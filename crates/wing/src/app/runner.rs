@@ -263,8 +263,7 @@ pub async fn execute_intent(
             }
         }
         AppIntent::UpdateSession {
-            model,
-            provider,
+            model_id,
             agent,
             title,
             thinking,
@@ -275,8 +274,7 @@ pub async fn execute_intent(
             if let Some(t) = transport {
                 let req = wing_api_client::models::UpdateSessionRequest {
                     session_id: app.session_id.clone(),
-                    model: model.clone(),
-                    provider: provider.clone(),
+                    model_id: model_id.clone(),
                     agent: agent.clone(),
                     title: title.clone(),
                     thinking,
@@ -287,8 +285,7 @@ pub async fn execute_intent(
                 match t.http.update_session(&req).await {
                     Ok(_) => apply_update_session(
                         app,
-                        model,
-                        provider,
+                        model_id,
                         agent,
                         title,
                         thinking,
@@ -584,8 +581,7 @@ pub async fn execute_intent(
 #[allow(clippy::too_many_arguments)]
 fn apply_update_session(
     app: &mut App,
-    model: Option<String>,
-    provider: Option<String>,
+    model_id: Option<String>,
     agent: Option<String>,
     title: Option<String>,
     thinking: Option<bool>,
@@ -595,21 +591,33 @@ fn apply_update_session(
 ) {
     let on_off = |b: bool| if b { "on" } else { "off" };
 
-    // Optimistic display label for the new model, resolved from the last
-    // `/api/models` snapshot (the panel that produced this switch rendered
-    // from it). The gateway's `session_state_changed` event overwrites it with
-    // the authoritative declaration right after — same value in practice.
-    let model_display_name = model
+    // Optimistic model identity, resolved from the last `/api/models` snapshot
+    // (the panel that produced this switch rendered from it): call name,
+    // provider and display label. When the snapshot does not cover the id
+    // (stale cache), the id itself stands in for the call name — the gateway's
+    // `session_state_changed` right after carries the authoritative values.
+    let model = model_id
         .as_deref()
-        .and_then(|m| app.model_display_label(provider.as_deref(), m));
+        .map(|id| match app.model_declaration(id) {
+            Some((name, provider, label)) => crate::ui::status_bar::ModelUpdate {
+                id: Some(id.to_string()),
+                name: name.to_string(),
+                provider: Some(provider.to_string()),
+                display_name: (label != id).then(|| label.to_string()),
+            },
+            None => crate::ui::status_bar::ModelUpdate {
+                id: Some(id.to_string()),
+                name: id.to_string(),
+                provider: None,
+                display_name: None,
+            },
+        });
 
     // Build toast parts from non-None fields. The model part goes through the
-    // shared formatter so the display label (and the raw name on its own
-    // line) match the picker's immediate toast exactly.
+    // shared formatter so the display label (and the raw id on its own line)
+    // match the picker's immediate toast exactly.
     let parts: Vec<String> = [
-        model
-            .as_deref()
-            .map(|m| app.model_switch_toast(provider.as_deref(), m)),
+        model_id.as_deref().map(|id| app.model_switch_toast(id)),
         agent.as_ref().map(|a| format!("Agent: {a}")),
         title.as_ref().map(|t| format!("Title: {t}")),
         thinking.map(|t| format!("Think: {}", on_off(t))),
@@ -623,18 +631,8 @@ fn apply_update_session(
 
     // Apply to local status.
     let affects_list = title.is_some() || workspace.is_some();
-    app.status.apply_session_update(
-        model,
-        model_display_name,
-        agent,
-        title,
-        thinking,
-        reasoning_effort,
-        yolo,
-    );
-    if let Some(p) = provider {
-        app.status.provider = Some(p);
-    }
+    app.status
+        .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
 
     if let Some(w) = workspace {
         app.status.workdir = Some(w);
@@ -683,7 +681,6 @@ mod tests {
             &mut app,
             None,
             None,
-            None,
             Some("New Title".into()),
             None,
             None,
@@ -698,7 +695,6 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
             None,
             None,
             None,
@@ -722,18 +718,19 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
         assert!(!app.popup.cache.sessions.is_empty());
     }
 
+    /// The optimistic update resolves the whole identity group (call name /
+    /// provider / label) from the `/api/models` snapshot by **id**.
     #[test]
-    fn test_update_session_syncs_provider() {
+    fn test_update_session_resolves_the_identity_from_the_snapshot() {
         let mut app = app_with_cached_sessions();
+        app.model_sources = vec![labeled_sources()];
         apply_update_session(
             &mut app,
-            Some("gpt-4o".into()),
-            Some("alt".into()),
+            Some("dfmodel".into()),
             None,
             None,
             None,
@@ -741,8 +738,34 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(app.status.model, "gpt-4o");
-        assert_eq!(app.status.provider.as_deref(), Some("alt"));
+        assert_eq!(app.status.model, "dfmodel");
+        assert_eq!(app.status.model_id.as_deref(), Some("dfmodel"));
+        assert_eq!(app.status.provider.as_deref(), Some("qoder"));
+        assert_eq!(
+            app.status.model_display_name.as_deref(),
+            Some("DeepSeek-Flash")
+        );
+    }
+
+    /// id 不在快照里（陈旧缓存）：id 顶上调用名，provider 缺席——权威值随
+    /// `session_state_changed` 到达。
+    #[test]
+    fn test_update_session_with_an_unknown_id_keeps_the_id_as_the_fallback() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            Some("mystery-id".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(app.status.model, "mystery-id");
+        assert_eq!(app.status.model_id.as_deref(), Some("mystery-id"));
+        assert_eq!(app.status.provider, None);
+        assert_eq!(app.status.model_display_name, None);
     }
 
     #[test]
@@ -750,7 +773,6 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
             None,
             None,
             None,
@@ -762,13 +784,13 @@ mod tests {
         assert!(!app.popup.cache.sessions.is_empty());
     }
 
-    /// Provider group declaring a display name for `dfmodel` — the source the
+    /// Model group declaring a display name for `dfmodel` — the source the
     /// close-to-the-panel optimistic label is resolved from.
     fn labeled_sources() -> wing_api_client::models::ProviderModels {
         wing_api_client::models::ProviderModels {
             provider: "qoder".into(),
-            models: vec!["dfmodel".into()],
-            model_details: vec![wing_api_client::models::ModelDetail {
+            models: vec![wing_api_client::models::ModelDetail {
+                id: "dfmodel".into(),
                 name: "dfmodel".into(),
                 display_name: Some("DeepSeek-Flash".into()),
                 description: None,
@@ -785,7 +807,6 @@ mod tests {
         apply_update_session(
             &mut app,
             Some("dfmodel".into()),
-            Some("qoder".into()),
             None,
             None,
             None,
@@ -811,14 +832,18 @@ mod tests {
         let mut app = app_with_cached_sessions();
         app.model_sources = vec![wing_api_client::models::ProviderModels {
             provider: "p".into(),
-            models: vec!["plain".into()],
-            model_details: vec![],
+            models: vec![wing_api_client::models::ModelDetail {
+                id: "plain".into(),
+                name: "plain".into(),
+                display_name: None,
+                description: None,
+                capabilities: Default::default(),
+            }],
         }];
 
         apply_update_session(
             &mut app,
             Some("plain".into()),
-            Some("p".into()),
             None,
             None,
             None,

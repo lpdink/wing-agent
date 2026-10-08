@@ -208,12 +208,27 @@ class SessionManager:
         self._teardowns: set[asyncio.Task[None]] = set()
 
         config = get_config()
-        self._template_manager = AgentTemplateManager(config.agents)
+        self._template_manager = AgentTemplateManager(config.agents, config)
 
     @property
     def template_manager(self) -> AgentTemplateManager:
         """Agent 模板管理器。"""
         return self._template_manager
+
+    def reload_templates(self) -> None:
+        """按**当前 config** 重建模板管理器（config 热重载后调用）。
+
+        模板是 config 的派生状态（`agents[].model` 经 id 表解析成调用名 +
+        provider）：不重建的话，「reload 后新建的会话用旧模板（旧 id 映射）、
+        已存在会话 resume 时用新映射」两条路径会分叉。重建只影响**未来的**
+        模板解析；已在内存的会话保持自己的 agent（切模型是用户的显式动作）。
+
+        Raises:
+            ValueError: 新 config 的 `agents[]` 无法解析（理论上不可达——
+                config 加载期已强制；调用方按「config 项的一部分」处理）。
+        """
+        config = get_config()
+        self._template_manager = AgentTemplateManager(config.agents, config)
 
     # ============================================================
     # 外部方法：session 生命周期
@@ -256,7 +271,7 @@ class SessionManager:
             template_name: Agent 模板名称，None 时使用默认模板（仅新会话生效）
             workspace: 工作目录（仅新会话生效）
             agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值；
-                收养路径只应用 model/provider/effort/tools）
+                收养路径只应用 model_id/effort/tools）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
             tags: 创建即打标 / 收养时并入（经 :meth:`set_session_tags` 同一套校验）
             session_id: 指定 session id（create-or-adopt）；None = 自生成
@@ -286,12 +301,16 @@ class SessionManager:
         # 标签、覆盖文本与工具 ref 的纯校验提到最前（都不写盘）：任何非法输入在
         # 任何副作用之前 raise，"失败即零残留"对 create-or-adopt 尤其重要（重试
         # 必须还是干净状态）。全部必须在**认领键**之前——认领会建会话目录。
+        # model_id 的查表同理前置：未命中在 `apply_agent_override`（认领之后）才
+        # 会 raise，留下一个失败产生的空会话目录。
         if tags:
             apply_tag_ops([], add=tags)
         if agent_override is not None:
             validate_override_utf8(agent_override)
             if agent_override.tools is not None:
                 validate_tool_refs(agent_override.tools)
+            if agent_override.model_id is not None:
+                get_config().require_model(agent_override.model_id)
         if workspace is not None:
             require_utf8(workspace, field="workspace")
 
@@ -400,7 +419,7 @@ class SessionManager:
         config 时回退默认模板。
 
         ``agent_override`` 是 resume 语义的参数覆盖（编排方 `--model` 等）：
-        只应用 `model` / `provider` / `effort` / `tools` 子集——见
+        只应用 `model_id` / `effort` / `tools` 子集——见
         :meth:`Session.apply_resume_override`（不改链上前缀是不变量）。
 
         Args:
@@ -412,7 +431,7 @@ class SessionManager:
 
         Raises:
             LookupError: session 不存在
-            ValueError: 覆盖里的工具引用无法解析
+            ValueError: 覆盖里的 model_id 未命中 id 空间 / 工具引用无法解析
         """
         result = self._resolve_with_store(session_id)
         if result is None:
@@ -468,7 +487,7 @@ class SessionManager:
 
         语义 = :meth:`resume_session` + 覆盖子集 + tags 并入：
         - 模板 / workspace 来自 metadata（"创建"参数对既有会话无意义）；
-        - `agent_override` 走 resume 子集（model/provider/effort/tools）；
+        - `agent_override` 走 resume 子集（model_id/effort/tools）；
         - `tags` 按 add 语义并入（幂等；非法标签在此 ValueError，零写盘）；
         - **不触发 `before_session_start`**：session id 未变，这是"恢复既有
           会话"而非"创建新会话"（该 hook 的语义边界就是"新 session id"）。
@@ -562,6 +581,7 @@ class SessionManager:
                 workspace=source.session_workspace,
                 forked_from=session_id,
                 template_name=source.template_name,
+                model_id=source.model_id,
                 model_name=source.agent.model,
                 provider_name=source.agent.provider_name,
                 system_prompt=source.context_manager.setin_system_prompt or None,
@@ -577,7 +597,9 @@ class SessionManager:
             ),
         )
 
-        template = AgentTemplate.from_agent(source.agent, name=source.template_name)
+        template = AgentTemplate.from_agent(
+            source.agent, name=source.template_name, model_id=source.model_id
+        )
         new_session = Session.from_template(
             template=template,
             session_id=new_session_id,

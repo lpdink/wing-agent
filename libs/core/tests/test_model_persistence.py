@@ -1,4 +1,4 @@
-"""模型绑定（provider + model）持久化与 resume 还原的回归测试。
+"""模型身份三元组（model_id + provider + name）持久化与 resume 还原的回归测试。
 
 覆盖：
   - 显式动作落盘：模型切换 / 创建 override / 模板切换 / fork 快照
@@ -93,34 +93,43 @@ class TestExplicitSwitchPersists:
     """模型切换（session/update）落盘并在重启后还原。"""
 
     @pytest.mark.asyncio
-    async def test_switch_model_and_provider_restored_after_restart(self, sm, root):
+    async def test_switch_model_id_restored_after_restart(self, sm, root):
+        """按 id 切换：provider 随映射而来，三元组一次落盘，重启后 id 优先还原。"""
         session = sm.create_session()
         sid = session.session_id
+        assert session.model_id == "gpt-4"  # 模板默认模型的 id
 
-        await session.update_state(model="qwen3-max", provider_name="alt")
+        await session.update_state(model_id="qwen3-max")
 
         meta = _metadata(root, sid)
-        assert (meta.model_name, meta.provider_name) == ("qwen3-max", "alt")
+        assert (meta.model_id, meta.model_name, meta.provider_name) == (
+            "qwen3-max",
+            "qwen3-max",
+            "alt",
+        )
 
         # 重启：同一 store 根目录上的新 SessionManager
         restored = _restart(root).resume_session(sid)
         assert restored.agent.model == "qwen3-max"
         assert restored.agent.model_provider.name == "alt"
+        assert restored.model_id == "qwen3-max"
 
     @pytest.mark.asyncio
-    async def test_switch_model_only_keeps_current_provider(self, sm, root):
+    async def test_switch_within_provider_keeps_provider(self, sm, root, _mock_config):
         session = sm.create_session()
         sid = session.session_id
         provider_name = session.agent.model_provider.name
 
-        await session.update_state(model="qwen3-max")
+        _mock_config.providers[0].models = ["gpt-4", "gpt-4.1"]
+        await session.update_state(model_id="gpt-4.1")
 
         meta = _metadata(root, sid)
-        assert meta.model_name == "qwen3-max"
-        assert meta.provider_name == provider_name
+        assert meta.model_id == "gpt-4.1"
+        assert meta.model_name == "gpt-4.1"
+        assert meta.provider_name == provider_name == "default"
 
         restored = _restart(root).resume_session(sid)
-        assert restored.agent.model == "qwen3-max"
+        assert restored.agent.model == "gpt-4.1"
         assert restored.agent.model_provider.name == provider_name
 
 
@@ -130,16 +139,21 @@ class TestCreateOverridePersists:
     @pytest.mark.asyncio
     async def test_create_with_override_records_and_restores(self, sm, root):
         session = sm.create_session(
-            agent_override=AgentOverride(model="gpt-4o-mini", provider="alt")
+            agent_override=AgentOverride(model_id="gpt-4o-mini")
         )
         sid = session.session_id
 
         meta = _metadata(root, sid)
-        assert (meta.model_name, meta.provider_name) == ("gpt-4o-mini", "alt")
+        assert (meta.model_id, meta.model_name, meta.provider_name) == (
+            "gpt-4o-mini",
+            "gpt-4o-mini",
+            "alt",
+        )
 
         restored = _restart(root).resume_session(sid)
         assert restored.agent.model == "gpt-4o-mini"
         assert restored.agent.model_provider.name == "alt"
+        assert restored.model_id == "gpt-4o-mini"
 
 
 class TestTemplateSwitchPersists:
@@ -150,19 +164,25 @@ class TestTemplateSwitchPersists:
         session = sm.create_session()
         sid = session.session_id
         # 先留下一个旧的显式记录，验证会被模板切换覆写
-        await session.update_state(model="qwen3-max", provider_name="alt")
+        await session.update_state(model_id="qwen3-max")
 
         template = AgentTemplate(name="coder", model="claude-x", provider_name="alt")
         await session.switch_template(template)
 
         meta = _metadata(root, sid)
         assert meta.template_name == "coder"
-        assert (meta.model_name, meta.provider_name) == ("claude-x", "alt")
+        # 模板未带 model_id → identify 反查补全（alt 声明了 claude-x）
+        assert (meta.model_id, meta.model_name, meta.provider_name) == (
+            "claude-x",
+            "claude-x",
+            "alt",
+        )
 
         # coder 不在 config 中 → resume 回落默认模板，但模型记录优先还原
         restored = _restart(root).resume_session(sid)
         assert restored.agent.model == "claude-x"
         assert restored.agent.model_provider.name == "alt"
+        assert restored.model_id == "claude-x"
 
 
 class TestForkSnapshot:
@@ -171,7 +191,7 @@ class TestForkSnapshot:
     @pytest.mark.asyncio
     async def test_fork_after_switch_records_source_model(self, sm, root):
         source = sm.create_session()
-        await source.update_state(model="qwen3-max", provider_name="alt")
+        await source.update_state(model_id="qwen3-max")
         _seed(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
@@ -179,7 +199,11 @@ class TestForkSnapshot:
         assert child is not None
 
         meta = _metadata(root, child.session_id)
-        assert (meta.model_name, meta.provider_name) == ("qwen3-max", "alt")
+        assert (meta.model_id, meta.model_name, meta.provider_name) == (
+            "qwen3-max",
+            "qwen3-max",
+            "alt",
+        )
 
         restored = _restart(root).resume_session(child.session_id)
         assert restored.agent.model == "qwen3-max"
@@ -196,6 +220,7 @@ class TestForkSnapshot:
 
         # 即使源从未显式切换，子 session 也记录 fork 时刻的生效模型
         meta = _metadata(root, child.session_id)
+        assert meta.model_id == source.model_id == "gpt-4"
         assert meta.model_name == source.agent.model
         assert meta.provider_name == source.agent.model_provider.name
 
@@ -220,14 +245,19 @@ class TestDegradation:
         assert any("cannot restore model" in r.getMessage() for r in wing_logs)
         # 记录保留：config 修复后仍能还原
         meta = _metadata(root, sid)
-        assert (meta.model_name, meta.provider_name) == ("ghost-model", "ghost")
+        assert (meta.model_id, meta.model_name, meta.provider_name) == (
+            None,
+            "ghost-model",
+            "ghost",
+        )
 
     @pytest.mark.asyncio
-    async def test_model_not_in_static_list_restores_with_warning(
+    async def test_undeclared_snapshot_restores_with_warning(
         self, sm, root, wing_logs, _mock_config
     ):
-        """provider 在、model 不在其静态列表内：仍然还原，只打 warning。"""
-        _mock_config.providers[0].models = ["only-this-model"]
+        """provider 在、快照调用名不在其声明内：仍然还原（反查补不到 id），只打 warning。"""
+        # 目录声明必须仍然覆盖模板引用的 model id（否则模板解析就该失败）
+        _mock_config.providers[0].models = ["gpt-4", "only-this-model"]
 
         session = sm.create_session()
         sid = session.session_id
@@ -241,45 +271,57 @@ class TestDegradation:
         restored = _restart(root).resume_session(sid)
 
         assert restored.agent.model == "not-in-list"
-        assert any("static model list" in r.getMessage() for r in wing_logs)
+        assert restored.model_id is None
+        assert any("not declared by provider" in r.getMessage() for r in wing_logs)
 
     @pytest.mark.asyncio
     async def test_object_declared_model_restores_without_warning(
         self, sm, root, wing_logs, _mock_config
     ):
-        """对象形态声明：模型在列表内（按实际调用名）时正常还原、不告警。"""
+        """对象形态声明（id 缺省 = name）：按 id 切换 → 重启后 id 命中，不告警。"""
         _mock_config.providers[0].models = [
+            ModelSpec(name="gpt-4"),
             ModelSpec(
-                name="qwen3-max",
-                display_name="Qwen3 Max",
+                name="obj-model",
+                display_name="Object Model",
                 capabilities=ModelCapabilities(vision=True),
-            )
+            ),
         ]
 
         session = sm.create_session()
         sid = session.session_id
-        await session.update_state(model="qwen3-max")
+        await session.update_state(model_id="obj-model")
 
         restored = _restart(root).resume_session(sid)
 
-        assert restored.agent.model == "qwen3-max"
-        assert not [r for r in wing_logs if "static model list" in r.getMessage()]
+        assert restored.agent.model == "obj-model"
+        assert restored.model_id == "obj-model"
+        assert not [
+            r for r in wing_logs if "not declared by provider" in r.getMessage()
+        ]
 
     @pytest.mark.asyncio
     async def test_object_declared_model_not_in_list_restores_with_warning(
         self, sm, root, wing_logs, _mock_config
     ):
-        """对象形态声明：不在列表内仍只 warning 不阻断（与字符串形态同语义）。"""
-        _mock_config.providers[0].models = [ModelSpec(name="other-model")]
+        """对象形态声明被删（id 未命中、快照调用名也不在声明内）：仍只 warning 不阻断。"""
+        _mock_config.providers[0].models = [
+            ModelSpec(name="gpt-4"),
+            ModelSpec(name="obj-model"),
+        ]
 
         session = sm.create_session()
         sid = session.session_id
-        await session.update_state(model="qwen3-max")
+        await session.update_state(model_id="obj-model")
+
+        # 模型被移出声明（id 与调用名同时消失）：快照兜底 + warning
+        _mock_config.providers[0].models = [ModelSpec(name="gpt-4")]
 
         restored = _restart(root).resume_session(sid)
 
-        assert restored.agent.model == "qwen3-max"
-        assert any("static model list" in r.getMessage() for r in wing_logs)
+        assert restored.agent.model == "obj-model"
+        assert any("is not in config" in r.getMessage() for r in wing_logs)
+        assert any("not declared by provider" in r.getMessage() for r in wing_logs)
 
     @pytest.mark.asyncio
     async def test_partial_record_treated_as_no_record(self, sm, root):
@@ -310,7 +352,7 @@ class TestPersistFailureIsBestEffort:
         monkeypatch.setattr(session.store, "save_metadata", _boom)
 
         received.clear()
-        await rt.update_session(sid, model="qwen3-max", provider="alt")
+        await rt.update_session(sid, model_id="qwen3-max")
 
         # 切换生效、事件照发——一次磁盘写失败不会把已生效的切换变成 500
         assert session.agent.model == "qwen3-max"
@@ -343,6 +385,7 @@ class TestCompatibility:
         session.touch_last_interaction()  # 触发一次 metadata 落盘
 
         raw = json.loads((root / sid / "metadata.json").read_text(encoding="utf-8"))
+        assert "model_id" not in raw
         assert "model_name" not in raw
         assert "provider_name" not in raw
 
@@ -357,7 +400,7 @@ class TestRestoreEvents:
         rt1 = WingRuntime()
         session = rt1.create_session()
         sid = session.session_id
-        await session.update_state(model="qwen3-max", provider_name="alt")
+        await session.update_state(model_id="qwen3-max")
 
         # 模拟 Gateway 重启：新 runtime 从磁盘恢复同一 session
         rt2 = WingRuntime()
@@ -374,5 +417,6 @@ class TestRestoreEvents:
         agent = syncs[0].agent
         assert agent is not None
         assert agent.model_name == "qwen3-max"
+        assert agent.model_id == "qwen3-max"
         assert agent.provider_name == "alt"
         assert inits[0].model == "qwen3-max"

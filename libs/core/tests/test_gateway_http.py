@@ -10,6 +10,7 @@ mock 掉 runtime 就只剩 route 的胶水，证明不了这件事。
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError
@@ -294,7 +295,7 @@ class TestSessionCreate:
             json={
                 "workspace": "/ws",
                 "agent": {
-                    "model": "gpt-4o",
+                    "model_id": "gpt-4o",
                     "tools": ["Read", "Bash"],
                     "max_turns": 10,
                     "effort": "high",
@@ -305,7 +306,7 @@ class TestSessionCreate:
         call_kwargs = mock_runtime.create_session.call_args
         override = call_kwargs.kwargs["agent_override"]
         assert override is not None
-        assert override.model == "gpt-4o"
+        assert override.model_id == "gpt-4o"
         assert override.tools == ["Read", "Bash"]
         assert override.max_turns == 10
         assert override.effort == "high"
@@ -319,7 +320,7 @@ class TestSessionCreate:
             json={
                 "template_name": "default",
                 "agent": {
-                    "model": "claude-sonnet-4-20250514",
+                    "model_id": "claude-sonnet-4-20250514",
                     "append_system_prompt": "\nAlways respond in Chinese.",
                 },
             },
@@ -327,7 +328,7 @@ class TestSessionCreate:
         assert resp.status_code == 200
         call_kwargs = mock_runtime.create_session.call_args
         override = call_kwargs.kwargs["agent_override"]
-        assert override.model == "claude-sonnet-4-20250514"
+        assert override.model_id == "claude-sonnet-4-20250514"
         assert override.append_system_prompt == "\nAlways respond in Chinese."
         assert override.system_prompt is None
         assert override.tools is None
@@ -365,13 +366,13 @@ class TestSessionResume:
             "/api/session/resume",
             json={
                 "session_id": "abc123",
-                "agent": {"model": "gpt-4o", "effort": "high", "tools": ["Read"]},
+                "agent": {"model_id": "gpt-4o", "effort": "high", "tools": ["Read"]},
             },
         )
         assert resp.status_code == 200
         override = mock_runtime.resume_session.call_args.kwargs["agent_override"]
         assert override is not None
-        assert override.model == "gpt-4o"
+        assert override.model_id == "gpt-4o"
         assert override.effort == "high"
         assert override.tools == ["Read"]
         assert override.system_prompt is None
@@ -700,6 +701,8 @@ class TestSessionInfo:
             "thinking": True,
             "reasoning_effort": "high",
         }
+        mock_session.model_id = "gpt-4o"
+        mock_session.agent.provider_name = "default"
         mock_session.agent.model_display_name = "GPT-4o Flash"
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
@@ -719,6 +722,8 @@ class TestSessionInfo:
         assert resp.status_code == 200
         data = resp.json()
         assert data["model"] == "gpt-4o"
+        assert data["model_id"] == "gpt-4o"
+        assert data["provider_name"] == "default"
         assert data["model_display_name"] == "GPT-4o Flash"
         assert data["api_url"] == "https://api.openai.com"
         assert data["tools"] == ["Bash", "Read"]
@@ -747,6 +752,8 @@ class TestSessionInfo:
             "thinking": False,
             "reasoning_effort": None,
         }
+        mock_session.model_id = "gpt-4o"
+        mock_session.agent.provider_name = "default"
         mock_session.agent.model_display_name = None
         mock_session.agent.yolo = False
         mock_session.session_name = None
@@ -775,6 +782,8 @@ class TestSessionInfo:
             "thinking": False,
             "reasoning_effort": None,
         }
+        mock_session.model_id = "gpt-4o"
+        mock_session.agent.provider_name = "default"
         mock_session.agent.model_display_name = None
         mock_session.agent.yolo = False
         mock_session.session_name = None
@@ -836,23 +845,18 @@ class TestSessionBranches:
 class TestSessionUpdate:
     """POST /api/session/update 测试。"""
 
-    def test_update_model(self, client: TestClient, mock_runtime):
-        """切换模型（model 与 provider 同时设置）。"""
+    def test_update_model_id(self, client: TestClient, mock_runtime):
+        """按 model_id 切换模型（provider 随映射而来，不再单独下发）。"""
         mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
-            json={
-                "session_id": "test-id",
-                "model": "gpt-4o-mini",
-                "provider": "default",
-            },
+            json={"session_id": "test-id", "model_id": "gpt-4o-mini"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         mock_runtime.update_session.assert_called_once_with(
             session_id="test-id",
-            model="gpt-4o-mini",
-            provider="default",
+            model_id="gpt-4o-mini",
             agent=None,
             title=None,
             thinking=None,
@@ -963,14 +967,15 @@ class TestSessionUpdate:
             json={
                 "session_id": "test-id",
                 "agent": "coder",
-                "model": "gpt-4o-mini",
-                "provider": "default",
+                "model_id": "gpt-4o-mini",
                 "title": "new title",
                 "thinking": True,
                 "yolo": True,
             },
         )
         assert resp.status_code == 200
+        mock_runtime.update_session.assert_awaited_once()
+        assert mock_runtime.update_session.call_args.kwargs["model_id"] == "gpt-4o-mini"
 
     def test_update_all_none(self, client: TestClient, mock_runtime):
         """所有可选字段均为 None 返回 400。"""
@@ -980,37 +985,50 @@ class TestSessionUpdate:
         )
         assert resp.status_code == 400
 
-    def test_update_provider_only_rejected(self, client: TestClient, mock_runtime):
-        """只给 provider 不给 model 返回 400（对称契约），报错只陈述契约。"""
+    def test_update_legacy_fields_silently_ignored(
+        self, client: TestClient, mock_runtime
+    ):
+        """旧字段 {model, provider} 被静默忽略：其它字段照常生效，不报错、不引导。"""
         mock_runtime.update_session = AsyncMock()
         resp = client.post(
             "/api/session/update",
-            json={"session_id": "test-id", "provider": "claude"},
-        )
-        assert resp.status_code == 400
-        assert "set together or both omitted" in resp.json()["detail"]
-        mock_runtime.update_session.assert_not_awaited()
-
-    def test_update_model_only_rejected(self, client: TestClient, mock_runtime):
-        """只给 model 不给 provider 同样返回 400（对称契约）。"""
-        mock_runtime.update_session = AsyncMock()
-        resp = client.post(
-            "/api/session/update",
-            json={"session_id": "test-id", "model": "gpt-4o"},
-        )
-        assert resp.status_code == 400
-        assert "set together or both omitted" in resp.json()["detail"]
-        mock_runtime.update_session.assert_not_awaited()
-
-    def test_update_provider_with_model_ok(self, client: TestClient, mock_runtime):
-        """provider 伴随 model 时正常处理。"""
-        mock_runtime.update_session = AsyncMock()
-        resp = client.post(
-            "/api/session/update",
-            json={"session_id": "test-id", "provider": "claude", "model": "claude-x"},
+            json={
+                "session_id": "test-id",
+                "model": "gpt-4o",
+                "provider": "default",
+                "title": "renamed",
+            },
         )
         assert resp.status_code == 200
-        mock_runtime.update_session.assert_awaited_once()
+        kwargs = mock_runtime.update_session.call_args.kwargs
+        assert kwargs["model_id"] is None
+        assert kwargs["title"] == "renamed"
+        assert "model" not in kwargs and "provider" not in kwargs
+
+    def test_update_legacy_only_is_no_update_field(
+        self, client: TestClient, mock_runtime
+    ):
+        """纯旧字段请求体 = 没有任何更新字段 → 400（与全 None 同一规则）。"""
+        mock_runtime.update_session = AsyncMock()
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "model": "gpt-4o", "provider": "default"},
+        )
+        assert resp.status_code == 400
+        assert "at least one update field" in resp.json()["detail"]
+        mock_runtime.update_session.assert_not_awaited()
+
+    def test_update_unknown_model_id_is_400(self, client: TestClient, mock_runtime):
+        """未知 model_id：ValueError（C7 文案）→ 400，错误信息自解释。"""
+        mock_runtime.update_session = AsyncMock(
+            side_effect=ValueError("unknown model id 'sonnet'; available ids: ds-flash")
+        )
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "test-id", "model_id": "sonnet"},
+        )
+        assert resp.status_code == 400
+        assert "unknown model id 'sonnet'" in resp.json()["detail"]
 
     def test_update_session_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
@@ -1019,7 +1037,7 @@ class TestSessionUpdate:
         )
         resp = client.post(
             "/api/session/update",
-            json={"session_id": "xxx", "model": "gpt-4o", "provider": "default"},
+            json={"session_id": "xxx", "model_id": "gpt-4o"},
         )
         assert resp.status_code == 404
 
@@ -1034,8 +1052,7 @@ class TestSessionUpdate:
         assert resp.json()["ok"] is True
         mock_runtime.update_session.assert_called_once_with(
             session_id="test-id",
-            model=None,
-            provider=None,
+            model_id=None,
             agent=None,
             title=None,
             thinking=None,
@@ -1166,32 +1183,52 @@ class TestSystemCommands:
 
 
 class TestSystemModels:
-    """GET /api/models 测试——嵌套响应，经 runtime 转发（路由不感知 config）。"""
+    """GET /api/models 测试——嵌套响应，经 runtime 取目录（路由不读 config）。
+
+    目录是配置声明的静态投影（无远端发现）：域类型 ``ModelGroup`` / ``ModelRef``
+    → wire 的 **对象数组**；``id`` 是全局唯一引用词。
+    """
 
     def test_list_models_ok(self, client: TestClient, mock_runtime):
-        """正常获取模型列表（按 provider 分组嵌套 + 逐项对应的 model_details）。"""
-        from wing.config import ModelCapabilities
-        from wing.provider.pool import ModelDetail, ProviderModels
+        """正常获取目录（按 provider 分组嵌套，每项携带 id / name / 展示元信息）。"""
+        from wing.config import ModelGroup, ModelRef, ModelSpec
 
-        mock_runtime.list_models = AsyncMock(
+        mock_runtime.list_models = MagicMock(
             return_value=[
-                ProviderModels(
+                ModelGroup(
                     provider="default",
-                    models=["gpt-4o", "gpt-4o-mini"],
-                    model_details=[
-                        ModelDetail(
+                    models=[
+                        ModelRef(
+                            id="gpt-4o",
                             name="gpt-4o",
-                            display_name="GPT-4o",
-                            description="flagship",
-                            capabilities=ModelCapabilities(vision=True),
+                            provider_name="default",
+                            spec=ModelSpec(
+                                name="gpt-4o",
+                                display_name="GPT-4o",
+                                description="flagship",
+                                capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
+                            ),
                         ),
-                        ModelDetail(name="gpt-4o-mini", display_name="GPT-4o mini"),
+                        ModelRef(
+                            id="gpt-4o-mini",
+                            name="gpt-4o-mini",
+                            provider_name="default",
+                            spec=ModelSpec(
+                                name="gpt-4o-mini", display_name="GPT-4o mini"
+                            ),
+                        ),
                     ],
                 ),
-                ProviderModels(
+                ModelGroup(
                     provider="claude",
-                    models=["claude-opus-4"],
-                    model_details=[ModelDetail(name="claude-opus-4")],
+                    models=[
+                        ModelRef(
+                            id="sonnet",
+                            name="claude-opus-4",
+                            provider_name="claude",
+                            spec=ModelSpec(id="sonnet", name="claude-opus-4"),
+                        )
+                    ],
                 ),
             ]
         )
@@ -1202,15 +1239,16 @@ class TestSystemModels:
             "providers": [
                 {
                     "provider": "default",
-                    "models": ["gpt-4o", "gpt-4o-mini"],
-                    "model_details": [
+                    "models": [
                         {
+                            "id": "gpt-4o",
                             "name": "gpt-4o",
                             "display_name": "GPT-4o",
                             "description": "flagship",
                             "capabilities": {"vision": True},
                         },
                         {
+                            "id": "gpt-4o-mini",
                             "name": "gpt-4o-mini",
                             "display_name": "GPT-4o mini",
                             "description": None,
@@ -1220,9 +1258,9 @@ class TestSystemModels:
                 },
                 {
                     "provider": "claude",
-                    "models": ["claude-opus-4"],
-                    "model_details": [
+                    "models": [
                         {
+                            "id": "sonnet",
                             "name": "claude-opus-4",
                             "display_name": None,
                             "description": None,
@@ -1233,34 +1271,104 @@ class TestSystemModels:
             ]
         }
 
-    def test_list_models_details_padded_to_match_models(
-        self, client: TestClient, mock_runtime
-    ):
-        """producer 未给 detail（或无详情）时边界补最小条目——逐项一致是接口契约。"""
-        from wing.provider.pool import ProviderModels
-
-        mock_runtime.list_models = AsyncMock(
-            return_value=[
-                ProviderModels(provider="legacy", models=["a", "b"]),
-            ]
-        )
-
-        resp = client.get("/api/models")
-        assert resp.status_code == 200
-        group = resp.json()["providers"][0]
-        assert group["models"] == ["a", "b"]
-        assert [d["name"] for d in group["model_details"]] == ["a", "b"]
-        assert all(
-            d["capabilities"] == {"vision": False} for d in group["model_details"]
-        )
-
     def test_list_models_empty(self, client: TestClient, mock_runtime):
         """无 provider 时返回空分组列表。"""
-        mock_runtime.list_models = AsyncMock(return_value=[])
+        mock_runtime.list_models = MagicMock(return_value=[])
 
         resp = client.get("/api/models")
         assert resp.status_code == 200
         assert resp.json() == {"providers": []}
+
+
+class TestModelsCatalogFromConfig:
+    """真 runtime + 真 config：目录投影端到端（配置声明序 → wire，形状即契约）。
+
+    mock 掉的 runtime 只能证明 route 的胶水；这一组证明「目录 = 配置声明的静态
+    投影」——没有远端请求、没有平行数组、id 就是配置里写的那个。
+    """
+
+    @pytest.fixture
+    def catalog_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
+        from wing.gateway.server import GatewayServer
+        from wing.runtime import WingRuntime
+
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="local",
+                    base_url="http://localhost:1/v1",
+                    api_key="k",
+                    models=[
+                        "dfmodel",
+                        ModelSpec(
+                            name="dfmodel-2026",
+                            display_name="DeepSeek-Flash",
+                            capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
+                        ),
+                        ModelSpec(id="ds-flash", name="sonnet", display_name="Sonnet"),
+                    ],
+                ),
+            ],
+            agents=[AgentConfig(name="default", model="dfmodel")],
+        )
+        # 单例替换（与 conftest 的 _mock_config 同口径）：runtime 构造与路由都读它。
+        monkeypatch.setattr("wing.config.loader._config", config)
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+
+        with patch("wing.gateway.server.load_config") as mock_load_config:
+            mock_load_config.return_value = _mock_config()
+            server = GatewayServer()
+        server.runtime = WingRuntime()
+        with TestClient(server._app) as tc:
+            yield tc
+
+    def test_catalog_follows_declaration_order_and_ids(self, catalog_client):
+        resp = catalog_client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "providers": [
+                {
+                    "provider": "local",
+                    "models": [
+                        {
+                            "id": "dfmodel",
+                            "name": "dfmodel",
+                            "display_name": None,
+                            "description": None,
+                            "capabilities": {"vision": False},
+                        },
+                        {
+                            "id": "dfmodel-2026",
+                            "name": "dfmodel-2026",
+                            "display_name": "DeepSeek-Flash",
+                            "description": None,
+                            "capabilities": {"vision": True},
+                        },
+                        {
+                            "id": "ds-flash",
+                            "name": "sonnet",
+                            "display_name": "Sonnet",
+                            "description": None,
+                            "capabilities": {"vision": False},
+                        },
+                    ],
+                }
+            ]
+        }
+
+    def test_catalog_builds_no_provider_instances(self, catalog_client):
+        """目录是纯配置投影：列目录不构造任何 provider 实例（旧实现经池懒建并发请求）。"""
+        import wing.provider.pool as pool_mod
+
+        resp = catalog_client.get("/api/models")
+        assert resp.status_code == 200
+        assert [m["id"] for m in resp.json()["providers"][0]["models"]] == [
+            "dfmodel",
+            "dfmodel-2026",
+            "ds-flash",
+        ]
+        assert pool_mod._pool._providers == {}
 
 
 # ============================================================
@@ -2135,7 +2243,7 @@ class TestRealRuntimeGates:
             "/api/session/create",
             content=(
                 b'{"session_id": "Ghost-R", "agent": '
-                b'{"model": "m", "system_prompt": "\\ud800"}}'
+                b'{"model_id": "m", "system_prompt": "\\ud800"}}'
             ),
             headers={"content-type": "application/json"},
         )
@@ -2151,7 +2259,7 @@ class TestRealRuntimeGates:
             "/api/session/create",
             content=(
                 b'{"session_id": "Ghost-R", "agent": '
-                b'{"model": "m", "system_prompt": "\\ud800"}}'
+                b'{"model_id": "m", "system_prompt": "\\ud800"}}'
             ),
             headers={"content-type": "application/json"},
         )
@@ -2160,7 +2268,7 @@ class TestRealRuntimeGates:
         again = client.post("/api/session/create", json={"session_id": "Ghost-R"})
         assert again.status_code == 200, again.text
         assert again.json()["session_id"] == "Ghost-R"
-        # 幽灵的痕迹（model / system_prompt 记录）不存在 → 这是全新会话。
+        # 幽灵的痕迹（model_id / system_prompt 记录）不存在 → 这是全新会话。
         state = client.get("/api/session/get", params={"session_id": "Ghost-R"})
         assert state.status_code == 200, state.text
         assert state.json()["messages"] == []
@@ -2214,7 +2322,7 @@ class TestRealRuntimeGates:
         assert resp.status_code == 404, resp.text
         assert "\\ud800" in resp.json()["detail"], resp.text
 
-    # ── S1（终轮复审）：update 的 model / reasoning_effort 也必须先过闸门 ──
+    # ── update 的 model_id / reasoning_effort 也必须先过闸门 ──
 
     def test_update_model_surrogate_is_400_without_poisoning(self, real_client):
         """毒化路径：内存态先被写脏 → `/info` 500、后续写全失败（修复前）。"""
@@ -2222,16 +2330,13 @@ class TestRealRuntimeGates:
         created = client.post("/api/session/create", json={"session_id": "U-1"})
         assert created.status_code == 200, created.text
 
-        # model / provider 必须成对给出（既有约定）——provider 用测试配置里的合法值
         bad = client.post(
             "/api/session/update",
-            content=(
-                b'{"session_id": "U-1", "model": "\\ud800", "provider": "default"}'
-            ),
+            content=b'{"session_id": "U-1", "model_id": "\\ud800"}',
             headers={"content-type": "application/json"},
         )
         assert bad.status_code == 400, bad.text
-        assert "model must be UTF-8 encodable" in bad.json()["detail"]
+        assert "model_id must be UTF-8 encodable" in bad.json()["detail"]
 
         # 未被毒化：读端点与后续写操作全部照常，metadata 无痕
         assert (
@@ -2279,6 +2384,159 @@ class TestRealRuntimeGates:
             ).status_code
             == 200
         )
+
+    # ── 模型引用词：update{model_id} → info 三件套（真实 runtime 端到端） ──
+
+    def test_update_model_id_and_info_round_trip(self, real_client):
+        """真实 runtime：按 id 切换 → info 携带 (model, model_id, provider_name)。
+
+        测试配置（conftest）：default → gpt-4；alt → qwen3-max / gpt-4o-mini /
+        claude-x（id 缺省 = 调用名）。
+        """
+        client, sessions_root = real_client
+        created = client.post("/api/session/create", json={"session_id": "M-1"})
+        assert created.status_code == 200, created.text
+
+        info = client.get("/api/session/info", params={"session_id": "M-1"})
+        assert info.status_code == 200, info.text
+        assert info.json()["model"] == "gpt-4"
+        assert info.json()["model_id"] == "gpt-4"
+        assert info.json()["provider_name"] == "default"
+
+        updated = client.post(
+            "/api/session/update",
+            json={"session_id": "M-1", "model_id": "qwen3-max"},
+        )
+        assert updated.status_code == 200, updated.text
+
+        after = client.get("/api/session/info", params={"session_id": "M-1"}).json()
+        assert after["model"] == "qwen3-max"
+        assert after["model_id"] == "qwen3-max"
+        assert after["provider_name"] == "alt"
+
+        # 三元组落盘（跨重启恢复的唯一来源）
+        metadata = json.loads(
+            (sessions_root / "M-1" / "metadata.json").read_text(encoding="utf-8")
+        )
+        assert (
+            metadata["model_id"],
+            metadata["model_name"],
+            metadata["provider_name"],
+        ) == ("qwen3-max", "qwen3-max", "alt")
+
+    def test_unknown_model_id_is_400_with_available_ids(self, real_client):
+        """未知 id：400 + available ids + name 提示（外部编排方一次改对）。"""
+        client, _ = real_client
+        assert (
+            client.post("/api/session/create", json={"session_id": "M-2"}).status_code
+            == 200
+        )
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "M-2", "model_id": "sonnet"},
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "unknown model id 'sonnet'" in detail
+        assert "available ids:" in detail
+        assert "gpt-4" in detail  # 列出可选 id（本测试配置）
+        # 会话仍在原模型上（先查后改，零变化）
+        info = client.get("/api/session/info", params={"session_id": "M-2"}).json()
+        assert info["model"] == "gpt-4"
+
+    @pytest.fixture
+    def two_template_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """两个模板的真实 runtime：模板切换的原子性需要"模板会变"的观察点。"""
+        from wing.config import AgentConfig, Config, ProviderConfig
+        from wing.gateway.server import GatewayServer
+        from wing.runtime import WingRuntime
+
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="p",
+                    base_url="http://x",
+                    api_key="k",
+                    models=["a-name"],
+                )
+            ],
+            agents=[
+                AgentConfig(name="default", model="a-name"),
+                AgentConfig(name="coder", model="a-name"),
+            ],
+        )
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        # 单例替换（与 conftest 的 _mock_config 同口径）：runtime 构造与模板
+        # 解析都读它。
+        monkeypatch.setattr("wing.config.loader._config", config)
+        with patch("wing.gateway.server.load_config") as mock_load_config:
+            mock_load_config.return_value = _mock_config()
+            server = GatewayServer()
+        server.runtime = WingRuntime()
+        with TestClient(server._app) as tc:
+            yield tc, tmp_path / "sessions"
+
+    def test_update_with_unknown_model_id_does_not_switch_template(
+        self, two_template_client
+    ):
+        """请求级原子性：`{agent, model_id:<未知>}` → 400 且模板 / 三元组都不动。
+
+        未命中在 `_apply_model` 才被发现时，响应是 400、而模板已切换且三元组已
+        落盘——错误响应与已生效的变更同时出现。model_id 的查表前置后整体拒绝。
+        """
+        client, sessions_root = two_template_client
+        assert (
+            client.post("/api/session/create", json={"session_id": "A-1"}).status_code
+            == 200
+        )
+        before = client.get("/api/session/get", params={"session_id": "A-1"}).json()
+        assert before["template_name"] == "default"
+
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "A-1", "agent": "coder", "model_id": "nope"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "unknown model id 'nope'" in resp.json()["detail"]
+
+        after = client.get("/api/session/get", params={"session_id": "A-1"}).json()
+        assert after["template_name"] == "default"  # 模板未切换
+        assert after["agent"]["model_id"] == before["agent"]["model_id"] == "a-name"
+        metadata_path = sessions_root / "A-1" / "metadata.json"
+        if metadata_path.exists():
+            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert "template_name" not in raw, raw
+            assert "model_id" not in raw and "model_name" not in raw, raw
+
+        # 观察点有效：合法请求确实能把模板切过去（不是把功能一起锁死）
+        assert (
+            client.post("/api/session/create", json={"session_id": "A-2"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/update", json={"session_id": "A-2", "agent": "coder"}
+            ).status_code
+            == 200
+        )
+        switched = client.get("/api/session/get", params={"session_id": "A-2"}).json()
+        assert switched["template_name"] == "coder"
+
+    def test_create_with_unknown_model_id_leaves_no_directory(self, real_client):
+        """覆盖式创建：未知 model_id → 400 且**零残留**（认领目录之前失败）。"""
+        client, sessions_root = real_client
+        resp = client.post(
+            "/api/session/create",
+            json={"session_id": "G-1", "agent": {"model_id": "nope"}},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "unknown model id 'nope'" in resp.json()["detail"]
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+        # 重试是全新会话（没有半成品目录可被"收养"）
+        retry = client.post("/api/session/create", json={"session_id": "G-1"})
+        assert retry.status_code == 200, retry.text
+        assert retry.json()["session_id"] == "G-1"
 
 
 class TestSendRouteErrorMapping:

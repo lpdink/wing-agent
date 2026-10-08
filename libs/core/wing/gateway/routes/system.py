@@ -29,8 +29,9 @@ from wing.gateway.protocol import (
 from wing.commands import magic_registry
 
 if TYPE_CHECKING:
+    # 注解专用：路由只经 runtime 拿数据，不在运行期 import config（design D6）。
+    from wing.config import ModelRef
     from wing.gateway.server import GatewayServer
-    from wing.provider.pool import ProviderModels as ProviderModelsData
 
 router = APIRouter(tags=["system"])
 
@@ -60,49 +61,40 @@ async def list_commands(request: Request) -> CommandsResponse:
     return CommandsResponse(commands=commands)
 
 
-def _aligned_model_details(group: ProviderModelsData) -> list[ModelDetail]:
-    """把 provider 层明细投影成协议模型，并按 ``models`` 顺序对齐。
+def _model_detail(ref: ModelRef) -> ModelDetail:
+    """域层目录条目 → wire 模型（唯一投影点）。
 
-    「model_details 与 models 逐项同序同名」是接口契约，在边界（路由）上保证：
-    缺 detail 的模型补最小条目（能力全 false），名字对不上的 detail 直接忽略——
-    任何 producer（含测试替身）都不可能发出错位响应。
+    ``display_name`` 保持可空（未声明 = null 这个事实），回落调用名是渲染层的事。
     """
-    declared = {d.name: d for d in group.model_details}
-    details: list[ModelDetail] = []
-    for name in group.models:
-        detail = declared.get(name)
-        details.append(
-            ModelDetail(
-                name=name,
-                display_name=detail.display_name if detail is not None else None,
-                description=detail.description if detail is not None else None,
-                capabilities=ModelCapabilities(
-                    vision=detail.capabilities.vision if detail is not None else False
-                ),
-            )
-        )
-    return details
+    return ModelDetail(
+        id=ref.id,
+        name=ref.name,
+        display_name=ref.spec.display_name,
+        description=ref.spec.description,
+        capabilities=ModelCapabilities(vision=ref.spec.capabilities.vision),
+    )
 
 
 @router.get(
     "/api/models",
     response_model=ModelsResponse,
-    summary="获取可用模型列表",
+    summary="获取可用模型目录",
 )
 async def list_models(request: Request) -> ModelsResponse:
-    """可用模型列表（按 provider 分组嵌套）——经 runtime 转发，路由不感知 config。"""
+    """可用模型目录（按 provider 分组嵌套）——经 runtime 取配置的静态投影。
+
+    无网络请求：目录的唯一来源是配置声明（``providers[].models``）。
+    """
     from wing.gateway.protocol import ProviderModels
 
     server = _get_server(request)
-    groups = await server.runtime.list_models()
     return ModelsResponse(
         providers=[
             ProviderModels(
-                provider=g.provider,
-                models=g.models,
-                model_details=_aligned_model_details(g),
+                provider=group.provider,
+                models=[_model_detail(ref) for ref in group.models],
             )
-            for g in groups
+            for group in server.runtime.list_models()
         ]
     )
 

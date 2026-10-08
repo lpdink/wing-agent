@@ -31,13 +31,14 @@ def reset_config_before_each_test():
 
 @pytest.fixture
 def minimal_config_dict() -> dict:
-    """最小配置字典（仅必需字段）"""
+    """最小配置字典（仅必需字段 + 模型目录的一条声明）。"""
     return {
         "providers": [
             {
                 "name": "default",
                 "base_url": "https://api.example.com/v1",
                 "api_key": "test-key-123",
+                "models": ["gpt-4"],
             },
         ],
         "agents": [
@@ -48,7 +49,11 @@ def minimal_config_dict() -> dict:
 
 @pytest.fixture
 def full_config_dict() -> dict:
-    """完整配置字典"""
+    """完整配置字典。
+
+    ``agents[].provider`` 是**已删除**的字段（引用词是 model id）：配置里继续写
+    它不会报错，也不会出现在解析产物上——``extra="ignore"`` 的静默忽略就是契约。
+    """
     return {
         "providers": [
             {
@@ -60,6 +65,7 @@ def full_config_dict() -> dict:
                 "explicit_cache_mode": False,
                 "reasoning_effort": "high",
                 "extra_body": {"enable_thinking": True},
+                "models": [{"name": "gpt-4", "display_name": "GPT-4"}],
             },
         ],
         "agents": [
@@ -103,7 +109,8 @@ class TestConfigModels:
         assert config.providers[0].base_url == "https://api.example.com/v1"
         assert config.agents[0].model == "gpt-4"
         assert config.agents[0].tools == ["Bash", "Read", "Write"]
-        assert config.agents[0].provider == "main"
+        # agents[].provider 已删除：配置里写了也不报错，但解析产物上没有这个字段
+        assert not hasattr(config.agents[0], "provider")
 
     def test_duplicate_provider_name_rejected(self):
         """重复 provider name 报错"""
@@ -116,24 +123,28 @@ class TestConfigModels:
                 agents=[{"name": "default", "model": "m"}],  # ty: ignore[invalid-argument-type]
             )
 
-    def test_agent_references_unknown_provider(self):
-        """agent 引用不存在的 provider 报错"""
-        with pytest.raises(ValueError, match="unknown provider"):
-            Config(
-                providers=[  # ty: ignore[invalid-argument-type]
-                    {"name": "a", "base_url": "http://a", "api_key": "k"},
-                ],
-                agents=[{"name": "default", "model": "m", "provider": "nonexistent"}],  # ty: ignore[invalid-argument-type]
-            )
+    def test_agent_provider_field_is_silently_ignored(self):
+        """`agents[].provider` 已删除：继续写不报错、不生效（extra=ignore 契约）。"""
+        config = Config(
+            providers=[  # ty: ignore[invalid-argument-type]
+                {"name": "a", "base_url": "http://a", "api_key": "k", "models": ["m"]},
+            ],
+            agents=[  # ty: ignore[invalid-argument-type]
+                {"name": "default", "model": "m", "provider": "nonexistent"},
+            ],
+        )
+        assert config.agents[0].model == "m"
+        assert not hasattr(config.agents[0], "provider")
 
     def test_get_provider_helper(self, minimal_config_dict):
-        """get_provider 按名称查询"""
+        """get_provider 按名称查询（name 必填——没有「默认 provider」概念）"""
         config = Config(**minimal_config_dict)
         p = config.get_provider("default")
         assert p.name == "default"
-        # None 返回第一个
-        p2 = config.get_provider(None)
-        assert p2.name == "default"
+        with pytest.raises(ValueError, match="provider name is required"):
+            config.get_provider("")
+        with pytest.raises(ValueError, match="provider 'nope' not found"):
+            config.get_provider("nope")
 
 
 class TestLoadConfig:
@@ -291,6 +302,7 @@ class TestLoadConfig:
                             "name": "default",
                             "base_url": "https://new.example.com",
                             "api_key": "test-key-123",
+                            "models": ["gpt-4"],
                         },
                     ],
                     "agents": [{"name": "default", "model": "gpt-4"}],
@@ -379,11 +391,12 @@ class TestDefaultConfigTemplate:
         from wing.config import DEFAULT_CONFIG_YAML
 
         config = Config(**yaml.safe_load(DEFAULT_CONFIG_YAML))
-        # 新增字段在模板里落位（images 段 / 模型声明的两种形态示例）
+        # 新增字段在模板里落位（images 段 / 模型目录声明）
         assert config.images.max_bytes == 4_718_592
         assert config.images.max_images == 32
-        assert config.providers[0].models == []
-        assert config.providers[0].model_names() == []
+        # 模型目录是必需段：模板声明占位模型，agent 引用它的 id（同一占位符）
+        assert config.providers[0].model_names() == ["ChangeHere"]
+        assert config.find_model(config.agents[0].model) is not None
 
     def test_template_covers_every_config_field(self):
         """顶层与 images 段的键集合必须与 Config 模型字段一一对应（SYNC 硬约束）。"""

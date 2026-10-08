@@ -19,6 +19,7 @@ from wing_probe import Probe, ToolCall, Turn, Usage
 TPS_MODEL = "probe/llm-metrics-tps"
 
 
+@pytest.mark.probe_env(models=[TPS_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_tool_call_only_turn_reports_decode_tps(probe: Probe) -> None:

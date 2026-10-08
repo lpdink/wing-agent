@@ -26,6 +26,8 @@ def build_session_info(session: Session) -> SessionInfoResponse:
     msg_count, total_tok = cm.get_context_stats()
     return SessionInfoResponse(
         model=status["model"],
+        model_id=session.model_id,
+        provider_name=session.agent.provider_name,
         model_display_name=session.agent.model_display_name,
         api_url=status["api_url"],
         tools=status["tools"],

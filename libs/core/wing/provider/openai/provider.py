@@ -163,19 +163,6 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             return 0
         return len(state.pending)
 
-    async def list_models(self) -> list[str]:
-        if self._config.models:
-            # 静态声明短路：字符串 / 对象两种形态统一取实际调用名（排序保持现状）。
-            return sorted(self._config.model_names())
-        try:
-            resp = await self._client.get("/models")
-            await raise_with_body(resp)
-            data = resp.json()
-            return sorted([m["id"] for m in data.get("data", [])])
-        except Exception as e:
-            log.error(f"Failed to list models: {e}")
-            raise
-
     async def _close_transport(self) -> None:
         await self._client.aclose()
 

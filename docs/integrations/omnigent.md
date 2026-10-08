@@ -53,7 +53,7 @@ acp:
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `model` | 无 | 固定这个 wing agent 的初始模型（形如 `provider:model`，取值看 wing 的 `wing models` 输出 / 模型选择器）；不填则用 wing 侧的默认模型 |
+| `model` | 无 | 固定这个 wing agent 的初始模型（值 = **model_id**，即 `providers[].models` 声明的 id；取值看 wing 的 `wing models` 输出 / 模型选择器）；不填则用 wing 侧的默认模型 |
 | `session_id_mode` | `server` | 保持默认：会话 id 由 wing 生成 |
 | `send_model` | `false` | 不需要（那是给把模型塞进 `session/new` 的 agent 用的） |
 | `omnigent_mcp` | `true` | 建议设 `false`，见上 |

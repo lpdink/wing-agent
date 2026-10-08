@@ -321,6 +321,7 @@ fn test_sync_titles_use_the_new_sessions_workdir() {
     if let WingEvent::SyncSession { agent, .. } = &mut sync {
         *agent = Some(Box::new(crate::protocol::AgentInfo {
             model_name: "test-model".into(),
+            model_id: None,
             system_prompt: None,
             tools: vec![],
             skills: vec![],
@@ -412,6 +413,7 @@ fn test_sync_feeds_the_nameplate_instead_of_pushing_a_banner_cell() {
     let mut app = test_app();
     let agent = crate::protocol::AgentInfo {
         model_name: "test-model".into(),
+        model_id: None,
         system_prompt: None,
         tools: vec![],
         skills: vec!["pdf".into(), "webapp".into()],
@@ -468,6 +470,7 @@ fn test_sync_restores_model_display_name() {
     let mut app = test_app();
     let agent = crate::protocol::AgentInfo {
         model_name: "dfmodel-2026".into(),
+        model_id: Some("ds-flash".into()),
         system_prompt: None,
         tools: vec![],
         skills: vec![],
@@ -478,6 +481,7 @@ fn test_sync_restores_model_display_name() {
     };
     app.handle_event(sync_event_with_agent(Some(agent), vec![]));
     assert_eq!(app.status.model, "dfmodel-2026");
+    assert_eq!(app.status.model_id.as_deref(), Some("ds-flash"));
     assert_eq!(
         app.status.model_display_name.as_deref(),
         Some("DeepSeek-Flash")
@@ -498,6 +502,8 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
     // New gateway: label travels with the model.
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("dfmodel-2026".into()),
+        model_id: Some("ds-flash".into()),
+        provider_name: Some("qoder".into()),
         model_display_name: Some("DeepSeek-Flash".into()),
         thinking: None,
         reasoning_effort: None,
@@ -512,6 +518,8 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
     // name (a stale label must not describe the new model).
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("plain-model".into()),
+        model_id: None,
+        provider_name: None,
         model_display_name: None,
         thinking: Some(true),
         reasoning_effort: None,
@@ -528,6 +536,8 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
     // Model untouched (e.g. yolo toggle): the label stays with its model.
     app.handle_event(WingEvent::SessionStateChanged {
         model: None,
+        model_id: None,
+        provider_name: None,
         model_display_name: None,
         thinking: None,
         reasoning_effort: None,
@@ -562,6 +572,8 @@ fn test_session_state_changed_falls_back_to_the_local_label_when_omitted() {
 
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("dfmodel".into()),
+        model_id: Some("dfmodel".into()),
+        provider_name: Some("qoder".into()),
         model_display_name: None,
         thinking: None,
         reasoning_effort: None,
@@ -580,6 +592,8 @@ fn test_session_state_changed_falls_back_to_the_local_label_when_omitted() {
     // The local snapshot has nothing for this model → no invented label.
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("mystery".into()),
+        model_id: Some("mystery-id".into()),
+        provider_name: None,
         model_display_name: None,
         thinking: None,
         reasoning_effort: None,

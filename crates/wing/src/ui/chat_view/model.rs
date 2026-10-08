@@ -1660,8 +1660,13 @@ mod tests {
         view.show_model_picker(crate::shared::panels::picker::ModelPanel::new(
             vec![wing_api_client::models::ProviderModels {
                 provider: "p".into(),
-                models: vec!["m".into()],
-                model_details: vec![],
+                models: vec![wing_api_client::models::ModelDetail {
+                    id: "m".into(),
+                    name: "m".into(),
+                    display_name: None,
+                    description: None,
+                    capabilities: Default::default(),
+                }],
             }],
             None,
         ));

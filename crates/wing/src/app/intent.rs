@@ -107,10 +107,11 @@ pub enum AppIntent {
     /// Fetch available agent template list via HTTP API for popup candidates.
     FetchAgents,
 
-    /// Update session state (model, agent, title, thinking, reasoning_effort, yolo, workspace) via HTTP API.
+    /// Update session state (model id, agent, title, thinking, reasoning_effort,
+    /// yolo, workspace) via HTTP API.
     UpdateSession {
-        model: Option<String>,
-        provider: Option<String>,
+        /// 模型引用词（model_id）——唯一的模型变更入口。
+        model_id: Option<String>,
         agent: Option<String>,
         title: Option<String>,
         thinking: Option<bool>,
@@ -150,8 +151,7 @@ impl AppIntent {
     /// Build an `UpdateSession` intent with all fields `None`.
     fn update_session(f: impl FnOnce(&mut Self)) -> Self {
         let mut intent = Self::UpdateSession {
-            model: None,
-            provider: None,
+            model_id: None,
             agent: None,
             title: None,
             thinking: None,
@@ -163,17 +163,11 @@ impl AppIntent {
         intent
     }
 
-    /// Update the session model (with optional provider).
-    pub fn set_model(model: String, provider: Option<String>) -> Self {
+    /// Update the session model by its reference word (`model_id`).
+    pub fn set_model(model_id: String) -> Self {
         Self::update_session(|i| {
-            if let Self::UpdateSession {
-                model: m,
-                provider: p,
-                ..
-            } = i
-            {
-                *m = Some(model);
-                *p = provider;
+            if let Self::UpdateSession { model_id: m, .. } = i {
+                *m = Some(model_id);
             }
         })
     }

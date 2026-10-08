@@ -19,7 +19,7 @@ from wing_probe.provider.context import ContextView
 
 @dataclass(frozen=True)
 class LoggedRequest:
-    """一次入站 ``/v1/chat/completions`` 请求的留档。"""
+    """一次入站 ``chat/completions`` 请求的留档。"""
 
     index: int
     """全局序号（0-based，按到达顺序）。"""
@@ -32,6 +32,13 @@ class LoggedRequest:
     """墙钟时间（``time.time()``，报告可读性用）。"""
     model_index: int = 0
     """同 model 内的序号（0-based）。"""
+    path: str = ""
+    """入站请求的原始路径（``request.path``）。
+
+    主 provider 是 ``/v1/chat/completions``；附加 provider（跨 provider 场景）
+    是 ``/<name>/v1/chat/completions``——「这次调用打到哪个 provider 的端点」
+    因此是可断言事实。剧本仍按**调用名**路由（同名调用名共用一条剧本队列）。
+    """
 
     @property
     def stream(self) -> bool:
@@ -69,6 +76,7 @@ class RequestLog:
         body: dict[str, Any],
         *,
         model: str,
+        path: str = "",
         at: float | None = None,
         at_wall: float | None = None,
     ) -> LoggedRequest:
@@ -80,6 +88,7 @@ class RequestLog:
             at=time.monotonic() if at is None else at,
             at_wall=time.time() if at_wall is None else at_wall,
             model_index=len(self.by_model(model)),
+            path=path,
         )
         self._requests.append(entry)
         return entry

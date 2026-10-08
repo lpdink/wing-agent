@@ -1,5 +1,5 @@
 # wing/provider/pool.py
-"""共享 provider 池 — 全部会话与模型列表共用同一批无状态 provider 实例。
+"""共享 provider 池 — 全部会话共用同一批无状态 provider 实例。
 
 为什么共享（相对旧版「每 agent 一份 client 表」）：
 
@@ -19,73 +19,25 @@
   收尾后自动关闭；
 - 配置中已移除的 name：池保留旧实例（钉在它上面的会话继续可用），新解析
   按当前配置——与旧版「活跃 provider 重建失败时保持可用」的会话不拆解
-  语义一致；
-- ``/api/models`` 聚合复用同一批实例（不再维护第二套只读 client）。
+  语义一致。
+
+池只做一件事：把 provider 实例的生命周期钉在一处。**模型目录不在这里**——
+它是配置声明的静态投影（``wing.config.Config.model_groups()``），远端
+``/models`` 发现已退役，池不需要为目录持有第二份配置快照。
 """
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
 from wing.common.logger import log
-from wing.config import ModelCapabilities
 from wing.provider.base import ModelProvider
 from wing.provider.factory import create_provider
 
-if TYPE_CHECKING:
-    from wing.config import ProviderConfig
-
 __all__ = [
-    "ModelDetail",
-    "ProviderModels",
     "ProviderPool",
     "close_providers",
     "get_provider",
-    "list_all_models",
     "reset_providers",
 ]
-
-_LIST_MODELS_TIMEOUT = 10.0
-
-
-@dataclass
-class ModelDetail:
-    """单条模型声明的对外投影（与 ``ProviderModels.models`` 逐项同序对应）。
-
-    ``capabilities`` 直接复用 config 的声明类型（能力词汇只有一份）。
-    """
-
-    name: str
-    """实际调用名。"""
-    display_name: str | None = None
-    """展示名（缺省由前端回落 name）。"""
-    description: str | None = None
-    capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
-
-
-@dataclass
-class ProviderModels:
-    """按 provider 聚合的模型列表（嵌套响应条目）。"""
-
-    provider: str
-    models: list[str] = field(default_factory=list)
-    model_details: list[ModelDetail] = field(default_factory=list)
-    """与 models 逐项同序同名：配置声明的带元信息，远端发现的最小化。"""
-
-
-def _model_detail(cfg: ProviderConfig, model: str) -> ModelDetail:
-    """按声明构建 detail：已声明带元信息，未声明（远端发现）给最小条目。"""
-    spec = cfg.find_model(model)
-    if spec is None:
-        return ModelDetail(name=model)
-    return ModelDetail(
-        name=spec.name,
-        display_name=spec.display_name,
-        description=spec.description,
-        capabilities=spec.capabilities,
-    )
 
 
 class ProviderPool:
@@ -93,8 +45,6 @@ class ProviderPool:
 
     def __init__(self) -> None:
         self._providers: dict[str, ModelProvider] = {}
-        self._configs: dict[str, ProviderConfig] = {}
-        """实例建表时的配置快照（存活期内不变；聚合查询据此解析模型声明）。"""
 
     # ── 解析 ──────────────────────────────────────
 
@@ -113,7 +63,6 @@ class ProviderPool:
         cfg = get_config().get_provider(name)  # 名称未知 → 按配置报错
         provider = create_provider(cfg)
         self._providers[name] = provider
-        self._configs[name] = cfg
         return provider
 
     # ── 生命周期 ──────────────────────────────────
@@ -136,7 +85,6 @@ class ProviderPool:
             provider for name, provider in self._providers.items() if name in fresh
         ]
         self._providers.update(fresh)
-        self._configs.update({cfg.name: cfg for cfg in configs})
         for provider in displaced:
             await provider.retire()
         log.info(
@@ -149,38 +97,8 @@ class ProviderPool:
         """关闭并清空池（进程终结 / 测试；在途请求随之终止）。"""
         providers = list(self._providers.values())
         self._providers.clear()
-        self._configs.clear()
         for provider in providers:
             await provider.aclose()
-
-    # ── 模型列表聚合 ──────────────────────────────
-
-    async def list_all_models(self) -> list[ProviderModels]:
-        """并发查询当前配置声明的全部 provider（per-provider 超时；失败落空）。"""
-        from wing.config import get_config
-
-        async def _query_one(
-            name: str, cfg: ProviderConfig, provider: ModelProvider
-        ) -> ProviderModels:
-            try:
-                models = await asyncio.wait_for(
-                    provider.list_models(), timeout=_LIST_MODELS_TIMEOUT
-                )
-                return ProviderModels(
-                    provider=name,
-                    models=models,
-                    model_details=[_model_detail(cfg, m) for m in models],
-                )
-            except Exception as e:
-                log.error(f"list_models failed for provider '{name}': {e}")
-                return ProviderModels(provider=name, models=[])
-
-        configs = list(get_config().providers)
-        return list(
-            await asyncio.gather(
-                *(_query_one(cfg.name, cfg, self.get(cfg.name)) for cfg in configs)
-            )
-        )
 
 
 _pool = ProviderPool()
@@ -199,8 +117,3 @@ async def reset_providers() -> int:
 async def close_providers() -> None:
     """关闭并清空共享 provider 池（进程终结入口）。"""
     await _pool.close()
-
-
-async def list_all_models() -> list[ProviderModels]:
-    """聚合模型列表（按 provider 分组；配置了静态 models 的跳过请求）。"""
-    return await _pool.list_all_models()

@@ -130,6 +130,7 @@ def _assert_groups(rows: list[dict], expected: list[str]) -> None:
     assert observed == expected, f"expected {expected}, got {detail}"
 
 
+@pytest.mark.probe_env(models=[ORDER_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_active_sessions_rank_before_disk_only_ones(probe: Probe) -> None:
@@ -197,6 +198,7 @@ async def test_active_sessions_rank_before_disk_only_ones(probe: Probe) -> None:
     ]
 
 
+@pytest.mark.probe_env(models=[ORDER_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_list_order_follows_last_interaction_when_nothing_is_loaded(

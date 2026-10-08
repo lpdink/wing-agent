@@ -784,12 +784,16 @@ class TestProviderLifecycle:
                     name="default",
                     base_url="https://a.example.com",
                     api_key=api_key,
+                    models=["gpt-4"],
                 ),
                 ProviderConfig(
-                    name="p2", base_url="https://b.example.com", api_key="k"
+                    name="p2",
+                    base_url="https://b.example.com",
+                    api_key="k",
+                    models=["model-2", "model-3"],
                 ),
             ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+            agents=[AgentConfig(name="default", model="gpt-4")],
         )
 
     @pytest.mark.asyncio
@@ -802,21 +806,21 @@ class TestProviderLifecycle:
 
     @pytest.mark.asyncio
     async def test_cross_provider_switch_resolves_from_pool(self, sm, monkeypatch):
-        """跨 provider 切模型：实例经池解析；切回同名复用同一实例（client 不重建）。"""
+        """跨 provider 切模型（按 id）：实例经池解析；切回同名复用同一实例。"""
         self._use_config(monkeypatch, self._two_provider_config())
         session = sm.create_session()
         p_default = session.agent.model_provider
         assert p_default.name == "default"
 
-        session._apply_model("model-2", provider_name="p2")
+        session._apply_model("model-2")  # p2 声明的 id
         assert session.agent.model_provider.name == "p2"
         assert session.agent.model_provider is not p_default
         # 旧实例仍在池中可用（其他会话可能钉着它），未被关闭
         assert p_default._client.is_closed is False
         assert get_provider("default") is p_default
 
-        # 切回 default：复用池中同一实例，而非新建
-        session._apply_model("model-3", provider_name="default")
+        # 切回 default 声明的 id：复用池中同一实例，而非新建
+        session._apply_model("gpt-4")
         assert session.agent.model_provider is p_default
 
     @pytest.mark.asyncio
@@ -877,17 +881,20 @@ class TestProviderLifecycle:
         """配置移除某 provider：池保留旧实例——钉在它上面的会话不被 reload 拆解。"""
         self._use_config(monkeypatch, self._two_provider_config())
         session = sm.create_session()
-        session._apply_model("model-2", provider_name="p2")
+        session._apply_model("model-2")  # p2 声明的 id
         p2 = session.agent.model_provider
 
         # 新配置只剩 default（p2 被移除）
         only_default = Config(
             providers=[
                 ProviderConfig(
-                    name="default", base_url="https://a.example.com", api_key="k"
+                    name="default",
+                    base_url="https://a.example.com",
+                    api_key="k",
+                    models=["gpt-4"],
                 ),
             ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+            agents=[AgentConfig(name="default", model="gpt-4")],
         )
         self._use_config(monkeypatch, only_default)
         await reset_providers()

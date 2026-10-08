@@ -211,14 +211,22 @@ describe('the rest of the local table', () => {
 });
 
 describe('runtime state on resume', () => {
-  it('a resumed session shows the gateway yolo state (checkpoint② #3)', async () => {
+  it('a resumed session shows the gateway yolo state and the model quadruple (checkpoint② #3)', async () => {
     const harness = createHostHarness();
     teardown.push(harness);
     await harness.boot();
     harness.gateway.seedSession({
       sessionId: 'persisted-1',
       name: 'Earlier work',
-      runtime: { yolo: true, thinking: true, reasoningEffort: 'high', model: 'claude-opus-4-6' },
+      runtime: {
+        yolo: true,
+        thinking: true,
+        reasoningEffort: 'high',
+        model: 'claude-opus-4-6',
+        modelId: 'claude-opus-4',
+        modelDisplayName: null,
+        providerName: 'anthropic',
+      },
       messages: [{ role: 'user', content: 'hello from before', uuid: 'u1' }],
     });
 
@@ -229,7 +237,12 @@ describe('runtime state on resume', () => {
     expect(record?.meta.yolo).toBe(true);
     expect(record?.meta.thinking).toBe(true);
     expect(record?.meta.reasoningEffort).toBe('high');
+    // The runtime info fills the whole model quadruple (the replay carries no
+    // agent here): call name, reference word, display fallback, provider.
     expect(record?.meta.model).toBe('claude-opus-4-6');
+    expect(record?.meta.modelId).toBe('claude-opus-4');
+    expect(record?.meta.modelDisplayName).toBe('');
+    expect(record?.meta.provider).toBe('anthropic');
     // And the webview was told (this is what the status area renders).
     const states = harness.ofType('state').filter((message) => message.state.sessionId === 'persisted-1');
     expect(states.at(-1)?.state.meta.yolo).toBe(true);
@@ -241,23 +254,24 @@ describe('runtime state on resume', () => {
     await harness.boot();
     harness.gateway.seedSession({
       sessionId: 'persisted-2',
-      runtime: { model: 'stale-model', yolo: true },
+      runtime: {
+        model: 'stale-model',
+        modelId: 'stale-id',
+        providerName: 'stale-provider',
+        yolo: true,
+      },
     });
 
     // Hold the `/api/session/info` response so the model switch lands first.
     const gate = harness.gateway.holdNext('/api/session/info');
     await harness.intent({ type: 'activateSession', sessionId: 'persisted-2' });
-    await harness.intent({
-      type: 'setModel',
-      sessionId: 'persisted-2',
-      provider: 'openai',
-      model: 'gpt-5.2',
-    });
+    await harness.intent({ type: 'setModel', sessionId: 'persisted-2', modelId: 'gpt-5.2' });
     gate.release();
     await flushMicrotasks(30);
 
     const record = harness.host.sessionManager.record('persisted-2');
     expect(record?.meta.model).toBe('gpt-5.2');
+    expect(record?.meta.modelId).toBe('gpt-5.2');
     expect(record?.meta.provider).toBe('openai');
     // The refresh still delivered the fields the pick could not know about.
     expect(record?.meta.yolo).toBe(true);

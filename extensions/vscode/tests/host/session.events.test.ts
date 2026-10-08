@@ -150,7 +150,10 @@ describe('meta merges', () => {
 
     harness.gateway.emit({
       type: 'session_state_changed',
-      model: 'gpt-5.2',
+      model: 'dfmodel',
+      model_id: 'ds-flash',
+      provider_name: 'qoder',
+      model_display_name: 'DeepSeek-Flash',
       thinking: true,
       reasoning_effort: 'high',
       yolo: true,
@@ -162,7 +165,10 @@ describe('meta merges', () => {
 
     const record = harness.host.sessionManager.record(sessionId);
     expect(record?.meta).toMatchObject({
-      model: 'gpt-5.2',
+      model: 'dfmodel',
+      modelId: 'ds-flash',
+      modelDisplayName: 'DeepSeek-Flash',
+      provider: 'qoder',
       thinking: true,
       reasoningEffort: 'high',
       yolo: true,
@@ -180,6 +186,9 @@ describe('meta merges', () => {
     harness.gateway.emit({
       type: 'session_state_changed',
       model: null,
+      model_id: null,
+      provider_name: null,
+      model_display_name: null,
       thinking: null,
       reasoning_effort: null,
       yolo: false,
@@ -189,11 +198,47 @@ describe('meta merges', () => {
     });
     await flushMicrotasks();
     expect(harness.host.sessionManager.record(sessionId)?.meta).toMatchObject({
-      model: 'gpt-5.2',
+      model: 'dfmodel',
+      modelId: 'ds-flash',
+      modelDisplayName: 'DeepSeek-Flash',
+      provider: 'qoder',
       thinking: true,
       reasoningEffort: 'high',
       yolo: false,
       agent: 'reviewer',
+    });
+  });
+
+  it('the display name follows the model (a switch to an undeclared one clears it)', async () => {
+    const { harness, sessionId } = await boot();
+    harness.wipe();
+
+    harness.gateway.emit({
+      type: 'session_state_changed',
+      model: 'dfmodel',
+      model_id: 'ds-flash',
+      provider_name: 'qoder',
+      model_display_name: 'DeepSeek-Flash',
+      session_id: sessionId,
+    });
+    await flushMicrotasks();
+    harness.gateway.emit({
+      type: 'session_state_changed',
+      model: 'plain-call-name',
+      model_id: 'plain',
+      provider_name: 'local',
+      // No declared display name: the event carries none, and the meta must not
+      // keep the previous model's label (the label is model state, not its own).
+      session_id: sessionId,
+    });
+    await flushMicrotasks();
+
+    const meta = harness.host.sessionManager.record(sessionId)?.meta;
+    expect(meta).toMatchObject({
+      model: 'plain-call-name',
+      modelId: 'plain',
+      modelDisplayName: '',
+      provider: 'local',
     });
   });
 

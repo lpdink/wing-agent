@@ -454,16 +454,11 @@ async def test_model_switch_downgrades_to_placeholder(probe: Probe) -> None:
     assert before_tools[0]["content"] == envelope
     assert len(bearer_messages(before.body)) == 1, before.describe()
 
-    # 切到 text-only 模型（同一 provider 内的另一个模型名；该端点要求
-    # model 与 provider 成对给出）。
+    # 切到 text-only 模型（同一 provider 内的另一个 id；模型切换只认 model_id）。
     updated = await probe.driver_required.http.request(
         "POST",
         "/api/session/update",
-        body={
-            "session_id": session.session_id,
-            "model": TEXT_MODEL,
-            "provider": "probe",
-        },
+        body={"session_id": session.session_id, "model_id": TEXT_MODEL},
     )
     assert updated.get("ok") is True, updated
 

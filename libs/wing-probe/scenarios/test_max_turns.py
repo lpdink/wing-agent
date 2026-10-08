@@ -56,6 +56,7 @@ async def _wait_idle(session: Session, *, timeout: float = IDLE_DEADLINE) -> str
     )
 
 
+@pytest.mark.probe_env(models=[MAX_TURNS_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> None:

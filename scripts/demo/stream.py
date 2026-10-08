@@ -148,17 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self) -> None:  # noqa: N802 - 基类命名
-        if self.path.rstrip("/").endswith("/models"):
-            body = json.dumps(
-                {
-                    "object": "list",
-                    "data": [
-                        {"id": STATE["model"], "object": "model", "owned_by": "demo"}
-                    ],
-                }
-            ).encode()
-            self._send(body)
-            return
+        # 没有模型发现端点：wing 的模型目录来自配置声明（远端 GET /models 已退役）。
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802

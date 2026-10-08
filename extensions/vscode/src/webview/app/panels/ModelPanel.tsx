@@ -29,8 +29,9 @@ export type ModelPanelRow =
   | {
       readonly kind: 'model';
       readonly selectable: true;
+      readonly id: string;
+      readonly label: string;
       readonly provider: string;
-      readonly model: string;
       readonly selected: boolean;
     }
   | { readonly kind: 'separator'; readonly selectable: false; readonly label: string }
@@ -62,8 +63,9 @@ export function buildModelRows(
     rows.push({
       kind: 'model',
       selectable: true,
+      id: row.id,
+      label: row.label,
       provider: row.provider,
-      model: row.model,
       selected: row.selected,
     });
   }
@@ -102,7 +104,7 @@ export function ModelPanel({ sessionId, picker, meta, onClose }: ModelPanelProps
     }
     switch (row.kind) {
       case 'model':
-        postToHost({ type: 'setModel', sessionId, provider: row.provider, model: row.model });
+        postToHost({ type: 'setModel', sessionId, modelId: row.id });
         return;
       case 'thinking':
         postToHost({ type: 'setThinking', sessionId, enabled: !row.enabled });
@@ -125,9 +127,7 @@ export function ModelPanel({ sessionId, picker, meta, onClose }: ModelPanelProps
     if (target === undefined) {
       return undefined;
     }
-    const index = rows.findIndex(
-      (row) => row.kind === 'model' && row.provider === target.provider && row.model === target.model,
-    );
+    const index = rows.findIndex((row) => row.kind === 'model' && row.id === target.id);
     return index >= 0 ? index : undefined;
   }, [picker, rows]);
 
@@ -179,7 +179,8 @@ export function ModelPanel({ sessionId, picker, meta, onClose }: ModelPanelProps
 function rowKey(row: ModelPanelRow, index: number): string {
   switch (row.kind) {
     case 'model':
-      return `model:${row.provider}/${row.model}`;
+      // The id is the identity (two rows can share a provider).
+      return `model:${row.id}`;
     case 'effort':
       return `effort:${row.level}`;
     case 'thinking':
@@ -231,7 +232,7 @@ function ModelRowView({ row, index, highlighted, onActivate }: ModelRowViewProps
     case 'model':
       return (
         <div {...shared} data-current={row.selected ? 'true' : 'false'} data-testid="model-row">
-          <span className={styles.optionLabel}>{row.model}</span>
+          <span className={styles.optionLabel}>{row.label}</span>
           {row.selected ? <span className={styles.badge}>current</span> : null}
         </div>
       );

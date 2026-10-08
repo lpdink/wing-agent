@@ -121,7 +121,9 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 # 其它常用旋钮（kwargs 原名透传 ProbeEnv；None = 不写该段，保持标准配置）：
 @pytest.mark.probe_env(models=[{"name": "probe/vlm", "capabilities": {"vision": True}}])
 #   → providers[0].models：provider 静态模型声明（str 或对象；能力/展示元信息）。
-#   注意：它**不改 agent 默认模型**，场景仍须显式 probe.session(model=…) 选剧本。
+#   注意：它**不改 agent 默认模型**，场景仍须显式 probe.session(model=…) 选剧本——
+#   `model=` 的值是 **model_id**（引用词），必须落在 `models` 声明里（未显式给
+#   `models` 时基建默认声明模板模型；显式给时模板模型会被补进声明）。
 
 @pytest.mark.probe_env(context_window_tokens=1000, keep_recent_tokens=400)
 #   → agents[0]（default 模板）：压缩双阈值——early trigger = 窗口 − 保留区、

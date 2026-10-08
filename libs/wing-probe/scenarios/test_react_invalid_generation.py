@@ -29,6 +29,7 @@ EMPTY_MODEL = "probe/react-invalid-empty"
 TRUNCATED_MODEL = "probe/react-invalid-truncated"
 
 
+@pytest.mark.probe_env(models=[EMPTY_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_empty_generation_retries_then_succeeds(probe: Probe) -> None:
@@ -82,6 +83,7 @@ async def test_empty_generation_retries_then_succeeds(probe: Probe) -> None:
     second.assert_tail_from([{"role": "user", "content": "go"}])
 
 
+@pytest.mark.probe_env(models=[TRUNCATED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_truncated_tool_call_keeps_content_and_retries(probe: Probe) -> None:

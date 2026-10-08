@@ -88,7 +88,7 @@ async def _release(probe: Probe, session_id: str) -> dict:
     )
 
 
-@pytest.mark.probe_env(sessions=FAST_EVICTION)
+@pytest.mark.probe_env(models=[HYDRATE_MODEL], sessions=FAST_EVICTION)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_idle_session_is_evicted_then_hydrates_on_demand(probe: Probe) -> None:
@@ -136,7 +136,7 @@ async def test_idle_session_is_evicted_then_hydrates_on_demand(probe: Probe) -> 
     ]
 
 
-@pytest.mark.probe_env(sessions=FAST_EVICTION)
+@pytest.mark.probe_env(models=[PINNED_MODEL], sessions=FAST_EVICTION)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_subscribed_session_is_never_evicted(probe: Probe) -> None:
@@ -166,7 +166,7 @@ async def test_subscribed_session_is_never_evicted(probe: Probe) -> None:
     ]
 
 
-@pytest.mark.probe_env(sessions=SLOW_EVICTION)
+@pytest.mark.probe_env(models=[RELEASE_MODEL], sessions=SLOW_EVICTION)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_release_evicts_idle_session(probe: Probe) -> None:

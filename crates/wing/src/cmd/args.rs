@@ -12,15 +12,9 @@ pub struct RunArgs {
     #[arg(short = 'p', long = "prompt")]
     pub prompt: String,
 
-    /// Override model name.
+    /// Override model id (references `providers[].models` in the gateway config).
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
-
-    /// Override provider name (references config `providers[].name`).
-    /// When set with `--model`, switches to that provider's endpoint; a lone
-    /// `--provider` (no `--model`) is a no-op.
-    #[arg(long = "provider")]
-    pub provider: Option<String>,
 
     /// Resume an existing session by ID.
     #[arg(short = 'r', long = "resume")]

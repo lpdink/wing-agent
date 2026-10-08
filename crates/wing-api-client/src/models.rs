@@ -46,6 +46,11 @@ pub struct TagMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub model_name: String,
+    /// 模型的**引用词**（∈ 配置声明的 id 空间）——前端的选择态 / 匹配以它为准。
+    /// 陈旧数据 / 降级路径（旧会话的 id 已被删除且反查不中）为 None，
+    /// 前端容忍：展示回落 `model_display_name`‖`model_name`，picker 无标记。
+    #[serde(default)]
+    pub model_id: Option<String>,
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,
@@ -54,11 +59,11 @@ pub struct AgentInfo {
     #[serde(default)]
     pub rules: Vec<String>,
     pub workspace: Option<String>,
-    /// 当前活跃 provider 的名称；旧网关/降级路径缺失时为 None。
+    /// 当前活跃 provider 的名称（运行期事实）；旧网关/降级路径缺失时为 None。
     #[serde(default)]
     pub provider_name: Option<String>,
     /// `model_name` 的展示名（网关配置声明）；旧网关 / 未声明时为 None。
-    /// 展示层专用——身份仍是 `model_name` + `provider_name`。
+    /// 展示层专用——身份是 `model_id`。
     #[serde(default)]
     pub model_display_name: Option<String>,
 }
@@ -70,12 +75,10 @@ pub struct AgentInfo {
 /// Agent 参数覆盖。所有字段可选，`None` 表示不覆盖（保留 template 值）。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentOverride {
+    /// 覆盖模型（引用 `providers[].models` 的 id）；未命中由网关报错（400）。
+    /// provider 是运行期事实，随映射而来——不再是覆盖字段。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Provider name (references config `providers[].name`).
-    /// When set with `model`, switches to that provider's endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,8 +119,8 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct ResumeSessionRequest {
     pub session_id: String,
-    /// Resume-time override: only `model` / `provider` / `effort` / `tools`
-    /// are applied (the rest would change the conversation prefix).
+    /// Resume-time override: only `model_id` / `effort` / `tools` are applied
+    /// (the rest would change the conversation prefix).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentOverride>,
 }
@@ -276,7 +279,15 @@ pub struct ContextStatsInfo {
 /// GET /api/session/info 响应——session 运行时状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfoResponse {
+    /// 当前模型的调用名（发给上游的值；展示回落素材）。
     pub model: String,
+    /// 当前模型的**引用词**（∈ 配置声明的 id 空间）；不可用时 None（旧会话 / 反查不中）。
+    /// 前端的选择态 / 匹配以它为准。
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// 当前模型的 provider 名（运行期事实；未取到时 None）。
+    #[serde(default)]
+    pub provider_name: Option<String>,
     /// 当前模型的展示名（未声明 / 旧网关为 None，前端回落 `model`）。
     #[serde(default)]
     pub model_display_name: Option<String>,
@@ -366,10 +377,9 @@ pub struct BranchesResponse {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateSessionRequest {
     pub session_id: String,
+    /// 切换模型（引用 `providers[].models` 的 id；未命中 → 400 含 available ids）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -448,13 +458,18 @@ pub struct ModelCapabilities {
     pub vision: bool,
 }
 
-/// 单个模型的展示详情（镜像 Python `ModelSpec` 的 API 投影）。
+/// 单个模型的声明（镜像 Python `ModelSpec` 的 API 投影）。
 ///
-/// `display_name` / `description` / `capabilities` 都可能在旧网关或部分
-/// 覆盖的响应里缺席，解码必须容忍——**缺省不影响任何一份数据行**。
+/// 字段即线格式：`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给
+/// 上游的调用名，`display_name` 可空（展示层回落 `name`）。
+///
+/// `display_name` / `description` / `capabilities` 都可能在部分覆盖的响应里缺席，
+/// 解码必须容忍——**缺省不影响任何一份数据行**。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelDetail {
-    /// 实际调用名（身份）：Apply / 匹配 / 上报一律用它。
+    /// 全局唯一引用词（Apply / 匹配 / 上报一律用它）。
+    pub id: String,
+    /// 实际调用名（发给 provider API 的值）。
     pub name: String,
     /// 人类可读展示名（展示层专用；可能缺省或为空串）。
     #[serde(default)]
@@ -463,6 +478,19 @@ pub struct ModelDetail {
     pub description: Option<String>,
     #[serde(default, deserialize_with = "deserialize_capabilities")]
     pub capabilities: ModelCapabilities,
+}
+
+impl ModelDetail {
+    /// 展示名：优先声明的 `display_name`（去空白后非空），缺省 / 空串 / 纯空白一律
+    /// 回落调用名 `name`。
+    ///
+    /// 展示层专用——任何 Apply / 匹配 / 上报都必须使用 `id`（身份层）。
+    pub fn display_label(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(&self.name)
+    }
 }
 
 /// `capabilities: null` 与缺省等价（安全默认：text-only）。
@@ -489,32 +517,30 @@ where
     Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// 单个 provider 的可用模型（嵌套模型列表条目）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 单个 provider 的模型目录（嵌套模型列表条目）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderModels {
     pub provider: String,
-    #[serde(default)]
-    pub models: Vec<String>,
-    /// 模型展示详情（追加属性；旧网关不返回时为缺省空表，且可能只覆盖部分模型）。
     #[serde(default, deserialize_with = "deserialize_vec_or_default")]
-    pub model_details: Vec<ModelDetail>,
+    pub models: Vec<ModelDetail>,
 }
 
 impl ProviderModels {
-    /// 按调用名查找模型详情。未覆盖（旧网关 / 部分覆盖）时返回 `None`。
-    pub fn detail_for(&self, name: &str) -> Option<&ModelDetail> {
-        self.model_details.iter().find(|detail| detail.name == name)
+    /// 按 **id**（引用词）查找模型声明；目录未覆盖该 id 时返回 `None`。
+    ///
+    /// 单键查表：id 全局唯一，命中 / 未命中是二值判断，没有候选集合、没有优先级。
+    pub fn find(&self, model_id: &str) -> Option<&ModelDetail> {
+        self.models.iter().find(|detail| detail.id == model_id)
     }
 
-    /// 展示名：优先该模型声明的 `display_name`（去空白后非空），缺省 / 空串 /
-    /// 纯空白 / 未声明一律回落调用名 `name`。
+    /// `model_id` 的展示名：命中声明则用 [`ModelDetail::display_label`]，未命中回落
+    /// id 本身（调用方拿到的永远是「能显示的东西」）。
     ///
-    /// 展示层专用——任何 Apply / 匹配 / 上报都必须使用 `name`（身份层）。
-    pub fn label_for<'a>(&'a self, name: &'a str) -> &'a str {
-        self.detail_for(name)
-            .and_then(|detail| detail.display_name.as_deref())
-            .filter(|label| !label.trim().is_empty())
-            .unwrap_or(name)
+    /// 展示层专用——任何 Apply / 匹配 / 上报都必须使用 id（身份层）。
+    pub fn label_for<'a>(&'a self, model_id: &'a str) -> &'a str {
+        self.find(model_id)
+            .map(|detail| detail.display_label())
+            .unwrap_or(model_id)
     }
 }
 
@@ -684,8 +710,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_info_provider_name_optional() {
-        // Legacy response without provider_name / model_display_name → None.
+    fn agent_info_model_id_optional() {
+        // Legacy response without model_id / provider_name / model_display_name → None.
         let legacy = r#"{
             "model_name": "gpt-4",
             "system_prompt": null,
@@ -695,12 +721,14 @@ mod tests {
             "workspace": null
         }"#;
         let info: AgentInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.model_id, None);
         assert_eq!(info.provider_name, None);
         assert_eq!(info.model_display_name, None);
 
         // Round trip keeps the fields.
         let info = AgentInfo {
             model_name: "gpt-4".into(),
+            model_id: Some("fancy-gpt".into()),
             system_prompt: None,
             tools: vec![],
             skills: vec![],
@@ -710,15 +738,18 @@ mod tests {
             model_display_name: Some("Fancy Flash".into()),
         };
         let back: AgentInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        assert_eq!(back.model_id.as_deref(), Some("fancy-gpt"));
         assert_eq!(back.provider_name.as_deref(), Some("alt"));
         assert_eq!(back.model_display_name.as_deref(), Some("Fancy Flash"));
     }
 
     #[test]
-    fn session_info_display_name_optional() {
-        // New gateway carries the declared display label next to the call name.
+    fn session_info_carries_model_identity_and_tolerates_absent_fields() {
+        // Current gateway: reference word + provider fact + display label.
         let json = r#"{
             "model": "dfmodel-2026",
+            "model_id": "ds-flash",
+            "provider_name": "qoder",
             "model_display_name": "DeepSeek-Flash",
             "api_url": "http://x",
             "tools": [],
@@ -730,9 +761,11 @@ mod tests {
         }"#;
         let info: SessionInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(info.model, "dfmodel-2026");
+        assert_eq!(info.model_id.as_deref(), Some("ds-flash"));
+        assert_eq!(info.provider_name.as_deref(), Some("qoder"));
         assert_eq!(info.model_display_name.as_deref(), Some("DeepSeek-Flash"));
 
-        // Old gateway (no field) → None, no error.
+        // Old gateway (no new fields) → None, no error.
         let legacy = r#"{
             "model": "gpt-4o",
             "api_url": "http://x",
@@ -744,6 +777,8 @@ mod tests {
             "context_stats": {"message_count": 0, "total_tokens": 0}
         }"#;
         let info: SessionInfoResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.model_id, None);
+        assert_eq!(info.provider_name, None);
         assert_eq!(info.model_display_name, None);
     }
 
@@ -771,124 +806,116 @@ mod tests {
         assert_eq!(health.commit.as_deref(), Some("3e6e472"));
     }
 
-    // ── /api/models model_details（旧网关容忍 + 展示名回落） ──────
-
-    /// 旧网关：没有 `model_details` 字段，`models` 照旧可用。
+    /// 请求体只发 `model_id`：`model` / `provider` 必须不存在（legacy 字段已删）。
     #[test]
-    fn models_response_without_model_details() {
-        let legacy = r#"{
-            "providers": [{"provider": "qoder", "models": ["dfmodel", "gpt-x"]}]
-        }"#;
-        let resp: ModelsResponse = serde_json::from_str(legacy).unwrap();
-        assert_eq!(resp.providers.len(), 1);
-        let group = &resp.providers[0];
-        assert_eq!(group.models, vec!["dfmodel", "gpt-x"]);
-        assert!(group.model_details.is_empty());
-        // 未声明 → 展示名回落调用名（身份层值）。
-        assert_eq!(group.label_for("dfmodel"), "dfmodel");
-        assert_eq!(group.label_for("unknown"), "unknown");
+    fn update_and_override_requests_carry_only_model_id() {
+        let update = UpdateSessionRequest {
+            session_id: "s1".into(),
+            model_id: Some("ds-flash".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&update).unwrap(),
+            serde_json::json!({"session_id": "s1", "model_id": "ds-flash"})
+        );
+
+        let override_ = AgentOverride {
+            model_id: Some("ds-flash".into()),
+            yolo: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&override_).unwrap(),
+            serde_json::json!({"model_id": "ds-flash", "yolo": true})
+        );
+
+        // 全空体里没有任何模型字段残留。
+        let empty = serde_json::to_value(UpdateSessionRequest {
+            session_id: "s1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(empty.get("model").is_none() && empty.get("provider").is_none());
     }
 
-    /// 新网关：追加属性解析；`display_name: null` / 缺 `description` /
-    /// 缺 `capabilities` 全部容忍。
+    // ── /api/models 目录（对象数组 + id 引用词） ──────
+
+    /// 现行网关的形状：对象数组，`id` / `name` / `display_name` / `description` /
+    /// `capabilities`；`display_name: null` / 缺 `description` / 缺 `capabilities` 全部容忍。
     #[test]
-    fn model_details_tolerate_null_and_missing_optional_fields() {
+    fn models_response_decodes_the_object_array_with_ids() {
         let json = r#"{
             "providers": [{
                 "provider": "qoder",
-                "models": ["dfmodel", "dfmodel-2026"],
-                "model_details": [
-                    {"name": "dfmodel", "display_name": null,
+                "models": [
+                    {"id": "dfmodel", "name": "dfmodel", "display_name": null,
                      "description": null, "capabilities": null},
-                    {"name": "dfmodel-2026", "display_name": "DeepSeek-Flash"}
+                    {"id": "ds-flash", "name": "dfmodel-2026", "display_name": "DeepSeek-Flash"},
+                    {"id": "bare", "name": "bare"}
                 ]
             }]
         }"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let group = &resp.providers[0];
-        assert_eq!(group.model_details.len(), 2);
+        assert_eq!(group.models.len(), 3);
 
-        // null display_name → 回落调用名；null capabilities → vision=false。
-        let first = &group.model_details[0];
+        // null display_name / capabilities → 回落调用名 / vision=false。
+        let first = &group.models[0];
+        assert_eq!(first.id, "dfmodel");
+        assert_eq!(first.name, "dfmodel");
         assert_eq!(first.display_name, None);
         assert_eq!(first.description, None);
         assert!(!first.capabilities.vision);
-        assert_eq!(group.label_for("dfmodel"), "dfmodel");
+        assert_eq!(first.display_label(), "dfmodel");
 
-        // 部分覆盖：第二条只有展示名，其余缺省。
-        let second = group.detail_for("dfmodel-2026").unwrap();
+        // id ≠ name：展示名 / 描述如实解析。
+        let second = group.find("ds-flash").expect("id lookup");
+        assert_eq!(second.name, "dfmodel-2026");
         assert_eq!(second.display_name.as_deref(), Some("DeepSeek-Flash"));
-        assert_eq!(second.description, None);
-        assert!(!second.capabilities.vision);
-        assert_eq!(group.label_for("dfmodel-2026"), "DeepSeek-Flash");
+        assert_eq!(second.display_label(), "DeepSeek-Flash");
+        assert_eq!(group.label_for("ds-flash"), "DeepSeek-Flash");
+
+        // 未命中：`find` = None，`label_for` 回落 id 本身。
+        assert!(group.find("nope").is_none());
+        assert_eq!(group.label_for("nope"), "nope");
     }
 
-    /// 空串 display_name 与缺省等价；capabilities.vision 如实解析。
+    /// 空串 / 纯空白 `display_name` 与缺省等价；capabilities.vision 如实解析。
     #[test]
-    fn label_for_falls_back_on_empty_display_name_and_reads_capabilities() {
+    fn display_label_falls_back_on_blank_names_and_reads_capabilities() {
         let json = r#"{
             "providers": [{
                 "provider": "p",
-                "models": ["a", "b"],
-                "model_details": [
-                    {"name": "a", "display_name": "",
+                "models": [
+                    {"id": "a", "name": "a", "display_name": "",
                      "capabilities": {"vision": true}},
-                    {"name": "b", "capabilities": {"vision": false}}
+                    {"id": "b", "name": "b", "display_name": "   "},
+                    {"id": "c", "name": "c", "display_name": " DeepSeek-Flash "}
                 ]
             }]
         }"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let group = &resp.providers[0];
         assert_eq!(group.label_for("a"), "a", "空串展示名回落调用名");
-        assert!(group.detail_for("a").unwrap().capabilities.vision);
-        assert!(!group.detail_for("b").unwrap().capabilities.vision);
-        // provider 级响应也容忍缺省（旧网关的最小响应）。
+        assert_eq!(group.label_for("b"), "b", "纯空白展示名回落调用名");
+        assert!(group.find("a").unwrap().capabilities.vision);
+        assert!(!group.find("b").unwrap().capabilities.vision);
+        // 带内容但两端有空白仍然有效（只做判定，不改写声明的值）。
+        assert_eq!(group.label_for("c"), " DeepSeek-Flash ");
+
+        // provider 级响应也容忍缺省（最小响应）。
         let empty: ModelsResponse = serde_json::from_str(r#"{"providers": []}"#).unwrap();
         assert!(empty.providers.is_empty());
         let no_providers: ModelsResponse = serde_json::from_str("{}").unwrap();
         assert!(no_providers.providers.is_empty());
     }
 
-    /// `model_details: null` 与缺省等价（空表）——整条响应仍可解析，`models` 不受影响。
+    /// `models: null` 与缺省等价（空表）——整条响应仍可解析。
     #[test]
-    fn model_details_null_decodes_as_empty() {
-        let json = r#"{
-            "providers": [{
-                "provider": "qoder",
-                "models": ["dfmodel"],
-                "model_details": null
-            }]
-        }"#;
+    fn models_null_decodes_as_empty() {
+        let json = r#"{"providers": [{"provider": "qoder", "models": null}]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
-        let group = &resp.providers[0];
-        assert!(group.model_details.is_empty());
-        assert_eq!(group.models, vec!["dfmodel"]);
-        assert_eq!(group.label_for("dfmodel"), "dfmodel", "回落调用名");
-    }
-
-    /// 纯空白 `display_name` 与缺省等价（渲染成空白行会让模型名消失）。
-    #[test]
-    fn label_for_ignores_whitespace_only_display_name() {
-        let json = r#"{
-            "providers": [{
-                "provider": "p",
-                "models": ["a", "b"],
-                "model_details": [
-                    {"name": "a", "display_name": "   "},
-                    {"name": "b", "display_name": "\t\n "}
-                ]
-            }]
-        }"#;
-        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
-        let group = &resp.providers[0];
-        assert_eq!(group.label_for("a"), "a");
-        assert_eq!(group.label_for("b"), "b");
-        // 带内容但两端有空白仍然有效（只做判定，不改写声明的值）。
-        let resp: ModelsResponse = serde_json::from_str(
-            r#"{"providers":[{"provider":"p","models":["c"],
-                 "model_details":[{"name":"c","display_name":" DeepSeek-Flash "}]}]}"#,
-        )
-        .unwrap();
-        assert_eq!(resp.providers[0].label_for("c"), " DeepSeek-Flash ");
+        assert!(resp.providers[0].models.is_empty());
+        assert_eq!(resp.providers[0].label_for("dfmodel"), "dfmodel");
     }
 }

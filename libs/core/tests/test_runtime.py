@@ -344,13 +344,16 @@ class TestSessionSerialization:
         assert isinstance(info.rules, list)
         # provider_name 与 model_name 同源同刻：当前活跃 provider 的名称。
         assert info.provider_name == session.agent.model_provider.name == "default"
+        # model_id 是引用词（模板默认模型 = "gpt-4"，id 缺省为 name）。
+        assert info.model_id == session.model_id == "gpt-4"
 
     def test_agent_info_provider_name_defaults_to_none(self):
-        """provider_name 可选：缺省为 None，序列化/反序列化不报错（旧数据兼容）。"""
+        """provider_name / model_id 可选：缺省为 None，序列化/反序列化不报错（旧数据兼容）。"""
         from wing.event import AgentInfo
 
         info = AgentInfo(model_name="gpt-4")
         assert info.provider_name is None
+        assert info.model_id is None
         assert info.model_dump()["provider_name"] is None
         assert AgentInfo.model_validate(info.model_dump()).provider_name is None
         # 显式携带时 round-trip 保持不变。
@@ -358,6 +361,12 @@ class TestSessionSerialization:
         assert (
             AgentInfo.model_validate(with_provider.model_dump()).provider_name == "alt"
         )
+        with_id = AgentInfo(
+            model_name="gpt-4", model_id="shared-id", provider_name="alt"
+        )
+        round_tripped = AgentInfo.model_validate(with_id.model_dump())
+        assert round_tripped.model_id == "shared-id"
+        assert round_tripped.provider_name == "alt"
 
     @pytest.mark.asyncio
     async def test_serialize_messages_empty(self, runtime: Any):

@@ -102,9 +102,6 @@ class TestBasicMessageManagement:
             ):
                 yield  # pragma: no cover
 
-            async def list_models(self):
-                return []
-
         prov = _StubProvider()
         llm_msgs = (
             await cm.get_messages_for_llm(

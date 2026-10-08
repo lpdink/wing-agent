@@ -55,7 +55,7 @@ describe('model panel (host-owned)', () => {
     expect(within(container).queryByTestId('model-panel')).toBeNull();
   });
 
-  it('groups rows by provider and marks the current model', () => {
+  it('groups rows by provider and marks the current model (display name, identity by id)', () => {
     const { container } = mountWebview([makeModelPickerSession()]);
     const panel = within(container).getByTestId('model-panel');
 
@@ -66,19 +66,21 @@ describe('model panel (host-owned)', () => {
       .getAllByTestId('model-panel-group')
       .map((node) => node.textContent);
     expect(groups).toEqual(['anthropic', 'openai']);
-    expect(within(panel).getByText('claude-sonnet-4').closest('[data-testid="model-row"]')).toHaveAttribute(
+    // The label is the declared display name; the id never renders.
+    expect(within(panel).getByText('Claude Sonnet 4').closest('[data-testid="model-row"]')).toHaveAttribute(
       'data-current',
       'true',
     );
+    expect(within(panel).queryByText('claude-sonnet-4')).toBeNull();
   });
 
-  it('applies a model on click', () => {
+  it('applies a model on click — the id travels, not the label', () => {
     const mounted = mountWebview([makeModelPickerSession()]);
 
     fireEvent.click(rowByText(mounted.container, 'gpt-5'));
 
     expect(mounted.bridge.sentOfType('setModel')).toEqual([
-      { type: 'setModel', sessionId: 'session-a', provider: 'openai', model: 'gpt-5' },
+      { type: 'setModel', sessionId: 'session-a', modelId: 'gpt-5' },
     ]);
   });
 
@@ -131,12 +133,12 @@ describe('model panel (host-owned)', () => {
     // Row order: group(anthropic) · sonnet(current, highlighted) · opus · group(openai) · gpt-5 · …
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(mounted.bridge.sentOfType('setModel')[0]).toMatchObject({ model: 'claude-opus-4' });
+    expect(mounted.bridge.sentOfType('setModel')[0]).toMatchObject({ modelId: 'claude-opus-4' });
 
     // From opus, one more step must jump over the `openai` group header onto gpt-5.
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(mounted.bridge.sentOfType('setModel')[1]).toMatchObject({ model: 'gpt-5' });
+    expect(mounted.bridge.sentOfType('setModel')[1]).toMatchObject({ modelId: 'gpt-5' });
   });
 
   it('asks the host to close on Escape (the host owns the overlay)', () => {

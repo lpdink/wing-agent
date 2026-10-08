@@ -1,12 +1,13 @@
-"""模型声明协议测试——``models: str | ModelSpec``、能力解析、两 provider list_models。
+"""模型声明协议测试——``models: str | ModelSpec`` 与能力 / 展示名解析。
 
 锁定行为：
 
 - 存量字符串形态零修改可用；对象形态携带 display_name / description / capabilities；
 - 未声明能力 = 全 false（安全默认，不做名字启发式）；
 - 同一 provider 内实际调用名不得重复（对象/字符串混排也查）；
-- ``image_max_bytes`` 与 ``images.*`` 非法值在解析期报错；
-- ``list_models`` 对两种形态返回排序后的实际调用名（静态声明短路，无网络）。
+- ``image_max_bytes`` 与 ``images.*`` 非法值在解析期报错。
+
+id 空间（``ModelSpec.id`` / 全局唯一 / 解析入口）的测试见 ``test_model_catalog.py``。
 """
 
 from __future__ import annotations
@@ -24,8 +25,6 @@ from wing.config import (
     resolve_model_capabilities,
     resolve_model_display_name,
 )
-from wing.provider.anthropic.provider import AnthropicProvider
-from wing.provider.openai.provider import OpenAICompatProvider
 
 
 def _provider(**kwargs) -> ProviderConfig:
@@ -36,9 +35,10 @@ def _provider(**kwargs) -> ProviderConfig:
 
 
 def _config(provider: ProviderConfig) -> Config:
+    """以 provider 声明的首个模型 id 作为 agent 引用的模型（新世界的耦合点）。"""
     return Config(
         providers=[provider],
-        agents=[AgentConfig(name="default", model="m", provider=provider.name)],
+        agents=[AgentConfig(name="default", model=provider.model_names()[0])],
     )
 
 
@@ -185,7 +185,7 @@ class TestImagesConfig:
     """``Config.images`` 缺省值与校验。"""
 
     def test_defaults(self):
-        provider = _provider()
+        provider = _provider(models=["m"])
         assert _config(provider).images == ImagesConfig(
             max_bytes=4_718_592,
             max_images=32,
@@ -201,8 +201,8 @@ class TestImagesConfig:
         此处用显式对象（ty 门禁不接受裸 dict 传给 pydantic 字段）。
         """
         config = Config(
-            providers=[_provider()],
-            agents=[AgentConfig(name="default", model="m", provider="p")],
+            providers=[_provider(models=["m"])],
+            agents=[AgentConfig(name="default", model="m")],
             images=ImagesConfig(max_bytes=1024, max_images=2),
         )
         assert config.images.max_bytes == 1024
@@ -223,29 +223,3 @@ class TestImagesConfig:
     def test_non_positive_values_rejected(self, field, value):
         with pytest.raises(ValidationError):
             ImagesConfig(**{field: value})
-
-
-class TestProviderListModelsStaticDeclarations:
-    """静态声明短路：两种形态都返回排序后的实际调用名（无网络请求）。"""
-
-    @pytest.mark.asyncio
-    async def test_openai_provider_mixed_forms(self):
-        provider = OpenAICompatProvider(
-            config=_provider(models=["b-string", {"name": "a-object"}])
-        )
-        try:
-            assert await provider.list_models() == ["a-object", "b-string"]
-        finally:
-            await provider.aclose()
-
-    @pytest.mark.asyncio
-    async def test_anthropic_provider_mixed_forms(self):
-        provider = AnthropicProvider(
-            config=_provider(
-                protocol="anthropic", models=[{"name": "b-object"}, "a-string"]
-            )
-        )
-        try:
-            assert await provider.list_models() == ["a-string", "b-object"]
-        finally:
-            await provider.aclose()

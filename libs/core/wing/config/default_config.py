@@ -26,6 +26,25 @@ providers:
     base_url: ChangeHere      # e.g. https://api.openai.com/v1
     api_key: ChangeHere       # e.g. sk-xxx
 
+    # Model catalog — REQUIRED: at least one model per provider. This is the
+    # ONLY source of the catalog (there is no remote /models discovery).
+    # A model **id** is the globally unique handle referenced by
+    # agents[].model, session updates and the HTTP API; `name` is the call
+    # name actually sent to the provider API. Three declaration forms:
+    #   - dfmodel                    # bare string: id = name (legacy form)
+    #   - name: dfmodel-2026         # object: id = name
+    #     display_name: DeepSeek-Flash
+    #   - id: ds-flash               # explicit id (unique across providers)
+    #     name: dfmodel-2026         # call name sent to the provider API
+    #     display_name: DeepSeek-Flash
+    #     description: deepseek official release
+    #     capabilities:
+    #       vision: true             # accepts image input; default false
+    # A model without a capabilities declaration is text-only (ReadImage
+    # refuses to attach images for it).
+    models:
+      - ChangeHere
+
     # Streaming first-chunk timeout (seconds).
     timeout_first_chunk: 300.0
 
@@ -69,18 +88,12 @@ providers:
   #   api_key: sk-ant-xxx
   #   anthropic_version: "2023-06-01"
   #   max_tokens: 8192            # REQUIRED for Anthropic (max output tokens)
-  #   # Static model list — skips remote GET /models when set.
+  #   # Model catalog — REQUIRED, same three forms as the provider above.
   #   models:
   #     - claude-sonnet-4-20250514
-  #     # Entries may also be objects carrying display metadata and
-  #     # capability declarations (the actual call name is `name`):
-  #     #   - name: dfmodel-2026           # actual call name (sent to the API)
-  #     #     display_name: DeepSeek-Flash # human-readable label
-  #     #     description: deepseek official release
-  #     #     capabilities:
-  #     #       vision: true             # accepts image input; default false
-  #     # A model without a capabilities declaration is treated as
-  #     # text-only (ReadImage refuses to attach images for it).
+  #     # - id: sonnet
+  #     #   name: claude-sonnet-4-20250514
+  #     #   display_name: Claude Sonnet 4
   #   # Image delivery form: inline | followup.
   #   # Default is protocol-specific (openai → followup, anthropic → inline).
   #   # image_delivery: inline
@@ -98,8 +111,9 @@ providers:
 # tool set, and optional system prompt.
 agents:
   - name: default
-    model: ChangeHere      # e.g. gpt-4, qwen-max, etc.
-    # provider: default    # references providers[].name (defaults to first)
+    # Model id — MUST reference one of the ids declared in
+    # providers[].models above (e.g. dfmodel or ds-flash).
+    model: ChangeHere
 
     # Mark as default agent (used when no agent is explicitly selected).
     default: true

@@ -218,6 +218,7 @@ fn test_model_opens_panel_instantly_from_cache_and_preselects() {
     app.model_sources = vec![model_group("p", &["m1", "m2"])];
     app.status.provider = Some("p".into());
     app.status.model = "m2".into();
+    app.status.model_id = Some("m2".into());
     assert!(app.try_frontend_command("/model"));
     let panel = app.model_panel.as_ref().expect("panel opens from cache");
     assert_eq!(panel.current_page(), 0);
@@ -249,13 +250,13 @@ fn test_model_refused_while_working() {
 }
 
 #[test]
-fn test_model_panel_applies_explicit_provider_for_same_name_model() {
-    // Regression: two providers expose the same model name — applying the
-    // second one must carry the SECOND provider explicitly.
+fn test_model_panel_applies_the_id_of_the_selected_page() {
+    // 同名模型跨 provider：id 各自独立，选中的是**当前 tab** 那一行的 id
+    // （旧世界靠随行携带 provider 消歧；现在 id 本身就是消歧结果）。
     let mut app = test_app();
     app.model_sources = vec![
-        model_group("dashscope", &["shared"]),
-        model_group("dashscope-openai", &["shared"]),
+        model_group("dashscope", &["shared-a"]),
+        model_group("dashscope-openai", &["shared-b"]),
     ];
     app.try_frontend_command("/model");
     app.drain_intents();
@@ -270,10 +271,9 @@ fn test_model_panel_applies_explicit_provider_for_same_name_model() {
     assert!(
         intents.iter().any(|i| matches!(
             i,
-            AppIntent::UpdateSession { model: Some(m), provider: Some(p), .. }
-                if m == "shared" && p == "dashscope-openai"
+            AppIntent::UpdateSession { model_id: Some(m), .. } if m == "shared-b"
         )),
-        "explicit provider required, got {intents:?}"
+        "the selected row's id is required, got {intents:?}"
     );
 }
 
@@ -529,11 +529,23 @@ fn test_stale_fetch_results_are_discarded() {
 /// Feed a `FetchPayload::Info` result into the app (the `/api/session/info`
 /// projection path).
 fn feed_info(app: &mut App, model: &str, display_name: Option<&str>) {
-    feed_info_with_tags(app, model, display_name, vec![]);
+    feed_info_full(app, model, None, None, display_name, vec![]);
 }
 
 /// 同 [`feed_info`]，但可以带上会话标签（pin 星标的真值来源）。
 fn feed_info_with_tags(app: &mut App, model: &str, display_name: Option<&str>, tags: Vec<String>) {
+    feed_info_full(app, model, None, None, display_name, tags);
+}
+
+/// 完整的 info 夹具：调用名 + 引用词 + provider 事实 + 展示名 + 标签。
+fn feed_info_full(
+    app: &mut App,
+    model: &str,
+    model_id: Option<&str>,
+    provider_name: Option<&str>,
+    display_name: Option<&str>,
+    tags: Vec<String>,
+) {
     use crate::app::intent::FetchPayload;
     use crate::app::intent::FetchResult;
     use wing_api_client::models::ContextStatsInfo;
@@ -544,6 +556,8 @@ fn feed_info_with_tags(app: &mut App, model: &str, display_name: Option<&str>, t
         session_id,
         payload: FetchPayload::Info(Box::new(SessionInfoResponse {
             model: model.into(),
+            model_id: model_id.map(str::to_string),
+            provider_name: provider_name.map(str::to_string),
             model_display_name: display_name.map(str::to_string),
             api_url: "http://x".into(),
             tools: vec![],
@@ -596,24 +610,60 @@ fn test_info_display_name_prefers_the_gateway_and_falls_back_locally() {
         &[("dfmodel", "DeepSeek-Flash")],
     )];
 
-    // Old gateway (no field): the local snapshot keeps the label on reconnect.
-    feed_info(&mut app, "dfmodel", None);
+    // Old gateway (no label field): the local snapshot keeps the label on
+    // reconnect — resolved by the reference word when one is present.
+    feed_info_full(&mut app, "dfmodel", Some("dfmodel"), None, None, vec![]);
     assert_eq!(
         app.status.model_display_name.as_deref(),
         Some("DeepSeek-Flash")
     );
 
-    // Current gateway: the shipped value wins over the local snapshot.
-    feed_info(&mut app, "dfmodel", Some("Gateway Label"));
+    // Current gateway: the shipped value wins over the local snapshot, and the
+    // provider fact comes straight from the response (no clearing hack).
+    feed_info_full(
+        &mut app,
+        "dfmodel",
+        Some("dfmodel"),
+        Some("qoder"),
+        Some("Gateway Label"),
+        vec![],
+    );
     assert_eq!(
         app.status.model_display_name.as_deref(),
         Some("Gateway Label")
     );
+    assert_eq!(app.status.provider.as_deref(), Some("qoder"));
 
     // Undeclared model: no label is invented, the raw name is the fallback.
     feed_info(&mut app, "mystery", None);
     assert_eq!(app.status.model, "mystery");
     assert_eq!(app.status.model_display_name, None);
+}
+
+#[test]
+fn test_info_carries_model_id_and_provider_without_a_clearing_hack() {
+    // 模型变了 + info 带 provider_name → provider 直接进 status（旧实现在模型变化时
+    // 清空 provider，因为 info 那时不带它；现在权威值随 info 一起到）。
+    let mut app = test_app();
+    app.status.model = "old-model".into();
+    app.status.provider = Some("old-provider".into());
+    app.status.model_id = Some("old-id".into());
+
+    feed_info_full(
+        &mut app,
+        "dfmodel-2026",
+        Some("ds-flash"),
+        Some("qoder"),
+        None,
+        vec![],
+    );
+    assert_eq!(app.status.model, "dfmodel-2026");
+    assert_eq!(app.status.model_id.as_deref(), Some("ds-flash"));
+    assert_eq!(
+        app.status.provider.as_deref(),
+        Some("qoder"),
+        "provider 是权威字段，不是被清空的旧缓存"
+    );
 }
 
 // ── Session list: backend base order + the pin overlay ──

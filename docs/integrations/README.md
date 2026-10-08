@@ -88,7 +88,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 | wing 的 prompt 命令（`/` 补全） | ✅ | ❌ | `available_commands_update`（wing 命令来自 `commands.paths` 配置） |
 | 权限询问（Bash 危险命令确认） | ✅ | ✅ | `session/request_permission`；客户端原样渲染 wing 的三个选项 |
 | Ask 提问（AskUserQuestion 工具） | ✅ 表单提问（elicitation） | ⚠️ 降级为逐题权限卡片 | omnigent 不支持 elicitation，见 [omnigent.md](omnigent.md) |
-| 模型切换 | ✅ 会话内模型选择器 | ✅ 会话内 `/model` | config option `model`（值形如 `provider:model`），热切换、不丢会话 |
+| 模型切换 | ✅ 会话内模型选择器 | ✅ 会话内 `/model` | config option `model`（值 = **model_id**，即 `providers[].models` 声明的 id），热切换、不丢会话 |
 | 会话导入（历史列表） | ✅ Thread History → Import Threads | ❌ | 需要 `session/list`；omnigent 不调用 |
 | 打开旧会话 | ✅ 优先回放历史（`session/load`），否则 `session/resume` | ❌ | 同上 |
 | 关闭会话 | ✅（关闭线程） | ❌ | omnigent 不调用 `session/close`；会话留在 wing 侧，可 `wing release` 逐出内存 |

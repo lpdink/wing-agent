@@ -97,7 +97,7 @@ class TestUpdateStatePersists:
         session = sm.create_session()
         await session.update_state(thinking=False, reasoning_effort="high")
 
-        await session.update_state(model="qwen-max", provider_name="alt")
+        await session.update_state(model_id="qwen3-max")
 
         assert session.agent.model_provider.name == "alt"
         assert session.agent.thinking is False
@@ -228,9 +228,10 @@ class TestProviderResetKeepsSessionSwitches:
                     base_url="https://a.example.com",
                     api_key="k",
                     max_retries=3,
+                    models=["gpt-4"],
                 )
             ],
-            agents=[AgentConfig(name="default", model="gpt-4", provider="default")],
+            agents=[AgentConfig(name="default", model="gpt-4")],
         )
         monkeypatch.setattr("wing.config.loader._config", rotated)
         monkeypatch.setattr("wing.config.get_config", lambda: rotated)
@@ -485,7 +486,7 @@ class TestLiveSkewAndEmptyRecords:
         await session.update_state(yolo=False)
         session.agent.set_yolo(True)
 
-        await session.update_state(model="qwen-max", provider_name="alt")
+        await session.update_state(model_id="qwen3-max")
 
         assert session.agent.model_provider.name == "alt"
         assert session.agent.yolo is True

@@ -9,10 +9,40 @@
 | **WingRuntime** | 服务层协调者（`runtime.py`）。路由 handler 薄化，逻辑下沉到 Session / ContextManager。 |
 | **Session** | 一个会话：消息链 + 状态 + metadata，经 SessionStore 持久化（`session/session.py`）。 |
 | **SessionManager** | 多会话管理 + fork/resume + store 注册表（`{name: store}`）（`session/manager.py`）。 |
-| **AgentTemplate** | agent 模板：model / tools / system_prompt / skills / rules，来自配置 `agents:`（`session/template.py`）。 |
+| **AgentTemplate** | agent 模板：model（引用 id）/ tools / system_prompt / skills / rules，来自配置 `agents:`；`model` 是 id，经 `Config.find_model()` 查表得到调用名与 provider（`session/template.py`，无「默认第一个 provider」）。 |
 | **WingAgent** | ReAct agent，`wing/agent/` 包（core / react_loop / tool_executor / event_sink / inbox / tool_context）；公开导入路径经 re-export 保持不变（PR #53）。 |
 | **ToolContext** | 工具侧窄接口 Protocol（session_id / yolo / cwd / ask_feedback / emit / interrupt hooks）；工具收 `ctx` 而非整个 agent，取代旧的 `AgentStateBag` 字符串耦合（PR #53）。 |
 | **EventBus** | 全局单例事件路由，Runtime 发事件、Gateway 订阅转发（`event_bus.py`）。 |
+
+## 模型（三名词）
+
+「引用词」只有一个：**model_id**。provider 与调用名都是运行期事实，不再是引用维度——
+一切请求 / 协议 / CLI / metadata 引用 model_id，解析 = **单键查表**（`Config.find_model()`）。
+
+| 名词 | 定义 | 谁用 |
+|------|------|------|
+| **model_id** | 全局唯一**引用词**。配置声明时可选（缺省 = `name`，存量字符串形态零改动）；`providers[].models[].id` 的投影 | 协议、配置引用（`agents[].model`）、metadata、前端选择态 |
+| **name** | 上游**调用名**（发给 provider API 的值） | 运行期、审计 |
+| **display_name** | **展示名**（缺省回落 name；未声明 = null） | 渲染层（状态栏 / 模型面板），不参与匹配 |
+| provider | 运行期**事实**维度 + 展示分组（**不再是引用词**） | `AgentInfo` / `/api/models` 分组 / 状态事件 |
+
+不变量（写进代码注释与测试）：
+
+1. **id 全局唯一**：配置加载期强制（跨 provider）；`agents[].model` 必须是 id（查不中即加载失败，
+   错误含 available ids + 调用名提示）。运行期只有「命中 / 未命中」二值判断——**无候选集合、
+   无优先级、无回落**。
+2. **同 provider 内 name 唯一**（现状保留）：`(provider, name) → 声明项` 反查（`Config.identify()`）
+   无歧义；该反查只用于旧数据迁移 / 补 id，**绝不出现在请求解析路径**。
+3. **解析 = 单键查表**：`id → (provider, name)` 由配置唯一决定；重命名 / 重排 / 顺序不影响结果。
+   任何「基于 id 字符串结构的解析」（`:` 前缀等）永久禁止。
+4. **目录 = 配置静态声明的同步投影**：远端 `GET /models` 发现已退役，`/api/models` 是对外可依赖
+   的合同（每个 id 全局唯一）。
+
+恢复链（resume 时决定跑在哪个模型上）：`metadata.model_id` 命中 → 用**当前映射**
+（`ref.name` / `ref.provider_name`，跟随配置演化）；未命中（id 被删）→ 用记录里的快照
+`(provider_name, model_name)` 继续跑 + warning，`identify` 反查补 id；快照 provider 也不可解析
+→ 回落模板默认 + warning（记录保留，config 修好后仍可还原）；旧记录（无 id）走快照路径 + 反查补 id。
+restore 后内存态与记录不一致才落盘对齐（一次性迁移，非写噪声）。
 
 ## 持久化（PR #39）
 
@@ -21,8 +51,8 @@
 | **SessionStore** | 会话持久化的**唯一**所有者（ABC，`store/base.py`）。backend：`file` / `memory`，建会话时选。 |
 | **MessageLog** | 追加式混合记录 + aux kv（`store/base.py`）。pending compaction 存于 aux。newest.json 快照已移除（重放由混合日志承担）。 |
 | **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`chain.py`）。 |
-| **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、model_name/provider_name、last_interaction…）。 |
-| **模型绑定持久化** | `model_name` + `provider_name` 成对记录会话的当前模型，写入时机是**显式动作**（模型切换、模板切换、创建 override、fork 快照；未动过模型的 session 不写）。resume 时记录优先于模板默认模型；记录的 provider 不可解析则回落模板默认并打 warning，记录保留。进程存活期间前端渲染与后端使用同源于 agent，本机制解决的是重启后的还原。 |
+| **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、model_id/provider_name/model_name、last_interaction…）。 |
+| **模型绑定持久化** | 会话当前模型的**三元组** `(model_id, provider_name, model_name)`：`model_id` 是引用词，`provider_name` / `model_name` 是当时的运行期事实快照（`session/session.py::_persist_model`）。写入时机是**显式动作**（模型切换、模板切换、创建 override、fork 快照；未动过模型的 session 不写）。resume 按上面「恢复链」还原（id 优先 → 快照兜底 → 模板默认）；进程存活期间前端渲染与后端使用同源于 agent，本机制解决的是重启后的还原。 |
 
 ## 事件系统
 

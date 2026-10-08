@@ -142,7 +142,7 @@ function describeWebviewMessage(message: WebviewToHostMessage): string {
     case 'compact':
       return `compact:${message.sessionId}`;
     case 'setModel':
-      return `setModel:${message.provider}/${message.model}`;
+      return `setModel:${message.modelId}`;
     case 'setThinking':
       return `setThinking:${String(message.enabled)}`;
     case 'setEffort':
@@ -213,7 +213,7 @@ const WEBVIEW_MESSAGES: readonly WebviewToHostMessage[] = [
   { type: 'closeSession', sessionId: 's' },
   { type: 'activateSession', sessionId: 's' },
   { type: 'compact', sessionId: 's' },
-  { type: 'setModel', sessionId: 's', provider: 'p', model: 'm' },
+  { type: 'setModel', sessionId: 's', modelId: 'm' },
   { type: 'setThinking', sessionId: 's', enabled: true },
   { type: 'setEffort', sessionId: 's', effort: 'high' },
   { type: 'setYolo', sessionId: 's', enabled: false },
@@ -304,7 +304,7 @@ describe('shared contract', () => {
       'closeSession:s',
       'activateSession:s',
       'compact:s',
-      'setModel:p/m',
+      'setModel:m',
       'setThinking:true',
       'setEffort:high',
       'setYolo:false',

@@ -49,13 +49,16 @@ class TestMetadata:
         assert loaded == meta
 
     def test_model_binding_roundtrip(self, store: SessionStore):
-        """模型绑定成对 round-trip：provider 与 model 一并读回。"""
+        """模型身份三元组 round-trip：id / provider / 调用名一并读回。"""
         store.save_metadata(
             _sid("model"),
-            SessionMetadata(model_name="qwen3-max", provider_name="dashscope"),
+            SessionMetadata(
+                model_id="ds-flash", model_name="qwen3-max", provider_name="dashscope"
+            ),
         )
         loaded = store.load_metadata(_sid("model"))
         assert loaded is not None
+        assert loaded.model_id == "ds-flash"
         assert loaded.model_name == "qwen3-max"
         assert loaded.provider_name == "dashscope"
 

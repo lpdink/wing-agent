@@ -39,6 +39,7 @@ use acp_harness::questions_ask;
 use acp_harness::reasoning;
 use acp_harness::run_client;
 use acp_harness::session_row;
+use acp_harness::session_state_model;
 use acp_harness::session_title;
 use acp_harness::settle;
 use acp_harness::spawn_prompt;
@@ -186,10 +187,13 @@ async fn prompt_streams_in_order_and_reports_end_turn() {
     let workspace = harness.workspace();
     gateway.set_models(models_catalog(&[(
         "fake",
-        &[("echo-1", "Echo One"), ("echo-2", "Echo Two")],
+        &[
+            ("echo-1", "echo-1", "Echo One"),
+            ("echo-2", "echo-2", "Echo Two"),
+        ],
     )]));
     gateway.set_commands(commands_catalog(&[
-        ("model", "Switch the model", "<provider:model>"),
+        ("model", "Switch the model", "<model-id>"),
         ("tips", "Show the tips panel", ""),
     ]));
 
@@ -236,15 +240,15 @@ async fn prompt_streams_in_order_and_reports_end_turn() {
                 sid.as_str()
             );
 
-            // 应答里的模型 configOptions（id=model；值域 `provider:model`）。
+            // 应答里的模型 configOptions（id=model；值 = 纯 model_id，组 = provider）。
             let options = new.config_options.expect("configOptions 已广告");
             let option = serde_json::to_value(&options[0]).expect("option 序列化");
             assert_eq!(option["id"], "model");
             assert_eq!(option["category"], "model");
             assert_eq!(option["type"], "select");
-            assert_eq!(option["currentValue"], "fake:echo-1");
+            assert_eq!(option["currentValue"], "echo-1");
             assert_eq!(option["options"][0]["group"], "fake");
-            assert_eq!(option["options"][0]["options"][0]["value"], "fake:echo-1");
+            assert_eq!(option["options"][0]["options"][0]["value"], "echo-1");
             assert_eq!(option["options"][0]["options"][0]["name"], "Echo One");
 
             // 命令列表在应答**之后**补发（「应答先于通知」这一顺序性质由
@@ -259,7 +263,7 @@ async fn prompt_streams_in_order_and_reports_end_turn() {
             assert_eq!(commands["availableCommands"][0]["name"], "model");
             assert_eq!(
                 commands["availableCommands"][0]["description"],
-                "Switch the model <provider:model>"
+                "Switch the model <model-id>"
             );
 
             // 一轮 prompt：推脚本帧（真实后端的形状），等终态。
@@ -380,7 +384,10 @@ async fn cancel_interrupts_the_gateway_and_reports_cancelled() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
 
     let recorder = Recorder::new();
     let permissions = PermissionScript::new();
@@ -437,7 +444,10 @@ async fn bash_confirmation_maps_to_permission_and_writes_the_token_back() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
 
     let recorder = Recorder::new();
     let permissions = PermissionScript::new();
@@ -544,7 +554,10 @@ async fn questions_ask_maps_to_elicitation_form() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
 
     let recorder = Recorder::new();
     let permissions = PermissionScript::new();
@@ -707,7 +720,10 @@ async fn questions_ask_falls_back_to_per_question_permissions() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
 
     let recorder = Recorder::new();
     let permissions = PermissionScript::new();
@@ -806,8 +822,14 @@ async fn set_config_option_updates_the_session_and_relays_external_changes() {
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
     gateway.set_models(models_catalog(&[
-        ("fake", &[("echo-1", "Echo One"), ("echo-2", "Echo Two")]),
-        ("other", &[("solo-1", "Solo One")]),
+        (
+            "fake",
+            &[
+                ("echo-1", "echo-1", "Echo One"),
+                ("echo-2", "echo-2", "Echo Two"),
+            ],
+        ),
+        ("other", &[("solo-1", "solo-1", "Solo One")]),
     ]));
 
     let recorder = Recorder::new();
@@ -830,10 +852,10 @@ async fn set_config_option_updates_the_session_and_relays_external_changes() {
                 .await?;
             let sid = new.session_id.to_string();
 
-            // 值域是全量的（两个 provider 的分组），currentValue 是当前模型。
+            // 值域是全量的（两个 provider 的分组），currentValue 是本会话的 model_id。
             let options = new.config_options.expect("configOptions 已广告");
             let option = serde_json::to_value(&options[0]).expect("option 序列化");
-            assert_eq!(option["currentValue"], "fake:echo-1");
+            assert_eq!(option["currentValue"], "echo-1");
             let groups = option["options"].as_array().expect("分组值域");
             assert_eq!(groups.len(), 2, "两个 provider 各一组");
             assert_eq!(groups[0]["group"], "fake");
@@ -844,17 +866,20 @@ async fn set_config_option_updates_the_session_and_relays_external_changes() {
                     .iter()
                     .map(|value| value["value"].as_str().unwrap_or_default())
                     .collect::<Vec<_>>(),
-                ["fake:echo-1", "fake:echo-2"]
+                ["echo-1", "echo-2"],
+                "值 = 纯 model_id（无 provider 前缀）"
             );
             assert_eq!(groups[1]["group"], "other");
-            assert_eq!(groups[1]["options"][0]["value"], "other:solo-1");
+            assert_eq!(groups[1]["options"][0]["value"], "solo-1");
 
-            // 切换：`provider:model` 值 id → `POST /api/session/update{model, provider}`。
+            // 切换：值就是 model_id → `POST /api/session/update{model_id}`（一个请求，
+            // 不需要目录补 provider）。
+            let switch_requests_before = gw.count("/api/session/update");
             let switched = connection
                 .send_request(SetSessionConfigOptionRequest::new(
                     new.session_id.clone(),
                     "model",
-                    "fake:echo-2",
+                    "echo-2",
                 ))
                 .block_task()
                 .await?;
@@ -863,19 +888,24 @@ async fn set_config_option_updates_the_session_and_relays_external_changes() {
                 .await;
             assert_eq!(
                 update.body.expect("update 请求体"),
-                json!({"session_id": sid, "model": "echo-2", "provider": "fake"})
+                json!({"session_id": sid, "model_id": "echo-2"})
+            );
+            assert_eq!(
+                gw.count("/api/session/update"),
+                switch_requests_before + 1,
+                "一次切换只发一个 update"
             );
             let option = serde_json::to_value(&switched.config_options[0]).expect("option 序列化");
             assert_eq!(
-                option["currentValue"], "fake:echo-2",
+                option["currentValue"], "echo-2",
                 "响应带回全量 options（网关是权威）"
             );
 
-            // 外部（TUI 等）改模型 → `session_state_changed` → `config_option_update` 中继。
-            gw.set_session_state(&sid, "fake", "echo-3", Some("Echo Three"));
+            // 外部（TUI 等）改模型 → `session_state_changed{model_id}` → `config_option_update` 中继。
+            gw.set_session_state(&sid, Some("echo-3"), "fake", "echo-3", Some("Echo Three"));
             gw.push(wing_event(
                 &sid,
-                json!({"type": "session_state_changed", "model": "echo-3", "model_display_name": "Echo Three"}),
+                session_state_model("echo-3", "echo-3", "fake", Some("Echo Three")),
             ));
             let relay = rec
                 .wait_update("config_option_update 中继", &sid, |update| {
@@ -883,7 +913,22 @@ async fn set_config_option_updates_the_session_and_relays_external_changes() {
                 })
                 .await;
             assert_eq!(relay["configOptions"][0]["id"], "model");
-            assert_eq!(relay["configOptions"][0]["currentValue"], "fake:echo-3");
+            assert_eq!(relay["configOptions"][0]["currentValue"], "echo-3");
+
+            // 未知 model id：网关 400（含 available ids）→ invalid params 带原文。
+            let error = connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    new.session_id.clone(),
+                    "model",
+                    "nope",
+                ))
+                .block_task()
+                .await
+                .expect_err("未知 model id 必须报错");
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            let text = format!("{error:?}");
+            assert!(text.contains("unknown model id 'nope'"), "{text}");
+            assert!(text.contains("echo-1"), "available ids 带上: {text}");
 
             // 未知 config id：invalid params（不静默接受一个不存在的 option）。
             let error = connection
@@ -920,7 +965,10 @@ async fn session_list_maps_filters_and_paginates() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
     gateway.set_sessions(vec![
         session_row(
             "s-old",
@@ -1022,10 +1070,13 @@ async fn session_load_replays_before_the_response_and_resume_skips_it() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
     gateway.set_commands(commands_catalog(&[("model", "Switch the model", "")]));
     gateway.add_resumable("s-old", Some(&workspace));
-    gateway.set_session_state("s-old", "fake", "echo-1", Some("Echo One"));
+    gateway.set_session_state("s-old", Some("echo-1"), "fake", "echo-1", Some("Echo One"));
     gateway.set_session_info("s-old", Some("旧会话"), 321, 262_144);
 
     let a_path = format!("{workspace}/src/a.rs");
@@ -1201,7 +1252,10 @@ async fn session_close_unsubscribes_and_releases_idempotently() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
 
     let recorder = Recorder::new();
     let permissions = PermissionScript::new();
@@ -1429,7 +1483,10 @@ async fn cancel_during_an_ask_discards_the_late_answer() {
     let harness = Harness::start().await;
     let gateway = Arc::clone(&harness.gateway);
     let workspace = harness.workspace();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
 
     let recorder = Recorder::new();
     let permissions = PermissionScript::new();
@@ -1626,10 +1683,13 @@ async fn frame_order_is_pinned_on_the_wire() {
     let gateway = FakeGateway::start();
     let home = TempHome::new(gateway.port());
     let workspace = home.path().to_string_lossy().to_string();
-    gateway.set_models(models_catalog(&[("fake", &[("echo-1", "Echo One")])]));
+    gateway.set_models(models_catalog(&[(
+        "fake",
+        &[("echo-1", "echo-1", "Echo One")],
+    )]));
     gateway.set_commands(commands_catalog(&[("model", "Switch the model", "")]));
     gateway.add_resumable("s-old", Some(&workspace));
-    gateway.set_session_state("s-old", "fake", "echo-1", Some("Echo One"));
+    gateway.set_session_state("s-old", Some("echo-1"), "fake", "echo-1", Some("Echo One"));
     gateway.set_session_info("s-old", Some("旧会话"), 321, 262_144);
     let messages = json!([
         {"role": "user", "content": "看一下这个 bug"},

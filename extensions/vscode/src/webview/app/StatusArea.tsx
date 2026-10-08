@@ -14,6 +14,7 @@
 import type { ReactElement } from 'react';
 
 import type { SessionViewModel } from '../../shared';
+import { modelLabel } from '../../shared';
 import { postToHost, pingHost } from '../bridge/channel';
 import { useAppStore } from '../state/appStore';
 import styles from '../styles/app.module.css';
@@ -47,6 +48,9 @@ function SessionStatus({ session }: { readonly session: SessionViewModel }): Rea
   const usage = contextUsage(context);
   const ttft = ttftMs(session);
   const workspace = baseName(meta.workspace);
+  // Display material only: the declared display name when present, else the call
+  // name. Identity (`meta.modelId`) never appears here.
+  const model = modelLabel(meta.modelDisplayName, meta.model);
 
   return (
     <div className={styles.statusArea} data-testid="status-area">
@@ -64,7 +68,7 @@ function SessionStatus({ session }: { readonly session: SessionViewModel }): Rea
         onClick={() => postToHost({ type: 'openModelPicker', sessionId: session.sessionId })}
       >
         <span data-testid="session-model">
-          {meta.model === '' ? 'No model' : meta.model}
+          {model === '' ? 'No model' : model}
           {meta.provider === '' ? '' : ` · ${meta.provider}`}
         </span>
         <span className={styles.chipChevron} aria-hidden="true" />

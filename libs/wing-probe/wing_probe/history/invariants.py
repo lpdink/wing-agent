@@ -89,10 +89,14 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = DELTA_EVENT_TYPES | frozenset(
 )
 
 #: fork 的 metadata 快照必需字段（spec「fork 断言」：缺一项即失败）。
+#:
+#: ``model_id`` / ``model_name`` / ``provider_name`` 是模型的**身份三元组**
+#: （引用词 + 运行期事实快照）：fork 快照必须一次写全，resume 才不丢身份。
 FORK_METADATA_FIELDS: tuple[str, ...] = (
     "forked_from",
     "workspace",
     "template_name",
+    "model_id",
     "model_name",
     "provider_name",
 )
@@ -110,6 +114,7 @@ FORK_METADATA_FIELDS: tuple[str, ...] = (
 FORK_SNAPSHOT_FIELDS: tuple[str, ...] = (
     "workspace",
     "template_name",
+    "model_id",
     "model_name",
     "provider_name",
     "system_prompt",

@@ -97,16 +97,12 @@ def validate_tool_refs(tools: list[str]) -> None:
 def ignored_override_fields(override: "AgentOverride", *, resume: bool) -> list[str]:
     """本次覆盖里**不会生效**的字段名（纯函数，供 warning 与单测）。
 
-    - ``provider`` 只在**同时给出 model** 时生效（切 provider 需要"切到哪个
-      模型"；单独给 provider 是 no-op）——创建与 resume 两条路径同此口径
-      （``session/update`` 直接 400 拒绝半对，这里只出声不改行为）；
-    - ``resume=True`` 时 ``system_prompt`` / ``append_system_prompt`` /
-      ``max_turns`` / ``yolo`` 一律不生效（它们改请求前缀或会话既有限额，
-      属创建期语义）。
+    ``resume=True`` 时 ``system_prompt`` / ``append_system_prompt`` /
+    ``max_turns`` / ``yolo`` 一律不生效（它们改请求前缀或会话既有限额，
+    属创建期语义）。其余字段（``model_id`` / ``effort`` / ``tools``）两条
+    路径都生效——provider 已不是覆盖字段（运行期事实，随 model_id 映射而来）。
     """
     ignored: list[str] = []
-    if override.provider is not None and override.model is None:
-        ignored.append("provider")
     if resume:
         ignored.extend(
             name
@@ -142,6 +138,10 @@ class Session:
         self._messages = messages
         self._store = store
         self._template_name: str | None = None
+        # 模型身份三元组的引用词（内存态）：id 是唯一引用词，provider/name 是
+        # agent 持有的运行期事实。构造期由 _restore_persisted_model 填充；无
+        # 记录时在下方按 live agent 反查兜底。
+        self._model_id: str | None = None
 
         metadata = store.load_metadata(session_id) or SessionMetadata()
         if workspace is not None:
@@ -162,6 +162,14 @@ class Session:
         # 路径（session id 已是既有的、记录已在磁盘上）。记录存在时优先于
         # 模板默认。
         self._restore_persisted_state()
+
+        # model id 兜底（无记录 / 记录不可用回落模板默认时）：由 live agent 的
+        # (provider, name) 反查补全——新会话因此从第一帧起就有引用词，/info 与
+        # 状态事件不必等下一条显式动作。反查查不中即保持 None（不猜测）。
+        if self._model_id is None:
+            self._model_id = get_config().identify(
+                self._agent.provider_name, self._agent.model
+            )
 
         log.info(f"Session initialized: {session_id}")
 
@@ -278,6 +286,11 @@ class Session:
 
         self._template_name = template.name
         self._metadata.template_name = template.name
+        # 模型引用词：模板自带 id（fork 的 from_agent 传入源会话 id）；缺省按
+        # 新模板的 (provider, name) 反查补全（模板来自配置，正常必命中）。
+        self._model_id = template.model_id or get_config().identify(
+            template.provider_name, template.model
+        )
         # 模板切换以新模板为准——此前记录的显式覆盖（基础提示词 / 工具 /
         # 动态开关 / 限额）随切换作废：清记录即「跟随新模板与配置」的持久化
         # 表达（新 agent 已按新模板构造），避免重启后把旧覆盖又贴回新 agent。
@@ -287,8 +300,8 @@ class Session:
         self._metadata.reasoning_effort = None
         self._metadata.yolo = None
         self._metadata.max_turns = None
-        # 模板切换覆写模型记录（新模板的生效模型）；_persist_model 保存整个
-        # metadata，与上面的清理同一次落盘。
+        # 模板切换覆写模型记录（新模板的生效模型；_model_id 已在上面就位，
+        # _persist_model 写三元组）；保存整个 metadata，与上面的清理同一次落盘。
         self._persist_model()
         log.info(f"Session {self._session_id}: switched to agent '{template.name}'")
 
@@ -313,9 +326,8 @@ class Session:
         - None 字段不覆盖（保留 template 值）
         - system_prompt 替换，append_system_prompt 追加
         - 两者同时存在时，先替换再追加
-        - ``provider`` 只在**同时给出 model** 时生效（切 provider 需要一个要
-          切过去的模型；单独给 provider 是 no-op——与 ``session/update`` 的
-          "model 与 provider 必须成对"同一口径，只是这里出声而非报错）
+        - ``model_id`` 是唯一的模型覆盖入口：单键查表（命中即切换调用名与
+          provider），未命中 raise（C7 文案）——provider 随映射而来，不再单独下发
 
         每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，
         其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
@@ -323,7 +335,8 @@ class Session:
 
         # 工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
         # 文本字段的可编码性同样在应用之前收口（非法 UTF-8 → 落盘就会炸）。
-        不会生效的字段（``provider`` 单独给出）打 warning——**不做静默忽略**。
+        被忽略的字段以 :func:`ignored_override_fields` 为统一判据——创建路径当前
+        没有会被忽略的字段（``provider`` 已不是覆盖字段）。
         """
         cm = self._context_manager
         agent = self._agent
@@ -334,15 +347,15 @@ class Session:
         if ignored:
             log.warning(
                 f"Session {self._session_id}: agent override ignores "
-                f"{', '.join(ignored)} (provider only applies together with model)"
+                f"{', '.join(ignored)} (create-time fields only)"
             )
 
         if override.tools is not None:
             validate_tool_refs(override.tools)
 
-        # model 覆盖走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
-        if override.model is not None:
-            self._apply_model(override.model, override.provider)
+        # model_id 覆盖走 _apply_model：与运行时切换同一条路径，一并落盘模型记录。
+        if override.model_id is not None:
+            self._apply_model(override.model_id)
 
         if override.system_prompt is not None:
             cm.setin_system_prompt = override.system_prompt
@@ -370,7 +383,7 @@ class Session:
 
         log.info(
             f"Session {self._session_id}: applied agent override "
-            f"(model={override.model}, provider={override.provider}, "
+            f"(model_id={override.model_id}, "
             f"tools={override.tools}, "
             f"max_turns={override.max_turns}, effort={override.effort}, "
             f"yolo={override.yolo})"
@@ -379,7 +392,7 @@ class Session:
     def apply_resume_override(self, override: AgentOverride) -> None:
         """应用 **resume 语义** 的 AgentOverride 子集（恢复既有会话时调用）。
 
-        只应用 ``model`` / ``provider`` / ``effort`` / ``tools``——它们改的是
+        只应用 ``model_id`` / ``effort`` / ``tools``——它们改的是
         "下一轮怎么发起请求"，不触碰已落链的对话内容。其余字段**一律不应用**：
 
         - ``system_prompt`` / ``append_system_prompt``：改的是系统提示词，
@@ -387,13 +400,10 @@ class Session:
           前缀身份漂移（KV cache 碎裂）；要换请对新会话用创建覆盖，或走
           `session/update` 的显式动作；
         - ``max_turns``：会话既有限额是运行时状态，不因"续链"被改写；
-        - ``yolo``：同上（创建期决定，resume 不重贴）；
-        - ``provider`` 单独给出（没有 ``model``）同样是 no-op——切 provider 需要
-          一个要切过去的模型（与 ``session/update`` 的成对约定同一口径）。
+        - ``yolo``：同上（创建期决定，resume 不重贴）。
 
         给了被忽略的字段会打 warning（**不做静默忽略**：编排方能在日志里看到
-        `--system-prompt` / 单独的 `--provider` 在 `-r` 下没生效），但仍然继续
-        应用子集。
+        `--system-prompt` 在 `-r` 下没生效），但仍然继续应用子集。
 
         每个被应用的字段同步写入 metadata 并落盘（与创建覆盖同一套语义），
         因此跨重启 / 逐出后水合仍然生效。
@@ -404,8 +414,7 @@ class Session:
                 f"Session {self._session_id}: resume override ignores "
                 f"{', '.join(ignored)} (prompt fields would change the "
                 "conversation prefix; max_turns / yolo are create-time session "
-                "settings; provider only applies together with model — use "
-                "session/update for an explicit change)"
+                "settings)"
             )
 
         # 纯校验在前（工具 ref 不可解析时不得留下"model 已切换"的半截状态）
@@ -413,8 +422,8 @@ class Session:
         if override.tools is not None:
             validate_tool_refs(override.tools)
 
-        if override.model is not None:
-            self._apply_model(override.model, override.provider)
+        if override.model_id is not None:
+            self._apply_model(override.model_id)
 
         if override.tools is not None:
             self._agent.set_tools(override.tools)
@@ -426,7 +435,7 @@ class Session:
 
         log.info(
             f"Session {self._session_id}: applied resume override "
-            f"(model={override.model}, provider={override.provider}, "
+            f"(model_id={override.model_id}, "
             f"tools={override.tools}, effort={override.effort})"
         )
 
@@ -435,6 +444,15 @@ class Session:
     @property
     def agent(self) -> "WingAgent":
         return self._agent
+
+    @property
+    def model_id(self) -> str | None:
+        """当前模型的引用词（∈ 配置声明的 id 空间；不可用时 None）。
+
+        三元组的唯一对外读口：/info、AgentInfo、状态事件、fork 快照都取它。
+        provider_name / model_name（运行期事实）从 ``self.agent`` 读。
+        """
+        return self._model_id
 
     @property
     def template_name(self) -> str | None:
@@ -513,6 +531,7 @@ class Session:
         cm = self._context_manager
         return AgentInfo(
             model_name=self._agent.model,
+            model_id=self._model_id,
             system_prompt=cm.system_prompt.content if cm.system_prompt else None,
             tools=[t.effective_llm_name for t in self._agent.tools],
             skills=list(cm._skills_cache.keys()),
@@ -595,8 +614,7 @@ class Session:
     async def update_state(
         self,
         *,
-        model: str | None = None,
-        provider_name: str | None = None,
+        model_id: str | None = None,
         template: "AgentTemplate | None" = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -608,8 +626,7 @@ class Session:
         """更新 session 状态。按 template → model → tools → title → thinking → effort → yolo → workspace 顺序执行。
 
         Args:
-            model: 切换模型（裸模型名）
-            provider_name: 切换 provider（配合 model 使用）
+            model_id: 切换模型（引用词 = providers[].models 的 id；未命中 raise）
             template: 切换 agent 模板（None 表示不切换）
             title: 设置标题
             thinking: 开关 thinking 模式
@@ -621,23 +638,28 @@ class Session:
         # 纯校验：任何字段非法在 mutation 之前退出，避免部分应用
         if tools is not None:
             validate_tool_refs(tools)
-        # 文本字段的可编码性：model / provider / effort 先写内存态、再落 metadata 与
+        # 文本字段的可编码性：model_id / effort 先写内存态、再落 metadata 与
         # LLM 请求体——非 UTF-8（孤立代理字符）会让 `_persist_model` 在
         # `encode("utf-8")` 处抛错，而这时**内存态已经被污染**（此后 `/info` 序列化
         # 就炸、该会话所有写操作全失败）。与 set_title / set_workspace 同形：拦在
         # mutation 之前，不可编码的输入等价于"没发生过"。
-        if model is not None:
-            require_utf8(model, field="model")
-        if provider_name is not None:
-            require_utf8(provider_name, field="provider")
+        if model_id is not None:
+            require_utf8(model_id, field="model_id")
         if reasoning_effort is not None:
             require_utf8(reasoning_effort, field="reasoning_effort")
+        # id 查表同样前置（`_apply_model` 内仍会查一次，二次查表无副作用）：
+        # mutation 是**有序**的（template → model → …），未命中的 model_id 必须与
+        # 其它非法字段同价——否则 `{agent: X, model_id: <未知>}` 会先切模板、落盘
+        # 三元组，再在 `_apply_model` 处 raise：错误响应 + 已生效的变更同时出现，
+        # 请求级留下半截状态（"任何字段非法在 mutation 之前退出"因此破功）。
+        if model_id is not None:
+            get_config().require_model(model_id)
 
         if template is not None:
             await self.switch_template(template)
 
-        if model is not None:
-            self._apply_model(model, provider_name)
+        if model_id is not None:
+            self._apply_model(model_id)
 
         if tools is not None:
             self.agent.set_tools(tools)
@@ -704,28 +726,33 @@ class Session:
             return
         self._record_state(append_system_prompt=value)
 
-    def _apply_model(self, model: str, provider_name: str | None = None) -> None:
-        """切换模型，必要时切换 provider name——委托 agent 的单一持有能力。
+    def _apply_model(self, model_id: str) -> None:
+        """按引用词切换模型（含 provider 随映射而来的切换）。
 
-        Session 与 agent 都不持有 provider 实例：实例归共享池，agent 只记
-        name（切回同名解析到同一实例，无创建 / 关闭动作）。
+        单键查表：命中即 `agent.set_model(ref.name, ref.provider_name)` 并记下
+        `_model_id`；**未命中 raise**（C7 文案，`Config.require_model`）——先查
+        后改，状态零变化。Session 与 agent 都不持有 provider 实例：实例归共享池，
+        agent 只记 name（切回同名解析到同一实例，无创建 / 关闭动作）。
 
-        切换成功后把生效的 (provider, model) 记入 metadata 并落盘——这是
-        显式模型动作的落盘点，也是模型选择跨进程重启的唯一恢复来源。
+        切换成功后把生效的 (model_id, provider, name) 三元组记入 metadata 并
+        落盘——这是显式模型动作的落盘点，也是模型选择跨进程重启的唯一恢复来源。
 
         会话级开关（thinking / reasoning_effort）住 agent、与 provider 实例
         无关，跨 provider 切换天然保留（不存在实例更替导致的状态归零）；
         agent 级状态（yolo / max_turns）同样不随切换变化。
         """
-        self.agent.set_model(model, provider_name)
+        ref = get_config().require_model(model_id)
+        self.agent.set_model(ref.name, ref.provider_name)
+        self._model_id = ref.id
         self._persist_model()
 
     def _persist_model(self) -> None:
-        """把 agent 当前生效的 (provider, model) 成对记入 metadata 并落盘。
+        """把模型身份三元组 (model_id, provider_name, model_name) 记入 metadata 并落盘。
 
-        成对语义：不落盘半写记录（读取侧把单字段视为无记录）。
-        保存的是整个 metadata，因此调用方（如 switch_template）设置的
-        其他字段（template_name 等）随同一次写入落盘。
+        三元组一次写全（不落半写记录：读取侧把 id 缺失但有快照的记录视为旧记录，
+        恢复时经 `Config.identify` 反查补 id）。model_id 是引用词，provider_name /
+        model_name 是此刻的运行期事实快照。保存的是整个 metadata，因此调用方
+        （如 switch_template）设置的其他字段（template_name 等）随同一次写入落盘。
 
         落盘是 best-effort：写失败（disk full / 只读挂载 / 权限）只打 warning，
         不让 OSError 穿出去——切换已经生效，把请求变成 500 只会制造一次新的
@@ -733,6 +760,7 @@ class Session:
         正确、重启后回模板默认。不可编码为 UTF-8 的模型名（配置里的非法转义 /
         远端工具宿主注册的名字）同样是"写不进去"，一并按 best-effort 处理。
         """
+        self._metadata.model_id = self._model_id
         self._metadata.model_name = self.agent.model
         self._metadata.provider_name = self.agent.provider_name
         try:
@@ -828,43 +856,100 @@ class Session:
             self._agent.set_max_turns(m.max_turns)
 
     def _restore_persisted_model(self) -> None:
-        """从 metadata 还原模型绑定（重启后 resume 的核心动作）。
+        """从 metadata 还原模型身份三元组（重启后 resume 的核心动作）。
 
-        - 记录存在（两字段齐全）时优先于模板默认模型，直接 set 到 agent；
-          还原动作本身不落盘——记录已在磁盘上，不产生写噪声。
-        - provider 已不可解析（config 变更/构建失败）时降级：打 warning、
-          保持模板默认模型、记录原样保留（config 修复后下次 resume 仍可还原）。
-        - 记录不完整（单字段）视为无记录。
-        - model 不在 provider 的静态模型列表内时只打 warning，仍然还原
-          （记录是用户选择，不因配置列表变动而作废）。
+        恢复链（优先级固定，**无候选集合 / 无优先级回落 / 不猜测**）：
+
+        1. ``model_id`` 命中 id 空间 → **用当前映射**（``ref.name`` /
+           ``ref.provider_name``，跟随配置演化；id 不变而 name/provider 变了
+           是配置作者的正常操作），``_model_id = ref.id``；
+        2. ``model_id`` 未命中（id 被删）→ 用记录里的**快照** ``(provider_name,
+           model_name)`` 继续跑 + warning；``_model_id = identify(provider, name)``
+           （反查补全，可能 None——name 也不在声明里时不编 id）；
+        3. 快照 provider 不可解析（config 变更 / 构建失败）→ 回落模板默认 +
+           warning，**记录原样保留**（config 修复后下次 resume 仍可还原）；
+        4. 旧记录（无 ``model_id``）→ 同 2 的快照路径 + ``identify`` 反查补 id；
+        5. 记录不完整（只有 id 或只有半边快照）：id 能命中走 1，否则视为无记录。
+
+        ``identify`` 是**单键反查**（同 provider 内调用名唯一 ⇒ 至多一个命中），
+        只回答「这个 (provider, name) 对应哪个 id」，不参与「该跑哪个模型」的决策。
+
+        对齐落盘（一次性迁移，不是写噪声）：只有当内存三元组与记录**不一致、
+        且拿到了新事实**（id 命中后的快照跟随 / 旧记录补 id）才写回 metadata。
+        id 未命中且反查也未命中时**不写**——旧 id 与快照是唯一恢复线索，擦掉
+        等于销毁信息（与第 3 级的"记录保留"同一口径）。
         """
-        model = self._metadata.model_name
-        provider_name = self._metadata.provider_name
-        if model is None or provider_name is None:
-            return
-        try:
-            provider_cfg = get_config().get_provider(provider_name)
-        except Exception as e:
-            log.warning(
-                f"Session {self._session_id}: cannot restore model '{model}' "
-                f"on provider '{provider_name}' ({e}); "
-                "falling back to template default (record kept)"
+        m = self._metadata
+        config = get_config()
+
+        restored = False
+        if m.model_id is not None:
+            ref = config.find_model(m.model_id)
+            if ref is not None:
+                # ① id 命中：用当前映射（name / provider 跟随配置演化）。
+                self.agent.set_model(ref.name, ref.provider_name)
+                self._model_id = ref.id
+                restored = True
+                log.info(
+                    f"Session {self._session_id}: restored model id "
+                    f"'{ref.id}' → '{ref.name}' (provider '{ref.provider_name}')"
+                )
+
+        if not restored and m.model_name is not None and m.provider_name is not None:
+            try:
+                config.get_provider(m.provider_name)
+            except ValueError as e:
+                # ③ 快照 provider 不可解析：回落模板默认，记录保留。
+                log.warning(
+                    f"Session {self._session_id}: cannot restore model "
+                    f"'{m.model_name}' on provider '{m.provider_name}' ({e}); "
+                    "falling back to template default (record kept)"
+                )
+                return
+            # ②/④ 快照兜底（id 被删 / 旧记录无 model_id）：记录是用户选择，
+            # 不因配置列表变动而作废——仍然还原，只做反查补 id。
+            self.agent.set_model(m.model_name, m.provider_name)
+            self._model_id = config.identify(m.provider_name, m.model_name)
+            restored = True
+            if m.model_id is not None:
+                log.warning(
+                    f"Session {self._session_id}: recorded model id "
+                    f"'{m.model_id}' is not in config; restoring recorded "
+                    f"snapshot '{m.model_name}' (provider '{m.provider_name}')"
+                )
+            if self._model_id is None:
+                log.warning(
+                    f"Session {self._session_id}: recorded model "
+                    f"'{m.model_name}' is not declared by provider "
+                    f"'{m.provider_name}' (no model id backfilled); "
+                    "restoring anyway"
+                )
+            log.info(
+                f"Session {self._session_id}: restored model '{m.model_name}' "
+                f"(provider '{m.provider_name}')"
+                + (
+                    f"; backfilled model id '{self._model_id}'"
+                    if self._model_id is not None
+                    else "; no id backfilled"
+                )
             )
+
+        if not restored:
             return
-        # 静态模型列表非空时能对记录做一致性提示（不阻断）：记录到已下架
-        # 模型时，用户看到的失败来自上游 model not found，看不出与 session
-        # 记录有关——这条 warning 是唯一线索。列表为空 = 远端 /models 动态
-        # 来源，跳过（避免在构造期发网络请求）。
-        if provider_cfg.models and model not in provider_cfg.model_names():
-            log.warning(
-                f"Session {self._session_id}: recorded model '{model}' is not "
-                f"in provider '{provider_name}' static model list; restoring anyway"
+
+        # 对齐落盘（一次性迁移）：内存三元组 ≠ 记录才写，且只在拿到新事实
+        # （id 或快照跟随映射）时写——见 docstring。
+        if self._model_id is not None and (
+            self._model_id,
+            self.agent.provider_name,
+            self.agent.model,
+        ) != (m.model_id, m.provider_name, m.model_name):
+            log.info(
+                f"Session {self._session_id}: aligning persisted model record to "
+                f"(id='{self._model_id}', provider='{self.agent.provider_name}', "
+                f"name='{self.agent.model}')"
             )
-        self.agent.set_model(model, provider_name)
-        log.info(
-            f"Session {self._session_id}: restored model "
-            f"'{model}' (provider '{provider_name}')"
-        )
+            self._persist_model()
 
     def touch_last_interaction(self) -> None:
         """更新最后互动时间并持久化。"""

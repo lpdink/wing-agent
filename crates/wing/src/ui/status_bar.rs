@@ -35,15 +35,35 @@ fn fmt_tokens(n: i64) -> String {
     }
 }
 
+/// 模型身份四元组——一个会话表面上「当前模型」的完整陈述。
+///
+/// 四个字段是**同一个时钟的同一份状态**（info / 事件 / 快照 / 乐观更新都给全），
+/// 因此以一组整体消费：model 值变化时它们一起换，不存在「新模型配旧 provider」的
+/// 中间态。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelUpdate {
+    /// 引用词（∈ 配置声明的 id 空间）；不可用时 None（旧会话 / 反查不中）。
+    /// 前端的选择态 / 匹配以它为准——但绝不发明它。
+    pub id: Option<String>,
+    /// 实际调用名（发给上游的值；展示回落素材）。
+    pub name: String,
+    /// 活跃 provider 名（运行期事实；降级路径可能缺席）。
+    pub provider: Option<String>,
+    /// 配置声明的展示名（未声明 / 空串 = None，展示回落 `name`）。
+    pub display_name: Option<String>,
+}
+
 /// Application state for the status bar.
 #[derive(Debug, Clone)]
 pub struct StatusData {
-    /// Active model's call name (identity — never rendered as-is while a
-    /// display label is known).
+    /// Active model's call name (display fallback — never the identity).
     pub model: String,
+    /// Active model's reference word (`model_id`); None when the gateway could
+    /// not resolve one (old session metadata / identify miss). Display-only
+    /// consumers ignore it; the picker shows no mark without it.
+    pub model_id: Option<String>,
     /// Display label declared for `model` by the gateway config; `None` when
-    /// undeclared / on old gateways. Display-only — identity stays `model` +
-    /// `provider`.
+    /// undeclared / on old gateways. Display-only — identity is `model_id`.
     pub model_display_name: Option<String>,
     /// Active model provider name (None until known / on old gateways).
     pub provider: Option<String>,
@@ -73,6 +93,7 @@ impl Default for StatusData {
     fn default() -> Self {
         Self {
             model: "unknown".into(),
+            model_id: None,
             model_display_name: None,
             provider: None,
             total_tokens: 0,
@@ -97,7 +118,7 @@ impl StatusData {
     /// (non-blank), otherwise the call name.
     ///
     /// The gateway normalizes "no declaration" to `None`; the blank check is
-    /// the same defense the `/model` picker applies (`label_for`), so a
+    /// the same defense the `/model` picker applies (`display_label`), so a
     /// whitespace-only label can never blank out the status bar.
     pub fn model_label(&self) -> &str {
         self.model_display_name
@@ -106,20 +127,31 @@ impl StatusData {
             .unwrap_or(&self.model)
     }
 
+    /// Replace the whole model identity group (the four fields travel together).
+    pub fn set_model(&mut self, model: ModelUpdate) {
+        self.model = model.name;
+        self.model_id = model.id;
+        self.provider = model.provider;
+        self.model_display_name = model.display_name;
+    }
+
     /// Apply optional session-state fields from a server event or optimistic update.
     ///
-    /// Parameter order mirrors `AppIntent::UpdateSession` field declaration
-    /// (`model, agent, title, thinking, reasoning_effort, yolo`) so that
-    /// callers destructuring the variant can pass fields through positionally.
-    /// `model_display_name` rides with `model`: it is only consumed when a new
-    /// model value is present, and `None` there means "no declared label"
-    /// (display falls back to the call name) — never "keep the old label",
-    /// which would describe a model that is no longer active.
+    /// The model identity group (`model` / `model_id` / `provider` /
+    /// `model_display_name`) is consumed — and dropped — together: they
+    /// describe the same instant of the same model, so a `None` model means
+    /// "the model is unchanged" while a present one replaces all four (a stale
+    /// label must never describe the new model). A model without an id keeps
+    /// `model_id = None` (old gateway / identify miss) — the frontend tolerates
+    /// it but never invents one.
+    ///
+    /// Parameter order mirrors the remaining session-state fields of
+    /// `AppIntent::UpdateSession` so that callers destructuring the variant can
+    /// pass fields through positionally.
     #[allow(clippy::too_many_arguments)] // flat mirror of the session-state fields
     pub fn apply_session_update(
         &mut self,
-        model: Option<String>,
-        model_display_name: Option<String>,
+        model: Option<ModelUpdate>,
         agent: Option<String>,
         title: Option<String>,
         thinking: Option<bool>,
@@ -127,8 +159,7 @@ impl StatusData {
         yolo: Option<bool>,
     ) {
         if let Some(m) = model {
-            self.model = m;
-            self.model_display_name = model_display_name;
+            self.set_model(m);
         }
         if let Some(a) = agent {
             self.agent = Some(a);
@@ -728,12 +759,32 @@ mod tests {
         assert!(text.join("").contains("Wing · unknown"), "{text:?}");
     }
 
+    /// The model identity group (id / call name / provider / label) is applied
+    /// as one unit.
+    fn model_update(
+        id: Option<&str>,
+        name: &str,
+        provider: Option<&str>,
+        label: Option<&str>,
+    ) -> ModelUpdate {
+        ModelUpdate {
+            id: id.map(str::to_string),
+            name: name.to_string(),
+            provider: provider.map(str::to_string),
+            display_name: label.map(str::to_string),
+        }
+    }
+
     #[test]
     fn test_apply_session_update_keeps_display_name_with_its_model() {
         let mut data = StatusData::default();
         data.apply_session_update(
-            Some("dfmodel".into()),
-            Some("DeepSeek-Flash".into()),
+            Some(model_update(
+                Some("ds-flash"),
+                "dfmodel",
+                Some("qoder"),
+                Some("DeepSeek-Flash"),
+            )),
             None,
             None,
             None,
@@ -741,6 +792,8 @@ mod tests {
             None,
         );
         assert_eq!(data.model, "dfmodel");
+        assert_eq!(data.model_id.as_deref(), Some("ds-flash"));
+        assert_eq!(data.provider.as_deref(), Some("qoder"));
         assert_eq!(data.model_display_name.as_deref(), Some("DeepSeek-Flash"));
         assert_eq!(data.model_label(), "DeepSeek-Flash");
     }
@@ -749,8 +802,12 @@ mod tests {
     fn test_apply_session_update_clears_stale_label_on_model_change() {
         let mut data = StatusData::default();
         data.apply_session_update(
-            Some("dfmodel".into()),
-            Some("DeepSeek-Flash".into()),
+            Some(model_update(
+                Some("ds-flash"),
+                "dfmodel",
+                Some("qoder"),
+                Some("DeepSeek-Flash"),
+            )),
             None,
             None,
             None,
@@ -758,9 +815,18 @@ mod tests {
             None,
         );
         // Model changes without a declared label: the old label must not
-        // survive and describe the new model.
-        data.apply_session_update(Some("plain".into()), None, None, None, None, None, None);
+        // survive and describe the new model (nor its provider / id).
+        data.apply_session_update(
+            Some(model_update(None, "plain", None, None)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(data.model, "plain");
+        assert_eq!(data.model_id, None);
+        assert_eq!(data.provider, None);
         assert_eq!(data.model_display_name, None);
         assert_eq!(data.model_label(), "plain");
     }
@@ -769,17 +835,22 @@ mod tests {
     fn test_apply_session_update_without_model_keeps_label() {
         let mut data = StatusData::default();
         data.apply_session_update(
-            Some("dfmodel".into()),
-            Some("DeepSeek-Flash".into()),
+            Some(model_update(
+                Some("ds-flash"),
+                "dfmodel",
+                Some("qoder"),
+                Some("DeepSeek-Flash"),
+            )),
             None,
             None,
             None,
             None,
             None,
         );
-        // thinking-only update: model untouched → label untouched.
-        data.apply_session_update(None, None, None, None, Some(true), None, None);
+        // thinking-only update: model untouched → identity untouched.
+        data.apply_session_update(None, None, None, Some(true), None, None);
         assert_eq!(data.model, "dfmodel");
+        assert_eq!(data.model_id.as_deref(), Some("ds-flash"));
         assert_eq!(data.model_display_name.as_deref(), Some("DeepSeek-Flash"));
     }
 }

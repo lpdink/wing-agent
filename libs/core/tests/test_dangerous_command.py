@@ -11,7 +11,10 @@ def _cfg(safe_patterns: list[str] | None = None) -> Config:
     return Config(
         providers=[
             ProviderConfig(
-                name="default", base_url="https://api.example.com", api_key="test"
+                name="default",
+                base_url="https://api.example.com",
+                api_key="test",
+                models=["gpt-4"],
             )
         ],
         agents=[AgentConfig(name="default", model="gpt-4")],

@@ -160,7 +160,11 @@ export class SessionRecord {
     this.nowFn = options.now;
     this.createdAt = options.createdAt;
     this.meta = {
+      // The model quadruple is filled by the gateway (sync snapshot / state
+      // change event / runtime info); `''` = not known yet, never guessed.
+      modelId: '',
       model: '',
+      modelDisplayName: '',
       provider: '',
       thinking: false,
       reasoningEffort: '',

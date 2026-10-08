@@ -76,11 +76,18 @@ class SessionStateChangedEvent(WingEvent):
 
     替代 ModelSwitchedEvent + ThinkToggledEvent + SessionUpdatedEvent。
     所有字段可选，只携带当前值。
+
+    模型三件套与 AgentInfo 对齐：``model_id`` 是引用词（前端据此做选择态匹配），
+    ``provider_name`` 是运行期事实（展示分组），``model`` 是调用名 + 展示名
+    ``model_display_name``。四者同刻下发（model_id 未取到时为 None）。
     """
 
     type: Literal["session_state_changed"] = "session_state_changed"
     persist: ClassVar[bool] = False
     model: str | None = None
+    model_id: str | None = None
+    provider_name: str | None = None
+    """当前模型的 provider 名（运行期事实；与 model / model_id 同刻下发）。"""
     model_display_name: str | None = None
     """当前模型的展示名（与 model 同刻下发；未声明 / 无展示名 = 省略，
     前端回落 model）。"""

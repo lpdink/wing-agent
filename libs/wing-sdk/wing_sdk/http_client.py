@@ -127,7 +127,7 @@ class GatewayClient:
     async def update_session(
         self,
         session_id: str,
-        model: str | None = None,
+        model_id: str | None = None,
         agent: str | None = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -137,7 +137,7 @@ class GatewayClient:
     ) -> dict:
         body: dict[str, Any] = {"session_id": session_id}
         for key, value in [
-            ("model", model),
+            ("model_id", model_id),
             ("agent", agent),
             ("title", title),
             ("thinking", thinking),

@@ -131,7 +131,7 @@ describe('applyPanels', () => {
       ...EMPTY_PANELS,
       modelPicker: {
         sessionId: session.sessionId,
-        rows: [{ provider: 'p', model: 'm', selected: true }],
+        rows: [{ id: 'm', label: 'Model M', provider: 'p', selected: true }],
         activeIndex: 0,
       },
       globalNotice: { level: 'warning', text: 'gateway offline' },
@@ -139,7 +139,12 @@ describe('applyPanels', () => {
 
     expect(outcome).toEqual({ ok: true });
     const panels = store.getState().sessions[session.sessionId]?.panels;
-    expect(panels?.modelPicker?.rows[0]?.model).toBe('m');
+    expect(panels?.modelPicker?.rows[0]).toEqual({
+      id: 'm',
+      label: 'Model M',
+      provider: 'p',
+      selected: true,
+    });
     expect(panels?.globalNotice?.level).toBe('warning');
   });
 

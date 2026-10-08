@@ -153,7 +153,7 @@ async def test_keyless_and_bad_key_are_rejected_with_401(probe: Probe) -> None:
         await accepted.close()
 
 
-@pytest.mark.probe_env(auth=_auth_env(), api_key=ADMIN_KEY)
+@pytest.mark.probe_env(models=[ADMIN_MODEL], auth=_auth_env(), api_key=ADMIN_KEY)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_admin_key_drives_a_normal_session(probe: Probe) -> None:
@@ -175,7 +175,7 @@ async def test_admin_key_drives_a_normal_session(probe: Probe) -> None:
     assert info["status"] == "idle", info
 
 
-@pytest.mark.probe_env(auth=_auth_env(), api_key=ADMIN_KEY)
+@pytest.mark.probe_env(models=[ADMIN_MODEL], auth=_auth_env(), api_key=ADMIN_KEY)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_tool_runtime_role_is_scoped_to_tool_registration(probe: Probe) -> None:

@@ -95,8 +95,9 @@ class Message(ChainNode):
 providers:
   - name: my-provider
     models:
-      - legacy-model                       # 存量：纯字符串 = 无能力声明
-      - name: dfmodel-2026                 # 对象形态：name = 实际调用名
+      - legacy-model                       # 存量：纯字符串 = id 与调用名同为 legacy-model，无能力声明
+      - id: ds-flash                       # 显式 id = 全局唯一引用词（缺省 = name）
+        name: dfmodel-2026                 # name = 实际调用名（发给 provider API 的值）
         display_name: DeepSeek-Flash       # 展示名（缺省前端回落 name）
         description: 深度求索正式版模型
         capabilities:
@@ -104,18 +105,21 @@ providers:
 ```
 
 - **未声明 = text-only**（安全默认）；不做名字启发式。
-- `resolve_model_capabilities(provider_cfg, model)` 是唯一解析入口；`ToolContext.capabilities`
+- `resolve_model_capabilities(provider_cfg, model)` 是唯一解析入口（`model` 是**调用名**——
+  运行期口径：agent 持有调用名，能力声明按调用名查声明项）；`ToolContext.capabilities`
   实时解析（无缓存），会话中 `/model` 切换后门禁与投影随之变化。
 - 对象形态未知键**静默忽略**（pydantic `extra="ignore"`）：`capabilites` / `visionn` 这类
   拼写错误**不报错**，按"未声明"处理 → text-only。没有启发式会替你打开能力——这是安全默认，
-  不是校验遗漏（配置校验只做实际调用名去重）。
-- `GET /api/models` 在 `models: [str]` 之外**追加** `model_details: [{name, display_name,
-  description, capabilities: {vision}}]`，与 `models` 逐项同序同名（缺 detail 的补最小条目）。
-- **展示名随会话状态下发**：会话 agent 快照（`sync_session.agent` / `GET /api/session/get`）与
-  `session_state_changed`、`GET /api/session/info` 与 `model`（`model_name`）同刻携带
-  `model_display_name`（未声明 / 空串 = 缺失或 null）——前端渲染展示名、缺省回落实际调用名，
-  不必拿调用名去 `/api/models` 里自查；展示名不参与身份（匹配 / 变更仍以实际调用名 + provider 为准）。
-- 存量兼容：旧 config（`models: [str]`）零修改可用；旧前端忽略 `model_details`。
+  不是校验遗漏（配置校验只做 id 全局唯一 + 同 provider 内调用名去重）。
+- `GET /api/models` 的 `providers[].models` 是**对象数组**：
+  `{id, name, display_name, description, capabilities: {vision}}`（`id` = 引用词，`name` = 调用名；
+  旧的「调用名数组 + `model_details` 平行数组」已删除——能力内嵌在同一个对象里，无逐项对齐契约）。
+- **展示名随会话状态下发**：会话 agent 快照（`sync_session.agent` / `GET /api/session/get`）、
+  `session_state_changed` 与 `GET /api/session/info` 携带 `model`（调用名）+ `model_id`（引用词）
+  + `provider_name` + `model_display_name`（未声明 / 空串 = 缺失或 null）——前端渲染展示名、
+  缺省回落调用名，不必拿调用名去 `/api/models` 里自查；**身份是 `model_id`**，展示名不参与匹配。
+- 存量兼容：旧 config（字符串形态）零修改可用（id = 调用名）；读图门禁的 `resolve_model_capabilities`
+  口径不变（字符串形态 = 未声明能力）。
 
 ## 请求期图片投影（核心）
 
@@ -241,8 +245,9 @@ providers:
 
 > `@pytest.mark.probe_env(models=…)` 只声明 provider 的**静态模型列表**（能力 / 展示元信息，
 > 即 `/api/models` 与 `resolve_model_capabilities` 的数据源），**不改 agent 默认模型**——
-> 场景必须显式 `probe.session(model=…)`。否则请求会打到 agent 模板里的占位模型
-> （`probe/default`），而假 Provider 的剧本按 model 名路由，表现为 5xx 或断言对不上。
+> 场景必须显式 `probe.session(model=…)`（值是 **model_id**，且必须落在 `models` 声明里）。
+> 否则请求会打到 agent 模板里的占位模型（`probe/default`），而假 Provider 的剧本按 model 名路由，
+> 表现为 5xx 或断言对不上。
 
 | 场景 | 断言要点 |
 |------|----------|
