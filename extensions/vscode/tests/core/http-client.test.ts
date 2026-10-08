@@ -116,8 +116,7 @@ describe('session lifecycle', () => {
     });
     await makeClient(transport).createSession({
       agent: {
-        model: 'gpt-5',
-        provider: 'openai',
+        model_id: 'gpt-5',
         system_prompt: null,
         append_system_prompt: null,
         tools: ['Bash'],
@@ -128,7 +127,7 @@ describe('session lifecycle', () => {
     });
 
     expect(transport.body()).toStrictEqual({
-      agent: { model: 'gpt-5', provider: 'openai', tools: ['Bash'], effort: 'high', yolo: true },
+      agent: { model_id: 'gpt-5', tools: ['Bash'], effort: 'high', yolo: true },
     });
   });
 
@@ -248,9 +247,12 @@ describe('messaging and queries', () => {
     expect(response.messages[1]?.tool_calls).toStrictEqual([{ id: 'c1', name: 'Bash', arguments: {} }]);
   });
 
-  it('sessionInfo decodes the runtime status', async () => {
+  it('sessionInfo decodes the runtime status (incl. the nullable model quadruple)', async () => {
     const transport = new ScriptedTransport().reply(200, {
       model: 'gpt-5',
+      model_id: 'gpt-5',
+      provider_name: 'openai',
+      model_display_name: 'GPT-5',
       api_url: 'https://api.example.com',
       tools: ['Bash', 'Read'],
       total_tokens: 1200,
@@ -270,11 +272,38 @@ describe('messaging and queries', () => {
     expect(transport.last.url).toBe('http://127.0.0.1:32523/api/session/info?session_id=sess-1');
     expect(response).toMatchObject({
       model: 'gpt-5',
+      model_id: 'gpt-5',
+      provider_name: 'openai',
+      model_display_name: 'GPT-5',
       thinking: true,
       reasoning_effort: 'high',
       context_stats: { message_count: 7, total_tokens: 1200 },
       workdir: '/tmp/ws',
     });
+  });
+
+  it('sessionInfo tolerates a gateway without model_id (old wire)', async () => {
+    const transport = new ScriptedTransport().reply(200, {
+      model: 'gpt-5',
+      api_url: 'https://api.example.com',
+      tools: [],
+      total_tokens: 0,
+      context_window_tokens: 0,
+      thinking: false,
+      reasoning_effort: null,
+      yolo: false,
+      session_name: null,
+      workdir: null,
+      status: 'idle',
+      context_stats: { message_count: 0, total_tokens: 0 },
+      skills_info: '',
+      system_prompt: '',
+    });
+    const response = await makeClient(transport).sessionInfo('sess-1');
+
+    expect(response.model_id).toBeNull();
+    expect(response.provider_name).toBeNull();
+    expect(response.model_display_name).toBeNull();
   });
 
   it('sessionBranches decodes branch targets', async () => {
@@ -295,20 +324,18 @@ describe('session mutations', () => {
     expect(transport.body()).toStrictEqual({ session_id: 'sess-1', thinking: false, title: 'New' });
   });
 
-  it('updateSession keeps model + provider + tools together', async () => {
+  it('updateSession sends the model by reference word, never a name/provider pair', async () => {
     const transport = new ScriptedTransport().reply(200, OK);
     await makeClient(transport).updateSession({
       session_id: 'sess-1',
-      model: 'claude-sonnet-4',
-      provider: 'anthropic',
+      model_id: 'claude-sonnet-4',
       tools: ['Bash', 'default.Read'],
       yolo: true,
     });
 
     expect(transport.body()).toStrictEqual({
       session_id: 'sess-1',
-      model: 'claude-sonnet-4',
-      provider: 'anthropic',
+      model_id: 'claude-sonnet-4',
       tools: ['Bash', 'default.Read'],
       yolo: true,
     });
@@ -363,14 +390,65 @@ describe('system endpoints', () => {
     ]);
   });
 
-  it('listModels returns provider groups', async () => {
+  it('listModels decodes the object array (no parallel model_details)', async () => {
     const transport = new ScriptedTransport().reply(200, {
-      providers: [{ provider: 'openai', models: ['gpt-5'] }],
+      providers: [
+        {
+          provider: 'openai',
+          models: [
+            {
+              id: 'gpt-5.2',
+              name: 'gpt-5.2',
+              display_name: 'GPT-5.2',
+              description: null,
+              capabilities: { vision: true },
+            },
+          ],
+        },
+      ],
     });
     const response = await makeClient(transport).listModels();
 
     expect(transport.last.url).toBe('http://127.0.0.1:32523/api/models');
-    expect(response.providers).toStrictEqual([{ provider: 'openai', models: ['gpt-5'] }]);
+    expect(response.providers).toStrictEqual([
+      {
+        provider: 'openai',
+        models: [
+          {
+            id: 'gpt-5.2',
+            name: 'gpt-5.2',
+            display_name: 'GPT-5.2',
+            description: null,
+            capabilities: { vision: true },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('listModels skips entries without an id and defaults missing capabilities', async () => {
+    const transport = new ScriptedTransport().reply(200, {
+      providers: [
+        {
+          provider: 'qoder',
+          models: [
+            { name: 'dfmodel' }, // no id → cannot be addressed; skipped
+            { id: 'ds-flash', name: 'dfmodel-2026' },
+          ],
+        },
+      ],
+    });
+    const response = await makeClient(transport).listModels();
+
+    expect(response.providers[0]?.models).toStrictEqual([
+      {
+        id: 'ds-flash',
+        name: 'dfmodel-2026',
+        display_name: null,
+        description: null,
+        capabilities: { vision: false },
+      },
+    ]);
   });
 
   it('listAgents / listTools', async () => {

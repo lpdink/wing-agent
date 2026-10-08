@@ -66,12 +66,16 @@ describe('command catalog', () => {
 });
 
 describe('model picker', () => {
-  it('lists models with the current selection marked and applies a choice', async () => {
+  it('lists the catalog by id with the current id marked and applies a choice', async () => {
     const { harness, sessionId } = await boot();
-    // The agent snapshot travels with the replay (that is where model+provider
-    // come from; `session_state_changed` has no provider field).
+    // The agent snapshot travels with the replay — that is where the model
+    // quadruple comes from (id = reference word, name = call name, display name
+    // = label material, provider = grouping). The id differs from the call name
+    // on purpose: matching on the name would break here.
     harness.gateway.session(sessionId).agent = {
       model_name: 'claude-sonnet-4-6',
+      model_id: 'claude-sonnet-4',
+      model_display_name: 'Claude Sonnet 4',
       provider_name: 'anthropic',
       workspace: '/workspace',
       tools: [],
@@ -88,44 +92,68 @@ describe('model picker', () => {
     const picker = lastPanels(harness)?.modelPicker;
     expect(picker?.rows).toHaveLength(3);
     expect(picker?.rows.find((row) => row.selected)).toEqual({
+      id: 'claude-sonnet-4',
+      label: 'Claude Sonnet 4',
       provider: 'anthropic',
-      model: 'claude-sonnet-4-6',
       selected: true,
     });
 
     harness.wipe();
-    await harness.intent({
-      type: 'setModel',
-      sessionId,
-      provider: 'openai',
-      model: 'gpt-5.2',
-    });
+    await harness.intent({ type: 'setModel', sessionId, modelId: 'gpt-5.2' });
     await flushMicrotasks();
 
     const update = harness.gateway.calls('/api/session/update');
     expect(update).toHaveLength(1);
-    expect(update[0]?.body).toMatchObject({ session_id: sessionId, model: 'gpt-5.2', provider: 'openai' });
+    // The identity alone travels: no name, no provider.
+    expect(update[0]?.body).toStrictEqual({ session_id: sessionId, model_id: 'gpt-5.2' });
     // Applying a model closes the picker.
     expect(lastPanels(harness)?.modelPicker).toBeNull();
 
-    // The gateway's `session_state_changed` carries no provider, so the host
-    // applies the user's choice optimistically (TUI `runner.rs` does the same).
+    // The whole quadruple moves together when the gateway's
+    // `session_state_changed` lands (no optimistic model write: the host does
+    // not know the call name / display name of an id it has never seen).
     const record = harness.host.sessionManager.record(sessionId);
     expect(record?.meta.model).toBe('gpt-5.2');
+    expect(record?.meta.modelId).toBe('gpt-5.2');
     expect(record?.meta.provider).toBe('openai');
     const state = harness
       .ofType('state')
       .filter((message) => message.state.sessionId === sessionId)
       .at(-1);
+    expect(state?.state.meta.modelId).toBe('gpt-5.2');
     expect(state?.state.meta.provider).toBe('openai');
 
-    // Re-opening the picker highlights the new provider's row.
+    // Re-opening the picker highlights the new row — matched by id.
     await harness.intent({ type: 'openModelPicker', sessionId });
     await flushMicrotasks();
     const reopened = lastPanels(harness)?.modelPicker;
     expect(reopened?.rows.filter((row) => row.selected)).toEqual([
-      { provider: 'openai', model: 'gpt-5.2', selected: true },
+      { id: 'gpt-5.2', label: 'gpt-5.2', provider: 'openai', selected: true },
     ]);
+  });
+
+  it('marks no row when the model id is unknown (old gateway)', async () => {
+    const { harness, sessionId } = await boot();
+    // No `model_id` in the snapshot at all: the host keeps `''` and refuses to
+    // match on the call name (that would be a resolve, which no longer exists).
+    harness.gateway.session(sessionId).agent = {
+      model_name: 'claude-sonnet-4-6',
+      provider_name: 'anthropic',
+      workspace: '/workspace',
+      tools: [],
+      skills: [],
+      rules: [],
+      system_prompt: null,
+    };
+    harness.gateway.pushSyncToSubscribers(sessionId);
+    await flushMicrotasks();
+
+    await harness.intent({ type: 'openModelPicker', sessionId });
+    await flushMicrotasks();
+
+    const rows = lastPanels(harness)?.modelPicker?.rows ?? [];
+    expect(rows).toHaveLength(3);
+    expect(rows.some((row) => row.selected)).toBe(false);
   });
 
   it('surfaces a model-list failure as a toast and leaves the panel closed', async () => {

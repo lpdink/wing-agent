@@ -113,8 +113,7 @@ describe('public API barrel', () => {
     };
     const update: UpdateSessionRequest = {
       session_id: 's1',
-      model: null,
-      provider: null,
+      model_id: null,
       agent: null,
       title: 'T',
       thinking: null,
@@ -125,6 +124,8 @@ describe('public API barrel', () => {
     };
     const agent: AgentInfo = {
       model_name: 'gpt-5',
+      model_id: 'gpt-5',
+      model_display_name: null,
       system_prompt: null,
       tools: [],
       skills: [],

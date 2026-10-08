@@ -78,7 +78,7 @@ export const FRONTEND_COMMANDS: readonly FrontendCommand[] = [
   {
     name: '/model',
     aliases: ['/m'],
-    description: 'Select provider and model',
+    description: 'Select a model',
     params: '',
     kind: 'intent',
   },

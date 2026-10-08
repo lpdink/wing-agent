@@ -185,6 +185,26 @@ describe('status area', () => {
     expect(ui.getByTestId('session-context')).toHaveAttribute('data-level', 'normal');
   });
 
+  it('renders the declared display name instead of the call name', () => {
+    const session = makeShellSession();
+    const { container } = mountWebview([
+      { ...session, meta: { ...session.meta, modelDisplayName: 'DeepSeek-Flash' } },
+    ]);
+
+    expect(within(container).getByTestId('session-model')).toHaveTextContent(
+      'DeepSeek-Flash · fixture-provider',
+    );
+  });
+
+  it('falls back to "No model" when nothing is known (old gateway)', () => {
+    const session = makeShellSession();
+    const { container } = mountWebview([
+      { ...session, meta: { ...session.meta, model: '', modelId: '', modelDisplayName: '' } },
+    ]);
+
+    expect(within(container).getByTestId('session-model')).toHaveTextContent('No model');
+  });
+
   it('opens the model picker from both the model and the thinking chip', () => {
     const { container, bridge } = mountWebview([makeShellSession()]);
 

@@ -160,7 +160,9 @@ export function makeFixtureSession(overrides: Partial<SessionViewModel> = {}): S
     status: 'idle',
     attention: 'none',
     meta: {
+      modelId: 'fixture-model',
       model: 'fixture-model',
+      modelDisplayName: '',
       provider: 'fixture-provider',
       thinking: true,
       reasoningEffort: 'medium',
@@ -406,9 +408,11 @@ export function makeModelPicker(): ModelPickerModel {
   return {
     sessionId: 'session-a',
     rows: [
-      { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
-      { provider: 'anthropic', model: 'claude-opus-4', selected: false },
-      { provider: 'openai', model: 'gpt-5', selected: false },
+      // The first row proves the split: the id is the identity, the label is
+      // what the user reads, and the two differ for a declared display name.
+      { id: 'claude-sonnet-4', label: 'Claude Sonnet 4', provider: 'anthropic', selected: true },
+      { id: 'claude-opus-4', label: 'claude-opus-4', provider: 'anthropic', selected: false },
+      { id: 'gpt-5', label: 'gpt-5', provider: 'openai', selected: false },
     ],
     activeIndex: null,
   };

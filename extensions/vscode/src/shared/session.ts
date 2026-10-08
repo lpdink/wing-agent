@@ -31,9 +31,24 @@ export type SessionAttention = 'none' | 'result' | 'error';
 
 /** Session-level knobs and identity, as reported by the gateway. */
 export interface SessionMetaModel {
-  /** Model name (`''` until the gateway reports it). */
+  /**
+   * The model **reference word** (`providers[].models[].id`) — the identity used
+   * for picker matching and updates. `''` until the gateway reports it, or on
+   * old gateways that never send one; an unknown id marks no row and is never
+   * guessed.
+   */
+  readonly modelId: string;
+  /** Model call name (the value sent upstream); `''` until reported. */
   readonly model: string;
-  /** Provider name (`''` until the gateway reports it, or on old gateways). */
+  /**
+   * Declared display name (`''` when undeclared or on old gateways) — display
+   * material only; {@link modelLabel} falls back to {@link model}.
+   */
+  readonly modelDisplayName: string;
+  /**
+   * Provider name (`''` until reported, or on old gateways). A runtime fact and
+   * the display grouping — **not** a reference word.
+   */
   readonly provider: string;
   /** Thinking / reasoning enabled. */
   readonly thinking: boolean;
@@ -95,11 +110,25 @@ export interface TurnViewModel {
 
 // ── overlays (panels) ─────────────────────────────────────────────────
 
+/**
+ * The display label of a model: the declared `display_name` when present,
+ * else the call name (`''` when neither is known).
+ *
+ * Display only — identity (`model_id`) never derives from a label.
+ */
+export function modelLabel(displayName: string, model: string): string {
+  return displayName === '' ? model : displayName;
+}
+
 /** One row of the `/model` picker. */
 export interface ModelPickerRowModel {
+  /** The model reference word — the row's identity (echoed back on selection). */
+  readonly id: string;
+  /** Render label (`display_name ‖ name`), filled by the host. */
+  readonly label: string;
+  /** Display grouping (the provider carrying the model). */
   readonly provider: string;
-  readonly model: string;
-  /** True for the row matching the session's current provider + model. */
+  /** True for the row whose id matches the session's current model id. */
   readonly selected: boolean;
 }
 
