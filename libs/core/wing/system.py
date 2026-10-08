@@ -4,7 +4,8 @@
 ``reload_system(sm)`` 是 ``/api/system/reload`` 的实现体：config → hooks → prompt
 commands → provider → skills & rules，逐项独立 try/except；config 失败立即中止
 （后续项不再尝试），其余项失败继续——**步骤顺序与逐项 detail 是对外契约**
-（probe ``test_system_reload`` 抓名字序与逐项 ok）。
+（probe ``test_system_reload`` 抓名字序与逐项 ok）。config 项内部还包含一步
+``sm.reload_templates()``（模板管理器跟随新 config 重建，见 ``SessionManager.reload_templates``）。
 
 纯移动：``ReloadResult`` / ``ReloadResultItem`` 与流程体逐字来自 runtime，唯一
 机械差异是 ``self.sm`` → 参数 ``sm``（调用侧 ``WingRuntime.reload_system()`` 只
@@ -60,6 +61,11 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
 
     try:
         config = load_config(reload=True)
+        # 模板是 config 的派生状态（agents[].model 经 id 表解析）：与 config
+        # 一起重建，避免「reload 后新会话用旧模板、resume 用新映射」分叉。
+        # 不另立 ReloadResultItem——逐项名字序是对外契约，且 config 加载成功
+        # 而模板重建失败在逻辑上不可达（加载期已强制 agents[].model ∈ id 空间）。
+        sm.reload_templates()
         items.append(ReloadResultItem(name="config.yaml", ok=True))
     except Exception as e:
         items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))

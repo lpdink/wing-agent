@@ -59,11 +59,19 @@ def validate_media_content(media_id: str, data: bytes) -> None:
 class SessionMetadata(BaseModel):
     """Session 持久元数据。全字段可选，序列化时排除 None。
 
-    model_name / provider_name 记录会话的模型绑定，二者成对写入、成对读取
-    （任一为 None 视为无记录）。写入时机是**显式模型动作**——模型切换、
-    模板切换、创建 override、fork 快照；resume 时记录优先于模板默认模型，
-    是模型选择跨进程重启的唯一恢复来源。model_name 与 AgentInfo.model_name
-    同义（当前生效模型的裸名）。
+    model_id / model_name / provider_name 记录会话的模型身份**三元组**：
+
+    - ``model_id`` 是**引用词**（∈ 配置声明的 id 空间）：resume 以它为唯一入口——
+      命中即用当前映射（name / provider 跟随配置演化），未命中才回落到快照；
+    - ``model_name`` / ``provider_name`` 是写入时刻的**运行期事实快照**（发给上游的
+      调用名 + 承载它的 provider）：id 被删 / 改时的兜底恢复线索；
+    - 三者由 ``Session._persist_model`` 一次写全（整个 metadata 幂等落盘）。
+      ``model_id`` 缺失但快照齐全 = 旧记录：恢复时经 ``Config.identify`` 反查补 id，
+      内存态与记录不一致才落盘对齐（一次性迁移，不产生写噪声）。
+
+    写入时机是**显式模型动作**——模型切换、模板切换、创建 override、fork 快照；
+    resume 时记录优先于模板默认模型，是模型选择跨进程重启的唯一恢复来源。
+    model_name 与 AgentInfo.model_name 同义（当前生效模型的裸名）。
 
     提示词与动态状态（system_prompt / append_system_prompt / tools / thinking /
     reasoning_effort / yolo / max_turns）走同一套"显式动作写入、resume 优先
@@ -105,6 +113,7 @@ class SessionMetadata(BaseModel):
     last_interaction: str | None = None
     forked_from: str | None = None
     template_name: str | None = None
+    model_id: str | None = None
     model_name: str | None = None
     provider_name: str | None = None
     system_prompt: str | None = None

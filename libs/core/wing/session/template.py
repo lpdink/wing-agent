@@ -36,6 +36,10 @@ class AgentTemplate(BaseModel):
     """绑定的 provider 名称（对应 providers[].name）。由 `agents[].model` 的
     model id 查表得到（`Config.require_model` → `ModelRef.provider_name`）——
     不存在「未指定 = 第一个 provider」的回落。"""
+    model_id: str | None = None
+    """模型引用词（`agents[].model` 的 effective id）。from_config 恒填；
+    from_agent 由调用方传入（fork 传源会话的 id，可空——源会话可能跑在配置
+    已删除的 id 上）。模板切换后会话以它作为 `_model_id`。"""
     system_prompt: str = ""
     resolved_tools: list[Tool] = Field(default_factory=list)
     skills_patterns: list[str] = Field(default_factory=list)
@@ -50,10 +54,17 @@ class AgentTemplate(BaseModel):
     yolo: bool | None = None
 
     @classmethod
-    def from_agent(cls, agent: "WingAgent", name: str | None = None) -> "AgentTemplate":
+    def from_agent(
+        cls,
+        agent: "WingAgent",
+        name: str | None = None,
+        model_id: str | None = None,
+    ) -> "AgentTemplate":
         """从已有 WingAgent 反向抽取模板。
 
-        用于 fork/switch 场景下保留当前 agent 配置。
+        用于 fork/switch 场景下保留当前 agent 配置：``model`` / ``provider_name``
+        取自 live agent（运行期事实），``model_id`` 由调用方传入（fork 传源会话的
+        引用词；None = 源会话也没有 id）。
         tools 反查 tool_registry 获取未绑定工具。
         """
         cm = agent.context_manager
@@ -68,6 +79,7 @@ class AgentTemplate(BaseModel):
             name=name or agent.model,
             model=agent.model,
             provider_name=agent.provider_name,
+            model_id=model_id,
             system_prompt=cm.setin_system_prompt,
             resolved_tools=unbound_tools,
             skills_patterns=cm.skills_patterns,
@@ -106,6 +118,7 @@ class AgentTemplate(BaseModel):
             name=agent_config.name,
             model=ref.name,
             provider_name=ref.provider_name,
+            model_id=ref.id,
             system_prompt=agent_config.system_prompt,
             resolved_tools=resolved_tools,
             skills_patterns=list(agent_config.skills),

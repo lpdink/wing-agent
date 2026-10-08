@@ -49,7 +49,9 @@ def mock_session():
     session.session_name = "Test Session"
     session.template_name = "default"
     session.agent.model = "gpt-4o"
+    session.agent.provider_name = "default"
     session.agent.model_display_name = None
+    session.model_id = "gpt-4o"
     session.agent.yolo = False
     session.agent.thinking = False
     session.agent.reasoning_effort = None
@@ -68,12 +70,14 @@ class TestRuntimeUpdateSessionEvents:
     async def test_update_model_emits_event_with_none_for_unchanged_fields(
         self, runtime, mock_session, cleanup_event_bus
     ):
-        """只改 model 时，event 中其他字段为 None；model_display_name 与 model 同刻。"""
+        """只改 model_id 时，event 中其他字段为 None；三件套与展示名同刻下发。"""
         runtime.sm._sessions["test-session"] = mock_session
         mock_session.agent.model = "gpt-4o-mini"
+        mock_session.agent.provider_name = "alt"
         mock_session.agent.model_display_name = "Flash Mini"
+        mock_session.model_id = "gpt-4o-mini"
 
-        await runtime.update_session("test-session", model="gpt-4o-mini")
+        await runtime.update_session("test-session", model_id="gpt-4o-mini")
 
         events = [
             e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
@@ -81,6 +85,8 @@ class TestRuntimeUpdateSessionEvents:
         assert len(events) == 1
         event = events[0]
         assert event.model == "gpt-4o-mini"
+        assert event.model_id == "gpt-4o-mini"
+        assert event.provider_name == "alt"
         assert event.model_display_name == "Flash Mini"
         assert event.thinking is None
         assert event.yolo is None
@@ -107,6 +113,8 @@ class TestRuntimeUpdateSessionEvents:
         ]
         assert len(events) == 1
         assert events[0].model is None
+        assert events[0].model_id is None
+        assert events[0].provider_name is None
         assert events[0].model_display_name is None
 
     @pytest.mark.asyncio
@@ -116,9 +124,10 @@ class TestRuntimeUpdateSessionEvents:
         """模型无展示名声明（字符串形态 / 未声明）时下发 None，前端回落调用名。"""
         runtime.sm._sessions["test-session"] = mock_session
         mock_session.agent.model = "plain-model"
+        mock_session.model_id = "plain-model"
         mock_session.agent.model_display_name = None
 
-        await runtime.update_session("test-session", model="plain-model")
+        await runtime.update_session("test-session", model_id="plain-model")
 
         events = [
             e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
@@ -149,7 +158,7 @@ class TestRuntimeUpdateSessionEvents:
         await runtime.update_session(
             "test-session",
             agent="coder",
-            model="gpt-4o-mini",
+            model_id="gpt-4o-mini",
             title="new title",
             thinking=True,
             yolo=True,
@@ -198,6 +207,8 @@ class TestRuntimeUpdateSessionEvents:
         event = events[0]
         assert event.agent == "coder"
         assert event.model == "gpt-4o"
+        assert event.model_id == "gpt-4o"
+        assert event.provider_name == "default"
         # agent switch 应报告重置后的值
         assert event.thinking is True
         assert event.reasoning_effort == "medium"
@@ -208,7 +219,7 @@ class TestRuntimeUpdateSessionEvents:
     async def test_update_session_not_found_raises_lookup_error(self, runtime):
         """session 不存在时 raise LookupError（route 映射到 404）。"""
         with pytest.raises(LookupError, match="Session not found"):
-            await runtime.update_session("nonexistent", model="gpt-4o")
+            await runtime.update_session("nonexistent", model_id="gpt-4o")
 
     @pytest.mark.asyncio
     async def test_update_agent_template_not_found_raises_lookup_error(
@@ -234,7 +245,7 @@ class TestRuntimeUpdateSessionEvents:
         """
         runtime.sm._sessions["test-session"] = mock_session
 
-        await runtime.update_session("test-session", model="gpt-4o-mini")
+        await runtime.update_session("test-session", model_id="gpt-4o-mini")
 
         for event in cleanup_event_bus:
             if event.target is not None:

@@ -28,13 +28,15 @@ class TestSessionUpdateState:
 
     @pytest.mark.asyncio
     async def test_update_model(self, sm):
-        """更新模型名称。"""
+        """按 model id 切换模型（调用名与 provider 随映射而来）。"""
         session = sm.create_session()
         original_model = session.agent.model
         assert original_model != "gpt-4o-mini"
 
-        await session.update_state(model="gpt-4o-mini")
+        await session.update_state(model_id="gpt-4o-mini")
         assert session.agent.model == "gpt-4o-mini"
+        assert session.agent.model_provider.name == "alt"
+        assert session.model_id == "gpt-4o-mini"
 
     @pytest.mark.asyncio
     async def test_update_title(self, sm):
@@ -97,7 +99,7 @@ class TestSessionUpdateState:
         """多字段同时更新，全部生效。"""
         session = sm.create_session()
         await session.update_state(
-            model="gpt-4o-mini",
+            model_id="gpt-4o-mini",
             title="Multi Update",
             thinking=True,
             reasoning_effort="medium",
@@ -142,18 +144,20 @@ class TestModelDisplayName:
         session = sm.create_session()
         assert session.agent.model_display_name == "Fancy Flash"
         assert session.to_agent_info().model_display_name == "Fancy Flash"
+        assert session.to_agent_info().model_id == "fancy"
 
-        # 切到无展示名声明的模型：回落 None（前端回落调用名）。
-        await session.update_state(model="plain")
+        # 切到无展示名声明的模型（id == name）：回落 None（前端回落调用名）。
+        await session.update_state(model_id="plain")
         assert session.agent.model == "plain"
         assert session.agent.model_display_name is None
         assert session.to_agent_info().model_display_name is None
+        assert session.to_agent_info().model_id == "plain"
 
 
 class TestNonUtf8UpdateState:
     """update_state 的文本字段闸门：拒绝在 mutation 之前，活会话不被毒化。
 
-    背景（终轮复审 S1）：`model` / `reasoning_effort` 先写内存态、再落 metadata；
+    背景（终轮复审 S1）：`model_id` / `reasoning_effort` 先写内存态、再落 metadata；
     `_persist_model` 只在 `encode("utf-8")` 处抛 `UnicodeEncodeError`（`ValueError`
     子类，被路由当成"客户端的错"→ 400），但**内存态已经是非法值**——此后该会话
     `/info` 序列化就炸、所有写操作全失败（不落盘、逐出/重启自愈）。
@@ -170,14 +174,15 @@ class TestNonUtf8UpdateState:
         before = session.agent.model
 
         with pytest.raises(ValueError) as failure:
-            await session.update_state(model="\ud800")
-        assert "model must be UTF-8 encodable" in str(failure.value)
+            await session.update_state(model_id="\ud800")
+        assert "model_id must be UTF-8 encodable" in str(failure.value)
 
         # 未被毒化：内存态还是老值，后续写操作照常，metadata 里没有模型记录
         assert session.agent.model == before
         await session.update_state(title="ok")  # 毒化时这里会抛 UnicodeEncodeError
         metadata = session.store.load_metadata("U-1")
         assert metadata is not None and metadata.session_name == "ok"
+        assert metadata.model_id is None
         assert metadata.model_name is None and metadata.provider_name is None
 
     @pytest.mark.asyncio
@@ -198,12 +203,19 @@ class TestNonUtf8UpdateState:
         assert metadata.reasoning_effort is None
 
     @pytest.mark.asyncio
-    async def test_provider_is_gated_before_mutation(self, file_sm: SessionManager):
-        """provider 单独给出时也先过闸门（不该靠"查找先抛"这种偶然顺序）。"""
+    async def test_unknown_model_id_leaves_no_record(self, file_sm: SessionManager):
+        """未知 id（C7 文案）与闸门同口径：先查后改，失败不留任何记录。"""
         session = file_sm.create_session(session_id="U-3")
+        before = session.agent.model
+
         with pytest.raises(ValueError) as failure:
-            await session.update_state(provider_name="\ud800")
-        assert "provider must be UTF-8 encodable" in str(failure.value)
+            await session.update_state(model_id="no-such-id")
+        assert "unknown model id 'no-such-id'" in str(failure.value)
+
+        assert session.agent.model == before
+        assert session.model_id == before  # 模板默认模型的 id（conftest 里 = 调用名）
+        metadata = session.store.load_metadata("U-3")
+        assert metadata is None or metadata.model_name is None
 
 
 class TestBestEffortStatePersistence:

@@ -157,11 +157,11 @@ class WingRuntime:
 
         Args:
             agent_override: resume 语义的参数覆盖（只应用
-                model/provider/effort/tools 子集，见 `Session.apply_resume_override`）
+                model_id/effort/tools 子集，见 `Session.apply_resume_override`）
 
         Raises:
             LookupError: session 不存在（含 id 不过闸门——与本处同价）
-            ValueError: 覆盖里的工具引用无法解析
+            ValueError: 覆盖里的 model_id 未命中 / 工具引用无法解析
         """
         return self.sm.resume_session(session_id, agent_override=agent_override)
 
@@ -401,8 +401,7 @@ class WingRuntime:
         self,
         session_id: str,
         *,
-        model: str | None = None,
-        provider: str | None = None,
+        model_id: str | None = None,
         agent: str | None = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -415,9 +414,13 @@ class WingRuntime:
 
         委托给 Session.update_state()，计算 event 字段后发射事件。
 
+        Args:
+            model_id: 切换模型（引用 providers[].models 的 id；未命中 ValueError）
+
         Raises:
             LookupError: session 或 template 不存在
-            ValueError: workspace 路径不合法 / 工具引用无法解析
+            ValueError: model_id 未命中 id 空间 / workspace 路径不合法 /
+                工具引用无法解析
         """
         session = self._require_session(session_id)
 
@@ -431,8 +434,7 @@ class WingRuntime:
                 )
 
         await session.update_state(
-            model=model,
-            provider_name=provider,
+            model_id=model_id,
             template=template,
             title=title,
             thinking=thinking,
@@ -444,11 +446,13 @@ class WingRuntime:
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None
-        model_emitted = model is not None or agent_switched
+        model_emitted = model_id is not None or agent_switched
         self._emit_session_event(
             SessionStateChangedEvent(
                 session_id=session.session_id,
                 model=session.agent.model if model_emitted else None,
+                model_id=session.model_id if model_emitted else None,
+                provider_name=session.agent.provider_name if model_emitted else None,
                 model_display_name=session.agent.model_display_name
                 if model_emitted
                 else None,

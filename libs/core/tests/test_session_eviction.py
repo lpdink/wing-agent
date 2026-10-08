@@ -331,15 +331,16 @@ class TestHydration:
         session = runtime.create_session()
         _seed(session, "alpha", "beta")
         sid = session.session_id
-        session._apply_model("gpt-4", "alt")  # 落盘模型记录（快照语义）
+        session._apply_model("qwen3-max")  # 落盘模型三元组（alt 声明的 id）
 
         runtime.sm.evict(sid, reason="test")
         await runtime.sm.wait_teardowns()
 
         reborn = runtime.sm.ensure_loaded(sid)
         assert reborn.session_id == sid
-        assert reborn.agent.model == "gpt-4"
+        assert reborn.agent.model == "qwen3-max"
         assert reborn.agent.model_provider.name == "alt"
+        assert reborn.model_id == "qwen3-max"
         assert [m.content for m in reborn.context_manager.get_context_window()] == [
             "alpha",
             "beta",
