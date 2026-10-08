@@ -11,6 +11,7 @@ import asyncio
 import functools
 import gc
 import inspect
+import time
 import types
 import uuid
 from collections import deque
@@ -497,10 +498,19 @@ class WingAgent:
             消费的输入）。调用方（runtime）把它带进 `InterruptedEvent`——
             前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待期间
             新到的消息。
+
+        成功路径有且至少一条 INFO（`Agent interrupt complete: …`，与
+        `shutdown()` 的 `Agent shutdown complete: …` 对称）：session id、
+        worker 是否终止、consumer 是否重建、入口到返回的总耗时（含等锁与
+        取消阶梯）、被丢弃的积压数——打断过程本身必须可 grep，而不是只能
+        从前端事件流 / history 反推。阶梯中间步骤仍是 WARNING 级、阶梯
+        耗尽另有 ERROR + notice（既有形态，不在此重复）。
         """
+        started = time.monotonic()
         self._inbox.cancel_all_waiters()
         dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
 
+        rebuilt = False
         async with self._interrupt_lock:
             self._fire_interrupt_hooks()
 
@@ -517,8 +527,15 @@ class WingAgent:
                 # 时重建，避免出现第二个消费者 / 复活已关闭的 agent。
                 if self._worker is old and not self._closing:
                     self._worker = asyncio.create_task(self._run())
+                    rebuilt = True
             else:
                 self._arm_worker_renewal(old)
+        log.info(
+            f"Agent interrupt complete: session={self.session_id} "
+            f"worker_stopped={stopped} consumer_rebuilt={rebuilt} "
+            f"waited={int((time.monotonic() - started) * 1000)}ms "
+            f"dropped={len(dropped)}"
+        )
         return dropped
 
     async def shutdown(self) -> None:

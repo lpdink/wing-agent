@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -211,6 +212,42 @@ class TestCancelLadder:
             "died with error during interrupt" in r.getMessage()
             for r in wing_logs.records
         )
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_happy_path_logs_outcome_as_info(
+        self, runtime, wing_logs: pytest.LogCaptureFixture
+    ) -> None:
+        """成功路径有 INFO 记录（#173）：session / 结果 / 耗时 / 丢弃数可 grep。
+
+        与 shutdown 的 `Agent shutdown complete: …` 对称——打断过程本身必须
+        留下地面事实（是否发生、等了多久、有没有重建 consumer、丢了几条
+        积压），而不是只能从前端事件流 / history 反推。
+        """
+        agent = runtime.create_session().agent
+
+        async def _idle() -> None:
+            await asyncio.sleep(30)
+
+        await _replace_worker(agent, _idle())
+        await agent.post("stale backlog", request_id="req-stale")
+
+        dropped = await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+
+        assert dropped == ["req-stale"]
+        infos = [
+            record.getMessage()
+            for record in wing_logs.records
+            if record.levelno == logging.INFO
+            and "Agent interrupt complete" in record.getMessage()
+        ]
+        assert len(infos) == 1, [r.getMessage() for r in wing_logs.records]
+        line = infos[0]
+        assert f"session={agent.session_id}" in line, line
+        assert "worker_stopped=True" in line, line
+        assert "consumer_rebuilt=True" in line, line
+        assert "dropped=1" in line, line
+        assert re.search(r"waited=\d+ms", line), line
         await agent.shutdown()
 
     @pytest.mark.asyncio
