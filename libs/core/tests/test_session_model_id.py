@@ -598,3 +598,97 @@ class TestOverrideModelId:
 
         session = sm.create_session(agent_override=override)
         assert session.model_id == "ds-flash"  # 模板默认，未被旧字段影响
+
+
+class TestNoPartialApplication:
+    """请求级原子性：任何字段非法都在 mutation 之前退出（含 model_id 前置查表）。
+
+    mutation 是有序的（template → model → …）：未知 model_id 若在 `_apply_model`
+    处才被发现，`{agent: X, model_id: <未知>}` 会**先切模板、落盘三元组、再报错**
+    ——错误响应 + 已生效的变更同时出现。前置查表让这条组合整体拒绝。
+    """
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_id_blocks_template_switch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from wing.config import AgentConfig
+
+        root = tmp_path / "sessions"
+        cfg = Config(
+            providers=[
+                ProviderConfig(
+                    name="p",
+                    base_url="http://x",
+                    api_key="k",
+                    models=[ModelSpec(id="a-id", name="a-name")],
+                )
+            ],
+            agents=[
+                AgentConfig(name="default", model="a-id"),
+                AgentConfig(name="coder", model="a-id"),
+            ],
+        )
+        _use_config(monkeypatch, cfg)
+        sm = SessionManager({"file": FileSessionStore(root)})
+        session = sm.create_session()
+        sid = session.session_id
+        agent_before = session.agent
+
+        coder = sm.template_manager.get("coder")
+        assert coder is not None
+        with pytest.raises(ValueError, match="unknown model id 'nope'"):
+            await session.update_state(template=coder, model_id="nope")
+
+        # 模板未切换、agent 未重建、三元组未变、磁盘零记录
+        assert session.agent is agent_before
+        assert session.template_name == "default"
+        assert session.model_id == "a-id"
+        assert session.agent.model == "a-name"
+        meta = FileSessionStore(root).load_metadata(sid)
+        assert meta is None or (
+            meta.template_name is None
+            and meta.model_id is None
+            and meta.model_name is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_valid_model_id_and_template_apply_together(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """对照：合法组合下两者都生效（观察点有效，不是把功能一起锁死）。"""
+        from wing.config import AgentConfig
+
+        root = tmp_path / "sessions"
+        cfg = Config(
+            providers=[
+                ProviderConfig(
+                    name="p",
+                    base_url="http://x",
+                    api_key="k",
+                    models=[
+                        ModelSpec(id="a-id", name="a-name"),
+                        ModelSpec(id="b-id", name="b-name"),
+                    ],
+                )
+            ],
+            agents=[
+                AgentConfig(name="default", model="a-id"),
+                AgentConfig(name="coder", model="a-id"),
+            ],
+        )
+        _use_config(monkeypatch, cfg)
+        sm = SessionManager({"file": FileSessionStore(root)})
+        session = sm.create_session()
+        sid = session.session_id
+
+        coder = sm.template_manager.get("coder")
+        assert coder is not None
+        await session.update_state(template=coder, model_id="b-id")
+
+        assert session.template_name == "coder"
+        assert session.model_id == "b-id"
+        assert session.agent.model == "b-name"
+        meta = FileSessionStore(root).load_metadata(sid)
+        assert meta is not None
+        assert (meta.template_name, meta.model_id) == ("coder", "b-id")

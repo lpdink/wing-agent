@@ -647,6 +647,13 @@ class Session:
             require_utf8(model_id, field="model_id")
         if reasoning_effort is not None:
             require_utf8(reasoning_effort, field="reasoning_effort")
+        # id 查表同样前置（`_apply_model` 内仍会查一次，二次查表无副作用）：
+        # mutation 是**有序**的（template → model → …），未命中的 model_id 必须与
+        # 其它非法字段同价——否则 `{agent: X, model_id: <未知>}` 会先切模板、落盘
+        # 三元组，再在 `_apply_model` 处 raise：错误响应 + 已生效的变更同时出现，
+        # 请求级留下半截状态（"任何字段非法在 mutation 之前退出"因此破功）。
+        if model_id is not None:
+            get_config().require_model(model_id)
 
         if template is not None:
             await self.switch_template(template)

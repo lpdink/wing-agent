@@ -301,12 +301,16 @@ class SessionManager:
         # 标签、覆盖文本与工具 ref 的纯校验提到最前（都不写盘）：任何非法输入在
         # 任何副作用之前 raise，"失败即零残留"对 create-or-adopt 尤其重要（重试
         # 必须还是干净状态）。全部必须在**认领键**之前——认领会建会话目录。
+        # model_id 的查表同理前置：未命中在 `apply_agent_override`（认领之后）才
+        # 会 raise，留下一个失败产生的空会话目录。
         if tags:
             apply_tag_ops([], add=tags)
         if agent_override is not None:
             validate_override_utf8(agent_override)
             if agent_override.tools is not None:
                 validate_tool_refs(agent_override.tools)
+            if agent_override.model_id is not None:
+                get_config().require_model(agent_override.model_id)
         if workspace is not None:
             require_utf8(workspace, field="workspace")
 

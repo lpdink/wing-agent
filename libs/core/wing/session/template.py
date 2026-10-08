@@ -66,6 +66,13 @@ class AgentTemplate(BaseModel):
         取自 live agent（运行期事实），``model_id`` 由调用方传入（fork 传源会话的
         引用词；None = 源会话也没有 id）。
         tools 反查 tool_registry 获取未绑定工具。
+
+        ``model_id`` 只是**模板自带 id 的载体**：`Session.from_template` 当前不读
+        它（构造期的引用词由恢复链 + identify 兜底决定）。fork 场景里子会话身份的
+        **权威来源是 metadata 快照**（`SessionManager.fork_session` 写入的
+        ``model_id=source.model_id``），删掉那条快照而指望本参数兜底会静默退化到
+        identify 反查——本参数存在的意义是「模板切换 / from_agent 形态下模板携带
+        引用词」，不是「fork 身份的保底」。
         """
         cm = agent.context_manager
 

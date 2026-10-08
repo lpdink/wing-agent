@@ -135,6 +135,26 @@ class TestCreateWithRequestedId:
             )
         assert _session_dirs(root) == []
 
+    @pytest.mark.asyncio
+    async def test_unknown_model_id_override_leaves_no_trace(
+        self, sm: SessionManager, root: Path
+    ):
+        """覆盖里的 model_id 未命中：在任何副作用（含认领目录）之前失败。"""
+        with pytest.raises(ValueError, match="unknown model id 'nope'"):
+            sm.create_session(
+                session_id=CUSTOM_ID,
+                agent_override=AgentOverride(model_id="nope"),
+            )
+        # 认领键（mkdir）在纯校验之后 → 零残留，重试是全新会话
+        assert _session_dirs(root) == []
+
+        created = sm.create_session(session_id=CUSTOM_ID)
+        assert created.session_id == CUSTOM_ID
+        assert created.template_name == "default"
+        assert created.model_id == "gpt-4"
+        metadata = created.store.load_metadata(CUSTOM_ID)
+        assert metadata is None or metadata.model_id is None
+
 
 class TestAdoptExistingSession:
     """已存在 → 收养（同 resume 语义）。"""

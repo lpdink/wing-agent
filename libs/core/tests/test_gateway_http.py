@@ -2444,6 +2444,100 @@ class TestRealRuntimeGates:
         info = client.get("/api/session/info", params={"session_id": "M-2"}).json()
         assert info["model"] == "gpt-4"
 
+    @pytest.fixture
+    def two_template_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """两个模板的真实 runtime：模板切换的原子性需要"模板会变"的观察点。"""
+        from wing.config import AgentConfig, Config, ProviderConfig
+        from wing.gateway.server import GatewayServer
+        from wing.runtime import WingRuntime
+
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="p",
+                    base_url="http://x",
+                    api_key="k",
+                    models=["a-name"],
+                )
+            ],
+            agents=[
+                AgentConfig(name="default", model="a-name"),
+                AgentConfig(name="coder", model="a-name"),
+            ],
+        )
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        # 单例替换（与 conftest 的 _mock_config 同口径）：runtime 构造与模板
+        # 解析都读它。
+        monkeypatch.setattr("wing.config.loader._config", config)
+        with patch("wing.gateway.server.load_config") as mock_load_config:
+            mock_load_config.return_value = _mock_config()
+            server = GatewayServer()
+        server.runtime = WingRuntime()
+        with TestClient(server._app) as tc:
+            yield tc, tmp_path / "sessions"
+
+    def test_update_with_unknown_model_id_does_not_switch_template(
+        self, two_template_client
+    ):
+        """请求级原子性：`{agent, model_id:<未知>}` → 400 且模板 / 三元组都不动。
+
+        未命中在 `_apply_model` 才被发现时，响应是 400、而模板已切换且三元组已
+        落盘——错误响应与已生效的变更同时出现。model_id 的查表前置后整体拒绝。
+        """
+        client, sessions_root = two_template_client
+        assert (
+            client.post("/api/session/create", json={"session_id": "A-1"}).status_code
+            == 200
+        )
+        before = client.get("/api/session/get", params={"session_id": "A-1"}).json()
+        assert before["template_name"] == "default"
+
+        resp = client.post(
+            "/api/session/update",
+            json={"session_id": "A-1", "agent": "coder", "model_id": "nope"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "unknown model id 'nope'" in resp.json()["detail"]
+
+        after = client.get("/api/session/get", params={"session_id": "A-1"}).json()
+        assert after["template_name"] == "default"  # 模板未切换
+        assert after["agent"]["model_id"] == before["agent"]["model_id"] == "a-name"
+        metadata_path = sessions_root / "A-1" / "metadata.json"
+        if metadata_path.exists():
+            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert "template_name" not in raw, raw
+            assert "model_id" not in raw and "model_name" not in raw, raw
+
+        # 观察点有效：合法请求确实能把模板切过去（不是把功能一起锁死）
+        assert (
+            client.post("/api/session/create", json={"session_id": "A-2"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/session/update", json={"session_id": "A-2", "agent": "coder"}
+            ).status_code
+            == 200
+        )
+        switched = client.get("/api/session/get", params={"session_id": "A-2"}).json()
+        assert switched["template_name"] == "coder"
+
+    def test_create_with_unknown_model_id_leaves_no_directory(self, real_client):
+        """覆盖式创建：未知 model_id → 400 且**零残留**（认领目录之前失败）。"""
+        client, sessions_root = real_client
+        resp = client.post(
+            "/api/session/create",
+            json={"session_id": "G-1", "agent": {"model_id": "nope"}},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "unknown model id 'nope'" in resp.json()["detail"]
+        assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
+
+        # 重试是全新会话（没有半成品目录可被"收养"）
+        retry = client.post("/api/session/create", json={"session_id": "G-1"})
+        assert retry.status_code == 200, retry.text
+        assert retry.json()["session_id"] == "G-1"
+
 
 class TestSendRouteErrorMapping:
     """`send` 路由的错误映射口径：**只有输入非法**才回 400。
