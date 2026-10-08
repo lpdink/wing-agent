@@ -13,8 +13,6 @@
  *   content deltas → tool-call deltas → finish_reason frame → usage frame →
  *   `[DONE]`. `stream:false` answers a complete `chat.completion` (compaction
  *   calls are non-streaming).
- * - `GET /v1/models` — the registered model names (the gateway's dynamic model
- *   discovery hits this).
  *
  * Every request is logged (`requests`), so a scenario can assert "this command
  * never reached the model" as a *count*, not as an absence of side effects.
@@ -130,7 +128,6 @@ export class FakeProvider {
   private readonly scripts = new Map<string, RegisteredScript>();
   private server: Server | null = null;
   private port = 0;
-  private readonly startedAt = Date.now();
 
   readonly requests: LoggedRequest[] = [];
 
@@ -216,21 +213,6 @@ export class FakeProvider {
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', this.url);
-    if (request.method === 'GET' && url.pathname === '/v1/models') {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(
-        JSON.stringify({
-          object: 'list',
-          data: this.models().map((id) => ({
-            id,
-            object: 'model',
-            created: Math.floor(this.startedAt / 1000),
-            owned_by: 'wing-vscode-smoke',
-          })),
-        }),
-      );
-      return;
-    }
     if (request.method !== 'POST' || url.pathname !== '/v1/chat/completions') {
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: `no fake route for ${url.pathname}` } }));

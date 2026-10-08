@@ -34,7 +34,7 @@ Zed 的设置文件：macOS 和 Linux（未改 `XDG_CONFIG_HOME`）是 `~/.confi
 | `command` | 要启动的可执行文件；写成 `wing` 或绝对路径都行 |
 | `args` | 启动参数；`acp` 即让 wing 以 ACP 前端运行 |
 | `env` | 可选：补充环境变量，例如自定义的 `WING_HOME` |
-| `default_config_options` | 可选：给会话配置项预置默认值，例如 `{ "model": "<provider:model>" }`（值域见线程里的模型选择器） |
+| `default_config_options` | 可选：给会话配置项预置默认值，例如 `{ "model": "<model_id>" }`（值 = `providers[].models` 声明的 **model_id**，取值见线程里的模型选择器 / `wing models`；旧的 `provider:model` 拼串不再接受） |
 
 ### PATH 陷阱（最常踩的坑）
 

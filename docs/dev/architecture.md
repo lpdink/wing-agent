@@ -186,7 +186,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 前者是发给上游的值，后者是渲染素材。**模型目录 = 配置静态声明的同步投影**：远端 `GET /models`
 发现机制已退役，`/api/models` 不再有任何网络依赖（目录的每个 id 全局唯一，是对外可依赖的合同）。
 
-provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wing.provider.pool` 的**全进程共享池**——每 provider name 一个实例（懒建），全部会话与 `/api/models` 聚合共用。旧版「每 agent 一份 client 表」会按 会话数 × provider 数 放大 socket 占用（httpx keepalive 连接只在下次使用连接池时才被过期检查，会一直挂着），reload 的逐会话重建还会把在途请求的 client 关死（#172：重试栈绑死在已关闭实例上，永不成功）。
+provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wing.provider.pool` 的**全进程共享池**——每 provider name 一个实例（懒建），全部会话共用（模型目录 = 配置静态投影，**不经池**，见上）。旧版「每 agent 一份 client 表」会按 会话数 × provider 数 放大 socket 占用（httpx keepalive 连接只在下次使用连接池时才被过期检查，会一直挂着），reload 的逐会话重建还会把在途请求的 client 关死（#172：重试栈绑死在已关闭实例上，永不成功）。
 
 - agent 只持有 **provider name** 与调用名（`WingAgent.provider_name` / `model`，同源同刻——切换模型时由 model_id 单键查表一次性写入），实例经 `get_provider(name)` 实时解析；切模型 = 换 name，无需创建/关闭任何 client。
 - 一切**会话级参数**经 `RequestOptions` 在每次调用时注入（`WingAgent.request_options()` → `generate(..., options=)`）：
