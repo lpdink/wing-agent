@@ -23,7 +23,7 @@
 //! |------|------|
 //! | [`agent`] | ACP handler 注册（initialize / session/new / session/prompt / session/cancel / list / load / resume / close / set_config_option） |
 //! | [`ask`] | Ask 事件 → ACP 交互面（permission / elicitation / 回退，答案格式契约） |
-//! | [`model`] | 模型 config option（值域 / 分组 / currentValue）+ 热切换 + 外部变更中继 |
+//! | [`model`] | 模型 config option（值 = model_id / 分组 / currentValue）+ 热切换 + 外部变更中继 |
 //! | [`session`] | `SessionHub`：会话表、WS 事件泵与分流、出站队列、prompt 串行化 |
 //! | [`translate`] | `WingEvent` → ACP `session/update` 的映射（纯函数） |
 //!

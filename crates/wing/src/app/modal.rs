@@ -406,8 +406,8 @@ impl App {
             .map(|panel| panel.handle_key(key))
             .unwrap_or(ModelPanelAction::None);
         match action {
-            ModelPanelAction::Apply { provider, model } => {
-                self.apply_model_selection(provider, model);
+            ModelPanelAction::Apply { model_id } => {
+                self.apply_selected_model(model_id);
             }
             ModelPanelAction::Cancel => {
                 self.close_model_panel();
@@ -674,7 +674,7 @@ impl App {
         }
         if !self.model_sources.is_empty() {
             // Open now from cache; the fetch below refreshes in place.
-            let panel = ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
+            let panel = ModelPanel::new(self.model_sources.clone(), self.current_model_id());
             self.present_model_panel(panel);
             // The popup yields to the modal panel (never both at once).
             self.popup.active = ActivePopup::None;
@@ -711,66 +711,83 @@ impl App {
         self.chat.remove_model_picker();
     }
 
-    /// The session's active `(provider, model)` pair — both must be known
-    /// (a model without a provider cannot be preselected unambiguously).
-    pub(super) fn current_model_pair(&self) -> Option<(&str, &str)> {
-        let provider = self.status.provider.as_deref().filter(|p| !p.is_empty())?;
-        let model = self.status.model.as_str();
-        if model.is_empty() || model == "unknown" {
-            return None;
-        }
-        Some((provider, model))
+    /// The session's active model id — the reference word the picker
+    /// preselects by and the `/api/session/update` call takes. `None` when the
+    /// gateway could not resolve one (old session metadata / identify miss):
+    /// the picker then opens without a mark rather than inventing an id.
+    pub(super) fn current_model_id(&self) -> Option<&str> {
+        self.status
+            .model_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
     }
 
-    /// Declared display label for a `(provider, model)` pair, resolved from
-    /// the last `/api/models` snapshot — the same declaration the picker rows
-    /// render. `None` when the pair is unknown **or** the label equals the
-    /// call name (an equal label adds no information and must not be shown
-    /// twice).
-    ///
-    /// With no provider known (reconnect-time fallbacks), the first group
-    /// carrying the call name wins: best effort — same-named models across
-    /// providers are not guaranteed to resolve to the active provider's
-    /// declaration. Everywhere the provider is known it is used verbatim.
+    /// The model declaration behind an id, as the display layer needs it:
+    /// `(call_name, provider, label)`. `None` when the last `/api/models`
+    /// snapshot does not cover the id (stale cache / id-less session).
     ///
     /// Display layer only: this never takes part in apply / matching / any
-    /// identity decision (`ModelPanel::Apply` keeps carrying the call name).
-    pub(super) fn model_display_label(
-        &self,
-        provider: Option<&str>,
-        model: &str,
-    ) -> Option<String> {
-        let group = match provider {
-            Some(p) => self.model_sources.iter().find(|g| g.provider == p),
-            None => self
-                .model_sources
-                .iter()
-                .find(|g| g.models.iter().any(|m| m == model)),
-        }?;
-        let label = group.label_for(model);
+    /// identity decision (`ModelPanel::Apply` carries the id).
+    pub(super) fn model_declaration(&self, model_id: &str) -> Option<(&str, &str, &str)> {
+        let group = self
+            .model_sources
+            .iter()
+            .find(|group| group.find(model_id).is_some())?;
+        let detail = group.find(model_id)?;
+        Some((
+            detail.name.as_str(),
+            group.provider.as_str(),
+            detail.display_label(),
+        ))
+    }
+
+    /// Declared display label for a model id, resolved from the last
+    /// `/api/models` snapshot — the same declaration the picker rows render.
+    /// `None` when the id is unknown **or** the label equals the id (an equal
+    /// label adds no information and must not be shown twice).
+    ///
+    /// Display layer only: never part of apply / matching / any identity
+    /// decision.
+    pub(super) fn model_display_label(&self, model_id: &str) -> Option<String> {
+        let (_, _, label) = self.model_declaration(model_id)?;
+        (label != model_id).then(|| label.to_string())
+    }
+
+    /// Declared display label for a **call name** — the id-less fallback
+    /// (legacy sessions / `identify` misses). Ambiguous across providers by
+    /// nature: the first group carrying the call name wins. Display only.
+    pub(super) fn model_display_label_by_name(&self, model: &str) -> Option<String> {
+        let detail = self
+            .model_sources
+            .iter()
+            .find_map(|group| group.models.iter().find(|detail| detail.name == model))?;
+        let label = detail.display_label();
         (label != model).then(|| label.to_string())
     }
 
     /// Toast text for a model switch: the display label takes the first line,
-    /// the raw call name follows on its own line — **only** when a declared
-    /// label exists (otherwise there is nothing to add: the first line
-    /// already shows the call name). This is the one place the raw id is
+    /// the raw reference word (model id) follows on its own line — **only**
+    /// when a declared label exists (otherwise there is nothing to add: the
+    /// first line already shows the id). This is the one place the raw id is
     /// allowed to reach the screen.
-    pub(super) fn model_switch_toast(&self, provider: Option<&str>, model: &str) -> String {
-        match (self.model_display_label(provider, model), provider) {
-            (Some(label), Some(p)) => format!("Model: {label} ({p})\n↳ {model}"),
-            (Some(label), None) => format!("Model: {label}\n↳ {model}"),
-            (None, Some(p)) => format!("Model: {model} ({p})"),
-            (None, None) => format!("Model: {model}"),
+    pub(super) fn model_switch_toast(&self, model_id: &str) -> String {
+        let provider = self
+            .model_declaration(model_id)
+            .map(|(_, provider, _)| provider);
+        match (self.model_display_label(model_id), provider) {
+            (Some(label), Some(p)) => format!("Model: {label} ({p})\n↳ {model_id}"),
+            (Some(label), None) => format!("Model: {label}\n↳ {model_id}"),
+            (None, Some(p)) => format!("Model: {model_id} ({p})"),
+            (None, None) => format!("Model: {model_id}"),
         }
     }
 
-    /// Apply the pair chosen in the model panel: close it, dispatch the
-    /// explicit `(provider, model)` update and give immediate feedback.
-    /// Refuses while a turn is running (defense-in-depth — the panel is
-    /// already guarded against opening mid-turn, but a race via SyncSession
-    /// / fork could start a turn while the panel is visible).
-    pub(super) fn apply_model_selection(&mut self, provider: String, model: String) {
+    /// Apply the model id chosen in the panel: close it, dispatch the id
+    /// verbatim and give immediate feedback. Refuses while a turn is running
+    /// (defense-in-depth — the panel is already guarded against opening
+    /// mid-turn, but a race via SyncSession / fork could start a turn while
+    /// the panel is visible).
+    pub(super) fn apply_selected_model(&mut self, model_id: String) {
         if self.turn.working {
             self.close_model_panel();
             self.show_toast(Toast::warning(
@@ -780,8 +797,8 @@ impl App {
             return;
         }
         self.close_model_panel();
-        let toast = self.model_switch_toast(Some(&provider), &model);
-        self.push_intent(AppIntent::set_model(model, Some(provider)));
+        let toast = self.model_switch_toast(&model_id);
+        self.push_intent(AppIntent::set_model(model_id));
         self.show_toast(Toast::info(toast, std::time::Duration::from_secs(3)));
     }
 }

@@ -82,6 +82,7 @@ pub fn model_picker_lines(panel: &ModelPanel, palette: &ThemePalette) -> Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wing_api_client::models::ModelDetail;
     use wing_api_client::models::ProviderModels;
 
     fn palette() -> ThemePalette {
@@ -91,12 +92,20 @@ mod tests {
     fn group(provider: &str, models: &[&str]) -> ProviderModels {
         ProviderModels {
             provider: provider.into(),
-            models: models.iter().map(|m| m.to_string()).collect(),
-            model_details: vec![],
+            models: models
+                .iter()
+                .map(|m| ModelDetail {
+                    id: (*m).to_string(),
+                    name: (*m).to_string(),
+                    display_name: None,
+                    description: None,
+                    capabilities: Default::default(),
+                })
+                .collect(),
         }
     }
 
-    /// Group with `display_name` declarations for the given call names.
+    /// Group with `display_name` declarations for the given model ids.
     fn group_with_labels(
         provider: &str,
         models: &[&str],
@@ -105,14 +114,20 @@ mod tests {
         use wing_api_client::models::ModelDetail;
         ProviderModels {
             provider: provider.into(),
-            models: models.iter().map(|m| m.to_string()).collect(),
-            model_details: labels
+            models: models
                 .iter()
-                .map(|(name, label)| ModelDetail {
-                    name: (*name).to_string(),
-                    display_name: Some((*label).to_string()),
-                    description: None,
-                    capabilities: Default::default(),
+                .map(|id| {
+                    let label = labels
+                        .iter()
+                        .find(|(model, _)| model == id)
+                        .map(|(_, label)| (*label).to_string());
+                    ModelDetail {
+                        id: (*id).to_string(),
+                        name: (*id).to_string(),
+                        display_name: label,
+                        description: None,
+                        capabilities: Default::default(),
+                    }
                 })
                 .collect(),
         }
@@ -140,7 +155,7 @@ mod tests {
                 group("anthropic", &["a1", "a2"]),
                 group("qoder", &["dfmodel"]),
             ],
-            Some(("qoder", "dfmodel")),
+            Some("dfmodel"),
         );
         let out = text(&model_picker_lines(&panel, &palette()));
         assert!(out.contains("anthropic > qoder"), "{out}");
@@ -153,7 +168,7 @@ mod tests {
     }
 
     /// `display_name` only changes the row text: the `●` mark still tracks
-    /// the session's call name, and uncovered models keep their name.
+    /// the session's model id, and uncovered models keep their name.
     #[test]
     fn rows_show_display_name_when_the_gateway_declares_one() {
         let panel = ModelPanel::new(
@@ -162,7 +177,7 @@ mod tests {
                 &["dfmodel", "bare"],
                 &[("dfmodel", "DeepSeek-Flash")],
             )],
-            Some(("qoder", "dfmodel")),
+            Some("dfmodel"),
         );
         let out = text(&model_picker_lines(&panel, &palette()));
         assert!(out.contains("❯ DeepSeek-Flash ●"), "{out}");
@@ -178,12 +193,19 @@ mod tests {
 
     #[test]
     fn long_lists_scroll_centered_without_markers() {
-        let models: Vec<String> = (0..8).map(|i| format!("m{i}")).collect();
+        let models: Vec<ModelDetail> = (0..8)
+            .map(|i| ModelDetail {
+                id: format!("m{i}"),
+                name: format!("m{i}"),
+                display_name: None,
+                description: None,
+                capabilities: Default::default(),
+            })
+            .collect();
         let mut panel = ModelPanel::new(
             vec![ProviderModels {
                 provider: "p".into(),
                 models,
-                model_details: vec![],
             }],
             None,
         );
@@ -204,10 +226,7 @@ mod tests {
 
     #[test]
     fn rows_are_column_aligned() {
-        let panel = ModelPanel::new(
-            vec![group("p", &["model-a", "model-b"])],
-            Some(("p", "model-b")),
-        );
+        let panel = ModelPanel::new(vec![group("p", &["model-a", "model-b"])], Some("model-b"));
         let out = text(&model_picker_lines(&panel, &palette()));
         // Cursor and non-cursor rows start at the same column; the `●` mark
         // is a suffix so it never shifts the labels.

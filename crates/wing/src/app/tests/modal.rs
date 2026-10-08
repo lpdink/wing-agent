@@ -297,7 +297,7 @@ fn test_model_panel_swallows_keys_but_lets_page_keys_scroll() {
 }
 
 #[test]
-fn test_model_panel_apply_toast_shows_display_name_and_raw_name_on_its_own_line() {
+fn test_model_panel_apply_toast_shows_display_name_and_raw_id_on_its_own_line() {
     let mut app = test_app();
     app.model_sources = vec![model_group_with_labels(
         "qoder",
@@ -311,17 +311,16 @@ fn test_model_panel_apply_toast_shows_display_name_and_raw_name_on_its_own_line(
 
     let toast = app.toast.as_ref().expect("apply toast");
     assert_eq!(toast.message, "Model: DeepSeek-Flash (qoder)\n↳ dfmodel");
-    // The intent still carries the call name — display never leaks into the
-    // identity layer.
+    // The intent carries the model id — display never leaks into the identity layer.
     let requested = app.drain_intents().into_iter().find_map(|i| match i {
-        AppIntent::UpdateSession { model, .. } => model,
+        AppIntent::UpdateSession { model_id, .. } => model_id,
         _ => None,
     });
     assert_eq!(requested.as_deref(), Some("dfmodel"));
 }
 
 #[test]
-fn test_model_panel_apply_toast_falls_back_to_call_name_without_declaration() {
+fn test_model_panel_apply_toast_falls_back_to_id_without_declaration() {
     let mut app = test_app();
     app.model_sources = vec![model_group("p", &["gpt-4o"])];
     app.open_model_panel();
@@ -332,7 +331,7 @@ fn test_model_panel_apply_toast_falls_back_to_call_name_without_declaration() {
     let toast = app.toast.as_ref().expect("apply toast");
     assert_eq!(
         toast.message, "Model: gpt-4o (p)",
-        "no declared label → single line with the call name"
+        "no declared label → single line with the model id"
     );
 }
 

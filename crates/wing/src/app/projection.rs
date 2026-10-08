@@ -382,6 +382,8 @@ impl App {
             }
             WingEvent::SessionStateChanged {
                 model,
+                model_id,
+                provider_name,
                 model_display_name,
                 thinking,
                 reasoning_effort,
@@ -395,16 +397,25 @@ impl App {
                 // already ships). Fall back to the local snapshot so a label
                 // the user has already seen is not dropped to the raw call
                 // name — with a current gateway the two agree and this is a
-                // no-op.
+                // no-op. Lookup by id when there is one, by call name for
+                // id-less sessions (display only, never a resolution).
                 let model_display_name = match model.as_deref() {
                     Some(m) if model_display_name.is_none() => {
-                        self.model_display_label(self.status.provider.as_deref(), m)
+                        match model_id.as_deref().filter(|id| !id.trim().is_empty()) {
+                            Some(id) => self.model_display_label(id),
+                            None => self.model_display_label_by_name(m),
+                        }
                     }
                     _ => model_display_name,
                 };
+                let model = model.map(|name| crate::ui::status_bar::ModelUpdate {
+                    id: model_id,
+                    name,
+                    provider: provider_name,
+                    display_name: model_display_name,
+                });
                 self.status.apply_session_update(
                     model,
-                    model_display_name,
                     agent,
                     title,
                     thinking,
@@ -559,9 +570,12 @@ impl App {
             rules: agent_info.rules.len(),
         });
         if let Some(agent_info) = &agent {
-            self.status.model = agent_info.model_name.clone();
-            self.status.model_display_name = agent_info.model_display_name.clone();
-            self.status.provider = agent_info.provider_name.clone();
+            self.status.set_model(crate::ui::status_bar::ModelUpdate {
+                id: agent_info.model_id.clone(),
+                name: agent_info.model_name.clone(),
+                provider: agent_info.provider_name.clone(),
+                display_name: agent_info.model_display_name.clone(),
+            });
             self.status.workdir = agent_info.workspace.clone();
         }
 

@@ -50,16 +50,9 @@ pub struct Cli {
     #[arg(short = 'p', long = "prompt")]
     pub prompt: Option<String>,
 
-    /// Override model name.
+    /// Override model id (references `providers[].models` in the gateway config).
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
-
-    /// Override provider name (references config `providers[].name`).
-    ///
-    /// Only takes effect together with `--model`: switching provider needs a model
-    /// to switch to (a lone `--provider` is a no-op and says so in the log).
-    #[arg(long = "provider")]
-    pub provider: Option<String>,
 
     /// Override tools (comma-separated). If not set, uses template defaults.
     #[arg(long = "tools")]
@@ -535,7 +528,6 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
         append_system_prompt: cli.append_system_prompt,
         max_turns: cli.max_turns,
         effort: cli.effort,
-        provider: cli.provider,
         tools: cli.tools,
         tag: cli.tag,
         output_format,
@@ -747,6 +739,26 @@ mod tests {
 
         let cli = Cli::try_parse_from(["wing", "-p", "hi"]).expect("absent");
         assert!(!cli.include_partial_messages);
+    }
+
+    #[test]
+    fn clap_parses_the_model_id_and_rejects_the_removed_provider_flag() {
+        // `--model` 的值是 model_id（引用词）——原样进 StdioArgs / override。
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--model", "ds-flash"]).expect("parses");
+        assert_eq!(cli.model.as_deref(), Some("ds-flash"));
+
+        // `--provider` 已删除：clap 直接报未知参数（不写兼容、不写引导）。
+        for argv in [
+            vec!["wing", "-p", "hi", "--provider", "qoder"],
+            vec!["wing", "-p", "hi", "--provider=qoder"],
+            vec!["wing", "run", "-p", "hi", "--provider", "qoder"],
+        ] {
+            let Err(err) = Cli::try_parse_from(argv.clone()) else {
+                panic!("--provider must be rejected, got {argv:?}");
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+            assert!(err.to_string().contains("--provider"), "{err}");
+        }
     }
 
     #[test]

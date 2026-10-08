@@ -283,22 +283,42 @@ pub fn session_row(
     })
 }
 
-/// `/api/models` 目录：`[(provider, [(model, display_name)])]`。
-pub fn models_catalog(providers: &[(&str, &[(&str, &str)])]) -> Value {
+/// 目录里一条模型声明：`(id, 调用名, 展示名)`。
+pub type CatalogModel = (&'static str, &'static str, &'static str);
+
+/// `/api/models` 目录：`[(provider, [(id, name, display_name)])]`（对象数组 + 引用词）。
+pub fn models_catalog(providers: &[(&str, &[CatalogModel])]) -> Value {
     let providers: Vec<Value> = providers
         .iter()
         .map(|(provider, models)| {
             json!({
                 "provider": provider,
-                "models": models.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-                "model_details": models
+                "models": models
                     .iter()
-                    .map(|(name, display)| json!({"name": name, "display_name": display}))
+                    .map(|(id, name, display)| {
+                        json!({"id": id, "name": name, "display_name": display})
+                    })
                     .collect::<Vec<_>>(),
             })
         })
         .collect();
     json!({"providers": providers})
+}
+
+/// 一条带模型身份的 `session_state_changed`（引用词 + 运行期事实 + 展示名同刻下发）。
+pub fn session_state_model(
+    model_id: &str,
+    model: &str,
+    provider: &str,
+    display_name: Option<&str>,
+) -> Value {
+    json!({
+        "type": "session_state_changed",
+        "model": model,
+        "model_id": model_id,
+        "provider_name": provider,
+        "model_display_name": display_name,
+    })
 }
 
 /// `/api/commands`：`[(name, description, params)]`。

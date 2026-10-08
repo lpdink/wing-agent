@@ -3,7 +3,7 @@
 //! Provider tabs (pages) × model rows:
 //! - `←`/`→` switch provider (clamped at the ends — no wrap-around),
 //! - `↑`/`↓` move the model cursor (clamped at the ends; per-provider memory),
-//! - `Enter` applies the highlighted `(provider, model)` in one keypress —
+//! - `Enter` applies the highlighted model's **id** in one keypress —
 //!   there is no confirm page (model switching is a cheap, reversible act),
 //! - `Esc` cancels (the app closes the panel; no request is sent),
 //! - provider tabs and model rows are windowed by the kernel (≤ 5 visible),
@@ -11,19 +11,22 @@
 //!   pinned at the ends, and there are **no** indicator glyphs (`‹`/`›`)
 //!   — the rows stay column-aligned instead.
 //!
-//! Opening preselects the session's current `(provider, model)`: the cursor
-//! lands on that provider page / model row and a `●` mark (the kernel's
-//! committed row) identifies the model currently in use. An unknown provider
-//! or model falls back to the first page / first row without a mark.
+//! Opening preselects the session's current model **by id**: the cursor lands
+//! on that row (its provider page becomes active) and a `●` mark (the kernel's
+//! committed row) identifies the model currently in use. An unknown id (or a
+//! session that has none — old metadata without a reference word) falls back to
+//! the first page / first row without a mark.
 //!
-//! The applied pair is always explicit: `Enter` produces the provider name
-//! and model name together, and the app dispatches them as-is — no
-//! name-based re-resolution, so same-named models across providers cannot be
-//! confused.
+//! Identity is the **model id** (`providers[].models[].id`, globally unique):
+//! `Enter` produces exactly the id the gateway's `session/update` takes —
+//! no name-based re-resolution, so same-named models across providers cannot
+//! be confused (they carry different ids), and the provider is only the tab
+//! grouping / display dimension.
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 
+use wing_api_client::models::ModelDetail;
 use wing_api_client::models::ProviderModels;
 
 use super::PageKind;
@@ -34,8 +37,8 @@ use super::SelectionPanel;
 pub enum ModelPanelAction {
     /// Key consumed, nothing to do.
     None,
-    /// Enter on a model row: apply this (provider, model) pair.
-    Apply { provider: String, model: String },
+    /// Enter on a model row: apply this model id.
+    Apply { model_id: String },
     /// Esc: close the panel without changing anything.
     Cancel,
 }
@@ -43,7 +46,7 @@ pub enum ModelPanelAction {
 /// Interactive state of the model picker.
 #[derive(Debug, Clone)]
 pub struct ModelPanel {
-    /// Provider groups + their models (from the last successful fetch).
+    /// Provider groups + their declared models (from the last successful fetch).
     sources: Vec<ProviderModels>,
     /// Active provider page.
     current: usize,
@@ -54,45 +57,47 @@ pub struct ModelPanel {
 }
 
 impl ModelPanel {
-    /// Build a panel from fetched sources, preselecting `current` — the
-    /// session's active `(provider, model)` pair when known.
-    pub fn new(sources: Vec<ProviderModels>, current: Option<(&str, &str)>) -> Self {
+    /// Build a panel from fetched sources, preselecting the session's active
+    /// model id when known.
+    pub fn new(sources: Vec<ProviderModels>, current_model_id: Option<&str>) -> Self {
         let mut panel = Self {
             cursors: vec![0; sources.len()],
             committed: vec![None; sources.len()],
             current: 0,
             sources,
         };
-        panel.preselect(current);
+        panel.preselect(current_model_id);
         panel
     }
 
     /// In-place refresh: replace the sources, keeping the active page, cursor
     /// and mark where they are still valid.  Cursor and committed mark are
-    /// re-resolved by **(provider, model) name** (not index), so re-ordering
-    /// or insertion in the model list never shifts the selection to a
-    /// different model — the same principle this feature branch establishes
-    /// for the `/model` command path.  An empty update is ignored so the last
-    /// good data stays on screen.
+    /// re-resolved by **model id** (not index), so re-ordering or insertion in
+    /// the catalog never shifts the selection to a different model — and since
+    /// ids are globally unique, a provider reshuffle cannot collide either.
+    /// An empty update is ignored so the last good data stays on screen.
     pub fn set_sources(&mut self, sources: Vec<ProviderModels>) {
         if sources.is_empty() {
             return;
         }
-        // Snapshot cursor/committed by (provider name, model name).
+        // Snapshot cursor/committed by model id (identity), plus the active page.
         let prev: Vec<(String, Option<String>, Option<String>)> = self
             .sources
             .iter()
             .enumerate()
             .map(|(i, g)| {
                 let row = self.cursor_at(i);
-                let cursor = g.models.get(row).cloned();
-                let committed = self.committed_at(i).and_then(|r| g.models.get(r).cloned());
+                let cursor = g.models.get(row).map(|m| m.id.clone());
+                let committed = self
+                    .committed_at(i)
+                    .and_then(|r| g.models.get(r).map(|m| m.id.clone()));
                 (g.provider.clone(), cursor, committed)
             })
             .collect();
-        let prev_active = self.current_page();
-        let prev_active_name: Option<String> =
-            self.sources.get(prev_active).map(|g| g.provider.clone());
+        let prev_active_name: Option<String> = self
+            .sources
+            .get(self.current_page())
+            .map(|g| g.provider.clone());
 
         self.sources = sources;
         self.cursors = vec![0; self.sources.len()];
@@ -102,11 +107,11 @@ impl ModelPanel {
         for (i, group) in self.sources.iter().enumerate() {
             if let Some((_, cursor, committed)) = prev.iter().find(|(p, _, _)| *p == group.provider)
             {
-                if let Some(name) = cursor {
-                    self.cursors[i] = group.models.iter().position(|m| m == name).unwrap_or(0);
+                if let Some(id) = cursor {
+                    self.cursors[i] = group.models.iter().position(|m| &m.id == id).unwrap_or(0);
                 }
-                if let Some(name) = committed {
-                    self.committed[i] = group.models.iter().position(|m| m == name);
+                if let Some(id) = committed {
+                    self.committed[i] = group.models.iter().position(|m| &m.id == id);
                 }
             }
             // Restore the active page by provider name.
@@ -116,20 +121,23 @@ impl ModelPanel {
         }
     }
 
-    /// Preselect the session's current `(provider, model)`: provider page,
-    /// model row and `●` mark. Unknown provider/model falls back to the first
-    /// page / row without a mark.
-    fn preselect(&mut self, pair: Option<(&str, &str)>) {
-        let Some((provider, model)) = pair else {
+    /// Preselect the session's current model id: provider page, model row and
+    /// `●` mark. Unknown / absent id falls back to the first page / row
+    /// without a mark (the frontend never invents an id).
+    fn preselect(&mut self, model_id: Option<&str>) {
+        let Some(model_id) = model_id.filter(|id| !id.trim().is_empty()) else {
             return;
         };
-        let Some(page) = self.sources.iter().position(|p| p.provider == provider) else {
+        let Some((page, row)) = self.sources.iter().enumerate().find_map(|(page, group)| {
+            group
+                .models
+                .iter()
+                .position(|detail| detail.id == model_id)
+                .map(|row| (page, row))
+        }) else {
             return;
         };
         self.current = page;
-        let Some(row) = self.sources[page].models.iter().position(|m| m == model) else {
-            return;
-        };
         self.cursors[page] = row;
         self.committed[page] = Some(row);
     }
@@ -159,19 +167,18 @@ impl ModelPanel {
         }
     }
 
-    /// Enter: apply the highlighted pair. No-op on an empty model list — there
-    /// is nothing to apply, and the user can still switch providers.
+    /// Enter: apply the highlighted model id. No-op on an empty model list —
+    /// there is nothing to apply, and the user can still switch providers.
     fn apply_current(&mut self) -> ModelPanelAction {
         let page = self.current_page();
         let Some(group) = self.sources.get(page) else {
             return ModelPanelAction::None;
         };
-        let Some(model) = group.models.get(self.cursor_at(page)) else {
+        let Some(detail) = group.models.get(self.cursor_at(page)) else {
             return ModelPanelAction::None;
         };
         ModelPanelAction::Apply {
-            provider: group.provider.clone(),
-            model: model.clone(),
+            model_id: detail.id.clone(),
         }
     }
 
@@ -182,8 +189,8 @@ impl ModelPanel {
         &self.sources
     }
 
-    /// Models of the active provider.
-    pub fn models(&self) -> &[String] {
+    /// Model declarations of the active provider.
+    pub fn models(&self) -> &[ModelDetail] {
         self.sources
             .get(self.current_page())
             .map_or(&[], |group| group.models.as_slice())
@@ -191,16 +198,16 @@ impl ModelPanel {
 
     /// Display label for a row on the active provider page: the model's
     /// declared `display_name` when present (non-empty), otherwise its call
-    /// name. Rendering-only — Apply / cursor / mark keep resolving by the
-    /// call name (`models()`), so the identity layer never sees this.
+    /// name. Rendering-only — Apply / cursor / mark keep resolving by the id
+    /// (`models()`), so the identity layer never sees this.
     pub fn label_at(&self, row: usize) -> &str {
         let Some(group) = self.sources.get(self.current_page()) else {
             return "";
         };
-        let Some(name) = group.models.get(row) else {
+        let Some(detail) = group.models.get(row) else {
             return "";
         };
-        group.label_for(name)
+        detail.display_label()
     }
 
     /// Cursor row on the active provider.
@@ -260,67 +267,77 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn group(provider: &str, models: &[&str]) -> ProviderModels {
-        ProviderModels {
-            provider: provider.into(),
-            models: models.iter().map(|m| m.to_string()).collect(),
-            model_details: vec![],
+    fn detail(id: &str, name: &str) -> ModelDetail {
+        ModelDetail {
+            id: id.into(),
+            name: name.into(),
+            display_name: None,
+            description: None,
+            capabilities: Default::default(),
         }
     }
 
-    /// Provider group carrying `display_name` declarations for the given
-    /// model names — the display layer's input.
+    /// Provider group where each model's id equals its name.
+    fn group(provider: &str, models: &[&str]) -> ProviderModels {
+        ProviderModels {
+            provider: provider.into(),
+            models: models.iter().map(|m| detail(m, m)).collect(),
+        }
+    }
+
+    /// Provider group declaring a display label for the given model id.
     fn group_with_labels(
         provider: &str,
         models: &[&str],
         labels: &[(&str, &str)],
     ) -> ProviderModels {
-        use wing_api_client::models::ModelDetail;
         ProviderModels {
             provider: provider.into(),
-            models: models.iter().map(|m| m.to_string()).collect(),
-            model_details: labels
+            models: models
                 .iter()
-                .map(|(name, label)| ModelDetail {
-                    name: (*name).to_string(),
-                    display_name: Some((*label).to_string()),
-                    description: None,
-                    capabilities: Default::default(),
+                .map(|id| {
+                    let label = labels
+                        .iter()
+                        .find(|(model, _)| model == id)
+                        .map(|(_, label)| (*label).to_string());
+                    ModelDetail {
+                        id: (*id).to_string(),
+                        name: (*id).to_string(),
+                        display_name: label,
+                        description: None,
+                        capabilities: Default::default(),
+                    }
                 })
                 .collect(),
         }
     }
 
-    /// Two providers exposing the same model name (`shared`).
+    /// Two providers exposing same-named models under **different ids**.
     fn same_name_sources() -> Vec<ProviderModels> {
         vec![
-            group("dashscope", &["shared", "only-a"]),
-            group("dashscope-openai", &["shared", "only-b"]),
+            ProviderModels {
+                provider: "dashscope".into(),
+                models: vec![detail("shared-a", "shared"), detail("only-a", "only-a")],
+            },
+            ProviderModels {
+                provider: "dashscope-openai".into(),
+                models: vec![detail("shared-b", "shared"), detail("only-b", "only-b")],
+            },
         ]
     }
 
-    // ── Same-name regression ────────────────────────────────────
+    // ── Id-keyed apply ──────────────────────────────────────────
 
     #[test]
-    fn same_name_model_resolves_to_the_selected_provider() {
+    fn apply_carries_the_id_of_the_selected_row() {
         let mut panel = ModelPanel::new(same_name_sources(), None);
-        // First provider, first row: `shared` → dashscope.
-        assert_eq!(
-            panel.handle_key(key(KeyCode::Enter)),
-            ModelPanelAction::Apply {
-                provider: "dashscope".into(),
-                model: "shared".into(),
-            }
-        );
-        // Switch to the second provider and select its `shared` → the SECOND
-        // provider must be applied (the old first-match resolution bug).
-        let mut panel = ModelPanel::new(same_name_sources(), None);
+        // Second page, first row: the same *name* as the first page's `shared`,
+        // but its own id — the tab the user selected decides.
         panel.handle_key(key(KeyCode::Right));
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
             ModelPanelAction::Apply {
-                provider: "dashscope-openai".into(),
-                model: "shared".into(),
+                model_id: "shared-b".into(),
             }
         );
     }
@@ -336,8 +353,7 @@ mod tests {
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
             ModelPanelAction::Apply {
-                provider: "dashscope".into(),
-                model: "only-a".into(),
+                model_id: "only-a".into(),
             }
         );
         // ← at the first provider stays put; → walks back to the second one
@@ -349,18 +365,17 @@ mod tests {
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
             ModelPanelAction::Apply {
-                provider: "dashscope-openai".into(),
-                model: "only-b".into(),
+                model_id: "only-b".into(),
             }
         );
     }
 
-    // ── Preselect ───────────────────────────────────────────────
+    // ── Preselect (by id) ───────────────────────────────────────
 
     #[test]
-    fn preselects_current_pair_with_marker() {
-        let panel = ModelPanel::new(same_name_sources(), Some(("dashscope-openai", "only-b")));
-        assert_eq!(panel.current_page(), 1, "opens on the current provider");
+    fn preselects_current_id_with_marker() {
+        let panel = ModelPanel::new(same_name_sources(), Some("only-b"));
+        assert_eq!(panel.current_page(), 1, "opens on the id's provider");
         assert_eq!(panel.cursor(), 1, "cursor on the current model");
         assert_eq!(
             panel.committed_at(1),
@@ -371,27 +386,36 @@ mod tests {
     }
 
     #[test]
-    fn unknown_provider_falls_back_to_the_first_page() {
-        let panel = ModelPanel::new(same_name_sources(), Some(("nope", "only-b")));
+    fn unknown_id_falls_back_to_the_first_page() {
+        let panel = ModelPanel::new(same_name_sources(), Some("nope"));
         assert_eq!(panel.current_page(), 0);
         assert_eq!(panel.cursor(), 0);
         assert_eq!(panel.committed_at(0), None);
     }
 
     #[test]
-    fn known_provider_unknown_model_selects_page_without_mark() {
-        let panel = ModelPanel::new(same_name_sources(), Some(("dashscope-openai", "nope")));
-        assert_eq!(panel.current_page(), 1);
-        assert_eq!(panel.cursor(), 0);
-        assert_eq!(panel.committed_at(1), None);
-    }
-
-    #[test]
-    fn missing_pair_falls_back_to_the_first_page() {
+    fn missing_or_blank_id_falls_back_to_the_first_page() {
+        // 旧会话（metadata 无 id）：没有可匹配的引用词 → 无标记（不发明 id）。
         let panel = ModelPanel::new(same_name_sources(), None);
         assert_eq!(panel.current_page(), 0);
         assert_eq!(panel.cursor(), 0);
         assert_eq!(panel.committed_at(0), None);
+
+        let panel = ModelPanel::new(same_name_sources(), Some("   "));
+        assert_eq!(panel.current_page(), 0);
+        assert_eq!(panel.committed_at(0), None);
+    }
+
+    /// 同名模型跨 provider：id 各自独立 → 各自独立预选（旧世界靠 (provider, name)
+    /// 消歧，现在 id 本身就是消歧结果）。
+    #[test]
+    fn same_name_models_are_preselected_by_their_own_ids() {
+        let panel = ModelPanel::new(same_name_sources(), Some("shared-b"));
+        assert_eq!(panel.current_page(), 1);
+        assert_eq!(panel.committed_at(1), Some(0));
+        let panel = ModelPanel::new(same_name_sources(), Some("shared-a"));
+        assert_eq!(panel.current_page(), 0);
+        assert_eq!(panel.committed_at(0), Some(0));
     }
 
     // ── Empty page ──────────────────────────────────────────────
@@ -441,16 +465,16 @@ mod tests {
     }
 
     /// The identity layer is untouched: with display names present, the
-    /// cursor and the applied pair still resolve by the call name.
+    /// cursor and the applied value still resolve by the id.
     #[test]
-    fn apply_uses_call_name_even_when_display_names_exist() {
+    fn apply_uses_the_id_even_when_display_names_exist() {
         let mut panel = ModelPanel::new(
             vec![group_with_labels(
                 "qoder",
                 &["dfmodel", "other"],
                 &[("dfmodel", "DeepSeek-Flash")],
             )],
-            Some(("qoder", "dfmodel")),
+            Some("dfmodel"),
         );
         assert_eq!(
             panel.label_at(panel.cursor()),
@@ -460,10 +484,33 @@ mod tests {
         assert_eq!(
             panel.handle_key(key(KeyCode::Enter)),
             ModelPanelAction::Apply {
-                provider: "qoder".into(),
-                model: "dfmodel".into(),
+                model_id: "dfmodel".into(),
             },
-            "Apply carries the call name, never the display name"
+            "Apply carries the id, never the display name"
+        );
+    }
+
+    /// id ≠ name：行渲染调用名/展示名，Apply 发 id。
+    #[test]
+    fn apply_carries_the_id_when_it_differs_from_the_call_name() {
+        let sources = vec![ProviderModels {
+            provider: "qoder".into(),
+            models: vec![ModelDetail {
+                id: "ds-flash".into(),
+                name: "dfmodel-2026".into(),
+                display_name: Some("DeepSeek-Flash".into()),
+                description: None,
+                capabilities: Default::default(),
+            }],
+        }];
+        let mut panel = ModelPanel::new(sources, Some("ds-flash"));
+        assert_eq!(panel.committed_at(0), Some(0), "id 匹配预选");
+        assert_eq!(
+            panel.handle_key(key(KeyCode::Enter)),
+            ModelPanelAction::Apply {
+                model_id: "ds-flash".into(),
+            },
+            "值 = id（不是调用名、不是展示名）"
         );
     }
 
@@ -491,10 +538,10 @@ mod tests {
 
     #[test]
     fn refresh_keeps_page_cursor_and_marker() {
-        let mut panel = ModelPanel::new(same_name_sources(), Some(("dashscope-openai", "only-b")));
+        let mut panel = ModelPanel::new(same_name_sources(), Some("only-b"));
         let refreshed = vec![
-            group("dashscope", &["shared", "only-a", "new-a"]),
-            group("dashscope-openai", &["shared", "only-b", "new-b"]),
+            group("dashscope", &["shared-a", "only-a", "new-a"]),
+            group("dashscope-openai", &["shared-b", "only-b", "new-b"]),
         ];
         panel.set_sources(refreshed);
         assert_eq!(panel.current_page(), 1);
@@ -502,18 +549,31 @@ mod tests {
         assert_eq!(panel.committed_at(1), Some(1));
     }
 
+    /// 刷新按 **id** 重解析：目录重排后光标与标记跟的是同一个模型（不是同一行号）。
+    #[test]
+    fn refresh_tracks_the_id_across_reordering() {
+        let mut panel = ModelPanel::new(vec![group("p", &["a", "b", "c"])], Some("c"));
+        panel.handle_key(key(KeyCode::Up)); // cursor → b
+        panel.handle_key(key(KeyCode::Up)); // cursor → a
+        assert_eq!(panel.cursor(), 0, "cursor preselected a");
+        // 重排 + 插入：a 与 c 都换了行号。
+        panel.set_sources(vec![group("p", &["new", "a", "b", "c"])]);
+        assert_eq!(panel.cursor(), 1, "cursor follows a's new row");
+        assert_eq!(panel.committed_at(0), Some(3), "the mark follows the c id");
+    }
+
     #[test]
     fn refresh_falls_back_when_the_current_page_vanishes() {
         let mut panel = ModelPanel::new(same_name_sources(), None);
         panel.handle_key(key(KeyCode::Right)); // page 1
-        panel.set_sources(vec![group("dashscope", &["shared"])]);
+        panel.set_sources(vec![group("dashscope", &["shared-a"])]);
         assert_eq!(panel.current_page(), 0, "missing provider → first page");
         assert_eq!(panel.cursor(), 0);
     }
 
     #[test]
     fn refresh_clamps_cursor_and_clears_vanished_mark() {
-        let mut panel = ModelPanel::new(vec![group("p", &["a", "b", "c"])], Some(("p", "c")));
+        let mut panel = ModelPanel::new(vec![group("p", &["a", "b", "c"])], Some("c"));
         panel.set_sources(vec![group("p", &["a"])]);
         assert_eq!(panel.cursor(), 0, "cursor clamps to the remaining row");
         assert_eq!(panel.committed_at(0), None, "vanished model loses its mark");
@@ -533,12 +593,13 @@ mod tests {
     fn window_on_long_model_list_centers_the_cursor() {
         use crate::shared::panels::PANEL_WINDOW;
         use crate::shared::panels::window_range;
-        let many: Vec<String> = (0..8).map(|i| format!("m{i}")).collect();
+        let many: Vec<ModelDetail> = (0..8)
+            .map(|i| detail(&format!("m{i}"), &format!("m{i}")))
+            .collect();
         let mut panel = ModelPanel::new(
             vec![ProviderModels {
                 provider: "p".into(),
                 models: many,
-                model_details: vec![],
             }],
             None,
         );

@@ -55,8 +55,12 @@ pub struct RecordedRequest {
 }
 
 /// 会话的「当前模型」状态（`GET /api/session/get` 的 agent 字段 + `POST update` 写入）。
+///
+/// 四元组与真网关同构：`model_id` 是引用词，`model` 是调用名，`provider` 是运行期事实，
+/// `display_name` 是展示名。
 #[derive(Debug, Clone)]
 struct SessionState {
+    model_id: Option<String>,
     provider: String,
     model: String,
     display_name: Option<String>,
@@ -66,6 +70,7 @@ struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            model_id: Some("echo-1".to_string()),
             provider: "fake".to_string(),
             model: "echo-1".to_string(),
             display_name: Some("Echo One".to_string()),
@@ -249,10 +254,11 @@ impl FakeGateway {
             .insert(session_id.to_string(), frame);
     }
 
-    /// 预置会话状态（`GET /api/session/get`）。
+    /// 预置会话状态（`GET /api/session/get`）：`(model_id, provider, 调用名, 展示名)`。
     pub fn set_session_state(
         &self,
         session_id: &str,
+        model_id: Option<&str>,
         provider: &str,
         model: &str,
         display_name: Option<&str>,
@@ -260,6 +266,7 @@ impl FakeGateway {
         self.state.states.lock().expect("gateway state").insert(
             session_id.to_string(),
             SessionState {
+                model_id: model_id.map(str::to_string),
                 provider: provider.to_string(),
                 model: model.to_string(),
                 display_name: display_name.map(str::to_string),
@@ -551,20 +558,36 @@ fn route(
         }
         ("POST", "/api/session/unsubscribe") => (200, json!({"ok": true})),
         ("POST", "/api/session/update") => {
-            // 会话级状态变更（模型 / provider）：写回状态表，后续 session/get 反映新值。
+            // 会话级状态变更（模型引用词）：按目录把 id 映射回调用名 / provider /
+            // 展示名写回状态表（未命中 = 真网关的 400 语义），后续 session/get 反映新值。
             if let Some(body) = body {
                 let session_id = body
                     .get("session_id")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let mut states = state.states.lock().expect("gateway state");
-                let entry = states.entry(session_id.to_string()).or_default();
-                if let Some(model) = body.get("model").and_then(Value::as_str) {
-                    entry.model = model.to_string();
-                    entry.display_name = None;
-                }
-                if let Some(provider) = body.get("provider").and_then(Value::as_str) {
-                    entry.provider = provider.to_string();
+                if let Some(model_id) = body.get("model_id").and_then(Value::as_str) {
+                    let catalog = state.models.lock().expect("gateway state").clone();
+                    match resolve_catalog_entry(&catalog, model_id) {
+                        Some((provider, name, display)) => {
+                            let mut states = state.states.lock().expect("gateway state");
+                            let entry = states.entry(session_id.to_string()).or_default();
+                            entry.model_id = Some(model_id.to_string());
+                            entry.provider = provider;
+                            entry.model = name;
+                            entry.display_name = display;
+                        }
+                        None => {
+                            return (
+                                400,
+                                json!({
+                                    "detail": format!(
+                                        "unknown model id '{model_id}'; available ids: {}",
+                                        catalog_ids(&catalog).join(", ")
+                                    ),
+                                }),
+                            );
+                        }
+                    }
                 }
             }
             (200, json!({"ok": true}))
@@ -621,6 +644,7 @@ fn session_get_frame(state: &GatewayState, session_id: &str) -> Value {
         "messages": [],
         "agent": {
             "model_name": current.model,
+            "model_id": current.model_id,
             "system_prompt": null,
             "tools": [],
             "skills": [],
@@ -643,6 +667,8 @@ fn session_info_frame(state: &GatewayState, session_id: &str) -> Value {
     let current = state.state_of(session_id);
     json!({
         "model": current.model,
+        "model_id": current.model_id,
+        "provider_name": current.provider,
         "model_display_name": current.display_name,
         "api_url": "http://fake-gateway",
         "tools": [],
@@ -660,6 +686,58 @@ fn session_info_frame(state: &GatewayState, session_id: &str) -> Value {
         "tags": [],
         "tag_meta": {},
     })
+}
+
+/// 目录里按 **id** 查声明：`(provider, 调用名, 展示名)`（单键查表，与真网关同语义）。
+fn resolve_catalog_entry(
+    catalog: &Value,
+    model_id: &str,
+) -> Option<(String, String, Option<String>)> {
+    catalog
+        .get("providers")?
+        .as_array()?
+        .iter()
+        .find_map(|group| {
+            let provider = group.get("provider")?.as_str()?.to_string();
+            let detail = group
+                .get("models")?
+                .as_array()?
+                .iter()
+                .find(|detail| detail.get("id").and_then(Value::as_str) == Some(model_id))?;
+            let name = detail.get("name")?.as_str()?.to_string();
+            let display = detail
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some((provider, name, display))
+        })
+}
+
+/// 目录里的全部 id（400 的 available ids 用）。
+fn catalog_ids(catalog: &Value) -> Vec<String> {
+    catalog
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(|providers| {
+            providers
+                .iter()
+                .flat_map(|group| {
+                    group
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .map(|models| {
+                            models
+                                .iter()
+                                .filter_map(|detail| {
+                                    detail.get("id").and_then(Value::as_str).map(str::to_string)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 与 [`FakeGateway::push`] 等价的内部版本（路由里推快照用）。

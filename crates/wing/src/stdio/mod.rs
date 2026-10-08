@@ -89,6 +89,7 @@ impl std::str::FromStr for InputFormat {
 #[derive(Debug, Clone)]
 pub struct StdioArgs {
     pub prompt: String,
+    /// 模型覆盖（`--model` 的值 = 引用词 model_id）。
     pub model: Option<String>,
     pub resume: Option<String>,
     /// `--session-id`: create-or-adopt (mutually exclusive with `resume`).
@@ -99,7 +100,6 @@ pub struct StdioArgs {
     pub append_system_prompt: Option<String>,
     pub max_turns: Option<u32>,
     pub effort: Option<String>,
-    pub provider: Option<String>,
     pub tools: Option<String>,
     /// Tags attached to the session (created tagged; `-r` adds to the resumed one).
     pub tag: Vec<String>,
@@ -149,8 +149,7 @@ pub fn resume_session_at_error(value: &str) -> String {
 ///    恢复既有会话，语义冲突，同时给出即报错（不猜调用方想要哪个）；
 /// 2. resume / adopt 下不生效的覆盖旗标（`--system-prompt` / `--append-system-prompt` /
 ///    `--max-turns`）打日志警告——它们**不该**改链上前缀，但"给了没反应"
-///    必须可诊断；
-/// 3. 任何路径下都不生效的 `--provider`（单独给出，没有 `--model`）同样出声。
+///    必须可诊断。
 ///
 /// 警告只进日志（`$WING_HOME/tui/logs/`）：stderr 留给错误与 `session_id:` 行，
 /// stdout 是协议流。
@@ -173,16 +172,6 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
         );
     }
 
-    // `--provider` 单独给出：切 provider 需要一个要切过去的模型（与
-    // `session/update` 的"model 与 provider 必须成对"同一口径）——它在**任何**
-    // 路径上都是 no-op，因此不看是否 resume。
-    if provider_without_model(args) {
-        tracing::warn!(
-            "--provider without --model is a no-op: switching provider needs a model \
-             to switch to; the session keeps its current provider"
-        );
-    }
-
     if args.resume.is_some() || args.session_id.is_some() {
         let ignored = resume_ignored_flags(args);
         if !ignored.is_empty() {
@@ -195,8 +184,7 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
     }
 
     // `--include-partial-messages` 只在 stream-json 输出下有意义（其余输出形态
-    // 没有协议通道可承载 `stream_event` 帧）——给了没反应必须可诊断，与
-    // `--provider` 单独给出同一口径。
+    // 没有协议通道可承载 `stream_event` 帧）——给了没反应必须可诊断。
     if partial_messages_without_stream_json_output(args) {
         tracing::warn!(
             "--include-partial-messages requires --output-format stream-json: without \
@@ -220,11 +208,6 @@ fn resume_ignored_flags(args: &StdioArgs) -> Vec<&'static str> {
         flags.push("--max-turns");
     }
     flags
-}
-
-/// `--provider` 给了但没有 `--model`：no-op（纯函数，便于单测）。
-fn provider_without_model(args: &StdioArgs) -> bool {
-    args.provider.is_some() && args.model.is_none()
 }
 
 /// `--include-partial-messages` 给了但输出不是 stream-json：no-op（纯函数，
@@ -256,8 +239,7 @@ pub fn session_id_mismatch_error(requested: &str, returned: &str) -> String {
 /// 创建语义的覆盖：全字段（stdio 一律 yolo）。
 fn create_override(args: &StdioArgs) -> AgentOverride {
     AgentOverride {
-        model: args.model.clone(),
-        provider: args.provider.clone(),
+        model_id: args.model.clone(),
         system_prompt: args.system_prompt.clone(),
         append_system_prompt: args.append_system_prompt.clone(),
         tools: normalize_tools(args.tools.as_deref()),
@@ -267,15 +249,14 @@ fn create_override(args: &StdioArgs) -> AgentOverride {
     }
 }
 
-/// resume（含 adopt）语义的覆盖：**只装** model / provider / effort / tools。
+/// resume（含 adopt）语义的覆盖：**只装** model_id / effort / tools。
 ///
 /// `--system-prompt` / `--append-system-prompt` / `--max-turns` 不在其中：它们
 /// 会改请求前缀或会话既有限额（网关侧也照此口径，见 `apply_resume_override`）。
-/// 四个字段全空时返回 `None`——不发一个全空的覆盖体。
+/// 三个字段全空时返回 `None`——不发一个全空的覆盖体。
 fn resume_override(args: &StdioArgs) -> Option<AgentOverride> {
     let override_ = AgentOverride {
-        model: args.model.clone(),
-        provider: args.provider.clone(),
+        model_id: args.model.clone(),
         system_prompt: None,
         append_system_prompt: None,
         tools: normalize_tools(args.tools.as_deref()),
@@ -283,10 +264,8 @@ fn resume_override(args: &StdioArgs) -> Option<AgentOverride> {
         effort: args.effort.clone(),
         yolo: None,
     };
-    let is_empty = override_.model.is_none()
-        && override_.provider.is_none()
-        && override_.tools.is_none()
-        && override_.effort.is_none();
+    let is_empty =
+        override_.model_id.is_none() && override_.tools.is_none() && override_.effort.is_none();
     (!is_empty).then_some(override_)
 }
 
@@ -1192,7 +1171,6 @@ mod tests {
             append_system_prompt: None,
             max_turns: None,
             effort: None,
-            provider: None,
             tools: None,
             tag: Vec::new(),
             output_format: OutputFormat::Text,
@@ -1236,8 +1214,7 @@ mod tests {
     #[test]
     fn resume_override_carries_only_the_resume_subset() {
         let mut a = args();
-        a.model = Some("m".into());
-        a.provider = Some("p".into());
+        a.model = Some("ds-flash".into());
         a.effort = Some("high".into());
         a.tools = Some("Read,Bash".into());
         // 创建期旗标：不得进入 resume 覆盖。
@@ -1246,8 +1223,7 @@ mod tests {
         a.max_turns = Some(7);
 
         let override_ = resume_override(&a).expect("non-empty override");
-        assert_eq!(override_.model.as_deref(), Some("m"));
-        assert_eq!(override_.provider.as_deref(), Some("p"));
+        assert_eq!(override_.model_id.as_deref(), Some("ds-flash"));
         assert_eq!(override_.effort.as_deref(), Some("high"));
         assert_eq!(override_.tools, Some(vec!["Read".into(), "Bash".into()]));
         assert_eq!(override_.system_prompt, None);
@@ -1272,12 +1248,14 @@ mod tests {
     #[test]
     fn create_override_keeps_full_semantics_and_yolo() {
         let mut a = args();
+        a.model = Some("ds-flash".into());
         a.system_prompt = Some("SYS".into());
         a.append_system_prompt = Some("APP".into());
         a.max_turns = Some(7);
         a.tools = Some("default".into()); // 语义值丢弃 → None
 
         let override_ = create_override(&a);
+        assert_eq!(override_.model_id.as_deref(), Some("ds-flash"));
         assert_eq!(override_.system_prompt.as_deref(), Some("SYS"));
         assert_eq!(override_.append_system_prompt.as_deref(), Some("APP"));
         assert_eq!(override_.max_turns, Some(7));
@@ -1295,18 +1273,6 @@ mod tests {
     // ---- 不生效旗标的识别（纯函数） ----
 
     #[test]
-    fn provider_without_model_is_recognised() {
-        let mut a = args();
-        assert!(!provider_without_model(&a)); // 都没有 = 没问题
-
-        a.provider = Some("p".into());
-        assert!(provider_without_model(&a), "单独的 --provider 是 no-op");
-
-        a.model = Some("m".into());
-        assert!(!provider_without_model(&a), "--provider + --model 成对生效");
-    }
-
-    #[test]
     fn resume_ignored_flags_lists_create_time_flags() {
         let mut a = args();
         assert!(resume_ignored_flags(&a).is_empty());
@@ -1318,10 +1284,6 @@ mod tests {
             resume_ignored_flags(&a),
             vec!["--system-prompt", "--append-system-prompt", "--max-turns"]
         );
-
-        // provider 不由这里管（它在任何路径上都是 no-op，单独一套消息）。
-        a.provider = Some("p".into());
-        assert!(!resume_ignored_flags(&a).contains(&"--provider"));
     }
 
     // ---- --include-partial-messages（流式的可诊断 no-op） ----

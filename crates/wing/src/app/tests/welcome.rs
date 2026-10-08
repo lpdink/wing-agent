@@ -309,6 +309,7 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
         turn_started_at: None,
         agent: Some(Box::new(crate::protocol::AgentInfo {
             model_name: "test-model".into(),
+            model_id: None,
             system_prompt: None,
             tools: vec![],
             skills: vec!["pdf".into(), "webapp".into()],

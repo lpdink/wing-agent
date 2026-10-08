@@ -83,7 +83,7 @@ impl GatewayClient {
 
     /// 从磁盘恢复已有 session，并应用 resume 覆盖（`AgentOverride` 子集）。
     ///
-    /// 覆盖只应用 `model` / `provider` / `effort` / `tools`——见
+    /// 覆盖只应用 `model_id` / `effort` / `tools`——见
     /// [`ResumeSessionRequest`] 的字段说明。`agent` 为 `None` 时与
     /// [`Self::resume_session`] 等价（保留这个变体方法而不是给
     /// `resume_session` 加参数：既有调用点零改动，合并面更小）。

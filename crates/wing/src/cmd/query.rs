@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
-use wing_api_client::models::{AgentsResponse, ModelsResponse, ToolsListResponse};
+use wing_api_client::models::{AgentsResponse, ModelDetail, ModelsResponse, ToolsListResponse};
 
 use super::common;
 
@@ -50,9 +50,10 @@ const MODEL_DESCRIPTION_MAX_CHARS: usize = 60;
 
 /// Render the `wing models` table.
 ///
-/// Row shape: `  {name}` + ` ({display_name})` when the gateway declared a
-/// display name distinct from the call name + the truncated description.
-/// Display only — the call name stays the first, authoritative column.
+/// Row shape: `  {id}` — the **reference word** is the first, authoritative column
+/// (it is what every request sends) — plus `→ {name}` when the call name differs
+/// from the id, `({display_name})` when a display label is declared, and the
+/// truncated description.
 fn format_models(resp: &ModelsResponse) -> String {
     if resp.providers.is_empty() {
         return "No models configured.\n".to_string();
@@ -63,28 +64,36 @@ fn format_models(resp: &ModelsResponse) -> String {
         if group.models.is_empty() {
             out.push_str("  (no models)\n");
         } else {
-            for model in &group.models {
-                let label = group.label_for(model);
-                let mut line = if label == model {
-                    format!("  {model}")
-                } else {
-                    format!("  {model} ({label})")
-                };
-                if let Some(desc) = group
-                    .detail_for(model)
-                    .and_then(|detail| detail.description.as_deref())
-                    .filter(|desc| !desc.trim().is_empty())
-                {
-                    line.push_str("  ");
-                    line.push_str(&common::truncate_chars(desc, MODEL_DESCRIPTION_MAX_CHARS));
-                }
-                out.push_str(&line);
+            for detail in &group.models {
+                out.push_str(&format_model_row(detail));
                 out.push('\n');
             }
         }
         out.push('\n');
     }
     out
+}
+
+/// 一行模型：`  {id}` + `→ {name}`（id ≠ name 时）+ `({label})`（声明的展示名与
+/// 调用名不同时）+ 截断的描述。展示层专用——请求一律用 id。
+fn format_model_row(detail: &ModelDetail) -> String {
+    let mut line = format!("  {}", detail.id);
+    if detail.name != detail.id {
+        line.push_str(&format!(" → {}", detail.name));
+    }
+    let label = detail.display_label();
+    if label != detail.name {
+        line.push_str(&format!(" ({label})"));
+    }
+    if let Some(desc) = detail
+        .description
+        .as_deref()
+        .filter(|desc| !desc.trim().is_empty())
+    {
+        line.push_str("  ");
+        line.push_str(&common::truncate_chars(desc, MODEL_DESCRIPTION_MAX_CHARS));
+    }
+    line
 }
 
 // ============================================================
@@ -188,16 +197,21 @@ mod tests {
     use super::*;
     use wing_api_client::models::{ModelDetail, ProviderModels};
 
-    fn group(provider: &str, models: &[&str], details: Vec<ModelDetail>) -> ProviderModels {
+    fn group(provider: &str, details: Vec<ModelDetail>) -> ProviderModels {
         ProviderModels {
             provider: provider.into(),
-            models: models.iter().map(|m| m.to_string()).collect(),
-            model_details: details,
+            models: details,
         }
     }
 
-    fn detail(name: &str, display_name: Option<&str>, description: Option<&str>) -> ModelDetail {
+    fn detail(
+        id: &str,
+        name: &str,
+        display_name: Option<&str>,
+        description: Option<&str>,
+    ) -> ModelDetail {
         ModelDetail {
+            id: id.into(),
             name: name.into(),
             display_name: display_name.map(str::to_string),
             description: description.map(str::to_string),
@@ -206,9 +220,16 @@ mod tests {
     }
 
     #[test]
-    fn format_models_legacy_response_prints_call_names_only() {
+    fn format_models_lists_ids_first() {
+        // id == name（存量配置的常态）：第一列就是 id，不加冗余后缀。
         let resp = ModelsResponse {
-            providers: vec![group("qoder", &["dfmodel", "gpt-x"], vec![])],
+            providers: vec![group(
+                "qoder",
+                vec![
+                    detail("dfmodel", "dfmodel", None, None),
+                    detail("gpt-x", "gpt-x", None, None),
+                ],
+            )],
         };
         assert_eq!(
             format_models(&resp),
@@ -217,21 +238,25 @@ mod tests {
     }
 
     #[test]
-    fn format_models_adds_display_name_and_description() {
+    fn format_models_adds_call_name_and_display_name_suffixes() {
+        // id ≠ name → `→ name`；声明了展示名 → `(label)`；描述截断列在最后。
         let resp = ModelsResponse {
             providers: vec![group(
                 "qoder",
-                &["dfmodel", "bare"],
-                vec![detail(
-                    "dfmodel",
-                    Some("DeepSeek-Flash"),
-                    Some("深度求索正式版模型"),
-                )],
+                vec![
+                    detail(
+                        "ds-flash",
+                        "dfmodel-2026",
+                        Some("DeepSeek-Flash"),
+                        Some("深度求索正式版模型"),
+                    ),
+                    detail("bare", "bare-upstream", None, None),
+                ],
             )],
         };
         assert_eq!(
             format_models(&resp),
-            "Provider: qoder\n  dfmodel (DeepSeek-Flash)  深度求索正式版模型\n  bare\n\n"
+            "Provider: qoder\n  ds-flash → dfmodel-2026 (DeepSeek-Flash)  深度求索正式版模型\n  bare → bare-upstream\n\n"
         );
     }
 
@@ -241,8 +266,7 @@ mod tests {
         let resp = ModelsResponse {
             providers: vec![group(
                 "p",
-                &["m"],
-                vec![detail("m", None, Some(long.as_str()))],
+                vec![detail("m", "m", None, Some(long.as_str()))],
             )],
         };
         let expected_desc = "x".repeat(MODEL_DESCRIPTION_MAX_CHARS - 3) + "...";
@@ -254,18 +278,22 @@ mod tests {
 
     #[test]
     fn format_models_skips_redundant_or_empty_display_names() {
-        // display_name 与调用名相同 / 为空串 → 不重复展示；无 description 不补尾巴。
+        // 展示名与调用名相同 / 为空串 → 不重复展示；无 description 不补尾巴。
+        // id == name 且声明了展示名 → 只补 `(label)`。
         let resp = ModelsResponse {
             providers: vec![group(
                 "p",
-                &["same", "empty"],
                 vec![
-                    detail("same", Some("same"), None),
-                    detail("empty", Some(""), None),
+                    detail("same", "same", Some("same"), None),
+                    detail("empty", "empty", Some(""), None),
+                    detail("labelled", "labelled", Some("Nice Label"), None),
                 ],
             )],
         };
-        assert_eq!(format_models(&resp), "Provider: p\n  same\n  empty\n\n");
+        assert_eq!(
+            format_models(&resp),
+            "Provider: p\n  same\n  empty\n  labelled (Nice Label)\n\n"
+        );
     }
 
     #[test]
@@ -274,8 +302,7 @@ mod tests {
         let resp = ModelsResponse {
             providers: vec![group(
                 "p",
-                &["blank"],
-                vec![detail("blank", None, Some("   "))],
+                vec![detail("blank", "blank", None, Some("   "))],
             )],
         };
         assert_eq!(format_models(&resp), "Provider: p\n  blank\n\n");
@@ -283,8 +310,7 @@ mod tests {
         let resp = ModelsResponse {
             providers: vec![group(
                 "p",
-                &["padded"],
-                vec![detail("padded", None, Some(" 说明 "))],
+                vec![detail("padded", "padded", None, Some(" 说明 "))],
             )],
         };
         assert_eq!(format_models(&resp), "Provider: p\n  padded   说明 \n\n");
@@ -297,7 +323,7 @@ mod tests {
             "No models configured.\n"
         );
         let empty_group = ModelsResponse {
-            providers: vec![group("p", &[], vec![])],
+            providers: vec![group("p", vec![])],
         };
         assert_eq!(
             format_models(&empty_group),
