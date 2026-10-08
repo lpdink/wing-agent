@@ -93,7 +93,7 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
         CommandInfo {
             name: "model".into(),
             aliases: vec!["m".into()],
-            description: "Select provider and model".into(),
+            description: "Select a model".into(),
             params: String::new(),
         },
         CommandInfo {

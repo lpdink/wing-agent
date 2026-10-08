@@ -336,21 +336,26 @@ impl App {
 
         match result.payload {
             FetchPayload::Info(info) => {
-                // Update model; clear provider when the model changes, since
-                // Info does not carry provider info and the old provider
-                // may be stale (e.g. the model was changed via another path).
-                // The display label is resolved before that clearing, and —
-                // when the gateway did not ship one (old gateway) — falls back
-                // to the local `/api/models` snapshot, so a reconnect does not
-                // drop a label that is already known.
-                let model_display_name = info.model_display_name.or_else(|| {
-                    self.model_display_label(self.status.provider.as_deref(), &info.model)
+                // The model identity group travels whole: `model_id` is the
+                // reference word, `model` the call name, `provider_name` the
+                // runtime fact (info ships it now — no more "clear the provider
+                // when the model changes" guesswork). The display label falls
+                // back to the local `/api/models` snapshot only when the
+                // gateway did not ship one, so a reconnect does not drop a
+                // label that is already known: by id when there is one, by
+                // call name for id-less sessions (display only).
+                let model_display_name = info.model_display_name.clone().or_else(|| {
+                    match info.model_id.as_deref().filter(|id| !id.trim().is_empty()) {
+                        Some(id) => self.model_display_label(id),
+                        None => self.model_display_label_by_name(&info.model),
+                    }
                 });
-                if info.model != self.status.model {
-                    self.status.provider = None;
-                }
-                self.status.model = info.model;
-                self.status.model_display_name = model_display_name;
+                self.status.set_model(crate::ui::status_bar::ModelUpdate {
+                    id: info.model_id.clone(),
+                    name: info.model.clone(),
+                    provider: info.provider_name.clone(),
+                    display_name: model_display_name,
+                });
                 self.status.total_tokens = info.total_tokens;
                 self.status.context_window_tokens = info.context_window_tokens;
                 self.status.thinking = info.thinking;
@@ -370,7 +375,7 @@ impl App {
                 };
                 self.turn.last_title = Some(title.clone());
                 self.push_intent(AppIntent::SetTitle(title));
-                tracing::info!(model = %self.status.model, "session info received");
+                tracing::info!(model = %self.status.model, model_id = ?self.status.model_id, "session info received");
             }
             FetchPayload::Commands(resp) => {
                 self.popup.cache.commands = resp
@@ -407,7 +412,7 @@ impl App {
                         // (refresh) does NOT reopen after the user closes it.
                         self.model_panel_pending = false;
                         let panel =
-                            ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
+                            ModelPanel::new(self.model_sources.clone(), self.current_model_id());
                         self.present_model_panel(panel);
                     }
                     // If the panel was closed (Esc) while the fetch was in
@@ -570,7 +575,7 @@ fn show_skills_info(app: &mut App, _text: &str) -> bool {
 /// `/model [ignored]` — open the picker panel.
 ///
 /// Args are ignored (BREAKING): model selection goes through the panel so the
-/// (provider, model) pair is explicit.
+/// applied value is the model id the gateway takes.
 fn open_model_picker(app: &mut App, _text: &str) -> bool {
     app.open_model_panel();
     true
