@@ -499,12 +499,15 @@ class WingAgent:
             前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待期间
             新到的消息。
 
-        成功路径有且至少一条 INFO（`Agent interrupt complete: …`，与
-        `shutdown()` 的 `Agent shutdown complete: …` 对称）：session id、
-        worker 是否终止、consumer 是否重建、入口到返回的总耗时（含等锁与
-        取消阶梯）、被丢弃的积压数——打断过程本身必须可 grep，而不是只能
-        从前端事件流 / history 反推。阶梯中间步骤仍是 WARNING 级、阶梯
-        耗尽另有 ERROR + notice（既有形态，不在此重复）。
+        正常返回（含阶梯耗尽的**降级**路径——那时 `worker_stopped=False`、
+        前面另有 ERROR + notice）必有且**仅**一条 INFO（
+        `Agent interrupt complete: …`，与 `shutdown()` 的
+        `Agent shutdown complete: …` 对称）：session id、worker 是否终止、
+        consumer 是否重建、入口到返回的总耗时（含等锁与取消阶梯）、被丢弃
+        的积压数（口径：**带 `request_id`** 的排队项——内部直投不带 id，
+        被清但不计数）——打断过程本身必须可 grep，而不是只能从前端事件流 /
+        history 反推。阶梯中间步骤仍是 WARNING 级、阶梯耗尽另有 ERROR +
+        notice（既有形态，不在此重复）。
         """
         started = time.monotonic()
         self._inbox.cancel_all_waiters()
