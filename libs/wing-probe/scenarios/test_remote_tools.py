@@ -70,6 +70,7 @@ def _tool_messages(probe: Probe, session_id: str) -> list[dict]:
     ]
 
 
+@pytest.mark.probe_env(models=[ROUNDTRIP_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_remote_tool_roundtrip_registers_and_returns_result(probe: Probe) -> None:
@@ -173,6 +174,7 @@ async def test_remote_tool_roundtrip_registers_and_returns_result(probe: Probe) 
         await host.close()
 
 
+@pytest.mark.probe_env(models=[DISCONNECT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_remote_host_disconnect_aborts_in_flight_and_unregisters(

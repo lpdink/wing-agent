@@ -745,6 +745,7 @@ def fork_source() -> list[dict[str, Any]]:
 SOURCE_METADATA: dict[str, Any] = {
     "workspace": "/tmp/ws",
     "template_name": "default",
+    "model_id": "probe/basic",
     "model_name": "probe/basic",
     "provider_name": "probe-unit",
     "last_interaction": TS,
@@ -758,6 +759,7 @@ def child_metadata(**overrides: Any) -> dict[str, Any]:
         "forked_from": SOURCE_SESSION,
         "workspace": "/tmp/ws",
         "template_name": "default",
+        "model_id": "probe/basic",
         "model_name": "probe/basic",
         "provider_name": "probe-unit",
         "last_interaction": TS,

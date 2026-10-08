@@ -56,6 +56,7 @@ def _fingerprint(view: HistoryView) -> list[str]:
     ]
 
 
+@pytest.mark.probe_env(models=[SHAPE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_manual_compact_chain_shape(probe: Probe) -> None:
@@ -132,6 +133,7 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     assert '"type": "compact_done"' in timeline, timeline[-400:]
 
 
+@pytest.mark.probe_env(models=[REQUEST_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_request_after_compact(probe: Probe) -> None:
@@ -183,6 +185,7 @@ async def test_request_after_compact(probe: Probe) -> None:
         assert compressed not in body, (compressed, context.describe())
 
 
+@pytest.mark.probe_env(models=[INSTRUCTION_MODEL, PLAIN_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_compact_instruction_rendering(probe: Probe) -> None:
@@ -240,6 +243,7 @@ async def test_compact_instruction_rendering(probe: Probe) -> None:
     assert plain_prompt != instructed_prompt, "指令必须真的改变 prompt"
 
 
+@pytest.mark.probe_env(models=[FAILURE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_compact_failure_leaves_no_trace(probe: Probe) -> None:

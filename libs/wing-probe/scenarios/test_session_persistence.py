@@ -160,7 +160,7 @@ def _assert_prefix_identity(
     _assert_message_prefix(source_req, actual_req, shared=shared)
 
 
-@pytest.mark.probe_env(hooks=["hooks/*.py"])
+@pytest.mark.probe_env(models=[HOOK_MODEL], hooks=["hooks/*.py"])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_hook_injected_append_survives_fork_and_rehydrate(probe: Probe) -> None:
@@ -214,6 +214,7 @@ async def test_hook_injected_append_survives_fork_and_rehydrate(probe: Probe) ->
     assert HOOK_MARKER in hydrated_req.body["messages"][0]["content"]
 
 
+@pytest.mark.probe_env(models=[STATE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_dynamic_state_and_overrides_survive_rehydrate(probe: Probe) -> None:
@@ -266,6 +267,7 @@ async def test_dynamic_state_and_overrides_survive_rehydrate(probe: Probe) -> No
 REBUILD_MODEL = "probe/persist-rebuild"
 
 
+@pytest.mark.probe_env(models=[REBUILD_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_recorded_switches_survive_provider_rebuild(probe: Probe) -> None:

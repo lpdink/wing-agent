@@ -57,6 +57,7 @@ async def _three_turns(probe: Probe, model: str) -> Session:
     return session
 
 
+@pytest.mark.probe_env(models=[MIDDLE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_middle_rewind_chain_shape_and_draft(probe: Probe) -> None:
@@ -136,6 +137,7 @@ async def test_middle_rewind_chain_shape_and_draft(probe: Probe) -> None:
     ], after.describe()
 
 
+@pytest.mark.probe_env(models=[CONTINUE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_rewind_then_continue_chain_order(probe: Probe) -> None:
@@ -193,6 +195,7 @@ async def test_rewind_then_continue_chain_order(probe: Probe) -> None:
         assert abandoned not in body, (abandoned, context.describe())
 
 
+@pytest.mark.probe_env(models=[EVENT_PARENT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_rewind_skips_event_ancestors(probe: Probe) -> None:
@@ -247,6 +250,7 @@ async def test_rewind_skips_event_ancestors(probe: Probe) -> None:
     ], after.describe()
 
 
+@pytest.mark.probe_env(models=[ROOT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_rewind_to_root(probe: Probe) -> None:
@@ -315,6 +319,7 @@ COMPACT_REWIND_MODEL = "probe/rewind-after-compact"
 COMPACT_REWIND_SUMMARY = "Task: answer the user."
 
 
+@pytest.mark.probe_env(models=[COMPACT_REWIND_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_rewind_after_compact_keeps_region_reachable(probe: Probe) -> None:

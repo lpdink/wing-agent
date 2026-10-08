@@ -151,6 +151,7 @@ def _assert_reload_items(reload_result: dict, *, rebuilt_providers: int) -> list
     return items
 
 
+@pytest.mark.probe_env(models=[RELOAD_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_reload_reports_every_item_and_keeps_recorded_switches(
@@ -197,6 +198,7 @@ async def test_reload_reports_every_item_and_keeps_recorded_switches(
     assert info["reasoning_effort"] == "high", info
 
 
+@pytest.mark.probe_env(models=[CONFIG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_reload_rereads_provider_config_from_disk(probe: Probe) -> None:
@@ -225,6 +227,7 @@ async def test_reload_rereads_provider_config_from_disk(probe: Probe) -> None:
 
 
 @pytest.mark.probe_env(
+    models=[HOOK_MODEL],
     hooks=["hooks/*.py"],
     # 不让 importlib 写 pyc：`load_hooks` 用 spec_from_file_location +
     # exec_module，字节码缓存按「mtime 取整到秒 + 文件大小」校验——场景在同一秒内
@@ -285,6 +288,7 @@ INFLIGHT_TEXT = (
 )
 
 
+@pytest.mark.probe_env(models=[INFLIGHT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_reload_during_inflight_stream_keeps_turn_alive(probe: Probe) -> None:

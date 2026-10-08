@@ -169,7 +169,9 @@ def _assert_applied(
 
 
 @pytest.mark.probe_env(
-    context_window_tokens=CONTEXT_WINDOW, keep_recent_tokens=KEEP_RECENT
+    models=[EARLY_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
 )
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
@@ -233,7 +235,9 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
 
 
 @pytest.mark.probe_env(
-    context_window_tokens=CONTEXT_WINDOW, keep_recent_tokens=KEEP_RECENT
+    models=[RESTART_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
 )
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio

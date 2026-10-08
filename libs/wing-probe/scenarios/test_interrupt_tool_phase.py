@@ -83,6 +83,7 @@ async def _assert_never_appears(
         await asyncio.sleep(POLL_INTERVAL)
 
 
+@pytest.mark.probe_env(models=[TOOL_PHASE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_interrupt_during_tool_execution_synthesizes_result(
@@ -200,6 +201,7 @@ async def test_interrupt_during_tool_execution_synthesizes_result(
     )
 
 
+@pytest.mark.probe_env(models=[BATCH_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_interrupt_collects_each_parallel_call_individually(probe: Probe) -> None:

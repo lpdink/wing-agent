@@ -31,7 +31,7 @@ async def _create(probe: Probe, *, tags: list[str] | None = None) -> Session:
     driver = probe.driver_required
     body: dict = {
         "workspace": str(probe.workspace),
-        "agent": {"model": TAG_MODEL, "yolo": True},
+        "agent": {"model_id": TAG_MODEL, "yolo": True},
     }
     if tags is not None:
         body["tags"] = tags
@@ -67,6 +67,7 @@ async def _evict(probe: Probe, session_id: str) -> None:
     assert payload == {"ok": True, "released": True, "detail": "released"}, payload
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_create_with_tags_atomic_mutation_and_idempotence(probe: Probe) -> None:
@@ -110,6 +111,7 @@ async def test_create_with_tags_atomic_mutation_and_idempotence(probe: Probe) ->
     assert missing.value.status == 404, missing.value.call.render()
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_evicted_session_can_be_tagged_without_waking(probe: Probe) -> None:
@@ -154,6 +156,7 @@ async def test_evicted_session_can_be_tagged_without_waking(probe: Probe) -> Non
     assert (await resumed.info())["tags"] == []
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_does_not_inherit_tags(probe: Probe) -> None:
@@ -169,6 +172,7 @@ async def test_fork_does_not_inherit_tags(probe: Probe) -> None:
     assert (await _tag(probe, sid))["tags"] == ["favorite", "task=wing-tags"]
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_tagged_session_without_messages_is_listed_immediately(
