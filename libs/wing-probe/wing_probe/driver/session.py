@@ -15,7 +15,9 @@
     await session.chat("hi")
 
 ``model`` / ``tools`` / ``yolo`` 等经 POST /api/session/create 的 ``agent``
-（``AgentOverride``）下发，``workspace`` 走请求体同名字段。
+（``AgentOverride``）下发，``workspace`` 走请求体同名字段。``model`` 的值是
+**model_id**（引用配置声明；缺省 id = 调用名，所以 ``model="probe/basic"`` 这类
+场景私有名仍然工作），网关按配置映射决定发给上游的调用名与 provider。
 """
 
 from __future__ import annotations
@@ -348,7 +350,6 @@ class Driver:
         self,
         *,
         model: str | None = None,
-        provider: str | None = None,
         tools: Sequence[str] | None = None,
         yolo: bool | None = None,
         system_prompt: str | None = None,
@@ -363,14 +364,18 @@ class Driver:
     ) -> Session:
         """创建并订阅一个新会话。
 
-        便捷参数（``model`` / ``provider`` / ``tools`` / ``yolo`` / ``system_prompt`` /
+        便捷参数（``model`` / ``tools`` / ``yolo`` / ``system_prompt`` /
         ``append_system_prompt`` / ``max_turns`` / ``effort``）合并进 ``agent``
         （``AgentOverride``）下发——同名键以便捷参数为准；``None`` 表示不覆盖。
+
+        ``model`` 的语义是 **model_id**（引用 ``providers[].models`` 的 id），
+        不是发给上游的调用名：命中即按配置映射切到该 id 的 ``(provider, name)``，
+        未命中网关 400（C7 文案）。没有 ``provider`` 参数——provider 是运行期事实，
+        由 id 唯一决定。
         """
         overrides: dict[str, Any] = dict(agent or {})
         for key, value in (
-            ("model", model),
-            ("provider", provider),
+            ("model_id", model),
             ("tools", list(tools) if tools is not None else None),
             ("yolo", yolo),
             ("system_prompt", system_prompt),

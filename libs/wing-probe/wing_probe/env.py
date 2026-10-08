@@ -199,6 +199,79 @@ def resolve_gateway_bin(
 # ── config.yaml 生成 ────────────────────────────────────────────
 
 
+def model_declaration_id(entry: str | Mapping[str, Any]) -> str:
+    """模型声明的 **effective id**（``spec.id or spec.name``，与后端同一条规则）。
+
+    str 形态（存量）= 自身；dict 形态 = ``id`` 非空取 ``id``，否则取 ``name``。
+    仅用于配置生成期的「模板 model 是否已在 id 空间」判断（见
+    :func:`render_config_yaml`），不是解析——运行期解析只发生在网关里。
+    """
+    if isinstance(entry, str):
+        return entry
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        raise ProbeEnvError(f"model declaration needs a non-empty name: {entry!r}")
+    declared = entry.get("id")
+    if isinstance(declared, str) and declared:
+        return declared
+    return name
+
+
+def model_declaration_name(entry: str | Mapping[str, Any]) -> str:
+    """模型声明的**调用名**（发给上游的值；str 形态 = 自身）。"""
+    return entry if isinstance(entry, str) else str(entry.get("name") or "")
+
+
+def resolve_model_declarations(
+    *,
+    model: str,
+    models: Sequence[str | Mapping[str, Any]] | None,
+) -> list[str | Mapping[str, Any]]:
+    """``providers[0].models`` 的最终声明（模板 model 一定落在 id 空间里）。
+
+    组合规则（新世界：``agents[].model`` 必须 ∈ id 空间，否则网关启动即失败）：
+
+    1. ``models is None`` → ``[model]``：模板 model 自己就是唯一声明（缺省 id = name）；
+    2. 显式声明 → 原样保留；模板 ``model`` 既不在声明的 effective id 集合、也不在
+       调用名集合里时，末尾**追加**字符串形态的 ``model``（id = name = model）。
+
+    第 2 条的「也不在调用名集合」是一个边界：场景若已声明了同名调用名但给了别的 id，
+    追加会撞 ``duplicate model name``（后端拒绝，报错比真实问题更误导），此时不追加
+    ——网关会以 ``unknown model id '<model>'`` 明说模板 model 不落在 id 空间。
+    """
+    if models is None:
+        return [model]
+    declared: list[str | Mapping[str, Any]] = list(models)
+    ids = {model_declaration_id(entry) for entry in declared}
+    names = {model_declaration_name(entry) for entry in declared}
+    if model not in ids and model not in names:
+        declared.append(model)
+    return declared
+
+
+def _default_provider_block(
+    *, name: str, base_url: str, api_key: str
+) -> dict[str, Any]:
+    """provider 条目的公共部分（假 Provider 接线 + 有界重试；两种来源共用）。
+
+    ``max_retries`` / ``max_retry_delay`` 有界且可数：语义重试场景要求
+    ``max_retries > 0``，退避压到 1s 保证场景快（一次逻辑调用的剧本消费上界
+    = ``1 + max_retries``）。
+    """
+    return {
+        "name": name,
+        "protocol": "openai",
+        "base_url": base_url.rstrip("/"),
+        "api_key": api_key,
+        "timeout_first_chunk": 30.0,
+        "timeout_total": 120.0,
+        "max_retries": PROBE_MAX_RETRIES,
+        "max_retry_delay": 1.0,
+        "explicit_cache_mode": True,
+        "extra_body": {},
+    }
+
+
 def render_config_yaml(
     *,
     provider_base_url: str,
@@ -207,6 +280,7 @@ def render_config_yaml(
     provider_api_key: str = DEFAULT_PROVIDER_API_KEY,
     model: str = DEFAULT_PROBE_MODEL,
     models: Sequence[str | Mapping[str, Any]] | None = None,
+    extra_providers: Sequence[Mapping[str, Any]] = (),
     images: Mapping[str, Any] | None = None,
     provider_extra: Mapping[str, Any] | None = None,
     tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
@@ -220,14 +294,25 @@ def render_config_yaml(
 ) -> str:
     """生成 probe 网关配置（providers 指向假 Provider；agents 预置 default）。
 
-    base_url 是 OpenAI 兼容根（``http://host:port/v1``）——provider 在其后
-    拼 ``/chat/completions`` 与 ``/models``。``system_prompt`` 默认非空
-    （见 :data:`DEFAULT_SYSTEM_PROMPT`），空串会让 system 段从请求里消失。
+    base_url 是 OpenAI 兼容根（``http://host:port/v1``）——provider 在其后拼
+    ``/chat/completions``（远端模型发现已退役，没有 ``/models`` 这条路）。
+    ``system_prompt`` 默认非空（见 :data:`DEFAULT_SYSTEM_PROMPT`），空串会让
+    system 段从请求里消失。
 
-    ``models`` 是 provider 静态模型声明列表（元素为 str 或 dict，原样写进
-    ``providers[0].models``；None = 不写该键，保持旧配置形态）。``images`` 是
-    顶层 ``images:`` 段的原文（None = 不写）。``sessions`` 是透传给配置
-    ``sessions:`` 段的原文（None = 用默认值；逐出场景靠它把 TTL 压到秒级）。
+    ``models`` 是 provider 静态模型声明列表（元素为 str 或 dict）：None = 只声明
+    模板 ``model`` 自己（``[model]``），显式给出时模板 model 不在 id 空间则追加
+    ——组合规则见 :func:`resolve_model_declarations`。``agents[].provider`` 不再
+    生成（后端已删该字段；provider 是运行期事实，不是引用词）。
+
+    ``extra_providers`` 是**附加 provider** 的条目（跨 provider 场景用）：每个
+    条目 ``{"name", "base_url", "models"}``（``api_key`` 可选，缺省同主 provider）
+    ——接线与主 provider 逐字段同形（同一份 :func:`_default_provider_block`）。
+    ``models`` 必填非空：新世界每个 provider 至少声明一个模型，否则配置加载失败。
+    ``ProbeEnv`` 把它的 base_url 指到假 Provider 的第二条路径前缀（见
+    :meth:`ProbeEnv.extra_provider_specs`）。
+
+    ``images`` 是顶层 ``images:`` 段的原文（None = 不写）。``sessions`` 是透传给
+    配置 ``sessions:`` 段的原文（None = 用默认值；逐出场景靠它把 TTL 压到秒级）。
 
     ``provider_extra`` 是 provider 级透传旋钮：键值合进 ``providers[0]``
     （None = 不合并，缺省输出与既有形态逐字节一致）——用于覆盖协议级行为
@@ -245,29 +330,41 @@ def render_config_yaml(
     （场景负责给全 ``enabled`` 与 ``keys``）——配合 driver 的 ``api_key``
     （``Probe.start``）使用，见 scenarios/test_gateway_auth.py。
     """
-    provider: dict[str, Any] = {
-        "name": provider_name,
-        "protocol": "openai",
-        "base_url": provider_base_url.rstrip("/"),
-        "api_key": provider_api_key,
-        "timeout_first_chunk": 30.0,
-        "timeout_total": 120.0,
-        "max_retries": PROBE_MAX_RETRIES,
-        "max_retry_delay": 1.0,
-        "explicit_cache_mode": True,
-        "extra_body": {},
-    }
-    if models is not None:
-        provider["models"] = list(models)
+    provider: dict[str, Any] = _default_provider_block(
+        name=provider_name, base_url=provider_base_url, api_key=provider_api_key
+    )
+    provider["models"] = resolve_model_declarations(model=model, models=models)
     if provider_extra is not None:
         provider.update(provider_extra)
+    providers: list[dict[str, Any]] = [provider]
+    for spec in extra_providers:
+        extra_name = spec.get("name")
+        extra_base_url = spec.get("base_url")
+        extra_models = spec.get("models")
+        if not isinstance(extra_name, str) or not extra_name:
+            raise ProbeEnvError(f"extra provider needs a name: {dict(spec)!r}")
+        if not isinstance(extra_base_url, str) or not extra_base_url:
+            raise ProbeEnvError(
+                f"extra provider '{extra_name}' needs a base_url: {dict(spec)!r}"
+            )
+        if not extra_models:
+            raise ProbeEnvError(
+                f"extra provider '{extra_name}' declares no models "
+                "(providers[].models must be non-empty)"
+            )
+        block = _default_provider_block(
+            name=extra_name,
+            base_url=extra_base_url,
+            api_key=str(spec.get("api_key") or provider_api_key),
+        )
+        block["models"] = list(extra_models)
+        providers.append(block)
     config: dict[str, Any] = {
-        "providers": [provider],
+        "providers": providers,
         "agents": [
             {
                 "name": "default",
                 "model": model,
-                "provider": provider_name,
                 "default": True,
                 "system_prompt": system_prompt,
                 "tools": list(tools),
@@ -397,6 +494,7 @@ class ProbeEnv:
         gateway_attempts: int = DEFAULT_GATEWAY_ATTEMPTS,
         model: str = DEFAULT_PROBE_MODEL,
         models: Sequence[str | Mapping[str, Any]] | None = None,
+        extra_providers: Sequence[Mapping[str, Any]] | None = None,
         images: Mapping[str, Any] | None = None,
         provider_extra: Mapping[str, Any] | None = None,
         tools: Sequence[str] = DEFAULT_AGENT_TOOLS,
@@ -416,7 +514,17 @@ class ProbeEnv:
         self.config_path = self.wing_home / "core" / "config.yaml"
         self.model = model
         self.models = tuple(models) if models is not None else None
-        """provider 静态模型声明（元素 str 或 dict；None = 不写 models 键）。"""
+        """provider 静态模型声明（元素 str 或 dict；None = 只声明模板 model）。"""
+        self.extra_providers = (
+            tuple(dict(entry) for entry in extra_providers)
+            if extra_providers is not None
+            else None
+        )
+        """附加 provider 旋钮（跨 provider 场景；``{"name", "models"}``）。
+
+        base_url 由 :meth:`extra_provider_specs` 指到假 Provider 的第二条路径
+        前缀（``/<name>/v1``）——同进程、同剧本表，请求归属靠留档的 path 判定。
+        """
         self.images = dict(images) if images is not None else None
         """顶层 images: 段原文（None = 不写该段，用配置缺省值）。"""
         self.provider_extra = (
@@ -434,7 +542,9 @@ class ProbeEnv:
         self.auth = dict(auth) if auth is not None else None
         """``gateway.auth`` 段原文（None = 缺省关闭；见 ``render_config_yaml``）。"""
 
-        self.provider = FakeProvider(host=DEFAULT_HOST)
+        self.provider = FakeProvider(
+            host=DEFAULT_HOST, path_prefixes=self._extra_provider_names()
+        )
         """进程内假 Provider（注册剧本 / 读请求留档）。"""
 
         self._gateway_bin_override = (
@@ -537,6 +647,41 @@ class ProbeEnv:
         self._log_marker("--- probe: gateway restart ---")
         await self.start_gateway()
 
+    def _extra_provider_names(self) -> tuple[str, ...]:
+        """附加 provider 的 name 列表（假 Provider 注册路径前缀用；构造期就绪）。"""
+        names: list[str] = []
+        for entry in self.extra_providers or ():
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                raise ProbeEnvError(f"extra provider needs a name: {entry!r}")
+            names.append(name)
+        return tuple(names)
+
+    def extra_provider_specs(self) -> list[dict[str, Any]]:
+        """附加 provider 的完整条目（``render_config_yaml`` 消费的形态）。
+
+        base_url = ``<假 Provider 地址>/<name>/v1``——假 Provider 按构造参数
+        ``path_prefixes`` 为每个 name 注册同一条 chat completions 路由，于是
+        「这次调用打到哪个 provider」由请求留档的 ``path`` 判定。
+        """
+        specs: list[dict[str, Any]] = []
+        for entry in self.extra_providers or ():
+            name = entry.get("name")
+            models = entry.get("models")
+            if not models:
+                raise ProbeEnvError(
+                    f"extra provider {name!r} declares no models "
+                    "(providers[].models must be non-empty)"
+                )
+            specs.append(
+                {
+                    "name": name,
+                    "base_url": f"{self.provider.url}/{name}/v1",
+                    "models": list(models),
+                }
+            )
+        return specs
+
     def _render_config(self, port: int) -> str:
         """按当前参数生成配置文本（启动重试换端口时重新生成）。"""
         return render_config_yaml(
@@ -544,6 +689,7 @@ class ProbeEnv:
             gateway_port=port,
             model=self.model,
             models=self.models,
+            extra_providers=self.extra_provider_specs(),
             images=self.images,
             provider_extra=self.provider_extra,
             tools=self.tools,
@@ -558,18 +704,19 @@ class ProbeEnv:
     def startup_report(self, binary: Path | None = None) -> str:
         """启动上下文（解析结果 / 命令 / 隔离目录 / 假 Provider），失败报告用。"""
         resolved = binary or self._gateway_bin
-        return "\n".join(
-            [
-                "--- probe startup context ---",
-                f"  binary: {resolved}",
-                f"  command: {' '.join(self.command())}",
-                f"  WING_HOME: {self.wing_home}",
-                f"  WING_SESSIONS_PATH: {self.sessions_path}",
-                f"  provider: {self.provider_url}",
-                f"  health timeout: {self._health_timeout:.1f}s",
-                f"  log: {self.log_path}",
-            ]
-        )
+        lines = [
+            "--- probe startup context ---",
+            f"  binary: {resolved}",
+            f"  command: {' '.join(self.command())}",
+            f"  WING_HOME: {self.wing_home}",
+            f"  WING_SESSIONS_PATH: {self.sessions_path}",
+            f"  provider: {self.provider_url}",
+            f"  health timeout: {self._health_timeout:.1f}s",
+            f"  log: {self.log_path}",
+        ]
+        for spec in self.extra_provider_specs():
+            lines.append(f"  extra provider: {spec['name']} → {spec['base_url']}")
+        return "\n".join(lines)
 
     def _prepare_dirs(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

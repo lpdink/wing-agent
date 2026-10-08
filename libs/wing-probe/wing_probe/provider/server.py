@@ -4,7 +4,12 @@
 
 - ``POST /v1/chat/completions``：``stream=true`` 走 SSE（见 ``sse.py``），
   ``stream=false`` 返回完整 message JSON（**压缩调用走非流式**，必须支持）；
-- ``GET /v1/models``：已注册模型的清单（网关的动态模型发现会打这里）。
+- ``POST /<prefix>/v1/chat/completions``（``path_prefixes`` 给定的每个前缀）：
+  同一条处理链的第二入口——**附加 provider**（跨 provider 场景）的 base_url 指
+  到这里，「这次调用打到哪个 provider」由请求留档的 ``path`` 判定。
+
+远端模型发现（``GET /v1/models``）已退役：网关的模型目录来自配置声明，假
+Provider 不再需要应答模型列表。
 
 剧本按 model 名路由（``ScriptRegistry``），每次入站请求消费一个 Turn；
 未注册 / 剧本耗尽 → 5xx + 可读报告（含模型名与已消费/总 Turn 数）。
@@ -18,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import time
+from collections.abc import Sequence
 from typing import Any
 
 from aiohttp import web
@@ -37,7 +42,6 @@ from wing_probe.provider.sse import (
 )
 
 CHAT_PATH = "/v1/chat/completions"
-MODELS_PATH = "/v1/models"
 
 
 def _error_response(status: int, message: str, *, code: str) -> web.Response:
@@ -51,8 +55,20 @@ def _error_response(status: int, message: str, *, code: str) -> web.Response:
 class FakeProvider:
     """按剧本吐确定分片的 OpenAI 兼容假 Provider（同进程 aiohttp）。"""
 
-    def __init__(self, *, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        path_prefixes: Sequence[str] = (),
+    ) -> None:
         self.host = host
+        self.path_prefixes = tuple(entry.strip("/") for entry in path_prefixes)
+        """附加 provider 的路径前缀（``<prefix>/v1/chat/completions`` 也指向本 app）。
+
+        ``ProbeEnv`` 由 ``extra_providers`` 的 name 生成它们；每个前缀对应配置里
+        一个附加 provider 的 base_url，请求留档的 ``path`` 因此能判定归属。
+        """
         self.scripts = ScriptRegistry()
         """model → Script 路由表。"""
         self.requests = RequestLog()
@@ -61,7 +77,6 @@ class FakeProvider:
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
         self._socket: socket.socket | None = None
-        self._started_at = 0.0
 
     # ── 生命周期 ────────────────────────────────────────────
 
@@ -89,7 +104,8 @@ class FakeProvider:
             return self
         app = web.Application()
         app.router.add_post(CHAT_PATH, self._handle_chat_completions)
-        app.router.add_get(MODELS_PATH, self._handle_models)
+        for prefix in self.path_prefixes:
+            app.router.add_post(f"/{prefix}{CHAT_PATH}", self._handle_chat_completions)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
 
@@ -102,7 +118,6 @@ class FakeProvider:
         self._port = int(sock.getsockname()[1])
         self._site = web.SockSite(self._runner, sock)
         await self._site.start()
-        self._started_at = time.time()
         return self
 
     async def stop(self) -> None:
@@ -150,7 +165,7 @@ class FakeProvider:
 
         raw_model = body.get("model")
         model = raw_model if isinstance(raw_model, str) else ""
-        logged = self.requests.record(body, model=model)
+        logged = self.requests.record(body, model=model, path=request.path)
         headers = {"x-request-id": f"probe-{logged.index}"}
 
         try:
@@ -221,21 +236,5 @@ class FakeProvider:
             return response
         return response
 
-    async def _handle_models(self, request: web.Request) -> web.Response:
-        return web.json_response(
-            {
-                "object": "list",
-                "data": [
-                    {
-                        "id": name,
-                        "object": "model",
-                        "created": int(self._started_at),
-                        "owned_by": "wing-probe",
-                    }
-                    for name in self.scripts.models()
-                ],
-            }
-        )
 
-
-__all__ = ["CHAT_PATH", "MODELS_PATH", "FakeProvider"]
+__all__ = ["CHAT_PATH", "FakeProvider"]
