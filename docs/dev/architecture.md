@@ -76,7 +76,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
 
 - `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥。**id 在同一个文件系统上只对应一个会话**：大小写 / Unicode 归一化不敏感的文件系统（macOS APFS 默认 / Windows NTFS）上，`team-a` 与 `Team-A` 是同一份日志——网关按**磁盘真名**回应（日志留一条 warning），stdio 侧发现"请求 id ≠ 回应 id"即拒绝继续（`session_id_mismatch_error`），绝不静默换 id；
-- `-r/--resume <id>`：恢复既有会话，`--model` / `--provider` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）；`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--provider` 只在**伴随 `--model`** 时生效（切 provider 需要一个要切过去的模型；单独给出同样是 no-op + warning，与 `session/update` 的"成对"约定同口径）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
+- `-r/--resume <id>`：恢复既有会话，`--model` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）。`--model` 的值是 **model_id**（引用词；网关未命中回 400，绝不猜 / 不回落），`--provider` 已删除（provider 不是引用维度——模型由 id 唯一确定）。`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
 - `--resume-session-at`：wing 没有会话截断能力，**出现即非零退出 + 明确文案**（绝不静默忽略——被忽略会让编排方以为上下文已回退，与 wing 的实际状态错位）。
 
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。
@@ -178,9 +178,17 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 ## 模型调用：无状态 provider 与共享池
 
+**模型身份与 provider 的角色**：模型的引用词是全局唯一的 **model_id**（配置 `providers[].models[].id`，
+显式声明可选、缺省 = 调用名）——一切请求 / 协议 / CLI / metadata 引用它，解析 = 单键查表
+（`Config.find_model()`，无候选集合、无优先级、无回落；`agents[].model` 在配置加载期就按 id 空间校验）。
+**provider 不再是引用词**：它是「展示分组 + 运行期事实」（同名模型跨 provider 时以 id 消歧），
+只回答「调用名发往哪个 base_url」这类运行期问题；调用名（name）与展示名（display_name）分工同理——
+前者是发给上游的值，后者是渲染素材。**模型目录 = 配置静态声明的同步投影**：远端 `GET /models`
+发现机制已退役，`/api/models` 不再有任何网络依赖（目录的每个 id 全局唯一，是对外可依赖的合同）。
+
 provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wing.provider.pool` 的**全进程共享池**——每 provider name 一个实例（懒建），全部会话与 `/api/models` 聚合共用。旧版「每 agent 一份 client 表」会按 会话数 × provider 数 放大 socket 占用（httpx keepalive 连接只在下次使用连接池时才被过期检查，会一直挂着），reload 的逐会话重建还会把在途请求的 client 关死（#172：重试栈绑死在已关闭实例上，永不成功）。
 
-- agent 只持有 **provider name**（`WingAgent.provider_name`），实例经 `get_provider(name)` 实时解析；切模型 = 换 name，无需创建/关闭任何 client。
+- agent 只持有 **provider name** 与调用名（`WingAgent.provider_name` / `model`，同源同刻——切换模型时由 model_id 单键查表一次性写入），实例经 `get_provider(name)` 实时解析；切模型 = 换 name，无需创建/关闭任何 client。
 - 一切**会话级参数**经 `RequestOptions` 在每次调用时注入（`WingAgent.request_options()` → `generate(..., options=)`）：
 
 | 参数 | 用途 | 缺省 |

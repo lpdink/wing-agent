@@ -175,9 +175,10 @@ interface PanelsModel {
 ### 3.5 runtime 状态只在「订阅后」补齐
 
 `sync_session.agent` 不含 yolo；`session_state_changed` 只在变更时发。宿主在 subscribe 成功后
-调 `GET /api/session/info` 合并 `yolo/thinking/reasoningEffort`（以及空值兜底的
-`model`/`workdir`），只填空、不覆盖竞态中的用户选择。**这是检查点② bug（resume 后 yolo 显示为
-关）的修复**，重连重订阅同样刷新；持续轮询不在范围内。
+调 `GET /api/session/info` 合并 `yolo/thinking/reasoningEffort`（以及空值兜底的模型四元组
+`model_id`/`model`/`model_display_name`/`provider` 与 `workdir`），**只填空、不覆盖竞态中的用户
+选择**（每个字段只填自己的空）。**这是检查点② bug（resume 后 yolo 显示为关）的修复**，
+重连重订阅同样刷新；持续轮询不在范围内。
 
 ## 4. 时序
 
