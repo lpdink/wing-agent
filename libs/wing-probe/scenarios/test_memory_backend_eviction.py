@@ -67,7 +67,7 @@ def _messages(probe: Probe, session_id: str) -> list[str]:
     return [message["content"] for message in probe.history(session_id).messages()]
 
 
-@pytest.mark.probe_env(sessions=FAST_EVICTION)
+@pytest.mark.probe_env(models=[PINNED_MODEL], sessions=FAST_EVICTION)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_memory_session_is_pinned_against_release_and_sweep(probe: Probe) -> None:
@@ -118,6 +118,7 @@ async def test_memory_session_is_pinned_against_release_and_sweep(probe: Probe) 
     ], follow_up.describe()
 
 
+@pytest.mark.probe_env(models=[RESTART_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_memory_session_vanishes_on_restart_while_file_session_survives(

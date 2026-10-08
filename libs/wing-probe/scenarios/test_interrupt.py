@@ -72,6 +72,7 @@ async def _wait_idle(session: Session, *, timeout: float = 10.0) -> str:
     )
 
 
+@pytest.mark.probe_env(models=[STREAM_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_interrupt_mid_stream_closes_turn_and_keeps_chain_valid(

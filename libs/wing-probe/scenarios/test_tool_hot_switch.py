@@ -117,6 +117,7 @@ async def _rehydrate(probe: Probe, session: Session) -> None:
     await driver.http.subscribe(session.session_id, driver.client_id)
 
 
+@pytest.mark.probe_env(models=[HOT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_hot_switch_freezes_declared_and_reminds_model(probe: Probe) -> None:
@@ -176,6 +177,7 @@ async def test_hot_switch_freezes_declared_and_reminds_model(probe: Probe) -> No
     assert _reminder_of(after_tool) == reminder
 
 
+@pytest.mark.probe_env(models=[COLD_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_cold_switch_updates_declared_without_reminder(probe: Probe) -> None:
@@ -207,6 +209,7 @@ async def test_cold_switch_updates_declared_without_reminder(probe: Probe) -> No
     assert probe.context(COLD_MODEL, 1).tool_names == list(INITIAL_TOOLS)
 
 
+@pytest.mark.probe_env(models=[COMPACT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_manual_compact_syncs_declared_to_executable(probe: Probe) -> None:
@@ -255,6 +258,7 @@ async def test_manual_compact_syncs_declared_to_executable(probe: Probe) -> None
     assert REMINDER_HEADER not in json.dumps(after_compact.body, ensure_ascii=False)
 
 
+@pytest.mark.probe_env(models=[REMOVAL_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_hot_switch_removal_blocks_execution_and_keeps_declared(
@@ -312,6 +316,7 @@ async def test_hot_switch_removal_blocks_execution_and_keeps_declared(
     assert probe.context(REMOVAL_MODEL, 2).tool_names == list(EXTENDED_TOOLS)
 
 
+@pytest.mark.probe_env(models=[REBUILD_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_declared_set_follows_executable_after_rehydrate(probe: Probe) -> None:

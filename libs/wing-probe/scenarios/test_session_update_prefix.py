@@ -77,6 +77,7 @@ async def _list_entry(probe: Probe, session_id: str) -> dict:
     raise AssertionError(f"session {session_id} not in /api/session/list")
 
 
+@pytest.mark.probe_env(models=[TITLE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_title_change_is_display_only(probe: Probe) -> None:
@@ -126,6 +127,7 @@ async def test_title_change_is_display_only(probe: Probe) -> None:
     _assert_prefix_identity(before, after, shared=len(before.context().messages))
 
 
+@pytest.mark.probe_env(models=[WORKSPACE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_workspace_change_moves_bash_and_file_tools(probe: Probe) -> None:

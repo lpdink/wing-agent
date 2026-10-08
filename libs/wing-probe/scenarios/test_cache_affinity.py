@@ -31,6 +31,7 @@ def _cache_key(probe: Probe, model: str, index: int) -> str | None:
     return probe.request(model, index).body.get("prompt_cache_key")
 
 
+@pytest.mark.probe_env(models=[MAIN_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_react_requests_carry_own_session_id(probe: Probe) -> None:
@@ -54,6 +55,7 @@ async def test_react_requests_carry_own_session_id(probe: Probe) -> None:
     assert s1.session_id != s2.session_id
 
 
+@pytest.mark.probe_env(models=[COMPACT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_compact_request_carries_session_id(probe: Probe) -> None:

@@ -34,6 +34,7 @@ SKIP_ANCHOR = "was NOT executed"
 ARGS_ECHO_ANCHOR = "Arguments received:"
 
 
+@pytest.mark.probe_env(models=[MALFORMED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_malformed_args_short_circuit_then_self_correct(probe: Probe) -> None:
@@ -116,6 +117,7 @@ async def test_malformed_args_short_circuit_then_self_correct(probe: Probe) -> N
     assert SKIP_ANCHOR in results[0].data["tool_result"], results[0].data
 
 
+@pytest.mark.probe_env(models=[NON_OBJECT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_non_object_args_are_rejected_without_execution(probe: Probe) -> None:

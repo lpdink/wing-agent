@@ -67,6 +67,7 @@ def _assistant_turn_frames(probe: Probe) -> list[tuple[Frame, ChunkEnvelope]]:
     return found
 
 
+@pytest.mark.probe_env(models=[MODEL])
 @pytest.mark.timeout(180)
 @pytest.mark.asyncio
 async def test_oversized_event_is_chunked_and_reassembled(probe: Probe) -> None:

@@ -33,7 +33,7 @@ async def _create(probe: Probe, *, tags: list[str] | None = None) -> Session:
     driver = probe.driver_required
     body: dict = {
         "workspace": str(probe.workspace),
-        "agent": {"model": TAG_MODEL, "yolo": True},
+        "agent": {"model_id": TAG_MODEL, "yolo": True},
     }
     if tags is not None:
         body["tags"] = tags
@@ -77,6 +77,7 @@ def _assert_recorded(entry: dict, tag: str) -> str:
     return stamp
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_tag_times_recorded_idempotent_and_dropped(probe: Probe) -> None:
@@ -126,6 +127,7 @@ async def test_tag_times_recorded_idempotent_and_dropped(probe: Probe) -> None:
     assert "tags" not in disk and "tag_meta" not in disk, disk
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_evicted_tagging_records_time_without_hydration(probe: Probe) -> None:
@@ -157,6 +159,7 @@ async def test_evicted_tagging_records_time_without_hydration(probe: Probe) -> N
     assert _assert_recorded(info, "pin") == stamp, info
 
 
+@pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_legacy_metadata_without_records_projects_empty(probe: Probe) -> None:

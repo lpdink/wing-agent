@@ -44,7 +44,7 @@ async def _registry_names(probe: Probe) -> set[str]:
     return {str(tool["llm_name"]) for tool in payload["tools"]}
 
 
-@pytest.mark.probe_env(tools=list(CONFIG_TOOLS))
+@pytest.mark.probe_env(models=[TOLERANT_MODEL], tools=list(CONFIG_TOOLS))
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_config_legacy_tool_names_are_tolerated(probe: Probe) -> None:
@@ -91,6 +91,7 @@ async def test_config_legacy_tool_names_are_tolerated(probe: Probe) -> None:
     probe.history(session).assert_tool_pairing()
 
 
+@pytest.mark.probe_env(models=[STRICT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_explicit_override_with_unknown_name_is_rejected(probe: Probe) -> None:

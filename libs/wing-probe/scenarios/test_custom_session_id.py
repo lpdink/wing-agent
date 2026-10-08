@@ -5,7 +5,7 @@
 - ``POST /api/session/create`` 的 ``session_id`` 是 **create-or-adopt**：
   不存在 → 以该 id 建会话（**id 精确一致**，编排方自己生成的 UUID 就此生效）；
   已存在 → **收养**既有会话（不产生第二个会话，链路连续，覆盖按 resume 子集）；
-- ``POST /api/session/resume`` 的 ``agent`` 只应用 **model / provider / effort /
+- ``POST /api/session/resume`` 的 ``agent`` 只应用 **model_id / effort /
   tools** 子集；``system_prompt`` / ``append_system_prompt`` / ``max_turns``
   一律不应用（不改链上前缀 / 不改会话既有限额）——给了也不该出现在请求体里；
 - 闸门只防穿越与卫生：跨越型 id（``../escape``、含 ``/``）、点开头（``.media``
@@ -59,7 +59,7 @@ async def _create(
     probe: Probe,
     *,
     session_id: str | None = None,
-    model: str | None = None,
+    model_id: str | None = None,
     workspace: str | None = None,
     agent: dict | None = None,
     tags: list[str] | None = None,
@@ -73,8 +73,8 @@ async def _create(
     if tags is not None:
         body["tags"] = tags
     overrides: dict = dict(agent or {})
-    if model is not None:
-        overrides["model"] = model
+    if model_id is not None:
+        overrides["model_id"] = model_id
     if overrides:
         body["agent"] = overrides
     return await _driver(probe).http.request("POST", "/api/session/create", body=body)
@@ -93,6 +93,7 @@ async def _listed_ids(probe: Probe) -> list[str]:
     return [entry["id"] for entry in payload.get("sessions", [])]
 
 
+@pytest.mark.probe_env(models=[CREATED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_custom_id_create_then_adopt_is_one_session(probe: Probe) -> None:
@@ -103,7 +104,7 @@ async def test_custom_id_create_then_adopt_is_one_session(probe: Probe) -> None:
         Turn.of(text="second reply"),
     )
 
-    created = await _create(probe, session_id=CUSTOM_ID, model=CREATED_MODEL)
+    created = await _create(probe, session_id=CUSTOM_ID, model_id=CREATED_MODEL)
     assert created["session_id"] == CUSTOM_ID, created
     assert _session_dirs(probe) == [CUSTOM_ID], _session_dirs(probe)
 
@@ -113,7 +114,7 @@ async def test_custom_id_create_then_adopt_is_one_session(probe: Probe) -> None:
     records_before = len(session.history.records)
 
     # 二次 create 同一个 id：收养（不是新会话）。
-    adopted = await _create(probe, session_id=CUSTOM_ID, model=CREATED_MODEL)
+    adopted = await _create(probe, session_id=CUSTOM_ID, model_id=CREATED_MODEL)
     assert adopted["session_id"] == CUSTOM_ID, adopted
     assert _session_dirs(probe) == [CUSTOM_ID], _session_dirs(probe)
     assert await _listed_ids(probe) == [CUSTOM_ID]
@@ -129,6 +130,7 @@ async def test_custom_id_create_then_adopt_is_one_session(probe: Probe) -> None:
     )
 
 
+@pytest.mark.probe_env(models=[CREATED_MODEL, RESUMED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_resume_override_switches_model_and_keeps_prefix(probe: Probe) -> None:
@@ -139,7 +141,10 @@ async def test_resume_override_switches_model_and_keeps_prefix(probe: Probe) -> 
     probe.register(RESUMED_MODEL, Turn.of(text="switched reply"))
 
     created = await _create(
-        probe, session_id=CUSTOM_ID, model=CREATED_MODEL, workspace=str(probe.workspace)
+        probe,
+        session_id=CUSTOM_ID,
+        model_id=CREATED_MODEL,
+        workspace=str(probe.workspace),
     )
     session = await _driver(probe).attach(
         created["session_id"], workspace=probe.workspace
@@ -152,7 +157,7 @@ async def test_resume_override_switches_model_and_keeps_prefix(probe: Probe) -> 
         probe,
         session.session_id,
         agent={
-            "model": RESUMED_MODEL,
+            "model_id": RESUMED_MODEL,
             "effort": "high",
             # 以下三个字段是创建期语义：必须被忽略（不是"尽量应用"）。
             "system_prompt": SYSTEM_PROMPT_MARKER,
@@ -185,6 +190,7 @@ async def test_resume_override_switches_model_and_keeps_prefix(probe: Probe) -> 
     assert "max_turns" not in metadata, metadata
 
 
+@pytest.mark.probe_env(models=[CREATED_MODEL, ADOPTED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_adopt_with_custom_id_applies_resume_subset(probe: Probe) -> None:
@@ -195,7 +201,10 @@ async def test_adopt_with_custom_id_applies_resume_subset(probe: Probe) -> None:
     probe.register(ADOPTED_MODEL, Turn.of(text="adopted reply"))
 
     created = await _create(
-        probe, session_id=CUSTOM_ID, model=CREATED_MODEL, workspace=str(probe.workspace)
+        probe,
+        session_id=CUSTOM_ID,
+        model_id=CREATED_MODEL,
+        workspace=str(probe.workspace),
     )
     session = await _driver(probe).attach(
         created["session_id"], workspace=probe.workspace
@@ -207,7 +216,7 @@ async def test_adopt_with_custom_id_applies_resume_subset(probe: Probe) -> None:
     adopted = await _create(
         probe,
         session_id=CUSTOM_ID,
-        agent={"model": ADOPTED_MODEL, "tools": ["Read", "Glob"]},
+        agent={"model_id": ADOPTED_MODEL, "tools": ["Read", "Glob"]},
     )
     assert adopted["session_id"] == CUSTOM_ID, adopted
     assert _session_dirs(probe) == [CUSTOM_ID], _session_dirs(probe)
@@ -230,6 +239,7 @@ async def test_adopt_with_custom_id_applies_resume_subset(probe: Probe) -> None:
     assert metadata.get("tools") == ["Read", "Glob"], metadata
 
 
+@pytest.mark.probe_env(models=[CREATED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_invalid_session_id_is_rejected_without_traces(probe: Probe) -> None:
@@ -262,7 +272,7 @@ async def test_invalid_session_id_is_rejected_without_traces(probe: Probe) -> No
 
     # 放宽后的闸门照常接受"非时间戳形态"的任意安全 id。
     probe.register(CREATED_MODEL, Turn.of(text="ok"))
-    created = await _create(probe, session_id="team.run-7", model=CREATED_MODEL)
+    created = await _create(probe, session_id="team.run-7", model_id=CREATED_MODEL)
     assert created["session_id"] == "team.run-7", created
     assert _session_dirs(probe) == ["team.run-7"], _session_dirs(probe)
 
@@ -282,6 +292,7 @@ def _fs_is_case_insensitive(base: Path) -> bool:
         probe_dir.rmdir()
 
 
+@pytest.mark.probe_env(models=[CREATED_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
@@ -300,12 +311,12 @@ async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
     aliases = _fs_is_case_insensitive(probe.env.root)
 
     created = await _create(
-        probe, session_id="Team-V", model=CREATED_MODEL, tags=["favorite"]
+        probe, session_id="Team-V", model_id=CREATED_MODEL, tags=["favorite"]
     )
     assert created["session_id"] == "Team-V", created
 
     variant = await _create(
-        probe, session_id="team-v", model=CREATED_MODEL, tags=["variant"]
+        probe, session_id="team-v", model_id=CREATED_MODEL, tags=["variant"]
     )
     if aliases:
         assert variant["session_id"] == "Team-V", variant  # 归一：真名
