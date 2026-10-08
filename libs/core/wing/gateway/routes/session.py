@@ -320,8 +320,7 @@ async def update_session(
     if all(
         v is None
         for v in (
-            body.model,
-            body.provider,
+            body.model_id,
             body.agent,
             body.title,
             body.thinking,
@@ -335,17 +334,10 @@ async def update_session(
             status_code=400, detail="at least one update field is required"
         )
 
-    if (body.model is None) != (body.provider is None):
-        raise HTTPException(
-            status_code=400,
-            detail="model and provider must be set together or both omitted",
-        )
-
     try:
         await server.runtime.update_session(
             session_id=body.session_id,
-            model=body.model,
-            provider=body.provider,
+            model_id=body.model_id,
             agent=body.agent,
             title=body.title,
             thinking=body.thinking,
