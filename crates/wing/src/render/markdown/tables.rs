@@ -1,10 +1,11 @@
-//! Table rendering — borderless layout with content-aware width allocation.
+//! Table rendering — framed grid with content-aware width allocation.
 //!
-//! Visual style (adapted from codex, MIT license):
-//! - Columns are separated by gaps + cell padding instead of `│` borders
-//! - A heavy `━` rule sits under the header; light `─` rules separate body rows
-//! - Cell padding honors column alignment (left / center / right)
-//! - Cell content word-wraps instead of truncating (zero information loss)
+//! Visual style (**重框三档**, see [`TableSkin::framed`]): a heavy outer frame
+//! wraps the table, the header band is heavy (its separator and its own column
+//! dividers), and the body grid is light — three tiers carried by stroke
+//! weight alone, all strokes sharing one quiet ink (the theme `border` colour).
+//! Cell padding honours column alignment (left / center / right); cell content
+//! word-wraps instead of truncating (zero information loss).
 //!
 //! ## Width allocation
 //!
@@ -13,31 +14,29 @@
 //! (short values such as counts or status labels). When the table overflows the
 //! available width, token-heavy columns surrender excess width before narrative
 //! prose, and compact columns are preserved last — so an oversized path does not
-//! collapse readable prose into an unreadable narrow strip.
+//! collapse readable prose into an unreadable narrow strip. The maths itself
+//! lives in [`crate::render::table`], shared with the CLI table renderer.
 
 use pulldown_cmark::Alignment;
 use ratatui::style::Style;
-use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::types::MarkdownLine;
 use super::types::MarkdownSegment;
 use super::types::SegmentKind;
+use crate::render::table::ColumnMetrics;
+use crate::render::table::LONG_TOKEN_WIDTH;
+use crate::render::table::MIN_COLUMN_WIDTH;
+use crate::render::table::RuleGlyphs;
+use crate::render::table::TableSkin;
+use crate::render::table::classify_column;
+use crate::render::table::compute_column_widths;
+use crate::render::table::frame_overhead;
+use crate::render::table::longest_token_width;
+use crate::render::table::split_str_by_width;
 
-/// Spaces between adjacent columns.
-const COLUMN_GAP: usize = 2;
 /// Spaces of padding on each side of a cell's content.
 const CELL_PADDING: usize = 1;
-/// Rule character drawn under the header row.
-const HEADER_SEPARATOR_CHAR: char = '━';
-/// Rule character drawn between body rows.
-const BODY_SEPARATOR_CHAR: char = '─';
-/// Hard minimum column width.
-const MIN_COLUMN_WIDTH: usize = 3;
-/// Soft readable floor for narrative / token-heavy columns.
-const PREFERRED_FLOOR: usize = 16;
-/// A whitespace token at least this wide marks its column as token-heavy.
-const LONG_TOKEN_WIDTH: usize = 20;
 
 /// Accumulates table rows during markdown parsing.
 #[derive(Debug, Default)]
@@ -51,12 +50,15 @@ pub(crate) struct TableBuffer {
 
 /// Render a table buffer with word-wrap and content-aware column balancing.
 ///
-/// `available_width` is the full content width the table may occupy (caller has
-/// already subtracted any line prefix). When `Some`, column widths are shrunk to
-/// fit; the rendered lines are guaranteed not to exceed this width so downstream
-/// wrapping never breaks the layout mid-row.
+/// `frame_style` inks every glyph of the frame and the grid (callers pass the
+/// theme's `border` style); `available_width` is the full content width the
+/// table may occupy (caller has already subtracted any line prefix). When
+/// `Some`, column widths are shrunk to fit; the rendered lines are guaranteed
+/// not to exceed this width so downstream wrapping never breaks the layout
+/// mid-row.
 pub(crate) fn render_table(
     table: &TableBuffer,
+    frame_style: Style,
     base_style: Style,
     available_width: Option<u16>,
 ) -> Vec<MarkdownLine> {
@@ -79,68 +81,56 @@ pub(crate) fn render_table(
 
     let metrics = collect_column_metrics(&table.headers, &table.rows, col_count);
 
-    // Content budget = available width minus per-column padding and inter-column
-    // gaps. This is the space the column *content* widths may collectively use.
-    let content_budget = available_width.map(|avail| {
-        let overhead = col_count * CELL_PADDING * 2 + col_count.saturating_sub(1) * COLUMN_GAP;
-        (avail as usize).saturating_sub(overhead)
-    });
+    // Content budget = available width minus the frame (outer verticals, cell
+    // padding, inner dividers). This is the space the column *content* widths
+    // may collectively use.
+    let content_budget =
+        available_width.map(|avail| (avail as usize).saturating_sub(frame_overhead(col_count)));
 
     let col_widths = compute_column_widths(&metrics, content_budget);
+    let skin = TableSkin::framed();
 
-    let separator_style = base_style.dim();
+    lines.push(rule_line(&skin.top, &col_widths, frame_style));
 
-    // Header row + heavy rule.
+    // Header band: the heavy row and its heavy separator.
     if !table.headers.is_empty() {
         lines.extend(render_row(
             &table.headers,
-            &col_widths,
-            &alignments,
-            base_style,
-            true,
+            &RowEnv {
+                col_widths: &col_widths,
+                alignments: &alignments,
+                base_style,
+                frame_style,
+                outer_v: skin.outer_v,
+                divider: skin.header_v,
+                bold: true,
+            },
         ));
-        lines.push(render_separator(
-            &col_widths,
-            HEADER_SEPARATOR_CHAR,
-            separator_style,
-        ));
+        lines.push(rule_line(&skin.header_sep, &col_widths, frame_style));
     }
 
     // Body rows with a light rule between each pair.
     for (row_idx, row) in table.rows.iter().enumerate() {
-        lines.extend(render_row(row, &col_widths, &alignments, base_style, false));
+        lines.extend(render_row(
+            row,
+            &RowEnv {
+                col_widths: &col_widths,
+                alignments: &alignments,
+                base_style,
+                frame_style,
+                outer_v: skin.outer_v,
+                divider: skin.inner_v,
+                bold: false,
+            },
+        ));
         if row_idx + 1 < table.rows.len() {
-            lines.push(render_separator(
-                &col_widths,
-                BODY_SEPARATOR_CHAR,
-                separator_style,
-            ));
+            lines.push(rule_line(&skin.body_sep, &col_widths, frame_style));
         }
     }
 
+    lines.push(rule_line(&skin.bottom, &col_widths, frame_style));
+
     lines
-}
-
-/// Classification of a table column for width-allocation priority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColumnKind {
-    /// Long-form prose content.
-    Narrative,
-    /// Paths, URLs, hashes — long unbroken tokens.
-    TokenHeavy,
-    /// Short values such as counts or status labels.
-    Compact,
-}
-
-/// Per-column measurements used for width allocation.
-struct ColumnMetrics {
-    /// Widest cell content (display width) in this column.
-    max_width: usize,
-    /// Widest whitespace token in the header cell.
-    header_token_width: usize,
-    /// Widest whitespace token across body cells.
-    body_token_width: usize,
-    kind: ColumnKind,
 }
 
 /// Gather width/token statistics for each column and classify it.
@@ -190,176 +180,73 @@ fn collect_column_metrics(
             total_cell_width as f64 / total_cells as f64
         };
 
-        let kind = if long_body_token_count > 0
-            && long_body_token_count >= body_token_count.saturating_sub(long_body_token_count)
-        {
-            ColumnKind::TokenHeavy
-        } else if avg_words_per_cell >= 4.0 || avg_cell_width >= 28.0 {
-            ColumnKind::Narrative
-        } else {
-            ColumnKind::Compact
-        };
+        let kind = classify_column(
+            avg_words_per_cell,
+            avg_cell_width,
+            long_body_token_count,
+            body_token_count,
+        );
 
         metrics.push(ColumnMetrics {
             max_width,
             header_token_width,
             body_token_width,
+            min_width: MIN_COLUMN_WIDTH,
             kind,
         });
     }
     metrics
 }
 
-/// Allocate column content widths so the table fits within `content_budget`.
-///
-/// Each column starts at its natural (max cell content) width, then columns are
-/// shrunk one character at a time until the total fits. Token-heavy columns
-/// shrink before narrative prose; compact columns are preserved last. Always
-/// returns widths whose sum is `<= content_budget` (when a budget is given).
-fn compute_column_widths(metrics: &[ColumnMetrics], content_budget: Option<usize>) -> Vec<usize> {
-    let col_count = metrics.len();
-    let mut widths: Vec<usize> = metrics
-        .iter()
-        .map(|m| m.max_width.max(MIN_COLUMN_WIDTH))
-        .collect();
-
-    let Some(budget) = content_budget else {
-        return widths;
-    };
-    if col_count == 0 {
-        return widths;
-    }
-
-    // Degenerate budget: cannot even hold minimum-width columns. Split evenly.
-    let min_total = col_count * MIN_COLUMN_WIDTH;
-    if budget < min_total {
-        let share = (budget / col_count).max(1);
-        return vec![share; col_count];
-    }
-
-    // Preferred floors, relaxed in shrink-priority order until they fit.
-    let mut floors: Vec<usize> = metrics
-        .iter()
-        .map(|m| preferred_column_floor(m, MIN_COLUMN_WIDTH))
-        .collect();
-    let mut floor_total: usize = floors.iter().sum();
-    while floor_total > budget {
-        let Some((idx, _)) = floors
-            .iter()
-            .enumerate()
-            .filter(|(_, floor)| **floor > MIN_COLUMN_WIDTH)
-            .min_by_key(|(idx, floor)| {
-                (
-                    shrink_priority(metrics[*idx].kind),
-                    usize::MAX.saturating_sub(**floor),
-                )
-            })
-        else {
-            break;
-        };
-        floors[idx] -= 1;
-        floor_total -= 1;
-    }
-
-    // Shrink columns one char at a time until the total fits the budget.
-    let mut total: usize = widths.iter().sum();
-    while total > budget {
-        let Some(idx) = next_column_to_shrink(&widths, &floors, metrics) else {
-            break;
-        };
-        widths[idx] -= 1;
-        total -= 1;
-    }
-
-    widths
-}
-
-/// Preferred minimum width for a column before the shrink loop runs.
-///
-/// Narrative and token-heavy columns keep a readable 16-cell soft floor; compact
-/// columns floor at the wider of their header/body token widths (body capped at
-/// 16). Clamped to `[min, max_width]`.
-fn preferred_column_floor(metrics: &ColumnMetrics, min: usize) -> usize {
-    let target = match metrics.kind {
-        ColumnKind::Narrative | ColumnKind::TokenHeavy => PREFERRED_FLOOR,
-        ColumnKind::Compact => metrics
-            .header_token_width
-            .max(metrics.body_token_width.min(PREFERRED_FLOOR)),
-    };
-    target.max(min).min(metrics.max_width.max(min))
-}
-
-/// Pick the next column to shrink by one character.
-///
-/// Priority: TokenHeavy before Narrative before Compact. Within the same kind,
-/// the column with the most slack above its floor shrinks first so similarly
-/// shaped columns stay balanced.
-fn next_column_to_shrink(
-    widths: &[usize],
-    floors: &[usize],
-    metrics: &[ColumnMetrics],
-) -> Option<usize> {
-    widths
-        .iter()
-        .enumerate()
-        .filter(|(idx, width)| **width > floors[*idx])
-        .min_by_key(|(idx, width)| {
-            let slack = width.saturating_sub(floors[*idx]);
-            (
-                shrink_priority(metrics[*idx].kind),
-                usize::MAX.saturating_sub(slack),
-            )
-        })
-        .map(|(idx, _)| idx)
-}
-
-fn shrink_priority(kind: ColumnKind) -> usize {
-    match kind {
-        ColumnKind::TokenHeavy => 0,
-        ColumnKind::Narrative => 1,
-        ColumnKind::Compact => 2,
-    }
-}
-
-/// Longest whitespace-delimited token width in `text` (CJK-aware).
-fn longest_token_width(text: &str) -> usize {
-    text.split_whitespace()
-        .map(UnicodeWidthStr::width)
-        .max()
-        .unwrap_or(0)
-}
-
 /// Render a horizontal rule spanning all columns.
 ///
-/// Each column contributes `width + 2*CELL_PADDING` rule characters, joined by
-/// `COLUMN_GAP` spaces — matching the row layout exactly.
-fn render_separator(col_widths: &[usize], ch: char, style: Style) -> MarkdownLine {
+/// Each column contributes `width + 2*CELL_PADDING` fill characters, joined by
+/// the rule's junction glyph — matching the row layout exactly, so every line
+/// of the table has the same display width.
+fn rule_line(glyphs: &RuleGlyphs, col_widths: &[usize], style: Style) -> MarkdownLine {
     let mut line = MarkdownLine::default();
-    let segment = ch.to_string();
+    let left = glyphs.left.to_string();
+    let junction = glyphs.junction.to_string();
+    let fill = glyphs.fill.to_string();
+    let right = glyphs.right.to_string();
+
+    line.push_segment(SegmentKind::Border, style, &left);
     for (i, &w) in col_widths.iter().enumerate() {
         line.push_segment(
             SegmentKind::Border,
             style,
-            &segment.repeat(w + CELL_PADDING * 2),
+            &fill.repeat(w + CELL_PADDING * 2),
         );
         if i + 1 < col_widths.len() {
-            line.push_segment(SegmentKind::Border, style, &" ".repeat(COLUMN_GAP));
+            line.push_segment(SegmentKind::Border, style, &junction);
         }
     }
+    line.push_segment(SegmentKind::Border, style, &right);
     line
 }
 
-/// Render a single table row (possibly multi-line after wrapping).
-///
-/// Columns are gap-separated with alignment-aware padding. Trailing columns that
-/// are empty on a given line are trimmed so rows do not carry useless padding.
-fn render_row(
-    row: &[MarkdownLine],
-    col_widths: &[usize],
-    alignments: &[Alignment],
+/// What one row needs from its table: the column geometry plus the ink and
+/// glyph choices for the row's tier (heavy header band vs light body grid).
+struct RowEnv<'a> {
+    col_widths: &'a [usize],
+    alignments: &'a [Alignment],
     base_style: Style,
+    frame_style: Style,
+    outer_v: char,
+    divider: char,
     bold: bool,
-) -> Vec<MarkdownLine> {
+}
+
+/// Render a single table row (possibly multi-line after wrapping) as one or
+/// more full-width grid lines.
+///
+/// Every line draws the complete row — all columns (empty cells included) and
+/// both frame verticals — because a missing column would leave a hole in the
+/// grid. Cells are alignment-aware padded; `env.divider` is the column
+/// separator for this row's tier (heavy inside the header band, light in the
+/// body).
+fn render_row(row: &[MarkdownLine], env: &RowEnv<'_>) -> Vec<MarkdownLine> {
+    let col_widths = env.col_widths;
     let wrapped_cells: Vec<Vec<Vec<MarkdownSegment>>> = col_widths
         .iter()
         .enumerate()
@@ -370,21 +257,13 @@ fn render_row(
         .collect();
     let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
 
+    let outer = env.outer_v.to_string();
+    let divider = env.divider.to_string();
     let mut out = Vec::with_capacity(row_height);
     for line_idx in 0..row_height {
-        // Rightmost column with visible content on this line.
-        let last_visible = wrapped_cells.iter().rposition(|cell_lines| {
-            cell_lines
-                .get(line_idx)
-                .is_some_and(|segs| segs.iter().any(|s| !s.text.is_empty()))
-        });
-        let Some(last) = last_visible else {
-            out.push(MarkdownLine::default());
-            continue;
-        };
-
         let mut line = MarkdownLine::default();
-        for col in 0..=last {
+        line.push_segment(SegmentKind::Border, env.frame_style, &outer);
+        for col in 0..col_widths.len() {
             let width = col_widths[col];
             let segments = wrapped_cells[col]
                 .get(line_idx)
@@ -392,30 +271,34 @@ fn render_row(
                 .unwrap_or_default();
             let content_width: usize = segments.iter().map(|s| s.width()).sum();
             let remaining = width.saturating_sub(content_width);
-            let (left_pad, right_pad) = match alignments[col] {
+            let (left_pad, right_pad) = match env.alignments[col] {
                 Alignment::Left | Alignment::None => (0, remaining),
                 Alignment::Center => (remaining / 2, remaining - remaining / 2),
                 Alignment::Right => (remaining, 0),
             };
-            let is_last = col == last;
 
             // Padding is layout whitespace within the prose area.
-            line.push_segment(SegmentKind::Text, base_style, &" ".repeat(CELL_PADDING));
+            line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(CELL_PADDING));
             if left_pad > 0 {
-                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(left_pad));
+                line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(left_pad));
             }
             for seg in &segments {
-                let style = if bold { seg.style.bold() } else { seg.style };
+                let style = if env.bold {
+                    seg.style.bold()
+                } else {
+                    seg.style
+                };
                 line.push_segment(seg.kind, style, &seg.text);
             }
-            if !is_last {
-                if right_pad > 0 {
-                    line.push_segment(SegmentKind::Text, base_style, &" ".repeat(right_pad));
-                }
-                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(CELL_PADDING));
-                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(COLUMN_GAP));
+            if right_pad > 0 {
+                line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(right_pad));
+            }
+            line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(CELL_PADDING));
+            if col + 1 < col_widths.len() {
+                line.push_segment(SegmentKind::Border, env.frame_style, &divider);
             }
         }
+        line.push_segment(SegmentKind::Border, env.frame_style, &outer);
         out.push(line);
     }
     out
@@ -540,24 +423,6 @@ fn split_into_words(text: &str) -> Vec<String> {
     words
 }
 
-/// Split a string at a display width boundary (CJK-safe).
-///
-/// Returns `(head, tail)` where `head` fits within `max_width` display columns.
-pub(crate) fn split_str_by_width(text: &str, max_width: usize) -> (&str, &str) {
-    if max_width == 0 {
-        return ("", text);
-    }
-    let mut width = 0;
-    for (i, ch) in text.char_indices() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + cw > max_width {
-            return (&text[..i], &text[i..]);
-        }
-        width += cw;
-    }
-    (text, "")
-}
-
 // ============================================================
 // Tests
 // ============================================================
@@ -565,6 +430,7 @@ pub(crate) fn split_str_by_width(text: &str, max_width: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::table::ColumnKind;
 
     fn make_line(text: &str) -> MarkdownLine {
         let mut line = MarkdownLine::default();
@@ -576,19 +442,77 @@ mod tests {
         lines.iter().map(|l| l.to_plain()).collect()
     }
 
+    /// 跨前端对账：同一份数据、同样的预算（**无需折行 / 截断时**——折行是
+    /// markdown 侧的设计、截断是 CLI 侧的设计），两条渲染路径的纯文本必须
+    /// 逐字符相同——两个前端共用一份皮肤与宽度引擎，这条测试把「视觉同源」
+    /// 从口头承诺钉成事实。
     #[test]
-    fn test_split_str_by_width_ascii() {
-        assert_eq!(split_str_by_width("hello world", 5), ("hello", " world"));
-        assert_eq!(split_str_by_width("hello", 10), ("hello", ""));
-        assert_eq!(split_str_by_width("abc", 0), ("", "abc"));
-    }
+    fn markdown_and_plain_render_the_same_grid() {
+        use crate::render::table::plain::{self, PlainCell, PlainColumn, PlainOpts, PlainTable};
 
-    #[test]
-    fn test_split_str_by_width_cjk() {
-        // Each CJK char = 2 columns.
-        assert_eq!(split_str_by_width("你好世界", 4), ("你好", "世界"));
-        assert_eq!(split_str_by_width("你好世界", 3), ("你", "好世界"));
-        assert_eq!(split_str_by_width("a你b", 3), ("a你", "b"));
+        let table = TableBuffer {
+            headers: vec![make_line("A"), make_line("Item")],
+            rows: vec![
+                vec![make_line("1"), make_line("first")],
+                vec![make_line("2"), make_line("second")],
+            ],
+            ..Default::default()
+        };
+        let md_lines = plain_lines(&render_table(&table, Style::new(), Style::new(), Some(60)));
+
+        let plain_table = PlainTable {
+            columns: vec![
+                PlainColumn::new("A", crate::render::table::ColumnKind::Compact),
+                PlainColumn::new("Item", crate::render::table::ColumnKind::Compact),
+            ],
+            rows: vec![
+                vec![PlainCell::plain("1"), PlainCell::plain("first")],
+                vec![PlainCell::plain("2"), PlainCell::plain("second")],
+            ],
+        };
+        let cli_lines = plain::render(
+            &plain_table,
+            &PlainOpts {
+                width: 60,
+                color: false,
+                frame: Style::new(),
+                header: Style::new(),
+            },
+        );
+
+        assert_eq!(md_lines, cli_lines);
+
+        // 收紧预算：内容层按各自设计分化（markdown 折行、CLI 截断），但几何
+        // 不许分化——同一份预算下两侧的行宽逐一相等、顶/底框逐字符相同。
+        let width = |l: &String| unicode_width::UnicodeWidthStr::width(l.as_str());
+        for budget in [24usize, 12] {
+            let md: Vec<String> = plain_lines(&render_table(
+                &table,
+                Style::new(),
+                Style::new(),
+                Some(budget as u16),
+            ));
+            let cli = plain::render(
+                &plain_table,
+                &PlainOpts {
+                    width: budget,
+                    color: false,
+                    frame: Style::new(),
+                    header: Style::new(),
+                },
+            );
+            assert_eq!(md.first(), cli.first(), "top rule @ {budget}");
+            assert_eq!(md.last(), cli.last(), "bottom rule @ {budget}");
+            let target = width(&md[0]);
+            assert!(
+                md.iter().all(|l| width(l) == target),
+                "md @ {budget}: {md:?}"
+            );
+            assert!(
+                cli.iter().all(|l| width(l) == target),
+                "cli @ {budget}: {cli:?}"
+            );
+        }
     }
 
     #[test]
@@ -651,7 +575,7 @@ mod tests {
             ..Default::default()
         };
         // 2 columns à 1 content column + chrome ≈ the degenerate share.
-        let lines = render_table(&table, Style::new(), Some(12));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(12));
         assert!(!lines.is_empty());
     }
 
@@ -660,13 +584,6 @@ mod tests {
         let cell = MarkdownLine::default();
         let wrapped = wrap_cell(&cell, 10);
         assert_eq!(wrapped.len(), 1);
-    }
-
-    #[test]
-    fn test_longest_token_width() {
-        assert_eq!(longest_token_width("a bb ccc"), 3);
-        assert_eq!(longest_token_width(""), 0);
-        assert_eq!(longest_token_width("你好 ab"), 4); // 你好 = 4 cols
     }
 
     #[test]
@@ -699,122 +616,52 @@ mod tests {
         assert_eq!(metrics[0].kind, ColumnKind::Narrative);
     }
 
+    /// Exact shape of the framed grid: heavy frame, heavy header band, light
+    /// body grid — one line per visual line, every line the same width.
     #[test]
-    fn test_compute_widths_no_budget_keeps_natural() {
-        let metrics = vec![
-            ColumnMetrics {
-                max_width: 10,
-                header_token_width: 3,
-                body_token_width: 5,
-                kind: ColumnKind::Compact,
-            },
-            ColumnMetrics {
-                max_width: 20,
-                header_token_width: 3,
-                body_token_width: 5,
-                kind: ColumnKind::Compact,
-            },
-        ];
-        let widths = compute_column_widths(&metrics, None);
-        assert_eq!(widths, vec![10, 20]);
-    }
-
-    #[test]
-    fn test_compute_widths_fits_budget() {
-        let metrics = vec![
-            ColumnMetrics {
-                max_width: 10,
-                header_token_width: 3,
-                body_token_width: 5,
-                kind: ColumnKind::Compact,
-            },
-            ColumnMetrics {
-                max_width: 80,
-                header_token_width: 3,
-                body_token_width: 60,
-                kind: ColumnKind::TokenHeavy,
-            },
-            ColumnMetrics {
-                max_width: 40,
-                header_token_width: 3,
-                body_token_width: 30,
-                kind: ColumnKind::Narrative,
-            },
-        ];
-        let widths = compute_column_widths(&metrics, Some(60));
-        let total: usize = widths.iter().sum();
-        assert!(total <= 60, "total {total} exceeds budget 60: {widths:?}");
-        assert!(widths.iter().all(|&w| w >= 1));
-    }
-
-    #[test]
-    fn test_compute_widths_token_heavy_shrinks_first() {
-        // TokenHeavy column should give up width before the Narrative column.
-        let metrics = vec![
-            ColumnMetrics {
-                max_width: 60,
-                header_token_width: 3,
-                body_token_width: 50,
-                kind: ColumnKind::TokenHeavy,
-            },
-            ColumnMetrics {
-                max_width: 60,
-                header_token_width: 3,
-                body_token_width: 30,
-                kind: ColumnKind::Narrative,
-            },
-        ];
-        let widths = compute_column_widths(&metrics, Some(60));
-        assert!(
-            widths[1] >= widths[0],
-            "narrative ({}) should retain at least as much width as token-heavy ({}): {widths:?}",
-            widths[1],
-            widths[0]
-        );
-    }
-
-    #[test]
-    fn test_compute_widths_degenerate_budget() {
-        let metrics = vec![
-            ColumnMetrics {
-                max_width: 10,
-                header_token_width: 3,
-                body_token_width: 5,
-                kind: ColumnKind::Compact,
-            },
-            ColumnMetrics {
-                max_width: 10,
-                header_token_width: 3,
-                body_token_width: 5,
-                kind: ColumnKind::Compact,
-            },
-            ColumnMetrics {
-                max_width: 10,
-                header_token_width: 3,
-                body_token_width: 5,
-                kind: ColumnKind::Compact,
-            },
-        ];
-        // Budget too small for 3 * MIN_COLUMN_WIDTH.
-        let widths = compute_column_widths(&metrics, Some(6));
-        assert_eq!(widths.len(), 3);
-        assert!(widths.iter().all(|&w| w >= 1));
-    }
-
-    #[test]
-    fn test_render_table_basic_borderless() {
+    fn test_render_table_framed_grid_shape() {
         let table = TableBuffer {
             headers: vec![make_line("A"), make_line("B")],
             rows: vec![vec![make_line("1"), make_line("2")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(80));
-        let text = plain_lines(&lines).join("\n");
-        assert!(text.contains("A"), "header missing: {text}");
-        assert!(text.contains("1"), "data missing: {text}");
-        // Borderless style: no vertical bars, heavy header rule present.
-        assert!(!text.contains("│"), "should be borderless: {text}");
-        assert!(text.contains("━"), "header rule missing: {text}");
+        let lines = render_table(&table, Style::new(), Style::new(), Some(80));
+        let expected = [
+            "┏━━━━━┳━━━━━┓",
+            "┃ A   ┃ B   ┃",
+            "┣━━━━━╇━━━━━┫",
+            "┃ 1   │ 2   ┃",
+            "┗━━━━━┷━━━━━┛",
+        ];
+        assert_eq!(plain_lines(&lines), expected);
+    }
+
+    /// Every line of a table is exactly as wide as every other one — the frame
+    /// closes on both sides and cells are padded to their column width — so
+    /// downstream layout (and the equal-width CLI grids) can trust the
+    /// geometry even when a cell wraps.
+    #[test]
+    fn test_render_table_lines_are_equal_width() {
+        let table = TableBuffer {
+            headers: vec![make_line("Name"), make_line("Description")],
+            rows: vec![
+                vec![make_line("one"), make_line("short")],
+                vec![
+                    make_line("two"),
+                    make_line("this description wraps onto several lines at width"),
+                ],
+            ],
+            ..Default::default()
+        };
+        for avail in [24u16, 40, 80] {
+            let lines = render_table(&table, Style::new(), Style::new(), Some(avail));
+            let widths: Vec<usize> = lines.iter().map(|l| l.width()).collect();
+            assert!(
+                widths.iter().all(|w| *w == widths[0]),
+                "avail={avail}: {widths:?}"
+            );
+            assert!(widths[0] <= avail as usize, "avail={avail}: {}", widths[0]);
+        }
     }
 
     #[test]
@@ -824,10 +671,12 @@ mod tests {
             rows: vec![vec![make_line("a")], vec![make_line("b")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         let text = plain_lines(&lines).join("\n");
-        // Light rule between the two body rows.
-        assert!(text.contains("─"), "body separator missing: {text}");
+        // The heavy header separator and the light body rule between the two
+        // body rows, each with its own junction glyphs.
+        assert!(text.contains("┣━━━━━┫"), "header separator missing: {text}");
+        assert!(text.contains("┠─────┨"), "body separator missing: {text}");
     }
 
     #[test]
@@ -857,7 +706,7 @@ mod tests {
             ..Default::default()
         };
         for avail in [40u16, 60, 80, 120] {
-            let lines = render_table(&table, Style::new(), Some(avail));
+            let lines = render_table(&table, Style::new(), Style::new(), Some(avail));
             for line in &lines {
                 assert!(
                     line.width() <= avail as usize,
@@ -880,7 +729,7 @@ mod tests {
             ]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(30));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(30));
         // The wrapped row should produce multiple lines.
         assert!(
             lines.len() >= 4,
@@ -900,7 +749,7 @@ mod tests {
         let long_text = "This very long text must not be truncated under any circumstances";
         table.headers = vec![make_line("Col")];
         table.rows = vec![vec![make_line(long_text)]];
-        let lines = render_table(&table, Style::new(), Some(20));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(20));
         let text = plain_lines(&lines).join("\n");
         // All words must be preserved (they'll be on separate lines due to wrapping).
         for word in long_text.split_whitespace() {
@@ -918,7 +767,7 @@ mod tests {
             rows: vec![vec![make_line("你好"), make_line("1")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         let text = plain_lines(&lines).join("\n");
         assert!(text.contains("你好"), "CJK content missing: {text}");
     }
@@ -931,7 +780,7 @@ mod tests {
             alignments: vec![Alignment::Left, Alignment::Right],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         // The right-aligned "5" should be preceded by padding spaces within
         // its column (i.e. appear with leading spaces before the column gap/end).
         let data_line = plain_lines(&lines)
@@ -951,7 +800,7 @@ mod tests {
             rows: vec![vec![make_line(""), make_line("x")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         assert!(!lines.is_empty());
     }
 }

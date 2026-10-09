@@ -5,8 +5,95 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use wing_api_client::GatewayClient as GatewayApiClient;
+
+/// Output environment for human-facing tables.
+///
+/// `width`: a TTY adapts to the terminal; a pipe gets [`PIPE_WIDTH`] —
+/// deterministic output for `grep` / `less` / CI (terminal queries through
+/// `/dev/tty` must not leak the real width into a redirect).
+///
+/// `color` is off unless stdout is a TTY, `NO_COLOR` is unset-or-empty (the
+/// no-color.org semantics: "present and not an empty string") and the
+/// terminal does not declare itself dumb.
+pub struct TableOutput {
+    pub width: usize,
+    pub color: bool,
+}
+
+/// Table width for non-TTY output: the width the hand-laid tables used to be
+/// cut for, kept so pipes stay deterministic.
+pub const PIPE_WIDTH: usize = 120;
+
+impl TableOutput {
+    pub fn detect() -> Self {
+        let stdout_tty = std::io::stdout().is_terminal();
+        Self {
+            width: Self::width_for(stdout_tty),
+            color: Self::color_for(
+                stdout_tty,
+                std::env::var_os("NO_COLOR").as_deref(),
+                std::env::var_os("TERM").as_deref(),
+            ),
+        }
+    }
+
+    /// Width policy: TTY → the terminal's width (120 when the query fails);
+    /// pipe → [`PIPE_WIDTH`].
+    fn width_for(stdout_tty: bool) -> usize {
+        if stdout_tty {
+            crossterm::terminal::size().map_or(PIPE_WIDTH, |(w, _)| w as usize)
+        } else {
+            PIPE_WIDTH
+        }
+    }
+
+    /// Colour policy (see the struct docs). Pure, so the rule is testable
+    /// without a terminal.
+    fn color_for(
+        stdout_tty: bool,
+        no_color: Option<&std::ffi::OsStr>,
+        term: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        stdout_tty
+            && no_color.is_none_or(|v| v.is_empty())
+            && term.is_none_or(|t| t.to_string_lossy() != "dumb")
+    }
+}
+
+/// Flatten a display string to a single line: control whitespace (hard
+/// newlines included) becomes a space.
+///
+/// Free text (session names, tool descriptions) may carry newlines; a raw one
+/// breaks a tabular row in two.
+pub fn single_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Render a plain table through the shared engine with the standard CLI inks
+/// (dim frame, bold header), sized to `out`. Trailing newline included.
+pub fn render_table(
+    table: &crate::render::table::plain::PlainTable,
+    palette: &crate::config::ThemePalette,
+    out: &TableOutput,
+) -> String {
+    use ratatui::style::Style;
+
+    let opts = crate::render::table::plain::PlainOpts {
+        width: out.width,
+        color: out.color,
+        frame: Style::new().fg(palette.dim),
+        header: Style::new().fg(palette.text).bold(),
+    };
+    let mut rendered = crate::render::table::plain::render(table, &opts).join("\n");
+    rendered.push('\n');
+    rendered
+}
 
 /// Ensure the gateway is running, returning `(host, port)`.
 ///
@@ -43,7 +130,7 @@ pub fn print_json<T: serde::Serialize>(value: &T) {
 }
 
 /// Print a value as compact JSON to stdout (single line, for agent `jq` piping).
-pub fn print_json_compact<T: serde::Serialize>(value: &T) {
+pub fn print_json_compact<T: serde::Serialize + ?Sized>(value: &T) {
     match serde_json::to_string(value) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("error: failed to serialize JSON: {e}"),
@@ -127,5 +214,37 @@ mod tests {
         assert_eq!(missing_tags(&requested, &actual), vec!["executor"]);
         assert!(missing_tags(&requested, &requested).is_empty());
         assert_eq!(missing_tags(&requested, &[]).len(), 2);
+    }
+
+    #[test]
+    fn single_line_flattens_control_whitespace() {
+        // 硬换行 / tab / CR 都是行结构，进表格前必须压成空格。
+        assert_eq!(single_line("first\nsecond"), "first second");
+        assert_eq!(single_line("a\tb\rc"), "a b c");
+        // 普通文本原样（不折叠已有空格）。
+        assert_eq!(single_line("keep  the  spaces"), "keep  the  spaces");
+    }
+
+    #[test]
+    fn table_output_policy_is_testable_without_a_terminal() {
+        use std::ffi::OsStr;
+        // 管道：固定宽度（确定性）、永不着色。
+        assert_eq!(TableOutput::width_for(false), PIPE_WIDTH);
+        assert!(!TableOutput::color_for(false, None, None));
+        // TTY：默认着色；NO_COLOR 非空即退出（空串不算 opt-out，no-color.org 口径）。
+        assert!(TableOutput::color_for(true, None, None));
+        assert!(!TableOutput::color_for(true, Some(OsStr::new("1")), None));
+        assert!(TableOutput::color_for(true, Some(OsStr::new("")), None));
+        // TERM=dumb 同样退出。
+        assert!(!TableOutput::color_for(
+            true,
+            None,
+            Some(OsStr::new("dumb"))
+        ));
+        assert!(TableOutput::color_for(
+            true,
+            None,
+            Some(OsStr::new("xterm-256color"))
+        ));
     }
 }

@@ -6,5 +6,6 @@ pub mod line_utils;
 pub mod markdown;
 pub mod renderable;
 pub mod syntax;
+pub mod table;
 
 pub use renderable::Renderable;

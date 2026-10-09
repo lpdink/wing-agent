@@ -19,8 +19,8 @@ use ratatui::style::Style;
 use unicode_linebreak::{BreakOpportunity, linebreaks};
 use unicode_width::UnicodeWidthStr;
 
-use super::tables::split_str_by_width;
 use super::types::{MarkdownLine, SegmentKind};
+use crate::render::table::split_str_by_width;
 
 /// A flattened segment: its byte range within the flattened line text plus the
 /// styling needed to reconstruct it after wrapping.
