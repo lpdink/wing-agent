@@ -2,7 +2,8 @@
 //!
 //! 问题有两个来源（design §14.1）：**本地**按 catalog 约束生成（列表长度、必填缺席），
 //! **后端**由 `GET /api/settings/get` / `POST set` 带回（`kind` 是字符串，未知种类必须容忍，
-//! 见 protocol_addendum P6）。两者按 `(根, 路径, message)` 去重（本地优先 —— 它带 hint）。
+//! 见 protocol_addendum P6）。两者按 `(根, 路径, kind)` 去重（**AD4**）：`message` 取**后端**的
+//! （后端是唯一校验器），`hint` 取**非空的那个**（后端优先、本地兜底）。
 //!
 //! 本地生成**只覆盖两条约束**：`min_items` / `max_items` 与必填叶子缺席。值级约束
 //! （范围 / pattern）不重复校验已存的值：编辑器在提交时挡，后端 `set` 是权威（design D9）。

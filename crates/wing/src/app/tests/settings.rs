@@ -33,6 +33,7 @@ use super::images::has_placeholder;
 use super::images::kitty;
 use super::images::write_png;
 use super::support::frame_text;
+use super::support::hover;
 use super::support::press as mouse_press;
 use super::support::sync_event;
 use super::support::test_app;
@@ -95,13 +96,30 @@ fn node(key: &str, kind: SettingKind) -> SettingNode {
     }
 }
 
+/// 递归重算全部 path（**与 07/08 的夹具同口径**，review N1）：
+/// `key == "[]"`（元素模板）产出 `<prefix>[]` 而不是 `<prefix>.[]`，并且
+/// `element` / `variants` 也要跟着重算 —— 漏掉任何一条，列表内字段（`providers[].api_key`）
+/// 的 catalog 路径就与 `flatten` 产出的模板路径对不上，搜索类用例会**静默空转**。
 fn with_paths(mut node: SettingNode, prefix: &str) -> SettingNode {
-    node.path = if prefix.is_empty() {
+    node.path = if node.key == "[]" {
+        format!("{prefix}[]")
+    } else if prefix.is_empty() {
         node.key.clone()
     } else {
         format!("{prefix}.{}", node.key)
     };
     let path = node.path.clone();
+    if let Some(element) = node.element.take() {
+        node.element = Some(Box::new(with_paths(*element, &path)));
+    }
+    if let Some(variants) = node.variants.take() {
+        node.variants = Some(
+            variants
+                .into_iter()
+                .map(|variant| with_paths(variant, &path))
+                .collect(),
+        );
+    }
     let children = std::mem::take(&mut node.children);
     node.children = children
         .into_iter()
@@ -424,6 +442,56 @@ fn paste_while_the_panel_is_open_does_not_reach_the_draft() {
     assert_eq!(app.input.text(), "hello");
 }
 
+/// N4（review_r1）：设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
+/// ask（AD2：面板开着时到达的 ask 入队但不弹）。顺序反过来的话，`Ctrl+V` 会写进
+/// 那条**看不见**的 ask 内联编辑器里。
+#[test]
+fn paste_is_dropped_before_it_can_reach_a_queued_ask() {
+    let mut app = app_with_settings_panel();
+    app.handle_event(sync_event(
+        vec![],
+        None,
+        vec![],
+        vec![json!({
+            "type": "ask",
+            "tool_call_id": "ask-paste",
+            "questions": [{
+                "id": "q1",
+                "header": "标题",
+                "question": "问题？",
+                "options": [{"label": "甲"}, {"label": "乙"}],
+            }],
+        })],
+        None,
+    ));
+    assert_eq!(app.ask_panels.len(), 1, "ask 入队（不弹）");
+
+    // 把那条 ask 摆成"正在编辑自由输入行"——只有这个状态才可能被粘贴写脏。
+    {
+        let panel = app.ask_panels.front_mut().expect("队列前端");
+        let free_form = panel.questions[0].options.len();
+        panel.states[0].cursor = free_form;
+        panel.states[0].editing = true;
+    }
+
+    app.handle_paste("leaked");
+    assert_eq!(
+        app.ask_panels.front().expect("队列前端").states[0].draft,
+        "",
+        "面板开着时粘贴不落到看不见的 ask 编辑器"
+    );
+    assert_eq!(app.input.text(), "", "也不落到 composer");
+
+    // 关面板后同一条 ask 照旧吃粘贴（挡板只属于面板）。
+    app.close_settings_panel(false);
+    app.handle_paste("ok");
+    assert_eq!(
+        app.ask_panels.front().expect("队列前端").states[0].draft,
+        "ok",
+        "面板关掉后 ask 的粘贴路径不变"
+    );
+}
+
 // ── 2. ask 排队 ────────────────────────────────────────────
 
 #[test]
@@ -535,6 +603,13 @@ fn the_open_panel_suppresses_pictures_and_closing_invalidates_them() {
     // 关闭：整屏重画 + 图片句柄失效（design §20 风险 13 的配对）。
     app.close_settings_panel(false);
     assert!(app.needs_full_redraw, "关闭后面板要求整屏重画");
+    // N2：`invalidate` 在**关闭那一刻**就已经生效（不是靠下一次 draw 的兜底）——
+    // 下一帧的 `needs_full_redraw` 分支会把它再做一遍，只有在这里读才分得清。
+    assert_eq!(
+        app.images.stats().expect("lane").cached,
+        0,
+        "关闭动作自己调了 images.invalidate()（不等 draw）"
+    );
     let buf = super::images::frame(&mut app, &mut terminal);
     assert!(!has_placeholder(&buf), "失效的编码不会再画");
     assert_eq!(
@@ -562,6 +637,72 @@ fn opening_the_panel_cancels_an_in_flight_selection() {
     assert!(!app.selection.is_press_active(), "打开面板取消选区");
 }
 
+// ── 3b. 滚动条在 overlay 期间的交接（§20 风险 13 的第三件） ────
+
+/// 滚动条独有的字形：强调态（悬停 / 拖拽）的 thumb 是 `█`，其余是 `┃`；
+/// `│` 与所有边框共享，不能当判据。面板自己只画 `│` / `─` / `❯` / `■`（U+25A0，
+/// 不是 `█` U+2588），所以整帧扫这两个码位就是"滚动条画没画"。
+fn has_bar_glyph(buf: &ratatui::buffer::Buffer) -> bool {
+    for y in buf.area.y..buf.area.bottom() {
+        for x in buf.area.x..buf.area.right() {
+            if matches!(buf[(x, y)].symbol(), "┃" | "█") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// S2（review_r1）：overlay 期间**不绘制**滚动条，且 hover / drag 态在打开那一刻
+/// 就交出去 —— 不交出去的话关掉面板后拖拽态会复活（强调字形重新出现）。
+#[test]
+fn the_open_panel_hands_the_scrollbar_over_and_gives_it_back_on_close() {
+    let mut app = test_app();
+    for i in 0..40 {
+        app.chat
+            .push(ChatCell::AssistantMessage(format!("msg {i}")));
+    }
+    let mut terminal = test_terminal(80, 24);
+    app.draw(&mut terminal).expect("draw");
+
+    // 悬停让滚动条进入强调态：这是"有东西要交接"的前提。
+    let geom = app.scrollbar_geometry().expect("内容溢出，滚动条在场");
+    app.handle_mouse(hover((geom.column, geom.thumb_top)));
+    assert!(app.scrollbar.is_active(), "悬停亮起");
+    app.draw(&mut terminal).expect("draw");
+    assert!(
+        has_bar_glyph(terminal.backend().buffer()),
+        "强调态画的是 `█`：\n{}",
+        frame_text(terminal.backend().buffer())
+    );
+
+    // 打开面板：overlay 的第一帧就把状态交出去，且一个滚动条字形都不画。
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        Some(interface_source("magenta")),
+    );
+    app.draw(&mut terminal).expect("draw");
+    let buf = terminal.backend().buffer();
+    assert!(frame_text(buf).contains("Settings"), "面板在场");
+    assert!(!app.scrollbar.is_active(), "overlay 帧清掉 hover / drag 态");
+    assert!(
+        !has_bar_glyph(buf),
+        "overlay 期间不画滚动条：\n{}",
+        frame_text(buf)
+    );
+
+    // 关面板：滚动条回来（悬停态不复活 —— 那要用户下一次真的悬停）。
+    app.close_settings_panel(false);
+    app.draw(&mut terminal).expect("draw");
+    assert!(!app.scrollbar.is_active());
+    assert!(
+        has_bar_glyph(terminal.backend().buffer()),
+        "关掉面板后滚动条回来：\n{}",
+        frame_text(terminal.backend().buffer())
+    );
+}
+
 // ── 4. 实时预览（§15.3） ───────────────────────────────────
 
 #[test]
@@ -573,6 +714,9 @@ fn editing_an_interface_color_through_the_real_key_path_previews_it() {
     press(&mut app, KeyCode::Enter); // 打开编辑器（预填 magenta）
     press_event(&mut app, ctrl(KeyCode::Char('u'))); // 清空缓冲
     type_text(&mut app, "cyan");
+    // S1：先把 `App::with_images` 的初始值消费掉 —— 否则下面那条断言恒真
+    //（构造即 `true`，而这条测试从不 draw）。提交之后的 `true` 必须由这次预览给出。
+    app.needs_full_redraw = false;
     press(&mut app, KeyCode::Enter); // 提交
 
     assert_eq!(
@@ -582,6 +726,26 @@ fn editing_an_interface_color_through_the_real_key_path_previews_it() {
     );
     assert_eq!(app.palette.accent, ratatui::style::Color::Cyan);
     assert!(app.needs_full_redraw, "调色板变了要整屏重画");
+}
+
+/// S1 的专门守卫（review_r1 的 M-E 从这里穿过去）：`apply_palette` 必须**主动**
+/// 置 `needs_full_redraw` —— 调色板不在 ratatui 的 diff 键里，不整屏重画就会留残影。
+#[test]
+fn a_preview_asks_for_a_full_redraw() {
+    let mut app = app_with_settings_panel();
+    app.needs_full_redraw = false;
+    app.apply_settings_preview(&json!({"colors": {"accent": "cyan"}}));
+    assert!(app.needs_full_redraw, "改调色板 → 整屏重画");
+}
+
+/// 同一条守卫的另一半：回退预览（`Close{discard:true}`）也必须整屏重画。
+#[test]
+fn a_discard_close_asks_for_a_full_redraw() {
+    let mut app = app_with_settings_panel();
+    app.apply_settings_preview(&json!({"colors": {"accent": "cyan"}}));
+    app.needs_full_redraw = false;
+    app.close_settings_panel(true);
+    assert!(app.needs_full_redraw, "关掉面板（含回退）→ 整屏重画");
 }
 
 #[test]
@@ -613,10 +777,12 @@ fn closing_with_discard_restores_the_config_snapshot() {
     let before = app.config.colors.accent.clone();
     app.apply_settings_preview(&json!({"colors": {"accent": "cyan"}}));
     assert_eq!(app.config.colors.accent.as_deref(), Some("cyan"));
+    // S1：消费初始值，让下面那条断言由"这次关闭"负责（不是构造时的 true）。
+    app.needs_full_redraw = false;
 
     app.close_settings_panel(true);
     assert_eq!(app.config.colors.accent, before, "预览被回退");
-    assert!(app.needs_full_redraw);
+    assert!(app.needs_full_redraw, "关闭要整屏重画");
     assert!(app.settings_panel.is_none());
 }
 
@@ -1195,4 +1361,31 @@ fn the_panel_contract_used_by_the_app_is_stable() {
     assert!(panel.is_stale(), "指纹不同 → stale");
     panel.set_interface(interface_source("magenta"));
     assert_eq!(panel.dirty_count(), 0);
+}
+
+// ── 8b. 重启路径的早退分支（N6） ───────────────────────────
+
+/// N6（review_r1）：`restart_gateway` 连"没有 transport"这条早退都没有测试。
+/// 它不需要真网关：没有连接时直接 toast + return，**不产出任何副作用**。
+#[tokio::test]
+async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
+    let mut app = app_with_settings_panel();
+    let mut transport: Option<crate::app::Transport> = None;
+    let mut endpoint = crate::app::GatewayEndpoint {
+        ws_url: "ws://127.0.0.1:32523/ws".into(),
+        http_base: "http://127.0.0.1:32523".into(),
+        api_key: None,
+    };
+
+    app.set_connected(false);
+    super::super::settings::restart_gateway(&mut app, &mut transport, &mut endpoint).await;
+
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.kind),
+        Some(ToastKind::Warning),
+        "没有连接时给一条 warning toast"
+    );
+    assert_eq!(endpoint.http_base, "http://127.0.0.1:32523", "早退不碰端点");
+    assert!(!app.status.connected, "早退不改连接态");
+    assert!(app.drain_intents().is_empty(), "早退不产出任何副作用");
 }

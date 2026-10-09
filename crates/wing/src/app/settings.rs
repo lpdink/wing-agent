@@ -762,10 +762,16 @@ pub(super) async fn restart_gateway(
     }
 }
 
-/// 轮询 `/api/health` 直到网关不可达；`true` = 它下去了（或探测本身失败）。
+/// 轮询直到网关**真的下去了**：health 不可达 **且** 端口不再接受连接。
 ///
 /// 单次探测带超时：在 WSL / 容器里 SYN 可能被静默丢掉（`cmd/start.rs` 的同款注释），
 /// 不设上限会把"等 10s"变成"等内核的 TCP 重试窗口"。
+///
+/// **为什么要看端口**（review N5）：`start_gateway` 起手会做一次裸 TCP 占用检查，
+/// 而 uvicorn 优雅关闭的窗口里可能"health 已经不响应、listen socket 还没释放" ——
+/// 只看 health 就可能在那个窗口里往下走，于是 `Ctrl+R` 报"端口被占用"（其实旧网关
+/// 正在死，再按一次就成功）。这里用与 `start_gateway` **同一条判据**（连接成功 =
+/// 占用；拒绝 / 超时 = 空闲），把窗口等过去；等不到就还是走"取消重启"的老路。
 async fn wait_until_unreachable(endpoint: &GatewayEndpoint, timeout: Duration) -> bool {
     let Ok(probe) =
         wing_api_client::GatewayClient::new(&endpoint.http_base, endpoint.api_key.as_deref())
@@ -774,14 +780,38 @@ async fn wait_until_unreachable(endpoint: &GatewayEndpoint, timeout: Duration) -
     };
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        match tokio::time::timeout(RESTART_PROBE_TIMEOUT, probe.health()).await {
-            Ok(Ok(_)) => {}
+        let down = match tokio::time::timeout(RESTART_PROBE_TIMEOUT, probe.health()).await {
+            Ok(Ok(_)) => false,
             // 连接被拒 / 超时 / 任何错误都算"不可达"。
-            _ => return true,
+            _ => true,
+        };
+        if down && !port_listening(endpoint).await {
+            return true;
         }
         if std::time::Instant::now() >= deadline {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// 端口上还有人在 listen 吗 —— 与 [`crate::cmd::start::start_gateway`] 的占用检查
+/// 同一条判据（连上 = 有人在；拒绝 / 超时 = 空闲）。
+async fn port_listening(endpoint: &GatewayEndpoint) -> bool {
+    let Some((host, port)) = endpoint
+        .http_base
+        .trim_start_matches("http://")
+        .rsplit_once(':')
+        .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)))
+    else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(
+            RESTART_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }

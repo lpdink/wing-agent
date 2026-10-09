@@ -596,7 +596,16 @@ impl App {
     /// Handle a bracketed paste event: routed to the active ask panel's inline
     /// editor when one is up (panel is modal); the modal model panel and the
     /// settings overlay drop it; otherwise it goes to the composer.
+    ///
+    /// **顺序**（N4）：设置面板的挡板排在最前 —— 面板是全屏、拿走全部按键的层，
+    /// 而队列里可能正躺着一条**看不见**的 ask（AD2：面板开着时到达的 ask 入队不弹）。
+    /// 先问 ask 的话，`Ctrl+V` 会写进那条 ask 的内联编辑器（用户看不见自己改了什么）。
     pub(super) fn handle_paste(&mut self, text: &str) {
+        // 设置面板：内联编辑器只吃按键事件，草稿在面板底下不可见 —— 粘贴进
+        // composer 只会改掉用户关面板之后要发的内容。
+        if self.settings_panel.is_some() {
+            return;
+        }
         if !self.ask_panels.is_empty() {
             if let Some(panel) = self.ask_panels.front_mut() {
                 panel.insert_paste(text);
@@ -606,11 +615,6 @@ impl App {
         }
         // The model panel is modal and owns no text field — paste is dropped.
         if self.model_panel.is_some() {
-            return;
-        }
-        // 设置面板同理：它的内联编辑器只吃按键事件，草稿在面板底下不可见 ——
-        // 粘贴进 composer 只会改掉用户关面板之后要发的内容。
-        if self.settings_panel.is_some() {
             return;
         }
         self.input.insert_str(text);

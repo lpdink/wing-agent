@@ -225,7 +225,7 @@ impl AppConfig {
     pub fn load() -> Self {
         let Some(path) = store::interface_config_path() else {
             tracing::warn!("cannot determine config directory, using defaults");
-            return Self::default();
+            return Self::default_resolved();
         };
         Self::load_from_path(&path)
     }
@@ -245,20 +245,20 @@ impl AppConfig {
                         cfg
                     }
                     // 类型错误：warn（带 path）已经由 `from_doc_at` 打出，这里只回落。
-                    None => Self::default(),
+                    None => Self::default_resolved(),
                 },
                 Err(e) => {
                     tracing::warn!(?path, %e, "failed to parse config, using defaults");
-                    Self::default()
+                    Self::default_resolved()
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::debug!(?path, "no config file, using defaults");
-                Self::default()
+                Self::default_resolved()
             }
             Err(e) => {
                 tracing::warn!(?path, %e, "failed to read config, using defaults");
-                Self::default()
+                Self::default_resolved()
             }
         }
     }
@@ -270,7 +270,18 @@ impl AppConfig {
     /// [`Self::resolve`] is applied here so every caller — including the settings panel's live
     /// preview via [`store::appconfig_from_doc`] — gets the same folded config `load()` returns.
     pub(crate) fn from_doc(doc: &serde_json::Value) -> Self {
-        Self::from_doc_at(doc, None).unwrap_or_default()
+        Self::from_doc_at(doc, None).unwrap_or_else(Self::default_resolved)
+    }
+
+    /// Fallback default for every error path — **`resolve()` 过**（review N3）。
+    ///
+    /// 成功路径是「解析 → resolve」，回落路径必须是同一形态：`resolve()` 今天只折叠
+    /// `colors.math_mode = rendering.math`，两边恰好相等，但默认值将来一旦偏离这个
+    /// 等式，未 resolve 的回落就会造出「同一份默认配置、两种形态」的隐性分叉。
+    fn default_resolved() -> Self {
+        let mut cfg = Self::default();
+        cfg.resolve();
+        cfg
     }
 
     /// [`Self::from_doc`] with the source path for the log line (N-3).
