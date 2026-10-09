@@ -576,7 +576,8 @@ class ProbeEnv:
             if extra_providers is not None
             else None
         )
-        """附加 provider 旋钮（跨 provider 场景；``{"name", "models"}``）。
+        """附加 provider 旋钮（跨 provider 场景；``{"name", "models"}``，``api_key`` 可选、
+        缺省同主 provider）。
 
         base_url 由 :meth:`extra_provider_specs` 指到假 Provider 的第二条路径
         前缀（``/<name>/v1``）——同进程、同剧本表，请求归属靠留档的 path 判定。
@@ -730,6 +731,10 @@ class ProbeEnv:
         base_url = ``<假 Provider 地址>/<name>/v1``——假 Provider 按构造参数
         ``path_prefixes`` 为每个 name 注册同一条 chat completions 路由，于是
         「这次调用打到哪个 provider」由请求留档的 ``path`` 判定。
+
+        ``api_key`` 可选（条目里给了就透传，缺省同主 provider）——这是
+        ``render_config_yaml`` 的既有契约（同一份 ``_default_provider_block``），
+        「两个 provider、两把不同的 key」的场景（密文错配回归，A1）靠它成立。
         """
         specs: list[dict[str, Any]] = []
         for entry in self.extra_providers or ():
@@ -740,13 +745,15 @@ class ProbeEnv:
                     f"extra provider {name!r} declares no models "
                     "(providers[].models must be non-empty)"
                 )
-            specs.append(
-                {
-                    "name": name,
-                    "base_url": f"{self.provider.url}/{name}/v1",
-                    "models": list(models),
-                }
-            )
+            spec: dict[str, Any] = {
+                "name": name,
+                "base_url": f"{self.provider.url}/{name}/v1",
+                "models": list(models),
+            }
+            api_key = entry.get("api_key")
+            if isinstance(api_key, str) and api_key:
+                spec["api_key"] = api_key
+            specs.append(spec)
         return specs
 
     def _render_config(self, port: int) -> str:

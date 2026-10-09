@@ -183,3 +183,85 @@ async def test_secrets_are_never_echoed_and_null_keeps_the_value(probe: Probe) -
     # 本场景钉的是"网关实际发出的凭据 = 磁盘上的值"（`Authorization` 逐字）与
     # "真值不出网关"两面——前者是"仍能用原 key 认证成功"的可观测等价物：
     # 凭据正确且确实被用于下一次调用，认证成功与否只取决于上游（不在 probe 内）。
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A1 回归（PR #180 review）：删掉列表首项后，剩下的 provider 必须拿到**自己的** key
+#
+# 按下标回填的旧行为：`providers[0]` 删除后，`providers[1]`（掩码为 null）会从
+# `current[0]` 抄来 p1 的密钥——保存成功、回执不报告，用户下次调用才 401 / 打错账号。
+# 结构性看不见的原因：既有场景全是单 provider 单 key。这里用**两个 provider、
+# 两把不同的 key**，断言「网关实际发出的 Authorization == 那一项自己的 key」。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: 附加 provider（第二个）——同名会撞 provider 全局唯一性，所以用独立名字。
+P2_NAME = "probe2"
+#: p2 的模型（p1 的模板模型不会与它撞 id）。
+P2_MODEL = "probe2/secret-target"
+#: p2 自己的 key（与 p1 的 `probe-key` 不同；末 4 位可辨识）。
+P2_KEY = "probe2-secret-BBB2"
+#: p2 的端点路径（请求留档据此判定"这次调用打到哪个 provider"）。
+P2_PATH = f"/{P2_NAME}/v1/chat/completions"
+
+
+def _wire_credential_for(probe: Probe, model: str, index: int) -> str | None:
+    """第 ``index`` 次打到 ``model`` 的 LLM 请求实际发出的 ``Authorization`` 头。"""
+    request = probe.request(model, index)
+    assert request.path == P2_PATH, (request.path, request.describe())
+    return request.headers.get("authorization")
+
+
+@pytest.mark.probe_env(
+    model=SECRETS_MODEL,
+    extra_providers=[{"name": P2_NAME, "models": [P2_MODEL], "api_key": P2_KEY}],
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_secret_follows_its_provider_when_the_first_is_deleted(
+    probe: Probe,
+) -> None:
+    """删掉 ``providers[0]`` 后保存：p2 的 key 必须还是 p2 自己的（线格式 + 盘上双证）。"""
+    probe.register(P2_MODEL, Turn.of(text="p2-r1"), Turn.of(text="p2-r2"))
+    http = probe.driver_required.http
+
+    # 会话用 p2 的模型：请求留档的 path 判定归属（/probe2/v1/chat/completions）。
+    session = await probe.session(model=P2_MODEL)
+
+    # ── 控制组：删除前，p2 发出的就是 p2 自己的 key ──
+    first = await session.chat("before the delete")
+    assert first.data["subtype"] == "success", first.data
+    assert _wire_credential_for(probe, P2_MODEL, 0) == f"Bearer {P2_KEY}"
+
+    current = await _settings(http)
+    document = current["values"]
+    assert [p["name"] for p in document["providers"]] == ["probe", P2_NAME]
+    assert document["providers"][0]["api_key"] is None, document["providers"][0]
+    assert document["providers"][1]["api_key"] is None, document["providers"][1]
+
+    # ── 面板动作：删掉 providers[0]，回传整份掩码文档 ──
+    # 默认 agent 模板引用 p1 的模型——删掉 p1 之前把它改到 p2 的模型上，
+    # 让保存后的配置仍然合法（本场景只考察密钥归属）。
+    document["agents"][0]["model"] = P2_MODEL
+    del document["providers"][0]
+    receipt = await http.request(
+        "POST",
+        "/api/settings/set",
+        body={"base": current["fingerprint"], "document": document},
+    )
+    assert receipt["ok"] is True, receipt
+    # 身份（name）配对成功 ⇒ 没有丢任何东西 ⇒ 不打扰用户。
+    assert receipt["warnings"] == [], receipt
+
+    # 盘上：只剩 p2，且 api_key 是 p2 自己的（错配形态：p1 的 probe-key）。
+    written = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
+    assert [p["name"] for p in written["providers"]] == [P2_NAME], written["providers"]
+    assert written["providers"][0]["api_key"] == P2_KEY, written["providers"][0]
+
+    # ── 线格式：下一轮对话真的带着 p2 自己的 key 出去 ──
+    second = await session.chat("after deleting the first provider")
+    assert second.data["subtype"] == "success", second.data
+    assert probe.request(P2_MODEL, 1).context().messages[-1].content == (
+        "after deleting the first provider"
+    )
+    assert _wire_credential_for(probe, P2_MODEL, 1) == f"Bearer {P2_KEY}"
+    session.watch.assert_never("error")

@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 from wing.config import models as models_module
+from wing.config.catalog import SettingKind, SettingNode, build_catalog
 from wing.config.models import Config
 from wing.config.spec import ApplyScope, setting_meta
 
@@ -414,3 +415,70 @@ def test_choices_declarations_match_spec() -> None:
         "ProviderConfig.reasoning_effort": {"low", "medium", "high", "max"},
         "UserAgentConfig.preset": {"opencode", "qwen-code"},
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. identity_field（保存时密文回填的配对键，审查 A1）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_identity_field_declarations_match_spec() -> None:
+    """声明闭集：只声明在「元素子树里有可达密文叶子」的列表上。
+
+    - ``Config.providers``：`api_key` 是密文，`name` 全局唯一（跨字段检查强制）→ 声明；
+    - ``Config.agents`` / ``ProviderConfig.models``：没有可达的密文叶子 → 不声明
+      （不为对称加无用声明）；
+    - ``Config.gateway.auth.keys``：唯一的非密文标量 ``role`` 不唯一（默认 admin，
+      多条 key 同 role 是常态），``key`` 本身是密文（incoming 侧恰好是 null）→
+      **没有可用的身份字段，不声明**，走「长度相等的安全下标回落 / 宁可不猜」。
+    """
+    declared = {
+        path: _meta(path).identity_field
+        for path, _ in _ALL_FIELDS
+        if _meta(path).identity_field is not None
+    }
+    assert declared == {"Config.providers": "name"}
+
+
+def _identity_nodes(node: SettingNode) -> list[SettingNode]:
+    """catalog 里声明了 ``identity_field`` 的全部节点（递归）。"""
+    found = [node] if node.identity_field is not None else []
+    for child in node.children:
+        found.extend(_identity_nodes(child))
+    if node.element is not None:
+        found.extend(_identity_nodes(node.element))
+    for variant in node.variants or []:
+        found.extend(_identity_nodes(variant))
+    return found
+
+
+def test_identity_field_points_to_a_non_secret_scalar_of_the_element_template() -> None:
+    """门禁：``identity_field`` 只能声明在 LIST 上，且指向元素模板里**真实存在**的
+    非密文标量字段（对象 / 列表 / map / 密文叶子都不行）。
+
+    写错 = 一条永远配不上的死声明：列表结构变化时密钥会被静默丢弃（而不是按身份
+    跟自己的项走）——必须在这里变红，不许靠运行期觉察。
+    """
+    nodes = _identity_nodes(build_catalog())
+    assert [node.path for node in nodes] == ["providers"], [n.path for n in nodes]
+    for node in nodes:
+        assert node.kind is SettingKind.LIST, (
+            f"{node.path}: identity_field 只能声明在 list 字段上"
+        )
+        assert node.element is not None and node.element.kind is SettingKind.OBJECT, (
+            f"{node.path}: 元素模板必须是对象才能谈身份字段"
+        )
+        child = next(
+            (c for c in node.element.children if c.key == node.identity_field), None
+        )
+        assert child is not None, (
+            f"{node.path}: 元素模板里没有 {node.identity_field!r} 这个字段"
+        )
+        assert not child.secret, f"{node.path}.{child.key}: 身份字段不能是密文"
+        assert child.kind in (
+            SettingKind.STR,
+            SettingKind.ENUM,
+            SettingKind.INT,
+            SettingKind.FLOAT,
+            SettingKind.BOOL,
+        ), f"{node.path}.{child.key}: 身份字段必须是标量（实得 {child.kind}）"

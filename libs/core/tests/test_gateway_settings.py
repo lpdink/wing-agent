@@ -70,13 +70,14 @@ def _gateway(
     *,
     auth_enabled: bool = False,
     keys: list[ApiKeyEntry] | None = None,
+    text: str = VALID_YAML,
 ) -> Iterator[tuple[TestClient, Path, object]]:
     """真实 runtime + tmp WING_HOME + TestClient（照 test_gateway_http 的既有模式）。"""
     monkeypatch.setenv("WING_HOME", str(tmp_path))
     monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
     config_path = tmp_path / "core" / "config.yaml"
     config_path.parent.mkdir(parents=True)
-    config_path.write_text(VALID_YAML, encoding="utf-8")
+    config_path.write_text(text, encoding="utf-8")
     reset_config()
 
     from wing.gateway.server import GatewayServer
@@ -110,6 +111,33 @@ def auth_gateway(
             ApiKeyEntry(key=TOOL_KEY, role="tool_runtime"),
         ],
     ) as context:
+        yield context
+
+
+#: 两个 provider、**两把不同的 key**（A1 回归的靶子：单 provider / 单 key 结构性看不见错配）。
+TWO_PROVIDER_YAML = """\
+providers:
+  - name: p1
+    protocol: openai
+    base_url: https://p1.example.com
+    api_key: KEY-P1-AAAA
+    models: [m1]
+  - name: p2
+    protocol: openai
+    base_url: https://p2.example.com
+    api_key: KEY-P2-BBBBBBBB
+    models: [m2]
+agents:
+  - name: default
+    model: m2
+"""
+
+
+@pytest.fixture
+def two_provider_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[TestClient, Path, object]]:
+    with _gateway(tmp_path, monkeypatch, text=TWO_PROVIDER_YAML) as context:
         yield context
 
 
@@ -469,6 +497,67 @@ class TestSettingsSet:
         text = config_path.read_text(encoding="utf-8")
         assert "future_key: keep-me" in text
         assert "unknown key (not recognized by this wing version)" in text
+
+
+# ============================================================
+# A1：密文按身份配对（删除 / 重命名 provider 后的回执形态）
+# ============================================================
+
+
+class TestSettingsSecretPairing:
+    """密文 ``null`` 哨兵按身份回填（审查 A1）——两把不同 key 的端到端回执。
+
+    单 provider / 单 key 的配置在结构上看不见「A 的密钥被写给 B」，所以这里有两条：
+    ① 删除一个 provider（身份配对成功）→ 回执 ``warnings`` 为空、盘上密钥没错配；
+    ② 删除 + 改名（配不上）→ 宁可不猜：密钥被移除 → 校验失败（api_key 必填）+
+       ``warnings`` 点名路径要求重填。
+    """
+
+    def test_delete_a_provider_keeps_the_other_key_without_warnings(
+        self, two_provider_gateway
+    ):
+        client, config_path, _ = two_provider_gateway
+        values, fingerprint = _get_doc(client)
+        assert [p["name"] for p in values["providers"]] == ["p1", "p2"]
+        assert values["providers"][0]["api_key"] is None  # 掩码（get 不回显）
+        assert values["providers"][1]["api_key"] is None
+
+        del values["providers"][0]  # 面板的列表删除 / CLI 的 remove
+        body = client.post(
+            "/api/settings/set", json={"base": fingerprint, "document": values}
+        ).json()
+
+        assert body["ok"] is True, body
+        assert body["problems"] == []
+        # 身份（name=p2）配对成功 → 没有丢任何东西 → 不打扰用户。
+        assert body["warnings"] == []
+        assert "providers[0].name" in body["changed"]
+
+        written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert [p["name"] for p in written["providers"]] == ["p2"]
+        assert written["providers"][0]["api_key"] == "KEY-P2-BBBBBBBB"
+
+    def test_delete_and_rename_reports_the_dropped_key_in_warnings(
+        self, two_provider_gateway
+    ):
+        client, config_path, _ = two_provider_gateway
+        before = config_path.read_bytes()
+        values, fingerprint = _get_doc(client)
+        values["providers"] = [values["providers"][1]]  # 删掉 p1
+        values["providers"][0]["name"] = "p2-renamed"  # 同时改名 → 身份配不上
+
+        body = client.post(
+            "/api/settings/set", json={"base": fingerprint, "document": values}
+        ).json()
+
+        # 宁可不猜：密钥被移除（没有写给任何人）→ 必填字段缺失 → 全有或全无（不写盘）。
+        assert body["ok"] is False, body
+        assert [p["path"] for p in body["problems"]] == ["providers[0].api_key"]
+        assert body["warnings"] == [
+            "无法确定 providers[0].api_key 属于哪一项（列表结构变化且无法按身份配对），"
+            "已移除该密钥，请重新填写"
+        ]
+        assert config_path.read_bytes() == before  # 一个字节都没写
 
 
 # ============================================================
