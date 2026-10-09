@@ -1,5 +1,4 @@
 # wing/config/models.py
-# SYNC: Keep this file in sync with default_config.py when adding/removing fields.
 """配置模型（pydantic）+ 模型目录（id 空间）/ 能力 / 展示名解析。
 
 字段的元信息（说明 / 枚举含义 / 密文 / 生效域 / 分组）一律经 ``S(...)`` 在**声明处**
@@ -42,6 +41,7 @@ class ModelCapabilities(BaseModel):
 
     vision: bool = S(
         doc="是否接受图片输入（本期唯一能力）",
+        notes="未声明或 false 时，ReadImage 不会为该模型附图片（请求里只留占位文本）。",
         apply=ApplyScope.HOT,
         default=False,
     )
@@ -228,6 +228,12 @@ class ProviderConfig(BaseModel):
         notes="low / medium / high / max；null = 交给 provider 决定。",
         apply=ApplyScope.HOT,
         default=None,
+        choices={
+            "low": "低推理强度（更快、更省）",
+            "medium": "中等推理强度",
+            "high": "高推理强度",
+            "max": "最高推理强度",
+        },
     )
     max_tokens: int = S(
         doc="最大输出 token 数（Anthropic 协议必填）",
@@ -236,7 +242,11 @@ class ProviderConfig(BaseModel):
     )
     extra_body: dict = S(
         doc="透传到 request body 顶层的额外字段",
-        notes='面板里用单行 JSON 编辑器。例：{"thinking":{"type":"enabled"}}',
+        notes=(
+            '面板里用单行 JSON 编辑器。例：{"thinking":{"type":"enabled"}}。\n'
+            "openai 协议下 enable_thinking / preserve_thinking 默认随每个请求发送；"
+            "在这里显式写出可覆盖。"
+        ),
         apply=ApplyScope.HOT,
         default_factory=dict,
     )
@@ -440,8 +450,11 @@ class SessionsConfig(BaseModel):
     eviction: EvictionConfig = S(
         doc="空闲会话逐出（只回收内存态，磁盘不动）",
         notes=(
+            "只有同时满足「没有轮次在跑、没有排队输入、没有客户端订阅、空闲超过阈值」"
+            "才会被逐出；空闲计时器随会话状态变化重置。\n"
             "被逐出的会话在下次被需要时按需水合（resume / subscribe / send）。\n"
-            "存储路径不是配置字段：由 WING_SESSIONS_PATH / WING_HOME 决定。"
+            "存储路径不是配置字段：由 WING_SESSIONS_PATH / WING_HOME 决定。\n"
+            "想立刻回收某个会话用 `wing release <session-id>`。"
         ),
         apply=ApplyScope.RESTART,
         default_factory=EvictionConfig,
@@ -565,7 +578,11 @@ class ImagesConfig(BaseModel):
 
     max_bytes: int = S(
         doc="单图原始字节上限（默认 4.5 MiB）",
-        notes="ReadImage 读时拒绝 + 降采样提示。",
+        notes=(
+            "ReadImage 读时拒绝 + 降采样提示。\n"
+            "4.5 MiB 是对多数 provider 服务端单图上限（约 5 MB 档）的保守取值；"
+            "你的 provider 接受更大时可以调大。"
+        ),
         apply=ApplyScope.HOT,
         default=4_718_592,
         gt=0,
@@ -647,7 +664,8 @@ class AuthConfig(BaseModel):
         doc="是否启用 API key 鉴权",
         notes=(
             "启用后除豁免路径（/api/health）外全部 HTTP/WS 请求必须携带有效 key："
-            "Authorization: Bearer / X-API-Key / WS ?api_key=。"
+            "Authorization: Bearer / X-API-Key / WS ?api_key=。\n"
+            "WS 的 query 参数写法会被反向代理的访问日志记下，能改 header 时优先用 header。"
         ),
         apply=ApplyScope.HOT,
         default=False,

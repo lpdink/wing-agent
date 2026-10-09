@@ -3,9 +3,9 @@
 
 为什么单独成模块：
 
-- 元信息今天散在 ``models.py`` 的字段 docstring 与 ``default_config.py`` 的手写 YAML 里，
-  靠 ``# SYNC`` 注释维系——机器读不到，设置界面就长不出来。声明层把它变成结构化数据，
-  挂在 ``FieldInfo.json_schema_extra[WING_META_KEY]`` 上（进 JSON Schema / OpenAPI，下游
+- 元信息曾是两份人读文本（``models.py`` 的字段 docstring 与手写 YAML 模板，靠 ``# SYNC`` 注释
+  维系）——机器读不到，设置界面就长不出来。声明层把它变成结构化数据，挂在
+  ``FieldInfo.json_schema_extra[WING_META_KEY]`` 上（进 JSON Schema / OpenAPI，下游
   catalog（02）与设置面板（03/06）从这里读）。
 - **声明取代 docstring**：迁移时字段 docstring 整段搬进 ``doc`` / ``notes``，两边都留就是新的 SYNC。
 - 本模块是纯数据（无 I/O、不 import 其它 wing 包）；``S()`` 只把参数规整成一次 ``Field(...)`` 调用，

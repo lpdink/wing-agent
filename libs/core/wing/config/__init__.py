@@ -1,19 +1,28 @@
 # wing/config/__init__.py
-"""wing/config 包 — 配置模型、加载单例与默认模板。
+"""wing/config 包 — 配置模型、加载单例、设置目录树与规范形 YAML emitter。
 
 公共 API 通过此 __init__ re-export（消费方 import 路径不变）：
 
-    from wing.config import Config, get_config, load_config, get_headers, S, ...
+    from wing.config import Config, get_config, load_config, get_headers, S, build_catalog, ...
 
 内部模块：``models``（pydantic 配置模型 + 模型目录（id 空间）/ 能力 / 展示名解析）·
 ``spec``（声明层：``S(...)`` / ``SettingMeta`` / ``ApplyScope``，字段元信息的唯一来源）·
 ``problems``（跨字段检查的纯函数 + ``ConfigProblem``，加载期与设置面板共用）·
+``catalog``（设置目录树：``SettingNode`` / ``build_catalog()`` / ``parse_path()``）·
+``emit``（规范形 YAML emitter：默认模板与保存路径共用，注释来自声明）·
 ``loader``（WING_HOME 解析 + 配置单例加载）·
-``user_agent``（UA 预设与请求头构造）·
-``default_config``（手写默认 config.yaml 模板，事实来源）。
+``user_agent``（UA 预设与请求头构造）。
 """
 
-from .default_config import DEFAULT_CONFIG_YAML
+from .catalog import (
+    ChoiceSpec,
+    PathStep,
+    SettingKind,
+    SettingNode,
+    build_catalog,
+    parse_path,
+)
+from .emit import default_document, emit_config_yaml
 from .loader import (
     get_config,
     get_config_path,
@@ -51,10 +60,10 @@ __all__ = [
     "ApiKeyEntry",
     "ApplyScope",
     "AuthConfig",
+    "ChoiceSpec",
     "CommandsConfig",
     "Config",
     "ConfigProblem",
-    "DEFAULT_CONFIG_YAML",
     "EvictionConfig",
     "GatewayConfig",
     "ImagesConfig",
@@ -63,19 +72,26 @@ __all__ = [
     "ModelGroup",
     "ModelRef",
     "ModelSpec",
+    "PathStep",
     "ProblemKind",
     "ProviderConfig",
     "S",
     "SessionsConfig",
+    "SettingKind",
     "SettingMeta",
+    "SettingNode",
     "ToolResultTruncateConfig",
     "UserAgentConfig",
+    "build_catalog",
     "cross_field_problems",
+    "default_document",
+    "emit_config_yaml",
     "get_config",
     "get_config_path",
     "get_headers",
     "get_wing_home",
     "load_config",
+    "parse_path",
     "reset_config",
     "resolve_model_capabilities",
     "resolve_model_display_name",

@@ -410,5 +410,7 @@ def test_choices_declarations_match_spec() -> None:
         "LogConfig.level": {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
         "ProviderConfig.image_delivery": {"inline", "followup"},
         "ProviderConfig.protocol": {"openai", "anthropic"},
+        # 值域原先只写在 notes 里的 str 字段（增补 P10）：补 choices ⇒ catalog 推成 enum
+        "ProviderConfig.reasoning_effort": {"low", "medium", "high", "max"},
         "UserAgentConfig.preset": {"opencode", "qwen-code"},
     }

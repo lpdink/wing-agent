@@ -11,7 +11,6 @@ import yaml
 
 from wing.config import (
     Config,
-    ImagesConfig,
     ProviderConfig,
     get_config,
     get_config_path,
@@ -87,7 +86,7 @@ class TestConfigModels:
     def test_provider_config_required_fields(self):
         """ProviderConfig 必需字段验证"""
         with pytest.raises(Exception):
-            ProviderConfig()  # ty: ignore[missing-argument]
+            ProviderConfig()
 
         config = ProviderConfig(
             name="test", base_url="https://api.example.com", api_key="key"
@@ -380,36 +379,38 @@ class TestResetConfig:
 
 
 class TestDefaultConfigTemplate:
-    """手写模板与 Config 的 SYNC 守门（模板是事实来源，必须能被直接解析）。
+    """首启模板（由声明生成）的守门：模板必须是「两个空列表 + 全套注释」。
 
-    Config 是 ``extra="ignore"``：只断言「解析出来的值」挡不住模板漏改或键名
-    拼错（缺键/错键静默回落到默认值，断言恰好全绿）。守门必须比对**键集合**：
-    Config 新增字段而模板漏改、或模板键名写错，都会在这里变红。
+    这份模板不再是一份能直接跑的配置（那是旧的手写模板 + ``ChangeHere`` 的做法）：
+    解析出来只有 ``providers: []`` / ``agents: []``，它们是**天然的 problem**，网关据此进
+    setup mode 指路。旧版这一节守的是「手写模板与 models.py 的 SYNC」——模板由声明生成后
+    那份纪律死亡，守门改为：① 模板能被解析且恰好是两个空列表；② 加载期只报这两个空列表；
+    ③ 每个被展开的字段都以键行或注释行的形式出现（emitter 的覆盖性，见 test_config_emit.py）。
     """
 
-    def test_template_parses_into_valid_config(self):
-        from wing.config import DEFAULT_CONFIG_YAML
+    def test_template_is_two_empty_lists(self):
+        from wing.config import build_catalog, default_document, emit_config_yaml
 
-        config = Config(**yaml.safe_load(DEFAULT_CONFIG_YAML))
-        # 新增字段在模板里落位（images 段 / 模型目录声明）
-        assert config.images.max_bytes == 4_718_592
-        assert config.images.max_images == 32
-        # 模型目录是必需段：模板声明占位模型，agent 引用它的 id（同一占位符）
-        assert config.providers[0].model_names() == ["ChangeHere"]
-        assert config.find_model(config.agents[0].model) is not None
+        text = emit_config_yaml(default_document(), build_catalog())
+        raw = yaml.safe_load(text)
+        assert raw == {"providers": [], "agents": []}
+        # 首启模板不再有假值占位符（ChangeHere 死亡）
+        assert "ChangeHere" not in text
 
-    def test_template_covers_every_config_field(self):
-        """顶层与 images 段的键集合必须与 Config 模型字段一一对应（SYNC 硬约束）。"""
-        from wing.config import DEFAULT_CONFIG_YAML
+    def test_template_only_fails_on_empty_providers_and_agents(self):
+        """喂给加载期：只失败在「providers / agents 不得为空」这两条上。"""
+        from wing.config import (
+            build_catalog,
+            cross_field_problems,
+            default_document,
+            emit_config_yaml,
+        )
 
-        raw = yaml.safe_load(DEFAULT_CONFIG_YAML)
-        assert set(raw) == set(Config.model_fields)
-        assert set(raw["images"]) == set(ImagesConfig.model_fields)
-
-    def test_template_keeps_image_option_documented(self):
-        """image_delivery / image_max_bytes / capabilities.vision 在模板注释里可见。"""
-        from wing.config import DEFAULT_CONFIG_YAML
-
-        assert "image_delivery" in DEFAULT_CONFIG_YAML
-        assert "image_max_bytes" in DEFAULT_CONFIG_YAML
-        assert "vision: true" in DEFAULT_CONFIG_YAML
+        raw = yaml.safe_load(emit_config_yaml(default_document(), build_catalog()))
+        with pytest.raises(ValueError, match="agents list cannot be empty"):
+            Config(**raw)
+        problems = cross_field_problems(Config.model_construct(**raw))
+        assert [(problem.path, problem.kind.value) for problem in problems] == [
+            ("agents", "empty_list"),
+            ("providers", "empty_list"),
+        ]

@@ -61,9 +61,10 @@ libs/core/wing/
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
 │   ├── spec.py                      声明层：S(...) / SettingMeta / ApplyScope（字段元信息唯一来源）
 │   ├── problems.py                  跨字段检查纯函数 + ConfigProblem（加载期 / 设置面板共用）
+│   ├── catalog.py                   设置目录树：SettingNode / build_catalog() / parse_path()
+│   ├── emit.py                      规范形 YAML emitter（默认模板与保存共用；注释来自声明）
 │   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config
-│   ├── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
-│   └── default_config.py            手写默认 config.yaml 模板（事实来源）
+│   └── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
 ├── schema/                          领域模型包：Tool / ToolParam / Message 等核心 schema（公共 API 经 __init__ re-export）
 │   ├── message.py                   ChainNode / 内容块 / MediaRef / Message（落盘格式守门人）
 │   ├── llm.py                       LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall
