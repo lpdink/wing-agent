@@ -156,7 +156,7 @@ pub enum Command {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Dump default configuration to stdout and exit.
+        /// Dump the TUI configuration as canonical (commented) YAML to stdout and exit.
         #[arg(long)]
         dump_config: bool,
     },
@@ -413,9 +413,20 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 dump_config,
             } => {
                 if dump_config {
-                    let config = AppConfig::default();
-                    print!("{}", config.to_yaml());
-                    ExitCode::SUCCESS
+                    // Canonical form of the *current* file (`$WING_HOME/tui/config.yaml`): the
+                    // emitter is catalog-driven and shared with the settings panel's save path,
+                    // so there is exactly one declaration. A broken file is reported instead of
+                    // silently dumped as defaults.
+                    match crate::config::store::read_interface_doc() {
+                        Ok(read) => {
+                            print!("{}", crate::config::catalog::dump_config_yaml(&read.doc));
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("wing error: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
                 } else {
                     let gw = backend_config::read_backend_gateway_config();
                     let host = host.unwrap_or(gw.host);
