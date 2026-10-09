@@ -1973,6 +1973,7 @@ fn every_row_action_variant_is_reachable_from_the_tree() {
         "OpenChoices",
         "Edit(Str)",
         "Edit(Int)",
+        "Edit(Float)",
         "Edit(Secret)",
         "Edit(Json)",
         "AddItem",
@@ -1981,10 +1982,6 @@ fn every_row_action_variant_is_reachable_from_the_tree() {
     ] {
         assert!(kinds.contains(&expected), "缺 {expected}：{kinds:?}");
     }
-    assert!(
-        !kinds.contains(&"Edit(Float)"),
-        "示例目录里没有 float 字段（Float 走 edit.rs 的单测）"
-    );
 }
 
 // ── 零碎行为 ────────────────────────────────────────────────

@@ -95,6 +95,13 @@ pub(crate) fn int_field(key: &str, min: Option<f64>, max: Option<f64>) -> Settin
     n
 }
 
+pub(crate) fn float_field(key: &str, default: f64) -> SettingNode {
+    let mut n = node(key, SettingKind::Float);
+    n.has_default = true;
+    n.default = Some(json!(default));
+    n
+}
+
 pub(crate) fn bool_field(key: &str, default: bool) -> SettingNode {
     let mut n = node(key, SettingKind::Bool);
     n.has_default = true;
@@ -199,6 +206,7 @@ pub(crate) fn sample_catalog() -> SettingNode {
             ),
             required_str("base_url"),
             secret_field("api_key"),
+            float_field("timeout_first_chunk", 300.0),
             models,
         ],
     ));
