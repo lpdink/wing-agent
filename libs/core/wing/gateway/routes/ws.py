@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import uuid
 
@@ -25,6 +26,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from wing.common.logger import log
 from wing.event import ErrorEvent, wire_dump
+from wing.request_context import reset_request_context, set_request_context
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
 from wing.gateway.protocol import ClientRequest, ConnectResponse, ToolCallResult
@@ -97,6 +99,7 @@ async def handle_ws(ws: WebSocket) -> None:
                 log.error(f"Invalid JSON frame from {client_id}: {e}")
                 continue
 
+            token: contextvars.Token | None = None
             try:
                 if "call_id" in payload:
                     result = ToolCallResult(**payload)
@@ -117,6 +120,14 @@ async def handle_ws(ws: WebSocket) -> None:
                         )
                         continue
                     req = ClientRequest(**payload)
+                    # 帧级关联上下文：本帧处理期的日志（含下面的失败日志）带上
+                    # session / request 归属。turn 内部另有更细的绑定
+                    # （react_loop.run_turn），这里补的是通道层。
+                    token = set_request_context(
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        client_id=client_id,
+                    )
                     await server.runtime.post(
                         content=req.content,
                         request_id=req.request_id,
@@ -127,6 +138,10 @@ async def handle_ws(ws: WebSocket) -> None:
             except Exception as e:
                 log.error(f"Failed to handle request: {e}")
                 await ws.send_text(json.dumps(wire_dump(ErrorEvent(message=str(e)))))
+            finally:
+                # 恢复必须在 except 之后：失败日志本身也要带归属。
+                if token is not None:
+                    reset_request_context(token)
     except WebSocketDisconnect:
         pass
     finally:

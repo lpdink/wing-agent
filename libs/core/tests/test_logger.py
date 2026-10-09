@@ -17,14 +17,20 @@ import sys
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from wing.common.logger import (
     RETENTION_DAYS,
+    LogContextProvider,
     install_loop_exception_logger,
     setup_logger,
+)
+from wing.request_context import (
+    get_request_context,
+    reset_request_context,
+    set_request_context,
 )
 
 
@@ -85,6 +91,8 @@ def test_daily_file_naming_and_new_symlink(
     assert "hello wing" in content
     # Grep-friendly prefix: every line starts with the local timestamp.
     assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - INFO - ", content)
+    # Path field is root-relative, not the absolute source path.
+    assert re.search(r" - INFO - .*tests/test_logger\.py:\d+ - hello wing", content)
 
     new_log = tmp_path / "new.log"
     assert new_log.is_symlink()
@@ -214,6 +222,198 @@ def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> N
     # 用「 - <路径> - 」的字段边界断言，而不是子串：子串断言会被
     # `/etc → /private/etc` 这类 realpath 语义或相对路径实现蒙混过关。
     assert f" - {outside_path}:7 - " in outside
+
+
+def _production_formatter(logger: logging.Logger):
+    """取 setup_logger 挂上的 formatter（= 生产 root 计算逻辑本体）。"""
+    from wing.common.logger import _PathFormatter
+
+    return next(
+        handler.formatter
+        for handler in logger.handlers
+        if isinstance(handler.formatter, _PathFormatter)
+    )
+
+
+def test_package_files_render_relative_to_wing_package(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """包内源码渲染为 ``wing/...`` 相对形态（回归：root 曾算成 wing/common）。
+
+    除 ``wing/common/`` 自身外，旧 root 让所有文件 `relative_to` 失败、整片
+    回退绝对路径（安装态下就是 site-packages 长路径）。这里直接用生产
+    formatter 格式化一条「源码位于 wing/provider/openai/provider.py」的记录
+    ——root 的正确性必须由生产表达式负责，而不是测试里复刻的近似式。
+    """
+    setup_logger(log_dir=tmp_path)
+    formatter = _production_formatter(_restore_logger)
+
+    provider_file = (
+        Path(__file__).resolve().parents[1]
+        / "wing"
+        / "provider"
+        / "openai"
+        / "provider.py"
+    )
+    record = logging.LogRecord(
+        name="wing",
+        level=logging.INFO,
+        pathname=str(provider_file),
+        lineno=328,
+        msg="[DONE] openai_compat response header received",
+        args=(),
+        exc_info=None,
+    )
+    line = formatter.format(record)
+
+    assert " - wing/provider/openai/provider.py:328 - " in line
+    assert str(provider_file) not in line
+
+
+def test_correlation_section_rendered_from_context(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """session / request id 从协程上下文逐条读取并标注在行内。"""
+    setup_logger(log_dir=tmp_path, context=get_request_context)
+
+    token = set_request_context(
+        session_id="20261009-223452-932fd6d1", request_id="wing_12"
+    )
+    try:
+        _log("hello correlation")
+    finally:
+        reset_request_context(token)
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert re.search(
+        r" - INFO - \[20261009-223452-932fd6d1 wing_12\] - "
+        r"tests/test_logger\.py:\d+ - hello correlation$",
+        content,
+        re.MULTILINE,
+    ), content
+
+
+def test_correlation_renders_only_available_ids(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """只有一个 id 时只标注一个；都没有时整段省略（不留空壳）。"""
+    setup_logger(log_dir=tmp_path, context=get_request_context)
+
+    for context, message in [
+        ({"session_id": "sid-only"}, "session only"),
+        ({"request_id": "rid-only"}, "request only"),
+    ]:
+        token = set_request_context(**context)
+        try:
+            _log(message)
+        finally:
+            reset_request_context(token)
+    _log("no context")
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert " - INFO - [sid-only] - tests/test_logger.py:" in content
+    assert " - INFO - [rid-only] - tests/test_logger.py:" in content
+    # 无上下文的行保持既有形状：级别后直接是路径字段。
+    assert re.search(
+        r" - INFO - tests/test_logger\.py:\d+ - no context$", content, re.MULTILINE
+    )
+    assert "[]" not in content
+
+
+def test_context_provider_failure_degrades_to_no_section(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """provider 抛错按「无上下文」处理——日志格式化不得外溢异常。"""
+
+    def boom():
+        raise RuntimeError("provider down")
+
+    setup_logger(log_dir=tmp_path, context=boom)
+    _log("survived")
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert re.search(
+        r" - INFO - tests/test_logger\.py:\d+ - survived$", content, re.MULTILINE
+    ), content
+
+
+def test_context_provider_attribute_failure_keeps_line(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """provider 返回对象的属性访问抛错：按「无上下文」处理，整行照常落盘。
+
+    回归：护栏曾只包 ``provider()`` 调用本身，属性读取外溢后 logging 的
+    ``handleError`` 会把该行从文件与 stdout 一起丢掉——丢日志比丢标注严重。
+    """
+
+    class BadContext:
+        @property
+        def session_id(self) -> str:
+            raise RuntimeError("attribute boom")
+
+        request_id = None
+
+    # BadContext 刻意违反 LogContext 契约（属性访问抛错），cast 只为绕过静态
+    # 检查——本测试要验证的正是"契约被违反时也不能出事"。
+    setup_logger(
+        log_dir=tmp_path, context=cast(LogContextProvider, lambda: BadContext())
+    )
+    _log("survived attr")
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert re.search(
+        r" - INFO - tests/test_logger\.py:\d+ - survived attr$", content, re.MULTILINE
+    ), content
+
+
+def test_loop_exception_logs_never_correlate(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """事件循环兜底日志不参与关联标注——GC 时机的上下文可能属于无关任务。
+
+    回归：带上下文的协程触发兜底处理器时，该行曾被错误打上"恰好路过"任务的
+    session / request（错误归属比不归属更误导）。
+    """
+    from wing.common.logger import _LoopExceptionLogger
+
+    setup_logger(log_dir=tmp_path, context=get_request_context)
+
+    loop = asyncio.new_event_loop()
+    try:
+        token = set_request_context(
+            session_id="unrelated-sid", request_id="unrelated-rid"
+        )
+        try:
+            handler = _LoopExceptionLogger(lambda _loop, _context: None)
+            handler(loop, {"message": "Task exception was never retrieved"})
+        finally:
+            reset_request_context(token)
+    finally:
+        loop.close()
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert "asyncio unhandled" in content
+    assert "unrelated-sid" not in content
+    assert "unrelated-rid" not in content
+    assert re.search(
+        r" - ERROR - wing/common/logger\.py:\d+ - asyncio unhandled",
+        content,
+        re.MULTILINE,
+    ), content
+
+
+def test_setup_logger_survives_missing_stdout(
+    tmp_path: Path,
+    _restore_logger: logging.Logger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``sys.stdout is None``（pythonw / 嵌入式宿主）不得变成启动崩溃路径。"""
+    monkeypatch.setattr(sys, "stdout", None)
+
+    setup_logger(log_dir=tmp_path)  # 不抛即通过
+
+    console = logging.getLogger("wing").handlers[0]
+    assert isinstance(console, logging.StreamHandler)
 
 
 @pytest.fixture()

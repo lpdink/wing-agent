@@ -20,6 +20,7 @@ import sys
 from wing.common.logger import setup_logger
 from wing.config import get_config
 from wing.commands import register_prompt_commands
+from wing.request_context import get_request_context
 
 from .server import GatewayServer
 
@@ -48,7 +49,9 @@ def main() -> None:
 
     # 初始化日志（控制台级别来自 config；文件日志见 common/logger.py 策略）。
     # 库代码 import 时不再有日志副作用，网关进程在此显式挂载 handler。
-    setup_logger(level=config.log.level)
+    # 关联上下文由组合根接线：formatter 逐条从 get_request_context() 读
+    # session / request id（common 是 L0，不能反向 import request_context）。
+    setup_logger(level=config.log.level, context=get_request_context)
 
     register_prompt_commands(config.commands.paths)
 
