@@ -2077,6 +2077,50 @@ class TestWsFrameRouting:
             server.runtime.post.assert_called_once()
             server.remote_tools.resolve_result.assert_not_called()
 
+    def test_failed_frame_log_carries_correlation(self, rbac_env):
+        """帧处理失败日志带 ``[<session_id> <request_id>]`` 归属（WS 通道层绑定）。
+
+        回归：绑定曾被安排在 `runtime.post` 内部——失败日志发生在 except 里，
+        那时上下文已复位，行内只剩裸消息文本。
+        """
+        import logging
+
+        from wing.common.logger import _PathFormatter
+        from wing.request_context import get_request_context
+
+        server, tc = rbac_env
+
+        async def failing_post(**kwargs):
+            raise RuntimeError("boom")
+
+        server.runtime.post = failing_post
+
+        lines: list[str] = []
+        formatter = _PathFormatter(Path.cwd(), context=get_request_context)
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                lines.append(formatter.format(record))
+
+        logger = logging.getLogger("wing")
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            with tc.websocket_connect("/ws", headers=ADMIN_HEADERS) as ws:
+                ws.receive_json()  # connected
+                ws.send_json(
+                    {"request_id": "req-ws", "session_id": "sess-ws", "content": "hi"}
+                )
+                err = ws.receive_json()
+                assert err["type"] == "error", err
+        finally:
+            logger.removeHandler(handler)
+
+        assert any(
+            "[sess-ws req-ws]" in line and "Failed to handle request" in line
+            for line in lines
+        ), lines
+
 
 # ============================================================
 # 保留字 client_id + admin 断连注销 + llm_name 注册

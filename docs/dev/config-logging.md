@@ -62,7 +62,7 @@
 - 日志初始化是显式的：网关 CLI（`wing-gateway` → `wing.common.logger.setup_logger`）与 `wing` 二进制（`cmd::dispatch` 入口统一初始化，TUI / stdio / 全部编排子命令共用同一份 `util/logging.rs`，幂等）在启动时挂 handler。**import `wing` 没有任何日志副作用**——测试与脚本永远不会在 `~/.wing` 创建文件。
 - 网关 lifespan 里把 asyncio 未处理异常的兜底接进 wing 日志：`asyncio unhandled: message=… task=…`（带 traceback），随后原样转发给原处理器（stderr 行为不变）——「Task exception was never retrieved / Task was destroyed but it is pending」这类暗角不再只沉在 `gateway.log`（`common/logger.py::install_loop_exception_logger`）。
 - 后端每行格式 `YYYY-MM-DD HH:MM:SS - LEVEL - [<session_id> <request_id>] - path:line - message`；TUI 由 tracing 输出（本地时间，`RUST_LOG` 可覆盖级别，默认 `wing=warn`）。
-  - **关联段**逐条从协程上下文（`request_context.RequestContext`）读取——接线在组合根（`gateway/cli.py` 把 `get_request_context` 传给 `setup_logger`，formatter 不依赖领域类型、`common` 保持 L0）；只有一个 id 时只标注一个，两个都没有时整段省略。turn 全链路（provider / 工具 / ReAct / 压缩 / `SM._post` / turn 内 hook）自动带上；会话逐出拆解（`_teardown`）、WS 帧处理、`/api/session/compact` 显式绑定（`request_context.session_context`）。追一个会话直接按 id grep：
+  - **关联段**逐条从协程上下文（`request_context.RequestContext`）读取——接线在组合根（`gateway/cli.py` 把 `get_request_context` 传给 `setup_logger`，formatter 不依赖领域类型、`common` 保持 L0）；只有一个 id 时只标注一个，两个都没有时整段省略。turn 全链路（provider / 工具 / ReAct / 压缩 / `SM._post` / turn 内 hook）自动带上；会话逐出拆解（`_teardown`）、WS 帧处理、`/api/session/compact` 显式绑定（`request_context.session_context`）。**事件循环兜底日志**（`asyncio unhandled: …`）刻意不标注：它在 GC 时机触发，当前上下文可能是任意无关任务（错误归属比不归属更误导，见 `common/logger.py` 的 `NO_CORRELATION`）。追一个会话直接按 id grep：
 
 ```bash
 grep 20261009-223452-932fd6d1 ~/.wing/core/logs/new.log

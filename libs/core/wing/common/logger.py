@@ -18,7 +18,9 @@ Policy (kept in sync with the TUI frontend, see docs/dev/config-logging.md):
   current coroutine carries no ids. Source paths of package files render
   as ``wing/...`` (relative to the parent of the ``wing`` package); files
   outside the package (user hooks, site customizations) fall back to
-  absolute paths — the only way to locate them.
+  absolute paths — the only way to locate them. Loop-level fallback logs
+  (``install_loop_exception_logger``) opt out of correlation: they fire at
+  GC time, where the ambient context may belong to an unrelated task.
 """
 
 from __future__ import annotations
@@ -64,6 +66,12 @@ class LogContext(Protocol):
 #: 返回当前协程关联上下文的 provider；无任何上下文时返回 None。
 LogContextProvider = Callable[[], LogContext | None]
 
+#: logging record 属性：置真时该行**跳过关联段**。给「当前上下文不可信」的
+#: 记录方一个声明口——典型是事件循环兜底日志：它在 GC 时机触发，此刻恰好在
+#: 跑的可能是任意无关任务，拿到它的 session/request 标注 = 错误归属（比不标
+#: 注更误导）。用 ``log.error(..., extra={NO_CORRELATION: True})`` 声明。
+NO_CORRELATION = "wing_no_correlation"
+
 
 class _PathFormatter(logging.Formatter):
     """行格式：``时间 - 级别 - [关联] - 路径:行号 - 消息``。
@@ -72,7 +80,8 @@ class _PathFormatter(logging.Formatter):
       ``wing/provider/openai/provider.py:328``）；root 之外的文件回退绝对路径。
     - 关联段取 ``context`` provider 的当前值：session / request 都在时同帧
       展示 ``[<session_id> <request_id>]``，只有一个时展示一个，都没有时整段
-      省略（不留空壳）。provider 抛错按"无上下文"处理——日志格式化不得外溢。
+      省略（不留空壳）。provider 抛错、属性访问抛错（坏 provider）一律按
+      "无上下文"处理——日志格式化不得外溢，整行日志更不能因此丢掉。
     """
 
     def __init__(
@@ -105,23 +114,28 @@ class _PathFormatter(logging.Formatter):
         self._rel_paths[pathname] = rel
         return rel
 
-    def _correlation(self) -> str:
-        """当前协程关联上下文的渲染段（无值 = 空串，省略整段）。"""
+    def _correlation(self, record: logging.LogRecord) -> str:
+        """当前协程关联上下文的渲染段（无值 / 被显式抑制 = 空串，省略整段）。"""
         provider = self._context
-        if provider is None:
+        if provider is None or getattr(record, NO_CORRELATION, False):
             return ""
         try:
             ctx = provider()
-        except Exception:  # noqa: BLE001 - 日志格式化不得外溢
+            ids = [
+                value
+                for value in (
+                    getattr(ctx, "session_id", None),
+                    getattr(ctx, "request_id", None),
+                )
+                if value
+            ]
+        except Exception:  # noqa: BLE001 - 日志格式化不得外溢（含坏 provider 的属性访问）
             return ""
-        if ctx is None:
-            return ""
-        ids = [value for value in (ctx.session_id, ctx.request_id) if value]
         return f"[{' '.join(ids)}] - " if ids else ""
 
     def format(self, record: logging.LogRecord) -> str:
         record.relpath = f"{self._rel_path(record.pathname)}:{record.lineno}"
-        record.correlation = self._correlation()
+        record.correlation = self._correlation(record)
 
         msg = super().format(record)
         if self._use_color and record.levelname in _COLORS:
@@ -252,9 +266,13 @@ class _LoopExceptionLogger:
     ) -> None:
         try:
             exception = context.get("exception")
+            # 兜底日志的当前上下文不可信（`Task.__del__` 在 GC 时机触发，
+            # 此刻恰好在跑的可能是不相干的另一任务）——显式声明跳过关联段：
+            # 错误归属比不归属更误导。见 NO_CORRELATION。
             log.error(
                 _format_loop_exception(context),
                 exc_info=exception if isinstance(exception, BaseException) else None,
+                extra={NO_CORRELATION: True},
             )
         except Exception:  # noqa: BLE001 - 日志不得外溢
             pass
@@ -318,11 +336,17 @@ def setup_logger(
     root = Path(__file__).resolve().parents[2]
 
     # Console handler - controlled by config. 只在真正的终端上色：守护进程
-    # stdout 落 gateway.log（非 tty）时，色码只会污染按行检索。
+    # stdout 落 gateway.log（非 tty）时，色码只会污染按行检索。sys.stdout
+    # 可能为 None（pythonw / 嵌入式宿主）——`StreamHandler(None)` 本就回落
+    # stderr，这里不能把"无 stdout"变成启动崩溃路径。
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(getattr(logging, level.upper(), logging.INFO))
     console.setFormatter(
-        _PathFormatter(root, use_color=sys.stdout.isatty(), context=context)
+        _PathFormatter(
+            root,
+            use_color=sys.stdout is not None and sys.stdout.isatty(),
+            context=context,
+        )
     )
     logger.addHandler(console)
 

@@ -78,6 +78,11 @@ def session_context(session_id: str) -> Iterator[None]:
     会话逐出拆解、会话级 HTTP 端点（compact）——这些路径的日志（以及其调用
     链上的日志）借助 ContextVar 自动带上归属，不需要逐条手工拼 id。块内的
     异常（例如映射成 404 的 ``LookupError``）照常传播，退出时恢复先前上下文。
+
+    约束：**只面向未设上下文的入站路径**。合并语义保留的 request_id 属于
+    外层请求——若在**另一会话的请求作用域内**用它切换 session，日志与事件
+    会带上与该会话无关的 request_id（比不标注更误导）；轮内操作（如
+    ``ensure_loaded`` 命中同会话）不受影响，因为 id 本就同源。
     """
     token = _ctx.set(replace(_ctx.get(), session_id=session_id))
     try:

@@ -17,12 +17,13 @@ import sys
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from wing.common.logger import (
     RETENTION_DAYS,
+    LogContextProvider,
     install_loop_exception_logger,
     setup_logger,
 )
@@ -334,6 +335,85 @@ def test_context_provider_failure_degrades_to_no_section(
     assert re.search(
         r" - INFO - tests/test_logger\.py:\d+ - survived$", content, re.MULTILINE
     ), content
+
+
+def test_context_provider_attribute_failure_keeps_line(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """provider 返回对象的属性访问抛错：按「无上下文」处理，整行照常落盘。
+
+    回归：护栏曾只包 ``provider()`` 调用本身，属性读取外溢后 logging 的
+    ``handleError`` 会把该行从文件与 stdout 一起丢掉——丢日志比丢标注严重。
+    """
+
+    class BadContext:
+        @property
+        def session_id(self) -> str:
+            raise RuntimeError("attribute boom")
+
+        request_id = None
+
+    # BadContext 刻意违反 LogContext 契约（属性访问抛错），cast 只为绕过静态
+    # 检查——本测试要验证的正是"契约被违反时也不能出事"。
+    setup_logger(
+        log_dir=tmp_path, context=cast(LogContextProvider, lambda: BadContext())
+    )
+    _log("survived attr")
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert re.search(
+        r" - INFO - tests/test_logger\.py:\d+ - survived attr$", content, re.MULTILINE
+    ), content
+
+
+def test_loop_exception_logs_never_correlate(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """事件循环兜底日志不参与关联标注——GC 时机的上下文可能属于无关任务。
+
+    回归：带上下文的协程触发兜底处理器时，该行曾被错误打上"恰好路过"任务的
+    session / request（错误归属比不归属更误导）。
+    """
+    from wing.common.logger import _LoopExceptionLogger
+
+    setup_logger(log_dir=tmp_path, context=get_request_context)
+
+    loop = asyncio.new_event_loop()
+    try:
+        token = set_request_context(
+            session_id="unrelated-sid", request_id="unrelated-rid"
+        )
+        try:
+            handler = _LoopExceptionLogger(lambda _loop, _context: None)
+            handler(loop, {"message": "Task exception was never retrieved"})
+        finally:
+            reset_request_context(token)
+    finally:
+        loop.close()
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert "asyncio unhandled" in content
+    assert "unrelated-sid" not in content
+    assert "unrelated-rid" not in content
+    assert re.search(
+        r" - ERROR - wing/common/logger\.py:\d+ - asyncio unhandled",
+        content,
+        re.MULTILINE,
+    ), content
+
+
+def test_setup_logger_survives_missing_stdout(
+    tmp_path: Path,
+    _restore_logger: logging.Logger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``sys.stdout is None``（pythonw / 嵌入式宿主）不得变成启动崩溃路径。"""
+    monkeypatch.setattr(sys, "stdout", None)
+
+    setup_logger(log_dir=tmp_path)  # 不抛即通过
+
+    console = logging.getLogger("wing").handlers[0]
+    assert isinstance(console, logging.StreamHandler)
 
 
 @pytest.fixture()
