@@ -99,7 +99,8 @@ class SettingsApplyResult:
     """``apply_settings`` 的回执（领域形状；wire 投影见 ``gateway/projection.py``）。
 
     ``ok=False`` 时 ``fingerprint`` 是**磁盘当前指纹**（文件一个字节都没写）；
-    ``setup_mode_exited`` 本期恒 ``False``（网关只在配置合法时活着——04 才让它变真）。
+    ``setup_mode_exited`` 为真 ⟺ 这次保存把网关从 setup mode 推进了正常模式
+    （04；正常模式下恒 ``False``）。
     """
 
     ok: bool
@@ -112,16 +113,32 @@ class SettingsApplyResult:
     backup_path: str | None = None
 
 
+@dataclass
+class WriteEffectResult:
+    """保存事务第 ⑦ 步（「生效」）的产物——04 引入的接点形状。
+
+    ``reload`` 是逐项结果：
+
+    - 正常模式 = 热重载六项（``reload_system``：config.yaml / hooks / prompt commands /
+      provider / skills & rules / log level）；
+    - setup mode = 转入正常模式的六步（``GatewayServer._enter_operational``：
+      config.yaml / log level / prompt commands / runtime / background jobs / auth）。
+
+    两条路径永不混用（前者是「已经在跑，换一份配置」，后者是「从无到有」），
+    回执形状相同（``ReloadResponse``）。
+    """
+
+    reload: ReloadResult
+    setup_mode_exited: bool = False
+
+
 async def settings_write_effect(sm: SessionManager) -> ReloadResult:
-    """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）——**04 的替换点**。
+    """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）的正常模式实现体。
 
-    正常模式：热重载（config.yaml → hooks → prompt commands → provider →
-    skills & rules → log level）。setup mode（04）：换成「转入正常模式」
-    （``server._enter_operational()``）并让 ``setup_mode_exited=True``。
-
-    这是本步骤**唯一**为 04 预留的接点：一个模块级函数 + 一个调用点
-    （``apply_settings`` 的 ⑦）。失败**不回滚文件**——配置本身是合法的，
-    回执按 ``ReloadResult`` 的逐项 ok 如实报告（与 ``/api/system/reload`` 同语义）。
+    热重载（config.yaml → hooks → prompt commands → provider → skills & rules → log level）。
+    唯一调用点：``WingRuntime.post_write_effect()``（04 把这个接点从模块函数上移成
+    实例方法，见那里的说明）。失败**不回滚文件**——配置本身是合法的，回执按
+    ``ReloadResult`` 的逐项 ok 如实报告（与 ``/api/system/reload`` 同语义）。
     """
     return await _reload_system(sm)
 
@@ -569,6 +586,24 @@ class WingRuntime:
     # Setting API —— 保存事务（唯一写盘路径）
     # ============================================================
 
+    async def post_write_effect(self) -> WriteEffectResult:
+        """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）——**04 的接点**。
+
+        唯一调用点是 :meth:`apply_settings` 的第 ⑦ 步。
+
+        - 正常模式（本类）：热重载（:func:`settings_write_effect` 的六项逐项结果）。
+        - setup mode（04）：``gateway.server._SetupRuntime`` 覆盖本方法——换成
+          「转入正常模式」（``GatewayServer._enter_operational()``），并把
+          ``setup_mode_exited`` 置真。
+
+        把接点从模块级函数（03 的 ``settings_write_effect``）上移成**实例方法**，
+        是因为「setup mode 下的 runtime」是 ``WingRuntime`` 的替身（见
+        ``gateway/server.py`` 的 ``_SetupRuntime``）——覆盖一个方法是替身唯一的
+        介入点，而事务本体（①–⑥、⑧–⑩）因此只有一份实现。失败**不回滚文件**：
+        配置本身合法，回执按 ``ReloadResult`` 逐项如实报告。
+        """
+        return WriteEffectResult(reload=await settings_write_effect(self.sm))
+
     async def apply_settings(
         self, document: dict[str, Any], base: str | None = None
     ) -> SettingsApplyResult:
@@ -578,7 +613,7 @@ class WingRuntime:
         ③ 密文三态回填（``null`` = 保留磁盘现值）→ ④ 字段级 + 跨字段校验
         （**全有或全无**：有 problem 时一个字节都不写）→ ⑤ ``config.yaml.bak``
         （覆盖式，只留最近一份）→ ⑥ 规范形 YAML + 原子写 → ⑦ 生效
-        （:func:`settings_write_effect`，04 的接点；失败不回滚文件）→
+        （:meth:`post_write_effect`，04 的接点；失败不回滚文件）→
         ⑧ ``changed`` / ``restart_required``（只读叶子的 apply，增补 P13）→
         ⑨ 广播 ``SettingsChangedEvent``（global）→ ⑩ 回执。
 
@@ -637,7 +672,7 @@ class WingRuntime:
         _, new_fp = read_document()
 
         # ⑦ 生效（04 的接点；失败不回滚——配置本身合法，回执逐项报告）。
-        reload_result = await settings_write_effect(self.sm)
+        effect = await self.post_write_effect()
 
         # ⑧ 差异 → changed / restart_required（P13：只读叶子路径的 apply）。
         changed = changed_paths(current_doc, incoming, catalog)
@@ -663,7 +698,8 @@ class WingRuntime:
             fingerprint=new_fp.value,
             changed=changed,
             restart_required=restart,
-            reload=reload_result,
+            reload=effect.reload,
+            setup_mode_exited=effect.setup_mode_exited,
             backup_path=backup_path,
         )
 

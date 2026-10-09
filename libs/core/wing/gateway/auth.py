@@ -10,6 +10,11 @@
 鉴权逻辑完全在 Gateway 层，不侵入 Runtime。
 AuthMiddleware 不缓存 AuthConfig——每次请求从 ``app.state.server.auth_config``
 动态读取，确保 ``/api/system/reload`` 热重载后立即生效。
+
+**修复模式（setup mode）**：配置坏掉时 auth 配置本身不可信，``dispatch`` 开头有一个
+独立分支——只接受 loopback 来源且**不要求 key**（``LOOPBACK_HOSTS``），非 loopback
+一律 403。这是收紧不是放松（正常模式下 auth 关闭时任何人都能访问）。既有鉴权逻辑
+（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**。
 """
 
 from __future__ import annotations
@@ -26,6 +31,11 @@ from wing.gateway.protocol import error_response
 
 # 免鉴权路径——无论 auth.enabled 如何，这些路径始终开放。
 EXEMPT_PATHS: set[str] = {"/api/health"}
+
+# loopback 主机名：**修复模式**（setup mode）免 key 的判据。HTTP 侧以
+# ``request.client.host`` 判定，WS 侧同义复用（``websocket.client.host``）。
+# 三种拼写覆盖 uvicorn 在本机监听时的全部常见来源（IPv4 / IPv6 / 名字）。
+LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 # ── 身份角色 ─────────────────────────────────────────────────
 # admin（ApiKeyEntry.role 默认值）：全量访问，是隐式的"非受限"角色。
@@ -101,7 +111,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        auth_config = request.app.state.server.auth_config
+        server = request.app.state.server
+
+        # 修复模式（setup mode）：配置坏掉 ⇒ auth 配置本身不可信（读不出来）。
+        # 修复模式 ≈ 本地控制台访问：**只接受 loopback，不要求 key**。
+        # 这是**收紧不是放松**——正常模式下 auth.enabled=false 时任何人都能访问，
+        # setup mode 下只有本机能（哪怕 auth.enabled=false）。判定必须在读
+        # auth 配置之前（那份配置此刻不可用）。
+        if server.in_setup_mode:
+            client_host = request.client.host if request.client else ""
+            if client_host not in LOOPBACK_HOSTS:
+                return error_response(
+                    403,
+                    "gateway is in setup mode: only loopback clients may read or "
+                    "repair the configuration",
+                )
+            return await call_next(request)
+
+        auth_config = server.auth_config
 
         if not auth_config.enabled:
             return await call_next(request)
