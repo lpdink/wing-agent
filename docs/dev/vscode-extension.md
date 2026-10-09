@@ -20,6 +20,8 @@
 **不做**（Out of Scope，别顺手加）：
 
 - 图片/文件上传、附件、多模态、`@file` 引用（后端未支持，视觉上也不出现）；
+- 设置界面（本期未实现；网关侧的 Setting API 已就绪——`GET /api/settings/schema` 是纯数据目录，
+  扩展可直接消费，见 [settings.md](settings.md)）；
 - VS Code 原生 Chat Participant API（我们做自己的 Webview 视图）；
 - 远程场景（SSH / WSL / Dev Container）、多机网关；
 - Electron / Web 前端本体（只保留 `src/core` 这个接缝）；

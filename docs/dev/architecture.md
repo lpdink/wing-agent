@@ -16,6 +16,39 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 - **Gateway** 是 FastAPI 进程，持有 `EventBus` 订阅，把 Runtime 产生的事件经 WS 推给已订阅客户端。
 - **Frontends** 都在 `wing` 二进制里，共享同一套 Gateway + Runtime。
 
+## 网关启动与配置
+
+启动路径是**永不抛的两段式**（细节见 [settings.md](settings.md)）：`config/boot.py::boot_config()` 读
+`$WING_HOME/core/config.yaml` 并给出四种结局之一（文件缺失并写出由声明生成的模板 / YAML 语法错 /
+校验不过 / 成功）——任何意外都收敛成一条可展示的 problem（最外层兜底），网关**不再因配置非法而退出**。
+`boot.ok` 为真 ⇒ 正常模式（建 `WingRuntime`、注册逐出 job、加载 hooks / prompt commands）；否则
+**降级启动 = setup mode**。
+
+- **setup mode 只服务修复所需的最小面**：`/api/health` 与四个设置端点（+ `/api/shutdown` /
+  `/openapi.json` / `/docs` / `/redoc`），其余一律 **503 `error="setup_mode"`**；`/ws` 在 accept 之前
+  以 1013 关闭；鉴权收紧为 **loopback-only 免 key**（非 loopback 403）。
+- **`server.runtime` 恒非 Optional**：setup mode 下是只服务保存事务的替身（其余访问 →
+  `SetupModeError` → 503 安全网），所以路由层没有一处 Optional 分支。
+- **就地转入正常模式**：`POST /api/settings/set` 写出一份合法配置后调
+  `GatewayServer._enter_operational()`（六步、幂等：`config.yaml` → `log level` → `prompt commands`
+  → `runtime` → `background jobs` → `auth`），**不重启进程**；任一步失败 ⇒ 停在 setup mode、
+  文件不回滚、回执如实报明细。**反向不成立**：正常模式永不退回 setup mode（外部改坏文件 +
+  `/api/system/reload` 仍是"报错 + 保留旧配置"）。
+- **三种前端形态共用一次预检**（`GET /api/settings/status`）：TUI 在 WS 连接前预检，配置不可用则先跑
+  **无 session 的 setup 循环**（向导，同一个设置面板 + 问题清单首屏）；stdio（`wing -p`）与 ACP 把
+  problems 打到 stderr 并以 **78（`EX_CONFIG`）** 退出（stdout 只承载协议帧）。
+
+**配置生效**有两条管道，落点不同但实现只有一份：
+
+| 场景 | 实现 | 明细名字（**对外契约**） |
+|---|---|---|
+| 已在正常模式，保存 / `/api/system/reload` | `system.reload_system()` | `config.yaml → hooks → prompt commands → provider → skills & rules → log level`（只许在末尾追加） |
+| setup mode 保存后转入正常模式 | `GatewayServer._enter_operational()` | `config.yaml / log level / prompt commands / runtime / background jobs / auth` |
+
+逐项独立 try/except：config 项失败立即中止（后续项不再尝试），其余项失败继续；**失败不回滚文件**
+（配置本身是合法的），回执按 `ReloadResult` 逐项上报。provider 池的 retire 语义使热重载对在途请求透明
+（见下节）。
+
 ## 数据流（一次对话）
 
 ```
