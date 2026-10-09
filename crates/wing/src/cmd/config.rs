@@ -587,6 +587,8 @@ struct ListRow {
     section: Option<String>,
     /// 树深度（渲染缩进用；`rows` 顺序已是深度优先）。
     depth: usize,
+    /// 是否是其兄弟里的最后一个（渲染 `└─` / `├─` 连接符）。
+    last: bool,
 }
 
 /// `wing config get`
@@ -776,7 +778,7 @@ fn build_rows(
         only_overridden,
     };
     let mut rows = Vec::new();
-    for child in &root.children {
+    for (index, child) in root.children.iter().enumerate() {
         let child_section = child.section.clone();
         if let Some(wanted) = section {
             let matches = child_section
@@ -787,7 +789,17 @@ fn build_rows(
             }
         }
         let value = parse_path(&child.path).and_then(|steps| get_path(values, &steps));
-        walk_node(child, &child.path, value, 0, child_section, &ctx, &mut rows);
+        let last = index + 1 == root.children.len();
+        walk_node(
+            child,
+            &child.path,
+            value,
+            0,
+            last,
+            child_section,
+            &ctx,
+            &mut rows,
+        );
     }
     Ok(rows)
 }
@@ -806,28 +818,27 @@ fn walk_node(
     path: &str,
     value: Option<&Value>,
     depth: usize,
+    last: bool,
     section: Option<String>,
     ctx: &RowCtx<'_>,
     out: &mut Vec<ListRow>,
 ) {
-    let present = value.is_some();
-    let structural = node.is_structural();
-
-    if !ctx.only_overridden || present {
+    if !ctx.only_overridden || value.is_some() {
         out.push(make_row(
             node,
             path,
             value,
             depth,
+            last,
             section.clone(),
             ctx,
-            structural,
         ));
     }
 
     // 结构节点下钻：object → children；list → 文档里的具体元素（模板路径无法展开）。
     if !node.children.is_empty() {
-        for child in &node.children {
+        let last_index = node.children.len() - 1;
+        for (index, child) in node.children.iter().enumerate() {
             let child_path = format!("{path}.{}", child.key);
             let child_value = value.and_then(|v| v.get(&child.key));
             walk_node(
@@ -835,6 +846,7 @@ fn walk_node(
                 &child_path,
                 child_value,
                 depth + 1,
+                index == last_index,
                 section.clone(),
                 ctx,
                 out,
@@ -847,6 +859,7 @@ fn walk_node(
         let Some(array) = value.and_then(|v| v.as_array()) else {
             return;
         };
+        let last_index = array.len().saturating_sub(1);
         for (index, item) in array.iter().enumerate() {
             let item_path = format!("{path}[{index}]");
             let Some(element) = element_node_for(node, item) else {
@@ -857,6 +870,7 @@ fn walk_node(
                 &item_path,
                 Some(item),
                 depth + 1,
+                index == last_index,
                 section.clone(),
                 ctx,
                 out,
@@ -878,10 +892,11 @@ fn make_row(
     path: &str,
     value: Option<&Value>,
     depth: usize,
+    last: bool,
     section: Option<String>,
     ctx: &RowCtx<'_>,
-    structural: bool,
 ) -> ListRow {
+    let structural = node.is_structural();
     let secret = ctx.secrets.get(path).cloned();
     let problem = ctx
         .problems
@@ -907,6 +922,7 @@ fn make_row(
         structural,
         section,
         depth,
+        last,
     }
 }
 
@@ -949,6 +965,8 @@ fn render_list_text(rows: &[ListRow]) -> String {
     }
     let mut out = String::new();
     let mut previous_section: Option<&str> = None;
+    // 深度优先顺序下的祖先栈：`true` = 该祖先是自己兄弟里的最后一个（画空格而不是竖线）。
+    let mut ancestors: Vec<bool> = Vec::new();
     for row in rows {
         let section = row.section.as_deref();
         if section != previous_section {
@@ -957,7 +975,9 @@ fn render_list_text(rows: &[ListRow]) -> String {
             }
             previous_section = section;
         }
-        let indent = tree_indent(row.depth);
+        ancestors.truncate(row.depth);
+        let indent = tree_indent(&ancestors, row.depth, row.last);
+        ancestors.push(row.last);
         let bang = if row.problem.is_some() { "! " } else { "" };
         let mut line = format!("{indent}{bang}{}", row.path);
         if row.structural {
@@ -1000,9 +1020,17 @@ fn render_row_value(row: &ListRow, overridden: bool) -> String {
     "(未设置)".to_string()
 }
 
-/// 树形缩进：第 `depth` 层的 `│  ` 前缀（根节点无缩进）。
-fn tree_indent(depth: usize) -> String {
-    "│  ".repeat(depth)
+/// 树形前缀：祖先层画 `│  ` / `   `，本层画 `├─ ` / `└─ `（根层无连接符）。
+fn tree_indent(ancestors: &[bool], depth: usize, last: bool) -> String {
+    if depth == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for ancestor_last in ancestors {
+        out.push_str(if *ancestor_last { "   " } else { "│  " });
+    }
+    out.push_str(if last { "└─ " } else { "├─ " });
+    out
 }
 
 /// 生效域短标记（`next_session` → `session`）。
@@ -3133,6 +3161,20 @@ mod tests {
         assert!(text.contains("── Providers ──"), "{text}");
         assert!(text.contains("── Gateway ──"), "{text}");
         assert!(text.contains("providers  (list)"), "{text}");
+        // ├─ / └─ 连接符 + 祖先竖线（深度优先顺序下的树形）。
+        assert!(text.contains("│  └─ providers[0]  (object)"), "{text}");
+        assert!(
+            text.contains("│     ├─ providers[0].name = qoder"),
+            "{text}"
+        );
+        assert!(
+            text.contains("│     └─ providers[0].extra_body = (未设置)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("│     ├─ providers[0].models  (list)"),
+            "{text}"
+        );
         assert!(text.contains("providers[0].name = qoder"), "{text}");
         assert!(
             text.contains("providers[0].api_key = •••••••• 0001"),
