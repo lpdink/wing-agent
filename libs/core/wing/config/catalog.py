@@ -55,7 +55,8 @@ class SettingNode(BaseModel):
     """设置目录树的一个节点（**领域类型，不是 wire 模型**）。
 
     字段名即协议：03 的 ``gateway/protocol/settings.py`` 逐字段投影成 ``SettingNodeProto``
-    （与 ``config.ModelRef`` → ``gateway/protocol.ModelDetail`` 的既有惯例一致）。
+    （与 ``config.ModelRef`` → ``gateway/protocol.ModelDetail`` 的既有惯例一致）——
+    唯一的例外是 :attr:`identity_field`（纯后端语义，不投影，见该字段的 docstring）。
 
     三类节点：
 
@@ -126,6 +127,12 @@ class SettingNode(BaseModel):
     # ── 渲染提示 ──
     summary_fields: list[str] = Field(default_factory=list)
     """列表项标题行的字段名序列（空 = 前端回落「第一个标量子字段」）。"""
+    identity_field: str | None = None
+    """列表项的**身份字段名**（``SettingMeta.identity_field`` 的目录投影）。
+
+    **刻意不投影到 wire**（``SettingNodeProto`` 没有这个字段）：身份配对是纯后端语义
+    （保存时密文 ``null`` 哨兵的回填配对，见 ``document.resolve_secrets``），前端不需要知道。
+    """
     value_hint: str | None = None
     """值渲染提示；后端 catalog **恒为 ``None``**（只有 Rust 侧 Interface 根发 ``"color"``）。"""
 
@@ -317,6 +324,7 @@ def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNo
         section=meta.section,
         section_doc=meta.section_doc,
         summary_fields=list(meta.summary_fields or []),
+        identity_field=meta.identity_field,
         value_hint=None,
         children=children,
         element=element,

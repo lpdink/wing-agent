@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import dataclasses
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,6 +23,7 @@ from wing.config.catalog import Element, Index, Key
 from wing.config.document import (
     ABSENT_FINGERPRINT,
     ConfigDocumentError,
+    ExtraKey,
     SecretState,
     SparseDocument,
     changed_paths,
@@ -126,11 +128,14 @@ class TestReadDocument:
         )
         doc, _ = read_document()
         assert doc.data["gateway"] == {"port": 40000}
-        assert sorted((path, repr(value)) for path, value in doc.extra) == sorted(
+        extra = sorted(
+            (entry.parent, entry.key, repr(entry.value)) for entry in doc.extra
+        )
+        assert extra == sorted(
             [
-                ("future_root", repr(1)),
-                ("gateway.future_key", repr("hello")),
-                ("providers[0].future_provider_key", repr([1, 2])),
+                ("", "future_root", repr(1)),
+                ("gateway", "future_key", repr("hello")),
+                ("providers[0]", "future_provider_key", repr([1, 2])),
             ]
         )
 
@@ -167,7 +172,7 @@ class TestReadDocument:
             encoding="utf-8",
         )
         doc, _ = read_document()
-        assert doc.extra == [("providers[0].models[0].future_spec_key", 7)]
+        assert doc.extra == [ExtraKey("providers[0].models[0]", "future_spec_key", 7)]
 
     def test_yaml_syntax_error_carries_fingerprint(self, config_path: Path):
         config_path.write_text("providers: [unclosed\n", encoding="utf-8")
@@ -247,38 +252,47 @@ class TestResolveSecrets:
             }
         )
 
+    def _resolve(self, incoming: SparseDocument, current: SparseDocument):
+        return resolve_secrets(incoming, current, _catalog())
+
     def test_null_keeps_current_value(self):
         incoming = _doc(data={"providers": [{"name": "p", "api_key": None}]})
-        resolved = resolve_secrets(incoming, self._current("disk-secret"), _catalog())
-        assert resolved.data["providers"][0]["api_key"] == "disk-secret"
+        resolved = self._resolve(incoming, self._current("disk-secret"))
+        assert resolved.document.data["providers"][0]["api_key"] == "disk-secret"
+        assert resolved.dropped_secrets == []
 
     def test_null_with_no_current_value_removes_key(self):
         incoming = _doc(data={"providers": [{"name": "p", "api_key": None}]})
-        resolved = resolve_secrets(incoming, self._current(), _catalog())
-        assert "api_key" not in resolved.data["providers"][0]
+        resolved = self._resolve(incoming, self._current())
+        assert "api_key" not in resolved.document.data["providers"][0]
+        # current 侧本来就没有值 → 不是损失（既有语义），不记录、不警告。
+        assert resolved.dropped_secrets == []
 
     def test_string_is_set(self):
         incoming = _doc(data={"providers": [{"name": "p", "api_key": "new"}]})
-        resolved = resolve_secrets(incoming, self._current("old"), _catalog())
-        assert resolved.data["providers"][0]["api_key"] == "new"
+        resolved = self._resolve(incoming, self._current("old"))
+        assert resolved.document.data["providers"][0]["api_key"] == "new"
 
     def test_empty_string_is_explicit_clear(self):
         incoming = _doc(data={"providers": [{"name": "p", "api_key": ""}]})
-        resolved = resolve_secrets(incoming, self._current("old"), _catalog())
-        assert resolved.data["providers"][0]["api_key"] == ""
+        resolved = self._resolve(incoming, self._current("old"))
+        assert resolved.document.data["providers"][0]["api_key"] == ""
 
     def test_absence_is_not_overridden(self):
         """键缺席 = 该项不被覆盖（从文件移除）——绝不偷偷从 current 补一个回来。"""
         incoming = _doc(data={"providers": [{"name": "p"}]})
-        resolved = resolve_secrets(incoming, self._current("disk-secret"), _catalog())
-        assert "api_key" not in resolved.data["providers"][0]
+        resolved = self._resolve(incoming, self._current("disk-secret"))
+        assert "api_key" not in resolved.document.data["providers"][0]
 
     def test_nested_auth_keys_null_keeps_current(self):
         incoming = _doc(
             data={"gateway": {"auth": {"keys": [{"key": None, "role": "admin"}]}}}
         )
-        resolved = resolve_secrets(incoming, self._current("x"), _catalog())
-        assert resolved.data["gateway"]["auth"]["keys"][0]["key"] == "auth-secret-123"
+        resolved = self._resolve(incoming, self._current("x"))
+        assert (
+            resolved.document.data["gateway"]["auth"]["keys"][0]["key"]
+            == "auth-secret-123"
+        )
 
     def test_non_secret_null_is_untouched(self):
         """``null`` 只在 secret 叶子上是「保留」哨兵；别处的 null 是用户写下的值。"""
@@ -287,18 +301,23 @@ class TestResolveSecrets:
                 "providers": [{"name": "p", "api_key": None, "reasoning_effort": None}]
             }
         )
-        resolved = resolve_secrets(incoming, self._current("disk"), _catalog())
-        assert resolved.data["providers"][0]["reasoning_effort"] is None
+        resolved = self._resolve(incoming, self._current("disk"))
+        assert resolved.document.data["providers"][0]["reasoning_effort"] is None
 
     def test_inputs_are_not_mutated(self):
         current = self._current("disk-secret")
         incoming = _doc(data={"providers": [{"name": "p", "api_key": None}]})
-        resolve_secrets(incoming, current, _catalog())
+        self._resolve(incoming, current)
         assert incoming.data["providers"][0]["api_key"] is None
         assert current.data["providers"][0]["api_key"] == "disk-secret"
 
-    def test_index_mismatch_falls_back_to_absent(self):
-        """incoming 的下标在 current 里不存在时按「当前也没有值」处理（宁可报错不猜值）。"""
+    def test_length_mismatch_drops_instead_of_matching_by_index(self):
+        """列表变长且身份配不上 ⇒ 落 (c)：**绝不**按下标从 current 抄一个值过来（A1 的反面断言）。
+
+        旧行为（按下标）会把 current[0] 的 "disk" 抄给一个全新的 "a"——这正是 A1
+        「静默错配」的形态，只是方向相反。现在两项都拿不到值；位置 0 有影子
+        （current 里真有值）→ 记录一条 dropped，位置 1 没有影子 → 不记录。
+        """
         incoming = _doc(
             data={
                 "providers": [
@@ -307,9 +326,400 @@ class TestResolveSecrets:
                 ]
             }
         )
-        resolved = resolve_secrets(incoming, self._current("disk"), _catalog())
-        assert resolved.data["providers"][0]["api_key"] == "disk"
-        assert "api_key" not in resolved.data["providers"][1]
+        resolved = self._resolve(incoming, self._current("disk"))
+        assert "api_key" not in resolved.document.data["providers"][0]
+        assert "api_key" not in resolved.document.data["providers"][1]
+        assert resolved.dropped_secrets == ["providers[0].api_key"]
+
+
+# ============================================================
+# A1 回归：密文按**身份**配对（两把不同的 key）
+# ============================================================
+
+P1_KEY = "KEY-P1-AAAA"
+P2_KEY = "KEY-P2-BBBBBB"
+#: 身份被重命名后的名字（长度不变 ⇒ 走安全的下标回落）。
+P2_RENAMED = "p2-renamed"
+
+
+def _two_providers() -> SparseDocument:
+    """盘上两个 provider、**两把不同的 key**（单 provider 单 key 看不见错配）。"""
+    return _doc(
+        data={
+            "providers": [
+                {
+                    "name": "p1",
+                    "protocol": "openai",
+                    "base_url": "http://a",
+                    "api_key": P1_KEY,
+                    "models": ["m1"],
+                },
+                {
+                    "name": "p2",
+                    "protocol": "openai",
+                    "base_url": "http://b",
+                    "api_key": P2_KEY,
+                    "models": ["m2"],
+                },
+            ],
+            "agents": [{"name": "default", "model": "m2"}],
+        }
+    )
+
+
+def _masked() -> list[dict]:
+    """盘上两个 provider → 「``get`` 之后前端持有的形态」：secret 掩码为 ``null``，其余逐字回传。"""
+    return [
+        {**provider, "api_key": None} for provider in _two_providers().data["providers"]
+    ]
+
+
+def _new_provider(name: str, model: str, key: str) -> dict:
+    """面板里新填的条目（secret 是明文，无需回填）。"""
+    return {
+        "name": name,
+        "protocol": "openai",
+        "base_url": f"http://{name}",
+        "api_key": key,
+        "models": [model],
+    }
+
+
+def _keys_of(doc: SparseDocument) -> list[tuple[Any, Any]]:
+    return [
+        (provider.get("name"), provider.get("api_key"))
+        for provider in doc.data["providers"]
+    ]
+
+
+class TestSecretIdentityPairing:
+    """审查 A1：按下标配对时「删 / 移 / 前插」会把 A 的密钥静默写给 B。
+
+    每一条都断言**每把 key 跟自己的 provider 走**（名字与 key 成对）。
+    """
+
+    def _resolve(self, providers: list[dict]):
+        incoming = _doc(
+            data={
+                "providers": providers,
+                "agents": [{"name": "default", "model": "m2"}],
+            }
+        )
+        return resolve_secrets(incoming, _two_providers(), _catalog())
+
+    def test_delete_first_keeps_the_remaining_key(self):
+        masked = _masked()
+        resolved = self._resolve([masked[1]])
+        assert _keys_of(resolved.document) == [("p2", P2_KEY)]
+        assert resolved.dropped_secrets == []
+
+    def test_delete_last_keeps_the_remaining_key(self):
+        masked = _masked()
+        resolved = self._resolve([masked[0]])
+        assert _keys_of(resolved.document) == [("p1", P1_KEY)]
+        assert resolved.dropped_secrets == []
+
+    def test_swap_follows_identity(self):
+        masked = _masked()
+        resolved = self._resolve([masked[1], masked[0]])
+        assert _keys_of(resolved.document) == [("p2", P2_KEY), ("p1", P1_KEY)]
+        assert resolved.dropped_secrets == []
+
+    def test_prepend_keeps_every_pair(self):
+        masked = _masked()
+        resolved = self._resolve(
+            [_new_provider("p3", "m3", "KEY-P3-CCCC"), masked[0], masked[1]]
+        )
+        assert _keys_of(resolved.document) == [
+            ("p3", "KEY-P3-CCCC"),
+            ("p1", P1_KEY),
+            ("p2", P2_KEY),
+        ]
+        assert resolved.dropped_secrets == []
+
+    def test_rename_with_equal_length_keeps_the_key(self):
+        """(b) 安全的下标回落：身份变了但结构没变（重命名）——密钥必须保留。
+
+        AD18 第 2 点：这次回落**必须出声**（它和「替换成新项」在文档里不可区分）。
+        """
+        masked = _masked()
+        renamed = {**masked[1], "name": P2_RENAMED}
+        resolved = self._resolve([masked[0], renamed])
+        assert _keys_of(resolved.document) == [
+            ("p1", P1_KEY),
+            (P2_RENAMED, P2_KEY),
+        ]
+        assert resolved.dropped_secrets == []
+        (secret,) = resolved.positional_secrets
+        assert secret.path == "providers[1].api_key"
+        assert secret.identity_field == "name"
+        assert secret.identity_value == P2_RENAMED
+
+    def test_delete_and_append_a_null_item_does_not_inherit_a_key(self):
+        """AD18 第 3 点（审查 B1 的主形态）：删一项 + 同一次保存里加一项（长度相等）。
+
+        旧 (b) 不看 consumed：新项（``api_key: null``）会抄走**在位项**的密钥。现在那个槽位
+        已被 (a) 认领 ⇒ 落 (c)：新项没有密钥、路径进 ``dropped_secrets``、没有任何位置保留。
+        """
+        masked = _masked()
+        appended = {**_new_provider("p3", "m3", "placeholder"), "api_key": None}
+        resolved = self._resolve([masked[1], appended])
+        assert _keys_of(resolved.document) == [("p2", P2_KEY), ("p3", None)]
+        assert resolved.dropped_secrets == ["providers[1].api_key"]
+        assert resolved.positional_secrets == []
+
+    def test_replacing_the_whole_list_warns_about_every_positional_key(self):
+        """AD18 第 3 点（N1 的残余）：整表替换长度相等 ⇒ consumed 守卫关不掉 → 出声。"""
+        masked = _masked()
+        resolved = self._resolve(
+            [{**masked[0], "name": "p3"}, {**masked[1], "name": "p4"}]
+        )
+        # 位置保留照旧生效（这是 (b) 存在的理由：不把「重命名」变成硬失败）……
+        assert _keys_of(resolved.document) == [("p3", P1_KEY), ("p4", P2_KEY)]
+        # ……但两个路径都进列表，回执会逐条说清两种读法。
+        assert resolved.dropped_secrets == []
+        assert [secret.path for secret in resolved.positional_secrets] == [
+            "providers[0].api_key",
+            "providers[1].api_key",
+        ]
+        assert {secret.identity_value for secret in resolved.positional_secrets} == {
+            "p3",
+            "p4",
+        }
+        assert all(
+            secret.identity_field == "name" for secret in resolved.positional_secrets
+        )
+
+    def test_positional_records_need_a_value_actually_retained(self):
+        """只记**真的保留**了值的叶子：显式赋值 / 盘上本来就是空值时不打扰。"""
+        masked = _masked()
+        explicit = {**masked[1], "name": "p3", "api_key": "KEY-P3-CCCC"}
+        resolved = self._resolve([explicit, masked[1]])
+        assert _keys_of(resolved.document) == [("p3", "KEY-P3-CCCC"), ("p2", P2_KEY)]
+        assert resolved.positional_secrets == []
+
+        # 盘上的值是空串（= 显式清空）→ 不算「保留了一个值」。
+        empty_current = _doc(
+            data={
+                "providers": [
+                    {**masked[0], "api_key": ""},
+                    {**masked[1], "api_key": P2_KEY},
+                ]
+            }
+        )
+        incoming = _doc(
+            data={
+                "providers": [
+                    {**masked[0], "name": "p3", "api_key": None},
+                    masked[1],
+                ]
+            }
+        )
+        resolved = resolve_secrets(incoming, empty_current, _catalog())
+        assert _keys_of(resolved.document) == [("p3", ""), ("p2", P2_KEY)]
+        assert resolved.positional_secrets == []
+
+    def test_new_item_inserted_in_front_records_the_dropped_path(self):
+        """新项（带哨兵）前插、长度变长：路径进 dropped（影子的 AD18 口径）。
+
+        影子不再排除「被 (a) 认领的槽位」——新项带着 ``null`` 落在那个槽位上时，
+        用户看到的是「哪一个密钥被移除了、请重填」，而不是我们替他留下一个来路不明的值。
+        """
+        masked = _masked()
+        resolved = self._resolve(
+            [
+                {**_new_provider("p3", "m3", "placeholder"), "api_key": None},
+                masked[0],
+                masked[1],
+            ]
+        )
+        assert _keys_of(resolved.document) == [
+            ("p3", None),
+            ("p1", P1_KEY),
+            ("p2", P2_KEY),
+        ]
+        assert resolved.dropped_secrets == ["providers[0].api_key"]
+        assert resolved.positional_secrets == []
+
+    def test_grow_keeps_existing_pairs(self):
+        masked = _masked()
+        resolved = self._resolve(
+            [masked[0], masked[1], _new_provider("p3", "m3", "KEY-P3-CCCC")]
+        )
+        assert _keys_of(resolved.document) == [
+            ("p1", P1_KEY),
+            ("p2", P2_KEY),
+            ("p3", "KEY-P3-CCCC"),
+        ]
+        # 新增项（位置 2）没有影子 → 不是损失。
+        assert resolved.dropped_secrets == []
+
+    def test_shrink_with_rename_drops_instead_of_guessing(self):
+        """删一个 + 改另一个的名字：配不上 → 丢弃 + 记录（绝不把 p1 的 key 给 p2）。"""
+        masked = _masked()
+        renamed = {**masked[1], "name": P2_RENAMED}
+        resolved = self._resolve([renamed])
+        assert _keys_of(resolved.document) == [(P2_RENAMED, None)]
+        assert resolved.dropped_secrets == ["providers[0].api_key"]
+
+    def test_length_change_never_uses_the_index(self):
+        """核心不变量：长度不等时**绝不**按下标配对（A1 的 bug 形态本身）。"""
+        masked = _masked()
+        resolved = self._resolve([masked[1]])
+        assert resolved.document.data["providers"][0]["api_key"] != P1_KEY
+
+    def test_identity_matching_ignores_empty_and_non_string_identities(self):
+        """身份值不是非空字符串时不成其为身份：退回 (b) / (c)，绝不猜测。"""
+        masked = _masked()
+        renamed = {**masked[1], "name": ""}  # 空身份 + 长度不变 → (b) 下标回落
+        resolved = self._resolve([masked[0], renamed])
+        assert _keys_of(resolved.document) == [("p1", P1_KEY), ("", P2_KEY)]
+        # 没有身份可核 ⇒ 位置保留必须出声（原因子句走「该项没有 name」）。
+        (secret,) = resolved.positional_secrets
+        assert secret.path == "providers[1].api_key"
+        assert secret.identity_value is None
+
+    def test_duplicate_identity_in_current_skips_the_index_fallback(self):
+        """current 侧身份重名（手改坏文件）：该身份不可用 → 落 (c)，连 (b) 也不走。"""
+        base = _masked()
+        current = _doc(
+            data={
+                "providers": [
+                    {**base[0], "api_key": P1_KEY},
+                    {**base[0], "api_key": P2_KEY},  # 同名（坏文件）
+                ]
+            }
+        )
+        incoming = _doc(
+            data={
+                "providers": [
+                    {**base[0], "api_key": None},  # 身份重名 → 不可用
+                    {**base[1], "api_key": None},  # 身份不在 current，但长度相等 → (b)
+                ]
+            }
+        )
+        resolved = resolve_secrets(incoming, current, _catalog())
+        assert "api_key" not in resolved.document.data["providers"][0]
+        assert resolved.document.data["providers"][1]["api_key"] == P2_KEY
+        assert resolved.dropped_secrets == ["providers[0].api_key"]
+        # 第二项走 (b)（长度相等、身份不在 current）→ 位置保留同样出声。
+        (secret,) = resolved.positional_secrets
+        assert secret.path == "providers[1].api_key"
+        assert secret.identity_value == "p2"
+
+    def test_without_identity_declaration_length_change_still_drops(self):
+        """没有密文叶子的列表（agents）结构变化不产生记录（也不该有配对行为）。"""
+        incoming = _doc(data={"agents": [{"name": "renamed", "model": "m2"}]})
+        resolved = resolve_secrets(incoming, _two_providers(), _catalog())
+        assert resolved.dropped_secrets == []
+
+
+class TestSecretListsWithoutIdentity:
+    """无 ``identity_field`` 的密文列表（``gateway.auth.keys``）：长度变化 → 丢弃，不猜。"""
+
+    def _current(self) -> SparseDocument:
+        return _doc(
+            data={
+                "gateway": {
+                    "auth": {
+                        "keys": [
+                            {"key": "AUTH-K1", "role": "admin"},
+                            {"key": "AUTH-K2", "role": "tool_runtime"},
+                        ]
+                    }
+                }
+            }
+        )
+
+    def test_shrink_drops_and_records_instead_of_crossing_keys(self):
+        incoming = _doc(
+            data={"gateway": {"auth": {"keys": [{"key": None, "role": "admin"}]}}}
+        )
+        resolved = resolve_secrets(incoming, self._current(), _catalog())
+        keys = resolved.document.data["gateway"]["auth"]["keys"]
+        assert keys == [{"role": "admin"}]
+        assert "key" not in keys[0]  # 绝不把 AUTH-K1 / AUTH-K2 猜给它
+        assert resolved.dropped_secrets == ["gateway.auth.keys[0].key"]
+
+    def test_grow_drops_existing_keys_and_does_not_record_the_new_item(self):
+        """列表变长（无身份）：整表落 (c)——在位项的真值被丢弃并记录，新增项不记录。"""
+        incoming = _doc(
+            data={
+                "gateway": {
+                    "auth": {
+                        "keys": [
+                            {"key": None, "role": "admin"},
+                            {"key": None, "role": "tool_runtime"},
+                            {"key": "AUTH-K3", "role": "admin"},
+                        ]
+                    }
+                }
+            }
+        )
+        resolved = resolve_secrets(incoming, self._current(), _catalog())
+        keys = resolved.document.data["gateway"]["auth"]["keys"]
+        assert "key" not in keys[0]  # null 被移除（不按下标猜 AUTH-K1）
+        assert "key" not in keys[1]
+        assert keys[2]["key"] == "AUTH-K3"  # 明文原样保留
+        # 前两项有影子（现值真实存在）→ 记录；第三项没有影子 → 不是损失。
+        assert resolved.dropped_secrets == [
+            "gateway.auth.keys[0].key",
+            "gateway.auth.keys[1].key",
+        ]
+
+    def test_equal_length_keeps_todays_index_fallback(self):
+        """长度相等 = 安全的下标回落（今天的行为，不许退化）。"""
+        incoming = _doc(
+            data={
+                "gateway": {
+                    "auth": {
+                        "keys": [
+                            {"key": None, "role": "admin"},
+                            {"key": None, "role": "tool_runtime"},
+                        ]
+                    }
+                }
+            }
+        )
+        resolved = resolve_secrets(incoming, self._current(), _catalog())
+        keys = resolved.document.data["gateway"]["auth"]["keys"]
+        assert [entry["key"] for entry in keys] == ["AUTH-K1", "AUTH-K2"]
+        assert resolved.dropped_secrets == []
+        # 无身份字段 ⇒ 每次等长保存都会出声（AD18 第 2 点；AD19 说这条边界「现在会出声」）。
+        assert [secret.path for secret in resolved.positional_secrets] == [
+            "gateway.auth.keys[0].key",
+            "gateway.auth.keys[1].key",
+        ]
+        assert all(
+            secret.identity_field is None for secret in resolved.positional_secrets
+        )
+
+
+class TestDroppedSecretsAreVisible:
+    """丢弃必须在回执里看得见：``changed`` 含路径（值 → 缺席是差异），warnings 由 runtime 拼。"""
+
+    def test_dropped_path_appears_in_changed_paths(self):
+        current = _two_providers()
+        masked = _masked()
+        renamed = {**masked[1], "name": P2_RENAMED}
+        incoming = _doc(data={"providers": [renamed]})
+        resolved = resolve_secrets(incoming, current, _catalog())
+        changed = changed_paths(current, resolved.document, _catalog())
+        assert "providers[0].api_key" in changed
+        assert resolved.dropped_secrets == ["providers[0].api_key"]
+
+    def test_kept_secret_creates_no_changed_entry(self):
+        """``null`` 保留且值没变 → 不产生差异（changed 的语义是"盘上真的变了"）。"""
+        current = _two_providers()
+        incoming = _doc(
+            data={
+                "providers": _masked(),
+                "agents": [{"name": "default", "model": "m2"}],
+            }
+        )
+        resolved = resolve_secrets(incoming, current, _catalog())
+        assert resolved.dropped_secrets == []
+        assert changed_paths(current, resolved.document, _catalog()) == []
 
 
 class TestSecretStates:

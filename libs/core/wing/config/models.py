@@ -675,6 +675,10 @@ class AuthConfig(BaseModel):
         notes="enabled=true 且 keys 为空会锁死全部请求（含 reload），启动时告警。",
         apply=ApplyScope.HOT,
         default_factory=list,
+        # 刻意**不**声明 identity_field：元素里唯一的非密文标量是 role（默认 admin，
+        # 多条 key 同 role 是常态——不是身份），key 本身是密文（incoming 侧恰好是 null，
+        # 根本不能当配对键）。无身份的密文列表走「长度相等时安全下标回落 / 否则宁可不猜」
+        # （document.resolve_secrets），删条目时密钥被丢弃 + 回执要求重填。
     )
 
     def verify(self, key: str) -> str | None:
@@ -757,6 +761,10 @@ class Config(BaseModel):
         apply=ApplyScope.NEXT_SESSION,
         min_items=1,
         summary_fields=["name", "protocol", "base_url"],
+        # 身份字段（保存时密文回填的配对键）：name 由跨字段检查强制全局唯一
+        # （problems.cross_field_problems 的 duplicate provider name），且非密文——
+        # 删 / 移 / 前插 provider 后 api_key 的 null 哨兵按它回填，不会错配到别的 provider。
+        identity_field="name",
         section="Providers",
         section_doc="LLM provider 与模型目录（目录只有一个来源：这里的声明）",
     )

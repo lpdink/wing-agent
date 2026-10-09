@@ -513,6 +513,28 @@ def test_env_extra_providers_point_at_fake_provider_prefix(tmp_path: Path) -> No
         env.extra_provider_specs()
 
 
+def test_env_extra_provider_specs_pass_through_api_key(tmp_path: Path) -> None:
+    """附加 provider 的 ``api_key`` 选了就透传，缺省同主 provider（A1 回归场景的前提）。
+
+    「两个 provider、两把不同的 key」是密文错配场景（A1）的**结构性前提**；
+    此前 ``extra_provider_specs()`` 丢掉这个键，附加 provider 永远与主 provider 同 key。
+    """
+    env = ProbeEnv(
+        tmp_path,
+        extra_providers=[
+            {"name": "probe2", "models": ["probe/two"], "api_key": "p2-key"},
+            {"name": "probe3", "models": ["probe/three"]},
+        ],
+    )
+    assert env.extra_provider_specs()[0]["api_key"] == "p2-key"
+    assert (
+        "api_key" not in env.extra_provider_specs()[1]
+    )  # 缺省不写死：由 render 回落到主 provider
+    config = yaml.safe_load(env._render_config(45124))
+    assert config["providers"][1]["api_key"] == "p2-key"
+    assert config["providers"][2]["api_key"] == config["providers"][0]["api_key"]
+
+
 def test_render_config_provider_extra_merges_into_provider() -> None:
     """provider_extra 的键值合进 providers[0]（provider 级透传旋钮）。"""
     baseline = yaml.safe_load(

@@ -34,6 +34,7 @@ from wing.config import (
     emit_config_yaml,
 )
 from wing.config.catalog import SettingNode
+from wing.config.document import ExtraKey, read_document
 
 # ─────────────────────────────────────────────────────────────────────────────
 # fixtures
@@ -332,7 +333,9 @@ def test_unknown_keys_are_written_back_at_the_parent_tail(
     catalog: SettingNode,
 ) -> None:
     doc = {"providers": [], "agents": [], "gateway": {"port": 1, "future_knob": True}}
-    text = emit_config_yaml(doc, catalog, extra=[("gateway.future_knob", True)])
+    text = emit_config_yaml(
+        doc, catalog, extra=[ExtraKey("gateway", "future_knob", True)]
+    )
     index = text.index("future_knob: true")
     marker = text.rindex(
         "# unknown key (not recognized by this wing version)", 0, index
@@ -344,7 +347,7 @@ def test_unknown_keys_are_written_back_at_the_parent_tail(
 
 def test_unknown_root_key_is_written_at_the_file_tail(catalog: SettingNode) -> None:
     doc = {"providers": [], "agents": [], "wat": {"a": [1, 2]}}
-    text = emit_config_yaml(doc, catalog, extra=[("wat", {"a": [1, 2]})])
+    text = emit_config_yaml(doc, catalog, extra=[ExtraKey("", "wat", {"a": [1, 2]})])
     assert text.rstrip().endswith(("- 2", "2"))
     assert "# unknown key (not recognized by this wing version)" in text
     assert yaml.safe_load(text) == doc
@@ -355,7 +358,7 @@ def test_unknown_key_without_its_parent_is_still_preserved(
 ) -> None:
     """父容器缺席（输入不一致）：条目兜底写回文件末尾，绝不丢。"""
     text = emit_config_yaml(
-        {"providers": [], "agents": []}, catalog, extra=[("nowhere.knob", 7)]
+        {"providers": [], "agents": []}, catalog, extra=[ExtraKey("nowhere", "knob", 7)]
     )
     assert "knob: 7" in text
 
@@ -369,7 +372,10 @@ def test_single_line_mapping_unknown_key_stays_valid_yaml(
     「原样写回」，写出一份解析不了的文件等于把它弄丢了。03 的端到端保存路径
     （``test_gateway_settings.py::test_set_keeps_unknown_keys``）先撞上这个形态。
     """
-    extra = [("future_section", {"future_key": "keep-me"}), ("nowhere.one", [1])]
+    extra = [
+        ExtraKey("", "future_section", {"future_key": "keep-me"}),
+        ExtraKey("nowhere", "one", [1]),
+    ]
     doc = {"providers": [], "agents": []}
     text = emit_config_yaml(doc, catalog, extra=extra)
     loaded = yaml.safe_load(text)
@@ -411,7 +417,7 @@ def test_single_element_list_payload_is_emitted_as_a_block(
 ) -> None:
     """B1 的另一半（生产路径②）：未知键的值是**单元素 list**。"""
     doc = {"providers": [], "agents": []}
-    text = emit_config_yaml(doc, catalog, extra=[("future_knob", [1])])
+    text = emit_config_yaml(doc, catalog, extra=[ExtraKey("", "future_knob", [1])])
     assert "future_knob:\n  - 1\n" in text
     assert "future_knob: - 1" not in text
     assert yaml.safe_load(text)["future_knob"] == [1]
@@ -419,13 +425,13 @@ def test_single_element_list_payload_is_emitted_as_a_block(
 
 def test_scalar_and_empty_container_payloads_stay_inline(catalog: SettingNode) -> None:
     """内联只对**标量**与**空容器**成立（它们 dump 出来的单行才是真·单行）。"""
-    extra: list[tuple[str, Any]] = [
-        ("a_null", None),
-        ("a_bool", True),
-        ("a_int", 7),
-        ("a_str", "x"),
-        ("a_map", {}),
-        ("a_list", []),
+    extra = [
+        ExtraKey("", "a_null", None),
+        ExtraKey("", "a_bool", True),
+        ExtraKey("", "a_int", 7),
+        ExtraKey("", "a_str", "x"),
+        ExtraKey("", "a_map", {}),
+        ExtraKey("", "a_list", []),
     ]
     text = emit_config_yaml({"providers": [], "agents": []}, catalog, extra=extra)
     for line in (
@@ -438,7 +444,7 @@ def test_scalar_and_empty_container_payloads_stay_inline(catalog: SettingNode) -
     ):
         assert line in text
     loaded = yaml.safe_load(text)
-    assert [loaded[name] for name, _ in extra] == [None, True, 7, "x", {}, []]
+    assert [loaded[entry.key] for entry in extra] == [None, True, 7, "x", {}, []]
 
 
 def test_multi_line_container_payload_keeps_its_block_shape(
@@ -447,7 +453,7 @@ def test_multi_line_container_payload_keeps_its_block_shape(
     """多行容器的既有行为不回归：键独占一行，载荷缩进 +2。"""
     payload = {"a": [1, 2], "b": {"c": 3}}
     text = emit_config_yaml(
-        {"providers": [], "agents": []}, catalog, extra=[("wat", payload)]
+        {"providers": [], "agents": []}, catalog, extra=[ExtraKey("", "wat", payload)]
     )
     lines = text.splitlines()
     index = lines.index("wat:")
@@ -467,6 +473,141 @@ def test_commented_container_default_keeps_the_block_shape() -> None:
     text = emit_config_yaml({}, build_catalog(mini))
     assert "# a_map:\n  # a: 1\n" in text
     assert (yaml.safe_load(text) or {}) == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A2 回归：键名本身含点（或别的 YAML 边界形态）的未知键
+#
+# 失败形态（审查 A2 的原始复现）：`gateway: {foo.bar: 42}` 保存一次后变成顶层
+# `bar: 42`——`_Extras` 曾用 `rpartition(".")` 从"路径字符串"反推父容器，键名里的点
+# 被当成分隔符。修复把 extra 改成结构性三元组（父前缀 + 原始键名 + 值）。
+# 这一批参数化即审查者临时 fuzz 的物化：位置、名字、值三者都必须不变。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: 边界键名（含点 / YAML 歧义形态 / 空串）。审查者的 33 字符串 fuzz 不在仓库里，
+#: 这里固化成门禁；未来再加边界字符串就加进这批。
+_BOUNDARY_UNKNOWN_KEYS = [
+    # 含点：本回归的靶子
+    "foo.bar",
+    "gateway.foo.bar",  # 名字长得像一条完整父路径
+    "a.b.c",
+    "providers[0].x",  # 名字里有规范路径的写法
+    "trailing.",
+    ".leading",
+    ".",
+    "..",
+    "...",
+    "a..b",
+    "键.点",
+    # YAML 解析歧义：类型词 / 结构字符 / 引号形态
+    "true",
+    "false",
+    "null",
+    "~",
+    "123",
+    "1.5",
+    "-",
+    "- item",
+    "#comment",
+    "[bracket]",
+    "{brace}",
+    "*alias",
+    "&anchor",
+    "!tag",
+    "|pipe",
+    ">fold",
+    "%percent",
+    "@at",
+    "`tick`",
+    '"quote"',
+    "'quote'",
+    "back\\slash",
+    "with space",
+    "tab\tkey",
+    "nl\nkey",
+    "",
+]
+
+_VALID_BODY: dict[str, Any] = {
+    "providers": [
+        {"name": "p", "base_url": "https://x", "api_key": "k", "models": ["m"]}
+    ],
+    "agents": [{"name": "default", "model": "m"}],
+}
+
+
+def _config_with_unknown(position: str, key: str, payload: Any) -> dict[str, Any]:
+    """一份合法配置 + 在指定位置塞入一个未知键（三种位置：顶层 / 嵌套对象 / 列表项）。"""
+    import copy
+
+    doc = copy.deepcopy(_VALID_BODY)
+    if position == "root":
+        doc[key] = payload
+    elif position == "nested":
+        doc["gateway"] = {"port": 40000, key: payload}
+    else:  # list_item
+        doc["providers"][0][key] = payload
+    return doc
+
+
+@pytest.fixture
+def config_path(tmp_path, monkeypatch) -> Any:
+    """把 ``document`` 的读取口钉到 tmp 文件（与 test_config_document 同一手法）。"""
+    path = tmp_path / "core" / "config.yaml"
+    path.parent.mkdir(parents=True)
+    monkeypatch.setattr("wing.config.document.get_config_path", lambda: path)
+    return path
+
+
+@pytest.mark.parametrize("position", ["root", "nested", "list_item"])
+@pytest.mark.parametrize("key", _BOUNDARY_UNKNOWN_KEYS)
+@pytest.mark.parametrize(
+    "payload", [7, {"inner": 1}, [1, 2]], ids=["scalar", "map", "list"]
+)
+def test_boundary_unknown_key_round_trips_in_place(
+    position: str, key: str, payload: Any, config_path: Any, catalog: SettingNode
+) -> None:
+    """读盘 → emit → safe_load：未知键的**位置、名字、值**三者都不变（A2 的全面回归）。"""
+    expected = _config_with_unknown(position, key, payload)
+    config_path.write_text(
+        yaml.safe_dump(expected, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    doc, _ = read_document()
+    text = emit_config_yaml(doc.data, catalog, extra=doc.extra)
+    loaded = yaml.safe_load(text)
+    assert loaded == expected  # 一处不等就红（挪位 / 改名 / 改值 / 吃键）
+    # 定位断言（失败时给出比"两份大 dict 不等"更指向性的证据）
+    if position == "root":
+        assert loaded[key] == payload
+    elif position == "nested":
+        assert loaded["gateway"][key] == payload
+    else:
+        assert loaded["providers"][0][key] == payload
+
+
+def test_dotted_unknown_key_stays_under_its_parent(config_path: Any) -> None:
+    """A2 的原始复现（审查者给的两例）：位置 / 名字都不许被 `rpartition` 挪走。"""
+    config_path.write_text(
+        "gateway:\n"
+        "  port: 40000\n"
+        "  foo.bar: 42\n"
+        "providers:\n"
+        "  - name: p\n"
+        "    base_url: https://x\n"
+        "    api_key: k\n"
+        "    models: [m]\n"
+        "    a.b: dotkey\n"
+        "agents: [{name: default, model: m}]\n",
+        encoding="utf-8",
+    )
+    doc, _ = read_document()
+    text = emit_config_yaml(doc.data, build_catalog(), extra=doc.extra)
+    loaded = yaml.safe_load(text)
+    assert loaded["gateway"]["foo.bar"] == 42
+    assert loaded["providers"][0]["a.b"] == "dotkey"
+    assert "bar" not in loaded  # 旧形态：顶层 `bar: 42`
+    assert "b" not in loaded["providers"][0]  # 旧形态：`b: dotkey` 落在 provider 里
 
 
 def test_list_item_nested_sequence_payload_keeps_depth() -> None:

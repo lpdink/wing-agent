@@ -370,6 +370,76 @@ class TestSetupGuard:
 
 
 # ============================================================
+# 修复模式的免 key 边界（审查 A3）：**绑定地址**也必须是 loopback
+# ============================================================
+
+
+#: 会不会被当作「loopback 绑定」的地址；``localhost`` 是 defensive 拼写。
+_LOOPBACK_BINDINGS = ("127.0.0.1", "::1", "localhost")
+#: 非 loopback 绑定：``0.0.0.0`` / ``::``（通配）与具体外部地址。
+_NON_LOOPBACK_BINDINGS = ("0.0.0.0", "::", "1.2.3.4")
+
+
+class TestSetupModeBindingBoundary:
+    """免 key 修复访问的**两个**条件：来源 loopback **且** 网关自身绑定 loopback。
+
+    只看来访地址不够（审查 A3）：任何把流量从 127.0.0.1 转发进来的本机进程都会让
+    远端流量以 loopback 身份到达，而 setup mode 授予的是免 key 的整份配置写权限。
+    setup mode 下没有可核验的 key（auth 配置不可信），所以非 loopback 绑定一律 403
+    ——矩阵只该出现 200 / 403。
+    """
+
+    @pytest.mark.parametrize("binding", [*_LOOPBACK_BINDINGS, *_NON_LOOPBACK_BINDINGS])
+    @pytest.mark.parametrize("source", ["loopback", "remote", "none"])
+    @pytest.mark.parametrize("with_key", [False, True], ids=["no-key", "with-key"])
+    def test_keyless_access_is_granted_only_for_a_loopback_binding(
+        self,
+        binding: str,
+        source: str,
+        with_key: bool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _wing_home(tmp_path, monkeypatch, INVALID_YAML)
+        from wing.gateway.server import GatewayServer
+
+        server = GatewayServer(host=binding)
+        assert server.in_setup_mode is True
+        kwargs: dict = {}
+        if source == "loopback":
+            kwargs["client"] = LOOPBACK
+        elif source == "none":
+            kwargs["client"] = (
+                None  # ASGI scope 里 client 缺席（request.client is None）
+            )
+        headers = {"x-api-key": "any-key"} if with_key else {}
+
+        with TestClient(server._app, **kwargs) as tc:
+            resp = tc.get("/api/settings/status", headers=headers)
+
+        expected = (
+            200 if (binding in _LOOPBACK_BINDINGS and source == "loopback") else 403
+        )
+        assert resp.status_code == expected, (binding, source, with_key, resp.text)
+        if resp.status_code == 403:
+            detail = resp.json()["detail"]
+            assert "setup mode" in detail
+            if source == "loopback":
+                # 本机来源但绑定非 loopback：detail 必须指路（改回 loopback 绑定）。
+                assert binding in detail, detail
+                assert "non-loopback" in detail, detail
+
+    def test_loopback_binding_still_allows_the_repair_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """绑定 loopback（默认配置）时本机来源照旧免 key——正常修复路径不回归。"""
+        server = _server(INVALID_YAML, tmp_path, monkeypatch)
+        assert server.host == "127.0.0.1"
+        with _client(server, loopback=True) as tc:
+            assert tc.get("/api/settings/status").status_code == 200
+
+
+# ============================================================
 # 就地转入正常模式
 # ============================================================
 
@@ -719,3 +789,62 @@ class TestModeReporting:
             assert (
                 "配置合法但运行时装配失败" in refusal["detail"]
             )  # 不再说「共 0 条问题」
+
+
+# ============================================================
+# CLI 降级横幅（A4）：两条降级路径都要在终端看得见，且只打一次
+# ============================================================
+
+
+class TestCliDegradedBanner:
+    """``cli.main()`` 的横幅条件从 ``not boot.ok`` 改成 ``server.in_setup_mode``。
+
+    覆盖的是「配置合法但运行时装配失败」（boot.ok=True）这条最显眼的漏网通道：
+    信息本来只在 ERROR 日志与 503 detail 里，终端只看到「🚀 Gateway 启动于 …」。
+    """
+
+    def _run_main(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """跑 ``cli.main()``（``start`` 打桩成 no-op，避免真起 uvicorn）。"""
+        started: dict[str, object] = {}
+        monkeypatch.setattr(sys, "argv", ["wing-gateway"])
+        from wing.gateway import cli
+
+        monkeypatch.setattr(
+            cli.GatewayServer,
+            "start",
+            lambda self: started.update(host=self.host, port=self.port),
+        )
+        cli.main()
+        assert started, "server.start() 没有被调用"
+
+    def test_boot_failure_prints_the_banner_exactly_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        _wing_home(tmp_path, monkeypatch, INVALID_YAML)
+        self._run_main(monkeypatch)
+        out = capsys.readouterr().out
+        assert out.count("⚠ 配置不可用") == 1  # 移位置后不许打两遍
+        assert "providers[0].models" in out
+        assert "wing config doctor" in out
+
+    def test_assembly_failure_prints_the_banner(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        """boot.ok=True 但 ``_enter_operational`` 失败 → 横幅 + 装配失败的 problem 明细。"""
+        _wing_home(tmp_path, monkeypatch, VALID_YAML)
+        with patch(
+            "wing.gateway.server.setup_logger",
+            side_effect=OSError("logs dir is read-only"),
+        ):
+            self._run_main(monkeypatch)
+        out = capsys.readouterr().out
+        assert out.count("⚠ 配置不可用") == 1
+        assert "（invalid）" in out  # boot_reason 非 None（AD14）
+        assert "配置合法但运行时装配失败" in out
+        assert "logs dir is read-only" in out

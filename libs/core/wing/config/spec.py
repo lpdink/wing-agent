@@ -66,6 +66,19 @@ class SettingMeta(BaseModel):
     """分组说明；只写在该 section 的**首个**字段上（写多处 = 新 SYNC）。"""
     summary_fields: list[str] | None = None
     """列表项标题行的字段名序列（列表字段上声明；缺省 = 第一个标量子字段）。"""
+    identity_field: str | None = None
+    """列表项的**身份字段名**（列表字段上声明；元素模板里那个唯一的非密文标量字段）。
+
+    用途唯一：保存时密文 ``null`` 哨兵的回填配对（``document.resolve_secrets`` 的
+    LIST 分支）——按身份配对而不是按下标，删 / 移 / 前插列表项后密钥不会错配到别的项。
+    **只在「元素子树里有可达密文叶子」的列表上声明**（没有密文叶子的列表结构变化
+    不涉及密钥回填，声明是无用噪声）；没有可用身份字段的密文列表（如
+    ``gateway.auth.keys``：``key`` 是密文、``role`` 不唯一）不声明，走「长度相等的
+    安全下标回落 / 宁可不猜」分支。
+
+    门禁（``tests/test_config_spec.py``）：必须指向元素模板里**真实存在**、**非密文**、
+    **标量 kind** 的字段，写错即红。
+    """
     min_items: int | None = None
     """「不得为空」的**声明**（强制仍由 ``problems.cross_field_problems`` 负责，见其模块 docstring）。"""
     max_items: int | None = None
@@ -105,6 +118,7 @@ def S(
     section: str | None = None,
     section_doc: str | None = None,
     summary_fields: list[str] | None = None,
+    identity_field: str | None = None,
     min_items: int | None = None,
     max_items: int | None = None,
     **field_kwargs: Any,
@@ -130,6 +144,7 @@ def S(
         section=section,
         section_doc=section_doc,
         summary_fields=summary_fields,
+        identity_field=identity_field,
         min_items=min_items,
         max_items=max_items,
     )
