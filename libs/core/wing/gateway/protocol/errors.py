@@ -27,6 +27,11 @@ class ErrorResponse(BaseModel):
 # 出口——gateway 的 exception handler 与鉴权中间件共用，保证路由异常、请求校验
 # 失败、鉴权拒绝都输出同一形状，wing-api-client 因此总能结构化解析。
 # 仅收录实际会被产生的状态码，避免出现误导性的死映射项。
+#
+# 503 是**通用** service_unavailable：setup mode 的语义由调用方**显式**传
+# error="setup_mode"（gateway/setup_guard.py 与 app.py 的 SetupModeError 处理器）。
+# 不要把这里写成 "setup_mode"——那会让所有 503（含未来的其它降级态）都被
+# Rust 侧的 is_setup_mode() 误判（protocol_addendum P4）。
 HTTP_ERROR_TYPES: dict[int, str] = {
     400: "bad_request",
     401: "unauthorized",
@@ -35,6 +40,7 @@ HTTP_ERROR_TYPES: dict[int, str] = {
     405: "method_not_allowed",
     422: "validation_error",
     500: "internal_error",
+    503: "service_unavailable",
     504: "gateway_timeout",
 }
 

@@ -91,6 +91,41 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 DEFAULT_KEEP_RECENT_TOKENS = 50_000
 
 
+def conflicting_config_knobs(**values: Any) -> list[str]:
+    """``config_text`` 与「生成配置」旋钮互斥的判定（返回显式偏离默认值的旋钮名）。
+
+    ``config_text`` 会**整份替换**生成的 ``config.yaml``——同一份启动参数里再给
+    ``models=`` / ``auth=`` 之类的旋钮，它们会被静默忽略（场景作者会对着"自己明明
+    声明了模型"的配置调试半天）。所以显式偏离默认值即报错，而不是静默丢弃。
+    「显式传了与默认相同的值」不算冲突（无假红）：判定基准就是模块默认常量。
+    """
+    defaults: dict[str, Any] = {
+        "model": DEFAULT_PROBE_MODEL,
+        "models": None,
+        "extra_providers": None,
+        "images": None,
+        "provider_extra": None,
+        "tools": DEFAULT_AGENT_TOOLS,
+        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "context_window_tokens": DEFAULT_CONTEXT_WINDOW_TOKENS,
+        "keep_recent_tokens": DEFAULT_KEEP_RECENT_TOKENS,
+        "sessions": None,
+        "hooks": (),
+        "auth": None,
+    }
+    conflicts: list[str] = []
+    for name, value in values.items():
+        default = defaults[name]
+        # 序列形态按元素比较（list/tuple 拼写差异不算冲突）。
+        if isinstance(default, tuple) and isinstance(value, Sequence):
+            differs = tuple(value) != default
+        else:
+            differs = value != default
+        if differs:
+            conflicts.append(name)
+    return conflicts
+
+
 class ProbeEnvError(RuntimeError):
     """环境自举失败（二进制缺失 / 进程提前退出 / 健康检查超时）。"""
 
@@ -505,7 +540,28 @@ class ProbeEnv:
         sessions: Mapping[str, Any] | None = None,
         hooks: Sequence[str] = (),
         auth: Mapping[str, Any] | None = None,
+        config_text: str | None = None,
     ) -> None:
+        if config_text is not None:
+            conflicts = conflicting_config_knobs(
+                model=model,
+                models=models,
+                extra_providers=extra_providers,
+                images=images,
+                provider_extra=provider_extra,
+                tools=tools,
+                system_prompt=system_prompt,
+                context_window_tokens=context_window_tokens,
+                keep_recent_tokens=keep_recent_tokens,
+                sessions=sessions,
+                hooks=hooks,
+                auth=auth,
+            )
+            if conflicts:
+                raise ProbeEnvError(
+                    f"config_text replaces the generated config.yaml, so these "
+                    f"generation knobs would be silently ignored: {', '.join(conflicts)}"
+                )
         self.root = Path(root).expanduser().resolve()
         self.wing_home = self.root / "wing_home"
         self.sessions_path = self.root / "sessions"
@@ -520,7 +576,8 @@ class ProbeEnv:
             if extra_providers is not None
             else None
         )
-        """附加 provider 旋钮（跨 provider 场景；``{"name", "models"}``）。
+        """附加 provider 旋钮（跨 provider 场景；``{"name", "models"}``，``api_key`` 可选、
+        缺省同主 provider）。
 
         base_url 由 :meth:`extra_provider_specs` 指到假 Provider 的第二条路径
         前缀（``/<name>/v1``）——同进程、同剧本表，请求归属靠留档的 path 判定。
@@ -541,6 +598,17 @@ class ProbeEnv:
 
         self.auth = dict(auth) if auth is not None else None
         """``gateway.auth`` 段原文（None = 缺省关闭；见 ``render_config_yaml``）。"""
+
+        self.config_text = config_text
+        """场景自带的 ``core/config.yaml`` **原文**（None = 按参数生成，既有行为）。
+
+        非 None 时 :meth:`_render_config` 逐字返回它（连故意的 YAML 语法错都能表达）
+        ——setup mode 场景用它注入"坏到不能启动"的配置。代价：假 Provider 的接线
+        不再自动生成，场景要用 ``env.provider.base_url`` 自己拼 ``base_url``；
+        与「配置生成」旋钮互斥（偏离默认值即 ``ProbeEnvError``，见
+        :func:`conflicting_config_knobs`）。启动仍带 ``-p <OS 分配端口>``（``cli.py``
+        的显式参数优先于配置），所以探针总能连上降级启动的网关。
+        """
 
         self.provider = FakeProvider(
             host=DEFAULT_HOST, path_prefixes=self._extra_provider_names()
@@ -663,6 +731,10 @@ class ProbeEnv:
         base_url = ``<假 Provider 地址>/<name>/v1``——假 Provider 按构造参数
         ``path_prefixes`` 为每个 name 注册同一条 chat completions 路由，于是
         「这次调用打到哪个 provider」由请求留档的 ``path`` 判定。
+
+        ``api_key`` 可选（条目里给了就透传，缺省同主 provider）——这是
+        ``render_config_yaml`` 的既有契约（同一份 ``_default_provider_block``），
+        「两个 provider、两把不同的 key」的场景（密文错配回归，A1）靠它成立。
         """
         specs: list[dict[str, Any]] = []
         for entry in self.extra_providers or ():
@@ -673,17 +745,25 @@ class ProbeEnv:
                     f"extra provider {name!r} declares no models "
                     "(providers[].models must be non-empty)"
                 )
-            specs.append(
-                {
-                    "name": name,
-                    "base_url": f"{self.provider.url}/{name}/v1",
-                    "models": list(models),
-                }
-            )
+            spec: dict[str, Any] = {
+                "name": name,
+                "base_url": f"{self.provider.url}/{name}/v1",
+                "models": list(models),
+            }
+            api_key = entry.get("api_key")
+            if isinstance(api_key, str) and api_key:
+                spec["api_key"] = api_key
+            specs.append(spec)
         return specs
 
     def _render_config(self, port: int) -> str:
-        """按当前参数生成配置文本（启动重试换端口时重新生成）。"""
+        """按当前参数生成配置文本（启动重试换端口时重新生成）。
+
+        ``config_text`` 非 None ⇒ 逐字返回场景自带的文件（不再生成；两者的关系
+        见 :attr:`config_text` 与 :func:`conflicting_config_knobs`）。
+        """
+        if self.config_text is not None:
+            return self.config_text
         return render_config_yaml(
             provider_base_url=self.provider.base_url,
             gateway_port=port,

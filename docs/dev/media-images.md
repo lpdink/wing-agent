@@ -29,7 +29,8 @@ openai: followup(默认) / inline      anthropic: inline(默认) / followup
 模型请求体里的 data URL / base64 image block      （字节由 provider 按需从存储读取）
 ```
 
-`ReadImage` 已在 `wing/config/default_config.py` 的默认 agent 工具集里；未声明 vision 的模型调用它时
+`ReadImage` 是内置工具，但只有在某个 agent 的 `tools` 列表里才会被它使用（`agents[].tools` 声明；
+TUI 设置面板或 `wing config add agents[0].tools ReadImage` 都能加）；未声明 vision 的模型调用它时
 按门禁安全拒绝（见下）。
 
 ## ReadImage 工具
@@ -204,7 +205,7 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 ## 配置
 
 ```yaml
-images:                       # 顶层段（wing/config/default_config.py 模板同步维护）
+images:                       # 顶层段（声明在 config/models.py::ImagesConfig，模板由 config/emit.py 生成）
   max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示）
   max_images: 32              # 请求期计数高水位（超出触发批量驱逐）
   count_quantum: 8            # 计数驱逐量子（每次超限至少丢这么多张）

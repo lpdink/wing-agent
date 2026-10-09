@@ -19,7 +19,7 @@ reload 落在流式生成上时该轮不受影响（旧实例退场服务完在�
 覆盖的断言点：
 
 - ``test_reload_reports_every_item_and_keeps_recorded_switches``：reload 响应的
-  **名字序**恰好五项、逐项 ok、provider 项 detail 是确定计数（本场景一条 provider
+  **名字序**恰好六项（R3：`log level` 追加在末尾）、逐项 ok、provider 项 detail 是确定计数（本场景一条 provider
   配置）；记录在案的 `thinking=False` / `reasoning_effort="high"` 在 reload
   后的下一次请求里逐字段一致（开关住 agent，不随实例更替漂移），会话照常收尾，
   live 状态与记录一致；
@@ -59,6 +59,7 @@ EXPECTED_ITEMS = [
     "prompt commands",
     "provider",
     "skills & rules",
+    "log level",
 ]
 
 #: 请求体里影响服务端处理的开关（前缀身份的一部分）。
@@ -140,7 +141,7 @@ def _assert_prefix_identity(
 
 
 def _assert_reload_items(reload_result: dict, *, rebuilt_providers: int) -> list[dict]:
-    """reload 响应的逐项契约：名字序恰好五项、逐项 ok、provider 计数确定。"""
+    """reload 响应的逐项契约：名字序恰好六项、逐项 ok、provider 计数确定。"""
     assert reload_result["ok"] is True, reload_result
     items = reload_result["results"]
     assert [item["name"] for item in items] == EXPECTED_ITEMS, items

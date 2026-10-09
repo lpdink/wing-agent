@@ -32,6 +32,7 @@ mod modal;
 mod mouse;
 mod projection;
 mod selection_session;
+mod settings;
 
 pub use intent::AppIntent;
 
@@ -42,6 +43,8 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::widgets::Clear;
+use ratatui::widgets::Widget as _;
 
 use self::images::Images;
 use self::transport::GatewayEndpoint;
@@ -189,6 +192,30 @@ pub struct App {
     /// 读它的只有 [`App::sync_welcome`]：它曾是 transcript 顶部一条 system
     /// 消息，现在归名牌（见 [`crate::ui::welcome::SessionFacts`]）。
     session_facts: Option<SessionFacts>,
+    /// 设置面板（`/settings`）：`Some` ⇔ 面板开着（`ModalOwner::Settings` 接管键盘）。
+    /// 生命周期与分派全在 [`settings`] 模块。
+    settings_panel: Option<crate::shared::panels::settings::SettingsPanel>,
+    /// 面板的 Gateway 数据（`GET schema` + `GET get` 的一次成功快照）：
+    /// cache-first 打开、overlay 的目录（详情栏）、保存后的回写都读它。
+    settings_cache: Option<(
+        wing_api_client::models::SettingsSchemaResponse,
+        wing_api_client::models::SettingsGetResponse,
+    )>,
+    /// Interface 根的 catalog（09 的 `interface_catalog()`）；与注入面板的那一份相同，
+    /// 供 overlay 的详情栏 / 色块预览用（07 没有"行 → 节点"的访问器，见 08 D11）。
+    interface_catalog: Option<wing_api_client::models::SettingNode>,
+    /// 打开面板时的 `config` 快照（实时预览的回退基准；保存成功 / `R` 重载后更新）。
+    config_snapshot: Option<AppConfig>,
+    /// 已请求、尚未返回的 `FetchSettings`（无缓存时到达后要自动打开面板；关面板即清）。
+    settings_pending: bool,
+    /// 已请求的 `R` 重载：结果到达时**无条件**应用快照（丢弃本地改动是它的语义），
+    /// 而打开时的后台刷新只在面板干净时应用。
+    settings_reload_pending: bool,
+    /// 保存的两半：Interface 半边已定，Gateway 半边在飞（合并回执需要它）。
+    settings_save: Option<settings::PendingSettingsSave>,
+    /// 调色板刚变过（实时预览）：欢迎屏 header 的缓存键里没有调色板，
+    /// `sync_welcome` 下一帧强制重建一次（同 Ctrl+O 需要显式作废 cell 缓存）。
+    welcome_theme_dirty: bool,
 }
 
 impl App {
@@ -261,6 +288,14 @@ impl App {
             scrollbar: scrollbar::ScrollbarState::default(),
             images,
             session_facts: None,
+            settings_panel: None,
+            settings_cache: None,
+            interface_catalog: None,
+            config_snapshot: None,
+            settings_pending: false,
+            settings_reload_pending: false,
+            settings_save: None,
+            welcome_theme_dirty: false,
         }
     }
 
@@ -278,10 +313,17 @@ impl App {
         let working = self.turn.working;
         let visible = self.chat.header_in_view();
         let facts = self.session_facts;
+        // 调色板刚变过（实时预览）：`needs_rebuild` 的键里没有它，强制重建一次。
+        let theme_dirty = std::mem::take(&mut self.welcome_theme_dirty);
         let Some(welcome) = self.welcome.as_mut() else {
             return;
         };
-        if !welcome.needs_rebuild(width, now, working, visible, facts) {
+        let rebuild = if theme_dirty && visible {
+            true
+        } else {
+            welcome.needs_rebuild(width, now, working, visible, facts)
+        };
+        if !rebuild {
             return;
         }
         let lines = welcome.build(palette, width, now, working, visible, facts);
@@ -641,7 +683,12 @@ impl App {
             // reflows the cells. `self.chat` now holds this frame's content
             // height and the effective scroll offset (auto-scroll / clamp
             // included).
-            if let Some(geom) = self.scrollbar_geometry() {
+            //
+            // 设置面板开着时不画：overlay 是最后写入者，画在它下面只是白费；
+            // 顺手清掉 hover / drag 态，免得关掉面板后拖拽态复活（§20 风险 13）。
+            if self.settings_panel.is_some() {
+                self.clear_scrollbar_interaction();
+            } else if let Some(geom) = self.scrollbar_geometry() {
                 scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
             } else {
                 // No bar this frame (content fits, or nothing drawn yet):
@@ -699,10 +746,39 @@ impl App {
             // `execute!(Show/Hide, MoveTo)` wrote to the backend out-of-band,
             // which desyncs ratatui's cursor tracking and is explicitly
             // discouraged by ratatui.
-            let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
-            let cursor_x = cursor_x.min(area.width.saturating_sub(1));
-            let cursor_y = cursor_y.min(area.height.saturating_sub(1));
-            frame.set_cursor_position((cursor_x, cursor_y));
+            //
+            // 设置面板开着时不定位：面板自己画反显光标，终端光标留在 overlay 上
+            // 就是一个游离的方块（不调用它 = 这一帧隐藏光标）。
+            if self.settings_panel.is_none() {
+                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
+                let cursor_x = cursor_x.min(area.width.saturating_sub(1));
+                let cursor_y = cursor_y.min(area.height.saturating_sub(1));
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+
+            // 设置面板：全屏 overlay，垫在 toast *之前*（保存回执的 toast 要压在它上面）。
+            // `Clear` 抹掉底下的 chat / status / composer；面板自带同一份 Clear，
+            // 这里再清一次是 design §12.1 的落点（谁渲染谁负责挡底）。
+            if let Some(panel) = self.settings_panel.as_mut() {
+                // 08 的契约：每帧把可见行数告诉面板（PageUp / PageDown 的步长）。
+                panel.set_viewport_rows(
+                    crate::ui::settings::tree_viewport_rows(panel, area) as usize
+                );
+            }
+            if let Some(panel) = self.settings_panel.as_ref()
+                && let Some((schema, _)) = self.settings_cache.as_ref()
+            {
+                frame.render_widget(Clear, area);
+                crate::ui::settings::SettingsOverlay::new(
+                    panel,
+                    crate::ui::settings::SettingsCatalogs::new(
+                        &schema.root,
+                        self.interface_catalog.as_ref(),
+                    ),
+                    &palette,
+                )
+                .render(area, frame.buffer_mut());
+            }
 
             // Toast overlay (rendered last, on top of everything).
             let mut toast_area: Option<Rect> = None;
@@ -734,7 +810,10 @@ impl App {
             let clip = self.chat.geometry().area;
             let recorded = self.chat.frame_images();
             self.images.observe_visible(recorded);
-            if !self.selection.is_press_active() {
+            // 设置面板开着时跳过绘制：overlay 是这一帧的最后写入者，图片若还画
+            // 就会盖在它上面（与 toast 遮罩同一个理由，§20 风险 13）。关面板时
+            // `close_settings_panel` 会 invalidate 一次，编码与句柄在那里作废。
+            if self.settings_panel.is_none() && !self.selection.is_press_active() {
                 self.images
                     .paint(recorded, clip, toast_area, frame.buffer_mut());
             }
@@ -750,7 +829,11 @@ impl App {
             // lands between frames, so the copy must come from the frame the
             // user was actually looking at. The composer needs no snapshot —
             // its wrapping is ours, so the copy comes from the draft itself.
-            if self.selection.is_press_active() {
+            //
+            // 设置面板开着时不画：面板是全屏 overlay，拖拽的坐标落在它底下的 chat
+            // band 上（选区锚在内容坐标），高亮画出来只会泼在面板上（打开面板时
+            // 已有的选区已经被取消，这里挡的是"面板开着时新起的拖拽"）。
+            if self.selection.is_press_active() && self.settings_panel.is_none() {
                 match self.selection.region() {
                     Some(SelectionRegion::Chat) => {
                         self.chat
@@ -843,7 +926,7 @@ pub async fn run_app(
     terminal: &mut WingTerminal,
     transport: Transport,
     session_id: String,
-    endpoint: GatewayEndpoint,
+    mut endpoint: GatewayEndpoint,
     config: AppConfig,
     launch_workspace: Option<String>,
 ) -> Result<()> {
@@ -909,7 +992,15 @@ pub async fn run_app(
         // status, toasts on failure) — mark dirty uniformly instead of
         // relying on each intent remembering to.
         for intent in app.drain_intents() {
-            runner::execute_intent(&mut app, &transport, terminal, intent, &fetch_tx).await;
+            runner::execute_intent(
+                &mut app,
+                &mut transport,
+                &mut endpoint,
+                terminal,
+                intent,
+                &fetch_tx,
+            )
+            .await;
             app.mark_dirty();
         }
 

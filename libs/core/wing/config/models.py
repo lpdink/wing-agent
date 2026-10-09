@@ -1,5 +1,12 @@
 # wing/config/models.py
-# SYNC: Keep this file in sync with default_config.py when adding/removing fields.
+"""配置模型（pydantic）+ 模型目录（id 空间）/ 能力 / 展示名解析。
+
+字段的元信息（说明 / 枚举含义 / 密文 / 生效域 / 分组）一律经 ``S(...)`` 在**声明处**
+声明一次（``config/spec.py``），字段 docstring 不再存在——两边都留就是新的 SYNC。
+跨字段检查住在 ``config/problems.py``，本文件的 ``model_validator`` 只是薄适配器
+（加载期仍只 raise 第一个 problem，文案逐字不变）。
+"""
+
 import hmac
 import os
 from collections.abc import Iterator
@@ -7,13 +14,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from .problems import (
+    cross_field_problems,
+    iter_model_refs,
+    model_name_message,
+    provider_model_problems,
+    unknown_model_message,
+)
+from .spec import ApplyScope, S
 
 _MAX_MODEL_ID_LENGTH = 128
 """显式 model id 的长度上限（name 不设上限，与现状一致）。"""
-
-_UNKNOWN_ID_LIST_LIMIT = 10
-"""错误文案里 available ids 的展示上限（超出截断为前 N 个 + ``…``）。"""
 
 
 class ModelCapabilities(BaseModel):
@@ -26,8 +39,12 @@ class ModelCapabilities(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore")
     """extra="ignore"：未来新增能力（audio 等）时旧版本忽略未知键而非拒绝配置。"""
 
-    vision: bool = False
-    """是否接受图片输入（本期唯一能力）。"""
+    vision: bool = S(
+        doc="是否接受图片输入（本期唯一能力）",
+        notes="未声明或 false 时，ReadImage 不会为该模型附图片（请求里只留占位文本）。",
+        apply=ApplyScope.HOT,
+        default=False,
+    )
 
 
 class ModelSpec(BaseModel):
@@ -40,20 +57,36 @@ class ModelSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
     """extra="ignore"：未来新增字段由新版本消费，旧版本忽略未知键。"""
 
-    id: str | None = None
-    """全局唯一引用词（可选；缺省 = name，见 :attr:`effective_id`）。
-
-    声明后，一切请求 / 协议 / metadata 引用它；``name`` 只作为发给上游的调用名。
-    允许 ``:`` ``/`` ``@`` 等可见字符（外部系统的值域不能比我们窄），
-    但不接受首尾空白 / 控制字符 / 空串 / 超长——引用词是查表的键，静默改写
-    会在两台机器上得到不同的查找结果。
-    """
-    name: str
-    """实际调用名（传给 provider.generate 的值）。"""
-    display_name: str | None = None
-    """展示名（人类可读；缺省由前端回落 name）。"""
-    description: str | None = None
-    capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
+    id: str | None = S(
+        doc="全局唯一引用词（缺省 = name）",
+        notes=(
+            "声明后，一切请求 / 协议 / metadata 引用它；name 只作为发给上游的调用名。\n"
+            "允许 : / @ 等可见字符（外部系统的值域不能比我们窄），但不接受首尾空白 / "
+            "控制字符 / 空串 / 超长——引用词是查表的键，静默改写会在两台机器上得到"
+            "不同的查找结果。"
+        ),
+        apply=ApplyScope.HOT,
+        default=None,
+    )
+    name: str = S(
+        doc="实际调用名（传给 provider.generate）",
+        apply=ApplyScope.HOT,
+    )
+    display_name: str | None = S(
+        doc="展示名（缺省由前端回落调用名）",
+        apply=ApplyScope.HOT,
+        default=None,
+    )
+    description: str | None = S(
+        doc="模型描述（人类可读，可选）",
+        apply=ApplyScope.HOT,
+        default=None,
+    )
+    capabilities: ModelCapabilities = S(
+        doc="能力声明（未声明 = 全 false 的安全默认）",
+        apply=ApplyScope.HOT,
+        default_factory=ModelCapabilities,
+    )
 
     @field_validator("name")
     @classmethod
@@ -63,14 +96,12 @@ class ModelSpec(BaseModel):
         「无首尾空白」是**隐式 id 的前提**：``effective_id = id or name``，而
         ``find_model()`` 按 trim 后的键查表——name 若带空白，id 空间就会出现
         「查不到自己声明」的破洞（加载说合法、解析说未知），或把请求静默落到
-        另一个模型上。
+        另一个模型上。文案的唯一实现在 ``problems.model_name_message``
+        （跨字段检查与裸字符串形态共用它，不许抄两份）。
         """
-        if not v.strip():
-            raise ValueError("model name must be non-empty")
-        if v != v.strip():
-            raise ValueError(
-                f"model name must not have leading/trailing whitespace, got: '{v}'"
-            )
+        message = model_name_message(v)
+        if message is not None:
+            raise ValueError(message)
         return v
 
     @field_validator("id")
@@ -136,44 +167,136 @@ class ProviderConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    name: str
-    """用户自定义标识，全局唯一。"""
-    protocol: Literal["openai", "anthropic"] = "openai"
-    """协议类型。"""
-    base_url: str
-    api_key: str
-    timeout_first_chunk: float = 300.0
-    timeout_total: float = 600.0
-    max_retries: int = 10
-    """LLM 调用失败时的最大重试次数。"""
-    max_retry_delay: float = 180.0
-    """指数退避最大重试间隔（秒，默认 3 分钟）。"""
-    explicit_cache_mode: bool = True
-    reasoning_effort: str | None = None
-    max_tokens: int = 128_000
-    """最大输出 token 数（Anthropic 协议必填）。"""
-    extra_body: dict = Field(default_factory=dict)
-    """透传到 request body 的额外字段（平铺合并到顶层）。"""
-    anthropic_version: str = "2023-06-01"
-    """Anthropic API 版本 header（仅 anthropic 协议使用）。"""
-    models: list[str | ModelSpec] = Field(default_factory=list)
-    """静态模型声明（字符串 = 存量形态；对象 = 带展示元信息 / 能力 / 可选 id）。
+    name: str = S(
+        doc="Provider 标识（全局唯一）",
+        notes="只接受 [a-zA-Z0-9_-]+；它是运行期事实维度，不是模型引用词。",
+        apply=ApplyScope.NEXT_SESSION,
+        # pattern 同时进 Field 元数据（catalog 的面板侧格式校验读它）；
+        # 文案仍由下面的校验器给（pydantic 的 string_pattern_mismatch 会改文案）。
+        pattern=r"^[a-zA-Z0-9_-]+$",
+    )
+    protocol: Literal["openai", "anthropic"] = S(
+        doc="协议类型",
+        apply=ApplyScope.HOT,
+        default="openai",
+        choices={
+            "openai": "OpenAI 兼容协议（/chat/completions）",
+            "anthropic": "Anthropic Messages 协议",
+        },
+    )
+    base_url: str = S(
+        doc="服务端点",
+        example="https://api.openai.com/v1",
+        apply=ApplyScope.HOT,
+    )
+    api_key: str = S(
+        doc="API 密钥",
+        apply=ApplyScope.HOT,
+        secret=True,
+    )
+    timeout_first_chunk: float = S(
+        doc="流式首块超时（秒）",
+        notes="这是**响应头**超时；响应体停滞另有硬编码 120s 判定（provider/transport.py）。",
+        apply=ApplyScope.HOT,
+        default=300.0,
+    )
+    timeout_total: float = S(
+        doc="非流式调用总超时（秒）",
+        notes="流式调用只受首块超时约束。",
+        apply=ApplyScope.HOT,
+        default=600.0,
+    )
+    max_retries: int = S(
+        doc="LLM 调用失败时的最大重试次数",
+        apply=ApplyScope.HOT,
+        default=10,
+    )
+    max_retry_delay: float = S(
+        doc="指数退避最大重试间隔（秒）",
+        notes="退避被钳制在该上界（默认 3 分钟）。",
+        apply=ApplyScope.HOT,
+        default=180.0,
+    )
+    explicit_cache_mode: bool = S(
+        doc="显式缓存模式（追加 cache_control 标记）",
+        notes="给最后一个 content block 追加 cache_control ephemeral 标记；不支持的 provider 静默忽略。",
+        apply=ApplyScope.HOT,
+        default=True,
+    )
+    reasoning_effort: str | None = S(
+        doc="推理强度",
+        notes="low / medium / high / max；null = 交给 provider 决定。",
+        apply=ApplyScope.HOT,
+        default=None,
+        choices={
+            "low": "低推理强度（更快、更省）",
+            "medium": "中等推理强度",
+            "high": "高推理强度",
+            "max": "最高推理强度",
+        },
+    )
+    max_tokens: int = S(
+        doc="最大输出 token 数（Anthropic 协议必填）",
+        apply=ApplyScope.HOT,
+        default=128_000,
+    )
+    extra_body: dict = S(
+        doc="透传到 request body 顶层的额外字段",
+        notes=(
+            '面板里用单行 JSON 编辑器。例：{"thinking":{"type":"enabled"}}。\n'
+            "openai 协议下 enable_thinking / preserve_thinking 默认随每个请求发送；"
+            "在这里显式写出可覆盖。"
+        ),
+        apply=ApplyScope.HOT,
+        default_factory=dict,
+    )
+    anthropic_version: str = S(
+        doc="Anthropic API 版本 header",
+        notes="仅 anthropic 协议使用。",
+        apply=ApplyScope.HOT,
+        default="2023-06-01",
+    )
+    models: list[str | ModelSpec] = S(
+        doc="模型声明（目录的唯一来源）",
+        notes=(
+            "三种形态：裸字符串（id=name）/ 对象（id=name）/ 对象带显式 id。\n"
+            "没有远端 /models 发现；至少声明一个。"
+        ),
+        apply=ApplyScope.HOT,
+        default_factory=list,
+        min_items=1,
+        summary_fields=["id", "name", "display_name"],
+    )
+    image_delivery: Literal["inline", "followup"] | None = S(
+        doc="图片投递形态",
+        notes="null = 按协议默认（openai → followup；anthropic → inline）。",
+        apply=ApplyScope.HOT,
+        default=None,
+        choices={
+            "inline": "图片留在原消息里（tool_result 内嵌 image block）",
+            "followup": "图片汇总为段后的 user 消息（最宽兼容）",
+        },
+    )
+    image_max_bytes: int | None = S(
+        doc="单图请求期兜底上限（字节）",
+        notes="超过的图片位降级为占位文本；null = 不设上限。",
+        apply=ApplyScope.HOT,
+        default=None,
+    )
 
-    这是模型目录的**唯一来源**（远端 ``GET /models`` 发现已退役）；配置加载期
-    强制 ``providers[].models`` 非空。消费方用 :meth:`model_specs` /
-    :meth:`model_names` 取声明，不要直接翻元素类型；引用词（id）统一经
-    ``Config.find_model()`` / ``Config.model_groups()`` 解析。
-    """
-    image_delivery: Literal["inline", "followup"] | None = None
-    """图片投递形态。None = 按协议默认（openai → followup；anthropic → inline）。"""
-    image_max_bytes: int | None = None
-    """单图请求期兜底上限（字节）；超过的图片位降级为占位文本。None = 不设。"""
-
-    @field_validator("name")
+    @field_validator("name", mode="before")
     @classmethod
-    def _name_valid(cls, v: str) -> str:
+    def _name_valid(cls, v: object) -> object:
+        """provider name 只接受 ``[a-zA-Z0-9_-]+``。
+
+        ``mode="before"``：抢在同名 ``Field(pattern=...)`` 之前给出**自有文案**
+        （pydantic 的 ``string_pattern_mismatch`` 会改变错误文案，而加载期文案是
+        对外契约）。非字符串输入原样放行，交给 pydantic 的类型检查报错。
+        """
         import re
 
+        if not isinstance(v, str):
+            return v
         if not re.match(r"^[a-zA-Z0-9_-]+$", v):
             raise ValueError(f"provider name must match ^[a-zA-Z0-9_-]+$, got: '{v}'")
         return v
@@ -190,15 +313,17 @@ class ProviderConfig(BaseModel):
         """同一 provider 内实际调用名不得重复（对象/字符串混排也查）。
 
         重复声明在运行期表现为「同一模型两套能力/展示」，属配置错误，必须在
-        解析期报错。
+        解析期报错。dup 检查体在 ``problems.provider_model_problems``（同一份实现，
+        Config 级检查共用），这里只 raise 第一个 problem 的文案。
+
+        ``model_names()`` 那一行是**裸字符串形态**的调用名守门（非空 / 无首尾空白）：
+        对象形态由 ``ModelSpec`` 的字段校验器负责，字符串形态今天经「包装成
+        ``ModelSpec``」触发同一校验器——保留原路径，错误文案与 loc 因此逐字不变。
         """
-        names = self.model_names()
-        if len(names) != len(set(names)):
-            seen: set[str] = set()
-            for n in names:
-                if n in seen:
-                    raise ValueError(f"duplicate model name: '{n}'")
-                seen.add(n)
+        self.model_names()
+        problems = provider_model_problems(self)
+        if problems:
+            raise ValueError(problems[0].render())
         return self
 
     def model_specs(self) -> list[ModelSpec]:
@@ -256,11 +381,35 @@ def resolve_model_display_name(provider_cfg: ProviderConfig, model: str) -> str 
 
 
 class UserAgentConfig(BaseModel):
-    preset: Literal["opencode", "qwen-code"] = "qwen-code"
+    preset: Literal["opencode", "qwen-code"] = S(
+        doc="HTTP User-Agent 预设",
+        apply=ApplyScope.HOT,
+        default="qwen-code",
+        choices={
+            "opencode": "UA 形如 opencode/<版本>（system release; arch）",
+            "qwen-code": "UA 形如 QwenCode/<版本>，并附带 X-DashScope-* 请求头",
+        },
+    )
 
 
 class LogConfig(BaseModel):
-    level: str = "WARNING"
+    level: str = S(
+        doc="网关控制台日志级别",
+        notes=(
+            "daemon 的 stdout/stderr（日志经 wing 侧重定向到 "
+            "~/.wing/core/logs/gateway.log）。\n"
+            "每日文件日志（wing_YYYY-MM-DD.log）恒为 DEBUG，不受此项影响。"
+        ),
+        apply=ApplyScope.HOT,
+        default="WARNING",
+        choices={
+            "DEBUG": "最详细（含第三方库）",
+            "INFO": "常规运行信息",
+            "WARNING": "警告与错误",
+            "ERROR": "仅错误",
+            "CRITICAL": "仅致命错误",
+        },
+    )
 
 
 class EvictionConfig(BaseModel):
@@ -273,20 +422,43 @@ class EvictionConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    enabled: bool = True
-    """总开关。关闭后 reaper 不扫描（调试 / 保守回滚用）。"""
-
-    idle_ttl_seconds: float = Field(default=1800.0, gt=0)
-    """空闲时长阈值（秒）：无订阅且超过该时长即逐出。"""
-
-    sweep_interval_seconds: float = Field(default=300.0, gt=0)
-    """扫描周期（秒）。启动时读取，热重载不改变已注册 job 的间隔。"""
+    enabled: bool = S(
+        doc="总开关（关闭后 reaper 不扫描）",
+        notes="调试 / 保守回滚用。",
+        apply=ApplyScope.HOT,
+        default=True,
+    )
+    idle_ttl_seconds: float = S(
+        doc="空闲时长阈值（秒）",
+        notes="无订阅且超过该时长即逐出；计时器由会话状态变化重置。",
+        apply=ApplyScope.HOT,
+        default=1800.0,
+        gt=0,
+    )
+    sweep_interval_seconds: float = S(
+        doc="扫描周期（秒）",
+        notes="启动时读取；热重载不改变已注册 job 的间隔。",
+        apply=ApplyScope.RESTART,
+        default=300.0,
+        gt=0,
+    )
 
 
 class SessionsConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    eviction: EvictionConfig = Field(default_factory=EvictionConfig)
+    eviction: EvictionConfig = S(
+        doc="空闲会话逐出（只回收内存态，磁盘不动）",
+        notes=(
+            "只有同时满足「没有轮次在跑、没有排队输入、没有客户端订阅、空闲超过阈值」"
+            "才会被逐出；空闲计时器随会话状态变化重置。\n"
+            "被逐出的会话在下次被需要时按需水合（resume / subscribe / send）。\n"
+            "存储路径不是配置字段：由 WING_SESSIONS_PATH / WING_HOME 决定。\n"
+            "想立刻回收某个会话用 `wing release <session-id>`。"
+        ),
+        apply=ApplyScope.RESTART,
+        default_factory=EvictionConfig,
+    )
 
     def resolved_path(self) -> Path:
         """Session storage path.
@@ -305,18 +477,65 @@ class SessionsConfig(BaseModel):
 class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    name: str
-    model: str
-    """引用的 model id（∈ providers[].models 声明的 id 空间；配置加载期强制）。"""
-    default: bool = False
-    system_prompt: str = ""
-    tools: list[str] = Field(default_factory=list)
-    context_window_tokens: int = 256_000
-    keep_recent_tokens: int = 50_000
-    skills: list[str] = Field(default_factory=list)
-    rules: list[str] = Field(default_factory=list)
-    max_turns: int | None = None
-    yolo: bool | None = None
+    name: str = S(
+        doc="Agent 名称（全局唯一）",
+        apply=ApplyScope.NEXT_SESSION,
+    )
+    model: str = S(
+        doc="引用的 model id（∈ providers[].models 声明的 id 空间）",
+        notes="配置加载期强制：未命中即报错。",
+        apply=ApplyScope.NEXT_SESSION,
+    )
+    default: bool = S(
+        doc="是否默认 agent（未显式选择时使用）",
+        apply=ApplyScope.NEXT_SESSION,
+        default=False,
+    )
+    system_prompt: str = S(
+        doc="系统提示词（附加在每次对话开头）",
+        apply=ApplyScope.NEXT_SESSION,
+        default="",
+    )
+    tools: list[str] = S(
+        doc="可用工具名列表（注册表中的名字）",
+        apply=ApplyScope.NEXT_SESSION,
+        default_factory=list,
+    )
+    context_window_tokens: int = S(
+        doc="上下文窗口 token 上限",
+        notes="达到后触发压缩。",
+        apply=ApplyScope.NEXT_SESSION,
+        default=256_000,
+    )
+    keep_recent_tokens: int = S(
+        doc="压缩后保留的近期 token 数",
+        apply=ApplyScope.NEXT_SESSION,
+        default=50_000,
+    )
+    skills: list[str] = S(
+        doc="技能 glob 模式",
+        notes="每个匹配加载一个 SKILL.md 作为 agent 上下文。",
+        apply=ApplyScope.NEXT_SESSION,
+        default_factory=list,
+    )
+    rules: list[str] = S(
+        doc="规则 glob 模式",
+        notes="每个匹配加载一个 markdown 文件作为 agent 规则。",
+        apply=ApplyScope.NEXT_SESSION,
+        default_factory=list,
+    )
+    max_turns: int | None = S(
+        doc="单轮最大工具调用轮数",
+        notes="null = 不限制。",
+        apply=ApplyScope.NEXT_SESSION,
+        default=None,
+    )
+    yolo: bool | None = S(
+        doc="该 agent 是否跳过危险命令确认",
+        notes="null = 跟随顶层 yolo。",
+        apply=ApplyScope.NEXT_SESSION,
+        default=None,
+    )
 
 
 class ToolResultTruncateConfig(BaseModel):
@@ -326,8 +545,19 @@ class ToolResultTruncateConfig(BaseModel):
     keep_chars: number of chars to keep at head and tail when truncating.
     """
 
-    max_length: int | None = 100_000
-    keep_chars: int = 200
+    max_length: int | None = S(
+        doc="触发截断的字符阈值",
+        notes=(
+            "null 或负数 = 关闭截断。\n超限的完整结果存到临时文件，上下文里只留头尾。"
+        ),
+        apply=ApplyScope.HOT,
+        default=100_000,
+    )
+    keep_chars: int = S(
+        doc="截断时头 / 尾各保留的字符数",
+        apply=ApplyScope.HOT,
+        default=200,
+    )
 
     @field_validator("keep_chars")
     @classmethod
@@ -346,16 +576,43 @@ class ImagesConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    max_bytes: int = Field(default=4_718_592, gt=0)
-    """单图原始字节上限（默认 4.5 MiB；ReadImage 读时拒绝 + 降采样提示）。"""
-    max_images: int = Field(default=32, gt=0)
-    """计数高水位：超出时从最旧开始按 count_quantum 批量驱逐。"""
-    count_quantum: int = Field(default=8, gt=0)
-    """计数驱逐量子（每次超限批量丢这么多张，KV-cache 友好）。"""
-    request_budget_bytes: int = Field(default=37_748_736, gt=0)
-    """请求内图片 base64 编码后累计高水位（36 MiB ≈ DeepSeek 48 MiB 的 75%）。"""
-    evict_quantum_bytes: int = Field(default=18_874_368, gt=0)
-    """字节驱逐量子（= 预算一半，与 DSH 同构）。"""
+    max_bytes: int = S(
+        doc="单图原始字节上限（默认 4.5 MiB）",
+        notes=(
+            "ReadImage 读时拒绝 + 降采样提示。\n"
+            "4.5 MiB 是对多数 provider 服务端单图上限（约 5 MB 档）的保守取值；"
+            "你的 provider 接受更大时可以调大。"
+        ),
+        apply=ApplyScope.HOT,
+        default=4_718_592,
+        gt=0,
+    )
+    max_images: int = S(
+        doc="计数高水位（超出即批量驱逐）",
+        notes="从最旧开始按 count_quantum 批量丢（KV-cache 友好）。",
+        apply=ApplyScope.HOT,
+        default=32,
+        gt=0,
+    )
+    count_quantum: int = S(
+        doc="计数驱逐量子（每次超限批量丢这么多张）",
+        apply=ApplyScope.HOT,
+        default=8,
+        gt=0,
+    )
+    request_budget_bytes: int = S(
+        doc="请求内图片累计字节高水位（base64 口径）",
+        notes="36 MiB ≈ DeepSeek 48 MiB 的 75%。",
+        apply=ApplyScope.HOT,
+        default=37_748_736,
+        gt=0,
+    )
+    evict_quantum_bytes: int = S(
+        doc="字节驱逐量子（= 预算一半，与 DSH 同构）",
+        apply=ApplyScope.HOT,
+        default=18_874_368,
+        gt=0,
+    )
 
 
 class ApiKeyEntry(BaseModel):
@@ -366,8 +623,24 @@ class ApiKeyEntry(BaseModel):
     mismatch between client and server.
     """
 
-    key: str
-    role: str = "admin"
+    key: str = S(
+        doc="API 密钥",
+        notes=(
+            "仅限 ASCII 可打印字符（0x20–0x7E）：HTTP header 是 latin-1 编码，"
+            "非 ASCII 会在两端静默错配。"
+        ),
+        apply=ApplyScope.HOT,
+        secret=True,
+    )
+    role: str = S(
+        doc="密钥角色（RBAC）",
+        apply=ApplyScope.HOT,
+        default="admin",
+        choices={
+            "admin": "全量访问（隐式的非受限角色）",
+            "tool_runtime": "仅允许注册远程工具（并持有其 WS）",
+        },
+    )
 
     @field_validator("key")
     @classmethod
@@ -387,8 +660,26 @@ class AuthConfig(BaseModel):
     has full access; ``tool_runtime`` may only register remote tools.
     """
 
-    enabled: bool = False
-    keys: list[ApiKeyEntry] = Field(default_factory=list)
+    enabled: bool = S(
+        doc="是否启用 API key 鉴权",
+        notes=(
+            "启用后除豁免路径（/api/health）外全部 HTTP/WS 请求必须携带有效 key："
+            "Authorization: Bearer / X-API-Key / WS ?api_key=。\n"
+            "WS 的 query 参数写法会被反向代理的访问日志记下，能改 header 时优先用 header。"
+        ),
+        apply=ApplyScope.HOT,
+        default=False,
+    )
+    keys: list[ApiKeyEntry] = S(
+        doc="API key 列表",
+        notes="enabled=true 且 keys 为空会锁死全部请求（含 reload），启动时告警。",
+        apply=ApplyScope.HOT,
+        default_factory=list,
+        # 刻意**不**声明 identity_field：元素里唯一的非密文标量是 role（默认 admin，
+        # 多条 key 同 role 是常态——不是身份），key 本身是密文（incoming 侧恰好是 null，
+        # 根本不能当配对键）。无身份的密文列表走「长度相等时安全下标回落 / 否则宁可不猜」
+        # （document.resolve_secrets），删条目时密钥被丢弃 + 回执要求重填。
+    )
 
     def verify(self, key: str) -> str | None:
         """Return the role for *key*, or ``None`` if not found.
@@ -403,106 +694,184 @@ class AuthConfig(BaseModel):
 
 
 class GatewayConfig(BaseModel):
-    host: str = "127.0.0.1"
-    port: int = 32523
-    auth: AuthConfig = Field(default_factory=AuthConfig)
-    remote_tool_timeout: float = 1800.0
-    """远程工具调用总超时（秒）——安全网，非小超时。
-
-    远程工具（如 Bash）可能执行很久，故默认宽口径（30 分钟）。
-    断连是首要失败信号（WS 关闭立即 fail 在途调用），此超时仅兜底
-    客户端静默挂死但未断连的极端情况。
-    """
+    host: str = S(
+        doc="监听地址",
+        apply=ApplyScope.RESTART,
+        default="127.0.0.1",
+    )
+    port: int = S(
+        doc="监听端口",
+        apply=ApplyScope.RESTART,
+        default=32523,
+    )
+    auth: AuthConfig = S(
+        doc="API key 鉴权配置",
+        apply=ApplyScope.HOT,
+        default_factory=AuthConfig,
+    )
+    remote_tool_timeout: float = S(
+        doc="远程工具调用总超时（秒）",
+        notes=(
+            "安全网，非小超时：远程工具（如 Bash）可能执行很久，默认宽口径 30 分钟。\n"
+            "断连是首要失败信号（WS 关闭立即 fail 在途调用），此值仅兜底客户端静默挂死。"
+        ),
+        apply=ApplyScope.HOT,
+        default=1800.0,
+    )
 
 
 class CommandsConfig(BaseModel):
-    paths: list[str] = Field(default_factory=list)
+    paths: list[str] = S(
+        doc="prompt 命令定义文件的 glob 模式",
+        notes=(
+            "每个 .md（YAML frontmatter: name/description/aliases；正文用 $ARGUMENTS）"
+            "定义一个斜杠命令。例：~/.wing/commands/*.md"
+        ),
+        apply=ApplyScope.HOT,
+        default_factory=list,
+    )
 
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    providers: list[ProviderConfig]
-    agents: list[AgentConfig]
-    hooks: list[str] = Field(default_factory=list)
-    safe_command_patterns: list[str] = Field(default_factory=list)
-    yolo: bool = False
-    steer: bool = True
-    log: LogConfig = Field(default_factory=LogConfig)
-    sessions: SessionsConfig = Field(default_factory=SessionsConfig)
-    commands: CommandsConfig = Field(default_factory=CommandsConfig)
-    user_agent: UserAgentConfig = Field(default_factory=UserAgentConfig)
-    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
-    tool_result_truncate: ToolResultTruncateConfig = Field(
-        default_factory=ToolResultTruncateConfig
+    # ── Providers ──────────────────────────────────
+    providers: list[ProviderConfig] = S(
+        doc="LLM provider 声明（模型目录的唯一来源）",
+        notes=(
+            "至少一个；providers[].models 声明的 id 是全局唯一的模型引用词。\n"
+            "每个 provider 声明协议（openai / anthropic）、端点与凭据；models 至少一个\n"
+            "（没有远端 /models 发现），三条声明形态：\n"
+            "  - dfmodel                        # 裸字符串：id = 调用名\n"
+            "  - name: dfmodel-2026             # 对象：id = name\n"
+            "    display_name: DeepSeek-Flash\n"
+            "  - id: ds-flash                   # 显式 id（全局唯一引用词）\n"
+            "    name: dfmodel-2026             # 实际发给上游的调用名\n"
+            "    capabilities: {vision: true}   # 未声明 = 纯文本（ReadImage 不附图）\n"
+            "Anthropic 协议最小示例（max_tokens 必填；image_delivery 默认 inline）：\n"
+            "  - name: claude\n"
+            "    protocol: anthropic\n"
+            "    base_url: https://api.anthropic.com\n"
+            "    api_key: sk-ant-xxx\n"
+            '    anthropic_version: "2023-06-01"\n'
+            "    max_tokens: 8192\n"
+            "    models: [claude-sonnet-4-20250514]\n"
+            "    extra_body: {thinking: {type: enabled, budget_tokens: 4096}}"
+        ),
+        apply=ApplyScope.NEXT_SESSION,
+        min_items=1,
+        summary_fields=["name", "protocol", "base_url"],
+        # 身份字段（保存时密文回填的配对键）：name 由跨字段检查强制全局唯一
+        # （problems.cross_field_problems 的 duplicate provider name），且非密文——
+        # 删 / 移 / 前插 provider 后 api_key 的 null 哨兵按它回填，不会错配到别的 provider。
+        identity_field="name",
+        section="Providers",
+        section_doc="LLM provider 与模型目录（目录只有一个来源：这里的声明）",
     )
-    images: ImagesConfig = Field(default_factory=ImagesConfig)
+    # ── Agents ─────────────────────────────────────
+    agents: list[AgentConfig] = S(
+        doc="Agent 模板（至少一个）",
+        notes="每个 agent 定义模型、工具集与系统提示词。",
+        apply=ApplyScope.NEXT_SESSION,
+        min_items=1,
+        summary_fields=["name", "model"],
+        section="Agents",
+        section_doc="Agent 模板：模型引用 / 工具集 / 提示词 / skills 与 rules",
+    )
+    # ── Behavior ───────────────────────────────────
+    safe_command_patterns: list[str] = S(
+        doc="自动放行的命令正则（不需要确认）",
+        notes=r"例：^git\s+(status|log|diff)",
+        apply=ApplyScope.HOT,
+        default_factory=list,
+        section="Behavior",
+        section_doc="Agent 行为与内置工具的通用开关（bash 安全 / 结果截断）",
+    )
+    yolo: bool = S(
+        doc="跳过危险命令的安全检查",
+        notes="谨慎使用——所有命令不经确认直接执行。",
+        apply=ApplyScope.NEXT_SESSION,
+        default=False,
+        section="Behavior",
+    )
+    steer: bool = S(
+        doc="启用 steer 模式（用引导提示约束 agent 行为）",
+        apply=ApplyScope.NEXT_SESSION,
+        default=True,
+        section="Behavior",
+    )
+    tool_result_truncate: ToolResultTruncateConfig = S(
+        doc="工具结果截断策略",
+        apply=ApplyScope.HOT,
+        default_factory=ToolResultTruncateConfig,
+        section="Behavior",
+    )
+    # ── Images ─────────────────────────────────────
+    images: ImagesConfig = S(
+        doc="图片读入与请求期保留预算",
+        apply=ApplyScope.HOT,
+        default_factory=ImagesConfig,
+        section="Images",
+        section_doc="ReadImage 与请求期图片投影（预算按请求生效）",
+    )
+    # ── Sessions ───────────────────────────────────
+    sessions: SessionsConfig = S(
+        doc="会话管理",
+        apply=ApplyScope.RESTART,
+        default_factory=SessionsConfig,
+        section="Sessions",
+        section_doc="会话内存态回收（磁盘状态一概不动）",
+    )
+    # ── Gateway ────────────────────────────────────
+    gateway: GatewayConfig = S(
+        doc="网关服务配置",
+        apply=ApplyScope.RESTART,
+        default_factory=GatewayConfig,
+        section="Gateway",
+        section_doc="网关监听 / 鉴权 / 远程工具",
+    )
+    # ── Extensibility ──────────────────────────────
+    hooks: list[str] = S(
+        doc="hook 文件的 glob 模式",
+        notes="hook 是 Python 模块，经 wing hook API 注册处理器。",
+        apply=ApplyScope.HOT,
+        default_factory=list,
+        section="Extensibility",
+        section_doc="扩展点：hooks 与 prompt 命令",
+    )
+    commands: CommandsConfig = S(
+        doc="prompt 命令配置",
+        apply=ApplyScope.HOT,
+        default_factory=CommandsConfig,
+        section="Extensibility",
+    )
+    # ── Logging ────────────────────────────────────
+    log: LogConfig = S(
+        doc="日志配置",
+        apply=ApplyScope.HOT,
+        default_factory=LogConfig,
+        section="Logging",
+        section_doc="日志（控制台级别；文件日志恒为 DEBUG）",
+    )
+    # ── Advanced ───────────────────────────────────
+    user_agent: UserAgentConfig = S(
+        doc="HTTP User-Agent 预设",
+        apply=ApplyScope.HOT,
+        default_factory=UserAgentConfig,
+        section="Advanced",
+        section_doc="低层 / 少用开关",
+    )
 
     @model_validator(mode="after")
     def _validate_config(self) -> "Config":
-        if not self.agents:
-            raise ValueError("agents list cannot be empty")
-        if not self.providers:
-            raise ValueError("providers list cannot be empty")
+        """跨字段检查（检查体住在 ``wing.config.problems``）。
 
-        provider_names = [p.name for p in self.providers]
-        if len(provider_names) != len(set(provider_names)):
-            seen = set()
-            for n in provider_names:
-                if n in seen:
-                    raise ValueError(f"duplicate provider name: '{n}'")
-                seen.add(n)
-
-        agent_names = [a.name for a in self.agents]
-        if len(agent_names) != len(set(agent_names)):
-            seen_agents: set[str] = set()
-            for n in agent_names:
-                if n in seen_agents:
-                    raise ValueError(f"duplicate agent name: '{n}'")
-                seen_agents.add(n)
-
-        # 模型目录 = 配置声明的静态投影（远端 /models 发现已退役）：每个 provider
-        # 至少声明一个模型，且 effective id 跨 provider 全局唯一。「全局唯一」是
-        # 「解析 = 单键查表」的前提——没有候选集合、没有优先级、没有回落。
-        declared_by: dict[str, str] = {}
-        for provider in self.providers:
-            if not provider.models:
-                raise ValueError(
-                    f"provider '{provider.name}' declares no models: "
-                    "providers[].models must declare at least one model "
-                    "(the model catalog comes from configuration only)"
-                )
-            for spec in provider.model_specs():
-                model_id = spec.effective_id
-                owner = declared_by.get(model_id)
-                if owner is not None:
-                    if owner == provider.name:
-                        # 同一 provider 内两条声明撞 id（名字不同、id 显式撞车）：
-                        # 说两遍 provider 名会读成 bug。
-                        conflict = (
-                            f"duplicate model id '{model_id}' declared twice "
-                            f"by provider '{provider.name}'."
-                        )
-                    else:
-                        conflict = (
-                            f"duplicate model id '{model_id}': declared by provider "
-                            f"'{owner}' and provider '{provider.name}'."
-                        )
-                    raise ValueError(
-                        f"{conflict}\n"
-                        "Give one an explicit id, e.g.:\n"
-                        f"  - id: {provider.name}-{spec.name}\n"
-                        f"    name: {spec.name}"
-                    )
-                declared_by[model_id] = provider.name
-
-        # agents[].model 必须落在 id 空间内（未命中即配置错误——错误信息即 C7 文案：
-        # available ids + 调用名提示，外部编排方据此一次改对）。校验与解析共用
-        # `require_model`（同一 trim 语义）：`find_model()` 能命中的值，加载期就
-        # 一定放行——「加载说合法 ⇔ 解析能命中」由构造保证，不留第二种判断口径。
-        for agent in self.agents:
-            self.require_model(agent.model)
-
+        加载期只报第一个（pydantic 契约），文案与抽取前逐字一致；设置面板路径
+        用同一批纯函数拿**全部**问题（含精确路径）。
+        """
+        problems = cross_field_problems(self)
+        if problems:
+            raise ValueError(problems[0].render())
         return self
 
     # ── 模型目录（id 空间）──────────────────────────
@@ -542,37 +911,10 @@ class Config(BaseModel):
     def describe_unknown_model(self, model_id: str) -> str:
         """未命中 id 的自解释错误文案（C7）——纯函数，不含副作用。
 
-        形如::
-
-            unknown model id 'sonnet'; available ids: ds-flash, ds-pro, gpt-4o, …;
-            note: 'sonnet' is the call name of model id 'ds-flash' (provider 'local') —
-            declare an explicit id or send 'ds-flash'
-
-        available ids 按声明序、超过 10 个截断；请求值命中某声明的**调用名**时给出
-        「它就是哪个 id 的调用名」提示。这只是错误路径的提示，**绝不自动生效**
-        （不是 resolve——那正是本任务要消灭的东西）。
+        文案的唯一实现在 ``problems.unknown_model_message``（跨字段检查的
+        ``agents[].model`` 那条共用它，所以这里委托而不是抄一份）。
         """
-        ids = [ref.id for ref in self._iter_model_refs()]
-        shown = ", ".join(ids[:_UNKNOWN_ID_LIST_LIMIT])
-        if len(ids) > _UNKNOWN_ID_LIST_LIMIT:
-            shown = f"{shown}, …"
-        parts = [f"unknown model id '{model_id}'; available ids: {shown}"]
-
-        wanted = model_id.strip()
-        hints = [ref for ref in self._iter_model_refs() if ref.name == wanted]
-        if hints:
-            noun = "model id" if len(hints) == 1 else "model ids"
-            described = " and ".join(
-                f"'{ref.id}' (provider '{ref.provider_name}')" for ref in hints
-            )
-            target = (
-                f"send '{hints[0].id}'" if len(hints) == 1 else "send one of those ids"
-            )
-            parts.append(
-                f"note: '{model_id}' is the call name of {noun} {described} — "
-                f"declare an explicit id or {target}"
-            )
-        return "; ".join(parts)
+        return unknown_model_message(list(iter_model_refs(self.providers)), model_id)
 
     def identify(self, provider_name: str, name: str) -> str | None:
         """反查 ``(provider, name) → effective id``；未命中返回 None。

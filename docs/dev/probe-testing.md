@@ -57,6 +57,23 @@ libs/wing-probe/
 └── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
+### 设置面场景（`scenarios/test_settings_*.py`，9 个文件 / 12 个用例）
+
+Setting API / setup mode 的整机证据（都在真网关上跑，断言锚定 HTTP 响应体、假 Provider 留档的请求体、
+磁盘字节、会话事件四个面）：
+
+| 文件 | 钉住什么 |
+|------|----------|
+| `test_settings_schema.py` | schema 的 wire 形状：抽查 29 条关键路径（`kind` / `apply` / `secret` / `min_items` / `variants` / `summary_fields` 是数组不是 null）+ 三条全局不变量（根 `key == path == "config"`、`value_hint is None`、`config_path` 绝对路径） |
+| `test_settings_apply.py` | **"生效"的硬证据**：改 `extra_body`（单键 map）与 `reasoning_effort` → 下一个请求体真的带上它们；回执 `reload.results` 的六项名字序 |
+| `test_settings_invalid.py` | 非法值 → **HTTP 200 + `ok=false`** + 精确 path/kind；文件字节未变；既有会话照常跑完一轮 |
+| `test_settings_conflict.py` | 旧指纹 → 409 `conflict` + 文件未被覆盖；新指纹 → 成功；幂等保存 `changed == []` |
+| `test_settings_secrets.py` | get 不回显真值（响应体里搜不到）+ hint 是末 4 位；set 的 `null` **保留**磁盘现值、字符串覆盖生效、嵌套密文（`gateway.auth.keys[0].key`）同样进表 |
+| `test_settings_setup_mode.py` | 钱场景：坏配置 → 降级启动 → 503 `setup_mode` → `set` 修好 → `setup_mode_exited=true` → 会话跑通；另两个用例覆盖顶层数字键（AD12）与 YAML 语法错（AD13，`.bak` 逐字留坏文件） |
+| `test_settings_list_editing.py` | 新增 provider + 新 model id → `/api/models` 立刻出现且能驱动一轮；删空 `agents` → 精确 `empty_list`、文件未变、恢复后可保存 |
+| `test_settings_restart_required.py` | 改 `gateway.port` → 回执点名 + **旧端口照常、新端口无人监听**（不做假热更） |
+| `test_settings_backup.py` | `.bak` 逐字节等于"每次保存前"的文件（覆盖式只留一份） |
+
 ## 新增一个场景
 
 **场景 = 代码，不写配置文件**：剧本（假 Provider 每一轮吐什么）写在测试函数里；模型名按场景私有（`probe/<主题>-<角度>`），因为剧本按 model 名路由、场景之间零共享。
@@ -144,6 +161,13 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 # Authorization: Bearer）。auth 打开时 ProbeEnv 关自己的子进程也用 keys 里第一把
 # 非 tool_runtime 的 key（/api/shutdown 同样受鉴权保护）。见 scenarios/test_gateway_auth.py
 @pytest.mark.probe_env(auth={"enabled": True, "keys": [{"key": "k"}]}, api_key="k")
+
+# config_text: **逐字替换**生成的 core/config.yaml（None = 按参数生成，既有行为不变）。
+# 它与所有"生成配置"的旋钮互斥（显式偏离默认值即报错——那些旋钮会静默失效）；
+# 写一份语法错的配置只有它能表达。常与 connect=False 配套：setup mode 下 /ws 在
+# accept 之前就被关（默认的 start 会直接 WsError），修好后再 connect_driver()。
+# 见 scenarios/test_settings_setup_mode.py 与 libs/wing-probe/tests/test_env_config.py
+@pytest.mark.probe_env(connect=False, config_text="providers: []\nagents: []\n")
 ```
 
 确定性来自配置而不是等待运气：把阈值压到秒级、断言仍走"轮询到状态翻转（带超时）"。
@@ -221,6 +245,11 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 1. `chain_topology`（`assert_chain_invariants`）：链拓扑自洽——uuid 存在且唯一、记录种类可识别（Message 或 `role="event"` + 非空 `type`）、每条 `parent_uuid` 都在记录集中、活跃链自 tip 回溯可达根且逐节点衔接（无环）、活跃链末端 == tip == 末条记录；
 2. `tool_pairing`（`assert_tool_pairing`）：每个带 `tool_calls` 的 assistant 消息，其每个 `call_id` 都有配对 tool 消息（未终结的半截参数块一律剔除）；
 3. `no_transient_records`（`assert_no_transient_records`）：流式 delta / 瞬态事件不得出现在 `history.jsonl`。
+
+**既有场景不许改**——除非**产品行为被刻意变更**、且 scheduler 在任务裁定里显式豁免（豁免只覆盖"期望值跟着新事实走"，不覆盖为了让实现过关而放松断言）。已发生的两例：
+
+- `test_system_reload.py` 的 `EXPECTED_ITEMS`：`reload_system` 追加第六项 `log level`（列表末尾），严格相等的整表断言必然要跟着从五项改成六项（既有五项逐字保留）；
+- `test_model_id_cross_provider.py`：`..._fails_config_load` 断言"重复 model id ⇒ 网关**拒绝启动**"，与 setup mode（配置非法也要活着）正面互斥 → 改写为"降级启动 + `/api/settings/status` 精确报出问题"（场景名 / docstring 一并改），并**持有 env 以便 teardown**（原先 `ProbeEnv.start` 抛异常路径会漏网关子进程；`ProbeEnv` 也补了 start 中途失败的兜底 terminate + 基础设施自测）。
 
 **红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（子记录 = 源**记录前缀**（append 顺序）+ uuid 全量重映射 + 引用全部落在子记录集内部 + 活跃链 = 记录 tip 回溯（reload 口径自洽；内存态 vs 文件由场景的 `/api/session/get` 与请求体断言承担）+ metadata 快照；被压缩区间随行但不入链）。会话逐出（`scenarios/test_session_eviction.py`）不需要专用 helper——它断言的是"什么都不该变"（逐出/水合前后记录集指纹一致），红线直接由场景内的指纹对比 + 内置不变量承担。
 

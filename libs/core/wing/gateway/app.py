@@ -22,6 +22,11 @@ from wing.gateway.auth import AuthMiddleware
 from wing.gateway.openapi import OPENAPI_METADATA
 from wing.gateway.protocol import error_response
 from wing.gateway.routes import register_routes
+from wing.gateway.setup_guard import (
+    SetupGuardMiddleware,
+    SetupModeError,
+    render_setup_detail,
+)
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -35,6 +40,9 @@ def _register_error_handlers(app: FastAPI) -> None:
     - 单独处理请求体校验失败（RequestValidationError，422，非 HTTPException）。
     - 鉴权拒绝（401）由 AuthMiddleware 直接经 protocol.error_response 输出——
       中间件位于 ExceptionMiddleware 之外，抛异常不会被这里捕获。
+    - setup mode 下访问 runtime（SetupModeError）也要有 503 + error="setup_mode"
+      的形状：守门中间件已经保证这类访问不可达，这里是万一可达时的安全网
+      （也让 Rust 侧的 is_setup_mode() 拿到正确的协议形状）。
     """
 
     @app.exception_handler(StarletteHTTPException)
@@ -50,6 +58,13 @@ def _register_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         detail = "; ".join(str(e.get("msg", "invalid")) for e in exc.errors())
         return error_response(422, detail or "validation error")
+
+    @app.exception_handler(SetupModeError)
+    async def _on_setup_mode(request: Request, exc: SetupModeError) -> JSONResponse:
+        # 显式覆盖 error 码（P4）：HTTP_ERROR_TYPES[503] 是通用的 service_unavailable。
+        return error_response(
+            503, render_setup_detail(exc.problems), error="setup_mode"
+        )
 
 
 def create_app(server: GatewayServer) -> FastAPI:
@@ -92,6 +107,11 @@ def create_app(server: GatewayServer) -> FastAPI:
     )
 
     app.state.server = server
+    # 中间件顺序（Starlette：``add_middleware`` 是 ``user_middleware.insert(0, …)``，
+    # 即**后 add 的在外层**）。AuthMiddleware 必须在最外层：修复模式的 loopback
+    # 判定要**先**发生——setup mode 下非 loopback 的任何路径都先吃 403，
+    # loopback 才轮到守门中间件决定「放行 or 503」（总设计 §8.4）。
+    app.add_middleware(SetupGuardMiddleware)
     app.add_middleware(AuthMiddleware)
     _register_error_handlers(app)
     register_routes(app)

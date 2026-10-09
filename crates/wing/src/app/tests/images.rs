@@ -70,7 +70,7 @@ const CELL: CellPixels = CellPixels::new(10, 20);
 /// layout the store's own `ImageSupport` cell).
 const LAYOUT_CELL: LayoutCellPixels = LayoutCellPixels::new(10, 20);
 
-fn kitty() -> ImageSupport {
+pub(super) fn kitty() -> ImageSupport {
     ImageSupport::from_parts(ImageProtocol::Kitty, CELL, false)
 }
 
@@ -79,10 +79,10 @@ fn kitty() -> ImageSupport {
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
 /// Self-cleaning temp directory (the crate has no `tempfile` dependency).
-struct TempDir(PathBuf);
+pub(super) struct TempDir(PathBuf);
 
 impl TempDir {
-    fn new(tag: &str) -> Self {
+    pub(super) fn new(tag: &str) -> Self {
         let unique = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "wing-app-images-{}-{tag}-{unique}",
@@ -93,11 +93,11 @@ impl TempDir {
         Self(path)
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.0
     }
 
-    fn file(&self, name: &str) -> PathBuf {
+    pub(super) fn file(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
 }
@@ -108,7 +108,7 @@ impl Drop for TempDir {
     }
 }
 
-fn write_png(path: &Path, px_w: u32, px_h: u32) {
+pub(super) fn write_png(path: &Path, px_w: u32, px_h: u32) {
     let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(px_w, px_h, |x, y| {
         image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
     }));
@@ -173,7 +173,11 @@ fn transmit_sequence(buf: &Buffer, area: Rect) -> String {
 
 /// An app whose picture lane is wired to an injected capability, with no
 /// welcome header (so the band's first row is the first content row).
-fn app_with_images(mode: ImagesMode, support: ImageSupport, workspace: Option<&Path>) -> App {
+pub(super) fn app_with_images(
+    mode: ImagesMode,
+    support: ImageSupport,
+    workspace: Option<&Path>,
+) -> App {
     let mut app = App::with_images(
         "test-session".into(),
         AppConfig::default(),
@@ -185,7 +189,7 @@ fn app_with_images(mode: ImagesMode, support: ImageSupport, workspace: Option<&P
 }
 
 /// Draw once — the frame assertions read `term.backend().buffer()`.
-fn frame(app: &mut App, term: &mut Terminal<TestBackend>) -> Buffer {
+pub(super) fn frame(app: &mut App, term: &mut Terminal<TestBackend>) -> Buffer {
     draw(app, term);
     term.backend().buffer().clone()
 }
@@ -204,7 +208,7 @@ fn frame(app: &mut App, term: &mut Terminal<TestBackend>) -> Buffer {
 /// can evict the cache entry, and a probe that just landed can add an anchor
 /// whose encode has not started. That is not the thing under test, and it is
 /// exactly what a loaded CI machine makes visible.
-fn draw_until(
+pub(super) fn draw_until(
     app: &mut App,
     term: &mut Terminal<TestBackend>,
     what: &str,
@@ -233,7 +237,7 @@ fn placeholder_cells(buf: &Buffer) -> Vec<(u16, u16)> {
     cells
 }
 
-fn has_placeholder(buf: &Buffer) -> bool {
+pub(super) fn has_placeholder(buf: &Buffer) -> bool {
     !placeholder_cells(buf).is_empty()
 }
 

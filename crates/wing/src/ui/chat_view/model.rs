@@ -535,6 +535,19 @@ impl ChatView {
         self.thinking_expanded
     }
 
+    /// 作废**每一个** cell 的行 / 高度缓存 —— 呈现参数（调色板）变了但内容没变。
+    ///
+    /// `CellContext`（调色板 / 思考模式 / 布局）不是缓存的键：行缓存按
+    /// `(宽度, 内容 generation)` 索引，所以任何影响**呈现**的全局变化都必须显式
+    /// 走一次这里，否则旧颜色会一直留在屏幕上直到内容真的变化。设置面板的实时
+    /// 预览换调色板走的就是这条路（与 [`Self::toggle_thinking_expansion`] 同一个
+    /// 问题的另一面）。
+    pub fn invalidate_cells(&mut self) {
+        for cached in self.cells.iter_mut() {
+            cached.invalidate();
+        }
+    }
+
     /// Set the result on a tool call block by index (from RenderContext).
     pub fn set_tool_result_by_index(&mut self, index: usize, result: String, success: bool) {
         if let Some(cached) = self.cells.get_mut(index)
