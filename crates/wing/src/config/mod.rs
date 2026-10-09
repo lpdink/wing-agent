@@ -237,11 +237,16 @@ impl AppConfig {
     pub(crate) fn load_from_path(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(content) => match store::parse_document(&content, path) {
-                Ok(doc) => {
-                    let cfg = Self::from_doc(&doc);
-                    tracing::info!(?path, "loaded config");
-                    cfg
-                }
+                Ok(doc) => match Self::from_doc_at(&doc, Some(path)) {
+                    Some(cfg) => {
+                        // 只有**真的按文档解析成功**才打这条 INFO（N-3：类型错误回落默认值时
+                        // 打 "loaded config" 是误导）。
+                        tracing::info!(?path, "loaded config");
+                        cfg
+                    }
+                    // 类型错误：warn（带 path）已经由 `from_doc_at` 打出，这里只回落。
+                    None => Self::default(),
+                },
                 Err(e) => {
                     tracing::warn!(?path, %e, "failed to parse config, using defaults");
                     Self::default()
@@ -265,15 +270,25 @@ impl AppConfig {
     /// [`Self::resolve`] is applied here so every caller — including the settings panel's live
     /// preview via [`store::appconfig_from_doc`] — gets the same folded config `load()` returns.
     pub(crate) fn from_doc(doc: &serde_json::Value) -> Self {
-        let mut cfg = match serde_json::from_value::<Self>(doc.clone()) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                tracing::warn!(%e, "failed to parse config, using defaults");
-                Self::default()
+        Self::from_doc_at(doc, None).unwrap_or_default()
+    }
+
+    /// [`Self::from_doc`] with the source path for the log line (N-3).
+    ///
+    /// `Some(cfg)` = 文档按声明解析成功；`None` = 类型错误（warn 已打出，调用方回落默认值）。
+    /// 三种启动状态的日志因此完整：文件不存在 = debug；解析 / 类型错误 = warn（都带 path）；
+    /// 成功 = info——且成功那一栏只在真的成功时打。
+    fn from_doc_at(doc: &serde_json::Value, path: Option<&Path>) -> Option<Self> {
+        match serde_json::from_value::<Self>(doc.clone()) {
+            Ok(mut cfg) => {
+                cfg.resolve();
+                Some(cfg)
             }
-        };
-        cfg.resolve();
-        cfg
+            Err(e) => {
+                tracing::warn!(?path, %e, "failed to parse config, using defaults");
+                None
+            }
+        }
     }
 
     /// Serialize this config to canonical YAML (catalog comments included).

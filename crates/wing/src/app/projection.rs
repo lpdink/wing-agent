@@ -423,6 +423,11 @@ impl App {
                     yolo,
                 );
             }
+            WingEvent::SettingsChanged { fingerprint, .. } => {
+                // 面板开着 → 指纹比对（相同 = 自己刚保存的那一次；不同 = 别人改了，
+                // 顶部横幅）；关着 → 丢掉设置缓存（见 `note_settings_changed`）。
+                self.note_settings_changed(&fingerprint);
+            }
             WingEvent::SyncSession {
                 session_id,
                 messages,

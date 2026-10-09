@@ -11,6 +11,11 @@
 use tokio::sync::mpsc;
 
 use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
+use crate::app::settings::GatewaySaveReport;
+use crate::app::settings::InterfaceSaveReport;
+use crate::app::settings::PendingSettingsSave;
+use crate::app::settings::changed_leaf_paths;
+use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
@@ -31,13 +36,17 @@ const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(
 /// Execute a single intent, performing any necessary I/O.
 ///
 /// `transport` is `None` when the gateway connection is lost; intents that
-/// require the gateway are silently discarded in that case.
+/// require the gateway are silently discarded in that case. `*endpoint` is the
+/// gateway the retry ladder would reconnect to — an explicit restart
+/// ([`AppIntent::RestartGateway`]) may rewrite it (the config file is the
+/// source of truth for host:port, and `Ctrl+R` exists to apply that change).
 ///
 /// Fetch-type intents are spawned as background tasks; their results arrive
 /// asynchronously via `fetch_tx`.
 pub async fn execute_intent(
     app: &mut App,
-    transport: &Option<Transport>,
+    transport: &mut Option<Transport>,
+    endpoint: &mut GatewayEndpoint,
     terminal: &mut WingTerminal,
     intent: AppIntent,
     fetch_tx: &mpsc::Sender<FetchResult>,
@@ -571,6 +580,113 @@ pub async fn execute_intent(
             if let Err(e) = crate::util::osc9::send_notification(writer, &message) {
                 tracing::warn!("failed to send OSC 9 notification: {e}");
             }
+        }
+        // ---- 设置面板 ----
+        AppIntent::FetchSettings | AppIntent::ReloadSettings => {
+            if let Some(t) = transport {
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    // schema 是静态目录、get 是当前文档：并发两个请求一次回齐
+                    // （面板打开 / 后台刷新 / R 重载三条路径共用这一份结果）。
+                    let (schema, state) = tokio::join!(http.settings_schema(), http.settings_get());
+                    let payload = match (schema, state) {
+                        (Ok(schema), Ok(state)) => FetchPayload::Settings {
+                            schema: Box::new(schema),
+                            state: Box::new(state),
+                        },
+                        (Err(e), _) | (_, Err(e)) => FetchPayload::Toast {
+                            message: format!("载入设置失败：{e}"),
+                            is_error: true,
+                        },
+                    };
+                    let _ = tx
+                        .send(FetchResult {
+                            session_id,
+                            payload,
+                        })
+                        .await;
+                });
+            }
+        }
+        AppIntent::SaveSettings {
+            gateway,
+            base,
+            interface,
+            gateway_dirty,
+            interface_dirty,
+        } => {
+            // Interface 半边：本地原子写（几 KB + `.bak`），同步做 —— 用户按下 `s`
+            // 之后本地文件是不是写成了，不该等一个 HTTP RTT。
+            let report = if interface_dirty {
+                let previous = crate::config::store::read_interface_doc()
+                    .ok()
+                    .map(|read| read.doc);
+                let changed = changed_leaf_paths(previous.as_ref(), &interface).len();
+                match crate::config::store::write_interface_doc(&interface) {
+                    Ok(outcome) => {
+                        let report = InterfaceSaveReport::Ok {
+                            path: outcome.path.display().to_string(),
+                            changed,
+                        };
+                        app.settle_interface_save(&report, &interface);
+                        report
+                    }
+                    Err(e) => {
+                        let report = InterfaceSaveReport::Err {
+                            message: e.to_string(),
+                        };
+                        app.settle_interface_save(&report, &interface);
+                        report
+                    }
+                }
+            } else {
+                InterfaceSaveReport::Skipped
+            };
+            // 两半的状态先存住：合并回执（与缓存回写）都读这一份。
+            app.settings_save = Some(PendingSettingsSave {
+                interface: report,
+                document: (*gateway).clone(),
+            });
+            // Gateway 半边：异步（回执两半合体，不阻塞主循环）。
+            if gateway_dirty {
+                if let Some(t) = transport.as_ref() {
+                    let http = t.http.clone();
+                    let session_id = app.session_id.clone();
+                    let tx = fetch_tx.clone();
+                    let request = wing_api_client::models::SettingsSetRequest {
+                        base: Some(base),
+                        document: (*gateway).clone(),
+                    };
+                    tokio::spawn(async move {
+                        let payload = match http.settings_set(&request).await {
+                            Ok(response) => FetchPayload::SettingsSaved(Box::new(response)),
+                            Err(e) => FetchPayload::SettingsSaveError {
+                                message: e.to_string(),
+                                conflict: e.is_conflict(),
+                            },
+                        };
+                        let _ = tx
+                            .send(FetchResult {
+                                session_id,
+                                payload,
+                            })
+                            .await;
+                    });
+                } else {
+                    app.settle_gateway_save(GatewaySaveReport::Failed {
+                        message: "网关未连接".to_string(),
+                        conflict: false,
+                    });
+                }
+            } else {
+                // 只有 Interface 半边：立刻收口（回执只说那一半）。
+                app.settle_gateway_save(GatewaySaveReport::Skipped);
+            }
+        }
+        AppIntent::RestartGateway => {
+            super::settings::restart_gateway(app, transport, endpoint).await;
         }
     }
 }

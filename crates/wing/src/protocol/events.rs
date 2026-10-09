@@ -550,6 +550,32 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
+    /// 配置变更广播（网关的 `SettingsChangedEvent`，design.md §7.6）。
+    ///
+    /// `target = EventTarget(scope="global")`：所有客户端都收得到，包括**另一个客户端**
+    /// 的保存。面板据此做指纹比对（相同 = 自己刚保存的那一次，不警告；不同 = 别人改了，
+    /// 顶部横幅「按 R 重新载入」），不做"是不是我触发的"的猜测。
+    ///
+    /// 旧网关不发这个事件 → `#[serde(default)]` 让每个字段都可缺席（本变体只在
+    /// 事件真的到达时才被构造）。
+    #[serde(rename = "settings_changed")]
+    SettingsChanged {
+        /// 变更的规范路径列表。
+        #[serde(default)]
+        changed: Vec<String>,
+        /// 其中生效域为 `restart` 的路径（回执据此提示「Ctrl+R 立即重启」）。
+        #[serde(default)]
+        restart_required: Vec<String>,
+        /// 这次保存是否让网关从 setup mode 就地转入正常模式。
+        #[serde(default)]
+        setup_mode_exited: bool,
+        /// 落盘后的新指纹（乐观并发的凭据）。
+        #[serde(default)]
+        fingerprint: String,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
     /// Agent interrupted.
     #[serde(rename = "interrupted")]
     Interrupted {
@@ -736,6 +762,7 @@ impl WingEvent {
             Self::DiffContent { .. } => "diff_content",
             Self::SyncSession { .. } => "sync_session",
             Self::SessionStateChanged { .. } => "session_state_changed",
+            Self::SettingsChanged { .. } => "settings_changed",
             Self::Interrupted { .. } => "interrupted",
             Self::CompactDone { .. } => "compact_done",
             Self::ContextStats { .. } => "context_stats",
@@ -767,6 +794,7 @@ impl WingEvent {
             | Self::DiffContent { meta, .. }
             | Self::SyncSession { meta, .. }
             | Self::SessionStateChanged { meta, .. }
+            | Self::SettingsChanged { meta, .. }
             | Self::Interrupted { meta, .. }
             | Self::CompactDone { meta, .. }
             | Self::ContextStats { meta, .. }
@@ -1866,5 +1894,39 @@ mod tests {
         // No discriminator at all.
         assert!(WingEvent::from_history_value(&serde_json::json!({})).is_err());
         assert!(WingEvent::from_history_value(&serde_json::json!({"type": 5})).is_err());
+    }
+
+    /// `settings_changed`（design §7.6）：全字段解码，且**缺字段也能解码**
+    /// （旧网关 / 全局事件不带 session_id）——面板只按指纹比对。
+    #[test]
+    fn deserialize_settings_changed_event() {
+        let json = r#"{
+            "type": "settings_changed",
+            "changed": ["gateway.port", "colors.accent"],
+            "restart_required": ["gateway.port"],
+            "setup_mode_exited": true,
+            "fingerprint": "fnv1a64:0123456789abcdef",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-settings"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match &event {
+            WingEvent::SettingsChanged {
+                changed,
+                restart_required,
+                setup_mode_exited,
+                fingerprint,
+                ..
+            } => {
+                assert_eq!(changed, &["gateway.port", "colors.accent"]);
+                assert_eq!(restart_required, &["gateway.port"]);
+                assert!(setup_mode_exited);
+                assert_eq!(fingerprint, "fnv1a64:0123456789abcdef");
+            }
+            other => panic!("expected SettingsChanged, got {other:?}"),
+        }
+        assert_eq!(event.event_type(), "settings_changed");
+        // 全局事件：没有 session_id —— 事件路由不按会话过滤它（`session_id()` 为 None）。
+        assert_eq!(event.session_id(), None);
     }
 }

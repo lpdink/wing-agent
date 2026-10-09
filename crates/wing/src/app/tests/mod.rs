@@ -14,5 +14,6 @@ mod modal;
 mod projection;
 mod scrollbar;
 mod selection;
+mod settings;
 mod support;
 mod welcome;

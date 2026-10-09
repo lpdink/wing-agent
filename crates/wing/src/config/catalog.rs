@@ -509,8 +509,12 @@ fn emit_document(doc: &Value, catalog: &SettingNode) -> String {
         if let Some(name) = child.section.as_deref()
             && section != Some(name)
         {
+            // 文件头之后已经有一个空行了（N-1：第一个 section 前不再重复补，
+            // 否则输出里会出现两个连着的空行）。
+            if section.is_some() {
+                out.push('\n');
+            }
             section = Some(name);
-            out.push('\n');
             out.push_str(&section_header(name));
             out.push('\n');
             if let Some(section_doc) = child.section_doc.as_deref() {
@@ -1217,6 +1221,28 @@ mod tests {
         let parsed = appconfig_from_doc(&read_back);
         assert_eq!(json_of(&parsed), json_of(&AppConfig::default()));
         assert_eq!(parsed.colors.preset, ColorPreset::Wing);
+    }
+
+    /// N-1（09 review_r1）：文件头与第一个 section 之间**恰有一个**空行。
+    #[test]
+    fn the_header_is_followed_by_exactly_one_blank_line() {
+        let dumped = dump_config_yaml(&json!({}));
+        let mut lines = dumped.lines();
+        // 文件头 4 行。
+        for _ in 0..HEADER.len() {
+            assert!(lines.next().is_some_and(|l| l.starts_with("# ")));
+        }
+        assert_eq!(lines.next(), Some(""), "文件头后是一个空行");
+        let first_section = lines.next().expect("至少一个 section");
+        assert!(
+            first_section.starts_with("# ── "),
+            "第二个非头行就是第一个 section 分隔线，实际：{first_section:?}"
+        );
+        // 反向：整篇不许出现连续两个空行。
+        assert!(
+            !dumped.contains("\n\n\n"),
+            "输出里不该有连续两个空行：\n{dumped}"
+        );
     }
 
     /// 稀疏文档保持稀疏：只有写下的键回到文档里，再 dump 逐字相同。
