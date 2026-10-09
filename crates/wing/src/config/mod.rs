@@ -2,10 +2,12 @@
 //!
 //! Missing file → silent defaults. Parse error → warn + defaults.
 
+pub mod catalog;
 pub mod colors;
 pub mod rendering;
+pub mod store;
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use ratatui::style::Color;
 use serde::Deserialize;
@@ -221,53 +223,97 @@ impl AppConfig {
     ///
     /// Returns defaults if the file doesn't exist or fails to parse.
     pub fn load() -> Self {
-        let Some(path) = config_path() else {
+        let Some(path) = store::interface_config_path() else {
             tracing::warn!("cannot determine config directory, using defaults");
-            return Self::default();
+            return Self::default_resolved();
         };
-        match std::fs::read_to_string(&path) {
-            Ok(content) => match serde_yaml::from_str::<AppConfig>(&content) {
-                Ok(mut cfg) => {
-                    cfg.resolve();
-                    tracing::info!(?path, "loaded config");
-                    cfg
-                }
+        Self::load_from_path(&path)
+    }
+
+    /// Load from an explicit path — the implementation behind [`Self::load`].
+    ///
+    /// Also the seam the tests use to prove that `load` and [`store::appconfig_from_doc`] parse
+    /// identically: both funnel into [`Self::from_doc`], so there is one parser, not two.
+    pub(crate) fn load_from_path(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(content) => match store::parse_document(&content, path) {
+                Ok(doc) => match Self::from_doc_at(&doc, Some(path)) {
+                    Some(cfg) => {
+                        // 只有**真的按文档解析成功**才打这条 INFO（N-3：类型错误回落默认值时
+                        // 打 "loaded config" 是误导）。
+                        tracing::info!(?path, "loaded config");
+                        cfg
+                    }
+                    // 类型错误：warn（带 path）已经由 `from_doc_at` 打出，这里只回落。
+                    None => Self::default_resolved(),
+                },
                 Err(e) => {
                     tracing::warn!(?path, %e, "failed to parse config, using defaults");
-                    Self::default()
+                    Self::default_resolved()
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::debug!(?path, "no config file, using defaults");
-                Self::default()
+                Self::default_resolved()
             }
             Err(e) => {
                 tracing::warn!(?path, %e, "failed to read config, using defaults");
-                Self::default()
+                Self::default_resolved()
             }
         }
     }
 
-    /// Serialize to YAML string (for `--dump-config`).
+    /// The shared parse: sparse (or full) document → `AppConfig`.
+    ///
+    /// Type errors warn and fall back to the defaults — never fails, matching the historical
+    /// `load()` contract (an invalid value keeps the default instead of taking the TUI down).
+    /// [`Self::resolve`] is applied here so every caller — including the settings panel's live
+    /// preview via [`store::appconfig_from_doc`] — gets the same folded config `load()` returns.
+    pub(crate) fn from_doc(doc: &serde_json::Value) -> Self {
+        Self::from_doc_at(doc, None).unwrap_or_else(Self::default_resolved)
+    }
+
+    /// Fallback default for every error path — **`resolve()` 过**（review N3）。
+    ///
+    /// 成功路径是「解析 → resolve」，回落路径必须是同一形态：`resolve()` 今天只折叠
+    /// `colors.math_mode = rendering.math`，两边恰好相等，但默认值将来一旦偏离这个
+    /// 等式，未 resolve 的回落就会造出「同一份默认配置、两种形态」的隐性分叉。
+    fn default_resolved() -> Self {
+        let mut cfg = Self::default();
+        cfg.resolve();
+        cfg
+    }
+
+    /// [`Self::from_doc`] with the source path for the log line (N-3).
+    ///
+    /// `Some(cfg)` = 文档按声明解析成功；`None` = 类型错误（warn 已打出，调用方回落默认值）。
+    /// 三种启动状态的日志因此完整：文件不存在 = debug；解析 / 类型错误 = warn（都带 path）；
+    /// 成功 = info——且成功那一栏只在真的成功时打。
+    fn from_doc_at(doc: &serde_json::Value, path: Option<&Path>) -> Option<Self> {
+        match serde_json::from_value::<Self>(doc.clone()) {
+            Ok(mut cfg) => {
+                cfg.resolve();
+                Some(cfg)
+            }
+            Err(e) => {
+                tracing::warn!(?path, %e, "failed to parse config, using defaults");
+                None
+            }
+        }
+    }
+
+    /// Serialize this config to canonical YAML (catalog comments included).
+    ///
+    /// A thin shell over [`catalog::dump_config_yaml`]: the emitter is catalog-driven, so the Rust
+    /// side still has exactly one declaration. This is the *struct* dump (every key present with
+    /// its value); the `--dump-config` CLI and the settings panel's save path go through
+    /// [`store`] instead, because they dump a *document* — sparse, i.e. only the keys the user
+    /// actually wrote, with everything else left as commented defaults.
     pub fn to_yaml(&self) -> String {
-        // Use serde_yaml for structure, then prepend header comment.
-        let yaml = serde_yaml::to_string(self).unwrap_or_default();
-        format!(
-            "# wing configuration\n\
-             # Generated by `wing tui --dump-config`\n\
-             # Place at $WING_HOME/tui/config.yaml (default: ~/.wing/tui/config.yaml)\n\
-             #\n\
-             # Colors: `preset` picks the base palette — `Wing` (designed for\n\
-             # dark terminals, the default) or `Terminal` (inherit the terminal's\n\
-             # ANSI colours). Any other key under `colors:` overrides that one\n\
-             # slot, e.g. `accent: \"#f0c674\"`; values are named ANSI colours\n\
-             # (\"cyan\", \"dark_gray\") or hex (\"#00BCD4\"). Slots: accent, text,\n\
-             # thinking, tool_result, dim, success, warning, danger, math,\n\
-             # surface, diff_add_bg, diff_del_bg, diff_add_bg_strong,\n\
-             # diff_del_bg_strong.\n\
-             \n\
-             {yaml}"
-        )
+        match serde_json::to_value(self) {
+            Ok(doc) => catalog::dump_config_yaml(&doc),
+            Err(_) => String::new(),
+        }
     }
 }
 
@@ -338,19 +384,6 @@ fn resolve(value: Option<&str>, fallback: Color) -> Color {
             fallback
         }),
     }
-}
-
-/// Get the config file path.
-///
-/// Returns `None` if the home directory cannot be determined (the caller
-/// should fall back to defaults).
-fn config_path() -> Option<PathBuf> {
-    let home = if let Ok(env_home) = std::env::var("WING_HOME") {
-        PathBuf::from(env_home)
-    } else {
-        dirs::home_dir()?.join(".wing")
-    };
-    Some(home.join("tui").join("config.yaml"))
 }
 
 #[cfg(test)]
@@ -425,7 +458,7 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.colors.preset = ColorPreset::Terminal;
         cfg.colors.accent = Some("#ff00ff".into());
-        let dumped = cfg.to_yaml();
+        let dumped = crate::config::catalog::dump_config_yaml(&serde_json::to_value(&cfg).unwrap());
         assert!(dumped.contains("preset: Terminal"), "{dumped}");
         let parsed: AppConfig = serde_yaml::from_str(&dumped).unwrap();
         assert_eq!(parsed.colors.preset, ColorPreset::Terminal);
@@ -461,7 +494,7 @@ mod tests {
         let yaml = "colors:\n  math_mode: off\n";
         let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.colors.math_mode, MathMode::Text);
-        let dumped = cfg.to_yaml();
+        let dumped = crate::config::catalog::dump_config_yaml(&serde_json::to_value(&cfg).unwrap());
         assert!(dumped.contains("math: Text"), "dumped config: {dumped}");
         assert_eq!(dumped.matches("math_mode").count(), 0);
     }

@@ -23,6 +23,7 @@ pub mod ps;
 pub mod query;
 mod release;
 pub mod run;
+pub(crate) mod setup;
 pub(crate) mod start;
 mod status;
 mod stop;
@@ -156,7 +157,7 @@ pub enum Command {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Dump default configuration to stdout and exit.
+        /// Dump the TUI configuration as canonical (commented) YAML to stdout and exit.
         #[arg(long)]
         dump_config: bool,
     },
@@ -413,9 +414,20 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 dump_config,
             } => {
                 if dump_config {
-                    let config = AppConfig::default();
-                    print!("{}", config.to_yaml());
-                    ExitCode::SUCCESS
+                    // Canonical form of the *current* file (`$WING_HOME/tui/config.yaml`): the
+                    // emitter is catalog-driven and shared with the settings panel's save path,
+                    // so there is exactly one declaration. A broken file is reported instead of
+                    // silently dumped as defaults.
+                    match crate::config::store::read_interface_doc() {
+                        Ok(read) => {
+                            print!("{}", crate::config::catalog::dump_config_yaml(&read.doc));
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("wing error: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
                 } else {
                     let gw = backend_config::read_backend_gateway_config();
                     let host = host.unwrap_or(gw.host);
@@ -548,13 +560,40 @@ async fn smart_default_tui() -> Result<()> {
     run_tui(&host, port).await
 }
 
+/// 装一个"panic 时先恢复终端"的 hook。
+///
+/// 恢复序列就是 `tui::leave_sequence`（先关鼠标上报再离开备用屏）——与干净退出路径
+/// 写的是同一串字节，panic 因此永远不会把"正在上报鼠标"的终端留给 shell。
+/// 失败一律忽略：垂死的终端不能再 panic。原 hook 链在其后。
+///
+/// 与 [`restore_panic_hook`] 成对；调用方（[`run_tui`]）负责装卸——setup 循环只借终端，
+/// 这样 setup 阶段的 panic 与正常阶段走的是同一套恢复。
+fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = tui::leave_sequence(&mut std::io::stdout());
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
+        original_hook(panic_info);
+    }));
+}
+
+/// 摘掉 [`install_panic_hook`] 装的自定义 hook（装回默认 hook）。
+fn restore_panic_hook() {
+    let _ = std::panic::take_hook();
+}
+
 /// Launch TUI: connect to gateway, init terminal, run app.
+///
+/// 启动前的预检（§16.1）：配置不可用时先跑一个**无 session 的 setup 循环**，
+/// 用户修好并保存后继续走下面与今天逐字相同的启动链。配置可用 ⇒ 一个分支都不进。
 async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize logging (file only, no console output).
     let _log_guard = init_logging();
 
-    // Load user configuration (needed early for api_key).
-    let config = AppConfig::load();
+    // Load user configuration (needed early for api_key). `mut`: setup 阶段会预览
+    // Interface 根（颜色等改动当场生效），随后原样交给 run_app。
+    let mut config = AppConfig::load();
     let api_key = config
         .api_key
         .as_deref()
@@ -573,6 +612,45 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
+    // HTTP client（预检与后面的建会话共用同一个；伪码 §16.1 的构造位置就在预检之前）。
+    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
+
+    // ── 预检：配置可用吗？（最便宜的一次调用；不要把它与"网关不可达"混为一谈）──
+    match setup::preflight_config(&http).await {
+        setup::Preflight::Ready => {}
+        setup::Preflight::Unusable { .. } => {
+            let endpoint = crate::app::transport::GatewayEndpoint {
+                ws_url: ws_url.clone(),
+                http_base: http_base.clone(),
+                api_key: api_key.clone(),
+            };
+            let mut terminal = tui::init_terminal()?;
+            install_panic_hook();
+            // 先无损收尾再 `?`：setup 内部报错（如拉数据失败）也绝不能把终端留在 raw mode。
+            let outcome = setup::run_setup_tui(&mut terminal, &http, &mut config, &endpoint).await;
+            restore_panic_hook();
+            tui::restore_terminal(&mut terminal)?;
+            match outcome? {
+                setup::SetupOutcome::Quit => {
+                    // 终端恢复后打印（§16.2）：配置仍不可用时的出路。路径取后端权威值，
+                    // 拿不到就省略那半句。
+                    let config_path = http
+                        .settings_get()
+                        .await
+                        .ok()
+                        .map(|state| state.config_path);
+                    eprintln!("{}", setup::quit_note(config_path.as_deref()));
+                    return Ok(());
+                }
+                setup::SetupOutcome::Ready => {}
+            }
+        }
+        setup::Preflight::Failed(e) => {
+            anyhow::bail!("{}", setup::preflight_failure_message(&http_base, &e));
+        }
+    }
+
     // 1. WS connect (get client_id).
     let gateway = GatewayClient::connect(&ws_url, api_key_ref)
         .await
@@ -587,9 +665,6 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     tracing::info!(client_id = %client_id, "WS connected");
 
     // 2. HTTP create session.
-    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
-
     let create_req = wing_api_client::models::CreateSessionRequest {
         workspace: workspace.clone(),
         ..Default::default()
@@ -612,19 +687,8 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize terminal.
     let mut terminal = tui::init_terminal()?;
 
-    // Set up panic hook to restore terminal on panic.
-    //
-    // The teardown itself is `tui::leave_sequence` (mouse reporting off before
-    // leaving the alternate screen) — the same sequence the clean-exit path
-    // writes, so a panic can never leave the terminal reporting mice to the
-    // shell. Failures are ignored: a dead terminal must not re-panic.
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = tui::leave_sequence(&mut std::io::stdout());
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
-        original_hook(panic_info);
-    }));
+    // Set up panic hook to restore terminal on panic (see `install_panic_hook`).
+    install_panic_hook();
 
     // Run the app.
     let transport = Transport {
@@ -650,7 +714,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     tui::restore_terminal(&mut terminal)?;
 
     // Restore original panic hook.
-    let _ = std::panic::take_hook();
+    restore_panic_hook();
 
     result?;
     tracing::info!("wing exited cleanly");

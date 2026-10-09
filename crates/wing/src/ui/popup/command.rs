@@ -156,6 +156,12 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             description: "Reload config, hooks, skills".into(),
             params: String::new(),
         },
+        CommandInfo {
+            name: "settings".into(),
+            aliases: vec!["config".into(), "set".into()],
+            description: "Edit gateway & interface settings".into(),
+            params: String::new(),
+        },
     ]
 });
 

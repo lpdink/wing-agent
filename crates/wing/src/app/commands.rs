@@ -202,6 +202,13 @@ pub(super) const COMMANDS: &[CommandRoute] = &[
         takes_args: true,
         handler: resume_session,
     },
+    // ---- 设置面板（TUI 写配置的唯一入口；design §12.4） ----
+    CommandRoute {
+        name: "/settings",
+        aliases: &["/config", "/set"],
+        takes_args: false,
+        handler: open_settings_command,
+    },
 ];
 
 impl App {
@@ -496,6 +503,18 @@ impl App {
                     self.show_toast(Toast::info(message, std::time::Duration::from_secs(3)));
                 }
             }
+            FetchPayload::Settings { schema, state } => {
+                self.handle_settings_fetch(*schema, *state);
+            }
+            FetchPayload::SettingsSaved(response) => {
+                self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Saved(*response));
+            }
+            FetchPayload::SettingsSaveError { message, conflict } => {
+                self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Failed {
+                    message,
+                    conflict,
+                });
+            }
         }
     }
 }
@@ -750,5 +769,14 @@ fn resume_session(app: &mut App, text: &str) -> bool {
             ));
         }
     }
+    true
+}
+
+/// `/settings` (aliases `/config`, `/set`) — open the settings panel.
+///
+/// 与 `/model` 不同：设置面板**允许在轮次进行中打开**（provider 重建是 reload-safe 的，
+/// design §12.5），cache-first 的打开与后台刷新都在 [`App::open_settings_panel`] 里。
+fn open_settings_command(app: &mut App, _text: &str) -> bool {
+    app.open_settings_panel();
     true
 }

@@ -226,10 +226,13 @@ const UI_FORBIDDEN_LAYERS: &[&str] = &["app"];
 const SHARED_FORBIDDEN_LAYERS: &[&str] = &["app", "ui", "cmd", "stdio", "gateway", "tui"];
 const SHARED_FORBIDDEN_CRATES: &[&str] = &["ratatui"];
 
-/// Files that used to reach up — the guard must actually see them.
+/// Anchor files the guard must actually see (`assert_scanned` panics when one is
+/// missing): every layer directory registers a few of its files here, so a walk
+/// that stopped early cannot let the rules pass vacuously.
 const UI_ANCHORS: &[&str] = &["ui/panel.rs", "ui/chat_view/cell.rs", "ui/cells/ask_msg.rs"];
 
-/// The neutral layer's files — the guard must actually see them.
+/// The neutral layer's anchors — same contract; every panel package registers
+/// its files here (the settings package included).
 const SHARED_ANCHORS: &[&str] = &[
     "shared/mod.rs",
     "shared/constants.rs",
@@ -237,6 +240,14 @@ const SHARED_ANCHORS: &[&str] = &[
     "shared/panels/mod.rs",
     "shared/panels/ask.rs",
     "shared/panels/picker.rs",
+    // The settings panel package (07).
+    "shared/panels/settings/mod.rs",
+    "shared/panels/settings/doc.rs",
+    "shared/panels/settings/tree.rs",
+    "shared/panels/settings/edit.rs",
+    "shared/panels/settings/list.rs",
+    "shared/panels/settings/search.rs",
+    "shared/panels/settings/problems.rs",
 ];
 
 /// Scan `sources` for `needles`, panicking with every offending site.

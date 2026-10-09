@@ -668,7 +668,18 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         .filter(|k| !k.is_empty());
     let api_key_ref = api_key.as_deref();
 
-    // 2. WS connect.
+    // 2. HTTP client. 构造提前到 WS 之前：预检必须先于握手（setup mode 下网关
+    //    一律拒绝 WS，先连只会得到一句误导的"网关没起来"）。
+    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
+
+    // 3. 配置预检（D27）：不可用 → problems 走 **stderr** + EX_CONFIG（78），
+    //    stdout 一个字节都不写（它只承载协议帧）。
+    if let Some(code) = crate::cmd::setup::preflight_or_report(&http, &http_base).await {
+        return Ok(code);
+    }
+
+    // 4. WS connect.
     let mut gateway = GatewayClient::connect(&ws_url, api_key_ref)
         .await
         .map_err(|e| {
@@ -681,11 +692,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");
 
-    // 3. HTTP client.
-    let http = GatewayApiClient::new(http_base, api_key_ref)
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
-
-    // 4. Create, adopt, or resume the session.
+    // 5. Create, adopt, or resume the session.
     //
     // 三条路径的语义差：`-r/--resume` 恢复既有会话（覆盖按 resume 子集）；
     // `--session-id` 是 create-or-adopt（同一个端点两种结果，覆盖语义由网关
@@ -749,14 +756,14 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         resp.session_id
     };
 
-    // 5. HTTP subscribe.
+    // 6. HTTP subscribe.
     http.subscribe(&session_id, &client_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to subscribe to session: {e}"))?;
 
     tracing::info!("subscribed to session events");
 
-    // 6. Build renderer. stdout 只有一个出口：renderer 的协议帧与 stdin pump 的
+    // 7. Build renderer. stdout 只有一个出口：renderer 的协议帧与 stdin pump 的
     //    control 应答共享同一个 sink（见 `stdout::StdoutSink`）。
     let out = Arc::new(StdoutSink::stdout());
     let mut renderer = StdioRenderer::new(
@@ -767,7 +774,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         args.include_partial_messages,
     );
 
-    // 7. stdin pump：stream-json 输入模式下 stdin 是常驻通道——turn 期间仍要消费
+    // 8. stdin pump：stream-json 输入模式下 stdin 是常驻通道——turn 期间仍要消费
     //    control_request（interrupt 等）并应答（编排器在 await 它们）；常驻模式下
     //    每条 `user` 消息都要投递给驱动侧转发。
     let resident = args.is_resident();
@@ -787,7 +794,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         }));
     }
 
-    // 8. Resolve prompt: CLI arg > stdin (stream-json) > error.
+    // 9. Resolve prompt: CLI arg > stdin (stream-json) > error.
     let prompt = if !args.prompt.is_empty() {
         args.prompt.clone()
     } else if let Some(pump) = pump.as_mut() {
@@ -798,7 +805,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         anyhow::bail!("no prompt provided");
     };
 
-    // 9. Send prompt（首轮）。
+    // 10. Send prompt（首轮）。
     //
     // 常驻模式下空文本 prompt 不发：后端对空 content 不起轮（`run_turn` 直接
     // return、不发任何终态帧），发了就等于挂在这里等一个永不发生的终态。跳过它，
@@ -824,7 +831,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         tracing::info!("prompt sent, entering event loop");
     }
 
-    // 10. Event loop。区别只在退出裁决：
+    // 11. Event loop。区别只在退出裁决：
     //     - 一次性：终态帧结束进程（既有语义）；
     //     - 常驻（`--input-format stream-json` + `--output-format stream-json`）：
     //       终态帧只结束当前轮，EOF 收尾（空闲置退 / 在途轮等终态）。
@@ -845,7 +852,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         Ok(run_one_shot_loop(&mut gateway, &mut renderer).await)
     };
 
-    // 11. 收尾：通知 stdin pump 停下（有界等待进行中的应答写完——它可能恰好
+    // 12. 收尾：通知 stdin pump 停下（有界等待进行中的应答写完——它可能恰好
     //     跨过轮结束，直接 abort 会让编排器收不到响应）。
     if let Some(pump) = pump.take() {
         pump.finish().await;
