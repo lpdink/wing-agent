@@ -8,9 +8,16 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
+use ratatui::style::Style;
 use wing_api_client::models::{AgentsResponse, ModelDetail, ModelsResponse, ToolsListResponse};
 
+use crate::config::AppConfig;
+use crate::config::ThemePalette;
+use crate::render::table::ColumnKind;
+use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
+
 use super::common;
+use super::common::TableOutput;
 
 // ============================================================
 // wing models
@@ -129,23 +136,50 @@ fn print_tools(resp: &ToolsListResponse) {
         println!("No tools registered.");
         return;
     }
+    let palette = ThemePalette::from_config(&AppConfig::load().colors);
+    let out = TableOutput::detect();
+    print!("{}", format_tools_table(resp, &palette, &out));
+}
 
-    let name_w = 25;
-    let ns_w = 15;
+/// Render the `wing tools` table through the shared table engine — same skin
+/// and width policy as `wing ps` and the TUI markdown tables.
+fn format_tools_table(
+    resp: &ToolsListResponse,
+    palette: &ThemePalette,
+    out: &TableOutput,
+) -> String {
+    let columns = vec![
+        PlainColumn::new("LLM NAME", ColumnKind::Compact),
+        PlainColumn::new("NAMESPACE", ColumnKind::Compact),
+        PlainColumn::capped("DESCRIPTION", ColumnKind::Narrative, 72),
+    ];
+    let rows = resp
+        .tools
+        .iter()
+        .map(|tool| {
+            vec![
+                PlainCell::styled(tool.llm_name.clone(), Style::new().fg(palette.text)),
+                PlainCell::styled(tool.namespace.clone(), Style::new().fg(palette.tool_result)),
+                PlainCell::styled(
+                    description_cell(&tool.description),
+                    Style::new().fg(palette.dim),
+                ),
+            ]
+        })
+        .collect();
+    let table = PlainTable { columns, rows };
+    common::render_table(&table, palette, out)
+}
 
-    println!("{:<name_w$} {:<ns_w$} DESCRIPTION", "LLM NAME", "NAMESPACE");
-    println!("{}", "-".repeat(name_w + ns_w + 40));
-
-    for tool in &resp.tools {
-        let desc: String = if tool.description.is_empty() {
-            "-".to_string()
-        } else {
-            common::truncate_chars(&tool.description, 40)
-        };
-        println!(
-            "{:<name_w$} {:<ns_w$} {desc}",
-            tool.llm_name, tool.namespace
-        );
+/// Tool descriptions are free text (often multi-line markdown blurbs): flatten
+/// to one line and collapse whitespace; an empty description renders as `-`.
+fn description_cell(desc: &str) -> String {
+    let flat = common::single_line(desc);
+    let collapsed = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        "-".to_string()
+    } else {
+        collapsed
     }
 }
 
@@ -195,13 +229,67 @@ fn print_agents(resp: &AgentsResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wing_api_client::models::{ModelDetail, ProviderModels};
+    use wing_api_client::models::{ModelDetail, ProviderModels, ToolInfo};
 
     fn group(provider: &str, details: Vec<ModelDetail>) -> ProviderModels {
         ProviderModels {
             provider: provider.into(),
             models: details,
         }
+    }
+
+    // ── wing tools（共享表格引擎）─────────────────────────────────
+
+    fn tool(llm_name: &str, namespace: &str, description: &str) -> ToolInfo {
+        ToolInfo {
+            ref_field: format!("{namespace}.{llm_name}"),
+            namespace: namespace.into(),
+            name: llm_name.into(),
+            llm_name: llm_name.into(),
+            description: description.into(),
+        }
+    }
+
+    fn tools_out() -> TableOutput {
+        TableOutput {
+            width: 100,
+            color: false,
+        }
+    }
+
+    #[test]
+    fn tools_table_is_framed_and_aligned() {
+        let resp = ToolsListResponse {
+            tools: vec![
+                tool("Bash", "core", "Execute a shell command"),
+                tool(
+                    "mcp__github__create_issue",
+                    "mcp",
+                    "Create a GitHub issue.\nSecond line of the blurb.",
+                ),
+            ],
+        };
+        let table = format_tools_table(&resp, &ThemePalette::default(), &tools_out());
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 7, "{table}");
+        assert!(lines[0].starts_with('┏'), "{table}");
+        assert!(lines[1].contains("LLM NAME") && lines[1].contains("DESCRIPTION"));
+        // 每行等宽（显示列记账）。
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| unicode_width::UnicodeWidthStr::width(*l))
+            .collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        assert!(widths[0] <= 100, "{widths:?}");
+        // 多行 description 被压平，不破格。
+        assert!(lines[5].contains("Create a GitHub issue. Second line of the blurb."));
+    }
+
+    #[test]
+    fn description_cell_flattens_and_falls_back() {
+        assert_eq!(description_cell(""), "-");
+        assert_eq!(description_cell("   "), "-");
+        assert_eq!(description_cell("a\n\tb  c"), "a b c");
     }
 
     fn detail(

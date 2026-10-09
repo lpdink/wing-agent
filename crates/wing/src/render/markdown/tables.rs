@@ -440,6 +440,46 @@ mod tests {
         lines.iter().map(|l| l.to_plain()).collect()
     }
 
+    /// 跨前端对账：同一份数据、同样的预算，markdown 渲染与 plain 渲染（CLI）
+    /// 的纯文本必须逐字符相同——两个前端共用一份皮肤与宽度引擎，这条测试把
+    /// 「视觉同源」从口头承诺钉成事实。
+    #[test]
+    fn markdown_and_plain_render_the_same_grid() {
+        use crate::render::table::plain::{self, PlainCell, PlainColumn, PlainOpts, PlainTable};
+
+        let table = TableBuffer {
+            headers: vec![make_line("A"), make_line("Item")],
+            rows: vec![
+                vec![make_line("1"), make_line("first")],
+                vec![make_line("2"), make_line("second")],
+            ],
+            ..Default::default()
+        };
+        let md_lines = plain_lines(&render_table(&table, Style::new(), Style::new(), Some(60)));
+
+        let plain_table = PlainTable {
+            columns: vec![
+                PlainColumn::new("A", crate::render::table::ColumnKind::Compact),
+                PlainColumn::new("Item", crate::render::table::ColumnKind::Compact),
+            ],
+            rows: vec![
+                vec![PlainCell::plain("1"), PlainCell::plain("first")],
+                vec![PlainCell::plain("2"), PlainCell::plain("second")],
+            ],
+        };
+        let plain_lines = plain::render(
+            &plain_table,
+            &PlainOpts {
+                width: 60,
+                color: false,
+                frame: Style::new(),
+                header: Style::new(),
+            },
+        );
+
+        assert_eq!(md_lines, plain_lines);
+    }
+
     #[test]
     fn test_wrap_cell_short() {
         let cell = make_line("short");

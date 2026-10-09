@@ -5,8 +5,65 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use wing_api_client::GatewayClient as GatewayApiClient;
+
+/// Output environment for human-facing tables.
+///
+/// `width` is the terminal width when stdout is a TTY, 120 otherwise (the
+/// width the hand-laid tables used to be cut for, kept for pipes so output
+/// stays deterministic); `color` is off when stdout is not a TTY, when
+/// `NO_COLOR` is set (the standard opt-out) or when the terminal declares
+/// itself dumb.
+pub struct TableOutput {
+    pub width: usize,
+    pub color: bool,
+}
+
+impl TableOutput {
+    pub fn detect() -> Self {
+        let dumb = std::env::var_os("TERM").is_some_and(|t| t == "dumb");
+        Self {
+            width: crossterm::terminal::size().map_or(120, |(w, _)| w as usize),
+            color: std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none()
+                && !dumb,
+        }
+    }
+}
+
+/// Flatten a display string to a single line: control whitespace (hard
+/// newlines included) becomes a space.
+///
+/// Free text (session names, tool descriptions) may carry newlines; a raw one
+/// breaks a tabular row in two.
+pub fn single_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Render a plain table through the shared engine with the standard CLI inks
+/// (dim frame, bold header), sized to `out`. Trailing newline included.
+pub fn render_table(
+    table: &crate::render::table::plain::PlainTable,
+    palette: &crate::config::ThemePalette,
+    out: &TableOutput,
+) -> String {
+    use ratatui::style::Style;
+
+    let opts = crate::render::table::plain::PlainOpts {
+        width: out.width,
+        color: out.color,
+        frame: Style::new().fg(palette.dim),
+        header: Style::new().fg(palette.text).bold(),
+    };
+    let mut rendered = crate::render::table::plain::render(table, &opts).join("\n");
+    rendered.push('\n');
+    rendered
+}
 
 /// Ensure the gateway is running, returning `(host, port)`.
 ///
@@ -43,7 +100,7 @@ pub fn print_json<T: serde::Serialize>(value: &T) {
 }
 
 /// Print a value as compact JSON to stdout (single line, for agent `jq` piping).
-pub fn print_json_compact<T: serde::Serialize>(value: &T) {
+pub fn print_json_compact<T: serde::Serialize + ?Sized>(value: &T) {
     match serde_json::to_string(value) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("error: failed to serialize JSON: {e}"),
@@ -127,5 +184,14 @@ mod tests {
         assert_eq!(missing_tags(&requested, &actual), vec!["executor"]);
         assert!(missing_tags(&requested, &requested).is_empty());
         assert_eq!(missing_tags(&requested, &[]).len(), 2);
+    }
+
+    #[test]
+    fn single_line_flattens_control_whitespace() {
+        // 硬换行 / tab / CR 都是行结构，进表格前必须压成空格。
+        assert_eq!(single_line("first\nsecond"), "first second");
+        assert_eq!(single_line("a\tb\rc"), "a b c");
+        // 普通文本原样（不折叠已有空格）。
+        assert_eq!(single_line("keep  the  spaces"), "keep  the  spaces");
     }
 }
