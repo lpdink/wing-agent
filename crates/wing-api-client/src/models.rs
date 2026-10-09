@@ -1069,9 +1069,9 @@ impl SettingNode {
 /// 这是 §5.2 文法的 Rust 侧实现（Python 侧是 `document.py` 的同名函数）：catalog 寻址
 /// （[`SettingNode::node_at`]）与前端路径工具共用它，避免第二份实现漂移。
 ///
-/// 空串是合法路径（= 根自己）。`[i]` 必须是非负十进制整数（以 `usize` 解析，超出 `usize`
-/// 即非法——注意这与"下标越界"无关，见 [`SettingNode::node_at`]）；`[]` 是元素模板
-/// （[`PathStep::Element`]）。
+/// 空串是合法路径（= 根自己）。`[i]` 必须是**非负十进制整数**：没有符号位（`a[+1]` / `a[-1]`
+/// 都非法），且超出 `usize` 即非法——注意这与"下标越界"无关，见 [`SettingNode::node_at`]；
+/// `[]` 是元素模板（[`PathStep::Element`]）。
 pub fn parse_path(path: &str) -> Option<Vec<PathStep>> {
     if path.is_empty() {
         return Some(Vec::new());
@@ -1092,7 +1092,15 @@ pub fn parse_path(path: &str) -> Option<Vec<PathStep>> {
         match index {
             None => {}
             Some("") => steps.push(PathStep::Element),
-            Some(raw) => steps.push(PathStep::Index(raw.parse().ok()?)),
+            Some(raw) => {
+                // §5.2 的下标是**非负十进制整数**，没有符号位：`usize::from_str` 会接受
+                // 前导 `+`（`a[+1]`），而 Python 侧按 `str.isdigit()` 会拒 —— 两边同口径
+                // （AD6）。溢出仍由 `parse` 的 `Err` 兜住。
+                if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                steps.push(PathStep::Index(raw.parse().ok()?));
+            }
         }
     }
     Some(steps)
@@ -1509,7 +1517,7 @@ mod settings_tests {
         "version": "0.4.1",
         "config_path": "/home/u/.wing/core/config.yaml",
         "root": {
-            "key": "config", "path": "", "title": "Wing 配置", "doc": "网关的全部配置。",
+            "key": "config", "path": "config", "title": "Wing 配置", "doc": "网关的全部配置。",
             "kind": "object",
             "children": [
                 {
@@ -1723,7 +1731,10 @@ mod settings_tests {
         let root = &resp.root;
         assert_eq!(root.kind, SettingKind::Object);
         assert_eq!(root.key, "config");
-        assert_eq!(root.path, "");
+        assert_eq!(
+            root.path, "config",
+            "P2：真实网关的根节点 key == path == \"config\""
+        );
         assert_eq!(root.display_label(), "Wing 配置");
         assert!(root.is_structural());
 
@@ -1923,6 +1934,8 @@ mod settings_tests {
             "a[0",
             "a[0]x",
             "a[]]",
+            "a[+1]",
+            "a[-1]",
             "1a",
             "a-b",
             "a[999999999999999999999999]",
@@ -1949,10 +1962,15 @@ mod settings_tests {
             root.node_at("gateway.auth.keys[].name").unwrap().path,
             "gateway.auth.keys[].name"
         );
-        // 根名是可选的路径前缀（§9 没规定根的 key/path 拼写，两种写法都得能寻址）
+        // 根名是可选的路径前缀（P2：根节点的 key == path == "config"，两种写法都得能寻址）
         assert_eq!(
             root.node_at("config.gateway.port").unwrap().path,
             "gateway.port"
+        );
+        assert_eq!(
+            root.node_at("gateway.port").unwrap().path,
+            "gateway.port",
+            "无前缀同样能寻址"
         );
         assert_eq!(root.node_at("config").unwrap().key, "config");
         // 空路径 = 根自己
