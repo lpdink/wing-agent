@@ -33,9 +33,23 @@
 //! | `?` | 帮助浮层（`?` 或 `Esc` 关闭） |
 //! | `Tab` | 切根（Gateway ↔ Interface，目标根自动展开） |
 //! | `R` | 重新载入（丢弃本地改动；有脏改动先二次确认） |
-//! | `Ctrl+R` | 立即重启网关（有脏改动先二次确认；轮次中是否允许由 App 判定） |
+//! | `Ctrl+R` | 立即重启网关：**仅当有待重启的变更时**（上次保存回执的 `restart_required` 非空，键位栏也只在那时显示它）；有脏改动先二次确认；轮次中是否允许由 App 判定 |
 //! | `Esc` | 见下面的阶梯 |
 //! | `Ctrl+C` | **面板不吞**（调用方必须先判 `is_quit_key`，双击退出是应用保留手势） |
+//!
+//! ## 键位（问题清单视图）
+//!
+//! `↑` `↓` / `PageUp` `PageDown` / `Home` `End` 选择；`Enter` 或 `→` 跳到该字段；
+//! `←` / `Esc` / `p` 返回树；`/` 切回树并进入搜索；`s` 保存；`Tab` 切根；
+//! `R` 重新载入（与树视图同一条路径）；`Ctrl+R` 立即重启；`?` 帮助。
+//!
+//! ## 密文契约（**红线**）
+//!
+//! 密文叶子在 `get` 响应里恒为 `null`（`secrets` 平行表给出 set / empty / absent 三态）：
+//! **`null` = 保留磁盘上的现值，保存时必须原样回传**（design.md §7.5）。
+//! 丢掉这个键 = 清空密钥 = 用户下一次调用 401 —— 因此面板从不删除用户没动过的密文键，
+//! 编辑器也只在用户真的输入了值时改写它；这条契约由
+//! `tests::unedited_secret_null_is_echoed_back_in_the_save_document` 钉住。
 //!
 //! ## 模态性
 //!
@@ -341,6 +355,11 @@ impl SettingsPanel {
             if response.ok {
                 self.doc.mark_baseline(Root::Gateway);
                 self.stale = false;
+                // 保存让网关从降级转入正常模式：标题栏的 `setup mode` 标记跟着熄掉
+                // （否则要等 10/11 重建面板）。
+                if response.setup_mode_exited {
+                    self.setup_mode = false;
+                }
             } else {
                 self.view = View::Problems;
                 self.problem_cursor = 0;
@@ -525,6 +544,10 @@ impl SettingsPanel {
         parts.push("/ 搜索".into());
         if self.interface_catalog.is_some() {
             parts.push("Tab 切根".into());
+        }
+        if !self.restart_required.is_empty() {
+            // AD1：只有真的有 restart 类变更时才挂这个键。
+            parts.push("Ctrl+R 立即重启".into());
         }
         parts.push("? 帮助".into());
         parts.push(if self.dirty_count() > 0 {
@@ -803,11 +826,22 @@ impl SettingsPanel {
     }
 
     fn handle_problems_key(&mut self, key: KeyEvent) -> SettingsAction {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('p') => {
+            KeyCode::Esc | KeyCode::Char('p') | KeyCode::Left => {
                 self.view = View::Tree;
                 SettingsAction::None
             }
+            KeyCode::Right => {
+                self.jump_to_problem();
+                SettingsAction::None
+            }
+            KeyCode::Tab => {
+                self.switch_root();
+                SettingsAction::None
+            }
+            KeyCode::Char('R') if !ctrl => self.discard_then(DiscardIntent::Reload),
+            KeyCode::Char('r' | 'R') if ctrl => self.restart_action(),
             KeyCode::Char('/') => {
                 self.view = View::Tree;
                 self.enter_search();
@@ -926,7 +960,7 @@ impl SettingsPanel {
             KeyCode::Char('d') if !ctrl => self.delete_action(),
             KeyCode::Char('J') if !ctrl => self.move_item_action(1),
             KeyCode::Char('K') if !ctrl => self.move_item_action(-1),
-            KeyCode::Char('r' | 'R') if ctrl => self.discard_then(DiscardIntent::Restart),
+            KeyCode::Char('r' | 'R') if ctrl => self.restart_action(),
             KeyCode::Char('R') => self.discard_then(DiscardIntent::Reload),
             KeyCode::Char('r') => self.reset_action(),
             KeyCode::Char('s') if !ctrl => self.save_action(),
@@ -1461,6 +1495,15 @@ impl SettingsPanel {
         }
     }
 
+    /// `Ctrl+R`：只在**真的有待重启的变更**（上次保存回执的 `restart_required` 非空）时接受。
+    /// 没有 → 无操作 —— 键位栏同样不显示它（AD1），免得教用户按一个没有意义的键。
+    fn restart_action(&mut self) -> SettingsAction {
+        if self.restart_required.is_empty() {
+            return SettingsAction::None;
+        }
+        self.discard_then(DiscardIntent::Restart)
+    }
+
     fn discard_then(&mut self, intent: DiscardIntent) -> SettingsAction {
         if self.dirty_count() > 0 {
             self.pending = Some(Pending::Discard { intent });
@@ -1497,8 +1540,18 @@ impl SettingsPanel {
                 };
                 match result {
                     Ok(value) => {
+                        // AD3：「打开 → 不改 → Enter」= 无操作（不写入、不标脏）——
+                        // 否则在一个「缺席即默认」的字段上连按两次 Enter 会把默认值物化。
+                        let unchanged = self
+                            .edit
+                            .as_ref()
+                            .is_some_and(|edit| edit.commits_unchanged(&value));
                         self.edit = None;
-                        self.write_value(root, &path, value, Some((root, path.clone())))
+                        if unchanged {
+                            SettingsAction::None
+                        } else {
+                            self.write_value(root, &path, value, Some((root, path.clone())))
+                        }
                     }
                     Err(message) => {
                         if let Some(edit) = self.edit.as_mut() {

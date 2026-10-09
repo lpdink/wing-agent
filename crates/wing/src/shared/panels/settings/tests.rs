@@ -11,6 +11,8 @@ use crossterm::event::KeyModifiers;
 use serde_json::Value;
 use serde_json::json;
 use wing_api_client::models::ApplyScope;
+use wing_api_client::models::SecretPresence;
+use wing_api_client::models::SecretState;
 use wing_api_client::models::SettingProblem;
 use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
@@ -1658,9 +1660,21 @@ fn reload_when_clean_emits_reload_and_when_dirty_asks_first() {
 }
 
 #[test]
-fn ctrl_r_emits_restart_and_asks_when_dirty() {
+fn ctrl_r_is_accepted_only_when_a_restart_is_pending() {
+    // AD1：没有待重启的变更 → 无操作（键位栏也不显示这个键）。
     let mut panel = panel();
+    assert_eq!(press(&mut panel, ctrl('r')), SettingsAction::None);
+    assert!(!panel.footer_hint().contains("Ctrl+R"));
+    // 一次带 restart_required 的保存回执之后，键才生效、才出现在键位栏。
+    mark_restart_pending(&mut panel);
+    assert!(panel.footer_hint().contains("Ctrl+R 立即重启"));
     assert_eq!(press(&mut panel, ctrl('r')), SettingsAction::RestartGateway);
+}
+
+#[test]
+fn ctrl_r_asks_before_discarding_dirty_changes() {
+    let mut panel = panel();
+    mark_restart_pending(&mut panel);
     edit_port(&mut panel, "8080");
     assert_eq!(press(&mut panel, ctrl('r')), SettingsAction::None);
     assert_eq!(
@@ -1671,6 +1685,16 @@ fn ctrl_r_emits_restart_and_asks_when_dirty() {
         press_code(&mut panel, KeyCode::Enter),
         SettingsAction::RestartGateway
     );
+}
+
+/// 灌一次「带 restart_required」的保存回执（Ctrl+R 的前提）。
+fn mark_restart_pending(panel: &mut SettingsPanel) {
+    let mut response = ok_response(Vec::new());
+    response.restart_required = vec!["gateway.port".into()];
+    panel.apply_save(super::SaveOutcome {
+        gateway: Some(response),
+        interface_ok: None,
+    });
 }
 
 #[test]
@@ -1896,8 +1920,9 @@ fn every_settings_action_variant_is_produced_by_keys() {
     let mut reload = panel();
     seen.push(press_code(&mut reload, KeyCode::Char('R')));
 
-    // RestartGateway：干净面板按 Ctrl+R。
+    // RestartGateway：有待重启的变更时按 Ctrl+R。
     let mut restart = panel();
+    mark_restart_pending(&mut restart);
     seen.push(press(&mut restart, ctrl('r')));
 
     // Close{discard:true}：脏 + Esc + Enter。
@@ -2182,4 +2207,243 @@ fn problems_and_add_are_consistent_for_a_zero_item_list() {
             .iter()
             .all(|problem| problem.path.as_deref() != Some("providers"))
     );
+}
+
+// ── 返修 r1：B1 密文 null 红线 / S1 问题清单键位 / AD3 编辑器无操作 / N5 setup 标记 ──
+
+/// `get` 快照：`api_key` 为 `null`（密文「保留」态）+ secrets 表说磁盘上它是 set。
+fn state_with_secret_set() -> SettingsGetResponse {
+    let mut state = state();
+    state.secrets.insert(
+        "providers[0].api_key".to_string(),
+        SecretState {
+            state: SecretPresence::Set,
+            hint: Some("ab12".into()),
+        },
+    );
+    state
+}
+
+#[test]
+fn unedited_secret_null_is_echoed_back_in_the_save_document() {
+    // design.md §7.5 的契约红线：`null` = 保留磁盘现值，保存时必须**原样回传**。
+    // 丢掉这个键 = 清空密钥 = 用户下一次调用 401。
+    let mut panel = SettingsPanel::new(&schema(), state_with_secret_set(), None, View::Tree);
+    goto(&mut panel, "providers");
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "providers[0]");
+    press_code(&mut panel, KeyCode::Right);
+    assert_eq!(
+        row(&panel, "providers[0].api_key").value,
+        ValueText::Masked {
+            hint: Some("ab12".into())
+        },
+        "行上按 secrets 表显示掩码"
+    );
+    edit_port(&mut panel, "8080");
+    let action = press_code(&mut panel, KeyCode::Char('s'));
+    let SettingsAction::Save { gateway, .. } = action else {
+        panic!("expected Save, got {action:?}")
+    };
+    let provider = gateway["providers"][0]
+        .as_object()
+        .expect("provider 是对象");
+    assert!(
+        provider.contains_key("api_key"),
+        "契约红线：原样回传 null（丢键 = 清空密钥）"
+    );
+    assert_eq!(provider["api_key"], Value::Null);
+    assert!(
+        !panel.is_dirty(super::Root::Gateway, "providers[0].api_key"),
+        "没动过的密文不算脏"
+    );
+    assert_eq!(
+        gateway["gateway"]["port"],
+        json!(8080),
+        "同一次保存带上真正的改动"
+    );
+}
+
+#[test]
+fn an_absent_secret_stays_absent_in_the_save_document() {
+    // 文档里根本没有 `api_key` → 保存载荷里也不许出现（不制造显式 null）。
+    let gateway_doc = json!({
+        "providers": [{"name": "p", "base_url": "u", "models": ["m"]}],
+        "gateway": {"port": 1}
+    });
+    let mut panel = panel_with(gateway_doc);
+    edit_port(&mut panel, "8080");
+    let action = press_code(&mut panel, KeyCode::Char('s'));
+    let SettingsAction::Save { gateway, .. } = action else {
+        panic!("expected Save, got {action:?}")
+    };
+    let provider = gateway["providers"][0]
+        .as_object()
+        .expect("provider 是对象");
+    assert!(
+        !provider.contains_key("api_key"),
+        "缺席保持缺席：不物化成显式 null（两种语义不同）"
+    );
+}
+
+#[test]
+fn problems_view_left_returns_to_the_tree() {
+    let mut panel = SettingsPanel::new(&schema(), state(), None, View::Problems);
+    assert_eq!(press_code(&mut panel, KeyCode::Left), SettingsAction::None);
+    assert_eq!(panel.view(), View::Tree);
+}
+
+#[test]
+fn problems_view_right_jumps_to_the_row_like_enter() {
+    let backend = vec![SettingProblem {
+        path: Some("providers[0].api_key".into()),
+        kind: "missing_required".into(),
+        message: "必填项未设置".into(),
+        hint: None,
+    }];
+    let mut panel = SettingsPanel::new(
+        &schema(),
+        state_with(fx::sample_gateway_doc(), backend),
+        None,
+        View::Problems,
+    );
+    press_code(&mut panel, KeyCode::Right);
+    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(cursor_path(&panel), "providers[0].api_key");
+}
+
+#[test]
+fn problems_view_tab_switches_the_root() {
+    let mut panel =
+        SettingsPanel::new(&schema(), state(), Some(interface_source()), View::Problems);
+    assert_eq!(panel.rows()[panel.cursor()].root, super::Root::Gateway);
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(panel.rows()[panel.cursor()].root, super::Root::Interface);
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(panel.rows()[panel.cursor()].root, super::Root::Gateway);
+}
+
+#[test]
+fn problems_view_r_reloads_and_ctrl_r_restarts_like_the_tree() {
+    let mut problems = SettingsPanel::new(&schema(), state(), None, View::Problems);
+    assert_eq!(
+        press_code(&mut problems, KeyCode::Char('R')),
+        SettingsAction::Reload
+    );
+    assert_eq!(problems.view(), View::Problems, "重载不切视图");
+    mark_restart_pending(&mut problems);
+    assert_eq!(
+        press(&mut problems, ctrl('r')),
+        SettingsAction::RestartGateway
+    );
+    // 脏改动时与树视图同一条路径：先放弃确认。
+    let mut dirty = panel();
+    edit_port(&mut dirty, "8080");
+    press_code(&mut dirty, KeyCode::Char('p'));
+    assert_eq!(dirty.view(), View::Problems);
+    assert_eq!(
+        press_code(&mut dirty, KeyCode::Char('R')),
+        SettingsAction::None
+    );
+    assert!(dirty.prompt().is_some(), "脏改动先确认");
+    press_code(&mut dirty, KeyCode::Esc);
+    assert!(dirty.prompt().is_none());
+    assert_eq!(dirty.view(), View::Problems);
+}
+
+#[test]
+fn submitting_the_untouched_buffer_is_a_no_op() {
+    // AD3：打开 → 不改 → Enter 必须什么都不做（不写入、不标脏）。
+    let mut panel = panel();
+    goto(&mut panel, "gateway");
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "gateway.port");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(
+        panel.edit_state().unwrap().visible_buffer(),
+        "32523",
+        "预填有效展示值"
+    );
+    assert_eq!(press_code(&mut panel, KeyCode::Enter), SettingsAction::None);
+    assert!(panel.edit_state().is_none(), "编辑器照常关闭");
+    assert_eq!(panel.dirty_count(), 0, "没改就不脏");
+}
+
+#[test]
+fn submitting_the_default_prefill_does_not_pin_it() {
+    // 缺席 + 有默认 → 预填默认值；直接 Enter 不得把它物化成显式覆盖。
+    let mut panel = panel_with(json!({}));
+    goto(&mut panel, "gateway");
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "gateway.port");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.edit_state().unwrap().visible_buffer(), "0");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.dirty_count(), 0);
+    assert_eq!(
+        row(&panel, "gateway.port").value,
+        ValueText::Default("0".into()),
+        "仍是缺席态（跟随默认），不是显式 0"
+    );
+}
+
+#[test]
+fn editing_the_buffer_really_does_write() {
+    // AD3 的反面：真的改了就必须写（免得把 no-op 误扩成「永不写入」）。
+    let mut panel = panel_with(json!({}));
+    goto(&mut panel, "gateway");
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "gateway.port");
+    press_code(&mut panel, KeyCode::Enter);
+    type_text(&mut panel, "7");
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.is_dirty(super::Root::Gateway, "gateway.port"));
+    assert_eq!(
+        row(&panel, "gateway.port").value,
+        ValueText::Text("7".into()),
+        "缓冲 07 → int 7 → 写回并展示为 7"
+    );
+}
+
+#[test]
+fn unchanged_nullable_field_does_not_write_an_explicit_null() {
+    let mut field = fx::str_field("theme");
+    field.nullable = true;
+    let schema = SettingsSchemaResponse {
+        version: "0".into(),
+        root: fx::root(vec![field]),
+        config_path: "p".into(),
+    };
+    let mut panel =
+        SettingsPanel::new(&schema, state_with(json!({}), Vec::new()), None, View::Tree);
+    goto(&mut panel, "theme");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.edit_state().unwrap().visible_buffer(), "");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.dirty_count(), 0, "空提交 = 打开时的值 → 无操作");
+    assert_eq!(row(&panel, "theme").value, ValueText::None, "字段仍然缺席");
+}
+
+#[test]
+fn a_successful_save_that_exits_setup_mode_clears_the_flag() {
+    let mut setup = state();
+    setup.setup_mode = true;
+    let mut panel = SettingsPanel::new(&schema(), setup, None, View::Tree);
+    assert!(panel.setup_mode());
+    let mut response = ok_response(Vec::new());
+    response.setup_mode_exited = true;
+    panel.apply_save(super::SaveOutcome {
+        gateway: Some(response),
+        interface_ok: None,
+    });
+    assert!(!panel.setup_mode(), "保存让网关转入正常模式，标记跟着熄掉");
+    // 不含 exited 的回执不动这个标记。
+    let mut setup = state();
+    setup.setup_mode = true;
+    let mut panel = SettingsPanel::new(&schema(), setup, None, View::Tree);
+    panel.apply_save(super::SaveOutcome {
+        gateway: Some(ok_response(Vec::new())),
+        interface_ok: None,
+    });
+    assert!(panel.setup_mode());
 }

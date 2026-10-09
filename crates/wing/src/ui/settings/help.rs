@@ -41,7 +41,8 @@ const TABLE: &[HelpRow] = &[
     HelpRow::Key("p", "问题清单（再按一次返回树）"),
     HelpRow::Key("Tab", "切根 Gateway ↔ Interface"),
     HelpRow::Key("R", "重新载入（丢弃本地改动）"),
-    HelpRow::Key("Ctrl+R", "立即重启网关"),
+    // AD1：Ctrl+R 只在有待重启的变更时（`restart_required` 非空）生效并出现在键位栏。
+    HelpRow::Key("Ctrl+R", "立即重启网关（有待重启的变更时）"),
     HelpRow::Key("PgUp PgDn", "翻页；Home End 跳首尾"),
     HelpRow::Key("?", "帮助（再按 ? 或 Esc 关闭）"),
     HelpRow::Key("Ctrl+C", "双击退出 TUI（面板不吞）"),
@@ -58,7 +59,7 @@ const TABLE: &[HelpRow] = &[
     HelpRow::Key("← →", "移动光标；Home End 行首行尾"),
     HelpRow::Key("Bksp Del", "删除字符；Ctrl+U 清空缓冲"),
     HelpRow::Section("问题清单 / 选择项"),
-    HelpRow::Key("↑ ↓", "选择；Enter 跳到该字段 / 选中"),
+    HelpRow::Key("↑ ↓", "选择；Enter / → 跳到该字段 · Space 选中"),
     HelpRow::Key("← Esc", "返回（不选）"),
 ];
 

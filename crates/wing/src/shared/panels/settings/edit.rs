@@ -82,6 +82,8 @@ pub struct EditState {
     error: Option<String>,
     required: bool,
     constraints: Constraints,
+    /// 打开编辑器时缓冲所代表的值（校验通过才有）——AD3 的「无操作」判据。
+    initial_value: Option<Value>,
 }
 
 impl EditState {
@@ -100,6 +102,9 @@ impl EditState {
             initial
         };
         let cursor = buffer.chars().count();
+        // AD3：记住「打开时展示的值」。提交值与之相同 ⇒ 无操作（不写入、不标脏），
+        // 于是「打开 → 不改 → Enter」不会把声明默认值物化成显式覆盖。
+        let initial_value = validate_buffer(kind, &buffer, required, &constraints).ok();
         Self {
             root,
             path,
@@ -109,7 +114,13 @@ impl EditState {
             error: None,
             required,
             constraints,
+            initial_value,
         }
+    }
+
+    /// AD3：这次提交与「打开时展示的值」等价吗（等价 = 该次提交视为无操作）。
+    pub(crate) fn commits_unchanged(&self, committed: &Value) -> bool {
+        self.initial_value.as_ref() == Some(committed)
     }
 
     // ── 只读访问器（08 渲染） ─────────────────────────────────
@@ -241,102 +252,111 @@ impl EditState {
 
     /// 提交前的本地校验：`Ok` = 写进文档的 JSON 值，`Err` = 留在编辑器里的原因。
     pub(crate) fn validate(&self) -> Result<Value, String> {
-        match self.kind {
-            ScalarKind::Secret => Ok(Value::String(self.buffer.clone())),
-            ScalarKind::Json => {
-                let parsed: Value = serde_json::from_str(self.buffer.trim())
-                    .map_err(|e| format!("JSON 解析失败：{e}"))?;
-                if parsed.is_object() {
-                    Ok(parsed)
-                } else {
-                    Err("需要一个 JSON 对象".into())
-                }
-            }
-            ScalarKind::Int => {
-                let trimmed = self.buffer.trim();
-                let number: i64 = trimmed.parse().map_err(|_| "需要一个整数".to_string())?;
-                self.check_range(number as f64)?;
-                Ok(Value::from(number))
-            }
-            ScalarKind::Float => {
-                let trimmed = self.buffer.trim();
-                let number: f64 = trimmed.parse().map_err(|_| "需要一个数字".to_string())?;
-                if !number.is_finite() {
-                    return Err("需要一个数字".into());
-                }
-                self.check_range(number)?;
-                Ok(Value::from(number))
-            }
-            ScalarKind::Str => {
-                let trimmed = self.buffer.trim();
-                if self.constraints.nullable && matches!(trimmed, "" | "null" | "~") {
-                    return Ok(Value::Null);
-                }
-                if self.required && trimmed.is_empty() {
-                    return Err("必填".into());
-                }
-                if let Some(min_length) = self.constraints.min_length {
-                    let len = self.buffer.chars().count() as i64;
-                    if len < min_length {
-                        return Err(format!("至少 {min_length} 个字符"));
-                    }
-                }
-                // 不支持的构造返回 None：跳过本地校验（后端是权威）。
-                if let Some(pattern) = &self.constraints.pattern
-                    && pattern_matches(pattern, &self.buffer) == Some(false)
-                {
-                    return Err(format!("格式应为 {pattern}"));
-                }
-                Ok(Value::String(self.buffer.clone()))
+        validate_buffer(self.kind, &self.buffer, self.required, &self.constraints)
+    }
+}
+
+/// 本地校验的实体（`EditState::open` 的初始值判定与 `EditState::validate` 共用同一份）。
+fn validate_buffer(
+    kind: ScalarKind,
+    buffer: &str,
+    required: bool,
+    constraints: &Constraints,
+) -> Result<Value, String> {
+    match kind {
+        ScalarKind::Secret => Ok(Value::String(buffer.to_string())),
+        ScalarKind::Json => {
+            let parsed: Value =
+                serde_json::from_str(buffer.trim()).map_err(|e| format!("JSON 解析失败：{e}"))?;
+            if parsed.is_object() {
+                Ok(parsed)
+            } else {
+                Err("需要一个 JSON 对象".into())
             }
         }
-    }
-
-    fn check_range(&self, value: f64) -> Result<(), String> {
-        let out_of_range = self.constraints.min.is_some_and(|min| {
-            if self.constraints.exclusive_min {
-                value <= min
-            } else {
-                value < min
+        ScalarKind::Int => {
+            let number: i64 = buffer
+                .trim()
+                .parse()
+                .map_err(|_| "需要一个整数".to_string())?;
+            check_range(number as f64, constraints)?;
+            Ok(Value::from(number))
+        }
+        ScalarKind::Float => {
+            let number: f64 = buffer
+                .trim()
+                .parse()
+                .map_err(|_| "需要一个数字".to_string())?;
+            if !number.is_finite() {
+                return Err("需要一个数字".into());
             }
-        }) || self.constraints.max.is_some_and(|max| {
-            if self.constraints.exclusive_max {
-                value >= max
-            } else {
-                value > max
+            check_range(number, constraints)?;
+            Ok(Value::from(number))
+        }
+        ScalarKind::Str => {
+            let trimmed = buffer.trim();
+            if constraints.nullable && matches!(trimmed, "" | "null" | "~") {
+                return Ok(Value::Null);
             }
-        });
-        if out_of_range {
-            Err(format!("取值范围 {}", self.range_label()))
-        } else {
-            Ok(())
+            if required && trimmed.is_empty() {
+                return Err("必填".into());
+            }
+            if let Some(min_length) = constraints.min_length {
+                let len = buffer.chars().count() as i64;
+                if len < min_length {
+                    return Err(format!("至少 {min_length} 个字符"));
+                }
+            }
+            // 不支持的构造返回 None：跳过本地校验（后端是权威）。
+            if let Some(pattern) = &constraints.pattern
+                && pattern_matches(pattern, buffer) == Some(false)
+            {
+                return Err(format!("格式应为 {pattern}"));
+            }
+            Ok(Value::String(buffer.to_string()))
         }
     }
+}
 
-    /// 开闭区间按 exclusive 标志渲染，缺界用 `∞`：`(0, ∞)`（无界的一侧恒为开）。
-    fn range_label(&self) -> String {
-        let low = self
-            .constraints
-            .min
-            .map(fmt_bound)
-            .unwrap_or_else(|| "-∞".into());
-        let high = self
-            .constraints
-            .max
-            .map(fmt_bound)
-            .unwrap_or_else(|| "∞".into());
-        let left = if self.constraints.min.is_none() || self.constraints.exclusive_min {
-            '('
+fn check_range(value: f64, constraints: &Constraints) -> Result<(), String> {
+    let out_of_range = constraints.min.is_some_and(|min| {
+        if constraints.exclusive_min {
+            value <= min
         } else {
-            '['
-        };
-        let right = if self.constraints.max.is_none() || self.constraints.exclusive_max {
-            ')'
+            value < min
+        }
+    }) || constraints.max.is_some_and(|max| {
+        if constraints.exclusive_max {
+            value >= max
         } else {
-            ']'
-        };
-        format!("{left}{low}, {high}{right}")
+            value > max
+        }
+    });
+    if out_of_range {
+        Err(format!("取值范围 {}", range_label(constraints)))
+    } else {
+        Ok(())
     }
+}
+
+/// 开闭区间按 exclusive 标志渲染，缺界用 `∞`：`(0, ∞)`（无界的一侧恒为开）。
+fn range_label(constraints: &Constraints) -> String {
+    let low = constraints
+        .min
+        .map(fmt_bound)
+        .unwrap_or_else(|| "-∞".into());
+    let high = constraints.max.map(fmt_bound).unwrap_or_else(|| "∞".into());
+    let left = if constraints.min.is_none() || constraints.exclusive_min {
+        '('
+    } else {
+        '['
+    };
+    let right = if constraints.max.is_none() || constraints.exclusive_max {
+        ')'
+    } else {
+        ']'
+    };
+    format!("{left}{low}, {high}{right}")
 }
 
 /// 标量 kind 的编辑器判据（bool / enum / object / list 没有单行编辑器）。

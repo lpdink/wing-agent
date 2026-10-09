@@ -137,7 +137,9 @@ pub(crate) fn problem(
     }
 }
 
-/// 合并本地与后端问题：`(根, 路径, message)` 去重（本地优先），再按严重度 + 路径排序。
+/// 合并本地与后端问题（**AD4**）：同 `(根, 路径, kind)` 视为同一条 ——
+/// `message` 取**后端**的（后端是唯一校验器，文案权威在它），`hint` 取**非空的那个**
+/// （后端优先、本地兜底，绝不因为去重把可操作建议丢掉）。合并后按严重度 + 路径排序。
 pub(crate) fn merge(local: Vec<Problem>, backend: &[SettingProblem]) -> Vec<Problem> {
     let mut out = local;
     for item in backend {
@@ -148,13 +150,18 @@ pub(crate) fn merge(local: Vec<Problem>, backend: &[SettingProblem]) -> Vec<Prob
             message: item.message.clone(),
             hint: item.hint.clone(),
         };
-        let duplicate = out.iter().any(|existing| {
+        match out.iter_mut().find(|existing| {
             existing.root == problem.root
                 && existing.path == problem.path
-                && existing.message == problem.message
-        });
-        if !duplicate {
-            out.push(problem);
+                && existing.kind == problem.kind
+        }) {
+            Some(existing) => {
+                existing.message = problem.message;
+                if problem.hint.is_some() {
+                    existing.hint = problem.hint;
+                }
+            }
+            None => out.push(problem),
         }
     }
     out.sort_by(|a, b| {
@@ -309,23 +316,19 @@ mod tests {
     }
 
     #[test]
-    fn merge_deduplicates_by_root_path_message_and_keeps_local_hints() {
+    fn merge_deduplicates_by_path_and_kind_and_takes_the_backend_message() {
         let local = vec![{
             let mut p = fx::problem(
                 Root::Gateway,
                 Some("providers[0].name"),
                 "missing_required",
-                "必填项未设置",
+                "本地文案",
             );
             p.hint = Some("本地提示".into());
             p
         }];
         let backend = vec![
-            backend(
-                Some("providers[0].name"),
-                "missing_required",
-                "必填项未设置",
-            ),
+            backend(Some("providers[0].name"), "missing_required", "后端文案"),
             backend(
                 Some("providers[0].base_url"),
                 "missing_required",
@@ -338,7 +341,47 @@ mod tests {
             .iter()
             .find(|p| p.path.as_deref() == Some("providers[0].name"))
             .unwrap();
-        assert_eq!(name.hint.as_deref(), Some("本地提示"), "本地优先");
+        assert_eq!(name.message, "后端文案", "AD4：message 权威在后端");
+        assert_eq!(
+            name.hint.as_deref(),
+            Some("本地提示"),
+            "AD4：后端没带 hint → 本地兜底，去重不许把建议丢掉"
+        );
+    }
+
+    #[test]
+    fn merge_prefers_the_backend_hint_when_it_has_one() {
+        let local = vec![{
+            let mut p = fx::problem(
+                Root::Gateway,
+                Some("providers[0].name"),
+                "duplicate",
+                "本地",
+            );
+            p.hint = Some("本地提示".into());
+            p
+        }];
+        let mut incoming = backend(Some("providers[0].name"), "duplicate", "后端");
+        incoming.hint = Some("给其中一个声明显式 id".into());
+        let merged = merge(local, &[incoming]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].hint.as_deref(), Some("给其中一个声明显式 id"));
+    }
+
+    #[test]
+    fn merge_keeps_different_kinds_on_the_same_path_apart() {
+        let local = vec![fx::problem(
+            Root::Gateway,
+            Some("providers"),
+            "empty_list",
+            "a",
+        )];
+        let backend = vec![backend(Some("providers"), "missing_required", "b")];
+        assert_eq!(
+            merge(local, &backend).len(),
+            2,
+            "同路径不同 kind 不是同一条"
+        );
     }
 
     #[test]
