@@ -51,6 +51,7 @@ from wing.config import (
 from wing.config.document import (
     ConfigDocumentError,
     ConfigFingerprint,
+    PositionalSecret,
     SparseDocument,
     changed_paths,
     locate_problems,
@@ -96,6 +97,40 @@ DROPPED_SECRET_WARNING = "无法确定 {path} 属于哪一项（列表结构变�
 绝不把 A 的密钥按旧下标写给 B。逐条（一条路径一条）与面板 / CLI 的逐条渲染对齐。
 """
 
+POSITIONAL_SECRET_WARNING = (
+    "{path} 按位置保留了磁盘上的值（{reason}）——若这是重命名，无需处理；"
+    "若是替换成了新的项，请重新填写该密钥"
+)
+"""密文哨兵因 (b) 等长下标回落而被**按位置保留**时的回执警告（审查 B1 / AD18 第 2 点）。
+
+consumed 守卫关掉的是「新项抢别人的槽位」那一类；**整表替换**与「全改名」在文档里
+结构不可区分，守卫关不掉——既然关不掉，就**不许静默**。三要素：路径 + 两种读法
+（重命名 / 替换成新的）+ 怎么办。
+"""
+
+POSITIONAL_REASON_NO_IDENTITY = "该列表没有身份字段"
+"""警告的（原因）子句：列表没声明 ``identity_field``（只可能按位置配对）。"""
+
+POSITIONAL_REASON_MISSING_IDENTITY = "该项没有 {field}"
+"""警告的（原因）子句：项的身份值缺席 / 不是非空字符串。"""
+
+POSITIONAL_REASON_MISMATCH = "该项的 {field} 与磁盘上的项不一致"
+"""警告的（原因）子句：项有身份值，但在磁盘上查不到（重命名 / 替换的形态）。"""
+
+
+def positional_secret_warning(secret: PositionalSecret) -> str:
+    """(b) 保留的警告文案：路径 + 两种读法 + 怎么办（AD18 的三要素）。
+
+    原因子句按可用身份分三种：没有身份字段 / 该项没有身份值 / 身份值与磁盘上的项不一致。
+    """
+    if secret.identity_field is None:
+        reason = POSITIONAL_REASON_NO_IDENTITY
+    elif secret.identity_value is None:
+        reason = POSITIONAL_REASON_MISSING_IDENTITY.format(field=secret.identity_field)
+    else:
+        reason = POSITIONAL_REASON_MISMATCH.format(field=secret.identity_field)
+    return POSITIONAL_SECRET_WARNING.format(path=secret.path, reason=reason)
+
 
 class SettingsConflictError(RuntimeError):
     """保存的基线指纹与磁盘现状不符（乐观并发冲突）。路由据此回 409。
@@ -129,7 +164,8 @@ class SettingsApplyResult:
     setup_mode_exited: bool = False
     backup_path: str | None = None
     warnings: list[str] = field(default_factory=list)
-    """非致命的告知（AD13）：如「原配置文件无法解析，其中的密钥无法保留」。
+    """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」（AD13）、
+    「密钥被丢弃」/「密钥按位置保留」（审查 A1 / B1）。
     与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
 
 
@@ -666,9 +702,11 @@ class WingRuntime:
             raise SettingsConflictError(current_fp.value)
 
         # ③ 密文回填：null = 保留磁盘现值（真实值只在这里被读、从不回显）。
-        #    列表项按**身份**配对（identity_field）；配不上且长度变化 → 宁可不猜：
-        #    该密钥被丢弃（必填 → problem），并且**必须让用户看见**（审查 A1：
-        #    静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
+        #    列表项按**身份**配对（identity_field）；配不上且长度变化 / 槽位已被认领
+        #    → 宁可不猜：该密钥被丢弃（必填 → problem），并且**必须让用户看见**
+        #    （审查 A1/B1：静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
+        #    等长下标回落（(b)）保留下来的值同样**出声**（AD18 第 2 点：它和「重命名」
+        #    在文档里不可区分）。
         resolution = resolve_secrets(
             SparseDocument(data=document), current_doc, catalog
         )
@@ -676,6 +714,10 @@ class WingRuntime:
         warnings.extend(
             DROPPED_SECRET_WARNING.format(path=path)
             for path in resolution.dropped_secrets
+        )
+        warnings.extend(
+            positional_secret_warning(secret)
+            for secret in resolution.positional_secrets
         )
 
         # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
