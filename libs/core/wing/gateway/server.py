@@ -26,7 +26,13 @@ from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
 from wing.common.logger import log, setup_logger
 from wing.commands import register_prompt_commands
-from wing.config import AuthConfig, Config, ConfigProblem, load_config
+from wing.config import (
+    AuthConfig,
+    Config,
+    ConfigProblem,
+    ProblemKind,
+    load_config,
+)
 from wing.config.boot import BootFailure, BootResult, boot_config
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
@@ -67,6 +73,13 @@ def _check_port_available(host: str, port: int) -> bool:
             return True
 
 
+#: setup mode 替身（``_SetupRuntime``）唯一放行的公开入口：保存事务本身。
+#: 其余一切公开属性（含继承自 ``WingRuntime`` 的方法）都抛 ``SetupModeError``。
+_SETUP_RUNTIME_ALLOWED: frozenset[str] = frozenset(
+    {"apply_settings", "post_write_effect"}
+)
+
+
 class _SetupRuntime(WingRuntime):
     """setup mode 的 runtime 替身：**只服务保存事务**（见 :attr:`GatewayServer.runtime`）。
 
@@ -76,8 +89,10 @@ class _SetupRuntime(WingRuntime):
     不是「第二份事务」，而是**同一个事务 + 不同的第 ⑦ 步效应**
     （:meth:`WingRuntime.post_write_effect`）：正常模式热重载，这里转入正常模式（§8.5）。
 
-    其余一切访问（``list_sessions`` / ``post`` / …）与「runtime 在 setup mode 不可用」
-    同义：抛 :class:`SetupModeError`（守门中间件保证这些路径本就不可达——这是双保险）。
+    其余一切访问与「runtime 在 setup mode 不可用」同义：守门中间件是业务面的一道闸
+    （白名单之外一律 503 ``setup_mode``），替身把**所有**非事务入口（含继承来的方法，
+    如 ``list_models`` / ``list_sessions``）都翻成 :class:`SetupModeError`——两道闸
+    覆盖同一批路径（审查 N1 / 05 M3）。
     """
 
     def __init__(self, server: GatewayServer) -> None:
@@ -92,12 +107,20 @@ class _SetupRuntime(WingRuntime):
             setup_mode_exited=not self._server.in_setup_mode,
         )
 
-    def __getattr__(self, name: str) -> Any:
-        # dunder 探测（copy / pickle / repr / isinstance 相关的内省）不吞：
-        # 只把「业务属性」翻译成 SetupModeError。
-        if name.startswith("__") and name.endswith("__"):
-            raise AttributeError(name)
-        raise SetupModeError(self._server.setup_problems)
+    def __getattribute__(self, name: str) -> Any:
+        """setup mode 下 **只有保存事务可达**（审查 N1：``__getattr__`` 只拦"基类没有"
+        的属性，`list_models` 这类真实方法会绕过去、以 ``ValueError`` 露出）。
+
+        这里用 ``__getattribute__`` 拦**所有**公开属性：白名单只有
+        ``apply_settings`` / ``post_write_effect`` 两个入口，其余（含继承来的方法）
+        一律 :class:`SetupModeError`。下划线开头的名字（``_server`` / 内省的 dunder）
+        放行——它们不是业务入口，拦掉只会让 ``isinstance`` / ``repr`` / 调试工具出怪。
+        """
+        if not name.startswith("_") and name not in _SETUP_RUNTIME_ALLOWED:
+            raise SetupModeError(
+                object.__getattribute__(self, "_server").setup_problems
+            )
+        return object.__getattribute__(self, name)
 
 
 class GatewayServer:
@@ -140,7 +163,12 @@ class GatewayServer:
         self._background_requested = False
         self._started_at = datetime.now(timezone.utc)
         if self._boot.ok:
-            self._enter_operational(config=self._boot.config)
+            result = self._enter_operational(config=self._boot.config)
+            if not result.ok:
+                # AD14：启动路径**必须消费**这个结果——否则「文件合法但运行时装不上」
+                # 会静默降级：boot_reason=None、problems 为空、503 说「共 0 条问题」，
+                # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
+                self._record_startup_failure(result)
         self._app = create_app(self)
 
     # ============================================================
@@ -263,6 +291,37 @@ class GatewayServer:
             "setup mode exited: gateway is operational (config reloaded from disk)"
         )
         return ReloadResult(ok=True, items=items)
+
+    def _record_startup_failure(self, result: ReloadResult) -> None:
+        """启动路径转入正常模式失败：**不静默降级**（AD14）。
+
+        做两件事：① ERROR 日志（含逐项明细）；② 把失败写成一条 ``path=None`` 的
+        boot 级 problem——于是 ``boot_reason`` 非 None、``setup_problems`` 非空、
+        503 detail 不再说「共 0 条问题」，而 ``status.valid`` 因
+        ``valid == (not in_setup_mode and 无 problem)`` 一致地为 ``false``。
+        """
+        detail = "; ".join(
+            f"{item.name}: {item.detail or 'failed'}"
+            for item in result.items
+            if not item.ok
+        )
+        log.error(f"setup mode: cannot enter operational mode at startup — {detail}")
+        self._boot = BootResult(
+            ok=False,
+            config=None,
+            problems=[
+                ConfigProblem(
+                    path=None,
+                    kind=ProblemKind.INVALID_VALUE,
+                    message=f"配置合法但运行时装配失败：{detail}",
+                    hint="检查运行环境（日志目录写权限 / hooks / store 路径）后重启；"
+                    "配置文件本身没有内容问题",
+                )
+            ],
+            reason=BootFailure.INVALID,
+            path=self._boot.path,
+            endpoint=self._boot.endpoint,
+        )
 
     def _install_eviction_job(self, config: Config, runtime: WingRuntime) -> None:
         """注册空闲会话逐出 job（幂等：重复调用不会留下两个 job）。

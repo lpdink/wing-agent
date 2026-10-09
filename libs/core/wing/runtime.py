@@ -20,7 +20,6 @@ wing/runtime.py — WingRuntime：service 层协调者
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from wing.event import (
     BranchTargetInfo,
@@ -36,7 +35,7 @@ from wing.event import (
     SyncSessionEvent,
     WingEvent,
 )
-from wing.common.fs import atomic_write_text
+from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
 from wing.event_bus import event_bus
 from wing.config import (
@@ -51,6 +50,7 @@ from wing.config import (
 )
 from wing.config.document import (
     ConfigDocumentError,
+    ConfigFingerprint,
     SparseDocument,
     changed_paths,
     locate_problems,
@@ -78,6 +78,15 @@ if TYPE_CHECKING:
 # ============================================================
 # Setting API —— 保存事务的数据形状（L4：编排结果，不是 wire 模型）
 # ============================================================
+
+
+UNPARSEABLE_CONFIG_WARNING = "原配置文件无法解析，其中的密钥无法保留，请重新填写"
+"""当前 ``config.yaml`` 读不出文档时的回执警告（AD13）。
+
+语法错意味着我们不知道文件里原本有什么：旧密钥无从回填（``null`` 不再等于「保留」），
+未知键也无从保留。回执必须**显式**说明这一点——用户按面板提示重填密钥，而不是
+在保存后静默失去一个 provider 的凭据。
+"""
 
 
 class SettingsConflictError(RuntimeError):
@@ -111,6 +120,9 @@ class SettingsApplyResult:
     reload: ReloadResult | None = None
     setup_mode_exited: bool = False
     backup_path: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    """非致命的告知（AD13）：如「原配置文件无法解析，其中的密钥无法保留」。
+    与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
 
 
 @dataclass
@@ -628,18 +640,18 @@ class WingRuntime:
         catalog = build_catalog()
 
         # ① 现读磁盘（D18：不缓存）。
+        warnings: list[str] = []
         try:
             current_doc, current_fp = read_document()
         except ConfigDocumentError as exc:
-            # 文件存在但读不出文档：不能写（会把用户的文件换成我们臆想的内容）。
-            # 指纹仍参与并发判定；解析失败如实报成一条文档级 problem。
-            if base is not None and base != exc.fingerprint:
-                raise SettingsConflictError(exc.fingerprint) from exc
-            return SettingsApplyResult(
-                ok=False,
-                fingerprint=exc.fingerprint,
-                problems=[exc.as_problem()],
-            )
+            # 文件存在但读不出文档（YAML 语法错 / 顶层不是映射）。**事务照常继续**：
+            # 这正是「配置写坏 ⇒ 开设置面板修」（D1）在语法错这条分支上的兑现——
+            # 否则面板保存永远 ok=false、用户只剩手改文件一条路（审查 B3 / AD13）。
+            # 现文档视为**空**：未知键无从保留、旧密钥无从回填（回执里显式警告）。
+            # 指纹仍然算（= 文件字节的 sha256）——乐观并发不因文件坏了而失效。
+            current_doc = SparseDocument(data={})
+            current_fp = ConfigFingerprint(value=exc.fingerprint)
+            warnings.append(UNPARSEABLE_CONFIG_WARNING)
 
         # ② 乐观并发：指纹不匹配 → 409（不写盘）。
         if base is not None and base != current_fp.value:
@@ -655,18 +667,24 @@ class WingRuntime:
         )
         if problems:
             return SettingsApplyResult(
-                ok=False, fingerprint=current_fp.value, problems=problems
+                ok=False,
+                fingerprint=current_fp.value,
+                problems=problems,
+                warnings=warnings,
             )
 
-        # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。
+        # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。原子写（不是 copyfile）：
+        # 进程在拷贝中途被杀不会留下截断的 .bak（审查 N7）；字节级复制，
+        # 连读不出文档的坏文件也逐字留证（AD13 的价值所在）。
         config_path = get_config_path()
         backup_path: str | None = None
         if config_path.exists():
             backup = config_path.with_name(f"{config_path.name}.bak")
-            shutil.copyfile(config_path, backup)
+            atomic_write_bytes(backup, config_path.read_bytes())
             backup_path = str(backup)
 
-        # ⑥ 规范形 YAML（未知键取自磁盘文档，D17）+ 原子写。
+        # ⑥ 规范形 YAML（未知键取自磁盘文档，D17；读不出文档时没有未知键可保留）
+        #    + 原子写。
         text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
         atomic_write_text(config_path, text)
         _, new_fp = read_document()
@@ -701,6 +719,7 @@ class WingRuntime:
             reload=effect.reload,
             setup_mode_exited=effect.setup_mode_exited,
             backup_path=backup_path,
+            warnings=warnings,
         )
 
     # ============================================================

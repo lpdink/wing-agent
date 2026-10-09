@@ -9,8 +9,9 @@
   端点**（请求留档的 ``path``），上游收到的仍是调用名 ``shared``（id 不外发）；
 - 展示分组跟随 id 映射：``session_state_changed`` 的 ``provider_name`` 与
   ``model_id`` 同刻换组；
-- 负面：**同一个 id** 声明在两个 provider → 配置加载失败，错误文案点出两个
-  provider 名并给出修复示例（唯一的修复动作是加显式 id）。
+- 负面：**同一个 id** 声明在两个 provider → 网关**降级启动**（setup mode，D1），
+  设置端点精确报出问题（两个 provider 名 + 修复示例，唯一的修复动作是加显式 id）
+  ——坏配置不再让进程退出（04 的行为变更）。
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from wing_probe import Probe, Turn
-from wing_probe.env import ProbeEnv, ProbeEnvError
+from wing_probe import DriverHttp, DriverHttpError, Probe, Turn
+from wing_probe.env import ProbeEnv
 
 #: 两个 provider 共用的调用名（发给上游的值，剧本按它路由）。
 SHARED_NAME = "shared"
@@ -94,20 +95,53 @@ async def test_model_id_picks_the_provider_endpoint(probe: Probe) -> None:
 
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_same_id_across_providers_fails_config_load(tmp_path: Path) -> None:
-    """同一个 id 声明在两个 provider → 网关拒绝启动，文案含两 provider 与修复示例。"""
-    with pytest.raises(ProbeEnvError) as failure:
-        await ProbeEnv.start(
-            tmp_path / "duplicate-id",
-            models=[{"id": "shared", "name": "p1-upstream"}],
-            extra_providers=[
-                {"name": "probe2", "models": [{"id": "shared", "name": "p2-upstream"}]}
-            ],
-        )
+async def test_same_id_across_providers_boots_into_setup_mode(
+    tmp_path: Path,
+) -> None:
+    """同一个 id 声明在两个 provider → 网关**降级启动**并在问题清单里精确报出（AD11）。
 
-    report = str(failure.value)
-    assert "duplicate model id 'shared'" in report, report
-    assert "provider 'probe' and provider 'probe2'" in report, report
-    # 修复示例按「后声明的 provider × 调用名」生成（一次改对）。
-    assert "- id: probe2-p2-upstream" in report, report
-    assert "name: p2-upstream" in report, report
+    行为变更（04）：「坏配置 ⇒ 进程拒绝启动」已死——配置写坏时网关降级启动（setup mode），
+    唯一修复路径是设置端点。所以这条负面用例验的东西从「进程拒绝启动」换成
+    「进程降级启动 + 精确告诉用户哪里错了」：后者是更强的产品保证（用户被指路，
+    而不是面对 traceback）。
+
+    ``env`` 被持有到 ``finally``（teardown），否则网关子进程会泄漏（AD17）。
+    """
+    env = await ProbeEnv.start(
+        tmp_path / "duplicate-id",
+        models=[{"id": "shared", "name": "p1-upstream"}],
+        extra_providers=[
+            {"name": "probe2", "models": [{"id": "shared", "name": "p2-upstream"}]}
+        ],
+    )
+    http = DriverHttp(env.gateway_url, started_at=env.started_at)
+    try:
+        # ① 降级启动：进程活着、health 通（不是秒退，也不是拒绝启动）。
+        assert env.process is not None and env.process.poll() is None
+        health = await http.health()
+        assert health["status"] == "ok", health
+
+        # ② status：valid=false + setup_mode=true + 问题文案含两个 provider 与修复示例。
+        status = await http.request("GET", "/api/settings/status")
+        assert status["valid"] is False, status
+        assert status["setup_mode"] is True, status
+        report = "\n".join(problem["message"] for problem in status["problems"])
+        assert "duplicate model id 'shared'" in report, report
+        assert "provider 'probe' and provider 'probe2'" in report, report
+        # 修复示例按「后声明的 provider × 调用名」生成（一次改对）。
+        assert "- id: probe2-p2-upstream" in report, report
+        assert "name: p2-upstream" in report, report
+
+        # ③ 降级面成立：会话端点 503 setup_mode（不是「拒绝启动」也不是 500）。
+        with pytest.raises(DriverHttpError) as failure:
+            await http.request("POST", "/api/session/create", body={})
+        assert failure.value.status == 503, failure.value.call.render()
+        assert failure.value.call.response["error"] == "setup_mode", (
+            failure.value.call.response
+        )
+        assert "duplicate model id 'shared'" in failure.value.call.response["detail"], (
+            failure.value.call.response
+        )
+    finally:
+        await http.close()
+        await env.stop()

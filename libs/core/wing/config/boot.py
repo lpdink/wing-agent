@@ -30,7 +30,12 @@ import yaml
 from ..common.fs import atomic_write_text
 from . import loader
 from .catalog import build_catalog
-from .document import SparseDocument, locate_problems, merge_with_defaults
+from .document import (
+    SparseDocument,
+    locate_problems,
+    malformed_document_problem,
+    merge_with_defaults,
+)
 from .emit import default_document, emit_config_yaml
 from .models import Config, GatewayConfig
 from .problems import ConfigProblem, ProblemKind, cross_field_problems
@@ -80,6 +85,10 @@ class BootResult:
 def boot_config() -> BootResult:
     """读 ``config.yaml`` 并返回结局 —— **永不抛**。
 
+    **「永不抛」靠最外层兜底实现**（AD12）：任何没想到的形态（非字符串顶层键、
+    未来 pydantic 的行为变化……）都在 :func:`_read_boot_config` 之外被兜成一条
+    可展示的文档级 problem，而不是让网关带 traceback 崩掉——后者正是本步骤要消灭的路径。
+
     单例优先：``loader`` 已加载（同一进程内已 boot 过 / 组合根注入）⇒ 直接以它为准，
     **不重新加载配置**（不写盘、不校验）——``get_config()`` 的真相就是那个单例，
     重复读盘只会引入「同一个进程里两份配置」的分叉。成功时把 ``Config`` 塞回单例，
@@ -89,7 +98,21 @@ def boot_config() -> BootResult:
     不改任何全局状态（除 loader 单例）。
     """
     path = loader.get_config_path()
+    try:
+        return _read_boot_config(path)
+    except Exception as exc:  # noqa: BLE001 — 兜底是本函数的契约（永不抛）
+        return BootResult(
+            ok=False,
+            config=None,
+            problems=[malformed_document_problem(exc)],
+            reason=BootFailure.INVALID,
+            path=path,
+            endpoint=None,
+        )
 
+
+def _read_boot_config(path: Path) -> BootResult:
+    """启动读取的主体（``boot_config()`` 的兜底之外的一切）。"""
     if loader._config is not None:
         return BootResult(
             ok=True,
@@ -144,7 +167,23 @@ def boot_config() -> BootResult:
             f"config.yaml 顶层必须是映射，实得 {type(parsed).__name__}",
         )
 
+    # 顶层键不是字符串（YAML 把裸数字 / bool / 日期解析成对应类型）：`Config(**parsed)`
+    # 会抛 `TypeError: keywords must be strings`，而 pydantic 的 ValidationError
+    # 路径根本进不去。先给一条**说得清**的问题，而不是让用户看 TypeError（AD12）。
+    # endpoint 照常取——Rust 侧 serde 对结构体的非字符串键是**跳过**（实测：`1: oops`
+    # 不影响它读到 `gateway.port`），两边必须落在同一个端口上。
     endpoint = _endpoint_of(parsed)
+    bad_keys = [key for key in parsed if not isinstance(key, str)]
+    if bad_keys:
+        shown = ", ".join(str(key) for key in bad_keys[:5])
+        more = "…" if len(bad_keys) > 5 else ""
+        return _failure(
+            path,
+            BootFailure.INVALID,
+            f"config.yaml 顶层键必须是字符串，实得：{shown}{more}",
+            endpoint=endpoint,
+        )
+
     try:
         config = Config(**parsed)
     except Exception:
@@ -184,24 +223,31 @@ def _problems_of(doc: SparseDocument) -> list[ConfigProblem]:
 def _endpoint_of(parsed: Any) -> tuple[str, int] | None:
     """从解析出的映射里取 ``gateway.host`` / ``gateway.port``。
 
-    语义与 Rust 侧 ``BackendConfigFile`` 的 ``#[serde(default)]`` 对齐：只认
-    ``host: String`` / ``port: u16`` 两段，缺省或类型不对的**各自**回落声明默认值
-    （``GatewayConfig`` 是默认值的唯一来源）。顶层解析不出映射 ⇒ ``None``
-    （调用方回落默认，与 Rust 侧「整个文件解析不了」同价）。
+    语义与 Rust 侧 ``BackendConfigFile`` 的 ``#[serde(default)]`` 对齐
+    （``crates/wing/src/cmd/backend_config.rs``）：
+
+    - 顶层解析不出映射 ⇒ ``None``（调用方回落默认；Rust 侧「整份解析失败」同价）；
+    - ``gateway`` 段缺失 ⇒ 两字段都用声明默认值（Rust ``GatewaySection::default()``）；
+    - 段里**某个字段类型不对** ⇒ **整段**回落默认值（Rust：serde 反序列化失败 →
+      最外层 ``#[serde(default)]`` 整份回落；不是逐字段回落——审查 N4）；
+    - 字段缺失（但存在的那些类型都对）⇒ 逐字段回落（Rust 的 ``#[serde(default)]``
+      按字段生效）。
     """
     if not isinstance(parsed, dict):
         return None
+    fallback = (_default("host", str), _default("port", int))
     gateway = parsed.get("gateway")
+    if gateway is None:
+        return fallback
     if not isinstance(gateway, dict):
-        gateway = {}
-    host = gateway.get("host")
-    port = gateway.get("port")
-    return (
-        host if isinstance(host, str) and host else _default("host", str),
-        port
-        if isinstance(port, int) and not isinstance(port, bool) and 0 <= port <= 65535
-        else _default("port", int),
-    )
+        return fallback
+    host = gateway.get("host", fallback[0])
+    port = gateway.get("port", fallback[1])
+    if not isinstance(host, str) or not host:
+        return fallback
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535:
+        return fallback
+    return host, port
 
 
 def _default(field: str, kind: type) -> Any:
@@ -247,12 +293,18 @@ def _problem(message: str) -> ConfigProblem:
     )
 
 
-def _failure(path: Path, reason: BootFailure, message: str) -> BootResult:
+def _failure(
+    path: Path,
+    reason: BootFailure,
+    message: str,
+    *,
+    endpoint: tuple[str, int] | None = None,
+) -> BootResult:
     return BootResult(
         ok=False,
         config=None,
         problems=[_problem(message)],
         reason=reason,
         path=path,
-        endpoint=None,
+        endpoint=endpoint,
     )

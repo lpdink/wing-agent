@@ -16,9 +16,13 @@
 9. WS 可连（``connect_driver``）→ 建会话跑一轮成功（假 Provider 收到请求）→
    ``history.jsonl`` 有记录。
 
-**已知上游偏差**（04 Assumption 2）：``get`` / ``status`` 的 ``setup_mode`` 字段在
-setup mode 下仍恒 ``False``（``routes/settings.py`` 写死）。本场景因此**不**用该
-字段判降级——判据是会话端点的 503 错误码与 WS 拒绝（两者都是可观测事实）。
+``setup_mode`` 字段在降级期是**真值** ``true``（04/AD15），转入正常模式后 ``false``
+——本场景直接断言它（另一个可观测判据是会话端点的 503 错误码与 WS 拒绝）。
+
+本文件另有两个用例覆盖两条「坏到读不出来」的分支（AD12/AD13）：
+顶层数字键（``Config(**parsed)`` 连校验都进不去）与 YAML 语法错（文件读不出文档）
+——两者都必须降级启动、报得出问题，并且**都能经 ``set`` 修好**（语法错那条的旧文件
+会被备份进 ``config.yaml.bak``）。
 """
 
 from __future__ import annotations
@@ -222,5 +226,150 @@ async def test_broken_config_repairs_in_place(probe: Probe) -> None:
         ], history.describe()
         history.assert_chain_invariants()
         session.watch.assert_never("error")
+    finally:
+        await http.close()
+
+
+#: 顶层数字键：PyYAML 解析成 int 键，`Config(**parsed)` 连字段级校验都进不去
+#: （`TypeError: keywords must be strings`）。providers/agents 本身是合法的——
+#: 唯一的问题就是这个键（AD12）。
+NUMERIC_KEY_CONFIG = f"""\
+1: oops
+providers:
+  - name: probe
+    base_url: http://127.0.0.1:1/v1
+    api_key: probe-key
+    models: [{SETUP_MODEL}]
+agents:
+  - name: default
+    model: {SETUP_MODEL}
+"""
+
+#: 坏缩进（AD13 的形态）：文件存在但读不出文档。
+SYNTAX_ERROR_CONFIG = "providers: [\n"
+
+
+def _fixed_document(probe: Probe) -> dict:
+    """修复文档：把 provider 指到假 Provider、agent 引用场景私有 model。"""
+    return {
+        "providers": [
+            {
+                "name": "probe",
+                "protocol": "openai",
+                "base_url": probe.env.provider.base_url,
+                "api_key": "probe-key",
+                "models": [SETUP_MODEL],
+            }
+        ],
+        "agents": [
+            {
+                "name": "default",
+                "model": SETUP_MODEL,
+                "default": True,
+                "system_prompt": probe.env.system_prompt,
+                "tools": ["Bash"],
+                "context_window_tokens": 256_000,
+                "keep_recent_tokens": 50_000,
+            }
+        ],
+    }
+
+
+@pytest.mark.probe_env(connect=False, config_text=NUMERIC_KEY_CONFIG)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_numeric_top_level_key_boots_degraded_and_repairs(probe: Probe) -> None:
+    """顶层数字键（AD12）：降级启动 + 指向精确的问题 + ``set`` 修好 → 转正常模式。
+
+    修这条之前 ``boot_config()`` 自己会抛（`TypeError: keywords must be strings`）——
+    网关带 traceback 崩溃，正是 setup mode 要消灭的那条路径。
+    """
+    probe.register(SETUP_MODEL, Turn.of(text="fixed"))
+    http = DriverHttp(probe.env.gateway_url, started_at=probe.env.started_at)
+    try:
+        process = probe.env.process
+        assert process is not None and process.poll() is None, (
+            "gateway died on a malformed config"
+        )
+        health = await http.health()
+        assert health["status"] == "ok", health
+
+        status = await http.request("GET", "/api/settings/status")
+        assert status["valid"] is False, status
+        assert status["setup_mode"] is True, status
+        (problem,) = status["problems"]
+        assert problem["path"] is None, problem
+        assert "顶层键必须是字符串" in problem["message"], problem
+
+        receipt = await http.request(
+            "POST", "/api/settings/set", body={"document": _fixed_document(probe)}
+        )
+        assert receipt["ok"] is True, receipt
+        assert receipt["setup_mode_exited"] is True, receipt
+        assert receipt["warnings"] == [], (
+            receipt
+        )  # 读得出来的文件：没有「无法保留」警告
+
+        created = await http.request(
+            "POST", "/api/session/create", body={"workspace": str(probe.workspace)}
+        )
+        assert created["session_id"], created
+    finally:
+        await http.close()
+
+
+@pytest.mark.probe_env(connect=False, config_text=SYNTAX_ERROR_CONFIG)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_syntax_error_file_repairs_through_the_api(probe: Probe) -> None:
+    """YAML 语法错（AD13）：``set`` 是真正的修复路径——写盘 + ``.bak`` 留坏文件 + 转正常模式。
+
+    修这条之前事务在 ① 步就返回 ``ok=false``，产品内**没有任何**路径能修好语法错的文件
+    （面板 / ``wing config set`` 全走这个事务），用户只能手改 YAML——与 D1「用户永远
+    见不到 YAML」正面冲突。
+    """
+    probe.register(SETUP_MODEL, Turn.of(text="repaired"))
+    http = DriverHttp(probe.env.gateway_url, started_at=probe.env.started_at)
+    try:
+        broken_bytes = probe.env.config_path.read_bytes()
+        health = await http.health()
+        assert health["status"] == "ok", health
+
+        status = await http.request("GET", "/api/settings/status")
+        assert status["valid"] is False, status
+        assert status["setup_mode"] is True, status
+        (problem,) = status["problems"]
+        assert problem["path"] is None, problem
+        assert "不是合法 YAML" in problem["message"], problem
+
+        receipt = await http.request(
+            "POST", "/api/settings/set", body={"document": _fixed_document(probe)}
+        )
+        assert receipt["ok"] is True, receipt
+        assert receipt["setup_mode_exited"] is True, receipt
+        # 密钥无法保留是必然（文件读不出来）——回执显式告知（AD13）。
+        assert receipt["warnings"] == [
+            "原配置文件无法解析，其中的密钥无法保留，请重新填写"
+        ], receipt
+
+        # .bak 里就是那个坏文件（逐字）——它的价值正在于用户能拿回来手工抢救。
+        backup = probe.env.config_path.with_name("config.yaml.bak")
+        assert backup.read_bytes() == broken_bytes, receipt["backup_path"]
+        assert (
+            yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))[
+                "providers"
+            ][0]["name"]
+            == "probe"
+        )
+
+        # 会话真的能跑起来（修复后的配置可用）。
+        driver = await probe.connect_driver()
+        assert driver.client_id, driver
+        session = await probe.session(model=SETUP_MODEL)
+        result = await session.chat("back?")
+        assert result.data["subtype"] == "success", result.data
+        assert result.data["result"] == "repaired", result.data
+        request = probe.request(SETUP_MODEL, 0)
+        assert request.context().messages[-1].content == "back?", request.describe()
     finally:
         await http.close()

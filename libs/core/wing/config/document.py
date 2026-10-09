@@ -43,6 +43,11 @@ from .spec import ApplyScope
 ABSENT_FINGERPRINT = "absent"
 """文件不存在时的指纹值（乐观并发仍可判定：缺席 ⇔ 缺席）。"""
 
+UNPARSEABLE_CONFIG_HINT = (
+    "配置文件无法解析；请手工检查语法或备份后删除该文件让 wing 重新生成"
+)
+"""「连字段级校验都做不出来」的问题的建议（AD12 的兜底文案，boot 与设置端点共用）。"""
+
 _MISSING = object()
 """「键缺席」（与显式 ``None`` 区分：``null`` 是用户写下的值）。"""
 
@@ -361,16 +366,36 @@ def _state_of(value: Any) -> SecretState:
 
 
 def locate_problems(raw: dict[str, Any]) -> list[ConfigProblem]:
-    """``Config(**raw)`` → ``ValidationError`` → 带规范路径的问题列表（不抛异常）。
+    """``Config(**raw)`` → ``ValidationError`` → 带规范路径的问题列表（**不抛异常**）。
 
     只报**字段级**错误：模型级校验器的错误（``loc == ()``）由 ``cross_field_problems``
     以精确路径给出同一文案的结构化版本（见 :func:`_translate_errors`）。
+
+    形态错误（顶层键不是字符串 / 值不是映射等，pydantic 抛 ``TypeError``）同样不抛：
+    报一条 ``path=None`` 的文档级问题。这是**公开面**——启动读取（``boot_config``）与
+    设置端点的三个读路径都直接调它，任何输入形态都必须能产出「问题清单」而不是 500 / 崩溃
+    （AD12）。
     """
     try:
         Config(**raw)
     except ValidationError as exc:
         return _translate_errors(exc.errors(), raw)
+    except Exception as exc:  # noqa: BLE001 — 兜底是本函数的契约（文档级问题，不抛）
+        return [malformed_document_problem(exc)]
     return []
+
+
+def malformed_document_problem(exc: BaseException) -> ConfigProblem:
+    """「连一次字段级校验都做不出来」的文档 → 一条 ``path=None`` 的问题。
+
+    文案与 ``boot_config()`` 的最外层兜底同源（同一个出口，两处消费方读同一句话）。
+    """
+    return ConfigProblem(
+        path=None,
+        kind=ProblemKind.INVALID_VALUE,
+        message=f"config.yaml 无法解析：{exc}",
+        hint=UNPARSEABLE_CONFIG_HINT,
+    )
 
 
 def _translate_errors(

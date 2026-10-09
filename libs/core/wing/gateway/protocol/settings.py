@@ -245,6 +245,12 @@ class SettingsSetResponse(BaseModel):
     backup_path: str | None = Field(
         default=None, description="备份文件路径；没有旧文件时为 null"
     )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="非致命告知（04/AD13）：如「原配置文件无法解析，其中的密钥无法保留，"
+        "请重新填写」。与 problems 的区别：problems 让保存失败，warnings 只是提醒；"
+        "旧前端忽略该字段即可（Rust 镜像由集成时统一补）",
+    )
 
 
 __all__ = [

@@ -9,6 +9,7 @@ sessions 走 tmp —— 不碰用户真实的 ``~/.wing``。
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -326,13 +327,22 @@ class TestSetupGuard:
     def test_setup_runtime_rejects_everything_but_the_save(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """替身只放行保存事务：**任何**别的入口（含继承来的方法）都是 SetupModeError。
+
+        N1 的加固点：``list_models`` 是 ``WingRuntime`` 上的真实方法，不碰替身缺失的
+        状态——``__getattr__`` 式的守卫会放过它（05 的 M3 变异实验实测成了 500）。
+        这里逐个点名。
+        """
         server = _server(INVALID_YAML, tmp_path, monkeypatch)
         assert isinstance(server.runtime, _SetupRuntime)
 
-        with pytest.raises(SetupModeError):
-            server.runtime.list_sessions()
+        for name in ("list_sessions", "list_models", "create_session", "post"):
+            with pytest.raises(SetupModeError):
+                getattr(server.runtime, name)
         with pytest.raises(SetupModeError):
             _ = server.runtime.sm
+        # 白名单里的两个入口照常可用（保存事务 + ⑦ 步效应）。
+        assert callable(server.runtime.apply_settings)
 
     def test_setup_mode_error_maps_to_503_setup_mode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -456,3 +466,256 @@ class TestEnterOperational:
                 "prompt commands",
             ]
             assert server.in_setup_mode is True
+
+
+# ============================================================
+# AD12 —— 「永不抛」的兜底与坏形态（审查 B1）
+# ============================================================
+
+#: 五种必须降级启动（而不是抛 / 崩溃）的坏形态（AD12 点名；多两种同族）。
+MALFORMED_CONFIGS = {
+    "top-level numeric key": "1: oops\n",
+    "top-level bool key": "on: true\n",
+    "top-level list": "- a\n- b\n",
+    "top-level scalar": "42",
+    "empty file": "",
+    "comments only": "# 只有注释\n",
+}
+
+
+class TestMalformedConfigs:
+    @pytest.mark.parametrize("label", sorted(MALFORMED_CONFIGS))
+    def test_malformed_config_boots_degraded_without_raising(
+        self, label: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """每种坏形态：``boot_config()`` 不抛、网关降级启动、status 报得出问题。"""
+        text = MALFORMED_CONFIGS[label]
+        # boot_config 本身（不经过服务器）：ok=False + reason/problems 非空。
+        _wing_home(tmp_path, monkeypatch, text)
+        boot = boot_config()
+        assert boot.ok is False, label
+        assert boot.config is None, label
+        assert boot.reason is not None, label
+        assert boot.problems, label
+
+        reset_config()
+        server = _server(text, tmp_path, monkeypatch)
+        assert server.in_setup_mode is True, label
+        with _client(server) as tc:
+            assert tc.get("/api/health").status_code == 200, label
+            status = tc.get("/api/settings/status").json()
+            assert status["valid"] is False, label
+            assert status["setup_mode"] is True, label
+            assert status["problems"], label
+            # 读路径也不许 500（get 同样走 locate_problems）。
+            assert tc.get("/api/settings/get").status_code == 200, label
+
+    def test_numeric_top_level_key_keeps_the_gateway_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """顶层非字符串键 ≠ 读不出文件：Rust 侧 serde **跳过**它并照读 ``gateway`` 段
+        （实测：`serde-probe` 对 ``1: oops`` + ``gateway.port: 39806`` 给出 port 39806）
+        ——两边必须落在同一个端口上（总设计 §8.6）。"""
+        _wing_home(tmp_path, monkeypatch, "1: oops\ngateway:\n  port: 39987\n")
+
+        boot = boot_config()
+        assert boot.ok is False
+        assert boot.reason is BootFailure.INVALID
+        assert boot.endpoint == ("127.0.0.1", 39987)
+        assert "顶层键必须是字符串" in boot.problems[0].message
+        assert boot.problems[0].path is None
+
+    def test_status_surfaces_the_boot_reason_when_the_disk_view_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """AD12：顶层数字键在磁盘视图里只是「未知键」（D17，不算错误），但网关因它没起来
+        ——``status`` 必须把 boot 侧的问题带出来，否则用户看到 ``invalid`` 却一片空白
+        （11 的 setup 首屏会是空清单）。"""
+        text = "1: oops\n" + VALID_YAML
+        _wing_home(tmp_path, monkeypatch, text)
+        server = _server(text, tmp_path, monkeypatch)
+        assert server.in_setup_mode is True
+
+        with _client(server) as tc:
+            status = tc.get("/api/settings/status").json()
+            assert status["valid"] is False
+            assert status["setup_mode"] is True
+            # 磁盘视图干净（providers/agents 都合法）⇒ 唯一一条就是 boot 侧的。
+            assert [(p["path"], p["kind"]) for p in status["problems"]] == [
+                (None, "invalid_value")
+            ]
+            assert "顶层键必须是字符串" in status["problems"][0]["message"]
+            # get 同口径（面板的问题列表读它）。
+            assert "顶层键必须是字符串" in str(
+                tc.get("/api/settings/get").json()["problems"]
+            )
+
+    def test_unexpected_failure_becomes_a_problem_not_an_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """「永不抛」靠**最外层兜底**实现：连没想到的异常也变成一条文档级 problem。"""
+        _wing_home(tmp_path, monkeypatch, VALID_YAML)
+        from wing.config.document import UNPARSEABLE_CONFIG_HINT
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("unexpectable")
+
+        monkeypatch.setattr("wing.config.boot.yaml.safe_load", boom)
+        boot = boot_config()
+        assert boot.ok is False
+        assert boot.reason is BootFailure.INVALID
+        (problem,) = boot.problems
+        assert problem.path is None
+        assert "unexpectable" in problem.message
+        assert problem.hint == UNPARSEABLE_CONFIG_HINT
+
+
+# ============================================================
+# AD13 —— 语法错的文件必须能经产品修复（审查 B3）
+# ============================================================
+
+
+class TestUnparseableFileRepair:
+    def test_save_repairs_an_unparseable_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """语法错 → 降级启动 → ``set`` 一份合法文档 → 写盘 + ``.bak`` 留坏文件 + 转正常模式。"""
+        path = _wing_home(tmp_path, monkeypatch, SYNTAX_ERROR_YAML)
+        server = _server(SYNTAX_ERROR_YAML, tmp_path, monkeypatch)
+        broken_bytes = path.read_bytes()
+
+        with _client(server) as tc:
+            status = tc.get("/api/settings/status").json()
+            assert status["valid"] is False
+            assert status["setup_mode"] is True
+            # 指纹仍然算（= 坏文件字节的 sha256，不是 "absent"）：乐观并发不因文件坏了而失效。
+            assert status["fingerprint"] == hashlib.sha256(broken_bytes).hexdigest()
+
+            # 旧基线 → 409，文件一字节不动。
+            conflict = tc.post(
+                "/api/settings/set",
+                json={"base": "0" * 64, "document": GOOD_DOCUMENT},
+            )
+            assert conflict.status_code == 409
+            assert path.read_bytes() == broken_bytes
+
+            resp = tc.post(
+                "/api/settings/set",
+                json={"base": status["fingerprint"], "document": GOOD_DOCUMENT},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["ok"] is True, body
+            assert body["setup_mode_exited"] is True, body
+            # 密钥无法保留是必然（文件读不出来）——回执**显式**告知（AD13）。
+            assert body["warnings"] == [
+                "原配置文件无法解析，其中的密钥无法保留，请重新填写"
+            ], body
+
+            # `.bak` 里就是那个坏文件（逐字；atomic_write_bytes 复制字节）。
+            backup = path.with_name("config.yaml.bak")
+            assert backup.read_bytes() == broken_bytes
+
+            # 盘上已是合法配置；网关已转入正常模式（同进程）。
+            written = yaml.safe_load(path.read_text(encoding="utf-8"))
+            assert written["providers"][0]["name"] == "p"
+            assert server.in_setup_mode is False
+            assert tc.post("/api/session/create", json={}).status_code == 200
+
+    def test_null_secret_on_an_unparseable_file_reports_missing_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """坏文件上的 ``api_key: null`` 无法「保留」⇒ 明确报必填缺失（而不是静默清空）。"""
+        path = _wing_home(tmp_path, monkeypatch, SYNTAX_ERROR_YAML)
+        server = _server(SYNTAX_ERROR_YAML, tmp_path, monkeypatch)
+        broken_bytes = path.read_bytes()
+        document = {
+            "providers": [
+                {
+                    "name": "p",
+                    "base_url": "http://127.0.0.1:1/v1",
+                    "api_key": None,  # 面板在「保留」语义下发的就是 null
+                    "models": ["m"],
+                }
+            ],
+            "agents": [{"name": "default", "model": "m"}],
+        }
+
+        with _client(server) as tc:
+            body = tc.post(
+                "/api/settings/set", json={"base": None, "document": document}
+            ).json()
+            assert body["ok"] is False
+            assert body["warnings"], body
+            paths = {p["path"]: p["kind"] for p in body["problems"]}
+            assert paths.get("providers[0].api_key") == "missing_required", body
+            assert path.read_bytes() == broken_bytes  # 校验失败：一个字节都不写
+
+    def test_parse_error_problem_still_reports_the_line_number(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """修好之后 problems 清空；修好之前 status 给的是带行号的 parse 问题（不伪装成字段错误）。
+
+        文案来自 ``ConfigDocumentError.as_problem``（03 的实现，逐字未改）：PyYAML 自己的
+        多行文本，其中 ``line 3, column 4`` 就是用户定位坏行所需的行号（boot 侧另有一条
+        中文的「第 N 行，第 M 列」形态，两者指向同一行）。
+        """
+        _wing_home(tmp_path, monkeypatch, SYNTAX_ERROR_YAML)
+        server = _server(SYNTAX_ERROR_YAML, tmp_path, monkeypatch)
+        with _client(server) as tc:
+            status = tc.get("/api/settings/status").json()
+            (problem,) = status["problems"]
+            assert problem["path"] is None
+            assert problem["kind"] == "invalid_value"
+            assert "line 3, column 4" in problem["message"]
+
+
+# ============================================================
+# AD14 / AD15 —— 不再静默降级；setup_mode / valid 自洽
+# ============================================================
+
+
+class TestModeReporting:
+    def test_setup_mode_is_reported_truthfully(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """AD15：降级期 ``get`` / ``status`` 的 ``setup_mode`` 都是真值 true。"""
+        server = _server(INVALID_YAML, tmp_path, monkeypatch)
+        with _client(server) as tc:
+            assert tc.get("/api/settings/get").json()["setup_mode"] is True
+            assert tc.get("/api/settings/status").json()["setup_mode"] is True
+            # 转入正常模式后都是 false（同一进程）。
+            tc.post("/api/settings/set", json={"base": None, "document": GOOD_DOCUMENT})
+            assert tc.get("/api/settings/get").json()["setup_mode"] is False
+            assert tc.get("/api/settings/status").json()["setup_mode"] is False
+
+    def test_startup_transition_failure_is_not_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """AD14：配置合法但运行时装不上 ⇒ 非空 boot_reason + problems + valid=false。"""
+        _wing_home(tmp_path, monkeypatch, VALID_YAML)
+        from wing.gateway.server import GatewayServer
+
+        with patch(
+            "wing.gateway.server.setup_logger",
+            side_effect=OSError("logs dir is read-only"),
+        ):
+            server = GatewayServer()
+
+        assert server.in_setup_mode is True
+        assert server.boot_reason is BootFailure.INVALID  # 不是 None
+        (problem,) = server.setup_problems
+        assert problem.path is None
+        assert "配置合法但运行时装配失败" in problem.message
+        assert "logs dir is read-only" in problem.message
+
+        with _client(server) as tc:
+            status = tc.get("/api/settings/status").json()
+            # 自洽铁律：不允许 valid=true 且 setup_mode=true（AD14）。
+            assert not (status["valid"] and status["setup_mode"])
+            assert status["valid"] is False
+            assert status["setup_mode"] is True
+            refusal = tc.post("/api/session/create", json={}).json()
+            assert (
+                "配置合法但运行时装配失败" in refusal["detail"]
+            )  # 不再说「共 0 条问题」
