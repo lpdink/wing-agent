@@ -2,10 +2,12 @@
 """wing/system.py — 系统级热重载流程（11 归位：自 ``WingRuntime.reload_system`` 抽出）。
 
 ``reload_system(sm)`` 是 ``/api/system/reload`` 的实现体：config → hooks → prompt
-commands → provider → skills & rules，逐项独立 try/except；config 失败立即中止
+commands → provider → skills & rules → log level，逐项独立 try/except；config 失败立即中止
 （后续项不再尝试），其余项失败继续——**步骤顺序与逐项 detail 是对外契约**
 （probe ``test_system_reload`` 抓名字序与逐项 ok）。config 项内部还包含一步
 ``sm.reload_templates()``（模板管理器跟随新 config 重建，见 ``SessionManager.reload_templates``）。
+``log level`` 是 03 追加的**末项**（既有五项的名字与顺序不许动）：``setup_logger`` 幂等重挂
+handler，把声明的 ``log.level: hot`` 兑现到运行期。
 
 纯移动：``ReloadResult`` / ``ReloadResultItem`` 与流程体逐字来自 runtime，唯一
 机械差异是 ``self.sm`` → 参数 ``sm``（调用侧 ``WingRuntime.reload_system()`` 只
@@ -49,7 +51,7 @@ class ReloadResult:
 
 
 async def reload_system(sm: SessionManager) -> ReloadResult:
-    """热重载全局配置、hooks、prompt commands、provider、skills & rules。
+    """热重载全局配置、hooks、prompt commands、provider、skills & rules、log level。
 
     config 加载失败时立即中止。其余项失败时继续。
     """
@@ -104,6 +106,20 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
         items.append(ReloadResultItem(name="skills & rules", ok=True))
     except Exception as e:
         items.append(ReloadResultItem(name="skills & rules", ok=False, detail=str(e)))
+
+    # log level：追加在**末尾**（既有五项的名字与顺序是对外契约，probe 钉住）。
+    # setup_logger 幂等（handlers.clear() 后重挂），所以「保存即生效」——
+    # 这是声明层把 log.level 标成 hot 的运行期依据。
+    try:
+        from wing.common.logger import setup_logger
+        from wing.request_context import get_request_context
+
+        # context= 必须重传：#179 之后日志的 session / request 关联段由 provider 逐条现取，
+        # 而 setup_logger 会 handlers.clear() 后重挂——不传就等于热重载把关联段抹掉。
+        setup_logger(level=config.log.level, context=get_request_context)
+        items.append(ReloadResultItem(name="log level", ok=True))
+    except Exception as e:
+        items.append(ReloadResultItem(name="log level", ok=False, detail=str(e)))
 
     all_ok = all(item.ok for item in items)
     return ReloadResult(ok=all_ok, items=items)

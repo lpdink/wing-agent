@@ -406,3 +406,18 @@ def test_logged_request_exposes_body_and_context() -> None:
     log.clear()
     assert len(log) == 0
     assert log.summary() == "0 requests"
+
+
+def test_request_log_records_normalized_headers() -> None:
+    """入站请求头留档（小写键）——密文断言的证据面：``authorization`` 逐字可得。
+
+    HTTP 头不区分大小写，所以留档统一折成小写键；缺省（未给 headers）是空映射，
+    既有调用点不受影响。
+    """
+    log = RequestLog()
+    entry = log.record(
+        make_body(), model=MODEL, headers={"Authorization": "Bearer k", "X-Trace": "t"}
+    )
+    assert entry.headers == {"authorization": "Bearer k", "x-trace": "t"}, entry.headers
+    assert log.record(make_body(), model=MODEL).headers == {}
+    assert log.record(make_body(), model=MODEL, headers={}).headers == {}

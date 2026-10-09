@@ -427,7 +427,7 @@ class TestDefaultMaxBytes:
     "= 上限可读"变红）。fixture 字节数与默认值同源，改动必须一起改。
     """
 
-    #: 默认上限的字节数（4.5 MiB）——与 config.py / default_config.py 同值。
+    #: 默认上限的字节数（4.5 MiB）——与 config/models.py 的声明同值。
     DEFAULT_MAX_BYTES = 4_718_592
 
     @pytest.mark.asyncio

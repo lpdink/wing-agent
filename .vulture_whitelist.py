@@ -22,6 +22,9 @@ workdir
 skills_info
 service
 default_agent
+# Setting API 的 setup_mode（get / status 两个响应模型的字段）：本期恒 False
+# （网关只在配置合法时才活着），消费方是序列化之后的前端；04 让它变真。
+setup_mode
 
 # 链上事件与工具 schema 字段
 created_at
@@ -33,6 +36,15 @@ multi_select
 # audit 指标 entry：写入由 aggregate() 完成，读出经 model_dump
 tokens_per_sec_total
 tokens_per_sec_count
+
+# ── 配置问题分类（wire 词表）──────────────────────────────────────────
+# `ProblemKind` 是加载期 / 设置面板 / CLI 共用的分类词表（协议面）。
+# `invalid_value` 的产出方是 03 的 `document.locate_problems`（字段级错误翻译）与
+# 坏文档问题——它已被真实引用，**不再需要白名单**（名字进白名单 = 放弃对它的检查）。
+# `unknown_key` 至今没有产出方：未知键是**前向兼容记录**（原样保留并写回），不是配置
+# 错误，把它计入 problems 会让「新版本写的键 → 旧面板拒绝启动」（03 design.md
+# Assumptions 8）。词表成员保留，白名单因此也保留。
+UNKNOWN_KEY
 
 # ── pytest 插件钩子 ────────────────────────────────────────────────────
 # pytest 按名字调用，没有静态引用。

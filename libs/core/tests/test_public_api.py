@@ -56,12 +56,14 @@ assert event_bus.subscriber_count == 1, event_bus.subscriber_count
 print("ok")
 """
 
-# 组合根安装契约（S1）：全新进程走真实入口链（临时 WING_HOME → 落默认模板 →
+# 组合根安装契约（S1）：全新进程走真实入口链（临时 WING_HOME → 写一份合法配置 →
 # load_config → WingRuntime()），断言两件事在构造后成立：
-#   1. 默认模板的工具（9 个）能被解析出来 —— 即工具注册确实在
+#   1. 这份配置声明的工具（9 个）能被解析出来 —— 即工具注册确实在
 #      SessionManager/AgentTemplateManager 构造之前完成；
 #   2. metrics 订阅恰为 1（仅 metrics；SessionReaper 的订阅在 gateway attach）。
 # 只钉「WingRuntime() 会安装」这一侧：这侧在同进程内不可断言（conftest 已装）。
+# 配置文本是显式写下的（不再用首启模板——模板现在是「providers/agents 空」的天然 problem，
+# 由 setup 向导消费，不是一份能直接跑的配置）。
 _RUNTIME_PROBE = """
 import os
 import tempfile
@@ -72,11 +74,22 @@ with tempfile.TemporaryDirectory(prefix="wing-runtime-probe-") as tmp:
     os.environ["WING_SESSIONS_PATH"] = str(Path(tmp) / "sessions")
 
     from wing.config import load_config
-    from wing.config import DEFAULT_CONFIG_YAML
 
     config_path = Path(tmp) / "core" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(DEFAULT_CONFIG_YAML, encoding="utf-8")
+    config_path.write_text(
+        "providers:\\n"
+        "  - name: probe\\n"
+        "    base_url: http://127.0.0.1:1/v1\\n"
+        "    api_key: probe-key\\n"
+        "    models: [probe-model]\\n"
+        "agents:\\n"
+        "  - name: default\\n"
+        "    model: probe-model\\n"
+        "    tools: [Bash, Read, ReadImage, Write, Edit, Glob, Grep,"
+        " AskUserQuestion, TodoWrite]\\n",
+        encoding="utf-8",
+    )
     load_config()
 
     from wing.event_bus import event_bus

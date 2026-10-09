@@ -4,17 +4,30 @@
 LLM 请求长什么样"。检索维度：model 名 + 序号（全局序号与同 model 内序号）。
 
 ``LoggedRequest`` 冻结原始 body（不做任何规范化）；需要规范化视图时走
-``LoggedRequest.context()`` → ``ContextView``。
+``LoggedRequest.context()`` → ``ContextView``。**请求头**（``headers``）也留档：
+「网关实际用哪份凭据调用上游」是密文语义（§7.5：`null` = 保留现值）唯一可观测的
+证据面——body 里没有凭据，只有请求头的 ``Authorization`` 有。
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from wing_probe.provider.context import ContextView
+
+
+def normalize_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """入站请求头 → 小写键字典（HTTP 头不区分大小写；断言侧不必再折叠）。
+
+    值原样保留（含 ``Bearer <key>``）；同名头只留最后一个（重复头在语义上等价于
+    逗号连接，这里不需要那个精度）。
+    """
+    if not headers:
+        return {}
+    return {str(key).lower(): str(value) for key, value in headers.items()}
 
 
 @dataclass(frozen=True)
@@ -38,6 +51,13 @@ class LoggedRequest:
     主 provider 是 ``/v1/chat/completions``；附加 provider（跨 provider 场景）
     是 ``/<name>/v1/chat/completions``——「这次调用打到哪个 provider 的端点」
     因此是可断言事实。剧本仍按**调用名**路由（同名调用名共用一条剧本队列）。
+    """
+    headers: Mapping[str, str] = field(default_factory=dict)
+    """入站请求头（**小写键**；见 :func:`normalize_headers`）。
+
+    密文断言的证据面：``headers["authorization"] == f"Bearer {key}"`` 是
+    「这次调用用的是哪把钥匙」的唯一可观测事实（假 Provider 不校验它）。
+    刻意**不进**失败现场转储（``probe.dump``）：artifacts 不该出现凭据。
     """
 
     @property
@@ -77,10 +97,11 @@ class RequestLog:
         *,
         model: str,
         path: str = "",
+        headers: Mapping[str, str] | None = None,
         at: float | None = None,
         at_wall: float | None = None,
     ) -> LoggedRequest:
-        """记录一次请求（原样保留 body），返回留档条目。"""
+        """记录一次请求（原样保留 body 与请求头），返回留档条目。"""
         entry = LoggedRequest(
             index=len(self._requests),
             model=model,
@@ -89,6 +110,7 @@ class RequestLog:
             at_wall=time.time() if at_wall is None else at_wall,
             model_index=len(self.by_model(model)),
             path=path,
+            headers=normalize_headers(headers),
         )
         self._requests.append(entry)
         return entry

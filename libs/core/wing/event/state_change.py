@@ -2,7 +2,8 @@
 
 """
 状态变更事件：session 生命周期、压缩、中断等。
-也包括 SyncSessionEvent——它同步 session 的完整状态。
+也包括 SyncSessionEvent——它同步 session 的完整状态，以及网关级的
+SettingsChangedEvent（配置保存事务的回执广播）。
 """
 
 from __future__ import annotations
@@ -113,6 +114,38 @@ class CompactDoneEvent(WingEvent):
     original_tokens: int
     compressed_tokens: int
     model: str = ""
+
+
+# ============================================================
+# 网关级状态变更（不属于任何 session）
+# ============================================================
+
+
+class SettingsChangedEvent(WingEvent):
+    """网关配置已变更（``runtime.apply_settings`` 事务成功后广播）。
+
+    **网关级通知，不属于任何会话**：``target = EventTarget(scope="global")``
+    （所有已连接客户端都该知道配置变了——面板据此提示「配置已被其它客户端修改」）。
+
+    不落盘也**不进** ``FACT_EVENTS``：它不是某个会话链上的事实，而是时点信号
+    （"配置刚变了、新指纹是 X"）。客户端重连后正确的做法是重新 ``GET
+    /api/settings/status``，重放一条旧通知只会误导（见 ``event/__init__.py``
+    对两个集合的区分）。
+
+    消费方不需要判断"这是不是我自己刚触发的那一次"——比指纹就够了：
+    自己的保存会更新本地指纹，指纹相同即忽略。
+
+    - ``changed`` / ``restart_required``：规范路径列表（不含值——值一律不进事件）。
+    - ``setup_mode_exited``：这次保存是否让网关从 setup mode 转入正常模式（04 才可能为真）。
+    - ``fingerprint``：落盘后的新指纹（乐观并发的比较基准）。
+    """
+
+    type: Literal["settings_changed"] = "settings_changed"
+    persist: ClassVar[bool] = False
+    changed: list[str]
+    restart_required: list[str]
+    setup_mode_exited: bool = False
+    fingerprint: str
 
 
 # ============================================================
