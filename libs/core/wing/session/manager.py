@@ -40,6 +40,7 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.commands import expand_prompt_command
+from wing.request_context import session_context
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
@@ -723,12 +724,17 @@ class SessionManager:
         return True
 
     async def _teardown(self, session: Session, reason: str) -> None:
-        """拆解会话运行期资源并记一行日志（异常不逃逸）。"""
-        try:
-            await session.aclose()
-        except Exception as e:
-            log.error(f"Session teardown failed ({session.session_id}): {e}")
-        log.info(f"Session evicted: {session.session_id} ({reason})")
+        """拆解会话运行期资源并记一行日志（异常不逃逸）。
+
+        拆解跑在独立任务里（reaper sweep / release 端点都不携带上下文）——
+        显式绑定 session，让拆解链路的日志自动带上归属。
+        """
+        with session_context(session.session_id):
+            try:
+                await session.aclose()
+            except Exception as e:
+                log.error(f"Session teardown failed ({session.session_id}): {e}")
+            log.info(f"Session evicted: {session.session_id} ({reason})")
 
     def evict_idle_sessions(
         self, ttl_seconds: float, now: float | None = None

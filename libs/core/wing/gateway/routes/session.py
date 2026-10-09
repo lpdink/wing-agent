@@ -46,6 +46,7 @@ from wing.gateway.protocol import (
 from wing.gateway.projection import build_session_branches, build_session_info
 from wing.common.utils import InvalidInputError
 from wing.common.logger import log
+from wing.request_context import session_context
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -406,24 +407,27 @@ async def compact_session(
     request: Request,
 ) -> CompactResponse:
     server = _get_server(request)
-    try:
-        original, compressed = await asyncio.wait_for(
-            server.runtime.compact_session(body.session_id, body.instruction),
-            timeout=1200.0,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="compact timed out (1200s)")
-    except LookupError:
-        raise HTTPException(status_code=404, detail="session not found")
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        log.error(f"compact failed: {e}")
-        raise HTTPException(status_code=500, detail=f"compact failed: {e}")
+    # 压缩是会话级操作：绑定归属，压缩链路的日志（含下面的失败日志）自动
+    # 带上 session；缺失该绑定时这些行只能靠 message 文本对号入座。
+    with session_context(body.session_id):
+        try:
+            original, compressed = await asyncio.wait_for(
+                server.runtime.compact_session(body.session_id, body.instruction),
+                timeout=1200.0,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="compact timed out (1200s)")
+        except LookupError:
+            raise HTTPException(status_code=404, detail="session not found")
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            log.error(f"compact failed: {e}")
+            raise HTTPException(status_code=500, detail=f"compact failed: {e}")
 
-    return CompactResponse(
-        ok=True, original_tokens=original, compressed_tokens=compressed
-    )
+        return CompactResponse(
+            ok=True, original_tokens=original, compressed_tokens=compressed
+        )
 
 
 @router.post(

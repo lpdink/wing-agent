@@ -26,6 +26,11 @@ from wing.common.logger import (
     install_loop_exception_logger,
     setup_logger,
 )
+from wing.request_context import (
+    get_request_context,
+    reset_request_context,
+    set_request_context,
+)
 
 
 @pytest.fixture()
@@ -85,6 +90,8 @@ def test_daily_file_naming_and_new_symlink(
     assert "hello wing" in content
     # Grep-friendly prefix: every line starts with the local timestamp.
     assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - INFO - ", content)
+    # Path field is root-relative, not the absolute source path.
+    assert re.search(r" - INFO - .*tests/test_logger\.py:\d+ - hello wing", content)
 
     new_log = tmp_path / "new.log"
     assert new_log.is_symlink()
@@ -214,6 +221,119 @@ def test_relpath_is_cached_per_source_file(tmp_path: Path, _restore_logger) -> N
     # 用「 - <路径> - 」的字段边界断言，而不是子串：子串断言会被
     # `/etc → /private/etc` 这类 realpath 语义或相对路径实现蒙混过关。
     assert f" - {outside_path}:7 - " in outside
+
+
+def _production_formatter(logger: logging.Logger):
+    """取 setup_logger 挂上的 formatter（= 生产 root 计算逻辑本体）。"""
+    from wing.common.logger import _PathFormatter
+
+    return next(
+        handler.formatter
+        for handler in logger.handlers
+        if isinstance(handler.formatter, _PathFormatter)
+    )
+
+
+def test_package_files_render_relative_to_wing_package(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """包内源码渲染为 ``wing/...`` 相对形态（回归：root 曾算成 wing/common）。
+
+    除 ``wing/common/`` 自身外，旧 root 让所有文件 `relative_to` 失败、整片
+    回退绝对路径（安装态下就是 site-packages 长路径）。这里直接用生产
+    formatter 格式化一条「源码位于 wing/provider/openai/provider.py」的记录
+    ——root 的正确性必须由生产表达式负责，而不是测试里复刻的近似式。
+    """
+    setup_logger(log_dir=tmp_path)
+    formatter = _production_formatter(_restore_logger)
+
+    provider_file = (
+        Path(__file__).resolve().parents[1]
+        / "wing"
+        / "provider"
+        / "openai"
+        / "provider.py"
+    )
+    record = logging.LogRecord(
+        name="wing",
+        level=logging.INFO,
+        pathname=str(provider_file),
+        lineno=328,
+        msg="[DONE] openai_compat response header received",
+        args=(),
+        exc_info=None,
+    )
+    line = formatter.format(record)
+
+    assert " - wing/provider/openai/provider.py:328 - " in line
+    assert str(provider_file) not in line
+
+
+def test_correlation_section_rendered_from_context(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """session / request id 从协程上下文逐条读取并标注在行内。"""
+    setup_logger(log_dir=tmp_path, context=get_request_context)
+
+    token = set_request_context(
+        session_id="20261009-223452-932fd6d1", request_id="wing_12"
+    )
+    try:
+        _log("hello correlation")
+    finally:
+        reset_request_context(token)
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert re.search(
+        r" - INFO - \[20261009-223452-932fd6d1 wing_12\] - "
+        r"tests/test_logger\.py:\d+ - hello correlation$",
+        content,
+        re.MULTILINE,
+    ), content
+
+
+def test_correlation_renders_only_available_ids(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """只有一个 id 时只标注一个；都没有时整段省略（不留空壳）。"""
+    setup_logger(log_dir=tmp_path, context=get_request_context)
+
+    for context, message in [
+        ({"session_id": "sid-only"}, "session only"),
+        ({"request_id": "rid-only"}, "request only"),
+    ]:
+        token = set_request_context(**context)
+        try:
+            _log(message)
+        finally:
+            reset_request_context(token)
+    _log("no context")
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert " - INFO - [sid-only] - tests/test_logger.py:" in content
+    assert " - INFO - [rid-only] - tests/test_logger.py:" in content
+    # 无上下文的行保持既有形状：级别后直接是路径字段。
+    assert re.search(
+        r" - INFO - tests/test_logger\.py:\d+ - no context$", content, re.MULTILINE
+    )
+    assert "[]" not in content
+
+
+def test_context_provider_failure_degrades_to_no_section(
+    tmp_path: Path, _restore_logger: logging.Logger
+) -> None:
+    """provider 抛错按「无上下文」处理——日志格式化不得外溢异常。"""
+
+    def boom():
+        raise RuntimeError("provider down")
+
+    setup_logger(log_dir=tmp_path, context=boom)
+    _log("survived")
+
+    content = (tmp_path / "new.log").read_text(encoding="utf-8")
+    assert re.search(
+        r" - INFO - tests/test_logger\.py:\d+ - survived$", content, re.MULTILINE
+    ), content
 
 
 @pytest.fixture()
