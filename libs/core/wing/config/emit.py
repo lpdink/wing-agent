@@ -27,12 +27,17 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from .catalog import SettingKind, SettingNode
 from .spec import ApplyScope
+
+if TYPE_CHECKING:
+    # 只在类型层需要（运行时只用属性访问）：document 依赖 emit 的 _item_template，
+    # 这里是反向引用，必须避免循环 import。
+    from .document import ExtraKey
 
 _MISSING = object()
 """稀疏文档里的「键缺席」（与显式 ``None`` 区分：``null`` 是用户写下的值）。"""
@@ -63,15 +68,16 @@ def default_document() -> dict[str, Any]:
 def emit_config_yaml(
     data: dict[str, Any],
     catalog: SettingNode,
-    extra: list[tuple[str, Any]] | None = None,
+    extra: list[ExtraKey] | None = None,
 ) -> str:
     """稀疏文档 + catalog → 规范形 YAML 文本（默认模板与保存写盘共用）。
 
     Args:
         data: 稀疏文档（只有用户显式写下的键；``{}`` = 空文件）。
         catalog: ``build_catalog()`` 的产物（根节点）。
-        extra: schema 之外的未知键 ``(规范路径, 原始值)``；由其**父路径**定位，
-            写在该容器已知键之后（找不到容器的条目兜底追加在文件末尾——绝不丢用户的键）。
+        extra: schema 之外的未知键（``document.ExtraKey``：父前缀 + 原始键名 + 值）；
+            由**父前缀**定位，写在该容器已知键之后（找不到容器的条目兜底追加在文件末尾
+            ——绝不丢用户的键）。
     """
     out: list[str] = list(_HEADER)
     out.append("")
@@ -442,16 +448,20 @@ def _emit_raw_item(out: list[str], item: Any, indent: int, commented: bool) -> N
 
 
 class _Extras:
-    """schema 之外的未知键，按父路径归类；``take`` 过的父路径算「已归位」。"""
+    """schema 之外的未知键，按**父容器前缀**归类；``take`` 过的父路径算「已归位」。
 
-    def __init__(self, extra: list[tuple[str, Any]] | None) -> None:
+    消费 ``document.ExtraKey`` 三元组：父前缀在读取时结构性拼接、键名不参与切分
+    （审查 A2——这里曾经用 ``rpartition(".")`` 反推边界，键名含点时会把键挪到错误的名字 /
+    位置）。不做任何字符串解析，坏形态在类型层就不可表达。
+    """
+
+    def __init__(self, extra: list[ExtraKey] | None) -> None:
         self._by_parent: dict[str, list[tuple[str, Any]]] = {}
         self._consumed: set[str] = set()
-        for path, value in extra or []:
-            parent, _, key = path.rpartition(".")
-            if not key:
-                continue
-            self._by_parent.setdefault(parent, []).append((key, value))
+        for entry in extra or []:
+            self._by_parent.setdefault(entry.parent, []).append(
+                (entry.key, entry.value)
+            )
 
     def take(self, parent: str) -> list[tuple[str, Any]]:
         self._consumed.add(parent)

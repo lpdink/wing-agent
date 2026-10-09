@@ -88,6 +88,14 @@ UNPARSEABLE_CONFIG_WARNING = "原配置文件无法解析，其中的密钥无�
 在保存后静默失去一个 provider 的凭据。
 """
 
+DROPPED_SECRET_WARNING = "无法确定 {path} 属于哪一项（列表结构变化且无法按身份配对），已移除该密钥，请重新填写"
+"""密文哨兵因无法安全配对而被丢弃时的回执警告（审查 A1 的第 3 点）。
+
+比错配轻、比静默重：**宁可不猜**——列表删 / 移 / 前插后配不上的密钥一律移除
+（必填字段随之成为 problem，保存被拦住），并在回执里点名路径 + 要求重填；
+绝不把 A 的密钥按旧下标写给 B。逐条（一条路径一条）与面板 / CLI 的逐条渲染对齐。
+"""
+
 
 class SettingsConflictError(RuntimeError):
     """保存的基线指纹与磁盘现状不符（乐观并发冲突）。路由据此回 409。
@@ -658,7 +666,17 @@ class WingRuntime:
             raise SettingsConflictError(current_fp.value)
 
         # ③ 密文回填：null = 保留磁盘现值（真实值只在这里被读、从不回显）。
-        incoming = resolve_secrets(SparseDocument(data=document), current_doc, catalog)
+        #    列表项按**身份**配对（identity_field）；配不上且长度变化 → 宁可不猜：
+        #    该密钥被丢弃（必填 → problem），并且**必须让用户看见**（审查 A1：
+        #    静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
+        resolution = resolve_secrets(
+            SparseDocument(data=document), current_doc, catalog
+        )
+        incoming = resolution.document
+        warnings.extend(
+            DROPPED_SECRET_WARNING.format(path=path)
+            for path in resolution.dropped_secrets
+        )
 
         # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
         raw = merge_with_defaults(incoming, catalog)

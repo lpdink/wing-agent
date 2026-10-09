@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, get_args
+from typing import Any, Literal, NamedTuple, get_args
 
 import yaml
 from pydantic import BaseModel, ValidationError
@@ -57,16 +57,48 @@ _MISSING = object()
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class ExtraKey(NamedTuple):
+    """schema 之外的未知键（前向兼容，原样写回）：``(父容器前缀, 原始键名, 值)``。
+
+    父前缀在递归遍历时拼接、**键名不参与任何字符串切分**——键名本身含点（``foo.bar``）、
+    就是 ``.``、或以点开头结尾时仍能精确归位。审查 A2 的教训：靠 ``rpartition(".")``
+    事后反推边界，会把 ``gateway.foo.bar`` 误判成父 ``gateway.foo`` 下的 ``bar``，
+    保存一次即把键挪到错误的名字 / 位置（违反 D17 的前向兼容承诺）。
+    """
+
+    parent: str
+    """父容器规范前缀（``gateway`` / ``providers[0]``；根层 = ``""``）。"""
+    key: str
+    """原始键名（**非字符串键在读取时就转成字符串**，见 :func:`_split_known`）。"""
+    value: Any
+    """原样的值（不解释，写回时不丢形态）。"""
+
+
 @dataclass(frozen=True)
 class SparseDocument:
     """``config.yaml`` 的稀疏视图：只有用户显式写下的键。
 
-    ``data`` 只含声明内的键（未知键在读取时就分离进 ``extra``）；``extra`` 是其
-    父容器路径 + 键名（``gateway.weird`` / ``providers[0].foo``），由 emitter 原样写回。
+    ``data`` 只含声明内的键（未知键在读取时就分离进 ``extra``）；``extra`` 是它的
+    父容器前缀 + **原始键名** + 值（:class:`ExtraKey`，键名不参与切分），由 emitter
+    在原父容器末尾原样写回。
     """
 
     data: dict[str, Any]
-    extra: list[tuple[str, Any]] = field(default_factory=list)
+    extra: list[ExtraKey] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SecretResolution:
+    """``resolve_secrets`` 的产物：解析后的稀疏文档 + 因无法配对而丢弃的密文路径。
+
+    显式建模（不是全局状态、不是异常）：丢弃是**正常结果**——列表结构变了又没有可用的
+    身份配对时，宁可让用户重填一次，也不把 A 的密钥猜给 B（总设计 §7.5 / 审查 A1）。
+    丢弃路径由回执变成用户可见的 ``warnings``（``runtime.apply_settings``）。
+    """
+
+    document: SparseDocument
+    dropped_secrets: list[str] = field(default_factory=list)
+    """``null`` 哨兵因无法安全配对而被移除的**规范路径**（含具体下标，文档序）。"""
 
 
 @dataclass(frozen=True)
@@ -139,29 +171,34 @@ def read_document() -> tuple[SparseDocument, ConfigFingerprint]:
             fingerprint.value,
         )
 
-    extra: list[tuple[str, Any]] = []
+    extra: list[ExtraKey] = []
     data = _split_known(build_catalog(), parsed, "", extra)
     return SparseDocument(data=data, extra=extra), fingerprint
 
 
 def _split_known(
-    node: SettingNode, value: Any, path: str, extra: list[tuple[str, Any]]
+    node: SettingNode, value: Any, path: str, extra: list[ExtraKey]
 ) -> Any:
     """递归把 schema 之外的键收进 ``extra``（freeform map 的内部键不算未知键）。
 
-    未知键**不丢**（总设计 D17）：路径带上父容器（``gateway.weird``），emitter 据此
-    在父节末尾原样写回。
+    未知键**不丢**（总设计 D17）：记录 ``(父容器前缀, 原始键名, 值)`` 三元组（:class:`ExtraKey`）
+    ——前缀在这里拼接，**键名不参与任何切分**（审查 A2），emitter 据此在父容器末尾原样写回。
+
+    **非字符串键在记录时就转成字符串**（YAML 的裸数字 / bool / 日期会被解析成对应类型）：
+    这不是保真度的退让，而是修复路径的前提——`Config(**raw)` 只接受字符串关键字
+    （`TypeError: keywords must be strings`，AD12 的显式守卫），把一个 int 键原样写回文件
+    会让「面板保存修好配置」这条路径永远修不好（probe 场景
+    ``test_numeric_top_level_key_boots_degraded_and_repairs`` 钉住）。字符串键一个字符都不变。
     """
     if node.kind is SettingKind.OBJECT and isinstance(value, dict):
         known = {child.key: child for child in node.children}
         out: dict[Any, Any] = {}
         for key, item in value.items():
-            child_path = _join(path, key)
             child = known.get(key)
             if child is None:
-                extra.append((child_path, item))
+                extra.append(ExtraKey(parent=path, key=str(key), value=item))
             else:
-                out[key] = _split_known(child, item, child_path, extra)
+                out[key] = _split_known(child, item, _join(path, key), extra)
         return out
     if node.kind is SettingKind.LIST and isinstance(value, list):
         out_list: list[Any] = []
@@ -237,21 +274,33 @@ def _materialize_default(node: SettingNode) -> Any:
 
 def resolve_secrets(
     incoming: SparseDocument, current: SparseDocument, catalog: SettingNode
-) -> SparseDocument:
-    """密文三态回填（总设计 §7.5）：``null`` → 取 current 的值；字符串 → 保留；缺席 → 不覆盖。
+) -> SecretResolution:
+    """密文三态回填（总设计 §7.5）：``null`` → 取 current 的对应值；字符串 → 保留；缺席 → 不覆盖。
 
-    - ``null`` 是「保留磁盘现值」的哨兵（前端从 ``get`` 拿到的就是它，必须原样回传）；
-      current 也没有该值时，键从文档里**移除**（必填字段随之成为 problem，绝不静默清空）。
+    - ``null`` 是「保留磁盘现值」的哨兵（前端从 ``get`` 拿到的就是它，必须原样回传）。
+      **对应值按身份配对**（列表节点声明的 ``identity_field``，见 :func:`_resolve`）——
+      删 / 移 / 前插列表项后密钥跟自己的项走，绝不按下标硬配（审查 A1：按下标会把
+      A 的密钥**静默**写给 B，用户下次调用才发现 401 或打错账号）。
+    - current 也没有该值时，键从文档里**移除**（必填字段随之成为 problem，绝不静默清空）；
+      若这个「没有」是因为列表结构变了、无法确定该值属于哪一项，路径进
+      :attr:`SecretResolution.dropped_secrets`，由回执变成用户可见的警告（宁可不猜）。
     - 键缺席 = 该项不被覆盖（从文件移除）。
-    - 返回**新**文档（不改入参：``data`` 的容器逐层重建，未触碰的子树按引用共享——只读）。
+    - 返回 :class:`SecretResolution`（不改入参：``data`` 的容器逐层重建，
+      未触碰的子树按引用共享——只读）。
     """
-    data = _resolve(catalog, incoming.data, current.data)
-    return SparseDocument(
-        data=data if isinstance(data, dict) else {}, extra=incoming.extra
+    dropped: list[str] = []
+    data = _resolve(catalog, incoming.data, current.data, "", dropped)
+    return SecretResolution(
+        document=SparseDocument(
+            data=data if isinstance(data, dict) else {}, extra=incoming.extra
+        ),
+        dropped_secrets=dropped,
     )
 
 
-def _resolve(node: SettingNode, value: Any, current: Any) -> Any:
+def _resolve(
+    node: SettingNode, value: Any, current: Any, path: str, dropped: list[str]
+) -> Any:
     if node.secret and node.kind is SettingKind.SECRET:
         if value is None:
             return _MISSING if current is _MISSING else current
@@ -267,26 +316,169 @@ def _resolve(node: SettingNode, value: Any, current: Any) -> Any:
             current_item = (
                 current.get(key, _MISSING) if isinstance(current, dict) else _MISSING
             )
-            resolved = _resolve(child, item, current_item)
+            resolved = _resolve(child, item, current_item, _join(path, key), dropped)
             if resolved is not _MISSING:
                 out[key] = resolved
         return out
     if node.kind is SettingKind.LIST and isinstance(value, list):
-        current_list = current if isinstance(current, list) else []
-        out_list: list[Any] = []
-        for index, item in enumerate(value):
-            template = _item_template(node, item)
-            if template is None:
-                out_list.append(item)
-                continue
-            current_item = (
+        return _resolve_list(node, value, current, path, dropped)
+    return value
+
+
+def _resolve_list(
+    node: SettingNode, value: list[Any], current: Any, path: str, dropped: list[str]
+) -> list[Any]:
+    """LIST 分支的三段式配对（顺序即优先级，审查 A1 的裁定）：
+
+    (a) **身份配对**：节点声明了 ``identity_field`` 时按它建「身份 → current 项」映射，
+        incoming 项按自己的身份查表（身份在 current 侧重名 ⇒ 该身份不可用，落 (c)）；
+    (b) **安全的下标回落**：**仅当** ``len(incoming) == len(current)`` 时，对 (a) 没配上的
+        项按下标配对——覆盖「重命名」（身份变了但结构没变），今天的行为不许退化；
+    (c) **不猜**：其余情况该子树以「无现值」解析（``null`` 哨兵被移除，必填字段随之成为
+        problem），并记录真实损失（:func:`_record_dropped`）。
+
+    **长度不等时绝不按下标配对**是本函数的核心不变量——那正是 A1 的 bug。
+    """
+    current_list = current if isinstance(current, list) else []
+    positions, duplicated = _identity_index(node.identity_field, current_list)
+    length_equal = len(value) == len(current_list)
+
+    # (a) 先对**全部** incoming 项做身份判定：consumed（被配走的 current 下标）用于
+    # (c) 的影子判定——一个已被别人按身份领走的项不是孤儿，不能算作损失。
+    matched: list[int | None] = []
+    unusable: list[bool] = []
+    for item in value:
+        position, ambiguous = _identity_match(
+            node.identity_field, item, positions, duplicated
+        )
+        matched.append(position)
+        unusable.append(ambiguous)
+    consumed = {position for position in matched if position is not None}
+
+    out_list: list[Any] = []
+    for index, item in enumerate(value):
+        template = _item_template(node, item)
+        if template is None:
+            out_list.append(item)
+            continue
+        item_path = f"{path}[{index}]"
+        position = matched[index]
+        current_item: Any
+        if position is not None:
+            current_item = current_list[position]  # (a)
+        elif length_equal and not unusable[index]:
+            current_item = (  # (b)
                 current_list[index] if index < len(current_list) else _MISSING
             )
-            resolved = _resolve(template, item, current_item)
-            if resolved is not _MISSING:
-                out_list.append(resolved)
-        return out_list
-    return value
+        else:
+            current_item = _MISSING  # (c)
+            _record_dropped(
+                template,
+                item,
+                _shadow(index, current_list, consumed),
+                item_path,
+                dropped,
+            )
+        resolved = _resolve(template, item, current_item, item_path, dropped)
+        if resolved is not _MISSING:
+            out_list.append(resolved)
+    return out_list
+
+
+def _identity_index(
+    identity_field: str | None, current_list: list[Any]
+) -> tuple[dict[str, int], set[str]]:
+    """current 列表 → ``{身份值: 下标}`` 映射 + 重名身份集合（重名 = 不可用）。
+
+    只收录**非空字符串**身份（别的形态不是身份）。重名在合法配置里不可能出现
+    （跨字段检查拒重复 provider name），但代码 defensive：该身份整体不可用，
+    落 (c)——绝不猜重复项里的哪一个（审查 A1 的裁定）。
+    """
+    positions: dict[str, int] = {}
+    duplicated: set[str] = set()
+    if identity_field is None:
+        return positions, duplicated
+    for index, item in enumerate(current_list):
+        if not isinstance(item, dict):
+            continue
+        value = item.get(identity_field)
+        if not isinstance(value, str) or not value:
+            continue
+        if value in positions:
+            duplicated.add(value)
+        positions[value] = index
+    return positions, duplicated
+
+
+def _identity_match(
+    identity_field: str | None,
+    item: Any,
+    positions: dict[str, int],
+    duplicated: set[str],
+) -> tuple[int | None, bool]:
+    """incoming 项 →（(a) 配对到的 current 下标 / ``None``，身份是否「重名不可用」）。"""
+    if identity_field is None or not isinstance(item, dict):
+        return None, False
+    value = item.get(identity_field)
+    if not isinstance(value, str) or not value:
+        return None, False
+    if value in duplicated:
+        return None, True
+    return positions.get(value), False
+
+
+def _shadow(index: int, current_list: list[Any], consumed: set[int]) -> Any:
+    """(c) 分支的影子：同下标的 current 项；不存在或已被别的项按身份配走 ⇒ ``_MISSING``。
+
+    影子只用于回答「是不是真有值被丢」（:func:`_record_dropped`）——**绝不**被当成配对来源
+    （那会重新引入下标配对，正是 A1）。
+    """
+    if index < len(current_list) and index not in consumed:
+        return current_list[index]
+    return _MISSING
+
+
+def _record_dropped(
+    template: SettingNode, item: Any, shadow: Any, path: str, dropped: list[str]
+) -> None:
+    """(c) 分支的损失记录：``null`` 密文哨兵 × 影子在同路径有非空值 → 记一条路径。
+
+    影子没有值（新增项 / 用户从没设过密钥 / 列表变长）时**不记录**——那是既有语义，
+    不是新损失（审查 A1 第 3 点的要求）。
+    """
+    if template.secret and template.kind is SettingKind.SECRET:
+        if item is None and _has_value(shadow):
+            dropped.append(path)
+        return
+    if template.kind is SettingKind.OBJECT and isinstance(item, dict):
+        known = {child.key: child for child in template.children}
+        for key, child_item in item.items():
+            child = known.get(key)
+            if child is None:
+                continue
+            child_shadow = (
+                shadow.get(key, _MISSING) if isinstance(shadow, dict) else _MISSING
+            )
+            _record_dropped(child, child_item, child_shadow, _join(path, key), dropped)
+    elif template.kind is SettingKind.LIST and isinstance(item, list):
+        shadow_list = shadow if isinstance(shadow, list) else []
+        for index, child_item in enumerate(item):
+            child_template = _item_template(template, child_item)
+            if child_template is None:
+                continue
+            child_shadow = shadow_list[index] if index < len(shadow_list) else _MISSING
+            _record_dropped(
+                child_template,
+                child_item,
+                child_shadow,
+                f"{path}[{index}]",
+                dropped,
+            )
+
+
+def _has_value(value: Any) -> bool:
+    """「磁盘上真的有一个可保留的密文值」：缺席 / ``null`` / 空串都不算。"""
+    return value is not _MISSING and value is not None and value != ""
 
 
 def secret_states(doc: SparseDocument, catalog: SettingNode) -> dict[str, SecretState]:
@@ -658,6 +850,8 @@ __all__ = [
     "ABSENT_FINGERPRINT",
     "ConfigDocumentError",
     "ConfigFingerprint",
+    "ExtraKey",
+    "SecretResolution",
     "SecretState",
     "SparseDocument",
     "changed_paths",
