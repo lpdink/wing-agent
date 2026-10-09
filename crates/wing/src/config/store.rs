@@ -24,6 +24,7 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 
 use crate::config::AppConfig;
+use crate::config::catalog::DumpMode;
 use crate::config::catalog::dump_config_yaml;
 
 /// 文件不存在时的指纹字面量（与后端同口径）。
@@ -138,7 +139,8 @@ pub(crate) fn read_interface_doc_from(path: &Path) -> Result<InterfaceDoc, Store
 
 /// 原子写 `$WING_HOME/tui/config.yaml`：`.bak` → tmp + `sync_all` + `rename`。
 ///
-/// 写盘内容 = [`dump_config_yaml`]（`--dump-config` 与保存共用同一个 emitter）。
+/// 写盘内容 = [`dump_config_yaml`] 的 [`DumpMode::Raw`] 输出（`--dump-config` 与保存共用同一个
+/// emitter，但模式相反：**保存永远写密文真值**，展示默认写掩码）。
 pub fn write_interface_doc(doc: &Value) -> Result<WriteOutcome, StoreError> {
     let path = interface_config_path().ok_or(StoreError::NoConfigPath)?;
     write_interface_doc_to(&path, doc)
@@ -148,15 +150,22 @@ pub fn write_interface_doc(doc: &Value) -> Result<WriteOutcome, StoreError> {
 pub(crate) fn write_interface_doc_to(path: &Path, doc: &Value) -> Result<WriteOutcome, StoreError> {
     let backup_path = if path.exists() {
         let backup = backup_path(path)?;
-        fs::copy(path, &backup).map_err(|e| StoreError::Write {
-            path: backup.clone(),
+        // 读旧文件 → 原子写：`fs::copy` 中途被杀会留下截断的备份（B2），这里与后端
+        // `common/fs.py::atomic_write_bytes` 同语义（`atomic_write` 只有文本版，
+        // 按既有口径不改它）。旧文件是配置文本，原样逐字节写回；非 UTF-8 的旧文件根本
+        // 进不了配置（`read_interface_doc_from` 同样拒绝），这里直接以 Read 错误拒绝整条保存。
+        let previous = fs::read_to_string(path).map_err(|e| StoreError::Read {
+            path: path.to_owned(),
             source: e,
         })?;
+        atomic_write(&backup, &previous)?;
         Some(backup)
     } else {
         None
     };
-    let text = dump_config_yaml(doc);
+    // **保存路径永远是 `Raw`**：写掩码 = 把用户的密钥换成掩码字符串 = 数据损坏。
+    // 展示路径（`--dump-config`）在 `cmd/mod.rs` 里显式传 `Masked`。
+    let text = dump_config_yaml(doc, DumpMode::Raw);
     atomic_write(path, &text)?;
     Ok(WriteOutcome {
         path: path.to_owned(),
@@ -456,8 +465,8 @@ mod tests {
         assert!(outcome.backup_path.is_none(), "首次写入没有可备份的旧文件");
         assert_eq!(
             read_text(&file),
-            dump_config_yaml(&doc),
-            "写盘内容 = catalog dump"
+            dump_config_yaml(&doc, DumpMode::Raw),
+            "写盘内容 = catalog dump（Raw）"
         );
         let read = read_interface_doc_from(&file).unwrap();
         assert_eq!(read.doc, doc, "写出去的是规范形，读回来还是同一份稀疏文档");
@@ -467,7 +476,7 @@ mod tests {
         let backup = outcome.backup_path.expect("第二次写入必须备份旧文件");
         assert_eq!(
             read_text(&backup),
-            dump_config_yaml(&doc),
+            dump_config_yaml(&doc, DumpMode::Raw),
             "备份 = 改前的文件"
         );
 
@@ -478,6 +487,95 @@ mod tests {
             .collect();
         entries.sort();
         assert_eq!(entries, ["config.yaml", "config.yaml.bak"]);
+    }
+
+    /// 含密文的样本（保存路径的不变量测试用）。
+    const SAVE_SECRET: &str = "sk-live-secret-1234";
+
+    /// **数据损坏级不变量**：保存路径写的是密文**真值**，不是掩码。
+    ///
+    /// `dump_config_yaml` 是 `--dump-config` 与保存共用的同一个 emitter——掩码只能出现在展示路径上
+    /// （`cmd/mod.rs` 显式传 `DumpMode::Masked`）。谁把 `store` 这边"顺手统一"成 Masked，
+    /// 用户的密钥就会被 8 个实心点覆盖，而且在用户下次 401 之前无人察觉。
+    #[test]
+    fn the_save_path_writes_the_real_secret_never_the_mask() {
+        let dir = TestDir::new("save-secret");
+        let file = dir.path("config.yaml");
+        let doc = json!({"api_key": SAVE_SECRET, "colors": {"accent": "#ff00ff"}});
+
+        write_interface_doc_to(&file, &doc).unwrap();
+        let text = read_text(&file);
+        assert!(text.contains(SAVE_SECRET), "保存要写真值：\n{text}");
+        assert!(!text.contains('•'), "保存路径不许出现掩码字符：\n{text}");
+        assert!(
+            !text.contains("已掩码"),
+            "保存路径不许出现掩码注释：\n{text}"
+        );
+        assert_eq!(
+            text,
+            dump_config_yaml(&doc, DumpMode::Raw),
+            "保存内容 = Raw 模式的规范形"
+        );
+        assert_ne!(
+            text,
+            dump_config_yaml(&doc, DumpMode::Masked),
+            "保存内容必须与展示（掩码）内容不同"
+        );
+        assert_eq!(
+            read_interface_doc_from(&file).unwrap().doc,
+            doc,
+            "真值仍在文档里，读回来逐值相等"
+        );
+
+        // 第二次保存：备份里也是真值（B2 的改动不许把掩码引进备份）。
+        let outcome = write_interface_doc_to(&file, &json!({"api_key": "sk-next-9999"})).unwrap();
+        let backup = read_text(&outcome.backup_path.expect("第二次写入备份旧文件"));
+        assert!(backup.contains(SAVE_SECRET), "备份要写真值：\n{backup}");
+        assert!(!backup.contains('•'), "备份里不许有掩码：\n{backup}");
+    }
+
+    /// B2：`.bak` 是改前文件的**逐字节**副本，且写它是原子写（读字节 → tmp + rename），
+    /// 不再用 `fs::copy`（拷贝中途被杀会留下截断的备份）。
+    #[test]
+    fn the_backup_is_the_previous_file_byte_for_byte() {
+        let dir = TestDir::new("backup-bytes");
+        let file = dir.path("config.yaml");
+        // 手写的、非规范形的旧文件：CRLF、行尾注释、奇怪的空白、未知键、明文密钥。
+        let hand_written = "# 手写文件（非规范形）\r\n\
+                            api_key: sk-live-secret-1234   # 行尾注释\r\n\
+                            \r\n\
+                            colors:\r\n    accent:   \"#ff00ff\"\r\n\
+                            unknown_key: 1\r\n";
+        fs::write(&file, hand_written).unwrap();
+
+        let outcome = write_interface_doc_to(&file, &json!({"layout": {"max_input_lines": 25}}))
+            .expect("write");
+        let backup = outcome.backup_path.expect("旧文件存在 → 必须备份");
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            hand_written.as_bytes(),
+            "备份必须逐字节等于改前文件（不重新序列化、不换行尾）"
+        );
+        // 主文件已被新内容原子替换。
+        assert_eq!(
+            read_interface_doc_from(&file).unwrap().doc,
+            json!({"layout": {"max_input_lines": 25}})
+        );
+    }
+
+    /// B2 不退化：目标不存在时**不产生** `.bak`（今天的行为）。
+    #[test]
+    fn no_backup_is_created_when_the_target_does_not_exist() {
+        let dir = TestDir::new("no-backup");
+        let file = dir.path("config.yaml");
+        let outcome = write_interface_doc_to(&file, &json!({"api_key": SAVE_SECRET})).unwrap();
+        assert!(outcome.backup_path.is_none(), "首次写入没有可备份的旧文件");
+        assert!(!dir.path("config.yaml.bak").exists());
+        let entries: Vec<String> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, ["config.yaml"], "目录里只有目标文件");
     }
 
     #[test]

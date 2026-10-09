@@ -309,9 +309,14 @@ impl AppConfig {
     /// its value); the `--dump-config` CLI and the settings panel's save path go through
     /// [`store`] instead, because they dump a *document* — sparse, i.e. only the keys the user
     /// actually wrote, with everything else left as commented defaults.
+    ///
+    /// [`catalog::DumpMode::Raw`]: a struct dump is a round-trip artifact, so secrets are written
+    /// verbatim (production has no caller; the one display surface — `wing tui --dump-config` —
+    /// goes through `store`, which picks the mode explicitly). Do not wire this into a display
+    /// path: it would print the real `api_key`.
     pub fn to_yaml(&self) -> String {
         match serde_json::to_value(self) {
-            Ok(doc) => catalog::dump_config_yaml(&doc),
+            Ok(doc) => catalog::dump_config_yaml(&doc, catalog::DumpMode::Raw),
             Err(_) => String::new(),
         }
     }
@@ -458,7 +463,10 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.colors.preset = ColorPreset::Terminal;
         cfg.colors.accent = Some("#ff00ff".into());
-        let dumped = crate::config::catalog::dump_config_yaml(&serde_json::to_value(&cfg).unwrap());
+        let dumped = crate::config::catalog::dump_config_yaml(
+            &serde_json::to_value(&cfg).unwrap(),
+            crate::config::catalog::DumpMode::Raw,
+        );
         assert!(dumped.contains("preset: Terminal"), "{dumped}");
         let parsed: AppConfig = serde_yaml::from_str(&dumped).unwrap();
         assert_eq!(parsed.colors.preset, ColorPreset::Terminal);
@@ -494,7 +502,10 @@ mod tests {
         let yaml = "colors:\n  math_mode: off\n";
         let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.colors.math_mode, MathMode::Text);
-        let dumped = crate::config::catalog::dump_config_yaml(&serde_json::to_value(&cfg).unwrap());
+        let dumped = crate::config::catalog::dump_config_yaml(
+            &serde_json::to_value(&cfg).unwrap(),
+            crate::config::catalog::DumpMode::Raw,
+        );
         assert!(dumped.contains("math: Text"), "dumped config: {dumped}");
         assert_eq!(dumped.matches("math_mode").count(), 0);
     }

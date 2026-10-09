@@ -9,9 +9,10 @@
 //! 1. **catalog 不许与 serde 漂移**：`interface_catalog_covers_every_serde_leaf` /
 //!    `interface_catalog_declares_no_phantom_key` 双向对账（机制不是纪律）。给 `AppConfig`
 //!    加字段忘了声明 → 红；声明了不存在的键 → 红。
-//! 2. **`dump_config_yaml` 是 `(doc, catalog)` 的纯函数**：不读 env、不写时间戳——round-trip
+//! 2. **`dump_config_yaml` 是 `(doc, catalog, mode)` 的纯函数**：不读 env、不写时间戳——round-trip
 //!    （`dump → 解析 → 再 dump` 逐字相同）与"空文档解析回 `AppConfig::default()`"
-//!    因此可以被单测机械证明。
+//!    因此可以被单测机械证明。密文怎么发射由 [`DumpMode`] 参数决定（**保存路径传 `Raw`，
+//!    展示路径传 `Masked`**）：漏传编译不过，不存在"忘了想"的路径。
 //!
 //! 文案口径：`doc` 照抄 [`crate::config`] 里现有的字段文档注释（英文，已经打磨过的口径），
 //! 新增的 `notes` / `choices[].doc` / `section_doc` 用中文（TUI 的产品语言）。
@@ -473,6 +474,24 @@ const HEADER: [&str; 4] = [
     "A commented line is an unset default: uncomment it to pin the value.",
 ];
 
+/// 密文叶子的发射模式——**同一个 emitter 的两个用途在这里分岔**。
+///
+/// 不是"默认值 + 例外"，而是两处调用点各自显式点名（Rust 没有默认参数，漏传 = 编译不过）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpMode {
+    /// 密文叶子**原样写值**——**保存路径专用**。
+    ///
+    /// 只有 [`crate::config::store::write_interface_doc`]（面板 `s` / setup 向导 / `app/runner.rs`
+    /// 共用的唯一写盘实现）该传它：把用户密钥换成掩码字符串写进文件 = **数据损坏**。
+    Raw,
+    /// 密文叶子写 `null` + 掩码注释（`•••••••• 1234`，与 `wing config get` / 设置面板同一套语言）
+    /// ——**展示路径专用**（`wing tui --dump-config` 的默认；`--show-secrets` 才给真值）。
+    Masked,
+}
+
+/// `--show-secrets` 的完整拼写（掩码注释里的指引用它，测试也 grep 它）。
+pub const SHOW_SECRETS_HINT: &str = "wing tui --dump-config --show-secrets";
+
 /// 由 catalog 生成的规范形 YAML（带注释）。
 ///
 /// `--dump-config` 与 [`crate::config::store::write_interface_doc`] 共用它：Rust 侧也只有一份声明。
@@ -482,20 +501,24 @@ const HEADER: [&str; 4] = [
 /// 2. 按 `section` 分组，每组一个 `# ── Section ──…` 分隔行 + `section_doc`；
 /// 3. 文档注释在上方（不用行尾注释）；值存在 → 原样写出；值缺席且有默认 → 写成注释掉的默认值；
 ///    `example` → `# e.g. …`；
-/// 4. `secret` → `# 密钥：面板里只写不回显（末 4 位提示）`；
+/// 4. `secret` → `# 密钥：面板里只写不回显（末 4 位提示）`；[`DumpMode::Masked`] 下再跟一行
+///    `# 已掩码（•••••••• 1234）——真值：…`，值本身写 `null`（见 [`DumpMode`]）；
 /// 5. `apply == restart / next_session` → `# 生效：…`（hot 不加，避免噪声）；
 /// 6. 引号能不加就不加（含特殊字符 / 看起来像别的类型 → 双引号 + 转义，非 ASCII 原样）；
 /// 7. 缩进 2 空格；注释折行到 78 列（见模块内的列宽常量）。
+///
+/// 它仍是 `(doc, catalog, mode)` 的**纯函数**：不读 env、不写时间戳、不含主机信息——
+/// `mode` 是参数不是环境，round-trip 与幂等照样可以被单测机械证明。
 ///
 /// **与后端的差异**（见 `09_interface_catalog/design.md` 的差异清单）：未知键丢弃（既有
 /// `--dump-config` 行为）、没有必填字段、`null` 与缺席等价，以及——
 /// **一个子树没有任何用户写下的值时，整块（含容器行）注释掉**：`colors:` 带空 body 是 `null`，
 /// 而 `AppConfig.colors` 不是 `Option`，裸容器行会让整份配置反序列化失败。
-pub fn dump_config_yaml(doc: &Value) -> String {
-    emit_document(doc, &interface_catalog())
+pub fn dump_config_yaml(doc: &Value, mode: DumpMode) -> String {
+    emit_document(doc, &interface_catalog(), mode)
 }
 
-fn emit_document(doc: &Value, catalog: &SettingNode) -> String {
+fn emit_document(doc: &Value, catalog: &SettingNode, mode: DumpMode) -> String {
     let mut out = String::new();
     for line in HEADER {
         out.push_str("# ");
@@ -521,7 +544,7 @@ fn emit_document(doc: &Value, catalog: &SettingNode) -> String {
                 comment(&mut out, 0, section_doc);
             }
         }
-        emit_node(&mut out, child, doc.get(&child.key), 0, false);
+        emit_node(&mut out, child, doc.get(&child.key), 0, false, mode);
     }
     out
 }
@@ -536,6 +559,7 @@ fn emit_node(
     value: Option<&Value>,
     indent: usize,
     commented: bool,
+    mode: DumpMode,
 ) {
     let value = value.filter(|v| !v.is_null());
     if !node.doc.trim().is_empty() {
@@ -556,6 +580,12 @@ fn emit_node(
     }
     if node.secret {
         comment(out, indent, "密钥：面板里只写不回显（末 4 位提示）");
+        // 只有"真的掩了一个值"时才加这一行：文件里没有密文时 Masked 与 Raw 逐字节相同。
+        if mode == DumpMode::Masked
+            && let Some(note) = masked_note(value)
+        {
+            comment(out, indent, &note);
+        }
     }
 
     match node.kind {
@@ -574,17 +604,30 @@ fn emit_node(
                     value.and_then(|v| v.get(&child.key)),
                     indent + 2,
                     block,
+                    mode,
                 );
             }
         }
-        _ => emit_leaf(out, node, value, indent),
+        _ => emit_leaf(out, node, value, indent, mode),
     }
 }
 
 /// 标量叶子（含未知 kind 的兜底）。
-fn emit_leaf(out: &mut String, node: &SettingNode, value: Option<&Value>, indent: usize) {
+fn emit_leaf(
+    out: &mut String,
+    node: &SettingNode,
+    value: Option<&Value>,
+    indent: usize,
+    mode: DumpMode,
+) {
     let key = &node.key;
     if let Some(value) = value {
+        if mode == DumpMode::Masked && node.secret && is_maskable(value) {
+            // 掩码 = `null`（后端 `get` 对密文叶的口径），**不是**把 `•••••••• 1234` 当值写出去：
+            // 那会是一份能解析、能写回的 YAML——重定向回来就等于把密钥替换成 8 个实心点。
+            line(out, indent, &format!("{key}: null"), false);
+            return;
+        }
         match inline(value) {
             Some(text) => line(out, indent, &format!("{key}: {text}"), false),
             // 声明的标量拿到 list/map（手写文件的畸形值）：块输出，不静默丢数据。
@@ -611,6 +654,44 @@ fn emit_leaf(out: &mut String, node: &SettingNode, value: Option<&Value>, indent
         let empty = empty_value(node);
         line(out, indent, &format!("{key}: {empty}"), true);
     }
+}
+
+/// [`DumpMode::Masked`] 下密文叶的掩码注释；`None` = 这个值不需要掩（缺席 / `null` / 空串）。
+///
+/// 视觉语言与 `wing config get`（`cmd/config.rs::render_secret`）和设置面板的值列
+/// （`shared/panels/settings/tree.rs::display_value` 生产 `ValueText::Masked`，`ui/settings/tree.rs` 画）
+/// **同一套**：`•••••••• <末 4 位>`。
+/// 短密钥（< 8）不给 hint——比例过高等于泄露（后端 `document.py::_state_of` 同一条规则）。
+fn masked_note(value: Option<&Value>) -> Option<String> {
+    let value = value.filter(|v| is_maskable(v))?;
+    let hint = value.as_str().and_then(secret_hint);
+    Some(match hint {
+        Some(hint) => format!("已掩码（•••••••• {hint}）——真值：`{SHOW_SECRETS_HINT}`"),
+        None => format!("已掩码（••••••••）——真值：`{SHOW_SECRETS_HINT}`"),
+    })
+}
+
+/// 这个值需要掩吗？空串 / `null` 不携带密钥（原样写出去反而保住了"显式清空过"这个状态）；
+/// 其余一律按密文处理（手写坏文件里的 `api_key: 123` 也掩）。
+fn is_maskable(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        _ => true,
+    }
+}
+
+/// 密文只下发末 4 位 hint：值长度 ≥ 8 才有，否则 `None`（短密钥不给，避免泄露比例过高）。
+///
+/// 与后端 `config/document.py::_state_of`（`value[-4:] if len(value) >= 8 else None`）和
+/// `wing-api-client` 的 `SecretState.hint` 文档是同一条规则；`DumpMode::Masked`、
+/// `wing config get` 与设置面板共用这一份实现（改规则就改这里 + 后端那一处）。
+pub fn secret_hint(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < 8 {
+        return None;
+    }
+    Some(chars[chars.len() - 4..].iter().collect())
 }
 
 /// 子树里有没有用户写下的值（决定 object 是正常发射还是整块注释）。
@@ -1201,12 +1282,12 @@ mod tests {
     #[test]
     fn a_fully_populated_config_round_trips_byte_for_byte() {
         let doc = json_of(&full_sample());
-        let dumped = dump_config_yaml(&doc);
+        let dumped = dump_config_yaml(&doc, DumpMode::Raw);
         let parsed = appconfig_from_doc(&doc_from_text(&dumped));
         let parsed_doc = json_of(&parsed);
         assert_eq!(parsed_doc, doc, "解析回来的文档必须逐值相同");
         assert_eq!(
-            dump_config_yaml(&parsed_doc),
+            dump_config_yaml(&parsed_doc, DumpMode::Raw),
             dumped,
             "再 dump 必须逐字相同"
         );
@@ -1215,7 +1296,7 @@ mod tests {
     /// 空文档 = 纯注释模板：没有任何键真的被写下，解析回来就是默认值。
     #[test]
     fn an_empty_document_dumps_a_commented_template() {
-        let dumped = dump_config_yaml(&json!({}));
+        let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         let read_back = doc_from_text(&dumped);
         assert_eq!(read_back, json!({}), "全是注释：一个键都不该被写下");
         let parsed = appconfig_from_doc(&read_back);
@@ -1226,7 +1307,7 @@ mod tests {
     /// N-1（09 review_r1）：文件头与第一个 section 之间**恰有一个**空行。
     #[test]
     fn the_header_is_followed_by_exactly_one_blank_line() {
-        let dumped = dump_config_yaml(&json!({}));
+        let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         let mut lines = dumped.lines();
         // 文件头 4 行。
         for _ in 0..HEADER.len() {
@@ -1249,10 +1330,10 @@ mod tests {
     #[test]
     fn a_sparse_document_stays_sparse_through_a_dump() {
         let doc = json!({"colors": {"accent": "#ff00ff"}});
-        let dumped = dump_config_yaml(&doc);
+        let dumped = dump_config_yaml(&doc, DumpMode::Raw);
         let read_back = doc_from_text(&dumped);
         assert_eq!(read_back, doc);
-        assert_eq!(dump_config_yaml(&read_back), dumped);
+        assert_eq!(dump_config_yaml(&read_back, DumpMode::Raw), dumped);
     }
 
     /// 一个子树没有任何写下的值 → 整块注释（含容器行）。
@@ -1261,11 +1342,11 @@ mod tests {
     /// 那种文件会让整份配置反序列化失败——整块注释就是为了不让它出现。
     #[test]
     fn an_absent_subtree_is_commented_as_one_block() {
-        let empty = dump_config_yaml(&json!({}));
+        let empty = dump_config_yaml(&json!({}), DumpMode::Raw);
         assert!(empty.lines().any(|line| line == "# layout:"), "{empty}");
         assert!(!empty.lines().any(|line| line == "layout:"), "{empty}");
 
-        let pinned = dump_config_yaml(&json!({"layout": {"max_input_lines": 25}}));
+        let pinned = dump_config_yaml(&json!({"layout": {"max_input_lines": 25}}), DumpMode::Raw);
         assert!(pinned.lines().any(|line| line == "layout:"));
         assert!(pinned.lines().any(|line| line == "  max_input_lines: 25"));
         assert!(pinned.lines().any(|line| line == "  # max_popup_rows: 8"));
@@ -1283,7 +1364,7 @@ mod tests {
     /// 注释来自 catalog：分组、字段 doc / notes / example / 密文 / 生效域 / 注释掉的默认值。
     #[test]
     fn the_comments_come_from_the_catalog() {
-        let dumped = dump_config_yaml(&json!({}));
+        let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         for section in [
             "# ── Colors",
             "# ── Layout",
@@ -1348,7 +1429,7 @@ mod tests {
         ];
         for value in tricky {
             let doc = json!({ "api_key": value });
-            let dumped = dump_config_yaml(&doc);
+            let dumped = dump_config_yaml(&doc, DumpMode::Raw);
             let read_back = doc_from_text(&dumped);
             assert_eq!(read_back, doc, "值 {value:?} 没有 round-trip：\n{dumped}");
         }
@@ -1358,16 +1439,16 @@ mod tests {
     #[test]
     fn a_non_scalar_value_falls_back_to_a_block_but_is_not_lost() {
         let doc = json!({"api_key": ["a", "b"]});
-        let dumped = dump_config_yaml(&doc);
+        let dumped = dump_config_yaml(&doc, DumpMode::Raw);
         assert_eq!(doc_from_text(&dumped), doc);
         let doc = json!({"api_key": {}});
-        assert_eq!(doc_from_text(&dump_config_yaml(&doc)), doc);
+        assert_eq!(doc_from_text(&dump_config_yaml(&doc, DumpMode::Raw)), doc);
     }
 
     /// 注释行不超过列宽预算（长文档注释真的被折了）。
     #[test]
     fn comment_lines_stay_within_the_column_budget() {
-        let dumped = dump_config_yaml(&json!({}));
+        let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         for line in dumped.lines() {
             assert!(
                 UnicodeWidthStr::width(line) <= COMMENT_WIDTH,
@@ -1389,7 +1470,7 @@ mod tests {
             "layout": {"max_input_lines": 25},
             "rendering": {"thinking": "hidden", "math": "off", "images": "off"},
         });
-        let dumped = dump_config_yaml(&doc);
+        let dumped = dump_config_yaml(&doc, DumpMode::Raw);
         assert!(dumped.contains("preset: terminal"), "{dumped}");
         assert!(dumped.contains("thinking: hidden"), "{dumped}");
         let parsed = appconfig_from_doc(&doc_from_text(&dumped));
@@ -1447,7 +1528,7 @@ mod tests {
     /// （`api_key` 的占位是空串——语义等于未设置：空 → 不发鉴权头）。
     #[test]
     fn uncommenting_the_commented_defaults_yields_the_default_config() {
-        let dumped = dump_config_yaml(&json!({}));
+        let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         let uncommented = uncomment(&dumped);
         assert!(uncommented.contains("colors:"), "{uncommented}");
         assert!(uncommented.contains("preset: wing"), "{uncommented}");
@@ -1508,7 +1589,7 @@ mod tests {
             "colors": {"accent": null, "unknown_slot": "#123456"},
             "unknown_top": 1,
         });
-        let dumped = dump_config_yaml(&doc);
+        let dumped = dump_config_yaml(&doc, DumpMode::Raw);
         assert!(!dumped.contains("unknown_top"));
         assert!(!dumped.contains("unknown_slot"));
         // `null` 与缺席等价：accent 回到注释掉的默认值
@@ -1516,8 +1597,133 @@ mod tests {
         assert_eq!(doc_from_text(&dumped), json!({}));
         // 空对象同样等价于缺席（整块回到注释状态）
         assert_eq!(
-            doc_from_text(&dump_config_yaml(&json!({"colors": {}}))),
+            doc_from_text(&dump_config_yaml(&json!({"colors": {}}), DumpMode::Raw)),
             json!({})
         );
+    }
+
+    // ── 密文发射（`DumpMode`） ──────────────────────────────────
+
+    /// 含密文的样本：一份真值 + 一份短到不该给 hint 的。
+    const SECRET: &str = "sk-dump-secret-9999";
+
+    fn doc_with_secret() -> Value {
+        json!({"api_key": SECRET, "colors": {"accent": "#ff00ff"}})
+    }
+
+    /// `Masked`（= `--dump-config` 的默认）不写出真值，但保留掩码 + 末 4 位 + 出口指引。
+    #[test]
+    fn masked_mode_hides_the_secret_and_points_at_show_secrets() {
+        let masked = dump_config_yaml(&doc_with_secret(), DumpMode::Masked);
+        assert!(
+            !masked.contains(SECRET),
+            "掩码后的 dump 不许带明文：\n{masked}"
+        );
+        assert!(
+            !masked.contains("secret-9999"),
+            "连片段都不该出现：\n{masked}"
+        );
+        // 视觉语言与 `wing config get` / 设置面板同一套。
+        assert!(masked.contains("已掩码（•••••••• 9999）"), "{masked}");
+        assert!(
+            masked.contains(SHOW_SECRETS_HINT),
+            "掩码注释必须给出真值的出口：\n{masked}"
+        );
+        // 值本身是 null（后端 `get` 对密文叶的口径），不是 bullets 字符串。
+        assert!(masked.lines().any(|l| l == "api_key: null"), "{masked}");
+        // 同一份文档里的非密文值照旧。
+        assert!(masked.contains("accent: \"#ff00ff\""), "{masked}");
+        // 掩码输出**不是** round-trip artifact，这条测试把代价钉死：`api_key: null` 解析回来是
+        // "缺席"（`null` 与缺席等价，本模块既有口径），所以再 dump 一次会回到注释掉的模板。
+        // 要保住真值必须 `--show-secrets`（`raw_mode_writes_the_secret_verbatim_and_round_trips`）。
+        let again = dump_config_yaml(&doc_from_text(&masked), DumpMode::Masked);
+        assert!(!again.contains(SECRET), "{again}");
+        assert!(
+            !again.contains("已掩码"),
+            "没有值可掩时不该再出现掩码行：\n{again}"
+        );
+        assert!(again.lines().any(|l| l == "# api_key: \"\""), "{again}");
+    }
+
+    /// `Raw`（= 保存路径 / `--show-secrets`）写出真值，round-trip 逐字相同。
+    #[test]
+    fn raw_mode_writes_the_secret_verbatim_and_round_trips() {
+        let doc = doc_with_secret();
+        let raw = dump_config_yaml(&doc, DumpMode::Raw);
+        assert!(raw.contains(&format!("api_key: {SECRET}")), "{raw}");
+        assert!(!raw.contains('•'), "Raw 模式不该出现掩码：\n{raw}");
+        assert_eq!(doc_from_text(&raw), doc, "Raw 必须逐值 round-trip");
+        assert_eq!(
+            dump_config_yaml(&doc_from_text(&raw), DumpMode::Raw),
+            raw,
+            "Raw 必须逐字幂等"
+        );
+    }
+
+    /// **重定向回来的安全性**：掩码后的文本解析回来，密文键必须是 `null`。
+    ///
+    /// 若把 `•••••••• 9999` 当值写出去，`dump > f` 之后再 `cp f 回去` 就会把用户的密钥
+    /// 替换成 8 个实心点——静默毁密钥。这条测试钉住那个形态没有被选。
+    #[test]
+    fn a_masked_secret_is_null_so_a_redirected_dump_never_writes_the_mask_back() {
+        let masked = dump_config_yaml(&doc_with_secret(), DumpMode::Masked);
+        let parsed = doc_from_text(&masked);
+        assert_eq!(parsed.get("api_key"), Some(&Value::Null), "{parsed}");
+        assert_eq!(
+            json_of(&appconfig_from_doc(&parsed)).get("api_key"),
+            Some(&Value::Null),
+            "掩码文档解析成配置后 api_key 是 None（= 不发 auth header），不是掩码字符串"
+        );
+    }
+
+    /// 文件里没有密文值时，`Masked` 与 `Raw` 逐字节相同——mode 是惰性的，
+    /// 空文档 dump 出来的模板因此与掩码前一字不差。
+    #[test]
+    fn the_mode_is_inert_when_the_document_holds_no_secret_value() {
+        let docs = [
+            json!({}),
+            json!({"colors": {"accent": "#ff00ff"}}),
+            json!({"api_key": ""}),   // 显式清空过：空值不携带密钥，原样写出
+            json!({"api_key": null}), // 与缺席等价
+        ];
+        for doc in docs {
+            assert_eq!(
+                dump_config_yaml(&doc, DumpMode::Masked),
+                dump_config_yaml(&doc, DumpMode::Raw),
+                "{doc}"
+            );
+        }
+        // 空文档 dump 出来的仍是全注释模板（含 `# 密钥：…` 那行）。
+        let empty = dump_config_yaml(&json!({}), DumpMode::Masked);
+        assert!(empty.lines().any(|l| l == "# api_key: \"\""));
+        assert!(empty.contains("# 密钥：面板里只写不回显（末 4 位提示）"));
+    }
+
+    /// 短密钥（< 8）既不出现在输出里，也不给 hint（比例过高 = 泄露）。
+    #[test]
+    fn a_short_secret_gets_no_hint() {
+        let masked = dump_config_yaml(&json!({"api_key": "q7Z"}), DumpMode::Masked);
+        assert!(!masked.contains("q7Z"), "{masked}");
+        assert!(masked.contains("已掩码（••••••••）"), "{masked}");
+        assert!(masked.lines().any(|l| l == "api_key: null"), "{masked}");
+    }
+
+    /// 非字符串的密文值（手写坏文件）也照掩——它是个值，就按密文处理。
+    #[test]
+    fn a_non_string_secret_value_is_masked_too() {
+        let masked = dump_config_yaml(&json!({"api_key": 123456789}), DumpMode::Masked);
+        assert!(!masked.contains("123456789"), "{masked}");
+        assert!(masked.lines().any(|l| l == "api_key: null"), "{masked}");
+    }
+
+    #[test]
+    fn secret_hint_needs_eight_chars() {
+        assert_eq!(secret_hint("12345678"), Some("5678".into()));
+        assert_eq!(secret_hint("1234567"), None);
+        assert_eq!(secret_hint("sk-abcdefgh"), Some("efgh".into()));
+        assert_eq!(secret_hint(""), None);
+        // 非 ASCII：按字符数算，且不切坏字符（后端 `len()` / `value[-4:]` 同语义）。
+        assert_eq!(secret_hint("密钥密钥密钥密钥"), Some("密钥密钥".into()));
+        assert_eq!(secret_hint("密钥"), None);
     }
 }

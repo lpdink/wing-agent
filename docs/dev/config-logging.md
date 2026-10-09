@@ -16,7 +16,7 @@
 │   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）；.media/ 为跨会话共享的图片媒体池（内容寻址）
 │   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
 └── tui/
-    ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`--dump-config` 输出它的规范形）
+    ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）
     ├── config.yaml.bak 最近一次保存前的原文（同上）
     └── logs/           TUI 日志：wing_YYYY-MM-DD.log（命名同后端，无符号链接）
 ```
@@ -58,7 +58,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
-`colors`（`preset` = `wing` | `terminal` 选底色：`wing` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（默认），`terminal` 跟随终端自己的 ANSI 色；其余每个槽位键**覆盖该槽**：`accent` / `text` / `thinking` / `tool_result` / `dim` / `success` / `warning` / `danger` / `math` / `surface` 与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`api_key`（网关鉴权，空则不发送）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
+`colors`（`preset` = `wing` | `terminal` 选底色：`wing` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（默认），`terminal` 跟随终端自己的 ANSI 色；其余每个槽位键**覆盖该槽**：`accent` / `text` / `thinking` / `tool_result` / `dim` / `success` / `warning` / `danger` / `math` / `surface` 与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`api_key`（网关鉴权，空则不发送；**密文**——面板只写不回显、`--dump-config` 默认掩码，见下）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
 
 `rendering` 的键：
 
@@ -72,16 +72,30 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 
 **读写路径**：`crates/wing/src/config/store.rs` 是 `~/.wing/tui/config.yaml` 的唯一 I/O——
 稀疏文档读取（只有文件里写下的键）+ 文件字节指纹（FNV-1a 64，`fnv1a64:<hex>`；文件不存在 = `"absent"`）+
-原子写（tmp + `sync_all` + `rename`）+ 写前 `.bak`（覆盖式）。**读失败不吞**：文件坏掉时报错，
+原子写（tmp + `sync_all` + `rename`）+ 写前 `.bak`（覆盖式；**同样是原子写**：读旧文件字节 →
+同一套 tmp + rename，不再用会留下截断副本的 `fs::copy`）。**读失败不吞**：文件坏掉时报错，
 不静默回落默认值（否则一次保存就会覆盖掉用户手写的文件）。
 
 编辑入口有三个，共用同一份声明（`config/catalog.rs::interface_catalog()`）：
 
 - **TUI `/settings` 面板的 Interface 根**：实时预览（改颜色当场变色，`Esc` 回退）+ `s` 保存；
-- **`wing tui --dump-config`**：读**当前文件**、输出它的规范形（注释来自声明、缺席的默认值写成注释行），
-  因此 `dump > f; 改写 f; 回填; dump > f2; diff f f2` 是可验证的 round-trip；文件坏掉时 stderr 报错 +
-  非零退出（不假装一切正常）。注意它把文件里的值**原样打印，含 `api_key` 明文**——这是 round-trip
-  用途的要求；把它重定向进已存在的文件前先备份（shell 会先截断目标）；
+- **`wing tui --dump-config`**：读**当前文件**、输出它的规范形（注释来自声明、缺席的默认值写成注释行）；
+  文件坏掉时 stderr 报错 + 非零退出（不假装一切正常）。
+  - **密文默认掩码**（本 PR **改变了它的语义**：旧实现打印的是 `AppConfig::default()` —— 一份
+    `api_key` 恒为空的默认模板；现在打印的是**当前文件**，所以必须管住文件里的密文）：
+    secret 叶子输出 `api_key: null` + 一行 `# 已掩码（•••••••• 1234）`，用的是与设置面板 /
+    `wing config get` **同一套** `•••••••• 末 4 位` 视觉语言（末 4 位只在值长度 ≥ 8 时给）。
+    真值要显式加 **`--show-secrets`**（round-trip 用途：`wing tui --dump-config --show-secrets > f`，
+    之后 `改写 f; 回填; dump --show-secrets > f2; diff f f2` 才是可验证的 round-trip）；
+    单独传 `--show-secrets`（不带 `--dump-config`）会被拒绝，不静默忽略。
+  - 为什么默认掩码：与项目「密文只写不回显」的整体姿态一致（后端 `get` 对密文恒返回 `null`，
+    真值只以末 4 位 hint 出现），而 stdout 会被 shell 重定向、被日志与 CI 捕获；真值只在显式要时才给。
+    代价是**不带 `--show-secrets` 的 dump 不是 round-trip artifact**（`api_key` 变成 `null`），
+    这一点是刻意的。
+  - **保存路径不受掩码影响**：`store::write_interface_doc`（面板 `s` / setup 向导 / `app/runner.rs`
+    共用的唯一写盘实现）用的是同一个 emitter 的 **Raw** 模式——写掩码 = 把用户密钥换成掩码字符串
+    = **数据损坏**。两处别"顺手统一"。
+  - `--show-secrets` 的输出是真值：`> 已存在的文件` 前先备份（shell 会在程序启动前先截断目标）；
 - **手写文件**（仍然支持）：外部改动在面板 `R` 重新载入时读入。
 
 > 颜色槽「注释掉的默认值」是 `preset: wing` 下的值；改 `preset` 后它们仅供参考（不随预设重算）。
