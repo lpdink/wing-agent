@@ -20,6 +20,8 @@ wing/runtime.py — WingRuntime：service 层协调者
 
 from __future__ import annotations
 
+import shutil
+from dataclasses import dataclass, field
 from wing.event import (
     BranchTargetInfo,
     BranchTargetsEvent,
@@ -30,18 +32,40 @@ from wing.event import (
     SessionInfo,
     SessionInitEvent,
     SessionStateChangedEvent,
+    SettingsChangedEvent,
     SyncSessionEvent,
     WingEvent,
 )
+from wing.common.fs import atomic_write_text
+from wing.common.logger import log
 from wing.event_bus import event_bus
-from wing.config import ModelGroup, get_config
+from wing.config import (
+    Config,
+    ConfigProblem,
+    ModelGroup,
+    build_catalog,
+    cross_field_problems,
+    emit_config_yaml,
+    get_config,
+    get_config_path,
+)
+from wing.config.document import (
+    ConfigDocumentError,
+    SparseDocument,
+    changed_paths,
+    locate_problems,
+    merge_with_defaults,
+    read_document,
+    resolve_secrets,
+    restart_required_paths,
+)
 from wing.hooks import load_hooks
 from wing.request_context import (
     get_request_context,
     reset_request_context,
     set_request_context,
 )
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from collections.abc import Iterable
 from wing.session import Session, SessionManager, SessionReaper, TagMutation
 from wing.system import ReloadResult, reload_system as _reload_system
@@ -49,6 +73,57 @@ from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
     from wing.session import AgentOverride, AgentTemplateManager
+
+
+# ============================================================
+# Setting API —— 保存事务的数据形状（L4：编排结果，不是 wire 模型）
+# ============================================================
+
+
+class SettingsConflictError(RuntimeError):
+    """保存的基线指纹与磁盘现状不符（乐观并发冲突）。路由据此回 409。
+
+    携带磁盘当前指纹：客户端拿不到它就得先 GET 一次才能重试；409 的 detail 直接带上，
+    重试路径缩短一步。
+    """
+
+    def __init__(self, fingerprint: str) -> None:
+        super().__init__(
+            f"config.yaml changed on disk (current fingerprint: {fingerprint})"
+        )
+        self.fingerprint = fingerprint
+
+
+@dataclass
+class SettingsApplyResult:
+    """``apply_settings`` 的回执（领域形状；wire 投影见 ``gateway/projection.py``）。
+
+    ``ok=False`` 时 ``fingerprint`` 是**磁盘当前指纹**（文件一个字节都没写）；
+    ``setup_mode_exited`` 本期恒 ``False``（网关只在配置合法时活着——04 才让它变真）。
+    """
+
+    ok: bool
+    fingerprint: str
+    problems: list[ConfigProblem] = field(default_factory=list)
+    changed: list[str] = field(default_factory=list)
+    restart_required: list[str] = field(default_factory=list)
+    reload: ReloadResult | None = None
+    setup_mode_exited: bool = False
+    backup_path: str | None = None
+
+
+async def settings_write_effect(sm: SessionManager) -> ReloadResult:
+    """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）——**04 的替换点**。
+
+    正常模式：热重载（config.yaml → hooks → prompt commands → provider →
+    skills & rules → log level）。setup mode（04）：换成「转入正常模式」
+    （``server._enter_operational()``）并让 ``setup_mode_exited=True``。
+
+    这是本步骤**唯一**为 04 预留的接点：一个模块级函数 + 一个调用点
+    （``apply_settings`` 的 ⑦）。失败**不回滚文件**——配置本身是合法的，
+    回执按 ``ReloadResult`` 的逐项 ok 如实报告（与 ``/api/system/reload`` 同语义）。
+    """
+    return await _reload_system(sm)
 
 
 # ============================================================
@@ -481,7 +556,7 @@ class WingRuntime:
         return get_config().model_groups()
 
     async def reload_system(self) -> ReloadResult:
-        """热重载全局配置、hooks、prompt commands、provider、skills & rules。
+        """热重载全局配置、hooks、prompt commands、provider、skills & rules、log level。
 
         config 加载失败时立即中止。其余项失败时继续。
 
@@ -489,6 +564,108 @@ class WingRuntime:
         失败语义不变）——本方法只做委托，调用点（gateway 路由）不变。
         """
         return await _reload_system(self.sm)
+
+    # ============================================================
+    # Setting API —— 保存事务（唯一写盘路径）
+    # ============================================================
+
+    async def apply_settings(
+        self, document: dict[str, Any], base: str | None = None
+    ) -> SettingsApplyResult:
+        """保存事务（总设计 §7.3 的十步）：校验 → ``.bak`` → 原子写 → 生效 → 事件 → 回执。
+
+        ① 现读磁盘（服务端不缓存文档）→ ② 基线指纹不符 → 409（不写盘）→
+        ③ 密文三态回填（``null`` = 保留磁盘现值）→ ④ 字段级 + 跨字段校验
+        （**全有或全无**：有 problem 时一个字节都不写）→ ⑤ ``config.yaml.bak``
+        （覆盖式，只留最近一份）→ ⑥ 规范形 YAML + 原子写 → ⑦ 生效
+        （:func:`settings_write_effect`，04 的接点；失败不回滚文件）→
+        ⑧ ``changed`` / ``restart_required``（只读叶子的 apply，增补 P13）→
+        ⑨ 广播 ``SettingsChangedEvent``（global）→ ⑩ 回执。
+
+        Args:
+            document: 稀疏文档（密文三态见 ``resolve_secrets``）；未知键原样保留
+                （从磁盘文档回填，客户端不认识也不会吃掉它）。
+            base: 客户端持有的基线指纹（``None`` = 跳过并发检查，对应 CLI 的 ``--force``）。
+
+        Raises:
+            SettingsConflictError: 指纹不匹配（乐观并发）——文件未被触碰。
+        """
+        catalog = build_catalog()
+
+        # ① 现读磁盘（D18：不缓存）。
+        try:
+            current_doc, current_fp = read_document()
+        except ConfigDocumentError as exc:
+            # 文件存在但读不出文档：不能写（会把用户的文件换成我们臆想的内容）。
+            # 指纹仍参与并发判定；解析失败如实报成一条文档级 problem。
+            if base is not None and base != exc.fingerprint:
+                raise SettingsConflictError(exc.fingerprint) from exc
+            return SettingsApplyResult(
+                ok=False,
+                fingerprint=exc.fingerprint,
+                problems=[exc.as_problem()],
+            )
+
+        # ② 乐观并发：指纹不匹配 → 409（不写盘）。
+        if base is not None and base != current_fp.value:
+            raise SettingsConflictError(current_fp.value)
+
+        # ③ 密文回填：null = 保留磁盘现值（真实值只在这里被读、从不回显）。
+        incoming = resolve_secrets(SparseDocument(data=document), current_doc, catalog)
+
+        # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
+        raw = merge_with_defaults(incoming, catalog)
+        problems = locate_problems(raw) + cross_field_problems(
+            Config.model_construct(**raw)
+        )
+        if problems:
+            return SettingsApplyResult(
+                ok=False, fingerprint=current_fp.value, problems=problems
+            )
+
+        # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。
+        config_path = get_config_path()
+        backup_path: str | None = None
+        if config_path.exists():
+            backup = config_path.with_name(f"{config_path.name}.bak")
+            shutil.copyfile(config_path, backup)
+            backup_path = str(backup)
+
+        # ⑥ 规范形 YAML（未知键取自磁盘文档，D17）+ 原子写。
+        text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
+        atomic_write_text(config_path, text)
+        _, new_fp = read_document()
+
+        # ⑦ 生效（04 的接点；失败不回滚——配置本身合法，回执逐项报告）。
+        reload_result = await settings_write_effect(self.sm)
+
+        # ⑧ 差异 → changed / restart_required（P13：只读叶子路径的 apply）。
+        changed = changed_paths(current_doc, incoming, catalog)
+        restart = restart_required_paths(changed, catalog)
+
+        # ⑨ 广播（global scope：所有客户端都该知道配置变了）。日志只写 path，不写值。
+        log.info(
+            f"settings changed: paths={changed} restart_required={restart} "
+            f"fingerprint={current_fp.value}→{new_fp.value}"
+        )
+        event_bus.emit(
+            SettingsChangedEvent(
+                changed=changed,
+                restart_required=restart,
+                fingerprint=new_fp.value,
+                target=EventTarget(scope="global"),
+            )
+        )
+
+        # ⑩ 回执。
+        return SettingsApplyResult(
+            ok=True,
+            fingerprint=new_fp.value,
+            changed=changed,
+            restart_required=restart,
+            reload=reload_result,
+            backup_path=backup_path,
+        )
 
     # ============================================================
     # 内部辅助

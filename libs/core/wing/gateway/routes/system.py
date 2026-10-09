@@ -120,7 +120,7 @@ async def list_agents(request: Request) -> AgentsResponse:
     summary="热重载全局配置",
 )
 async def reload_system(request: Request) -> ReloadResponse:
-    """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules。"""
+    """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules、log level。"""
     server = _get_server(request)
     result = await server.runtime.reload_system()
     return ReloadResponse(
