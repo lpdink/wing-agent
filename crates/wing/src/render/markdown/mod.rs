@@ -898,6 +898,38 @@ mod tests {
         );
     }
 
+    /// 引用 / 列表里的表格：外层前缀（引用栏 `│ `、列表续行 / marker）不许
+    /// 进单元格——每个格子糊一道引用栏（`┃ │ A ┃`）比没有前缀更糟。表格
+    /// 整体也不带外层前缀；列表 item 的 marker 单独一行（表格前的归属注记）。
+    #[test]
+    fn table_in_blockquote_keeps_cells_clean() {
+        let md = "> | A | B |\n> |---|---|\n> | 1 | 2 |";
+        let lines = render_text(md);
+        let text = join_lines(&lines);
+        assert!(text.contains("┃ A"), "clean header cell: {text}");
+        assert!(
+            !text.contains("┃ │"),
+            "quote rail leaked into a cell: {text}"
+        );
+    }
+
+    #[test]
+    fn table_in_list_item_keeps_cells_clean() {
+        let md = "- | A | B |\n  |---|---|\n  | 1 | 2 |";
+        let lines = render_text(md);
+        let text = join_lines(&lines);
+        assert!(text.contains("┃ A"), "clean header cell: {text}");
+        assert!(
+            !text.contains("┃ •"),
+            "list marker leaked into a cell: {text}"
+        );
+        // marker 单独成行（表格仍在，结构没丢）。
+        assert!(
+            lines.iter().any(|l| l.trim() == "•"),
+            "marker line missing: {lines:?}"
+        );
+    }
+
     #[test]
     fn strikethrough_renders() {
         let lines = render_text("~~deleted~~");

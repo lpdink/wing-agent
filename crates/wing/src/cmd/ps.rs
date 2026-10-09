@@ -14,6 +14,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Datelike;
 use chrono::Local;
 use chrono::NaiveDateTime;
 use ratatui::style::Style;
@@ -197,7 +198,10 @@ fn format_sessions_table(
     now: NaiveDateTime,
 ) -> String {
     let columns = vec![
-        PlainColumn::new("SESSION ID", ColumnKind::Compact),
+        // The id is the copyable handle and only matches exactly — it must
+        // never be truncated, even on a narrow terminal (the table overflows
+        // instead; NAME/TAGS give up their width first).
+        PlainColumn::keep_natural("SESSION ID", ColumnKind::Compact),
         PlainColumn::new("STATUS", ColumnKind::Compact),
         PlainColumn::new("LAST", ColumnKind::Compact),
         PlainColumn::capped("NAME", ColumnKind::Narrative, 80),
@@ -249,21 +253,25 @@ fn tags_text(tags: &[String]) -> String {
 
 /// Render `last_interaction` (a naive local timestamp from the backend, e.g.
 /// `2026-10-09T21:10:21.047560`) as a compact age — `now` / `42s` / `12m` /
-/// `3h` / `2d`, falling back to the event's own `MM-DD` once a week old.
-/// Unparseable values pass through as written (the table still shows
-/// *something* meaningful).
+/// `3h` / `2d`. Unparseable values pass through as written (flattened to one
+/// line first: the table still shows *something* meaningful, and a control
+/// character cannot tear the row apart).
 fn format_last_interaction(ts: Option<&str>, now: NaiveDateTime) -> String {
     let Some(ts) = ts else {
         return "-".to_string();
     };
     match NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
-        Ok(dt) => format_age(now.signed_duration_since(dt), dt),
-        Err(_) => ts.to_string(),
+        Ok(dt) => format_age(dt, now),
+        Err(_) => common::single_line(ts),
     }
 }
 
-fn format_age(age: chrono::Duration, at: NaiveDateTime) -> String {
-    let secs = age.num_seconds().max(0);
+/// Compact age of `at` seen from `now`: `now` / `42s` / `12m` / `3h` / `2d`;
+/// once past a week the event's own date reads better than a growing day
+/// count (with the year when it is not the current one — a session list
+/// outlives new year's eve).
+fn format_age(at: NaiveDateTime, now: NaiveDateTime) -> String {
+    let secs = now.signed_duration_since(at).num_seconds().max(0);
     if secs < 5 {
         "now".to_string()
     } else if secs < 60 {
@@ -274,8 +282,10 @@ fn format_age(age: chrono::Duration, at: NaiveDateTime) -> String {
         format!("{}h", secs / 3600)
     } else if secs < 7 * 86_400 {
         format!("{}d", secs / 86_400)
-    } else {
+    } else if at.year() == now.year() {
         at.format("%m-%d").to_string()
+    } else {
+        at.format("%Y-%m-%d").to_string()
     }
 }
 
@@ -350,23 +360,26 @@ mod tests {
     #[test]
     fn format_age_boundaries() {
         let at = naive("2026-10-09T21:00:00");
-        assert_eq!(format_age(chrono::Duration::seconds(0), at), "now");
-        assert_eq!(format_age(chrono::Duration::seconds(4), at), "now");
-        assert_eq!(format_age(chrono::Duration::seconds(5), at), "5s");
-        assert_eq!(format_age(chrono::Duration::seconds(59), at), "59s");
-        assert_eq!(format_age(chrono::Duration::seconds(60), at), "1m");
-        assert_eq!(format_age(chrono::Duration::seconds(3599), at), "59m");
-        assert_eq!(format_age(chrono::Duration::seconds(3600), at), "1h");
-        assert_eq!(format_age(chrono::Duration::seconds(86_399), at), "23h");
-        assert_eq!(format_age(chrono::Duration::seconds(86_400), at), "1d");
-        assert_eq!(format_age(chrono::Duration::seconds(6 * 86_400), at), "6d");
-        // 一周以上：显示事件当天的日期（比不断变大的天数好读）。
+        let after = |secs: i64| at + chrono::Duration::seconds(secs);
+        assert_eq!(format_age(at, after(0)), "now");
+        assert_eq!(format_age(at, after(4)), "now");
+        assert_eq!(format_age(at, after(5)), "5s");
+        assert_eq!(format_age(at, after(59)), "59s");
+        assert_eq!(format_age(at, after(60)), "1m");
+        assert_eq!(format_age(at, after(3599)), "59m");
+        assert_eq!(format_age(at, after(3600)), "1h");
+        assert_eq!(format_age(at, after(86_399)), "23h");
+        assert_eq!(format_age(at, after(86_400)), "1d");
+        assert_eq!(format_age(at, after(6 * 86_400)), "6d");
+        // 一周以上：显示事件当天的日期（同年只给 MM-DD）。
+        assert_eq!(format_age(at, after(7 * 86_400)), "10-09");
+        // 跨年保留年份——会话列表会跨年，`12-28` 的年份不能靠猜。
         assert_eq!(
-            format_age(chrono::Duration::seconds(7 * 86_400), at),
-            "10-09"
+            format_age(naive("2025-12-28T10:00:00"), naive("2026-01-05T10:00:00")),
+            "2025-12-28"
         );
         // 时钟偏移导致的"未来"时间戳钳到 now，不出负数。
-        assert_eq!(format_age(chrono::Duration::seconds(-5), at), "now");
+        assert_eq!(format_age(at, after(-5)), "now");
     }
 
     #[test]
@@ -383,8 +396,13 @@ mod tests {
             format_last_interaction(Some("2026-10-09T21:10:00"), now),
             "1m"
         );
-        // 解析不了就原样展示（不装作认识）。
+        // 解析不了就原样展示（不装作认识）——但先压平控制字符，别撕开数据行。
         assert_eq!(format_last_interaction(Some("garbage"), now), "garbage");
+        assert_eq!(
+            format_last_interaction(Some("bad\nts"), now),
+            "bad ts",
+            "回退路径也必须单行化"
+        );
     }
 
     #[test]
@@ -442,6 +460,35 @@ mod tests {
         // 第二行：缺省字段回退 `-`，inactive 是展示值。
         assert!(lines[5].contains("inactive"), "{table}");
         assert!(lines[5].contains('-'), "{table}");
+    }
+
+    /// 会话 id 是**精确匹配**的可复制句柄（`wing tail/info/wait` 都要完整 id），
+    /// 窄终端下必须在场：收缩全部发生在 NAME/TAGS/STATUS 上，80 列（最常见
+    /// 的默认宽度）尤其要保住。
+    #[test]
+    fn session_id_survives_a_narrow_terminal() {
+        let mut long_name = session(
+            "20261009-210702-217d85f2",
+            "working",
+            &["executor", "task=a"],
+        );
+        long_name.name = Some("我们前端的表格渲染虽然不错吧 但是其实我更喜欢包裹起来的感觉".into());
+        long_name.last_interaction = Some("2026-10-09T21:10:21.047560".into());
+        let sessions = vec![long_name];
+
+        let palette = ThemePalette::default();
+        let now = naive("2026-10-09T21:11:00");
+        for width in [80usize, 100, 120] {
+            let out = TableOutput {
+                width,
+                color: false,
+            };
+            let table = format_sessions_table(&sessions, &palette, &out, now);
+            assert!(
+                table.contains("20261009-210702-217d85f2"),
+                "width={width}: id 不能被截断\n{table}"
+            );
+        }
     }
 
     /// 颜色只在要求时出现，且以显示宽度为锚（ANSI 不计宽）。

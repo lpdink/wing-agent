@@ -141,12 +141,13 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 ```
 
 * **三档只靠笔画粗细**：所有框线共用一个墨色（`theme.border` = palette `dim`），**不叠 DIM 修饰符**（终端对 DIM 的处理不一致，显式颜色才是稳定观感）；
-* **宽度预算 `3n+1`**（外框 2 + 每列左右留白 2 + 列间分隔 n−1）；列宽分配 / 分类阈值在共享引擎 `render/table/`（`frame_overhead` / `compute_column_widths`），两前端不许各拿一套；
-* **不变量**：单元格折行不截断（零信息损失，markdown 侧）；每一行等宽、且 ≤ 可用宽度（`tables.rs` 的形状 golden + 等宽测试钉住）；
+* **宽度预算 `3n+1`**（外框 2 + 每列左右留白 2 + 列间分隔 n−1）；列宽分配 / 分类阈值在共享引擎 `render/table/`（`frame_overhead` / `compute_column_widths`），两前端不许各拿一套。列可声明硬地板 `ColumnMetrics::min_width`（`wing ps` 的 SESSION ID 用 `keep_natural`：id 是精确匹配的可复制句柄，宁可行溢出也不截断）；
+* **不变量**：单元格折行不截断（零信息损失，markdown 侧）；**正常预算下**每一行等宽、且 ≤ 可用宽度（`tables.rs` 的形状 golden + 等宽测试钉住）。预算退化到装不下各列硬地板时，行会溢出而不是摧毁列——这是 `compute_column_widths` 的登记语义；
+* **单元格不注入外层前缀**：引用栏 / 列表续行不会进格子（进去了就是每格一道假框线 `┃ │ A ┃`）；表格整体也不套外层前缀（与代码块 / 公式块不同），列表 item 的 marker 单独成行；
 * **CLI 侧**（`render/table/plain.rs`）：同一皮肤渲染纯文本网格；单元格从折行改为**截断**（终端宽是硬约束），全部按显示宽度记账（CJK 安全），TTY 上着色（尊重 `NO_COLOR`）；
 * **预览**：`cargo run -p wing --example theme_preview`（assistant markdown 一节就是表格实景）；任意输入用 `render_probe`。
 
-已知边界：表格嵌在 blockquote / 列表里不带外层前缀（既有行为，见第四节登记）。
+已知边界：表格不带外层前缀、单元格内不注入前缀（见第四节登记）。
 
 ## 三、不变量：流式静息态 == 参考全量渲染
 
@@ -162,7 +163,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 | 现象 | 原因 | 归类 |
 |---|---|---|
-| 表格嵌在 blockquote / 列表里，外层的 `│ ` / 续行前缀没带上 | 表格渲染不套外层前缀（与代码块 / 公式块不同）；本次改动未涉及，属既有行为 | 既有（登记） |
+| 表格嵌在 blockquote / 列表里：不带外层前缀（引用栏 / 续行缩进不出现在表上），列表 item 的 marker 单独成行 | 表格渲染不套外层前缀；单元格内也刻意不注入（注入了就是每格一道假框线 `┃ │ A ┃`，该注入已移除）。与代码块 / 公式块（会带引用栏）不同 | 刻意的语义 |
 | 流式中 `[foo]` 短暂显示成字面量 | 引用式链接的定义与引用落在不同 slice，切片独立解析；`finalize()` 收敛 | 切片隔离，见 `stream.rs` 模块文档 |
 | reasoning 里模型把草稿套在围栏里、内部再套围栏，导致后半段正文被吃进代码块（或反之） | CommonMark 不允许嵌套围栏：一个裸围栏闭合外层后，后续围栏的配对整体翻转。任何 CommonMark 渲染器（GitHub / VS Code / Claude Code）结果相同；还原作者意图需要全局配对最优化，与稳定前缀模型冲突 | 输入歧义，见 `stream.rs` 模块文档「Known limit — nested fences」 |
 | 段落后面紧跟列表（`para` 换行 `- item`）时，该列表项内的缩进续行会多出段落间空行 | splitter 的 Paragraph 模式不识别「列表打断段落」，于是项内缩进内容被切成独立的缩进块（缩进块是顶层块，没有「列表项内不加空行」的规则）。逐帧可见、`finalize()` 收敛 | 切片边界，见 `stream.rs` | 

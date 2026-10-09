@@ -26,6 +26,7 @@ use super::types::MarkdownSegment;
 use super::types::SegmentKind;
 use crate::render::table::ColumnMetrics;
 use crate::render::table::LONG_TOKEN_WIDTH;
+use crate::render::table::MIN_COLUMN_WIDTH;
 use crate::render::table::RuleGlyphs;
 use crate::render::table::TableSkin;
 use crate::render::table::classify_column;
@@ -190,6 +191,7 @@ fn collect_column_metrics(
             max_width,
             header_token_width,
             body_token_width,
+            min_width: MIN_COLUMN_WIDTH,
             kind,
         });
     }
@@ -440,9 +442,10 @@ mod tests {
         lines.iter().map(|l| l.to_plain()).collect()
     }
 
-    /// 跨前端对账：同一份数据、同样的预算，markdown 渲染与 plain 渲染（CLI）
-    /// 的纯文本必须逐字符相同——两个前端共用一份皮肤与宽度引擎，这条测试把
-    /// 「视觉同源」从口头承诺钉成事实。
+    /// 跨前端对账：同一份数据、同样的预算（**无需折行 / 截断时**——折行是
+    /// markdown 侧的设计、截断是 CLI 侧的设计），两条渲染路径的纯文本必须
+    /// 逐字符相同——两个前端共用一份皮肤与宽度引擎，这条测试把「视觉同源」
+    /// 从口头承诺钉成事实。
     #[test]
     fn markdown_and_plain_render_the_same_grid() {
         use crate::render::table::plain::{self, PlainCell, PlainColumn, PlainOpts, PlainTable};
@@ -467,7 +470,7 @@ mod tests {
                 vec![PlainCell::plain("2"), PlainCell::plain("second")],
             ],
         };
-        let plain_lines = plain::render(
+        let cli_lines = plain::render(
             &plain_table,
             &PlainOpts {
                 width: 60,
@@ -477,7 +480,39 @@ mod tests {
             },
         );
 
-        assert_eq!(md_lines, plain_lines);
+        assert_eq!(md_lines, cli_lines);
+
+        // 收紧预算：内容层按各自设计分化（markdown 折行、CLI 截断），但几何
+        // 不许分化——同一份预算下两侧的行宽逐一相等、顶/底框逐字符相同。
+        let width = |l: &String| unicode_width::UnicodeWidthStr::width(l.as_str());
+        for budget in [24usize, 12] {
+            let md: Vec<String> = plain_lines(&render_table(
+                &table,
+                Style::new(),
+                Style::new(),
+                Some(budget as u16),
+            ));
+            let cli = plain::render(
+                &plain_table,
+                &PlainOpts {
+                    width: budget,
+                    color: false,
+                    frame: Style::new(),
+                    header: Style::new(),
+                },
+            );
+            assert_eq!(md.first(), cli.first(), "top rule @ {budget}");
+            assert_eq!(md.last(), cli.last(), "bottom rule @ {budget}");
+            let target = width(&md[0]);
+            assert!(
+                md.iter().all(|l| width(l) == target),
+                "md @ {budget}: {md:?}"
+            );
+            assert!(
+                cli.iter().all(|l| width(l) == target),
+                "cli @ {budget}: {cli:?}"
+            );
+        }
     }
 
     #[test]

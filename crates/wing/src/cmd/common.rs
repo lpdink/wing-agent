@@ -12,25 +12,55 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 
 /// Output environment for human-facing tables.
 ///
-/// `width` is the terminal width when stdout is a TTY, 120 otherwise (the
-/// width the hand-laid tables used to be cut for, kept for pipes so output
-/// stays deterministic); `color` is off when stdout is not a TTY, when
-/// `NO_COLOR` is set (the standard opt-out) or when the terminal declares
-/// itself dumb.
+/// `width`: a TTY adapts to the terminal; a pipe gets [`PIPE_WIDTH`] —
+/// deterministic output for `grep` / `less` / CI (terminal queries through
+/// `/dev/tty` must not leak the real width into a redirect).
+///
+/// `color` is off unless stdout is a TTY, `NO_COLOR` is unset-or-empty (the
+/// no-color.org semantics: "present and not an empty string") and the
+/// terminal does not declare itself dumb.
 pub struct TableOutput {
     pub width: usize,
     pub color: bool,
 }
 
+/// Table width for non-TTY output: the width the hand-laid tables used to be
+/// cut for, kept so pipes stay deterministic.
+pub const PIPE_WIDTH: usize = 120;
+
 impl TableOutput {
     pub fn detect() -> Self {
-        let dumb = std::env::var_os("TERM").is_some_and(|t| t == "dumb");
+        let stdout_tty = std::io::stdout().is_terminal();
         Self {
-            width: crossterm::terminal::size().map_or(120, |(w, _)| w as usize),
-            color: std::io::stdout().is_terminal()
-                && std::env::var_os("NO_COLOR").is_none()
-                && !dumb,
+            width: Self::width_for(stdout_tty),
+            color: Self::color_for(
+                stdout_tty,
+                std::env::var_os("NO_COLOR").as_deref(),
+                std::env::var_os("TERM").as_deref(),
+            ),
         }
+    }
+
+    /// Width policy: TTY → the terminal's width (120 when the query fails);
+    /// pipe → [`PIPE_WIDTH`].
+    fn width_for(stdout_tty: bool) -> usize {
+        if stdout_tty {
+            crossterm::terminal::size().map_or(PIPE_WIDTH, |(w, _)| w as usize)
+        } else {
+            PIPE_WIDTH
+        }
+    }
+
+    /// Colour policy (see the struct docs). Pure, so the rule is testable
+    /// without a terminal.
+    fn color_for(
+        stdout_tty: bool,
+        no_color: Option<&std::ffi::OsStr>,
+        term: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        stdout_tty
+            && no_color.is_none_or(|v| v.is_empty())
+            && term.is_none_or(|t| t.to_string_lossy() != "dumb")
     }
 }
 
@@ -193,5 +223,28 @@ mod tests {
         assert_eq!(single_line("a\tb\rc"), "a b c");
         // 普通文本原样（不折叠已有空格）。
         assert_eq!(single_line("keep  the  spaces"), "keep  the  spaces");
+    }
+
+    #[test]
+    fn table_output_policy_is_testable_without_a_terminal() {
+        use std::ffi::OsStr;
+        // 管道：固定宽度（确定性）、永不着色。
+        assert_eq!(TableOutput::width_for(false), PIPE_WIDTH);
+        assert!(!TableOutput::color_for(false, None, None));
+        // TTY：默认着色；NO_COLOR 非空即退出（空串不算 opt-out，no-color.org 口径）。
+        assert!(TableOutput::color_for(true, None, None));
+        assert!(!TableOutput::color_for(true, Some(OsStr::new("1")), None));
+        assert!(TableOutput::color_for(true, Some(OsStr::new("")), None));
+        // TERM=dumb 同样退出。
+        assert!(!TableOutput::color_for(
+            true,
+            None,
+            Some(OsStr::new("dumb"))
+        ));
+        assert!(TableOutput::color_for(
+            true,
+            None,
+            Some(OsStr::new("xterm-256color"))
+        ));
     }
 }

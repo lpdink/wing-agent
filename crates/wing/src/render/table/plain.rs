@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::ColumnKind;
 use super::ColumnMetrics;
+use super::MIN_COLUMN_WIDTH;
 use super::RuleGlyphs;
 use super::TableSkin;
 use super::compute_column_widths;
@@ -35,6 +36,11 @@ pub struct PlainColumn {
     /// Natural width ceiling — keeps a wide terminal from stretching one
     /// column across the whole screen.
     pub max_width: Option<usize>,
+    /// Never shrink below the natural width: for values whose full text *is*
+    /// the point (a session id that gets copied and matched exactly). A
+    /// too-narrow terminal makes the table overflow rather than truncate such
+    /// a column (see [`super::ColumnMetrics::min_width`]).
+    pub keep_natural: bool,
 }
 
 impl PlainColumn {
@@ -43,15 +49,23 @@ impl PlainColumn {
             header: header.into(),
             kind,
             max_width: None,
+            keep_natural: false,
         }
     }
 
     /// A column with a natural-width ceiling.
     pub fn capped(header: impl Into<String>, kind: ColumnKind, max_width: usize) -> Self {
         Self {
-            header: header.into(),
-            kind,
             max_width: Some(max_width),
+            ..Self::new(header, kind)
+        }
+    }
+
+    /// A column that keeps its full natural width (no truncation ever).
+    pub fn keep_natural(header: impl Into<String>, kind: ColumnKind) -> Self {
+        Self {
+            keep_natural: true,
+            ..Self::new(header, kind)
         }
     }
 }
@@ -123,6 +137,11 @@ pub fn render(table: &PlainTable, opts: &PlainOpts) -> Vec<String> {
                 max_width,
                 header_token_width: longest_token_width(&column.header),
                 body_token_width,
+                min_width: if column.keep_natural {
+                    max_width
+                } else {
+                    MIN_COLUMN_WIDTH
+                },
                 kind: column.kind,
             }
         })
@@ -405,6 +424,33 @@ mod tests {
         let lines = render(&t, &opts(300, false));
         // Cap 20 + frame 4 = 24, not 104 even on a very wide terminal.
         assert_eq!(UnicodeWidthStr::width(lines[0].as_str()), 24);
+    }
+
+    /// `keep_natural` 列（会话 id）在窄预算下保持完整：收缩只发生在其它列。
+    #[test]
+    fn keep_natural_column_survives_a_narrow_budget() {
+        let t = PlainTable {
+            columns: vec![
+                PlainColumn::keep_natural("SESSION ID", ColumnKind::Compact),
+                PlainColumn::capped("NAME", ColumnKind::Narrative, 80),
+            ],
+            rows: vec![vec![
+                PlainCell::plain("20261009-210702-217d85f2"),
+                PlainCell::plain("我们前端的表格渲染虽然不错吧 但是其实我更喜欢包裹起来的感觉"),
+            ]],
+        };
+        let lines = render(&t, &opts(80, false));
+        assert!(
+            lines[3].contains("20261009-210702-217d85f2"),
+            "id 不能被截断：{:?}",
+            lines[3]
+        );
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
+            .collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        assert!(widths[0] <= 80, "{widths:?}");
     }
 
     #[test]

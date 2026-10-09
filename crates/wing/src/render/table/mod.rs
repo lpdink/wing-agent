@@ -42,6 +42,12 @@ pub struct ColumnMetrics {
     pub header_token_width: usize,
     /// Widest whitespace token across body cells.
     pub body_token_width: usize,
+    /// **Hard floor**: the column never shrinks below this. Pass
+    /// [`MIN_COLUMN_WIDTH`] for the default; a column whose full value is the
+    /// point (a session id that gets copied and matched exactly) passes its
+    /// natural width — the table then overflows a too-narrow budget instead
+    /// of destroying the value (see [`compute_column_widths`]).
+    pub min_width: usize,
     pub kind: ColumnKind,
 }
 
@@ -70,8 +76,11 @@ pub fn classify_column(
 ///
 /// Each column starts at its natural (max cell content) width, then columns are
 /// shrunk one character at a time until the total fits. Token-heavy columns
-/// shrink before narrative prose; compact columns are preserved last. Always
-/// returns widths whose sum is `<= content_budget` (when a budget is given).
+/// shrink before narrative prose; compact columns are preserved last. The
+/// result sums to `<= content_budget` when a budget is given — unless the
+/// *hard floors* ([`ColumnMetrics::min_width`]) do not fit: floor-bound columns
+/// keep their width and the rows overflow, because a column declared "must not
+/// lose its value" outranks fitting the budget.
 pub fn compute_column_widths(
     metrics: &[ColumnMetrics],
     content_budget: Option<usize>,
@@ -79,7 +88,7 @@ pub fn compute_column_widths(
     let col_count = metrics.len();
     let mut widths: Vec<usize> = metrics
         .iter()
-        .map(|m| m.max_width.max(MIN_COLUMN_WIDTH))
+        .map(|m| m.max_width.max(hard_floor(m)))
         .collect();
 
     let Some(budget) = content_budget else {
@@ -89,24 +98,22 @@ pub fn compute_column_widths(
         return widths;
     }
 
-    // Degenerate budget: cannot even hold minimum-width columns. Split evenly.
-    let min_total = col_count * MIN_COLUMN_WIDTH;
+    // Degenerate budget: not even the hard floors fit. The floors win (see
+    // the doc comment); callers must tolerate an over-wide row here.
+    let min_total: usize = metrics.iter().map(hard_floor).sum();
     if budget < min_total {
-        let share = (budget / col_count).max(1);
-        return vec![share; col_count];
+        return metrics.iter().map(hard_floor).collect();
     }
 
-    // Preferred floors, relaxed in shrink-priority order until they fit.
-    let mut floors: Vec<usize> = metrics
-        .iter()
-        .map(|m| preferred_column_floor(m, MIN_COLUMN_WIDTH))
-        .collect();
+    // Preferred (soft) floors, never below the hard floor, relaxed in
+    // shrink-priority order until they fit.
+    let mut floors: Vec<usize> = metrics.iter().map(preferred_column_floor).collect();
     let mut floor_total: usize = floors.iter().sum();
     while floor_total > budget {
         let Some((idx, _)) = floors
             .iter()
             .enumerate()
-            .filter(|(_, floor)| **floor > MIN_COLUMN_WIDTH)
+            .filter(|(idx, floor)| **floor > hard_floor(&metrics[*idx]))
             .min_by_key(|(idx, floor)| {
                 (
                     shrink_priority(metrics[*idx].kind),
@@ -133,12 +140,19 @@ pub fn compute_column_widths(
     widths
 }
 
+/// The floor a column can never go below: its declared hard floor, clamped up
+/// to [`MIN_COLUMN_WIDTH`].
+fn hard_floor(metrics: &ColumnMetrics) -> usize {
+    metrics.min_width.max(MIN_COLUMN_WIDTH)
+}
+
 /// Preferred minimum width for a column before the shrink loop runs.
 ///
 /// Narrative and token-heavy columns keep a readable 16-cell soft floor; compact
 /// columns floor at the wider of their header/body token widths (body capped at
-/// 16). Clamped to `[min, max_width]`.
-fn preferred_column_floor(metrics: &ColumnMetrics, min: usize) -> usize {
+/// 16). Clamped to `[hard floor, max_width]`.
+fn preferred_column_floor(metrics: &ColumnMetrics) -> usize {
+    let min = hard_floor(metrics);
     let target = match metrics.kind {
         ColumnKind::Narrative | ColumnKind::TokenHeavy => PREFERRED_FLOOR,
         ColumnKind::Compact => metrics
@@ -309,6 +323,7 @@ mod tests {
             max_width,
             header_token_width: 3,
             body_token_width: 5,
+            min_width: MIN_COLUMN_WIDTH,
             kind: ColumnKind::Compact,
         }
     }
@@ -372,12 +387,14 @@ mod tests {
                 max_width: 80,
                 header_token_width: 3,
                 body_token_width: 60,
+                min_width: MIN_COLUMN_WIDTH,
                 kind: ColumnKind::TokenHeavy,
             },
             ColumnMetrics {
                 max_width: 40,
                 header_token_width: 3,
                 body_token_width: 30,
+                min_width: MIN_COLUMN_WIDTH,
                 kind: ColumnKind::Narrative,
             },
         ];
@@ -395,12 +412,14 @@ mod tests {
                 max_width: 60,
                 header_token_width: 3,
                 body_token_width: 50,
+                min_width: MIN_COLUMN_WIDTH,
                 kind: ColumnKind::TokenHeavy,
             },
             ColumnMetrics {
                 max_width: 60,
                 header_token_width: 3,
                 body_token_width: 30,
+                min_width: MIN_COLUMN_WIDTH,
                 kind: ColumnKind::Narrative,
             },
         ];
@@ -420,10 +439,45 @@ mod tests {
             compact_metrics(10),
             compact_metrics(10),
         ];
-        // Budget too small for 3 * MIN_COLUMN_WIDTH.
+        // Budget too small for 3 * MIN_COLUMN_WIDTH: the hard floors win over
+        // fitting (a caller must tolerate an over-wide row here — documented
+        // on `compute_column_widths`).
         let widths = compute_column_widths(&metrics, Some(6));
-        assert_eq!(widths.len(), 3);
-        assert!(widths.iter().all(|&w| w >= 1));
+        assert_eq!(widths, vec![MIN_COLUMN_WIDTH; 3]);
+    }
+
+    /// A column declared `min_width = natural` (a value that must survive
+    /// whole — `wing ps`'s session id) never shrinks: the other columns give
+    /// up everything above their own floors first, and if the budget still
+    /// cannot fit, the floors win over the budget.
+    #[test]
+    fn keep_natural_column_never_shrinks() {
+        let id = |max: usize| ColumnMetrics {
+            max_width: max,
+            header_token_width: 7,
+            body_token_width: max,
+            min_width: max,
+            kind: ColumnKind::Compact,
+        };
+        let text = |max: usize| ColumnMetrics {
+            max_width: max,
+            header_token_width: 4,
+            body_token_width: max,
+            min_width: MIN_COLUMN_WIDTH,
+            kind: ColumnKind::Narrative,
+        };
+
+        // Roomy-then-tight budgets: NAME shrinks, the id stays whole.
+        for budget in [64usize, 48, 34] {
+            let widths = compute_column_widths(&[id(24), text(80), text(40)], Some(budget));
+            assert_eq!(widths[0], 24, "budget={budget}: {widths:?}");
+            assert!(widths[1] >= MIN_COLUMN_WIDTH && widths[2] >= MIN_COLUMN_WIDTH);
+        }
+
+        // Budget below the hard floors (24 + 3 + 3 = 30): floors win, rows
+        // overflow rather than lose the id.
+        let widths = compute_column_widths(&[id(24), text(80), text(40)], Some(10));
+        assert_eq!(widths, vec![24, MIN_COLUMN_WIDTH, MIN_COLUMN_WIDTH]);
     }
 
     #[test]
