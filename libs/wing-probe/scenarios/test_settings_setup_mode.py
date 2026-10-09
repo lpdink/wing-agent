@@ -17,7 +17,8 @@
    ``history.jsonl`` 有记录。
 
 ``setup_mode`` 字段在降级期是**真值** ``true``（04/AD15），转入正常模式后 ``false``
-——本场景直接断言它（另一个可观测判据是会话端点的 503 错误码与 WS 拒绝）。
+——本文件的另两条用例断言它（AD12/AD13 的降级路径）；**主用例的判据**是会话端点的
+503 错误码与 WS 拒绝（这两条在"字段说真话"之前就已经是可观测事实）。
 
 本文件另有两个用例覆盖两条「坏到读不出来」的分支（AD12/AD13）：
 顶层数字键（``Config(**parsed)`` 连校验都进不去）与 YAML 语法错（文件读不出文档）
@@ -94,8 +95,11 @@ async def test_broken_config_repairs_in_place(probe: Probe) -> None:
 
     http = DriverHttp(probe.env.gateway_url, started_at=probe.env.started_at)
     try:
-        pid = probe.env.process.pid
-        assert probe.env.process.poll() is None, "gateway died on a broken config"
+        # ty 收窄：`process` 是可空属性（未启动的 env）——⑦ 还要用它复核"就地"。
+        process = probe.env.process
+        assert process is not None, "probe env must have spawned a gateway process"
+        pid = process.pid
+        assert process.poll() is None, "gateway died on a broken config"
 
         # ① 降级启动：进程活着、health 通（白名单里的最小事实）。
         health = await http.health()
@@ -186,8 +190,8 @@ async def test_broken_config_repairs_in_place(probe: Probe) -> None:
         assert backup.read_bytes() == before_bytes, receipt["backup_path"]
 
         # ⑦ 就地转入：同一个进程（pid 不变、仍活着）——不是偷偷重启。
-        assert probe.env.process.pid == pid, (pid, probe.env.process.pid)
-        assert probe.env.process.poll() is None
+        assert process.pid == pid, (pid, process.pid)
+        assert process.poll() is None
 
         # ⑧ 守门解除：同一 HTTP 客户端再打会话端点 → 200；status 转 valid。
         created = await http.request(

@@ -74,6 +74,9 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
     assert "reasoning_effort" not in body_before, body_before
 
     # ② get → 改两处 → set（整份稀疏文档回传；密文 null 的保留语义见 secrets 场景）。
+    #    第二个观测点用 provider 级 `reasoning_effort` 而不是 §18.3 表里写的 `max_tokens`：
+    #    `max_tokens` 只进 Anthropic 协议的 body（anthropic/provider.py），openai 协议的
+    #    假 Provider 上它**根本不出现在请求体里**，观测不到（review N1）。
     current = await _settings(http)
     provider_doc = current["values"]["providers"][0]
     provider_doc["extra_body"] = {MARKER_KEY: MARKER_VALUE}

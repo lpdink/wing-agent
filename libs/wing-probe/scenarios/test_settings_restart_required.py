@@ -60,8 +60,12 @@ def _free_port() -> int:
 async def test_port_change_needs_a_restart_and_does_not_rebind(probe: Probe) -> None:
     """改 gateway.port → restart_required 点名；旧端口照常、新端口无人监听。"""
     http = probe.driver_required.http
-    pid = probe.env.process.pid
+    # ty：`process` / `port` 都是可空属性（未启动的 env）——先收窄成非空，后续断言直读。
+    process = probe.env.process
+    assert process is not None, "probe env must have spawned a gateway process"
     old_port = probe.env.port
+    assert old_port is not None, "probe env must know its gateway port"
+    pid = process.pid
 
     current = await http.request("GET", "/api/settings/get")
     document = current["values"]
@@ -84,8 +88,8 @@ async def test_port_change_needs_a_restart_and_does_not_rebind(probe: Probe) -> 
     )
 
     # 不做假热更：同一个进程、旧端口照常服务。
-    assert probe.env.process.poll() is None
-    assert probe.env.process.pid == pid, (pid, probe.env.process.pid)
+    assert process.poll() is None
+    assert process.pid == pid, (pid, process.pid)
     assert _listening(old_port), f"gateway stopped serving the old port {old_port}"
     health = await http.health()
     assert health["status"] == "ok", health
