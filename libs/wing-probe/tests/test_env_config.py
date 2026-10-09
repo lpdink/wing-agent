@@ -713,3 +713,43 @@ async def test_restart_gateway_without_running_process_starts_one(
 
     assert started == [1], "重启只调用一次 start_gateway"
     assert env.process is None
+
+
+# ── 场景自带的 config.yaml（config_text 旋钮） ──────────────────
+
+
+def test_config_text_replaces_the_generated_file(tmp_path: Path) -> None:
+    """``config_text`` 逐字写盘（含故意的语法错）；缺省仍走生成路径。
+
+    setup mode 场景的注入点：整份替换 ``core/config.yaml``，所以"坏到不能
+    启动"的配置能被表达。逐字（不做占位符替换）是刻意的——语法错场景需要原文。
+    """
+    raw = "providers: []\nagents: []\n"
+    env = ProbeEnv(tmp_path, config_text=raw)
+    assert env.config_text == raw
+    assert env._render_config(45124) == raw
+
+    plain = ProbeEnv(tmp_path)
+    assert plain.config_text is None
+    generated = plain._render_config(45124)
+    assert generated != raw
+    assert "port: 45124" in generated, "缺省路径仍按端口生成配置"
+
+
+def test_config_text_rejects_generation_knobs(tmp_path: Path) -> None:
+    """``config_text`` 与生成旋钮互斥：显式偏离默认值即报错（不静默失效）。"""
+    with pytest.raises(ProbeEnvError) as failure:
+        ProbeEnv(
+            tmp_path,
+            config_text="providers: []\n",
+            models=["probe/x"],
+            auth={"enabled": True},
+        )
+    message = str(failure.value)
+    assert "models" in message and "auth" in message, message
+
+    # 显式给「与默认相同」的值不算冲突（无假红）。
+    env = ProbeEnv(
+        tmp_path, config_text="providers: []\n", tools=list(DEFAULT_AGENT_TOOLS)
+    )
+    assert env.config_text == "providers: []\n"
