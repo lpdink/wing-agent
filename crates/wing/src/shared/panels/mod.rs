@@ -31,6 +31,7 @@
 
 pub mod ask;
 pub mod picker;
+pub mod settings;
 
 /// Default number of visibly rendered tabs / option rows.
 pub const PANEL_WINDOW: usize = 5;

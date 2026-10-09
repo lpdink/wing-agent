@@ -237,6 +237,14 @@ const SHARED_ANCHORS: &[&str] = &[
     "shared/panels/mod.rs",
     "shared/panels/ask.rs",
     "shared/panels/picker.rs",
+    // The settings panel package — same neutral-layer rules apply.
+    "shared/panels/settings/mod.rs",
+    "shared/panels/settings/doc.rs",
+    "shared/panels/settings/tree.rs",
+    "shared/panels/settings/edit.rs",
+    "shared/panels/settings/list.rs",
+    "shared/panels/settings/search.rs",
+    "shared/panels/settings/problems.rs",
 ];
 
 /// Scan `sources` for `needles`, panicking with every offending site.
