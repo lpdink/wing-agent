@@ -1313,6 +1313,12 @@ fn render_write_text(response: &SettingsSetResponse, note: Option<&str>) -> Stri
     for changed in &response.changed {
         out.push_str(&format!("  · {changed}\n"));
     }
+    // warnings 不是 problems：保存已经成功，但这些是用户必须知道的副作用。
+    // 最典型的一条来自 AD13 —— 原文件语法坏到读不出来时我们无法保留其中的密钥，
+    // 不显式说出来，用户就会以为密钥还在（下一次调用 401 才发现）。
+    for warning in &response.warnings {
+        out.push_str(&format!("⚠ {warning}\n"));
+    }
     if let Some(note) = note {
         out.push_str(&format!("  {note}\n"));
     }
@@ -1321,7 +1327,7 @@ fn render_write_text(response: &SettingsSetResponse, note: Option<&str>) -> Stri
             "⚠ 需重启网关才生效：{}\n",
             response.restart_required.join(", ")
         ));
-        out.push_str("  运行 wing stop && wing start（或在 TUI 设置面板里按 r）\n");
+        out.push_str("  运行 wing stop && wing start（或在 TUI 设置面板里按 Ctrl+R）\n");
     }
     if let Some(reload) = &response.reload {
         if !reload.results.is_empty() {
@@ -2372,6 +2378,7 @@ mod tests {
 
     fn ok_set_response() -> SettingsSetResponse {
         SettingsSetResponse {
+            warnings: Vec::new(),
             ok: true,
             fingerprint: "fp-2".to_string(),
             problems: Vec::new(),
@@ -3627,6 +3634,7 @@ mod tests {
     #[test]
     fn render_write_text_ok_includes_changed_restart_reload_and_backup() {
         let response = SettingsSetResponse {
+            warnings: Vec::new(),
             ok: true,
             fingerprint: "fp-2".to_string(),
             problems: Vec::new(),
@@ -3668,6 +3676,7 @@ mod tests {
     #[test]
     fn render_write_text_refused_lists_problems_and_never_writes() {
         let response = SettingsSetResponse {
+            warnings: Vec::new(),
             ok: false,
             fingerprint: "fp-1".to_string(),
             problems: vec![problem(
@@ -4180,6 +4189,7 @@ mod tests {
         // ok=false → 1，且回执（problems）走 stdout。
         let mut refused = FakeBackend::healthy(catalog(), document());
         refused.set = Ok(SettingsSetResponse {
+            warnings: Vec::new(),
             ok: false,
             fingerprint: "fp-1".to_string(),
             problems: vec![problem(
