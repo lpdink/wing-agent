@@ -17,9 +17,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
-from wing.config import ApiKeyEntry, AuthConfig, reset_config
+from wing.config import ApiKeyEntry, AuthConfig, Config, reset_config
 from wing.event import EVENT_TYPES, FACT_EVENTS, SettingsChangedEvent, wire_dump
 from wing.event_bus import event_bus
 
@@ -433,6 +434,25 @@ class TestSettingsSet:
         resp = client.post("/api/settings/set", json={"base": None})
         assert resp.status_code == 422
         assert resp.json()["error"] == "validation_error"
+
+    def test_set_keeps_freeform_map_readable_on_disk(self, gateway):
+        """AD7（B1 回归）：单键平铺 map 落盘后，config.yaml 仍是**能解析、能加载**的文件。
+
+        `extra_body: {top_p: 0.9}` 是自由 map 最常见的形态；emitter 曾把这种「恰好单行的
+        容器载荷」当标量内联，写出 `extra_body: top_p: 0.9` 让整个文件解析失败——用户视角
+        就是「我保存了一次，配置就坏了」。这条测试从保存事务一路钉到磁盘字节。
+        """
+        client, config_path, _ = gateway
+        values, fingerprint = _get_doc(client)
+        values["providers"][0]["extra_body"] = {"top_p": 0.9}
+        body = client.post(
+            "/api/settings/set", json={"base": fingerprint, "document": values}
+        ).json()
+        assert body["ok"] is True
+
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config = Config(**raw)  # 落盘文件必须能被加载期构造（不是"能写不能读"）
+        assert config.providers[0].extra_body == {"top_p": 0.9}
 
     def test_set_keeps_unknown_keys(self, gateway):
         """未知键由服务端回填（D17：新版本写的键，旧版本编辑时不能吃掉）。"""

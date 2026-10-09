@@ -310,13 +310,18 @@ def _emit_value(
 def _emit_keyed_raw(
     out: list[str], key: str, value: Any, indent: int, commented: bool
 ) -> None:
-    """键 + 任意 YAML 载荷（freeform map 的值 / 未知键的值）。"""
+    """键 + 任意 YAML 载荷（freeform map 的值 / 未知键的值）。
+
+    内联（`key: <载荷>`）只对**标量**与**空容器**成立：`safe_dump` 给它们的单行是真·单行
+    （`true` / `{}` / `[]`）。非空容器的单行 dump（`a: 1` / `- 1`）是**块结构的首行**，
+    直接拼在 `key: ` 后会产出非法 YAML（`key: a: 1` / `key: - 1`，`yaml.safe_load` 直接
+    ScannerError）——这类载荷一律走缩进块。前向兼容承诺「原样写回」，写出一份解析不了的文件
+    等于把它弄丢了（B1 回归，见 02 design.md「Rework r1」）。
+    """
     text = _raw_yaml(value)
     lines = text.split("\n")
-    # 单行内联只对**标量**与**空容器**成立。非空映射 / 列表 dump 出来的单行仍是**块结构**
-    # （`future_key: keep-me` / `- 1`），拼在 `key: ` 后面会产出非法 YAML——必须走缩进块
-    # （未知键的前向兼容承诺「原样写回」，写出一份解析不了的文件等于把它弄丢了）。
-    if len(lines) == 1 and (not isinstance(value, (dict, list)) or not value):
+    inline = len(lines) == 1 and (not isinstance(value, (dict, list)) or not value)
+    if inline:
         _line(out, indent, f"{_key_text(key)}: {lines[0]}", commented)
         return
     _line(out, indent, f"{_key_text(key)}:", commented)
@@ -415,7 +420,12 @@ def _emit_object_item(
 
 
 def _emit_raw_item(out: list[str], item: Any, indent: int, commented: bool) -> None:
-    """没有元素声明（或形状对不上）的列表项：原样写出。"""
+    """没有元素声明（或形状对不上）的列表项：原样写出。
+
+    与 ``_emit_keyed_raw`` 不同，这里把载荷首行并进 ``- `` 是**正确**的（不是同一条 B1 缺陷）：
+    嵌套序列的紧凑形态 ``- - 1`` 就是 ``[[1]]`` 的合法写法——``yaml.safe_dump([[1]])``
+    自己也这么写（实测变异验证：改成分行缩进，解析结果不变）。
+    """
     lines = _raw_yaml(item).split("\n")
     for index, line in enumerate(lines):
         if index == 0:

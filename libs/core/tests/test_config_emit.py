@@ -17,15 +17,17 @@
 from __future__ import annotations
 
 import re
+from typing import Any, get_args, get_origin
 
 import pytest
 import yaml
-from pydantic import create_model
+from pydantic import BaseModel, create_model
 
 from wing.config import (
     ApplyScope,
     Config,
     S,
+    SettingKind,
     build_catalog,
     cross_field_problems,
     default_document,
@@ -233,7 +235,8 @@ def test_header_has_no_timestamp(template: str) -> None:
     assert header[1] == "# wing-agent configuration"
     assert "$WING_HOME/core/config.yaml" in header[2]
     assert "/settings" in header[3]
-    assert not re.search(r"\d{4}-\d{2}-\d{2}", template)
+    # 不写生成时间戳（会让每次保存都产生 diff 噪声）；文件头里不许出现日期形态
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", "\n".join(header))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -373,6 +376,185 @@ def test_single_line_mapping_unknown_key_stays_valid_yaml(
     assert loaded["future_section"] == {"future_key": "keep-me"}
     assert loaded["one"] == [1]
     assert "future_section: future_key" not in text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B1 回归（Rework r1）：容器载荷不许被当成标量内联
+#
+# `safe_dump` 给出单行的**非空容器**（`a: 1` / `- 1`）是块结构的首行，不是标量；
+# 拼在 `key: ` 后面会产出 `key: a: 1` 这种解析不了的文件（数据损坏级，AD7）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_single_key_map_payload_is_emitted_as_a_block(catalog: SettingNode) -> None:
+    """B1 的原始复现（生产路径①）：``extra_body`` 写单键平铺 map。"""
+    doc = {
+        "providers": [
+            {
+                "name": "p",
+                "base_url": "http://x",
+                "api_key": "k",
+                "models": ["m"],
+                "extra_body": {"top_p": 0.9},
+            }
+        ],
+        "agents": [{"name": "a", "model": "m"}],
+    }
+    text = emit_config_yaml(doc, catalog)
+    assert "extra_body:\n      top_p: 0.9\n" in text  # 块风格，键独占一行
+    assert "extra_body: top_p" not in text
+    assert yaml.safe_load(text) == doc
+
+
+def test_single_element_list_payload_is_emitted_as_a_block(
+    catalog: SettingNode,
+) -> None:
+    """B1 的另一半（生产路径②）：未知键的值是**单元素 list**。"""
+    doc = {"providers": [], "agents": []}
+    text = emit_config_yaml(doc, catalog, extra=[("future_knob", [1])])
+    assert "future_knob:\n  - 1\n" in text
+    assert "future_knob: - 1" not in text
+    assert yaml.safe_load(text)["future_knob"] == [1]
+
+
+def test_scalar_and_empty_container_payloads_stay_inline(catalog: SettingNode) -> None:
+    """内联只对**标量**与**空容器**成立（它们 dump 出来的单行才是真·单行）。"""
+    extra: list[tuple[str, Any]] = [
+        ("a_null", None),
+        ("a_bool", True),
+        ("a_int", 7),
+        ("a_str", "x"),
+        ("a_map", {}),
+        ("a_list", []),
+    ]
+    text = emit_config_yaml({"providers": [], "agents": []}, catalog, extra=extra)
+    for line in (
+        "a_null: null",
+        "a_bool: true",
+        "a_int: 7",
+        "a_str: x",
+        "a_map: {}",
+        "a_list: []",
+    ):
+        assert line in text
+    loaded = yaml.safe_load(text)
+    assert [loaded[name] for name, _ in extra] == [None, True, 7, "x", {}, []]
+
+
+def test_multi_line_container_payload_keeps_its_block_shape(
+    catalog: SettingNode,
+) -> None:
+    """多行容器的既有行为不回归：键独占一行，载荷缩进 +2。"""
+    payload = {"a": [1, 2], "b": {"c": 3}}
+    text = emit_config_yaml(
+        {"providers": [], "agents": []}, catalog, extra=[("wat", payload)]
+    )
+    lines = text.splitlines()
+    index = lines.index("wat:")
+    assert lines[index + 1].startswith("  a:")
+    assert yaml.safe_load(text)["wat"] == payload
+
+
+def test_commented_container_default_keeps_the_block_shape() -> None:
+    """注释态同形：缺席 map 的非空默认值整块注释，注释产物仍是合法 YAML。"""
+    mini = create_model(
+        "_M",
+        a_map=(
+            dict,
+            S(doc="映射", apply=ApplyScope.HOT, default_factory=lambda: {"a": 1}),
+        ),
+    )
+    text = emit_config_yaml({}, build_catalog(mini))
+    assert "# a_map:\n  # a: 1\n" in text
+    assert (yaml.safe_load(text) or {}) == {}
+
+
+def test_list_item_nested_sequence_payload_keeps_depth() -> None:
+    """没有元素形态声明的 list（防御路径）：嵌套序列项不多包一层。
+
+    这条路径用紧凑形态（`- - 1`）就够——它正是 ``safe_dump([[1]])`` 自己的写法
+    （变异验证：改成"dash 独占一行 + 整体缩进"解析结果不变，所以这里不是 B1 的同族缺陷）。
+    """
+    bare = SettingNode(
+        key="bare", path="bare", title="bare", doc="", kind=SettingKind.LIST
+    )
+    root = SettingNode(
+        key="config",
+        path="config",
+        title="config",
+        doc="",
+        kind=SettingKind.OBJECT,
+        children=[bare],
+    )
+    text = emit_config_yaml({"bare": [[1], [2, 3]]}, root)
+    assert "  - - 1" in text
+    assert yaml.safe_load(text) == {"bare": [[1], [2, 3]]}
+
+
+def _walk_fields(model: type[BaseModel], prefix: str = "") -> list[tuple[str, Any]]:
+    """``(路径, FieldInfo)``：递归走 `model` 可达的全部声明字段（含 union / 列表元素）。"""
+    out: list[tuple[str, Any]] = []
+    for name, field in model.model_fields.items():
+        path = f"{prefix}.{name}" if prefix else name
+        out.append((path, field))
+        for child in (field.annotation, *get_args(field.annotation)):
+            if isinstance(child, type) and issubclass(child, BaseModel):
+                out.extend(_walk_fields(child, path))
+    return out
+
+
+def test_every_list_declaration_defaults_to_empty() -> None:
+    """S2 门禁：emitter 对 list 的缺席值写死 `[]`（catalog 的 `default=None` 是结构口径）。
+
+    这条门禁让那个「发明值」保持诚实：所有非必填 LIST 声明的实际 factory 默认都必须是空列表。
+    未来某个 list 带非空默认时，模板会静默撒谎——这里先红。
+    """
+    lists = [
+        (path, field)
+        for path, field in _walk_fields(Config)
+        if get_origin(field.annotation) is list
+    ]
+    assert sorted(path for path, _ in lists) == [
+        "agents",
+        "agents.rules",
+        "agents.skills",
+        "agents.tools",
+        "commands.paths",
+        "gateway.auth.keys",
+        "hooks",
+        "providers",
+        "providers.models",
+        "safe_command_patterns",
+    ]
+    for path, field in lists:
+        assert (
+            field.is_required() or field.get_default(call_default_factory=True) == []
+        ), path
+
+
+def test_element_template_fields_are_rendered_when_items_exist(
+    catalog: SettingNode,
+) -> None:
+    """S2：元素模板字段只有列表非空时才出现在文件里——它们必须真的被渲染过。
+
+    `image_delivery` / `image_max_bytes`（provider 层）与 `vision`（对象形态模型的
+    capabilities）是旧模板点名要可见的三个字段，空模板不展开元素，所以单独看一眼。
+    """
+    doc = {
+        "providers": [
+            {
+                "name": "p",
+                "base_url": "b",
+                "api_key": "k",
+                "models": [{"name": "m"}],
+            }
+        ],
+        "agents": [{"name": "a", "model": "m"}],
+    }
+    text = emit_config_yaml(doc, catalog)
+    assert re.search(r"(?m)^\s*# image_delivery: null$", text)
+    assert re.search(r"(?m)^\s*# image_max_bytes: null$", text)
+    assert re.search(r"(?m)^\s*# vision: false$", text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

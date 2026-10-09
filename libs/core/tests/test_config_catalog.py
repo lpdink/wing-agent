@@ -434,6 +434,17 @@ def test_nested_list_path_from_real_catalog() -> None:
     ]
 
 
+def test_images_defaults_are_pinned() -> None:
+    """旧模板测试的两个钉子：``max_bytes``（见 test_constraints_from_real_catalog）
+    与 ``max_images``——后者原先无人接（S2），这里连同同段的其它默认值一起钉住。"""
+    catalog = build_catalog()
+    assert _by_path(catalog, "images.max_bytes").default == 4_718_592
+    assert _by_path(catalog, "images.max_images").default == 32
+    assert _by_path(catalog, "images.count_quantum").default == 8
+    assert _by_path(catalog, "images.request_budget_bytes").default == 37_748_736
+    assert _by_path(catalog, "images.evict_quantum_bytes").default == 18_874_368
+
+
 def test_declared_field_scale_matches_01_report() -> None:
     """规模断言：声明字段总数 = 68（01 报告的迁移字段数）；路径不重复。"""
     declared = _declared(build_catalog())
@@ -494,7 +505,7 @@ def test_parse_path_accepts_grammar(text: str, expected: list[object]) -> None:
         "a-b",
         "a b",
         "a[99999999999999999999]",  # > 2**64-1（溢出）
-        "a[+1]",
+        "a[+1]",  # AD6：文法是「非负整数」，没有符号位（Rust 侧同此口径）
         "a[1_0]",
     ],
 )

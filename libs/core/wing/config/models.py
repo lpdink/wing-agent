@@ -734,7 +734,26 @@ class Config(BaseModel):
     # ── Providers ──────────────────────────────────
     providers: list[ProviderConfig] = S(
         doc="LLM provider 声明（模型目录的唯一来源）",
-        notes="至少一个；providers[].models 声明的 id 是全局唯一的模型引用词。",
+        notes=(
+            "至少一个；providers[].models 声明的 id 是全局唯一的模型引用词。\n"
+            "每个 provider 声明协议（openai / anthropic）、端点与凭据；models 至少一个\n"
+            "（没有远端 /models 发现），三条声明形态：\n"
+            "  - dfmodel                        # 裸字符串：id = 调用名\n"
+            "  - name: dfmodel-2026             # 对象：id = name\n"
+            "    display_name: DeepSeek-Flash\n"
+            "  - id: ds-flash                   # 显式 id（全局唯一引用词）\n"
+            "    name: dfmodel-2026             # 实际发给上游的调用名\n"
+            "    capabilities: {vision: true}   # 未声明 = 纯文本（ReadImage 不附图）\n"
+            "Anthropic 协议最小示例（max_tokens 必填；image_delivery 默认 inline）：\n"
+            "  - name: claude\n"
+            "    protocol: anthropic\n"
+            "    base_url: https://api.anthropic.com\n"
+            "    api_key: sk-ant-xxx\n"
+            '    anthropic_version: "2023-06-01"\n'
+            "    max_tokens: 8192\n"
+            "    models: [claude-sonnet-4-20250514]\n"
+            "    extra_body: {thinking: {type: enabled, budget_tokens: 4096}}"
+        ),
         apply=ApplyScope.NEXT_SESSION,
         min_items=1,
         summary_fields=["name", "protocol", "base_url"],
