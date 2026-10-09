@@ -165,7 +165,9 @@ class FakeProvider:
 
         raw_model = body.get("model")
         model = raw_model if isinstance(raw_model, str) else ""
-        logged = self.requests.record(body, model=model, path=request.path)
+        logged = self.requests.record(
+            body, model=model, path=request.path, headers=request.headers
+        )
         headers = {"x-request-id": f"probe-{logged.index}"}
 
         try:
