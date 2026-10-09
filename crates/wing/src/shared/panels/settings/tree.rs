@@ -24,6 +24,8 @@ use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::parse_path;
 
+use crate::config::catalog::secret_hint;
+
 use super::ChoiceState;
 use super::Problem;
 use super::SearchFilter;
@@ -533,6 +535,8 @@ pub fn display_value(doc: &SettingsDoc, root: Root, node: &SettingNode, path: &s
                 ValueText::Text("(empty)".into())
             } else {
                 ValueText::Masked {
+                    // 本地 Interface 密钥的 hint：与 `--dump-config` 的掩码注释共用一份实现
+                    // （`config/catalog.rs::secret_hint`，规则与后端 `_state_of` 同源）。
                     hint: secret_hint(text),
                 }
             }
@@ -568,15 +572,6 @@ pub(crate) fn render_scalar(value: &Value) -> String {
         Value::Null => "(null)".into(),
         other => compact_json(other),
     }
-}
-
-/// 密文只下发末 4 位（长度 ≥ 8 才有，design §7.5）。
-pub(crate) fn secret_hint(text: &str) -> Option<String> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() < 8 {
-        return None;
-    }
-    Some(chars[chars.len() - 4..].iter().collect())
 }
 
 fn compact_json(value: &Value) -> String {
@@ -1252,13 +1247,5 @@ mod tests {
         assert_eq!(render_scalar(&json!("中文")), "中文");
         assert_eq!(render_scalar(&json!({"a": 1})), "{\"a\":1}");
         assert_eq!(render_scalar(&json!(null)), "(null)");
-    }
-
-    #[test]
-    fn secret_hint_needs_eight_chars() {
-        assert_eq!(secret_hint("12345678"), Some("5678".into()));
-        assert_eq!(secret_hint("1234567"), None);
-        assert_eq!(secret_hint("sk-abcdefgh"), Some("efgh".into()));
-        assert_eq!(secret_hint(""), None);
     }
 }
