@@ -641,6 +641,9 @@ impl App {
         let tool_call_id = panel.tool_call_id.clone();
         self.reply_to_ask(content, tool_call_id);
         self.refresh_ask_placeholder();
+        // The agent resumes on this answer: the record stops being `blocked`
+        // (the next queued ask, if any, keeps it blocked on that one).
+        self.sync_program_status();
     }
 
     /// Answer a pending ask — the single reply path (every ask is a panel).

@@ -36,6 +36,7 @@ use crate::ui::chat_view::ChatCell;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
 use crate::ui::welcome::SessionFacts;
+use crate::util::program_status::State;
 use crate::util::title::AttentionKind;
 
 impl App {
@@ -82,6 +83,10 @@ impl App {
                 );
                 self.turn.last_title = Some(working_title.clone());
                 self.push_intent(AppIntent::SetTitle(working_title));
+                // Derive from the state rather than forcing `working`: if an
+                // ask panel is somehow still queued, that is what the agent is
+                // actually blocked on.
+                self.sync_program_status();
             }
             WingEvent::UserMessageAccepted {
                 origin_request_id, ..
@@ -112,6 +117,14 @@ impl App {
                         self.dir_label().as_deref(),
                     )));
                 }
+                // Program status: a turn that ended without reporting a
+                // terminal state (a `turn_result` lost across a reconnect)
+                // must not leave the record claiming work. A record that
+                // already says `done` / `error` — notably the `error` the
+                // `Error` event just wrote — stays until replaced.
+                if self.program_status.is_in_flight() {
+                    self.set_program_status(State::Idle, None);
+                }
             }
             WingEvent::Interrupted {
                 dropped_request_ids,
@@ -135,6 +148,9 @@ impl App {
                 self.push_intent(AppIntent::SetTitle(title::title_idle(
                     self.dir_label().as_deref(),
                 )));
+                // Interrupted work is idle per the spec (not done: there is no
+                // result to look at).
+                self.set_program_status(State::Idle, None);
             }
             WingEvent::Notice { level, message, .. } => {
                 // Informational only. Deliberately does NOT call finish_turn():
@@ -164,7 +180,13 @@ impl App {
 
             WingEvent::Error { message, .. } => {
                 self.finish_turn();
+                // The backend cancels every feedback waiter when a turn dies —
+                // a stale ask panel must not outlive it (nor get answered into
+                // a dead waiter), and the record must not stay `blocked`.
+                self.clear_ask_state();
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
+                // The most specific failure text wing has for the record.
+                self.set_program_status(State::Error, Some(&message));
                 self.notify_unfocused(message.clone(), AttentionKind::Error);
             }
 
@@ -337,10 +359,16 @@ impl App {
                     choices: &choices,
                     required,
                 });
+                let interactive = panel.is_interactive();
                 let notify_text = panel.notify_text();
                 self.chat
                     .push(ChatCell::Ask(AskMessage::new(panel.clone())));
                 self.register_ask_panel(panel);
+                // Only an interactive ask blocks the agent (a Notice is
+                // display-only); what it waits for is the front panel.
+                if interactive {
+                    self.sync_program_status();
+                }
                 self.notify_unfocused(notify_text, AttentionKind::Ask);
                 // Bring the ask into view so the user sees it immediately and
                 // understands why Up/Down now navigate the panel.
@@ -496,6 +524,10 @@ impl App {
                 } else {
                     AttentionKind::Done
                 };
+                self.set_program_status(
+                    if is_error { State::Error } else { State::Done },
+                    Some(&msg),
+                );
                 self.notify_unfocused(msg, kind);
             }
             _ => {
@@ -704,6 +736,12 @@ impl App {
         // top of this function — the title needs the workdir before it is
         // composed).
         self.refresh_copy_candidates();
+
+        // Project the restored view onto the program-status record: a replayed
+        // ask queue is what the agent is blocked on, a live turn is `working`,
+        // an idle snapshot is `idle`. A session switch or reconnect must not
+        // leave the record describing the view that was replaced.
+        self.sync_program_status();
     }
 
     /// Handle tool call results with tool-specific routing.

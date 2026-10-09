@@ -15,6 +15,7 @@ use crate::app::transport::Transport;
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
+use crate::util::program_status;
 use crate::util::title;
 
 use super::App;
@@ -570,6 +571,12 @@ pub async fn execute_intent(
             let writer = terminal.backend_mut();
             if let Err(e) = crate::util::osc9::send_notification(writer, &message) {
                 tracing::warn!("failed to send OSC 9 notification: {e}");
+            }
+        }
+        AppIntent::SetProgramStatus(report) => {
+            let writer = terminal.backend_mut();
+            if let Err(e) = program_status::write(writer, &report) {
+                tracing::warn!("failed to report program status: {e}");
             }
         }
     }

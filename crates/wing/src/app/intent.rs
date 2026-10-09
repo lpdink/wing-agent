@@ -126,6 +126,11 @@ pub enum AppIntent {
     /// Send a desktop notification via OSC 9 escape sequence.
     Notify(String),
 
+    /// Report the program status to the terminal via OSC 7501 (Program Status
+    /// Protocol). Carries the fully formatted sequence: the App formats once,
+    /// so its dedup compares exactly what goes on the wire.
+    SetProgramStatus(String),
+
     /// Compact the current session context via HTTP API.
     /// `instruction` is an optional user-directed compaction focus
     /// (parsed from `/compact <instruction>`), appended to the compact prompt.
