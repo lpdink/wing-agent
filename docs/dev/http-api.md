@@ -75,7 +75,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | GET | `/api/commands` | 命令列表（仅返回 `source == "prompt"` 的命令） |
 | GET | `/api/models` | 可用模型目录（按 provider 分组嵌套；目录 = **配置静态声明的同步投影**——远端 `/models` 发现已退役、无网络请求）。`providers[].models` 是**对象数组**：`{id, name, display_name, description, capabilities: {vision}}`——`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给上游的调用名，`display_name` 是展示名（可空，前端回落 `name`），`capabilities` 是能力声明（见 [media-images.md](media-images.md)）。旧的 `model_details` 平行数组已删除（消灭「两数组逐项对齐」的脆弱契约） |
 | GET | `/api/agents` | 可用 agent 模板列表 |
-| POST | `/api/system/reload` | 重载配置 / hooks / provider / skills / auth（无需重启） |
+| POST | `/api/system/reload` | 热重载（无需重启），**逐项名字序是对外契约**（probe `test_system_reload` 钉住，只许在末尾追加）：`config.yaml → hooks → prompt commands → provider → skills & rules → log level`。config 项失败立即中止（后续项不再尝试），其余项失败继续；逐项 `ok` / `detail` 如实上报，**失败不回滚文件**。保存事务（`/api/settings/set` 的第 ⑦ 步）走同一条管道 |
 | POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
 | GET | `/api/tools` | 全局工具列表（内置 + 远程，平铺；ref / namespace / name / llm_name / description）（PR #50） |
 
@@ -86,6 +86,61 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
   {"id": "dfmodel", "name": "dfmodel", "display_name": "DeepSeek-Flash",
    "description": null, "capabilities": {"vision": false}}]}]}
 ```
+
+### Settings（`routes/settings.py`，4 个）
+
+RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端点。**读端点不经过 `server.runtime`**
+（`config.document` 的纯函数 + 投影组合），写路径住在 `runtime.apply_settings`。机制细节
+（声明层 / 稀疏文档 / 保存事务 / 密文 / 生效域）见 [settings.md](settings.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/settings/schema` | 设置目录树（`SettingNodeProto`：默认值 / 约束 / 枚举 / 生效域 `apply` / 密文标记 / 分组 / 列表元素形态）。纯静态，可长缓存；`{version, root, config_path}`，根节点的 `key` / `path` 恒为 `"config"` |
+| GET | `/api/settings/get` | 稀疏文档（只有用户显式写下的键；密文叶子恒为 `null`）+ `secrets` 状态表（`set` / `empty` / `absent` + 末 4 位 hint）+ `fingerprint`（文件 sha256；不存在 = `"absent"`）+ 全部 `problems` + `setup_mode` + `config_path`。文件坏掉（YAML 语法错）也照常应答：`values={}` + 一条文档级 problem（`path=null`） |
+| GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检。`valid == (not setup_mode and 无 problem)`：降级态**恒** `false` |
+| POST | `/api/settings/set` | 保存事务。body `{base, document}`：`base` = 客户端持有的指纹（显式 `null` / 缺键 = 不做并发检查，CLI `--force`）；`document` = 整份稀疏文档。**密文三态**：`null` = 保留磁盘现值 / 字符串 = 设为该值（`""` = 显式清空）/ 键缺席 = 从文件移除。**鉴权：admin**（`tool_runtime` 403） |
+
+`POST /api/settings/set` 的响应（`SettingsSetResponse`）：
+
+```json
+{"ok": true, "fingerprint": "…", "problems": [], "changed": ["providers[0].extra_body"],
+ "restart_required": [], "reload": {"ok": true, "results": [{"name": "config.yaml", "ok": true}, …]},
+ "setup_mode_exited": false, "backup_path": "…/config.yaml.bak", "warnings": []}
+```
+
+> **校验失败走 HTTP 200 + `ok=false` + `problems`（不是 4xx）**——刻意的取舍，别"修好"它：
+> 请求本身完全合法，是**用户填的内容**不合法；把它当业务结果返回，前端保存路径永远拿到同一个响应类型
+> （`ok` 决定成败，`problems` 逐条驱动标红）。HTTP 错误码只留给**协议级**失败：**409**（指纹不匹配，
+> `error: "conflict"`，`detail` 带当前指纹）、**401 / 403**（鉴权）、**500**（写盘 `OSError`）。
+>
+> 其他语义：**全有或全无**（有 problem 时文件一个字节都不写）；写前把现有文件字节级复制到
+> `config.yaml.bak`（覆盖式，只留最近一份）；`changed` 是相对保存前的变更路径（列表按下标 diff，
+> 删除元素会把后续项记成 modified）；`restart_required` 是其中 `apply == restart` 的**叶子**路径，
+> **不做假热更**（`gateway.port` 改了也不会换端口监听）；`warnings` 是非致命告知
+> （当前唯一产出：原文件不可解析时"其中的密钥无法保留"——语法错的文件也能经这个端点修好）。
+> 保存成功会广播 `settings_changed` 事件（见下）。
+
+#### 配置不可用时的降级面（setup mode）
+
+配置缺失 / 非法时网关**不再崩溃退出**：`boot_config()` 永不抛，网关以 **setup mode** 降级启动——
+只服务设置端点，其余一律 **503**，`error == "setup_mode"`（`detail` = 前 10 条 problem + 修复指引）。
+经 API 保存出一份合法配置后**就地转入正常模式**（不重启进程，`setup_mode_exited: true`）。
+
+**可用路径 = 九条 allowlist**（`gateway/setup_guard.py::SETUP_ALLOWED_PATHS`）：
+
+```
+/api/health · /api/settings/{schema,get,status,set} · /api/shutdown · /openapi.json · /docs · /redoc
+```
+
+- 其余一切（session / models / agents / commands / tools / system reload …）一律 503。
+  注意 `HTTP_ERROR_TYPES[503]` 是**通用**的 `"service_unavailable"`——setup 语义由守门**显式覆盖**
+  `error="setup_mode"`（客户端结构化判定的唯一依据，不要嗅探 `detail` 文案）。
+- `/ws` 在 **accept 之前**以 1013 关闭（客户端看到握手失败，而不是"连上就断"）。
+- **修复模式鉴权 = loopback-only 免 key**：配置坏掉 ⇒ auth 配置本身不可信，所以只接受
+  `127.0.0.1` / `::1` / `localhost` 来源且**不要求 key**；非 loopback 一律 **403**。
+  **这是收紧不是放松**（正常模式 `auth.enabled=false` 时任何人都能访问）——把网关暴露到 `0.0.0.0`
+  且配置坏掉的部署**无法远程修复**，是刻意的安全姿态。中间件顺序（`app.py`）：
+  `AuthMiddleware` 在外层，非 loopback 在 setup mode 下任何路径都先吃 403（而不是 503）。
 
 ### Health（`routes/health.py`，1 个）
 
@@ -137,6 +192,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > **模型四元组**（`model` / `model_id` / `provider_name` / `model_display_name`）：会话 agent 快照（`sync_session.agent`、`GET /api/session/get.agent`）、`session_state_changed`（模型变更时四者同刻下发）与 `GET /api/session/info` 携带同一组字段。`model_id` 是配置声明 `providers[].models[].id` 的投影（可空——旧会话的 id 已删除且反查不中时为 null），是**身份**：前端的选择态匹配、状态展示的「当前模型」判定与一切变更请求都以它为准；未命中任何候选即视为未知，绝不按调用名反查。`model_display_name` 是**展示层素材**（未声明 / 空串 = 缺失或 null）：前端渲染展示名、缺省回落调用名，不参与匹配。
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
+
+**网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），客户端重连后应重新 `GET /api/settings/status`，重放一条旧通知只会误导。消费侧**用指纹比对**判断是不是别人改的（自己的保存会更新本地指纹，相同即忽略；不同则提示"配置已被其它客户端修改"并作废本地缓存）。
 
 > `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（前端终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。
 
@@ -225,6 +282,7 @@ gateway:
 | WS | 查询参数 `?api_key=<key>` | 2 |
 
 - `/api/health` 始终豁免。
+- **修复模式（setup mode）另有一条前置分支**：配置不可用时只接受 loopback 来源且**不要求 key**（非 loopback 一律 403）——见上面「配置不可用时的降级面」。
 - key 用 `hmac.compare_digest` 常量时间比较；须为 ASCII 可打印字符（配置解析时校验）。
 - `auth_config` 每次请求读取最新配置单例，`/api/system/reload` 可即时生效。
 - **加密（TLS）由外部反向代理（nginx 等）负责**，应用层只做身份验证。
