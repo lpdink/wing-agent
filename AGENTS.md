@@ -59,6 +59,8 @@ libs/core/wing/
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
 ├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
+│   ├── spec.py                      声明层：S(...) / SettingMeta / ApplyScope（字段元信息唯一来源）
+│   ├── problems.py                  跨字段检查纯函数 + ConfigProblem（加载期 / 设置面板共用）
 │   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config
 │   ├── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
 │   └── default_config.py            手写默认 config.yaml 模板（事实来源）

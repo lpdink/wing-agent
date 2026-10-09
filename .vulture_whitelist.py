@@ -34,6 +34,13 @@ multi_select
 tokens_per_sec_total
 tokens_per_sec_count
 
+# ── 配置问题分类（wire 词表，本期缺席成员）────────────────────────────
+# `ProblemKind` 是加载期 / 设置面板 / CLI 共用的分类词表（协议面）：`invalid_value`
+# 与 `unknown_key` 的产出方在后续步骤（03 的 document.locate_problems / 未知键保留），
+# 01 只冻结词表本身。名字进白名单 = 放弃对它的检查，其余五个成员仍受门禁保护。
+INVALID_VALUE
+UNKNOWN_KEY
+
 # ── pytest 插件钩子 ────────────────────────────────────────────────────
 # pytest 按名字调用，没有静态引用。
 pytest_runtest_makereport
