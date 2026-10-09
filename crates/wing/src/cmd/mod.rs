@@ -158,9 +158,22 @@ pub enum Command {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Dump the TUI configuration as canonical (commented) YAML to stdout and exit.
+        /// Dump the *current* TUI config file as canonical (commented) YAML to stdout and exit.
+        ///
+        /// Reads `$WING_HOME/tui/config.yaml` (a broken file is reported on stderr instead of
+        /// being dumped as defaults). Secret leaves are MASKED by default: `api_key` becomes
+        /// `null` plus a `# 已掩码（•••••••• 1234）` comment — pass --show-secrets for the real
+        /// values.
         #[arg(long)]
         dump_config: bool,
+
+        /// Write secret values (`api_key`) verbatim instead of masking them (--dump-config only).
+        ///
+        /// WARNING: stdout then carries the real secret. Use it for the round-trip
+        /// (`wing tui --dump-config --show-secrets > config.yaml`) and be aware that anything
+        /// capturing stdout — a redirected file, a log, CI output — now holds your key.
+        #[arg(long = "show-secrets")]
+        show_secrets: bool,
     },
 
     /// Start the gateway daemon in the background.
@@ -367,6 +380,38 @@ fn misplaced_include_partial_messages_error(flag: bool) -> Option<String> {
     )
 }
 
+/// Error message when `--show-secrets` is passed without `--dump-config`.
+///
+/// Same reasoning as the other misplaced-flag guards: the flag lives on
+/// `Command::Tui` (it selects how `--dump-config` emits secret leaves), so
+/// `wing tui --show-secrets` parses fine and would otherwise be a silently
+/// ignored no-op — the user would believe the flag did something. Refuse with
+/// a pointer instead. `None` = invocation is fine.
+fn misplaced_show_secrets_error(show_secrets: bool, dump_config: bool) -> Option<String> {
+    if !show_secrets || dump_config {
+        return None;
+    }
+    Some(format!(
+        "--show-secrets only applies to --dump-config \
+         (`{}`); wing refuses it here instead of ignoring it.",
+        crate::config::catalog::SHOW_SECRETS_HINT
+    ))
+}
+
+/// `--dump-config` 的输出（纯函数：读文件由调用方做，这里只管**模式**这一个分岔）。
+///
+/// 默认 `Masked`：stdout 会被重定向、日志与 CI 捕获，而密文在项目其余地方的姿态是
+/// "只写不回显"（后端 `get` 恒返回 `null` + 末 4 位 hint，`wing config get` 显示
+/// `•••••••• 1234`）。真值只在显式 `--show-secrets` 时给（round-trip 用途）。
+fn dump_config_output(doc: &serde_json::Value, show_secrets: bool) -> String {
+    let mode = if show_secrets {
+        crate::config::catalog::DumpMode::Raw
+    } else {
+        crate::config::catalog::DumpMode::Masked
+    };
+    crate::config::catalog::dump_config_yaml(doc, mode)
+}
+
 /// Dispatch CLI command.
 pub async fn dispatch(cli: Cli) -> ExitCode {
     // Logging is initialized for **every** path — TUI, stdio and all
@@ -422,15 +467,23 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 host,
                 port,
                 dump_config,
+                show_secrets,
             } => {
+                if let Some(message) = misplaced_show_secrets_error(show_secrets, dump_config) {
+                    eprintln!("wing error: {message}");
+                    return ExitCode::FAILURE;
+                }
                 if dump_config {
                     // Canonical form of the *current* file (`$WING_HOME/tui/config.yaml`): the
                     // emitter is catalog-driven and shared with the settings panel's save path,
                     // so there is exactly one declaration. A broken file is reported instead of
                     // silently dumped as defaults.
+                    //
+                    // Secret leaves are masked unless `--show-secrets`: this output goes to
+                    // stdout, which shells redirect and CI captures.
                     match crate::config::store::read_interface_doc() {
                         Ok(read) => {
-                            print!("{}", crate::config::catalog::dump_config_yaml(&read.doc));
+                            print!("{}", dump_config_output(&read.doc, show_secrets));
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
@@ -855,5 +908,94 @@ mod tests {
         let cli = Cli::try_parse_from(["wing", "-p", "hi", "--include-partial-messages"])
             .expect("parses");
         assert!(cli.is_stdio_mode());
+    }
+
+    /// `--dump-config` 的默认方向是**掩码**：CLI 这一处必须传 `Masked`
+    /// （保存路径那一处传 `Raw`，见 `config/store.rs::the_save_path_writes_the_real_secret_never_the_mask`）。
+    #[test]
+    fn dump_config_output_masks_by_default_and_raw_with_show_secrets() {
+        let doc = serde_json::json!({"api_key": "sk-dump-secret-9999"});
+
+        let masked = dump_config_output(&doc, false);
+        assert!(!masked.contains("sk-dump-secret-9999"), "{masked}");
+        assert!(masked.contains("已掩码（•••••••• 9999）"), "{masked}");
+        assert!(
+            masked.contains(crate::config::catalog::SHOW_SECRETS_HINT),
+            "{masked}"
+        );
+
+        let raw = dump_config_output(&doc, true);
+        assert!(raw.contains("api_key: sk-dump-secret-9999"), "{raw}");
+        assert!(!raw.contains('•'), "{raw}");
+    }
+
+    /// `--show-secrets` 只在 `--dump-config` 上有意义；单独出现时**拒绝**（不是静默忽略）。
+    #[test]
+    fn clap_parses_show_secrets_only_on_dump_config() {
+        let cli = Cli::try_parse_from(["wing", "tui", "--dump-config"]).expect("parses");
+        match cli.command {
+            Some(Command::Tui {
+                dump_config,
+                show_secrets,
+                ..
+            }) => {
+                assert!(dump_config);
+                assert!(!show_secrets, "默认掩码");
+                assert!(misplaced_show_secrets_error(show_secrets, dump_config).is_none());
+            }
+            other => panic!("expected the tui subcommand, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "tui", "--dump-config", "--show-secrets"])
+            .expect("parses");
+        match cli.command {
+            Some(Command::Tui {
+                dump_config,
+                show_secrets,
+                ..
+            }) => {
+                assert!(dump_config && show_secrets);
+                assert!(misplaced_show_secrets_error(show_secrets, dump_config).is_none());
+            }
+            other => panic!("expected the tui subcommand, got {other:?}"),
+        }
+
+        // 单独出现：clap 收下（flag 绑在 Tui 上），guard 必须拒绝并指向 --dump-config。
+        let cli = Cli::try_parse_from(["wing", "tui", "--show-secrets"]).expect("parses");
+        match cli.command {
+            Some(Command::Tui {
+                dump_config,
+                show_secrets,
+                ..
+            }) => {
+                assert!(!dump_config && show_secrets);
+                let message = misplaced_show_secrets_error(show_secrets, dump_config)
+                    .expect("outside --dump-config the flag must be rejected");
+                assert!(message.contains("--dump-config"), "{message}");
+                assert!(message.contains("--show-secrets"), "{message}");
+            }
+            other => panic!("expected the tui subcommand, got {other:?}"),
+        }
+
+        // 不误伤：没传旗标时永远放行。
+        assert!(misplaced_show_secrets_error(false, false).is_none());
+        assert!(misplaced_show_secrets_error(false, true).is_none());
+
+        // 顶层形态不存在（`wing --dump-config` / `wing --show-secrets` 都是 clap 错误）：
+        // 真形态是 `wing tui --dump-config`，任务书里的顶层写法要按真值改写。
+        for argv in [
+            vec!["wing", "--dump-config"],
+            vec!["wing", "--dump-config", "--show-secrets"],
+            vec!["wing", "--show-secrets"],
+        ] {
+            let Err(err) = Cli::try_parse_from(argv.clone()) else {
+                panic!("top-level form must not parse, got {argv:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{argv:?}"
+            );
+        }
     }
 }
