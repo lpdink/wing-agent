@@ -328,6 +328,69 @@ impl GatewayClient {
     }
 
     // ============================================================
+    // Settings（配置的设置目录 / 读写 / 预检）
+    // ============================================================
+
+    /// 取设置目录（catalog 树）：全量字段声明 + 约束 + 生效域。
+    ///
+    /// 纯静态，可长缓存；setup mode 下同样可用（它是修复配置的依据）。
+    pub async fn settings_schema(&self) -> Result<SettingsSchemaResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/settings/schema"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 读当前配置：稀疏文档（密文叶子 = `null`）+ 指纹 + 密文状态 + 问题。
+    ///
+    /// **回传契约**：密文的 `null` 必须原样带回 [`Self::settings_set`]（`null` = 保留磁盘现值；
+    /// 丢掉键 = 清空密钥）。前端在 `values` 上做编辑，保存时发整份。
+    pub async fn settings_get(&self) -> Result<SettingsGetResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/settings/get"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 极简健康判定（启动路径的预检：`valid=false` ⇒ 网关处于 setup mode，走修复流程）。
+    pub async fn settings_status(&self) -> Result<SettingsStatusResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/settings/status"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 保存配置（全文档替换 + 乐观并发指纹）。
+    ///
+    /// **校验失败也是 `Ok`**：服务端返回 HTTP 200 + `ok=false` + `problems`（design.md D16），
+    /// 因为"用户填的内容不合法"是业务结果而不是请求非法。`Err` 只对应协议级失败：
+    /// 409 指纹不匹配（[`ApiClientError::is_conflict`]）/ 鉴权 / 写盘失败 / 网络。
+    pub async fn settings_set(
+        &self,
+        req: &SettingsSetRequest,
+    ) -> Result<SettingsSetResponse, ApiClientError> {
+        self.post_json("/api/settings/set", req).await
+    }
+
+    // ============================================================
     // 系统级查询
     // ============================================================
 
@@ -570,5 +633,268 @@ mod tests {
         let client = GatewayClient::localhost(None);
         assert!(client.is_ok());
         assert_eq!(client.unwrap().base_url, "http://127.0.0.1:32523");
+    }
+
+    // ============================================================
+    // Settings 端点 — 进程内假网关（手写 HTTP/1.1 应答，零新依赖）
+    // ============================================================
+    //
+    // L1 的真网关此刻还没实现这些端点，这是离线条件下唯一能验证
+    // "4 个端点路径 / 方法 / 认证头 / 请求体写对了"的手段。
+
+    /// 假网关收到的一条请求。
+    #[derive(Debug, Clone)]
+    struct Recorded {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    /// 进程内假网关：`127.0.0.1:0` 临时端口，按路径回放预置的 `(status, body)`，记录全部请求。
+    struct MockGateway {
+        url: String,
+        recorded: std::sync::Arc<std::sync::Mutex<Vec<Recorded>>>,
+    }
+
+    impl MockGateway {
+        async fn start(routes: Vec<(&'static str, u16, &'static str)>) -> Self {
+            use tokio::io::AsyncReadExt;
+            use tokio::io::AsyncWriteExt;
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = recorded.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let routes = routes.clone();
+                    let sink = sink.clone();
+                    tokio::spawn(async move {
+                        // 我们发出的请求都很小：读到空行拿到头，再按 Content-Length 收 body。
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 4096];
+                        let head_end = loop {
+                            let Ok(n) = stream.read(&mut chunk).await else {
+                                return;
+                            };
+                            if n == 0 {
+                                return;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(pos) = find_head_end(&buf) {
+                                break pos;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                        let body_start = head_end + 4;
+                        let content_length = header_value(&head, "content-length")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let body_end = body_start + content_length;
+                        while buf.len() < body_end {
+                            let Ok(n) = stream.read(&mut chunk).await else {
+                                return;
+                            };
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+
+                        let mut lines = head.split("\r\n");
+                        let request_line = lines.next().unwrap_or_default();
+                        let mut parts = request_line.split(' ');
+                        let method = parts.next().unwrap_or_default().to_string();
+                        let path = parts.next().unwrap_or_default().to_string();
+                        sink.lock().unwrap().push(Recorded {
+                            method,
+                            path: path.clone(),
+                            authorization: header_value(&head, "authorization"),
+                            body: String::from_utf8_lossy(
+                                &buf[body_start..body_end.min(buf.len())],
+                            )
+                            .to_string(),
+                        });
+
+                        let (status, body) = routes
+                            .iter()
+                            .find(|(route, _, _)| *route == path.as_str())
+                            .map(|(_, status, body)| (*status, *body))
+                            .unwrap_or((404, r#"{"error":"not_found"}"#));
+                        let response = format!(
+                            "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            status_text(status),
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.flush().await;
+                        let _ = stream.shutdown().await;
+                    });
+                }
+            });
+
+            Self { url, recorded }
+        }
+
+        fn recorded(&self) -> Vec<Recorded> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    fn find_head_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn header_value(head: &str, name: &str) -> Option<String> {
+        head.split("\r\n").skip(1).find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    }
+
+    fn status_text(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            409 => "Conflict",
+            503 => "Service Unavailable",
+            _ => "Error",
+        }
+    }
+
+    const SCHEMA_BODY: &str = r#"{"version":"0.4.1","config_path":"/tmp/config.yaml",
+        "root":{"key":"config","path":"","title":"Wing","doc":"d","kind":"object"}}"#;
+    const GET_BODY: &str = r#"{"values":{"gateway":{"port":32523}},"secrets":{},
+        "fingerprint":"sha256:abc","problems":[],"setup_mode":false,
+        "config_path":"/tmp/config.yaml"}"#;
+    const STATUS_BODY: &str = r#"{"valid":false,"setup_mode":true,
+        "problems":[{"path":"providers","kind":"empty_list","message":"providers 不得为空"}],
+        "fingerprint":null}"#;
+    const SET_REFUSED_BODY: &str = r#"{"ok":false,"fingerprint":"sha256:abc",
+        "problems":[{"path":"providers[0].api_key","kind":"missing_required",
+        "message":"必填","hint":"在面板里填一个密钥"}],"changed":[],"restart_required":[]}"#;
+    const SET_OK_BODY: &str = r#"{"ok":true,"fingerprint":"sha256:fff",
+        "setup_mode_exited":true,"backup_path":"/tmp/config.yaml.bak"}"#;
+
+    #[tokio::test]
+    async fn settings_endpoints_hit_the_frozen_paths_and_bodies() {
+        let server = MockGateway::start(vec![
+            ("/api/settings/schema", 200, SCHEMA_BODY),
+            ("/api/settings/get", 200, GET_BODY),
+            ("/api/settings/status", 200, STATUS_BODY),
+            ("/api/settings/set", 200, SET_REFUSED_BODY),
+        ])
+        .await;
+        let client = GatewayClient::new(server.url.clone(), Some("secret-key")).unwrap();
+
+        let schema = client.settings_schema().await.unwrap();
+        assert_eq!(schema.version, "0.4.1");
+        assert_eq!(schema.root.key, "config");
+
+        let get = client.settings_get().await.unwrap();
+        assert_eq!(get.fingerprint, "sha256:abc");
+        assert_eq!(get.values["gateway"]["port"], serde_json::json!(32523));
+
+        let status = client.settings_status().await.unwrap();
+        assert!(!status.valid && status.setup_mode);
+        assert_eq!(status.problems.len(), 1);
+
+        let set = client
+            .settings_set(&SettingsSetRequest {
+                base: Some("sha256:abc".into()),
+                document: serde_json::json!({"gateway": {"port": 32523}}),
+            })
+            .await
+            .unwrap();
+        // D16：校验失败是 HTTP 200 + ok=false + problems（不是 4xx）
+        assert!(!set.ok);
+        assert_eq!(
+            set.problems[0].path.as_deref(),
+            Some("providers[0].api_key")
+        );
+
+        let recorded = server.recorded();
+        let seen: Vec<(&str, &str)> = recorded
+            .iter()
+            .map(|req| (req.method.as_str(), req.path.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("GET", "/api/settings/schema"),
+                ("GET", "/api/settings/get"),
+                ("GET", "/api/settings/status"),
+                ("POST", "/api/settings/set"),
+            ]
+        );
+        assert_eq!(
+            recorded[3].body,
+            r#"{"base":"sha256:abc","document":{"gateway":{"port":32523}}}"#
+        );
+        for req in &recorded {
+            assert_eq!(req.authorization.as_deref(), Some("Bearer secret-key"));
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_set_serializes_base_null_explicitly() {
+        let server = MockGateway::start(vec![("/api/settings/set", 200, SET_OK_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client
+            .settings_set(&SettingsSetRequest {
+                base: None,
+                document: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        assert!(resp.ok && resp.setup_mode_exited);
+        assert_eq!(resp.backup_path.as_deref(), Some("/tmp/config.yaml.bak"));
+        // §9 的 `base: str | None` 没有默认值：省键会被判 422，必须显式写 null
+        assert_eq!(server.recorded()[0].body, r#"{"base":null,"document":{}}"#);
+    }
+
+    #[tokio::test]
+    async fn setup_mode_and_conflict_are_recognized_off_the_wire() {
+        // setup mode 下非 settings 端点被守门中间件挡成 503 + error=setup_mode
+        // （断在 create_session 上是真实路径：TUI/stdio 的预检之外，run/wait 也会撞到）。
+        let setup = MockGateway::start(vec![(
+            "/api/session/create",
+            503,
+            r#"{"error":"setup_mode","detail":"providers 不得为空"}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(setup.url.clone(), None).unwrap();
+        let err = client
+            .create_session(&CreateSessionRequest::default())
+            .await
+            .unwrap_err();
+        assert!(err.is_setup_mode(), "{err}");
+        assert!(!err.is_conflict());
+        assert!(err.to_string().contains("503"), "错误文案带状态码：{err}");
+
+        // 指纹不匹配 = 409（协议级失败）
+        let conflict = MockGateway::start(vec![(
+            "/api/settings/set",
+            409,
+            r#"{"error":"fingerprint_mismatch","detail":"配置已被其它客户端修改"}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(conflict.url.clone(), None).unwrap();
+        let err = client
+            .settings_set(&SettingsSetRequest {
+                base: Some("sha256:stale".into()),
+                document: serde_json::json!({}),
+            })
+            .await
+            .unwrap_err();
+        assert!(err.is_conflict(), "{err}");
+        assert!(!err.is_setup_mode());
     }
 }
