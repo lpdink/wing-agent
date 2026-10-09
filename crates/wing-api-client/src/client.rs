@@ -769,7 +769,7 @@ mod tests {
     }
 
     const SCHEMA_BODY: &str = r#"{"version":"0.4.1","config_path":"/tmp/config.yaml",
-        "root":{"key":"config","path":"","title":"Wing","doc":"d","kind":"object"}}"#;
+        "root":{"key":"config","path":"config","title":"Wing","doc":"d","kind":"object"}}"#;
     const GET_BODY: &str = r#"{"values":{"gateway":{"port":32523}},"secrets":{},
         "fingerprint":"sha256:abc","problems":[],"setup_mode":false,
         "config_path":"/tmp/config.yaml"}"#;
@@ -796,6 +796,10 @@ mod tests {
         let schema = client.settings_schema().await.unwrap();
         assert_eq!(schema.version, "0.4.1");
         assert_eq!(schema.root.key, "config");
+        assert_eq!(
+            schema.root.path, "config",
+            "P2：根的 key 与 path 都是 config"
+        );
 
         let get = client.settings_get().await.unwrap();
         assert_eq!(get.fingerprint, "sha256:abc");
