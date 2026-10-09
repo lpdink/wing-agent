@@ -871,16 +871,18 @@ mod tests {
     }
 
     #[test]
-    fn table_borderless() {
+    fn table_framed_grid() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
         let lines = render_text(md);
         let text = join_lines(&lines);
-        // Borderless style uses a heavy header rule, not vertical bars.
+        // 重框三档：外框与表头带重、表体网格轻 —— 每档有自己的结点字形。
         assert!(
-            text.contains("━"),
-            "should use heavy header rule, got: {text}"
+            text.contains('┏') && text.contains('┓'),
+            "frame corners missing: {text}"
         );
-        assert!(!text.contains("│"), "should be borderless, got: {text}");
+        assert!(text.contains('╇'), "heavy header separator: {text}");
+        assert!(text.contains('│'), "light body divider: {text}");
+        assert!(text.contains('┷'), "bottom junctions: {text}");
         assert!(text.contains("A"), "got: {text}");
         assert!(text.contains("1"), "got: {text}");
     }
@@ -962,9 +964,9 @@ mod tests {
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        // Borderless style: heavy header rule, no vertical bars.
+        // Framed grid at a constrained width: heavy frame + heavy header rule.
         assert!(text.contains("━"), "got: {text}");
-        assert!(!text.contains("│"), "should be borderless, got: {text}");
+        assert!(text.contains('┃'), "frame verticals missing: {text}");
         assert!(text.contains("A"), "got: {text}");
     }
 
@@ -981,16 +983,18 @@ mod tests {
             .map(|s| s.as_str())
             .filter(|l| !l.is_empty())
             .collect();
-        // Layout: header, heavy rule, row0, light rule, row1.
+        // Layout: top frame, header, heavy rule, row0, light rule, row1, bottom.
         assert!(
-            non_blank.len() >= 5,
-            "expected header + rule + row + rule + row, got: {non_blank:?}"
+            non_blank.len() >= 7,
+            "expected frame + header + rule + row + rule + row + frame, got: {non_blank:?}"
         );
-        assert!(non_blank[0].contains("File") && non_blank[0].contains("Function"));
-        assert!(non_blank[1].contains("━"), "header rule: {}", non_blank[1]);
-        assert!(non_blank[2].contains("src/main.rs"));
-        assert!(non_blank[3].contains("─"), "body rule: {}", non_blank[3]);
-        assert!(non_blank[4].contains("src/lib.rs"));
+        assert!(non_blank[0].contains('┏'), "top frame: {}", non_blank[0]);
+        assert!(non_blank[1].contains("File") && non_blank[1].contains("Function"));
+        assert!(non_blank[2].contains("━"), "header rule: {}", non_blank[2]);
+        assert!(non_blank[3].contains("src/main.rs"));
+        assert!(non_blank[4].contains("─"), "body rule: {}", non_blank[4]);
+        assert!(non_blank[5].contains("src/lib.rs"));
+        assert!(non_blank[6].contains('┗'), "bottom frame: {}", non_blank[6]);
     }
 
     #[test]

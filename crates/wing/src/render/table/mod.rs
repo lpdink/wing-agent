@@ -205,6 +205,96 @@ pub(crate) fn split_str_by_width(text: &str, max_width: usize) -> (&str, &str) {
 }
 
 // ============================================================
+// Table skin — the box-drawing glyphs of one table look
+// ============================================================
+
+/// Glyphs of one horizontal rule line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuleGlyphs {
+    /// Left end (a corner or a T-junction against the frame).
+    pub left: char,
+    /// Junction where an inner column divider crosses the rule.
+    pub junction: char,
+    /// Right end.
+    pub right: char,
+    /// The rule's fill character (its stroke weight).
+    pub fill: char,
+}
+
+/// Box-drawing skin shared by every table frontend.
+///
+/// The default skin is **三档重框** (heavy three-tier frame): the outer frame
+/// and the header band are drawn heavy, the body grid light. Three tiers are
+/// carried by *stroke weight alone* — every stroke shares one ink colour
+/// (theme `border`), because weight is what a terminal renders reliably while
+/// a DIM modifier is at the font's mercy.
+///
+/// Sharing one skin is what keeps the TUI markdown tables and the CLI tables
+/// (`wing ps` / `wing tools`) from drifting into two different looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableSkin {
+    pub top: RuleGlyphs,
+    pub header_sep: RuleGlyphs,
+    pub body_sep: RuleGlyphs,
+    pub bottom: RuleGlyphs,
+    /// Outer frame vertical — heavy, so the table reads as wrapped.
+    pub outer_v: char,
+    /// Column divider inside the header row — heavy: the header band reads as
+    /// part of the frame (it is the table's cap).
+    pub header_v: char,
+    /// Column divider inside body rows — light, so data cells breathe.
+    pub inner_v: char,
+}
+
+impl TableSkin {
+    /// The one skin: heavy frame, heavy header band, light body grid.
+    ///
+    /// Junction glyphs follow the weight transition (Unicode pairs every
+    /// light/heavy combination): the header separator drops from the heavy
+    /// header row to the light body (`╇`), body separators hang off the heavy
+    /// frame (`┠` / `┨`), the bottom border meets light body verticals (`┷`).
+    pub const fn framed() -> Self {
+        Self {
+            top: RuleGlyphs {
+                left: '┏',
+                junction: '┳',
+                right: '┓',
+                fill: '━',
+            },
+            header_sep: RuleGlyphs {
+                left: '┣',
+                junction: '╇',
+                right: '┫',
+                fill: '━',
+            },
+            body_sep: RuleGlyphs {
+                left: '┠',
+                junction: '┼',
+                right: '┨',
+                fill: '─',
+            },
+            bottom: RuleGlyphs {
+                left: '┗',
+                junction: '┷',
+                right: '┛',
+                fill: '━',
+            },
+            outer_v: '┃',
+            header_v: '┃',
+            inner_v: '│',
+        }
+    }
+}
+
+/// Fixed width cost of the frame for `col_count` columns: 2 outer verticals,
+/// 2 padding cells per column, 1 inner divider between adjacent columns.
+///
+/// The column *content* widths share `available_width - frame_overhead(n)`.
+pub fn frame_overhead(col_count: usize) -> usize {
+    col_count * 3 + 1
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -332,5 +422,30 @@ mod tests {
         let widths = compute_column_widths(&metrics, Some(6));
         assert_eq!(widths.len(), 3);
         assert!(widths.iter().all(|&w| w >= 1));
+    }
+
+    #[test]
+    fn frame_overhead_matches_the_assembly_math() {
+        // 2 outer verticals + 2 padding cells per column + 1 divider per
+        // adjacent pair: `┃ a │ b ┃` is 4 + 3 for one divider.
+        assert_eq!(frame_overhead(1), 4);
+        assert_eq!(frame_overhead(2), 7);
+        assert_eq!(frame_overhead(3), 10);
+    }
+
+    /// Every skin glyph must be exactly one terminal cell wide — a glyph from
+    /// an ambiguous-width or emoji table would desynchronise every row after
+    /// the first one (the renderers count columns, not chars).
+    #[test]
+    fn skin_glyphs_are_single_width() {
+        let skin = TableSkin::framed();
+        for rule in [skin.top, skin.header_sep, skin.body_sep, skin.bottom] {
+            for ch in [rule.left, rule.junction, rule.right, rule.fill] {
+                assert_eq!(UnicodeWidthChar::width(ch), Some(1), "{ch:?}");
+            }
+        }
+        for ch in [skin.outer_v, skin.header_v, skin.inner_v] {
+            assert_eq!(UnicodeWidthChar::width(ch), Some(1), "{ch:?}");
+        }
     }
 }

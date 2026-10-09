@@ -560,7 +560,12 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 if !table.current_row.is_empty() {
                     table.rows.push(std::mem::take(&mut table.current_row));
                 }
-                let rendered = render_table(&table, ctx.base_style, ctx.available_width);
+                let rendered = render_table(
+                    &table,
+                    ctx.theme.border,
+                    ctx.base_style,
+                    ctx.available_width,
+                );
                 ctx.lines.extend(rendered);
             }
             push_blank_line(ctx.lines);

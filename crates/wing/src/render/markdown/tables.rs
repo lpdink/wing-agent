@@ -1,10 +1,11 @@
-//! Table rendering — borderless layout with content-aware width allocation.
+//! Table rendering — framed grid with content-aware width allocation.
 //!
-//! Visual style (adapted from codex, MIT license):
-//! - Columns are separated by gaps + cell padding instead of `│` borders
-//! - A heavy `━` rule sits under the header; light `─` rules separate body rows
-//! - Cell padding honors column alignment (left / center / right)
-//! - Cell content word-wraps instead of truncating (zero information loss)
+//! Visual style (**重框三档**, see [`TableSkin::framed`]): a heavy outer frame
+//! wraps the table, the header band is heavy (its separator and its own column
+//! dividers), and the body grid is light — three tiers carried by stroke
+//! weight alone, all strokes sharing one quiet ink (the theme `border` colour).
+//! Cell padding honours column alignment (left / center / right); cell content
+//! word-wraps instead of truncating (zero information loss).
 //!
 //! ## Width allocation
 //!
@@ -13,7 +14,8 @@
 //! (short values such as counts or status labels). When the table overflows the
 //! available width, token-heavy columns surrender excess width before narrative
 //! prose, and compact columns are preserved last — so an oversized path does not
-//! collapse readable prose into an unreadable narrow strip.
+//! collapse readable prose into an unreadable narrow strip. The maths itself
+//! lives in [`crate::render::table`], shared with the CLI table renderer.
 
 use pulldown_cmark::Alignment;
 use ratatui::style::Style;
@@ -24,19 +26,16 @@ use super::types::MarkdownSegment;
 use super::types::SegmentKind;
 use crate::render::table::ColumnMetrics;
 use crate::render::table::LONG_TOKEN_WIDTH;
+use crate::render::table::RuleGlyphs;
+use crate::render::table::TableSkin;
 use crate::render::table::classify_column;
 use crate::render::table::compute_column_widths;
+use crate::render::table::frame_overhead;
 use crate::render::table::longest_token_width;
 use crate::render::table::split_str_by_width;
 
-/// Spaces between adjacent columns.
-const COLUMN_GAP: usize = 2;
 /// Spaces of padding on each side of a cell's content.
 const CELL_PADDING: usize = 1;
-/// Rule character drawn under the header row.
-const HEADER_SEPARATOR_CHAR: char = '━';
-/// Rule character drawn between body rows.
-const BODY_SEPARATOR_CHAR: char = '─';
 
 /// Accumulates table rows during markdown parsing.
 #[derive(Debug, Default)]
@@ -50,12 +49,15 @@ pub(crate) struct TableBuffer {
 
 /// Render a table buffer with word-wrap and content-aware column balancing.
 ///
-/// `available_width` is the full content width the table may occupy (caller has
-/// already subtracted any line prefix). When `Some`, column widths are shrunk to
-/// fit; the rendered lines are guaranteed not to exceed this width so downstream
-/// wrapping never breaks the layout mid-row.
+/// `frame_style` inks every glyph of the frame and the grid (callers pass the
+/// theme's `border` style); `available_width` is the full content width the
+/// table may occupy (caller has already subtracted any line prefix). When
+/// `Some`, column widths are shrunk to fit; the rendered lines are guaranteed
+/// not to exceed this width so downstream wrapping never breaks the layout
+/// mid-row.
 pub(crate) fn render_table(
     table: &TableBuffer,
+    frame_style: Style,
     base_style: Style,
     available_width: Option<u16>,
 ) -> Vec<MarkdownLine> {
@@ -78,44 +80,54 @@ pub(crate) fn render_table(
 
     let metrics = collect_column_metrics(&table.headers, &table.rows, col_count);
 
-    // Content budget = available width minus per-column padding and inter-column
-    // gaps. This is the space the column *content* widths may collectively use.
-    let content_budget = available_width.map(|avail| {
-        let overhead = col_count * CELL_PADDING * 2 + col_count.saturating_sub(1) * COLUMN_GAP;
-        (avail as usize).saturating_sub(overhead)
-    });
+    // Content budget = available width minus the frame (outer verticals, cell
+    // padding, inner dividers). This is the space the column *content* widths
+    // may collectively use.
+    let content_budget =
+        available_width.map(|avail| (avail as usize).saturating_sub(frame_overhead(col_count)));
 
     let col_widths = compute_column_widths(&metrics, content_budget);
+    let skin = TableSkin::framed();
 
-    let separator_style = base_style.dim();
+    lines.push(rule_line(&skin.top, &col_widths, frame_style));
 
-    // Header row + heavy rule.
+    // Header band: the heavy row and its heavy separator.
     if !table.headers.is_empty() {
         lines.extend(render_row(
             &table.headers,
-            &col_widths,
-            &alignments,
-            base_style,
-            true,
+            &RowEnv {
+                col_widths: &col_widths,
+                alignments: &alignments,
+                base_style,
+                frame_style,
+                outer_v: skin.outer_v,
+                divider: skin.header_v,
+                bold: true,
+            },
         ));
-        lines.push(render_separator(
-            &col_widths,
-            HEADER_SEPARATOR_CHAR,
-            separator_style,
-        ));
+        lines.push(rule_line(&skin.header_sep, &col_widths, frame_style));
     }
 
     // Body rows with a light rule between each pair.
     for (row_idx, row) in table.rows.iter().enumerate() {
-        lines.extend(render_row(row, &col_widths, &alignments, base_style, false));
+        lines.extend(render_row(
+            row,
+            &RowEnv {
+                col_widths: &col_widths,
+                alignments: &alignments,
+                base_style,
+                frame_style,
+                outer_v: skin.outer_v,
+                divider: skin.inner_v,
+                bold: false,
+            },
+        ));
         if row_idx + 1 < table.rows.len() {
-            lines.push(render_separator(
-                &col_widths,
-                BODY_SEPARATOR_CHAR,
-                separator_style,
-            ));
+            lines.push(rule_line(&skin.body_sep, &col_widths, frame_style));
         }
     }
+
+    lines.push(rule_line(&skin.bottom, &col_widths, frame_style));
 
     lines
 }
@@ -186,35 +198,53 @@ fn collect_column_metrics(
 
 /// Render a horizontal rule spanning all columns.
 ///
-/// Each column contributes `width + 2*CELL_PADDING` rule characters, joined by
-/// `COLUMN_GAP` spaces — matching the row layout exactly.
-fn render_separator(col_widths: &[usize], ch: char, style: Style) -> MarkdownLine {
+/// Each column contributes `width + 2*CELL_PADDING` fill characters, joined by
+/// the rule's junction glyph — matching the row layout exactly, so every line
+/// of the table has the same display width.
+fn rule_line(glyphs: &RuleGlyphs, col_widths: &[usize], style: Style) -> MarkdownLine {
     let mut line = MarkdownLine::default();
-    let segment = ch.to_string();
+    let left = glyphs.left.to_string();
+    let junction = glyphs.junction.to_string();
+    let fill = glyphs.fill.to_string();
+    let right = glyphs.right.to_string();
+
+    line.push_segment(SegmentKind::Border, style, &left);
     for (i, &w) in col_widths.iter().enumerate() {
         line.push_segment(
             SegmentKind::Border,
             style,
-            &segment.repeat(w + CELL_PADDING * 2),
+            &fill.repeat(w + CELL_PADDING * 2),
         );
         if i + 1 < col_widths.len() {
-            line.push_segment(SegmentKind::Border, style, &" ".repeat(COLUMN_GAP));
+            line.push_segment(SegmentKind::Border, style, &junction);
         }
     }
+    line.push_segment(SegmentKind::Border, style, &right);
     line
 }
 
-/// Render a single table row (possibly multi-line after wrapping).
-///
-/// Columns are gap-separated with alignment-aware padding. Trailing columns that
-/// are empty on a given line are trimmed so rows do not carry useless padding.
-fn render_row(
-    row: &[MarkdownLine],
-    col_widths: &[usize],
-    alignments: &[Alignment],
+/// What one row needs from its table: the column geometry plus the ink and
+/// glyph choices for the row's tier (heavy header band vs light body grid).
+struct RowEnv<'a> {
+    col_widths: &'a [usize],
+    alignments: &'a [Alignment],
     base_style: Style,
+    frame_style: Style,
+    outer_v: char,
+    divider: char,
     bold: bool,
-) -> Vec<MarkdownLine> {
+}
+
+/// Render a single table row (possibly multi-line after wrapping) as one or
+/// more full-width grid lines.
+///
+/// Every line draws the complete row — all columns (empty cells included) and
+/// both frame verticals — because a missing column would leave a hole in the
+/// grid. Cells are alignment-aware padded; `env.divider` is the column
+/// separator for this row's tier (heavy inside the header band, light in the
+/// body).
+fn render_row(row: &[MarkdownLine], env: &RowEnv<'_>) -> Vec<MarkdownLine> {
+    let col_widths = env.col_widths;
     let wrapped_cells: Vec<Vec<Vec<MarkdownSegment>>> = col_widths
         .iter()
         .enumerate()
@@ -225,21 +255,13 @@ fn render_row(
         .collect();
     let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
 
+    let outer = env.outer_v.to_string();
+    let divider = env.divider.to_string();
     let mut out = Vec::with_capacity(row_height);
     for line_idx in 0..row_height {
-        // Rightmost column with visible content on this line.
-        let last_visible = wrapped_cells.iter().rposition(|cell_lines| {
-            cell_lines
-                .get(line_idx)
-                .is_some_and(|segs| segs.iter().any(|s| !s.text.is_empty()))
-        });
-        let Some(last) = last_visible else {
-            out.push(MarkdownLine::default());
-            continue;
-        };
-
         let mut line = MarkdownLine::default();
-        for col in 0..=last {
+        line.push_segment(SegmentKind::Border, env.frame_style, &outer);
+        for col in 0..col_widths.len() {
             let width = col_widths[col];
             let segments = wrapped_cells[col]
                 .get(line_idx)
@@ -247,30 +269,34 @@ fn render_row(
                 .unwrap_or_default();
             let content_width: usize = segments.iter().map(|s| s.width()).sum();
             let remaining = width.saturating_sub(content_width);
-            let (left_pad, right_pad) = match alignments[col] {
+            let (left_pad, right_pad) = match env.alignments[col] {
                 Alignment::Left | Alignment::None => (0, remaining),
                 Alignment::Center => (remaining / 2, remaining - remaining / 2),
                 Alignment::Right => (remaining, 0),
             };
-            let is_last = col == last;
 
             // Padding is layout whitespace within the prose area.
-            line.push_segment(SegmentKind::Text, base_style, &" ".repeat(CELL_PADDING));
+            line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(CELL_PADDING));
             if left_pad > 0 {
-                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(left_pad));
+                line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(left_pad));
             }
             for seg in &segments {
-                let style = if bold { seg.style.bold() } else { seg.style };
+                let style = if env.bold {
+                    seg.style.bold()
+                } else {
+                    seg.style
+                };
                 line.push_segment(seg.kind, style, &seg.text);
             }
-            if !is_last {
-                if right_pad > 0 {
-                    line.push_segment(SegmentKind::Text, base_style, &" ".repeat(right_pad));
-                }
-                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(CELL_PADDING));
-                line.push_segment(SegmentKind::Text, base_style, &" ".repeat(COLUMN_GAP));
+            if right_pad > 0 {
+                line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(right_pad));
+            }
+            line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(CELL_PADDING));
+            if col + 1 < col_widths.len() {
+                line.push_segment(SegmentKind::Border, env.frame_style, &divider);
             }
         }
+        line.push_segment(SegmentKind::Border, env.frame_style, &outer);
         out.push(line);
     }
     out
@@ -474,7 +500,7 @@ mod tests {
             ..Default::default()
         };
         // 2 columns à 1 content column + chrome ≈ the degenerate share.
-        let lines = render_table(&table, Style::new(), Some(12));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(12));
         assert!(!lines.is_empty());
     }
 
@@ -515,20 +541,52 @@ mod tests {
         assert_eq!(metrics[0].kind, ColumnKind::Narrative);
     }
 
+    /// Exact shape of the framed grid: heavy frame, heavy header band, light
+    /// body grid — one line per visual line, every line the same width.
     #[test]
-    fn test_render_table_basic_borderless() {
+    fn test_render_table_framed_grid_shape() {
         let table = TableBuffer {
             headers: vec![make_line("A"), make_line("B")],
             rows: vec![vec![make_line("1"), make_line("2")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(80));
-        let text = plain_lines(&lines).join("\n");
-        assert!(text.contains("A"), "header missing: {text}");
-        assert!(text.contains("1"), "data missing: {text}");
-        // Borderless style: no vertical bars, heavy header rule present.
-        assert!(!text.contains("│"), "should be borderless: {text}");
-        assert!(text.contains("━"), "header rule missing: {text}");
+        let lines = render_table(&table, Style::new(), Style::new(), Some(80));
+        let expected = [
+            "┏━━━━━┳━━━━━┓",
+            "┃ A   ┃ B   ┃",
+            "┣━━━━━╇━━━━━┫",
+            "┃ 1   │ 2   ┃",
+            "┗━━━━━┷━━━━━┛",
+        ];
+        assert_eq!(plain_lines(&lines), expected);
+    }
+
+    /// Every line of a table is exactly as wide as every other one — the frame
+    /// closes on both sides and cells are padded to their column width — so
+    /// downstream layout (and the equal-width CLI grids) can trust the
+    /// geometry even when a cell wraps.
+    #[test]
+    fn test_render_table_lines_are_equal_width() {
+        let table = TableBuffer {
+            headers: vec![make_line("Name"), make_line("Description")],
+            rows: vec![
+                vec![make_line("one"), make_line("short")],
+                vec![
+                    make_line("two"),
+                    make_line("this description wraps onto several lines at width"),
+                ],
+            ],
+            ..Default::default()
+        };
+        for avail in [24u16, 40, 80] {
+            let lines = render_table(&table, Style::new(), Style::new(), Some(avail));
+            let widths: Vec<usize> = lines.iter().map(|l| l.width()).collect();
+            assert!(
+                widths.iter().all(|w| *w == widths[0]),
+                "avail={avail}: {widths:?}"
+            );
+            assert!(widths[0] <= avail as usize, "avail={avail}: {}", widths[0]);
+        }
     }
 
     #[test]
@@ -538,10 +596,12 @@ mod tests {
             rows: vec![vec![make_line("a")], vec![make_line("b")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         let text = plain_lines(&lines).join("\n");
-        // Light rule between the two body rows.
-        assert!(text.contains("─"), "body separator missing: {text}");
+        // The heavy header separator and the light body rule between the two
+        // body rows, each with its own junction glyphs.
+        assert!(text.contains("┣━━━━━┫"), "header separator missing: {text}");
+        assert!(text.contains("┠─────┨"), "body separator missing: {text}");
     }
 
     #[test]
@@ -571,7 +631,7 @@ mod tests {
             ..Default::default()
         };
         for avail in [40u16, 60, 80, 120] {
-            let lines = render_table(&table, Style::new(), Some(avail));
+            let lines = render_table(&table, Style::new(), Style::new(), Some(avail));
             for line in &lines {
                 assert!(
                     line.width() <= avail as usize,
@@ -594,7 +654,7 @@ mod tests {
             ]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(30));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(30));
         // The wrapped row should produce multiple lines.
         assert!(
             lines.len() >= 4,
@@ -614,7 +674,7 @@ mod tests {
         let long_text = "This very long text must not be truncated under any circumstances";
         table.headers = vec![make_line("Col")];
         table.rows = vec![vec![make_line(long_text)]];
-        let lines = render_table(&table, Style::new(), Some(20));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(20));
         let text = plain_lines(&lines).join("\n");
         // All words must be preserved (they'll be on separate lines due to wrapping).
         for word in long_text.split_whitespace() {
@@ -632,7 +692,7 @@ mod tests {
             rows: vec![vec![make_line("你好"), make_line("1")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         let text = plain_lines(&lines).join("\n");
         assert!(text.contains("你好"), "CJK content missing: {text}");
     }
@@ -645,7 +705,7 @@ mod tests {
             alignments: vec![Alignment::Left, Alignment::Right],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         // The right-aligned "5" should be preceded by padding spaces within
         // its column (i.e. appear with leading spaces before the column gap/end).
         let data_line = plain_lines(&lines)
@@ -665,7 +725,7 @@ mod tests {
             rows: vec![vec![make_line(""), make_line("x")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
         assert!(!lines.is_empty());
     }
 }

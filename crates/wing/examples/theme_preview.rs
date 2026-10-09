@@ -521,10 +521,11 @@ let p = ThemePalette::from_config(&config.colors);
 let quiet = p.dim; // chrome 永远比内容安静
 ```
 
-| 槽位 | 岗位 |
-|------|------|
-| text | 正文 |
-| dim | chrome |
+| 槽位 | 岗位 | 说明 |
+|------|:----:|------|
+| `text` | 正文 | 最亮的一档，承担阅读 |
+| `dim` | chrome | 表格线、代码框：永远比内容安静 |
+| `accent` | 品牌 | 链接与命令；长 token 在此折行：`libs/core/wing/config/loader.py` |
 
 行内公式 $E = mc^2$，块级公式：
 
