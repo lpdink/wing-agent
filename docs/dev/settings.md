@@ -95,10 +95,13 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 | 引号 | 能不加就不加（判据 = 不加引号能否原样读回）；需要时双引号 + JSON 转义，非 ASCII 原样 |
 
 **未知键保留（前向兼容）**：`config/document.py` 读取时把 schema 之外的键收进 `extra`
-（带上父容器路径，如 `gateway.weird` / `providers[0].foo`；freeform map 的内部键不算），
+（**结构性三元组** `ExtraKey(父容器前缀, 原始键名, 值)`，如 `("gateway", "weird", …)` /
+`("providers[0]", "foo", …)`；freeform map 的内部键不算），
 保存时从**磁盘文档**取回、写在父容器已知键之后，上面一行
 `# unknown key (not recognized by this wing version)`；父容器自己缺席时兜底写在文件末尾。
 ——新版本写的键，旧版本编辑时**不能吃掉**（这是"安全"与"毁掉用户配置"的分界线）。
+**键名不参与任何字符串切分**：`gateway.foo.bar` 这种「键名本身含点」的未知键必须原地写回
+（曾经用 `rpartition(".")` 反推父容器，会把键挪到错误的名字 / 位置）。
 代价：`get` 不下发未知键（面板没有节点可渲染它们），客户端无法删除它们。
 
 **`.bak`**：保存前把现有文件**字节级**复制到 `config.yaml.bak`（覆盖式，只留最近一份；
@@ -143,7 +146,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 ```
 ① 现读磁盘 → (current_doc, current_fp)        ← 读不出来（YAML 语法错）也继续，见下
 ② base != current_fp → 409，不写盘            ← 乐观并发；base=None（CLI --force）跳过检查
-③ 密文回填：null = 保留磁盘现值                ← §6
+③ 密文回填：null = 保留磁盘现值                ← 按身份配对，见 §6
 ④ 字段级 + 跨字段校验（全有或全无）             ← 有 problem → 200 + ok=false，一个字节都不写
 ⑤ 备份 config.yaml.bak（字节级原子写，覆盖式）
 ⑥ emit_config_yaml(incoming) → 原子写 config.yaml
@@ -193,6 +196,23 @@ git-tracked 的 `config.yaml` + `.bak`。
   `hint` = 值长度 **≥ 8** 时的末 4 位，否则 `null`（短密钥不给 hint，避免泄露比例过高）。
 - **写**（`set`）的三态：`null` → **保留磁盘现值**；字符串 → 设为该值（`""` = 显式清空）；
   键缺席 → 该项不被覆盖（从文件移除；两个密文字段都是必填，所以这会成为 problem，而不是静默清空）。
+- **`null` 的「保留」按身份配对，不按下标**（`document.resolve_secrets` 的 LIST 分支，
+  三段式、顺序即优先级；声明面是 `SettingMeta.identity_field`，目录落在 `SettingNode.identity_field`，
+  **不进 wire**）：
+  1. **身份配对**：列表节点声明了 `identity_field` 时，用磁盘现值建「身份值 → 项」映射
+     （只收录非空字符串身份），incoming 项按自己的身份值查表配对。`providers → name`
+     （`cross_field_problems` 强制 provider name 全局唯一，所以它是合法身份）。
+  2. **安全的下标回落**：**仅当** `len(incoming) == len(current)` 时，对没配上身份的项按下标配对
+     ——覆盖「重命名」（身份变了但结构没变）。
+  3. **宁可不猜**：以上都配不上（长度变化 / 身份重名 / 无身份可查）时，该子树的 `null` 哨兵解析为
+     「键被移除」（必填字段随之成为 problem，保存被拦住），并在回执 `warnings` 里逐条点名：
+     `无法确定 providers[1].api_key 属于哪一项（列表结构变化且无法按身份配对），已移除该密钥，请重新填写`。
+     真丢过值才警告（新增项 / 从没设过密钥时静默，那是既有语义）。
+  - **不变量：列表长度不等时绝不按下标配对**——按下标回填会把 A 的密钥**静默**写给 B
+    （保存成功、回执不报告、用户下次调用才发现 401 或打错账号），是本模块唯一的数据损坏级缺陷来源。
+  - 没有可达密文叶子的列表（`agents` / `providers[].models`）不需要 `identity_field`；
+    `gateway.auth.keys` **没有可用身份**（`key` 是密文、`role` 不唯一）→ 不声明，走 2/3：
+    长度不变照旧按位置保留，长度一变整表落「不猜」（丢弃 + 警告 + 重填）。
 - **契约红线**（`shared/panels/settings/mod.rs` 的模块文档与单测钉住）：**前端必须把从 `get` 拿到的
   `null` 原样回传**。丢掉这个键 = 清空密钥 = 用户下一次调用 401。面板从不删除用户没动过的密文键，
   密文编辑器缓冲**从空开始**（提交空缓冲 = 取消），且缓冲只有 `visible_buffer()`（`•` × 长度）一个出口
@@ -274,12 +294,21 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
   Rust 侧 `is_setup_mode()` 的判据就是「503 且结构化 body 的 `error == "setup_mode"`」。
 - **`/ws` 在 accept 之前以 1013 关闭**：客户端看到的是握手失败而不是"连上就断"；
   setup mode 下 WS 没有任何可用功能（修复全在 HTTP 设置端点上）。
-- **修复模式鉴权 = loopback-only 免 key**（`LOOPBACK_HOSTS = {127.0.0.1, ::1, localhost}`）：
-  配置坏掉 ⇒ auth 配置本身不可信（读不出来），所以修复模式 ≈ 本地控制台权限——只接受本机来源、
-  **不要求 key**；非 loopback 一律 403。**这是收紧不是放松**：正常模式 `auth.enabled=false` 时
-  任何人都能访问，setup mode 下只有本机能。代价是把网关暴露到 `0.0.0.0` 且配置坏掉的部署
-  无法远程修复——刻意的安全姿态。
-  中间件顺序：`AuthMiddleware` 在**外层**（后 add），守门在其内——非 loopback 在 setup mode 下
+- **修复模式鉴权 = loopback-only 免 key**：免 key 需要**两个条件同时成立**——
+  ① 请求来源是 loopback（`LOOPBACK_HOSTS = {127.0.0.1, ::1, localhost}`），且
+  ② **网关自身的绑定地址是 loopback**（`GatewayServer.host`，即 `cli.py` 从文件/参数解析出来的那个，
+  **不在中间件里重读 config**——它正是此刻不可信的那份）。任一不成立 → 403。
+  配置坏掉 ⇒ auth 配置本身不可信（读不出来），所以修复模式 ≈ 本地控制台权限、**不要求 key**：
+  **这是收紧不是放松**：正常模式 `auth.enabled=false` 时任何人都能访问，setup mode 下只有
+  「本机来源 + 本机绑定」这一种组合能进。为什么②必须有：**只看来访地址会被本机转发洗白**——
+  把网关绑到 `0.0.0.0` 之后，任何从 `127.0.0.1` 转发进来的本机进程（无鉴权反代、容器 sidecar、
+  本地端口转发）都会让远端流量以 loopback 身份到达，而此时 setup mode 授予的是**免 key 的整份配置
+  写权限**（能改回 `auth.enabled=false`、换 provider 端点）。绑 `0.0.0.0` / `::` / 任何非 loopback
+  地址时**连本机来源也拒绝**：setup mode 下没有可核验的 key（`server.auth_config` 恒为安全默认、
+  没有 keys），「要求一把无法核验的 key」等价于拒绝，返回 401 才是撒谎；detail 直接指路——
+  **把 `gateway.host` 改回 `127.0.0.1` 并重启**（或手工编辑 `config.yaml`，CLI/TUI 之外的最后手段）。
+  代价是把网关暴露到 `0.0.0.0` 且配置坏掉的部署无法远程修复——刻意的安全姿态。
+  中间件顺序：`AuthMiddleware` 在**外层**（后 add），守门在其内——被拒的来源在 setup mode 下
   任何路径都先吃 403（而不是 503）。
 - **`server.runtime` 恒非 Optional**：setup mode 下它是只服务保存事务的**替身**
   （`_SetupRuntime`：只放行 `apply_settings` / `post_write_effect`，其余一切属性抛 `SetupModeError`）。
@@ -291,6 +320,9 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
   中间态）、文件**不回滚**（它本身是合法配置）、回执如实报明细；下次保存或重启再试。
   启动路径上转入失败**不许静默降级**：记 ERROR 日志 + 写一条 `path=None` 的 boot problem
   （否则会出现 503 说"共 0 条问题"而 `valid=true` 的自相矛盾）。
+  **终端横幅覆盖两条降级路径**（`cli.py`）：横幅条件不是 `boot.ok`，而是构造完 server 之后的
+  `server.in_setup_mode`——「配置合法但运行时装配失败」这条也打同一段（reason 取 `server.boot_reason`、
+  问题清单取 `server.setup_problems`），且**恰好一次**（`boot.ok=false` 那条不再在构造前重复打印）。
 - **`valid` 必须自洽**：`valid == (not setup_mode and 无 problem)`——降级态**恒** `false`，
   不允许 `valid=true` 且 `setup_mode=true`。`get` / `status` 的 `setup_mode` 字段是真值
   （取自 `server.in_setup_mode`），面板据此显示徽标。
@@ -448,7 +480,9 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 | 两个 `config.yaml` 的注释语言不一致 | Gateway 侧全中文（面板直接展示这些文案）；TUI 侧字段 `doc` 沿用既有的英文、新增 `notes` 用中文 |
 | `--dump-config` 会把 `api_key` 明文写到 stdout | **既有行为**（旧实现同样序列化真值），且 `dump > file` 的 round-trip 用途要求它是真值；重定向进已存在文件前先备份（shell 会先截断目标） |
 | 颜色槽"注释掉的默认值"是 `preset: wing` 下的值 | 改 `preset` 后它们仅供参考（不随预设重算） |
-| setup mode 下非 loopback 无法修复 | 刻意的安全姿态（§8）；把网关暴露到 `0.0.0.0` 且配置坏掉时请到本机修复 |
+| setup mode 下非 loopback 无法修复 | 刻意的安全姿态（§8）：免 key 还要求**网关自身绑定 loopback**，所以把网关绑到 `0.0.0.0` 时连本机来源也不放行（防本机转发洗白）。修法：把 `gateway.host` 改回 `127.0.0.1` 重启，或手工编辑 `config.yaml` |
+| 重命名列表项时密钥靠「长度相等的下标回落」保留 | 身份（`name`）变了但列表长度没变 ⇒ 按位置配对（§6 第 2 条）；长度也变了则宁可丢弃 + 警告重填。删除 / 前插 / 互换都按身份精确配对，不受影响 |
+| 无身份字段的密文列表（`gateway.auth.keys`）长度一变就整表丢密钥 | 元素里没有可用的非密文唯一标量（`role` 不唯一、`key` 是密文）⇒ 无法按身份配对；丢掉的密钥进回执 `warnings`，按提示重填即可 |
 | 列表元素模板的 `apply` 恒为 `hot` | 合成节点不继承字段的 apply（§7 末）；判定请用字段级声明 |
 | 搜索按子串命中，会命中 `notes` 里的路径文本 | 例如搜 `providers[].models` 会先命中 `providers` 节点的 doc；不是 bug，是"文档也参与匹配"的直接后果 |
 
@@ -456,6 +490,10 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 
 - 加 / 改一个配置字段：只动 `config/models.py` 的 `S(...)` 声明（+ 必要时的跨字段检查），
   模板 / 目录 / 面板 / CLI / 校验会跟着变；跑 `test_config_spec.py` 与 `test_config_emit.py`。
+- **给 LIST 字段加密文叶子前先想配对**：只要元素子树里有可达的 `secret=True` 叶子，就必须同时声明
+  `identity_field`（元素里那个唯一的非密文标量字段名）——否则列表结构一变，`null` 哨兵配不上，
+  密钥只能被丢弃（回执警告 + 用户重填），或者更糟：**按下标错配**（§6 的不变量）。
+  声明错（字段不存在 / 指向密文 / 非标量）会被 `test_config_spec.py` 的 `identity_field` 门禁当场拒绝。
 - 给 `AppConfig`（TUI 配置）加字段：同时改 `config/catalog.rs::interface_catalog()`——
   否则 Rust 侧双向对账门禁变红。
 - 改保存 / 生效语义：唯一写盘路径是 `runtime.apply_settings`，唯一热重载实现是 `system.reload_system`
