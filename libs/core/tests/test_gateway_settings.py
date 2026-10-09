@@ -559,6 +559,94 @@ class TestSettingsSecretPairing:
         ]
         assert config_path.read_bytes() == before  # 一个字节都没写
 
+    def test_delete_and_append_a_null_item_is_refused_not_hijacked(
+        self, two_provider_gateway
+    ):
+        """审查 B1 的主形态：删一项 + 同一次保存里加一项（长度相等）。
+
+        新项的 ``null`` 哨兵落在**已被 p2 认领**的槽位上——(b) 的 consumed 守卫必须让它
+        落「不猜」：不许抄走 p2 的密钥（旧行为：`p3` 静默继承 `KEY-P2-BBBBBBBB`），
+        回执点名 + 全有或全无。
+        """
+        client, config_path, _ = two_provider_gateway
+        before = config_path.read_bytes()
+        values, fingerprint = _get_doc(client)
+        del values["providers"][0]  # 删 p1
+        values["providers"].append(  # 同一次保存里追加新项（api_key 是 null 哨兵）
+            {
+                "name": "p3",
+                "protocol": "openai",
+                "base_url": "https://p3.example.com",
+                "api_key": None,
+                "models": ["m3"],
+            }
+        )
+        body = client.post(
+            "/api/settings/set", json={"base": fingerprint, "document": values}
+        ).json()
+
+        assert body["ok"] is False, body
+        assert [p["path"] for p in body["problems"]] == ["providers[1].api_key"]
+        assert body["warnings"] == [
+            "无法确定 providers[1].api_key 属于哪一项（列表结构变化且无法按身份配对），"
+            "已移除该密钥，请重新填写"
+        ]
+        assert config_path.read_bytes() == before
+
+    def test_whole_list_replacement_reports_the_positional_keys(
+        self, two_provider_gateway
+    ):
+        """整表替换（长度相等）：consumed 守卫关不掉，回执必须**出声**（AD18 第 2 点）。
+
+        两条警告各点名一个路径，并把两种读法（重命名 / 替换成新的）都写出来——
+        这既是 N1 残余的处置，也是「保留 (b) 而不是撤掉它」的代价说明。
+        """
+        client, config_path, _ = two_provider_gateway
+        values, fingerprint = _get_doc(client)
+        values["providers"] = [
+            {**values["providers"][0], "name": "p3"},
+            {**values["providers"][1], "name": "p4"},
+        ]
+        body = client.post(
+            "/api/settings/set", json={"base": fingerprint, "document": values}
+        ).json()
+
+        assert body["ok"] is True, body
+        assert body["warnings"] == [
+            "providers[0].api_key 按位置保留了磁盘上的值"
+            "（该项的 name 与磁盘上的项不一致）——若这是重命名，无需处理；"
+            "若是替换成了新的项，请重新填写该密钥",
+            "providers[1].api_key 按位置保留了磁盘上的值"
+            "（该项的 name 与磁盘上的项不一致）——若这是重命名，无需处理；"
+            "若是替换成了新的项，请重新填写该密钥",
+        ]
+        written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert [p["name"] for p in written["providers"]] == ["p3", "p4"]
+        # 位置保留把两把 key 按原下标一起搬了过来（旧值 = 新值，`changed` 看不见它们）。
+        assert [p["api_key"] for p in written["providers"]] == [
+            "KEY-P1-AAAA",
+            "KEY-P2-BBBBBBBB",
+        ]
+
+    def test_rename_reports_the_positional_key_and_keeps_it(self, two_provider_gateway):
+        """重命名（长度相等、无增删）：密钥按位置保留 + 一条「按位置保留」的说明。"""
+        client, config_path, _ = two_provider_gateway
+        values, fingerprint = _get_doc(client)
+        values["providers"][1]["name"] = "p2-renamed"
+        body = client.post(
+            "/api/settings/set", json={"base": fingerprint, "document": values}
+        ).json()
+
+        assert body["ok"] is True, body
+        assert body["warnings"] == [
+            "providers[1].api_key 按位置保留了磁盘上的值"
+            "（该项的 name 与磁盘上的项不一致）——若这是重命名，无需处理；"
+            "若是替换成了新的项，请重新填写该密钥"
+        ]
+        written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert [p["name"] for p in written["providers"]] == ["p1", "p2-renamed"]
+        assert written["providers"][1]["api_key"] == "KEY-P2-BBBBBBBB"
+
 
 # ============================================================
 # 鉴权（写端点要求 admin —— 由既有 RBAC 天然满足，见 design.md D9）

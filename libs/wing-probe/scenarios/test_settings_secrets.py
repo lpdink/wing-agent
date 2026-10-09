@@ -265,3 +265,75 @@ async def test_secret_follows_its_provider_when_the_first_is_deleted(
     )
     assert _wire_credential_for(probe, P2_MODEL, 1) == f"Bearer {P2_KEY}"
     session.watch.assert_never("error")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B1 回归（rev-r1）：(b) 等长下标回落**不许**把已认领槽位的密钥抄给新项
+#
+# 旧 (b) 只看「长度相等」，不看哪些槽位已被 (a) 身份配对认领：删 p1 + 同一次保存里
+# 追加新项 p3（api_key 是 null 哨兵、长度仍相等）时，p3 会静默继承 p2 的密钥——
+# ok=true / warnings=[] / changed 不含该路径（与原始 A1 同构的零感知）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: 追加的新 provider（不被调用：本场景只考密钥归属）。
+P3_NAME = "probe3"
+#: 新 provider 声明的模型 id（与 p1 / p2 的都不撞）。
+P3_MODEL = "probe3/appended"
+
+
+@pytest.mark.probe_env(
+    model=SECRETS_MODEL,
+    extra_providers=[{"name": P2_NAME, "models": [P2_MODEL], "api_key": P2_KEY}],
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_appending_a_null_item_is_refused_not_hijacked(probe: Probe) -> None:
+    """删 p1 + 同一次保存里加 p3(null)：保存被拦（不写盘），p2 的密钥不受影响。
+
+    三件套断言：回执点名 ``providers[1].api_key``（必填缺失）+ 丢弃警告 + 文件逐字节未变；
+    线格式断言：被拒的保存没有污染运行中的网关——下一轮对话仍发 p2 自己的 key。
+    """
+    probe.register(P2_MODEL, Turn.of(text="p2-r1"), Turn.of(text="p2-r2"))
+    http = probe.driver_required.http
+
+    session = await probe.session(model=P2_MODEL)
+    first = await session.chat("before the refused save")
+    assert first.data["subtype"] == "success", first.data
+    assert _wire_credential_for(probe, P2_MODEL, 0) == f"Bearer {P2_KEY}"
+
+    current = await _settings(http)
+    document = current["values"]
+    assert [p["name"] for p in document["providers"]] == ["probe", P2_NAME]
+    before = probe.env.config_path.read_bytes()
+
+    del document["providers"][0]  # 删 p1（它引用的模型同时被替换到 p2 的模型上）
+    document["agents"][0]["model"] = P2_MODEL
+    document["providers"].append(
+        {
+            "name": P3_NAME,
+            "protocol": "openai",
+            "base_url": document["providers"][0]["base_url"],  # 复用 p2 的端点
+            "api_key": None,  # 新项的密钥是 null 哨兵——B1 的触发形态
+            "models": [P3_MODEL],
+        }
+    )
+
+    receipt = await http.request(
+        "POST",
+        "/api/settings/set",
+        body={"base": current["fingerprint"], "document": document},
+    )
+    assert receipt["ok"] is False, receipt
+    assert [p["path"] for p in receipt["problems"]] == ["providers[1].api_key"], receipt
+    assert receipt["warnings"] == [
+        "无法确定 providers[1].api_key 属于哪一项（列表结构变化且无法按身份配对），"
+        "已移除该密钥，请重新填写"
+    ], receipt
+    # 全有或全无：文件一个字节都没写（p3 没有拿到 p2 的密钥，也没有拿到别的什么）。
+    assert probe.env.config_path.read_bytes() == before
+
+    # 线格式：p2 仍然发自己的 key（被拒的保存没有污染运行中的配置）。
+    second = await session.chat("after the refused save")
+    assert second.data["subtype"] == "success", second.data
+    assert _wire_credential_for(probe, P2_MODEL, 1) == f"Bearer {P2_KEY}"
+    session.watch.assert_never("error")

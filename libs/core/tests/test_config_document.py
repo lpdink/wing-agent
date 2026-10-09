@@ -438,7 +438,10 @@ class TestSecretIdentityPairing:
         assert resolved.dropped_secrets == []
 
     def test_rename_with_equal_length_keeps_the_key(self):
-        """(b) 安全的下标回落：身份变了但结构没变（重命名）——密钥必须保留。"""
+        """(b) 安全的下标回落：身份变了但结构没变（重命名）——密钥必须保留。
+
+        AD18 第 2 点：这次回落**必须出声**（它和「替换成新项」在文档里不可区分）。
+        """
         masked = _masked()
         renamed = {**masked[1], "name": P2_RENAMED}
         resolved = self._resolve([masked[0], renamed])
@@ -447,6 +450,96 @@ class TestSecretIdentityPairing:
             (P2_RENAMED, P2_KEY),
         ]
         assert resolved.dropped_secrets == []
+        (secret,) = resolved.positional_secrets
+        assert secret.path == "providers[1].api_key"
+        assert secret.identity_field == "name"
+        assert secret.identity_value == P2_RENAMED
+
+    def test_delete_and_append_a_null_item_does_not_inherit_a_key(self):
+        """AD18 第 3 点（审查 B1 的主形态）：删一项 + 同一次保存里加一项（长度相等）。
+
+        旧 (b) 不看 consumed：新项（``api_key: null``）会抄走**在位项**的密钥。现在那个槽位
+        已被 (a) 认领 ⇒ 落 (c)：新项没有密钥、路径进 ``dropped_secrets``、没有任何位置保留。
+        """
+        masked = _masked()
+        appended = {**_new_provider("p3", "m3", "placeholder"), "api_key": None}
+        resolved = self._resolve([masked[1], appended])
+        assert _keys_of(resolved.document) == [("p2", P2_KEY), ("p3", None)]
+        assert resolved.dropped_secrets == ["providers[1].api_key"]
+        assert resolved.positional_secrets == []
+
+    def test_replacing_the_whole_list_warns_about_every_positional_key(self):
+        """AD18 第 3 点（N1 的残余）：整表替换长度相等 ⇒ consumed 守卫关不掉 → 出声。"""
+        masked = _masked()
+        resolved = self._resolve(
+            [{**masked[0], "name": "p3"}, {**masked[1], "name": "p4"}]
+        )
+        # 位置保留照旧生效（这是 (b) 存在的理由：不把「重命名」变成硬失败）……
+        assert _keys_of(resolved.document) == [("p3", P1_KEY), ("p4", P2_KEY)]
+        # ……但两个路径都进列表，回执会逐条说清两种读法。
+        assert resolved.dropped_secrets == []
+        assert [secret.path for secret in resolved.positional_secrets] == [
+            "providers[0].api_key",
+            "providers[1].api_key",
+        ]
+        assert {secret.identity_value for secret in resolved.positional_secrets} == {
+            "p3",
+            "p4",
+        }
+        assert all(
+            secret.identity_field == "name" for secret in resolved.positional_secrets
+        )
+
+    def test_positional_records_need_a_value_actually_retained(self):
+        """只记**真的保留**了值的叶子：显式赋值 / 盘上本来就是空值时不打扰。"""
+        masked = _masked()
+        explicit = {**masked[1], "name": "p3", "api_key": "KEY-P3-CCCC"}
+        resolved = self._resolve([explicit, masked[1]])
+        assert _keys_of(resolved.document) == [("p3", "KEY-P3-CCCC"), ("p2", P2_KEY)]
+        assert resolved.positional_secrets == []
+
+        # 盘上的值是空串（= 显式清空）→ 不算「保留了一个值」。
+        empty_current = _doc(
+            data={
+                "providers": [
+                    {**masked[0], "api_key": ""},
+                    {**masked[1], "api_key": P2_KEY},
+                ]
+            }
+        )
+        incoming = _doc(
+            data={
+                "providers": [
+                    {**masked[0], "name": "p3", "api_key": None},
+                    masked[1],
+                ]
+            }
+        )
+        resolved = resolve_secrets(incoming, empty_current, _catalog())
+        assert _keys_of(resolved.document) == [("p3", ""), ("p2", P2_KEY)]
+        assert resolved.positional_secrets == []
+
+    def test_new_item_inserted_in_front_records_the_dropped_path(self):
+        """新项（带哨兵）前插、长度变长：路径进 dropped（影子的 AD18 口径）。
+
+        影子不再排除「被 (a) 认领的槽位」——新项带着 ``null`` 落在那个槽位上时，
+        用户看到的是「哪一个密钥被移除了、请重填」，而不是我们替他留下一个来路不明的值。
+        """
+        masked = _masked()
+        resolved = self._resolve(
+            [
+                {**_new_provider("p3", "m3", "placeholder"), "api_key": None},
+                masked[0],
+                masked[1],
+            ]
+        )
+        assert _keys_of(resolved.document) == [
+            ("p3", None),
+            ("p1", P1_KEY),
+            ("p2", P2_KEY),
+        ]
+        assert resolved.dropped_secrets == ["providers[0].api_key"]
+        assert resolved.positional_secrets == []
 
     def test_grow_keeps_existing_pairs(self):
         masked = _masked()
@@ -481,6 +574,10 @@ class TestSecretIdentityPairing:
         renamed = {**masked[1], "name": ""}  # 空身份 + 长度不变 → (b) 下标回落
         resolved = self._resolve([masked[0], renamed])
         assert _keys_of(resolved.document) == [("p1", P1_KEY), ("", P2_KEY)]
+        # 没有身份可核 ⇒ 位置保留必须出声（原因子句走「该项没有 name」）。
+        (secret,) = resolved.positional_secrets
+        assert secret.path == "providers[1].api_key"
+        assert secret.identity_value is None
 
     def test_duplicate_identity_in_current_skips_the_index_fallback(self):
         """current 侧身份重名（手改坏文件）：该身份不可用 → 落 (c)，连 (b) 也不走。"""
@@ -505,6 +602,10 @@ class TestSecretIdentityPairing:
         assert "api_key" not in resolved.document.data["providers"][0]
         assert resolved.document.data["providers"][1]["api_key"] == P2_KEY
         assert resolved.dropped_secrets == ["providers[0].api_key"]
+        # 第二项走 (b)（长度相等、身份不在 current）→ 位置保留同样出声。
+        (secret,) = resolved.positional_secrets
+        assert secret.path == "providers[1].api_key"
+        assert secret.identity_value == "p2"
 
     def test_without_identity_declaration_length_change_still_drops(self):
         """没有密文叶子的列表（agents）结构变化不产生记录（也不该有配对行为）。"""
@@ -584,6 +685,14 @@ class TestSecretListsWithoutIdentity:
         keys = resolved.document.data["gateway"]["auth"]["keys"]
         assert [entry["key"] for entry in keys] == ["AUTH-K1", "AUTH-K2"]
         assert resolved.dropped_secrets == []
+        # 无身份字段 ⇒ 每次等长保存都会出声（AD18 第 2 点；AD19 说这条边界「现在会出声」）。
+        assert [secret.path for secret in resolved.positional_secrets] == [
+            "gateway.auth.keys[0].key",
+            "gateway.auth.keys[1].key",
+        ]
+        assert all(
+            secret.identity_field is None for secret in resolved.positional_secrets
+        )
 
 
 class TestDroppedSecretsAreVisible:
