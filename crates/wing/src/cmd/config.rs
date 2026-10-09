@@ -92,6 +92,10 @@ pub enum ConfigCommand {
         /// Canonical path (`gateway.port`, `providers[0].api_key`, …).
         path: String,
         /// New value as text (see `--json-value` for raw JSON).
+        ///
+        /// Negative numbers are accepted (`-1`, `-2.5`) — without this the value
+        /// would be taken for a flag by clap and rejected with exit code 2.
+        #[arg(allow_negative_numbers = true)]
         value: Option<String>,
         /// Raw JSON value, bypassing the local kind coercion entirely.
         #[arg(long = "json-value")]
@@ -115,6 +119,9 @@ pub enum ConfigCommand {
         /// Canonical path of the list (`providers`, `providers[0].models`, …).
         path: String,
         /// Item value: scalar lists require it; object/map elements accept JSON.
+        ///
+        /// Negative numbers are accepted (`-1`, `-2.5`) — see `set` for why.
+        #[arg(allow_negative_numbers = true)]
         value: Option<String>,
         /// Raw JSON item value, bypassing the local kind coercion entirely.
         #[arg(long = "json-value")]
@@ -447,6 +454,13 @@ fn render_doctor(
             out.push_str(&format!("      ↳ {hint}\n"));
         }
     }
+    if problems.is_empty() {
+        // 后端不该发出"不可用但零问题"的组合；真出现就如实说明，而不是打印「共 0 个问题」。
+        out.push_str(
+            "网关报告配置不可用，但没有给出具体问题；查看网关日志或运行 wing config list\n",
+        );
+        return out;
+    }
     out.push_str(&format!(
         "共 {} 个问题 · 运行 wing 打开设置面板，或 wing config set <path> <value>\n",
         problems.len()
@@ -608,19 +622,25 @@ async fn execute_get<B: SettingsBackend>(
             "路径文法非法：`{path}`（示例：gateway.port / providers[0].api_key）"
         ));
     };
+    // AD8：先剥可选根前缀，之后目录寻址、文档读取、密文表 / 问题表查找与回显都用规范路径。
+    let steps = match normalize_steps(&schema.root, steps) {
+        Ok(steps) => steps,
+        Err(message) => return Outcome::usage(&message),
+    };
+    let canonical = format_path(&steps);
     let Some(node) = resolve_node(&schema.root, &current.values, &steps) else {
         return Outcome::usage(&format!(
-            "路径不在设置目录中：`{path}`（用 `wing config list` 查看全部路径）"
+            "路径不在设置目录中：`{canonical}`（用 `wing config list` 查看全部路径）"
         ));
     };
 
     let value = get_path(&current.values, &steps).cloned();
-    let secret = current.secrets.get(path).cloned();
+    let secret = current.secrets.get(&canonical).cloned();
     let problem = sorted_problems(&current.problems)
         .into_iter()
-        .find(|p| p.path.as_deref() == Some(path))
+        .find(|p| p.path.as_deref() == Some(canonical.as_str()))
         .cloned();
-    let output = GetOutput::new(path, node, value, secret, problem);
+    let output = GetOutput::new(&canonical, node, value, secret, problem);
 
     if json {
         Outcome::ok(format!("{}\n", json_string(&output)))
@@ -675,7 +695,7 @@ impl GetOutput {
             default,
             secret,
             problem,
-            node: node.clone(),
+            node: redact_node_defaults(node),
         }
     }
 
@@ -738,7 +758,15 @@ impl GetOutput {
             return format!("({})", self.kind);
         }
         match &self.value {
-            Some(value) => render_json_value(value),
+            Some(value) => {
+                let rendered = render_json_value(value);
+                if render_json_value_full(value).chars().count() > VALUE_MAX_CHARS {
+                    // 单项 get 被截断必须标注：完整值在 --json 里（list 的截断是版面设计，不标注）。
+                    format!("{rendered}  （已截断，完整值用 --json 取）")
+                } else {
+                    rendered
+                }
+            }
             None => "(未设置)".to_string(),
         }
     }
@@ -926,6 +954,25 @@ fn make_row(
     }
 }
 
+/// 按目录把密文节点的 `default` 置空（纵深防御：`get --json` 带完整 `node`，
+/// 若网关哪天给 secret 声明了默认值，它不该从这条路径流出去）。递归到 children / element / variants。
+fn redact_node_defaults(node: &SettingNode) -> SettingNode {
+    let mut redacted = node.clone();
+    if node.secret {
+        redacted.default = None;
+    }
+    redacted.children = node.children.iter().map(redact_node_defaults).collect();
+    redacted.element = node
+        .element
+        .as_deref()
+        .map(|element| Box::new(redact_node_defaults(element)));
+    redacted.variants = node
+        .variants
+        .as_ref()
+        .map(|variants| variants.iter().map(redact_node_defaults).collect());
+    redacted
+}
+
 /// 按目录把密文叶子替换成 `null`（纵深防御：上游若没掩码，值也不会出现在本模块的任何输出里）。
 fn redact_secrets(node: &SettingNode, value: &Value) -> Value {
     if node.secret {
@@ -1062,6 +1109,14 @@ fn render_json_value(value: &Value) -> String {
     match value {
         Value::String(text) => common::truncate_chars(text, VALUE_MAX_CHARS),
         other => common::truncate_chars(&other.to_string(), VALUE_MAX_CHARS),
+    }
+}
+
+/// 完整渲染（不截断）：只给单项 `get` 判断"是否被截断"用。
+fn render_json_value_full(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -1310,13 +1365,13 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             value,
             json_value,
         } => {
-            let steps = write_steps(path)?;
+            let steps = plan_steps(root, path)?;
             let incoming = incoming_value(value.as_deref(), json_value.as_deref())?;
             // union 列表元素的整项替换：形态由**新值**决定（`{` 开头 = 完整形态）；
             // 其余路径的形态由文档现值决定（`resolve_node`）。
             let node = match union_replacement_target(root, &document, &steps, incoming) {
                 Some(variant) => variant,
-                None => require_node(root, &document, &steps, path)?,
+                None => require_node(root, &document, &steps)?,
             };
             let coerced = incoming_json(node, incoming)?;
             apply_set(&mut document, &steps, coerced)?;
@@ -1326,8 +1381,8 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             })
         }
         WriteOp::Unset { path } => {
-            let steps = write_steps(path)?;
-            require_node(root, &document, &steps, path)?;
+            let steps = plan_steps(root, path)?;
+            require_node(root, &document, &steps)?;
             if apply_unset(&mut document, &steps)? {
                 Ok(Plan::Save {
                     document,
@@ -1336,7 +1391,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             } else {
                 Ok(Plan::Noop {
                     reason: "already_default",
-                    message: format!("`{path}` 本就不在文档里（已在默认值上）"),
+                    message: format!("`{}` 本就不在文档里（已在默认值上）", format_path(&steps)),
                 })
             }
         }
@@ -1346,10 +1401,14 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             json_value,
             variant,
         } => {
-            let steps = write_steps(path)?;
-            let list = require_node(root, &document, &steps, path)?;
+            let steps = plan_steps(root, path)?;
+            let canonical = format_path(&steps);
+            let list = require_node(root, &document, &steps)?;
             if list.kind != SettingKind::List {
-                return Err(format!("`{path}` 不是列表（kind: {}）", list.kind.as_str()));
+                return Err(format!(
+                    "`{canonical}` 不是列表（kind: {}）",
+                    list.kind.as_str()
+                ));
             }
             let choice = variant.as_deref().map(parse_variant).transpose()?;
             let element = add_element_node(list, choice)?;
@@ -1363,7 +1422,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                     Some(stub) => stub,
                     None => {
                         return Err(format!(
-                            "`{path}` 的元素是标量（{}），新增时必须给 <value>（或对 object 形态用 --variant object 插骨架）",
+                            "`{canonical}` 的元素是标量（{}），新增时必须给 <value>（或对 object 形态用 --variant object 插骨架）",
                             element.kind.as_str()
                         ));
                     }
@@ -1372,12 +1431,12 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             let index = apply_add(&mut document, &steps, list, item)?;
             Ok(Plan::Save {
                 document,
-                note: Some(format!("新增项：{path}[{index}]")),
+                note: Some(format!("新增项：{canonical}[{index}]")),
             })
         }
         WriteOp::Remove { path } => {
-            let steps = write_steps(path)?;
-            require_node(root, &document, &steps, path)?;
+            let steps = plan_steps(root, path)?;
+            require_node(root, &document, &steps)?;
             // 摘要前先拿到元素节点：脱敏要按目录走（密文叶在输出里一律 null）。
             let element = removal_element(root, &document, &steps);
             let removed = apply_remove(&mut document, &steps)?;
@@ -1387,12 +1446,16 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             };
             Ok(Plan::Save {
                 document,
-                note: Some(format!("已移除：{path} = {}", render_json_value(&summary))),
+                note: Some(format!(
+                    "已移除：{} = {}",
+                    format_path(&steps),
+                    render_json_value(&summary)
+                )),
             })
         }
         WriteOp::Move { path, delta } => {
-            let steps = write_steps(path)?;
-            require_node(root, &document, &steps, path)?;
+            let steps = plan_steps(root, path)?;
+            require_node(root, &document, &steps)?;
             let outcome = apply_move(&mut document, &steps, *delta)?;
             if !outcome.moved {
                 let reason = if *delta == 0 {
@@ -1401,7 +1464,8 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                     "already_at_edge"
                 };
                 let message = format!(
-                    "`{path}` 已在边界（第 {} / {} 项），未移动",
+                    "`{}` 已在边界（第 {} / {} 项），未移动",
+                    format_path(&steps),
                     outcome.from + 1,
                     outcome.length
                 );
@@ -1409,7 +1473,11 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             }
             Ok(Plan::Save {
                 document,
-                note: Some(format!("已移动：{} → [{}]", path, outcome.to)),
+                note: Some(format!(
+                    "已移动：{} → [{}]",
+                    format_path(&steps),
+                    outcome.to
+                )),
             })
         }
     }
@@ -1478,15 +1546,60 @@ fn write_steps(path: &str) -> Result<Vec<PathStep>, String> {
     Ok(steps)
 }
 
-/// 按路径在目录里寻址；找不到就是用法错误（带统一指引）。
+/// 写命令的路径：先做文法校验（离线可判），再按 AD8 规范化。
+fn plan_steps(root: &SettingNode, path: &str) -> Result<Vec<PathStep>, String> {
+    normalize_steps(root, write_steps(path)?)
+}
+
+/// 路径规范化（scheduler 裁定 AD8）：剥掉可选的 `config.` 根前缀。
+///
+/// 与 `node_at` / `resolve_node` 的可选前缀同口径：首段等于根名、且根没有同名子节点时吃掉它
+/// （06 的 D5 / P2 承诺两种拼写都能寻址）。**只做这一件事**：不折叠大小写、不做别名。
+/// 规范化后的路径是唯一用于文档操作、目录寻址、回显与 `--json` 的形态——否则写命令会在
+/// 文档根下造出名为 `config` 的伪键并静默成功（见 design.md Rework r1 / review r1 的 B1）。
+///
+/// 剥完为空（用户只敲了根名）→ 用法错误，并列出可用顶层节名。
+fn normalize_steps(root: &SettingNode, steps: Vec<PathStep>) -> Result<Vec<PathStep>, String> {
+    let stripped: Vec<PathStep> = match steps.as_slice() {
+        [PathStep::Key(first), rest @ ..]
+            if !first.is_empty()
+                && first == &root.key
+                && !root.children.iter().any(|child| &child.key == first) =>
+        {
+            rest.to_vec()
+        }
+        _ => steps,
+    };
+    if stripped.is_empty() {
+        let sections: Vec<&str> = root
+            .children
+            .iter()
+            .map(|child| child.display_label())
+            .collect();
+        return Err(format!(
+            "路径为空：`{}` 是根名，请指向一个具体设置（可用顶层节：{}）",
+            root.key,
+            if sections.is_empty() {
+                "(无)".to_string()
+            } else {
+                sections.join(" / ")
+            }
+        ));
+    }
+    Ok(stripped)
+}
+
+/// 按路径在目录里寻址；找不到就是用法错误（带统一指引）。路径必须是**已规范化**的。
 fn require_node<'a>(
     root: &'a SettingNode,
     document: &Value,
     steps: &[PathStep],
-    path: &str,
 ) -> Result<&'a SettingNode, String> {
     resolve_node(root, document, steps).ok_or_else(|| {
-        format!("路径不在设置目录中：`{path}`（用 `wing config list` 查看全部路径）")
+        format!(
+            "路径不在设置目录中：`{}`（用 `wing config list` 查看全部路径）",
+            format_path(steps)
+        )
     })
 }
 
@@ -1609,18 +1722,8 @@ fn resolve_node<'a>(
     document: &Value,
     steps: &[PathStep],
 ) -> Option<&'a SettingNode> {
-    // 根名（`config`）是可选前缀：仅当首段不命中任何子节点时才吃掉它（与 `node_at` 同口径）。
-    let steps: &[PathStep] = match steps {
-        [PathStep::Key(first), rest @ ..]
-            if !first.is_empty()
-                && first == &root.key
-                && !root.children.iter().any(|child| &child.key == first) =>
-        {
-            rest
-        }
-        all => all,
-    };
-
+    // `steps` 必须是**已规范化**的（`normalize_steps`）：根前缀容忍是入口的唯一职责，
+    // 这里不再各判一半——否则"目录寻址认这个前缀、文档操作不认"就会重现（review r1 的 B1）。
     let mut node = root;
     let mut value: Option<&Value> = Some(document);
     for step in steps {
@@ -2049,6 +2152,16 @@ fn api_failure(error: &ApiClientError, http_base: &str, what: &str) -> (u8, Stri
             3,
             "wing config error: 配置已被其它客户端修改，请重试（或 --force 跳过指纹检查）"
                 .to_string(),
+        );
+    }
+    // 503 + error=="setup_mode"（协议增补 P4）：settings 端点按 §8.3 的 allowlist 不该被守门，
+    // 真出现说明网关状态异常——至少把"网关处于修复模式"这个事实告诉用户。
+    if error.is_setup_mode() {
+        return (
+            1,
+            format!(
+                "wing config error: {what}：{error}\n  （网关处于修复模式：只有本机（loopback）客户端可以读写设置）"
+            ),
         );
     }
     if let ApiClientError::Api { status: 404, .. } = error {
@@ -2607,12 +2720,30 @@ mod tests {
     }
 
     #[test]
-    fn resolve_node_honours_the_optional_root_prefix() {
-        let root = catalog();
+    fn normalization_is_the_single_authority_for_the_root_prefix() {
+        let root = catalog(); // root.key == "config"
+        // 入口规范化：带/不带前缀 → 同一条规范路径。
+        let plain = normalize_steps(&root, steps("gateway.port")).expect("plain");
+        let prefixed = normalize_steps(&root, steps("config.gateway.port")).expect("prefixed");
+        assert_eq!(format_path(&plain), "gateway.port");
+        assert_eq!(format_path(&prefixed), "gateway.port");
+
+        // 只敲根名 → 用法错误 + 顶层节名。
+        let message = normalize_steps(&root, steps("config")).unwrap_err();
+        assert!(message.contains("路径为空"), "{message}");
+        assert!(message.contains("providers"), "{message}");
+
+        // 根名才是唯一依据：别的顶层键不会被当前缀剥掉。
+        let mut other = catalog();
+        other.key = "settings".to_string();
+        let kept = normalize_steps(&other, steps("config.gateway.port")).expect("kept");
+        assert_eq!(format_path(&kept), "config.gateway.port");
+
+        // resolve_node 只接受已规范化的 steps（容忍只在入口做一次，避免"两处各判一半"）。
         let doc = document();
-        let plain = resolve_node(&root, &doc, &steps("gateway.port")).expect("plain");
-        let prefixed = resolve_node(&root, &doc, &steps("config.gateway.port")).expect("prefixed");
-        assert_eq!(plain.path, prefixed.path);
+        assert!(resolve_node(&root, &doc, &steps("gateway.port")).is_some());
+        assert!(resolve_node(&root, &doc, &steps("config.gateway.port")).is_none());
+        assert!(resolve_node(&root, &doc, &prefixed).is_some());
     }
 
     // ------------------------------------------------------------
@@ -3145,6 +3276,21 @@ mod tests {
         );
     }
 
+    /// N5：`valid=false` 且零问题的边界组合（后端不该发，但文案不能是「共 0 个问题」）。
+    #[test]
+    fn render_doctor_handles_invalid_without_problems() {
+        let status = SettingsStatusResponse {
+            valid: false,
+            setup_mode: false,
+            problems: Vec::new(),
+            fingerprint: None,
+        };
+        let text = render_doctor(&status, &[], "/tmp/config.yaml");
+        assert!(text.starts_with("✗ 配置不可用"), "{text}");
+        assert!(text.contains("没有给出具体问题"), "{text}");
+        assert!(!text.contains("共 0 个问题"), "{text}");
+    }
+
     #[test]
     fn render_list_text_shows_sections_tree_flags_and_problem_marker() {
         let mut secrets = HashMap::new();
@@ -3341,6 +3487,143 @@ mod tests {
         assert!(text.contains("必填"), "{text}");
     }
 
+    /// 把目录里的 `providers[].api_key` 改成"带默认值的密文"（对抗性 fixture：真实声明没有默认值）。
+    fn catalog_with_secret_default(secret_default: &str) -> SettingNode {
+        let mut root = catalog();
+        let provider = root.children[0]
+            .element
+            .as_mut()
+            .expect("providers 元素")
+            .as_mut();
+        let key = provider
+            .children
+            .iter_mut()
+            .find(|child| child.key == "api_key")
+            .expect("api_key");
+        key.default = Some(json!(secret_default));
+        key.has_default = true;
+        root
+    }
+
+    /// N2：`get --json` 的 `node` 是完整目录节点——密文节点的 `default` 也必须置空，
+    /// hint 之外的任何密钥形态都不许从这条路径流出去。
+    #[tokio::test]
+    async fn get_json_never_carries_a_secret_default() {
+        const SECRET_DEFAULT: &str = "sk-default-should-not-leak";
+        let backend = FakeBackend::healthy(catalog_with_secret_default(SECRET_DEFAULT), document());
+        let (code, stdout, stderr) = run_cmd(
+            &backend,
+            ConfigCommand::Get {
+                path: "providers[0].api_key".to_string(),
+            },
+            true,
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+        assert!(!stdout.contains(SECRET_DEFAULT), "默认值泄露：{stdout}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("json");
+        assert_eq!(parsed["default"], Value::Null, "顶层 default 必须为空");
+        assert_eq!(
+            parsed["node"]["default"],
+            Value::Null,
+            "node.default 必须为空"
+        );
+        assert_eq!(parsed["node"]["has_default"], json!(true));
+
+        // 同一份目录里的非密文字段不受影响（默认值照常展示）。
+        let (_, stdout, _) = run_cmd(
+            &backend,
+            ConfigCommand::Get {
+                path: "gateway.port".to_string(),
+            },
+            true,
+        )
+        .await;
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("json");
+        assert_eq!(parsed["node"]["default"], json!(32523));
+    }
+
+    /// N4：`get --json` 是编排器消费的最富形状（含完整 `node`）——钉住字段名与递归结构。
+    #[tokio::test]
+    async fn get_json_shape_is_stable_and_node_is_recursive() {
+        let backend = FakeBackend::healthy(catalog(), document());
+        let (code, stdout, stderr) = run_cmd(
+            &backend,
+            ConfigCommand::Get {
+                path: "providers[0]".to_string(),
+            },
+            true,
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("get --json parses");
+        for field in [
+            "path",
+            "kind",
+            "apply",
+            "value",
+            "overridden",
+            "has_default",
+            "default",
+            "secret",
+            "problem",
+            "node",
+        ] {
+            assert!(parsed.get(field).is_some(), "缺少字段 {field}：{parsed}");
+        }
+        assert_eq!(parsed["path"], json!("providers[0]"));
+        assert_eq!(parsed["kind"], json!("object"));
+        assert_eq!(parsed["node"]["key"], json!("[]"));
+        assert_eq!(parsed["node"]["path"], json!("providers[]"));
+        // node 递归：子节点带自己的 path/kind/约束。
+        let children = parsed["node"]["children"].as_array().expect("children");
+        let api_key = children
+            .iter()
+            .find(|child| child["key"] == json!("api_key"))
+            .expect("api_key 子节点");
+        assert_eq!(api_key["kind"], json!("secret"));
+        assert_eq!(api_key["secret"], json!(true));
+        assert_eq!(api_key["path"], json!("providers[].api_key"));
+        // 列表元素模板也递归带出来（union variants）。
+        let models = children
+            .iter()
+            .find(|child| child["key"] == json!("models"))
+            .expect("models 子节点");
+        assert_eq!(models["element"], Value::Null);
+        assert_eq!(
+            models["variants"].as_array().expect("variants").len(),
+            2,
+            "union 元素的两个形态都要在 node 里"
+        );
+    }
+
+    /// N7：单项 `get` 的值被截断时必须标注（完整值在 `--json` 里）。
+    #[test]
+    fn get_text_marks_truncated_values() {
+        let root = catalog();
+        let mut doc = document();
+        let long = "x".repeat(VALUE_MAX_CHARS + 20);
+        doc["providers"][0]["base_url"] = json!(long);
+        let node = resolve_node(&root, &doc, &steps("providers[0].base_url")).unwrap();
+        let output = GetOutput::new("providers[0].base_url", node, Some(json!(long)), None, None);
+        let text = output.render_text();
+        assert!(text.contains("..."), "{text}");
+        assert!(text.contains("已截断，完整值用 --json 取"), "{text}");
+        // 短值不加标注。
+        let output = GetOutput::new(
+            "providers[0].base_url",
+            node,
+            Some(json!("https://example.com/v1")),
+            None,
+            None,
+        );
+        assert!(
+            !output.render_text().contains("已截断"),
+            "{}",
+            output.render_text()
+        );
+    }
+
     #[test]
     fn render_write_text_ok_includes_changed_restart_reload_and_backup() {
         let response = SettingsSetResponse {
@@ -3468,6 +3751,35 @@ mod tests {
         assert!(stderr.contains("早于 Setting API"), "{stderr}");
     }
 
+    /// N1：503 + `error=="setup_mode"`（协议增补 P4）必须给出修复模式提示，而不是裸 503 文本。
+    #[test]
+    fn setup_mode_503_is_reported_with_a_hint() {
+        let error = ApiClientError::Api {
+            status: 503,
+            detail: "setup mode".to_string(),
+            body: Some(wing_api_client::models::ErrorResponse {
+                error: "setup_mode".to_string(),
+                detail: Some("configuration is invalid".to_string()),
+                session_id: None,
+                uuid: None,
+            }),
+        };
+        let (code, message) = api_failure(&error, "http://127.0.0.1:32523", "读取配置状态失败");
+        assert_eq!(code, 1, "503 是协议级失败，不是「不可达」");
+        assert!(message.contains("修复模式"), "{message}");
+        assert!(message.contains("loopback"), "{message}");
+
+        // 普通 503（没有 setup_mode 错误码）不带这条提示。
+        let plain = ApiClientError::Api {
+            status: 503,
+            detail: "service unavailable".to_string(),
+            body: None,
+        };
+        let (code, message) = api_failure(&plain, "http://127.0.0.1:32523", "读取配置状态失败");
+        assert_eq!(code, 1);
+        assert!(!message.contains("修复模式"), "{message}");
+    }
+
     #[tokio::test]
     async fn list_renders_tree_and_json_round_trips() {
         let backend = FakeBackend::healthy(catalog(), document());
@@ -3553,6 +3865,218 @@ mod tests {
         .await;
         assert_eq!(code, 4);
         assert!(stderr.contains("路径不在设置目录中"), "{stderr}");
+    }
+
+    /// AD8（review r1 的 B1）：六个子命令 × 带 `config.` 前缀 / 不带前缀
+    /// → 落到**同一个文档位置**、回显**同一条规范路径**、绝不出现名为 `config` 的伪键。
+    #[tokio::test]
+    async fn root_prefix_is_normalized_across_every_subcommand() {
+        let cases: Vec<(&str, ConfigCommand, ConfigCommand)> = vec![
+            (
+                "set",
+                ConfigCommand::Set {
+                    path: "config.gateway.port".to_string(),
+                    value: Some("9999".to_string()),
+                    json_value: None,
+                    force: false,
+                },
+                ConfigCommand::Set {
+                    path: "gateway.port".to_string(),
+                    value: Some("9999".to_string()),
+                    json_value: None,
+                    force: false,
+                },
+            ),
+            (
+                "get",
+                ConfigCommand::Get {
+                    path: "config.gateway.port".to_string(),
+                },
+                ConfigCommand::Get {
+                    path: "gateway.port".to_string(),
+                },
+            ),
+            (
+                "unset",
+                ConfigCommand::Unset {
+                    path: "config.gateway.port".to_string(),
+                    force: false,
+                },
+                ConfigCommand::Unset {
+                    path: "gateway.port".to_string(),
+                    force: false,
+                },
+            ),
+            (
+                "add",
+                ConfigCommand::Add {
+                    path: "config.tools".to_string(),
+                    value: Some("read".to_string()),
+                    json_value: None,
+                    variant: None,
+                    force: false,
+                },
+                ConfigCommand::Add {
+                    path: "tools".to_string(),
+                    value: Some("read".to_string()),
+                    json_value: None,
+                    variant: None,
+                    force: false,
+                },
+            ),
+            (
+                "remove",
+                ConfigCommand::Remove {
+                    path: "config.tools[0]".to_string(),
+                    force: false,
+                },
+                ConfigCommand::Remove {
+                    path: "tools[0]".to_string(),
+                    force: false,
+                },
+            ),
+            (
+                "move",
+                ConfigCommand::Move {
+                    path: "config.providers[0].models[1]".to_string(),
+                    delta: -1,
+                    force: false,
+                },
+                ConfigCommand::Move {
+                    path: "providers[0].models[1]".to_string(),
+                    delta: -1,
+                    force: false,
+                },
+            ),
+        ];
+
+        for (name, prefixed, plain) in cases {
+            let with_prefix = FakeBackend::healthy(catalog(), document());
+            let without = FakeBackend::healthy(catalog(), document());
+            let (code_a, stdout_a, stderr_a) = run_cmd(&with_prefix, prefixed, false).await;
+            let (code_b, stdout_b, stderr_b) = run_cmd(&without, plain, false).await;
+
+            assert_eq!(code_a, code_b, "{name}: 退出码必须一致");
+            assert_eq!(stdout_a, stdout_b, "{name}: 回显必须用规范路径");
+            assert_eq!(stderr_a, stderr_b, "{name}: stderr 必须一致");
+
+            let documents_a = with_prefix.requests();
+            let documents_b = without.requests();
+            assert_eq!(
+                documents_a.len(),
+                documents_b.len(),
+                "{name}: 提交次数必须一致"
+            );
+            if let (Some(a), Some(b)) = (documents_a.last(), documents_b.last()) {
+                assert_eq!(
+                    a.document, b.document,
+                    "{name}: 两种拼写必须落到同一个文档位置"
+                );
+                assert!(
+                    a.document.get("config").is_none(),
+                    "{name}: 不许出现名为 config 的伪键：{}",
+                    a.document
+                );
+            }
+            assert!(
+                !stdout_a.contains("config.gateway")
+                    && !stdout_a.contains("config.tools")
+                    && !stdout_a.contains("config.providers"),
+                "{name}: 回显里不该出现带前缀的路径：{stdout_a}"
+            );
+        }
+    }
+
+    /// 只敲根名（或路径解析后为空）→ 用法错误 4，并列出可用顶层节名。
+    #[tokio::test]
+    async fn root_only_path_is_a_usage_error_listing_the_top_level_sections() {
+        let backend = FakeBackend::healthy(catalog(), document());
+        // `config` 规范化后为空 → 报"路径为空"并列出顶层节名；`config.` 是文法错（空段）→ 同样是 4。
+        for (path, needle) in [("config", "路径为空"), ("config.", "路径文法非法")] {
+            let (code, stdout, stderr) = run_cmd(
+                &backend,
+                ConfigCommand::Get {
+                    path: path.to_string(),
+                },
+                false,
+            )
+            .await;
+            assert_eq!(code, 4, "{path}: stderr={stderr}");
+            assert!(stdout.is_empty(), "{path}: {stdout}");
+            assert!(stderr.contains(needle), "{path}: {stderr}");
+            if path == "config" {
+                assert!(
+                    stderr.contains("providers"),
+                    "{path}: 要列出顶层节名 {stderr}"
+                );
+            }
+        }
+        // 写命令同理（规范化后为空 → 4，不是静默成功）。
+        let (code, _, stderr) = run_cmd(
+            &backend,
+            ConfigCommand::Set {
+                path: "config".to_string(),
+                value: Some("1".to_string()),
+                json_value: None,
+                force: false,
+            },
+            false,
+        )
+        .await;
+        assert_eq!(code, 4);
+        assert!(stderr.contains("路径为空"), "{stderr}");
+        assert!(backend.requests().is_empty(), "不许发保存请求");
+    }
+
+    /// S1 / AD9：带前缀（以及非规范拼写的下标）查密文字段，hint 必须查得到。
+    #[tokio::test]
+    async fn secrets_lookup_uses_the_canonical_path() {
+        let mut backend = FakeBackend::healthy(catalog(), document());
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "providers[0].api_key".to_string(),
+            SecretState {
+                state: SecretPresence::Set,
+                hint: Some("1234".to_string()),
+            },
+        );
+        if let Ok(response) = backend.get.as_mut() {
+            response.secrets = secrets;
+        }
+
+        for path in [
+            "providers[0].api_key",
+            "config.providers[0].api_key",
+            "providers[00].api_key",
+        ] {
+            let (code, stdout, stderr) = run_cmd(
+                &backend,
+                ConfigCommand::Get {
+                    path: path.to_string(),
+                },
+                false,
+            )
+            .await;
+            assert_eq!(code, 0, "{path}: {stderr}");
+            assert!(stdout.contains("•••••••• 1234"), "{path}: {stdout}");
+            assert!(
+                stdout.starts_with("providers[0].api_key ="),
+                "{path}: 回显必须是规范路径：{stdout}"
+            );
+
+            let (_, stdout, _) = run_cmd(
+                &backend,
+                ConfigCommand::Get {
+                    path: path.to_string(),
+                },
+                true,
+            )
+            .await;
+            let parsed: Value = serde_json::from_str(stdout.trim()).expect("json");
+            assert_eq!(parsed["path"], json!("providers[0].api_key"), "{path}");
+            assert_eq!(parsed["secret"]["state"], json!("set"), "{path}");
+            assert_eq!(parsed["secret"]["hint"], json!("1234"), "{path}");
+        }
     }
 
     #[tokio::test]
@@ -4087,5 +4611,83 @@ mod tests {
 
         let (_, command) = parse(&["wing", "config", "path"]);
         assert!(matches!(command, ConfigCommand::Path));
+    }
+
+    /// S2（AD9）：`set` / `add` 的位置参数收负数——clap 默认把 `-1` 当旗标（退出码 2，
+    /// 与"网关不可达"同码），必须在解析层就放行，让值走到强制转换表。
+    #[test]
+    fn clap_parses_negative_values_for_set_and_add() {
+        let (_, command) = parse(&["wing", "config", "set", "gateway.port", "-1"]);
+        match command {
+            ConfigCommand::Set { value, force, .. } => {
+                assert_eq!(value.as_deref(), Some("-1"));
+                assert!(!force);
+            }
+            other => panic!("expected set, got {other:?}"),
+        }
+        let (_, command) = parse(&["wing", "config", "set", "images.quality", "-1.5"]);
+        match command {
+            ConfigCommand::Set { value, .. } => assert_eq!(value.as_deref(), Some("-1.5")),
+            other => panic!("expected set, got {other:?}"),
+        }
+        let (_, command) = parse(&["wing", "config", "add", "tools", "-1"]);
+        match command {
+            ConfigCommand::Add { value, .. } => assert_eq!(value.as_deref(), Some("-1")),
+            other => panic!("expected add, got {other:?}"),
+        }
+        // 放行负数不能把旗标也吞成值：`--force` / `--json-value` 必须仍是旗标。
+        let (_, command) = parse(&["wing", "config", "set", "gateway.port", "--force"]);
+        match command {
+            ConfigCommand::Set { value, force, .. } => {
+                assert_eq!(value, None, "`--force` 不能被当成值");
+                assert!(force);
+            }
+            other => panic!("expected set, got {other:?}"),
+        }
+        let (_, command) = parse(&["wing", "config", "set", "x.y", "-1", "--force"]);
+        match command {
+            ConfigCommand::Set { value, force, .. } => {
+                assert_eq!(value.as_deref(), Some("-1"));
+                assert!(force);
+            }
+            other => panic!("expected set, got {other:?}"),
+        }
+    }
+
+    /// N6：`--force` 对五个写命令都要能解析（冲突恢复动作是同构的），`add --json-value` 同理。
+    #[test]
+    fn clap_parses_force_on_every_writer_and_json_value_on_add() {
+        let (_, command) = parse(&["wing", "config", "unset", "gateway.port", "--force"]);
+        assert!(matches!(command, ConfigCommand::Unset { force: true, .. }));
+        let (_, command) = parse(&["wing", "config", "remove", "tools[0]", "--force"]);
+        assert!(matches!(command, ConfigCommand::Remove { force: true, .. }));
+        let (_, command) = parse(&["wing", "config", "move", "tools[0]", "1", "--force"]);
+        assert!(matches!(command, ConfigCommand::Move { force: true, .. }));
+        let (_, command) = parse(&["wing", "config", "add", "tools", "x", "--force"]);
+        assert!(matches!(command, ConfigCommand::Add { force: true, .. }));
+
+        let (_, command) = parse(&[
+            "wing",
+            "config",
+            "add",
+            "providers[0].models",
+            "--json-value",
+            r#"{"id":"ds-x"}"#,
+            "--variant",
+            "object",
+        ]);
+        match command {
+            ConfigCommand::Add {
+                value,
+                json_value,
+                variant,
+                ..
+            } => {
+                assert_eq!(value, None);
+                assert_eq!(json_value.as_deref(), Some(r#"{"id":"ds-x"}"#));
+                assert_eq!(variant.as_deref(), Some("object"));
+            }
+            other => panic!("expected add, got {other:?}"),
+        }
     }
 }
