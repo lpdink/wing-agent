@@ -36,6 +36,7 @@ use std::time::Instant;
 use anyhow::Result;
 use anyhow::anyhow;
 use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -303,13 +304,11 @@ where
             true,
         )?;
 
-        // 事件源断了（真实环境只在 fatal 时）——当作退出，不空转。
-        let Some(TermEvent::Key(key)) = events.next_event().await else {
-            return Ok(SetupOutcome::Quit);
+        let key = match next_setup_input(terminal, events).await? {
+            SetupInput::Key(key) => key,
+            SetupInput::StreamClosed => return Ok(SetupOutcome::Quit),
+            SetupInput::Handled => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
 
         // Ctrl+C 永远归循环：双击退出（第一击只提示）。照 `App::handle_quit_key` 的口径。
         if crate::tui::is_quit_key(&key) {
@@ -323,13 +322,7 @@ where
         }
         ctrl_c_at = None;
 
-        // `q` 也是退出——只在面板不在编辑 / 搜索 / 确认态时（编辑中的 `q` 是输入字符）。
-        if key.code == KeyCode::Char('q')
-            && key.modifiers.is_empty()
-            && panel.edit_state().is_none()
-            && panel.prompt().is_none()
-            && panel.search_query().is_none()
-        {
+        if q_is_quit(&panel, &key) {
             return Ok(SetupOutcome::Quit);
         }
 
@@ -375,8 +368,12 @@ where
                     return Ok(SetupOutcome::Ready);
                 }
             }
-            // setup 里没有可重启的会话/连接，网关此刻正服务着这条修复请求；忽略（design A4）。
-            SettingsAction::RestartGateway => {}
+            // setup 里没有可重启的会话/连接，网关此刻正服务着这条修复请求；忽略——
+            // 但键位栏（`restart_required` 非空时 07 会挂出"Ctrl+R 立即重启"）会让人以为
+            // 按下去有反应，所以给一句回执（N4）：重启要等进了正常 TUI 再做。
+            SettingsAction::RestartGateway => {
+                note = Note::hint("重启网关：进入 TUI 后按 Ctrl+R（setup 里不改网关进程）");
+            }
             // 面板是 setup 唯一的 UI：关掉它 = 退出（design A5）。
             SettingsAction::Close { .. } => return Ok(SetupOutcome::Quit),
             SettingsAction::Reload => {
@@ -398,7 +395,61 @@ where
     }
 }
 
+/// 循环关心的三种输入（[`next_setup_input`] 的产物）。
+enum SetupInput {
+    /// 该转给面板的按键。
+    Key(KeyEvent),
+    /// 事件源断了（真实环境只在 fatal 时）——循环当退出，不空转。
+    StreamClosed,
+    /// 已经在归一里处理掉了（Resize 已重画；鼠标 / tick 不消费）——继续循环。
+    Handled,
+}
+
+/// 取下一个事件并归一。
+///
+/// `Resize` **不是**退出信号：用户在 setup 阶段调整窗口不该把向导连同未保存的编辑
+/// 一起丢掉。布局由下一帧自动跟随（ratatui 的 `autoresize` 看后端尺寸），这里额外
+/// 强制整屏重画一次——终端被 out-of-band 扰动过，diff 残影要靠清屏抹掉（与 `app`
+/// 主循环 `Resize → needs_full_redraw` 同一条处置）。清屏失败只记日志：画面全在下一帧
+/// 重画，不该被一次终端查询打死。
+async fn next_setup_input<B: Backend, E: SetupEvents>(
+    terminal: &mut Terminal<B>,
+    events: &mut E,
+) -> Result<SetupInput> {
+    match events.next_event().await {
+        Some(TermEvent::Key(key)) if key.kind == KeyEventKind::Press => Ok(SetupInput::Key(key)),
+        // 其余的 `Key`（Release / Repeat）、鼠标、粘贴、focus、tick：setup 不消费。
+        Some(TermEvent::Resize(_, _)) => {
+            if let Err(e) = terminal.clear() {
+                tracing::warn!("terminal clear after resize failed: {e}");
+            }
+            Ok(SetupInput::Handled)
+        }
+        Some(_) => Ok(SetupInput::Handled),
+        None => Ok(SetupInput::StreamClosed),
+    }
+}
+
+/// `q` 算不算"退出"的意图：只在面板**没有任何开着的东西**时才算。
+///
+/// 编辑中的 `q` 是输入字符（必须给编辑器）；帮助 / 枚举选择 / 搜索 / 确认态里的 `q`
+/// 同理，都归面板 —— 按了没反应也比把向导关掉强。
+fn q_is_quit(panel: &SettingsPanel, key: &KeyEvent) -> bool {
+    if key.code != KeyCode::Char('q') || !key.modifiers.is_empty() {
+        return false;
+    }
+    let panel_busy = panel.edit_state().is_some()
+        || panel.prompt().is_some()
+        || panel.search_query().is_some()
+        || panel.choices().is_some()
+        || panel.view() == View::Help;
+    !panel_busy
+}
+
 /// 一次 `s`：两半各自执行 + 合并回执；返回 `(状态行, 是否就绪)`。
+///
+/// 回执是**一行**（D5），但两半的结论谁都不能被谁盖掉：TUI 写入失败、Gateway 失败 /
+/// 未就绪 / 后端 warnings（AD13）都进同一个 `parts`，按发生顺序拼起来。
 async fn save_once<H: SetupBackend>(
     http: &H,
     panel: &mut SettingsPanel,
@@ -408,15 +459,18 @@ async fn save_once<H: SetupBackend>(
     gateway_dirty: bool,
     interface_dirty: bool,
 ) -> (Note, bool) {
+    /// 一句话里最多拼几条 —— 再多也读不过来（且会被面板宽度裁掉）。
+    const MAX_PARTS: usize = 3;
+    let mut parts: Vec<String> = Vec::new();
+
     // Interface 半边（本地原子写；一键保存两边，D10——两边各自成败）。
     let mut interface_ok: Option<bool> = None;
-    let mut note: Option<Note> = None;
     if interface_dirty {
         match http.write_interface(&interface) {
             Ok(_) => interface_ok = Some(true),
             Err(e) => {
                 interface_ok = Some(false);
-                note = Some(Note::error(format!("TUI 配置写入失败：{e}")));
+                parts.push(format!("TUI 配置写入失败：{e}"));
             }
         }
     }
@@ -437,17 +491,30 @@ async fn save_once<H: SetupBackend>(
                     && (response.setup_mode_exited
                         || matches!(http.status().await, Ok(status) if status.valid));
                 if !response.ok {
-                    note = Some(Note::error(format!(
+                    parts.push(format!(
                         "设置未保存：{} 个问题，见问题清单",
                         response.problems.len()
-                    )));
+                    ));
                 } else if !ready {
                     // 文件写了但网关没就绪（A12）：绝不放行到"没有会话能力"的启动链。
-                    note = Some(Note::error("保存成功，但网关仍未就绪 — 修完问题再按 s"));
+                    parts.push("保存成功，但网关仍未就绪 — 修完问题再按 s".into());
+                }
+                // 后端的非致命说明（AD13："旧密钥没有保留"之类）必须让用户看见 ——
+                // 回执就一行，但它是这一屏唯一的出口。
+                for warning in &response.warnings {
+                    parts.push(format!("⚠ {warning}"));
+                }
+                // 要重启才生效的键（AD1 的 Ctrl+R 在 setup 里是 no-op）：告诉用户去哪儿按。
+                if !response.restart_required.is_empty() {
+                    // 动作在前（一行会被 CJK 宽度裁掉尾巴）：先在 setup 里说清"去哪儿按"。
+                    parts.push(format!(
+                        "需重启网关（进 TUI 后 Ctrl+R）：{}",
+                        response.restart_required.join("、")
+                    ));
                 }
                 gateway_saved = Some(response);
             }
-            Err(e) => note = Some(Note::error(format!("保存失败：{e}"))),
+            Err(e) => parts.push(format!("保存失败：{e}")),
         }
     }
 
@@ -459,10 +526,26 @@ async fn save_once<H: SetupBackend>(
         });
     }
 
+    let caveats = if parts.len() > MAX_PARTS {
+        parts.truncate(MAX_PARTS);
+        parts.join(" · ") + " …"
+    } else {
+        parts.join(" · ")
+    };
+
     if ready {
-        return (Note::ok("✓ 配置就绪，正在启动…"), true);
+        // 就绪 + 有要交代的事：把交代缀在就绪句后面（绝不静默吞掉 —— N4）。
+        let text = if caveats.is_empty() {
+            "✓ 配置就绪，正在启动…".to_string()
+        } else {
+            format!("✓ 配置就绪，正在启动…（{caveats}）")
+        };
+        return (Note::ok(text), true);
     }
-    (note.unwrap_or_else(|| Note::ok("设置已保存")), false)
+    if caveats.is_empty() {
+        return (Note::ok("设置已保存"), false);
+    }
+    (Note::error(caveats), false)
 }
 
 // ===========================================================================
@@ -574,10 +657,13 @@ fn draw_frame<B: Backend>(
     let palette = ThemePalette::from_config(&config.colors);
     terminal
         .draw(|frame| {
-            let (backplate, panel_area) = split_setup_areas(frame.area());
+            let (backplate, panel_area, note_area) = split_setup_areas(frame.area());
             if let Some(backplate) = backplate {
-                draw_backplate(frame, backplate, &palette, note);
+                draw_backplate(frame, backplate, &palette);
             }
+            // 状态行**恒有**一行：它是唯一会说话的地方（保存回执 / 就绪 / Ctrl+C 提示），
+            // 小终端里也不该整条消失。
+            draw_note(frame, note_area, &palette, note);
             if panel_open {
                 // 08 的契约：每帧同步可见行数，再 Clear + 整块 render（同 10 的落点）。
                 panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
@@ -593,25 +679,56 @@ fn draw_frame<B: Backend>(
     Ok(())
 }
 
-/// 背板（上 14 行）与面板（其余）的切分；高度不够时只有面板。
-fn split_setup_areas(area: Rect) -> (Option<Rect>, Rect) {
-    if area.height < BACKPLATE_MIN_HEIGHT || area.width < BACKPLATE_MIN_WIDTH {
-        return (None, area);
+/// 背板（上 14 行）、面板（其余）与状态行（恒有）的切分。
+///
+/// 状态行是**唯一**会说话的地方：保存回执、就绪、Ctrl+C 提示都在那里 —— 放得下时它是
+/// 背板的最后一行，放不下时（窄 / 矮）就从面板手里拿一行，绝不被整条丢掉。背板（海鸥 +
+/// wordmark）纯粹是门面，空间不够时先让它退场。
+fn split_setup_areas(area: Rect) -> (Option<Rect>, Rect, Rect) {
+    // 一行的状态行（高度 0 的终端里退化为 0 行）。
+    let one_line = Rect {
+        y: area.bottom().saturating_sub(1),
+        height: area.height.min(1),
+        ..area
+    };
+    if area.height >= BACKPLATE_MIN_HEIGHT && area.width >= BACKPLATE_MIN_WIDTH {
+        let backplate = Rect {
+            height: BACKPLATE_ROWS,
+            ..area
+        };
+        let panel = Rect {
+            y: area.y + BACKPLATE_ROWS,
+            height: area.height - BACKPLATE_ROWS,
+            ..area
+        };
+        // 背板里状态行是它的最后一行（`draw_backplate` 画海鸥与 wordmark，状态行照旧）。
+        let note = Rect {
+            y: area.y + BACKPLATE_ROWS - 1,
+            height: 1,
+            ..area
+        };
+        (Some(backplate), panel, note)
+    } else {
+        let panel = Rect {
+            height: area.height.saturating_sub(one_line.height),
+            ..area
+        };
+        (None, panel, one_line)
     }
-    let backplate = Rect {
-        height: BACKPLATE_ROWS,
-        ..area
-    };
-    let panel = Rect {
-        y: area.y + BACKPLATE_ROWS,
-        height: area.height - BACKPLATE_ROWS,
-        ..area
-    };
-    (Some(backplate), panel)
 }
 
-/// 背板：海鸥 + wordmark 居中，状态行压在最后一行。
-fn draw_backplate(frame: &mut Frame, area: Rect, palette: &ThemePalette, note: &Note) {
+/// 状态行：一句话 + 语气，居中压在给定的一行里。
+fn draw_note(frame: &mut Frame, area: Rect, palette: &ThemePalette, note: &Note) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let line = Line::from(Span::styled(note.text.clone(), note.style(palette)));
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+}
+
+/// 背板：海鸥 + wordmark 居中（状态行由 `draw_note` 单独画）。
+fn draw_backplate(frame: &mut Frame, area: Rect, palette: &ThemePalette) {
     frame.render_widget(Clear, area);
     let accent = to_rgb(palette.accent);
     let light = is_light_theme(to_rgb(palette.text));
@@ -640,13 +757,6 @@ fn draw_backplate(frame: &mut Frame, area: Rect, palette: &ThemePalette, note: &
         let x = area.x + (area.width - art::WORDMARK_COLS as u16) / 2;
         draw_wordmark(frame, x, area.y, accent, light);
     }
-
-    // 状态行（背板最后一行，居中）：首屏提示 / 保存回执 / 就绪。
-    let line = Line::from(Span::styled(note.text.clone(), note.style(palette)));
-    frame.render_widget(
-        Paragraph::new(line).alignment(Alignment::Center),
-        Rect::new(area.x, area.bottom() - 1, area.width, 1),
-    );
 }
 
 /// 海鸥（站姿，定格）：与 `ui::welcome` 的待机帧同一份网格与留白，逐帧重画。
@@ -751,16 +861,24 @@ mod tests {
     //! bool"的极小目录 + 一份 Interface 的 `colors.preset` 枚举；后端与事件源都是
     //! 可注入的假实现（12 在 `cmd/config.rs` 的同一套做法），**不碰磁盘**。
 
+    use std::cell::Cell;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
+    use ratatui::backend::ClearType;
     use ratatui::backend::TestBackend;
+    use ratatui::backend::WindowSize;
+    use ratatui::buffer::Buffer;
+    use ratatui::buffer::Cell as BufferCell;
+    use ratatui::layout::Position;
     use ratatui::layout::Rect;
+    use ratatui::layout::Size;
     use ratatui::style::Color;
     use serde_json::json;
     use wing_api_client::models::ApplyScope;
@@ -866,7 +984,11 @@ mod tests {
         ];
         preset.has_default = true;
         preset.default = Some(json!("wing"));
-        let colors = object("colors", vec![preset]);
+        // 一个可自由输入的自由文本字段（`accent`）：`q` 守卫的测试要一个真编辑器。
+        let mut accent = node("accent", SettingKind::Str);
+        accent.nullable = true;
+        accent.example = Some("#f2c14e".into());
+        let colors = object("colors", vec![preset, accent]);
         let mut root = node("interface", SettingKind::Object);
         root.path = "interface".into();
         root.children = vec![with_paths(colors, "")];
@@ -937,6 +1059,8 @@ mod tests {
         status: SettingsStatusResponse,
         set: FakeSet,
         interface: Option<InterfaceSource>,
+        /// 让 Interface 半边的原子写失败（N4 的两半独立性测试）。
+        interface_write_fails: bool,
         sets: RefCell<Vec<SettingsSetRequest>>,
         written_interface: RefCell<Vec<Value>>,
     }
@@ -954,6 +1078,7 @@ mod tests {
                 },
                 set: FakeSet::Saved(saved_response(true, "fp-2", true, vec![])),
                 interface: None,
+                interface_write_fails: false,
                 sets: RefCell::new(Vec::new()),
                 written_interface: RefCell::new(Vec::new()),
             }
@@ -1001,6 +1126,12 @@ mod tests {
         }
 
         fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError> {
+            if self.interface_write_fails {
+                return Err(StoreError::Write {
+                    path: std::path::PathBuf::from("/home/u/.wing/tui/config.yaml"),
+                    source: std::io::Error::other("磁盘满了"),
+                });
+            }
             self.written_interface.borrow_mut().push(doc.clone());
             Ok(WriteOutcome {
                 path: std::path::PathBuf::from("/home/u/.wing/tui/config.yaml"),
@@ -1035,11 +1166,18 @@ mod tests {
     /// 所以最后一帧就是最后一个按键处理完的那一帧（断言"保存之后留下了什么"就靠它）。
     struct ScriptedEvents {
         queue: VecDeque<TermEvent>,
+        /// `Some` = 这条脚本的终端是 [`ResizableBackend`]：吐出 `Resize(w, h)` 之前
+        /// **先**把后端的自报尺寸换过去（真终端的顺序：终端先换尺寸，SIGWINCH 事件后到）。
+        size: Option<Rc<Cell<(u16, u16)>>>,
     }
 
     impl SetupEvents for ScriptedEvents {
         async fn next_event(&mut self) -> Option<TermEvent> {
-            self.queue.pop_front()
+            let event = self.queue.pop_front();
+            if let (Some(size), Some(TermEvent::Resize(width, height))) = (&self.size, &event) {
+                size.set((*width, *height));
+            }
+            event
         }
     }
 
@@ -1058,6 +1196,7 @@ mod tests {
     fn script(events: impl IntoIterator<Item = TermEvent>) -> ScriptedEvents {
         ScriptedEvents {
             queue: events.into_iter().collect(),
+            size: None,
         }
     }
 
@@ -1077,13 +1216,95 @@ mod tests {
         Terminal::new(TestBackend::new(120, 40)).expect("test terminal")
     }
 
+    /// 测试用后端：在 `TestBackend` 外套一层"尺寸可被外部改"的壳。
+    ///
+    /// 真终端的 resize 是**后端自报新尺寸**、ratatui 的 `autoresize` 据此重排 ——
+    /// `TestBackend` 建好之后尺寸写死，所以要复现"下一帧按新尺寸画"必须自己造这个壳。
+    struct ResizableBackend {
+        inner: RefCell<TestBackend>,
+        size: Rc<Cell<(u16, u16)>>,
+    }
+
+    impl ResizableBackend {
+        /// 返回后端与它的尺寸把手（测试改把手 = 真终端改窗口大小）。
+        fn new(width: u16, height: u16) -> (Self, Rc<Cell<(u16, u16)>>) {
+            let size = Rc::new(Cell::new((width, height)));
+            let backend = Self {
+                inner: RefCell::new(TestBackend::new(width, height)),
+                size: Rc::clone(&size),
+            };
+            (backend, size)
+        }
+
+        /// 当前屏幕缓冲（壳里那一块，clone 出来看）。
+        fn buffer(&self) -> Buffer {
+            self.inner.borrow().buffer().clone()
+        }
+    }
+
+    impl Backend for ResizableBackend {
+        type Error = core::convert::Infallible;
+
+        fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+        where
+            I: Iterator<Item = (u16, u16, &'a BufferCell)>,
+        {
+            self.inner.borrow_mut().draw(content)
+        }
+
+        fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+            self.inner.borrow_mut().hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> Result<(), Self::Error> {
+            self.inner.borrow_mut().show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+            self.inner.borrow_mut().get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(
+            &mut self,
+            position: P,
+        ) -> Result<(), Self::Error> {
+            self.inner.borrow_mut().set_cursor_position(position)
+        }
+
+        fn clear(&mut self) -> Result<(), Self::Error> {
+            self.inner.borrow_mut().clear()
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+            self.inner.borrow_mut().clear_region(clear_type)
+        }
+
+        /// 自报尺寸跟着把手走；变了就把内层缓冲一起 resize（真终端这一层由内核做）。
+        fn size(&self) -> Result<Size, Self::Error> {
+            let (width, height) = self.size.get();
+            let mut inner = self.inner.borrow_mut();
+            let current = inner.buffer().area;
+            if current.width != width || current.height != height {
+                inner.resize(width, height);
+            }
+            Ok(Size::new(width, height))
+        }
+
+        fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+            self.inner.borrow_mut().window_size()
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.borrow_mut().flush()
+        }
+    }
+
     /// 一屏文本（不含样式）。
     ///
     /// 双宽字符（CJK）在缓冲里占两格、第二格是 reset 出来的占位格：按**显示宽度**
     /// 跳格，否则会读出「每 个 汉 字 一 个 空 格」的假象（与 `ui/settings/tests.rs`
     /// 的 `row_text` 同一口径）。被 diff 跳过的占位格也正因此不会污染文本。
-    fn screen(terminal: &Terminal<TestBackend>) -> String {
-        let buffer = terminal.backend().buffer();
+    fn buffer_text(buffer: &Buffer) -> String {
         (buffer.area.y..buffer.area.bottom())
             .map(|y| {
                 let mut row = String::new();
@@ -1098,6 +1319,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        buffer_text(terminal.backend().buffer())
     }
 
     async fn run(
@@ -1278,6 +1503,164 @@ mod tests {
         let mut config = AppConfig::default();
         let (outcome, _) = run(&backend, &mut config, vec![key(KeyCode::Char('q'))]).await;
         assert!(matches!(outcome, SetupOutcome::Quit));
+    }
+
+    /// N1：编辑中的 `q` 必须是**输入字符**，不是退出。
+    ///
+    /// 判据落在"保存请求里有没有 `q`"上：守卫若丢了，`q` 会当场把循环关掉，
+    /// 后面的事件一个都消费不了、接口半边也永远不会写盘。
+    #[tokio::test]
+    async fn q_in_an_open_editor_is_typed_not_quit() {
+        let mut backend = FakeBackend::first_run();
+        backend.interface = Some(interface_source("wing"));
+        let mut events = vec![key(KeyCode::Char('/'))];
+        events.extend(text("accent"));
+        // 搜索命中 → 回车开编辑器 → 敲 `q` → 回车提交。
+        events.extend([
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('s')),
+        ]);
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+
+        assert!(matches!(outcome, SetupOutcome::Quit), "脚本耗尽 ⇒ 退出");
+        let written = backend.written_interface();
+        assert_eq!(written.len(), 1, "接口半边写盘了：\n{}", screen(&terminal));
+        assert_eq!(
+            written[0]["colors"]["accent"], "q",
+            "编辑器里的 `q` 应该是输入字符"
+        );
+    }
+
+    /// N1：枚举选择项视图开着时 `q` 也不该关向导（它属"面板开着的东西"）。
+    #[tokio::test]
+    async fn q_with_choices_open_is_not_quit() {
+        let mut backend = FakeBackend::first_run();
+        backend.interface = Some(interface_source("wing"));
+        let mut events = vec![key(KeyCode::Char('/'))];
+        events.extend(text("preset"));
+        // 命中 → 回车退出搜索 → 回车展开选择项 → `q`（不该退出）→ 下移一格选
+        // `terminal` → 回车落值 → 保存。
+        events.extend([
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('q')),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('s')),
+        ]);
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+
+        assert!(matches!(outcome, SetupOutcome::Quit), "脚本耗尽 ⇒ 退出");
+        let written = backend.written_interface();
+        assert_eq!(written.len(), 1, "接口半边写盘了：\n{}", screen(&terminal));
+        assert_eq!(written[0]["colors"]["preset"], "terminal");
+    }
+
+    /// N1：帮助页开着时 `q` 也不该关向导（`?` 打开 → `q` → Esc 返回 → 照常编辑保存）。
+    #[tokio::test]
+    async fn q_with_help_open_is_not_quit() {
+        let mut backend = FakeBackend::first_run();
+        backend.interface = Some(interface_source("wing"));
+        let mut events = vec![key(KeyCode::Char('?'))];
+        events.push(key(KeyCode::Char('q')));
+        events.push(key(KeyCode::Esc));
+        events.push(key(KeyCode::Char('/')));
+        events.extend(text("accent"));
+        events.extend([
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('x')),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('s')),
+        ]);
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+
+        assert!(matches!(outcome, SetupOutcome::Quit), "脚本耗尽 ⇒ 退出");
+        let written = backend.written_interface();
+        assert_eq!(
+            written.len(),
+            1,
+            "帮助页之后照常干活：\n{}",
+            screen(&terminal)
+        );
+        assert_eq!(written[0]["colors"]["accent"], "x");
+    }
+
+    /// N4：就绪的那次保存带着"TUI 配置没写进去"的交代 —— 不能被就绪句吞掉。
+    #[tokio::test]
+    async fn a_ready_save_keeps_the_interface_failure_in_the_receipt() {
+        let mut backend = FakeBackend::first_run();
+        backend.interface = Some(interface_source("wing"));
+        backend.interface_write_fails = true;
+        // 两边都弄脏：Interface 半边写盘会失败，Gateway 半边成功且就绪 —— 就绪句
+        // 必须把失败带上（N4.2）。
+        let mut events = vec![key(KeyCode::Char('/'))];
+        events.extend(text("preset"));
+        events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
+        events.push(key(KeyCode::Char('/')));
+        events.extend(text("enabled"));
+        events.extend([key(KeyCode::Enter), key(KeyCode::Enter)]);
+        events.push(key(KeyCode::Char('s')));
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+
+        assert_eq!(outcome, SetupOutcome::Ready, "网关半边就绪 ⇒ 进正常 TUI");
+        let screen = screen(&terminal);
+        assert!(screen.contains("✓ 配置就绪"), "{screen}");
+        assert!(
+            screen.contains("TUI 配置写入失败"),
+            "写入失败必须跟着就绪句一起露面：\n{screen}"
+        );
+    }
+
+    /// N4 + AD13：后端的 warnings 与"需重启才生效"都进回执（一行里拼得下）。
+    #[tokio::test]
+    async fn a_save_receipt_carries_the_backend_warnings() {
+        let mut backend = FakeBackend::first_run();
+        let mut response = saved_response(true, "fp-2", true, vec![]);
+        response.warnings = vec!["原配置文件无法解析，其中的密钥无法保留，请重新填写".into()];
+        response.restart_required = vec!["gateway.port".into()];
+        backend.set = FakeSet::Saved(response);
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
+
+        assert_eq!(outcome, SetupOutcome::Ready, "网关半边就绪 ⇒ 进正常 TUI");
+        let screen = screen(&terminal);
+        assert!(
+            screen.contains("密钥无法保留"),
+            "AD13 的警告要看得见：\n{screen}"
+        );
+        assert!(screen.contains("Ctrl+R"), "重启去向要说清楚：\n{screen}");
+    }
+
+    /// N4.1：两半**同时**失败时，两句话都不许被对方盖掉（一行里拼起来）。
+    #[tokio::test]
+    async fn a_double_failure_keeps_both_halves_in_the_receipt() {
+        let mut backend = FakeBackend::first_run();
+        backend.interface = Some(interface_source("wing"));
+        backend.interface_write_fails = true;
+        backend.set = FakeSet::Failed;
+        // 先把 Interface 半边弄脏（enum 右切），再把 Gateway 半边弄脏（bool 切换）。
+        let mut events = vec![key(KeyCode::Char('/'))];
+        events.extend(text("preset"));
+        events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
+        events.push(key(KeyCode::Char('/')));
+        events.extend(text("enabled"));
+        events.extend([key(KeyCode::Enter), key(KeyCode::Enter)]);
+        events.push(key(KeyCode::Char('s')));
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+
+        assert!(matches!(outcome, SetupOutcome::Quit));
+        let screen = screen(&terminal);
+        assert!(screen.contains("TUI 配置写入失败"), "{screen}");
+        assert!(screen.contains("保存失败"), "{screen}");
     }
 
     #[tokio::test]
@@ -1535,15 +1918,104 @@ mod tests {
 
     #[test]
     fn layout_ladder_drops_the_backplate_on_short_terminals() {
-        let (backplate, panel) = split_setup_areas(Rect::new(0, 0, 120, 40));
+        let (backplate, panel, note) = split_setup_areas(Rect::new(0, 0, 120, 40));
         let backplate = backplate.expect("40 行放得下背板");
         assert_eq!(backplate.height, BACKPLATE_ROWS);
         assert_eq!(panel.y, BACKPLATE_ROWS);
         assert_eq!(panel.height, 40 - BACKPLATE_ROWS);
+        // 状态行是背板的最后一行。
+        assert_eq!(note, Rect::new(0, BACKPLATE_ROWS - 1, 120, 1));
 
-        // 24 行终端：背板让位，面板全屏。
-        let (backplate, panel) = split_setup_areas(Rect::new(0, 0, 80, 24));
+        // 24 行终端：背板让位，面板拿掉一行留给状态行（**状态行不消失** —— N3）。
+        let (backplate, panel, note) = split_setup_areas(Rect::new(0, 0, 80, 24));
         assert!(backplate.is_none());
-        assert_eq!(panel, Rect::new(0, 0, 80, 24));
+        assert_eq!(note, Rect::new(0, 23, 80, 1));
+        assert_eq!(panel, Rect::new(0, 0, 80, 23));
+
+        // 窄也一样（宽度掉到背板阈值以下）：面板 + 状态行。
+        let (backplate, panel, note) = split_setup_areas(Rect::new(0, 0, 30, 40));
+        assert!(backplate.is_none());
+        assert_eq!(note, Rect::new(0, 39, 30, 1));
+        assert_eq!(panel.height, 39);
+
+        // 退化到 1 行 / 0 行也不 panic。
+        let (_, panel, note) = split_setup_areas(Rect::new(0, 0, 20, 1));
+        assert_eq!((panel.height, note.height), (0, 1));
+        let (_, panel, note) = split_setup_areas(Rect::new(0, 0, 20, 0));
+        assert_eq!((panel.height, note.height), (0, 0));
+    }
+
+    /// S1：`Resize` 必须被当成"重排 + 重画"，不是退出 —— 用户在 setup 阶段拉窗口
+    /// 不能把向导连同未保存的编辑一起丢掉。
+    ///
+    /// 三个断言：(a) 循环没退出（最后的 `s` 还被执行了、结果是 `Ready`）；
+    /// (b) 下一帧按**新尺寸**画（80×24 < 背板阈值 ⇒ 背板消失，而状态行还在）；
+    /// (c) 未保存的编辑还在（保存请求里带着 resize 之前敲进去的 `gateway.enabled = true`）。
+    #[tokio::test]
+    async fn a_resize_event_repaints_at_the_new_size_and_keeps_the_edit() {
+        let backend = FakeBackend::first_run();
+        let mut config = AppConfig::default();
+        let (mut terminal, size) = {
+            let (backend, size) = ResizableBackend::new(120, 40);
+            (Terminal::new(backend).expect("test terminal"), size)
+        };
+
+        // 编辑（未保存）：搜到 `enabled` 再回车切换成 true。
+        let mut events = vec![key(KeyCode::Char('/'))];
+        events.extend(text("enabled"));
+        events.extend([key(KeyCode::Enter), key(KeyCode::Enter)]);
+        // 拉窗口到 80×24（真终端顺序：后端先自报新尺寸，事件后到），然后保存。
+        events.push(TermEvent::Resize(80, 24));
+        events.push(key(KeyCode::Char('s')));
+
+        let mut events = ScriptedEvents {
+            queue: events.into_iter().collect(),
+            size: Some(Rc::clone(&size)),
+        };
+        let outcome = run_setup_tui_with(
+            &mut terminal,
+            &backend,
+            &mut config,
+            &endpoint(),
+            &mut events,
+        )
+        .await
+        .expect("setup loop");
+
+        // (a) 没退出：`s` 被处理了，而且真的就绪（Resize 若被当成 Quit，后面的事件一个都不会消费）。
+        assert_eq!(outcome, SetupOutcome::Ready);
+        // (c) 编辑活着：resize 之前切的那一刀出现在了保存请求里。
+        assert_eq!(
+            backend.sets()[0].document,
+            json!({"gateway": {"enabled": true}})
+        );
+
+        // (b) 下一帧按新尺寸画：80×24 ⇒ 背板（海鸥 / wordmark）让位，状态行还在。
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.area, Rect::new(0, 0, 80, 24), "缓冲跟着新尺寸");
+        let screen = buffer_text(&buffer);
+        assert!(
+            !screen.contains("首次运行"),
+            "24 行里不该还有背板：\n{screen}"
+        );
+        assert!(screen.contains("✓ 配置就绪"), "状态行要看得见：\n{screen}");
+    }
+
+    /// S1 的最小复现（审查者的脚本）：`[Resize, ctrl_c]` —— Resize 之后按键仍被处理，
+    /// 所以第一击 Ctrl+C 的提示必须出现在终帧上。
+    #[tokio::test]
+    async fn a_resize_event_does_not_swallow_the_next_key() {
+        let backend = FakeBackend::first_run();
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(
+            &backend,
+            &mut config,
+            vec![TermEvent::Resize(100, 30), ctrl_c()],
+        )
+        .await;
+
+        assert!(matches!(outcome, SetupOutcome::Quit));
+        let screen = screen(&terminal);
+        assert!(screen.contains("再按一次 Ctrl+C 退出"), "{screen}");
     }
 }
