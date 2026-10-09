@@ -84,19 +84,26 @@ def main() -> None:
         else (gateway.port if gateway is not None else file_port)
     )
 
-    if not boot.ok:
-        reason = boot.reason.value if boot.reason is not None else "unknown"
+    server = GatewayServer(host=host, port=port, boot=boot)
+    if server.in_setup_mode:
+        # 降级横幅：**构造之后**按 server 的真实模式打一次，覆盖两条路径——
+        # ① boot 失败（配置缺失 / 语法错 / 校验不过）；② 配置合法但运行时装配失败
+        # （``_enter_operational`` 失败 ⇒ ``_record_startup_failure``，AD14 的数据面
+        # 已补齐，这里补上终端这条最显眼的通道）。问题清单复用 server 的快照
+        # （② 的那批只存在于 server 上），且只打一次（这里不再有构造前的重复打印）。
+        reason = (
+            server.boot_reason.value if server.boot_reason is not None else "unknown"
+        )
         # flush=True：启动信息必须立刻可见——无论 stdout 是终端、管道还是被
         # `wing start` 捕获（块缓冲会把横幅扣在缓冲区里，而它正是「怎么修」的唯一提示）。
         print(f"⚠ 配置不可用（{reason}）：网关以修复模式启动 {host}:{port}", flush=True)
-        for problem in boot.problems[:10]:
+        for problem in server.setup_problems[:10]:
             print(f"   · {problem.path or '<document>'}: {problem.message}", flush=True)
         print(
             "   运行 `wing` 打开设置面板修复，或 `wing config doctor` 查看详情。",
             flush=True,
         )
 
-    server = GatewayServer(host=host, port=port, boot=boot)
     try:
         server.start()
     except KeyboardInterrupt:

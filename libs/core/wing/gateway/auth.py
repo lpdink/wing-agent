@@ -12,9 +12,11 @@ AuthMiddleware 不缓存 AuthConfig——每次请求从 ``app.state.server.auth
 动态读取，确保 ``/api/system/reload`` 热重载后立即生效。
 
 **修复模式（setup mode）**：配置坏掉时 auth 配置本身不可信，``dispatch`` 开头有一个
-独立分支——只接受 loopback 来源且**不要求 key**（``LOOPBACK_HOSTS``），非 loopback
-一律 403。这是收紧不是放松（正常模式下 auth 关闭时任何人都能访问）。既有鉴权逻辑
-（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**。
+独立分支——只接受 loopback 来源、**且网关自身必须绑定在 loopback 上**（``LOOPBACK_HOSTS``），
+两者都成立才不要求 key；否则一律 403。这是收紧不是放松（正常模式下 auth 关闭时任何人都能访问）。
+第二个条件关掉的是「任何 loopback 转发者即修复者」（审查 A3）：绑 ``0.0.0.0`` 且配置坏掉时，
+本机反代 / 端口转发会让远端流量以 loopback 来源到达——那种部署不提供免 key 修复访问。
+既有鉴权逻辑（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**。
 """
 
 from __future__ import annotations
@@ -118,6 +120,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 这是**收紧不是放松**——正常模式下 auth.enabled=false 时任何人都能访问，
         # setup mode 下只有本机能（哪怕 auth.enabled=false）。判定必须在读
         # auth 配置之前（那份配置此刻不可用）。
+        #
+        # **免 key 仅当网关自身绑定 loopback**（审查 A3）：只看来访地址不够——
+        # 任何把流量从 127.0.0.1 转发进来的本机进程（无鉴权反代 / 容器 sidecar /
+        # 本地端口转发）都会让远端流量以 loopback 身份到达，而 setup mode 授予的是
+        # **免 key 的整份配置写权限**。绑定地址取自 ``GatewayServer.host``（构造参数，
+        # 已经过「文件里的值优先」解析）——**不在这里重读 config**（它正是不可信的那份）。
         if server.in_setup_mode:
             client_host = request.client.host if request.client else ""
             if client_host not in LOOPBACK_HOSTS:
@@ -125,6 +133,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     403,
                     "gateway is in setup mode: only loopback clients may read or "
                     "repair the configuration",
+                )
+            if server.host not in LOOPBACK_HOSTS:
+                # 绑到非 loopback（0.0.0.0 / :: / 具体外部地址）⇒ 不提供免 key 访问。
+                # 这里**不是**「要求一把 key」：setup mode 下 auth 配置不可信
+                # （``server.auth_config`` 恒为安全默认、没有可核验的 keys），
+                # 放行一把无法核验的 key 会把写面重新打开——直接拒绝才是安全分支。
+                return error_response(
+                    403,
+                    "gateway is in setup mode: it is bound to a non-loopback "
+                    f"address ({server.host}) — keyless repair access is not offered; "
+                    "set gateway.host back to 127.0.0.1 and restart, or edit "
+                    "config.yaml directly",
                 )
             return await call_next(request)
 
