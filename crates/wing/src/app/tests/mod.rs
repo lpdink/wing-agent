@@ -11,6 +11,7 @@ mod frame;
 mod images;
 mod interaction;
 mod modal;
+mod program_status;
 mod projection;
 mod scrollbar;
 mod selection;

@@ -13,6 +13,7 @@
 | [tui-rendering.md](tui-rendering.md) | Markdown 渲染的调试入口（`render_probe`）、`Content`/`Thinking` 两个 profile 的差异、流式==终态的不变量与对账、已知边界清单 |
 | [tui-images.md](tui-images.md) | 终端图片能力的两档阶梯、探测与配置、三态、资源上限与压力验证、新鲜度（重写同一路径 ≤1s 换图）、失效触发点、性能数字、真机验收清单 |
 | [tui-input.md](tui-input.md) | TUI 输入通道：键盘/鼠标/滚轮的上报模式（DECSET）与生命周期对称、选择与滚动的指针语义 |
+| [tui-signals.md](tui-signals.md) | TUI 终端状态信号（OSC 0 标题 / OSC 9 通知 / OSC 7501 程序状态）：读者分工、状态映射、盲发与去重决策、已知边界 |
 | [vscode-extension.md](vscode-extension.md) | VSCode 扩展：四层分层与数据流、桥协议与归约（重放==直播）、会话时序与多 Tab、连接自愈、构建/测试/smoke、打包与安装 |
 | [probe-testing.md](probe-testing.md) | wing-probe 确定性集成测试：跑法（`make test-probe`）、新增场景、断言原语、红线清单与口径、逃生舱 |
 | [welcome-mascot.md](welcome-mascot.md) | 开屏海鸥：字母网格帧与品牌调色板、待机/干活两姿态、可见性门控的重绘成本契约、改画工作流 |

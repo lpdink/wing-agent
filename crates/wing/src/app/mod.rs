@@ -68,7 +68,11 @@ use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
 use crate::ui::welcome::SessionFacts;
 use crate::ui::welcome::Welcome;
+use crate::util::program_status;
 use crate::util::title;
+use program_status::BlockKind;
+use program_status::Reporter;
+use program_status::State;
 use title::AttentionKind;
 
 use self::frame::FrameGeometry;
@@ -81,6 +85,7 @@ use self::turn_state::TurnState;
 
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
+use crate::shared::panels::ask::PanelMode;
 
 /// Threshold for wide-mode status bar (shows cumulative usage details).
 const WIDE_THRESHOLD: u16 = 100;
@@ -136,6 +141,9 @@ pub struct App {
     pub(crate) popup: PopupState,
     /// Turn state (working flag + timer + spinner + usage).
     turn: TurnState,
+    /// OSC 7501 program-status lane: formats reports, drops idempotent
+    /// repeats, carries the `WING_PROGRAM_STATUS` switch.
+    program_status: Reporter,
     /// Last tick instant for measuring real dt between TermEvent::Tick.
     last_tick: std::time::Instant,
     /// Active toast notification (lazy-expired in draw).
@@ -234,6 +242,7 @@ impl App {
             ctx: RenderContext::new(),
             popup: PopupState::default(),
             turn: TurnState::default(),
+            program_status: Reporter::from_env(),
             last_tick: std::time::Instant::now(),
             toast: None,
             ask_panels: std::collections::VecDeque::new(),
@@ -424,6 +433,43 @@ impl App {
                 kind,
                 self.dir_label().as_deref(),
             )));
+        }
+    }
+
+    /// Report the agent's state to the terminal via OSC 7501 (Program Status
+    /// Protocol). The side-channel counterpart to the OSC 0 title: the same
+    /// state, addressed to terminals and agent dashboards instead of the human
+    /// in front of the tab. Idempotent reports are dropped by the reporter.
+    fn set_program_status(&mut self, state: State, msg: Option<&str>) {
+        if let Some(report) = self.program_status.report(state, msg) {
+            self.push_intent(AppIntent::SetProgramStatus(report));
+        }
+    }
+
+    /// Project the current state onto the program-status record: the front ask
+    /// panel is what the agent is blocked on, otherwise the turn decides.
+    /// Shared by the live Ask event, the answer path, and sync replay.
+    fn sync_program_status(&mut self) {
+        match self.ask_panels.front() {
+            Some(panel) => {
+                // The retired Bash confirmation is an approval gate; every
+                // other interactive ask is a question. (`Notice` never enters
+                // the queue — it is not interactive.)
+                let kind = match panel.mode {
+                    PanelMode::RequiredChoice => BlockKind::Permission,
+                    PanelMode::Question | PanelMode::Notice => BlockKind::Question,
+                };
+                let msg = panel.notify_text();
+                self.set_program_status(State::Blocked(kind), Some(&msg));
+            }
+            None => {
+                let state = if self.turn.working {
+                    State::Working
+                } else {
+                    State::Idle
+                };
+                self.set_program_status(state, None);
+            }
         }
     }
 
@@ -822,6 +868,9 @@ pub async fn run_app(
     let images = Images::new(config.rendering.images, image_support, image_waker);
 
     let mut app = App::with_images(session_id, config, launch_workspace, images);
+    // Initial program-status record: the session starts at rest (a mid-turn
+    // resume replaces this with `working` when its SyncSession lands).
+    app.set_program_status(State::Idle, None);
     let mut term_events = crate::tui::spawn_event_stream();
     let mut transport = Some(transport);
     // Session recovery pending: the transport (WS) is up but the session
@@ -1153,10 +1202,15 @@ pub async fn run_app(
         }
     }
 
-    // Restore terminal title on exit.
+    // Restore terminal title on exit, and drop the program-status record the
+    // way the spec expects a quitting program to (the intent lane is dead by
+    // now — write the `clear` straight to the terminal).
     {
         let writer = terminal.backend_mut();
         let _ = title::set_title(writer, "");
+        if let Some(report) = app.program_status.report(State::Clear, None) {
+            let _ = program_status::write(writer, &report);
+        }
     }
 
     Ok(())
