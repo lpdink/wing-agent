@@ -17,6 +17,7 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 pub mod args;
 pub(crate) mod backend_config;
 pub mod common;
+pub mod config;
 mod discover;
 pub mod messages;
 pub mod ps;
@@ -250,6 +251,15 @@ pub enum Command {
         session_ids: Vec<String>,
     },
 
+    /// Read and change the gateway configuration (Setting API).
+    ///
+    /// Works while the gateway is degraded (setup mode), which is exactly when
+    /// the TUI panel is unreachable. Never auto-starts the gateway.
+    Config {
+        #[command(subcommand)]
+        command: config::ConfigCommand,
+    },
+
     /// Show last N messages from a session (like `tail`).
     Tail {
         /// Session ID.
@@ -473,6 +483,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
             Command::Release { session_ids } => {
                 crate::cmd::release::run(&session_ids, cli.json).await
             }
+            Command::Config { command } => crate::cmd::config::run(command, cli.json).await,
             Command::Tail {
                 session_id,
                 n,
