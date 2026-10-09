@@ -129,9 +129,28 @@ async def test_stop_is_safe_after_start_failure(
 # 去掉它，进程就泄漏（AD17 点名的正是这一层）。
 
 
-async def _explode_with(exc: BaseException, *_: object, **__: object) -> None:
-    """``wait_for_health`` 的替身：直接抛给定异常（合成，供兜底分支专用）。"""
+async def _explode_with(
+    exc: BaseException, pid_file: Path, *_: object, **__: object
+) -> None:
+    """``wait_for_health`` 的替身：**先等假网关把 pid 写出来，再抛**给定异常。
+
+    ``start()`` 的兜底分支一抛就收尸（``DEFAULT_SHUTDOWN_WAIT`` 被压到 0.2s），而假网关是
+    fork 出来的 shell——负载下它可能还没被调度到 ``echo $$`` 那一行就吃了 SIGTERM，pid 文件
+    永不出现，用例在「读 pid」这一步**假红**（审查 N3：并行 ~2/16 复现的时序竞态，不是泄漏）。
+    先等 pid 落盘再抛：被测路径（兜底收尸）一字不变，竞态消失。等不到也照抛——之后
+    ``_read_pid`` 会给出「用例自身失效」的明确断言。
+    """
+    await _wait_for_pid_file(pid_file, timeout=5.0)
     raise exc
+
+
+async def _wait_for_pid_file(path: Path, *, timeout: float) -> None:
+    """等 ``path`` 出现且非空（让出事件循环，不阻塞假网关的调度）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text(encoding="utf-8").strip():
+            return
+        await asyncio.sleep(0.02)
 
 
 @pytest.mark.asyncio
@@ -152,7 +171,7 @@ async def test_non_probe_error_from_health_wait_is_reaped_by_the_outer_guard(
     monkeypatch.setattr(
         "wing_probe.env.wait_for_health",
         lambda *args, **kwargs: _explode_with(
-            TimeoutError("synthetic"), *args, **kwargs
+            TimeoutError("synthetic"), pid_file, *args, **kwargs
         ),
     )
 
@@ -194,7 +213,7 @@ async def test_cancelled_start_still_reaps_the_spawned_gateway(
     monkeypatch.setattr(
         "wing_probe.env.wait_for_health",
         lambda *args, **kwargs: _explode_with(
-            asyncio.CancelledError(), *args, **kwargs
+            asyncio.CancelledError(), pid_file, *args, **kwargs
         ),
     )
 
