@@ -16,9 +16,10 @@
 //! probing support first (the spec permits it explicitly). `WING_PROGRAM_STATUS`
 //! (`0` / `false` / `off`) switches reporting off.
 //!
-//! `msg` is shown by terminals and dashboards *outside* the grid — keep it a
-//! short public summary (what the agent is working on / waiting for), never
-//! raw session content.
+//! `msg` is shown by terminals and dashboards *outside* the grid: it carries
+//! the same public summary OSC 9 already notifies with (turn stats plus a
+//! truncated result line, or the question an ask waits on) — nothing beyond
+//! what this machine already shows.
 
 use std::io::Write;
 
@@ -82,8 +83,8 @@ impl BlockKind {
 const APP: &str = "wing";
 
 /// Decoded `msg` limit from the spec. Truncating before encoding keeps the
-/// base64 under the spec's 2732-byte *encoded* limit (and the whole sequence
-/// well under its 4096-byte cap).
+/// base64 at most 2732 bytes — exactly the spec's encoded cap for `msg` — and
+/// the whole sequence well under its 4096-byte cap.
 const MAX_MSG_BYTES: usize = 2048;
 
 /// Format one OSC 7501 report (root record, `app=wing`).
@@ -331,8 +332,9 @@ mod tests {
         assert_eq!(text.len(), MAX_MSG_BYTES, "truncated to the byte limit");
         assert!(text.chars().all(|c| c == 'é'), "never splits a code point");
 
-        // Through `format`: encoded size stays under the spec's 2732-byte
-        // limit and the whole sequence under its 4096-byte cap.
+        // Through `format`: the encoded size reaches but does not exceed the
+        // spec's 2732-byte cap, and the whole sequence stays under its
+        // 4096-byte cap.
         let report = format(State::Done, Some(&long));
         let msg = report.split(":msg=").nth(1).unwrap();
         let encoded = msg.trim_end_matches("\x1b\\");

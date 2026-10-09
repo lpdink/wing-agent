@@ -24,7 +24,7 @@ OSC 7501 = [Program Status Protocol](https://www.superlogical.com/rex/docs/build
 | `Interrupted` | `idle`（spec：被打断报 idle，不报 done） |
 | `Done` 时记录仍停在 `working/blocked` | `idle`（`turn_result` 丢失时的兜底；`done/error` 不被覆盖） |
 | `SyncSession`（订阅 / 会话切换 / 重连） | 以快照重投影：重放的面板队列 → `blocked`，回合在飞 → `working`，否则 `idle` |
-| 退出 | `clear`（直接写终端，不走 intent） |
+| 退出 | 不写任何报告（见设计决策） |
 
 ## 设计决策
 
@@ -32,6 +32,7 @@ OSC 7501 = [Program Status Protocol](https://www.superlogical.com/rex/docs/build
 - **去重按整条已格式化序列**（`Reporter`）。记录是幂等快照，同一 `(state, msg)` 连发即 noop——spinner 每帧不会刷记录，重复的 `turn_started` 也不会。
 - **`msg` 只放"公开摘要"**：与 OSC 9 同源（回合摘要 / 面板问题原文），会被终端与面板显示在网格之外，绝不放会话正文。经过：控制字符→空格、trim、UTF-8 边界截断（解码 ≤2048B，编码 ≤2732B，整串 <4096B——spec 硬上限）。
 - **`done` 的存续交给终端**：`done/error` 在下一个 `working/idle/clear` 之前一直有效；终端自己决定何时停止展示（如用户按键）。因此 `Done` 事件不会把 `done` 覆写回 `idle`。
+- **退出不写 `clear`**：spec 的生命周期规则已经覆盖退出——进程退出时终端 MUST 丢弃 `working`/`blocked`，`done`/`error` 留存供用户回来查看；主动 clear 只会删掉用户还没看到的 `done`/`error`。（`idle` 记录的清理由终端自决。）
 - **不做焦点门控**：OSC 9 只在失焦时发（通知=打断），7501 无条件发（展示交给终端，失焦与否由终端自己知道）。
 - **开关**：`WING_PROGRAM_STATUS=0|false|off` 关闭（默认开，`Reporter::from_env` 只读一次）。
 

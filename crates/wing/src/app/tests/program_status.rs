@@ -261,6 +261,31 @@ fn answering_the_ask_reports_working_again() {
     );
 }
 
+#[test]
+fn a_queued_ask_keeps_blocking_after_the_answer() {
+    // Concurrent tool calls can leave two asks queued; answering the front
+    // one leaves the record blocked on the next, and only emptying the queue
+    // goes back to `working`.
+    let mut app = report_app();
+    app.handle_event(turn_started());
+    app.handle_event(ask_question_event());
+    app.handle_event(ask_required_choice_event());
+    let _ = reports(&mut app);
+
+    app.finish_ask_panel("q1: y".into());
+    assert_eq!(
+        reports(&mut app),
+        vec![format(
+            State::Blocked(BlockKind::Permission),
+            Some("dangerous command, proceed?")
+        )],
+        "the second panel becomes the front and the record follows it"
+    );
+
+    app.finish_ask_panel("y".into());
+    assert_eq!(reports(&mut app), vec![format(State::Working, None)]);
+}
+
 // ── session snapshots ──
 
 #[test]

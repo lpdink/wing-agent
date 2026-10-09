@@ -1202,15 +1202,14 @@ pub async fn run_app(
         }
     }
 
-    // Restore terminal title on exit, and drop the program-status record the
-    // way the spec expects a quitting program to (the intent lane is dead by
-    // now — write the `clear` straight to the terminal).
+    // Restore the terminal title on exit. The program-status record is left
+    // alone on purpose: the spec's lifetime rules already do the right thing
+    // when the process exits — the terminal drops `working` / `blocked`, and
+    // `done` / `error` survive so the user still finds them. An exit `clear`
+    // would only delete records that are meant to be kept.
     {
         let writer = terminal.backend_mut();
         let _ = title::set_title(writer, "");
-        if let Some(report) = app.program_status.report(State::Clear, None) {
-            let _ = program_status::write(writer, &report);
-        }
     }
 
     Ok(())

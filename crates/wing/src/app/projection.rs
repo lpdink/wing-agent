@@ -83,7 +83,10 @@ impl App {
                 );
                 self.turn.last_title = Some(working_title.clone());
                 self.push_intent(AppIntent::SetTitle(working_title));
-                self.set_program_status(State::Working, None);
+                // Derive from the state rather than forcing `working`: if an
+                // ask panel is somehow still queued, that is what the agent is
+                // actually blocked on.
+                self.sync_program_status();
             }
             WingEvent::UserMessageAccepted {
                 origin_request_id, ..
@@ -177,6 +180,10 @@ impl App {
 
             WingEvent::Error { message, .. } => {
                 self.finish_turn();
+                // The backend cancels every feedback waiter when a turn dies —
+                // a stale ask panel must not outlive it (nor get answered into
+                // a dead waiter), and the record must not stay `blocked`.
+                self.clear_ask_state();
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
                 // The most specific failure text wing has for the record.
                 self.set_program_status(State::Error, Some(&message));
