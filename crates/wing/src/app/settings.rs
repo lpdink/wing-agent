@@ -483,6 +483,13 @@ pub(super) fn save_notice_text(
             response.restart_required.join("、")
         ));
     }
+    // 后端的非致命说明（AD13）：当前文件不可解析时，密文无从回填 —— 必须**逐条**
+    // 让用户看见（"其中旧密钥没有保留，请重新填写"）。它不影响成败等级。
+    if let GatewaySaveReport::Saved(response) = gateway {
+        for warning in &response.warnings {
+            lines.push(format!("  ⚠ {warning}"));
+        }
+    }
     lines.join("\n")
 }
 
@@ -572,6 +579,13 @@ fn gateway_success_summary(response: &SettingsSetResponse) -> String {
 /// 摘要 toast：面板还没关，回执在它底下看不见 —— "保存到底成没成"要立刻可见。
 fn save_notice_toast(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> String {
     if save_notice_ok(interface, gateway) {
+        // 有后端 warnings 时不能只说"已保存"：那些话（AD13 的"旧密钥没有保留"）
+        // 是用户必须知道的，而回执此刻正压在面板下面。
+        if let GatewaySaveReport::Saved(response) = gateway
+            && !response.warnings.is_empty()
+        {
+            return format!("设置已保存 · {} 条说明（见回执）", response.warnings.len());
+        }
         return "设置已保存".to_string();
     }
     match gateway {

@@ -327,6 +327,7 @@ fn settings_response(
     problems: Vec<SettingProblem>,
 ) -> SettingsSetResponse {
     SettingsSetResponse {
+        warnings: vec![],
         ok,
         fingerprint: fingerprint.into(),
         problems,
@@ -820,6 +821,44 @@ fn an_interface_only_save_closes_the_receipt_without_a_gateway_line() {
     assert!(text.contains("✓ Interface"), "{text}");
     assert!(!text.contains("Gateway"), "{text}");
     assert!(save_notice_ok(&interface, &GatewaySaveReport::Skipped));
+}
+
+/// AD13：后端带回 `warnings`（坏文件被修复、密文无从回填）时，回执**逐条**显示 ——
+/// 它是"用户必须知道"的话，不是日志；且不改变成败等级（保存是成功的）。
+#[test]
+fn a_save_that_lost_secrets_reports_the_backend_warnings() {
+    let mut app = app_with_settings_panel();
+    let mut response = settings_response(true, "fp-2", vec![]);
+    response.changed = vec!["providers[0].api_key".into()];
+    response.setup_mode_exited = true;
+    response.warnings = vec!["原配置文件无法解析，其中的密钥无法保留，请重新填写".into()];
+    app.settle_gateway_save(GatewaySaveReport::Saved(response));
+
+    let (info, text) = last_cell_text(&app);
+    assert!(info, "有 warning 也还是成功（info rail）：{text}");
+    assert!(text.starts_with("设置已保存"), "{text}");
+    assert!(
+        text.contains("⚠ 原配置文件无法解析，其中的密钥无法保留，请重新填写"),
+        "AD13 的说明要在回执里：{text}"
+    );
+    assert_eq!(
+        app.toast.as_ref().map(|t| t.message.as_str()),
+        Some("设置已保存 · 1 条说明（见回执）"),
+        "回执压在面板下面：toast 要指出还有说明可看"
+    );
+
+    // 没有 warnings 的响应不产生这一行（老网关 / 一切正常）。
+    let mut app = app_with_settings_panel();
+    app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
+        true,
+        "fp-3",
+        vec![],
+    )));
+    let (_, text) = last_cell_text(&app);
+    assert!(
+        !text.contains("⚠ 原配置文件"),
+        "没有 warning 就没有这一行：{text}"
+    );
 }
 
 // ── 6. 轮次中拒绝重启（§12.5） ─────────────────────────────

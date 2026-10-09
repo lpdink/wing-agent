@@ -1017,6 +1017,7 @@ mod tests {
         problems: Vec<SettingProblem>,
     ) -> SettingsSetResponse {
         SettingsSetResponse {
+            warnings: Vec::new(),
             ok,
             fingerprint: fingerprint.into(),
             problems,

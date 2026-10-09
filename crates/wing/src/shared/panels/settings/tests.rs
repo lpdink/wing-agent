@@ -174,6 +174,7 @@ fn provider_labels(panel: &SettingsPanel) -> Vec<String> {
 
 fn ok_response(problems: Vec<SettingProblem>) -> SettingsSetResponse {
     SettingsSetResponse {
+        warnings: Vec::new(),
         ok: problems.is_empty(),
         fingerprint: "fp-2".into(),
         problems,
@@ -1616,6 +1617,7 @@ fn failed_save_keeps_dirty_and_jumps_to_the_problems_view() {
     }];
     panel.apply_save(super::SaveOutcome {
         gateway: Some(SettingsSetResponse {
+            warnings: Vec::new(),
             ok: false,
             fingerprint: "fp-1".into(),
             problems: problems.clone(),

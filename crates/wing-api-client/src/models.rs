@@ -1225,6 +1225,11 @@ pub struct SettingsSetResponse {
     /// 备份文件路径（保存前复制的 `.bak`）；没有旧文件时为 `None`。
     #[serde(default)]
     pub backup_path: Option<String>,
+    /// 保存过程中**必须告知用户**的非致命说明（AD13：当前文件无法解析时，
+    /// 密文无从回填 —— 回执里要说明"旧密钥没有保留，请重新填写"）。
+    /// 老网关不带这个字段，所以默认空。
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -2088,6 +2093,44 @@ mod settings_tests {
     }
 
     // ── 响应 / 请求形状 ───────────────────────────────────────
+
+    /// AD13：`warnings` 是**后加字段**，两种响应都要能解码 —— 带它的（新网关
+    /// 修好了坏文件）与不带它的（老网关 / 一切正常）在 Rust 侧都是合法形状。
+    #[test]
+    fn settings_set_response_decodes_with_and_without_warnings() {
+        let with_warnings = r#"{
+            "ok": true,
+            "fingerprint": "sha256:new",
+            "problems": [],
+            "changed": ["providers[0].api_key"],
+            "restart_required": [],
+            "reload": {"ok": true, "results": []},
+            "setup_mode_exited": true,
+            "backup_path": "/home/u/.wing/core/config.yaml.bak",
+            "warnings": ["原配置文件无法解析，其中的密钥无法保留，请重新填写"]
+        }"#;
+        let resp: SettingsSetResponse = serde_json::from_str(with_warnings).unwrap();
+        assert!(resp.ok);
+        assert_eq!(resp.warnings.len(), 1);
+        assert!(resp.warnings[0].contains("密钥无法保留"));
+        assert_eq!(
+            resp.backup_path.as_deref(),
+            Some("/home/u/.wing/core/config.yaml.bak"),
+            "坏文件照常备份（AD13）"
+        );
+
+        let without = r#"{
+            "ok": false,
+            "fingerprint": "sha256:cur",
+            "problems": [{"path": "gateway.port", "kind": "invalid_value",
+                          "message": "端口被占用", "hint": null}]
+        }"#;
+        let resp: SettingsSetResponse = serde_json::from_str(without).unwrap();
+        assert!(!resp.ok);
+        assert!(resp.warnings.is_empty(), "缺字段 = 没有 warning");
+        assert!(resp.changed.is_empty());
+        assert!(resp.reload.is_none());
+    }
 
     #[test]
     fn settings_get_response_masks_secrets_and_keeps_the_null_marker() {
