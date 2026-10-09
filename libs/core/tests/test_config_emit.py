@@ -357,6 +357,24 @@ def test_unknown_key_without_its_parent_is_still_preserved(
     assert "knob: 7" in text
 
 
+def test_single_line_mapping_unknown_key_stays_valid_yaml(
+    catalog: SettingNode,
+) -> None:
+    """未知键的值是**单键映射**时，dump 出来的单行仍是块结构（`future: x`）。
+
+    直接拼在 `key: ` 后面会产出非法 YAML（`key: future: x`）——前向兼容承诺
+    「原样写回」，写出一份解析不了的文件等于把它弄丢了。03 的端到端保存路径
+    （``test_gateway_settings.py::test_set_keeps_unknown_keys``）先撞上这个形态。
+    """
+    extra = [("future_section", {"future_key": "keep-me"}), ("nowhere.one", [1])]
+    doc = {"providers": [], "agents": []}
+    text = emit_config_yaml(doc, catalog, extra=extra)
+    loaded = yaml.safe_load(text)
+    assert loaded["future_section"] == {"future_key": "keep-me"}
+    assert loaded["one"] == [1]
+    assert "future_section: future_key" not in text
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. 首启模板
 # ─────────────────────────────────────────────────────────────────────────────

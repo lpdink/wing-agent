@@ -313,7 +313,10 @@ def _emit_keyed_raw(
     """键 + 任意 YAML 载荷（freeform map 的值 / 未知键的值）。"""
     text = _raw_yaml(value)
     lines = text.split("\n")
-    if len(lines) == 1:
+    # 单行内联只对**标量**与**空容器**成立。非空映射 / 列表 dump 出来的单行仍是**块结构**
+    # （`future_key: keep-me` / `- 1`），拼在 `key: ` 后面会产出非法 YAML——必须走缩进块
+    # （未知键的前向兼容承诺「原样写回」，写出一份解析不了的文件等于把它弄丢了）。
+    if len(lines) == 1 and (not isinstance(value, (dict, list)) or not value):
         _line(out, indent, f"{_key_text(key)}: {lines[0]}", commented)
         return
     _line(out, indent, f"{_key_text(key)}:", commented)
