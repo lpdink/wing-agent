@@ -2865,6 +2865,12 @@ mod tests {
         })
         .unwrap_err();
         assert!(message.contains("路径不在设置目录中"), "{message}");
+        // 自由 map 的内部不可寻址（catalog 只声明到 map 这一层）。
+        let message = plan(&WriteOp::Unset {
+            path: "providers[0].extra_body.thinking".to_string(),
+        })
+        .unwrap_err();
+        assert!(message.contains("路径不在设置目录中"), "{message}");
     }
 
     #[test]
