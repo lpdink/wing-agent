@@ -72,7 +72,8 @@ pub struct PendingAsk {
 #[derive(Serialize)]
 struct AsksOutput {
     session_id: String,
-    /// Session status at snapshot time (`waiting` when an ask is pending).
+    /// Session status when the ask(s) were found — `waiting` whenever an ask
+    /// is pending (an outstanding ask is exactly what that status means).
     status: String,
     asks: Vec<PendingAsk>,
 }
@@ -137,7 +138,7 @@ async fn asks_inner(session_id: &str, wait_secs: u64) -> Result<(AsksOutput, boo
                 ..
             } => {
                 status = status_str(snapshot_status);
-                asks = collect_asks(events);
+                asks = collect_asks(events)?;
                 snapshot_seen = true;
                 break;
             }
@@ -178,6 +179,9 @@ async fn asks_inner(session_id: &str, wait_secs: u64) -> Result<(AsksOutput, boo
             continue;
         }
         if let Some(ask) = pending_ask(&event) {
+            // An outstanding ask *is* why the session is `waiting`, whatever
+            // the snapshot said a moment ago (same rule as the branch above).
+            status = status_str(SessionStatus::Waiting);
             asks.push(ask);
             break;
         }
@@ -218,20 +222,35 @@ async fn next_event(gateway: &mut GatewayClient, timeout: Duration) -> Result<Op
 
 /// Turn the snapshot's fact events into pending asks (in chain order).
 ///
-/// A snapshot entry that is not an `ask` — or that fails to decode — is
-/// skipped: the report is about what is *pending*, and a stray record must not
-/// take the whole answer down.
-fn collect_asks(events: Vec<serde_json::Value>) -> Vec<PendingAsk> {
-    events
-        .into_iter()
-        .filter_map(|value| match serde_json::from_value::<WingEvent>(value) {
-            Ok(event) => pending_ask(&event),
+/// A snapshot entry that decodes but is not an `ask` is skipped — including an
+/// unknown event **type** (`WingEvent`'s catch-all), which is forward
+/// compatibility rather than a problem.
+///
+/// A **known** type whose payload does not decode is the opposite: it means
+/// the gateway and this binary disagree about a type they both know, and the
+/// entry it failed to decode could be exactly the pending ask this command
+/// exists to report. Silently dropping it would answer "no pending asks" —
+/// with exit 0 — for a session that is blocked on one, so the drift fails the
+/// command instead.
+fn collect_asks(events: Vec<serde_json::Value>) -> Result<Vec<PendingAsk>> {
+    let mut asks = Vec::new();
+    for value in events {
+        match serde_json::from_value::<WingEvent>(value.clone()) {
+            Ok(event) => asks.extend(pending_ask(&event)),
             Err(e) => {
-                tracing::debug!(error = %e, "skipping undecodable snapshot event");
-                None
+                let event_type = value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<no type>");
+                anyhow::bail!(
+                    "the gateway sent a `{event_type}` event this build cannot decode: {e} \
+                     (the CLI and the gateway ship as one version — is the running gateway \
+                     older or newer than this `wing`?)"
+                );
             }
-        })
-        .collect()
+        }
+    }
+    Ok(asks)
 }
 
 fn pending_ask(event: &WingEvent) -> Option<PendingAsk> {
@@ -294,6 +313,9 @@ fn format_asks(output: &AsksOutput) -> String {
         for choice in &ask.choices {
             text.push_str(&format!("    {choice}\n"));
         }
+        if ask.required {
+            text.push_str("    (required — pick one of the choices)\n");
+        }
     }
     text
 }
@@ -330,11 +352,18 @@ mod tests {
     #[test]
     fn collect_asks_picks_ask_events_and_skips_the_rest() {
         let events = vec![
-            json!({"type": "diff_content", "session_id": "s1", "content": "x"}),
+            // 已知类型、非 ask：解码通过，只是不产出。
+            json!({
+                "type": "turn_started",
+                "session_id": "s1",
+                "created_at": "2026-10-10T22:06:26.935654",
+                "request_id": "req-1",
+            }),
             ask_event_value(),
+            // 未知类型（前向兼容）：`WingEvent::Unknown`，跳过。
             json!({"type": "not_a_known_event", "session_id": "s1"}),
         ];
-        let asks = collect_asks(events);
+        let asks = collect_asks(events).expect("known types must decode");
         assert_eq!(asks.len(), 1);
         assert_eq!(asks[0].tool_call_id, "call_fake_ask_1");
         assert_eq!(asks[0].questions[0].id, "q1");
@@ -355,12 +384,33 @@ mod tests {
             "choices": ["yes", "no"],
             "required": true,
         })];
-        let asks = collect_asks(events);
+        let asks = collect_asks(events).expect("decodes");
         assert_eq!(asks.len(), 1);
         assert_eq!(asks[0].question, "Run `rm -rf /`?");
         assert_eq!(asks[0].choices, ["yes", "no"]);
         assert!(asks[0].required);
         assert!(asks[0].questions.is_empty());
+    }
+
+    /// 已知类型但字段漂移 ⇒ 响亮失败，绝不静默跳过：跳过一个有 ask 的条目
+    /// 就是对在挂的 ask 报「没有」并且 exit 0（应答闭环会因此空转）。
+    #[test]
+    fn collect_asks_fails_loudly_on_a_drifted_known_event() {
+        // ask 缺 tool_call_id（必填字段漂移）。
+        let drifted_ask = json!({
+            "type": "ask",
+            "session_id": "s1",
+            "created_at": "2026-10-10T22:06:26.935654",
+            "request_id": "req-1",
+            "questions": [{"id": "q1", "question": "Proceed?", "options": 7}],
+        });
+        let error = collect_asks(vec![drifted_ask]).unwrap_err().to_string();
+        assert!(error.contains("`ask`"), "{error}");
+        assert!(error.contains("cannot decode"), "{error}");
+
+        // 未知类型仍然跳过（前向兼容），不误伤。
+        let unknown_type = json!({"type": "brand_new_event", "session_id": "s1"});
+        assert!(collect_asks(vec![unknown_type]).unwrap().is_empty());
     }
 
     /// `--json` 是机器面：`tool_call_id` 恒在场，空 `questions` 不出现。
@@ -388,8 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn format_asks_marks_the_legacy_required_form() {
+        let asks = collect_asks(vec![json!({
+            "type": "ask",
+            "session_id": "s1",
+            "created_at": "2026-10-10T22:06:26.935654",
+            "request_id": "req-1",
+            "tool_call_id": "call-bash",
+            "question": "Run it?",
+            "choices": ["yes", "no"],
+            "required": true,
+        })])
+        .expect("decodes");
+        let text = format_asks(&AsksOutput {
+            session_id: "s1".into(),
+            status: "waiting".into(),
+            asks,
+        });
+        assert!(text.contains("Run it?"), "{text}");
+        assert!(text.contains("required"), "{text}");
+    }
+
+    #[test]
     fn format_asks_renders_questions_and_options() {
-        let asks = collect_asks(vec![ask_event_value()]);
+        let asks = collect_asks(vec![ask_event_value()]).expect("decodes");
         let text = format_asks(&AsksOutput {
             session_id: "s1".into(),
             status: "waiting".into(),

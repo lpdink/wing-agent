@@ -5,7 +5,17 @@
 //! is simply started, and one that is running is shut down first (polling
 //! health until it is gone) before the replacement is spawned and probed.
 //!
-//! `--json` reports the stop outcome and the endpoint; the spawn messages
+//! **A stop that does not finish is a failed restart, not a warning.** When
+//! the old process is still reachable after the stop window, starting anyway
+//! is worse than useless: `wing start` probes the endpoint, sees the dying
+//! process answering, concludes "already running" and skips the spawn — and
+//! once that process finishes exiting a few seconds later there is no gateway
+//! at all, while the command has already reported success. So that case stops
+//! here: nothing is started, the receipt says `ok: false` with
+//! `stop: "shutdown_initiated"`, and the exit code is non-zero. A retry once
+//! the old process is gone (or a `wing start`) is a plain second command.
+//!
+//! `--json` reports the endpoint and the stop outcome; the spawn messages
 //! from `wing start` go to stderr, so stdout stays machine-readable.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -20,11 +30,15 @@ use super::{start, stop};
 /// Output of `wing restart` (also used with `--json`).
 #[derive(Serialize)]
 struct RestartOutput {
+    /// True only when a reachable gateway is serving the endpoint at return
+    /// time. `false` means the restart did **not** happen (the old process
+    /// would not go away), not merely that it went slowly.
     ok: bool,
     host: String,
     port: u16,
     /// What the stop half found — `"stopped"` / `"not_running"` /
-    /// `"shutdown_initiated"` (the old process was still reachable after 5s).
+    /// `"shutdown_initiated"` (`false`-`ok` case: the old process was still
+    /// reachable after the stop window, so nothing was started).
     stop: &'static str,
 }
 
@@ -44,15 +58,7 @@ pub async fn run(host: Option<String>, port: Option<u16>, json: bool) -> ExitCod
     let stop_label = match stop_outcome {
         stop::StopOutcome::Stopped => "stopped",
         stop::StopOutcome::NotRunning => "not_running",
-        stop::StopOutcome::ShutdownInitiated => {
-            // 旧进程 5s 内仍可达：start 会看到"已在运行"并按幂等语义返回——
-            // 这可能不是调用方要的重启，必须说出来。
-            eprintln!(
-                "warning: the old gateway was still reachable after 5s; \
-                 the restart may not have replaced it (check `wing status`)"
-            );
-            "shutdown_initiated"
-        }
+        stop::StopOutcome::ShutdownInitiated => return report_unreplaced(host, port, json),
     };
 
     if let Err(e) = start::start_gateway(&host, port).await {
@@ -75,4 +81,30 @@ pub async fn run(host: Option<String>, port: Option<u16>, json: bool) -> ExitCod
         );
     }
     ExitCode::SUCCESS
+}
+
+/// The stop half left the old process running: report it and start nothing.
+fn report_unreplaced(host: String, port: u16, json: bool) -> ExitCode {
+    let output = RestartOutput {
+        ok: false,
+        host,
+        port,
+        stop: "shutdown_initiated",
+    };
+    if json {
+        super::common::print_json_compact(&output);
+    } else {
+        println!(
+            "restart: FAILED — the gateway at ws://{}:{}/ws did not exit; \
+             no new gateway was started",
+            output.host, output.port
+        );
+    }
+    eprintln!(
+        "wing restart error: the old gateway at ws://{}:{}/ws was still reachable \
+         after the stop window and no new gateway was started; check `wing status` \
+         and retry once it is gone",
+        output.host, output.port
+    );
+    ExitCode::FAILURE
 }

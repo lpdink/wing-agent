@@ -222,10 +222,35 @@ struct UpdateOutput {
 }
 
 /// The one update flag whose effect exceeds its own field: switching the
-/// template rebuilds the agent, and the template's `thinking` /
-/// `reasoning_effort` / `yolo` come with it (`runtime.update_session`).
-const AGENT_SWITCH_NOTE: &str =
-    "--agent switches the template: thinking / reasoning_effort / yolo follow the new template";
+/// template rebuilds the agent, so the new template's values apply to the
+/// fields the caller did **not** name explicitly (the gateway applies the
+/// template first and the given fields after it, so explicit flags win). The
+/// note lists only what actually follows the template — naming a field the
+/// caller set explicitly would contradict the `applied` list right above it.
+fn agent_switch_note(args: &UpdateArgs) -> Option<String> {
+    args.agent.as_ref()?;
+    let mut from_template: Vec<&str> = Vec::new();
+    if args.thinking.is_none() {
+        from_template.push("thinking");
+    }
+    if args.effort.is_none() {
+        from_template.push("reasoning_effort");
+    }
+    if args.yolo.is_none() {
+        from_template.push("yolo");
+    }
+    if from_template.is_empty() {
+        return None;
+    }
+    let listed = from_template.join(" / ");
+    Some(if from_template.len() == 3 {
+        format!("--agent switches the template: {listed} follow the new template")
+    } else {
+        format!(
+            "--agent switches the template: {listed} follow the new template              (the fields given explicitly were applied after it)"
+        )
+    })
+}
 
 /// Entry point for `wing update`.
 pub async fn run_update(args: UpdateArgs, json: bool) -> ExitCode {
@@ -252,11 +277,7 @@ async fn update_inner(args: &UpdateArgs) -> Result<UpdateOutput> {
     let http = common::create_api_client(&host, port)?;
     common::hydrate_on_404(&http, &args.session_id, || http.update_session(&request)).await?;
 
-    let notes = if args.agent.is_some() {
-        vec![AGENT_SWITCH_NOTE.to_string()]
-    } else {
-        Vec::new()
-    };
+    let notes: Vec<String> = agent_switch_note(args).into_iter().collect();
     Ok(UpdateOutput {
         ok: true,
         session_id: args.session_id.clone(),
@@ -435,31 +456,44 @@ mod tests {
         );
     }
 
-    /// `--agent` 的效果超出它自己的字段：模板重建会带上模板的
-    /// thinking / effort / yolo —— 回执必须说出来，别让脚本把 applied
-    /// 当"其余字段未动"的证明。
+    /// `--agent` 的效果超出它自己的字段：模板重建会带上调用方**没有显式给出**
+    /// 的 thinking / effort / yolo —— 回执必须说出来，且只点名这些字段：把显式
+    /// 给出（因此覆盖模板值）的字段也列进去，就和上方的 applied 自相矛盾。
     #[test]
-    fn agent_switch_is_reported_as_a_note() {
+    fn agent_switch_note_names_only_the_fields_that_follow_the_template() {
         let mut given = args("s1");
         given.agent = Some("executor".into());
         let (_, applied) = build_update(&given).unwrap();
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].field, "agent");
 
-        let output = UpdateOutput {
-            ok: true,
-            session_id: "s1".into(),
-            applied,
-            notes: vec![AGENT_SWITCH_NOTE.to_string()],
-        };
-        let json = serde_json::to_value(&output).unwrap();
-        assert!(
-            json["notes"][0].as_str().unwrap().contains("thinking"),
-            "{json}"
-        );
-        assert!(format!("{json}").contains("yolo"), "{json}");
+        let note = agent_switch_note(&given).expect("note");
+        for field in ["thinking", "reasoning_effort", "yolo"] {
+            assert!(note.contains(field), "{note}");
+        }
 
-        // 普通字段更新不带 note（serde 直接省掉该键）。
+        // 显式给出的字段覆盖模板值：note 不再点名它们（否则与 applied 矛盾）。
+        let mut partial = args("s1");
+        partial.agent = Some("executor".into());
+        partial.thinking = Some(OnOff::Off);
+        let note = agent_switch_note(&partial).expect("note");
+        assert!(!note.contains("thinking /"), "{note}");
+        assert!(note.contains("reasoning_effort"), "{note}");
+        assert!(note.contains("yolo"), "{note}");
+        assert!(note.contains("given explicitly"), "{note}");
+
+        // 三个字段全部显式给出 ⇒ 没有"跟随模板"的字段 ⇒ 不产生 note。
+        let mut full = args("s1");
+        full.agent = Some("executor".into());
+        full.thinking = Some(OnOff::On);
+        full.effort = Some("high".into());
+        full.yolo = Some(OnOff::Off);
+        assert!(agent_switch_note(&full).is_none());
+
+        // 不给 --agent 永远没有 note。
+        assert!(agent_switch_note(&args("s1")).is_none());
+
+        // 输出面：notes 为空时 serde 省掉该键。
         let plain = UpdateOutput {
             ok: true,
             session_id: "s1".into(),

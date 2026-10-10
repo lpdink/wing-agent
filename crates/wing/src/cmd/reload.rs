@@ -49,9 +49,34 @@ pub async fn run_reload(json: bool) -> ExitCode {
 }
 
 async fn reload_inner() -> Result<ReloadResponse> {
+    // `ensure_gateway` starts a gateway when none is running — and a fresh
+    // process read the config at boot, so the per-item receipt below describes
+    // a pipeline that had nothing to re-read. Say that on stderr instead of
+    // letting the receipt imply a live config change.
+    let was_running = gateway_responding().await;
     let (host, port) = common::ensure_gateway().await?;
+    if !was_running {
+        eprintln!(
+            "note: no gateway was running — it was just started, and a fresh \
+             process already loads the config at boot (the items below are that \
+             pipeline run, not a re-read of an edited file)"
+        );
+    }
     let http = common::create_api_client(&host, port)?;
     Ok(http.reload_system().await?)
+}
+
+/// Whether a wing gateway answers on the configured endpoint (a cheap probe;
+/// unlike [`common::ensure_gateway`] it starts nothing).
+async fn gateway_responding() -> bool {
+    let gw = super::backend_config::read_backend_gateway_config();
+    let base = format!("http://{}:{}", gw.host, gw.port);
+    match wing_api_client::GatewayClient::new(&base, None) {
+        Ok(client) => {
+            matches!(client.health().await, Ok(health) if health.service == "wing-gateway")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Render the per-item report, in the response's own order (the name order is

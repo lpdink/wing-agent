@@ -78,6 +78,9 @@ struct StubState {
     /// Push a live ask this many ms after a subscribe (the "ask arrives while
     /// the caller is already listening" path).
     ask_after_subscribe_ms: Option<u64>,
+    /// Push the ask **before** the snapshot on subscribe: the live ask
+    /// outrunning the replay.
+    ask_before_snapshot: bool,
 }
 
 impl Default for StubState {
@@ -104,6 +107,7 @@ impl Default for StubState {
             next_client_id: 0,
             pending_ask: None,
             ask_after_subscribe_ms: None,
+            ask_before_snapshot: false,
         }
     }
 }
@@ -296,7 +300,12 @@ fn route(
     state: &mut StubState,
 ) -> (u16, String) {
     let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    let session_id = request["session_id"].as_str().unwrap_or(SESSION_ID);
+    // POST endpoints carry the id in the body, GET endpoints in the query.
+    let session_id = request["session_id"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| query_param(query, "session_id"))
+        .unwrap_or_else(|| SESSION_ID.to_string());
 
     // A session the stub does not hold: every session endpoint 404s.
     if session_id == UNKNOWN_ID {
@@ -315,6 +324,11 @@ fn route(
         ("POST", "/api/session/subscribe") => {
             let client_id = header_value(head, "x-client-id").unwrap_or_default();
             if let Some(tx) = state.ws_clients.get(&client_id) {
+                if state.ask_before_snapshot {
+                    // Live ask outrunning the replay (anything the subscriber
+                    // reads first is a live frame, not the snapshot).
+                    let _ = tx.send(ask_event().to_string());
+                }
                 let _ = tx.send(session_snapshot(state));
                 // Optional live ask: it arrives after the snapshot, so only a
                 // listener that keeps reading (`--wait`) sees it.
@@ -606,6 +620,15 @@ fn session_snapshot(state: &StubState) -> String {
         "draft": null,
     })
     .to_string()
+}
+
+/// Query-string parameter (`?a=1&b=2`); no percent-decoding — session ids and
+/// the values used here are plain ASCII.
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| value.to_string())
+    })
 }
 
 /// Case-insensitive header lookup on the request head.
@@ -1292,21 +1315,26 @@ async fn stdio_prompt_carries_the_tool_call_id() {
     let _ = std::fs::remove_dir_all(&stub.home);
 }
 
-/// `wing restart` acts on **one** endpoint: the one it was given (config or
-/// `--port`), not "whatever the config says" for one half and the flag for the
-/// other. Regression: the stop half used to re-read the config, so
+/// `wing restart` acts on **one** endpoint — the one it was given (config or
+/// `--port`), never "the config for the stop half, the flag for the start
+/// half". Regression: the stop half used to re-read the config, so
 /// `restart --port X` stopped the config gateway and started an orphan on X.
+///
+/// The stub stays reachable after the shutdown, so this also pins the other
+/// half of the contract: a stop that does not finish is a **failed** restart
+/// (non-zero, `ok: false`, and nothing started), not a success with a warning —
+/// starting anyway would make `wing start` see the dying process as "already
+/// running" and skip the spawn, leaving no gateway behind at all.
 #[tokio::test]
 async fn restart_acts_on_the_endpoint_it_was_given() {
     let config_stub = Stub::start("restart-config").await;
     let target_stub = Stub::start("restart-target").await;
 
-    let (code, stdout, _stderr) = run_wing(
-        &["restart", "--port", &target_stub.port.to_string()],
+    let (code, stdout, stderr) = run_wing(
+        &["restart", "--port", &target_stub.port.to_string(), "--json"],
         &config_stub,
     )
     .await;
-    assert_eq!(code, 0);
 
     assert_eq!(
         config_stub.path_hits("/api/shutdown").len(),
@@ -1318,13 +1346,92 @@ async fn restart_acts_on_the_endpoint_it_was_given() {
         1,
         "the stop half and the start half must share one endpoint"
     );
-    // The start half ran against the same endpoint (the stub stays healthy, so
-    // `wing start` reports it as already running instead of spawning anything).
+
+    assert_ne!(code, 0, "an unfinished stop must fail the restart");
+    assert_eq!(
+        json_of(&stdout),
+        json!({
+            "ok": false,
+            "host": "127.0.0.1",
+            "port": target_stub.port,
+            "stop": "shutdown_initiated",
+        })
+    );
     assert!(
-        stdout.contains(&format!(":{}/ws", target_stub.port)),
-        "{stdout}"
+        stderr.contains("still reachable") && stderr.contains("no new gateway was started"),
+        "{stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&config_stub.home);
     let _ = std::fs::remove_dir_all(&target_stub.home);
+}
+
+/// A GET endpoint with an unknown session 404s like the POST ones (the stub
+/// reads `session_id` from the query, which is where GET puts it).
+#[tokio::test]
+async fn unknown_session_on_a_get_endpoint_is_a_clean_404() {
+    let stub = Stub::start("get-404").await;
+
+    let (code, stdout, stderr) = run_wing(&["branches", UNKNOWN_ID], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains(UNKNOWN_ID), "{stderr}");
+    assert!(stderr.contains("not found"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// A live ask that outruns the snapshot is reported the same way as one that
+/// is in it — including the status, which is `waiting` because an ask is
+/// pending, not whatever the session was doing a moment earlier.
+#[tokio::test]
+async fn asks_reports_an_ask_that_outran_the_snapshot() {
+    let stub = Stub::start("asks-live-first").await;
+    stub.with(|state| {
+        state.status = "working".into();
+        state.ask_before_snapshot = true;
+    });
+
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let asks = json_of(&stdout);
+    assert_eq!(asks["asks"][0]["tool_call_id"], "call-42");
+    assert_eq!(
+        asks["status"], "waiting",
+        "an outstanding ask is what `waiting` means: {asks}"
+    );
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// A snapshot entry whose type is known but whose payload does not decode is a
+/// protocol error, not an empty answer: reporting "no pending asks" with exit
+/// 0 for a session that may be blocked on one would send the caller's
+/// `--tool-call-id` loop spinning against nothing.
+#[tokio::test]
+async fn asks_fails_loudly_on_a_drifted_ask_event() {
+    let stub = Stub::start("asks-drift").await;
+    stub.with(|state| {
+        state.status = "waiting".into();
+        // An `ask` this build cannot decode (unknown field shape).
+        state.pending_ask = Some(json!({
+            "type": "ask",
+            "session_id": SESSION_ID,
+            "created_at": "2026-10-10T12:00:00",
+            "request_id": "req-stub",
+            "tool_call_id": "call-42",
+            "questions": "not-an-array",
+        }));
+    });
+
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub).await;
+    assert_ne!(code, 0, "stdout: {stdout}");
+    assert!(
+        !stdout.contains("No pending asks"),
+        "a drifted ask must not read as `none`: {stdout}"
+    );
+    assert!(stderr.contains("cannot decode"), "{stderr}");
+    assert!(stderr.contains("`ask`"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
 }
