@@ -630,7 +630,8 @@ class WingAgent:
 
         闸门（与 interrupt / shutdown 互斥，绝不出现第二个消费者）：
 
-        - `_closing`：shutdown 是终局——绝不复活已关闭的 agent；
+        - `_closing`：shutdown 是终局——绝不复活已关闭的 agent（死亡照常记
+          日志，异常取下不再悬着）；
         - `worker.cancelled()`：取消是**意图性**收口（interrupt 的取消阶梯 /
           shutdown）——重建由收口方自己决定（interrupt 直接重建；阶梯放手后
           被保留的 worker 由 `_arm_worker_renewal` 续期，它连取消路径也要
@@ -646,7 +647,9 @@ class WingAgent:
         极端死法不值得为它引入重复上报面（`_run` 的兜底可能已经报过，
         再发一轮 error/done 只会让前端看到两条收尾）。
         """
-        if self._closing or self._worker is not worker or worker.cancelled():
+        if self._worker is not worker or worker.cancelled():
+            # 已被替换（续期 / interrupt 负责上报）/ 意图性取消（已取消的任务
+            # 无异常可取——`exception()` 会抛 `CancelledError`，判据顺序不能反）。
             return
         exc = worker.exception()
         if self._closing:
@@ -699,8 +702,10 @@ class WingAgent:
             f"stack=[{_worker_frames(worker)}]"
         )
         if notify:
-            # 错误路径的副作用同样不得掀翻调用者（#187）：这里的落盘可能
-            # 正是刚坏掉的资源，而调用链上还有 interrupt 的收口要完成。
+            # 错误路径的副作用同样走降级窗口（#187）：notice 今天 persist=false
+            # （窗口在本例上是纯防御——定型 / 广播路径不得外溢），但契约统一：
+            # 错误路径里的副作用一律不得掀翻调用者——这条调用链上还有
+            # interrupt 的收口要完成。
             with self._sink.best_effort():
                 self._sink.emit(
                     NoticeEvent(
