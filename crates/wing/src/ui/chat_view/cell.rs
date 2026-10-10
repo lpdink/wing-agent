@@ -3,8 +3,11 @@
 //! A cell owns **what it looks like** (its `to_lines` / `render_lines` output)
 //! and nothing else: no scroll state, no viewport geometry, no frame state.
 //! Height and line caching live one layer up, in
-//! [`CachedCell`](crate::ui::cached_cell::CachedCell); wrapping into screen
-//! rows is the widget's job (`super::viewport`).
+//! [`CachedCell`](crate::ui::cached_cell::CachedCell). A cell may wrap inside
+//! its own output (DiffView hangs an over-wide row's continuation under its
+//! gutter); what stays the widget's job (`super::viewport`) is the layout's
+//! `Paragraph` wrap for whatever a cell leaves over-wide, and the screen-row
+//! arithmetic that follows from it.
 //!
 //! [`PendingMessage`] lives here too: it is the cell wrapper of a
 //! sent-but-not-yet-accepted user message, i.e. another content state, not a

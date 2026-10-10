@@ -448,6 +448,10 @@ fn row_line(
 /// Push one chrome line (`prefix` + `body`) wrapped to `width`, continuation
 /// rows holding `body`'s column: a long path or `@@` header continues under
 /// itself instead of snapping back to the left edge.
+///
+/// Same threshold as a code row: the indent only pays while the continuation
+/// still gets at least as much width as it spends, so a degenerate window
+/// (a handful of columns) keeps the one over-wide line.
 fn push_chrome_line(
     lines: &mut Vec<Line<'static>>,
     prefix: &str,
@@ -457,7 +461,7 @@ fn push_chrome_line(
 ) {
     let indent = UnicodeWidthStr::width(prefix);
     let flat = format!("{prefix}{body}");
-    if width <= indent || UnicodeWidthStr::width(flat.as_str()) <= width {
+    if width < 2 * indent || UnicodeWidthStr::width(flat.as_str()) <= width {
         lines.push(Line::from(Span::styled(flat, style)));
         return;
     }
@@ -489,7 +493,12 @@ fn wrap_runs(runs: &[Run], limit: usize) -> Vec<Vec<Run>> {
     while start < flat.len() {
         let rest = &flat[start..];
         if UnicodeWidthStr::width(rest) <= limit {
-            segments.push(slice_runs(&spans, &flat, start, flat.len()));
+            // A whitespace tail is a wrap artefact, not content: dropping it
+            // keeps trailing spaces from costing a blank visual row.
+            let rest = rest.trim_end();
+            if !rest.is_empty() || segments.is_empty() {
+                segments.push(slice_runs(&spans, &flat, start, start + rest.len()));
+            }
             break;
         }
         let cut = break_point(rest, limit);
@@ -538,7 +547,13 @@ fn wrap_plain(text: &str, limit: usize) -> Vec<&str> {
     let mut rest = text;
     loop {
         if UnicodeWidthStr::width(rest) <= limit {
-            rows.push(rest);
+            // Trailing spaces of the last row are a wrap artefact, not
+            // content: dropping them keeps a whitespace tail from costing a
+            // visual row (an empty band row on a tinted code row).
+            let rest = rest.trim_end();
+            if !rest.is_empty() || rows.is_empty() {
+                rows.push(rest);
+            }
             return rows;
         }
         let cut = break_point(rest, limit);
@@ -558,6 +573,11 @@ fn wrap_plain(text: &str, limit: usize) -> Vec<&str> {
 /// callers always make progress: a window whose only space is the leading one
 /// is cut by column (cutting at 0 would push nothing and stall the loop), and
 /// a single grapheme wider than the window is cut alone.
+///
+/// A space cut is only taken when it leaves something in the head — a row of
+/// pure indentation would otherwise swallow the leading whitespace of an
+/// over-wide line (an indented statement would lose its indentation), so that
+/// case is cut by column instead.
 fn break_point(text: &str, limit: usize) -> usize {
     let (head, _) = split_str_by_width(text, limit);
     if head.is_empty() {
@@ -568,7 +588,7 @@ fn break_point(text: &str, limit: usize) -> usize {
             .unwrap_or(text.len());
     }
     match head.rfind(' ') {
-        Some(i) if i > 0 => i,
+        Some(i) if !head[..i].trim().is_empty() => i,
         _ => head.len(),
     }
 }
@@ -1204,7 +1224,8 @@ mod tests {
 
     /// The plan is built once (the window is immutable): rendering again —
     /// including at another width — reuses it, so the rows (and their line
-    /// numbers) stay identical; only the row padding follows the width.
+    /// numbers) stay identical; only the row padding follows the width (and
+    /// only rows over the new width wrap, which this fixture avoids).
     #[test]
     fn plan_is_reused_across_renders() {
         let diff = windowed("a\nb\nc", "a\nB\nc", 1);
@@ -1218,7 +1239,11 @@ mod tests {
         );
 
         let narrow = diff.to_lines(&p(), 40);
-        assert_eq!(narrow.len(), first.len(), "row count is width-independent");
+        assert_eq!(
+            narrow.len(),
+            first.len(),
+            "a window that fits at both widths renders the same rows"
+        );
         for (a, b) in first.iter().zip(narrow.iter()) {
             assert_eq!(a.to_string().trim_end(), b.to_string().trim_end());
         }
@@ -1327,6 +1352,16 @@ mod tests {
         assert_eq!(rows[0], "  ┌─ src/modules/alpha/beta/gamma/f");
         assert_eq!(rows[1], "     ile.rs");
 
+        // Below twice the prefix's width (the frame's `  ┌─ ` is 5) the
+        // hanging indent would leave the body ~2 columns: keep one over-wide
+        // line instead.
+        let narrow: Vec<String> = diff
+            .to_lines(&p(), 8)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(narrow[0], "  ┌─ src/modules/alpha/beta/gamma/file.rs");
+
         // Window starting at line 100000: the `@@` header is wider than 24
         // columns, so it wraps after the old-side range.
         let diff = windowed("a\nb", "a\nB", 100000);
@@ -1344,27 +1379,33 @@ mod tests {
     }
 
     /// The hanging indent only pays while the code column gets at least as
-    /// much width as the gutter itself (10 columns here): at 20 the wrap
-    /// holds the column, below it one over-wide row wrapped by the layout
-    /// keeps more code per row.
+    /// much width as the gutter itself (10 columns here): at 20 the code row
+    /// wraps into four visual rows of ten columns each, below it the row
+    /// stays one over-wide line (the layout's full-width wrap keeps more
+    /// code per row than a hanging indent into a one-column body would).
     #[test]
     fn too_narrow_for_the_code_column_stays_unwrapped() {
         let diff = view(None, &format!("{}\n", "x".repeat(32)));
-        for width in [10, 12, 19] {
-            let code: Vec<String> = diff
-                .to_lines(&p(), width)
+        let add_row = |width: u16| {
+            let lines = diff.to_lines(&p(), width);
+            let start = lines
                 .iter()
-                .map(|l| l.to_string())
-                .filter(|r| r.contains("│ +"))
-                .collect();
-            assert_eq!(code.len(), 1, "unexpected wrap at {width}: {code:?}");
+                .position(|l| l.to_string().contains("│ +"))
+                .expect("add row");
+            (lines, start)
+        };
+        for width in [10, 12, 19] {
+            let (lines, start) = add_row(width);
+            // The footer right after the row: it was not wrapped (a wrapped
+            // row would continue with indent-only rows in between).
+            assert!(
+                lines[start + 1].to_string().starts_with("  └"),
+                "unexpected wrap at {width}: {:?}",
+                lines[start + 1].to_string()
+            );
         }
 
-        let lines = diff.to_lines(&p(), 20);
-        let start = lines
-            .iter()
-            .position(|l| l.to_string().contains("│ +"))
-            .expect("add row");
+        let (lines, start) = add_row(20);
         let rows: Vec<String> = lines[start..start + 4]
             .iter()
             .map(|l| l.to_string())
@@ -1379,5 +1420,104 @@ mod tests {
                 format!("{code_column}xx        "),
             ]
         );
+    }
+
+    /// An over-wide line whose leading indent is followed by a token too long
+    /// for the window keeps that indent on the first visual row: the row may
+    /// not be cut inside the indentation (the statement would look unindented
+    /// at the top level).
+    #[test]
+    fn wrapped_rows_keep_the_leading_indent() {
+        // 8 columns of indent + a 24-column token: at 40 the code column is
+        // 30, so the first row is a column-exact cut (the only space in the
+        // window is inside the indentation, where a break would drop it).
+        let line = "        some_function_name(arg1, arg2)";
+        let diff = view(None, &format!("{line}\n"));
+        let lines = diff.to_lines(&p(), 40);
+        let start = lines
+            .iter()
+            .position(|l| l.to_string().contains("│ +"))
+            .expect("add row");
+        let rows: Vec<String> = lines[start..start + 2]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let code_column = " ".repeat(10);
+        assert_eq!(
+            rows,
+            vec![
+                "    1 │ +         some_function_name(arg".to_string(),
+                format!("{:<40}", format!("{code_column}1, arg2)")),
+            ]
+        );
+    }
+
+    /// A CJK line has no space to break at: the wrap cuts it by column —
+    /// never inside a wide character — and the continuation holds the code
+    /// column like any other row.
+    #[test]
+    fn wrapped_wide_characters_cut_at_the_column() {
+        let diff = DiffView::new(
+            "notes.txt".into(),
+            None,
+            "这是一条很长的中文注释内容\n".into(),
+            1,
+            1,
+        );
+        let lines = diff.to_lines(&p(), 32); // code column 10, content 22
+        let start = lines
+            .iter()
+            .position(|l| l.to_string().contains("│ +"))
+            .expect("add row");
+        let rows: Vec<String> = lines[start..start + 2]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let code_column = " ".repeat(10);
+        assert_eq!(
+            rows,
+            vec![
+                // 11 wide characters = 22 columns, cut on the character edge.
+                "    1 │ + 这是一条很长的中文注释".to_string(),
+                // 2 wide characters, then the tint padding (32 - 10 - 4).
+                format!("{code_column}内容{}", " ".repeat(18)),
+            ]
+        );
+    }
+
+    /// A delete row wraps like an add row — the continuation keeps the number
+    /// column's indent and the delete tint.
+    #[test]
+    fn wrapped_delete_rows_keep_the_delete_tint() {
+        let long = "let x = a_very_long_name + another_very_long_name + yet_another_name;";
+        let diff = windowed(&format!("{long}\n"), "let x = 1;\n", 1);
+        let p = p();
+        let lines = diff.to_lines(&p, 40); // two-column gutter 14, content 26
+        let start = lines
+            .iter()
+            .position(|l| l.to_string().contains("│ -"))
+            .expect("delete row");
+        let rows: Vec<String> = lines[start..start + 3]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let code_column = " ".repeat(14);
+        assert_eq!(
+            rows,
+            vec![
+                format!("{:<40}", "    1     │ - let x = a_very_long_name"),
+                format!("{:<40}", format!("{code_column}+ another_very_long_name")),
+                format!("{:<40}", format!("{code_column}+ yet_another_name;")),
+            ]
+        );
+        for line in &lines[start..start + 3] {
+            assert!(
+                line.spans.iter().all(
+                    |span| matches!(span.style.bg, Some(bg) if bg == p.diff_del_bg || bg == p.diff_del_bg_strong)
+                ),
+                "wrapped delete row not fully tinted: {:?}",
+                line.spans.iter().map(|s| s.style.bg).collect::<Vec<_>>()
+            );
+        }
     }
 }
