@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from wing.agent import ToolContext, current_tool_call_id
+from wing.common.fs import atomic_write_text
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
@@ -25,10 +26,6 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
     try:
         path = _resolve_path(path, ctx)
 
-        parent = os.path.dirname(os.path.abspath(path))
-        if parent and not os.path.exists(parent):
-            os.makedirs(parent, exist_ok=True)
-
         # Read old content BEFORE writing (for diff event)
         old_text: str | None = None
         existed = os.path.exists(path)
@@ -40,8 +37,11 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
             except Exception:
                 pass
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        # 原子替换（tmp + os.replace，与 Edit 同语义）：写入中途被杀不会留下
+        # 半截文件（原内容要么完整保留、要么整体被替换），并发读者也不会读到
+        # 部分内容。tmp 与目标同目录（同文件系统）、fsync 先于 rename（断电后
+        # 不会出现"已改名、内容为空"）。父目录自动创建。
+        atomic_write_text(Path(path), content)
 
         byte_count = len(content.encode("utf-8"))
         new_lines = len(content.splitlines())

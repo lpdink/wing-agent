@@ -28,19 +28,33 @@ def _tmp_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
 
 
+def _discard_tmp(tmp: Path) -> None:
+    """删除失败的 tmp 文件（尽力而为；删除失败不掩盖原始异常）。"""
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     """原子写入文本文件：tmp + fsync + replace。自动创建父目录。
 
     使用 os.replace 而非 os.rename：目标存在时原子替换（Windows 上
     os.rename 会因目标存在而失败，而 metadata.json 等文件会被反复覆盖）。
+    失败时丢弃 tmp、目标原样不动——要么整体可见、要么什么都没发生，不会在
+    目标目录留下 `.tmp.<pid>.<tid>` 垃圾（与 Edit 的失败语义一致）。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_path(path)
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        _discard_tmp(tmp)
+        raise
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -51,11 +65,15 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_path(path)
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        _discard_tmp(tmp)
+        raise
 
 
 def atomic_write_json(path: Path, data: Any, *, indent: int | None = None) -> None:
