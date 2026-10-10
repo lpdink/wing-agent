@@ -211,7 +211,11 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 **时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask，被放弃的输入以 `request_id` 列表随 `InterruptedEvent.dropped_request_ids` 下发——前端据此只把真正被放弃的 pending 消息标为 discarded；锁等待期间新投递的消息（客户端 POST 已应答）不在其中，留给随后的消费者（重建的新 worker、保留 worker 的续期继任者），不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
 
-**降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后若自然终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
+**降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
+
+**消费者不死与上报路径不可失败（#187）**：终局续期是**通用**的——每个消费者任务都由 `_spawn_worker()` 创建并挂上 `_on_worker_done`，只要它不是被取消（意图性收口：interrupt 阶梯 / shutdown）、仍是当前 worker、且 agent 未关闭，就以异常收场即自动重建（否则 inbox 里的消息再无人消费：status 仍是 idle、投递没有任何反应，即"僵尸态"）。三条闸门都以 `self._worker is worker` 为准绳（同步回调里串行判定），与 `_arm_worker_renewal`（阶梯放手后被保留 worker 的续期，它连取消收场也兜住）互不抢建，绝不出现第二个消费者。已知边界：worker 被 `BaseException` 掀翻时只重建消费者、不替客户端收口（本轮没有 `turn_result` / `error` / `done`，前端等下一次投递的事件回 idle）。
+
+与它配对的是**上报路径不可失败**：兜底 handler 的收尾动作（`turn_result` / `error` / `done`）与它报告的故障常常同源——落盘正是刚坏掉的资源（如 ENOSPC）。`AgentEventSink.best_effort()` 窗口把这条契约写在调用点上：落盘失败降级为 ERROR 日志，事件仍尽力广播（前端靠它复位 working 态），绝不抛出（严格发射会在 except 块里再抛一次，同层接不住，异常逃出 `run_turn` 与 worker 的 drain 循环——这正是 #187 的僵尸链路）。runtime 侧 session 级上报（`WingRuntime._emit_session_event`：打断 / 回退 / 压缩 / 状态变更的**已生效**动作报告）走同一原语 `emit_best_effort`——落盘失败不再让 `POST /api/session/interrupt` 返回 500、也不再把事件本身丢掉。代价是磁盘上可能缺这条记录（报告是记账，不是事实）：resume 重放以磁盘为准。
 
 ## 模型调用：无状态 provider 与共享池
 
