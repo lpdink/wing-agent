@@ -1,35 +1,33 @@
 //! 模型选择：`model` session config option 的构造、热切换与外部变更中继。
 //!
 //! ACP 的模型选择 = **session config option**（`category: "model"` 的 select）：客户端从
-//! `session/new` / `session/load` / `session/resume` 响应的 `configOptions` 里渲染下拉，
-//! 用户选中某一项 → `session/set_config_option`；本模块把值翻译成
-//! `POST /api/session/update {model_id}`，成功后回**全量** options（协议语义）。
+//! `session/new` / `session/load` / `session/resume` 响应的 `configOptions` 里渲染下拉，用户选中
+//! 某一项 → `session/set_config_option`；本模块把值翻译成 `POST /api/session/update {model_id}`，
+//! 成功后回**全量** options（协议语义）。
 //!
 //! # 值域
 //!
-//! 广告出去的值 id **就是 model_id**（全局唯一引用词，`providers[].models` 的 `id`）——
-//! 不用 provider 前缀消歧：同名模型跨 provider 各自有独立 id，值原样回送即命中。
-//! label = 声明的 `display_name`（缺省回落调用名），group = provider（展示分组）。
+//! 广告出去的值 id **就是 model_id**（全局唯一引用词，`providers[].models` 的 `id`）——不用
+//! provider 前缀消歧：同名模型跨 provider 各自有独立 id，值原样回送即命中。label = 声明的
+//! `display_name`（缺省回落调用名），group = provider（展示分组）。
+//! `currentValue`（[`SessionModel::current_value_id`]）= 会话当前的 model_id；为空（旧会话 metadata
+//! 无 id 且反查不中）时回落调用名，**不编任何前缀**。
 //!
-//! `currentValue`（[`SessionModel::current_value_id`]）= 会话当前的 model_id；为空
-//! （旧会话 metadata 无 id 且反查不中）时回落调用名，**不编任何前缀**。
-//!
-//! 未命中 id 的校验在**网关**（400，错误文案含 available ids 与 name 提示）——前端
-//! 只做「非空值」的本地检查，不猜、不回落、不解析字符串结构。
+//! 未命中 id 的校验在**网关**（400，错误文案含 available ids 与 name 提示）——前端只做「非空值」
+//! 的本地检查，不猜、不回落、不解析字符串结构。
 //!
 //! # 当前状态的数据源
 //!
 //! `GET /api/session/get` 的 `agent: AgentInfo`——`model_id` / `provider_name` /
-//! `model_display_name` 都在这里（info 端点有 `model_id` + `provider_name`，但 agent
-//! 才是本模块一直对账的那一份）。
+//! `model_display_name` 都在这里（info 端点有 `model_id` + `provider_name`，但 agent 才是本模块一直
+//! 对账的那一份）。
 //!
 //! # 中继
 //!
-//! 其它前端（TUI / 编排 CLI）改模型时网关广播 `session_state_changed{model_id}`；本模块
-//! 重新取权威状态构造全量 options，以 `config_option_update` 推给客户端。**触发点在
-//! [`super::session::SessionHub::dispatch`] 而不是 prompt 轮次的事件循环**：该事件与
-//! 「有没有在途 prompt」无关，空闲时会话事件通道没有消费者（分流即丢弃），写在轮次里
-//! 几乎永不触发（design D7）。
+//! 其它前端（TUI / 编排 CLI）改模型时网关广播 `session_state_changed{model_id}`；本模块重新取权威
+//! 状态构造全量 options，以 `config_option_update` 推给客户端。**触发点在
+//! [`super::session::SessionHub::dispatch`] 而不是 prompt 轮次的事件循环**：该事件与「有没有在途
+//! prompt」无关，空闲时会话事件通道没有消费者（分流即丢弃），写在轮次里几乎永不触发（design D7）。
 
 use std::sync::Arc;
 

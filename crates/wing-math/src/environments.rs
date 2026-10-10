@@ -85,7 +85,7 @@ fn takes_count_arg(name: &str) -> bool {
 /// `chars` 是**归一化之后**的整条公式；`depth` 是当前的环境嵌套深度（单元格递归时会 +1）。
 ///
 /// 返回 [`Reject`] 表示"这个环境（或它的某个单元格/前后缀）渲染不了"。**必须整条上抛**：
-/// 单元格渲染失败绝不能退化成"空格占位"——那就是静默丢内容（review r1 的 B1）。
+/// 单元格渲染失败绝不能退化成"空格占位"——那就是静默丢内容。
 pub(crate) fn render_multiline_env(
     chars: &[char],
     span: &EnvSpan,
@@ -179,7 +179,7 @@ fn parse_array_spec(spec: &str) -> Option<Vec<ColAlign>> {
             // 列间距线：我们不做间距，忽略是安全的
             '|' | ' ' | '\t' => {}
             // 其它（`p{2cm}` / `@{}` / `*{}` / 嵌套组里的内容…）我们既不理解、
-            // 也无法渲染 —— 忽略就等于静默丢内容（review r3 的 N2），整条降级
+            // 也无法渲染 —— 忽略就等于静默丢内容，整条降级
             _ => return None,
         }
     }
@@ -203,7 +203,7 @@ fn align_of(kind: EnvKind, spec: &[ColAlign], col: usize) -> ColAlign {
 
 /// 把 body 切成网格：`\\` 分行、`&` 分列、每格独立排版、按列对齐堆叠。
 ///
-/// 任一单元格渲染失败都会把 [`Reject`] 上抛（**不允许**用空格占位，见 review r1 的 B1）。
+/// 任一单元格渲染失败都会把 [`Reject`] 上抛（**不允许**用空格占位）。
 fn build_grid(
     kind: EnvKind,
     spec: &[ColAlign],
@@ -319,7 +319,7 @@ fn render_cell(src: &str, depth: usize) -> Result<Option<RenderedBlock>, Reject>
                 return Ok(None);
             }
             // 渲染出来只有空白（`\sqrt{}` / `\,` 这类）：交给 Empty 语义处理，
-            // 不能让它在网格里留下一行空白（review r2 的 N2）
+            // 不能让它在网格里留下一行空白
             if !block
                 .cells()
                 .iter()
@@ -340,7 +340,7 @@ fn row_width(row: &[String]) -> usize {
     row.iter().map(|c| UnicodeWidthStr::width(c.as_str())).sum()
 }
 
-/// 让块的每一行都有相同的**显示宽度**（review r1 的 N2）。
+/// 让块的每一行都有相同的**显示宽度**。
 ///
 /// 上游 `RenderedBlock` 在宽字符（CJK/emoji）参与组合时，"格数"与"列数"会不一致
 /// （`from_text` 一格一个 `char`，而 `width` 按 `unicode-width` 记账），于是块内各行

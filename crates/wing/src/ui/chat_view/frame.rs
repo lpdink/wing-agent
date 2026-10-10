@@ -1,22 +1,18 @@
-//! The frame snapshot and the selection face: screen ↔ content mapping, the
-//! highlight, and the copy-on-select source.
+//! The frame snapshot and the selection face: screen ↔ content mapping, the highlight, and the
+//! copy-on-select source.
 //!
-//! The one thing this module owns is [`FrameSnapshot`] — what the chat band
-//! *looked like* in a drawn frame, as row-level graphemes with their cell
-//! padding. A selection reads the snapshot for its text and the frame
-//! geometry for the pointer mapping / highlight, and nothing here decides
-//! anything about scrolling.
+//! The one thing this module owns is [`FrameSnapshot`] — what the chat band *looked like* in a drawn
+//! frame, as row-level graphemes with their cell padding. A selection reads the snapshot for its
+//! text and the frame geometry for the pointer mapping / highlight; nothing here decides anything
+//! about scrolling.
 //!
-//! The only place this module looks into the content model is
-//! [`ChatView::visible_row_insets`]: the per-row padding is a property of the
-//! *layout* the render walk produced, and the walk lives in `super::viewport`
-//! (the two must stay in sync — see the note on that method).
+//! The only place this module looks into the content model is [`ChatView::visible_row_insets`]: the
+//! per-row padding is a property of the *layout* the render walk produced, and that walk lives in
+//! `super::viewport` — the two must stay in sync.
 //!
-//! The buffer walk is deliberately the *only* way the rendered rows are
-//! observed (`buffer_row_graphemes`): the frame is the authority on what the
-//! user saw — links ride inside the cell symbols, wide graphemes occupy two
-//! cells, and the render path's padding rows are recognized here. The pure
-//! text maths (row spans, wide-grapheme handling, trimming) stays in
+//! The buffer walk ([`buffer_row_graphemes`]) is deliberately the *only* way rendered rows are
+//! observed: the frame is the authority on what the user saw (links ride inside the cell symbols,
+//! wide graphemes occupy two cells, padding rows are recognized here). The pure text maths stays in
 //! [`crate::ui::selection`], which knows nothing about ratatui.
 
 use ratatui::buffer::Buffer;
@@ -39,17 +35,14 @@ use super::ChatView;
 
 /// Snapshot of the chat band as one frame drew it — the copy-on-select source.
 ///
-/// Copy-on-select is WYSIWYG: the release event lands between frames, so the
-/// text has to come from a frame the user was actually looking at. And
-/// because the rows were captured out of *that* frame's buffer, the snapshot
-/// carries that frame's own coordinates ([`Self::scroll_offset`],
-/// [`Self::width`]) instead of borrowing the live geometry — the snapshot is
-/// self-describing, so a copy can never mix rows from one frame with the
-/// coordinates of another.
+/// Copy-on-select is WYSIWYG: the release event lands between frames, so the text has to come from a
+/// frame the user was actually looking at. Because the rows were captured out of *that* frame's
+/// buffer, the snapshot carries that frame's own coordinates ([`Self::scroll_offset`],
+/// [`Self::width`]) rather than borrowing the live geometry — a copy can never mix rows from one
+/// frame with the coordinates of another.
 ///
-/// Refreshed only while a drag is in flight (see
-/// [`ChatView::capture_visible_rows`]), so an idle app pays nothing. An empty
-/// snapshot means "nothing to copy": the release path then produces no
+/// Refreshed only while a drag is in flight (see [`ChatView::capture_visible_rows`]), so an idle app
+/// pays nothing. An empty snapshot means "nothing to copy": the release path then produces no
 /// clipboard intent and no feedback.
 #[derive(Debug, Clone, Default)]
 pub(super) struct FrameSnapshot {
@@ -178,16 +171,14 @@ impl ChatView {
             && row < area.bottom()
     }
 
-    /// Map a screen position to a content point, clamping the pointer into
-    /// the visible band *and* into the content.
+    /// Map a screen position to a content point, clamping the pointer into the visible band *and*
+    /// into the content.
     ///
-    /// Clamping (rather than rejecting out-of-band coordinates) is what makes
-    /// edge drags work: the pointer may sit on the status bar / composer, yet
-    /// the selection still ends on the chat band's first / last visible row —
-    /// which is also what the edge auto-scroll then scrolls from. The extra
-    /// clamp against the content height keeps the coordinates meaningful when
-    /// the content is shorter than the band (the blank rows below it are not
-    /// content).
+    /// Clamping (rather than rejecting out-of-band coordinates) is what makes edge drags work: the
+    /// pointer may sit on the status bar / composer, yet the selection still ends on the chat band's
+    /// first / last visible row — which is also what the edge auto-scroll then scrolls from. The
+    /// extra clamp against the content height keeps the coordinates meaningful when the content is
+    /// shorter than the band (the blank rows below it are not content).
     pub fn content_point_at(&self, column: u16, row: u16) -> Option<SelectionPoint> {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
@@ -222,20 +213,17 @@ impl ChatView {
 
     /// Snap a drag focus to the right edge of the grapheme under it.
     ///
-    /// The pointer selects the character it rests on (reference behaviour):
-    /// stopping on `d` copies through the `d` instead of cutting before it.
-    /// Uses the last snapshot, which describes exactly the frame the pointer
-    /// coordinates were mapped through; rows outside it are left untouched, and
-    /// a click never reaches here (no drag event), so "press and release
-    /// without moving = no selection" is unaffected.
+    /// The pointer selects the character it rests on (reference behaviour): stopping on `d` copies
+    /// through the `d` instead of cutting before it. Uses the last snapshot, which describes exactly
+    /// the frame the pointer coordinates were mapped through; rows outside it are left untouched,
+    /// and a click never reaches here (no drag event), so "press and release without moving = no
+    /// selection" is unaffected.
     ///
     /// # Precondition
     ///
-    /// Like [`Self::selected_text`], `point` must come from the frame the
-    /// snapshot was captured from (`content_point_at` on that frame's
-    /// geometry) — that is what "the frame the pointer coordinates were
-    /// mapped through" means, and the snapshot's own coordinates are what
-    /// index its rows.
+    /// Like [`Self::selected_text`], `point` must come from the frame the snapshot was captured from
+    /// (`content_point_at` on that frame's geometry) — the snapshot's own coordinates index its
+    /// rows.
     pub fn snap_focus_right(&self, point: SelectionPoint) -> SelectionPoint {
         if self.snapshot.is_empty() {
             // No drag frame has been captured yet — there is no rendered
@@ -258,16 +246,14 @@ impl ChatView {
 
     /// Paint the highlight for `bounds` into the frame's buffer.
     ///
-    /// A pure overlay: the cell styles coming out of the widget render are
-    /// merged with `REVERSED` (`Cell::set_style` keeps fg/bg and only inserts
-    /// the modifier), so the terminal's underlying colors survive. Nothing is
-    /// cleaned up afterwards — the buffer is refilled by the widgets on the
-    /// next frame, so a selection that is gone simply is not painted again.
+    /// A pure overlay: the cell styles coming out of the widget render are merged with `REVERSED`
+    /// (`Cell::set_style` keeps fg/bg and only inserts the modifier), so the terminal's underlying
+    /// colors survive. Nothing is cleaned up afterwards — the buffer is refilled by the widgets on
+    /// the next frame, so a selection that is gone simply is not painted again.
     ///
-    /// Clipping uses the chat band of the last frame only; rows outside the
-    /// band (status bar, composer, popups) are never touched. Wide graphemes
-    /// are painted as a whole (all of their cells), so a partially selected
-    /// CJK / emoji character is never half-inverted.
+    /// Clipping uses the chat band of the last frame only; rows outside the band (status bar,
+    /// composer, popups) are never touched. Wide graphemes are painted as a whole, so a partially
+    /// selected CJK / emoji character is never half-inverted.
     pub fn paint_selection(&self, buf: &mut Buffer, selection: &Selection) {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
@@ -305,14 +291,13 @@ impl ChatView {
 
     /// Snapshot the visible rows as graphemes — the copy-on-select source.
     ///
-    /// Called from the draw pass while a drag is in flight (never on the
-    /// release itself: the frame the user was looking at is the authority).
-    /// Each row also records the columns its cell fills with *padding*, so the
-    /// copy can skip the inset a user message draws before its text without
+    /// Called from the draw pass while a drag is in flight (never on the release itself: the frame
+    /// the user was looking at is the authority). Each row also records the columns its cell fills
+    /// with *padding*, so the copy can skip the inset a user message draws before its text without
     /// touching indentation that is part of the content.
     ///
-    /// The whole snapshot is replaced in one assignment, so a failure between
-    /// rows could never leave a half-captured frame behind.
+    /// The whole snapshot is replaced in one assignment, so a failure between rows could never leave
+    /// a half-captured frame behind.
     pub fn capture_visible_rows(&mut self, buf: &Buffer) {
         let area = self.geometry.area;
         if area.width == 0 || area.height == 0 {
@@ -325,18 +310,14 @@ impl ChatView {
 
     /// Left padding (in columns) of every visible band row, in row order.
     ///
-    /// Only the user-message cells inset their text (`cell_area.x + 2`); every
-    /// other cell starts at the band's left edge. The rows are walked exactly
-    /// like the render walks them (header → cells → pending), so a row's inset
-    /// belongs to whichever entry drew it. Rows of an entry that is scrolled
-    /// out of the band contribute nothing, which the caller reads as "no
-    /// padding".
+    /// Only the user-message cells inset their text (`cell_area.x + 2`); every other cell starts at
+    /// the band's left edge. The rows are walked exactly like the render walks them (header → cells
+    /// → pending), so a row's inset belongs to whichever entry drew it. Rows of an entry scrolled out
+    /// of the band contribute nothing, which the caller reads as "no padding".
     ///
-    /// MIRRORS the render walk in `super::viewport`'s widget (same order, same
-    /// cached heights, same user-message inset): a layout change there must be
-    /// mirrored here, and the copy-side test
-    /// `snapshot_row_insets_match_the_rendered_rows` is what turns red when the
-    /// two drift apart.
+    /// MIRRORS the render walk in `super::viewport`'s widget (same order, same cached heights, same
+    /// user-message inset): a layout change there must be mirrored here, and
+    /// `snapshot_row_insets_match_the_rendered_rows` is the test that turns red when the two drift.
     fn visible_row_insets(&self, visible: u16) -> Vec<u16> {
         let top = self.geometry.scroll_offset;
         let bottom = top + visible as usize;
@@ -383,13 +364,11 @@ impl ChatView {
     ///
     /// # Precondition
     ///
-    /// `bounds` must be content coordinates of the frame the snapshot was
-    /// captured from — map the pointer through `content_point_at` on that
-    /// frame's geometry (which is what `App` does: every press-active draw
-    /// captures, so the snapshot and the geometry always describe the same
-    /// frame). The extraction uses the snapshot's own `scroll_offset` /
-    /// `width`, so rows from another frame would silently index the wrong
-    /// lines.
+    /// `bounds` must be content coordinates of the frame the snapshot was captured from — map the
+    /// pointer through `content_point_at` on that frame's geometry (which is what `App` does: every
+    /// press-active draw captures, so snapshot and geometry always describe the same frame). The
+    /// extraction uses the snapshot's own `scroll_offset` / `width`, so rows from another frame would
+    /// silently index the wrong lines.
     pub fn selected_text(&self, bounds: (SelectionPoint, SelectionPoint)) -> Option<String> {
         self.snapshot.text(bounds)
     }

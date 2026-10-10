@@ -20,7 +20,7 @@
 //! agent→client 请求，后续 ask 留在会话事件缓冲里排队（与 TUI `ask_panels` 的 FIFO 队列
 //! 同语义）。因此答案永远在轮次内回写，不需要 detached 任务的簿记，也不存在「终态之后才到
 //! 的答案」竞态。等待时同时等 `SessionHub::stream_dead()`：WS 一断就用
-//! [`default_answer`] 收口（review r1 N-1）。
+//! [`default_answer`] 收口。
 //!
 //! 可测性：整条流程（`resolve_with`）只依赖 [`AskInteraction`] 这一小片交互面，
 //! 单测用脚本化 mock 驱动，不需要真实连接。
@@ -634,7 +634,7 @@ fn answer_text(value: Option<&ElicitationContentValue>) -> String {
 /// 注意：**只有 `cancelled` 才停**。看板客户端在「同意」时未必回 `selected`——只提供
 /// Approve/Reject 二态的实现（omnigent 的 yes/no 桥）在找不到 `allow_*` 选项时会回
 /// `cancelled`（`_permission_outcome` 的兜底）。因此每道题**必须**至少有一条 `allow_once`
-/// 选项（见 [`fallback_options`]），否则它后面的题目会被整批吞掉（review r1 S-1）。
+/// 选项（见 [`fallback_options`]），否则它后面的题目会被整批吞掉。
 async fn fallback_questions(
     interaction: &impl AskInteraction,
     session_id: &SessionId,
@@ -712,7 +712,7 @@ fn option_id_for(question_index: usize, option_index: usize) -> String {
 /// - `Skip`（`reject_once`，[`SKIP_OPTION_ID`]）——「拒绝 / 跳过」语义的落点；
 /// - 自由文本题**额外**一条 `Continue`（`allow_once`，[`CONTINUE_OPTION_ID`]）——没有它，
 ///   只给 Approve/Reject 的客户端（权限卡片收不到自由文本）在「同意」时会回 `cancelled`
-///   outcome，被我们按规范判成「轮次已取消」，后面的题目整批不再询问（review r1 S-1）。
+///   outcome，被我们按规范判成「轮次已取消」，后面的题目整批不再询问。
 ///   顺带让选项数 ≥2 且含 `reject_*`，这类客户端会直接渲染选项卡而不是二态卡。
 fn fallback_options(question: &AskQuestion, question_index: usize) -> Vec<PermissionOption> {
     let options = enum_options(question);
@@ -1443,7 +1443,7 @@ mod tests {
 
     // ---- ③ 回退 ----
 
-    /// review r1 S-1 的最小复现形状：自由文本题在前、有选项的题在后。
+    /// 最小复现形状：自由文本题在前、有选项的题在后。
     fn free_text_first_ask() -> WingEvent {
         event(json!({
             "type": "ask",

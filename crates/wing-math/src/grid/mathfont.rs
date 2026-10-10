@@ -1,20 +1,15 @@
 // ---------------------------------------------------------------------------
 // 来源（vendored，逐字内联）
-//   crate   : term-maths
-//   version : 1.0.0
-//   repo    : 包元数据未声明 repository（crates.io `term-maths`；发布时
-//             `.cargo_vcs_info.json` git sha1 = 5a2de3b29f1d4cec72c8685b8d52ddfb53519676）
-//   license : MIT OR Apache-2.0，Copyright (c) 2026 Jack Geraghty
+//   crate   : term-maths 1.0.0 — MIT OR Apache-2.0, Copyright (c) 2026 Jack Geraghty
 //             （原文见 crate 根 LICENSE-MIT / LICENSE-APACHE）
+//   repo    : 包元数据未声明 repository（crates.io `term-maths`；发布时 `.cargo_vcs_info.json`
+//             git sha1 = 5a2de3b29f1d4cec72c8685b8d52ddfb53519676）
 //   原路径  : mathfont.rs
 //
-// 本地改动（相对上游）：
-//   1. 模块路径：`rust_latex_parser::` -> `crate::latex::`，
-//      `crate::xxx` -> `crate::grid::xxx`（内联后模块位置变化）。
-//   2. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
-//      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
-//      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上两点外与上游逐字一致（含文件内联测试）。
+// 本地改动（相对上游）：模块路径 `rust_latex_parser::` -> `crate::latex::`、`crate::xxx` ->
+// `crate::grid::xxx`；运行过 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净 —— 上游文件未经
+// rustfmt 处理故有纯空白差异，已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对）。除上述改动
+// 外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! Unicode Mathematical Alphanumeric Symbols mapping (U+1D400–U+1D7FF).

@@ -1,35 +1,31 @@
 //! The text-selection gesture — its lifecycle, its rules and its timers.
 //!
-//! A drag is one session with four pieces of state, all owned by
-//! [`SelectionSession`]:
+//! A drag is one session with four pieces of state, all owned by [`SelectionSession`]:
 //!
-//! * the anchor / focus state machine ([`Selection`], `ui::selection`) — the
-//!   coordinates themselves;
-//! * the **fingerprint** of the region the press landed in ([`SelectionGuard`])
-//!   — see [`SelectionSession::needs_abort`] for the one invalidation rule;
-//! * the markdown link recorded under the pointer at press time — a click opens
-//!   *that* link, never whatever scrolled under the pointer since;
-//! * the edge auto-scroll **deadline** (absolute, see
-//!   [`SELECTION_AUTOSCROLL_DELAY`]).
+//! * the anchor / focus state machine ([`Selection`], `ui::selection`) — the coordinates themselves;
+//! * the **fingerprint** of the region the press landed in ([`SelectionGuard`]) — see
+//!   [`SelectionSession::needs_abort`] for the one invalidation rule;
+//! * the markdown link recorded under the pointer at press time — a click opens *that* link, never
+//!   whatever scrolled under the pointer since;
+//! * the edge auto-scroll **deadline** (absolute, see [`SELECTION_AUTOSCROLL_DELAY`]).
 //!
-//! Two rules that used to be written twice in the app root live here once:
+//! Two rules live here once, for both readers:
 //!
-//! * **invalidation** — `needs_abort` is read by the frame (a structural change
-//!   can land between two frames) and by the release (it can land in the same
-//!   loop iteration); both get the same verdict from the same predicate;
-//! * **the timer invariant** — there is no deadline without a drag: every way a
-//!   gesture ends (release, cancel, invalidation, reaching the content edge, a
-//!   composer press) goes through [`SelectionSession::cancel`] /
-//!   [`SelectionSession::release`] / [`SelectionSession::stop_edge_scroll`].
+//! * **invalidation** — `needs_abort` is read by the frame (a structural change can land between two
+//!   frames) and by the release (it can land in the same loop iteration); both get the same verdict
+//!   from the same predicate;
+//! * **the timer invariant** — there is no deadline without a drag: every way a gesture ends
+//!   (release, cancel, invalidation, reaching the content edge, a composer press) goes through
+//!   [`SelectionSession::cancel`] / [`SelectionSession::release`] /
+//!   [`SelectionSession::stop_edge_scroll`].
 //!
-//! The session owns *coordinates and rules*; the effects (placing the cursor,
-//! pushing a clipboard / open-link intent) stay with [`App`], which is also
-//! where the fingerprints are read from (chat structure, draft, frame width).
+//! The session owns *coordinates and rules*; the effects (placing the cursor, pushing a clipboard /
+//! open-link intent) stay with [`App`], which is also where the fingerprints are read from (chat
+//! structure, draft, frame width).
 //!
-//! Call directions: [`super::mouse`] dispatches presses, drags and releases in
-//! here; the frame calls `cancel_selection` when a fingerprint expired and
-//! paints through [`SelectionSession::state`]; the run loop parks its timer arm
-//! on [`selection_autoscroll_tick`].
+//! Call directions: [`super::mouse`] dispatches presses, drags and releases in here; the frame calls
+//! `cancel_selection` when a fingerprint expired and paints through [`SelectionSession::state`]; the
+//! run loop parks its timer arm on [`selection_autoscroll_tick`].
 
 use std::time::Duration;
 use std::time::Instant;

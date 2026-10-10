@@ -278,14 +278,13 @@ fn code_regions_are_never_parsed() {
 }
 
 /// Code-block content must survive byte for byte — including when the code
-/// block was opened by a fence line that ends a container (review r3: the
+/// block was opened by a fence line that ends a container (the
 /// normalization scanner used to read `> ~~~ … \n~~~` as "the fence closed"
 /// while the parser reads the bare fence as a NEW top-level fence, so the
 /// swallowed content was rewritten).
 #[test]
 fn code_after_a_bare_fence_line_is_never_rewritten() {
     for md in [
-        // The review's reproduction.
         "> ~~~\n> a\n~~~\n\n\\(x\\) after",
         "> ~~~\n> a\n\n~~~\n\n\\(x\\) after",
         "> ~~~\n> a\n~~~   \n\n\\(x\\) after",
@@ -399,14 +398,14 @@ fn off_and_text_differ_only_where_math_renders() {
 }
 
 // ============================================================
-// 4b. Inline math is prose (wrap regression, review r1 / B1)
+// 4b. Inline math is prose (wrap regression)
 // ============================================================
 
 /// A paragraph that contains an inline formula must wrap exactly like the same
 /// paragraph with the formula's rendered text spelled out as plain text — same
 /// line breaks, same continuation indent.
 ///
-/// This is the regression the review caught: while a `Math` segment forced the
+/// Regression: while a `Math` segment forced the
 /// whole line out of the prose-wrapper, the line fell through to the compose's
 /// character-level hard wrap (words cut in half, the two-column continuation
 /// indent lost) as soon as it was wider than the cell.
@@ -483,7 +482,7 @@ fn overwide_degraded_inline_math_wraps_like_text() {
 }
 
 // ============================================================
-// 4c. Regions pulldown does not parse as text (review r1 / S1, S2)
+// 4c. Regions pulldown does not parse as text
 // ============================================================
 
 /// Rewriting a link destination changes the URL the user clicks (and the OSC8
@@ -583,7 +582,7 @@ fn prefixed_code_blocks_are_never_rewritten() {
 }
 
 // ============================================================
-// 4d. Tab-indented lines (review r2 / B1) and reference definitions (r2 / S2)
+// 4d. Tab-indented lines and reference definitions
 // ============================================================
 
 /// Tab-indented lines must render — and stream — without panicking.

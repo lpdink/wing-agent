@@ -101,7 +101,7 @@ fn node(key: &str, kind: SettingKind) -> SettingNode {
     }
 }
 
-/// 递归重算全部 path（**与 07/08 的夹具同口径**，review N1）：
+/// 递归重算全部 path（**与产品 catalog 同口径**）：
 /// `key == "[]"`（元素模板）产出 `<prefix>[]` 而不是 `<prefix>.[]`，并且
 /// `element` / `variants` 也要跟着重算 —— 漏掉任何一条，列表内字段（`providers[].api_key`）
 /// 的 catalog 路径就与 `flatten` 产出的模板路径对不上，搜索类用例会**静默空转**。
@@ -455,7 +455,7 @@ fn paste_while_the_panel_is_open_does_not_reach_the_draft() {
     assert_eq!(app.input.text(), "hello");
 }
 
-/// N4（review_r1）：设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
+/// N4：设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
 /// ask（AD2：面板开着时到达的 ask 入队但不弹）。顺序反过来的话，`Ctrl+V` 会写进
 /// 那条**看不见**的 ask 内联编辑器里。
 #[test]
@@ -697,7 +697,7 @@ fn has_bar_glyph(buf: &ratatui::buffer::Buffer) -> bool {
     false
 }
 
-/// S2（review_r1）：overlay 期间**不绘制**滚动条，且 hover / drag 态在打开那一刻
+/// S2：overlay 期间**不绘制**滚动条，且 hover / drag 态在打开那一刻
 /// 就交出去 —— 不交出去的话关掉面板后拖拽态会复活（强调字形重新出现）。
 #[test]
 fn the_open_panel_hands_the_scrollbar_over_and_gives_it_back_on_close() {
@@ -772,7 +772,7 @@ fn editing_an_interface_color_through_the_real_key_path_previews_it() {
     assert!(app.needs_full_redraw, "调色板变了要整屏重画");
 }
 
-/// S1 的专门守卫（review_r1 的 M-E 从这里穿过去）：`apply_palette` 必须**主动**
+/// S1 的专门守卫：`apply_palette` 必须**主动**
 /// 置 `needs_full_redraw` —— 调色板不在 ratatui 的 diff 键里，不整屏重画就会留残影。
 #[test]
 fn a_preview_asks_for_a_full_redraw() {
@@ -1409,7 +1409,7 @@ fn the_panel_contract_used_by_the_app_is_stable() {
 
 // ── 8b. 重启路径的早退分支（N6） ───────────────────────────
 
-/// N6（review_r1）：`restart_gateway` 连"没有 transport"这条早退都没有测试。
+/// N6：`restart_gateway` 连"没有 transport"这条早退都没有测试。
 /// 它不需要真网关：没有连接时直接 toast + return，**不产出任何副作用**。
 #[tokio::test]
 async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
@@ -1434,7 +1434,7 @@ async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
     assert!(app.drain_intents().is_empty(), "早退不产出任何副作用");
 }
 
-// ── 浮层的两条边界（审查 S1 / S4）────────────────────────────
+// ── 浮层的两条边界────────────────────────────
 
 /// 一张带链接的聊天 + 一台 100×30 的终端：链接的 hit box 落在卡片底下。
 fn app_with_link_under_the_card() -> App {
@@ -1503,7 +1503,7 @@ fn a_drag_on_the_card_does_not_copy_a_stale_snapshot() {
     app.handle_mouse(mouse_drag((at.0 + 4, at.1)));
     app.handle_mouse(mouse_release((at.0 + 4, at.1)));
     // 选区绘制被浮层挡掉、`capture_visible_rows` 也不跑：与其复制到打开面板前
-    // 那一帧的快照，不如根本不认领这个手势（审查 S1 第 2 条）。
+    // 那一帧的快照，不如根本不认领这个手势。
     assert!(app.drain_intents().is_empty(), "浮层期间不产生复制意图");
     assert!(!app.selection.is_press_active(), "没有留下半截选区");
 }

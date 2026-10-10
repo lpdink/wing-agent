@@ -1,11 +1,9 @@
 //! Setup TUI —— 首次运行 / 配置损坏时的修复循环（design §16，D22）。
 //!
-//! 它是**在 `App` 之前的一个更小的东西**：没有 session、没有 WS、没有意图队列，
-//! 绝不进 `run_app`（`App.session_id` 是 `String` 非 `Option`，处处假定有会话；
-//! 硬套会污染几十处——design §16.3 的整个设计就是为了避免这个改动）。
-//! 终端生命周期（`init_terminal` / `restore_terminal` / panic hook）归**调用方**
-//! （[`crate::cmd::run_tui`]），这里只借 `&mut Terminal<B>` 画帧；于是 setup 阶段的
-//! panic 也走同一套恢复序列，不会把终端留在 raw mode。
+//! 它是**在 `App` 之前的一个更小的东西**：没有 session、没有 WS、没有意图队列，绝不进 `run_app`
+//! （`App.session_id` 是 `String` 非 `Option`，处处假定有会话，硬套会污染几十处）。终端生命周期
+//! （`init_terminal` / `restore_terminal` / panic hook）归**调用方**（[`crate::cmd::run_tui`]），这里
+//! 只借 `&mut Terminal<B>` 画帧；于是 setup 阶段的 panic 也走同一套恢复序列，不会把终端留在 raw mode。
 //!
 //! 画面 = 背板 + 前景：
 //!
@@ -19,14 +17,12 @@
 //! └───────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! 背板复用 [`crate::ui::welcome`] 的**帧数据与绘制原语**（`art` 的字母网格、
-//! `sprite` 的半格渲染、`wordmark` 的渐变大字），**不复用** `Welcome` 结构体
-//! ——它绑定 chat header 的宽度阶梯与可见性门控。前景就是 10 接好的同一个
-//! [`SettingsPanel`] + [`SettingsOverlay`]，首屏 = 问题清单（D11）。
+//! 背板复用 [`crate::ui::welcome`] 的**帧数据与绘制原语**（`art` 的字母网格、`sprite` 的半格渲染、
+//! `wordmark` 的渐变大字），**不复用** `Welcome` 结构体——它绑定 chat header 的宽度阶梯与可见性门控。
+//! 前景就是同一个 [`SettingsPanel`] + [`SettingsOverlay`]，首屏 = 问题清单（D11）。
 //!
-//! 三个前端共用这里的预检（[`preflight_config`] / [`preflight_or_report`]）。
-//! **stdout 一个字节都不写**（stdio / ACP 的协议帧通道就是这条 stdout 的语义）：
-//! 本模块唯一的打印点是降级报告的 `eprint!`。
+//! 三个前端共用这里的预检（[`preflight_config`] / [`preflight_or_report`]）。**stdout 一个字节都不
+//! 写**（stdio / ACP 的协议帧通道就是这条 stdout 的语义）：本模块唯一的打印点是降级报告的 `eprint!`。
 #![allow(clippy::print_stderr)]
 
 use std::process::ExitCode;
@@ -2023,7 +2019,7 @@ mod tests {
         assert!(screen.contains("✓ 配置就绪"), "状态行要看得见：\n{screen}");
     }
 
-    /// S1 的最小复现（审查者的脚本）：`[Resize, ctrl_c]` —— Resize 之后按键仍被处理，
+    /// S1 的最小复现：`[Resize, ctrl_c]` —— Resize 之后按键仍被处理，
     /// 所以第一击 Ctrl+C 的提示必须出现在终帧上。
     #[tokio::test]
     async fn a_resize_event_does_not_swallow_the_next_key() {

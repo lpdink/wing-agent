@@ -1,8 +1,7 @@
 //! ToolCallBlock — tool invocation with result display.
 //!
-//! Uses enum dispatch (`ToolRenderer`) for tool-specific header and result
-//! rendering. Known tools get tailored display; unknown tools fall back to
-//! generic rendering.
+//! Uses enum dispatch (`ToolRenderer`) for tool-specific header and result rendering. Known tools
+//! get tailored display; unknown tools fall back to generic rendering.
 //!
 //! Header examples:
 //!   ⦁ Bash(ls -la) 3s/30s        — live: elapsed/own timeout
@@ -386,7 +385,7 @@ pub struct ToolCallBlock {
     /// constant, NOT a fresh `started_at.elapsed()`. A cache invalidation
     /// (width change / palette preview) re-renders lines; recomputing then
     /// would show "time since the tool started", growing forever — the
-    /// fake-timeout reading again (#108, review).
+    /// fake-timeout reading again.
     timer_frozen_secs: Option<u64>,
     /// Incremental syntax highlight cache for Write/Edit streaming.
     /// Write: file content preview. Edit: new_string preview.
@@ -1159,7 +1158,7 @@ mod tests {
         assert!(!text.contains("s/"), "no frozen timeout pair: {text}");
     }
 
-    /// Review finding on #108: the frozen runtime must be *captured*, not
+    /// The frozen runtime must be *captured*, not
     /// recomputed. A settled card re-renders on any line-cache invalidation
     /// (width change / palette preview); an `elapsed()`-derived value would
     /// show "time since the tool started" — growing forever, which is the

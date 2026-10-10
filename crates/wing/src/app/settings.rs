@@ -776,7 +776,7 @@ pub(super) async fn restart_gateway(
 /// 单次探测带超时：在 WSL / 容器里 SYN 可能被静默丢掉（`cmd/start.rs` 的同款注释），
 /// 不设上限会把"等 10s"变成"等内核的 TCP 重试窗口"。
 ///
-/// **为什么要看端口**（review N5）：`start_gateway` 起手会做一次裸 TCP 占用检查，
+/// **为什么要看端口**：`start_gateway` 起手会做一次裸 TCP 占用检查，
 /// 而 uvicorn 优雅关闭的窗口里可能"health 已经不响应、listen socket 还没释放" ——
 /// 只看 health 就可能在那个窗口里往下走，于是 `Ctrl+R` 报"端口被占用"（其实旧网关
 /// 正在死，再按一次就成功）。这里用与 `start_gateway` **同一条判据**（连接成功 =

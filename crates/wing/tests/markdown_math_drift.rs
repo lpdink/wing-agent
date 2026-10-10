@@ -1,5 +1,5 @@
 //! Drift detection: the normalization scanner's “which regions are not prose”
-//! model must agree with what the parser actually does (review r4).
+//! model must agree with what the parser actually does.
 //!
 //! `math::normalize_delimiters` rewrites `\(…\)` / `\[…\]` / bare environments
 //! into `$…$` / `$$…$$`, but it must never touch a region markdown does not
@@ -10,7 +10,7 @@
 //! * **no region rewritten** (this file): the code and link segments of the
 //!   render must be byte-identical with `rendering.math = text` and `= off`;
 //!   any difference means a rewrite landed inside one of them — the failure
-//!   mode of three separate defects (r4/S1, S2a, S2b);
+//!   mode of three separate defects;
 //! * **prose is still rewritten** (the shape tests in `math_render.rs` and the
 //!   `stream_render_reconcile` matrix): a delimiter pair outside those regions
 //!   must be rewritten, otherwise the scanner over-protects.
@@ -120,7 +120,7 @@ const PIECES: &[&str] = &[
 
 /// Deterministic documents that place every protected-region opener next to
 /// every container/interrupter shape — the adjacencies the defects lived in
-/// (review r4: a broad HTML rule or a lax reference-definition continuation
+/// (a broad HTML rule or a lax reference-definition continuation
 /// only shows up when the *next* line is a fence opener, and a list-item fence
 /// only when a marker/blank follows).
 fn structured_corpus() -> Vec<String> {
@@ -303,7 +303,7 @@ fn prose_delimiters_are_always_rewritten() {
 /// one: for a document that is **entirely** non-prose, the rendered text must
 /// be the same with math on and off (no rewrite anywhere).
 ///
-/// This is where review r5/S1's HTML variant lives:
+/// The HTML variant:
 /// `<b>\n~~~~\n- a\n\\(x\\)\n` is one HTML block, so `\\(x\\)` must stay
 /// verbatim.
 #[test]

@@ -1,21 +1,17 @@
 //! Application state machine and main event loop.
 //!
-//! This file is the **composition root**: it holds the `App` state, runs the
-//! main loop and draws. Everything else lives in a lane module with one
-//! responsibility:
+//! This file is the **composition root**: it holds the `App` state, runs the main loop and draws.
+//! Everything else lives in a lane module with one responsibility:
 //!
 //! * [`commands`] — slash-command routing (table → handler → fetch projection);
 //! * [`projection`] — gateway events projected into chat / turn / status;
-//! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles.
+//! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles;
+//! * [`frame`] — the geometry of the frame just drawn; [`mouse`] — pointer gesture routing (its
+//!   priority chain declared once); [`selection_session`] — the drag's lifecycle (anchor,
+//!   fingerprint, edge auto-scroll).
 //!
-//! The interaction paths live in their own modules too: [`frame`] records the
-//! geometry of the frame just drawn, [`mouse`] routes pointer gestures — its
-//! priority chain declared once — and [`selection_session`] owns the drag's
-//! lifecycle (anchor, fingerprint, edge auto-scroll).
-//!
-//! State that the UI renders as well (the selection panels, the shared magic
-//! strings) is neutral and lives in [`crate::shared`] — this root only
-//! orchestrates it.
+//! State the UI renders as well (the selection panels, the shared magic strings) is neutral and
+//! lives in [`crate::shared`] — this root only orchestrates it.
 
 pub mod intent;
 pub mod popup_state;
@@ -300,14 +296,11 @@ impl App {
 
     /// 按当前宽度 / 时刻决定要不要重建欢迎屏 header，要就重建。
     ///
-    /// 每帧调用：海鸥动作 / 开屏扫光期间逐帧重建，定格且姿态没到点就一次不建
-    /// —— 动画 header 不该每帧重新分配。`welcome == None`（测试关掉了）时
-    /// 什么都不做，header 由调用方自己管。
-    ///
-    /// 两个门控信号：**干活**（`turn.working`，决定站姿还是飞行）与**在视口里**
-    /// （`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，
-    /// 常驻 idle 循环因此常态零成本。第三个信号是**会话事实**（skills / rules
-    /// 计数，SyncSession 到达时变化）：名牌右列的那一行随它重建。
+    /// 每帧调用：海鸥动作 / 开屏扫光期间逐帧重建，定格且姿态没到点就一次不建 —— 动画
+    /// header 不该每帧重新分配。两个门控信号：**干活**（`turn.working`，站姿还是飞行）与
+    /// **在视口里**（`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，常驻
+    /// idle 循环因此常态零成本。第三个信号是**会话事实**（skills / rules 计数，SyncSession
+    /// 到达时变化）：名牌右列那一行随它重建。`welcome == None`（测试关掉了）时什么都不做。
     fn sync_welcome(&mut self, palette: &ThemePalette, width: u16, now: std::time::Instant) {
         let working = self.turn.working;
         let visible = self.chat.header_in_view();
@@ -398,14 +391,11 @@ impl App {
     /// The picture lane's freshness check — the event loop's half of
     /// [`images::Images::poll_freshness`].
     ///
-    /// Called from the run loop when the lane says a check is due, **never**
-    /// from [`App::draw`]: it `stat`s the pictures on screen, and a picture
-    /// whose file changed drops the store's memo, which the next frame's
-    /// `sync` turns into a fresh header probe and a new encoding. Disabled
-    /// lanes (no protocol / `rendering.images: off`) short-circuit here, so
-    /// "off" still reads no file.
-    ///
-    /// `now` is injected so the throttle can be tested without sleeping.
+    /// Called from the run loop when the lane says a check is due, **never** from [`App::draw`]: it
+    /// `stat`s the pictures on screen, and a picture whose file changed drops the store's memo, which
+    /// the next frame's `sync` turns into a fresh header probe and a new encoding. Disabled lanes (no
+    /// protocol / `rendering.images: off`) short-circuit here, so "off" still reads no file. `now` is
+    /// injected so the throttle can be tested without sleeping.
     fn poll_image_freshness(&mut self, now: std::time::Instant) -> bool {
         if !self.images.is_enabled() {
             return false;
@@ -438,16 +428,14 @@ impl App {
         false
     }
 
-    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
+    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error): resets turn state,
+    /// render context and copy candidates. Callers handle their own specific follow-up (title,
+    /// toast, etc.).
     ///
-    /// Resets turn state, render context, and copy candidates.
-    /// Callers handle their own specific follow-up (title, toast, etc.).
-    ///
-    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method,
-    /// so any chat mutations by the caller (e.g. `clear_ask_state`,
-    /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
-    /// Currently safe because `collect_assistant_messages` only collects
-    /// `AssistantMessage` cells, which are unaffected by these mutations.
+    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method, so any chat
+    /// mutations by the caller (`clear_ask_state`, `chat.push(ErrorMessage)`) happen *after* the copy
+    /// cache is snapshotted. Currently safe because `collect_assistant_messages` only collects
+    /// `AssistantMessage` cells, which those mutations do not touch.
     fn finish_turn(&mut self) {
         self.turn.finish();
         self.ctx.reset();
@@ -606,16 +594,13 @@ impl App {
                 self.cancel_selection();
             }
 
-            // Layout: status (1) | chat (fill) | composer block | [popup].
-            // The composer is a fixed block below the scrollable chat
-            // viewport — it stays in view regardless of the chat scroll
-            // position. The card carries the frame, the draft and both rails
-            // (activity + meta): the rows the working indicator and the info
-            // separator used to take are inside it, so a running turn costs no
-            // row at all. The card *floats* inside its block (see
-            // `chrome::card_area`), so the height is asked for in the columns
-            // the card will really get — the request and the wrapping it
-            // produces have to describe the same frame.
+            // Layout: status (1) | chat (fill) | composer block | [popup]. The composer is a fixed
+            // block below the scrollable chat viewport, so it stays in view whatever the scroll
+            // position. The card carries the frame, the draft and both rails (activity + meta): the
+            // rows the working indicator and the info separator used to take are inside it, so a
+            // running turn costs no row at all. The card *floats* inside its block (see
+            // `chrome::card_area`), so the height is asked for in the columns the card will really
+            // get — the request and the wrapping it produces have to describe the same frame.
             let card_w = crate::ui::input_area::chrome::card_area(area).width;
             let composer_h = self.input.height(card_w);
             let popup_h = self.popup.height();
@@ -680,16 +665,14 @@ impl App {
                 scrollbar::content_area(chunks[1]),
             );
 
-            // Overlay scrollbar. Painted after the chat widget (so it overprints
-            // the gutter's blank columns) and before the toast (so a toast is
-            // never hidden by it). It takes no layout width: the gutter is
-            // reserved unconditionally, so the bar showing up on overflow never
-            // reflows the cells. `self.chat` now holds this frame's content
-            // height and the effective scroll offset (auto-scroll / clamp
-            // included).
+            // Overlay scrollbar. Painted after the chat widget (so it overprints the gutter's
+            // blank columns) and before the toast (so a toast is never hidden by it). It takes no
+            // layout width: the gutter is reserved unconditionally, so the bar appearing on overflow
+            // never reflows the cells. `self.chat` now holds this frame's content height and the
+            // effective scroll offset (auto-scroll / clamp included).
             //
-            // 设置面板开着时不画：overlay 是最后写入者，画在它下面只是白费；
-            // 顺手清掉 hover / drag 态，免得关掉面板后拖拽态复活（§20 风险 13）。
+            // 设置面板开着时不画：overlay 是最后写入者，画在它下面只是白费；顺手清掉 hover / drag
+            // 态，免得关掉面板后拖拽态复活（§20 风险 13）。
             if self.settings_panel.is_some() {
                 self.clear_scrollbar_interaction();
             } else if let Some(geom) = self.scrollbar_geometry() {
@@ -812,19 +795,16 @@ impl App {
                 }
             }
 
-            // Markdown pictures — the last write of the frame (see
-            // `ui::image::paint`): every widget above has already painted, so
-            // nothing can land on a placeholder or a sixel anchor afterwards.
-            // Overlays are respected by *not* drawing: a picture whose box the
-            // toast would cover is skipped whole (a partial overdraw would break
-            // the image), and a drag selection keeps the frame text-only — its
-            // snapshot copies the visible rows and the row content must not
-            // change under the finger.
+            // Markdown pictures — the last write of the frame (see `ui::image::paint`): every widget
+            // above has already painted, so nothing can land on a placeholder or a sixel anchor
+            // afterwards. Overlays are respected by *not* drawing: a picture whose box the toast would
+            // cover is skipped whole (a partial overdraw would break the image), and a drag selection
+            // keeps the frame text-only — its snapshot copies the visible rows and the row content must
+            // not change under the finger.
             //
-            // The frame's placement table is recorded before those gates: it is
-            // also the freshness lane's target set, and a picture that is on
-            // screen but suppressed *this* frame is still worth keeping in step
-            // with its file (see `Images::observe_visible`).
+            // The frame's placement table is recorded before those gates: it is also the freshness
+            // lane's target set, and a picture on screen but suppressed *this* frame is still worth
+            // keeping in step with its file (see `Images::observe_visible`).
             let clip = self.chat.geometry().area;
             let recorded = self.chat.frame_images();
             self.images.observe_visible(recorded);
@@ -839,22 +819,19 @@ impl App {
                     .paint(recorded, clip, &masks, frame.buffer_mut());
             }
 
-            // In-app text selection — painted after the toast (the selection
-            // sits above every overlay) and clipped to *this* frame's rect of
-            // the region that owns it. It is a pure `Buffer` patch: merging
-            // `REVERSED` into the cell styles the widgets just produced, so no
-            // cell / widget code has to know about selections and the
-            // background colors survive.
+            // In-app text selection — painted after the toast (the selection sits above every
+            // overlay) and clipped to *this* frame's rect of the region that owns it. It is a pure
+            // `Buffer` patch: merging `REVERSED` into the cell styles the widgets just produced, so no
+            // cell / widget code has to know about selections and the background colors survive.
             //
-            // The chat pass also snapshots the visible rows: the release event
-            // lands between frames, so the copy must come from the frame the
-            // user was actually looking at. The composer needs no snapshot —
-            // its wrapping is ours, so the copy comes from the draft itself.
+            // The chat pass also snapshots the visible rows: the release event lands between frames,
+            // so the copy must come from the frame the user was actually looking at. The composer
+            // needs no snapshot — its wrapping is ours, so the copy comes from the draft itself.
             //
-            // 设置面板开着时不画：面板是**模态浮层**，键盘已经被它接管、指针也不再
-            // 认领背景（`background_pointer_blocked`），而拖拽坐标落在卡片四周的 chat
-            // band 上（选区锚在内容坐标）——高亮画出来只会和卡片打架（打开面板时
-            // 已有的选区已经被取消，这里挡的是"面板开着时新起的拖拽"）。
+            // 设置面板开着时不画：面板是**模态浮层**，键盘已经被它接管、指针也不再认领背景
+            // （`background_pointer_blocked`），而拖拽坐标落在卡片四周的 chat band 上（选区锚在
+            // 内容坐标）—— 高亮画出来只会和卡片打架（打开面板时已有的选区已被取消，这里挡的是
+            // "面板开着时新起的拖拽"）。
             if self.selection.is_press_active() && self.settings_panel.is_none() {
                 match self.selection.region() {
                     Some(SelectionRegion::Chat) => {

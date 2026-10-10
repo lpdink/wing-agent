@@ -1,9 +1,7 @@
-//! Math (LaTeX) rendering: delimiter normalization + the two pulldown math
-//! events.
+//! Math (LaTeX) rendering: delimiter normalization + the two pulldown math events.
 //!
-//! `pulldown-cmark` hands us `Event::InlineMath` / `Event::DisplayMath` for
-//! `$…$` and `$$…$$`, but it knows nothing about the delimiters the models
-//! actually emit most of the time:
+//! `pulldown-cmark` hands us `Event::InlineMath` / `Event::DisplayMath` for `$…$` and `$$…$$`, but
+//! it knows nothing about the delimiters the models actually emit most of the time:
 //!
 //! | source | pulldown sees | we do |
 //! |---|---|---|
@@ -13,28 +11,22 @@
 //! | `\[x\]` | `Text("[x")` + `Text("]")` | rewrite to `$$x$$` |
 //! | `\begin{align}…\end{align}` | plain text + soft breaks | rewrite to `$$…$$` |
 //!
-//! The rewrites are a **source-text pre-pass** ([`normalize_delimiters`]) run
-//! before parsing, so every render entry point that shares
-//! `render_markdown_to_lines` — the full reference render, a promoted
-//! streaming block, a re-parsed indented prose block — sees the same text and
-//! produces the same output. See the module-level docs of `super::Profile`
-//! for where the rule lives.
+//! The rewrites are a **source-text pre-pass** ([`normalize_delimiters`]) run before parsing, so
+//! every render entry point that shares `render_markdown_to_lines` — the full reference render, a
+//! promoted streaming block, a re-parsed indented prose block — sees the same text. The rule
+//! itself lives in `super::Profile`.
 //!
-//! ## Degradation: the source, never half a formula
-//!
-//! [`wing_math::render_inline`] / [`wing_math::render_display`] return `None`
-//! for anything they will not render (too wide, suspected truncation, unknown
-//! commands, a multiline block that cannot fit on one line — the full list is
-//! in `wing_math`'s rustdoc). `None` is not an error: the segment then carries
-//! the **complete source between its delimiters** (`$…$` / `$$…$$`), which is
-//! byte-identical to what the TUI showed before math rendering existed. A
-//! formula is never truncated, never replaced by an empty string and never
+//! **Degradation: the source, never half a formula.** [`wing_math::render_inline`] /
+//! [`wing_math::render_display`] return `None` for anything they will not render (too wide,
+//! suspected truncation, unknown commands, a multiline block that cannot fit on one line — the
+//! full list is in `wing_math`'s rustdoc). `None` is not an error: the segment then carries the
+//! **complete source between its delimiters**, byte-identical to what the TUI showed before math
+//! rendering existed. A formula is never truncated, never replaced by an empty string and never
 //! silently dropped.
 //!
-//! Every math segment — rendered grid or literal fallback — is tagged
-//! [`SegmentKind::Math`] and styled with [`MarkdownTheme::math`], so it stays
-//! a distinct element in both profiles (the thinking recolor leaves it alone,
-//! like code).
+//! Every math segment — rendered grid or literal fallback — is tagged [`SegmentKind::Math`] and
+//! styled with [`MarkdownTheme::math`], so it stays a distinct element in both profiles (the
+//! thinking recolor leaves it alone, like code).
 
 use std::borrow::Cow;
 
@@ -157,12 +149,11 @@ fn push_math_block<'a>(ctx: &mut MarkdownContext<'_>, lines: impl Iterator<Item 
 
 /// Append one math line: fresh line + block prefix + the text.
 ///
-/// A grid row that renders to nothing keeps its (blank) row — except at the
-/// end of the document, where the document-level trailing-blank trim
-/// (`trim_trailing_blank`) merges it with the block separator, exactly as it
-/// merges any other trailing blank line. For a formula whose last grid row is
-/// empty, the engine's `height()` and the rendered row count can therefore
-/// differ by one; nothing visible is lost.
+/// A grid row that renders to nothing keeps its (blank) row — except at the end of the document,
+/// where the document-level trailing-blank trim (`trim_trailing_blank`) merges it with the block
+/// separator as it does for any other trailing blank. For a formula whose last grid row is empty,
+/// the engine's `height()` and the rendered row count can therefore differ by one; nothing visible
+/// is lost.
 fn push_math_line(ctx: &mut MarkdownContext<'_>, text: &str) {
     *ctx.current_line = MarkdownLine::default();
     ctx.ensure_prefix();
@@ -200,54 +191,37 @@ fn fits_line(rendered: &str, ctx: &MarkdownContext<'_>) -> bool {
 // Delimiter normalization (source pre-pass)
 // ============================================================
 
-/// Rewrite the math delimiters pulldown does not understand into the `$` /
-/// `$$` form it does: `\(…\)` → `$…$`, `\[…\]` → `$$…$$`, and a bare
-/// environment (`\begin{align}…\end{align}`) → `$$…$$`.
+/// Rewrite the math delimiters pulldown does not understand into the `$` / `$$` form it does:
+/// `\(…\)` → `$…$`, `\[…\]` → `$$…$$`, and a bare environment (`\begin{align}…\end{align}`) →
+/// `$$…$$`.
 ///
-/// Never touches a region pulldown does not parse as markdown text:
+/// Never touches a region pulldown does not parse as markdown text: fenced code blocks (``` / ~~~),
+/// **including a fence behind a block prefix** (`> ~~~`, `- ``` ` — the parser resolves the prefix
+/// before it decides what the line is, so a prefix must not hide the region); inline code spans;
+/// existing `$…$` / `$$…$$` math (so a wrapped environment stays wrapped); indented (4-space) code
+/// blocks, prefix-aware in the same way; HTML blocks (`<div>` … to the next blank line); an inline
+/// HTML tag or autolink, a link / image destination (`](url "title")` — it is what a click and the
+/// OSC8 hyperlink open) and a link reference definition line; anything whose closing delimiter is
+/// missing, or that would cross a blank line or a fence (pulldown's own math pairing does not cross
+/// a blank line either, so leaving the source alone keeps the output identical to the `$`-less
+/// literal it is today); and a span the scan reaches *after* an unpaired `$$` in the same block
+/// (inserting `$$` there would re-pair the stray delimiter and grow the text on every pass).
 ///
-/// - fenced code blocks (``` / ~~~), **including a fence behind a block
-///   prefix (`> ~~~`, `- ``` `)** — the parser resolves the prefix before it
-///   decides what the line is, so a prefix must not hide the region,
-/// - inline code spans (backticks),
-/// - existing `$…$` / `$$…$$` math (so a wrapped environment stays wrapped),
-/// - indented (4-space) code blocks, prefix-aware in the same way,
-/// - HTML blocks (`<div>` … to the next blank line) — markdown is not parsed
-///   inside them,
-/// - an inline HTML tag or autolink (`<…>`), and a link / image destination
-///   (`](url "title")`: the destination is what a click (and the OSC8
-///   hyperlink) opens,
-/// - a link reference definition line (`[label]: url "title"`),
-/// - anything whose closing delimiter is missing, or that would cross a blank
-///   line or a fence — pulldown's own math pairing does not cross a blank
-///   line either, so leaving the source alone keeps the renderer's output
-///   identical to the `$`-less literal it is today,
-/// - a span the scan reaches *after* an unpaired `$$` in the same block
-///   (inserting `$$` there would re-pair the stray delimiter and grow the text
-///   on every pass).
+/// The rewrite is purely local (a span is rewritten iff its own text is well-formed), which is what
+/// lets the streaming engine normalize a *slice* and still agree with the reference render of the
+/// whole document: slice boundaries are exactly the blank lines / fences a span may not cross.
 ///
-/// The rewrite is purely local (a span is rewritten iff its own text is
-/// well-formed), which is what lets the streaming engine normalize a *slice*
-/// and still agree with the reference render of the whole document: slice
-/// boundaries are exactly the blank lines / fences a span may not cross.
+/// Two refusals keep the output a pure function of the input rather than of how often the pass ran
+/// — inserting a delimiter must never re-pair a `$` that is already there: the delimiters a rewrite
+/// would insert must not touch an existing `$` (`fuses_with_dollar`, or the fused `$$` would change
+/// what the next pass sees), and the positional unpaired-`$$` rule above.
 ///
-/// Two refusals keep the output a pure function of the input rather than of
-/// how often the pass ran — inserting a delimiter must never re-pair a `$`
-/// that is already there:
+/// Two budgets bound the pass: a span longer than [`MAX_SPAN`] bytes is not rewritten (the engine's
+/// own source budget is smaller), and the pass stops after [`MAX_SCAN_WORK`] bytes of
+/// closer-searching. Past either, the remaining text is left exactly as it is.
 ///
-/// - the delimiters a rewrite would insert must not touch an existing `$`
-///   (`fuses_with_dollar`), or the fused `$$` would change what the next pass
-///   sees;
-/// - the positional unpaired-`$$` rule above.
-///
-/// Two budgets bound the pass: a span longer than [`MAX_SPAN`] bytes is not
-/// rewritten (the engine's own source budget is smaller), and the pass stops
-/// after [`MAX_SCAN_WORK`] bytes of closer-searching. Past either, the
-/// remaining text is left exactly as it is.
-///
-/// A span's leading/trailing whitespace is trimmed, because `$` only pairs
-/// against non-whitespace: `\(a \)` written out verbatim as `$a $` would not
-/// be math at all.
+/// A span's leading/trailing whitespace is trimmed, because `$` only pairs against non-whitespace:
+/// `\(a \)` written out verbatim as `$a $` would not be math at all.
 ///
 /// Returns [`Cow::Borrowed`] when there is nothing to rewrite.
 pub(crate) fn normalize_delimiters(text: &str) -> Cow<'_, str> {
@@ -308,19 +282,16 @@ struct Scan<'a> {
     /// The [`HtmlContainer`] is the container the block lives in: an HTML block
     /// cannot outlive its container (`> <div>` ends when the `>` chain stops),
     /// but a *top-level* block keeps its content verbatim — `- a` or `> q`
-    /// inside it are block content, not containers (review r5 / S1).
+    /// inside it are block content, not containers.
     in_html_block: Option<(HtmlBlock, HtmlContainer)>,
     /// The scan has met an unpaired `$$` in the current block.
     ///
-    /// A rewrite inserts `$$`, and a stray `$$` would then pair with the
-    /// inserted one on the next pass — the text would keep growing. So from
-    /// that point on the rest of the block is left alone (a formula there
-    /// degrades to its source, which is always allowed); a span *before* the
-    /// stray delimiter is unaffected. The rule is positional on purpose: it is
-    /// decided by what the scan has already seen, never by a look-ahead.
-    ///
-    /// Single `$` deliberately does not set this: `$100` in prose is common
-    /// and cannot pair with an inserted `$$`.
+    /// A rewrite inserts `$$`, and a stray `$$` would then pair with the inserted one on the next
+    /// pass — the text would keep growing. So from that point on the rest of the block is left
+    /// alone (a formula there degrades to its source, which is always allowed); a span *before* the
+    /// stray delimiter is unaffected. The rule is positional on purpose: decided by what the scan
+    /// has already seen, never by a look-ahead. Single `$` deliberately does not set this: `$100` in
+    /// prose is common and cannot pair with an inserted `$$`.
     stray_display_delim: bool,
 }
 
@@ -412,8 +383,7 @@ impl<'a> Scan<'a> {
                     // Which lines are code is decided by the SHARED fence
                     // state machine (`FenceTrack::step`) — the same one the
                     // streaming splitter drives, so the slice boundaries and
-                    // this scanner cannot disagree about a fence again
-                    // (review r3).
+                    // this scanner cannot disagree about a fence again.
                     let (track_next, step) = track.step(line);
                     match step {
                         FenceStep::Closes => {
@@ -469,17 +439,15 @@ impl<'a> Scan<'a> {
                     continue;
                 }
                 if self.ref_def_lines > 0 {
-                    // The destination and/or the title of the definition above:
-                    // markdown is not parsed here either (the destination is a
-                    // URL — rewriting it would change what a click opens).
+                    // The destination and/or the title of the definition above: markdown is not
+                    // parsed here either (the destination is a URL — rewriting it would change what
+                    // a click opens).
                     //
-                    // Only lines the definition can actually absorb count
-                    // (CommonMark §4.7): a fence line interrupts the
-                    // definition, and a title is `"…"` / `'…'` / `(…)` —
-                    // otherwise the definition ended and the line is parsed
-                    // (review r4 / S2b: `[ref]: http://x` + `  ~~~` used to
-                    // swallow the fence opener, so the scanner rewrote the
-                    // code the fence opened).
+                    // Only lines the definition can actually absorb count (CommonMark §4.7): a fence
+                    // line interrupts the definition, and a title is `"…"` / `'…'` / `(…)` —
+                    // otherwise the definition ended and the line is parsed (`[ref]: http://x` +
+                    // `  ~~~` used to swallow the fence opener, so the scanner rewrote the code the
+                    // fence opened).
                     if self.ref_def_continuation(line) {
                         i = next;
                         line_start = next;
@@ -690,13 +658,12 @@ impl<'a> Scan<'a> {
         Some(end)
     }
 
-    /// Whether the delimiters a rewrite would insert at `[start, end)` fuse
-    /// with a `$` that is already there into a `$$` pair.
+    /// Whether the delimiters a rewrite would insert at `[start, end)` fuse with a `$` that is
+    /// already there into a `$$` pair.
     ///
-    /// `$$` is a different region kind (it hides a bare environment from the
-    /// next pass), so fusing would change what a second pass sees and the
-    /// rewrite would stop being idempotent — the text would grow a `$$` per
-    /// pass. Sources that put a `$` right next to a delimiter are left alone
+    /// `$$` is a different region kind (it hides a bare environment from the next pass), so fusing
+    /// would change what a second pass sees and the rewrite would stop being idempotent — the text
+    /// would grow a `$$` per pass. Sources that put a `$` right next to a delimiter are left alone
     /// instead; showing the source is always allowed.
     fn fuses_with_dollar(&self, start: usize, end: usize) -> bool {
         (start > 0 && self.bytes[start - 1] == b'$') || self.bytes.get(end) == Some(&b'$')
@@ -892,9 +859,6 @@ impl<'a> Scan<'a> {
     }
 }
 
-/// Whether the line's content opens an HTML block: `<tag`, `</tag`, `<!--`,
-/// `<?…`, `<!DOCTYPE`. Mirrors pulldown's HTML blocks closely enough for the
-/// normalization's purpose — that region must not be rewritten.
 /// The HTML block a line opens — CommonMark 0.30 §4.6 “HTML blocks”.
 ///
 /// Only the seven *start* conditions are modelled, plus the end condition that
@@ -981,7 +945,7 @@ const HTML_BLOCK_TAGS: &[&str] = &[
 /// Deliberately faithful to the seven start conditions instead of “any line
 /// starting with `<…`”: treating a paragraph like `<3` or `<b>bold</b>` as a
 /// block used to swallow a following fence line, and the scanner then rewrote
-/// code-block content (review r4 / S2a). `at_block_start` matters for type 7,
+/// code-block content. `at_block_start` matters for type 7,
 /// which cannot interrupt a paragraph.
 fn html_block_start(content: &str, at_block_start: bool) -> Option<HtmlBlock> {
     let rest = content.strip_prefix('<')?;
@@ -1603,7 +1567,7 @@ mod tests {
             "\\text{中文}",
             " ",
             "\\end{",
-            // The shapes the safety rules exist for (review r1 / S3).
+            // The shapes the safety rules exist for.
             "$x$",
             "\\(x\\)",
             "$$x$$",

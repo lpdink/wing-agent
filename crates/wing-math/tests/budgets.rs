@@ -1,4 +1,4 @@
-//! 预算闸测试（`design.md → D8`，review r1 的 S2 后闸门前移）。
+//! 预算闸测试（`design.md → D8`；闸门在排版前）。
 //!
 //! 引擎对畸形/超大输入必须有界：源码长度、花括号嵌套深度、行/列分隔符数量、结果高度、
 //! 结果面积，任一超限都返回 `None`（上层降级为字面量），绝不 OOM / 栈溢出。
@@ -15,7 +15,7 @@ use wing_math::{render_block, render_display};
 
 /// 源码长度上限。
 const MAX_SOURCE_CHARS: usize = 8192;
-/// 花括号嵌套上限（`guard::MAX_BRACE_DEPTH`；review r3 把它与解析器递归闸对齐到 47）。
+/// 花括号嵌套上限（`guard::MAX_BRACE_DEPTH`，与解析器递归闸对齐到 47）。
 const MAX_BRACE_DEPTH: usize = 47;
 /// 解析器递归深度上限（`api::MAX_PARSE_DEPTH`；一层结构 ≈ 2 个深度单位）。
 const MAX_PARSE_DEPTH: usize = 96;
@@ -79,7 +79,7 @@ fn brace_depth_budget() {
     // 只有左括号（不配平）同样是拒绝
     assert!(render_block(&"{".repeat(MAX_PARSE_DEPTH)).is_none());
 
-    // 极限附近不得栈溢出（review r2 的 S1）
+    // 极限附近不得栈溢出
     for depth in [8, 32, 63, 64, 200] {
         let src = format!("{}x{}", "{".repeat(depth), "}".repeat(depth));
         let _ = render_block(&src);
@@ -88,7 +88,7 @@ fn brace_depth_budget() {
 
 #[test]
 fn brace_free_chains_hit_the_depth_gate_before_layout() {
-    // review r2 的 S1：`\left(` / `\frac ` / `\sqrt ` / `\hat ` 这类**不带花括号**的
+    // `\left(` / `\frac ` / `\sqrt ` / `\hat ` 这类**不带花括号**的
     // 链式嵌套没有花括号信号，必须由解析器的递归深度闸拦下来，而且要在排版之前。
     let chains: &[(&str, String, String)] = &[
         ("\\left(", "\\left(".repeat(250), String::new()),
@@ -194,7 +194,7 @@ fn budget_boundaries_are_fast() {
 
 #[test]
 fn long_flat_formulas_are_not_quadratic() {
-    // review r1 的 S2：`layout_seq` 原来是 O(n²)（2000 项 release 282 ms）。
+    // `layout_seq` 原来是 O(n²)（2000 项 release 282 ms）。
     // 这里给一个宽松的上界（真实值远低于它），防止二次方路径回归。
     let src = "x + ".repeat(1000) + "y"; // 2001 项，4005 字符
     let start = Instant::now();
@@ -219,7 +219,7 @@ fn long_flat_formulas_are_not_quadratic() {
 
 #[test]
 fn max_depth_inputs_survive_a_small_stack() {
-    // review r1 的 S2 / r2 的 S1 / r3 的 S1：debug 构建 + 小线程栈下，深嵌套会把
+    // debug 构建 + 小线程栈下，深嵌套会把
     // 解析器与排版递归到 stack overflow（不可捕获的 abort）。深度闸必须在**解析过程中**
     // 就置位（不用等排版），让"上限附近 + 远超上限"的输入在小栈里也能跑完。
     //

@@ -273,7 +273,7 @@ impl AppConfig {
         Self::from_doc_at(doc, None).unwrap_or_else(Self::default_resolved)
     }
 
-    /// Fallback default for every error path — **`resolve()` 过**（review N3）。
+    /// Fallback default for every error path — **`resolve()` 过**。
     ///
     /// 成功路径是「解析 → resolve」，回落路径必须是同一形态：`resolve()` 今天只折叠
     /// `colors.math_mode = rendering.math`，两边恰好相等，但默认值将来一旦偏离这个

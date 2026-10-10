@@ -1,30 +1,25 @@
 //! Modal ownership lane — who owns the keyboard, and the Escape ladder.
 //!
-//! The TUI has three modal layers (ask panel, `/model` picker, command
-//! candidate popup) plus the composer. This module declares, **once**, which
-//! one owns a key event:
+//! The TUI has three modal layers (ask panel, `/model` picker, command candidate popup) plus the
+//! composer. This module declares, **once**, which one owns a key event:
 //!
-//! * [`App::modal_chain`] — the layers that are up, in priority order (the
-//!   declaration order of [`ModalOwner`] *is* the priority order);
-//! * [`App::route_key`] — the key → owner decision, including the keys the app
-//!   always keeps for itself (Esc, page keys, Ctrl+C). A layer that does not
-//!   take a key lets it through to the next one, and the chat keeps its scroll
-//!   keys all the way down;
-//! * [`App::handle_key`] — a thin ladder that dispatches each route to its
-//!   handler.
+//! * [`App::modal_chain`] — the layers that are up, in priority order (the declaration order of
+//!   [`ModalOwner`] *is* the priority order);
+//! * [`App::route_key`] — the key → owner decision, including the keys the app always keeps for
+//!   itself (Esc, page keys, Ctrl+C). A layer that does not take a key lets it through to the next
+//!   one, and the chat keeps its scroll keys all the way down;
+//! * [`App::handle_key`] — a thin ladder that dispatches each route to its handler.
 //!
-//! The mouse path reads the same declaration ([`App::composer_pointer_blocked`])
-//! instead of re-deriving "is a modal up?" on its own, so the two input
-//! channels cannot drift apart.
+//! The mouse path reads the same declaration ([`App::composer_pointer_blocked`]) instead of
+//! re-deriving "is a modal up?" on its own, so the two input channels cannot drift apart.
 //!
-//! The panel **state machines** (ask panel questions, model picker pages) are
-//! neutral and live in `shared/panels/`; what lives here is their App-side
-//! lifecycle: the queues, the chat-cell mirroring, and the reply/apply paths.
+//! The panel **state machines** (ask panel questions, model picker pages) are neutral and live in
+//! `shared/panels/`; what lives here is their App-side lifecycle: the queues, the chat-cell
+//! mirroring, and the reply/apply paths.
 //!
-//! Call directions: [`super::commands`] calls in for the `/model` picker and
-//! the composer's submit path; [`super::projection`] calls in for ask
-//! registration; this module calls [`super::commands`] (submit / popup
-//! refresh).
+//! Call directions: [`super::commands`] calls in for the `/model` picker and the composer's submit
+//! path; [`super::projection`] calls in for ask registration; this module calls [`super::commands`]
+//! (submit / popup refresh).
 
 use super::App;
 use super::AppIntent;

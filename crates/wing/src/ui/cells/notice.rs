@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_hard_broken_word_never_leaves_a_stray_rail_row() {
-        // 回归（评审 S-1）：词宽 == 折行宽 + 尾随空格时，硬断会把那块空白切
+        // 回归：词宽 == 折行宽 + 尾随空格时，硬断会把那块空白切
         // 成独立一格；它不能变成一条只有栏杆的空行。
         let lines = notice_lines("aaaaaaaa bbb ccc", NoticeLevel::Info, 10, &palette());
         assert_eq!(text_of(&lines), "│ aaaaaaaa\n│ bbb ccc\n");
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn a_trailing_newline_does_not_draw_a_dangling_rail() {
-        // 回归（评审 S-2）：`/context` 的文本恒以 `\n` 结尾 —— 结尾换行是
+        // 回归：`/context` 的文本恒以 `\n` 结尾 —— 结尾换行是
         // 终止符，不是一行。
         let lines = notice_lines(
             "Messages: 5\nTokens: 1200 / 128000\n",
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn emoji_presentation_cannot_overflow_the_cell() {
-        // 回归（评审 N-3）：U+2764 + U+FE0F 逐字符宽 1 + 0，串级宽 2 ——
+        // 回归：U+2764 + U+FE0F 逐字符宽 1 + 0，串级宽 2 ——
         // 逐字符裁剪会放出去一列。
         for width in 0u16..12 {
             for line in &notice_lines("❤️ x", NoticeLevel::Info, width, &palette()) {

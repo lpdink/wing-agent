@@ -1,34 +1,29 @@
 //! The last frame's geometry — the contract every input path reads.
 //!
-//! `draw` **records** what it laid out (the whole terminal area, the chat band
-//! and the composer block); the mouse, the selection, the keyboard's page keys
-//! and the composer's editing width **consume** that record. Nothing else may
-//! rely on "which field `draw` happened to fill in" — hit testing a pointer
-//! between frames is a query about the frame the user is pointing at, and that
+//! `draw` **records** what it laid out (the whole terminal area, the chat band and the composer
+//! block); the mouse, the selection, the keyboard's page keys and the composer's editing width
+//! **consume** that record. Nothing else may rely on "which field `draw` happened to fill in" — hit
+//! testing a pointer between frames is a query about the frame the user is pointing at, and that
 //! frame is this value.
 //!
 //! Two kinds of facts, deliberately kept apart:
 //!
-//! * **recorded** — the rects above. They are the frame's layout, so they only
-//!   change when a new frame is drawn;
-//! * **derived** — anything that follows the *content* (the scrollbar's thumb
-//!   position, which tracks the chat's content height and scroll offset). Those
-//!   are computed from the recorded band plus live state at query time, so a
-//!   drag that scrolls the view between two frames still hit-tests against the
-//!   position the bar has right now (see [`FrameGeometry::scrollbar`]).
+//! * **recorded** — the rects above. They are the frame's layout, so they only change when a new
+//!   frame is drawn;
+//! * **derived** — anything that follows the *content* (the scrollbar's thumb position, which tracks
+//!   the chat's content height and scroll offset). Those are computed from the recorded band plus
+//!   live state at query time, so a drag that scrolls the view between two frames still hit-tests
+//!   against the position the bar has right now (see [`FrameGeometry::scrollbar`]).
 //!
-//! The chat's *own* rect (the band minus the scrollbar gutter, plus the scroll
-//! offset it was rendered with) is recorded by [`crate::ui::chat_view`] itself
-//! and read back through `ChatView::geometry` / `contains_screen`: one fact,
-//! one writer.
+//! The chat's *own* rect (the band minus the scrollbar gutter, plus the scroll offset it was rendered
+//! with) is recorded by [`crate::ui::chat_view`] itself and read back through `ChatView::geometry` /
+//! `contains_screen`: one fact, one writer.
 //!
-//! **One draw writes this in three places** — the terminal area at the top of
-//! the pass (the selection fingerprint must see the *new* width), the chat band
-//! after the layout, the composer block when the input widget is rendered
-//! (the cancellation path must still see the *old* band height). A draw that
-//! fails halfway therefore leaves a mixed frame — a new area with the previous
-//! band — which is exactly what the three loose fields this replaced did; no
-//! reader can observe a frame that was not drawn to completion anyway.
+//! **One draw writes this in three places** — the terminal area at the top of the pass (the
+//! selection fingerprint must see the *new* width), the chat band after the layout, the composer
+//! block when the input widget is rendered (the cancellation path must still see the *old* band
+//! height). A draw that fails halfway therefore leaves a mixed frame; no reader can observe a frame
+//! that was not drawn to completion anyway.
 
 use ratatui::layout::Rect;
 

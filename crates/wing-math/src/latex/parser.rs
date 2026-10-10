@@ -1,59 +1,49 @@
 // ---------------------------------------------------------------------------
 // 来源（vendored，逐字内联）
-//   crate   : rust-latex-parser
-//   version : 0.1.0
+//   crate   : rust-latex-parser 0.1.0 — MIT, Copyright (c) 2026 William-Selna
+//             （原文见 crate 根 LICENSE-MIT-rust-latex-parser；上游 crate 未随包附 LICENSE 文件）
 //   repo    : https://github.com/William-Selna/Rust-LaTeX-Parser
 //             （发布时 .cargo_vcs_info.json git sha1 = 086d394561465b4154272951f5cd524f77855e99）
-//   license : MIT，Copyright (c) 2026 William-Selna
-//             （原文见 crate 根 LICENSE-MIT-rust-latex-parser；上游 crate 未随包附 LICENSE 文件，
-//               本文件由仓库 LICENSE 取得）
 //   原路径  : parser.rs
 //
 // 本地改动（相对上游）：
-//   1. 模块路径：`crate::ast` -> `crate::latex::ast`，`rust_latex_parser::`
-//      -> `crate::latex::`（内联后模块位置变化）。
-//   2. doc 示例里的 use 路径同步改写为 `wing_math::latex::...`。
-//   3. 4 处 `collapsible_if` 机械折叠（let-chains），语义不变 —— 本仓库
+//   1. 模块路径：`crate::ast` -> `crate::latex::ast`，`rust_latex_parser::` -> `crate::latex::`
+//      （内联后模块位置变化）；doc 示例里的 use 路径同步改写为 `wing_math::latex::...`。
+//   2. 4 处 `collapsible_if` 机械折叠（let-chains），语义不变 —— 本仓库
 //      `cargo clippy -- -D warnings` 必须干净，改点均在原地标了「本地改动」注释：
 //      `maybe_wrap_op_spacing` / `parse_sequence_until_ex`（两处）/ `parse_command`。
-//   4. `is_spaced_operator` 加入 `·`（U+00B7）：`\cdot` 在 LaTeX 里是二元运算符，
-//      上游漏了它，`a \cdot b` 被渲染成 `a ·b`。
-//   5. 命名算子（`\log` `\sin` `\det` `\max` …）后面被吃掉的空格补回来：
-//      上游读完命令名后无条件吃掉一个尾随空格（TeX 控制词惯例），但命名算子后面那个
-//      空格在 LaTeX 里是有语义的，被吃掉后 `\log p(x)` 渲染成 `logp(x)`。
-//   6. `parse_group_atom` 先跳过参数前的空白：LaTeX 允许 `\frac {a} {b}`，上游不跳
-//      空格会把第二个参数解析成一个空格，`\frac{X} {Y}` 的分母因此消失、`{Y}` 被挤到
-//      最后一行（多行公式折行经控制字符归一化后正好是这个形状）。
-//   7. 递归深度闸 + `parse_equation_with_depth`（本项目新增）：`parse_atom` /
-//      `parse_sequence_until_ex` 各包一层深度计数，越界即置位并立刻返回空节点
-//      （`parse_atom` 越界时会吃掉一个字符，保证调用方的 `while pos < len` 前进）。
-//      上游没有这个上界：brace-free 的深嵌套（`\left(\left(…`、`\hat \hat …`）
-//      会让解析器与排版递归到爆栈（debug + 2 MiB 栈实测 abort）。
-//      `parse_equation` 保持原语义（无上界），新入口供上层适配层做"排版前闸门"。
-//   8. `parse_equation_with_depth` 额外返回**消费的字符数**（`parser.pos`）：
-//      上游在 `&` / `\\` / `}` / `\right` / `\end` 处会直接 `break`，剩下的输入被静默
-//      丢掉。上层用它做"输入必须被完整消费"的兜底判据（review r3 的 B1 收尾：
-//      `\\` 被当成 `\frac` 的第二个参数时，`cases` 后面整段消失）。
-//   9. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
-//      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
-//      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//  10. 符号表与二元算子间距（步骤 02）：`latex_to_unicode` 补 `\top`（⊤ U+22A4，
-//      转置记号；缺了它 `W^\top` 会走未知命令兜底、被 AST 泄漏自检判成"未渲染"）与
-//      `\odot`（⊙ U+2299）；`is_spaced_operator` 加入带圈 / 星号算子
-//      `⊙ ⊕ ⊗ ∘ ∗ ⋆`（与本地改动 4 的 `·` 同类：它们在 LaTeX 里是二元运算符，
-//      上游漏了间距，`a ⊕ b` 被渲染成 `a ⊕b`）。`⊤` 是普通符号，**不**进间距集。
-//  11. 符号命令的尾随空格退回输入流（步骤 02；r1 的 S1 收窄）：本地改动 5 只把命名
-//      算子的语义空格补回来，符号命令（`\pi` `\top` …）走的是"读完命令名无条件吃掉
-//      一个空格"的上游路径，于是 `\pi x` 渲染成 `πx`，而裸词 `pi x` 是 `π x`（同一
-//      式子两种写法两种结果）。这里把吃掉的空格**退回输入流**（`self.pos -= 1`），
-//      空格由外层序列正常变成 `EqNode::Text(" ")`，于是 `w^\top x` 的上标仍是干净的
-//      `⊤`（→ `ᵀ`）、空格落在 `wᵀ` 与 `x` 之间，而不是被吞进上标参数。
-//      **只在下一位是另一个对象的起点时才退**（判据 + 反例表见
+//   3. 符号表与二元算子间距：`latex_to_unicode` 补 `\top`（⊤ U+22A4，转置记号；缺了它 `W^\top`
+//      会走未知命令兜底、被 AST 泄漏自检判成"未渲染"）与 `\odot`（⊙ U+2299）；
+//      `is_spaced_operator` 加入 `·`（U+00B7）与带圈 / 星号算子 `⊙ ⊕ ⊗ ∘ ∗ ⋆` —— 它们在 LaTeX
+//      里是二元运算符，上游漏了间距，`a \cdot b` / `a ⊕ b` 被渲染成 `a ·b` / `a ⊕b`。
+//      `⊤` 是普通符号，**不**进间距集。
+//   4. 命名算子（`\log` `\sin` `\det` `\max` …）后面被吃掉的空格补回来：上游读完命令名后
+//      无条件吃掉一个尾随空格（TeX 控制词惯例），但命名算子后面那个空格在 LaTeX 里是有语义的，
+//      被吃掉后 `\log p(x)` 渲染成 `logp(x)`。
+//   5. `parse_group_atom` 先跳过参数前的空白：LaTeX 允许 `\frac {a} {b}`，上游不跳空格会把
+//      第二个参数解析成一个空格，`\frac{X} {Y}` 的分母因此消失、`{Y}` 被挤到最后一行（多行
+//      公式折行经控制字符归一化后正好是这个形状）。
+//   6. 递归深度闸 + `parse_equation_with_depth`（本项目新增）：`parse_atom` /
+//      `parse_sequence_until_ex` 各包一层深度计数，越界即置位并立刻返回空节点（`parse_atom`
+//      越界时会吃掉一个字符，保证调用方的 `while pos < len` 前进）。上游没有这个上界：
+//      brace-free 的深嵌套（`\left(\left(…`、`\hat \hat …`）会让解析器与排版递归到爆栈
+//      （debug + 2 MiB 栈实测 abort）。`parse_equation` 保持原语义（无上界），新入口供上层
+//      适配层做"排版前闸门"。
+//   7. `parse_equation_with_depth` 额外返回**消费的字符数**（`parser.pos`）：上游在 `&` / `\\` /
+//      `}` / `\right` / `\end` 处会直接 `break`，剩下的输入被静默丢掉。上层用它做"输入必须被
+//      完整消费"的兜底判据（`\\` 被 `\frac` 吃成参数时，`cases` 后面整段消失）。
+//   8. 符号命令的尾随空格退回输入流：上游路径下 `\pi x` 渲染成 `πx`，而裸词 `pi x` 是 `π x`
+//      （同一式子两种写法两种结果）。这里把吃掉的空格**退回输入流**（`self.pos -= 1`），空格由
+//      外层序列正常变成 `EqNode::Text(" ")`，于是 `w^\top x` 的上标仍是干净的 `⊤`（→ `ᵀ`）、
+//      空格落在 `wᵀ` 与 `x` 之间。**只在下一位是另一个对象的起点时才退**（判据 + 反例表见
 //      `EqParser::trailing_space_separates_objects`；判据先跳过连续空格）：`\pi ^2` /
-//      `\epsilon _0` 的上下标要挂回符号本身、`x^{\top }` 的右花括号不能把上标挤出
-//      字形路径、`\right` / `\end` 不是（新）对象的起点（那是右定界符 / 环境结束，
-//      同类于 `}`）、`cases` 单元格（不 trim）不能多占一列、标点要贴前一个对象。
-//   除以上十一点外与上游逐字一致（含文件内联测试）。
+//      `\epsilon _0` 的上下标要挂回符号本身、`x^{\top }` 的右花括号不能把上标挤出字形路径、
+//      `\right` / `\end` 不是（新）对象的起点（那是右定界符 / 环境结束，同类于 `}`）、
+//      `cases` 单元格（不 trim）不能多占一列、标点要贴前一个对象。
+//   9. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt 处理，
+//      因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，除上述改动外
+//      逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
+//   除以上九点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! The parser. Turns LaTeX math strings into [`EqNode`] trees.
@@ -160,7 +150,7 @@ pub fn parse_equation_with_depth(input: &str, max_depth: usize) -> (EqNode, bool
     let node = parser.parse_sequence();
     // 第三个返回值：解析器**消费掉的字符数**。上游在 `&` / `\\` / `}` / `\right` /
     // `\end` 处会直接 `break`，剩下的输入被静默丢掉；调用方用它做"输入被完整消费"
-    // 的兜底判据（review r3 的 B1：`\begin{cases} 1 &\frac 2 \\ 3 & 4 \end{cases}`
+    // 的兜底判据（`\begin{cases} 1 &\frac 2 \\ 3 & 4 \end{cases}`
     // 里 `\\` 被 `\frac` 当成了第二个参数，`& 4` 整段消失）。
     (node, parser.depth_exceeded, parser.pos)
 }
@@ -805,7 +795,7 @@ impl EqParser {
             // 本地改动（见文件头）：上游在读完命令名后无条件吃掉一个尾随空格
             // （TeX 控制词的惯例），但命名算子（`\log` `\sin` `\det` …）后面那个空格
             // 在 LaTeX 里是有语义的：算子与它的参数之间必须有间隔。被吃掉后
-            // `\log p(x)` 会渲染成 `logp(x)`（review r1 的 S3）。这里把吃掉的空格补回来。
+            // `\log p(x)` 会渲染成 `logp(x)`。这里把吃掉的空格补回来。
             let node = EqNode::Limit {
                 name: name.clone(),
                 lower: lower.map(Box::new),
@@ -845,19 +835,17 @@ impl EqParser {
 
         // Greek letter / symbol lookup
         let symbol = latex_to_unicode(&name).unwrap_or_else(|| format!("\\{}", name));
-        // 本地改动（见文件头）：符号命令后面那个空格在 LaTeX 里是**分隔两个对象**的
-        // 语义空格（`\pi x` 该渲染成 `π x`；裸词路径 `pi x` 本来就是这个行为 —— 被吃
-        // 掉之后同一个式子两种写法两种结果）。本地改动 5 对命名算子（`\log p(x)`）做过
-        // 同样的事，这里推广到符号命令；做法是把吃掉的空格**退回输入流**，而不是塞进
-        // 返回的节点里：空格留在输入里，外层序列会照常把它变成 `EqNode::Text(" ")`
-        // （`is_space_like` 视其为空白，与 `Space` 节点的折叠行为一致），
-        // 于是 `w^\top x` 的上标仍然是干净的 `⊤`（→ `ᵀ`），空格落在 `wᵀ` 与 `x` 之间。
+        // 本地改动（见文件头）：符号命令后面那个空格在 LaTeX 里是**分隔两个对象**的语义空格
+        // （`\pi x` 该渲染成 `π x`；裸词路径 `pi x` 本来就是这个行为 —— 被吃掉之后同一个式子
+        // 两种写法两种结果）。做法是把吃掉的空格**退回输入流**，而不是塞进返回的节点里：空格留在
+        // 输入里，外层序列会照常把它变成 `EqNode::Text(" ")`（`is_space_like` 视其为空白，与
+        // `Space` 节点的折叠行为一致），于是 `w^\top x` 的上标仍然是干净的 `⊤`（→ `ᵀ`），空格
+        // 落在 `wᵀ` 与 `x` 之间。
         //
-        // **只在下一位确实是"另一个对象"的起点时才退**（r1 的 S1）：`^` / `_` / 撇号
-        // 要挂在**前面那个原子**上、右定界符与 `&` / `\\` 之后没有对象、标点紧贴前一个
-        // 对象排版 —— 这些形态下退回空格会把本来正确的结果弄坏（`\pi ^2` → `π ²`、
-        // `x^{\top }` 整条掉回源码、`cases` 单元格多一列）。判据见
-        // [`Self::trailing_space_separates_objects`]。
+        // **只在下一位确实是"另一个对象"的起点时才退**：`^` / `_` / 撇号要挂在**前面那个原子**
+        // 上、右定界符与 `&` / `\\` 之后没有对象、标点紧贴前一个对象排版 —— 这些形态下退回空格
+        // 会把本来正确的结果弄坏（`\pi ^2` → `π ²`、`x^{\top }` 整条掉回源码、`cases` 单元格多
+        // 一列）。判据见 [`Self::trailing_space_separates_objects`]。
         if had_trailing_space && self.trailing_space_separates_objects() {
             self.pos -= 1;
         }
@@ -866,20 +854,20 @@ impl EqParser {
 
     /// 刚吃掉的尾随空格要不要退回输入流？（返回 `true` 表示"下一位是另一个对象的起点"）
     ///
-    /// 本地改动（见文件头）：调用点在 `parse_command` 的符号命令分支，此时 `self.pos`
-    /// 指向那个空格**之后**的第一个字符。下列形态下退回空格是净损失：
+    /// 调用点在 `parse_command` 的符号命令分支，此时 `self.pos` 指向那个空格**之后**的第一个
+    /// 字符。下列形态下退回空格是净损失：
     ///
     /// | 下一位 | 为什么不能退回 | 例（退回 → 不退回） |
     /// |---|---|---|
     /// | `^` `_` `'` | 上下标 / 撇号挂在**前一个原子**上 | `\pi ^2` → `π ²` / `π²` |
     /// | `}` `)` `]` | 右定界符：回到外层只剩尾随空白 | `x^{\top }` → 源码 / `xᵀ` |
-    /// | `\right` `\end` | 同上（`\right` 闭合 `\left`、`\end` 闭合环境；r2 的 S1） | `\left( \alpha \right)` → `( α )` / `( α)` |
+    /// | `\right` `\end` | 同上（`\right` 闭合 `\left`、`\end` 闭合环境） | `\left( \alpha \right)` → `( α )` / `( α)` |
     /// | `&` `\\` | 环境列 / 行分隔符（`cases` 单元格不 trim） | `cases` 宽 11 / 10 |
     /// | `,` `;` `:` `.` `!` `?` | 标点紧贴前一个对象排版 | `\pi , x` → `π , x` / `π, x` |
     /// | 输入结束 | 没有对象可分隔 | `x + \pi ` |
     ///
-    /// 判据**跳过后续的连续空格**（r2 的 N6）：`\pi  ^2` 这种多打一个空格的写法，只看
-    /// 紧邻那一位的话，退回的空格自己会成为 `^` 的宿主（`π  ²`）。
+    /// 判据**跳过后续的连续空格**：`\pi  ^2` 这种多打一个空格的写法，只看紧邻那一位的话，退回
+    /// 的空格自己会成为 `^` 的宿主（`π  ²`）。
     fn trailing_space_separates_objects(&self) -> bool {
         let mut i = self.pos;
         while self.chars.get(i) == Some(&' ') {

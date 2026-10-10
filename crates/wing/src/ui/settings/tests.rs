@@ -960,7 +960,7 @@ fn the_anchor_column_scrolls_when_it_does_not_fit() {
     assert!(!text.contains("Providers"), "头一个锚点滚出窗口：{text}");
 }
 
-// ── 副标题行（审查 S2）：搜索回显不许被横幅顶掉 ─────────────
+// ── 副标题行：搜索回显不许被横幅顶掉 ─────────────
 
 #[test]
 fn the_search_line_wins_over_the_stale_banner() {
@@ -1035,7 +1035,7 @@ fn a_narrow_card_drops_the_anchor_column_and_keeps_focus_in_the_tree() {
 }
 
 /// 极矮卡片（inner 高 4~5 行）：副标题行只在**有内容要说**时才占一行——
-/// 搜索回显 / 过期横幅不许丢，`/ 搜索…` 占位则让给主体（审查 N1）。
+/// 搜索回显 / 过期横幅不许丢，`/ 搜索…` 占位则让给主体。
 #[test]
 fn a_very_short_card_keeps_the_search_echo_but_drops_the_placeholder() {
     let (catalog, _interface, mut panel) = fx::product_panel();

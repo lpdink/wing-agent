@@ -1,18 +1,17 @@
 //! Gateway event projection lane — `WingEvent` in, chat / turn / status out.
 //!
-//! Every event the gateway pushes is projected into UI state here and nowhere
-//! else: this module is the only place that matches on event variants. The
-//! writes are strictly "state in, state out" — chat cells, turn bookkeeping,
-//! status data, modal registration. Side effects (title changes, notifications,
-//! interruptions) leave through `AppIntent`s, so a projection never performs
-//! I/O itself.
+//! Every event the gateway pushes is projected into UI state here and nowhere else: this module is
+//! the only place that matches on event variants. The writes are strictly "state in, state out" —
+//! chat cells, turn bookkeeping, status data, modal registration. Side effects (title changes,
+//! notifications, interruptions) leave through `AppIntent`s, so a projection never performs I/O
+//! itself.
 //!
-//! The session-scoped guards (drop events from other sessions, always accept
-//! `SyncSession`) live here too: they decide **what the projection is allowed
-//! to see**, which is the projection's own contract.
+//! The session-scoped guards (drop events from other sessions, always accept `SyncSession`) live
+//! here too: they decide **what the projection is allowed to see**, which is the projection's own
+//! contract.
 //!
-//! Call directions: the main loop ([`super`]) calls in with every event;
-//! projections call out to [`super::modal`] (ask registration).
+//! Call directions: the main loop ([`super`]) calls in with every event; projections call out to
+//! [`super::modal`] (ask registration).
 
 use super::App;
 use super::AppIntent;

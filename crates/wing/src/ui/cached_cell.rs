@@ -1,14 +1,12 @@
 //! CachedCell — ChatCell wrapper with generation-based caching.
 //!
-//! Caches both rendered lines and width-aware height to avoid
-//! redundant `render_markdown()` calls during rendering.
+//! Caches both rendered lines and width-aware height to avoid redundant `render_markdown()` calls
+//! during rendering.
 //!
-//! Streaming cells (Thinking / AssistantMessage while a turn is active)
-//! carry a [`StreamingRender`] instead: deltas append through
-//! `append_stream` without invalidating the generation cache — only the
-//! active tail re-renders each sync, and heights come from the flat line
-//! count (O(1)). At turn end the stream is reconciled
-//! (`request_finalize` → the next render installs the full reference
+//! Streaming cells (Thinking / AssistantMessage while a turn is active) carry a [`StreamingRender`]
+//! instead: deltas append through `append_stream` without invalidating the generation cache — only
+//! the active tail re-renders each sync, and heights come from the flat line count (O(1)). At turn
+//! end the stream is reconciled (`request_finalize` → the next render installs the full reference
 //! render as the cached lines, flagged `prewrapped`).
 
 use std::path::PathBuf;
