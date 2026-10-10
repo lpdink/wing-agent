@@ -265,10 +265,19 @@ def _series(values: Any, unit: str) -> str:
 def _rounds_block(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
     """逐轮原始值（折叠）：每指标一行，两侧各列出本侧每轮的代表值。
 
-    单轮运行没什么可看的（没有轮间信息），不渲染。漂移大的指标额外在标题上点出来 ——
-    表格里的中位数已经把每轮的值压扁了，这一块才是判读"Δ 是不是噪声"的第一现场。
+    只要**任一指标的任一侧**有多轮就渲染（`--rounds 3` 下某侧少了一两轮，另一侧的逐轮值
+    反而更需要看）；两侧都只有单轮（`--rounds 1`）没有轮间信息，不渲染。漂移大的指标额外
+    在标题上点出来 —— 表格里的中位数已经把每轮的值压扁了，这一块才是判读"Δ 是不是噪声"
+    的第一现场。
     """
-    rounds = max((len(entry.get("base") or []) for entry in comparisons), default=0)
+    rounds = max(
+        (
+            len(entry.get(side) or [])
+            for entry in comparisons
+            for side in ("base", "head")
+        ),
+        default=0,
+    )
     if not comparisons or rounds < 2:
         return []
     drifted = [

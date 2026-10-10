@@ -700,19 +700,22 @@ def build_comparisons(
         shown = ", ".join(unequal[:4]) + (" …" if len(unequal) > 4 else "")
         notes.append(f"{len(unequal)} 个指标两侧轮数不等（有轮次失败）：{shown}")
     # 顺序 = 可见性优先级（报告顶部只直出前两条）：可比性 > 判定可靠性 > 样本抖动。
-    notes.extend(round_spread_notes(comparisons))
+    notes.extend(round_spread_notes(comparisons, thresholds))
     notes.extend(ci_width_notes(results))
     return comparisons, notes
 
 
 def round_spread_notes(
-    comparisons: Sequence[Mapping[str, Any]], *, limit: int = 5
+    comparisons: Sequence[Mapping[str, Any]], thresholds: Thresholds, *, limit: int = 5
 ) -> list[str]:
-    """逐轮漂移大的指标 → 一条聚合 note（透明度提示，不改判定）。
+    """逐轮漂移大的**可判定**指标 → 一条聚合 note（透明度提示，不改判定）。
 
     `stability_pct`（两侧轮间极差/中位数的较大者）> `ROUND_SPREAD_NOTE_PCT` 时提醒读者：
     中位数已经把每轮的值压扁了，一个 +40% 的 Δ 可能只是某侧后两轮整体漂移（真实案例：
-    产品代码零差异的 PR 上 `tui.display.lag_p50_us` 出现过 +43.7%）。提示不是判定 ——
+    产品代码零差异的 PR 上 `tui.display.lag_p50_us` 出现过 +43.7%）。
+
+    `info_only` 指标不进榜：它们本来就不判档，"判定仅供参考"对它们没有意义；而且近零中位数
+    的有符号量（trend）会以天文数字霸榜、把真正受影响的判定行挤出 top 5。提示仍然不是判定 ——
     verdict、退出码、带宽都不动。
     """
     drifted = [
@@ -720,14 +723,24 @@ def round_spread_notes(
         for entry in comparisons
         if entry.get("stability_pct") is not None
         and float(entry["stability_pct"]) > ROUND_SPREAD_NOTE_PCT
+        and not thresholds.is_info_only(str(entry["metric"]))
+    ]
+    skipped = [
+        str(entry["metric"])
+        for entry in comparisons
+        if entry.get("stability_pct") is not None
+        and float(entry["stability_pct"]) > ROUND_SPREAD_NOTE_PCT
+        and thresholds.is_info_only(str(entry["metric"]))
     ]
     if not drifted:
         return []
     drifted.sort(key=lambda item: item[1], reverse=True)
     shown = "、".join(f"{metric} {value:.1f}%" for metric, value in drifted[:limit])
     more = f"，共 {len(drifted)} 项" if len(drifted) > limit else ""
+    # 信息项也漂（且可能很夸张）：写明"还有几项没列"，免得读者拿折叠块里的 ⚠️ 计数对不上。
+    extra = f"（另有 {len(skipped)} 项信息项漂移未列）" if skipped else ""
     return [
-        f"逐轮漂移大（轮间极差/中位数 > {ROUND_SPREAD_NOTE_PCT:.0f}%）：{shown}{more}"
+        f"逐轮漂移大（轮间极差/中位数 > {ROUND_SPREAD_NOTE_PCT:.0f}%）：{shown}{more}{extra}"
         " —— 判定仅供参考，先看评论里的逐轮原始值"
     ]
 
@@ -2407,7 +2420,8 @@ def run_selftest() -> int:
                     "stability_pct": 31.0 + index,
                 }
                 for index in range(7)
-            ]
+            ],
+            thresholds,
         )
         checker.check(
             "stability.top5",
@@ -2416,6 +2430,50 @@ def run_selftest() -> int:
             and note_many[0].count("stub.spread") == 5
             and "stub.spread6.median_ms 37.0%" in note_many[0],
             str(note_many),
+        )
+        # info_only 指标不进漂移榜：它们本来就不判档，"判定仅供参考"没有意义；近零中位数的
+        # 有符号量（trend）还会以天文数字霸榜、把真正受影响的判定行挤出 top 5。
+        info_drift: list[SuiteResult] = []
+        for index, (trend, judged) in enumerate(
+            ((1000.0, 100.0), (1000.0, 100.0), (2000.0, 140.0)), start=1
+        ):
+            for side in ("base", "head"):
+                info_drift.append(
+                    _synth(
+                        "tui",
+                        side,
+                        index,
+                        {"tui.display.trend_us": trend, "tui.judged.median_ms": judged},
+                    )
+                )
+        comparisons_id, notes_id = build_comparisons(info_drift, thresholds)
+        by_id = {str(entry["metric"]): entry for entry in comparisons_id}
+        checker.check(
+            "stability.info_only_excluded",
+            by_id["tui.display.trend_us"]["stability_pct"] == 100.0
+            and by_id["tui.judged.median_ms"]["stability_pct"] == 40.0
+            and len(notes_id) == 1
+            and "tui.judged.median_ms 40.0%" in notes_id[0]
+            and "trend_us" not in notes_id[0]
+            and "（另有 1 项信息项漂移未列）" in notes_id[0],
+            f"{[(metric, entry['stability_pct']) for metric, entry in by_id.items()]} / {notes_id}",
+        )
+        # 混合轮数（某侧有轮次失败）：任一指标的任一侧有多轮 → 逐轮块照渲染（N1）。
+        mixed: list[SuiteResult] = [
+            _synth("stub", "base", 1, {"stub.mixed.median_ms": 10.0}),
+            _synth("stub", "head", 1, {"stub.mixed.median_ms": 10.0}),
+            _synth("stub", "head", 2, {"stub.mixed.median_ms": 12.0}),
+            _synth("stub", "head", 3, {"stub.mixed.median_ms": 11.0}),
+        ]
+        comparisons_m, notes_m = build_comparisons(mixed, thresholds)
+        md_m = report_render.render_comment(
+            build_report(ctx, comparisons_m, [], notes_m, 1.0)
+        )
+        checker.check(
+            "report.rounds_block_mixed_rounds",
+            "<details><summary>逐轮原始值" in md_m
+            and "| `stub.mixed.median_ms` | 10 ms | 10 / 12 / 11 ms |" in md_m,
+            md_m[md_m.find("<details><summary>逐轮原始值") :][:200],
         )
 
         # ⑪ 校准语义：两侧同 rev。用 HEAD~1（≠ HEAD）构造——实现里删掉"校准钉住 head"就会红。
