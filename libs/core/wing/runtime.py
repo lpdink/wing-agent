@@ -21,6 +21,7 @@ wing/runtime.py — WingRuntime：service 层协调者
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from wing.agent.event_sink import emit_best_effort
 from wing.event import (
     BranchTargetInfo,
     BranchTargetsEvent,
@@ -802,14 +803,20 @@ class WingRuntime:
         持久化语义）；session 为 None 的事件（无会话上下文）只广播。
         request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
         帧携带同一关联值（与 AgentEventSink.emit 一致）。
+
+        落盘走 `emit_best_effort`（#187 同族）：这里发的都是**已生效**动作
+        的报告（打断 / 回退 / 压缩 / 会话状态变更），报告动作不得反过来掀翻
+        调用者——落盘失败（如 ENOSPC）降级为 ERROR 日志并继续广播，而不是
+        让动作已经完成却对客户端返回 500、事件永不下发。
         """
         ctx = get_request_context()
         if ctx.request_id is not None:
             event.request_id = ctx.request_id
         event.target = EventTarget(scope="session")
-        if event.persist and session is not None:
-            session.context_manager.append_event(event)
-        event_bus.emit(event)
+        emit_best_effort(
+            event,
+            session.context_manager.append_event if session is not None else None,
+        )
 
     def _emit_context_stats(self, session: Session) -> None:
         """发射 ContextStatsEvent。"""

@@ -24,14 +24,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from wing.event_bus import event_bus
+from wing.agent.react_loop import ReActLoop
 from wing.schema import LLMResponse, LLMUsage, TextBlock
 
 #: 磁盘打满（现场故障：write 返回 ENOSPC）。
@@ -93,8 +95,52 @@ def _boom_generate(*args: Any, **kwargs: Any) -> _BoomStream:
 
 
 def _persist_log(agent: Any) -> Any:
-    """会话的落盘写口（`MessageLog`：文件后端即 history.jsonl）。"""
+    """会话的落盘写口（`MessageLog`：文件后端即 history.jsonl）。
+
+    锁定的内部契约：`ContextManager._messages`（TrackedList）→ `._log`
+    （MessageLog）——落盘故障注入的唯一入口（生产故障就在这一层）。TrackedList
+    换后端 / 改布局时这里会碎，属于预期（那时注入点要跟着挪）。
+    """
     return agent.context_manager._messages._log
+
+
+def _record_spawns(agent: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """记录该 agent 的消费者任务（以当前 `agent._worker` 起始），含孤儿。
+
+    只看 `agent._worker` 抓不到"第二个消费者"——孤儿任务照样在抢同一个
+    inbox（两边都 `_set_working(True)`、都往同一条链提交）。
+    """
+    spawned: list[Any] = [agent._worker]
+    original = agent._spawn_worker
+
+    def _record() -> Any:
+        task = original()
+        spawned.append(task)
+        return task
+
+    monkeypatch.setattr(agent, "_spawn_worker", _record)
+    return spawned
+
+
+@contextlib.contextmanager
+def _capture_loop_callback_errors() -> Iterator[list[dict[str, Any]]]:
+    """捕获 event loop 的异常上下文（done callback 里漏出的异常经此上报）。"""
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: contexts.append(dict(ctx)))
+    try:
+        yield contexts
+    finally:
+        loop.set_exception_handler(previous)
+
+
+def _callback_errors(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        ctx
+        for ctx in contexts
+        if "Exception in callback" in str(ctx.get("message", ""))
+    ]
 
 
 def _fail_append(
@@ -271,6 +317,88 @@ class TestReportPathIsUnfailable:
         # 关闭是终局：收口不触发通用续期（不复活已关闭的 agent）。
         assert agent._worker.done()
 
+    @pytest.mark.asyncio
+    async def test_interrupt_report_survives_persist_failure(
+        self, runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """runtime 侧同族上报：打断已生效时上报落盘失败不得变成 500 + 事件丢失。
+
+        `WingRuntime._emit_session_event` 发的是**已生效**动作的报告（打断 /
+        回退 / 压缩 / 状态变更）——它走同一本 history.jsonl。上报失败若照旧
+        抛出，`POST /api/session/interrupt` 会在打断已经生效的情况下返回 500，
+        且 `InterruptedEvent`（含被放弃消息的 request_id）永不下发。
+        """
+        session = runtime.create_session()
+        agent = session.agent
+        _fail_append(_persist_log(agent), monkeypatch, only=None)
+
+        events: list[Any] = []
+        event_bus.subscribe(events.append)
+
+        await asyncio.wait_for(
+            runtime.interrupt_session(session.session_id), timeout=5.0
+        )
+
+        interrupted = [e for e in events if e.type == "interrupted"]
+        assert len(interrupted) == 1, _types(events)
+        assert interrupted[0].dropped_request_ids == [], interrupted[0]
+        assert not agent._worker.done()
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_turn_failure_survives_exception_in_report_chain(
+        self, runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """双故障叠加（阶梯耗尽 + 落盘故障）：打断仍有界返回、notice 仍下发。
+
+        极端形态：worker 连取消也不响应（`_report_undead_worker` 的 notice 是
+        **错误路径里的副作用**），同时落盘整体失败。收口链上的任何一环都不
+        允许把 interrupt 拖住或炸掉——notice 事件此刻一条都不能少。
+        """
+        import wing.agent.core as core
+
+        monkeypatch.setattr(core, "_INTERRUPT_WAIT_SECONDS", 0.02)
+
+        stop = asyncio.Event()
+        started = asyncio.Event()
+
+        async def _swallow_all(_loop: Any) -> None:
+            """替身 `ReActLoop.run_turn`（类属性：多一个 self）。"""
+            started.set()
+            while True:
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    if stop.is_set():
+                        raise  # 收尾：放行取消，worker 正常终止
+                    continue
+
+        # 在 agent 创建**之前**打补丁：worker 的第一次 `run_turn` 就是它——
+        # 不靠投递消息把状态推进到那一步（那会与 interrupt 的入口清理竞态）。
+        monkeypatch.setattr(ReActLoop, "run_turn", _swallow_all)
+        session = runtime.create_session()
+        agent = session.agent
+        _fail_append(_persist_log(agent), monkeypatch, only=None)
+
+        worker = agent._worker
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        events: list[Any] = []
+        event_bus.subscribe(events.append)
+
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+
+        notices = [e for e in events if e.type == "notice"]
+        assert notices and notices[-1].level == "error", _types(events)
+        # 阶梯耗尽：保留原 worker（绝不重建第二个）。
+        assert agent._worker is worker and not worker.done()
+
+        # 收尾：先放掉吞取消的 worker，再走 shutdown（不污染 loop）。
+        stop.set()
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await agent.shutdown()
+
 
 class TestWorkerRenewal:
     """worker 终局续期：非意图性异常结束 → 自动重建；意图性收口不抢建。"""
@@ -304,17 +432,77 @@ class TestWorkerRenewal:
 
     @pytest.mark.asyncio
     async def test_cancelled_worker_is_not_renewed(self, runtime: Any) -> None:
-        """取消是意图性收口（interrupt / shutdown / 测试停机）：不触发续期。"""
+        """取消是意图性收口（interrupt / shutdown / 测试停机）：不触发续期。
+
+        守两件事：没有第二个消费者；**回调本身不出错**——已取消的任务上取
+        `exception()` 会抛 `CancelledError`，判据顺序写反就变成 loop 的
+        "Exception in callback"（续期静默失效），而"没被替换"的断言照样绿。
+        变异守门：删掉 `_on_worker_done` 的 `worker.cancelled()` 判据后本用例
+        转红（回调异常被 loop 记下）。
+        """
         session = runtime.create_session()
         agent = session.agent
         worker = agent._worker
 
-        worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
-        await _settle()
+        with _capture_loop_callback_errors() as contexts:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            await _settle()
 
         assert agent._worker is worker
         assert worker.done()
+        assert _callback_errors(contexts) == [], contexts
+        await agent.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_kept_worker_dying_with_exception_rebuilds_exactly_one_consumer(
+        self, runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """双回调形态：阶梯放手保留后以异常死亡 → 活着的消费者恰好一个。
+
+        生产中唯一让两条续期回调**同时登记**的路径：阶梯放手保留的 worker
+        （`_arm_worker_renewal` 的 `_renew` 已登记）随后以**非取消**方式死亡
+        （异常逃逸）——此时通用续期（`_on_worker_done`）也会触发，防重复全靠
+        两边的 `self._worker is worker` 判据。只看 `agent._worker` 抓不到孤儿
+        消费者（它照样在抢同一个 inbox），所以这里数**活着的消费者任务**。
+        变异守门：删掉任一道身份判据 → 两个活消费者（本用例转红）。
+        """
+        import wing.agent.core as core
+
+        monkeypatch.setattr(core, "_INTERRUPT_WAIT_SECONDS", 0.02)
+
+        started = asyncio.Event()
+
+        async def _swallow_then_die(_loop: Any) -> None:
+            started.set()
+            for _ in range(3):
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    pass
+            await asyncio.sleep(0.2)  # 阶梯之外才死：interrupt 已放手并登记续期
+            raise WorkerEscape("dies after being kept")
+
+        # 在 agent 创建之前打补丁：worker 的第一次 `run_turn` 就是它（否则补丁
+        # 落不进在途的那次调用，时序要赌消息投递与 interrupt 的入口清理谁先）。
+        monkeypatch.setattr(ReActLoop, "run_turn", _swallow_then_die)
+        session = runtime.create_session()
+        agent = session.agent
+        spawned = _record_spawns(agent, monkeypatch)
+        kept = spawned[0]
+        # 等 worker 真正进入吞取消循环：对**未启动**的协程 cancel，CancelledError
+        # 在协程体执行前抛出、body 无从吞掉（阶梯一次就杀掉它）。
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        await asyncio.wait_for(agent.interrupt(), timeout=5.0)
+        assert agent._worker is kept  # 先保留（绝不重建第二个）
+
+        await _wait_until(kept.done, timeout=3.0)
+        await _settle()
+
+        live = [task for task in spawned if not task.done()]
+        assert len(live) == 1, [repr(t) for t in spawned]
+        assert live[0] is agent._worker
         await agent.shutdown()
 
     @pytest.mark.asyncio

@@ -637,11 +637,28 @@ class WingAgent:
           兜住，故此处不覆盖）；
         - `self._worker is not worker`：已被替换（等锁期间续期或 interrupt
           抢先重建）——本回调与 `_arm_worker_renewal` 可能同时被登记，两边
-          都以这条为准绳（同步回调里串行判定）。
+          都以这条为准绳（同步回调里串行判定）；已取消的任务上取
+          `exception()` 会抛 `CancelledError`，所以取消判据必须写在它前面。
+
+        已知边界：这里只重建消费者，**不替客户端收口**——worker 被
+        `BaseException` 掀翻（`Exception` 已经出不了 `_run`）时本轮没有
+        turn_result / error / done，前端要等下一次投递的事件才回到 idle。
+        极端死法不值得为它引入重复上报面（`_run` 的兜底可能已经报过，
+        再发一轮 error/done 只会让前端看到两条收尾）。
         """
         if self._closing or self._worker is not worker or worker.cancelled():
             return
         exc = worker.exception()
+        if self._closing:
+            # shutdown 是终局：不重建（闸门）。异常照常取下并向日志交代——
+            # 不取回会由 loop 以 "Task exception was never retrieved" 报出，
+            # 与 shutdown 自己的收口日志重复。
+            log.error(
+                f"worker 在关闭中异常终止: session={self.session_id} "
+                f"exception={type(exc).__name__ if exc is not None else '-'}",
+                exc_info=exc,
+            )
+            return
         log.error(
             f"worker 意外终止，重建消费者: session={self.session_id} "
             f"exception={type(exc).__name__ if exc is not None else '-'}",

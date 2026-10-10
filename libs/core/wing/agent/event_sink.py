@@ -55,6 +55,38 @@ if TYPE_CHECKING:
     from wing.schema import LLMUsage, MediaRef, Message, ToolCall
 
 
+def emit_best_effort(
+    event: WingEvent, append_event: Callable[[WingEvent], None] | None
+) -> None:
+    """降级发射原语：落盘失败降级为 ERROR 日志，事件仍**尽力广播**，绝不抛出。
+
+    只做「落盘（persist=true 且给了写口时）→ 广播」两件事；元数据定型
+    （request_id / target）由调用方在此之前完成——`AgentEventSink._prepare`
+    与 `WingRuntime._emit_session_event` 的定型口径不同，不在这里合并。
+
+    用在**错误 / 上报路径**上（`AgentEventSink.best_effort()` 窗口、runtime
+    的 session 级上报）：这些动作与它们报告的故障常常同源——落盘正是刚坏掉
+    的资源（如 ENOSPC）。严格发射会让异常在 except 块里再抛一次（同层接不
+    住），或者让**已经生效**的业务动作（打断 / 回退 / 压缩）对客户端表现为
+    失败（500 + 事件永不下发），两者都不允许。
+
+    已知代价：磁盘上没有这条记录（报告是记账，不是事实）——前端靠广播拿到
+    它复位状态，resume 重放以磁盘为准。
+    """
+    if event.persist and append_event is not None:
+        try:
+            append_event(event)
+        except Exception:
+            log.exception(
+                f"事件上报落盘失败（已降级；仍向客户端广播）："
+                f"type={type(event).__name__}"
+            )
+    try:
+        event_bus.emit(event)
+    except Exception:
+        log.exception(f"事件上报广播失败（已降级）：type={type(event).__name__}")
+
+
 class AgentEventSink:
     """事件发射唯一出口——构造时绑定 session_id 与事件落盘回调。"""
 
@@ -118,17 +150,9 @@ class AgentEventSink:
         """上报窗口内的发射：任何一步失败都降级为日志，绝不抛出。"""
         try:
             self._prepare(event)
-            if event.persist and self._append_event is not None:
-                self._append_event(event)
         except Exception:
-            log.exception(
-                f"事件上报落盘失败（已降级；仍向客户端广播）："
-                f"type={type(event).__name__}"
-            )
-        try:
-            event_bus.emit(event)
-        except Exception:
-            log.exception(f"事件上报广播失败（已降级）：type={type(event).__name__}")
+            log.exception(f"事件上报定型失败（已降级）：type={type(event).__name__}")
+        emit_best_effort(event, self._append_event)
 
     def _prepare(self, event: WingEvent) -> None:
         # 关联元数据定型：在落盘之前完成 request_id 注入，保证磁盘记录

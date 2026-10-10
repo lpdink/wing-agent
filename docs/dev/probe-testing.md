@@ -264,7 +264,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 ## 逃生舱
 
-`probe.without_invariants(reason="...")` 关闭本场景的 teardown 不变量——**必须给理由**：理由写进 `artifacts/dump.txt` 并在终端汇总回显，空理由直接报错。用于"场景有意制造非法中间态"（例如断言失败路径的中间产物），不得用于掩盖真实失败。
+`probe.without_invariants(reason="...")` 关闭本场景的 teardown 不变量——**必须给理由**：理由写进 `artifacts/dump.txt` 并在终端汇总回显，空理由直接报错。用于"场景有意制造非法中间态"（例如断言失败路径的中间产物），不得用于掩盖真实失败。已发生的实例与理由：
+
+- 注入落盘故障的场景（`scenarios/test_worker_resilience.py`，钉「消费者不死 / 零僵尸」）：故障期间该会话的写入整体失败，**磁盘链必然在故障窗口上断开**（内存链与磁盘分叉，恢复后新记录的 `parent_uuid` 指向没写进文件的 uuid）——那是 `TrackedList` "先改内存再落盘"的既有语义在故障下的必然后果，磁盘链修复不在该场景范围内；断言目标是消费者存活与续期。
+
 
 `probe.allow_arguments_error(reason="...")` 是同一纪律的**窄口径**逃生舱：tool 配对不变量不再把 `arguments_error` 视为违规（用于有意构造"模型吐出坏参数"的场景，见 `scenarios/test_malformed_tool_args.py`；链拓扑与"瞬态记录不落盘"继续强制）。单次断言也可以自行放开：`view.assert_tool_pairing(allow_arguments_error=True)`。
 
