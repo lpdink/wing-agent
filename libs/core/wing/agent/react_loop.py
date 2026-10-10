@@ -453,7 +453,8 @@ class ReActLoop:
                 # 元信息（避免与带内 usage 双计）但携带 stop_reason——若只在
                 # 非零 usage 分支取值，它会被整个跳过，Message.stop_reason
                 # 恒为 null（max_tokens 截断审计失效）。取值与 metrics 发射
-                # 解耦：任一帧给了非 None 值就更新。
+                # 解耦：任一帧给了非 None 值就更新（provider 层传输重试在同一
+                # generate() 内重放流时跨尝试累积，与 last_usage 同构）。
                 if chunk.usage.stop_reason is not None:
                     stop_reason = chunk.usage.stop_reason
 

@@ -16,10 +16,10 @@ import json
 
 from wing.agent.event_sink import AgentEventSink
 from wing.chain import TrackedList
-from wing.event import DiffContentEvent
+from wing.event import AssistantTurnEvent, DiffContentEvent
 from wing.event_bus import event_bus
 from wing.request_context import reset_request_context, set_request_context
-from wing.schema import ChainNode, ToolCall
+from wing.schema import ChainNode, Message, ToolCall
 from wing.store.file import FileMessageLog
 
 
@@ -136,3 +136,68 @@ class TestRequestIdFinalization:
         (record,) = _read_log_lines(tmp_path)
         frame = wire_dump(broadcast[0])
         assert record["request_id"] == frame["request_id"] == "req-shared"
+
+
+class TestAssistantTurnStopReason:
+    """assistant_turn 的 stop_reason 是 stdio / ACP 消费者看到的终止原因。
+
+    它必须优先反映 Message 上的真实值（OpenAI 的 ``length`` 翻译成 Claude
+    词表的 ``max_tokens``），合成值只作兜底——否则编排器区分不了截断与
+    正常收尾（与落盘审计的差异会让同一次调用在两个面上说法不一）。
+    """
+
+    def setup_method(self):
+        event_bus._subscribers.clear()
+
+    def teardown_method(self):
+        event_bus._subscribers.clear()
+
+    def test_stop_reason_translated_to_claude_vocabulary(self):
+        sink = AgentEventSink(session_id="s-test")
+        turns: list = []
+        event_bus.subscribe(turns.append)
+        tool_calls = [ToolCall(id="c1", name="Bash", arguments={"cmd": "ls"})]
+
+        sink.assistant_turn(
+            Message(role="assistant", content="cut o", stop_reason="length"), "m"
+        )  # OpenAI 截断
+        sink.assistant_turn(
+            Message(role="assistant", content="done", stop_reason="stop"), "m"
+        )  # OpenAI 正常收尾
+        sink.assistant_turn(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=tool_calls,
+                stop_reason="tool_calls",
+            ),
+            "m",
+        )  # OpenAI 工具轮
+        sink.assistant_turn(
+            Message(role="assistant", content="t", stop_reason="max_tokens"), "m"
+        )  # Anthropic 原值原样通过
+        sink.assistant_turn(
+            Message(role="assistant", content="", tool_calls=tool_calls), "m"
+        )  # 无真实值 → 兜底合成
+
+        turns = [event for event in turns if isinstance(event, AssistantTurnEvent)]
+        assert [turn.stop_reason for turn in turns] == [
+            "max_tokens",
+            "end_turn",
+            "tool_use",
+            "max_tokens",
+            "tool_use",
+        ]
+
+    def test_interrupted_falls_back_to_synthesis(self):
+        """认不出的值（interrupted）不被当成合法协议值透传给 stdio。"""
+        sink = AgentEventSink(session_id="s-test")
+        turns: list = []
+        event_bus.subscribe(turns.append)
+
+        sink.assistant_turn(
+            Message(role="assistant", content="partial", stop_reason="interrupted"), "m"
+        )
+
+        (turn,) = [event for event in turns if isinstance(event, AssistantTurnEvent)]
+        assert turn.stop_reason == "end_turn"

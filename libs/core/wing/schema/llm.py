@@ -50,9 +50,12 @@ class LLMUsage(BaseModel):
     stop_reason: str | None = None
     """终止原因（协议原值：end_turn / max_tokens / tool_use / stop / length…）。
 
-    provider 在最终响应的 usage 上设置；react_loop 据此传导进
-    Message.stop_reason 与 LLMCallMetricsEvent——截断审计与补提交语义
-    的唯一事实源。中断路径由 runtime 合成 "interrupted"。"""
+    provider 在响应帧的 usage 上设置（OpenAI 兼容：带内 usage 帧带"此刻
+    已知值"、零 token 的流尾终帧带权威值）；react_loop **按帧全量取值**
+    ——不随 metrics 的 token 过滤丢帧——传导进 Message.stop_reason（唯一
+    落盘审计位置）与 LLMCallMetricsEvent。本字段是随行快照：OpenAI 带内帧
+    可能缺（此时只有 Message 顶层字段有值）。中断路径由 runtime 合成
+    "interrupted"。"""
 
     def __repr__(self) -> str:
         parts = [f"in:{self.prompt_tokens} out:{self.completion_tokens}"]

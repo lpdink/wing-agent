@@ -107,8 +107,9 @@ class ToolCallResultEvent(WingEvent):
 
 class LLMCallMetricsEvent(WingEvent):
     type: Literal["llm_call_metrics"] = "llm_call_metrics"
-    # 与 Message.usage + Message.stop_reason 逐字段等价，不落盘（截断审计的落盘
-    # 位置是 Message）。事件本身保留：audit 经 event_bus 聚合进独立的 metrics.json，
+    # token / 性能字段与 Message.usage 逐字段等价；stop_reason 取带内 usage 帧
+    # 的已知值（权威值在 Message.stop_reason——截断审计的落盘位置）。不落盘。
+    # 事件本身保留：audit 经 event_bus 聚合进独立的 metrics.json，
     # 直播路径的用量/截断提示依赖它。
     persist: ClassVar[bool] = False
     model: str = ""
@@ -209,6 +210,33 @@ class DiffContentEvent(WingEvent):
 # stdio frontends consume them to produce Claude-compatible NDJSON output.
 
 
+#: Message.stop_reason（协议原值）→ Claude 兼容词汇（stdio 帧的契约）。
+#: OpenAI 专有值（stop / length / tool_calls）在这里翻译，Anthropic 原值原样
+#: 通过——两个协议都收敛到同一套词表；认不出的值（如 interrupted）交给
+#: ``_claude_stop_reason`` 的兜底合成。
+_CLAUDE_STOP_REASON: dict[str, str] = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+    "end_turn": "end_turn",
+    "max_tokens": "max_tokens",
+    "tool_use": "tool_use",
+    "stop_sequence": "stop_sequence",
+}
+
+
+def _claude_stop_reason(msg: Message) -> str:
+    """stdio / ACP 消费的终止原因：优先真实值（含 max_tokens 截断），否则合成。
+
+    合成（按有无 tool_calls 报 tool_use/end_turn）只作兜底——真实值为空或
+    认不出时用；截断被报成 end_turn 会让编排器区分不了 length 与 stop。
+    """
+    mapped = _CLAUDE_STOP_REASON.get(msg.stop_reason or "")
+    if mapped is not None:
+        return mapped
+    return "tool_use" if msg.tool_calls else "end_turn"
+
+
 class AssistantTurnEvent(WingEvent):
     """Turn 级别的 assistant 完整消息（对应 Claude SDKAssistantMessage）。
 
@@ -259,7 +287,7 @@ class AssistantTurnEvent(WingEvent):
             session_id=session_id,
             content_blocks=content_blocks,
             model=model,
-            stop_reason="tool_use" if msg.tool_calls else "end_turn",
+            stop_reason=_claude_stop_reason(msg),
             usage=usage_dict,
         )
 

@@ -127,15 +127,6 @@ class TestOpenAIStreamSnapshot:
         assert provider.snapshot_blocks(acc) is None
         assert provider.snapshot_blocks(None) is None
 
-    def test_finish_reason_recorded_on_state(self):
-        """流式 chunk 的 finish_reason 首个非空值进入 state。"""
-        state = _OAIStreamState()
-        # 模拟 _generate_stream 内部的记录逻辑
-        choice = {"finish_reason": "length"}
-        if state.stop_reason is None and choice is not None:
-            state.stop_reason = choice.get("finish_reason")
-        assert state.stop_reason == "length"
-
 
 class TestUnfinishedToolCallCount:
     """截断检测计数：含无 id 的半截调用（投影会跳过它们，计数不能有盲区）。"""

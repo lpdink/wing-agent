@@ -7,8 +7,9 @@
   非流式路径同语义。带内 usage chunk（非零 token、喂 metrics）与流尾终帧
   （零 token、喂 Message 组装）各持一半信息，消费侧不许按"有没有 token"取舍；
 - 对照组：`finish_reason=stop` 的正常收尾；
-- 直播路径：`llm_call_metrics`（带内 usage 帧的载荷）同样携带 stop_reason——
-  前端据此区分 length ≠ stop。
+- 直播路径：`llm_call_metrics`（带内 usage 帧的载荷）与 `assistant_turn`
+  （stdio / ACP 消费者看到的 turn 级事件）同样携带真实值——后者按 Claude 词表
+  翻译（`length` → `max_tokens`），编排器据此区分截断与正常收尾。
 
 断言面：事件时间线（llm_call_metrics.stop_reason）、落盘链（assistant Message 的
 stop_reason / usage；内置不变量照常）。
@@ -66,6 +67,13 @@ async def test_streaming_stop_reason_survives_to_disk(probe: Probe) -> None:
         TRUNCATED_USAGE.completion_tokens,
         NORMAL_USAGE.completion_tokens,
     ], [event.data for event in metrics]
+
+    # ── 直播：turn 级事件（stdio / ACP）报 Claude 词表的真实值 ──
+    turns = session.watch.events("assistant_turn")
+    assert [event.data.get("stop_reason") for event in turns] == [
+        "max_tokens",  # OpenAI 的 length 翻译成 Claude 词表
+        "end_turn",
+    ], [event.data for event in turns]
 
     # ── 落盘：assistant Message 的 stop_reason 与 usage 逐条对账 ──
     view = probe.history(session)
