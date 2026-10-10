@@ -16,14 +16,20 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 
 pub mod args;
 pub mod argv;
+pub mod asks;
 pub(crate) mod backend_config;
+pub mod branch;
 pub mod common;
 pub mod config;
+pub mod control;
 mod discover;
+pub mod lifecycle;
 pub mod messages;
 pub mod ps;
 pub mod query;
 mod release;
+pub mod reload;
+mod restart;
 pub mod run;
 pub(crate) mod setup;
 pub(crate) mod start;
@@ -105,10 +111,18 @@ pub struct Cli {
     #[arg(long = "effort")]
     pub effort: Option<String>,
 
+    /// Answer a pending Ask by its tool_call_id (stdio mode).
+    ///
+    /// Routes the prompt to that ask's feedback waiter instead of the session
+    /// inbox; find the id with `wing asks <sid>`. (`wing run` carries the same
+    /// flag on the subcommand; this top-level copy exists so the stdio argument
+    /// filter keeps it — see `filter_unknown_args`.)
+    #[arg(long = "tool-call-id")]
+    pub tool_call_id: Option<String>,
+
     /// Output format: text (default), json, stream-json.
     #[arg(long = "output-format", default_value = "text")]
     pub output_format: String,
-
     /// Input format: text (default), stream-json.
     #[arg(long = "input-format", default_value = "text")]
     pub input_format: String,
@@ -191,6 +205,17 @@ pub enum Command {
     /// Stop the gateway daemon.
     Stop,
 
+    /// Restart the gateway daemon (stop + start; safe when it is not running).
+    Restart {
+        /// Gateway host (default: from config).
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Gateway port (default: from config).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+
     /// Show gateway daemon status.
     Status,
 
@@ -231,6 +256,82 @@ pub enum Command {
 
     /// Show session runtime info (model, tools, tokens, status).
     Info {
+        /// Session ID.
+        session_id: String,
+    },
+
+    /// Interrupt the session's current task (the TUI's Esc).
+    #[command(visible_alias = "int")]
+    Interrupt {
+        /// Session ID.
+        session_id: String,
+    },
+
+    /// Fork a session at a message node — the new session keeps the prefix.
+    ///
+    /// The node's own text is returned as `draft` (it is left out of the new
+    /// session so it can be re-sent, edited). Get uuids from `wing branches`;
+    /// `--at current` copies the whole chain.
+    Fork {
+        /// Session ID.
+        session_id: String,
+        /// Target message uuid (`current` = the latest state).
+        #[arg(long, value_name = "UUID")]
+        at: String,
+    },
+
+    /// Rewind a session to just before a message node.
+    ///
+    /// The cut message comes back as `draft` for re-sending. Get uuids from
+    /// `wing branches`; `--to current` is a no-op (already the latest state).
+    Rewind {
+        /// Session ID.
+        session_id: String,
+        /// Target message uuid (`current` = no-op).
+        #[arg(long, value_name = "UUID")]
+        to: String,
+    },
+
+    /// List a session's forkable / rewindable message nodes (the uuids `fork` / `rewind` take).
+    Branches {
+        /// Session ID.
+        session_id: String,
+    },
+
+    /// Show a session's pending Ask question(s) — with the tool_call_id to answer them.
+    ///
+    /// A pending ask's tool call is not on the chain yet, so `wing tail` cannot
+    /// see it; this reads the live session snapshot (read-only, one shot).
+    Asks {
+        /// Session ID.
+        session_id: String,
+        /// Block up to N seconds for an ask to appear (default: report the
+        /// current snapshot only).
+        #[arg(long, default_value = "0")]
+        wait: u64,
+    },
+
+    /// Compact a session's context (manual compaction).
+    Compact {
+        /// Session ID.
+        session_id: String,
+        /// Optional compaction focus, appended to the compact prompt (without
+        /// it the default strategy runs).
+        instruction: Option<String>,
+    },
+
+    /// Update session state — only the fields you pass are changed.
+    Update(control::UpdateArgs),
+
+    /// Hot-reload the gateway configuration (config / hooks / commands /
+    /// providers / skills & rules / log level; per-item results, in order).
+    Reload,
+
+    /// Create an empty session and print its id.
+    New(lifecycle::NewArgs),
+
+    /// Load an evicted session back into gateway memory and print its state.
+    Resume {
         /// Session ID.
         session_id: String,
     },
@@ -387,6 +488,24 @@ fn misplaced_include_partial_messages_error(flag: bool) -> Option<String> {
     )
 }
 
+/// Error message when the top-level `--tool-call-id` is used outside stdio mode.
+///
+/// Stdio mode (`wing -p ... --tool-call-id ...`) is one consumer; the other is
+/// `wing run`'s own `--tool-call-id` (placed **after** the subcommand, where it
+/// binds to `RunArgs`). The flag must live on the top-level `Cli` as well,
+/// otherwise the stdio argument filter would silently drop it — the exact
+/// failure this step exists to remove — which means a misplaced use now parses
+/// fine and would reach dispatch with nobody reading it. Refuse with a pointer
+/// instead of silently ignoring. `None` = invocation is fine.
+fn misplaced_tool_call_id_error(tool_call_id: Option<&str>) -> Option<String> {
+    let tool_call_id = tool_call_id?;
+    Some(format!(
+        "top-level --tool-call-id only applies to stdio mode (wing -p ... --tool-call-id {tool_call_id}); \
+         with a subcommand put it after the subcommand, e.g. `wing run --tool-call-id {tool_call_id} ...`. \
+         wing refuses it here instead of ignoring it."
+    ))
+}
+
 /// Error message when `--show-secrets` is passed without `--dump-config`.
 ///
 /// Same reasoning as the other misplaced-flag guards: the flag lives on
@@ -468,6 +587,14 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // 同理：顶层 --tool-call-id 只服务 stdio 模式（`wing -p --tool-call-id ...`）。
+    // 子命令形态在 `wing run` 上有自己的同名旗标（出现在子命令之后即绑定到它，
+    // 顶层保持 None），所以这条闸门只拦"放在子命令之前"或"没走 stdio"的写法。
+    if let Some(message) = misplaced_tool_call_id_error(cli.tool_call_id.as_deref()) {
+        eprintln!("wing error: {message}");
+        return ExitCode::FAILURE;
+    }
+
     match cli.command {
         Some(cmd) => match cmd {
             Command::Tui {
@@ -530,6 +657,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
+            Command::Restart { host, port } => crate::cmd::restart::run(host, port, cli.json).await,
             Command::Status => {
                 status::show_status().await;
                 ExitCode::SUCCESS
@@ -543,6 +671,34 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 crate::cmd::ps::run_ps(all, &tag, cli.json, cli.watch).await
             }
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
+            Command::Interrupt { session_id } => {
+                crate::cmd::control::run_interrupt(&session_id, cli.json).await
+            }
+            Command::Fork { session_id, at } => {
+                crate::cmd::branch::run_fork(&session_id, &at, cli.json).await
+            }
+            Command::Rewind { session_id, to } => {
+                crate::cmd::branch::run_rewind(&session_id, &to, cli.json).await
+            }
+            Command::Branches { session_id } => {
+                crate::cmd::branch::run_branches(&session_id, cli.json).await
+            }
+            Command::Asks { session_id, wait } => {
+                crate::cmd::asks::run_asks(&session_id, wait, cli.json).await
+            }
+            Command::Compact {
+                session_id,
+                instruction,
+            } => {
+                crate::cmd::control::run_compact(&session_id, instruction.as_deref(), cli.json)
+                    .await
+            }
+            Command::Update(args) => crate::cmd::control::run_update(args, cli.json).await,
+            Command::Reload => crate::cmd::reload::run_reload(cli.json).await,
+            Command::New(args) => crate::cmd::lifecycle::run_new(args, cli.json).await,
+            Command::Resume { session_id } => {
+                crate::cmd::lifecycle::run_resume(&session_id, cli.json).await
+            }
             Command::Tag {
                 session_id,
                 tags,
@@ -612,6 +768,7 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
         max_turns: cli.max_turns,
         effort: cli.effort,
         tools: cli.tools,
+        tool_call_id: cli.tool_call_id,
         tag: cli.tag,
         output_format,
         input_format,
@@ -1004,5 +1161,247 @@ mod tests {
                 "{argv:?}"
             );
         }
+    }
+
+    // ── 控制面子命令（clap 形态） ──────────────────────────────
+
+    #[test]
+    fn clap_parses_the_branch_commands() {
+        let cli = Cli::try_parse_from(["wing", "branches", "sid-1"]).expect("branches");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Branches { ref session_id }) if session_id == "sid-1"
+        ));
+
+        let cli = Cli::try_parse_from(["wing", "fork", "sid-1", "--at", "u-1"]).expect("fork");
+        match cli.command {
+            Some(Command::Fork { session_id, at }) => {
+                assert_eq!((session_id.as_str(), at.as_str()), ("sid-1", "u-1"));
+            }
+            other => panic!("expected fork, got {other:?}"),
+        }
+        // uuid 是 --at / --to 的**值**（不是位置参数）：缺了它 clap 直接报错。
+        let err = Cli::try_parse_from(["wing", "fork", "sid-1"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+
+        let cli =
+            Cli::try_parse_from(["wing", "rewind", "sid-1", "--to", "current"]).expect("rewind");
+        match cli.command {
+            Some(Command::Rewind { session_id, to }) => {
+                assert_eq!((session_id.as_str(), to.as_str()), ("sid-1", "current"));
+            }
+            other => panic!("expected rewind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_interrupt_and_its_int_alias() {
+        for name in ["interrupt", "int"] {
+            let cli = Cli::try_parse_from(["wing", name, "sid-1"]).expect(name);
+            assert!(
+                matches!(cli.command, Some(Command::Interrupt { ref session_id }) if session_id == "sid-1"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn clap_parses_compact_with_and_without_instruction() {
+        let cli = Cli::try_parse_from(["wing", "compact", "sid-1"]).expect("no instruction");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Compact { ref session_id, instruction: None }) if session_id == "sid-1"
+        ));
+
+        let cli =
+            Cli::try_parse_from(["wing", "compact", "sid-1", "keep the TODOs"]).expect("with");
+        match cli.command {
+            Some(Command::Compact { instruction, .. }) => {
+                assert_eq!(instruction.as_deref(), Some("keep the TODOs"));
+            }
+            other => panic!("expected compact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_all_update_flags() {
+        let cli = Cli::try_parse_from([
+            "wing",
+            "update",
+            "sid-1",
+            "--model",
+            "ds-flash",
+            "--agent",
+            "executor",
+            "--title",
+            "nightly",
+            "--effort",
+            "high",
+            "--workspace",
+            "/tmp/ws",
+            "--tools",
+            "core.Bash,Read",
+        ])
+        .expect("update");
+        match cli.command {
+            Some(Command::Update(args)) => {
+                assert_eq!(args.session_id, "sid-1");
+                assert_eq!(args.model.as_deref(), Some("ds-flash"));
+                assert_eq!(args.agent.as_deref(), Some("executor"));
+                assert_eq!(args.title.as_deref(), Some("nightly"));
+                assert_eq!(args.effort.as_deref(), Some("high"));
+                assert_eq!(args.workspace.as_deref(), Some("/tmp/ws"));
+                assert_eq!(args.tools.as_deref(), Some("core.Bash,Read"));
+                assert!(args.thinking.is_none() && args.yolo.is_none());
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+    }
+
+    /// on/off 三形态：裸旗标（= on）、空格取值、`=` 取值；`true` / `false` 是别名。
+    /// 裸旗标后紧跟另一个旗标不能被吞成它的值（clap 的 `num_args(0..=1)` 语义）。
+    #[test]
+    fn clap_parses_update_on_off_flags_in_every_form() {
+        use crate::cmd::control::OnOff;
+
+        let cli = Cli::try_parse_from(["wing", "update", "sid", "--yolo"]).expect("bare");
+        match cli.command {
+            Some(Command::Update(args)) => assert_eq!(args.yolo, Some(OnOff::On)),
+            other => panic!("expected update, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "update", "sid", "--yolo", "off"]).expect("space");
+        match cli.command {
+            Some(Command::Update(args)) => assert_eq!(args.yolo, Some(OnOff::Off)),
+            other => panic!("expected update, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "update", "sid", "--thinking=off"]).expect("equals");
+        match cli.command {
+            Some(Command::Update(args)) => assert_eq!(args.thinking, Some(OnOff::Off)),
+            other => panic!("expected update, got {other:?}"),
+        }
+
+        // 别名形态。
+        let cli = Cli::try_parse_from(["wing", "update", "sid", "--thinking", "false"])
+            .expect("true/false alias");
+        match cli.command {
+            Some(Command::Update(args)) => assert_eq!(args.thinking, Some(OnOff::Off)),
+            other => panic!("expected update, got {other:?}"),
+        }
+
+        // 裸旗标 + 下一个旗标：`--thinking` 不能被吃掉 `--title` 的值。
+        let cli = Cli::try_parse_from(["wing", "update", "sid", "--thinking", "--title", "t"])
+            .expect("bare followed by another flag");
+        match cli.command {
+            Some(Command::Update(args)) => {
+                assert_eq!(args.thinking, Some(OnOff::On));
+                assert_eq!(args.title.as_deref(), Some("t"));
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_reload_new_and_resume() {
+        let cli = Cli::try_parse_from(["wing", "reload"]).expect("reload");
+        assert!(matches!(cli.command, Some(Command::Reload)));
+
+        let cli = Cli::try_parse_from([
+            "wing",
+            "new",
+            "--workspace",
+            "/tmp/ws",
+            "--template",
+            "executor",
+            "--tag",
+            "a,b",
+        ])
+        .expect("new");
+        match cli.command {
+            Some(Command::New(args)) => {
+                assert_eq!(args.workspace.as_deref(), Some("/tmp/ws"));
+                assert_eq!(args.template.as_deref(), Some("executor"));
+                assert_eq!(args.tag, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected new, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "resume", "sid-1"]).expect("resume");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Resume { ref session_id }) if session_id == "sid-1"
+        ));
+    }
+
+    /// `wing run --tool-call-id`（Ask 定向回答）：值是 call id，可重复给出最后一次生效。
+    #[test]
+    fn clap_parses_run_tool_call_id() {
+        let cli = Cli::try_parse_from([
+            "wing",
+            "run",
+            "-r",
+            "sid",
+            "-p",
+            "answer",
+            "--tool-call-id",
+            "call-42",
+        ])
+        .expect("run with tool call id");
+        match cli.command {
+            Some(Command::Run(args)) => {
+                assert_eq!(args.tool_call_id.as_deref(), Some("call-42"));
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "run", "-p", "hi"]).expect("run without");
+        match cli.command {
+            Some(Command::Run(args)) => assert!(args.tool_call_id.is_none()),
+            other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    /// 顶层 `--tool-call-id`（stdio 模式）与 `wing run` 的子命令版并存：
+    /// 出现在子命令之后绑定到 `RunArgs`，顶层保持 None——两条路径互不干扰。
+    ///
+    /// 顶层那份存在的理由是 stdio 参数过滤器（`filter_unknown_args`）：`-p`
+    /// 一出现它就按 stdio 语义丢未知长旗标，而它只认顶层定义——子命令旗标
+    /// 会被静默丢掉（这正是本步要消灭的形态）。
+    #[test]
+    fn clap_parses_tool_call_id_on_both_levels() {
+        // stdio 形态：顶层字段。guard 不在这条路径上被询问（dispatch 先走
+        // is_stdio_mode 分支返回），`is_stdio_mode` 就是它的保护。
+        let cli =
+            Cli::try_parse_from(["wing", "-p", "answer", "-r", "sid", "--tool-call-id", "c1"])
+                .expect("stdio form");
+        assert!(cli.is_stdio_mode());
+        assert_eq!(cli.tool_call_id.as_deref(), Some("c1"));
+
+        // 子命令形态：绑定到 RunArgs，顶层为 None（guard 因此不会误伤）。
+        let cli = Cli::try_parse_from(["wing", "run", "-p", "answer", "--tool-call-id", "c2"])
+            .expect("run form");
+        assert_eq!(cli.tool_call_id, None);
+        match cli.command {
+            Some(Command::Run(args)) => assert_eq!(args.tool_call_id.as_deref(), Some("c2")),
+            other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    /// 放错位置（子命令之前 / 没有子命令却不在 stdio）的顶层 `--tool-call-id`
+    /// 被显式拒绝，而不是静默忽略。
+    #[test]
+    fn misplaced_tool_call_id_is_rejected_outside_stdio() {
+        assert!(misplaced_tool_call_id_error(None).is_none());
+
+        let message = misplaced_tool_call_id_error(Some("c1")).expect("must be rejected");
+        assert!(message.contains("stdio"), "{message}");
+        assert!(message.contains("--tool-call-id"), "{message}");
+
+        // clap 接受这种写法（flag 绑在顶层）——guard 是唯一防线。
+        let cli = Cli::try_parse_from(["wing", "--tool-call-id", "c1", "ps"]).expect("parses");
+        assert_eq!(cli.tool_call_id.as_deref(), Some("c1"));
+        assert!(!cli.is_stdio_mode());
+        assert!(misplaced_tool_call_id_error(cli.tool_call_id.as_deref()).is_some());
     }
 }

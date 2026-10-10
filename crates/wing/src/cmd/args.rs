@@ -40,6 +40,15 @@ pub struct RunArgs {
     #[arg(long = "tools")]
     pub tools: Option<String>,
 
+    /// Answer a pending Ask by its tool_call_id — routes the prompt to that
+    /// ask's feedback waiter instead of the session inbox.
+    ///
+    /// Find the id with `wing asks <sid>` (the pending-ask query): a pending
+    /// ask's tool call is not on the chain yet, so `wing tail` cannot see it.
+    /// A stale id (no live waiter) falls back to a normal message.
+    #[arg(long = "tool-call-id")]
+    pub tool_call_id: Option<String>,
+
     /// Attach tags to the session (repeatable / comma-separated).
     ///
     /// Applied at creation; with -r the tags are added to the resumed

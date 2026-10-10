@@ -409,6 +409,9 @@ pub struct UpdateSessionRequest {
     pub yolo: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// 切换工具集（全量替换，ref 格式：`namespace.name` 或裸名）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 /// POST /api/session/update 响应。
@@ -1477,6 +1480,19 @@ mod tests {
         })
         .unwrap();
         assert!(empty.get("model").is_none() && empty.get("provider").is_none());
+
+        // `tools`（全量替换）：显式给出的数组原样上线，None 时不出现该键
+        // ——端点按「键缺席 = 不动工具集」处理部分更新。
+        let tools = UpdateSessionRequest {
+            session_id: "s1".into(),
+            tools: Some(vec!["core.Bash".into(), "Read".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&tools).unwrap(),
+            serde_json::json!({"session_id": "s1", "tools": ["core.Bash", "Read"]})
+        );
+        assert!(empty.get("tools").is_none());
     }
 
     // ── /api/models 目录（对象数组 + id 引用词） ──────
