@@ -281,11 +281,14 @@ pub enum Command {
         /// Number of messages to show (default 10).
         #[arg(short = 'n', long, default_value = "10")]
         n: usize,
-        /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content
-        /// (named filters strip to the selected section in both text and --json
-        /// output; tool results print as a 500-char peek in text mode).
-        #[arg(short = 't', long, default_value = "all")]
-        filter: String,
+        #[arg(
+            short = 't',
+            long,
+            default_value = "all",
+            value_delimiter = ',',
+            help = messages::FILTER_HELP
+        )]
+        filter: Vec<messages::FilterArg>,
     },
 
     /// Show first N messages from a session (like `head`).
@@ -295,11 +298,14 @@ pub enum Command {
         /// Number of messages to show (default 10).
         #[arg(short = 'n', long, default_value = "10")]
         n: usize,
-        /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content
-        /// (named filters strip to the selected section in both text and --json
-        /// output; tool results print as a 500-char peek in text mode).
-        #[arg(short = 't', long, default_value = "all")]
-        filter: String,
+        #[arg(
+            short = 't',
+            long,
+            default_value = "all",
+            value_delimiter = ',',
+            help = messages::FILTER_HELP
+        )]
+        filter: Vec<messages::FilterArg>,
     },
 
     /// List available models (grouped by provider).
