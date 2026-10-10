@@ -5,10 +5,12 @@ import os
 from pathlib import Path
 
 from wing.agent import ToolContext, current_tool_call_id
+from wing.common.fs import atomic_write_text
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
 from wing.tools.internal.utils import resolve_path as _resolve_path
+from wing.tools.internal.write_target import resolve_write_target
 
 
 @tool_registry.register(name="Write")
@@ -25,10 +27,6 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
     try:
         path = _resolve_path(path, ctx)
 
-        parent = os.path.dirname(os.path.abspath(path))
-        if parent and not os.path.exists(parent):
-            os.makedirs(parent, exist_ok=True)
-
         # Read old content BEFORE writing (for diff event)
         old_text: str | None = None
         existed = os.path.exists(path)
@@ -40,8 +38,19 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
             except Exception:
                 pass
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        # 写入目标语义（符号链接 / 非常规文件 / 只读拒绝）由共享 helper 判定
+        # ——与 Edit 同一份政策（`tools/internal/write_target.py`）。
+        target, in_place = resolve_write_target(path)
+
+        if in_place:
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            # 原子替换（tmp + os.replace，与 Edit 同语义）：写入中途被杀不会
+            # 留下半截文件（原内容要么完整保留、要么整体被替换），并发读者
+            # 也不会读到部分内容。tmp 与目标同目录（同文件系统）、fsync 先于
+            # rename（断电后不会出现"已改名、内容为空"）。父目录自动创建。
+            atomic_write_text(target, content)
 
         byte_count = len(content.encode("utf-8"))
         new_lines = len(content.splitlines())
