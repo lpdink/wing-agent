@@ -688,7 +688,7 @@ fn a_box_that_does_not_start_on_its_caption_is_not_painted() {
     loop {
         images.sync(std::slice::from_ref(&plot));
         let mut attempt = right.clone();
-        images.paint(std::slice::from_ref(&image), clip, None, &mut attempt);
+        images.paint(std::slice::from_ref(&image), clip, &[], &mut attempt);
         if has_placeholder(&attempt) {
             break;
         }
@@ -704,7 +704,7 @@ fn a_box_that_does_not_start_on_its_caption_is_not_painted() {
     let mut wrong = Buffer::empty(clip);
     wrong.set_string(2, 0, "not a caption at all", Style::default());
     let untouched = wrong.clone();
-    images.paint(std::slice::from_ref(&image), clip, None, &mut wrong);
+    images.paint(std::slice::from_ref(&image), clip, &[], &mut wrong);
     assert_eq!(wrong, untouched, "the picture must not cover plain text");
 
     // …and neither does a box one row off (its origin is a cover row, not the
@@ -720,7 +720,7 @@ fn a_box_that_does_not_start_on_its_caption_is_not_painted() {
             ..image.clone()
         }),
         clip,
-        None,
+        &[],
         &mut shifted,
     );
     assert_eq!(
@@ -903,7 +903,7 @@ fn a_pending_encode_leaves_the_caption_untouched() {
         path: plot.clone(),
     };
     let mut buf = caption.clone();
-    images.paint(std::slice::from_ref(&requested), clip, None, &mut buf);
+    images.paint(std::slice::from_ref(&requested), clip, &[], &mut buf);
     assert_eq!(
         buf, caption,
         "a queued encode must leave the caption exactly as it was"
@@ -915,7 +915,7 @@ fn a_pending_encode_leaves_the_caption_untouched() {
     while !painted {
         images.sync(std::slice::from_ref(&plot));
         let mut attempt = caption.clone();
-        images.paint(std::slice::from_ref(&requested), clip, None, &mut attempt);
+        images.paint(std::slice::from_ref(&requested), clip, &[], &mut attempt);
         painted = has_placeholder(&attempt);
         assert!(
             Instant::now() < deadline,

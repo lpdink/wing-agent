@@ -32,27 +32,29 @@ enum HelpRow {
 
 /// 键位表（design §12.3 的全表；顺序 = 使用频率）。
 const TABLE: &[HelpRow] = &[
+    HelpRow::Section("两栏"),
+    HelpRow::Key("Tab", "切栏（左栏分组 ↔ 右栏设置项）"),
+    HelpRow::Key("← →", "回左栏 / 进右栏（右栏里仍是折叠、展开）"),
+    HelpRow::Key("Esc", "右栏 → 左栏 → 关闭面板（脏则二次确认）"),
     HelpRow::Section("通用"),
-    HelpRow::Key("↑ ↓", "移动光标 / 选择条目"),
-    HelpRow::Key("Enter", "展开 / 切换 / 选择 / 编辑 / 新增"),
+    HelpRow::Key("↑ ↓", "移动光标 / 选择条目 / 选分组"),
+    HelpRow::Key("Enter", "展开 / 切换 / 选择 / 编辑 / 新增 / 进右栏"),
     HelpRow::Key("Space", "切换 bool / 选中选项"),
     HelpRow::Key("s", "保存两边（Gateway + Interface）"),
-    HelpRow::Key("/", "搜索（Enter 保留 · Esc 恢复）"),
+    HelpRow::Key("/", "搜索（跨分组；Enter 保留 · Esc 恢复）"),
     HelpRow::Key("p", "问题清单（再按一次返回树）"),
-    HelpRow::Key("Tab", "切根 Gateway ↔ Interface"),
     HelpRow::Key("R", "重新载入（丢弃本地改动）"),
     // AD1：Ctrl+R 只在有待重启的变更时（`restart_required` 非空）生效并出现在键位栏。
     HelpRow::Key("Ctrl+R", "立即重启网关（有待重启的变更时）"),
     HelpRow::Key("PgUp PgDn", "翻页；Home End 跳首尾"),
     HelpRow::Key("?", "帮助（再按 ? 或 Esc 关闭）"),
     HelpRow::Key("Ctrl+C", "双击退出 TUI（面板不吞）"),
-    HelpRow::Section("树视图"),
+    HelpRow::Section("右栏（设置项）"),
     HelpRow::Key("← →", "折叠 / 展开；enum 行循环切值"),
     HelpRow::Key("a", "给最近的列表新增一项"),
     HelpRow::Key("d", "删除列表项 / 清空标量（二次确认）"),
     HelpRow::Key("J K", "列表项下移 / 上移"),
     HelpRow::Key("r", "复位为默认（移除这一项）"),
-    HelpRow::Key("Esc", "退出搜索 → 关闭面板（脏则二次确认）"),
     HelpRow::Section("编辑器"),
     HelpRow::Key("Enter", "提交（空缓冲 = 取消）"),
     HelpRow::Key("Esc", "取消编辑，缓冲丢弃"),
@@ -143,7 +145,8 @@ mod tests {
         }
         assert!(joined.contains("改动只在按 s 保存后才落盘。"), "{joined}");
         assert!(joined.contains("折叠 / 展开"), "{joined}");
-        assert!(joined.contains("切根 Gateway ↔ Interface"), "{joined}");
+        assert!(joined.contains("切栏"), "两栏的 Tab 语义：{joined}");
+        assert!(joined.contains("回左栏"), "Esc 阶梯的第一级：{joined}");
     }
 
     #[test]

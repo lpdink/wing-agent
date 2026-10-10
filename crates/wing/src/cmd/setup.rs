@@ -74,6 +74,7 @@ use crate::shared::panels::settings::View;
 use crate::tui::TermEvent;
 use crate::ui::settings::SettingsCatalogs;
 use crate::ui::settings::SettingsOverlay;
+use crate::ui::settings::anchors_viewport_rows;
 use crate::ui::settings::tree_viewport_rows;
 use crate::ui::shimmer::is_light_theme;
 use crate::ui::shimmer::to_rgb;
@@ -585,6 +586,7 @@ impl SetupBackend for GatewayApiClient {
         crate::config::store::read_interface_doc()
             .ok()
             .map(|read| InterfaceSource {
+                groups: crate::config::catalog::interface_groups(),
                 catalog: crate::config::catalog::interface_catalog(),
                 doc: read.doc,
             })
@@ -665,8 +667,9 @@ fn draw_frame<B: Backend>(
             // 小终端里也不该整条消失。
             draw_note(frame, note_area, &palette, note);
             if panel_open {
-                // 08 的契约：每帧同步可见行数，再 Clear + 整块 render（同 10 的落点）。
+                // 08 的契约：每帧同步两栏各自的可见行数，再 Clear + 整块 render（同 10 的落点）。
                 panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
+                panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
                 frame.render_widget(Clear, panel_area);
                 let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
                 frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
@@ -885,6 +888,7 @@ mod tests {
     use wing_api_client::models::ErrorResponse;
     use wing_api_client::models::SecretState;
     use wing_api_client::models::SettingChoice;
+    use wing_api_client::models::SettingGroup;
     use wing_api_client::models::SettingKind;
     use wing_api_client::models::SettingsSetResponse;
 
@@ -1005,9 +1009,11 @@ mod tests {
     }
 
     fn schema() -> SettingsSchemaResponse {
+        let root = gateway_catalog();
         SettingsSchemaResponse {
             version: "0.0.0-test".into(),
-            root: gateway_catalog(),
+            groups: SettingGroup::derive_from_sections(&root, "g"),
+            root,
             config_path: "/home/u/.wing/core/config.yaml".into(),
         }
     }
@@ -1030,6 +1036,12 @@ mod tests {
 
     fn interface_source(preset: &str) -> InterfaceSource {
         InterfaceSource {
+            groups: vec![SettingGroup {
+                id: "interface".into(),
+                title: "Interface".into(),
+                doc: "TUI 自身".into(),
+                members: vec!["colors".into(), "layout".into()],
+            }],
             catalog: interface_catalog_fixture(),
             doc: json!({"colors": {"preset": preset}}),
         }

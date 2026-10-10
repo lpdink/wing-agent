@@ -140,6 +140,7 @@ impl App {
             Ok(read) => {
                 self.interface_catalog = Some(catalog.clone());
                 Some(InterfaceSource {
+                    groups: crate::config::catalog::interface_groups(),
                     catalog,
                     doc: read.doc,
                 })
@@ -157,6 +158,11 @@ impl App {
         self.settings_pending = false;
         // 选区锚在内容坐标：overlay 期间的帧几何与内容都变了，留着只会指向别的文本。
         self.cancel_selection();
+        // v2 的卡片是**浮层**：四周露出聊天背景，于是"卡片底下那张图"成了新问题——
+        // 图形协议画上去的像素不会因为这一帧不画它就消失（sixel 尤其如此）。
+        // 打开时整屏重画一次（`terminal.clear()` + `images.invalidate()` 是既有配对），
+        // 与 `close_settings_panel` 的那一次对称：进出面板各擦一次屏幕。
+        self.needs_full_redraw = true;
         self.chat_dirty = true;
     }
 
@@ -199,6 +205,7 @@ impl App {
         ));
         self.settings_cache = Some((schema.clone(), state));
         self.cancel_selection();
+        self.needs_full_redraw = true;
     }
 
     /// `FetchPayload::Settings` 的落地：打开 / 后台刷新 / `R` 重载三个来源共用。
@@ -307,6 +314,7 @@ impl App {
                 let doc = read.doc;
                 if let Some(panel) = self.settings_panel.as_mut() {
                     panel.set_interface(InterfaceSource {
+                        groups: crate::config::catalog::interface_groups(),
                         catalog,
                         doc: doc.clone(),
                     });

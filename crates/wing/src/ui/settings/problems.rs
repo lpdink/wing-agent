@@ -32,7 +32,18 @@ use super::text::wrap_rows;
 /// 条目细节行的最大行数（超过按 `…` 收尾）。
 const MAX_DETAIL_ROWS: usize = 3;
 
-/// 问题清单的行列表（含标题与底部说明行）。
+/// 清单标题（v2：它占右栏的**分组头**那一行，所以从清单行里搬了出来）。
+pub(crate) fn heading_line(palette: &ThemePalette, width: usize) -> Line<'static> {
+    let heading = Style::default()
+        .fg(palette.accent)
+        .add_modifier(Modifier::BOLD);
+    clamp_line(
+        Line::from(Span::styled(" 待修复".to_string(), heading)),
+        width,
+    )
+}
+
+/// 问题清单的行列表（标题在分组头那一行，见 [`heading_line`]；这里只含条目与底部说明）。
 pub(crate) fn problem_lines(
     panel: &SettingsPanel,
     palette: &ThemePalette,
@@ -43,21 +54,13 @@ pub(crate) fn problem_lines(
         return Vec::new();
     }
     let dim = Style::default().fg(palette.dim);
-    let heading = Style::default()
-        .fg(palette.accent)
-        .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    // 标题行 + 底部说明行各占一行（矮终端下先让位给内容）。
-    lines.push(clamp_line(
-        Line::from(Span::styled("待修复".to_string(), heading)),
-        width,
-    ));
-
     let problems = panel.problems();
+    // 底部说明行占一行（矮终端下先让位给内容）。
     let footnote = height >= 3;
     let list_height = height
-        .saturating_sub(1 + usize::from(footnote))
+        .saturating_sub(usize::from(footnote))
         .max(usize::from(problems.is_empty()));
     if problems.is_empty() {
         lines.push(clamp_line(
@@ -236,9 +239,11 @@ mod tests {
             ),
             problem(None, "invalid_value", "配置里出现了未知键", None),
         ]);
+        // 标题不在清单行里（v2：它占右栏的分组头那一行）。
+        assert!(heading_line(&palette(), 60).to_string().contains("待修复"));
         let lines = problem_lines(&panel, &palette(), 60, 12);
         let joined = texts(&lines).join("\n");
-        assert!(joined.contains("待修复"), "{joined}");
+        assert!(!joined.contains("待修复"), "标题已搬走：{joined}");
         assert!(joined.contains("❯ 1  providers 不得为空"), "{joined}");
         assert!(
             joined.contains("路径 providers · 至少声明一个 provider"),

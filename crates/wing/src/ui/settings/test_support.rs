@@ -16,6 +16,7 @@ use wing_api_client::models::ApplyScope;
 use wing_api_client::models::SecretPresence;
 use wing_api_client::models::SecretState;
 use wing_api_client::models::SettingChoice;
+use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::SettingsGetResponse;
@@ -285,6 +286,281 @@ pub(crate) fn interface_catalog() -> SettingNode {
     root(vec![colors, layout])
 }
 
+// ── 产品口径的夹具（8 个锚点；帧证据与布局测试用）─────────────
+
+/// 后端 `config/groups.py` 那张表的镜像（**测试夹具**：断言的是布局，不是分组契约本身
+/// ——分组契约由 Python 侧 `test_config_groups.py` 与 probe 场景钉住）。
+pub(crate) fn product_groups() -> Vec<SettingGroup> {
+    let group = |id: &str, title: &str, doc: &str, members: &[&str]| SettingGroup {
+        id: id.to_string(),
+        title: title.to_string(),
+        doc: doc.to_string(),
+        members: members.iter().map(|member| (*member).to_string()).collect(),
+    };
+    vec![
+        group(
+            "providers",
+            "Providers",
+            "LLM provider 与模型目录",
+            &["providers"],
+        ),
+        group(
+            "agents",
+            "Agents",
+            "Agent 模板：模型引用 / 工具集 / 提示词",
+            &["agents"],
+        ),
+        group(
+            "behavior",
+            "Behavior",
+            "Agent 行为与内置工具的通用开关",
+            &[
+                "safe_command_patterns",
+                "yolo",
+                "steer",
+                "tool_result_truncate",
+            ],
+        ),
+        group(
+            "images",
+            "Images",
+            "ReadImage 与请求期图片投影",
+            &["images"],
+        ),
+        group(
+            "sessions",
+            "Sessions",
+            "会话内存态回收（磁盘状态一概不动）",
+            &["sessions"],
+        ),
+        group(
+            "gateway",
+            "Gateway",
+            "网关监听 / 鉴权 / 远程工具",
+            &["gateway"],
+        ),
+        group(
+            "advanced",
+            "Advanced",
+            "扩展点（hooks / prompt 命令）· 日志 · 低层少用开关",
+            &["hooks", "commands", "log", "user_agent"],
+        ),
+    ]
+}
+
+/// 与 [`product_groups`] 配套的目录：真实的顶层键 + 每键几个代表性字段。
+pub(crate) fn product_catalog() -> SettingNode {
+    let models = {
+        let spec = element(object(
+            "ModelSpec",
+            vec![str_field("id"), str_field("display_name")],
+        ));
+        let mut node = list_of("models", vec![element(str_field("str")), spec]);
+        node.min_items = Some(1);
+        node.summary_fields = vec!["id".into()];
+        node
+    };
+    let provider = element(object(
+        "ProviderConfig",
+        vec![
+            required_str("name"),
+            enum_field(
+                "protocol",
+                &[
+                    ("openai", "OpenAI 兼容协议"),
+                    ("anthropic", "Anthropic Messages 协议"),
+                ],
+            ),
+            required_str("base_url"),
+            secret_field("api_key"),
+            float_field("timeout_first_chunk", 300.0),
+            models,
+        ],
+    ));
+    let mut providers = list("providers", provider);
+    providers.min_items = Some(1);
+    providers.summary_fields = vec!["name".into(), "protocol".into()];
+
+    let agent = element(object(
+        "AgentConfig",
+        vec![
+            required_str("name"),
+            required_str("model"),
+            bool_field("default", false),
+            list("tools", element(str_field("tool"))),
+        ],
+    ));
+    let mut agents = list("agents", agent);
+    agents.min_items = Some(1);
+    agents.summary_fields = vec!["name".into(), "model".into()];
+
+    let truncate = object(
+        "tool_result_truncate",
+        vec![
+            int_field("max_length", None, None),
+            int_field("keep_chars", None, None),
+        ],
+    );
+    let eviction = object(
+        "eviction",
+        vec![
+            bool_field("enabled", true),
+            float_field("idle_ttl_seconds", 3600.0),
+            restart_field("sweep_interval_seconds", 60.0),
+        ],
+    );
+    let sessions = object("sessions", vec![eviction]);
+    let auth = object(
+        "auth",
+        vec![
+            bool_field("enabled", false),
+            list(
+                "keys",
+                element(object(
+                    "ApiKeyEntry",
+                    vec![
+                        secret_field("key"),
+                        enum_field("role", &[("admin", "管理"), ("tool_runtime", "工具")]),
+                    ],
+                )),
+            ),
+        ],
+    );
+    let mut host = str_field("host");
+    host.apply = ApplyScope::Restart;
+    let mut port = int_field("port", Some(1.0), Some(65535.0));
+    port.apply = ApplyScope::Restart;
+    let gateway = object(
+        "gateway",
+        vec![host, port, auth, float_field("remote_tool_timeout", 300.0)],
+    );
+    let commands = object("commands", vec![list("paths", element(str_field("path")))]);
+    let log = object(
+        "log",
+        vec![enum_field(
+            "level",
+            &[("DEBUG", "调试"), ("INFO", "信息"), ("WARNING", "警告")],
+        )],
+    );
+    let user_agent = object(
+        "user_agent",
+        vec![enum_field(
+            "preset",
+            &[("opencode", "opencode"), ("qwen-code", "qwen-code")],
+        )],
+    );
+
+    root(vec![
+        providers,
+        agents,
+        list("safe_command_patterns", element(str_field("pattern"))),
+        bool_field("yolo", false),
+        bool_field("steer", true),
+        truncate,
+        object(
+            "images",
+            vec![
+                int_field("max_bytes", None, None),
+                int_field("max_images", None, None),
+                int_field("count_quantum", None, None),
+            ],
+        ),
+        sessions,
+        gateway,
+        list("hooks", element(str_field("hook"))),
+        commands,
+        log,
+        user_agent,
+    ])
+}
+
+/// `apply = restart` 的 float 字段（键位栏 / 行尾标记的 restart 形态）。
+fn restart_field(key: &str, default: f64) -> SettingNode {
+    let mut node = float_field(key, default);
+    node.apply = ApplyScope::Restart;
+    node
+}
+
+/// 产品口径的稀疏文档：两个 provider、一个 agent、若干显式值。
+pub(crate) fn product_values() -> Value {
+    json!({
+        "providers": [
+            {
+                "name": "gateway",
+                "protocol": "openai",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "api_key": null,
+                "timeout_first_chunk": 300.0,
+                "models": ["gpt-4o"]
+            },
+            {
+                "name": "dashscope",
+                "protocol": "openai",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key": null,
+                "models": ["ds-flash", "ds-pro"]
+            }
+        ],
+        "agents": [{"name": "default", "model": "gateway:gpt-4o", "tools": ["Bash", "Read"]}],
+        "yolo": false,
+        "gateway": {"port": 32523},
+        "log": {"level": "INFO"}
+    })
+}
+
+/// 产品口径的面板（Gateway 7 组 + Interface 1 组 = 8 个锚点）。
+pub(crate) fn product_panel() -> (SettingNode, SettingNode, SettingsPanel) {
+    let gateway = product_catalog();
+    let interface = interface_catalog();
+    let schema = SettingsSchemaResponse {
+        version: "0.0.0-test".into(),
+        root: gateway.clone(),
+        config_path: "~/.wing/core/config.yaml".into(),
+        groups: product_groups(),
+    };
+    let state = SettingsGetResponse {
+        values: product_values(),
+        secrets: {
+            let mut secrets = HashMap::new();
+            secrets.insert(
+                "providers[0].api_key".to_string(),
+                SecretState {
+                    state: SecretPresence::Set,
+                    hint: Some("ab12".into()),
+                },
+            );
+            secrets.insert(
+                "providers[1].api_key".to_string(),
+                SecretState {
+                    state: SecretPresence::Set,
+                    hint: None,
+                },
+            );
+            secrets
+        },
+        fingerprint: "fp-product".into(),
+        problems: vec![],
+        setup_mode: false,
+        config_path: "~/.wing/core/config.yaml".into(),
+    };
+    let panel = SettingsPanel::new(
+        &schema,
+        state,
+        Some(InterfaceSource {
+            groups: vec![SettingGroup {
+                id: "interface".into(),
+                title: "Interface".into(),
+                doc: "TUI 自身：配色 / 布局 / 渲染".into(),
+                members: interface.children.iter().map(|c| c.key.clone()).collect(),
+            }],
+            catalog: interface.clone(),
+            doc: json!({"colors": {"accent": "cyan", "preset": "wing"}}),
+        }),
+        View::Tree,
+    );
+    (gateway, interface, panel)
+}
+
 // ── 文档 / 面板 ─────────────────────────────────────────────
 
 pub(crate) fn sample_values() -> Value {
@@ -315,11 +591,49 @@ pub(crate) fn sample_secrets() -> HashMap<String, SecretState> {
     secrets
 }
 
+/// 示例分组表（左栏锚点）：三个组覆盖 [`sample_catalog`] 的五个顶层键。
+///
+/// 夹具目录常常只有个别键（`big_list` / 空根），所以成员先按目录过滤，
+/// 剩下没被认领的顶层键各自成组——保证任何夹具目录都能渲染出左栏。
+pub(crate) fn sample_groups(catalog: &SettingNode) -> Vec<SettingGroup> {
+    let declared: [(&str, &str, [&str; 2]); 3] = [
+        ("providers", "Providers", ["providers", ""]),
+        ("net", "Net", ["gateway", "log"]),
+        ("misc", "Misc", ["tools", "extra_body"]),
+    ];
+    let has = |key: &str| !key.is_empty() && catalog.children.iter().any(|c| c.key == key);
+    let group = |id: &str, title: &str, members: Vec<String>| SettingGroup {
+        id: id.to_string(),
+        title: title.to_string(),
+        doc: format!("{title} 的说明"),
+        members,
+    };
+    let mut groups: Vec<SettingGroup> = declared
+        .iter()
+        .filter_map(|(id, title, members)| {
+            let members: Vec<String> = members
+                .iter()
+                .filter(|member| has(member))
+                .map(|member| (*member).to_string())
+                .collect();
+            (!members.is_empty()).then(|| group(id, title, members))
+        })
+        .collect();
+    for child in &catalog.children {
+        let covered = groups.iter().any(|g| g.members.contains(&child.key));
+        if !covered {
+            groups.push(group(&child.key, &child.key, vec![child.key.clone()]));
+        }
+    }
+    groups
+}
+
 pub(crate) fn schema(catalog: &SettingNode) -> SettingsSchemaResponse {
     SettingsSchemaResponse {
         version: "0.0.0-test".into(),
         root: catalog.clone(),
         config_path: "/home/u/.wing/core/config.yaml".into(),
+        groups: sample_groups(catalog),
     }
 }
 
@@ -334,9 +648,15 @@ pub(crate) fn state(values: Value) -> SettingsGetResponse {
     }
 }
 
-/// Interface 根的注入内容（catalog + 稀疏文档）。
+/// Interface 根的注入内容（分组声明 + catalog + 稀疏文档）。
 pub(crate) fn interface_source(catalog: SettingNode) -> InterfaceSource {
     InterfaceSource {
+        groups: vec![SettingGroup {
+            id: "interface".into(),
+            title: "Interface".into(),
+            doc: "TUI 自身的说明".into(),
+            members: catalog.children.iter().map(|c| c.key.clone()).collect(),
+        }],
         catalog,
         doc: json!({"colors": {"accent": "cyan", "preset": "wing"}}),
     }

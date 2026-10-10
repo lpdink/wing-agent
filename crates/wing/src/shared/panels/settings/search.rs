@@ -15,6 +15,7 @@ use wing_api_client::models::SettingNode;
 
 use super::doc::Root;
 use super::doc::ancestors;
+use super::doc::path_is_within;
 
 /// 一次搜索的匹配结果（跨根）。
 #[derive(Debug, Clone)]
@@ -66,6 +67,18 @@ impl SearchFilter {
     /// 这个模板路径是否是某个命中项的**严格祖先**（要可见且强制展开）。
     pub(crate) fn is_ancestor(&self, root: Root, path: &str) -> bool {
         self.ancestor_paths.contains(&(root, path.to_string()))
+    }
+
+    /// 落在某个分组（= 若干顶层成员）里的命中数（左栏徽标 / 自动跳组）。
+    ///
+    /// 命中集是按**模板路径**记的（`providers[].api_key`），所以判定用「首段 ∈ 成员」。
+    pub(crate) fn hits_under(&self, root: Root, members: &[String]) -> usize {
+        self.hits
+            .iter()
+            .filter(|(hit_root, path)| {
+                *hit_root == root && members.iter().any(|member| path_is_within(member, path))
+            })
+            .count()
     }
 
     /// `label` 里 query 的出现位置（字节区间，大小写不敏感，互不重叠）。
@@ -131,21 +144,32 @@ fn find_spans(haystack: &str, needle: &str) -> Vec<Range<usize>> {
     spans
 }
 
-/// 面板侧的搜索会话：query + 进入搜索时的展开快照与光标快照（Esc 恢复用）。
+/// 面板侧的搜索会话：query + 进入搜索时的展开 / 光标 / 分组快照（Esc 恢复用）。
 #[derive(Debug, Clone)]
 pub(crate) struct SearchState {
     query: String,
     snapshot: HashSet<(Root, String)>,
     cursor_snapshot: Option<(Root, String)>,
+    group_snapshot: usize,
 }
 
 impl SearchState {
-    pub(crate) fn new(expanded: &HashSet<(Root, String)>, cursor: Option<(Root, String)>) -> Self {
+    pub(crate) fn new(
+        expanded: &HashSet<(Root, String)>,
+        cursor: Option<(Root, String)>,
+        group: usize,
+    ) -> Self {
         Self {
             query: String::new(),
             snapshot: expanded.clone(),
             cursor_snapshot: cursor,
+            group_snapshot: group,
         }
+    }
+
+    /// 进入搜索前选中的分组（搜索会为了「跳到有命中的组」挪动它，Esc 要还回去）。
+    pub(crate) fn group_snapshot(&self) -> usize {
+        self.group_snapshot
     }
 
     pub(crate) fn query(&self) -> &str {
@@ -276,7 +300,7 @@ mod tests {
     fn search_state_snapshots_expanded_and_cursor() {
         let mut expanded = HashSet::new();
         expanded.insert((Root::Gateway, "providers".to_string()));
-        let mut state = SearchState::new(&expanded, Some((Root::Gateway, "gateway".into())));
+        let mut state = SearchState::new(&expanded, Some((Root::Gateway, "gateway".into())), 3);
         state.push('p');
         state.push('o');
         assert_eq!(state.query(), "po");
@@ -293,6 +317,7 @@ mod tests {
             state.cursor_snapshot(),
             Some((Root::Gateway, "gateway".into()))
         );
+        assert_eq!(state.group_snapshot(), 3);
     }
 
     #[test]

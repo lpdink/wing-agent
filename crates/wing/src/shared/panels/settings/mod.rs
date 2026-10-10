@@ -6,12 +6,19 @@
 //!
 //! # 交互契约（08 / 10 的唯一说明书）
 //!
-//! ## 结构
+//! ## 结构（v2：双栏）
 //!
-//! 一棵树、两个顶层根（`Gateway` = 后端 config.yaml，`Interface` = TUI 自己的配置）；
-//! 可见行由 [`SettingsPanel::rows`] 给出（[`flatten`] 的产物），光标是**全局行下标**
-//! （[`SettingsPanel::cursor`]），窗口数学用 kernel 的 `window_range`
-//! （[`SettingsPanel::visible_range`]，08 传自己的可见行数）。
+//! **左栏 = 业务分组锚点，右栏 = 当前分组的设置项**（VS Code 设置弹窗的形状）：
+//! 锚点表由 [`groups::build_anchors`] 从两份声明拼出——后端 `GET /api/settings/schema`
+//! 的 `groups[]`（Gateway 根）与 Rust 侧 `config/catalog.rs::interface_groups()`
+//! （Interface 根）。**前端零硬编码**：组名 / 顺序 / 成员全部来自声明，加组 / 并组 / 改名
+//! 都只动后端（或 Interface 的那份声明）。
+//!
+//! 焦点由 [`Focus`] 表达（`Groups` = 左栏，`Items` = 右栏）；右栏的可见行是**当前分组**
+//! 的成员子树（[`SettingsPanel::rows`] = [`flatten`] 的产物，不再有「根头行」——左栏承担了它），
+//! 光标是行下标（[`SettingsPanel::cursor`]），窗口数学用 kernel 的 `window_range`
+//! （[`SettingsPanel::visible_range`] / [`SettingsPanel::anchors_visible_range`]，
+//! 08 传自己的可见行数）。
 //!
 //! ## 键位（树视图）
 //!
@@ -19,7 +26,7 @@
 //! |---|---|
 //! | `↑` `↓` | 移动光标（钳制，不绕回） |
 //! | `PageUp` `PageDown` / `Home` `End` | 按 [`SettingsPanel::set_viewport_rows`] 翻页 / 跳首尾 |
-//! | `←` | 结构行：折叠；已折叠则跳到父行。enum 行：循环切值（往前）。选择项展开中：折叠 |
+//! | `←` | 结构行：折叠；已折叠则跳到父行；**已到分组顶层（无处可去）则回左栏**。enum 行：循环切值（往前）。选择项展开中：折叠 |
 //! | `→` | 结构行：展开。enum 行：循环切值（往后） |
 //! | `Enter` | 按 [`RowAction`] 分派（展开 / 切换 / 展开选择项 / 编辑 / 新增 / 选中 / 只读） |
 //! | `Space` | bool 切换；选择项行 = 选中 |
@@ -31,7 +38,7 @@
 //! | `/` | 进入搜索（问题清单视图里按 `/` 先切回树） |
 //! | `p` | 问题清单视图 / 返回树 |
 //! | `?` | 帮助浮层（`?` 或 `Esc` 关闭） |
-//! | `Tab` | 切根（Gateway ↔ Interface，目标根自动展开） |
+//! | `Tab` | 切栏（左栏 ↔ 右栏） |
 //! | `R` | 重新载入（丢弃本地改动；有脏改动先二次确认） |
 //! | `Ctrl+R` | 立即重启网关：**仅当有待重启的变更时**（上次保存回执的 `restart_required` 非空，键位栏也只在那时显示它）；有脏改动先二次确认；轮次中是否允许由 App 判定 |
 //! | `Esc` | 见下面的阶梯 |
@@ -39,9 +46,10 @@
 //!
 //! ## 键位（问题清单视图）
 //!
-//! `↑` `↓` / `PageUp` `PageDown` / `Home` `End` 选择；`Enter` 或 `→` 跳到该字段；
-//! `←` / `Esc` / `p` 返回树；`/` 切回树并进入搜索；`s` 保存；`Tab` 切根；
-//! `R` 重新载入（与树视图同一条路径）；`Ctrl+R` 立即重启；`?` 帮助。
+//! `↑` `↓` / `PageUp` `PageDown` / `Home` `End` 选择（左栏焦点时选分组）；`Enter` 或 `→`
+//! 跳到该字段（左栏焦点时 = 进那一组的树）；`←` / `Esc` / `p` 返回树；`/` 切回树并进入搜索；
+//! `s` 保存；`Tab` 切栏；`R` 重新载入（与树视图同一条路径）；`Ctrl+R` 立即重启；`?` 帮助。
+//! 问题清单**不按分组过滤**（它是全局的），但左栏的锚点会显示每组的问题数徽标。
 //!
 //! ## 密文契约（**红线**）
 //!
@@ -65,22 +73,30 @@
 //!
 //! 1. 编辑器激活 → 取消编辑（丢失缓冲，不改文档）；
 //! 2. 模态提示开着 → 取消提示；
-//! 3. 搜索激活 → 退出搜索 + 清空 query + **恢复搜索前的展开快照**；
+//! 3. 搜索激活 → 退出搜索 + 清空 query + **恢复搜索前的展开快照与分组**；
 //! 4. 帮助浮层 → 关闭帮助；
-//! 5. enum 选择项展开着 → 折叠（光标留在 enum 行）；
-//! 6. 有脏改动 → 进入「放弃 N 项未保存的改动？」二次确认（`Enter` 确认 →
+//! 5. 右栏 + enum 选择项展开着 → 折叠（光标留在 enum 行）；
+//! 6. 右栏 → **回左栏**（v2：右栏的 `Esc` 先退一栏，不直接关面板）；
+//! 7. 左栏 + 有脏改动 → 进入「放弃 N 项未保存的改动？」二次确认（`Enter` 确认 →
 //!    [`SettingsAction::Close`]`{discard: true}`）；
-//! 7. 否则 → [`SettingsAction::Close`]`{discard: false}`。
+//! 8. 左栏 → [`SettingsAction::Close`]`{discard: false}`。
+//!
+//! ## 左栏键位
+//!
+//! `↑` `↓` / `Home` `End` / `PageUp` `PageDown` 选分组（进入即展开该组成员、右栏回到首行）；
+//! `Enter` / `→` / `Tab` 进右栏；`←` 无操作（已经在最左）；`Esc` 走上面的阶梯 7–8；
+//! `s` / `R` / `Ctrl+R` / `/` / `p` / `?` 与右栏同义（两栏共用那一段处理）。
 //!
 //! ## 显式动作 vs 浏览
 //!
-//! 浏览（移动光标、展开折叠、搜索过滤、翻页、切根）**永不产生动作**；
+//! 浏览（移动光标、切分组、切栏、展开折叠、搜索过滤、翻页）**永不产生动作**；
 //! 只有值或文档真的变了（编辑提交 / bool 切换 / enum 选中或循环 / 复位 / 列表增删移 /
 //! 保存 / 重载 / 重启 / 关闭）才产出 [`SettingsAction`]。Interface 根的任何值变更**立即**
 //! 追加一次 [`SettingsAction::PreviewInterface`]（整份稀疏文档）供 App 实时预览。
 
 mod doc;
 mod edit;
+mod groups;
 mod list;
 mod problems;
 mod search;
@@ -99,6 +115,7 @@ use crossterm::event::KeyModifiers;
 use serde_json::Value;
 use serde_json::json;
 use wing_api_client::models::ApplyScope;
+use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::SettingProblem;
@@ -111,6 +128,8 @@ pub use doc::SettingsDoc;
 pub use edit::Constraints;
 pub use edit::EditState;
 pub use edit::ScalarKind;
+pub use groups::AnchorView;
+pub use groups::GroupAnchor;
 pub use problems::Problem;
 pub use search::SearchFilter;
 pub use tree::Row;
@@ -127,6 +146,18 @@ use super::wrap_index;
 use edit::EditEvent;
 use search::SearchState;
 
+/// 双栏焦点（v2）：左栏选分组，右栏编辑当前分组的设置项。
+///
+/// `Tab` / `←` / `→` 在两栏之间移动；两栏各自的 `↑↓` 语义不同（分组 vs 行），
+/// 所以焦点是**必须**显式建模的状态，不能靠"光标在哪一行"推断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// 左栏：业务分组锚点。
+    Groups,
+    /// 右栏：当前分组的设置项（问题清单视图里 = 问题列表）。
+    Items,
+}
+
 /// 面板当前的视图（`Choices` 不是视图：enum 选择项是树的**子行**，见 design §20 D19）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -136,11 +167,15 @@ pub enum View {
     Help,
 }
 
-/// Interface 根的注入内容：catalog（09 的 `interface_catalog()`）+ 稀疏文档
-/// （09 的 `read_interface_doc()`）。
+/// Interface 根的注入内容：catalog + 分组 + 稀疏文档。
+///
+/// 三者都来自 09/10（`config/catalog.rs` 的 `interface_catalog()` / `interface_groups()`
+/// 与 `config/store.rs` 的 `read_interface_doc()`）。`groups` 是这个根在左栏的锚点
+/// （声明在 Rust 侧——TUI 自己的配置后端不知道）；空表 = 按 catalog 的 `section` 推导。
 #[derive(Debug, Clone)]
 pub struct InterfaceSource {
     pub catalog: SettingNode,
+    pub groups: Vec<SettingGroup>,
     pub doc: Value,
 }
 
@@ -243,6 +278,16 @@ enum DiscardIntent {
 pub struct SettingsPanel {
     gateway_catalog: SettingNode,
     interface_catalog: Option<SettingNode>,
+    /// 后端 schema 的分组声明（Gateway 根的锚点来源；老网关 = 空表 → 按 section 推导）。
+    gateway_groups: Vec<SettingGroup>,
+    /// Interface 根的分组声明（`InterfaceSource.groups`；没注入 Interface 根时为空）。
+    interface_groups: Vec<SettingGroup>,
+    /// 左栏锚点（两份声明拼成；顺序即界面顺序）。
+    anchors: Vec<GroupAnchor>,
+    /// 左栏光标（`anchors` 的下标）。
+    group_cursor: usize,
+    /// 双栏焦点。
+    focus: Focus,
     doc: SettingsDoc,
     /// 后端带回的问题（`get` / `set` 的 `problems`），与本地问题合并。
     backend_problems: Vec<SettingProblem>,
@@ -263,6 +308,8 @@ pub struct SettingsPanel {
     stale: bool,
     restart_required: Vec<String>,
     viewport_rows: usize,
+    /// 左栏可见行数（`PageUp` / `PageDown` 在锚点上的步长）。
+    anchor_viewport_rows: usize,
 }
 
 impl SettingsPanel {
@@ -276,6 +323,10 @@ impl SettingsPanel {
         initial_view: View,
     ) -> Self {
         let interface_catalog = interface.as_ref().map(|source| source.catalog.clone());
+        let interface_groups = interface
+            .as_ref()
+            .map(|source| source.groups.clone())
+            .unwrap_or_default();
         let interface_doc = interface.map_or_else(|| json!({}), |source| source.doc);
         let doc = SettingsDoc::new(
             state.values,
@@ -283,9 +334,27 @@ impl SettingsPanel {
             state.secrets,
             state.fingerprint,
         );
+        let anchors = groups::build_anchors(
+            &schema.root,
+            &schema.groups,
+            interface_catalog
+                .as_ref()
+                .map(|catalog| (catalog, interface_groups.as_slice())),
+        );
         let mut panel = Self {
             gateway_catalog: schema.root.clone(),
+            gateway_groups: schema.groups.clone(),
+            interface_groups,
             interface_catalog,
+            anchors,
+            group_cursor: 0,
+            // 打开面板先落在左栏：先选分类再改值（VS Code 的形状）；
+            // 问题清单首屏（setup）例外——那里右栏才是主角。
+            focus: if initial_view == View::Tree {
+                Focus::Groups
+            } else {
+                Focus::Items
+            },
             doc,
             backend_problems: state.problems,
             problems: Vec::new(),
@@ -305,30 +374,188 @@ impl SettingsPanel {
             stale: false,
             restart_required: Vec::new(),
             viewport_rows: 10,
+            anchor_viewport_rows: 8,
         };
-        panel.expanded.insert((Root::Gateway, String::new()));
-        if panel.interface_catalog.is_some() {
-            panel.expanded.insert((Root::Interface, String::new()));
-        }
-        panel.rebuild(Some((Root::Gateway, String::new())));
+        // 进入第 0 组：展开它的顶层成员，右栏一进来就有内容（不用逐个 Enter）。
+        panel.enter_group(0);
         panel
     }
 
+    // ── 左栏：业务分组 ───────────────────────────────────────
+
+    /// 当前选中的分组（没有锚点时 `None`：空目录 / 老网关的空 schema）。
+    pub fn group(&self) -> Option<&GroupAnchor> {
+        self.anchors.get(self.group_cursor)
+    }
+
+    /// 左栏的全部锚点（渲染顺序 = 声明顺序）。
+    pub fn anchors(&self) -> &[GroupAnchor] {
+        &self.anchors
+    }
+
+    /// 左栏光标。
+    pub fn group_cursor(&self) -> usize {
+        self.group_cursor
+    }
+
+    /// 当前焦点栏。
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// 左栏的可见窗口（锚点数超过高度时滚动；kernel 的同一份数学）。
+    pub fn anchors_visible_range(&self, visible_rows: usize) -> std::ops::Range<usize> {
+        super::window_range(self.group_cursor, self.anchors.len(), visible_rows)
+    }
+
+    /// 左栏的只读投影（含徽标：脏 / 问题数 / 搜索命中数）。
+    pub fn anchor_views(&self) -> Vec<AnchorView> {
+        self.anchors
+            .iter()
+            .enumerate()
+            .map(|(index, anchor)| AnchorView {
+                title: anchor.title.clone(),
+                root: anchor.root,
+                doc: anchor.doc.clone(),
+                selected: index == self.group_cursor,
+                dirty: self.group_dirty(anchor),
+                problems: self.group_problems(anchor),
+                hits: self.filter.as_ref().map(|f| self.group_hits(anchor, f)),
+            })
+            .collect()
+    }
+
+    /// 组内有未保存的改动吗（任一成员的子树下有脏路径）。
+    fn group_dirty(&self, anchor: &GroupAnchor) -> bool {
+        anchor
+            .members
+            .iter()
+            .any(|member| self.doc.has_dirty_below(anchor.root, member))
+    }
+
+    /// 组内的问题条数（文档级问题 `path == null` 不归任何组：标题栏的总数仍然算它）。
+    fn group_problems(&self, anchor: &GroupAnchor) -> usize {
+        self.problems
+            .iter()
+            .filter(|problem| self.problem_in_group(anchor, problem))
+            .count()
+    }
+
+    fn problem_in_group(&self, anchor: &GroupAnchor, problem: &Problem) -> bool {
+        if problem.root != anchor.root {
+            return false;
+        }
+        let Some(path) = problem.path.as_deref() else {
+            return false;
+        };
+        let head = path_head(path);
+        anchor.members.iter().any(|member| member == head)
+    }
+
+    /// 搜索态下组内的命中数（左栏徽标 + 「跳到第一个有命中的组」都靠它）。
+    fn group_hits(&self, anchor: &GroupAnchor, filter: &SearchFilter) -> usize {
+        filter.hits_under(anchor.root, &anchor.members)
+    }
+
+    fn group_has_hits(&self, anchor: &GroupAnchor) -> bool {
+        self.filter
+            .as_ref()
+            .is_some_and(|filter| self.group_hits(anchor, filter) > 0)
+    }
+
+    /// 选中一个分组：展开它的顶层成员、右栏回到首行、重算行。
+    fn enter_group(&mut self, index: usize) {
+        if self.anchors.is_empty() {
+            // 没有锚点（空目录 / 读不出 schema）：右栏是空的，但**问题清单必须照算**
+            // —— setup 首屏正是"目录还没长出来、问题一大堆"的那个场景。
+            self.group_cursor = 0;
+            self.rebuild(None);
+            return;
+        }
+        let index = index.min(self.anchors.len() - 1);
+        let changed = index != self.group_cursor;
+        self.group_cursor = index;
+        if changed {
+            self.cursor = 0;
+            self.choices = None;
+        }
+        let anchor = self.anchors[index].clone();
+        for member in &anchor.members {
+            self.expanded.insert((anchor.root, member.clone()));
+        }
+        self.rebuild(None);
+    }
+
+    /// 左栏 `↑↓`：钳制移动（不绕回）。
+    fn move_group(&mut self, delta: isize) {
+        if self.anchors.is_empty() {
+            return;
+        }
+        let last = self.anchors.len() - 1;
+        let next = (self.group_cursor as isize + delta).clamp(0, last as isize) as usize;
+        if next != self.group_cursor {
+            self.enter_group(next);
+        }
+    }
+
+    /// 某个路径所属的分组下标（问题清单跳转 / 搜索自动定位用）。
+    fn group_index_for(&self, root: Root, path: &str) -> Option<usize> {
+        let head = path_head(path);
+        self.anchors.iter().position(|anchor| {
+            anchor.root == root && anchor.members.iter().any(|member| member == head)
+        })
+    }
+
+    /// 锚点表重算后把光标尽量留在同一组（按 id；找不到就钳制）。
+    fn restore_group(&mut self, previous: &str) {
+        let index = self
+            .anchors
+            .iter()
+            .position(|anchor| anchor.id == previous)
+            .unwrap_or_else(|| self.group_cursor.min(self.anchors.len().saturating_sub(1)));
+        self.enter_group(index);
+    }
+
     /// 注入 / 刷新 Interface 根（10 重读 `~/.wing/tui/config.yaml` 后调用）。
+    ///
+    /// 锚点表随之重算（Interface 锚点出现 / 消失），光标尽量留在同一组。
     pub fn set_interface(&mut self, source: InterfaceSource) {
-        let anchor = self.anchor();
+        let row_anchor = self.row_anchor();
+        let group_id = self.group().map(|anchor| anchor.id.clone());
         self.interface_catalog = Some(source.catalog);
+        self.interface_groups = source.groups;
         self.doc.set_interface_doc(source.doc);
-        self.expanded.insert((Root::Interface, String::new()));
+        self.rebuild_anchors();
         self.prune_expanded();
         self.recompute_filter();
-        self.rebuild(anchor);
+        match group_id {
+            Some(id) => self.restore_group(&id),
+            None => self.rebuild(row_anchor),
+        }
+    }
+
+    /// 重算锚点表（schema 换了 / Interface 根注入或撤走）。
+    fn rebuild_anchors(&mut self) {
+        let anchors = groups::build_anchors(
+            &self.gateway_catalog,
+            &self.gateway_groups,
+            self.interface_catalog
+                .as_ref()
+                .map(|catalog| (catalog, self.interface_groups.as_slice())),
+        );
+        self.anchors = anchors;
+        if self.group_cursor >= self.anchors.len() {
+            self.group_cursor = self.anchors.len().saturating_sub(1);
+        }
     }
 
     /// `R` 重载的落地：整份换掉 Gateway 的目录 / 文档 / 密文表 / 指纹 / 后端问题，
     /// 丢弃本地改动（编辑 / 提示 / 选择项一并收起）。10 在重拉 `schema`+`get` 之后调用。
     pub fn apply_snapshot(&mut self, schema: &SettingsSchemaResponse, state: SettingsGetResponse) {
+        let row_anchor = self.row_anchor();
+        let group_id = self.group().map(|anchor| anchor.id.clone());
         self.gateway_catalog = schema.root.clone();
+        self.gateway_groups = schema.groups.clone();
         self.config_path = schema.config_path.clone();
         self.doc
             .reload_gateway(state.values, state.secrets, state.fingerprint);
@@ -339,10 +566,13 @@ impl SettingsPanel {
         self.edit = None;
         self.pending = None;
         self.choices = None;
+        self.rebuild_anchors();
         self.prune_expanded();
         self.recompute_filter();
-        let anchor = self.anchor();
-        self.rebuild(anchor);
+        match group_id {
+            Some(id) => self.restore_group(&id),
+            None => self.rebuild(row_anchor),
+        }
     }
 
     /// 保存回执落地：成功 → 清该根脏标记并把当前文档记为基线；`ok=false` → 换 problems、
@@ -368,7 +598,7 @@ impl SettingsPanel {
         if outcome.interface_ok == Some(true) {
             self.doc.mark_baseline(Root::Interface);
         }
-        let anchor = self.anchor();
+        let anchor = self.row_anchor();
         self.rebuild(anchor);
     }
 
@@ -420,6 +650,11 @@ impl SettingsPanel {
     /// 08 每帧告知可见行数（`PageUp` / `PageDown` 的步长）。
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport_rows = rows.max(1);
+    }
+
+    /// 08 每帧告知**左栏**的可见行数（锚点上的翻页步长）。
+    pub fn set_anchor_viewport_rows(&mut self, rows: usize) {
+        self.anchor_viewport_rows = rows.max(1);
     }
 
     pub fn view(&self) -> View {
@@ -519,8 +754,13 @@ impl SettingsPanel {
                 "↑↓ 选择 · Enter 跳到该字段 · s 保存 · Esc 返回树".into()
             };
         }
-        let mut parts = vec!["↑↓ 移动".to_string()];
-        if let Some(row) = self.rows.get(self.cursor) {
+        let mut parts = match self.focus {
+            Focus::Groups => vec!["↑↓ 选分组".to_string(), "Enter 进右栏".to_string()],
+            Focus::Items => vec!["↑↓ 移动".to_string()],
+        };
+        if self.focus == Focus::Items
+            && let Some(row) = self.rows.get(self.cursor)
+        {
             let verb = match &row.action {
                 RowAction::Expand => "展开/折叠",
                 RowAction::Toggle => "切换",
@@ -535,6 +775,7 @@ impl SettingsPanel {
                 parts.push("J/K 排序 · d 删除".into());
             }
         }
+        parts.push("Tab/←→ 切栏".into());
         parts.push("s 保存".into());
         parts.push(if self.problems.is_empty() {
             "p 问题".into()
@@ -542,18 +783,15 @@ impl SettingsPanel {
             format!("p 问题({})", self.problems.len())
         });
         parts.push("/ 搜索".into());
-        if self.interface_catalog.is_some() {
-            parts.push("Tab 切根".into());
-        }
         if !self.restart_required.is_empty() {
             // AD1：只有真的有 restart 类变更时才挂这个键。
             parts.push("Ctrl+R 立即重启".into());
         }
         parts.push("? 帮助".into());
-        parts.push(if self.dirty_count() > 0 {
-            "Esc 放弃改动".into()
-        } else {
-            "Esc 关闭".into()
+        parts.push(match (self.focus, self.dirty_count() > 0) {
+            (Focus::Items, _) => "Esc 回左栏".into(),
+            (Focus::Groups, true) => "Esc 放弃改动".into(),
+            (Focus::Groups, false) => "Esc 关闭".into(),
         });
         parts.join(" · ")
     }
@@ -584,7 +822,8 @@ impl SettingsPanel {
         self.rows.get(self.cursor)
     }
 
-    fn anchor(&self) -> Option<(Root, String)> {
+    /// 当前行的身份（`(根, 具体路径)`）——重算后把光标锚回同一行（design D5）。
+    fn row_anchor(&self) -> Option<(Root, String)> {
         self.current_row().map(|row| (row.root, row.path.clone()))
     }
 
@@ -594,7 +833,8 @@ impl SettingsPanel {
             .position(|row| row.root == root && row.path == path)
     }
 
-    /// 整树重算 + 光标重锚（design D5）：先按身份找回原来那一行，找不到再交给 kernel 钳制。
+    /// 右栏重算（当前分组的行）+ 光标重锚（design D5）：先按身份找回原来那一行，
+    /// 找不到再交给 kernel 钳制。
     fn rebuild(&mut self, anchor: Option<(Root, String)>) {
         self.refresh_problems();
         self.rows = self.flatten_all();
@@ -606,28 +846,25 @@ impl SettingsPanel {
         }
     }
 
+    /// 右栏的行 = **当前分组**的成员子树（v2：不再有跨根拼接的整棵树）。
+    ///
+    /// 没有锚点（空目录）或该组的目录取不到 → 空行表（08 画「(空目录)」占位）。
     fn flatten_all(&self) -> Vec<Row> {
-        let mut rows = flatten(
-            Root::Gateway,
-            &self.gateway_catalog,
+        let Some(anchor) = self.group() else {
+            return Vec::new();
+        };
+        let Some(catalog) = self.catalog(anchor.root) else {
+            return Vec::new();
+        };
+        flatten(
+            catalog,
+            anchor,
             &self.doc,
             &self.expanded,
             &self.problems,
             self.filter.as_ref(),
             self.choices.as_ref(),
-        );
-        if let Some(catalog) = &self.interface_catalog {
-            rows.extend(flatten(
-                Root::Interface,
-                catalog,
-                &self.doc,
-                &self.expanded,
-                &self.problems,
-                self.filter.as_ref(),
-                self.choices.as_ref(),
-            ));
-        }
-        rows
+        )
     }
 
     fn refresh_problems(&mut self) {
@@ -738,7 +975,7 @@ impl SettingsPanel {
             KeyCode::Esc => self.exit_search_restore(),
             KeyCode::Enter => {
                 // 「Enter 退出搜索并保持光标（祖先保持展开）」：把锚点的祖先固化进展开集。
-                let anchor = self.anchor();
+                let anchor = self.row_anchor();
                 if let Some((root, path)) = &anchor {
                     for ancestor in doc::ancestors(path) {
                         self.expanded.insert((*root, ancestor));
@@ -792,18 +1029,45 @@ impl SettingsPanel {
         if self.view != View::Tree {
             self.view = View::Tree;
         }
-        let cursor = self.anchor();
-        self.search = Some(SearchState::new(&self.expanded, cursor));
+        // 搜索的结果是行 ⇒ 焦点回右栏（左栏此时显示每组的命中数徽标）。
+        self.focus = Focus::Items;
+        let cursor = self.row_anchor();
+        self.search = Some(SearchState::new(&self.expanded, cursor, self.group_cursor));
     }
 
     /// 过滤重算 + 光标跳到第一个命中（design §14.2）。
+    ///
+    /// v2 追加一条：搜索跨**全部分组**求命中，但右栏一次只显示一个组 —— 所以当前组
+    /// 没有命中而别的组有时，自动把左栏光标挪到第一个有命中的组（否则用户会以为
+    /// "搜不到"，而结果只是在另一个锚点下面）。
     fn rebuild_search(&mut self) {
         self.recompute_filter();
+        self.follow_hits();
         self.rebuild(None);
         if self.filter.is_some()
             && let Some(index) = self.first_hit_row()
         {
             self.cursor = index;
+        }
+    }
+
+    /// 当前组零命中 ⇒ 跳到第一个有命中的组（只在搜索态生效）。
+    fn follow_hits(&mut self) {
+        if self.filter.is_none() {
+            return;
+        }
+        if self.group().is_some_and(|a| self.group_has_hits(a)) {
+            return;
+        }
+        let Some(index) = self
+            .anchors
+            .iter()
+            .position(|anchor| self.group_has_hits(anchor))
+        else {
+            return;
+        };
+        if index != self.group_cursor {
+            self.enter_group(index);
         }
     }
 
@@ -814,73 +1078,94 @@ impl SettingsPanel {
             .position(|row| filter.is_hit(row.root, &row.tpath))
     }
 
-    /// Esc：清空 query 并回到搜索前的展开快照与光标。
+    /// Esc：清空 query 并回到搜索前的展开快照、分组与光标。
     fn exit_search_restore(&mut self) {
         let Some(state) = self.search.take() else {
             return;
         };
         self.expanded = state.snapshot().clone();
+        let group = state.group_snapshot();
         self.recompute_filter();
-        let anchor = state.cursor_snapshot().or_else(|| self.anchor());
+        let anchor = state.cursor_snapshot().or_else(|| self.row_anchor());
+        if group != self.group_cursor && group < self.anchors.len() {
+            self.group_cursor = group;
+        }
         self.rebuild(anchor);
     }
 
     fn handle_problems_key(&mut self, key: KeyEvent) -> SettingsAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // 两栏共用的键（与树视图同一条路径）。
         match key.code {
-            KeyCode::Esc | KeyCode::Char('p') | KeyCode::Left => {
+            KeyCode::Esc | KeyCode::Char('p') => {
                 self.view = View::Tree;
-                SettingsAction::None
-            }
-            KeyCode::Right => {
-                self.jump_to_problem();
-                SettingsAction::None
+                return SettingsAction::None;
             }
             KeyCode::Tab => {
-                self.switch_root();
-                SettingsAction::None
+                self.toggle_focus();
+                return SettingsAction::None;
             }
-            KeyCode::Char('R') if !ctrl => self.discard_then(DiscardIntent::Reload),
-            KeyCode::Char('r' | 'R') if ctrl => self.restart_action(),
+            KeyCode::Char('R') if !ctrl => return self.discard_then(DiscardIntent::Reload),
+            KeyCode::Char('r' | 'R') if ctrl => return self.restart_action(),
+            KeyCode::Char('s') if !ctrl => return self.save_action(),
             KeyCode::Char('/') => {
                 self.view = View::Tree;
                 self.enter_search();
-                SettingsAction::None
+                return SettingsAction::None;
             }
             KeyCode::Char('?') => {
                 self.open_help();
-                SettingsAction::None
+                return SettingsAction::None;
             }
-            KeyCode::Char('s') => self.save_action(),
-            KeyCode::Up => {
-                self.move_problem_cursor(-1);
-                SettingsAction::None
-            }
-            KeyCode::Down => {
-                self.move_problem_cursor(1);
-                SettingsAction::None
-            }
-            KeyCode::PageUp => {
-                self.move_problem_cursor(-(self.viewport_rows as isize));
-                SettingsAction::None
-            }
-            KeyCode::PageDown => {
-                self.move_problem_cursor(self.viewport_rows as isize);
-                SettingsAction::None
-            }
-            KeyCode::Home => {
-                self.problem_cursor = 0;
-                SettingsAction::None
-            }
-            KeyCode::End => {
-                self.problem_cursor = self.problems.len().saturating_sub(1);
-                SettingsAction::None
-            }
-            KeyCode::Enter => {
-                self.jump_to_problem();
-                SettingsAction::None
-            }
-            _ => SettingsAction::None,
+            _ => {}
+        }
+        match self.focus {
+            // 左栏：选分组；`Enter` / `→` 直接进那一组的树（问题清单本身不按组过滤，
+            // 所以"进组"在这里意味着换视图，而不只是换焦点）。
+            Focus::Groups => match key.code {
+                KeyCode::Enter | KeyCode::Right => {
+                    self.view = View::Tree;
+                    self.focus = Focus::Items;
+                    SettingsAction::None
+                }
+                _ => self.handle_groups_key(key),
+            },
+            // 右栏：问题列表（全局的，不按分组过滤）。
+            Focus::Items => match key.code {
+                KeyCode::Left => {
+                    self.view = View::Tree;
+                    SettingsAction::None
+                }
+                KeyCode::Up => {
+                    self.move_problem_cursor(-1);
+                    SettingsAction::None
+                }
+                KeyCode::Down => {
+                    self.move_problem_cursor(1);
+                    SettingsAction::None
+                }
+                KeyCode::PageUp => {
+                    self.move_problem_cursor(-(self.viewport_rows as isize));
+                    SettingsAction::None
+                }
+                KeyCode::PageDown => {
+                    self.move_problem_cursor(self.viewport_rows as isize);
+                    SettingsAction::None
+                }
+                KeyCode::Home => {
+                    self.problem_cursor = 0;
+                    SettingsAction::None
+                }
+                KeyCode::End => {
+                    self.problem_cursor = self.problems.len().saturating_sub(1);
+                    SettingsAction::None
+                }
+                KeyCode::Enter | KeyCode::Right => {
+                    self.jump_to_problem();
+                    SettingsAction::None
+                }
+                _ => SettingsAction::None,
+            },
         }
     }
 
@@ -894,7 +1179,7 @@ impl SettingsPanel {
         self.problem_cursor = next as usize;
     }
 
-    /// `Enter` on 问题清单：回树、切到问题所在根、展开祖先、光标落行。
+    /// `Enter` on 问题清单：回树、**切到问题所在的分组**、展开祖先、光标落行。
     /// `path == None`（文档级问题）→ 无操作。
     fn jump_to_problem(&mut self) -> bool {
         let Some(problem) = self.problems.get(self.problem_cursor) else {
@@ -904,7 +1189,11 @@ impl SettingsPanel {
             return false;
         };
         let root = problem.root;
+        if let Some(index) = self.group_index_for(root, &path) {
+            self.enter_group(index);
+        }
         self.view = View::Tree;
+        self.focus = Focus::Items;
         for ancestor in doc::ancestors(&path) {
             self.expanded.insert((root, ancestor));
         }
@@ -913,83 +1202,111 @@ impl SettingsPanel {
             .is_some_and(|row| row.root == root && row.path == path)
     }
 
-    // ── 按键：树 ─────────────────────────────────────────────
+    // ── 按键：树（双栏） ─────────────────────────────────────
 
     fn handle_tree_key(&mut self, key: KeyEvent) -> SettingsAction {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // 两栏共用的键：Esc 阶梯、保存 / 重载 / 重启、搜索、问题清单、帮助、切栏。
         match key.code {
-            KeyCode::Esc => self.escape_tree(),
-            KeyCode::Up if self.choices.is_some() && self.cursor_on_choice_owner() => {
-                self.move_choice_cursor(-1);
-                SettingsAction::None
-            }
-            KeyCode::Down if self.choices.is_some() && self.cursor_on_choice_owner() => {
-                self.move_choice_cursor(1);
-                SettingsAction::None
-            }
-            KeyCode::Up => {
-                self.move_cursor(-1);
-                SettingsAction::None
-            }
-            KeyCode::Down => {
-                self.move_cursor(1);
-                SettingsAction::None
-            }
-            KeyCode::PageUp => {
-                self.move_cursor(-(self.viewport_rows as isize));
-                SettingsAction::None
-            }
-            KeyCode::PageDown => {
-                self.move_cursor(self.viewport_rows as isize);
-                SettingsAction::None
-            }
-            KeyCode::Home => {
-                self.set_cursor_at(0, 0);
-                SettingsAction::None
-            }
-            KeyCode::End => {
-                let last = self.rows.len().saturating_sub(1);
-                self.set_cursor_at(0, last);
-                SettingsAction::None
-            }
-            KeyCode::Left => self.left_action(),
-            KeyCode::Right => self.right_action(),
-            KeyCode::Enter => self.enter_action(),
-            KeyCode::Char(' ') => self.space_action(),
-            KeyCode::Char('a') if !ctrl => self.start_add(),
-            KeyCode::Char('d') if !ctrl => self.delete_action(),
-            KeyCode::Char('J') if !ctrl => self.move_item_action(1),
-            KeyCode::Char('K') if !ctrl => self.move_item_action(-1),
-            KeyCode::Char('r' | 'R') if ctrl => self.restart_action(),
-            KeyCode::Char('R') => self.discard_then(DiscardIntent::Reload),
-            KeyCode::Char('r') => self.reset_action(),
-            KeyCode::Char('s') if !ctrl => self.save_action(),
+            KeyCode::Esc => return self.escape_tree(),
+            KeyCode::Char('s') if !ctrl => return self.save_action(),
+            KeyCode::Char('r' | 'R') if ctrl => return self.restart_action(),
+            KeyCode::Char('R') => return self.discard_then(DiscardIntent::Reload),
             KeyCode::Char('/') => {
                 self.enter_search();
-                SettingsAction::None
+                return SettingsAction::None;
             }
             KeyCode::Char('p') => {
                 self.view = View::Problems;
-                SettingsAction::None
+                // 问题清单的主角是右栏那一列（左栏只剩徽标与 Enter 跳组）。
+                self.focus = Focus::Items;
+                return SettingsAction::None;
             }
             KeyCode::Char('?') => {
                 self.open_help();
-                SettingsAction::None
+                return SettingsAction::None;
             }
             KeyCode::Tab => {
-                self.switch_root();
-                SettingsAction::None
+                self.toggle_focus();
+                return SettingsAction::None;
             }
-            _ => SettingsAction::None,
+            _ => {}
+        }
+        match self.focus {
+            Focus::Groups => self.handle_groups_key(key),
+            Focus::Items => self.handle_items_key(key, ctrl),
         }
     }
 
-    /// Esc 阶梯的第 5–7 级（1–4 由编辑器 / 提示 / 搜索 / 帮助各自的处理器消费）。
+    /// 左栏：选分组（进入即展开该组成员、右栏回首行）；`Enter` / `→` 进右栏。
+    fn handle_groups_key(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Up => self.move_group(-1),
+            KeyCode::Down => self.move_group(1),
+            KeyCode::PageUp => self.move_group(-(self.anchor_viewport_rows as isize)),
+            KeyCode::PageDown => self.move_group(self.anchor_viewport_rows as isize),
+            KeyCode::Home => self.enter_group(0),
+            KeyCode::End => self.enter_group(self.anchors.len().saturating_sub(1)),
+            KeyCode::Enter | KeyCode::Right => self.focus = Focus::Items,
+            // 已经在最左栏：`←` 无处可去（不吞也不产生动作）。
+            _ => {}
+        }
+        SettingsAction::None
+    }
+
+    /// 右栏：既有的一切编辑键（v1 的树键位原样保留）。
+    fn handle_items_key(&mut self, key: KeyEvent, ctrl: bool) -> SettingsAction {
+        match key.code {
+            KeyCode::Up if self.choices.is_some() && self.cursor_on_choice_owner() => {
+                self.move_choice_cursor(-1);
+            }
+            KeyCode::Down if self.choices.is_some() && self.cursor_on_choice_owner() => {
+                self.move_choice_cursor(1);
+            }
+            KeyCode::Up => self.move_cursor(-1),
+            KeyCode::Down => self.move_cursor(1),
+            KeyCode::PageUp => self.move_cursor(-(self.viewport_rows as isize)),
+            KeyCode::PageDown => self.move_cursor(self.viewport_rows as isize),
+            KeyCode::Home => self.set_cursor_at(0, 0),
+            KeyCode::End => {
+                let last = self.rows.len().saturating_sub(1);
+                self.set_cursor_at(0, last);
+            }
+            KeyCode::Left => return self.left_action(),
+            KeyCode::Right => return self.right_action(),
+            KeyCode::Enter => return self.enter_action(),
+            KeyCode::Char(' ') => return self.space_action(),
+            KeyCode::Char('a') if !ctrl => return self.start_add(),
+            KeyCode::Char('d') if !ctrl => return self.delete_action(),
+            KeyCode::Char('J') if !ctrl => return self.move_item_action(1),
+            KeyCode::Char('K') if !ctrl => return self.move_item_action(-1),
+            KeyCode::Char('r') => return self.reset_action(),
+            _ => {}
+        }
+        SettingsAction::None
+    }
+
+    /// `Tab`：两栏之间切焦点（v2 取代了 v1 的「切根」——Interface 现在是最后一个锚点）。
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Groups => Focus::Items,
+            Focus::Items => Focus::Groups,
+        };
+    }
+
+    /// Esc 阶梯的第 5–8 级（1–4 由编辑器 / 提示 / 搜索 / 帮助各自的处理器消费）。
+    ///
+    /// v2 的两栏让「退出」多了一级：右栏的 `Esc` 先退回左栏，**左栏**的 `Esc` 才是
+    /// 「放弃改动 → 关闭」那两级（否则一次误触就把用户送出面板）。
     fn escape_tree(&mut self) -> SettingsAction {
-        if self.choices.is_some() {
-            self.choices = None;
-            let anchor = self.anchor();
-            self.rebuild(anchor);
+        if self.focus == Focus::Items {
+            if self.choices.is_some() {
+                self.choices = None;
+                let anchor = self.row_anchor();
+                self.rebuild(anchor);
+                return SettingsAction::None;
+            }
+            self.focus = Focus::Groups;
             return SettingsAction::None;
         }
         if self.dirty_count() > 0 {
@@ -1009,8 +1326,10 @@ impl SettingsPanel {
             .is_some_and(|row| row.root == choices.root && row.path == choices.path)
     }
 
+    /// 右栏的 `←`：折叠 / 跳父行 / enum 往前切值；**已到分组顶层（无处可去）则回左栏**。
     fn left_action(&mut self) -> SettingsAction {
         let Some(row) = self.current_row().cloned() else {
+            self.focus = Focus::Groups;
             return SettingsAction::None;
         };
         if self
@@ -1019,7 +1338,7 @@ impl SettingsPanel {
             .is_some_and(|choices| choices.root == row.root && choices.path == row.path)
         {
             self.choices = None;
-            let anchor = self.anchor();
+            let anchor = self.row_anchor();
             self.rebuild(anchor);
             return SettingsAction::None;
         }
@@ -1030,20 +1349,29 @@ impl SettingsPanel {
                     self.expanded.remove(&(row.root, row.path.clone()));
                     self.rebuild(Some((row.root, row.path.clone())));
                 } else {
-                    self.goto_parent();
+                    self.left_or_out(row.depth);
                 }
                 SettingsAction::None
             }
             RowAction::Choose { .. } => {
                 self.choices = None;
-                let anchor = self.anchor();
+                let anchor = self.row_anchor();
                 self.rebuild(anchor);
                 SettingsAction::None
             }
             _ => {
-                self.goto_parent();
+                self.left_or_out(row.depth);
                 SettingsAction::None
             }
+        }
+    }
+
+    /// `←` 的「往上一级」：有父行就跳父行，已经在分组顶层（depth 0）就退回左栏。
+    fn left_or_out(&mut self, depth: usize) {
+        if depth > 0 {
+            self.goto_parent();
+        } else {
+            self.focus = Focus::Groups;
         }
     }
 
@@ -1130,18 +1458,6 @@ impl SettingsPanel {
         }
     }
 
-    fn switch_root(&mut self) {
-        if self.interface_catalog.is_none() {
-            return;
-        }
-        let target = match self.current_row().map(|row| row.root) {
-            Some(Root::Gateway) => Root::Interface,
-            _ => Root::Gateway,
-        };
-        self.expanded.insert((target, String::new()));
-        self.rebuild(Some((target, String::new())));
-    }
-
     // ── 值编辑动作 ───────────────────────────────────────────
 
     fn toggle_bool(&mut self, row: &Row) -> SettingsAction {
@@ -1200,7 +1516,7 @@ impl SettingsPanel {
         if let Some(choices) = self.choices.as_mut() {
             choices.cursor = next;
         }
-        let anchor = self.anchor();
+        let anchor = self.row_anchor();
         self.rebuild(anchor);
     }
 
@@ -1748,6 +2064,18 @@ impl SettingsPanel {
                 cursor: 0,
             },
         })
+    }
+}
+
+/// 一个具体路径的**首段**（顶层键）：`providers[0].api_key` → `providers`。
+///
+/// 分组成员是按顶层键声明的，所以「这条路径 / 这个问题 / 这次命中属于哪一组」只看首段。
+/// 不做字符串切分猜测：走 [`doc::format_path`] 的同一套解析（解析不出 → 整串当首段，
+/// 于是不匹配任何成员，行为等价于"不属于任何组"）。
+fn path_head(path: &str) -> &str {
+    match path.split_once(['.', '[']) {
+        Some((head, _)) => head,
+        None => path,
     }
 }
 

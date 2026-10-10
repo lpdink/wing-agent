@@ -19,6 +19,7 @@ use wing_api_client::models::ApplyScope;
 use wing_api_client::models::SecretPresence;
 use wing_api_client::models::SecretState;
 use wing_api_client::models::SettingChoice;
+use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::SettingProblem;
@@ -214,10 +215,12 @@ fn interface_catalog() -> SettingNode {
 }
 
 fn gateway_schema() -> SettingsSchemaResponse {
+    let root = gateway_catalog();
     SettingsSchemaResponse {
         version: "0.0.0-test".into(),
-        root: gateway_catalog(),
+        root,
         config_path: "/home/u/.wing/core/config.yaml".into(),
+        groups: Vec::new(),
     }
 }
 
@@ -250,6 +253,12 @@ fn sample_values() -> Value {
 
 fn interface_source(accent: &str) -> InterfaceSource {
     InterfaceSource {
+        groups: vec![SettingGroup {
+            id: "interface".into(),
+            title: "Interface".into(),
+            doc: "TUI 自身".into(),
+            members: vec!["colors".into(), "layout".into()],
+        }],
         catalog: interface_catalog(),
         doc: json!({"colors": {"accent": accent}}),
     }
@@ -547,7 +556,7 @@ fn an_ask_arriving_while_the_panel_is_open_waits_in_the_queue() {
 // ── 3. overlay 的绘制落点 + 三者处置（§20 风险 13） ────────
 
 #[test]
-fn the_open_panel_covers_the_whole_frame() {
+fn the_open_panel_floats_over_the_chat_and_leaves_the_background_visible() {
     let mut app = test_app();
     app.chat.push(ChatCell::UserMessage("hello world".into()));
     app.input.set_text("draft text");
@@ -563,18 +572,46 @@ fn the_open_panel_covers_the_whole_frame() {
         gateway_state(sample_values(), "fp-1"),
         Some(interface_source("magenta")),
     );
+    // 打开面板要求整屏重画一次：卡片底下的图片像素要擦掉（与关闭时对称）。
+    assert!(app.needs_full_redraw, "打开面板 = 一次整屏重画");
     app.draw(&mut terminal).expect("draw");
-    let after = frame_text(terminal.backend().buffer());
-    assert!(after.contains("Settings"), "overlay 的标题在场：\n{after}");
-    assert!(
-        !after.contains("hello world"),
-        "底层 chat 不可见：\n{after}"
+    let buf = terminal.backend().buffer().clone();
+    let after = frame_text(&buf);
+    assert!(after.contains("Settings"), "卡片的标题在场：\n{after}");
+
+    // 卡片几何：min(终端宽-4, 110) × min(终端高-4, 32)，居中。
+    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 100, 30));
+    assert_eq!(card, ratatui::layout::Rect::new(2, 2, 96, 26));
+    assert_eq!(buf[(card.x, card.y)].symbol(), "┌", "卡片左上角");
+    assert_eq!(
+        buf[(card.right() - 1, card.bottom() - 1)].symbol(),
+        "┘",
+        "卡片右下角"
     );
-    assert!(!after.contains("draft text"), "composer 不可见：\n{after}");
-    assert!(
-        !after.contains("今天构建什么"),
-        "composer 的占位也不可见：\n{after}"
-    );
+
+    // 四周露出背景：状态栏与 composer 都还在（v1 的全屏 overlay 会把它们抹掉）。
+    assert!(after.contains("test-session"), "状态栏可见：\n{after}");
+    assert!(after.contains("draft text"), "composer 可见：\n{after}");
+    // 卡片内部不透底：被它盖住的那条消息不见了。
+    assert!(!after.contains("hello world"), "卡片内部不透底：\n{after}");
+}
+
+#[test]
+fn a_small_terminal_degrades_the_panel_to_full_screen() {
+    // < 80×24：浮层比全屏更难读，直接铺满。
+    for (width, height) in [(79u16, 30u16), (80, 23), (60, 48), (40, 10)] {
+        let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, width, height));
+        assert_eq!(
+            card,
+            ratatui::layout::Rect::new(0, 0, width, height),
+            "{width}x{height} 应当铺满"
+        );
+    }
+    // ≥ 80×24：浮层，且不超过 110×32。
+    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 80, 24));
+    assert_eq!(card, ratatui::layout::Rect::new(2, 2, 76, 20));
+    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 200, 60));
+    assert_eq!(card, ratatui::layout::Rect::new(45, 14, 110, 32));
 }
 
 #[test]
@@ -598,7 +635,10 @@ fn the_open_panel_suppresses_pictures_and_closing_invalidates_them() {
         Some(interface_source("magenta")),
     );
     let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(!has_placeholder(&buf), "overlay 期间不画图片");
+    assert!(
+        !has_placeholder(&buf),
+        "卡片挡住的图片这一帧不画（打开面板时还整屏擦过一次）"
+    );
 
     // 关闭：整屏重画 + 图片句柄失效（design §20 风险 13 的配对）。
     app.close_settings_panel(false);

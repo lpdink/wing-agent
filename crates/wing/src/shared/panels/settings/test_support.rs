@@ -11,6 +11,7 @@ use wing_api_client::models::ApplyScope;
 use wing_api_client::models::SecretPresence;
 use wing_api_client::models::SecretState;
 use wing_api_client::models::SettingChoice;
+use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 
@@ -224,6 +225,45 @@ pub(crate) fn sample_catalog() -> SettingNode {
     let tools = list("tools", element(str_field("tool")));
 
     root(vec![providers, gateway, tools, map_field("extra_body")])
+}
+
+// ── 分组（左栏锚点）────────────────────────────────────────
+
+/// 一个分组声明（夹具用；生产路径的两份声明见 `groups.rs` 的模块文档）。
+pub(crate) fn group(id: &str, title: &str, members: &[&str]) -> SettingGroup {
+    SettingGroup {
+        id: id.to_string(),
+        title: title.to_string(),
+        doc: format!("{title} 的说明"),
+        members: members.iter().map(|member| (*member).to_string()).collect(),
+    }
+}
+
+/// [`sample_catalog`] 的分组表：四个顶层键 → 三个锚点。
+pub(crate) fn sample_groups() -> Vec<SettingGroup> {
+    vec![
+        group("providers", "Providers", &["providers"]),
+        group("net", "Net", &["gateway"]),
+        group("misc", "Misc", &["tools", "extra_body"]),
+    ]
+}
+
+/// 示例 Interface 根（两个顶层键）。
+pub(crate) fn interface_catalog() -> SettingNode {
+    let mut accent = str_field("accent");
+    accent.value_hint = Some("color".into());
+    root(vec![
+        object("colors", vec![accent]),
+        object(
+            "layout",
+            vec![int_field("max_input_lines", Some(1.0), None)],
+        ),
+    ])
+}
+
+/// 示例 Interface 根的分组表（一个锚点装下全部顶层键）。
+pub(crate) fn interface_groups() -> Vec<SettingGroup> {
+    vec![group("interface", "Interface", &["colors", "layout"])]
 }
 
 /// 示例文档：一个 provider（api_key 恒为 null —— 密文三态里的「保留」）。
