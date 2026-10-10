@@ -102,27 +102,43 @@ fn rule_line(fill: char, left: char, right: char, inner: usize, style: Style) ->
 ///
 /// Whole spans survive while they fit; the first span that does not is cut on
 /// a character boundary (CJK-aware, via the shared [`split_str_by_width`]).
+/// **Every cut is marked**: one column is reserved for the ellipsis up front,
+/// so a budget that is used up exactly on a span boundary still ends in `…`
+/// (a row that fits whole is returned untouched — an exact fit is not a cut).
 ///
 /// Shared with the welcome's un-carded text column: the card and the plain
 /// column degrade the same way (the card calls this for every row it draws).
 pub fn fit_row(row: &Line<'static>, max: usize) -> Line<'static> {
+    if row.width() <= max {
+        return row.clone();
+    }
+    if max == 0 {
+        return Line::from(Vec::new());
+    }
+    // The ellipsis takes one of the columns; the rest is the text budget.
+    let budget = max - 1;
     let mut out: Vec<Span<'static>> = Vec::new();
-    let mut budget = max;
+    let mut used = 0;
     for span in &row.spans {
         let width = span.content.width();
-        if width <= budget {
-            budget -= width;
+        if used + width <= budget {
+            used += width;
             out.push(span.clone());
             continue;
         }
-        if budget == 0 {
-            break;
+        let (head, _) = split_str_by_width(&span.content, budget - used);
+        if head.is_empty() {
+            // The cut lands on this span's first column (or its boundary):
+            // the ellipsis carries its ink.
+            out.push(Span::styled("…".to_string(), span.style));
+        } else {
+            out.push(Span::styled(format!("{head}…"), span.style));
         }
-        // The ellipsis takes one of the remaining columns.
-        let (head, _) = split_str_by_width(&span.content, budget - 1);
-        out.push(Span::styled(format!("{head}…"), span.style));
-        break;
+        return Line::from(out);
     }
+    // Unreachable while `row.width() > max`: the spans' widths sum past the
+    // budget, so some span is cut above. Kept as a total-function tail.
+    out.push(Span::raw("…"));
     Line::from(out)
 }
 
@@ -136,6 +152,11 @@ mod tests {
 
     fn row(text: &str) -> Line<'static> {
         Line::from(text.to_string())
+    }
+
+    /// A line's plain text (assertions on fitted rows).
+    fn plain(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     fn text_of(lines: &[Line<'static>]) -> Vec<String> {
@@ -233,6 +254,22 @@ mod tests {
         let row_spans = &lines[1].spans;
         assert_eq!(row_spans[2].content.as_ref(), "abcdefgh");
         assert_eq!(row_spans[3].content.as_ref(), "ijk…");
+    }
+
+    #[test]
+    fn a_cut_that_uses_up_the_budget_is_still_marked() {
+        // 边界：某个 span 恰好把预算用尽、后面还有非空 span —— 切照样发生了，
+        // 标记就必须出现（`fit_row` 的 doc 承诺「每一次切都补 `…`」）。
+        let boundary = Line::from(vec![Span::raw("abc"), Span::raw("def")]);
+        assert_eq!(plain(&fit_row(&boundary, 3)), "ab…");
+        // 恰好放得下（没有切）不打标记。
+        assert_eq!(plain(&fit_row(&Line::from("abc"), 3)), "abc");
+        // 尾巴是空 span 不算"还有内容"。
+        let empty_tail = Line::from(vec![Span::raw("abc"), Span::raw("")]);
+        assert_eq!(plain(&fit_row(&empty_tail, 3)), "abc");
+        // 退化宽度：只剩省略号。
+        assert_eq!(plain(&fit_row(&boundary, 1)), "…");
+        assert_eq!(plain(&fit_row(&boundary, 0)), "");
     }
 
     #[test]

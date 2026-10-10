@@ -6,11 +6,17 @@
 //! ([`plain`], used by `wing ps` / `wing tools`), and the welcome nameplate's
 //! info card ([`card`]).
 //!
-//! Everything here works on numbers and string measurements only: no
-//! `ratatui` styles, no assumption about which frontend is drawing. The width
-//! policy (which column gives up width first, which one is preserved last) is
-//! a product decision that lives in [`compute_column_widths`] — sharing it is
-//! what keeps the frontends from growing two different looks.
+//! The layout half — this module's own maths, plus [`plain`] — works on
+//! numbers and string measurements only: no `ratatui` styles, no assumption
+//! about which frontend is drawing. [`card`] is the deliberate TUI-only
+//! exception: the welcome nameplate draws `ratatui` lines, and routing it
+//! through the same skin and width accounting is what keeps the card from
+//! growing a look of its own. Keep styles out of everything else: `plain`
+//! must stay paintable without them.
+//!
+//! The width policy (which column gives up width first, which one is preserved
+//! last) is a product decision that lives in [`compute_column_widths`] —
+//! sharing it is what keeps the frontends from growing two different looks.
 
 pub mod card;
 pub mod plain;

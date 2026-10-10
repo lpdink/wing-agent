@@ -850,22 +850,29 @@ mod tests {
     }
 
     #[test]
-    fn the_card_holds_the_widest_tip_at_its_minimum_width() {
-        // CARD_MIN 的来历：卡内宽度（列宽 − 框的 4 列）要放得下最宽的一行 ——
-        // tips 池里最宽的一条 + `Tip  ` 标签。池子加一条更长的 tip 时这里会红：
-        // 那时要么抬 CARD_MIN，要么认了折尾（产品决定，不许悄悄发生）。
-        let widest = tips::TIPS
-            .iter()
-            .map(|tip| tip.text.width())
-            .max()
-            .unwrap_or(0);
-        let label = "Tip  ".width();
+    fn the_card_minimum_holds_every_row_it_draws() {
+        // CARD_MIN 的来历：卡内宽度（列宽 − 框的 4 列）要放得下**最宽的一行** ——
+        // 口径是整个 `info_rows`，不只是 tips 池：池子加一条更长的 tip、键位文案
+        // 加几列、`TIPS_COMMAND` 改名变长，都会在最小卡片里静默折尾，这里必须红
+        // （逼一次产品决定：抬 CARD_MIN，还是认了折尾）。
         let inner = CARD_MIN - crate::render::table::frame_overhead(1);
-        assert!(
-            widest + label <= inner,
-            "最宽的 tip {} + 标签 {label} 列 > 卡内 {inner} 列",
-            widest
-        );
+        let widest_tip = tips::TIPS
+            .iter()
+            .map(|tip| tip.text)
+            .max_by_key(|text| text.width())
+            .unwrap_or("");
+        // 事实行的位数是动态的，按三位数（`999 skills · 999 rules`）取上界。
+        let facts = Some(SessionFacts {
+            skills: 999,
+            rules: 999,
+        });
+        for row in info_rows(&palette(), widest_tip, facts) {
+            let width = line_width(&row);
+            assert!(
+                width <= inner,
+                "行「{row}」{width} 列 > 卡内 {inner} 列（CARD_MIN={CARD_MIN}）"
+            );
+        }
     }
 
     /// 信息列里的 wordmark 宽度：前 `rows` 行是字形（行尾透明格已裁，取最宽的
@@ -931,9 +938,19 @@ mod tests {
         assert_eq!(shape(COMPACT_MIN - 1), (false, false), "最窄档没列");
         assert_eq!(shape(COMPACT_MIN), (false, false), "内容 40：1x + 纯文字");
         assert_eq!(
+            shape(45),
+            (false, false),
+            "内容 45：纯文字段的上边界（信息列 44）"
+        );
+        assert_eq!(
             shape(COMPACT_MIN + (CARD_MIN - 39) as u16),
             (false, true),
             "内容 46：1x + 卡片"
+        );
+        assert_eq!(
+            shape(47),
+            (true, true),
+            "内容 47：2x + 卡片段的下边界（信息列 46）"
         );
         assert_eq!(shape(FULL_MIN - 1), (true, true), "内容 73：2x + 卡片");
 
