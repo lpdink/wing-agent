@@ -203,7 +203,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 **stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；audit 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 
-合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
+合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题；例外是 resume / 迟到订阅重放锚定的近似计时器（`TimerAnchor::Turn`）——它量的是 turn 起点而非工具执行起点，结果到达即丢弃，冻结它会永远显示一个错误时长，见 #108），stdio 模式据此输出 user turn 消息。
 
 **时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask，被放弃的输入以 `request_id` 列表随 `InterruptedEvent.dropped_request_ids` 下发——前端据此只把真正被放弃的 pending 消息标为 discarded；锁等待期间新投递的消息（客户端 POST 已应答）不在其中，留给随后的消费者（重建的新 worker、保留 worker 的续期继任者），不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
 

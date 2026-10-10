@@ -5,7 +5,8 @@
 //! generic rendering.
 //!
 //! Header examples:
-//!   ⦁ Bash(ls -la) 3s/30s
+//!   ⦁ Bash(ls -la) 3s/30s        — live: elapsed/own timeout
+//!   ⦁ Bash(sleep 100) ~837s      — resume replay: turn-anchored approximation
 //!   ⦁ Read(wing/src/main.rs)
 //!   ⦁ ReadImage(shot.png)   — basename only
 //!   ⦁ Glob(src/**/*.ts, **/*.py)
@@ -344,6 +345,29 @@ impl ToolRenderer {
 
 // ── ToolCallBlock ───────────────────────────────────────────────
 
+/// How a Bash card's elapsed timer was anchored — the provenance decides how
+/// honestly the number may be rendered.
+///
+/// The timer has two sources with different semantics (issue #108): the live
+/// `ToolCall` event marks the instant the tool began executing (exact), while
+/// resume / late-subscription replay anchors to the *turn* start because the
+/// execution instant was never observable (the live event is not persisted,
+/// and `SessionMessage` carries no timestamps). The turn-anchored value is an
+/// upper bound on the tool's runtime, not the runtime itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimerAnchor {
+    /// Anchored at the instant the tool began executing (live `ToolCall`) —
+    /// the elapsed value is the tool's own runtime, comparable with its
+    /// timeout: rendered `3s/30s`.
+    #[default]
+    Execution,
+    /// Anchored at the turn start (resume / late-subscription replay) —
+    /// rendered approximate (`~837s`), deliberately without the timeout
+    /// denominator: pairing it with the tool's budget would read as a
+    /// timeout being exceeded.
+    Turn,
+}
+
 /// A tool invocation block showing name, args summary, and result.
 #[derive(Debug, Clone)]
 pub struct ToolCallBlock {
@@ -354,6 +378,9 @@ pub struct ToolCallBlock {
     pub result: Option<String>,
     /// When the tool started executing (for Bash timer display).
     pub started_at: Option<Instant>,
+    /// Where `started_at` came from — decides the timer's display form
+    /// (exact `12s/300s` vs approximate `~837s`). See [`TimerAnchor`].
+    pub timer_anchor: TimerAnchor,
     /// Incremental syntax highlight cache for Write/Edit streaming.
     /// Write: file content preview. Edit: new_string preview.
     /// Mutually exclusive per tool — a block is never both Write and Edit.
@@ -391,6 +418,7 @@ impl ToolCallBlock {
             status: ToolStatus::Pending,
             result: None,
             started_at: None,
+            timer_anchor: TimerAnchor::Execution,
             stream_highlight: None,
             edit_old_lines: Vec::new(),
             todo_stream: None,
@@ -412,6 +440,7 @@ impl ToolCallBlock {
             status: ToolStatus::Streaming,
             result: None,
             started_at: None,
+            timer_anchor: TimerAnchor::Execution,
             stream_highlight: None,
             edit_old_lines: Vec::new(),
             todo_stream: None,
@@ -424,6 +453,11 @@ impl ToolCallBlock {
     }
 
     /// Set the result and status.
+    ///
+    /// The status flip stops the elapsed tick; an exact (execution-anchored)
+    /// timer keeps its frozen runtime ("the command took 271s"), but a
+    /// turn-anchored one measured the turn, not the tool — freezing it would
+    /// display a wrong duration forever (issue #108), so it is dropped.
     pub fn set_result(&mut self, result: String, success: bool) {
         self.result = Some(result);
         self.status = if success {
@@ -431,6 +465,10 @@ impl ToolCallBlock {
         } else {
             ToolStatus::Failed
         };
+        if self.timer_anchor == TimerAnchor::Turn {
+            self.started_at = None;
+            self.timer_shown_secs = None;
+        }
     }
 
     /// Append a raw args fragment (ToolCallStreamEvent). O(1): the text is
@@ -474,6 +512,17 @@ impl ToolCallBlock {
     /// cache will materialize for it (see [`Self::tick_timer`]).
     pub fn start_timer(&mut self, at: Instant) {
         self.started_at = Some(at);
+        self.timer_anchor = TimerAnchor::Execution;
+        self.timer_shown_secs = Some(at.elapsed().as_secs());
+    }
+
+    /// Anchor the timer at the *turn* start, for a card whose execution
+    /// instant was never observable (resume / late-subscription replay):
+    /// `at` is an upper bound on the tool's runtime, rendered approximate
+    /// (`~837s`) and without the timeout denominator. See [`TimerAnchor`].
+    pub fn start_timer_from_turn(&mut self, at: Instant) {
+        self.started_at = Some(at);
+        self.timer_anchor = TimerAnchor::Turn;
         self.timer_shown_secs = Some(at.elapsed().as_secs());
     }
 
@@ -584,7 +633,7 @@ impl ToolCallBlock {
 
         // Bash timer: appended as dim text after args.
         if renderer == ToolRenderer::Bash {
-            let timer = format_bash_timer(self.started_at, &self.tool_args);
+            let timer = format_bash_timer(self.started_at, self.timer_anchor, &self.tool_args);
             if !timer.is_empty() {
                 header_spans.push(Span::raw(" "));
                 header_spans.push(Span::styled(timer, dim));
@@ -776,16 +825,29 @@ fn command_one_line(cmd: &str) -> String {
     cmd.trim().replace("\r\n", "⏎").replace('\n', "⏎")
 }
 
-/// Format the Bash timer display: "3s/30s" or "3s" or empty.
-fn format_bash_timer(started_at: Option<Instant>, args: &serde_json::Value) -> String {
+/// Format the Bash timer display.
+///
+/// Exact (execution-anchored): "3s/30s", or "3s" when the call has no
+/// timeout. Turn-anchored (resume / late-subscription replay): "~837s" —
+/// approximate elapsed since the turn start, deliberately WITHOUT the
+/// timeout denominator: it measures the turn, not the tool, so pairing it
+/// with the tool's own budget would read as a timeout being exceeded
+/// (issue #108). Empty when there is no timer to show.
+fn format_bash_timer(
+    started_at: Option<Instant>,
+    anchor: TimerAnchor,
+    args: &serde_json::Value,
+) -> String {
     let Some(started) = started_at else {
         return String::new();
     };
     let elapsed = started.elapsed().as_secs();
-    if let Some(timeout) = args.get("timeout").and_then(|v| v.as_u64()) {
-        format!("{elapsed}s/{timeout}s")
-    } else {
-        format!("{elapsed}s")
+    match anchor {
+        TimerAnchor::Execution => match args.get("timeout").and_then(|v| v.as_u64()) {
+            Some(timeout) => format!("{elapsed}s/{timeout}s"),
+            None => format!("{elapsed}s"),
+        },
+        TimerAnchor::Turn => format!("~{elapsed}s"),
     }
 }
 
@@ -874,6 +936,8 @@ pub fn truncate_by_chars(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::config::ThemePalette;
     use serde_json::json;
@@ -983,6 +1047,66 @@ mod tests {
             !text.contains("/"),
             "should not have timeout separator: {text}"
         );
+    }
+
+    /// #108: a turn-anchored timer (resume / late-subscription replay) is an
+    /// upper bound on the tool's runtime — it must render as an approximation
+    /// and MUST NOT append the tool's timeout denominator: `837s/300s` reads
+    /// as "this Bash blew its 300s budget and was not interrupted".
+    #[test]
+    fn test_bash_timer_turn_anchored_is_approximate_without_timeout() {
+        let mut block = ToolCallBlock::new(
+            "Bash".into(),
+            json!({"command": "sleep 100", "timeout": 300}),
+            "tc-turn".into(),
+        );
+        // Backdated past 5s but short of 6s: the displayed whole-second value
+        // is 5 for the next half second even if the runner stalls here.
+        block.start_timer_from_turn(Instant::now() - Duration::from_millis(5_500));
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("~5s"), "expected approximate elapsed: {text}");
+        assert!(
+            !text.contains("/300s"),
+            "the timeout denominator must be gone on the turn-anchored path: {text}"
+        );
+    }
+
+    /// #108: the exact (execution-anchored) timer keeps its `3s/30s` form —
+    /// the fix must not leak into the live path.
+    #[test]
+    fn test_bash_timer_execution_anchored_keeps_timeout_denominator() {
+        let mut block = ToolCallBlock::new(
+            "Bash".into(),
+            json!({"command": "ls -la", "timeout": 30}),
+            "tc-exact".into(),
+        );
+        block.start_timer(Instant::now() - Duration::from_millis(5_500));
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("5s/30s"), "expected exact elapsed: {text}");
+        assert!(!text.contains("~"), "no approximation marker here: {text}");
+    }
+
+    /// #108: once the result lands, a turn-anchored timer is dropped — the
+    /// frozen value would be the turn's elapsed time displayed as the tool's
+    /// duration, wrong forever (the live path keeps its frozen runtime).
+    #[test]
+    fn test_bash_timer_turn_anchored_dropped_after_result() {
+        let mut block = ToolCallBlock::new(
+            "Bash".into(),
+            json!({"command": "sleep 100", "timeout": 300}),
+            "tc-turn-drop".into(),
+        );
+        block.start_timer_from_turn(Instant::now() - Duration::from_secs(837));
+        assert!(block.started_at.is_some());
+        block.set_result("done".into(), true);
+        assert!(
+            block.started_at.is_none(),
+            "turn-anchored timer must not outlive the result"
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("Bash(sleep 100)"), "card intact: {text}");
+        assert!(!text.contains('~'), "no frozen turn timer: {text}");
+        assert!(!text.contains("s/"), "no frozen timeout pair: {text}");
     }
 
     #[test]
