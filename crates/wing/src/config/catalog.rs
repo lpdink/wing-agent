@@ -307,7 +307,8 @@ pub fn interface_groups() -> Vec<SettingGroup> {
     vec![SettingGroup {
         id: "interface".to_owned(),
         title: "Interface".to_owned(),
-        doc: "TUI 自身：配色 / 布局 / 渲染（改动即时预览，`s` 保存到 tui/config.yaml）".to_owned(),
+        // 这段 doc 会原样画在右栏的组头（纯文本，不渲染 markdown）：不写反引号。
+        doc: "TUI 自身：配色 / 布局 / 渲染（改动即时预览，s 保存到 tui/config.yaml）".to_owned(),
         members: vec![
             "colors".to_owned(),
             "layout".to_owned(),
