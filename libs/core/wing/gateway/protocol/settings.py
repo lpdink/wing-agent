@@ -88,10 +88,13 @@ class SettingNodeProto(BaseModel):
         default=None, description="预留：废弃说明（本期不消费）"
     )
 
-    # ── 分组 ──
-    section: str | None = Field(default=None, description="顶层分组名")
+    # ── 分组（业务分组的投影，声明在 config/groups.py；权威是 schema.groups[]）──
+    section: str | None = Field(
+        default=None,
+        description="所属业务分组的 title（只在该组的首个成员上非空）",
+    )
     section_doc: str | None = Field(
-        default=None, description="分组说明（每节只写一次）"
+        default=None, description="分组说明（与 section 同一位置，每组只写一次）"
     )
 
     # ── 结构 ──

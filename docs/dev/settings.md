@@ -91,6 +91,12 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 `build_groups()` 在构建期就抛（不是运行期悄悄漏），probe 侧另有 wire 形状与保存回归的整机断言
 （`scenarios/test_settings_groups.py`）。
 
+**两侧对"漏了怎么办"是刻意的两种口径**：后端**硬失败**（未分组的顶层键 → `build_catalog()` 抛 →
+`GET /api/settings/schema` 500，因为那是开发者写错了声明，CI 必须挡住）；前端**软兜底**
+（没被任何组认领的键进一个 `{root}:ungrouped` 锚点，因为前端要面对的是"任意版本的网关"——
+老网关、半升级的网关、被 hack 过的网关都不能让设置面板打不开）。硬失败管住自己的仓库，
+软兜底管住别人的进程，两者不矛盾。
+
 ## 2. 门禁：不是纪律，是机制
 
 五处测试让「声明 / 目录 / 分组 / 模板 / serde」不许漂移（改声明而不同步的代价是测试变红，不是"有人会记得改"）：
@@ -422,7 +428,7 @@ Interface 是**最后一个锚点**（不再有 v1 的"切根"概念，两个根
 | `↑` `↓` | 选分组（钳制） | 移动光标（钳制） | **忽略**（模态：必须 Enter / Esc 收口） | 选择（左栏焦点时选分组） | 内项光标 |
 | `PageUp` `PageDown` / `Home` `End` | 按锚点可见行数翻页 / 首尾 | 翻页 / 首尾 | `Home`/`End` 行首尾 | 翻页 / 首尾 | — |
 | `Tab` | 进右栏 | 回左栏 | 忽略 | 切栏 | 切栏 |
-| `←` | 无操作（已在最左） | 折叠 / 已折叠则跳父行 / **depth 0 无处可去则回左栏**；enum 行循环切值（往前） | 左移字符 | 返回树 | 折叠（不选） |
+| `←` | 无操作（已在最左） | 折叠 / 已折叠则跳父行 / **depth 0 无处可去则回左栏**；enum 行循环切值（往前） | 左移字符 | 无操作（回树用 `Esc` / `p`） | 折叠（不选） |
 | `→` | 进右栏 | 展开；enum 行循环切值（往后） | 右移字符 | 跳到该行（左栏焦点时 = 进那一组的树） | — |
 | `Enter` | 进右栏 | 按行类型分派（展开 / 切换 / 选择项 / 编辑 / 新增 / 选中 / 只读） | 提交（**不改 = 无操作**） | 跳到该行 | 选中并折叠 |
 | `Space` | — | bool 切换 | 插入空格 | — | 选中 |
@@ -583,8 +589,10 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
   `ui/settings/**` 只渲染；`r`/`R`/`Ctrl+R` 的三分是刻意设计（复位 / 重载 / 重启），别再合成一个键。
   **两栏共用的键**（`s` / `R` / `Ctrl+R` / `/` / `p` / `?` / `Tab` / `Esc`）在焦点分派**之前**处理，
   加新键时先想清楚它属于哪一栏。
-- 改面板几何：`ui/settings/mod.rs` 的 `card_area`（浮层尺寸）与 `Regions::new`（内部切分）是唯一实现，
-  App / setup 向导 / 测试都走它们；`tree_viewport_rows` 与 `anchors_viewport_rows` 必须与实际画出来的
-  行数一致（翻页步长），`the_viewport_contract_holds_at_every_size` 钉住这条。
+- 改面板几何：`ui/settings/mod.rs` 的 `card_area`（浮层尺寸，**只有 App 与测试用**——setup 向导有自己的
+  三块布局，把面板整块渲染进 `panel_area`，不是浮层）与 `Regions::new`（内部切分，三个入口共用）；
+  `tree_viewport_rows` / `anchors_viewport_rows` / `has_anchor_column` 必须与实际画出来的东西一致
+  （翻页步长与"左栏存不存在"），每帧喂回面板（`set_viewport_rows` / `set_anchor_viewport_rows` /
+  `set_anchors_visible`），`the_viewport_contract_holds_at_every_size` 钉住这条。
 - 排查用户现场：`wing config doctor`（不需要网关正常）→ `wing config list` → `~/.wing/core/logs/`
   的 `settings changed:` 行（只有路径，没有值）；两个 `.bak` 是最近一次保存前的原文。
