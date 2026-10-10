@@ -381,8 +381,8 @@ pub struct ToolCallBlock {
     /// Where `started_at` came from — decides the timer's display form
     /// (exact `12s/300s` vs upper-bound `≤837s`). See [`TimerAnchor`].
     pub timer_anchor: TimerAnchor,
-    /// Whole seconds captured when the timer settled (see
-    /// [`Self::settle_timer`]) — the display for a finished call is this
+    /// Whole seconds captured when the result landed (see
+    /// [`Self::freeze_timer`]) — the display for a finished call is this
     /// constant, NOT a fresh `started_at.elapsed()`. A cache invalidation
     /// (width change / palette preview) re-renders lines; recomputing then
     /// would show "time since the tool started", growing forever — the
@@ -461,7 +461,7 @@ impl ToolCallBlock {
         }
     }
 
-    /// Set the result and status, settling the elapsed timer with it.
+    /// Set the result and status, freezing the elapsed timer with it.
     pub fn set_result(&mut self, result: String, success: bool) {
         self.result = Some(result);
         self.status = if success {
@@ -469,31 +469,43 @@ impl ToolCallBlock {
         } else {
             ToolStatus::Failed
         };
-        self.settle_timer();
+        self.freeze_timer();
     }
 
-    /// Settle the elapsed display: capture what it shows *now* and stop
-    /// deriving it from the clock.
+    /// Freeze the elapsed display at what it shows *now*, when the result
+    /// landed (called by [`Self::set_result`]).
     ///
     /// An exact (execution-anchored) timer freezes at the value it reached
-    /// ("the command took 271s"); a turn-anchored one measured the turn, not
-    /// the tool — freezing it would display a wrong duration forever (issue
-    /// #108), so it is dropped. Idempotent, and the render path reads the
-    /// frozen value: a re-render after settling (width change / palette
-    /// preview invalidates the line cache) must not recompute
-    /// `started_at.elapsed()` — that value keeps growing and reads as a
-    /// fake timeout again.
-    ///
-    /// Called by [`Self::set_result`] (normal completion) and at turn end
-    /// for cards still pending — their result event never arrived, and
-    /// without settling they would grow forever on the next invalidation.
-    pub fn settle_timer(&mut self) {
+    /// ("the command took 271s" — the result pins the completion instant); a
+    /// turn-anchored one measured the turn, not the tool — freezing it would
+    /// display a wrong duration forever (issue #108), so it is dropped. The
+    /// render path reads the frozen value: a re-render after settling (width
+    /// change / palette preview invalidates the line cache) must not
+    /// recompute `started_at.elapsed()` — that value keeps growing and reads
+    /// as a fake timeout again.
+    fn freeze_timer(&mut self) {
         if let Some(started) = self.started_at.take()
             && self.timer_anchor == TimerAnchor::Execution
         {
             self.timer_frozen_secs = Some(started.elapsed().as_secs());
         }
         self.timer_shown_secs = None;
+    }
+
+    /// Drop the elapsed display without a result (turn end for a card whose
+    /// result event never arrived).
+    ///
+    /// Nothing about the tool's runtime is known then: the value at turn end
+    /// is "execution start → turn end" — an *upper* bound on the runtime, and
+    /// an outright lower bound on the degraded interrupt path (a worker the
+    /// cancellation ladder gave up on keeps running). Freezing it would
+    /// render that bound as an exact `271s/300s` measurement, the very
+    /// fake-timeout reading #108 removes — so no duration is shown.
+    /// Idempotent.
+    pub fn discard_timer(&mut self) {
+        self.started_at = None;
+        self.timer_shown_secs = None;
+        self.timer_frozen_secs = None;
     }
 
     /// Append a raw args fragment (ToolCallStreamEvent). O(1): the text is
@@ -862,7 +874,7 @@ impl ToolCallBlock {
     /// the tool's own budget would read as a timeout being exceeded (issue
     /// #108). Empty when there is no timer to show.
     ///
-    /// A settled timer (see [`Self::settle_timer`]) renders its captured
+    /// A frozen timer (see [`Self::freeze_timer`]) renders its captured
     /// value; a live timer derives it from `started_at` each render.
     fn timer_text(&self) -> String {
         let elapsed = if let Some(frozen) = self.timer_frozen_secs {

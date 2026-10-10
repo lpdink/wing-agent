@@ -642,8 +642,9 @@ impl ChatView {
     /// [`TimerAnchor::Turn`](crate::ui::cells::tool_call::TimerAnchor::Turn) —
     /// rendered as `≤837s` and without the timeout denominator (`837s/300s`
     /// would read as "this Bash blew its timeout and was not interrupted").
-    /// A result landing on such a cell drops the timer outright: the frozen
-    /// value would be a wrong duration forever (issue #108).
+    /// A result landing on such a cell — or the turn ending without one —
+    /// drops the timer outright: the frozen value would be a wrong duration
+    /// forever (issue #108, see [`Self::discard_pending_bash_timers`]).
     pub fn mark_pending_bash_running(&mut self, started_at: std::time::Instant) {
         for cached in &mut self.cells {
             if let ChatCell::ToolCall(block) = cached.cell()
@@ -694,12 +695,13 @@ impl ChatView {
         }
     }
 
-    /// Turn end: settle the Bash timers still ticking. Normally each card
-    /// was settled by its own result; this catches cards left Pending
-    /// because their result event never arrived — their live-derived value
-    /// would keep recomputing (and growing) on every later re-render, the
-    /// fake-timeout reading again (issue #108).
-    pub fn finish_bash_timers(&mut self) {
+    /// Turn end: drop the timers of Bash cards still pending. Normally each
+    /// card was finished by its own result; this catches cards whose result
+    /// event never arrived — the completion instant is unknown, so any value
+    /// shown would be the turn's elapsed time, not the tool's runtime (and it
+    /// would keep recomputing on later re-renders) — the fake-timeout reading
+    /// again (issue #108).
+    pub fn discard_pending_bash_timers(&mut self) {
         for cached in &mut self.cells {
             if let ChatCell::ToolCall(block) = cached.cell()
                 && block.tool_name == TOOL_BASH
@@ -707,7 +709,7 @@ impl ChatView {
             {
                 cached.mutate(|cell| {
                     if let ChatCell::ToolCall(block) = cell {
-                        block.settle_timer();
+                        block.discard_timer();
                     }
                 });
             }
@@ -1202,12 +1204,13 @@ mod tests {
         );
     }
 
-    /// Review finding on #108: `finish_bash_timers` (turn end) settles cards
-    /// whose result never arrived — an exact timer freezes at the value it
-    /// reached, a turn-anchored approximation is dropped. Without it a card
-    /// would keep a live-derived, growing value across later re-renders.
+    /// #108: `discard_pending_bash_timers` (turn end) drops the timer of a
+    /// card whose result never arrived — its completion instant is unknown,
+    /// so freezing "execution start → turn end" would render an upper bound
+    /// as an exact runtime. Without dropping, a live-derived value would also
+    /// keep growing across later re-renders.
     #[test]
-    fn test_finish_bash_timers_settles_pending_cards_at_turn_end() {
+    fn test_discard_pending_bash_timers_drops_timers_at_turn_end() {
         use crate::config::ThemePalette;
 
         let mut view = ChatView::new();
@@ -1234,34 +1237,19 @@ mod tests {
         };
         assert!(header(&view, "tc-exact").contains("/300s"));
 
-        view.finish_bash_timers();
+        view.discard_pending_bash_timers();
 
         let exact = header(&view, "tc-exact");
         assert!(
-            exact.contains("5s/300s") || exact.contains("6s/300s"),
-            "an exact timer freezes at the value it reached: {exact}"
+            !exact.contains("s/") && !exact.contains('≤'),
+            "no duration survives a result-less turn end: {exact}"
         );
-        // The live-derived value would have kept growing; the settled one
-        // must not move across a re-render.
-        view.cells
-            .iter_mut()
-            .find(|c| matches!(c.cell(), ChatCell::ToolCall(b) if b.tool_call_id == "tc-exact"))
-            .unwrap()
-            .mutate(|cell| {
-                if let ChatCell::ToolCall(block) = cell {
-                    block.started_at = Some(Instant::now() - Duration::from_secs(500));
-                }
-            });
-        assert_eq!(
-            header(&view, "tc-exact"),
-            exact,
-            "settling must capture the value, not recompute it"
-        );
+        assert!(exact.contains("sleep 1"), "card intact: {exact}");
 
         let turn = header(&view, "tc-turn");
         assert!(
             !turn.contains('≤'),
-            "a pending turn-anchored timer is dropped at turn end: {turn}"
+            "the turn-anchored timer is dropped too: {turn}"
         );
         assert!(turn.contains("sleep 100"), "card intact: {turn}");
     }

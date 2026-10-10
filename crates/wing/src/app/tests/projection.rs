@@ -319,6 +319,50 @@ fn test_live_bash_timer_keeps_frozen_timeout_pair_after_result() {
     );
 }
 
+/// #108: turn end (Done / Interrupted) drops the timer of a Bash card whose
+/// result never arrived — `finish_turn` → `discard_pending_bash_timers`
+/// wiring, the app-level counterpart of the `ChatView` unit test. The value
+/// at turn end is "execution start → turn end": the completion instant is
+/// unknown, so no duration may be displayed.
+#[test]
+fn test_turn_end_drops_bash_timer_without_result() {
+    let bash_call = |app: &mut App| {
+        app.handle_event(WingEvent::ToolCall {
+            tool_name: "Bash".into(),
+            tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
+            tool_call_id: "tc-no-result".into(),
+            meta: event_meta(),
+        });
+    };
+    let assert_dropped = |app: &App, when: &str| {
+        let header = tool_header(app, "tc-no-result");
+        assert!(
+            !header.contains("s/") && !header.contains('≤'),
+            "no timer survives {when}: {header}"
+        );
+        assert!(header.contains("sleep 100"), "card intact: {header}");
+    };
+
+    // Done: the turn finished while the result event never showed up.
+    let mut app = test_app();
+    bash_call(&mut app);
+    assert!(
+        tool_header(&app, "tc-no-result").contains("/300s"),
+        "the live timer is running before the turn ends"
+    );
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_dropped(&app, "Done");
+
+    // Interrupted: same wiring.
+    let mut app = test_app();
+    bash_call(&mut app);
+    app.handle_event(WingEvent::Interrupted {
+        dropped_request_ids: None,
+        meta: event_meta(),
+    });
+    assert_dropped(&app, "Interrupted");
+}
+
 #[test]
 fn test_sync_working_status_with_empty_projections_restores_working() {
     // The regression: the turn is in flight but nothing is finalized yet — the

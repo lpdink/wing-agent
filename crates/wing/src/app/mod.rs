@@ -455,9 +455,9 @@ impl App {
         self.refresh_copy_candidates();
         // 回合结束：还在计时的思考块就地定格（`深度思考中 4s` → `深度思考 4s`）。
         self.chat.finish_active_thinking(std::time::Instant::now());
-        // 同理，还没落结果的 Bash 卡就地收口计时器（精确的定格、近似 turn 锚定的丢弃）：
-        // 失去结果事件的卡否则会在之后的重渲染里继续增长（假超时，#108）。
-        self.chat.finish_bash_timers();
+        // 同理，还没落结果的 Bash 卡直接丢弃计时器：完成时刻不可知，任何数值都会
+        // 把「执行起点→回合结束」这个上界渲染成精确运行时长（#108 的假超时读法）。
+        self.chat.discard_pending_bash_timers();
         // Turn-end reconcile: install the full reference render for all
         // streaming cells (converges any incremental drift, frees stream
         // state). The actual render happens at the next draw, where the
