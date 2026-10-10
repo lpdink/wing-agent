@@ -428,17 +428,13 @@ class ContextManager:
         relink_tail: list[Message] = []
         prev_uuid: str | None = compact_node.uuid
         for msg in tail:
-            relinked = Message(
-                role=msg.role,
-                content=msg.content,
-                reasoning_content=msg.reasoning_content,
-                content_blocks=msg.content_blocks,
-                tool_calls=msg.tool_calls,
-                tool_call_id=msg.tool_call_id,
-                usage=msg.usage,
-                parent_uuid=prev_uuid,
+            # 整条复制（只换链坐标）：tail 是"未被压缩的保留区"，除
+            # uuid/parent_uuid 外的一切字段都是原消息的事实。手抄字段清单会
+            # 随 schema 漂移——`stop_reason` / `media` 就这样被静默丢掉过
+            # （截断审计在压缩后消失、图片引用从保留区消失）。
+            relinked = msg.model_copy(
+                update={"uuid": str(uuid.uuid4()), "parent_uuid": prev_uuid}
             )
-            relinked.uuid = str(uuid.uuid4())
             relink_tail.append(relinked)
             prev_uuid = relinked.uuid
 

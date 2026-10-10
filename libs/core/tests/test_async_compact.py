@@ -13,7 +13,7 @@ import pytest
 from wing.context import Compactor, ContextManager, PendingCompact
 from wing.chain import TrackedList
 from wing.store.file import FileMessageLog
-from wing.schema import ChainNode, LLMResponse, LLMUsage, Message
+from wing.schema import ChainNode, LLMResponse, LLMUsage, MediaRef, Message
 
 
 # ---------------------------------------------------------------------------
@@ -412,3 +412,62 @@ class TestDiscardOnMismatch:
         cm._discard_pending_compact()
         assert cm._pending_compact_result is None
         assert cm._pending_compact_task is None
+
+
+# ===================================================================
+# 7. Relink 保留区：整条事实跟随
+# ===================================================================
+
+
+class TestRelinkPreservesTailFacts:
+    """apply 只换保留区（tail）的链坐标——其余字段必须原样跟随。
+
+    手抄字段清单会随 schema 漂移：`stop_reason`（截断审计）与 `media`
+    （图片引用）就曾被静默丢掉。复制整条消息（`model_copy`）是唯一稳的口径。
+    """
+
+    @pytest.mark.asyncio
+    async def test_tail_message_facts_survive_apply(self, tmp_dir):
+        cm = _make_cm(
+            tmp_dir,
+            compactor=Compactor(context_window_tokens=10_000, keep_recent_tokens=1_000),
+        )
+        media = MediaRef(id="a" * 64, mime="image/png", bytes=3, width=1, height=1)
+        head_user = Message(role="user", content="alpha")
+        head_reply = Message(role="assistant", content="reply one")
+        tail_reply = Message(
+            role="assistant",
+            content="tail reply",
+            usage=LLMUsage(prompt_tokens=12, completion_tokens=7, stop_reason="length"),
+            stop_reason="length",
+            media=[media],
+        )
+        for message in (head_user, head_reply, tail_reply):
+            cm.add_message(message)
+
+        cm._pending_compact_result = PendingCompact(
+            compact_content="[Compact] summary",
+            start_uuid=head_user.uuid,  # ty: ignore[invalid-argument-type]
+            end_uuid=head_reply.uuid,  # ty: ignore[invalid-argument-type]
+        )
+        msgs = [node for node in cm._messages if isinstance(node, Message)]
+        end_idx = cm._verify_snapshot_valid(msgs)
+        assert end_idx == 1, [m.content for m in msgs]
+
+        cm._apply_pending_compact(msgs, end_idx)
+
+        # 活跃链 = 压缩节点 + 重链接的 tail（原记录仍在日志里，不在链上）。
+        active = [node for node in cm._messages if isinstance(node, Message)]
+        assert [message.content for message in active] == [
+            "[Compact] summary",
+            "tail reply",
+        ]
+        copy = active[-1]
+        assert copy.uuid != tail_reply.uuid
+        assert copy.role == "assistant"
+        assert copy.stop_reason == "length"
+        assert copy.usage is not None and copy.usage.completion_tokens == 7
+        assert copy.usage.stop_reason == "length"
+        assert copy.media is not None and copy.media[0].id == "a" * 64
+        # 链坐标：parent 指向压缩节点（tail 的第一条）。
+        assert copy.parent_uuid == active[0].uuid
