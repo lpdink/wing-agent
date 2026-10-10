@@ -7,12 +7,16 @@ pty 字节流里找它首次出现 → ``lag = 出现在终端 − Provider 发�
 
     uv run python scripts/demo/latency.py                      # 默认阶梯
     uv run python scripts/demo/latency.py --steps 3000,30000 --seconds 8
-    uv run python scripts/demo/latency.py --steps 3000 --emit-log /tmp/e.jsonl --keep
+    uv run python scripts/demo/latency.py --steps 3000 --json /tmp/lat.json
 
 怎么读：
 * ``p50/p99`` 是每个标记帧"从发射到画进终端"的时间；稳态下它不该随台阶上涨；
 * ``趋势`` = 后四分之一段的 p50 − 前四分之一段的 p50。持续为正 = 开始积压
   （上游 TCP 反压会一路传回 Provider，Provider 侧的时间戳也已经漂了）。
+
+``--json`` 只是给脚本/流水线加的一路**机器可读**输出（``{meta, measurements[]}``，与表格
+同源同口径，非有限值写作 ``null``）；不带它时行为与从前一字不差。perf 的 A/B 套件
+（``scripts/perf/suite_tui.py``）在进程内调用 :func:`run_rate`，不经过 CLI。
 
 与 `lag_marker.py`（fast-stream 时代的 CTE 工具）同源；这里接的是本仓库自己的
 `stream.py`（同一份语料、同一个 deadline 自校正发射器），所以 README 里引的性能
@@ -24,6 +28,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import pty
 import re
@@ -35,7 +40,9 @@ import sys
 import termios
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -55,6 +62,8 @@ REASON_CHARS = 0
 ANSI_RE = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]")
 #: 找到的标记占比低于这个值就认为这一档"样本不足"，不进结论。
 MIN_COVERAGE = 0.4
+#: ``resend_after`` 生效时，同一档最多补发几次 prompt（见 :func:`run_rate`）。
+RESEND_LIMIT = 3
 
 
 def cpu_seconds(pid: int) -> float:
@@ -138,16 +147,49 @@ class Provider:
 
 
 def run_rate(
-    rate: int, seconds: float, marker_every: int, keep: bool
+    rate: int,
+    seconds: float,
+    marker_every: int,
+    keep: bool,
+    *,
+    emit_path: Path | None = None,
+    resend_after: float | None = None,
 ) -> dict[str, float]:
-    """跑一个台阶：起 provider + 网关，PTY 里跑真 TUI，量标记的显示延迟。"""
+    """跑一个台阶：起 provider + 网关，PTY 里跑真 TUI，量标记的显示延迟。
+
+    ``emit_path`` 是 provider 每帧发射时刻 JSONL 的落点（``None`` = 既有的
+    ``/tmp/wing-latency-<rate>.jsonl``）；perf A/B 套件用它把中间产物隔离到自己的
+    scratch。返回值是这一档的 row（字段与表格列一一对应，时间单位是**秒**）。
+
+    ``resend_after``（可选，默认 ``None`` = 不补发，与从前一字不差）：首击后 N 秒
+    provider 还是**一帧都没发出来**（emit log 为空），就再送一次同一句 prompt，最多
+    ``RESEND_LIMIT`` 次。动机见 perf-ci 04 的 design.md：TUI 在启动期的终端查询阶段会
+    冲掉先到的按键，首击偶尔整个丢掉（网关侧证据：一次 ``routing 'go'`` 都没有），而
+    6s 档位经不起整档白测。守卫是"provider 零帧"这个**代理信号**（不是"prompt 未被消费"
+    的直接证据）：只要第一帧流出就立刻停止补发——实测"网关开始路由 → provider 首帧"
+    这一跳约 60ms，对 0.7s 的套件取值有 10x+ 余量；把阈值压到 10ms 时确实可能重复投递
+    （重复的消息只进会话 inbox，不形成第二个可见轮次，不污染被测指标）。
+    """
     reply_log: list[bytes] = []
     #: 待答的终端查询：``[应答时刻, 排队时的输出字节数, 已试次数]``。
     #: crossterm 读光标位置前会冲掉已到达的输入 —— 回包抢在它冲之前就白给，
     #: 应用会卡满 2s 超时（TUI 日志里那条 `cursor position could not be read`）。
     #: 所以"没人继续画"就补发，看到输出增长就撤掉。
     pending: list[list[float]] = []
-    emit = Path("/tmp") / f"wing-latency-{rate}.jsonl"
+    emit = (
+        emit_path
+        if emit_path is not None
+        else Path("/tmp") / f"wing-latency-{rate}.jsonl"
+    )
+    emit.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit_idle() -> bool:
+        """provider 还没发过任何一帧（emit log 为空）；读不到就当"非空"（不补发）。"""
+        try:
+            return emit.stat().st_size == 0
+        except OSError:
+            return False
+
     provider = Provider(rate, emit, marker_every)
     try:
         env = dict(os.environ)
@@ -173,6 +215,7 @@ def run_rate(
         started = time.perf_counter()
         typed = False
         typed_at = 0.0
+        resends = 0
         total_bytes = 0
         cpu_start = cpu_at = float("nan")
         # 滚动窗口：等 TUI 真的画出首屏（欢迎屏上的提示行）再送 prompt。固定 sleep
@@ -216,6 +259,17 @@ def run_rate(
                 if not typed and (b"Esc " in recent or elapsed > 8.0):
                     os.write(fd, b"go\r")
                     typed = True
+                    typed_at = time.perf_counter()
+                    cpu_start = cpu_seconds(pid)
+                if (
+                    resend_after is not None
+                    and typed
+                    and resends < RESEND_LIMIT
+                    and time.perf_counter() - typed_at > resend_after
+                    and emit_idle()
+                ):
+                    os.write(fd, b"go\r")
+                    resends += 1
                     typed_at = time.perf_counter()
                     cpu_start = cpu_seconds(pid)
                 if typed and cpu_start == cpu_start:
@@ -309,7 +363,48 @@ def run_rate(
         "trend": (pct(lag[-quarter:], 0.5) - pct(lag[:quarter], 0.5))
         if lag
         else float("nan"),
+        #: 首击被启动期吃掉时的补发次数（``resend_after`` 为 None 时恒 0）——
+        #: 表格不显示；它进 --json 与 suite 的 meta，是"这一档为什么起得晚"的证据。
+        "resends": resends,
     }
+
+
+def json_ready(value: Any) -> Any:
+    """JSON 化一个 row 字段：非有限的浮点写作 ``None``（NaN/Infinity 不是合法 JSON）。
+
+    表格里 NaN 显示成 ``nanm``、JSON 里显示成 ``null`` —— 同一个事实的两种表达。
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def write_json_report(
+    path: Path,
+    rows: Sequence[Mapping[str, float]],
+    *,
+    seconds: float,
+    marker_every: int,
+    steps: Sequence[int],
+) -> None:
+    """把每次测量的 row 与 meta 原子写成 JSON（``--json``；不影响 stdout 的表格）。"""
+    payload = {
+        "meta": {
+            "seconds": seconds,
+            "marker_every": marker_every,
+            "steps": list(steps),
+            "wing_bin": str(wing_bin()),
+        },
+        "measurements": [
+            {key: json_ready(value) for key, value in row.items()} for row in rows
+        ],
+    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    tmp = path.with_name(path.name + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    print(f"[latency] wrote {path}", file=sys.stderr)
 
 
 def main() -> int:
@@ -324,15 +419,22 @@ def main() -> int:
         "--marker-every", type=int, default=400, help="每 N 帧插一个标记"
     )
     parser.add_argument("--keep", action="store_true", help="保留各台阶的 emit log")
+    parser.add_argument(
+        "--json",
+        help=("把每次测量的行数据与 meta 写成 JSON（与表格同口径，非有限值写 null）"),
+    )
     args = parser.parse_args()
 
+    steps = [int(x) for x in args.steps.split(",")]
     print(f"标记每 {args.marker_every} 帧一行；lag = 标记出现在终端 − Provider 发射")
     print(
         f"{'帧/s':>9}{'标记':>7}{'命中率':>8}{'min':>9}{'p50':>9}{'p99':>9}{'max':>9}"
         f"{'趋势':>9}{'TUI CPU':>9}   判定"
     )
-    for step in (int(x) for x in args.steps.split(",")):
+    rows: list[dict[str, float]] = []
+    for step in steps:
         row = run_rate(step, args.seconds, args.marker_every, args.keep)
+        rows.append(row)
         verdict = "跟得上"
         if row["coverage"] < MIN_COVERAGE:
             # 命中率低说明多数标记行在两次绘制之间就被滚过去了（高速下的常态），
@@ -352,6 +454,14 @@ def main() -> int:
             f"{row['p99'] * 1000:>8.1f}m{row['max'] * 1000:>8.1f}m"
             f"{row['trend'] * 1000:>+8.1f}m{row['cpu']:>8.0f}%   {verdict}",
             flush=True,
+        )
+    if args.json:
+        write_json_report(
+            Path(args.json),
+            rows,
+            seconds=args.seconds,
+            marker_every=args.marker_every,
+            steps=steps,
         )
     return 0
 
