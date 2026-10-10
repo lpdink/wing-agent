@@ -25,7 +25,9 @@ use tokio::net::{TcpListener, TcpStream};
 const SESSION_ID: &str = "20261010-074437-440e10fb";
 
 /// The history served by the fake gateway: one row per element, each carrying
-/// a sentinel that only that element renders.
+/// a sentinel that only that element renders — plus a `system` row, the shape
+/// no element owns (the backend writes it as the `[rewind_to_root]` sentinel
+/// after a rewind to the root).
 ///
 /// The shape mirrors the Message projection (`serialize_message`), including
 /// the `reasoning_content` the reported session had — the leak the user saw
@@ -47,6 +49,7 @@ fn history() -> serde_json::Value {
             "content": "RESULT-BODY"
         },
         {"role": "user", "uuid": "u-user-2", "content": "USER-TEXT-2"},
+        {"role": "system", "uuid": "u-sys", "content": "SYS-MARKER"},
     ])
 }
 
@@ -206,7 +209,14 @@ async fn tail_user_content_prints_only_the_text_elements() {
     for expected in ["USER-TEXT", "ANSWER"] {
         assert!(stdout.contains(expected), "{expected} missing:\n{stdout}");
     }
-    for leaked in ["REASONING", "→ [call-1]", "← call-1", "RESULT-BODY"] {
+    for leaked in [
+        "REASONING",
+        "→ [call-1]",
+        "← call-1",
+        "RESULT-BODY",
+        // A `system` row owns no element, so no element filter selects it.
+        "SYS-MARKER",
+    ] {
         assert!(!stdout.contains(leaked), "{leaked} leaked:\n{stdout}");
     }
     // Both user rows are selected; the assistant row yields its text only.
@@ -227,6 +237,9 @@ async fn tail_user_content_prints_only_the_text_elements() {
         "ANSWER",
         "→ [call-1]",
         "RESULT-BODY",
+        // `all` is unfiltered: the system row's text renders here and only
+        // here (the pre-element renderer printed it too).
+        "SYS-MARKER",
     ] {
         assert!(
             all.contains(sentinel),
@@ -263,6 +276,7 @@ async fn tail_user_content_json_carries_the_same_elements() {
     assert!(!stdout.contains("\"role\""), "{stdout}");
     assert!(!stdout.contains("REASONING"), "{stdout}");
     assert!(!stdout.contains("tool_calls"), "{stdout}");
+    assert!(!stdout.contains("SYS-MARKER"), "{stdout}");
 
     // `--json --filter all` stays byte-compatible with the raw messages (the
     // documented exception: `all` is "no filter", so nothing is stripped).
@@ -315,6 +329,29 @@ async fn head_and_tail_slice_the_same_selection() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The default path: no `--filter` at all must equal `--filter all` (clap
+/// supplies the default, so the union semantics cannot turn the plain command
+/// into a usage error or into an empty selection).
+#[tokio::test]
+async fn the_default_filter_is_all() {
+    let home = start_gateway("default-filter").await;
+
+    let (code, default, stderr) = run_wing(&["tail", SESSION_ID], &home).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, explicit, stderr) = run_wing(&["tail", SESSION_ID, "--filter", "all"], &home).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(default, explicit, "default filter must be `all`");
+
+    let (code, default, stderr) = run_wing(&["head", SESSION_ID, "-n", "2"], &home).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, explicit, stderr) =
+        run_wing(&["head", SESSION_ID, "-n", "2", "-t", "all"], &home).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(default, explicit, "head shares the default");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The closed vocabulary: a value outside it is rejected by the process
 /// (exit 2 + the valid names on stderr) instead of quietly printing the
 /// unfiltered view.
@@ -343,6 +380,12 @@ async fn unknown_filter_value_is_rejected_before_any_request() {
     let (code, _, stderr) = run_wing(&["tail", SESSION_ID, "--filter", "user,"], &home).await;
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("--filter"), "{stderr}");
+    // The wording is clap's own for an empty value — pinned so a change to it
+    // is a deliberate act, not a silent one.
+    assert!(
+        stderr.contains("a value is required for '--filter <FILTER>'"),
+        "{stderr}"
+    );
 
     // `head` shares the vocabulary (one definition, two commands).
     let (code, _, stderr) = run_wing(&["head", SESSION_ID, "-t", "bogus"], &home).await;

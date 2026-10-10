@@ -136,7 +136,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 - `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
-- `wing tail|head <sid> -n N -t <type>`：消息窗口（类 Unix head/tail；平铺元素模型——按 user/assistant/tool_call/tool_result/reasoning/content 选取元素并在输出侧剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload））；
+- `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
 - `wing models|tools|agents`：系统查询；`wing start|stop|status`：网关守护进程生命周期（默认的 TUI / stdio 启动路径会自动拉起网关）。
 
 ## 远程工具（PR #47 / #50）

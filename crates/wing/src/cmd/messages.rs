@@ -51,8 +51,11 @@
 //! - `tool_result` is every tool message: an empty result is still a result.
 //!
 //! `all` is the universe: a list containing it is unfiltered (`all,user` ≡
-//! `all`), and a payload that does not decode into a Message projection
-//! carries no element, so it stays reachable through `all` only.
+//! `all`), and it is the only filter that shows a payload that does not decode
+//! into a Message projection (such a payload carries no element), or the text
+//! of a row whose role no element owns — a system node, e.g. the
+//! `[rewind_to_root]` sentinel a rewind to the root leaves as the chain's only
+//! node. Element filters select rows by what they carry and never reach those.
 //!
 //! Tool results print as a **500-char peek** in text mode — that is the
 //! tool-result element's single text rendering; `--json` carries the stored
@@ -110,10 +113,11 @@ pub enum FilterArg {
 
 /// One selectable element of the log — the unit `--filter` selects.
 ///
-/// Declaration order is the canonical render order (which is also the order
-/// the section checks, the body lines and the `--json` keys come out in). A
-/// message owns the elements of its role only, so the two text elements never
-/// both apply to one row.
+/// Declaration order is the canonical order: every output walks the selection
+/// in it, so one filter always yields the same sequence. (`--json` object *key*
+/// order is whatever map the serializer keeps — semantic equality is the
+/// contract, not byte layout.) A message owns the elements of its role only,
+/// so the two text elements never both apply to one row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Element {
     /// User-message text (`user`).
@@ -173,12 +177,20 @@ impl Element {
         }
     }
 
+    /// Whether the vocabulary owns `role` at all: a row of another role (a
+    /// system node) carries no element, whatever it holds.
+    fn owns_role(role: &str) -> bool {
+        Self::ALL.iter().any(|element| element.owner_role() == role)
+    }
+
     /// Whether `msg` carries this element (row selection + text rendering).
     ///
     /// The one definition of element membership: the owning role, plus the
-    /// element's own presence rule. Text elements need non-empty text (a
-    /// tool-only message has no narration to strip, and empty reasoning is not
-    /// reasoning); a tool result is its message, empty or not.
+    /// element's own presence rule. User text and tool results *are* their
+    /// message (the projection always emits a `content` key, so an empty user
+    /// message is still a user message), while reasoning and assistant text
+    /// need non-empty text — a tool-only message has no narration to strip,
+    /// and empty reasoning is not reasoning.
     fn carried_by(self, msg: &SessionMessage) -> bool {
         if msg.role != self.owner_role() {
             return false;
@@ -210,7 +222,7 @@ impl Element {
 /// A set of selected elements.
 ///
 /// Iteration follows [`Element::ALL`] (declaration order), which is what keeps
-/// body lines and `--json` keys in a stable, canonical order.
+/// the body lines in a stable, canonical order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Selection(u8);
 
@@ -445,8 +457,7 @@ fn filter_messages(rows: &[HistoryRow], filter: Filter) -> Vec<&HistoryRow> {
         .collect()
 }
 
-/// Body lines of one message under a filter's element selection
-/// (header/separator excluded).
+/// Body lines of one message under a filter (header/separator excluded).
 ///
 /// The selected elements are walked in canonical order and each element the
 /// message carries renders exactly once — so a section the caller did not
@@ -454,10 +465,18 @@ fn filter_messages(rows: &[HistoryRow], filter: Filter) -> Vec<&HistoryRow> {
 /// message carries no assistant text: its `content` *is* the tool result, so
 /// only the tool-result element renders it (rendering it as text as well
 /// printed every tool result twice in the default `all` view).
-fn message_body_lines(msg: &SessionMessage, selection: Selection) -> Vec<String> {
+///
+/// `all` is "no filter" rather than merely the union of the vocabulary, so it
+/// also shows the text of a row whose role owns no element at all: a system
+/// node — the `[rewind_to_root]` sentinel a rewind to the root leaves as the
+/// only node on the chain is one — carries text no filter name selects.
+/// Element filters never reach it (such a row carries no element, so it is
+/// never selected); a selected row rendering nothing would be the silent
+/// content loss this module exists to prevent.
+fn message_body_lines(msg: &SessionMessage, filter: Filter) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    for element in selection.iter() {
+    for element in filter.elements().iter() {
         if !element.carried_by(msg) {
             continue;
         }
@@ -489,6 +508,12 @@ fn message_body_lines(msg: &SessionMessage, selection: Selection) -> Vec<String>
                 lines.push(format!("  {display}"));
             }
         }
+    }
+
+    // See the doc comment: `all` renders the text of a row the vocabulary does
+    // not describe (no element owns its role), which no element filter selects.
+    if matches!(filter, Filter::All) && !Element::owns_role(&msg.role) {
+        push_paragraph(&mut lines, &msg.content);
     }
 
     lines
@@ -611,12 +636,11 @@ fn print_messages(rows: &[&HistoryRow], filter: Filter) {
         return;
     }
 
-    let selection = filter.elements();
     for row in rows {
         println!("─────────────────────────────────────────────");
         println!("{}", header_line(row));
         if let Some(msg) = &row.view {
-            for line in message_body_lines(msg, selection) {
+            for line in message_body_lines(msg, filter) {
                 println!("{line}");
             }
         }
@@ -792,8 +816,9 @@ mod tests {
         assert!(filter_messages(&msgs, filter("reasoning")).is_empty());
         let msg = decoded(foreign);
         assert!(!Element::Reasoning.carried_by(&msg));
+        // `all` still shows the row's own text (user text is an element).
         assert!(
-            message_body_lines(&msg, Selection::ALL)
+            message_body_lines(&msg, filter("all"))
                 .join("\n")
                 .contains("hi")
         );
@@ -956,16 +981,96 @@ mod tests {
 
     /// Every rendered line of the selected rows (headers included — they are
     /// part of what the command prints).
-    fn render(rows: &[&HistoryRow], selection: Selection) -> String {
+    fn render(rows: &[&HistoryRow], filter: Filter) -> String {
         rows.iter()
             .flat_map(|row| {
                 std::iter::once(header_line(row)).chain(match &row.view {
-                    Some(msg) => message_body_lines(msg, selection),
+                    Some(msg) => message_body_lines(msg, filter),
                     None => Vec::new(),
                 })
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn all_renders_the_text_of_a_row_no_element_owns() {
+        // `all` is "no filter", not just the union of the vocabulary. A row
+        // whose role no element owns carries text that no filter name selects
+        // — the `[rewind_to_root]` sentinel (`role: "system"`, the only node
+        // left on the chain after a rewind to the root) is the one the backend
+        // really writes. Rendering nothing for a selected row is the silent
+        // content loss this module exists to prevent: the pre-element renderer
+        // printed that text, and `--json` (raw payloads) still does.
+        let rows = rows(vec![json!({
+            "role": "system",
+            "uuid": "u-sys",
+            "content": "[rewind_to_root]"
+        })]);
+        let selected = filter_messages(&rows, filter("all"));
+        assert_eq!(selected.len(), 1);
+        assert!(render(&selected, filter("all")).contains("[rewind_to_root]"));
+
+        // A role-less (but decodable) payload is the same case: no element
+        // owns its text either.
+        let anonymous = decoded(json!({"content": "role-less"}));
+        assert!(
+            message_body_lines(&anonymous, filter("all"))
+                .join("\n")
+                .contains("role-less")
+        );
+
+        // Element filters never select such a row — it carries no element, so
+        // none of them renders its text (which is why the fallback cannot
+        // widen a filtered view). The row reaches the renderer only through
+        // `all`, and there the fallback is its last section.
+        let sentinel = decoded(json!({
+            "role": "system",
+            "uuid": "u-sys",
+            "content": "[rewind_to_root]"
+        }));
+        for raw in [
+            "user",
+            "assistant",
+            "reasoning",
+            "content",
+            "tool_call",
+            "tool_result",
+            "user,content",
+            "assistant,tool_result",
+        ] {
+            assert!(
+                message_body_lines(&sentinel, filter(raw)).is_empty(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_no_element_owns_is_selected_by_all_only() {
+        let rows = rows(vec![
+            json!({"role": "system", "uuid": "u-sys", "content": "[rewind_to_root]"}),
+            json!({"role": "user", "uuid": "u-user", "content": "USER-TEXT"}),
+        ]);
+        assert_eq!(filter_messages(&rows, filter("all")).len(), 2);
+        assert_eq!(filter_messages(&rows, filter("user,content")).len(), 1);
+
+        // `--json`: raw payload under `all`, and nothing to strip from the
+        // element filters (the row is not selected at all).
+        assert_eq!(
+            json_payload(&filter_messages(&rows, filter("all")), filter("all")),
+            vec![
+                json!({"role": "system", "uuid": "u-sys", "content": "[rewind_to_root]"}),
+                json!({"role": "user", "uuid": "u-user", "content": "USER-TEXT"}),
+            ]
+        );
+        assert_eq!(
+            json_payload(
+                &filter_messages(&rows, filter("user,content")),
+                filter("user,content")
+            ),
+            vec![json!({"uuid": "u-user", "content": "USER-TEXT"})]
+        );
     }
 
     #[test]
@@ -1008,7 +1113,7 @@ mod tests {
             let selected = filter_messages(&rows, parsed);
             assert_eq!(selected.len(), *count, "{raw}: selected rows");
 
-            let text = render(&selected, parsed.elements());
+            let text = render(&selected, parsed);
             let json = serde_json::to_string(&json_payload(&selected, parsed)).unwrap();
             for (index, (text_sentinel, json_sentinel)) in SENTINELS.iter().enumerate() {
                 let want = present[index];
@@ -1038,7 +1143,7 @@ mod tests {
         let selected = filter_messages(&rows, parsed);
         assert_eq!(selected.len(), 2, "只该剩 user 文本与 assistant 文本两条");
 
-        let text = render(&selected, parsed.elements());
+        let text = render(&selected, parsed);
         assert!(text.contains("USER-TEXT"), "{text}");
         assert!(text.contains("ANSWER"), "{text}");
         for leaked in ["REASONING", "→ [call-1]", "← call-1", "RESULT-BODY"] {
@@ -1105,7 +1210,7 @@ mod tests {
         for (raw, value, expected) in cases {
             let parsed = filter(raw);
             let msg = decoded(value.clone());
-            let text = message_body_lines(&msg, parsed.elements()).join("\n");
+            let text = message_body_lines(&msg, parsed).join("\n");
             let record = element_record(&msg, parsed.elements()).to_string();
             assert!(!record.contains("\"role\""), "{raw}: {record}");
             for sentinel in sentinels {
@@ -1131,7 +1236,7 @@ mod tests {
         // Regression: `--filter content` used to print reasoning too, because
         // the filter only selected messages while print_messages rendered
         // every section.
-        let lines = message_body_lines(&decoded(assistant_msg()), filter("content").elements());
+        let lines = message_body_lines(&decoded(assistant_msg()), filter("content"));
         let joined = lines.join("\n");
         assert!(joined.contains("the answer"));
         assert!(!joined.contains("thinking hard"));
@@ -1140,7 +1245,7 @@ mod tests {
 
     #[test]
     fn body_lines_reasoning_only() {
-        let lines = message_body_lines(&decoded(assistant_msg()), filter("reasoning").elements());
+        let lines = message_body_lines(&decoded(assistant_msg()), filter("reasoning"));
         let joined = lines.join("\n");
         assert!(joined.contains("thinking hard"));
         assert!(!joined.contains("the answer"));
@@ -1149,7 +1254,7 @@ mod tests {
 
     #[test]
     fn body_lines_tool_call_only() {
-        let lines = message_body_lines(&decoded(assistant_msg()), filter("tool_call").elements());
+        let lines = message_body_lines(&decoded(assistant_msg()), filter("tool_call"));
         let joined = lines.join("\n");
         assert!(joined.contains("→ [tc_bash] bash"));
         assert!(!joined.contains("thinking hard"));
@@ -1158,10 +1263,7 @@ mod tests {
 
     #[test]
     fn body_lines_tool_result_only() {
-        let lines = message_body_lines(
-            &decoded(tool_result_msg()),
-            filter("tool_result").elements(),
-        );
+        let lines = message_body_lines(&decoded(tool_result_msg()), filter("tool_result"));
         let joined = lines.join("\n");
         assert!(joined.contains("← tc1"));
         assert!(joined.contains("file-a"));
@@ -1174,7 +1276,7 @@ mod tests {
         // result. A tool message has no assistant text: its content *is* the
         // result, so the result element is its only renderer.
         let msg = decoded(tool_result_msg());
-        let all = message_body_lines(&msg, Selection::ALL);
+        let all = message_body_lines(&msg, filter("all"));
         let joined = all.join("\n");
         assert_eq!(
             joined.matches("file-a").count(),
@@ -1185,10 +1287,7 @@ mod tests {
         assert!(joined.contains("← tc1"), "{joined}");
         // Byte-identical to the dedicated `--filter tool_result` view: one
         // rendering definition per element, no extra copy smuggled into `all`.
-        assert_eq!(
-            all,
-            message_body_lines(&msg, filter("tool_result").elements())
-        );
+        assert_eq!(all, message_body_lines(&msg, filter("tool_result")));
     }
 
     #[test]
@@ -1206,7 +1305,7 @@ mod tests {
             "tool_call_id": "tc1",
             "content": long,
         }));
-        let lines = message_body_lines(&msg, Selection::ALL);
+        let lines = message_body_lines(&msg, filter("all"));
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(!lines.join("\n").contains(&long), "no untruncated copy");
         assert!(lines[2].ends_with("..."), "{:?}", lines[2]);
@@ -1221,7 +1320,8 @@ mod tests {
         // selects assistant messages and so never reaches a tool row.
         let msg = decoded(tool_result_msg());
         for element in Element::ALL {
-            let joined = message_body_lines(&msg, selection(&[element])).join("\n");
+            let joined =
+                message_body_lines(&msg, Filter::Elements(selection(&[element]))).join("\n");
             let renders_result = matches!(element, Element::ToolResult);
             assert_eq!(
                 joined.matches("file-a").count(),
@@ -1233,7 +1333,7 @@ mod tests {
 
     #[test]
     fn body_lines_all_renders_every_section() {
-        let lines = message_body_lines(&decoded(assistant_msg()), Selection::ALL);
+        let lines = message_body_lines(&decoded(assistant_msg()), filter("all"));
         let joined = lines.join("\n");
         assert!(joined.contains("thinking hard"));
         assert!(joined.contains("the answer"));
@@ -1252,9 +1352,7 @@ mod tests {
             "role": "assistant",
             "tool_calls": [{"id": "a", "name": "Bash", "arguments": null}]
         }));
-        let lines = |msg: &SessionMessage| {
-            message_body_lines(msg, filter("tool_call").elements()).join("\n")
-        };
+        let lines = |msg: &SessionMessage| message_body_lines(msg, filter("tool_call")).join("\n");
         assert!(
             lines(&absent).contains("→ [a] Bash()"),
             "{}",
@@ -1283,7 +1381,7 @@ mod tests {
         let msg = decoded(json!({"role": "assistant"}));
         assert_eq!(msg.content, "");
         assert!(!msg.has_tool_calls());
-        assert!(message_body_lines(&msg, Selection::ALL).is_empty());
+        assert!(message_body_lines(&msg, filter("all")).is_empty());
     }
 
     // ── element_record / json_payload: machine output filters too ──
