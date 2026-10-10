@@ -42,9 +42,9 @@ FAILURE_MARKER = "Permission denied"
 @pytest.mark.asyncio
 async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
     """落盘整体失败 → error 收口 + 会话 idle；恢复后投递仍被消费。"""
-    if os.geteuid() == 0:
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
         pytest.skip(
-            "root 无视文件权限位：本场景靠去掉 history.jsonl 的写权限注入落盘失败"
+            "root / 无权限位的平台：本场景靠去掉 history.jsonl 的写权限注入落盘失败"
         )
 
     probe.register(
@@ -80,7 +80,12 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
         assert event.data["subtype"] == "error_during_execution", event.data
         assert event.data["is_error"] is True, event.data
         assert FAILURE_MARKER in event.data["errors"][-1], event.data
-        session.watch.assert_ordered(["error", "done"], since=cursor)
+        # 尾部两帧要**等**到（expect 命中 turn_result 即返回，error / done 还在
+        # 后续读循环里）；`assert_ordered` 是同步扫描、不等待，直接扫会读到
+        # "还没到"的时间线（无 uvloop 的合帧节奏下必红）。等齐再验相对顺序。
+        await session.watch.expect("error", within=30)
+        await session.watch.expect("done", within=30)
+        session.watch.assert_ordered(["turn_result", "error", "done"], since=cursor)
 
         # ② 状态复位：不是一个卡住的会话——下一次投递可以干净地用上它。
         info = await session.info()

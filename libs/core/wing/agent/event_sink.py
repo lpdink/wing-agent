@@ -152,6 +152,11 @@ class AgentEventSink:
             self._prepare(event)
         except Exception:
             log.exception(f"事件上报定型失败（已降级）：type={type(event).__name__}")
+            # 定型失败仍要尽力广播（报告不得丢），但不能落进 EventBus 对
+            # `target=None` 的 global 兜底——一条 session 定向的收尾不该发给
+            # 所有 client：补最小定向。
+            if event.target is None:
+                event.target = EventTarget(scope="session")
         emit_best_effort(event, self._append_event)
 
     def _prepare(self, event: WingEvent) -> None:
