@@ -317,6 +317,10 @@ class Failure:
 
 # ── 阈值与判定（契约 §4/§8） ───────────────────────────────────
 
+#: 轮间极差 / 中位数超过它 → 该指标的"逐轮漂移大"（判定仅供参考）。
+#: ab 用它产聚合 note、report 用它给逐轮原始值折叠块加 ⚠️ —— 两边共用一个数。
+ROUND_SPREAD_NOTE_PCT = 30.0
+
 
 @dataclass(frozen=True)
 class Thresholds:

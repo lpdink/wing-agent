@@ -98,3 +98,11 @@ git -C <repo> worktree remove --force target/perf/base && rm -rf target/perf
   `gateway.context.build_p99_ms`。
 - 另有一条通用守卫：`base_median <= 0` 的指标一律 n/a（Δ% 在非正基准上没有方向含义）。
 - 改带宽要**同时改** `ab.py` selftest 里的钉值表（`thresholds.file …` 循环），否则红灯。
+
+## 评论里有什么（透明度）
+
+主表之后是一个 `<details>` 折叠的 **`逐轮原始值`**：每个指标的每轮代表值（`base`/`head`
+各三格）。comparison 里的 `stability_pct` = 两侧**轮间极差/中位数**的较大者；任一侧超过
+`30%`（`common.ROUND_SPREAD_NOTE_PCT`）时评论顶部会出现「逐轮漂移大（判定仅供参考）」并点名
+（top 5 + 计数），折叠块标题也会带 ⚠️ 计数。**这只是透明度：verdict、退出码、带宽都不动。**
+真实案例（同 rev 的 +43.7% 伪回归）见 [docs/dev/perf-testing.md §6](../../docs/dev/perf-testing.md)。

@@ -3,7 +3,8 @@
 
 由 03 的 report job 调用：`--json <tui.json> <gateway.json>` 合并多个测量 job 的
 产物后渲染成**一条**评论；`comment.py` 按首行的 `<!-- wing-perf -->` marker
-查找并更新同一条。
+查找并更新同一条。表格之后依次是 `<details>` 折叠的**逐轮原始值**（每指标每侧的各轮
+代表值；任一侧轮间漂移大时标题带 ⚠️）与套件失败区块。
 
     uv run python scripts/perf/report.py --json target/perf/ab.json --out-md /tmp/comment.md
 """
@@ -21,6 +22,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from common import (  # noqa: E402  (同目录模块：脚本直接跑时 sys.path 已含 HERE)
+    ROUND_SPREAD_NOTE_PCT,
     CommandError,
     Thresholds,
     metric_unit,
@@ -159,6 +161,7 @@ def render_comment(
 
     lines += [_conclusion_line(comparisons, failures), ""]
     lines += _table(comparisons)
+    lines += _rounds_block(comparisons)
     lines += _failure_section(failures)
     lines += _footnote(report, comparisons, run_url)
 
@@ -242,6 +245,53 @@ def _table(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
             for entry in unjudged
         ]
         lines += ["未判定：" + "；".join(reasons), ""]
+    return lines
+
+
+def _series(values: Any, unit: str) -> str:
+    """逐轮值一格：`12,947 / 11,401 / 12,610 µs`（单位只在末尾出现一次）。
+
+    缺数据（该侧一轮都没有 / 值非有限）→ `—`。单位来自 metric id（`_ratio` 无量纲）。
+    """
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return "—"
+    numbers = [_number(value) for value in values]
+    if not numbers or any(number is None for number in numbers):
+        return "—"
+    text = " / ".join(fmt_value(number) for number in numbers)
+    return f"{text} {unit}".strip() if unit else text
+
+
+def _rounds_block(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
+    """逐轮原始值（折叠）：每指标一行，两侧各列出本侧每轮的代表值。
+
+    单轮运行没什么可看的（没有轮间信息），不渲染。漂移大的指标额外在标题上点出来 ——
+    表格里的中位数已经把每轮的值压扁了，这一块才是判读"Δ 是不是噪声"的第一现场。
+    """
+    rounds = max((len(entry.get("base") or []) for entry in comparisons), default=0)
+    if not comparisons or rounds < 2:
+        return []
+    drifted = [
+        entry
+        for entry in comparisons
+        if (_number(entry.get("stability_pct")) or 0.0) > ROUND_SPREAD_NOTE_PCT
+    ]
+    title = "逐轮原始值"
+    if drifted:
+        title += f"（⚠️ {len(drifted)} 个指标轮间漂移 > {ROUND_SPREAD_NOTE_PCT:.0f}%）"
+    lines = [
+        f"<details><summary>{title}</summary>",
+        "",
+        "| 指标 | base | head |",
+        "|---|---:|---:|",
+    ]
+    for entry in comparisons:
+        unit = metric_unit(str(entry.get("metric", "")))
+        lines.append(
+            f"| `{entry.get('metric')}` | {_series(entry.get('base'), unit)} "
+            f"| {_series(entry.get('head'), unit)} |"
+        )
+    lines += ["", "</details>", ""]
     return lines
 
 

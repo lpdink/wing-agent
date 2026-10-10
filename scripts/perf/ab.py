@@ -15,10 +15,13 @@ report JSON（交给 `report.py` 渲染成 PR 评论）。
 原始单次结果落 `<workdir>/raw/<suite>-<side>-r<round>.json`，子进程日志落
 `<workdir>/raw/logs/`；suite 失败只记 `failures[]`（退出码非 0，CI 视为基础设施故障），
 其余测量继续；suite 侧写在 raw 里的 `meta.notes` 会带上 `<suite>/<side> r<round>` 标注
-汇总进报告的 `meta.notes`（不吞不截断）。rust 的两个质量信号在这里被消费：**载荷指纹**
-两侧都采到且不一致 → 该 suite 的指标判 n/a（比的可能不是同一份载荷）；**criterion CI
-宽度** > 10% → 加一条提示 note（只提示样本抖动，不改判档）。契约（§Frozen Interfaces）
-见 perf-ci 任务书；设计与取舍见 01 harness_core 与 08 ci_calibration 步骤的 `design.md`。
+汇总进报告的 `meta.notes`（不吞不截断）。每个 comparison 另带 `stability_pct`（两侧
+轮间极差/中位数的较大者）：漂移 > `ROUND_SPREAD_NOTE_PCT` 的指标会得到一条聚合 note
+（"判定仅供参考"），报告据此渲染逐轮原始值折叠块——**只加透明度，不动判定**。
+rust 的两个质量信号在这里被消费：**载荷指纹**两侧都采到且不一致 → 该 suite 的指标判
+n/a（比的可能不是同一份载荷）；**criterion CI 宽度** > 10% → 加一条提示 note（只提示
+样本抖动，不改判档）。契约（§Frozen Interfaces）见 perf-ci 任务书；设计与取舍见
+01 harness_core 与 08 ci_calibration 步骤的 `design.md`。
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ if str(HERE) not in sys.path:
 
 import report as report_render  # noqa: E402  (同目录模块)
 from common import (  # noqa: E402
+    ROUND_SPREAD_NOTE_PCT,
     CommandError,
     CommandResult,
     Failure,
@@ -499,6 +503,20 @@ def _fmt_number(value: float) -> str:
     return f"{value:g}"
 
 
+def round_spread_pct(values: Sequence[float]) -> float | None:
+    """轮间极差 / 中位数（%）：轮与轮之间漂了多少。
+
+    单一轮次（看不出漂移）或中位数为 0（比值无定义）→ None。这是**透明度**信号，不参与
+    判定：轮间漂移大时中位数仍照报，只是提醒"这个数别当结论"。
+    """
+    if len(values) < 2:
+        return None
+    center = median(values)
+    if center == 0:
+        return None
+    return round(100.0 * (max(values) - min(values)) / abs(center), 3)
+
+
 def _config_of(result: SuiteResult) -> Mapping[str, Any]:
     config = result.meta.get("config")
     return config if isinstance(config, Mapping) else {}
@@ -575,9 +593,9 @@ def ci_width_notes(results: Sequence[SuiteResult]) -> list[str]:
     shown = "、".join(
         f"{metric} {value:.1f}%" for metric, value in ordered[:CI_WIDTH_NOTE_LIMIT]
     )
-    more = f"（共 {len(ordered)} 项）" if len(ordered) > CI_WIDTH_NOTE_LIMIT else ""
+    more = f"，共 {len(ordered)} 项" if len(ordered) > CI_WIDTH_NOTE_LIMIT else ""
     return [
-        f"criterion 置信区间偏宽（> {CI_WIDTH_WARN_PCT:.0f}%{more}）：{shown}"
+        f"criterion 置信区间偏宽（> {CI_WIDTH_WARN_PCT:.0f}%）：{shown}{more}"
         " —— 只提示样本抖动，不改判档"
     ]
 
@@ -593,7 +611,6 @@ def build_comparisons(
             f"{suite}: 两侧载荷指纹不一致（bench 载荷生成器被改过？该 suite 的指标不可比）"
             f"：{detail}"
         )
-    notes.extend(ci_width_notes(results))
     table: dict[str, dict[str, dict[int, float]]] = {}
     suites: dict[str, str] = {}
     for result in results:
@@ -621,15 +638,27 @@ def build_comparisons(
         noise, regress = thresholds.for_metric(metric, suite)
         medians: dict[str, float | None] = {}
         entry: dict[str, Any] = {"metric": metric, "suite": suite}
+        side_values: dict[str, list[float]] = {}
         for side_name in ("base", "head"):
             values = [
                 value for _round, value in sorted(per_side.get(side_name, {}).items())
             ]
+            side_values[side_name] = values
             entry[side_name] = [round(value, 6) for value in values]
             medians[side_name] = median(values) if values else None
         base_median, head_median = medians["base"], medians["head"]
         entry["base_median"] = None if base_median is None else round(base_median, 6)
         entry["head_median"] = None if head_median is None else round(head_median, 6)
+        spreads = [
+            spread
+            for spread in (
+                round_spread_pct(side_values["base"]),
+                round_spread_pct(side_values["head"]),
+            )
+            if spread is not None
+        ]
+        # 两侧取大者：任一侧漂得多，这个指标的判定就不可靠。
+        entry["stability_pct"] = max(spreads) if spreads else None
         entry["delta_pct"] = None
         entry["verdict"] = "n/a"
         entry["noise_pct"] = noise
@@ -670,7 +699,37 @@ def build_comparisons(
     if unequal:
         shown = ", ".join(unequal[:4]) + (" …" if len(unequal) > 4 else "")
         notes.append(f"{len(unequal)} 个指标两侧轮数不等（有轮次失败）：{shown}")
+    # 顺序 = 可见性优先级（报告顶部只直出前两条）：可比性 > 判定可靠性 > 样本抖动。
+    notes.extend(round_spread_notes(comparisons))
+    notes.extend(ci_width_notes(results))
     return comparisons, notes
+
+
+def round_spread_notes(
+    comparisons: Sequence[Mapping[str, Any]], *, limit: int = 5
+) -> list[str]:
+    """逐轮漂移大的指标 → 一条聚合 note（透明度提示，不改判定）。
+
+    `stability_pct`（两侧轮间极差/中位数的较大者）> `ROUND_SPREAD_NOTE_PCT` 时提醒读者：
+    中位数已经把每轮的值压扁了，一个 +40% 的 Δ 可能只是某侧后两轮整体漂移（真实案例：
+    产品代码零差异的 PR 上 `tui.display.lag_p50_us` 出现过 +43.7%）。提示不是判定 ——
+    verdict、退出码、带宽都不动。
+    """
+    drifted = [
+        (str(entry["metric"]), float(entry["stability_pct"]))
+        for entry in comparisons
+        if entry.get("stability_pct") is not None
+        and float(entry["stability_pct"]) > ROUND_SPREAD_NOTE_PCT
+    ]
+    if not drifted:
+        return []
+    drifted.sort(key=lambda item: item[1], reverse=True)
+    shown = "、".join(f"{metric} {value:.1f}%" for metric, value in drifted[:limit])
+    more = f"，共 {len(drifted)} 项" if len(drifted) > limit else ""
+    return [
+        f"逐轮漂移大（轮间极差/中位数 > {ROUND_SPREAD_NOTE_PCT:.0f}%）：{shown}{more}"
+        " —— 判定仅供参考，先看评论里的逐轮原始值"
+    ]
 
 
 def suite_notes(results: Sequence[SuiteResult]) -> list[str]:
@@ -1503,7 +1562,35 @@ def run_selftest() -> int:
             by_metric["stub.better.median_ms"]["head"] == [9.5, 9.0, 8.5],
             str(by_metric["stub.better.median_ms"]["head"]),
         )
-        checker.check("aggregate.no_notes", not notes, str(notes))
+        # 逐轮透明：stub 的 skew case 刻意让 head 轮值不对称（9.0/9.2/13.0）→ 漂移 43.5%，
+        # 其余 case 的轮间极差都在 30% 以内 → 只有一条聚合 note，且不改判定。
+        checker.check(
+            "stability.per_metric",
+            {metric: entry["stability_pct"] for metric, entry in by_metric.items()}
+            == {
+                "stub.steady.median_ms": 8.0,
+                "stub.better.median_ms": 11.111,
+                "stub.watch.median_ms": 1.739,
+                "stub.worse.median_ms": 14.286,
+                "stub.skew.median_ms": 43.478,
+                "stub.mismatch.median_ms": 0.0,
+            },
+            str({m: e["stability_pct"] for m, e in by_metric.items()}),
+        )
+        checker.check(
+            "stability.drift_note",
+            len(notes) == 1
+            and notes[0].startswith("逐轮漂移大（轮间极差/中位数 > 30%）")
+            and "stub.skew.median_ms 43.5%" in notes[0]
+            and "stub.worse.median_ms" not in notes[0],
+            str(notes),
+        )
+        checker.check(
+            "stability.verdict_untouched",
+            by_metric["stub.skew.median_ms"]["verdict"] == "improved"
+            and by_metric["stub.skew.median_ms"]["delta_pct"] == -8.0,
+            str(by_metric["stub.skew.median_ms"]),
+        )
         propagated = suite_notes(results)
         checker.check(
             "notes.propagation",
@@ -1643,6 +1730,21 @@ def run_selftest() -> int:
             < md.index("stub.better.median_ms")
             < md.index("stub.steady.median_ms"),
         )
+        # 逐轮原始值折叠块：标题带漂移计数，行里是每轮值（不是中位数）。
+        checker.check(
+            "report.rounds_block",
+            "<details><summary>逐轮原始值（⚠️ 1 个指标轮间漂移 > 30%）</summary>" in md
+            and "| 指标 | base | head |" in md
+            and "| `stub.worse.median_ms` | 10 / 10 / 10 ms | 13 / 14 / 15 ms |" in md
+            and "| `stub.skew.median_ms` | 10 / 10 / 10 ms | 9 / 9.2 / 13 ms |" in md
+            and "| `stub.mismatch.median_ms` | 8 / 8 / 8 ms | 8 / 8 / 8 ms |" in md,
+            md[md.find("<details><summary>逐轮原始值") :][:400],
+        )
+        checker.check(
+            "report.drift_note_top",
+            "> ⚠️ 逐轮漂移大" in md and "stub.skew.median_ms 43.5%" in md,
+            "",
+        )
         checker.check(
             "report.footnote",
             "方法与口径" in md
@@ -1672,10 +1774,14 @@ def run_selftest() -> int:
             if merged_md_path.is_file()
             else ""
         )
+        single_count = md.count("`stub.worse.median_ms`")
         checker.check(
             "report.merge",
-            proc.returncode == 0 and merged_md.count("`stub.worse.median_ms`") == 2,
-            f"rc={proc.returncode} count={merged_md.count('`stub.worse.median_ms`')}",
+            proc.returncode == 0
+            and single_count > 0
+            and merged_md.count("`stub.worse.median_ms`") == 2 * single_count,
+            f"rc={proc.returncode} single={single_count} "
+            f"merged={merged_md.count('`stub.worse.median_ms`')}",
         )
 
         # ⑥b 不一致合并（03 的 report job 若拿到不同 sha / 档位的产物）：告警必须可见、表头不得说谎
@@ -1958,7 +2064,7 @@ def run_selftest() -> int:
             ),
             str([result.meta.get("config") for result in results_q]),
         )
-        comparisons_q, _ = build_comparisons(results_q, thresholds)
+        comparisons_q, drift_q = build_comparisons(results_q, thresholds)
         by_q = {str(entry["metric"]): entry for entry in comparisons_q}
         checker.check(
             "single_round.lists",
@@ -1973,11 +2079,24 @@ def run_selftest() -> int:
             and by_q["stub.worse.median_ms"]["verdict"] == "regression",
             str(by_q["stub.worse.median_ms"]),
         )
+        # 单轮没有轮间信息：stability 为 null、不产漂移 note、报告也不渲染逐轮块。
+        checker.check(
+            "stability.single_round_null",
+            all(entry["stability_pct"] is None for entry in comparisons_q)
+            and not any("逐轮漂移大" in note for note in drift_q),
+            str([(entry["metric"], entry["stability_pct"]) for entry in comparisons_q]),
+        )
         payload_q = build_report(replace(ctx, rounds=1), comparisons_q, [], [], 1.0)
         checker.check(
             "single_round.note",
             any("rounds=1" in note for note in payload_q["meta"]["notes"]),
             str(payload_q["meta"]["notes"]),
+        )
+        md_q = report_render.render_comment(payload_q)
+        checker.check(
+            "report.rounds_block_single_round",
+            "逐轮原始值" not in md_q,
+            md_q[md_q.find("| 判定 |") :][:200],
         )
 
         # ⑩ 边界：base 中位数为 0 / 指标缺失（合成数据）
@@ -2257,6 +2376,46 @@ def run_selftest() -> int:
                     ]
                 )
             ),
+        )
+
+        # ⑩f 漂移提示：边界（=30% 不触发）与 top-5 截断
+        boundary: list[SuiteResult] = []
+        for name, head_values in (
+            ("stub.drift30.median_ms", (100.0, 100.0, 130.0)),  # 正好 30% → 不触发
+            ("stub.drift31.median_ms", (100.0, 100.0, 131.0)),  # > 30% → 触发
+            ("stub.calm.median_ms", (100.0, 100.0, 100.0)),  # 0% → 不触发
+        ):
+            for index, head_value in enumerate(head_values, start=1):
+                boundary.append(_synth("stub", "base", index, {name: 100.0}))
+                boundary.append(_synth("stub", "head", index, {name: head_value}))
+        comparisons_b, notes_b = build_comparisons(boundary, thresholds)
+        by_b = {str(entry["metric"]): entry for entry in comparisons_b}
+        checker.check(
+            "stability.boundary",
+            by_b["stub.drift30.median_ms"]["stability_pct"] == 30.0
+            and by_b["stub.drift31.median_ms"]["stability_pct"] == 31.0
+            and by_b["stub.calm.median_ms"]["stability_pct"] == 0.0
+            and len(notes_b) == 1
+            and "stub.drift31.median_ms 31.0%" in notes_b[0]
+            and "stub.drift30" not in notes_b[0],
+            f"{[(metric, entry['stability_pct']) for metric, entry in by_b.items()]} / {notes_b}",
+        )
+        note_many = round_spread_notes(
+            [
+                {
+                    "metric": f"stub.spread{index}.median_ms",
+                    "stability_pct": 31.0 + index,
+                }
+                for index in range(7)
+            ]
+        )
+        checker.check(
+            "stability.top5",
+            len(note_many) == 1
+            and "，共 7 项" in note_many[0]
+            and note_many[0].count("stub.spread") == 5
+            and "stub.spread6.median_ms 37.0%" in note_many[0],
+            str(note_many),
         )
 
         # ⑪ 校准语义：两侧同 rev。用 HEAD~1（≠ HEAD）构造——实现里删掉"校准钉住 head"就会红。

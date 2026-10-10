@@ -23,7 +23,10 @@ job 只在基础设施故障时红（构建/测量失败、报告渲染失败）
 4. 判定（默认 lower-better）：`|Δ| < noise_pct` → **持平**；变好 → **改善**；
    变差且 `|Δ| ≥ regress_pct` → **回归**；变差且介于两者之间 → **关注**。
    例外由 `thresholds.json` 声明：`higher_better`（越大越好）与 `info_only`（只给数值不判档）。
-5. 输出：`ab.json`（机器）+ `comment.md`（人读，`report.py` 渲染）+ 每轮的 raw 结果。
+5. 输出：`ab.json`（机器）+ `comment.md`（人读，`report.py` 渲染：主表 + `逐轮原始值` 折叠块 +
+   注意事项）+ 每轮的 raw 结果。每个指标带 `stability_pct`（两侧**轮间极差/中位数**的较大者）：
+   哪一侧轮间漂移超过 30%，顶部注意事项就会点名（"判定仅供参考"）——中位数把每轮的值压扁了，
+   先看逐轮值再下结论（见 §6 的真实案例）。
 
 **为什么交错**：同机负载是最大噪声源，同轮内 base/head 相邻测量能对冲慢漂移（turbo、
 邻居 job、温度）。**为什么轮次中位数**：3 轮取中能丢掉单颗负载尖峰；2 轮的中位数实际是
@@ -278,6 +281,10 @@ artifact 的逐轮值**。`append.*` 这一轮是 2s 测量时间的旧口径；
   避免同时引入"缓存命中/未命中"两种构建状态）。
 - **评论**：`report.py` 渲染 → `comment.py` 按 marker `<!-- wing-perf -->` upsert（同 PR 永远
   只有一条）。**fork PR 不发评论**（token 只读），结果只留 artifact。
+  - **怎么读**：① 顶部注意事项（最多直出 2 条，其余折叠）——「逐轮漂移大」「置信区间偏宽」
+    「载荷指纹不一致」这类透明度信号在这里；② 主表按 |Δ| 降序，`🚫 不判定` 沉底（原因在表末）；
+    ③ `逐轮原始值` 折叠块：每个指标的每轮代表值（`base`/`head` 各三格），漂移大时标题带 ⚠️
+    —— 一个 +40% 的 Δ 若伴随某侧后两轮整体抬高，那是漂移不是回归；④ 失败区块（如有）。
 - **job 不够红**：性能回归只会出现在评论里；红叉只留给基础设施故障（构建/测量失败、渲染失败）。
 - **已知局限**：
   - harness 恒取 head 版——PR 同时改 `scripts/perf/`、`scripts/demo/` 或 `libs/wing-probe/`
@@ -296,6 +303,15 @@ artifact 的逐轮值**。`append.*` 这一轮是 2s 测量时间的旧口径；
   - 不跑 nightly 全量档（非 quick）、不维护跨 run 趋势、不做强制门禁、不测内存/二进制体积/
     构建时间/冷启动/真实 LLM 时延。
 
+### 已知噪声模式（真实案例）
+
+- **同 rev 的伪回归**（`tui.display.lag_p50_us` **+43.7%**，run `38073962476`）：两侧产品代码
+  零差异；base 逐轮 12.9 / 11.4 / 12.6 ms（极差 13%）稳定，head 11.9 / **18.2 / 18.1** ms ——
+  后两轮被共享 runner 整体拖慢，3 轮中位数把它放大成一个「回归」。评论现在会点名这条指标
+  （顶部「逐轮漂移大」）并在逐轮块里给出两侧全部轮值：**看到 +X0% 的回归，先看逐轮值**。
+  （该 run 里被点名的还有 `fanout.complete_ms`、`append.256`、`gap_p99`、`trend` 等，共 8 项。）
+- 另两类常见形态（单点尖峰、µs 级 bench 的轮间漂移）见上面的局限清单。
+
 ## 7. 排查手册
 
 | 症状 | 先看哪里 |
@@ -309,6 +325,7 @@ artifact 的逐轮值**。`append.*` 这一轮是 2s 测量时间的旧口径；
 | 评论里出现"criterion 置信区间偏宽" | 对应 raw 的 `meta.config.ci_rel_pct`（样本抖动，不改判档）；必要时重跑或加大 `--measurement-time` |
 | 某行 note 是"基准非正" | 基准侧中位数 ≤ 0（如 `tui.tui_cpu_ratio` 在 CI runner 上读到 0）——本次 run 里该指标没有百分比含义 |
 | gateway 数字整体偏大 | `meta.config.machine.loadavg`（判读同机负载的第一手证据）；再用 `--calibrate` 量地板 |
+| 评论里出现"回归/关注"但产品代码没差 | 先看**逐轮原始值**折叠块与顶部「逐轮漂移大」note：某侧轮间漂移会把中位数对比放大（案例见 §6「已知噪声模式」）；`stability_pct` 在 `ab.json` 的每个 comparison 里 |
 | 评论没出现 | 是不是 fork PR / draft / 上一轮 run 被取消；`perf-report` job 的 `compose` 步骤输出；artifact `perf-comment` |
 | 想复现某一行 | 用 `ab.json` 里该 suite 的 `meta.config`（档位、并发、历史规模）在本地单侧跑 `suite_<name>.py`；side 描述符形状见 `scripts/perf/README.md` |
 
