@@ -291,6 +291,9 @@ pub async fn execute_intent(
                     reasoning_effort: reasoning_effort.clone(),
                     yolo,
                     workspace: workspace.clone(),
+                    // TUI 没有工具集编辑器：工具集切换只由 `wing update --tools`
+                    // 从 CLI 驱动（同端点，键缺席 = 不动）。
+                    tools: None,
                 };
                 match t.http.update_session(&req).await {
                     Ok(_) => apply_update_session(

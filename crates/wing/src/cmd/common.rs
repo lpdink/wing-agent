@@ -8,6 +8,7 @@
 use std::io::IsTerminal;
 
 use anyhow::Result;
+use wing_api_client::ApiClientError;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
 /// Output environment for human-facing tables.
@@ -161,13 +162,16 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 /// close. The read (no ops) doubles as the compatibility probe — an older
 /// gateway has no `/api/session/tag` route at all and fails loudly here,
 /// before the prompt is sent.
+///
+/// Returns the session's **resulting** tags (existing + newly added), which
+/// callers report as the outcome.
 pub async fn ensure_tags_applied(
     http: &GatewayApiClient,
     session_id: &str,
     tags: &[String],
-) -> Result<()> {
+) -> Result<Vec<String>> {
     if tags.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let resp = http
         .tag_session(session_id, None, None)
@@ -191,7 +195,73 @@ pub async fn ensure_tags_applied(
              (older gateways ignore the create `tags` field; restart it: wing stop && wing start)"
         );
     }
-    Ok(())
+    Ok(resp.tags)
+}
+
+/// Run a session-scoped call with the CLI's **404 → resume → retry** convention.
+///
+/// A 404 from a session endpoint means "not loaded **right now**" (evicted, or
+/// never hydrated since the gateway started) — not "does not exist": eviction
+/// only reclaims memory, the disk state is kept. `wing tail` / `head` / `info`
+/// already hydrate on 404, and the control-plane commands follow the same
+/// rule so an operator never has to know whether a session was evicted before
+/// running `wing branches|fork|rewind|compact|update`.
+///
+/// The retry happens **once**: if the resumed call 404s again, or the resume
+/// itself 404s (the session is not on disk either), that error is the honest
+/// answer. The returned error is already the user-facing one
+/// ([`session_error`]), so callers just `?` it.
+///
+/// `wing tail` / `head` predate this helper and keep their own inline version
+/// (`cmd::messages::fetch_messages`, which sniffs "404" / "not found" out of
+/// the error text); folding them in would change an existing command's
+/// behavior, so that is left as a follow-up.
+pub async fn hydrate_on_404<T, F, Fut>(
+    http: &GatewayApiClient,
+    session_id: &str,
+    call: F,
+) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, ApiClientError>>,
+{
+    match call().await {
+        Ok(value) => Ok(value),
+        Err(first) if first.is_not_found() => {
+            // 404 = 不在内存 ⇒ 水合一次；磁盘上也没有才算真的不存在。
+            http.resume_session(session_id)
+                .await
+                .map_err(|e| session_error(session_id, &e))?;
+            // 重试：会话此时已知在内存，再来 404 是**另一个 404**（fork / rewind
+            // 的 uuid 未命中就是这一种）——网关的 detail 才是答案，原样带出，
+            // 不再改写成"会话不存在"。
+            call().await.map_err(|e| session_failed(session_id, &e))
+        }
+        Err(e) => Err(session_error(session_id, &e)),
+    }
+}
+
+/// `session <id>: <gateway error>` — status code and detail verbatim.
+pub fn session_failed(session_id: &str, error: &ApiClientError) -> anyhow::Error {
+    anyhow::anyhow!("session {session_id}: {error}")
+}
+
+/// One friendly line for a session-scoped API failure.
+///
+/// 404 gets the "evicted ≠ missing" wording (with the way out: `wing resume`
+/// or `wing ps --all`); 409 passes through the gateway's own reason (busy /
+/// subscribed / not durable) — the status code and the reason are the useful
+/// part, so both stay in the message. Everything else keeps the transport
+/// error verbatim (never re-classify a network failure as "not found").
+pub fn session_error(session_id: &str, error: &ApiClientError) -> anyhow::Error {
+    if error.is_not_found() {
+        anyhow::anyhow!(
+            "session {session_id} not found (not loaded and not on disk); \
+             `wing ps --all` lists every known session"
+        )
+    } else {
+        session_failed(session_id, error)
+    }
 }
 
 /// Requested tags not present in `actual` (pure; unit-tested).

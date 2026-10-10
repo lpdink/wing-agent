@@ -129,7 +129,9 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     // 3. Send prompt (non-blocking — the HTTP call returns immediately,
     //    the agent processes asynchronously). Always sent, including on
     //    resume: `wing run -r <sid> -p "next task"` resumes + sends.
-    http.send_message(&session_id, &args.prompt, None)
+    //    `--tool-call-id` routes the prompt to a pending Ask's feedback
+    //    waiter instead of the session inbox (answering an ask).
+    http.send_message(&session_id, &args.prompt, args.tool_call_id.clone())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send prompt: {e}"))?;
 

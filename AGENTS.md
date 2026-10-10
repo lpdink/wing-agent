@@ -145,13 +145,18 @@ crates/wing/src/
 │   ├── args.rs                      `wing run` 与 stdio 共享的启动参数
 │   ├── argv.rs                      命令行参数入口（OsString → UTF-8 String；非法字节友好报错、exit 2）
 │   ├── backend_config.rs            读 backend config（gateway host:port、wing_home）
-│   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化）
+│   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化、404→resume 水合惯例）
 │   ├── discover.rs                  定位 wing-gateway 可执行文件
-│   ├── start.rs / stop.rs / status.rs  网关守护进程生命周期（health + /api/shutdown）
+│   ├── start.rs / stop.rs / status.rs / restart.rs  网关守护进程生命周期（health + /api/shutdown）
 │   ├── run.rs                       `wing run` 非阻塞启动任务（建会话 + 发 prompt，返回 session id）
 │   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
 │   ├── ps.rs                        `wing ps` / `wing info`（会话列表 / 单会话运行时信息）
+│   ├── branch.rs                    `wing branches` / `fork` / `rewind`（消息节点导航：uuid 闭环 + draft）
+│   ├── asks.rs                      `wing asks`（在挂 Ask 的 tool_call_id 发现口：WS 快照 + `--wait`）
+│   ├── control.rs                   `wing interrupt`（别名 int）/ `compact` / `update`（会话控制面）
+│   ├── lifecycle.rs                 `wing new` / `resume`（建空会话 / 显式水合）
 │   ├── release.rs                   `wing release` 逐出会话内存态（显式 eviction，幂等）
+│   ├── reload.rs                    `wing reload` 系统热重载（逐项结果按契约名字序）
 │   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
 │   ├── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
 │   ├── config.rs                    `wing config` 子命令族（doctor/list/get/set/unset/add/remove/move/path）
