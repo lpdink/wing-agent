@@ -15,13 +15,21 @@ AgentEventSink 的方法发射。内部自动注入 session_id 和 EventTarget�
 
 工具侧派生事件（DiffContentEvent 等经 ctx.emit / WingAgent.emit）同样
 路由至此——sink 是唯一的发射出口，不存在绕过 sink 的直连 event_bus。
+
+**上报窗口（`best_effort`）**：错误处理路径的收尾动作（turn_result / error /
+done）与它报告的故障常常同源——落盘正是刚坏掉的资源（如 ENOSPC）。默认的
+严格发射在这些路径上会**在 except 块里再抛一次**，同层接不住，异常逃出
+run_turn / worker 循环（见 #187）。窗口把「报告动作不得失败」写成一段显式
+契约：窗口内落盘失败降级为 ERROR 日志、事件仍尽力广播（前端靠它复位）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
+from wing.common.logger import log
 from wing.event import EventTarget
 from wing.event_bus import event_bus
 from wing.event import (
@@ -59,8 +67,70 @@ class AgentEventSink:
         # 事件落盘回调（ContextManager.append_event）——None 时纯内存
         # （无持久化语义的场景，如测试）。
         self._append_event = append_event
+        # 降级发射窗口（见 `best_effort`）：只由错误上报路径进入。
+        self._best_effort = False
+
+    @contextlib.contextmanager
+    def best_effort(self) -> Iterator[None]:
+        """上报窗口：窗口内的发射失败降级为日志，绝不抛出（#187）。
+
+        兜底 handler 的收尾（`turn_result` / `error` / `done`）依赖落盘，而
+        落盘可能正是它正在报告的故障：严格发射会在 except 块里再抛一次，
+        同层接不住——异常逃出 `run_turn`、再逃出 worker 的 while True，
+        消费者协程就此结束（inbox 里的消息再无人消费 = 僵尸态）。
+
+        窗口内 `emit` 的契约：
+
+        - 落盘失败 → ERROR 日志（含完整异常链），继续；
+        - 仍**尽力广播**事件——前端靠它复位 working 态（磁盘上没有这条记录
+          是已知代价：报告是记账，不是事实）；
+        - 广播失败 → ERROR 日志，继续。
+
+        窗口是 sink 上的瞬时状态，用 try/finally 收口。窗口内**不得有
+        await**：没有 yield point 就不可能串到别的任务，窗口不会漏到窗口外
+        的发射上（嵌套时按栈恢复原值）。
+        """
+        previous = self._best_effort
+        self._best_effort = True
+        try:
+            yield
+        finally:
+            self._best_effort = previous
 
     def emit(self, event: WingEvent) -> None:
+        """发射事件（严格模式：落盘失败即抛，由调用方决定语义）。
+
+        错误上报路径用 `best_effort()` 窗口包住调用，把「报告不得失败」的
+        契约写在调用点上。
+        """
+        if self._best_effort:
+            self._emit_degraded(event)
+        else:
+            self._emit_strict(event)
+
+    def _emit_strict(self, event: WingEvent) -> None:
+        self._prepare(event)
+        if event.persist and self._append_event is not None:
+            self._append_event(event)
+        event_bus.emit(event)
+
+    def _emit_degraded(self, event: WingEvent) -> None:
+        """上报窗口内的发射：任何一步失败都降级为日志，绝不抛出。"""
+        try:
+            self._prepare(event)
+            if event.persist and self._append_event is not None:
+                self._append_event(event)
+        except Exception:
+            log.exception(
+                f"事件上报落盘失败（已降级；仍向客户端广播）："
+                f"type={type(event).__name__}"
+            )
+        try:
+            event_bus.emit(event)
+        except Exception:
+            log.exception(f"事件上报广播失败（已降级）：type={type(event).__name__}")
+
+    def _prepare(self, event: WingEvent) -> None:
         # 关联元数据定型：在落盘之前完成 request_id 注入，保证磁盘记录
         # 与广播帧携带同一个值（日志是唯一事实来源——live replay 与
         # resume replay 不允许对同一事件呈现不同的 request_id）。
@@ -73,15 +143,6 @@ class AgentEventSink:
             event.session_id = self._session_id
         if event.target is None:
             event.target = EventTarget(scope="session")
-
-        # 分流：persist=true 先落盘（事实）再广播（投影）；
-        # persist=false 纯广播——不落盘、不缓冲（瞬态内容由轮提交的
-        # Message 记录承载，未提交内容由 accumulator 投影按需取得）。
-        if event.persist:
-            if self._append_event is not None:
-                self._append_event(event)
-
-        event_bus.emit(event)
 
     # ── Turn 生命周期 ──
 

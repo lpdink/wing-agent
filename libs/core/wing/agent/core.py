@@ -225,10 +225,11 @@ class WingAgent:
         # resume 时刻重算）。与 _working 同生命周期（_set_working 维护）。
         self._turn_started_at: datetime | None = None
         self._interrupt_lock = asyncio.Lock()
-        # shutdown 是一次性的终局：置位后终局续期（见 `_arm_worker_renewal`）
-        # 与 interrupt 的直接重建都不再发生——"逐出后又被复活"必须不可能。
+        # shutdown 是一次性的终局：置位后终局续期（见 `_on_worker_done` /
+        # `_arm_worker_renewal`）与 interrupt 的直接重建都不再发生——"逐出后
+        # 又被复活"必须不可能。
         self._closing: bool = False
-        self._worker = asyncio.create_task(self._run())
+        self._worker = self._spawn_worker()
 
     # ── ToolContext Protocol 实现 ──
 
@@ -532,8 +533,10 @@ class WingAgent:
                 # shutdown 也可能已置位 _closing——只在还是旧 worker 且未关闭
                 # 时重建，避免出现第二个消费者 / 复活已关闭的 agent。
                 if self._worker is old and not self._closing:
-                    self._worker = asyncio.create_task(self._run())
-                    rebuilt = True
+                    self._worker = self._spawn_worker()
+                # 以现状为准：续期回调若已抢先重建，这里不重复计数（也不会
+                # 出现第二个消费者）。
+                rebuilt = self._worker is not old
             else:
                 self._arm_worker_renewal(old)
         log.info(
@@ -606,13 +609,55 @@ class WingAgent:
                 log.error("old worker died with error during interrupt", exc_info=exc)
         return True
 
+    def _spawn_worker(self) -> asyncio.Task[None]:
+        """创建消费者任务并挂上终局续期守卫。
+
+        worker 的**所有**创建点都必须经这里（构造 / interrupt 重建 / 续期
+        重建）——漏掉一处就意味着那条路径上死掉的 worker 不会再被续期。
+        """
+        worker: asyncio.Task[None] = asyncio.create_task(self._run())
+        worker.add_done_callback(self._on_worker_done)
+        return worker
+
+    def _on_worker_done(self, worker: asyncio.Task[None]) -> None:
+        """终局续期（通用）：worker 因**非意图性**异常结束 → 自动重建消费者。
+
+        单轮失败由 `_run` 的 while 兜住；但兜底 handler 自身也可能被同一故障
+        掀翻（报告动作与落盘同源，如 ENOSPC 贯穿两层的 sink 调用）。worker
+        一旦静默结束，inbox 里的消息再无人消费——status 仍是 idle、投递无
+        任何反应（僵尸态），只能靠 interrupt 重建。续期把"消费者不死"兜到
+        底：不管谁、以什么方式把 `_run` 掀翻，只要不是意图性收口就重建。
+
+        闸门（与 interrupt / shutdown 互斥，绝不出现第二个消费者）：
+
+        - `_closing`：shutdown 是终局——绝不复活已关闭的 agent；
+        - `worker.cancelled()`：取消是**意图性**收口（interrupt 的取消阶梯 /
+          shutdown）——重建由收口方自己决定（interrupt 直接重建；阶梯放手后
+          被保留的 worker 由 `_arm_worker_renewal` 续期，它连取消路径也要
+          兜住，故此处不覆盖）；
+        - `self._worker is not worker`：已被替换（等锁期间续期或 interrupt
+          抢先重建）——本回调与 `_arm_worker_renewal` 可能同时被登记，两边
+          都以这条为准绳（同步回调里串行判定）。
+        """
+        if self._closing or self._worker is not worker or worker.cancelled():
+            return
+        exc = worker.exception()
+        log.error(
+            f"worker 意外终止，重建消费者: session={self.session_id} "
+            f"exception={type(exc).__name__ if exc is not None else '-'}",
+            exc_info=exc,
+        )
+        self._worker = self._spawn_worker()
+
     def _arm_worker_renewal(self, worker: asyncio.Task) -> None:
         """阶梯放手后的终局续期：被保留的 worker 随后死亡则重建消费者。
 
         只在「仍是当前 worker 且 agent 未关闭（`_closing`）」时重建。续期
-        与 interrupt 重建可能竞争 worker 的同一终局——两边都以
-        `self._worker is worker` 为准绳（同步回调里串行判定），不会出现
-        第二个消费者。
+        与 interrupt 重建、通用续期（`_on_worker_done`）可能竞争 worker 的
+        同一终局——三边都以 `self._worker is worker` 为准绳（同步回调里串行
+        判定），不会出现第二个消费者。与通用续期的唯一差别：这里**不**区分
+        死法——被保留的 worker 最终以「取消」收场（阶梯之外的那次投递生效）
+        同样要续期，否则消息进 inbox 无人消费。
         """
 
         def _renew(_: asyncio.Task) -> None:
@@ -622,7 +667,7 @@ class WingAgent:
                 f"interrupt: 被保留的 worker 随后终止，重建消费者 "
                 f"(session={self.session_id})"
             )
-            self._worker = asyncio.create_task(self._run())
+            self._worker = self._spawn_worker()
 
         worker.add_done_callback(_renew)
 
@@ -637,15 +682,18 @@ class WingAgent:
             f"stack=[{_worker_frames(worker)}]"
         )
         if notify:
-            self._sink.emit(
-                NoticeEvent(
-                    level="error",
-                    message=(
-                        "打断未生效：worker 未在取消阶梯内终止（保留原 worker）"
-                        "——若其随后退出将自动恢复；也可再次打断重试"
-                    ),
+            # 错误路径的副作用同样不得掀翻调用者（#187）：这里的落盘可能
+            # 正是刚坏掉的资源，而调用链上还有 interrupt 的收口要完成。
+            with self._sink.best_effort():
+                self._sink.emit(
+                    NoticeEvent(
+                        level="error",
+                        message=(
+                            "打断未生效：worker 未在取消阶梯内终止（保留原 worker）"
+                            "——若其随后退出将自动恢复；也可再次打断重试"
+                        ),
+                    )
                 )
-            )
 
     def get_status(self) -> dict:
         """返回当前状态快照（网关的 session info 投影素材）。"""
@@ -684,7 +732,12 @@ class WingAgent:
                 log.error(f"interrupt hook {hook_id} failed: {e}")
 
     async def _run(self) -> None:
-        """主循环：持续 drain inbox 并处理。"""
+        """主循环：持续 drain inbox 并处理。
+
+        循环**不因单轮失败退出**（本轮以 error 上报后继续消费下一条）；错误
+        上报走 `best_effort` 窗口，报告动作不会把本循环掀翻（#187）——万一
+        仍然逃出去，`_on_worker_done` 的通用续期会重建消费者。
+        """
         while True:
             try:
                 await self._loop.run_turn()
@@ -692,8 +745,9 @@ class WingAgent:
                 raise
             except Exception as e:
                 log.error(f"处理消息失败: {e}")
-                self._sink.error(f"处理消息失败：异常：{e}")
-                self._sink.done()
+                with self._sink.best_effort():
+                    self._sink.error(f"处理消息失败：异常：{e}")
+                    self._sink.done()
 
     def _bind_tools(self, tools: list[Tool]) -> dict[str, Tool]:
         from wing.tool_registry import ToolRef

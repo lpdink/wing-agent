@@ -225,16 +225,20 @@ class ReActLoop:
 
             error_detail = format_exception_chain(e)
             log.exception(f"处理消息失败: {error_detail}")
-            self._sink.turn_result(
-                subtype="error_during_execution",
-                is_error=True,
-                num_turns=ctx.num_turns,
-                duration_ms=ctx.elapsed_ms(),
-                usage=ctx.usage_dict(),
-                errors=[error_detail],
-            )
-            self._sink.error(f"处理消息失败：异常：{error_detail}")
-            self._sink.done()
+            # 上报窗口（#187）：收尾动作与它报告的故障同源——落盘失败时
+            # 严格发射会在本 except 块里再抛一次，同层接不住，异常逃出
+            # run_turn（worker 随之死亡）。窗口内降级为日志，绝不抛出。
+            with self._sink.best_effort():
+                self._sink.turn_result(
+                    subtype="error_during_execution",
+                    is_error=True,
+                    num_turns=ctx.num_turns,
+                    duration_ms=ctx.elapsed_ms(),
+                    usage=ctx.usage_dict(),
+                    errors=[error_detail],
+                )
+                self._sink.error(f"处理消息失败：异常：{error_detail}")
+                self._sink.done()
         finally:
             # 兜底置空当前 accumulator（错误/取消路径轮边界未触达时；
             # 正常路径轮边界已置空，此处幂等）。未提交投影随之失效——
