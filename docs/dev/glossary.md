@@ -64,7 +64,7 @@ restore 后内存态与记录不一致才落盘对齐（一次性迁移，非写
 | **persist 分流** | `WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧 `Field(exclude=True)` 会被子类重声明击穿），基类默认 true。判据：**是事实** 且 **无 Message 孪生**。false 仅限流式 delta、Message 孪生体积事件、可实时重建的协议/查询事件。 |
 | **中断补提交** | 流式期间打断：accumulator 快照部分块（text/thinking 保留、未终结 tool 块剔除）→ partial Message（`stop_reason="interrupted"`）提交 → re-raise，当前 accumulator 置空。用户可放心打断长思考。 |
 | **accumulator 协议** | `generate(..., accumulator=)` caller 注入容器，provider 每次尝试填充新状态；取消后 `snapshot_blocks()` 取已终结块、`pending_tool_calls()` 取未终结调用。 |
-| **stop_reason** | provider 捕获协议原值（end_turn/max_tokens/tool_use/stop/length）→ **`Message.stop_reason` 是唯一落盘审计位置**；LLMCallMetricsEvent.stop_reason 仅用于直播（persist=false）。 |
+| **stop_reason** | provider 捕获协议原值（end_turn/max_tokens/tool_use/stop/length）→ **`Message.stop_reason` 是唯一落盘审计位置**（`usage.stop_reason` 只是随行快照）；LLMCallMetricsEvent.stop_reason 仅用于直播（persist=false）；`assistant_turn.stop_reason` 翻译成 Claude 词表（length→max_tokens、stop→end_turn）供 stdio 透传（ACP 的 StopReason 另由 turn 终态推导）。 |
 | **事件链锚定** | rewind/fork/compact 凭链序免费工作：事件是链节点，set_tip/fork 拷贝/压缩边界自然裁剪事件可见性。 |
 | **中途订阅视图** | SyncSessionEvent = 状态 + 四组素材：status（快照时刻的 idle/working/waiting，**必填、权威**——working 不可由内容反推，也没有回落推断）+ turn_started_at（恢复已耗时）+ messages（已提交投影）+ uncommitted（单个未提交 assistant Message 投影）+ uncommitted_tools（未终结调用原始 args）+ events（活跃链**事实**事件）。前端按 **messages → uncommitted → uncommitted_tools → events → live** 组装（uncommitted 走 replay_messages、uncommitted_tools 走 live ToolCallStream 分支），diff 锚点结构性先于 diff 存在。 |
 | **事实事件下发过滤** | 后端单点策略：`get_active_events()` 按 `FACT_EVENTS`（与 persist 标记同处 `event/__init__.py`）过滤，ask 额外按 `pending_ask_ids()`（inbox feedback waiters）过滤。前端只做能力分发（有渲染器则渲染），不编码"孪生不得渲染"策略。存量孪生记录加载进链但不下发（零迁移）。 |

@@ -14,6 +14,9 @@
   自校验（找不到就丢弃）；
 - **跨进程重启恢复**：pending 在盘上（aux），新进程重建 CM 时读回（进程重启时
   内存里的 task / result 全没了）——下一轮请求照样 apply。
+- **relink 只换链坐标**：apply 重链接保留区（tail）时整条复制消息——上下文事实
+  与 provider 审计字段（`stop_reason` / `usage`）、媒体引用都随行（手抄字段清单
+  会随 schema 漂移，静默丢字段）。
 
 确定性来源（不是等待运气）：`@pytest.mark.probe_env` 把上下文窗口压到千级，
 剧本用 `usage.prompt_tokens` 精确驱动阈值；"待生效状态已落盘"用**轮询到 aux
@@ -35,6 +38,7 @@ from wing_probe import (
     Turn,
     Usage,
     assert_compact_transition,
+    message_semantics,
 )
 from wing_probe.history.view import COMPACT_PREFIX, HistoryView
 
@@ -295,3 +299,65 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
         "gamma",
         "post compact reply",
     ], final.describe()
+
+
+#: 保留区事实场景的私有 model 名。
+TAIL_MODEL = "probe/auto-compact-tail-facts"
+
+
+@pytest.mark.probe_env(
+    models=[TAIL_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
+    """apply 只换保留区（tail）的链坐标：上下文事实与审计字段都随行（红线）。
+
+    WHEN 后台压缩换入（与 ``test_early_compact_persists_then_applies`` 同一条
+    触发路径）
+    THEN 保留区里被重链接的 assistant 记录：上下文事实与 apply 前逐字段等价
+    （``message_semantics``，uuid 是新的），且 ``stop_reason`` / ``usage`` 仍在
+    ——"重链接"是换链坐标，不是重造消息（截断审计不得因压缩凭空消失）。
+    """
+    probe.register(TAIL_MODEL, *_script())
+    session = await probe.session(model=TAIL_MODEL)
+
+    await session.chat("alpha")
+    await session.chat("beta")
+    await _wait_pending(probe, session)
+
+    before_apply = probe.history(session)
+    retained_before = [
+        message
+        for message in before_apply.messages()
+        if message["role"] == "assistant" and message["content"] == SUMMARY_LOOKING_TEXT
+    ]
+    assert len(retained_before) == 1, before_apply.describe()
+    original = retained_before[0]
+    assert original.get("stop_reason") == "stop", original
+    assert original["usage"]["prompt_tokens"] == SERVER_TOKENS, original
+
+    result = await session.chat("gamma")
+    assert result.data["result"] == "post compact reply", result.data
+
+    final = probe.history(session)
+    retained_after = [
+        message
+        for message in final.messages()
+        if message["role"] == "assistant" and message["content"] == SUMMARY_LOOKING_TEXT
+    ]
+    assert len(retained_after) == 1, final.describe()
+    relinked = retained_after[0]
+
+    # 链坐标换了（uuid 全新），上下文事实逐字段等价（比较口径同红线断言）。
+    assert relinked["uuid"] != original["uuid"], relinked
+    assert message_semantics(relinked) == message_semantics(original), (
+        relinked,
+        original,
+    )
+    # provider 审计字段跟随：stop_reason / usage 不缺（截断审计在压缩后仍可读）。
+    assert relinked.get("stop_reason") == "stop", relinked
+    assert relinked["usage"]["prompt_tokens"] == SERVER_TOKENS, relinked
+    final.assert_chain_invariants()

@@ -415,6 +415,7 @@ class ReActLoop:
         """
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
+        stop_reason: str | None = None
         # accumulator 上提为 turn 级持有（self._current_acc）——未提交投影
         # （resume）与中断补提交按需快照同一个对象。
         accumulator = provider.create_accumulator()
@@ -447,6 +448,15 @@ class ReActLoop:
                             args_fragment=delta.args_fragment,
                             is_final=delta.is_final,
                         )
+
+                # 终止原因**不随 token 走**：OpenAI 兼容的终结帧只带零 token
+                # 元信息（避免与带内 usage 双计）但携带 stop_reason——若只在
+                # 非零 usage 分支取值，它会被整个跳过，Message.stop_reason
+                # 恒为 null（max_tokens 截断审计失效）。取值与 metrics 发射
+                # 解耦：任一帧给了非 None 值就更新（provider 层传输重试在同一
+                # generate() 内重放流时跨尝试累积，与 last_usage 同构）。
+                if chunk.usage.stop_reason is not None:
+                    stop_reason = chunk.usage.stop_reason
 
                 if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
                     last_usage = chunk.usage
@@ -493,5 +503,5 @@ class ReActLoop:
             role="assistant",
             content_blocks=content_blocks,
             usage=last_usage,
-            stop_reason=last_usage.stop_reason if last_usage else None,
+            stop_reason=stop_reason,
         )
