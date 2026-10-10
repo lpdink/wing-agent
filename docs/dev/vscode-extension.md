@@ -307,8 +307,10 @@ WS 帧
   清文本、输入文本清选项（TUI `AskPanel::commit_option` / `confirm_editing` 的同款不变式；宿主
   `askAnswerValue` 的「选项优先」读取规则依赖它，缺了它文本会被静默丢弃）。多选两者并存、提交时
   合并。转换就两个纯函数，住在 `src/webview/chat/askDraft.ts`，组件只负责接线。时机差异注意：
-  TUI 只在 Enter 确认时落定，webview 没有确认步——首次键入即最终选择（误敲一个字符也会清掉已点
-  选项；UI 上可见，但不可逆）。
+  TUI 只在 Enter 确认时落定，webview 没有确认步——首次键入即最终选择。两个方向的不可逆性不对
+  称：误敲一个字符会清掉已点选项（代价低）；反过来，点选项会清掉已输入的自定义文本且无法恢复
+  ——TUI 的编辑器草稿在确认后仍保留（暗色可见、可回退再确认），webview 没有这层缓冲，长文本
+  误点即需重输。
 - **失败模式**：webview 端不变量（`applyPatch.ts`）——seq 必须恰好 `lastSeq + 1`、寻址的 cell
   必须存在、op 必须匹配 cell 种类；任何一条不满足就 `resync`（报告
   `seq-gap`/`unknown-cell`/`duplicate-cell`/`unsupported-op`/`protocol`），宿主回 `hydrate`。
