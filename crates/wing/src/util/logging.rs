@@ -76,15 +76,12 @@ fn init_logging_in(dir: PathBuf) -> Option<WorkerGuard> {
 }
 
 /// Determine the log directory.
+///
+/// `$WING_HOME/tui/logs` — resolved by [`crate::util::wing_home`] so the
+/// frontend keeps logging to the same root the backend uses, non-UTF-8 home
+/// directory included.
 fn log_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("WING_HOME") {
-        return PathBuf::from(home).join("tui").join("logs");
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".wing")
-        .join("tui")
-        .join("logs")
+    crate::util::wing_home::root().join("tui").join("logs")
 }
 
 /// File name for a given local date: `wing_YYYY-MM-DD.log`.

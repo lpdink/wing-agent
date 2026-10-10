@@ -34,14 +34,28 @@ fn os(text: &str) -> OsString {
     OsString::from(text)
 }
 
-/// Scratch `$WING_HOME`: the intake check runs before wing touches the
-/// environment, but a regression must fail here rather than against whatever
-/// gateway the developer has running.
-fn scratch_home() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-argv-non-utf8-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
+/// Scratch `$WING_HOME`, removed on drop.
+///
+/// The intake check runs before wing touches the environment, but a regression
+/// must fail here rather than against whatever gateway the developer has
+/// running. `tag` keeps concurrent tests from sharing (and deleting) one home.
+struct ScratchHome {
+    path: PathBuf,
+}
+
+impl ScratchHome {
+    fn new(tag: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("wing-e2e-argv-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(path.join("core")).expect("create scratch home");
+        Self { path }
+    }
+}
+
+impl Drop for ScratchHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 /// Spawn the real binary with `args` and wait for it to exit.
@@ -49,11 +63,10 @@ fn scratch_home() -> PathBuf {
 /// A timeout is part of the contract: the diagnostic must be *fail-fast*. A
 /// regression that let the bytes through would instead enter TUI / stdio mode
 /// and hang here, so the test fails loudly instead of blocking the suite.
-async fn run(args: &[OsString]) -> Output {
-    let home = scratch_home();
+async fn run(home: &ScratchHome, args: &[OsString]) -> Output {
     let child = Command::new(env!("CARGO_BIN_EXE_wing"))
         .args(args)
-        .env("WING_HOME", &home)
+        .env("WING_HOME", &home.path)
         .env_remove("RUST_LOG")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -61,16 +74,13 @@ async fn run(args: &[OsString]) -> Output {
         .kill_on_drop(true)
         .spawn()
         .expect("spawn wing");
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
+    match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await {
         Ok(result) => result.expect("wait for wing"),
         Err(_) => panic!(
             "`wing` did not exit on a non-UTF-8 argument — the command line must be rejected \
              before any frontend starts"
         ),
-    };
-    let _ = std::fs::remove_dir_all(&home);
-    output
+    }
 }
 
 /// The contract for an undecodable command line: usage exit code, stderr naming
@@ -105,7 +115,8 @@ fn assert_rejected(output: &Output, position: usize) {
 #[tokio::test]
 async fn plain_mode_reports_the_offending_argument() {
     // No subcommand, no `-p`: the path that would end up in the TUI.
-    let output = run(&[undecodable_flag()]).await;
+    let home = ScratchHome::new("plain");
+    let output = run(&home, &[undecodable_flag()]).await;
     assert_rejected(&output, 1);
 }
 
@@ -113,24 +124,25 @@ async fn plain_mode_reports_the_offending_argument() {
 async fn stdio_mode_reports_the_offending_argument() {
     // `-p` selects stdio mode, whose filter drops SDK-injected flags before
     // clap parses: it must never be handed bytes wing cannot decode.
-    let output = run(&[os("-p"), os("hi"), undecodable_flag()]).await;
+    let home = ScratchHome::new("stdio");
+    let output = run(&home, &[os("-p"), os("hi"), undecodable_flag()]).await;
     assert_rejected(&output, 3);
 }
 
 #[tokio::test]
-async fn valid_multibyte_arguments_are_not_rejected() {
+async fn valid_multibyte_arguments_reach_the_parser() {
     // Only *undecodable* bytes are refused — non-ASCII UTF-8 is ordinary input.
-    // (`--tag=中文` is afterwards refused by the misplaced-flag gate, so this
-    // exits non-zero too; what matters is which message comes out.)
-    let output = run(&[os("--tag=中文")]).await;
+    // (`--tag=中文` is then refused by the misplaced-flag gate, whose message is
+    // the observable proof that the argument arrived intact and un-mangled.)
+    let home = ScratchHome::new("multibyte");
+    let output = run(&home, &[os("--tag=中文")]).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("not valid UTF-8"),
         "multi-byte UTF-8 must not be reported as undecodable: {stderr}"
     );
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "it must reach the ordinary misplaced-flag gate instead: {stderr}"
+    assert!(
+        stderr.contains("top-level --tag only applies to stdio mode"),
+        "the argument must reach dispatch intact: {stderr}"
     );
 }

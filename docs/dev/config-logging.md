@@ -4,6 +4,8 @@
 
 `WING_HOME` 覆盖 `~/.wing`；后端数据统一落在 `$WING_HOME/core`（`wing/config/loader.py::get_wing_home()`）。`WING_SESSIONS_PATH` 额外覆盖 sessions 目录。
 
+两端的取值口径必须一致（`libs/core/wing/config/loader.py::get_wing_home()` ↔ `crates/wing/src/util/wing_home.rs`）：**空串视同未设置**（回落到 `~/.wing`），且路径**按字节原样使用**——非 UTF-8 的 home 是真实目录（Python 用 surrogateescape 拿到同一串字节），前端不得静默回落到 `~/.wing`，否则配置 / 日志 / 会话会分到两个 home。
+
 ```
 ~/.wing/
 ├── core/
@@ -129,6 +131,6 @@ awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_
 
 | 变量 | 作用 |
 |------|------|
-| `WING_HOME` | 覆盖 `~/.wing`（后端数据在 `$WING_HOME/core`，TUI 在 `$WING_HOME/tui`） |
+| `WING_HOME` | 覆盖 `~/.wing`（后端数据在 `$WING_HOME/core`，TUI 在 `$WING_HOME/tui`）；空串视同未设置，取值按字节原样使用（见上「目录布局」） |
 | `WING_SESSIONS_PATH` | 覆盖 sessions 目录 |
 | `RUST_LOG` | TUI tracing 级别（默认 `wing=warn,tokio_tungstenite=warn`） |

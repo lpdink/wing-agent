@@ -212,10 +212,10 @@ crates/wing/src/
 │   └── line_utils.rs / renderable.rs
 ├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
 ├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
+└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
 
 ### 其他
 

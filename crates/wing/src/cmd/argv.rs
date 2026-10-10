@@ -10,8 +10,10 @@
 //! The whole command line is decoded up front, in one place, so every path
 //! (TUI, stdio, orchestration subcommands) inherits the same contract. That
 //! includes arguments stdio mode would go on to *drop* (`filter_unknown_args`):
-//! a silently dropped flag and a mangled one look identical from the outside,
-//! and wing cannot pass bytes it cannot even name down to the gateway.
+//! wing would rather fail loudly on a command line it cannot read than accept a
+//! flag some later layer silently swallows — a dropped flag and a mangled one
+//! look identical from the outside, and this diagnostic names the exact
+//! argument, which is what the panic never did.
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -26,11 +28,12 @@ use std::fmt::Write as _;
 /// was caught here or by the parser.
 pub const EXIT_CODE_USAGE: u8 = 2;
 
-/// Longest escaped preview of an offending argument, in bytes.
+/// Raw bytes included in the escaped preview of an offending argument.
 ///
 /// A whole binary blob can arrive as a single argument (a shell inlining a
-/// file's contents); stderr stays readable by capping the preview and reporting
-/// how much was left out.
+/// file's contents); stderr stays readable by capping the preview — the escape
+/// below grows each byte to at most 4 characters — and reporting how much was
+/// left out.
 const PREVIEW_BYTES: usize = 96;
 
 /// Decode the command line into UTF-8 `String`s.
@@ -69,8 +72,9 @@ where
 pub struct NonUtf8Arg {
     /// 1-based `argv` index (`argv[0]` is the program name).
     pub position: usize,
-    /// The argument's bytes, quoted and escaped (`"--bad=\xff"`), capped at
-    /// [`PREVIEW_BYTES`].
+    /// The argument's bytes, quoted and escaped (`"--bad=\xff"`); at most
+    /// [`PREVIEW_BYTES`] raw bytes go in, so the escaped form is at most 4×
+    /// that plus the quotes and the "more bytes" note.
     pub preview: String,
 }
 
