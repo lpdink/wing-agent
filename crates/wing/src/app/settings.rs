@@ -421,7 +421,8 @@ impl App {
     }
 
     /// 保存回执：transcript 里的一条 notice（`NoticeRow` 的 rail 形态）+
-    /// 一条摘要 toast（面板是全屏的，回执在它底下看不见）。
+    /// 一条摘要 toast（卡片盖住聊天带的中段，回执很可能正好在它底下看不见；
+    /// 而且保存后紧接着就可能关面板，toast 是唯一一定能被看到的那一份）。
     pub(super) fn show_settings_save_notice(
         &mut self,
         interface: &InterfaceSaveReport,

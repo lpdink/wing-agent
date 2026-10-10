@@ -110,8 +110,9 @@ const TREE_SHARE: u16 = 58;
 
 /// 卡片矩形（浮层几何的唯一实现；10 与测试共用）。
 ///
-/// `terminal` 是整个终端（或 setup 屏给面板的那块区域）：卡片在其中居中，
-/// 终端小于 `80×24` 时退化为铺满 `terminal`。
+/// `terminal` 是整个终端：卡片在其中居中，终端小于 `80×24` 时退化为铺满。
+/// **setup 向导不走这里**——它有自己的三块布局（说明 / 面板 / 提示），把面板整块
+/// 渲染进 `panel_area`（那里没有"背景"可言，浮层无从谈起）。
 pub fn card_area(terminal: Rect) -> Rect {
     if terminal.width < FLOAT_MIN_WIDTH || terminal.height < FLOAT_MIN_HEIGHT {
         return terminal;
@@ -241,25 +242,23 @@ impl<'a> SettingsOverlay<'a> {
         clamp_line(compose(&segments, palette), budget)
     }
 
-    /// 标题栏下面那一行：过期横幅 > 搜索行 > `/ 搜索…` 占位。
+    /// 标题栏下面那一行：**搜索行** > 过期横幅 > `/ 搜索…` 占位。
     ///
     /// v1 把搜索画在标题栏里（整条替换）；v2 的浮层有一行富余，搜索因此有了固定的家，
     /// 标题栏的路径 / 未保存数 / 有效性也就不会在输入 query 时集体消失。
+    ///
+    /// 搜索优先于横幅（审查 S2）：query 是**输入回显**，被顶掉就等于"敲了字看不见"；
+    /// 横幅退化成同一行尾部的一段 `⚠ 已被其它客户端修改`（放不下就先丢它——
+    /// 退出搜索后它整条回来）。
     fn subheader_line(&self, width: usize) -> Line<'static> {
         let palette = self.palette;
-        if self.panel.is_stale() {
-            return clamp_line(
-                Line::from(Span::styled(
-                    " ⚠ 配置已被其它客户端修改，按 R 重新载入".to_string(),
-                    Style::default().fg(palette.warning),
-                )),
-                width,
-            );
-        }
         if let Some(query) = self.panel.search_query() {
             // 长 query 左截断：光标在末尾，头部截断会连 `▏` 一起丢掉。
             let text = format!("搜索: {query}");
-            let tail = format!("  {} 命中", self.panel.search_hits());
+            let mut tail = format!("  {} 命中", self.panel.search_hits());
+            if self.panel.is_stale() {
+                tail.push_str("  ⚠ 已被其它客户端修改");
+            }
             let available = width.saturating_sub(2 + display_width(&tail) + 1);
             let text = if display_width(&text) > available {
                 truncate_left_to_display_width(&text, available)
@@ -276,6 +275,15 @@ impl<'a> SettingsOverlay<'a> {
                     ),
                     Span::styled(tail, Style::default().fg(palette.dim)),
                 ]),
+                width,
+            );
+        }
+        if self.panel.is_stale() {
+            return clamp_line(
+                Line::from(Span::styled(
+                    " ⚠ 配置已被其它客户端修改，按 R 重新载入".to_string(),
+                    Style::default().fg(palette.warning),
+                )),
                 width,
             );
         }
@@ -545,6 +553,16 @@ pub fn anchors_viewport_rows(panel: &SettingsPanel, area: Rect) -> u16 {
     regions_for(panel, area).map_or(0, |regions| {
         regions.anchors.map_or(0, |anchors| anchors.height)
     })
+}
+
+/// 这一帧**有没有左栏**（窄卡片放不下时右栏独占）。
+///
+/// 10 每帧把它喂回面板（[`SettingsPanel::set_anchors_visible`]）：焦点能待在哪一栏，
+/// 取决于那一栏存不存在——两边读的是同一份 [`Regions`]，不会各说各话。
+pub fn has_anchor_column(panel: &SettingsPanel, area: Rect) -> bool {
+    regions_for(panel, area)
+        .and_then(|regions| regions.anchors)
+        .is_some()
 }
 
 /// 与 [`SettingsOverlay::render`] 同一份区域切分（翻页步长必须与实际画出来的行数一致）。

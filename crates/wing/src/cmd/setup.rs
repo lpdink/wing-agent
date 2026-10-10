@@ -75,6 +75,7 @@ use crate::tui::TermEvent;
 use crate::ui::settings::SettingsCatalogs;
 use crate::ui::settings::SettingsOverlay;
 use crate::ui::settings::anchors_viewport_rows;
+use crate::ui::settings::has_anchor_column;
 use crate::ui::settings::tree_viewport_rows;
 use crate::ui::shimmer::is_light_theme;
 use crate::ui::shimmer::to_rgb;
@@ -670,6 +671,7 @@ fn draw_frame<B: Backend>(
                 // 08 的契约：每帧同步两栏各自的可见行数，再 Clear + 整块 render（同 10 的落点）。
                 panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
                 panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
+                panel.set_anchors_visible(has_anchor_column(panel, panel_area));
                 frame.render_widget(Clear, panel_area);
                 let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
                 frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
@@ -1012,7 +1014,8 @@ mod tests {
         let root = gateway_catalog();
         SettingsSchemaResponse {
             version: "0.0.0-test".into(),
-            groups: SettingGroup::derive_from_sections(&root, "g"),
+            // 空表 = 面板自己按 section 兜底推导（真网关会发 groups[]）。
+            groups: Vec::new(),
             root,
             config_path: "/home/u/.wing/core/config.yaml".into(),
         }

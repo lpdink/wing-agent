@@ -83,9 +83,20 @@
 //!
 //! ## 左栏键位
 //!
-//! `↑` `↓` / `Home` `End` / `PageUp` `PageDown` 选分组（进入即展开该组成员、右栏回到首行）；
-//! `Enter` / `→` / `Tab` 进右栏；`←` 无操作（已经在最左）；`Esc` 走上面的阶梯 7–8；
+//! `↑` `↓` / `Home` `End` / `PageUp` `PageDown` 选分组；`Enter` / `→` / `Tab` 进右栏；
+//! `←` 无操作（已经在最左）；`Esc` 走上面的阶梯 7–8；
 //! `s` / `R` / `Ctrl+R` / `/` / `p` / `?` 与右栏同义（两栏共用那一段处理）。
+//!
+//! 换到**别的**分组时（[`SettingsPanel::enter_group`]）展开该组的顶层成员、右栏回到首行；
+//! 在同一组上按 `Home` / `End` 只是移动锚点光标，不动右栏。
+//!
+//! ## 左栏可能不存在（窄卡片）
+//!
+//! 卡片太窄放不下两栏时 08 只画右栏，并每帧用
+//! [`SettingsPanel::set_anchors_visible`]`(false)` 告知。此后：焦点被收回右栏、
+//! `Tab` 无处可切、`←` 与 `Esc` 不再"退一栏"（`Esc` 直接走放弃改动 / 关闭），
+//! 键位栏也不再提"切栏"。**焦点能待在哪一栏，取决于那一栏存不存在**——这不是渲染细节
+//! 渗进状态机，而是同一个事实的两面（用户不该对着看不见的栏按键）。
 //!
 //! ## 显式动作 vs 浏览
 //!
@@ -310,6 +321,9 @@ pub struct SettingsPanel {
     viewport_rows: usize,
     /// 左栏可见行数（`PageUp` / `PageDown` 在锚点上的步长）。
     anchor_viewport_rows: usize,
+    /// 08 报告：这一帧**有没有画出左栏**（窄卡片放不下时右栏独占，见 08 的 `split_columns`）。
+    /// 不可见 ⇒ 焦点不许停在左栏，`Tab` 无处可去，`Esc` 直接走"放弃改动 / 关闭"两级。
+    anchors_visible: bool,
 }
 
 impl SettingsPanel {
@@ -375,6 +389,7 @@ impl SettingsPanel {
             restart_required: Vec::new(),
             viewport_rows: 10,
             anchor_viewport_rows: 8,
+            anchors_visible: true,
         };
         // 进入第 0 组：展开它的顶层成员，右栏一进来就有内容（不用逐个 Enter）。
         panel.enter_group(0);
@@ -415,8 +430,6 @@ impl SettingsPanel {
             .enumerate()
             .map(|(index, anchor)| AnchorView {
                 title: anchor.title.clone(),
-                root: anchor.root,
-                doc: anchor.doc.clone(),
                 selected: index == self.group_cursor,
                 dirty: self.group_dirty(anchor),
                 problems: self.group_problems(anchor),
@@ -508,11 +521,11 @@ impl SettingsPanel {
 
     /// 锚点表重算后把光标尽量留在同一组（按 id；找不到就钳制），
     /// 并尽量把右栏光标锚回原来那一行（`R` 重载 / 注入 Interface 根之后不该被弹回首行）。
-    fn restore_group(&mut self, previous: &str, row_anchor: Option<(Root, String)>) {
+    fn restore_group(&mut self, previous: (Root, &str), row_anchor: Option<(Root, String)>) {
         let index = self
             .anchors
             .iter()
-            .position(|anchor| anchor.id == previous)
+            .position(|anchor| anchor.is(previous.0, previous.1))
             .unwrap_or_else(|| self.group_cursor.min(self.anchors.len().saturating_sub(1)));
         self.enter_group(index);
         if let Some((root, path)) = row_anchor
@@ -527,7 +540,8 @@ impl SettingsPanel {
     /// 锚点表随之重算（Interface 锚点出现 / 消失），光标尽量留在同一组。
     pub fn set_interface(&mut self, source: InterfaceSource) {
         let row_anchor = self.row_anchor();
-        let group_id = self.group().map(|anchor| anchor.id.clone());
+        // 身份是 `(root, id)`；id 克隆一份，避免跨着后面的赋值借用 self。
+        let group_id = self.group().map(|anchor| (anchor.root, anchor.id.clone()));
         self.interface_catalog = Some(source.catalog);
         self.interface_groups = source.groups;
         self.doc.set_interface_doc(source.doc);
@@ -535,7 +549,7 @@ impl SettingsPanel {
         self.prune_expanded();
         self.recompute_filter();
         match group_id {
-            Some(id) => self.restore_group(&id, row_anchor),
+            Some((root, id)) => self.restore_group((root, &id), row_anchor),
             None => self.rebuild(row_anchor),
         }
     }
@@ -559,7 +573,8 @@ impl SettingsPanel {
     /// 丢弃本地改动（编辑 / 提示 / 选择项一并收起）。10 在重拉 `schema`+`get` 之后调用。
     pub fn apply_snapshot(&mut self, schema: &SettingsSchemaResponse, state: SettingsGetResponse) {
         let row_anchor = self.row_anchor();
-        let group_id = self.group().map(|anchor| anchor.id.clone());
+        // 身份是 `(root, id)`；id 克隆一份，避免跨着后面的赋值借用 self。
+        let group_id = self.group().map(|anchor| (anchor.root, anchor.id.clone()));
         self.gateway_catalog = schema.root.clone();
         self.gateway_groups = schema.groups.clone();
         self.config_path = schema.config_path.clone();
@@ -576,7 +591,7 @@ impl SettingsPanel {
         self.prune_expanded();
         self.recompute_filter();
         match group_id {
-            Some(id) => self.restore_group(&id, row_anchor),
+            Some((root, id)) => self.restore_group((root, &id), row_anchor),
             None => self.rebuild(row_anchor),
         }
     }
@@ -661,6 +676,23 @@ impl SettingsPanel {
     /// 08 每帧告知**左栏**的可见行数（锚点上的翻页步长）。
     pub fn set_anchor_viewport_rows(&mut self, rows: usize) {
         self.anchor_viewport_rows = rows.max(1);
+    }
+
+    /// 08 每帧告知左栏有没有被画出来（窄卡片下右栏独占整块）。
+    ///
+    /// 这不是"渲染细节渗进状态机"，而是**同一个事实的两面**：焦点能待在哪一栏，
+    /// 取决于那一栏存不存在。左栏不可见时把焦点收回右栏，于是 `↑↓` 仍然是"移动光标"、
+    /// `Esc` 仍然是"退出面板"，用户不会对着一个看不见的栏按键。
+    pub fn set_anchors_visible(&mut self, visible: bool) {
+        self.anchors_visible = visible;
+        if !visible && self.focus == Focus::Groups {
+            self.focus = Focus::Items;
+        }
+    }
+
+    /// 左栏此刻是否可见（键位栏据此决定要不要提"切栏"）。
+    pub fn anchors_visible(&self) -> bool {
+        self.anchors_visible
     }
 
     pub fn view(&self) -> View {
@@ -757,6 +789,7 @@ impl SettingsPanel {
             if self.focus == Focus::Groups {
                 return "↑↓ 选分组 · Enter 进那一组 · Tab 切栏 · Esc 返回树".into();
             }
+            // （左栏不可见时焦点恒在右栏，走下面那条）
             return if self.problems.is_empty() {
                 "暂无问题 · Esc 返回树".into()
             } else {
@@ -784,7 +817,9 @@ impl SettingsPanel {
                 parts.push("J/K 排序 · d 删除".into());
             }
         }
-        parts.push("Tab/←→ 切栏".into());
+        if self.anchors_visible {
+            parts.push("Tab/←→ 切栏".into());
+        }
         parts.push("s 保存".into());
         parts.push(if self.problems.is_empty() {
             "p 问题".into()
@@ -797,10 +832,11 @@ impl SettingsPanel {
             parts.push("Ctrl+R 立即重启".into());
         }
         parts.push("? 帮助".into());
-        parts.push(match (self.focus, self.dirty_count() > 0) {
-            (Focus::Items, _) => "Esc 回左栏".into(),
-            (Focus::Groups, true) => "Esc 放弃改动".into(),
-            (Focus::Groups, false) => "Esc 关闭".into(),
+        let back_to_groups = self.focus == Focus::Items && self.anchors_visible;
+        parts.push(match (back_to_groups, self.dirty_count() > 0) {
+            (true, _) => "Esc 回左栏".into(),
+            (false, true) => "Esc 放弃改动".into(),
+            (false, false) => "Esc 关闭".into(),
         });
         parts.join(" · ")
     }
@@ -1296,7 +1332,11 @@ impl SettingsPanel {
     }
 
     /// `Tab`：两栏之间切焦点（v2 取代了 v1 的「切根」——Interface 现在是最后一个锚点）。
+    /// 左栏没画出来时无处可切（无操作）。
     fn toggle_focus(&mut self) {
+        if !self.anchors_visible {
+            return;
+        }
         self.focus = match self.focus {
             Focus::Groups => Focus::Items,
             Focus::Items => Focus::Groups,
@@ -1315,8 +1355,11 @@ impl SettingsPanel {
                 self.rebuild(anchor);
                 return SettingsAction::None;
             }
-            self.focus = Focus::Groups;
-            return SettingsAction::None;
+            if self.anchors_visible {
+                self.focus = Focus::Groups;
+                return SettingsAction::None;
+            }
+            // 没有左栏可退（窄卡片）：直接走"放弃改动 / 关闭"那两级。
         }
         if self.dirty_count() > 0 {
             self.pending = Some(Pending::Discard {
@@ -1338,7 +1381,9 @@ impl SettingsPanel {
     /// 右栏的 `←`：折叠 / 跳父行 / enum 往前切值；**已到分组顶层（无处可去）则回左栏**。
     fn left_action(&mut self) -> SettingsAction {
         let Some(row) = self.current_row().cloned() else {
-            self.focus = Focus::Groups;
+            if self.anchors_visible {
+                self.focus = Focus::Groups;
+            }
             return SettingsAction::None;
         };
         if self
@@ -1375,11 +1420,12 @@ impl SettingsPanel {
         }
     }
 
-    /// `←` 的「往上一级」：有父行就跳父行，已经在分组顶层（depth 0）就退回左栏。
+    /// `←` 的「往上一级」：有父行就跳父行，已经在分组顶层（depth 0）就退回左栏
+    /// （左栏没画出来时无处可退，无操作）。
     fn left_or_out(&mut self, depth: usize) {
         if depth > 0 {
             self.goto_parent();
-        } else {
+        } else if self.anchors_visible {
             self.focus = Focus::Groups;
         }
     }

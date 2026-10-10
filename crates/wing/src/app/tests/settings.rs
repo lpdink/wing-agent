@@ -32,10 +32,14 @@ use super::images::app_with_images;
 use super::images::draw_until;
 use super::images::has_placeholder;
 use super::images::kitty;
+use super::images::placeholder_rect;
 use super::images::write_png;
+use super::support::drag as mouse_drag;
+use super::support::draw;
 use super::support::frame_text;
 use super::support::hover;
 use super::support::press as mouse_press;
+use super::support::release as mouse_release;
 use super::support::sync_event;
 use super::support::test_app;
 use super::support::test_terminal;
@@ -1428,4 +1432,146 @@ async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
     assert_eq!(endpoint.http_base, "http://127.0.0.1:32523", "早退不碰端点");
     assert!(!app.status.connected, "早退不改连接态");
     assert!(app.drain_intents().is_empty(), "早退不产出任何副作用");
+}
+
+// ── 浮层的两条边界（审查 S1 / S4）────────────────────────────
+
+/// 一张带链接的聊天 + 一台 100×30 的终端：链接的 hit box 落在卡片底下。
+fn app_with_link_under_the_card() -> App {
+    let mut app = test_app();
+    app.chat.push(ChatCell::AssistantMessage(
+        "see [docs](https://example.com) for details".into(),
+    ));
+    app
+}
+
+/// 链接 hit box 的左上角（屏幕坐标）。
+fn link_cell(app: &App) -> (u16, u16) {
+    let (row, links) = app.chat.frame_links().first().expect("帧里有链接").clone();
+    (links[0].start, row)
+}
+
+#[test]
+fn a_click_on_the_card_does_not_open_the_link_underneath() {
+    let mut app = app_with_link_under_the_card();
+    let mut terminal = test_terminal(100, 30);
+    draw(&mut app, &mut terminal);
+    let at = link_cell(&app);
+    let card = crate::ui::settings::card_area(terminal.backend().buffer().area);
+    assert!(
+        card.contains(ratatui::layout::Position::new(at.0, at.1)),
+        "夹具前提：链接在卡片底下（{at:?} vs {card:?}）"
+    );
+
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        Some(interface_source("magenta")),
+    );
+    draw(&mut app, &mut terminal);
+    // 卡片盖住的 hit box 已经作废（看不见的不许点得着）。
+    assert!(
+        app.chat.frame_links().is_empty(),
+        "卡片下的链接 hit box 要作废：{:?}",
+        app.chat.frame_links()
+    );
+    // 再点同一格：不产生 OpenLink，也不产生任何意图。
+    app.handle_mouse(mouse_press(at));
+    app.handle_mouse(mouse_release(at));
+    assert!(
+        app.drain_intents().is_empty(),
+        "浮层期间背景不接指针（审查 S1）"
+    );
+    // 滚轮是**独立通道**（`app::mouse` 的模块 doc：永远滚聊天视图，不被任何浮层认领）——
+    // 背景滚一下不改面板的任何状态，v1 就是这个口径，这里不动。
+}
+
+#[test]
+fn a_drag_on_the_card_does_not_copy_a_stale_snapshot() {
+    let mut app = app_with_link_under_the_card();
+    let mut terminal = test_terminal(100, 30);
+    draw(&mut app, &mut terminal);
+    let at = link_cell(&app);
+
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        Some(interface_source("magenta")),
+    );
+    draw(&mut app, &mut terminal);
+    app.handle_mouse(mouse_press(at));
+    app.handle_mouse(mouse_drag((at.0 + 4, at.1)));
+    app.handle_mouse(mouse_release((at.0 + 4, at.1)));
+    // 选区绘制被浮层挡掉、`capture_visible_rows` 也不跑：与其复制到打开面板前
+    // 那一帧的快照，不如根本不认领这个手势（审查 S1 第 2 条）。
+    assert!(app.drain_intents().is_empty(), "浮层期间不产生复制意图");
+    assert!(!app.selection.is_press_active(), "没有留下半截选区");
+}
+
+#[test]
+fn a_picture_outside_the_card_is_still_painted() {
+    // 浮层只挡它盖住的那张图；露在外面的背景照画（masks 写成整块区域就退化成 v1）。
+    let dir = TempDir::new("settings-card-mask");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 120, 60);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    // 200 列：卡片 110 列居中（x 45..155），小图的盒子在最左边，两者不相交。
+    let mut terminal = test_terminal(200, 40);
+    let buf = draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let before = placeholder_rect(&buf).expect("画出来了");
+    let card = crate::ui::settings::card_area(buf.area);
+    assert!(
+        !card.intersects(before),
+        "夹具前提：图在卡片之外（{before:?} vs {card:?}）"
+    );
+
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        Some(interface_source("magenta")),
+    );
+    // 打开面板会整屏重画一次（`needs_full_redraw` ⇒ `terminal.clear()` +
+    // `images.invalidate()`），编码要过一两个 worker 轮次才回来 —— 所以这里等到它回来，
+    // 断言的是"背景那张图最终照画"，而不是"同一帧内不闪"。
+    let buf = draw_until(&mut app, &mut terminal, "the picture is back", |_, buf| {
+        has_placeholder(buf)
+    });
+    assert_eq!(
+        placeholder_rect(&buf),
+        Some(before),
+        "同一张图、同一个盒子（没有被重排或撕成半张）"
+    );
+}
+
+#[test]
+fn a_picture_under_the_card_is_skipped_whole() {
+    // 上一条的另一半：盖住的那张整张跳过（半张覆盖会撕碎图形协议）。
+    let dir = TempDir::new("settings-card-mask");
+    let plot = dir.file("plot.png");
+    write_png(&plot, 800, 600);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
+    app.chat
+        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
+    let mut terminal = test_terminal(120, 40);
+    let buf = draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let before = placeholder_rect(&buf).expect("画出来了");
+    let card = crate::ui::settings::card_area(buf.area);
+    assert!(
+        card.intersects(before),
+        "夹具前提：图被卡片盖住（{before:?} vs {card:?}）"
+    );
+
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        Some(interface_source("magenta")),
+    );
+    let buf = super::images::frame(&mut app, &mut terminal);
+    assert!(!has_placeholder(&buf), "被卡片盖住的那张整张不画");
 }

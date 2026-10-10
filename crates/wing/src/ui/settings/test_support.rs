@@ -509,16 +509,19 @@ pub(crate) fn product_values() -> Value {
 }
 
 /// 产品口径的面板（Gateway 7 组 + Interface 1 组 = 8 个锚点）。
-pub(crate) fn product_panel() -> (SettingNode, SettingNode, SettingsPanel) {
-    let gateway = product_catalog();
-    let interface = interface_catalog();
-    let schema = SettingsSchemaResponse {
+/// 产品口径的 schema（真目录 + 真分组表）。
+pub(crate) fn product_schema() -> SettingsSchemaResponse {
+    SettingsSchemaResponse {
         version: "0.0.0-test".into(),
-        root: gateway.clone(),
+        root: product_catalog(),
         config_path: "~/.wing/core/config.yaml".into(),
         groups: product_groups(),
-    };
-    let state = SettingsGetResponse {
+    }
+}
+
+/// 产品口径的 state（真稀疏文档 + 两个 provider 的密文）。
+pub(crate) fn product_state() -> SettingsGetResponse {
+    SettingsGetResponse {
         values: product_values(),
         secrets: {
             let mut secrets = HashMap::new();
@@ -542,20 +545,26 @@ pub(crate) fn product_panel() -> (SettingNode, SettingNode, SettingsPanel) {
         problems: vec![],
         setup_mode: false,
         config_path: "~/.wing/core/config.yaml".into(),
-    };
+    }
+}
+
+/// 产品口径的 Interface 注入内容（用 [`crate::config::catalog::interface_groups`] 的真声明）。
+pub(crate) fn product_interface() -> InterfaceSource {
+    let catalog = interface_catalog();
+    InterfaceSource {
+        groups: crate::config::catalog::interface_groups(),
+        catalog,
+        doc: json!({"colors": {"accent": "cyan", "preset": "wing"}}),
+    }
+}
+
+pub(crate) fn product_panel() -> (SettingNode, SettingNode, SettingsPanel) {
+    let gateway = product_catalog();
+    let interface = interface_catalog();
     let panel = SettingsPanel::new(
-        &schema,
-        state,
-        Some(InterfaceSource {
-            groups: vec![SettingGroup {
-                id: "interface".into(),
-                title: "Interface".into(),
-                doc: "TUI 自身：配色 / 布局 / 渲染".into(),
-                members: interface.children.iter().map(|c| c.key.clone()).collect(),
-            }],
-            catalog: interface.clone(),
-            doc: json!({"colors": {"accent": "cyan", "preset": "wing"}}),
-        }),
+        &product_schema(),
+        product_state(),
+        Some(product_interface()),
         View::Tree,
     );
     (gateway, interface, panel)

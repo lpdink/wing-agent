@@ -2994,3 +2994,68 @@ fn a_reload_keeps_both_the_group_and_the_row_under_the_cursor() {
     assert_eq!(panel.group().unwrap().id, "net", "分组不动");
     assert_eq!(cursor_path(&panel), "gateway.port", "右栏光标锚回原行");
 }
+
+#[test]
+fn an_invisible_left_column_takes_focus_esc_and_tab_with_it() {
+    // 窄卡片：08 只画右栏，每帧用 set_anchors_visible(false) 告知。
+    let mut panel = panel();
+    assert_eq!(panel.focus(), Focus::Groups, "开面板时焦点默认在左栏");
+    panel.set_anchors_visible(false);
+    assert_eq!(panel.focus(), Focus::Items, "左栏不存在 ⇒ 焦点被收回右栏");
+    assert!(
+        !panel.footer_hint().contains("切栏"),
+        "{}",
+        panel.footer_hint()
+    );
+
+    // `Tab` 无处可切。
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(panel.focus(), Focus::Items);
+
+    // 右栏首行就是 depth 0 的 `providers`：`←` 先折叠它，再按本该退左栏 —— 这里无处可退。
+    assert_eq!(cursor_path(&panel), "providers");
+    press_code(&mut panel, KeyCode::Left);
+    assert!(
+        !panel.rows().iter().any(|row| row.path == "providers[0]"),
+        "折叠了"
+    );
+    press_code(&mut panel, KeyCode::Left);
+    assert_eq!(panel.focus(), Focus::Items, "不退到一个看不见的栏");
+
+    // `Esc` 直接走放弃改动 / 关闭那两级。
+    assert_eq!(
+        press_code(&mut panel, KeyCode::Esc),
+        SettingsAction::Close { discard: false }
+    );
+
+    // 脏面板仍然是二次确认，不会一按就把改动丢了。跨组导航只能靠搜索（左栏不可见），
+    // 这条路径本身就是 v2 的：搜索会把焦点放进右栏并跳到有命中的组。
+    let mut panel = panel_with(json!({}));
+    panel.set_anchors_visible(false);
+    press_code(&mut panel, KeyCode::Char('/'));
+    type_text(&mut panel, "port");
+    assert_eq!(panel.group().unwrap().id, "net", "搜索跳到了那一组");
+    assert_eq!(panel.focus(), Focus::Items, "搜索把焦点放进右栏");
+    // 搜索结果里挪到 gateway.port（`goto` 助手会经左栏换组，这里左栏不存在）。
+    while cursor_path(&panel) != "gateway.port" {
+        press_code(&mut panel, KeyCode::Down);
+    }
+    // 搜索态下 `Enter` 的语义是"退出搜索、光标留在命中行"，再按一次才进编辑器。
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.search_query().is_none(), "第一次 Enter 退出搜索");
+    assert_eq!(cursor_path(&panel), "gateway.port", "光标留在命中行");
+    press_code(&mut panel, KeyCode::Enter);
+    press(&mut panel, ctrl('u'));
+    type_text(&mut panel, "1234");
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.dirty_count() > 0, "改动落地");
+    assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
+    assert!(panel.pending.is_some(), "脏 ⇒ 二次确认");
+
+    // 左栏回来了 ⇒ 焦点语义恢复（`Esc` 先退一栏，而不是直接弹放弃确认）。
+    panel.pending = None;
+    panel.set_anchors_visible(true);
+    assert_eq!(panel.focus(), Focus::Items);
+    assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
+    assert_eq!(panel.focus(), Focus::Groups, "左栏可见时 Esc 先退一栏");
+}

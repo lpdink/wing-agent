@@ -163,7 +163,6 @@ fn shorten(text: &str, budget: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::panels::settings::Root;
 
     fn palette() -> ThemePalette {
         ThemePalette::default()
@@ -172,8 +171,6 @@ mod tests {
     fn view(title: &str, selected: bool) -> AnchorView {
         AnchorView {
             title: title.to_string(),
-            root: Root::Gateway,
-            doc: String::new(),
             selected,
             dirty: false,
             problems: 0,

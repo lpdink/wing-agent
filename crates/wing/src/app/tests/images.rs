@@ -243,7 +243,7 @@ pub(super) fn has_placeholder(buf: &Buffer) -> bool {
 
 /// The bounding box of the painted cells — the rect the picture actually
 /// covered.
-fn placeholder_rect(buf: &Buffer) -> Option<Rect> {
+pub(super) fn placeholder_rect(buf: &Buffer) -> Option<Rect> {
     let cells = placeholder_cells(buf);
     let (first_x, first_y) = *cells.first()?;
     let mut rect = Rect::new(first_x, first_y, 1, 1);

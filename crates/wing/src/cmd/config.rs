@@ -2208,9 +2208,7 @@ mod tests {
     use std::sync::Mutex;
 
     use clap::Parser;
-    use wing_api_client::models::{
-        ApplyScope, ReloadResponse, ReloadResultItem, SettingChoice, SettingGroup,
-    };
+    use wing_api_client::models::{ApplyScope, ReloadResponse, ReloadResultItem, SettingChoice};
 
     // ------------------------------------------------------------
     // fixture：目录
@@ -2464,7 +2462,8 @@ mod tests {
                     version: "0.0.0".to_string(),
                     root: root.clone(),
                     config_path: "/tmp/wing/config.yaml".to_string(),
-                    groups: SettingGroup::derive_from_sections(&root, "g"),
+                    // CLI 不消费分组；空表 = 面板自己按 section 兜底推导。
+                    groups: Vec::new(),
                 }),
                 get: Ok(get_response(values)),
                 status: Ok(SettingsStatusResponse {

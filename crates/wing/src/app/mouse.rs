@@ -24,8 +24,8 @@
 //! Call directions: the run loop calls [`App::handle_mouse`] and turns the
 //! [`MouseOutcome`] into a frame request; this module calls the composer /
 //! chat selection handlers of the selection lane and the modal lane's
-//! [`App::composer_pointer_blocked`] guard (it does not re-derive "is a modal
-//! up?" on its own).
+//! [`App::composer_pointer_blocked`] / [`App::background_pointer_blocked`]
+//! guards (it does not re-derive "is a modal up?" on its own).
 
 use crate::ui::scrollbar;
 use crate::ui::scrollbar::ScrollbarGeometry;
@@ -91,6 +91,11 @@ impl PointerOwner {
     /// live widget state; none of them mutates anything — the press handler
     /// does that once, after the chain has picked a winner.
     fn claims(self, app: &App, column: u16, row: u16) -> bool {
+        // 设置面板是**浮层模态**：卡片四周的聊天还看得见，但它不是可交互的表面
+        // （见 [`App::background_pointer_blocked`]）。四个背景认领一律先过这道门。
+        if app.background_pointer_blocked() {
+            return false;
+        }
         match self {
             PointerOwner::Scrollbar => app.scrollbar_at(column, row).is_some(),
             // The composer sits below the chat band, and it is claimed only

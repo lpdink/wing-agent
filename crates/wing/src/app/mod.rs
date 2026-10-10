@@ -772,6 +772,7 @@ impl App {
                 panel.set_anchor_viewport_rows(crate::ui::settings::anchors_viewport_rows(
                     panel, card,
                 ) as usize);
+                panel.set_anchors_visible(crate::ui::settings::has_anchor_column(panel, card));
             }
             if let Some(panel) = self.settings_panel.as_ref()
                 && let Some(card) = settings_card
@@ -786,6 +787,10 @@ impl App {
                     &palette,
                 )
                 .render(card, frame.buffer_mut());
+                // 卡片盖住的链接 hit box 要作废（与 toast 同一条不变量：看不见的
+                // hit box 不许打开看不见的链接）。指针侧另有一道门
+                // （`background_pointer_blocked`），这里保证的是**表本身**不撒谎。
+                self.chat.mask_links(card);
             }
 
             // Toast overlay (rendered last, on top of everything).
@@ -841,8 +846,9 @@ impl App {
             // user was actually looking at. The composer needs no snapshot —
             // its wrapping is ours, so the copy comes from the draft itself.
             //
-            // 设置面板开着时不画：面板是全屏 overlay，拖拽的坐标落在它底下的 chat
-            // band 上（选区锚在内容坐标），高亮画出来只会泼在面板上（打开面板时
+            // 设置面板开着时不画：面板是**模态浮层**，键盘已经被它接管、指针也不再
+            // 认领背景（`background_pointer_blocked`），而拖拽坐标落在卡片四周的 chat
+            // band 上（选区锚在内容坐标）——高亮画出来只会和卡片打架（打开面板时
             // 已有的选区已经被取消，这里挡的是"面板开着时新起的拖拽"）。
             if self.selection.is_press_active() && self.settings_panel.is_none() {
                 match self.selection.region() {

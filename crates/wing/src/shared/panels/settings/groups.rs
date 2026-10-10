@@ -6,7 +6,9 @@
 //!
 //! 1. 把两份声明拼成一张**有序**锚点表（Gateway 的组在前、Interface 的组在后）；
 //! 2. 把成员收敛成 catalog 里真实存在的 root 子节点（按声明序，幻影成员丢掉）；
-//! 3. 老网关兜底：没有 `groups[]` 时按 root 子节点的 `section` 推导（[`SettingGroup::derive_from_sections`]）。
+//! 3. 老网关兜底：没有 `groups[]` 时按 root 子节点的 `section` 推导（[`derive_groups`]）。
+//!    这条**策略**住在这里而不是协议镜像层（`wing-api-client`）：那一层只镜像后端发的东西，
+//!    "后端没发时前端怎么办"是面板自己的事。
 //!
 //! 前端**不许**硬编码组名 / 顺序 / 成员：这张表就是左列的全部事实。
 
@@ -16,6 +18,9 @@ use wing_api_client::models::SettingNode;
 use super::doc::Root;
 
 /// 一个左列锚点（= 一个业务分组）。
+///
+/// **身份是 `(root, id)`**，不是 `id`：Gateway 的组由后端声明、Interface 的由 Rust 侧声明，
+/// 两个命名空间互不知情（后端哪天加一个叫 `interface` 的组也不该锚到错的栏）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupAnchor {
     /// 这一组属于哪个根（决定右栏读哪份文档 / 哪棵目录）。
@@ -30,13 +35,20 @@ pub struct GroupAnchor {
     pub members: Vec<String>,
 }
 
+impl GroupAnchor {
+    /// 身份匹配（见结构体 doc）。
+    pub(crate) fn is(&self, root: Root, id: &str) -> bool {
+        self.root == root && self.id == id
+    }
+}
+
 /// 锚点的只读投影（08 渲染左列用；徽标数由面板现算）。
+///
+/// 只带左列**画得出来**的东西：组头说明与所属根都从 `SettingsPanel::group()` 拿，
+/// 在这里再放一份就是两份真相。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorView {
     pub title: String,
-    pub root: Root,
-    /// 组头说明（悬停 / 详情用；左列本身只画 title）。
-    pub doc: String,
     /// 光标在这一项上。
     pub selected: bool,
     /// 组内有未保存的改动。
@@ -71,7 +83,7 @@ fn anchors_of(root: Root, catalog: &SettingNode, groups: &[SettingGroup]) -> Vec
             Root::Gateway => "gateway:",
             Root::Interface => "interface:",
         };
-        SettingGroup::derive_from_sections(catalog, prefix)
+        derive_groups(catalog, prefix)
     } else {
         groups.to_vec()
     };
@@ -115,6 +127,33 @@ fn anchors_of(root: Root, catalog: &SettingNode, groups: &[SettingGroup]) -> Vec
         });
     }
     anchors
+}
+
+/// 老网关兼容：没有 `groups[]` 时，从 root 直接子节点的 `section` 推导分组。
+///
+/// 连续的同一 `section` 合成一组（顺序 = 声明序）；没有 `section` 的节点各自成组
+/// （标题回落键名）。它只是"别把界面画塌"的兜底，语义权威始终是后端那张表。
+///
+/// `id_prefix` 用来隔开两个根的 id 命名空间（`gateway:` / `interface:`）——id 只在
+/// 锚点表内部用于"重算后回到同一组"，撞上会锚到错的栏。
+pub(crate) fn derive_groups(root: &SettingNode, id_prefix: &str) -> Vec<SettingGroup> {
+    let mut groups: Vec<SettingGroup> = Vec::new();
+    for child in &root.children {
+        let title = child.section.clone().unwrap_or_else(|| child.key.clone());
+        if let Some(last) = groups.last_mut()
+            && last.title == title
+        {
+            last.members.push(child.key.clone());
+            continue;
+        }
+        groups.push(SettingGroup {
+            id: format!("{id_prefix}{}", groups.len()),
+            title,
+            doc: child.section_doc.clone().unwrap_or_default(),
+            members: vec![child.key.clone()],
+        });
+    }
+    groups
 }
 
 /// 这一组的成员节点（右栏要渲染的子树；按声明序，取不到的成员跳过）。
@@ -240,6 +279,41 @@ mod tests {
             nodes.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(),
             ["providers", "tools"]
         );
+    }
+
+    #[test]
+    fn sections_are_derived_into_groups_for_an_old_gateway() {
+        let mut catalog = fx::sample_catalog();
+        catalog.children[0].section = Some("Providers".into());
+        catalog.children[0].section_doc = Some("至少一个".into());
+        catalog.children[1].section = Some("Net".into());
+        catalog.children[2].section = Some("Net".into());
+        let derived = derive_groups(&catalog, "gateway:");
+        assert_eq!(
+            derived
+                .iter()
+                .map(|group| (group.id.clone(), group.title.clone(), group.members.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "gateway:0".into(),
+                    "Providers".into(),
+                    vec!["providers".to_string()]
+                ),
+                (
+                    "gateway:1".into(),
+                    "Net".into(),
+                    vec!["gateway".to_string(), "tools".to_string()]
+                ),
+                (
+                    "gateway:2".into(),
+                    "extra_body".into(),
+                    vec!["extra_body".to_string()]
+                ),
+            ],
+            "连续的同一 section 合成一组；没有 section 的用键名当标题"
+        );
+        assert_eq!(derived[0].doc, "至少一个", "doc 回落 section_doc");
     }
 
     #[test]

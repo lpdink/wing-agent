@@ -7,6 +7,8 @@
 //! ② **密文红线**：编辑密钥时屏幕缓冲里不含明文子串；
 //! ③ 帧断言写**具体屏幕内容**，不只是「不 panic」。
 
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -15,6 +17,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
 use crate::config::ThemePalette;
+use crate::shared::panels::settings::Focus;
+use crate::shared::panels::settings::SettingsAction;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
 use wing_api_client::models::SettingNode;
@@ -22,6 +26,7 @@ use wing_api_client::models::SettingNode;
 use super::SettingsCatalogs;
 use super::SettingsOverlay;
 use super::anchors_viewport_rows;
+use super::has_anchor_column;
 use super::test_support as fx;
 use super::tree_viewport_rows;
 
@@ -953,4 +958,78 @@ fn the_anchor_column_scrolls_when_it_does_not_fit() {
     let text = buffer_text(&buf);
     assert!(text.contains("Interface"), "滚到末尾：{text}");
     assert!(!text.contains("Providers"), "头一个锚点滚出窗口：{text}");
+}
+
+// ── 副标题行（审查 S2）：搜索回显不许被横幅顶掉 ─────────────
+
+#[test]
+fn the_search_line_wins_over_the_stale_banner() {
+    let catalog = fx::product_catalog();
+    let schema = fx::product_schema();
+    let mut panel = SettingsPanel::new(&schema, fx::product_state(), None, View::Tree);
+    // 过期口径走产品路径：`settings_changed` 事件带着一份与本地不同的指纹。
+    panel.on_settings_changed("other-client-fp");
+    assert!(panel.is_stale(), "夹具前提：指纹不一致");
+    let catalogs = SettingsCatalogs::new(&catalog, None);
+
+    // 没有搜索：横幅整条占着副标题行。
+    let text = render(&panel, catalogs, 100, 30);
+    assert!(text.contains("配置已被其它客户端修改"), "{text}");
+    assert!(!text.contains("/ 搜索…"), "横幅在时不画占位：{text}");
+
+    // 搜索激活：回显优先，横幅退化成同一行尾部的一段。
+    fx::press(&mut panel, crossterm::event::KeyCode::Char('/'));
+    fx::type_text(&mut panel, "log");
+    let text = render(&panel, catalogs, 100, 30);
+    assert!(text.contains("搜索: log"), "query 回显在场：{text}");
+    assert!(text.contains("命中"), "命中数在场：{text}");
+    assert!(
+        text.contains("已被其它客户端修改"),
+        "横幅没丢，只是让位给回显：{text}"
+    );
+}
+
+#[test]
+fn a_narrow_card_drops_the_anchor_column_and_keeps_focus_in_the_tree() {
+    let catalog = fx::product_catalog();
+    let schema = fx::product_schema();
+    let mut panel = SettingsPanel::new(&schema, fx::product_state(), None, View::Tree);
+    assert_eq!(panel.focus(), Focus::Groups);
+    let catalogs = SettingsCatalogs::new(&catalog, None);
+
+    // 40 列：卡片铺满，主体放不下"左栏 14 + 分隔 + 右栏 24"。
+    let area = Rect::new(0, 0, 40, 24);
+    assert!(!has_anchor_column(&panel, area), "窄卡片不出左栏");
+    panel.set_viewport_rows(tree_viewport_rows(&panel, area) as usize);
+    panel.set_anchors_visible(has_anchor_column(&panel, area));
+    assert_eq!(
+        panel.focus(),
+        Focus::Items,
+        "左栏不存在 ⇒ 焦点不许停在它上面（审查 S3）"
+    );
+    let text = render(&panel, catalogs, 40, 24);
+    assert!(text.contains("Settings"), "{text}");
+    assert!(text.contains("providers"), "右栏独占：{text}");
+    // 左栏没画（别的锚点标题一个都不在），但**组头还在**：用户仍然知道自己站在哪一组里。
+    assert!(!text.contains("Agents"), "左栏确实没画：{text}");
+    assert!(
+        text.contains("Providers · LLM provider"),
+        "组头补上了左栏的那份信息：{text}"
+    );
+    // 键位栏不再提"切栏"（没得切），Esc 仍是关闭。
+    assert!(!text.contains("切栏"), "{text}");
+    assert!(text.contains("Esc 关闭"), "{text}");
+    // 窄卡片仍然不溢出（①号铁律）：哨兵一格不动。
+    let (buf, area) = render_inset(&panel, catalogs, 40, 24);
+    assert_frame_intact(&buf, area, "40x24 无左栏");
+    // `Tab` 无处可去；`Esc` 直接走关闭那两级（不经过一个看不见的栏）。
+    assert_eq!(panel.focus(), Focus::Items);
+    fx::press(&mut panel, crossterm::event::KeyCode::Tab);
+    assert_eq!(panel.focus(), Focus::Items, "Tab 不切到不存在的栏");
+    let esc = KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(
+        panel.handle_key(esc),
+        SettingsAction::Close { discard: false },
+        "Esc 直接关（干净面板）"
+    );
 }

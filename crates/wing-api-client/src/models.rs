@@ -1145,38 +1145,13 @@ pub struct SettingsSchemaResponse {
     pub root: SettingNode,
     /// config.yaml 的绝对路径（面板标题栏展示）。
     pub config_path: String,
-    /// 业务分组（顺序即界面顺序）。
+    /// 业务分组（顺序即界面顺序；TUI 设置面板左栏锚点的唯一来源）。
     ///
-    /// `#[serde(default)]`：老网关不发这个键 ⇒ 空表 ⇒ 面板回落到「按 root 子节点的
-    /// `section` 推导分组」（[`SettingGroup::derive_from_sections`]），不至于无处可点。
+    /// `#[serde(default)]`：老网关不发这个键 ⇒ 空表。空表**怎么兜底**是前端的策略，
+    /// 不是 wire 的一部分（住在 `crates/wing` 的 `shared::panels::settings::groups`）——
+    /// 这一层只镜像后端发的东西。
     #[serde(default)]
     pub groups: Vec<SettingGroup>,
-}
-
-impl SettingGroup {
-    /// 老网关兼容：没有 `groups[]` 时，从 root 直接子节点的 `section` 推导分组。
-    ///
-    /// 连续的同一 `section` 合成一组（顺序 = 声明序）；没有 `section` 的节点各自成组
-    /// （标题回落键名）。它只是"别把界面画塌"的兜底，语义权威始终是后端那张表。
-    pub fn derive_from_sections(root: &SettingNode, id_prefix: &str) -> Vec<SettingGroup> {
-        let mut groups: Vec<SettingGroup> = Vec::new();
-        for child in &root.children {
-            let title = child.section.clone().unwrap_or_else(|| child.key.clone());
-            if let Some(last) = groups.last_mut()
-                && last.title == title
-            {
-                last.members.push(child.key.clone());
-                continue;
-            }
-            groups.push(SettingGroup {
-                id: format!("{id_prefix}{}", groups.len()),
-                title,
-                doc: child.section_doc.clone().unwrap_or_default(),
-                members: vec![child.key.clone()],
-            });
-        }
-        groups
-    }
 }
 
 /// 一条配置问题（镜像 Python `ConfigProblem`）。
@@ -1894,52 +1869,6 @@ mod settings_tests {
         }"#;
         let resp: SettingsSchemaResponse = serde_json::from_str(json).unwrap();
         assert!(resp.groups.is_empty());
-    }
-
-    #[test]
-    fn groups_are_derived_from_sections_for_an_old_gateway() {
-        let resp = schema();
-        // 夹具的 root 子节点带 section（Providers / Gateway / Logging）：连续的同一 section
-        // 合成一组，顺序 = 声明序。
-        let derived = SettingGroup::derive_from_sections(&resp.root, "gateway:");
-        assert_eq!(
-            derived
-                .iter()
-                .map(|group| (group.id.clone(), group.title.clone(), group.members.clone()))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "gateway:0".to_string(),
-                    "Providers".to_string(),
-                    vec!["providers".to_string()]
-                ),
-                (
-                    "gateway:1".to_string(),
-                    "Gateway".to_string(),
-                    vec!["gateway".to_string()]
-                ),
-                (
-                    "gateway:2".to_string(),
-                    "Logging".to_string(),
-                    vec!["log".to_string()]
-                ),
-            ]
-        );
-        // 没有 section 的节点用键名当标题（各自成组）。
-        let bare: SettingNode = serde_json::from_str(
-            r#"{
-                "key": "config", "path": "config", "title": "配置", "doc": "", "kind": "object",
-                "children": [
-                    {"key": "yolo", "path": "yolo", "title": "yolo", "doc": "", "kind": "bool"},
-                    {"key": "steer", "path": "steer", "title": "steer", "doc": "", "kind": "bool"}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let derived = SettingGroup::derive_from_sections(&bare, "g");
-        assert_eq!(derived.len(), 2);
-        assert_eq!(derived[0].title, "yolo");
-        assert_eq!(derived[1].members, vec!["steer".to_string()]);
     }
 
     // ── 前向兼容 ──────────────────────────────────────────────
