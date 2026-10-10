@@ -62,7 +62,7 @@ const TOOL_RESULT_MAX_CHARS = 16_000;
 const TOOL_RESULT_TAIL_CHARS = 4_000;
 
 /**
- * Streaming tool-argument render budget (review #109 [P1-2]).
+ * Streaming tool-argument render budget.
  *
  * A provider emits one `tool_call_stream` fragment per SSE chunk, so a 200 KB
  * `Write` is ~1000 fragments. Re-parsing the accumulated text and pushing the
@@ -703,7 +703,7 @@ function applyToolCallStream(
   const buffered = record.toolArgsStreamFor(input.toolCallId);
   const argsText = (buffered?.text ?? '') + input.fragment;
   const atMs = record.now();
-  // Render budget (review #109 [P1-2]): the first fragment, the last one, every
+  // Render budget: the first fragment, the last one, every
   // fragment of a small call, and otherwise one update per interval / N chars /
   // N fragments. Everything else stays in the buffer — the cell *and* the bridge
   // stay untouched, so the webview's mirror keeps matching this record exactly.

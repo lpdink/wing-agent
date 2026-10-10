@@ -1497,7 +1497,7 @@ export class SessionManager {
  * `tool_call` cells are deliberately *not* covered here: their `argsText` is
  * capped at the source (`reducer.ts` `TOOL_ARGS_MAX_CHARS`) because it is a
  * streaming preview — re-chunking it would still send every byte, which is the
- * traffic the cap exists to remove (review #109 [P1-2]).
+ * traffic the cap exists to remove.
  */
 function sliceTextOp(op: CellPatch): CellPatch[] {
   switch (op.op) {

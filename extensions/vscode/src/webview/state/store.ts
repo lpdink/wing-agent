@@ -36,8 +36,8 @@ export interface ToastModel {
 /**
  * How long a toast stays on screen before it dismisses itself (ms).
  *
- * Review #109 [P2-4]: `dismissToast` used to have no production caller, so every
- * "Compacting context…" / "Copied to clipboard" / "Not sent…" piled up in the
+ * Without an auto-dismiss, every "Compacting context…" / "Copied to clipboard"
+ * / "Not sent…" piles up in the
  * `role="log"` region for the lifetime of the window (`retainContextWhenHidden`
  * keeps the webview alive) — unreadable after a few dozen, and a screen reader
  * re-announces the whole region on every push. Errors get longer *and* a manual
@@ -196,7 +196,7 @@ export function createAppStore(): AppStoreApi {
 
     applyTabs: (tabs, activeSessionId) => {
       set((state) => {
-        // A closed tab's snapshot is dead weight (review #109 [P2-4]): the
+        // A closed tab's snapshot is dead weight: the
         // webview lives for the whole window, so its transcript — cells, tool
         // results, diff rows — would otherwise be retained forever. The host's
         // tab list is the authority for what is open, and it always announces a

@@ -58,7 +58,7 @@ export function createGatewayClients(
   options: GatewayFactoryOptions = {},
 ): GatewayClients {
   const urls = gatewayUrls({ host: settings.host, port: settings.port });
-  // Auth rides in headers, never in the URL (review #109 [P3-6]); the gateway
+  // Auth rides in headers, never in the URL; the gateway
   // prefers headers, and both transports here accept them.
   const headers = apiKeyHeaders(settings.apiKey);
   const connection = new GatewayConnection({
