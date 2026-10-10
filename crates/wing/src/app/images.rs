@@ -472,12 +472,13 @@ impl Images {
     /// Draw this frame's recorded pictures — the last write over their rects.
     ///
     /// `clip` is the region pictures may touch (the chat band's content rect:
-    /// the scrollbar gutter is not in it). `mask` is an overlay painted on top
-    /// of the chat (the toast): a picture that would be covered is skipped
-    /// **whole** rather than partially — the protocols carry their payload in
-    /// individual cells (`paint`'s contract), so a partial overdraw would break
-    /// the image instead of hiding part of it. The anchor's caption stays
-    /// visible in that case, which is exactly the reserved box's job.
+    /// the scrollbar gutter is not in it). `masks` are the overlays painted on
+    /// top of the chat (the toast, the settings card): a picture that would be
+    /// covered by any of them is skipped **whole** rather than partially — the
+    /// protocols carry their payload in individual cells (`paint`'s contract),
+    /// so a partial overdraw would break the image instead of hiding part of
+    /// it. The anchor's caption stays visible in that case, which is exactly
+    /// the reserved box's job.
     ///
     /// Callers gate this on the selection (a drag captures text; see
     /// `App::draw`) — this function assumes it may draw.
@@ -485,7 +486,7 @@ impl Images {
         &mut self,
         frame_images: &[FrameImage],
         clip: Rect,
-        mask: Option<Rect>,
+        masks: &[Rect],
         buf: &mut Buffer,
     ) {
         if self.store.is_none() || frame_images.is_empty() {
@@ -499,7 +500,7 @@ impl Images {
             if !frame.area.intersects(clip) {
                 continue;
             }
-            if mask.is_some_and(|mask| frame.area.intersects(mask)) {
+            if masks.iter().any(|mask| frame.area.intersects(*mask)) {
                 continue;
             }
             // The picture is painted over its caption — the box's first row *is*
@@ -656,7 +657,7 @@ mod tests {
         let clip = Rect::new(0, 0, 10, 4);
         let mut buf = Buffer::empty(clip);
         let before = buf.clone();
-        images.paint(&[], clip, None, &mut buf);
+        images.paint(&[], clip, &[], &mut buf);
         assert_eq!(buf, before);
     }
 

@@ -260,6 +260,21 @@ impl App {
     ///
     /// The chat band's drag selection and the wheel are **not** affected
     /// (rolling history while a panel is open has to keep working).
+    /// 背景（chat band / 滚动条 / 状态栏）此刻是否**不接受指针**。
+    ///
+    /// 设置面板是浮层卡片：四周露出的聊天看得见但点不动 —— 三条理由，一条比一条硬：
+    ///
+    /// 1. 卡片盖住的链接 hit box 还在表里，点卡片 = 打开一个看不见的链接
+    ///    （渲染侧另外 `mask_links(card)`，这里是同一件事的第二道门）；
+    /// 2. 面板开着时选区**不画**（`App::draw` 的门控），拖出来的高亮看不见，
+    ///    而 `capture_visible_rows` 也不跑 —— 复制到的会是打开面板前那一帧的快照；
+    /// 3. 滚动条这一帧根本没画（hover / drag 态被清），点它会抓一个不存在的把手。
+    ///
+    /// 键盘侧的同类门是 [`Self::composer_pointer_blocked`]（那个只管 composer）。
+    pub(super) fn background_pointer_blocked(&self) -> bool {
+        self.settings_panel.is_some()
+    }
+
     pub(super) fn composer_pointer_blocked(&self) -> bool {
         match self.modal_owner() {
             None => false,
@@ -597,7 +612,7 @@ impl App {
     /// editor when one is up (panel is modal); the modal model panel and the
     /// settings overlay drop it; otherwise it goes to the composer.
     ///
-    /// **顺序**（N4）：设置面板的挡板排在最前 —— 面板是全屏、拿走全部按键的层，
+    /// **顺序**（N4）：设置面板的挡板排在最前 —— 面板是模态浮层、拿走全部按键的层，
     /// 而队列里可能正躺着一条**看不见**的 ask（AD2：面板开着时到达的 ask 入队不弹）。
     /// 先问 ask 的话，`Ctrl+V` 会写进那条 ask 的内联编辑器（用户看不见自己改了什么）。
     pub(super) fn handle_paste(&mut self, text: &str) {

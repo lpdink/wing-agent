@@ -1,7 +1,7 @@
 # 设置面（Setting API · TUI 设置面板 · 首次运行向导 · `wing config`）
 
 本页是**配置这条产品线**的机制级文档：一份声明（`S(...)`）怎么变成目录 / 模板 / 校验，配置怎么经
-API 保存与生效，配置不可用时网关怎么活着（setup mode），以及三个消费入口（TUI 全屏面板 /
+API 保存与生效，配置不可用时网关怎么活着（setup mode），以及三个消费入口（TUI 浮层面板 /
 首次运行向导 / `wing config` CLI）各自长什么样、改它们要注意什么。
 
 涉及两个文件（都叫 `config.yaml`，语义完全不同）：
@@ -33,10 +33,12 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | `choices` | 枚举值域：值 → 含义（面板的内联选择项；`Literal` 之外的补充） |
 | `example` | 示例值（详情栏 + YAML `# e.g. …` 注释） |
 | `editable` | `false` = 面板灰显只读 |
-| `section` / `section_doc` | 顶层分组名 / 分组说明（`section_doc` 只写在该 section 的**首个**字段上） |
 | `summary_fields` | 列表项标题行的字段名序（`providers` / `agents` / `providers[].models` 各声明一组） |
 | `min_items` / `max_items` | 列表规模**声明**（"不得为空" = `min_items: 1`）；强制仍归跨字段检查 |
 | `deprecated` | 预留（本期不消费） |
+
+**分组不在这里声明**（曾经的 `section` / `section_doc` 已移出 `SettingMeta`）：界面分类住在
+`config/groups.py` 的一张有序表里，见 §1.1。
 
 其余参数（`default` / `default_factory` / `gt` / `pattern` / …）原样透传 `pydantic.Field`。
 **必填只有一处定义**：字段没有 `default`（catalog 读 `FieldInfo.is_required()`）——不引入第二个 `required=`。
@@ -53,18 +55,59 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 模板 = `emit_config_yaml(default_document(), build_catalog())`，`default_document()` = `{"providers": [], "agents": []}`
 （首启模板的空列表是**天然的 problem**——向导据此指路，不再需要 `ChangeHere` 这种假占位符）。
 
-规模（`build_catalog()` 实测）：**68 个声明字段 / 80 个节点 / 55 个叶子 / 9 个 section**；
+规模（`build_catalog()` 实测）：**68 个声明字段 / 80 个节点 / 55 个叶子 / 7 个业务分组**；
 `secret` 2（`providers[].api_key`、`gateway.auth.keys[].key`）、`enum` 6、`min_items=1` 3 组。
+
+### 1.1 业务分组：存储形式与界面分类的解耦缝
+
+`config/groups.py` 的 `SETTING_GROUPS` 是**界面分类的唯一声明处**：一组 = `(id, title, doc, members)`，
+表的顺序即界面顺序（设置面板左列锚点、`wing config list` 的分组头、`config.yaml` 的 `# ── Name ───`
+分隔行都由此而来）。成员是 `Config` 的**顶层键名**——`config.yaml` 的存储形状一概不动，
+所以加组 / 并组 / 改名 / 调序都是**零迁移**的声明层改动。
+
+| id | title | 成员（顶层键） |
+|---|---|---|
+| `providers` | Providers | `providers` |
+| `agents` | Agents | `agents` |
+| `behavior` | Behavior | `safe_command_patterns` · `yolo` · `steer` · `tool_result_truncate` |
+| `images` | Images | `images` |
+| `sessions` | Sessions | `sessions` |
+| `gateway` | Gateway | `gateway` |
+| `advanced` | Advanced | `hooks` · `commands` · `log` · `user_agent` |
+
+（`Interface` 是第 8 个锚点，但它是 TUI 自己的配置：声明在 Rust 侧 `config/catalog.rs::interface_groups()`，
+后端不知道它。见 §9。）
+
+三个消费口径（都从这一张表来，不存在第二份）：
+
+| 消费方 | 读什么 |
+|---|---|
+| `GET /api/settings/schema` | `groups[]`（id / title / doc / members）——**前端左列锚点的唯一来源**，前端零硬编码 |
+| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（emitter 的一条块注释） |
+| `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**，分隔行按组的首次出现发一次（分组表管界面顺序，不管文件顺序） |
+
+门禁（`tests/test_config_groups.py`）：id / title 唯一、成员非空且都是真实顶层字段、
+每个顶层字段**恰好**属于一个组（漏 = 界面里无处可去，重复 = 两份真相）、顺序钉死。
+`build_groups()` 在构建期就抛（不是运行期悄悄漏），probe 侧另有 wire 形状与保存回归的整机断言
+（`scenarios/test_settings_groups.py`）。
+
+**两侧对"漏了怎么办"是刻意的两种口径**：后端**硬失败**（未分组的顶层键 → `build_catalog()` 抛 →
+`GET /api/settings/schema` 500，因为那是开发者写错了声明，CI 必须挡住）；前端**软兜底**
+（没被任何组认领的键进一个 `{root}:ungrouped` 锚点，因为前端要面对的是"任意版本的网关"——
+老网关、半升级的网关、被 hack 过的网关都不能让设置面板打不开）。硬失败管住自己的仓库，
+软兜底管住别人的进程，两者不矛盾。
 
 ## 2. 门禁：不是纪律，是机制
 
-三处测试让「声明 / 目录 / 模板 / serde」不许漂移（改声明而不同步的代价是测试变红，不是"有人会记得改"）：
+五处测试让「声明 / 目录 / 分组 / 模板 / serde」不许漂移（改声明而不同步的代价是测试变红，不是"有人会记得改"）：
 
 | 门禁 | 位置 | 钉住 |
 |---|---|---|
-| 每个配置字段必须声明 | `libs/core/tests/test_config_spec.py` | 递归遍历 `Config` 及嵌套模型：字段缺声明 / `apply` 没显式写（AST 检查）/ 字段 docstring 残留 / `secret` 不是 `str` / `choices` 缺 `Literal` 的键 → 红 |
-| Interface 根双向对账 | `crates/wing/src/config/catalog.rs` 的单测 | **穷尽 struct 字面量**构造 `AppConfig` 全字段样本（加字段即编译失败）→ catalog 缺声明 / 声明了幻影键 → 红 |
-| 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 |
+| 每个配置字段必须声明 | `libs/core/tests/test_config_spec.py` | 递归遍历 `Config` 及嵌套模型：字段缺声明 / `apply` 没显式写（AST 检查）/ 字段 docstring 残留 / `secret` 不是 `str` / `choices` 缺 `Literal` 的键 → 红；**声明层不再携带分组**（AST 拒绝 `S(section=...)`） |
+| 分组是一张完整的划分 | `libs/core/tests/test_config_groups.py` | 顺序钉死、id / title 唯一、成员都是真实顶层字段、每个顶层字段**恰好**属于一个组；坏表（漏 / 重 / 幻影 / 空组）→ `validate_groups` 抛；目录投影（`section` = title、`section_doc` 只在首成员）+ wire 形状 |
+| 分组的 wire 形状 | probe `scenarios/test_settings_groups.py` | 真网关的 `groups[]`（顺序 / 成员 / 与节点 `section` 同源）+ 零迁移与保存回归（改跨旧分组的键、文件顶层键不变、分隔行跟着新分组） |
+| Interface 根双向对账 | `crates/wing/src/config/catalog.rs` 的单测 | **穷尽 struct 字面量**构造 `AppConfig` 全字段样本（加字段即编译失败）→ catalog 缺声明 / 声明了幻影键 → 红；`interface_groups()` 的成员 = catalog root 的子节点 |
+| 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 + **分隔行恰好是分组表的 title 序** |
 
 `config/catalog.rs` 是 Rust 侧的**声明表**（后端不知道 TUI 的类型），与后端 catalog **同构**：
 同一个 `SettingNode` 类型（来自 `wing-api-client`），所以树 widget 零分支。Interface 根 22 个叶子 =
@@ -85,7 +128,7 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 | 规则 | 行为 |
 |---|---|
 | 文件头 | 4 行注释（产品名 / 文件路径 / "推荐在 TUI 里用 `/settings` 编辑" / 无时间戳——避免 diff 噪声） |
-| 分组 | 按 `section` 声明序分组，`# ── Name ───` 分隔行 + `section_doc` |
+| 分组 | 按业务分组（§1.1）分段：`# ── Name ───` 分隔行 + `section_doc`，按组的**首次出现**发一次（键序恒为声明序） |
 | 注释位置 | 文档注释在值**上方**（`doc` → `notes` → `# e.g. …` → 生效域 → 密钥说明），不用行尾注释 |
 | 缺席有默认 | 标量写成注释行；object 整棵子树注释；list / map 注释成 `# key: []` / `# key: {}` |
 | 缺席必填 | 写出键 + 空值（`""` / `0` / `false` / `[]` / `{}`）——它就是一条 problem，向导据此指路 |
@@ -133,7 +176,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 
 | 方法 | 路径 | 语义 | 鉴权 | setup mode |
 |---|---|---|---|---|
-| GET | `/api/settings/schema` | 设置目录（catalog 树）+ 版本 + `config.yaml` 绝对路径；纯静态 | 常规 | ✅ |
+| GET | `/api/settings/schema` | 设置目录（catalog 树）+ **业务分组 `groups[]`**（§1.1）+ 版本 + `config.yaml` 绝对路径；纯静态 | 常规 | ✅ |
 | GET | `/api/settings/get` | 稀疏文档（密文叶子 = `null`）+ 密文状态表 + 指纹 + 全部问题 | 常规 | ✅ |
 | GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检 | 常规 | ✅ |
 | POST | `/api/settings/set` | 保存事务（见下） | **admin**（`tool_runtime` 403） | ✅（唯一修复路径） |
@@ -345,16 +388,34 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
   默认，与 Rust `cmd/backend_config.rs` 的 `#[serde(default)]` 语义对齐）——TUI / CLI 与降级启动的网关
   因此落在同一个端口上。
 
-## 9. TUI 设置面板
+## 9. TUI 设置面板（v2：浮层卡片 + 双栏）
 
-**落点：全屏 overlay（不是聊天流里的 cell）**。理由：设置是"去一个地方"而不是"transcript 里的一条消息"；
-需要不随滚动漂移的框架（标题栏 / 详情栏 / 键位栏）；一节可能十几个字段，聊天流的 5 行窗口会窒息；
-且不扰动 transcript 的滚动位置、选区锚点、图片放置表（三者都对内容坐标敏感）。
+**落点：居中浮层卡片（不是聊天流里的 cell，也不再是全屏 overlay）**。设置是"去一个地方"而不是
+"transcript 里的一条消息"；需要不随滚动漂移的框架（标题栏 / 副标题行 / 键位栏）；一节可能十几个字段，
+聊天流的 5 行窗口会窒息；且不扰动 transcript 的滚动位置、选区锚点、图片放置表。
+v2 把"全屏"改成"浮层"：四周露出聊天背景，用户始终知道自己还在会话里。
 
-**一棵树，两个顶层根**：`Gateway`（后端 `config.yaml`，catalog 来自 `GET /api/settings/schema`）与
-`Interface`（TUI 自己的 `config.yaml`，catalog 来自 Rust 侧 `config/catalog.rs`）。`Tab` 切根，搜索跨两个根。
+几何（`ui/settings/mod.rs::card_area` 是唯一实现，App 与测试共用）：
 
-**提交语义 = 实时预览 + 显式保存**：Interface 根的任何提交**立即**产生一次
+| 规则 | 值 |
+|---|---|
+| 卡片尺寸 | `min(终端宽-4, 110) × min(终端高-4, 32)`，居中 |
+| 退化 | 终端 `< 80×24` → 铺满（浮层比全屏更难读的尺寸就别浮了） |
+| 左栏宽度 | `clamp(内容宽 × 22%, 14, 22)`，且保证右栏 ≥ 24 列（否则**不出左栏**，右栏独占） |
+| 详情栏 | 右栏 ≥ 78 列时竖切出来（树 58% / 详情 42%）；否则右栏末行退化为当前行的 doc 提示 |
+| 键位栏 | 按内容装箱 1~2 行（装得下一行就把省下的行还给主体） |
+
+**双栏：左栏 = 业务分组锚点，右栏 = 当前分组的设置项**。锚点表由 `shared/panels/settings/groups.rs`
+从两份声明拼出（后端 `schema.groups[]` + Rust 侧 `config/catalog.rs::interface_groups()`），
+**前端零硬编码**：组名 / 顺序 / 成员全在声明层（§1.1），加组并组改名不用碰 Rust。
+Interface 是**最后一个锚点**（不再有 v1 的"切根"概念，两个根只是锚点表里的两段）；
+老网关不发 `groups[]` 时按 root 子节点的 `section` 推导兜底（`SettingGroup::derive_from_sections`），
+没被任何组认领的顶层键进一个兜底锚点——**任何情况下都不会有设置项在界面里消失**。
+
+进入一个分组会展开它的顶层成员（右栏一进来就有内容），换组时右栏光标回到首行；
+`providers[0]` 这类列表层级只出现在右栏。左栏的锚点带三种徽标：脏（`●`）/ 问题数 / 搜索命中数。
+
+**提交语义 = 实时预览 + 显式保存**（v1 原样保留）：Interface 根的任何提交**立即**产生一次
 `PreviewInterface(整份稀疏文档)`（App 换掉自己的 `config` / 调色板 → 整屏重绘；改颜色当场变色，
 `Esc` 放弃时回退快照）；Gateway 根的改动只标脏、攒到 `s` 一次保存。`s` **保存两边**、各自成败、
 回执合并成一条 notice（`✓ Interface …` / `✓ Gateway …` / `⚠ gateway.port 需重启网关才生效 — Ctrl+R 立即重启`）。
@@ -362,31 +423,34 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
 
 键位表（`shared/panels/settings/mod.rs` 是唯一实现，`ui/settings/**` 只渲染）：
 
-| 键 | 树视图 | 编辑器激活 | 问题清单 | 选择项展开 |
-|---|---|---|---|---|
-| `↑` `↓` | 移动光标（钳制） | **忽略**（模态：必须 Enter / Esc 收口） | 选择 | 内项光标 |
-| `PageUp` `PageDown` / `Home` `End` | 翻页 / 首尾 | `Home`/`End` 行首尾 | 翻页 / 首尾 | — |
-| `←` | 折叠 / 已折叠则跳父行；enum 行循环切值（往前） | 左移字符 | 返回树 | 折叠（不选） |
-| `→` | 展开；enum 行循环切值（往后） | 右移字符 | 跳到该行（= `Enter`） | — |
-| `Enter` | 按行类型分派（展开 / 切换 / 选择项 / 编辑 / 新增 / 选中 / 只读） | 提交（**不改 = 无操作**） | 跳到该行 | 选中并折叠 |
-| `Space` | bool 切换 | 插入空格 | — | 选中 |
-| `a` | 给最近的列表祖先新增一项（union 列表先选形态） | 输入字符 | — | — |
-| `d` | 列表项删除 / 标量字段清空（二次确认） | — | — | — |
-| `J` `K` | 列表项下移 / 上移（顺序有意义：模型目录 / glob 序） | — | — | — |
-| `r` | 叶子复位（从稀疏文档移除 = 跟随默认）；列表项 / 结构行无操作 | — | — | — |
-| `s` | 保存两边 | — | 保存 | — |
-| `/` | 搜索 | — | 回树 + 搜索 | — |
-| `p` | 问题清单 / 返回树 | — | 返回树 | — |
-| `?` | 帮助浮层 | — | 帮助 | — |
-| `Tab` | 切根 | — | 切根 | — |
-| `R` | **重新载入**（丢弃本地全部改动、重拉 `get`；脏则先确认） | — | 同树 | — |
-| `Ctrl+R` | **立即重启网关**（仅在 `restart_required` 非空时被接受、也只在键位栏显示；脏则先确认；轮次进行中由 App 拒绝） | — | 同树 | — |
-| `Esc` | 七级阶梯（见下） | 取消编辑 | 返回树 | 折叠 |
-| `Ctrl+C` | **面板不吞**（应用保留手势：双击退出 TUI） | 同 | 同 | 同 |
+| 键 | 左栏（分组） | 右栏（设置项） | 编辑器激活 | 问题清单 | 选择项展开 |
+|---|---|---|---|---|---|
+| `↑` `↓` | 选分组（钳制） | 移动光标（钳制） | **忽略**（模态：必须 Enter / Esc 收口） | 选择（左栏焦点时选分组） | 内项光标 |
+| `PageUp` `PageDown` / `Home` `End` | 按锚点可见行数翻页 / 首尾 | 翻页 / 首尾 | `Home`/`End` 行首尾 | 翻页 / 首尾 | — |
+| `Tab` | 进右栏 | 回左栏 | 忽略 | 切栏 | 切栏 |
+| `←` | 无操作（已在最左） | 折叠 / 已折叠则跳父行 / **depth 0 无处可去则回左栏**；enum 行循环切值（往前） | 左移字符 | 无操作（回树用 `Esc` / `p`） | 折叠（不选） |
+| `→` | 进右栏 | 展开；enum 行循环切值（往后） | 右移字符 | 跳到该行（左栏焦点时 = 进那一组的树） | — |
+| `Enter` | 进右栏 | 按行类型分派（展开 / 切换 / 选择项 / 编辑 / 新增 / 选中 / 只读） | 提交（**不改 = 无操作**） | 跳到该行 | 选中并折叠 |
+| `Space` | — | bool 切换 | 插入空格 | — | 选中 |
+| `a` | — | 给最近的列表祖先新增一项（union 列表先选形态） | 输入字符 | — | — |
+| `d` | — | 列表项删除 / 标量字段清空（二次确认） | — | — | — |
+| `J` `K` | — | 列表项下移 / 上移（顺序有意义：模型目录 / glob 序） | — | — | — |
+| `r` | — | 叶子复位（从稀疏文档移除 = 跟随默认）；列表项 / 结构行无操作 | — | — | — |
+| `s` | 保存两边 | 保存两边 | — | 保存 | — |
+| `/` | 搜索（焦点自动进右栏） | 搜索 | — | 回树 + 搜索 | — |
+| `p` | 问题清单（焦点进右栏） | 问题清单 | — | 返回树 | — |
+| `?` | 帮助浮层 | 帮助浮层 | — | 帮助 | — |
+| `R` | **重新载入**（丢弃本地全部改动、重拉 `get`；脏则先确认） | 同 | — | 同树 | — |
+| `Ctrl+R` | **立即重启网关**（仅在 `restart_required` 非空时被接受、也只在键位栏显示；脏则先确认；轮次进行中由 App 拒绝） | 同 | — | 同树 | — |
+| `Esc` | 阶梯 7–8（脏改动确认 → 关闭） | 阶梯 5–6（折叠选择项 → 回左栏） | 取消编辑 | 返回树 | 折叠 |
+| `Ctrl+C` | **面板不吞**（应用保留手势：双击退出 TUI） | 同 | 同 | 同 | 同 |
 
-`Esc` 阶梯（命中即停）：编辑器激活 → 取消编辑；模态提示 → 取消；搜索 → 退出 + 清 query + 恢复搜索前的
-展开快照；帮助 → 关闭；enum 选择项 → 折叠；有脏改动 → "放弃 N 项未保存的改动？"二次确认 →
-`Close{discard:true}`；否则 `Close{discard:false}`。**关闭动作由 App 执行**（面板只产出意图）。
+`s` / `R` / `Ctrl+R` / `/` / `p` / `?` / `Tab` / `Esc` 在**两栏共用**（先于焦点分派处理）。
+
+`Esc` 阶梯（命中即停）：① 编辑器激活 → 取消编辑；② 模态提示 → 取消；③ 搜索 → 退出 + 清 query +
+恢复搜索前的**展开快照与分组**；④ 帮助 → 关闭；⑤ 右栏 + enum 选择项 → 折叠；⑥ 右栏 → **回左栏**
+（v2 新增的一级：一次误触不该把用户送出面板）；⑦ 左栏 + 有脏改动 → "放弃 N 项未保存的改动？"
+二次确认 → `Close{discard:true}`；⑧ 左栏 → `Close{discard:false}`。**关闭动作由 App 执行**（面板只产出意图）。
 
 其余交互口径：
 
@@ -394,23 +458,29 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
   用户看到的与将要得到的一致）；
 - **enum** 的选择项**内联展开为子行**（不切视图），`←`/`→` 在 enum 行上循环切值（power user 快捷键）；
 - **密文行**渲染 `•••••••• ab12` / `(empty)` / `(not set)`，编辑器缓冲永不明文渲染（§6）；
-- **问题清单是同一个组件的三个场景**：setup 首屏（初始视图 = 问题清单）、保存失败（`ok=false` 自动切过去）、
-  随时用 `p` 查看。`Enter` 在树上展开祖先并把光标落到该行；文档级问题（`path == null`）不可导航。
-  本地按目录约束生成的问题（`min_items` / 必填缺席）与后端返回的问题合并去重
-  （同 `(根, 路径, kind)` 为同一条；`message` 取后端的、`hint` 取两者中非空的那个），
+- **问题清单是同一个组件的三个场景**：setup 首屏（初始视图 = 问题清单，焦点在右栏）、保存失败
+  （`ok=false` 自动切过去）、随时用 `p` 查看。清单**不按分组过滤**（它是全局的），左栏只显示每组的问题数；
+  `Enter` 会**切到问题所在的那一组**、展开祖先并把光标落到该行；文档级问题（`path == null`）不可导航、
+  也不归任何组（标题栏的总数仍然算它）。本地按目录约束生成的问题（`min_items` / 必填缺席）与后端返回的
+  问题合并去重（同 `(根, 路径, kind)` 为同一条；`message` 取后端的、`hint` 取两者中非空的那个），
   排序按严重度（`missing_required` > `unknown_reference` > `duplicate` > `empty_list` > `invalid_value` > `unknown_key`，
   未知种类最后）再按路径；
-- **搜索**：子串匹配 `path` / `title` / `doc` / `notes` / `choices`（值 + 含义），命中项的祖先自动展开、
-  命中的结构节点连带显示直接子节点；`Esc` 恢复搜索前的展开快照；
+- **搜索跨全部分组**：子串匹配 `path` / `title` / `doc` / `notes` / `choices`（值 + 含义），命中项的祖先
+  自动展开、命中的结构节点连带显示直接子节点。右栏一次只显示一组，所以**当前组零命中而别的组有命中时
+  自动跳到第一个有命中的组**（左栏的命中数徽标同时告诉你还有哪些组），`Esc` 恢复搜索前的分组与展开快照；
 - **模态优先级**：`ModalOwner::Settings` 最高，且是**唯一连应用保留键也接管的层**——面板开着时
   `Esc` / `PageUp` / `PageDown` / `Ctrl+O` 全部交给面板（`Ctrl+O` 被面板忽略，比让它穿透去改看不见的
   聊天状态安全），**只有 `Ctrl+C` 永远归应用**。面板开着时到达的 `ask` 排队不弹出，关闭后照旧弹出；
-- **overlay 期间的三件事**（改渲染顺序时最容易漏）：图片**不画**、选区被取消、滚动条不画且清掉
-  hover / drag 态（`┃` / `█` 是滚动条独有码位，测试按"整帧扫这两个码位"判定）。**关闭后成对地**
-  `needs_full_redraw = true` + `images.invalidate()`（调色板 / 布局可能都变了，diff 渲染会留残影）；
-- 保存回执同时弹一条摘要 toast（面板是全屏的，transcript notice 在它底下看不见）；
-  `settings_changed` 事件的指纹与本地不同时，面板顶部出横幅「配置已被其它客户端修改，按 R 重新载入」
-  ——**不自动覆盖**本地未保存的改动。
+- **浮层期间的三件事**（改渲染顺序时最容易漏）：卡片挡住的图片**整张跳过**（`images.paint` 的 `masks`
+  里同时有卡片与 toast；半张覆盖会撕碎图形协议），卡片之外的背景图片照画；选区被取消；滚动条不画且清掉
+  hover / drag 态（`┃` / `█` 是滚动条独有码位，测试按"整帧扫这两个码位"判定）。
+  **开面板与关面板各整屏重画一次**（`needs_full_redraw = true`，与 `images.invalidate()` 是既有配对）：
+  卡片底下那张图已经画到屏幕上了，"这一帧不画它"不会让它消失（sixel 尤其如此），只有 `terminal.clear()` 会；
+- 保存回执同时弹一条摘要 toast（面板压在 transcript 上，notice 在它底下看不见）；
+  `settings_changed` 事件的指纹与本地不同时，副标题行出横幅「配置已被其它客户端修改，按 R 重新载入」
+  ——**不自动覆盖**本地未保存的改动（v1 把它画在树的第一行，v2 给了它常驻的副标题行，
+  优先级：**搜索行 > 横幅 > `/ 搜索…` 占位**——query 是输入回显，被顶掉就等于"敲了字看不见"，
+  所以搜索态下横幅退化成同一行尾部的一段 `⚠ 已被其它客户端修改`，放不下时先丢横幅）。
 
 ## 10. 首次运行向导（setup TUI）
 
@@ -502,6 +572,11 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 
 - 加 / 改一个配置字段：只动 `config/models.py` 的 `S(...)` 声明（+ 必要时的跨字段检查），
   模板 / 目录 / 面板 / CLI / 校验会跟着变；跑 `test_config_spec.py` 与 `test_config_emit.py`。
+  **新的顶层键还要在 `config/groups.py` 的 `SETTING_GROUPS` 里归一个组**——不归就是
+  `build_groups()` 当场抛（界面里它会无处可去），`test_config_groups.py` 也会红。
+- 改界面分类（加组 / 并组 / 改名 / 调顺序）：只动 `SETTING_GROUPS` 一张表（§1.1）；
+  `config.yaml` 零迁移（顶层键不动，只有分隔注释跟着变）。前端**不许**出现组名字面量——
+  左栏锚点全部来自 `schema.groups[]`（Interface 的那一份在 `config/catalog.rs::interface_groups()`）。
 - **给 LIST 字段加密文叶子前先想配对**：只要元素子树里有可达的 `secret=True` 叶子，就必须同时声明
   `identity_field`（元素里那个唯一的非密文标量字段名）——否则列表结构一变，`null` 哨兵配不上，
   密钥只能被丢弃（回执警告 + 用户重填），或者更糟：**按下标错配**（§6 的不变量）。
@@ -513,5 +588,12 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 - 改 `SETUP_ALLOWED_PATHS`：它是"修复模式能做什么"的全部定义——加一个路径前先问"配置坏掉时它真的可用吗"。
 - 改键位：`shared/panels/settings/mod.rs` 的 `handle_*_key` 是唯一实现（模块 doc 的表要与它同步改），
   `ui/settings/**` 只渲染；`r`/`R`/`Ctrl+R` 的三分是刻意设计（复位 / 重载 / 重启），别再合成一个键。
+  **两栏共用的键**（`s` / `R` / `Ctrl+R` / `/` / `p` / `?` / `Tab` / `Esc`）在焦点分派**之前**处理，
+  加新键时先想清楚它属于哪一栏。
+- 改面板几何：`ui/settings/mod.rs` 的 `card_area`（浮层尺寸，**只有 App 与测试用**——setup 向导有自己的
+  三块布局，把面板整块渲染进 `panel_area`，不是浮层）与 `Regions::new`（内部切分，三个入口共用）；
+  `tree_viewport_rows` / `anchors_viewport_rows` / `has_anchor_column` 必须与实际画出来的东西一致
+  （翻页步长与"左栏存不存在"），每帧喂回面板（`set_viewport_rows` / `set_anchor_viewport_rows` /
+  `set_anchors_visible`），`the_viewport_contract_holds_at_every_size` 钉住这条。
 - 排查用户现场：`wing config doctor`（不需要网关正常）→ `wing config list` → `~/.wing/core/logs/`
   的 `settings changed:` 行（只有路径，没有值）；两个 `.bak` 是最近一次保存前的原文。

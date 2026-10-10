@@ -8,7 +8,7 @@
 2. path 生成（含多级列表嵌套与根拼写 = ``config``）；
 3. 约束抽取（``gt``/``ge``/``lt``/``le`` → min/max + exclusive 标志、``pattern``、``min_items``）；
 4. ``required`` / ``default`` / ``has_default``（含 default_factory 的 object/list 与 map 两种情况）；
-5. section 分组与 ``order``（= 声明序）、合成节点的元信息；
+5. section 分组（= ``config/groups.py`` 的表的投影）与 ``order``（= 声明序）、合成节点的元信息；
 6. ``parse_path`` 全用例（合法 5 例 + 非法 12 例，文法与 Rust 侧同批）；
 7. **规模断言**：声明字段总数 = 68（01 报告的迁移字段数），防「某个嵌套模型被漏扫」。
 """
@@ -32,6 +32,7 @@ from wing.config.catalog import (
     build_catalog,
     parse_path,
 )
+from wing.config.groups import build_groups
 from wing.config.models import Config
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,25 +323,22 @@ def test_root_spelling_and_children_order() -> None:
     )
 
 
-def test_sections_are_contiguous_and_documented() -> None:
+def test_sections_follow_the_group_table() -> None:
+    """``section`` 是分组表的投影（表本身与覆盖门禁见 ``test_config_groups.py``）。"""
     catalog = build_catalog()
-    sections: list[str] = []
+    titles = [group.title for group in build_groups()]
     for child in catalog.children:
-        assert child.section is not None, child.path
-        if child.section not in sections:
-            sections.append(child.section)
-    assert sections == [
-        "Providers",
-        "Agents",
-        "Behavior",
-        "Images",
-        "Sessions",
-        "Gateway",
-        "Extensibility",
-        "Logging",
-        "Advanced",
-    ]
-    for section in sections:
+        assert child.section in titles, child.path
+    # 每个组的成员在声明序里是**连续的一段**（今天的表就是如此）。
+    # 注意这**不是** emitter 的前提：分隔行按"组的首次出现"发（`emit.py` 的 `banner_for`），
+    # 交错也只是横幅位置跟着首个成员走，不会重复发——所以这里钉的是文件可读性事实，
+    # 不是机制依赖（`runs` 而不是 `seen`：交错会在这里现形）。
+    runs: list[str] = []
+    for child in catalog.children:
+        if not runs or runs[-1] != child.section:
+            runs.append(child.section or "")
+    assert runs == titles, runs
+    for section in titles:
         members = [c for c in catalog.children if c.section == section]
         assert members[0].section_doc is not None, section
         assert all(member.section_doc is None for member in members[1:]), section

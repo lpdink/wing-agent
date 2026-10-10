@@ -71,7 +71,7 @@
 | `hooks/`（registry / loader） | L2 | Hook 扩展点注册表 + 配置文件加载（`hook_registry.py` 与 `config.load_hooks` 于 11 归位一处） |
 | `request_context.py` | L2 | 每请求上下文（request_id / session_id / client_id，单 ContextVar） |
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
-| `config/`（spec / models / problems / catalog / emit / document / boot / loader / user_agent） | L3 | 声明层（`S(...)` / `SettingMeta` / `ApplyScope`：字段元信息唯一来源）+ 设置目录树（catalog）+ 规范形 YAML emitter（模板与保存共用）+ 稀疏文档 / 启动读取（`boot_config()` 永不抛）+ WING_HOME 解析与配置单例 |
+| `config/`（spec / models / problems / catalog / groups / emit / document / boot / loader / user_agent） | L3 | 声明层（`S(...)` / `SettingMeta` / `ApplyScope`：字段元信息唯一来源）+ 设置目录树（catalog）+ 业务分组表（groups：界面分类的唯一声明处）+ 规范形 YAML emitter（模板与保存共用）+ 稀疏文档 / 启动读取（`boot_config()` 永不抛）+ WING_HOME 解析与配置单例 |
 | `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
 | `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、打断收口阶梯、未提交投影 |

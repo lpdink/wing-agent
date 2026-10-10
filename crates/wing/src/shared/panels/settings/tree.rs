@@ -27,6 +27,7 @@ use wing_api_client::models::parse_path;
 use crate::config::catalog::secret_hint;
 
 use super::ChoiceState;
+use super::GroupAnchor;
 use super::Problem;
 use super::SearchFilter;
 use super::doc::Root;
@@ -37,6 +38,7 @@ use super::doc::path_is_within;
 use super::edit::ScalarKind;
 use super::edit::editor_kind;
 use super::edit::fmt_f64;
+use super::groups::member_nodes;
 
 /// 一行可见的树节点（设计 §11.2）。
 #[derive(Debug, Clone, PartialEq)]
@@ -111,15 +113,20 @@ pub enum RowAction {
     ReadOnly,
 }
 
-/// 扁平化一棵根（含根头行）。
+/// 扁平化**一个业务分组**（= 右栏的全部内容）。
 ///
-/// - `expanded`：按 `(根, 具体路径)` 记的展开集（根头行用空路径）；
+/// `group` 决定画哪些顶层节点（[`member_nodes`] 按声明序解析）与它们属于哪个根
+/// （[`GroupAnchor::root`]）：v2 的面板不再有「根头行」——左栏锚点承担了它，
+/// 右栏从 depth 0 的成员行开始。
+///
+/// - `catalog`：整棵根目录（`concrete_node` 解析 union 列表项的形态要用它）；
+/// - `expanded`：按 `(根, 具体路径)` 记的展开集；
 /// - `problems`：已合并的问题表，只用于行标记的汇总；
 /// - `filter`：搜索态（`None` = 完整树）；
 /// - `choices`：当前展开的 enum 选择项（只对匹配的根与路径生效）。
 pub fn flatten(
-    root: Root,
     catalog: &SettingNode,
+    group: &GroupAnchor,
     doc: &SettingsDoc,
     expanded: &HashSet<(Root, String)>,
     problems: &[Problem],
@@ -127,7 +134,7 @@ pub fn flatten(
     choices: Option<&ChoiceState>,
 ) -> Vec<Row> {
     let ctx = Ctx {
-        root,
+        root: group.root,
         catalog,
         doc,
         expanded,
@@ -136,12 +143,8 @@ pub fn flatten(
         choices,
     };
     let mut rows = Vec::new();
-    rows.push(root_row(&ctx));
-    let vis = ctx.visible("");
-    if ctx.show_children("", "", vis) || ctx.is_hit("") {
-        for child in &catalog.children {
-            visit(&ctx, &mut rows, child, Place::root_child(&child.key));
-        }
+    for member in member_nodes(catalog, group) {
+        visit(&ctx, &mut rows, member, Place::top(&member.key));
     }
     rows
 }
@@ -199,30 +202,6 @@ impl Ctx<'_> {
     }
 }
 
-fn root_row(ctx: &Ctx) -> Row {
-    let label = ctx.root.label();
-    Row {
-        root: ctx.root,
-        path: String::new(),
-        depth: 0,
-        label: label.to_string(),
-        value: ValueText::None,
-        markers: RowMarkers {
-            dirty: ctx.doc.has_dirty_below(ctx.root, ""),
-            problem: ctx
-                .problems
-                .iter()
-                .any(|p| p.root == ctx.root && p.path.is_some()),
-            required: false,
-            secret: false,
-            apply: ApplyScope::Hot,
-        },
-        action: RowAction::Expand,
-        match_spans: ctx.filter.map_or_else(Vec::new, |f| f.find_spans(label)),
-        tpath: String::new(),
-    }
-}
-
 /// 一次访问的「位置」：具体路径 / 模板路径 / 深度 / 搜索态强制 / 所属列表。
 struct Place<'a> {
     path: String,
@@ -235,11 +214,12 @@ struct Place<'a> {
 }
 
 impl<'a> Place<'a> {
-    fn root_child(key: &str) -> Place<'static> {
+    /// 分组的顶层成员（右栏的第一层，depth 0）。
+    fn top(key: &str) -> Place<'static> {
         Place {
             path: key.to_string(),
             tpath: key.to_string(),
-            depth: 1,
+            depth: 0,
             forced: false,
             owner: None,
         }
@@ -683,12 +663,34 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
+    /// 一个"装下全部顶层键"的分组（夹具里没有分组表，测试直接用 root 的全部子节点）。
+    fn all_members(catalog: &SettingNode) -> GroupAnchor {
+        GroupAnchor {
+            root: Root::Gateway,
+            id: "all".to_string(),
+            title: "All".to_string(),
+            doc: String::new(),
+            members: catalog
+                .children
+                .iter()
+                .map(|child| child.key.clone())
+                .collect(),
+        }
+    }
+
     fn flatten_sample() -> Vec<Row> {
         let catalog = fx::sample_catalog();
         let doc = fx::sample_doc();
-        let mut expanded = HashSet::new();
-        expanded.insert((Root::Gateway, String::new()));
-        flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None)
+        let expanded = HashSet::new();
+        flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        )
     }
 
     fn label(rows: &[Row], path: &str) -> String {
@@ -717,16 +719,15 @@ mod tests {
     // ── 扁平化 ───────────────────────────────────────────────
 
     #[test]
-    fn root_row_is_first_and_children_follow_in_declaration_order() {
+    fn members_come_in_declaration_order_without_a_root_row() {
         let rows = flatten_sample();
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
-            vec!["", "providers", "gateway", "tools", "extra_body"],
-            "根头行在前，其余按声明序（未展开）"
+            vec!["providers", "gateway", "tools", "extra_body"],
+            "v2 没有根头行（左栏锚点承担了它），成员按声明序"
         );
-        assert_eq!(rows[0].label, "Gateway");
-        assert_eq!(rows[1].depth, 1);
-        assert_eq!(rows[1].label, "providers (1)", "列表行带项数");
+        assert_eq!(rows[0].depth, 0, "成员行是右栏的第一层");
+        assert_eq!(rows[0].label, "providers (1)", "列表行带项数");
     }
 
     #[test]
@@ -738,12 +739,19 @@ mod tests {
             (Root::Gateway, "gateway"),
             (Root::Gateway, "gateway.auth"),
         ]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(
             paths,
             vec![
-                "",
                 "providers",
                 "gateway",
                 "gateway.port",
@@ -753,8 +761,8 @@ mod tests {
                 "extra_body"
             ]
         );
-        assert_eq!(row(&rows, "gateway.port").depth, 2);
-        assert_eq!(row(&rows, "gateway.auth.enabled").depth, 3);
+        assert_eq!(row(&rows, "gateway.port").depth, 1);
+        assert_eq!(row(&rows, "gateway.auth.enabled").depth, 2);
     }
 
     #[test]
@@ -762,8 +770,16 @@ mod tests {
         let catalog = fx::sample_catalog();
         let doc = fx::sample_doc();
         let expanded = expand_all(&[(Root::Gateway, "")]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
-        assert_eq!(rows.len(), 5, "只展开根，全部顶层折起来");
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(rows.len(), 4, "一个都不展开 → 只剩四个成员行");
     }
 
     #[test]
@@ -771,7 +787,15 @@ mod tests {
         let catalog = fx::sample_catalog();
         let doc = fx::sample_doc();
         let expanded = expand_all(&[(Root::Gateway, ""), (Root::Gateway, "providers")]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         let item = row(&rows, "providers[0]");
         assert_eq!(item.label, "default · openai", "summary_fields 顺序");
         assert_eq!(item.value, ValueText::None, "列表项行主文本在 label");
@@ -787,7 +811,15 @@ mod tests {
         let catalog = fx::sample_catalog();
         let doc = fx::sample_doc();
         let expanded = expand_all(&[(Root::Gateway, ""), (Root::Gateway, "tools")]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         assert_eq!(label(&rows, "tools[0]"), "Bash");
         assert_eq!(label(&rows, "tools[1]"), "Read");
         assert_eq!(
@@ -807,7 +839,15 @@ mod tests {
             (Root::Gateway, "providers[0]"),
             (Root::Gateway, "providers[0].models"),
         ]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         // 裸字符串形态 → 标量项行。
         assert_eq!(label(&rows, "providers[0].models[0]"), "ds-flash");
         assert_eq!(
@@ -837,7 +877,15 @@ mod tests {
             (Root::Gateway, "providers[0].models"),
             (Root::Gateway, "providers[0].models[1]"),
         ]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         assert_eq!(
             label(&rows, "providers[0].models[1]"),
             "ds-pro",
@@ -858,7 +906,15 @@ mod tests {
         let catalog = fx::sample_catalog();
         let doc = fx::empty_doc();
         let expanded = expand_all(&[(Root::Gateway, ""), (Root::Gateway, "providers")]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         assert_eq!(label(&rows, "providers"), "providers (0)");
         assert_eq!(
             rows.iter()
@@ -876,7 +932,15 @@ mod tests {
         catalog.children[2].editable = false;
         let doc = fx::sample_doc();
         let expanded = expand_all(&[(Root::Gateway, ""), (Root::Gateway, "tools")]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         assert!(
             rows.iter().all(|r| r.path != "tools[]"),
             "只读列表没有新增行"
@@ -894,7 +958,15 @@ mod tests {
         catalog.children[2].max_items = Some(2);
         let doc = fx::sample_doc();
         let expanded = expand_all(&[(Root::Gateway, ""), (Root::Gateway, "tools")]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         assert!(rows.iter().all(|r| r.path != "tools[]"), "满了就没有新增行");
     }
 
@@ -904,8 +976,8 @@ mod tests {
         catalog.children[0].order = 9;
         catalog.children[1].order = -1;
         let rows = flatten(
-            Root::Gateway,
             &catalog,
+            &all_members(&catalog),
             &fx::empty_doc(),
             &expand_all(&[(Root::Gateway, "")]),
             &[],
@@ -914,7 +986,7 @@ mod tests {
         );
         assert_eq!(
             rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
-            vec!["", "providers", "gateway", "tools", "extra_body"],
+            vec!["providers", "gateway", "tools", "extra_body"],
             "声明序就是展示序"
         );
     }
@@ -1103,8 +1175,8 @@ mod tests {
             (Root::Gateway, "providers[0]"),
         ]);
         let rows = flatten(
-            Root::Gateway,
             &catalog,
+            &all_members(&catalog),
             &doc,
             &expanded,
             &problems,
@@ -1114,7 +1186,6 @@ mod tests {
         assert!(row(&rows, "providers[0].api_key").markers.dirty);
         assert!(row(&rows, "providers[0]").markers.dirty, "项行是汇总");
         assert!(row(&rows, "providers").markers.dirty);
-        assert!(row(&rows, "").markers.dirty);
         assert!(row(&rows, "providers").markers.problem);
         assert!(row(&rows, "providers[0].name").markers.problem);
         assert!(!row(&rows, "gateway").markers.problem);
@@ -1129,7 +1200,15 @@ mod tests {
             (Root::Gateway, "providers"),
             (Root::Gateway, "providers[0]"),
         ]);
-        let rows = flatten(Root::Gateway, &catalog, &doc, &expanded, &[], None, None);
+        let rows = flatten(
+            &catalog,
+            &all_members(&catalog),
+            &doc,
+            &expanded,
+            &[],
+            None,
+            None,
+        );
         assert!(row(&rows, "providers[0].name").markers.required);
         assert!(row(&rows, "providers[0].api_key").markers.secret);
         assert_eq!(

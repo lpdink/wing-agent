@@ -181,6 +181,49 @@ class TestSettingsSchema:
         assert root["key"] == "config" and root["path"] == "config"
         assert root["kind"] == "object"
 
+    def test_groups_are_the_navigation_anchors(self, gateway):
+        """``groups`` 是前端左列锚点的唯一来源：顺序 / 名字 / 成员都在 wire 上。"""
+        client, _, _ = gateway
+        body = client.get("/api/settings/schema").json()
+        groups = body["groups"]
+        assert [g["id"] for g in groups] == [
+            "providers",
+            "agents",
+            "behavior",
+            "images",
+            "sessions",
+            "gateway",
+            "advanced",
+        ]
+        assert [g["title"] for g in groups] == [
+            "Providers",
+            "Agents",
+            "Behavior",
+            "Images",
+            "Sessions",
+            "Gateway",
+            "Advanced",
+        ]
+        by_id = {g["id"]: g for g in groups}
+        assert by_id["behavior"]["members"] == [
+            "safe_command_patterns",
+            "yolo",
+            "steer",
+            "tool_result_truncate",
+        ]
+        assert by_id["advanced"]["members"] == [
+            "hooks",
+            "commands",
+            "log",
+            "user_agent",
+        ]
+        assert all(g["doc"] for g in groups)
+        # 成员与目录的 section 同源（同一个组名，两个消费口径）。
+        root = body["root"]
+        for child in root["children"]:
+            group = next(g for g in groups if child["key"] in g["members"])
+            assert child["section"] == group["title"], child["key"]
+
     def test_providers_node_carries_declarations(self, gateway):
         client, _, _ = gateway
         root = client.get("/api/settings/schema").json()["root"]

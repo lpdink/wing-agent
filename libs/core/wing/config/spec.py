@@ -60,10 +60,6 @@ class SettingMeta(BaseModel):
     """False = 面板灰显只读。"""
     deprecated: str | None = None
     """预留：废弃说明。本期不消费（无迁移 / 无 rename）。"""
-    section: str | None = None
-    """顶层分组名（09 个 section 之一；见 ``Config`` 的字段）。"""
-    section_doc: str | None = None
-    """分组说明；只写在该 section 的**首个**字段上（写多处 = 新 SYNC）。"""
     summary_fields: list[str] | None = None
     """列表项标题行的字段名序列（列表字段上声明；缺省 = 第一个标量子字段）。"""
     identity_field: str | None = None
@@ -115,8 +111,6 @@ def S(
     example: str | None = None,
     editable: bool = True,
     deprecated: str | None = None,
-    section: str | None = None,
-    section_doc: str | None = None,
     summary_fields: list[str] | None = None,
     identity_field: str | None = None,
     min_items: int | None = None,
@@ -141,8 +135,6 @@ def S(
         example=example,
         editable=editable,
         deprecated=deprecated,
-        section=section,
-        section_doc=section_doc,
         summary_fields=summary_fields,
         identity_field=identity_field,
         min_items=min_items,

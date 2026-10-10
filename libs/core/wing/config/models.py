@@ -765,8 +765,6 @@ class Config(BaseModel):
         # （problems.cross_field_problems 的 duplicate provider name），且非密文——
         # 删 / 移 / 前插 provider 后 api_key 的 null 哨兵按它回填，不会错配到别的 provider。
         identity_field="name",
-        section="Providers",
-        section_doc="LLM provider 与模型目录（目录只有一个来源：这里的声明）",
     )
     # ── Agents ─────────────────────────────────────
     agents: list[AgentConfig] = S(
@@ -775,8 +773,6 @@ class Config(BaseModel):
         apply=ApplyScope.NEXT_SESSION,
         min_items=1,
         summary_fields=["name", "model"],
-        section="Agents",
-        section_doc="Agent 模板：模型引用 / 工具集 / 提示词 / skills 与 rules",
     )
     # ── Behavior ───────────────────────────────────
     safe_command_patterns: list[str] = S(
@@ -784,82 +780,63 @@ class Config(BaseModel):
         notes=r"例：^git\s+(status|log|diff)",
         apply=ApplyScope.HOT,
         default_factory=list,
-        section="Behavior",
-        section_doc="Agent 行为与内置工具的通用开关（bash 安全 / 结果截断）",
     )
     yolo: bool = S(
         doc="跳过危险命令的安全检查",
         notes="谨慎使用——所有命令不经确认直接执行。",
         apply=ApplyScope.NEXT_SESSION,
         default=False,
-        section="Behavior",
     )
     steer: bool = S(
         doc="启用 steer 模式（用引导提示约束 agent 行为）",
         apply=ApplyScope.NEXT_SESSION,
         default=True,
-        section="Behavior",
     )
     tool_result_truncate: ToolResultTruncateConfig = S(
         doc="工具结果截断策略",
         apply=ApplyScope.HOT,
         default_factory=ToolResultTruncateConfig,
-        section="Behavior",
     )
     # ── Images ─────────────────────────────────────
     images: ImagesConfig = S(
         doc="图片读入与请求期保留预算",
         apply=ApplyScope.HOT,
         default_factory=ImagesConfig,
-        section="Images",
-        section_doc="ReadImage 与请求期图片投影（预算按请求生效）",
     )
     # ── Sessions ───────────────────────────────────
     sessions: SessionsConfig = S(
         doc="会话管理",
         apply=ApplyScope.RESTART,
         default_factory=SessionsConfig,
-        section="Sessions",
-        section_doc="会话内存态回收（磁盘状态一概不动）",
     )
     # ── Gateway ────────────────────────────────────
     gateway: GatewayConfig = S(
         doc="网关服务配置",
         apply=ApplyScope.RESTART,
         default_factory=GatewayConfig,
-        section="Gateway",
-        section_doc="网关监听 / 鉴权 / 远程工具",
     )
-    # ── Extensibility ──────────────────────────────
+    # ── Advanced（扩展点 / 日志 / 低层开关）────────
+    # 分组的唯一声明处是 config/groups.py 的 SETTING_GROUPS（界面锚点 + YAML 分隔行都来自它）。
     hooks: list[str] = S(
         doc="hook 文件的 glob 模式",
         notes="hook 是 Python 模块，经 wing hook API 注册处理器。",
         apply=ApplyScope.HOT,
         default_factory=list,
-        section="Extensibility",
-        section_doc="扩展点：hooks 与 prompt 命令",
     )
     commands: CommandsConfig = S(
         doc="prompt 命令配置",
         apply=ApplyScope.HOT,
         default_factory=CommandsConfig,
-        section="Extensibility",
     )
-    # ── Logging ────────────────────────────────────
     log: LogConfig = S(
         doc="日志配置",
         apply=ApplyScope.HOT,
         default_factory=LogConfig,
-        section="Logging",
-        section_doc="日志（控制台级别；文件日志恒为 DEBUG）",
     )
-    # ── Advanced ───────────────────────────────────
     user_agent: UserAgentConfig = S(
         doc="HTTP User-Agent 预设",
         apply=ApplyScope.HOT,
         default_factory=UserAgentConfig,
-        section="Advanced",
-        section_doc="低层 / 少用开关",
     )
 
     @model_validator(mode="after")

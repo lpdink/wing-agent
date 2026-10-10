@@ -50,6 +50,7 @@ from .session import (
 from .settings import (
     SecretState,
     SettingChoice,
+    SettingGroupProto,
     SettingNodeProto,
     SettingProblem,
     SettingsGetResponse,
@@ -117,6 +118,7 @@ __all__ = [
     "SessionInfoResponse",
     "SessionListResponse",
     "SettingChoice",
+    "SettingGroupProto",
     "SettingNodeProto",
     "SettingProblem",
     "SettingsGetResponse",

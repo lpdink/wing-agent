@@ -38,7 +38,18 @@ pub(crate) fn detail_lines(
         .add_modifier(Modifier::BOLD);
     let mut buf = LineBuf::new(width, height);
 
-    let heading = node.map_or_else(|| row.label.clone(), |n| n.display_label().to_string());
+    // 列表项的目录节点是**元素模板**（`key == "[]"`、`title == "[]"`）——拿它当标题
+    // 只会显示一个 `[]`。这时用行自己的摘要（`name · protocol · …`）才有信息量。
+    let heading = node.map_or_else(
+        || row.label.clone(),
+        |n| {
+            if n.key == "[]" {
+                row.label.clone()
+            } else {
+                n.display_label().to_string()
+            }
+        },
+    );
     buf.text(&heading, title);
     let Some(node) = node else {
         // 合成行 / 无法定位的节点：把已知的都说清楚，然后停。
@@ -340,6 +351,25 @@ mod tests {
         assert!(text.contains("值 < 10"), "{text}");
         assert!(text.contains("格式 ^[a-z]+$"), "{text}");
         assert!(text.contains("长度 ≥ 3"), "{text}");
+    }
+
+    #[test]
+    fn a_list_item_row_titles_with_its_summary_not_the_element_template() {
+        let catalog = fx::sample_catalog();
+        let element = catalog.node_at("providers[]").expect("元素模板");
+        assert_eq!(element.key, "[]");
+        let lines = detail_lines(
+            Some(element),
+            &row("providers[0]", "default · openai"),
+            &palette(),
+            40,
+            6,
+        );
+        assert_eq!(texts(&lines)[0], "default · openai", "标题用摘要行");
+        // 普通字段仍用自己的声明标题。
+        let port = catalog.node_at("gateway.port").expect("节点");
+        let lines = detail_lines(Some(port), &row("gateway.port", "port"), &palette(), 40, 6);
+        assert!(texts(&lines)[0].contains("port"), "{:?}", texts(&lines)[0]);
     }
 
     #[test]

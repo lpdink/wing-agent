@@ -43,7 +43,6 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use ratatui::widgets::Clear;
 use ratatui::widgets::Widget as _;
 
 use self::images::Images;
@@ -758,19 +757,29 @@ impl App {
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
 
-            // 设置面板：全屏 overlay，垫在 toast *之前*（保存回执的 toast 要压在它上面）。
-            // `Clear` 抹掉底下的 chat / status / composer；面板自带同一份 Clear，
-            // 这里再清一次是 design §12.1 的落点（谁渲染谁负责挡底）。
-            if let Some(panel) = self.settings_panel.as_mut() {
-                // 08 的契约：每帧把可见行数告诉面板（PageUp / PageDown 的步长）。
+            // 设置面板：居中**浮层卡片**（v2），垫在 toast *之前*（保存回执的 toast 要压在
+            // 它上面）。卡片自己 `Clear` 自己那块——四周的聊天背景因此还在（v1 是全屏
+            // overlay，这里额外全屏 `Clear` 一次；浮层不再需要，也不该抹掉背景）。
+            let settings_card = self
+                .settings_panel
+                .as_ref()
+                .map(|_| crate::ui::settings::card_area(area));
+            if let Some(panel) = self.settings_panel.as_mut()
+                && let Some(card) = settings_card
+            {
+                // 08 的契约：每帧把两栏各自的可见行数告诉面板（翻页步长）。
                 panel.set_viewport_rows(
-                    crate::ui::settings::tree_viewport_rows(panel, area) as usize
+                    crate::ui::settings::tree_viewport_rows(panel, card) as usize
                 );
+                panel.set_anchor_viewport_rows(crate::ui::settings::anchors_viewport_rows(
+                    panel, card,
+                ) as usize);
+                panel.set_anchors_visible(crate::ui::settings::has_anchor_column(panel, card));
             }
             if let Some(panel) = self.settings_panel.as_ref()
+                && let Some(card) = settings_card
                 && let Some((schema, _)) = self.settings_cache.as_ref()
             {
-                frame.render_widget(Clear, area);
                 crate::ui::settings::SettingsOverlay::new(
                     panel,
                     crate::ui::settings::SettingsCatalogs::new(
@@ -779,7 +788,11 @@ impl App {
                     ),
                     &palette,
                 )
-                .render(area, frame.buffer_mut());
+                .render(card, frame.buffer_mut());
+                // 卡片盖住的链接 hit box 要作废（与 toast 同一条不变量：看不见的
+                // hit box 不许打开看不见的链接）。指针侧另有一道门
+                // （`background_pointer_blocked`），这里保证的是**表本身**不撒谎。
+                self.chat.mask_links(card);
             }
 
             // Toast overlay (rendered last, on top of everything).
@@ -812,12 +825,15 @@ impl App {
             let clip = self.chat.geometry().area;
             let recorded = self.chat.frame_images();
             self.images.observe_visible(recorded);
-            // 设置面板开着时跳过绘制：overlay 是这一帧的最后写入者，图片若还画
-            // 就会盖在它上面（与 toast 遮罩同一个理由，§20 风险 13）。关面板时
-            // `close_settings_panel` 会 invalidate 一次，编码与句柄在那里作废。
-            if self.settings_panel.is_none() && !self.selection.is_press_active() {
+            // 浮层卡片是"挡一块"而不是"挡全屏"：背景里的图片照常画，被卡片（或 toast）
+            // 压住的那几张由 `paint` 的 masks **整张**跳过（半张覆盖会撕碎图形协议，
+            // §20 风险 13 的同一条理由）。关面板时 `close_settings_panel` 会 invalidate
+            // 一次，编码与句柄在那里作废。
+            let mut masks: Vec<Rect> = toast_area.into_iter().collect();
+            masks.extend(settings_card);
+            if !self.selection.is_press_active() {
                 self.images
-                    .paint(recorded, clip, toast_area, frame.buffer_mut());
+                    .paint(recorded, clip, &masks, frame.buffer_mut());
             }
 
             // In-app text selection — painted after the toast (the selection
@@ -832,8 +848,9 @@ impl App {
             // user was actually looking at. The composer needs no snapshot —
             // its wrapping is ours, so the copy comes from the draft itself.
             //
-            // 设置面板开着时不画：面板是全屏 overlay，拖拽的坐标落在它底下的 chat
-            // band 上（选区锚在内容坐标），高亮画出来只会泼在面板上（打开面板时
+            // 设置面板开着时不画：面板是**模态浮层**，键盘已经被它接管、指针也不再
+            // 认领背景（`background_pointer_blocked`），而拖拽坐标落在卡片四周的 chat
+            // band 上（选区锚在内容坐标）——高亮画出来只会和卡片打架（打开面板时
             // 已有的选区已经被取消，这里挡的是"面板开着时新起的拖拽"）。
             if self.selection.is_press_active() && self.settings_panel.is_none() {
                 match self.selection.region() {

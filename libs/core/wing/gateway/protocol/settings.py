@@ -88,10 +88,14 @@ class SettingNodeProto(BaseModel):
         default=None, description="预留：废弃说明（本期不消费）"
     )
 
-    # ── 分组 ──
-    section: str | None = Field(default=None, description="顶层分组名")
+    # ── 分组（业务分组的投影，声明在 config/groups.py；权威是 schema.groups[]）──
+    section: str | None = Field(
+        default=None,
+        description="所属业务分组的 title：root 的每个直接子节点都带（嵌套节点为 null）",
+    )
     section_doc: str | None = Field(
-        default=None, description="分组说明（每节只写一次）"
+        default=None,
+        description="分组说明：只在每组的声明序首成员上非空（emitter 的一条块注释）",
     )
 
     # ── 结构 ──
@@ -119,12 +123,33 @@ class SettingNodeProto(BaseModel):
 SettingNodeProto.model_rebuild()
 
 
+class SettingGroupProto(BaseModel):
+    """一个业务分组（镜像 ``config.groups.SettingGroup``）——前端导航的**唯一锚定来源**。
+
+    分组与 ``config.yaml`` 的存储形式解耦：``members`` 是顶层键名（catalog root 直接子节点的
+    ``key``），组的顺序即界面顺序。前端**不许**硬编码组名 / 顺序 / 成员——加组、并组、改名
+    都只发生在后端声明层（``config/groups.py``）。
+    """
+
+    id: str = Field(description="稳定标识（改名 / 调序都不该改它）")
+    title: str = Field(description="显示名（面板锚点 / YAML 分隔行 / CLI 分组头）")
+    doc: str = Field(default="", description="一行说明")
+    members: list[str] = Field(
+        default_factory=list,
+        description="成员 = Config 的顶层键名（每个顶层键恰好属于一个组）",
+    )
+
+
 class SettingsSchemaResponse(BaseModel):
-    """GET /api/settings/schema 响应——设置目录（catalog 树）+ 版本 + 文件位置。"""
+    """GET /api/settings/schema 响应——设置目录（catalog 树）+ 分组 + 版本 + 文件位置。"""
 
     version: str = Field(description="网关版本（前端可据此提示「网关比面板新」）")
     root: SettingNodeProto = Field(description="Config 的节点（catalog 的根）")
     config_path: str = Field(description="config.yaml 的绝对路径（面板标题栏展示）")
+    groups: list[SettingGroupProto] = Field(
+        default_factory=list,
+        description="业务分组（顺序即界面顺序）；老网关不发该键 → 前端回落到 section 推导",
+    )
 
 
 # ============================================================
@@ -257,6 +282,7 @@ class SettingsSetResponse(BaseModel):
 __all__ = [
     "SecretState",
     "SettingChoice",
+    "SettingGroupProto",
     "SettingNodeProto",
     "SettingProblem",
     "SettingsGetResponse",

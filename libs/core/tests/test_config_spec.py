@@ -13,7 +13,8 @@
 4. ``secret=True`` 的字段注解必须是 ``str``。
 5. ``choices`` 的键集 ⊇ ``Literal`` 的 args（有 ``Literal`` 时）。
 6. AST：字段赋值后不紧跟字符串表达式（无残留字段 docstring）。
-7. 顶层九分组：名字闭集、声明序连续、``section_doc`` 每段恰好一次且在首字段。
+7. 声明层**不携带**分组（``section`` / ``section_doc`` 已移出 ``SettingMeta``；
+   分组表见 ``config/groups.py`` 与 ``test_config_groups.py``）。
 8. 容器节点的 ``apply`` = 子树**最粗**的一档（总设计只给了叶子，容器约定见 design.md D7）。
 9. 任务书点名的声明（secret / min_items / summary_fields / choices）逐条钉住。
 """
@@ -99,12 +100,6 @@ _FIELD_BY_PATH: dict[str, FieldInfo] = dict(_ALL_FIELDS)
 def _meta(path: str) -> Any:
     meta = setting_meta(_FIELD_BY_PATH[path])
     assert meta is not None, f"{path} 没有声明（缺 S(...)）"
-    return meta
-
-
-def _meta_for(field: FieldInfo) -> Any:
-    meta = setting_meta(field)
-    assert meta is not None, "字段没有声明"
     return meta
 
 
@@ -246,57 +241,31 @@ def test_choices_cover_literal_args(path: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. 顶层九分组
+# 7. 声明层不携带分组（分组的唯一来源是 config/groups.py）
 # ─────────────────────────────────────────────────────────────────────────────
 
-_EXPECTED_SECTIONS = [
-    "Providers",
-    "Agents",
-    "Behavior",
-    "Images",
-    "Sessions",
-    "Gateway",
-    "Extensibility",
-    "Logging",
-    "Advanced",
-]
+
+def test_setting_meta_declares_no_grouping() -> None:
+    """``SettingMeta`` 不再有 ``section`` / ``section_doc``：界面分类住在分组表里。
+
+    分组曾是字段声明的一部分（``S(section=...)`` + 「``section_doc`` 只写首字段」的纪律），
+    于是「改一次界面分类」要动模型声明——而模型声明同时是文件布局与校验的事实来源。
+    现在它由 ``config/groups.py`` 的 ``SETTING_GROUPS`` 单点声明
+    （门禁见 ``test_config_groups.py``）。
+    """
+    fields = set(type(_meta("Config.providers")).model_fields)
+    assert not {"section", "section_doc"} & fields, sorted(fields)
 
 
-def test_config_sections_are_contiguous_and_documented() -> None:
-    """九分组：名字闭集、声明序连续、``section_doc`` 每段恰好一次且在首字段。"""
-    sections: list[str] = []
-    for name in Config.model_fields:
-        meta = _meta(f"Config.{name}")
-        assert meta.section is not None, f"Config.{name} 缺 section"
-        sections.append(meta.section)
-
-    # 连续 = 同一 section 只出现在一段里（分组顺序 = 声明序）。
-    first_seen: list[str] = []
-    for section in sections:
-        if section not in first_seen:
-            first_seen.append(section)
-    assert first_seen == _EXPECTED_SECTIONS, f"分组顺序不符：{first_seen}"
-
-    for section in _EXPECTED_SECTIONS:
-        section_fields = [
-            field
-            for name, field in Config.model_fields.items()
-            if _meta(f"Config.{name}").section == section
-        ]
-        docs = [_meta_for(field).section_doc for field in section_fields]
-        assert sum(doc is not None for doc in docs) == 1, (
-            f"{section}: section_doc 必须恰好写一次（写多处 = 新 SYNC）"
-        )
-        assert docs[0] is not None, f"{section}: section_doc 必须写在首字段上"
-
-
-def test_nested_models_have_no_section() -> None:
-    """``section`` 只属于顶层字段（嵌套模型的字段不该有分组）。"""
-    for path, _ in _ALL_FIELDS:
-        model_name = path.split(".")[0]
-        if model_name == "Config":
-            continue
-        assert _meta(path).section is None, f"{path}: 嵌套字段不该有 section"
+def test_no_declaration_passes_a_section_kwarg() -> None:
+    """AST：源码里不许再出现 ``S(section=...)`` / ``S(section_doc=...)``。"""
+    offenders = sorted(
+        node.lineno
+        for node in _s_calls()
+        for kw in node.keywords
+        if kw.arg in ("section", "section_doc")
+    )
+    assert not offenders, f"以下 S(...) 调用还在声明分组：lines {offenders}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

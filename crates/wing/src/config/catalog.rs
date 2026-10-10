@@ -25,6 +25,7 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 use wing_api_client::models::ApplyScope;
 use wing_api_client::models::SettingChoice;
+use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 
@@ -291,6 +292,30 @@ pub fn interface_catalog() -> SettingNode {
     root.section_doc = None;
     root.children = vec![colors, layout, rendering, api_key];
     root
+}
+
+/// Interface 根的**业务分组**（设置面板左列的最后一个锚点）。
+///
+/// 与后端 `config/groups.py` 的 `SETTING_GROUPS` 同一份建模、同一个 wire 类型
+/// （[`SettingGroup`]），只是声明在 Rust 侧——TUI 自己的配置后端不知道。
+/// 一个锚点装下全部顶层键：Interface 的四个键（`colors` / `layout` / `rendering` / `api_key`）
+/// 是一件事（"这个终端长什么样"），拆成四个锚点只会把左列挤满。
+///
+/// 门禁（本文件的单测）：成员必须与 [`interface_catalog`] 的 root 子节点**双向对账**——
+/// 加了字段忘了归类 ⇒ 它在面板里无处可去；归类了不存在的键 ⇒ 空锚点。
+pub fn interface_groups() -> Vec<SettingGroup> {
+    vec![SettingGroup {
+        id: "interface".to_owned(),
+        title: "Interface".to_owned(),
+        // 这段 doc 会原样画在右栏的组头（纯文本，不渲染 markdown）：不写反引号。
+        doc: "TUI 自身：配色 / 布局 / 渲染（改动即时预览，s 保存到 tui/config.yaml）".to_owned(),
+        members: vec![
+            "colors".to_owned(),
+            "layout".to_owned(),
+            "rendering".to_owned(),
+            "api_key".to_owned(),
+        ],
+    }]
 }
 
 /// 一个只填了身份 / 类型 / 文档的节点（其余字段取协议默认值，见 §9）。
@@ -1125,6 +1150,20 @@ mod tests {
                 node.path
             );
         }
+    }
+
+    /// 分组与 catalog 的 root 子节点**双向对账**（左列锚点不许漏项 / 不许有幻影成员）。
+    #[test]
+    fn interface_groups_partition_the_catalog_root() {
+        let catalog = interface_catalog();
+        let groups = interface_groups();
+        assert_eq!(groups.len(), 1, "Interface 是一个锚点");
+        let members: Vec<&str> = groups[0].members.iter().map(String::as_str).collect();
+        let keys: Vec<&str> = catalog.children.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(members, keys, "成员 = root 子节点（顺序也一致）");
+        assert!(!groups[0].title.trim().is_empty());
+        assert!(!groups[0].doc.trim().is_empty());
+        assert!(!groups[0].id.trim().is_empty());
     }
 
     // ── catalog 内容 ───────────────────────────────────────────

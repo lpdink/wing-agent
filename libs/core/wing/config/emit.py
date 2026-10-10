@@ -10,7 +10,9 @@
 
 1. 文件头 4 行注释（产品名 / 文件位置 / 「推荐在 TUI 里用 ``/settings`` 编辑」；**不写时间戳**——
    它会让每次保存都产生 diff 噪声）；
-2. 按 ``section`` 分组（声明序连续），每组一行 ``# ── Name ───…`` 分隔 + ``section_doc`` 块注释；
+2. 按业务分组（``config/groups.py`` 的表盖到目录节点上的 ``section``）分段，每组一行
+   ``# ── Name ───…`` 分隔 + ``section_doc`` 块注释；**键序恒为模型声明序**，分隔行按组
+   的首次出现发一次（分组表管界面顺序，不管文件顺序）；
 3. 每个字段：``doc`` / ``notes`` / ``example`` 在上方（不用行尾注释）；值存在 → 写出；
    值缺席且有默认 → **注释掉的默认值**；值缺席且必填 → 键 + 空值（天然的 problem，
    ``ChangeHere`` 占位符彻底死亡）；
@@ -209,15 +211,17 @@ def _emit_children(
     commented: bool = False,
 ) -> None:
     """一个 object 节点的子字段（``data`` 是它的值；缺席的子字段照规则 3 处理）。"""
-    section: str | None = None
+    banner_for: set[str] = set()
     emitted = 0
     for child in node.children:
         child_path = _child_path(prefix, child.key)
         if top_level:
             if emitted:
                 out.append("")
-            if child.section is not None and child.section != section:
-                section = child.section
+            # 分隔行按「首次出现」发一次：分组表是界面顺序，文件顺序恒为声明序，
+            # 两者不一致时也不重复发（同一组的两段分隔行只会让人以为文件被切错了）。
+            if child.section is not None and child.section not in banner_for:
+                banner_for.add(child.section)
                 _emit_section_banner(out, child)
         raw = data.get(child.key, _MISSING) if isinstance(data, dict) else _MISSING
         _emit_field(out, extras, child, child_path, raw, indent, commented=commented)

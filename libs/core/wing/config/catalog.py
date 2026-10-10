@@ -5,8 +5,9 @@
 
 - 01 的声明层回答了「这个字段是什么」，本模块把它变成**一棵树**：路径文法（``providers[].api_key``）、
   类型推导（注解 → ``SettingKind``）、约束（``gt`` → ``min`` + ``exclusive_min``）、枚举值域、
-  分组（section）、列表元素形态（``element`` / ``variants``）。Setting API（03）、TUI 面板（07/08）、
-  ``wing config`` CLI（12）与自动生成文档共用这一份数据，不允许各自再推一遍类型。
+  业务分组（``config/groups.py`` 的表盖到 root 直接子节点上）、列表元素形态（``element`` / ``variants``）。
+  Setting API（03）、TUI 面板（07/08）、``wing config`` CLI（12）与自动生成文档共用这一份数据，
+  不允许各自再推一遍类型。
 - 纯逻辑：不读文件、不 import gateway / runtime / event_bus。每次 ``build_catalog()`` 现建，
   **不缓存**——配置量级是几十个节点，缓存只换来失效问题。
 - ``parse_path()`` 是路径文法（总设计 §5.2）的**唯一实现**（Rust 侧 ``wing-api-client`` 有同构的一份，
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
+from .groups import SettingGroup, build_groups, group_of
 from .models import Config
 from .spec import ApplyScope, SettingMeta, setting_meta
 
@@ -120,9 +122,13 @@ class SettingNode(BaseModel):
 
     # ── 分组 ──
     section: str | None = None
-    """顶层分组名（只出现在 root 的直接子节点上）。"""
+    """业务分组名（只出现在 root 的直接子节点上）。
+
+    **不是字段声明**：由 ``config/groups.py`` 的 ``SETTING_GROUPS`` 盖上来
+    （:func:`build_catalog` 的最后一步）——界面分类与文件存储形式解耦，改分组只动那张表。
+    """
     section_doc: str | None = None
-    """分组说明（每个 section 只写一次，在该段首字段上）。"""
+    """分组说明（每个分组只盖在该组**声明序首个**成员上，emitter 据此写块注释）。"""
 
     # ── 渲染提示 ──
     summary_fields: list[str] = Field(default_factory=list)
@@ -248,6 +254,9 @@ def build_catalog(root: type[BaseModel] = Config) -> SettingNode:
 
     每次调用现建、不缓存。未声明的字段直接 ``ValueError``（声明门禁已保证生产路径不出现——
     悄悄产出一个没有文档的节点比炸更糟）。
+
+    最后一步把**业务分组**盖到 root 的直接子节点上（:func:`_stamp_groups`）：分组的
+    唯一来源是 ``config/groups.py`` 的 ``SETTING_GROUPS``，字段声明里没有它。
     """
     node = SettingNode(
         key=ROOT_KEY,
@@ -258,7 +267,31 @@ def build_catalog(root: type[BaseModel] = Config) -> SettingNode:
         children=_children_of(root, ""),
     )
     node.apply = _coarsest_apply(node)
+    _stamp_groups(node, root)
     return node
+
+
+def _stamp_groups(node: SettingNode, root: type[BaseModel]) -> None:
+    """root 的直接子节点盖上 ``section`` / ``section_doc``（分组表 → 目录节点）。
+
+    - ``section`` = 组的 ``title``（emitter 的分隔行、``wing config list`` 的分组头、
+      旧客户端的分组渲染都读它，形状不变）；
+    - ``section_doc`` 只盖在**声明序首个**成员上（emitter 的一条块注释，写多处 = 重复）；
+    - ``root`` 不是 :class:`Config`（单测的手工小模型）时没有分组表，一切留 ``None``；
+      是 ``Config`` 而有顶层键没被任何组认领 → ``ValueError``（界面里它会无处可去）。
+    """
+    if root is not Config:
+        return
+    groups = build_groups(root)
+    first_of: set[str] = set()
+    for child in node.children:
+        group: SettingGroup | None = group_of(child.key, groups)
+        if group is None:
+            raise ValueError(f"顶层配置字段没有归入任何设置分组：{child.key}")
+        child.section = group.title
+        if group.id not in first_of:
+            first_of.add(group.id)
+            child.section_doc = group.doc
 
 
 def _children_of(model: type[BaseModel], prefix: str) -> list[SettingNode]:
@@ -321,8 +354,6 @@ def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNo
         apply=meta.apply,
         editable=meta.editable,
         deprecated=meta.deprecated,
-        section=meta.section,
-        section_doc=meta.section_doc,
         summary_fields=list(meta.summary_fields or []),
         identity_field=meta.identity_field,
         value_hint=None,

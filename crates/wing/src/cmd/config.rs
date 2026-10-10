@@ -73,7 +73,11 @@ pub enum ConfigCommand {
 
     /// Print the settings tree (path / value / default / apply scope / overridden / problems).
     List {
-        /// Only show this top-level section (case-insensitive; e.g. `gateway`).
+        /// Only show this group (case-insensitive; e.g. `gateway`).
+        ///
+        /// The group names are the backend's declaration (`config/groups.py`) —
+        /// the same anchors the TUI settings panel lists in its left column.
+        /// `Advanced` covers hooks / commands / log / user_agent.
         #[arg(long)]
         section: Option<String>,
         /// Only show paths that are present in the sparse document (explicitly set).
@@ -2456,8 +2460,10 @@ mod tests {
             Self {
                 schema: Ok(SettingsSchemaResponse {
                     version: "0.0.0".to_string(),
-                    root,
+                    root: root.clone(),
                     config_path: "/tmp/wing/config.yaml".to_string(),
+                    // CLI 不消费分组；空表 = 面板自己按 section 兜底推导。
+                    groups: Vec::new(),
                 }),
                 get: Ok(get_response(values)),
                 status: Ok(SettingsStatusResponse {

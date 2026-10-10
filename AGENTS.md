@@ -62,6 +62,7 @@ libs/core/wing/
 │   ├── spec.py                      声明层：S(...) / SettingMeta / ApplyScope（字段元信息唯一来源）
 │   ├── problems.py                  跨字段检查纯函数 + ConfigProblem（加载期 / 设置面板共用）
 │   ├── catalog.py                   设置目录树：SettingNode / build_catalog() / parse_path()
+│   ├── groups.py                    业务分组表：SETTING_GROUPS / build_groups()（界面分类的唯一声明处）
 │   ├── emit.py                      规范形 YAML emitter（默认模板与保存共用；注释来自声明）
 │   ├── document.py                  稀疏文档视图（读 / 指纹 / 密文三态 / 未知键 / changed_paths）
 │   ├── boot.py                      启动读取（永不抛：模板生成 / 语法错 / 校验不过 → 降级启动）
@@ -175,7 +176,7 @@ crates/wing/src/
 │   ├── panels/mod.rs                选择面板内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
 │   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
 │   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
-│   ├── panels/settings/             设置面板状态机（树扁平化 · 内联编辑器 · 列表增删移 · 搜索 · 问题清单 · 键位与 Esc 阶梯）
+│   ├── panels/settings/             设置面板状态机（左栏分组锚点 · 右栏树扁平化 · 双栏焦点 · 内联编辑器 · 列表增删移 · 搜索 · 问题清单 · 键位与 Esc 阶梯）
 │   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端零感知）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
@@ -196,7 +197,7 @@ crates/wing/src/
 │   ├── emoji_width.rs               出帧前的宽度归一化（VS16 表情格子钉 ForcedWidth；每帧必跑，出帧口 tui::draw_frame 调用）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
-│   ├── settings/                    设置面板全屏 overlay（标题/树/详情栏/编辑器/问题清单/帮助/提示，只读渲染）
+│   ├── settings/                    设置面板浮层 overlay（卡片几何 / 左栏锚点 / 树 / 详情栏 / 编辑器 / 问题清单 / 帮助 / 提示，只读渲染）
 │   ├── shimmer.rs                   扫光 / 混色原语（开屏 wordmark 与思考块标题行共用）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
@@ -244,7 +245,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
-| [`docs/dev/settings.md`](docs/dev/settings.md) | 设置面：一份声明生成目录/模板/校验、稀疏文档与「缺席即默认」、Setting API（4 端点 + 保存事务 + 密文语义 + 生效域全表）、setup mode（降级启动 / loopback-only 修复）、TUI 全屏面板（键位表）、首次运行向导、`wing config` CLI |
+| [`docs/dev/settings.md`](docs/dev/settings.md) | 设置面：一份声明生成目录/模板/校验、业务分组（界面分类的唯一声明处）、稀疏文档与「缺席即默认」、Setting API（4 端点 + 保存事务 + 密文语义 + 生效域全表）、setup mode（降级启动 / loopback-only 修复）、TUI 浮层面板（双栏 + 键位表）、首次运行向导、`wing config` CLI |
 | [`docs/dev/media-images.md`](docs/dev/media-images.md) | 媒体与图片（read-image）：ReadImage 工具、内容寻址媒体池、模型能力声明、请求期图片投影（高水位 + 量子批量驱逐）与 KV/前缀 cache、inline/followup 线格式、probe 场景清单 |
 | [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 存量链接）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
