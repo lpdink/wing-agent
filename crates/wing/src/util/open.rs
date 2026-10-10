@@ -1,29 +1,23 @@
-//! Opening links: classify a markdown destination, resolve it, hand it to a
-//! system opener.
+//! Opening links: classify a markdown destination, resolve it, hand it to a system opener.
 //!
-//! The whole module is argv-only on purpose: a link destination is *model
-//! output*, so it must never reach a shell. [`OpenPlan`] carries a program plus
-//! an argument vector (`OsString`s), and the only process we start is that
-//! program — no `sh -c`, no string concatenation, no globbing.
+//! The whole module is argv-only on purpose: a link destination is *model output*, so it must never
+//! reach a shell. [`OpenPlan`] carries a program plus an argument vector (`OsString`s), and the only
+//! process we start is that program — no `sh -c`, no string concatenation, no globbing.
 //!
-//! Resolution rules (see the `tui-link-open` change):
+//! Resolution rules:
 //!
-//! * a destination with a scheme (`https:`, `mailto:`, …) is a URL, opened by
-//!   the platform's default browser launcher;
-//! * a destination that looks like a path (`/abs`, `./rel`, `../rel`, `~/rel`,
-//!   `file://…`, a drive letter, a UNC path) — or a bare relative form — is a
-//!   local file, resolved against `$HOME` (`~`), the **CLI launch directory**
-//!   (`current_dir`, *not* the session workspace) and checked for existence
-//!   before anything is started;
-//! * a `#L10` / `#L10C5` / `:10` / `:10:5` suffix on a local target is a line
-//!   (and column) reference: it is stripped from the path and, when a
-//!   line-capable editor CLI is on `PATH`, used to jump to that line.
+//! * a destination with a scheme (`https:`, `mailto:`, …) is a URL, opened by the platform's default
+//!   browser launcher;
+//! * a destination that looks like a path (`/abs`, `./rel`, `../rel`, `~/rel`, `file://…`, a drive
+//!   letter, a UNC path) — or a bare relative form — is a local file, resolved against `$HOME` (`~`),
+//!   the **CLI launch directory** (`current_dir`, *not* the session workspace) and checked for
+//!   existence before anything is started;
+//! * a `#L10` / `#L10C5` / `:10` / `:10:5` suffix on a local target is a line (and column) reference:
+//!   stripped from the path and, when a line-capable editor CLI is on `PATH`, used to jump there.
 //!
-//! Known limits (deliberate, see the `tui-link-open` change): `~user/x` is not
-//! expanded (only `~` / `~/…`); a `file://` URL with a real host
-//! (`file://nas/share/x`) is reported instead of guessed;
-//! [`Env::has_executable`] looks for the bare program name, so on Windows a
-//! `.cmd` shim (`code.cmd`) is not detected and the line jump degrades to
+//! Known limits: `~user/x` is not expanded (only `~` / `~/…`); a `file://` URL with a real host
+//! (`file://nas/share/x`) is reported instead of guessed; [`Env::has_executable`] looks for the bare
+//! program name, so on Windows a `.cmd` shim (`code.cmd`) is not detected and the line jump degrades to
 //! opening the file.
 
 use std::ffi::OsString;

@@ -1,13 +1,11 @@
 //! The composer's card — its frame, its geometry, and the two rails.
 //!
-//! The composer is drawn as a **card**: a rounded box whose text rows hold the
-//! draft and whose two horizontal rules carry the live state that used to live
-//! on rows of its own above the input. Framing the draft is what gives it an
-//! edge against the chat above — the old composer was a bare `> ` line that
-//! read as one more chat row — and folding the status rows into the frame is
-//! what keeps the frame from costing rows: the working indicator rides the top
-//! border (the *activity rail*), the workdir / usage / scroll read-out rides
-//! the bottom one (the *meta rail*), and both keep the styling they had.
+//! The composer is drawn as a **card**: a rounded box whose text rows hold the draft and whose two
+//! horizontal rules carry the live state that used to live on rows of its own above the input. Framing
+//! the draft is what gives it an edge against the chat above, and folding the status rows into the
+//! frame is what keeps the frame from costing rows: the working indicator rides the top border (the
+//! *activity rail*), the workdir / usage / scroll read-out rides the bottom one (the *meta rail*), and
+//! both keep the styling they had.
 //!
 //! ```text
 //! ╭─ ⠋ Working... (12s) · Esc to interrupt ────────────────────╮
@@ -16,21 +14,17 @@
 //! ╰─ ~/ws/wing · 1.2k in · 340 out · 42.5 t/s ──────── 87% ───╯
 //! ```
 //!
-//! The card **floats**: it keeps [`CARD_MARGIN`] columns of air on each side
-//! (the layout turns the composer block into [`card_area`] before anything
-//! else looks at it) and its body stays on the terminal's own background —
-//! the boundary is the frame, and nothing else. No fill, no glow: the card
-//! blends with the transcript around it and is told apart by its edges, its
-//! prompt glyph and the rails, the way the rest of the TUI is.
+//! The card **floats**: it keeps [`CARD_MARGIN`] columns of air on each side (the layout turns the
+//! composer block into [`card_area`] before anything else looks at it) and its body stays on the
+//! terminal's own background — the boundary is the frame, and nothing else.
 //!
-//! The one state the frame does carry is the keyboard's: while a panel is
-//! swallowing the composer's keys, the draft is ghosted (drawn as inactive
-//! text), so "typing will not land here" is visible before a key is pressed.
+//! The one state the frame does carry is the keyboard's: while a panel is swallowing the composer's
+//! keys, the draft is ghosted (drawn as inactive text), so "typing will not land here" is visible
+//! before a key is pressed.
 //!
-//! **One geometry, one writer.** [`Chrome`] is the single description of where
-//! the card's columns are; the widget, the wrap width, the cursor placement and
-//! the pointer mapping all read it, so a pointer cannot describe a frame the
-//! renderer did not draw.
+//! **One geometry, one writer.** [`Chrome`] is the single description of where the card's columns are;
+//! the widget, the wrap width, the cursor placement and the pointer mapping all read it, so a pointer
+//! cannot describe a frame the renderer did not draw.
 
 use std::time::Instant;
 

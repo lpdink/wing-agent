@@ -1,21 +1,17 @@
-//! `wing asks` — the pending Ask question(s) of a session, with the
-//! `tool_call_id` needed to answer them.
+//! `wing asks` — the pending Ask question(s) of a session, with the `tool_call_id` needed to answer
+//! them.
 //!
-//! `POST /api/session/send` resolves a pending ask only when the message
-//! carries that ask's `tool_call_id` (`--tool-call-id` on `wing run`), so a
-//! caller has to be able to find the id **while the ask is still pending**.
-//! Neither `wing tail` nor `wing head` can: a pending ask's tool call belongs
-//! to the *uncommitted* assistant message (the provider stream accumulator is
-//! the authority mid-turn), so it is not on the chain yet. `wing ps` / `info`
-//! do not carry it either.
+//! `POST /api/session/send` resolves a pending ask only when the message carries that ask's
+//! `tool_call_id` (`--tool-call-id` on `wing run`), so a caller has to be able to find the id **while
+//! the ask is still pending**. Neither `wing tail` nor `wing head` can: a pending ask's tool call
+//! belongs to the *uncommitted* assistant message (the provider stream accumulator is the authority
+//! mid-turn), so it is not on the chain yet. `wing ps` / `info` do not carry it either.
 //!
-//! What does carry it is the live event stream: subscribing triggers a
-//! `sync_session` snapshot whose `events` include the still-active ask (that
-//! is exactly how the TUI rebuilds its ask panel after a reconnect), and a
-//! fresh ask arrives as a live `ask` event. This command subscribes, reads
-//! that snapshot, and prints the pending asks — one shot, no session content
-//! touched (like the other read commands, subscribing hydrates an evicted
-//! session back into gateway memory).
+//! What does carry it is the live event stream: subscribing triggers a `sync_session` snapshot whose
+//! `events` include the still-active ask (that is how the TUI rebuilds its ask panel after a
+//! reconnect), and a fresh ask arrives as a live `ask` event. This command subscribes, reads that
+//! snapshot, and prints the pending asks — one shot, no session content touched (like the other read
+//! commands, subscribing hydrates an evicted session back into gateway memory).
 //!
 //! ```sh
 //! wing asks "$SID"                 # the snapshot: pending asks, or none
@@ -24,10 +20,8 @@
 //! wing run -r "$SID" -p "yes" --tool-call-id "$ASK"
 //! ```
 //!
-//! Exit codes: 0 = the report was produced (with or without pending asks,
-//! mirroring `wing ps`); with `--wait N`, a window that closes without any ask
-//! is a failure (non-zero) — a caller that asked to block until an ask wants
-//! to hear that none came.
+//! Exit codes: 0 = the report was produced (with or without pending asks, mirroring `wing ps`); with
+//! `--wait N`, a window that closes without any ask is a failure (non-zero).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

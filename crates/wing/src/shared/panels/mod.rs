@@ -1,33 +1,27 @@
 //! SelectionPanel — the shared kernel behind interactive selection panels.
 //!
-//! A panel is a sequence of pages (tabs). Each page is either a list of rows
-//! the kernel navigates, or a *custom* page the adapter fully owns (AskPanel's
-//! confirm page: the kernel keeps its tab slot but no cursor). The kernel
-//! provides, once for every adapter:
+//! A panel is a sequence of pages (tabs). Each page is either a list of rows the kernel navigates, or
+//! a *custom* page the adapter fully owns (AskPanel's confirm page: the kernel keeps its tab slot but
+//! no cursor). The kernel provides, once for every adapter:
 //!
-//! - page switching (`←`/`→`) and page-local cursor movement (`↑`/`↓`) with
-//!   per-page cursor memory; both **clamp at the ends by default** (no
-//!   wrap-around — the model picker's UX). Adapters may override the two
-//!   methods to opt into wrap semantics (AskPanel keeps its established
-//!   wrap-around tab/row navigation),
-//! - single-select commit capture (`commit_current`), decoupled from later
-//!   cursor movement,
-//! - visible-window math ([`window_range`], default [`PANEL_WINDOW`]) for the
-//!   tab bar and the option rows — the cursor/active page is kept in the
-//!   *middle* of the window while it scrolls, and the window is pinned at the
-//!   ends (no wrap, no indicator glyphs),
+//! - page switching (`←`/`→`) and page-local cursor movement (`↑`/`↓`) with per-page cursor memory;
+//!   both **clamp at the ends by default** (no wrap-around — the model picker's UX), and adapters may
+//!   override the two methods to opt into wrap semantics (AskPanel keeps its established wrap-around
+//!   tab/row navigation),
+//! - single-select commit capture (`commit_current`), decoupled from later cursor movement,
+//! - visible-window math ([`window_range`], default [`PANEL_WINDOW`]) for the tab bar and the option
+//!   rows — the cursor/active page is kept in the *middle* of the window while it scrolls, and the
+//!   window is pinned at the ends (no wrap, no indicator glyphs),
 //! - the refresh fallback policy ([`SelectionPanel::clamp_after_refresh`]).
 //!
-//! **Storage belongs to the adapter.** AskPanel keeps one cursor per question
-//! in its `QuestionState`; ModelPanel keeps one per provider. Adapters
-//! implement [`SelectionPanel`] over their own state — the default methods are
-//! the entire navigation/commit/refresh contract. `Enter` semantics, confirm
-//! pages, multi-select state and inline editors are adapter concerns; the
-//! kernel MUST NOT contain any of them.
+//! **Storage belongs to the adapter.** AskPanel keeps one cursor per question in its `QuestionState`;
+//! ModelPanel keeps one per provider. Adapters implement [`SelectionPanel`] over their own state — the
+//! default methods are the entire navigation/commit/refresh contract. `Enter` semantics, confirm
+//! pages, multi-select state and inline editors are adapter concerns; the kernel MUST NOT contain any
+//! of them.
 //!
-//! The adapters live next to the kernel, one per panel: [`ask`] and [`picker`].
-//! Both state machines are neutral (this whole layer is) — the App drives
-//! them, the UI renders them.
+//! The adapters live next to the kernel, one per panel: [`ask`] and [`picker`]. Both state machines
+//! are neutral (this whole layer is) — the App drives them, the UI renders them.
 
 pub mod ask;
 pub mod picker;
