@@ -37,6 +37,7 @@
 //! template strings, brackets — stay correctly colored.
 
 use std::cell::OnceCell;
+use std::ops::Range;
 
 use ratatui::style::Color;
 use ratatui::style::Style;
@@ -476,9 +477,7 @@ fn push_chrome_line(
 ///
 /// The row text is treated as one string so a break can fall inside a run;
 /// every segment keeps the styles (and word-level emphasis) of the runs it
-/// spans. Breaks land on the last space that fits (word wrap) with a
-/// column-exact cut as the fallback, and the spaces at a break are dropped —
-/// the caller re-adds the indent.
+/// spans. The row boundaries are [`wrap_ranges`]'s.
 fn wrap_runs(runs: &[Run], limit: usize) -> Vec<Vec<Run>> {
     let mut flat = String::new();
     let mut spans: Vec<(usize, usize, Option<Style>, bool)> = Vec::with_capacity(runs.len());
@@ -488,81 +487,107 @@ fn wrap_runs(runs: &[Run], limit: usize) -> Vec<Vec<Run>> {
         spans.push((start, flat.len(), run.style, run.strong));
     }
 
-    let mut segments = Vec::new();
-    let mut start = 0usize;
-    while start < flat.len() {
-        let rest = &flat[start..];
-        if UnicodeWidthStr::width(rest) <= limit {
-            // A whitespace tail is a wrap artefact, not content: dropping it
-            // keeps trailing spaces from costing a blank visual row.
-            let rest = rest.trim_end();
-            if !rest.is_empty() || segments.is_empty() {
-                segments.push(slice_runs(&spans, &flat, start, start + rest.len()));
-            }
-            break;
-        }
-        let cut = break_point(rest, limit);
-        let head = rest[..cut].trim_end();
-        if !head.is_empty() {
-            segments.push(slice_runs(&spans, &flat, start, start + head.len()));
-        }
-        // Skip the spaces at the break: a wrapped row never starts with the
-        // boundary whitespace it was cut at.
-        start += cut + (rest[cut..].len() - rest[cut..].trim_start_matches(' ').len());
-    }
-    if segments.is_empty() {
-        segments.push(Vec::new());
-    }
-    segments
+    // Walk the row's byte ranges and cut the runs to match: the segments
+    // only move forward, so the span cursor resumes where the last one left
+    // off instead of re-scanning the run list per segment.
+    let mut cursor = 0;
+    wrap_ranges(&flat, limit)
+        .into_iter()
+        .map(|range| slice_runs(&spans, &flat, range.start, range.end, &mut cursor))
+        .collect()
 }
 
 /// Rebuild the runs covering `[a, b)` of the flattened row text, cutting a run
 /// in half when a wrap boundary lands inside it.
+///
+/// `cursor` is the first span a later segment can still use: spans are ordered
+/// by start and segments only advance, so resuming there keeps the whole wrap
+/// linear in the row length.
 fn slice_runs(
     spans: &[(usize, usize, Option<Style>, bool)],
     flat: &str,
     a: usize,
     b: usize,
+    cursor: &mut usize,
 ) -> Vec<Run> {
-    let mut runs = Vec::new();
-    for &(start, end, style, strong) in spans {
-        let start = start.max(a);
-        let end = end.min(b);
-        if start >= end {
-            continue;
-        }
-        runs.push(Run {
-            text: flat[start..end].to_string(),
-            style,
-            strong,
-        });
+    // Spans that end at or before the segment's start are behind us for good.
+    while *cursor < spans.len() && spans[*cursor].1 <= a {
+        *cursor += 1;
     }
+    let mut runs = Vec::new();
+    let mut i = *cursor;
+    while i < spans.len() && spans[i].0 < b {
+        let start = spans[i].0.max(a);
+        let end = spans[i].1.min(b);
+        if start < end {
+            runs.push(Run {
+                text: flat[start..end].to_string(),
+                style: spans[i].2,
+                strong: spans[i].3,
+            });
+        }
+        if spans[i].1 > b {
+            break; // still open on the next segment
+        }
+        i += 1;
+    }
+    *cursor = i;
     runs
 }
 
 /// The rows of `text` wrapped to `limit` display columns (at least one row,
 /// empty only for empty input).
 fn wrap_plain(text: &str, limit: usize) -> Vec<&str> {
+    wrap_ranges(text, limit)
+        .into_iter()
+        .map(|range| &text[range])
+        .collect()
+}
+
+/// Byte ranges of the rows of `text` wrapped to `limit` display columns.
+///
+/// Breaks land on the last space that fits (word wrap) with a column-exact
+/// cut as the fallback; the spaces at a break and a whitespace tail are
+/// dropped (the callers re-add their indent).
+///
+/// The remaining width is measured once and then decremented by each emitted
+/// row (and the spaces dropped at its break), so the loop's "does the rest
+/// fit" test is O(1) instead of a fresh scan of the tail per row: wrapping a
+/// long row — a minified line — stays linear in the row length. `str::width`
+/// sums per piece, so a context-sensitive selector (VS16 / ZWJ) straddling a
+/// cut can shift that total by a column or two; the stop is guarded by an
+/// authoritative re-measure of the rest (short whenever it runs), so a drift
+/// can only cost a cut that the whole-row measure would not have made.
+fn wrap_ranges(text: &str, limit: usize) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
-    let mut rest = text;
-    loop {
-        if UnicodeWidthStr::width(rest) <= limit {
-            // Trailing spaces of the last row are a wrap artefact, not
-            // content: dropping them keeps a whitespace tail from costing a
-            // visual row (an empty band row on a tinted code row).
-            let rest = rest.trim_end();
-            if !rest.is_empty() || rows.is_empty() {
-                rows.push(rest);
+    let mut start = 0usize;
+    let mut remaining = UnicodeWidthStr::width(text);
+    while start < text.len() {
+        let rest = &text[start..];
+        if remaining <= limit && UnicodeWidthStr::width(rest) <= limit {
+            // A whitespace tail is a wrap artefact, not content: dropping it
+            // keeps trailing spaces from costing a blank visual row.
+            let end = start + rest.trim_end().len();
+            if end > start || rows.is_empty() {
+                rows.push(start..end);
             }
-            return rows;
+            break;
         }
         let cut = break_point(rest, limit);
         let head = rest[..cut].trim_end();
         if !head.is_empty() {
-            rows.push(head);
+            rows.push(start..start + head.len());
         }
-        rest = rest[cut..].trim_start_matches(' ');
+        // Skip the spaces at the break: a wrapped row never starts with the
+        // boundary whitespace it was cut at.
+        let skip = rest[cut..].len() - rest[cut..].trim_start_matches(' ').len();
+        remaining -= UnicodeWidthStr::width(&rest[..cut + skip]);
+        start += cut + skip;
     }
+    if rows.is_empty() {
+        rows.push(0..0);
+    }
+    rows
 }
 
 /// Byte index to cut `text` at so that the head fits `limit` display columns:
@@ -1376,6 +1401,39 @@ mod tests {
             .expect("hunk header");
         assert_eq!(rows[hunk], "  @@ -100000,2");
         assert_eq!(rows[hunk + 1], "  +100000,2 @@");
+    }
+
+    /// A very long single row — the shape a minified line has — wraps into
+    /// the expected rows: the running width bookkeeping stays exact over
+    /// thousands of columns and the loop emits one row per break instead of
+    /// rescanning the tail.
+    #[test]
+    fn long_rows_wrap_into_expected_rows() {
+        // 1000 "ab " tokens = 3000 columns; the code column is 10, so the
+        // content wraps at 30: ten tokens per row, the break space dropped.
+        let diff = view(None, &format!("{}\n", "ab ".repeat(1000)));
+        let lines = diff.to_lines(&p(), 40);
+        let start = lines
+            .iter()
+            .position(|l| l.to_string().contains("│ +"))
+            .expect("add row");
+
+        let row = "ab ab ab ab ab ab ab ab ab ab";
+        let code_column = " ".repeat(10);
+        let rows: Vec<String> = lines[start..lines.len() - 2]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(rows.len(), 100, "3000 columns / 30 per row");
+        assert_eq!(rows[0], format!("{:<40}", format!("    1 │ + {row}")));
+        for (i, text) in rows.iter().enumerate().skip(1) {
+            assert_eq!(
+                text,
+                &format!("{:<40}", format!("{code_column}{row}")),
+                "row {i}"
+            );
+        }
+        assert!(lines[lines.len() - 2].to_string().contains('└'), "footer");
     }
 
     /// The hanging indent only pays while the code column gets at least as
