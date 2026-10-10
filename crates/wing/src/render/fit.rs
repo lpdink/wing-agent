@@ -32,8 +32,9 @@
 //! once and are unreachable from a real terminal: the **width** variant answers `u16::MAX` columns
 //! for a picture wider than 65535 px inside a box past 65535 px wide (≈ 6554 columns at a 10 px
 //! cell); the **height** variant answers `u16::MAX` rows for a picture taller than 65535 px in a box
-//! past 65535 px tall (at the layout's 36-row cap that takes a cell at least 1821 px high). Real
-//! character cells are 8–40 px tall.
+//! past 65535 px tall (at the layout's 36-row cap that takes a cell at least 1821 px high). The
+//! height variant is the one input class where the layout's reserved rows (the cap) and the
+//! encoder's height (65535) would disagree. Real character cells are 8–40 px tall.
 
 use ratatui::layout::Size;
 
