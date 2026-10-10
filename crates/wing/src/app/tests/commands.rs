@@ -722,6 +722,10 @@ mod session_list {
             status: status.into(),
             tags,
             tag_meta,
+            model_id: None,
+            model_name: None,
+            provider_name: None,
+            model_display_name: None,
         }
     }
 

@@ -191,6 +191,10 @@ async fn fetch_session_info(session_id: &str) -> Result<SessionInfoResponse> {
 /// Inks: NAME carries the primary text colour (it is what the eye scans for),
 /// SESSION ID the secondary one (copied on demand), LAST stays the faintest —
 /// and STATUS carries the one semantic colour per state.
+///
+/// MODEL is the model's display name (gateway config) with the call name / id
+/// as fallback; it is a short label rather than prose, so it classifies as
+/// `Compact` (shrinks after NAME/TAGS) and is capped like the other columns.
 fn format_sessions_table(
     sessions: &[SessionInfo],
     palette: &ThemePalette,
@@ -205,6 +209,7 @@ fn format_sessions_table(
         PlainColumn::new("STATUS", ColumnKind::Compact),
         PlainColumn::new("LAST", ColumnKind::Compact),
         PlainColumn::capped("NAME", ColumnKind::Narrative, 80),
+        PlainColumn::capped("MODEL", ColumnKind::Compact, 32),
         PlainColumn::capped("TAGS", ColumnKind::Narrative, 40),
     ];
     let rows = sessions
@@ -221,6 +226,7 @@ fn format_sessions_table(
                     common::single_line(s.name.as_deref().unwrap_or("-")),
                     Style::new().fg(palette.text),
                 ),
+                PlainCell::styled(model_text(s), Style::new().fg(palette.tool_result)),
                 PlainCell::styled(tags_text(&s.tags), Style::new().fg(palette.tool_result)),
             ]
         })
@@ -228,6 +234,29 @@ fn format_sessions_table(
 
     let table = PlainTable { columns, rows };
     common::render_table(&table, palette, out)
+}
+
+/// The model cell: display name first, then the call name, then the id
+/// (`-` when the gateway sent none of them — an old gateway omits all four).
+///
+/// Blank values are treated as absent (a gateway that sends `""` does not
+/// mean "the model is called nothing"), and the winner is flattened to one
+/// line: the value ends up in a fixed-width cell where a stray control
+/// character would tear the grid apart (same guard as NAME).
+fn model_text(session: &SessionInfo) -> String {
+    match [
+        session.model_display_name.as_deref(),
+        session.model_name.as_deref(),
+        session.model_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    {
+        Some(value) => common::single_line(value),
+        None => "-".to_string(),
+    }
 }
 
 /// The one semantic colour per session state.
@@ -330,7 +359,27 @@ mod tests {
             status: status.into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             tag_meta: Default::default(),
+            model_id: None,
+            model_name: None,
+            provider_name: None,
+            model_display_name: None,
         }
+    }
+
+    /// 带模型四件套的会话（列表条目的模型列素材）；`provider` 显式给出，
+    /// 与 `model_name` 独立（网关的降级形态里两者可以只剩其一）。
+    fn with_model(
+        mut info: SessionInfo,
+        model_id: Option<&str>,
+        model_name: Option<&str>,
+        provider: Option<&str>,
+        display_name: Option<&str>,
+    ) -> SessionInfo {
+        info.model_id = model_id.map(str::to_string);
+        info.model_name = model_name.map(str::to_string);
+        info.provider_name = provider.map(str::to_string);
+        info.model_display_name = display_name.map(str::to_string);
+        info
     }
 
     /// 一个 pin 过的会话（带打标时间）。
@@ -412,6 +461,125 @@ mod tests {
         assert_eq!(status_style("waiting", &p).fg, Some(p.warning));
         assert_eq!(status_style("idle", &p).fg, Some(p.tool_result));
         assert_eq!(status_style("inactive", &p).fg, Some(p.dim));
+    }
+
+    /// 模型列的回落链：展示名 → 调用名 → 引用词 → `-`。
+    ///
+    /// 展示名是展示素材（未声明时网关发 null），调用名是"实际跑的是什么"，
+    /// 引用词是身份——三者都没有（旧网关）才回落到 `-`。
+    #[test]
+    fn model_text_falls_back_display_name_then_name_then_id() {
+        let full = with_model(
+            session("a", "idle", &[]),
+            Some("ds-flash"),
+            Some("deepseek-flash-2026"),
+            Some("probe"),
+            Some("DeepSeek Flash"),
+        );
+        assert_eq!(model_text(&full), "DeepSeek Flash");
+
+        // 未声明展示名 → 调用名。
+        let no_display = with_model(
+            full.clone(),
+            Some("ds-flash"),
+            Some("deepseek-flash-2026"),
+            Some("probe"),
+            None,
+        );
+        assert_eq!(model_text(&no_display), "deepseek-flash-2026");
+
+        // 只有引用词（降级路径）→ id。
+        let id_only = with_model(full.clone(), Some("ds-flash"), None, None, None);
+        assert_eq!(model_text(&id_only), "ds-flash");
+
+        // 旧网关 / 全缺 → `-`。
+        assert_eq!(model_text(&session("b", "inactive", &[])), "-");
+
+        // 空串 / 纯空白不算"有值"（网关发的空展示名不能吃掉调用名）。
+        let blank = with_model(
+            full.clone(),
+            Some("ds-flash"),
+            Some("deepseek-flash-2026"),
+            Some("probe"),
+            Some("   "),
+        );
+        assert_eq!(model_text(&blank), "deepseek-flash-2026");
+        let all_blank = with_model(full, Some("ds-flash"), Some(""), Some("probe"), Some(" "));
+        assert_eq!(model_text(&all_blank), "ds-flash");
+    }
+
+    /// 模型值里的控制字符不能撕开数据行（与 NAME 同一条纪律）。
+    #[test]
+    fn model_text_flattens_control_characters() {
+        let messy = with_model(
+            session("a", "idle", &[]),
+            Some("ds-flash"),
+            None,
+            Some("probe"),
+            Some("Deep\nSeek\tFlash"),
+        );
+        assert_eq!(model_text(&messy), "Deep Seek Flash");
+    }
+
+    /// 模型列出现在表格里（表头 + 值），且不破坏等宽契约。
+    #[test]
+    fn sessions_table_carries_a_model_column() {
+        let sessions = vec![
+            with_model(
+                session("20261009-210702-217d85f2", "working", &["task=a"]),
+                Some("ds-flash"),
+                Some("deepseek-flash-2026"),
+                Some("probe"),
+                Some("DeepSeek Flash"),
+            ),
+            with_model(
+                session("20261008-123133-3f465dd1", "inactive", &[]),
+                Some("probe/model"),
+                Some("probe/model"),
+                Some("probe"),
+                None,
+            ),
+        ];
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 100,
+            color: false,
+        };
+        let table = format_sessions_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
+
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(lines[1].contains("MODEL"), "{table}");
+        // 展示名优先；无展示名的行回落到调用名。
+        assert!(lines[3].contains("DeepSeek Flash"), "{table}");
+        assert!(lines[5].contains("probe/model"), "{table}");
+
+        // 等宽的格子（引擎的契约），且不超终端宽。
+        let widths: Vec<usize> = lines
+            .iter()
+            .map(|l| unicode_width::UnicodeWidthStr::width(*l))
+            .collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        assert!(widths[0] <= 100, "{widths:?}");
+    }
+
+    /// 没有模型素材的会话（旧网关 / 未解析）在模型列显示 `-`，而不是空单元格。
+    #[test]
+    fn sessions_table_shows_a_dash_without_model_material() {
+        let sessions = vec![session("20261009-210702-217d85f2", "idle", &[])];
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 100,
+            color: false,
+        };
+        let table = format_sessions_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
+        let row: Vec<&str> = table.lines().filter(|l| l.contains("idle")).collect();
+        assert_eq!(row.len(), 1, "{table}");
+        // 单元格按体行分隔符切：SESSION ID / STATUS / LAST / NAME / MODEL / TAGS。
+        // （前提：本用例的值里不含框线字符——`single_line` 只压平控制字符。）
+        let cells: Vec<&str> = row[0].split('│').collect();
+        assert_eq!(cells.len(), 6, "{table}");
+        assert_eq!(cells[2].trim(), "-", "LAST：{table}");
+        assert_eq!(cells[4].trim(), "-", "MODEL：{table}");
     }
 
     /// 表格渲染的硬不变量：所有行等宽（按显示列记账，CJK 安全）、不超终端宽；
