@@ -704,6 +704,11 @@ class ContextManager:
             # 构造回退行——`unzip_last_uuid` 必须跟着走：parent 是压缩节点时，
             # 它是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段
             # 历史）从 /rewind、/fork 候选里消失（回退到压缩后第一条消息即触发）。
+            #
+            # 字段清单是**刻意的**（不是压缩 relink 那种"整条复制"）：回退行是
+            # 上下文事实行——provider 审计字段（usage / stop_reason）不复制，
+            # 与 `HistoryView.message_semantics` 的比较口径同源（红线场景
+            # `scenarios/test_rewind.py` 逐键钉住）。
             rewind_msg = Message(
                 role=parent_msg.role,
                 content=parent_msg.content,

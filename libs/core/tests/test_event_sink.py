@@ -158,35 +158,38 @@ class TestAssistantTurnStopReason:
         event_bus.subscribe(turns.append)
         tool_calls = [ToolCall(id="c1", name="Bash", arguments={"cmd": "ls"})]
 
-        sink.assistant_turn(
-            Message(role="assistant", content="cut o", stop_reason="length"), "m"
-        )  # OpenAI 截断
-        sink.assistant_turn(
-            Message(role="assistant", content="done", stop_reason="stop"), "m"
-        )  # OpenAI 正常收尾
-        sink.assistant_turn(
-            Message(
-                role="assistant",
-                content="",
-                tool_calls=tool_calls,
-                stop_reason="tool_calls",
-            ),
-            "m",
-        )  # OpenAI 工具轮
-        sink.assistant_turn(
-            Message(role="assistant", content="t", stop_reason="max_tokens"), "m"
-        )  # Anthropic 原值原样通过
-        sink.assistant_turn(
-            Message(role="assistant", content="", tool_calls=tool_calls), "m"
-        )  # 无真实值 → 兜底合成
+        cases = [
+            # (stop_reason, tool_calls, 期望 wire 值)
+            ("length", None, "max_tokens"),  # OpenAI 截断
+            ("stop", None, "end_turn"),  # OpenAI 正常收尾
+            ("tool_calls", tool_calls, "tool_use"),  # OpenAI 工具轮
+            ("function_call", tool_calls, "tool_use"),  # 旧版 function calling
+            ("content_filter", None, "refusal"),  # OpenAI 内容过滤
+            ("max_tokens", None, "max_tokens"),  # Anthropic 原值原样通过
+            ("pause_turn", None, "pause_turn"),
+            ("refusal", None, "refusal"),
+            ("stop_sequence", None, "stop_sequence"),
+            # 带 tool_use 块：按协议报 tool_use（旧合成口径）——除非截断。
+            ("stop", tool_calls, "tool_use"),
+            ("length", tool_calls, "max_tokens"),
+            # 无真实值 → 兜底合成。
+            (None, None, "end_turn"),
+            (None, tool_calls, "tool_use"),
+        ]
+        for stop_reason, calls, _ in cases:
+            sink.assistant_turn(
+                Message(
+                    role="assistant",
+                    content="x" if not calls else "",
+                    tool_calls=calls,
+                    stop_reason=stop_reason,
+                ),
+                "m",
+            )
 
         turns = [event for event in turns if isinstance(event, AssistantTurnEvent)]
         assert [turn.stop_reason for turn in turns] == [
-            "max_tokens",
-            "end_turn",
-            "tool_use",
-            "max_tokens",
-            "tool_use",
+            expected for _, _, expected in cases
         ]
 
     def test_interrupted_falls_back_to_synthesis(self):

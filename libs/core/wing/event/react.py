@@ -211,30 +211,39 @@ class DiffContentEvent(WingEvent):
 
 
 #: Message.stop_reason（协议原值）→ Claude 兼容词汇（stdio 帧的契约）。
-#: OpenAI 专有值（stop / length / tool_calls）在这里翻译，Anthropic 原值原样
-#: 通过——两个协议都收敛到同一套词表；认不出的值（如 interrupted）交给
-#: ``_claude_stop_reason`` 的兜底合成。
+#: OpenAI 兼容侧的值（stop / length / tool_calls / function_call /
+#: content_filter）在这里翻译，Anthropic 原值原样通过——两个协议都收敛到
+#: 同一套词表；认不出的值（如 interrupted）交给 ``_claude_stop_reason``
+#: 的兜底合成，绝不把协议外的词透传给消费者。
 _CLAUDE_STOP_REASON: dict[str, str] = {
+    # OpenAI 兼容 → Claude 词表
     "stop": "end_turn",
     "length": "max_tokens",
     "tool_calls": "tool_use",
+    "function_call": "tool_use",  # 旧版 function calling 的 finish_reason
+    "content_filter": "refusal",
+    # Anthropic 原值（原样通过）
     "end_turn": "end_turn",
     "max_tokens": "max_tokens",
     "tool_use": "tool_use",
     "stop_sequence": "stop_sequence",
+    "pause_turn": "pause_turn",
+    "refusal": "refusal",
 }
 
 
 def _claude_stop_reason(msg: Message) -> str:
     """stdio / ACP 消费的终止原因：优先真实值（含 max_tokens 截断），否则合成。
 
-    合成（按有无 tool_calls 报 tool_use/end_turn）只作兜底——真实值为空或
-    认不出时用；截断被报成 end_turn 会让编排器区分不了 length 与 stop。
+    带 tool_use 块的消息按协议报 ``tool_use``（有工具要执行；旧的合成口径），
+    唯一例外是截断——``max_tokens`` + tool_use 块在 Anthropic 侧合法，且编排器
+    需要它判断是否续跑。合成（按有无 tool_calls 报 tool_use/end_turn）只作
+    兜底：真实值为空或认不出时用——截断被报成 end_turn 会让编排器区分不了。
     """
     mapped = _CLAUDE_STOP_REASON.get(msg.stop_reason or "")
-    if mapped is not None:
-        return mapped
-    return "tool_use" if msg.tool_calls else "end_turn"
+    if msg.tool_calls:
+        return "max_tokens" if mapped == "max_tokens" else "tool_use"
+    return mapped if mapped is not None else "end_turn"
 
 
 class AssistantTurnEvent(WingEvent):
