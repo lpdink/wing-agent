@@ -31,7 +31,7 @@ fn exercise(src: &str) {
         }
     }
 
-    // 渲染结果里不得混入控制字符（`\n` / `\t` 会破坏网格行契约，review r1 的 B3）
+    // 渲染结果里不得混入控制字符（`\n` / `\t` 会破坏网格行契约）
     if let Some(m) = &display {
         assert!(m.width() <= 80, "width budget broken for {src:?}");
         assert_eq!(m.height(), m.lines().len());
@@ -223,7 +223,7 @@ fn no_panic_on_random_byte_soup() {
     }
 }
 
-// ── review r1 的 B2 回归：命令 × 参数形态全矩阵不得 panic ──────────────
+// ── 命令 × 参数形态全矩阵不得 panic ──────────────
 
 /// 覆盖上游 `parse_command` 里全部分支的命令名（含不存在命令与空参数陷阱）。
 const COMMANDS: &[&str] = &[
@@ -324,7 +324,7 @@ const ARG_SHAPES: &[&str] = &[
 
 #[test]
 fn command_argument_matrix_never_panics() {
-    // review r1 的 B2：`\binom{}{}` 曾在 debug 下 `0 - 1` 下溢 panic。
+    // `\binom{}{}` 曾在 debug 下 `0 - 1` 下溢 panic。
     // 这里把"命令 × 参数形态"全矩阵跑一遍（含刻意畸形的），契约是"绝不 panic"。
     for cmd in COMMANDS {
         // 该命令若"没被渲染"，上游会把它原样兜底成 `\name`——这是可判定的泄漏形状
@@ -374,7 +374,7 @@ fn binom_with_empty_arguments_is_safe() {
 
 #[test]
 fn control_characters_are_neutralised() {
-    // review r1 的 B3：控制字符必须被归零，不能直通网格
+    // 控制字符必须被归零，不能直通网格
     let alphabet = "a \\{}$^_&x\n\t\r\u{0b}\u{0c}\u{00a0}\u{200b}";
     for a in alphabet.chars() {
         for b in alphabet.chars() {
@@ -579,7 +579,7 @@ fn structural_fuzz_keeps_the_contract() {
 
 /// 骨架里的内容用**数字**标记：命令名（`\begin{cases}` / `\frac` / `\text`…）里
 /// 一个数字都没有，所以"源里的每个数字都必须出现在渲染结果里"是一条**真正的
-/// 内容不丢判据**（review r3 的 [B1] 就是被它抓住的：`cases` 第 3 列消失）。
+/// 内容不丢判据**（`cases` 第 3 列消失这类形态就是被它抓住的）。
 const CONTENT_SKELETONS: &[&str] = &[
     r"\begin{cases} 1 & 2 \end{cases}",
     r"\begin{cases} 1 & 2 \\ 3 & 4 \end{cases}",

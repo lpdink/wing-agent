@@ -12,7 +12,7 @@
 //! | `session/load` | request | resume 校验 → 挂载（arm + subscribe）→ 回放 `sync_session` 快照 → 标题/用量/命令 → 响应（[`restore_session`]） |
 //! | `session/resume` | request | 同 load，不回放 |
 //! | `session/close` | request | 在途轮次按 cancel 处理 → 回收 hub 条目（N6）→ unsubscribe + release（幂等成功） |
-//! | `session/set_config_option` | request | 只认 `model`（`provider:model` 值域 / 裸模型名）→ `POST /api/session/update` → 回**全量** options（见 [`super::model`]） |
+//! | `session/set_config_option` | request | 只认 `model`（值 = 纯 model_id）→ `POST /api/session/update {model_id}` → 回**全量** options（见 [`super::model`]） |
 //!
 //! `session/new` / `session/load` / `session/resume` 的响应都带 `configOptions`
 //! （id=`model`；构造与解析全在 [`super::model`]）；外部改模型（TUI / 其它前端）触发
@@ -430,7 +430,7 @@ async fn create_session(
         .map_err(hub_error)?;
 
     tracing::info!(session_id = %session_id, "acp: session created");
-    // 04：模型 config options（id=model / category=model / select，值域 `provider:model`）。
+    // 04：模型 config options（id=model / category=model / select，值 = 纯 model_id）。
     let options = model_options(hub, &session_id).await;
     let session_id = SessionId::new(session_id);
     Ok((
@@ -818,7 +818,7 @@ async fn run_turn(
         // 请求，后续 ask 留在会话事件缓冲里排队（与 TUI 的 ask 面板 FIFO 同语义）。
         // 等待期间后端轮次被 feedback waiter 阻塞，不会有事件堆积。
         //
-        // 等客户端作答时**同时等事件流终止**（review r1 N-1）：WS 一断就用默认答案收口，
+        // 等客户端作答时**同时等事件流终止**：WS 一断就用默认答案收口，
         // 让轮次走到下面 `next_event() == None` 的「gateway event stream ended」错误分支——
         // 否则 `session/prompt` 会一直卡在这条客户端请求上，只以连接消失告终（无可诊断错误）。
         if let WingEvent::Ask { tool_call_id, .. } = &event {
@@ -1081,6 +1081,10 @@ mod tests {
             status: "inactive".to_string(),
             tags: Vec::new(),
             tag_meta: std::collections::HashMap::new(),
+            model_id: None,
+            model_name: None,
+            provider_name: None,
+            model_display_name: None,
         }
     }
 

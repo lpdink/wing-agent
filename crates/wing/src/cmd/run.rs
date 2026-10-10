@@ -28,8 +28,14 @@ use super::common;
 struct RunOutput {
     session_id: String,
     template_name: String,
+    /// 当前模型的调用名（发给上游的值）。
     model: String,
+    /// 当前模型的引用词（∈ 配置声明的 id 空间；不可用时 None）。
+    model_id: Option<String>,
+    /// 提供该模型的 provider（运行期事实，来自 session info）。
     provider: Option<String>,
+    /// 声明的展示名（未声明 / 不可用时 None）。
+    model_display_name: Option<String>,
     tools: Vec<String>,
     /// Resulting tags reported by session info (on `-r`: existing + newly
     /// added); falls back to the requested `--tag` list if info is unavailable.
@@ -92,8 +98,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         )
     } else {
         let override_ = AgentOverride {
-            model: args.model.clone(),
-            provider: args.provider.clone(),
+            model_id: args.model.clone(),
             system_prompt: args.system_prompt.clone(),
             append_system_prompt: args.append_system_prompt.clone(),
             tools,
@@ -124,27 +129,51 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     // 3. Send prompt (non-blocking — the HTTP call returns immediately,
     //    the agent processes asynchronously). Always sent, including on
     //    resume: `wing run -r <sid> -p "next task"` resumes + sends.
-    http.send_message(&session_id, &args.prompt, None)
+    //    `--tool-call-id` routes the prompt to a pending Ask's feedback
+    //    waiter instead of the session inbox (answering an ask).
+    http.send_message(&session_id, &args.prompt, args.tool_call_id.clone())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to send prompt: {e}"))?;
 
     // 4. Fetch session info for model/tools/tags display (resulting state —
-    //    on `-r` this includes tags the session already had).
-    let (model, tools_list, tags) = match http.get_session_info(&session_id).await {
-        Ok(info) => (info.model, info.tools, info.tags),
-        Err(e) => {
-            // Non-fatal: the session was created and the prompt was sent.
-            // The agent is working; we just couldn't get display metadata.
-            tracing::warn!("Failed to get session info: {e}");
-            (args.model.unwrap_or_default(), vec![], args.tag)
-        }
-    };
+    //    on `-r` this includes tags the session already had). The model
+    //    identity comes from the session itself (`model_id` + call name +
+    //    provider fact + declared label).
+    let (model, model_id, provider, model_display_name, tools_list, tags) =
+        match http.get_session_info(&session_id).await {
+            Ok(info) => (
+                info.model,
+                info.model_id,
+                info.provider_name,
+                info.model_display_name,
+                info.tools,
+                info.tags,
+            ),
+            Err(e) => {
+                // Non-fatal: the session was created and the prompt was sent.
+                // The agent is working; we just couldn't get display metadata.
+                // The requested `--model` is the best available identity here
+                // (it is exactly what was sent as `model_id`).
+                tracing::warn!("Failed to get session info: {e}");
+                let requested = args.model.clone();
+                (
+                    requested.clone().unwrap_or_default(),
+                    requested,
+                    None,
+                    None,
+                    vec![],
+                    args.tag,
+                )
+            }
+        };
 
     Ok(RunOutput {
         session_id,
         template_name,
         model,
-        provider: args.provider,
+        model_id,
+        provider,
+        model_display_name,
         tools: tools_list,
         tags,
         workspace: resolved_workspace,
@@ -156,6 +185,12 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
 fn print_text(output: &RunOutput) {
     println!("session_id:  {}", output.session_id);
     println!("model:       {}", output.model);
+    if let Some(ref id) = output.model_id {
+        println!("model_id:    {id}");
+    }
+    if let Some(ref label) = output.model_display_name {
+        println!("model_label: {label}");
+    }
     if let Some(ref p) = output.provider {
         println!("provider:    {p}");
     }

@@ -35,6 +35,7 @@ def _make_loop() -> ReActLoop:
         current_model=lambda: "test-model",
         current_provider=lambda: None,  # ty: ignore[invalid-argument-type]
         current_tools=lambda: [],
+        current_options=lambda: None,  # ty: ignore[invalid-argument-type]
         stream=True,
     )
 
@@ -115,3 +116,71 @@ class TestCallLlmContract:
         # Message.usage 取自带内非零 chunk，不受终块零元信息影响
         assert msg.usage is not None
         assert msg.usage.prompt_tokens == 10
+
+
+class TestStopReasonCapture:
+    """终止原因不随 token 走（截断审计：#151）。
+
+    provider 契约（OpenAI 兼容流式）：带内 usage chunk 携带非零 token，流尾的
+    权威块数组 chunk 只带零 token 元信息——但 stop_reason 在后者上。消费侧若
+    只在"有 token"分支取值，终帧被整个跳过，Message.stop_reason 恒为 null，
+    max_tokens 截断在落盘审计里不可见。
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_token_final_frame_keeps_stop_reason(self):
+        """零 token 终结帧的 stop_reason 必须进 Message（OpenAI 流式形态）。"""
+        provider = _FakeProvider(
+            [
+                LLMResponse(content="cut o"),
+                LLMResponse(
+                    usage=LLMUsage(prompt_tokens=10, completion_tokens=5)
+                ),  # 带内 usage：无 stop_reason
+                LLMResponse(
+                    content_blocks=[TextBlock(text="cut o")],
+                    usage=LLMUsage(model="m", stop_reason="length"),  # 零 token 终帧
+                ),
+            ]
+        )
+        msg = await _make_loop()._call_llm(provider, [], "m", None)  # ty: ignore[invalid-argument-type]
+
+        assert msg.stop_reason == "length"
+        # usage 口径不变：仍是带内非零 chunk（终帧零元信息不覆盖）
+        assert msg.usage is not None
+        assert msg.usage.completion_tokens == 5
+
+    @pytest.mark.asyncio
+    async def test_token_bearing_final_frame_still_captured(self):
+        """对照（Anthropic 形态）：终止帧同时带 token 与 stop_reason，照常捕获。"""
+        provider = _FakeProvider(
+            [
+                LLMResponse(content="hi"),
+                LLMResponse(
+                    content_blocks=[TextBlock(text="hi")],
+                    usage=LLMUsage(
+                        prompt_tokens=10, completion_tokens=5, stop_reason="end_turn"
+                    ),
+                ),
+            ]
+        )
+        msg = await _make_loop()._call_llm(provider, [], "m", None)  # ty: ignore[invalid-argument-type]
+
+        assert msg.stop_reason == "end_turn"
+        assert msg.usage is not None
+        assert msg.usage.stop_reason == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_no_stop_reason_anywhere_stays_none(self):
+        """无任何帧携带 stop_reason：不发明值（仍为 None）。"""
+        provider = _FakeProvider(
+            [
+                LLMResponse(content="hi"),
+                LLMResponse(usage=LLMUsage(prompt_tokens=3, completion_tokens=1)),
+                LLMResponse(
+                    content_blocks=[TextBlock(text="hi")], usage=LLMUsage(model="m")
+                ),
+            ]
+        )
+        msg = await _make_loop()._call_llm(provider, [], "m", None)  # ty: ignore[invalid-argument-type]
+
+        assert msg.stop_reason is None

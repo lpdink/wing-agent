@@ -3,6 +3,13 @@
 
 所有协议实现（OpenAI 兼容、Anthropic）继承此基类，
 输出统一的 LLMResponse 流，上层 ReActLoop 对协议无感知。
+
+**无状态契约**：provider 实例共享于全部会话（生命周期归
+``wing.provider.pool``），实例上只允许存在「配置 + 连接池」两类状态；
+一切会话级参数（缓存亲和的 session id、媒体池读接口、thinking / effort
+开关）经 `RequestOptions` 在**每次调用**时注入。实例的关闭（`retire`）
+不打断在途请求：退场只在在途计数归零时真正关闭 client——重试栈因此
+不会绑死在一个已被关闭的 client 上（reload 与在途调用的竞态根因）。
 """
 
 from __future__ import annotations
@@ -17,6 +24,35 @@ from wing.schema import LLMResponse, Message, Tool
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
     from wing.media import MediaAccess
+
+
+@dataclass(frozen=True)
+class RequestOptions:
+    """一次模型调用的会话级参数（provider 无状态化的唯一注入点）。
+
+    全部字段可选、全部「None = 不注入」：
+
+    - ``session_id``：缓存亲和的 prompt cache key（explicit_cache_mode 的
+      OpenAI 兼容 provider 据此下发 ``prompt_cache_key``；
+      Anthropic 走 cache_control，不需要）；
+    - ``media``：会话媒体池读接口——序列化图片时按 id 读字节；
+    - ``thinking`` / ``reasoning_effort``：会话级开关覆盖；None = 跟随
+      provider 配置（extra_body / config.reasoning_effort）的默认。
+    """
+
+    session_id: str | None = None
+    media: MediaAccess | None = None
+    thinking: bool | None = None
+    reasoning_effort: str | None = None
+
+
+class ProviderClosedError(RuntimeError):
+    """已经关闭的 provider 实例被用于发起新调用。
+
+    只应出现在「解析出实例后池恰好换新并关闭了它」的竞态残窗（正常路径
+    由「解析后立即迭代」的不变量排除，见 `ReActLoop._call_llm_validated`）。
+    立刻失败而不是进重试栈空转——对已关闭的 client 重试永远不可能成功。
+    """
 
 
 @dataclass(frozen=True)
@@ -83,12 +119,15 @@ class ModelProvider(ABC):
     """模型调用 provider 基类。"""
 
     _config: ProviderConfig
-    _media: MediaAccess | None = None
-    """会话媒体池读写窄接口（序列化图片时按 id 读字节）。
+    """创建时固化的 provider 配置（只读；配置变更 = 池换新实例）。"""
 
-    由 create_provider 注入；None = 无媒体存储（registry 的仅列表 client、
-    测试构造的裸 provider）。构造器各自把它存进来（见协议实现）。"""
-    reasoning_effort: str | None = None
+    def __init__(self) -> None:
+        # ── 生命周期（池所有权的支撑状态；与「会话状态」无关）──
+        # 在途计数：generate 全程（含协议实现内部的重试）持有，retire 只在
+        # 归零时真正关闭 client——退场绝不打断已发出的请求。
+        self._inflight: int = 0
+        self._retired: bool = False
+        self._closed: bool = False
 
     @property
     def name(self) -> str:
@@ -108,28 +147,93 @@ class ModelProvider(ABC):
         """
         return self._config
 
-    @abstractmethod
-    def generate(
+    async def generate(
         self,
         messages: list[Message],
         model: str,
         tools: list[Tool] | None = None,
         stream: bool = False,
         accumulator: "StreamAccumulator | None" = None,
+        options: "RequestOptions | None" = None,
     ) -> AsyncIterator[LLMResponse]:
-        """统一调用入口，产出 LLMResponse 流。
+        """统一调用入口，产出 LLMResponse 流（模板方法）。
+
+        会话级参数一律经 `options` 注入（provider 实例零会话状态）。
 
         accumulator：caller 持有的流累积状态容器（可选）。传入时 provider
         在每次尝试开始时填充新状态（重试重置——累积只反映当前尝试）；
         流被取消后 caller 仍可经 snapshot_blocks() 读取已累积的部分内容
         （中断补提交路径）。不传时行为与无 accumulator 完全一致。
+
+        本方法承担两个生命周期不变量（子类经 `_generate` 实现协议细节）：
+        在途登记覆盖整个调用（含重试——重试期间实例不会被退场关闭）；
+        已关闭实例上的新调用立即失败（`ProviderClosedError`，不进重试栈）。
+        """
+        call = options or RequestOptions()
+        self._inflight += 1
+        try:
+            if self._closed:
+                raise ProviderClosedError(
+                    f"provider '{self._config.name}' client has been closed"
+                )
+            async for item in self._generate(
+                messages, model, tools, stream, accumulator, call
+            ):
+                yield item
+        finally:
+            self._inflight -= 1
+            if self._retired and self._inflight == 0:
+                await self.aclose()
+
+    @abstractmethod
+    def _generate(
+        self,
+        messages: list[Message],
+        model: str,
+        tools: list[Tool] | None = None,
+        stream: bool = False,
+        accumulator: "StreamAccumulator | None" = None,
+        options: "RequestOptions | None" = None,
+    ) -> AsyncIterator[LLMResponse]:
+        """协议实现：单次 generate 的全部尝试（含 `@with_retry` 重试）。
+
+        声明为非 async def（返回类型即 async generator）——与运行时调用形态
+        （async for 消费）一致，也让类型检查器看到正确的可迭代面。
         """
         ...  # pragma: no cover
 
-    @abstractmethod
-    async def list_models(self) -> list[str]:
-        """获取可用模型列表。"""
-        ...
+    @property
+    def thinking(self) -> bool:
+        """thinking 的配置基线（无会话覆盖时请求会带什么）。
+
+        协议实现按自己的 extra_body 语义派生；会话级覆盖优先于此值
+        （见 `WingAgent.thinking`）。基类默认 False。
+        """
+        return False
+
+    # ── 生命周期（池所有权）───────────────
+
+    async def retire(self) -> None:
+        """池换新后的优雅退场：无在途请求立即关闭；有在途则等归零时关闭。
+
+        reload 语义由此保证：在途请求在旧实例上正常跑完（不打断），新请求
+        由池解析到新实例（新配置立即生效）。
+        """
+        self._retired = True
+        if self._inflight == 0:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        """关闭底层连接（幂等）。
+
+        仅由池在退场收尾 / 进程终结 / 测试中调用——会话与 agent 不持有
+        生命周期所有权。
+        """
+        self._closed = True
+        await self._close_transport()
+
+    async def _close_transport(self) -> None:
+        """协议实现：释放自己的 httpx client。"""
 
     # ── 流累积状态（中断补提交）───────────────
 
@@ -173,22 +277,3 @@ class ModelProvider(ABC):
         但从未收到终结信号），上层据此判定无效轮次。基类默认 0（无累积语义）。
         """
         return 0
-
-    async def aclose(self) -> None:
-        """释放 provider 持有的资源。
-
-        由所有者在生命周期终结时调用（agent 模板切换 / session 释放 /
-        模型列表 registry 重置 / 驱逐重建）。持有长连接等资源的子类应覆盖。
-        """
-
-    def set_thinking(self, enable: bool) -> None:
-        """运行时切换思考模式。子类可覆盖。
-
-        约定：thinking 状态应从实际请求 payload 源（如 extra_body）派生，
-        setter 改写同一存储——保证 property / get_status 上报 / 请求体自洽。
-        """
-        self.thinking = enable
-
-    def set_reasoning_effort(self, effort: str | None) -> None:
-        """运行时切换推理强度。子类可覆盖。"""
-        self.reasoning_effort = effort

@@ -329,10 +329,21 @@ export interface CompactDoneEvent extends EventMeta {
   readonly model: string;
 }
 
-/** `session_state_changed` — one event for model / thinking / effort / yolo / title / agent. */
+/**
+ * `session_state_changed` — one event for model / thinking / effort / yolo / title / agent.
+ *
+ * The four model fields travel together when the model changes (`model` = call
+ * name, `model_id` = reference word, `provider_name` = runtime fact,
+ * `model_display_name` = presentation material; `null` = unchanged in this
+ * event, and any of the model quadruple may be genuinely unknown). All four are
+ * nullable for the same reason as {@link AgentInfo}'s.
+ */
 export interface SessionStateChangedEvent extends EventMeta {
   readonly type: 'session_state_changed';
   readonly model: string | null;
+  readonly model_id: string | null;
+  readonly provider_name: string | null;
+  readonly model_display_name: string | null;
   readonly thinking: boolean | null;
   readonly reasoning_effort: string | null;
   readonly yolo: boolean | null;
@@ -622,6 +633,11 @@ const decodeSessionStateChanged: EventDecoder<SessionStateChangedEvent> = (paylo
   ...meta,
   type: 'session_state_changed',
   model: optString(payload, 'model'),
+  // The model quadruple is nullable on the wire (`null` = unchanged here / an
+  // old gateway that has no id at all). The reducer refills all four together.
+  model_id: optString(payload, 'model_id'),
+  provider_name: optString(payload, 'provider_name'),
+  model_display_name: optString(payload, 'model_display_name'),
   thinking: optionalBoolean(payload, 'thinking'),
   reasoning_effort: optString(payload, 'reasoning_effort'),
   yolo: optionalBoolean(payload, 'yolo'),

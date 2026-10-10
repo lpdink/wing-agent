@@ -13,8 +13,10 @@ wing/request_context.py — per-request 上下文
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 
 
 @dataclass
@@ -66,3 +68,24 @@ def reset_request_context(token: contextvars.Token) -> None:
 def get_request_context() -> RequestContext:
     """获取当前协程的 RequestContext。"""
     return _ctx.get()
+
+
+@contextlib.contextmanager
+def session_context(session_id: str) -> Iterator[None]:
+    """在**当前** RequestContext 上绑定 ``session_id``（保留 request_id 等）。
+
+    供「已知自己在为哪个 session 工作、但入站协程未设过上下文」的路径使用：
+    会话逐出拆解、会话级 HTTP 端点（compact）——这些路径的日志（以及其调用
+    链上的日志）借助 ContextVar 自动带上归属，不需要逐条手工拼 id。块内的
+    异常（例如映射成 404 的 ``LookupError``）照常传播，退出时恢复先前上下文。
+
+    约束：**只面向未设上下文的入站路径**。合并语义保留的 request_id 属于
+    外层请求——若在**另一会话的请求作用域内**用它切换 session，日志与事件
+    会带上与该会话无关的 request_id（比不标注更误导）；轮内操作（如
+    ``ensure_loaded`` 命中同会话）不受影响，因为 id 本就同源。
+    """
+    token = _ctx.set(replace(_ctx.get(), session_id=session_id))
+    try:
+        yield
+    finally:
+        _ctx.reset(token)

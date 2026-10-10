@@ -16,6 +16,39 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 - **Gateway** 是 FastAPI 进程，持有 `EventBus` 订阅，把 Runtime 产生的事件经 WS 推给已订阅客户端。
 - **Frontends** 都在 `wing` 二进制里，共享同一套 Gateway + Runtime。
 
+## 网关启动与配置
+
+启动路径是**永不抛的两段式**（细节见 [settings.md](settings.md)）：`config/boot.py::boot_config()` 读
+`$WING_HOME/core/config.yaml` 并给出四种结局之一（文件缺失并写出由声明生成的模板 / YAML 语法错 /
+校验不过 / 成功）——任何意外都收敛成一条可展示的 problem（最外层兜底），网关**不再因配置非法而退出**。
+`boot.ok` 为真 ⇒ 正常模式（建 `WingRuntime`、注册逐出 job、加载 hooks / prompt commands）；否则
+**降级启动 = setup mode**。
+
+- **setup mode 只服务修复所需的最小面**：`/api/health` 与四个设置端点（+ `/api/shutdown` /
+  `/openapi.json` / `/docs` / `/redoc`），其余一律 **503 `error="setup_mode"`**；`/ws` 在 accept 之前
+  以 1013 关闭；鉴权收紧为 **loopback-only 免 key**（非 loopback 403）。
+- **`server.runtime` 恒非 Optional**：setup mode 下是只服务保存事务的替身（其余访问 →
+  `SetupModeError` → 503 安全网），所以路由层没有一处 Optional 分支。
+- **就地转入正常模式**：`POST /api/settings/set` 写出一份合法配置后调
+  `GatewayServer._enter_operational()`（六步、幂等：`config.yaml` → `log level` → `prompt commands`
+  → `runtime` → `background jobs` → `auth`），**不重启进程**；任一步失败 ⇒ 停在 setup mode、
+  文件不回滚、回执如实报明细。**反向不成立**：正常模式永不退回 setup mode（外部改坏文件 +
+  `/api/system/reload` 仍是"报错 + 保留旧配置"）。
+- **三种前端形态共用一次预检**（`GET /api/settings/status`）：TUI 在 WS 连接前预检，配置不可用则先跑
+  **无 session 的 setup 循环**（向导，同一个设置面板 + 问题清单首屏）；stdio（`wing -p`）与 ACP 把
+  problems 打到 stderr 并以 **78（`EX_CONFIG`）** 退出（stdout 只承载协议帧）。
+
+**配置生效**有两条管道，落点不同但实现只有一份：
+
+| 场景 | 实现 | 明细名字（**对外契约**） |
+|---|---|---|
+| 已在正常模式，保存 / `/api/system/reload` | `system.reload_system()` | `config.yaml → hooks → prompt commands → provider → skills & rules → log level`（只许在末尾追加） |
+| setup mode 保存后转入正常模式 | `GatewayServer._enter_operational()` | `config.yaml / log level / prompt commands / runtime / background jobs / auth` |
+
+逐项独立 try/except：config 项失败立即中止（后续项不再尝试），其余项失败继续；**失败不回滚文件**
+（配置本身是合法的），回执按 `ReloadResult` 逐项上报。provider 池的 retire 语义使热重载对在途请求透明
+（见下节）。
+
 ## 数据流（一次对话）
 
 ```
@@ -45,6 +78,10 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 **流式增量渲染**：Reasoning / assistant 长文本的 delta 不再每帧全量重渲染（O(n²) 整轮）。`render/markdown/stream.rs` 的 `StreamingRender` 把流式文本切成 markdown 块——已闭合块渲染一次提升为不可变稳定前缀，每帧只重渲染活动尾部；未闭合代码块走行级缓存（Content 保留 syntect 有状态高亮、Thinking 永久 plain）。`CachedCell` 的流式分支不 bump generation（细粒度失效），渲染循环对预折行 cell 直接逐行 blit（去 `Paragraph` Composer 与 clone），高度 O(1)。WS 事件只置脏，draw 由 16ms 帧间隔合帧（输入旁路节流）。turn 结束 `finalize` 全量对账兜底任何增量漂移。基准与对账矩阵：`crates/wing/benches/stream_render.rs`、`tests/stream_render_{reconcile,throughput}.rs`（512KB 平均帧 18.2ms→13µs，p99<0.6ms，支撑 3000 tokens/s）。
 
 **工具参数（`tool_call_stream`）是同一模式的第二个实例**：片段追加退化为 O(1)（只 push + 置 dirty），解析 / 语法高亮 / 渲染缓存失效推迟到帧边界每格至多一次（`CachedCell::compute_*` → `flush_pending_args`；`is_final` 与权威 args 强制冲刷）——旧的 per-fragment 全量重解析是 O(n²)，会把 256 有界事件通道顶满。基准：`crates/wing/benches/tool_args_stream.rs`（append ~20–40ns/片段且与 payload 无关；帧成本 ∝ payload、每帧一次）。
+
+**终端差分与 VS16 表情符号（issue #181）**：`Terminal::draw` 只发「变过的格子」，而 `CrosstermBackend` 用 `x == last.x + 1` 判断相邻（假设上一个符号只推进了 1 列）。ratatui 0.30 的 `BufferDiff` 对 VS16 表情符号（基字符 + `U+FE0F`，`unicode-width` 与 `Buffer::set_stringn` 都认它是 2 列）会**额外重发它覆盖的尾随格**（上游对「终端不清尾随格」的 workaround）⇒ 那格以及它之后整行都被打印到右一列；偏位后的写入压到中文宽字的半格上时，终端把该宽字**整字**清空 —— 屏幕上「某个字缺一块」，而缓冲区一直是对的（所以选中/复制正常，focus 或 resize 触发的整屏重绘也能让它回来）。
+
+修法：每帧渲染完、交给 ratatui 做 diff 之前，逐格把「symbol 含 `U+FE0F` 且 `cell_width() > 1`」的格子钉上 `CellDiffOption::ForcedWidth(真实列宽)`（`ui/emoji_width.rs`；与 `ui/chat_view/link.rs` 的 OSC8 注入同一手法、同一条规矩——forced 值必须是终端真正推进的列数）。钉住后这些格子走 diff 的**普通宽字分支**（尾随格与 CJK 一样被跳过），同一行里再也不会出现「紧跟在宽字后面、却按相邻写」的格子。**这条规矩只有一把尺**：`render::markdown::symbol_width`（= ratatui 的 `CellWidth`，即 unicode-width + 半角片假名浊音符补偿），OSC8 注入的走格与钉宽、buffer 文本走格（`ui::selection::grapheme_width`）、这个 pass 全用它——用纯 `unicode-width` 量 `ｶﾞ` 会少算一列，同样的漂移就回来了。代价：这条路径上等于关掉上游对 VS16 的清尾随格 workaround，即把 VS16 表情符号降级为与 CJK 宽字同一种行为（布局本来也按 2 列算）；上游 ratatui#2721 已把 backend 的相邻性判断改成按上一格的真实宽度（`x == p.x + cell_width()`，crossterm/termion/termina 三处），等含它的版本发版后可重新评估移除这个 pass——**判据是可观测的**：`crates/wing/tests/vs16_row_drift.rs` 的 drift 臂（未打 pass 的那一臂）转 clean 即说明上游已修好。**不要**用「回合结束强制整屏重绘」兜底：闪屏，且 `needs_full_redraw` 与 `images.invalidate()` 绑定，会连带把图片全部重编码。两个绘制面（TUI 主循环、首次运行向导）都经 `tui::draw_frame`（唯一的出帧口）走这个 pass；回归测试 `crates/wing/tests/vs16_row_drift.rs`（真 `Buffer::diff` + backend 相邻性规则 + 终端网格模型，断言「终端网格 == buffer」）。
 
 ### stdio 模式（`wing -p`，PR #1）
 
@@ -76,7 +113,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
 
 - `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥。**id 在同一个文件系统上只对应一个会话**：大小写 / Unicode 归一化不敏感的文件系统（macOS APFS 默认 / Windows NTFS）上，`team-a` 与 `Team-A` 是同一份日志——网关按**磁盘真名**回应（日志留一条 warning），stdio 侧发现"请求 id ≠ 回应 id"即拒绝继续（`session_id_mismatch_error`），绝不静默换 id；
-- `-r/--resume <id>`：恢复既有会话，`--model` / `--provider` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）；`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--provider` 只在**伴随 `--model`** 时生效（切 provider 需要一个要切过去的模型；单独给出同样是 no-op + warning，与 `session/update` 的"成对"约定同口径）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
+- `-r/--resume <id>`：恢复既有会话，`--model` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）。`--model` 的值是 **model_id**（引用词；网关未命中回 400，绝不猜 / 不回落），`--provider` 已删除（provider 不是引用维度——模型由 id 唯一确定）。`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
 - `--resume-session-at`：wing 没有会话截断能力，**出现即非零退出 + 明确文案**（绝不静默忽略——被忽略会让编排方以为上下文已回退，与 wing 的实际状态错位）。
 
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。
@@ -103,8 +140,15 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 - `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
-- `wing tail|head <sid> -n N -t <type>`：消息窗口（类 Unix head/tail；平铺元素模型——按 user/assistant/tool_call/tool_result/reasoning/content 选取元素并在输出侧剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload））；
-- `wing models|tools|agents`：系统查询；`wing start|stop|status`：网关守护进程生命周期（默认的 TUI / stdio 启动路径会自动拉起网关）。
+- `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
+- **控制面补全**（TUI 已有而 CLI 缺失的语义，日常运维不必再手搓 curl）：
+  - `wing new [--workspace] [--template] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
+  - `wing branches <sid>` / `wing fork <sid> --at <uuid>` / `wing rewind <sid> --to <uuid>`：消息节点导航——`branches` 给出可回退 / 分叉的 uuid（表格 + `--json`，uuid 不截断），`fork` 产出新会话 id + draft、`rewind` 把当前会话截回目标之前，两者都把目标消息文本作为 **draft** 回吐（目标不在新 / 截断后的链里，供调用方重发）；`current` 是哨兵（fork = 全链拷贝，rewind = 文档化 no-op）；
+  - `wing interrupt <sid>`（可见别名 `int`）/ `wing compact <sid> [instruction]`：中断在飞 turn / 手动压缩（`instruction` 为可选侧重指令，无它时压缩 prompt 不变）；
+  - `wing reload`：系统热重载；逐项结果**按网关自己的名字序**如实打印（名字序是对外契约），任一失败即非零退出；
+  - **Ask 定向回答**：`wing asks <sid> [--wait N]` 给出在挂 ask 的 `tool_call_id`（Ask 的 tool call 属于**未提交** assistant 消息，`wing tail` 看不到——只有订阅时的会话快照/实时事件携带它；`--wait` 等 ask 出现，超时非零），`wing run -r <sid> -p <answer> --tool-call-id <id>`（stdio 模式同名顶层旗标）把消息路由到该 ask 的 feedback waiter；ask 落链后 `wing tail <sid> -t tool_call` 同样可见 call id；
+  - 会话级命令沿用 `wing tail` / `info` 的 **404 → resume → 重试一次** 惯例（`branches` / `fork` / `rewind` / `compact` / `update` 命中"已逐出"时先水合）；`interrupt` **刻意不水合**——没有在跑的东西可中断，报错说明并指向 `wing ps --all`；
+- `wing models|tools|agents`：系统查询；`wing start|stop|restart|status`：网关守护进程生命周期（`restart` = stop + start 语法糖，默认的 TUI / stdio 启动路径会自动拉起网关）。
 
 ## 远程工具（PR #47 / #50）
 
@@ -138,14 +182,14 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 ### 会话逐出（eviction）
 
-**内存态是缓存**：`SessionManager._sessions` 是"在场会话"的工作集，磁盘（`history.jsonl` + `metadata.json`）是唯一事实来源。逐出 = 让该会话经历一次"gateway 重启"——只回收运行期资源（worker task + provider client），磁盘一概不动。
+**内存态是缓存**：`SessionManager._sessions` 是"在场会话"的工作集，磁盘（`history.jsonl` + `metadata.json`）是唯一事实来源。逐出 = 让该会话经历一次"gateway 重启"——只回收运行期资源（worker task；provider 实例归共享池，不随会话关闭），磁盘一概不动。
 
 | 维度 | 口径 |
 |------|------|
 | 判定 | `_blocked_reason()` 为 None **且**空闲时长 > `sessions.eviction.idle_ttl_seconds`；四类钉住（任一命中即不逐出）：`status != idle`（working / waiting 有在飞 turn）、inbox 有待处理输入（`agent.post()` 直投路径不 touch 计时器，只看 timer 会漏判）、非持久后端（memory 逐出 = 数据销毁）、有 client 订阅（EventBus 路由表） |
 | 计时 | `touch` = 任何携带该 session_id 的事件（`SessionReaper` 订阅 EventBus）——"会话状态变化即重置计时器"；create / resume 初始化 |
 | 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
-| 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()` + `aclose_providers()`，顺序固定）异步收尾 |
+| 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()`，异步收尾；agent 只持 provider name，无 client 所有权要终结） |
 | 水合 | 被逐出 ≠ 不存在：`resume` / `subscribe` / `send`（HTTP 与 WS 上行）按需水合；空会话（无消息、无磁盘痕迹）逐出后不可恢复 |
 | 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
 
@@ -168,13 +212,42 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 **无效轮次与自动重试**：单轮生成若「不进入下一次 ReAct 且不合法」——（a）无 content 且无收敛（已终结）的 tool call（含全空与只有 reasoning——reasoning 不作为收尾依据），或（b）有 content、tool call 起了头但一个都没收敛（流被上游截断，如网关在非法 JSON 工具调用处直接切断；流未正常结束、无权威块数组的形态——如 Anthropic 在 `message_stop` 前被切断——同判）——判定为**无效轮次**（`ReActLoop._call_llm_validated`，抛 `InvalidGenerationError`）：（a）不提交任何内容；（b）提交 content、不提交 tool call（与 provider 剔除未收敛块的口径一致）。随后交给 `with_retry(retry_on=(InvalidGenerationError,), label="模型生成")` 有界重试（参数经 `ReActLoop._config` 跟随**当前 provider 配置**的 `max_retries` / `max_retry_delay`；重试通知走 `notice`）。**有任一收敛 tool call 则永不重试**（自然进入下一轮）。截断检测用 `unfinished_tool_calls()` 计数（含无 id 的半截调用，无盲区）；`retry_on` 过滤保证语义重试不与 provider 层的传输重试叠加放大；无效尝试置空 `_current_acc`（被丢弃的内容不进未提交投影），其 usage 照常计入 turn 账。重试耗尽沿 turn 错误路径上报（`turn_result` error + `error` 事件）：无效轮次绝不作为成功 turn 提交。规则（b）会在链上产生相邻 assistant 消息——Anthropic 序列化器按既有交替规则**合并连续同角色消息**（等价于未截断时「text + tool_use 同一条」的形态）；已知边界：该轮的重试请求以 assistant 结尾（续跑语义），Anthropic 开 thinking 时 prefill 是否被拒待真实环境验证（被拒则该轮重试失败、内容不丢）。
 
-**stop_reason 捕获**：两个 provider 均在最终 usage 携带协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`），传导进 `Message.stop_reason`（**唯一落盘审计位置**）与 `LLMCallMetricsEvent.stop_reason`（仅用于直播——该事件 persist=false，不落盘；audit 经 event_bus 聚合进独立的 metrics.json）。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
+**stop_reason 捕获**：两个 provider 都把协议原值（`end_turn`/`max_tokens`/`tool_use`/`stop`/`length`）挂在响应帧的 usage 上——Anthropic 的终帧同时带 token 与值；OpenAI 兼容的带内 usage 帧（token 所在）附上此刻已知的值，零 token 的流尾终帧携带权威值。`_call_llm` **按帧全量取它**（不随 metrics 的 token 过滤丢帧），组装进 `Message.stop_reason`（**唯一落盘审计位置**；`usage.stop_reason` 只是随行快照，OpenAI 带内帧可能缺）。直播的 `LLMCallMetricsEvent.stop_reason`（persist=false，不落盘；audit 经 event_bus 聚合进独立的 metrics.json）与 `assistant_turn.stop_reason` 与它同源——后者翻译成 Claude 词表（`length` → `max_tokens`、`stop` / `stop_sequence` 等收敛），stdio 前端直接透传；ACP 的 `StopReason` 另由 turn 终态（`turn_result` / `interrupted`）推导，不读该字段。Anthropic 的 max_tokens 砍在 tool args 中间时，未终结的 tool 块从权威块数组剔除（半截 tool_use 不再被当作完整调用执行）；该剔除与未提交投影共用同一实现（`_ordered_finalized_blocks`）。
 
-合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进，结果事件使其冻结——修复了打断后计时器不停的存量问题），stdio 模式据此输出 user turn 消息。
+合成结果同时发射与正常完成相同的 `ToolCallResultEvent` / `ToolResultTurnEvent`：TUI 据此翻转 cell 状态（Bash 计时器仅在 cell 为 Pending 时前进；结果事件把精确计时**固化**在当前值上——之后任何重渲染（改宽 / 调色板预览）不再重算，「打断后计时器不停」的存量问题同修），stdio 模式据此输出 user turn 消息。完成时刻不可知的两条路径都不显示时长（见 #108）：resume / 迟到订阅重放只能锚 turn 起点的近似计时器（`TimerAnchor::Turn`）在结果到达时丢弃；回合结束时仍无结果的卡（结果事件丢失）同样丢弃——把「执行起点→回合结束」这个上界冻结成精确时长，会永远显示一个错误数字。
 
 **时序**：runtime 先 await `agent.interrupt()`（补提交随之完成）再 emit `InterruptedEvent`（persist=true，落盘于 partial Message 之后，链序正确）——客户端观察到 Interrupted 时 store 已一致。收尸 gather 带 5s 兜底超时，行为不端的工具（吞掉取消）不会无限挂起补提交路径。打断在入口（等锁之前）同步丢弃**当时**已排队的输入与 pending ask，被放弃的输入以 `request_id` 列表随 `InterruptedEvent.dropped_request_ids` 下发——前端据此只把真正被放弃的 pending 消息标为 discarded；锁等待期间新投递的消息（客户端 POST 已应答）不在其中，留给随后的消费者（重建的新 worker、保留 worker 的续期继任者），不被排队中的 interrupt 吞掉。hooks 只在拿到锁之后触发——排队中的请求不提前杀掉在途 turn 的前台工具。
 
-**降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后若自然终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
+**降级路径（worker 不响应取消）**：worker 在取消阶梯内始终不终止时，`interrupt()` 保留旧 worker（绝不重建第二个消费者）、打 ERROR + 广播 notice（TUI 显示"打断未生效"）后立即返回——锁必然释放、RPC 必然应答。此时 `InterruptedEvent` 可能先于（甚至永久早于）partial Message——链序保证在降级路径下让位于"会话不失去打断能力"。被保留的 worker 随后终止，终局续期自动重建消费者（`shutdown()` 置位的 `_closing` 闸门同时挡住终局续期与 `interrupt()` 的重建——逐出 / 模板切换后不会被复活）。
+
+**消费者不死与上报路径不可失败（#187）**：终局续期是**通用**的——每个消费者任务都由 `_spawn_worker()` 创建并挂上 `_on_worker_done`，只要它不是被取消（意图性收口：interrupt 阶梯 / shutdown）、仍是当前 worker、且 agent 未关闭，就以异常收场即自动重建（否则 inbox 里的消息再无人消费：status 仍是 idle、投递没有任何反应，即"僵尸态"）。三条闸门都以 `self._worker is worker` 为准绳（同步回调里串行判定），与 `_arm_worker_renewal`（阶梯放手后被保留 worker 的续期，它连取消收场也兜住）互不抢建，绝不出现第二个消费者。已知边界：worker 被 `BaseException` 掀翻时只重建消费者、不替客户端收口（本轮没有 `turn_result` / `error` / `done`，前端等下一次投递的事件回 idle）。
+
+与它配对的是**上报路径不可失败**：兜底 handler 的收尾动作（`turn_result` / `error` / `done`）与它报告的故障常常同源——落盘正是刚坏掉的资源（如 ENOSPC）。`AgentEventSink.best_effort()` 窗口把这条契约写在调用点上：落盘失败降级为 ERROR 日志，事件仍尽力广播（前端靠它复位 working 态），绝不抛出（严格发射会在 except 块里再抛一次，同层接不住，异常逃出 `run_turn` 与 worker 的 drain 循环——这正是 #187 的僵尸链路）。runtime 侧 session 级上报（`WingRuntime._emit_session_event`：打断 / 回退 / 压缩 / 状态变更的**已生效**动作报告）走同一原语 `emit_best_effort`——落盘失败不再让 `POST /api/session/interrupt` 返回 500、也不再把事件本身丢掉。代价是磁盘上可能缺这条记录（报告是记账，不是事实）：resume 重放以磁盘为准。
+
+## 模型调用：无状态 provider 与共享池
+
+**模型身份与 provider 的角色**：模型的引用词是全局唯一的 **model_id**（配置 `providers[].models[].id`，
+显式声明可选、缺省 = 调用名）——一切请求 / 协议 / CLI / metadata 引用它，解析 = 单键查表
+（`Config.find_model()`，无候选集合、无优先级、无回落；`agents[].model` 在配置加载期就按 id 空间校验）。
+**provider 不再是引用词**：它是「展示分组 + 运行期事实」（同名模型跨 provider 时以 id 消歧），
+只回答「调用名发往哪个 base_url」这类运行期问题；调用名（name）与展示名（display_name）分工同理——
+前者是发给上游的值，后者是渲染素材。**模型目录 = 配置静态声明的同步投影**：远端 `GET /models`
+发现机制已退役，`/api/models` 不再有任何网络依赖（目录的每个 id 全局唯一，是对外可依赖的合同）。
+
+provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wing.provider.pool` 的**全进程共享池**——每 provider name 一个实例（懒建），全部会话共用（模型目录 = 配置静态投影，**不经池**，见上）。旧版「每 agent 一份 client 表」会按 会话数 × provider 数 放大 socket 占用（httpx keepalive 连接只在下次使用连接池时才被过期检查，会一直挂着），reload 的逐会话重建还会把在途请求的 client 关死（#172：重试栈绑死在已关闭实例上，永不成功）。
+
+- agent 只持有 **provider name** 与调用名（`WingAgent.provider_name` / `model`，同源同刻——切换模型时由 model_id 单键查表一次性写入），实例经 `get_provider(name)` 实时解析；切模型 = 换 name，无需创建/关闭任何 client。
+- 一切**会话级参数**经 `RequestOptions` 在每次调用时注入（`WingAgent.request_options()` → `generate(..., options=)`）：
+
+| 参数 | 用途 | 缺省 |
+|------|------|------|
+| `session_id` | 缓存亲和：`explicit_cache_mode` 的 OpenAI 兼容 provider 下发 `prompt_cache_key`（压缩调用与主调用同一 key）；Anthropic 走 cache_control，不需要 | 无（不下发） |
+| `media` | 请求期媒体投影的读接口（序列化图片时按 id 读字节） | 无媒体存储（图片位退化占位） |
+| `thinking` / `reasoning_effort` | 会话级开关覆盖（状态住 `WingAgent`，随 metadata 记录持久化） | None = 跟随 provider 配置基线 |
+
+**退场（retire）语义**：`/api/system/reload` 的 provider 步骤调用 `reset_providers()`——按新配置**先建后换**（任一构建失败池保持原样），被替换的旧实例 `retire()`：在途计数归零才真正 `aclose`，**在途请求不受影响**，新请求立即由池解析到新实例。因此 reload 对会话完全透明（比「打断 + 重试自愈」更强）：不打断在途、无需重贴记录、无逐会话重建；配置中已移除的 name 保留旧实例（钉在它上面的会话不被拆解）。
+
+**竞态守卫**：已关闭实例上的新调用抛 `ProviderClosedError` 快速失败（不进重试栈空转——对死 client 重试永远不可能成功）；ReActLoop 每次 attempt 在发起前重新解析当前 provider，且「解析 → 首次迭代」之间无 await（晚解析纪律）——池换新与在途迭代之间不存在竞态窗口。
 
 ## 事件系统与统一日志
 

@@ -26,6 +26,7 @@ BASH_MODEL = "probe/react-bash"
 ASK_MODEL = "probe/react-ask"
 
 
+@pytest.mark.probe_env(models=[TEXT_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_text_turn_event_order_and_persistence(probe: Probe) -> None:
@@ -85,6 +86,7 @@ async def test_text_turn_event_order_and_persistence(probe: Probe) -> None:
     context.assert_prefix_like(["user: hi"])
 
 
+@pytest.mark.probe_env(models=[BASH_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_bash_tool_roundtrip_and_pairing(probe: Probe) -> None:
@@ -155,6 +157,7 @@ async def test_bash_tool_roundtrip_and_pairing(probe: Probe) -> None:
     view.assert_tool_pairing()
 
 
+@pytest.mark.probe_env(models=[ASK_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_ask_roundtrip_and_raw_answer_feedback(probe: Probe) -> None:

@@ -209,8 +209,8 @@ function Toasts(): ReactElement {
 /**
  * One toast, which removes itself after its level's deadline.
  *
- * Review #109 [P2-4]: nothing used to call `dismissToast`, so this region grew
- * for the lifetime of the window. The timer lives in the component (the store
+ * Without the timer this region grows for the lifetime of the window. The
+ * timer lives in the component (the store
  * stays timer-free and testable in the node project) and every toast keeps a
  * manual close button — errors are the ones a user may want to read twice.
  */

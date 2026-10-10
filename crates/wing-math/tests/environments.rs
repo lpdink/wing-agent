@@ -245,7 +245,7 @@ fn multiline_environment_is_not_silently_truncated() {
     assert!(!text.contains('\\'), "leaked command in\n{text}");
 }
 
-// ── review r1 的 B1 / N2 回归 ────────────────────────────────────────
+// ── 单元格内容不丢 / 行宽对齐回归 ────────────────────────────────────────
 
 #[test]
 fn failed_cell_degrades_the_whole_formula_instead_of_blanking_it() {

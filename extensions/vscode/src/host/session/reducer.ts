@@ -62,7 +62,7 @@ const TOOL_RESULT_MAX_CHARS = 16_000;
 const TOOL_RESULT_TAIL_CHARS = 4_000;
 
 /**
- * Streaming tool-argument render budget (review #109 [P1-2]).
+ * Streaming tool-argument render budget.
  *
  * A provider emits one `tool_call_stream` fragment per SSE chunk, so a 200 KB
  * `Write` is ~1000 fragments. Re-parsing the accumulated text and pushing the
@@ -134,7 +134,12 @@ export function applySync(record: SessionRecord, sync: SyncSessionEvent): void {
     }
     record.meta = {
       ...record.meta,
+      // The model quadruple, one instant: call name / reference word / display
+      // name / provider. `null` (old gateway, gone id) normalizes to `''` =
+      // unknown — the picker then marks nothing instead of guessing.
       model: sync.agent.model_name,
+      modelId: sync.agent.model_id ?? '',
+      modelDisplayName: sync.agent.model_display_name ?? '',
       provider: sync.agent.provider_name ?? '',
       workspace: sync.agent.workspace ?? record.meta.workspace,
     };
@@ -698,7 +703,7 @@ function applyToolCallStream(
   const buffered = record.toolArgsStreamFor(input.toolCallId);
   const argsText = (buffered?.text ?? '') + input.fragment;
   const atMs = record.now();
-  // Render budget (review #109 [P1-2]): the first fragment, the last one, every
+  // Render budget: the first fragment, the last one, every
   // fragment of a small call, and otherwise one update per interval / N chars /
   // N fragments. Everything else stays in the buffer — the cell *and* the bridge
   // stay untouched, so the webview's mirror keeps matching this record exactly.
@@ -826,6 +831,16 @@ function applyMetaChanges(record: SessionRecord, event: SessionStateChangedEvent
   const meta = { ...record.meta };
   if (event.model !== null) {
     meta.model = event.model;
+    // The display name travels with the call name (`null` = the declared model
+    // has no display name) — it must follow the model, or a switch to a model
+    // without one would keep showing the previous model's name.
+    meta.modelDisplayName = event.model_display_name ?? '';
+  }
+  if (event.model_id !== null) {
+    meta.modelId = event.model_id;
+  }
+  if (event.provider_name !== null) {
+    meta.provider = event.provider_name;
   }
   if (event.thinking !== null) {
     meta.thinking = event.thinking;

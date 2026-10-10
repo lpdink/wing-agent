@@ -52,6 +52,11 @@
 另外 **§6 的两类规则内例外**（叶子组 `common ↔ media ↔ schema` 互依、3 条函数内懒加载）
 同样是刻意批准的横向 / 向上依赖，一并登记在那里。
 
+**设置面新增模块的落点**（族按包前缀判定，无需改 `FAMILY_RULES`）：
+`config/{spec,problems,catalog,emit,document,boot}.py` 都在 `wing.config.*`（L3）；
+`gateway/{setup_guard.py,routes/settings.py,protocol/settings.py}` 都在 `wing.gateway.*`（L4）。
+`document.py` 是唯一新增的配置文件读点（与 `loader.py` 同级同责）；`catalog` / `emit` / `problems` 是纯函数、无 I/O。
+
 ## 2. 每个包的职责一句话
 
 | 包 / 模块 | 层 | 职责一句话 |
@@ -66,18 +71,18 @@
 | `hooks/`（registry / loader） | L2 | Hook 扩展点注册表 + 配置文件加载（`hook_registry.py` 与 `config.load_hooks` 于 11 归位一处） |
 | `request_context.py` | L2 | 每请求上下文（request_id / session_id / client_id，单 ContextVar） |
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
-| `config/`（models / loader / user_agent / default_config） | L3 | 配置模型 + `WING_HOME` 解析 + 手写默认模板（事实来源） |
+| `config/`（spec / models / problems / catalog / groups / emit / document / boot / loader / user_agent） | L3 | 声明层（`S(...)` / `SettingMeta` / `ApplyScope`：字段元信息唯一来源）+ 设置目录树（catalog）+ 业务分组表（groups：界面分类的唯一声明处）+ 规范形 YAML emitter（模板与保存共用）+ 稀疏文档 / 启动读取（`boot_config()` 永不抛）+ WING_HOME 解析与配置单例 |
 | `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
-| `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
+| `session/`（session / manager / reaper / template / model_binding / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、生效模型绑定（resume 链的只读投影）、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、打断收口阶梯、未提交投影 |
 | `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
-| `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、provider registry |
+| `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、无状态 provider 与全进程共享池（`pool.py`） |
 | `audit/`（原 `metrics_registry/`） | L3 | 指标 / 审计注册中心（EventBus 订阅，原子写 JSON；`install()` 由组合根显式调用） |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |
-| `system.py`（原 `runtime.reload_system`） | L4 | 系统级热重载流程（config → hooks → commands → provider → skills & rules） |
+| `system.py`（原 `runtime.reload_system`） | L4 | 系统级热重载流程（config → hooks → commands → provider → skills & rules → log level；名字序是对外契约） |
 | `background.py` | L4 | BackgroundScheduler：周期任务宿主（逐出、未来的 dreaming 等） |
-| `gateway/` | L4 | FastAPI 网关：HTTP 路由 + WS 事件流 + 鉴权 + 远程工具宿主 |
+| `gateway/` | L4 | FastAPI 网关：HTTP 路由 + WS 事件流 + 鉴权 + 远程工具宿主 + setup mode 守门（`setup_guard.py`，503 `error="setup_mode"`） |
 | `__init__.py` | — | 包入口；**不得 import 任何 wing 子模块**（R6：顶层无副作用，组合根负责显式装配） |
 
 ## 3. 迁移映射（历史记录：旧路径 → 新路径）
@@ -93,7 +98,7 @@
 | `common/tracked_list.py` | `chain.py` | 07 |
 | `media.py` | `media/*` | 08 |
 | `schema.py` | `schema/*` | 08 |
-| `config.py` | `config/*`（`default_config.py` 并入） | 08 |
+| `config.py` | `config/*`（`default_config.py` 并入；**该手写模板后于设置面改动中删除**——模板现在由 `config/emit.py` 从声明生成） | 08 |
 | `provider/anthropic.py` / `provider/openai_compat.py` | `provider/anthropic/*` / `provider/openai/*`；provider registry 抽出为独立模块 | 09 |
 | `gateway/protocol.py` | `gateway/protocol/*`（领域需要的类型**移出** gateway） | 10 |
 | `magic_command/` | `commands.py` | 11 |

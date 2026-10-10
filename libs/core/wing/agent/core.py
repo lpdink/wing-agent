@@ -11,6 +11,7 @@ import asyncio
 import functools
 import gc
 import inspect
+import time
 import types
 import uuid
 from collections import deque
@@ -27,8 +28,9 @@ from wing.config import (
     resolve_model_display_name,
 )
 from wing.event import AskEvent, NoticeEvent, WingEvent
-from wing.provider import create_provider
+from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
+from wing.provider.pool import get_provider
 from wing.schema import Message, Tool
 
 from .event_sink import AgentEventSink
@@ -149,12 +151,18 @@ def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
 
 
 class WingAgent:
-    """Agent 核心——组装各部件，提供对外接口。"""
+    """Agent 核心——组装各部件，提供对外接口。
+
+    provider 实例不归 agent 持有：只记 name，经共享池实时解析
+    （``wing.provider.pool``）——reload 换新后自动拿到新实例。会话级
+    LLM 调用参数（thinking / reasoning_effort 开关）住在本类，经
+    `request_options()` 在每次调用时注入 provider。
+    """
 
     def __init__(
         self,
         model: str,
-        model_provider: ModelProvider,
+        provider_name: str,
         context_manager: Any,  # ContextManager（避免循环导入）
         stream: bool = False,
         tools: list[Tool] | None = None,
@@ -163,7 +171,7 @@ class WingAgent:
         media: MediaAccess | None = None,
     ) -> None:
         self.model = model
-        self.model_provider = model_provider
+        self._provider_name = provider_name
         self.context_manager = context_manager
         self.stream = stream
         self._media = media
@@ -172,12 +180,10 @@ class WingAgent:
         为 None 表示该 agent 没有媒体存储（测试构造的裸 agent）——工具侧
         必须据此安全拒绝（不得假定可用）。"""
 
-        # Provider client 表：按 name 有界持有（切回同名复用、跨 provider 切模型
-        # 不关闭旧 client，不打断在途生成）。生命周期由创建方终结：shutdown() 不动
-        # provider，仅 aclose_providers()（agent 整体废弃 / session 释放）关闭。
-        self._providers: dict[str, ModelProvider] = {
-            model_provider.name: model_provider
-        }
+        # 会话级模型开关（provider 无状态化后住在本类；None = 跟随 provider
+        # 配置默认）。per-call 经 request_options() 注入——绝不落在共享实例上。
+        self._thinking: bool | None = None
+        self._reasoning_effort: str | None = None
 
         # ── 内部部件组装 ──
         self._inbox = Inbox()
@@ -194,11 +200,10 @@ class WingAgent:
             current_model=lambda: self.model,
             current_provider=lambda: self.model_provider,
             current_tools=lambda: self.tools,
+            current_options=self.request_options,
             stream=stream,
             set_working=self._set_working,
         )
-        # 重试口径跟随当前 provider 的配置（构造与切换时同步；见 ReActLoop._config）
-        self._loop._config = model_provider.config
 
         # ── 工具集 ──
         self._tools: dict[str, Tool] = self._bind_tools(tools or [])
@@ -220,10 +225,11 @@ class WingAgent:
         # resume 时刻重算）。与 _working 同生命周期（_set_working 维护）。
         self._turn_started_at: datetime | None = None
         self._interrupt_lock = asyncio.Lock()
-        # shutdown 是一次性的终局：置位后终局续期（见 `_arm_worker_renewal`）
-        # 与 interrupt 的直接重建都不再发生——"逐出后又被复活"必须不可能。
+        # shutdown 是一次性的终局：置位后终局续期（见 `_on_worker_done` /
+        # `_arm_worker_renewal`）与 interrupt 的直接重建都不再发生——"逐出后
+        # 又被复活"必须不可能。
         self._closing: bool = False
-        self._worker = asyncio.create_task(self._run())
+        self._worker = self._spawn_worker()
 
     # ── ToolContext Protocol 实现 ──
 
@@ -251,8 +257,21 @@ class WingAgent:
 
         与 capabilities 同款实时解析：展示名不是身份，任何匹配 / 变更仍以
         model + provider 为准；前端只在展示层消费（缺省回落 self.model）。
+
+        provider 不可解析（配置里已删、池里也没有旧实例）不是本属性的失败面：
+        展示名是**可选素材**，缺它只意味着"没有展示名"（回落调用名）。因此依赖
+        它的**投影**在本场景下仍然可用——会话列表的四件套、`to_agent_info`
+        （`session/get` 与 sync 重放的 agent 快照）。
+
+        注意保护范围仅限这些投影：`get_status`（`/api/session/info` 的素材）还要
+        读 thinking / reasoning_effort / api_url，它们同为 provider 派生且进请求
+        体，见该方法的说明。
         """
-        return resolve_model_display_name(self.model_provider.config, self.model)
+        try:
+            provider_cfg = self.model_provider.config
+        except ValueError:
+            return None
+        return resolve_model_display_name(provider_cfg, self.model)
 
     @property
     def yolo(self) -> bool:
@@ -402,67 +421,66 @@ class WingAgent:
     def set_max_turns(self, max_turns: int | None) -> None:
         self._loop.max_turns = max_turns
 
-    def set_model(self, model: str, provider: ModelProvider) -> None:
-        """切换模型与 provider（两参必填）。
+    @property
+    def provider_name(self) -> str:
+        """当前 provider name（实例经共享池按 name 实时解析）。"""
+        return self._provider_name
 
-        model 只由 WingAgent 持有（唯一存储）；provider 入表并换为活跃。
+    @property
+    def model_provider(self) -> ModelProvider:
+        """当前共享 provider 实例（池解析；reload 换新后自动可见）。
+
+        provider 生命周期归池——agent 不做也不该做关闭动作。
+        """
+        return get_provider(self._provider_name)
+
+    def set_model(self, model: str, provider_name: str | None = None) -> None:
+        """切换模型（必要时切 provider name）。
+
+        model 只由 WingAgent 持有（唯一存储）；provider 只记 name、实例经
+        共享池解析。先校验目标 name 可解析再落状态——失败不留半截切换。
         ReActLoop / ToolExecutor 不存储 model——经注入取值器与调用点传参
-        获取，无需传播。同 provider 内换 model 的调用方传当前 provider
-        实例——任何 OpenAI-compat 端点都能给出 provider，可选 + fallback
-        只引入隐式约定。
+        获取，无需传播。
         """
+        if provider_name is not None and provider_name != self._provider_name:
+            get_provider(provider_name)  # 校验（不可解析 → raise，状态不变）
+            self._provider_name = provider_name
         self.model = model
-        self.model_provider = provider
-        self._providers[provider.name] = provider
-        self._loop._config = provider.config  # 重试口径跟随 provider 配置
-
-    def get_or_create_provider(self, name: str) -> ModelProvider:
-        """按 name 获取缓存的 provider client，缺失时创建并缓存（创建即拥有）。"""
-        cached = self._providers.get(name)
-        if cached is not None:
-            return cached
-        cfg = get_config().get_provider(name)
-        provider = create_provider(cfg, session_id=self.session_id, media=self._media)
-        self._providers[name] = provider
-        return provider
-
-    async def aclose_providers(self) -> None:
-        """关闭并清空 provider client 表。
-
-        仅由显式终结 provider 生命周期的一方调用：模板切换（旧 agent 整体
-        废弃）、未来的 session 释放。shutdown() 不做此事——provider 的生命
-        周期归创建 / 持有它的那一层（Session），agent 关停不关闭共享 client。
-        """
-        providers = list(self._providers.values())
-        self._providers.clear()
-        for provider in providers:
-            await provider.aclose()
-
-    async def rebuild_providers(self) -> None:
-        """驱逐重建：按新配置重建活跃 provider，成功后关闭旧表全部 client。
-
-        配置热加载入口——provider 客户端无"热刷新"语义（ModelProvider 不提供
-        reload），reload 即驱逐 + 重建。api_key / base_url / anthropic_version /
-        extra_body 等变更随重建自然生效；非活跃 name 下次用到时按新配置懒创建。
-
-        先建后关：重建失败（如 provider 从新配置中移除）时旧 client 保持可用，
-        session 不会被钉死在已关闭的 client 上。
-        """
-        active_name = self.model_provider.name
-        cfg = get_config().get_provider(active_name)
-        new_provider = create_provider(
-            cfg, session_id=self.session_id, media=self._media
-        )
-
-        old_providers = list(self._providers.values())
-        self._providers = {active_name: new_provider}
-        self.model_provider = new_provider
-        self._loop._config = new_provider.config  # 重试口径跟随 provider 配置
-        for provider in old_providers:
-            await provider.aclose()
 
     def set_reasoning_effort(self, effort: str | None) -> None:
-        self.model_provider.reasoning_effort = effort
+        """设置会话级推理力度覆盖（None = 跟随 provider 配置默认）。"""
+        self._reasoning_effort = effort
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """会话生效的推理力度：显式覆盖优先，否则 provider 配置默认。"""
+        if self._reasoning_effort is not None:
+            return self._reasoning_effort
+        return self.model_provider.config.reasoning_effort
+
+    def set_thinking(self, enable: bool) -> None:
+        """设置会话级 thinking 覆盖（None 语义不可达：显式开关即覆盖）。"""
+        self._thinking = enable
+
+    @property
+    def thinking(self) -> bool:
+        """会话生效的 thinking 状态：显式覆盖优先，否则 provider 配置基线。"""
+        if self._thinking is not None:
+            return self._thinking
+        return self.model_provider.thinking
+
+    def request_options(self) -> RequestOptions:
+        """本次模型调用的会话级参数（provider 无状态化的唯一注入点）。
+
+        缓存亲和（session id → prompt_cache_key）、媒体池读接口、thinking /
+        reasoning_effort 覆盖——全部经这里下发；provider 实例零会话状态。
+        """
+        return RequestOptions(
+            session_id=self.session_id,
+            media=self._media,
+            thinking=self._thinking,
+            reasoning_effort=self._reasoning_effort,
+        )
 
     async def post(
         self,
@@ -477,30 +495,35 @@ class WingAgent:
     async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。
 
-        积压在**等锁之前**清（入口处同步执行）：打断时刻之前排队的输入视为
-        放弃；推迟到拿锁之后再清会把锁等待期间新到的消息（客户端 POST 已
-        返回 ok）一并吞掉——排队等待期在正常路径就有秒级，单次降级路径最长
-        ~18s（排队在另一个 interrupt 之后还会叠加）。hooks 与收口在锁内：
-        注定排队的请求不提前杀掉在途 turn 的前台工具，也不会并发重建出
-        第二个消费者。
+        积压在**等锁之前**清（入口处同步执行）：打断时刻之前排队的输入视为放弃；推迟到拿锁之后再清会
+        把锁等待期间新到的消息（客户端 POST 已返回 ok）一并吞掉——排队等待期在正常路径就有秒级，单次
+        降级路径最长 ~18s。hooks 与收口在锁内：注定排队的请求不提前杀掉在途 turn 的前台工具，也不会
+        并发重建出第二个消费者。
 
-        收口等待是**有界**的取消阶梯（见 `_stop_worker`）：worker 在阶梯内
-        始终不终止时**保留旧 worker**（绝不重建第二个，避免两个 worker 抢
-        同一个 inbox），打 ERROR 并广播 notice 后立即返回；同时登记终局
-        续期——被保留的 worker 随后若自然终止且仍是当前 worker，自动重建
-        消费者（否则消息进 inbox 无人消费）。interrupt 绝不会因为 worker
-        不响应而永久持有 `_interrupt_lock`。`_closing`（shutdown 的终局闸门）
-        同样挡住这里的重建：已关闭的 agent 不会被 interrupt 复活。
+        收口等待是**有界**的取消阶梯（见 `_stop_worker`）：worker 在阶梯内始终不终止时**保留旧
+        worker**（绝不重建第二个，避免两个 worker 抢同一个 inbox），打 ERROR 并广播 notice 后立即
+        返回；同时登记终局续期——被保留的 worker 随后若自然终止且仍是当前 worker，自动重建消费者
+        （否则消息进 inbox 无人消费）。interrupt 绝不会因为 worker 不响应而永久持有
+        `_interrupt_lock`。`_closing`（shutdown 的终局闸门）同样挡住这里的重建：已关闭的 agent 不会
+        被 interrupt 复活。
 
         Returns:
-            被放弃的积压输入的 `request_id` 列表（打断时刻已排队、尚未被
-            消费的输入）。调用方（runtime）把它带进 `InterruptedEvent`——
-            前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待期间
-            新到的消息。
+            被放弃的积压输入的 `request_id` 列表（打断时刻已排队、尚未被消费）。调用方（runtime）
+            把它带进 `InterruptedEvent`——前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待
+            期间新到的消息。
+
+        正常返回（含阶梯耗尽的**降级**路径——那时 `worker_stopped=False`、前面另有 ERROR + notice）
+        必有且**仅**一条 INFO（`Agent interrupt complete: …`，与 `shutdown()` 的
+        `Agent shutdown complete: …` 对称）：session id、worker 是否终止、consumer 是否重建、入口到
+        返回的总耗时（含等锁与取消阶梯）、被丢弃的积压数（口径：**带 `request_id`** 的排队项——内部
+        直投不带 id，被清但不计数）——打断过程本身必须可 grep。阶梯中间步骤是 WARNING 级、阶梯耗尽
+        另有 ERROR + notice。
         """
+        started = time.monotonic()
         self._inbox.cancel_all_waiters()
         dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
 
+        rebuilt = False
         async with self._interrupt_lock:
             self._fire_interrupt_hooks()
 
@@ -516,9 +539,18 @@ class WingAgent:
                 # shutdown 也可能已置位 _closing——只在还是旧 worker 且未关闭
                 # 时重建，避免出现第二个消费者 / 复活已关闭的 agent。
                 if self._worker is old and not self._closing:
-                    self._worker = asyncio.create_task(self._run())
+                    self._worker = self._spawn_worker()
+                # 以现状为准：续期回调若已抢先重建，这里不重复计数（也不会
+                # 出现第二个消费者）。
+                rebuilt = self._worker is not old
             else:
                 self._arm_worker_renewal(old)
+        log.info(
+            f"Agent interrupt complete: session={self.session_id} "
+            f"worker_stopped={stopped} consumer_rebuilt={rebuilt} "
+            f"waited={int((time.monotonic() - started) * 1000)}ms "
+            f"dropped={len(dropped)}"
+        )
         return dropped
 
     async def shutdown(self) -> None:
@@ -527,8 +559,8 @@ class WingAgent:
         收口与 interrupt 共用同一阶梯（有界）：worker 不响应取消时打 ERROR
         后返回——会话拆解（逐出 / release / 模板切换）绝不会被拖死；`_closing`
         置位后终局续期也被闸门挡住（不会"逐出后又被复活"）。
-        注意：不关闭 provider——provider 生命周期由 Session 层管理，
-        client 的终结由显式调用 aclose_providers() 的一方负责。
+        注意：不关闭 provider——实例归共享池（其他会话共用），agent 只持有
+        name，没有任何 client 所有权要终结。
         """
         self._closing = True
         # 清积压留在锁内无妨：shutdown 是终局，锁等待期间到达的输入注定无人
@@ -583,13 +615,75 @@ class WingAgent:
                 log.error("old worker died with error during interrupt", exc_info=exc)
         return True
 
+    def _spawn_worker(self) -> asyncio.Task[None]:
+        """创建消费者任务并挂上终局续期守卫。
+
+        worker 的**所有**创建点都必须经这里（构造 / interrupt 重建 / 续期
+        重建）——漏掉一处就意味着那条路径上死掉的 worker 不会再被续期。
+        """
+        worker: asyncio.Task[None] = asyncio.create_task(self._run())
+        worker.add_done_callback(self._on_worker_done)
+        return worker
+
+    def _on_worker_done(self, worker: asyncio.Task[None]) -> None:
+        """终局续期（通用）：worker 因**非意图性**异常结束 → 自动重建消费者。
+
+        单轮失败由 `_run` 的 while 兜住；但兜底 handler 自身也可能被同一故障
+        掀翻（报告动作与落盘同源，如 ENOSPC 贯穿两层的 sink 调用）。worker
+        一旦静默结束，inbox 里的消息再无人消费——status 仍是 idle、投递无
+        任何反应（僵尸态），只能靠 interrupt 重建。续期把"消费者不死"兜到
+        底：不管谁、以什么方式把 `_run` 掀翻，只要不是意图性收口就重建。
+
+        闸门（与 interrupt / shutdown 互斥，绝不出现第二个消费者）：
+
+        - `_closing`：shutdown 是终局——绝不复活已关闭的 agent（死亡照常记
+          日志，异常取下不再悬着）；
+        - `worker.cancelled()`：取消是**意图性**收口（interrupt 的取消阶梯 /
+          shutdown）——重建由收口方自己决定（interrupt 直接重建；阶梯放手后
+          被保留的 worker 由 `_arm_worker_renewal` 续期，它连取消路径也要
+          兜住，故此处不覆盖）；
+        - `self._worker is not worker`：已被替换（等锁期间续期或 interrupt
+          抢先重建）——本回调与 `_arm_worker_renewal` 可能同时被登记，两边
+          都以这条为准绳（同步回调里串行判定）；已取消的任务上取
+          `exception()` 会抛 `CancelledError`，所以取消判据必须写在它前面。
+
+        已知边界：这里只重建消费者，**不替客户端收口**——worker 被
+        `BaseException` 掀翻（`Exception` 已经出不了 `_run`）时本轮没有
+        turn_result / error / done，前端要等下一次投递的事件才回到 idle。
+        极端死法不值得为它引入重复上报面（`_run` 的兜底可能已经报过，
+        再发一轮 error/done 只会让前端看到两条收尾）。
+        """
+        if self._worker is not worker or worker.cancelled():
+            # 已被替换（续期 / interrupt 负责上报）/ 意图性取消（已取消的任务
+            # 无异常可取——`exception()` 会抛 `CancelledError`，判据顺序不能反）。
+            return
+        exc = worker.exception()
+        if self._closing:
+            # shutdown 是终局：不重建（闸门）。异常照常取下并向日志交代——
+            # 不取回会由 loop 以 "Task exception was never retrieved" 报出，
+            # 与 shutdown 自己的收口日志重复。
+            log.error(
+                f"worker 在关闭中异常终止: session={self.session_id} "
+                f"exception={type(exc).__name__ if exc is not None else '-'}",
+                exc_info=exc,
+            )
+            return
+        log.error(
+            f"worker 意外终止，重建消费者: session={self.session_id} "
+            f"exception={type(exc).__name__ if exc is not None else '-'}",
+            exc_info=exc,
+        )
+        self._worker = self._spawn_worker()
+
     def _arm_worker_renewal(self, worker: asyncio.Task) -> None:
         """阶梯放手后的终局续期：被保留的 worker 随后死亡则重建消费者。
 
         只在「仍是当前 worker 且 agent 未关闭（`_closing`）」时重建。续期
-        与 interrupt 重建可能竞争 worker 的同一终局——两边都以
-        `self._worker is worker` 为准绳（同步回调里串行判定），不会出现
-        第二个消费者。
+        与 interrupt 重建、通用续期（`_on_worker_done`）可能竞争 worker 的
+        同一终局——三边都以 `self._worker is worker` 为准绳（同步回调里串行
+        判定），不会出现第二个消费者。与通用续期的唯一差别：这里**不**区分
+        死法——被保留的 worker 最终以「取消」收场（阶梯之外的那次投递生效）
+        同样要续期，否则消息进 inbox 无人消费。
         """
 
         def _renew(_: asyncio.Task) -> None:
@@ -599,7 +693,7 @@ class WingAgent:
                 f"interrupt: 被保留的 worker 随后终止，重建消费者 "
                 f"(session={self.session_id})"
             )
-            self._worker = asyncio.create_task(self._run())
+            self._worker = self._spawn_worker()
 
         worker.add_done_callback(_renew)
 
@@ -614,26 +708,38 @@ class WingAgent:
             f"stack=[{_worker_frames(worker)}]"
         )
         if notify:
-            self._sink.emit(
-                NoticeEvent(
-                    level="error",
-                    message=(
-                        "打断未生效：worker 未在取消阶梯内终止（保留原 worker）"
-                        "——若其随后退出将自动恢复；也可再次打断重试"
-                    ),
+            # 错误路径的副作用同样走降级窗口（#187）：notice 今天 persist=false
+            # （窗口在本例上是纯防御——定型 / 广播路径不得外溢），但契约统一：
+            # 错误路径里的副作用一律不得掀翻调用者——这条调用链上还有
+            # interrupt 的收口要完成。
+            with self._sink.best_effort():
+                self._sink.emit(
+                    NoticeEvent(
+                        level="error",
+                        message=(
+                            "打断未生效：worker 未在取消阶梯内终止（保留原 worker）"
+                            "——若其随后退出将自动恢复；也可再次打断重试"
+                        ),
+                    )
                 )
-            )
 
     def get_status(self) -> dict:
-        """返回当前状态快照（网关的 session info 投影素材）。"""
+        """返回当前状态快照（网关的 session info 投影素材）。
+
+        本快照要经 provider 解析才能答的字段不止一个（``thinking`` /
+        ``reasoning_effort`` 是"显式覆盖优先、否则 provider 配置默认"，``api_url``
+        取 provider 实例）——provider 已从配置删除、池里也没有旧实例时它们一起
+        失败。它们同时是**请求路径**的值（thinking / effort 进请求体），所以这里
+        不做部分降级：报一个编造的默认值比大声失败更糟。
+        """
         count, tokens = self.context_manager.get_context_stats()
         ctx_window = 0
         if self.context_manager.compactor:
             ctx_window = self.context_manager.compactor.context_window_tokens
         return {
             "model": self.model,
-            "thinking": self.model_provider.thinking,
-            "reasoning_effort": self.model_provider.reasoning_effort,
+            "thinking": self.thinking,
+            "reasoning_effort": self.reasoning_effort,
             "message_count": count,
             "total_tokens": tokens,
             "context_window_tokens": ctx_window,
@@ -661,7 +767,12 @@ class WingAgent:
                 log.error(f"interrupt hook {hook_id} failed: {e}")
 
     async def _run(self) -> None:
-        """主循环：持续 drain inbox 并处理。"""
+        """主循环：持续 drain inbox 并处理。
+
+        循环**不因单轮失败退出**（本轮以 error 上报后继续消费下一条）；错误
+        上报走 `best_effort` 窗口，报告动作不会把本循环掀翻（#187）——万一
+        仍然逃出去，`_on_worker_done` 的通用续期会重建消费者。
+        """
         while True:
             try:
                 await self._loop.run_turn()
@@ -669,8 +780,9 @@ class WingAgent:
                 raise
             except Exception as e:
                 log.error(f"处理消息失败: {e}")
-                self._sink.error(f"处理消息失败：异常：{e}")
-                self._sink.done()
+                with self._sink.best_effort():
+                    self._sink.error(f"处理消息失败：异常：{e}")
+                    self._sink.done()
 
     def _bind_tools(self, tools: list[Tool]) -> dict[str, Tool]:
         from wing.tool_registry import ToolRef

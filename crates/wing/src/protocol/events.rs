@@ -98,6 +98,10 @@ impl SessionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub model_name: String,
+    /// 模型的**引用词**（∈ 配置声明的 id 空间）；不可用时缺席（serde → None）。
+    /// 前端的选择态 / 匹配以它为准（展示回落 `model_display_name`‖`model_name`）。
+    #[serde(default)]
+    pub model_id: Option<String>,
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,
@@ -110,8 +114,8 @@ pub struct AgentInfo {
     #[serde(default)]
     pub provider_name: Option<String>,
     /// Display label declared for `model_name` (gateway config); absent on old
-    /// gateways / undeclared models (serde → None). Display-only — identity
-    /// stays `model_name` + `provider_name`.
+    /// gateways / undeclared models (serde → None). Display-only — identity is
+    /// `model_id`.
     #[serde(default)]
     pub model_display_name: Option<String>,
 }
@@ -526,6 +530,13 @@ pub enum WingEvent {
     #[serde(rename = "session_state_changed")]
     SessionStateChanged {
         model: Option<String>,
+        /// 模型的**引用词**（∈ 配置声明的 id 空间）；不可用时省略 / null。
+        /// 前端的选择态 / 匹配以它为准（展示可回落 `model`）。
+        #[serde(default)]
+        model_id: Option<String>,
+        /// 当前模型的 provider 名（运行期事实；与 `model` / `model_id` 同刻下发）。
+        #[serde(default)]
+        provider_name: Option<String>,
         /// Declared display label for `model`; same clock as `model` (absent
         /// when the model is unchanged / has no declaration).
         #[serde(default)]
@@ -535,6 +546,32 @@ pub enum WingEvent {
         yolo: Option<bool>,
         title: Option<String>,
         agent: Option<String>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// 配置变更广播（网关的 `SettingsChangedEvent`，design.md §7.6）。
+    ///
+    /// `target = EventTarget(scope="global")`：所有客户端都收得到，包括**另一个客户端**
+    /// 的保存。面板据此做指纹比对（相同 = 自己刚保存的那一次，不警告；不同 = 别人改了，
+    /// 顶部横幅「按 R 重新载入」），不做"是不是我触发的"的猜测。
+    ///
+    /// 旧网关不发这个事件 → `#[serde(default)]` 让每个字段都可缺席（本变体只在
+    /// 事件真的到达时才被构造）。
+    #[serde(rename = "settings_changed")]
+    SettingsChanged {
+        /// 变更的规范路径列表。
+        #[serde(default)]
+        changed: Vec<String>,
+        /// 其中生效域为 `restart` 的路径（回执据此提示「Ctrl+R 立即重启」）。
+        #[serde(default)]
+        restart_required: Vec<String>,
+        /// 这次保存是否让网关从 setup mode 就地转入正常模式。
+        #[serde(default)]
+        setup_mode_exited: bool,
+        /// 落盘后的新指纹（乐观并发的凭据）。
+        #[serde(default)]
+        fingerprint: String,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -725,6 +762,7 @@ impl WingEvent {
             Self::DiffContent { .. } => "diff_content",
             Self::SyncSession { .. } => "sync_session",
             Self::SessionStateChanged { .. } => "session_state_changed",
+            Self::SettingsChanged { .. } => "settings_changed",
             Self::Interrupted { .. } => "interrupted",
             Self::CompactDone { .. } => "compact_done",
             Self::ContextStats { .. } => "context_stats",
@@ -756,6 +794,7 @@ impl WingEvent {
             | Self::DiffContent { meta, .. }
             | Self::SyncSession { meta, .. }
             | Self::SessionStateChanged { meta, .. }
+            | Self::SettingsChanged { meta, .. }
             | Self::Interrupted { meta, .. }
             | Self::CompactDone { meta, .. }
             | Self::ContextStats { meta, .. }
@@ -878,6 +917,8 @@ mod tests {
         match event {
             WingEvent::SessionStateChanged {
                 model,
+                model_id,
+                provider_name,
                 model_display_name,
                 thinking,
                 yolo,
@@ -886,6 +927,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(model, Some("gpt-4o".to_string()));
+                assert_eq!(
+                    model_id, None,
+                    "old gateway payload (no field) must deserialize to None"
+                );
+                assert_eq!(provider_name, None);
                 assert_eq!(
                     model_display_name, None,
                     "old gateway payload (no field) must deserialize to None"
@@ -900,11 +946,14 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_session_state_changed_with_display_name() {
-        // New gateway: the display label travels with the model value.
+    fn deserialize_session_state_changed_with_model_identity() {
+        // New gateway: the reference word, the provider fact and the display
+        // label all travel with the model value.
         let json = r#"{
             "type": "session_state_changed",
             "model": "dfmodel-2026",
+            "model_id": "ds-flash",
+            "provider_name": "qoder",
             "model_display_name": "DeepSeek-Flash",
             "created_at": "2025-01-01T00:00:00",
             "session_id": "abc123",
@@ -914,10 +963,14 @@ mod tests {
         match event {
             WingEvent::SessionStateChanged {
                 model,
+                model_id,
+                provider_name,
                 model_display_name,
                 ..
             } => {
                 assert_eq!(model.as_deref(), Some("dfmodel-2026"));
+                assert_eq!(model_id.as_deref(), Some("ds-flash"));
+                assert_eq!(provider_name.as_deref(), Some("qoder"));
                 assert_eq!(model_display_name.as_deref(), Some("DeepSeek-Flash"));
             }
             _ => panic!("expected SessionStateChanged"),
@@ -1043,6 +1096,7 @@ mod tests {
         // serialize → deserialize round trip.
         let info = AgentInfo {
             model_name: "gpt-4".into(),
+            model_id: None,
             system_prompt: None,
             tools: vec![],
             skills: vec![],
@@ -1840,5 +1894,39 @@ mod tests {
         // No discriminator at all.
         assert!(WingEvent::from_history_value(&serde_json::json!({})).is_err());
         assert!(WingEvent::from_history_value(&serde_json::json!({"type": 5})).is_err());
+    }
+
+    /// `settings_changed`（design §7.6）：全字段解码，且**缺字段也能解码**
+    /// （旧网关 / 全局事件不带 session_id）——面板只按指纹比对。
+    #[test]
+    fn deserialize_settings_changed_event() {
+        let json = r#"{
+            "type": "settings_changed",
+            "changed": ["gateway.port", "colors.accent"],
+            "restart_required": ["gateway.port"],
+            "setup_mode_exited": true,
+            "fingerprint": "fnv1a64:0123456789abcdef",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-settings"
+        }"#;
+        let event: WingEvent = serde_json::from_str(json).unwrap();
+        match &event {
+            WingEvent::SettingsChanged {
+                changed,
+                restart_required,
+                setup_mode_exited,
+                fingerprint,
+                ..
+            } => {
+                assert_eq!(changed, &["gateway.port", "colors.accent"]);
+                assert_eq!(restart_required, &["gateway.port"]);
+                assert!(setup_mode_exited);
+                assert_eq!(fingerprint, "fnv1a64:0123456789abcdef");
+            }
+            other => panic!("expected SettingsChanged, got {other:?}"),
+        }
+        assert_eq!(event.event_type(), "settings_changed");
+        // 全局事件：没有 session_id —— 事件路由不按会话过滤它（`session_id()` 为 None）。
+        assert_eq!(event.session_id(), None);
     }
 }

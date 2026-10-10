@@ -10,6 +10,8 @@ because ToolExecutor filters model args by the tool's signature.
 from __future__ import annotations
 
 import inspect
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -133,3 +135,56 @@ class TestEditErrors:
         p.write_text("abc")
         with pytest.raises(ToolError, match="old_string cannot be empty"):
             await edit_file(str(p), "", "x", ctx=_StubCtx())  # type: ignore[arg-type]
+
+
+class TestEditDurability:
+    """Edit 走共享原子写原语（tmp + fsync + replace）：覆盖保留权限位。"""
+
+    @pytest.mark.asyncio
+    async def test_edit_preserves_mode(self, tmp_path: Path):
+        p = tmp_path / "script.sh"
+        p.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+        p.chmod(0o755)
+        ctx = _StubCtx()
+
+        await edit_file(str(p), "old", "new", ctx=ctx)  # type: ignore[arg-type]
+
+        assert p.read_text() == "#!/bin/sh\necho new\n"
+        assert stat.S_IMODE(p.stat().st_mode) == 0o755
+
+
+class TestWriteTargetPolicy:
+    """Edit 与 Write 共用同一份写入目标政策（`tools/internal/write_target.py`）。"""
+
+    @pytest.mark.asyncio
+    async def test_edit_writes_through_symlink(self, tmp_path: Path):
+        """末段是符号链接：编辑真实目标，链接保留（与 Write 一致）。"""
+        real = tmp_path / "real.txt"
+        real.write_text("old value\n", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+        ctx = _StubCtx()
+
+        await edit_file(str(link), "old value", "new value", ctx=ctx)  # type: ignore[arg-type]
+
+        assert link.is_symlink()
+        assert real.read_text(encoding="utf-8") == "new value\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses the target's read-only bit",
+    )
+    async def test_edit_refuses_readonly_target(self, tmp_path: Path):
+        """只读目标：拒绝编辑（与 Write 一致，不给"换个工具绕过"的口子）。"""
+        target = tmp_path / "ro.txt"
+        target.write_text("protected", encoding="utf-8")
+        target.chmod(0o444)
+        ctx = _StubCtx()
+
+        with pytest.raises(ToolError, match="Permission denied"):
+            await edit_file(str(target), "protected", "hacked", ctx=ctx)  # type: ignore[arg-type]
+
+        assert target.read_text(encoding="utf-8") == "protected"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o444
+        assert ctx.events == []  # 失败不 emit diff 事件

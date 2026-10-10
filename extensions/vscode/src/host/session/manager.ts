@@ -16,6 +16,7 @@ import {
   FRONTEND_COMMANDS,
   MAX_PATCH_TEXT_CHUNK,
   matchCommand,
+  modelLabel,
   normalizeCommandName,
   unhandledVariant,
 } from '../../shared';
@@ -290,7 +291,9 @@ export class SessionManager {
       case 'setModel':
         await this.updateSession(
           intent.sessionId,
-          { model: intent.model, provider: intent.provider },
+          // The reference word is the whole request; the display triple and the
+          // provider come back with the gateway's `session_state_changed`.
+          { model_id: intent.modelId },
           { closeModelPicker: true },
         );
         return;
@@ -515,8 +518,7 @@ export class SessionManager {
   private async updateSession(
     sessionId: SessionId,
     fields: {
-      model?: string;
-      provider?: string;
+      model_id?: string;
       thinking?: boolean;
       reasoning_effort?: string;
       yolo?: boolean;
@@ -538,18 +540,14 @@ export class SessionManager {
       this.reportFailure('Update failed', error);
       return;
     }
-    // Optimistic local update (TUI `runner.rs` does the same): the gateway's
-    // `session_state_changed` carries no provider, so a cross-provider model
-    // switch would otherwise leave `meta.provider` stale until the next sync —
-    // and the /model picker's `selected` row depends on it.
+    // Optimistic local update (TUI `runner.rs` does the same) for the fields
+    // whose value the intent already carries. The **model** quadruple is not
+    // written here: its identity is a reference word whose call name / display
+    // name / provider only the gateway knows, and it travels as one fact through
+    // `session_state_changed` (which now carries all four) — so the chip and the
+    // picker can never disagree about which model is current.
     const record = managed.record;
     const meta = { ...record.meta };
-    if (fields.model !== undefined) {
-      meta.model = fields.model;
-    }
-    if (fields.provider !== undefined) {
-      meta.provider = fields.provider;
-    }
     if (fields.thinking !== undefined) {
       meta.thinking = fields.thinking;
     }
@@ -631,13 +629,15 @@ export class SessionManager {
     }
     try {
       const response = await http.listModels();
-      const model = managed.record.meta.model;
-      const provider = managed.record.meta.provider;
+      const currentId = managed.record.meta.modelId;
       const rows = response.providers.flatMap((group) =>
-        group.models.map((name) => ({
+        group.models.map((detail) => ({
+          id: detail.id,
+          label: modelLabel(detail.display_name ?? '', detail.name),
           provider: group.provider,
-          model: name,
-          selected: name === model && group.provider === provider,
+          // Identity is the id (`''` — old gateway — marks nothing; guessing
+          // from the call name would be a resolve, which no longer exists).
+          selected: detail.id === currentId,
         })),
       );
       managed.record.panels = {
@@ -1036,11 +1036,11 @@ export class SessionManager {
   /**
    * Pull the runtime knobs the replay does not carry.
    *
-   * `sync_session.agent` has model/provider/tools — but **not** `yolo`, `thinking`
-   * or `reasoning_effort`. The TUI fetches `GET /api/session/info` on every
-   * session switch for exactly this reason; without it a resumed session shows
-   * "yolo off" while the backend has it on. Failures stay quiet: the tab works,
-   * the knobs keep their last known value.
+   * `sync_session.agent` has the model quadruple/tools — but **not** `yolo`,
+   * `thinking` or `reasoning_effort`. The TUI fetches `GET /api/session/info` on
+   * every session switch for exactly this reason; without it a resumed session
+   * shows "yolo off" while the backend has it on. Failures stay quiet: the tab
+   * works, the knobs keep their last known value.
    */
   private async refreshRuntimeState(managed: ManagedSession): Promise<void> {
     const http = this.deps.http();
@@ -1059,10 +1059,17 @@ export class SessionManager {
         thinking: info.thinking,
         reasoningEffort: info.reasoning_effort ?? '',
         yolo: info.yolo,
-        // Fill, never clobber: a model switch that landed while this response was
-        // in flight is newer than the response (the gateway echoes it through
-        // `session_state_changed` and the optimistic update already applied).
+        // Fill, never clobber: a model switch that landed while this response
+        // was in flight is newer than the response (the gateway echoes the
+        // whole quadruple through `session_state_changed`). Each field only
+        // fills its own blank, so a partially known model still completes.
         model: record.meta.model === '' ? info.model : record.meta.model,
+        modelId: record.meta.modelId === '' ? (info.model_id ?? '') : record.meta.modelId,
+        modelDisplayName:
+          record.meta.modelDisplayName === ''
+            ? (info.model_display_name ?? '')
+            : record.meta.modelDisplayName,
+        provider: record.meta.provider === '' ? (info.provider_name ?? '') : record.meta.provider,
         workspace: info.workdir ?? record.meta.workspace,
       };
       record.dirtyState = true;
@@ -1490,7 +1497,7 @@ export class SessionManager {
  * `tool_call` cells are deliberately *not* covered here: their `argsText` is
  * capped at the source (`reducer.ts` `TOOL_ARGS_MAX_CHARS`) because it is a
  * streaming preview — re-chunking it would still send every byte, which is the
- * traffic the cap exists to remove (review #109 [P1-2]).
+ * traffic the cap exists to remove.
  */
 function sliceTextOp(op: CellPatch): CellPatch[] {
   switch (op.op) {

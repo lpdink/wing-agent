@@ -340,7 +340,7 @@ fn missing_files_degrade_to_a_reason_instead_of_an_error() {
 /// lets through; the `image` crate's feature set is what can be *read*. When the
 /// two drift apart the pipeline does not fail loudly — a `.gif` simply probes as
 /// `NotAnImage` and the user gets a link, with nothing saying why (that is
-/// exactly the review's S2). This test pins both halves together, end to end:
+/// silently). This test pins both halves together, end to end:
 /// write a real file of each claimed format, probe it, and encode it for the
 /// terminal — the whole path the drawing layer takes.
 #[test]

@@ -77,3 +77,15 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 url = "2"
+
+# ── 开发构建磁盘优化 ───────────────────────────────────────────
+# 多 worktree + sccache 的工作流下（实测，2026-10）：
+# - dev 中间产物（.o / .rlib）里 DWARF 占 80%+，增量目录单仓可达 4G；
+# - 增量编译会使本地 crate 的编译无法进 sccache（non-cacheable:
+#   incremental），跨 worktree 的缓存复用被掐断。
+# 因此关闭 debuginfo 与增量编译；需要同树小步快速迭代时，
+# 单次 CARGO_INCREMENTAL=1 即可临时覆盖。CI 不受影响
+# （GitHub Actions 默认 CARGO_INCREMENTAL=0）。
+[profile.dev]
+debug = false
+incremental = false

@@ -23,7 +23,7 @@
 //! |------|------|
 //! | [`agent`] | ACP handler 注册（initialize / session/new / session/prompt / session/cancel / list / load / resume / close / set_config_option） |
 //! | [`ask`] | Ask 事件 → ACP 交互面（permission / elicitation / 回退，答案格式契约） |
-//! | [`model`] | 模型 config option（值域 / 分组 / currentValue）+ 热切换 + 外部变更中继 |
+//! | [`model`] | 模型 config option（值 = model_id / 分组 / currentValue）+ 热切换 + 外部变更中继 |
 //! | [`session`] | `SessionHub`：会话表、WS 事件泵与分流、出站队列、prompt 串行化 |
 //! | [`translate`] | `WingEvent` → ACP `session/update` 的映射（纯函数） |
 //!
@@ -82,21 +82,28 @@ async fn run_acp_inner(args: AcpArgs) -> Result<ExitCode> {
         .api_key
         .filter(|k| !k.is_empty());
 
-    // 3. WS 连接：拿 client_id；连接本体移交给 hub 的事件泵（见 session.rs 的
+    // 3. HTTP client。构造提前到 WS 之前：预检必须先于握手（setup mode 下网关
+    //    一律拒绝 WS，先连只会得到一句误导的"网关没起来"）。
+    let http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
+        .context("failed to create HTTP client")?;
+
+    // 4. 配置预检（D27）：不可用 → problems 走 **stderr** + EX_CONFIG（78）。
+    //    stdout 此刻还没交给 ACP 传输，且这条路径只写 stderr —— 协议帧通道零污染。
+    if let Some(code) = crate::cmd::setup::preflight_or_report(&http, &http_base).await {
+        return Ok(code);
+    }
+
+    // 5. WS 连接：拿 client_id；连接本体移交给 hub 的事件泵（见 session.rs 的
     //    模块文档：WS 客户端不可 Clone，收/发共用一条连接）。
     let gateway = GatewayClient::connect(&ws_url, api_key.as_deref())
         .await
         .with_context(|| format!("failed to connect to gateway at {ws_url}"))?;
     let client_id = gateway.client_id().to_string();
 
-    // 4. HTTP client（建会话 / 订阅 / interrupt / 命令列表）。
-    let http = GatewayApiClient::new(http_base, api_key.as_deref())
-        .context("failed to create HTTP client")?;
-
-    // 5. hub：会话表 + 事件分流 + 出站队列（内部 spawn WS 事件泵）。
+    // 6. hub：会话表 + 事件分流 + 出站队列（内部 spawn WS 事件泵）。
     let hub = SessionHub::start(gateway, http, client_id);
 
-    // 6. ACP 服务循环（stdout 归它）。
+    // 7. ACP 服务循环（stdout 归它）。
     agent::serve(hub, args).await.context("ACP serve failed")?;
     Ok(ExitCode::SUCCESS)
 }

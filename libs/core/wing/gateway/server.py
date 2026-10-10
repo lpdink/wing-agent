@@ -17,21 +17,37 @@ import json
 import socket
 import sys
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import WebSocket
 import uvicorn
 
 from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
-from wing.common.logger import log
-from wing.config import AuthConfig, get_config, load_config
+from wing.common.logger import log, setup_logger
+from wing.commands import register_prompt_commands
+from wing.config import (
+    AuthConfig,
+    Config,
+    ConfigProblem,
+    ProblemKind,
+    load_config,
+)
+from wing.config.boot import BootFailure, BootResult, boot_config
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
-from wing.runtime import WingRuntime
+from wing.request_context import get_request_context
+from wing.runtime import WingRuntime, WriteEffectResult
+from wing.system import ReloadResult, ReloadResultItem
 
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
 from .remote_tools import RemoteToolManager
+from .setup_guard import SetupModeError
+
+#: 默认监听地址（与 ``GatewayConfig.host`` 的声明默认值同源）。
+#: 配置不可用时 cli 回落它——两边读同一份文件、同一个默认（总设计 §8.6）。
+DEFAULT_HOST = "127.0.0.1"
 
 DEFAULT_PORT = 32523
 
@@ -58,35 +74,272 @@ def _check_port_available(host: str, port: int) -> bool:
             return True
 
 
+#: setup mode 替身（``_SetupRuntime``）唯一放行的公开入口：保存事务本身。
+#: 其余一切公开属性（含继承自 ``WingRuntime`` 的方法）都抛 ``SetupModeError``。
+_SETUP_RUNTIME_ALLOWED: frozenset[str] = frozenset(
+    {"apply_settings", "post_write_effect"}
+)
+
+
+class _SetupRuntime(WingRuntime):
+    """setup mode 的 runtime 替身：**只服务保存事务**（见 :attr:`GatewayServer.runtime`）。
+
+    为什么需要它：真 ``WingRuntime`` 在 setup mode 下构造不出来（``__init__`` 第一个动作
+    就是 ``get_config()``），而 ``POST /api/settings/set`` **必须**能用——它是唯一的修复
+    路径，且它的实现体是 ``WingRuntime.apply_settings``（唯一写盘路径）。这个替身因此
+    不是「第二份事务」，而是**同一个事务 + 不同的第 ⑦ 步效应**
+    （:meth:`WingRuntime.post_write_effect`）：正常模式热重载，这里转入正常模式（§8.5）。
+
+    其余一切访问与「runtime 在 setup mode 不可用」同义：守门中间件是业务面的一道闸
+    （白名单之外一律 503 ``setup_mode``），替身把**所有**非事务入口（含继承来的方法，
+    如 ``list_models`` / ``list_sessions``）都翻成 :class:`SetupModeError`——两道闸
+    覆盖同一批路径。
+    """
+
+    def __init__(self, server: GatewayServer) -> None:
+        # 不调 super().__init__()：它读 config、建 SessionManager / reaper，setup mode 做不到。
+        self._server = server
+
+    async def post_write_effect(self) -> WriteEffectResult:
+        """⑦：转入正常模式（而不是热重载）——``setup_mode_exited`` 因此为真。"""
+        reload_result = self._server._enter_operational()
+        return WriteEffectResult(
+            reload=reload_result,
+            setup_mode_exited=not self._server.in_setup_mode,
+        )
+
+    def __getattribute__(self, name: str) -> Any:
+        """setup mode 下 **只有保存事务可达**（``__getattr__`` 只拦"基类没有"
+        的属性，`list_models` 这类真实方法会绕过去、以 ``ValueError`` 露出）。
+
+        这里用 ``__getattribute__`` 拦**所有**公开属性：白名单只有
+        ``apply_settings`` / ``post_write_effect`` 两个入口，其余（含继承来的方法）
+        一律 :class:`SetupModeError`。下划线开头的名字（``_server`` / 内省的 dunder）
+        放行——它们不是业务入口，拦掉只会让 ``isinstance`` / ``repr`` / 调试工具出怪。
+        """
+        if not name.startswith("_") and name not in _SETUP_RUNTIME_ALLOWED:
+            raise SetupModeError(
+                object.__getattribute__(self, "_server").setup_problems
+            )
+        return object.__getattribute__(self, name)
+
+
 class GatewayServer:
     """Gateway 服务器——生命周期管理器。
 
     持有 runtime、client 映射、FastAPI app。
     负责 start/stop 和 EventBus 事件路由。
+
+    **setup mode（04）**：配置不可用时降级启动——``runtime`` 是只服务保存事务的替身，
+    守门中间件（``setup_guard.py``）只放行设置端点，其余一律 503 ``setup_mode``；
+    保存出合法配置后由 ``_enter_operational()`` **就地**转入正常模式（不重启进程）。
     """
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
+        host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
+        *,
+        boot: BootResult | None = None,
     ) -> None:
+        """
+        Args:
+            boot: 已经做过的启动读取（``cli.py`` 传进来避免二次读盘，且
+                ``boot_reason`` 与横幅口径一致）。``None`` ⇒ 自己 ``boot_config()``。
+        """
         self.host = host
         self.port = port
-        self.runtime = WingRuntime()
+        self._boot = boot if boot is not None else boot_config()
+        # setup mode 的替身：``runtime`` 因此恒非 Optional——配置不可用不是
+        # 「有时没有 runtime」，而是「除修复路径外一律 503」（守门 + 替身共同保证）。
+        self._runtime: WingRuntime = _SetupRuntime(self)
+        self._in_setup_mode = True
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
         self._remote_tools = RemoteToolManager()
-        # 后台周期任务宿主（首个 job：空闲会话逐出）。interval 在启动时
-        # 读取一次——config 热重载不改变已注册 job 的间隔；TTL 每个 sweep
-        # 都从当前 config 读，热重载即时生效。
+        # 后台周期任务宿主（首个 job：空闲会话逐出）。interval 在**进入正常模式**时
+        # 读取一次——config 热重载不改变已注册 job 的间隔；TTL 每个 sweep 都从当前
+        # config 读，热重载即时生效。setup mode 下没有 reaper 可 attach，job 也不注册。
         self._background = BackgroundScheduler()
+        self._background_requested = False
+        self._started_at = datetime.now(timezone.utc)
+        if self._boot.ok:
+            result = self._enter_operational(config=self._boot.config)
+            if not result.ok:
+                # AD14：启动路径**必须消费**这个结果——否则「文件合法但运行时装不上」
+                # 会静默降级：boot_reason=None、problems 为空、503 说「共 0 条问题」，
+                # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
+                self._record_startup_failure(result)
+        self._app = create_app(self)
+
+    # ============================================================
+    # 运行模式
+    # ============================================================
+
+    @property
+    def runtime(self) -> WingRuntime:
+        """当前 runtime（**非 Optional**：配置不可用不是「有时没有 runtime」）。
+
+        正常模式：真 ``WingRuntime``。setup mode：:class:`_SetupRuntime` 替身——
+        只有保存事务（``apply_settings``）可达，其余一切访问抛 ``SetupModeError``
+        （守门中间件保证那些路径不可达，类型检查也看不到 Optional）。
+        """
+        return self._runtime
+
+    @runtime.setter
+    def runtime(self, value: WingRuntime) -> None:
+        """注入接缝：既有测试用 ``server.runtime = mock`` 换掉真实例（行为不变）。
+
+        不翻转模式标志——替身与 :attr:`in_setup_mode` 的一致性由
+        :meth:`_enter_operational` 的尾部原子翻转保证。
+        """
+        self._runtime = value
+
+    @property
+    def in_setup_mode(self) -> bool:
+        """是否处于 setup mode（04）：只服务设置端点，其余一律 503。"""
+        return self._in_setup_mode
+
+    @property
+    def setup_problems(self) -> list[ConfigProblem]:
+        """启动时配置失败的原因（``boot_config()`` 的产物；setup mode 下即 503 的文案素材）。
+
+        是**启动时的快照**，不每次读盘：「现在文件里还有什么问题」由
+        ``GET /api/settings/status`` 现读现报——两者职责不同。
+        """
+        return list(self._boot.problems)
+
+    @property
+    def boot_reason(self) -> BootFailure | None:
+        """``boot_config()`` 的结局分类（``ok=True`` 时为 ``None``）。"""
+        return self._boot.reason
+
+    def _enter_operational(self, config: Config | None = None) -> ReloadResult:
+        """把网关推进正常模式（六步，**幂等**）：① 配置 ② 日志级别 ③ prompt commands
+        ④ 建 runtime ⑤ 逐出 job + 后台任务 ⑥ auth 锁死警告。
+
+        任一步失败 ⇒ **停在 setup mode**（``_runtime`` 与 ``_in_setup_mode`` 都不翻转），
+        返回 ``ReloadResult(ok=False, items=[…])`` 如实报明细；文件**不回滚**——它是
+        合法配置（保存事务已校验过），下次保存或重启再试。
+
+        Args:
+            config: 已校验的配置。``None`` ⇒ ``load_config(reload=True)`` 现读磁盘
+                （保存事务刚写完盘，此处必然成功）。
+        """
+        if not self._in_setup_mode:
+            return ReloadResult(ok=True, items=[])  # 幂等：已在正常模式
+
+        items: list[ReloadResultItem] = []
+
+        # ① 配置（boot 成功时由调用方给，避免重复读盘）。
+        try:
+            if config is None:
+                config = load_config(reload=True)
+        except Exception as e:
+            items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
+            log.error(f"setup mode: cannot enter operational mode — {e}")
+            return ReloadResult(ok=False, items=items)
+        items.append(ReloadResultItem(name="config.yaml", ok=True))
+
+        # ② 日志级别（config 已进单例；此后所有日志按新级别走）。
+        # context= 必须重传：setup_logger 会 handlers.clear() 后重挂，不传就等于
+        # 把 #179 的 session / request 关联段抹掉（cli.py 的正常启动路径同样传它）。
+        try:
+            setup_logger(level=config.log.level, context=get_request_context)
+        except Exception as e:
+            items.append(ReloadResultItem(name="log level", ok=False, detail=str(e)))
+            return ReloadResult(ok=False, items=items)
+        items.append(ReloadResultItem(name="log level", ok=True))
+
+        # ③ prompt 命令（配置里的 commands.paths）。
+        try:
+            register_prompt_commands(config.commands.paths)
+        except Exception as e:
+            items.append(
+                ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
+            )
+            return ReloadResult(ok=False, items=items)
+        items.append(ReloadResultItem(name="prompt commands", ok=True))
+
+        # ④ runtime（hooks 随之加载；providers 池按需懒建）。
+        try:
+            runtime = WingRuntime()
+        except Exception as e:
+            items.append(ReloadResultItem(name="runtime", ok=False, detail=str(e)))
+            log.error(f"setup mode: cannot enter operational mode — {e}")
+            return ReloadResult(ok=False, items=items)
+        items.append(ReloadResultItem(name="runtime", ok=True))
+
+        # ⑤ 逐出 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
+        try:
+            self._install_eviction_job(config, runtime)
+            if self._background_requested:
+                runtime.reaper.attach()
+                self._background.start()
+        except Exception as e:
+            items.append(
+                ReloadResultItem(name="background jobs", ok=False, detail=str(e))
+            )
+            return ReloadResult(ok=False, items=items)
+        items.append(ReloadResultItem(name="background jobs", ok=True))
+
+        # ⑥ auth 锁死警告（读**新**配置——auth_config 在 setup mode 下是安全默认值）。
+        detail = self._warn_auth_lockout(config.gateway.auth)
+        items.append(ReloadResultItem(name="auth", ok=True, detail=detail))
+
+        # 全部成功：同一个同步块里原子翻转（请求处理之间看不到中间态）。
+        self._runtime = runtime
+        self._in_setup_mode = False
+        log.info(
+            "setup mode exited: gateway is operational (config reloaded from disk)"
+        )
+        return ReloadResult(ok=True, items=items)
+
+    def _record_startup_failure(self, result: ReloadResult) -> None:
+        """启动路径转入正常模式失败：**不静默降级**（AD14）。
+
+        做两件事：① ERROR 日志（含逐项明细）；② 把失败写成一条 ``path=None`` 的
+        boot 级 problem——于是 ``boot_reason`` 非 None、``setup_problems`` 非空、
+        503 detail 不再说「共 0 条问题」，而 ``status.valid`` 因
+        ``valid == (not in_setup_mode and 无 problem)`` 一致地为 ``false``。
+        """
+        detail = "; ".join(
+            f"{item.name}: {item.detail or 'failed'}"
+            for item in result.items
+            if not item.ok
+        )
+        log.error(f"setup mode: cannot enter operational mode at startup — {detail}")
+        self._boot = BootResult(
+            ok=False,
+            config=None,
+            problems=[
+                ConfigProblem(
+                    path=None,
+                    kind=ProblemKind.INVALID_VALUE,
+                    message=f"配置合法但运行时装配失败：{detail}",
+                    hint="检查运行环境（日志目录写权限 / hooks / store 路径）后重启；"
+                    "配置文件本身没有内容问题",
+                )
+            ],
+            reason=BootFailure.INVALID,
+            path=self._boot.path,
+            endpoint=self._boot.endpoint,
+        )
+
+    def _install_eviction_job(self, config: Config, runtime: WingRuntime) -> None:
+        """注册空闲会话逐出 job（幂等：重复调用不会留下两个 job）。
+
+        先摘除同名 job 再注册：转入失败后的重试会拿到一个**新的** runtime
+        （同一份配置、新的 SessionManager），旧 job 若留着会把逐出器绑在旧
+        manager 上——remove + add 是这里的 replace 语义（名字相同，
+        ``jobs`` 里始终只有一个）。
+        """
+        self._background.remove_job("session-eviction")
         self._background.add_job(
             "session-eviction",
-            get_config().sessions.eviction.sweep_interval_seconds,
-            self.runtime.reap_idle_sessions,
+            config.sessions.eviction.sweep_interval_seconds,
+            runtime.reap_idle_sessions,
         )
-        self._app = create_app(self)
-        self._started_at = datetime.now(timezone.utc)
 
     @property
     def uptime(self) -> int:
@@ -95,18 +348,32 @@ class GatewayServer:
 
     @property
     def auth_config(self) -> AuthConfig:
-        """当前鉴权配置（每次读取最新单例，热重载后立即生效）。"""
+        """当前鉴权配置（每次读取最新单例，热重载后立即生效）。
+
+        setup mode：配置读不出来 ⇒ 返回安全默认值（auth 关闭、无 key）。真正的
+        来源策略不在这里——守门中间件与 ``AuthMiddleware`` 的 loopback-only 才是
+        （§8.4）；这里只保证「任何时序下读 auth 配置都不炸」。
+        """
+        if self._in_setup_mode:
+            return AuthConfig()
         return load_config().gateway.auth
 
-    def _warn_auth_lockout(self) -> None:
-        """启动时检查 auth 配置，空 keys 锁死时发出警告。"""
-        auth = self.auth_config
+    def _warn_auth_lockout(self, auth: AuthConfig | None = None) -> str | None:
+        """检查 auth 配置，空 keys 锁死时发出警告；返回告警文案（未锁死 = ``None``）。
+
+        ``auth`` 给定时用它——``_enter_operational()`` 的 ⑥ 要读**新**配置，而
+        ``auth_config`` 在 setup mode 下返回的是安全默认值。
+        """
+        auth = auth if auth is not None else self.auth_config
         if auth.enabled and not auth.keys:
-            log.warning(
+            message = (
                 "gateway.auth.enabled=true but keys list is empty — "
                 "ALL requests (including /api/system/reload) will be "
                 "rejected with 401. Edit config.yaml and restart to fix."
             )
+            log.warning(message)
+            return message
+        return None
 
     @property
     def clients(self) -> dict[str, WebSocket]:
@@ -124,14 +391,22 @@ class GatewayServer:
         return self._remote_tools
 
     def start_background(self) -> None:
-        """启动后台周期任务（gateway lifespan startup 调用）。"""
+        """启动后台周期任务（gateway lifespan startup 调用）。
+
+        setup mode：此刻没有 reaper 可 attach —— 记下「lifespan 已跑过」的意图，
+        转入正常模式时在 ``_enter_operational()`` 的 ⑤ 补上（幂等）。
+        """
+        self._background_requested = True
+        if self._in_setup_mode:
+            return
         self.runtime.reaper.attach()
         self._background.start()
 
     async def stop_background(self) -> None:
-        """停止后台周期任务（gateway lifespan shutdown 调用）。"""
+        """停止后台周期任务（gateway lifespan shutdown 调用）；setup mode 下无 reaper 可 detach。"""
         await self._background.stop()
-        self.runtime.reaper.detach()
+        if not self._in_setup_mode:
+            self.runtime.reaper.detach()
 
     def start(self) -> None:
         """启动服务器（阻塞）。"""

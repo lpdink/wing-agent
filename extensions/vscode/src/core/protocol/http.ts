@@ -85,8 +85,12 @@ export interface ToolInfo {
 
 /** `protocol.py::AgentOverride`. `null` means "keep the template's value". */
 export interface AgentOverride {
-  readonly model: string | null;
-  readonly provider: string | null;
+  /**
+   * The model reference word (`providers[].models[].id`); the legacy
+   * `model` / `provider` fields were removed from the wire — a request carrying
+   * them has those fields **silently ignored** by the gateway.
+   */
+  readonly model_id: string | null;
   readonly system_prompt: string | null;
   readonly append_system_prompt: string | null;
   readonly tools: readonly string[] | null;
@@ -153,8 +157,12 @@ export interface RewindRequest {
 /** `protocol.py::UpdateSessionRequest` — every field optional, at least one required. */
 export interface UpdateSessionRequest {
   readonly session_id: string;
-  readonly model: string | null;
-  readonly provider: string | null;
+  /**
+   * Switch the session model by reference word (`providers[].models[].id`); an
+   * unknown id is a 400. The legacy `model` / `provider` pair is gone from the
+   * wire — sending it is silently ignored (never a 400, never an effect).
+   */
+  readonly model_id: string | null;
   readonly agent: string | null;
   readonly title: string | null;
   readonly thinking: boolean | null;
@@ -242,7 +250,14 @@ export interface SessionGetResponse {
 
 /** `protocol.py::SessionInfoResponse` — `GET /api/session/info`. */
 export interface SessionInfoResponse {
+  /** The call name actually sent upstream (display fallback material). */
   readonly model: string;
+  /** The model reference word (`null` when unknown — old gateway / gone id). */
+  readonly model_id: string | null;
+  /** The runtime fact `model` is carried by (`null` when unknown). */
+  readonly provider_name: string | null;
+  /** Declared display name (`null` when undeclared — fall back to `model`). */
+  readonly model_display_name: string | null;
   readonly api_url: string;
   readonly tools: readonly string[];
   readonly total_tokens: number;
@@ -294,10 +309,31 @@ export interface CommandsResponse {
   readonly commands: readonly CommandInfo[];
 }
 
-/** `protocol.py::ProviderModels`. */
+/** `protocol.py::ModelCapabilities` — declared capabilities of one model. */
+export interface ModelCapabilities {
+  /** Accepts image input (the only capability so far; undeclared = false). */
+  readonly vision: boolean;
+}
+
+/**
+ * `protocol.py::ModelDetail` — one model declaration of the catalog.
+ *
+ * `id` is the globally unique reference word (`GET /api/models` is a contract
+ * other clients rely on), `name` the call name sent upstream, `display_name` the
+ * presentation fallback material, `capabilities` the declared abilities.
+ */
+export interface ModelDetail {
+  readonly id: string;
+  readonly name: string;
+  readonly display_name: string | null;
+  readonly description: string | null;
+  readonly capabilities: ModelCapabilities;
+}
+
+/** `protocol.py::ProviderModels` — one provider's models (declaration order). */
 export interface ProviderModels {
   readonly provider: string;
-  readonly models: readonly string[];
+  readonly models: readonly ModelDetail[];
 }
 
 /** `protocol.py::ModelsResponse`. */
@@ -456,6 +492,11 @@ export function decodeSessionInfoResponse(value: unknown): SessionInfoResponse |
   const stats = requireObject(value, 'context_stats');
   return {
     model: reqString(value, 'model'),
+    // Nullable on the wire (an old gateway omits them entirely; a gone id is
+    // reported as `null`) — decode as unknown instead of failing the response.
+    model_id: optString(value, 'model_id'),
+    provider_name: optString(value, 'provider_name'),
+    model_display_name: optString(value, 'model_display_name'),
     api_url: reqString(value, 'api_url'),
     tools: reqStringArray(value, 'tools'),
     total_tokens: reqNumber(value, 'total_tokens'),
@@ -540,11 +581,42 @@ export function decodeCommandsResponse(value: unknown): CommandsResponse | null 
   return { commands: decodeEach(readJsonArray(value, 'commands'), decodeCommandInfo) };
 }
 
+function decodeModelCapabilities(value: unknown): ModelCapabilities {
+  // Undeclared / malformed = all-false (the backend's default); an unknown key
+  // must not fail the whole catalog (forward compatibility).
+  return { vision: isJsonObject(value) ? booleanOr(value, 'vision', false) : false };
+}
+
+function decodeModelDetail(value: unknown): ModelDetail | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+  const id = optString(value, 'id');
+  const name = optString(value, 'name');
+  // Both are required in the backend model: an entry without them cannot be
+  // addressed or called. Skipping it beats fabricating an id.
+  if (id === null || name === null) {
+    return null;
+  }
+  return {
+    id,
+    name,
+    display_name: optString(value, 'display_name'),
+    description: optString(value, 'description'),
+    capabilities: decodeModelCapabilities(value['capabilities']),
+  };
+}
+
 function decodeProviderModels(value: unknown): ProviderModels | null {
   if (!isJsonObject(value)) {
     return null;
   }
-  return { provider: reqString(value, 'provider'), models: readStringArray(value, 'models') };
+  return {
+    provider: reqString(value, 'provider'),
+    // `models` is an object array since the model-id change; the old parallel
+    // `model_details` array is gone from the wire (never decoded here).
+    models: decodeEach(readJsonArray(value, 'models'), decodeModelDetail),
+  };
 }
 
 export function decodeModelsResponse(value: unknown): ModelsResponse | null {

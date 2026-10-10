@@ -231,7 +231,7 @@ export interface DiffRow {
  * shape; determinism matters more than the exact script among equals because
  * the payload is already windowed to a handful of lines.
  *
- * **Memory gate (review #109 [P1-1]).** Myers' trace costs `D × 2(N+M)` ints,
+ * **Memory gate.** Myers' trace costs `D × 2(N+M)` ints,
  * and the backend sends `Write` its *whole* `old_text` / `new_text`, so "replace
  * a 3000-line file" (n = m ≈ 3000, D ≈ 6000) held ~340 MB until this function
  * returned. Above {@link DIFF_MAX_EDIT_LINES} lines in the trimmed middle the
@@ -428,8 +428,8 @@ export interface DiffWindowModel {
  * Two independent limits guard the two costs, in this order: {@link lineDiff}'s
  * `DIFF_MAX_EDIT_LINES` gate bounds the *computation* (a whole-file rewrite is
  * rendered as one coarse block), and `maxRows` bounds the *payload* the cell
- * keeps. Neither implies the other — the review's point was that the row cap
- * alone ran after the expensive part.
+ * keeps. Neither implies the other — the row cap alone would run after the
+ * expensive part.
  */
 export function buildDiffWindow(input: {
   readonly oldText: string | null;
@@ -582,6 +582,10 @@ export function askAnswerValue(
     return parts.length === 0 ? null : parts.join(', ');
   }
   if (answer.selected.length > 0) {
+    // Option-first (TUI `answer_value`). The webview keeps `selected` and
+    // `text` mutually exclusive on single-select questions — last explicit
+    // choice wins (`webview/chat/askDraft.ts`); this branch is where the text
+    // would be silently dropped if that invariant broke (#113).
     return answer.selected[0] ?? null;
   }
   const custom = answer.text.trim();

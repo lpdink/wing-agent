@@ -91,13 +91,16 @@ class TestBasicMessageManagement:
         cm.add_message(Message(role="user", content="hello"))
 
         class _StubProvider(ModelProvider):
-            async def generate(
-                self, messages, model, tools=None, stream=False, accumulator=None
+            async def _generate(
+                self,
+                messages,
+                model,
+                tools=None,
+                stream=False,
+                accumulator=None,
+                options=None,
             ):
                 yield  # pragma: no cover
-
-            async def list_models(self):
-                return []
 
         prov = _StubProvider()
         llm_msgs = (
@@ -291,7 +294,7 @@ class TestRewind:
 
         rewind_entry = _read_history(tmp_dir / "test-session")[-1]
         assert rewind_entry["content"] == "[Compact] summary"
-        assert rewind_entry["unzip_last_uuid"] == msgs[1].uuid  # ty: ignore[invalid-argument-type]
+        assert rewind_entry["unzip_last_uuid"] == msgs[1].uuid
         assert [target["content"] for target in cm.get_branch_targets()] == [
             "old1",
             "[Compact] [Compact] summary",

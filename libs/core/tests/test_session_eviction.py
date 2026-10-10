@@ -164,7 +164,12 @@ class TestIdleEviction:
         await runtime.sm.wait_teardowns()
 
     @pytest.mark.asyncio
-    async def test_teardown_closes_worker_and_providers(self):
+    async def test_teardown_closes_worker_but_not_shared_providers(self):
+        """逐出只收 worker；provider 实例归共享池——不随会话关闭。
+
+        回归（#172 方向）：旧写法在逐出时 aclose 掉 client，其他会话与
+        重建路径可能还在引用同一实例；共享池后所有权唯一，逐出零关闭。
+        """
         from wing.provider.openai.provider import OpenAICompatProvider
 
         runtime = _runtime()
@@ -175,16 +180,16 @@ class TestIdleEviction:
         runtime.sm.evict(session.session_id, reason="test")
         await runtime.sm.wait_teardowns()
 
-        assert session.agent._providers == {}
-        assert provider._client.is_closed is True
+        assert provider._client.is_closed is False
         assert session.agent._worker.done() is True
 
     @pytest.mark.asyncio
-    async def test_teardown_closes_providers_even_if_shutdown_fails(self):
-        """shutdown 抛错（worker 带异常退出）也必须关掉 provider。
+    async def test_teardown_survives_shutdown_failure(self):
+        """shutdown 抛错（worker 带异常退出）也不能阻断逐出收口。
 
-        回归：``aclose`` 里 shutdown 与 aclose_providers 的顺序若无
-        try/finally，失败会跳过关闭，留下"已摘除但没拆干净"的 client。
+        回归：``Session.aclose`` 曾用 try/finally 保证 aclose_providers 不被
+        跳过；共享池后没有 client 要关，但「shutdown 失败也要完成摘除」
+        的收口语义仍然成立（逐出照常完成、池不受损）。
         """
         from wing.provider.openai.provider import OpenAICompatProvider
 
@@ -201,8 +206,9 @@ class TestIdleEviction:
         runtime.sm.evict(session.session_id, reason="test")
         await runtime.sm.wait_teardowns()
 
-        assert provider._client.is_closed is True
-        assert session.agent._providers == {}
+        # 逐出完成、共享实例未受影响
+        assert runtime.sm.get_session(session.session_id) is None
+        assert provider._client.is_closed is False
 
         # 清理：shutdown 被替身绕过了，worker 还挂着
         assert session.agent._worker.cancel() is True
@@ -325,15 +331,16 @@ class TestHydration:
         session = runtime.create_session()
         _seed(session, "alpha", "beta")
         sid = session.session_id
-        session._apply_model("gpt-4", "alt")  # 落盘模型记录（快照语义）
+        session._apply_model("qwen3-max")  # 落盘模型三元组（alt 声明的 id）
 
         runtime.sm.evict(sid, reason="test")
         await runtime.sm.wait_teardowns()
 
         reborn = runtime.sm.ensure_loaded(sid)
         assert reborn.session_id == sid
-        assert reborn.agent.model == "gpt-4"
+        assert reborn.agent.model == "qwen3-max"
         assert reborn.agent.model_provider.name == "alt"
+        assert reborn.model_id == "qwen3-max"
         assert [m.content for m in reborn.context_manager.get_context_window()] == [
             "alpha",
             "beta",

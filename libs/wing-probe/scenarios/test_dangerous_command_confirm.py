@@ -37,6 +37,7 @@ def _dangerous_turn(command: str) -> Turn:
     return Turn.of(tool_calls=[ToolCall("Bash", {"command": command})])
 
 
+@pytest.mark.probe_env(models=[CONFIRM_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_dangerous_command_ask_deny_then_allow(probe: Probe) -> None:

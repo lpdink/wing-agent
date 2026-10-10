@@ -1,14 +1,12 @@
 //! CachedCell — ChatCell wrapper with generation-based caching.
 //!
-//! Caches both rendered lines and width-aware height to avoid
-//! redundant `render_markdown()` calls during rendering.
+//! Caches both rendered lines and width-aware height to avoid redundant `render_markdown()` calls
+//! during rendering.
 //!
-//! Streaming cells (Thinking / AssistantMessage while a turn is active)
-//! carry a [`StreamingRender`] instead: deltas append through
-//! `append_stream` without invalidating the generation cache — only the
-//! active tail re-renders each sync, and heights come from the flat line
-//! count (O(1)). At turn end the stream is reconciled
-//! (`request_finalize` → the next render installs the full reference
+//! Streaming cells (Thinking / AssistantMessage while a turn is active) carry a [`StreamingRender`]
+//! instead: deltas append through `append_stream` without invalidating the generation cache — only
+//! the active tail re-renders each sync, and heights come from the flat line count (O(1)). At turn
+//! end the stream is reconciled (`request_finalize` → the next render installs the full reference
 //! render as the cached lines, flagged `prewrapped`).
 
 use std::path::PathBuf;
@@ -49,6 +47,11 @@ pub struct CachedCell {
     /// (width, generation) lifecycle of the lines: a width change or a
     /// re-render through `to_lines` clears it, so stale pre-wrapped lines
     /// are never blitted (they would truncate instead of wrapping).
+    ///
+    /// Only the streaming renderer sets it: a cell may wrap inside its own
+    /// `to_lines` (DiffView hangs over-wide rows under the gutter), but its
+    /// output is not the *uniformly* wrapped text the blit path expects, so
+    /// it renders through `Paragraph` like every other frozen cell.
     prewrapped_width: Option<u16>,
     /// Turn-end reconcile requested: the next `compute_lines` /
     /// `compute_height` installs the full reference render.
@@ -350,9 +353,10 @@ impl CachedCell {
     /// 行 / 高度缓存都要作废（presentation 不在缓存键里，见 `CellContext`）。
     pub(crate) fn invalidate(&mut self) {
         self.generation += 1;
-        // The lines will be rebuilt by `to_lines` (which never pre-wraps):
-        // drop the blit fast path here rather than relying on
-        // `update_heights` having refreshed it earlier in the same frame.
+        // The lines are rebuilt by `to_lines` — the generic path, which is
+        // not the blit path's uniformly pre-wrapped output (a cell may wrap
+        // inside it, e.g. DiffView): drop the flag here rather than relying
+        // on `update_heights` having refreshed it earlier in the same frame.
         self.prewrapped_width = None;
     }
 
@@ -693,7 +697,8 @@ impl CachedCell {
                 rows_exact,
                 image_rows,
             });
-            // Lines from `to_lines` are not pre-wrapped — never blit them.
+            // A cell's own `to_lines` output is not the streaming renderer's
+            // uniformly pre-wrapped text — never blit it.
             self.prewrapped_width = None;
         }
 

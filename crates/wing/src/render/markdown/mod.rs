@@ -871,16 +871,18 @@ mod tests {
     }
 
     #[test]
-    fn table_borderless() {
+    fn table_framed_grid() {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |";
         let lines = render_text(md);
         let text = join_lines(&lines);
-        // Borderless style uses a heavy header rule, not vertical bars.
+        // 重框三档：外框与表头带重、表体网格轻 —— 每档有自己的结点字形。
         assert!(
-            text.contains("━"),
-            "should use heavy header rule, got: {text}"
+            text.contains('┏') && text.contains('┓'),
+            "frame corners missing: {text}"
         );
-        assert!(!text.contains("│"), "should be borderless, got: {text}");
+        assert!(text.contains('╇'), "heavy header separator: {text}");
+        assert!(text.contains('│'), "light body divider: {text}");
+        assert!(text.contains('┷'), "bottom junctions: {text}");
         assert!(text.contains("A"), "got: {text}");
         assert!(text.contains("1"), "got: {text}");
     }
@@ -893,6 +895,38 @@ mod tests {
         assert!(
             text.contains("━"),
             "should have heavy header separator, got: {text}"
+        );
+    }
+
+    /// 引用 / 列表里的表格：外层前缀（引用栏 `│ `、列表续行 / marker）不许
+    /// 进单元格——每个格子糊一道引用栏（`┃ │ A ┃`）比没有前缀更糟。表格
+    /// 整体也不带外层前缀；列表 item 的 marker 单独一行（表格前的归属注记）。
+    #[test]
+    fn table_in_blockquote_keeps_cells_clean() {
+        let md = "> | A | B |\n> |---|---|\n> | 1 | 2 |";
+        let lines = render_text(md);
+        let text = join_lines(&lines);
+        assert!(text.contains("┃ A"), "clean header cell: {text}");
+        assert!(
+            !text.contains("┃ │"),
+            "quote rail leaked into a cell: {text}"
+        );
+    }
+
+    #[test]
+    fn table_in_list_item_keeps_cells_clean() {
+        let md = "- | A | B |\n  |---|---|\n  | 1 | 2 |";
+        let lines = render_text(md);
+        let text = join_lines(&lines);
+        assert!(text.contains("┃ A"), "clean header cell: {text}");
+        assert!(
+            !text.contains("┃ •"),
+            "list marker leaked into a cell: {text}"
+        );
+        // marker 单独成行（表格仍在，结构没丢）。
+        assert!(
+            lines.iter().any(|l| l.trim() == "•"),
+            "marker line missing: {lines:?}"
         );
     }
 
@@ -962,9 +996,9 @@ mod tests {
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        // Borderless style: heavy header rule, no vertical bars.
+        // Framed grid at a constrained width: heavy frame + heavy header rule.
         assert!(text.contains("━"), "got: {text}");
-        assert!(!text.contains("│"), "should be borderless, got: {text}");
+        assert!(text.contains('┃'), "frame verticals missing: {text}");
         assert!(text.contains("A"), "got: {text}");
     }
 
@@ -981,16 +1015,18 @@ mod tests {
             .map(|s| s.as_str())
             .filter(|l| !l.is_empty())
             .collect();
-        // Layout: header, heavy rule, row0, light rule, row1.
+        // Layout: top frame, header, heavy rule, row0, light rule, row1, bottom.
         assert!(
-            non_blank.len() >= 5,
-            "expected header + rule + row + rule + row, got: {non_blank:?}"
+            non_blank.len() >= 7,
+            "expected frame + header + rule + row + rule + row + frame, got: {non_blank:?}"
         );
-        assert!(non_blank[0].contains("File") && non_blank[0].contains("Function"));
-        assert!(non_blank[1].contains("━"), "header rule: {}", non_blank[1]);
-        assert!(non_blank[2].contains("src/main.rs"));
-        assert!(non_blank[3].contains("─"), "body rule: {}", non_blank[3]);
-        assert!(non_blank[4].contains("src/lib.rs"));
+        assert!(non_blank[0].contains('┏'), "top frame: {}", non_blank[0]);
+        assert!(non_blank[1].contains("File") && non_blank[1].contains("Function"));
+        assert!(non_blank[2].contains("━"), "header rule: {}", non_blank[2]);
+        assert!(non_blank[3].contains("src/main.rs"));
+        assert!(non_blank[4].contains("─"), "body rule: {}", non_blank[4]);
+        assert!(non_blank[5].contains("src/lib.rs"));
+        assert!(non_blank[6].contains('┗'), "bottom frame: {}", non_blank[6]);
     }
 
     #[test]
@@ -1810,7 +1846,7 @@ mod tests {
         assert!(anchors.iter().all(|a| a.rows == 30 && a.cols == 80));
     }
 
-    // ── Multi-line alt (PR #135 review, blocker B) ─────────────────
+    // ── Multi-line alt ─────────────────
     //
     // A soft break inside the label flushes the line the label started on
     // (`Event::SoftBreak` → `flush_line`), so the `label_start_segment_idx`
@@ -1824,7 +1860,7 @@ mod tests {
     /// (the crash needed ≥ 2: one segment survives the flush, so `[2..]` and
     /// `[3..]` are the out-of-range ones) and in every enclosing block.
     const CROSS_LINE_ALT_SHAPES: &[&str] = &[
-        // The review's minimal input: two segments (`foo ` + code `bar`).
+        // Minimal input: two segments (`foo ` + code `bar`).
         "foo `bar` ![l1\nl2](a.png)",
         // Two adjacent inline-code segments, and a longer prefix.
         "`a` `b` ![l1\nl2](a.png)",
@@ -1868,7 +1904,7 @@ mod tests {
 
     #[test]
     fn cross_line_alt_keeps_the_baseline_rendering() {
-        // The exact review input, pinned segment by segment (this is what
+        // Pinned segment by segment (this is what
         // `origin/develop` renders for it — verified against the baseline
         // binary, see the step's design.md):
         //   line 1: `foo ` · inline code `bar` · ` ` · link label `l1`
@@ -1897,7 +1933,7 @@ mod tests {
 
     #[test]
     fn cross_line_alt_survives_math_and_images_off() {
-        // The review found both switches unable to dodge the panic (it is in
+        // Both switches are unable to dodge the panic (it is in
         // the parser, before either option is consulted) — pin that both are
         // clean now, and that the output does not depend on the math mode.
         let math_off = ThemePalette {

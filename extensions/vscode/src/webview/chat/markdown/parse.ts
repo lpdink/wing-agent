@@ -1142,8 +1142,7 @@ const FENCE_RUN = /^(`{3,}|~{3,})/;
  * Up to three columns of indentation are allowed, and four or more is an indented
  * code block instead (CommonMark, and the TUI's `fence_open`). Getting this wrong
  * is not cosmetic: a fence the scan does not see lets a `<div>` *inside* it open
- * an HTML block, which then swallows the formulas after the fence (review r2
- * [S1]).
+ * an HTML block, which then swallows the formulas after the fence.
  */
 function opensFence(content: string): Fence | null {
   const indent = indentWidth(content);

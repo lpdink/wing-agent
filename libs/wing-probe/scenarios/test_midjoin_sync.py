@@ -55,6 +55,7 @@ async def midjoin(probe: Probe, session_id: str) -> AsyncIterator[Event]:
         await other.close()
 
 
+@pytest.mark.probe_env(models=[FIRST_CHUNK_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
@@ -92,6 +93,7 @@ async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
     assert result.data["subtype"] == "success", result.data
 
 
+@pytest.mark.probe_env(models=[TOOL_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_midjoin_while_tool_running_reports_working(probe: Probe) -> None:
@@ -121,6 +123,7 @@ async def test_midjoin_while_tool_running_reports_working(probe: Probe) -> None:
     assert result.data["subtype"] == "success", result.data
 
 
+@pytest.mark.probe_env(models=[ASK_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_midjoin_pending_ask_reports_waiting(probe: Probe) -> None:
@@ -169,6 +172,7 @@ async def test_midjoin_pending_ask_reports_waiting(probe: Probe) -> None:
     assert result.data["subtype"] == "success", result.data
 
 
+@pytest.mark.probe_env(models=[IDLE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_midjoin_idle_session_reports_idle(probe: Probe) -> None:

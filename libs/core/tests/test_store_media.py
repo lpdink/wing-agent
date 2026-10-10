@@ -94,7 +94,7 @@ class TestInvalidIdRejected:
 
 
 class TestContentAddressValidation:
-    """首写校验 id 与字节一致（review r1 N2）。"""
+    """首写校验 id 与字节一致。"""
 
     def test_write_rejects_mismatched_content(self, store: SessionStore):
         with pytest.raises(ValueError, match="内容寻址不一致"):

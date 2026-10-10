@@ -2,9 +2,12 @@
 """wing/system.py — 系统级热重载流程（11 归位：自 ``WingRuntime.reload_system`` 抽出）。
 
 ``reload_system(sm)`` 是 ``/api/system/reload`` 的实现体：config → hooks → prompt
-commands → provider → skills & rules，逐项独立 try/except；config 失败立即中止
+commands → provider → skills & rules → log level，逐项独立 try/except；config 失败立即中止
 （后续项不再尝试），其余项失败继续——**步骤顺序与逐项 detail 是对外契约**
-（probe ``test_system_reload`` 抓名字序与逐项 ok）。
+（probe ``test_system_reload`` 抓名字序与逐项 ok）。config 项内部还包含一步
+``sm.reload_templates()``（模板管理器跟随新 config 重建，见 ``SessionManager.reload_templates``）。
+``log level`` 是 03 追加的**末项**（既有五项的名字与顺序不许动）：``setup_logger`` 幂等重挂
+handler，把声明的 ``log.level: hot`` 兑现到运行期。
 
 纯移动：``ReloadResult`` / ``ReloadResultItem`` 与流程体逐字来自 runtime，唯一
 机械差异是 ``self.sm`` → 参数 ``sm``（调用侧 ``WingRuntime.reload_system()`` 只
@@ -48,7 +51,7 @@ class ReloadResult:
 
 
 async def reload_system(sm: SessionManager) -> ReloadResult:
-    """热重载全局配置、hooks、prompt commands、provider、skills & rules。
+    """热重载全局配置、hooks、prompt commands、provider、skills & rules、log level。
 
     config 加载失败时立即中止。其余项失败时继续。
     """
@@ -60,6 +63,11 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
 
     try:
         config = load_config(reload=True)
+        # 模板是 config 的派生状态（agents[].model 经 id 表解析）：与 config
+        # 一起重建，避免「reload 后新会话用旧模板、resume 用新映射」分叉。
+        # 不另立 ReloadResultItem——逐项名字序是对外契约，且 config 加载成功
+        # 而模板重建失败在逻辑上不可达（加载期已强制 agents[].model ∈ id 空间）。
+        sm.reload_templates()
         items.append(ReloadResultItem(name="config.yaml", ok=True))
     except Exception as e:
         items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
@@ -79,33 +87,16 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     except Exception as e:
         items.append(ReloadResultItem(name="prompt commands", ok=False, detail=str(e)))
 
-    # provider 重建（驱逐重建）：按新配置重建活跃 provider 后关闭旧 client，配置变更
-    # 随重建自然生效；模型列表 registry 一并重置（下次查询按新配置重建）。
-    # 单 session 失败不阻断其余 session——否则坏 session 会悄悄留着旧凭据。
+    # provider 重建：共享池按新配置重建全部实例（先建后换——任一构建失败池保持
+    # 原样）；旧实例退场（在途请求跑完后自动关闭，reload 对会话透明）。会话不再
+    # 逐一重建：实例经池按 name 实时解析，新请求立即用新配置；会话级开关住
+    # agent，不随实例更替漂移，无需重贴。
     try:
-        from wing.provider.registry import reset_registry
+        from wing.provider.pool import reset_providers
 
-        await reset_registry()
-        rebuilt = 0
-        failures: list[str] = []
-        for session in sm.iter_sessions():
-            try:
-                # 快照遍历期间可能发生逐出/拆解：已不在内存的会话跳过，
-                # 否则会给已关闭 provider 的 agent 重建 client 且无人回收。
-                if sm.get_session(session.session_id) is None:
-                    continue
-                await session.agent.rebuild_providers()
-                # provider 实例换了：记录在案的 provider 级开关（thinking /
-                # reasoning_effort）重贴，否则 reload 后 live 悄悄退回配置
-                # 默认、请求前缀随之漂移（Session 持有记录，见其 docstring）。
-                session.reapply_provider_options()
-                rebuilt += 1
-            except Exception as e:
-                failures.append(f"{session.session_id}: {e}")
-        detail = f"rebuilt {rebuilt} session(s)"
-        if failures:
-            detail += "; failed: " + ", ".join(failures)
-        items.append(ReloadResultItem(name="provider", ok=not failures, detail=detail))
+        rebuilt = await reset_providers()
+        detail = f"rebuilt {rebuilt} provider(s)"
+        items.append(ReloadResultItem(name="provider", ok=True, detail=detail))
     except Exception as e:
         items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
 
@@ -115,6 +106,20 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
         items.append(ReloadResultItem(name="skills & rules", ok=True))
     except Exception as e:
         items.append(ReloadResultItem(name="skills & rules", ok=False, detail=str(e)))
+
+    # log level：追加在**末尾**（既有五项的名字与顺序是对外契约，probe 钉住）。
+    # setup_logger 幂等（handlers.clear() 后重挂），所以「保存即生效」——
+    # 这是声明层把 log.level 标成 hot 的运行期依据。
+    try:
+        from wing.common.logger import setup_logger
+        from wing.request_context import get_request_context
+
+        # context= 必须重传：#179 之后日志的 session / request 关联段由 provider 逐条现取，
+        # 而 setup_logger 会 handlers.clear() 后重挂——不传就等于热重载把关联段抹掉。
+        setup_logger(level=config.log.level, context=get_request_context)
+        items.append(ReloadResultItem(name="log level", ok=True))
+    except Exception as e:
+        items.append(ReloadResultItem(name="log level", ok=False, detail=str(e)))
 
     all_ok = all(item.ok for item in items)
     return ReloadResult(ok=all_ok, items=items)

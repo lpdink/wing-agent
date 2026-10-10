@@ -241,7 +241,7 @@ impl ThinkingBlock {
         let mut spans = self.shine_spans(&head, palette, dim);
         // 静止部分跟措辞同一色系：进行中措辞是逐列 Rgb 混色的（见
         // `shine_spans`），秒数与提示就用 dim 的 Rgb 解析值 —— 命名色与
-        // Rgb 混用会在命名色主题 + 非 truecolor 终端上各走各的色（评审 N）。
+        // Rgb 混用会在命名色主题 + 非 truecolor 终端上各走各的色。
         // 定格后整行回到命名 dim，与旧行为一致。
         let static_style = if self.is_active() {
             let base = to_rgb(palette.dim);
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn hidden_label_omits_a_zero_second_duration() {
-        // 不满一秒就定格：与进行中同口径，不显示 `0s`（评审 N）。
+        // 不满一秒就定格：与进行中同口径，不显示 `0s`。
         let mut block = ThinkingBlock::new();
         let start = t0();
         block.start(start);
@@ -705,7 +705,7 @@ mod tests {
 
     /// 非流式路径（resume 重放 / 收起再展开）：标题占第 0 行、正文整体下移
     /// 一行 —— 图片锚点的**绝对**行号必须跟着下移。不平移的话绘制侧
-    /// `caption_at` 会按错行找 caption、拒绘，图片静默消失（评审 B）。
+    /// `caption_at` 会按错行找 caption、拒绘，图片静默消失。
     #[test]
     fn expanded_header_keeps_the_image_anchor_on_its_caption_row() {
         use crate::render::markdown::CellPixels;

@@ -593,10 +593,6 @@ async def test_server_error_report_for_unknown_and_exhausted_scripts() -> None:
             assert "probe/nope" in report["message"]
             assert MODEL in report["message"], "报告列出已注册模型"
 
-            models = await client.get("/models")
-            assert models.status_code == 200
-            assert [entry["id"] for entry in models.json()["data"]] == [MODEL]
-
             bad = await client.post(
                 "/chat/completions",
                 content=b"not json",
@@ -612,6 +608,38 @@ async def test_server_error_report_for_unknown_and_exhausted_scripts() -> None:
             MODEL,
             "probe/nope",
         ]
+
+
+@pytest.mark.asyncio
+async def test_prefixed_route_serves_and_logs_its_path() -> None:
+    """附加 provider 的路径前缀：同一条处理链 + 留档带 path（归属可判定）。"""
+    provider = FakeProvider(path_prefixes=("probe2",))
+    await provider.start()
+    try:
+        provider.register(MODEL, Script(Turn.of(text="from p2")))
+        async with httpx.AsyncClient(
+            base_url=provider.url, timeout=10.0, trust_env=False
+        ) as client:
+            prefixed = await client.post(
+                "/probe2/v1/chat/completions", json=request_body(stream=False)
+            )
+            assert prefixed.status_code == 200
+            assert prefixed.json()["choices"][0]["message"]["content"] == "from p2"
+
+            default = await client.post(
+                "/v1/chat/completions", json=request_body(stream=False)
+            )
+            assert default.status_code == 500  # 剧本按调用名共享：只够一次
+
+            # 模型发现端点已退役（网关的目录来自配置声明）。
+            assert (await client.get("/v1/models")).status_code == 404
+
+        assert [entry.path for entry in provider.requests] == [
+            "/probe2/v1/chat/completions",
+            "/v1/chat/completions",
+        ]
+    finally:
+        await provider.stop()
 
 
 @pytest.mark.asyncio

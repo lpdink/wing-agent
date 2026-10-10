@@ -61,6 +61,7 @@ def _fingerprint(view: HistoryView) -> list[str]:
     ]
 
 
+@pytest.mark.probe_env(models=[INTEGRITY_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_chain_integrity_and_uuid_remap(probe: Probe) -> None:
@@ -122,6 +123,7 @@ async def test_fork_chain_integrity_and_uuid_remap(probe: Probe) -> None:
     child_view.assert_no_transient_records()
 
 
+@pytest.mark.probe_env(models=[METADATA_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_metadata_snapshot(probe: Probe) -> None:
@@ -146,6 +148,7 @@ async def test_fork_metadata_snapshot(probe: Probe) -> None:
     assert metadata["forked_from"] == session.session_id
     assert metadata["workspace"] == str(session.workspace)
     assert metadata["template_name"] == "default"
+    assert metadata["model_id"] == METADATA_MODEL
     assert metadata["model_name"] == METADATA_MODEL
     assert metadata["provider_name"] == "probe"
     assert datetime.fromisoformat(metadata["last_interaction"]), metadata
@@ -161,6 +164,7 @@ async def test_fork_metadata_snapshot(probe: Probe) -> None:
     assert child_view.metadata() == metadata
 
 
+@pytest.mark.probe_env(models=[ISOLATION_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_isolation_and_evolution_equivalence(probe: Probe) -> None:
@@ -275,6 +279,7 @@ COMPACT_FORK_MODEL = "probe/fork-after-compact"
 COMPACT_FORK_SUMMARY = "Task: answer the user. State: two turns done."
 
 
+@pytest.mark.probe_env(models=[COMPACT_FORK_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_after_compact_keeps_region_out_of_context(probe: Probe) -> None:
@@ -369,6 +374,7 @@ async def test_fork_after_compact_keeps_region_out_of_context(probe: Probe) -> N
 PRECOMPACT_FORK_MODEL = "probe/fork-pre-compact"
 
 
+@pytest.mark.probe_env(models=[PRECOMPACT_FORK_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_at_pre_compact_message_ignores_the_compaction(probe: Probe) -> None:

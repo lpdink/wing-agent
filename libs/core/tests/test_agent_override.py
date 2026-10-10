@@ -1,7 +1,7 @@
 """Tests for AgentOverride — session 创建时的 agent 参数覆盖。
 
 覆盖 Session.apply_agent_override() 的行为：
-  - model 覆盖
+  - model_id 覆盖
   - system_prompt 替换 / 追加
   - tools 替换
   - max_turns 设置
@@ -52,38 +52,55 @@ class TestApplyAgentOverride:
 
     @pytest.mark.asyncio
     async def test_override_model(self, runtime: Any):
-        """model 覆盖直接修改 agent.model。"""
+        """model_id 覆盖切换调用名与引用词。"""
         session = runtime.create_session()
         original_model = session.agent.model
 
-        override = AgentOverride(model="gpt-4o-mini")
+        override = AgentOverride(model_id="gpt-4o-mini")
         session.apply_agent_override(override)
 
         assert session.agent.model == "gpt-4o-mini"
         assert session.agent.model != original_model
+        assert session.model_id == "gpt-4o-mini"
 
     @pytest.mark.asyncio
-    async def test_override_model_with_provider(self, runtime: Any):
-        """model + provider 覆盖：切换到指定 provider 后 set_model。"""
+    async def test_override_model_switches_provider_by_mapping(self, runtime: Any):
+        """provider 不再是覆盖字段：切到 alt 声明的 id 时 provider 随映射而来。"""
         session = runtime.create_session()
         original_provider_name = session.agent.model_provider.name
 
-        # Switch to the "alt" provider (added in conftest mock config).
-        override = AgentOverride(model="qwen-max", provider="alt")
+        # "qwen3-max" 由 alt provider 声明（见 conftest mock config）。
+        override = AgentOverride(model_id="qwen3-max")
         session.apply_agent_override(override)
 
-        assert session.agent.model == "qwen-max"
+        assert session.agent.model == "qwen3-max"
         assert session.agent.model_provider.name == "alt"
         assert session.agent.model_provider.name != original_provider_name
 
     @pytest.mark.asyncio
-    async def test_override_model_with_unknown_provider_raises(self, runtime: Any):
-        """指定不存在的 provider 名应抛 ValueError。"""
+    async def test_override_unknown_model_id_raises(self, runtime: Any):
+        """未知 model id 抛 ValueError（C7 文案）；状态零变化。"""
         session = runtime.create_session()
+        before_model = session.agent.model
 
-        override = AgentOverride(model="gpt-4o", provider="nonexistent")
-        with pytest.raises(ValueError, match="provider 'nonexistent' not found"):
+        override = AgentOverride(model_id="nonexistent")
+        with pytest.raises(ValueError, match="unknown model id 'nonexistent'"):
             session.apply_agent_override(override)
+        assert session.agent.model == before_model
+
+    @pytest.mark.asyncio
+    async def test_legacy_model_provider_fields_are_ignored(self, runtime: Any):
+        """旧字段 model / provider 被静默忽略（不报错、不生效、不 warning）。"""
+        session = runtime.create_session()
+        before_model = session.agent.model
+
+        override = AgentOverride.model_validate(
+            {"model": "qwen3-max", "provider": "alt"}
+        )
+        assert override.model_id is None
+        session.apply_agent_override(override)
+
+        assert session.agent.model == before_model
 
     @pytest.mark.asyncio
     async def test_override_system_prompt_replace(self, runtime: Any):
@@ -168,7 +185,7 @@ class TestApplyAgentOverride:
         override = AgentOverride(effort="high")
         session.apply_agent_override(override)
 
-        assert session.agent.model_provider.reasoning_effort == "high"
+        assert session.agent.reasoning_effort == "high"
 
     @pytest.mark.asyncio
     async def test_none_fields_not_overridden(self, runtime: Any):
@@ -178,7 +195,7 @@ class TestApplyAgentOverride:
         original_prompt = session.context_manager.setin_system_prompt
         original_tools = [t.name for t in session.agent.tools]
         original_max_turns = session.agent.max_turns
-        original_effort = session.agent.model_provider.reasoning_effort
+        original_effort = session.agent.reasoning_effort
 
         override = AgentOverride()  # All None
         session.apply_agent_override(override)
@@ -187,21 +204,21 @@ class TestApplyAgentOverride:
         assert session.context_manager.setin_system_prompt == original_prompt
         assert [t.name for t in session.agent.tools] == original_tools
         assert session.agent.max_turns == original_max_turns
-        assert session.agent.model_provider.reasoning_effort == original_effort
+        assert session.agent.reasoning_effort == original_effort
 
     @pytest.mark.asyncio
     async def test_override_via_create_session(self, runtime: Any):
         """通过 runtime.create_session() 传入 agent_override。"""
         override = AgentOverride(
-            model="gpt-4o",
+            model_id="gpt-4o-mini",
             max_turns=25,
             effort="low",
         )
         session = runtime.create_session(agent_override=override)
 
-        assert session.agent.model == "gpt-4o"
+        assert session.agent.model == "gpt-4o-mini"
         assert session.agent.max_turns == 25
-        assert session.agent.model_provider.reasoning_effort == "low"
+        assert session.agent.reasoning_effort == "low"
 
 
 # ============================================================
@@ -262,10 +279,10 @@ class TestWingAgentSetters:
         agent = session.agent
 
         agent.set_reasoning_effort("low")
-        assert agent.model_provider.reasoning_effort == "low"
+        assert agent.reasoning_effort == "low"
 
         agent.set_reasoning_effort(None)
-        assert agent.model_provider.reasoning_effort is None
+        assert agent.reasoning_effort is None
 
     @pytest.mark.asyncio
     async def test_bind_tools_llm_name_collision_raises(self, runtime: Any):
@@ -346,22 +363,41 @@ class TestMaxTurnsConfig:
     def test_agent_template_from_config_max_turns(self):
         """AgentTemplate.from_config 传递 max_turns。"""
         from wing.session import AgentTemplate
-        from wing.config import AgentConfig
+        from wing.config import AgentConfig, Config, ProviderConfig
 
-        config = AgentConfig(
-            name="test", model="gpt-4", provider="default", max_turns=30
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="http://x",
+                    api_key="k",
+                    models=["gpt-4"],
+                )
+            ],
+            agents=[
+                AgentConfig(name="test", model="gpt-4", max_turns=30, default=True)
+            ],
         )
-        template = AgentTemplate.from_config(config)
+        template = AgentTemplate.from_config(config.agents[0], config)
         assert template.max_turns == 30
 
     def test_agent_template_from_config_default_none(self):
         """AgentTemplate.from_config 默认 max_turns 为 None。"""
         from wing.session import AgentTemplate
-        from wing.config import AgentConfig
+        from wing.config import AgentConfig, Config, ProviderConfig
 
-        # provider 绑定在 Config 解析阶段落定（此处模拟解析后的 AgentConfig）
-        config = AgentConfig(name="test", model="gpt-4", provider="default")
-        template = AgentTemplate.from_config(config)
+        config = Config(
+            providers=[
+                ProviderConfig(
+                    name="default",
+                    base_url="http://x",
+                    api_key="k",
+                    models=["gpt-4"],
+                )
+            ],
+            agents=[AgentConfig(name="test", model="gpt-4")],
+        )
+        template = AgentTemplate.from_config(config.agents[0], config)
         assert template.max_turns is None
 
 
@@ -386,8 +422,7 @@ class TestUtf8GateFieldDerivation:
         assert set(_TEXT_FIELDS) == expected
         # 今日本身就这些（不是空集 / 不是把 list[str] 也算进来）
         assert set(_TEXT_FIELDS) == {
-            "model",
-            "provider",
+            "model_id",
             "system_prompt",
             "append_system_prompt",
             "effort",

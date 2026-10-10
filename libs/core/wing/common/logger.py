@@ -12,6 +12,15 @@ Policy (kept in sync with the TUI frontend, see docs/dev/config-logging.md):
 - **No import side effects**: importing ``wing`` never touches the
   filesystem — file/console handlers attach only via :func:`setup_logger`,
   called explicitly by the gateway CLI entry point.
+- Line format: ``YYYY-MM-DD HH:MM:SS - LEVEL - [<session_id> <request_id>] - path:line - message``.
+  The correlation section comes from the ``context`` provider handed to
+  :func:`setup_logger` (see :class:`LogContext`); it is omitted when the
+  current coroutine carries no ids. Source paths of package files render
+  as ``wing/...`` (relative to the parent of the ``wing`` package); files
+  outside the package (user hooks, site customizations) fall back to
+  absolute paths — the only way to locate them. Loop-level fallback logs
+  (``install_loop_exception_logger``) opt out of correlation: they fire at
+  GC time, where the ambient context may belong to an unrelated task.
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ import sys
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 _LOGGER_NAME = "wing"
 RETENTION_DAYS = 7
@@ -40,16 +49,54 @@ _COLORS = {
 }
 
 
-class _PathFormatter(logging.Formatter):
-    """Formatter with relative path support."""
+class LogContext(Protocol):
+    """日志关联标识的只读视图（``session_id`` / ``request_id``）。
 
-    def __init__(self, root: Path, use_color: bool = False) -> None:
+    实现方是 ``wing.request_context.RequestContext``——logger 住 L0、request
+    上下文住 L2，分层规则不允许反向 import（见 docs/dev/backend-layout.md
+    §6），因此这里只声明**结构化契约**，接线由组合根完成：``gateway/cli.py``
+    把 ``get_request_context`` 交给 :func:`setup_logger`，formatter 在**每条
+    记录格式化时**（= 调用方协程上下文里）读取，无需把 id 传过来传过去。
+    """
+
+    session_id: str | None
+    request_id: str | None
+
+
+#: 返回当前协程关联上下文的 provider；无任何上下文时返回 None。
+LogContextProvider = Callable[[], LogContext | None]
+
+#: logging record 属性：置真时该行**跳过关联段**。给「当前上下文不可信」的
+#: 记录方一个声明口——典型是事件循环兜底日志：它在 GC 时机触发，此刻恰好在
+#: 跑的可能是任意无关任务，拿到它的 session/request 标注 = 错误归属（比不标
+#: 注更误导）。用 ``log.error(..., extra={NO_CORRELATION: True})`` 声明。
+NO_CORRELATION = "wing_no_correlation"
+
+
+class _PathFormatter(logging.Formatter):
+    """行格式：``时间 - 级别 - [关联] - 路径:行号 - 消息``。
+
+    - 路径按 ``root`` 相对化（生产 root = wing 包的父目录 → 包内文件渲染为
+      ``wing/provider/openai/provider.py:328``）；root 之外的文件回退绝对路径。
+    - 关联段取 ``context`` provider 的当前值：session / request 都在时同帧
+      展示 ``[<session_id> <request_id>]``，只有一个时展示一个，都没有时整段
+      省略（不留空壳）。provider 抛错、属性访问抛错（坏 provider）一律按
+      "无上下文"处理——日志格式化不得外溢，整行日志更不能因此丢掉。
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        use_color: bool = False,
+        context: LogContextProvider | None = None,
+    ) -> None:
         super().__init__(
-            "%(asctime)s - %(levelname)s - %(relpath)s - %(message)s",
+            "%(asctime)s - %(levelname)s - %(correlation)s%(relpath)s - %(message)s",
             "%Y-%m-%d %H:%M:%S",
         )
         self._root = root
         self._use_color = use_color
+        self._context = context
         # pathname → 相对 root 的路径 memo。`Path(...).resolve()` 是一次真实
         # 文件系统调用（realpath），逐条日志都做会在流式 DEBUG 日志这类热路径上
         # 累积。产出它的源文件集合有界（仓库源码 + 用户 hooks），无需淘汰策略。
@@ -67,8 +114,28 @@ class _PathFormatter(logging.Formatter):
         self._rel_paths[pathname] = rel
         return rel
 
+    def _correlation(self, record: logging.LogRecord) -> str:
+        """当前协程关联上下文的渲染段（无值 / 被显式抑制 = 空串，省略整段）。"""
+        provider = self._context
+        if provider is None or getattr(record, NO_CORRELATION, False):
+            return ""
+        try:
+            ctx = provider()
+            ids = [
+                value
+                for value in (
+                    getattr(ctx, "session_id", None),
+                    getattr(ctx, "request_id", None),
+                )
+                if value
+            ]
+        except Exception:  # noqa: BLE001 - 日志格式化不得外溢（含坏 provider 的属性访问）
+            return ""
+        return f"[{' '.join(ids)}] - " if ids else ""
+
     def format(self, record: logging.LogRecord) -> str:
         record.relpath = f"{self._rel_path(record.pathname)}:{record.lineno}"
+        record.correlation = self._correlation(record)
 
         msg = super().format(record)
         if self._use_color and record.levelname in _COLORS:
@@ -199,9 +266,13 @@ class _LoopExceptionLogger:
     ) -> None:
         try:
             exception = context.get("exception")
+            # 兜底日志的当前上下文不可信（`Task.__del__` 在 GC 时机触发，
+            # 此刻恰好在跑的可能是不相干的另一任务）——显式声明跳过关联段：
+            # 错误归属比不归属更误导。见 NO_CORRELATION。
             log.error(
                 _format_loop_exception(context),
                 exc_info=exception if isinstance(exception, BaseException) else None,
+                extra={NO_CORRELATION: True},
             )
         except Exception:  # noqa: BLE001 - 日志不得外溢
             pass
@@ -236,6 +307,7 @@ def setup_logger(
     level: str = "WARNING",
     log_dir: str | Path | None = None,
     *,
+    context: LogContextProvider | None = None,
     now: Callable[[], datetime] = datetime.now,
 ) -> logging.Logger:
     """Attach console + daily-file handlers to the ``wing`` logger.
@@ -246,6 +318,9 @@ def setup_logger(
     Args:
         level: Console log level (stdout); the daily file always logs DEBUG.
         log_dir: Log directory, default ``$WING_HOME/core/logs``.
+        context: 关联上下文 provider（组合根传入
+            ``wing.request_context.get_request_context`` 这类零参可调用对象）；
+            缺省 None = 行内不产生关联段（测试 / 嵌入式使用零依赖）。
         now: Clock override for tests.
     """
     logger = logging.getLogger(_LOGGER_NAME)
@@ -253,12 +328,26 @@ def setup_logger(
     logger.setLevel(logging.DEBUG)  # Logger captures all, handlers filter
     logger.propagate = False
 
-    root = Path(__file__).parent.resolve()
+    # 包内文件相对 **wing 包的父目录** 渲染（``wing/provider/...py:328``）：
+    # parents 链是 [0]=wing/common、[1]=wing、[2]=wing 的父目录——dev 的
+    # libs/core 与安装态的 site-packages 都得同一个 ``wing/...`` 形态。
+    # 旧实现用 [0]（wing/common）当 root，除 common 自身外全部落入
+    # relative_to 失败分支、整片回退绝对路径（回归见 test_logger）。
+    root = Path(__file__).resolve().parents[2]
 
-    # Console handler - controlled by config
+    # Console handler - controlled by config. 只在真正的终端上色：守护进程
+    # stdout 落 gateway.log（非 tty）时，色码只会污染按行检索。sys.stdout
+    # 可能为 None（pythonw / 嵌入式宿主）——`StreamHandler(None)` 本就回落
+    # stderr，这里不能把"无 stdout"变成启动崩溃路径。
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(getattr(logging, level.upper(), logging.INFO))
-    console.setFormatter(_PathFormatter(root, use_color=True))
+    console.setFormatter(
+        _PathFormatter(
+            root,
+            use_color=sys.stdout is not None and sys.stdout.isatty(),
+            context=context,
+        )
+    )
     logger.addHandler(console)
 
     # File handler - always DEBUG level, one file per local day
@@ -270,7 +359,7 @@ def setup_logger(
 
     file_handler = _DailyFileHandler(log_dir, now=now)
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(_PathFormatter(root))
+    file_handler.setFormatter(_PathFormatter(root, context=context))
     logger.addHandler(file_handler)
 
     # Prune stale files at startup, even before the first record.

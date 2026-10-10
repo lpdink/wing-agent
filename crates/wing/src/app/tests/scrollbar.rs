@@ -550,8 +550,14 @@ fn scrolling_linked_cjk_keeps_the_terminal_in_step() {
 
 // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
 
-/// Bar glyphs that no other widget draws: `│` is shared with every border
-/// (the composer card's included), `┃` / `█` are the bar's alone.
+/// Bar glyphs that no other widget draws, **in this file's fixtures**: `│` is
+/// shared with every border (the composer card's included); `┃` is also the
+/// welcome nameplate's info-card frame, `█` the bar's active thumb and the
+/// status bar's meter (the welcome's half blocks are `▀` / `▄`, never `█`).
+/// `long_chat_app` stays unambiguous without clearing the welcome: 40 messages
+/// scroll the header out of view, and at 80 columns the info card does not
+/// appear at all — trimming those messages or widening the fixture would put
+/// `┃` back into the frame.
 fn is_bar_glyph(symbol: &str) -> bool {
     matches!(symbol, "┃" | "█")
 }

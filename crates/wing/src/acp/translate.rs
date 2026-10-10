@@ -1,18 +1,14 @@
 //! `WingEvent` → ACP v1 `session/update` 的映射（纯函数 + 会话级工具卡片状态）。
 //!
-//! 本模块**不认识网络也不认识连接**：输入是一个已反序列化的 wing 事件，输出是一串
-//! 待包装成 `SessionNotification` 的 [`SessionUpdate`]。这样映射规则可以逐行单测
-//! （真实事件 JSON fixture），不需要网关或 ACP 客户端。
+//! 本模块**不认识网络也不认识连接**：输入是一个已反序列化的 wing 事件，输出是一串待包装成
+//! `SessionNotification` 的 [`SessionUpdate`]。这样映射规则可以逐行单测（真实事件 JSON fixture），
+//! 不需要网关或 ACP 客户端。
 //!
-//! 两类入口：
+//! 两类入口：[`ToolCards::apply`] 是**有状态**映射（状态跨轮次存活于会话上，负责工具卡片的「只创建
+//! 一次」去重、`diff_content` 的锚定、content 的累积）；[`turn_end`] / [`flatten_prompt`] 是无状态纯
+//! 函数。Ask 事件在 `ask` 模块分流（permission / elicitation / 回退），本模块对它**不产帧**。
 //!
-//! - [`ToolCards::apply`]：**有状态**映射（状态跨轮次存活于会话上）。工具卡片的
-//!   「只创建一次」去重、`diff_content` 的锚定、content 的累积都要它。
-//! - [`turn_end`] / [`flatten_prompt`]：无状态纯函数。
-//!
-//! Ask 事件在 `ask` 模块分流（permission / elicitation / 回退），本模块对它**不产帧**。
-//!
-//! 映射规格（与 01 步任务书的表格逐行对应）：
+//! 映射规格：
 //!
 //! | wing 事件 | ACP 输出 |
 //! |-----------|----------|
@@ -27,9 +23,9 @@
 //! | `turn_result` / `interrupted` / `error` | 轮次终态（end_turn / cancelled / JSON-RPC error） |
 //! | 其余 | 零帧（debug 日志） |
 //!
-//! 子模块 [`replay`]：`session/load` 的历史回放投影（`sync_session` 快照 → update
-//! 序列）。它与实时映射共用同一份 [`ToolCards`] 记忆与 title/kind/locations 规则——
-//! 回放建好的卡片，后续实时 `diff_content` / `tool_call_result` 继续锚定。
+//! 子模块 [`replay`]：`session/load` 的历史回放投影（`sync_session` 快照 → update 序列）。它与实时
+//! 映射共用同一份 [`ToolCards`] 记忆与 title/kind/locations 规则——回放建好的卡片，后续实时
+//! `diff_content` / `tool_call_result` 继续锚定。
 
 pub mod replay;
 

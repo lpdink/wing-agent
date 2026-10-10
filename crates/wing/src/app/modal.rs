@@ -1,30 +1,25 @@
 //! Modal ownership lane — who owns the keyboard, and the Escape ladder.
 //!
-//! The TUI has three modal layers (ask panel, `/model` picker, command
-//! candidate popup) plus the composer. This module declares, **once**, which
-//! one owns a key event:
+//! The TUI has three modal layers (ask panel, `/model` picker, command candidate popup) plus the
+//! composer. This module declares, **once**, which one owns a key event:
 //!
-//! * [`App::modal_chain`] — the layers that are up, in priority order (the
-//!   declaration order of [`ModalOwner`] *is* the priority order);
-//! * [`App::route_key`] — the key → owner decision, including the keys the app
-//!   always keeps for itself (Esc, page keys, Ctrl+C). A layer that does not
-//!   take a key lets it through to the next one, and the chat keeps its scroll
-//!   keys all the way down;
-//! * [`App::handle_key`] — a thin ladder that dispatches each route to its
-//!   handler.
+//! * [`App::modal_chain`] — the layers that are up, in priority order (the declaration order of
+//!   [`ModalOwner`] *is* the priority order);
+//! * [`App::route_key`] — the key → owner decision, including the keys the app always keeps for
+//!   itself (Esc, page keys, Ctrl+C). A layer that does not take a key lets it through to the next
+//!   one, and the chat keeps its scroll keys all the way down;
+//! * [`App::handle_key`] — a thin ladder that dispatches each route to its handler.
 //!
-//! The mouse path reads the same declaration ([`App::composer_pointer_blocked`])
-//! instead of re-deriving "is a modal up?" on its own, so the two input
-//! channels cannot drift apart.
+//! The mouse path reads the same declaration ([`App::composer_pointer_blocked`]) instead of
+//! re-deriving "is a modal up?" on its own, so the two input channels cannot drift apart.
 //!
-//! The panel **state machines** (ask panel questions, model picker pages) are
-//! neutral and live in `shared/panels/`; what lives here is their App-side
-//! lifecycle: the queues, the chat-cell mirroring, and the reply/apply paths.
+//! The panel **state machines** (ask panel questions, model picker pages) are neutral and live in
+//! `shared/panels/`; what lives here is their App-side lifecycle: the queues, the chat-cell
+//! mirroring, and the reply/apply paths.
 //!
-//! Call directions: [`super::commands`] calls in for the `/model` picker and
-//! the composer's submit path; [`super::projection`] calls in for ask
-//! registration; this module calls [`super::commands`] (submit / popup
-//! refresh).
+//! Call directions: [`super::commands`] calls in for the `/model` picker and the composer's submit
+//! path; [`super::projection`] calls in for ask registration; this module calls [`super::commands`]
+//! (submit / popup refresh).
 
 use super::App;
 use super::AppIntent;
@@ -45,6 +40,10 @@ use crate::ui::toast::Toast;
 /// **Declaration order is the priority order** — see [`App::modal_owner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModalOwner {
+    /// 设置面板（`/settings`）：**最高优先级**，且是唯一一个连应用保留键
+    /// （`Esc` / `PageUp` / `PageDown` / `Ctrl+O`）也接管的层（AD2）。`Ctrl+C`
+    /// 永远归应用。面板关闭的动作由 App 执行（面板只产出 `SettingsAction`）。
+    Settings,
     /// Ask panel (queue front): swallows every key except the ones the app
     /// reserves (`Esc`, `PageUp` / `PageDown`). Every ask is a panel — the
     /// retired menu's own layer is gone.
@@ -79,6 +78,9 @@ pub(super) enum KeyRoute {
     Quit,
     /// Ctrl+O — 展开 / 收起思考块（**全局**：所有轮一起切；应用保留键，面板之下也可用）。
     ToggleReasoning,
+    /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它，AD2；
+    /// `Ctrl+C` 在它之前就被应用截走）。
+    Settings,
     /// The ask panel owns the key.
     AskPanel,
     /// The `/model` picker owns the key.
@@ -148,6 +150,9 @@ impl App {
     /// takes the front, [`App::route_key`] walks the whole chain.
     fn modal_chain(&self) -> impl Iterator<Item = ModalOwner> {
         [
+            self.settings_panel
+                .is_some()
+                .then_some(ModalOwner::Settings),
             (!self.ask_panels.is_empty()).then_some(ModalOwner::AskPanel),
             self.model_panel
                 .is_some()
@@ -180,6 +185,13 @@ impl App {
     pub(super) fn route_key(&self, key: &crossterm::event::KeyEvent) -> KeyRoute {
         if is_quit_key(key) {
             return KeyRoute::Quit;
+        }
+        // 设置面板：最高优先级，且是**唯一接管应用保留键**的层（AD2）——
+        // `Esc` 走面板自己的 Esc 阶梯、`PageUp`/`PageDown` 翻面板的树、
+        // `Ctrl+O` 交给面板（面板忽略它，比让它穿透去改看不见的聊天状态安全）。
+        // 必须排在 `app_reserved_key` 与 Ctrl+O 的分支之前。
+        if self.settings_panel.is_some() {
+            return KeyRoute::Settings;
         }
         // Ctrl+O 与应用保留键同档：查看动作，任何面板之下都生效（也必须在
         // 面板之前截住 —— 落到 composer 会变成输入 `o`）。
@@ -243,6 +255,21 @@ impl App {
     ///
     /// The chat band's drag selection and the wheel are **not** affected
     /// (rolling history while a panel is open has to keep working).
+    /// 背景（chat band / 滚动条 / 状态栏）此刻是否**不接受指针**。
+    ///
+    /// 设置面板是浮层卡片：四周露出的聊天看得见但点不动 —— 三条理由，一条比一条硬：
+    ///
+    /// 1. 卡片盖住的链接 hit box 还在表里，点卡片 = 打开一个看不见的链接
+    ///    （渲染侧另外 `mask_links(card)`，这里是同一件事的第二道门）；
+    /// 2. 面板开着时选区**不画**（`App::draw` 的门控），拖出来的高亮看不见，
+    ///    而 `capture_visible_rows` 也不跑 —— 复制到的会是打开面板前那一帧的快照；
+    /// 3. 滚动条这一帧根本没画（hover / drag 态被清），点它会抓一个不存在的把手。
+    ///
+    /// 键盘侧的同类门是 [`Self::composer_pointer_blocked`]（那个只管 composer）。
+    pub(super) fn background_pointer_blocked(&self) -> bool {
+        self.settings_panel.is_some()
+    }
+
     pub(super) fn composer_pointer_blocked(&self) -> bool {
         match self.modal_owner() {
             None => false,
@@ -263,7 +290,7 @@ impl App {
     pub(super) fn composer_typing_blocked(&self) -> bool {
         matches!(
             self.modal_owner(),
-            Some(ModalOwner::AskPanel | ModalOwner::ModelPicker)
+            Some(ModalOwner::Settings | ModalOwner::AskPanel | ModalOwner::ModelPicker)
         )
     }
 
@@ -277,6 +304,7 @@ impl App {
                 self.reset_quit_counter();
                 self.toggle_reasoning_expansion();
             }
+            KeyRoute::Settings => self.handle_settings_key(key),
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),
             KeyRoute::ModelPicker => self.handle_model_picker_key(key),
             KeyRoute::EscLadder => {
@@ -406,8 +434,8 @@ impl App {
             .map(|panel| panel.handle_key(key))
             .unwrap_or(ModelPanelAction::None);
         match action {
-            ModelPanelAction::Apply { provider, model } => {
-                self.apply_model_selection(provider, model);
+            ModelPanelAction::Apply { model_id } => {
+                self.apply_selected_model(model_id);
             }
             ModelPanelAction::Cancel => {
                 self.close_model_panel();
@@ -416,6 +444,20 @@ impl App {
             // page into the chat cell.
             ModelPanelAction::None => self.sync_model_panel_cell(),
         }
+    }
+
+    /// 设置面板：模态，最高优先级（AD2）。
+    ///
+    /// 07 的状态机吃下按键并回一个 [`SettingsAction`]；这里只做"喂 + 分派"
+    /// —— 全部分派逻辑（预览 / 保存 / 重启 / 重载 / 关闭）在 `app::settings`。
+    /// `Ctrl+C` 永远到不了这里（[`App::route_key`] 先放行给应用）。
+    fn handle_settings_key(&mut self, key: crossterm::event::KeyEvent) {
+        let action = self
+            .settings_panel
+            .as_mut()
+            .map(|panel| panel.handle_key(key))
+            .unwrap_or(crate::shared::panels::settings::SettingsAction::None);
+        self.handle_settings_action(action);
     }
 
     /// Escape ladder: close popup if active, otherwise clear/interrupt.
@@ -562,9 +604,18 @@ impl App {
     }
 
     /// Handle a bracketed paste event: routed to the active ask panel's inline
-    /// editor when one is up (panel is modal); the modal model panel drops it;
-    /// otherwise it goes to the composer.
+    /// editor when one is up (panel is modal); the modal model panel and the
+    /// settings overlay drop it; otherwise it goes to the composer.
+    ///
+    /// **顺序**（N4）：设置面板的挡板排在最前 —— 面板是模态浮层、拿走全部按键的层，
+    /// 而队列里可能正躺着一条**看不见**的 ask（AD2：面板开着时到达的 ask 入队不弹）。
+    /// 先问 ask 的话，`Ctrl+V` 会写进那条 ask 的内联编辑器（用户看不见自己改了什么）。
     pub(super) fn handle_paste(&mut self, text: &str) {
+        // 设置面板：内联编辑器只吃按键事件，草稿在面板底下不可见 —— 粘贴进
+        // composer 只会改掉用户关面板之后要发的内容。
+        if self.settings_panel.is_some() {
+            return;
+        }
         if !self.ask_panels.is_empty() {
             if let Some(panel) = self.ask_panels.front_mut() {
                 panel.insert_paste(text);
@@ -641,6 +692,9 @@ impl App {
         let tool_call_id = panel.tool_call_id.clone();
         self.reply_to_ask(content, tool_call_id);
         self.refresh_ask_placeholder();
+        // The agent resumes on this answer: the record stops being `blocked`
+        // (the next queued ask, if any, keeps it blocked on that one).
+        self.sync_program_status();
     }
 
     /// Answer a pending ask — the single reply path (every ask is a panel).
@@ -674,7 +728,7 @@ impl App {
         }
         if !self.model_sources.is_empty() {
             // Open now from cache; the fetch below refreshes in place.
-            let panel = ModelPanel::new(self.model_sources.clone(), self.current_model_pair());
+            let panel = ModelPanel::new(self.model_sources.clone(), self.current_model_id());
             self.present_model_panel(panel);
             // The popup yields to the modal panel (never both at once).
             self.popup.active = ActivePopup::None;
@@ -711,66 +765,83 @@ impl App {
         self.chat.remove_model_picker();
     }
 
-    /// The session's active `(provider, model)` pair — both must be known
-    /// (a model without a provider cannot be preselected unambiguously).
-    pub(super) fn current_model_pair(&self) -> Option<(&str, &str)> {
-        let provider = self.status.provider.as_deref().filter(|p| !p.is_empty())?;
-        let model = self.status.model.as_str();
-        if model.is_empty() || model == "unknown" {
-            return None;
-        }
-        Some((provider, model))
+    /// The session's active model id — the reference word the picker
+    /// preselects by and the `/api/session/update` call takes. `None` when the
+    /// gateway could not resolve one (old session metadata / identify miss):
+    /// the picker then opens without a mark rather than inventing an id.
+    pub(super) fn current_model_id(&self) -> Option<&str> {
+        self.status
+            .model_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
     }
 
-    /// Declared display label for a `(provider, model)` pair, resolved from
-    /// the last `/api/models` snapshot — the same declaration the picker rows
-    /// render. `None` when the pair is unknown **or** the label equals the
-    /// call name (an equal label adds no information and must not be shown
-    /// twice).
-    ///
-    /// With no provider known (reconnect-time fallbacks), the first group
-    /// carrying the call name wins: best effort — same-named models across
-    /// providers are not guaranteed to resolve to the active provider's
-    /// declaration. Everywhere the provider is known it is used verbatim.
+    /// The model declaration behind an id, as the display layer needs it:
+    /// `(call_name, provider, label)`. `None` when the last `/api/models`
+    /// snapshot does not cover the id (stale cache / id-less session).
     ///
     /// Display layer only: this never takes part in apply / matching / any
-    /// identity decision (`ModelPanel::Apply` keeps carrying the call name).
-    pub(super) fn model_display_label(
-        &self,
-        provider: Option<&str>,
-        model: &str,
-    ) -> Option<String> {
-        let group = match provider {
-            Some(p) => self.model_sources.iter().find(|g| g.provider == p),
-            None => self
-                .model_sources
-                .iter()
-                .find(|g| g.models.iter().any(|m| m == model)),
-        }?;
-        let label = group.label_for(model);
+    /// identity decision (`ModelPanel::Apply` carries the id).
+    pub(super) fn model_declaration(&self, model_id: &str) -> Option<(&str, &str, &str)> {
+        let group = self
+            .model_sources
+            .iter()
+            .find(|group| group.find(model_id).is_some())?;
+        let detail = group.find(model_id)?;
+        Some((
+            detail.name.as_str(),
+            group.provider.as_str(),
+            detail.display_label(),
+        ))
+    }
+
+    /// Declared display label for a model id, resolved from the last
+    /// `/api/models` snapshot — the same declaration the picker rows render.
+    /// `None` when the id is unknown **or** the label equals the id (an equal
+    /// label adds no information and must not be shown twice).
+    ///
+    /// Display layer only: never part of apply / matching / any identity
+    /// decision.
+    pub(super) fn model_display_label(&self, model_id: &str) -> Option<String> {
+        let (_, _, label) = self.model_declaration(model_id)?;
+        (label != model_id).then(|| label.to_string())
+    }
+
+    /// Declared display label for a **call name** — the id-less fallback
+    /// (legacy sessions / `identify` misses). Ambiguous across providers by
+    /// nature: the first group carrying the call name wins. Display only.
+    pub(super) fn model_display_label_by_name(&self, model: &str) -> Option<String> {
+        let detail = self
+            .model_sources
+            .iter()
+            .find_map(|group| group.models.iter().find(|detail| detail.name == model))?;
+        let label = detail.display_label();
         (label != model).then(|| label.to_string())
     }
 
     /// Toast text for a model switch: the display label takes the first line,
-    /// the raw call name follows on its own line — **only** when a declared
-    /// label exists (otherwise there is nothing to add: the first line
-    /// already shows the call name). This is the one place the raw id is
+    /// the raw reference word (model id) follows on its own line — **only**
+    /// when a declared label exists (otherwise there is nothing to add: the
+    /// first line already shows the id). This is the one place the raw id is
     /// allowed to reach the screen.
-    pub(super) fn model_switch_toast(&self, provider: Option<&str>, model: &str) -> String {
-        match (self.model_display_label(provider, model), provider) {
-            (Some(label), Some(p)) => format!("Model: {label} ({p})\n↳ {model}"),
-            (Some(label), None) => format!("Model: {label}\n↳ {model}"),
-            (None, Some(p)) => format!("Model: {model} ({p})"),
-            (None, None) => format!("Model: {model}"),
+    pub(super) fn model_switch_toast(&self, model_id: &str) -> String {
+        let provider = self
+            .model_declaration(model_id)
+            .map(|(_, provider, _)| provider);
+        match (self.model_display_label(model_id), provider) {
+            (Some(label), Some(p)) => format!("Model: {label} ({p})\n↳ {model_id}"),
+            (Some(label), None) => format!("Model: {label}\n↳ {model_id}"),
+            (None, Some(p)) => format!("Model: {model_id} ({p})"),
+            (None, None) => format!("Model: {model_id}"),
         }
     }
 
-    /// Apply the pair chosen in the model panel: close it, dispatch the
-    /// explicit `(provider, model)` update and give immediate feedback.
-    /// Refuses while a turn is running (defense-in-depth — the panel is
-    /// already guarded against opening mid-turn, but a race via SyncSession
-    /// / fork could start a turn while the panel is visible).
-    pub(super) fn apply_model_selection(&mut self, provider: String, model: String) {
+    /// Apply the model id chosen in the panel: close it, dispatch the id
+    /// verbatim and give immediate feedback. Refuses while a turn is running
+    /// (defense-in-depth — the panel is already guarded against opening
+    /// mid-turn, but a race via SyncSession / fork could start a turn while
+    /// the panel is visible).
+    pub(super) fn apply_selected_model(&mut self, model_id: String) {
         if self.turn.working {
             self.close_model_panel();
             self.show_toast(Toast::warning(
@@ -780,8 +851,8 @@ impl App {
             return;
         }
         self.close_model_panel();
-        let toast = self.model_switch_toast(Some(&provider), &model);
-        self.push_intent(AppIntent::set_model(model, Some(provider)));
+        let toast = self.model_switch_toast(&model_id);
+        self.push_intent(AppIntent::set_model(model_id));
         self.show_toast(Toast::info(toast, std::time::Duration::from_secs(3)));
     }
 }

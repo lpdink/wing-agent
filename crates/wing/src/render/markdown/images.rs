@@ -1,67 +1,48 @@
 //! Image anchors: `![alt](path)` as a reserved block plus a side channel.
 //!
-//! Markdown images have always rendered through the **link path** (the alt
-//! text as a link, `Tag::Image` sharing `Tag::Link`'s handling). This module
-//! adds the second tier: in [`ImageMode::Anchor`] an image that stands alone
-//! on its line becomes an **anchor** — a block of `rows` lines whose first
-//! line is a copyable caption, plus an [`ImageSpan`] telling the UI layer
-//! where the picture goes. Nothing here draws anything; that is the chat
-//! view's job (a later step).
+//! Images normally render through the **link path** (alt text as a link). This module adds the
+//! second tier: in [`ImageMode::Anchor`] an image standing alone on its line becomes an
+//! **anchor** — a block of `rows` lines whose first line is a copyable caption, plus an
+//! [`ImageSpan`] telling the UI layer where the picture goes. Nothing here draws anything; that
+//! is the chat view's job.
 //!
-//! # The two-tier rule (the task's D2)
+//! **Two-tier rule**: [`ImageMode::Off`], an image with no metadata, a rejected path, or any
+//! shape other than "alone on its line" renders **exactly** like the link path. There is no
+//! third tier — no half-blocks, no mosaics, no ASCII art.
 //!
-//! [`ImageMode::Off`] — or an image with no metadata, a rejected path, or any
-//! shape other than "alone on its line" — renders **exactly** like today:
-//! every span identical to the link path. There is no third tier: no
-//! half-blocks, no mosaics, no ASCII art.
-//!
-//! # Zero I/O (the task's D3/D4)
-//!
-//! This module never touches the filesystem: no `stat`, no decode, no
-//! `canonicalize`. The pixel dimensions arrive in [`ImageOpts::shapes`] — a
-//! table the caller (the chat view, backed by `ui::image::ImageStore`) fills
-//! from header probes. A path with no table entry falls back to the link
-//! path, which makes "the file does not exist / is not an image / is too
+//! **Zero I/O**: this module never touches the filesystem — no `stat`, no decode, no
+//! `canonicalize`. Pixel dimensions arrive in [`ImageOpts::shapes`], a table the caller (the
+//! chat view, backed by `ui::image::ImageStore`) fills from header probes; a path with no entry
+//! falls back to the link path, which makes "the file does not exist / is not an image / is too
 //! large" the caller's answer rather than something this layer guesses at.
 //!
-//! # The row count is a pure function of the box, the picture and the cell
+//! **The row count is a pure function** of the box, the picture and the cell:
 //!
 //! ```text
 //! rows = fit_cells(px_w, px_h, (W, MAX_ANCHOR_ROWS), cell).height
 //! ```
 //!
-//! `W` is the markdown render width (the cell width minus its 2-column
-//! prefix — the anchor's [`ImageSpan::cols`]) and `cell` is the terminal's
-//! character cell in pixels, injected through [`ImageOpts`] exactly like the
-//! shape metadata. The box and the picture that the **drawing layer** encodes
-//! are computed by the same shared function ([`crate::render::fit`]), so the
-//! rows reserved here are the rows the picture actually occupies: a 512×512
-//! image at a 10×20 cell in a 140-column box reserves 26 rows and is drawn
-//! 52×26 cells — instead of reserving the 36 rows an aspect assumption would
-//! have guessed and leaving the bottom blank.
+//! `W` is the markdown render width (the cell width minus its 2-column prefix — the anchor's
+//! [`ImageSpan::cols`]) and `cell` is the terminal's character cell in pixels, injected through
+//! [`ImageOpts`]. Reserving and drawing share one fit function ([`crate::render::fit`]), so the
+//! rows reserved here are the rows the picture actually occupies — a 512×512 image at a 10×20
+//! cell in a 140-column box reserves 26 rows and is drawn 52×26 cells, instead of reserving the
+//! 36 rows an aspect assumption would have guessed and leaving the bottom blank.
 //!
-//! The cell size is an input, but it is a **stable** one, which is what keeps
-//! the two invariants that a capability-dependent height would break: it is
-//! probed once at startup and rides in `ImageOpts`'s structural equality, so
-//! the same "the options changed, rebuild the cell" path that carries a
-//! late-arriving shape also carries a cell change. `CachedCell`'s height cache
-//! and the streaming engine's "resting state == the reference render"
-//! invariant see the same rows for a given (width, shape, cell) triple, frame
-//! after frame.
+//! The cell size is an input, but a **stable** one: it is probed once at startup and rides in
+//! [`ImageOpts`]'s structural equality, so the "the options changed, rebuild the cell" path that
+//! carries a late-arriving shape also carries a cell change. `CachedCell`'s height cache and the
+//! streaming engine's "resting state == the reference render" invariant therefore see the same
+//! rows for a given (width, shape, cell) triple, frame after frame. Everything else is
+//! deliberately *not* an input: the file, its decode, the protocol and the terminal's answers
+//! beyond the cell size.
 //!
-//! Everything else is deliberately *not* an input: the picture's file, its
-//! decode, the protocol and the terminal's answers beyond the cell size. The
-//! row count is exact arithmetic over three numbers.
-//!
-//! # The anchor block
-//!
-//! Line 0 is the caption ([`anchor_caption`]): visible when no image is
-//! painted, and the text a drag-selection copies. Lines 1..rows are blank
-//! cover rows — the box the picture is painted over. A picture is only ever
-//! anchored when it is **alone on its line at the top level**; anything else
-//! (inline, in a list item, in a quote, in a table cell, inside a heading or
-//! a link, inside a code fence, inside a nested prose block) stays on the
-//! link path rather than producing a misaligned anchor.
+//! **The anchor block**: line 0 is the caption ([`anchor_caption`]) — visible when no image is
+//! painted, and the text a drag-selection copies; lines 1..rows are blank cover rows the picture
+//! is painted over. A picture is only anchored when it is **alone on its line at the top level**;
+//! anything else (inline, in a list item, in a quote, in a table cell, inside a heading or a
+//! link, inside a code fence, inside a nested prose block) stays on the link path rather than
+//! producing a misaligned anchor.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -79,13 +60,11 @@ use crate::render::fit::fit_cells;
 /// Fewest rows an anchor may reserve (a single caption row).
 pub const MIN_ANCHOR_ROWS: u16 = 1;
 
-/// Most rows an anchor may reserve — the height of the box the picture is
-/// fitted into.
+/// Most rows an anchor may reserve — the height of the box the picture is fitted into.
 ///
-/// About one screen on a 40-row terminal: without it an 800×6000 sliver would
-/// swallow the viewport. The cap enters through the *box* rather than as a
-/// clamp on a finished number, and since a fit never grows its box, no anchor
-/// can exceed it.
+/// About one screen on a 40-row terminal: without it an 800×6000 sliver would swallow the
+/// viewport. The cap enters through the *box*, and a fit never grows its box, so no anchor can
+/// exceed it.
 pub const MAX_ANCHOR_ROWS: u16 = 36;
 
 /// Longest accepted image path, in characters.
@@ -161,14 +140,13 @@ impl ImageEntry {
     }
 }
 
-/// Image rendering options: the mode, the workspace root, the metadata, and
-/// the terminal's character cell.
+/// Image rendering options: the mode, the workspace root, the metadata, and the terminal's
+/// character cell.
 ///
-/// Owned (not a borrowed view) because [`super::stream::StreamingRender`]
-/// outlives a single render call and has to notice when an input changes (a
-/// late-arriving probe, or a cell size, changes the row count, which must
-/// force a rebuild). Equality is structural, which is exactly how that change
-/// is detected — the cell rides the same channel as a shape.
+/// Owned (not a borrowed view) because [`super::stream::StreamingRender`] outlives a single
+/// render call and has to notice input changes: a late-arriving probe or a cell size changes the
+/// row count, which must force a rebuild. Structural equality is how that change is detected —
+/// the cell rides the same channel as a shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImageOpts {
     mode: ImageMode,
@@ -196,30 +174,25 @@ impl ImageOpts {
         &NO_IMAGES
     }
 
-    /// `Anchor` options over `shapes`, resolving relative paths against
-    /// `workspace` and sizing the boxes for a character cell of `cell` pixels.
+    /// `Anchor` options over `shapes`, resolving relative paths against `workspace` and sizing
+    /// the boxes for a character cell of `cell` pixels.
     ///
-    /// `workspace = None` means "relative paths are rejected" — the table's
-    /// keys are then absolute paths only.
+    /// `workspace = None` means "relative paths are rejected" — the table's keys are then
+    /// absolute paths only.
     ///
-    /// A **degenerate cell** (either dimension zero) is not a layout input:
-    /// the rows cannot be derived from it, and guessing one is the very
-    /// mismatch this contract removes. Such a call answers with the shared
-    /// [`ImageOpts::off`] — the picture keeps the link path — rather than
-    /// reserving a box the encoder could never fill. In production the cell
-    /// comes from [`ImageSupport::cell_pixel_size`], which is only `Some` for a
-    /// non-degenerate cell (`ImageSupport::is_enabled` is false otherwise), so
-    /// this branch is a guard, not a state a running app can reach.
+    /// A **degenerate cell** (either dimension zero) is not a layout input: the rows cannot be
+    /// derived from it, and guessing one is the very mismatch this contract removes, so the call
+    /// answers with the shared [`ImageOpts::off`]. In production the cell comes from
+    /// [`ImageSupport::cell_pixel_size`], which is only `Some` for a non-degenerate cell, so this
+    /// branch is a guard rather than a state a running app can reach.
     ///
     /// [`ImageSupport::cell_pixel_size`]: crate::ui::image::ImageSupport::cell_pixel_size
     ///
-    /// Table contract: every key is the output of [`resolve_image_path`] for
-    /// the destination as written in the markdown, and **a path appears at
-    /// most once**. A duplicate is a caller bug (a directory scan that
-    /// re-registers the same file): the lookup answers with the first row, so
-    /// the result stays deterministic, but the contract is "one row per path".
-    /// Keep the table scoped to what the view is about to draw rather than to
-    /// "every image in the workspace" — see [`shape_for`](Self::shape_for).
+    /// Table contract: every key is the output of [`resolve_image_path`] for the destination as
+    /// written in the markdown, and **a path appears at most once**. A duplicate is a caller bug
+    /// (a directory scan re-registering the same file): the lookup answers with the first row, so
+    /// the result stays deterministic. Keep the table scoped to what the view is about to draw —
+    /// see [`shape_for`](Self::shape_for).
     pub fn anchor(workspace: Option<PathBuf>, shapes: Vec<ImageEntry>, cell: CellPixels) -> Self {
         if !cell.is_valid() {
             return Self::off().clone();
@@ -263,12 +236,10 @@ impl ImageOpts {
 
     /// The shape recorded for `path` (an exact match of the resolved form).
     ///
-    /// A linear scan: the table is expected to be the handful of images of one
-    /// screen (the caller reuses its own probe cache to build it once per
-    /// layout/metadata change, not once per image per frame), and the markdown
-    /// renderer asks at most once per image per parse — with the streaming
-    /// engine, once per image per *block*, not per frame. Duplicate rows answer
-    /// with the first one (see [`anchor`](Self::anchor)).
+    /// A linear scan: the table is the handful of images of one screen, built once per
+    /// layout/metadata change rather than per image per frame, and the renderer asks at most once
+    /// per image per *block* (with the streaming engine). Duplicate rows answer with the first
+    /// one (see [`anchor`](Self::anchor)).
     pub fn shape_for(&self, path: &Path) -> Option<ImageShape> {
         self.shapes
             .iter()
@@ -283,23 +254,15 @@ impl ImageOpts {
 
 /// Rows an image anchor reserves at markdown width `width`.
 ///
-/// The anchor's box is `width × MAX_ANCHOR_ROWS` cells; the picture is fitted
-/// into it exactly as the drawing layer will fit it, and the rows reserved are
-/// the rows the fit occupies — so the box is the size of the picture, and
-/// nothing is left blank underneath. `cell` is the terminal's character cell in
-/// pixels (see [`ImageOpts`]); the arithmetic itself is
-/// [`crate::render::fit::fit_cells`], shared with `ui/image/encode.rs`.
+/// The box is `width × MAX_ANCHOR_ROWS` cells; the picture is fitted into it exactly as the
+/// drawing layer fits it, and the rows reserved are the rows the fit occupies — nothing is left
+/// blank underneath. `cell` is the terminal's character cell in pixels (see [`ImageOpts`]); the
+/// arithmetic is [`crate::render::fit::fit_cells`], shared with `ui/image/encode.rs`.
 ///
-/// Off-screen inputs are impossible: the cap is the box the fit is computed
-/// against, and a fit never grows its box, so the answer is already inside
-/// [`MIN_ANCHOR_ROWS`]..=[`MAX_ANCHOR_ROWS`]. The clamp stays as the written
-/// contract; structurally it is an identity here (a degenerate input returns
-/// [`MIN_ANCHOR_ROWS`] above, and the fit's own `max(…, 1)` floors the rest).
-///
-/// Total: a zero width, a degenerate shape (`px_h == 0`) or a degenerate cell
-/// answers [`MIN_ANCHOR_ROWS`] rather than panicking. The parse layer rejects
-/// those cases before they can become an anchor (a degenerate cell switches
-/// anchors off entirely — see [`ImageOpts::anchor`]).
+/// Off-screen answers are structurally impossible (the cap *is* the box, and a fit never grows
+/// its box), so the clamp stays only as the written contract. A zero width, a degenerate shape
+/// (`px_h == 0`) or a degenerate cell answers [`MIN_ANCHOR_ROWS`] rather than panicking; the
+/// parse layer rejects those before they can become an anchor.
 pub fn anchor_rows(width: u16, shape: ImageShape, cell: CellPixels) -> u16 {
     if width == 0 || !shape.is_usable() || !cell.is_valid() {
         return MIN_ANCHOR_ROWS;
@@ -360,29 +323,24 @@ impl fmt::Display for PathReject {
 
 /// Whether the workspace containment check below folds ASCII case.
 ///
-/// macOS and Windows *default* to case-insensitive filesystems; Linux does not.
-/// (A macOS volume can be formatted case-sensitive — the rule is per filesystem,
-/// and the platform default is the only thing a lexical check can follow.)
+/// macOS and Windows *default* to case-insensitive filesystems, Linux does not (a macOS volume
+/// can be formatted case-sensitive — the rule is per filesystem, and the platform default is the
+/// only thing a lexical check can follow).
 ///
-/// Exactly one input can tell the two rules apart, and it is the `..` fold:
-/// under `/workspace`, the relative path `../WORKSPACE/a.png` names a file
-/// *inside* the workspace on a case-insensitive filesystem, so refusing it would
-/// be a false "escapes the workspace" that costs the user a picture. A variant
-/// spelling *below* the root is admitted (or refused) identically under both
-/// rules — the joined path carries the workspace's own spelling, byte for byte.
-/// The path itself is never rewritten: this decides only what counts as *the
-/// same* path.
+/// Exactly one input can tell the two rules apart, the `..` fold: under `/workspace`, the
+/// relative path `../WORKSPACE/a.png` names a file *inside* the workspace on a case-insensitive
+/// filesystem, so refusing it would be a false "escapes the workspace" that costs the user a
+/// picture. A variant spelling *below* the root is admitted or refused identically under both
+/// rules — the joined path carries the workspace's own spelling byte for byte. The path itself
+/// is never rewritten: this only decides what counts as *the same* path.
 const CASE_INSENSITIVE_PATHS: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// [`Path::starts_with`] under the platform's case rule (see
-/// [`CASE_INSENSITIVE_PATHS`]) — still purely lexical, no `stat` and no
-/// `canonicalize`, so the module's zero-I/O contract is untouched.
+/// [`Path::starts_with`] under the platform's case rule (see [`CASE_INSENSITIVE_PATHS`]) —
+/// still purely lexical, no `stat` and no `canonicalize`.
 ///
-/// Only ASCII case is folded (Unicode folding would need a table this layer has
-/// no business carrying), and symlinks are still compared by their own path:
-/// the boundary here is lexical by design. Reachable only from the relative
-/// branch of [`resolve_image_path`], i.e. only for paths that `..` folded out of
-/// the workspace; everything else carries the workspace's own spelling.
+/// Only ASCII case is folded (Unicode folding would need a table this layer has no business
+/// carrying), and symlinks are compared by their own path: the boundary is lexical by design.
+/// Reachable only from the relative branch of [`resolve_image_path`].
 fn is_inside(path: &Path, root: &Path) -> bool {
     is_inside_with(path, root, CASE_INSENSITIVE_PATHS)
 }
@@ -421,19 +379,17 @@ fn os_str_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr, case_insensitive: 
     }
 }
 
-/// Resolve a markdown image destination to the path the metadata table is
-/// keyed by (and the drawing layer feeds to `ImageStore`).
+/// Resolve a markdown image destination to the path the metadata table is keyed by (and the
+/// drawing layer feeds to `ImageStore`).
 ///
-/// Pure and I/O-free: no existence check, no `canonicalize`, no symlink
-/// resolution — the boundary here is lexical, and the file is only ever
-/// *displayed*. The caller keys its table with this exact function, so the
-/// two sides cannot disagree about normalisation.
+/// Pure and I/O-free: no existence check, no `canonicalize`, no symlink resolution — the boundary
+/// is lexical, and the file is only ever *displayed*. Callers key their table with this exact
+/// function, so the two sides cannot disagree about normalisation.
 ///
-/// Accepted (all normalised: `.`/`..` folded, duplicate separators collapsed):
-/// absolute paths, `file://` URLs, and relative paths joined onto `workspace`.
-/// Rejected (see [`PathReject`]): empty, control characters, over-long, remote
-/// schemes, `~`, relative paths without a workspace, `..` escapes (the
-/// containment check folds case on case-insensitive platforms — see
+/// Accepted (all normalised: `.`/`..` folded, duplicate separators collapsed): absolute paths,
+/// `file://` URLs, and relative paths joined onto `workspace`. Rejected (see [`PathReject`]):
+/// empty, control characters, over-long, remote schemes, `~`, relative paths without a workspace,
+/// `..` escapes (the containment check folds case on case-insensitive platforms — see
 /// [`is_inside`]), and non-image extensions.
 pub fn resolve_image_path(workspace: Option<&Path>, raw: &str) -> Result<PathBuf, PathReject> {
     let raw = raw.trim();
@@ -595,11 +551,9 @@ pub struct ImageAnchor {
 
 /// One image anchor inside a rendered cell, in display coordinates.
 ///
-/// The side channel's shape mirrors [`super::LinkSpan`]: spans live in a
-/// vector parallel to the rendered lines (a line without an anchor has an
-/// empty vector), and `column` uses the same coordinate system as
-/// `LinkSpan::start` — display columns from the line's left edge, the 2-column
-/// cell prefix included.
+/// Mirrors [`super::LinkSpan`]: spans live in a vector parallel to the rendered lines (a line
+/// without an anchor has an empty vector), and `column` uses the same coordinate system as
+/// `LinkSpan::start` — display columns from the line's left edge, cell prefix included.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageSpan {
     /// Row of the anchor's first line (an index into the cell's lines).
@@ -636,33 +590,26 @@ const COVER_CELL: &str = " ";
 
 /// The blank span of an anchor's cover row.
 ///
-/// Both compose paths ([`super::links::compose_lines`] for the cached
-/// reference render and `compose_into` for the streaming engine) must produce
-/// **identical** rows — the reconcile matrix compares them span by span — so
-/// the cover row's content is built here and nowhere else. A plain space with
-/// the default style: the row is painted over by the picture, and a space is
-/// the smallest thing that still occupies the cell.
+/// Both compose paths ([`super::links::compose_lines`] for the cached reference render and the
+/// streaming `compose_into`) must produce **identical** rows — the reconcile matrix compares them
+/// span by span — so the cover row's content is built here and nowhere else. A plain space with
+/// the default style: the row is painted over, and a space is the smallest thing that still
+/// occupies the cell.
 pub(crate) fn cover_span() -> ratatui::text::Span<'static> {
     ratatui::text::Span::raw(COVER_CELL)
 }
 
 /// Whether a composed row is one of an anchor's cover rows.
 ///
-/// The streaming compose dedups a batch's leading blank line against the
-/// previous content ("did the last row already end this blank run?"). A cover
-/// row *looks* blank but is not a markdown blank line — swallowing the
-/// separator that follows an anchor block would drop a line from the stream.
+/// The streaming compose dedups a batch's leading blank line against the previous content. A cover
+/// row *looks* blank but is not a markdown blank line — swallowing the separator that follows an
+/// anchor block would drop a line from the stream.
 ///
-/// The judgment is **structural**, derived from the anchor side channel: the
-/// row is inside an anchor's row range but is not the anchor's caption row.
-/// It must not be a content test ("is this span a space?"): at narrow widths a
-/// hard wrap turns the 2-column cell prefix into ordinary rows whose only span
-/// *is* a space, and a content test mistakes them for cover rows — which drops
-/// the dedup and adds a blank line to the streaming resting state.
-///
-/// The scan is bounded by [`MAX_ANCHOR_ROWS`]: an anchor covering `last` starts
-/// at most that many rows above it, and its side-channel entry lives on its
-/// caption row.
+/// The judgment is **structural**, derived from the anchor side channel (inside an anchor's row
+/// range but not its caption row) and must not be a content test ("is this span a space?"): at
+/// narrow widths a hard wrap turns the 2-column cell prefix into ordinary rows whose only span
+/// *is* a space, which a content test would mistake for cover rows and thereby add a blank line
+/// to the streaming resting state. The scan is bounded by [`MAX_ANCHOR_ROWS`].
 pub(crate) fn row_is_cover_row(images: &[Vec<ImageSpan>], last: usize) -> bool {
     let from = last.saturating_sub(usize::from(MAX_ANCHOR_ROWS));
     images
@@ -675,13 +622,11 @@ pub(crate) fn row_is_cover_row(images: &[Vec<ImageSpan>], last: usize) -> bool {
 
 /// Build the per-line anchor side channel for the rows described by `tags`.
 ///
-/// `tags` is index-aligned with the wrapped rows and `base` is where those
-/// rows start inside the buffer being described, `total_rows` its final row
-/// count — the anchor's `line` is then simply its own row index, which is what
-/// makes the row arithmetic exact without any index bookkeeping. The returned
-/// vector is index-aligned with `tags` (the batch's own rows). An anchor whose
-/// rows do not all exist (a truncated batch) is dropped rather than pointed at
-/// a half-present box.
+/// `tags` is index-aligned with the wrapped rows, `base` is where those rows start inside the
+/// buffer and `total_rows` its final row count — an anchor's `line` is then simply its own row
+/// index, which makes the row arithmetic exact without index bookkeeping. The returned vector is
+/// index-aligned with `tags`. An anchor whose rows do not all exist (a truncated batch) is dropped
+/// rather than pointed at a half-present box.
 pub(crate) fn image_side_channel(
     tags: &[Option<ImageAnchor>],
     total_rows: usize,
@@ -702,13 +647,10 @@ pub(crate) fn image_side_channel(
 
 /// 在行集**首部**插入一段行后，把侧通道里既有锚点的 `line` 一起下移。
 ///
-/// `line` 是锚点的**绝对**行号（行号 == 索引，见 [`image_side_channel`]），
-/// 而侧通道条目只是跟着 `lines` 挪了位置 —— 锚点内部的 `line` 不跟着挪，
-/// 就会指向错行：绘制侧 `caption_at` 的 caption 校验按行找标记、找不到就
-/// 拒绘，图片会**静默消失**（只剩 `▢ alt · W×H`）。
-///
-/// 思考块的 disclosure 标题行就是「首部插入」（`StreamingRender::set_header`
-/// 的晚设 / finalize 重装，与非流式的 `with_header`）——三处都必须过这里。
+/// `line` 是锚点的**绝对**行号（行号 == 索引，见 [`image_side_channel`]），而侧通道条目只是跟着
+/// `lines` 挪了位置；锚点内部的 `line` 不跟着挪就会指向错行 —— 绘制侧 `caption_at` 的 caption
+/// 校验按行找标记、找不到就拒绘，图片会**静默消失**（只剩 `▢ alt · W×H`）。思考块的 disclosure
+/// 标题行就是「首部插入」（晚设 / finalize 重装 / 非流式 `with_header` 三处都过这里）。
 pub(crate) fn shift_anchors_after_insert(images: &mut [Vec<ImageSpan>], at: usize) {
     for span in images.iter_mut().flatten() {
         if span.line >= at {
@@ -813,14 +755,12 @@ mod tests {
         }
     }
 
-    /// The encoder is handed the *box* (`cols × rows`); the layout computes the
-    /// rows from the `MAX_ANCHOR_ROWS` box. The two must agree on the height —
-    /// and the picture must stay inside the columns — for every shape, width
-    /// and cell, not just for the table above.
+    /// The encoder is handed the *box* (`cols × rows`) and the layout computes the rows from the
+    /// `MAX_ANCHOR_ROWS` box; the two must agree on the height — and the picture must stay inside
+    /// the columns — for every shape, width and cell, not just for the table above.
     ///
-    /// This is the invariant `ui::image::encode`'s reconciliation asserts with
-    /// real pictures; here it is the arithmetic behind it, over a matrix that
-    /// would be too slow to encode.
+    /// `ui::image::encode`'s reconciliation asserts this with real pictures; here it is the
+    /// arithmetic behind it, over a matrix that would be too slow to encode.
     #[test]
     fn the_reserved_rows_are_the_height_of_the_box_they_reserve() {
         let shapes: &[(u32, u32)] = &[
@@ -1120,8 +1060,8 @@ mod tests {
         );
     }
 
-    /// The workspace containment check follows the *platform's* case rule
-    /// (review #135, N1): on a case-insensitive filesystem a case-variant
+    /// The workspace containment check follows the *platform's* case rule:
+    /// on a case-insensitive filesystem a case-variant
     /// spelling names the same file, and refusing it would cost the user a
     /// picture for nothing. Both rules are asserted here, on every platform, by
     /// injecting the rule — the platform default only picks between them.
@@ -1170,13 +1110,12 @@ mod tests {
 
     #[test]
     fn a_case_variant_spelling_resolves_like_the_platform_allows() {
-        // The same rule, seen from the resolver — and the *only* input where it
-        // can decide anything is the `..` fold: the containment check runs on
-        // the relative branch, whose prefix is the workspace's own spelling
-        // (byte for byte), so a variant spelling *below* the root is admitted
-        // under both rules. `../WORKSPACE/a.png` under `/workspace` folds back
-        // onto a *sibling-looking* path that is the same file on a
-        // case-insensitive filesystem and a different one on Linux.
+        // The same rule seen from the resolver — the *only* input where it can decide anything is
+        // the `..` fold: the containment check runs on the relative branch, whose prefix is the
+        // workspace's own spelling (byte for byte), so a variant spelling *below* the root is
+        // admitted under both rules. `../WORKSPACE/a.png` under `/workspace` folds back onto a
+        // sibling-looking path that is the same file on a case-insensitive filesystem and a
+        // different one on Linux.
         let w = Some(ws()); // "/workspace"
         let folded = resolve_image_path(w.as_deref(), "../WORKSPACE/a.png");
         if CASE_INSENSITIVE_PATHS {

@@ -1,36 +1,34 @@
 //! Ready-to-draw images and the buffer placement primitive.
 //!
-//! [`paint`] is the only function in the crate that writes an image into a ratatui buffer,
-//! and it owns the contract that makes graphics coexist with text:
+//! [`paint`] is the only function in the crate that writes an image into a ratatui buffer, and it owns
+//! the contract that makes graphics coexist with text:
 //!
-//! * it writes **only** the part of the image that falls inside `area` (signed vertical
-//!   offset — an image scrolled half out of the viewport draws its visible rows only);
+//! * it writes **only** the part of the image that falls inside `area` (signed vertical offset — an
+//!   image scrolled half out of the viewport draws its visible rows only);
 //! * it refuses to draw horizontally clipped images (see [`paint`]'s documentation);
 //! * it refuses to draw an image from a **superseded epoch** (see below);
-//! * it returns the rect it covered, so the caller can mask selection hit-testing, skip link
-//!   detection and keep its own geometry honest.
+//! * it returns the rect it covered, so the caller can mask selection hit-testing, skip link detection
+//!   and keep its own geometry honest.
 //!
 //! # Lifetime of a [`ReadyImage`]
 //!
-//! A ready image belongs to the **epoch** it was encoded in, and every terminal protocol here
-//! carries a one-shot payload: the kitty transmit sequence and the sixel/iTerm2 escape are
-//! consumed by the first paint, afterwards only placeholders are written. Two consequences:
+//! A ready image belongs to the **epoch** it was encoded in, and every terminal protocol here carries a
+//! one-shot payload: the kitty transmit sequence and the sixel/iTerm2 escape are consumed by the first
+//! paint, afterwards only placeholders are written. Two consequences:
 //!
 //! 1. **An image must not outlive an invalidation.** [`super::ImageStore::invalidate`] and
-//!    [`super::ImageStore::reset`] revoke every handle — they bump the epoch because the
-//!    terminal may have dropped what we sent, and an image from before that moment would paint
-//!    placeholders for data the terminal no longer has. ([`super::ImageStore::refresh`] does
-//!    *not* revoke anything: it only makes the next probe re-read one file, so the pixels — and
-//!    the handles — are still good.)
-//!    This is enforced mechanically, not by convention: every image carries a handle to the
-//!    store's epoch counter and [`paint`] refuses anything that is no longer current
-//!    ([`ReadyImage::is_current`]), so a stale handle draws nothing instead of drawing wrong.
-//! 2. **Paint it, don't hoard it.** Painting the same image again in a later frame of the
-//!    *same* epoch is fine and expected (the placeholders address the image the terminal
-//!    already holds — that is how scrolling works), but the payload reaches the terminal with
-//!    the *first* paint: a frame that is thrown away before it is flushed loses the image for
-//!    good. Request again after [`super::ImageStore::invalidate`] instead of keeping an old
-//!    handle.
+//!    [`super::ImageStore::reset`] revoke every handle — they bump the epoch because the terminal may
+//!    have dropped what we sent, and an image from before that moment would paint placeholders for data
+//!    the terminal no longer has. ([`super::ImageStore::refresh`] does *not* revoke anything: it only
+//!    makes the next probe re-read one file, so the pixels — and the handles — are still good.) This is
+//!    enforced mechanically, not by convention: every image carries a handle to the store's epoch
+//!    counter and [`paint`] refuses anything that is no longer current
+//!    ([`ReadyImage::is_current`]).
+//! 2. **Paint it, don't hoard it.** Painting the same image again in a later frame of the *same* epoch
+//!    is fine and expected (the placeholders address the image the terminal already holds — that is how
+//!    scrolling works), but the payload reaches the terminal with the *first* paint: a frame that is
+//!    thrown away before it is flushed loses the image for good. Request again after
+//!    [`super::ImageStore::invalidate`] instead of keeping an old handle.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

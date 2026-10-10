@@ -26,6 +26,7 @@ from wing.media import (
     plan_request_media,
 )
 from wing.provider.anthropic.provider import AnthropicProvider
+from wing.provider.base import RequestOptions
 from wing.provider.media import (
     FOLLOWUP_GUIDE_TEXT,
     UNAVAILABLE_PLACEHOLDER,
@@ -119,10 +120,17 @@ async def openai_body(
     cfg: ProviderConfig | None = None,
     model: str = VISION_MODEL,
     media: MediaAccess | None = None,
+    session_id: str | None = None,
 ) -> dict:
-    p = OpenAICompatProvider(cfg or openai_cfg(), media=media)
+    p = OpenAICompatProvider(cfg or openai_cfg())
     try:
-        return p._build_body(messages, model, None, False)
+        return p._build_body(
+            messages,
+            model,
+            None,
+            False,
+            RequestOptions(session_id=session_id, media=media),
+        )
     finally:
         await p.aclose()
 
@@ -134,9 +142,9 @@ async def anthropic_messages(
     model: str = VISION_MODEL,
     media: MediaAccess | None = None,
 ) -> tuple[str, list[dict]]:
-    p = AnthropicProvider(cfg or anthropic_cfg(), media=media)
+    p = AnthropicProvider(cfg or anthropic_cfg())
     try:
-        return p._serialize_messages(messages, model)
+        return p._serialize_messages(messages, model, RequestOptions(media=media))
     finally:
         await p.aclose()
 
@@ -183,6 +191,43 @@ class TestResolveImageDelivery:
     def test_protocol_defaults(self):
         assert resolve_image_delivery(openai_cfg()) == "followup"
         assert resolve_image_delivery(anthropic_cfg()) == "inline"
+
+
+########## 缓存亲和（session id → prompt_cache_key）
+
+
+class TestOpenAICacheKey:
+    """存量缓存亲和不变量：session id 经 RequestOptions 注入 → prompt_cache_key。
+
+    provider 无状态化后 session id 不再驻留实例——本条盯住「该注入的场合
+    一定要注入、不该注入的场合绝不出现」，防未来重构把亲和弄丢。
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_cache_mode_injects_session_id(self):
+        body = await openai_body(
+            [Message(role="user", content="q")],
+            cfg=openai_cfg(explicit_cache_mode=True),
+            session_id="sess-42",
+        )
+        assert body["prompt_cache_key"] == "sess-42"
+
+    @pytest.mark.asyncio
+    async def test_no_session_id_keeps_key_absent(self):
+        body = await openai_body(
+            [Message(role="user", content="q")],
+            cfg=openai_cfg(explicit_cache_mode=True),
+        )
+        assert "prompt_cache_key" not in body
+
+    @pytest.mark.asyncio
+    async def test_implicit_cache_mode_never_injects(self):
+        body = await openai_body(
+            [Message(role="user", content="q")],
+            cfg=openai_cfg(explicit_cache_mode=False),
+            session_id="sess-42",
+        )
+        assert "prompt_cache_key" not in body
 
 
 ########## OpenAI 兼容线格式
@@ -780,10 +825,15 @@ class TestAnthropicMediaSerialization:
         msgs = [Message(role="tool", tool_call_id="c1", content="env", media=[ref])]
         p = AnthropicProvider(
             anthropic_cfg(image_delivery="followup", explicit_cache_mode=True),
-            media=make_media(data),
         )
         try:
-            body = p._build_body(msgs, VISION_MODEL, None, False)
+            body = p._build_body(
+                msgs,
+                VISION_MODEL,
+                None,
+                False,
+                RequestOptions(media=make_media(data)),
+            )
         finally:
             await p.aclose()
         blocks = body["messages"][-1]["content"]
@@ -906,6 +956,7 @@ class _CapturingProvider:
         tools: list | None = None,
         stream: bool = False,
         accumulator: Any = None,
+        options: Any = None,
     ):
         self.messages = messages
         yield LLMResponse(content="<summary>ok</summary>")

@@ -5,7 +5,7 @@
 - **create-or-adopt**：给了 session_id——不存在则以该 id 建会话（id 即最终
   id）；已存在（内存或任 store）则收养既有会话（同 resume：模板 / workspace
   来自 metadata、不触发 ``before_session_start``）；
-- **resume 覆盖子集**：只应用 model / provider / effort / tools；system_prompt /
+- **resume 覆盖子集**：只应用 model_id / effort / tools；system_prompt /
   append_system_prompt / max_turns / yolo **一律不应用**（不改链上前缀 / 不改
   会话既有限额），且被忽略的字段要出声（warning 日志）；
 - **零残留**：非法 id / 非法标签 / 无法解析的工具 ref 都必须在**任何写盘之前**
@@ -112,7 +112,7 @@ class TestCreateWithRequestedId:
         with pytest.raises(ValueError):
             sm.create_session(
                 session_id=CUSTOM_ID,
-                agent_override=AgentOverride(model="gpt-4o-mini"),
+                agent_override=AgentOverride(model_id="gpt-4o-mini"),
                 tags=["bad tag"],
             )
         assert _session_dirs(root) == []
@@ -131,9 +131,29 @@ class TestCreateWithRequestedId:
         with pytest.raises(ValueError):
             sm.create_session(
                 session_id=CUSTOM_ID,
-                agent_override=AgentOverride(model="gpt-4o-mini", tools=["Nope"]),
+                agent_override=AgentOverride(model_id="gpt-4o-mini", tools=["Nope"]),
             )
         assert _session_dirs(root) == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_id_override_leaves_no_trace(
+        self, sm: SessionManager, root: Path
+    ):
+        """覆盖里的 model_id 未命中：在任何副作用（含认领目录）之前失败。"""
+        with pytest.raises(ValueError, match="unknown model id 'nope'"):
+            sm.create_session(
+                session_id=CUSTOM_ID,
+                agent_override=AgentOverride(model_id="nope"),
+            )
+        # 认领键（mkdir）在纯校验之后 → 零残留，重试是全新会话
+        assert _session_dirs(root) == []
+
+        created = sm.create_session(session_id=CUSTOM_ID)
+        assert created.session_id == CUSTOM_ID
+        assert created.template_name == "default"
+        assert created.model_id == "gpt-4"
+        metadata = created.store.load_metadata(CUSTOM_ID)
+        assert metadata is None or metadata.model_id is None
 
 
 class TestAdoptExistingSession:
@@ -209,7 +229,7 @@ class TestAdoptExistingSession:
 
 
 class TestAdoptAppliesResumeSubset:
-    """收养时的 agent 覆盖 = resume 子集（model/provider/effort/tools）。"""
+    """收养时的 agent 覆盖 = resume 子集（model_id/effort/tools）。"""
 
     @pytest.mark.asyncio
     async def test_applied_fields_take_effect_and_persist(self, sm: SessionManager):
@@ -217,7 +237,7 @@ class TestAdoptAppliesResumeSubset:
         adopted = sm.create_session(
             session_id=CUSTOM_ID,
             agent_override=AgentOverride(
-                model="gpt-4o-mini",
+                model_id="gpt-4o-mini",
                 effort="high",
                 tools=["Read", "Bash"],
             ),
@@ -225,11 +245,12 @@ class TestAdoptAppliesResumeSubset:
 
         assert adopted is created
         assert adopted.agent.model == "gpt-4o-mini"
-        assert adopted.agent.model_provider.reasoning_effort == "high"
+        assert adopted.agent.reasoning_effort == "high"
         assert sorted(tool_refs(adopted.agent.tools)) == ["Bash", "Read"]
 
         metadata = adopted.store.load_metadata(CUSTOM_ID)
         assert metadata is not None
+        assert metadata.model_id == "gpt-4o-mini"
         assert metadata.model_name == "gpt-4o-mini"
         assert metadata.reasoning_effort == "high"
         assert sorted(metadata.tools or []) == ["Bash", "Read"]
@@ -274,12 +295,12 @@ class TestAdoptAppliesResumeSubset:
         with pytest.raises(ValueError):
             sm.create_session(
                 session_id=CUSTOM_ID,
-                agent_override=AgentOverride(model="gpt-4o-mini", tools=["Nope"]),
+                agent_override=AgentOverride(model_id="gpt-4o-mini", tools=["Nope"]),
             )
 
         metadata = created.store.load_metadata(CUSTOM_ID)
         assert created.agent.model == before_model
-        assert metadata is None or metadata.model_name is None
+        assert metadata is None or metadata.model_id is None
 
 
 class TestResumeOverrideSubset:
@@ -292,12 +313,12 @@ class TestResumeOverrideSubset:
 
         resumed = sm.resume_session(
             session.session_id,
-            agent_override=AgentOverride(model="gpt-4o-mini", effort="low"),
+            agent_override=AgentOverride(model_id="gpt-4o-mini", effort="low"),
         )
 
         assert resumed is session
         assert resumed.agent.model == "gpt-4o-mini"
-        assert resumed.agent.model_provider.reasoning_effort == "low"
+        assert resumed.agent.reasoning_effort == "low"
         assert _roles(resumed) == ["user"]
 
     @pytest.mark.asyncio
@@ -310,7 +331,7 @@ class TestResumeOverrideSubset:
 
         restarted = _restart(root)
         resumed = restarted.resume_session(
-            session_id, agent_override=AgentOverride(model="gpt-4o-mini")
+            session_id, agent_override=AgentOverride(model_id="gpt-4o-mini")
         )
         assert resumed.agent.model == "gpt-4o-mini"
         assert _roles(resumed) == ["user"]
@@ -331,7 +352,7 @@ class TestResumeOverrideSubset:
         with pytest.raises(ValueError):
             sm.resume_session(
                 session.session_id,
-                agent_override=AgentOverride(model="gpt-4o-mini", tools=["Nope"]),
+                agent_override=AgentOverride(model_id="gpt-4o-mini", tools=["Nope"]),
             )
         assert session.agent.model == before_model
 
@@ -490,7 +511,7 @@ class TestIgnoredOverrideWarnings:
         sm.resume_session(
             session.session_id,
             agent_override=AgentOverride(
-                model="gpt-4o-mini",
+                model_id="gpt-4o-mini",
                 system_prompt="X",
                 append_system_prompt="Y",
                 max_turns=1,
@@ -502,66 +523,81 @@ class TestIgnoredOverrideWarnings:
         for field in ("system_prompt", "append_system_prompt", "max_turns", "yolo"):
             assert field in text, wing_warnings
         # 生效的字段不进 warning。
-        assert "resume override ignores model" not in text
+        assert "resume override ignores model_id" not in text
 
     @pytest.mark.asyncio
-    async def test_provider_without_model_warns_on_resume(
+    async def test_legacy_fields_are_silently_ignored_on_resume(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
-        """`provider` 单独给出（没有 model）是 no-op——本步新增的一条静默路径。"""
+        """旧字段 `model` / `provider` 被 pydantic 静默丢弃：不生效、不出声。"""
         session = sm.create_session()
-        sm.resume_session(
-            session.session_id, agent_override=AgentOverride(provider="alt")
+        before = session.agent.model
+        override = AgentOverride.model_validate(
+            {"model": "gpt-4o-mini", "provider": "alt"}
         )
-        text = "\n".join(wing_warnings)
-        assert "resume override ignores provider" in text, wing_warnings
+        assert override.model_id is None
+
+        sm.resume_session(session.session_id, agent_override=override)
+
+        assert session.agent.model == before
+        assert not [line for line in wing_warnings if "override" in line], wing_warnings
 
     @pytest.mark.asyncio
-    async def test_provider_without_model_warns_on_adopt(
+    async def test_legacy_fields_are_silently_ignored_on_adopt(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
         created = sm.create_session(session_id=CUSTOM_ID)
         adopted = sm.create_session(
-            session_id=CUSTOM_ID, agent_override=AgentOverride(provider="alt")
+            session_id=CUSTOM_ID,
+            agent_override=AgentOverride.model_validate(
+                {"model": "gpt-4o-mini", "provider": "alt"}
+            ),
         )
         assert adopted is created
-        assert any("resume override ignores provider" in line for line in wing_warnings)
+        assert adopted.agent.model == created.agent.model
+        assert not [line for line in wing_warnings if "override" in line], wing_warnings
 
     @pytest.mark.asyncio
-    async def test_provider_without_model_warns_on_create(
+    async def test_legacy_fields_are_silently_ignored_on_create(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
-        """创建路径同一口径（provider 与 model 成对；``session/update`` 直接 400）。"""
-        sm.create_session(agent_override=AgentOverride(provider="alt"))
-        assert any("agent override ignores provider" in line for line in wing_warnings)
+        session = sm.create_session(
+            agent_override=AgentOverride.model_validate(
+                {"model": "gpt-4o-mini", "provider": "alt"}
+            )
+        )
+        assert session.agent.model == "gpt-4"  # 模板默认，未被旧字段影响
+        assert not [line for line in wing_warnings if "override" in line], wing_warnings
 
     @pytest.mark.asyncio
-    async def test_provider_with_model_is_silent(
+    async def test_model_id_override_is_silent(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
         session = sm.create_session()
         sm.resume_session(
             session.session_id,
-            agent_override=AgentOverride(model="gpt-4o-mini", provider="alt"),
+            agent_override=AgentOverride(model_id="gpt-4o-mini"),
         )
+        assert session.agent.model == "gpt-4o-mini"
         assert session.agent.model_provider.name == "alt"
-        assert not [line for line in wing_warnings if "provider" in line], wing_warnings
+        assert not [line for line in wing_warnings if "override" in line], wing_warnings
 
     def test_ignored_override_fields_is_pure(self):
         """纯函数直接对账（warning 的判据，不依赖日志捕获）。"""
         assert ignored_override_fields(AgentOverride(), resume=True) == []
-        assert ignored_override_fields(AgentOverride(provider="p"), resume=False) == [
-            "provider"
-        ]
+        assert ignored_override_fields(AgentOverride(), resume=False) == []
+        # model_id / effort / tools 两条路径都生效，不进忽略清单
         assert (
-            ignored_override_fields(AgentOverride(model="m", provider="p"), resume=True)
+            ignored_override_fields(
+                AgentOverride(model_id="m", effort="low"), resume=True
+            )
             == []
         )
         assert ignored_override_fields(
-            AgentOverride(provider="p", system_prompt="s", yolo=True),
+            AgentOverride(system_prompt="s", yolo=True, max_turns=1),
             resume=True,
-        ) == ["provider", "system_prompt", "yolo"]
-        # 创建语义下只有 provider 的成对性构成"被忽略"。
+        ) == ["system_prompt", "max_turns", "yolo"]
+        # 创建语义下没有"被忽略"的字段（旧 provider 成对逻辑已删）。
         assert (
             ignored_override_fields(
                 AgentOverride(system_prompt="s", max_turns=1), resume=False
@@ -604,21 +640,22 @@ class TestNonUtf8InputGates:
 
     def test_pure_field_scan(self):
         assert non_utf8_override_fields(AgentOverride()) == []
-        assert non_utf8_override_fields(AgentOverride(model="m", effort="high")) == []
+        assert (
+            non_utf8_override_fields(AgentOverride(model_id="m", effort="high")) == []
+        )
         assert non_utf8_override_fields(AgentOverride(system_prompt="\ud800")) == [
             "system_prompt"
         ]
         assert non_utf8_override_fields(
-            AgentOverride(model="\ud800", provider="\udc00", tools=["ok", "\ud800"])
-        ) == ["model", "provider", "tools[1]"]
+            AgentOverride(model_id="\ud800", tools=["ok", "\ud800"])
+        ) == ["model_id", "tools[1]"]
 
     @pytest.mark.parametrize(
         "override",
         [
             AgentOverride(system_prompt="\ud800"),
             AgentOverride(append_system_prompt="\ud800"),
-            AgentOverride(model="\ud800"),
-            AgentOverride(provider="\ud800"),
+            AgentOverride(model_id="\ud800"),
             AgentOverride(effort="\ud800"),
             AgentOverride(tools=["\ud800"]),
         ],
@@ -642,7 +679,7 @@ class TestNonUtf8InputGates:
             sm.create_session(
                 session_id="Ghost-2",
                 agent_override=AgentOverride(
-                    model="gpt-4o-mini", system_prompt="\ud800"
+                    model_id="gpt-4o-mini", system_prompt="\ud800"
                 ),
             )
         session = sm.create_session(session_id="Ghost-2")
@@ -650,7 +687,9 @@ class TestNonUtf8InputGates:
         # 幽灵的痕迹（模板默认提示词之外没有任何覆盖）不存在
         assert not session.context_manager.setin_system_prompt
         metadata = session.store.load_metadata("Ghost-2")
-        assert metadata is None or metadata.model_name is None
+        assert metadata is None or (
+            metadata.model_id is None and metadata.model_name is None
+        )
 
     @pytest.mark.asyncio
     async def test_other_input_fields_are_gated_too(
@@ -673,7 +712,7 @@ class TestNonUtf8InputGates:
         with pytest.raises(ValueError):
             sm.resume_session(
                 "K-1",
-                agent_override=AgentOverride(model="gpt-4o-mini", provider="\ud800"),
+                agent_override=AgentOverride(model_id="gpt-4o-mini", effort="\ud800"),
             )
         with pytest.raises(ValueError):
             session.set_title("\ud800")
@@ -687,5 +726,5 @@ class TestNonUtf8InputGates:
         assert session.agent.model == before  # 没有半截状态
         metadata = session.store.load_metadata("K-1")
         assert metadata is None or (
-            metadata.model_name is None and metadata.session_name is None
+            metadata.model_id is None and metadata.model_name is None
         )

@@ -172,12 +172,11 @@ export type WebviewToHostMessage =
   | { readonly type: 'activateSession'; readonly sessionId: SessionId }
   /** `/compact`. */
   | { readonly type: 'compact'; readonly sessionId: SessionId }
-  /** Apply a model selection (also closes the picker). */
+  /** Apply a model selection by reference word (also closes the picker). */
   | {
       readonly type: 'setModel';
       readonly sessionId: SessionId;
-      readonly provider: string;
-      readonly model: string;
+      readonly modelId: string;
     }
   /** Toggle thinking. */
   | { readonly type: 'setThinking'; readonly sessionId: SessionId; readonly enabled: boolean }

@@ -2,7 +2,9 @@
 """Unified configuration module.
 
 Loads from ``$WING_HOME/core/config.yaml`` (default: ``~/.wing/core/config.yaml``).
-When the config file is missing, a template is created from ``default_config.py``.
+When the config file is missing, a template is generated from the declarations
+(``config/catalog.py`` + ``config/emit.py``) — one emitter for the default template and for
+every save, so the file can never drift from the models again.
 """
 
 import os
@@ -32,11 +34,17 @@ def get_config_path() -> Path:
 
 
 def _create_config_template(config_path: Path) -> None:
-    """Create config file from the default template."""
-    from .default_config import DEFAULT_CONFIG_YAML
+    """Create config file from the generated template (声明 → catalog → emitter)。
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(DEFAULT_CONFIG_YAML, encoding="utf-8")
+    原子写（tmp + fsync + replace）：首启的模板与保存路径共用同一条落盘语义，
+    不留下半截文件。
+    """
+    from ..common.fs import atomic_write_text
+    from .catalog import build_catalog
+    from .emit import default_document, emit_config_yaml
+
+    text = emit_config_yaml(default_document(), build_catalog())
+    atomic_write_text(config_path, text)
     print(f"Created config template: {config_path}")
 
 

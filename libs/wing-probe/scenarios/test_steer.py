@@ -52,6 +52,7 @@ def _note_for(text: str) -> str:
     return f"{NOTE_PREFIX}{text}]\n"
 
 
+@pytest.mark.probe_env(models=[STEER_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_queued_message_steers_next_request(probe: Probe) -> None:
@@ -117,6 +118,7 @@ async def test_queued_message_steers_next_request(probe: Probe) -> None:
     view.assert_tool_pairing()
 
 
+@pytest.mark.probe_env(models=[PLAIN_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_no_note_without_queued_message(probe: Probe) -> None:
@@ -155,6 +157,7 @@ async def test_no_note_without_queued_message(probe: Probe) -> None:
     )
 
 
+@pytest.mark.probe_env(models=[MULTI_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_steer_note_lands_on_last_tool_result_only(probe: Probe) -> None:

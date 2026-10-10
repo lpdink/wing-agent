@@ -1,16 +1,14 @@
-//! The content model: cells, pending messages and every mutation the app
-//! performs on them.
+//! The content model: cells, pending messages and every mutation the app performs on them.
 //!
-//! This is the only place that changes *what* the view holds — pushing cells,
-//! queueing / promoting / discarding pending user messages, anchoring derived
-//! cells under their tool call and the streaming (by-index) mutations.
+//! This is the only place that changes *what* the view holds — pushing cells, queueing / promoting /
+//! discarding pending user messages, anchoring derived cells under their tool call and the streaming
+//! (by-index) mutations.
 //!
-//! It never **reads** scroll state, geometry or rendering. The only writes to
-//! the viewport state are the three app-visible entries that are part of the
-//! model's own contract: `push_pending` and `show_model_picker` bring the
-//! user's own content into view, and `clear()` resets the viewport for a
-//! rebuilt content list (top of the content, follow re-armed). Everything
-//! else about scrolling belongs to `super::viewport`.
+//! It never **reads** scroll state, geometry or rendering. The only writes to the viewport state are
+//! the three app-visible entries that are part of the model's own contract: `push_pending` and
+//! `show_model_picker` bring the user's own content into view, and `clear()` resets the viewport for
+//! a rebuilt content list (top of the content, follow re-armed). Everything else about scrolling
+//! belongs to `super::viewport`.
 
 use ratatui::text::Line;
 
@@ -168,23 +166,18 @@ impl ChatView {
         )
     }
 
-    /// Anchor a derived cell (Todo/Diff) directly after the ToolCall cell
-    /// that produced it.
+    /// Anchor a derived cell (Todo/Diff) directly after the ToolCall cell that produced it.
     ///
-    /// Concurrent tool execution makes derived events arrive out of order;
-    /// appending them would misplace them below unrelated cells. If the
-    /// ToolCall already has anchored derived cells (they sit contiguously
-    /// right after it — anchoring never interleaves foreign cells into the
-    /// group), the new cell is inserted after them so multiple emissions
-    /// from one tool call keep their original order.
+    /// Concurrent tool execution makes derived events arrive out of order; appending them would
+    /// misplace them below unrelated cells. When the ToolCall already has anchored derived cells
+    /// (they sit contiguously right after it — anchoring never interleaves foreign cells into the
+    /// group), the new cell is inserted after them so multiple emissions from one tool call keep
+    /// their original order.
     ///
-    /// When no ToolCall cell matches (unknown id, older gateway, lost
-    /// event), the cell is handed back via `Err` (boxed to keep the
-    /// `Result` small) so the caller can fall back to `push` without a
-    /// pre-check or clone.
-    ///
-    /// `cell_heights` needs no maintenance — it is resized/recomputed
-    /// lazily in `update_heights` on every draw (same as `remove_ask`).
+    /// When no ToolCall cell matches (unknown id, older gateway, lost event), the cell is handed back
+    /// via `Err` (boxed to keep the `Result` small) so the caller can fall back to `push` without a
+    /// pre-check or clone. `cell_heights` needs no maintenance — it is resized/recomputed lazily in
+    /// `update_heights` on every draw (same as `remove_ask`).
     pub fn insert_after_tool_call(
         &mut self,
         tool_call_id: &str,
@@ -210,13 +203,12 @@ impl ChatView {
 
     /// Remove the Ask cell with the given tool_call_id from the chat view.
     ///
-    /// Called when a *queued* (still unanswered) ask is dropped — the turn
-    /// ended or was interrupted and the backend cancelled its waiter.
+    /// Called when a *queued* (still unanswered) ask is dropped — the turn ended or was interrupted
+    /// and the backend cancelled its waiter.
     ///
-    /// Searched from the tail, like [`ChatView::update_ask_panel`]: the App
-    /// mirrors into — and therefore drops — the **newest** cell carrying the
-    /// id. A tool call may legitimately reuse its `tool_call_id` (the Bash
-    /// confirmation re-asks after a rejected answer), and a first-match
+    /// Searched from the tail, like [`ChatView::update_ask_panel`]: the App mirrors into — and
+    /// therefore drops — the **newest** cell carrying the id. A tool call may legitimately reuse its
+    /// `tool_call_id` (the Bash confirmation re-asks after a rejected answer), and a first-match
     /// removal would strand a stale card behind the live one.
     pub fn remove_ask(&mut self, tool_call_id: &str) {
         let idx = self.cells.iter().rposition(
@@ -425,15 +417,15 @@ impl ChatView {
 
     /// Append reasoning content to the last thinking block (for streaming).
     ///
-    /// Routes through the incremental `StreamingRender` (stable prefix +
-    /// active tail) — no full re-render per delta.
+    /// Routes through the incremental `StreamingRender` (stable prefix + active tail) — no full
+    /// re-render per delta.
     ///
     /// 承接规则：
-    /// * 最后一个 cell 是**未收尾**的思考块 → 继续这一段（重放半截块没有计时，
-    ///   第一个 live delta 在这里补上开始时刻）；
-    /// * 否则开新块 —— 开之前先把还挂着的活跃块冻上：锚定插入（Diff / Todo）、
-    ///   `/model` 面板、Ask 卡片都可能把"最后一块"与活跃块劈开，活跃块的
-    ///   冻结不能依赖"它是最后一个 cell"。
+    /// * 最后一个 cell 是**未收尾**的思考块 → 继续这一段（重放半截块没有计时，第一个 live
+    ///   delta 在这里补上开始时刻）；
+    /// * 否则开新块 —— 开之前先把还挂着的活跃块冻上：锚定插入（Diff / Todo）、`/model`
+    ///   面板、Ask 卡片都可能把"最后一块"与活跃块劈开，活跃块的冻结不能依赖"它是最后一个
+    ///   cell"。
     pub fn append_to_last_thinking(&mut self, text: &str) {
         self.append_to_last_thinking_at(text, std::time::Instant::now());
     }
@@ -535,6 +527,19 @@ impl ChatView {
         self.thinking_expanded
     }
 
+    /// 作废**每一个** cell 的行 / 高度缓存 —— 呈现参数（调色板）变了但内容没变。
+    ///
+    /// `CellContext`（调色板 / 思考模式 / 布局）不是缓存的键：行缓存按
+    /// `(宽度, 内容 generation)` 索引，所以任何影响**呈现**的全局变化都必须显式
+    /// 走一次这里，否则旧颜色会一直留在屏幕上直到内容真的变化。设置面板的实时
+    /// 预览换调色板走的就是这条路（与 [`Self::toggle_thinking_expansion`] 同一个
+    /// 问题的另一面）。
+    pub fn invalidate_cells(&mut self) {
+        for cached in self.cells.iter_mut() {
+            cached.invalidate();
+        }
+    }
+
     /// Set the result on a tool call block by index (from RenderContext).
     pub fn set_tool_result_by_index(&mut self, index: usize, result: String, success: bool) {
         if let Some(cached) = self.cells.get_mut(index)
@@ -616,13 +621,18 @@ impl ChatView {
 
     /// On resume, anchor the elapsed timer of still-running Bash cards.
     ///
-    /// A mid-execution Bash tool replays from the uncommitted Message
-    /// projection as a Pending cell with no `started_at` (the live ToolCall
-    /// event that would set it never arrives for a late subscriber). Set it to
-    /// the turn-start instant so the card shows elapsed time and keeps
-    /// advancing (via `tick_bash_timers`) instead of showing nothing. Cells
-    /// that already have a timer, or that already finished (Success/Failed),
-    /// are left untouched.
+    /// A mid-execution Bash tool replays from the uncommitted Message projection as a Pending cell
+    /// with no `started_at` (the live ToolCall event that would set it never arrives for a late
+    /// subscriber). Set it to the turn-start instant so the card shows elapsed time and keeps
+    /// advancing (via `tick_bash_timers`) instead of showing nothing. Cells that already have a timer,
+    /// or that already finished (Success/Failed), are left untouched.
+    ///
+    /// The turn start is only an *upper bound* on the tool's runtime, so the timer is anchored as
+    /// [`TimerAnchor::Turn`](crate::ui::cells::tool_call::TimerAnchor::Turn) — rendered as `≤837s`
+    /// and without the timeout denominator (`837s/300s` would read as "this Bash blew its timeout and
+    /// was not interrupted"). A result landing on such a cell — or the turn ending without one —
+    /// drops the timer outright: the frozen value would be a wrong duration forever (issue #108, see
+    /// [`Self::discard_pending_bash_timers`]).
     pub fn mark_pending_bash_running(&mut self, started_at: std::time::Instant) {
         for cached in &mut self.cells {
             if let ChatCell::ToolCall(block) = cached.cell()
@@ -632,7 +642,7 @@ impl ChatView {
             {
                 cached.mutate(|cell| {
                     if let ChatCell::ToolCall(block) = cell {
-                        block.start_timer(started_at);
+                        block.start_timer_from_turn(started_at);
                     }
                 });
             }
@@ -648,20 +658,18 @@ impl ChatView {
         }
     }
 
-    /// Refresh pending Bash timers at the frame boundary — invalidating a
-    /// cell only when its *displayed* elapsed value actually moves.
+    /// Refresh pending Bash timers at the frame boundary — invalidating a cell only when its
+    /// *displayed* elapsed value actually moves.
     ///
-    /// The heartbeat that calls this runs at 100 ms, but the display is
-    /// whole seconds (`format_bash_timer`), so nine out of ten ticks are
-    /// no-ops; invalidating on every tick re-rendered each pending cell
-    /// (full `to_lines` + the height recompute's `to_vec` clone) 10×/s for
-    /// a value that changed 1×/s.
+    /// The heartbeat that calls this runs at 100 ms, but the display is whole seconds
+    /// (`ToolCallBlock::timer_text`), so nine out of ten ticks are no-ops; invalidating on every tick
+    /// re-rendered each pending cell (full `to_lines` + the height recompute's `to_vec` clone) 10×/s
+    /// for a value that changed 1×/s.
     ///
-    /// Pending Bash tools are selected by their authoritative cell status —
-    /// there is no separately maintained counter, so a new status-mutating
-    /// path (e.g. `set_final_args`) cannot silently desync the timer. The
-    /// caller gates this on `turn.working` (a tool can only be pending
-    /// mid-turn), so idle sessions pay nothing for the scan.
+    /// Pending Bash tools are selected by their authoritative cell status — there is no separately
+    /// maintained counter, so a new status-mutating path (e.g. `set_final_args`) cannot silently
+    /// desync the timer. The caller gates this on `turn.working`, so idle sessions pay nothing for
+    /// the scan.
     pub fn tick_bash_timers(&mut self) {
         for cached in &mut self.cells {
             if let ChatCell::ToolCall(block) = cached.cell()
@@ -669,6 +677,27 @@ impl ChatView {
                 && block.status == ToolStatus::Pending
             {
                 cached.tick_bash_timer();
+            }
+        }
+    }
+
+    /// Turn end: drop the timers of Bash cards still pending. Normally each
+    /// card was finished by its own result; this catches cards whose result
+    /// event never arrived — the completion instant is unknown, so any value
+    /// shown would be the turn's elapsed time, not the tool's runtime (and it
+    /// would keep recomputing on later re-renders) — the fake-timeout reading
+    /// again (issue #108).
+    pub fn discard_pending_bash_timers(&mut self) {
+        for cached in &mut self.cells {
+            if let ChatCell::ToolCall(block) = cached.cell()
+                && block.tool_name == TOOL_BASH
+                && block.status == ToolStatus::Pending
+            {
+                cached.mutate(|cell| {
+                    if let ChatCell::ToolCall(block) = cell {
+                        block.discard_timer();
+                    }
+                });
             }
         }
     }
@@ -1102,17 +1131,123 @@ mod tests {
         assert_eq!(view.cells[idx].generation(), frozen);
     }
 
-    /// Regression (#54ee2e9): a Bash cell that reaches Pending through the
-    /// streaming-finalization path — `update_tool_args_by_index` →
-    /// `set_final_args`, which flips the status itself — must still be
-    /// selected by the timer tick.
+    /// #108 regression: `mark_pending_bash_running` (the sync / resume
+    /// re-anchor path) hands the card a *turn-anchored* timer — rendered
+    /// approximate and dropped when the result lands. Freezing it like the
+    /// exact timer would pin the turn's elapsed time onto the card as the
+    /// tool's duration, forever.
+    #[test]
+    fn test_turn_anchored_bash_timer_is_approximate_then_dropped() {
+        use crate::config::ThemePalette;
+
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 100", "timeout": 300}),
+            "tc-resume".into(),
+        )));
+        let idx = view.tool_call_index("tc-resume").unwrap();
+
+        // Resume replay: the execution instant was never observable — the
+        // timer anchors to the turn start (an upper bound on the runtime).
+        view.mark_pending_bash_running(Instant::now() - Duration::from_secs(5));
+
+        let header = {
+            let ChatCell::ToolCall(block) = view.cells[idx].cell() else {
+                panic!("expected a ToolCall cell");
+            };
+            block.to_lines(&ThemePalette::default(), 10)[0].to_string()
+        };
+        assert!(
+            header.contains("≤5s") || header.contains("≤6s"),
+            "elapsed must render as an upper bound: {header}"
+        );
+        assert!(
+            !header.contains("300"),
+            "the tool timeout must not appear: {header}"
+        );
+
+        // The tool finishes while we watch: the frozen turn value would read
+        // as a (wrong) duration — the timer is dropped instead.
+        view.set_tool_result_by_index(idx, "done".into(), true);
+        let header = {
+            let ChatCell::ToolCall(block) = view.cells[idx].cell() else {
+                panic!("expected a ToolCall cell");
+            };
+            block.to_lines(&ThemePalette::default(), 10)[0].to_string()
+        };
+        assert!(
+            !header.contains('≤'),
+            "turn-anchored timer must not outlive the result: {header}"
+        );
+        assert!(
+            !header.contains("s/"),
+            "no frozen timeout pair after the result: {header}"
+        );
+        assert!(
+            header.contains("sleep 100"),
+            "the card itself stays intact: {header}"
+        );
+    }
+
+    /// #108: `discard_pending_bash_timers` (turn end) drops the timer of a
+    /// card whose result never arrived — its completion instant is unknown,
+    /// so freezing "execution start → turn end" would render an upper bound
+    /// as an exact runtime. Without dropping, a live-derived value would also
+    /// keep growing across later re-renders.
+    #[test]
+    fn test_discard_pending_bash_timers_drops_timers_at_turn_end() {
+        use crate::config::ThemePalette;
+
+        let mut view = ChatView::new();
+        let mut exact = ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 1", "timeout": 300}),
+            "tc-exact".into(),
+        );
+        exact.start_timer(Instant::now() - Duration::from_secs(5));
+        view.push(ChatCell::ToolCall(exact));
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 100", "timeout": 300}),
+            "tc-turn".into(),
+        )));
+        view.mark_pending_bash_running(Instant::now() - Duration::from_secs(837));
+
+        let header = |view: &ChatView, id: &str| {
+            let idx = view.tool_call_index(id).unwrap();
+            let ChatCell::ToolCall(block) = view.cells[idx].cell() else {
+                panic!("expected a ToolCall cell");
+            };
+            block.to_lines(&ThemePalette::default(), 10)[0].to_string()
+        };
+        assert!(header(&view, "tc-exact").contains("/300s"));
+
+        view.discard_pending_bash_timers();
+
+        let exact = header(&view, "tc-exact");
+        assert!(
+            !exact.contains("s/") && !exact.contains('≤'),
+            "no duration survives a result-less turn end: {exact}"
+        );
+        assert!(exact.contains("sleep 1"), "card intact: {exact}");
+
+        let turn = header(&view, "tc-turn");
+        assert!(
+            !turn.contains('≤'),
+            "the turn-anchored timer is dropped too: {turn}"
+        );
+        assert!(turn.contains("sleep 100"), "card intact: {turn}");
+    }
+
+    /// A Bash cell that reaches Pending through the streaming-finalization path —
+    /// `update_tool_args_by_index` → `set_final_args`, which flips the status itself — must still be
+    /// selected by the timer tick (issue #54ee2e9).
     ///
-    /// The old materialized `pending_bash_count` missed this transition:
-    /// `set_final_args` set the status to Pending opaquely, so the separate
-    /// `set_tool_status_by_index` call saw an already-Pending cell and
-    /// skipped its bookkeeping, leaving the counter at zero. `tick_bash_timers`
-    /// then returned early and the timer froze at 0s until the result landed.
-    /// Selecting by authoritative status makes the path irrelevant.
+    /// A materialized `pending_bash_count` misses this transition: `set_final_args` sets the status
+    /// opaquely, so a separate `set_tool_status_by_index` call sees an already-Pending cell and skips
+    /// its bookkeeping, leaving the counter at zero — the timer then freezes at 0s until the result
+    /// lands. Selecting by authoritative status makes the path irrelevant.
     #[test]
     fn test_bash_timer_ticks_after_streaming_finalize() {
         let mut view = ChatView::new();
@@ -1609,7 +1744,7 @@ mod tests {
 
     #[test]
     fn freeze_is_self_healing_when_the_cell_order_shifts() {
-        // 回归（审查 B）：锚定插入 / 面板开合 / Ask 卡片会把活跃块从"最后
+        // 回归：锚定插入 / 面板开合 / Ask 卡片会把活跃块从"最后
         // 一块"挤走 —— 冻结与 tick 不许依赖缓存下标。
         let (p, l) = test_ctx();
         let ctx = CellContext {
@@ -1660,8 +1795,13 @@ mod tests {
         view.show_model_picker(crate::shared::panels::picker::ModelPanel::new(
             vec![wing_api_client::models::ProviderModels {
                 provider: "p".into(),
-                models: vec!["m".into()],
-                model_details: vec![],
+                models: vec![wing_api_client::models::ModelDetail {
+                    id: "m".into(),
+                    name: "m".into(),
+                    display_name: None,
+                    description: None,
+                    capabilities: Default::default(),
+                }],
             }],
             None,
         ));

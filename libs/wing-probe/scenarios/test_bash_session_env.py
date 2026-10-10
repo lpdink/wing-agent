@@ -26,7 +26,9 @@ COMMAND = "printf '%s' \"$WING_SESSION_ID\""
 
 #: 把网关进程 env 污染成"带旧值"——显式覆盖语义由此变成端到端确定性验证：
 #: 没有注入时命令会漏出 stale-outer-session，注入后必须是真实会话 id。
-@pytest.mark.probe_env(env_overrides={"WING_SESSION_ID": "stale-outer-session"})
+@pytest.mark.probe_env(
+    models=[ENV_MODEL], env_overrides={"WING_SESSION_ID": "stale-outer-session"}
+)
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_bash_sees_own_session_id_env(probe: Probe) -> None:

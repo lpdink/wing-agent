@@ -89,6 +89,7 @@ impl std::str::FromStr for InputFormat {
 #[derive(Debug, Clone)]
 pub struct StdioArgs {
     pub prompt: String,
+    /// 模型覆盖（`--model` 的值 = 引用词 model_id）。
     pub model: Option<String>,
     pub resume: Option<String>,
     /// `--session-id`: create-or-adopt (mutually exclusive with `resume`).
@@ -99,8 +100,9 @@ pub struct StdioArgs {
     pub append_system_prompt: Option<String>,
     pub max_turns: Option<u32>,
     pub effort: Option<String>,
-    pub provider: Option<String>,
     pub tools: Option<String>,
+    /// `--tool-call-id`: 定向回答一个挂起的 Ask（首条 prompt 直达 feedback waiter）。
+    pub tool_call_id: Option<String>,
     /// Tags attached to the session (created tagged; `-r` adds to the resumed one).
     pub tag: Vec<String>,
     pub output_format: OutputFormat,
@@ -149,8 +151,7 @@ pub fn resume_session_at_error(value: &str) -> String {
 ///    恢复既有会话，语义冲突，同时给出即报错（不猜调用方想要哪个）；
 /// 2. resume / adopt 下不生效的覆盖旗标（`--system-prompt` / `--append-system-prompt` /
 ///    `--max-turns`）打日志警告——它们**不该**改链上前缀，但"给了没反应"
-///    必须可诊断；
-/// 3. 任何路径下都不生效的 `--provider`（单独给出，没有 `--model`）同样出声。
+///    必须可诊断。
 ///
 /// 警告只进日志（`$WING_HOME/tui/logs/`）：stderr 留给错误与 `session_id:` 行，
 /// stdout 是协议流。
@@ -173,16 +174,6 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
         );
     }
 
-    // `--provider` 单独给出：切 provider 需要一个要切过去的模型（与
-    // `session/update` 的"model 与 provider 必须成对"同一口径）——它在**任何**
-    // 路径上都是 no-op，因此不看是否 resume。
-    if provider_without_model(args) {
-        tracing::warn!(
-            "--provider without --model is a no-op: switching provider needs a model \
-             to switch to; the session keeps its current provider"
-        );
-    }
-
     if args.resume.is_some() || args.session_id.is_some() {
         let ignored = resume_ignored_flags(args);
         if !ignored.is_empty() {
@@ -195,8 +186,7 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
     }
 
     // `--include-partial-messages` 只在 stream-json 输出下有意义（其余输出形态
-    // 没有协议通道可承载 `stream_event` 帧）——给了没反应必须可诊断，与
-    // `--provider` 单独给出同一口径。
+    // 没有协议通道可承载 `stream_event` 帧）——给了没反应必须可诊断。
     if partial_messages_without_stream_json_output(args) {
         tracing::warn!(
             "--include-partial-messages requires --output-format stream-json: without \
@@ -220,11 +210,6 @@ fn resume_ignored_flags(args: &StdioArgs) -> Vec<&'static str> {
         flags.push("--max-turns");
     }
     flags
-}
-
-/// `--provider` 给了但没有 `--model`：no-op（纯函数，便于单测）。
-fn provider_without_model(args: &StdioArgs) -> bool {
-    args.provider.is_some() && args.model.is_none()
 }
 
 /// `--include-partial-messages` 给了但输出不是 stream-json：no-op（纯函数，
@@ -256,8 +241,7 @@ pub fn session_id_mismatch_error(requested: &str, returned: &str) -> String {
 /// 创建语义的覆盖：全字段（stdio 一律 yolo）。
 fn create_override(args: &StdioArgs) -> AgentOverride {
     AgentOverride {
-        model: args.model.clone(),
-        provider: args.provider.clone(),
+        model_id: args.model.clone(),
         system_prompt: args.system_prompt.clone(),
         append_system_prompt: args.append_system_prompt.clone(),
         tools: normalize_tools(args.tools.as_deref()),
@@ -267,15 +251,14 @@ fn create_override(args: &StdioArgs) -> AgentOverride {
     }
 }
 
-/// resume（含 adopt）语义的覆盖：**只装** model / provider / effort / tools。
+/// resume（含 adopt）语义的覆盖：**只装** model_id / effort / tools。
 ///
 /// `--system-prompt` / `--append-system-prompt` / `--max-turns` 不在其中：它们
 /// 会改请求前缀或会话既有限额（网关侧也照此口径，见 `apply_resume_override`）。
-/// 四个字段全空时返回 `None`——不发一个全空的覆盖体。
+/// 三个字段全空时返回 `None`——不发一个全空的覆盖体。
 fn resume_override(args: &StdioArgs) -> Option<AgentOverride> {
     let override_ = AgentOverride {
-        model: args.model.clone(),
-        provider: args.provider.clone(),
+        model_id: args.model.clone(),
         system_prompt: None,
         append_system_prompt: None,
         tools: normalize_tools(args.tools.as_deref()),
@@ -283,10 +266,8 @@ fn resume_override(args: &StdioArgs) -> Option<AgentOverride> {
         effort: args.effort.clone(),
         yolo: None,
     };
-    let is_empty = override_.model.is_none()
-        && override_.provider.is_none()
-        && override_.tools.is_none()
-        && override_.effort.is_none();
+    let is_empty =
+        override_.model_id.is_none() && override_.tools.is_none() && override_.effort.is_none();
     (!is_empty).then_some(override_)
 }
 
@@ -689,7 +670,18 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         .filter(|k| !k.is_empty());
     let api_key_ref = api_key.as_deref();
 
-    // 2. WS connect.
+    // 2. HTTP client. 构造提前到 WS 之前：预检必须先于握手（setup mode 下网关
+    //    一律拒绝 WS，先连只会得到一句误导的"网关没起来"）。
+    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
+
+    // 3. 配置预检（D27）：不可用 → problems 走 **stderr** + EX_CONFIG（78），
+    //    stdout 一个字节都不写（它只承载协议帧）。
+    if let Some(code) = crate::cmd::setup::preflight_or_report(&http, &http_base).await {
+        return Ok(code);
+    }
+
+    // 4. WS connect.
     let mut gateway = GatewayClient::connect(&ws_url, api_key_ref)
         .await
         .map_err(|e| {
@@ -702,11 +694,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");
 
-    // 3. HTTP client.
-    let http = GatewayApiClient::new(http_base, api_key_ref)
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
-
-    // 4. Create, adopt, or resume the session.
+    // 5. Create, adopt, or resume the session.
     //
     // 三条路径的语义差：`-r/--resume` 恢复既有会话（覆盖按 resume 子集）；
     // `--session-id` 是 create-or-adopt（同一个端点两种结果，覆盖语义由网关
@@ -770,14 +758,14 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         resp.session_id
     };
 
-    // 5. HTTP subscribe.
+    // 6. HTTP subscribe.
     http.subscribe(&session_id, &client_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to subscribe to session: {e}"))?;
 
     tracing::info!("subscribed to session events");
 
-    // 6. Build renderer. stdout 只有一个出口：renderer 的协议帧与 stdin pump 的
+    // 7. Build renderer. stdout 只有一个出口：renderer 的协议帧与 stdin pump 的
     //    control 应答共享同一个 sink（见 `stdout::StdoutSink`）。
     let out = Arc::new(StdoutSink::stdout());
     let mut renderer = StdioRenderer::new(
@@ -788,7 +776,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         args.include_partial_messages,
     );
 
-    // 7. stdin pump：stream-json 输入模式下 stdin 是常驻通道——turn 期间仍要消费
+    // 8. stdin pump：stream-json 输入模式下 stdin 是常驻通道——turn 期间仍要消费
     //    control_request（interrupt 等）并应答（编排器在 await 它们）；常驻模式下
     //    每条 `user` 消息都要投递给驱动侧转发。
     let resident = args.is_resident();
@@ -808,7 +796,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         }));
     }
 
-    // 8. Resolve prompt: CLI arg > stdin (stream-json) > error.
+    // 9. Resolve prompt: CLI arg > stdin (stream-json) > error.
     let prompt = if !args.prompt.is_empty() {
         args.prompt.clone()
     } else if let Some(pump) = pump.as_mut() {
@@ -819,7 +807,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         anyhow::bail!("no prompt provided");
     };
 
-    // 9. Send prompt（首轮）。
+    // 10. Send prompt（首轮）。
     //
     // 常驻模式下空文本 prompt 不发：后端对空 content 不起轮（`run_turn` 直接
     // return、不发任何终态帧），发了就等于挂在这里等一个永不发生的终态。跳过它，
@@ -828,7 +816,10 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         tracing::warn!("empty prompt in resident mode: skipping the initial send");
         false
     } else {
-        if let Err(e) = http.send_message(&session_id, &prompt, None).await {
+        if let Err(e) = http
+            .send_message(&session_id, &prompt, args.tool_call_id.clone())
+            .await
+        {
             // 收尾纪律：还没进事件循环就退出——先把 pump 收干净，别把半收尾的
             // 任务 detach 到运行时回收。
             if let Some(pump) = pump.take() {
@@ -845,7 +836,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         tracing::info!("prompt sent, entering event loop");
     }
 
-    // 10. Event loop。区别只在退出裁决：
+    // 11. Event loop。区别只在退出裁决：
     //     - 一次性：终态帧结束进程（既有语义）；
     //     - 常驻（`--input-format stream-json` + `--output-format stream-json`）：
     //       终态帧只结束当前轮，EOF 收尾（空闲置退 / 在途轮等终态）。
@@ -866,7 +857,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         Ok(run_one_shot_loop(&mut gateway, &mut renderer).await)
     };
 
-    // 11. 收尾：通知 stdin pump 停下（有界等待进行中的应答写完——它可能恰好
+    // 12. 收尾：通知 stdin pump 停下（有界等待进行中的应答写完——它可能恰好
     //     跨过轮结束，直接 abort 会让编排器收不到响应）。
     if let Some(pump) = pump.take() {
         pump.finish().await;
@@ -1018,6 +1009,23 @@ mod tests {
             filtered,
             vec!["-p", "hello", "--include-partial-messages"],
             "已知 flag 保留、未知 flag 丢弃"
+        );
+    }
+
+    /// `--tool-call-id`（定向回答 Ask）同理：顶层定义 + 过滤器保留，缺一不可
+    /// ——丢了过滤器这一环，`wing -p ... --tool-call-id X` 会被静默降级成
+    /// 一条没有寻址信息的普通消息（ask 永远挂在那里等）。
+    #[test]
+    fn filter_keeps_tool_call_id_and_its_value() {
+        let args: Vec<String> = vec!["-p", "yes", "-r", "sid", "--tool-call-id", "call-1"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(
+            filtered,
+            vec!["-p", "yes", "-r", "sid", "--tool-call-id", "call-1"],
+            "已知 value flag 的取值也要跟着走"
         );
     }
 
@@ -1192,8 +1200,8 @@ mod tests {
             append_system_prompt: None,
             max_turns: None,
             effort: None,
-            provider: None,
             tools: None,
+            tool_call_id: None,
             tag: Vec::new(),
             output_format: OutputFormat::Text,
             input_format: InputFormat::Text,
@@ -1236,8 +1244,7 @@ mod tests {
     #[test]
     fn resume_override_carries_only_the_resume_subset() {
         let mut a = args();
-        a.model = Some("m".into());
-        a.provider = Some("p".into());
+        a.model = Some("ds-flash".into());
         a.effort = Some("high".into());
         a.tools = Some("Read,Bash".into());
         // 创建期旗标：不得进入 resume 覆盖。
@@ -1246,8 +1253,7 @@ mod tests {
         a.max_turns = Some(7);
 
         let override_ = resume_override(&a).expect("non-empty override");
-        assert_eq!(override_.model.as_deref(), Some("m"));
-        assert_eq!(override_.provider.as_deref(), Some("p"));
+        assert_eq!(override_.model_id.as_deref(), Some("ds-flash"));
         assert_eq!(override_.effort.as_deref(), Some("high"));
         assert_eq!(override_.tools, Some(vec!["Read".into(), "Bash".into()]));
         assert_eq!(override_.system_prompt, None);
@@ -1272,12 +1278,14 @@ mod tests {
     #[test]
     fn create_override_keeps_full_semantics_and_yolo() {
         let mut a = args();
+        a.model = Some("ds-flash".into());
         a.system_prompt = Some("SYS".into());
         a.append_system_prompt = Some("APP".into());
         a.max_turns = Some(7);
         a.tools = Some("default".into()); // 语义值丢弃 → None
 
         let override_ = create_override(&a);
+        assert_eq!(override_.model_id.as_deref(), Some("ds-flash"));
         assert_eq!(override_.system_prompt.as_deref(), Some("SYS"));
         assert_eq!(override_.append_system_prompt.as_deref(), Some("APP"));
         assert_eq!(override_.max_turns, Some(7));
@@ -1295,18 +1303,6 @@ mod tests {
     // ---- 不生效旗标的识别（纯函数） ----
 
     #[test]
-    fn provider_without_model_is_recognised() {
-        let mut a = args();
-        assert!(!provider_without_model(&a)); // 都没有 = 没问题
-
-        a.provider = Some("p".into());
-        assert!(provider_without_model(&a), "单独的 --provider 是 no-op");
-
-        a.model = Some("m".into());
-        assert!(!provider_without_model(&a), "--provider + --model 成对生效");
-    }
-
-    #[test]
     fn resume_ignored_flags_lists_create_time_flags() {
         let mut a = args();
         assert!(resume_ignored_flags(&a).is_empty());
@@ -1318,10 +1314,6 @@ mod tests {
             resume_ignored_flags(&a),
             vec!["--system-prompt", "--append-system-prompt", "--max-turns"]
         );
-
-        // provider 不由这里管（它在任何路径上都是 no-op，单独一套消息）。
-        a.provider = Some("p".into());
-        assert!(!resume_ignored_flags(&a).contains(&"--provider"));
     }
 
     // ---- --include-partial-messages（流式的可诊断 no-op） ----

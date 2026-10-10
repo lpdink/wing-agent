@@ -255,7 +255,8 @@ export class GatewayHttpClient {
    * `POST /api/session/update`.
    *
    * Only the fields present in `request` are sent; the backend rejects an empty
-   * update (400) and requires `model` + `provider` to travel together.
+   * update (400). The model is switched by reference word (`model_id` alone) —
+   * the legacy `model` + `provider` pair is gone and is never encoded.
    */
   async updateSession(
     request: { readonly session_id: string } & Partial<Omit<UpdateSessionRequest, 'session_id'>>,
@@ -265,8 +266,7 @@ export class GatewayHttpClient {
       path: '/api/session/update',
       body: jsonBody({
         session_id: request.session_id,
-        model: request.model ?? null,
-        provider: request.provider ?? null,
+        model_id: request.model_id ?? null,
         agent: request.agent ?? null,
         title: request.title ?? null,
         thinking: request.thinking ?? null,
@@ -317,7 +317,7 @@ export class GatewayHttpClient {
     return this.request({ method: 'GET', path: '/api/commands', decode: decodeCommandsResponse });
   }
 
-  /** `GET /api/models` — models grouped by provider. */
+  /** `GET /api/models` — the catalog, grouped by provider (object entries). */
   async listModels(): Promise<ModelsResponse> {
     return this.request({ method: 'GET', path: '/api/models', decode: decodeModelsResponse });
   }
@@ -478,8 +478,7 @@ function queryString(query: Readonly<Record<string, string>> | undefined): strin
 
 function agentOverrideBody(agent: AgentOverride): JsonObject {
   return jsonBody({
-    model: agent.model,
-    provider: agent.provider,
+    model_id: agent.model_id,
     system_prompt: agent.system_prompt,
     append_system_prompt: agent.append_system_prompt,
     tools: agent.tools === null ? null : [...agent.tools],

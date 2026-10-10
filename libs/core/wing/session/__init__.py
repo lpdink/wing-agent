@@ -7,6 +7,7 @@
         Session, serialize_message, tool_refs,
         SessionManager, SessionReaper,
         AgentTemplate, AgentTemplateManager,
+        ModelBinding,
         AgentOverride,
     )
 
@@ -14,10 +15,12 @@
 ``manager``（SessionManager —— 多会话 / fork / resume / 逐出）·
 ``reaper``（SessionReaper —— 空闲会话逐出）·
 ``template``（AgentTemplate —— 配置 agents: 的 model/tools/prompt/skills/rules）·
+``model_binding``（生效模型绑定 —— resume 链的只读投影，会话列表的模型列）·
 ``override``（AgentOverride —— 创建期参数覆盖的领域类型）。
 """
 
 from .manager import SessionManager
+from .model_binding import ModelBinding
 from .override import AgentOverride
 from .reaper import SessionReaper
 from .session import Session, serialize_message, tool_refs
@@ -28,6 +31,7 @@ __all__ = [
     "AgentOverride",
     "AgentTemplate",
     "AgentTemplateManager",
+    "ModelBinding",
     "Session",
     "SessionManager",
     "SessionReaper",

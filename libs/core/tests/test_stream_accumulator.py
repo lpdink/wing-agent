@@ -572,9 +572,15 @@ async def _interrupted_agent(
     client = _FakeClient(lines)
     provider._client = client  # ty: ignore[invalid-assignment]
 
+    # 定制实例登记进共享池：agent 只持 name，解析一律经池（本测试注入的
+    # 假 client 就是靠这一步生效的）。
+    import wing.provider.pool as pool_mod
+
+    pool_mod._pool._providers[provider.name] = provider
+
     session = runtime.create_session()
     agent = session.agent
-    agent.set_model("test-model", provider)
+    agent.set_model("test-model", provider.name)
 
     await agent.post("go")
 

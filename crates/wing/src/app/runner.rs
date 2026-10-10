@@ -11,10 +11,16 @@
 use tokio::sync::mpsc;
 
 use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
+use crate::app::settings::GatewaySaveReport;
+use crate::app::settings::InterfaceSaveReport;
+use crate::app::settings::PendingSettingsSave;
+use crate::app::settings::changed_leaf_paths;
+use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
+use crate::util::program_status;
 use crate::util::title;
 
 use super::App;
@@ -31,13 +37,17 @@ const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(
 /// Execute a single intent, performing any necessary I/O.
 ///
 /// `transport` is `None` when the gateway connection is lost; intents that
-/// require the gateway are silently discarded in that case.
+/// require the gateway are silently discarded in that case. `*endpoint` is the
+/// gateway the retry ladder would reconnect to — an explicit restart
+/// ([`AppIntent::RestartGateway`]) may rewrite it (the config file is the
+/// source of truth for host:port, and `Ctrl+R` exists to apply that change).
 ///
 /// Fetch-type intents are spawned as background tasks; their results arrive
 /// asynchronously via `fetch_tx`.
 pub async fn execute_intent(
     app: &mut App,
-    transport: &Option<Transport>,
+    transport: &mut Option<Transport>,
+    endpoint: &mut GatewayEndpoint,
     terminal: &mut WingTerminal,
     intent: AppIntent,
     fetch_tx: &mpsc::Sender<FetchResult>,
@@ -263,8 +273,7 @@ pub async fn execute_intent(
             }
         }
         AppIntent::UpdateSession {
-            model,
-            provider,
+            model_id,
             agent,
             title,
             thinking,
@@ -275,20 +284,21 @@ pub async fn execute_intent(
             if let Some(t) = transport {
                 let req = wing_api_client::models::UpdateSessionRequest {
                     session_id: app.session_id.clone(),
-                    model: model.clone(),
-                    provider: provider.clone(),
+                    model_id: model_id.clone(),
                     agent: agent.clone(),
                     title: title.clone(),
                     thinking,
                     reasoning_effort: reasoning_effort.clone(),
                     yolo,
                     workspace: workspace.clone(),
+                    // TUI 没有工具集编辑器：工具集切换只由 `wing update --tools`
+                    // 从 CLI 驱动（同端点，键缺席 = 不动）。
+                    tools: None,
                 };
                 match t.http.update_session(&req).await {
                     Ok(_) => apply_update_session(
                         app,
-                        model,
-                        provider,
+                        model_id,
                         agent,
                         title,
                         thinking,
@@ -575,6 +585,119 @@ pub async fn execute_intent(
                 tracing::warn!("failed to send OSC 9 notification: {e}");
             }
         }
+        AppIntent::SetProgramStatus(report) => {
+            let writer = terminal.backend_mut();
+            if let Err(e) = program_status::write(writer, &report) {
+                tracing::warn!("failed to report program status: {e}");
+            }
+        }
+        // ---- 设置面板 ----
+        AppIntent::FetchSettings | AppIntent::ReloadSettings => {
+            if let Some(t) = transport {
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    // schema 是静态目录、get 是当前文档：并发两个请求一次回齐
+                    // （面板打开 / 后台刷新 / R 重载三条路径共用这一份结果）。
+                    let (schema, state) = tokio::join!(http.settings_schema(), http.settings_get());
+                    let payload = match (schema, state) {
+                        (Ok(schema), Ok(state)) => FetchPayload::Settings {
+                            schema: Box::new(schema),
+                            state: Box::new(state),
+                        },
+                        (Err(e), _) | (_, Err(e)) => FetchPayload::Toast {
+                            message: format!("载入设置失败：{e}"),
+                            is_error: true,
+                        },
+                    };
+                    let _ = tx
+                        .send(FetchResult {
+                            session_id,
+                            payload,
+                        })
+                        .await;
+                });
+            }
+        }
+        AppIntent::SaveSettings {
+            gateway,
+            base,
+            interface,
+            gateway_dirty,
+            interface_dirty,
+        } => {
+            // Interface 半边：本地原子写（几 KB + `.bak`），同步做 —— 用户按下 `s`
+            // 之后本地文件是不是写成了，不该等一个 HTTP RTT。
+            let report = if interface_dirty {
+                let previous = crate::config::store::read_interface_doc()
+                    .ok()
+                    .map(|read| read.doc);
+                let changed = changed_leaf_paths(previous.as_ref(), &interface).len();
+                match crate::config::store::write_interface_doc(&interface) {
+                    Ok(outcome) => {
+                        let report = InterfaceSaveReport::Ok {
+                            path: outcome.path.display().to_string(),
+                            changed,
+                        };
+                        app.settle_interface_save(&report, &interface);
+                        report
+                    }
+                    Err(e) => {
+                        let report = InterfaceSaveReport::Err {
+                            message: e.to_string(),
+                        };
+                        app.settle_interface_save(&report, &interface);
+                        report
+                    }
+                }
+            } else {
+                InterfaceSaveReport::Skipped
+            };
+            // 两半的状态先存住：合并回执（与缓存回写）都读这一份。
+            app.settings_save = Some(PendingSettingsSave {
+                interface: report,
+                document: (*gateway).clone(),
+            });
+            // Gateway 半边：异步（回执两半合体，不阻塞主循环）。
+            if gateway_dirty {
+                if let Some(t) = transport.as_ref() {
+                    let http = t.http.clone();
+                    let session_id = app.session_id.clone();
+                    let tx = fetch_tx.clone();
+                    let request = wing_api_client::models::SettingsSetRequest {
+                        base: Some(base),
+                        document: (*gateway).clone(),
+                    };
+                    tokio::spawn(async move {
+                        let payload = match http.settings_set(&request).await {
+                            Ok(response) => FetchPayload::SettingsSaved(Box::new(response)),
+                            Err(e) => FetchPayload::SettingsSaveError {
+                                message: e.to_string(),
+                                conflict: e.is_conflict(),
+                            },
+                        };
+                        let _ = tx
+                            .send(FetchResult {
+                                session_id,
+                                payload,
+                            })
+                            .await;
+                    });
+                } else {
+                    app.settle_gateway_save(GatewaySaveReport::Failed {
+                        message: "网关未连接".to_string(),
+                        conflict: false,
+                    });
+                }
+            } else {
+                // 只有 Interface 半边：立刻收口（回执只说那一半）。
+                app.settle_gateway_save(GatewaySaveReport::Skipped);
+            }
+        }
+        AppIntent::RestartGateway => {
+            super::settings::restart_gateway(app, transport, endpoint).await;
+        }
     }
 }
 
@@ -584,8 +707,7 @@ pub async fn execute_intent(
 #[allow(clippy::too_many_arguments)]
 fn apply_update_session(
     app: &mut App,
-    model: Option<String>,
-    provider: Option<String>,
+    model_id: Option<String>,
     agent: Option<String>,
     title: Option<String>,
     thinking: Option<bool>,
@@ -595,21 +717,33 @@ fn apply_update_session(
 ) {
     let on_off = |b: bool| if b { "on" } else { "off" };
 
-    // Optimistic display label for the new model, resolved from the last
-    // `/api/models` snapshot (the panel that produced this switch rendered
-    // from it). The gateway's `session_state_changed` event overwrites it with
-    // the authoritative declaration right after — same value in practice.
-    let model_display_name = model
+    // Optimistic model identity, resolved from the last `/api/models` snapshot
+    // (the panel that produced this switch rendered from it): call name,
+    // provider and display label. When the snapshot does not cover the id
+    // (stale cache), the id itself stands in for the call name — the gateway's
+    // `session_state_changed` right after carries the authoritative values.
+    let model = model_id
         .as_deref()
-        .and_then(|m| app.model_display_label(provider.as_deref(), m));
+        .map(|id| match app.model_declaration(id) {
+            Some((name, provider, label)) => crate::ui::status_bar::ModelUpdate {
+                id: Some(id.to_string()),
+                name: name.to_string(),
+                provider: Some(provider.to_string()),
+                display_name: (label != id).then(|| label.to_string()),
+            },
+            None => crate::ui::status_bar::ModelUpdate {
+                id: Some(id.to_string()),
+                name: id.to_string(),
+                provider: None,
+                display_name: None,
+            },
+        });
 
     // Build toast parts from non-None fields. The model part goes through the
-    // shared formatter so the display label (and the raw name on its own
-    // line) match the picker's immediate toast exactly.
+    // shared formatter so the display label (and the raw id on its own line)
+    // match the picker's immediate toast exactly.
     let parts: Vec<String> = [
-        model
-            .as_deref()
-            .map(|m| app.model_switch_toast(provider.as_deref(), m)),
+        model_id.as_deref().map(|id| app.model_switch_toast(id)),
         agent.as_ref().map(|a| format!("Agent: {a}")),
         title.as_ref().map(|t| format!("Title: {t}")),
         thinking.map(|t| format!("Think: {}", on_off(t))),
@@ -623,18 +757,8 @@ fn apply_update_session(
 
     // Apply to local status.
     let affects_list = title.is_some() || workspace.is_some();
-    app.status.apply_session_update(
-        model,
-        model_display_name,
-        agent,
-        title,
-        thinking,
-        reasoning_effort,
-        yolo,
-    );
-    if let Some(p) = provider {
-        app.status.provider = Some(p);
-    }
+    app.status
+        .apply_session_update(model, agent, title, thinking, reasoning_effort, yolo);
 
     if let Some(w) = workspace {
         app.status.workdir = Some(w);
@@ -683,7 +807,6 @@ mod tests {
             &mut app,
             None,
             None,
-            None,
             Some("New Title".into()),
             None,
             None,
@@ -698,7 +821,6 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
             None,
             None,
             None,
@@ -722,18 +844,19 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
         assert!(!app.popup.cache.sessions.is_empty());
     }
 
+    /// The optimistic update resolves the whole identity group (call name /
+    /// provider / label) from the `/api/models` snapshot by **id**.
     #[test]
-    fn test_update_session_syncs_provider() {
+    fn test_update_session_resolves_the_identity_from_the_snapshot() {
         let mut app = app_with_cached_sessions();
+        app.model_sources = vec![labeled_sources()];
         apply_update_session(
             &mut app,
-            Some("gpt-4o".into()),
-            Some("alt".into()),
+            Some("dfmodel".into()),
             None,
             None,
             None,
@@ -741,8 +864,34 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(app.status.model, "gpt-4o");
-        assert_eq!(app.status.provider.as_deref(), Some("alt"));
+        assert_eq!(app.status.model, "dfmodel");
+        assert_eq!(app.status.model_id.as_deref(), Some("dfmodel"));
+        assert_eq!(app.status.provider.as_deref(), Some("qoder"));
+        assert_eq!(
+            app.status.model_display_name.as_deref(),
+            Some("DeepSeek-Flash")
+        );
+    }
+
+    /// id 不在快照里（陈旧缓存）：id 顶上调用名，provider 缺席——权威值随
+    /// `session_state_changed` 到达。
+    #[test]
+    fn test_update_session_with_an_unknown_id_keeps_the_id_as_the_fallback() {
+        let mut app = app_with_cached_sessions();
+        apply_update_session(
+            &mut app,
+            Some("mystery-id".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(app.status.model, "mystery-id");
+        assert_eq!(app.status.model_id.as_deref(), Some("mystery-id"));
+        assert_eq!(app.status.provider, None);
+        assert_eq!(app.status.model_display_name, None);
     }
 
     #[test]
@@ -750,7 +899,6 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
             None,
             None,
             None,
@@ -762,13 +910,13 @@ mod tests {
         assert!(!app.popup.cache.sessions.is_empty());
     }
 
-    /// Provider group declaring a display name for `dfmodel` — the source the
+    /// Model group declaring a display name for `dfmodel` — the source the
     /// close-to-the-panel optimistic label is resolved from.
     fn labeled_sources() -> wing_api_client::models::ProviderModels {
         wing_api_client::models::ProviderModels {
             provider: "qoder".into(),
-            models: vec!["dfmodel".into()],
-            model_details: vec![wing_api_client::models::ModelDetail {
+            models: vec![wing_api_client::models::ModelDetail {
+                id: "dfmodel".into(),
                 name: "dfmodel".into(),
                 display_name: Some("DeepSeek-Flash".into()),
                 description: None,
@@ -785,7 +933,6 @@ mod tests {
         apply_update_session(
             &mut app,
             Some("dfmodel".into()),
-            Some("qoder".into()),
             None,
             None,
             None,
@@ -811,14 +958,18 @@ mod tests {
         let mut app = app_with_cached_sessions();
         app.model_sources = vec![wing_api_client::models::ProviderModels {
             provider: "p".into(),
-            models: vec!["plain".into()],
-            model_details: vec![],
+            models: vec![wing_api_client::models::ModelDetail {
+                id: "plain".into(),
+                name: "plain".into(),
+                display_name: None,
+                description: None,
+                capabilities: Default::default(),
+            }],
         }];
 
         apply_update_session(
             &mut app,
             Some("plain".into()),
-            Some("p".into()),
             None,
             None,
             None,

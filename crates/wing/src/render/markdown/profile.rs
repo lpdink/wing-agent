@@ -1,30 +1,22 @@
 //! Rendering profile — which kind of cell text belongs to.
 //!
-//! Reasoning (`Thinking`) and assistant content (`Content`) run through the
-//! same markdown pipeline and produce the same code blocks. Three rules are
-//! owned here so the full renderer and the streaming engine cannot drift
-//! apart:
+//! Reasoning (`Thinking`) and assistant content (`Content`) run through the same markdown pipeline and
+//! produce the same code blocks. Three rules are owned here so the full renderer and the streaming
+//! engine cannot drift apart:
 //!
-//! - **Inline fence normalization** (`text:```rust` → a real fence): only
-//!   `Content`. Reasoning discusses code fences in prose, so normalizing
-//!   would turn every mention of ``` into a spurious code block.
-//! - **Indented (4-space) blocks**: `Content` keeps them as code blocks
-//!   (CommonMark: an indented block *is* code); `Thinking` renders them as
-//!   prose, because reasoning uses indentation for nesting — models indent
-//!   sub-thoughts far more often than they write unfenced code.
-//! - **Math delimiter normalization** (`\(…\)` → `$…$`, `\[…\]` → `$$…$$`,
-//!   a bare `\begin{align}…\end{align}` → `$$…$$`): **the same in both
-//!   profiles**. It is a source rewrite done before parsing (see
-//!   [`super::math`]), which is what makes it safe to apply to a streaming
-//!   slice as well as to the whole document; a formula is a formula whether
-//!   the model wrote it in reasoning or in the answer, and the rule only
-//!   fires on a *complete*, code-free span — an unterminated `\(` or one
-//!   that spans a blank line stays the literal text it is today, so it
-//!   cannot swallow prose either way.
+//! - **Inline fence normalization** (`text:```rust` → a real fence): only `Content`. Reasoning discusses
+//!   code fences in prose, so normalizing would turn every mention of ``` into a spurious code block.
+//! - **Indented (4-space) blocks**: `Content` keeps them as code blocks (CommonMark: an indented block
+//!   *is* code); `Thinking` renders them as prose, because reasoning uses indentation for nesting.
+//! - **Math delimiter normalization** (`\(…\)` → `$…$`, `\[…\]` → `$$…$$`, a bare
+//!   `\begin{align}…\end{align}` → `$$…$$`): **the same in both profiles**. It is a source rewrite done
+//!   before parsing (see [`super::math`]), which is what makes it safe on a streaming slice as well as on
+//!   the whole document; the rule only fires on a *complete*, code-free span — an unterminated `\(` or one
+//!   spanning a blank line stays literal text, so it cannot swallow prose either way.
 //!
-//! Everything else (fenced code blocks, highlighting, gutters) is shared: a
-//! code block looks the same in both profiles, only the surrounding prose is
-//! recolored by the cell compose (see [`super::thinking_segment_style`]).
+//! Everything else (fenced code blocks, highlighting, gutters) is shared: a code block looks the same in
+//! both profiles, only the surrounding prose is recolored by the cell compose (see
+//! [`super::thinking_segment_style`]).
 
 /// Nesting budget for indented-as-prose blocks (see
 /// [`Profile::indented_blocks_are_prose`]).

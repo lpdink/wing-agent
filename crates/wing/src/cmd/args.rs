@@ -12,15 +12,9 @@ pub struct RunArgs {
     #[arg(short = 'p', long = "prompt")]
     pub prompt: String,
 
-    /// Override model name.
+    /// Override model id (references `providers[].models` in the gateway config).
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
-
-    /// Override provider name (references config `providers[].name`).
-    /// When set with `--model`, switches to that provider's endpoint; a lone
-    /// `--provider` (no `--model`) is a no-op.
-    #[arg(long = "provider")]
-    pub provider: Option<String>,
 
     /// Resume an existing session by ID.
     #[arg(short = 'r', long = "resume")]
@@ -45,6 +39,15 @@ pub struct RunArgs {
     /// Override tools (comma-separated). If not set, uses template defaults.
     #[arg(long = "tools")]
     pub tools: Option<String>,
+
+    /// Answer a pending Ask by its tool_call_id — routes the prompt to that
+    /// ask's feedback waiter instead of the session inbox.
+    ///
+    /// Find the id with `wing asks <sid>` (the pending-ask query): a pending
+    /// ask's tool call is not on the chain yet, so `wing tail` cannot see it.
+    /// A stale id (no live waiter) falls back to a normal message.
+    #[arg(long = "tool-call-id")]
+    pub tool_call_id: Option<String>,
 
     /// Attach tags to the session (repeatable / comma-separated).
     ///

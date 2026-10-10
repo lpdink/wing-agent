@@ -290,7 +290,11 @@ class Probe:
         workspace: str | Path | None = None,
         **kwargs: Any,
     ) -> Session:
-        """创建一个会话并订阅其事件流（``workspace`` 缺省 = ``probe.workspace``）。"""
+        """创建一个会话并订阅其事件流（``workspace`` 缺省 = ``probe.workspace``）。
+
+        ``model`` 的值是 **model_id**（引用配置 ``providers[].models`` 的 id；
+        缺省 id = 调用名，所以场景私有的 ``probe/...`` 名字仍可直接用）。
+        """
         target = self.workspace if workspace is None else Path(workspace)
         target.mkdir(parents=True, exist_ok=True)
         return await self.driver_required.session(

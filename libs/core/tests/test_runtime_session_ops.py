@@ -49,10 +49,12 @@ def mock_session():
     session.session_name = "Test Session"
     session.template_name = "default"
     session.agent.model = "gpt-4o"
+    session.agent.provider_name = "default"
     session.agent.model_display_name = None
+    session.model_id = "gpt-4o"
     session.agent.yolo = False
-    session.agent.model_provider.thinking = False
-    session.agent.model_provider.reasoning_effort = None
+    session.agent.thinking = False
+    session.agent.reasoning_effort = None
     session.update_state = AsyncMock()
     return session
 
@@ -68,12 +70,14 @@ class TestRuntimeUpdateSessionEvents:
     async def test_update_model_emits_event_with_none_for_unchanged_fields(
         self, runtime, mock_session, cleanup_event_bus
     ):
-        """只改 model 时，event 中其他字段为 None；model_display_name 与 model 同刻。"""
+        """只改 model_id 时，event 中其他字段为 None；三件套与展示名同刻下发。"""
         runtime.sm._sessions["test-session"] = mock_session
         mock_session.agent.model = "gpt-4o-mini"
+        mock_session.agent.provider_name = "alt"
         mock_session.agent.model_display_name = "Flash Mini"
+        mock_session.model_id = "gpt-4o-mini"
 
-        await runtime.update_session("test-session", model="gpt-4o-mini")
+        await runtime.update_session("test-session", model_id="gpt-4o-mini")
 
         events = [
             e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
@@ -81,6 +85,8 @@ class TestRuntimeUpdateSessionEvents:
         assert len(events) == 1
         event = events[0]
         assert event.model == "gpt-4o-mini"
+        assert event.model_id == "gpt-4o-mini"
+        assert event.provider_name == "alt"
         assert event.model_display_name == "Flash Mini"
         assert event.thinking is None
         assert event.yolo is None
@@ -98,7 +104,7 @@ class TestRuntimeUpdateSessionEvents:
     ):
         """model 未被触碰时（如只切 thinking）不携带展示名——它与 model 同刻发放。"""
         runtime.sm._sessions["test-session"] = mock_session
-        mock_session.agent.model_provider.thinking = True
+        mock_session.agent.thinking = True
 
         await runtime.update_session("test-session", thinking=True)
 
@@ -107,6 +113,8 @@ class TestRuntimeUpdateSessionEvents:
         ]
         assert len(events) == 1
         assert events[0].model is None
+        assert events[0].model_id is None
+        assert events[0].provider_name is None
         assert events[0].model_display_name is None
 
     @pytest.mark.asyncio
@@ -116,9 +124,10 @@ class TestRuntimeUpdateSessionEvents:
         """模型无展示名声明（字符串形态 / 未声明）时下发 None，前端回落调用名。"""
         runtime.sm._sessions["test-session"] = mock_session
         mock_session.agent.model = "plain-model"
+        mock_session.model_id = "plain-model"
         mock_session.agent.model_display_name = None
 
-        await runtime.update_session("test-session", model="plain-model")
+        await runtime.update_session("test-session", model_id="plain-model")
 
         events = [
             e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
@@ -143,13 +152,13 @@ class TestRuntimeUpdateSessionEvents:
         mock_session.agent.model = "gpt-4o-mini"
         mock_session.session_name = "new title"
         mock_session.template_name = "coder"
-        mock_session.agent.model_provider.thinking = True
+        mock_session.agent.thinking = True
         mock_session.agent.yolo = True
 
         await runtime.update_session(
             "test-session",
             agent="coder",
-            model="gpt-4o-mini",
+            model_id="gpt-4o-mini",
             title="new title",
             thinking=True,
             yolo=True,
@@ -178,8 +187,8 @@ class TestRuntimeUpdateSessionEvents:
         runtime.sm._sessions["test-session"] = mock_session
 
         # 模拟 switch_template 后的 agent 状态
-        mock_session.agent.model_provider.thinking = True
-        mock_session.agent.model_provider.reasoning_effort = "medium"
+        mock_session.agent.thinking = True
+        mock_session.agent.reasoning_effort = "medium"
         mock_session.agent.yolo = False
         mock_session.agent.model = "gpt-4o"
         mock_session.template_name = "coder"
@@ -198,6 +207,8 @@ class TestRuntimeUpdateSessionEvents:
         event = events[0]
         assert event.agent == "coder"
         assert event.model == "gpt-4o"
+        assert event.model_id == "gpt-4o"
+        assert event.provider_name == "default"
         # agent switch 应报告重置后的值
         assert event.thinking is True
         assert event.reasoning_effort == "medium"
@@ -208,7 +219,7 @@ class TestRuntimeUpdateSessionEvents:
     async def test_update_session_not_found_raises_lookup_error(self, runtime):
         """session 不存在时 raise LookupError（route 映射到 404）。"""
         with pytest.raises(LookupError, match="Session not found"):
-            await runtime.update_session("nonexistent", model="gpt-4o")
+            await runtime.update_session("nonexistent", model_id="gpt-4o")
 
     @pytest.mark.asyncio
     async def test_update_agent_template_not_found_raises_lookup_error(
@@ -234,7 +245,7 @@ class TestRuntimeUpdateSessionEvents:
         """
         runtime.sm._sessions["test-session"] = mock_session
 
-        await runtime.update_session("test-session", model="gpt-4o-mini")
+        await runtime.update_session("test-session", model_id="gpt-4o-mini")
 
         for event in cleanup_event_bus:
             if event.target is not None:
@@ -269,21 +280,26 @@ class TestThinkingTogglePassthrough:
         mock_session.update_state.assert_awaited_once()
 
 
-class TestReloadProviderIsolation:
-    """reload_system 的 provider 驱逐重建：单 session 失败不阻断其余。"""
+class TestReloadProviderPool:
+    """reload_system 的 provider 步骤：共享池重建（先建后换，失败不改动池）。"""
 
     @pytest.mark.asyncio
-    async def test_one_bad_session_does_not_skip_rest(self, runtime, monkeypatch):
+    async def test_pool_reset_failure_keeps_pool_and_reports_item(
+        self, runtime, monkeypatch
+    ):
         from wing.config import get_config
 
-        s1 = runtime.create_session()
-        s2 = runtime.create_session()
+        session = runtime.create_session()
+        old = session.agent.model_provider
 
-        s1.agent.rebuild_providers = AsyncMock(side_effect=RuntimeError("boom"))
-        s2.agent.rebuild_providers = AsyncMock()
-        monkeypatch.setattr("wing.provider.registry.reset_registry", AsyncMock())
+        import wing.provider.pool as pool_mod
+
+        def _boom(cfg):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(pool_mod, "create_provider", _boom)
         # 隔离环境配置：CI 无用户 config 文件，load_config(reload=True) 会因
-        # 文件缺失提前中止 reload（本测试只关心 provider 重建的失败隔离）。
+        # 文件缺失提前中止 reload（本测试只关心 provider 重建的失败语义）。
         monkeypatch.setattr(
             "wing.config.load_config", lambda reload=False: get_config()
         )
@@ -292,7 +308,29 @@ class TestReloadProviderIsolation:
 
         provider_item = next(i for i in result.items if i.name == "provider")
         assert provider_item.ok is False
-        assert "rebuilt 1 session(s)" in provider_item.detail
         assert "boom" in provider_item.detail
-        # 坏 session 之后的 session 仍然被重建（不被跳过）
-        s2.agent.rebuild_providers.assert_awaited_once()
+        # 先建后换：失败不改动池——旧实例未关闭、仍被解析（会话不被钉死）
+        assert old._client.is_closed is False
+        assert session.agent.model_provider is old
+
+    @pytest.mark.asyncio
+    async def test_pool_reset_replaces_instances_and_reports_count(
+        self, runtime, monkeypatch
+    ):
+        from wing.config import get_config
+
+        session = runtime.create_session()
+        old = session.agent.model_provider
+        monkeypatch.setattr(
+            "wing.config.load_config", lambda reload=False: get_config()
+        )
+
+        result = await runtime.reload_system()
+
+        provider_item = next(i for i in result.items if i.name == "provider")
+        assert provider_item.ok is True
+        assert provider_item.detail == "rebuilt 2 provider(s)"  # conftest 配置两个
+        # 池换新：旧实例退场关闭（无在途），后续请求走新实例
+        assert old._client.is_closed is True
+        assert session.agent.model_provider is not old
+        assert session.agent.model_provider._client.is_closed is False

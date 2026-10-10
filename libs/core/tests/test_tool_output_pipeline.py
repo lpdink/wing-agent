@@ -326,10 +326,11 @@ class TestSessionWiring:
             assert media.read(mid) == payload
             assert media.read("cd" * 32) is None
 
-            # 初始 provider 与切换/懒创建的 provider 都拿到同一 MediaAccess
-            assert agent.model_provider._media is agent.media
-            alt = agent.get_or_create_provider("alt")
-            assert alt._media is agent.media
+            # 会话参数是媒体读接口的唯一注入点（provider 实例无会话状态）；
+            # 切 provider 前后同一 agent 的 request_options() 都带上它。
+            assert agent.request_options().media is agent.media
+            agent.set_model(agent.model, "alt")
+            assert agent.request_options().media is agent.media
         finally:
             await agent.shutdown()
 

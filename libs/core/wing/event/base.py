@@ -67,6 +67,14 @@ class SessionInfo(BaseModel):
     tag_meta：每个标签的记录（``metadata.tag_meta`` 的投影；键集 ⊆ ``tags``，
     无记录为空字典）——当前只有 ``added_at`` 打标时间（本地 naive ISO），
     前端据此做「后 pin 的排在更前面」这类**前端语义**的排序。
+
+    model_id / model_name / provider_name / model_display_name：会话的生效模型
+    四件套（口径与 ``/api/session/info`` / :class:`AgentInfo` 一致）。列表带上它
+    是「跨会话选一个接着干」这类能力的素材——用户先看列表就知道每个会话在跑
+    什么模型，不必逐会话拉 info（N+1）。未加载的会话按 resume 链解析盘上记录
+    （见 ``wing.session.model_binding``）：解析不到的降级路径下各字段为 None /
+    缺省，展示层自行回落（展示名 → 调用名 → 引用词）。身份仍是 ``model_id``，
+    展示名只是素材。
     """
 
     id: str
@@ -78,6 +86,10 @@ class SessionInfo(BaseModel):
     status: SessionStatus = "inactive"
     tags: list[str] = Field(default_factory=list)
     tag_meta: dict[str, TagMeta] = Field(default_factory=dict)
+    model_id: str | None = None
+    model_name: str | None = None
+    provider_name: str | None = None
+    model_display_name: str | None = None
 
 
 class AgentInfo(BaseModel):
@@ -87,16 +99,22 @@ class AgentInfo(BaseModel):
     前端据此渲染加载概览（如 "loaded N skills, M rules"）；
     配置 pattern 等细节经 /skills 按需拉取（SessionInfo.skills_info）。
 
-    model_name 与 provider_name 同源同刻：provider_name 是当前活跃
-    ModelProvider 的名称（model/provider 二元组是模型选择的完整身份，
-    同名模型跨 provider 时前端据此消歧）。旧数据/降级路径下可为 None。
+    model_id 是模型的**引用词**（∈ 配置声明的 id 空间）——一切请求 / 协议 /
+    metadata 引用它；未命中时任何修改动作都必须报错而非回落。陈旧数据 / 降级
+    路径下可为 None（旧会话记录了已删除的 id 且调用名也不在声明中）。
+
+    model_name / provider_name 是**运行期事实**（同源同刻）：model_name 是发给
+    上游的调用名（也是前端展示的回落素材），provider_name 是承载它的 provider
+    （展示分组维度）。provider 不再是引用词——同名模型跨 provider 时前端以
+    model_id 消歧。
 
     model_display_name 是 model_name 在配置声明里的展示名（前端展示层的
     唯一素材；未声明 / 空串 = None，前端回落 model_name）。展示名不是身份：
-    任何匹配 / 变更仍以 model_name + provider_name 为准。
+    任何匹配 / 变更仍以 model_id 为准。
     """
 
     model_name: str
+    model_id: str | None = None
     system_prompt: str | None = None
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)

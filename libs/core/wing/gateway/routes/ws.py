@@ -14,10 +14,13 @@
   - 入站帧按 call_id 分流：含 call_id 的是工具调用结果（→ RemoteToolManager，
     带归属校验），其余按 ClientRequest 处理（向后兼容）。
   - 断连时 fail_client：在途调用立即失败 + 注销该 client 的远程工具。
+  - setup mode（04）：**accept 之前**直接以 1013 关闭——配置不可用时 WS 没有任何
+    可用功能，客户端看到的是握手失败而不是连上就断。
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import uuid
 
@@ -25,6 +28,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from wing.common.logger import log
 from wing.event import ErrorEvent, wire_dump
+from wing.request_context import reset_request_context, set_request_context
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
 from wing.gateway.protocol import ClientRequest, ConnectResponse, ToolCallResult
@@ -38,7 +42,15 @@ async def handle_ws(ws: WebSocket) -> None:
     """处理 WebSocket 连接。"""
     server = ws.app.state.server
 
-    # 0. 鉴权（必须在 accept 之前）
+    # 0. setup mode：握手即拒（**accept 之前** close ⇒ 客户端看到的是握手失败，
+    #    而不是「连上了又被断」）。setup mode 下 WS 没有任何可用功能——修复全在
+    #    HTTP 设置端点上（守门白名单），loopback 与非 loopback 一视同仁；
+    #    真正的来源策略由 HTTP 面的 AuthMiddleware 承担（§8.4）。
+    if server.in_setup_mode:
+        await ws.close(code=1013, reason="setup_mode")
+        return
+
+    # 1. 鉴权（必须在 accept 之前）
     auth_config = server.auth_config
     role: str | None = None
     if auth_config.enabled:
@@ -97,6 +109,7 @@ async def handle_ws(ws: WebSocket) -> None:
                 log.error(f"Invalid JSON frame from {client_id}: {e}")
                 continue
 
+            token: contextvars.Token | None = None
             try:
                 if "call_id" in payload:
                     result = ToolCallResult(**payload)
@@ -117,6 +130,14 @@ async def handle_ws(ws: WebSocket) -> None:
                         )
                         continue
                     req = ClientRequest(**payload)
+                    # 帧级关联上下文：本帧处理期的日志（含下面的失败日志）带上
+                    # session / request 归属。turn 内部另有更细的绑定
+                    # （react_loop.run_turn），这里补的是通道层。
+                    token = set_request_context(
+                        request_id=req.request_id,
+                        session_id=req.session_id,
+                        client_id=client_id,
+                    )
                     await server.runtime.post(
                         content=req.content,
                         request_id=req.request_id,
@@ -127,6 +148,10 @@ async def handle_ws(ws: WebSocket) -> None:
             except Exception as e:
                 log.error(f"Failed to handle request: {e}")
                 await ws.send_text(json.dumps(wire_dump(ErrorEvent(message=str(e)))))
+            finally:
+                # 恢复必须在 except 之后：失败日志本身也要带归属。
+                if token is not None:
+                    reset_request_context(token)
     except WebSocketDisconnect:
         pass
     finally:

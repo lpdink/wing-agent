@@ -41,9 +41,25 @@ export function isTurnInFlight(status: SessionStatus): boolean {
   return status === 'working' || status === 'waiting';
 }
 
-/** `wing/event/base.py::AgentInfo` — the agent configuration snapshot. */
+/**
+ * `wing/event/base.py::AgentInfo` — the agent configuration snapshot.
+ *
+ * The model is described by two vocabularies, and the difference matters:
+ * `model_id` is the **reference word** (the globally unique id the catalog
+ * declares; every request / protocol / metadata reference uses it), while
+ * `model_name` / `provider_name` are runtime facts (the call name sent upstream
+ * and the provider carrying it — a display grouping, no longer a reference
+ * word). `model_display_name` is presentation-only material.
+ *
+ * `model_id` and `model_display_name` are nullable: an old gateway has no id at
+ * all, and a session whose persisted id is gone (with a call name that is not
+ * declared either) genuinely has none. Readers treat `null` as "unknown" and
+ * never guess one.
+ */
 export interface AgentInfo {
   readonly model_name: string;
+  readonly model_id: string | null;
+  readonly model_display_name: string | null;
   readonly system_prompt: string | null;
   readonly tools: readonly string[];
   readonly skills: readonly string[];
@@ -88,6 +104,10 @@ export function decodeAgentInfo(value: unknown): AgentInfo | null {
   }
   return {
     model_name: modelName,
+    // Both are optional on the wire (nullable in Pydantic, and absent entirely
+    // on old gateways) — missing / non-string becomes `null`, never a guess.
+    model_id: optString(value, 'model_id'),
+    model_display_name: optString(value, 'model_display_name'),
     system_prompt: optString(value, 'system_prompt'),
     tools: readStringArray(value, 'tools'),
     skills: readStringArray(value, 'skills'),

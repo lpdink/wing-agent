@@ -27,6 +27,7 @@ def _capturing_provider():
         model: str,
         tools: list | None = None,
         stream: bool = False,
+        options: object = None,
     ) -> AsyncIterator[LLMResponse]:
         state["messages"] = messages
         state["model"] = model
@@ -43,6 +44,7 @@ def _mock_provider(response: LLMResponse):
         model: str,
         tools: list | None = None,
         stream: bool = False,
+        options: object = None,
     ) -> AsyncIterator[LLMResponse]:
         yield response
 

@@ -2,8 +2,8 @@
 """AgentOverride — 会话创建时的 agent 参数覆盖（领域类型）。
 
 从 gateway/protocol.py 迁来的领域类型：Session.apply_agent_override 是唯一
-应用点，HTTP 层只把它当请求体字段的承载。字段逐字不变——OpenAPI schema 与
-Rust client（crates/wing-api-client）依赖同一份形状。
+应用点，HTTP 层只把它当请求体字段的承载。OpenAPI schema 与 Rust client
+（crates/wing-api-client）依赖同一份形状。
 """
 
 from __future__ import annotations
@@ -18,15 +18,14 @@ from wing.common.utils import is_utf8_encodable
 class AgentOverride(BaseModel):
     """Agent 参数覆盖。所有字段可选，None 表示不覆盖（保留 template 值）。
 
-    provider 与 model 配合使用：指定 provider 时，model 切换到该 provider
-    的 endpoint；不指定时使用当前 provider（单独给出 provider 是 no-op，见
-    `Session.ignored_override_fields`）。
+    ``model_id`` 是唯一的模型覆盖入口（引用 providers[].models 的 id）：命中即
+    切到该 id 的调用名与 provider，未命中 raise（错误信息含 available ids）。
+    provider 不再是覆盖字段（运行期事实，随映射而来）；旧字段 ``model`` /
+    ``provider`` 由 pydantic ``extra="ignore"`` 静默忽略。
     """
 
-    model: str | None = Field(default=None, description="覆盖模型名称")
-    provider: str | None = Field(
-        default=None,
-        description="覆盖 provider 名称（配合 model 使用，引用 providers[].name）",
+    model_id: str | None = Field(
+        default=None, description="覆盖模型（引用 providers[].models 的 id）"
     )
     system_prompt: str | None = Field(default=None, description="替换系统提示词")
     append_system_prompt: str | None = Field(

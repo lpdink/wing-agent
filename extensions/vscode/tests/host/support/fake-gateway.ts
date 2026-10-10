@@ -57,7 +57,14 @@ export interface FakeSessionState {
 
 /** The `/api/session/info` values the host can read but never derives. */
 export interface FakeRuntimeState {
+  /** Call name sent upstream (display fallback material). */
   model: string;
+  /** Reference word (`null` = unknown, like a gateway that has no mapping). */
+  modelId: string | null;
+  /** Declared display name (`null` = undeclared). */
+  modelDisplayName: string | null;
+  /** Provider carrying the model (`null` = unknown). */
+  providerName: string | null;
   thinking: boolean;
   reasoningEffort: string | null;
   yolo: boolean;
@@ -67,6 +74,39 @@ export interface FakeRuntimeState {
   contextWindowTokens: number;
   skillsInfo: string;
   systemPrompt: string;
+}
+
+/** One entry of the fake catalog (`GET /api/models` models array). */
+export interface FakeModelEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly display_name: string | null;
+}
+
+/** The fake catalog, grouped by provider in declaration order. */
+export const MODEL_CATALOG: readonly { provider: string; models: readonly FakeModelEntry[] }[] = [
+  {
+    provider: 'anthropic',
+    models: [
+      // The id deliberately differs from the call name: the picker must match
+      // on the id and render the display name, never parse a name.
+      { id: 'claude-sonnet-4', name: 'claude-sonnet-4-6', display_name: 'Claude Sonnet 4' },
+      { id: 'claude-opus-4', name: 'claude-opus-4-6', display_name: null },
+    ],
+  },
+  { provider: 'openai', models: [{ id: 'gpt-5.2', name: 'gpt-5.2', display_name: null }] },
+];
+
+/** Resolve one catalog entry by reference word (`null` = unknown id). */
+export function findCatalogEntry(modelId: string): { entry: FakeModelEntry; provider: string } | null {
+  for (const group of MODEL_CATALOG) {
+    for (const entry of group.models) {
+      if (entry.id === modelId) {
+        return { entry, provider: group.provider };
+      }
+    }
+  }
+  return null;
 }
 
 export interface FakeSessionSeed {
@@ -236,7 +276,12 @@ export class FakeGateway {
       turnStartedAt: seed.turnStartedAt ?? null,
       agent: seed.agent ?? null,
       runtime: {
+        // A coherent default world: the first anthropic catalog entry, with the
+        // full model quadruple a new gateway reports.
         model: 'claude-sonnet-4-6',
+        modelId: 'claude-sonnet-4',
+        modelDisplayName: 'Claude Sonnet 4',
+        providerName: 'anthropic',
         thinking: false,
         reasoningEffort: null,
         yolo: false,
@@ -506,6 +551,9 @@ export class FakeGateway {
         const runtime = state.runtime;
         return json({
           model: runtime.model,
+          model_id: runtime.modelId,
+          provider_name: runtime.providerName,
+          model_display_name: runtime.modelDisplayName,
           api_url: 'http://fake-provider/v1',
           tools: ['Bash', 'Read'],
           total_tokens: runtime.totalTokens,
@@ -528,6 +576,26 @@ export class FakeGateway {
       case '/api/session/update': {
         const sessionId = asString(body?.['session_id']) ?? '';
         const state = this.sessions.get(sessionId);
+        // The model is switched by reference word; the legacy `model` /
+        // `provider` fields are silently ignored (a 400 on an unknown id
+        // mirrors the gateway).
+        let modelSwitched = false;
+        if (typeof body?.['model_id'] === 'string') {
+          const resolved = findCatalogEntry(body['model_id']);
+          if (resolved === null) {
+            return {
+              status: 400,
+              body: JSON.stringify({ error: `unknown model id '${body['model_id']}'` }),
+            };
+          }
+          modelSwitched = true;
+          if (state !== undefined) {
+            state.runtime.model = resolved.entry.name;
+            state.runtime.modelId = resolved.entry.id;
+            state.runtime.modelDisplayName = resolved.entry.display_name;
+            state.runtime.providerName = resolved.provider;
+          }
+        }
         if (state !== undefined) {
           if (typeof body?.['yolo'] === 'boolean') {
             state.runtime.yolo = body['yolo'];
@@ -538,9 +606,6 @@ export class FakeGateway {
           if (typeof body?.['reasoning_effort'] === 'string') {
             state.runtime.reasoningEffort = body['reasoning_effort'];
           }
-          if (typeof body?.['model'] === 'string') {
-            state.runtime.model = body['model'];
-          }
           if (typeof body?.['title'] === 'string') {
             state.name = body['title'];
           }
@@ -549,18 +614,24 @@ export class FakeGateway {
             state.workspace = body['workspace'];
           }
         }
-        const agent = state?.agent ?? {};
+        // The model quadruple travels together, exactly like the real gateway:
+        // a model switch (or a template switch, which resets the model) emits
+        // all four; every other update leaves them null (= unchanged).
+        const runtime = state?.runtime;
+        const modelEmitted = modelSwitched || body?.['agent'] !== undefined;
         this.emit({
           type: 'session_state_changed',
           session_id: sessionId,
-          model: body?.['model'] ?? null,
+          model: modelEmitted ? (runtime?.model ?? null) : null,
+          model_id: modelEmitted ? (runtime?.modelId ?? null) : null,
+          provider_name: modelEmitted ? (runtime?.providerName ?? null) : null,
+          model_display_name: modelEmitted ? (runtime?.modelDisplayName ?? null) : null,
           thinking: body?.['thinking'] ?? null,
           reasoning_effort: body?.['reasoning_effort'] ?? null,
           yolo: body?.['yolo'] ?? null,
           title: body?.['title'] ?? null,
           agent: body?.['agent'] ?? null,
           created_at: nowIso(this.now()),
-          ...(agent === null ? {} : {}),
         });
         return json({ ok: true });
       }
@@ -605,10 +676,16 @@ export class FakeGateway {
 
       case '/api/models':
         return json({
-          providers: [
-            { provider: 'anthropic', models: ['claude-sonnet-4-6', 'claude-opus-4-6'] },
-            { provider: 'openai', models: ['gpt-5.2'] },
-          ],
+          providers: MODEL_CATALOG.map((group) => ({
+            provider: group.provider,
+            models: group.models.map((entry) => ({
+              id: entry.id,
+              name: entry.name,
+              display_name: entry.display_name,
+              description: null,
+              capabilities: { vision: false },
+            })),
+          })),
         });
 
       case '/api/agents':

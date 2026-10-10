@@ -2,24 +2,21 @@
 """
 wing/runtime.py — WingRuntime：service 层协调者
 
-组合 SessionManager + EventBus，提供统一入站入口。
-
-架构定位：
-  Runtime 是协调者，不是实现者。它将用户请求路由到正确的组件，
-  并管理事件的发射——但具体的业务逻辑由 Session、ContextManager
-  等组件自己实现。
+组合 SessionManager + EventBus，提供统一入站入口。**协调者，不是实现者**：把用户请求路由到正确的
+组件并管理事件发射，具体业务逻辑归 Session / ContextManager 等组件自己实现。
 
 设计约束：
   - post() 是唯一入站入口，统一管理 RequestContext
-  - Session 生命周期方法语义单一
   - 订阅管理封装路由注册 + SyncSession 推送
   - 所有事件通过 _emit_session_event() 发射，保证 scope="session"
-  - 异常层次：LookupError（not found）/ ValueError（bad input）/
-    RuntimeError（bad state），route 按类型映射 HTTP status
+  - 异常层次：LookupError（not found）/ ValueError（bad input）/ RuntimeError（bad state），
+    route 按类型映射 HTTP status
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from wing.agent.event_sink import emit_best_effort
 from wing.event import (
     BranchTargetInfo,
     BranchTargetsEvent,
@@ -30,26 +27,172 @@ from wing.event import (
     SessionInfo,
     SessionInitEvent,
     SessionStateChangedEvent,
+    SettingsChangedEvent,
     SyncSessionEvent,
     WingEvent,
 )
+from wing.common.fs import atomic_write_bytes, atomic_write_text
+from wing.common.logger import log
 from wing.event_bus import event_bus
-from wing.config import get_config
+from wing.config import (
+    Config,
+    ConfigProblem,
+    ModelGroup,
+    build_catalog,
+    cross_field_problems,
+    emit_config_yaml,
+    get_config,
+    get_config_path,
+)
+from wing.config.document import (
+    ConfigDocumentError,
+    ConfigFingerprint,
+    PositionalSecret,
+    SparseDocument,
+    changed_paths,
+    locate_problems,
+    merge_with_defaults,
+    read_document,
+    resolve_secrets,
+    restart_required_paths,
+)
 from wing.hooks import load_hooks
 from wing.request_context import (
     get_request_context,
     reset_request_context,
     set_request_context,
 )
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from collections.abc import Iterable
 from wing.session import Session, SessionManager, SessionReaper, TagMutation
 from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
-    from wing.provider.registry import ProviderModels
     from wing.session import AgentOverride, AgentTemplateManager
+
+
+# ============================================================
+# Setting API —— 保存事务的数据形状（L4：编排结果，不是 wire 模型）
+# ============================================================
+
+
+UNPARSEABLE_CONFIG_WARNING = "原配置文件无法解析，其中的密钥无法保留，请重新填写"
+"""当前 ``config.yaml`` 读不出文档时的回执警告（AD13）。
+
+语法错意味着我们不知道文件里原本有什么：旧密钥无从回填（``null`` 不再等于「保留」），
+未知键也无从保留。回执必须**显式**说明这一点——用户按面板提示重填密钥，而不是
+在保存后静默失去一个 provider 的凭据。
+"""
+
+DROPPED_SECRET_WARNING = "无法确定 {path} 属于哪一项（列表结构变化且无法按身份配对），已移除该密钥，请重新填写"
+"""密文哨兵因无法安全配对而被丢弃时的回执警告。
+
+比错配轻、比静默重：**宁可不猜**——列表删 / 移 / 前插后配不上的密钥一律移除
+（必填字段随之成为 problem，保存被拦住），并在回执里点名路径 + 要求重填；
+绝不把 A 的密钥按旧下标写给 B。逐条（一条路径一条）与面板 / CLI 的逐条渲染对齐。
+"""
+
+POSITIONAL_SECRET_WARNING = (
+    "{path} 按位置保留了磁盘上的值（{reason}）——若这是重命名，无需处理；"
+    "若是替换成了新的项，请重新填写该密钥"
+)
+"""密文哨兵因 (b) 等长下标回落而被**按位置保留**时的回执警告。
+
+consumed 守卫关掉的是「新项抢别人的槽位」那一类；**整表替换**与「全改名」在文档里
+结构不可区分，守卫关不掉——既然关不掉，就**不许静默**。三要素：路径 + 两种读法
+（重命名 / 替换成新的）+ 怎么办。
+"""
+
+POSITIONAL_REASON_NO_IDENTITY = "该列表没有身份字段"
+"""警告的（原因）子句：列表没声明 ``identity_field``（只可能按位置配对）。"""
+
+POSITIONAL_REASON_MISSING_IDENTITY = "该项没有 {field}"
+"""警告的（原因）子句：项的身份值缺席 / 不是非空字符串。"""
+
+POSITIONAL_REASON_MISMATCH = "该项的 {field} 与磁盘上的项不一致"
+"""警告的（原因）子句：项有身份值，但在磁盘上查不到（重命名 / 替换的形态）。"""
+
+
+def positional_secret_warning(secret: PositionalSecret) -> str:
+    """(b) 保留的警告文案：路径 + 两种读法 + 怎么办（AD18 的三要素）。
+
+    原因子句按可用身份分三种：没有身份字段 / 该项没有身份值 / 身份值与磁盘上的项不一致。
+    """
+    if secret.identity_field is None:
+        reason = POSITIONAL_REASON_NO_IDENTITY
+    elif secret.identity_value is None:
+        reason = POSITIONAL_REASON_MISSING_IDENTITY.format(field=secret.identity_field)
+    else:
+        reason = POSITIONAL_REASON_MISMATCH.format(field=secret.identity_field)
+    return POSITIONAL_SECRET_WARNING.format(path=secret.path, reason=reason)
+
+
+class SettingsConflictError(RuntimeError):
+    """保存的基线指纹与磁盘现状不符（乐观并发冲突）。路由据此回 409。
+
+    携带磁盘当前指纹：客户端拿不到它就得先 GET 一次才能重试；409 的 detail 直接带上，
+    重试路径缩短一步。
+    """
+
+    def __init__(self, fingerprint: str) -> None:
+        super().__init__(
+            f"config.yaml changed on disk (current fingerprint: {fingerprint})"
+        )
+        self.fingerprint = fingerprint
+
+
+@dataclass
+class SettingsApplyResult:
+    """``apply_settings`` 的回执（领域形状；wire 投影见 ``gateway/projection.py``）。
+
+    ``ok=False`` 时 ``fingerprint`` 是**磁盘当前指纹**（文件一个字节都没写）；
+    ``setup_mode_exited`` 为真 ⟺ 这次保存把网关从 setup mode 推进了正常模式
+    （04；正常模式下恒 ``False``）。
+    """
+
+    ok: bool
+    fingerprint: str
+    problems: list[ConfigProblem] = field(default_factory=list)
+    changed: list[str] = field(default_factory=list)
+    restart_required: list[str] = field(default_factory=list)
+    reload: ReloadResult | None = None
+    setup_mode_exited: bool = False
+    backup_path: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」（AD13）、
+    「密钥被丢弃」/「密钥按位置保留」。
+    与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
+
+
+@dataclass
+class WriteEffectResult:
+    """保存事务第 ⑦ 步（「生效」）的产物——04 引入的接点形状。
+
+    ``reload`` 是逐项结果：
+
+    - 正常模式 = 热重载六项（``reload_system``：config.yaml / hooks / prompt commands /
+      provider / skills & rules / log level）；
+    - setup mode = 转入正常模式的六步（``GatewayServer._enter_operational``：
+      config.yaml / log level / prompt commands / runtime / background jobs / auth）。
+
+    两条路径永不混用（前者是「已经在跑，换一份配置」，后者是「从无到有」），
+    回执形状相同（``ReloadResponse``）。
+    """
+
+    reload: ReloadResult
+    setup_mode_exited: bool = False
+
+
+async def settings_write_effect(sm: SessionManager) -> ReloadResult:
+    """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）的正常模式实现体。
+
+    热重载（config.yaml → hooks → prompt commands → provider → skills & rules → log level）。
+    唯一调用点：``WingRuntime.post_write_effect()``（04 把这个接点从模块函数上移成
+    实例方法，见那里的说明）。失败**不回滚文件**——配置本身是合法的，回执按
+    ``ReloadResult`` 的逐项 ok 如实报告（与 ``/api/system/reload`` 同语义）。
+    """
+    return await _reload_system(sm)
 
 
 # ============================================================
@@ -158,11 +301,11 @@ class WingRuntime:
 
         Args:
             agent_override: resume 语义的参数覆盖（只应用
-                model/provider/effort/tools 子集，见 `Session.apply_resume_override`）
+                model_id/effort/tools 子集，见 `Session.apply_resume_override`）
 
         Raises:
             LookupError: session 不存在（含 id 不过闸门——与本处同价）
-            ValueError: 覆盖里的工具引用无法解析
+            ValueError: 覆盖里的 model_id 未命中 / 工具引用无法解析
         """
         return self.sm.resume_session(session_id, agent_override=agent_override)
 
@@ -305,6 +448,7 @@ class WingRuntime:
             model_provider=session.agent.model_provider,
             current_tools=lambda: session.agent.tools,
             instruction=instruction,
+            options=session.agent.request_options(),
         )
 
         self._emit_session_event(
@@ -401,8 +545,7 @@ class WingRuntime:
         self,
         session_id: str,
         *,
-        model: str | None = None,
-        provider: str | None = None,
+        model_id: str | None = None,
         agent: str | None = None,
         title: str | None = None,
         thinking: bool | None = None,
@@ -415,9 +558,13 @@ class WingRuntime:
 
         委托给 Session.update_state()，计算 event 字段后发射事件。
 
+        Args:
+            model_id: 切换模型（引用 providers[].models 的 id；未命中 ValueError）
+
         Raises:
             LookupError: session 或 template 不存在
-            ValueError: workspace 路径不合法 / 工具引用无法解析
+            ValueError: model_id 未命中 id 空间 / workspace 路径不合法 /
+                工具引用无法解析
         """
         session = self._require_session(session_id)
 
@@ -431,8 +578,7 @@ class WingRuntime:
                 )
 
         await session.update_state(
-            model=model,
-            provider_name=provider,
+            model_id=model_id,
             template=template,
             title=title,
             thinking=thinking,
@@ -444,18 +590,20 @@ class WingRuntime:
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None
-        model_emitted = model is not None or agent_switched
+        model_emitted = model_id is not None or agent_switched
         self._emit_session_event(
             SessionStateChangedEvent(
                 session_id=session.session_id,
                 model=session.agent.model if model_emitted else None,
+                model_id=session.model_id if model_emitted else None,
+                provider_name=session.agent.provider_name if model_emitted else None,
                 model_display_name=session.agent.model_display_name
                 if model_emitted
                 else None,
-                thinking=session.agent.model_provider.thinking
+                thinking=session.agent.thinking
                 if thinking is not None or agent_switched
                 else None,
-                reasoning_effort=session.agent.model_provider.reasoning_effort
+                reasoning_effort=session.agent.reasoning_effort
                 if reasoning_effort is not None or agent_switched
                 else None,
                 yolo=session.agent.yolo if yolo is not None or agent_switched else None,
@@ -468,18 +616,16 @@ class WingRuntime:
     # 系统操作
     # ============================================================
 
-    async def list_models(self) -> list["ProviderModels"]:
-        """可用模型列表（跨 provider 聚合，按 provider 分组）。
+    def list_models(self) -> list[ModelGroup]:
+        """模型目录（按 provider 分组，配置声明序）。
 
-        转发 provider 包 registry（模块级持有所有 provider client；配置了
-        静态 models 的 provider 跳过请求）。gateway 路由经此获取，不感知 config。
+        目录是**配置声明的同步投影**——不查远端、不发网络请求（远端 ``/models``
+        发现已退役）。gateway 路由经此获取，不感知 config。
         """
-        from wing.provider.registry import list_all_models
-
-        return await list_all_models()
+        return get_config().model_groups()
 
     async def reload_system(self) -> ReloadResult:
-        """热重载全局配置、hooks、prompt commands、provider、skills & rules。
+        """热重载全局配置、hooks、prompt commands、provider、skills & rules、log level。
 
         config 加载失败时立即中止。其余项失败时继续。
 
@@ -487,6 +633,149 @@ class WingRuntime:
         失败语义不变）——本方法只做委托，调用点（gateway 路由）不变。
         """
         return await _reload_system(self.sm)
+
+    # ============================================================
+    # Setting API —— 保存事务（唯一写盘路径）
+    # ============================================================
+
+    async def post_write_effect(self) -> WriteEffectResult:
+        """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）——**04 的接点**。
+
+        唯一调用点是 :meth:`apply_settings` 的第 ⑦ 步。
+
+        - 正常模式（本类）：热重载（:func:`settings_write_effect` 的六项逐项结果）。
+        - setup mode（04）：``gateway.server._SetupRuntime`` 覆盖本方法——换成
+          「转入正常模式」（``GatewayServer._enter_operational()``），并把
+          ``setup_mode_exited`` 置真。
+
+        把接点从模块级函数（03 的 ``settings_write_effect``）上移成**实例方法**，
+        是因为「setup mode 下的 runtime」是 ``WingRuntime`` 的替身（见
+        ``gateway/server.py`` 的 ``_SetupRuntime``）——覆盖一个方法是替身唯一的
+        介入点，而事务本体（①–⑥、⑧–⑩）因此只有一份实现。失败**不回滚文件**：
+        配置本身合法，回执按 ``ReloadResult`` 逐项如实报告。
+        """
+        return WriteEffectResult(reload=await settings_write_effect(self.sm))
+
+    async def apply_settings(
+        self, document: dict[str, Any], base: str | None = None
+    ) -> SettingsApplyResult:
+        """保存事务（总设计 §7.3 的十步）：校验 → ``.bak`` → 原子写 → 生效 → 事件 → 回执。
+
+        ① 现读磁盘（服务端不缓存文档）→ ② 基线指纹不符 → 409（不写盘）→ ③ 密文三态回填
+        （``null`` = 保留磁盘现值）→ ④ 字段级 + 跨字段校验（**全有或全无**：有 problem 时一个字节
+        都不写）→ ⑤ ``config.yaml.bak``（覆盖式，只留最近一份）→ ⑥ 规范形 YAML + 原子写 → ⑦ 生效
+        （:meth:`post_write_effect`，04 的接点；失败不回滚文件）→ ⑧ ``changed`` /
+        ``restart_required``（只读叶子的 apply）→ ⑨ 广播 ``SettingsChangedEvent``（global）→
+        ⑩ 回执。
+
+        Args:
+            document: 稀疏文档（密文三态见 ``resolve_secrets``）；未知键原样保留（从磁盘文档回填，
+                客户端不认识也不会吃掉它）。
+            base: 客户端持有的基线指纹（``None`` = 跳过并发检查，对应 CLI 的 ``--force``）。
+
+        Raises:
+            SettingsConflictError: 指纹不匹配（乐观并发）——文件未被触碰。
+        """
+        catalog = build_catalog()
+
+        # ① 现读磁盘（D18：不缓存）。
+        warnings: list[str] = []
+        try:
+            current_doc, current_fp = read_document()
+        except ConfigDocumentError as exc:
+            # 文件存在但读不出文档（YAML 语法错 / 顶层不是映射）。**事务照常继续**：
+            # 这正是「配置写坏 ⇒ 开设置面板修」（D1）在语法错这条分支上的兑现——
+            # 否则面板保存永远 ok=false、用户只剩手改文件一条路。
+            # 现文档视为**空**：未知键无从保留、旧密钥无从回填（回执里显式警告）。
+            # 指纹仍然算（= 文件字节的 sha256）——乐观并发不因文件坏了而失效。
+            current_doc = SparseDocument(data={})
+            current_fp = ConfigFingerprint(value=exc.fingerprint)
+            warnings.append(UNPARSEABLE_CONFIG_WARNING)
+
+        # ② 乐观并发：指纹不匹配 → 409（不写盘）。
+        if base is not None and base != current_fp.value:
+            raise SettingsConflictError(current_fp.value)
+
+        # ③ 密文回填：null = 保留磁盘现值（真实值只在这里被读、从不回显）。
+        #    列表项按**身份**配对（identity_field）；配不上且长度变化 / 槽位已被认领
+        #    → 宁可不猜：该密钥被丢弃（必填 → problem），并且**必须让用户看见**
+        #    （静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
+        #    等长下标回落（(b)）保留下来的值同样**出声**（AD18 第 2 点：它和「重命名」
+        #    在文档里不可区分）。
+        resolution = resolve_secrets(
+            SparseDocument(data=document), current_doc, catalog
+        )
+        incoming = resolution.document
+        warnings.extend(
+            DROPPED_SECRET_WARNING.format(path=path)
+            for path in resolution.dropped_secrets
+        )
+        warnings.extend(
+            positional_secret_warning(secret)
+            for secret in resolution.positional_secrets
+        )
+
+        # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
+        raw = merge_with_defaults(incoming, catalog)
+        problems = locate_problems(raw) + cross_field_problems(
+            Config.model_construct(**raw)
+        )
+        if problems:
+            return SettingsApplyResult(
+                ok=False,
+                fingerprint=current_fp.value,
+                problems=problems,
+                warnings=warnings,
+            )
+
+        # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。原子写（不是 copyfile）：
+        # 进程在拷贝中途被杀不会留下截断的 .bak；字节级复制，
+        # 连读不出文档的坏文件也逐字留证（AD13 的价值所在）。
+        config_path = get_config_path()
+        backup_path: str | None = None
+        if config_path.exists():
+            backup = config_path.with_name(f"{config_path.name}.bak")
+            atomic_write_bytes(backup, config_path.read_bytes())
+            backup_path = str(backup)
+
+        # ⑥ 规范形 YAML（未知键取自磁盘文档，D17；读不出文档时没有未知键可保留）
+        #    + 原子写。
+        text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
+        atomic_write_text(config_path, text)
+        _, new_fp = read_document()
+
+        # ⑦ 生效（04 的接点；失败不回滚——配置本身合法，回执逐项报告）。
+        effect = await self.post_write_effect()
+
+        # ⑧ 差异 → changed / restart_required（P13：只读叶子路径的 apply）。
+        changed = changed_paths(current_doc, incoming, catalog)
+        restart = restart_required_paths(changed, catalog)
+
+        # ⑨ 广播（global scope：所有客户端都该知道配置变了）。日志只写 path，不写值。
+        log.info(
+            f"settings changed: paths={changed} restart_required={restart} "
+            f"fingerprint={current_fp.value}→{new_fp.value}"
+        )
+        event_bus.emit(
+            SettingsChangedEvent(
+                changed=changed,
+                restart_required=restart,
+                fingerprint=new_fp.value,
+                target=EventTarget(scope="global"),
+            )
+        )
+
+        # ⑩ 回执。
+        return SettingsApplyResult(
+            ok=True,
+            fingerprint=new_fp.value,
+            changed=changed,
+            restart_required=restart,
+            reload=effect.reload,
+            setup_mode_exited=effect.setup_mode_exited,
+            backup_path=backup_path,
+            warnings=warnings,
+        )
 
     # ============================================================
     # 内部辅助
@@ -508,14 +797,20 @@ class WingRuntime:
         持久化语义）；session 为 None 的事件（无会话上下文）只广播。
         request_id 在落盘前从 RequestContext 定型注入——磁盘记录与广播
         帧携带同一关联值（与 AgentEventSink.emit 一致）。
+
+        落盘走 `emit_best_effort`（#187 同族）：这里发的都是**已生效**动作
+        的报告（打断 / 回退 / 压缩 / 会话状态变更），报告动作不得反过来掀翻
+        调用者——落盘失败（如 ENOSPC）降级为 ERROR 日志并继续广播，而不是
+        让动作已经完成却对客户端返回 500、事件永不下发。
         """
         ctx = get_request_context()
         if ctx.request_id is not None:
             event.request_id = ctx.request_id
         event.target = EventTarget(scope="session")
-        if event.persist and session is not None:
-            session.context_manager.append_event(event)
-        event_bus.emit(event)
+        emit_best_effort(
+            event,
+            session.context_manager.append_event if session is not None else None,
+        )
 
     def _emit_context_stats(self, session: Session) -> None:
         """发射 ContextStatsEvent。"""

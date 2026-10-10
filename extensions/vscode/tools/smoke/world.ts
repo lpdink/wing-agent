@@ -41,7 +41,7 @@ export interface SmokeWorldOptions {
   readonly report: (message: string) => void;
   /**
    * `WING_SMOKE_AUTH_KEY` — sent as `Authorization: Bearer …` (header, never a
-   * query parameter: review #109 [P3-6]). `null` keeps the smoke keyless.
+   * query parameter). `null` keeps the smoke keyless.
    */
   readonly apiKey?: string | null;
 }

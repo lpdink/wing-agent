@@ -1,64 +1,37 @@
 //! The App's image lane: capability, store, metadata table and the drawing pass.
 //!
-//! One owner for everything the picture path needs, so the render layer and the
-//! event loop stay free of it:
+//! One owner for everything the picture path needs, so the render layer and the event loop stay
+//! free of it: `run_app` → [`ImageSupport::detect`] → `Images::new(mode, support, waker)`; the
+//! render layer asks `opts()` (mode + workspace + shapes), the chat view hands `FrameImage[]` to
+//! `paint()`, and the store's worker thread wakes the event loop through the waker.
 //!
-//! ```text
-//! run_app ── ImageSupport::detect() ──► Images::new(mode, support, waker)
-//!                                            │
-//! render layer ◄── Images::opts() ───────────┤  (mode + workspace + shapes)
-//!                                            │
-//! chat view ── FrameImage[] ────────────────►│  Images::paint()  → ImageStore::request
-//!                                            │       │
-//!                                            │       └─► ui::image::paint()
-//!                                            │
-//! worker thread ── waker ────────────────────┘  (wake the event loop, then poll)
-//! ```
+//! **Two-tier rule, enforced here.** `Images` is *the* gate: when the mode is `off`, the terminal
+//! has no graphics protocol, or the store could not start, `is_enabled()` is false, `opts()`
+//! returns the shared [`ImageOpts::off`] and the render layer produces no anchors at all — the
+//! markdown image keeps its existing link rendering, cell for cell. Nothing is queued and no file
+//! is read. There is no third tier.
 //!
-//! # The two-tier rule, enforced here
+//! **Degradation ladder** (everything but the last row is the legacy link path): off / no
+//! protocol / probe failed → metadata unknown (probe in flight) → metadata unavailable (missing,
+//! corrupt, oversized, worker died) → metadata known but encode pending / failed, which shows the
+//! anchor box with its caption, never a blank hole → ready, the picture over the box.
 //!
-//! `Images` is *the* gate: when the mode is `off`, the terminal has no graphics
-//! protocol, or the store could not start, `is_enabled()` is false, `opts()`
-//! returns the shared [`ImageOpts::off`] and the render layer produces no
-//! anchors at all — the markdown image keeps its existing link rendering, cell
-//! for cell. Nothing is queued and no file is read. There is no third tier.
+//! **Zero I/O on the render path**: [`Images::sync`] and [`Images::request`] are hash lookups into
+//! the store's memo and LRU; every file read, decode and protocol encode happens on the store's
+//! worker thread (see [`crate::ui::image`]).
 //!
-//! # Degradation ladder
+//! **Freshness**: the store never re-`stat`s a path on its own, so "the model overwrote
+//! `plot.png`" is invisible until [`Images::poll_freshness`] says so — the only file I/O this lane
+//! does, kept **out** of the render path: `App::draw` records the visible pictures
+//! (`observe_visible`), the event loop asks `freshness_deadline(now)` (it parks while nothing is
+//! anchored) and calls `poll_freshness(now)` about once a second, which `fs::metadata`s every
+//! watched path, refreshes the changed ones in the store, and lets the next frame's `sync` re-probe
+//! → new header → new encode.
 //!
-//! | state | what the user sees |
-//! |---|---|
-//! | off / no protocol / probe failed | the legacy link path |
-//! | metadata unknown (probe in flight) | the legacy link path (no table entry yet) |
-//! | metadata unavailable (missing, corrupt, oversized, worker died) | the legacy link path (never enters the table) |
-//! | metadata known, encode pending / failed | the anchor box with its caption — never a blank hole |
-//! | ready | the picture over the box |
-//!
-//! # Zero I/O on the render path
-//!
-//! [`Images::sync`] and [`Images::request`] are hash lookups into the store's
-//! memo and LRU; every file read, decode and protocol encode happens on the
-//! store's worker thread (see [`crate::ui::image`]).
-//!
-//! # Freshness: a picture that is rewritten must come back
-//!
-//! The store never re-`stat`s a path on its own (that would be I/O on the
-//! render path), so "the model overwrote `plot.png`" is invisible until
-//! somebody says so. [`Images::poll_freshness`] is that somebody — the only
-//! file I/O this lane does, kept **out** of the render path:
-//!
-//! ```text
-//! App::draw ── observe_visible(frame_images)   ← the target set: what is on screen
-//!                                                     │
-//! event loop ── freshness_deadline(now) ──────────────┤  parks when nothing is anchored
-//!            └─ poll_freshness(now)  ─── fs::metadata ─┘  1/s, bounded by the frame's
-//!                  └─ ImageStore::refresh(path)             own placement table
-//!                       └─ next frame's sync re-probes → new header → new encode
-//! ```
-//!
-//! Three properties are the contract (and the tests): **bounded** (one entry
-//! per visible anchor, deduped), **throttled** ([`FRESHNESS_INTERVAL`], with
-//! the clock injected so the tests need no sleeping), and **not on the render
-//! path** (the check runs from the event loop, never from `draw`).
+//! Three properties are the contract (and the tests): **bounded** (one deduped entry per visible
+//! anchor), **throttled** ([`FRESHNESS_INTERVAL`], with the clock injected so tests need no
+//! sleeping), and **not on the render path** (the check runs from the event loop, never from
+//! `draw`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -286,14 +259,11 @@ impl Images {
     /// Announce the view's structure epoch
     /// ([`ChatView::structure_epoch`](crate::ui::chat_view::ChatView::structure_epoch)).
     ///
-    /// A rebuild — session switch, compaction re-sync, rewind replay — replaces
-    /// the whole content list, so the files the *new* content names may have
-    /// changed on disk since they were probed (there is no file watcher), and
-    /// the old content's pictures are gone. Everything is therefore dropped:
-    /// the encodings, the store's metadata memo **and** this lane's table —
-    /// which the next frames rebuild from the new content's candidates. A
-    /// picture that was replaced is laid out from its new header; one that
-    /// vanished stops producing an anchor at all.
+    /// A rebuild — session switch, compaction re-sync, rewind replay — replaces the whole content
+    /// list, so the files the *new* content names may have changed on disk since they were probed
+    /// (there is no file watcher) and the old content's pictures are gone. Everything is therefore
+    /// dropped: the encodings, the store's metadata memo **and** this lane's table, which the next
+    /// frames rebuild from the new content's candidates.
     pub(crate) fn set_structure_epoch(&mut self, epoch: u64) {
         if self.epoch == epoch {
             return;
@@ -309,16 +279,14 @@ impl Images {
         self.rebuild_opts();
     }
 
-    /// One frame's plumbing: drain the worker, ask about every candidate, keep
-    /// the metadata table current. Returns whether anything the frame depends
-    /// on changed — the metadata table, or a picture that just finished
-    /// encoding — which means the caller must redraw.
+    /// One frame's plumbing: drain the worker, ask about every candidate, keep the metadata table
+    /// current. Returns whether anything the frame depends on changed — the table, or a picture
+    /// that just finished encoding — which means the caller must redraw.
     ///
-    /// Called twice per frame — before the render (so a result that landed is
-    /// drawn *this* frame) and after it (so candidates the render just
-    /// discovered get probed, which is what wakes the loop when it answers).
-    /// Both halves are hash lookups: [`ImageStore::meta`] enqueues a probe only
-    /// the first time it sees a path.
+    /// Called twice per frame: before the render (so a result that landed is drawn *this* frame)
+    /// and after it (so candidates the render just discovered get probed, which is what wakes the
+    /// loop when it answers). Both halves are hash lookups: [`ImageStore::meta`] enqueues a probe
+    /// only the first time it sees a path.
     pub(crate) fn sync(&mut self, candidates: &[PathBuf]) -> bool {
         let Some(store) = self.store.as_mut() else {
             return false;
@@ -388,32 +356,24 @@ impl Images {
         })
     }
 
-    /// Re-`stat` the pictures on screen and drop the store's memo for the ones
-    /// whose file changed — the freshness half of the lane.
+    /// Re-`stat` the pictures on screen and drop the store's memo for the ones whose file changed
+    /// — the freshness half of the lane.
     ///
-    /// * **Bounded**: the target set is [`Images::watch`], one deduped entry
-    ///   per visible anchor, so a session with a thousand pictures costs the
-    ///   same as one with two.
-    /// * **Throttled**: at most one check per [`FRESHNESS_INTERVAL`]. `now` is
-    ///   the caller's clock — the event loop passes `Instant::now()`, the tests
-    ///   a synthetic instant, so the interval is testable without sleeping.
-    /// * **I/O lives here and nowhere else**: one `fs::metadata` per watched
-    ///   path, from the event loop — never from the render path, never from
-    ///   [`crate::ui::image::paint`].
+    /// * **Bounded**: the target set is [`Images::watch`], one deduped entry per visible anchor, so
+    ///   a session with a thousand pictures costs the same as one with two.
+    /// * **Throttled**: at most one check per [`FRESHNESS_INTERVAL`]. `now` is the caller's clock
+    ///   (the event loop passes `Instant::now()`, the tests a synthetic instant), so the interval is
+    ///   testable without sleeping.
+    /// * **I/O lives here and nowhere else**: one `fs::metadata` per watched path, from the event
+    ///   loop — never from the render path, never from [`crate::ui::image::paint`].
     ///
-    /// The baseline a path is compared against is the version the **store**
-    /// read (its memoised [`ImageMeta`](crate::ui::image::ImageMeta)) whenever
-    /// it has one: that is what the picture on screen was encoded from, so a
-    /// rewrite that raced the first check is still caught. When the store has
-    /// no usable answer — a probe is in flight, or the path degraded into
-    /// `Unavailable` — the lane falls back to its own last-seen stamp, which is
-    /// what makes a mid-write file (truncated, empty, half a header) recover
-    /// once the write finishes instead of staying broken until a content
-    /// rebuild.
-    ///
-    /// Returns whether anything was refreshed: the caller redraws, and the
-    /// ordinary `sync` → probe → `poll` path turns it into a fresh header, a
-    /// re-laid-out box and a new encoding.
+    /// The baseline is the version the **store** read (its memoised
+    /// [`ImageMeta`](crate::ui::image::ImageMeta)) whenever it has one: that is what the picture on
+    /// screen was encoded from, so a rewrite that raced the first check is still caught. When the
+    /// store has no usable answer — a probe is in flight, or the path degraded into `Unavailable` —
+    /// the lane falls back to its own last-seen stamp, which makes a mid-write file (truncated,
+    /// empty, half a header) recover once the write finishes instead of staying broken until a
+    /// content rebuild. Returns whether anything was refreshed.
     pub(crate) fn poll_freshness(&mut self, now: Instant) -> bool {
         if self.watch.is_empty() {
             return false;
@@ -471,21 +431,20 @@ impl Images {
 
     /// Draw this frame's recorded pictures — the last write over their rects.
     ///
-    /// `clip` is the region pictures may touch (the chat band's content rect:
-    /// the scrollbar gutter is not in it). `mask` is an overlay painted on top
-    /// of the chat (the toast): a picture that would be covered is skipped
-    /// **whole** rather than partially — the protocols carry their payload in
-    /// individual cells (`paint`'s contract), so a partial overdraw would break
-    /// the image instead of hiding part of it. The anchor's caption stays
-    /// visible in that case, which is exactly the reserved box's job.
+    /// `clip` is the region pictures may touch (the chat band's content rect: the scrollbar gutter
+    /// is not in it). `masks` are the overlays painted on top of the chat (the toast, the settings
+    /// card): a picture that would be covered by any of them is skipped **whole** rather than
+    /// partially — the protocols carry their payload in individual cells (`paint`'s contract), so a
+    /// partial overdraw would break the image instead of hiding part of it. The anchor's caption
+    /// stays visible in that case, which is exactly the reserved box's job.
     ///
-    /// Callers gate this on the selection (a drag captures text; see
-    /// `App::draw`) — this function assumes it may draw.
+    /// Callers gate this on the selection (a drag captures text; see `App::draw`) — this function
+    /// assumes it may draw.
     pub(crate) fn paint(
         &mut self,
         frame_images: &[FrameImage],
         clip: Rect,
-        mask: Option<Rect>,
+        masks: &[Rect],
         buf: &mut Buffer,
     ) {
         if self.store.is_none() || frame_images.is_empty() {
@@ -499,7 +458,7 @@ impl Images {
             if !frame.area.intersects(clip) {
                 continue;
             }
-            if mask.is_some_and(|mask| frame.area.intersects(mask)) {
+            if masks.iter().any(|mask| frame.area.intersects(*mask)) {
                 continue;
             }
             // The picture is painted over its caption — the box's first row *is*
@@ -561,18 +520,15 @@ impl Images {
 
 /// Blank the part of the anchor's caption row the picture does not cover.
 ///
-/// The box reserves exactly the rows the picture occupies, but the two can
-/// still disagree on the **column** axis: a picture whose
-/// [`MAX_ANCHOR_ROWS`](crate::render::markdown::MAX_ANCHOR_ROWS) cap binds (a
-/// tall image) comes back fewer columns wide than the box (fit, not stretched —
-/// see [`crate::ui::image`]), and a long caption would then peek out to the
-/// right of the picture. The row is part of the picture's box, so the picture
-/// owns it: everything the picture did not cover is cleared.
+/// The box reserves exactly the rows the picture occupies, but the two can still disagree on the
+/// **column** axis: a picture whose [`MAX_ANCHOR_ROWS`](crate::render::markdown::MAX_ANCHOR_ROWS)
+/// cap binds (a tall image) comes back fewer columns wide than the box (fit, not stretched — see
+/// [`crate::ui::image`]), and a long caption would then peek out to the right of the picture. The
+/// row is part of the picture's box, so the picture owns it: everything it did not cover is cleared.
 ///
-/// Only the caption row carries text (the rows below it are blank cover rows),
-/// and only when the box's first row is on screen at all (`offset.1 < 0` means
-/// the box starts above the band). Cells the picture **did** cover are never
-/// touched: the kitty placeholders and sixel anchors live there.
+/// Only the caption row carries text (the rows below are blank cover rows), and only when the box's
+/// first row is on screen at all (`offset.1 < 0` means the box starts above the band). Cells the
+/// picture **did** cover are never touched: the kitty placeholders and sixel anchors live there.
 fn clear_uncovered_caption(frame: &FrameImage, covered: Rect, buf: &mut Buffer) {
     if frame.offset.1 < 0 || covered.y != frame.area.y {
         return;
@@ -656,7 +612,7 @@ mod tests {
         let clip = Rect::new(0, 0, 10, 4);
         let mut buf = Buffer::empty(clip);
         let before = buf.clone();
-        images.paint(&[], clip, None, &mut buf);
+        images.paint(&[], clip, &[], &mut buf);
         assert_eq!(buf, before);
     }
 

@@ -45,6 +45,7 @@ from .state_change import (
     InterruptedEvent,
     SessionInitEvent,
     SessionStateChangedEvent,
+    SettingsChangedEvent,
     SyncSessionEvent,
 )
 
@@ -76,6 +77,9 @@ EVENT_TYPES: dict[str, type[WingEvent]] = {
     "session_state_changed": SessionStateChangedEvent,
     "context_stats": ContextStatsEvent,
     "branch_targets": BranchTargetsEvent,
+    # 网关级通知（global scope，不属于任何会话链）：登记只为「type → 类」的完整性；
+    # 它 persist=False，永不进链、因此也不进 resume 重放。
+    "settings_changed": SettingsChangedEvent,
 }
 
 
@@ -92,6 +96,10 @@ FACT_EVENTS: frozenset[str] = frozenset(
         "compact_done",
     }
 )
+# 集合的成员条件（两条同时成立）：事件**落在某个会话的链上**（TrackedList）
+# **且**是读回来仍成立的事实。settings_changed 两条都不满足——它是网关级
+# 时点通知（无 session_id、不进任何链），重连后的正解是重新 GET
+# /api/settings/status，而不是重放一条旧通知。
 
 # wire 帧 / SyncSession 载荷剥除的存储专用字段：parent_uuid / unzip_last_uuid
 # 是链拓扑（仅磁盘记录需要），role 是记录级判别（恒为 "event"，无信息），
@@ -145,6 +153,7 @@ __all__ = [
     "InterruptedEvent",
     "CompactDoneEvent",
     "SessionStateChangedEvent",
+    "SettingsChangedEvent",
     # query_response
     "ContextStatsEvent",
     "BranchTargetInfo",

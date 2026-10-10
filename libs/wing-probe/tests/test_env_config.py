@@ -23,11 +23,14 @@ from wing_probe.env import (
     ProbeEnvError,
     log_section,
     merge_no_proxy,
+    model_declaration_id,
+    model_declaration_name,
     read_log_tail,
     render_config_yaml,
     repo_root,
     reserve_port,
     resolve_gateway_bin,
+    resolve_model_declarations,
     wait_for_health,
     write_config,
 )
@@ -46,12 +49,15 @@ def test_render_config_points_provider_at_fake() -> None:
     # 重试有界且可数：语义重试场景需要它 >0（一次逻辑调用 ≈ 1+max_retries 次消费）
     assert provider["max_retries"] == 2
     assert provider["max_retry_delay"] == 1.0
+    # models 是目录的唯一来源（远端发现退役）：缺省只声明模板 model 自己。
+    assert provider["models"] == [DEFAULT_PROBE_MODEL]
 
     agent = config["agents"][0]
     assert agent["name"] == "default"
     assert agent["default"] is True
     assert agent["model"] == DEFAULT_PROBE_MODEL
-    assert agent["provider"] == provider["name"]
+    # agents[].provider 已从配置契约里删除：probe 不再生成它。
+    assert "provider" not in agent
     # system prompt 非空：system 段要真的进请求（"system + 摘要/前缀"断言的前提）
     assert agent["system_prompt"] == DEFAULT_SYSTEM_PROMPT
     assert agent["system_prompt"].strip()
@@ -343,17 +349,17 @@ async def test_wait_for_health_reports_unreachable_url(tmp_path: Path) -> None:
 # ── 模型声明与 images 段（阶段 2：model declaration） ──────────────
 
 
-def test_render_config_omits_models_and_images_by_default() -> None:
-    """缺省不写 models / images 键——保持旧配置文本形态（未声明 = 既有行为）。"""
+def test_render_config_defaults_models_to_template_model() -> None:
+    """缺省写 ``[model]``（模板 model 必须落在 id 空间）；images 仍不写。"""
     config = yaml.safe_load(
         render_config_yaml(provider_base_url="http://127.0.0.1:1/v1", gateway_port=2)
     )
-    assert "models" not in config["providers"][0]
+    assert config["providers"][0]["models"] == [DEFAULT_PROBE_MODEL]
     assert "images" not in config
 
 
 def test_render_config_model_declarations() -> None:
-    """models 原样写进 providers[0].models（元素 str 或 dict）。"""
+    """models 原样写进 providers[0].models（元素 str 或 dict）+ 追加模板 model。"""
     declarations: list[Any] = [
         "legacy-model",
         {
@@ -370,7 +376,82 @@ def test_render_config_model_declarations() -> None:
             models=declarations,
         )
     )
-    assert config["providers"][0]["models"] == declarations
+    # 模板 model（probe/default）不在声明里 → 追加，否则 agents[].model 解析不了。
+    assert config["providers"][0]["models"] == [*declarations, DEFAULT_PROBE_MODEL]
+
+
+def test_resolve_model_declarations_rules() -> None:
+    """组合规则：None = [model]；已在 id 空间不追加；撞调用名时不追加（不制造重名）。"""
+    # None → 只声明模板 model（id = name）。
+    assert resolve_model_declarations(model="probe/default", models=None) == [
+        "probe/default"
+    ]
+    # 已在 effective id 集合里（显式 id 形态）→ 原样，不追加。
+    declared: list[Any] = [{"id": "probe/default", "name": "upstream-default"}]
+    assert (
+        resolve_model_declarations(model="probe/default", models=declared) == declared
+    )
+    # 已在调用名集合里（id 是别的）→ 不追加：追加会撞 duplicate model name，
+    # 报错比真实问题更误导（网关会以 unknown model id 明说模板 model 不在 id 空间）。
+    shared: list[Any] = [{"id": "other", "name": "probe/default"}]
+    assert resolve_model_declarations(model="probe/default", models=shared) == shared
+    # 都不在 → 追加。
+    others: list[Any] = ["probe/one"]
+    assert resolve_model_declarations(model="probe/default", models=others) == [
+        "probe/one",
+        "probe/default",
+    ]
+
+
+def test_model_declaration_helpers() -> None:
+    """effective id / 调用名的两形态口径（str 与 dict 混排）。"""
+    assert model_declaration_id("plain") == "plain"
+    assert model_declaration_id({"name": "upstream"}) == "upstream"
+    assert model_declaration_id({"id": "alias", "name": "upstream"}) == "alias"
+    assert model_declaration_name("plain") == "plain"
+    assert model_declaration_name({"id": "alias", "name": "upstream"}) == "upstream"
+    with pytest.raises(ProbeEnvError, match="needs a non-empty name"):
+        model_declaration_id({"display_name": "no name"})
+
+
+def test_render_config_extra_providers() -> None:
+    """附加 provider 与主 provider 逐字段同形（同一份默认块），models 必填非空。"""
+    config = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            models=["probe/one"],
+            extra_providers=[
+                {
+                    "name": "probe2",
+                    "base_url": "http://127.0.0.1:1/probe2/v1/",
+                    "models": [{"id": "p2-shared", "name": "shared"}],
+                }
+            ],
+        )
+    )
+    primary, extra = config["providers"]
+    assert extra["name"] == "probe2"
+    assert extra["base_url"] == "http://127.0.0.1:1/probe2/v1"
+    assert extra["models"] == [{"id": "p2-shared", "name": "shared"}]
+    # 接线键与主 provider 同源（同一个 _default_provider_block）。
+    for key in ("protocol", "api_key", "max_retries", "max_retry_delay"):
+        assert extra[key] == primary[key]
+    # 模板 model 只追加到主 provider。
+    assert primary["models"] == ["probe/one", DEFAULT_PROBE_MODEL]
+
+    with pytest.raises(ProbeEnvError, match="declares no models"):
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            extra_providers=[{"name": "probe2", "base_url": "x", "models": []}],
+        )
+    with pytest.raises(ProbeEnvError, match="needs a name"):
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            extra_providers=[{"models": ["probe/one"]}],
+        )
 
 
 def test_render_config_images_section() -> None:
@@ -401,8 +482,57 @@ def test_env_render_config_passes_models_and_images(tmp_path: Path) -> None:
     assert config["providers"][0]["models"] == [
         "legacy",
         {"name": "probe/vision", "capabilities": {"vision": True}},
+        DEFAULT_PROBE_MODEL,  # 模板 model 不在声明里 → 追加（否则网关起不来）
     ]
     assert config["images"] == {"max_images": 4}
+
+
+def test_env_extra_providers_point_at_fake_provider_prefix(tmp_path: Path) -> None:
+    """ProbeEnv 的附加 provider 指到假 Provider 的第二条路径前缀（跨 provider 场景）。"""
+    env = ProbeEnv(
+        tmp_path,
+        models=["probe/one"],
+        extra_providers=[{"name": "probe2", "models": ["probe/two"]}],
+    )
+    assert env._extra_provider_names() == ("probe2",)
+    assert env.extra_provider_specs() == [
+        {
+            "name": "probe2",
+            "base_url": f"{env.provider.url}/probe2/v1",
+            "models": ["probe/two"],
+        }
+    ]
+    config = yaml.safe_load(env._render_config(45124))
+    assert [item["name"] for item in config["providers"]] == ["probe", "probe2"]
+    assert config["providers"][1]["base_url"] == f"{env.provider.url}/probe2/v1"
+
+    with pytest.raises(ProbeEnvError, match="needs a name"):
+        ProbeEnv(tmp_path, extra_providers=[{"models": ["probe/two"]}])
+    with pytest.raises(ProbeEnvError, match="declares no models"):
+        env = ProbeEnv(tmp_path, extra_providers=[{"name": "probe2"}])
+        env.extra_provider_specs()
+
+
+def test_env_extra_provider_specs_pass_through_api_key(tmp_path: Path) -> None:
+    """附加 provider 的 ``api_key`` 选了就透传，缺省同主 provider（A1 回归场景的前提）。
+
+    「两个 provider、两把不同的 key」是密文错配场景（A1）的**结构性前提**；
+    此前 ``extra_provider_specs()`` 丢掉这个键，附加 provider 永远与主 provider 同 key。
+    """
+    env = ProbeEnv(
+        tmp_path,
+        extra_providers=[
+            {"name": "probe2", "models": ["probe/two"], "api_key": "p2-key"},
+            {"name": "probe3", "models": ["probe/three"]},
+        ],
+    )
+    assert env.extra_provider_specs()[0]["api_key"] == "p2-key"
+    assert (
+        "api_key" not in env.extra_provider_specs()[1]
+    )  # 缺省不写死：由 render 回落到主 provider
+    config = yaml.safe_load(env._render_config(45124))
+    assert config["providers"][1]["api_key"] == "p2-key"
+    assert config["providers"][2]["api_key"] == config["providers"][0]["api_key"]
 
 
 def test_render_config_provider_extra_merges_into_provider() -> None:
@@ -605,3 +735,43 @@ async def test_restart_gateway_without_running_process_starts_one(
 
     assert started == [1], "重启只调用一次 start_gateway"
     assert env.process is None
+
+
+# ── 场景自带的 config.yaml（config_text 旋钮） ──────────────────
+
+
+def test_config_text_replaces_the_generated_file(tmp_path: Path) -> None:
+    """``config_text`` 逐字写盘（含故意的语法错）；缺省仍走生成路径。
+
+    setup mode 场景的注入点：整份替换 ``core/config.yaml``，所以"坏到不能
+    启动"的配置能被表达。逐字（不做占位符替换）是刻意的——语法错场景需要原文。
+    """
+    raw = "providers: []\nagents: []\n"
+    env = ProbeEnv(tmp_path, config_text=raw)
+    assert env.config_text == raw
+    assert env._render_config(45124) == raw
+
+    plain = ProbeEnv(tmp_path)
+    assert plain.config_text is None
+    generated = plain._render_config(45124)
+    assert generated != raw
+    assert "port: 45124" in generated, "缺省路径仍按端口生成配置"
+
+
+def test_config_text_rejects_generation_knobs(tmp_path: Path) -> None:
+    """``config_text`` 与生成旋钮互斥：显式偏离默认值即报错（不静默失效）。"""
+    with pytest.raises(ProbeEnvError) as failure:
+        ProbeEnv(
+            tmp_path,
+            config_text="providers: []\n",
+            models=["probe/x"],
+            auth={"enabled": True},
+        )
+    message = str(failure.value)
+    assert "models" in message and "auth" in message, message
+
+    # 显式给「与默认相同」的值不算冲突（无假红）。
+    env = ProbeEnv(
+        tmp_path, config_text="providers: []\n", tools=list(DEFAULT_AGENT_TOOLS)
+    )
+    assert env.config_text == "providers: []\n"

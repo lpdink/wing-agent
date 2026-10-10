@@ -40,7 +40,7 @@ pub(crate) struct Structure {
     /// 环境体内的 `&` 总数 —— 每个至少产生一列。
     pub column_separator_count: usize,
     /// 某个环境的一行列数**超过它的容量**（`cases` 每行 2 列）：多出来的列没有消费者，
-    /// 上游会直接 `break` 丢掉后半段（review r3 的 B1）。
+    /// 上游会直接 `break` 丢掉后半段。
     pub environment_row_overflow: bool,
     /// 花括号配平（每个 `}` 都有对应的 `{`，且没有跨过环境边界）。
     ///
@@ -142,7 +142,7 @@ pub(crate) fn brace_arg(chars: &[char], i: usize) -> Option<(String, usize)> {
 /// 扫描时的嵌套上下文 —— 决定 `&` / `\\` 是否"有主"。
 ///
 /// 上游 parser 在**任意深度**遇到 `&` / `\\` 都会 `break` 并丢掉后半段，所以判据不能
-/// 只看"花括号深度 0"（review r2 的 B1：`x + { y & z }` 曾经返回 `Some("x + y")`）。
+/// 只看"花括号深度 0"（`x + { y & z }` 曾经返回 `Some("x + y")`）。
 /// 我们的规则是：**分隔符只允许出现在它真正会被消费的地方** ——
 /// `\text{…}` 的原文里（字面字符）、或环境体里（上游的 `matrix`/`cases`，或我们自己的
 /// `align` 家族）。其它任何位置、任何深度出现 → 整条降级。
@@ -197,7 +197,7 @@ impl CtxEntry {
     }
 }
 
-/// 上游托管环境的**每行列容量**（review r3 的 B1）。
+/// 上游托管环境的**每行列容量**。
 ///
 /// 这个数字必须与上游 parser 的实际消费者一致，否则多出来的列会被静默丢掉：
 ///
@@ -235,7 +235,7 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
         match chars[i] {
             '{' => {
                 // `\text{…}` 里再嵌花括号时**仍然是字面文本**（上游 `parse_text_block`
-                // 原文照读 + 计深），所以 Text 上下文里压的还是 Text（review r3 的 N1）
+                // 原文照读 + 计深），所以 Text 上下文里压的还是 Text
                 let in_text = ctx.last().is_some_and(|c| c.is_text());
                 ctx.push(if consumed_text_flag || in_text {
                     CtxEntry::text()
@@ -394,7 +394,7 @@ pub(crate) fn scan(chars: &[char]) -> Structure {
 /// 合法形态：一个普通字符（`(` `)` `[` `]` `|` `.` …），或一个定界符命令
 /// （`\{` `\}` `\|` / `\lbrace` `\rVert` …；归一化本该把它们改写成字面字符，
 /// 这里兜底）。**裸反斜杠不是合法定界符** —— 上游会把它当定界符逐行画出来，
-/// 结果就是输出里出现没渲染的 LaTeX（review r2 的 B2）。
+/// 结果就是输出里出现没渲染的 LaTeX。
 fn skip_delimiter(chars: &[char], i: usize) -> Option<usize> {
     let mut j = i;
     // 上游 `parse_command` 会吃掉命令后的一个空格
@@ -404,7 +404,7 @@ fn skip_delimiter(chars: &[char], i: usize) -> Option<usize> {
     let &c = chars.get(j)?;
     if c != '\\' {
         // 任意单字符都曾是上游的定界符（`\right文` 会多画一个 `文`），我们只认
-        // 真正的定界符记号（review r3 的 N3）
+        // 真正的定界符记号
         return crate::normalize::is_delimiter_char(c).then_some(j + 1);
     }
     // `\<单个非字母字符>`：`\{` `\}` `\|` 是定界符，其它（`\,` `\ ` …）不是
@@ -675,7 +675,7 @@ mod capacity_tests {
         // `\text{…}` 里的 `&` 是普通字符，不占槽位
         let st = scan_str(r"\begin{cases} \text{a & b} & c \end{cases}");
         assert!(!st.environment_row_overflow);
-        // 里面再嵌花括号也是字面文本（review r3 的 N1）
+        // 里面再嵌花括号也是字面文本
         let st = scan_str(r"\begin{cases} \text{a {b & c}} & d \end{cases}");
         assert!(!st.environment_row_overflow);
         // 只数到 cases 行里那一个 `&`：`\text{…}` 里的两个都不算
@@ -697,7 +697,7 @@ mod capacity_tests {
             assert_eq!(st.left_count, 1, "{src}");
             assert_eq!(st.right_count, 1, "{src}");
         }
-        // 裸反斜杠 / 字母 / CJK 都不是定界符（review r3 的 N3）
+        // 裸反斜杠 / 字母 / CJK 都不是定界符
         for src in [
             r"\left\unknowncmd x \right)",
             r"\left( x \right中",

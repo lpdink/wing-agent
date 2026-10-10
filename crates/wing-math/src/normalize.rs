@@ -84,7 +84,7 @@ const DELIMS: &[(&str, char)] = &[
 /// 上游 `latex_to_unicode` 覆盖 130+ 符号，但 `\mid`（条件概率 `P(A \mid B)` 里的竖线）
 /// 与 `\lt` / `\gt` 不在其中，会走未知命令兜底漏成字面量。这三个是纯别名，重写零风险。
 ///
-/// `N13`（review r1 的 N1）：`\ldots` / `\dots` 上游一律映射成中线点 `⋯`，但 LaTeX 语义
+/// `N13`：`\ldots` / `\dots` 上游一律映射成中线点 `⋯`，但 LaTeX 语义
 /// 是"基线省略号" `…`（`\cdots` 才是中线点）。这里把前两者改写成 `…`。
 const SYMBOL_ALIASES: &[(&str, char)] = &[
     ("mid", '|'),
@@ -94,7 +94,7 @@ const SYMBOL_ALIASES: &[(&str, char)] = &[
     ("dots", '…'),
 ];
 
-/// `N14`：源码里的**控制字符**（review r1 的 B3）。
+/// `N14`：源码里的**控制字符**。
 ///
 /// `\n` / `\t` 之类会作为普通字符进入网格，破坏"行内结果单行 / 显示结果是字符网格"的契约，
 /// 而 LLM 输出的多行公式是常态。这里统一折叠成**一个空格**（换行在数学表达式里等价于
@@ -117,7 +117,7 @@ pub(crate) fn delimiter_command_char(name: &str) -> Option<char> {
     DELIMS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
 }
 
-/// `\left` / `\right` 后面**允许**的定界符字符（review r3 的 N3）。
+/// `\left` / `\right` 后面**允许**的定界符字符。
 ///
 /// 上游把"紧跟 `\left` 的任意单个字符"都当定界符并逐行画出来，于是
 /// `\right文字` 会凭空多画一个 `文`（fuzz 里的"内容增益"）。LaTeX 本身要求定界符是
@@ -161,7 +161,7 @@ pub(crate) fn normalize(src: &str) -> String {
 }
 
 /// `N14`：控制字符 → 空格、零宽字符 → 删除。**必须在任何扫描之前做**，否则
-/// `\n` 会以普通字符的身份进入 parser 与网格（review r1 的 B3）。
+/// `\n` 会以普通字符的身份进入 parser 与网格。
 fn sanitize(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut pending_space = false;

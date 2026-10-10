@@ -5,7 +5,7 @@
  * `gateway.port` in `~/.wing/config.yaml`; default 127.0.0.1:32523). TLS is the
  * reverse proxy's job, so a configurable host/port is all the extension needs.
  *
- * **Auth never travels in the URL by default** (review #109 [P3-6]). The gateway
+ * **Auth never travels in the URL by default**. The gateway
  * prefers headers — `gateway/auth.py::extract_key_from_ws` reads
  * `Authorization: Bearer` / `X-API-Key` first and only then `?api_key=` — and the
  * Node extension host can set them (undici's `WebSocket` and the bundled `ws`

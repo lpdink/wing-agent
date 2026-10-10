@@ -11,10 +11,12 @@
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from unittest.mock import patch
 
 import pytest
+
+from wing.provider.base import ModelProvider
 
 
 class _CapturingHandler(logging.Handler):
@@ -80,6 +82,36 @@ def _isolate_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_provider_pool(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """每个测试一枚全新 provider 池。
+
+    池是模块级单例（生产语义如此）；实例若是跨测试复用，会携带上一个测试的
+    配置快照（base_url / api_key 等）——必须隔离，否则测试之间互相污染。
+    """
+    import wing.provider.pool as pool_mod
+
+    monkeypatch.setattr(pool_mod, "_pool", pool_mod.ProviderPool())
+    yield
+
+
+@pytest.fixture()
+def install_provider() -> Callable[[ModelProvider], ModelProvider]:
+    """把测试自建的 provider 实例登记进共享池（按 provider.name 替换懒建条目）。
+
+    agent 只持 provider name、解析一律经池——需要注入定制实例（假 client /
+    定制 config）的测试用本 fixture 把实例放回池里，而不是绕过池传递实例。
+    （池单例已被 ``_isolate_provider_pool`` 逐测试替换，登记随测试消亡。）
+    """
+    import wing.provider.pool as pool_mod
+
+    def _install(provider: ModelProvider) -> ModelProvider:
+        pool_mod._pool._providers[provider.name] = provider
+        return provider
+
+    return _install
+
+
+@pytest.fixture(autouse=True)
 def _mock_config():
     """自动 mock config，避免加载真实 config.yaml。
 
@@ -92,10 +124,16 @@ def _mock_config():
     test_config = Config(
         providers=[
             ProviderConfig(
-                name="default", base_url="https://api.example.com", api_key="test"
+                name="default",
+                base_url="https://api.example.com",
+                api_key="test",
+                models=["gpt-4"],
             ),
             ProviderConfig(
-                name="alt", base_url="https://api.alt.com", api_key="test-alt"
+                name="alt",
+                base_url="https://api.alt.com",
+                api_key="test-alt",
+                models=["qwen3-max", "gpt-4o-mini", "claude-x"],
             ),
         ],
         agents=[
@@ -115,8 +153,10 @@ def _mock_config():
         ],
     )
 
-    with patch("wing.config.get_config", return_value=test_config):
-        with patch("wing.config.loader._config", test_config):
-            yield test_config
+    # 只替换 loader 单例：get_config()（任何模块持有的引用）都在调用时读它；
+    # 额外 patch `wing.config.get_config` 名字反而会让惰性 import 的读取方
+    # （如 wing.provider.pool）绕开测试注入的 config。
+    with patch("wing.config.loader._config", test_config):
+        yield test_config
 
     reset_config()

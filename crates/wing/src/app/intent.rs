@@ -10,7 +10,7 @@
 
 use wing_api_client::models::{
     AgentsResponse, BranchesResponse, CommandsResponse, ModelsResponse, SessionInfoResponse,
-    SessionListResponse,
+    SessionListResponse, SettingsGetResponse, SettingsSchemaResponse, SettingsSetResponse,
 };
 
 /// Payload of a background fetch result.
@@ -33,6 +33,18 @@ pub enum FetchPayload {
     SkillsInfo(String),
     /// Compact session completed (original_tokens, compressed_tokens).
     CompactDone { original: i64, compressed: i64 },
+    /// 设置目录 + 稀疏文档快照（`GET schema` + `GET get`，并发一次拿回）。
+    ///
+    /// 装箱：`SettingsSchemaResponse` 带着整棵 catalog，是枚举里最大的一档
+    /// （`FetchPayload` 会进 mpsc 的缓冲区，别让每个变体都按最大档算大小）。
+    Settings {
+        schema: Box<SettingsSchemaResponse>,
+        state: Box<SettingsGetResponse>,
+    },
+    /// 一次保存的 Gateway 半边回执（`POST /api/settings/set`）。
+    SettingsSaved(Box<SettingsSetResponse>),
+    /// Gateway 半边失败：`conflict` 区分 409（指纹冲突）与传输 / 协议错误。
+    SettingsSaveError { message: String, conflict: bool },
     /// Show a toast message (for errors or success feedback from background tasks).
     Toast { message: String, is_error: bool },
 }
@@ -107,10 +119,11 @@ pub enum AppIntent {
     /// Fetch available agent template list via HTTP API for popup candidates.
     FetchAgents,
 
-    /// Update session state (model, agent, title, thinking, reasoning_effort, yolo, workspace) via HTTP API.
+    /// Update session state (model id, agent, title, thinking, reasoning_effort,
+    /// yolo, workspace) via HTTP API.
     UpdateSession {
-        model: Option<String>,
-        provider: Option<String>,
+        /// 模型引用词（model_id）——唯一的模型变更入口。
+        model_id: Option<String>,
         agent: Option<String>,
         title: Option<String>,
         thinking: Option<bool>,
@@ -124,6 +137,11 @@ pub enum AppIntent {
 
     /// Send a desktop notification via OSC 9 escape sequence.
     Notify(String),
+
+    /// Report the program status to the terminal via OSC 7501 (Program Status
+    /// Protocol). Carries the fully formatted sequence: the App formats once,
+    /// so its dedup compares exactly what goes on the wire.
+    SetProgramStatus(String),
 
     /// Compact the current session context via HTTP API.
     /// `instruction` is an optional user-directed compaction focus
@@ -144,14 +162,38 @@ pub enum AppIntent {
 
     /// Fetch and display skills info via HTTP API.
     ShowSkillsInfo,
+
+    // ---- 设置面板（design §12.4） ----
+    /// `GET /api/settings/schema` + `GET /api/settings/get`（并发），产出
+    /// [`FetchPayload::Settings`]。打开面板的 cache-first 刷新与首次拉取共用它。
+    FetchSettings,
+
+    /// `R`：丢弃本地改动并重拉 `get`（结果的落地口径见 `App::settings_reload_pending`）。
+    ReloadSettings,
+
+    /// `s`：一键保存两边。Interface 半边在 intent 执行时同步写盘；Gateway 半边异步 POST。
+    SaveSettings {
+        /// 本次要提交给网关的稀疏文档。
+        gateway: Box<serde_json::Value>,
+        /// 乐观并发的基准指纹（面板持有的那一个）。
+        base: String,
+        /// 要写进 `~/.wing/tui/config.yaml` 的稀疏文档。
+        interface: Box<serde_json::Value>,
+        /// 哪边真的改了：跳过没有改动的一边（不发空 POST / 不重写文件）。
+        gateway_dirty: bool,
+        interface_dirty: bool,
+    },
+
+    /// `Ctrl+R`：立即重启网关（shutdown → 等不可达 → 重新拉起 → 重连 → 会话恢复）。
+    /// 轮次进行中由 App 在分派点拒绝（design §12.5）。
+    RestartGateway,
 }
 
 impl AppIntent {
     /// Build an `UpdateSession` intent with all fields `None`.
     fn update_session(f: impl FnOnce(&mut Self)) -> Self {
         let mut intent = Self::UpdateSession {
-            model: None,
-            provider: None,
+            model_id: None,
             agent: None,
             title: None,
             thinking: None,
@@ -163,17 +205,11 @@ impl AppIntent {
         intent
     }
 
-    /// Update the session model (with optional provider).
-    pub fn set_model(model: String, provider: Option<String>) -> Self {
+    /// Update the session model by its reference word (`model_id`).
+    pub fn set_model(model_id: String) -> Self {
         Self::update_session(|i| {
-            if let Self::UpdateSession {
-                model: m,
-                provider: p,
-                ..
-            } = i
-            {
-                *m = Some(model);
-                *p = provider;
+            if let Self::UpdateSession { model_id: m, .. } = i {
+                *m = Some(model_id);
             }
         })
     }

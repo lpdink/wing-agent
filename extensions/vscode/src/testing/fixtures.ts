@@ -160,7 +160,9 @@ export function makeFixtureSession(overrides: Partial<SessionViewModel> = {}): S
     status: 'idle',
     attention: 'none',
     meta: {
+      modelId: 'fixture-model',
       model: 'fixture-model',
+      modelDisplayName: '',
       provider: 'fixture-provider',
       thinking: true,
       reasoningEffort: 'medium',
@@ -223,6 +225,36 @@ export function makeApprovalAskCell(id = 'ask-approval'): AskCellModel {
         options: [
           { label: 'Approve', description: '' },
           { label: 'Deny', description: '' },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * An ask cell whose single question also renders the free-form field
+ * (`required: false` — see `AskCell`), for the option-vs-text interplay tests.
+ */
+export function makeCustomAnswerAskCell(id = 'ask-custom', multiSelect = false): AskCellModel {
+  return {
+    kind: 'ask',
+    id,
+    createdAt: FIXTURE_EPOCH,
+    requestId: 'ask-request-custom',
+    sessionId: 'session-a',
+    approval: false,
+    state: 'awaiting',
+    answers: [],
+    questions: [
+      {
+        id: 'q-open',
+        question: 'Which rendering strategy should the transcript use?',
+        header: 'Rendering',
+        multiSelect,
+        required: false,
+        options: [
+          { label: 'Memoized cells', description: 'Stable prefix + streaming tail' },
+          { label: 'Full re-render', description: 'Simplest, quadratic on long turns' },
         ],
       },
     ],
@@ -406,9 +438,11 @@ export function makeModelPicker(): ModelPickerModel {
   return {
     sessionId: 'session-a',
     rows: [
-      { provider: 'anthropic', model: 'claude-sonnet-4', selected: true },
-      { provider: 'anthropic', model: 'claude-opus-4', selected: false },
-      { provider: 'openai', model: 'gpt-5', selected: false },
+      // The first row proves the split: the id is the identity, the label is
+      // what the user reads, and the two differ for a declared display name.
+      { id: 'claude-sonnet-4', label: 'Claude Sonnet 4', provider: 'anthropic', selected: true },
+      { id: 'claude-opus-4', label: 'claude-opus-4', provider: 'anthropic', selected: false },
+      { id: 'gpt-5', label: 'gpt-5', provider: 'openai', selected: false },
     ],
     activeIndex: null,
   };

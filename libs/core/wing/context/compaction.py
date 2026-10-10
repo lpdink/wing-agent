@@ -8,9 +8,13 @@
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from wing.provider.base import ModelProvider
 from wing.schema import LLMResponse, LLMUsage, Message, Tool
+
+if TYPE_CHECKING:
+    from wing.provider.base import RequestOptions
 
 
 @dataclass
@@ -202,6 +206,7 @@ class Compactor:
         model_provider: ModelProvider,
         tools: list | None = None,
         instruction: str | None = None,
+        options: "RequestOptions | None" = None,
     ) -> LLMResponse:
         """执行压缩。
 
@@ -210,6 +215,11 @@ class Compactor:
 
         prompt（BODY [+ 指令块] + FORMAT）被追加为最后一条 user message。
         工具调用在响应中被静默忽略。
+
+        options 是调用方注入的会话级参数（session id 保持与主调用同一
+        prompt cache key；thinking / effort 开关与主调用同口径）——provider
+        无状态化后不再有「实例自带会话状态」可言，compact 请求的缓存亲和
+        与开关一致性全靠它。
 
         instruction 是用户通过 /compact <侧重> 下发的压缩侧重指令
         （仅手动压缩传入；后台自动压缩不带）。条件渲染：存在则插入
@@ -238,12 +248,14 @@ class Compactor:
         ]
         messages = request_messages + [Message(role="user", content=prompt)]
 
+        # 消费完整（非流式路径只产出一个响应）：不 break——被 break 放弃的
+        # 生成器要到 finalizer 才收尾，provider 的在途计数（退场「排空即关」
+        # 的依据）会白挂一程。
         response = None
         async for item in model_provider.generate(
-            messages, model, tools=tools, stream=False
+            messages, model, tools=tools, stream=False, options=options
         ):
             response = item
-            break
 
         if response is None:
             response = LLMResponse(content="")

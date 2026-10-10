@@ -469,6 +469,9 @@ describe('event mirror — every type decodes field by field', () => {
       ...META,
       type: 'session_state_changed',
       model: null,
+      model_id: null,
+      provider_name: null,
+      model_display_name: null,
       thinking: true,
       reasoning_effort: null,
       yolo: null,
@@ -476,6 +479,24 @@ describe('event mirror — every type decodes field by field', () => {
       agent: null,
       session_id: 's',
       uuid: null,
+    });
+  });
+
+  it('session_state_changed carries the model quadruple when the model changes', () => {
+    const decoded = known({
+      type: 'session_state_changed',
+      model: 'dfmodel',
+      model_id: 'ds-flash',
+      provider_name: 'qoder',
+      model_display_name: 'DeepSeek-Flash',
+      session_id: 's',
+      ...META,
+    });
+    expect(decoded).toMatchObject({
+      model: 'dfmodel',
+      model_id: 'ds-flash',
+      provider_name: 'qoder',
+      model_display_name: 'DeepSeek-Flash',
     });
   });
 
@@ -543,6 +564,8 @@ describe('sync_session — the replay payload', () => {
     turn_started_at: '2026-09-18T07:59:00+00:00',
     agent: {
       model_name: 'gpt-5',
+      model_id: 'gpt-5',
+      model_display_name: 'GPT-5',
       system_prompt: 'be brief',
       tools: ['Bash'],
       skills: [],
@@ -595,11 +618,31 @@ describe('sync_session — the replay payload', () => {
     ]);
     expect(event.agent).toStrictEqual({
       model_name: 'gpt-5',
+      model_id: 'gpt-5',
+      model_display_name: 'GPT-5',
       system_prompt: 'be brief',
       tools: ['Bash'],
       skills: [],
       rules: [],
       workspace: '/tmp/ws',
+      provider_name: 'openai',
+    });
+  });
+
+  it('an old gateway agent snapshot without model_id decodes it as null', () => {
+    const event = syncSession({
+      ...payload,
+      agent: { model_name: 'gpt-5', provider_name: 'openai' },
+    });
+    expect(event.agent).toStrictEqual({
+      model_name: 'gpt-5',
+      model_id: null,
+      model_display_name: null,
+      system_prompt: null,
+      tools: [],
+      skills: [],
+      rules: [],
+      workspace: null,
       provider_name: 'openai',
     });
   });

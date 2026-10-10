@@ -115,10 +115,14 @@ export function renderConfig(options: {
     '    max_retry_delay: 1.0',
     '    explicit_cache_mode: true',
     '    extra_body: {}',
+    '    # The catalog comes from the declaration only (no remote discovery) and',
+    '    # must be non-empty; a bare string declares id = name.',
+    '    models:',
+    `      - ${options.model}`,
     'agents:',
     '  - name: default',
+    '    # The id of the model declared above (no provider field any more).',
     `    model: ${options.model}`,
-    '    provider: smoke',
     '    default: true',
     `    system_prompt: ${JSON.stringify(systemPrompt)}`,
     '    tools:',
@@ -168,7 +172,7 @@ export interface SmokeGatewayOptions {
   /**
    * `WING_SMOKE_AUTH_KEY` — when set, the generated config requires it.
    *
-   * The point is to prove the *header* auth path (review #109 [P3-6]) against
+   * The point is to prove the *header* auth path against
    * the real gateway: HTTP and WS both carry `Authorization: Bearer …`, so a
    * green run means a user with `wing.apiKey` set can connect. Default `null`
    * keeps the smoke on the ordinary no-auth configuration.

@@ -10,7 +10,9 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 1. WS  GET/WS  /ws                 → ConnectResponse { type:"connected", client_id }
 2. HTTP POST  /api/session/create   → { session_id }
 3. HTTP POST  /api/session/subscribe { session_id, client_id }
-4. HTTP POST  /api/session/send      { session_id, content }   → agent loop 启动
+4. HTTP POST  /api/session/send      { session_id, content, tool_call_id? } → agent loop 启动
+   （`tool_call_id` = 定向回答一个在挂 Ask 的 feedback waiter；CLI 侧：`wing asks` 拿 id，
+   `wing run --tool-call-id` 回答）
 5. WS   接收 ReAct 事件流（text / tool_call / … / turn_result）
 ```
 
@@ -23,16 +25,16 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`；可选 `session_id` = **create-or-adopt**：不存在则以该 id 建会话，已存在则收养既有会话——语义同 `/api/session/resume`，`agent` 覆盖只应用 resume 子集。**收养路径忽略创建参数**：`template_name` / `workspace` / `backend` 一律以 metadata 为准、且不做校验，因此同一个请求体可能"id 存在 → 200（参数被忽略）/ id 不存在 → 400（如 `backend` 非法）"；**例外**是"该 id 已命中内存里的**空会话**"（同 FS 的变体）：那条路径走的是认领之后的校验分支，`backend` / `template_name` 非法仍会 **400**） |
-| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型记录优先于模板默认；也是被逐出会话的显式水合入口）。可选 `agent` 覆盖：**只应用 `model` / `provider` / `effort` / `tools`**——`system_prompt` / `append_system_prompt` / `max_turns` / `yolo` 一律不应用（它们会改请求前缀或会话既有限额，属创建期语义），被忽略的字段会记 warning；`provider` 只在**伴随 `model`** 时生效 |
+| POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型绑定按恢复链还原：`metadata.model_id` 命中用当前映射 → 快照兜底 → 模板默认；也是被逐出会话的显式水合入口）。可选 `agent` 覆盖：**只应用 `model_id` / `effort` / `tools`**——`system_prompt` / `append_system_prompt` / `max_turns` / `yolo` 一律不应用（它们会改请求前缀或会话既有限额，属创建期语义），被忽略的字段会记 warning |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
-| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404） |
-| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）与 `tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及 `/ss <args>` 的 exact > prefix > contains 分层（层内保持上述顺序）；后端不感知 `pin`（它只是普通标签），状态优先级（`waiting` 不提前）与 workspace 不参与排序 |
+| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask）；无该 id / id 已失效则回退普通入队 |
+| GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）与 `tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags），以及生效模型的四件套 `model_id`（引用词）/ `model_name`（调用名）/ `provider_name` / `model_display_name`（口径同 `/api/session/info`；在内存的会话取 live agent，未加载的按 resume 链解析盘上记录，解析不出的降级路径为 null，展示层回落 展示名 → 调用名 → 引用词）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及 `/ss <args>` 的 exact > prefix > contains 分层（层内保持上述顺序）；后端不感知 `pin`（它只是普通标签），状态优先级（`waiting` 不提前）与 workspace 不参与排序 |
 | GET | `/api/session/get` | 获取 session 详情 |
-| GET | `/api/session/info` | 运行时状态，含 `context_stats`、`skills_info`、`reasoning_effort`、`model_display_name`（模型展示名；未声明 = null，前端回落 `model`）、`tags`（会话标签）与 `tag_meta`（标签记录，含 `added_at`） |
+| GET | `/api/session/info` | 运行时状态，含 `model`（调用名）+ `model_id`（引用词；不可用时 null）+ `provider_name`（运行期事实）+ `model_display_name`（展示名；未声明 = null，前端回落 `model`）、`context_stats`、`skills_info`、`reasoning_effort`、`tags`（会话标签）与 `tag_meta`（标签记录，含 `added_at`） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
-| POST | `/api/session/update` | 更新状态：model / agent / title / thinking / reasoning_effort / yolo / workspace / tools（`tools` 全量替换，ref 格式，PR #50） |
+| POST | `/api/session/update` | 更新状态：model_id / agent / title / thinking / reasoning_effort / yolo / workspace / tools（`tools` 全量替换，ref 格式，PR #50）。`model_id` 是模型**引用词**（∈ `providers[].models` 的 id），未命中回 400（错误含 available ids + 调用名提示）；旧字段 `model` / `provider` 已删除——发了被**静默忽略**（不报错、不生效） |
 | POST | `/api/session/tag` | 读取或原子增删会话标签。body `{session_id, add?, remove?}`：两者皆缺省 = 纯读取；同时给出时服务端一次原子应用（幂等，remove 胜出）。响应 `{ok, session_id, tags, added, removed, tag_meta}`。**打标时间**：实际加入的标签记 `added_at`（本地 naive ISO，与 `last_interaction` 同口径；幂等 no-op 不刷新），移除即删记录，清空后 `tag_meta` 与 `tags` 一起从 metadata 消失。**不水合**已逐出会话（标签与记录属持久 metadata，读写都不把会话换入内存）；标签为不透明字符串（1..64 字符，禁空白 / 逗号 / 控制符，不以 `-` 开头，单会话上限 64；建议小写、`k=v` 作命名空间）；非法 400 / 未知会话 404 |
 | POST | `/api/session/compact` | 手动压缩上下文，可带 `instruction` 侧重指令（条件插入压缩 prompt，无指令时 prompt 不变） |
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
@@ -73,11 +75,74 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/commands` | 命令列表（仅返回 `source == "prompt"` 的命令） |
-| GET | `/api/models` | 可用模型列表（按 provider 分组嵌套：`providers[].models` 是实际调用名；**追加** `model_details: [{name, display_name, description, capabilities: {vision}}]`，与 `models` 逐项同序同名——见 [media-images.md](media-images.md)） |
+| GET | `/api/models` | 可用模型目录（按 provider 分组嵌套；目录 = **配置静态声明的同步投影**——远端 `/models` 发现已退役、无网络请求）。`providers[].models` 是**对象数组**：`{id, name, display_name, description, capabilities: {vision}}`——`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给上游的调用名，`display_name` 是展示名（可空，前端回落 `name`），`capabilities` 是能力声明（见 [media-images.md](media-images.md)）。旧的 `model_details` 平行数组已删除（消灭「两数组逐项对齐」的脆弱契约） |
 | GET | `/api/agents` | 可用 agent 模板列表 |
-| POST | `/api/system/reload` | 重载配置 / hooks / provider / skills / auth（无需重启） |
+| POST | `/api/system/reload` | 热重载（无需重启），**逐项名字序是对外契约**（probe `test_system_reload` 钉住，只许在末尾追加）：`config.yaml → hooks → prompt commands → provider → skills & rules → log level`。config 项失败立即中止（后续项不再尝试），其余项失败继续；逐项 `ok` / `detail` 如实上报，**失败不回滚文件**。保存事务（`/api/settings/set` 的第 ⑦ 步）走同一条管道 |
 | POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
 | GET | `/api/tools` | 全局工具列表（内置 + 远程，平铺；ref / namespace / name / llm_name / description）（PR #50） |
+
+> `/api/models` 的响应形状（对象数组；`model_details` 平行数组已不存在）：
+
+```json
+{"providers": [{"provider": "qoder", "models": [
+  {"id": "dfmodel", "name": "dfmodel", "display_name": "DeepSeek-Flash",
+   "description": null, "capabilities": {"vision": false}}]}]}
+```
+
+### Settings（`routes/settings.py`，4 个）
+
+RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端点。**读端点不经过 `server.runtime`**
+（`config.document` 的纯函数 + 投影组合），写路径住在 `runtime.apply_settings`。机制细节
+（声明层 / 稀疏文档 / 保存事务 / 密文 / 生效域）见 [settings.md](settings.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/settings/schema` | 设置目录树（`SettingNodeProto`：默认值 / 约束 / 枚举 / 生效域 `apply` / 密文标记 / 分组 / 列表元素形态）。纯静态，可长缓存；`{version, root, config_path, groups}`，根节点的 `key` / `path` 恒为 `"config"`；`groups[]`（`{id, title, doc, members}`，顺序即界面顺序）是设置面板左列锚点的唯一来源，声明在后端 `config/groups.py` |
+| GET | `/api/settings/get` | 稀疏文档（只有用户显式写下的键；密文叶子恒为 `null`）+ `secrets` 状态表（`set` / `empty` / `absent` + 末 4 位 hint）+ `fingerprint`（文件 sha256；不存在 = `"absent"`）+ 全部 `problems` + `setup_mode` + `config_path`。文件坏掉（YAML 语法错）也照常应答：`values={}` + 一条文档级 problem（`path=null`） |
+| GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检。`valid == (not setup_mode and 无 problem)`：降级态**恒** `false` |
+| POST | `/api/settings/set` | 保存事务。body `{base, document}`：`base` = 客户端持有的指纹（显式 `null` / 缺键 = 不做并发检查，CLI `--force`）；`document` = 整份稀疏文档。**密文三态**：`null` = 保留磁盘现值 / 字符串 = 设为该值（`""` = 显式清空）/ 键缺席 = 从文件移除。**鉴权：admin**（`tool_runtime` 403） |
+
+`POST /api/settings/set` 的响应（`SettingsSetResponse`）：
+
+```json
+{"ok": true, "fingerprint": "…", "problems": [], "changed": ["providers[0].extra_body"],
+ "restart_required": [], "reload": {"ok": true, "results": [{"name": "config.yaml", "ok": true}, …]},
+ "setup_mode_exited": false, "backup_path": "…/config.yaml.bak", "warnings": []}
+```
+
+> **校验失败走 HTTP 200 + `ok=false` + `problems`（不是 4xx）**——刻意的取舍，别"修好"它：
+> 请求本身完全合法，是**用户填的内容**不合法；把它当业务结果返回，前端保存路径永远拿到同一个响应类型
+> （`ok` 决定成败，`problems` 逐条驱动标红）。HTTP 错误码只留给**协议级**失败：**409**（指纹不匹配，
+> `error: "conflict"`，`detail` 带当前指纹）、**401 / 403**（鉴权）、**500**（写盘 `OSError`）。
+>
+> 其他语义：**全有或全无**（有 problem 时文件一个字节都不写）；写前把现有文件字节级复制到
+> `config.yaml.bak`（覆盖式，只留最近一份）；`changed` 是相对保存前的变更路径（列表按下标 diff，
+> 删除元素会把后续项记成 modified）；`restart_required` 是其中 `apply == restart` 的**叶子**路径，
+> **不做假热更**（`gateway.port` 改了也不会换端口监听）；`warnings` 是非致命告知
+> （当前唯一产出：原文件不可解析时"其中的密钥无法保留"——语法错的文件也能经这个端点修好）。
+> 保存成功会广播 `settings_changed` 事件（见下）。
+
+#### 配置不可用时的降级面（setup mode）
+
+配置缺失 / 非法时网关**不再崩溃退出**：`boot_config()` 永不抛，网关以 **setup mode** 降级启动——
+只服务设置端点，其余一律 **503**，`error == "setup_mode"`（`detail` = 前 10 条 problem + 修复指引）。
+经 API 保存出一份合法配置后**就地转入正常模式**（不重启进程，`setup_mode_exited: true`）。
+
+**可用路径 = 九条 allowlist**（`gateway/setup_guard.py::SETUP_ALLOWED_PATHS`）：
+
+```
+/api/health · /api/settings/{schema,get,status,set} · /api/shutdown · /openapi.json · /docs · /redoc
+```
+
+- 其余一切（session / models / agents / commands / tools / system reload …）一律 503。
+  注意 `HTTP_ERROR_TYPES[503]` 是**通用**的 `"service_unavailable"`——setup 语义由守门**显式覆盖**
+  `error="setup_mode"`（客户端结构化判定的唯一依据，不要嗅探 `detail` 文案）。
+- `/ws` 在 **accept 之前**以 1013 关闭（客户端看到握手失败，而不是"连上就断"）。
+- **修复模式鉴权 = loopback-only 免 key**：配置坏掉 ⇒ auth 配置本身不可信，所以只接受
+  `127.0.0.1` / `::1` / `localhost` 来源且**不要求 key**；非 loopback 一律 **403**。
+  **这是收紧不是放松**（正常模式 `auth.enabled=false` 时任何人都能访问）——把网关暴露到 `0.0.0.0`
+  且配置坏掉的部署**无法远程修复**，是刻意的安全姿态。中间件顺序（`app.py`）：
+  `AuthMiddleware` 在外层，非 loopback 在 setup mode 下任何路径都先吃 403（而不是 503）。
 
 ### Health（`routes/health.py`，1 个）
 
@@ -126,9 +191,11 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 
-> **模型展示名**：会话 agent 快照（`sync_session.agent`、`GET /api/session/get.agent`）与 `session_state_changed`、`GET /api/session/info` 与 `model` / `model_name` 同刻携带 `model_display_name`（配置声明 `display_name` 的投影；未声明 / 空串 = 缺失或 null）。它是**展示层素材**：前端渲染展示名、缺省回落实际调用名；身份与变更仍以实际调用名 + provider 为准，不做名字反向解析。
+> **模型四元组**（`model` / `model_id` / `provider_name` / `model_display_name`）：会话 agent 快照（`sync_session.agent`、`GET /api/session/get.agent`）、`session_state_changed`（模型变更时四者同刻下发）与 `GET /api/session/info` 携带同一组字段。`model_id` 是配置声明 `providers[].models[].id` 的投影（可空——旧会话的 id 已删除且反查不中时为 null），是**身份**：前端的选择态匹配、状态展示的「当前模型」判定与一切变更请求都以它为准；未命中任何候选即视为未知，绝不按调用名反查。`model_display_name` 是**展示层素材**（未声明 / 空串 = 缺失或 null）：前端渲染展示名、缺省回落调用名，不参与匹配。
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
+
+**网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），客户端重连后应重新 `GET /api/settings/status`，重放一条旧通知只会误导。消费侧**用指纹比对**判断是不是别人改的（自己的保存会更新本地指纹，相同即忽略；不同则提示"配置已被其它客户端修改"并作废本地缓存）。
 
 > `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（前端终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。
 
@@ -217,6 +284,7 @@ gateway:
 | WS | 查询参数 `?api_key=<key>` | 2 |
 
 - `/api/health` 始终豁免。
+- **修复模式（setup mode）另有一条前置分支**：配置不可用时只接受 loopback 来源且**不要求 key**（非 loopback 一律 403）——见上面「配置不可用时的降级面」。
 - key 用 `hmac.compare_digest` 常量时间比较；须为 ASCII 可打印字符（配置解析时校验）。
 - `auth_config` 每次请求读取最新配置单例，`/api/system/reload` 可即时生效。
 - **加密（TLS）由外部反向代理（nginx 等）负责**，应用层只做身份验证。

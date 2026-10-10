@@ -40,9 +40,11 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.commands import expand_prompt_command
+from wing.request_context import session_context
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
+from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
 from .session import Session, tool_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
@@ -208,12 +210,37 @@ class SessionManager:
         self._teardowns: set[asyncio.Task[None]] = set()
 
         config = get_config()
-        self._template_manager = AgentTemplateManager(config.agents)
+        self._template_manager = AgentTemplateManager(config.agents, config)
 
     @property
     def template_manager(self) -> AgentTemplateManager:
         """Agent 模板管理器。"""
         return self._template_manager
+
+    def reload_templates(self) -> None:
+        """按**当前 config** 重建模板管理器（config 热重载后调用）。
+
+        模板是 config 的派生状态（`agents[].model` 经 id 表解析成调用名 +
+        provider）：不重建的话，「reload 后新建的会话用旧模板（旧 id 映射）、
+        已存在会话 resume 时用新映射」两条路径会分叉。重建只影响**未来的**
+        模板解析；已在内存的会话保持自己的 agent（切模型是用户的显式动作）。
+
+        Raises:
+            ValueError: 新 config 的 `agents[]` 无法解析（理论上不可达——
+                config 加载期已强制；调用方按「config 项的一部分」处理）。
+        """
+        config = get_config()
+        self._template_manager = AgentTemplateManager(config.agents, config)
+
+    def _template_or_default(self, name: str | None) -> AgentTemplate:
+        """按记录里的模板名取模板；缺失 / 已不存在（config 演化）→ 默认模板。
+
+        「metadata 是模板的唯一来源」这条规则只有一份实现，resume（真的按模板
+        重建 agent）与列表投影（未加载会话的模型列）共用它——否则两边会给出
+        不同的默认模板答案。
+        """
+        template = self._template_manager.get(name) if name is not None else None
+        return template if template is not None else self._template_manager.default
 
     # ============================================================
     # 外部方法：session 生命周期
@@ -241,22 +268,19 @@ class SessionManager:
     ) -> Session:
         """创建（或按 id 收养）session。
 
-        ``session_id`` 是 **create-or-adopt** 入口（编排方自带 id 的场景，如
-        Claude Agent SDK 系消费方用自己的 UUID 建会话）：给定时该 id 即最终
-        session id——已存在（内存或任 store）则**收养**既有会话，语义等同
-        :meth:`resume_session`（模板 / workspace 来自 metadata，agent 覆盖只
-        应用 resume 子集，见 :meth:`Session.apply_resume_override`），且不触发
-        `before_session_start`（session id 未变，是"恢复"而非"创建新会话"）；
-        不存在则以该 id 建会话（此时 agent 覆盖是创建语义：全字段应用）。
-
-        不给 ``session_id`` 时行为不变：id 由后端生成（见
+        ``session_id`` 是 **create-or-adopt** 入口（编排方自带 id 的场景，如 Claude Agent SDK 系
+        消费方用自己的 UUID 建会话）：给定时该 id 即最终 session id——已存在（内存或任 store）则
+        **收养**既有会话，语义等同 :meth:`resume_session`（模板 / workspace 来自 metadata，agent
+        覆盖只应用 resume 子集，见 :meth:`Session.apply_resume_override`），且不触发
+        `before_session_start`（session id 未变，是"恢复"而非"创建新会话"）；不存在则以该 id 建
+        会话（此时 agent 覆盖是创建语义：全字段应用）。不给 ``session_id`` 时 id 由后端生成（见
         :meth:`_generate_session_id`）——**既有策略是默认，不是唯一**。
 
         Args:
             template_name: Agent 模板名称，None 时使用默认模板（仅新会话生效）
             workspace: 工作目录（仅新会话生效）
-            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值；
-                收养路径只应用 model/provider/effort/tools）
+            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值；收养路径只应用
+                model_id/effort/tools）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
             tags: 创建即打标 / 收养时并入（经 :meth:`set_session_tags` 同一套校验）
             session_id: 指定 session id（create-or-adopt）；None = 自生成
@@ -286,12 +310,16 @@ class SessionManager:
         # 标签、覆盖文本与工具 ref 的纯校验提到最前（都不写盘）：任何非法输入在
         # 任何副作用之前 raise，"失败即零残留"对 create-or-adopt 尤其重要（重试
         # 必须还是干净状态）。全部必须在**认领键**之前——认领会建会话目录。
+        # model_id 的查表同理前置：未命中在 `apply_agent_override`（认领之后）才
+        # 会 raise，留下一个失败产生的空会话目录。
         if tags:
             apply_tag_ops([], add=tags)
         if agent_override is not None:
             validate_override_utf8(agent_override)
             if agent_override.tools is not None:
                 validate_tool_refs(agent_override.tools)
+            if agent_override.model_id is not None:
+                get_config().require_model(agent_override.model_id)
         if workspace is not None:
             require_utf8(workspace, field="workspace")
 
@@ -394,14 +422,12 @@ class SessionManager:
     ) -> Session:
         """恢复已有 session（精确匹配 session id）。已在内存中则直接返回。
 
-        模板只从 metadata.template_name 解析——resume 不接受显式模板：
-        **metadata 是模板的唯一来源**，要换模板请在恢复后走
-        `session/update`（agent 字段）。template_name 缺失或已不存在于
-        config 时回退默认模板。
+        模板只从 metadata.template_name 解析——resume 不接受显式模板：**metadata 是模板的唯一
+        来源**，要换模板请在恢复后走 `session/update`（agent 字段）。template_name 缺失或已不存在
+        于 config 时回退默认模板。
 
-        ``agent_override`` 是 resume 语义的参数覆盖（编排方 `--model` 等）：
-        只应用 `model` / `provider` / `effort` / `tools` 子集——见
-        :meth:`Session.apply_resume_override`（不改链上前缀是不变量）。
+        ``agent_override`` 是 resume 语义的参数覆盖（编排方 `--model` 等）：只应用 `model_id` /
+        `effort` / `tools` 子集——见 :meth:`Session.apply_resume_override`（不改链上前缀是不变量）。
 
         Args:
             session_id: 目标 session ID（须为完整 ID）
@@ -412,7 +438,7 @@ class SessionManager:
 
         Raises:
             LookupError: session 不存在
-            ValueError: 覆盖里的工具引用无法解析
+            ValueError: 覆盖里的 model_id 未命中 id 空间 / 工具引用无法解析
         """
         result = self._resolve_with_store(session_id)
         if result is None:
@@ -430,11 +456,9 @@ class SessionManager:
         metadata = store.load_metadata(resolved)
 
         # metadata 是模板的唯一来源：template_name > 默认
-        tpl = None
-        if metadata is not None and metadata.template_name is not None:
-            tpl = self._template_manager.get(metadata.template_name)
-        if tpl is None:
-            tpl = self._template_manager.default
+        tpl = self._template_or_default(
+            metadata.template_name if metadata is not None else None
+        )
 
         messages: TrackedList[ChainNode] = TrackedList.load(
             store.open_log(resolved), Message
@@ -468,7 +492,7 @@ class SessionManager:
 
         语义 = :meth:`resume_session` + 覆盖子集 + tags 并入：
         - 模板 / workspace 来自 metadata（"创建"参数对既有会话无意义）；
-        - `agent_override` 走 resume 子集（model/provider/effort/tools）；
+        - `agent_override` 走 resume 子集（model_id/effort/tools）；
         - `tags` 按 add 语义并入（幂等；非法标签在此 ValueError，零写盘）；
         - **不触发 `before_session_start`**：session id 未变，这是"恢复既有
           会话"而非"创建新会话"（该 hook 的语义边界就是"新 session id"）。
@@ -562,8 +586,9 @@ class SessionManager:
                 workspace=source.session_workspace,
                 forked_from=session_id,
                 template_name=source.template_name,
+                model_id=source.model_id,
                 model_name=source.agent.model,
-                provider_name=source.agent.model_provider.name,
+                provider_name=source.agent.provider_name,
                 system_prompt=source.context_manager.setin_system_prompt or None,
                 append_system_prompt=(
                     source.context_manager.append_system_prompt or None
@@ -577,7 +602,9 @@ class SessionManager:
             ),
         )
 
-        template = AgentTemplate.from_agent(source.agent, name=source.template_name)
+        template = AgentTemplate.from_agent(
+            source.agent, name=source.template_name, model_id=source.model_id
+        )
         new_session = Session.from_template(
             template=template,
             session_id=new_session_id,
@@ -616,20 +643,14 @@ class SessionManager:
     ) -> TagMutation:
         """按 session id 原子增删标签（幂等；读或写都不触发水合）。
 
-        标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：
+        标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：已在内存 → 经
+        ``Session.apply_tag_ops`` 改内存元数据并落盘（内存对象是磁盘事实的同一来源，绕开它会被后续
+        save 回写覆盖）；未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打 favorite 不会
+        把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
 
-        - 已在内存 → 经 ``Session.apply_tag_ops`` 改内存元数据并落盘
-          （内存对象是磁盘事实的同一来源，绕开它会被后续 save 回写覆盖）；
-        - 未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打
-          favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
-
-        打标时间（``tag_meta``）随同一处变更维护：新增记时间、移除删记录，
-        与 tags 一次落盘。
-
-        session id 先过格式闸门（``_resolve_with_store``）：不合规的值按
-        "不存在"处理，绝不触达 store（防路径穿越）。
-
-        add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
+        打标时间（``tag_meta``）随同一处变更维护：新增记时间、移除删记录，与 tags 一次落盘。
+        session id 先过格式闸门（``_resolve_with_store``）：不合规的值按"不存在"处理，绝不触达 store
+        （防路径穿越）。add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
 
         Raises:
             LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
@@ -701,12 +722,17 @@ class SessionManager:
         return True
 
     async def _teardown(self, session: Session, reason: str) -> None:
-        """拆解会话运行期资源并记一行日志（异常不逃逸）。"""
-        try:
-            await session.aclose()
-        except Exception as e:
-            log.error(f"Session teardown failed ({session.session_id}): {e}")
-        log.info(f"Session evicted: {session.session_id} ({reason})")
+        """拆解会话运行期资源并记一行日志（异常不逃逸）。
+
+        拆解跑在独立任务里（reaper sweep / release 端点都不携带上下文）——
+        显式绑定 session，让拆解链路的日志自动带上归属。
+        """
+        with session_context(session.session_id):
+            try:
+                await session.aclose()
+            except Exception as e:
+                log.error(f"Session teardown failed ({session.session_id}): {e}")
+            log.info(f"Session evicted: {session.session_id} ({reason})")
 
     def evict_idle_sessions(
         self, ttl_seconds: float, now: float | None = None
@@ -782,25 +808,23 @@ class SessionManager:
     def list_sessions(self) -> list[SessionInfo]:
         """列出所有有效 session（跨 stores 聚合），按「活跃优先 + 最后交互时间降序」。
 
-        每个 session 携带运行时 `status`：
-        - 已加载进内存（在 `self._sessions` 中）→ 取 live 状态（idle/working/waiting）
-        - 未 resume → `inactive`
+        每个 session 携带运行时 `status`：已加载进内存（在 `self._sessions` 中）→ 取 live 状态
+        （idle/working/waiting）；未 resume → `inactive`。
 
-        排序口径（唯一事实来源，前端按原序渲染、不再重排）：
+        排序口径（唯一事实来源，前端按原序渲染、不再重排）：① `status != "inactive"` 的（= 已在
+        内存里的工作集）在前，未加载的在后；② 组内按 `_timestamp_key`（最后一次交互时间）降序；
+        ③ 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是优先级：没有它，并列
+        项的先后就取决于 store 的枚举顺序（`iterdir()` / SQL 返回序），同一个列表两次请求可能给出
+        不同顺序。
 
-        1. `status != "inactive"` 的（= 已在内存里的工作集）在前，未加载的在后；
-        2. 组内按 `_timestamp_key`（最后一次交互时间，见该函数的归一化回退）降序；
-        3. 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是
-           优先级：没有它，并列项的先后就取决于 store 的枚举顺序（`iterdir()` /
-           SQL 返回序），同一个列表两次请求可能给出不同顺序。
+        `status` 只用来区分 active / inactive，不再有组内优先级：`waiting`（正在等用户回答）不因为
+        状态本身提前——需要突出 waiting 时看面板上的状态图标（`?`）。workspace 也不参与排序。
 
-        `status` 只用来区分 active / inactive，不再有组内优先级：`waiting`
-        （正在等用户回答）不因为状态本身提前——旧的「waiting > working > idle」
-        排序键已从前端删除，需要突出 waiting 时看面板上的状态图标（`?`）。
-
-        workspace 不参与排序：workspace 匹配曾作为前端的第一排序键，让
-        「在哪启动 TUI」压过了「正在用哪几个会话」——本方法不复制该语义。
+        模型四件套（`model_id` / `model_name` / `provider_name` / `model_display_name`）与 `status`
+        同源同刻地投影：在内存的会话取 live agent（`Session.model_binding`），未加载的按 resume 链
+        解析盘上记录（`resolve_model_binding`）。两条路都不发网络请求、不建会话。
         """
+        config = get_config()
         result = []
         for store in self._stores.values():
             for summary in store.list_summaries():
@@ -813,6 +837,15 @@ class SessionManager:
                     continue
 
                 loaded = self._sessions.get(summary.id)
+                binding = (
+                    loaded.model_binding()
+                    if loaded is not None
+                    else resolve_model_binding(
+                        metadata,
+                        config,
+                        self._template_or_default(metadata.template_name),
+                    )
+                )
                 tags = sanitize_tags(metadata.tags)
                 result.append(
                     SessionInfo(
@@ -823,6 +856,10 @@ class SessionManager:
                         status=loaded.status if loaded is not None else "inactive",
                         tags=tags,
                         tag_meta=sanitize_tag_meta(metadata.tag_meta, tags),
+                        model_id=binding.model_id,
+                        model_name=binding.model_name,
+                        provider_name=binding.provider_name,
+                        model_display_name=binding.model_display_name,
                     )
                 )
 

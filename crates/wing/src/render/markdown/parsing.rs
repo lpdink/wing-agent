@@ -204,6 +204,13 @@ impl MarkdownContext<'_> {
     }
 
     pub(crate) fn ensure_prefix(&mut self) {
+        // 表格单元格自成一格：外层前缀（引用栏 `│ `、列表续行缩进、列表
+        // marker）不进单元格——进去了就是每个格子糊一道假框线（`┃ │ A ┃`），
+        // 比没有前缀更糟。表格整体因此不带外层前缀（登记在
+        // docs/dev/tui-rendering.md 第四节）。
+        if self.active_table.is_some() {
+            return;
+        }
         ensure_prefix(
             self.current_line,
             *self.blockquote_depth,
@@ -560,7 +567,12 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 if !table.current_row.is_empty() {
                     table.rows.push(std::mem::take(&mut table.current_row));
                 }
-                let rendered = render_table(&table, ctx.base_style, ctx.available_width);
+                let rendered = render_table(
+                    &table,
+                    ctx.theme.border,
+                    ctx.base_style,
+                    ctx.available_width,
+                );
                 ctx.lines.extend(rendered);
             }
             push_blank_line(ctx.lines);

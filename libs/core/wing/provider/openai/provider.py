@@ -21,6 +21,7 @@ from wing.config import get_headers
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    RequestOptions,
     StreamAccumulator,
     parse_tool_args,
 )
@@ -44,33 +45,28 @@ from wing.schema import (
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
-    from wing.media import MediaAccess
 
 
 class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
-    """OpenAI 兼容协议 provider（httpx 实现）。"""
+    """OpenAI 兼容协议 provider（httpx 实现）。
 
-    def __init__(
-        self,
-        config: ProviderConfig,
-        session_id: str | None = None,
-        media: MediaAccess | None = None,
-    ) -> None:
+    无状态：实例只含配置与连接池；会话级参数（session id / 媒体池 / 开关）
+    经 `generate(..., options=RequestOptions)` 注入（见 ModelProvider）。
+    """
+
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__()
         self._config = config
-        self._session_id = session_id
-        # 会话媒体池：序列化 mixin 经 self._media 按 id 读字节（见 provider/media.py）。
-        self._media = media
         self.base_url = config.base_url.rstrip("/")
-        self.reasoning_effort: str | None = config.reasoning_effort
         self.timeout_first_chunk = config.timeout_first_chunk
         self.timeout_total = config.timeout_total
         self.explicit_cache_mode = config.explicit_cache_mode
-        # 深拷贝：与 anthropic 路径同口径——运行时开关不得写穿全局 ProviderConfig。
+        # 深拷贝：配置里的 extra_body 是共享只读源——任何路径都不得写穿它。
         self._extra_body: dict = copy.deepcopy(config.extra_body)
         # enable_thinking / preserve_thinking 默认随每个请求发送（用户 extra_body 的
         # 显式值优先）。preserve_thinking 尤为关键——缺它则多轮工具回合间 thinking
-        # 被服务端剥离。thinking 状态从 extra_body 派生（实际请求 payload 源），与
-        # Anthropic 路径同构：property / setter / 请求体 / 对外上报四者自洽。
+        # 被服务端剥离。thinking 的会话级覆盖在请求期经 options 注入（per-request
+        # 视图），与 Anthropic 路径同构。
         self._extra_body.setdefault("enable_thinking", True)
         self._extra_body.setdefault("preserve_thinking", True)
 
@@ -88,18 +84,20 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     # ─── Public API ───────────────────────────────────────────────
 
     @with_retry()
-    async def generate(
+    async def _generate(
         self,
         messages: list[Message],
         model: str,
         tools: list[Tool] | None = None,
         stream: bool = False,
         accumulator: StreamAccumulator | None = None,
+        options: RequestOptions | None = None,
     ) -> AsyncIterator[LLMResponse]:
+        options = options or RequestOptions()
         log.info(
             f"[BEGIN] openai_compat call {model} with {len(messages)} stream:{stream}"
         )
-        body = self._build_body(messages, model, tools, stream)
+        body = self._build_body(messages, model, tools, stream, options)
 
         if stream:
             async for item in self._generate_stream(body, model, accumulator):
@@ -165,39 +163,18 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             return 0
         return len(state.pending)
 
-    async def list_models(self) -> list[str]:
-        if self._config.models:
-            # 静态声明短路：字符串 / 对象两种形态统一取实际调用名（排序保持现状）。
-            return sorted(self._config.model_names())
-        try:
-            resp = await self._client.get("/models")
-            await raise_with_body(resp)
-            data = resp.json()
-            return sorted([m["id"] for m in data.get("data", [])])
-        except Exception as e:
-            log.error(f"Failed to list models: {e}")
-            raise
-
-    async def aclose(self) -> None:
+    async def _close_transport(self) -> None:
         await self._client.aclose()
 
     @property
     def thinking(self) -> bool:
-        """thinking 开关状态——从 extra_body 的 enable_thinking 派生。
+        """thinking 的**配置基线**——extra_body 的 enable_thinking 派生值。
 
-        extra_body 平铺进请求 body，是实际 payload 源；状态从它派生，保证
-        「序列化回放 / 对外 get_status() 上报 / 开关语义」三者自洽
-        （与 Anthropic 路径同构）。
+        会话级覆盖（options.thinking）优先于此值；本 property 是「无覆盖时
+        请求会带什么」的口径（会话侧生效值 = 覆盖 ?? 基线，见
+        `WingAgent.thinking`）。
         """
         return bool(self._extra_body.get("enable_thinking", True))
-
-    def set_thinking(self, enable: bool) -> None:
-        # 改写 extra_body（请求 body 透传源）：切换下次请求即生效，
-        # property 派生随之翻转，无第二份状态。
-        self._extra_body["enable_thinking"] = enable
-
-    def set_reasoning_effort(self, effort: str | None) -> None:
-        self.reasoning_effort = effort
 
     # ─── Request Building ─────────────────────────────────────────
 
@@ -207,8 +184,10 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         model: str,
         tools: list[Tool] | None,
         stream: bool,
+        options: RequestOptions | None = None,
     ) -> dict:
-        openai_messages = self._serialize_messages(messages, model)
+        options = options or RequestOptions()
+        openai_messages = self._serialize_messages(messages, model, options)
         if self.explicit_cache_mode:
             self._apply_cache_control(openai_messages)
 
@@ -222,19 +201,29 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         if stream:
             body["stream_options"] = {"include_usage": True}
 
-        for k, v in self._extra_body.items():
+        # 会话级 thinking 覆盖：只改 per-request 视图，绝不写穿共享 extra_body。
+        extra_body = self._extra_body
+        if options.thinking is not None:
+            extra_body = {**self._extra_body, "enable_thinking": options.thinking}
+        for k, v in extra_body.items():
             if k not in body:
                 body[k] = v
 
-        if self.reasoning_effort:
-            body["reasoning_effort"] = self.reasoning_effort
+        effort = (
+            options.reasoning_effort
+            if options.reasoning_effort is not None
+            else self._config.reasoning_effort
+        )
+        if effort:
+            body["reasoning_effort"] = effort
 
-        # prompt_cache_key（显式缓存模式）
+        # prompt_cache_key（显式缓存模式）：key 来自调用方注入的会话 id
+        # （缓存亲和的存量行为，option 缺省即不下发）。
         # 已知限制：key 是**本会话**的 session id——fork 出的子会话用自己的
         # id，若上游按 key 隔离缓存，父→子无法复用同一前缀的缓存块
         # （见 docs/dev/architecture.md「压缩与缓存哲学」的已知边界）。
-        if self.explicit_cache_mode and self._session_id:
-            body["prompt_cache_key"] = self._session_id
+        if self.explicit_cache_mode and options.session_id:
+            body["prompt_cache_key"] = options.session_id
 
         return body
 
@@ -400,6 +389,11 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                     tokens_per_sec=decode_tps,
                     model=model,
                     request_id=request_id,
+                    # 此刻已知的终止原因（标准帧序下 usage 帧在 finish_reason
+                    # 帧之后到达）：带内 usage 帧是 metrics 事件的载荷源，
+                    # 带上它直播路径才看得到 length ≠ stop。帧序反了也不丢
+                    # ——终结帧（流尾）永远携带权威值，取值侧按帧全量捕获。
+                    stop_reason=state.stop_reason,
                 )
 
                 yield LLMResponse(

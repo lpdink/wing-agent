@@ -75,20 +75,30 @@ pub(super) fn sync_event_with_status(
     }
 }
 
+/// Provider group whose models have `id == name` (the存量配置 shape).
 pub(super) fn model_group(
     provider: &str,
     models: &[&str],
 ) -> wing_api_client::models::ProviderModels {
+    use wing_api_client::models::ModelDetail;
     wing_api_client::models::ProviderModels {
         provider: provider.into(),
-        models: models.iter().map(|m| m.to_string()).collect(),
-        model_details: vec![],
+        models: models
+            .iter()
+            .map(|m| ModelDetail {
+                id: (*m).to_string(),
+                name: (*m).to_string(),
+                display_name: None,
+                description: None,
+                capabilities: Default::default(),
+            })
+            .collect(),
     }
 }
 
-/// Provider group carrying `display_name` declarations for the given call
-/// names — the display layer's input (the picker renders its rows from it,
-/// and the label fallbacks resolve against it).
+/// Provider group carrying `display_name` declarations for the given model ids
+/// — the display layer's input (the picker renders its rows from it, and the
+/// label fallbacks resolve against it).
 pub(super) fn model_group_with_labels(
     provider: &str,
     models: &[&str],
@@ -97,14 +107,20 @@ pub(super) fn model_group_with_labels(
     use wing_api_client::models::ModelDetail;
     wing_api_client::models::ProviderModels {
         provider: provider.into(),
-        models: models.iter().map(|m| m.to_string()).collect(),
-        model_details: labels
+        models: models
             .iter()
-            .map(|(name, label)| ModelDetail {
-                name: (*name).to_string(),
-                display_name: Some((*label).to_string()),
-                description: None,
-                capabilities: Default::default(),
+            .map(|id| {
+                let label = labels
+                    .iter()
+                    .find(|(model, _)| model == id)
+                    .map(|(_, label)| (*label).to_string());
+                ModelDetail {
+                    id: (*id).to_string(),
+                    name: (*id).to_string(),
+                    display_name: label,
+                    description: None,
+                    capabilities: Default::default(),
+                }
             })
             .collect(),
     }

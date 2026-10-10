@@ -193,6 +193,176 @@ fn test_sync_midturn_restores_working_and_elapsed() {
     assert!(cell_kinds(&app).contains(&"assistant"));
 }
 
+/// The rendered header line of the tool cell with `tool_call_id`.
+fn tool_header(app: &App, tool_call_id: &str) -> String {
+    let block = app
+        .chat
+        .cells
+        .iter()
+        .find_map(|c| match c.cell() {
+            ChatCell::ToolCall(b) if b.tool_call_id == tool_call_id => Some(b),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no ToolCall cell for {tool_call_id:?}"));
+    block.to_lines(&crate::config::ThemePalette::default(), 10)[0].to_string()
+}
+
+/// The mid-execution Bash card of a snapshot fixture.
+fn mid_turn_bash_sync(turn_started_ago: i64) -> WingEvent {
+    sync_event(
+        vec![serde_json::json!({"role": "user", "content": "run it"})],
+        Some(serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "tc-bash",
+                "name": "Bash",
+                "arguments": {"command": "sleep 100", "timeout": 300},
+            }],
+        })),
+        vec![],
+        vec![],
+        Some(utc_ago(turn_started_ago)),
+    )
+}
+
+/// #108: a Bash card replayed mid-execution (resume / late subscription) has
+/// no observable execution instant — `mark_pending_bash_running` anchors it
+/// to the turn start, an upper bound on the tool's runtime. Rendered
+/// an upper bound (`≤837s`), never paired with the tool's own timeout:
+/// `837s/300s` reads as "this Bash blew its budget and was not interrupted".
+#[test]
+fn test_sync_mid_turn_bash_timer_renders_approximate_not_timeout_pair() {
+    let mut app = test_app();
+    app.handle_event(mid_turn_bash_sync(837));
+
+    let header = tool_header(&app, "tc-bash");
+    assert!(
+        header.contains("≤837s") || header.contains("≤838s"),
+        "turn-anchored elapsed must render as an upper bound: {header}"
+    );
+    assert!(
+        !header.contains("300"),
+        "the tool timeout must not appear beside it: {header}"
+    );
+}
+
+/// #108: the same card finishing while we watch drops the turn-anchored
+/// timer — the frozen value (turn elapsed at completion) would display a
+/// wrong duration forever.
+#[test]
+fn test_sync_replayed_bash_drops_turn_timer_when_result_arrives() {
+    let mut app = test_app();
+    app.handle_event(mid_turn_bash_sync(837));
+    app.handle_event(WingEvent::ToolCallResult {
+        tool_name: "Bash".into(),
+        tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
+        tool_call_id: "tc-bash".into(),
+        tool_result: "done".into(),
+        tool_success: true,
+        model: "test-model".into(),
+        tool_media: Vec::new(),
+        meta: EventMeta {
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            session_id: Some("test-session".into()),
+            request_id: "r".into(),
+        },
+    });
+
+    let header = tool_header(&app, "tc-bash");
+    assert!(
+        !header.contains('≤'),
+        "turn-anchored timer must not outlive the result: {header}"
+    );
+    assert!(
+        !header.contains("s/"),
+        "no frozen timeout pair after the result: {header}"
+    );
+    assert!(header.contains("sleep 100"), "card intact: {header}");
+}
+
+/// The live path is untouched by #108: an execution-anchored timer keeps its
+/// exact form and its frozen runtime after the result lands.
+#[test]
+fn test_live_bash_timer_keeps_frozen_timeout_pair_after_result() {
+    let mut app = test_app();
+    let meta = EventMeta {
+        created_at: "2026-01-01T00:00:00+00:00".into(),
+        session_id: Some("test-session".into()),
+        request_id: "r".into(),
+    };
+    app.handle_event(WingEvent::ToolCall {
+        tool_name: "Bash".into(),
+        tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
+        tool_call_id: "tc-live".into(),
+        meta: meta.clone(),
+    });
+    app.handle_event(WingEvent::ToolCallResult {
+        tool_name: "Bash".into(),
+        tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
+        tool_call_id: "tc-live".into(),
+        tool_result: "done".into(),
+        tool_success: true,
+        model: "test-model".into(),
+        tool_media: Vec::new(),
+        meta,
+    });
+
+    let header = tool_header(&app, "tc-live");
+    assert!(
+        header.contains("/300s"),
+        "live timer keeps the frozen timeout pair: {header}"
+    );
+    assert!(
+        !header.contains('≤'),
+        "no upper-bound marker on the live path: {header}"
+    );
+}
+
+/// #108: turn end (Done / Interrupted) drops the timer of a Bash card whose
+/// result never arrived — `finish_turn` → `discard_pending_bash_timers`
+/// wiring, the app-level counterpart of the `ChatView` unit test. The value
+/// at turn end is "execution start → turn end": the completion instant is
+/// unknown, so no duration may be displayed.
+#[test]
+fn test_turn_end_drops_bash_timer_without_result() {
+    let bash_call = |app: &mut App| {
+        app.handle_event(WingEvent::ToolCall {
+            tool_name: "Bash".into(),
+            tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
+            tool_call_id: "tc-no-result".into(),
+            meta: event_meta(),
+        });
+    };
+    let assert_dropped = |app: &App, when: &str| {
+        let header = tool_header(app, "tc-no-result");
+        assert!(
+            !header.contains("s/") && !header.contains('≤'),
+            "no timer survives {when}: {header}"
+        );
+        assert!(header.contains("sleep 100"), "card intact: {header}");
+    };
+
+    // Done: the turn finished while the result event never showed up.
+    let mut app = test_app();
+    bash_call(&mut app);
+    assert!(
+        tool_header(&app, "tc-no-result").contains("/300s"),
+        "the live timer is running before the turn ends"
+    );
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_dropped(&app, "Done");
+
+    // Interrupted: same wiring.
+    let mut app = test_app();
+    bash_call(&mut app);
+    app.handle_event(WingEvent::Interrupted {
+        dropped_request_ids: None,
+        meta: event_meta(),
+    });
+    assert_dropped(&app, "Interrupted");
+}
+
 #[test]
 fn test_sync_working_status_with_empty_projections_restores_working() {
     // The regression: the turn is in flight but nothing is finalized yet — the
@@ -321,6 +491,7 @@ fn test_sync_titles_use_the_new_sessions_workdir() {
     if let WingEvent::SyncSession { agent, .. } = &mut sync {
         *agent = Some(Box::new(crate::protocol::AgentInfo {
             model_name: "test-model".into(),
+            model_id: None,
             system_prompt: None,
             tools: vec![],
             skills: vec![],
@@ -412,6 +583,7 @@ fn test_sync_feeds_the_nameplate_instead_of_pushing_a_banner_cell() {
     let mut app = test_app();
     let agent = crate::protocol::AgentInfo {
         model_name: "test-model".into(),
+        model_id: None,
         system_prompt: None,
         tools: vec![],
         skills: vec!["pdf".into(), "webapp".into()],
@@ -468,6 +640,7 @@ fn test_sync_restores_model_display_name() {
     let mut app = test_app();
     let agent = crate::protocol::AgentInfo {
         model_name: "dfmodel-2026".into(),
+        model_id: Some("ds-flash".into()),
         system_prompt: None,
         tools: vec![],
         skills: vec![],
@@ -478,6 +651,7 @@ fn test_sync_restores_model_display_name() {
     };
     app.handle_event(sync_event_with_agent(Some(agent), vec![]));
     assert_eq!(app.status.model, "dfmodel-2026");
+    assert_eq!(app.status.model_id.as_deref(), Some("ds-flash"));
     assert_eq!(
         app.status.model_display_name.as_deref(),
         Some("DeepSeek-Flash")
@@ -498,6 +672,8 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
     // New gateway: label travels with the model.
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("dfmodel-2026".into()),
+        model_id: Some("ds-flash".into()),
+        provider_name: Some("qoder".into()),
         model_display_name: Some("DeepSeek-Flash".into()),
         thinking: None,
         reasoning_effort: None,
@@ -512,6 +688,8 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
     // name (a stale label must not describe the new model).
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("plain-model".into()),
+        model_id: None,
+        provider_name: None,
         model_display_name: None,
         thinking: Some(true),
         reasoning_effort: None,
@@ -528,6 +706,8 @@ fn test_session_state_changed_prefers_display_name_and_tolerates_absent() {
     // Model untouched (e.g. yolo toggle): the label stays with its model.
     app.handle_event(WingEvent::SessionStateChanged {
         model: None,
+        model_id: None,
+        provider_name: None,
         model_display_name: None,
         thinking: None,
         reasoning_effort: None,
@@ -562,6 +742,8 @@ fn test_session_state_changed_falls_back_to_the_local_label_when_omitted() {
 
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("dfmodel".into()),
+        model_id: Some("dfmodel".into()),
+        provider_name: Some("qoder".into()),
         model_display_name: None,
         thinking: None,
         reasoning_effort: None,
@@ -580,6 +762,8 @@ fn test_session_state_changed_falls_back_to_the_local_label_when_omitted() {
     // The local snapshot has nothing for this model → no invented label.
     app.handle_event(WingEvent::SessionStateChanged {
         model: Some("mystery".into()),
+        model_id: Some("mystery-id".into()),
+        provider_name: None,
         model_display_name: None,
         thinking: None,
         reasoning_effort: None,

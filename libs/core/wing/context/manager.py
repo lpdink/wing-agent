@@ -27,6 +27,7 @@ from .resources import (
 
 if TYPE_CHECKING:
     from wing.event import WingEvent
+    from wing.provider.base import RequestOptions
 
 
 class ContextManager:
@@ -261,6 +262,7 @@ class ContextManager:
         model: str,
         model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
+        options: "RequestOptions | None" = None,
     ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
 
@@ -274,9 +276,12 @@ class ContextManager:
 
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
-            model_provider: ModelProvider 实例（触发 compact 时使用）。
-            current_tools: 零参 callable，返回 Agent 当前可执行工具。
-                compact sync 在 await 结束后求值，避免并发切换导致过期快照。
+            model_provider: ModelProvider 实例（仅后台 compact 消费——主调用由调用方在发送时刻重新
+                解析）。
+            current_tools: 零参 callable，返回 Agent 当前可执行工具。compact sync 在 await 结束后
+                求值，避免并发切换导致过期快照。
+            options: 会话级调用参数（缓存亲和 session id / 开关）——compact 请求与主调用保持同一
+                prompt cache key 与开关口径。
         """
         if not self.compactor:
             return LLMMessagesResult(
@@ -325,7 +330,7 @@ class ContextManager:
 
         # ── Step 3: 该触发 early compact 了？ ──
         if self.compactor.need_early_trigger(msgs, server_tokens):
-            self._start_background_compact(msgs, model, model_provider)
+            self._start_background_compact(msgs, model, model_provider, options)
 
         return LLMMessagesResult(
             [self.system_prompt] + msgs, tools=list(self._declared_tools)
@@ -338,6 +343,7 @@ class ContextManager:
         msgs: list[Message],
         model: str,
         model_provider: ModelProvider,
+        options: "RequestOptions | None" = None,
     ) -> None:
         """启动后台异步 compact task。"""
         preserve_last = msgs[-1].role == "user" if msgs else False
@@ -360,6 +366,7 @@ class ContextManager:
                     model,
                     model_provider,
                     tools=compact_tools,
+                    options=options,
                 )
                 result = PendingCompact(
                     compact_content=response.content or "",
@@ -421,17 +428,13 @@ class ContextManager:
         relink_tail: list[Message] = []
         prev_uuid: str | None = compact_node.uuid
         for msg in tail:
-            relinked = Message(
-                role=msg.role,
-                content=msg.content,
-                reasoning_content=msg.reasoning_content,
-                content_blocks=msg.content_blocks,
-                tool_calls=msg.tool_calls,
-                tool_call_id=msg.tool_call_id,
-                usage=msg.usage,
-                parent_uuid=prev_uuid,
+            # 整条复制（只换链坐标）：tail 是"未被压缩的保留区"，除
+            # uuid/parent_uuid 外的一切字段都是原消息的事实。手抄字段清单会
+            # 随 schema 漂移——`stop_reason` / `media` 就这样被静默丢掉过
+            # （截断审计在压缩后消失、图片引用从保留区消失）。
+            relinked = msg.model_copy(
+                update={"uuid": str(uuid.uuid4()), "parent_uuid": prev_uuid}
             )
-            relinked.uuid = str(uuid.uuid4())
             relink_tail.append(relinked)
             prev_uuid = relinked.uuid
 
@@ -468,12 +471,13 @@ class ContextManager:
         model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
         instruction: str | None = None,
+        options: "RequestOptions | None" = None,
     ) -> tuple[int, int]:
         """手动压缩上下文。
 
-        丢弃 pending async compact，对当前消息链执行同步压缩，
-        将压缩结果写入消息链。Compact 打破 prefix cache，完成后
-        自动同步声明集为 current_tools()（await 后求值，避免并发切换导致过期快照）。
+        丢弃 pending async compact，对当前消息链执行同步压缩，将压缩结果写入消息链。Compact 打破
+        prefix cache，完成后自动同步声明集为 current_tools()（await 后求值，避免并发切换导致过期
+        快照）。
 
         Args:
             model: 主 model 名称
@@ -500,6 +504,7 @@ class ContextManager:
             model_provider,
             tools=list(self._declared_tools),
             instruction=instruction,
+            options=options,
         )
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None
@@ -699,6 +704,11 @@ class ContextManager:
             # 构造回退行——`unzip_last_uuid` 必须跟着走：parent 是压缩节点时，
             # 它是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段
             # 历史）从 /rewind、/fork 候选里消失（回退到压缩后第一条消息即触发）。
+            #
+            # 字段清单是**刻意的**（不是压缩 relink 那种"整条复制"）：回退行是
+            # 上下文事实行——provider 审计字段（usage / stop_reason）不复制，
+            # 与 `HistoryView.message_semantics` 的比较口径同源（红线场景
+            # `scenarios/test_rewind.py` 逐键钉住）。
             rewind_msg = Message(
                 role=parent_msg.role,
                 content=parent_msg.content,

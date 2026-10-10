@@ -1,21 +1,19 @@
 //! stdin handler for `--input-format stream-json` mode.
 //!
-//! stdin 是**常驻控制通道**：SDK（Claude Agent SDK / CloudCLI）在 turn 期间仍会
-//! 写 `control_request`（`interrupt` 等）与 `keep_alive`；凡被 SDK await 的控制
-//! 请求**必须有应答**，否则编排器的"停止"按钮永远等不到结果。
+//! stdin 是**常驻控制通道**：SDK（Claude Agent SDK / CloudCLI）在 turn 期间仍会写 `control_request`
+//! （`interrupt` 等）与 `keep_alive`；凡被 SDK await 的控制请求**必须有应答**，否则编排器的"停止"
+//! 按钮永远等不到结果。
 //!
-//! 分工：pump 负责「读一行 → 分类 → 应答 / 投递」，与 turn 驱动（`run_stdio`
-//! 的事件循环）通过两条通道协作——`mpsc` 按到达顺序投递 `user` 消息（常驻模式下
-//! 由驱动侧逐条转发给网关），`watch<shutdown>` 接收收尾信号。所有 stdout 写入经
-//! 共享的 [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
+//! 分工：pump 负责「读一行 → 分类 → 应答 / 投递」，与 turn 驱动（`run_stdio` 的事件循环）通过两条
+//! 通道协作——`mpsc` 按到达顺序投递 `user` 消息（常驻模式下由驱动侧逐条转发给网关），
+//! `watch<shutdown>` 接收收尾信号。所有 stdout 写入经共享的
+//! [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
 //!
-//! 多轮语义（`--input-format stream-json` + `--output-format stream-json`）：pump
-//! 是常驻消息通道，轮间与轮中的每条 `user` 消息都投递给驱动侧（转发
-//! `POST /api/session/send`，由网关 inbox 决定 steer / 排队）；进程在 stdin EOF
-//! 时收尾，而不是在 `result` 帧后退出（见 `crate::stdio::ExitPolicy`）。
-//!
-//! 一次性语义（非常驻）：只有首条 `user` 消息有归宿——它要么是 prompt（CLI 未给
-//! `-p`），要么被丢弃（CLI 已给 prompt）；其余消息记日志丢弃。
+//! 多轮语义（`--input-format stream-json` + `--output-format stream-json`）：pump 是常驻消息通道，
+//! 轮间与轮中的每条 `user` 消息都投递给驱动侧（转发 `POST /api/session/send`，由网关 inbox 决定
+//! steer / 排队）；进程在 stdin EOF 时收尾，而不是在 `result` 帧后退出（见
+//! `crate::stdio::ExitPolicy`）。一次性语义（非常驻）：只有首条 `user` 消息有归宿——它要么是 prompt
+//! （CLI 未给 `-p`），要么被丢弃（CLI 已给 prompt）；其余消息记日志丢弃。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -30,7 +28,6 @@ use tokio::task::JoinHandle;
 use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::UpdateSessionRequest;
 
-use crate::model_selection::resolve_provider;
 use crate::stdio::stdout::StdoutSink;
 
 /// interrupt 触发后等网关回话的上限。
@@ -299,17 +296,22 @@ pub type ModelSwitchFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 /// 模型切换口（与 [`Interruptor`] 同一精神：pump 只懂协议，动作经窄接口注入）。
 ///
-/// Claude 协议的 `set_model` 控制请求只给一个**裸模型名**（编排器的值域来自它自己
-/// 配置的模型清单），而 `POST /api/session/update` 要求 model / provider 成对下发。
-/// 归属解析与 ACP 侧同一条规则（[`resolve_provider`]）：读会话当前 provider
-/// （`GET /api/session/get`；读路径不水合，但 stdio 进程持有订阅、会话不会被逐出）
-/// → 目录归属 → 更新。读/解析失败如实报错，不替编排器猜。
+/// Claude 协议的 `set_model` 控制请求给一个**模型引用词**（model_id，∈ `providers[].models`
+/// 的 id 空间）；本接口把它原样发给 `POST /api/session/update {model_id}`——单键查表在
+/// 网关侧完成（命中即切、未命中 400 带 available ids），前端不解析、不补 provider、不回落。
+///
+/// 值不是 id 时由**网关**报错，错误原文经 [`ModelSwitcher`] 的 `Err` 回到编排方
+/// （`control_response.error`）——那是编排方唯一的自诊断素材。
 pub trait ModelSwitcher: Send + Sync + 'static {
-    /// 把当前会话的模型切到 `model`。
-    fn set_model(&self, model: String) -> ModelSwitchFuture;
+    /// 把当前会话的模型切到 `model_id`。
+    fn set_model(&self, model_id: String) -> ModelSwitchFuture;
 }
 
-/// 生产实现：`POST /api/session/update {model, provider}`（wing-api-client）。
+/// 生产实现：`POST /api/session/update {model_id}`（wing-api-client）——**一个往返**。
+///
+/// 旧实现先 `GET /api/session/get` 读当前 provider、再 `GET /api/models` 拉目录、跑一次
+/// 归属解析补齐 `(model, provider)` 才发 update（3 个往返 + 一套猜测式 resolve）；值收敛为
+/// 全局唯一的 model_id 之后，这两个读和那套解析全部消失。
 pub struct GatewayModelSwitcher {
     http: GatewayApiClient,
     session_id: String,
@@ -325,27 +327,13 @@ impl GatewayModelSwitcher {
 }
 
 impl ModelSwitcher for GatewayModelSwitcher {
-    fn set_model(&self, model: String) -> ModelSwitchFuture {
+    fn set_model(&self, model_id: String) -> ModelSwitchFuture {
         let http = self.http.clone();
         let session_id = self.session_id.clone();
         Box::pin(async move {
-            let current = http
-                .get_session(&session_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("could not read session state: {e}"))?
-                .agent
-                .and_then(|agent| agent.provider_name);
-            let catalog = http
-                .get_models()
-                .await
-                .map_err(|e| anyhow::anyhow!("the gateway did not list its models: {e}"))?;
-            let provider = resolve_provider(&model, &catalog, current.as_deref())
-                .ok_or_else(|| anyhow::anyhow!("cannot resolve a provider for model '{model}'"))?;
-
             let update = UpdateSessionRequest {
                 session_id,
-                model: Some(model),
-                provider: Some(provider),
+                model_id: Some(model_id),
                 ..Default::default()
             };
             http.update_session(&update)
@@ -653,14 +641,16 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
         }
 
         "set_model" => {
-            let model = req
+            // Claude 协议的 `model` 字段 = 模型引用词（model_id）；空值在本地拒绝
+            // （没有可发的 id），其余一律交给网关判定（未命中 → 400 原文回编排方）。
+            let model_id = req
                 .request
                 .get("model")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            if model.is_empty() {
+            if model_id.is_empty() {
                 tracing::warn!(
                     request_id = %req.request_id,
                     "set_model without a usable 'model' value; answering error"
@@ -675,14 +665,14 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
             } else {
                 match tokio::time::timeout(
                     MODEL_SWITCH_ACK_WAIT,
-                    ctx.model_switcher.set_model(model.clone()),
+                    ctx.model_switcher.set_model(model_id.clone()),
                 )
                 .await
                 {
                     Ok(Ok(())) => {
                         tracing::info!(
                             request_id = %req.request_id,
-                            model = %model,
+                            model_id = %model_id,
                             "model switched"
                         );
                         ctx.out
@@ -691,10 +681,11 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
                     Ok(Err(e)) => {
                         tracing::warn!(
                             request_id = %req.request_id,
-                            model = %model,
+                            model_id = %model_id,
                             error = %e,
                             "model switch failed; answering error"
                         );
+                        // 网关原文（含 available ids / name 提示）原样回编排方。
                         ctx.out.line(
                             &ControlResponse::error(
                                 req.request_id.as_str(),
@@ -706,7 +697,7 @@ async fn handle_control_request(req: &ControlRequest, ctx: &StdinPumpContext) {
                     Err(_) => {
                         tracing::warn!(
                             request_id = %req.request_id,
-                            model = %model,
+                            model_id = %model_id,
                             "model switch did not finish in time; answering error"
                         );
                         ctx.out.line(
@@ -825,12 +816,16 @@ mod tests {
     }
 
     impl ModelSwitcher for FakeModelSwitcher {
-        fn set_model(&self, model: String) -> ModelSwitchFuture {
-            self.calls.lock().unwrap().push(model);
+        fn set_model(&self, model_id: String) -> ModelSwitchFuture {
+            self.calls.lock().unwrap().push(model_id);
             let fail = self.fail;
             Box::pin(async move {
                 if fail {
-                    Err(anyhow::anyhow!("gateway said no"))
+                    // 网关 400 的形状（C7 文案）：原文要经 control_response.error 回编排方。
+                    Err(anyhow::anyhow!(
+                        "API error (400): unknown model id 'nope'; available ids: ds-flash, ds-pro; \
+                         note: 'nope' is the call name of model id 'ds-flash' (provider 'local')"
+                    ))
                 } else {
                     Ok(())
                 }
@@ -1334,6 +1329,31 @@ mod tests {
         pump.finish().await;
     }
 
+    /// 值原样透传给切换口：id 可以含 `:` 等可见字符，前端**不做任何字符串结构解析**
+    /// （前缀拆分 / 归属推断都不存在了）。
+    #[tokio::test]
+    async fn pump_passes_the_model_id_through_without_parsing() {
+        let capture = CaptureSink::default();
+        let switcher = Arc::new(FakeModelSwitcher::default());
+        let mut pump = spawn_with_switcher(
+            r#"{"type":"control_request","request_id":"model-4","request":{"subtype":"set_model","model":"  qwen2.5:7b  "}}"#,
+            &switcher,
+            &capture,
+        );
+
+        assert_eq!(pump.wait_prompt().await.unwrap(), "go");
+
+        let lines = wait_lines(&capture, 1).await;
+        assert_eq!(lines[0]["response"]["subtype"], "success");
+        assert_eq!(
+            switcher.calls(),
+            vec!["qwen2.5:7b".to_string()],
+            "只做 trim，其余逐字透传"
+        );
+
+        pump.finish().await;
+    }
+
     #[tokio::test]
     async fn pump_answers_error_when_the_model_switch_fails() {
         let capture = CaptureSink::default();
@@ -1349,14 +1369,10 @@ mod tests {
         let lines = wait_lines(&capture, 1).await;
         assert_eq!(lines[0]["response"]["subtype"], "error");
         assert_eq!(lines[0]["response"]["request_id"], "model-2");
-        assert!(
-            lines[0]["response"]["error"]
-                .as_str()
-                .unwrap()
-                .contains("gateway said no"),
-            "{:?}",
-            lines[0]
-        );
+        // 网关原文（含 available ids / name 提示）原样回编排方——那是它唯一的自诊断素材。
+        let text = lines[0]["response"]["error"].as_str().unwrap();
+        assert!(text.contains("unknown model id 'nope'"), "{text}");
+        assert!(text.contains("available ids: ds-flash, ds-pro"), "{text}");
         assert_eq!(switcher.calls(), vec!["gmodel".to_string()]);
 
         pump.finish().await;
@@ -1709,5 +1725,161 @@ mod tests {
         let lines = wait_lines(&capture, 1).await;
         assert_eq!(lines[0]["response"]["subtype"], "success");
         assert_eq!(lines[0]["response"]["request_id"], "int-1");
+    }
+
+    // ---- GatewayModelSwitcher（真 HTTP：一个往返 + 网关原文） ----
+
+    /// 最小 HTTP 服务器的请求记录。
+    #[derive(Debug, Clone, PartialEq)]
+    struct RecordedHttp {
+        method: String,
+        path: String,
+        body: serde_json::Value,
+    }
+
+    /// 起一个最小 HTTP 服务器：记录每条请求，按固定脚本应答（`connection: close`，
+    /// 一条请求一个连接）。
+    ///
+    /// 断言面是「**发了几个请求、发了什么**」：旧实现的 get_session + get_models +
+    /// update 三往返会在这里现形（任何多余请求都进记录）。
+    async fn spawn_http_recorder(
+        status: u16,
+        response: serde_json::Value,
+    ) -> (String, Arc<Mutex<Vec<RecordedHttp>>>) {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        let recorded: Arc<Mutex<Vec<RecordedHttp>>> = Arc::default();
+        let sink = Arc::clone(&recorded);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let sink = Arc::clone(&sink);
+                let payload = response.clone();
+                tokio::spawn(async move {
+                    let Some((method, path, body)) = read_http_request(&mut stream).await else {
+                        return;
+                    };
+                    sink.lock().unwrap().push(RecordedHttp {
+                        method,
+                        path,
+                        body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+                    });
+                    let text = payload.to_string();
+                    let reason = if status >= 400 { "Error" } else { "OK" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{text}",
+                        text.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), recorded)
+    }
+
+    /// 读一条完整 HTTP 请求（header + `Content-Length` body）。
+    async fn read_http_request(
+        stream: &mut tokio::net::TcpStream,
+    ) -> Option<(String, String, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length: usize = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().ok())?
+            })
+            .unwrap_or(0);
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let mut request_line = head.lines().next()?.split_whitespace();
+        let method = request_line.next()?.to_string();
+        let path = request_line.next()?.to_string();
+        let body = buf[header_end..(header_end + content_length).min(buf.len())].to_vec();
+        Some((method, path, body))
+    }
+
+    /// `set_model(id)` 只发一个 `POST /api/session/update {model_id}`——没有
+    /// get_session、没有 get_models、没有归属解析（3 往返 → 1 往返）。
+    #[tokio::test]
+    async fn gateway_model_switcher_sends_one_update_with_the_model_id() {
+        let (base, recorded) = spawn_http_recorder(200, serde_json::json!({"ok": true})).await;
+        let http = GatewayApiClient::new(&base, None).expect("client");
+        let switcher = GatewayModelSwitcher::new(http, "s1");
+
+        switcher
+            .set_model("ds-flash".into())
+            .await
+            .expect("switch succeeds");
+
+        let requests = recorded.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            1,
+            "一个往返，不得有 get_session / get_models: {requests:?}"
+        );
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/session/update");
+        assert_eq!(
+            requests[0].body,
+            serde_json::json!({"session_id": "s1", "model_id": "ds-flash"})
+        );
+    }
+
+    /// 网关 400（未知 id，C7 文案）→ 错误原文带回编排方。
+    #[tokio::test]
+    async fn gateway_model_switcher_keeps_the_gateway_error_verbatim() {
+        let (base, recorded) = spawn_http_recorder(
+            400,
+            serde_json::json!({
+                "detail": "unknown model id 'nope'; available ids: ds-flash, ds-pro"
+            }),
+        )
+        .await;
+        let http = GatewayApiClient::new(&base, None).expect("client");
+        let switcher = GatewayModelSwitcher::new(http, "s1");
+
+        let err = switcher
+            .set_model("nope".into())
+            .await
+            .expect_err("400 must fail");
+        let text = err.to_string();
+        assert!(text.contains("unknown model id 'nope'"), "{text}");
+        assert!(
+            text.contains("ds-flash"),
+            "available ids 必须原样带回: {text}"
+        );
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            1,
+            "失败路径同样只发一个请求"
+        );
     }
 }

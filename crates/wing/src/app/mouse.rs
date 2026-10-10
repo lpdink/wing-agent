@@ -2,30 +2,24 @@
 //!
 //! The pointer has five channels, and each of them is declared here:
 //!
-//! * [`App::pointer_owner`] walks [`POINTER_PRIORITY`] — the **one** place
-//!   where the order (scrollbar → composer → chat band → status bar) is
-//!   written down. A press is offered to each owner in turn and the first
-//!   claim wins;
-//! * the wheel is a channel of its own: it always scrolls the chat view and is
-//!   never claimed by a panel or a popup, so the history stays reachable while
-//!   an ask panel / the model picker / the command popup is up;
-//! * hover belongs to the overlay scrollbar alone (it is the only thing that
-//!   reacts to motion);
-//! * a drag / release does **not** re-pick an owner: it goes back to the region
-//!   the press started in (see [`super::selection_session`]), so a pointer that
-//!   wanders out of the region keeps producing coordinates in the space the
-//!   gesture began in;
-//! * the status bar owns two cells of its own row — the session id (click =
-//!   copy the full id) and the pin star (click = toggle the session's pin
-//!   tag). Both are claims on the *last frame's* recorded regions
-//!   ([`crate::ui::status_bar::StatusBarRegions`]), so a click always lands on
-//!   what was drawn.
+//! * [`App::pointer_owner`] walks [`POINTER_PRIORITY`] — the **one** place where the order (scrollbar
+//!   → composer → chat band → status bar) is written down. A press is offered to each owner in turn
+//!   and the first claim wins;
+//! * the wheel is a channel of its own: it always scrolls the chat view and is never claimed by a
+//!   panel or a popup, so the history stays reachable while an ask panel / the model picker / the
+//!   command popup is up;
+//! * hover belongs to the overlay scrollbar alone (it is the only thing that reacts to motion);
+//! * a drag / release does **not** re-pick an owner: it goes back to the region the press started in
+//!   (see [`super::selection_session`]), so a pointer that wanders out of the region keeps producing
+//!   coordinates in the space the gesture began in;
+//! * the status bar owns two cells of its own row — the session id (click = copy the full id) and the
+//!   pin star (click = toggle the session's pin tag). Both are claims on the *last frame's* recorded
+//!   regions ([`crate::ui::status_bar::StatusBarRegions`]), so a click always lands on what was drawn.
 //!
-//! Call directions: the run loop calls [`App::handle_mouse`] and turns the
-//! [`MouseOutcome`] into a frame request; this module calls the composer /
-//! chat selection handlers of the selection lane and the modal lane's
-//! [`App::composer_pointer_blocked`] guard (it does not re-derive "is a modal
-//! up?" on its own).
+//! Call directions: the run loop calls [`App::handle_mouse`] and turns the [`MouseOutcome`] into a
+//! frame request; this module calls the composer / chat selection handlers of the selection lane and
+//! the modal lane's [`App::composer_pointer_blocked`] / [`App::background_pointer_blocked`] guards (it
+//! does not re-derive "is a modal up?" on its own).
 
 use crate::ui::scrollbar;
 use crate::ui::scrollbar::ScrollbarGeometry;
@@ -91,6 +85,11 @@ impl PointerOwner {
     /// live widget state; none of them mutates anything — the press handler
     /// does that once, after the chain has picked a winner.
     fn claims(self, app: &App, column: u16, row: u16) -> bool {
+        // 设置面板是**浮层模态**：卡片四周的聊天还看得见，但它不是可交互的表面
+        // （见 [`App::background_pointer_blocked`]）。四个背景认领一律先过这道门。
+        if app.background_pointer_blocked() {
+            return false;
+        }
         match self {
             PointerOwner::Scrollbar => app.scrollbar_at(column, row).is_some(),
             // The composer sits below the chat band, and it is claimed only

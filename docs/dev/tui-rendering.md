@@ -128,6 +128,28 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 * **标题行在流式路径里的位置**：展开的思考块，标题由 `StreamingRender` 当作行集的第 0 行（`set_header`）——正文因此拿两列续行缩进，链接 / 图片锚点的「行号 == 索引」不变（插 / 摘标题行时锚点的**绝对行号**随之 ±1 平移，见 `images.rs` 的 `shift_anchors_after_insert/remove`；漏平移会让绘制侧按错行找 caption、拒绘，图片静默消失）。后设的标题会**接管**正文首行的 `⦁ `（原件暂存，收起时原样归还）。`sync_stream_header` 对**每个**思考块都设标题：折叠时也设，只是整条流不参与渲染（展开 / 折叠切换的那一帧行集已经就位）；
 * **切换的落点**：覆盖是 `ChatView` 的一个会话级字段、渲染期经 `CellContext` 下发（`ThinkingMode::expanded` 一个纯函数解析），不落在块上 —— 新起的块天然跟随当前模式，`clear()` 也不重置它。块自己冻在 `深度思考 12s`，不再是旧的「新一轮把旧计数清零」。
 
+## 二·七、表格（markdown 表格的边框语言）
+
+表格走**重框三档**（`render/table/mod.rs` 的 `TableSkin::framed`）——TUI markdown 表格与 CLI 表格（`wing ps` / `wing tools`）共用同一份皮肤，保证两个前端视觉同源：
+
+```
+┏━━━━━━━┳━━━━━━━┓   外框：粗 ┏ ┳ ┓ ┗ ┷ ┛ ━ ┃
+┃ 表头   ┃ 表头   ┃   表头带：粗 —— 行内分隔 ┃、分隔线 ┣ ╇ ┫
+┣━━━━━━━╇━━━━━━━┫
+┃ 数据   │ 数据   ┃   表体网格：细 —— │ ─ ┼，边缘挂点 ┠ ┨
+┗━━━━━━━┷━━━━━━━┛
+```
+
+* **三档只靠笔画粗细**：所有框线共用一个墨色（`theme.border` = palette `dim`），**不叠 DIM 修饰符**（终端对 DIM 的处理不一致，显式颜色才是稳定观感）；
+* **宽度预算 `3n+1`**（外框 2 + 每列左右留白 2 + 列间分隔 n−1）；列宽分配 / 分类阈值在共享引擎 `render/table/`（`frame_overhead` / `compute_column_widths`），两前端不许各拿一套。列可声明硬地板 `ColumnMetrics::min_width`（`wing ps` 的 SESSION ID 用 `keep_natural`：id 是精确匹配的可复制句柄，宁可行溢出也不截断）；
+* **不变量**：单元格折行不截断（零信息损失，markdown 侧）；**正常预算下**每一行等宽、且 ≤ 可用宽度（`tables.rs` 的形状 golden + 等宽测试钉住）。预算退化到装不下各列硬地板时，行会溢出而不是摧毁列——这是 `compute_column_widths` 的登记语义；
+* **单元格不注入外层前缀**：引用栏 / 列表续行不会进格子（进去了就是每格一道假框线 `┃ │ A ┃`）；表格整体也不套外层前缀（与代码块 / 公式块不同），列表 item 的 marker 单独成行；
+* **CLI 侧**（`render/table/plain.rs`）：同一皮肤渲染纯文本网格；单元格从折行改为**截断**（终端宽是硬约束），全部按显示宽度记账（CJK 安全），TTY 上着色（尊重 `NO_COLOR`）；
+* **开屏名牌侧**（`render/table/card.rs`）：欢迎屏右侧信息列的信息卡 —— 同一份皮肤与宽度账本（`TableSkin::framed` / `frame_overhead`），但是**无表头带、无行间线**的"框住的信息块"（信息行不是数据行，重表头带与每行细线只会把它读成表单）；行同样**省略**而不是折行（卡片行数是布局契约，见 [welcome-mascot](welcome-mascot.md)）。宽度不够的档位根本不上框（`CARD_MIN`）—— 框是装饰，不许花掉文字；
+* **预览**：`cargo run -p wing --example theme_preview`（assistant markdown 一节就是表格实景）；任意输入用 `render_probe`；欢迎屏那张用 `cargo run -p wing --example welcome_preview`。
+
+已知边界：表格不带外层前缀、单元格内不注入前缀（见第四节登记）。
+
 ## 三、不变量：流式静息态 == 参考全量渲染
 
 `StreamingRender` 是「稳定前缀 + 活动尾部」的增量引擎，但它的**静息态**（每帧 `lines()` 之后、`finalize()` 之前）必须与同一文本的 `full_render` 参考渲染**逐 span 相同**（文本 + 样式 + 链接 + 图片锚点几何）；`finalize()` 直接换成参考渲染。这条不变量由 `crates/wing/tests/stream_render_reconcile.rs` 的矩阵（shape × chunk 大小 × 宽度 × profile）强制，`render_probe --check` 是它的手动版本。
@@ -142,6 +164,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 | 现象 | 原因 | 归类 |
 |---|---|---|
+| 表格嵌在 blockquote / 列表里：不带外层前缀（引用栏 / 续行缩进不出现在表上），列表 item 的 marker 单独成行 | 表格渲染不套外层前缀；单元格内也刻意不注入（注入了就是每格一道假框线 `┃ │ A ┃`，该注入已移除）。与代码块 / 公式块（会带引用栏）不同 | 刻意的语义 |
 | 流式中 `[foo]` 短暂显示成字面量 | 引用式链接的定义与引用落在不同 slice，切片独立解析；`finalize()` 收敛 | 切片隔离，见 `stream.rs` 模块文档 |
 | reasoning 里模型把草稿套在围栏里、内部再套围栏，导致后半段正文被吃进代码块（或反之） | CommonMark 不允许嵌套围栏：一个裸围栏闭合外层后，后续围栏的配对整体翻转。任何 CommonMark 渲染器（GitHub / VS Code / Claude Code）结果相同；还原作者意图需要全局配对最优化，与稳定前缀模型冲突 | 输入歧义，见 `stream.rs` 模块文档「Known limit — nested fences」 |
 | 段落后面紧跟列表（`para` 换行 `- item`）时，该列表项内的缩进续行会多出段落间空行 | splitter 的 Paragraph 模式不识别「列表打断段落」，于是项内缩进内容被切成独立的缩进块（缩进块是顶层块，没有「列表项内不加空行」的规则）。逐帧可见、`finalize()` 收敛 | 切片边界，见 `stream.rs` | 

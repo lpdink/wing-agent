@@ -12,17 +12,17 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
 │ stdio（wing -p）· NDJSON    │             │ · routes/session(16)    │               │ ├ SessionManager        │
 │ acp（wing acp）· ACP v1     │             │ · routes/system(6)      │               │ ├ SessionStore          │
-│ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/tools · health │◄──────────────│ ├ ContextManager        │
-│ 网关生命周期 · start/stop   │             │ · routes/ws（事件流）   │               │ ├ EventBus              │
+│ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/settings(4)    │◄──────────────│ ├ ContextManager        │
+│ 网关生命周期 · start/stop   │             │ · tools/health · ws     │               │ ├ EventBus              │
 │ GatewayClient(WS)+ApiClient │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
 │ HTTP 建会话 → WS 订阅       │             │                         │               │                         │
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
 ```
 
 - **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（24 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（28 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
-- **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知。
+- **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知；provider 实例无状态、归全进程共享池（`provider/pool.py`），会话级参数（session id 缓存亲和 / media / thinking）经 `RequestOptions` 每次调用注入。
 
 **改代码前必读的不变量**（细节一律在 docs/dev，不要在这里展开）：
 
@@ -50,6 +50,7 @@ libs/core/wing/
 │   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
 │   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
 │   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
+│   ├── model_binding.py             生效模型绑定（resume 链的只读投影；会话列表的模型列）
 │   └── override.py                  AgentOverride — 创建期参数覆盖（领域类型，住领域层非网关）
 ├── chain.py                         TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 ├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载
@@ -59,9 +60,15 @@ libs/core/wing/
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
 ├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
+│   ├── spec.py                      声明层：S(...) / SettingMeta / ApplyScope（字段元信息唯一来源）
+│   ├── problems.py                  跨字段检查纯函数 + ConfigProblem（加载期 / 设置面板共用）
+│   ├── catalog.py                   设置目录树：SettingNode / build_catalog() / parse_path()
+│   ├── groups.py                    业务分组表：SETTING_GROUPS / build_groups()（界面分类的唯一声明处）
+│   ├── emit.py                      规范形 YAML emitter（默认模板与保存共用；注释来自声明）
+│   ├── document.py                  稀疏文档视图（读 / 指纹 / 密文三态 / 未知键 / changed_paths）
+│   ├── boot.py                      启动读取（永不抛：模板生成 / 语法错 / 校验不过 → 降级启动）
 │   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config
-│   ├── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
-│   └── default_config.py            手写默认 config.yaml 模板（事实来源）
+│   └── user_agent.py                UA 预设（opencode / qwen-code）+ get_headers
 ├── schema/                          领域模型包：Tool / ToolParam / Message 等核心 schema（公共 API 经 __init__ re-export）
 │   ├── message.py                   ChainNode / 内容块 / MediaRef / Message（落盘格式守门人）
 │   ├── llm.py                       LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall
@@ -87,7 +94,7 @@ libs/core/wing/
 │   ├── transport.py                 HTTP/SSE 传输管道与错误面（SSE 行解析 / 空闲超时 / httpx 构造 / raise_with_body）
 │   ├── media.py                     请求期媒体投影与序列化原语（两协议共用）
 │   ├── factory.py                   create_provider() — 按协议创建 provider 实例
-│   ├── registry.py                  模块级 provider client registry（/api/models 聚合，长持有 + 并发查询）
+│   ├── pool.py                      共享 provider 池（每 name 一个无状态实例；全会话与 /api/models 聚合共用；reload 换新 + 旧实例退场）
 │   ├── openai/                      OpenAI 兼容协议子包（provider / serialize / stream）
 │   ├── anthropic/                   Anthropic 协议子包（provider / serialize / stream）
 │   └── __init__.py                  ModelProvider + create_provider（稳定入口）
@@ -118,33 +125,42 @@ libs/core/wing/
     ├── server.py                    GatewayServer — 生命周期 + EventBus 订阅 + uptime
     ├── cli.py                       wing-gateway CLI 入口
     ├── auth.py                      opt-in API key 鉴权中间件（HTTP + WS；admin / tool_runtime）
+    ├── setup_guard.py               setup mode 守门（allowlist 白名单 + 503 error="setup_mode"）+ SetupModeError
     ├── remote_tools.py              RemoteToolManager — 远程工具宿主连接 + WS 调用分发
     ├── frames.py                    出网帧切分（>8 MiB 载荷按 UTF-8 边界切为 ≤16 MiB 帧）
     ├── projection.py                领域 → 协议响应投影（session info / branches）
-    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · errors
+    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
-    └── routes/                      session(15) · system(6) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(16) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
 
 ```
 crates/wing/src/
-├── main.rs                          入口（clap；stdio 模式检测 → 过滤未知参数）
+├── main.rs                          入口（args_os 收集 + UTF-8 校验 → clap；stdio 模式检测 → 过滤未知参数）
 ├── lib.rs                           库根：模块导出（供 bench / tests 引用；deny print_stdout/stderr）
 ├── cmd/                             CLI 子命令与分发
 │   ├── mod.rs                       Cli/Command 定义 + dispatch（TUI / 网关生命周期 / 编排子命令 / stdio）
 │   ├── args.rs                      `wing run` 与 stdio 共享的启动参数
+│   ├── argv.rs                      命令行参数入口（OsString → UTF-8 String；非法字节友好报错、exit 2）
 │   ├── backend_config.rs            读 backend config（gateway host:port、wing_home）
-│   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化）
+│   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化、404→resume 水合惯例）
 │   ├── discover.rs                  定位 wing-gateway 可执行文件
-│   ├── start.rs / stop.rs / status.rs  网关守护进程生命周期（health + /api/shutdown）
+│   ├── start.rs / stop.rs / status.rs / restart.rs  网关守护进程生命周期（health + /api/shutdown）
 │   ├── run.rs                       `wing run` 非阻塞启动任务（建会话 + 发 prompt，返回 session id）
 │   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
 │   ├── ps.rs                        `wing ps` / `wing info`（会话列表 / 单会话运行时信息）
+│   ├── branch.rs                    `wing branches` / `fork` / `rewind`（消息节点导航：uuid 闭环 + draft）
+│   ├── asks.rs                      `wing asks`（在挂 Ask 的 tool_call_id 发现口：WS 快照 + `--wait`）
+│   ├── control.rs                   `wing interrupt`（别名 int）/ `compact` / `update`（会话控制面）
+│   ├── lifecycle.rs                 `wing new` / `resume`（建空会话 / 显式水合）
 │   ├── release.rs                   `wing release` 逐出会话内存态（显式 eviction，幂等）
+│   ├── reload.rs                    `wing reload` 系统热重载（逐项结果按契约名字序）
 │   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
-│   └── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
+│   ├── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
+│   ├── config.rs                    `wing config` 子命令族（doctor/list/get/set/unset/add/remove/move/path）
+│   └── setup.rs                     首次运行向导（无 session 的 setup 循环 + 三前端共用的配置预检）
 ├── acp/                             ACP 前端（wing acp，stdio 上的 Agent Client Protocol 服务端）
 │   ├── mod.rs                       入口（ensure gateway → WS 连接 → HTTP client → 服务循环）+ CLI 参数
 │   ├── agent.rs                     ACP handler 注册（initialize / new / prompt / cancel / list / load / resume / close / set_config_option）
@@ -166,7 +182,9 @@ crates/wing/src/
 │   ├── panels/mod.rs                选择面板内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
 │   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
 │   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
+│   ├── panels/settings/             设置面板状态机（左栏分组锚点 · 右栏树扁平化 · 双栏焦点 · 内联编辑器 · 列表增删移 · 搜索 · 问题清单 · 键位与 Esc 阶梯）
 │   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端零感知）
+│   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环
@@ -176,14 +194,17 @@ crates/wing/src/
 │   ├── images.rs                   图片 lane：能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟）
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
-│   └── popup_state.rs               Popup + 候选缓存 + 去重
+│   ├── popup_state.rs               Popup + 候选缓存 + 去重
+│   └── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
 ├── ui/                              UI 组件
 │   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
+│   ├── emoji_width.rs               出帧前的宽度归一化（VS16 表情格子钉 ForcedWidth；每帧必跑，出帧口 tui::draw_frame 调用）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
+│   ├── settings/                    设置面板浮层 overlay（卡片几何 / 左栏锚点 / 树 / 详情栏 / 编辑器 / 问题清单 / 帮助 / 提示，只读渲染）
 │   ├── shimmer.rs                   扫光 / 混色原语（开屏 wordmark 与思考块标题行共用）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
@@ -193,16 +214,17 @@ crates/wing/src/
 ├── render/                          Markdown + 语法高亮
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）
 │   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
+│   ├── table/                       共享表格引擎：列宽分配 / 列分类 / 框线皮肤（markdown 表格与 CLI 共用）+ plain（CLI 纯文本表格渲染，wing ps / tools 用）+ card（welcome 信息卡：无表头带 / 无行间线）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）
 │   └── line_utils.rs / renderable.rs
-├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
-├── config/                          TUI 配置（mod / colors / rendering）
-└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
+├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
+├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
+└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
+配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
 
 ### 其他
 
@@ -231,6 +253,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
+| [`docs/dev/settings.md`](docs/dev/settings.md) | 设置面：一份声明生成目录/模板/校验、业务分组（界面分类的唯一声明处）、稀疏文档与「缺席即默认」、Setting API（4 端点 + 保存事务 + 密文语义 + 生效域全表）、setup mode（降级启动 / loopback-only 修复）、TUI 浮层面板（双栏 + 键位表）、首次运行向导、`wing config` CLI |
 | [`docs/dev/media-images.md`](docs/dev/media-images.md) | 媒体与图片（read-image）：ReadImage 工具、内容寻址媒体池、模型能力声明、请求期图片投影（高水位 + 量子批量驱逐）与 KV/前缀 cache、inline/followup 线格式、probe 场景清单 |
 | [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 存量链接）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
@@ -263,6 +286,8 @@ make fmt                          # 格式化全部
 ```
 
 **后端特性测试约定**：开发后端特性（新增 / 修改 `libs/core` 的行为——上下文链、事件、协议、工具、网关等）时，**必须在 `libs/wing-probe/` 下增加真实有效的测试**：断言场景用代码写（`scenarios/`，不写配置文件），经公开 HTTP / WS 协议驱动"真网关 + 假 Provider"；`make test-probe` 与 CI 的 `probe-check` job 会强制其通过。**上下文红线**（compact / rewind / fork 等一切对上下文的操作）的行为变更必须配套红线断言。详见 [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
+
+**注释纪律**：注释**宁缺毋滥**，只承载代码本身读不出的信息——不变量、协议 / 契约、红线、非显然的 why（平台差异、竞态、外部约束）。保持**高信息密度**：函数 / 类型名已说清的不复述，同一主题的连续多行注释压成要点式，与代码不符的过期注释直接删。**严禁**添加「解释自己这处改动为什么正确」的辩护式注释（"原来 XX 会出问题"、"这样改是对的"、"按评审意见修成…"）——改动理由写进 commit message / PR 正文。
 
 ## 分发
 

@@ -1,18 +1,17 @@
 //! Gateway event projection lane — `WingEvent` in, chat / turn / status out.
 //!
-//! Every event the gateway pushes is projected into UI state here and nowhere
-//! else: this module is the only place that matches on event variants. The
-//! writes are strictly "state in, state out" — chat cells, turn bookkeeping,
-//! status data, modal registration. Side effects (title changes, notifications,
-//! interruptions) leave through `AppIntent`s, so a projection never performs
-//! I/O itself.
+//! Every event the gateway pushes is projected into UI state here and nowhere else: this module is
+//! the only place that matches on event variants. The writes are strictly "state in, state out" —
+//! chat cells, turn bookkeeping, status data, modal registration. Side effects (title changes,
+//! notifications, interruptions) leave through `AppIntent`s, so a projection never performs I/O
+//! itself.
 //!
-//! The session-scoped guards (drop events from other sessions, always accept
-//! `SyncSession`) live here too: they decide **what the projection is allowed
-//! to see**, which is the projection's own contract.
+//! The session-scoped guards (drop events from other sessions, always accept `SyncSession`) live
+//! here too: they decide **what the projection is allowed to see**, which is the projection's own
+//! contract.
 //!
-//! Call directions: the main loop ([`super`]) calls in with every event;
-//! projections call out to [`super::modal`] (ask registration).
+//! Call directions: the main loop ([`super`]) calls in with every event; projections call out to
+//! [`super::modal`] (ask registration).
 
 use super::App;
 use super::AppIntent;
@@ -36,6 +35,7 @@ use crate::ui::chat_view::ChatCell;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
 use crate::ui::welcome::SessionFacts;
+use crate::util::program_status::State;
 use crate::util::title::AttentionKind;
 
 impl App {
@@ -82,6 +82,10 @@ impl App {
                 );
                 self.turn.last_title = Some(working_title.clone());
                 self.push_intent(AppIntent::SetTitle(working_title));
+                // Derive from the state rather than forcing `working`: if an
+                // ask panel is somehow still queued, that is what the agent is
+                // actually blocked on.
+                self.sync_program_status();
             }
             WingEvent::UserMessageAccepted {
                 origin_request_id, ..
@@ -112,6 +116,14 @@ impl App {
                         self.dir_label().as_deref(),
                     )));
                 }
+                // Program status: a turn that ended without reporting a
+                // terminal state (a `turn_result` lost across a reconnect)
+                // must not leave the record claiming work. A record that
+                // already says `done` / `error` — notably the `error` the
+                // `Error` event just wrote — stays until replaced.
+                if self.program_status.is_in_flight() {
+                    self.set_program_status(State::Idle, None);
+                }
             }
             WingEvent::Interrupted {
                 dropped_request_ids,
@@ -135,6 +147,9 @@ impl App {
                 self.push_intent(AppIntent::SetTitle(title::title_idle(
                     self.dir_label().as_deref(),
                 )));
+                // Interrupted work is idle per the spec (not done: there is no
+                // result to look at).
+                self.set_program_status(State::Idle, None);
             }
             WingEvent::Notice { level, message, .. } => {
                 // Informational only. Deliberately does NOT call finish_turn():
@@ -164,7 +179,13 @@ impl App {
 
             WingEvent::Error { message, .. } => {
                 self.finish_turn();
+                // The backend cancels every feedback waiter when a turn dies —
+                // a stale ask panel must not outlive it (nor get answered into
+                // a dead waiter), and the record must not stay `blocked`.
+                self.clear_ask_state();
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
+                // The most specific failure text wing has for the record.
+                self.set_program_status(State::Error, Some(&message));
                 self.notify_unfocused(message.clone(), AttentionKind::Error);
             }
 
@@ -337,10 +358,16 @@ impl App {
                     choices: &choices,
                     required,
                 });
+                let interactive = panel.is_interactive();
                 let notify_text = panel.notify_text();
                 self.chat
                     .push(ChatCell::Ask(AskMessage::new(panel.clone())));
                 self.register_ask_panel(panel);
+                // Only an interactive ask blocks the agent (a Notice is
+                // display-only); what it waits for is the front panel.
+                if interactive {
+                    self.sync_program_status();
+                }
                 self.notify_unfocused(notify_text, AttentionKind::Ask);
                 // Bring the ask into view so the user sees it immediately and
                 // understands why Up/Down now navigate the panel.
@@ -382,6 +409,8 @@ impl App {
             }
             WingEvent::SessionStateChanged {
                 model,
+                model_id,
+                provider_name,
                 model_display_name,
                 thinking,
                 reasoning_effort,
@@ -395,22 +424,36 @@ impl App {
                 // already ships). Fall back to the local snapshot so a label
                 // the user has already seen is not dropped to the raw call
                 // name — with a current gateway the two agree and this is a
-                // no-op.
+                // no-op. Lookup by id when there is one, by call name for
+                // id-less sessions (display only, never a resolution).
                 let model_display_name = match model.as_deref() {
                     Some(m) if model_display_name.is_none() => {
-                        self.model_display_label(self.status.provider.as_deref(), m)
+                        match model_id.as_deref().filter(|id| !id.trim().is_empty()) {
+                            Some(id) => self.model_display_label(id),
+                            None => self.model_display_label_by_name(m),
+                        }
                     }
                     _ => model_display_name,
                 };
+                let model = model.map(|name| crate::ui::status_bar::ModelUpdate {
+                    id: model_id,
+                    name,
+                    provider: provider_name,
+                    display_name: model_display_name,
+                });
                 self.status.apply_session_update(
                     model,
-                    model_display_name,
                     agent,
                     title,
                     thinking,
                     reasoning_effort,
                     yolo,
                 );
+            }
+            WingEvent::SettingsChanged { fingerprint, .. } => {
+                // 面板开着 → 指纹比对（相同 = 自己刚保存的那一次；不同 = 别人改了，
+                // 顶部横幅）；关着 → 丢掉设置缓存（见 `note_settings_changed`）。
+                self.note_settings_changed(&fingerprint);
             }
             WingEvent::SyncSession {
                 session_id,
@@ -485,6 +528,10 @@ impl App {
                 } else {
                     AttentionKind::Done
                 };
+                self.set_program_status(
+                    if is_error { State::Error } else { State::Done },
+                    Some(&msg),
+                );
                 self.notify_unfocused(msg, kind);
             }
             _ => {
@@ -559,9 +606,12 @@ impl App {
             rules: agent_info.rules.len(),
         });
         if let Some(agent_info) = &agent {
-            self.status.model = agent_info.model_name.clone();
-            self.status.model_display_name = agent_info.model_display_name.clone();
-            self.status.provider = agent_info.provider_name.clone();
+            self.status.set_model(crate::ui::status_bar::ModelUpdate {
+                id: agent_info.model_id.clone(),
+                name: agent_info.model_name.clone(),
+                provider: agent_info.provider_name.clone(),
+                display_name: agent_info.model_display_name.clone(),
+            });
             self.status.workdir = agent_info.workspace.clone();
         }
 
@@ -690,6 +740,12 @@ impl App {
         // top of this function — the title needs the workdir before it is
         // composed).
         self.refresh_copy_candidates();
+
+        // Project the restored view onto the program-status record: a replayed
+        // ask queue is what the agent is blocked on, a live turn is `working`,
+        // an idle snapshot is `idle`. A session switch or reconnect must not
+        // leave the record describing the view that was replaced.
+        self.sync_program_status();
     }
 
     /// Handle tool call results with tool-specific routing.

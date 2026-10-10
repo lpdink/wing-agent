@@ -68,11 +68,10 @@ class ResumeSessionRequest(BaseModel):
     agent: AgentOverride | None = Field(
         default=None,
         description=(
-            "恢复时应用的参数覆盖——只应用 model / provider / effort / tools 子集"
+            "恢复时应用的参数覆盖——只应用 model_id / effort / tools 子集"
             "（system_prompt / append_system_prompt / max_turns / yolo 一律不应用："
             "它们会改变对话前缀或会话既有限额，是创建期语义）。被忽略的字段会记 "
-            "warning；provider 只在**伴随 model** 时生效（切 provider 需要一个要切"
-            "过去的模型，与 /api/session/update 的成对约定同口径）。"
+            "warning。"
         ),
     )
 
@@ -141,9 +140,9 @@ class UpdateSessionRequest(BaseModel):
     """POST /api/session/update 请求——统一 session 状态变更。"""
 
     session_id: str = Field(description="目标 session ID")
-    model: str | None = Field(default=None, description="切换模型")
-    provider: str | None = Field(
-        default=None, description="切换 provider（配合 model 使用）"
+    model_id: str | None = Field(
+        default=None,
+        description="切换模型（引用 providers[].models 的 id；未命中 400）",
     )
     agent: str | None = Field(default=None, description="切换 agent 模板")
     title: str | None = Field(default=None, description="设置 session 名称")
@@ -265,7 +264,18 @@ class ContextStatsInfo(BaseModel):
 class SessionInfoResponse(BaseModel):
     """GET /api/session/info 响应——session 运行时状态。"""
 
-    model: str = Field(description="当前模型名称（实际调用名，身份标识）")
+    model: str = Field(description="当前模型名称（实际调用名）")
+    model_id: str | None = Field(
+        default=None,
+        description=(
+            "当前模型的引用词（∈ providers[].models 的 id；不可用时 None）。"
+            "前端的选择态 / 文案匹配以它为准。"
+        ),
+    )
+    provider_name: str | None = Field(
+        default=None,
+        description="当前模型的 provider 名（运行期事实；未取到时 None）",
+    )
     model_display_name: str | None = Field(
         default=None,
         description="当前模型的展示名（未声明 / 空串 = None，前端回落 model）",

@@ -1,21 +1,17 @@
 //! Application state machine and main event loop.
 //!
-//! This file is the **composition root**: it holds the `App` state, runs the
-//! main loop and draws. Everything else lives in a lane module with one
-//! responsibility:
+//! This file is the **composition root**: it holds the `App` state, runs the main loop and draws.
+//! Everything else lives in a lane module with one responsibility:
 //!
 //! * [`commands`] — slash-command routing (table → handler → fetch projection);
 //! * [`projection`] — gateway events projected into chat / turn / status;
-//! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles.
+//! * [`modal`] — keyboard ownership, the Escape ladder, panel lifecycles;
+//! * [`frame`] — the geometry of the frame just drawn; [`mouse`] — pointer gesture routing (its
+//!   priority chain declared once); [`selection_session`] — the drag's lifecycle (anchor,
+//!   fingerprint, edge auto-scroll).
 //!
-//! The interaction paths live in their own modules too: [`frame`] records the
-//! geometry of the frame just drawn, [`mouse`] routes pointer gestures — its
-//! priority chain declared once — and [`selection_session`] owns the drag's
-//! lifecycle (anchor, fingerprint, edge auto-scroll).
-//!
-//! State that the UI renders as well (the selection panels, the shared magic
-//! strings) is neutral and lives in [`crate::shared`] — this root only
-//! orchestrates it.
+//! State the UI renders as well (the selection panels, the shared magic strings) is neutral and
+//! lives in [`crate::shared`] — this root only orchestrates it.
 
 pub mod intent;
 pub mod popup_state;
@@ -32,6 +28,7 @@ mod modal;
 mod mouse;
 mod projection;
 mod selection_session;
+mod settings;
 
 pub use intent::AppIntent;
 
@@ -42,6 +39,7 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::widgets::Widget as _;
 
 use self::images::Images;
 use self::transport::GatewayEndpoint;
@@ -68,7 +66,11 @@ use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
 use crate::ui::welcome::SessionFacts;
 use crate::ui::welcome::Welcome;
+use crate::util::program_status;
 use crate::util::title;
+use program_status::BlockKind;
+use program_status::Reporter;
+use program_status::State;
 use title::AttentionKind;
 
 use self::frame::FrameGeometry;
@@ -81,6 +83,7 @@ use self::turn_state::TurnState;
 
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
+use crate::shared::panels::ask::PanelMode;
 
 /// Threshold for wide-mode status bar (shows cumulative usage details).
 const WIDE_THRESHOLD: u16 = 100;
@@ -136,6 +139,9 @@ pub struct App {
     pub(crate) popup: PopupState,
     /// Turn state (working flag + timer + spinner + usage).
     turn: TurnState,
+    /// OSC 7501 program-status lane: formats reports, drops idempotent
+    /// repeats, carries the `WING_PROGRAM_STATUS` switch.
+    program_status: Reporter,
     /// Last tick instant for measuring real dt between TermEvent::Tick.
     last_tick: std::time::Instant,
     /// Active toast notification (lazy-expired in draw).
@@ -181,6 +187,30 @@ pub struct App {
     /// 读它的只有 [`App::sync_welcome`]：它曾是 transcript 顶部一条 system
     /// 消息，现在归名牌（见 [`crate::ui::welcome::SessionFacts`]）。
     session_facts: Option<SessionFacts>,
+    /// 设置面板（`/settings`）：`Some` ⇔ 面板开着（`ModalOwner::Settings` 接管键盘）。
+    /// 生命周期与分派全在 [`settings`] 模块。
+    settings_panel: Option<crate::shared::panels::settings::SettingsPanel>,
+    /// 面板的 Gateway 数据（`GET schema` + `GET get` 的一次成功快照）：
+    /// cache-first 打开、overlay 的目录（详情栏）、保存后的回写都读它。
+    settings_cache: Option<(
+        wing_api_client::models::SettingsSchemaResponse,
+        wing_api_client::models::SettingsGetResponse,
+    )>,
+    /// Interface 根的 catalog（09 的 `interface_catalog()`）；与注入面板的那一份相同，
+    /// 供 overlay 的详情栏 / 色块预览用（07 没有"行 → 节点"的访问器，见 08 D11）。
+    interface_catalog: Option<wing_api_client::models::SettingNode>,
+    /// 打开面板时的 `config` 快照（实时预览的回退基准；保存成功 / `R` 重载后更新）。
+    config_snapshot: Option<AppConfig>,
+    /// 已请求、尚未返回的 `FetchSettings`（无缓存时到达后要自动打开面板；关面板即清）。
+    settings_pending: bool,
+    /// 已请求的 `R` 重载：结果到达时**无条件**应用快照（丢弃本地改动是它的语义），
+    /// 而打开时的后台刷新只在面板干净时应用。
+    settings_reload_pending: bool,
+    /// 保存的两半：Interface 半边已定，Gateway 半边在飞（合并回执需要它）。
+    settings_save: Option<settings::PendingSettingsSave>,
+    /// 调色板刚变过（实时预览）：欢迎屏 header 的缓存键里没有调色板，
+    /// `sync_welcome` 下一帧强制重建一次（同 Ctrl+O 需要显式作废 cell 缓存）。
+    welcome_theme_dirty: bool,
 }
 
 impl App {
@@ -234,6 +264,7 @@ impl App {
             ctx: RenderContext::new(),
             popup: PopupState::default(),
             turn: TurnState::default(),
+            program_status: Reporter::from_env(),
             last_tick: std::time::Instant::now(),
             toast: None,
             ask_panels: std::collections::VecDeque::new(),
@@ -252,27 +283,39 @@ impl App {
             scrollbar: scrollbar::ScrollbarState::default(),
             images,
             session_facts: None,
+            settings_panel: None,
+            settings_cache: None,
+            interface_catalog: None,
+            config_snapshot: None,
+            settings_pending: false,
+            settings_reload_pending: false,
+            settings_save: None,
+            welcome_theme_dirty: false,
         }
     }
 
     /// 按当前宽度 / 时刻决定要不要重建欢迎屏 header，要就重建。
     ///
-    /// 每帧调用：海鸥动作 / 开屏扫光期间逐帧重建，定格且姿态没到点就一次不建
-    /// —— 动画 header 不该每帧重新分配。`welcome == None`（测试关掉了）时
-    /// 什么都不做，header 由调用方自己管。
-    ///
-    /// 两个门控信号：**干活**（`turn.working`，决定站姿还是飞行）与**在视口里**
-    /// （`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，
-    /// 常驻 idle 循环因此常态零成本。第三个信号是**会话事实**（skills / rules
-    /// 计数，SyncSession 到达时变化）：名牌右列的那一行随它重建。
+    /// 每帧调用：海鸥动作 / 开屏扫光期间逐帧重建，定格且姿态没到点就一次不建 —— 动画
+    /// header 不该每帧重新分配。两个门控信号：**干活**（`turn.working`，站姿还是飞行）与
+    /// **在视口里**（`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，常驻
+    /// idle 循环因此常态零成本。第三个信号是**会话事实**（skills / rules 计数，SyncSession
+    /// 到达时变化）：名牌右列那一行随它重建。`welcome == None`（测试关掉了）时什么都不做。
     fn sync_welcome(&mut self, palette: &ThemePalette, width: u16, now: std::time::Instant) {
         let working = self.turn.working;
         let visible = self.chat.header_in_view();
         let facts = self.session_facts;
+        // 调色板刚变过（实时预览）：`needs_rebuild` 的键里没有它，强制重建一次。
+        let theme_dirty = std::mem::take(&mut self.welcome_theme_dirty);
         let Some(welcome) = self.welcome.as_mut() else {
             return;
         };
-        if !welcome.needs_rebuild(width, now, working, visible, facts) {
+        let rebuild = if theme_dirty && visible {
+            true
+        } else {
+            welcome.needs_rebuild(width, now, working, visible, facts)
+        };
+        if !rebuild {
             return;
         }
         let lines = welcome.build(palette, width, now, working, visible, facts);
@@ -348,14 +391,11 @@ impl App {
     /// The picture lane's freshness check — the event loop's half of
     /// [`images::Images::poll_freshness`].
     ///
-    /// Called from the run loop when the lane says a check is due, **never**
-    /// from [`App::draw`]: it `stat`s the pictures on screen, and a picture
-    /// whose file changed drops the store's memo, which the next frame's
-    /// `sync` turns into a fresh header probe and a new encoding. Disabled
-    /// lanes (no protocol / `rendering.images: off`) short-circuit here, so
-    /// "off" still reads no file.
-    ///
-    /// `now` is injected so the throttle can be tested without sleeping.
+    /// Called from the run loop when the lane says a check is due, **never** from [`App::draw`]: it
+    /// `stat`s the pictures on screen, and a picture whose file changed drops the store's memo, which
+    /// the next frame's `sync` turns into a fresh header probe and a new encoding. Disabled lanes (no
+    /// protocol / `rendering.images: off`) short-circuit here, so "off" still reads no file. `now` is
+    /// injected so the throttle can be tested without sleeping.
     fn poll_image_freshness(&mut self, now: std::time::Instant) -> bool {
         if !self.images.is_enabled() {
             return false;
@@ -388,22 +428,23 @@ impl App {
         false
     }
 
-    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error).
+    /// Common cleanup at the end of an agent turn (Done / Interrupted / Error): resets turn state,
+    /// render context and copy candidates. Callers handle their own specific follow-up (title,
+    /// toast, etc.).
     ///
-    /// Resets turn state, render context, and copy candidates.
-    /// Callers handle their own specific follow-up (title, toast, etc.).
-    ///
-    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method,
-    /// so any chat mutations by the caller (e.g. `clear_ask_state`,
-    /// `chat.push(ErrorMessage)`) happen *after* the copy cache is snapshot.
-    /// Currently safe because `collect_assistant_messages` only collects
-    /// `AssistantMessage` cells, which are unaffected by these mutations.
+    /// **Ordering note**: `refresh_copy_candidates()` runs *inside* this method, so any chat
+    /// mutations by the caller (`clear_ask_state`, `chat.push(ErrorMessage)`) happen *after* the copy
+    /// cache is snapshotted. Currently safe because `collect_assistant_messages` only collects
+    /// `AssistantMessage` cells, which those mutations do not touch.
     fn finish_turn(&mut self) {
         self.turn.finish();
         self.ctx.reset();
         self.refresh_copy_candidates();
         // 回合结束：还在计时的思考块就地定格（`深度思考中 4s` → `深度思考 4s`）。
         self.chat.finish_active_thinking(std::time::Instant::now());
+        // 同理，还没落结果的 Bash 卡直接丢弃计时器：完成时刻不可知，任何数值都会
+        // 把「执行起点→回合结束」这个上界渲染成精确运行时长（#108 的假超时读法）。
+        self.chat.discard_pending_bash_timers();
         // Turn-end reconcile: install the full reference render for all
         // streaming cells (converges any incremental drift, frees stream
         // state). The actual render happens at the next draw, where the
@@ -424,6 +465,43 @@ impl App {
                 kind,
                 self.dir_label().as_deref(),
             )));
+        }
+    }
+
+    /// Report the agent's state to the terminal via OSC 7501 (Program Status
+    /// Protocol). The side-channel counterpart to the OSC 0 title: the same
+    /// state, addressed to terminals and agent dashboards instead of the human
+    /// in front of the tab. Idempotent reports are dropped by the reporter.
+    fn set_program_status(&mut self, state: State, msg: Option<&str>) {
+        if let Some(report) = self.program_status.report(state, msg) {
+            self.push_intent(AppIntent::SetProgramStatus(report));
+        }
+    }
+
+    /// Project the current state onto the program-status record: the front ask
+    /// panel is what the agent is blocked on, otherwise the turn decides.
+    /// Shared by the live Ask event, the answer path, and sync replay.
+    fn sync_program_status(&mut self) {
+        match self.ask_panels.front() {
+            Some(panel) => {
+                // The retired Bash confirmation is an approval gate; every
+                // other interactive ask is a question. (`Notice` never enters
+                // the queue — it is not interactive.)
+                let kind = match panel.mode {
+                    PanelMode::RequiredChoice => BlockKind::Permission,
+                    PanelMode::Question | PanelMode::Notice => BlockKind::Question,
+                };
+                let msg = panel.notify_text();
+                self.set_program_status(State::Blocked(kind), Some(&msg));
+            }
+            None => {
+                let state = if self.turn.working {
+                    State::Working
+                } else {
+                    State::Idle
+                };
+                self.set_program_status(state, None);
+            }
         }
     }
 
@@ -496,7 +574,9 @@ impl App {
         let layout = self.config.layout.clone();
         let thinking_mode = self.config.rendering.thinking;
         let thinking_expanded = self.chat.thinking_expansion();
-        terminal.draw(|frame| {
+        // `tui::draw_frame` (not `Terminal::draw`): every frame this app puts on
+        // the screen goes through the wire pass — see [`crate::ui::emoji_width`].
+        crate::tui::draw_frame(terminal, |frame| {
             let area = frame.area();
             self.geometry.record_area(area);
 
@@ -514,16 +594,13 @@ impl App {
                 self.cancel_selection();
             }
 
-            // Layout: status (1) | chat (fill) | composer block | [popup].
-            // The composer is a fixed block below the scrollable chat
-            // viewport — it stays in view regardless of the chat scroll
-            // position. The card carries the frame, the draft and both rails
-            // (activity + meta): the rows the working indicator and the info
-            // separator used to take are inside it, so a running turn costs no
-            // row at all. The card *floats* inside its block (see
-            // `chrome::card_area`), so the height is asked for in the columns
-            // the card will really get — the request and the wrapping it
-            // produces have to describe the same frame.
+            // Layout: status (1) | chat (fill) | composer block | [popup]. The composer is a fixed
+            // block below the scrollable chat viewport, so it stays in view whatever the scroll
+            // position. The card carries the frame, the draft and both rails (activity + meta): the
+            // rows the working indicator and the info separator used to take are inside it, so a
+            // running turn costs no row at all. The card *floats* inside its block (see
+            // `chrome::card_area`), so the height is asked for in the columns the card will really
+            // get — the request and the wrapping it produces have to describe the same frame.
             let card_w = crate::ui::input_area::chrome::card_area(area).width;
             let composer_h = self.input.height(card_w);
             let popup_h = self.popup.height();
@@ -588,14 +665,17 @@ impl App {
                 scrollbar::content_area(chunks[1]),
             );
 
-            // Overlay scrollbar. Painted after the chat widget (so it overprints
-            // the gutter's blank columns) and before the toast (so a toast is
-            // never hidden by it). It takes no layout width: the gutter is
-            // reserved unconditionally, so the bar showing up on overflow never
-            // reflows the cells. `self.chat` now holds this frame's content
-            // height and the effective scroll offset (auto-scroll / clamp
-            // included).
-            if let Some(geom) = self.scrollbar_geometry() {
+            // Overlay scrollbar. Painted after the chat widget (so it overprints the gutter's
+            // blank columns) and before the toast (so a toast is never hidden by it). It takes no
+            // layout width: the gutter is reserved unconditionally, so the bar appearing on overflow
+            // never reflows the cells. `self.chat` now holds this frame's content height and the
+            // effective scroll offset (auto-scroll / clamp included).
+            //
+            // 设置面板开着时不画：overlay 是最后写入者，画在它下面只是白费；顺手清掉 hover / drag
+            // 态，免得关掉面板后拖拽态复活（§20 风险 13）。
+            if self.settings_panel.is_some() {
+                self.clear_scrollbar_interaction();
+            } else if let Some(geom) = self.scrollbar_geometry() {
                 scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
             } else {
                 // No bar this frame (content fits, or nothing drawn yet):
@@ -653,10 +733,53 @@ impl App {
             // `execute!(Show/Hide, MoveTo)` wrote to the backend out-of-band,
             // which desyncs ratatui's cursor tracking and is explicitly
             // discouraged by ratatui.
-            let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
-            let cursor_x = cursor_x.min(area.width.saturating_sub(1));
-            let cursor_y = cursor_y.min(area.height.saturating_sub(1));
-            frame.set_cursor_position((cursor_x, cursor_y));
+            //
+            // 设置面板开着时不定位：面板自己画反显光标，终端光标留在 overlay 上
+            // 就是一个游离的方块（不调用它 = 这一帧隐藏光标）。
+            if self.settings_panel.is_none() {
+                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
+                let cursor_x = cursor_x.min(area.width.saturating_sub(1));
+                let cursor_y = cursor_y.min(area.height.saturating_sub(1));
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+
+            // 设置面板：居中**浮层卡片**（v2），垫在 toast *之前*（保存回执的 toast 要压在
+            // 它上面）。卡片自己 `Clear` 自己那块——四周的聊天背景因此还在（v1 是全屏
+            // overlay，这里额外全屏 `Clear` 一次；浮层不再需要，也不该抹掉背景）。
+            let settings_card = self
+                .settings_panel
+                .as_ref()
+                .map(|_| crate::ui::settings::card_area(area));
+            if let Some(panel) = self.settings_panel.as_mut()
+                && let Some(card) = settings_card
+            {
+                // 08 的契约：每帧把两栏各自的可见行数告诉面板（翻页步长）。
+                panel.set_viewport_rows(
+                    crate::ui::settings::tree_viewport_rows(panel, card) as usize
+                );
+                panel.set_anchor_viewport_rows(crate::ui::settings::anchors_viewport_rows(
+                    panel, card,
+                ) as usize);
+                panel.set_anchors_visible(crate::ui::settings::has_anchor_column(panel, card));
+            }
+            if let Some(panel) = self.settings_panel.as_ref()
+                && let Some(card) = settings_card
+                && let Some((schema, _)) = self.settings_cache.as_ref()
+            {
+                crate::ui::settings::SettingsOverlay::new(
+                    panel,
+                    crate::ui::settings::SettingsCatalogs::new(
+                        &schema.root,
+                        self.interface_catalog.as_ref(),
+                    ),
+                    &palette,
+                )
+                .render(card, frame.buffer_mut());
+                // 卡片盖住的链接 hit box 要作废（与 toast 同一条不变量：看不见的
+                // hit box 不许打开看不见的链接）。指针侧另有一道门
+                // （`background_pointer_blocked`），这里保证的是**表本身**不撒谎。
+                self.chat.mask_links(card);
+            }
 
             // Toast overlay (rendered last, on top of everything).
             let mut toast_area: Option<Rect> = None;
@@ -672,39 +795,44 @@ impl App {
                 }
             }
 
-            // Markdown pictures — the last write of the frame (see
-            // `ui::image::paint`): every widget above has already painted, so
-            // nothing can land on a placeholder or a sixel anchor afterwards.
-            // Overlays are respected by *not* drawing: a picture whose box the
-            // toast would cover is skipped whole (a partial overdraw would break
-            // the image), and a drag selection keeps the frame text-only — its
-            // snapshot copies the visible rows and the row content must not
-            // change under the finger.
+            // Markdown pictures — the last write of the frame (see `ui::image::paint`): every widget
+            // above has already painted, so nothing can land on a placeholder or a sixel anchor
+            // afterwards. Overlays are respected by *not* drawing: a picture whose box the toast would
+            // cover is skipped whole (a partial overdraw would break the image), and a drag selection
+            // keeps the frame text-only — its snapshot copies the visible rows and the row content must
+            // not change under the finger.
             //
-            // The frame's placement table is recorded before those gates: it is
-            // also the freshness lane's target set, and a picture that is on
-            // screen but suppressed *this* frame is still worth keeping in step
-            // with its file (see `Images::observe_visible`).
+            // The frame's placement table is recorded before those gates: it is also the freshness
+            // lane's target set, and a picture on screen but suppressed *this* frame is still worth
+            // keeping in step with its file (see `Images::observe_visible`).
             let clip = self.chat.geometry().area;
             let recorded = self.chat.frame_images();
             self.images.observe_visible(recorded);
+            // 浮层卡片是"挡一块"而不是"挡全屏"：背景里的图片照常画，被卡片（或 toast）
+            // 压住的那几张由 `paint` 的 masks **整张**跳过（半张覆盖会撕碎图形协议，
+            // §20 风险 13 的同一条理由）。关面板时 `close_settings_panel` 会 invalidate
+            // 一次，编码与句柄在那里作废。
+            let mut masks: Vec<Rect> = toast_area.into_iter().collect();
+            masks.extend(settings_card);
             if !self.selection.is_press_active() {
                 self.images
-                    .paint(recorded, clip, toast_area, frame.buffer_mut());
+                    .paint(recorded, clip, &masks, frame.buffer_mut());
             }
 
-            // In-app text selection — painted after the toast (the selection
-            // sits above every overlay) and clipped to *this* frame's rect of
-            // the region that owns it. It is a pure `Buffer` patch: merging
-            // `REVERSED` into the cell styles the widgets just produced, so no
-            // cell / widget code has to know about selections and the
-            // background colors survive.
+            // In-app text selection — painted after the toast (the selection sits above every
+            // overlay) and clipped to *this* frame's rect of the region that owns it. It is a pure
+            // `Buffer` patch: merging `REVERSED` into the cell styles the widgets just produced, so no
+            // cell / widget code has to know about selections and the background colors survive.
             //
-            // The chat pass also snapshots the visible rows: the release event
-            // lands between frames, so the copy must come from the frame the
-            // user was actually looking at. The composer needs no snapshot —
-            // its wrapping is ours, so the copy comes from the draft itself.
-            if self.selection.is_press_active() {
+            // The chat pass also snapshots the visible rows: the release event lands between frames,
+            // so the copy must come from the frame the user was actually looking at. The composer
+            // needs no snapshot — its wrapping is ours, so the copy comes from the draft itself.
+            //
+            // 设置面板开着时不画：面板是**模态浮层**，键盘已经被它接管、指针也不再认领背景
+            // （`background_pointer_blocked`），而拖拽坐标落在卡片四周的 chat band 上（选区锚在
+            // 内容坐标）—— 高亮画出来只会和卡片打架（打开面板时已有的选区已被取消，这里挡的是
+            // "面板开着时新起的拖拽"）。
+            if self.selection.is_press_active() && self.settings_panel.is_none() {
                 match self.selection.region() {
                     Some(SelectionRegion::Chat) => {
                         self.chat
@@ -797,7 +925,7 @@ pub async fn run_app(
     terminal: &mut WingTerminal,
     transport: Transport,
     session_id: String,
-    endpoint: GatewayEndpoint,
+    mut endpoint: GatewayEndpoint,
     config: AppConfig,
     launch_workspace: Option<String>,
 ) -> Result<()> {
@@ -822,6 +950,9 @@ pub async fn run_app(
     let images = Images::new(config.rendering.images, image_support, image_waker);
 
     let mut app = App::with_images(session_id, config, launch_workspace, images);
+    // Initial program-status record: the session starts at rest (a mid-turn
+    // resume replaces this with `working` when its SyncSession lands).
+    app.set_program_status(State::Idle, None);
     let mut term_events = crate::tui::spawn_event_stream();
     let mut transport = Some(transport);
     // Session recovery pending: the transport (WS) is up but the session
@@ -860,7 +991,15 @@ pub async fn run_app(
         // status, toasts on failure) — mark dirty uniformly instead of
         // relying on each intent remembering to.
         for intent in app.drain_intents() {
-            runner::execute_intent(&mut app, &transport, terminal, intent, &fetch_tx).await;
+            runner::execute_intent(
+                &mut app,
+                &mut transport,
+                &mut endpoint,
+                terminal,
+                intent,
+                &fetch_tx,
+            )
+            .await;
             app.mark_dirty();
         }
 
@@ -1153,7 +1292,11 @@ pub async fn run_app(
         }
     }
 
-    // Restore terminal title on exit.
+    // Restore the terminal title on exit. The program-status record is left
+    // alone on purpose: the spec's lifetime rules already do the right thing
+    // when the process exits — the terminal drops `working` / `blocked`, and
+    // `done` / `error` survive so the user still finds them. An exit `clear`
+    // would only delete records that are meant to be kept.
     {
         let writer = terminal.backend_mut();
         let _ = title::set_title(writer, "");
