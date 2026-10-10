@@ -1116,7 +1116,27 @@ fn is_path_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// GET /api/settings/schema 响应——设置目录（catalog 树）+ 版本 + 文件位置。
+/// 一个业务分组（镜像 Python `SettingGroup` / 协议 `SettingGroupProto`）。
+///
+/// 分组是**界面分类**的唯一声明来源（后端 `config/groups.py`）：设置面板左列的锚点、
+/// `wing config list` 的分组头都读它，前端不许硬编码组名 / 顺序 / 成员。
+/// `members` 是 `Config` 的顶层键名（= catalog root 直接子节点的 `key`），
+/// 每个顶层键恰好属于一个组。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingGroup {
+    /// 稳定标识（改名 / 调序都不该改它）。
+    pub id: String,
+    /// 显示名（面板锚点 / YAML 分隔行 / CLI 分组头）。
+    pub title: String,
+    /// 一行说明。
+    #[serde(default)]
+    pub doc: String,
+    /// 成员 = 顶层键名。
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+/// GET /api/settings/schema 响应——设置目录（catalog 树）+ 业务分组 + 版本 + 文件位置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsSchemaResponse {
     /// 网关版本（前端可据此提示"网关比面板新"）。
@@ -1125,6 +1145,38 @@ pub struct SettingsSchemaResponse {
     pub root: SettingNode,
     /// config.yaml 的绝对路径（面板标题栏展示）。
     pub config_path: String,
+    /// 业务分组（顺序即界面顺序）。
+    ///
+    /// `#[serde(default)]`：老网关不发这个键 ⇒ 空表 ⇒ 面板回落到「按 root 子节点的
+    /// `section` 推导分组」（[`SettingGroup::derive_from_sections`]），不至于无处可点。
+    #[serde(default)]
+    pub groups: Vec<SettingGroup>,
+}
+
+impl SettingGroup {
+    /// 老网关兼容：没有 `groups[]` 时，从 root 直接子节点的 `section` 推导分组。
+    ///
+    /// 连续的同一 `section` 合成一组（顺序 = 声明序）；没有 `section` 的节点各自成组
+    /// （标题回落键名）。它只是"别把界面画塌"的兜底，语义权威始终是后端那张表。
+    pub fn derive_from_sections(root: &SettingNode, id_prefix: &str) -> Vec<SettingGroup> {
+        let mut groups: Vec<SettingGroup> = Vec::new();
+        for child in &root.children {
+            let title = child.section.clone().unwrap_or_else(|| child.key.clone());
+            if let Some(last) = groups.last_mut()
+                && last.title == title
+            {
+                last.members.push(child.key.clone());
+                continue;
+            }
+            groups.push(SettingGroup {
+                id: format!("{id_prefix}{}", groups.len()),
+                title,
+                doc: child.section_doc.clone().unwrap_or_default(),
+                members: vec![child.key.clone()],
+            });
+        }
+        groups
+    }
 }
 
 /// 一条配置问题（镜像 Python `ConfigProblem`）。
@@ -1521,6 +1573,12 @@ mod settings_tests {
     const SCHEMA_FIXTURE: &str = r#"{
         "version": "0.4.1",
         "config_path": "/home/u/.wing/core/config.yaml",
+        "groups": [
+            {"id": "providers", "title": "Providers", "doc": "至少声明一个 provider。",
+             "members": ["providers"]},
+            {"id": "advanced", "title": "Advanced", "doc": "网关与日志。",
+             "members": ["gateway", "log"]}
+        ],
         "root": {
             "key": "config", "path": "config", "title": "Wing 配置", "doc": "网关的全部配置。",
             "kind": "object",
@@ -1808,10 +1866,80 @@ mod settings_tests {
         assert_eq!(log_file.apply, ApplyScope::Readonly);
         assert!(!log_file.editable && log_file.deprecated.is_some());
 
+        // 分组表（面板左列锚点的唯一来源）：顺序 / id / 成员都在 wire 上。
+        assert_eq!(resp.groups.len(), 2);
+        assert_eq!(resp.groups[0].id, "providers");
+        assert_eq!(resp.groups[0].title, "Providers");
+        assert_eq!(resp.groups[0].doc, "至少声明一个 provider。");
+        assert_eq!(resp.groups[0].members, vec!["providers".to_string()]);
+        assert_eq!(
+            resp.groups[1].members,
+            vec!["gateway".to_string(), "log".to_string()]
+        );
+
         // 整棵树的不动点：编码 → 解码 → 编码必须逐值相同（字段名双向一致、无字段丢失）
         let v1 = serde_json::to_value(&resp).unwrap();
         let again: SettingsSchemaResponse = serde_json::from_value(v1.clone()).unwrap();
         assert_eq!(serde_json::to_value(&again).unwrap(), v1);
+    }
+
+    #[test]
+    fn a_schema_without_groups_decodes_to_an_empty_table() {
+        // 老网关不发 groups[]：`#[serde(default)]` 让它成为空表（面板据此走 section 推导）。
+        let json = r#"{
+            "version": "0.4.0",
+            "config_path": "/home/u/.wing/core/config.yaml",
+            "root": {"key": "config", "path": "config", "title": "配置", "doc": "",
+                     "kind": "object"}
+        }"#;
+        let resp: SettingsSchemaResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.groups.is_empty());
+    }
+
+    #[test]
+    fn groups_are_derived_from_sections_for_an_old_gateway() {
+        let resp = schema();
+        // 夹具的 root 子节点带 section（Providers / Gateway / Logging）：连续的同一 section
+        // 合成一组，顺序 = 声明序。
+        let derived = SettingGroup::derive_from_sections(&resp.root, "gateway:");
+        assert_eq!(
+            derived
+                .iter()
+                .map(|group| (group.id.clone(), group.title.clone(), group.members.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "gateway:0".to_string(),
+                    "Providers".to_string(),
+                    vec!["providers".to_string()]
+                ),
+                (
+                    "gateway:1".to_string(),
+                    "Gateway".to_string(),
+                    vec!["gateway".to_string()]
+                ),
+                (
+                    "gateway:2".to_string(),
+                    "Logging".to_string(),
+                    vec!["log".to_string()]
+                ),
+            ]
+        );
+        // 没有 section 的节点用键名当标题（各自成组）。
+        let bare: SettingNode = serde_json::from_str(
+            r#"{
+                "key": "config", "path": "config", "title": "配置", "doc": "", "kind": "object",
+                "children": [
+                    {"key": "yolo", "path": "yolo", "title": "yolo", "doc": "", "kind": "bool"},
+                    {"key": "steer", "path": "steer", "title": "steer", "doc": "", "kind": "bool"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let derived = SettingGroup::derive_from_sections(&bare, "g");
+        assert_eq!(derived.len(), 2);
+        assert_eq!(derived[0].title, "yolo");
+        assert_eq!(derived[1].members, vec!["steer".to_string()]);
     }
 
     // ── 前向兼容 ──────────────────────────────────────────────
