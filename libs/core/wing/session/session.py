@@ -532,6 +532,10 @@ class Session:
         （构造期恢复或显式动作写入），其余三项来自 live agent。**记录面**的同义
         投影是 :func:`wing.session.model_binding.resolve_model_binding`（列表里的
         未加载会话用那条路）——两处的答案必须是同一个模型。
+
+        不抛：agent 侧的三项都是状态读取（展示名在 provider 不可解析时降级为
+        None，见 ``WingAgent.model_display_name``）——列表是跨会话视图，不能被
+        单个会话的配置问题拖垮。
         """
         return ModelBinding(
             model_id=self._model_id,
@@ -541,20 +545,25 @@ class Session:
         )
 
     def to_agent_info(self) -> "AgentInfo":
-        """从 Session 的 agent 和 context_manager 构造 AgentInfo。"""
+        """从 Session 的 agent 和 context_manager 构造 AgentInfo。
+
+        模型四件套走 :meth:`model_binding`（与列表条目同一次取法）：四处出口
+        （info / get / sync 重放 / 列表）说的必须是同一个模型。
+        """
         from wing.event.base import AgentInfo
 
         cm = self._context_manager
+        binding = self.model_binding()
         return AgentInfo(
-            model_name=self._agent.model,
-            model_id=self._model_id,
+            model_name=binding.model_name,
+            model_id=binding.model_id,
             system_prompt=cm.system_prompt.content if cm.system_prompt else None,
             tools=[t.effective_llm_name for t in self._agent.tools],
             skills=list(cm._skills_cache.keys()),
             rules=list(cm._rules_files),
             workspace=self._metadata.workspace,
-            provider_name=self._agent.provider_name,
-            model_display_name=self._agent.model_display_name,
+            provider_name=binding.provider_name,
+            model_display_name=binding.model_display_name,
         )
 
     def serialize_messages(self) -> list[dict]:

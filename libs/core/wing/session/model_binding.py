@@ -58,9 +58,12 @@ def resolve_model_binding(
         if ref is not None:
             return _binding(ref.id, ref.name, ref.provider_name, config)
 
+    # 快照判据与 `_restore_persisted_model` 逐字对齐（`is not None`，不是真值
+    # 判定）：空串在两侧都必须走同一条路，否则"列表说什么"与"resume 跑什么"
+    # 会在损坏记录上分叉。
     if (
-        metadata.model_name
-        and metadata.provider_name
+        metadata.model_name is not None
+        and metadata.provider_name is not None
         and _has_provider(config, metadata.provider_name)
     ):
         return _binding(

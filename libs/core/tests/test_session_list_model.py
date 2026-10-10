@@ -367,6 +367,47 @@ class TestActiveProjection:
         assert session.to_agent_info().model_display_name == "DeepSeek Flash"
 
 
+class TestListSurvivesBrokenConfig:
+    """列表是跨会话视图：单个会话的配置问题不许拖垮整个端点。
+
+    历史上列表对 live 会话只读 `status`，不碰 agent 的模型解析；现在它要读模型
+    四件套——展示名经 provider 解析，而 provider 可能已从配置里删掉（池里恰好也
+    没有旧实例）。那一路必须降级（四件套里只有展示名变 None），而不是抛错。
+    """
+
+    @pytest.mark.asyncio
+    async def test_provider_removed_from_config_degrades_the_display_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # 只有一个 provider 的配置：下一步它会整个从配置里消失。
+        _use_config(
+            monkeypatch,
+            models=[FLASH],
+            agents=[("default", "ds-flash")],
+            provider_name="vanishing-provider",
+        )
+        root = tmp_path / "sessions"
+        sm = SessionManager({"file": FileSessionStore(root)})
+        session = sm.create_session()
+        session.context_manager.add_message(Message(role="user", content="hello"))
+
+        # 换配置：provider 没了，且共享池里也没有它的实例（会话从未发过请求）。
+        _use_config(
+            monkeypatch,
+            models=[FLASH],
+            agents=[("default", "ds-flash")],
+            provider_name="other-provider",
+        )
+
+        entry = _entry(sm, session.session_id)
+
+        # 身份与运行期事实照旧（它们不依赖 provider 解析），只有展示名降级。
+        assert entry.model_id == "ds-flash"
+        assert entry.model_name == "deepseek-flash-2026"
+        assert entry.provider_name == "vanishing-provider"
+        assert entry.model_display_name is None
+
+
 class TestListMatchesResume:
     """列表投影 == resume 真跑的模型（同一个答案，两条路径）。
 
@@ -399,6 +440,12 @@ class TestListMatchesResume:
             pytest.param(
                 {"model_name": "ghost", "provider_name": "gone"},
                 id="unresolvable-provider",
+            ),
+            # 损坏记录（空串快照）：两侧的"记录存在吗"必须同一判据（`is not
+            # None`），否则列表说模板默认、resume 却把空名字装回 agent。
+            pytest.param({"model_name": "", "provider_name": "p"}, id="empty-name"),
+            pytest.param(
+                {"model_name": "ghost", "provider_name": ""}, id="empty-provider"
             ),
         ],
     )

@@ -366,16 +366,18 @@ mod tests {
         }
     }
 
-    /// 带模型四件套的会话（列表条目的模型列素材）。
+    /// 带模型四件套的会话（列表条目的模型列素材）；`provider` 显式给出，
+    /// 与 `model_name` 独立（网关的降级形态里两者可以只剩其一）。
     fn with_model(
         mut info: SessionInfo,
         model_id: Option<&str>,
         model_name: Option<&str>,
+        provider: Option<&str>,
         display_name: Option<&str>,
     ) -> SessionInfo {
         info.model_id = model_id.map(str::to_string);
         info.model_name = model_name.map(str::to_string);
-        info.provider_name = model_name.map(|_| "probe".to_string());
+        info.provider_name = provider.map(str::to_string);
         info.model_display_name = display_name.map(str::to_string);
         info
     }
@@ -471,6 +473,7 @@ mod tests {
             session("a", "idle", &[]),
             Some("ds-flash"),
             Some("deepseek-flash-2026"),
+            Some("probe"),
             Some("DeepSeek Flash"),
         );
         assert_eq!(model_text(&full), "DeepSeek Flash");
@@ -480,12 +483,13 @@ mod tests {
             full.clone(),
             Some("ds-flash"),
             Some("deepseek-flash-2026"),
+            Some("probe"),
             None,
         );
         assert_eq!(model_text(&no_display), "deepseek-flash-2026");
 
         // 只有引用词（降级路径）→ id。
-        let id_only = with_model(full.clone(), Some("ds-flash"), None, None);
+        let id_only = with_model(full.clone(), Some("ds-flash"), None, None, None);
         assert_eq!(model_text(&id_only), "ds-flash");
 
         // 旧网关 / 全缺 → `-`。
@@ -496,10 +500,11 @@ mod tests {
             full.clone(),
             Some("ds-flash"),
             Some("deepseek-flash-2026"),
+            Some("probe"),
             Some("   "),
         );
         assert_eq!(model_text(&blank), "deepseek-flash-2026");
-        let all_blank = with_model(full, Some("ds-flash"), Some(""), Some(" "));
+        let all_blank = with_model(full, Some("ds-flash"), Some(""), Some("probe"), Some(" "));
         assert_eq!(model_text(&all_blank), "ds-flash");
     }
 
@@ -510,6 +515,7 @@ mod tests {
             session("a", "idle", &[]),
             Some("ds-flash"),
             None,
+            Some("probe"),
             Some("Deep\nSeek\tFlash"),
         );
         assert_eq!(model_text(&messy), "Deep Seek Flash");
@@ -523,12 +529,14 @@ mod tests {
                 session("20261009-210702-217d85f2", "working", &["task=a"]),
                 Some("ds-flash"),
                 Some("deepseek-flash-2026"),
+                Some("probe"),
                 Some("DeepSeek Flash"),
             ),
             with_model(
                 session("20261008-123133-3f465dd1", "inactive", &[]),
                 Some("probe/model"),
                 Some("probe/model"),
+                Some("probe"),
                 None,
             ),
         ];
@@ -567,6 +575,7 @@ mod tests {
         let row: Vec<&str> = table.lines().filter(|l| l.contains("idle")).collect();
         assert_eq!(row.len(), 1, "{table}");
         // 单元格按体行分隔符切：SESSION ID / STATUS / LAST / NAME / MODEL / TAGS。
+        // （前提：本用例的值里不含框线字符——`single_line` 只压平控制字符。）
         let cells: Vec<&str> = row[0].split('│').collect();
         assert_eq!(cells.len(), 6, "{table}");
         assert_eq!(cells[2].trim(), "-", "LAST：{table}");

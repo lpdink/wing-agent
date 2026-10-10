@@ -253,3 +253,34 @@ async def test_unresolvable_record_degrades_the_id_slot_only(probe: Probe) -> No
     assert _info_quartet(await http.get_session_info(session.session_id)) == _quartet(
         entry
     )
+
+
+@pytest.mark.probe_env(models=[MODEL_SPEC])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_blank_snapshot_keeps_list_and_resume_in_step(probe: Probe) -> None:
+    """损坏记录（空串调用名）：列表与 resume 必须同一判据，不许一边说 A 一边跑 B。
+
+    空串是"记录存在但是坏的"：恢复链认它（``is not None``）、把空名字装回 agent；
+    投影若按真值判定就会退回模板默认——列表说"DeepSeek Flash"、resume 之后跑在
+    空模型名上，正是本投影存在的意义所禁止的那种分叉。
+    """
+    probe.register(MODEL_NAME, Turn.of(text="reply"))
+    http = probe.driver_required.http
+
+    session = await probe.session(model=MODEL_ID)
+    await session.chat("alpha")
+    await _evict(probe, session)
+
+    broken = _rewrite_metadata(
+        probe, session.session_id, model_id=None, model_name="", provider_name="probe"
+    )
+    assert broken["model_name"] == "", broken
+
+    entry = await _entry(probe, session.session_id)
+    assert _quartet(entry) == (None, "", "probe", None), entry
+
+    await probe.resume(session.session_id)
+    assert _info_quartet(await http.get_session_info(session.session_id)) == _quartet(
+        entry
+    )

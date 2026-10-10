@@ -1385,12 +1385,14 @@ mod tests {
         assert_eq!(entry.provider_name, None);
         assert_eq!(entry.model_display_name, None);
 
-        // A resolved entry keeps the id when the display name / call name are
-        // unknown (stale record): the display layer falls back on its own.
-        let degraded = r#"{"id": "s1", "model_id": "ghost-id"}"#;
+        // Reachable gateway degradation: the call name survives while the
+        // reference word is gone (the recorded id was deleted from config).
+        // The display layer falls back on its own — `model_name` alone is
+        // enough to say what the session runs.
+        let degraded = r#"{"id": "s1", "model_name": "ghost-upstream"}"#;
         let entry: SessionInfo = serde_json::from_str(degraded).unwrap();
-        assert_eq!(entry.model_id.as_deref(), Some("ghost-id"));
-        assert_eq!(entry.model_name, None);
+        assert_eq!(entry.model_id, None);
+        assert_eq!(entry.model_name.as_deref(), Some("ghost-upstream"));
         assert_eq!(entry.model_display_name, None);
     }
 

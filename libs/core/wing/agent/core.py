@@ -256,8 +256,17 @@ class WingAgent:
 
         与 capabilities 同款实时解析：展示名不是身份，任何匹配 / 变更仍以
         model + provider 为准；前端只在展示层消费（缺省回落 self.model）。
+
+        provider 不可解析（配置里已删、池里也没有旧实例）不是本属性的失败面：
+        展示名是**可选素材**，缺它只意味着"没有展示名"（回落调用名）——返回
+        None，而不是让整个投影（会话列表 / `/api/session/info` 的 agent 快照）
+        因为一个会话的配置问题整体倒掉。
         """
-        return resolve_model_display_name(self.model_provider.config, self.model)
+        try:
+            provider_cfg = self.model_provider.config
+        except ValueError:
+            return None
+        return resolve_model_display_name(provider_cfg, self.model)
 
     @property
     def yolo(self) -> bool:
