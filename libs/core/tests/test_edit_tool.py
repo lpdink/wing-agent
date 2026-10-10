@@ -10,6 +10,7 @@ because ToolExecutor filters model args by the tool's signature.
 from __future__ import annotations
 
 import inspect
+import stat
 from pathlib import Path
 
 import pytest
@@ -133,3 +134,19 @@ class TestEditErrors:
         p.write_text("abc")
         with pytest.raises(ToolError, match="old_string cannot be empty"):
             await edit_file(str(p), "", "x", ctx=_StubCtx())  # type: ignore[arg-type]
+
+
+class TestEditDurability:
+    """Edit 走共享原子写原语（tmp + fsync + replace）：覆盖保留权限位。"""
+
+    @pytest.mark.asyncio
+    async def test_edit_preserves_mode(self, tmp_path: Path):
+        p = tmp_path / "script.sh"
+        p.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+        p.chmod(0o755)
+        ctx = _StubCtx()
+
+        await edit_file(str(p), "old", "new", ctx=ctx)  # type: ignore[arg-type]
+
+        assert p.read_text() == "#!/bin/sh\necho new\n"
+        assert stat.S_IMODE(p.stat().st_mode) == 0o755

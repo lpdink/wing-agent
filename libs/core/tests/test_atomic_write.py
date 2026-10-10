@@ -13,6 +13,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import stat
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -104,3 +105,38 @@ class TestFailureCleanup:
 
         assert target.read_bytes() == b"original"
         assert sorted(p.name for p in tmp_path.iterdir()) == ["blob.bin"]
+
+
+class TestModePreservation:
+    """覆盖既有文件保留其权限位；新建沿用 umask（与就地写一致）。"""
+
+    def test_text_overwrite_preserves_mode(self, tmp_path: Path):
+        target = tmp_path / "metadata.json"
+        target.write_text("{}", encoding="utf-8")
+        target.chmod(0o600)
+
+        atomic_write_text(target, "{}")
+
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_bytes_overwrite_preserves_mode(self, tmp_path: Path):
+        target = tmp_path / "blob.bin"
+        target.write_bytes(b"x")
+        target.chmod(0o640)
+
+        atomic_write_bytes(target, b"y")
+
+        assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+    def test_new_file_mode_matches_in_place_open(self, tmp_path: Path):
+        """新建文件（无既有目标）：落地权限 = open(path, "w") 的 umask 默认。"""
+        control = tmp_path / "control.txt"
+        with open(control, "w", encoding="utf-8"):
+            pass
+
+        target = tmp_path / "new.txt"
+        atomic_write_text(target, "x")
+
+        assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(
+            control.stat().st_mode
+        )

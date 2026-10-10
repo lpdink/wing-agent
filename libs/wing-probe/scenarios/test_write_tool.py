@@ -7,8 +7,10 @@
 - 新建文件：``old_text=None``（全绿 diff）、结果字符串 = ``write: ok (created)``；
 - ``diff_content`` 事件：Write 保持**全量**载荷（不做窗口裁剪），old / new 都从
   line 1 起；覆写时 ``old_text`` 是整份旧内容，新建时为 None；
-- 原子写（tmp + os.replace）：workspace 里不留下 ``.tmp.*`` 中间文件——成功路径
-  tmp 被替换走（不再有"写入中途的 temp 残骸"）。
+- 原子写（tmp + os.replace）不在 workspace 留下 ``.tmp.*`` 中间文件——这是"写入
+  过程不留痕"的清单侧证据（真正的原子性与失败清理由 ``libs/core/tests/`` 下
+  ``test_write_tool.py`` / ``test_atomic_write.py`` 的注入测试钉住，probe 层
+  不注入失败）。
 
 断言面：workspace 文件（内容 + 清单）、事件时间线（diff_content 逐字段）、落盘链
 （diff_content 是 persist=true 事实事件，磁盘记录与广播逐字段一致 + 内置不变量）。

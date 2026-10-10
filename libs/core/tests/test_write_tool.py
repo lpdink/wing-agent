@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -167,3 +168,95 @@ class TestResultStrings:
         target.write_text("a\nb\nc\n", encoding="utf-8")
         result = await write_file(str(target), "x", ctx=_StubCtx())  # type: ignore[arg-type]
         assert result == "write: ok (overwritten)\n  3 → 1 lines, 1 bytes"
+
+
+class TestTargetSemantics:
+    """写入目标语义对齐就地写（open(path, "w")）的可见行为。"""
+
+    @pytest.mark.asyncio
+    async def test_overwrite_preserves_mode(self, tmp_path: Path):
+        """覆盖既有文件保留其权限位（就地写语义；tmp+replace 会重置为 umask 默认）。"""
+        for mode in (0o755, 0o600, 0o640):
+            target = tmp_path / f"f-{mode:o}.txt"
+            target.write_text("old", encoding="utf-8")
+            target.chmod(mode)
+
+            await write_file(str(target), "new", ctx=_StubCtx())  # type: ignore[arg-type]
+
+            assert stat.S_IMODE(target.stat().st_mode) == mode, oct(
+                stat.S_IMODE(target.stat().st_mode)
+            )
+            assert target.read_text(encoding="utf-8") == "new"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses the target's read-only bit",
+    )
+    async def test_readonly_target_refused(self, tmp_path: Path):
+        """只读目标拒绝写入（rename 只需要目录写权限，不加检查会绕过只读位）。"""
+        target = tmp_path / "ro.txt"
+        target.write_text("protected", encoding="utf-8")
+        target.chmod(0o444)
+
+        with pytest.raises(ToolError, match="Permission denied"):
+            await write_file(str(target), "overwritten", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        assert target.read_text(encoding="utf-8") == "protected"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o444
+
+    @pytest.mark.asyncio
+    async def test_symlink_target_writes_through(self, tmp_path: Path):
+        """末段是符号链接：写穿到真实目标，链接本身保留（就地写语义）。"""
+        real = tmp_path / "real.txt"
+        real.write_text("real", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+
+        await write_file(str(link), "through link", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        assert link.is_symlink()
+        assert real.read_text(encoding="utf-8") == "through link"
+        assert link.read_text(encoding="utf-8") == "through link"
+
+    @pytest.mark.asyncio
+    async def test_dangling_symlink_creates_the_target_file(self, tmp_path: Path):
+        """悬空链接：目标文件被建出来（就地写顺着链接创建），链接保留。"""
+        real = tmp_path / "missing.txt"
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+        assert not real.exists()
+
+        await write_file(str(link), "created via link", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        assert link.is_symlink()
+        assert real.read_text(encoding="utf-8") == "created via link"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name != "posix", reason="/dev/null is a POSIX device node")
+    async def test_special_file_written_in_place(self, tmp_path: Path):
+        """设备节点等非常规文件：就地写（rename 会把节点本身换掉）。"""
+        devnull = Path(os.devnull)
+        before = os.stat(devnull)
+
+        await write_file(str(devnull), "discarded", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        after = os.stat(devnull)
+        assert stat.S_ISCHR(after.st_mode)  # 仍是字符设备
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+class TestDiagnostics:
+    """错误串是模型的自纠输入：保留就地写时代的可读诊断。"""
+
+    @pytest.mark.asyncio
+    async def test_parent_is_a_file_reports_not_a_directory(self, tmp_path: Path):
+        """父路径组件是文件：报 "Not a directory"（不是 mkdir 的 "File exists"）。"""
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+
+        with pytest.raises(ToolError, match="Not a directory"):
+            await write_file(str(blocker / "child.txt"), "y", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        assert blocker.read_text(encoding="utf-8") == "x"
