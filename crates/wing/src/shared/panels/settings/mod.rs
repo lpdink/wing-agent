@@ -506,14 +506,20 @@ impl SettingsPanel {
         })
     }
 
-    /// 锚点表重算后把光标尽量留在同一组（按 id；找不到就钳制）。
-    fn restore_group(&mut self, previous: &str) {
+    /// 锚点表重算后把光标尽量留在同一组（按 id；找不到就钳制），
+    /// 并尽量把右栏光标锚回原来那一行（`R` 重载 / 注入 Interface 根之后不该被弹回首行）。
+    fn restore_group(&mut self, previous: &str, row_anchor: Option<(Root, String)>) {
         let index = self
             .anchors
             .iter()
             .position(|anchor| anchor.id == previous)
             .unwrap_or_else(|| self.group_cursor.min(self.anchors.len().saturating_sub(1)));
         self.enter_group(index);
+        if let Some((root, path)) = row_anchor
+            && let Some(found) = self.row_index(root, &path)
+        {
+            self.cursor = found;
+        }
     }
 
     /// 注入 / 刷新 Interface 根（10 重读 `~/.wing/tui/config.yaml` 后调用）。
@@ -529,7 +535,7 @@ impl SettingsPanel {
         self.prune_expanded();
         self.recompute_filter();
         match group_id {
-            Some(id) => self.restore_group(&id),
+            Some(id) => self.restore_group(&id, row_anchor),
             None => self.rebuild(row_anchor),
         }
     }
@@ -570,7 +576,7 @@ impl SettingsPanel {
         self.prune_expanded();
         self.recompute_filter();
         match group_id {
-            Some(id) => self.restore_group(&id),
+            Some(id) => self.restore_group(&id, row_anchor),
             None => self.rebuild(row_anchor),
         }
     }
@@ -748,6 +754,9 @@ impl SettingsPanel {
             );
         }
         if self.view == View::Problems {
+            if self.focus == Focus::Groups {
+                return "↑↓ 选分组 · Enter 进那一组 · Tab 切栏 · Esc 返回树".into();
+            }
             return if self.problems.is_empty() {
                 "暂无问题 · Esc 返回树".into()
             } else {

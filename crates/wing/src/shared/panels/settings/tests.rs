@@ -2984,3 +2984,13 @@ fn the_footer_hint_follows_the_focused_column() {
     assert!(hint.contains("Esc 回左栏"), "{hint}");
     assert!(!hint.contains("切根"), "v1 的切根键位已消失：{hint}");
 }
+
+#[test]
+fn a_reload_keeps_both_the_group_and_the_row_under_the_cursor() {
+    let mut panel = panel();
+    goto(&mut panel, "gateway.port");
+    assert_eq!(panel.group().unwrap().id, "net");
+    panel.apply_snapshot(&schema(), state());
+    assert_eq!(panel.group().unwrap().id, "net", "分组不动");
+    assert_eq!(cursor_path(&panel), "gateway.port", "右栏光标锚回原行");
+}

@@ -93,13 +93,15 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 
 ## 2. 门禁：不是纪律，是机制
 
-三处测试让「声明 / 目录 / 模板 / serde」不许漂移（改声明而不同步的代价是测试变红，不是"有人会记得改"）：
+五处测试让「声明 / 目录 / 分组 / 模板 / serde」不许漂移（改声明而不同步的代价是测试变红，不是"有人会记得改"）：
 
 | 门禁 | 位置 | 钉住 |
 |---|---|---|
-| 每个配置字段必须声明 | `libs/core/tests/test_config_spec.py` | 递归遍历 `Config` 及嵌套模型：字段缺声明 / `apply` 没显式写（AST 检查）/ 字段 docstring 残留 / `secret` 不是 `str` / `choices` 缺 `Literal` 的键 → 红 |
-| Interface 根双向对账 | `crates/wing/src/config/catalog.rs` 的单测 | **穷尽 struct 字面量**构造 `AppConfig` 全字段样本（加字段即编译失败）→ catalog 缺声明 / 声明了幻影键 → 红 |
-| 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 |
+| 每个配置字段必须声明 | `libs/core/tests/test_config_spec.py` | 递归遍历 `Config` 及嵌套模型：字段缺声明 / `apply` 没显式写（AST 检查）/ 字段 docstring 残留 / `secret` 不是 `str` / `choices` 缺 `Literal` 的键 → 红；**声明层不再携带分组**（AST 拒绝 `S(section=...)`） |
+| 分组是一张完整的划分 | `libs/core/tests/test_config_groups.py` | 顺序钉死、id / title 唯一、成员都是真实顶层字段、每个顶层字段**恰好**属于一个组；坏表（漏 / 重 / 幻影 / 空组）→ `validate_groups` 抛；目录投影（`section` = title、`section_doc` 只在首成员）+ wire 形状 |
+| 分组的 wire 形状 | probe `scenarios/test_settings_groups.py` | 真网关的 `groups[]`（顺序 / 成员 / 与节点 `section` 同源）+ 零迁移与保存回归（改跨旧分组的键、文件顶层键不变、分隔行跟着新分组） |
+| Interface 根双向对账 | `crates/wing/src/config/catalog.rs` 的单测 | **穷尽 struct 字面量**构造 `AppConfig` 全字段样本（加字段即编译失败）→ catalog 缺声明 / 声明了幻影键 → 红；`interface_groups()` 的成员 = catalog root 的子节点 |
+| 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 + **分隔行恰好是分组表的 title 序** |
 
 `config/catalog.rs` 是 Rust 侧的**声明表**（后端不知道 TUI 的类型），与后端 catalog **同构**：
 同一个 `SettingNode` 类型（来自 `wing-api-client`），所以树 widget 零分支。Interface 根 22 个叶子 =
