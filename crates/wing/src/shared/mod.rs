@@ -13,7 +13,11 @@
 //! * vocabulary — the shared magic strings ([`constants`]) and the tip pool
 //!   ([`tips`]), plus the pin convention ([`pinning`]: which tag means
 //!   "pinned" and how pinned sessions sort first — one implementation shared
-//!   by the session panel, the status bar and `wing ps`).
+//!   by the session panel, the status bar and `wing ps`), and the sparse
+//!   settings document primitives ([`doc_edit`]: canonical-path algebra, the
+//!   stub built from the catalog, list add/remove/move — one implementation
+//!   shared by the settings panel and `wing config`, with their two UX
+//!   policies spelled out per entry point).
 //!
 //! **Admission rule.** Only state or vocabulary that *both* sides need, that is
 //! free of I/O and that knows neither the App nor the UI may live here; anything
@@ -22,6 +26,7 @@
 //! `tests/layer_guard.rs`.
 
 pub mod constants;
+pub mod doc_edit;
 pub mod panels;
 pub mod pinning;
 pub mod tips;

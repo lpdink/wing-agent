@@ -32,13 +32,13 @@ use super::Problem;
 use super::SearchFilter;
 use super::doc::Root;
 use super::doc::SettingsDoc;
-use super::doc::index_path;
-use super::doc::join_path;
-use super::doc::path_is_within;
 use super::edit::ScalarKind;
 use super::edit::editor_kind;
 use super::edit::fmt_f64;
 use super::groups::member_nodes;
+use crate::shared::doc_edit::index_path;
+use crate::shared::doc_edit::join_path;
+use crate::shared::doc_edit::path_is_within;
 
 /// 一行可见的树节点（设计 §11.2）。
 #[derive(Debug, Clone, PartialEq)]

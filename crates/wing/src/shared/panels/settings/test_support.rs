@@ -18,7 +18,7 @@ use wing_api_client::models::SettingNode;
 use super::Problem;
 use super::doc::Root;
 use super::doc::SettingsDoc;
-use super::doc::join_path;
+use crate::shared::doc_edit::join_path;
 
 /// 目录节点的合理缺省：editable、hot、无约束。
 pub(crate) fn node(key: &str, kind: SettingKind) -> SettingNode {

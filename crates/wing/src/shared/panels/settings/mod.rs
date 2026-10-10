@@ -134,6 +134,8 @@ use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetResponse;
 
+use crate::shared::doc_edit;
+
 pub use doc::Root;
 pub use doc::SettingsDoc;
 pub use edit::Constraints;
@@ -977,14 +979,14 @@ impl SettingsPanel {
                 if *set_root != root {
                     return Some((*set_root, path.clone()));
                 }
-                doc::remap_index(path, list_path, map).map(|mapped| (*set_root, mapped))
+                doc_edit::remap_index(path, list_path, map).map(|mapped| (*set_root, mapped))
             })
             .collect();
         let mut close_choices = false;
         if let Some(choices) = self.choices.as_mut()
             && choices.root == root
         {
-            match doc::remap_index(&choices.path, list_path, map) {
+            match doc_edit::remap_index(&choices.path, list_path, map) {
                 Some(mapped) => choices.path = mapped,
                 None => close_choices = true,
             }
@@ -1022,7 +1024,7 @@ impl SettingsPanel {
                 // 「Enter 退出搜索并保持光标（祖先保持展开）」：把锚点的祖先固化进展开集。
                 let anchor = self.row_anchor();
                 if let Some((root, path)) = &anchor {
-                    for ancestor in doc::ancestors(path) {
+                    for ancestor in doc_edit::ancestors(path) {
                         self.expanded.insert((*root, ancestor));
                     }
                 }
@@ -1239,7 +1241,7 @@ impl SettingsPanel {
         }
         self.view = View::Tree;
         self.focus = Focus::Items;
-        for ancestor in doc::ancestors(&path) {
+        for ancestor in doc_edit::ancestors(&path) {
             self.expanded.insert((root, ancestor));
         }
         self.rebuild(Some((root, path.clone())));
@@ -1456,7 +1458,7 @@ impl SettingsPanel {
         while index > 0 {
             index -= 1;
             let candidate = &self.rows[index];
-            if candidate.depth < row.depth && doc::path_is_within(&candidate.path, &row.path) {
+            if candidate.depth < row.depth && doc_edit::path_is_within(&candidate.path, &row.path) {
                 self.cursor = index;
                 return;
             }
@@ -1813,9 +1815,9 @@ impl SettingsPanel {
             return SettingsAction::None;
         };
         self.doc.mark_dirty(row.root, &list_path);
-        let map = doc::swap_index_map(index, new_index);
+        let map = doc_edit::swap_index_map(index, new_index);
         self.remap_sets(row.root, &list_path, &map);
-        let new_path = doc::index_path(&list_path, new_index);
+        let new_path = doc_edit::index_path(&list_path, new_index);
         self.rebuild(Some((row.root, new_path)));
         self.preview_if_interface(row.root)
     }
@@ -1993,7 +1995,7 @@ impl SettingsPanel {
                     return SettingsAction::None;
                 }
                 self.doc.mark_dirty(root, &list_path);
-                let map = doc::remove_index_map(index);
+                let map = doc_edit::remove_index_map(index);
                 self.remap_sets(root, &list_path, &map);
                 let anchor = self.deletion_anchor(root, &list_path, index);
                 self.rebuild(Some(anchor));
@@ -2026,7 +2028,7 @@ impl SettingsPanel {
             _ => 0,
         };
         if index < count {
-            (root, doc::index_path(list_path, index))
+            (root, doc_edit::index_path(list_path, index))
         } else {
             (root, format!("{list_path}[]"))
         }
@@ -2126,7 +2128,7 @@ impl SettingsPanel {
 ///
 /// 分组成员是按顶层键声明的，所以「这条路径 / 这个问题 / 这次命中属于哪一组」只看首段。
 /// 切分点是 `.` 或 `[`（`providers[0].api_key` → `providers`）：配置键都是标识符，
-/// 这一刀与 [`doc::format_path`] 的完整解析在合法路径上等价；切不出分隔符就整串当首段，
+/// 这一刀与 [`doc_edit::format_path`] 的完整解析在合法路径上等价；切不出分隔符就整串当首段，
 /// 于是不匹配任何成员——行为等价于"不属于任何组"，不会 panic 也不会误归。
 fn path_head(path: &str) -> &str {
     match path.split_once(['.', '[']) {

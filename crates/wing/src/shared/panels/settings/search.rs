@@ -14,8 +14,8 @@ use std::ops::Range;
 use wing_api_client::models::SettingNode;
 
 use super::doc::Root;
-use super::doc::ancestors;
-use super::doc::path_is_within;
+use crate::shared::doc_edit::ancestors;
+use crate::shared::doc_edit::path_is_within;
 
 /// 一次搜索的匹配结果（跨根）。
 #[derive(Debug, Clone)]

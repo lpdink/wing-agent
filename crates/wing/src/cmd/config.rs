@@ -60,6 +60,8 @@ use wing_api_client::models::{
 use wing_api_client::{ApiClientError, GatewayClient as GatewayApiClient};
 
 use super::{backend_config, common};
+use crate::shared::doc_edit;
+use crate::shared::doc_edit::Policy;
 
 // ============================================================
 // 子命令
@@ -631,14 +633,14 @@ async fn execute_get<B: SettingsBackend>(
         Ok(steps) => steps,
         Err(message) => return Outcome::usage(&message),
     };
-    let canonical = format_path(&steps);
+    let canonical = doc_edit::format_path(&steps);
     let Some(node) = resolve_node(&schema.root, &current.values, &steps) else {
         return Outcome::usage(&format!(
             "路径不在设置目录中：`{canonical}`（用 `wing config list` 查看全部路径）"
         ));
     };
 
-    let value = get_path(&current.values, &steps).cloned();
+    let value = doc_edit::get_path(&current.values, &steps).cloned();
     let secret = current.secrets.get(&canonical).cloned();
     let problem = sorted_problems(&current.problems)
         .into_iter()
@@ -820,7 +822,7 @@ fn build_rows(
                 continue;
             }
         }
-        let value = parse_path(&child.path).and_then(|steps| get_path(values, &steps));
+        let value = parse_path(&child.path).and_then(|steps| doc_edit::get_path(values, &steps));
         let last = index + 1 == root.children.len();
         walk_node(
             child,
@@ -1384,7 +1386,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                 None => require_node(root, &document, &steps)?,
             };
             let coerced = incoming_json(node, incoming)?;
-            apply_set(&mut document, &steps, coerced)?;
+            doc_edit::set_path(&mut document, &steps, coerced, Policy::Strict)?;
             Ok(Plan::Save {
                 document,
                 note: None,
@@ -1393,7 +1395,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
         WriteOp::Unset { path } => {
             let steps = plan_steps(root, path)?;
             require_node(root, &document, &steps)?;
-            if apply_unset(&mut document, &steps)? {
+            if doc_edit::unset_path(&mut document, &steps, Policy::Strict)? {
                 Ok(Plan::Save {
                     document,
                     note: None,
@@ -1401,7 +1403,10 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             } else {
                 Ok(Plan::Noop {
                     reason: "already_default",
-                    message: format!("`{}` 本就不在文档里（已在默认值上）", format_path(&steps)),
+                    message: format!(
+                        "`{}` 本就不在文档里（已在默认值上）",
+                        doc_edit::format_path(&steps)
+                    ),
                 })
             }
         }
@@ -1412,7 +1417,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             variant,
         } => {
             let steps = plan_steps(root, path)?;
-            let canonical = format_path(&steps);
+            let canonical = doc_edit::format_path(&steps);
             let list = require_node(root, &document, &steps)?;
             if list.kind != SettingKind::List {
                 return Err(format!(
@@ -1428,7 +1433,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                 }
                 (None, Some(raw)) => parse_json(raw)?,
                 (Some(raw), None) => coerce_value(element, raw)?,
-                (None, None) => match stub_value(element) {
+                (None, None) => match doc_edit::empty_value(element, Policy::Strict) {
                     Some(stub) => stub,
                     None => {
                         return Err(format!(
@@ -1438,7 +1443,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                     }
                 },
             };
-            let index = apply_add(&mut document, &steps, list, item)?;
+            let index = doc_edit::append_item(&mut document, &steps, list, item, Policy::Strict)?;
             Ok(Plan::Save {
                 document,
                 note: Some(format!("新增项：{canonical}[{index}]")),
@@ -1449,7 +1454,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
             require_node(root, &document, &steps)?;
             // 摘要前先拿到元素节点：脱敏要按目录走（密文叶在输出里一律 null）。
             let element = removal_element(root, &document, &steps);
-            let removed = apply_remove(&mut document, &steps)?;
+            let removed = doc_edit::remove_indexed(&mut document, &steps)?;
             let summary = match element {
                 Some(element) => redact_secrets(element, &removed),
                 None => removed,
@@ -1458,7 +1463,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                 document,
                 note: Some(format!(
                     "已移除：{} = {}",
-                    format_path(&steps),
+                    doc_edit::format_path(&steps),
                     render_json_value(&summary)
                 )),
             })
@@ -1466,7 +1471,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
         WriteOp::Move { path, delta } => {
             let steps = plan_steps(root, path)?;
             require_node(root, &document, &steps)?;
-            let outcome = apply_move(&mut document, &steps, *delta)?;
+            let outcome = doc_edit::move_indexed(&mut document, &steps, *delta, Policy::Strict)?;
             if !outcome.moved {
                 let reason = if *delta == 0 {
                     "delta_zero"
@@ -1475,7 +1480,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                 };
                 let message = format!(
                     "`{}` 已在边界（第 {} / {} 项），未移动",
-                    format_path(&steps),
+                    doc_edit::format_path(&steps),
                     outcome.from + 1,
                     outcome.length
                 );
@@ -1485,7 +1490,7 @@ fn plan_write(op: &WriteOp, root: &SettingNode, values: &Value) -> Result<Plan, 
                 document,
                 note: Some(format!(
                     "已移动：{} → [{}]",
-                    format_path(&steps),
+                    doc_edit::format_path(&steps),
                     outcome.to
                 )),
             })
@@ -1608,7 +1613,7 @@ fn require_node<'a>(
     resolve_node(root, document, steps).ok_or_else(|| {
         format!(
             "路径不在设置目录中：`{}`（用 `wing config list` 查看全部路径）",
-            format_path(steps)
+            doc_edit::format_path(steps)
         )
     })
 }
@@ -1652,7 +1657,7 @@ fn removal_element<'a>(
         return None;
     };
     let list = resolve_node(root, document, parents)?;
-    element_target(list, get_path(document, steps))
+    element_target(list, doc_edit::get_path(document, steps))
 }
 
 /// 位置参数与 `--json-value` 二选一的结论。
@@ -1689,37 +1694,6 @@ fn incoming_json(node: &SettingNode, incoming: Incoming<'_>) -> Result<Value, St
 // ============================================================
 // 路径与目录
 // ============================================================
-
-/// 规范路径 → 文本（`Key` 用 `.` 连接，`Index` / `Element` 用方括号）。
-fn format_path(steps: &[PathStep]) -> String {
-    let mut out = String::new();
-    for step in steps {
-        match step {
-            PathStep::Key(name) => {
-                if !out.is_empty() {
-                    out.push('.');
-                }
-                out.push_str(name);
-            }
-            PathStep::Index(index) => out.push_str(&format!("[{index}]")),
-            PathStep::Element => out.push_str("[]"),
-        }
-    }
-    out
-}
-
-/// 按路径取文档里的值（`None` = 路径缺席或含模板步）。
-fn get_path<'a>(document: &'a Value, steps: &[PathStep]) -> Option<&'a Value> {
-    let mut current = document;
-    for step in steps {
-        current = match step {
-            PathStep::Key(name) => current.get(name)?,
-            PathStep::Index(index) => current.get(*index)?,
-            PathStep::Element => return None,
-        };
-    }
-    Some(current)
-}
 
 /// 目录寻址：`Key` 走 `children`；`Index`/`Element` 走 `element`，
 /// union 元素（`variants`）用**文档实际值** + [`SettingNode::select_variant`] 选形态。
@@ -1829,246 +1803,6 @@ fn render_choices(node: &SettingNode) -> String {
 /// `--json-value`：原始 JSON，不做任何 kind 检查（调用方负责形状；不符由后端 problem 报告）。
 fn parse_json(raw: &str) -> Result<Value, String> {
     serde_json::from_str(raw).map_err(|e| format!("不是合法 JSON：{e}"))
-}
-
-/// 容器元素的骨架：object / map → `{}`；list → `[]`；标量 → `None`（必须给值）。
-///
-/// 骨架**不发明假值**（不填 name / base_url 之类）：插进去的 problems 由后端如实报告，
-/// 用户按提示用 `wing config set` 补齐，或者直接 `add <path> '{"name":…}'` 一次给全。
-fn stub_value(node: &SettingNode) -> Option<Value> {
-    match node.kind {
-        SettingKind::Object | SettingKind::Map => Some(json!({})),
-        SettingKind::List => Some(json!([])),
-        _ => None,
-    }
-}
-
-// ============================================================
-// 文档编辑（纯函数）
-// ============================================================
-
-/// `set`：沿路径写值；中间缺失 / 为 `null` 的 object 自动创建。
-///
-/// 中间层是标量、或列表下标越界 → 用法错误（不猜、不扩张列表——扩张用 `add`）。
-fn apply_set(document: &mut Value, steps: &[PathStep], value: Value) -> Result<(), String> {
-    apply_set_at(document, steps, 0, value)
-}
-
-fn apply_set_at(
-    current: &mut Value,
-    steps: &[PathStep],
-    at: usize,
-    value: Value,
-) -> Result<(), String> {
-    if at == steps.len() {
-        *current = value;
-        return Ok(());
-    }
-    match &steps[at] {
-        PathStep::Key(name) => {
-            let map = current.as_object_mut().ok_or_else(|| {
-                format!(
-                    "路径 {} 的中间层 {} 不是对象",
-                    format_path(steps),
-                    format_path(&steps[..at])
-                )
-            })?;
-            let next = map.entry(name.clone()).or_insert(Value::Null);
-            if at + 1 == steps.len() {
-                *next = value;
-                return Ok(());
-            }
-            if next.is_null() {
-                *next = json!({});
-            }
-            apply_set_at(next, steps, at + 1, value)
-        }
-        PathStep::Index(index) => {
-            let array = current.as_array_mut().ok_or_else(|| {
-                format!(
-                    "路径 {} 的中间层 {} 不是列表",
-                    format_path(steps),
-                    format_path(&steps[..at])
-                )
-            })?;
-            let length = array.len();
-            let item = array.get_mut(*index).ok_or_else(|| {
-                format!(
-                    "列表下标越界：{} 只有 {} 项（下标 {}）",
-                    format_path(&steps[..at]),
-                    length,
-                    index
-                )
-            })?;
-            apply_set_at(item, steps, at + 1, value)
-        }
-        PathStep::Element => Err("模板路径（[]）不能用于写操作".to_string()),
-    }
-}
-
-/// `unset`：从稀疏文档移除该路径；`Ok(false)` = 本就不存在（幂等无操作）。
-///
-/// 中间层类型不符同样视作"缺席"：unset 的语义是"确保它不在"，不是类型检查。
-fn apply_unset(document: &mut Value, steps: &[PathStep]) -> Result<bool, String> {
-    let Some((last, parents)) = steps.split_last() else {
-        return Err("路径不能为空".to_string());
-    };
-    let mut current = document;
-    for step in parents {
-        current = match step {
-            PathStep::Key(name) => match current.get_mut(name) {
-                Some(next) => next,
-                None => return Ok(false),
-            },
-            PathStep::Index(index) => match current.get_mut(*index) {
-                Some(next) => next,
-                None => return Ok(false),
-            },
-            PathStep::Element => return Err("模板路径（[]）不能用于写操作".to_string()),
-        };
-    }
-    match last {
-        PathStep::Key(name) => Ok(current
-            .as_object_mut()
-            .map(|map| map.remove(name).is_some())
-            .unwrap_or(false)),
-        PathStep::Index(index) => {
-            let Some(array) = current.as_array_mut() else {
-                return Ok(false);
-            };
-            if *index < array.len() {
-                array.remove(*index);
-                return Ok(true);
-            }
-            Ok(false)
-        }
-        PathStep::Element => Err("模板路径（[]）不能用于写操作".to_string()),
-    }
-}
-
-/// `remove`：删除列表里的具体下标；数组缺席 / 下标越界 → 用法错误（带当前长度）。
-fn apply_remove(document: &mut Value, steps: &[PathStep]) -> Result<Value, String> {
-    let (array, index) = list_slot(document, steps)?;
-    let length = array.len();
-    if index >= length {
-        return Err(format!(
-            "列表下标越界：{} 只有 {} 项（下标 {}）",
-            format_path(&steps[..steps.len() - 1]),
-            length,
-            index
-        ));
-    }
-    Ok(array.remove(index))
-}
-
-/// `move` 的结论。
-#[derive(Debug, PartialEq, Eq)]
-struct MoveOutcome {
-    moved: bool,
-    from: usize,
-    to: usize,
-    length: usize,
-}
-
-/// `move`：把元素挪到 `i + delta`，**越界钳制**（`clamp(i + delta, 0, len-1)`），
-/// 位移为 0（含 `delta == 0`）时 `moved = false`（调用方短路，不写盘）。
-fn apply_move(document: &mut Value, steps: &[PathStep], delta: i64) -> Result<MoveOutcome, String> {
-    let (array, index) = list_slot(document, steps)?;
-    let length = array.len();
-    if index >= length {
-        return Err(format!(
-            "列表下标越界：{} 只有 {} 项（下标 {}）",
-            format_path(&steps[..steps.len() - 1]),
-            length,
-            index
-        ));
-    }
-    // i128：`delta` 取 i64 极值时 `index + delta` 也不能溢出。
-    let target = (index as i128 + delta as i128).clamp(0, length as i128 - 1) as usize;
-    if target == index {
-        return Ok(MoveOutcome {
-            moved: false,
-            from: index,
-            to: index,
-            length,
-        });
-    }
-    let item = array.remove(index);
-    array.insert(target, item);
-    Ok(MoveOutcome {
-        moved: true,
-        from: index,
-        to: target,
-        length,
-    })
-}
-
-/// `add`：在列表末尾追加一项，返回新下标。
-///
-/// 列表在稀疏文档里缺席时，用 catalog 的**声明默认值**物化（没有默认则空列表）——
-/// 否则 `add tools bash` 会在"没显式写过 tools"时无处可落。
-fn apply_add(
-    document: &mut Value,
-    steps: &[PathStep],
-    list: &SettingNode,
-    item: Value,
-) -> Result<usize, String> {
-    let existing = get_path(document, steps);
-    let mut array = match existing {
-        Some(Value::Array(array)) => array.clone(),
-        Some(Value::Null) | None => match list.default.clone() {
-            Some(Value::Array(default)) if list.has_default => default,
-            _ => Vec::new(),
-        },
-        Some(_) => {
-            return Err(format!(
-                "{} 不是列表（文档里的值不是 JSON 数组）",
-                format_path(steps)
-            ));
-        }
-    };
-    array.push(item);
-    let index = array.len() - 1;
-    apply_set(document, steps, Value::Array(array))?;
-    Ok(index)
-}
-
-/// 定位"列表 + 具体下标"：路径必须以 `Index` 结尾、父层必须存在且是数组。
-fn list_slot<'a>(
-    document: &'a mut Value,
-    steps: &[PathStep],
-) -> Result<(&'a mut Vec<Value>, usize), String> {
-    let Some((PathStep::Index(index), parents)) = steps.split_last() else {
-        return Err(format!(
-            "{} 必须以具体下标结尾（如 providers[1]）",
-            format_path(steps)
-        ));
-    };
-    let mut current = document;
-    for step in parents {
-        current = match step {
-            PathStep::Key(name) => current.get_mut(name).ok_or_else(|| {
-                format!(
-                    "路径不在当前文档中：{}（先 set / add 建出来）",
-                    format_path(parents)
-                )
-            })?,
-            PathStep::Index(inner) => current.get_mut(*inner).ok_or_else(|| {
-                format!(
-                    "路径不在当前文档中：{}（先 set / add 建出来）",
-                    format_path(parents)
-                )
-            })?,
-            PathStep::Element => return Err("模板路径（[]）不能用于写操作".to_string()),
-        };
-    }
-    let Some(array) = current.as_array_mut() else {
-        return Err(format!(
-            "{} 不是列表（文档里的值不是 JSON 数组）",
-            format_path(parents)
-        ));
-    };
-    Ok((array, *index))
 }
 
 // ============================================================
@@ -2696,11 +2430,11 @@ mod tests {
     #[test]
     fn format_path_renders_canonical_paths() {
         assert_eq!(
-            format_path(&steps("providers[0].models[2].id")),
+            doc_edit::format_path(&steps("providers[0].models[2].id")),
             "providers[0].models[2].id"
         );
-        assert_eq!(format_path(&steps("providers[]")), "providers[]");
-        assert_eq!(format_path(&[]), "");
+        assert_eq!(doc_edit::format_path(&steps("providers[]")), "providers[]");
+        assert_eq!(doc_edit::format_path(&[]), "");
     }
 
     #[test]
@@ -2738,8 +2472,8 @@ mod tests {
         // 入口规范化：带/不带前缀 → 同一条规范路径。
         let plain = normalize_steps(&root, steps("gateway.port")).expect("plain");
         let prefixed = normalize_steps(&root, steps("config.gateway.port")).expect("prefixed");
-        assert_eq!(format_path(&plain), "gateway.port");
-        assert_eq!(format_path(&prefixed), "gateway.port");
+        assert_eq!(doc_edit::format_path(&plain), "gateway.port");
+        assert_eq!(doc_edit::format_path(&prefixed), "gateway.port");
 
         // 只敲根名 → 用法错误 + 顶层节名。
         let message = normalize_steps(&root, steps("config")).unwrap_err();
@@ -2750,7 +2484,7 @@ mod tests {
         let mut other = catalog();
         other.key = "settings".to_string();
         let kept = normalize_steps(&other, steps("config.gateway.port")).expect("kept");
-        assert_eq!(format_path(&kept), "config.gateway.port");
+        assert_eq!(doc_edit::format_path(&kept), "config.gateway.port");
 
         // resolve_node 只接受已规范化的 steps（容忍只在入口做一次，避免"两处各判一半"）。
         let doc = document();
@@ -2760,30 +2494,60 @@ mod tests {
     }
 
     // ------------------------------------------------------------
-    // 文档编辑
+    // 文档编辑（实现已下沉到 `shared::doc_edit`；这里钉 CLI 的用法错误文案）
     // ------------------------------------------------------------
 
     #[test]
-    fn apply_set_creates_missing_intermediate_objects() {
+    fn set_path_creates_missing_intermediate_objects() {
         let mut doc = json!({});
-        apply_set(&mut doc, &steps("gateway.auth.enabled"), json!(true)).unwrap();
+        doc_edit::set_path(
+            &mut doc,
+            &steps("gateway.auth.enabled"),
+            json!(true),
+            Policy::Strict,
+        )
+        .unwrap();
         assert_eq!(doc, json!({"gateway": {"auth": {"enabled": true}}}));
         // null 中间层同样被物化成对象（nullable object 字段）。
         let mut doc = json!({"gateway": {"auth": null}});
-        apply_set(&mut doc, &steps("gateway.auth.enabled"), json!(true)).unwrap();
+        doc_edit::set_path(
+            &mut doc,
+            &steps("gateway.auth.enabled"),
+            json!(true),
+            Policy::Strict,
+        )
+        .unwrap();
         assert_eq!(doc, json!({"gateway": {"auth": {"enabled": true}}}));
     }
 
     #[test]
-    fn apply_set_rejects_scalar_intermediate_and_out_of_range_index() {
+    fn set_path_rejects_scalar_intermediate_and_out_of_range_index() {
         let mut doc = json!({"gateway": {"port": 8080}});
-        let message = apply_set(&mut doc, &steps("gateway.port.sub"), json!(1)).unwrap_err();
+        let message = doc_edit::set_path(
+            &mut doc,
+            &steps("gateway.port.sub"),
+            json!(1),
+            Policy::Strict,
+        )
+        .unwrap_err();
         assert!(message.contains("不是对象"), "{message}");
-        let message = apply_set(&mut doc, &steps("gateway.port[0]"), json!(1)).unwrap_err();
+        let message = doc_edit::set_path(
+            &mut doc,
+            &steps("gateway.port[0]"),
+            json!(1),
+            Policy::Strict,
+        )
+        .unwrap_err();
         assert!(message.contains("不是列表"), "{message}");
 
         let mut doc = document();
-        let message = apply_set(&mut doc, &steps("providers[9].name"), json!("x")).unwrap_err();
+        let message = doc_edit::set_path(
+            &mut doc,
+            &steps("providers[9].name"),
+            json!("x"),
+            Policy::Strict,
+        )
+        .unwrap_err();
         assert!(message.contains("列表下标越界"), "{message}");
         assert!(
             message.contains("列表下标越界：providers 只有 1 项"),
@@ -2792,36 +2556,37 @@ mod tests {
     }
 
     #[test]
-    fn apply_unset_removes_and_reports_absent() {
+    fn unset_path_removes_and_reports_absent() {
         let mut doc = document();
-        assert!(apply_unset(&mut doc, &steps("gateway.port")).unwrap());
+        assert!(doc_edit::unset_path(&mut doc, &steps("gateway.port"), Policy::Strict).unwrap());
         assert!(doc["gateway"].get("port").is_none());
         // 幂等：第二次就是"缺席"。
-        assert!(!apply_unset(&mut doc, &steps("gateway.port")).unwrap());
-        assert!(!apply_unset(&mut doc, &steps("nothing.here")).unwrap());
+        assert!(!doc_edit::unset_path(&mut doc, &steps("gateway.port"), Policy::Strict).unwrap());
+        assert!(!doc_edit::unset_path(&mut doc, &steps("nothing.here"), Policy::Strict).unwrap());
         // 整个列表元素也可移除。
-        assert!(apply_unset(&mut doc, &steps("providers[0]")).unwrap());
+        assert!(doc_edit::unset_path(&mut doc, &steps("providers[0]"), Policy::Strict).unwrap());
         assert_eq!(doc["providers"], json!([]));
     }
 
     #[test]
-    fn apply_remove_reports_bounds_with_length() {
+    fn remove_indexed_reports_bounds_with_length() {
         let mut doc = document();
-        let removed = apply_remove(&mut doc, &steps("tools[0]")).unwrap();
+        let removed = doc_edit::remove_indexed(&mut doc, &steps("tools[0]")).unwrap();
         assert_eq!(removed, json!("bash"));
         assert_eq!(doc["tools"], json!([]));
-        let message = apply_remove(&mut doc, &steps("tools[5]")).unwrap_err();
+        let message = doc_edit::remove_indexed(&mut doc, &steps("tools[5]")).unwrap_err();
         assert!(message.contains("列表下标越界"), "{message}");
         assert!(message.contains("tools 只有 0 项"), "{message}");
     }
 
     #[test]
-    fn apply_move_swaps_in_both_directions() {
+    fn move_indexed_moves_in_both_directions() {
         let mut doc = json!({"tools": ["a", "b", "c"]});
-        let outcome = apply_move(&mut doc, &steps("tools[2]"), -1).unwrap();
+        let outcome =
+            doc_edit::move_indexed(&mut doc, &steps("tools[2]"), -1, Policy::Strict).unwrap();
         assert_eq!(
             outcome,
-            MoveOutcome {
+            doc_edit::MoveOutcome {
                 moved: true,
                 from: 2,
                 to: 1,
@@ -2829,56 +2594,76 @@ mod tests {
             }
         );
         assert_eq!(doc["tools"], json!(["a", "c", "b"]));
-        let outcome = apply_move(&mut doc, &steps("tools[0]"), 2).unwrap();
+        let outcome =
+            doc_edit::move_indexed(&mut doc, &steps("tools[0]"), 2, Policy::Strict).unwrap();
         assert_eq!(outcome.to, 2);
         assert_eq!(doc["tools"], json!(["c", "b", "a"]));
     }
 
     #[test]
-    fn apply_move_clamps_at_edges_and_tolerates_i64_extremes() {
+    fn move_indexed_clamps_at_edges_and_tolerates_i64_extremes() {
         let mut doc = json!({"tools": ["a", "b"]});
         // 边界钳制：向上越界 = 原地不动（moved=false 由调用方短路）。
-        let outcome = apply_move(&mut doc, &steps("tools[0]"), -5).unwrap();
+        let outcome =
+            doc_edit::move_indexed(&mut doc, &steps("tools[0]"), -5, Policy::Strict).unwrap();
         assert!(!outcome.moved);
         assert_eq!(doc["tools"], json!(["a", "b"]));
         // 向下越界钳到末位。
-        let outcome = apply_move(&mut doc, &steps("tools[0]"), i64::MAX).unwrap();
+        let outcome =
+            doc_edit::move_indexed(&mut doc, &steps("tools[0]"), i64::MAX, Policy::Strict).unwrap();
         assert_eq!(outcome.to, 1);
         assert_eq!(doc["tools"], json!(["b", "a"]));
         // 负向极值也不能溢出。
-        let outcome = apply_move(&mut doc, &steps("tools[1]"), i64::MIN).unwrap();
+        let outcome =
+            doc_edit::move_indexed(&mut doc, &steps("tools[1]"), i64::MIN, Policy::Strict).unwrap();
         assert_eq!(outcome.to, 0);
         // delta = 0 → 无位移。
-        let outcome = apply_move(&mut doc, &steps("tools[1]"), 0).unwrap();
+        let outcome =
+            doc_edit::move_indexed(&mut doc, &steps("tools[1]"), 0, Policy::Strict).unwrap();
         assert!(!outcome.moved);
     }
 
     #[test]
-    fn apply_add_appends_and_materializes_declared_defaults() {
+    fn append_item_appends_and_materializes_declared_defaults() {
         let root = catalog();
         let providers = resolve_node(&root, &document(), &steps("providers")).unwrap();
 
         // 标量列表：文档里有 → 直接追加。
         let mut doc = document();
-        let index = apply_add(&mut doc, &steps("tools"), providers, json!("read")).unwrap();
+        let index = doc_edit::append_item(
+            &mut doc,
+            &steps("tools"),
+            providers,
+            json!("read"),
+            Policy::Strict,
+        )
+        .unwrap();
         assert_eq!(index, 1);
         assert_eq!(doc["tools"], json!(["bash", "read"]));
 
         // 列表缺席 → 用声明默认值物化后追加（否则 "add 到默认值" 无处可落）。
         let mut doc = json!({});
         let tools_node = resolve_node(&root, &doc, &steps("tools")).unwrap();
-        let index = apply_add(&mut doc, &steps("tools"), tools_node, json!("read")).unwrap();
+        let index = doc_edit::append_item(
+            &mut doc,
+            &steps("tools"),
+            tools_node,
+            json!("read"),
+            Policy::Strict,
+        )
+        .unwrap();
         assert_eq!(index, 1);
         assert_eq!(doc["tools"], json!(["bash", "read"]));
 
         // 没有默认值且缺席 → 从空列表开始。
         let mut doc = json!({});
         let agents_node = resolve_node(&root, &doc, &steps("agents")).unwrap();
-        let index = apply_add(
+        let index = doc_edit::append_item(
             &mut doc,
             &steps("agents"),
             agents_node,
             json!({"name": "a"}),
+            Policy::Strict,
         )
         .unwrap();
         assert_eq!(index, 0);
@@ -2886,7 +2671,14 @@ mod tests {
 
         // 文档里的值不是数组 → 用法错误。
         let mut doc = json!({"tools": "oops"});
-        let message = apply_add(&mut doc, &steps("tools"), tools_node, json!("x")).unwrap_err();
+        let message = doc_edit::append_item(
+            &mut doc,
+            &steps("tools"),
+            tools_node,
+            json!("x"),
+            Policy::Strict,
+        )
+        .unwrap_err();
         assert!(message.contains("不是列表"), "{message}");
     }
 
