@@ -7,6 +7,7 @@
         Session, serialize_message, tool_refs,
         SessionManager, SessionReaper,
         AgentTemplate, AgentTemplateManager,
+        ModelBinding,
         AgentOverride,
     )
 
@@ -19,6 +20,7 @@
 """
 
 from .manager import SessionManager
+from .model_binding import ModelBinding
 from .override import AgentOverride
 from .reaper import SessionReaper
 from .session import Session, serialize_message, tool_refs
@@ -29,6 +31,7 @@ __all__ = [
     "AgentOverride",
     "AgentTemplate",
     "AgentTemplateManager",
+    "ModelBinding",
     "Session",
     "SessionManager",
     "SessionReaper",

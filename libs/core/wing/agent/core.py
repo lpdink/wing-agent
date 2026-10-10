@@ -258,9 +258,13 @@ class WingAgent:
         model + provider 为准；前端只在展示层消费（缺省回落 self.model）。
 
         provider 不可解析（配置里已删、池里也没有旧实例）不是本属性的失败面：
-        展示名是**可选素材**，缺它只意味着"没有展示名"（回落调用名）——返回
-        None，而不是让整个投影（会话列表 / `/api/session/info` 的 agent 快照）
-        因为一个会话的配置问题整体倒掉。
+        展示名是**可选素材**，缺它只意味着"没有展示名"（回落调用名）。因此依赖
+        它的**投影**在本场景下仍然可用——会话列表的四件套、`to_agent_info`
+        （`session/get` 与 sync 重放的 agent 快照）。
+
+        注意保护范围仅限这些投影：`get_status`（`/api/session/info` 的素材）还要
+        读 thinking / reasoning_effort / api_url，它们同为 provider 派生且进请求
+        体，见该方法的说明。
         """
         try:
             provider_cfg = self.model_provider.config
@@ -657,7 +661,14 @@ class WingAgent:
             )
 
     def get_status(self) -> dict:
-        """返回当前状态快照（网关的 session info 投影素材）。"""
+        """返回当前状态快照（网关的 session info 投影素材）。
+
+        本快照要经 provider 解析才能答的字段不止一个（``thinking`` /
+        ``reasoning_effort`` 是"显式覆盖优先、否则 provider 配置默认"，``api_url``
+        取 provider 实例）——provider 已从配置删除、池里也没有旧实例时它们一起
+        失败。它们同时是**请求路径**的值（thinking / effort 进请求体），所以这里
+        不做部分降级：报一个编造的默认值比大声失败更糟。
+        """
         count, tokens = self.context_manager.get_context_stats()
         ctx_window = 0
         if self.context_manager.compactor:

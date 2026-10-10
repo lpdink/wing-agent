@@ -93,6 +93,20 @@ def _write_session(
     (session_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
 
+def _fork_record(root: Path, session_id: str) -> None:
+    """把盘上记录的模型改成与 live agent 不同的一个（制造可观测分叉）。
+
+    显式动作落盘是同步的，所以"列表听了 live 还是听了记录"在两者相等时不可
+    分辨；这个 helper 手工拉开差距（等价于 best-effort 落盘失败 / 事后手改）。
+    """
+    path = root / session_id / "metadata.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record.update(
+        {"model_id": "other-id", "model_name": "other-upstream", "provider_name": "p"}
+    )
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
 def _entry(sm: SessionManager, session_id: str) -> SessionInfo:
     entries = {s.id: s for s in sm.list_sessions()}
     assert session_id in entries, list(entries)
@@ -327,12 +341,23 @@ class TestTemplateDefaultFallback:
 
 
 class TestActiveProjection:
-    """已加载（active）会话：四件套取自 live agent，不走盘上记录。"""
+    """已加载（active）会话：四件套取自 live agent，不走盘上记录。
+
+    「live 优先」只有在两者**不一致**时才可观测——显式动作（`update_state`）会
+    同步落盘，所以用例需要自己制造分叉（`_fork_record`）。
+    """
 
     @pytest.mark.asyncio
     async def test_live_agent_wins_over_the_disk_record(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """盘上记录与 live agent **不一致**时，列表必须听 live 的。
+
+        显式动作（`update_state`）会同步落盘，所以"刚切完"的记录与内存态天然相等
+        ——那样的断言证明不了任何事。这里先把盘上记录改写成另一个模型（模拟
+        best-effort 落盘失败 / 事后手改 / 记录停在旧值），再断言四件套仍来自
+        live agent。
+        """
         _use_config(
             monkeypatch,
             models=[FLASH, ModelSpec(id="other-id", name="other-upstream")],
@@ -341,11 +366,12 @@ class TestActiveProjection:
         root = tmp_path / "sessions"
         sm = SessionManager({"file": FileSessionStore(root)})
         session = sm.create_session()
-        # 盘上记录指向模板默认模型；live agent 切到另一个模型 → 列表必须听 live 的。
-        assert session.model_id == "other-id"
         await session.update_state(model_id="ds-flash")
         # 列表的候选判据是"有 history 或有标"——给一条消息让它在列表里成立。
         session.context_manager.add_message(Message(role="user", content="hello"))
+
+        # 盘上记录驶向另一个模型（id 命中、调用名与展示名都与 live 不同）。
+        _fork_record(root, session.session_id)
 
         entry = _entry(sm, session.session_id)
         binding = session.model_binding()
@@ -357,6 +383,7 @@ class TestActiveProjection:
             "p",
             "DeepSeek Flash",
         )
+        assert _model_quartet(entry) != ("other-id", "other-upstream", "p", None)
         # 与 live 会话自己的投影同源（同一份事实，两个出口）。
         assert _model_quartet(entry) == (
             binding.model_id,
@@ -406,6 +433,15 @@ class TestListSurvivesBrokenConfig:
         assert entry.model_name == "deepseek-flash-2026"
         assert entry.provider_name == "vanishing-provider"
         assert entry.model_display_name is None
+
+        # 同一场景下别的投影也不许倒：`session/get` 与 sync 重放的 agent 快照。
+        # （`/api/session/info` 不在此列：它的素材 `get_status` 还要读 thinking /
+        # reasoning_effort / api_url——那三个同为 provider 派生**且进请求体**，
+        # 不做部分降级是刻意的取舍，见 `WingAgent.get_status`。）
+        agent_info = session.to_agent_info()
+        assert agent_info.model_id == "ds-flash"
+        assert agent_info.model_name == "deepseek-flash-2026"
+        assert agent_info.model_display_name is None
 
 
 class TestListMatchesResume:

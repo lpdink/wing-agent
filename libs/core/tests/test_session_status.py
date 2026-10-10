@@ -156,7 +156,7 @@ def _mark_active(sm, session_id: str, status: str = "idle") -> None:
     """
     from unittest.mock import MagicMock
 
-    from wing.session.model_binding import ModelBinding
+    from wing.session import ModelBinding
 
     live = MagicMock()
     live.status = status
