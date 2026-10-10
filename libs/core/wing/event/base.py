@@ -67,6 +67,14 @@ class SessionInfo(BaseModel):
     tag_meta：每个标签的记录（``metadata.tag_meta`` 的投影；键集 ⊆ ``tags``，
     无记录为空字典）——当前只有 ``added_at`` 打标时间（本地 naive ISO），
     前端据此做「后 pin 的排在更前面」这类**前端语义**的排序。
+
+    model_id / model_name / provider_name / model_display_name：会话的生效模型
+    四件套（口径与 ``/api/session/info`` / :class:`AgentInfo` 一致）。列表带上它
+    是「跨会话选一个接着干」这类能力的素材——用户先看列表就知道每个会话在跑
+    什么模型，不必逐会话拉 info（N+1）。未加载的会话按 resume 链解析盘上记录
+    （见 ``wing.session.model_binding``）：解析不到的降级路径下各字段为 None /
+    缺省，展示层自行回落（展示名 → 调用名 → 引用词）。身份仍是 ``model_id``，
+    展示名只是素材。
     """
 
     id: str
@@ -78,6 +86,10 @@ class SessionInfo(BaseModel):
     status: SessionStatus = "inactive"
     tags: list[str] = Field(default_factory=list)
     tag_meta: dict[str, TagMeta] = Field(default_factory=dict)
+    model_id: str | None = None
+    model_name: str | None = None
+    provider_name: str | None = None
+    model_display_name: str | None = None
 
 
 class AgentInfo(BaseModel):

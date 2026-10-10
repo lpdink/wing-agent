@@ -50,6 +50,7 @@ libs/core/wing/
 │   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
 │   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
 │   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
+│   ├── model_binding.py             生效模型绑定（resume 链的只读投影；会话列表的模型列）
 │   └── override.py                  AgentOverride — 创建期参数覆盖（领域类型，住领域层非网关）
 ├── chain.py                         TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 ├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载

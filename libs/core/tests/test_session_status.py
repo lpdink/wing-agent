@@ -149,11 +149,23 @@ def _make_manager(sessions_path: Path):
 
 
 def _mark_active(sm, session_id: str, status: str = "idle") -> None:
-    """把 session 标记为「已加载进内存」（active）并给定 live 状态。"""
+    """把 session 标记为「已加载进内存」（active）并给定 live 状态。
+
+    列表条目还投影模型四件套（`Session.model_binding`）——假会话照实给一份
+    （未声明任何模型的降级形态），本文件断言的是状态与排序。
+    """
     from unittest.mock import MagicMock
+
+    from wing.session.model_binding import ModelBinding
 
     live = MagicMock()
     live.status = status
+    live.model_binding.return_value = ModelBinding(
+        model_id=None,
+        model_name="stub-model",
+        provider_name="p",
+        model_display_name=None,
+    )
     sm._sessions[session_id] = live
 
 

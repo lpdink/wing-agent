@@ -1081,6 +1081,10 @@ mod tests {
             status: "inactive".to_string(),
             tags: Vec::new(),
             tag_meta: std::collections::HashMap::new(),
+            model_id: None,
+            model_name: None,
+            provider_name: None,
+            model_display_name: None,
         }
     }
 

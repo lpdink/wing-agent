@@ -73,7 +73,7 @@
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
 | `config/`（spec / models / problems / catalog / emit / document / boot / loader / user_agent） | L3 | 声明层（`S(...)` / `SettingMeta` / `ApplyScope`：字段元信息唯一来源）+ 设置目录树（catalog）+ 规范形 YAML emitter（模板与保存共用）+ 稀疏文档 / 启动读取（`boot_config()` 永不抛）+ WING_HOME 解析与配置单例 |
 | `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
-| `session/`（session / manager / reaper / template / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、创建期参数覆盖 |
+| `session/`（session / manager / reaper / template / model_binding / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、生效模型绑定（resume 链的只读投影）、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、打断收口阶梯、未提交投影 |
 | `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、无状态 provider 与全进程共享池（`pool.py`） |

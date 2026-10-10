@@ -28,6 +28,23 @@ pub struct SessionInfo {
     /// 旧网关 / 老数据缺省为空。
     #[serde(default)]
     pub tag_meta: HashMap<String, TagMeta>,
+    /// 会话生效模型的**引用词**（∈ 配置声明的 id 空间）；身份字段。
+    /// 未加载的会话按 resume 链解析盘上记录，解析不出的降级路径为 None
+    /// （旧网关缺省）。
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// 生效模型的调用名（发给上游的值；展示回落素材）。旧网关 / 未解析时为
+    /// None。
+    #[serde(default)]
+    pub model_name: Option<String>,
+    /// 承载该模型的 provider 名（运行期事实）；旧网关 / 未解析时为 None。
+    #[serde(default)]
+    pub provider_name: Option<String>,
+    /// `model_name` 的展示名（网关配置声明）；旧网关 / 未声明时为 None。
+    /// 展示层专用——身份是 `model_id`（与 `AgentInfo` / `/api/session/info`
+    /// 同一口径）。
+    #[serde(default)]
+    pub model_display_name: Option<String>,
 }
 
 /// 单个标签的记录（`SessionMetadata.tag_meta` 的值）。
@@ -1331,6 +1348,50 @@ mod tests {
         assert_eq!(info.model_id, None);
         assert_eq!(info.provider_name, None);
         assert_eq!(info.model_display_name, None);
+    }
+
+    #[test]
+    fn session_list_entry_carries_the_model_quartet_and_tolerates_absent_fields() {
+        // Current gateway: the list entry answers "which model does this session
+        // run" without a per-session /info call.
+        let json = r#"{
+            "id": "20261009-210702-217d85f2",
+            "name": "ps-model-display",
+            "status": "inactive",
+            "tags": [],
+            "tag_meta": {},
+            "model_id": "ds-flash",
+            "model_name": "dfmodel-2026",
+            "provider_name": "qoder",
+            "model_display_name": "DeepSeek-Flash"
+        }"#;
+        let entry: SessionInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.model_id.as_deref(), Some("ds-flash"));
+        assert_eq!(entry.model_name.as_deref(), Some("dfmodel-2026"));
+        assert_eq!(entry.provider_name.as_deref(), Some("qoder"));
+        assert_eq!(entry.model_display_name.as_deref(), Some("DeepSeek-Flash"));
+
+        // Old gateway (before the model fields existed) → None, no error.
+        let legacy = r#"{
+            "id": "20260101-000000-abcdef01",
+            "name": "legacy-gateway",
+            "status": "working",
+            "tags": ["pin"],
+            "tag_meta": {}
+        }"#;
+        let entry: SessionInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(entry.model_id, None);
+        assert_eq!(entry.model_name, None);
+        assert_eq!(entry.provider_name, None);
+        assert_eq!(entry.model_display_name, None);
+
+        // A resolved entry keeps the id when the display name / call name are
+        // unknown (stale record): the display layer falls back on its own.
+        let degraded = r#"{"id": "s1", "model_id": "ghost-id"}"#;
+        let entry: SessionInfo = serde_json::from_str(degraded).unwrap();
+        assert_eq!(entry.model_id.as_deref(), Some("ghost-id"));
+        assert_eq!(entry.model_name, None);
+        assert_eq!(entry.model_display_name, None);
     }
 
     #[test]

@@ -30,6 +30,7 @@ from wing.schema import ChainNode, Message, Tool
 from wing.store import SessionMetadata, SessionStore, TagMeta
 from wing.tool_registry import ToolRef
 
+from .model_binding import ModelBinding
 from .override import validate_override_utf8
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 
@@ -523,6 +524,21 @@ class Session:
         log.info(f"Session {self._session_id}: workspace changed to {resolved_str}")
 
     # ── 序列化方法 ──────────────────────────────────
+
+    def model_binding(self) -> ModelBinding:
+        """当前生效的模型绑定（引用词 + 运行期事实 + 展示名，同源同刻）。
+
+        与 :meth:`to_agent_info` 的模型四件套同源：``model_id`` 来自内存态三元组
+        （构造期恢复或显式动作写入），其余三项来自 live agent。**记录面**的同义
+        投影是 :func:`wing.session.model_binding.resolve_model_binding`（列表里的
+        未加载会话用那条路）——两处的答案必须是同一个模型。
+        """
+        return ModelBinding(
+            model_id=self._model_id,
+            model_name=self._agent.model,
+            provider_name=self._agent.provider_name,
+            model_display_name=self._agent.model_display_name,
+        )
 
     def to_agent_info(self) -> "AgentInfo":
         """从 Session 的 agent 和 context_manager 构造 AgentInfo。"""

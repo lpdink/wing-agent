@@ -44,6 +44,7 @@ from wing.request_context import session_context
 from wing.schema import ChainNode, Message
 from wing.store import SessionMetadata, SessionStore
 
+from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
 from .session import Session, tool_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
@@ -230,6 +231,16 @@ class SessionManager:
         """
         config = get_config()
         self._template_manager = AgentTemplateManager(config.agents, config)
+
+    def _template_or_default(self, name: str | None) -> AgentTemplate:
+        """按记录里的模板名取模板；缺失 / 已不存在（config 演化）→ 默认模板。
+
+        「metadata 是模板的唯一来源」这条规则只有一份实现，resume（真的按模板
+        重建 agent）与列表投影（未加载会话的模型列）共用它——否则两边会给出
+        不同的默认模板答案。
+        """
+        template = self._template_manager.get(name) if name is not None else None
+        return template if template is not None else self._template_manager.default
 
     # ============================================================
     # 外部方法：session 生命周期
@@ -450,11 +461,9 @@ class SessionManager:
         metadata = store.load_metadata(resolved)
 
         # metadata 是模板的唯一来源：template_name > 默认
-        tpl = None
-        if metadata is not None and metadata.template_name is not None:
-            tpl = self._template_manager.get(metadata.template_name)
-        if tpl is None:
-            tpl = self._template_manager.default
+        tpl = self._template_or_default(
+            metadata.template_name if metadata is not None else None
+        )
 
         messages: TrackedList[ChainNode] = TrackedList.load(
             store.open_log(resolved), Message
@@ -828,7 +837,15 @@ class SessionManager:
 
         workspace 不参与排序：workspace 匹配曾作为前端的第一排序键，让
         「在哪启动 TUI」压过了「正在用哪几个会话」——本方法不复制该语义。
+
+        模型四件套（`model_id` / `model_name` / `provider_name` /
+        `model_display_name`）与 `status` 同源同刻地投影：在内存的会话取 live
+        agent（`Session.model_binding`），未加载的按 resume 链解析盘上记录
+        （`resolve_model_binding`——记录命中当前映射 → 快照兜底 → 模板默认）。
+        两条路都不发网络请求、不建会话：素材在一次 `list_summaries` 的 metadata
+        之上就地算出，跨会话看模型不需要逐会话拉 info。
         """
+        config = get_config()
         result = []
         for store in self._stores.values():
             for summary in store.list_summaries():
@@ -841,6 +858,15 @@ class SessionManager:
                     continue
 
                 loaded = self._sessions.get(summary.id)
+                binding = (
+                    loaded.model_binding()
+                    if loaded is not None
+                    else resolve_model_binding(
+                        metadata,
+                        config,
+                        self._template_or_default(metadata.template_name),
+                    )
+                )
                 tags = sanitize_tags(metadata.tags)
                 result.append(
                     SessionInfo(
@@ -851,6 +877,10 @@ class SessionManager:
                         status=loaded.status if loaded is not None else "inactive",
                         tags=tags,
                         tag_meta=sanitize_tag_meta(metadata.tag_meta, tags),
+                        model_id=binding.model_id,
+                        model_name=binding.model_name,
+                        provider_name=binding.provider_name,
+                        model_display_name=binding.model_display_name,
                     )
                 )
 

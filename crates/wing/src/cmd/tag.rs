@@ -163,6 +163,10 @@ mod tests {
             status: "inactive".into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             tag_meta: Default::default(),
+            model_id: None,
+            model_name: None,
+            provider_name: None,
+            model_display_name: None,
         }
     }
 
