@@ -551,7 +551,10 @@ fn scrolling_linked_cjk_keeps_the_terminal_in_step() {
 // ── Overlay scrollbar: whole-frame checks through a real Terminal ────
 
 /// Bar glyphs that no other widget draws: `│` is shared with every border
-/// (the composer card's included), `┃` / `█` are the bar's alone.
+/// (the composer card's included), `┃` / `█` are the bar's alone among the
+/// widgets *this fixture* draws — the welcome nameplate's info card uses `┃`
+/// for its frame (and `█` is a half-block pixel), so a frame-level scan must
+/// keep the welcome out (`clear_welcome`) to stay unambiguous.
 fn is_bar_glyph(symbol: &str) -> bool {
     matches!(symbol, "┃" | "█")
 }

@@ -104,8 +104,9 @@ const COMPACT_MIN: u16 = 40;
 
 /// 信息卡里画几行正文（版本 / 会话事实 / 空 / 键位 / tip / 入口）—— 事实槽位
 /// 恒在，所以卡片高度也恒定（[`info_rows`]）。
-#[cfg(test)]
-const CARD_BODY_ROWS: usize = 6;
+///
+/// `pub(crate)`：app 层的帧测试也数它（一张卡片 = 每行左右各一道竖线）。
+pub(crate) const CARD_BODY_ROWS: usize = 6;
 
 /// 会话事实 —— 这个会话加载了多少 skills / rules。
 ///
@@ -417,9 +418,9 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
 ///
 /// 差一列卡片就会把 tip 的尾巴吃掉，而 tip 是欢迎屏的**内容**、框是装饰 ——
 /// 装饰不许花掉内容（同 `FULL_MIN` 那条"海鸥不能让出去"的对偶）。所以窄于这条
-/// 线时信息列保持纯文字（今天的形态）；45 与 2x 大字的 46 只差一列，两者因此
-/// 总是同档出现（`the_card_holds_the_widest_tip_at_its_minimum_width` 把这条线
-/// 钉在 tips 池上：池子加一条更长的 tip 时它会红）。
+/// 线时信息列保持纯文字（今天的形态）。45 与 2x 大字的 46 只差一列：**恰好 45
+/// 列**时是"卡片 + 1x 大字"，46 列起才是"卡片 + 2x"（两条线各自的来历见
+/// `docs/dev/welcome-mascot.md` 的档位表）。
 const CARD_MIN: usize = 45;
 
 /// 右侧文字列：wordmark（1x 3 行 / 2x 5 行）+ 信息列。
@@ -470,14 +471,20 @@ fn info_rows(palette: &ThemePalette, tip: &str, facts: Option<SessionFacts>) -> 
         Some(line) => Line::from(Span::styled(line, dim)),
         None => Line::from(""),
     };
-    vec![
+    let rows = vec![
         Line::from(Span::styled(format!("wing · {}", version_label()), dim)),
         facts,
         Line::from(""),
         Line::from(Span::styled(KEYS, dim)),
         tip_line(tip, dim, text),
         Line::from(Span::styled(hints_text(), dim)),
-    ]
+    ];
+    debug_assert_eq!(
+        rows.len(),
+        CARD_BODY_ROWS,
+        "卡片行数变了：同步 CARD_BODY_ROWS（右列高度与测试都按它算）"
+    );
+    rows
 }
 
 /// 键位提示（一行）。
@@ -792,7 +799,7 @@ mod tests {
 
     #[test]
     fn elide_respects_display_width() {
-        // `elide` 服务 dim_line / wordmark_line 热路径：按显示宽度（CJK 记 2 列）
+        // `elide` 服务最窄档的 `wordmark_line`：按显示宽度（CJK 记 2 列）
         // 截断，超宽补 `…`，不超宽原样返回。
         assert_eq!(elide("abc", 5), "abc");
         assert_eq!(elide("abcde", 5), "abcde");
@@ -843,32 +850,6 @@ mod tests {
     }
 
     #[test]
-    fn the_text_column_steps_up_with_the_width_ladder() {
-        let palette = palette();
-        let column =
-            |width: usize| text_column(&palette, width, None, (34, 211, 238), false, "tip", None);
-        let framed = |lines: &[Line<'static>]| lines.iter().any(|l| l.to_string().contains('┏'));
-
-        // 78 列（120 列终端的 Full 档）：2x 大字（46 列 × 5 行）+ 卡片 8 行。
-        let wide = column(78);
-        assert_eq!(wide.len(), 13, "5 + 8");
-        assert_eq!(line_width(&wide[0]), 46, "2x 大字铺满 46 列");
-        assert!(framed(&wide), "宽信息列有卡片");
-
-        // 38 列（80 列终端的 Full 档）：1x 大字 + 纯文字列（6 行，无框）。
-        let narrow = column(38);
-        assert_eq!(narrow.len(), 9, "3 + 6");
-        assert_eq!(line_width(&narrow[0]), 23, "1x 大字 23 列");
-        assert!(!framed(&narrow), "窄信息列不上框");
-
-        // 两条档位线：卡片 45（框内放得下最宽一行），2x 大字 46。
-        assert!(framed(&column(CARD_MIN)));
-        assert!(!framed(&column(CARD_MIN - 1)));
-        assert_eq!(line_width(&column(CARD_MIN)[0]), 23, "45 列还是 1x 大字");
-        assert_eq!(line_width(&column(46)[0]), 46);
-    }
-
-    #[test]
     fn the_card_holds_the_widest_tip_at_its_minimum_width() {
         // CARD_MIN 的来历：卡内宽度（列宽 − 框的 4 列）要放得下最宽的一行 ——
         // tips 池里最宽的一条 + `Tip  ` 标签。池子加一条更长的 tip 时这里会红：
@@ -887,6 +868,12 @@ mod tests {
         );
     }
 
+    /// 信息列里的 wordmark 宽度：前 `rows` 行是字形（行尾透明格已裁，取最宽的
+    /// 一行 = 档位宽度）。
+    fn wordmark_width(column: &[Line<'static>], rows: usize) -> usize {
+        column.iter().take(rows).map(line_width).max().unwrap_or(0)
+    }
+
     #[test]
     fn the_info_rows_are_framed_when_the_column_allows_it() {
         let mut w = welcome();
@@ -894,12 +881,72 @@ mod tests {
         let text = text_of(&lines);
         assert!(text.contains("┏━━"), "卡片顶框在：{text}");
         assert!(text.contains("┗━━"), "卡片底框在：{text}");
-        // 六行正文每行左右各一道竖线。
+        // 正文行数就是卡片行数（每行左右各一道竖线）。
+        assert_eq!(info_rows(&palette(), "tip", None).len(), CARD_BODY_ROWS);
         assert_eq!(
             text.matches('┃').count(),
             CARD_BODY_ROWS * 2,
             "卡片的竖线数不对：{text}"
         );
+    }
+
+    #[test]
+    fn the_width_ladder_is_the_recorded_one() {
+        // 档位表（**内容宽** → 形态）。写成表是故意的：阶梯不是单调的 ——
+        // Full 档一出现，海鸥就吃掉 40 列，比它窄的 Compact 档反而更宽（73 列
+        // 有 2x 大字 + 卡片，74 列只剩 1x + 纯文字）。这条"变宽反而变小"是
+        // FULL_MIN 既定优先级的代价（80 列必须落在整块档、海鸥不能让出去），
+        // 表就是它的契约：哪一档出现在哪个区间，改了就红。
+        let palette = palette();
+        let column_of = |content: u16| -> usize {
+            match layout_for(content) {
+                Layout::Full => (content as usize).saturating_sub(ART_COLS + ART_GAP),
+                Layout::Compact => (content as usize).saturating_sub(1),
+                Layout::Minimal => 0,
+            }
+        };
+        let column = |content: u16| {
+            text_column(
+                &palette,
+                column_of(content),
+                None,
+                (34, 211, 238),
+                false,
+                "tip",
+                None,
+            )
+        };
+        let shape = |content: u16| -> (bool, bool) {
+            let lines = column(content);
+            let width = column_of(content);
+            let rows = wordmark::scale_for(width).rows();
+            (
+                wordmark_width(&lines, rows) == 46,
+                lines.iter().any(|l| l.to_string().contains('┏')),
+            )
+        };
+        let height = |content: u16| column(content).len();
+
+        // Compact 档（无海鸥）：信息列 = 内容宽 − 1。
+        assert_eq!(shape(COMPACT_MIN - 1), (false, false), "最窄档没列");
+        assert_eq!(shape(COMPACT_MIN), (false, false), "内容 40：1x + 纯文字");
+        assert_eq!(
+            shape(COMPACT_MIN + (CARD_MIN - 39) as u16),
+            (false, true),
+            "内容 46：1x + 卡片"
+        );
+        assert_eq!(shape(FULL_MIN - 1), (true, true), "内容 73：2x + 卡片");
+
+        // Full 档（海鸥 + 间隔 40 列）：信息列从 34 列起步。
+        assert_eq!(shape(FULL_MIN), (false, false), "内容 74：1x + 纯文字");
+        assert_eq!(shape(FULL_MIN + 10), (false, false), "内容 84：1x + 纯文字");
+        assert_eq!(shape(FULL_MIN + 11), (false, true), "内容 85：1x + 卡片");
+        assert_eq!(shape(FULL_MIN + 12), (true, true), "内容 86：2x + 卡片");
+
+        // 高度：1x + 纯文字 9 行、1x + 卡片 11 行、2x + 卡片 13 行。
+        assert_eq!(height(40), 9);
+        assert_eq!(height(46), 11);
+        assert_eq!(height(120), 13);
     }
 
     #[test]

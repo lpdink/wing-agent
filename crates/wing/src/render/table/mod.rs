@@ -10,7 +10,7 @@
 //! `ratatui` styles, no assumption about which frontend is drawing. The width
 //! policy (which column gives up width first, which one is preserved last) is
 //! a product decision that lives in [`compute_column_widths`] — sharing it is
-//! what keeps the two frontends from growing two different looks.
+//! what keeps the frontends from growing two different looks.
 
 pub mod card;
 pub mod plain;

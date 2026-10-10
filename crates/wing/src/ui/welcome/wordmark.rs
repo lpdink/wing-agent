@@ -122,9 +122,15 @@ pub fn lines(scale: Scale, phase: Option<f32>, accent: Rgb, light: bool) -> Vec<
         // 渲染像素坐标 → 源像素坐标：一个源像素占 `factor` 个渲染像素。
         let up = term_row * 2;
         let lo = up + 1;
+        // 行尾透明格不画（与 `sprite::lines` 同一条瘦身）：不裁的话每行都是满宽
+        // 空格，字形右边界就测不出来了。
+        let ink_end = (0..scale.columns())
+            .rev()
+            .find(|&col| ink_at(&rows, col, up, factor) || ink_at(&rows, col, lo, factor))
+            .map_or(0, |col| col + 1);
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut run: Option<(Style, String)> = None;
-        for col in 0..scale.columns() {
+        for col in 0..ink_end {
             let u = ink_at(&rows, col, up, factor);
             let l = ink_at(&rows, col, lo, factor);
             if !u && !l {
@@ -253,15 +259,18 @@ mod tests {
 
     #[test]
     fn scaled_rows_are_exactly_the_scaled_glyph_width() {
-        // 行尾透明格截掉：每行都不该超过档位列数，且字形底行（`G` 的下横）在 2x
-        // 下必须真的画到 46 列 —— 只断言行数会漏掉"横向没放大"。
+        // 行尾透明格裁掉（与 `sprite` 同一瘦身）：最宽的一行必须铺满档位宽度。
+        // 只断言行数会漏掉"横向没放大"—— 所以口径是**墨迹右边界**，不是行数。
         for scale in [Scale::X1, Scale::X2] {
             let lines = lines(scale, None, (34, 211, 238), false);
-            for line in &lines {
-                assert!(line_width(line) <= scale.columns());
-            }
             let widest = lines.iter().map(line_width).max().unwrap_or(0);
             assert_eq!(widest, scale.columns(), "{scale:?}: 字形没有铺满档位宽度");
+            for line in &lines {
+                assert!(
+                    line_width(line) <= scale.columns(),
+                    "{scale:?}: 行宽超出档位"
+                );
+            }
         }
     }
 

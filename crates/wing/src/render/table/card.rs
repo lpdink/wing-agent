@@ -31,6 +31,11 @@ use super::split_str_by_width;
 /// `[min_width, max_width]` (when the two conflict the minimum wins — an
 /// aligned card beats a squeezed one). Rows wider than the final width elide
 /// with `…`; every returned line is exactly as wide as the frame.
+///
+/// Degenerate case: a maximum below the frame's own width (4 columns) returns
+/// **no lines** — the caller loses the rows entirely rather than getting a
+/// broken frame. No caller reaches it (the welcome's narrowest column is 34),
+/// so it is a guard, not a mode.
 pub fn render(
     rows: &[Line<'static>],
     min_width: usize,

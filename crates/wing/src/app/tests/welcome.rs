@@ -83,13 +83,24 @@ fn welcome_header_never_carries_the_retired_release_notes() {
 /// 窄于此保持纯文字 —— 80 列终端（信息列 38 列）是后者。
 #[test]
 fn wide_terminal_frames_the_info_column() {
+    // 断言只看 100% 由欢迎屏决定的 header 行：整帧里滚动条的空闲 thumb 也画
+    // `┃`（`app/tests/scrollbar.rs` 的 `is_bar_glyph`），拿整帧数字形会被它带偏。
     let mut app = test_app();
     // 100 列：内容 98，信息列 58 列 → 卡片在场。
     let body = frame_body(&mut app, 100, 30);
     assert!(body.contains("┏━━"), "宽终端的信息列该上框：\n{body}");
     assert!(body.contains("┗━━"), "底框也要在：\n{body}");
-    // 框住六行正文：每行左右各一道竖线。
-    assert_eq!(body.matches('┃').count(), 12, "卡片竖线数不对：\n{body}");
+    let header: String = app
+        .chat
+        .header_lines()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert_eq!(
+        header.matches('┃').count(),
+        crate::ui::welcome::CARD_BODY_ROWS * 2,
+        "卡片竖线数不对（每行正文左右各一道）：\n{header}"
+    );
 
     let mut app = test_app();
     // 80 列：内容 78，信息列 38 列 → 纯文字列（旧形态，框会吃掉 4 列）。

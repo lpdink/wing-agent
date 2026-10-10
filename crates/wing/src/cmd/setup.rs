@@ -769,9 +769,10 @@ fn draw_gull(frame: &mut Frame, area: Rect, accent: sprite::Rgb) {
 
 /// wordmark（像素大字 `WING`，无扫光）：在背板里竖直居中。
 ///
-/// 固定 1x 档：背板是"海鸥 + 大字"并排居中的窄 lockup（见 `draw_backplate`），
-/// 2x 要大字单独占 46 列加上海鸥的 29 列就摆不下；欢迎屏那边按信息列宽度自动升
-/// 档（`wordmark::scale_for`），这里刻意不跟。
+/// 固定 1x 档：背板是"海鸥 + 大字"并排居中的窄 lockup —— 居中宽度与这里 rect
+/// 的列数都按 23 列写死（`draw_backplate` 的 `art::WORDMARK_COLS`），2x 要跟着
+/// 把两处都改成 46 + 5 行。欢迎屏那边按信息列宽度自动升档
+/// （`wordmark::scale_for`），这里刻意不跟。
 fn draw_wordmark(frame: &mut Frame, x: u16, top: u16, accent: sprite::Rgb, light: bool) {
     let lines = wordmark::lines(wordmark::Scale::X1, None, accent, light);
     let y = top + (ART_TERM_ROWS as u16).saturating_sub(lines.len() as u16) / 2;
