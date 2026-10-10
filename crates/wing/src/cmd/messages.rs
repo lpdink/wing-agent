@@ -1,24 +1,19 @@
 //! `wing tail` / `wing head` — message filtering (like Unix head/tail).
 //!
-//! Fetches session messages via `GET /api/session/get` and filters by element.
-//! `tail` shows the last N, `head` shows the first N.
-//!
-//! Decoding lives in the shared typed mirror (`protocol::SessionMessage`);
-//! filtering and printing run on the typed view. `--json` emits stripped
-//! element records (`{uuid, …selected fields}`) for element filters and the
-//! raw payloads verbatim for `all` (typed serialization would drop unknown
-//! fields and change key order, so neither path round-trips through the
-//! mirror).
+//! Fetches session messages via `GET /api/session/get` and filters by element: `tail` shows the last
+//! N, `head` the first N. Decoding lives in the shared typed mirror (`protocol::SessionMessage`);
+//! filtering and printing run on the typed view. `--json` emits stripped element records
+//! (`{uuid, …selected fields}`) for element filters and the raw payloads verbatim for `all` (typed
+//! serialization would drop unknown fields and change key order, so neither path round-trips through
+//! the mirror).
 //!
 //! # `--filter`: one element set, every output derived from it
 //!
-//! `head` / `tail` treat the log as a flat sequence of elements — user text,
-//! reasoning, assistant text, tool calls, tool results — and `--filter` names
-//! the ones to show. Names are repeatable and comma-separated, and combine as
-//! a **union**: `--filter user,content` is user text + assistant text and
-//! nothing else. A row is printed iff it carries at least one selected
-//! element, and only the selected elements are rendered — in text and in
-//! `--json` alike.
+//! `head` / `tail` treat the log as a flat sequence of elements — user text, reasoning, assistant
+//! text, tool calls, tool results — and `--filter` names the ones to show. Names are repeatable and
+//! comma-separated, and combine as a **union**: `--filter user,content` is user text + assistant text
+//! and nothing else. A row is printed iff it carries at least one selected element, and only the
+//! selected elements are rendered — in text and in `--json` alike.
 //!
 //! | `--filter`      | Selected elements                                       |
 //! |-----------------|---------------------------------------------------------|
@@ -30,39 +25,31 @@
 //! | `tool_call`     | Tool calls (each line carries its call id)               |
 //! | `tool_result`   | Tool results                                             |
 //!
-//! The parse result (`Filter` → `Selection`) is the **single source of
-//! truth**: row selection, text rendering and the `--json` records all walk
-//! that one element set through the same per-element definitions
-//! (`Element::carried_by` / `Element::in_record`), so no output path can drift
-//! from another. The vocabulary itself is a clap `ValueEnum`: an unknown value
-//! is rejected before the request — never silently treated as "no filter"
-//! (that fallback is what printed every section for `--filter user,content`).
+//! The parse result (`Filter` → `Selection`) is the **single source of truth**: row selection, text
+//! rendering and the `--json` records all walk that one element set through the same per-element
+//! definitions (`Element::carried_by` / `Element::in_record`), so no output path can drift from
+//! another. The vocabulary itself is a clap `ValueEnum`: an unknown value is rejected before the
+//! request — never silently treated as "no filter".
 //!
 //! Element definitions (one per element, shared by every output path):
 //!
-//! - `user` is a user message's text; `content` is an assistant message's
-//!   text. A tool message carries neither: its `content` *is* its tool result
-//!   and renders through `tool_result` only, so every result appears exactly
-//!   once. Selection is "the message carries the element", never message-level
-//!   purity: a message carrying tool calls still yields its text.
+//! - `user` is a user message's text; `content` is an assistant message's text. A tool message
+//!   carries neither: its `content` *is* its tool result and renders through `tool_result` only, so
+//!   every result appears exactly once. Selection is "the message carries the element", never
+//!   message-level purity: a message carrying tool calls still yields its text.
 //! - `reasoning` is a non-empty `reasoning_content` on an assistant message.
-//! - `tool_call` is a non-empty `tool_calls` array — absent / null / `[]` are
-//!   not a tool call.
+//! - `tool_call` is a non-empty `tool_calls` array — absent / null / `[]` are not a tool call.
 //! - `tool_result` is every tool message: an empty result is still a result.
 //!
-//! `all` is the universe: a list containing it is unfiltered (`all,user` ≡
-//! `all`), and it is the only filter that shows a payload that does not decode
-//! into a Message projection (such a payload carries no element), or the text
-//! of a row whose role no element owns — a system node, e.g. the
-//! `[rewind_to_root]` sentinel a rewind to the root leaves as the chain's only
-//! node. Element filters select rows by what they carry and never reach those.
+//! `all` is the universe: a list containing it is unfiltered (`all,user` ≡ `all`), and it is the only
+//! filter that shows a payload which does not decode into a Message projection (such a payload
+//! carries no element), or the text of a row whose role no element owns — a system node, e.g. the
+//! `[rewind_to_root]` sentinel a rewind to the root leaves as the chain's only node.
 //!
-//! Tool results print as a **500-char peek** in text mode — that is the
-//! tool-result element's single text rendering; `--json` carries the stored
-//! content in full. Note the backend caps results over
-//! `tool_result_truncate.max_length` (100k) *before* storing them, so beyond
-//! that cap even the payload is the head/marker/tail form (the full text lives
-//! in the temp file its marker names).
+//! Tool results print as a **500-char peek** in text mode — the tool-result element's single text
+//! rendering; `--json` carries the stored content in full. The backend caps results over
+//! `tool_result_truncate.max_length` (100k) *before* storing them, so beyond that cap even the
+//! payload is the head/marker/tail form (the full text lives in the temp file its marker names).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

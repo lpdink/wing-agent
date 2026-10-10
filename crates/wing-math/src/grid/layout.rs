@@ -1,44 +1,33 @@
 // ---------------------------------------------------------------------------
 // 来源（vendored）
-//   crate   : term-maths
-//   version : 1.0.0
-//   repo    : 包元数据未声明 repository（crates.io `term-maths`；发布时
-//             `.cargo_vcs_info.json` git sha1 = 5a2de3b29f1d4cec72c8685b8d52ddfb53519676）
-//   license : MIT OR Apache-2.0，Copyright (c) 2026 Jack Geraghty
+//   crate   : term-maths 1.0.0 — MIT OR Apache-2.0, Copyright (c) 2026 Jack Geraghty
 //             （原文见 crate 根 LICENSE-MIT / LICENSE-APACHE）
+//   repo    : 包元数据未声明 repository（crates.io `term-maths`；发布时 `.cargo_vcs_info.json`
+//             git sha1 = 5a2de3b29f1d4cec72c8685b8d52ddfb53519676）
 //   原路径  : src/layout.rs
 //
 // 本地改动（相对上游，逐条）：
-//   1. 模块路径：`rust_latex_parser::` -> `crate::latex::`，
-//      `crate::xxx` -> `crate::grid::xxx`。
-//   2. `layout_accent` 的 Hat / Dot / DoubleDot 改用新增的私有辅助函数
-//      `center_accent`：上游直接 `center_in`，而 `center_in` 在余量为奇数时把
-//      多余列放在**右侧**，导致 `\hat{abc}` 渲染成 `/\ `（accent 左偏一列）。
-//      `center_accent` 把多余列放左侧。仅影响"单字形 accent + 奇数余量宽度"
-//      这一种输入，其余路径一字未动（见函数旁注释）。
-//   3. `build_delimiter` 由私有改为 `pub(crate)`（逻辑未改），供
-//      `crate::environments` 生成拉伸定界符。
-//   4. `layout_seq` 改为一次性拼装（`crate::compose::beside_all`）：上游对每个子节点
-//      反复 `beside`，第 k 步复制前 k 块拼出的整个网格，长公式退化成 O(n²)
-//      （实测 2000 项单行公式 release 282 ms）。语义逐格等价（对拍见 compose 单测）。
-//   5. `layout_binom`：上游 `above(&top, &bot, baseline - 1)` 在 `top` 为空块时
-//      `0 - 1` 下溢 panic（`\binom{}{}`，debug 直接 abort），且堆叠块与定界符块基线
-//      不一致，`\binom{n}{k}` 被画成错位三行。改为纯堆叠 + 基线归中。
-//   6. `layout_sqrt`：空被开方数（`\sqrt{}`）直接返回空块。上游会让 `body_h == 0`
-//      走进"多行"分支，生成基线 = 1、高度 = 1 的块（**基线越界**），`beside` 按基线
-//      对齐时把整块下推一行，于是 `= \sqrt{}` 变成 2 行、`\begin{align} a &= \sqrt{}`
-//      多出一个空行。
-//   7. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
-//      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
-//      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   8. `to_superscript_char` 字形表补全（步骤 02）：上游只映射数字 / 符号 / `n` / `i`，
-//      `x^d` / `W^T` / `x^w` 这类高频写法全部掉进"堆叠"分支（2 行 → 行内 `None` →
-//      上层显示源码）。补上 Unicode 里**可得且字体覆盖良好**的上标字形：小写 a–z 的 25 个、
-//      大写 19 个，外加 `⊤ → ᵀ`（`^\top` 的行内形态）。**不收**的两类：`S X Z`
-//      （UCD 里没有常规大写修饰字形）；`q`（U+107A5）、`Y`（U+107B2 MODIFIER LETTER
-//      SMALL CAPITAL Y）、`C F Q`（U+A7F2 / U+A7F3 / U+A7F4）—— 有码位，但都在
-//      Latin Extended-F / -D 的补遗里（Unicode 14 起），字体覆盖差。缺失字形仍返回
-//      `None` → 堆叠回退，语义不变。逐条的码点与字符名写在函数里。
+//   1. 模块路径：`rust_latex_parser::` -> `crate::latex::`，`crate::xxx` -> `crate::grid::xxx`。
+//   2. `layout_accent` 的 Hat / Dot / DoubleDot 改用新增的私有辅助函数 `center_accent`：上游直接
+//      `center_in`，而它在余量为奇数时把多余列放**右侧**，`\hat{abc}` 因此渲染成 `/\ `（accent 左偏
+//      一列）；`center_accent` 把多余列放左侧。只影响"单字形 accent + 奇数余量宽度"这一种输入。
+//   3. `build_delimiter` 由私有改为 `pub(crate)`（逻辑未改），供 `crate::environments` 生成拉伸定界符。
+//   4. `layout_seq` 改为一次性拼装（`crate::compose::beside_all`）：上游对每个子节点反复 `beside`，
+//      第 k 步复制前 k 块拼出的整个网格，长公式退化成 O(n²)（实测 2000 项单行公式 release 282 ms）。
+//      语义逐格等价（对拍见 compose 单测）。
+//   5. `layout_binom`：上游 `above(&top, &bot, baseline - 1)` 在 `top` 为空块时 `0 - 1` 下溢 panic
+//      （`\binom{}{}`，debug 直接 abort），且堆叠块与定界符块基线不一致，`\binom{n}{k}` 被画成
+//      错位三行。改为纯堆叠 + 基线归中。
+//   6. `layout_sqrt`：空被开方数（`\sqrt{}`）直接返回空块。上游会让 `body_h == 0` 走进"多行"分支，
+//      生成基线 = 1、高度 = 1 的块（**基线越界**），`beside` 按基线对齐时把整块下推一行，于是
+//      `= \sqrt{}` 变成 2 行、`\begin{align} a &= \sqrt{}` 多出一个空行。
+//   7. `to_superscript_char` 字形表补全：上游只映射数字 / 符号 / `n` / `i`，`x^d` / `W^T` / `x^w`
+//      这类高频写法全部掉进"堆叠"分支（2 行 → 行内 `None` → 上层显示源码）。补上 Unicode 里**可得且
+//      字体覆盖良好**的上标字形：小写 a–z 的 25 个、大写 19 个，外加 `⊤ → ᵀ`（`^\top` 的行内形态）。
+//      **不收**的两类：`S X Z`（UCD 里没有常规大写修饰字形）；`q` / `Y` / `C F Q`——有码位，但都在
+//      Latin Extended-F / -D 的补遗里，字体覆盖差。缺失字形仍返回 `None` → 堆叠回退，语义不变。
+//      逐条的码点与字符名写在函数里。
+//   8. 运行 `cargo fmt`（门禁要求干净；上游文件未经 rustfmt 处理故有纯空白差异，已逐行 diff 核对）。
 //   除以上八点外与上游逐字一致。
 // ---------------------------------------------------------------------------
 

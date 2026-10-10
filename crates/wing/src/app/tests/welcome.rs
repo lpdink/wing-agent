@@ -310,7 +310,7 @@ fn scrolling_the_welcome_out_of_view_parks_the_clock() {
 ///
 /// 帧级断言刻意不写成"整帧不含某个词"：tip 是按**时间种子**抽的
 /// （`tips::seed_now()`），池子里有 `/skills 看已装技能…` —— 任何对整帧做
-/// 子串扫描的断言都会随进程抖动（评审 S-1：40 次里红 3 次）。槽位是确定性的：
+/// 子串扫描的断言都会随进程抖动（40 次里红 3 次）。槽位是确定性的：
 /// 它只由事实本身决定。
 fn facts_slot(app: &App) -> String {
     let lines = app.chat.header_lines();

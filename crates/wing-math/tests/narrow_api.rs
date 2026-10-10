@@ -252,7 +252,7 @@ fn some_results_keep_the_intended_symbols() {
     }
 }
 
-// ── review r1 的 B/S 回归 ───────────────────────────────────────────
+// ── 降级路径回归 ───────────────────────────────────────────
 
 #[test]
 fn none_when_a_cell_fails_to_render() {
@@ -431,7 +431,7 @@ fn wide_characters_in_scripts_do_not_break_column_alignment() {
     );
 }
 
-// ── review r2 的 B1/B2 回归 ─────────────────────────────────────────
+// ── 内容不丢 / 不 panic 回归 ─────────────────────────────────────────
 
 #[test]
 fn none_for_separators_outside_managed_regions_at_any_depth() {
@@ -553,7 +553,7 @@ fn none_for_invalid_delimiter_after_left_or_right() {
     );
 }
 
-// ── review r3 的 B1 / N1–N3 回归 ─────────────────────────────────────
+// ── 消费长度 / 定界符回归 ─────────────────────────────────────
 
 #[test]
 fn none_when_an_environment_row_exceeds_its_capacity() {

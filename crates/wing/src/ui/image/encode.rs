@@ -2,41 +2,39 @@
 //!
 //! # Why the protocols are built by hand
 //!
-//! `ratatui-image`'s own `Picker::new_protocol` is the natural entry point, but a `Picker`
-//! can only get a font size from `from_query_stdio` (I/O) or the deprecated `from_fontsize`
-//! — there is no public setter, and no public way to force its tmux flag. This layer must be
-//! able to *inject* both (tests, demo, future DPI override), so it constructs the protocol
-//! types directly — `Kitty::new` / `Sixel::new` / `Iterm2::new` are public — and reproduces
-//! upstream's size policy with the public `Resize`:
+//! `ratatui-image`'s own `Picker::new_protocol` is the natural entry point, but a `Picker` can only get
+//! a font size from `from_query_stdio` (I/O) or the deprecated `from_fontsize` — there is no public
+//! setter, and no public way to force its tmux flag. This layer must be able to *inject* both (tests,
+//! demo, future DPI override), so it constructs the protocol types directly — `Kitty::new` /
+//! `Sixel::new` / `Iterm2::new` are public — and reproduces upstream's size policy with the public
+//! `Resize`:
 //!
 //! ```text
 //! target (cells) --fit_cells--------> actual (cells, ≤ target, aspect kept, never upscaled)
 //!                --Resize::resize--> exact pixels = actual × cell_pixels (padded, never upscaled)
 //! ```
 //!
-//! The first step is [`crate::render::fit::fit_cells`], **not** upstream's
-//! `Resize::size_for` — the very same function the markdown layout computes an anchor's row
-//! count with (see `render/markdown/images.rs`). One shared function, one set of inputs, so
-//! "the box reserves `rows`" and "the picture is `size().height` cells tall" cannot drift
-//! apart. `tests` below assert the port still agrees with upstream's `size_for` for every
-//! input, which is what keeps the encoded bytes unchanged by the swap.
+//! The first step is [`crate::render::fit::fit_cells`], **not** upstream's `Resize::size_for` — the same
+//! function the markdown layout computes an anchor's row count with (see `render/markdown/images.rs`).
+//! One shared function, one set of inputs, so "the box reserves `rows`" and "the picture is
+//! `size().height` cells tall" cannot drift apart. The tests below assert the port still agrees with
+//! upstream's `size_for` for every input, which is what keeps the encoded bytes unchanged by the swap.
 //!
-//! `Resize::Fit(None)` never grows the **cell footprint**: a 16×16 icon in a 10×20 cell is a
-//! 2×1-cell image, however large the box it was given. (The pixels themselves are scaled to a
-//! whole number of cells — that same icon is encoded as 20×20 pixels, at most one cell of
-//! upscaling, with the remainder padded transparent.) That is deliberate: reporting a small
-//! image as a big block would lie about its resolution and waste the reserved rows.
+//! `Resize::Fit(None)` never grows the **cell footprint**: a 16×16 icon in a 10×20 cell is a 2×1-cell
+//! image, however large the box it was given. (The pixels themselves are scaled to a whole number of
+//! cells — that icon is encoded as 20×20 pixels, at most one cell of upscaling, with the remainder
+//! padded transparent.) Reporting a small image as a big block would lie about its resolution and
+//! waste the reserved rows.
 //!
 //! # Why sixel is row-sliced
 //!
-//! Vertically clipped rendering is only reachable through
-//! [`ratatui_image::sliced::SlicedImage`], whose `Sixel` variant wraps `SlicedSixel` — a type
-//! that lives in a **private** module and therefore cannot be built from outside the crate.
-//! The remaining public shape is upstream's own `Sliced(Vec<Protocol>)`: one single-cell-tall
-//! protocol per row. So every protocol except kitty (which has real placeholders) is emitted
-//! as a stack of one-row protocols. Cost: one escape sequence per row instead of one for the
-//! whole image; benefit: scrolling works, and the extra sequences are only sent when the row
-//! actually changes.
+//! Vertically clipped rendering is only reachable through [`ratatui_image::sliced::SlicedImage`], whose
+//! `Sixel` variant wraps `SlicedSixel` — a type that lives in a **private** module and therefore cannot
+//! be built from outside the crate. The remaining public shape is upstream's own
+//! `Sliced(Vec<Protocol>)`: one single-cell-tall protocol per row. So every protocol except kitty
+//! (which has real placeholders) is emitted as a stack of one-row protocols. Cost: one escape sequence
+//! per row instead of one for the whole image; benefit: scrolling works, and the extra sequences are
+//! only sent when the row actually changes.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -316,7 +314,7 @@ mod tests {
         assert_ne!(first, second, "two encodings reused the same image id");
     }
 
-    // ── The limits are re-checked at the read (PR #135 review, S1) ──────
+    // ── The limits are re-checked at the read ──────
     //
     // `decode` is the only place that reads a file for drawing, and it is
     // reached a frame or more after the probe that admitted the path. The

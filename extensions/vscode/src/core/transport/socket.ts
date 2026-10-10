@@ -7,7 +7,7 @@
  * (the adapter below, which removes every listener on close) and makes the
  * connection state machine fully testable with an in-process fake.
  *
- * **Which implementation is used (review #109 [P1-3]).** The default factory
+ * **Which implementation is used.** The default factory
  * resolves, in order: an injected implementation → `globalThis.WebSocket` →
  * the **bundled `ws` client**. The last step exists because the extension host
  * that we declare support for (`engines.vscode ^1.100.0` = Electron 34 / Node

@@ -1,94 +1,64 @@
 //! StreamingRender — block-level incremental markdown rendering.
 //!
-//! A streaming cell (Reasoning / assistant content) renders through a
-//! **stable prefix + active tail** model instead of re-rendering the whole
-//! accumulated text on every frame:
+//! **Stable prefix + active tail**: the splitter cuts the text into markdown
+//! blocks; a block whose closing line has arrived is rendered once (parse +
+//! compose) and promoted into an immutable prefix of `flat` — never re-rendered
+//! until a width change forces a full rebuild. Only the last, unclosed block
+//! (the tail) is re-rendered per sync, so a growing cell costs O(tail) instead
+//! of O(text).
 //!
-//! - The splitter scans incoming bytes line-by-line and cuts the source
-//!   into markdown **blocks**. A block whose closing line has arrived is
-//!   rendered once (parse + compose) and promoted into an immutable prefix
-//!   of `flat`; it is never re-rendered (until a width change forces a full
-//!   rebuild).
-//! - The active tail (the last, unclosed block) is re-rendered each sync,
-//!   so per-frame cost is O(tail), not O(text).
-//! - Fenced code blocks get a line-level cache: complete body lines render
-//!   once (stateful syntect `HighlightLines`, identical in both profiles),
-//!   and each sync only renders new lines. The composed top border +
-//!   completed body lines are themselves stable, so a giant growing code
-//!   block stays at O(new lines) per frame. A line that can still be
-//!   retracted (the trailing blank run before a closing fence, the in-flight
-//!   partial line) is held back and re-rendered each sync — see
-//!   [`fill_code_cache`].
+//! Fenced code blocks add a line-level cache: the top border and every complete
+//! body line are composed once (stateful syntect `HighlightLines`, identical in
+//! both profiles) and live in the stable prefix, so each sync renders only new
+//! lines. Lines that can still be retracted — the trailing blank run before a
+//! closing fence, the in-flight partial line — are held back and re-rendered
+//! each sync, see [`fill_code_cache`].
 //!
-//! Correctness contract: for the same final text and width, the
-//! incremental result is span-identical to [`full_lines`] — the reference
-//! full render with the same profile options. `finalize()` replaces the
-//! incremental state with exactly that reference, so any transient drift
-//! converges at turn end.
+//! **Correctness contract**: for the same final text and width the incremental
+//! result is span-identical to [`full_lines`] (the reference full render with
+//! the same profile options); `finalize()` installs exactly that reference, so
+//! transient drift converges at turn end.
 //!
-//! Known limit — slice-isolated parsing: each block is parsed on its own,
-//! so anything CommonMark resolves at **document** scope stops working
-//! once the definition and its use land in different slices. The one seen
-//! in practice is reference-style links (`[foo]: /url` in an earlier block,
-//! `[foo]` in a later one): while streaming, the later block renders the
-//! literal `[foo]` as plain text instead of a link. It converges at
-//! `finalize()`. Sharing a reference map across slices would defeat the
-//! stable-prefix model, so this is accepted rather than fixed (see the
-//! `shapes()` note in `tests/stream_render_reconcile.rs`).
+//! **Known limits** (all converge at `finalize()`):
+//! - Slice-isolated parsing: anything CommonMark resolves at *document* scope
+//!   stops working across slices. In practice: reference-style links (`[foo]:
+//!   /url` in an earlier block, `[foo]` in a later one) render as literal text.
+//!   A shared reference map would defeat the stable-prefix model, so this is
+//!   accepted rather than fixed (see `shapes()` in
+//!   `tests/stream_render_reconcile.rs`).
+//! - A list marker on the line right after paragraph text opens a list in
+//!   pulldown but stays inside the paragraph slice here, so the item's indented
+//!   continuation renders with the paragraph blanks the doc-context parse
+//!   suppresses inside list items (extra blank lines while streaming).
+//! - A list item's lazy continuation (indented, no blank line before it) is its
+//!   own slice and loses the item's continuation prefix.
+//! - Nested fences: CommonMark has no nested fences, so a model that wraps a
+//!   fenced draft in another fence gets the spec-mandated pairing — one bare
+//!   fence closes the outer block, parity flips, and prose can end up inside a
+//!   code block (or vice versa). No local rule recovers the author's intent.
 //!
-//! Known limit — list interrupting a paragraph: a list marker on the line
-//! right after paragraph text (`para` / `- item`) opens a list in pulldown,
-//! but the splitter keeps the line inside the paragraph slice (it only looks
-//! for fences and blank lines while a paragraph is open). The slice still
-//! renders correctly — the marker is inside it — but content that belongs to
-//! the item (an indented continuation paragraph) is then sliced as an
-//! indented block, which renders it with paragraph blanks the doc-context
-//! parse suppresses inside list items. Visible as extra blank lines while
-//! streaming; `finalize()` converges.
+//! **Block boundaries**: fences open/close code blocks and interrupt paragraphs
+//! (code needs its own mode for the line cache); lists swallow blank lines
+//! (loose lists) and close on non-list content after a blank; everything else
+//! (paragraphs, headings, tables, blockquotes, rules) lives in one "paragraph"
+//! slice whose INTERNAL structure the markdown parser decides — the splitter
+//! only decides when a slice is final. A misjudged boundary therefore only
+//! delays promotion (perf) or shows a transient difference `finalize` corrects,
+//! with the reference-link case above as the documented exception.
 //!
-//! Known limit — lazy continuation after a promoted block: a line that the
-//! doc-context parse reads as a list item's lazy continuation (indented, no
-//! blank line before it) is its own slice here, so it parses as a plain
-//! paragraph and loses the item's continuation prefix until `finalize()`.
+//! **Separators** replicate the full renderer: a blank line follows
+//! paragraph/heading/list/table blocks but NOT code blocks or
+//! blockquotes-ending-in-code, and it is emitted lazily when the next block
+//! starts, so a trailing blank never dangles at stream end.
 //!
-//! Known limit — nested fences: CommonMark has no nested code fences, so a
-//! model that wraps a fenced draft in another fence (`Draft:` + ```` ```markdown ````
-//! … ```bash … ``` … ```` ``` ````) gets a spec-mandated pairing: one bare
-//! fence closes the outer block, the parity of everything after it flips, and
-//! prose can end up inside a code block (or vice versa). No local rule
-//! recovers the author's intent — that needs a global pairing optimization,
-//! which the stable-prefix model cannot honor. Rendering follows CommonMark
-//! exactly here (as any other markdown renderer does).
-//!
-//! Block-boundary rules (see the design doc): fences open/close code
-//! blocks and interrupt paragraphs (code needs its own mode for the line
-//! cache); lists swallow blank lines (loose lists) and close on
-//! non-list content after a blank; everything else (paragraphs, headings,
-//! tables, blockquotes, rules) lives in one "paragraph" slice whose
-//! INTERNAL structure is decided by the markdown parser itself — the
-//! splitter only decides when a slice is final. That keeps the splitter
-//! conservative: a misjudged boundary can only delay promotion (perf), or
-//! produce a transient visual difference corrected by `finalize` — with
-//! the reference-link case above as the documented exception.
-//!
-//! Separator semantics replicate the full renderer exactly: a blank line
-//! follows paragraph/heading/list/table blocks but NOT code blocks or
-//! blockquotes-ending-in-code; the separator is emitted lazily when the
-//! next block starts, so a trailing blank never dangles at the end of the
-//! stream (matching the full render's trailing-blank trim).
-//!
-//! **Thinking vs Content.** The three rendering rules `Profile` owns are the
-//! only place the profiles differ, plus one shared rule: inline ````
-//! normalization (skipped for reasoning, which discusses fences in prose),
-//! indented (4-space) blocks (prose for reasoning, code for assistant
-//! content) — and math delimiter normalization (`\(…\)` / `\[…\]` / a bare
-//! AMS environment → `$…$` / `$$…$$`, see `super::math`), which applies to
-//! both profiles and is therefore also safe per slice: it only fires on a
-//! complete, code-free span inside one blank-line-delimited block, and a
-//! slice boundary IS a blank line or a fence. Fenced blocks render
-//! identically: highlight, gutter, borders. The cell compose is what
-//! recolors reasoning prose (`thinking_segment_style`); math keeps its own
-//! color in both.
+//! **Thinking vs Content**: the three `Profile`-owned rules are the only place
+//! the profiles differ, plus one shared rule — math delimiter normalization
+//! (`\(…\)` / `\[…\]` / a bare AMS environment → `$…$` / `$$…$$`, see
+//! `super::math`), which applies to both profiles and is slice-safe (it only
+//! fires on a complete, code-free span inside one blank-line-delimited block,
+//! and a slice boundary IS a blank line or a fence). Fenced blocks render
+//! identically: highlight, gutter, borders. The cell compose is what recolors
+//! reasoning prose (`thinking_segment_style`); math keeps its own color.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -126,7 +96,7 @@ enum Mode {
     /// `fence` is the fence running *inside* the item (`- ~~~`, `  ``` `):
     /// while it is open nothing may be cut — the normalization scanner is
     /// inside that fence too, and a cut there would make the two disagree
-    /// about which lines are code (review r3).
+    /// about which lines are code.
     List {
         blank_seen: bool,
         fence: Option<FenceTrack>,
@@ -137,15 +107,14 @@ enum Mode {
     /// The track is [`FenceTrack`] — the shared state machine; this mode only
     /// adds the slice bookkeeping around it.
     FencedCode(FenceTrack),
-    /// A fence that carries a block prefix (`> ~~~`, `- ~~~`): the parser
-    /// still reads it as a code block (prefixes are resolved first), so the
-    /// slice must not cut at the blank lines inside it — a slice starting
-    /// inside a fence body would render its content as prose.
+    /// A fence that carries a block prefix (`> ~~~`, `- ~~~`): the parser still reads
+    /// it as a code block (prefixes are resolved first), so the slice must not cut at
+    /// the blank lines inside it — a slice starting inside a fence body would render
+    /// its content as prose.
     ///
-    /// It deliberately does NOT use the fenced-code path: `FencedCode` drives
-    /// the line-level code cache, which expects a bare fence (language on the
-    /// opener line, no prefix in the body). A prefixed fence stays one
-    /// paragraph-ish slice and renders through the generic path, which is
+    /// Deliberately NOT the fenced-code path: `FencedCode` drives the line-level code
+    /// cache, which expects a bare fence (language on the opener, no prefix in the
+    /// body). A prefixed fence stays one paragraph-ish slice through the generic path —
     /// exactly what the document-level render does with those lines.
     PrefixedFence {
         track: FenceTrack,
@@ -247,15 +216,13 @@ impl CodeCache {
     }
 }
 
-/// Bookkeeping for the OPEN fenced code block's already-composed lines.
+/// Bookkeeping for the OPEN fenced code block's already-composed lines: the top border
+/// and the completed body lines live in `flat` as part of the stable prefix (each sync
+/// appends only newly completed lines), while the trailing partial line and the bottom
+/// border are re-appended transiently beyond `stable_len`.
 ///
-/// The block's top border and its completed body lines live in `flat` as
-/// part of the stable prefix — each sync appends only newly completed
-/// lines. The trailing partial line and the bottom border are re-appended
-/// (transient) and sit beyond `stable_len`.
-///
-/// Dropped (`None`) whenever the composed region becomes invalid: a width
-/// rebuild, the block's promotion, or a gutter-width rewrite.
+/// Dropped (`None`) whenever the composed region becomes invalid: a width rebuild, the
+/// block's promotion, or a gutter-width rewrite.
 #[derive(Clone, Copy)]
 struct CodeFlat {
     /// flat index of the block's top border.
@@ -268,9 +235,9 @@ struct CodeFlat {
 // FlatLines — composed lines and their side channels
 // ============================================================
 
-/// The composed lines of a streaming cell, with the side channels that must
-/// stay index-parallel to them: the markdown link spans (OSC8 injection and
-/// click hit-testing) and the image anchors (the drawing layer).
+/// The composed lines of a streaming cell, plus the side channels that must
+/// stay index-parallel to them: markdown link spans (OSC8 injection and click
+/// hit-testing) and image anchors (the drawing layer).
 ///
 /// Every mutation goes through this type, so the three vectors cannot drift
 /// apart — a `truncate` that missed one of them would silently misplace every
@@ -363,12 +330,11 @@ pub struct StreamingRender {
     /// Separator pending after the last promoted block — emitted when the
     /// next block starts (never dangles at stream end).
     pending_sep: bool,
-    /// Whether the last composed line is a TAIL separator — a separator the
-    /// current frame emitted before the active tail. Unlike a promoted
-    /// block's separator the tail can collapse to nothing on the next sync
-    /// (an indented block that resolves to an empty list item, a list item
-    /// still being typed), so the line is provisional: it is dropped and the
-    /// pending flag restored before the tail is re-rendered.
+    /// Whether the last composed line is a TAIL separator (emitted before the
+    /// active tail). Unlike a promoted block's separator it can collapse on the
+    /// next sync (an indented block that resolves to an empty list item, a list
+    /// item still being typed): the line is provisional — dropped and the pending
+    /// flag restored before the tail is re-rendered.
     tail_sep: bool,
     /// Rendering width; None until the first `lines()` call.
     width: Option<u16>,
@@ -378,19 +344,17 @@ pub struct StreamingRender {
     code_flat: Option<CodeFlat>,
     /// 标题行接管 / 归还 `⦁ `（正文首行子弹）时的原件暂存。
     ///
-    /// 标题行在场时子弹归它：`insert_header_front` 把正文首行的 `⦁ ` 偷走
-    /// （原件放这里）、正文首行就地换成两列续行缩进（等宽，链接 / 图片的列
-    /// 算术不变）；`remove_header_front` 优先把原件原样还回去 —— 两套 profile
-    /// 的子弹样式都不会串。实践中每次 `set_header` 更新（进行中的秒数 /
-    /// 刷光相位每帧在动）都走一轮「还旧、偷新」；暂存件被 `rebuild` /
-    /// `finalize` 清掉时，归还退化成「就地改写前缀」（见 `remove_header_front`）。
+    /// 标题行在场时子弹归它：`insert_header_front` 偷走正文首行的 `⦁ `（原件存
+    /// 这里），正文首行换成两列续行缩进（等宽，链接 / 图片的列算术不变）；
+    /// `remove_header_front` 优先原样还回（每次 `set_header` 更新都走一轮「还旧、
+    /// 偷新」）。暂存件被 `rebuild` / `finalize` 清掉时，归还退化成「就地改前缀」。
     stolen_bullet: Option<Span<'static>>,
-    /// 可选的标题行：cell 顶部的固定一行（思考块展开时保留的
-    /// `⦁ 深度思考中 4s` 标题），由 cell 每帧提供。
+    /// 可选的标题行：cell 顶部的固定一行（思考块展开时保留的 `⦁ 深度思考中 4s`
+    /// 标题），由 cell 每帧提供。
     ///
-    /// 存在这部分行里（而不是 frame 的旁路字段）是**索引一致**的要求：它是
-    /// 正文的**第一行** —— 正文因此拿两列续行缩进，链接 / 图片的行号与高度
-    /// 全都保持"行号 == 索引"，不用在绘制侧做偏移算术。
+    /// 存在这部分行里（而非 frame 的旁路字段）是**索引一致**的要求：它是正文的
+    /// 第一行，正文因此拿两列续行缩进，链接 / 图片的行号与高度保持"行号 ==
+    /// 索引"，绘制侧不用做偏移算术。
     header: Option<Line<'static>>,
     finalized: bool,
     dirty: bool,
@@ -440,10 +404,9 @@ impl StreamingRender {
 
     /// Adopt new image options.
     ///
-    /// Metadata arrives asynchronously (a header probe finishing), and it
-    /// changes how many rows an anchor reserves — so a change invalidates
-    /// every composed line and forces a full rebuild at the next render, the
-    /// same mechanism a width change uses.
+    /// Metadata arrives asynchronously (a header probe finishing) and changes how
+    /// many rows an anchor reserves, so any change invalidates every composed line
+    /// and forces a full rebuild — the same mechanism a width change uses.
     pub fn set_image_opts(&mut self, images: ImageOpts) {
         if self.image_opts == images {
             return;
@@ -686,17 +649,15 @@ impl StreamingRender {
         self.sync(width, palette);
     }
 
-    /// Incremental sync: promote newly-closed blocks, re-render the tail,
-    /// append the cell trailing blank. Requires `self.width == Some(width)`.
+    /// Incremental sync: promote newly-closed blocks, re-render the tail, append
+    /// the cell trailing blank. Requires `self.width == Some(width)`.
     ///
-    /// Separator semantics are DERIVED from the renderer itself: a
-    /// promoted block renders with `trim_trailing_blank: false`, and the
-    /// presence of the renderer's own trailing blank line is exactly what
-    /// the doc-context full render would emit at that boundary
-    /// (paragraph/heading/list/table ends push one via `push_blank_line`;
-    /// code blocks, HTML blocks and quotes ending in code do not). The
-    /// promotion pops that blank and re-emits it lazily before the NEXT
-    /// block, so it never dangles at stream end.
+    /// Separators are DERIVED from the renderer itself: a promoted block renders
+    /// with `trim_trailing_blank: false`, and the renderer's own trailing blank is
+    /// exactly what the doc-context full render emits at that boundary
+    /// (paragraph/heading/list/table ends push one via `push_blank_line`; code
+    /// blocks, HTML blocks and quotes ending in code do not). Promotion pops that
+    /// blank and re-emits it lazily before the NEXT block, so it never dangles.
     fn sync(&mut self, width: u16, palette: &ThemePalette) {
         self.dirty = false;
 
@@ -860,10 +821,9 @@ impl StreamingRender {
 
         // Transient: the provisional tail (a trailing blank run and/or the
         // in-flight partial line — see `fill_code_cache`), rendered through a
-        // highlighter owned by this sync (the committed one must not advance
-        // on lines that may still be retracted; one instance for the whole
-        // run also keeps multi-line constructs closer to their committed
-        // colors, and avoids re-scanning the syntax set per line), then the
+        // highlighter owned by this sync (the committed one must not advance on
+        // lines that may still be retracted; one instance for the whole run also
+        // keeps multi-line constructs closer to their committed colors), then the
         // bottom border.
         let mut pending_hl = cache.lang.as_deref().and_then(new_highlighter);
         for (i, line) in pending.iter().enumerate() {
@@ -892,21 +852,17 @@ impl StreamingRender {
 
     /// Apply the fence-on-own-line normalization to unchecked bytes.
     ///
-    /// Insertions can only occur inside the current (incomplete) line —
-    /// i.e. at offsets ≥ the splitter's line cursor — so splitter offsets
-    /// stay valid. The normalization cursor (`norm_cursor`, kept 2 bytes
-    /// behind the buffer end) upholds that invariant: a ``` found here can
-    /// only start at or after the splitter's last line boundary, because
-    /// the bytes before it are either line-terminated content or too short
-    /// to hold a fence.
+    /// Insertions can only occur inside the current (incomplete) line — at offsets
+    /// ≥ the splitter's line cursor — so splitter offsets stay valid. The
+    /// normalization cursor (`norm_cursor`, kept 2 bytes behind the buffer end)
+    /// upholds that: a ``` found here can only start at or after the splitter's
+    /// last line boundary.
     ///
     /// **Thinking profile**: reasoning text often contains inline ``` references
-    /// to discuss code fences (e.g. `（```rust）`). Normalizing these into
-    /// line-level fences would create spurious code blocks with wrong language
-    /// tags, swallowing the rest of the reasoning inside a code block border.
-    /// Skip normalization entirely — inline ``` stays as literal text. Genuine
-    /// line-start code blocks in reasoning are still detected by the splitter
-    /// via [`fence_open`].
+    /// (e.g. `（```rust）`). Normalizing those into line-level fences would create
+    /// spurious code blocks with wrong language tags, swallowing the rest of the
+    /// reasoning. Normalization is skipped entirely — inline ``` stays literal;
+    /// genuine line-start fences are still detected by the splitter.
     fn normalize_fences(&mut self) {
         if !self.profile.normalizes_inline_fences() {
             self.norm_cursor = self.buf.len().saturating_sub(2);
@@ -919,12 +875,11 @@ impl StreamingRender {
         while let Some(rel) = find_sub(&bytes[i..], b"```") {
             let at = i + rel;
             if at + 3 >= bytes.len() {
-                // The fence run touches the buffer end, so the byte that
-                // decides whether this is a fence (or a fence at EOF) has
-                // not arrived: stop here and re-examine it on the next
-                // push. Deciding now would insert a newline the full path
-                // (which sees the whole text) never would — e.g. an
-                // indented closing fence `  ```  ` split right after its
+                // The fence run touches the buffer end, so the byte that decides
+                // whether this is a fence (or a fence at EOF) has not arrived: stop
+                // and re-examine it on the next push. Deciding now would insert a
+                // newline the full path (which sees the whole text) never would —
+                // e.g. an indented closing fence `  ```  ` split right after its
                 // backticks would be torn out of the code block.
                 deferred = Some(at);
                 break;
@@ -1092,14 +1047,13 @@ impl StreamingRender {
                     && let Some((fc, fl, info)) = fence_open(line)
                 {
                     // A column-0 fence ends the list (an indented fence stays
-                    // inside the item — pulldown keeps it there, and a slice
-                    // cut out of the item would lose the list continuation
-                    // prefix). The line is the OPENER and is consumed here —
-                    // returning it to the FencedCode mode would make the
-                    // splitter read it as its own closer again (a bare fence
-                    // has no info string, so `is_fence_close` matches it),
-                    // which promotes an empty block and renders the whole
-                    // body as prose.
+                    // inside the item — pulldown keeps it there, and a slice cut out
+                    // of the item would lose the list continuation prefix). The line
+                    // is the OPENER and is consumed here — returning it to the
+                    // FencedCode mode would make the splitter read it as its own
+                    // closer again (a bare fence has no info string, so
+                    // `is_fence_close` matches it), which promotes an empty block and
+                    // renders the whole body as prose.
                     self.close_slice(line_start);
                     self.open_code_cache(fc, fl, info);
                     self.split.mode = Mode::FencedCode(FenceTrack::plain(fc, fl));
@@ -1242,18 +1196,17 @@ impl StreamingRender {
     }
 }
 
-/// Compose markdown-level lines into cell-final lines (prefix + thinking
-/// recolor + hard wrap) and extend `flat`.
+/// Compose markdown-level lines into cell-final lines (prefix + thinking recolor
+/// + hard wrap) and extend `flat`.
 ///
-/// Replicates the full renderer's GLOBAL blank-line dedup at the batch
-/// boundary: a standalone slice render can carry leading blank lines
-/// (e.g. a table's `flush_paragraph`) that the doc-context render
-/// would have deduplicated against the preceding block's blank — skip
-/// them when `flat` already ends with a blank line.
+/// Replicates the full renderer's GLOBAL blank-line dedup at the batch boundary: a
+/// standalone slice render can carry leading blank lines (e.g. a table's
+/// `flush_paragraph`) that the doc-context render would have deduplicated against
+/// the preceding block's blank — skip them when `flat` already ends with a blank.
 ///
-/// Free function (not a method) so callers can hold a `&self.buf` slice
-/// and a `&mut self.flat` at the same time — the incremental fenced-code
-/// tail must read the buffer while appending lines.
+/// Free function (not a method) so callers can hold a `&self.buf` slice and a
+/// `&mut self.flat` at the same time — the fenced-code tail must read the buffer
+/// while appending lines.
 fn compose_into<I>(
     flat: &mut FlatLines,
     md_lines: I,
@@ -1377,14 +1330,11 @@ fn drop_code_flat(flat: &mut FlatLines, stable_len: &mut usize, code_flat: &mut 
 
 /// Emit the separator blank line between blocks.
 ///
-/// The full renderer emits an empty `MarkdownLine` and lets the cell compose
-/// prefix it, so the separator is composed the same way instead of being
-/// hand-built: at the top of a cell it takes the first-line prefix (`⦁ `)
-/// exactly like the reference, a block that collapsed into its own blank
-/// line (an indented block resolving to an empty list item) reproduces the
-/// reference's line, and every other position stays the usual two-space
-/// indent. Free function so callers can hold a buffer borrow (the fenced
-/// tail) while composing.
+/// The full renderer emits an empty `MarkdownLine` and lets the cell compose prefix
+/// it, so the separator is composed the same way instead of being hand-built: at
+/// the top of a cell it takes the first-line prefix (`⦁ `) exactly like the
+/// reference, a block that collapsed into its own blank line reproduces the
+/// reference's line, and every other position stays the usual two-space indent.
 fn push_separator(flat: &mut FlatLines, width: u16, palette: &ThemePalette, profile: Profile) {
     compose_into(
         flat,
@@ -1413,12 +1363,10 @@ pub struct StreamLines<'a> {
     pub images: &'a [Vec<ImageSpan>],
 }
 
-/// The reference full-render pipeline for a streaming cell: markdown
-/// render with profile options → cell compose (prefix + thinking recolor)
-/// → hard wrap at `width` → one trailing blank line.
-///
-/// `finalize()` installs exactly this output; the reconcile tests assert
-/// the incremental engine converges to it span-for-span.
+/// The reference full-render pipeline for a streaming cell: markdown render with
+/// profile options → cell compose (prefix + thinking recolor) → hard wrap at
+/// `width` → one trailing blank line. `finalize()` installs exactly this output;
+/// the reconcile tests assert the incremental engine converges to it.
 pub fn full_lines(
     text: &str,
     width: u16,
@@ -1566,10 +1514,9 @@ fn code_bottom_border(theme: &MarkdownTheme) -> MarkdownLine {
 
 /// Opener/body split of a fenced-code slice.
 ///
-/// Returns the body region with the trailing newline run intact (the
-/// closing fence line is excluded when the slice has one) and whether the
-/// opener carries a language label. Refreshes `cache.lang` from the
-/// opener — it is the single source for the top-border label.
+/// Returns the body region with the trailing newline run intact (closing fence
+/// excluded when present) and whether the opener carries a language label.
+/// Refreshes `cache.lang` from the opener — the source for the top-border label.
 fn code_slice_parts<'a>(slice: &'a str, cache: &mut CodeCache) -> (&'a str, bool) {
     let opener_end = slice.find('\n').unwrap_or(slice.len());
     let opener = &slice[..opener_end];
@@ -1602,21 +1549,19 @@ fn code_slice_parts<'a>(slice: &'a str, cache: &mut CodeCache) -> (&'a str, bool
     (body_trimmed, has_language)
 }
 
-/// Drop the trailing `\r` of a NEWLINE-TERMINATED body line: pulldown
-/// normalizes CRLF endings out of the code text, so the reference never
-/// shows that byte — a CRLF stream would otherwise diverge on every line
-/// (and on the span comparison in the reconcile matrix). A bare `\r` with
-/// no line feed after it is content and must NOT be stripped: `str::lines`
-/// keeps it, so it survives into the reference render.
+/// Drop the trailing `\r` of a NEWLINE-TERMINATED body line: pulldown normalizes
+/// CRLF endings out of the code text, so the reference never shows that byte — a
+/// CRLF stream would otherwise diverge on every line. A bare `\r` with no line
+/// feed after it is content and must NOT be stripped (`str::lines` keeps it, so it
+/// survives into the reference render).
 fn strip_cr(line: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
 
-/// Render a fenced code block slice (opener + body [+ closer]) through
-/// the line cache, replicating `render_code_block` output exactly: top
-/// border with language label, gutter (Content + language only), per-line
-/// highlighting (Content) or plain color (Thinking), bottom border —
-/// including for unclosed blocks (matches the full path's
+/// Render a fenced code block slice (opener + body [+ closer]) through the line cache,
+/// replicating `render_code_block` exactly: top border with language label, gutter
+/// (Content + language only), per-line highlighting (Content) or plain color
+/// (Thinking), bottom border — including for unclosed blocks (matches the full path's
 /// `finalize_unclosed_code_block`).
 ///
 /// Used for PROMOTION (a closed block, once): O(lines) by design.
@@ -1657,33 +1602,27 @@ fn code_number_width(cache: &CodeCache, total_lines: usize) -> usize {
     }
 }
 
-/// Fill the cache with the body lines that are FINAL, returning the
-/// provisional tail (lines that may still disappear) and the body's total
-/// line count.
+/// Fill the cache with the body lines that are FINAL, returning the provisional tail
+/// (lines that may still disappear) and the body's total line count.
 ///
 /// A body line is final when nothing can move it again:
 ///
-/// - It is complete — newline-terminated inside the body (an unterminated
-///   last line is the in-flight partial one).
-/// - It is not an EMPTY line with nothing but the trailing newline run
-///   after it. The reference renderer trims that run
-///   (`trim_end_matches('\n')`, CRLF pairs first — see `strip_cr`), so a
-///   blank line that is currently the last thing in the body disappears the
-///   moment the closing fence — or the doc end — arrives. Committing it
-///   early leaves one body line the reference does not have until
-///   `finalize`: the "extra empty line inside a streaming code block" bug,
-///   visible whenever a chunk boundary lands between the blank line and the
-///   closing fence (the cache saw the blank line as an interior line before
-///   the fence closed the block).
+/// - It is complete — newline-terminated inside the body (an unterminated last line is
+///   the in-flight partial one).
+/// - It is not an EMPTY line with nothing but the trailing newline run after it. The
+///   reference renderer trims that run (`trim_end_matches('\n')`, CRLF pairs first —
+///   see `strip_cr`), so such a blank line disappears the moment the closing fence (or
+///   the doc end) arrives. Committing it early leaves one body line the reference does
+///   not have until `finalize` — the "extra empty line inside a streaming code block"
+///   bug, visible whenever a chunk boundary lands between the blank line and the
+///   closing fence.
 ///
-/// Everything after the last final line — the trailing blank run plus, when
-/// the body is mid-line, the partial line — is returned as `pending` and
-/// re-rendered by the caller every sync (statelessly, since a line that can
-/// still be retracted must not advance the highlighter state). Cost stays
-/// O(final lines added): the byte cursor only moves forward, while the
-/// pending tail is re-rendered and bounded by the blank run the model has
-/// emitted so far (normally empty or a line or two, and each line is a
-/// fresh stateless highlight — see [`render_code_line_stateless`]).
+/// Everything after the last final line — the trailing blank run plus, when the body is
+/// mid-line, the partial line — is returned as `pending` and re-rendered by the caller
+/// every sync (statelessly: a line that can still be retracted must not advance the
+/// highlighter state). Cost stays O(final lines added): the byte cursor only moves
+/// forward, and the pending tail is bounded by the blank run emitted so far (normally
+/// empty or a line or two, see [`render_code_line_stateless`]).
 fn fill_code_cache<'a>(
     cache: &mut CodeCache,
     body_trimmed: &'a str,
@@ -1739,13 +1678,13 @@ fn fill_code_cache<'a>(
     (pending, total)
 }
 
-/// The body without its trailing newline run — the bytes the reference
-/// renderer drops (`trim_end_matches('\n')` on the LF-normalized code text).
+/// The body without its trailing newline run — the bytes the reference renderer
+/// drops (`trim_end_matches('\n')` on the LF-normalized code text).
 ///
-/// Scanned from the END so mixed endings work out: a `\n` is consumed, and a
-/// `\r` right in front of a consumed `\n` is part of that CRLF ending and
-/// goes with it (`\r\n\n` = one CRLF line ending plus an empty line). A
-/// trailing `\r` with no line feed after it is content and stops the scan.
+/// Scanned from the END so mixed endings work out: a `\n` is consumed, and a `\r`
+/// right in front of a consumed `\n` belongs to that CRLF ending (`\r\n\n` = one
+/// CRLF ending plus an empty line). A trailing `\r` with no line feed after it is
+/// content and stops the scan.
 fn trim_trailing_code_endings(body: &str) -> &str {
     let bytes = body.as_bytes();
     let mut end = bytes.len();
@@ -1758,32 +1697,29 @@ fn trim_trailing_code_endings(body: &str) -> &str {
     &body[..end]
 }
 
-/// Whether a body line is blank for the reference renderer: empty, or
-/// nothing but the single `\r` of a CRLF ending that pulldown normalizes
-/// away.
+/// Whether a body line is blank for the reference renderer: empty, or nothing but
+/// the single `\r` of a CRLF ending that pulldown normalizes away.
 ///
-/// Exactly one, not "any run of them": pulldown strips only the `\r` that
-/// sits right before the `\n` (`append_code_text` appends the preceding
-/// `\r`s as content), so `"\r\r\n"` is a body line `"\r"` in the
-/// reference and must not be treated as a droppable blank line.
+/// Exactly one, not "any run of them": pulldown strips only the `\r` sitting right
+/// before the `\n` (`append_code_text` appends the preceding `\r`s as content), so
+/// `"\r\r\n"` is a body line `"\r"` in the reference and must not count as blank.
 fn code_line_is_blank(line: &str) -> bool {
     line.is_empty() || line == "\r"
 }
 
-/// Byte offset in the BODY just past the last line that can never move
-/// again: the last COMPLETE, non-blank line's terminator. 0 when there is
-/// none (every line is still provisional). The offset may land past
-/// `trimmed_len` — the last line's terminator then belongs to the body's
-/// trailing newline run — so callers clamp before slicing `trimmed`.
+/// Byte offset in the BODY just past the last line that can never move again: the
+/// last COMPLETE, non-blank line's terminator (0 when there is none — every line is
+/// still provisional). The offset may land past `trimmed_len` (the last line's
+/// terminator then belongs to the body's trailing newline run), so callers clamp
+/// before slicing `trimmed`.
 ///
-/// Offsets are body coordinates on purpose: CRLF endings make the body
-/// longer than `trimmed` while its terminators stay `\n` bytes (the `\r`
-/// in front of one is content to `code_line_is_blank`), and the cache's
-/// byte cursor lives in body coordinates.
+/// Offsets are body coordinates on purpose: CRLF endings make the body longer than
+/// `trimmed` while its terminators stay `\n` bytes, and the cache's byte cursor
+/// lives in body coordinates.
 ///
-/// `body_ends_with_newline` says whether the last line of `trimmed` is
-/// terminated by the newline that starts the body's trailing run (the
-/// reference keeps it), or is the in-flight partial line (it does not).
+/// `body_ends_with_newline` says whether the last line of `trimmed` is terminated by
+/// the newline that starts the body's trailing run (the reference keeps it), or is
+/// the in-flight partial line (it does not).
 fn final_line_end(body: &str, trimmed_len: usize, body_ends_with_newline: bool) -> usize {
     // Walk the lines backwards: `line_end` is the current line's exclusive
     // end (a terminator index), `terminated` whether that terminator exists
@@ -1912,7 +1848,7 @@ pub(crate) fn indent_of(line: &str) -> usize {
 /// multiple of 4 — CommonMark's tab handling (§2.2). Use this whenever an
 /// indentation is compared against something, and [`indent_bytes`] whenever a
 /// line is sliced: the two are different coordinate systems and mixing them is
-/// the defect class of review r4/r5.
+/// a defect class: the two coordinate systems must never be mixed.
 pub(crate) fn indent_columns(line: &str) -> usize {
     let mut col = 0usize;
     for c in line.chars() {
@@ -1925,15 +1861,14 @@ pub(crate) fn indent_columns(line: &str) -> usize {
     col
 }
 
-/// Number of leading whitespace **bytes** (spaces and tabs) — i.e. the byte
-/// offset of the first non-whitespace character.
+/// Number of leading whitespace **bytes** (spaces and tabs) — the byte offset of the
+/// first non-whitespace character.
 ///
-/// Distinct from [`indent_of`], which returns **columns** (a tab counts as
-/// four): the two agree only up to three columns of spaces — and those are
-/// exactly the cases in which the shape helpers below are allowed to look past
-/// the indentation. Anything that *slices* a line must use this one; anything
-/// that compares indentation against CommonMark's limits (≤3 for a fence or a
-/// list marker, ≥4 for an indented block) must use `indent_of`.
+/// Distinct from [`indent_of`], which returns **columns** (a tab counts as four): the
+/// two agree only up to three columns of spaces — exactly the cases where the shape
+/// helpers below may look past the indentation. Anything that *slices* a line must use
+/// this one; anything that compares indentation against CommonMark's limits (≤3 for a
+/// fence or list marker, ≥4 for an indented block) must use `indent_of`.
 fn indent_bytes(line: &str) -> usize {
     line.bytes()
         .take_while(|&b| b == b' ' || b == b'\t')
@@ -1942,13 +1877,11 @@ fn indent_bytes(line: &str) -> usize {
 
 /// The fenced-code state of a line sequence.
 ///
-/// **Single source of truth** for "which lines are code": the streaming
-/// splitter (slice boundaries) and the math normalization scanner (rewrite
-/// suppression) both drive this type. They used to carry two hand-written
-/// copies of the same rules, and the copies drifted — the scanner kept
-/// treating a prefix-less fence line as a closer while the splitter already
-/// knew it opens a new top-level fence (review r3), which rewrote code-block
-/// content in the final render.
+/// **Single source of truth** for "which lines are code": the streaming splitter
+/// (slice boundaries) and the math normalization scanner (rewrite suppression) both
+/// drive this type. Two hand-written copies of these rules drifted once — the scanner
+/// kept treating a prefix-less fence line as a closer while the splitter already knew
+/// it opens a new top-level fence — and rewrote code-block content in the final render.
 ///
 /// The rules below are the only place that decides; add a caller, not a copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1965,11 +1898,11 @@ pub(crate) struct FenceTrack {
     item_col: Option<(usize, usize)>,
     /// The tracked item has seen a non-blank content line since its marker.
     ///
-    /// An EMPTY item ends at a blank line, so an indented, prefix-less fence
-    /// line after blanks is a NEW top-level fence, not the item's content —
-    /// `  - ~~~~/ - / ␣␣ / ␣␣ / ␤ / "  ~~~~"` swallows what follows, while the
-    /// same shape without the blanks (`- ~~~/ - / "  ~~~"`) closes the fence
-    /// and leaves the rest prose (pulldown, review r4 / S1).
+    /// An EMPTY item ends at a blank line, so an indented, prefix-less fence line after
+    /// blanks is a NEW top-level fence, not the item's content —
+    /// `  - ~~~~/ - / ␣␣ / ␣␣ / ␤ / "  ~~~~"` swallows what follows, while the same
+    /// shape without the blanks (`- ~~~/ - / "  ~~~"`) closes the fence and leaves the
+    /// rest prose (pulldown).
     item_has_content: bool,
     /// A blank line has been seen since the last marker / content line.
     seen_blank: bool,
@@ -2034,16 +1967,16 @@ impl FenceTrack {
         {
             // A non-blank line that is not the item's content. Two cases:
             //
-            // * a LIST ITEM MARKER (`- a`, `1. b`, `  - c`, `1. `): this item
-            //   ended — a nested list would have to be indented at least at
-            //   this item's content column, and the line is less indented than
-            //   that. The marker opens a NEW item, whose own content column
-            //   governs what follows (`1. ~~~` + `  - c` + `   ~~~`: the last
-            //   line at column 3 is below the new item's column 4, so it is a
-            //   top-level fence, exactly as the parser reads it). Adopt it;
+            // * a LIST ITEM MARKER (`- a`, `1. b`, `  - c`, `1. `): this item ended —
+            //   a nested list would have to be indented at least at this item's
+            //   content column, and the line is less indented than that. The marker
+            //   opens a NEW item, whose own content column governs what follows
+            //   (`1. ~~~` + `  - c` + `   ~~~`: the last line at column 3 is below the
+            //   new item's column 4, so it is a top-level fence, as the parser reads
+            //   it). Adopt it;
             // * anything else (a paragraph line, a quote, …): the content was
-            //   interrupted, so an indented fence line can no longer be the
-            //   item's closer (see `container_gone`).
+            //   interrupted, so an indented fence line can no longer be the item's
+            //   closer (see `container_gone`).
             //
             // Blank lines are fence body, not content that interrupts the item.
             if let Some(len) = list_marker_len(line) {
@@ -2208,21 +2141,20 @@ fn split_fence_line(opener: &str) -> (&str, &str) {
     (&rest[run..], "")
 }
 
-/// The block prefix in front of a line's content, in **both** coordinate
-/// systems — one walk, so nothing can disagree about where the content starts:
+/// The block prefix in front of a line's content, in **both** coordinate systems —
+/// one walk, so nothing can disagree about where the content starts:
 ///
 /// ```text
 /// Prefix { bytes, columns, quotes, item: Option<(marker columns, content columns)> }
 /// ```
 ///
 /// * `bytes` — where to slice (the callers that need a `&str`);
-/// * `columns` — where the content *is*, with tabs advanced to the next
-///   multiple of 4 (CommonMark §2.2): indentation comparisons must use this,
-///   never `bytes` (mixing them was the defect class of review r4/r5);
-/// * `quotes` — how many `>` markers the chain has (an HTML block ends when its
-///   own chain does, so it needs this);
-/// * `item` — the innermost list item's content columns, from which the
-///   fence tracker derives the item's content column.
+/// * `columns` — where the content *is*, with tabs advanced to the next multiple of 4
+///   (CommonMark §2.2): indentation comparisons must use this, never `bytes`;
+/// * `quotes` — how many `>` markers the chain has (an HTML block ends when its own
+///   chain does, so it needs this);
+/// * `item` — the innermost list item's content columns, from which the fence tracker
+///   derives the item's content column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) struct Prefix {
     pub(crate) bytes: usize,
@@ -2309,8 +2241,7 @@ fn list_marker_bounds(s: &str, col0: usize) -> Option<(usize, usize)> {
     // 4 (CommonMark §5.2 + tab handling): `-\titem` has 3 columns of padding,
     // `  - \titem` has 5 and therefore starts its content after one space — a
     // tab counted as a single byte would put the item's content column in the
-    // wrong place and turn an indented code block into a paragraph
-    // (review r5 / S3).
+    // wrong place and turn an indented code block into a paragraph.
     let marker_end_col = col0 + marker;
     let mut at = marker;
     let mut col = marker_end_col;
@@ -2356,13 +2287,13 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // Hard wrap — over-wide lines split at display width
 // ============================================================
 
-/// Split lines wider than `width` display columns, preserving span
-/// styles. Prose is already pre-wrapped by the markdown pipeline; this
-/// catches code/border/table lines (and any pathological over-wide
-/// content) so every line in the flat buffer can be blitted directly.
+/// Split lines wider than `width` display columns, preserving span styles. Prose is
+/// already pre-wrapped by the markdown pipeline; this catches code/border/table lines
+/// (and any pathological over-wide content) so every line in the flat buffer can be
+/// blitted directly.
 ///
-/// Continuation lines drop leading spaces (break-at-space semantics) and
-/// never re-emit the cell prefix.
+/// Continuation lines drop leading spaces (break-at-space semantics) and never
+/// re-emit the cell prefix.
 #[cfg(test)]
 fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     hard_wrap_lines_with_links(lines, Vec::new(), Vec::new(), width).0
@@ -2370,17 +2301,15 @@ fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>
 
 /// [`hard_wrap_lines`] keeping the side channels aligned with the output rows.
 ///
-/// A line that fits keeps its spans unchanged (the common case — prose is
-/// pre-wrapped upstream, so links are not split here). A line that has to be
-/// split loses its spans: the split re-flows the text at arbitrary character
-/// boundaries, and guessing where a link's text landed would risk pointing a
-/// click at the wrong target — the link simply stays inactive on those rows.
+/// A line that fits keeps its spans unchanged (the common case — prose is pre-wrapped
+/// upstream, so links are not split here). A line that has to be split loses its
+/// spans: the split re-flows the text at arbitrary character boundaries, and guessing
+/// where a link's text landed would risk pointing a click at the wrong target — the
+/// link simply stays inactive on those rows.
 ///
-/// `images` carries an image anchor **on its caption row** so that the anchor
-/// follows its line through the split: the returned vector is index-aligned
-/// with the output rows, and a split row drops its anchor (a re-flowed anchor
-/// box has no meaningful geometry — it cannot happen in practice, the anchor's
-/// own rows always fit the width).
+/// `images` carries an image anchor **on its caption row** so the anchor follows its
+/// line through the split: the returned vector is index-aligned with the output rows,
+/// and a split row drops its anchor.
 fn hard_wrap_lines_with_links(
     lines: Vec<Line<'static>>,
     links: Vec<Vec<LinkSpan>>,
@@ -2501,7 +2430,7 @@ mod tests {
         assert_eq!(fence_close_len("text"), None);
     }
 
-    /// The shared fence rules (review r3): both the splitter and the math
+    /// The shared fence rules: both the splitter and the math
     /// scanner drive `FenceTrack::step`, so these assertions pin the single
     /// source of truth. A prefix-less fence line after a PREFIXED fence is a
     /// new top-level fence, not that fence's closer — the rule the math
@@ -2542,15 +2471,14 @@ mod tests {
         assert_eq!(step(listed, "~~~"), FenceStep::OpensTopLevel);
 
         // Blank lines are fence body: they neither close the fence nor end
-        // the item (review r3: a fence body with blanks must keep its closer).
+        // the item (a fence body with blanks must keep its closer).
         let (listed, s) = listed.step("");
         assert_eq!(s, FenceStep::Body);
         assert_eq!(step(listed, "  ~~~"), FenceStep::Closes);
 
         // …but once a non-blank line that cannot be item content showed up, the
         // item's fence is over as well: an indented fence line is then a NEW
-        // top-level fence, exactly as the parser reads it (review r3: the
-        // corpus case `- ~~~\n> \n  ~~~\n\n\(x\) T`).
+        // top-level fence, exactly as the parser reads it (`- ~~~\n> \n  ~~~\n\n\(x\) T`).
         let (listed, s) = listed.step("> ");
         assert_eq!(s, FenceStep::Body);
         assert_eq!(step(listed, "  ~~~"), FenceStep::OpensTopLevel);
@@ -2558,8 +2486,7 @@ mod tests {
 
     /// `content_start` must never slice at a **column** count: `indent_of`
     /// reports a tab as four columns, and `&line[4..]` is not a character
-    /// boundary in general (review r2 / B1: this panicked the TUI on any
-    /// tab-indented line that reached the streaming splitter).
+    /// boundary in general (a tab-indented line used to panic the TUI here).
     #[test]
     fn content_start_is_tab_safe() {
         // Plain prefixes still resolve.
@@ -2613,7 +2540,7 @@ mod tests {
         );
         // Columns, not bytes: a tab advances to the next multiple of 4, so the
         // item's content column is 8 — an indented code block, as the parser
-        // reads it (review r5 / S3).
+        // reads it.
         assert_eq!(
             prefixed_fence_open("  - \titem").map(|t| t.item_col),
             None,
@@ -2622,7 +2549,7 @@ mod tests {
         // Columns, not bytes: `" \t"` is 5 COLUMNS of padding, so the content
         // starts after the first whitespace character (the tab, byte 4) — its
         // own 4 columns of indent make it an indented code block, exactly as
-        // the parser reads it (review r5 / S3).
+        // the parser reads it.
         assert_eq!(
             prefix("  - \titem"),
             Prefix {
@@ -3148,7 +3075,7 @@ mod tests {
     }
 
     /// 标题行首部插入 / 摘除时，锚点的**绝对**行号跟着平移 —— 否则绘制侧按
-    /// 错行找 caption、拒绘，图片静默消失（评审 B）。逐条安装路径回归：
+    /// 错行找 caption、拒绘，图片静默消失。逐条安装路径回归：
     /// 先设标题 / 晚设 / finalize 重装 / 宽度 rebuild / 摘标题。
     #[test]
     fn a_header_shifts_the_anchor_rows_on_every_install_path() {

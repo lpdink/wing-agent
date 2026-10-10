@@ -495,36 +495,29 @@ class WingAgent:
     async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。
 
-        积压在**等锁之前**清（入口处同步执行）：打断时刻之前排队的输入视为
-        放弃；推迟到拿锁之后再清会把锁等待期间新到的消息（客户端 POST 已
-        返回 ok）一并吞掉——排队等待期在正常路径就有秒级，单次降级路径最长
-        ~18s（排队在另一个 interrupt 之后还会叠加）。hooks 与收口在锁内：
-        注定排队的请求不提前杀掉在途 turn 的前台工具，也不会并发重建出
-        第二个消费者。
+        积压在**等锁之前**清（入口处同步执行）：打断时刻之前排队的输入视为放弃；推迟到拿锁之后再清会
+        把锁等待期间新到的消息（客户端 POST 已返回 ok）一并吞掉——排队等待期在正常路径就有秒级，单次
+        降级路径最长 ~18s。hooks 与收口在锁内：注定排队的请求不提前杀掉在途 turn 的前台工具，也不会
+        并发重建出第二个消费者。
 
-        收口等待是**有界**的取消阶梯（见 `_stop_worker`）：worker 在阶梯内
-        始终不终止时**保留旧 worker**（绝不重建第二个，避免两个 worker 抢
-        同一个 inbox），打 ERROR 并广播 notice 后立即返回；同时登记终局
-        续期——被保留的 worker 随后若自然终止且仍是当前 worker，自动重建
-        消费者（否则消息进 inbox 无人消费）。interrupt 绝不会因为 worker
-        不响应而永久持有 `_interrupt_lock`。`_closing`（shutdown 的终局闸门）
-        同样挡住这里的重建：已关闭的 agent 不会被 interrupt 复活。
+        收口等待是**有界**的取消阶梯（见 `_stop_worker`）：worker 在阶梯内始终不终止时**保留旧
+        worker**（绝不重建第二个，避免两个 worker 抢同一个 inbox），打 ERROR 并广播 notice 后立即
+        返回；同时登记终局续期——被保留的 worker 随后若自然终止且仍是当前 worker，自动重建消费者
+        （否则消息进 inbox 无人消费）。interrupt 绝不会因为 worker 不响应而永久持有
+        `_interrupt_lock`。`_closing`（shutdown 的终局闸门）同样挡住这里的重建：已关闭的 agent 不会
+        被 interrupt 复活。
 
         Returns:
-            被放弃的积压输入的 `request_id` 列表（打断时刻已排队、尚未被
-            消费的输入）。调用方（runtime）把它带进 `InterruptedEvent`——
-            前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待期间
-            新到的消息。
+            被放弃的积压输入的 `request_id` 列表（打断时刻已排队、尚未被消费）。调用方（runtime）
+            把它带进 `InterruptedEvent`——前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待
+            期间新到的消息。
 
-        正常返回（含阶梯耗尽的**降级**路径——那时 `worker_stopped=False`、
-        前面另有 ERROR + notice）必有且**仅**一条 INFO（
-        `Agent interrupt complete: …`，与 `shutdown()` 的
-        `Agent shutdown complete: …` 对称）：session id、worker 是否终止、
-        consumer 是否重建、入口到返回的总耗时（含等锁与取消阶梯）、被丢弃
-        的积压数（口径：**带 `request_id`** 的排队项——内部直投不带 id，
-        被清但不计数）——打断过程本身必须可 grep，而不是只能从前端事件流 /
-        history 反推。阶梯中间步骤仍是 WARNING 级、阶梯耗尽另有 ERROR +
-        notice（既有形态，不在此重复）。
+        正常返回（含阶梯耗尽的**降级**路径——那时 `worker_stopped=False`、前面另有 ERROR + notice）
+        必有且**仅**一条 INFO（`Agent interrupt complete: …`，与 `shutdown()` 的
+        `Agent shutdown complete: …` 对称）：session id、worker 是否终止、consumer 是否重建、入口到
+        返回的总耗时（含等锁与取消阶梯）、被丢弃的积压数（口径：**带 `request_id`** 的排队项——内部
+        直投不带 id，被清但不计数）——打断过程本身必须可 grep。阶梯中间步骤是 WARNING 级、阶梯耗尽
+        另有 ERROR + notice。
         """
         started = time.monotonic()
         self._inbox.cancel_all_waiters()

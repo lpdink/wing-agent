@@ -229,7 +229,7 @@ def _endpoint_of(parsed: Any) -> tuple[str, int] | None:
     - 顶层解析不出映射 ⇒ ``None``（调用方回落默认；Rust 侧「整份解析失败」同价）；
     - ``gateway`` 段缺失 ⇒ 两字段都用声明默认值（Rust ``GatewaySection::default()``）；
     - 段里**某个字段类型不对** ⇒ **整段**回落默认值（Rust：serde 反序列化失败 →
-      最外层 ``#[serde(default)]`` 整份回落；不是逐字段回落——审查 N4）；
+      最外层 ``#[serde(default)]`` 整份回落；不是逐字段回落）；
     - 字段缺失（但存在的那些类型都对）⇒ 逐字段回落（Rust 的 ``#[serde(default)]``
       按字段生效）。
     """

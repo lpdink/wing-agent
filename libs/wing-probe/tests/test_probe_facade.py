@@ -419,7 +419,7 @@ async def test_dump_copies_aux_kv_files(tmp_path: Path) -> None:
     assert json.loads(copied.read_text(encoding="utf-8")) == pending
 
 
-# ── 文件断言器解析的 workspace（review N5） ─────────────────
+# ── 文件断言器解析的 workspace ─────────────────
 
 
 def test_files_of_session_id_reads_metadata_workspace(tmp_path: Path) -> None:

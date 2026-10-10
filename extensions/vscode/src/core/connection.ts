@@ -83,7 +83,7 @@ export interface GatewayConnectionOptions {
    * Full WS URL, e.g. from `gatewayUrls({ host, port }).wsUrl`.
    *
    * Never carries credentials: a key in a query string leaks into every layer
-   * that logs a request line (review #109 [P3-6]) — see {@link headers}.
+   * that logs a request line — see {@link headers}.
    */
   readonly wsUrl: string;
   /**

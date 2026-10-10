@@ -210,7 +210,7 @@ class TestProviderResetKeepsSessionSwitches:
     async def test_pool_reset_refreshes_loop_retry_config(self, sm, monkeypatch):
         """reload 后 loop 的无效轮次重试口径跟随新 provider 配置。
 
-        回归（审查发现）：旧实现逐会话 rebuild 时同步 `_loop._config`；共享池
+        回归：旧实现逐会话 rebuild 时同步 `_loop._config`；共享池
         化后没有逐会话同步点——`_config` 改为实时解析当前 provider 配置，
         reload 换新后自动生效（无需任何广播 / 重贴）。
         """

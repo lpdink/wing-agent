@@ -8,26 +8,25 @@
 //!                                                  └── waker() ⟶ wake the host's event loop
 //! ```
 //!
-//! The UI thread does nothing but hash lookups: [`ImageStore::request`] /
-//! [`ImageStore::meta`] return immediately, and [`ImageStore::poll`] moves finished work into
-//! the cache. Every file read, decode and protocol encode happens on the worker.
+//! The UI thread does nothing but hash lookups: [`ImageStore::request`] / [`ImageStore::meta`]
+//! return immediately, and [`ImageStore::poll`] moves finished work into the cache. Every file read,
+//! decode and protocol encode happens on the worker.
 //!
-//! The store is UI-thread state with a single owner and no locking (the cache holds
-//! `Arc`-shared protocols that the same thread paints). The worker never touches it — it sees
-//! only jobs, results and an `AtomicU64` generation. The whole pipeline is nevertheless `Send`
-//! (asserted in the tests), so the App can hold the store without any thread-affinity dance.
+//! The store is UI-thread state with a single owner and no locking (the cache holds `Arc`-shared
+//! protocols that the same thread paints). The worker never touches it — it sees only jobs, results
+//! and an `AtomicU64` generation. The whole pipeline is nevertheless `Send` (asserted in the tests),
+//! so the App can hold the store without any thread-affinity dance.
 //!
 //! # Lifecycle
 //!
-//! Dropping the store drops the job sender, so the worker's `recv()` fails and the thread
-//! exits after finishing whatever it was doing. There is no daemon and nothing to join.
+//! Dropping the store drops the job sender, so the worker's `recv()` fails and the thread exits after
+//! finishing whatever it was doing. There is no daemon and nothing to join.
 //!
-//! The reverse direction is guarded too: if the worker ever goes away (a panic that escaped a
-//! job guard, or a host waker that aborts the process's threads), the store notices — a failed
-//! send or a closed result channel — and every later call answers
-//! [`Unavailable::WorkerFailed`] instead of waiting forever for an answer that cannot come.
-//! The pipeline never pretends to be healthy; it degrades to the caller's text rendering,
-//! with the reason attached.
+//! The reverse direction is guarded too: if the worker ever goes away (a panic that escaped a job
+//! guard, or a host waker that aborts the process's threads), the store notices — a failed send or a
+//! closed result channel — and every later call answers [`Unavailable::WorkerFailed`] instead of
+//! waiting forever for an answer that cannot come. The pipeline never pretends to be healthy; it
+//! degrades to the caller's text rendering, with the reason attached.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1199,7 +1198,7 @@ mod tests {
         );
     }
 
-    /// PR #135 review, S1: the probe that admitted the path and the encode that
+    /// The probe that admitted the path and the encode that
     /// reads it are a frame or more apart, and the file can be replaced in
     /// between — exactly what "the model rewrote the same picture" looks like.
     /// The budgets must hold at the read, not only at the probe: without the
@@ -1498,7 +1497,7 @@ mod tests {
 
     #[test]
     fn an_invalidation_does_not_strand_a_queued_probe() {
-        // Regression for review r1 / B1: a probe waiting behind a long job while the caller
+        // Regression: a probe waiting behind a long job while the caller
         // calls `invalidate()` (resize, `terminal.clear()`, font change — all normal) used to
         // be dropped by the generation gate with nobody left to answer it: the path stayed
         // `Pending` for the rest of the session.
@@ -1536,7 +1535,7 @@ mod tests {
     fn a_refresh_racing_a_queued_probe_still_answers_it() {
         // Same shape as the invalidation race, driven by `refresh` of an unrelated path.
         //
-        // Attribution (review r2 / N12): this one pins the *combination* of both B1 layers —
+        // Pins the *combination* of both layers —
         // reviving either layer alone still passes here, which is exactly why it is worth
         // keeping (it is the user-visible symptom). The single-layer discriminators are
         // `the_worker_never_skips_a_queued_probe` (probes survive a moved generation) and
@@ -1572,7 +1571,7 @@ mod tests {
 
     #[test]
     fn a_dead_worker_is_reported_instead_of_staying_pending() {
-        // Review r1 / S1: when the worker's channels close (a panic past the guards, or any
+        // when the worker's channels close (a panic past the guards, or any
         // early exit), every request must say so instead of waiting forever for an answer.
         let dir = TempDir::new("store-worker-dead");
         let path = fixture(&dir, "plot.png", 40, 30);
@@ -1599,7 +1598,7 @@ mod tests {
 
     #[test]
     fn a_dead_worker_clears_the_in_flight_count() {
-        // Review r2 / N11: `in_flight` is a diagnostic, and a diagnostic must not claim jobs
+        // `in_flight` is a diagnostic, and a diagnostic must not claim jobs
         // that died with the worker.
         let dir = TempDir::new("store-dead-inflight");
         let path = fixture(&dir, "plot.png", 400, 200);
@@ -1650,7 +1649,7 @@ mod tests {
     #[test]
     fn a_panicking_waker_does_not_kill_the_pipeline() {
         // The host's callback runs on the worker thread; a panic in it used to take the whole
-        // graphics layer down with it (review r1 / S1).
+        // graphics layer down with it.
         let dir = TempDir::new("store-waker-panic");
         let path = fixture(&dir, "plot.png", 60, 30);
         let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(|| panic!("host waker blew up"));

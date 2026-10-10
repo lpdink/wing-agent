@@ -284,6 +284,8 @@ make fmt                          # 格式化全部
 
 **后端特性测试约定**：开发后端特性（新增 / 修改 `libs/core` 的行为——上下文链、事件、协议、工具、网关等）时，**必须在 `libs/wing-probe/` 下增加真实有效的测试**：断言场景用代码写（`scenarios/`，不写配置文件），经公开 HTTP / WS 协议驱动"真网关 + 假 Provider"；`make test-probe` 与 CI 的 `probe-check` job 会强制其通过。**上下文红线**（compact / rewind / fork 等一切对上下文的操作）的行为变更必须配套红线断言。详见 [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
 
+**注释纪律**：注释**宁缺毋滥**，只承载代码本身读不出的信息——不变量、协议 / 契约、红线、非显然的 why（平台差异、竞态、外部约束）。保持**高信息密度**：函数 / 类型名已说清的不复述，同一主题的连续多行注释压成要点式，与代码不符的过期注释直接删。**严禁**添加「解释自己这处改动为什么正确」的辩护式注释（"原来 XX 会出问题"、"这样改是对的"、"按评审意见修成…"）——改动理由写进 commit message / PR 正文。
+
 ## 分发
 
 - **Python**：`pip install wing-agent` → 安装 `wing-gateway`（Python 网关）与 `wing-cli`（maturin 构建的 Rust 二进制，提供 `wing` 命令）。

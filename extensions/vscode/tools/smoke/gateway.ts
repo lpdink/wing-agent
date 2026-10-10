@@ -172,7 +172,7 @@ export interface SmokeGatewayOptions {
   /**
    * `WING_SMOKE_AUTH_KEY` — when set, the generated config requires it.
    *
-   * The point is to prove the *header* auth path (review #109 [P3-6]) against
+   * The point is to prove the *header* auth path against
    * the real gateway: HTTP and WS both carry `Authorization: Bearer …`, so a
    * green run means a user with `wing.apiKey` set can connect. Default `null`
    * keeps the smoke on the ordinary no-auth configuration.

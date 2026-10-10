@@ -1846,7 +1846,7 @@ mod tests {
         assert!(anchors.iter().all(|a| a.rows == 30 && a.cols == 80));
     }
 
-    // ── Multi-line alt (PR #135 review, blocker B) ─────────────────
+    // ── Multi-line alt ─────────────────
     //
     // A soft break inside the label flushes the line the label started on
     // (`Event::SoftBreak` → `flush_line`), so the `label_start_segment_idx`
@@ -1860,7 +1860,7 @@ mod tests {
     /// (the crash needed ≥ 2: one segment survives the flush, so `[2..]` and
     /// `[3..]` are the out-of-range ones) and in every enclosing block.
     const CROSS_LINE_ALT_SHAPES: &[&str] = &[
-        // The review's minimal input: two segments (`foo ` + code `bar`).
+        // Minimal input: two segments (`foo ` + code `bar`).
         "foo `bar` ![l1\nl2](a.png)",
         // Two adjacent inline-code segments, and a longer prefix.
         "`a` `b` ![l1\nl2](a.png)",
@@ -1904,7 +1904,7 @@ mod tests {
 
     #[test]
     fn cross_line_alt_keeps_the_baseline_rendering() {
-        // The exact review input, pinned segment by segment (this is what
+        // Pinned segment by segment (this is what
         // `origin/develop` renders for it — verified against the baseline
         // binary, see the step's design.md):
         //   line 1: `foo ` · inline code `bar` · ` ` · link label `l1`
@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn cross_line_alt_survives_math_and_images_off() {
-        // The review found both switches unable to dodge the panic (it is in
+        // Both switches are unable to dodge the panic (it is in
         // the parser, before either option is consulted) — pin that both are
         // clean now, and that the output does not depend on the math mode.
         let math_off = ThemePalette {

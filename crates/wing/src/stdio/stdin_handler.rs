@@ -1,21 +1,19 @@
 //! stdin handler for `--input-format stream-json` mode.
 //!
-//! stdin 是**常驻控制通道**：SDK（Claude Agent SDK / CloudCLI）在 turn 期间仍会
-//! 写 `control_request`（`interrupt` 等）与 `keep_alive`；凡被 SDK await 的控制
-//! 请求**必须有应答**，否则编排器的"停止"按钮永远等不到结果。
+//! stdin 是**常驻控制通道**：SDK（Claude Agent SDK / CloudCLI）在 turn 期间仍会写 `control_request`
+//! （`interrupt` 等）与 `keep_alive`；凡被 SDK await 的控制请求**必须有应答**，否则编排器的"停止"
+//! 按钮永远等不到结果。
 //!
-//! 分工：pump 负责「读一行 → 分类 → 应答 / 投递」，与 turn 驱动（`run_stdio`
-//! 的事件循环）通过两条通道协作——`mpsc` 按到达顺序投递 `user` 消息（常驻模式下
-//! 由驱动侧逐条转发给网关），`watch<shutdown>` 接收收尾信号。所有 stdout 写入经
-//! 共享的 [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
+//! 分工：pump 负责「读一行 → 分类 → 应答 / 投递」，与 turn 驱动（`run_stdio` 的事件循环）通过两条
+//! 通道协作——`mpsc` 按到达顺序投递 `user` 消息（常驻模式下由驱动侧逐条转发给网关），
+//! `watch<shutdown>` 接收收尾信号。所有 stdout 写入经共享的
+//! [`StdoutSink`](crate::stdio::stdout::StdoutSink) 串行化。
 //!
-//! 多轮语义（`--input-format stream-json` + `--output-format stream-json`）：pump
-//! 是常驻消息通道，轮间与轮中的每条 `user` 消息都投递给驱动侧（转发
-//! `POST /api/session/send`，由网关 inbox 决定 steer / 排队）；进程在 stdin EOF
-//! 时收尾，而不是在 `result` 帧后退出（见 `crate::stdio::ExitPolicy`）。
-//!
-//! 一次性语义（非常驻）：只有首条 `user` 消息有归宿——它要么是 prompt（CLI 未给
-//! `-p`），要么被丢弃（CLI 已给 prompt）；其余消息记日志丢弃。
+//! 多轮语义（`--input-format stream-json` + `--output-format stream-json`）：pump 是常驻消息通道，
+//! 轮间与轮中的每条 `user` 消息都投递给驱动侧（转发 `POST /api/session/send`，由网关 inbox 决定
+//! steer / 排队）；进程在 stdin EOF 时收尾，而不是在 `result` 帧后退出（见
+//! `crate::stdio::ExitPolicy`）。一次性语义（非常驻）：只有首条 `user` 消息有归宿——它要么是 prompt
+//! （CLI 未给 `-p`），要么被丢弃（CLI 已给 prompt）；其余消息记日志丢弃。
 
 use std::collections::HashMap;
 use std::future::Future;

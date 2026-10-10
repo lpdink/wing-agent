@@ -1,22 +1,15 @@
 // ---------------------------------------------------------------------------
 // 来源（vendored，逐字内联）
-//   crate   : rust-latex-parser
-//   version : 0.1.0
+//   crate   : rust-latex-parser 0.1.0 — MIT, Copyright (c) 2026 William-Selna
+//             （原文见 crate 根 LICENSE-MIT-rust-latex-parser；上游 crate 未随包附 LICENSE 文件）
 //   repo    : https://github.com/William-Selna/Rust-LaTeX-Parser
 //             （发布时 .cargo_vcs_info.json git sha1 = 086d394561465b4154272951f5cd524f77855e99）
-//   license : MIT，Copyright (c) 2026 William-Selna
-//             （原文见 crate 根 LICENSE-MIT-rust-latex-parser；上游 crate 未随包附 LICENSE 文件，
-//               本文件由仓库 LICENSE 取得）
 //   原路径  : ast.rs
 //
-// 本地改动（相对上游）：
-//   1. 模块路径：`crate::ast` -> `crate::latex::ast`，`rust_latex_parser::`
-//      -> `crate::latex::`（内联后模块位置变化）。
-//   2. doc 示例里的 use 路径同步改写为 `wing_math::latex::...`。
-//   3. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt
-//      处理，因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，
-//      除上述改动外逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   除以上三点外与上游逐字一致（含文件内联测试）。
+// 本地改动（相对上游）：模块路径 `crate::ast` -> `crate::latex::ast`、`rust_latex_parser::` ->
+// `crate::latex::`，doc 示例里的 use 路径同步改写为 `wing_math::latex::...`；运行过 `cargo fmt`
+// （门禁要求 `cargo fmt --check` 干净，上游文件未经 rustfmt 处理，故有纯空白差异；已用「先 rustfmt
+// 上游文件、再与本文件逐行 diff」核对）。除上述改动外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! AST types for the equation layout tree.

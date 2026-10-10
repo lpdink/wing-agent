@@ -1,6 +1,6 @@
 """Message 单一存储测试——assistant 消息只存 content_blocks，扁平字段实时派生。
 
-锁定 PR #59 第二轮 review 的核心决策：消灭双存储与手动同步
+锁定核心决策：消灭双存储与手动同步
 （sync_flat_from_blocks），content / reasoning_content / tool_calls 为
 实时派生访问器；存量旧格式 JSONL 干净加载；序列化导出向后兼容。
 """

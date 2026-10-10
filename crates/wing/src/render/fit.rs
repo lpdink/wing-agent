@@ -1,27 +1,22 @@
 //! Pixels into cells: the one place where a picture meets a character box.
 //!
-//! Two layers need the same answer to "how many cells does this picture
-//! occupy?", and they must never disagree:
+//! Two layers need the same answer to "how many cells does this picture occupy?", and they must
+//! never disagree:
 //!
 //! * the **layout** reserves an anchor's rows before anything is decoded —
-//!   `render/markdown/images.rs::anchor_rows`, whose result is a cell's height
-//!   cache entry and part of the streaming engine's "resting state == the
-//!   reference render" invariant;
-//! * the **encoder** (`ui/image/encode.rs`) computes the cell footprint it is
-//!   about to paint from the whole decoded image.
+//!   `render/markdown/images.rs::anchor_rows`, whose result is a cell's height cache entry and part
+//!   of the streaming engine's "resting state == the reference render" invariant;
+//! * the **encoder** (`ui/image/encode.rs`) computes the cell footprint it is about to paint from
+//!   the whole decoded image.
 //!
-//! One row too many leaves a blank band under the picture; one too few and the
-//! picture covers the text below it. So both call [`fit_cells`]: the layout
-//! passes the header's pixel dimensions, the encoder passes the decoded
-//! image's.
+//! One row too many leaves a blank band under the picture; one too few and the picture covers the
+//! text below it. So both call [`fit_cells`]: the layout passes the header's pixel dimensions, the
+//! encoder passes the decoded image's.
 //!
-//! # The arithmetic is `ratatui-image`'s
-//!
-//! [`fit_cells`] is a port of `ratatui_image::Resize::Fit(None)::size_for`,
-//! narrowed to plain pixel dimensions so the layout can use it without a
-//! decoded image (the layout never touches the filesystem). The port is
-//! asserted against the upstream function in `ui/image/encode.rs`'s tests, so
-//! the encoder's output size cannot drift from it:
+//! **The arithmetic is `ratatui-image`'s**: [`fit_cells`] ports `ratatui_image::Resize::Fit(None)`
+//! `::size_for`, narrowed to plain pixel dimensions so the layout can use it without a decoded image
+//! (the layout never touches the filesystem). The port is asserted against the upstream function in
+//! `ui/image/encode.rs`'s tests, so the encoder's output size cannot drift from it:
 //!
 //! ```text
 //! box (cells) × cell (pixels)      →  box (pixels)
@@ -30,37 +25,28 @@
 //! ceil(px / cell)                  →  whole cells (the picture's cell footprint)
 //! ```
 //!
-//! The result is never larger than the box on either axis and never larger than
-//! the picture's own cell footprint — that is what makes it a *fit*, and it is
-//! why a small picture reserves few rows instead of being letterboxed into a
-//! tall box. The exception is upstream's `u16::MAX` saturation branch (see
-//! [`fit_area_proportionally`]), which comes in two symmetric variants; each
-//! needs two absurd inputs at once, and neither is reachable from a real
-//! terminal:
-//!
-//! * the **width** variant answers `u16::MAX` columns when the picture is wider
-//!   than 65535 px and the box is past 65535 px wide too (≈ 6554 columns at a
-//!   10 px cell) — the columns then exceed the box;
-//! * the **height** variant answers `u16::MAX` rows when the picture is taller
-//!   than 65535 px and the box is past 65535 px tall — at the layout's 36-row
-//!   cap that takes a cell at least 1821 px high. It is the one input class
-//!   where the layout's reserved rows (the cap) and the encoder's height
-//!   (65535) would disagree; real character cells are 8–40 px tall.
+//! The result is never larger than the box on either axis and never larger than the picture's own
+//! cell footprint — that is what makes it a *fit*, and why a small picture reserves few rows instead
+//! of being letterboxed into a tall box. The exception is upstream's `u16::MAX` saturation branch
+//! (see [`fit_area_proportionally`]), in two symmetric variants that each need two absurd inputs at
+//! once and are unreachable from a real terminal: the **width** variant answers `u16::MAX` columns
+//! for a picture wider than 65535 px inside a box past 65535 px wide (≈ 6554 columns at a 10 px
+//! cell); the **height** variant answers `u16::MAX` rows for a picture taller than 65535 px in a box
+//! past 65535 px tall (at the layout's 36-row cap that takes a cell at least 1821 px high). The
+//! height variant is the one input class where the layout's reserved rows (the cap) and the
+//! encoder's height (65535) would disagree. Real character cells are 8–40 px tall.
 
 use ratatui::layout::Size;
 
 /// The pixel size of one character cell — the terminal's font size.
 ///
-/// The layout's second input, next to the image's own pixel dimensions: both
-/// the row count and the drawn footprint are computed from a box expressed in
-/// cells, so the cell size has to be known *before* anything is laid out.
+/// The layout's second input, next to the image's own pixel dimensions: both the row count and the
+/// drawn footprint are computed from a box expressed in cells, so the cell size has to be known
+/// *before* anything is laid out.
 ///
-/// Deliberately smaller than `ui::image::CellPixels` (which the capability
-/// probe owns and the encoder reads): this layer must not depend on the `ui`
-/// module. The chat view builds one from a probe result with
-/// `CellPixels::new(cell.width, cell.height)`, exactly as it builds an
-/// [`ImageShape`](crate::render::markdown::ImageShape) from an
-/// `ui::image::ImageMeta`.
+/// Deliberately a separate type from `ui::image::CellPixels` (which the capability probe owns and
+/// the encoder reads): this layer must not depend on the `ui` module. The chat view builds one from
+/// a probe result with `CellPixels::new(cell.width, cell.height)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct CellPixels {
     /// Cell width in pixels.
@@ -85,23 +71,13 @@ impl CellPixels {
 
 /// The cell footprint of a `px_w × px_h` picture inside a `box_cells` box.
 ///
-/// Total: a degenerate input (a zero box, a zero pixel dimension, a zero cell)
-/// answers [`Size::ZERO`] — the caller decides what "no room" means (the
-/// encoder reports a failure, the layout keeps its minimum). Never panics and
-/// never divides by zero.
+/// Total: a degenerate input (a zero box, a zero pixel dimension, a zero cell) answers
+/// [`Size::ZERO`] — the caller decides what "no room" means (the encoder reports a failure, the
+/// layout keeps its minimum). Never panics and never divides by zero.
 ///
-/// The box is in cells and the answer is in cells; the picture's own pixel size
-/// caps it on both axes, so this never upscales (a 16×16 icon in a 10×20 cell
-/// is 2×1 cells however large the box is) — except for the two variants of
-/// upstream's `u16::MAX` saturation branch (see [`fit_area_proportionally`]),
-/// neither of which a real terminal can reach:
-///
-/// * a picture wider than 65535 px in a box whose pixel width is *also* past
-///   65535 (≈ 6554 columns at a 10 px cell, or 2 columns at an absurd 32k-px
-///   cell) answers `u16::MAX` columns: past the box on the width axis;
-/// * a picture taller than 65535 px in a box past 65535 px tall — at the
-///   layout's 36-row cap, a cell at least 1821 px high — answers `u16::MAX`
-///   rows: past the box on the height axis, and past the layout's own cap.
+/// The picture's own pixel size caps the answer on both axes, so this never upscales (a 16×16 icon
+/// in a 10×20 cell is 2×1 cells however large the box is) — except for upstream's `u16::MAX`
+/// saturation branch, whose two variants no real terminal can reach (see the module docs).
 pub fn fit_cells(px_w: u32, px_h: u32, box_cells: Size, cell: CellPixels) -> Size {
     if px_w == 0 || px_h == 0 || box_cells.width == 0 || box_cells.height == 0 || !cell.is_valid() {
         return Size::ZERO;
@@ -132,27 +108,20 @@ fn cells_ceil(px: u32, cell_px: u16) -> u16 {
     u16::try_from(cells).unwrap_or(u16::MAX)
 }
 
-/// The largest `w × h` that fits `nwidth × nheight` with the aspect ratio kept,
-/// at least one pixel on each axis.
+/// The largest `w × h` that fits `nwidth × nheight` with the aspect ratio kept, at least one pixel
+/// on each axis.
 ///
-/// A port of `ratatui_image`'s private `fit_area_proportionally` — itself the
-/// `image` crate's `resize_dimensions` (`fill = false`) — including its
-/// `u16::MAX` saturation branch, kept so that [`fit_cells`] agrees with the
-/// upstream function for *every* input (see `ui/image/encode.rs`'s parity test).
+/// A port of `ratatui_image`'s private `fit_area_proportionally` — itself the `image` crate's
+/// `resize_dimensions` (`fill = false`) — including its `u16::MAX` saturation branch, kept so that
+/// [`fit_cells`] agrees with the upstream function for *every* input (see `ui/image/encode.rs`'s
+/// parity test).
 ///
-/// The width branch triggers when the fitted width itself exceeds 65535 px,
-/// which needs the picture **and** the box to be that wide at once: `nw` is
-/// bounded by `min(box_px_w, px_w)`, so both must be past 65535. It is therefore
-/// a guard against arithmetic no real terminal can produce — a 6554-column
-/// terminal at a 10 px cell, or a picture ≥ 65536 px wide shown in one — and not
-/// something the store's pixel budget rules out on its own (a 100000×3 picture
-/// is only 300 000 px). It answers `u32::MAX` pixels of width, i.e. `u16::MAX`
-/// cells, past the box on that axis.
-///
-/// The height branch is the symmetric one on `nh`, and mirrors it exactly (a
-/// picture and a box past 65535 px *tall* — see [`fit_cells`] for what the
-/// layout's 36-row cap makes of the cell height). Both are ports of upstream's
-/// behaviour, not choices made here.
+/// The width branch triggers when the fitted width itself exceeds 65535 px, which needs the picture
+/// **and** the box to be that wide at once (`nw` is bounded by `min(box_px_w, px_w)`): a guard
+/// against arithmetic no real terminal can produce, not something the store's pixel budget rules
+/// out on its own (a 100000×3 picture is only 300 000 px). It answers `u32::MAX` pixels of width,
+/// i.e. `u16::MAX` cells, past the box on that axis. The height branch mirrors it exactly on `nh`.
+/// Both are ports of upstream's behaviour, not choices made here.
 fn fit_area_proportionally(width: u32, height: u32, nwidth: u32, nheight: u32) -> (u32, u32) {
     let ratio = f64::min(
         f64::from(nwidth) / f64::from(width),

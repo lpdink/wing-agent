@@ -1,19 +1,17 @@
 //! CJK-aware prose line wrapping (UAX #14).
 //!
-//! ratatui's `Paragraph` word-wrap only breaks at whitespace and never splits
-//! a "word". CJK text has no spaces, so a long CJK run becomes one giant word
-//! that gets pushed whole to the next line, leaving the current line short with
-//! a trail of buffer-padding spaces. That is the bug this module fixes.
+//! ratatui's `Paragraph` word-wrap only breaks at whitespace and never splits a "word". CJK text has
+//! no spaces, so a long CJK run becomes one giant word pushed whole to the next line, leaving the
+//! current line short with a trail of buffer-padding spaces. That is the bug this module fixes.
 //!
-//! We pre-wrap prose ourselves using Unicode line-break opportunities
-//! (UAX #14, via the `unicode-linebreak` crate) so CJK runs break at the margin
-//! while Latin words stay intact and CJK punctuation honors kinsoku rules.
+//! We pre-wrap prose using Unicode line-break opportunities (UAX #14, via the `unicode-linebreak`
+//! crate) so CJK runs break at the margin while Latin words stay intact and CJK punctuation honors
+//! kinsoku rules.
 //!
-//! The mechanism matches codex-rs (Apache-2.0), which enables textwrap's
-//! `unicode-linebreak` feature for exactly this reason; here we use the
-//! focused `unicode-linebreak` crate directly as the break-opportunity oracle
-//! and do a thin greedy fill over our `MarkdownLine` IR so each segment's
-//! kind/style/link is preserved through the wrap.
+//! The mechanism matches codex-rs (Apache-2.0), which enables textwrap's `unicode-linebreak` feature
+//! for exactly this reason; here we use the focused crate directly as the break-opportunity oracle
+//! and do a thin greedy fill over our `MarkdownLine` IR so each segment's kind/style/link is
+//! preserved through the wrap.
 
 use ratatui::style::Style;
 use unicode_linebreak::{BreakOpportunity, linebreaks};
@@ -586,7 +584,7 @@ mod tests {
 
     /// 深缩进的悬挂前缀有上限（宽度的一半）：缩进是层级提示，不该把正文挤没
     /// ——没有上限时 `indent ≥ width` 会让正文只剩一列，再被上层钳成看不见的
-    /// 空格（评审 N）。
+    /// 空格。
     #[test]
     fn plain_text_caps_a_deep_hanging_indent() {
         let rows = wrap_plain_text("            deep body text", 8);

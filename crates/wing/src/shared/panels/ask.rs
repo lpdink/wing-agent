@@ -1,53 +1,43 @@
 //! AskPanel — the one ask model, on top of the selection-panel kernel.
 //!
-//! **Every ask becomes an `AskPanel`.** The gateway sends two wire shapes (the
-//! `questions` form of the AskUserQuestion tool, and the retired
-//! `question`/`choices`/`required` form of the Bash dangerous-command
-//! confirmation); [`AskPanel::from_ask`] is the single normalization entry
-//! that turns either one into a panel, and [`PanelMode`] is the shape it
-//! produced. Live projection and replay both go through it — nothing
-//! downstream branches on the wire shape again.
+//! **Every ask becomes an `AskPanel`.** The gateway sends two wire shapes (the `questions` form of the
+//! AskUserQuestion tool, and the retired `question`/`choices`/`required` form of the Bash
+//! dangerous-command confirmation); [`AskPanel::from_ask`] is the single normalization entry that
+//! turns either one into a panel, and [`PanelMode`] is the shape it produced. Live projection and
+//! replay both go through it — nothing downstream branches on the wire shape again.
 //!
-//! Kernel responsibilities ([`SelectionPanel`]): page switching, per-question
-//! cursor memory, single-select commit capture. Adapter responsibilities
-//! (here): multi-select toggles, the inline free-form editor, the confirm page
-//! (registered as a *custom* page — the kernel keeps its tab slot but has no
-//! cursor on it), and reply construction (mode-dependent, see [`PanelMode`]).
+//! Kernel responsibilities ([`SelectionPanel`]): page switching, per-question cursor memory,
+//! single-select commit capture. Adapter responsibilities (here): multi-select toggles, the inline
+//! free-form editor, the confirm page (registered as a *custom* page — the kernel keeps its tab slot
+//! but has no cursor on it), and reply construction (mode-dependent, see [`PanelMode`]).
 //!
-//! `PanelMode::Question` renders a tab bar (question headers + a final confirm
-//! page), one question at a time with selectable options, and a free-form
-//! "Type Something" row. Its key map:
+//! `PanelMode::Question` renders a tab bar (question headers + a final confirm page), one question at
+//! a time with selectable options, and a free-form "Type Something" row. Its key map:
 //!
 //! - `↑`/`↓` — move the option cursor (wraps; the last row is the free-form row)
 //! - `←`/`→` — switch question tab (wraps; the last tab is the confirm page)
 //! - `Space`/`Tab` — toggle the option under the cursor (multi-select only)
-//! - `Enter` — advance to the next tab; on a single-select option row it also
-//!   commits that option; on the free-form row it starts inline editing;
-//!   while editing it confirms the text and advances
-//! - edit mode: `←`/`→` move the text cursor, `Backspace`/`Delete`/`Home`/`End`
-//!   edit the buffer, `↑`/`↓` leave the editor keeping the draft
+//! - `Enter` — advance to the next tab; on a single-select option row it also commits that option; on
+//!   the free-form row it starts inline editing; while editing it confirms the text and advances
+//! - edit mode: `←`/`→` move the text cursor, `Backspace`/`Delete`/`Home`/`End` edit the buffer,
+//!   `↑`/`↓` leave the editor keeping the draft
 //! - `Esc` is NOT consumed here — the app owns it (interrupt) at any time.
 //!
-//! `PanelMode::RequiredChoice` (a retired required ask, normalized) has no
-//! free-form row and no confirm page: `↑`/`↓` move the cursor (wraps) and
-//! `Enter` commits the option under it **and answers right away** — the panel
-//! is a one-shot mandatory choice. Neither mode consumes keys the app reserves
-//! (`Esc`, page keys). `PanelMode::Notice` is display-only: it never reaches
-//! this key handler at all (the app does not register it).
+//! `PanelMode::RequiredChoice` (a retired required ask, normalized) has no free-form row and no
+//! confirm page: `↑`/`↓` move the cursor (wraps) and `Enter` commits the option under it **and answers
+//! right away** — a one-shot mandatory choice. Neither mode consumes keys the app reserves (`Esc`,
+//! page keys). `PanelMode::Notice` is display-only: it never reaches this key handler at all (the app
+//! does not register it).
 //!
-//! Answers are **explicit acts only** — browsing (moving the cursor, switching
-//! tabs) never records an answer, so tabs only turn "answered" when the user
-//! actually chose something:
-//! - single-select: the option committed with Enter (captured via the kernel,
-//!   not derived — later cursor movement cannot change it; re-commit overrides)
-//! - multi-select: the toggled options (each toggle is itself an explicit act)
-//! - free-form: the text confirmed with Enter in the editor
+//! Answers are **explicit acts only** — browsing (moving the cursor, switching tabs) never records
+//! one, so tabs only turn "answered" when the user actually chose something: single-select — the
+//! option committed with Enter (captured via the kernel, not derived; re-commit overrides);
+//! multi-select — the toggled options; free-form — the text confirmed with Enter in the editor.
 //!
-//! In `Question` mode the user may leave questions unanswered: Submit is not
-//! gated, unanswered questions are sent as `(user did not answer)` and the
-//! confirm page warns about them. An empty free-form row never counts as an
-//! answer. In `RequiredChoice` mode there is nothing to submit without an
-//! answer: Enter on an option *is* the answer.
+//! In `Question` mode the user may leave questions unanswered: Submit is not gated, unanswered
+//! questions are sent as `(user did not answer)` and the confirm page warns about them. An empty
+//! free-form row never counts as an answer. In `RequiredChoice` mode there is nothing to submit
+//! without an answer: Enter on an option *is* the answer.
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;

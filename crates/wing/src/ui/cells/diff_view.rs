@@ -1,40 +1,30 @@
 //! DiffView — IDE-style diff rendering for one diff payload.
 //!
-//! The look follows what GitHub / VS Code do, which is what the terminal
-//! TUI needs to reach product level:
+//! The look follows GitHub / VS Code, which is what the terminal TUI needs to reach product level:
+//! changed lines carry a **tinted row background** (green additions, red deletions) with a stronger
+//! tint on the exact words that changed; the **text keeps its syntax colors** (syntect) instead of
+//! every glyph being painted green/red; rows carry an **old/new line-number gutter** and one `@@`
+//! hunk header, like `git diff` output.
 //!
-//!   - changed lines are marked by a **tinted row background** (green for
-//!     additions, red for deletions) with a stronger tint on the exact
-//!     words that changed,
-//!   - the **text keeps its syntax colors** (syntect) instead of every
-//!     glyph being painted green/red,
-//!   - rows carry an **old/new line-number gutter** and one `@@` hunk
-//!     header, like `git diff` output.
+//! **The payload is already a window, not a file** (`diff-payload-window`): the backend sends the
+//! changed region ± context lines plus the absolute line number of the window's first line. This
+//! renderer shows exactly the rows it was given — no context collapsing, no windowing policy of its
+//! own. `old_start_line` / `new_start_line` seed the row counters, so the gutter and the `@@` header
+//! carry real file line numbers.
 //!
-//! **The payload is already a window, not a file** (`diff-payload-window`):
-//! the backend sends the changed region ± context lines plus the absolute
-//! line number of the window's first line. This renderer shows exactly the
-//! rows it was given — no context collapsing, no windowing policy of its
-//! own. `old_start_line` / `new_start_line` seed the row counters, so the
-//! gutter and the `@@` header carry real file line numbers.
+//! Rendering is two-staged: a **width-independent plan** (syntax highlighting, inline emphasis — the
+//! expensive part) is built once per diff and cached, while `to_lines` only re-tints, re-wraps and
+//! re-pads it for the current width (a few microseconds, so window resizes stay cheap).
 //!
-//! Rendering is two-staged: a **width-independent plan** (syntax
-//! highlighting, inline emphasis — the expensive part) is built once per
-//! diff and cached, while `to_lines` only re-tints, re-wraps and re-pads it
-//! for the current width (a few microseconds, so window resizes stay cheap).
+//! **Wrapping is the view's job, with a hanging indent**: a row wider than the render width is cut
+//! here (word wrap, column-exact fallback) and every continuation row repeats the row's own indent —
+//! the gutter's columns, blank — so the code column holds and the tint band of an add/delete row runs
+//! on unbroken. Handing an over-wide row to the layout's `Paragraph` would wrap it flush at column 0,
+//! sliding the code out from under the line numbers.
 //!
-//! **Wrapping is the view's job, with a hanging indent**: a row wider than
-//! the render width is cut here (word wrap, column-exact fallback) and every
-//! continuation row repeats the row's own indent — the gutter's columns,
-//! blank — so the code column holds and the tint band of an add/delete row
-//! runs on unbroken. Handing an over-wide row to the layout's `Paragraph`
-//! would wrap it flush at column 0, sliding the code out from under the
-//! line numbers.
-//!
-//! Syntax highlighting runs one stateful syntect pass per revision: lines
-//! from the old revision feed one highlighter, lines from the new revision
-//! feed another, in file order, so multi-line constructs — block comments,
-//! template strings, brackets — stay correctly colored.
+//! Syntax highlighting runs one stateful syntect pass per revision: lines from the old revision feed
+//! one highlighter, lines from the new revision another, in file order, so multi-line constructs —
+//! block comments, template strings, brackets — stay correctly colored.
 
 use std::cell::OnceCell;
 use std::ops::Range;

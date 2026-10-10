@@ -1,21 +1,18 @@
-//! The viewport: scroll position, the follow contract, the per-frame geometry
-//! and the widget that draws the band.
+//! The viewport: scroll position, the follow contract, the per-frame geometry and the widget that
+//! draws the band.
 //!
-//! VIRTUALIZED drawing with a height cache: `update_heights` refreshes the
-//! per-cell wrap-aware heights (through `CachedCell`), the widget walks the
-//! cells that intersect the visible window and renders each one — pre-wrapped
-//! streaming lines are blitted directly, everything else goes through
+//! VIRTUALIZED drawing with a height cache: `update_heights` refreshes the per-cell wrap-aware
+//! heights (through `CachedCell`), the widget walks the cells that intersect the visible window and
+//! renders each one — pre-wrapped streaming lines are blitted directly, everything else goes through
 //! `Paragraph`.
 //!
-//! This layer knows *how tall* and *where*, never *what* a cell means: the
-//! only cell-type branch is the user-message row layout — full-width
-//! background plus the text inset — which is a layout fact rather than a
-//! semantic decision, and no business field (tool call ids, session state, …)
-//! is ever read here.
+//! This layer knows *how tall* and *where*, never *what* a cell means: the only cell-type branch is
+//! the user-message row layout — full-width background plus the text inset — which is a layout fact
+//! rather than a semantic decision, and no business field (tool call ids, session state, …) is ever
+//! read here.
 //!
-//! The scroll position / usage read-out this viewport's state feeds lives in
-//! the composer's meta rail (`ui::input_area::chrome`) — it is part of the
-//! input card's bottom border, not of the band.
+//! The scroll position / usage read-out this viewport's state feeds lives in the composer's meta rail
+//! (`ui::input_area::chrome`) — it is part of the input card's bottom border, not of the band.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -831,7 +828,7 @@ mod tests {
         assert!(view.is_at_bottom(), "release at the bottom re-arms follow");
     }
 
-    /// 刷光排帧的视口门控（评审 S：这套几何判断归 viewport 层 ——
+    /// 刷光排帧的视口门控（这套几何判断归 viewport 层 ——
     /// 内容模型不读 `geometry` / `cell_heights`）。
     #[test]
     fn reasoning_sweep_deadline_parks_when_idle_or_off_screen() {

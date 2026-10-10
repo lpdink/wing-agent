@@ -2,38 +2,29 @@
 //!
 //! Split into five concerns, each with exactly one home:
 //!
-//! * **content unit** (`cell`) — [`ChatCell`] and its rendering (what a cell
-//!   looks like, nothing else) plus the pending-message wrapper.
-//! * **content model** (`model`) — the cells, the pending queue, anchored
-//!   insertion and every streaming / by-index mutation. It never reads scroll
-//!   state or rendering; the drawing and the frame state are somebody else's
-//!   business.
-//! * **viewport** (`viewport`) — the scroll offset, the follow contract
-//!   (pinning / freezing), the per-frame geometry, the height cache refresh
-//!   and the widget that draws the band. It knows *how tall* and *where*, not
-//!   *what* the cells mean.
-//! * **frame snapshot & selection** (`frame`) — `FrameSnapshot`, the
-//!   copy-on-select source: row-level graphemes captured out of the drawn
-//!   frame, with the frame's own scroll offset and content width. Screen ↔
-//!   content mapping, highlight painting and text extraction read the
-//!   snapshot, never the live buffer.
-//! * **links** (`link`) — the per-frame link table ([`FrameLink`] hit
-//!   boxes), the click hit test, masking for overlays and the OSC8 injection
-//!   that makes the terminals linkify what the table promises.
+//! * **content unit** (`cell`) — [`ChatCell`] and its rendering (what a cell looks like, nothing else)
+//!   plus the pending-message wrapper.
+//! * **content model** (`model`) — the cells, the pending queue, anchored insertion and every streaming
+//!   / by-index mutation. It never reads scroll state or rendering.
+//! * **viewport** (`viewport`) — the scroll offset, the follow contract (pinning / freezing), the
+//!   per-frame geometry, the height cache refresh and the widget that draws the band. It knows *how
+//!   tall* and *where*, not *what* the cells mean.
+//! * **frame snapshot & selection** (`frame`) — `FrameSnapshot`, the copy-on-select source: row-level
+//!   graphemes captured out of the drawn frame, with that frame's own scroll offset and content width.
+//!   Screen ↔ content mapping, highlight painting and text extraction read the snapshot, never the live
+//!   buffer.
+//! * **links** (`link`) — the per-frame link table ([`FrameLink`] hit boxes), the click hit test,
+//!   masking for overlays and the OSC8 injection that makes terminals linkify what the table promises.
 //!
-//! The scroll bar drawn beside the band is an overlay owned by
-//! `ui::scrollbar` + `App`; the height cache lives in `ui::cached_cell`.
+//! The scroll bar beside the band is an overlay owned by `ui::scrollbar` + `App`; the height cache
+//! lives in `ui::cached_cell`.
 //!
-//! **Public API**: the split keeps `crate::ui::chat_view::{ChatCell, ChatView,
-//! ChatViewWidget, ChatGeometry, FrameLink, PendingMessage}` exactly as they
-//! were — names, signatures and paths. `app/**` is not allowed to notice this
-//! refactor. (The scroll / usage read-out that used to live here as
-//! `render_info_separator` is now the composer's meta rail — see
-//! `ui::input_area::chrome`.)
+//! **Public API**: the split keeps `crate::ui::chat_view::{ChatCell, ChatView, ChatViewWidget,
+//! ChatGeometry, FrameLink, PendingMessage}` exactly as they were — names, signatures and paths.
+//! `app/**` is not allowed to notice this refactor.
 //!
-//! Width-aware virtualization: each cell's height comes from [`CachedCell`]
-//! (generation-invalidated cache), and the widget walks the cells that
-//! intersect the visible window.
+//! Width-aware virtualization: each cell's height comes from [`CachedCell`] (generation-invalidated
+//! cache), and the widget walks the cells that intersect the visible window.
 
 mod cell;
 mod frame;

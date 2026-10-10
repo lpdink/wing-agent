@@ -1,26 +1,20 @@
 //! Overlay scrollbar — geometry, hit testing and painting.
 //!
-//! The bar lives on the **last column of the chat viewport**: it is painted
-//! on top of the content by a buffer patch (like the toast), so it never takes
-//! layout width and never reflows the chat cells.
+//! The bar lives on the **last column of the chat viewport**: painted on top of the content by a
+//! buffer patch (like the toast), so it never takes layout width and never reflows the chat cells.
 //! The content keeps clear of it through a gutter that is reserved *statically*
-//! ([`SCROLLBAR_GUTTER`], applied by [`content_area`] in `App::draw`), so the
-//! bar appearing on the first overflow changes nothing that is already drawn.
-//! It only exists while the content overflows the viewport — the same
-//! predicate the composer's meta rail uses for its `pos/total · %` read-out.
+//! ([`SCROLLBAR_GUTTER`], applied by [`content_area`] in `App::draw`), so the bar appearing on the
+//! first overflow changes nothing that is already drawn. It only exists while the content overflows
+//! the viewport — the same predicate the composer's meta rail uses for its `pos/total · %` read-out.
 //!
-//! Everything geometric is a pure function over `(area, content, offset)`, so
-//! the edge cases that matter in practice (content that exactly fits, a thumb
-//! at 10 000 lines of history in a 10-row viewport, dragging the pointer out
-//! of the track) are unit-testable without a terminal.
+//! Everything geometric is a pure function over `(area, content, offset)`, so the edge cases that
+//! matter in practice (content that exactly fits, a thumb at 10 000 lines of history in a 10-row
+//! viewport, dragging the pointer out of the track) are unit-testable without a terminal.
 //!
-//! Interaction model (see the change's design.md):
-//! - press on the bare track → jump there (thumb centred on the pointer);
-//! - press on the thumb → keep the grabbed row under the pointer while dragging;
-//! - drag clamps into the track, so pulling the pointer past either end keeps
-//!   tracking that end instead of stalling;
-//! - the wheel is *not* part of this module: `App::handle_mouse` matches it
-//!   before the bar ever sees the event.
+//! Interaction model: press on the bare track jumps there (thumb centred on the pointer); press on
+//! the thumb keeps the grabbed row under the pointer while dragging; a drag clamps into the track,
+//! so pulling the pointer past either end keeps tracking that end instead of stalling. The wheel is
+//! *not* part of this module: `App::handle_mouse` matches it before the bar ever sees the event.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

@@ -1,32 +1,23 @@
-//! `render_probe` — render arbitrary text through the real TUI markdown
-//! pipeline and print the result.
+//! `render_probe` — render arbitrary text through the real TUI markdown pipeline and print the
+//! result.
 //!
-//! A debugging tool for rendering anomalies (wrong code-block detection,
-//! wrapping, thinking colors, streaming drift): feed it the exact text that
-//! rendered wrong — typically a `reasoning_content` / `content` field out of
-//! `$WING_HOME/core/sessions/<id>/history.jsonl` — and see what the renderer
-//! makes of it, with the same code paths the TUI uses.
+//! A debugging tool for rendering anomalies (wrong code-block detection, wrapping, thinking colors,
+//! streaming drift): feed it the exact text that rendered wrong — typically a `reasoning_content` /
+//! `content` field out of `$WING_HOME/core/sessions/<id>/history.jsonl` — and see what the renderer
+//! makes of it, through the same code paths the TUI uses.
 //!
-//! Two views are available:
+//! Two views: **composed** (default) — `full_lines` / `StreamingRender` output, exactly what the chat
+//! cell shows (prefix, thinking recolor, hard wrap); **`--kinds`** — the markdown IR before
+//! composition, one line per segment run annotated with its [`SegmentKind`] (`T` prose, `H` heading,
+//! `i` inline code, `C` code block, `L` link, `M` marker, `B` border, `G` gutter, `$` math, `I`
+//! image), the view that answers "why is this line rendered as code?".
 //!
-//! - **composed view** (default): `full_lines` / `StreamingRender` output —
-//!   exactly what the chat cell shows (prefix, thinking recolor, hard wrap).
-//! - **`--kinds` view**: the markdown IR before composition, one line per
-//!   segment run annotated with its [`SegmentKind`] (`T` prose, `H` heading,
-//!   `i` inline code, `C` code block, `L` link, `M` marker, `B` border,
-//!   `G` gutter, `$` math, `I` image) — this is the view that answers "why
-//!   is this line rendered as code?".
-//!
-//! `--chunk` drives the incremental `StreamingRender` (the production
-//! streaming path) instead of the one-shot full render, and `--check`
-//! reconciles the two — the invariant the TUI depends on at turn end.
-//!
-//! `--images` turns markdown image anchors on: `![alt](path)` then reserves a
-//! block of rows instead of rendering as a link. The metadata (pixel size)
-//! comes from `--shape <path>=<W>x<H>`, which stands in for the chat view's
-//! header probes — the renderer itself never touches the filesystem. Anchors
-//! are listed after the rendered lines (`line/col/cols/rows path`), which is
-//! the geometry the drawing layer consumes.
+//! `--chunk` drives the incremental `StreamingRender` (the production streaming path) instead of the
+//! one-shot full render, and `--check` reconciles the two — the invariant the TUI depends on at turn
+//! end. `--images` turns markdown image anchors on: `![alt](path)` then reserves a block of rows
+//! instead of rendering as a link, with the metadata (pixel size) coming from `--shape
+//! <path>=<W>x<H>`, which stands in for the chat view's header probes (this tool never touches the
+//! filesystem). Anchors are listed after the rendered lines (`line/col/cols/rows path`).
 //!
 //! Usage:
 //! ```text

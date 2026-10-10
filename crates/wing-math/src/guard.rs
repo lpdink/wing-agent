@@ -1,25 +1,19 @@
 //! 自检与降级判据（本项目自研，非上游代码）。
 //!
-//! 上游引擎有三条会让结果"看起来正常但实际错了"的路径，本模块把它们变成**可判定**的
-//! 拒绝理由：
+//! 上游引擎有三条会让结果"看起来正常但实际错了"的路径，本模块把它们变成**可判定**的拒绝理由：
 //!
-//! 1. **静默截断（输入侧）**：顶层 `\\` / `&` 会让上游 parser 直接 `break`，输出里连
-//!    一个 `\` 都不会留下（实测 `a \\ b` → `a `）。这类问题只能在输入侧发现，所以有
-//!    [`check_source`]；它建立在 [`crate::scan::scan`] 的结构信息上（顺带把行/列分隔符
-//!    数量、花括号深度、孤立反斜杠这些"必然超预算 / 必然出错"的信号前移到解析之前）。
-//! 2. **命令泄漏（AST 侧）**：上游渲染器渲染未知命令时会兜底成 `\name` 文本节点
-//!    （含未支持环境的 `Text("\begin{env}")`）。判据是 AST 里出现 `\`，见 [`check_ast`]。
-//!    **不能**改成"输出文本里有 `\`"——`\hat` 的几何字形（`/\`、`/‾‾\`）自带反斜杠，
-//!    那样会把正常渲染误判成泄漏。
-//! 3. **网格被污染**：结果里出现控制字符（`\n` / `\t`）或整块只有空白，
-//!    见 [`check_output`]。
+//! 1. **静默截断（输入侧）**：顶层 `\\` / `&` 会让上游 parser 直接 `break`，输出里连一个 `\` 都
+//!    不会留下（实测 `a \\ b` → `a `）。这类问题只能在输入侧发现，所以有 [`check_source`]；它建立
+//!    在 [`crate::scan::scan`] 的结构信息上（顺带把行/列分隔符数量、花括号深度、孤立反斜杠这些"必然
+//!    超预算 / 必然出错"的信号前移到解析之前）。同类还有"有人消费但**槽位不够**"：`cases` 每行只有 2
+//!    个槽位，第 3 个 `&` 之后的列会被上游丢掉（[`Structure::environment_row_overflow`]）。
+//! 2. **命令泄漏（AST 侧）**：上游渲染器渲染未知命令时会兜底成 `\name` 文本节点（含未支持环境的
+//!    `Text("\begin{env}")`）。判据是 AST 里出现 `\`，见 [`check_ast`]；**不能**改成"输出文本里有
+//!    `\`"——`\hat` 的几何字形（`/\`、`/‾‾\`）自带反斜杠，那样会把正常渲染误判成泄漏。
+//! 3. **网格被污染**：结果里出现控制字符（`\n` / `\t`）或整块只有空白，见 [`check_output`]。
 //!
-//! 还有一条"有人消费但**槽位不够**"的形态：`cases` 每行只有 2 个槽位，第 3 个 `&`
-//! 之后的列会被上游丢掉（review r3 的 B1）。判据在 [`check_source`]（
-//! [`Structure::environment_row_overflow`]）。
-//!
-//! 另外这里集中放**预算闸**常量：上游排版是纯 CPU + 线性分配，正常公式毫秒级，但仍要
-//! 给"恶意/畸形输入"设上界，避免一次渲染吃掉整屏内存或爆栈。
+//! 另外这里集中放**预算闸**常量：上游排版是纯 CPU + 线性分配，正常公式毫秒级，但仍要给"恶意 / 畸形
+//! 输入"设上界，避免一次渲染吃掉整屏内存或爆栈。
 
 use crate::grid::rendered_block::RenderedBlock;
 use crate::scan::Structure;
@@ -29,7 +23,7 @@ pub(crate) const MAX_SOURCE_CHARS: usize = 8192;
 
 /// 花括号嵌套深度上限。上游是递归下降 parser + 递归排版，深度直接等于调用栈深度。
 ///
-/// **取值口径**（review r1 的 S2 + r3 的 S1）：真正的兜底闸是解析器的递归深度
+/// **取值口径**：真正的兜底闸是解析器的递归深度
 /// （[`crate::api::MAX_PARSE_DEPTH`] = 96），而**每层花括号在解析器里占 2 个深度单位**
 /// （一个 atom + 它的序列），所以花括号闸取 `96 / 2 = 48` 减去顶层 sequence 的 2 个单位
 /// → **47**：实测 `{`×47 的解析深度正好 96（刚好通过），`{`×48 = 98 会被解析器闸挡住。
@@ -152,14 +146,14 @@ pub(crate) fn check_source(chars: &[char], st: &Structure) -> Result<(), Reject>
 /// 1. `\hat` 的 `/\`、`/‾‾\` 几何（见 `grid/layout.rs::layout_accent`）；
 /// 2. `\left` / `\right` 的定界符字符（`Delimited { left, right }`）。
 ///
-/// 所以"输出文本里有 `\`"并不等于泄漏（review r1 的 S1：`\hat{ab}` 曾被自己的字形误伤）。
+/// 所以"输出文本里有 `\`"并不等于泄漏（`\hat{ab}` 曾被自己的字形误伤）。
 /// 真正的泄漏只在 AST 层可判定，且必须**穷尽每个节点类型与每个字段**：
 ///
 /// - `Text` / `TextBlock` 里的 `\`：上游 `parse_command` 对未知命令的兜底
 ///   `format!("\\{}", name)`（含未支持环境的 `Text("\begin{env}")`）与用户写在
 ///   `\text{…}` 里的反斜杠；
 /// - `Delimited.left` / `Delimited.right` 里的 `\`：`\left` 后面跟了非法定界符时，
-///   上游把裸 `\` 当成定界符（review r2 的 B2）。
+///   上游把裸 `\` 当成定界符。
 ///
 /// 这里的 `match` **刻意不写 `_` 兜底分支**：上游 AST 一旦增删变体，编译就会失败，
 /// 逼着人回来补判据（防止再出现"漏了一个节点类型"的回归）。
@@ -250,7 +244,7 @@ pub(crate) fn check_output(block: &RenderedBlock) -> Result<(), Reject> {
     for row in block.cells() {
         for cell in row {
             for ch in cell.chars() {
-                // 控制字符会破坏"单行 / 每行一个网格行"的契约（review r1 的 B3）
+                // 控制字符会破坏"单行 / 每行一个网格行"的契约
                 if ch.is_control() {
                     return Err(Reject::ControlCharacter);
                 }
@@ -403,7 +397,7 @@ mod tests {
             Err(Reject::LeakedCommand)
         );
 
-        // review r2 的 B2：`\left` / `\right` 的定界符字符串也是"渲染器会产出的 `\`"
+        // `\left` / `\right` 的定界符字符串也是"渲染器会产出的 `\`"
         // 之一，必须单独检查（只进 content 不看 left/right 就是漏网）。
         let delimited = parse_equation(r"\left\unknowncmd y \right)");
         assert_eq!(check_ast(&delimited), Err(Reject::LeakedCommand));

@@ -268,22 +268,19 @@ class SessionManager:
     ) -> Session:
         """创建（或按 id 收养）session。
 
-        ``session_id`` 是 **create-or-adopt** 入口（编排方自带 id 的场景，如
-        Claude Agent SDK 系消费方用自己的 UUID 建会话）：给定时该 id 即最终
-        session id——已存在（内存或任 store）则**收养**既有会话，语义等同
-        :meth:`resume_session`（模板 / workspace 来自 metadata，agent 覆盖只
-        应用 resume 子集，见 :meth:`Session.apply_resume_override`），且不触发
-        `before_session_start`（session id 未变，是"恢复"而非"创建新会话"）；
-        不存在则以该 id 建会话（此时 agent 覆盖是创建语义：全字段应用）。
-
-        不给 ``session_id`` 时行为不变：id 由后端生成（见
+        ``session_id`` 是 **create-or-adopt** 入口（编排方自带 id 的场景，如 Claude Agent SDK 系
+        消费方用自己的 UUID 建会话）：给定时该 id 即最终 session id——已存在（内存或任 store）则
+        **收养**既有会话，语义等同 :meth:`resume_session`（模板 / workspace 来自 metadata，agent
+        覆盖只应用 resume 子集，见 :meth:`Session.apply_resume_override`），且不触发
+        `before_session_start`（session id 未变，是"恢复"而非"创建新会话"）；不存在则以该 id 建
+        会话（此时 agent 覆盖是创建语义：全字段应用）。不给 ``session_id`` 时 id 由后端生成（见
         :meth:`_generate_session_id`）——**既有策略是默认，不是唯一**。
 
         Args:
             template_name: Agent 模板名称，None 时使用默认模板（仅新会话生效）
             workspace: 工作目录（仅新会话生效）
-            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值；
-                收养路径只应用 model_id/effort/tools）
+            agent_override: AgentOverride 参数覆盖（None 字段不覆盖 template 值；收养路径只应用
+                model_id/effort/tools）
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
             tags: 创建即打标 / 收养时并入（经 :meth:`set_session_tags` 同一套校验）
             session_id: 指定 session id（create-or-adopt）；None = 自生成
@@ -425,14 +422,12 @@ class SessionManager:
     ) -> Session:
         """恢复已有 session（精确匹配 session id）。已在内存中则直接返回。
 
-        模板只从 metadata.template_name 解析——resume 不接受显式模板：
-        **metadata 是模板的唯一来源**，要换模板请在恢复后走
-        `session/update`（agent 字段）。template_name 缺失或已不存在于
-        config 时回退默认模板。
+        模板只从 metadata.template_name 解析——resume 不接受显式模板：**metadata 是模板的唯一
+        来源**，要换模板请在恢复后走 `session/update`（agent 字段）。template_name 缺失或已不存在
+        于 config 时回退默认模板。
 
-        ``agent_override`` 是 resume 语义的参数覆盖（编排方 `--model` 等）：
-        只应用 `model_id` / `effort` / `tools` 子集——见
-        :meth:`Session.apply_resume_override`（不改链上前缀是不变量）。
+        ``agent_override`` 是 resume 语义的参数覆盖（编排方 `--model` 等）：只应用 `model_id` /
+        `effort` / `tools` 子集——见 :meth:`Session.apply_resume_override`（不改链上前缀是不变量）。
 
         Args:
             session_id: 目标 session ID（须为完整 ID）
@@ -648,20 +643,14 @@ class SessionManager:
     ) -> TagMutation:
         """按 session id 原子增删标签（幂等；读或写都不触发水合）。
 
-        标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：
+        标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：已在内存 → 经
+        ``Session.apply_tag_ops`` 改内存元数据并落盘（内存对象是磁盘事实的同一来源，绕开它会被后续
+        save 回写覆盖）；未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打 favorite 不会
+        把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
 
-        - 已在内存 → 经 ``Session.apply_tag_ops`` 改内存元数据并落盘
-          （内存对象是磁盘事实的同一来源，绕开它会被后续 save 回写覆盖）；
-        - 未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打
-          favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
-
-        打标时间（``tag_meta``）随同一处变更维护：新增记时间、移除删记录，
-        与 tags 一次落盘。
-
-        session id 先过格式闸门（``_resolve_with_store``）：不合规的值按
-        "不存在"处理，绝不触达 store（防路径穿越）。
-
-        add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
+        打标时间（``tag_meta``）随同一处变更维护：新增记时间、移除删记录，与 tags 一次落盘。
+        session id 先过格式闸门（``_resolve_with_store``）：不合规的值按"不存在"处理，绝不触达 store
+        （防路径穿越）。add / remove 皆空 = 纯读（返回当前标签，不产生任何写）。
 
         Raises:
             LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
@@ -819,31 +808,21 @@ class SessionManager:
     def list_sessions(self) -> list[SessionInfo]:
         """列出所有有效 session（跨 stores 聚合），按「活跃优先 + 最后交互时间降序」。
 
-        每个 session 携带运行时 `status`：
-        - 已加载进内存（在 `self._sessions` 中）→ 取 live 状态（idle/working/waiting）
-        - 未 resume → `inactive`
+        每个 session 携带运行时 `status`：已加载进内存（在 `self._sessions` 中）→ 取 live 状态
+        （idle/working/waiting）；未 resume → `inactive`。
 
-        排序口径（唯一事实来源，前端按原序渲染、不再重排）：
+        排序口径（唯一事实来源，前端按原序渲染、不再重排）：① `status != "inactive"` 的（= 已在
+        内存里的工作集）在前，未加载的在后；② 组内按 `_timestamp_key`（最后一次交互时间）降序；
+        ③ 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是优先级：没有它，并列
+        项的先后就取决于 store 的枚举顺序（`iterdir()` / SQL 返回序），同一个列表两次请求可能给出
+        不同顺序。
 
-        1. `status != "inactive"` 的（= 已在内存里的工作集）在前，未加载的在后；
-        2. 组内按 `_timestamp_key`（最后一次交互时间，见该函数的归一化回退）降序；
-        3. 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是
-           优先级：没有它，并列项的先后就取决于 store 的枚举顺序（`iterdir()` /
-           SQL 返回序），同一个列表两次请求可能给出不同顺序。
+        `status` 只用来区分 active / inactive，不再有组内优先级：`waiting`（正在等用户回答）不因为
+        状态本身提前——需要突出 waiting 时看面板上的状态图标（`?`）。workspace 也不参与排序。
 
-        `status` 只用来区分 active / inactive，不再有组内优先级：`waiting`
-        （正在等用户回答）不因为状态本身提前——旧的「waiting > working > idle」
-        排序键已从前端删除，需要突出 waiting 时看面板上的状态图标（`?`）。
-
-        workspace 不参与排序：workspace 匹配曾作为前端的第一排序键，让
-        「在哪启动 TUI」压过了「正在用哪几个会话」——本方法不复制该语义。
-
-        模型四件套（`model_id` / `model_name` / `provider_name` /
-        `model_display_name`）与 `status` 同源同刻地投影：在内存的会话取 live
-        agent（`Session.model_binding`），未加载的按 resume 链解析盘上记录
-        （`resolve_model_binding`——记录命中当前映射 → 快照兜底 → 模板默认）。
-        两条路都不发网络请求、不建会话：素材在一次 `list_summaries` 的 metadata
-        之上就地算出，跨会话看模型不需要逐会话拉 info。
+        模型四件套（`model_id` / `model_name` / `provider_name` / `model_display_name`）与 `status`
+        同源同刻地投影：在内存的会话取 live agent（`Session.model_binding`），未加载的按 resume 链
+        解析盘上记录（`resolve_model_binding`）。两条路都不发网络请求、不建会话。
         """
         config = get_config()
         result = []

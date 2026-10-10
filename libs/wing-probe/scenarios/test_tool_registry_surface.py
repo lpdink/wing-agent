@@ -1,4 +1,4 @@
-"""注册表面与"存量配置容忍"场景（追加项 · 03 review [S]1）。
+"""注册表面与"存量配置容忍"场景（追加项）。
 
 两条相关但**不同**的路径（design.md Assumption A1）：
 
@@ -11,7 +11,7 @@
 
 断言面：`GET /api/tools`（注册表视图）、请求体声明集、HTTP 状态码、workspace 文件。
 
-> **删除钉子（03 review [S]1 的"缺席"半边）已落地**：本场景在集成分支上运行
+> **删除钉子已落地**：本场景在集成分支上运行
 > （`03_delete_legacy_tools` 已并入），断言 `Explorer` / `BetterEdit` **不在**
 > 注册表里——两个名字在删除前后分别是"可解析"与"不可解析"，本文件两个方向都钉。
 """
@@ -57,7 +57,7 @@ async def test_config_legacy_tool_names_are_tolerated(probe: Probe) -> None:
     """
     registry = await _registry_names(probe)
     assert {"Bash", "Read", "Write"} <= registry, registry
-    # 删除钉子（03 review [S]1 的"缺席"半边）：两个已删工具名真的不在注册表里——
+    # 删除钉子：两个已删工具名真的不在注册表里——
     # 与上面"配置里留着它们也不炸"的容忍契约是**两个方向**的断言。
     assert not ({"Explorer", "BetterEdit"} & registry), registry
     expected = sorted(name for name in CONFIG_TOOLS if name in registry)

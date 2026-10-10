@@ -320,24 +320,16 @@ class Session:
     def apply_agent_override(self, override: AgentOverride) -> None:
         """应用 AgentOverride 到当前 session 的 agent（创建时调用）。
 
-        在 from_template 之后调用，覆盖 template 中的特定字段。
-        通过 agent 自身的公共方法完成覆盖，不直接操作内部状态。
+        在 from_template 之后调用，通过 agent 自身的公共方法覆盖 template 的特定字段，不直接操作
+        内部状态。Override 语义：None 字段不覆盖（保留 template 值）；system_prompt 替换、
+        append_system_prompt 追加，两者同时存在时先替换再追加；``model_id`` 是唯一的模型覆盖入口
+        （单键查表，命中即切换调用名与 provider，未命中 raise——provider 随映射而来，不再单独下发）。
 
-        Override 语义：
-        - None 字段不覆盖（保留 template 值）
-        - system_prompt 替换，append_system_prompt 追加
-        - 两者同时存在时，先替换再追加
-        - ``model_id`` 是唯一的模型覆盖入口：单键查表（命中即切换调用名与
-          provider），未命中 raise（C7 文案）——provider 随映射而来，不再单独下发
-
-        每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，
-        其效果必须跨重启（resume）与 fork 存活，否则系统提示词 / 工具集 /
-        开关在重启后变回模板默认，请求前缀与重启前不一致（KV cache 碎裂）。
-
-        # 工具 ref 先做纯校验（失败时不落任何字段）；其它字段的应用不会失败。
-        # 文本字段的可编码性同样在应用之前收口（非法 UTF-8 → 落盘就会炸）。
-        被忽略的字段以 :func:`ignored_override_fields` 为统一判据——创建路径当前
-        没有会被忽略的字段（``provider`` 已不是覆盖字段）。
+        每个被应用的字段同步写入 metadata 并落盘——override 是显式动作，其效果必须跨重启（resume）与
+        fork 存活，否则系统提示词 / 工具集 / 开关在重启后变回模板默认，请求前缀与重启前不一致
+        （KV cache 碎裂）。工具 ref 先做纯校验（失败时不落任何字段），文本字段的可编码性同样在应用
+        之前收口（非法 UTF-8 → 落盘就会炸）；被忽略的字段以 :func:`ignored_override_fields` 为统一
+        判据。
         """
         cm = self._context_manager
         agent = self._agent
@@ -883,26 +875,21 @@ class Session:
     def _restore_persisted_model(self) -> None:
         """从 metadata 还原模型身份三元组（重启后 resume 的核心动作）。
 
-        恢复链（优先级固定，**无候选集合 / 无优先级回落 / 不猜测**）：
+        恢复链（优先级固定，**无候选集合 / 无优先级回落 / 不猜测**）：① ``model_id`` 命中 id 空间 →
+        **用当前映射**（``ref.name`` / ``ref.provider_name``，跟随配置演化；id 不变而 name/provider
+        变了是配置作者的正常操作），``_model_id = ref.id``；② ``model_id`` 未命中（id 被删）→ 用记录
+        里的**快照** ``(provider_name, model_name)`` 继续跑 + warning，``_model_id =
+        identify(provider, name)``（反查补全，可能 None——name 也不在声明里时不编 id）；③ 快照
+        provider 不可解析 → 回落模板默认 + warning，**记录原样保留**（config 修复后下次 resume 仍可
+        还原）；④ 旧记录（无 ``model_id``）→ 同 ② 的快照路径 + ``identify`` 反查补 id；⑤ 记录不完整
+        （只有 id 或只有半边快照）：id 能命中走 ①，否则视为无记录。
 
-        1. ``model_id`` 命中 id 空间 → **用当前映射**（``ref.name`` /
-           ``ref.provider_name``，跟随配置演化；id 不变而 name/provider 变了
-           是配置作者的正常操作），``_model_id = ref.id``；
-        2. ``model_id`` 未命中（id 被删）→ 用记录里的**快照** ``(provider_name,
-           model_name)`` 继续跑 + warning；``_model_id = identify(provider, name)``
-           （反查补全，可能 None——name 也不在声明里时不编 id）；
-        3. 快照 provider 不可解析（config 变更 / 构建失败）→ 回落模板默认 +
-           warning，**记录原样保留**（config 修复后下次 resume 仍可还原）；
-        4. 旧记录（无 ``model_id``）→ 同 2 的快照路径 + ``identify`` 反查补 id；
-        5. 记录不完整（只有 id 或只有半边快照）：id 能命中走 1，否则视为无记录。
+        ``identify`` 是**单键反查**（同 provider 内调用名唯一 ⇒ 至多一个命中），只回答「这个
+        (provider, name) 对应哪个 id」，不参与「该跑哪个模型」的决策。
 
-        ``identify`` 是**单键反查**（同 provider 内调用名唯一 ⇒ 至多一个命中），
-        只回答「这个 (provider, name) 对应哪个 id」，不参与「该跑哪个模型」的决策。
-
-        对齐落盘（一次性迁移，不是写噪声）：只有当内存三元组与记录**不一致、
-        且拿到了新事实**（id 命中后的快照跟随 / 旧记录补 id）才写回 metadata。
-        id 未命中且反查也未命中时**不写**——旧 id 与快照是唯一恢复线索，擦掉
-        等于销毁信息（与第 3 级的"记录保留"同一口径）。
+        对齐落盘（一次性迁移，不是写噪声）：只有当内存三元组与记录**不一致、且拿到了新事实**（id
+        命中后的快照跟随 / 旧记录补 id）才写回 metadata。id 未命中且反查也未命中时**不写**——旧 id
+        与快照是唯一恢复线索，擦掉等于销毁信息。
         """
         m = self._metadata
         config = get_config()

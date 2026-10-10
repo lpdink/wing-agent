@@ -2,34 +2,30 @@
 //!
 //! # 为什么 WS 客户端住在事件泵任务里
 //!
-//! [`GatewayClient`] 不可 Clone，且收事件要 `&mut self`（`recv_event`）、发消息只要
-//! `&self`（`send_message`）——把引用散给多处会立刻撞上借用冲突。方案：**连接本体
-//! move 进泵任务**，泵里 `tokio::select!` 同时等「WS 事件」与「出站命令」；hub 其余
-//! 部分只拿一个 `mpsc::Sender<Outbound>`。
-//!
-//! （`select!` 在进入分支体前会 drop 其余分支的 future，所以分支体里可以对同一连接
-//! 做共享借用；这是本设计的编译期前提，改动泵结构时注意别破坏它。）
+//! [`GatewayClient`] 不可 Clone，收事件要 `&mut self`（`recv_event`）、发消息只要 `&self`
+//! （`send_message`）——把引用散给多处会立刻撞上借用冲突。方案：**连接本体 move 进泵任务**，
+//! 泵里 `tokio::select!` 同时等「WS 事件」与「出站命令」；hub 其余部分只拿一个
+//! `mpsc::Sender<Outbound>`。（`select!` 在进入分支体前 drop 其余分支的 future，所以分支体里
+//! 可以对同一连接做共享借用——这是本设计的编译期前提。）
 //!
 //! # 事件分流
 //!
-//! 单条 WS 连接承载所有会话的事件，按 `meta.session_id` 分流到各会话的
-//! `mpsc::Sender<WingEvent>`（容量 [`EVENT_BUFFER`]，**`try_send`**——投递阻塞会
-//! 反过来卡死出站队列，见 `dispatch`）。没有在途 prompt 的会话直接丢弃（ACP 的
-//! `session/update` 只在轮次内有意义），事件流随 WS 断开而终止。
+//! 单条 WS 连接承载所有会话的事件，按 `meta.session_id` 分流到各会话的 `mpsc::Sender<WingEvent>`
+//! （容量 [`EVENT_BUFFER`]，**`try_send`**——投递阻塞会反过来卡死出站队列，见 `dispatch`）。
+//! 没有在途 prompt 的会话直接丢弃（`session/update` 只在轮次内有意义），事件流随 WS 断开终止。
 //!
 //! # prompt 串行化
 //!
-//! 每个会话一把 `tokio::sync::Mutex`（gate）。[`SessionHub::begin_turn`] 先排队拿
-//! gate（等前一轮终态），再装事件通道、投递用户消息；[`Turn`] 持有 gate guard 与事件
-//! 接收端，Drop 时一并释放。同会话第二个 prompt 因此天然排队（不拒绝、不丢弃）。
+//! 每个会话一把 `tokio::sync::Mutex`（gate）。[`SessionHub::begin_turn`] 先排队拿 gate（等前一轮
+//! 终态），再装事件通道、投递用户消息；[`Turn`] 持有 gate guard 与事件接收端，Drop 时一并释放。
+//! 同会话第二个 prompt 因此天然排队（不拒绝、不丢弃）。
 //!
 //! # 挂载（session/load · session/resume）
 //!
-//! 已存在的会话经 [`SessionHub::attach_and_subscribe`] 挂载：入表（幂等）→ 取 gate →
-//! arm 事件接收端 → subscribe。**arm 必须早于 subscribe**（订阅会立刻推一份
-//! `sync_session` 快照，晚 arm 就没人接）——两条动作封在同一个方法里，顺序写不坏。
-//! [`Attached`] 的 Drop = 卸载（disarm，回到空闲语义）；[`SessionHub::close_session`]
-//! 负责回收条目与卡片记忆（幂等）。
+//! 已存在的会话经 [`SessionHub::attach_and_subscribe`] 挂载：入表（幂等）→ 取 gate → arm 事件
+//! 接收端 → subscribe。**arm 必须早于 subscribe**（订阅会立刻推一份 `sync_session` 快照，晚 arm
+//! 就没人接）——两条动作封在同一个方法里，顺序写不坏。[`Attached`] 的 Drop = 卸载（disarm，回到
+//! 空闲语义）；[`SessionHub::close_session`] 负责回收条目与卡片记忆（幂等）。
 
 use std::collections::HashMap;
 use std::fmt;
@@ -92,18 +88,14 @@ const CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// WS 断开后的收尾窗口：等客户端关连接（或超时）再退进程。
 ///
-/// 三段收尾的顺序是语义的一部分：
+/// 三段收尾的顺序是语义的一部分：1. `fail_in_flight`——让在途 prompt 的接收端立刻结束（它们随即
+/// 以 JSON-RPC error 收口）；2. `drain_pending_replies`——等每个在途 prompt 的错误**入出站队列**；
+/// 3. `wait_client_closed`——等客户端关连接（或本窗口耗尽）再退出。
 ///
-/// 1. `fail_in_flight`：让在途 prompt 的接收端立刻结束（它们随即以 JSON-RPC error 收口）；
-/// 2. `drain_pending_replies`：等每个在途 prompt 的错误**入出站队列**；
-/// 3. `wait_client_closed`：等客户端关连接（或本窗口耗尽）再退出。
-///
-/// 第 3 步不是凑数：SDK 的「有限前台」收尾（`connect_with` 的前台 future 返回）不等
-/// 物理写出——它的 `drain_outgoing` 只在成功路径/被动 EOF 路径等传输完成，进程随即
-/// 退出会把刚入队的 error 帧一起带走（实测：不等就只剩客户端那边的「连接消失」，
-/// 而本步验收要求「WS 断开时所有在途 prompt 回 JSON-RPC error（可诊断）」）。
-/// 等客户端自己关连接是最干净的放下时机：它读到错误后大约就是这个时刻；真机上
-/// 客户端每次都关，最坏情况才走满窗口。
+/// 第 3 步不是凑数：SDK 的「有限前台」收尾不等物理写出（它的 `drain_outgoing` 只在成功路径 / 被动
+/// EOF 路径等传输完成），进程随即退出会把刚入队的 error 帧一起带走——实测不等就只剩客户端那边的
+/// 「连接消失」，而本步验收要求「WS 断开时所有在途 prompt 回 JSON-RPC error（可诊断）」。等客户端
+/// 自己关连接是最干净的放下时机：它读到错误后大约就是这个时刻；最坏情况才走满窗口。
 const DRAIN_GRACE: Duration = Duration::from_secs(3);
 
 // ============================================================
@@ -183,7 +175,7 @@ struct EntryState {
     /// 会话级工具卡片记忆（跨轮次）。
     tools: ToolCards,
     /// 有一轮 **prompt** 已 armed：`session/cancel` / `close` 据此决定发不发 interrupt
-    /// （05 审查 N3：挂载窗口没有后端轮次，对空闲会话 interrupt 是多余行为）。
+    /// （挂载窗口没有后端轮次，对空闲会话 interrupt 是多余行为）。
     turn_armed: bool,
     /// 有一次**挂载**（`session/load` / `session/resume`）已 armed：同会话 prompt 排队等它，
     /// `close` 也要等它收口——但它**不是**在途轮次（不发 interrupt）。
@@ -642,7 +634,7 @@ impl SessionHub {
     ///
     /// 只有会话确实有**在途 prompt** 时才发起 HTTP interrupt——空闲期发会把网关的
     /// `interrupted` 广播留给下一个 prompt，等于凭空把它打回 cancelled。挂载窗口
-    /// （`session/load` / `session/resume`）同样没有后端轮次，也不发（05 审查 N3）。
+    /// （`session/load` / `session/resume`）同样没有后端轮次，也不发。
     /// 网关随后广播 `interrupted`，在途 [`Turn`] 收到即以 `cancelled` 收口
     /// （`session/cancel` 必回 `stopReason: "cancelled"`）。
     pub fn request_cancel(self: &Arc<Self>, session_id: &str) {
@@ -673,25 +665,21 @@ impl SessionHub {
     /// 挂载与订阅一个**已存在**的会话（`session/load` / `session/resume` 的共同入口）：
     /// 入表（幂等）→ 取 gate → arm 事件接收端 → subscribe。
     ///
-    /// **arm 必须早于 subscribe**：网关的订阅会立刻推一份 `sync_session` 快照，arm 晚
-    /// 一步就没有消费者，快照被丢弃（回放无从谈起）。两条动作封在一个方法里，顺序不
-    /// 会写错。
+    /// **arm 必须早于 subscribe**：网关的订阅会立刻推一份 `sync_session` 快照，arm 晚一步就没有
+    /// 消费者，快照被丢弃（回放无从谈起）。两条动作封在一个方法里，顺序不会写错。
     ///
-    /// 订阅失败 → 回滚（只回收**本次新建**的条目；见下）并报错——不留一个「在表但
-    /// 收不到事件」的会话（那种会话的 prompt 会静默挂起）。
+    /// 订阅失败 → 回滚（见下）并报错——不留一个「在表但收不到事件」的会话（那种会话的 prompt 会
+    /// 静默挂起）。回滚的两个边界：
     ///
-    /// 回滚的两个边界（05 审查 N1/N2）：
+    /// - **只回收本次新建的条目**：重复挂载一个既有会话时，条目（含卡片记忆）与网关侧订阅本来
+    ///   健康，一次失败的重复挂载不该把它们删掉；既有条目的订阅**不能**撤（那是它的健康订阅）；
+    /// - **best-effort 撤销网关侧订阅**（只对新建条目）：`POST /api/session/subscribe` 是「先建
+    ///   路由后应答」（见 `routes/session.py`），响应丢失时网关仍认为本 client 订阅着该会话——
+    ///   不撤销会把会话钉在网关内存里（release 被 409 拒绝、reaper 逐出不了）。
     ///
-    /// - **只回收本次新建的条目**：重复挂载一个既有会话时，条目（含卡片记忆）与网关侧
-    ///   订阅本来健康，一次失败的重复挂载不该把它们删掉；
-    /// - **best-effort 撤销网关侧订阅**（只对新建条目）：`POST /api/session/subscribe`
-    ///   是「先建路由后应答」（见 `routes/session.py`），响应丢失时网关仍认为本 client
-    ///   订阅着该会话——不撤销会把会话钉在网关内存里（release 被 409 拒绝、reaper 逐出
-    ///   不了）。既有条目的订阅**不能**撤（那是它的健康订阅）。
-    ///
-    /// 取 gate 会排队等同会话的在途轮次 / 上一次挂载收口（复用 `Turn` 的串行化语义）：
-    /// 挂载期间 armed，同会话的 `session/prompt` 也排队等挂载结束——回放中途换掉事件
-    /// 通道会让回放读不到快照帧。
+    /// 取 gate 会排队等同会话的在途轮次 / 上一次挂载收口（复用 `Turn` 的串行化语义）：挂载期间
+    /// armed，同会话的 `session/prompt` 也排队等挂载结束——回放中途换掉事件通道会让回放读不到
+    /// 快照帧。
     pub async fn attach_and_subscribe(&self, session_id: &str) -> Result<Attached, HubError> {
         let (attached, created) = self.attach_session(session_id).await?;
         if let Err(error) = self.subscribe_session(session_id).await {
@@ -736,7 +724,7 @@ impl SessionHub {
         }
         // 再查一次事件流（与 `begin_turn` 同款）：排队期间泵可能已经退出。
         if self.stream_dead.load(Ordering::SeqCst) {
-            // 本次新建的条目连同卡片记忆一起回滚（06 审查 N3）：死流上不留「在表但
+            // 本次新建的条目连同卡片记忆一起回滚：死流上不留「在表但
             // 无人投递」的半截会话。只回收新建条目——既有条目是别的挂载/轮次正在用
             // 的（与订阅失败的回滚同判据，见 [`SessionHub::attach_and_subscribe`]）。
             // 本路径还没 subscribe，无需撤销网关侧订阅。
@@ -772,7 +760,7 @@ impl SessionHub {
     }
 
     /// 关闭会话：视在途轮次为 cancel（有界等待收口）→ 回收会话表条目与卡片记忆
-    /// （01 审查 N6）→ unsubscribe + release（幂等，best-effort）。
+    /// → unsubscribe + release（幂等，best-effort）。
     ///
     /// **幂等成功**：重复 close / close 不认识（或刚被回收）的会话都不报错——与 Zed 的
     /// 关线程流程兼容。网关侧 release 的失败（忙碌 / 被订阅 / 非持久后端）只记 warn：
@@ -790,7 +778,7 @@ impl SessionHub {
                 // 留在表里恒拒新工作；后续收尾路径本来就不再服务任何新 prompt。）
                 // ACP：close 必须先当作 `session/cancel` 处理，让**在途轮次**有机会以
                 // `cancelled` 收口（而不是被我们抽掉通道、以内部错误收场）。挂载窗口
-                // 没有后端轮次——不发 interrupt（05 审查 N3），但仍要等它收口。
+                // 没有后端轮次——不发 interrupt，但仍要等它收口。
                 if entry.has_turn_in_flight() {
                     self.request_cancel(session_id);
                 }
@@ -836,7 +824,7 @@ impl SessionHub {
     /// 取既有条目；不存在则建一个并入表（挂载路径用，幂等——重复挂载不丢卡片记忆）。
     ///
     /// 返回 `(entry, created)`：`created == true` 只对**本次新建**的条目——回滚时据此
-    /// 决定要不要回收（05 审查 N1：既有条目不能误删）。
+    /// 决定要不要回收（既有条目不能误删）。
     fn entry_or_register(&self, session_id: &str) -> (Arc<SessionEntry>, bool) {
         let mut state = self.state.lock().expect("hub mutex poisoned");
         if let Some(entry) = state.sessions.get(session_id) {
@@ -990,8 +978,7 @@ impl SessionHub {
     ///
     /// 在途 ask 等待客户端作答时用它做 `select!` 的另一臂（见 `agent::run_turn`）：
     /// WS 一断就（用默认答案）收口，让轮次走到既有的「gateway event stream ended」错误
-    /// 分支——否则 `session/prompt` 会一直卡在客户端请求上，只以连接消失告终
-    /// （review r1 N-1）。
+    /// 分支——否则 `session/prompt` 会一直卡在客户端请求上，只以连接消失告终。
     pub async fn stream_dead(&self) {
         loop {
             // 先登记再复查：漏掉「登记与检查之间刚置位」的窗口。
@@ -1090,7 +1077,7 @@ pub struct NewSessionParams {
 /// 一次会话挂载（`attach_session` 的产物）：条目 + 事件接收端 + gate guard。
 ///
 /// 生命周期即「挂载期」：期间 `attach_armed = true`（同会话 prompt 排队等 gate，
-/// 但**不是**在途轮次——`close` / `cancel` 不据此发 interrupt，05 审查 N3），Drop 时
+/// 但**不是**在途轮次——`close` / `cancel` 不据此发 interrupt），Drop 时
 /// 一并卸下事件通道、释放 gate（回到空闲语义：事件丢弃，下一个 prompt 自己再 arm）。
 ///
 /// 职责分工：调用方 `subscribe_session` → [`Attached::read_snapshot`] 读快照 →
@@ -1293,7 +1280,7 @@ impl Turn {
     ///
     /// 必须在 `Turn` drop（= gate 释放）之前调用：后端的异常帧序
     /// `turn_result → error → done` 里，那条 `error` 若是留给下一个排队 prompt 去读，
-    /// 它会被当成新轮次的终态（review_r1 S3 实测复现）。
+    /// 它会被当成新轮次的终态。
     ///
     /// 返回窗口内收到的尾帧（已从通道取走）；`done`（正常路径的尾帧）到达即停，
     /// 通道关闭或预算耗尽同样停——总耗时不超过 [`TRAILING_FRAME_GRACE`]。
@@ -1404,7 +1391,7 @@ mod tests {
     }
 
     /// 测试用 hub，HTTP 指向一个「记录请求行」的极简监听：**订阅一律 500**（触发回滚），
-    /// 其余路径 200。用来观察「发不发 HTTP / 发的是哪条路径」（05 审查 N1/N2/N3）。
+    /// 其余路径 200。用来观察「发不发 HTTP / 发的是哪条路径」。
     ///
     /// 返回的 `Arc<Mutex<Vec<String>>>` 是请求行（`"POST /api/session/… HTTP/1.1"`）。
     async fn hub_with_recording_http() -> (
@@ -1898,7 +1885,7 @@ mod tests {
         );
     }
 
-    /// 05 审查 N1 + N2：新建条目的回滚 = 回收条目 **且** best-effort 撤销网关侧订阅
+    /// 新建条目的回滚 = 回收条目 **且** best-effort 撤销网关侧订阅
     /// （subscribe 是「先建路由后应答」，不撤会把会话钉在网关内存里）。
     #[tokio::test]
     async fn a_fresh_entry_rolls_back_and_unsubscribes() {
@@ -1921,7 +1908,7 @@ mod tests {
         );
     }
 
-    /// 05 审查 N1 + N2：重复挂载（条目已存在）失败时**保留**既有条目与卡片记忆，
+    /// 重复挂载（条目已存在）失败时**保留**既有条目与卡片记忆，
     /// 且**不**撤销它的健康订阅——一次失败的重复挂载不该把它打坏。
     #[tokio::test]
     async fn a_failed_re_attach_keeps_the_existing_entry_and_its_subscription() {
@@ -1951,7 +1938,7 @@ mod tests {
         );
     }
 
-    /// 05 审查 N3：挂载窗口没有后端轮次——`session/cancel` 不该向网关发 interrupt；
+    /// 挂载窗口没有后端轮次——`session/cancel` 不该向网关发 interrupt；
     /// 真有一轮 prompt 在途时才发（本测试同时钉住正反两面）。
     #[tokio::test]
     async fn cancel_only_interrupts_when_a_turn_is_in_flight() {
@@ -1988,7 +1975,7 @@ mod tests {
         drop(turn);
     }
 
-    /// 05 审查 N3（close 面）：挂载窗口的 `close` 不发 interrupt——但等挂载收口后
+    /// 挂载窗口的 `close` 不发 interrupt——但等挂载收口后
     /// 照常回收（unsubscribe + release）。
     #[tokio::test]
     async fn close_during_a_mount_window_does_not_interrupt() {
@@ -2070,7 +2057,7 @@ mod tests {
         assert!(!hub.knows("s1"), "死流上不挂载、也不入表");
     }
 
-    /// 06 审查 N3：死流在「入表之后、arm 之前」才被置位时，第二道复查必须把本次
+    /// 死流在「入表之后、arm 之前」才被置位时，第二道复查必须把本次
     /// **新建**的条目录回滚——否则会话表里留一个收不到事件的半截会话。
     ///
     /// 窗口是**构造**出来的（不是竞速）：先扣住 hub 的 `state` 锁——`entry_or_register`
@@ -2137,7 +2124,7 @@ mod tests {
         );
     }
 
-    // ---- 回收（session/close · 01 审查 N6） ----
+    // ---- 回收（session/close） ----
 
     #[tokio::test]
     async fn close_drops_the_entry_and_releases_the_card_memory() {

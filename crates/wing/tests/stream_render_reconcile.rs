@@ -79,7 +79,7 @@ fn shapes() -> Vec<(&'static str, String)> {
         ("long_code_block", "```rust\nlet a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;\nlet e = 5;\n```\n\nDone.".into()),
         ("overwide_code_line", "```rust\nlet some_extremely_long_variable_name_that_exceeds_terminal_width_by_a_lot = 1234567890;\n```\n\nafter".into()),
         ("cjk_code_comment", "```rust\n// 中文注释的代码行，验证宽度与硬折行\nlet x = 1;\n```\n\n结束。".into()),
-        // --- review-fix shapes (P1-4/P1-5) ---
+        // --- regression shapes: diff blocks, raw HTML, empty list item ---
         ("diff_block", "```diff\ndiff --git a/foo.rs b/foo.rs\nindex abc123..def456 100644\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,4 @@\n-old line\n+new line\n context line\n```\n\nafter".into()),
         ("diff_block_no_git", "```diff\n--- a/bar.rs\n+++ b/bar.rs\n@@ -1 +1 @@\n-x\n+y\n```\n\nafter".into()),
         ("unclosed_diff", "intro\n\n```diff\ndiff --git a/bar.rs b/bar.rs\n@@ -1 +1 @@\n-x\n+y\n".into()),
@@ -90,7 +90,7 @@ fn shapes() -> Vec<(&'static str, String)> {
         ("empty_list_item_then_more", "- \n\ntext after\n\nmore para\n".into()),
         ("empty_quote", "> \n\nafter".into()),
         ("quote_para_then_quote_code", "> before\n\n> ```rust\n> let a = 1;\n> ```\n\nafter".into()),
-        // --- review round 2 ---
+        // --- indented closing fences, CRLF ---
         ("indented_closing_fence", "```rust\nlet x = 1;\n  ```\n\nafter the block\n".into()),
         ("indented_closing_fence_trailing_space", "```rust\nlet x = 1;\n  ```  \n\nafter\n".into()),
         ("indented_closing_fence_tilde", "~~~python\nx = 1\n   ~~~\n\nafter\n".into()),
@@ -227,7 +227,7 @@ fn shapes() -> Vec<(&'static str, String)> {
             "intro\n\n$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$".into(),
         ),
         ("math_inline_tail", "the answer is $x^2 + y^2$".into()),
-        // --- review r1: regions pulldown does not parse as text ---
+        // --- regions pulldown does not parse as text ---
         (
             "math_link_destination",
             "see [a](http://x/\\(y\\)) and [b](http://x/\\(y\\) \"t \\(z\\)\") here\n\nafter".into(),
@@ -248,7 +248,7 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_autolink",
             "link <http://x/\\(y\\)> and text \\(z\\)\n\nafter".into(),
         ),
-        // --- review r1: code regions behind a block prefix (S2) ---
+        // --- code regions behind a block prefix ---
         (
             "math_quoted_tilde_fence",
             "> ~~~\n> \\begin{align}a\\end{align}\n> ~~~\n\nafter \\(x\\)\n".into(),
@@ -267,7 +267,7 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_list_fence",
             "- ```\n  \\(x\\)\n  ```\n\nafter\n".into(),
         ),
-        // --- review r1: inline math must not break prose wrapping (B1) ---
+        // --- inline math must not break prose wrapping ---
         (
             "math_inline_long_paragraph",
             "the quick brown fox $x^2$ jumps over the lazy dog and then keeps running far \
@@ -278,7 +278,7 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_inline_overwide",
             format!("Sum: $a_1{} end\n\nafter\n", " + a_2 + a_3 + a_4 + a_5 + a_6".repeat(3)),
         ),
-        // --- review r2: tabs (the panic) and prefixed-fence closure ---
+        // --- tabs (the panic) and prefixed-fence closure ---
         (
             // A tab is four COLUMNS but one byte: the shape helpers must not
             // slice at a column count (this input used to panic).
@@ -322,9 +322,9 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_reference_definition_wrapped",
             "[a b]:\n  http://x/\\(y\\) \"t \\(z\\)\"\n\nuse \\(a\\)\n\nafter\n".into(),
         ),
-        // --- review r3: the swallowed content carries a formula, so a wrong
-        // fence model would show up as a code-content rewrite (resting state
-        // != reference) instead of staying invisible ---
+        // --- the swallowed content carries a formula, so a wrong fence model
+        // shows up as a code-content rewrite (resting state != reference)
+        // instead of staying invisible ---
         (
             "math_bare_closer_swallows_formula",
             "> ~~~\n> a\n~~~\n\n\\(x\\) after\n".into(),
@@ -366,8 +366,8 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_list_continuation_fence",
             "- item\n  ~~~\n  body\n  ~~~\n\n\\(x\\) after\n".into(),
         ),
-        // --- review r4: the shapes that were still diverging (the matrix goes
-        // red on the pre-fix code for each of them) ---
+        // --- list-marker / continuation shapes (the matrix goes red on the
+        // pre-fix code for each of them) ---
         (
             // A NEW ITEM MARKER inside the same list: the indented fence line
             // is the new item's content, not a top-level fence.
@@ -424,7 +424,7 @@ fn shapes() -> Vec<(&'static str, String)> {
             "math_reference_definition_wrapped_then_fence",
             "[ref]:\n  http://x\n  ~~~\n\n\\(x\\) T\n".into(),
         ),
-        // --- review r5: three boundary rules in the shared primitives ---
+        // --- three boundary rules in the shared primitives ---
         (
             // An HTML block swallows a fence line: a line that merely carries a
             // prefix (`- a`) does not end the block (the block's *container*
@@ -503,7 +503,7 @@ fn reconcile_with(
 }
 
 /// [`reconcile_with`] with an explicit palette — the `rendering.math` switch
-/// lives there, and the review's cross-line-alt shapes must reconcile with it
+/// lives there, and the cross-line-alt shapes must reconcile with it
 /// off too (the panic they came from is in the parser, before any option).
 #[allow(clippy::too_many_arguments)]
 fn reconcile_with_palette(
@@ -681,7 +681,7 @@ fn image_shapes() -> Vec<(&'static str, String)> {
             "image_then_heading",
             "![a](./plots/a.png)\n\n# Heading\n\nbody\n".into(),
         ),
-        // --- review #135 blocker B: a label that spans a soft break ---
+        // --- a label that spans a soft break ---
         //
         // The soft break flushes the line the label opened on, so the saved
         // segment index outlives the line it was recorded against. The shape
@@ -884,7 +884,7 @@ fn reconcile_matrix_images() {
     }
 }
 
-/// The review's blocker-B shapes at the chunk sizes the report used
+/// Cross-line-alt shapes at the chunk sizes the report used
 /// (1 / 3 / 17), across widths, profiles, both image tiers and the math
 /// switch — the panic they came from is in the parser, i.e. the reference
 /// render alone was enough to kill the process, so the streaming engine's
@@ -1271,7 +1271,7 @@ fn header_shape_matches_the_reference_body() {
     }
 }
 
-/// 标题的三条「后装」路径 + 摘除路径都要保持锚点对齐（评审 B）。
+/// 标题的三条「后装」路径 + 摘除路径都要保持锚点对齐。
 ///
 /// 上面的 `header_shape_matches_the_reference_body` 只覆盖「标题先于一切
 /// push」的流式路径（那条路径按 `base` 记账，本来就对）。这里补上：晚设

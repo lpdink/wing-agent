@@ -1343,7 +1343,7 @@ mod tests {
         assert_eq!(parsed.colors.preset, ColorPreset::Wing);
     }
 
-    /// N-1（09 review_r1）：文件头与第一个 section 之间**恰有一个**空行。
+    /// N-1：文件头与第一个 section 之间**恰有一个**空行。
     #[test]
     fn the_header_is_followed_by_exactly_one_blank_line() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
