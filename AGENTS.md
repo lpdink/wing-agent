@@ -204,7 +204,7 @@ crates/wing/src/
 ├── render/                          Markdown + 语法高亮
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）
 │   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
-│   ├── table/                       共享表格引擎：列宽分配 / 列分类 / 框线皮肤（markdown 表格与 CLI 共用）+ plain（CLI 纯文本表格渲染，wing ps / tools 用）
+│   ├── table/                       共享表格引擎：列宽分配 / 列分类 / 框线皮肤（markdown 表格与 CLI 共用）+ plain（CLI 纯文本表格渲染，wing ps / tools 用）+ card（welcome 信息卡：无表头带 / 无行间线）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）

@@ -145,7 +145,8 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 * **不变量**：单元格折行不截断（零信息损失，markdown 侧）；**正常预算下**每一行等宽、且 ≤ 可用宽度（`tables.rs` 的形状 golden + 等宽测试钉住）。预算退化到装不下各列硬地板时，行会溢出而不是摧毁列——这是 `compute_column_widths` 的登记语义；
 * **单元格不注入外层前缀**：引用栏 / 列表续行不会进格子（进去了就是每格一道假框线 `┃ │ A ┃`）；表格整体也不套外层前缀（与代码块 / 公式块不同），列表 item 的 marker 单独成行；
 * **CLI 侧**（`render/table/plain.rs`）：同一皮肤渲染纯文本网格；单元格从折行改为**截断**（终端宽是硬约束），全部按显示宽度记账（CJK 安全），TTY 上着色（尊重 `NO_COLOR`）；
-* **预览**：`cargo run -p wing --example theme_preview`（assistant markdown 一节就是表格实景）；任意输入用 `render_probe`。
+* **开屏名牌侧**（`render/table/card.rs`）：欢迎屏右侧信息列的信息卡 —— 同一份皮肤与宽度账本（`TableSkin::framed` / `frame_overhead`），但是**无表头带、无行间线**的"框住的信息块"（信息行不是数据行，重表头带与每行细线只会把它读成表单）；行同样**省略**而不是折行（卡片行数是布局契约，见 [welcome-mascot](welcome-mascot.md)）。宽度不够的档位根本不上框（`CARD_MIN`）—— 框是装饰，不许花掉文字；
+* **预览**：`cargo run -p wing --example theme_preview`（assistant markdown 一节就是表格实景）；任意输入用 `render_probe`；欢迎屏那张用 `cargo run -p wing --example welcome_preview`。
 
 已知边界：表格不带外层前缀、单元格内不注入前缀（见第四节登记）。
 

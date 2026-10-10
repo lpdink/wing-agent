@@ -79,6 +79,25 @@ fn welcome_header_never_carries_the_retired_release_notes() {
     }
 }
 
+/// 信息卡按宽度档出现：信息列宽到框不吃掉文字时（≥ 45 列）信息列上重框，
+/// 窄于此保持纯文字 —— 80 列终端（信息列 38 列）是后者。
+#[test]
+fn wide_terminal_frames_the_info_column() {
+    let mut app = test_app();
+    // 100 列：内容 98，信息列 58 列 → 卡片在场。
+    let body = frame_body(&mut app, 100, 30);
+    assert!(body.contains("┏━━"), "宽终端的信息列该上框：\n{body}");
+    assert!(body.contains("┗━━"), "底框也要在：\n{body}");
+    // 框住六行正文：每行左右各一道竖线。
+    assert_eq!(body.matches('┃').count(), 12, "卡片竖线数不对：\n{body}");
+
+    let mut app = test_app();
+    // 80 列：内容 78，信息列 38 列 → 纯文字列（旧形态，框会吃掉 4 列）。
+    let body = frame_body(&mut app, 80, 30);
+    assert!(!body.contains('┏'), "80 列不该有卡片：\n{body}");
+    assert!(compact(&body).contains("Esc中断"), "键位行还在：\n{body}");
+}
+
 #[test]
 fn narrow_terminal_drops_the_art_before_the_text() {
     let mut app = test_app();
@@ -275,6 +294,9 @@ fn scrolling_the_welcome_out_of_view_parks_the_clock() {
 
 /// 名牌右列的**事实槽位**：版本行的下一行（`2 skills · 1 rule`，缺席时空白）。
 ///
+/// 事实行现在是信息卡里的一行（`┃` + 留白 + 内容 + 补白 + 留白 + `┃`），那一行
+/// 前面还可能有海鸥的字形 —— 取左右边框之间的文本。
+///
 /// 帧级断言刻意不写成"整帧不含某个词"：tip 是按**时间种子**抽的
 /// （`tips::seed_now()`），池子里有 `/skills 看已装技能…` —— 任何对整帧做
 /// 子串扫描的断言都会随进程抖动（评审 S-1：40 次里红 3 次）。槽位是确定性的：
@@ -285,13 +307,17 @@ fn facts_slot(app: &App) -> String {
         .iter()
         .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
         .expect("版本行在名牌右列");
-    // Full 档那一行 = 海鸥字形 + 补白 + 文字列的最后一个 span（右列的行都
-    // 是单 span 构建的；槽位缺席时是空行）。
-    lines[version + 1]
+    let text: String = lines[version + 1]
         .spans
-        .last()
-        .map(|span| span.content.trim().to_string())
-        .unwrap_or_default()
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    match (text.find('┃'), text.rfind('┃')) {
+        (Some(start), Some(end)) if end > start => {
+            text[start + '┃'.len_utf8()..end].trim().to_string()
+        }
+        _ => String::new(),
+    }
 }
 
 /// 开屏 = 名牌 + 输入卡：会话事实（skills / rules）挂在名牌右列，

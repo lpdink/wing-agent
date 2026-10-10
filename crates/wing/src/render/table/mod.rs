@@ -2,8 +2,9 @@
 //! allocation.
 //!
 //! One copy of the maths, consumed by the TUI markdown table renderer
-//! ([`crate::render::markdown::tables`]) and the CLI plain-text table renderer
-//! ([`plain`], used by `wing ps` / `wing tools`).
+//! ([`crate::render::markdown::tables`]), the CLI plain-text table renderer
+//! ([`plain`], used by `wing ps` / `wing tools`), and the welcome nameplate's
+//! info card ([`card`]).
 //!
 //! Everything here works on numbers and string measurements only: no
 //! `ratatui` styles, no assumption about which frontend is drawing. The width
@@ -11,6 +12,7 @@
 //! a product decision that lives in [`compute_column_widths`] — sharing it is
 //! what keeps the two frontends from growing two different looks.
 
+pub mod card;
 pub mod plain;
 
 use unicode_width::UnicodeWidthChar;

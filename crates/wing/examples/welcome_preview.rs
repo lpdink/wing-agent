@@ -93,10 +93,11 @@ fn render_line(line: &Line<'_>, width: u16, plain: bool) -> String {
             continue;
         }
         if plain {
-            // 无色预览里 `▀` + 背景色 = 实心格：不还原成 `█` 的话，画出来的
-            // 字形会整片瘦一半，没法拿来对形状。
+            // 无色预览里带背景色的半格 = 实心格：`▀` 填的是上半、`▄` 填的是下半，
+            // 两半都在时才是满格 —— 不还原成 `█` 的话，画出来的字形会整片瘦一半，
+            // 没法拿来对形状（2x 大字的每一格都是满格，尤其明显）。
             if span.style.bg.is_some() {
-                text = text.replace('▀', "█");
+                text = text.replace(['▀', '▄'], "█");
             }
             out.push_str(&text);
             continue;
@@ -161,7 +162,9 @@ fn draw(
     let dashes = "─".repeat((width as usize).saturating_sub(label.len() + 4));
     let _ = writeln!(out, "── {label} {dashes}");
     for line in &lines {
-        out.push_str(&render_line(line, width, plain));
+        // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的行会被
+        // 截掉最后一列（信息卡的右边框正好在那里）。
+        out.push_str(&render_line(line, width + 1, plain));
         out.push('\n');
     }
     out.push('\n');
