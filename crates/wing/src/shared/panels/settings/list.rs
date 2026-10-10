@@ -263,6 +263,19 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_list_path_is_not_an_add_target() {
+        let catalog = fx::sample_catalog();
+        let mut doc = fx::sample_doc();
+        let tools = &catalog.children[2];
+        assert!(add_item(&mut doc, Root::Gateway, "tools[", tools, None).is_none());
+        assert_eq!(
+            doc.value(Root::Gateway, "tools"),
+            Some(&json!(["Bash", "Read"])),
+            "文档一个字节都没动"
+        );
+    }
+
+    #[test]
     fn adding_a_scalar_item_appends_an_empty_value_and_opens_the_editor() {
         let catalog = fx::sample_catalog();
         let mut doc = fx::sample_doc();
@@ -394,6 +407,11 @@ mod tests {
             move_item(&mut doc, Root::Gateway, "tools", 0, -1),
             None,
             "到顶了"
+        );
+        assert_eq!(
+            move_item(&mut doc, Root::Gateway, "tools", 2, -1),
+            None,
+            "下标等于长度（行已过期）也不是可移动的项"
         );
         assert_eq!(move_item(&mut doc, Root::Gateway, "nope", 0, 1), None);
     }

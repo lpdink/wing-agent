@@ -24,7 +24,7 @@
 //! | 入口 | [`Policy::Strict`]（CLI） | [`Policy::Lenient`]（面板） |
 //! |---|---|---|
 //! | [`set_path`] | 中间层不是 object / array、数组下标越界 → 用法错误 | 形状不符就地换成正确的容器、数组补 `null` |
-//! | [`unset_path`] | 幂等（缺席 → `false`）；只动点名的那条路径 | 额外逐级清理变空的 object 祖先（不留残渣） |
+//! | [`unset_path`] | 幂等（缺席 → `false`）；只动点名的那条路径 | 额外逐级清理变空的 object / 数组容器（不留残渣） |
 //! | [`move_indexed`] | 目标下标**钳制**到 `[0, len-1]`（位移 0 → `moved == false`） | 越界 = `moved == false`（不钳制；面板只给 ±1，两种口径在 ±1 上重合） |
 //! | [`append_item`] | 列表缺席 / 为 `null` 时用目录的**声明默认值**物化 | 从不物化声明默认值（协议不携带 `list` 的默认值，design A2），缺席 = 空列表 |
 //! | [`empty_value`] | 骨架不发明假值：`{}` / `[]`，标量 → `None` | 标量给 kind 的空值，`object` 写**必填**字段 |

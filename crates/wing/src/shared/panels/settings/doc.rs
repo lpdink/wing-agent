@@ -46,8 +46,9 @@ impl Root {
 
 /// 稀疏文档 + 打开时的快照（baseline）+ 脏标记 + 密文表 + 指纹。
 ///
-/// 值的寻址一律走 §5.2 的规范路径（具体下标，`providers[0].api_key`）；
-/// [`Self::value`] 只读，[`Self::set_value`] / [`Self::remove_value`] 是面板唯一的写入口。
+/// 值的寻址一律走 §5.2 的规范路径（具体下标，`providers[0].api_key`）。
+/// [`Self::value`] 只读；写入口 = [`Self::set_value`] / [`Self::remove_value`]（单条路径）
+/// 与 [`Self::root_doc_mut`] + `shared::doc_edit` 的列表增删移（整项操作，`list.rs` 用）。
 #[derive(Debug, Clone)]
 pub struct SettingsDoc {
     gateway: Value,
