@@ -33,10 +33,12 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | `choices` | 枚举值域：值 → 含义（面板的内联选择项；`Literal` 之外的补充） |
 | `example` | 示例值（详情栏 + YAML `# e.g. …` 注释） |
 | `editable` | `false` = 面板灰显只读 |
-| `section` / `section_doc` | 顶层分组名 / 分组说明（`section_doc` 只写在该 section 的**首个**字段上） |
 | `summary_fields` | 列表项标题行的字段名序（`providers` / `agents` / `providers[].models` 各声明一组） |
 | `min_items` / `max_items` | 列表规模**声明**（"不得为空" = `min_items: 1`）；强制仍归跨字段检查 |
 | `deprecated` | 预留（本期不消费） |
+
+**分组不在这里声明**（曾经的 `section` / `section_doc` 已移出 `SettingMeta`）：界面分类住在
+`config/groups.py` 的一张有序表里，见 §1.1。
 
 其余参数（`default` / `default_factory` / `gt` / `pattern` / …）原样透传 `pydantic.Field`。
 **必填只有一处定义**：字段没有 `default`（catalog 读 `FieldInfo.is_required()`）——不引入第二个 `required=`。
@@ -53,8 +55,41 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 模板 = `emit_config_yaml(default_document(), build_catalog())`，`default_document()` = `{"providers": [], "agents": []}`
 （首启模板的空列表是**天然的 problem**——向导据此指路，不再需要 `ChangeHere` 这种假占位符）。
 
-规模（`build_catalog()` 实测）：**68 个声明字段 / 80 个节点 / 55 个叶子 / 9 个 section**；
+规模（`build_catalog()` 实测）：**68 个声明字段 / 80 个节点 / 55 个叶子 / 7 个业务分组**；
 `secret` 2（`providers[].api_key`、`gateway.auth.keys[].key`）、`enum` 6、`min_items=1` 3 组。
+
+### 1.1 业务分组：存储形式与界面分类的解耦缝
+
+`config/groups.py` 的 `SETTING_GROUPS` 是**界面分类的唯一声明处**：一组 = `(id, title, doc, members)`，
+表的顺序即界面顺序（设置面板左列锚点、`wing config list` 的分组头、`config.yaml` 的 `# ── Name ───`
+分隔行都由此而来）。成员是 `Config` 的**顶层键名**——`config.yaml` 的存储形状一概不动，
+所以加组 / 并组 / 改名 / 调序都是**零迁移**的声明层改动。
+
+| id | title | 成员（顶层键） |
+|---|---|---|
+| `providers` | Providers | `providers` |
+| `agents` | Agents | `agents` |
+| `behavior` | Behavior | `safe_command_patterns` · `yolo` · `steer` · `tool_result_truncate` |
+| `images` | Images | `images` |
+| `sessions` | Sessions | `sessions` |
+| `gateway` | Gateway | `gateway` |
+| `advanced` | Advanced | `hooks` · `commands` · `log` · `user_agent` |
+
+（`Interface` 是第 8 个锚点，但它是 TUI 自己的配置：声明在 Rust 侧 `config/catalog.rs::interface_groups()`，
+后端不知道它。见 §9。）
+
+三个消费口径（都从这一张表来，不存在第二份）：
+
+| 消费方 | 读什么 |
+|---|---|
+| `GET /api/settings/schema` | `groups[]`（id / title / doc / members）——**前端左列锚点的唯一来源**，前端零硬编码 |
+| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（emitter 的一条块注释） |
+| `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**，分隔行按组的首次出现发一次（分组表管界面顺序，不管文件顺序） |
+
+门禁（`tests/test_config_groups.py`）：id / title 唯一、成员非空且都是真实顶层字段、
+每个顶层字段**恰好**属于一个组（漏 = 界面里无处可去，重复 = 两份真相）、顺序钉死。
+`build_groups()` 在构建期就抛（不是运行期悄悄漏），probe 侧另有 wire 形状与保存回归的整机断言
+（`scenarios/test_settings_groups.py`）。
 
 ## 2. 门禁：不是纪律，是机制
 
@@ -85,7 +120,7 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 | 规则 | 行为 |
 |---|---|
 | 文件头 | 4 行注释（产品名 / 文件路径 / "推荐在 TUI 里用 `/settings` 编辑" / 无时间戳——避免 diff 噪声） |
-| 分组 | 按 `section` 声明序分组，`# ── Name ───` 分隔行 + `section_doc` |
+| 分组 | 按业务分组（§1.1）分段：`# ── Name ───` 分隔行 + `section_doc`，按组的**首次出现**发一次（键序恒为声明序） |
 | 注释位置 | 文档注释在值**上方**（`doc` → `notes` → `# e.g. …` → 生效域 → 密钥说明），不用行尾注释 |
 | 缺席有默认 | 标量写成注释行；object 整棵子树注释；list / map 注释成 `# key: []` / `# key: {}` |
 | 缺席必填 | 写出键 + 空值（`""` / `0` / `false` / `[]` / `{}`）——它就是一条 problem，向导据此指路 |
@@ -133,7 +168,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 
 | 方法 | 路径 | 语义 | 鉴权 | setup mode |
 |---|---|---|---|---|
-| GET | `/api/settings/schema` | 设置目录（catalog 树）+ 版本 + `config.yaml` 绝对路径；纯静态 | 常规 | ✅ |
+| GET | `/api/settings/schema` | 设置目录（catalog 树）+ **业务分组 `groups[]`**（§1.1）+ 版本 + `config.yaml` 绝对路径；纯静态 | 常规 | ✅ |
 | GET | `/api/settings/get` | 稀疏文档（密文叶子 = `null`）+ 密文状态表 + 指纹 + 全部问题 | 常规 | ✅ |
 | GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检 | 常规 | ✅ |
 | POST | `/api/settings/set` | 保存事务（见下） | **admin**（`tool_runtime` 403） | ✅（唯一修复路径） |

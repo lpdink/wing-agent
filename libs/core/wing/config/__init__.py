@@ -9,6 +9,7 @@
 ``spec``（声明层：``S(...)`` / ``SettingMeta`` / ``ApplyScope``，字段元信息的唯一来源）·
 ``problems``（跨字段检查的纯函数 + ``ConfigProblem``，加载期与设置面板共用）·
 ``catalog``（设置目录树：``SettingNode`` / ``build_catalog()`` / ``parse_path()``）·
+``groups``（业务分组表：``SETTING_GROUPS`` / ``build_groups()``——界面分类的唯一声明处）·
 ``emit``（规范形 YAML emitter：默认模板与保存路径共用，注释来自声明）·
 ``loader``（WING_HOME 解析 + 配置单例加载）·
 ``user_agent``（UA 预设与请求头构造）。
@@ -23,6 +24,7 @@ from .catalog import (
     parse_path,
 )
 from .emit import default_document, emit_config_yaml
+from .groups import SETTING_GROUPS, SettingGroup, build_groups, group_of
 from .loader import (
     get_config,
     get_config_path,
@@ -76,13 +78,16 @@ __all__ = [
     "ProblemKind",
     "ProviderConfig",
     "S",
+    "SETTING_GROUPS",
     "SessionsConfig",
+    "SettingGroup",
     "SettingKind",
     "SettingMeta",
     "SettingNode",
     "ToolResultTruncateConfig",
     "UserAgentConfig",
     "build_catalog",
+    "build_groups",
     "cross_field_problems",
     "default_document",
     "emit_config_yaml",
@@ -90,6 +95,7 @@ __all__ = [
     "get_config_path",
     "get_headers",
     "get_wing_home",
+    "group_of",
     "load_config",
     "parse_path",
     "reset_config",

@@ -28,6 +28,7 @@ from wing.config import (
     Config,
     ConfigProblem,
     build_catalog,
+    build_groups,
     cross_field_problems,
     get_config_path,
 )
@@ -121,6 +122,7 @@ async def settings_schema() -> SettingsSchemaResponse:
         build_catalog(),
         version=_get_version(),
         config_path=str(get_config_path()),
+        groups=build_groups(),
     )
 
 

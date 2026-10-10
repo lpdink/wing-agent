@@ -15,7 +15,9 @@ Setting API 的部分同理（03 追加）：``config.SettingNode`` → ``Settin
 
 from __future__ import annotations
 
-from wing.config import ConfigProblem, SettingNode
+from collections.abc import Sequence
+
+from wing.config import ConfigProblem, SettingGroup, SettingNode
 from wing.config.document import SecretState as SecretStateDomain
 from wing.event.query_response import BranchTargetInfo
 from wing.gateway.protocol import (
@@ -26,6 +28,7 @@ from wing.gateway.protocol import (
     SecretState as SecretStateProto,
     SessionInfoResponse,
     SettingChoice,
+    SettingGroupProto,
     SettingNodeProto,
     SettingProblem,
     SettingsSchemaResponse,
@@ -122,13 +125,29 @@ def build_settings_node(node: SettingNode) -> SettingNodeProto:
 
 
 def build_settings_schema(
-    catalog: SettingNode, *, version: str, config_path: str
+    catalog: SettingNode,
+    *,
+    version: str,
+    config_path: str,
+    groups: Sequence[SettingGroup] = (),
 ) -> SettingsSchemaResponse:
-    """GET /api/settings/schema 响应——目录树 + 网关版本 + 文件绝对路径。"""
+    """GET /api/settings/schema 响应——目录树 + 业务分组 + 网关版本 + 文件绝对路径。
+
+    ``groups`` 来自 ``config.build_groups()``（顺序即界面顺序）；前端左列锚点只认它。
+    """
     return SettingsSchemaResponse(
         version=version,
         root=build_settings_node(catalog),
         config_path=config_path,
+        groups=[
+            SettingGroupProto(
+                id=group.id,
+                title=group.title,
+                doc=group.doc,
+                members=list(group.members),
+            )
+            for group in groups
+        ],
     )
 
 

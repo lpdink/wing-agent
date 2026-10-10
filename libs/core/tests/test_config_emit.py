@@ -34,6 +34,7 @@ from wing.config import (
     emit_config_yaml,
 )
 from wing.config.catalog import SettingNode
+from wing.config.groups import build_groups
 from wing.config.document import ExtraKey, read_document
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,6 +229,16 @@ def test_section_banner_and_section_doc(template: str) -> None:
     assert lines[banner + 1] == "# 会话内存态回收（磁盘状态一概不动）"
     # 分隔行宽度固定（旧模板的观感）
     assert len(lines[banner]) == 64
+
+
+def test_section_banners_are_exactly_the_group_table(template: str) -> None:
+    """分隔行 = 分组表（顺序、名字、每组恰好一次）；文件里的键序仍是声明序。
+
+    分组表管**界面**分类，emitter 只是把它当作分段依据——所以「并组」在文件里的
+    唯一可见后果是少几行分隔注释，键一个都不动（零迁移）。
+    """
+    banners = re.findall(r"(?m)^# ── (.+?) ─+$", template)
+    assert banners == [group.title for group in build_groups()], banners
 
 
 def test_header_has_no_timestamp(template: str) -> None:
