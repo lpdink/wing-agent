@@ -389,6 +389,11 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                     tokens_per_sec=decode_tps,
                     model=model,
                     request_id=request_id,
+                    # 此刻已知的终止原因（标准帧序下 usage 帧在 finish_reason
+                    # 帧之后到达）：带内 usage 帧是 metrics 事件的载荷源，
+                    # 带上它直播路径才看得到 length ≠ stop。帧序反了也不丢
+                    # ——终结帧（流尾）永远携带权威值，取值侧按帧全量捕获。
+                    stop_reason=state.stop_reason,
                 )
 
                 yield LLMResponse(

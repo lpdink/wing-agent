@@ -6,11 +6,15 @@
 - anthropic `_build_final_response`：stop_reason 随最终 usage 传导；
 - anthropic `snapshot_blocks`：中断快照保留 text/thinking、丢弃 pending tool；
 - openai_compat `_OAIStreamState` 快照：只含已终结的 tool call；
-- openai_compat 流式 finish_reason=length 传导。
+- openai_compat 流式 finish_reason=length 传导：真实 `_generate_stream` 上，
+  带内 usage 帧与流尾终帧都携带 stop_reason（帧序两种都覆盖）。
 """
 
 from __future__ import annotations
 
+import json
+
+import pytest
 
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.anthropic.stream import _StreamState
@@ -159,3 +163,110 @@ class TestUnfinishedToolCallCount:
         assert provider.unfinished_tool_calls(None) == 0
         acc = provider.create_accumulator()
         assert provider.unfinished_tool_calls(acc) == 0
+
+
+# ─── OpenAI 兼容流式：stop_reason 的帧级传导（#151）─────────────────
+
+
+class _FakeStreamResponse:
+    is_error = False
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+        self.headers = {"x-request-id": "rid-stop-reason"}
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeStreamClient:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    def build_request(self, *args: object, **kwargs: object) -> object:
+        return object()
+
+    async def send(self, request: object, stream: bool = False) -> _FakeStreamResponse:
+        return _FakeStreamResponse(self._lines)
+
+
+def _openai_sse(chunks: list[dict]) -> list[str]:
+    lines: list[str] = []
+    for chunk in chunks:
+        lines.append(f"data: {json.dumps(chunk)}")
+        lines.append("")
+    lines.append("data: [DONE]")
+    lines.append("")
+    return lines
+
+
+def _openai_stream_provider(chunks: list[dict]) -> OpenAICompatProvider:
+    """只装配 `_generate_stream` 需要的属性（不走 __init__：无 config / http）。"""
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider.timeout_first_chunk = 30.0
+    provider._client = _FakeStreamClient(_openai_sse(chunks))
+    return provider
+
+
+def _usage_frames(responses: list) -> tuple[list, list]:
+    """(带内非零 usage 帧, 权威块数组终帧)。"""
+    inband = [
+        r for r in responses if r.usage.completion_tokens or r.usage.prompt_tokens
+    ]
+    final = [r for r in responses if r.content_blocks is not None]
+    return inband, final
+
+
+class TestOpenAIStreamStopReason:
+    """流式 finish_reason=length：带内 usage 帧与终帧都携带 stop_reason。
+
+    带内帧是 llm_call_metrics 的载荷源（直播截断提示），终帧是
+    Message.stop_reason 的取值源（落盘审计）；任一缺失都会让"length ≠ stop"
+    在对应路径上不可见。
+    """
+
+    @pytest.mark.asyncio
+    async def test_usage_frame_after_finish_reason_carries_it(self):
+        """协议帧序（finish_reason 先、usage 后）：带内 usage 帧带 stop_reason。"""
+        chunks = [
+            {"choices": [{"delta": {"content": "cut o"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+        ]
+        provider = _openai_stream_provider(chunks)
+        acc = provider.create_accumulator()
+
+        responses = [
+            c async for c in provider._generate_stream({}, "gpt-4", accumulator=acc)
+        ]
+
+        inband, final = _usage_frames(responses)
+        assert len(inband) == 1, [r.model_dump() for r in responses]
+        assert inband[0].usage.stop_reason == "length"
+        assert len(final) == 1
+        assert final[0].usage.stop_reason == "length"
+
+    @pytest.mark.asyncio
+    async def test_usage_frame_before_finish_reason_falls_back_to_final(self):
+        """帧序反了（usage 先到）：带内帧给不出值，终帧兜底（取值侧按帧全量捕获）。"""
+        chunks = [
+            {"choices": [{"delta": {"content": "cut o"}}]},
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+        ]
+        provider = _openai_stream_provider(chunks)
+        acc = provider.create_accumulator()
+
+        responses = [
+            c async for c in provider._generate_stream({}, "gpt-4", accumulator=acc)
+        ]
+
+        inband, final = _usage_frames(responses)
+        assert len(inband) == 1
+        assert inband[0].usage.stop_reason is None  # 此刻上游还没给
+        assert len(final) == 1
+        assert final[0].usage.stop_reason == "length"
