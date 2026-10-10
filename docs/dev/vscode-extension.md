@@ -303,6 +303,10 @@ WS 帧
   （不再是「值相等」——同一段文本连续两次发送失败时第二次会被吞掉）。网关未连接时 `sendMessage`
   的早退路径把文本回填（`SessionRecord.setDraft` + `state`），composer 的乐观清空不再是丢输入的
   窗口。`replyAsk` 不需要回填：ask cell 仍是 `awaiting`，用户可以再点一次。
+- **ask 草稿的互斥（#113）**：单选问题里，固定选项与自定义文本互为「最后一次显式选择」——点选项
+  清文本、输入文本清选项（TUI `AskPanel::commit_option` / `confirm_editing` 的同款不变式；宿主
+  `askAnswerValue` 的「选项优先」读取规则依赖它，缺了它文本会被静默丢弃）。多选两者并存、提交时
+  合并。转换就两个纯函数，住在 `src/webview/chat/askDraft.ts`，组件只负责接线。
 - **失败模式**：webview 端不变量（`applyPatch.ts`）——seq 必须恰好 `lastSeq + 1`、寻址的 cell
   必须存在、op 必须匹配 cell 种类；任何一条不满足就 `resync`（报告
   `seq-gap`/`unknown-cell`/`duplicate-cell`/`unsupported-op`/`protocol`），宿主回 `hydrate`。
