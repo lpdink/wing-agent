@@ -15,6 +15,7 @@ use crate::util::logging::init_logging;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
 pub mod args;
+pub mod argv;
 pub(crate) mod backend_config;
 pub mod common;
 pub mod config;
