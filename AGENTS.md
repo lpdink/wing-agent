@@ -136,11 +136,12 @@ libs/core/wing/
 
 ```
 crates/wing/src/
-├── main.rs                          入口（clap；stdio 模式检测 → 过滤未知参数）
+├── main.rs                          入口（args_os 收集 + UTF-8 校验 → clap；stdio 模式检测 → 过滤未知参数）
 ├── lib.rs                           库根：模块导出（供 bench / tests 引用；deny print_stdout/stderr）
 ├── cmd/                             CLI 子命令与分发
 │   ├── mod.rs                       Cli/Command 定义 + dispatch（TUI / 网关生命周期 / 编排子命令 / stdio）
 │   ├── args.rs                      `wing run` 与 stdio 共享的启动参数
+│   ├── argv.rs                      命令行参数入口（OsString → UTF-8 String；非法字节友好报错、exit 2）
 │   ├── backend_config.rs            读 backend config（gateway host:port、wing_home）
 │   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化）
 │   ├── discover.rs                  定位 wing-gateway 可执行文件
@@ -212,10 +213,10 @@ crates/wing/src/
 │   └── line_utils.rs / renderable.rs
 ├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
 ├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
+└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
 
 ### 其他
 

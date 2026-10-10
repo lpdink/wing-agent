@@ -95,12 +95,11 @@ impl std::error::Error for StoreError {
     }
 }
 
-/// `$WING_HOME/tui/config.yaml`（`WING_HOME` 覆盖 `~/.wing`）；无法确定时 `None`。
+/// `$WING_HOME/tui/config.yaml`（`WING_HOME` 覆盖 `~/.wing`，空串视同未设置，与后端
+/// `get_wing_home()` 一致；取值按字节保留，见 [`crate::util::wing_home`]）；无法确定时 `None`。
 pub fn interface_config_path() -> Option<PathBuf> {
-    let home = match std::env::var("WING_HOME") {
-        Ok(home) if !home.is_empty() => PathBuf::from(home),
-        _ => dirs::home_dir()?.join(".wing"),
-    };
+    let home =
+        crate::util::wing_home::env_override().or_else(crate::util::wing_home::home_default)?;
     Some(home.join("tui").join("config.yaml"))
 }
 
