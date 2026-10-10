@@ -141,7 +141,14 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 - `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
 - `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
-- `wing models|tools|agents`：系统查询；`wing start|stop|status`：网关守护进程生命周期（默认的 TUI / stdio 启动路径会自动拉起网关）。
+- **控制面补全**（TUI 已有而 CLI 缺失的语义，日常运维不必再手搓 curl）：
+  - `wing new [--workspace] [--template] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
+  - `wing branches <sid>` / `wing fork <sid> --at <uuid>` / `wing rewind <sid> --to <uuid>`：消息节点导航——`branches` 给出可回退 / 分叉的 uuid（表格 + `--json`，uuid 不截断），`fork` 产出新会话 id + draft、`rewind` 把当前会话截回目标之前，两者都把目标消息文本作为 **draft** 回吐（目标不在新 / 截断后的链里，供调用方重发）；`current` 是哨兵（fork = 全链拷贝，rewind = 文档化 no-op）；
+  - `wing interrupt <sid>`（可见别名 `int`）/ `wing compact <sid> [instruction]`：中断在飞 turn / 手动压缩（`instruction` 为可选侧重指令，无它时压缩 prompt 不变）；
+  - `wing reload`：系统热重载；逐项结果**按网关自己的名字序**如实打印（名字序是对外契约），任一失败即非零退出；
+  - **Ask 定向回答**：`wing asks <sid> [--wait N]` 给出在挂 ask 的 `tool_call_id`（Ask 的 tool call 属于**未提交** assistant 消息，`wing tail` 看不到——只有订阅时的会话快照/实时事件携带它；`--wait` 等 ask 出现，超时非零），`wing run -r <sid> -p <answer> --tool-call-id <id>`（stdio 模式同名顶层旗标）把消息路由到该 ask 的 feedback waiter；ask 落链后 `wing tail <sid> -t tool_call` 同样可见 call id；
+  - 会话级命令沿用 `wing tail` / `info` 的 **404 → resume → 重试一次** 惯例（`branches` / `fork` / `rewind` / `compact` / `update` 命中"已逐出"时先水合）；`interrupt` **刻意不水合**——没有在跑的东西可中断，报错说明并指向 `wing ps --all`；
+- `wing models|tools|agents`：系统查询；`wing start|stop|restart|status`：网关守护进程生命周期（`restart` = stop + start 语法糖，默认的 TUI / stdio 启动路径会自动拉起网关）。
 
 ## 远程工具（PR #47 / #50）
 
