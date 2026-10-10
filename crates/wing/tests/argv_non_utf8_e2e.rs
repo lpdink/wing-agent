@@ -132,8 +132,9 @@ async fn stdio_mode_reports_the_offending_argument() {
 #[tokio::test]
 async fn valid_multibyte_arguments_reach_the_parser() {
     // Only *undecodable* bytes are refused — non-ASCII UTF-8 is ordinary input.
-    // (`--tag=中文` is then refused by the misplaced-flag gate, whose message is
-    // the observable proof that the argument arrived intact and un-mangled.)
+    // (`--tag=中文` is then refused by the misplaced-flag gate, so a non-zero
+    // exit with *that* message — rather than a UTF-8 complaint — is what shows
+    // the argument survived intake.)
     let home = ScratchHome::new("multibyte");
     let output = run(&home, &[os("--tag=中文")]).await;
     let stderr = String::from_utf8_lossy(&output.stderr);

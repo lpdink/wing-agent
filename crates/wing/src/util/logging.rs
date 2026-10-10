@@ -71,7 +71,10 @@ fn init_logging_in(dir: PathBuf) -> Option<WorkerGuard> {
     }
     let _ = INITIALIZED.set(());
 
-    tracing::info!(log_dir = %dir.display(), "logging initialized");
+    // `?dir` (not `%dir.display()`): a path is bytes, and the escaped form keeps
+    // a non-UTF-8 directory recognisable in the log instead of collapsing it
+    // into replacement characters.
+    tracing::info!(log_dir = ?dir, "logging initialized");
     Some(guard)
 }
 

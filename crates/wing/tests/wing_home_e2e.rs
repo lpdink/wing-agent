@@ -9,12 +9,15 @@
 //!
 //! The three readers: the backend config path (and everything else under the
 //! root, `cmd::backend_config`), the frontend log directory (`util::logging`)
-//! and the TUI config file (`config::store`).
+//! and the TUI config file (`config::store`). `$HOME` is always redirected into
+//! a scratch directory, so the assertions never get near the real `~/.wing`.
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Output;
 use std::process::Stdio;
@@ -85,18 +88,36 @@ impl Drop for ScratchHome {
     }
 }
 
-/// Spawn the real binary with `$WING_HOME` set to the scratch home.
+/// Spawn the real binary with `$WING_HOME` set to the scratch home, and `$HOME`
+/// pointed at it too (so the fallback branches stay in the scratch directory).
 async fn run(home: &ScratchHome, args: &[&str]) -> Output {
-    let child = Command::new(env!("CARGO_BIN_EXE_wing"))
+    let home_env = home.os();
+    run_with(
+        &std::env::temp_dir(),
+        args,
+        &[
+            ("WING_HOME", home_env.as_os_str()),
+            ("HOME", home_env.as_os_str()),
+        ],
+    )
+    .await
+}
+
+/// Spawn the real binary from `cwd` with exactly the environment given.
+async fn run_with(cwd: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wing"));
+    command
         .args(args)
-        .env("WING_HOME", home.os())
+        .current_dir(cwd)
         .env_remove("RUST_LOG")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn wing");
+        .kill_on_drop(true);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command.spawn().expect("spawn wing");
     // Every command here is local — nothing may need a gateway or a real home.
     match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await {
         Ok(result) => result.expect("wait for wing"),
@@ -166,8 +187,12 @@ async fn the_tui_config_comes_from_the_given_home() {
 /// A home that is not valid UTF-8 is used *as it is*.
 ///
 /// The path itself never needs to exist for this: `wing config path` only joins
-/// path components. Only the display is lossy (`\xff` → `U+FFFD`); the bytes the
-/// child gets are the bytes the backend would get.
+/// path components. What this pins is the *fallback* — the byte home must not be
+/// discarded in favour of `~/.wing`. Byte fidelity itself is pinned in
+/// `util::wing_home`'s unit test (raw bytes in, raw bytes out); the stdout here
+/// is inert either way, since a path is only ever *displayed* lossily
+/// (`cmd::config` prints `to_string_lossy()`, so `\xff` and a literal `U+FFFD`
+/// look the same).
 #[tokio::test]
 async fn a_non_utf8_home_is_used_as_it_is() {
     let home = ScratchHome::undecodable("bytes");
@@ -186,15 +211,97 @@ async fn a_non_utf8_home_is_used_as_it_is() {
     );
 }
 
+#[tokio::test]
+async fn an_empty_home_falls_back_to_the_environment_home() {
+    // `$WING_HOME=""` means "unset" (the backend's `get_wing_home()` reads it the
+    // same way). Without that, the value used to be taken literally and the
+    // config path became a *relative* `core/config.yaml` under the cwd — while
+    // the backend happily used `~/.wing`.
+    let home = ScratchHome::new("empty", b"");
+    let home_env = home.os();
+    let output = run_with(
+        &std::env::temp_dir(),
+        &["config", "path"],
+        &[
+            ("WING_HOME", OsStr::new("")),
+            ("HOME", home_env.as_os_str()),
+        ],
+    )
+    .await;
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "got {:?}\nstderr: {stderr}",
+        output.status
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        home.join(".wing/core/config.yaml")
+            .to_string_lossy()
+            .as_ref(),
+        "an empty `$WING_HOME` must mean `~/.wing`, the same as the backend"
+    );
+}
+
+#[tokio::test]
+async fn a_tilde_home_expands_to_the_environment_home() {
+    // The backend expands a leading `~` (`Path.expanduser()`); a literal reading
+    // would put the frontend in a directory *named* `~` inside the cwd.
+    let home = ScratchHome::new("tilde", b"");
+    let cwd = home.join("cwd");
+    std::fs::create_dir_all(&cwd).expect("create scratch cwd");
+    let home_env = home.os();
+    let output = run_with(
+        &cwd,
+        &["config", "path"],
+        &[
+            ("WING_HOME", OsStr::new("~/wing")),
+            ("HOME", home_env.as_os_str()),
+        ],
+    )
+    .await;
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "got {:?}\nstderr: {stderr}",
+        output.status
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        home.join("wing/core/config.yaml")
+            .to_string_lossy()
+            .as_ref(),
+        "`~/wing` must expand against `$HOME`, exactly like the backend"
+    );
+    assert!(
+        !cwd.join("~").exists(),
+        "a literal `~` directory must never appear in the cwd: {}",
+        cwd.join("~").display()
+    );
+}
+
 /// The same, with the directory actually materialised: a byte home can only be
 /// created where the filesystem allows the name (Linux; CI runs ubuntu), and
-/// then the log directory has to appear inside it.
+/// then the log directory has to appear inside it — with the *bytes* intact in
+/// the log line that names it.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_non_utf8_home_receives_the_logs() {
     let home = ScratchHome::undecodable("bytes-logs");
     home.create();
-    let output = run(&home, &["config", "path"]).await;
+    let home_env = home.os();
+    // `wing=info` so the line carrying the resolved log directory is written.
+    let output = run_with(
+        &std::env::temp_dir(),
+        &["config", "path"],
+        &[
+            ("WING_HOME", home_env.as_os_str()),
+            ("RUST_LOG", OsStr::new("wing=info")),
+        ],
+    )
+    .await;
 
     assert!(
         output.status.success(),
@@ -206,5 +313,17 @@ async fn a_non_utf8_home_receives_the_logs() {
         logs.is_dir(),
         "`{}` is missing — the byte home was not the one in use",
         logs.display()
+    );
+    // The log file proves byte fidelity: the directory it names renders as
+    // `\xff` (an escaped byte), not as the lossy replacement character.
+    let log = std::fs::read_dir(&logs)
+        .expect("read log dir")
+        .map(|entry| entry.expect("log entry").path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "log"))
+        .expect("a log file was written");
+    let text = std::fs::read_to_string(&log).expect("read log file");
+    assert!(
+        text.to_lowercase().contains("\\xff"),
+        "the log must name the byte directory as bytes, not lossily: {text}"
     );
 }
