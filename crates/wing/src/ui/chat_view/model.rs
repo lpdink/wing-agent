@@ -636,6 +636,15 @@ impl ChatView {
     /// advancing (via `tick_bash_timers`) instead of showing nothing. Cells
     /// that already have a timer, or that already finished (Success/Failed),
     /// are left untouched.
+    ///
+    /// The turn start is only an *upper bound* on the tool's runtime (the
+    /// tool started at or after it), so the timer is anchored as
+    /// [`TimerAnchor::Turn`](crate::ui::cells::tool_call::TimerAnchor::Turn) —
+    /// rendered as `≤837s` and without the timeout denominator (`837s/300s`
+    /// would read as "this Bash blew its timeout and was not interrupted").
+    /// A result landing on such a cell — or the turn ending without one —
+    /// drops the timer outright: the frozen value would be a wrong duration
+    /// forever (issue #108, see [`Self::discard_pending_bash_timers`]).
     pub fn mark_pending_bash_running(&mut self, started_at: std::time::Instant) {
         for cached in &mut self.cells {
             if let ChatCell::ToolCall(block) = cached.cell()
@@ -645,7 +654,7 @@ impl ChatView {
             {
                 cached.mutate(|cell| {
                     if let ChatCell::ToolCall(block) = cell {
-                        block.start_timer(started_at);
+                        block.start_timer_from_turn(started_at);
                     }
                 });
             }
@@ -665,8 +674,8 @@ impl ChatView {
     /// cell only when its *displayed* elapsed value actually moves.
     ///
     /// The heartbeat that calls this runs at 100 ms, but the display is
-    /// whole seconds (`format_bash_timer`), so nine out of ten ticks are
-    /// no-ops; invalidating on every tick re-rendered each pending cell
+    /// whole seconds (`ToolCallBlock::timer_text`), so nine out of ten ticks
+    /// are no-ops; invalidating on every tick re-rendered each pending cell
     /// (full `to_lines` + the height recompute's `to_vec` clone) 10×/s for
     /// a value that changed 1×/s.
     ///
@@ -682,6 +691,27 @@ impl ChatView {
                 && block.status == ToolStatus::Pending
             {
                 cached.tick_bash_timer();
+            }
+        }
+    }
+
+    /// Turn end: drop the timers of Bash cards still pending. Normally each
+    /// card was finished by its own result; this catches cards whose result
+    /// event never arrived — the completion instant is unknown, so any value
+    /// shown would be the turn's elapsed time, not the tool's runtime (and it
+    /// would keep recomputing on later re-renders) — the fake-timeout reading
+    /// again (issue #108).
+    pub fn discard_pending_bash_timers(&mut self) {
+        for cached in &mut self.cells {
+            if let ChatCell::ToolCall(block) = cached.cell()
+                && block.tool_name == TOOL_BASH
+                && block.status == ToolStatus::Pending
+            {
+                cached.mutate(|cell| {
+                    if let ChatCell::ToolCall(block) = cell {
+                        block.discard_timer();
+                    }
+                });
             }
         }
     }
@@ -1113,6 +1143,115 @@ mod tests {
         let frozen = view.cells[idx].generation();
         view.tick_bash_timers();
         assert_eq!(view.cells[idx].generation(), frozen);
+    }
+
+    /// #108 regression: `mark_pending_bash_running` (the sync / resume
+    /// re-anchor path) hands the card a *turn-anchored* timer — rendered
+    /// approximate and dropped when the result lands. Freezing it like the
+    /// exact timer would pin the turn's elapsed time onto the card as the
+    /// tool's duration, forever.
+    #[test]
+    fn test_turn_anchored_bash_timer_is_approximate_then_dropped() {
+        use crate::config::ThemePalette;
+
+        let mut view = ChatView::new();
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 100", "timeout": 300}),
+            "tc-resume".into(),
+        )));
+        let idx = view.tool_call_index("tc-resume").unwrap();
+
+        // Resume replay: the execution instant was never observable — the
+        // timer anchors to the turn start (an upper bound on the runtime).
+        view.mark_pending_bash_running(Instant::now() - Duration::from_secs(5));
+
+        let header = {
+            let ChatCell::ToolCall(block) = view.cells[idx].cell() else {
+                panic!("expected a ToolCall cell");
+            };
+            block.to_lines(&ThemePalette::default(), 10)[0].to_string()
+        };
+        assert!(
+            header.contains("≤5s") || header.contains("≤6s"),
+            "elapsed must render as an upper bound: {header}"
+        );
+        assert!(
+            !header.contains("300"),
+            "the tool timeout must not appear: {header}"
+        );
+
+        // The tool finishes while we watch: the frozen turn value would read
+        // as a (wrong) duration — the timer is dropped instead.
+        view.set_tool_result_by_index(idx, "done".into(), true);
+        let header = {
+            let ChatCell::ToolCall(block) = view.cells[idx].cell() else {
+                panic!("expected a ToolCall cell");
+            };
+            block.to_lines(&ThemePalette::default(), 10)[0].to_string()
+        };
+        assert!(
+            !header.contains('≤'),
+            "turn-anchored timer must not outlive the result: {header}"
+        );
+        assert!(
+            !header.contains("s/"),
+            "no frozen timeout pair after the result: {header}"
+        );
+        assert!(
+            header.contains("sleep 100"),
+            "the card itself stays intact: {header}"
+        );
+    }
+
+    /// #108: `discard_pending_bash_timers` (turn end) drops the timer of a
+    /// card whose result never arrived — its completion instant is unknown,
+    /// so freezing "execution start → turn end" would render an upper bound
+    /// as an exact runtime. Without dropping, a live-derived value would also
+    /// keep growing across later re-renders.
+    #[test]
+    fn test_discard_pending_bash_timers_drops_timers_at_turn_end() {
+        use crate::config::ThemePalette;
+
+        let mut view = ChatView::new();
+        let mut exact = ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 1", "timeout": 300}),
+            "tc-exact".into(),
+        );
+        exact.start_timer(Instant::now() - Duration::from_secs(5));
+        view.push(ChatCell::ToolCall(exact));
+        view.push(ChatCell::ToolCall(ToolCallBlock::new(
+            TOOL_BASH.into(),
+            serde_json::json!({"command": "sleep 100", "timeout": 300}),
+            "tc-turn".into(),
+        )));
+        view.mark_pending_bash_running(Instant::now() - Duration::from_secs(837));
+
+        let header = |view: &ChatView, id: &str| {
+            let idx = view.tool_call_index(id).unwrap();
+            let ChatCell::ToolCall(block) = view.cells[idx].cell() else {
+                panic!("expected a ToolCall cell");
+            };
+            block.to_lines(&ThemePalette::default(), 10)[0].to_string()
+        };
+        assert!(header(&view, "tc-exact").contains("/300s"));
+
+        view.discard_pending_bash_timers();
+
+        let exact = header(&view, "tc-exact");
+        assert!(
+            !exact.contains("s/") && !exact.contains('≤'),
+            "no duration survives a result-less turn end: {exact}"
+        );
+        assert!(exact.contains("sleep 1"), "card intact: {exact}");
+
+        let turn = header(&view, "tc-turn");
+        assert!(
+            !turn.contains('≤'),
+            "the turn-anchored timer is dropped too: {turn}"
+        );
+        assert!(turn.contains("sleep 100"), "card intact: {turn}");
     }
 
     /// Regression (#54ee2e9): a Bash cell that reaches Pending through the
