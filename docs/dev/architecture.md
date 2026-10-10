@@ -79,6 +79,10 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 
 **工具参数（`tool_call_stream`）是同一模式的第二个实例**：片段追加退化为 O(1)（只 push + 置 dirty），解析 / 语法高亮 / 渲染缓存失效推迟到帧边界每格至多一次（`CachedCell::compute_*` → `flush_pending_args`；`is_final` 与权威 args 强制冲刷）——旧的 per-fragment 全量重解析是 O(n²)，会把 256 有界事件通道顶满。基准：`crates/wing/benches/tool_args_stream.rs`（append ~20–40ns/片段且与 payload 无关；帧成本 ∝ payload、每帧一次）。
 
+**终端差分与 VS16 表情符号（issue #181）**：`Terminal::draw` 只发「变过的格子」，而 `CrosstermBackend` 用 `x == last.x + 1` 判断相邻（假设上一个符号只推进了 1 列）。ratatui 0.30 的 `BufferDiff` 对 VS16 表情符号（基字符 + `U+FE0F`，`unicode-width` 与 `Buffer::set_stringn` 都认它是 2 列）会**额外重发它覆盖的尾随格**（上游对「终端不清尾随格」的 workaround）⇒ 那格以及它之后整行都被打印到右一列；偏位后的写入压到中文宽字的半格上时，终端把该宽字**整字**清空 —— 屏幕上「某个字缺一块」，而缓冲区一直是对的（所以选中/复制正常，focus 或 resize 触发的整屏重绘也能让它回来）。
+
+修法：每帧渲染完、交给 ratatui 做 diff 之前，逐格把「symbol 含 `U+FE0F` 且 `cell_width() > 1`」的格子钉上 `CellDiffOption::ForcedWidth(真实列宽)`（`ui/emoji_width.rs`；与 `ui/chat_view/link.rs` 的 OSC8 注入同一手法、同一条规矩——forced 值必须是终端真正推进的列数）。钉住后这些格子走 diff 的**普通宽字分支**（尾随格与 CJK 一样被跳过），同一行里再也不会出现「紧跟在宽字后面、却按相邻写」的格子。代价：这条路径上等于关掉上游对 VS16 的清尾随格 workaround，即把 VS16 表情符号降级为与 CJK 宽字同一种行为（布局本来也按 2 列算）；上游 ratatui#2721 已修 backend 的相邻性判断，等含它的版本发版后可重新评估移除这个 pass。**不要**用「回合结束强制整屏重绘」兜底：闪屏，且 `needs_full_redraw` 与 `images.invalidate()` 绑定，会连带把图片全部重编码。两个绘制面（TUI 主循环、首次运行向导）都经 `tui::draw_frame`（唯一的出帧口）走这个 pass；回归测试 `crates/wing/tests/vs16_row_drift.rs`（真 `Buffer::diff` + backend 相邻性规则 + 终端网格模型，断言「终端网格 == buffer」）。
+
 ### stdio 模式（`wing -p`，PR #1）
 
 无 human-in-the-loop 的头模式，**兼容 Claude Code 的 NDJSON 协议**——把 `wing` alias 为 `claude` 即可接入现有编排生态。

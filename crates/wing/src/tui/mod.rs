@@ -24,6 +24,7 @@ use crossterm::event::PushKeyboardEnhancementFlags;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::Terminal;
+use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
@@ -236,6 +237,31 @@ pub fn init_terminal() -> Result<WingTerminal> {
 pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
     leave_sequence(terminal.backend_mut())?;
     crossterm::terminal::disable_raw_mode()?;
+    Ok(())
+}
+
+/// Draw one frame and let the terminal have it.
+///
+/// The **only** way a frame reaches the screen: it runs the widget closure and
+/// then the wire pass over the buffer it wrote ([`crate::ui::emoji_width::pin`]),
+/// before ratatui diffs that buffer against the previous frame. A draw path
+/// that calls [`Terminal::draw`] itself skips the pass and can shift a whole row
+/// by one column on a terminal repaint (an emoji that measures two columns while
+/// the diff re-sends the cell it covers — see the pass's module docs for the
+/// regression).
+///
+/// The pass lives here rather than at each call site so that "every frame this
+/// frontend sends is normalized" is a property of the one function that sends
+/// it, not a rule the next draw path has to remember.
+pub fn draw_frame<B, F>(terminal: &mut Terminal<B>, render: F) -> Result<(), B::Error>
+where
+    B: Backend,
+    F: FnOnce(&mut ratatui::Frame<'_>),
+{
+    terminal.draw(|frame| {
+        render(frame);
+        crate::ui::emoji_width::pin(frame.buffer_mut());
+    })?;
     Ok(())
 }
 

@@ -655,27 +655,28 @@ fn draw_frame<B: Backend>(
 ) -> Result<()> {
     // 调色板每帧现算：Interface 根的实时预览因此一按键就可见（§15.3 的同一条路径）。
     let palette = ThemePalette::from_config(&config.colors);
-    terminal
-        .draw(|frame| {
-            let (backplate, panel_area, note_area) = split_setup_areas(frame.area());
-            if let Some(backplate) = backplate {
-                draw_backplate(frame, backplate, &palette);
-            }
-            // 状态行**恒有**一行：它是唯一会说话的地方（保存回执 / 就绪 / Ctrl+C 提示），
-            // 小终端里也不该整条消失。
-            draw_note(frame, note_area, &palette, note);
-            if panel_open {
-                // 08 的契约：每帧同步可见行数，再 Clear + 整块 render（同 10 的落点）。
-                panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
-                frame.render_widget(Clear, panel_area);
-                let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
-                frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
-            } else {
-                // 面板已关（就绪帧）：显式清掉那一块，否则 ratatui 的 diff 会留着上一帧的面板。
-                frame.render_widget(Clear, panel_area);
-            }
-        })
-        .map_err(|e| anyhow!("terminal draw failed: {e}"))?;
+    // `crate::tui::draw_frame`（而不是 `terminal.draw`）：向导是同一块终端上的第二个
+    // 绘制面，它画出的设置值同样可能带上 VS16 表情符号（见 `crate::ui::emoji_width`）。
+    crate::tui::draw_frame(terminal, |frame| {
+        let (backplate, panel_area, note_area) = split_setup_areas(frame.area());
+        if let Some(backplate) = backplate {
+            draw_backplate(frame, backplate, &palette);
+        }
+        // 状态行**恒有**一行：它是唯一会说话的地方（保存回执 / 就绪 / Ctrl+C 提示），
+        // 小终端里也不该整条消失。
+        draw_note(frame, note_area, &palette, note);
+        if panel_open {
+            // 08 的契约：每帧同步可见行数，再 Clear + 整块 render（同 10 的落点）。
+            panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
+            frame.render_widget(Clear, panel_area);
+            let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
+            frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
+        } else {
+            // 面板已关（就绪帧）：显式清掉那一块，否则 ratatui 的 diff 会留着上一帧的面板。
+            frame.render_widget(Clear, panel_area);
+        }
+    })
+    .map_err(|e| anyhow!("terminal draw failed: {e}"))?;
     Ok(())
 }
 
