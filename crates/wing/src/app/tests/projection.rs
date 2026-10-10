@@ -229,8 +229,8 @@ fn mid_turn_bash_sync(turn_started_ago: i64) -> WingEvent {
 /// #108: a Bash card replayed mid-execution (resume / late subscription) has
 /// no observable execution instant — `mark_pending_bash_running` anchors it
 /// to the turn start, an upper bound on the tool's runtime. Rendered
-/// approximate (`~837s`), never paired with the tool's own timeout: `837s/300s`
-/// reads as "this Bash blew its budget and was not interrupted".
+/// an upper bound (`≤837s`), never paired with the tool's own timeout:
+/// `837s/300s` reads as "this Bash blew its budget and was not interrupted".
 #[test]
 fn test_sync_mid_turn_bash_timer_renders_approximate_not_timeout_pair() {
     let mut app = test_app();
@@ -238,8 +238,8 @@ fn test_sync_mid_turn_bash_timer_renders_approximate_not_timeout_pair() {
 
     let header = tool_header(&app, "tc-bash");
     assert!(
-        header.contains("~837s") || header.contains("~838s"),
-        "turn-anchored elapsed must render approximate: {header}"
+        header.contains("≤837s") || header.contains("≤838s"),
+        "turn-anchored elapsed must render as an upper bound: {header}"
     );
     assert!(
         !header.contains("300"),
@@ -271,7 +271,7 @@ fn test_sync_replayed_bash_drops_turn_timer_when_result_arrives() {
 
     let header = tool_header(&app, "tc-bash");
     assert!(
-        !header.contains('~'),
+        !header.contains('≤'),
         "turn-anchored timer must not outlive the result: {header}"
     );
     assert!(
@@ -314,8 +314,8 @@ fn test_live_bash_timer_keeps_frozen_timeout_pair_after_result() {
         "live timer keeps the frozen timeout pair: {header}"
     );
     assert!(
-        !header.contains('~'),
-        "no approximation on the live path: {header}"
+        !header.contains('≤'),
+        "no upper-bound marker on the live path: {header}"
     );
 }
 
