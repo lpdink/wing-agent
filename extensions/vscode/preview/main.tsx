@@ -4,6 +4,7 @@ import {
   makeApprovalAskCell,
   makeBranchPicker,
   makeCommandCatalog,
+  makeCustomAnswerAskCell,
   makeEmptySession,
   makeFailedToolCell,
   makeFixtureSession,
@@ -56,6 +57,9 @@ const FIXTURES: Record<string, readonly SessionViewModel[]> = {
     }),
   ],
   approval: [makeFixtureSession({ title: 'Approval', cells: [makeApprovalAskCell()], seq: 0 })],
+  'ask (custom answer)': [
+    makeFixtureSession({ title: 'Ask with a custom answer', cells: [makeCustomAnswerAskCell()], seq: 0 }),
+  ],
   empty: [makeEmptySession()],
   'shell (idle)': [makeShellSession()],
   'shell (working + queue)': [makeWorkingSession()],

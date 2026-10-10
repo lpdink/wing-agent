@@ -5,9 +5,10 @@
  * state in `AskPanel`'s `QuestionState`. Both share one invariant the host's
  * `askAnswerValue` relies on: on a **single-select** question the fixed option
  * and the free-form text are mutually exclusive — the last explicit choice
- * wins (TUI `commit_option` / `confirm_editing`, `docs/dev/vscode-extension.md`
- * §1 declares the same ask semantics). Without it, a draft carrying both is
- * representable and the option-first host rule silently drops the text (#113).
+ * wins (TUI `commit_option` / `confirm_editing`; §5 of
+ * `docs/dev/vscode-extension.md` notes the same semantics). Without it, a
+ * draft carrying both is representable and the option-first host rule
+ * silently drops the text (#113).
  *
  * Multi-select questions combine toggles and text at submission (the TUI does
  * the same), so the two fields stay orthogonal there — the component tests in

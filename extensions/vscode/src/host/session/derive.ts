@@ -582,6 +582,10 @@ export function askAnswerValue(
     return parts.length === 0 ? null : parts.join(', ');
   }
   if (answer.selected.length > 0) {
+    // Option-first (TUI `answer_value`). The webview keeps `selected` and
+    // `text` mutually exclusive on single-select questions — last explicit
+    // choice wins (`webview/chat/askDraft.ts`); this branch is where the text
+    // would be silently dropped if that invariant broke (#113).
     return answer.selected[0] ?? null;
   }
   const custom = answer.text.trim();
