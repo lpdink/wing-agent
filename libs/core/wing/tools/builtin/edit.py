@@ -1,14 +1,13 @@
 # wing/tools/builtin/edit.py
 """Edit tool: precise text replacement."""
 
-from pathlib import Path
-
 from wing.agent import ToolContext, current_tool_call_id
 from wing.common.fs import atomic_write_text
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
 from wing.tools.internal.diff_window import build_diff_events, find_all
 from wing.tools.internal.utils import resolve_path as _resolve_path
+from wing.tools.internal.write_target import resolve_write_target
 
 
 @tool_registry.register(name="Edit")
@@ -75,9 +74,15 @@ async def edit_file(
         new_content = content[:pos] + new_string + content[pos + len(old_string) :]
 
     try:
-        # 原子替换（共享原语：同目录 tmp + fsync + os.replace）——与 Write 同
-        # 一份实现：失败丢弃 tmp、目标原样不动；覆盖既有文件保留其权限位。
-        atomic_write_text(Path(path), new_content)
+        # 写入目标语义与 Write 同一份政策（符号链接写穿 / 非常规文件就地写 /
+        # 只读拒绝），再走共享原子写原语：失败丢弃 tmp、目标原样不动；覆盖
+        # 既有文件保留其权限位。
+        target, in_place = resolve_write_target(path)
+        if in_place:
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        else:
+            atomic_write_text(target, new_content)
     except Exception as e:
         raise ToolError(f"edit: write failed: {e}")
 

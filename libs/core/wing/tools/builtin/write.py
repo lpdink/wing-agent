@@ -1,7 +1,6 @@
 # wing/tools/builtin/write.py
 """Write tool: write files (overwrite)."""
 
-import errno
 import os
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
 from wing.tools.internal.utils import resolve_path as _resolve_path
+from wing.tools.internal.write_target import resolve_write_target
 
 
 @tool_registry.register(name="Write")
@@ -38,25 +38,14 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
             except Exception:
                 pass
 
-        # 写入目标语义（对齐就地写 `open(path, "w")` 的可见行为）：
-        # - 符号链接：写穿到真实目标（原子替换会把链接本身换成普通文件，
-        #   真实目标静默留着旧内容——写"去哪了"与模型的理解错位）；
-        # - FIFO / 设备节点等非常规文件：就地写（rename 会把节点本身换掉，
-        #   消费者永远收不到字节）；
-        # - 既有但不可写的文件：拒绝（只有目录写权限是 rename 的要求，
-        #   目标自身的只读位拦不住替换——旧的 PermissionError 语义要显式补回）。
-        target = Path(path)
-        if target.is_symlink():
-            target = Path(os.path.realpath(target))
+        # 写入目标语义（符号链接 / 非常规文件 / 只读拒绝）由共享 helper 判定
+        # ——与 Edit 同一份政策（`tools/internal/write_target.py`）。
+        target, in_place = resolve_write_target(path)
 
-        if target.exists() and not target.is_file() and not target.is_dir():
+        if in_place:
             with open(target, "w", encoding="utf-8") as f:
                 f.write(content)
         else:
-            if target.is_file() and not os.access(target, os.W_OK):
-                # 只读目标：rename 只需要目录写权限，替换会绕过目标自身的
-                # 只读位——显式拒绝，保住就地写时代的 PermissionError 语义。
-                raise PermissionError(errno.EACCES, "Permission denied", str(path))
             # 原子替换（tmp + os.replace，与 Edit 同语义）：写入中途被杀不会
             # 留下半截文件（原内容要么完整保留、要么整体被替换），并发读者
             # 也不会读到部分内容。tmp 与目标同目录（同文件系统）、fsync 先于

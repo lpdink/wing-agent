@@ -65,6 +65,11 @@ def _write_atomically(
     - 失败（写 / swap 任一步）丢弃 tmp，目标原样不动——要么整体可见、要么
       什么都没发生，不在目标目录留下 `.tmp.<pid>.<tid>` 垃圾。
     """
+    if path.parent == path:
+        # 文件系统根（"/"、"."）：with_name 会抛 ValueError("empty name")——
+        # 就地写是 Is a directory，保住这个分类（否则实现细节泄漏进诊断）。
+        raise IsADirectoryError(errno.EISDIR, "Is a directory", str(path))
+
     try:
         # 父路径组件是文件（而非目录）时，mkdir 报 EEXIST——转成就地写同款
         # 的 ENOTDIR（"Not a directory"），模型看到的是能自纠的诊断。
@@ -75,9 +80,13 @@ def _write_atomically(
     tmp = _tmp_path(path)
     mode = _target_mode(path)
     try:
+        # O_NOFOLLOW：tmp 名可预测（pid + tid），目标目录里若被预置同名符号
+        # 链接，裸 open 会写穿到链接指向的文件并把链接装到目标路径上——拒绝
+        # 打开（失败清理会删掉它）。陈旧普通 tmp 文件仍被 O_TRUNC 复用。
+        # Windows 无该标志（getattr 兜底 0，那里也建不出符号链接的 tmp）。
         fd = os.open(
             tmp,
-            os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
             0o600 if mode is not None else 0o666,
         )
         handle = os.fdopen(fd, "wb") if binary else os.fdopen(fd, "w", encoding="utf-8")

@@ -260,3 +260,54 @@ class TestDiagnostics:
             await write_file(str(blocker / "child.txt"), "y", ctx=_StubCtx())  # type: ignore[arg-type]
 
         assert blocker.read_text(encoding="utf-8") == "x"
+
+
+class TestTempFileHardening:
+    """tmp 名可预测（pid + tid）：目录里预置同名符号链接不得被写穿。"""
+
+    @pytest.mark.asyncio
+    async def test_precreated_tmp_symlink_is_not_followed(self, tmp_path: Path):
+        """预置 tmp 符号链接 → 拒绝打开（受害者文件不被改写、目标不被换链）。"""
+        from wing.common.fs import _tmp_path
+
+        victim = tmp_path / "victim.txt"
+        victim.write_text("victim", encoding="utf-8")
+        target = tmp_path / "f.txt"
+        target.write_text("old", encoding="utf-8")
+        trap = _tmp_path(target)
+        trap.symlink_to(victim)
+
+        with pytest.raises(ToolError):
+            await write_file(str(target), "evil", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        assert victim.read_text(encoding="utf-8") == "victim"
+        assert target.read_text(encoding="utf-8") == "old"
+        assert not target.is_symlink()
+        # 失败清理把预置链接删掉：不留下可复用的陷门。
+        assert not trap.exists()
+
+
+class TestSymlinkEdgeCases:
+    @pytest.mark.asyncio
+    async def test_dangling_link_to_missing_dir_fails_like_in_place_write(
+        self, tmp_path: Path
+    ):
+        """链接目标的父目录不存在：报 ENOENT，不在链接指向的位置建目录树。"""
+        real = tmp_path / "nodir" / "target.txt"
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+
+        with pytest.raises(ToolError, match="No such file or directory"):
+            await write_file(str(link), "x", ctx=_StubCtx())  # type: ignore[arg-type]
+
+        assert not real.parent.exists()
+        assert link.is_symlink()
+
+
+class TestRootPathDiagnostics:
+    @pytest.mark.skipif(os.name != "posix", reason="根路径分类是 POSIX 语义")
+    @pytest.mark.asyncio
+    async def test_root_path_reports_is_a_directory(self):
+        """写文件系统根：报 Is a directory（旧就地写的分类，不泄漏实现细节）。"""
+        with pytest.raises(ToolError, match="Is a directory"):
+            await write_file("/", "x", ctx=_StubCtx())  # type: ignore[arg-type]
