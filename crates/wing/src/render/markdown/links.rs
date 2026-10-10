@@ -11,12 +11,11 @@
 
 use std::borrow::Cow;
 
-use unicode_width::UnicodeWidthStr;
-
 use super::images::{ImageAnchor, ImageSpan, cover_span, span_for_anchor};
 use super::types::MarkdownLine;
 use super::types::MarkdownSegment;
 
+use ratatui::buffer::CellWidth;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -150,12 +149,23 @@ pub fn strip_osc8(symbol: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Display width of a rendered symbol, ignoring an injected OSC8 sequence.
+/// Display width of a rendered symbol, ignoring an injected OSC8 sequence —
+/// the columns the terminal advances for it.
+///
+/// This is ratatui's own measure ([`CellWidth for str`]) rather than plain
+/// `unicode-width`, and the two differ in exactly one place: halfwidth katakana
+/// sound marks (`U+FF9E` / `U+FF9F`) are `Grapheme_Extend`, so `unicode-width`
+/// calls them zero-width, while terminals render them in a column of their own —
+/// and ratatui compensates (`count_halfwidth_sound_marks`). `Buffer::set_stringn`
+/// lays a `ｶﾞ` out in two columns for that reason, so anything that walks or
+/// measures the cells has to use the same ruler: the diff and the backend's
+/// cursor model do, and a caller that pins a *declared* width (the OSC8
+/// injection, [`crate::ui::emoji_width`]) has to as well or the terminal drifts
+/// by a column.
+///
+/// [`CellWidth for str`]: ratatui::buffer::CellWidth
 pub fn symbol_width(symbol: &str) -> u16 {
-    match strip_osc8(symbol) {
-        Cow::Borrowed(s) => s.width() as u16,
-        Cow::Owned(s) => s.width() as u16,
-    }
+    strip_osc8(symbol).cell_width()
 }
 
 // ============================================================
@@ -694,6 +704,26 @@ mod tests {
         assert_eq!(strip_osc8("\u{1b}]8;;https://e\u{7}hi"), "hi");
         // Truncated sequence: everything after the opener goes.
         assert_eq!(strip_osc8("\u{1b}]8;;https://e"), "");
+    }
+
+    #[test]
+    fn symbol_width_measures_what_the_terminal_advances() {
+        // The halfwidth katakana sound mark is the one symbol where plain
+        // `unicode-width` and the terminal disagree: it is `Grapheme_Extend`
+        // (zero columns for that crate) but a terminal renders it in a column of
+        // its own — which is what ratatui compensates for, and therefore what
+        // `Buffer::set_stringn` lays the cells out with. Anything that walks the
+        // cells or declares a width has to use this measure (see
+        // `ui::emoji_width`).
+        assert_eq!(symbol_width("ｶ"), 1, "the kana alone");
+        assert_eq!(symbol_width("ﾞ"), 1, "the sound mark alone");
+        assert_eq!(symbol_width("ｶﾞ"), 2, "the pair: two columns on a terminal");
+        assert_eq!(symbol_width("你"), 2);
+        assert_eq!(
+            symbol_width(&format!("{}ｶﾞ{}", osc8_open("x"), osc8_close())),
+            2,
+            "the injected sequence is not columns"
+        );
     }
 
     // ── ComposedLines ─────────────────────────────────────────────

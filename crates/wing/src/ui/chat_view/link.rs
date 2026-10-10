@@ -232,6 +232,8 @@ fn inject_osc8(buf: &mut Buffer, row: u16, start: u16, end: u16, target: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU16;
+
     use ratatui::style::Modifier;
     use ratatui::style::Style;
     use ratatui::text::Line;
@@ -504,6 +506,78 @@ mod tests {
             "the terminal cursor drifted from the backend's model:\n{}",
             drifted.join("\n")
         );
+    }
+
+    /// A linked grapheme the terminal advances further than `unicode-width`
+    /// does: a halfwidth katakana sound mark (`U+FF9E`) is `Grapheme_Extend`, so
+    /// `unicode-width` calls it zero columns while a terminal renders it in a
+    /// column of its own — `ｶﾞ` is two cells wide, which is also how ratatui
+    /// lays the cell out.
+    ///
+    /// The injection has to step and pin with that measure. Measuring with
+    /// `unicode-width` instead declares one column for a two-column cell *and*
+    /// stamps a sequence into the filler cell right of it, so the diff re-sends
+    /// that filler as if it followed a one-column glyph: the backend skips its
+    /// `MoveTo` and every later cell of the row lands one column to the right —
+    /// the same artifact as the CJK case above, reached through another symbol.
+    #[test]
+    fn a_linked_halfwidth_kana_grapheme_keeps_the_wire_in_step() {
+        let mut before = ChatView::new();
+        before.push(ChatCell::AssistantMessage(
+            "見 [ｶﾞｷﾞ](https://example.com)".into(),
+        ));
+        let prev = render(&mut before, 40, 3);
+
+        // The same line one character longer: the linked kana graphemes move one
+        // column right, so the repaint writes a wide cell *and* the filler column
+        // the previous frame held a glyph in.
+        let mut after = ChatView::new();
+        after.push(ChatCell::AssistantMessage(
+            "見一 [ｶﾞｷﾞ](https://example.com)".into(),
+        ));
+        let next = render(&mut after, 40, 3);
+
+        // The row is found by its plain tail (the kana walk is what the next
+        // assertion locks), and it reads back as the buffer holds it: wide
+        // graphemes, no phantom space between them.
+        let row = find_row(&next, "example.com");
+        let text = row_text(&next, row);
+        assert!(
+            text.contains("見一 ｶﾞｷﾞ (https://example.com)"),
+            "the row reads back as laid out, got {text:?}"
+        );
+
+        let head = (0..40)
+            .find(|&x| strip_osc8(next[(x, row)].symbol()).contains('ｶ'))
+            .expect("the kana head cell");
+        assert_eq!(
+            next[(head, row)].diff_option,
+            CellDiffOption::ForcedWidth(NonZeroU16::new(2).unwrap()),
+            "the declared width is the columns the terminal advances"
+        );
+        assert_eq!(
+            strip_osc8(next[(head + 1, row)].symbol()),
+            " ",
+            "the filler cell of the wide grapheme stays untouched"
+        );
+        assert!(
+            !next[(head + 1, row)].symbol().contains("\u{1b}]8;;"),
+            "no sequence may land on the filler cell"
+        );
+
+        // …and neither painting the frame from scratch nor repainting it over
+        // the previous frame desynchronises the wire.
+        for (label, from) in [
+            ("painted from scratch", &Buffer::empty(next.area)),
+            ("repainted over the previous frame", &prev),
+        ] {
+            let drifted = wired_desync(from, &next);
+            assert!(
+                drifted.is_empty(),
+                "the terminal cursor drifted ({label}):\n{}",
+                drifted.join("\n")
+            );
+        }
     }
 
     #[test]
