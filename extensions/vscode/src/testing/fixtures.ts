@@ -231,6 +231,36 @@ export function makeApprovalAskCell(id = 'ask-approval'): AskCellModel {
   };
 }
 
+/**
+ * An ask cell whose single question also renders the free-form field
+ * (`required: false` — see `AskCell`), for the option-vs-text interplay tests.
+ */
+export function makeCustomAnswerAskCell(id = 'ask-custom', multiSelect = false): AskCellModel {
+  return {
+    kind: 'ask',
+    id,
+    createdAt: FIXTURE_EPOCH,
+    requestId: 'ask-request-custom',
+    sessionId: 'session-a',
+    approval: false,
+    state: 'awaiting',
+    answers: [],
+    questions: [
+      {
+        id: 'q-open',
+        question: 'Which rendering strategy should the transcript use?',
+        header: 'Rendering',
+        multiSelect,
+        required: false,
+        options: [
+          { label: 'Memoized cells', description: 'Stable prefix + streaming tail' },
+          { label: 'Full re-render', description: 'Simplest, quadratic on long turns' },
+        ],
+      },
+    ],
+  };
+}
+
 // ── scenarios (step 04) ───────────────────────────────────────────────
 
 /** A tool call that failed — the case that must open by itself. */

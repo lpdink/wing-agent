@@ -5,6 +5,7 @@ import type { CellModel } from '../../src/shared';
 import {
   FIXTURE_EPOCH,
   makeApprovalAskCell,
+  makeCustomAnswerAskCell,
   makeFailedToolCell,
   makeFixtureSession,
   makeStreamingCells,
@@ -279,6 +280,75 @@ describe('ask cell', () => {
         sessionId: 'session-a',
         requestId: 'ask-request-1',
         answers: [{ questionId: 'q1', selected: ['Memoized cells'], text: '' }],
+      },
+    ]);
+  });
+
+  it('single-select: typing replaces the clicked option instead of being dropped (#113)', () => {
+    const { container, bridge } = mountCells([makeCustomAnswerAskCell()]);
+    const cell = cellElement(container, 'ask-custom');
+
+    const option = within(cell).getAllByRole('radio')[0] as HTMLElement;
+    fireEvent.click(option);
+    expect(option).toBeChecked();
+
+    // "Type an answer…" is the last explicit choice: the option deselects in
+    // the same gesture, so what is on screen is what gets submitted.
+    const textarea = within(cell).getByPlaceholderText('Type an answer…');
+    fireEvent.change(textarea, { target: { value: 'a third way' } });
+    expect(option).not.toBeChecked();
+    expect(option.closest('[data-selected]')?.getAttribute('data-selected')).toBe('false');
+
+    fireEvent.click(within(cell).getByRole('button', { name: 'Submit' }));
+    expect(bridge.sentOfType('answerAsk')).toEqual([
+      {
+        type: 'answerAsk',
+        sessionId: 'session-a',
+        requestId: 'ask-request-custom',
+        answers: [{ questionId: 'q-open', selected: [], text: 'a third way' }],
+      },
+    ]);
+  });
+
+  it('single-select: clicking an option clears the typed answer', () => {
+    const { container, bridge } = mountCells([makeCustomAnswerAskCell()]);
+    const cell = cellElement(container, 'ask-custom');
+
+    const textarea = within(cell).getByPlaceholderText('Type an answer…');
+    fireEvent.change(textarea, { target: { value: 'a third way' } });
+
+    fireEvent.click(within(cell).getAllByRole('radio')[1] as HTMLElement);
+    expect(textarea).toHaveValue('');
+
+    fireEvent.click(within(cell).getByRole('button', { name: 'Submit' }));
+    expect(bridge.sentOfType('answerAsk')).toEqual([
+      {
+        type: 'answerAsk',
+        sessionId: 'session-a',
+        requestId: 'ask-request-custom',
+        answers: [{ questionId: 'q-open', selected: ['Full re-render'], text: '' }],
+      },
+    ]);
+  });
+
+  it('multi-select: toggles and text are submitted together', () => {
+    const { container, bridge } = mountCells([makeCustomAnswerAskCell('ask-multi', true)]);
+    const cell = cellElement(container, 'ask-multi');
+
+    fireEvent.click(within(cell).getAllByRole('checkbox')[1] as HTMLElement);
+    const textarea = within(cell).getByPlaceholderText('Type an answer…');
+    fireEvent.change(textarea, { target: { value: 'plus this' } });
+
+    // The toggle survives the text edit — the host joins both into the answer.
+    expect(within(cell).getAllByRole('checkbox')[1]).toBeChecked();
+
+    fireEvent.click(within(cell).getByRole('button', { name: 'Submit' }));
+    expect(bridge.sentOfType('answerAsk')).toEqual([
+      {
+        type: 'answerAsk',
+        sessionId: 'session-a',
+        requestId: 'ask-request-custom',
+        answers: [{ questionId: 'q-open', selected: ['Full re-render'], text: 'plus this' }],
       },
     ]);
   });

@@ -18,6 +18,8 @@ import type { ReactElement } from 'react';
 import type { AskAnswerModel, AskCellModel, AskQuestionModel, SessionId } from '../../shared';
 import { postToHost } from '../bridge/channel';
 import styles from '../styles/chat.module.css';
+import { draftAfterOptionClick, draftAfterTextEdit } from './askDraft';
+import type { AskDraft } from './askDraft';
 
 export function AskCell({
   cell,
@@ -27,7 +29,7 @@ export function AskCell({
   readonly sessionId: SessionId;
 }): ReactElement {
   const awaiting = cell.state === 'awaiting';
-  const [answers, setAnswers] = useState<Readonly<Record<string, DraftAnswer>>>({});
+  const [answers, setAnswers] = useState<Readonly<Record<string, AskDraft>>>({});
   const drafts = answers;
 
   const complete = useMemo(
@@ -39,7 +41,7 @@ export function AskCell({
     [cell.questions, drafts],
   );
 
-  const update = (questionId: string, next: DraftAnswer): void => {
+  const update = (questionId: string, next: AskDraft): void => {
     setAnswers((previous) => ({ ...previous, [questionId]: next }));
   };
 
@@ -152,13 +154,10 @@ export function AskCell({
                             if (!awaiting) {
                               return;
                             }
-                            const current = drafts[question.id]?.selected ?? [];
-                            const next = question.multiSelect
-                              ? current.includes(option.label)
-                                ? current.filter((label) => label !== option.label)
-                                : [...current, option.label]
-                              : [option.label];
-                            update(question.id, { selected: next, text: drafts[question.id]?.text ?? '' });
+                            update(
+                              question.id,
+                              draftAfterOptionClick(question, drafts[question.id], option.label),
+                            );
                           }}
                         />
                         <span className={styles.askOptionLabel}>
@@ -184,10 +183,10 @@ export function AskCell({
                       : (cell.answers.find((a) => a.questionId === question.id)?.text ?? '')
                   }
                   onChange={(event) => {
-                    update(question.id, {
-                      selected: drafts[question.id]?.selected ?? [],
-                      text: event.target.value,
-                    });
+                    update(
+                      question.id,
+                      draftAfterTextEdit(question, drafts[question.id], event.target.value),
+                    );
                   }}
                 />
               )}
@@ -211,25 +210,19 @@ export function AskCell({
   );
 }
 
-/** Local draft of one question's answer. */
-interface DraftAnswer {
-  readonly selected: readonly string[];
-  readonly text: string;
-}
-
 /**
  * Only *required* questions gate the submit button: they are the option-only
  * ones, where "no answer" is not a valid response. Free-form questions may be
  * left empty (the user is skipping them).
  */
-function isAnswered(question: AskQuestionModel, draft: DraftAnswer | undefined): boolean {
+function isAnswered(question: AskQuestionModel, draft: AskDraft | undefined): boolean {
   if (!question.required) {
     return true;
   }
   return (draft?.selected.length ?? 0) > 0;
 }
 
-function toAnswer(question: AskQuestionModel, draft: DraftAnswer | undefined): AskAnswerModel {
+function toAnswer(question: AskQuestionModel, draft: AskDraft | undefined): AskAnswerModel {
   return {
     questionId: question.id,
     selected: draft?.selected ?? [],

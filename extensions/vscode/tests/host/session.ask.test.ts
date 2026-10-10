@@ -150,6 +150,37 @@ describe('multi-question asks', () => {
     expect(lastSentContent(fixture)).toBe('First: (user did not answer)\nq2: B, plus my notes');
   });
 
+  it('replies with the free-form text of a single-select question (#113)', async () => {
+    const fixture = await bootWithAsk({
+      type: 'ask',
+      tool_call_id: 'ask-text',
+      questions: [
+        {
+          id: 'q1',
+          header: 'Rendering',
+          question: 'Which strategy?',
+          options: [{ label: 'A' }],
+        },
+      ],
+      question: '',
+      choices: [],
+      required: false,
+    });
+
+    // What the webview submits after the user types instead of choosing an
+    // option: `selected` is empty (askDraft's single-select exclusivity) and
+    // the text is the answer — it must reach the wire, not be dropped.
+    await fixture.harness.intent({
+      type: 'answerAsk',
+      sessionId: fixture.sessionId,
+      requestId: 'ask-text',
+      answers: [{ questionId: 'q1', selected: [], text: 'a third way' }],
+    });
+    await flushMicrotasks();
+
+    expect(lastSentContent(fixture)).toBe('Rendering: a third way');
+  });
+
   it('ignores answers for a request that is no longer awaiting', async () => {
     const fixture = await bootWithAsk({
       type: 'ask',
