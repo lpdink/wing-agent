@@ -2,7 +2,7 @@
 
 背景：``test_model_id_cross_provider`` 的那条旧场景断言"坏配置 ⇒ 网关拒绝启动"，
 setup mode 之后网关**不再拒绝启动**，于是 ``ProbeEnv.start`` 成功返回、env 被丢掉、
-teardown 从不跑 —— 每跑一次漏一个网关子进程（审查 B2 / AD17 记录了 4~8 个孤儿）。
+teardown 从不跑 —— 每跑一次漏一个网关子进程。
 
 根因已在场景侧修掉（env 被 ``try/finally`` 持有），这里钉住**基建的第二道**：
 ``start()`` 中途失败（进程起了但健康检查不过）时，那个进程必须被收干净。
@@ -28,8 +28,7 @@ def _read_pid(path: Path, *, timeout: float = 5.0) -> int:
     """等假网关把自己的 pid 写出来（fork 之后 shell 要几毫秒才轮到跑）。
 
     等不到 = 用例自身失效（没起过进程就谈不上"收干净"）。**不能**把"起没起过"
-    的判定建在立刻读文件上：外层兜底路径没有任何等待，读得太早是假红（review S2
-    的用例必须能区分"泄漏"与"还没写"）。
+    的判定建在立刻读文件上：外层兜底路径没有任何等待，读得太早是假红（用例必须能区分"泄漏"与"还没写"）。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -120,7 +119,7 @@ async def test_stop_is_safe_after_start_failure(
     assert not _pid_alive(pid)
 
 
-# ── 外层兜底是**唯一**防线的两条路径（review S2） ────────────────
+# ── 外层兜底是**唯一**防线的两条路径 ────────────────
 #
 # `start_gateway` 的失败分支只接 `ProbeEnvError`（超时 / 进程早退），自己会
 # `_terminate_process()`——于是上面那条用例在"去掉 `start()` 的外层兜底"时仍绿。
@@ -136,7 +135,7 @@ async def _explode_with(
 
     ``start()`` 的兜底分支一抛就收尸（``DEFAULT_SHUTDOWN_WAIT`` 被压到 0.2s），而假网关是
     fork 出来的 shell——负载下它可能还没被调度到 ``echo $$`` 那一行就吃了 SIGTERM，pid 文件
-    永不出现，用例在「读 pid」这一步**假红**（审查 N3：并行 ~2/16 复现的时序竞态，不是泄漏）。
+    永不出现，用例在「读 pid」这一步**假红**（并行 ~2/16 复现的时序竞态，不是泄漏）。
     先等 pid 落盘再抛：被测路径（兜底收尸）一字不变，竞态消失。等不到也照抛——之后
     ``_read_pid`` 会给出「用例自身失效」的明确断言。
     """

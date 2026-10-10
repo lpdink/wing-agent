@@ -693,7 +693,7 @@ class TestThinkingStatus:
         """会话级覆盖不得写穿共享配置（ProviderConfig / 实例 extra_body 皆只读）。
 
         嵌套的 thinking dict 若被覆盖逻辑原地改写，会污染同进程其他会话
-        与池中其他引用者（review 发现：浅拷贝 + setdefault 的历史坑）。
+        与池中其他引用者（浅拷贝 + setdefault 的历史坑）。
         """
         cfg = ProviderConfig(
             name="test-anthropic",

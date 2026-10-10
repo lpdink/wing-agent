@@ -186,7 +186,7 @@ async def test_secrets_are_never_echoed_and_null_keeps_the_value(probe: Probe) -
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# A1 回归（PR #180 review）：删掉列表首项后，剩下的 provider 必须拿到**自己的** key
+# A1 回归：删掉列表首项后，剩下的 provider 必须拿到**自己的** key
 #
 # 按下标回填的旧行为：`providers[0]` 删除后，`providers[1]`（掩码为 null）会从
 # `current[0]` 抄来 p1 的密钥——保存成功、回执不报告，用户下次调用才 401 / 打错账号。

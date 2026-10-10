@@ -90,7 +90,7 @@ class MemorySessionStore(SessionStore):
     def write_media(self, media_id: str, data: bytes) -> None:
         """写入媒体字节（幂等：内容寻址下同名即同内容，首写即终值）。
 
-        首写路径校验 id 与字节一致（内容寻址完整性，review r1 N2）。
+        首写路径校验 id 与字节一致（内容寻址完整性）。
         """
         validate_media_id(media_id)
         if media_id in self._media:

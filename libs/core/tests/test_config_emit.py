@@ -489,10 +489,10 @@ def test_commented_container_default_keeps_the_block_shape() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # A2 回归：键名本身含点（或别的 YAML 边界形态）的未知键
 #
-# 失败形态（审查 A2 的原始复现）：`gateway: {foo.bar: 42}` 保存一次后变成顶层
+# 失败形态：`gateway: {foo.bar: 42}` 保存一次后变成顶层
 # `bar: 42`——`_Extras` 曾用 `rpartition(".")` 从"路径字符串"反推父容器，键名里的点
 # 被当成分隔符。修复把 extra 改成结构性三元组（父前缀 + 原始键名 + 值）。
-# 这一批参数化即审查者临时 fuzz 的物化：位置、名字、值三者都必须不变。
+# 参数化即键名 fuzz 的物化：位置、名字、值三者都必须不变。
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: 边界键名（含点 / YAML 歧义形态 / 空串）。审查者的 33 字符串 fuzz 不在仓库里，
@@ -598,7 +598,7 @@ def test_boundary_unknown_key_round_trips_in_place(
 
 
 def test_dotted_unknown_key_stays_under_its_parent(config_path: Any) -> None:
-    """A2 的原始复现（审查者给的两例）：位置 / 名字都不许被 `rpartition` 挪走。"""
+    """A2 的原始复现：位置 / 名字都不许被 `rpartition` 挪走。"""
     config_path.write_text(
         "gateway:\n"
         "  port: 40000\n"

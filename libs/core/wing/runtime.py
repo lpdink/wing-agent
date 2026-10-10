@@ -2,20 +2,15 @@
 """
 wing/runtime.py — WingRuntime：service 层协调者
 
-组合 SessionManager + EventBus，提供统一入站入口。
-
-架构定位：
-  Runtime 是协调者，不是实现者。它将用户请求路由到正确的组件，
-  并管理事件的发射——但具体的业务逻辑由 Session、ContextManager
-  等组件自己实现。
+组合 SessionManager + EventBus，提供统一入站入口。**协调者，不是实现者**：把用户请求路由到正确的
+组件并管理事件发射，具体业务逻辑归 Session / ContextManager 等组件自己实现。
 
 设计约束：
   - post() 是唯一入站入口，统一管理 RequestContext
-  - Session 生命周期方法语义单一
   - 订阅管理封装路由注册 + SyncSession 推送
   - 所有事件通过 _emit_session_event() 发射，保证 scope="session"
-  - 异常层次：LookupError（not found）/ ValueError（bad input）/
-    RuntimeError（bad state），route 按类型映射 HTTP status
+  - 异常层次：LookupError（not found）/ ValueError（bad input）/ RuntimeError（bad state），
+    route 按类型映射 HTTP status
 """
 
 from __future__ import annotations
@@ -91,7 +86,7 @@ UNPARSEABLE_CONFIG_WARNING = "原配置文件无法解析，其中的密钥无�
 """
 
 DROPPED_SECRET_WARNING = "无法确定 {path} 属于哪一项（列表结构变化且无法按身份配对），已移除该密钥，请重新填写"
-"""密文哨兵因无法安全配对而被丢弃时的回执警告（审查 A1 的第 3 点）。
+"""密文哨兵因无法安全配对而被丢弃时的回执警告。
 
 比错配轻、比静默重：**宁可不猜**——列表删 / 移 / 前插后配不上的密钥一律移除
 （必填字段随之成为 problem，保存被拦住），并在回执里点名路径 + 要求重填；
@@ -102,7 +97,7 @@ POSITIONAL_SECRET_WARNING = (
     "{path} 按位置保留了磁盘上的值（{reason}）——若这是重命名，无需处理；"
     "若是替换成了新的项，请重新填写该密钥"
 )
-"""密文哨兵因 (b) 等长下标回落而被**按位置保留**时的回执警告（审查 B1 / AD18 第 2 点）。
+"""密文哨兵因 (b) 等长下标回落而被**按位置保留**时的回执警告。
 
 consumed 守卫关掉的是「新项抢别人的槽位」那一类；**整表替换**与「全改名」在文档里
 结构不可区分，守卫关不掉——既然关不掉，就**不许静默**。三要素：路径 + 两种读法
@@ -166,7 +161,7 @@ class SettingsApplyResult:
     backup_path: str | None = None
     warnings: list[str] = field(default_factory=list)
     """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」（AD13）、
-    「密钥被丢弃」/「密钥按位置保留」（审查 A1 / B1）。
+    「密钥被丢弃」/「密钥按位置保留」。
     与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
 
 
@@ -666,17 +661,16 @@ class WingRuntime:
     ) -> SettingsApplyResult:
         """保存事务（总设计 §7.3 的十步）：校验 → ``.bak`` → 原子写 → 生效 → 事件 → 回执。
 
-        ① 现读磁盘（服务端不缓存文档）→ ② 基线指纹不符 → 409（不写盘）→
-        ③ 密文三态回填（``null`` = 保留磁盘现值）→ ④ 字段级 + 跨字段校验
-        （**全有或全无**：有 problem 时一个字节都不写）→ ⑤ ``config.yaml.bak``
-        （覆盖式，只留最近一份）→ ⑥ 规范形 YAML + 原子写 → ⑦ 生效
-        （:meth:`post_write_effect`，04 的接点；失败不回滚文件）→
-        ⑧ ``changed`` / ``restart_required``（只读叶子的 apply，增补 P13）→
-        ⑨ 广播 ``SettingsChangedEvent``（global）→ ⑩ 回执。
+        ① 现读磁盘（服务端不缓存文档）→ ② 基线指纹不符 → 409（不写盘）→ ③ 密文三态回填
+        （``null`` = 保留磁盘现值）→ ④ 字段级 + 跨字段校验（**全有或全无**：有 problem 时一个字节
+        都不写）→ ⑤ ``config.yaml.bak``（覆盖式，只留最近一份）→ ⑥ 规范形 YAML + 原子写 → ⑦ 生效
+        （:meth:`post_write_effect`，04 的接点；失败不回滚文件）→ ⑧ ``changed`` /
+        ``restart_required``（只读叶子的 apply）→ ⑨ 广播 ``SettingsChangedEvent``（global）→
+        ⑩ 回执。
 
         Args:
-            document: 稀疏文档（密文三态见 ``resolve_secrets``）；未知键原样保留
-                （从磁盘文档回填，客户端不认识也不会吃掉它）。
+            document: 稀疏文档（密文三态见 ``resolve_secrets``）；未知键原样保留（从磁盘文档回填，
+                客户端不认识也不会吃掉它）。
             base: 客户端持有的基线指纹（``None`` = 跳过并发检查，对应 CLI 的 ``--force``）。
 
         Raises:
@@ -691,7 +685,7 @@ class WingRuntime:
         except ConfigDocumentError as exc:
             # 文件存在但读不出文档（YAML 语法错 / 顶层不是映射）。**事务照常继续**：
             # 这正是「配置写坏 ⇒ 开设置面板修」（D1）在语法错这条分支上的兑现——
-            # 否则面板保存永远 ok=false、用户只剩手改文件一条路（审查 B3 / AD13）。
+            # 否则面板保存永远 ok=false、用户只剩手改文件一条路。
             # 现文档视为**空**：未知键无从保留、旧密钥无从回填（回执里显式警告）。
             # 指纹仍然算（= 文件字节的 sha256）——乐观并发不因文件坏了而失效。
             current_doc = SparseDocument(data={})
@@ -705,7 +699,7 @@ class WingRuntime:
         # ③ 密文回填：null = 保留磁盘现值（真实值只在这里被读、从不回显）。
         #    列表项按**身份**配对（identity_field）；配不上且长度变化 / 槽位已被认领
         #    → 宁可不猜：该密钥被丢弃（必填 → problem），并且**必须让用户看见**
-        #    （审查 A1/B1：静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
+        #    （静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
         #    等长下标回落（(b)）保留下来的值同样**出声**（AD18 第 2 点：它和「重命名」
         #    在文档里不可区分）。
         resolution = resolve_secrets(
@@ -735,7 +729,7 @@ class WingRuntime:
             )
 
         # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。原子写（不是 copyfile）：
-        # 进程在拷贝中途被杀不会留下截断的 .bak（审查 N7）；字节级复制，
+        # 进程在拷贝中途被杀不会留下截断的 .bak；字节级复制，
         # 连读不出文档的坏文件也逐字留证（AD13 的价值所在）。
         config_path = get_config_path()
         backup_path: str | None = None

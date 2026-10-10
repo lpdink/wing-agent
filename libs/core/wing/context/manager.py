@@ -276,12 +276,12 @@ class ContextManager:
 
         Args:
             model: 主 model 名称（触发 compact 时透传给 provider）。
-            model_provider: ModelProvider 实例（触发 compact 时使用；
-                仅后台 compact 消费——主调用由调用方在发送时刻重新解析）。
-            current_tools: 零参 callable，返回 Agent 当前可执行工具。
-                compact sync 在 await 结束后求值，避免并发切换导致过期快照。
-            options: 会话级调用参数（缓存亲和 session id / 开关）——compact
-                请求与主调用保持同一 prompt cache key 与开关口径。
+            model_provider: ModelProvider 实例（仅后台 compact 消费——主调用由调用方在发送时刻重新
+                解析）。
+            current_tools: 零参 callable，返回 Agent 当前可执行工具。compact sync 在 await 结束后
+                求值，避免并发切换导致过期快照。
+            options: 会话级调用参数（缓存亲和 session id / 开关）——compact 请求与主调用保持同一
+                prompt cache key 与开关口径。
         """
         if not self.compactor:
             return LLMMessagesResult(
@@ -475,9 +475,9 @@ class ContextManager:
     ) -> tuple[int, int]:
         """手动压缩上下文。
 
-        丢弃 pending async compact，对当前消息链执行同步压缩，
-        将压缩结果写入消息链。Compact 打破 prefix cache，完成后
-        自动同步声明集为 current_tools()（await 后求值，避免并发切换导致过期快照）。
+        丢弃 pending async compact，对当前消息链执行同步压缩，将压缩结果写入消息链。Compact 打破
+        prefix cache，完成后自动同步声明集为 current_tools()（await 后求值，避免并发切换导致过期
+        快照）。
 
         Args:
             model: 主 model 名称

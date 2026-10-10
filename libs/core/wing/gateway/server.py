@@ -93,7 +93,7 @@ class _SetupRuntime(WingRuntime):
     其余一切访问与「runtime 在 setup mode 不可用」同义：守门中间件是业务面的一道闸
     （白名单之外一律 503 ``setup_mode``），替身把**所有**非事务入口（含继承来的方法，
     如 ``list_models`` / ``list_sessions``）都翻成 :class:`SetupModeError`——两道闸
-    覆盖同一批路径（审查 N1 / 05 M3）。
+    覆盖同一批路径。
     """
 
     def __init__(self, server: GatewayServer) -> None:
@@ -109,7 +109,7 @@ class _SetupRuntime(WingRuntime):
         )
 
     def __getattribute__(self, name: str) -> Any:
-        """setup mode 下 **只有保存事务可达**（审查 N1：``__getattr__`` 只拦"基类没有"
+        """setup mode 下 **只有保存事务可达**（``__getattr__`` 只拦"基类没有"
         的属性，`list_models` 这类真实方法会绕过去、以 ``ValueError`` 露出）。
 
         这里用 ``__getattribute__`` 拦**所有**公开属性：白名单只有

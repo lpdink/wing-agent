@@ -59,51 +59,40 @@ def validate_media_content(media_id: str, data: bytes) -> None:
 class SessionMetadata(BaseModel):
     """Session 持久元数据。全字段可选，序列化时排除 None。
 
-    model_id / model_name / provider_name 记录会话的模型身份**三元组**：
+    model_id / model_name / provider_name 记录会话的模型身份**三元组**：``model_id`` 是**引用词**
+    （∈ 配置声明的 id 空间），resume 以它为唯一入口——命中即用当前映射（name / provider 跟随配置演
+    化），未命中才回落到快照；``model_name`` / ``provider_name`` 是写入时刻的**运行期事实快照**
+    （发给上游的调用名 + 承载它的 provider），id 被删 / 改时的兜底恢复线索；三者由
+    ``Session._persist_model`` 一次写全（整个 metadata 幂等落盘）。``model_id`` 缺失但快照齐全 = 旧记
+    录：恢复时经 ``Config.identify`` 反查补 id，内存态与记录不一致才落盘对齐（一次性迁移，不产生写
+    噪声）。
 
-    - ``model_id`` 是**引用词**（∈ 配置声明的 id 空间）：resume 以它为唯一入口——
-      命中即用当前映射（name / provider 跟随配置演化），未命中才回落到快照；
-    - ``model_name`` / ``provider_name`` 是写入时刻的**运行期事实快照**（发给上游的
-      调用名 + 承载它的 provider）：id 被删 / 改时的兜底恢复线索；
-    - 三者由 ``Session._persist_model`` 一次写全（整个 metadata 幂等落盘）。
-      ``model_id`` 缺失但快照齐全 = 旧记录：恢复时经 ``Config.identify`` 反查补 id，
-      内存态与记录不一致才落盘对齐（一次性迁移，不产生写噪声）。
+    写入时机是**显式模型动作**——模型切换、模板切换、创建 override、fork 快照；resume 时记录优先于
+    模板默认模型，是模型选择跨进程重启的唯一恢复来源。model_name 与 AgentInfo.model_name 同义（当前
+    生效模型的裸名）。
 
-    写入时机是**显式模型动作**——模型切换、模板切换、创建 override、fork 快照；
-    resume 时记录优先于模板默认模型，是模型选择跨进程重启的唯一恢复来源。
-    model_name 与 AgentInfo.model_name 同义（当前生效模型的裸名）。
+    提示词与动态状态（system_prompt / append_system_prompt / tools / thinking / reasoning_effort /
+    yolo / max_turns）走同一套"显式动作写入、resume 优先于模板/配置"语义：它们全部进入 LLM 请求（或
+    改变请求行为），丢失会让 fork/resume 后的请求前缀与重启前不一致——直接表现为 KV cache 不命中，
+    因此必须随会话持久化。system_prompt 是基础系统提示词的替换值；append_system_prompt 是追加部分
+    （hook 注入的环境信息 + override 的合并结果）；tools 是可执行工具集覆盖（ref 列表，如 "Bash" /
+    "client.Read"）；其余是会话级开关与限额。
 
-    提示词与动态状态（system_prompt / append_system_prompt / tools / thinking /
-    reasoning_effort / yolo / max_turns）走同一套"显式动作写入、resume 优先
-    于模板/配置"语义。它们全部进入 LLM 请求（或改变请求行为），丢失会让
-    fork/resume 后的请求前缀与重启前不一致——直接表现为 KV cache 不命中，
-    因此必须随会话持久化：
+    fork 时这些字段一次写全（快照语义，与模型绑定一致）——子会话重启后不会偏离 fork 时的行为：提示词
+    / 工具集 / yolo / max_turns 取 fork 时刻的**有效值**（子会话 agent 由 `AgentTemplate.from_agent`
+    按 live 构造，记录必须与之一致；append_system_prompt 先按 live 值写入供子会话构造时继承，随后
+    `before_session_start` 在新会话上生效、注入结果覆盖落盘）；thinking / reasoning_effort 只拷**显式
+    记录**——固化了 provider 派生默认（如 anthropic 未配置 thinking）会让子会话请求体带上源会话没有
+    的显式配置。
 
-    - system_prompt：基础系统提示词的替换值（AgentOverride.system_prompt）；
-    - append_system_prompt：追加系统提示词（hook 注入的环境信息 +
-      AgentOverride.append_system_prompt 的合并结果）；
-    - tools：可执行工具集覆盖（ref 列表，如 "Bash" / "client.Read"）；
-    - thinking / reasoning_effort / yolo / max_turns：会话级开关与限额。
-
-    fork 时这些字段一次写全（快照语义，与模型绑定一致）——子会话重启后不会
-    偏离 fork 时的行为：提示词 / 工具集 / yolo / max_turns 取 fork 时刻的
-    **有效值**（子会话 agent 由 `AgentTemplate.from_agent` 按 live 构造，记录
-    必须与之一致；append_system_prompt 先按 live 值写入供子会话构造时继承，
-    随后 `before_session_start` 在新会话上生效、注入结果覆盖落盘）；
-    thinking / reasoning_effort 只拷**显式记录**——固化了 provider 派生默认
-    （如 anthropic 未配置 thinking）会让子会话请求体带上源会话没有的显式配置。
-
-    - tags：会话级结构化标签（不透明字符串列表，如 ``scheduler`` /
-      ``favorite`` / ``task=wing-tag``；约定小写、``k=v`` 作命名空间，系统
-      不做语义解析）。由 ``SessionManager.set_session_tags``（``POST
-      /api/session/tag``）原子增删维护；不进 LLM 请求前缀，**fork 不继承**。
-      空列表与 None 等价（序列化排除 None——无标签的 metadata.json 零字段）。
-    - tag_meta：每个标签的元数据记录（``{tag: TagMeta}``），与 tags 同生同灭、
-      **键集 ⊆ tags**（不属于 tags 的键在读取投影与下次写盘时丢弃）。由标签
-      变更原语（``session.tags.apply_tag_ops``）维护：tag 被添加时记录一次
-      加入时间，移除时删除记录。值是对象（当前只有 ``added_at``），**面向
-      增量**：后续要加审计字段（来源 / actor / 变更历史）时往 ``TagMeta`` 里
-      加即可，不必再动存储结构。空字典与 None 等价（与 tags 同一约定）。
+    - tags：会话级结构化标签（不透明字符串列表，如 ``scheduler`` / ``favorite`` / ``task=wing-tag``；
+      约定小写、``k=v`` 作命名空间，系统不做语义解析）。由 ``SessionManager.set_session_tags``
+      （``POST /api/session/tag``）原子增删维护；不进 LLM 请求前缀，**fork 不继承**。空列表与 None
+      等价（序列化排除 None——无标签的 metadata.json 零字段）。
+    - tag_meta：每个标签的元数据记录（``{tag: TagMeta}``），与 tags 同生同灭、**键集 ⊆ tags**（不属
+      于 tags 的键在读取投影与下次写盘时丢弃）。由标签变更原语（``session.tags.apply_tag_ops``）维
+      护：tag 被添加时记录一次加入时间，移除时删除记录。值是对象（当前只有 ``added_at``），**面向增
+      量**：后续要加审计字段（来源 / actor / 变更历史）时往 ``TagMeta`` 里加即可。空字典与 None 等价。
     """
 
     model_config = ConfigDict(extra="ignore")

@@ -676,7 +676,7 @@ def test_r6_root_has_no_side_effects() -> None:
 def test_import_normalization_shapes() -> None:
     """形态级元测试：各类 import 写法 → ``(目标模块, 符号名)`` 的归一化结果。
 
-    覆盖 review S1 的包属性形态（``from wing import store``）、相对形态边界与
+    覆盖包属性形态（``from wing import store``）、相对形态边界与
     ``module=None`` 退回包根的形态（用例形状借 ``libs/wing-probe/tests/test_guard.py``）。
     """
     cases: list[tuple[str, str, list[tuple[str, tuple[str, ...]]]]] = [
@@ -769,7 +769,7 @@ def test_import_normalization_shapes() -> None:
 
 
 def test_bypass_shapes_are_detected() -> None:
-    """评审 S1/S2 的绕过形态必须命中对应规则（合成片段级回归）。"""
+    """绕过形态必须命中对应规则（合成片段级回归）。"""
     cases: list[tuple[str, str, set[str]]] = [
         # S1：包属性形态（修复前：R1/R2/R4 完全漏判、R5 错报成 → wing）
         ("from wing import store\n", "wing/tools/probe.py", {"R2"}),

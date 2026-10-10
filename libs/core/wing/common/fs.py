@@ -21,7 +21,7 @@ def _tmp_path(path: Path) -> Path:
 
     tmp 名一旦只按 pid 唯一，同进程多线程并发写同一路径就会撞名：两个线程
     打开同一个 tmp，先到者 os.replace 把它改名走，后到者 os.replace 找不到
-    源文件抛 FileNotFoundError（review r1 S1，实测 3/4 线程必现）。存活的
+    源文件抛 FileNotFoundError。存活的
     线程 id 互不相同，且本模块是同步函数（同线程内不存在交错），故 pid +
     tid 组合足以覆盖进程内并发；跨进程由 pid 区分。
 
@@ -38,7 +38,7 @@ def _target_mode(path: Path) -> int | None:
 
     就地写保留既有 inode 的权限位，而 tmp + replace 落地的是一份新 inode：
     不显式保留的话，0755 脚本 / 0600 密钥文件会被静默改写成 umask 默认值
-    （review write-atomic B1：可执行位丢失、`.env` 变 0644）。
+    （可执行位丢失、`.env` 变 0644）。
     """
     try:
         return stat.S_IMODE(path.stat().st_mode)

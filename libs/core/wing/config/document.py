@@ -61,7 +61,7 @@ class ExtraKey(NamedTuple):
     """schema 之外的未知键（前向兼容，原样写回）：``(父容器前缀, 原始键名, 值)``。
 
     父前缀在递归遍历时拼接、**键名不参与任何字符串切分**——键名本身含点（``foo.bar``）、
-    就是 ``.``、或以点开头结尾时仍能精确归位。审查 A2 的教训：靠 ``rpartition(".")``
+    就是 ``.``、或以点开头结尾时仍能精确归位。靠 ``rpartition(".")``
     事后反推边界，会把 ``gateway.foo.bar`` 误判成父 ``gateway.foo`` 下的 ``bar``，
     保存一次即把键挪到错误的名字 / 位置（违反 D17 的前向兼容承诺）。
     """
@@ -108,8 +108,8 @@ class SecretResolution:
     """``resolve_secrets`` 的产物：解析后的稀疏文档 + 两类「用户必须知道」的密文路径。
 
     显式建模（不是全局状态、不是异常）：丢弃与按位置保留都是**正常结果**——列表结构变了
-    又没法按身份配对时，宁可让用户重填一次，也不把 A 的密钥猜给 B（总设计 §7.5 / 审查 A1）；
-    而位置配对保留下来的值必须**出声**（审查 B1 / AD18），因为它与「重命名」不可区分。
+    又没法按身份配对时，宁可让用户重填一次，也不把 A 的密钥猜给 B（总设计 §7.5）；
+    而位置配对保留下来的值必须**出声**，因为它与「重命名」不可区分。
     两类路径都由回执变成用户可见的 ``warnings``（``runtime.apply_settings``）。
     """
 
@@ -201,7 +201,7 @@ def _split_known(
     """递归把 schema 之外的键收进 ``extra``（freeform map 的内部键不算未知键）。
 
     未知键**不丢**（总设计 D17）：记录 ``(父容器前缀, 原始键名, 值)`` 三元组（:class:`ExtraKey`）
-    ——前缀在这里拼接，**键名不参与任何切分**（审查 A2），emitter 据此在父容器末尾原样写回。
+    ——前缀在这里拼接，**键名不参与任何切分**，emitter 据此在父容器末尾原样写回。
 
     **非字符串键在记录时就转成字符串**（YAML 的裸数字 / bool / 日期会被解析成对应类型）：
     这不是保真度的退让，而是修复路径的前提——`Config(**raw)` 只接受字符串关键字
@@ -298,14 +298,13 @@ def resolve_secrets(
 
     - ``null`` 是「保留磁盘现值」的哨兵（前端从 ``get`` 拿到的就是它，必须原样回传）。
       **对应值按身份配对**（列表节点声明的 ``identity_field``，见 :func:`_resolve`）——
-      删 / 移 / 前插列表项后密钥跟自己的项走，绝不按下标硬配（审查 A1：按下标会把
+      删 / 移 / 前插列表项后密钥跟自己的项走，绝不按下标硬配（按下标会把
       A 的密钥**静默**写给 B，用户下次调用才发现 401 或打错账号）。
     - current 也没有该值时，键从文档里**移除**（必填字段随之成为 problem，绝不静默清空）；
       若这个「没有」是因为列表结构变了、无法确定该值属于哪一项，路径进
       :attr:`SecretResolution.dropped_secrets`，由回执变成用户可见的警告（宁可不猜）。
     - (b) 的下标回落**按位置保留**了密文叶子时，叶子进
-      :attr:`SecretResolution.positional_secrets`——它与「重命名」不可区分，必须出声
-      （审查 B1 / AD18 第 2 点）。
+      :attr:`SecretResolution.positional_secrets`——它与「重命名」不可区分，必须出声。
     - 键缺席 = 该项不被覆盖（从文件移除）。
     - 返回 :class:`SecretResolution`（不改入参：``data`` 的容器逐层重建，
       未触碰的子树按引用共享——只读）。
@@ -364,12 +363,12 @@ def _resolve_list(
     dropped: list[str],
     positional: list[PositionalSecret],
 ) -> list[Any]:
-    """LIST 分支的三段式配对（顺序即优先级，审查 A1 的裁定 + AD18 的返修）：
+    """LIST 分支的三段式配对（顺序即优先级）：
 
     (a) **身份配对**：节点声明了 ``identity_field`` 时按它建「身份 → current 项」映射，
         incoming 项按自己的身份查表（身份在 current 侧重名 ⇒ 该身份不可用，落 (c)）；
     (b) **安全的下标回落**：**仅当** ``len(incoming) == len(current)`` 且该下标**未被 (a)
-        认领**（``consumed`` 守卫，审查 B1）时，对 (a) 没配上的项按下标配对——覆盖「重命名」
+        认领**（``consumed`` 守卫）时，对 (a) 没配上的项按下标配对——覆盖「重命名」
         （身份变了但结构没变）；一旦真的按位置保留了密文，就把叶子记进 ``positional``，
         由回执**出声**（AD18 第 2 点：歧义关不掉，就不许静默）；
     (c) **不猜**：其余情况该子树以「无现值」解析（``null`` 哨兵被移除，必填字段随之成为
@@ -382,7 +381,7 @@ def _resolve_list(
     length_equal = len(value) == len(current_list)
 
     # (a) 先对**全部** incoming 项做身份判定：consumed（被 (a) 配走的 current 下标）是
-    # (b) 的守卫——没有它，新项会把别人（或已删项）的密钥当自己的（审查 B1）。
+    # (b) 的守卫——没有它，新项会把别人（或已删项）的密钥当自己的。
     matched: list[int | None] = []
     unusable: list[bool] = []
     for item in value:
@@ -432,7 +431,7 @@ def _identity_index(
 
     只收录**非空字符串**身份（别的形态不是身份）。重名在合法配置里不可能出现
     （跨字段检查拒重复 provider name），但代码 defensive：该身份整体不可用，
-    落 (c)——绝不猜重复项里的哪一个（审查 A1 的裁定）。
+    落 (c)——绝不猜重复项里的哪一个。
     """
     positions: dict[str, int] = {}
     duplicated: set[str] = set()

@@ -212,7 +212,7 @@ def format_size(nbytes: int) -> str:
 
     < 1 KiB 保留 "N bytes" 字面形态；KB 级数值四舍五入后若进位到 1024.0
     （如 1048575 B → "1024.0 KB"）则改用 MB 表达同一数值——同一单位内的
-    数值恒 < 1024（review r1 N3）。图片链路单图上限是 MiB 级配置，不设
+    数值恒 < 1024。图片链路单图上限是 MiB 级配置，不设
     GB 单位。信封文本与 ReadImage 的大小报错共用此函数。
     """
     if nbytes < 1024:

@@ -161,7 +161,7 @@ def _too_large_error(resolved: str, nbytes: int, max_bytes: int) -> ToolError:
     """单图超限的错误：实际大小 / 上限 / 降采样示例（可复制执行）。
 
     示例命令对路径做 shell 引用（``shlex.quote``）——含空格 / CJK 的路径
-    照抄即可执行（review r1 S1）。
+    照抄即可执行。
     """
     return ToolError(
         f"ReadImage: {resolved}: {format_size(nbytes)} exceeds the "

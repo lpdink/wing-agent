@@ -393,7 +393,7 @@ def _keys_of(doc: SparseDocument) -> list[tuple[Any, Any]]:
 
 
 class TestSecretIdentityPairing:
-    """审查 A1：按下标配对时「删 / 移 / 前插」会把 A 的密钥静默写给 B。
+    """按下标配对时「删 / 移 / 前插」会把 A 的密钥静默写给 B。
 
     每一条都断言**每把 key 跟自己的 provider 走**（名字与 key 成对）。
     """
@@ -456,7 +456,7 @@ class TestSecretIdentityPairing:
         assert secret.identity_value == P2_RENAMED
 
     def test_delete_and_append_a_null_item_does_not_inherit_a_key(self):
-        """AD18 第 3 点（审查 B1 的主形态）：删一项 + 同一次保存里加一项（长度相等）。
+        """AD18 第 3 点：删一项 + 同一次保存里加一项（长度相等）。
 
         旧 (b) 不看 consumed：新项（``api_key: null``）会抄走**在位项**的密钥。现在那个槽位
         已被 (a) 认领 ⇒ 落 (c)：新项没有密钥、路径进 ``dropped_secrets``、没有任何位置保留。

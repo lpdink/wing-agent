@@ -14,7 +14,7 @@ AuthMiddleware 不缓存 AuthConfig——每次请求从 ``app.state.server.auth
 **修复模式（setup mode）**：配置坏掉时 auth 配置本身不可信，``dispatch`` 开头有一个
 独立分支——只接受 loopback 来源、**且网关自身必须绑定在 loopback 上**（``LOOPBACK_HOSTS``），
 两者都成立才不要求 key；否则一律 403。这是收紧不是放松（正常模式下 auth 关闭时任何人都能访问）。
-第二个条件关掉的是「任何 loopback 转发者即修复者」（审查 A3）：绑 ``0.0.0.0`` 且配置坏掉时，
+第二个条件关掉的是「任何 loopback 转发者即修复者」：绑 ``0.0.0.0`` 且配置坏掉时，
 本机反代 / 端口转发会让远端流量以 loopback 来源到达——那种部署不提供免 key 修复访问。
 既有鉴权逻辑（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**。
 """
@@ -121,7 +121,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # setup mode 下只有本机能（哪怕 auth.enabled=false）。判定必须在读
         # auth 配置之前（那份配置此刻不可用）。
         #
-        # **免 key 仅当网关自身绑定 loopback**（审查 A3）：只看来访地址不够——
+        # **免 key 仅当网关自身绑定 loopback**：只看来访地址不够——
         # 任何把流量从 127.0.0.1 转发进来的本机进程（无鉴权反代 / 容器 sidecar /
         # 本地端口转发）都会让远端流量以 loopback 身份到达，而 setup mode 授予的是
         # **免 key 的整份配置写权限**。绑定地址取自 ``GatewayServer.host``（构造参数，

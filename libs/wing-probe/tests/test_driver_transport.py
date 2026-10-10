@@ -6,7 +6,7 @@
    - ``_chunk`` 信封合并后的 ``Delivery.text`` == 原始载荷、``Event.frames > 1``
      （spec「大事件帧可重组」在本层的可测面；Rust 侧同样是 16 MiB 软上限切分）；
    - 畸形帧走 ``invalid_frame`` 合成类型（不静默丢帧），``close_reason`` 可读；
-2. ``DriverHttp`` 的留档缝（tasks 4.1，review N4）：桩网关 + **公开** ``GatewayClient``
+2. ``DriverHttp`` 的留档缝（tasks 4.1）：桩网关 + **公开** ``GatewayClient``
    方法，断言"首个调用必须被留档"——上游若不再调用 ``_post`` / ``_get``，
    留档会静默全空，这条测试先红。
 """
@@ -256,7 +256,7 @@ async def test_malformed_frames_take_invalid_frame_path(tmp_path: Path) -> None:
     await driver.close()
 
 
-# ── HTTP 留档缝（review N4） ────────────────────────────────
+# ── HTTP 留档缝 ────────────────────────────────
 
 
 class StubGateway:
@@ -388,7 +388,7 @@ async def test_failed_call_is_logged_and_reported(stub_gateway: StubGateway) -> 
 async def test_resume_backfills_workspace_and_response(
     tmp_path: Path, stub_gateway: StubGateway
 ) -> None:
-    """``Driver.resume``：workspace 从响应回填，重复挂载刷新 response（review N2/N5）。"""
+    """``Driver.resume``：workspace 从响应回填，重复挂载刷新 response。"""
     env = FakeEnv(tmp_path, gateway_url=stub_gateway.url)
     driver = Driver(env)
     try:

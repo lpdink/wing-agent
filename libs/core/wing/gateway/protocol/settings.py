@@ -273,7 +273,7 @@ class SettingsSetResponse(BaseModel):
     warnings: list[str] = Field(
         default_factory=list,
         description="非致命告知：如「原配置文件无法解析，其中的密钥无法保留，请重新填写」"
-        "（04/AD13），或「密钥已被丢弃 / 按位置保留」（审查 A1 / B1）。"
+        "（04/AD13），或「密钥已被丢弃 / 按位置保留」。"
         "与 problems 的区别：problems 让保存失败，warnings 只是提醒；"
         "旧前端忽略该字段即可（Rust 镜像由集成时统一补）",
     )

@@ -548,7 +548,7 @@ class TestSettingsSet:
 
 
 class TestSettingsSecretPairing:
-    """密文 ``null`` 哨兵按身份回填（审查 A1）——两把不同 key 的端到端回执。
+    """密文 ``null`` 哨兵按身份回填——两把不同 key 的端到端回执。
 
     单 provider / 单 key 的配置在结构上看不见「A 的密钥被写给 B」，所以这里有两条：
     ① 删除一个 provider（身份配对成功）→ 回执 ``warnings`` 为空、盘上密钥没错配；
@@ -605,7 +605,7 @@ class TestSettingsSecretPairing:
     def test_delete_and_append_a_null_item_is_refused_not_hijacked(
         self, two_provider_gateway
     ):
-        """审查 B1 的主形态：删一项 + 同一次保存里加一项（长度相等）。
+        """删一项 + 同一次保存里加一项（长度相等）：新项不许继承密钥。
 
         新项的 ``null`` 哨兵落在**已被 p2 认领**的槽位上——(b) 的 consumed 守卫必须让它
         落「不猜」：不许抄走 p2 的密钥（旧行为：`p3` 静默继承 `KEY-P2-BBBBBBBB`），
