@@ -10,9 +10,12 @@
 //! - `wing compact <sid> [instruction]` — manual context compaction, with an
 //!   optional focus instruction. Hydrates on 404.
 //! - `wing update <sid> [flags]` — partial state update; **only the flags you
-//!   pass are sent** (the endpoint applies a key only when it is present), so
-//!   an update can never accidentally reset a field the caller did not
-//!   mention. Hydrates on 404.
+//!   pass are sent** (the endpoint applies a key only when it is present).
+//!   One gateway-side exception to read before scripting: `--agent` switches
+//!   the template, and the new template's `thinking` / `reasoning_effort` /
+//!   `yolo` values come with it (the gateway rebuilds the agent) — the command
+//!   says so in its output rather than pretending those fields were untouched.
+//!   Hydrates on 404.
 //!
 //! ```sh
 //! wing interrupt "$SID"
@@ -211,7 +214,18 @@ struct UpdateOutput {
     ok: bool,
     session_id: String,
     applied: Vec<AppliedField>,
+    /// Gateway semantics the receipt cannot express as a field change
+    /// (currently: `--agent` re-applies the new template's thinking / effort /
+    /// yolo values). Empty on a plain field update.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
 }
+
+/// The one update flag whose effect exceeds its own field: switching the
+/// template rebuilds the agent, and the template's `thinking` /
+/// `reasoning_effort` / `yolo` come with it (`runtime.update_session`).
+const AGENT_SWITCH_NOTE: &str =
+    "--agent switches the template: thinking / reasoning_effort / yolo follow the new template";
 
 /// Entry point for `wing update`.
 pub async fn run_update(args: UpdateArgs, json: bool) -> ExitCode {
@@ -238,10 +252,16 @@ async fn update_inner(args: &UpdateArgs) -> Result<UpdateOutput> {
     let http = common::create_api_client(&host, port)?;
     common::hydrate_on_404(&http, &args.session_id, || http.update_session(&request)).await?;
 
+    let notes = if args.agent.is_some() {
+        vec![AGENT_SWITCH_NOTE.to_string()]
+    } else {
+        Vec::new()
+    };
     Ok(UpdateOutput {
         ok: true,
         session_id: args.session_id.clone(),
         applied,
+        notes,
     })
 }
 
@@ -338,6 +358,9 @@ fn print_update(output: &UpdateOutput) {
     for field in &output.applied {
         println!("{:<13} {}", format!("{}:", field.field), field.value);
     }
+    for note in &output.notes {
+        println!("note:        {note}");
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +433,44 @@ mod tests {
             serde_json::to_value(&request).unwrap()["tools"],
             serde_json::json!([])
         );
+    }
+
+    /// `--agent` 的效果超出它自己的字段：模板重建会带上模板的
+    /// thinking / effort / yolo —— 回执必须说出来，别让脚本把 applied
+    /// 当"其余字段未动"的证明。
+    #[test]
+    fn agent_switch_is_reported_as_a_note() {
+        let mut given = args("s1");
+        given.agent = Some("executor".into());
+        let (_, applied) = build_update(&given).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].field, "agent");
+
+        let output = UpdateOutput {
+            ok: true,
+            session_id: "s1".into(),
+            applied,
+            notes: vec![AGENT_SWITCH_NOTE.to_string()],
+        };
+        let json = serde_json::to_value(&output).unwrap();
+        assert!(
+            json["notes"][0].as_str().unwrap().contains("thinking"),
+            "{json}"
+        );
+        assert!(format!("{json}").contains("yolo"), "{json}");
+
+        // 普通字段更新不带 note（serde 直接省掉该键）。
+        let plain = UpdateOutput {
+            ok: true,
+            session_id: "s1".into(),
+            applied: vec![AppliedField {
+                field: "title",
+                value: "t".into(),
+            }],
+            notes: Vec::new(),
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("notes").is_none(), "{json}");
     }
 
     #[test]

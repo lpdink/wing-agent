@@ -320,7 +320,11 @@ pub enum Command {
         instruction: Option<String>,
     },
 
-    /// Update session state — only the fields you pass are changed.
+    /// Update session state — only the fields you pass are sent.
+    ///
+    /// One exception to read before scripting: `--agent` switches the
+    /// template, and the new template's thinking / effort / yolo values come
+    /// with it (the gateway rebuilds the agent); the command reports that.
     Update(control::UpdateArgs),
 
     /// Hot-reload the gateway configuration (config / hooks / commands /

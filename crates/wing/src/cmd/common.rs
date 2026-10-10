@@ -211,6 +211,11 @@ pub async fn ensure_tags_applied(
 /// itself 404s (the session is not on disk either), that error is the honest
 /// answer. The returned error is already the user-facing one
 /// ([`session_error`]), so callers just `?` it.
+///
+/// `wing tail` / `head` predate this helper and keep their own inline version
+/// (`cmd::messages::fetch_messages`, which sniffs "404" / "not found" out of
+/// the error text); folding them in would change an existing command's
+/// behavior, so that is left as a follow-up.
 pub async fn hydrate_on_404<T, F, Fut>(
     http: &GatewayApiClient,
     session_id: &str,

@@ -34,7 +34,7 @@ pub async fn run(host: Option<String>, port: Option<u16>, json: bool) -> ExitCod
     let host = host.unwrap_or(gw.host);
     let port = port.unwrap_or(gw.port);
 
-    let stop_outcome = match stop::stop_gateway_quiet().await {
+    let stop_outcome = match stop::stop_gateway_quiet(&host, port).await {
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("wing restart error: {e}");

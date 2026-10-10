@@ -1012,6 +1012,23 @@ mod tests {
         );
     }
 
+    /// `--tool-call-id`（定向回答 Ask）同理：顶层定义 + 过滤器保留，缺一不可
+    /// ——丢了过滤器这一环，`wing -p ... --tool-call-id X` 会被静默降级成
+    /// 一条没有寻址信息的普通消息（ask 永远挂在那里等）。
+    #[test]
+    fn filter_keeps_tool_call_id_and_its_value() {
+        let args: Vec<String> = vec!["-p", "yes", "-r", "sid", "--tool-call-id", "call-1"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(
+            filtered,
+            vec!["-p", "yes", "-r", "sid", "--tool-call-id", "call-1"],
+            "已知 value flag 的取值也要跟着走"
+        );
+    }
+
     #[test]
     fn filter_keeps_yolo_flag() {
         let args: Vec<String> = vec!["-p", "hello", "--yolo"]

@@ -8,7 +8,8 @@ use super::backend_config::read_backend_gateway_config;
 ///
 /// [`stop_gateway`] maps each outcome to a human line; `wing restart` calls
 /// [`stop_gateway_quiet`] directly — its stdout is either JSON or the
-/// restart report, so it cannot inherit the stop messages.
+/// restart report, so it cannot inherit the stop messages — and passes it the
+/// **same** endpoint it will start, so both halves act on one gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
     /// The gateway was running and is now gone.
@@ -25,7 +26,8 @@ pub enum StopOutcome {
 /// Sends POST /api/shutdown, then polls /api/health until the gateway
 /// is no longer reachable (up to 5 seconds).
 pub async fn stop_gateway() -> anyhow::Result<()> {
-    match stop_gateway_quiet().await? {
+    let config = read_backend_gateway_config();
+    match stop_gateway_quiet(&config.host, config.port).await? {
         StopOutcome::Stopped => println!("Gateway stopped"),
         StopOutcome::NotRunning => println!("Gateway is not running"),
         StopOutcome::ShutdownInitiated => {
@@ -35,10 +37,13 @@ pub async fn stop_gateway() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The stop itself, without the human-readable lines (see [`StopOutcome`]).
-pub async fn stop_gateway_quiet() -> anyhow::Result<StopOutcome> {
-    let config = read_backend_gateway_config();
-    let http_base = format!("http://{}:{}", config.host, config.port);
+/// The stop itself at an **explicit** endpoint, without the human-readable
+/// lines (see [`StopOutcome`]).
+///
+/// The endpoint is a parameter because `wing restart --host/--port` must stop
+/// the gateway it is about to start, not the one the config points at.
+pub async fn stop_gateway_quiet(host: &str, port: u16) -> anyhow::Result<StopOutcome> {
+    let http_base = format!("http://{host}:{port}");
 
     // Read API key from TUI config for authenticated shutdown.
     let api_key = crate::config::AppConfig::load()

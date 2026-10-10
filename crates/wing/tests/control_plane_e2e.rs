@@ -112,6 +112,8 @@ impl Default for StubState {
 struct Stub {
     state: Arc<Mutex<StubState>>,
     home: PathBuf,
+    /// The port this stub listens on (its `WING_HOME` config points here).
+    port: u16,
 }
 
 impl Stub {
@@ -136,7 +138,7 @@ impl Stub {
         )
         .unwrap();
 
-        Self { state, home }
+        Self { state, home, port }
     }
 
     fn with(&self, f: impl FnOnce(&mut StubState)) {
@@ -330,6 +332,13 @@ fn route(
             (200, json!({"ok": true}).to_string())
         }
 
+        // The stdio / ACP preflight (`cmd::setup::preflight_or_report`).
+        ("GET", "/api/settings/status") => (
+            200,
+            json!({"valid": true, "setup_mode": false, "problems": [], "fingerprint": "fp-1"})
+                .to_string(),
+        ),
+
         ("POST", "/api/session/create") => {
             let template = request["template_name"].as_str().unwrap_or("default");
             // Create is where tags are born (atomic with the session).
@@ -449,6 +458,23 @@ fn route(
         }
 
         ("POST", "/api/session/send") => {
+            // A prompt starts a turn: subscribed frontends (stdio) hear the
+            // terminal frame and can exit; one-shot `wing run` never listens.
+            let frame = json!({
+                "type": "turn_result",
+                "subtype": "success",
+                "is_error": false,
+                "result": "stub turn done",
+                "num_turns": 1,
+                "duration_ms": 1,
+                "session_id": session_id,
+                "created_at": "2026-10-10T12:00:00",
+                "request_id": "req-stub",
+            })
+            .to_string();
+            for tx in state.ws_clients.values() {
+                let _ = tx.send(frame.clone());
+            }
             (200, json!({"ok": true, "request_id": "req-stub"}).to_string())
         }
 
@@ -1224,4 +1250,81 @@ async fn asks_wait_catches_a_live_ask() {
     assert!(stdout.contains("Proceed?"), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// The stdio frontend carries the directed answer too: `wing -p ... --tool-call-id`
+/// reaches `/api/session/send` with the id. The flag lives on the top-level Cli
+/// for exactly this path — the stdio argument filter only keeps flags it knows
+/// (see `filter_keeps_tool_call_id_and_its_value`), so without it the id would
+/// be dropped and the message would silently become a plain one.
+#[tokio::test]
+async fn stdio_prompt_carries_the_tool_call_id() {
+    let stub = Stub::start("stdio-ask").await;
+
+    let (code, _stdout, stderr) = run_wing(
+        &[
+            "-p",
+            "yes, proceed",
+            "-r",
+            SESSION_ID,
+            "--tool-call-id",
+            "call-42",
+        ],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        body_of(&stub, "/api/session/send"),
+        json!({
+            "session_id": SESSION_ID,
+            "content": "yes, proceed",
+            "tool_call_id": "call-42",
+        })
+    );
+
+    // Without the flag the message is a plain one (no `tool_call_id` key).
+    let (code, _, stderr) = run_wing(&["-p", "next task", "-r", SESSION_ID], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let sent = body_of(&stub, "/api/session/send");
+    assert!(sent.get("tool_call_id").is_none(), "{sent}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// `wing restart` acts on **one** endpoint: the one it was given (config or
+/// `--port`), not "whatever the config says" for one half and the flag for the
+/// other. Regression: the stop half used to re-read the config, so
+/// `restart --port X` stopped the config gateway and started an orphan on X.
+#[tokio::test]
+async fn restart_acts_on_the_endpoint_it_was_given() {
+    let config_stub = Stub::start("restart-config").await;
+    let target_stub = Stub::start("restart-target").await;
+
+    let (code, stdout, _stderr) = run_wing(
+        &["restart", "--port", &target_stub.port.to_string()],
+        &config_stub,
+    )
+    .await;
+    assert_eq!(code, 0);
+
+    assert_eq!(
+        config_stub.path_hits("/api/shutdown").len(),
+        0,
+        "the config endpoint must not be stopped while the flagged one is restarted"
+    );
+    assert_eq!(
+        target_stub.path_hits("/api/shutdown").len(),
+        1,
+        "the stop half and the start half must share one endpoint"
+    );
+    // The start half ran against the same endpoint (the stub stays healthy, so
+    // `wing start` reports it as already running instead of spawning anything).
+    assert!(
+        stdout.contains(&format!(":{}/ws", target_stub.port)),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&config_stub.home);
+    let _ = std::fs::remove_dir_all(&target_stub.home);
 }

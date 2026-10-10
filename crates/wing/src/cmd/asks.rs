@@ -13,8 +13,9 @@
 //! `sync_session` snapshot whose `events` include the still-active ask (that
 //! is exactly how the TUI rebuilds its ask panel after a reconnect), and a
 //! fresh ask arrives as a live `ask` event. This command subscribes, reads
-//! that snapshot, and prints the pending asks — read-only, one shot, no
-//! session state touched.
+//! that snapshot, and prints the pending asks — one shot, no session content
+//! touched (like the other read commands, subscribing hydrates an evicted
+//! session back into gateway memory).
 //!
 //! ```sh
 //! wing asks "$SID"                 # the snapshot: pending asks, or none
@@ -141,8 +142,10 @@ async fn asks_inner(session_id: &str, wait_secs: u64) -> Result<(AsksOutput, boo
                 break;
             }
             // A live ask can outrace the snapshot (subscribe lands while the
-            // turn is mid-ask). Same report either way.
+            // turn is mid-ask). Same report either way — and the status is
+            // `waiting` by definition: an ask is outstanding.
             _ if pending_ask(&event).is_some() => {
+                status = status_str(SessionStatus::Waiting);
                 asks.extend(pending_ask(&event));
                 snapshot_seen = true;
                 break;
