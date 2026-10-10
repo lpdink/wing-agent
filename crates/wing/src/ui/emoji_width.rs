@@ -34,9 +34,11 @@
 //! What it costs: this is exactly upstream's VS16 workaround, switched off for
 //! these cells — they behave like a CJK glyph from here on, which is also what
 //! the layout (2 reserved columns) and the copy path already assume. The
-//! trade-off and its exit condition are recorded in the issue (#181); the
-//! upstream fix for the backend's adjacency check (ratatui#2721) makes this pass
-//! a candidate for removal once a release carries it.
+//! trade-off and its exit condition are recorded in the issue (#181): the day
+//! the probe's drift arm comes out clean (`tests/vs16_row_drift.rs`, which is
+//! telling its reader exactly that), a ratatui release carries the upstream fix
+//! for the backend's adjacency check — ratatui#2721, `x == p.x + cell_width()`
+//! instead of `x == p.x + 1` — and this pass can be re-evaluated for removal.
 
 use std::num::NonZeroU16;
 
@@ -82,8 +84,8 @@ fn pin_cell(cell: &mut Cell) -> bool {
     }
     // The escape sequences of a hyperlink ride in the symbol; they are not
     // columns, and measuring them would make this cell look far wider than it
-    // is. (`BufferDiff` reads the symbol too, which is why the injection pins
-    // its width — a cell that carries a sequence without a pin never gets here.)
+    // is. The injection pins its own cells, so this is the belt-and-braces
+    // measure for anything else that ever carries a sequence.
     let symbol = strip_osc8(cell.symbol());
     if !symbol.contains(EMOJI_PRESENTATION) {
         return false;

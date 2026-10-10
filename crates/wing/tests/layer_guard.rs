@@ -8,6 +8,11 @@
 //! reach for the render library either: the panels are pure state, rendering
 //! lives in `ui`.
 //!
+//! `tui` and `cmd` sit *above* `ui` (the terminal lifecycle owns the frames it
+//! sends and normalizes them — `tui::draw_frame` → `ui::emoji_width`; the wizard
+//! draws its own screen), so those edges are legal and are not scanned here. What
+//! this file pins is the two directions that would be cycles.
+//!
 //! Rust cannot express "this module must not name that one" for modules inside
 //! a single crate (`pub(crate)` / private modules only narrow visibility, they
 //! cannot forbid a direction), and a custom lint would add a toolchain

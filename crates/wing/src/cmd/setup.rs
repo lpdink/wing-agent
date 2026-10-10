@@ -294,7 +294,7 @@ where
     let mut ctrl_c_at: Option<Instant> = None;
 
     loop {
-        draw_frame(
+        draw_setup_frame(
             terminal,
             &mut panel,
             &schema,
@@ -355,7 +355,7 @@ where
                 note = save_note;
                 if ready {
                     // 关闭 overlay（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
-                    draw_frame(
+                    draw_setup_frame(
                         terminal,
                         &mut panel,
                         &schema,
@@ -644,7 +644,7 @@ impl SetupEvents for TerminalEvents {
 // ===========================================================================
 
 /// 一帧：背板（海鸥 + wordmark + 状态行）+ 面板（`panel_open = false` 时只有背板）。
-fn draw_frame<B: Backend>(
+fn draw_setup_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     panel: &mut SettingsPanel,
     schema: &SettingsSchemaResponse,

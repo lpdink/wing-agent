@@ -7,6 +7,10 @@
 //! `vs16_row_drift` integration probe locks the shape — and `App::draw` is the
 //! path every frame of this frontend takes, so a cell that reaches the backend
 //! from here has been normalized.
+//!
+//! What the pass leaves alone (plain CJK and narrow text, cells another pass
+//! owns) is locked where a buffer is cheap to build: the pass's own unit tests
+//! and the probe's control scenarios.
 
 use super::support::*;
 use crate::ui::chat_view::ChatCell;
@@ -45,30 +49,4 @@ fn test_a_drawn_frame_pins_the_wide_emoji_it_sends() {
         ),
         "the cell the backend writes declares the width the terminal advances"
     );
-}
-
-#[test]
-fn test_a_drawn_frame_leaves_everything_else_alone() {
-    // The pass is not a blanket rewrite of the frame: a frame without an emoji
-    // presentation sequence carries no directive at all (nothing in this tree
-    // sets one outside the OSC8 injection and the image placements, and this
-    // frame has neither).
-    let mut app = test_app();
-    app.clear_welcome();
-    app.chat
-        .push(ChatCell::AssistantMessage("世界 hello".into()));
-    let mut terminal = test_terminal(40, 8);
-    draw(&mut app, &mut terminal);
-
-    let buf = terminal.backend().buffer();
-    assert!(emoji_cells(&terminal).is_empty(), "the guard: no VS16 cell");
-    for y in buf.area.y..buf.area.bottom() {
-        for x in buf.area.x..buf.area.right() {
-            assert_eq!(
-                buf[(x, y)].diff_option,
-                ratatui::buffer::CellDiffOption::None,
-                "({x},{y}) carries no directive"
-            );
-        }
-    }
 }

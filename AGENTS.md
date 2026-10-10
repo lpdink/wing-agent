@@ -192,6 +192,7 @@ crates/wing/src/
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
+│   ├── emoji_width.rs               出帧前的宽度归一化（VS16 表情格子钉 ForcedWidth；每帧必跑，出帧口 tui::draw_frame 调用）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── settings/                    设置面板全屏 overlay（标题/树/详情栏/编辑器/问题清单/帮助/提示，只读渲染）
@@ -209,7 +210,7 @@ crates/wing/src/
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）
 │   └── line_utils.rs / renderable.rs
-├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
+├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
 ├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
 └── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
 ```

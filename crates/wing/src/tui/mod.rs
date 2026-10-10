@@ -252,7 +252,13 @@ pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
 ///
 /// The pass lives here rather than at each call site so that "every frame this
 /// frontend sends is normalized" is a property of the one function that sends
-/// it, not a rule the next draw path has to remember.
+/// it, not a rule the next draw path has to remember. That convention is not
+/// machine-enforced — a scan for a stray `Terminal::draw` would have to tell
+/// test code from production code, which needs a parser rather than the
+/// directory walk `layer_guard` does. What is covered instead: both production
+/// draw paths (the TUI loop and the wizard) go through here, and
+/// `tests/vs16_row_drift.rs` paints through this function and checks the cell
+/// the backend receives.
 pub fn draw_frame<B, F>(terminal: &mut Terminal<B>, render: F) -> Result<(), B::Error>
 where
     B: Backend,
