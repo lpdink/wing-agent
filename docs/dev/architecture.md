@@ -79,6 +79,10 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 
 **工具参数（`tool_call_stream`）是同一模式的第二个实例**：片段追加退化为 O(1)（只 push + 置 dirty），解析 / 语法高亮 / 渲染缓存失效推迟到帧边界每格至多一次（`CachedCell::compute_*` → `flush_pending_args`；`is_final` 与权威 args 强制冲刷）——旧的 per-fragment 全量重解析是 O(n²)，会把 256 有界事件通道顶满。基准：`crates/wing/benches/tool_args_stream.rs`（append ~20–40ns/片段且与 payload 无关；帧成本 ∝ payload、每帧一次）。
 
+**终端差分与 VS16 表情符号（issue #181）**：`Terminal::draw` 只发「变过的格子」，而 `CrosstermBackend` 用 `x == last.x + 1` 判断相邻（假设上一个符号只推进了 1 列）。ratatui 0.30 的 `BufferDiff` 对 VS16 表情符号（基字符 + `U+FE0F`，`unicode-width` 与 `Buffer::set_stringn` 都认它是 2 列）会**额外重发它覆盖的尾随格**（上游对「终端不清尾随格」的 workaround）⇒ 那格以及它之后整行都被打印到右一列；偏位后的写入压到中文宽字的半格上时，终端把该宽字**整字**清空 —— 屏幕上「某个字缺一块」，而缓冲区一直是对的（所以选中/复制正常，focus 或 resize 触发的整屏重绘也能让它回来）。
+
+修法：每帧渲染完、交给 ratatui 做 diff 之前，逐格把「symbol 含 `U+FE0F` 且 `cell_width() > 1`」的格子钉上 `CellDiffOption::ForcedWidth(真实列宽)`（`ui/emoji_width.rs`；与 `ui/chat_view/link.rs` 的 OSC8 注入同一手法、同一条规矩——forced 值必须是终端真正推进的列数）。钉住后这些格子走 diff 的**普通宽字分支**（尾随格与 CJK 一样被跳过），同一行里再也不会出现「紧跟在宽字后面、却按相邻写」的格子。**这条规矩只有一把尺**：`render::markdown::symbol_width`（= ratatui 的 `CellWidth`，即 unicode-width + 半角片假名浊音符补偿），OSC8 注入的走格与钉宽、buffer 文本走格（`ui::selection::grapheme_width`）、这个 pass 全用它——用纯 `unicode-width` 量 `ｶﾞ` 会少算一列，同样的漂移就回来了。代价：这条路径上等于关掉上游对 VS16 的清尾随格 workaround，即把 VS16 表情符号降级为与 CJK 宽字同一种行为（布局本来也按 2 列算）；上游 ratatui#2721 已把 backend 的相邻性判断改成按上一格的真实宽度（`x == p.x + cell_width()`，crossterm/termion/termina 三处），等含它的版本发版后可重新评估移除这个 pass——**判据是可观测的**：`crates/wing/tests/vs16_row_drift.rs` 的 drift 臂（未打 pass 的那一臂）转 clean 即说明上游已修好。**不要**用「回合结束强制整屏重绘」兜底：闪屏，且 `needs_full_redraw` 与 `images.invalidate()` 绑定，会连带把图片全部重编码。两个绘制面（TUI 主循环、首次运行向导）都经 `tui::draw_frame`（唯一的出帧口）走这个 pass；回归测试 `crates/wing/tests/vs16_row_drift.rs`（真 `Buffer::diff` + backend 相邻性规则 + 终端网格模型，断言「终端网格 == buffer」）。
+
 ### stdio 模式（`wing -p`，PR #1）
 
 无 human-in-the-loop 的头模式，**兼容 Claude Code 的 NDJSON 协议**——把 `wing` alias 为 `claude` 即可接入现有编排生态。
@@ -136,7 +140,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 - `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
-- `wing tail|head <sid> -n N -t <type>`：消息窗口（类 Unix head/tail；平铺元素模型——按 user/assistant/tool_call/tool_result/reasoning/content 选取元素并在输出侧剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload））；
+- `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
 - `wing models|tools|agents`：系统查询；`wing start|stop|status`：网关守护进程生命周期（默认的 TUI / stdio 启动路径会自动拉起网关）。
 
 ## 远程工具（PR #47 / #50）

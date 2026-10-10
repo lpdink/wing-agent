@@ -15,6 +15,7 @@ use crate::util::logging::init_logging;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
 pub mod args;
+pub mod argv;
 pub(crate) mod backend_config;
 pub mod common;
 pub mod config;
@@ -81,10 +82,10 @@ pub struct Cli {
 
     /// NOT SUPPORTED — always rejected (wing cannot truncate a session).
     ///
-    /// Claude Code's "resume the session at an earlier point" flag. wing has no
-    /// history-truncation support, and silently ignoring it would let an
-    /// orchestrator believe its context was rolled back while wing kept the
-    /// full history. Passing it exits non-zero with an explicit message.
+    /// An orchestrator's "resume the session at an earlier point" flag. wing has
+    /// no history-truncation support, and silently ignoring it would let an
+    /// orchestrator believe its context was rolled back while wing kept the full
+    /// history. Passing it exits non-zero with an explicit message.
     #[arg(long = "resume-session-at")]
     pub resume_session_at: Option<String>,
 
@@ -114,10 +115,10 @@ pub struct Cli {
 
     /// Emit `stream_event` frames (Anthropic SSE shape) for token-level streaming.
     ///
-    /// Claude CLI's `--include-partial-messages`. stdio mode only, and only with
-    /// `--output-format stream-json` (text/json have no NDJSON channel to carry
-    /// the frames — the flag is then a no-op with a log warning). Without the
-    /// flag the output is byte-identical to before.
+    /// The NDJSON stdio protocol's `--include-partial-messages` flag. stdio mode
+    /// only, and only with `--output-format stream-json` (text/json have no
+    /// NDJSON channel to carry the frames — the flag is then a no-op with a log
+    /// warning). Without the flag the output is byte-identical to before.
     #[arg(long = "include-partial-messages")]
     pub include_partial_messages: bool,
 
@@ -281,11 +282,14 @@ pub enum Command {
         /// Number of messages to show (default 10).
         #[arg(short = 'n', long, default_value = "10")]
         n: usize,
-        /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content
-        /// (named filters strip to the selected section in both text and --json
-        /// output; tool results print as a 500-char peek in text mode).
-        #[arg(short = 't', long, default_value = "all")]
-        filter: String,
+        #[arg(
+            short = 't',
+            long,
+            default_value = "all",
+            value_delimiter = ',',
+            help = messages::FILTER_HELP
+        )]
+        filter: Vec<messages::FilterArg>,
     },
 
     /// Show first N messages from a session (like `head`).
@@ -295,11 +299,14 @@ pub enum Command {
         /// Number of messages to show (default 10).
         #[arg(short = 'n', long, default_value = "10")]
         n: usize,
-        /// Filter by type: all|user|assistant|tool_call|tool_result|reasoning|content
-        /// (named filters strip to the selected section in both text and --json
-        /// output; tool results print as a 500-char peek in text mode).
-        #[arg(short = 't', long, default_value = "all")]
-        filter: String,
+        #[arg(
+            short = 't',
+            long,
+            default_value = "all",
+            value_delimiter = ',',
+            help = messages::FILTER_HELP
+        )]
+        filter: Vec<messages::FilterArg>,
     },
 
     /// List available models (grouped by provider).
@@ -311,8 +318,8 @@ pub enum Command {
     /// List available agent templates.
     Agents,
 
-    /// Serve ACP (Agent Client Protocol) on stdio — for Zed / omnigent and other
-    /// ACP clients. Bridges every ACP session to a local wing session.
+    /// Serve ACP (Agent Client Protocol) on stdio — for ACP clients (editors,
+    /// agent orchestrators). Bridges every ACP session to a local wing session.
     Acp {
         /// Agent template for new sessions (default: gateway default template).
         #[arg(long)]

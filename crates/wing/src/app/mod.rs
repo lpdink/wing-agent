@@ -583,7 +583,9 @@ impl App {
         let layout = self.config.layout.clone();
         let thinking_mode = self.config.rendering.thinking;
         let thinking_expanded = self.chat.thinking_expansion();
-        terminal.draw(|frame| {
+        // `tui::draw_frame` (not `Terminal::draw`): every frame this app puts on
+        // the screen goes through the wire pass — see [`crate::ui::emoji_width`].
+        crate::tui::draw_frame(terminal, |frame| {
             let area = frame.area();
             self.geometry.record_area(area);
 

@@ -137,11 +137,12 @@ libs/core/wing/
 
 ```
 crates/wing/src/
-├── main.rs                          入口（clap；stdio 模式检测 → 过滤未知参数）
+├── main.rs                          入口（args_os 收集 + UTF-8 校验 → clap；stdio 模式检测 → 过滤未知参数）
 ├── lib.rs                           库根：模块导出（供 bench / tests 引用；deny print_stdout/stderr）
 ├── cmd/                             CLI 子命令与分发
 │   ├── mod.rs                       Cli/Command 定义 + dispatch（TUI / 网关生命周期 / 编排子命令 / stdio）
 │   ├── args.rs                      `wing run` 与 stdio 共享的启动参数
+│   ├── argv.rs                      命令行参数入口（OsString → UTF-8 String；非法字节友好报错、exit 2）
 │   ├── backend_config.rs            读 backend config（gateway host:port、wing_home）
 │   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化）
 │   ├── discover.rs                  定位 wing-gateway 可执行文件
@@ -193,6 +194,7 @@ crates/wing/src/
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
+│   ├── emoji_width.rs               出帧前的宽度归一化（VS16 表情格子钉 ForcedWidth；每帧必跑，出帧口 tui::draw_frame 调用）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── settings/                    设置面板浮层 overlay（卡片几何 / 左栏锚点 / 树 / 详情栏 / 编辑器 / 问题清单 / 帮助 / 提示，只读渲染）
@@ -210,12 +212,12 @@ crates/wing/src/
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）
 │   └── line_utils.rs / renderable.rs
-├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流）
+├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
 ├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）
+└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
+配套：`crates/wing/benches/stream_render.rs`（流式渲染基准）、`crates/wing/benches/image_frame.rs`（图片：每帧/滚动/首次编码/新鲜度检查）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
 
 ### 其他
 

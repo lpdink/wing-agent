@@ -67,14 +67,10 @@ impl BackendGatewayConfig {
 /// Path to the wing root directory: `~/.wing/`.
 ///
 /// Used for shared resources (e.g. venv, core config).
-/// `WING_HOME` env var overrides the default `~/.wing`.
+/// `WING_HOME` env var overrides the default `~/.wing` (see
+/// [`crate::util::wing_home`] for the rule and why the value is read as bytes).
 pub fn wing_root() -> PathBuf {
-    if let Ok(home) = std::env::var("WING_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".wing")
+    crate::util::wing_home::root()
 }
 
 /// Path to the backend log directory: `~/.wing/core/logs/`.

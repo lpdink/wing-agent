@@ -18,3 +18,4 @@ mod selection;
 mod settings;
 mod support;
 mod welcome;
+mod wire;

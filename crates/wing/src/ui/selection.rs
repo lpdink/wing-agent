@@ -23,7 +23,7 @@
 //! click) is explicitly out of scope, so there is no click-count or
 //! word-pivot state here.
 
-use unicode_width::UnicodeWidthStr;
+use crate::render::markdown::symbol_width;
 
 /// Which interactive region a selection belongs to.
 ///
@@ -367,12 +367,17 @@ pub fn extract_text(
     Some(lines.join("\n"))
 }
 
-/// Whether `symbol` is a width-2 (or wider) grapheme filler cell.
+/// Display width of a rendered symbol: the columns the terminal advances for
+/// it, at least one (a zero-width symbol would stall the buffer walkers).
 ///
 /// Used by the buffer walkers in [`crate::ui::chat_view`]: cells that hold a
-/// wide grapheme are followed by `width - 1` cells whose symbol is a space.
+/// wide grapheme are followed by `width - 1` cells whose symbol is a space, and
+/// the walk has to step over exactly those. The measure is
+/// [`crate::render::markdown::symbol_width`] — the same ruler `Buffer::set_stringn`
+/// lays cells out with and `BufferDiff` reads back — so a walk agrees with the
+/// buffer and with the terminal (see [`crate::ui::emoji_width`]).
 pub fn grapheme_width(symbol: &str) -> u16 {
-    (UnicodeWidthStr::width(symbol) as u16).max(1)
+    symbol_width(symbol).max(1)
 }
 
 #[cfg(test)]
@@ -770,5 +775,12 @@ mod tests {
         assert_eq!(grapheme_width("a"), 1);
         assert_eq!(grapheme_width("你"), 2);
         assert_eq!(grapheme_width(" "), 1);
+        // The terminal's measure, not plain `unicode-width`: the buffer holds
+        // `ｶﾞ` in two cells (its sound mark gets one column of its own), so a
+        // walker that calls it one column reads a phantom space next to it and
+        // loses the column of everything after it.
+        assert_eq!(grapheme_width("ｶﾞ"), 2);
+        // A zero-width symbol still takes a cell (the walkers must advance).
+        assert_eq!(grapheme_width("\u{200b}"), 1);
     }
 }

@@ -296,7 +296,7 @@ where
     let mut ctrl_c_at: Option<Instant> = None;
 
     loop {
-        draw_frame(
+        draw_setup_frame(
             terminal,
             &mut panel,
             &schema,
@@ -357,7 +357,7 @@ where
                 note = save_note;
                 if ready {
                     // 关闭 overlay（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
-                    draw_frame(
+                    draw_setup_frame(
                         terminal,
                         &mut panel,
                         &schema,
@@ -647,7 +647,7 @@ impl SetupEvents for TerminalEvents {
 // ===========================================================================
 
 /// 一帧：背板（海鸥 + wordmark + 状态行）+ 面板（`panel_open = false` 时只有背板）。
-fn draw_frame<B: Backend>(
+fn draw_setup_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     panel: &mut SettingsPanel,
     schema: &SettingsSchemaResponse,
@@ -658,29 +658,31 @@ fn draw_frame<B: Backend>(
 ) -> Result<()> {
     // 调色板每帧现算：Interface 根的实时预览因此一按键就可见（§15.3 的同一条路径）。
     let palette = ThemePalette::from_config(&config.colors);
-    terminal
-        .draw(|frame| {
-            let (backplate, panel_area, note_area) = split_setup_areas(frame.area());
-            if let Some(backplate) = backplate {
-                draw_backplate(frame, backplate, &palette);
-            }
-            // 状态行**恒有**一行：它是唯一会说话的地方（保存回执 / 就绪 / Ctrl+C 提示），
-            // 小终端里也不该整条消失。
-            draw_note(frame, note_area, &palette, note);
-            if panel_open {
-                // 08 的契约：每帧同步两栏各自的可见行数，再 Clear + 整块 render（同 10 的落点）。
-                panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
-                panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
-                panel.set_anchors_visible(has_anchor_column(panel, panel_area));
-                frame.render_widget(Clear, panel_area);
-                let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
-                frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
-            } else {
-                // 面板已关（就绪帧）：显式清掉那一块，否则 ratatui 的 diff 会留着上一帧的面板。
-                frame.render_widget(Clear, panel_area);
-            }
-        })
-        .map_err(|e| anyhow!("terminal draw failed: {e}"))?;
+    // `crate::tui::draw_frame`（而不是 `terminal.draw`）：向导是同一块终端上的第二个
+    // 绘制面，它画出的设置值同样可能带上 VS16 表情符号（见 `crate::ui::emoji_width`）。
+    crate::tui::draw_frame(terminal, |frame| {
+        let (backplate, panel_area, note_area) = split_setup_areas(frame.area());
+        if let Some(backplate) = backplate {
+            draw_backplate(frame, backplate, &palette);
+        }
+        // 状态行**恒有**一行：它是唯一会说话的地方（保存回执 / 就绪 / Ctrl+C 提示），
+        // 小终端里也不该整条消失。
+        draw_note(frame, note_area, &palette, note);
+        if panel_open {
+            // 08 的契约：每帧同步两栏各自的可见行数与左栏可见性，再 Clear + 整块 render
+            // （同 10 的落点）。
+            panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
+            panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
+            panel.set_anchors_visible(has_anchor_column(panel, panel_area));
+            frame.render_widget(Clear, panel_area);
+            let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
+            frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
+        } else {
+            // 面板已关（就绪帧）：显式清掉那一块，否则 ratatui 的 diff 会留着上一帧的面板。
+            frame.render_widget(Clear, panel_area);
+        }
+    })
+    .map_err(|e| anyhow!("terminal draw failed: {e}"))?;
     Ok(())
 }
 

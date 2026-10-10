@@ -4,6 +4,8 @@
 
 `WING_HOME` 覆盖 `~/.wing`；后端数据统一落在 `$WING_HOME/core`（`wing/config/loader.py::get_wing_home()`）。`WING_SESSIONS_PATH` 额外覆盖 sessions 目录。
 
+两端的取值口径必须一致（`libs/core/wing/config/loader.py::get_wing_home()` ↔ `crates/wing/src/util/wing_home.rs`）：**空串视同未设置**（回落到 `~/.wing`）、**前导 `~` 展开为家目录**（后端 `Path.expanduser()`；`~user` 是唯一不展开的写法——std 取不到 getpwnam），且路径**按字节原样使用**——非 UTF-8 的 home 是真实目录（Python 用 surrogateescape 拿到同一串字节），前端不得静默回落到 `~/.wing`，否则配置 / 日志 / 会话会分到两个 home。
+
 ```
 ~/.wing/
 ├── core/
@@ -51,7 +53,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 | `gateway` | `host` / `port`（**restart 域**：改完需重启网关，不做假热更）/ `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`；保存即热生效） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |
 | `user_agent.preset` | HTTP User-Agent 预设（`opencode` / `qwen-code`） |
-| `sessions` | `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取））。**存储路径不是配置字段**：`WING_SESSIONS_PATH` env > `$WING_HOME/sessions` |
+| `sessions` | `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取））。**存储路径不是配置字段**：`WING_SESSIONS_PATH` env > `$WING_HOME/core/sessions` |
 
 > 改一个键什么时候生效（哪些要重启网关）都写在字段声明里（`apply`），面板行与
 > `wing config list` 会显示；完整全表见 [settings.md](settings.md) 的「生效域」一节。
@@ -129,6 +131,6 @@ awk '$0 >= "2026-09-08 23:10" && $0 < "2026-09-08 23:30"' ~/.wing/tui/logs/wing_
 
 | 变量 | 作用 |
 |------|------|
-| `WING_HOME` | 覆盖 `~/.wing`（后端数据在 `$WING_HOME/core`，TUI 在 `$WING_HOME/tui`） |
+| `WING_HOME` | 覆盖 `~/.wing`（后端数据在 `$WING_HOME/core`，TUI 在 `$WING_HOME/tui`）；空串视同未设置、前导 `~` 展开、取值按字节原样使用（见上「目录布局」） |
 | `WING_SESSIONS_PATH` | 覆盖 sessions 目录 |
 | `RUST_LOG` | TUI tracing 级别（默认 `wing=warn,tokio_tungstenite=warn`） |
