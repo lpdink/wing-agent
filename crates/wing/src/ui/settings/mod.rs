@@ -498,7 +498,13 @@ impl Widget for SettingsOverlay<'_> {
             .title(self.title_line(area.width as usize));
         let hint_rows = self.hint_rows(area.width.saturating_sub(2) as usize);
         let columns = !self.panel.anchors().is_empty();
-        let Some(regions) = Regions::new(area, self.panel.view(), hint_rows, columns) else {
+        let Some(regions) = Regions::new(
+            area,
+            self.panel.view(),
+            hint_rows,
+            columns,
+            subheader_urgent(self.panel),
+        ) else {
             block.render(area, buf);
             return;
         };
@@ -555,6 +561,12 @@ pub fn anchors_viewport_rows(panel: &SettingsPanel, area: Rect) -> u16 {
     })
 }
 
+/// 副标题行这一帧有没有非说不可的内容（搜索回显 / 过期横幅）——决定它在极矮卡片里
+/// 是否还值得占一行（见 [`Regions::new`]）。
+fn subheader_urgent(panel: &SettingsPanel) -> bool {
+    panel.search_query().is_some() || panel.is_stale()
+}
+
 /// 这一帧**有没有左栏**（窄卡片放不下时右栏独占）。
 ///
 /// 10 每帧把它喂回面板（[`SettingsPanel::set_anchors_visible`]）：焦点能待在哪一栏，
@@ -577,7 +589,13 @@ fn regions_for(panel: &SettingsPanel, area: Rect) -> Option<Regions> {
         .len();
         (rows as u16).clamp(1, HINT_ROWS_MAX)
     };
-    Regions::new(area, panel.view(), hint_rows, !panel.anchors().is_empty())
+    Regions::new(
+        area,
+        panel.view(),
+        hint_rows,
+        !panel.anchors().is_empty(),
+        subheader_urgent(panel),
+    )
 }
 
 /// 区域切分（几何规则见模块文档）。
@@ -611,16 +629,25 @@ struct Regions {
 }
 
 impl Regions {
-    /// `columns` = 有没有左栏（没有锚点时右栏独占，不留一条空白列）。
-    fn new(area: Rect, view: View, hint_rows_max: u16, columns: bool) -> Option<Self> {
+    /// `columns` = 有没有左栏（没有锚点时右栏独占，不留一条空白列）；
+    /// `subheader_urgent` = 副标题行这一帧有非说不可的内容（搜索回显 / 过期横幅）。
+    fn new(
+        area: Rect,
+        view: View,
+        hint_rows_max: u16,
+        columns: bool,
+        subheader_urgent: bool,
+    ) -> Option<Self> {
         let inner = Block::default().borders(Borders::ALL).inner(area);
         if inner.width == 0 || inner.height == 0 {
             return None;
         }
         let mut rest = inner;
 
-        // 标题栏下面那一行：搜索态 / 横幅优先（矮终端下也不能丢），其余情况留足主体。
-        let subheader = (rest.height >= 6).then(|| {
+        // 标题栏下面那一行：**有内容要说**（搜索回显 / 过期横幅）时门槛降到 4 行——
+        // 矮终端下也不能把"我敲了什么"和"配置被别人改了"一起丢掉；空闲（只有 `/ 搜索…`
+        // 占位）时仍留足 6 行给主体，占位不值得在 5 行的卡片里挤掉一行设置项。
+        let subheader = (rest.height >= if subheader_urgent { 4 } else { 6 }).then(|| {
             let row = Rect::new(rest.x, rest.y, rest.width, 1);
             rest = Rect::new(rest.x, rest.y + 1, rest.width, rest.height - 1);
             row

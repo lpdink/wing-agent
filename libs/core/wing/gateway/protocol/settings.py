@@ -91,10 +91,11 @@ class SettingNodeProto(BaseModel):
     # ── 分组（业务分组的投影，声明在 config/groups.py；权威是 schema.groups[]）──
     section: str | None = Field(
         default=None,
-        description="所属业务分组的 title（只在该组的首个成员上非空）",
+        description="所属业务分组的 title：root 的每个直接子节点都带（嵌套节点为 null）",
     )
     section_doc: str | None = Field(
-        default=None, description="分组说明（与 section 同一位置，每组只写一次）"
+        default=None,
+        description="分组说明：只在每组的声明序首成员上非空（emitter 的一条块注释）",
     )
 
     # ── 结构 ──

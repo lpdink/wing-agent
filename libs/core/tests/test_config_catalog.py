@@ -327,13 +327,17 @@ def test_sections_follow_the_group_table() -> None:
     """``section`` 是分组表的投影（表本身与覆盖门禁见 ``test_config_groups.py``）。"""
     catalog = build_catalog()
     titles = [group.title for group in build_groups()]
-    seen: list[str] = []
     for child in catalog.children:
         assert child.section in titles, child.path
-        if child.section not in seen:
-            seen.append(child.section)
-    # 声明序里分组是连续的（emitter 的分隔行因此一组只发一次）。
-    assert seen == titles, seen
+    # 每个组的成员在声明序里是**连续的一段**（今天的表就是如此）。
+    # 注意这**不是** emitter 的前提：分隔行按"组的首次出现"发（`emit.py` 的 `banner_for`），
+    # 交错也只是横幅位置跟着首个成员走，不会重复发——所以这里钉的是文件可读性事实，
+    # 不是机制依赖（`runs` 而不是 `seen`：交错会在这里现形）。
+    runs: list[str] = []
+    for child in catalog.children:
+        if not runs or runs[-1] != child.section:
+            runs.append(child.section or "")
+    assert runs == titles, runs
     for section in titles:
         members = [c for c in catalog.children if c.section == section]
         assert members[0].section_doc is not None, section

@@ -1033,3 +1033,37 @@ fn a_narrow_card_drops_the_anchor_column_and_keeps_focus_in_the_tree() {
         "Esc 直接关（干净面板）"
     );
 }
+
+/// 极矮卡片（inner 高 4~5 行）：副标题行只在**有内容要说**时才占一行——
+/// 搜索回显 / 过期横幅不许丢，`/ 搜索…` 占位则让给主体（审查 N1）。
+#[test]
+fn a_very_short_card_keeps_the_search_echo_but_drops_the_placeholder() {
+    let (catalog, _interface, mut panel) = fx::product_panel();
+    let catalogs = SettingsCatalogs::new(&catalog, None);
+    // 40×6 → 卡片铺满（< 80×24 退化）→ inner 高 4：正好卡在门槛上。
+    let area = Rect::new(0, 0, 40, 6);
+    assert_eq!(super::card_area(area), area);
+    panel.set_viewport_rows(tree_viewport_rows(&panel, area) as usize);
+    panel.set_anchor_viewport_rows(anchors_viewport_rows(&panel, area) as usize);
+    panel.set_anchors_visible(has_anchor_column(&panel, area));
+
+    // 空闲：没有占位行（那一行还给设置项）。
+    let text = render(&panel, catalogs, 40, 6);
+    assert!(
+        !text.contains("/ 搜索…"),
+        "占位不值得在 4 行里挤一行：{text}"
+    );
+    let idle_rows = tree_viewport_rows(&panel, area);
+
+    // 搜索激活：回显必须在（否则"敲了字看不见"）。
+    fx::press(&mut panel, crossterm::event::KeyCode::Char('/'));
+    fx::type_text(&mut panel, "port");
+    panel.set_viewport_rows(tree_viewport_rows(&panel, area) as usize);
+    let text = render(&panel, catalogs, 40, 6);
+    assert!(text.contains("搜索: port"), "回显不许丢：{text}");
+    assert!(
+        tree_viewport_rows(&panel, area) < idle_rows,
+        "回显确实占掉了一行主体（不是白拿）"
+    );
+    assert_frame_intact(&render_buffer(&panel, catalogs, 40, 6), area, "40x6 搜索态");
+}

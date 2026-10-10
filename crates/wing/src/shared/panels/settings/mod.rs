@@ -652,12 +652,12 @@ impl SettingsPanel {
 
     // ── 只读访问器（08 渲染 / 10 判态） ───────────────────────
 
-    /// 全部可见行（两个根拼在一起的整棵树）。
+    /// 右栏的全部可见行 = **当前分组**的成员子树（v2：不再有两个根拼成的整棵树）。
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
-    /// 全局光标行下标。
+    /// 右栏的光标行下标（在 [`SettingsPanel::rows`] 里，即当前分组的成员子树）。
     pub fn cursor(&self) -> usize {
         self.cursor
     }
@@ -2125,8 +2125,9 @@ impl SettingsPanel {
 /// 一个具体路径的**首段**（顶层键）：`providers[0].api_key` → `providers`。
 ///
 /// 分组成员是按顶层键声明的，所以「这条路径 / 这个问题 / 这次命中属于哪一组」只看首段。
-/// 不做字符串切分猜测：走 [`doc::format_path`] 的同一套解析（解析不出 → 整串当首段，
-/// 于是不匹配任何成员，行为等价于"不属于任何组"）。
+/// 切分点是 `.` 或 `[`（`providers[0].api_key` → `providers`）：配置键都是标识符，
+/// 这一刀与 [`doc::format_path`] 的完整解析在合法路径上等价；切不出分隔符就整串当首段，
+/// 于是不匹配任何成员——行为等价于"不属于任何组"，不会 panic 也不会误归。
 fn path_head(path: &str) -> &str {
     match path.split_once(['.', '[']) {
         Some((head, _)) => head,
