@@ -14,9 +14,9 @@ use wing_api_client::models::SettingProblem;
 
 use super::doc::Root;
 use super::doc::SettingsDoc;
-use super::doc::index_path;
-use super::doc::join_path;
 use super::tree::concrete_node;
+use crate::shared::doc_edit::index_path;
+use crate::shared::doc_edit::join_path;
 
 /// 面板持有的一条问题（`SettingProblem` + 它属于哪个根）。
 #[derive(Debug, Clone, PartialEq, Eq)]

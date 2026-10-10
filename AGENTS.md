@@ -184,6 +184,7 @@ crates/wing/src/
 │   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
 │   ├── panels/settings/             设置面板状态机（左栏分组锚点 · 右栏树扁平化 · 双栏焦点 · 内联编辑器 · 列表增删移 · 搜索 · 问题清单 · 键位与 Esc 阶梯）
 │   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端零感知）
+│   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环

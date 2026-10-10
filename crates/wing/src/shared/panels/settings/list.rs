@@ -1,14 +1,16 @@
 //! 列表全结构编辑：定位目标列表、新增（含 stub 与变体形态）、删除、上下移。
 //!
+//! 文档本身怎么改（路径行走 / 下标 / 形状）是 [`crate::shared::doc_edit`] 的唯一实现，
+//! 这里只做面板这一侧：目录定位、`AddOutcome` 的编排（展开谁、光标落哪、开不开编辑器），
+//! 以及把「没做成」读成**无操作**（面板没有报错出口）。
+//!
 //! 索引重排不在这里 —— 删除 / 移动之后要重排 `dirty` / `expanded` / 选择项里的下标，
-//! 那是 [`super::SettingsPanel`] 的编排（用 `doc::remap_index`），因为集合不在本模块手里。
+//! 那是 [`super::SettingsPanel`] 的编排（用 `doc_edit::remap_index`），因为集合不在本模块手里。
 //!
 //! **已知限制（design A2）**：协议不携带列表的声明默认值（`object`/`list` 的 `default` 为
 //! `null`），所以「键缺席 = 跟随默认」的列表在面板里显示为空；一旦新增一项，这份列表就被
 //! 物化并钉住（稀疏文档模型的固有语义）。
 
-use serde_json::Value;
-use serde_json::json;
 use wing_api_client::models::PathStep;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
@@ -16,10 +18,9 @@ use wing_api_client::models::parse_path;
 
 use super::doc::Root;
 use super::doc::SettingsDoc;
-use super::doc::format_path;
-use super::doc::index_path;
-use super::doc::join_path;
 use super::tree::concrete_node;
+use crate::shared::doc_edit;
+use crate::shared::doc_edit::Policy;
 
 /// 从某个具体路径向上找**最近的列表祖先**（含自己，当自己是列表行时）。
 ///
@@ -37,14 +38,14 @@ pub(crate) fn nearest_list(catalog: &SettingNode, path: &str) -> Option<String> 
                 let Some(child) = node.children.iter().find(|child| child.key == *name) else {
                     break;
                 };
-                concrete = join_path(&concrete, name);
+                concrete = doc_edit::join_path(&concrete, name);
                 node = child;
             }
             PathStep::Index(index) => {
                 let Some(element) = node.element.as_deref() else {
                     break;
                 };
-                concrete = index_path(&concrete, *index);
+                concrete = doc_edit::index_path(&concrete, *index);
                 node = element;
             }
             PathStep::Element => {
@@ -77,7 +78,7 @@ pub(crate) fn list_item_parent(
     let PathStep::Index(index) = last else {
         return None;
     };
-    let list_path = format_path(prefix);
+    let list_path = doc_edit::format_path(prefix);
     let list_node = concrete_node(catalog, doc, root, &list_path)?;
     (list_node.kind == SettingKind::List).then_some((list_path, *index))
 }
@@ -112,14 +113,16 @@ pub(crate) fn add_item(
         (None, Some(variants), Some(index)) => variants.get(index)?,
         _ => return None,
     };
-    let mut array = match doc.value(root, list_path) {
-        Some(Value::Array(items)) => items.clone(),
-        _ => Vec::new(),
-    };
-    let index = array.len();
-    array.push(empty_value(element));
-    doc.set_value(root, list_path, Value::Array(array));
-    let item_path = index_path(list_path, index);
+    let steps = parse_path(list_path)?;
+    let index = doc_edit::append_item(
+        doc.root_doc_mut(root),
+        &steps,
+        list_node,
+        doc_edit::empty_value(element, Policy::Lenient)?,
+        Policy::Lenient,
+    )
+    .ok()?;
+    let item_path = doc_edit::index_path(list_path, index);
     let cursor_at = if element.kind == SettingKind::Object || element.kind == SettingKind::List {
         first_required_path(element, &item_path).unwrap_or_else(|| item_path.clone())
     } else {
@@ -142,23 +145,17 @@ pub(crate) fn add_item(
     })
 }
 
-/// 删除一个项；下标越界或不是数组 → `false`。
+/// 删除一个项；下标越界或不是数组 → `false`（面板策略：没做成 = 无操作）。
 pub(crate) fn remove_item(
     doc: &mut SettingsDoc,
     root: Root,
     list_path: &str,
     index: usize,
 ) -> bool {
-    let Some(Value::Array(items)) = doc.value(root, list_path) else {
+    let Some(steps) = parse_path(&doc_edit::index_path(list_path, index)) else {
         return false;
     };
-    if index >= items.len() {
-        return false;
-    }
-    let mut array = items.clone();
-    array.remove(index);
-    doc.set_value(root, list_path, Value::Array(array));
-    true
+    doc_edit::remove_indexed(doc.root_doc_mut(root), &steps).is_ok()
 }
 
 /// 把一个项移动 `delta` 格（±1）；到了边界返回 `None`。
@@ -169,44 +166,16 @@ pub(crate) fn move_item(
     index: usize,
     delta: isize,
 ) -> Option<usize> {
-    let Some(Value::Array(items)) = doc.value(root, list_path) else {
-        return None;
-    };
-    let target = index.checked_add_signed(delta)?;
-    if target >= items.len() {
-        return None;
-    }
-    let mut array = items.clone();
-    array.swap(index, target);
-    doc.set_value(root, list_path, Value::Array(array));
-    Some(target)
-}
-
-/// 新增项的初值：标量取「空值」，对象取 stub（只写必填字段的空值，有默认的字段一律缺席）。
-pub(crate) fn empty_value(node: &SettingNode) -> Value {
-    match node.kind {
-        SettingKind::Bool => json!(false),
-        SettingKind::Int => json!(0),
-        SettingKind::Float => json!(0.0),
-        SettingKind::Enum => node
-            .choices
-            .first()
-            .map_or_else(|| json!(""), |choice| json!(choice.value)),
-        SettingKind::Map | SettingKind::Object => stub_object(node),
-        SettingKind::List => json!([]),
-        _ => json!(""),
-    }
-}
-
-/// 对象 stub：只写**必填**字段（缺席即默认，design §13.4）。
-pub(crate) fn stub_object(node: &SettingNode) -> Value {
-    let mut map = serde_json::Map::new();
-    for child in &node.children {
-        if child.required {
-            map.insert(child.key.clone(), empty_value(child));
-        }
-    }
-    Value::Object(map)
+    let steps = parse_path(&doc_edit::index_path(list_path, index))?;
+    // 面板策略（`Policy::Lenient`）：越界 = 不移动；形状问题读成无操作（`.ok()?`）。
+    let outcome = doc_edit::move_indexed(
+        doc.root_doc_mut(root),
+        &steps,
+        delta as i64,
+        Policy::Lenient,
+    )
+    .ok()?;
+    outcome.moved.then_some(outcome.to)
 }
 
 /// 第一个必填子字段的路径（向导手感：新增后光标落在这里）。
@@ -214,13 +183,14 @@ fn first_required_path(node: &SettingNode, item_path: &str) -> Option<String> {
     node.children
         .iter()
         .find(|child| child.required)
-        .map(|child| join_path(item_path, &child.key))
+        .map(|child| doc_edit::join_path(item_path, &child.key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shared::panels::settings::test_support as fx;
+    use serde_json::json;
 
     #[test]
     fn nearest_list_walks_up_from_fields_items_and_add_rows() {
@@ -289,6 +259,19 @@ mod tests {
             list_item_parent(&catalog, &doc, Root::Gateway, "providers[]"),
             None,
             "新增行不是项"
+        );
+    }
+
+    #[test]
+    fn a_malformed_list_path_is_not_an_add_target() {
+        let catalog = fx::sample_catalog();
+        let mut doc = fx::sample_doc();
+        let tools = &catalog.children[2];
+        assert!(add_item(&mut doc, Root::Gateway, "tools[", tools, None).is_none());
+        assert_eq!(
+            doc.value(Root::Gateway, "tools"),
+            Some(&json!(["Bash", "Read"])),
+            "文档一个字节都没动"
         );
     }
 
@@ -425,6 +408,11 @@ mod tests {
             None,
             "到顶了"
         );
+        assert_eq!(
+            move_item(&mut doc, Root::Gateway, "tools", 2, -1),
+            None,
+            "下标等于长度（行已过期）也不是可移动的项"
+        );
         assert_eq!(move_item(&mut doc, Root::Gateway, "nope", 0, 1), None);
     }
 
@@ -448,8 +436,8 @@ mod tests {
             ],
         );
         assert_eq!(
-            stub_object(&outer),
-            json!({"name": "", "inner": {"deep": ""}, "tags": []})
+            doc_edit::empty_value(&outer, Policy::Lenient),
+            Some(json!({"name": "", "inner": {"deep": ""}, "tags": []}))
         );
     }
 }

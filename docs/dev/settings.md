@@ -508,8 +508,9 @@ stdio（`wing -p`）与 ACP（`wing acp`）不能开面板：同一个预检失�
 
 设置面板只服务 TUI；`wing config` 是 stdio / ACP / CI / 编排器的入口，也是**配置坏掉时唯一还能用的**
 诊断入口（setup mode 下照常工作）。全部读写走 Setting API，`cmd/config.rs` **零业务逻辑**
-（参数解析 + 值强制转换 + 稀疏文档上的结构编辑 + 输出格式化），gateway 不可达时**不自动拉起网关**
-（它常常正是在网关起不来时用的；自动拉起会掩盖问题）。
+（参数解析 + 值强制转换 + 调用共享文档原语 + 输出格式化；稀疏文档上的结构编辑——
+路径行走 / stub / 列表增删移——的唯一实现在 `shared/doc_edit.rs`，与设置面板共用），
+gateway 不可达时**不自动拉起网关**（它常常正是在网关起不来时用的；自动拉起会掩盖问题）。
 
 | 子命令 | 作用 |
 |---|---|
@@ -583,6 +584,9 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
   声明错（字段不存在 / 指向密文 / 非标量）会被 `test_config_spec.py` 的 `identity_field` 门禁当场拒绝。
 - 给 `AppConfig`（TUI 配置）加字段：同时改 `config/catalog.rs::interface_catalog()`——
   否则 Rust 侧双向对账门禁变红。
+- 改稀疏文档上的编辑（路径行走 / 目录 stub / 列表增删移 / 下标重排）：唯一实现是
+  `shared/doc_edit.rs`——`wing config`（`Policy::Strict`，用法错误文案与 exit 4 都在那里）
+  与设置面板（`Policy::Lenient`，按需创建、不报错）各自选策略消费，不许再写第二份。
 - 改保存 / 生效语义：唯一写盘路径是 `runtime.apply_settings`，唯一热重载实现是 `system.reload_system`
   （其逐项名字序是对外契约，只许在末尾追加）；面板 / CLI / curl 三个入口都在它们之上，不许各自写第二份。
 - 改 `SETUP_ALLOWED_PATHS`：它是"修复模式能做什么"的全部定义——加一个路径前先问"配置坏掉时它真的可用吗"。
