@@ -16,6 +16,11 @@ Tools:
     - Edit: Precise text replacement
     - Glob: File pattern matching
     - Grep: File content search
+
+Experimental tools (namespace ``experimental``, opt-in per session via refs like
+``experimental.Edit``; see ``wing.tools.experimental``):
+    - HashlineRead: Read with the content tag HashlineEdit consumes
+    - HashlineEdit: Line-anchored patch editing with content-hash tags
 """
 
 from wing.tools.builtin.ask_user import ask_user
@@ -27,6 +32,8 @@ from wing.tools.builtin.read import read_file
 from wing.tools.builtin.read_image import read_image
 from wing.tools.builtin.todo import todo_write
 from wing.tools.builtin.write import write_file
+from wing.tools.experimental.edit import hashline_edit
+from wing.tools.experimental.read import hashline_read
 
 __all__ = [
     "ask_user",
@@ -38,4 +45,6 @@ __all__ = [
     "glob_files",
     "grep_files",
     "todo_write",
+    "hashline_edit",
+    "hashline_read",
 ]
