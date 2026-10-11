@@ -188,3 +188,40 @@ class TestWriteTargetPolicy:
         assert target.read_text(encoding="utf-8") == "protected"
         assert stat.S_IMODE(target.stat().st_mode) == 0o444
         assert ctx.events == []  # 失败不 emit diff 事件
+
+
+class TestEditSourceErrors:
+    """读取源文件失败的错误面：模型据此自纠（文案即契约）。"""
+
+    @pytest.mark.asyncio
+    async def test_missing_file(self, tmp_path: Path):
+        with pytest.raises(ToolError, match="No such file"):
+            await edit_file(str(tmp_path / "nope.txt"), "a", "b", ctx=_StubCtx())  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_directory_target(self, tmp_path: Path):
+        with pytest.raises(ToolError, match="Is a directory"):
+            await edit_file(str(tmp_path), "a", "b", ctx=_StubCtx())  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses the file's read bits",
+    )
+    async def test_unreadable_file(self, tmp_path: Path):
+        target = tmp_path / "locked.txt"
+        target.write_text("secret", encoding="utf-8")
+        target.chmod(0o000)
+        try:
+            with pytest.raises(ToolError, match="Permission denied"):
+                await edit_file(str(target), "a", "b", ctx=_StubCtx())  # type: ignore[arg-type]
+        finally:
+            target.chmod(0o600)
+
+    @pytest.mark.asyncio
+    async def test_empty_file_reports_empty(self, tmp_path: Path):
+        target = tmp_path / "empty.txt"
+        target.write_text("", encoding="utf-8")
+
+        with pytest.raises(ToolError, match="old_string not found \\(file is empty\\)"):
+            await edit_file(str(target), "a", "b", ctx=_StubCtx())  # type: ignore[arg-type]

@@ -697,3 +697,127 @@ class TestAgentCapabilities:
         # 切回来仍然是实时解析（无缓存）
         agent.set_model("vision-model")
         assert agent.capabilities.vision is True
+
+
+########## 6. 文件系统错误面
+
+
+class TestFileSystemErrors:
+    """stat / open / 入库三处的失败都必须变成可读的 ToolError（绝不裸抛）。"""
+
+    @pytest.mark.asyncio
+    async def test_stat_permission_denied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(10, 10))
+        real_stat = os.stat
+
+        def _denied(path, *args, **kwargs):
+            if str(path) == str(image):
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr("wing.tools.builtin.read_image.os.stat", _denied)
+
+        with pytest.raises(ToolError, match="Permission denied"):
+            await read_image(
+                str(image), ctx=_ctx(vision=True, media=_SpyMedia().access)
+            )
+
+    @pytest.mark.asyncio
+    async def test_stat_other_oserror_reports_strerror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(10, 10))
+        real_stat = os.stat
+
+        def _broken(path, *args, **kwargs):
+            if str(path) == str(image):
+                raise OSError(5, "Input/output error")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr("wing.tools.builtin.read_image.os.stat", _broken)
+
+        with pytest.raises(ToolError, match="Input/output error"):
+            await read_image(
+                str(image), ctx=_ctx(vision=True, media=_SpyMedia().access)
+            )
+
+    @pytest.mark.asyncio
+    async def test_open_permission_denied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(10, 10))
+        real_open = builtins.open
+
+        def _denied(path, *args, **kwargs):
+            if str(path) == str(image):
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", _denied)
+
+        with pytest.raises(ToolError, match="Permission denied"):
+            await read_image(
+                str(image), ctx=_ctx(vision=True, media=_SpyMedia().access)
+            )
+
+    @pytest.mark.asyncio
+    async def test_file_vanished_between_stat_and_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(10, 10))
+        real_open = builtins.open
+        state = {"first": True}
+
+        def _vanish(path, *args, **kwargs):
+            if str(path) == str(image) and state["first"]:
+                state["first"] = False
+                raise FileNotFoundError(2, "No such file")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", _vanish)
+
+        with pytest.raises(ToolError, match="No such file"):
+            await read_image(
+                str(image), ctx=_ctx(vision=True, media=_SpyMedia().access)
+            )
+
+    @pytest.mark.asyncio
+    async def test_media_write_failure_is_reported(self, tmp_path: Path):
+        """入库失败意味着引用无法兑现——必须明确失败，不给假成功的信封。"""
+
+        class _BrokenMedia(_SpyMedia):
+            def write(self, media_id: str, data: bytes) -> None:
+                raise OSError(28, "No space left on device")
+
+        image = tmp_path / "shot.png"
+        write_image(image, png_bytes(10, 10))
+
+        with pytest.raises(ToolError, match="failed to persist image bytes"):
+            await read_image(
+                str(image), ctx=_ctx(vision=True, media=_BrokenMedia().access)
+            )
+
+    @pytest.mark.asyncio
+    async def test_vision_sibling_skips_plain_string_models(self, _mock_config):
+        """provider 声明的 model 可以是裸字符串（无能力声明）——跳过后仍能找到兄弟模型。"""
+        from wing.config import ProviderConfig
+        from wing.tools.builtin.read_image import _vision_sibling
+
+        provider = ProviderConfig(
+            name="p",
+            base_url="http://127.0.0.1:1/v1",
+            api_key="k",
+            models=[
+                "plain-model",
+                ModelSpec(name="text-model", capabilities=ModelCapabilities()),
+                ModelSpec(name="seer", capabilities=ModelCapabilities(vision=True)),
+            ],
+        )
+
+        assert _vision_sibling(provider, "text-model") == "seer"

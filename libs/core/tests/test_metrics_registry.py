@@ -895,3 +895,40 @@ class TestPathTraversal:
         )
         _handle_session_metrics(event)
         assert not any(tmp_sessions.iterdir())
+
+
+class TestCorruptedMetricsFile:
+    """metrics.json 损坏时的抢救：备份 + 返回空 dict（绝不静默覆盖历史）。"""
+
+    def test_corrupted_file_is_backed_up(self, tmp_path: Path):
+        from wing.audit.core import _read_metrics_json
+
+        path = tmp_path / "metrics.json"
+        path.write_text("{not json", encoding="utf-8")
+
+        assert _read_metrics_json(path) == {}
+        backups = list(tmp_path.glob("metrics.corrupted.*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "{not json"
+        assert not path.exists()  # 原文件已被改名（不会在下一次写入时被覆盖）
+
+    def test_unreadable_file_yields_empty(
+        self, tmp_path: Path, monkeypatch, wing_warnings
+    ):
+        import wing.audit.core as core
+
+        path = tmp_path / "metrics.json"
+        path.write_text("{}", encoding="utf-8")
+
+        def _boom(*args, **kwargs):
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr(core, "open", _boom, raising=False)
+
+        assert core._read_metrics_json(path) == {}
+        assert any("Failed to read metrics.json" in m for m in wing_warnings)
+
+    def test_missing_file_yields_empty(self, tmp_path: Path):
+        from wing.audit.core import _read_metrics_json
+
+        assert _read_metrics_json(tmp_path / "nope.json") == {}

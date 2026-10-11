@@ -379,3 +379,69 @@ class TestExpandPromptCommand:
             assert result is None
         finally:
             magic_registry.remove_by_source("prompt")
+
+
+class TestLoadFailures:
+    """加载期降级：单个坏文件不能拖垮整轮扫描（只告警并跳过）。"""
+
+    def test_missing_name_field_returns_none(self, tmp_path: Path, wing_warnings):
+        md = tmp_path / "noname.md"
+        md.write_text("---\ndescription: no name here\n---\nbody\n", encoding="utf-8")
+
+        assert load_prompt_command_from_file(md) is None
+        assert any("missing required 'name' field" in m for m in wing_warnings)
+
+    def test_malformed_front_matter_returns_none(self, tmp_path: Path, wing_warnings):
+        md = tmp_path / "broken.md"
+        md.write_text("---\nname: [unclosed\n---\nbody\n", encoding="utf-8")
+
+        assert load_prompt_command_from_file(md) is None
+        assert any("Failed to load prompt command" in m for m in wing_warnings)
+
+    def test_directory_matches_are_skipped(self, tmp_path: Path):
+        """glob 也能命中目录：跳过，不报错。"""
+        (tmp_path / "cmds" / "subdir").mkdir(parents=True)
+        (tmp_path / "cmds" / "ok.md").write_text(
+            "---\nname: ok\n---\nbody\n", encoding="utf-8"
+        )
+
+        commands = load_prompt_commands_from_paths([str(tmp_path / "cmds" / "*")])
+
+        assert [c.name for c in commands] == ["ok"]
+
+
+class TestRegistryListing:
+    def test_list_all_dedups_by_name(self):
+        """同名命令（不同来源）在列举里只出现一次。"""
+        from wing.commands import MagicCommand, MagicCommandRegistry
+
+        registry = MagicCommandRegistry()
+        first = MagicCommand(name="plan", description="a", source="builtin")
+        second = MagicCommand(name="plan", description="b", source="prompt")
+        registry._commands = {"plan#1": first, "plan#2": second}
+
+        listed = registry.list_all()
+
+        assert [c.name for c in listed] == ["plan"]
+        assert listed[0] is first  # 先注册的胜出
+
+    def test_remove_by_source_prunes_registry(self):
+        from wing.commands import MagicCommand, MagicCommandRegistry
+
+        registry = MagicCommandRegistry()
+        registry._commands = {
+            "keep": MagicCommand(name="keep", description="", source="builtin"),
+            "drop": MagicCommand(name="drop", description="", source="prompt"),
+        }
+
+        removed = registry.remove_by_source("prompt")
+
+        assert removed == 1
+        assert [c.name for c in registry.list_all()] == ["keep"]
+
+    def test_remove_unknown_source_is_noop(self):
+        from wing.commands import MagicCommandRegistry
+
+        registry = MagicCommandRegistry()
+
+        assert registry.remove_by_source("prompt") == 0

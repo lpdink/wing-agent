@@ -65,6 +65,7 @@ dev = [
     "vulture>=2.16",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
     "pytest-timeout>=2.3.0",
     # probe 场景按核数并行（`make test-probe` 的 `-n`；见 docs/dev/probe-testing.md）。
     "pytest-xdist>=3.8.0",
@@ -114,3 +115,26 @@ markers = [
 filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
+
+# ── 单测覆盖率（门禁口径）────────────────────────────────────
+# source 写包名而不是让 coverage 只统计「被导入过的」文件：没被任何测试碰到的
+# 模块必须以 0% 出现，否则「漏测整个模块」会被静默豁免。
+# 口径 = 语句 + 分支（combined）：纯语句覆盖率看不出「if 只走了一边」。
+[tool.coverage.run]
+branch = true
+source = ["wing", "wing_sdk"]
+
+[tool.coverage.report]
+# hatch-vcs 的构建产物：不在 git 里，其内容取决于构建时的 commit
+omit = ["*/_version.py"]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
+show_missing = true
+# 门禁阈值（本地 `make test-python` 与 CI 同一条命令、同一个数）：
+# 1 位小数精度，避免默认的整数四舍五入把 95.6 当成 96 放过；
+# 95.0 给常规改动留出约 130 条语句的余量，真正"整块没测"会立刻撞线。
+fail_under = 95
+precision = 1
