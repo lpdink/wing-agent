@@ -23,6 +23,7 @@ from wing.tools.experimental.hashline import (
     CutOp,
     HashlineError,
     PutOp,
+    RemOp,
     apply_section,
     content_tag,
     decode_utf8,
@@ -109,6 +110,13 @@ def test_trailing_space_after_put_colon_is_tolerated():
     op = section.ops[0]
     assert isinstance(op, PutOp)
     assert op.body == ["A"]
+
+
+def test_whitespace_tolerant_section_header_and_rem():
+    (section,) = parse_payload("  [a.py#A1B2] \n  REM \n")
+    assert section.path == "a.py"
+    assert len(section.ops) == 1
+    assert isinstance(section.ops[0], RemOp)
 
 
 def test_parse_multiple_sections_and_blank_lines_between_ops():

@@ -63,8 +63,8 @@ _MAX_TRACKED_SESSIONS = 128
 
 #: prepared 条目：(段, 绝对路径, 原文（未归一化，回滚用）, 归一化文本, BOM, 结果, MV 目标)
 _Prepared = tuple[Section, str, str, str, bool, ApplyOutcome, str | None]
-#: applied 条目：(绝对路径, 原文, BOM, 结果, MV 目标, 纯重命名的源真实路径)
-_Applied = tuple[str, str, bool, ApplyOutcome, str | None, str | None]
+#: applied 条目：(绝对路径, 原文, BOM, 结果, MV 目标, 纯重命名的源真实路径, 源权限位)
+_Applied = tuple[str, str, bool, ApplyOutcome, str | None, str | None, int | None]
 
 
 def _session_registers(session_id: str) -> dict[str, list[str]]:
@@ -107,9 +107,10 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
     - MV DEST     move/rename the file after its edits (may share the section;
       refuses an existing destination, the same file, a destination that is
       also patched somewhere in the same payload, or a destination whose
-      directory does not exist). A pure move renames the file, preserving
-      inode, permissions and line endings; a moved patch copies the source's
-      permissions onto the destination.
+      directory does not exist). A pure move renames the file (the source need
+      not be writable), preserving inode, permissions and line endings; a
+      moved patch requires a writable source and copies its permissions onto
+      the destination.
 
     Body lines start with `+`; the rest is written verbatim (a lone `+` is a blank
     line). Content whose own line starts with `-`/`+` must be escaped as `+-`/`++`.
@@ -266,30 +267,35 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
         for section, resolved, raw_text, norm_text, had_bom, outcome, dest in prepared:
             text = ("\ufeff" if had_bom else "") + outcome.new_content
             if outcome.removed:
-                _unlink_content_target(resolved)
-            elif dest is not None:
-                target, in_place = resolve_write_target(resolved)
-                if not in_place and outcome.new_content == norm_text:
-                    # 纯移动走 rename：保留 inode / 权限位 / 行尾字节（写新+删旧
-                    # 会把 0755 脚本变 0644、CRLF 变 LF、硬链接身份分叉）。
-                    os.rename(target, dest)
+                mode = _unlink_content_target(resolved)
+                applied.append((resolved, raw_text, had_bom, outcome, None, None, mode))
+                continue
+            if dest is not None:
+                source = os.path.realpath(resolved)
+                if outcome.new_content == norm_text:
+                    # 纯移动走 rename：保留 inode / 权限位 / 行尾字节，且只需目录
+                    # 写权限（源自身只读也能移动——rename 不写文件）。
+                    os.rename(source, dest)
                     applied.append(
-                        (resolved, raw_text, had_bom, outcome, dest, str(target))
+                        (resolved, raw_text, had_bom, outcome, dest, source, None)
                     )
                     continue
+                # 带内容变更的移动 = 编辑 + 删除源：源须可写（与主 Edit 同一政策）
+                resolve_write_target(resolved)
+                mode = stat.S_IMODE(os.stat(source).st_mode)
                 _write(dest, text)
-                applied.append((resolved, raw_text, had_bom, outcome, dest, None))
+                applied.append((resolved, raw_text, had_bom, outcome, dest, None, mode))
                 try:
-                    os.chmod(dest, stat.S_IMODE(os.stat(target).st_mode))
+                    os.chmod(dest, mode)
                 except OSError:
                     pass  # 权限位复制尽力而为；内容已就位，不因此让 MV 失败
-                _unlink_content_target(resolved)
+                os.unlink(source)
                 continue
-            elif outcome.new_content != norm_text:
+            if outcome.new_content != norm_text:
                 _write(resolved, text)
             else:
                 continue
-            applied.append((resolved, raw_text, had_bom, outcome, dest, None))
+            applied.append((resolved, raw_text, had_bom, outcome, dest, None, None))
     except OSError as e:
         failures = _rollback(applied)
         where = f"hashline: {section.path}: write failed: {e.strerror or e}"
@@ -349,28 +355,36 @@ def _write(path: str, text: str) -> None:
         atomic_write_text(target, text)
 
 
-def _unlink_content_target(path: str) -> None:
-    """按写穿政策删除内容目标：符号链接作用于其真实目标（与 Write / Edit 一致）。
+def _unlink_content_target(path: str) -> int:
+    """按写穿政策删除内容目标，返回其权限位（回滚重建时还原）。
 
     链接本身保留（可能悬空）——本工具编辑的是"路径处的内容"，不是目录项。
+    只读文件按 ``resolve_write_target`` 的政策拒绝（REM 是销毁性操作）。
     """
     target, _in_place = resolve_write_target(path)
+    mode = stat.S_IMODE(os.stat(target).st_mode)
     os.unlink(target)
+    return mode
 
 
 def _rollback(applied: list[_Applied]) -> list[str]:
     """尽力回滚已落盘段——返回失败清单（空 = 完整回滚）。
 
-    恢复写原文（未归一化）；MV 移除已写出的目标，纯重命名改名回源。任何失败只
-    记录、不上抛（原始写失败才是主错误）。
+    恢复写原文（未归一化）；MV 移除已写出的目标，纯重命名改名回源；被删除重建的
+    段落同时还原源权限位（原子写对新建文件用默认模式，不还原会静默降级）。任何
+    失败只记录、不上抛（原始写失败才是主错误）。
     """
     failures: list[str] = []
-    for resolved, raw_text, had_bom, _outcome, dest, renamed_from in reversed(applied):
+    for resolved, raw_text, had_bom, _outcome, dest, renamed_from, mode in reversed(
+        applied
+    ):
         try:
             if renamed_from is not None and dest is not None:
                 os.rename(dest, renamed_from)
                 continue
             _write(resolved, ("\ufeff" if had_bom else "") + raw_text)
+            if mode is not None:
+                os.chmod(resolved, mode)
         except Exception as e:  # noqa: BLE001 — 回滚是尽力而为，失败照实上报
             failures.append(f"{resolved} ({e})")
             continue

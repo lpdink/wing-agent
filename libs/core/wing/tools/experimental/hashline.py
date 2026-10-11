@@ -199,7 +199,7 @@ def parse_payload(text: str) -> list[Section]:
         if line.strip() == _END_WRAP:
             idx += 1
             break
-        match = _SECTION_RE.match(line)
+        match = _SECTION_RE.match(line.strip())
         if match is None:
             raise HashlineError(
                 f"line {idx + 1}: expected a [path#TAG] section header, got: {line!r}"
@@ -234,10 +234,10 @@ def _parse_ops(lines: list[str], idx: int, section: Section) -> int:
         if line.strip() == "":
             idx += 1  # 段内空行按噪声忽略（段头/End Patch 之外的自由分隔）
             continue
-        if line.strip() == _END_WRAP or _SECTION_RE.match(line):
+        if line.strip() == _END_WRAP or _SECTION_RE.match(line.strip()):
             break
         line_no = idx + 1
-        if line == "REM":
+        if line.strip() == "REM":
             section.ops.append(RemOp(line=line_no))
             idx += 1
             continue

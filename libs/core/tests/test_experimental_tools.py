@@ -694,3 +694,53 @@ class TestHashlineEdit:
         monkeypatch.setattr("wing.tools.experimental.read.os.stat", stat_then_remove)
         with pytest.raises(ToolError, match="No such file"):
             await read(_StubCtx(), str(p))
+
+    @pytest.mark.asyncio
+    async def test_readonly_source_pure_move_succeeds(self, tmp_path: Path):
+        src = tmp_path / "ro.txt"
+        src.write_text("ro\n", encoding="utf-8")
+        src.chmod(0o444)
+        dest = tmp_path / "moved_ro.txt"
+
+        await edit(_StubCtx(), f"[{src}#{content_tag('ro\n')}]\nMV {dest}\n")
+
+        assert dest.read_text(encoding="utf-8") == "ro\n"
+        assert dest.stat().st_mode & 0o777 == 0o444  # rename 保留权限位
+        assert not src.exists()
+
+    @pytest.mark.asyncio
+    async def test_readonly_source_patched_move_still_rejected(self, tmp_path: Path):
+        src = tmp_path / "ro.txt"
+        src.write_text("ro\n", encoding="utf-8")
+        src.chmod(0o444)
+        dest = tmp_path / "moved_ro.txt"
+        ctx = _StubCtx()
+
+        with pytest.raises(ToolError, match="Permission denied"):
+            await edit(
+                ctx,
+                f"[{src}#{content_tag('ro\n')}]\nPUT 1.=1:\n+x\nMV {dest}\n",
+            )
+        assert src.read_text(encoding="utf-8") == "ro\n"
+        assert not dest.exists()
+
+    @pytest.mark.asyncio
+    async def test_rollback_restores_source_permissions(self, tmp_path: Path):
+        victim = tmp_path / "victim.sh"
+        victim.write_text("#!/bin/sh\n", encoding="utf-8")
+        victim.chmod(0o755)
+        bad = tmp_path / "bad.txt"
+        bad.write_text("b\n", encoding="utf-8")
+        bad.chmod(0o444)
+        ctx = _StubCtx(session_id="mode-rollback")
+
+        payload = (
+            f"[{victim}#{content_tag('#!/bin/sh\n')}]\nREM\n"
+            f"[{bad}#{content_tag('b\n')}]\nPUT 1.=1:\n+x\n"
+        )
+        with pytest.raises(ToolError, match="nothing was changed"):
+            await edit(ctx, payload)
+
+        assert victim.read_text(encoding="utf-8") == "#!/bin/sh\n"
+        assert victim.stat().st_mode & 0o777 == 0o755  # 回滚重建还原权限位
+        assert bad.read_text(encoding="utf-8") == "b\n"
