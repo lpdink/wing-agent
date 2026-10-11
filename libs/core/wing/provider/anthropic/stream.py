@@ -54,7 +54,7 @@ def _first_token_rt_ms(state: _StreamState, header_rt_ms: float) -> float:
     """首 token RT（毫秒）：请求发出 → 首个正文/思考/tool 增量到达。
 
     流内尚未产出任何生成（空响应 / 立即失败）时退回首包 RT（``header_rt_ms``）
-    ——此刻那是唯一的已知量。
+    ——一个下界，不代表完整等待（空流可以持续任意久）。
     """
     if state.sent_ts is None or state.first_token_ts is None:
         return header_rt_ms

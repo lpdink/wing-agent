@@ -322,8 +322,8 @@ def render(
             )
         if patch is None:
             notes.append(
-                f"- **{name}**：增量覆盖率未判定（没有 patch 产物；非 PR run 不发评论，"
-                "PR run 见 job 日志）。"
+                f"- **{name}**：增量覆盖率未判定（没有 patch 产物——门禁 step 未产出，"
+                "见 job 日志）。"
             )
         elif patch.get("skipped"):
             notes.append(f"- **{name}**：增量覆盖率未判定 —— `{patch['skipped']}`。")
@@ -332,6 +332,27 @@ def render(
                 f"- **{name}**：增量覆盖率 {_fmt(float(patch['percent']), 1)} "
                 f"< 门禁 {_fmt(patch_min, 1)} —— 未覆盖行见上。"
             )
+        if patch:
+            unmeasured = patch.get("unmeasured") or []
+            if unmeasured:
+                shown = "、".join(
+                    f"`{f['path']}`（{f['lines']} 行）" for f in unmeasured[:6]
+                )
+                more = f"，另 {len(unmeasured) - 6} 个" if len(unmeasured) > 6 else ""
+                notes.append(
+                    f"- **{name}**：{len(unmeasured)} 个改动的非测试文件不在覆盖率统计面内"
+                    f"（**不参与判定**）：{shown}{more}。"
+                )
+            removed_tests = patch.get("removed_tests") or []
+            if removed_tests:
+                total = sum(int(f["lines"]) for f in removed_tests)
+                shown = "、".join(
+                    f"`{f['path']}`（-{f['lines']}）" for f in removed_tests[:6]
+                )
+                notes.append(
+                    f"- **{name}**：净删除测试 {total} 行（{shown}）——删除行不进增量判定，"
+                    "请人工确认。"
+                )
     if notes:
         out += ["", "---", "", "### ⚠️ 注意", "", *notes]
 

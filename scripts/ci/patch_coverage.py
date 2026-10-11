@@ -2,10 +2,15 @@
 """增量（patch）覆盖率：改动行 ∩ 可执行行 → 覆盖率 + 门禁。
 
 口径：
-- diff = ``git diff --unified=0 -M <merge-base(--base, HEAD)> HEAD`` 的新增/修改行；
+- diff = ``git diff --unified=0 -M <merge-base(--base, HEAD)> HEAD`` 的新增行；
 - Python = coverage.py JSON 的 ``executed_lines`` / ``missing_lines``（语句行；
   排除行不参与）；Rust = cargo-llvm-cov 的 LCOV（``DA`` 行记录，count 0 = 未执行）；
 - 覆盖率 = 命中行 / 可执行行（**行级**，与总量统计的语句+分支/区域口径不同）。
+
+**统计面** = 覆盖率产物自己覆盖的文件（Python 是 pyproject 的 ``source``，Rust 是
+workspace crates）——只有面内文件的改动行参与判定。面外的代码（``scripts/``、
+``libs/wing_hooks``、探针等）与**删除行**不判定，但会被点名（``unmeasured`` /
+``removed_tests``）供评论展示：静默豁免会把「这块其实没人管」藏起来。
 
 边界：diff 里没有可执行行（纯文档 / 配置 PR）→ 判过（``percent`` 为空）；覆盖率
 产物缺失 → 不判失败、写 ``skipped`` 由评论说明；git 基线解析失败则**硬失败**
@@ -33,7 +38,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 #: hunk 头：`@@ -a[,b] +c[,d] @@ …`——只关心新文件侧的起始行。
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -53,6 +58,14 @@ class FilePatch:
 
 
 @dataclass
+class FileChange:
+    """点名用的文件级计数：``lines`` 的含义随所属字段（新增行 / 净删除行）。"""
+
+    path: str
+    lines: int
+
+
+@dataclass
 class PatchResult:
     """一次判定的完整结果（``--out-json`` 的载荷）。"""
 
@@ -66,19 +79,48 @@ class PatchResult:
     ok: bool = True
     skipped: str | None = None
     files: list[FilePatch] = field(default_factory=list)
+    #: 统计面外的改动（非测试 .py / .rs 文件不在覆盖率产物里）：只点名，不判定。
+    unmeasured: list[FileChange] = field(default_factory=list)
+    #: 净删除的测试行（测试文件 removed - added > 0）：删除不进判定，只点名。
+    removed_tests: list[FileChange] = field(default_factory=list)
 
 
 # ─── 解析 ────────────────────────────────────────────────────────
 
 
-def parse_added_lines(diff_text: str) -> dict[str, set[int]]:
-    """unified diff（``-U0``）→ {repo 相对路径: 新增行号集合}。
+def _unquote(path: str) -> str:
+    """git 对含空格 / 非 ASCII 的路径输出 C 风格引号（``"b/a b.py"``、八进制转义的
+    UTF-8 字节）——剥引号并解码，否则路径对不上覆盖率产物、整个文件静默逃出门禁。"""
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        raw = path[1:-1]
+        try:
+            return (
+                raw.encode("latin-1", "backslashreplace")
+                .decode("unicode_escape")
+                .encode("latin-1")
+                .decode("utf-8")
+            )
+        except UnicodeDecodeError:
+            return raw
+    return path
+
+
+@dataclass
+class DiffLines:
+    """一次 diff 的行级改动：``added`` = {path: 新增行号}；``removed`` = {path: 删除行数}。"""
+
+    added: dict[str, set[int]] = field(default_factory=dict)
+    removed: dict[str, int] = field(default_factory=dict)
+
+
+def parse_diff(diff_text: str) -> DiffLines:
+    """unified diff（``-U0``）→ 新增行号与删除行数。
 
     hunk 状态机：``@@`` 进入 hunk；hunk 内只按 ``+`` / ``-`` / ``\\`` /
     上下文识别——以 ``++`` / ``--`` 开头的**内容行**（如新增一行 ``++ b/x``
     在 diff 里就是 ``+++ b/x``）因此不会被误当成 ``+++`` 文件头。
     """
-    added: dict[str, set[int]] = {}
+    diff = DiffLines()
     path: str | None = None
     cursor: int | None = None
     in_hunk = False
@@ -92,9 +134,12 @@ def parse_added_lines(diff_text: str) -> dict[str, set[int]]:
         if in_hunk:
             if raw.startswith("+"):
                 if path is not None and cursor is not None:
-                    added.setdefault(path, set()).add(cursor)
+                    diff.added.setdefault(path, set()).add(cursor)
                 cursor = (cursor or 0) + 1
-            elif raw.startswith("-") or raw.startswith("\\"):
+            elif raw.startswith("-"):
+                if path is not None:
+                    diff.removed[path] = diff.removed.get(path, 0) + 1
+            elif raw.startswith("\\"):
                 pass
             elif raw.startswith(" ") or raw == "":
                 cursor = (cursor or 0) + 1  # 上下文行（-U0 下不出现；容忍）
@@ -102,14 +147,30 @@ def parse_added_lines(diff_text: str) -> dict[str, set[int]]:
                 in_hunk = False  # hunk 结束：后续是文件级元数据
             continue
         if raw.startswith("+++ "):
-            target = raw[4:]
+            target = _unquote(raw[4:])
             if target == "/dev/null":
                 path = None
             elif target.startswith(("b/", "a/")):
                 path = target[2:]
             else:
                 path = target
-    return added
+    return diff
+
+
+def _is_python_test(path: str) -> bool:
+    """Python 测试文件（按约定不在覆盖率统计面内）。"""
+    name = Path(path).name
+    return (
+        "/tests/" in f"/{path}"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name == "conftest.py"
+    )
+
+
+def _is_rust_test(path: str) -> bool:
+    """Rust 集成测试（``tests/`` 目录；源文件内的 ``#[cfg(test)]`` 无从按路径识别）。"""
+    return "/tests/" in f"/{path}"
 
 
 def _rel(path: str, root: Path) -> str:
@@ -209,6 +270,39 @@ def compute_rust(
     return files
 
 
+def collect_unmeasured(
+    added: dict[str, set[int]],
+    coverage_paths: set[str],
+    *,
+    suffix: str,
+    is_test: Callable[[str], bool],
+) -> list[FileChange]:
+    """统计面外的非测试代码改动（覆盖率产物里没有的文件）——只点名，不判定。
+
+    测试文件剔除：它们按约定不在覆盖率统计面内（新测试行不判定是设计而非盲区）。
+    """
+    out = [
+        FileChange(path=path, lines=len(added[path]))
+        for path in added
+        if path.endswith(suffix) and path not in coverage_paths and not is_test(path)
+    ]
+    return sorted(out, key=lambda f: (-f.lines, f.path))
+
+
+def collect_removed_tests(
+    diff: DiffLines, *, suffix: str, is_test: Callable[[str], bool]
+) -> list[FileChange]:
+    """净删除的测试行（removed - added > 0）——删除不进判定，只点名提醒人工确认。"""
+    out = []
+    for path, removed in diff.removed.items():
+        if not path.endswith(suffix) or not is_test(path):
+            continue
+        net = removed - len(diff.added.get(path, ()))
+        if net > 0:
+            out.append(FileChange(path=path, lines=net))
+    return sorted(out, key=lambda f: (-f.lines, f.path))
+
+
 def judge(result: PatchResult) -> PatchResult:
     """汇总 files → covered/total/percent/ok。"""
     result.covered = sum(f.covered for f in result.files)
@@ -242,11 +336,11 @@ def merge_base(root: Path, base: str) -> str:
     return _git(root, "merge-base", base, "HEAD").strip()
 
 
-def diff_added_lines(root: Path, base: str) -> tuple[str, dict[str, set[int]]]:
-    """(merge_base, {path: 新增行})——基线解析失败抛 CalledProcessError。"""
+def diff_lines(root: Path, base: str) -> tuple[str, DiffLines]:
+    """(merge_base, 改动行)——基线解析失败抛 CalledProcessError。"""
     mb = merge_base(root, base)
     text = _git(root, "diff", "--unified=0", "-M", mb, "HEAD")
-    return mb, parse_added_lines(text)
+    return mb, parse_diff(text)
 
 
 def repo_root() -> Path:
@@ -271,7 +365,7 @@ def run_gate(
         return judge(result)
 
     try:
-        mb, added = diff_added_lines(root, base)
+        mb, diff = diff_lines(root, base)
         result.merge_base = mb
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or "").strip() or str(error)
@@ -279,9 +373,29 @@ def run_gate(
 
     if lang == "python":
         data = json.loads(coverage_path.read_text(encoding="utf-8"))
-        result.files = compute_python(added, parse_python_json(data, root))
+        coverage = parse_python_json(data, root)
+        result.files = compute_python(diff.added, coverage)
+        result.unmeasured = collect_unmeasured(
+            diff.added,
+            set(coverage),
+            suffix=".py",
+            is_test=_is_python_test,
+        )
+        result.removed_tests = collect_removed_tests(
+            diff, suffix=".py", is_test=_is_python_test
+        )
     else:
-        result.files = compute_rust(added, parse_lcov(coverage_path.read_text(), root))
+        coverage = parse_lcov(coverage_path.read_text(), root)
+        result.files = compute_rust(diff.added, coverage)
+        result.unmeasured = collect_unmeasured(
+            diff.added,
+            set(coverage),
+            suffix=".rs",
+            is_test=_is_rust_test,
+        )
+        result.removed_tests = collect_removed_tests(
+            diff, suffix=".rs", is_test=_is_rust_test
+        )
     return judge(result)
 
 
@@ -329,6 +443,16 @@ def format_report(result: PatchResult) -> str:
     for file in result.files:
         if file.missing:
             lines.append(f"  {file.path}: missing {', '.join(map(str, file.missing))}")
+    if result.unmeasured:
+        lines.append(
+            "  note: changed files outside the coverage surface (not judged): "
+            + ", ".join(f"{f.path} ({f.lines})" for f in result.unmeasured[:10])
+        )
+    if result.removed_tests:
+        lines.append(
+            "  note: net-removed test lines (not judged; confirm by hand): "
+            + ", ".join(f"{f.path} (-{f.lines})" for f in result.removed_tests[:10])
+        )
     return "\n".join(lines)
 
 
@@ -405,8 +529,28 @@ def _run_selftest() -> int:
         "@@ -0,0 +1,2 @@\n"
         "+first\n"
         "+second\n"
+        'diff --git "a/with space.py" "b/with space.py"\n'
+        '--- "a/with space.py"\n'
+        '+++ "b/with space.py"\n'
+        "@@ -0,0 +1 @@\n"
+        "+spaced\n"
+        'diff --git a/x.py "b/\\346\\226\\207.py"\n'
+        "--- a/x.py\n"
+        '+++ "b/\\346\\226\\207.py"\n'
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "diff --git a/t.py b/t.py\n"
+        "--- a/t.py\n"
+        "+++ b/t.py\n"
+        "@@ -1 +1 @@\n"
+        "-a\n"
+        "-b\n"
+        "-c\n"
+        "+keep\n"
     )
-    added = parse_added_lines(diff)
+    parsed = parse_diff(diff)
+    added, removed = parsed.added, parsed.removed
     check(
         "diff: hunk 行号与上下文/删除行",
         added["a.py"] == {2, 3, 14, 15, 20},
@@ -414,6 +558,16 @@ def _run_selftest() -> int:
     )
     check("diff: 内容行不撞文件头", "not-a-header" not in added, repr(added))
     check("diff: 新文件", added["b.py"] == {1, 2}, repr(added))
+    check(
+        "diff: 引号路径（空格 / 八进制 UTF-8）",
+        added.get("with space.py") == {1} and added.get("文.py") == {1},
+        repr(added),
+    )
+    check(
+        "diff: 删除行计数",
+        removed.get("a.py") == 2 and removed.get("t.py") == 3,
+        repr(removed),
+    )
 
     root = Path("/repo")
     py = parse_python_json(
@@ -489,6 +643,42 @@ def _run_selftest() -> int:
         "judge: 数据缺失不判失败",
         result.ok and result.skipped is not None,
         repr(result),
+    )
+
+    unmeasured = collect_unmeasured(
+        {
+            "libs/core/wing/a.py": {1, 2},
+            "scripts/tool.py": {1},
+            "libs/core/tests/test_a.py": {1},
+        },
+        {"libs/core/wing/a.py"},
+        suffix=".py",
+        is_test=_is_python_test,
+    )
+    check(
+        "blind spot: 统计面外点名（测试剔除）",
+        unmeasured == [FileChange("scripts/tool.py", 1)],
+        repr(unmeasured),
+    )
+    removed_tests = collect_removed_tests(
+        parse_diff(
+            "diff --git a/tests/test_a.py b/tests/test_a.py\n"
+            "--- a/tests/test_a.py\n"
+            "+++ b/tests/test_a.py\n"
+            "@@ -1,5 +1,2 @@\n"
+            "-one\n"
+            "-two\n"
+            "-three\n"
+            "+kept\n"
+            "+kept2\n"
+        ),
+        suffix=".py",
+        is_test=_is_python_test,
+    )
+    check(
+        "blind spot: 净删除测试行点名",
+        removed_tests == [FileChange("tests/test_a.py", 1)],
+        repr(removed_tests),
     )
 
     with tempfile.TemporaryDirectory(prefix="wing-patch-cov-") as tmp:

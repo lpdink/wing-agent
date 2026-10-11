@@ -328,8 +328,8 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         def ttft_ms() -> float:
             """首 token RT：请求发出 → 首个正文/思考/tool 增量到达。
 
-            流内尚未产出任何生成（空响应 / 立即失败）时退回首包 RT——此刻
-            那是唯一的已知量。
+            流内尚未产出任何生成（空响应 / 立即失败）时退回首包 RT——一个
+            下界，不代表完整等待（空流可以持续任意久）。
             """
             if state.first_token_ts is None:
                 return header_rt_ms
