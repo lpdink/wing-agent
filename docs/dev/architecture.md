@@ -142,7 +142,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
 - `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
 - **控制面补全**（TUI 已有而 CLI 缺失的语义，日常运维不必再手搓 curl）：
-  - `wing new [--workspace] [--template] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
+  - `wing new [--workspace] [--agent] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（`--agent` 选模板、workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
   - `wing branches <sid>` / `wing fork <sid> --at <uuid>` / `wing rewind <sid> --to <uuid>`：消息节点导航——`branches` 给出可回退 / 分叉的 uuid（表格 + `--json`，uuid 不截断），`fork` 产出新会话 id + draft、`rewind` 把当前会话截回目标之前，两者都把目标消息文本作为 **draft** 回吐（目标不在新 / 截断后的链里，供调用方重发）；`current` 是哨兵（fork = 全链拷贝，rewind = 文档化 no-op）；
   - `wing interrupt <sid>`（可见别名 `int`）/ `wing compact <sid> [instruction]`：中断在飞 turn / 手动压缩（`instruction` 为可选侧重指令，无它时压缩 prompt 不变）；
   - `wing reload`：系统热重载；逐项结果**按网关自己的名字序**如实打印（名字序是对外契约），任一失败即非零退出；

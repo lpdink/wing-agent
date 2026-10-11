@@ -981,14 +981,7 @@ async fn new_and_resume_round_trip() {
     let stub = Stub::start("new-resume").await;
 
     let (code, stdout, stderr) = run_wing(
-        &[
-            "new",
-            "--template",
-            "executor",
-            "--tag",
-            "nightly",
-            "--json",
-        ],
+        &["new", "--agent", "executor", "--tag", "nightly", "--json"],
         &stub,
     )
     .await;

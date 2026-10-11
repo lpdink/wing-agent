@@ -1316,7 +1316,7 @@ mod tests {
             "new",
             "--workspace",
             "/tmp/ws",
-            "--template",
+            "--agent",
             "executor",
             "--tag",
             "a,b",
@@ -1325,11 +1325,16 @@ mod tests {
         match cli.command {
             Some(Command::New(args)) => {
                 assert_eq!(args.workspace.as_deref(), Some("/tmp/ws"));
-                assert_eq!(args.template.as_deref(), Some("executor"));
+                assert_eq!(args.agent.as_deref(), Some("executor"));
                 assert_eq!(args.tag, vec!["a".to_string(), "b".to_string()]);
             }
             other => panic!("expected new, got {other:?}"),
         }
+
+        // `--template` 已改名 `--agent`：旧拼写直接报未知参数（不留别名）。
+        let err = Cli::try_parse_from(["wing", "new", "--template", "executor"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(err.to_string().contains("--template"), "{err}");
 
         let cli = Cli::try_parse_from(["wing", "resume", "sid-1"]).expect("resume");
         assert!(matches!(
