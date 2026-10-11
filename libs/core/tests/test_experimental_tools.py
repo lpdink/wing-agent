@@ -611,3 +611,86 @@ class TestHashlineEdit:
         # 照抄读输出的 PATH#TAG（路径含 #、末段是 TAG）→ 补丁可用。
         await edit(ctx, f"[{p}#{tag}]\nPUT 2.=2:\n+Y\n")
         assert p.read_text(encoding="utf-8") == "x\nY\n"
+
+    @pytest.mark.asyncio
+    async def test_pure_move_preserves_inode_mode_and_bytes(self, tmp_path: Path):
+        src = tmp_path / "script.sh"
+        src.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        src.chmod(0o755)
+        hard = tmp_path / "hard.txt"
+        hard.hardlink_to(src)
+        dest = tmp_path / "moved.sh"
+        ctx = _StubCtx()
+
+        await edit(ctx, f"[{src}#{content_tag('#!/bin/sh\necho hi\n')}]\nMV {dest}\n")
+
+        assert dest.read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
+        assert dest.stat().st_mode & 0o777 == 0o755
+        assert dest.stat().st_ino == hard.stat().st_ino  # rename：硬链接身份保持
+        assert not src.exists()
+
+    @pytest.mark.asyncio
+    async def test_pure_move_keeps_crlf_bytes(self, tmp_path: Path):
+        src = tmp_path / "crlf.txt"
+        src.write_bytes(b"a\r\nb\r\n")
+        dest = tmp_path / "moved.txt"
+
+        await edit(_StubCtx(), f"[{src}#{content_tag('a\nb\n')}]\nMV {dest}\n")
+
+        assert dest.read_bytes() == b"a\r\nb\r\n"  # rename 不产生 LF 重写
+
+    @pytest.mark.asyncio
+    async def test_moved_patch_copies_permissions(self, tmp_path: Path):
+        src = tmp_path / "s.sh"
+        src.write_text("old\n", encoding="utf-8")
+        src.chmod(0o755)
+        dest = tmp_path / "d.sh"
+
+        await edit(
+            _StubCtx(),
+            f"[{src}#{content_tag('old\n')}]\nPUT 1.=1:\n+new\nMV {dest}\n",
+        )
+
+        assert dest.read_text(encoding="utf-8") == "new\n"
+        assert dest.stat().st_mode & 0o777 == 0o755
+
+    @pytest.mark.asyncio
+    async def test_failed_later_section_restores_pure_move(self, tmp_path: Path):
+        a = tmp_path / "a.txt"
+        a.write_text("aaa\n", encoding="utf-8")
+        moved = tmp_path / "moved.txt"
+        bad = tmp_path / "bad.txt"
+        bad.write_text("b\n", encoding="utf-8")
+        bad.chmod(0o444)
+        ctx = _StubCtx(session_id="mv-rollback")
+
+        payload = (
+            f"[{a}#{content_tag('aaa\n')}]\nMV {moved}\n"
+            f"[{bad}#{content_tag('b\n')}]\nPUT 1.=1:\n+x\n"
+        )
+        with pytest.raises(ToolError, match="nothing was changed"):
+            await edit(ctx, payload)
+        assert a.read_text(encoding="utf-8") == "aaa\n"  # 改名回来了
+        assert not moved.exists()
+        assert bad.read_text(encoding="utf-8") == "b\n"
+        assert ctx.events == []
+
+    @pytest.mark.asyncio
+    async def test_read_open_race_translated_to_tool_error(
+        self, tmp_path: Path, monkeypatch
+    ):
+        import os as _os
+
+        p = tmp_path / "race.txt"
+        p.write_text("x\n", encoding="utf-8")
+        real_stat = _os.stat
+
+        def stat_then_remove(path, *args, **kwargs):
+            st = real_stat(path, *args, **kwargs)
+            if str(path).endswith("race.txt"):
+                _os.unlink(path)  # 模拟 stat 与 open 之间的外部删除
+            return st
+
+        monkeypatch.setattr("wing.tools.experimental.read.os.stat", stat_then_remove)
+        with pytest.raises(ToolError, match="No such file"):
+            await read(_StubCtx(), str(p))

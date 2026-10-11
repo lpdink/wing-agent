@@ -103,6 +103,14 @@ def test_parse_path_may_contain_hash():
     assert section.tag == "A1B2"
 
 
+def test_trailing_space_after_put_colon_is_tolerated():
+    # `PUT 1.=1: `（冒号后尾随空白，LLM 输出常见）仍按「替换 + 正文」解析。
+    (section,) = parse_payload("[a.py#A1B2]\nPUT 1.=1: \n+A\n")
+    op = section.ops[0]
+    assert isinstance(op, PutOp)
+    assert op.body == ["A"]
+
+
 def test_parse_multiple_sections_and_blank_lines_between_ops():
     sections = parse_payload(
         "*** Begin Patch\n"

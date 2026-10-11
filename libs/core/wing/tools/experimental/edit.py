@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import stat
 
 from wing.agent import ToolContext, current_tool_call_id
 from wing.common.fs import atomic_write_text
@@ -62,8 +63,8 @@ _MAX_TRACKED_SESSIONS = 128
 
 #: prepared 条目：(段, 绝对路径, 原文（未归一化，回滚用）, 归一化文本, BOM, 结果, MV 目标)
 _Prepared = tuple[Section, str, str, str, bool, ApplyOutcome, str | None]
-#: applied 条目：(绝对路径, 原文, BOM, 结果, MV 目标)
-_Applied = tuple[str, str, bool, ApplyOutcome, str | None]
+#: applied 条目：(绝对路径, 原文, BOM, 结果, MV 目标, 纯重命名的源真实路径)
+_Applied = tuple[str, str, bool, ApplyOutcome, str | None, str | None]
 
 
 def _session_registers(session_id: str) -> dict[str, list[str]]:
@@ -106,7 +107,9 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
     - MV DEST     move/rename the file after its edits (may share the section;
       refuses an existing destination, the same file, a destination that is
       also patched somewhere in the same payload, or a destination whose
-      directory does not exist).
+      directory does not exist). A pure move renames the file, preserving
+      inode, permissions and line endings; a moved patch copies the source's
+      permissions onto the destination.
 
     Body lines start with `+`; the rest is written verbatim (a lone `+` is a blank
     line). Content whose own line starts with `-`/`+` must be escaped as `+-`/`++`.
@@ -265,15 +268,28 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
             if outcome.removed:
                 _unlink_content_target(resolved)
             elif dest is not None:
+                target, in_place = resolve_write_target(resolved)
+                if not in_place and outcome.new_content == norm_text:
+                    # 纯移动走 rename：保留 inode / 权限位 / 行尾字节（写新+删旧
+                    # 会把 0755 脚本变 0644、CRLF 变 LF、硬链接身份分叉）。
+                    os.rename(target, dest)
+                    applied.append(
+                        (resolved, raw_text, had_bom, outcome, dest, str(target))
+                    )
+                    continue
                 _write(dest, text)
-                applied.append((resolved, raw_text, had_bom, outcome, dest))
+                applied.append((resolved, raw_text, had_bom, outcome, dest, None))
+                try:
+                    os.chmod(dest, stat.S_IMODE(os.stat(target).st_mode))
+                except OSError:
+                    pass  # 权限位复制尽力而为；内容已就位，不因此让 MV 失败
                 _unlink_content_target(resolved)
                 continue
             elif outcome.new_content != norm_text:
                 _write(resolved, text)
             else:
                 continue
-            applied.append((resolved, raw_text, had_bom, outcome, dest))
+            applied.append((resolved, raw_text, had_bom, outcome, dest, None))
     except OSError as e:
         failures = _rollback(applied)
         where = f"hashline: {section.path}: write failed: {e.strerror or e}"
@@ -345,15 +361,19 @@ def _unlink_content_target(path: str) -> None:
 def _rollback(applied: list[_Applied]) -> list[str]:
     """尽力回滚已落盘段——返回失败清单（空 = 完整回滚）。
 
-    恢复写原文（未归一化），MV 同时移除已写出的目标。任何失败只记录、不上抛
-    （原始写失败才是主错误）。
+    恢复写原文（未归一化）；MV 移除已写出的目标，纯重命名改名回源。任何失败只
+    记录、不上抛（原始写失败才是主错误）。
     """
     failures: list[str] = []
-    for resolved, raw_text, had_bom, _outcome, dest in reversed(applied):
+    for resolved, raw_text, had_bom, _outcome, dest, renamed_from in reversed(applied):
         try:
+            if renamed_from is not None and dest is not None:
+                os.rename(dest, renamed_from)
+                continue
             _write(resolved, ("\ufeff" if had_bom else "") + raw_text)
         except Exception as e:  # noqa: BLE001 — 回滚是尽力而为，失败照实上报
             failures.append(f"{resolved} ({e})")
+            continue
         if dest is not None:
             try:
                 if os.path.lexists(dest):

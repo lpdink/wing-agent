@@ -87,8 +87,13 @@ async def hashline_read(
     try:
         with open(resolved, "rb") as f:
             raw = f.read()
+    except FileNotFoundError:
+        # stat 与 open 之间的外部删除（TOCTOU）不逃逸成非 ToolError
+        raise ToolError(f"hashline: {resolved}: No such file")
     except PermissionError:
         raise ToolError(f"hashline: {resolved}: Permission denied")
+    except OSError as e:
+        raise ToolError(f"hashline: {resolved}: {e.strerror or e}")
 
     if b"\x00" in raw[:8192]:
         raise ToolError(

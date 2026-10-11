@@ -273,7 +273,7 @@ def _parse_ops(lines: list[str], idx: int, section: Section) -> int:
             idx += 1
             continue
         if line.startswith("PUT "):
-            rest = line[4:]
+            rest = line[4:].strip()
             if rest.endswith(":"):
                 loc = _parse_locator(rest[:-1], line_no)
                 body, idx = _parse_body(lines, idx + 1, line_no)
