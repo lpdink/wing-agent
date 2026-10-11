@@ -154,6 +154,9 @@ class ToolHost:
                 except json.JSONDecodeError:
                     continue
 
+                if not isinstance(payload, dict):
+                    continue
+
                 if payload.get("type") != "tool_call_request":
                     continue
 
