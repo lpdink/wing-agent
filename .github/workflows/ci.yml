@@ -51,8 +51,10 @@ jobs:
       - name: Dead code detection (vulture)
         run: uv run vulture libs/ --min-confidence 70 --exclude .venv/
 
-      - name: Unit tests
-        run: uv run pytest libs/core/tests/
+      # 与本地同一条命令：core + SDK 两套单测 + 覆盖率门禁
+      # （阈值与口径在 pyproject 的 [tool.coverage.*]，不在这里复述）
+      - name: Unit tests (with coverage gate)
+        run: make test-python
 
   # ── Probe: deterministic integration scenarios (fake provider) ─
   probe-check:

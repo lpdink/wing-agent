@@ -33,6 +33,11 @@ target/
 .DS_Store
 Thumbs.db
 
+# 覆盖率产物（pytest-cov；见 pyproject 的 [tool.coverage.*]）
+.coverage
+.coverage.*
+htmlcov/
+
 # wing runtime
 ~/.wing/
 libs/wing-sdk/uv.lock

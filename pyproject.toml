@@ -133,3 +133,8 @@ exclude_also = [
     "@overload",
 ]
 show_missing = true
+# 门禁阈值（本地 `make test-python` 与 CI 同一条命令、同一个数）：
+# 1 位小数精度，避免默认的整数四舍五入把 95.6 当成 96 放过；
+# 95.0 给常规改动留出约 130 条语句的余量，真正"整块没测"会立刻撞线。
+fail_under = 95
+precision = 1
