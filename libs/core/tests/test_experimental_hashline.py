@@ -26,6 +26,7 @@ from wing.tools.experimental.hashline import (
     apply_section,
     content_tag,
     decode_utf8,
+    normalize_newlines,
     parse_payload,
     split_lines,
 )
@@ -53,6 +54,12 @@ def test_content_tag_normalizes_newlines_only():
     # 空白与大小写属于内容，不参与规范化。
     assert content_tag("a b") != content_tag("a  b")
     assert content_tag("A") != content_tag("a")
+
+
+def test_normalize_newlines_folds_crlf_and_cr():
+    assert normalize_newlines("a\r\nb\rc\nd") == "a\nb\nc\nd"
+    # 幂等：已经是 LF 的文本原样返回。
+    assert normalize_newlines("a\nb\n") == "a\nb\n"
 
 
 def test_decode_utf8_reports_bom():
@@ -120,6 +127,8 @@ def test_parse_multiple_sections_and_blank_lines_between_ops():
         ("[a.py#A1B2]\nCUT 1* @x\n", "block locators"),
         ("[a.py#A1B2]\nFROB 1.=1\n", "expected an op"),
         ("[a.py#A1B2]\nCUT 1\n", "CUT needs an explicit range"),
+        ("[a.py#A1B2]\nCUT 2.=1 @x\n", "end < start"),
+        ("[a.py#A1B2]\nPUT ?:\n+A\n", "invalid locator"),
         ("[a.py#A1B2]\nPUT 2.=1:\n+A\n", "end < start"),
         ("[a.py#A1B2]\nMV\n", "MV needs a destination path"),
         (
@@ -200,11 +209,36 @@ def test_named_register_capture_and_paste_from_session():
     assert outcome2.new_content == "b\nc\na\n"
 
 
-def test_paste_over_range_requires_named_register():
+def test_named_register_visible_within_same_section():
+    outcome = apply_one("[x#AAAA]\nCUT 1.=1 @x\nPUT >$ @x\n", "a\nb\n")
+    assert outcome.new_content == "b\na\n"
+    assert outcome.named_registers == {"x": ["a"]}
+
+
+def test_apply_section_reports_and_accepts_anonymous_register():
+    outcome = apply_one("[x#AAAA]\nCUT 1.=1\n", "a\nb\n")
+    assert outcome.anonymous_register == ["a"]
+    # 调用方可以把匿名寄存器传给下一段（载荷内跨段传递）。
+    (section,) = parse_payload("[y#BBBB]\nPUT >$\n")
+    outcome2 = apply_section(section, "b\n", {}, anonymous=outcome.anonymous_register)
+    assert outcome2.new_content == "b\na\n"
+
+
+def test_range_paste_requires_named_register():
+    # 范围粘贴必须有名称——裸 `PUT N.=M`（少写 ':'）不是覆盖而是报错，避免静默。
+    with pytest.raises(HashlineError, match="range paste, which requires @name"):
+        apply_one("[x#AAAA]\nPUT 1.=1\n", "a\n")
     with pytest.raises(HashlineError, match="unknown register @nope"):
         apply_one("[x#AAAA]\nPUT 1.=1 @nope\n", "a\n")
+    # 间隙粘贴可以是匿名。
     with pytest.raises(HashlineError, match="no anonymous register"):
         apply_one("[x#AAAA]\nPUT <1\n", "a\n")
+
+
+def test_range_paste_over_lines_with_named_register():
+    outcome = apply_one("[x#AAAA]\nPUT 1.=2 @span\n", "a\nb\nc\n", {"span": ["X"]})
+    assert outcome.new_content == "X\nc\n"
+    assert outcome.ops_applied == 1
 
 
 def test_rem_must_be_alone_and_marks_removed():

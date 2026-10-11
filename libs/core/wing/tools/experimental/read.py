@@ -17,7 +17,11 @@ import stat
 from wing.agent import ToolContext
 from wing.schema import ToolError, ToolParam
 from wing.tool_registry import tool_registry
-from wing.tools.experimental.hashline import content_tag, decode_utf8
+from wing.tools.experimental.hashline import (
+    content_tag,
+    decode_utf8,
+    normalize_newlines,
+)
 from wing.tools.internal.utils import resolve_path
 
 MAX_LINES = 2000
@@ -63,6 +67,9 @@ async def hashline_read(
     is rejected when the file changed after this read. Re-read after edits to
     get the new TAG (edit results also carry it).
 
+    Line endings are shown (and hashed) as LF; a CRLF file is rewritten with LF
+    endings when patched.
+
     Errors: "hashline: PATH: No such file|Is a directory|Permission denied|not UTF-8|binary file"
     """
     limit = min(max(limit, 1), MAX_LINES)
@@ -84,13 +91,18 @@ async def hashline_read(
         raise ToolError(f"hashline: {resolved}: Permission denied")
 
     if b"\x00" in raw[:8192]:
-        raise ToolError(f"hashline: {resolved}: binary file — use Read or ReadImage")
+        raise ToolError(
+            f"hashline: {resolved}: binary file — use Read/ReadImage when available"
+        )
 
     try:
-        text, _had_bom = decode_utf8(raw)
+        raw_text, _had_bom = decode_utf8(raw)
     except UnicodeDecodeError as e:
-        raise ToolError(f"hashline: {resolved}: not UTF-8 ({e}) — use Read")
+        raise ToolError(
+            f"hashline: {resolved}: not UTF-8 ({e}) — convert it or use Read when available"
+        )
 
+    text = normalize_newlines(raw_text)
     tag = content_tag(text)
     lines = text.split("\n")
     if lines and lines[-1] == "":

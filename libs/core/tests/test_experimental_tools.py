@@ -252,3 +252,151 @@ class TestHashlineEdit:
         ctx = _StubCtx()
         with pytest.raises(ToolError, match=r"^hashline: "):
             await edit(ctx, "not a patch")
+
+    # ── 审查加固（评审轮修复项的行为锁定） ────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_repeated_sections_for_same_file_merge(self, tmp_path: Path):
+        a = tmp_path / "a.txt"
+        a.write_text("a\nb\nc\n", encoding="utf-8")
+        b = tmp_path / "b.txt"
+        b.write_text("x\ny\n", encoding="utf-8")
+        ctx = _StubCtx()
+        tag_a = content_tag("a\nb\nc\n")
+        tag_b = content_tag("x\ny\n")
+        # a 的段不连续（a → b → a）：按首次出现顺序归并，ops 按载荷顺序拼接。
+        payload = (
+            f"[{a}#{tag_a}]\nPUT 1.=1:\n+A\n"
+            f"[{b}#{tag_b}]\nPUT 1.=1:\n+X\n"
+            f"[{a}#{tag_a}]\nPUT 3.=3:\n+C\n"
+        )
+        result = await edit(ctx, payload)
+        assert result == (
+            f"hashline: ok (2 files)\n"
+            f"  {a}: #{content_tag('A\nb\nC\n')}, 2 ops, 3 → 3 lines\n"
+            f"  {b}: #{content_tag('X\ny\n')}, 1 op, 2 → 2 lines"
+        ), result
+        assert a.read_text(encoding="utf-8") == "A\nb\nC\n"
+        assert b.read_text(encoding="utf-8") == "X\ny\n"
+        assert len(ctx.events) == 3  # 每个操作一条窗口
+
+    @pytest.mark.asyncio
+    async def test_repeated_sections_with_different_tags_conflict(self, tmp_path: Path):
+        p = tmp_path / "f.txt"
+        p.write_text("a\n", encoding="utf-8")
+        ctx = _StubCtx()
+        tag = content_tag("a\n")
+        other = "0000" if tag != "0000" else "FFFF"
+        with pytest.raises(ToolError, match="different tags"):
+            await edit(
+                ctx, f"[{p}#{tag}]\nPUT 1.=1:\n+x\n[{p}#{other}]\nPUT 1.=1:\n+y\n"
+            )
+        assert p.read_text(encoding="utf-8") == "a\n"
+        assert ctx.events == []
+
+    @pytest.mark.asyncio
+    async def test_registers_flow_across_sections_in_one_payload(self, tmp_path: Path):
+        src = tmp_path / "src.txt"
+        src.write_text("keep\n", encoding="utf-8")
+        dst = tmp_path / "dst.txt"
+        dst.write_text("base\n", encoding="utf-8")
+        ctx = _StubCtx()
+        payload = (
+            f"[{src}#{content_tag('keep\n')}]\nCUT 1.=1 @moved\n"
+            f"[{dst}#{content_tag('base\n')}]\nPUT >$ @moved\n"
+        )
+        await edit(ctx, payload)
+        assert src.read_text(encoding="utf-8") == ""
+        assert dst.read_text(encoding="utf-8") == "base\nkeep\n"
+
+    @pytest.mark.asyncio
+    async def test_anonymous_register_flows_across_sections(self, tmp_path: Path):
+        src = tmp_path / "src.txt"
+        src.write_text("keep\n", encoding="utf-8")
+        dst = tmp_path / "dst.txt"
+        dst.write_text("base\n", encoding="utf-8")
+        ctx = _StubCtx()
+        payload = (
+            f"[{src}#{content_tag('keep\n')}]\nCUT 1.=1\n"
+            f"[{dst}#{content_tag('base\n')}]\nPUT >$\n"
+        )
+        await edit(ctx, payload)
+        assert dst.read_text(encoding="utf-8") == "base\nkeep\n"
+
+    @pytest.mark.asyncio
+    async def test_write_failure_rolls_back_and_keeps_registers_uncommitted(
+        self, tmp_path: Path
+    ):
+        good = tmp_path / "good.txt"
+        good.write_text("a\n", encoding="utf-8")
+        bad = tmp_path / "bad.txt"
+        bad.write_text("b\n", encoding="utf-8")
+        bad.chmod(0o444)
+        ctx = _StubCtx(session_id="rollback-session")
+
+        payload = (
+            f"[{good}#{content_tag('a\n')}]\nCUT 1.=1 @grab\nPUT >$:\n+after\n"
+            f"[{bad}#{content_tag('b\n')}]\nPUT 1.=1:\n+x\n"
+        )
+        with pytest.raises(ToolError, match="nothing was changed"):
+            await edit(ctx, payload)
+
+        # 已落盘的 good 被回滚；bad 原样；零事件；捕获的寄存器未提交。
+        assert good.read_text(encoding="utf-8") == "a\n"
+        assert bad.read_text(encoding="utf-8") == "b\n"
+        assert ctx.events == []
+        with pytest.raises(ToolError, match="unknown register @grab"):
+            await edit(ctx, f"[{good}#{content_tag('a\n')}]\nPUT >$ @grab\n")
+
+    @pytest.mark.asyncio
+    async def test_crlf_file_normalized_to_lf_on_edit(self, tmp_path: Path):
+        p = tmp_path / "crlf.txt"
+        p.write_bytes(b"a\r\nb\r\n")
+        ctx = _StubCtx()
+
+        result = await read(ctx, str(p))
+        assert "\r" not in result
+        tag = content_tag("a\nb\n")  # CRLF / LF 同一内容同一 tag
+        assert f"#{tag}" in result
+
+        await edit(ctx, f"[{p}#{tag}]\nPUT 2.=2:\n+B\n")
+        assert p.read_bytes() == b"a\nB\n"
+
+    @pytest.mark.asyncio
+    async def test_mv_refuses_existing_destination_and_same_file(self, tmp_path: Path):
+        src = tmp_path / "s.txt"
+        src.write_text("s\n", encoding="utf-8")
+        dst = tmp_path / "d.txt"
+        dst.write_text("precious\n", encoding="utf-8")
+        ctx = _StubCtx()
+
+        with pytest.raises(ToolError, match="already exists"):
+            await edit(ctx, f"[{src}#{content_tag('s\n')}]\nMV {dst}\n")
+        assert src.read_text(encoding="utf-8") == "s\n"
+        assert dst.read_text(encoding="utf-8") == "precious\n"
+
+        with pytest.raises(ToolError, match="same file"):
+            await edit(ctx, f"[{src}#{content_tag('s\n')}]\nMV {src}\n")
+        assert src.read_text(encoding="utf-8") == "s\n"
+
+    @pytest.mark.asyncio
+    async def test_rem_and_mv_follow_symlink_write_through(self, tmp_path: Path):
+        ctx = _StubCtx()
+
+        real = tmp_path / "real.txt"
+        real.write_text("r\n", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+        await edit(ctx, f"[{link}#{content_tag('r\n')}]\nREM\n")
+        assert not real.exists()
+        assert link.is_symlink()  # 链接本身保留（悬空）——写穿政策的删除侧
+
+        real2 = tmp_path / "real2.txt"
+        real2.write_text("r2\n", encoding="utf-8")
+        link2 = tmp_path / "link2.txt"
+        link2.symlink_to(real2)
+        dest = tmp_path / "moved.txt"
+        await edit(ctx, f"[{link2}#{content_tag('r2\n')}]\nMV {dest}\n")
+        assert dest.read_text(encoding="utf-8") == "r2\n"
+        assert not real2.exists()
+        assert link2.is_symlink()

@@ -11,6 +11,9 @@
 
 v1 不支持块定位（``N*`` / ``>N*``）——上游靠 tree-sitter 解析语法块，本实验没有
 语法解析依赖，遇到块形式显式报错，改用显式行范围。
+
+行尾口径：读写两侧都把 CRLF / CR 归一化为 LF（``normalize_newlines``），编辑按
+LF 写回——与主 Edit 工具文本模式的行为一致；tag 只对 LF 视图取指纹。
 """
 
 from __future__ import annotations
@@ -40,13 +43,21 @@ class HashlineError(ValueError):
     """解析 / 应用错误——工具层翻译成 ``ToolError`` 后交给模型。"""
 
 
+def normalize_newlines(text: str) -> str:
+    """CRLF / CR → LF。
+
+    读写两侧共用一份口径：内容同一性（tag）与行号语义都基于 LF 文本；编辑按
+    LF 写回（与主 Edit 工具文本模式的行为一致）。
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def content_tag(content: str) -> str:
     """内容指纹：LF 规范化后的 sha256 前 4 位十六进制（大写）。
 
-    规范化只折叠换行（``\\r\\n`` / ``\\r`` → ``\\n``），不做空白裁剪——行尾风格
-    不属于内容同一性，同一份文本视图给出同一个 tag。
+    行尾风格不属于内容同一性——同一文本的 CRLF / LF 视图给出同一个 tag。
     """
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalize_newlines(content)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:4].upper()
 
 
@@ -150,6 +161,8 @@ class ApplyOutcome:
     new_line_count: int
     named_registers: dict[str, list[str]] = field(default_factory=dict)
     """本次 CUT 产生的命名寄存器，由调用方在落盘成功后提交。"""
+    anonymous_register: list[str] | None = None
+    """本段结束时的匿名寄存器（载荷内跨段传递用；调用方决定是否继续传）。"""
     removed: bool = False
     moved_to: str | None = None
 
@@ -340,11 +353,16 @@ def apply_section(
     section: Section,
     content: str,
     registers: Mapping[str, list[str]],
+    anonymous: list[str] | None = None,
 ) -> ApplyOutcome:
     """把一段补丁应用到 ``content``（调用方已通过 tag 对账）。
 
-    先做全量校验与内容构造，任何错误（越界 / 重叠 / 未知寄存器）都抛
-    ``HashlineError`` 且不产生半截结果；写盘全部在调用方。
+    ``content`` 应为 LF 规范化后的文本（调用方 ``normalize_newlines``）；
+    ``registers`` = 可用命名寄存器（会话已提交值 + 本载荷前序段的捕获）；
+    ``anonymous`` = 进入本段时的匿名寄存器（载荷内跨段传递），返回值在
+    ``outcome.anonymous_register``。先做全量校验与内容构造，任何错误（越界 /
+    重叠 / 未知寄存器 / 无寄存器的范围粘贴）都抛 ``HashlineError`` 且不产生
+    半截结果；写盘全部在调用方。
     """
     lines, trailing_nl = split_lines(content)
     total = len(lines)
@@ -359,7 +377,6 @@ def apply_section(
     primitives: list[tuple[tuple[int, int, int], str, tuple, int]] = []
     seq = 0
     named: dict[str, list[str]] = {}
-    anonymous: list[str] | None = None
     removed = False
     moved_to: str | None = None
     ops_applied = 0
@@ -426,6 +443,12 @@ def apply_section(
             continue
         # PutOp
         if op.body is None:
+            if op.loc.kind == "range" and op.register is None:
+                raise HashlineError(
+                    f"line {op.line}: 'PUT {op.loc.start}.={op.loc.end}' without ':' "
+                    "is a range paste, which requires @name; add ':' plus '+' body "
+                    "lines to replace, or capture with CUT ... @name first"
+                )
             body = resolve_register(op.register, op.line)
             if op.loc.kind == "range":
                 add_replace(op.loc.start, op.loc.end, body, op.line)
@@ -497,6 +520,7 @@ def apply_section(
         old_line_count=total,
         new_line_count=len(new_lines),
         named_registers=named,
+        anonymous_register=anonymous,
         removed=removed,
         moved_to=moved_to,
     )
