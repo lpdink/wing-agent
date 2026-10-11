@@ -17,6 +17,7 @@
 | [tui-signals.md](tui-signals.md) | TUI 终端状态信号（OSC 0 标题 / OSC 9 通知 / OSC 7501 程序状态）：读者分工、状态映射、盲发与去重决策、已知边界 |
 | [vscode-extension.md](vscode-extension.md) | VSCode 扩展：四层分层与数据流、桥协议与归约（重放==直播）、会话时序与多 Tab、连接自愈、构建/测试/smoke、打包与安装 |
 | [probe-testing.md](probe-testing.md) | wing-probe 确定性集成测试：跑法（`make test-probe`）、新增场景、断言原语、红线清单与口径、逃生舱 |
+| [experimental-tools.md](experimental-tools.md) | experimental 命名域：hashline 行锚编辑（HashlineRead / HashlineEdit 的格式与语义、启用方式、事务 / 寄存器 / 别名的边界取舍、测试面） |
 | [coverage.md](coverage.md) | 覆盖率：增量（patch）门禁的口径与阈值来源、cargo-llvm-cov 工具链的坑、PR 覆盖率评论（sticky `<!-- wing-coverage -->`）的数据流与读法 |
 | [welcome-mascot.md](welcome-mascot.md) | 开屏海鸥：字母网格帧与品牌调色板、待机/干活两姿态、可见性门控的重绘成本契约、改画工作流 |
 

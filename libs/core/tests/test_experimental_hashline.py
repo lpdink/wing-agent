@@ -248,6 +248,11 @@ def test_rem_must_be_alone_and_marks_removed():
         apply_one("[x#AAAA]\nREM\nPUT 1.=1:\n+a\n", "a\n")
 
 
+def test_duplicate_mv_in_one_section_rejected():
+    with pytest.raises(HashlineError, match="duplicate MV"):
+        apply_one("[x#AAAA]\nMV d1\nMV d2\n", "a\n")
+
+
 def test_mv_records_destination_and_quoted_path():
     outcome = apply_one('[x#AAAA]\nMV "sub dir/x y.txt"\n', "a\n")
     assert outcome.moved_to == "sub dir/x y.txt"

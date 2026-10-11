@@ -426,6 +426,11 @@ def apply_section(
             removed = True
             continue
         if isinstance(op, MvOp):
+            if moved_to is not None:
+                raise HashlineError(
+                    f"line {op.line}: duplicate MV — a section can move to only one "
+                    "destination"
+                )
             moved_to = op.dest
             continue
         if isinstance(op, CutOp):

@@ -13,7 +13,9 @@
   完整文件由原始快照推导，会覆盖前段落盘结果——前段编辑静默丢失。
 
 命名寄存器是模块级会话状态（``session_id → {name: lines}``）：进程内、不落盘、
-不随会话 fork/恢复复制、网关重启即失忆——与 TodoWrite 的会话态同型。
+不随会话 fork/恢复复制、网关重启即失忆——与 TodoWrite 的会话态同型。为防长跑
+网关无界增长，寄存表有两级水位：跟踪会话数（按首次使用先后 FIFO 淘汰最老条目）
+与每会话命名寄存器数（超限显式报错，不静默淘汰）。
 """
 
 from __future__ import annotations
@@ -50,13 +52,30 @@ _PARAMS = [
 ]
 
 #: 会话级命名寄存器（session_id → {name → lines}）。仅本工具的 CUT / 粘贴读写；
-#: 进程内、不落盘（见模块 docstring 的作用域说明）。
+#: 进程内、不落盘；两级水位见模块 docstring。
 _registers: dict[str, dict[str, list[str]]] = {}
+
+#: 每会话命名寄存器上限（CUT 可能捕获长文件段；超限显式报错，不静默淘汰）。
+_MAX_NAMED_REGISTERS = 64
+#: 跟踪的会话数上限（按首次使用先后 FIFO 淘汰最老条目）。
+_MAX_TRACKED_SESSIONS = 128
 
 #: prepared 条目：(段, 绝对路径, 原文（未归一化，回滚用）, 归一化文本, BOM, 结果, MV 目标)
 _Prepared = tuple[Section, str, str, str, bool, ApplyOutcome, str | None]
 #: applied 条目：(绝对路径, 原文, BOM, 结果, MV 目标)
 _Applied = tuple[str, str, bool, ApplyOutcome, str | None]
+
+
+def _session_registers(session_id: str) -> dict[str, list[str]]:
+    """取会话寄存器表；表满时按首次使用先后淘汰最老的会话条目。"""
+    registers = _registers.get(session_id)
+    if registers is not None:
+        return registers
+    while len(_registers) >= _MAX_TRACKED_SESSIONS:
+        _registers.pop(next(iter(_registers)))
+    registers = {}
+    _registers[session_id] = registers
+    return registers
 
 
 @tool_registry.register(
@@ -84,7 +103,8 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
       PUT N.=M @name pastes register lines over N–M (@name required).
     - REM         delete the whole file (must be the only op in its section).
     - MV DEST     move/rename the file after its edits (may share the section;
-      refuses an existing destination).
+      refuses an existing destination, the same file, or a destination that is
+      also patched somewhere in the same payload).
 
     Body lines start with `+`; the rest is written verbatim (a lone `+` is a blank
     line). Content whose own line starts with `-`/`+` must be escaped as `+-`/`++`.
@@ -107,18 +127,26 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
     except HashlineError as e:
         raise ToolError(f"hashline: {e}") from e
 
-    merged: dict[str, Section] = {}
+    # 归并键 = realpath：符号链接 / `..` / 相对拼写等别名归一到同一身份。只用
+    # 字符串相等做键时，别名拼写会绕过归并——两段各自基于同一原始快照构造完整
+    # 文件并依次落盘，后写覆盖前写（前段编辑静默丢失，回执还谎报两个文件）。
+    groups: dict[str, tuple[str, Section]] = {}
     for section in sections:
         resolved = resolve_path(section.path, ctx)
-        existing = merged.get(resolved)
-        if existing is None:
-            merged[resolved] = Section(
-                path=section.path,
-                tag=section.tag,
-                ops=list(section.ops),
-                line=section.line,
+        key = os.path.realpath(resolved)
+        entry = groups.get(key)
+        if entry is None:
+            groups[key] = (
+                resolved,
+                Section(
+                    path=section.path,
+                    tag=section.tag,
+                    ops=list(section.ops),
+                    line=section.line,
+                ),
             )
             continue
+        existing = entry[1]
         if existing.tag != section.tag:
             raise ToolError(
                 f"hashline: {section.path}: repeated sections carry different tags "
@@ -126,14 +154,16 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
             )
         existing.ops.extend(section.ops)
 
-    session_registers = _registers.setdefault(ctx.session_id, {})
+    session_registers = _session_registers(ctx.session_id)
 
     # 载荷内前序段捕获的寄存器对后续段可见（"top-to-bottom across sections"），
     # 但只有全部落盘成功后才提交给会话。
     payload_named: dict[str, list[str]] = {}
     anonymous: list[str] | None = None
     prepared: list[_Prepared] = []
-    for resolved, section in merged.items():
+    canonical_sources = set(groups)
+    planned_dests: dict[str, str] = {}
+    for key, (resolved, section) in groups.items():
         try:
             with open(resolved, "rb") as f:
                 raw = f.read()
@@ -167,21 +197,43 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
             )
         except HashlineError as e:
             raise ToolError(f"hashline: {e}") from e
+
+        pending_names = set(payload_named) | set(outcome.named_registers)
+        if len(set(session_registers) | pending_names) > _MAX_NAMED_REGISTERS:
+            raise ToolError(
+                f"hashline: {section.path}: named register limit reached "
+                f"({_MAX_NAMED_REGISTERS} per session); reuse an existing name or "
+                "omit @name"
+            )
+
         anonymous = outcome.anonymous_register
         payload_named.update(outcome.named_registers)
 
         dest: str | None = None
         if outcome.moved_to is not None:
             dest = resolve_path(outcome.moved_to, ctx)
-            if os.path.abspath(dest) == os.path.abspath(resolved):
+            dest_key = os.path.realpath(dest)
+            if dest_key == key:
                 raise ToolError(
                     f"hashline: {section.path}: MV destination is the same file"
+                )
+            if dest_key in canonical_sources:
+                raise ToolError(
+                    f"hashline: {section.path}: MV destination {outcome.moved_to} is "
+                    "also patched in this payload — refusing to overwrite it"
+                )
+            if dest_key in planned_dests:
+                raise ToolError(
+                    f"hashline: {section.path}: MV destination {outcome.moved_to} is "
+                    "already the destination of the section for "
+                    f"{planned_dests[dest_key]}"
                 )
             if os.path.lexists(dest):
                 raise ToolError(
                     f"hashline: {section.path}: MV destination {outcome.moved_to} "
                     "already exists — refusing to overwrite it"
                 )
+            planned_dests[dest_key] = section.path
         prepared.append(
             (section, resolved, raw_text, norm_text, had_bom, outcome, dest)
         )

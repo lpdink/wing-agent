@@ -138,6 +138,29 @@ class TestHashlineRead:
         assert f"#{content_tag('hi\n')}" in await read(ctx, str(plain))
         assert f"#{content_tag('hi\n')}" in await read(ctx, str(bommed))
 
+    @pytest.mark.asyncio
+    async def test_offset_negative_and_beyond_eof(self, tmp_path: Path):
+        p = tmp_path / "f.txt"
+        p.write_text("a\nb\nc\n", encoding="utf-8")
+        ctx = _StubCtx()
+        result = await read(ctx, str(p), offset=-2)
+        assert "lines 2-3/3" in result
+        assert "2→b" in result and "3→c" in result
+        result = await read(ctx, str(p), offset=99)
+        assert "offset 99 beyond EOF (3 lines)" in result
+
+    @pytest.mark.asyncio
+    async def test_directory_and_permission_errors(self, tmp_path: Path):
+        ctx = _StubCtx()
+        with pytest.raises(ToolError, match="Is a directory"):
+            await read(ctx, str(tmp_path))
+        p = tmp_path / "secret.txt"
+        p.write_text("x\n", encoding="utf-8")
+        p.chmod(0o000)
+        with pytest.raises(ToolError, match="Permission denied"):
+            await read(ctx, str(p))
+        p.chmod(0o644)
+
 
 # ── HashlineEdit ──────────────────────────────────────────────────────
 
@@ -253,7 +276,7 @@ class TestHashlineEdit:
         with pytest.raises(ToolError, match=r"^hashline: "):
             await edit(ctx, "not a patch")
 
-    # ── 审查加固（评审轮修复项的行为锁定） ────────────────────────────
+    # ── 行为边界：归并 / 寄存器 / 回滚 / CRLF / MV 防护 / 符号链接 ──
 
     @pytest.mark.asyncio
     async def test_repeated_sections_for_same_file_merge(self, tmp_path: Path):
@@ -400,3 +423,132 @@ class TestHashlineEdit:
         assert dest.read_text(encoding="utf-8") == "r2\n"
         assert not real2.exists()
         assert link2.is_symlink()
+
+    @pytest.mark.asyncio
+    async def test_alias_spellings_merge_into_one_target(self, tmp_path: Path):
+        f = tmp_path / "f.txt"
+        f.write_text("l1\nl2\nl3\n", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        link.symlink_to(f)
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        alias = sub / ".." / "f.txt"  # `sub/../f.txt` 拼写
+        ctx = _StubCtx()
+        tag = content_tag("l1\nl2\nl3\n")
+        # 三种拼写（真名 / 符号链接 / `..`）指向同一文件 → 归并为一段、一次落盘。
+        payload = (
+            f"[{f}#{tag}]\nPUT 1.=1:\n+EDIT1\n"
+            f"[{link}#{tag}]\nPUT 3.=3:\n+EDIT3\n"
+            f"[{alias}#{tag}]\nPUT 2.=2:\n+EDIT2\n"
+        )
+        result = await edit(ctx, payload)
+        assert result.startswith("hashline: ok (1 file)"), result
+        assert result.count("\n") == 1, result
+        assert f.read_text(encoding="utf-8") == "EDIT1\nEDIT2\nEDIT3\n"
+
+    @pytest.mark.asyncio
+    async def test_two_sections_cannot_move_to_same_destination(self, tmp_path: Path):
+        a = tmp_path / "a.txt"
+        a.write_text("AAA\n", encoding="utf-8")
+        b = tmp_path / "b.txt"
+        b.write_text("BBB\n", encoding="utf-8")
+        dest = tmp_path / "dest.txt"
+        ctx = _StubCtx()
+
+        payload = (
+            f"[{a}#{content_tag('AAA\n')}]\nMV {dest}\n"
+            f"[{b}#{content_tag('BBB\n')}]\nMV {dest}\n"
+        )
+        with pytest.raises(ToolError, match="already the destination"):
+            await edit(ctx, payload)
+        assert a.read_text(encoding="utf-8") == "AAA\n"
+        assert b.read_text(encoding="utf-8") == "BBB\n"
+        assert not dest.exists()
+
+        # 别名拼写（悬空符号链接指向同一目标）同样命中冲突。
+        alias = tmp_path / "alias.txt"
+        alias.symlink_to(dest)
+        payload = (
+            f"[{a}#{content_tag('AAA\n')}]\nMV {dest}\n"
+            f"[{b}#{content_tag('BBB\n')}]\nMV {alias}\n"
+        )
+        with pytest.raises(ToolError, match="already the destination"):
+            await edit(ctx, payload)
+        assert a.read_text(encoding="utf-8") == "AAA\n"
+        assert b.read_text(encoding="utf-8") == "BBB\n"
+
+    @pytest.mark.asyncio
+    async def test_mv_destination_cannot_be_another_source(self, tmp_path: Path):
+        a = tmp_path / "a.txt"
+        a.write_text("AAA\n", encoding="utf-8")
+        b = tmp_path / "b.txt"
+        b.write_text("BBB\n", encoding="utf-8")
+        ctx = _StubCtx()
+
+        payload = (
+            f"[{a}#{content_tag('AAA\n')}]\nMV {b}\n"
+            f"[{b}#{content_tag('BBB\n')}]\nPUT 1.=1:\n+x\n"
+        )
+        with pytest.raises(ToolError, match="also patched in this payload"):
+            await edit(ctx, payload)
+        assert a.read_text(encoding="utf-8") == "AAA\n"
+        assert b.read_text(encoding="utf-8") == "BBB\n"
+        assert ctx.events == []
+
+    @pytest.mark.asyncio
+    async def test_edit_source_directory_and_permission_errors(self, tmp_path: Path):
+        ctx = _StubCtx()
+        with pytest.raises(ToolError, match="Is a directory"):
+            await edit(ctx, f"[{tmp_path}#FFFF]\nREM\n")
+        p = tmp_path / "secret.txt"
+        p.write_text("x\n", encoding="utf-8")
+        p.chmod(0o000)
+        with pytest.raises(ToolError, match="Permission denied"):
+            await edit(ctx, f"[{p}#FFFF]\nREM\n")
+        p.chmod(0o644)
+
+    @pytest.mark.asyncio
+    async def test_named_register_limit_errors_instead_of_silent_eviction(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from wing.tools.experimental import edit as edit_mod
+
+        monkeypatch.setattr(edit_mod, "_MAX_NAMED_REGISTERS", 1)
+        ctx = _StubCtx(session_id="cap-session")
+        p = tmp_path / "f.txt"
+        p.write_text("a\nb\n", encoding="utf-8")
+
+        await edit(ctx, f"[{p}#{content_tag('a\nb\n')}]\nCUT 1.=1 @one\n")
+        assert p.read_text(encoding="utf-8") == "b\n"
+
+        # 新名字超限 → 显式报错、零写入（文件仍是 b），不是静默淘汰既有寄存器。
+        with pytest.raises(ToolError, match="register limit"):
+            await edit(ctx, f"[{p}#{content_tag('b\n')}]\nCUT 1.=1 @two\n")
+        assert p.read_text(encoding="utf-8") == "b\n"
+
+        # 复用既有名字不受限。
+        await edit(ctx, f"[{p}#{content_tag('b\n')}]\nCUT 1.=1 @one\n")
+        assert p.read_text(encoding="utf-8") == ""
+
+    @pytest.mark.asyncio
+    async def test_register_session_map_is_bounded(self, tmp_path: Path, monkeypatch):
+        from wing.tools.experimental import edit as edit_mod
+
+        monkeypatch.setattr(edit_mod, "_registers", {})
+        monkeypatch.setattr(edit_mod, "_MAX_TRACKED_SESSIONS", 2)
+        for sid in ("s1", "s2", "s3"):
+            p = tmp_path / f"{sid}.txt"
+            p.write_text("keep\n", encoding="utf-8")
+            await edit(
+                _StubCtx(session_id=sid),
+                f"[{p}#{content_tag('keep\n')}]\nCUT 1.=1 @r\n",
+            )
+        assert set(edit_mod._registers) == {"s2", "s3"}
+
+        # 被淘汰会话的寄存器不再可见（条目重建但内容为空）。
+        p1 = tmp_path / "s1.txt"
+        with pytest.raises(ToolError, match="unknown register @r"):
+            await edit(
+                _StubCtx(session_id="s1"),
+                f"[{p1}#{content_tag('')}]\nPUT <1 @r\n",
+            )

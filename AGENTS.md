@@ -108,7 +108,8 @@ libs/core/wing/
 │   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
 ├── tools/                           内置工具（__init__ 显式导入 = 注册）
 │   ├── builtin/                     一工具一文件：bash · read/write/edit · glob/grep · read_image · ask_user · todo
-│   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety
+│   ├── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety
+│   └── experimental/                实验域（命名域 experimental）：hashline 行锚编辑——HashlineRead（读，带内容指纹）· HashlineEdit（写，[path#TAG] 补丁）
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── audit/                           指标 / 审计注册中心（EventBus 订阅，原子写 JSON；install() 由组合根显式调用）
 │   ├── core.py                      MetricsRegistry 类 + 单例 + 原子读写工具
@@ -260,6 +261,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
+| [`docs/dev/experimental-tools.md`](docs/dev/experimental-tools.md) | experimental 命名域：hashline 行锚编辑（HashlineRead / HashlineEdit 的格式与语义、启用方式、事务 / 寄存器 / 别名的边界取舍、测试面） |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |
 
 事实来源优先级：**代码 > docs/dev > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
