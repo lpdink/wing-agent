@@ -1057,7 +1057,10 @@ async fn run_carries_the_agent_flag() {
     let out = json_of(&stdout);
     assert_eq!(out["template_name"], "default");
     let create_body = body_of(&stub, "/api/session/create");
-    assert_eq!(create_body["template_name"], Value::Null, "{create_body}");
+    assert!(
+        create_body.get("template_name").is_none(),
+        "键必须缺席（而不是显式 null）：{create_body}"
+    );
 
     let _ = std::fs::remove_dir_all(&stub.home);
 }
