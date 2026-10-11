@@ -382,3 +382,38 @@ class TestEagerChunking:
         monkeypatch.setattr("wing.gateway.server.build_frames", counting)
         server._on_event(_notice("hello"))
         assert calls == 1
+
+
+class TestTinyBudgetBoundaryFallback:
+    """预算小到装不下一个字符时：前进一个**完整字符**，且绝不产空片。"""
+
+    def test_budget_that_cannot_fit_a_character_still_advances(self):
+        from wing.gateway.frames import _split_raw
+
+        raw = "汉字".encode()  # 每个字符 3 字节
+        # budget=1：任何字符都放不下 → 走 _next_boundary 兜底，不能死循环/空片
+        pieces = _split_raw(raw, 1, lambda start, end: end - start)
+
+        assert b"".join(pieces) == raw
+        assert all(pieces)  # 无空片
+        assert [len(p) for p in pieces] == [3, 3]
+
+    def test_budget_that_fits_exactly_one_character(self):
+        from wing.gateway.frames import _split_raw
+
+        raw = ("ab" * 8).encode()
+        pieces = _split_raw(raw, 1, lambda start, end: end - start)
+
+        assert b"".join(pieces) == raw
+        assert [len(p) for p in pieces] == [1] * 16
+
+    def test_escaping_expansion_shrinks_within_the_budget(self):
+        """转义膨胀（引号/反斜杠各 +1）时要按当前片密度收缩，而不是爆预算。"""
+        from wing.gateway.frames import _split_raw
+
+        raw = b'"' * 40
+        budget = 30
+        pieces = _split_raw(raw, budget, lambda start, end: 2 * (end - start))
+
+        assert b"".join(pieces) == raw
+        assert all(2 * len(p) <= budget for p in pieces)
