@@ -113,15 +113,29 @@ class DiffLines:
     removed: dict[str, int] = field(default_factory=dict)
 
 
+def _strip_prefix(target: str) -> str | None:
+    """``b/x`` / ``a/x`` → ``x``；``/dev/null`` → None。"""
+    if target == "/dev/null":
+        return None
+    if target.startswith(("b/", "a/")):
+        return target[2:]
+    return target
+
+
 def parse_diff(diff_text: str) -> DiffLines:
     """unified diff（``-U0``）→ 新增行号与删除行数。
 
     hunk 状态机：``@@`` 进入 hunk；hunk 内只按 ``+`` / ``-`` / ``\\`` /
     上下文识别——以 ``++`` / ``--`` 开头的**内容行**（如新增一行 ``++ b/x``
     在 diff 里就是 ``+++ b/x``）因此不会被误当成 ``+++`` 文件头。
+
+    新增行归 ``+++`` 侧路径、删除行归 ``---`` 侧路径：整文件删除时新侧是
+    ``/dev/null``，删除行必须仍能归到旧路径上（否则「删掉整个测试文件」在
+    ``removed`` 里消失）；改名带修改时两侧各归其位。
     """
     diff = DiffLines()
-    path: str | None = None
+    add_path: str | None = None
+    del_path: str | None = None
     cursor: int | None = None
     in_hunk = False
     for raw in diff_text.splitlines():
@@ -133,12 +147,12 @@ def parse_diff(diff_text: str) -> DiffLines:
             continue
         if in_hunk:
             if raw.startswith("+"):
-                if path is not None and cursor is not None:
-                    diff.added.setdefault(path, set()).add(cursor)
+                if add_path is not None and cursor is not None:
+                    diff.added.setdefault(add_path, set()).add(cursor)
                 cursor = (cursor or 0) + 1
             elif raw.startswith("-"):
-                if path is not None:
-                    diff.removed[path] = diff.removed.get(path, 0) + 1
+                if del_path is not None:
+                    diff.removed[del_path] = diff.removed.get(del_path, 0) + 1
             elif raw.startswith("\\"):
                 pass
             elif raw.startswith(" ") or raw == "":
@@ -147,13 +161,9 @@ def parse_diff(diff_text: str) -> DiffLines:
                 in_hunk = False  # hunk 结束：后续是文件级元数据
             continue
         if raw.startswith("+++ "):
-            target = _unquote(raw[4:])
-            if target == "/dev/null":
-                path = None
-            elif target.startswith(("b/", "a/")):
-                path = target[2:]
-            else:
-                path = target
+            add_path = _strip_prefix(_unquote(raw[4:]))
+        elif raw.startswith("--- "):
+            del_path = _strip_prefix(_unquote(raw[4:]))
     return diff
 
 
@@ -548,6 +558,23 @@ def _run_selftest() -> int:
         "-b\n"
         "-c\n"
         "+keep\n"
+        "diff --git a/tests/test_gone.py b/tests/test_gone.py\n"
+        "deleted file mode 100644\n"
+        "--- a/tests/test_gone.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,3 +0,0 @@\n"
+        "-a\n"
+        "-b\n"
+        "-c\n"
+        "diff --git a/tests/test_old.py b/tests/test_new.py\n"
+        "similarity index 80%\n"
+        "rename from tests/test_old.py\n"
+        "rename to tests/test_new.py\n"
+        "--- a/tests/test_old.py\n"
+        "+++ b/tests/test_new.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-stale\n"
+        "+fresh\n"
     )
     parsed = parse_diff(diff)
     added, removed = parsed.added, parsed.removed
@@ -567,6 +594,16 @@ def _run_selftest() -> int:
         "diff: 删除行计数",
         removed.get("a.py") == 2 and removed.get("t.py") == 3,
         repr(removed),
+    )
+    check(
+        "diff: 整文件删除的删除行归旧路径",
+        removed.get("tests/test_gone.py") == 3,
+        repr(removed),
+    )
+    check(
+        "diff: 改名带修改两侧各归其位",
+        removed.get("tests/test_old.py") == 1 and added.get("tests/test_new.py") == {1},
+        repr((added, removed)),
     )
 
     root = Path("/repo")
@@ -671,13 +708,21 @@ def _run_selftest() -> int:
             "-three\n"
             "+kept\n"
             "+kept2\n"
+            "diff --git a/tests/test_gone.py b/tests/test_gone.py\n"
+            "deleted file mode 100644\n"
+            "--- a/tests/test_gone.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-gone1\n"
+            "-gone2\n"
         ),
         suffix=".py",
         is_test=_is_python_test,
     )
     check(
-        "blind spot: 净删除测试行点名",
-        removed_tests == [FileChange("tests/test_a.py", 1)],
+        "blind spot: 净删除测试行点名（含整文件删除）",
+        removed_tests
+        == [FileChange("tests/test_gone.py", 2), FileChange("tests/test_a.py", 1)],
         repr(removed_tests),
     )
 
