@@ -16,6 +16,11 @@ pub struct RunArgs {
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
 
+    /// Agent to use for the session (name from `wing agents`; default: the
+    /// gateway's default agent).
+    #[arg(long = "agent")]
+    pub agent: Option<String>,
+
     /// Resume an existing session by ID.
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<String>,

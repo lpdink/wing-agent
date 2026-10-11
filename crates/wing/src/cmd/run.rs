@@ -108,7 +108,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         };
 
         let create_req = CreateSessionRequest {
-            template_name: None,
+            template_name: args.agent.clone(),
             workspace: workspace.clone(),
             agent: Some(override_),
             backend: None,

@@ -91,6 +91,8 @@ pub struct StdioArgs {
     pub prompt: String,
     /// 模型覆盖（`--model` 的值 = 引用词 model_id）。
     pub model: Option<String>,
+    /// 会话 agent 模板名（`--agent`；None = 网关默认）。
+    pub agent: Option<String>,
     pub resume: Option<String>,
     /// `--session-id`: create-or-adopt (mutually exclusive with `resume`).
     pub session_id: Option<String>,
@@ -149,9 +151,9 @@ pub fn resume_session_at_error(value: &str) -> String {
 /// 只查"静默忽略"类问题：
 /// 1. `--session-id` 与 `-r/--resume` 互斥——一个是 create-or-adopt、一个是
 ///    恢复既有会话，语义冲突，同时给出即报错（不猜调用方想要哪个）；
-/// 2. resume / adopt 下不生效的覆盖旗标（`--system-prompt` / `--append-system-prompt` /
-///    `--max-turns`）打日志警告——它们**不该**改链上前缀，但"给了没反应"
-///    必须可诊断。
+/// 2. resume / adopt 下不生效的覆盖旗标（`--agent` / `--system-prompt` /
+///    `--append-system-prompt` / `--max-turns`）打日志警告——它们**不该**改链上
+///    前缀，但"给了没反应"必须可诊断。
 ///
 /// 警告只进日志（`$WING_HOME/tui/logs/`）：stderr 留给错误与 `session_id:` 行，
 /// stdout 是协议流。
@@ -200,6 +202,9 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
 /// resume / adopt 下不生效的创建期旗标（纯函数，便于单测）。
 fn resume_ignored_flags(args: &StdioArgs) -> Vec<&'static str> {
     let mut flags = Vec::new();
+    if args.agent.is_some() {
+        flags.push("--agent");
+    }
     if args.system_prompt.is_some() {
         flags.push("--system-prompt");
     }
@@ -721,7 +726,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .map(|p| p.to_string_lossy().to_string());
 
         let create_req = CreateSessionRequest {
-            template_name: None,
+            template_name: args.agent.clone(),
             workspace,
             agent: Some(create_override(&args)),
             backend: None,
@@ -1029,6 +1034,19 @@ mod tests {
         );
     }
 
+    /// `--agent`（会话 agent 模板选择）同理：顶层定义 + 过滤器保留——丢了
+    /// 过滤器这一环，`wing -p ... --agent executor` 会被静默降级成默认模板
+    /// 会话（调用方以为按 executor 派了活）。
+    #[test]
+    fn filter_keeps_agent_and_its_value() {
+        let args: Vec<String> = vec!["-p", "hi", "--agent", "executor"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args);
+        assert_eq!(filtered, vec!["-p", "hi", "--agent", "executor"]);
+    }
+
     #[test]
     fn filter_keeps_yolo_flag() {
         let args: Vec<String> = vec!["-p", "hello", "--yolo"]
@@ -1193,6 +1211,7 @@ mod tests {
         StdioArgs {
             prompt: "hi".into(),
             model: None,
+            agent: None,
             resume: None,
             session_id: None,
             resume_session_at: None,
@@ -1307,12 +1326,18 @@ mod tests {
         let mut a = args();
         assert!(resume_ignored_flags(&a).is_empty());
 
+        a.agent = Some("executor".into());
         a.system_prompt = Some("s".into());
         a.append_system_prompt = Some("t".into());
         a.max_turns = Some(3);
         assert_eq!(
             resume_ignored_flags(&a),
-            vec!["--system-prompt", "--append-system-prompt", "--max-turns"]
+            vec![
+                "--agent",
+                "--system-prompt",
+                "--append-system-prompt",
+                "--max-turns"
+            ]
         );
     }
 

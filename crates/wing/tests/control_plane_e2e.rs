@@ -1028,6 +1028,60 @@ async fn new_and_resume_round_trip() {
     let _ = std::fs::remove_dir_all(&stub.home);
 }
 
+/// `wing run --agent`: the chosen agent rides the create request as
+/// `template_name` and comes back in the output; without the flag the gateway
+/// default decides (the request carries no template).
+#[tokio::test]
+async fn run_carries_the_agent_flag() {
+    let stub = Stub::start("run-agent").await;
+
+    let (code, stdout, stderr) = run_wing(
+        &["run", "--agent", "executor", "-p", "just ok", "--json"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let out = json_of(&stdout);
+    assert_eq!(out["session_id"], "created-by-stub");
+    assert_eq!(out["template_name"], "executor");
+    assert_eq!(
+        body_of(&stub, "/api/session/create")["template_name"],
+        "executor"
+    );
+    assert_eq!(body_of(&stub, "/api/session/send")["content"], "just ok");
+
+    // Without --agent the key is absent: the gateway's default template decides.
+    let stub = Stub::start("run-default-agent").await;
+    let (code, stdout, stderr) = run_wing(&["run", "-p", "just ok", "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let out = json_of(&stdout);
+    assert_eq!(out["template_name"], "default");
+    let create_body = body_of(&stub, "/api/session/create");
+    assert_eq!(create_body["template_name"], Value::Null, "{create_body}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// The stdio frontend carries the agent too: `wing -p ... --agent executor`
+/// creates a session on that template. The flag lives on the top-level `Cli`
+/// for exactly this path — the stdio argument filter only keeps flags it knows
+/// (see `filter_keeps_agent_and_its_value`), so without it the flag and its
+/// value would be dropped and the session would silently fall back to the
+/// default template.
+#[tokio::test]
+async fn stdio_prompt_carries_the_agent_flag() {
+    let stub = Stub::start("stdio-agent").await;
+
+    let (code, _stdout, stderr) = run_wing(&["-p", "hi", "--agent", "executor"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        body_of(&stub, "/api/session/create")["template_name"],
+        "executor"
+    );
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
 /// Answering an Ask: `--tool-call-id` reaches `/api/session/send`, and the id
 /// itself is discoverable through `wing tail` (the tool call line carries it).
 #[tokio::test]
