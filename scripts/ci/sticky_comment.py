@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Upsert the sticky ``wing-perf`` comment on a pull request (via the ``gh`` CLI)。
+"""Upsert a sticky PR comment identified by a marker (via the ``gh`` CLI)。
 
-perf workflow 每轮出一条 markdown 报告；本工具保证全 PR 上只有**一条**这样的评论：
+各 CI 报告（perf / coverage ...）每轮产出一条 markdown；本工具保证每个 marker 在
+全 PR 上只有**一条**这样的评论：
 
-* 查找 —— ``GET repos/{repo}/issues/{pr}/comments``，每页 100 条，命中 marker
-  （``<!-- wing-perf -->``）或翻到短页即停（首个匹配 = 最老的一条 = sticky）；
+* 查找 —— ``GET repos/{repo}/issues/{pr}/comments``，每页 100 条，命中 ``--marker``
+  或翻到短页即停（首个匹配 = 最老的一条 = sticky）；
 * 命中 —— ``PATCH repos/{repo}/issues/comments/{id}``（原地更新）；
 * 未命中 —— ``POST repos/{repo}/issues/{pr}/comments``（创建）。
 
@@ -22,8 +23,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-#: sticky comment 的标记。全 PR 唯一一条，report.py 渲染正文时带上、这里据此查找/更新。
-MARKER = "<!-- wing-perf -->"
 #: 分页大小（与 gh api 的 per_page 上限一致）。
 PAGE_SIZE = 100
 #: 分页护栏：正常 PR 远到不了这个页数，只在 API 行为异常时兜底。
@@ -47,16 +46,18 @@ def positive_int(text: str) -> int:
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="comment.py",
+        prog="sticky_comment.py",
         description=(
-            "Upsert the sticky wing-perf comment on a pull request: page through the PR's issue "
-            f"comments looking for the marker {MARKER}, then PATCH the oldest match — or POST a new "
+            "Upsert a sticky pull-request comment identified by --marker: page through the PR's "
+            "issue comments looking for the marker, then PATCH the oldest match — or POST a new "
             "comment when none exists."
         ),
         epilog=(
             "examples:\n"
-            "  comment.py --repo owner/repo --pr 42 --body-file comment.md\n"
-            "  comment.py --repo owner/repo --pr 42 --body-file comment.md --dry-run\n"
+            "  sticky_comment.py --repo owner/repo --pr 42 --marker '<!-- wing-perf -->' \\\n"
+            "      --body-file comment.md\n"
+            "  sticky_comment.py --repo owner/repo --pr 42 --marker '<!-- wing-perf -->' \\\n"
+            "      --body-file comment.md --dry-run\n"
             "\n"
             "Outside --dry-run, gh must be on PATH and authenticated (GH_TOKEN)."
         ),
@@ -74,6 +75,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=positive_int,
         metavar="N",
         help="pull request number",
+    )
+    parser.add_argument(
+        "--marker",
+        required=True,
+        metavar="HTML-COMMENT",
+        help=(
+            "exact marker string that identifies the sticky comment (e.g. '<!-- wing-perf -->'); "
+            "each marker owns one comment per PR"
+        ),
     )
     parser.add_argument(
         "--body-file",
@@ -125,7 +135,7 @@ def gh_api(method: str, path: str, payload: dict[str, str] | None = None) -> obj
         ) from None
 
 
-def find_sticky_comment(repo: str, pr: int) -> int | None:
+def find_sticky_comment(repo: str, pr: int, marker: str) -> int | None:
     """分页查找带 marker 的评论；返回最老一条的 id，找不到返回 None。"""
     for page in range(1, MAX_PAGES + 1):
         path = f"repos/{repo}/issues/{pr}/comments?per_page={PAGE_SIZE}&page={page}"
@@ -136,18 +146,20 @@ def find_sticky_comment(repo: str, pr: int) -> int | None:
             body = comment.get("body") if isinstance(comment, dict) else None
             if (
                 isinstance(body, str)
-                and MARKER in body
+                and marker in body
                 and isinstance(comment.get("id"), int)
             ):
                 return int(comment["id"])
         if len(batch) < PAGE_SIZE:
             return None
     raise CommentError(
-        f"marker {MARKER} not found within {MAX_PAGES} pages on {repo}#{pr}"
+        f"marker {marker} not found within {MAX_PAGES} pages on {repo}#{pr}"
     )
 
 
-def print_dry_run(repo: str, pr: int, body: str, marker_added: bool) -> None:
+def print_dry_run(
+    repo: str, pr: int, marker: str, body: str, marker_added: bool
+) -> None:
     """打印真实运行会发出的 API 调用（离线；不需要 gh / token）。"""
     payload = json.dumps({"body": body}, ensure_ascii=False)
     search = f"gh api --method GET 'repos/{repo}/issues/{pr}/comments?per_page={PAGE_SIZE}&page=<n>'"
@@ -155,6 +167,7 @@ def print_dry_run(repo: str, pr: int, body: str, marker_added: bool) -> None:
     create = f"gh api --method POST 'repos/{repo}/issues/{pr}/comments' --input -"
     print("dry-run: nothing is sent; a real run would make these calls")
     marker_state = "prepended" if marker_added else "present"
+    print(f"  marker  : {marker}")
     print(f"  body    : {len(body)} chars (marker {marker_state})")
     print(
         f"  payload : {len(payload.encode('utf-8'))} bytes of JSON on stdin (--input -)"
@@ -177,16 +190,16 @@ def load_body(path: str) -> str:
     return body
 
 
-def ensure_marker(body: str) -> tuple[str, bool]:
+def ensure_marker(body: str, marker: str) -> tuple[str, bool]:
     """正文缺 marker 时前置一个——否则贴出去将永远搜不到，下次就多出一条重复评论。"""
-    if MARKER in body:
+    if marker in body:
         return body, False
-    return f"{MARKER}\n\n{body}", True
+    return f"{marker}\n\n{body}", True
 
 
-def upsert(repo: str, pr: int, body: str) -> str:
+def upsert(repo: str, pr: int, body: str, marker: str) -> str:
     """PATCH 已存在的 sticky 评论，或创建一条；返回一行结果摘要。"""
-    comment_id = find_sticky_comment(repo, pr)
+    comment_id = find_sticky_comment(repo, pr, marker)
     if comment_id is None:
         response = gh_api("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body})
         action = "created"
@@ -207,15 +220,16 @@ def main(argv: list[str] | None = None) -> int:
         if len(parts) != 2 or not all(parts):
             raise CommentError(f"--repo must be OWNER/REPO, got {args.repo!r}")
         body = load_body(args.body_file)
-        body, added = ensure_marker(body)
+        body, added = ensure_marker(body, args.marker)
         if added:
             print(
-                f"warning: body had no {MARKER} marker; prepended it", file=sys.stderr
+                f"warning: body had no {args.marker} marker; prepended it",
+                file=sys.stderr,
             )
         if args.dry_run:
-            print_dry_run(args.repo, args.pr, body, added)
+            print_dry_run(args.repo, args.pr, args.marker, body, added)
             return 0
-        print(upsert(args.repo, args.pr, body))
+        print(upsert(args.repo, args.pr, body, args.marker))
         return 0
     except CommentError as error:
         print(f"error: {error}", file=sys.stderr)

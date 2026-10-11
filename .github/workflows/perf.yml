@@ -391,9 +391,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 scripts/perf/comment.py \
+          python3 scripts/ci/sticky_comment.py \
             --repo "$GITHUB_REPOSITORY" \
             --pr "${{ needs.resolve.outputs.pr_number }}" \
+            --marker '<!-- wing-perf -->' \
             --body-file comment.md
 
       - name: Upload the comment body

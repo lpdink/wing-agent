@@ -2,8 +2,8 @@
 """ab.py 输出 JSON → PR 评论 markdown（契约 §7）。
 
 由 03 的 report job 调用：`--json <tui.json> <gateway.json>` 合并多个测量 job 的
-产物后渲染成**一条**评论；`comment.py` 按首行的 `<!-- wing-perf -->` marker
-查找并更新同一条。表格之后依次是 `<details>` 折叠的**逐轮原始值**（每指标每侧的各轮
+产物后渲染成**一条**评论；`scripts/ci/sticky_comment.py` 按首行的 `<!-- wing-perf -->`
+marker 查找并更新同一条。表格之后依次是 `<details>` 折叠的**逐轮原始值**（每指标每侧的各轮
 代表值；任一侧轮间漂移大时标题带 ⚠️）与套件失败区块。
 
     uv run python scripts/perf/report.py --json target/perf/ab.json --out-md /tmp/comment.md
@@ -30,7 +30,7 @@ from common import (  # noqa: E402  (同目录模块：脚本直接跑时 sys.pa
     strip_ansi,
 )
 
-#: 评论唯一标识：comment.py 据此查找 / 更新同一条评论。
+#: 评论唯一标识：sticky_comment.py 据此查找 / 更新同一条评论。
 MARKER = "<!-- wing-perf -->"
 
 #: 判定 → 表格里的显示。`n/a` 覆盖两种情形：某一侧没有数据（真的不可比），

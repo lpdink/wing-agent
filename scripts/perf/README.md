@@ -26,7 +26,8 @@ uv run python scripts/perf/suite_rust.py --side target/perf/sides/head.json \
 
 # 只渲染评论 / 只演练贴评论（dry-run 不联网）
 uv run python scripts/perf/report.py --json target/perf/ab.json --out-md /tmp/comment.md
-uv run python scripts/perf/comment.py --repo owner/repo --pr 42 --body-file /tmp/comment.md --dry-run
+uv run python scripts/ci/sticky_comment.py --repo owner/repo --pr 42 \
+    --marker '<!-- wing-perf -->' --body-file /tmp/comment.md --dry-run
 ```
 
 `ab.py` 参数（`--help` 为准）：`--repo`（head worktree，默认脚本所在仓库）、
