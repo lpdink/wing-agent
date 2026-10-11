@@ -220,6 +220,7 @@ async def test_registration_order_and_overwrite():
 
     # dict 保序：A 的位置不动，值被覆盖
     assert [s.name for s in host.specs] == ["A", "B"]
+    assert await a2() == "a2"
 
 
 # ── run()：握手 + 注册 + 服务循环 ─────────────────────────────
@@ -456,12 +457,14 @@ def inspect_empty():
     return inspect.Parameter.empty
 
 
-async def test_infer_params_falls_back_when_hints_unresolvable():
-    """typing.get_type_hints 失败（前向引用解析不到）时退化为无 hint 推断。"""
+async def test_infer_params_falls_back_when_hints_unresolvable(monkeypatch):
+    """typing.get_type_hints 失败（前向引用解析不到 / 坏注解）→ 退化为无 hint 推断。"""
+    import typing
+
     host = ToolHost(client_id="h1")
 
     @host.tool(name="Forward")
-    async def forward(x: "NonexistentType") -> str:  # noqa: F821
+    async def forward(x: str) -> str:
         """Doc.
 
         Args:
@@ -469,11 +472,17 @@ async def test_infer_params_falls_back_when_hints_unresolvable():
         """
         return str(x)
 
+    def _unresolvable(fn: object) -> dict:
+        raise NameError("annotation not resolvable")
+
+    monkeypatch.setattr(typing, "get_type_hints", _unresolvable)
+
     (spec,) = host.specs
     assert (spec.params[0].type, spec.params[0].description) == (
         "string",
         "whatever.",
     )
+    assert await forward("x") == "x"  # 注解解析不了不影响函数本身
 
 
 async def test_args_section_stops_at_next_section():

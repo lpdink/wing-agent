@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -265,8 +266,13 @@ class _FakeStream:
         return self._chunks.pop(0) if self._chunks else b""
 
 
+def _as_process(proc: object) -> "asyncio.subprocess.Process":
+    """假件冒充进程（`_drain_pipes` 只消费 stdout/stderr 两个属性）。"""
+    return cast("asyncio.subprocess.Process", proc)
+
+
 class _FakeProcess:
-    def __init__(self, stdout: _FakeStream, stderr: _FakeStream) -> None:
+    def __init__(self, stdout: _FakeStream | None, stderr: _FakeStream | None) -> None:
         self.stdout = stdout
         self.stderr = stderr
 
@@ -275,14 +281,14 @@ class TestDrainPipes:
     async def test_collects_both_streams(self):
         proc = _FakeProcess(_FakeStream([b"out"]), _FakeStream([b"err"]))
 
-        stdout, stderr = await _drain_pipes(proc)  # type: ignore[arg-type]
+        stdout, stderr = await _drain_pipes(_as_process(proc))
 
         assert (stdout, stderr) == (b"out", b"err")
 
     async def test_missing_streams_are_skipped(self):
         proc = _FakeProcess(None, None)
 
-        assert await _drain_pipes(proc) == (b"", b"")  # type: ignore[arg-type]
+        assert await _drain_pipes(_as_process(proc)) == (b"", b"")
 
     async def test_read_error_ends_draining_quietly(self):
         """管道读取失败（对端已关）当作读完：已收到的字节仍要返回。"""
@@ -290,21 +296,20 @@ class TestDrainPipes:
             _FakeStream([b"first"], error=OSError("closed")), _FakeStream([])
         )
 
-        stdout, stderr = await _drain_pipes(proc)  # type: ignore[arg-type]
+        stdout, stderr = await _drain_pipes(_as_process(proc))
 
         assert stdout == b"first" and stderr == b""
 
     async def test_slow_stream_times_out_without_raising(self):
         """整体等待有上限：排空不能变成新的挂起源。"""
 
-        class _Never:
-            def at_eof(self) -> bool:
-                return False
+        class _Never(_FakeStream):
+            """永不到头的流：`read` 一直挂着，直到排空超时。"""
 
             async def read(self, n: int) -> bytes:
                 await asyncio.sleep(60)
                 return b""
 
-        proc = _FakeProcess(_Never(), _Never())
+        proc = _FakeProcess(_Never([]), _Never([]))
 
-        assert await _drain_pipes(proc, timeout=0.05) == (b"", b"")  # type: ignore[arg-type]
+        assert await _drain_pipes(_as_process(proc), timeout=0.05) == (b"", b"")

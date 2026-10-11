@@ -3,6 +3,10 @@
 import os
 import shutil
 
+from typing import cast
+
+import asyncio
+
 import pytest
 
 from wing_sdk.tools.bash import bash
@@ -546,4 +550,4 @@ async def test_kill_process_group_falls_back_when_proc_gone(monkeypatch):
         def kill(self) -> None:
             raise ProcessLookupError("no such process")
 
-    kill_process_group(_GoneProc())  # type: ignore[arg-type]
+    kill_process_group(cast("asyncio.subprocess.Process", _GoneProc()))

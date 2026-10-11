@@ -130,9 +130,7 @@ class TestAuthWarnings:
             server_mod, "log", type("_Rec", (), {"warning": logged.append})()
         )
 
-        message = server._warn_auth_lockout(
-            AuthConfig(enabled=True, keys=[], loopback_exempt=False)
-        )
+        message = server._warn_auth_lockout(AuthConfig(enabled=True, keys=[]))
 
         assert message is not None and "ALL requests" in message
         assert logged == [message]
@@ -144,7 +142,6 @@ class TestAuthWarnings:
         with_key = AuthConfig(
             enabled=True,
             keys=[ApiKeyEntry(key="k", role="admin")],
-            loopback_exempt=False,
         )
 
         assert server._warn_auth_lockout(with_key) is None
@@ -202,7 +199,7 @@ class TestOnEventRouting:
 
         server = _server(tmp_path, monkeypatch, MINIMAL_YAML)
         sent: list = []
-        server._schedule_send = lambda *a, **kw: sent.append(a)  # ty: ignore[invalid-assignment]
+        server._schedule_send = lambda *a, **kw: sent.append(a)
 
         server._on_event(TextEvent(content="no target"))
 
@@ -215,10 +212,10 @@ class TestOnEventRouting:
 
         server = _server(tmp_path, monkeypatch, MINIMAL_YAML)
         sent: list = []
-        server._schedule_send = lambda *a, **kw: sent.append(a)  # ty: ignore[invalid-assignment]
+        server._schedule_send = lambda *a, **kw: sent.append(a)
         subscribed = object()
         silent = object()
-        server._client_to_ws = {"c1": subscribed, "c2": silent}  # ty: ignore[invalid-assignment]
+        server._client_to_ws = {"c1": subscribed, "c2": silent}
         monkeypatch.setattr(
             server, "_receives_events", lambda cid: cid == "c1", raising=False
         )
@@ -239,6 +236,6 @@ class TestRecycleEdges:
     async def test_recycle_unknown_ws_is_noop(self, tmp_path, monkeypatch):
         server = _server(tmp_path, monkeypatch, MINIMAL_YAML)
 
-        await server._recycle_client(object(), reason="not tracked")  # ty: ignore[invalid-argument-type]
+        await server._recycle_client(object(), reason="not tracked")
 
         assert server.clients == {}

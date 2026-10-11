@@ -70,6 +70,12 @@ def _make_cm(
     )
 
 
+def _uuid_of(node: ChainNode) -> str:
+    """链节点的 uuid（构造后必非空，类型上是 Optional——这里收窄）。"""
+    assert node.uuid is not None
+    return node.uuid
+
+
 def _seed(cm: ContextManager) -> None:
     cm.add_message(Message(role="user", content="first question"))
     cm.add_message(Message(role="assistant", content_blocks=[]))
@@ -209,7 +215,7 @@ class TestPendingCompactState:
         window = cm.get_context_window()
         cm._pending_compact_result = PendingCompact(
             compact_content="x",
-            start_uuid=window[0].uuid,
+            start_uuid=_uuid_of(window[0]),
             end_uuid="not-in-chain",
         )
         assert cm._verify_snapshot_valid(window) is None
@@ -221,8 +227,8 @@ class TestPendingCompactState:
         # start/end 都在链上但顺序颠倒（区间必须有序才算有效）
         cm._pending_compact_result = PendingCompact(
             compact_content="x",
-            start_uuid=window[-1].uuid,
-            end_uuid=window[0].uuid,
+            start_uuid=_uuid_of(window[-1]),
+            end_uuid=_uuid_of(window[0]),
         )
         assert cm._verify_snapshot_valid(window) is None
 
@@ -233,8 +239,8 @@ class TestPendingCompactState:
         window = cm.get_context_window()
         cm._pending_compact_result = PendingCompact(
             compact_content="<summary>all</summary>",
-            start_uuid=window[0].uuid,
-            end_uuid=window[-1].uuid,
+            start_uuid=_uuid_of(window[0]),
+            end_uuid=_uuid_of(window[-1]),
             usage=LLMUsage(prompt_tokens=10, completion_tokens=2),
         )
 
@@ -264,14 +270,16 @@ class TestPendingCompactState:
         assert cm._pending_compact_task is None
         assert cm._pending_compact_result is None
 
-    async def test_persist_failure_is_swallowed(self, tmp_dir, wing_warnings):
+    async def test_persist_failure_is_swallowed(
+        self, tmp_dir, wing_warnings, monkeypatch
+    ):
         """aux 写入失败只降级为告警——不能把一整轮对话拖垮。"""
         cm = _make_cm(tmp_dir)
 
         def _boom(*args: Any, **kwargs: Any) -> None:
             raise OSError("disk full")
 
-        cm._messages.write_aux = _boom  # type: ignore[method-assign]
+        monkeypatch.setattr(cm._messages, "write_aux", _boom)
 
         cm._persist_pending_compact(
             PendingCompact(compact_content="x", start_uuid="a", end_uuid="b")

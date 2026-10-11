@@ -88,7 +88,7 @@ async def _install(provider, response=None, error=None) -> _FakeClient:
     """关掉真实 httpx client，装上替身（不必真的联网）。"""
     await provider._client.aclose()
     fake = _FakeClient(response, error)
-    provider._client = fake  # ty: ignore[invalid-assignment]
+    provider._client = fake
     return fake
 
 

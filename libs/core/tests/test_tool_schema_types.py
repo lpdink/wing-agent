@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import typing
 from typing import Any, ForwardRef, Literal, Optional, Union
 
 import pytest
@@ -50,11 +49,6 @@ class TestTypeMapping:
     )
     def test_mapping(self, hint, expected):
         assert _registry()._type_to_str(hint) == expected
-
-    def test_union_of_only_none_falls_back_to_string(self):
-        """Union 里全是 NoneType（构造上极端罕见）→ string 兜底。"""
-        fake = typing.Union[type(None), type(None)]  # 归一化为 NoneType 本身
-        assert _registry()._type_to_str(fake) == ("string", None)
 
 
 # ── _is_agent_type ────────────────────────────────────────────

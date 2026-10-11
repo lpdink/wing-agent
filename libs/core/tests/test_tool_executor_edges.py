@@ -205,6 +205,7 @@ async def test_interrupt_keeps_real_result_when_tool_finished(monkeypatch):
             await asyncio.sleep(30)
         except asyncio.CancelledError:
             return "cancelled-but-done"
+        return "never"  # pragma: no cover - 收尸窗口内被取消，走上面那条
 
     executor.set_tools({"T": _tool(quick_child)})
 
@@ -234,7 +235,7 @@ async def test_interrupted_results_keep_argument_error_precheck():
     results = await executor.execute([tc], "m")
 
     assert called is False
-    assert "was NOT executed" in results[0].content
+    assert "was NOT executed" in (results[0].content or "")
 
 
 async def test_media_refs_pass_through_message(tmp_path: Path):
