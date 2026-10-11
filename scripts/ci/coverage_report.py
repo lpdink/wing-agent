@@ -2,16 +2,19 @@
 """Python / Rust 覆盖率数据 → PR 评论 markdown。
 
 ci.yml 的 python-check / rust-check 两个 job 各产出一份机器可读覆盖率产物
-（coverage json / llvm-cov export），本脚本合并渲染成**一条** sticky 评论；
-`sticky_comment.py` 按首行的 `<!-- wing-coverage -->` marker 查找并原地更新。
+（coverage json / llvm-cov export）与一份**增量覆盖率判定**（patch json，
+`scripts/ci/patch_coverage.py` 写出的原样载荷）；本脚本合并渲染成**一条**
+sticky 评论；`sticky_comment.py` 按首行的 `<!-- wing-coverage -->` marker
+查找并原地更新。
 
-阈值不在这里声明 —— 两边都读各自门禁的唯一事实来源：Python 取 pyproject.toml 的
-`[tool.coverage.report]`（fail_under / precision），Rust 取 Makefile 的 `RUST_COV_*`
-变量。任一数据源缺失（job 失败 / 产物没产出）时，对应行显示 `—` 并在「注意」里说明，
-评论照发 —— 覆盖率没到或测试挂了，恰恰是最需要看到这条评论的时候。
+门禁与**判定数字**都不在这里重复声明：增量覆盖率取两个 patch json（门禁用的
+就是它们），阈值取 Makefile 的 `PATCH_COV_MIN`（门禁的唯一事实来源）。任何
+数据源缺失时，对应行显示 `—` 并在「注意」里说明，评论照发 —— 覆盖率没到或
+测试挂了，恰恰是最需要看到这条评论的时候。
 
     python3 scripts/ci/coverage_report.py \
         --python-json coverage-python.json --rust-json coverage-rust.json \
+        --patch-python patch-python.json --patch-rust patch-rust.json \
         --out-md comment-body.md --run-url https://github.com/.../actions/runs/123
 """
 
@@ -21,7 +24,6 @@ import argparse
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +33,15 @@ REPO_ROOT = HERE.parents[1]
 #: 评论唯一标识：sticky_comment.py 据此查找 / 更新同一条评论。
 MARKER = "<!-- wing-coverage -->"
 
+#: 单文件最多列出的未覆盖行条数（超出以 `…` 收尾，避免大 PR 把评论撑爆）。
+MAX_MISSING_ENTRIES = 20
+
+#: 未覆盖行的折叠块最多列出的文件数（超出只计数，避免大 PR 把评论撑爆）。
+MAX_MISSING_FILES = 30
+
 
 def _read_json(path: str) -> dict[str, Any] | None:
-    """读一份覆盖率产物；读不出（缺失 / 坏 JSON）返回 None，由调用方走「数据缺失」分支。"""
+    """读一份 JSON 产物；读不出（缺失 / 坏 JSON）返回 None，由调用方走「数据缺失」分支。"""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -42,32 +50,14 @@ def _read_json(path: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def load_python_gate() -> tuple[float, int] | None:
-    """pyproject.toml 的 [tool.coverage.report] → (fail_under, precision)。"""
-    try:
-        config = tomllib.loads(
-            (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        )
-    except OSError:
-        return None
-    report = config.get("tool", {}).get("coverage", {}).get("report", {})
-    fail_under, precision = report.get("fail_under"), report.get("precision", 0)
-    if not isinstance(fail_under, int | float) or not isinstance(precision, int):
-        return None
-    return float(fail_under), precision
-
-
-def load_rust_gate() -> tuple[float, float] | None:
-    """Makefile 的 RUST_COV_LINES_MIN / RUST_COV_REGIONS_MIN → (行, 区域)。"""
+def load_patch_min() -> float | None:
+    """Makefile 的 PATCH_COV_MIN → 增量覆盖率阈值（门禁与评论的唯一事实来源）。"""
     try:
         text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     except OSError:
         return None
-    lines = re.search(r"^RUST_COV_LINES_MIN\s*[:?]?=\s*([0-9.]+)", text, re.M)
-    regions = re.search(r"^RUST_COV_REGIONS_MIN\s*[:?]?=\s*([0-9.]+)", text, re.M)
-    if not lines or not regions:
-        return None
-    return float(lines.group(1)), float(regions.group(1))
+    matched = re.search(r"^PATCH_COV_MIN\s*[:?]?=\s*([0-9.]+)", text, re.M)
+    return float(matched.group(1)) if matched else None
 
 
 def python_totals(data: dict[str, Any]) -> tuple[float, int, int] | None:
@@ -154,34 +144,99 @@ def rust_crates(data: dict[str, Any]) -> list[tuple[str, float, float]]:
     return sorted(rows, key=lambda row: row[1])
 
 
-def _status(percent: float | None, threshold: float | None, digits: int | None) -> str:
-    """✅ / ❌ / —：Python 侧按 precision 舍入后再比（与 coverage 的 fail_under 同口径），
-    Rust 侧用原始值（与 cargo-llvm-cov 的比较同口径）。"""
-    if percent is None or threshold is None:
-        return "—"
-    value = round(percent, digits) if digits is not None else percent
-    return "✅" if value >= threshold else "❌"
-
-
 def _fmt(percent: float | None, digits: int) -> str:
     return f"{percent:.{digits}f}%" if percent is not None else "—"
+
+
+def _fmt_lines(lines: list[int]) -> str:
+    """[12, 13, 14, 33] → "12-14, 33"（连续段压缩；超长截断）。"""
+    entries: list[str] = []
+    start = prev = None
+    for line in lines:
+        if start is None:
+            start = prev = line
+        elif line == prev + 1:
+            prev = line
+        else:
+            entries.append(f"{start}" if start == prev else f"{start}-{prev}")
+            start = prev = line
+    if start is not None:
+        entries.append(f"{start}" if start == prev else f"{start}-{prev}")
+    if len(entries) > MAX_MISSING_ENTRIES:
+        kept = entries[:MAX_MISSING_ENTRIES]
+        return ", ".join(kept) + ", …"
+    return ", ".join(entries)
+
+
+def _patch_row(lang: str, patch: dict[str, Any] | None, threshold: float | None) -> str:
+    """增量覆盖率表格的一行：语言 | 改动行覆盖 | 覆盖/可执行 | 门禁 | 状态。
+
+    无改动可执行行 = 判过（`✅ 无改动行`）；产物缺失 = 未判定（原因进「注意」区）。
+    """
+    gate = _fmt(threshold, 1)
+    if patch is None:
+        return f"| {lang} | — | — | ≥ {gate} | — |"
+    percent = patch.get("percent")
+    covered, total = patch.get("covered"), patch.get("total")
+    if percent is None:
+        # 无改动可执行行（纯文档 / 配置 PR）是**判过**；产物缺失才是未判定（原因进「注意」区）。
+        status = "⏭️ 未判定" if patch.get("skipped") else "✅ 无改动行"
+        return f"| {lang} | — | — | ≥ {gate} | {status} |"
+    status = "✅" if patch.get("ok") else "❌"
+    return (
+        f"| {lang} | {_fmt(float(percent), 1)} | {covered} / {total} "
+        f"| ≥ {gate} | {status} |"
+    )
+
+
+def _patch_missing_details(
+    patch_python: dict[str, Any] | None, patch_rust: dict[str, Any] | None
+) -> list[str]:
+    """未覆盖的改动行（两个语言合并一个折叠块）。"""
+    entries: list[str] = []
+    total_missing = 0
+    omitted = 0
+    for patch in (patch_python, patch_rust):
+        if not patch:
+            continue
+        for file in patch.get("files", []):
+            missing = file.get("missing") or []
+            if not missing:
+                continue
+            total_missing += len(missing)
+            if len(entries) >= MAX_MISSING_FILES:
+                omitted += 1
+                continue
+            entries.append(f"| `{file.get('path')}` | {_fmt_lines(missing)} |")
+    if not entries:
+        return []
+    block = [
+        "",
+        "<details>",
+        f"<summary>未覆盖的改动行（{total_missing} 行）</summary>",
+        "",
+        "| 文件 | 未覆盖行 |",
+        "| --- | --- |",
+        *entries,
+    ]
+    if omitted:
+        block.append(f"| … | 其余 {omitted} 个文件省略 |")
+    block += ["", "</details>"]
+    return block
 
 
 def render(
     python_data: dict[str, Any] | None,
     rust_data: dict[str, Any] | None,
+    patch_python: dict[str, Any] | None,
+    patch_rust: dict[str, Any] | None,
     python_result: str | None,
     rust_result: str | None,
     run_url: str | None,
 ) -> str:
-    python_gate = load_python_gate()
-    rust_gate = load_rust_gate()
+    patch_min = load_patch_min()
     py_totals = python_totals(python_data) if python_data else None
     rs_totals = rust_totals(rust_data) if rust_data else None
-
-    py_percent = py_totals[0] if py_totals else None
-    py_threshold = python_gate[0] if python_gate else None
-    py_digits = python_gate[1] if python_gate else 1
 
     out: list[str] = [MARKER, "", "## 📊 覆盖率", ""]
     if py_totals is None and rs_totals is None:
@@ -190,29 +245,29 @@ def render(
             "",
         ]
 
-    out += ["| 范围 | 指标 | 覆盖率 | 阈值 | 状态 |", "| --- | --- | --- | --- | --- |"]
+    # 增量（门禁）：这个 PR 的改动行 —— 状态就是 merge 门禁的判定。
+    out += ["### 增量覆盖率（门禁）", ""]
+    out += [
+        "| 语言 | 改动行覆盖 | 覆盖 / 可执行 | 门禁 | 状态 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    out.append(_patch_row("Python（语句行）", patch_python, patch_min))
+    out.append(_patch_row("Rust（行）", patch_rust, patch_min))
+    out += _patch_missing_details(patch_python, patch_rust)
+
+    # 总量（参考）：不再是门禁，只看趋势。
+    out += ["", "### 总量（参考）", ""]
+    out += ["| 范围 | 指标 | 覆盖率 |", "| --- | --- | --- |"]
     out.append(
-        "| Python（`wing` + `wing_sdk`） | 语句 + 分支"
-        f" | {_fmt(py_percent, py_digits)} | {_fmt(py_threshold, 1)}"
-        f" | {_status(py_percent, py_threshold, py_digits)} |"
+        "| Python（`wing` + `wing_sdk`） | 语句 + 分支 | "
+        f"{_fmt(py_totals[0] if py_totals else None, 1)} |"
     )
-    for label, percent, threshold in (
-        (
-            "行",
-            rs_totals[0] if rs_totals else None,
-            rust_gate[0] if rust_gate else None,
-        ),
-        (
-            "区域",
-            rs_totals[1] if rs_totals else None,
-            rust_gate[1] if rust_gate else None,
-        ),
-    ):
-        out.append(
-            f"| Rust（workspace） | {label}"
-            f" | {_fmt(percent, 2)} | {_fmt(threshold, 1)}"
-            f" | {_status(percent, threshold, None)} |"
-        )
+    out.append(
+        f"| Rust（workspace） | 行 | {_fmt(rs_totals[0] if rs_totals else None, 2)} |"
+    )
+    out.append(
+        f"| Rust（workspace） | 区域 | {_fmt(rs_totals[1] if rs_totals else None, 2)} |"
+    )
 
     if python_data:
         packages = python_packages(python_data)
@@ -251,9 +306,9 @@ def render(
             out += ["", "</details>"]
 
     notes: list[str] = []
-    for name, data, result in (
-        ("Python", python_data, python_result),
-        ("Rust", rust_data, rust_result),
+    for name, data, result, patch in (
+        ("Python", python_data, python_result, patch_python),
+        ("Rust", rust_data, rust_result, patch_rust),
     ):
         if data is None:
             notes.append(
@@ -265,10 +320,26 @@ def render(
                 f"- **{name}**：本轮 job 结果 `{result}` —— 若为测试失败（而非覆盖率不达标），"
                 "数字可能不完整。"
             )
+        if patch is None:
+            notes.append(
+                f"- **{name}**：增量覆盖率未判定（没有 patch 产物；非 PR run 不发评论，"
+                "PR run 见 job 日志）。"
+            )
+        elif patch.get("skipped"):
+            notes.append(f"- **{name}**：增量覆盖率未判定 —— `{patch['skipped']}`。")
+        elif not patch.get("ok"):
+            notes.append(
+                f"- **{name}**：增量覆盖率 {_fmt(float(patch['percent']), 1)} "
+                f"< 门禁 {_fmt(patch_min, 1)} —— 未覆盖行见上。"
+            )
     if notes:
         out += ["", "---", "", "### ⚠️ 注意", "", *notes]
 
-    footer = "本地复现：`make test-python` / `make test-rust`（口径与阈值同 CI）"
+    footer = (
+        "本地复现：`make test-python` / `make test-rust` 后跑 "
+        "`make patch-cov-python` / `make patch-cov-rust`"
+        "（基线 `PATCH_BASE`、阈值 `PATCH_COV_MIN`，见 docs/dev/coverage.md）"
+    )
     if run_url:
         footer = f"[run 日志]({run_url}) · {footer}"
     out += ["", f"<sub>{footer}</sub>", ""]
@@ -278,16 +349,27 @@ def render(
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="coverage_report.py",
-        description="Render the sticky coverage comment from the two coverage artifacts.",
+        description="Render the sticky coverage comment from the coverage artifacts.",
         epilog=(
             "example:\n"
             "  coverage_report.py --python-json coverage-python.json \\\n"
-            "      --rust-json coverage-rust.json --out-md comment-body.md"
+            "      --rust-json coverage-rust.json --patch-python patch-python.json \\\n"
+            "      --patch-rust patch-rust.json --out-md comment-body.md"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--python-json", metavar="PATH", help="coverage json artifact")
     parser.add_argument("--rust-json", metavar="PATH", help="llvm-cov export artifact")
+    parser.add_argument(
+        "--patch-python",
+        metavar="PATH",
+        help="patch verdict artifact (patch_coverage.py)",
+    )
+    parser.add_argument(
+        "--patch-rust",
+        metavar="PATH",
+        help="patch verdict artifact (patch_coverage.py)",
+    )
     parser.add_argument(
         "--out-md",
         required=True,
@@ -312,8 +394,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     python_data = _read_json(args.python_json) if args.python_json else None
     rust_data = _read_json(args.rust_json) if args.rust_json else None
+    patch_python = _read_json(args.patch_python) if args.patch_python else None
+    patch_rust = _read_json(args.patch_rust) if args.patch_rust else None
     body = render(
-        python_data, rust_data, args.python_result, args.rust_result, args.run_url
+        python_data,
+        rust_data,
+        patch_python,
+        patch_rust,
+        args.python_result,
+        args.rust_result,
+        args.run_url,
     )
     Path(args.out_md).write_text(body, encoding="utf-8")
     print(f"comment body written to {args.out_md} ({len(body)} chars)")

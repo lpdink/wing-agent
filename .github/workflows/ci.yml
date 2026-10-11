@@ -31,9 +31,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # fetch-depth: 0 —— 增量覆盖率门禁要算与目标分支的 merge-base（非 PR 没用上，
+      # 但 steps 里无法按事件条件化 checkout；仓库不大，全历史检出可接受）。
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
 
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
@@ -58,24 +61,39 @@ jobs:
       - name: Dead code detection (vulture)
         run: uv run vulture libs/ --min-confidence 70 --exclude .venv/
 
-      # 与本地同一条命令：core + SDK 两套单测 + 覆盖率门禁
-      # （阈值与口径在 pyproject 的 [tool.coverage.*]，不在这里复述）
-      - name: Unit tests (with coverage gate)
+      # 与本地同一条命令：core + SDK 两套单测（总量覆盖率只作参考，见 docs/dev/coverage.md）
+      - name: Unit tests
         run: make test-python
 
-      # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：门禁失败 / 测试挂掉时也要导 ——
-      # 评论要能展示「低了多少」。--fail-under=0 显式关掉这条命令上的门禁检查
-      # （门禁在上面那条 make 里，这里只是导出既有 .coverage 数据，不重跑测试）。
+      # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：测试挂掉时也要导 ——
+      # 评论要能展示「低在哪」。--fail-under=0 关掉 coverage 自带的阈值检查
+      # （PR 门禁是下面的增量覆盖率；这里只是导出既有 .coverage 数据，不重跑测试）。
       - name: Export coverage JSON
         if: always()
         run: uv run coverage json -o coverage-python.json --fail-under=0
+
+      # 增量覆盖率脚本的自检（离线、不依赖仓库状态）：门禁的正确性不该只靠 review。
+      # python3 直跑（脚本纯 stdlib）：rust-check job 里没有 uv，两侧同一种调用方式。
+      - name: Patch coverage selftest
+        run: python3 scripts/ci/patch_coverage.py --selftest
+
+      # 增量覆盖率门禁：本 PR 的改动行必须被测试覆盖（基线 = 与目标分支的
+      # merge-base；阈值在 Makefile）。非 PR（push / dispatch）没有基线，跳过。
+      # 测试挂了也跑：patch-python.json 要供评论渲染（评论里会注明 job 结果）。
+      - name: Patch coverage gate (Python)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PATCH_BASE: origin/${{ github.base_ref }}
+        run: make patch-cov-python
 
       - name: Upload coverage data
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-python
-          path: coverage-python.json
+          path: |
+            coverage-python.json
+            patch-python.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -161,9 +179,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # fetch-depth: 0 —— 增量覆盖率门禁要算与目标分支的 merge-base（同 python-check）。
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -185,33 +205,43 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy -- -D warnings
 
-      # 与本地同一条命令：单测 + 覆盖率门禁（阈值在 Makefile 的 RUST_COV_*）。
+      # 与本地同一条命令：单测 + 插桩覆盖率产物（供增量门禁与评论复用；总量不再门禁）。
       # 插桩构建落在 target/llvm-cov-target/（独立于普通构建产物，互不失效）。
-      - name: Cargo test (with coverage gate)
+      - name: Cargo test
         run: make test-rust
 
-      # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：门禁失败 / 测试挂掉时也要导。
+      # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：测试挂掉时也要导。
       # 只读既有 profraw 生成报告，不重跑测试；--summary-only 去掉 segments 明细
       # （16MB → 91KB，评论只需要 totals 与每文件 summary）。
       - name: Export coverage JSON
         if: always()
         run: cargo llvm-cov report --json --summary-only --output-path coverage-rust.json
 
+      # 增量覆盖率门禁：先由既有 profraw 出 LCOV，再判定本 PR 的改动行（同 Python 侧）。
+      - name: Patch coverage gate (Rust)
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PATCH_BASE: origin/${{ github.base_ref }}
+        run: make patch-cov-rust
+
       - name: Upload coverage data
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-rust
-          path: coverage-rust.json
+          path: |
+            coverage-rust.json
+            patch-rust.json
           if-no-files-found: warn
           retention-days: 14
 
   # ── Coverage: 把两个 job 的覆盖率产物汇成一条 sticky comment ──
+  # 内容 = 增量覆盖率判定（门禁，数字取自门禁自己写下的 patch json）+ 总量（参考）。
   # 数据来自上面两个 job 各自上传的 artifact —— 与门禁同一次运行，不重跑测试。
   # 门禁红也要发（always）：评论要能展示「低在哪」；被并发取消的 run 不发
   # （!cancelled()），否则会贴一条残缺评论、随后又被新 run 覆盖。
   # 仅 pull_request 且非 fork：fork PR 的 GITHUB_TOKEN 被强制降为只读、发不了评论
-  # （与 perf workflow 同一约定）。
+  # （与 perf workflow 同一约定；fork 的增量门禁仍在上面的 check job 里照跑，只是没有评论）。
   coverage-report:
     name: Coverage Report
     runs-on: ubuntu-latest
@@ -252,6 +282,12 @@ jobs:
           fi
           if [ -f coverage/coverage-rust.json ]; then
             args+=(--rust-json coverage/coverage-rust.json)
+          fi
+          if [ -f coverage/patch-python.json ]; then
+            args+=(--patch-python coverage/patch-python.json)
+          fi
+          if [ -f coverage/patch-rust.json ]; then
+            args+=(--patch-rust coverage/patch-rust.json)
           fi
           python3 scripts/ci/coverage_report.py "${args[@]}" \
             --out-md comment-body.md \

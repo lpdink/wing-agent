@@ -33,10 +33,15 @@ target/
 .DS_Store
 Thumbs.db
 
-# 覆盖率产物（pytest-cov；见 pyproject 的 [tool.coverage.*]）
+# 覆盖率产物（pytest-cov / cargo-llvm-cov / 增量门禁；见 docs/dev/coverage.md）
 .coverage
 .coverage.*
 htmlcov/
+coverage-python.json
+coverage-rust.json
+coverage-rust.lcov
+patch-python.json
+patch-rust.json
 
 # wing runtime
 ~/.wing/
