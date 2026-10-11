@@ -1,4 +1,4 @@
-.PHONY: check test test-python test-python-html test-rust test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway demo
+.PHONY: check test test-python test-python-html test-rust test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -85,7 +85,8 @@ gateway:
 test-python:
 	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ --cov
 
-# 覆盖率 HTML 报告（本地排查用；门禁阈值与口径见 pyproject 的 [tool.coverage.*]）
+# 覆盖率 HTML 报告（本地排查用；总量口径见 pyproject 的 [tool.coverage.*] ——
+# 总量只作参考，PR 门禁是增量覆盖率：make patch-cov-python）
 test-python-html:
 	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ --cov \
 		--cov-report=term-missing --cov-report=html:target/coverage-python
@@ -151,44 +152,57 @@ fmt-rust:
 fmt-check-rust:
 	cargo fmt --check
 
-# Rust 覆盖率门禁阈值（行 / 区域，百分比）。唯一事实来源：`make test-rust` 的门禁与
-# CI 的 PR 覆盖率评论展示都读这两行（scripts/ci/coverage_report.py 按变量名解析）。
+# ── 增量（patch）覆盖率门禁 ──────────────────────────────────────
+# PR 的**改动行**必须有测试覆盖（行级：Python 语句行 / Rust 行）。门禁在 CI 的
+# python-check / rust-check 两个 job 里跑 patch-cov-python / patch-cov-rust；
+# 阈值与基线在此声明，被门禁与 PR 评论共同读取（scripts/ci/*.py 按变量名解析）。
 #
-# 依据（2026-10，develop @ #200 后实测）：行 92.05% / 区域 92.54%，各留约 1pp 余量 ——
-# 门禁定位是「防倒退」而非「已达标」：余量太小会把正常重构（代码搬家、平台分支）变成
-# 假报警，太大则拦不住整块新代码裸奔。抬阈值请先用 `make test-rust` 实测现状。
+# 依据（2026-10）：总量行级 ~92%（Rust）/ 合并语句+分支 96%（Python），增量门禁
+# 取 90% —— 定位是「防倒退」：给代码搬家（重构）与平台分支留出余量，同时挡住
+# 整块新代码裸奔。总量覆盖率不再做门禁，只进 PR 评论做参考。
 #
-# `?=` 允许本地用环境变量临时覆盖（如 RUST_COV_LINES_MIN=99 make test-rust 演练门禁
-# 失败路径）；CI 不设这个覆盖、默认值即仓库口径。
-RUST_COV_LINES_MIN ?= 91.0
-RUST_COV_REGIONS_MIN ?= 91.5
+# `?=` 允许本地/CI 用环境变量覆盖：CI 传 PATCH_BASE=origin/<目标分支> 与目标分支
+# 的 merge-base 对齐；本地默认 origin/develop（先提交再判——diff 只看提交，不看
+# 工作区）。演练门禁失败：PATCH_COV_MIN=99 make patch-cov-python。
+PATCH_COV_MIN ?= 90.0
+PATCH_BASE ?= origin/develop
 
-# Rust 覆盖率门禁：与 CI 同一条命令（本地 = CI）。
+# 增量覆盖率门禁（Python）：先由既有 .coverage 导出 JSON（不重跑测试），再判定。
+# 判定脚本是纯 stdlib——用 python3 直跑而不是 uv run：rust-check job 里没有 uv
+# （也不该为它拉一套 venv），两侧门禁共用同一个脚本、同一种调用方式。
+patch-cov-python:
+	uv run coverage json -o coverage-python.json --fail-under=0
+	python3 scripts/ci/patch_coverage.py --lang python \
+		--coverage coverage-python.json --base $(PATCH_BASE) \
+		--min $(PATCH_COV_MIN) --out-json patch-python.json
+
+# 增量覆盖率门禁（Rust）：先由既有 profraw 出 LCOV（不重跑测试），再判定。
+# 前提：最近一次 `make test-rust` 的插桩产物还在（target/llvm-cov-target/）。
+patch-cov-rust:
+	cargo llvm-cov report --lcov --output-path coverage-rust.lcov
+	python3 scripts/ci/patch_coverage.py --lang rust \
+		--coverage coverage-rust.lcov --base $(PATCH_BASE) \
+		--min $(PATCH_COV_MIN) --out-json patch-rust.json
+
+# Rust 测试（插桩构建；覆盖率产物供上面的增量门禁与 PR 评论复用）。
 #
 # - cargo-llvm-cov 是 cargo 子命令、不在 Cargo.toml 依赖里：缺失时硬失败 + 安装指引，
 #   不静默退化成裸 `cargo test` —— 那样本地「过了」而 CI 才拦，门禁形同虚设。
-# - cargo-llvm-cov 的 fail-under 只设退出码、**不打印任何失败原因**（上游行为），
-#   这里补一条明确的失败信息，否则 CI 红了日志里只有表格。
 # - doctests 单独一条：cargo-llvm-cov 的 --doctests 依赖 nightly 的 -Z unstable-options，
 #   stable 上不可用；分开跑保持与原本 `cargo test` 相同的目标覆盖面。
 # - 插桩构建（RUSTFLAGS 带 -C instrument-coverage）与普通构建在 target 里是两套产物：
 #   刚跑过裸 `cargo test` 再跑本命令会整树重编译（反之亦然）。日常统一走本命令。
 test-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { \
-		echo "❌ cargo-llvm-cov not found — the Rust coverage gate needs it."; \
+		echo "❌ cargo-llvm-cov not found — the Rust coverage tooling needs it."; \
 		echo "   Install:"; \
 		echo "     cargo install cargo-llvm-cov --locked"; \
 		echo "     rustup component add llvm-tools-preview"; \
 		exit 1; \
 	}
-	@if ! cargo llvm-cov --workspace --fail-under-lines $(RUST_COV_LINES_MIN) --fail-under-regions $(RUST_COV_REGIONS_MIN); then \
-		echo ""; \
-		echo "❌ Rust gate failed：测试挂了，或覆盖率低于阈值（TOTAL 行是实测值）。"; \
-		echo "   阈值：lines ≥ $(RUST_COV_LINES_MIN)% · regions ≥ $(RUST_COV_REGIONS_MIN)%（Makefile: RUST_COV_LINES_MIN / RUST_COV_REGIONS_MIN）"; \
-		exit 1; \
-	fi
+	cargo llvm-cov --workspace
 	cargo test --workspace --doc
 
-# 覆盖率 HTML 报告（本地排查用；阈值与口径见上方变量）
+# 覆盖率 HTML 报告（本地排查用）
 test-rust-html:
 	cargo llvm-cov --workspace --html --output-dir target/coverage-rust

@@ -279,6 +279,7 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
+                # 非流式没有逐 token 时序：首 token RT 不可知，退化为整个请求耗时
                 first_chunk_rt_ms=elapsed * 1000,
                 tokens_per_sec=completion_tokens / elapsed if elapsed > 0 else 0.0,
                 model=model,
@@ -313,7 +314,9 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             )
 
         request_id = resp.headers.get("x-request-id", "")
-        first_chunk_rt_ms = (time.monotonic() - t0) * 1000
+        # 响应头到达时刻（首包 RT）——只是首 token RT 的兜底：本地/自建服务端
+        # 常常先把流打开（头 + 空 role 帧）再排队/预填充，头到得早不说明有生成。
+        header_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] openai_compat response header received")
 
         # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
@@ -321,6 +324,16 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         state = _OAIStreamState()
         if accumulator is not None:
             accumulator.state = state
+
+        def ttft_ms() -> float:
+            """首 token RT：请求发出 → 首个正文/思考/tool 增量到达。
+
+            流内尚未产出任何生成（空响应 / 立即失败）时退回首包 RT——一个
+            下界，不代表完整等待（空流可以持续任意久）。
+            """
+            if state.first_token_ts is None:
+                return header_rt_ms
+            return (state.first_token_ts - t0) * 1000
 
         try:
             async for event in parse_sse_stream(
@@ -357,7 +370,8 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 # 正文 / 思考 / tool 参数增量都是模型解码产出，都要打点：
                 # 纯 tool call 响应（无正文无思考）缺了 tool 分支，decode
                 # TPS 恒为 0。按原始 delta 判断而非解析产物 deltas——首片
-                # 可能只带 id / name、没有 arguments 片段。
+                # 可能只带 id / name、没有 arguments 片段。该时刻同时是
+                # 首 token RT 的计时点（见 ttft_ms）。
                 if state.first_token_ts is None and (
                     content or reasoning or delta.get("tool_calls")
                 ):
@@ -385,7 +399,7 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     cached_tokens=cached_tokens,
-                    first_chunk_rt_ms=first_chunk_rt_ms,
+                    first_chunk_rt_ms=ttft_ms(),
                     tokens_per_sec=decode_tps,
                     model=model,
                     request_id=request_id,
@@ -416,7 +430,7 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                     state.final_tool_calls,
                 ),
                 usage=LLMUsage(
-                    first_chunk_rt_ms=first_chunk_rt_ms,
+                    first_chunk_rt_ms=ttft_ms(),
                     model=model,
                     request_id=request_id,
                     stop_reason=state.stop_reason,

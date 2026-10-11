@@ -44,8 +44,21 @@ class _StreamState:
     cache_creation: int = 0
     input_source: str = "start"  # input_tokens 来源：delta（权威）或 start（兜底）
     first_token_ts: float | None = None
+    # 请求发出时刻（首 token RT 的计时起点；provider 建立状态后注入）
+    sent_ts: float | None = None
     # 终止原因（message_delta.delta.stop_reason：end_turn/max_tokens/tool_use/…）
     stop_reason: str | None = None
+
+
+def _first_token_rt_ms(state: _StreamState, header_rt_ms: float) -> float:
+    """首 token RT（毫秒）：请求发出 → 首个正文/思考/tool 增量到达。
+
+    流内尚未产出任何生成（空响应 / 立即失败）时退回首包 RT（``header_rt_ms``）
+    ——一个下界，不代表完整等待（空流可以持续任意久）。
+    """
+    if state.sent_ts is None or state.first_token_ts is None:
+        return header_rt_ms
+    return (state.first_token_ts - state.sent_ts) * 1000
 
 
 def _is_zero_info_block(block: object) -> bool:
@@ -97,6 +110,9 @@ class _StreamMixin:
             state.blocks_by_index[idx] = ThinkingBlock(
                 thinking="", signature=block.get("data", ""), redacted=True
             )
+            # payload 是模型产出、且没有后续 delta：块起点打点（同 tool_use 的兜底口径）
+            if state.first_token_ts is None:
+                state.first_token_ts = time.monotonic()
         elif btype == "text":
             state.blocks_by_index[idx] = TextBlock(text="")
         elif btype == "tool_use":
@@ -118,15 +134,20 @@ class _StreamMixin:
         data: dict,
         model: str,
         request_id: str,
-        first_chunk_rt_ms: float,
+        header_rt_ms: float,
     ) -> LLMResponse | None:
         """处理 content_block_delta：累积进对应 index 的块，发射增量事件。"""
         idx = data.get("index", 0)
         delta = data.get("delta", {})
         delta_type = delta.get("type", "")
-        meta = LLMUsage(
-            first_chunk_rt_ms=first_chunk_rt_ms, model=model, request_id=request_id
-        )
+
+        def meta() -> LLMUsage:
+            """零 token 元信息 usage——在返回处取值，本帧即首帧时首 token RT 即为本帧时刻。"""
+            return LLMUsage(
+                first_chunk_rt_ms=_first_token_rt_ms(state, header_rt_ms),
+                model=model,
+                request_id=request_id,
+            )
 
         if delta_type == "text_delta":
             text = delta.get("text", "")
@@ -135,7 +156,7 @@ class _StreamMixin:
             blk = state.blocks_by_index.get(idx)
             if isinstance(blk, TextBlock):
                 blk.text += text
-            return LLMResponse(content=text, usage=meta)
+            return LLMResponse(content=text, usage=meta())
 
         if delta_type == "thinking_delta":
             thinking = delta.get("thinking", "")
@@ -144,7 +165,7 @@ class _StreamMixin:
             blk = state.blocks_by_index.get(idx)
             if isinstance(blk, ThinkingBlock):
                 blk.thinking += thinking
-            return LLMResponse(reasoning_content=thinking, usage=meta)
+            return LLMResponse(reasoning_content=thinking, usage=meta())
 
         if delta_type == "signature_delta":
             # per-block signature：累加进对应块（兼容单片/多片）
@@ -172,7 +193,7 @@ class _StreamMixin:
                         is_final=False,
                     )
                 ],
-                usage=meta,
+                usage=meta(),
             )
 
         return None
@@ -183,7 +204,7 @@ class _StreamMixin:
         data: dict,
         model: str,
         request_id: str,
-        first_chunk_rt_ms: float,
+        header_rt_ms: float,
     ) -> LLMResponse | None:
         """content_block_stop：按其 index 终结 tool 块（权威 JSON 解析）。"""
         idx = data.get("index", 0)
@@ -215,7 +236,9 @@ class _StreamMixin:
                 )
             ],
             usage=LLMUsage(
-                first_chunk_rt_ms=first_chunk_rt_ms, model=model, request_id=request_id
+                first_chunk_rt_ms=_first_token_rt_ms(state, header_rt_ms),
+                model=model,
+                request_id=request_id,
             ),
         )
 
@@ -256,7 +279,7 @@ class _StreamMixin:
 
     @staticmethod
     def _build_final_response(
-        state: _StreamState, model: str, request_id: str, first_chunk_rt_ms: float
+        state: _StreamState, model: str, request_id: str, header_rt_ms: float
     ) -> LLMResponse:
         """message_stop：产出有序 content_blocks（权威块数组）+ 最终 usage。
 
@@ -291,7 +314,7 @@ class _StreamMixin:
                 prompt_tokens=total_prompt,
                 completion_tokens=state.completion_tokens,
                 cached_tokens=state.cached_tokens,
-                first_chunk_rt_ms=first_chunk_rt_ms,
+                first_chunk_rt_ms=_first_token_rt_ms(state, header_rt_ms),
                 tokens_per_sec=decode_tps,
                 model=model,
                 request_id=request_id,

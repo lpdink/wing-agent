@@ -373,6 +373,7 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
+                # 非流式没有逐 token 时序：首 token RT 不可知，退化为整个请求耗时
                 first_chunk_rt_ms=elapsed * 1000,
                 tokens_per_sec=completion_tokens / elapsed if elapsed > 0 else 0.0,
                 model=model,
@@ -418,11 +419,14 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
         # 快照只反映当前尝试，与消费者看到的内容一致）
         state = _StreamState()
+        state.sent_ts = t0  # 首 token RT 的计时起点
         if accumulator is not None:
             accumulator.state = state
 
         request_id = resp.headers.get("request-id", "")
-        first_chunk_rt_ms = (time.monotonic() - t0) * 1000
+        # 响应头到达时刻（首包 RT）——只是首 token RT 的兜底：服务端常常先把流
+        # 打开（头 + 空 role 帧）再排队/预填充，头到得早不说明有生成。
+        header_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] anthropic response header received")
 
         try:
@@ -442,13 +446,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                     self._on_block_start(state, data)
                 elif event_type == "content_block_delta":
                     out = self._on_block_delta(
-                        state, data, model, request_id, first_chunk_rt_ms
+                        state, data, model, request_id, header_rt_ms
                     )
                     if out is not None:
                         yield out
                 elif event_type == "content_block_stop":
                     out = self._on_block_stop(
-                        state, data, model, request_id, first_chunk_rt_ms
+                        state, data, model, request_id, header_rt_ms
                     )
                     if out is not None:
                         yield out
@@ -458,7 +462,7 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                     self._on_message_start(state, data)
                 elif event_type == "message_stop":
                     yield self._build_final_response(
-                        state, model, request_id, first_chunk_rt_ms
+                        state, model, request_id, header_rt_ms
                     )
                 elif event_type == "error":
                     # Anthropic 流中 error 事件（overloaded / rate limit / 中途

@@ -116,7 +116,7 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
-# ── 单测覆盖率（门禁口径）────────────────────────────────────
+# ── 单测覆盖率（口径）────────────────────────────────────────
 # source 写包名而不是让 coverage 只统计「被导入过的」文件：没被任何测试碰到的
 # 模块必须以 0% 出现，否则「漏测整个模块」会被静默豁免。
 # 口径 = 语句 + 分支（combined）：纯语句覆盖率看不出「if 只走了一边」。
@@ -133,8 +133,7 @@ exclude_also = [
     "@overload",
 ]
 show_missing = true
-# 门禁阈值（本地 `make test-python` 与 CI 同一条命令、同一个数）：
-# 1 位小数精度，避免默认的整数四舍五入把 95.6 当成 96 放过；
-# 95.0 给常规改动留出约 130 条语句的余量，真正"整块没测"会立刻撞线。
-fail_under = 95
+# 总量覆盖率只作参考（PR 评论里一行），不做门禁 —— 门禁是增量（patch）
+# 覆盖率：Makefile 的 PATCH_COV_MIN + scripts/ci/patch_coverage.py。
+# precision 保留 1 位：报告/评论的展示口径，避免整数四舍五入掩盖 95.6 这样的值。
 precision = 1
