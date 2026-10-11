@@ -521,18 +521,20 @@ fn misplaced_tool_call_id_error(tool_call_id: Option<&str>) -> Option<String> {
 /// Error message when the top-level `--agent` is used outside stdio mode.
 ///
 /// Stdio mode (`wing -p ... --agent ...`) is one consumer; `wing run` / `wing
-/// new` carry their own `--agent` (placed **after** the subcommand, where it
-/// binds to the subcommand's args). The flag must live on the top-level `Cli`
-/// as well, otherwise the stdio argument filter would silently drop it — the
-/// exact failure this step exists to remove — which means a misplaced use now
-/// parses fine and would reach dispatch with nobody reading it. Refuse with a
-/// pointer instead of silently ignoring. `None` = invocation is fine.
+/// new` / `wing acp` carry their own `--agent` (placed **after** the
+/// subcommand, where it binds to the subcommand's args). The flag must live on
+/// the top-level `Cli` as well, otherwise the stdio argument filter would
+/// silently drop it — the exact failure this step exists to remove — which
+/// means a misplaced use now parses fine and would reach dispatch with nobody
+/// reading it. Refuse with a pointer instead of silently ignoring. `None` =
+/// invocation is fine.
 fn misplaced_agent_error(agent: Option<&str>) -> Option<String> {
     let agent = agent?;
     Some(format!(
         "top-level --agent only applies to stdio mode (wing -p ... --agent {agent}); \
-         with a subcommand put it after the subcommand, e.g. `wing run --agent {agent} ...` \
-         or `wing new --agent {agent}`. wing refuses it here instead of ignoring it."
+         with a subcommand put it after the subcommand, e.g. `wing run --agent {agent} ...`, \
+         `wing new --agent {agent}` or `wing acp --agent {agent}`. wing refuses it here \
+         instead of ignoring it."
     ))
 }
 
@@ -1457,6 +1459,10 @@ mod tests {
             misplaced_agent_error(Some("executor")).expect("outside stdio mode must be rejected");
         assert!(message.contains("stdio"), "{message}");
         assert!(message.contains("--agent"), "{message}");
+        // 同样自带 --agent 的子命令都要给出正确落点（acp 是第三个）。
+        assert!(message.contains("wing run --agent"), "{message}");
+        assert!(message.contains("wing new --agent"), "{message}");
+        assert!(message.contains("wing acp --agent"), "{message}");
 
         // clap 接受这种写法（flag 绑在顶层）——guard 是唯一防线。
         let cli = Cli::try_parse_from(["wing", "--agent", "executor", "ps"]).expect("parses");

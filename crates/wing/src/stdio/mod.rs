@@ -151,9 +151,10 @@ pub fn resume_session_at_error(value: &str) -> String {
 /// 只查"静默忽略"类问题：
 /// 1. `--session-id` 与 `-r/--resume` 互斥——一个是 create-or-adopt、一个是
 ///    恢复既有会话，语义冲突，同时给出即报错（不猜调用方想要哪个）；
-/// 2. resume / adopt 下不生效的覆盖旗标（`--agent` / `--system-prompt` /
+/// 2. resume / 收养既有会话下不生效的创建期旗标（`--agent` / `--system-prompt` /
 ///    `--append-system-prompt` / `--max-turns`）打日志警告——它们**不该**改链上
-///    前缀，但"给了没反应"必须可诊断。
+///    前缀，但"给了没反应"必须可诊断；新 id 的 `--session-id` 是纯创建，旗标
+///    实际生效（警告文案如实区分两种结果）。
 ///
 /// 警告只进日志（`$WING_HOME/tui/logs/`）：stderr 留给错误与 `session_id:` 行，
 /// stdout 是协议流。
@@ -181,8 +182,9 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
         if !ignored.is_empty() {
             tracing::warn!(
                 flags = %ignored.join(", "),
-                "ignored on resume/adopt: these change the conversation prefix or the \
-                 session's own limits and are create-time only"
+                "these are create-time only: -r/--resume keeps the resumed session's own \
+                 values, and --session-id applies them only when the id is new (adopting \
+                 an existing session ignores them)"
             );
         }
     }
@@ -199,7 +201,8 @@ pub fn validate_stdio_args(args: &StdioArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// resume / adopt 下不生效的创建期旗标（纯函数，便于单测）。
+/// resume / 收养既有会话（`--session-id` 命中已存在）下不生效的创建期旗标
+/// （纯函数，便于单测）。
 fn resume_ignored_flags(args: &StdioArgs) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if args.agent.is_some() {

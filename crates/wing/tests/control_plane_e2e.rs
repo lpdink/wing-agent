@@ -355,6 +355,9 @@ fn route(
 
         ("POST", "/api/session/create") => {
             let template = request["template_name"].as_str().unwrap_or("default");
+            // create-or-adopt: echo the requested id like the real gateway
+            // (the stdio frontend rejects a mismatched id).
+            let created_id = request["session_id"].as_str().unwrap_or("created-by-stub");
             // Create is where tags are born (atomic with the session).
             state.tags = request["tags"]
                 .as_array()
@@ -368,7 +371,7 @@ fn route(
             (
                 200,
                 json!({
-                    "session_id": "created-by-stub",
+                    "session_id": created_id,
                     "template_name": template,
                     "workspace": request["workspace"].clone(),
                     "backend": "file",
@@ -1081,6 +1084,26 @@ async fn stdio_prompt_carries_the_agent_flag() {
         body_of(&stub, "/api/session/create")["template_name"],
         "executor"
     );
+
+    // `--session-id` on a **fresh** id is a create, so `--agent` applies there
+    // too (the pre-request warning says exactly this: ignored only when the id
+    // already exists). The requested id survives round-trip verbatim.
+    let (code, _stdout, stderr) = run_wing(
+        &[
+            "-p",
+            "hi",
+            "--session-id",
+            "fresh-agent-id",
+            "--agent",
+            "executor",
+        ],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let create_body = body_of(&stub, "/api/session/create");
+    assert_eq!(create_body["session_id"], "fresh-agent-id");
+    assert_eq!(create_body["template_name"], "executor");
 
     let _ = std::fs::remove_dir_all(&stub.home);
 }
