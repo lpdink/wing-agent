@@ -1,4 +1,4 @@
-.PHONY: check test test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway demo
+.PHONY: check test test-python test-python-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -83,7 +83,12 @@ gateway:
 	uv run wing-gateway
 
 test-python:
-	uv run pytest libs/core/tests/ libs/wing-sdk/tests/
+	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ --cov
+
+# 覆盖率 HTML 报告（本地排查用；门禁阈值与口径见 pyproject 的 [tool.coverage.*]）
+test-python-html:
+	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ --cov \
+		--cov-report=term-missing --cov-report=html:target/coverage-python
 
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
