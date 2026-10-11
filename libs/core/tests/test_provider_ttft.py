@@ -252,6 +252,45 @@ class TestAnthropicTtft:
         assert delta_usage.first_chunk_rt_ms == expected, delta_usage
 
     @pytest.mark.asyncio
+    async def test_redacted_thinking_block_start_stamps_first_token(
+        self, clock: _Clock
+    ):
+        """首个生成是不透明的 redacted_thinking（无 delta）：块起点打点。"""
+        events = [
+            (0.0, {"type": "message_start", "message": {"usage": {"input_tokens": 5}}}),
+            (
+                0.7,
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "redacted_thinking", "data": "opaque"},
+                },
+            ),
+            (0.0, {"type": "content_block_stop", "index": 0}),
+            (
+                0.0,
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 1},
+                },
+            ),
+            (0.0, {"type": "message_stop"}),
+        ]
+        p = _anthropic_provider()
+        await _install(p, _anthropic_sse(events), clock)
+
+        final_usage = None
+        async for chunk in p._generate_stream({}, "claude-x"):
+            if chunk.content_blocks is not None:
+                final_usage = chunk.usage
+
+        assert final_usage is not None
+        assert final_usage.first_chunk_rt_ms == pytest.approx(
+            (HEADER_DELAY + 0.7) * 1000, abs=1.0
+        ), final_usage
+
+    @pytest.mark.asyncio
     async def test_ttft_falls_back_to_header_without_generation(self, clock: _Clock):
         """流内无任何 delta：退回首包 RT。"""
         events = [

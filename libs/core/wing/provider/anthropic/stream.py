@@ -110,6 +110,9 @@ class _StreamMixin:
             state.blocks_by_index[idx] = ThinkingBlock(
                 thinking="", signature=block.get("data", ""), redacted=True
             )
+            # payload 是模型产出、且没有后续 delta：块起点打点（同 tool_use 的兜底口径）
+            if state.first_token_ts is None:
+                state.first_token_ts = time.monotonic()
         elif btype == "text":
             state.blocks_by_index[idx] = TextBlock(text="")
         elif btype == "tool_use":
