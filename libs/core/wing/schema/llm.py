@@ -40,7 +40,11 @@ class LLMUsage(BaseModel):
     cached_tokens: int = 0
     """prompt 中被缓存命中的 token 数"""
     first_chunk_rt_ms: float = 0.0
-    """首包RT（毫秒）"""
+    """首 token RT（毫秒）：请求发出 → 首个正文/思考/tool 增量到达。
+
+    流式路径的耗时口径（前端 ttft / 审计的 first_chunk_rt_ms_*）。流内尚无
+    生成（空响应 / 立即失败）时退回首包（响应头）RT；非流式没有逐 token 时序，
+    退化为整个请求耗时。"""
     tokens_per_sec: float = 0.0
     """流式输出 tokens/s（基于服务端返回的 completion_tokens 精准计算）"""
     model: str = ""
