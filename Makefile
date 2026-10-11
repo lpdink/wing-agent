@@ -1,4 +1,4 @@
-.PHONY: check test test-python test-python-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway demo
+.PHONY: check test test-python test-python-html test-rust test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -157,6 +157,9 @@ fmt-check-rust:
 # 依据（2026-10，develop @ #200 后实测）：行 92.05% / 区域 92.54%，各留约 1pp 余量 ——
 # 门禁定位是「防倒退」而非「已达标」：余量太小会把正常重构（代码搬家、平台分支）变成
 # 假报警，太大则拦不住整块新代码裸奔。抬阈值请先用 `make test-rust` 实测现状。
+#
+# `?=` 允许本地用环境变量临时覆盖（如 RUST_COV_LINES_MIN=99 make test-rust 演练门禁
+# 失败路径）；CI 不设这个覆盖、默认值即仓库口径。
 RUST_COV_LINES_MIN ?= 91.0
 RUST_COV_REGIONS_MIN ?= 91.5
 

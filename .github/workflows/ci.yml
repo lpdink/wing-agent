@@ -17,6 +17,13 @@ on:
 permissions:
   contents: read
 
+# 同一 PR / 分支的后续推送取消上一轮 run（与 perf.yml 同一约定）。覆盖率评论的
+# 「被取消的 run 不发」正是依赖这个取消语义；否则交叠的 run 会互相覆盖评论、
+# 甚至双 POST 留下永久陈旧的重复评论。
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Python: lint + format + type check + dead code + test ──
   python-check:
@@ -218,10 +225,12 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      # 与两个门禁 job 同一个 ref（pull_request = merge ref）：评论里读到的阈值版本
+      # 与门禁实际使用的一致 —— base 与 PR 同时改阈值时不会显示成对不上的数。
       - name: Checkout (scripts only)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Download coverage data
         uses: actions/download-artifact@v4

@@ -11,8 +11,8 @@ fork PR 的 CI 把两层覆盖率贴成一条 sticky comment（marker `<!-- wing
 | Rust（workspace） | 行 + 区域（cargo-llvm-cov） | `Makefile` → `RUST_COV_LINES_MIN` / `RUST_COV_REGIONS_MIN` | 行 92.1% / 区域 92.5%（门禁 91.0 / 91.5） |
 
 阈值定位是**防倒退**而非「已达标」：各留约 1pp 余量，避免正常重构（代码搬家、平台分支）
-变成假报警。抬阈值前先实测现状 —— Rust 看 `make test-rust` 的 TOTAL 行 + 分 crate 明细
-（PR 评论会贴同一份口径），Python 看 `make test-python-html`。
+变成假报警。抬阈值前先实测现状 —— Rust 看 `make test-rust` 的 TOTAL 行与逐文件明细
+（分 crate 聚合见 PR 评论），Python 看 `make test-python-html`。
 
 ## Rust 覆盖率（cargo-llvm-cov）
 

@@ -63,8 +63,8 @@ def load_rust_gate() -> tuple[float, float] | None:
         text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     except OSError:
         return None
-    lines = re.search(r"^RUST_COV_LINES_MIN\s*\??=\s*([0-9.]+)", text, re.M)
-    regions = re.search(r"^RUST_COV_REGIONS_MIN\s*\??=\s*([0-9.]+)", text, re.M)
+    lines = re.search(r"^RUST_COV_LINES_MIN\s*[:?]?=\s*([0-9.]+)", text, re.M)
+    regions = re.search(r"^RUST_COV_REGIONS_MIN\s*[:?]?=\s*([0-9.]+)", text, re.M)
     if not lines or not regions:
         return None
     return float(lines.group(1)), float(regions.group(1))
