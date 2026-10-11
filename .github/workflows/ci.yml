@@ -56,6 +56,22 @@ jobs:
       - name: Unit tests (with coverage gate)
         run: make test-python
 
+      # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：门禁失败 / 测试挂掉时也要导 ——
+      # 评论要能展示「低了多少」。--fail-under=0 显式关掉这条命令上的门禁检查
+      # （门禁在上面那条 make 里，这里只是导出既有 .coverage 数据，不重跑测试）。
+      - name: Export coverage JSON
+        if: always()
+        run: uv run coverage json -o coverage-python.json --fail-under=0
+
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-python
+          path: coverage-python.json
+          if-no-files-found: warn
+          retention-days: 14
+
   # ── Probe: deterministic integration scenarios (fake provider) ─
   probe-check:
     name: Probe Check
@@ -132,7 +148,7 @@ jobs:
           path: extensions/vscode/wing-vscode.vsix
           if-no-files-found: error
 
-  # ── Rust: format + clippy + test ─────────────────────────────
+  # ── Rust: format + clippy + test (with a coverage gate) ──────
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
@@ -145,10 +161,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          # llvm-tools-preview 是 cargo-llvm-cov 的运行时依赖（llvm-profdata / llvm-cov）。
+          components: rustfmt, clippy, llvm-tools-preview
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cargo fmt check
         run: cargo fmt --check
@@ -156,5 +178,94 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy -- -D warnings
 
-      - name: Cargo test
-        run: cargo test
+      # 与本地同一条命令：单测 + 覆盖率门禁（阈值在 Makefile 的 RUST_COV_*）。
+      # 插桩构建落在 target/llvm-cov-target/（独立于普通构建产物，互不失效）。
+      - name: Cargo test (with coverage gate)
+        run: make test-rust
+
+      # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：门禁失败 / 测试挂掉时也要导。
+      # 只读既有 profraw 生成报告，不重跑测试；--summary-only 去掉 segments 明细
+      # （16MB → 91KB，评论只需要 totals 与每文件 summary）。
+      - name: Export coverage JSON
+        if: always()
+        run: cargo llvm-cov report --json --summary-only --output-path coverage-rust.json
+
+      - name: Upload coverage data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-rust
+          path: coverage-rust.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ── Coverage: 把两个 job 的覆盖率产物汇成一条 sticky comment ──
+  # 数据来自上面两个 job 各自上传的 artifact —— 与门禁同一次运行，不重跑测试。
+  # 门禁红也要发（always）：评论要能展示「低在哪」；被并发取消的 run 不发
+  # （!cancelled()），否则会贴一条残缺评论、随后又被新 run 覆盖。
+  # 仅 pull_request 且非 fork：fork PR 的 GITHUB_TOKEN 被强制降为只读、发不了评论
+  # （与 perf workflow 同一约定）。
+  coverage-report:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [python-check, rust-check]
+    if: >-
+      always() && !cancelled() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout (scripts only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage
+          merge-multiple: true
+
+      - name: Compose the comment body
+        env:
+          PYTHON_RESULT: ${{ needs.python-check.result }}
+          RUST_RESULT: ${{ needs.rust-check.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -f coverage/coverage-python.json ]; then
+            args+=(--python-json coverage/coverage-python.json)
+          fi
+          if [ -f coverage/coverage-rust.json ]; then
+            args+=(--rust-json coverage/coverage-rust.json)
+          fi
+          python3 scripts/ci/coverage_report.py "${args[@]}" \
+            --out-md comment-body.md \
+            --run-url "$RUN_URL" \
+            --python-result "$PYTHON_RESULT" \
+            --rust-result "$RUST_RESULT"
+
+      - name: Upsert sticky PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/sticky_comment.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --marker '<!-- wing-coverage -->' \
+            --body-file comment-body.md
+
+      - name: Step summary
+        if: always()
+        run: |
+          if [ -f comment-body.md ]; then
+            cat comment-body.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no comment body produced" >> "$GITHUB_STEP_SUMMARY"
+          fi

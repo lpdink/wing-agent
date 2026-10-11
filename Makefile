@@ -151,5 +151,41 @@ fmt-rust:
 fmt-check-rust:
 	cargo fmt --check
 
+# Rust 覆盖率门禁阈值（行 / 区域，百分比）。唯一事实来源：`make test-rust` 的门禁与
+# CI 的 PR 覆盖率评论展示都读这两行（scripts/ci/coverage_report.py 按变量名解析）。
+#
+# 依据（2026-10，develop @ #200 后实测）：行 92.05% / 区域 92.54%，各留约 1pp 余量 ——
+# 门禁定位是「防倒退」而非「已达标」：余量太小会把正常重构（代码搬家、平台分支）变成
+# 假报警，太大则拦不住整块新代码裸奔。抬阈值请先用 `make test-rust` 实测现状。
+RUST_COV_LINES_MIN ?= 91.0
+RUST_COV_REGIONS_MIN ?= 91.5
+
+# Rust 覆盖率门禁：与 CI 同一条命令（本地 = CI）。
+#
+# - cargo-llvm-cov 是 cargo 子命令、不在 Cargo.toml 依赖里：缺失时硬失败 + 安装指引，
+#   不静默退化成裸 `cargo test` —— 那样本地「过了」而 CI 才拦，门禁形同虚设。
+# - cargo-llvm-cov 的 fail-under 只设退出码、**不打印任何失败原因**（上游行为），
+#   这里补一条明确的失败信息，否则 CI 红了日志里只有表格。
+# - doctests 单独一条：cargo-llvm-cov 的 --doctests 依赖 nightly 的 -Z unstable-options，
+#   stable 上不可用；分开跑保持与原本 `cargo test` 相同的目标覆盖面。
+# - 插桩构建（RUSTFLAGS 带 -C instrument-coverage）与普通构建在 target 里是两套产物：
+#   刚跑过裸 `cargo test` 再跑本命令会整树重编译（反之亦然）。日常统一走本命令。
 test-rust:
-	cargo test
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || { \
+		echo "❌ cargo-llvm-cov not found — the Rust coverage gate needs it."; \
+		echo "   Install:"; \
+		echo "     cargo install cargo-llvm-cov --locked"; \
+		echo "     rustup component add llvm-tools-preview"; \
+		exit 1; \
+	}
+	@if ! cargo llvm-cov --workspace --fail-under-lines $(RUST_COV_LINES_MIN) --fail-under-regions $(RUST_COV_REGIONS_MIN); then \
+		echo ""; \
+		echo "❌ Rust gate failed：测试挂了，或覆盖率低于阈值（TOTAL 行是实测值）。"; \
+		echo "   阈值：lines ≥ $(RUST_COV_LINES_MIN)% · regions ≥ $(RUST_COV_REGIONS_MIN)%（Makefile: RUST_COV_LINES_MIN / RUST_COV_REGIONS_MIN）"; \
+		exit 1; \
+	fi
+	cargo test --workspace --doc
+
+# 覆盖率 HTML 报告（本地排查用；阈值与口径见上方变量）
+test-rust-html:
+	cargo llvm-cov --workspace --html --output-dir target/coverage-rust

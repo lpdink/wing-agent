@@ -5,7 +5,8 @@
 job 只在基础设施故障时红（构建/测量失败、报告渲染失败），性能回归只用评论表达。
 
 - 代码：`scripts/perf/`（`ab.py` 编排 · `common.py` 契约 · `report.py` 渲染 ·
-  `comment.py` upsert · `suite_{rust,tui,gateway}.py` 三个套件 · `thresholds.json`）
+  `suite_{rust,tui,gateway}.py` 三个套件 · `thresholds.json`；sticky 评论的 upsert 用
+  `scripts/ci/sticky_comment.py`，与覆盖率评论共用）
 - CI：`.github/workflows/perf.yml`（PR 触发 + 手工 dispatch）；评论正文也喂给
   `.github/workflows/wing-review.yml` 的 AI 审查者（它把与改动相关的回归点并入结论）
 - 速查表：`scripts/perf/README.md`
@@ -143,7 +144,8 @@ uv run python scripts/perf/ab.py --base-ref HEAD --calibrate --suites tui --roun
 
 # 只渲染 / 只贴评论
 uv run python scripts/perf/report.py --json target/perf/ab.json --out-md /tmp/comment.md
-uv run python scripts/perf/comment.py --repo owner/repo --pr 42 --body-file /tmp/comment.md --dry-run
+uv run python scripts/ci/sticky_comment.py --repo owner/repo --pr 42 \
+    --marker '<!-- wing-perf -->' --body-file /tmp/comment.md --dry-run
 ```
 
 产物落在 `<workdir>`（默认 `<repo>/target/perf`）：
@@ -281,8 +283,8 @@ artifact 的逐轮值**。`append.*` 这一轮是 2s 测量时间的旧口径；
   `rust-cache` 默认只覆盖 workspace 下的 `target/`，所以 base 侧每轮都冷编译——
   给缓存加 `cache-directories: ${{ runner.temp }}/perf/base/target` 是下一步的优化（本轮不做，
   避免同时引入"缓存命中/未命中"两种构建状态）。
-- **评论**：`report.py` 渲染 → `comment.py` 按 marker `<!-- wing-perf -->` upsert（同 PR 永远
-  只有一条）。**fork PR 不发评论**（token 只读），结果只留 artifact。
+- **评论**：`report.py` 渲染 → `scripts/ci/sticky_comment.py` 按 marker `<!-- wing-perf -->`
+  upsert（同 PR 永远只有一条）。**fork PR 不发评论**（token 只读），结果只留 artifact。
   - **怎么读**：① 顶部注意事项（最多直出 2 条，其余折叠）——「逐轮漂移大」「置信区间偏宽」
     「载荷指纹不一致」这类透明度信号在这里；漂移榜只列**可判定**的指标（`info_only` 项不进榜，
     有符号的 `trend` 会因为近零中位数霸榜），折叠块标题里的 ⚠️ 计数则是全部漂移行；② 主表按 |Δ|
