@@ -68,7 +68,7 @@ async def hashline_read(
     get the new TAG (edit results also carry it).
 
     Line endings are shown (and hashed) as LF; a CRLF file is rewritten with LF
-    endings when patched.
+    endings when a patch changes it (a no-op patch leaves the file untouched).
 
     Errors: "hashline: PATH: No such file|Is a directory|Permission denied|not UTF-8|binary file"
     """

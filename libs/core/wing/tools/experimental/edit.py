@@ -91,7 +91,8 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
     when the file changed since that read. All line numbers refer to that read's
     snapshot, independent of earlier ops in the same payload. Use Write for new
     files. The `*** Begin Patch` / `*** End Patch` wrapper is optional; a file
-    may repeat its section, later ops are chained onto the same snapshot.
+    may repeat its section consecutively, later ops are chained onto the same
+    snapshot.
 
     Ops (per file, any order; positions below are original line numbers):
     - PUT N.=M:   replace lines N–M with the following `+` body lines (N.=N = one line).
@@ -103,13 +104,15 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
       PUT N.=M @name pastes register lines over N–M (@name required).
     - REM         delete the whole file (must be the only op in its section).
     - MV DEST     move/rename the file after its edits (may share the section;
-      refuses an existing destination, the same file, or a destination that is
-      also patched somewhere in the same payload).
+      refuses an existing destination, the same file, a destination that is
+      also patched somewhere in the same payload, or a destination whose
+      directory does not exist).
 
     Body lines start with `+`; the rest is written verbatim (a lone `+` is a blank
     line). Content whose own line starts with `-`/`+` must be escaped as `+-`/`++`.
     Symlinks and CRLF are handled like the main Edit tool: writes go through the
-    link to the real target, and the file is rewritten with LF line endings.
+    link to the real target, and a patch that changes content is written back
+    with LF line endings.
 
     Example:
     *** Begin Patch
@@ -118,22 +121,32 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
     +def greet(name):
     *** End Patch
 
-    Returns per-file new TAGs (reuse them for follow-up patches). On validation
-    errors nothing is written and the message starts with "hashline: "; a write
-    failure rolls back the sections already written.
+    Returns per-file new TAGs (reuse them for follow-up patches). A file whose
+    normalized content is unchanged is left untouched and reported as
+    `no change` (no diff event). On validation errors nothing is written and the
+    message starts with "hashline: "; a write failure rolls back the sections
+    already written.
     """
     try:
         sections = parse_payload(input)
     except HashlineError as e:
         raise ToolError(f"hashline: {e}") from e
 
-    # 归并键 = realpath：符号链接 / `..` / 相对拼写等别名归一到同一身份。只用
-    # 字符串相等做键时，别名拼写会绕过归并——两段各自基于同一原始快照构造完整
-    # 文件并依次落盘，后写覆盖前写（前段编辑静默丢失，回执还谎报两个文件）。
+    # 归并键 = realpath：符号链接 / `..` / 相对拼写等别名归一到同一身份。同一文件
+    # 的段必须连续——归并后 ops 保持载荷序，寄存器跨段可见性才与 "top-to-bottom
+    # across sections" 一致；交错写法（a…b…a）会让中间段看到归并后的最终寄存器，
+    # 与声明语义分叉，因此显式报错而不是静默按归并序生效。
     groups: dict[str, tuple[str, Section]] = {}
+    last_key: str | None = None
     for section in sections:
         resolved = resolve_path(section.path, ctx)
         key = os.path.realpath(resolved)
+        if key != last_key and key in groups:
+            raise ToolError(
+                f"hashline: {section.path}: sections for one file must be contiguous "
+                "— merge the ops into one section or move them together"
+            )
+        last_key = key
         entry = groups.get(key)
         if entry is None:
             groups[key] = (
@@ -228,6 +241,11 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
                     "already the destination of the section for "
                     f"{planned_dests[dest_key]}"
                 )
+            if not os.path.isdir(os.path.dirname(dest)):
+                raise ToolError(
+                    f"hashline: {section.path}: MV destination directory "
+                    f"{os.path.dirname(outcome.moved_to) or '.'} does not exist"
+                )
             if os.path.lexists(dest):
                 raise ToolError(
                     f"hashline: {section.path}: MV destination {outcome.moved_to} "
@@ -269,9 +287,9 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
     session_registers.update(payload_named)
 
     tool_call_id = current_tool_call_id() or ""
-    for _section, resolved, _raw, _norm, _bom, outcome, _dest in prepared:
-        if outcome.removed:
-            continue
+    for _section, resolved, _raw, norm_text, _bom, outcome, _dest in prepared:
+        if outcome.removed or outcome.new_content == norm_text:
+            continue  # 无净变化：不写回也不发事件，避免前端渲染空 diff
         for window in outcome.windows:
             ctx.emit(
                 DiffContentEvent(
@@ -286,7 +304,7 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
             )
 
     parts = [f"hashline: ok ({len(prepared)} file{'s' if len(prepared) != 1 else ''})"]
-    for section, _resolved, _raw, _norm, _bom, outcome, _dest in prepared:
+    for section, _resolved, _raw, norm_text, _bom, outcome, _dest in prepared:
         if outcome.removed:
             parts.append(f"  {section.path}: removed")
             continue
@@ -294,8 +312,11 @@ async def hashline_edit(input: str, ctx: ToolContext) -> str:
         if outcome.ops_applied:
             row += (
                 f", {outcome.ops_applied} op{'s' if outcome.ops_applied != 1 else ''}"
-                f", {outcome.old_line_count} → {outcome.new_line_count} lines"
             )
+            if outcome.new_content != norm_text:
+                row += f", {outcome.old_line_count} → {outcome.new_line_count} lines"
+            else:
+                row += ", no change"
         if outcome.moved_to is not None:
             row += f", moved to {outcome.moved_to}"
         parts.append(row)

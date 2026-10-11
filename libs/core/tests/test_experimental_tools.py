@@ -287,11 +287,11 @@ class TestHashlineEdit:
         ctx = _StubCtx()
         tag_a = content_tag("a\nb\nc\n")
         tag_b = content_tag("x\ny\n")
-        # a 的段不连续（a → b → a）：按首次出现顺序归并，ops 按载荷顺序拼接。
+        # a 的两段连续：归并为一组、ops 按载荷顺序拼接（回执按文件计）。
         payload = (
             f"[{a}#{tag_a}]\nPUT 1.=1:\n+A\n"
-            f"[{b}#{tag_b}]\nPUT 1.=1:\n+X\n"
             f"[{a}#{tag_a}]\nPUT 3.=3:\n+C\n"
+            f"[{b}#{tag_b}]\nPUT 1.=1:\n+X\n"
         )
         result = await edit(ctx, payload)
         assert result == (
@@ -302,6 +302,26 @@ class TestHashlineEdit:
         assert a.read_text(encoding="utf-8") == "A\nb\nC\n"
         assert b.read_text(encoding="utf-8") == "X\ny\n"
         assert len(ctx.events) == 3  # 每个操作一条窗口
+
+    @pytest.mark.asyncio
+    async def test_non_contiguous_sections_for_one_file_rejected(self, tmp_path: Path):
+        a = tmp_path / "a.txt"
+        a.write_text("a\nb\nc\n", encoding="utf-8")
+        b = tmp_path / "b.txt"
+        b.write_text("x\n", encoding="utf-8")
+        ctx = _StubCtx()
+        tag_a = content_tag("a\nb\nc\n")
+        # 交错写法（a → b → a）：归并序与载荷序分叉，显式拒绝、零写入。
+        payload = (
+            f"[{a}#{tag_a}]\nPUT 1.=1:\n+A\n"
+            f"[{b}#{content_tag('x\n')}]\nPUT 1.=1:\n+X\n"
+            f"[{a}#{tag_a}]\nPUT 3.=3:\n+C\n"
+        )
+        with pytest.raises(ToolError, match="must be contiguous"):
+            await edit(ctx, payload)
+        assert a.read_text(encoding="utf-8") == "a\nb\nc\n"
+        assert b.read_text(encoding="utf-8") == "x\n"
+        assert ctx.events == []
 
     @pytest.mark.asyncio
     async def test_repeated_sections_with_different_tags_conflict(self, tmp_path: Path):
@@ -552,3 +572,42 @@ class TestHashlineEdit:
                 _StubCtx(session_id="s1"),
                 f"[{p1}#{content_tag('')}]\nPUT <1 @r\n",
             )
+
+    @pytest.mark.asyncio
+    async def test_no_net_change_is_reported_and_not_written(self, tmp_path: Path):
+        p = tmp_path / "noop.txt"
+        p.write_bytes(b"a\r\nb\r\n")  # CRLF：无净变化时保持原字节（不按 LF 写回）
+        ctx = _StubCtx()
+        tag = content_tag("a\nb\n")
+
+        result = await edit(ctx, f"[{p}#{tag}]\nPUT 1.=1:\n+a\n")
+
+        assert result == f"hashline: ok (1 file)\n  {p}: #{tag}, 1 op, no change"
+        assert p.read_bytes() == b"a\r\nb\r\n"
+        assert ctx.events == []  # 不发 old==new 的空 diff
+
+    @pytest.mark.asyncio
+    async def test_mv_refuses_missing_destination_directory(self, tmp_path: Path):
+        src = tmp_path / "s.txt"
+        src.write_text("s\n", encoding="utf-8")
+        dest = tmp_path / "newdir" / "x.txt"
+        ctx = _StubCtx()
+
+        with pytest.raises(ToolError, match="destination directory"):
+            await edit(ctx, f"[{src}#{content_tag('s\n')}]\nMV {dest}\n")
+        assert src.read_text(encoding="utf-8") == "s\n"
+        assert not dest.parent.exists()  # 不静默建目录
+
+    @pytest.mark.asyncio
+    async def test_filename_with_hash_roundtrips(self, tmp_path: Path):
+        p = tmp_path / "a#b.txt"
+        p.write_text("x\ny\n", encoding="utf-8")
+        ctx = _StubCtx()
+
+        result = await read(ctx, str(p))
+        tag = content_tag("x\ny\n")
+        assert f"#{tag} " in result
+
+        # 照抄读输出的 PATH#TAG（路径含 #、末段是 TAG）→ 补丁可用。
+        await edit(ctx, f"[{p}#{tag}]\nPUT 2.=2:\n+Y\n")
+        assert p.read_text(encoding="utf-8") == "x\nY\n"

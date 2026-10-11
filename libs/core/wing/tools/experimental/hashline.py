@@ -23,8 +23,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-#: 段头 ``[path#TAG]``；路径不含 ``#``（与上游同约束），TAG 为 4 位十六进制。
-_SECTION_RE = re.compile(r"^\[(?P<path>[^#\r\n]+)#(?P<tag>[0-9A-Fa-f]{4})\]$")
+#: 段头 ``[path#TAG]``：自右向左切分——末段 ``#XXXX`` 是 TAG，其余都属于路径
+#: （路径允许含 ``#``）。
+_SECTION_RE = re.compile(r"^\[(?P<path>.+)#(?P<tag>[0-9A-Fa-f]{4})\]$")
 _RANGE_RE = re.compile(r"^(?P<start>[1-9]\d*)\.=(?P<end>[1-9]\d*)$")
 _BEFORE_RE = re.compile(r"^<(?P<line>[1-9]\d*)$")
 _AFTER_RE = re.compile(r"^>(?P<line>[1-9]\d*)$")
@@ -211,6 +212,11 @@ def parse_payload(text: str) -> list[Section]:
         )
         idx += 1
         idx = _parse_ops(lines, idx, section)
+        if not section.ops:
+            raise HashlineError(
+                f"line {section.line}: section has no ops — expected at least one "
+                "PUT/CUT/REM/MV"
+            )
         sections.append(section)
 
     if not sections:

@@ -96,6 +96,13 @@ def test_parse_lowercase_tag_normalized_uppercase():
     assert section.tag == "A1B2"
 
 
+def test_parse_path_may_contain_hash():
+    # 段头自右向左切分：末段 #XXXX 是 TAG，其余都属于路径。
+    (section,) = parse_payload("[a#b.txt#A1B2]\nREM\n")
+    assert section.path == "a#b.txt"
+    assert section.tag == "A1B2"
+
+
 def test_parse_multiple_sections_and_blank_lines_between_ops():
     sections = parse_payload(
         "*** Begin Patch\n"
@@ -120,6 +127,8 @@ def test_parse_multiple_sections_and_blank_lines_between_ops():
         ("*** Begin Patch\n*** End Patch\n", "empty patch"),
         ("not a header\n", "section header"),
         ("[a.py#123]\nREM\n", "section header"),
+        ("[a.py#A1B2]\n", "has no ops"),
+        ("[a.py#A1B2]\n[b.py#1111]\nREM\n", "has no ops"),
         ("[a.py#A1B2]\nPUT 1.=1:\n", "needs at least one"),
         ("[a.py#A1B2]\n+x\n", "body line without a preceding"),
         ("[a.py#A1B2]\nPUT 1*:\n+A\n", "block locators"),
