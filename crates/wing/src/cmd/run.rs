@@ -83,6 +83,14 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let (session_id, template_name, resolved_workspace) = if let Some(ref resume_id) = args.resume {
+        // `--agent` 只作用在创建路径：resume 的会话保持自己的 agent。给了没反应
+        // 必须可诊断（与 stdio 路径的 resume-ignored 警告同口径）。
+        if args.agent.is_some() {
+            tracing::warn!(
+                "--agent is ignored on resume: the resumed session keeps its agent \
+                 (switch it with `wing update <sid> --agent <name>`)"
+            );
+        }
         let resp = http.resume_session(resume_id).await?;
         // `-r` + `--tag`: tags are added to the resumed session (idempotent;
         // the resumed session keeps its existing tags).
@@ -108,7 +116,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         };
 
         let create_req = CreateSessionRequest {
-            template_name: None,
+            template_name: args.agent.clone(),
             workspace: workspace.clone(),
             agent: Some(override_),
             backend: None,

@@ -14,7 +14,7 @@
 //! something else.
 //!
 //! ```sh
-//! SID=$(wing new --template executor --tag nightly --json | jq -r .session_id)
+//! SID=$(wing new --agent executor --tag nightly --json | jq -r .session_id)
 //! wing resume "$SID"          # → status / model / token summary
 //! ```
 
@@ -40,9 +40,10 @@ pub struct NewArgs {
     #[arg(long)]
     pub workspace: Option<String>,
 
-    /// Agent template name (default: the gateway's default template).
-    #[arg(long)]
-    pub template: Option<String>,
+    /// Agent to use for the session (name from `wing agents`; default: the
+    /// gateway's default agent).
+    #[arg(long = "agent")]
+    pub agent: Option<String>,
 
     /// Tags attached at creation (repeatable / comma-separated).
     #[arg(long = "tag", value_delimiter = ',')]
@@ -94,7 +95,7 @@ async fn new_inner(args: &NewArgs) -> Result<NewOutput> {
     };
 
     let request = CreateSessionRequest {
-        template_name: args.template.clone(),
+        template_name: args.agent.clone(),
         workspace,
         // Atomic: the session is born tagged (no dispatch-without-tags window).
         tags: (!args.tag.is_empty()).then(|| args.tag.clone()),

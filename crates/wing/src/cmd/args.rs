@@ -2,7 +2,7 @@
 
 use clap::Args;
 
-/// Arguments shared by `wing run` and stdio mode (`wing -p`).
+/// Arguments of `wing run` (stdio mode carries its own `StdioArgs`).
 ///
 /// All fields optional except where noted. When a field is `None`,
 /// the agent template's default value is used.
@@ -15,6 +15,14 @@ pub struct RunArgs {
     /// Override model id (references `providers[].models` in the gateway config).
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
+
+    /// Agent to use for the session (name from `wing agents`; default: the
+    /// gateway's default agent).
+    ///
+    /// Create-time only: with `-r` the resumed session keeps its agent (switch
+    /// it with `wing update <sid> --agent <name>`).
+    #[arg(long = "agent")]
+    pub agent: Option<String>,
 
     /// Resume an existing session by ID.
     #[arg(short = 'r', long = "resume")]

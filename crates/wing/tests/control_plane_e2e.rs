@@ -355,6 +355,9 @@ fn route(
 
         ("POST", "/api/session/create") => {
             let template = request["template_name"].as_str().unwrap_or("default");
+            // create-or-adopt: echo the requested id like the real gateway
+            // (the stdio frontend rejects a mismatched id).
+            let created_id = request["session_id"].as_str().unwrap_or("created-by-stub");
             // Create is where tags are born (atomic with the session).
             state.tags = request["tags"]
                 .as_array()
@@ -368,7 +371,7 @@ fn route(
             (
                 200,
                 json!({
-                    "session_id": "created-by-stub",
+                    "session_id": created_id,
                     "template_name": template,
                     "workspace": request["workspace"].clone(),
                     "backend": "file",
@@ -981,14 +984,7 @@ async fn new_and_resume_round_trip() {
     let stub = Stub::start("new-resume").await;
 
     let (code, stdout, stderr) = run_wing(
-        &[
-            "new",
-            "--template",
-            "executor",
-            "--tag",
-            "nightly",
-            "--json",
-        ],
+        &["new", "--agent", "executor", "--tag", "nightly", "--json"],
         &stub,
     )
     .await;
@@ -1031,6 +1027,83 @@ async fn new_and_resume_round_trip() {
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains(UNKNOWN_ID), "{stderr}");
     assert!(stderr.contains("not found"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// `wing run --agent`: the chosen agent rides the create request as
+/// `template_name` and comes back in the output; without the flag the gateway
+/// default decides (the request carries no template).
+#[tokio::test]
+async fn run_carries_the_agent_flag() {
+    let stub = Stub::start("run-agent").await;
+
+    let (code, stdout, stderr) = run_wing(
+        &["run", "--agent", "executor", "-p", "just ok", "--json"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let out = json_of(&stdout);
+    assert_eq!(out["session_id"], "created-by-stub");
+    assert_eq!(out["template_name"], "executor");
+    assert_eq!(
+        body_of(&stub, "/api/session/create")["template_name"],
+        "executor"
+    );
+    assert_eq!(body_of(&stub, "/api/session/send")["content"], "just ok");
+
+    // Without --agent the key is absent: the gateway's default template decides.
+    let stub = Stub::start("run-default-agent").await;
+    let (code, stdout, stderr) = run_wing(&["run", "-p", "just ok", "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let out = json_of(&stdout);
+    assert_eq!(out["template_name"], "default");
+    let create_body = body_of(&stub, "/api/session/create");
+    assert!(
+        create_body.get("template_name").is_none(),
+        "键必须缺席（而不是显式 null）：{create_body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// The stdio frontend carries the agent too: `wing -p ... --agent executor`
+/// creates a session on that template. The flag lives on the top-level `Cli`
+/// for exactly this path — the stdio argument filter only keeps flags it knows
+/// (see `filter_keeps_agent_and_its_value`), so without it the flag and its
+/// value would be dropped and the session would silently fall back to the
+/// default template.
+#[tokio::test]
+async fn stdio_prompt_carries_the_agent_flag() {
+    let stub = Stub::start("stdio-agent").await;
+
+    let (code, _stdout, stderr) = run_wing(&["-p", "hi", "--agent", "executor"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        body_of(&stub, "/api/session/create")["template_name"],
+        "executor"
+    );
+
+    // `--session-id` on a **fresh** id is a create, so `--agent` applies there
+    // too (the pre-request warning says exactly this: ignored only when the id
+    // already exists). The requested id survives round-trip verbatim.
+    let (code, _stdout, stderr) = run_wing(
+        &[
+            "-p",
+            "hi",
+            "--session-id",
+            "fresh-agent-id",
+            "--agent",
+            "executor",
+        ],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let create_body = body_of(&stub, "/api/session/create");
+    assert_eq!(create_body["session_id"], "fresh-agent-id");
+    assert_eq!(create_body["template_name"], "executor");
 
     let _ = std::fs::remove_dir_all(&stub.home);
 }

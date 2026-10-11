@@ -67,6 +67,14 @@ pub struct Cli {
     #[arg(long = "tools")]
     pub tools: Option<String>,
 
+    /// Agent to use for the session (name from `wing agents`; default: the
+    /// gateway's default agent).
+    ///
+    /// stdio mode only (`wing -p ... --agent executor`); with a subcommand put
+    /// it after the subcommand, e.g. `wing run --agent executor ...`.
+    #[arg(long = "agent")]
+    pub agent: Option<String>,
+
     /// Attach tags to the session (stdio mode `wing -p` only — subcommands
     /// like `wing run` / `wing tag` carry their own `--tag`; a misplaced
     /// top-level flag is rejected instead of being silently dropped).
@@ -510,6 +518,26 @@ fn misplaced_tool_call_id_error(tool_call_id: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Error message when the top-level `--agent` is used outside stdio mode.
+///
+/// Stdio mode (`wing -p ... --agent ...`) is one consumer; `wing run` / `wing
+/// new` / `wing acp` carry their own `--agent` (placed **after** the
+/// subcommand, where it binds to the subcommand's args). The flag must live on
+/// the top-level `Cli` as well, otherwise the stdio argument filter would
+/// silently drop it — the exact failure this step exists to remove — which
+/// means a misplaced use now parses fine and would reach dispatch with nobody
+/// reading it. Refuse with a pointer instead of silently ignoring. `None` =
+/// invocation is fine.
+fn misplaced_agent_error(agent: Option<&str>) -> Option<String> {
+    let agent = agent?;
+    Some(format!(
+        "top-level --agent only applies to stdio mode (wing -p ... --agent {agent}); \
+         with a subcommand put it after the subcommand, e.g. `wing run --agent {agent} ...`, \
+         `wing new --agent {agent}` or `wing acp --agent {agent}`. wing refuses it here \
+         instead of ignoring it."
+    ))
+}
+
 /// Error message when `--show-secrets` is passed without `--dump-config`.
 ///
 /// Same reasoning as the other misplaced-flag guards: the flag lives on
@@ -595,6 +623,13 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
     // 子命令形态在 `wing run` 上有自己的同名旗标（出现在子命令之后即绑定到它，
     // 顶层保持 None），所以这条闸门只拦"放在子命令之前"或"没走 stdio"的写法。
     if let Some(message) = misplaced_tool_call_id_error(cli.tool_call_id.as_deref()) {
+        eprintln!("wing error: {message}");
+        return ExitCode::FAILURE;
+    }
+
+    // 同理：顶层 --agent 只服务 stdio 模式（`wing -p --agent ...`）；`wing run` /
+    // `wing new` 的同名旗标出现在子命令之后即绑定到子命令，顶层保持 None。
+    if let Some(message) = misplaced_agent_error(cli.agent.as_deref()) {
         eprintln!("wing error: {message}");
         return ExitCode::FAILURE;
     }
@@ -764,6 +799,7 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
     let args = StdioArgs {
         prompt,
         model: cli.model,
+        agent: cli.agent,
         resume: cli.resume,
         session_id: cli.session_id,
         resume_session_at: cli.resume_session_at,
@@ -1316,7 +1352,7 @@ mod tests {
             "new",
             "--workspace",
             "/tmp/ws",
-            "--template",
+            "--agent",
             "executor",
             "--tag",
             "a,b",
@@ -1325,11 +1361,16 @@ mod tests {
         match cli.command {
             Some(Command::New(args)) => {
                 assert_eq!(args.workspace.as_deref(), Some("/tmp/ws"));
-                assert_eq!(args.template.as_deref(), Some("executor"));
+                assert_eq!(args.agent.as_deref(), Some("executor"));
                 assert_eq!(args.tag, vec!["a".to_string(), "b".to_string()]);
             }
             other => panic!("expected new, got {other:?}"),
         }
+
+        // `--template` 已改名 `--agent`：旧拼写直接报未知参数（不留别名）。
+        let err = Cli::try_parse_from(["wing", "new", "--template", "executor"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(err.to_string().contains("--template"), "{err}");
 
         let cli = Cli::try_parse_from(["wing", "resume", "sid-1"]).expect("resume");
         assert!(matches!(
@@ -1364,6 +1405,74 @@ mod tests {
             Some(Command::Run(args)) => assert!(args.tool_call_id.is_none()),
             other => panic!("expected run, got {other:?}"),
         }
+    }
+
+    /// `wing run --agent`：创建时会话用指定 agent 模板；不给 = 网关默认。
+    /// 值可长可短；`--agent=name` 与 `--agent name` 两种形式都命中。
+    #[test]
+    fn clap_parses_run_agent() {
+        let cli = Cli::try_parse_from(["wing", "run", "-p", "hi", "--agent", "executor"])
+            .expect("run with agent");
+        match cli.command {
+            Some(Command::Run(args)) => assert_eq!(args.agent.as_deref(), Some("executor")),
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "run", "-p", "hi", "--agent=executor"])
+            .expect("equals form");
+        match cli.command {
+            Some(Command::Run(args)) => assert_eq!(args.agent.as_deref(), Some("executor")),
+            other => panic!("expected run, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "run", "-p", "hi"]).expect("run without");
+        match cli.command {
+            Some(Command::Run(args)) => assert!(args.agent.is_none()),
+            other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    /// 顶层 `--agent`（stdio 模式）与子命令版并存：出现在子命令之后绑定到
+    /// 子命令参数，顶层保持 None——两条路径互不干扰；放在子命令之前由放错
+    /// 位置闸门拒绝。
+    #[test]
+    fn clap_parses_agent_on_both_levels() {
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--agent", "executor"]).expect("stdio");
+        assert!(cli.is_stdio_mode());
+        assert_eq!(cli.agent.as_deref(), Some("executor"));
+        assert!(cli.command.is_none());
+
+        let cli = Cli::try_parse_from(["wing", "run", "-p", "hi", "--agent", "executor"])
+            .expect("subcommand form");
+        assert_eq!(cli.agent, None, "子命令形态的顶层保持 None");
+        match cli.command {
+            Some(Command::Run(args)) => assert_eq!(args.agent.as_deref(), Some("executor")),
+            other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn misplaced_agent_is_rejected_outside_stdio() {
+        assert!(misplaced_agent_error(None).is_none());
+
+        let message =
+            misplaced_agent_error(Some("executor")).expect("outside stdio mode must be rejected");
+        assert!(message.contains("stdio"), "{message}");
+        assert!(message.contains("--agent"), "{message}");
+        // 同样自带 --agent 的子命令都要给出正确落点（acp 是第三个）。
+        assert!(message.contains("wing run --agent"), "{message}");
+        assert!(message.contains("wing new --agent"), "{message}");
+        assert!(message.contains("wing acp --agent"), "{message}");
+
+        // clap 接受这种写法（flag 绑在顶层）——guard 是唯一防线。
+        let cli = Cli::try_parse_from(["wing", "--agent", "executor", "ps"]).expect("parses");
+        assert_eq!(cli.agent.as_deref(), Some("executor"));
+        assert!(misplaced_agent_error(cli.agent.as_deref()).is_some());
+
+        // stdio 模式：`dispatch` 在 is_stdio_mode() 分支之后才走到闸门，不受影响。
+        let cli = Cli::try_parse_from(["wing", "-p", "hi", "--agent", "executor"]).expect("parses");
+        assert!(cli.is_stdio_mode());
+        assert_eq!(cli.agent.as_deref(), Some("executor"));
     }
 
     /// 顶层 `--tool-call-id`（stdio 模式）与 `wing run` 的子命令版并存：

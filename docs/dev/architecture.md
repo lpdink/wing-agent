@@ -95,6 +95,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 `stream-json` 消息类型：`system/init`（tools/model/cwd）· `assistant`（content blocks + usage）· `user`（tool_result blocks）· `result`（终止信号：累计 usage / turns / 耗时）· `stream_event`（`--include-partial-messages` 下的增量帧，见下）。支持 SDK 双向 stdin 握手（`--input-format stream-json`）。**未识别的 `--xxx` 参数被静默忽略**，确保外部编排层传递的 Claude 专有参数（如 `--permission-mode`）不报错。
 
+`--agent <name>`（名字来自 `wing agents`）选会话的 agent 模板（缺省 = 网关默认，与 `wing run --agent` 同词汇同口径）：只作用于创建路径——resume / 收养既有 `--session-id` 时它不生效（会话保持自己的 agent，日志记一条 warning）。
+
 **流式增量**（`--include-partial-messages`）：置位时，每条 assistant 消息的快照帧（`assistant`）之前先逐条输出 `stream_event` 帧（`SDKPartialAssistantMessage` 形状：`{type, event, parent_tool_use_id:null, session_id, uuid}`，`event` 是 Anthropic SSE 的 `RawMessageStreamEvent`）——`message_start`（含 `message.id`）→ 每条块的 `content_block_start` / `content_block_delta`（`text_delta` / `thinking_delta`；tool_use 的 `input_json_delta` 是 provider 侧增量原样透传，`is_final` 收口块）→ `content_block_stop` → `message_delta`（stop_reason / output_tokens 与快照帧同值）→ `message_stop`。要点：
 
 - **id 一致性（硬要求）**：`message_start.message.id` == 同一消息快照帧 `message.id`（消费方的流式/快照去重键）。跨帧关联在渲染器本地完成（`crates/wing/src/stdio/stream.rs`）：首增量铸 `msg_<hex>`、快照帧复用它产出 `message.id`（方案选择见 `03_streaming/design.md` D1——核心事件面无需携带消息 id）；
@@ -113,7 +115,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 会话身份与会话恢复（SDK 系消费方自带 id 的用法）：
 
 - `--session-id <id>`：**create-or-adopt**——该 id 不存在则以它建会话（编排方自己生成的 UUID / 任意安全 id 就此生效），已存在则收养既有会话（同 resume 语义：模板与 workspace 来自 metadata、`agent` 覆盖只应用 resume 子集）。与 `-r/--resume` 互斥。**id 在同一个文件系统上只对应一个会话**：大小写 / Unicode 归一化不敏感的文件系统（macOS APFS 默认 / Windows NTFS）上，`team-a` 与 `Team-A` 是同一份日志——网关按**磁盘真名**回应（日志留一条 warning），stdio 侧发现"请求 id ≠ 回应 id"即拒绝继续（`session_id_mismatch_error`），绝不静默换 id；
-- `-r/--resume <id>`：恢复既有会话，`--model` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）。`--model` 的值是 **model_id**（引用词；网关未命中回 400，绝不猜 / 不回落），`--provider` 已删除（provider 不是引用维度——模型由 id 唯一确定）。`--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（它们会改请求前缀 / 会话既有限额，是创建期语义，日志会记一条 warning）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
+- `-r/--resume <id>`：恢复既有会话，`--model` / `--effort` / `--tools` 作为参数覆盖生效（与创建路径同语义、同持久化）。`--model` 的值是 **model_id**（引用词；网关未命中回 400，绝不猜 / 不回落），`--provider` 已删除（provider 不是引用维度——模型由 id 唯一确定）。`--agent` / `--system-prompt` / `--append-system-prompt` / `--max-turns` **不生效**（选模板会改请求前缀，与后三者同属创建期语义；会话保持自己的 agent，日志会记一条 warning）。`--tools` 走的是运行期热切换：**链非空时声明集冻结**（请求里仍是老 tools，KV cache 不碎），改动以 System Reminder 告知模型；链空或压缩后同步到新声明集。**aliases**：`-r <别名>`（同文件系统的大小写 / 归一化变体）按**磁盘真名**恢复并在 stderr 的 `session_id:` 行回显真名、日志留 warning——与 `--session-id` 的 create 路径**故意不同**（那条会硬拒绝别名：create 可能"新建"，一个名字不能有两种命运，而 resume 只可能"恢复"，按真名继续是确定的）；
 - `--resume-session-at`：wing 没有会话截断能力，**出现即非零退出 + 明确文案**（绝不静默忽略——被忽略会让编排方以为上下文已回退，与 wing 的实际状态错位）。
 
 > 在后台执行 `wing -p "request" > /tmp/result.md` 等价于调度了一个拥有任意命令执行权限的子 agent。多 agent 不易驾驭，yolo 本身危险，编排者应审慎使用。
@@ -138,11 +140,11 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 面向脚本与外部编排器的非交互子命令，全部走 HTTP；`--json` 输出可直接被 agent 消费：
 
-- `wing run "<prompt>"`：建会话 + 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
+- `wing run [--agent <name>] "<prompt>"`：建会话（`--agent` 选模板，缺省 = 网关默认模板）+ 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
 - `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
 - `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
 - **控制面补全**（TUI 已有而 CLI 缺失的语义，日常运维不必再手搓 curl）：
-  - `wing new [--workspace] [--template] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
+  - `wing new [--workspace] [--agent] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（`--agent` 选模板、workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
   - `wing branches <sid>` / `wing fork <sid> --at <uuid>` / `wing rewind <sid> --to <uuid>`：消息节点导航——`branches` 给出可回退 / 分叉的 uuid（表格 + `--json`，uuid 不截断），`fork` 产出新会话 id + draft、`rewind` 把当前会话截回目标之前，两者都把目标消息文本作为 **draft** 回吐（目标不在新 / 截断后的链里，供调用方重发）；`current` 是哨兵（fork = 全链拷贝，rewind = 文档化 no-op）；
   - `wing interrupt <sid>`（可见别名 `int`）/ `wing compact <sid> [instruction]`：中断在飞 turn / 手动压缩（`instruction` 为可选侧重指令，无它时压缩 prompt 不变）；
   - `wing reload`：系统热重载；逐项结果**按网关自己的名字序**如实打印（名字序是对外契约），任一失败即非零退出；
