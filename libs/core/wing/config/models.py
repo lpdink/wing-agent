@@ -28,6 +28,12 @@ from .spec import ApplyScope, S
 _MAX_MODEL_ID_LENGTH = 128
 """显式 model id 的长度上限（name 不设上限，与现状一致）。"""
 
+DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
+"""模型未声明时的默认上下文窗口（token）——窗口与压缩阈值的唯一默认值。"""
+
+DEFAULT_KEEP_RECENT_TOKENS = 50_000
+"""模型未声明时的默认压缩保留区（token）。"""
+
 
 class ModelCapabilities(BaseModel):
     """模型能力声明（models 对象形态的 capabilities 字段）。
@@ -81,6 +87,21 @@ class ModelSpec(BaseModel):
         doc="模型描述（人类可读，可选）",
         apply=ApplyScope.HOT,
         default=None,
+    )
+    context_window_tokens: int = S(
+        doc="上下文窗口 token 上限",
+        notes=(
+            "达到后触发压缩（双阈值：窗口 − 保留区启动后台压缩，窗口换入结果）。\n"
+            "模型级是唯一配置来源：生效窗口与压缩行为跟随**当前模型**，"
+            "会话换模型即换阈值。"
+        ),
+        apply=ApplyScope.NEXT_SESSION,
+        default=DEFAULT_CONTEXT_WINDOW_TOKENS,
+    )
+    keep_recent_tokens: int = S(
+        doc="压缩后保留的近期 token 数",
+        apply=ApplyScope.NEXT_SESSION,
+        default=DEFAULT_KEEP_RECENT_TOKENS,
     )
     capabilities: ModelCapabilities = S(
         doc="能力声明（未声明 = 全 false 的安全默认）",
@@ -260,9 +281,11 @@ class ProviderConfig(BaseModel):
         doc="模型声明（目录的唯一来源）",
         notes=(
             "三种形态：裸字符串（id=name）/ 对象（id=name）/ 对象带显式 id。\n"
+            "对象形态可声明展示名 / 描述 / 能力 / 上下文窗口（context_window_tokens、"
+            "keep_recent_tokens——压缩阈值的唯一来源）。\n"
             "没有远端 /models 发现；至少声明一个。"
         ),
-        apply=ApplyScope.HOT,
+        apply=ApplyScope.NEXT_SESSION,
         default_factory=list,
         min_items=1,
         summary_fields=["id", "name", "display_name"],
@@ -501,17 +524,6 @@ class AgentConfig(BaseModel):
         apply=ApplyScope.NEXT_SESSION,
         default_factory=list,
     )
-    context_window_tokens: int = S(
-        doc="上下文窗口 token 上限",
-        notes="达到后触发压缩。",
-        apply=ApplyScope.NEXT_SESSION,
-        default=256_000,
-    )
-    keep_recent_tokens: int = S(
-        doc="压缩后保留的近期 token 数",
-        apply=ApplyScope.NEXT_SESSION,
-        default=50_000,
-    )
     skills: list[str] = S(
         doc="技能 glob 模式",
         notes="每个匹配加载一个 SKILL.md 作为 agent 上下文。",
@@ -748,6 +760,7 @@ class Config(BaseModel):
             "  - id: ds-flash                   # 显式 id（全局唯一引用词）\n"
             "    name: dfmodel-2026             # 实际发给上游的调用名\n"
             "    capabilities: {vision: true}   # 未声明 = 纯文本（ReadImage 不附图）\n"
+            "    context_window_tokens: 128000  # 缺省 256000；keep_recent_tokens 缺省 50000\n"
             "Anthropic 协议最小示例（max_tokens 必填；image_delivery 默认 inline）：\n"
             "  - name: claude\n"
             "    protocol: anthropic\n"

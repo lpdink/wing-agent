@@ -113,8 +113,10 @@ providers:
   拼写错误**不报错**，按"未声明"处理 → text-only。没有启发式会替你打开能力——这是安全默认，
   不是校验遗漏（配置校验只做 id 全局唯一 + 同 provider 内调用名去重）。
 - `GET /api/models` 的 `providers[].models` 是**对象数组**：
-  `{id, name, display_name, description, capabilities: {vision}}`（`id` = 引用词，`name` = 调用名；
-  旧的「调用名数组 + `model_details` 平行数组」已删除——能力内嵌在同一个对象里，无逐项对齐契约）。
+  `{id, name, display_name, description, context_window_tokens, keep_recent_tokens, capabilities: {vision}}`
+  （`id` = 引用词，`name` = 调用名；窗口 / 保留区是压缩双阈值的生效值——见
+  [settings.md](settings.md) 的生效域表；旧的「调用名数组 + `model_details` 平行数组」已删除
+  ——能力内嵌在同一个对象里，无逐项对齐契约）。
 - **展示名随会话状态下发**：会话 agent 快照（`sync_session.agent` / `GET /api/session/get`）、
   `session_state_changed` 与 `GET /api/session/info` 携带 `model`（调用名）+ `model_id`（引用词）
   + `provider_name` + `model_display_name`（未声明 / 空串 = 缺失或 null）——前端渲染展示名、

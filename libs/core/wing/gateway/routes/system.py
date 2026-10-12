@@ -65,12 +65,16 @@ def _model_detail(ref: ModelRef) -> ModelDetail:
     """域层目录条目 → wire 模型（唯一投影点）。
 
     ``display_name`` 保持可空（未声明 = null 这个事实），回落调用名是渲染层的事。
+    压缩阈值用**生效值**（声明 = 原值；未声明 = 声明层默认）：前端据此渲染
+    "这个模型的上下文窗口"。
     """
     return ModelDetail(
         id=ref.id,
         name=ref.name,
         display_name=ref.spec.display_name,
         description=ref.spec.description,
+        context_window_tokens=ref.spec.context_window_tokens,
+        keep_recent_tokens=ref.spec.keep_recent_tokens,
         capabilities=ModelCapabilities(vision=ref.spec.capabilities.vision),
     )
 

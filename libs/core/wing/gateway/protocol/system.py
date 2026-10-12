@@ -84,7 +84,8 @@ class ModelDetail(BaseModel):
     """单条模型声明（``ProviderModels.models`` 的元素）。
 
     字段即线格式：``id`` 是全局唯一引用词（一切请求 / 协议引用它），``name`` 是
-    发给上游的调用名，``display_name`` 可空（前端回落 name）。
+    发给上游的调用名，``display_name`` 可空（前端回落 name）；``context_window_tokens`` /
+    ``keep_recent_tokens`` 是生效的压缩阈值（未声明 = 全局默认）。
     """
 
     id: str = Field(description="模型 id（全局唯一引用词）")
@@ -93,6 +94,10 @@ class ModelDetail(BaseModel):
         default=None, description="展示名（可空，前端回落 name）"
     )
     description: str | None = Field(default=None, description="模型描述")
+    context_window_tokens: int = Field(
+        description="上下文窗口 token 上限（达到后触发压缩）"
+    )
+    keep_recent_tokens: int = Field(description="压缩后保留的近期 token 数")
     capabilities: ModelCapabilities = Field(
         default_factory=ModelCapabilities, description="能力声明"
     )

@@ -1206,6 +1206,8 @@ class TestSystemModels:
                                 name="gpt-4o",
                                 display_name="GPT-4o",
                                 description="flagship",
+                                context_window_tokens=128_000,
+                                keep_recent_tokens=16_000,
                                 capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
                             ),
                         ),
@@ -1245,6 +1247,8 @@ class TestSystemModels:
                             "name": "gpt-4o",
                             "display_name": "GPT-4o",
                             "description": "flagship",
+                            "context_window_tokens": 128_000,
+                            "keep_recent_tokens": 16_000,
                             "capabilities": {"vision": True},
                         },
                         {
@@ -1252,6 +1256,8 @@ class TestSystemModels:
                             "name": "gpt-4o-mini",
                             "display_name": "GPT-4o mini",
                             "description": None,
+                            "context_window_tokens": 256_000,
+                            "keep_recent_tokens": 50_000,
                             "capabilities": {"vision": False},
                         },
                     ],
@@ -1264,6 +1270,8 @@ class TestSystemModels:
                             "name": "claude-opus-4",
                             "display_name": None,
                             "description": None,
+                            "context_window_tokens": 256_000,
+                            "keep_recent_tokens": 50_000,
                             "capabilities": {"vision": False},
                         }
                     ],
@@ -1304,6 +1312,8 @@ class TestModelsCatalogFromConfig:
                         ModelSpec(
                             name="dfmodel-2026",
                             display_name="DeepSeek-Flash",
+                            context_window_tokens=1_000_000,
+                            keep_recent_tokens=80_000,
                             capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
                         ),
                         ModelSpec(id="ds-flash", name="sonnet", display_name="Sonnet"),
@@ -1336,6 +1346,8 @@ class TestModelsCatalogFromConfig:
                             "name": "dfmodel",
                             "display_name": None,
                             "description": None,
+                            "context_window_tokens": 256_000,
+                            "keep_recent_tokens": 50_000,
                             "capabilities": {"vision": False},
                         },
                         {
@@ -1343,6 +1355,8 @@ class TestModelsCatalogFromConfig:
                             "name": "dfmodel-2026",
                             "display_name": "DeepSeek-Flash",
                             "description": None,
+                            "context_window_tokens": 1_000_000,
+                            "keep_recent_tokens": 80_000,
                             "capabilities": {"vision": True},
                         },
                         {
@@ -1350,6 +1364,8 @@ class TestModelsCatalogFromConfig:
                             "name": "sonnet",
                             "display_name": "Sonnet",
                             "description": None,
+                            "context_window_tokens": 256_000,
+                            "keep_recent_tokens": 50_000,
                             "capabilities": {"vision": False},
                         },
                     ],

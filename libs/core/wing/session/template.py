@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field
 
 from wing.common.logger import log
-from wing.config import AgentConfig, Config
+from wing.config import (
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_KEEP_RECENT_TOKENS,
+    AgentConfig,
+    Config,
+)
 from wing.context import Compactor
 from wing.schema import Tool
 from wing.tool_registry import tool_registry
@@ -46,10 +51,10 @@ class AgentTemplate(BaseModel):
     rules_patterns: list[str] = Field(default_factory=list)
     compactor: Compactor = Field(
         default_factory=lambda: Compactor(
-            context_window_tokens=256_000, keep_recent_tokens=50_000
+            context_window_tokens=DEFAULT_CONTEXT_WINDOW_TOKENS,
+            keep_recent_tokens=DEFAULT_KEEP_RECENT_TOKENS,
         )
     )
-    context_window_tokens: int = 100_000
     max_turns: int | None = None
     yolo: bool | None = None
 
@@ -92,9 +97,6 @@ class AgentTemplate(BaseModel):
             skills_patterns=cm.skills_patterns,
             rules_patterns=cm.rules_patterns,
             compactor=cm.compactor,
-            context_window_tokens=cm.compactor.context_window_tokens
-            if cm.compactor
-            else 100_000,
             max_turns=agent.max_turns,
             yolo=agent.yolo,
         )
@@ -106,7 +108,7 @@ class AgentTemplate(BaseModel):
         ``agents[].model`` 是 model **id**（配置加载期保证 ∈ id 空间）；这里解析成
         运行期二元组：``model`` = 上游调用名、``provider_name`` = 声明该模型的
         provider。解析只有「命中」一种结果——查不中即配置损坏（``require_model``
-        抛出 C7 文案）。
+        抛出 C7 文案）。上下文窗口 / 压缩保留区从模型声明解析（唯一配置来源）。
         """
         ref = config.require_model(agent_config.model)
 
@@ -117,8 +119,8 @@ class AgentTemplate(BaseModel):
         ]
 
         compactor = Compactor(
-            context_window_tokens=agent_config.context_window_tokens,
-            keep_recent_tokens=agent_config.keep_recent_tokens,
+            context_window_tokens=ref.spec.context_window_tokens,
+            keep_recent_tokens=ref.spec.keep_recent_tokens,
         )
 
         return cls(
@@ -131,7 +133,6 @@ class AgentTemplate(BaseModel):
             skills_patterns=list(agent_config.skills),
             rules_patterns=list(agent_config.rules),
             compactor=compactor,
-            context_window_tokens=agent_config.context_window_tokens,
             max_turns=agent_config.max_turns,
             yolo=agent_config.yolo,
         )
