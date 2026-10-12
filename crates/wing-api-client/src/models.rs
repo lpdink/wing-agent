@@ -293,6 +293,45 @@ pub struct ContextStatsInfo {
     pub total_tokens: i64,
 }
 
+/// 会话用量与运行时长累计（`/api/session/info.usage`；镜像 Python
+/// `wing.store.SessionUsage`，同一线格式也走 `sync_session.usage`）。
+///
+/// 全零 = 还没有可用量记录（旧会话 / 引入前落盘的数据）——读取方不需要
+/// Optional 分支。命中率 = `cached_tokens / prompt_tokens`、工作时长 =
+/// `llm_time_ms + tool_time_ms` 由消费方推导（线格式不含派生值，客户端不会
+/// 与服务端各自算一份）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUsage {
+    /// 被消费进上下文的用户消息条数。
+    #[serde(default)]
+    pub user_messages: i64,
+    /// 完成的 LLM 调用次数（只覆盖 ReAct 循环内的调用；压缩等旁路调用不计）。
+    #[serde(default)]
+    pub llm_calls: i64,
+    /// **真实执行**的工具调用次数（参数非法 / 未知工具的短路与中断合成的
+    /// 结果都不计）。
+    #[serde(default)]
+    pub tool_calls: i64,
+    /// 收尾的回合数。
+    #[serde(default)]
+    pub turns: i64,
+    /// 输入 token 累计。
+    #[serde(default)]
+    pub prompt_tokens: i64,
+    /// 输出 token 累计。
+    #[serde(default)]
+    pub completion_tokens: i64,
+    /// 缓存命中 token 累计。
+    #[serde(default)]
+    pub cached_tokens: i64,
+    /// LLM 调用总时长（毫秒；各次调用实测之和）。
+    #[serde(default)]
+    pub llm_time_ms: i64,
+    /// 工具执行总时长（毫秒；并行工具按各自时长求和）。
+    #[serde(default)]
+    pub tool_time_ms: i64,
+}
+
 /// GET /api/session/info 响应——session 运行时状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfoResponse {
@@ -331,6 +370,10 @@ pub struct SessionInfoResponse {
     /// 每个标签的记录（键集 ⊆ tags）；当前含 `added_at` 打标时间。
     #[serde(default)]
     pub tag_meta: HashMap<String, TagMeta>,
+    /// 会话用量与运行时长累计；旧网关不带这个字段 → None（读取方按零处理，
+    /// 与「旧会话没有用量」同一语义）。
+    #[serde(default)]
+    pub usage: Option<SessionUsage>,
 }
 
 /// POST /api/session/compact 响应。
@@ -1346,6 +1389,61 @@ mod tests {
         assert_eq!(back.model_id.as_deref(), Some("fancy-gpt"));
         assert_eq!(back.provider_name.as_deref(), Some("alt"));
         assert_eq!(back.model_display_name.as_deref(), Some("Fancy Flash"));
+    }
+
+    #[test]
+    fn session_info_carries_the_usage_ledger_and_tolerates_its_absence() {
+        // 当前网关：用量账本随 /info 下发。
+        let json = r#"{
+            "model": "dfmodel-2026",
+            "api_url": "http://x",
+            "tools": [],
+            "total_tokens": 0,
+            "context_window_tokens": 128000,
+            "thinking": false,
+            "yolo": false,
+            "context_stats": {"message_count": 0, "total_tokens": 0},
+            "usage": {
+                "user_messages": 2,
+                "llm_calls": 3,
+                "tool_calls": 1,
+                "turns": 1,
+                "prompt_tokens": 130,
+                "completion_tokens": 25,
+                "cached_tokens": 50,
+                "llm_time_ms": 940,
+                "tool_time_ms": 82
+            }
+        }"#;
+        let info: SessionInfoResponse = serde_json::from_str(json).unwrap();
+        let usage = info.usage.expect("usage present");
+        assert_eq!(usage.user_messages, 2);
+        assert_eq!(usage.llm_calls, 3);
+        assert_eq!(usage.tool_calls, 1);
+        assert_eq!(usage.turns, 1);
+        assert_eq!(usage.prompt_tokens, 130);
+        assert_eq!(usage.completion_tokens, 25);
+        assert_eq!(usage.cached_tokens, 50);
+        assert_eq!(usage.llm_time_ms, 940);
+        assert_eq!(usage.tool_time_ms, 82);
+
+        // 旧网关（没有这个字段）→ None，不报错；缺字段的账本按零补齐。
+        let legacy = r#"{
+            "model": "gpt-4o",
+            "api_url": "http://x",
+            "tools": [],
+            "total_tokens": 0,
+            "context_window_tokens": 128000,
+            "thinking": false,
+            "yolo": false,
+            "context_stats": {"message_count": 0, "total_tokens": 0}
+        }"#;
+        let info: SessionInfoResponse = serde_json::from_str(legacy).unwrap();
+        assert!(info.usage.is_none());
+
+        let partial: SessionUsage = serde_json::from_str(r#"{"prompt_tokens": 7}"#).unwrap();
+        assert_eq!(partial.prompt_tokens, 7);
+        assert_eq!(partial.turns, 0);
     }
 
     #[test]

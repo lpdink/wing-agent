@@ -920,6 +920,37 @@ async fn image_freshness_tick(deadline: Option<std::time::Instant>) {
     }
 }
 
+/// TUI 退出时携带出的状态——终端恢复后打印的退出摘要素材。
+///
+/// 只带**本地**事实（会话 id / 模型 / 墙钟 / 状态栏累计）：服务端账本由
+/// `cmd::exit_summary::read_ledger` 在终端恢复**之后**另取（不响应的网关
+/// 不该让用户对着备用屏等），失败时正是这里的累计值兜底。
+pub struct TuiExit {
+    pub session_id: String,
+    /// 展示用模型名（display name ‖ 调用名；与状态栏同一取法）。
+    pub model: String,
+    /// 进入 TUI → 退出（run_app 本地计时，与网关时钟无关）。
+    pub wall: std::time::Duration,
+    /// 状态栏累计（快照基线 + live 增量）——摘要降级时的素材。
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+}
+
+impl TuiExit {
+    /// 从退出时刻的 App 取本地素材（服务端账本由 TUI 入口在终端恢复后另取）。
+    pub(crate) fn from_app(app: &App, wall: std::time::Duration) -> Self {
+        Self {
+            session_id: app.session_id.clone(),
+            model: app.status.model_label().to_string(),
+            wall,
+            prompt_tokens: app.status.session_prompt_tokens,
+            completion_tokens: app.status.session_completion_tokens,
+            cached_tokens: app.status.session_cached_tokens,
+        }
+    }
+}
+
 /// Run the main application loop.
 pub async fn run_app(
     terminal: &mut WingTerminal,
@@ -928,7 +959,8 @@ pub async fn run_app(
     mut endpoint: GatewayEndpoint,
     config: AppConfig,
     launch_workspace: Option<String>,
-) -> Result<()> {
+) -> Result<TuiExit> {
+    let entered = std::time::Instant::now();
     // Terminal graphics: probe **once**, before `spawn_event_stream` — the
     // query writes to stdout and reads stdin, so starting the event reader
     // first would let the two race for the same file descriptors. `off` skips
@@ -1302,7 +1334,10 @@ pub async fn run_app(
         let _ = title::set_title(writer, "");
     }
 
-    Ok(())
+    // Exit material for the summary the (already restored) terminal prints:
+    // local facts only — the server ledger is read by the caller afterwards,
+    // so an unresponsive gateway cannot freeze the alternate screen.
+    Ok(TuiExit::from_app(&app, entered.elapsed()))
 }
 
 #[cfg(test)]

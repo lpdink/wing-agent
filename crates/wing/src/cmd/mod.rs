@@ -23,6 +23,7 @@ pub mod common;
 pub mod config;
 pub mod control;
 mod discover;
+mod exit_summary;
 pub mod lifecycle;
 pub mod messages;
 pub mod ps;
@@ -970,8 +971,8 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         session_id,
         crate::app::transport::GatewayEndpoint {
             ws_url,
-            http_base,
-            api_key,
+            http_base: http_base.clone(),
+            api_key: api_key.clone(),
         },
         config,
         workspace,
@@ -984,9 +985,17 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Restore original panic hook.
     restore_panic_hook();
 
-    result?;
-    tracing::info!("wing exited cleanly");
-    Ok(())
+    match result {
+        Ok(exit) => {
+            // 终端恢复**之后**取一次账本并打印退出摘要（仅 TUI 形态；stdio /
+            // acp 的 stdout 是协议通道，绝不到这里）。取数有界（2s）——挂在
+            // 网关上的请求不该让用户对着备用屏等，失败即降级。
+            exit_summary::print_exit_summary(&http_base, api_key.as_deref(), &exit).await;
+            tracing::info!("wing exited cleanly");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

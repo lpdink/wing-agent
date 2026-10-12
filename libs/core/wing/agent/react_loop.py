@@ -420,6 +420,8 @@ class ReActLoop:
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
         stop_reason: str | None = None
+        # 本次调用从发起到 usage 帧的时长（会话用量账本的 llm_time_ms 来源）。
+        started = time.monotonic()
         # accumulator 上提为 turn 级持有（self._current_acc）——未提交投影
         # （resume）与中断补提交按需快照同一个对象。
         accumulator = provider.create_accumulator()
@@ -464,7 +466,10 @@ class ReActLoop:
 
                 if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
                     last_usage = chunk.usage
-                    self._sink.llm_metrics(chunk.usage)
+                    self._sink.llm_metrics(
+                        chunk.usage,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
         except asyncio.CancelledError:
             # 中断补提交：快照当前 accumulator（与 resume 未提交投影同源）。
             partial_blocks = provider.snapshot_blocks(self._current_acc)

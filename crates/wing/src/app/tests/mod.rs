@@ -17,5 +17,6 @@ mod scrollbar;
 mod selection;
 mod settings;
 mod support;
+mod usage;
 mod welcome;
 mod wire;

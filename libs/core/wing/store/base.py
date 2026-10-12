@@ -56,6 +56,47 @@ def validate_media_content(media_id: str, data: bytes) -> None:
         )
 
 
+class SessionUsage(BaseModel):
+    """会话用量与运行时长的累计账本（session 维度，跨进程延续）。
+
+    落 ``metadata.json`` 的 ``usage`` 字段，经 ``/api/session/info`` 与
+    ``sync_session`` 快照对前端开放——它是「本会话自身花了多少」的持久账本，
+    与 audit / metrics.json 审计链路无关（那套将来重做，互不读写）。
+
+    字段语义是对外契约，客户端据此推导命中率与工作时长：
+
+    - 计数：``user_messages`` 按被消费进上下文的用户消息计（一轮合并输入逐条
+      计）；``llm_calls`` 每次完成的 LLM 调用计一次（含随后被判无效重试的
+      尝试——token 真花掉了），**只覆盖 ReAct 循环内的调用**：上下文压缩
+      （compaction）与其它旁路调用不计（它们的 token 也不进本账本）；
+      ``tool_calls`` 每次**真实执行**的工具调用计一次——参数非法 / 未知工具
+      两条短路与中断合成的结果都不计；``turns`` 每个收尾的回合（发出
+      turn_result）计一次；
+    - token：``prompt_tokens`` / ``completion_tokens`` / ``cached_tokens``
+      与直播 ``llm_call_metrics`` 事件逐字段同源（口径同 ``llm_calls``）；
+    - 时长：``llm_time_ms`` 各次 ReAct 调用（从发起到 usage 帧）的总时长
+      之和，``tool_time_ms`` 各次真实执行时长之和（并行工具按各自时长求和，
+      因此两者可能重叠）。工作时长 = ``llm_time_ms + tool_time_ms`` 是客户端
+      可直接断言的下界，账本不另存派生值（命中率 =
+      ``cached_tokens / prompt_tokens`` 同理）。
+
+    全字段非负整数、缺省 0：旧会话（引入前落盘、字段缺失）读出的就是零，
+    不回填、不发明数字。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    user_messages: int = 0
+    llm_calls: int = 0
+    tool_calls: int = 0
+    turns: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    llm_time_ms: int = 0
+    tool_time_ms: int = 0
+
+
 class SessionMetadata(BaseModel):
     """Session 持久元数据。全字段可选，序列化时排除 None。
 
@@ -93,6 +134,8 @@ class SessionMetadata(BaseModel):
       于 tags 的键在读取投影与下次写盘时丢弃）。由标签变更原语（``session.tags.apply_tag_ops``）维
       护：tag 被添加时记录一次加入时间，移除时删除记录。值是对象（当前只有 ``added_at``），**面向增
       量**：后续要加审计字段（来源 / actor / 变更历史）时往 ``TagMeta`` 里加即可。空字典与 None 等价。
+    - usage：会话用量 / 运行时长的累计账本（计数 + token + 时长），由 ``session.usage.UsageTracker``
+      在回合收尾、会话释放与进程退出前落盘；旧会话没有这个记录，读出即零。语义见 ``SessionUsage``。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -114,6 +157,7 @@ class SessionMetadata(BaseModel):
     max_turns: int | None = None
     tags: list[str] | None = None
     tag_meta: dict[str, "TagMeta"] | None = None
+    usage: SessionUsage | None = None
 
     @field_validator("tags", mode="after")
     @classmethod

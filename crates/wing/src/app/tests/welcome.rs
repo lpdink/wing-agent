@@ -357,6 +357,7 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
         })),
         name: None,
         draft: None,
+        usage: None,
         meta: crate::protocol::EventMeta {
             created_at: "2026-01-01T00:00:00+00:00".into(),
             session_id: Some("test-session".into()),

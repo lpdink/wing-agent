@@ -13,6 +13,8 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field
 
+from wing.store import SessionUsage
+
 from .base import AgentInfo, SessionStatus, WingEvent
 
 
@@ -70,6 +72,14 @@ class SyncSessionEvent(WingEvent):
     agent: AgentInfo | None = None
     name: str | None = None
     draft: str | None = None
+    usage: SessionUsage | None = None
+    """快照时刻的会话用量账本（`Session.usage` 的全量投影）。
+
+    这是前端**基线**的唯一来源：与快照同一时刻取值、同一条有序 WS 通道
+    送达，快照之后的 live 事件恰是快照未包含的增量——「基线 = 快照值，
+    增量 = 其后事件之和」因此精确成立（HTTP `/api/session/info` 的快照
+    与 WS 帧无跨通道定序，不能拿来做基线，否则会把在途事件重复计入）。
+    旧网关不带这个字段（None）——前端按零基线显示。"""
 
 
 class SessionStateChangedEvent(WingEvent):

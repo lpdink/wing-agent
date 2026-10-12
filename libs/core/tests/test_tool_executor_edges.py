@@ -32,7 +32,9 @@ class _Sink:
     def tool_started(self, tc: ToolCall) -> None:
         pass
 
-    def tool_finished(self, tc, result, *, success, model, media=None) -> None:
+    def tool_finished(
+        self, tc, result, *, success, model, media=None, duration_ms=None
+    ) -> None:
         self.finished.append(
             {"name": tc.name, "result": result, "success": success, "media": media}
         )

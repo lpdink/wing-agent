@@ -5,9 +5,16 @@
 //!   - wing/event/react.py
 //!   - wing/event/state_change.py
 //!   - wing/event/query_response.py
+//!
+//! 一处刻意的例外：`sync_session.usage` 与 `GET /api/session/info.usage` 是
+//! **同一份线格式**（Python 侧也刻意复用 `wing.store.SessionUsage`，不另立
+//! 镜像），所以这里直接复用 [`wing_api_client::models::SessionUsage`] 而不是
+//! 再定义一份——两份定义必然漂移，而它们本就该逐字段相同。
 
 use serde::Deserialize;
 use serde::Serialize;
+
+use wing_api_client::models::SessionUsage;
 
 // ============================================================
 // Shared / nested types
@@ -522,6 +529,11 @@ pub enum WingEvent {
         name: Option<String>,
         #[serde(default)]
         draft: Option<String>,
+        /// 快照时刻的会话用量账本——前端累计的**基线**（快照之后的 live
+        /// 增量恰好是它未包含的部分；HTTP `/api/session/info` 的快照与 WS 帧
+        /// 无跨通道定序，不能拿来做基线）。旧网关不带 → None（按零基线）。
+        #[serde(default)]
+        usage: Option<SessionUsage>,
         #[serde(flatten)]
         meta: EventMeta,
     },

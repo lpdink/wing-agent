@@ -1,6 +1,7 @@
 //! Utilities.
 
 pub mod clipboard;
+pub mod format;
 pub mod logging;
 pub mod open;
 pub mod osc9;

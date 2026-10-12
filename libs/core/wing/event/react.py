@@ -82,6 +82,11 @@ class ToolCallResultEvent(WingEvent):
 
     只服务直播/前端渲染与 probe 断言；字节不进事件（在 SessionStore）。
     默认空列表——旧前端忽略新字段。"""
+    duration_ms: int | None = None
+    """本次工具执行的时长（毫秒；工具执行器测量）。
+
+    None = 未真实执行——中断时合成的结果（``interrupted``）也走这个事件，
+    但它不是一次执行：会话用量账本据此不计数、不计时。"""
 
     @classmethod
     def from_execution(
@@ -92,6 +97,7 @@ class ToolCallResultEvent(WingEvent):
         model: str,
         session_id: str,
         media: list[MediaRef] | None = None,
+        duration_ms: int | None = None,
     ) -> Self:
         return cls(
             session_id=session_id,
@@ -102,6 +108,7 @@ class ToolCallResultEvent(WingEvent):
             tool_success=success,
             model=model,
             tool_media=[m.model_dump() for m in (media or [])],
+            duration_ms=duration_ms,
         )
 
 
@@ -123,6 +130,10 @@ class LLMCallMetricsEvent(WingEvent):
 
     仅用于直播路径的用量与截断提示——不落盘（截断审计由 Message.stop_reason
     + Message.usage 唯一承载）。"""
+    duration_ms: int = 0
+    """本次 LLM 调用从发起到 usage 帧的时长（毫秒；0 = 未测量）。
+
+    ReAct 层测量（含上游流式等待），服务会话用量账本与直播路径——不落盘。"""
 
 
 class AskEvent(WingEvent):

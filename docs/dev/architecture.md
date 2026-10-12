@@ -75,6 +75,8 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 
 斜杠命令大多被前端拦截转 HTTP（如 `/compact`→`POST /api/session/compact`）；`/clear`、`/copy` 纯前端本地处理；用户 `.md` prompt 命令展开为文本后作为普通消息发送（见 glossary「命令」）。
 
+**状态栏用量与退出摘要**：状态栏的输入 / 输出 / 缓存命中累计以 `sync_session.usage` 快照为基线（attach / 切换 / 恢复都赋值，此后 live `llm_call_metrics` 加增量——resume 不再从 0 累起），基线只用 WS 快照而不用 HTTP `/api/session/info`（两个通道无定序）。任意正常退出（含双击 Ctrl+C）在终端恢复后打印一份退出摘要（`cmd/exit_summary.rs`，复用 CLI 表格引擎）：本地素材（墙钟 / 状态栏累计）来自 `run_app` 的返回值，服务端账本由 TUI 入口在恢复**之后**另取（2s 有界——不响应的网关只降级、不冻结画面；读数分三态：完整 / 网关可达但没带账本 / 不可达，注记各自说明）。摘要只属于 TUI 形态——stdio / ACP 的 stdout 是协议通道，由 `tests/exit_summary_shape.rs` 守门（含 `cmd/mod.rs` 内必须落在 `run_tui` 的函数级判定）。
+
 **流式增量渲染**：Reasoning / assistant 长文本的 delta 不再每帧全量重渲染（O(n²) 整轮）。`render/markdown/stream.rs` 的 `StreamingRender` 把流式文本切成 markdown 块——已闭合块渲染一次提升为不可变稳定前缀，每帧只重渲染活动尾部；未闭合代码块走行级缓存（Content 保留 syntect 有状态高亮、Thinking 永久 plain）。`CachedCell` 的流式分支不 bump generation（细粒度失效），渲染循环对预折行 cell 直接逐行 blit（去 `Paragraph` Composer 与 clone），高度 O(1)。WS 事件只置脏，draw 由 16ms 帧间隔合帧（输入旁路节流）。turn 结束 `finalize` 全量对账兜底任何增量漂移。基准与对账矩阵：`crates/wing/benches/stream_render.rs`、`tests/stream_render_{reconcile,throughput}.rs`（512KB 平均帧 18.2ms→13µs，p99<0.6ms，支撑 3000 tokens/s）。
 
 **工具参数（`tool_call_stream`）是同一模式的第二个实例**：片段追加退化为 O(1)（只 push + 置 dirty），解析 / 语法高亮 / 渲染缓存失效推迟到帧边界每格至多一次（`CachedCell::compute_*` → `flush_pending_args`；`is_final` 与权威 args 强制冲刷）——旧的 per-fragment 全量重解析是 O(n²)，会把 256 有界事件通道顶满。基准：`crates/wing/benches/tool_args_stream.rs`（append ~20–40ns/片段且与 payload 无关；帧成本 ∝ payload、每帧一次）。
@@ -307,6 +309,33 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
 接口与存储无关：`SessionStore` 8 方法（含内容寻址媒体池的 `write_media` / `read_media`）+ `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是几张表（sessions / messages / aux / 媒体字节）。
 
 **存量 session 零迁移**：老日志无事件记录 → `TrackedList.load` 按 role 分发（事件走 `EVENT_TYPES` 注册表，未知 type 跳过——前向容忍），事件重放为空即回退纯消息重放。不承诺老版本代码读新格式日志（新 session 由新代码产生，该场景不存在）。
+
+### 会话用量账本（`metadata.json.usage`）
+
+会话的累计用量与运行时长（计数 / token / 时长，见 `SessionUsage`）持久在
+`metadata.json.usage`，跨 release（逐出水合）与网关重启延续；旧会话没有这个
+记录，读出即零、不回填。它与 audit（`metrics.json`）链路**无关**：审计聚合将来
+重做，本账本是会话自身的持久状态，两者不共享读写。
+
+- **记账来源 = 直播事件**：`Session` 订阅 EventBus，只认自己 session id 的
+  `user_message_accepted` / `llm_call_metrics` / `tool_call_result` /
+  `turn_result`。LLM 调用时长在 ReAct 层测量、工具执行时长在 `tool_executor`
+  测量，两者随既有事件携带（`duration_ms`；工具侧 `None` = 中断合成的结果，
+  不算一次执行）。账本因此与前端可见的增量严格同源——它就是「基线 +
+  可见事件之和」在服务端的同一份数。
+- **落盘时机**：回合收尾（`turn_result`）、会话释放（`Session.aclose`）与网关
+  退出（`lifespan` finally 的 `SessionManager.flush_usage`）是显式落盘点；
+  回合中途另有 10s 节流的兜底，进程被硬杀时丢失窗口有界。写的是全量覆盖
+  （幂等）；失败降级为 warning 并保留脏标记，下一个落盘点重试。
+- **对外出口**：`GET /api/session/info.usage` 与 `sync_session.usage`（快照）。
+  前端拿 `sync_session` 做基线——它与其后的 live 事件同一条有序 WS 通道；
+  HTTP 快照与 WS 帧无跨通道定序，不能用来做基线（会把在途事件重复计入）。
+- **口径边界**：`llm_calls` / token / `llm_time_ms` 只覆盖 ReAct 循环内的
+  调用——上下文压缩（compaction）与其它旁路调用不计；`tool_calls` /
+  `tool_time_ms` 只覆盖**真实执行**的调用（参数非法 / 未知工具的两条短路与
+  中断合成的结果都不计）。见 `SessionUsage` 的字段说明（唯一契约处）。
+- **fork 从零开始**：子会话是新会话，账本不复制源会话的先前进度（「本会话
+  花了多少」不因分叉被继承）。
 
 ## 压缩与缓存哲学
 

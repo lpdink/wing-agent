@@ -252,15 +252,23 @@ class AgentEventSink:
         success: bool,
         model: str,
         media: list[MediaRef] | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         """一次调用发射 ToolCallResultEvent + ToolResultTurnEvent。
 
         media 只进 ToolCallResultEvent（tool_media 字段）——ToolResultTurnEvent
-        是 Claude SDK 兼容形状（纯文本），不扩展。
+        是 Claude SDK 兼容形状（纯文本），不扩展。duration_ms 同只进前者
+        （工具执行器实测；None = 中断合成的结果，不是一次执行）。
         """
         self.emit(
             ToolCallResultEvent.from_execution(
-                tc, result, success, model, self._session_id, media=media
+                tc,
+                result,
+                success,
+                model,
+                self._session_id,
+                media=media,
+                duration_ms=duration_ms,
             )
         )
         self.emit(
@@ -288,7 +296,7 @@ class AgentEventSink:
             )
         )
 
-    def llm_metrics(self, usage: LLMUsage) -> None:
+    def llm_metrics(self, usage: LLMUsage, *, duration_ms: int = 0) -> None:
         self.emit(
             LLMCallMetricsEvent(
                 session_id=self._session_id,
@@ -299,5 +307,6 @@ class AgentEventSink:
                 tokens_per_sec=usage.tokens_per_sec,
                 model=usage.model,
                 stop_reason=usage.stop_reason,
+                duration_ms=duration_ms,
             )
         )

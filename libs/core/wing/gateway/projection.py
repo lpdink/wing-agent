@@ -67,6 +67,7 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         system_prompt=cm.system_prompt.content or "",
         tags=session.tags,
         tag_meta=session.tag_meta,
+        usage=session.usage,
     )
 
 

@@ -51,6 +51,7 @@ libs/core/wing/
 │   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
 │   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
 │   ├── model_binding.py             生效模型绑定（resume 链的只读投影；会话列表的模型列）
+│   ├── usage.py                     UsageTracker — 会话用量账本（事件驱动累计 + 节流落盘）
 │   └── override.py                  AgentOverride — 创建期参数覆盖（领域类型，住领域层非网关）
 ├── chain.py                         TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 ├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载
@@ -147,6 +148,7 @@ crates/wing/src/
 │   ├── backend_config.rs            读 backend config（gateway host:port、wing_home）
 │   ├── common.rs                    子命令共享工具（网关发现、HTTP client、输出格式化、404→resume 水合惯例）
 │   ├── discover.rs                  定位 wing-gateway 可执行文件
+│   ├── exit_summary.rs              TUI 退出摘要（终端恢复后打印；网关不可达时降级）
 │   ├── start.rs / stop.rs / status.rs / restart.rs  网关守护进程生命周期（health + /api/shutdown）
 │   ├── run.rs                       `wing run` 非阻塞启动任务（建会话 + 发 prompt，返回 session id）
 │   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
@@ -221,7 +223,7 @@ crates/wing/src/
 │   └── line_utils.rs / renderable.rs
 ├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
 ├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
+└── util/                            clipboard / format（token / 命中率等共享数字记法）/ open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
 配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。

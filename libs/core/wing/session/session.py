@@ -15,7 +15,7 @@ Session 是有行为的对象，在构造器中创建 ContextManager 和 WingAge
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,18 +25,26 @@ from wing.common.utils import require_utf8
 from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
+from wing.event import (
+    LLMCallMetricsEvent,
+    ToolCallResultEvent,
+    TurnResultEvent,
+    UserMessageAcceptedEvent,
+)
+from wing.event_bus import event_bus
 from wing.media import MediaAccess
 from wing.schema import ChainNode, Message, Tool
-from wing.store import SessionMetadata, SessionStore, TagMeta
+from wing.store import SessionMetadata, SessionStore, SessionUsage, TagMeta
 from wing.tool_registry import ToolRef
 
 from .model_binding import ModelBinding
 from .override import validate_override_utf8
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
+from .usage import UsageTracker
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
-    from wing.event.base import AgentInfo, SessionStatus
+    from wing.event.base import AgentInfo, SessionStatus, WingEvent
 
     from .override import AgentOverride
     from .template import AgentTemplate
@@ -171,6 +179,15 @@ class Session:
             self._model_id = get_config().identify(
                 self._agent.provider_name, self._agent.model
             )
+
+        # 用量账本：以盘上记录为基线（resume 延续累计），由事件流增量记账
+        # （`_on_usage_event`）。**构造期不订阅**——订阅（`activate_usage`）跟随
+        # 「被 manager 接纳进工作集」这一步：构造与注册之间可能因覆盖校验失败
+        # 而中止，构造期订阅会把被放弃的会话永久钉在全局总线上（它持有整份
+        # 消息历史）。事件是账本与前端直播的唯一同源素材。
+        self._usage = UsageTracker(self._metadata.usage, persist=self._persist_usage)
+        self._usage_subscription: Callable[[WingEvent], None] = self._on_usage_event
+        self._usage_attached = False
 
         log.info(f"Session initialized: {session_id}")
 
@@ -312,10 +329,15 @@ class Session:
         只关闭本会话的 worker；provider 实例归共享池（其他会话共用、逐出
         不拆池）——agent 只持有 name，没有任何 client 所有权要终结。
 
-        只回收内存态，**不动磁盘**：消息日志已 append+fsync 落盘，元数据
-        在该落的时候已落——session 仍可经 resume 完整水合回来。
+        内存态回收之外只做一件事：退订用量事件并把账本落一次盘（释放前
+        落盘点——回合收尾已落过的是 no-op）。消息日志已 append+fsync 落盘，
+        元数据在该落的时候已落——session 仍可经 resume 完整水合回来。
         """
         await self._agent.shutdown()
+        if self._usage_attached:
+            self._usage_attached = False
+            event_bus.unsubscribe(self._usage_subscription)
+        self.flush_usage()
 
     def apply_agent_override(self, override: AgentOverride) -> None:
         """应用 AgentOverride 到当前 session 的 agent（创建时调用）。
@@ -572,6 +594,74 @@ class Session:
     def store(self) -> SessionStore:
         """该 session 所属的 SessionStore（fork 继承后端、SM 聚合用）。"""
         return self._store
+
+    @property
+    def usage(self) -> SessionUsage:
+        """会话用量与运行时长累计（内存账本的当前快照）。
+
+        `/api/session/info` 与 `sync_session` 快照的素材；累计口径见
+        `SessionUsage`。快照是读口——消费方拿到的副本不回写账本。
+        """
+        return self._usage.snapshot()
+
+    def flush_usage(self) -> None:
+        """把用量账本落一次盘（回合收尾 / 释放 / 进程退出前的落盘点；no-op 幂等）。"""
+        self._usage.flush()
+
+    def activate_usage(self) -> None:
+        """把用量账本挂上事件流（会话被接纳进工作集时由 SessionManager 调用）。
+
+        订阅跟随**在场**生命周期：注册（本方法，`SessionManager._register`）
+        → 逐出（`aclose` 退订）。幂等——重复激活只会退化成 no-op，不会让同
+        一批事件计两次。
+        """
+        if self._usage_attached:
+            return
+        self._usage_attached = True
+        event_bus.subscribe(self._usage_subscription)
+
+    def _on_usage_event(self, event: "WingEvent") -> None:
+        """用量账本的事件入口（EventBus 订阅；只记本会话的事件）。
+
+        记录口径与直播事件严格同源——账本全量 == 前端基线 + 可见增量之和，
+        `/api/session/info` 与 TUI 状态栏因此不会各自漂移。事件从 agent 的
+        sink 同步发出（同一事件循环），无并发窗口。
+
+        回合收尾（turn_result）是落盘点：这一轮的累计此刻完整，不等节流。
+        """
+        if event.session_id != self._session_id:
+            return
+        if isinstance(event, LLMCallMetricsEvent):
+            self._usage.record_llm_call(
+                prompt_tokens=event.prompt_tokens,
+                completion_tokens=event.completion_tokens,
+                cached_tokens=event.cached_tokens,
+                duration_ms=event.duration_ms,
+            )
+        elif isinstance(event, ToolCallResultEvent):
+            self._usage.record_tool_call(duration_ms=event.duration_ms)
+        elif isinstance(event, UserMessageAcceptedEvent):
+            self._usage.record_user_message()
+        elif isinstance(event, TurnResultEvent):
+            self._usage.record_turn()
+            self._usage.flush()
+
+    def _persist_usage(self, usage: SessionUsage) -> None:
+        """把用量账本全量写回 metadata.usage 并落盘（best-effort）。
+
+        与 `_persist_model` 同口径：磁盘写失败只打 warning 并抛给
+        `UsageTracker` 保留脏标记稍后重试——live 账本已经生效，改不了任何
+        请求结果。**任何**失败都在这里带会话 id 留痕（tracker 的 except 只
+        保留重试标记，不重复记日志）。
+        """
+        self._metadata.usage = usage
+        try:
+            self._save_metadata()
+        except Exception as e:
+            log.warning(
+                f"Session {self._session_id}: usage not persisted ({e}); will retry"
+            )
+            raise
 
     @property
     def persisted_thinking(self) -> bool | None:
