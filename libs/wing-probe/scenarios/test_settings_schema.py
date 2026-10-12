@@ -95,7 +95,8 @@ PATH_EXPECTATIONS: dict[str, dict[str, Any]] = {
     "sessions.eviction.idle_ttl_seconds": {"kind": "float", "apply": "hot"},
     "sessions.eviction.sweep_interval_seconds": {"kind": "float", "apply": "restart"},
     # ── 其它热点字段 ──
-    "images.max_images": {"kind": "int", "apply": "hot"},
+    # max_images 默认 -1 = 关闭计数驱逐（面板显示 / wing config 的 wire 默认值）。
+    "images.max_images": {"kind": "int", "apply": "hot", "default": -1},
     "log.level": {
         "kind": "enum",
         "apply": "hot",

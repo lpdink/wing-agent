@@ -1,9 +1,11 @@
 """read-image 链路 probe 场景（step 06 / 07 / 03-media-cap）。
 
-覆盖 12 条：正向读图（默认 followup）/ inline 形态 / 能力门禁 / 换模型降级（红线）/
+覆盖 15 条：正向读图（默认 followup）/ inline 形态 / 能力门禁 / 换模型降级（红线）/
 高水位量子驱逐（红线）/ 压缩剥离（红线）/ fork 后媒体可用 / 存量回放兼容 /
 provider `image_max_bytes` 请求期降级 / `images.max_bytes` 读时拒绝（注入覆盖）/
-字节缺失降级（UNAVAILABLE 占位）/ 默认上限读时拒绝（不注入覆盖）。
+字节缺失降级（UNAVAILABLE 占位）/ 默认上限读时拒绝（不注入覆盖）/
+计数驱逐默认关闭（红线，不注入覆盖）/ `max_images=0` 同为关闭（红线）/
+字节兜底保留（红线，计数关闭下仍驱逐）。
 
 断言只锚定四个取证面：**事件时间线**（WS 事件 data）、**假 Provider 请求留档**
 （`probe.context` / `probe.request`）、**history.jsonl**（独立解析）、**文件系统**
@@ -82,6 +84,21 @@ FAST_EVICTION: dict[str, Any] = {
 
 #: 高水位量子驱逐场景的 images 配置（4 张图 → 计数超 1 → 按量子 2 批量丢最旧）。
 EVICTION_IMAGES: dict[str, Any] = {"max_images": 3, "count_quantum": 2}
+
+#: 计数驱逐默认关闭场景的图片数：越过旧默认高水位 32——任何计数驱逐都会显形。
+DEFAULT_COUNT_PROBE_IMAGES = 33
+
+#: `max_images <= 0` = 关闭计数驱逐；0 与 -1 同为关闭（旧语义 0 会把所有图丢光）。
+ZERO_MAX_IMAGES: dict[str, Any] = {"max_images": 0, "count_quantum": 2}
+
+#: 计数关闭 + 小字节预算：4 × 73 B 图（encoded 100 B 各）→ Σ400 > 250 →
+#: 目标释放 200 B → 恰丢最旧 2 张（计数规则不参与）。
+BYTE_BACKSTOP_IMAGES: dict[str, Any] = {
+    "max_images": 0,
+    "count_quantum": 8,
+    "request_budget_bytes": 250,
+    "evict_quantum_bytes": 100,
+}
 
 #: 单图字节上限场景的旋钮值：64×64 的 `png()` 输出 197 B —— 超过 cap 且两端都
 #: < 1 KiB（`format_size` 走 "N bytes" 字面形态，断言不依赖 KB 舍入）。
@@ -923,3 +940,112 @@ async def test_default_max_bytes_refuses_read_without_writing(probe: Probe) -> N
         assert "image_url" not in body, entry.describe()
         for placeholder in PLACEHOLDERS:
             assert placeholder not in body, (entry.describe(), placeholder)
+
+
+# ── 场景 13 / 14：计数驱逐关闭（红线） ───────────────────────────────
+
+
+async def _read_all_and_assert_kept(probe: Probe, names: list[str]) -> None:
+    """一轮连读 `names` 全部图片 → 请求体里每一张都是 image part、零占位。"""
+    images = [(name, png(2, 2, tint=0x30 + index)) for index, name in enumerate(names)]
+    envelopes = [
+        envelope_text(write_image(probe, name, data), data, 2, 2)
+        for name, data in images
+    ]
+    refs = [media_id(data) for _, data in images]
+
+    probe.register(
+        VISION_MODEL,
+        Turn.of(tool_calls=[ToolCall("ReadImage", {"path": name}) for name in names]),
+        Turn.of(text="read them all"),
+    )
+    session = await probe.session(model=VISION_MODEL, tools=["ReadImage"])
+    result = await session.chat("read all")
+    assert result.data["subtype"] == "success", result.data
+
+    context = probe.context(VISION_MODEL, 1)
+    tools = tool_messages(context.body)
+    assert len(tools) == len(names), context.describe()
+    assert [content_parts(message)[0]["text"] for message in tools] == envelopes
+
+    bearers = bearer_messages(context.body)
+    assert len(bearers) == 1, context.describe()
+    kept = [media_id(image_bytes(part)) for part in image_parts(bearers[0][1])]
+    assert kept == refs, (len(kept), len(refs))
+    for message in messages_of(context.body):
+        assert not placeholder_texts(message), message
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_default_count_eviction_off_keeps_all_images(probe: Probe) -> None:
+    """**代码默认值** `images.max_images = -1`（计数驱逐关闭）：连读 33 张全保留。
+
+    不写 `images:` 段（走默认）。33 越过旧默认高水位 32：计数驱逐未关闭时
+    excess = 1 → 按量子 8 丢最旧 8 张，8 条 budget 占位让本场景立刻变红。
+    """
+    names = [f"d{index:02d}.png" for index in range(DEFAULT_COUNT_PROBE_IMAGES)]
+    await _read_all_and_assert_kept(probe, names)
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC], images=ZERO_MAX_IMAGES)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_zero_max_images_disables_count_eviction(probe: Probe) -> None:
+    """`images={"max_images": 0}`：0 是"关闭"的同义值——配置合法、连读 4 张全保留。
+
+    旧语义（0 小于任何数量 → 全部驱逐 + 配置校验拒绝 ≤0）让本场景在网关启动期即失败。
+    """
+    await _read_all_and_assert_kept(probe, ["z1.png", "z2.png", "z3.png", "z4.png"])
+
+
+# ── 场景 15：字节兜底保留（计数关闭下仍生效，红线） ─────────────────
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC], images=BYTE_BACKSTOP_IMAGES)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_byte_eviction_still_applies_when_count_disabled(probe: Probe) -> None:
+    """计数关闭（`max_images=0`）下字节高水位仍生效：4 张图超预算 → 恰丢最旧 2 张。
+
+    数量账（各图 raw 73 B，encoded_len = 4*ceil(73/3) = 100）：总量 400 > 预算 250 →
+    excess 150 → 目标释放 ceil(150/100)*100 = 200 → 从最旧累加 100 + 100 覆盖 →
+    丢 2 张；计数规则（`max_images=0`）不参与。`request_budget_bytes` 压小只是让断言
+    确定性，语义与线上大预算完全同构。
+    """
+    names = ["b1.png", "b2.png", "b3.png", "b4.png"]
+    images = [(name, png(2, 2, tint=0x70 + index)) for index, name in enumerate(names)]
+    assert all(len(data) == 73 for _, data in images), "场景算术的前提：73 B/张"
+    envelopes = [
+        envelope_text(write_image(probe, name, data), data, 2, 2)
+        for name, data in images
+    ]
+    refs = [media_id(data) for _, data in images]
+
+    probe.register(
+        VISION_MODEL,
+        Turn.of(tool_calls=[ToolCall("ReadImage", {"path": name}) for name in names]),
+        Turn.of(text="byte budget noted"),
+    )
+    session = await probe.session(model=VISION_MODEL, tools=["ReadImage"])
+    await session.chat("read four")
+
+    context = probe.context(VISION_MODEL, 1)
+    tools = tool_messages(context.body)
+    assert len(tools) == 4, context.describe()
+    assert [content_parts(message)[0]["text"] for message in tools] == envelopes
+
+    bearers = bearer_messages(context.body)
+    assert len(bearers) == 1, context.describe()
+    kept = [media_id(image_bytes(part)) for part in image_parts(bearers[0][1])]
+    assert kept == refs[2:], (kept, refs)  # 最新两张保留
+    for position, message in enumerate(tools):
+        parts = content_parts(message)
+        if position < 2:
+            # 被字节规则驱逐的两条：原信封 part 不动，其后追加固定占位文本。
+            assert [part["type"] for part in parts] == ["text", "text"], parts
+            assert parts[0]["text"] == envelopes[position], parts[0]
+            assert parts[1]["text"] == PLACEHOLDER_BUDGET, parts
+        else:
+            assert [part["type"] for part in parts] == ["text"], parts

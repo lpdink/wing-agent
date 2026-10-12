@@ -387,6 +387,25 @@ class TestPlanRequestMedia:
         # 最旧优先：保留的是出现序最后一张
         assert plans[-1].ref.id == f"{4:064x}"
 
+    @pytest.mark.parametrize("max_images", [0, -1, -100])
+    def test_non_positive_max_images_disables_count_rule(self, max_images: int):
+        """``max_images <= 0`` = 关闭计数驱逐：40 张全部保留（不是"全丢光"）。"""
+        policy = MediaPolicy(max_images=max_images, count_quantum=2)
+        msgs = [_msg(*_refs(40))]
+        plans = plan_request_media(msgs, policy=policy, vision=True)
+        assert all(p.kept for p in plans)
+
+    def test_byte_rule_still_applies_when_count_disabled(self):
+        """计数规则关闭不影响字节兜底：字节超预算仍按原样驱逐最旧。"""
+        policy = MediaPolicy(
+            max_images=-1,
+            count_quantum=8,
+            request_budget_bytes=100,
+            evict_quantum_bytes=50,
+        )
+        plans = plan_request_media([_msg(*_refs(10))], policy=policy, vision=True)
+        assert sum(1 for p in plans if not p.kept) == 7
+
     def test_byte_high_water_releases_quantum_target(self):
         # 10 × 12B → encoded 16B 各；总 160 > budget 100：excess=60 →
         # target=ceil(60/50)*50=100 → 从最旧累加 16×7=112 ≥ 100 → 丢 7 张。
@@ -472,7 +491,7 @@ class TestPlanRequestMedia:
 
     def test_default_policy_values_are_frozen_contract(self):
         policy = MediaPolicy()
-        assert policy.max_images == 32
+        assert policy.max_images == -1
         assert policy.count_quantum == 8
         assert policy.request_budget_bytes == 37_748_736
         assert policy.evict_quantum_bytes == 18_874_368

@@ -276,6 +276,8 @@ def test_constraints_from_real_catalog() -> None:
     max_bytes = _by_path(catalog, "images.max_bytes")
     assert (max_bytes.min, max_bytes.exclusive_min) == (0.0, True)
     assert max_bytes.default == 4_718_592
+    # max_images 允许 ≤0（= 关闭计数驱逐），面板编辑器不得强加下限。
+    assert _by_path(catalog, "images.max_images").min is None
     assert _by_path(catalog, "providers[].models").min_items == 1
     assert _by_path(catalog, "providers[].timeout_first_chunk").min_length is None
 
@@ -436,10 +438,11 @@ def test_nested_list_path_from_real_catalog() -> None:
 
 def test_images_defaults_are_pinned() -> None:
     """旧模板测试的两个钉子：``max_bytes``（见 test_constraints_from_real_catalog）
-    与 ``max_images``——后者原先无人接（S2），这里连同同段的其它默认值一起钉住。"""
+    与 ``max_images``——后者原先无人接（S2），这里连同同段的其它默认值一起钉住。
+    ``max_images`` 默认 -1 = 关闭计数驱逐。"""
     catalog = build_catalog()
     assert _by_path(catalog, "images.max_bytes").default == 4_718_592
-    assert _by_path(catalog, "images.max_images").default == 32
+    assert _by_path(catalog, "images.max_images").default == -1
     assert _by_path(catalog, "images.count_quantum").default == 8
     assert _by_path(catalog, "images.request_budget_bytes").default == 37_748_736
     assert _by_path(catalog, "images.evict_quantum_bytes").default == 18_874_368
