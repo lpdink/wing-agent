@@ -937,6 +937,20 @@ pub struct TuiExit {
     pub cached_tokens: i64,
 }
 
+impl TuiExit {
+    /// 从退出时刻的 App 取本地素材（服务端账本由 TUI 入口在终端恢复后另取）。
+    pub(crate) fn from_app(app: &App, wall: std::time::Duration) -> Self {
+        Self {
+            session_id: app.session_id.clone(),
+            model: app.status.model_label().to_string(),
+            wall,
+            prompt_tokens: app.status.session_prompt_tokens,
+            completion_tokens: app.status.session_completion_tokens,
+            cached_tokens: app.status.session_cached_tokens,
+        }
+    }
+}
+
 /// Run the main application loop.
 pub async fn run_app(
     terminal: &mut WingTerminal,
@@ -1323,14 +1337,7 @@ pub async fn run_app(
     // Exit material for the summary the (already restored) terminal prints:
     // local facts only — the server ledger is read by the caller afterwards,
     // so an unresponsive gateway cannot freeze the alternate screen.
-    Ok(TuiExit {
-        session_id: app.session_id.clone(),
-        model: app.status.model_label().to_string(),
-        wall: entered.elapsed(),
-        prompt_tokens: app.status.session_prompt_tokens,
-        completion_tokens: app.status.session_completion_tokens,
-        cached_tokens: app.status.session_cached_tokens,
-    })
+    Ok(TuiExit::from_app(&app, entered.elapsed()))
 }
 
 #[cfg(test)]

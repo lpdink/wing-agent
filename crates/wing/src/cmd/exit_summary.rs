@@ -63,7 +63,11 @@ pub async fn read_ledger(http_base: &str, api_key: Option<&str>, session_id: &st
 }
 
 /// 打印退出摘要（stdout，终端已恢复；颜色循 CLI 惯例：TTY 才着色）。
-pub fn print_exit_summary(exit: &TuiExit, ledger: Ledger) {
+///
+/// 取数在终端恢复**之后**（由 TUI 入口调用）——备用屏已经交还，一个挂着不
+/// 回话的网关只让摘要晚 2 秒、不冻住退出。
+pub async fn print_exit_summary(http_base: &str, api_key: Option<&str>, exit: &TuiExit) {
+    let ledger = read_ledger(http_base, api_key, &exit.session_id).await;
     let out = TableOutput::detect();
     let palette = ThemePalette::from_config(&crate::config::AppConfig::load().colors);
     print!("{}", render_exit_summary(exit, ledger, &palette, &out));
@@ -360,5 +364,84 @@ mod tests {
         assert_eq!(fmt_hit_rate(&sample_usage()), "66.4%");
         assert_eq!(fmt_hit_rate_from(0, 0), "-");
         assert_eq!(fmt_hit_rate_from(5, 10), "50.0%");
+    }
+
+    /// 最小 HTTP 桩：对每个请求回一段固定 JSON。返回 base URL。
+    async fn spawn_stub(body: &'static str) -> String {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn read_ledger_reports_the_usage_the_gateway_sent() {
+        let base = spawn_stub(
+            r#"{"model":"m","api_url":"http://x","tools":[],"total_tokens":0,
+                "context_window_tokens":0,"thinking":false,"yolo":false,
+                "context_stats":{"message_count":0,"total_tokens":0},
+                "usage":{"prompt_tokens":7,"turns":2,"llm_time_ms":5}}"#,
+        )
+        .await;
+
+        match read_ledger(&base, None, "s1").await {
+            Ledger::Reported(usage) => {
+                assert_eq!(usage.prompt_tokens, 7);
+                assert_eq!(usage.turns, 2);
+                assert_eq!(usage.llm_time_ms, 5);
+            }
+            _ => panic!("gateway shipped usage — expected Reported"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_ledger_names_the_reason_it_cannot_report() {
+        // 旧网关：接口 200 但没有 usage 字段。
+        let base = spawn_stub(
+            r#"{"model":"m","api_url":"http://x","tools":[],"total_tokens":0,
+                "context_window_tokens":0,"thinking":false,"yolo":false,
+                "context_stats":{"message_count":0,"total_tokens":0}}"#,
+        )
+        .await;
+        assert!(matches!(
+            read_ledger(&base, None, "s1").await,
+            Ledger::Unreported
+        ));
+
+        // 端口上没有监听者 / base URL 非法：都归 Unreachable，绝不 panic。
+        assert!(matches!(
+            read_ledger("http://127.0.0.1:1", None, "s1").await,
+            Ledger::Unreachable
+        ));
+        assert!(matches!(
+            read_ledger("not a url", None, "s1").await,
+            Ledger::Unreachable
+        ));
+    }
+
+    /// 打印路径本身（stdout 由测试框架捕获）——终端恢复后的唯一出口。
+    #[tokio::test]
+    async fn print_exit_summary_renders_the_degraded_variant_when_unreachable() {
+        print_exit_summary("http://127.0.0.1:1", None, &exit()).await;
     }
 }

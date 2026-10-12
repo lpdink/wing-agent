@@ -543,6 +543,41 @@ mod tests {
         assert_eq!(data.session_completion_tokens, 0);
     }
 
+    /// 会话累计（宽模式）：账本基线的三个数渲染为 `↑输入 ↓输出 ◎命中%`。
+    #[test]
+    fn test_status_bar_shows_cumulative_session_usage_in_wide_mode() {
+        let data = StatusData {
+            session_prompt_tokens: 120_500,
+            session_completion_tokens: 4_200,
+            session_cached_tokens: 80_000,
+            ..StatusData::default()
+        };
+        let out = render_text(&data);
+        // 80_000 / 120_500 = 66.4% → 状态栏取整为 66%。
+        assert!(out.contains("↑120.5k ↓4.2k ◎66%"), "got: {out}");
+    }
+
+    /// 窄模式让出这栏；没有输入（prompt 为 0）时不发明命中率。
+    #[test]
+    fn test_status_bar_usage_needs_width_and_a_prompt_to_hit() {
+        let data = StatusData {
+            session_prompt_tokens: 1_000,
+            session_completion_tokens: 10,
+            session_cached_tokens: 500,
+            ..StatusData::default()
+        };
+        assert!(!render_bar(&data, "", 80).0.join("").contains('↑'));
+
+        let no_prompt = StatusData {
+            session_prompt_tokens: 0,
+            session_cached_tokens: 500,
+            ..data
+        };
+        let out = render_text(&no_prompt);
+        assert!(out.contains("↑0"), "got: {out}");
+        assert!(!out.contains('◎'), "no prompt → no hit rate: {out}");
+    }
+
     /// The full 24-char session id the fixtures use.
     const SID: &str = "20261005-213012-ab12cd34";
 

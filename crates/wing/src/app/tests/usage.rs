@@ -67,6 +67,26 @@ fn counters(app: &App) -> (i64, i64, i64) {
     )
 }
 
+/// 退出素材取的是**本地**事实：会话 id / 模型标签 / 墙钟 / 状态栏累计。
+#[test]
+fn tui_exit_collects_the_local_exit_material() {
+    let mut app = test_app();
+    app.status.model = "dfmodel-2026".into();
+    app.status.model_display_name = Some("DeepSeek-Flash".into());
+    app.status.session_prompt_tokens = 120_500;
+    app.status.session_completion_tokens = 4_200;
+    app.status.session_cached_tokens = 80_000;
+
+    let exit = TuiExit::from_app(&app, std::time::Duration::from_secs(754));
+
+    assert_eq!(exit.session_id, "test-session");
+    assert_eq!(exit.model, "DeepSeek-Flash", "展示名优先于调用名");
+    assert_eq!(exit.wall, std::time::Duration::from_secs(754));
+    assert_eq!(exit.prompt_tokens, 120_500);
+    assert_eq!(exit.completion_tokens, 4_200);
+    assert_eq!(exit.cached_tokens, 80_000);
+}
+
 /// 恢复的会话不再从 0 累起：快照基线 + 其后的 live 增量。
 #[test]
 fn sync_baselines_the_counters_and_live_events_add_on_top() {

@@ -989,10 +989,8 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         Ok(exit) => {
             // 终端恢复**之后**取一次账本并打印退出摘要（仅 TUI 形态；stdio /
             // acp 的 stdout 是协议通道，绝不到这里）。取数有界（2s）——挂在
-            // 网关上的请求不该让用户对着备用屏等，超时即降级。
-            let ledger =
-                exit_summary::read_ledger(&http_base, api_key.as_deref(), &exit.session_id).await;
-            exit_summary::print_exit_summary(&exit, ledger);
+            // 网关上的请求不该让用户对着备用屏等，失败即降级。
+            exit_summary::print_exit_summary(&http_base, api_key.as_deref(), &exit).await;
             tracing::info!("wing exited cleanly");
             Ok(())
         }
