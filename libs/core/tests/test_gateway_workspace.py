@@ -478,6 +478,34 @@ class TestRouterWire:
         assert resp.status_code == 416
         assert resp.headers["content-range"] == "bytes */11"
 
+    def test_read_sandboxes_executable_document_types(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """HTML / SVG / XML 可预览但被沙箱化：nosniff + CSP sandbox（禁脚本、禁同源）。"""
+        files = {
+            "evil.html": "<script>alert(1)</script>",
+            "pic.svg": '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            "doc.xml": "<root/>",
+        }
+        for name, body in files.items():
+            target = tmp_path / name
+            target.write_text(body, encoding="utf-8")
+            resp = client.get("/api/workspace/read", params={"path": str(target)})
+            assert resp.status_code == 200, name
+            assert resp.headers["x-content-type-options"] == "nosniff", name
+            assert resp.headers["content-security-policy"] == "sandbox", name
+            assert resp.content.decode() == body, name
+
+    def test_read_plain_text_gets_nosniff_only(
+        self, client: TestClient, tree: Path
+    ) -> None:
+        resp = client.get(
+            "/api/workspace/read", params={"path": str(tree / "zebra.txt")}
+        )
+        assert resp.status_code == 200
+        assert resp.headers["x-content-type-options"] == "nosniff"
+        assert "content-security-policy" not in resp.headers
+
     def test_read_unknown_extension_is_octet_stream(
         self, client: TestClient, tmp_path: Path
     ) -> None:

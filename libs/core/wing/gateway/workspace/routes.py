@@ -24,6 +24,32 @@ from .protocol import (
 
 router = APIRouter(tags=["workspace"])
 
+#: 浏览器会**执行**的内容类型（文档上下文里能跑脚本 / 读同源能力）：直出时必须加
+#: ``CSP: sandbox``。没有它时，直接导航 / iframe 预览 ``evil.html`` 会在网关 origin
+#: （推荐部署下 = 前端 origin）执行文件里的脚本，把「任意文件读」升级成同源 XSS。
+EXECUTABLE_MEDIA_TYPES = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "application/xml",
+        "text/xml",
+    }
+)
+
+
+def _read_headers(mime: str | None) -> dict[str, str]:
+    """``read`` 的安全响应头。
+
+    ``nosniff`` 恒在（禁止按内容嗅探线类型）；可执行文档类型加 ``CSP: sandbox``——
+    沙箱把资源降成**唯一源**：禁脚本、禁同源读取，但渲染（HTML / SVG 预览）照常，
+    即 GitHub raw 的标准做法。
+    """
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if mime in EXECUTABLE_MEDIA_TYPES:
+        headers["Content-Security-Policy"] = "sandbox"
+    return headers
+
 
 def _project(entry: service.Entry) -> WorkspaceEntry:
     return WorkspaceEntry(
@@ -117,7 +143,9 @@ def workspace_read(path: str = Query(description="文件绝对路径")) -> FileR
         raise _http_error(exc) from exc
     return FileResponse(
         target.path,
+        media_type=target.mime,
         filename=target.name,
         content_disposition_type="inline",
+        headers=_read_headers(target.mime),
         stat_result=target.stat,
     )

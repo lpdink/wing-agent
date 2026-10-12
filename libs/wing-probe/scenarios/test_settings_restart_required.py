@@ -115,8 +115,9 @@ async def _preflight_headers(
 ) -> Mapping[str, str]:
     """一次 CORS 预检的响应头。
 
-    未放通时 ``CORSMiddleware`` 原样透传，预检落到路由层 → 405（无 OPTIONS 路由）——
-    这条路径也是留档的一部分，所以捕获 ``DriverHttpError`` 取回响应的头。
+    未放通时 ``CORSMiddleware`` **就地**回 ``400 "Disallowed CORS origin"``（无
+    ACAO；不落路由），放通时 200 + 回声——两条路径都要拿到响应头，所以捕获
+    ``DriverHttpError``。
     """
     try:
         call, _ = await http.request_raw(
@@ -156,7 +157,7 @@ async def test_cors_origins_change_names_the_restart_path(probe: Probe) -> None:
     assert receipt["restart_required"] == ["gateway.cors.origins[0]"], receipt
     assert receipt["reload"]["ok"] is True, receipt["reload"]
 
-    # 假热更的负向证据：运行中的网关仍不放通新来源（预检落到路由层 → 405）。
+    # 假热更的负向证据：运行中的网关仍不放通新来源（预检就地吃 400，无 ACAO）。
     preflight = {"Origin": CORS_ORIGIN, "Access-Control-Request-Method": "GET"}
     headers = await _preflight_headers(http, preflight)
     assert headers.get("access-control-allow-origin") is None, dict(headers)

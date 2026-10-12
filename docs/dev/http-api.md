@@ -193,6 +193,11 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
   `mime` 只对常规文件有意义（其余为 `null`）；`mtime` 是 lstat 的 epoch 秒。
 - **错误面**：404（不存在）/ 403（无权限）/ 400（相对路径、NUL 字节、对非目录列举、
   读非常规文件）/ 422（参数校验）；统一 `ErrorResponse` 形状。
+- **`read` 的安全响应头**：`X-Content-Type-Options: nosniff` 恒在；`text/html` /
+  `application/xhtml+xml` / `image/svg+xml` / XML 这些**浏览器会执行**的文档类型额外带
+  `Content-Security-Policy: sandbox`——渲染照常（HTML / SVG 可预览），但脚本被禁、资源
+  降成唯一源，防止「直接导航 / iframe 预览文件」把任意文件读升级成同源 XSS（能读
+  localStorage / 驱动 API 的那个源）。
 - **安全口径**：整流在鉴权面之后（反代 + HTTPS + 应用层鉴权 + 内网 VPC，"能过鉴权即
   全权"），不做过度加固。本端点族没有"根约束"——它浏览的就是宿主文件系统，`..` 只是
   普通导航，因此不存在"越出根"的穿越面；基本卫生落在：绝对路径校验、NUL 拒绝、词法
@@ -334,8 +339,12 @@ WebSocket（`/ws`）不受 CORS 约束，不需要也不提供任何跨源处理
 
 | 来源 | 是否放通 | 说明 |
 |------|----------|------|
-| loopback（`http(s)://localhost` / `127.0.0.1` / `[::1]`，**任意端口**） | **默认放通** | CORS 规范不支持端口通配，实现用 host 谓词匹配、按请求回声具体 origin（`allow_origin_regex`）。只服务本机页面 / 开发服务器 |
+| loopback（`http(s)://localhost` / `127.0.0.1` / `[::1]`，**任意端口**） | **默认放通**（网关自身绑 loopback 时） | CORS 规范不支持端口通配，实现用 host 谓词匹配、按请求回声具体 origin（`allow_origin_regex`）。只服务本机页面 / 开发服务器；注意 `file://` 页面的 Origin 是字面量 `null`，**不在**放通范围 |
 | 其它来源 | 默认不放通 | 写进 `gateway.cors.origins` 才生效（如 `https://ui.example.com`；写 `*` = 放开全部来源） |
+
+**loopback 回声有个前提**：网关自身绑在 loopback 地址（`gateway.host`）上。绑 `0.0.0.0` /
+外部地址是**远端可达**的部署，本机任意页面的跨源读权限随之关闭（那不是「本机开发」形态；
+需要就显式写 `origins`，loopback 来源也可以写进去）。
 
 - `allow_credentials` 恒 `false`（API key 走 header，不用 cookie）；允许的方法 / 头按前端
   最小需求：`GET / POST / HEAD / OPTIONS` + `Authorization / Content-Type / X-API-Key / X-Client-Id`；
@@ -343,13 +352,17 @@ WebSocket（`/ws`）不受 CORS 约束，不需要也不提供任何跨源处理
   （Fetch 的 safelist 不含它们，跨源前端要读 Range / 文件名素材必须显式 expose）。
   401 / 403 响应同样带 CORS 头，前端能读到错误体。
 - **生效域 = `restart`**：中间件在网关启动时装配，改 `gateway.cors.origins` 要重启网关
-  （保存回执的 `restart_required` 会点名 `gateway.cors.origins[i]`）。
+  （保存回执的 `restart_required` 会点名 `gateway.cors.origins[i]`）。**setup 修复也一视同仁**：
+  配置坏掉后经保存事务**就地**转入正常模式（不重启进程）时，origins 仍是装配时的空值——
+  运行期重建中间件在 Starlette 里不可行，修复流程里刚写的外部来源仍需重启才生效。
 - 安全性：CORS 不是鉴权边界（能过鉴权即全权）。对**本机进程**这层默认不构成新权限
   （不受同源策略约束，本就能直连 API）；对**页面**成立的边界变化与部署指引见下。
 
 **风险与部署指引（如实声明）**：默认放通 loopback + `auth.enabled=false` 的组合下，
-**本机页面**（任意端口的本地 dev server / 本地 HTML）可以 `fetch` 读走宿主文件与
-`~/.wing/core/config.yaml` 里的密钥——这是「本机开发便利」换来的代价。因此：
+**本机 http(s) 服务上的页面**（任意端口的本地 dev server / 本地工具里的页面）可以 `fetch`
+读走宿主文件与 `~/.wing/core/config.yaml` 里的密钥——这是「本机开发便利」换来的代价
+（`file://` 打开的本地 HTML 不受影响：其 Origin 是 `null`，不在放通范围）。缓解：
+loopback 回声要求网关自身绑 loopback（见上），远端可达的部署默认就没有这层。因此：
 
 - **推荐同源部署**（前端与 API 同一个反向代理 + HTTPS + 鉴权），该形态下 CORS 不参与；
 - 网关**绑定非 loopback 地址**（`gateway.host: 0.0.0.0`）或**多用户 / 非本人可控的机器**上，

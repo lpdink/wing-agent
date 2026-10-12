@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
 from wing.common.logger import install_loop_exception_logger
-from wing.gateway.auth import AuthMiddleware
+from wing.gateway.auth import AuthMiddleware, LOOPBACK_HOSTS
 from wing.gateway.cors import install_cors
 from wing.gateway.openapi import OPENAPI_METADATA
 from wing.gateway.protocol import error_response
@@ -116,10 +116,11 @@ def create_app(server: GatewayServer) -> FastAPI:
     # 即**后 add 的在外层**）。AuthMiddleware 必须在最外层（只有 CORS 比它更外）：
     # 修复模式的 loopback 判定要**先**发生——setup mode 下非 loopback 的任何路径都先
     # 吃 403，loopback 才轮到守门中间件决定「放行 or 503」（总设计 §8.4）。
-    # CORS 最外一层：预检请求不带凭据，必须就地应答（不能被鉴权拦下）。
+    # CORS 最外一层：预检请求不带凭据，必须就地应答（不能被鉴权拦下）；loopback
+    # 来源只在网关自身绑 loopback 时默认放通（远端可达的部署要显式写 origins）。
     app.add_middleware(SetupGuardMiddleware)
     app.add_middleware(AuthMiddleware)
-    install_cors(app, server.cors_origins)
+    install_cors(app, server.cors_origins, bound_loopback=server.host in LOOPBACK_HOSTS)
     _register_error_handlers(app)
     register_routes(app)
 

@@ -42,7 +42,7 @@ class HttpCall:
     response: Any = None
     """解析后的 JSON 响应（非 JSON 响应为 None）。"""
     text: str = ""
-    """原始响应文本（截断到 ``HTTP_TEXT_LIMIT``）。"""
+    """响应文本摘要（至多 ``HTTP_TEXT_LIMIT``；字节流端点只解前缀，不做整包解码）。"""
     params: Mapping[str, Any] | None = None
     at: float = 0.0
     """相对 env 启动的单调时钟（秒）。"""
@@ -288,8 +288,11 @@ class DriverHttp(GatewayClient):
                 payload = response.json()
             except ValueError:
                 detail = "response body is not JSON"
+            text = _truncate(response.text, self._text_limit)
         else:
             payload = response.content
+            # 字节流端点只解前缀：大二进制不做整包解码（内存翻倍、留档还是乱码）。
+            text = response.content[: self._text_limit].decode("utf-8", "replace")
         call = self._record(
             HttpCall(
                 method=method.upper(),
@@ -297,7 +300,7 @@ class DriverHttp(GatewayClient):
                 body=body if isinstance(body, dict) else None,
                 status=response.status_code,
                 response=payload if parse_json else None,
-                text=_truncate(response.text, self._text_limit),
+                text=text,
                 params=dict(params) if params is not None else None,
                 at=at,
                 duration_ms=duration_ms,

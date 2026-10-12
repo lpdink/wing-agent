@@ -52,6 +52,7 @@ async def test_workspace_file_api(probe: Probe) -> None:
     (base / "adir" / "inner.txt").write_text("inner", encoding="utf-8")
     (base / "alpha.md").write_text("# alpha", encoding="utf-8")
     (base / "zebra.txt").write_text("z-last", encoding="utf-8")
+    (base / "evil.html").write_text("<script>alert(1)</script>", encoding="utf-8")
     os.symlink("alpha.md", base / "link.md")
     os.symlink("missing.md", base / "dangling.md")
 
@@ -70,12 +71,13 @@ async def test_workspace_file_api(probe: Probe) -> None:
         "GET", "/api/workspace/list", params={"path": str(base)}
     )
     assert listing["path"] == str(base)
-    assert listing["total"] == 5
+    assert listing["total"] == 6
     assert listing["next_offset"] is None
     assert [(e["name"], e["type"]) for e in listing["entries"]] == [
         ("adir", "dir"),
         ("alpha.md", "file"),
         ("dangling.md", "symlink"),
+        ("evil.html", "file"),
         ("link.md", "symlink"),
         ("zebra.txt", "file"),
     ]
@@ -103,7 +105,7 @@ async def test_workspace_file_api(probe: Probe) -> None:
             "/api/workspace/list",
             params={"path": str(base), "offset": str(offset), "limit": "2"},
         )
-        assert page["total"] == 5
+        assert page["total"] == 6
         windows.extend(e["name"] for e in page["entries"])
         offset = page["next_offset"]
     assert windows == [e["name"] for e in listing["entries"]]
@@ -150,6 +152,16 @@ async def test_workspace_file_api(probe: Probe) -> None:
         "GET", "/api/workspace/read", params={"path": str(base / "link.md")}
     )
     assert linked == b"# alpha"
+
+    # 可执行文档类型被沙箱化：预览照常，但脚本 / 同源能力被 CSP 关掉；nosniff 恒在。
+    call, html = await http.request_raw(
+        "GET", "/api/workspace/read", params={"path": str(base / "evil.html")}
+    )
+    assert call.status == 200
+    assert html == b"<script>alert(1)</script>"
+    assert call.response_headers["content-type"] == "text/html; charset=utf-8"
+    assert call.response_headers["x-content-type-options"] == "nosniff"
+    assert call.response_headers["content-security-policy"] == "sandbox"
 
     # ── ⑥ 边界：相对路径 / 目录 / 缺失 / 悬空链接 ───────────────
     relative = await _failed(

@@ -23,14 +23,12 @@ import mimetypes
 import os
 import stat
 from dataclasses import dataclass
-from typing import Literal
+
+from .protocol import EntryType
 
 #: 目录列举的默认 / 上限条数（响应限幅；``total`` 仍反映扫描到的全量）。
 DEFAULT_LIST_LIMIT = 200
 MAX_LIST_LIMIT = 1000
-
-EntryType = Literal["file", "dir", "symlink", "other"]
-"""条目类型（lstat 口径）：符号链接不解析目标，自己算一类。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +68,8 @@ class ReadTarget:
 
     path: str
     name: str
+    mime: str | None
+    """按扩展名猜的 MIME（猜不出为 ``None``，路由据此决定安全头与线类型）。"""
     stat: os.stat_result
 
 
@@ -131,6 +131,10 @@ def _symlink_target(path: str) -> str | None:
         return None
 
 
+def _guess_mime(name: str) -> str | None:
+    return mimetypes.guess_type(name)[0]
+
+
 def _describe(name: str, path: str, st: os.stat_result) -> Entry:
     """``lstat`` 结果 → 条目的公共形状（口径见模块 docstring）。"""
     mode = st.st_mode
@@ -164,7 +168,7 @@ def _describe(name: str, path: str, st: os.stat_result) -> Entry:
             type="file",
             size=st.st_size,
             mtime=st.st_mtime,
-            mime=mimetypes.guess_type(name)[0],
+            mime=_guess_mime(name),
             symlink_target=None,
             broken=False,
         )
@@ -301,4 +305,5 @@ def resolve_read(raw: str) -> ReadTarget:
         raise WorkspaceError(400, f"is a directory: {path}")
     if not stat.S_ISREG(st.st_mode):
         raise WorkspaceError(400, f"not a regular file: {path}")
-    return ReadTarget(path=path, name=os.path.basename(path) or "download", stat=st)
+    name = os.path.basename(path) or "download"
+    return ReadTarget(path=path, name=name, mime=_guess_mime(name), stat=st)

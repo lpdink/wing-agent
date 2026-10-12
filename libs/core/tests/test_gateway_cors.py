@@ -53,11 +53,16 @@ ADMIN_KEY = "admin-key-123456"
 
 @contextlib.contextmanager
 def _gateway(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, auth_enabled: bool = False
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auth_enabled: bool = False,
+    config_text: str | None = None,
+    host: str | None = None,
 ) -> Iterator[TestClient]:
     monkeypatch.setenv("WING_HOME", str(tmp_path))
     monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    text = VALID_YAML
+    text = config_text or VALID_YAML
     if auth_enabled:
         text += f'  auth:\n    enabled: true\n    keys:\n      - {{key: "{ADMIN_KEY}", role: admin}}\n'
     config_path = tmp_path / "core" / "config.yaml"
@@ -67,7 +72,8 @@ def _gateway(
 
     from wing.gateway.server import GatewayServer
 
-    server = GatewayServer()
+    # 与 cli 同口径：host 由调用方解析后传入（缺省 = 默认 127.0.0.1）。
+    server = GatewayServer(host=host) if host is not None else GatewayServer()
     try:
         with TestClient(server._app) as tc:
             yield tc
@@ -138,6 +144,8 @@ class TestPreflight:
                 "Access-Control-Request-Method": "GET",
             },
         )
+        # Starlette 对未放通来源的预检**就地**回 400（不落路由），无 ACAO。
+        assert resp.status_code == 400
         assert _allow_origin(resp) is None
 
     def test_preflight_bypasses_authentication(
@@ -194,3 +202,53 @@ class TestSetupMode:
             assert server.cors_origins == []
         finally:
             reset_config()
+
+
+#: 网关绑非 loopback（0.0.0.0）：loopback 回声关闭；loopback 来源要显式写进 origins。
+BOUND_ELSEWHERE_YAML = """\
+providers:
+  - name: local
+    base_url: https://api.example.com
+    api_key: sk-test
+    models: [m1]
+agents:
+  - name: default
+    model: m1
+gateway:
+  host: 0.0.0.0
+  cors:
+    origins: ["http://localhost:5173"]
+"""
+
+
+class TestBindAddress:
+    def test_loopback_echo_requires_loopback_binding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """绑 0.0.0.0 是远端可达部署：loopback 来源不再默认回声，显式写 origins 才放。"""
+        with _gateway(
+            tmp_path,
+            monkeypatch,
+            config_text=BOUND_ELSEWHERE_YAML,
+            host="0.0.0.0",
+        ) as tc:
+            # 未显式配置的 loopback 来源（不同端口）→ 不放通
+            other = tc.get("/api/health", headers={"Origin": "http://localhost:9999"})
+            assert _allow_origin(other) is None
+
+            # 显式写进 origins 的 loopback 来源照常回声（放通与否由配置决定）
+            configured = tc.get(
+                "/api/health", headers={"Origin": "http://localhost:5173"}
+            )
+            assert _allow_origin(configured) == "http://localhost:5173"
+
+            # 远端来源未配置 → 不放通
+            foreign = tc.get(
+                "/api/health", headers={"Origin": "https://evil.example.com"}
+            )
+            assert _allow_origin(foreign) is None
+
+    def test_loopback_binding_keeps_the_default(self, client: TestClient) -> None:
+        """绑 loopback（默认配置）时 loopback 来源照常默认放通。"""
+        resp = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
+        assert _allow_origin(resp) == "http://localhost:5173"

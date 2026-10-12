@@ -3,14 +3,18 @@
 """``/api/workspace/*`` 的请求 / 响应模型——字段即线格式。
 
 本子包自含协议（不复用 ``gateway/protocol`` 的包根出口）：将来「拆 Gateway」时
-整个子包原样带走。
+整个子包原样带走。类型别名（``EntryType``）定义在这里、由 ``service`` 反向 import
+——值域属于**线契约**，实现层（本地 / 将来的远程 provider）都按它产出。
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
-from .service import EntryType
+EntryType = Literal["file", "dir", "symlink", "other"]
+"""条目类型（lstat 口径）：符号链接不解析目标，自己算一类。"""
 
 
 class WorkspaceEntry(BaseModel):
