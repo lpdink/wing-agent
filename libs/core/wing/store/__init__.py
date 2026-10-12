@@ -13,6 +13,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    SessionUsage,
     TagMeta,
 )
 from wing.store.file import FileSessionStore
@@ -23,6 +24,7 @@ __all__ = [
     "SessionMetadata",
     "SessionStore",
     "SessionSummary",
+    "SessionUsage",
     "TagMeta",
     "FileSessionStore",
     "MemorySessionStore",

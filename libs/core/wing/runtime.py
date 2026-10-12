@@ -529,6 +529,7 @@ class WingRuntime:
                 turn_started_at=turn_started_at,
                 agent=None,
                 draft=draft,
+                usage=session.usage,
             )
         )
 
@@ -839,8 +840,9 @@ class WingRuntime:
         ——中途订阅者据此获得与从始至终订阅一致的完整视图，组装顺序为
         messages → uncommitted → uncommitted_tools → events。快照同时是
         **状态**：status（快照时刻的运行状态，前端据此进入 working——内容投影
-        为空 ≠ 不在跑，一轮 LLM 调用在飞行时两者都空）与 turn_started_at
-        （恢复 working 已耗时）。
+        为空 ≠ 不在跑，一轮 LLM 调用在飞行时两者都空）、turn_started_at
+        （恢复 working 已耗时）与 usage（用量账本基线：快照之后的 live 增量
+        恰好是它未包含的部分，前端据此累计，不与 HTTP 快照混源）。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
         from wing.event import wire_dump
@@ -868,6 +870,7 @@ class WingRuntime:
                 agent=session.to_agent_info(),
                 name=session.session_name,
                 draft=draft,
+                usage=session.usage,
                 target=client_target,
             )
         )

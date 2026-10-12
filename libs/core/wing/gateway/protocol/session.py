@@ -17,7 +17,7 @@ from wing.session.override import AgentOverride
 
 # 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
 # 刻意不另立一份：见 `wing/event/base.py` 的同一说明）。
-from wing.store import TagMeta
+from wing.store import SessionUsage, TagMeta
 
 
 # ============================================================
@@ -306,6 +306,15 @@ class SessionInfoResponse(BaseModel):
     tag_meta: dict[str, TagMeta] = Field(
         default_factory=dict,
         description="每个标签的记录（键集 ⊆ tags）；当前含 added_at 打标时间",
+    )
+    usage: SessionUsage = Field(
+        default_factory=SessionUsage,
+        description=(
+            "会话用量与运行时长累计（计数 + token + 时长；跨 release / 网关"
+            "重启延续）。全零 = 还没有可用量记录（旧会话从零开始，不回填）。"
+            "命中率 = cached_tokens / prompt_tokens，工作时长 = "
+            "llm_time_ms + tool_time_ms 由客户端推导。"
+        ),
     )
 
 

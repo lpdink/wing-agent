@@ -13,13 +13,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import tempfile
+import time
 from contextvars import ContextVar
 from pathlib import Path
 
 from wing.common.logger import log
 from wing.config import get_config, get_wing_home
 from wing.hooks import hooks
-from wing.schema import Message, Tool, ToolCall, ToolError, ToolOutput
+from wing.schema import MediaRef, Message, Tool, ToolCall, ToolError, ToolOutput
 
 from .event_sink import AgentEventSink
 
@@ -160,8 +161,25 @@ class ToolExecutor:
         工具可返回 ``str``（存量，零改动）或 ``ToolOutput``（文本 + 媒体
         引用）。``after_tool_call`` hook 只接收/改写文本，media 原样透传。
         返回约定：带 media 时返回 ``ToolOutput``，否则返回 ``str``。
+
+        每个终态都把实测时长（毫秒）交给 tool_finished——会话用量账本据此
+        累计工具总时长；中断合成的结果由 execute() 直接发射，不经这里，
+        因此不会被记成一次执行。
         """
         self._sink.tool_started(tc)
+        started = time.monotonic()
+
+        def finish(
+            content: str, *, success: bool, media: list[MediaRef] | None = None
+        ) -> None:
+            self._sink.tool_finished(
+                tc,
+                content,
+                success=success,
+                model=model,
+                media=media,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
 
         # 参数 JSON 解析失败（provider 已容错并置 arguments_error）：不执行
         # 工具，把错误现场作为结果回灌给模型自纠——与 unknown-tool 同级的
@@ -173,7 +191,7 @@ class ToolExecutor:
                 f"you generated are invalid.\n{tc.arguments_error}\n"
                 f"Please re-issue the tool call with corrected arguments."
             )
-            self._sink.tool_finished(tc, result, success=False, model=model)
+            finish(result, success=False)
             return result
 
         tool = self._tools.get(tc.name)
@@ -182,7 +200,7 @@ class ToolExecutor:
                 f"Error: unknown tool: {tc.name}, "
                 f"or you don't have permission to use it."
             )
-            self._sink.tool_finished(tc, result, success=False, model=model)
+            finish(result, success=False)
             return result
 
         try:
@@ -226,17 +244,15 @@ class ToolExecutor:
             if modified_result is not None:
                 content = modified_result
 
-            self._sink.tool_finished(
-                tc, content, success=True, model=model, media=media
-            )
+            finish(content, success=True, media=media)
             return ToolOutput(content=content, media=media) if media else content
         except ToolError as e:
             result = str(e)
-            self._sink.tool_finished(tc, result, success=False, model=model)
+            finish(result, success=False)
             return result
         except Exception as e:
             result = f"Error executing tool '{tc.name}': {e}"
-            self._sink.tool_finished(tc, result, success=False, model=model)
+            finish(result, success=False)
             return result
 
 

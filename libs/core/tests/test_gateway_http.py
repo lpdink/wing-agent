@@ -24,7 +24,7 @@ from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
 from wing.session import TagMutation
-from wing.store import TagMeta
+from wing.store import SessionUsage, TagMeta
 
 
 def _raise_package_not_found(name: str) -> str:
@@ -717,6 +717,7 @@ class TestSessionInfo:
         )
         mock_runtime.get_session.return_value = mock_session
         mock_session.tag_meta = {}
+        mock_session.usage = SessionUsage()
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -739,6 +740,7 @@ class TestSessionInfo:
         assert data["context_stats"]["total_tokens"] == 800
         assert data["skills_info"] == "skill-a: desc"
         assert data["system_prompt"] == "You are a helpful assistant."
+        assert data["usage"] == SessionUsage().model_dump()
 
     def test_info_no_workspace(self, client: TestClient, mock_runtime):
         """Session 无 workspace 时 workdir 为 null；未声明展示名时为 null。"""
@@ -764,6 +766,7 @@ class TestSessionInfo:
         mock_session.agent.context_manager.system_prompt.content = ""
         mock_runtime.get_session.return_value = mock_session
         mock_session.tag_meta = {}
+        mock_session.usage = SessionUsage()
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
@@ -794,6 +797,7 @@ class TestSessionInfo:
         mock_session.agent.context_manager.system_prompt.content = ""
         mock_runtime.get_session.return_value = mock_session
         mock_session.tag_meta = {}
+        mock_session.usage = SessionUsage()
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200

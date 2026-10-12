@@ -781,6 +781,15 @@ class SessionManager:
         while self._teardowns:
             await asyncio.gather(*list(self._teardowns), return_exceptions=True)
 
+    def flush_usage(self) -> None:
+        """把所有在场会话的用量账本落盘（进程退出前的最后落盘点）。
+
+        回合收尾与逐出路径各自已落；这里兜住「回合进行中进程退出」的尾巴
+        ——最后一次累计也是跨重启延续的一部分。已落过的会话是 no-op。
+        """
+        for session in self._sessions.values():
+            session.flush_usage()
+
     def _blocked_reason(self, session: Session) -> str | None:
         """不可逐出的原因；None = 可以逐出。
 

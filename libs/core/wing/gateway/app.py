@@ -89,6 +89,10 @@ def create_app(server: GatewayServer) -> FastAPI:
         try:
             yield
         finally:
+            # 在场会话的用量账本先落盘（回合收尾之外的兜底：回合进行中进程
+            # 退出也不丢最后一次累计）；setup mode 下没有会话（runtime 是替身）。
+            if not server.in_setup_mode:
+                server.runtime.sm.flush_usage()
             await server.stop_background()
             # provider 池是全进程共享资源，生命周期随进程：lifespan 收尾
             # （uvicorn 优雅停机，含 /api/shutdown → SIGTERM 路径）是它的
