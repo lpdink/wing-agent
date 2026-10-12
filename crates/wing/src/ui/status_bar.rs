@@ -23,17 +23,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
 use crate::config::ThemePalette;
-
-/// Format token count in compact notation.
-fn fmt_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        format!("{n}")
-    }
-}
+use crate::util::format;
 
 /// 模型身份四元组——一个会话表面上「当前模型」的完整陈述。
 ///
@@ -335,14 +325,14 @@ impl Widget for StatusBar<'_> {
             right_spans.push(Span::styled(
                 format!(
                     " {}/{}",
-                    fmt_tokens(d.total_tokens),
-                    fmt_tokens(d.context_window_tokens),
+                    format::tokens(d.total_tokens),
+                    format::tokens(d.context_window_tokens),
                 ),
                 dim,
             ));
         } else {
             right_spans.push(Span::styled(
-                fmt_tokens(d.total_tokens),
+                format::tokens(d.total_tokens),
                 Style::default().fg(self.palette.success),
             ));
         }
@@ -351,16 +341,19 @@ impl Widget for StatusBar<'_> {
         if self.wide && (d.session_prompt_tokens > 0 || d.session_completion_tokens > 0) {
             right_spans.push(Span::styled(" · ", dim));
             right_spans.push(Span::styled(
-                format!("↑{}", fmt_tokens(d.session_prompt_tokens)),
+                format!("↑{}", format::tokens(d.session_prompt_tokens)),
                 Style::default().fg(self.palette.dim),
             ));
             right_spans.push(Span::styled(
-                format!(" ↓{}", fmt_tokens(d.session_completion_tokens)),
+                format!(" ↓{}", format::tokens(d.session_completion_tokens)),
                 Style::default().fg(self.palette.dim),
             ));
-            if d.session_cached_tokens > 0 && d.session_prompt_tokens > 0 {
-                let cache_pct = (d.session_cached_tokens as f64 / d.session_prompt_tokens as f64
-                    * 100.0) as u32;
+            if d.session_cached_tokens > 0
+                && let Some(rate) =
+                    format::hit_rate(d.session_cached_tokens, d.session_prompt_tokens)
+            {
+                // 状态栏要短：整数百分比（摘要有余量，留一位小数）。
+                let cache_pct = rate as u32;
                 right_spans.push(Span::styled(
                     format!(" ◎{cache_pct}%"),
                     Style::default().fg(self.palette.dim),
@@ -449,11 +442,11 @@ impl TurnUsage {
         let mut items: Vec<Vec<Span<'static>>> = Vec::new();
 
         items.push(vec![Span::styled(
-            format!("{} in", fmt_tokens(self.prompt_tokens)),
+            format!("{} in", format::tokens(self.prompt_tokens)),
             dim,
         )]);
         items.push(vec![Span::styled(
-            format!("{} out", fmt_tokens(self.completion_tokens)),
+            format!("{} out", format::tokens(self.completion_tokens)),
             dim,
         )]);
         if self.cached_tokens > 0 && self.prompt_tokens > 0 {
@@ -481,12 +474,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fmt_tokens() {
-        assert_eq!(fmt_tokens(0), "0");
-        assert_eq!(fmt_tokens(999), "999");
-        assert_eq!(fmt_tokens(1000), "1.0k");
-        assert_eq!(fmt_tokens(12345), "12.3k");
-        assert_eq!(fmt_tokens(1_500_000), "1.5M");
+    fn test_compact_token_notation() {
+        assert_eq!(format::tokens(0), "0");
+        assert_eq!(format::tokens(999), "999");
+        assert_eq!(format::tokens(1000), "1.0k");
+        assert_eq!(format::tokens(12345), "12.3k");
+        assert_eq!(format::tokens(1_500_000), "1.5M");
     }
 
     #[test]

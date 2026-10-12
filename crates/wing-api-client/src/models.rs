@@ -305,10 +305,11 @@ pub struct SessionUsage {
     /// 被消费进上下文的用户消息条数。
     #[serde(default)]
     pub user_messages: i64,
-    /// 完成的 LLM 调用次数。
+    /// 完成的 LLM 调用次数（只覆盖 ReAct 循环内的调用；压缩等旁路调用不计）。
     #[serde(default)]
     pub llm_calls: i64,
-    /// 真实执行的工具调用次数（中断合成的结果不计）。
+    /// **真实执行**的工具调用次数（参数非法 / 未知工具的短路与中断合成的
+    /// 结果都不计）。
     #[serde(default)]
     pub tool_calls: i64,
     /// 收尾的回合数。

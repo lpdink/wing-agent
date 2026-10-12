@@ -5,6 +5,11 @@
 //!   - wing/event/react.py
 //!   - wing/event/state_change.py
 //!   - wing/event/query_response.py
+//!
+//! 一处刻意的例外：`sync_session.usage` 与 `GET /api/session/info.usage` 是
+//! **同一份线格式**（Python 侧也刻意复用 `wing.store.SessionUsage`，不另立
+//! 镜像），所以这里直接复用 [`wing_api_client::models::SessionUsage`] 而不是
+//! 再定义一份——两份定义必然漂移，而它们本就该逐字段相同。
 
 use serde::Deserialize;
 use serde::Serialize;

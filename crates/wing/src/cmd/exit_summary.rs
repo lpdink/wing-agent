@@ -2,13 +2,15 @@
 //!
 //! 只服务 **TUI 形态**（`cmd::run_tui` 在 `run_app` 返回、终端恢复之后调用）：
 //! stdio / ACP 的 stdout 是协议通道，绝不走这里（形态由 `exit_summary_shape`
-//! 守门测试钉住）。网关不可达时降级：只打印本地能证实的部分（墙钟 + 状态栏
-//! 累计）并注明用量不可用。
+//! 守门测试钉住）。账本读数失败时降级：只打印本地能证实的部分（墙钟 +
+//! 状态栏累计）并注明原因。
 //!
 //! 渲染复用 CLI 表格引擎（`render::table::plain`，与 `wing ps` / `wing tools`
 //! 同一份皮肤与宽度数学）——两处读起来是同一个产品。
 
 #![allow(clippy::print_stdout)]
+
+use std::time::Duration;
 
 use ratatui::style::Style;
 
@@ -20,17 +22,60 @@ use crate::render::table::ColumnKind;
 use crate::render::table::plain::PlainCell;
 use crate::render::table::plain::PlainColumn;
 use crate::render::table::plain::PlainTable;
+use crate::util::format;
+use wing_api_client::GatewayClient;
 use wing_api_client::models::SessionUsage;
 
-/// 打印退出摘要（stdout，终端已恢复；颜色循 CLI 惯例：TTY 才着色）。
-pub fn print_exit_summary(exit: &TuiExit) {
-    let out = TableOutput::detect();
-    let palette = ThemePalette::from_config(&crate::config::AppConfig::load().colors);
-    print!("{}", render_exit_summary(exit, &palette, &out));
+/// 退出摘要的账本读数预算：超时即有界降级——摘要在终端恢复**之后**取数，
+/// 一个不响应的网关不该让用户对着黑屏等。
+const LEDGER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 退出时向网关要一次用量账本的结果。
+///
+/// 三态分开：`Reported` 才是完整摘要；`Unreported`（网关可达但没有这个
+/// 字段——旧网关）与 `Unreachable`（请求失败 / 超时 / 会话已不在）都降级，
+/// 但注记不同——把三种成因写成同一句「网关不可达」是误导。
+pub enum Ledger {
+    Reported(SessionUsage),
+    Unreported,
+    Unreachable,
 }
 
-/// 摘要的纯渲染（可测；打印与取数分离）。
-pub fn render_exit_summary(exit: &TuiExit, palette: &ThemePalette, out: &TableOutput) -> String {
+/// 取一次退出用的账本快照（有界等待；失败分类不抛）。
+pub async fn read_ledger(http_base: &str, api_key: Option<&str>, session_id: &str) -> Ledger {
+    let Ok(client) = GatewayClient::new(http_base, api_key) else {
+        return Ledger::Unreachable;
+    };
+    match tokio::time::timeout(LEDGER_TIMEOUT, client.get_session_info(session_id)).await {
+        Ok(Ok(info)) => match info.usage {
+            Some(usage) => Ledger::Reported(usage),
+            None => Ledger::Unreported,
+        },
+        Ok(Err(e)) => {
+            tracing::debug!("exit summary: session info unavailable: {e}");
+            Ledger::Unreachable
+        }
+        Err(_) => {
+            tracing::debug!("exit summary: session info timed out");
+            Ledger::Unreachable
+        }
+    }
+}
+
+/// 打印退出摘要（stdout，终端已恢复；颜色循 CLI 惯例：TTY 才着色）。
+pub fn print_exit_summary(exit: &TuiExit, ledger: Ledger) {
+    let out = TableOutput::detect();
+    let palette = ThemePalette::from_config(&crate::config::AppConfig::load().colors);
+    print!("{}", render_exit_summary(exit, ledger, &palette, &out));
+}
+
+/// 摘要的纯渲染（可测；取数与打印分离）。
+pub fn render_exit_summary(
+    exit: &TuiExit,
+    ledger: Ledger,
+    palette: &ThemePalette,
+    out: &TableOutput,
+) -> String {
     let label_ink = Style::new().fg(palette.dim);
     let value_ink = Style::new().fg(palette.text);
 
@@ -41,8 +86,8 @@ pub fn render_exit_summary(exit: &TuiExit, palette: &ThemePalette, out: &TableOu
         value_ink,
     )];
 
-    match &exit.usage {
-        Some(usage) => {
+    let note = match ledger {
+        Ledger::Reported(usage) => {
             let work = usage.llm_time_ms + usage.tool_time_ms;
             rows.push(row(
                 "LLM TIME",
@@ -59,59 +104,66 @@ pub fn render_exit_summary(exit: &TuiExit, palette: &ThemePalette, out: &TableOu
             rows.push(row("WORK TIME", fmt_millis(work), label_ink, value_ink));
             rows.push(row(
                 "USER MSGS",
-                fmt_count(usage.user_messages),
+                usage.user_messages.to_string(),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
                 "LLM CALLS",
-                fmt_count(usage.llm_calls),
+                usage.llm_calls.to_string(),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
                 "TOOL CALLS",
-                fmt_count(usage.tool_calls),
+                usage.tool_calls.to_string(),
                 label_ink,
                 value_ink,
             ));
-            rows.push(row("TURNS", fmt_count(usage.turns), label_ink, value_ink));
-            rows.push(row("CACHE HIT", fmt_hit_rate(usage), label_ink, value_ink));
+            rows.push(row("TURNS", usage.turns.to_string(), label_ink, value_ink));
+            rows.push(row("CACHE HIT", fmt_hit_rate(&usage), label_ink, value_ink));
             rows.push(row(
                 "INPUT TOKENS",
-                fmt_tokens(usage.prompt_tokens),
+                format::tokens(usage.prompt_tokens),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
                 "OUTPUT TOKENS",
-                fmt_tokens(usage.completion_tokens),
+                format::tokens(usage.completion_tokens),
                 label_ink,
                 value_ink,
             ));
+            None
         }
-        None => {
-            // 降级：网关不可达 / 连接已断——只报本地能证实的数字。
+        other => {
+            // 降级：只报本地能证实的数字（状态栏累计 = 快照基线 + live 增量）。
             rows.push(row(
                 "CACHE HIT",
-                hit_rate_from(exit.cached_tokens, exit.prompt_tokens),
+                fmt_hit_rate_from(exit.cached_tokens, exit.prompt_tokens),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
                 "INPUT TOKENS",
-                fmt_tokens(exit.prompt_tokens),
+                format::tokens(exit.prompt_tokens),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
                 "OUTPUT TOKENS",
-                fmt_tokens(exit.completion_tokens),
+                format::tokens(exit.completion_tokens),
                 label_ink,
                 value_ink,
             ));
+            Some(match other {
+                Ledger::Unreported => {
+                    "usage unavailable: the gateway reported none (live counters only)"
+                }
+                _ => "usage unavailable: gateway unreachable (live counters only)",
+            })
         }
-    }
+    };
 
     let columns = vec![
         PlainColumn::new("SESSION", ColumnKind::Compact),
@@ -126,8 +178,12 @@ pub fn render_exit_summary(exit: &TuiExit, palette: &ThemePalette, out: &TableOu
         crate::cmd::common::single_line(&exit.model)
     ));
     rendered.push_str(&render_table(&table, palette, out));
-    if exit.usage.is_none() {
-        rendered.push_str("usage unavailable: gateway unreachable (live counters only)\n");
+    // 两种时间轴同框：墙钟是本次运行，其余行是会话累计——resume 一个老会话
+    // 只跑 10 秒就退出时，不解释会看着像矛盾。
+    rendered.push_str("wall clock covers this run; the other rows are session totals\n");
+    if let Some(note) = note {
+        rendered.push_str(note);
+        rendered.push('\n');
     }
     rendered
 }
@@ -139,8 +195,8 @@ fn row(label: &str, value: String, label_ink: Style, value_ink: Style) -> Vec<Pl
     ]
 }
 
-/// 墙钟（会话级 `Duration`）：`3h 04m` / `12m 34s` / `8s`。
-fn fmt_duration(d: std::time::Duration) -> String {
+/// 墙钟（本次 TUI 运行）：`3h 04m` / `12m 34s` / `8s`。
+fn fmt_duration(d: Duration) -> String {
     let secs = d.as_secs();
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     if h > 0 {
@@ -152,43 +208,27 @@ fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// 毫秒时长（账本字段）：与墙钟同形，但保留亚秒精度（`0.9s`）。
+/// 毫秒时长（账本字段）：与墙钟同形，但保留亚秒精度（`0.9s`）——`0s` 会把
+/// 真实的百毫秒调用抹平成「没跑过」。
 fn fmt_millis(ms: i64) -> String {
     let ms = ms.max(0);
     if ms < 1_000 {
-        // 有量但不足一秒时给两位小数——`0s` 会把真实的百毫秒调用抹平成「没跑过」。
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
-        fmt_duration(std::time::Duration::from_millis(ms as u64))
+        fmt_duration(Duration::from_millis(ms as u64))
     }
 }
 
-/// 计数：原值（不缩写——用户会对账）。
-fn fmt_count(n: i64) -> String {
-    n.to_string()
-}
-
-/// token：与状态栏同一套紧凑记法（`1.2k` / `3.4M`）。
-fn fmt_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
-}
-
-/// 命中率 = cached / prompt（prompt 为 0 时是 `-`：没有可命中的输入）。
+/// 命中率 = cached / prompt（一位小数；无输入 = `-`）。
 fn fmt_hit_rate(usage: &SessionUsage) -> String {
-    hit_rate_from(usage.cached_tokens, usage.prompt_tokens)
+    fmt_hit_rate_from(usage.cached_tokens, usage.prompt_tokens)
 }
 
-fn hit_rate_from(cached: i64, prompt: i64) -> String {
-    if prompt <= 0 {
-        return "-".to_string();
+fn fmt_hit_rate_from(cached: i64, prompt: i64) -> String {
+    match format::hit_rate(cached, prompt) {
+        Some(rate) => format!("{rate:.1}%"),
+        None => "-".to_string(),
     }
-    format!("{:.1}%", cached.max(0) as f64 / prompt as f64 * 100.0)
 }
 
 // ============================================================
@@ -219,12 +259,11 @@ mod tests {
         }
     }
 
-    fn exit(usage: Option<SessionUsage>) -> TuiExit {
+    fn exit() -> TuiExit {
         TuiExit {
             session_id: "20261019-210702-217d85f2".into(),
             model: "DeepSeek-Flash".into(),
-            wall: std::time::Duration::from_secs(754),
-            usage,
+            wall: Duration::from_secs(754),
             prompt_tokens: 120_500,
             completion_tokens: 4_200,
             cached_tokens: 80_000,
@@ -247,7 +286,12 @@ mod tests {
 
     #[test]
     fn renders_every_field_the_summary_owns() {
-        let text = render_exit_summary(&exit(Some(sample_usage())), &palette(), &out());
+        let text = render_exit_summary(
+            &exit(),
+            Ledger::Reported(sample_usage()),
+            &palette(),
+            &out(),
+        );
 
         assert!(text.contains("20261019-210702-217d85f2"), "{text}");
         assert!(text.contains("DeepSeek-Flash"), "{text}");
@@ -272,37 +316,40 @@ mod tests {
             label_line(&text, "OUTPUT TOKENS").contains("4.2k"),
             "{text}"
         );
-        // 降级注记只在降级摘要里出现。
+        // 时间轴说明常在；降级注记只在降级时出现。
+        assert!(text.contains("wall clock covers this run"), "{text}");
         assert!(!text.contains("usage unavailable"), "{text}");
     }
 
     #[test]
-    fn degrades_to_live_counters_when_the_gateway_is_gone() {
-        let text = render_exit_summary(&exit(None), &palette(), &out());
+    fn degrades_to_live_counters_and_names_the_reason() {
+        for (ledger, expected) in [
+            (Ledger::Unreachable, "gateway unreachable"),
+            (Ledger::Unreported, "reported none"),
+        ] {
+            let text = render_exit_summary(&exit(), ledger, &palette(), &out());
 
-        assert!(
-            label_line(&text, "WALL CLOCK").contains("12m 34s"),
-            "{text}"
-        );
-        assert!(
-            label_line(&text, "INPUT TOKENS").contains("120.5k"),
-            "{text}"
-        );
-        assert!(label_line(&text, "CACHE HIT").contains("66.4%"), "{text}");
-        assert!(text.contains("usage unavailable"), "{text}");
-        // 只有在线的累计：没有服务端账本就不报时长 / 计数。
-        assert!(!text.contains("LLM TIME"), "{text}");
-        assert!(!text.contains("TURNS"), "{text}");
+            assert!(
+                label_line(&text, "WALL CLOCK").contains("12m 34s"),
+                "{text}"
+            );
+            assert!(
+                label_line(&text, "INPUT TOKENS").contains("120.5k"),
+                "{text}"
+            );
+            assert!(label_line(&text, "CACHE HIT").contains("66.4%"), "{text}");
+            assert!(text.contains(expected), "{text}");
+            // 只有在线的累计：没有服务端账本就不报时长 / 计数。
+            assert!(!text.contains("LLM TIME"), "{text}");
+            assert!(!text.contains("TURNS"), "{text}");
+        }
     }
 
     #[test]
     fn formats_durations_by_scale() {
-        assert_eq!(fmt_duration(std::time::Duration::from_secs(8)), "8s");
-        assert_eq!(fmt_duration(std::time::Duration::from_secs(754)), "12m 34s");
-        assert_eq!(
-            fmt_duration(std::time::Duration::from_secs(11_040)),
-            "3h 04m"
-        );
+        assert_eq!(fmt_duration(Duration::from_secs(8)), "8s");
+        assert_eq!(fmt_duration(Duration::from_secs(754)), "12m 34s");
+        assert_eq!(fmt_duration(Duration::from_secs(11_040)), "3h 04m");
         assert_eq!(fmt_millis(0), "0.0s");
         assert_eq!(fmt_millis(940), "0.9s");
         assert_eq!(fmt_millis(82_000), "1m 22s");
@@ -311,7 +358,7 @@ mod tests {
     #[test]
     fn hit_rate_is_derived_and_never_divides_by_zero() {
         assert_eq!(fmt_hit_rate(&sample_usage()), "66.4%");
-        assert_eq!(hit_rate_from(0, 0), "-");
-        assert_eq!(hit_rate_from(5, 10), "50.0%");
+        assert_eq!(fmt_hit_rate_from(0, 0), "-");
+        assert_eq!(fmt_hit_rate_from(5, 10), "50.0%");
     }
 }

@@ -75,7 +75,7 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 
 斜杠命令大多被前端拦截转 HTTP（如 `/compact`→`POST /api/session/compact`）；`/clear`、`/copy` 纯前端本地处理；用户 `.md` prompt 命令展开为文本后作为普通消息发送（见 glossary「命令」）。
 
-**状态栏用量与退出摘要**：状态栏的输入 / 输出 / 缓存命中累计以 `sync_session.usage` 快照为基线（attach / 切换 / 恢复都赋值，此后 live `llm_call_metrics` 加增量——resume 不再从 0 累起），基线只用 WS 快照而不用 HTTP `/api/session/info`（两个通道无定序）。任意正常退出（含双击 Ctrl+C）在终端恢复后打印一份退出摘要（`cmd/exit_summary.rs`，复用 CLI 表格引擎；网关不可达时降级为本地计数器 + 注明）。摘要只属于 TUI 形态——stdio / ACP 的 stdout 是协议通道，由 `tests/exit_summary_shape.rs` 守门。
+**状态栏用量与退出摘要**：状态栏的输入 / 输出 / 缓存命中累计以 `sync_session.usage` 快照为基线（attach / 切换 / 恢复都赋值，此后 live `llm_call_metrics` 加增量——resume 不再从 0 累起），基线只用 WS 快照而不用 HTTP `/api/session/info`（两个通道无定序）。任意正常退出（含双击 Ctrl+C）在终端恢复后打印一份退出摘要（`cmd/exit_summary.rs`，复用 CLI 表格引擎）：本地素材（墙钟 / 状态栏累计）来自 `run_app` 的返回值，服务端账本由 TUI 入口在恢复**之后**另取（2s 有界——不响应的网关只降级、不冻结画面；读数分三态：完整 / 网关可达但没带账本 / 不可达，注记各自说明）。摘要只属于 TUI 形态——stdio / ACP 的 stdout 是协议通道，由 `tests/exit_summary_shape.rs` 守门（含 `cmd/mod.rs` 内必须落在 `run_tui` 的函数级判定）。
 
 **流式增量渲染**：Reasoning / assistant 长文本的 delta 不再每帧全量重渲染（O(n²) 整轮）。`render/markdown/stream.rs` 的 `StreamingRender` 把流式文本切成 markdown 块——已闭合块渲染一次提升为不可变稳定前缀，每帧只重渲染活动尾部；未闭合代码块走行级缓存（Content 保留 syntect 有状态高亮、Thinking 永久 plain）。`CachedCell` 的流式分支不 bump generation（细粒度失效），渲染循环对预折行 cell 直接逐行 blit（去 `Paragraph` Composer 与 clone），高度 O(1)。WS 事件只置脏，draw 由 16ms 帧间隔合帧（输入旁路节流）。turn 结束 `finalize` 全量对账兜底任何增量漂移。基准与对账矩阵：`crates/wing/benches/stream_render.rs`、`tests/stream_render_{reconcile,throughput}.rs`（512KB 平均帧 18.2ms→13µs，p99<0.6ms，支撑 3000 tokens/s）。
 
@@ -330,6 +330,10 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
 - **对外出口**：`GET /api/session/info.usage` 与 `sync_session.usage`（快照）。
   前端拿 `sync_session` 做基线——它与其后的 live 事件同一条有序 WS 通道；
   HTTP 快照与 WS 帧无跨通道定序，不能用来做基线（会把在途事件重复计入）。
+- **口径边界**：`llm_calls` / token / `llm_time_ms` 只覆盖 ReAct 循环内的
+  调用——上下文压缩（compaction）与其它旁路调用不计；`tool_calls` /
+  `tool_time_ms` 只覆盖**真实执行**的调用（参数非法 / 未知工具的两条短路与
+  中断合成的结果都不计）。见 `SessionUsage` 的字段说明（唯一契约处）。
 - **fork 从零开始**：子会话是新会话，账本不复制源会话的先前进度（「本会话
   花了多少」不因分叉被继承）。
 
