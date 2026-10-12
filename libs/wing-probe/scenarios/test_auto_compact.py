@@ -46,7 +46,7 @@ from wing_probe.history.view import COMPACT_PREFIX, HistoryView
 EARLY_MODEL = "probe/auto-compact-early"
 RESTART_MODEL = "probe/auto-compact-restart"
 
-#: 上下文窗口旋钮（agent 配置）：compact_window = 1000 - 400 = 600 tokens。
+#: 上下文窗口旋钮（模型声明）：compact_window = 1000 - 400 = 600 tokens。
 #: 首轮无服务端 usage 时走本地估算（system + 一条 user ≈ 46 tokens）→ 不触发；
 #: 剧本回报的 1100 跨过 600（early）与 1000（apply）两个阈值。
 CONTEXT_WINDOW = 1000

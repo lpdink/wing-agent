@@ -99,6 +99,8 @@ mod tests {
                     name: (*m).to_string(),
                     display_name: None,
                     description: None,
+                    context_window_tokens: None,
+                    keep_recent_tokens: None,
                     capabilities: Default::default(),
                 })
                 .collect(),
@@ -126,6 +128,8 @@ mod tests {
                         name: (*id).to_string(),
                         display_name: label,
                         description: None,
+                        context_window_tokens: None,
+                        keep_recent_tokens: None,
                         capabilities: Default::default(),
                     }
                 })
@@ -199,6 +203,8 @@ mod tests {
                 name: format!("m{i}"),
                 display_name: None,
                 description: None,
+                context_window_tokens: None,
+                keep_recent_tokens: None,
                 capabilities: Default::default(),
             })
             .collect();

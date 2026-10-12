@@ -428,6 +428,8 @@ def test_nested_list_path_from_real_catalog() -> None:
         "providers[].models[].name",
         "providers[].models[].display_name",
         "providers[].models[].description",
+        "providers[].models[].context_window_tokens",
+        "providers[].models[].keep_recent_tokens",
         "providers[].models[].capabilities",
     ]
 

@@ -33,6 +33,8 @@ from .loader import (
     reset_config,
 )
 from .models import (
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_KEEP_RECENT_TOKENS,
     AgentConfig,
     ApiKeyEntry,
     AuthConfig,
@@ -66,6 +68,8 @@ __all__ = [
     "CommandsConfig",
     "Config",
     "ConfigProblem",
+    "DEFAULT_CONTEXT_WINDOW_TOKENS",
+    "DEFAULT_KEEP_RECENT_TOKENS",
     "EvictionConfig",
     "GatewayConfig",
     "ImagesConfig",

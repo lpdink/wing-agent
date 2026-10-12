@@ -90,6 +90,8 @@ pub(super) fn model_group(
                 name: (*m).to_string(),
                 display_name: None,
                 description: None,
+                context_window_tokens: None,
+                keep_recent_tokens: None,
                 capabilities: Default::default(),
             })
             .collect(),
@@ -119,6 +121,8 @@ pub(super) fn model_group_with_labels(
                     name: (*id).to_string(),
                     display_name: label,
                     description: None,
+                    context_window_tokens: None,
+                    keep_recent_tokens: None,
                     capabilities: Default::default(),
                 }
             })

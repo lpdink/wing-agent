@@ -5,12 +5,14 @@
 - 目录是**配置声明的静态投影**（远端 ``/models`` 发现已退役）：无网络、无 IO，
   每次读到的都是同一份声明；
 - 每个条目是**对象**，键恰好 ``{id, name, display_name, description,
-  capabilities}``——不再是 ``list[str]``，也没有 ``model_details`` 平行数组
-  （"两数组逐项对齐"的脆弱契约被消灭）；
+  context_window_tokens, keep_recent_tokens, capabilities}``——不再是
+  ``list[str]``，也没有 ``model_details`` 平行数组（"两数组逐项对齐"的脆弱契约
+  被消灭）；
 - ``id`` 缺省 = ``name``（存量字符串形态零改动）；显式 ``id:`` 时两者**分列**
   （``id`` 是引用词，``name`` 是发给上游的调用名）；
 - ``display_name`` / ``description`` / ``capabilities`` 原样投影：未声明 = null /
-  全 false（不做名字启发式）；
+  全 false（不做名字启发式）；``context_window_tokens`` / ``keep_recent_tokens``
+  是**生效值**（显式声明原样，未声明 = 声明层默认）；
 - 顺序 = 配置声明序（目录只有一个来源，不排序、不回落）；
 - **目录是合同不是展示面**：每个列出的 id 都能当 ``update {model_id}`` 用，
   切换后上游收到的是该条目的 ``name``。
@@ -36,6 +38,8 @@ NAMED_SPEC = {
     "name": NAMED_ID,
     "display_name": "Named Model",
     "description": "declares a display name",
+    "context_window_tokens": 128_000,
+    "keep_recent_tokens": 16_000,
     "capabilities": {"vision": True},
 }
 ALIAS_SPEC = {
@@ -49,12 +53,14 @@ TEMPLATE_ID = "probe/default"
 
 
 def _entry(model_id: str, name: str, **overrides: object) -> dict:
-    """目录条目（未声明的字段就是 null / 假）。"""
+    """目录条目（未声明的字段就是 null / 假 / 声明层默认窗口）。"""
     entry: dict = {
         "id": model_id,
         "name": name,
         "display_name": None,
         "description": None,
+        "context_window_tokens": 256_000,
+        "keep_recent_tokens": 50_000,
         "capabilities": {"vision": False},
     }
     entry.update(overrides)
@@ -83,6 +89,8 @@ async def test_catalog_shape_and_usable_ids(probe: Probe) -> None:
                         NAMED_ID,
                         display_name="Named Model",
                         description="declares a display name",
+                        context_window_tokens=128_000,
+                        keep_recent_tokens=16_000,
                         capabilities={"vision": True},
                     ),
                     _entry(

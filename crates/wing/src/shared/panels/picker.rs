@@ -273,6 +273,8 @@ mod tests {
             name: name.into(),
             display_name: None,
             description: None,
+            context_window_tokens: None,
+            keep_recent_tokens: None,
             capabilities: Default::default(),
         }
     }
@@ -305,6 +307,8 @@ mod tests {
                         name: (*id).to_string(),
                         display_name: label,
                         description: None,
+                        context_window_tokens: None,
+                        keep_recent_tokens: None,
                         capabilities: Default::default(),
                     }
                 })
@@ -500,6 +504,8 @@ mod tests {
                 name: "dfmodel-2026".into(),
                 display_name: Some("DeepSeek-Flash".into()),
                 description: None,
+                context_window_tokens: None,
+                keep_recent_tokens: None,
                 capabilities: Default::default(),
             }],
         }];

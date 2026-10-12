@@ -692,3 +692,278 @@ class TestNoPartialApplication:
         meta = FileSessionStore(root).load_metadata(sid)
         assert meta is not None
         assert (meta.template_name, meta.model_id) == ("coder", "b-id")
+
+
+class TestModelWindowFollowsModel:
+    """上下文窗口 / 压缩阈值是模型级声明：建会话、换模型、换模板都跟随当前模型。"""
+
+    @staticmethod
+    def _window(session: Any) -> tuple[int, int]:
+        compactor = session.context_manager.compactor
+        return compactor.context_window_tokens, compactor.keep_recent_tokens
+
+    @pytest.mark.asyncio
+    async def test_template_resolves_window_from_model_declaration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """会话构造期从模板模型的声明解析双阈值（未声明 = 声明层默认）。"""
+        _use_config(
+            monkeypatch,
+            _config(
+                [
+                    ModelSpec(
+                        id="small",
+                        name="m-small",
+                        context_window_tokens=64_000,
+                        keep_recent_tokens=8_000,
+                    ),
+                    "m-default",
+                ],
+                agent_model="small",
+            ),
+        )
+        sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
+        session = sm.create_session()
+
+        assert self._window(session) == (64_000, 8_000)
+        assert session.agent.get_status()["context_window_tokens"] == 64_000
+
+        awaited = sm.create_session(agent_override=AgentOverride(model_id="m-default"))
+        assert self._window(awaited) == (256_000, 50_000)
+        # override 只影响该会话：模板（以及之后建出的会话）仍是声明默认。
+        template = sm.template_manager.get("default")
+        assert template is not None
+        assert (
+            template.compactor.context_window_tokens,
+            template.compactor.keep_recent_tokens,
+        ) == (64_000, 8_000)
+        plain = sm.create_session()
+        assert self._window(plain) == (64_000, 8_000)
+
+    @pytest.mark.asyncio
+    async def test_update_state_rebinds_window_to_target_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """运行期换模型：生效窗口与压缩阈值跟随新模型（换回来也跟随）。"""
+        _use_config(
+            monkeypatch,
+            _config(
+                [
+                    ModelSpec(
+                        id="small",
+                        name="m-small",
+                        context_window_tokens=64_000,
+                        keep_recent_tokens=8_000,
+                    ),
+                    ModelSpec(
+                        id="large",
+                        name="m-large",
+                        context_window_tokens=200_000,
+                        keep_recent_tokens=20_000,
+                    ),
+                ],
+                agent_model="small",
+            ),
+        )
+        sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
+        session = sm.create_session()
+        assert self._window(session) == (64_000, 8_000)
+
+        await session.update_state(model_id="large")
+        assert self._window(session) == (200_000, 20_000)
+        assert session.agent.get_status()["context_window_tokens"] == 200_000
+
+        await session.update_state(model_id="small")
+        assert self._window(session) == (64_000, 8_000)
+        assert session.agent.get_status()["context_window_tokens"] == 64_000
+
+    @pytest.mark.asyncio
+    async def test_switch_template_rebinds_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """模板切换 = 换 agent + 换 CM：新模板（新模型）的声明即刻生效。"""
+        cfg = Config(
+            providers=[
+                ProviderConfig(
+                    name="p",
+                    base_url="http://x",
+                    api_key="k",
+                    models=[
+                        ModelSpec(
+                            id="small",
+                            name="m-small",
+                            context_window_tokens=64_000,
+                            keep_recent_tokens=8_000,
+                        ),
+                        ModelSpec(
+                            id="large",
+                            name="m-large",
+                            context_window_tokens=200_000,
+                            keep_recent_tokens=20_000,
+                        ),
+                    ],
+                )
+            ],
+            agents=[
+                AgentConfig(name="default", model="small"),
+                AgentConfig(name="coder", model="large"),
+            ],
+        )
+        _use_config(monkeypatch, cfg)
+        sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
+        session = sm.create_session()
+        assert self._window(session) == (64_000, 8_000)
+
+        coder = sm.template_manager.get("coder")
+        assert coder is not None
+        await session.switch_template(coder)
+
+        assert session.model_id == "large"
+        assert self._window(session) == (200_000, 20_000)
+
+    @pytest.mark.asyncio
+    async def test_undeclared_model_keeps_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """模型未声明（id 被删的恢复路径）：窗口保持现值，不回落硬编码默认。
+
+        目录数据一律从配置读（``get_config``）；查不中时不拦切换、也不改阈值。
+        """
+        _use_config(
+            monkeypatch,
+            _config(
+                [
+                    ModelSpec(
+                        id="small",
+                        name="m-small",
+                        context_window_tokens=64_000,
+                        keep_recent_tokens=8_000,
+                    )
+                ],
+                agent_model="small",
+            ),
+        )
+        sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
+        session = sm.create_session()
+
+        session.agent.set_model("m-gone", "p")
+        assert session.agent.model == "m-gone"
+        assert self._window(session) == (64_000, 8_000)
+
+    @pytest.mark.asyncio
+    async def test_sibling_sessions_keep_independent_windows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """同一模板建出的会话各有自己的 Compactor：换模型只改自己，模板不动。"""
+        _use_config(
+            monkeypatch,
+            _config(
+                [
+                    ModelSpec(
+                        id="small",
+                        name="m-small",
+                        context_window_tokens=64_000,
+                        keep_recent_tokens=8_000,
+                    ),
+                    ModelSpec(
+                        id="large",
+                        name="m-large",
+                        context_window_tokens=200_000,
+                        keep_recent_tokens=20_000,
+                    ),
+                ],
+                agent_model="small",
+            ),
+        )
+        sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
+        first = sm.create_session()
+        second = sm.create_session()
+        assert first.context_manager.compactor is not second.context_manager.compactor
+
+        await first.update_state(model_id="large")
+
+        assert self._window(first) == (200_000, 20_000)
+        assert self._window(second) == (64_000, 8_000)
+        template = sm.template_manager.get("default")
+        assert template is not None
+        assert (
+            template.compactor.context_window_tokens,
+            template.compactor.keep_recent_tokens,
+        ) == (64_000, 8_000)
+
+    @pytest.mark.asyncio
+    async def test_resume_window_follows_persisted_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """resume（重启 / 逐出后水合）按记录里的模型重解析窗口，而不是模板默认。"""
+        root = tmp_path / "sessions"
+        _use_config(
+            monkeypatch,
+            _config(
+                [
+                    ModelSpec(
+                        id="small",
+                        name="m-small",
+                        context_window_tokens=64_000,
+                        keep_recent_tokens=8_000,
+                    ),
+                    ModelSpec(
+                        id="large",
+                        name="m-large",
+                        context_window_tokens=200_000,
+                        keep_recent_tokens=20_000,
+                    ),
+                ],
+                agent_model="small",
+            ),
+        )
+        sm = SessionManager({"file": FileSessionStore(root)})
+        session = sm.create_session()
+        sid = session.session_id
+        await session.update_state(model_id="large")
+
+        restored = SessionManager({"file": FileSessionStore(root)}).resume_session(sid)
+
+        assert restored.model_id == "large"
+        assert self._window(restored) == (200_000, 20_000)
+
+    @pytest.mark.asyncio
+    async def test_fork_child_switch_does_not_touch_parent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """fork 子会话复制源会话的阈值快照：子会话换模型不回写父会话。"""
+        root = tmp_path / "sessions"
+        _use_config(
+            monkeypatch,
+            _config(
+                [
+                    ModelSpec(
+                        id="small",
+                        name="m-small",
+                        context_window_tokens=64_000,
+                        keep_recent_tokens=8_000,
+                    ),
+                    ModelSpec(
+                        id="large",
+                        name="m-large",
+                        context_window_tokens=200_000,
+                        keep_recent_tokens=20_000,
+                    ),
+                ],
+                agent_model="small",
+            ),
+        )
+        sm = SessionManager({"file": FileSessionStore(root)})
+        parent = sm.create_session()
+        _seed(parent, "hello")
+        result = sm.fork_session(parent.session_id, "current")
+        assert result is not None
+        child, _ = result
+
+        assert self._window(parent) == (64_000, 8_000)
+        assert self._window(child) == (64_000, 8_000)
+
+        await child.update_state(model_id="large")
+
+        assert self._window(child) == (200_000, 20_000)
+        assert self._window(parent) == (64_000, 8_000)

@@ -75,7 +75,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/commands` | 命令列表（仅返回 `source == "prompt"` 的命令） |
-| GET | `/api/models` | 可用模型目录（按 provider 分组嵌套；目录 = **配置静态声明的同步投影**——远端 `/models` 发现已退役、无网络请求）。`providers[].models` 是**对象数组**：`{id, name, display_name, description, capabilities: {vision}}`——`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给上游的调用名，`display_name` 是展示名（可空，前端回落 `name`），`capabilities` 是能力声明（见 [media-images.md](media-images.md)）。旧的 `model_details` 平行数组已删除（消灭「两数组逐项对齐」的脆弱契约） |
+| GET | `/api/models` | 可用模型目录（按 provider 分组嵌套；目录 = **配置静态声明的同步投影**——远端 `/models` 发现已退役、无网络请求）。`providers[].models` 是**对象数组**：`{id, name, display_name, description, context_window_tokens, keep_recent_tokens, capabilities: {vision}}`——`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给上游的调用名，`display_name` 是展示名（可空，前端回落 `name`），`context_window_tokens` / `keep_recent_tokens` 是压缩双阈值的**生效值**（模型声明唯一来源，未声明 = 声明层默认），`capabilities` 是能力声明（见 [media-images.md](media-images.md)）。旧的 `model_details` 平行数组已删除（消灭「两数组逐项对齐」的脆弱契约） |
 | GET | `/api/agents` | 可用 agent 模板列表 |
 | POST | `/api/system/reload` | 热重载（无需重启），**逐项名字序是对外契约**（probe `test_system_reload` 钉住，只许在末尾追加）：`config.yaml → hooks → prompt commands → provider → skills & rules → log level`。config 项失败立即中止（后续项不再尝试），其余项失败继续；逐项 `ok` / `detail` 如实上报，**失败不回滚文件**。保存事务（`/api/settings/set` 的第 ⑦ 步）走同一条管道 |
 | POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
@@ -86,7 +86,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 ```json
 {"providers": [{"provider": "qoder", "models": [
   {"id": "dfmodel", "name": "dfmodel", "display_name": "DeepSeek-Flash",
-   "description": null, "capabilities": {"vision": false}}]}]}
+   "description": null, "context_window_tokens": 256000, "keep_recent_tokens": 50000,
+   "capabilities": {"vision": false}}]}]}
 ```
 
 ### Settings（`routes/settings.py`，4 个）

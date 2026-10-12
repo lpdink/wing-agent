@@ -28,6 +28,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "libs" / "wing-probe"))
 
 from wing_probe.env import (  # noqa: E402
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
     render_config_yaml,
     reserve_port,
     resolve_gateway_bin,
@@ -50,6 +51,17 @@ def say(message: str) -> None:
     print(message, flush=True)
 
 
+def _declaration_with_display_name(
+    entry: str | dict[str, object], display_name: str
+) -> dict[str, object]:
+    """给模板模型的声明补展示名（保留 ``render_config_yaml`` 已写入的窗口键）。"""
+    declaration: dict[str, object] = (
+        {"name": entry} if isinstance(entry, str) else dict(entry)
+    )
+    declaration["display_name"] = display_name
+    return declaration
+
+
 def write_config(
     provider_base_url: str,
     gateway_port: int,
@@ -59,7 +71,7 @@ def write_config(
     display_name: str | None = None,
     system_prompt: str,
     tools: tuple[str, ...] = TOOLS,
-    context_window_tokens: int = 256_000,
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
     log_level: str = "INFO",
 ) -> Path:
     """写 ``$WING_HOME/core/config.yaml``：provider 指向假 Provider，agent 预置。"""
@@ -77,7 +89,9 @@ def write_config(
         )
     )
     config["providers"][0]["models"] = [
-        {"name": model, "display_name": display_name or model}
+        _declaration_with_display_name(
+            config["providers"][0]["models"][0], display_name or model
+        )
     ]
     config["yolo"] = True  # 录制里不要确认弹窗
     path = WING_HOME / "core" / "config.yaml"

@@ -20,6 +20,7 @@ import {
   enumOr,
   isJsonObject,
   numberOr,
+  optNumber,
   optString,
   readJsonArray,
   readStringArray,
@@ -321,12 +322,16 @@ export interface ModelCapabilities {
  * `id` is the globally unique reference word (`GET /api/models` is a contract
  * other clients rely on), `name` the call name sent upstream, `display_name` the
  * presentation fallback material, `capabilities` the declared abilities.
+ * `context_window_tokens` / `keep_recent_tokens` are the effective compaction
+ * thresholds (older gateways omit them → `null`; the client never guesses).
  */
 export interface ModelDetail {
   readonly id: string;
   readonly name: string;
   readonly display_name: string | null;
   readonly description: string | null;
+  readonly context_window_tokens: number | null;
+  readonly keep_recent_tokens: number | null;
   readonly capabilities: ModelCapabilities;
 }
 
@@ -603,6 +608,8 @@ function decodeModelDetail(value: unknown): ModelDetail | null {
     name,
     display_name: optString(value, 'display_name'),
     description: optString(value, 'description'),
+    context_window_tokens: optNumber(value, 'context_window_tokens'),
+    keep_recent_tokens: optNumber(value, 'keep_recent_tokens'),
     capabilities: decodeModelCapabilities(value['capabilities']),
   };
 }

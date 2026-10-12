@@ -108,11 +108,22 @@ class Compactor:
         context_window_tokens: int,
         keep_recent_tokens: int,
     ) -> None:
+        self.set_window(context_window_tokens, keep_recent_tokens)
+
+    def set_window(self, context_window_tokens: int, keep_recent_tokens: int) -> None:
+        """设置双阈值（构造期与运行期切换模型共用）。
+
+        先校验后赋值：非法组合 raise 且状态零变化（调用方的切换不留半截）。
+        """
         if context_window_tokens <= keep_recent_tokens:
             raise ValueError("context_window_tokens must > keep_recent_tokens")
         self.context_window_tokens = context_window_tokens
         self.keep_recent_tokens = keep_recent_tokens
         self.compact_window_tokens = context_window_tokens - keep_recent_tokens
+
+    def copy(self) -> "Compactor":
+        """独立副本——每个会话持有自己的阈值（换模型只改本会话）。"""
+        return Compactor(self.context_window_tokens, self.keep_recent_tokens)
 
     # ── Token 估算 ──────────────────────────────
 

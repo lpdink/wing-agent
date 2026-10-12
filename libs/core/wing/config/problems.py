@@ -203,6 +203,49 @@ def _model_path(prefix: str, index: int, spec: Any) -> str:
     return f"{prefix}models[{index}]" + ("" if isinstance(spec, str) else ".name")
 
 
+def _as_int(value: Any) -> int | None:
+    """可判定为整数的值（``bool`` 不算）；否则 ``None``（字段级校验的地盘）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _model_window_problems(provider: Any, path_prefix: str) -> list[ConfigProblem]:
+    """逐模型声明检查压缩双阈值：窗口必须 > 保留区（未声明的一侧取声明层默认）。
+
+    模型级是这两个值的唯一来源，而两者各自有独立默认值——「只声明窗口」是自然
+    写法，32k 窗口 + 默认 50k 保留区会以裸 ``ValueError`` 掀翻运行期装配（网关
+    停在 setup mode 且诊断指不到字段）。这里在配置校验期给出精确路径。
+    """
+    from .models import (  # 延迟导入：models 反向依赖本模块（跨字段检查入口）
+        DEFAULT_CONTEXT_WINDOW_TOKENS,
+        DEFAULT_KEEP_RECENT_TOKENS,
+    )
+
+    problems: list[ConfigProblem] = []
+    for index, (spec, view) in enumerate(_specs(provider)):
+        if view is None or isinstance(spec, str):
+            continue  # 裸字符串形态没有窗口键；声明形态不可判定时跳过
+        window = _as_int(_field(spec, "context_window_tokens"))
+        keep = _as_int(_field(spec, "keep_recent_tokens"))
+        window = DEFAULT_CONTEXT_WINDOW_TOKENS if window is None else window
+        keep = DEFAULT_KEEP_RECENT_TOKENS if keep is None else keep
+        if window > keep:
+            continue
+        problems.append(
+            ConfigProblem(
+                path=f"{path_prefix}models[{index}].keep_recent_tokens",
+                kind=ProblemKind.INVALID_VALUE,
+                message=(
+                    f"model '{view.name}': keep_recent_tokens ({keep}) must be less "
+                    f"than context_window_tokens ({window})"
+                ),
+                hint="把 keep_recent_tokens 调小（压缩保留区必须小于上下文窗口）",
+            )
+        )
+    return problems
+
+
 def _duplicate_positions(values: Sequence[str | None]) -> list[int]:
     """重复值**第二次出现**（及以后，每个名字只报一次）的下标，按出现顺序。
 
@@ -265,7 +308,9 @@ def cross_field_problems(config: Config) -> list[ConfigProblem]:
     5. agent name 重复；
     6. 逐 provider：``models`` 为空 → 随后逐声明：model id 全局重复（同一 provider 内撞 id
        的文案说一遍 provider 名，跨 provider 说两遍）；
-    7. 逐 agent：``agents[].model`` 未命中 id 空间（文案 = ``unknown_model_message``）。
+    7. 逐声明：压缩双阈值必须自洽（``context_window_tokens`` > ``keep_recent_tokens``；
+       未声明的一侧取声明层默认）；
+    8. 逐 agent：``agents[].model`` 未命中 id 空间（文案 = ``unknown_model_message``）。
     """
     problems: list[ConfigProblem] = []
     providers = _items(_field(config, "providers"))
@@ -383,7 +428,15 @@ def cross_field_problems(config: Config) -> list[ConfigProblem]:
                 )
             )
 
-    # ⑦ agents[].model 必须落在 id 空间内（未命中即配置错误——文案即 C7：available ids
+    # ⑦ 逐声明：压缩双阈值必须自洽（窗口 > 保留区）。窗口迁到模型级后「只声明
+    # 窗口」是自然写法，而保留区有独立默认——不在这里拦住就会以裸 ValueError
+    # 掀翻运行期装配。
+    for index, provider in enumerate(providers):
+        problems.extend(
+            _model_window_problems(provider, path_prefix=f"providers[{index}].")
+        )
+
+    # ⑧ agents[].model 必须落在 id 空间内（未命中即配置错误——文案即 C7：available ids
     # + 调用名提示，外部编排方据此一次改对）。校验与解析共用同一 trim 语义：
     # find_model() 能命中的值，加载期就放行——「加载说合法 ⇔ 解析能命中」由构造保证。
     #

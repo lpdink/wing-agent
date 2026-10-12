@@ -79,6 +79,39 @@ class TestProviderModelDeclarations:
         assert spec.description is None
         assert spec.capabilities == ModelCapabilities(vision=False)
 
+    def test_context_window_fields_default_and_override(self):
+        """上下文窗口 / 保留区是模型级字段：缺省 = 声明层默认，显式声明覆盖。"""
+        cfg = _provider(models=["a", {"name": "b", "context_window_tokens": 8_000}])
+        a = cfg.find_model("a")
+        b = cfg.find_model("b")
+        assert a is not None and b is not None
+        assert a.context_window_tokens == 256_000
+        assert a.keep_recent_tokens == 50_000
+        assert b.context_window_tokens == 8_000
+        assert b.keep_recent_tokens == 50_000
+
+    def test_context_window_defaults_match_module_constants(self):
+        """默认值只有一处定义（``config.models`` 的常量）。"""
+        from wing.config import (
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            DEFAULT_KEEP_RECENT_TOKENS,
+        )
+
+        spec = ModelSpec(name="x")
+        assert spec.context_window_tokens == DEFAULT_CONTEXT_WINDOW_TOKENS
+        assert spec.keep_recent_tokens == DEFAULT_KEEP_RECENT_TOKENS
+
+    def test_agent_level_window_fields_are_ignored(self):
+        """窗口字段已从 agents[] 移走：旧键静默忽略（extra="ignore" 的既有契约）。"""
+        agent = AgentConfig(
+            name="a",
+            model="m",
+            context_window_tokens=500_000,  # ty: ignore[unknown-argument]
+            keep_recent_tokens=100_000,  # ty: ignore[unknown-argument]
+        )
+        assert not hasattr(agent, "context_window_tokens")
+        assert not hasattr(agent, "keep_recent_tokens")
+
     def test_mixed_forms_preserve_declaration_order(self):
         cfg = _provider(models=["legacy", {"name": "new", "display_name": "New"}])
         assert cfg.model_names() == ["legacy", "new"]

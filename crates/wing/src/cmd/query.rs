@@ -303,6 +303,8 @@ mod tests {
             name: name.into(),
             display_name: display_name.map(str::to_string),
             description: description.map(str::to_string),
+            context_window_tokens: None,
+            keep_recent_tokens: None,
             capabilities: Default::default(),
         }
     }

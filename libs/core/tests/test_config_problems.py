@@ -351,7 +351,118 @@ def test_duplicate_model_id_explicit_id_path() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ⑦ agents[].model 未命中 id 空间
+# ⑦ 压缩双阈值：窗口必须 > 保留区（未声明的一侧取声明层默认）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_window_must_exceed_keep_recent() -> None:
+    """只声明窗口（保留区取默认 50000）也会被判非法——模型级最常见的声明坑。"""
+    problems = _problems(
+        _raw(
+            [_provider(models=[{"name": "m", "context_window_tokens": 32_000}])],
+            [{"name": "a", "model": "m"}],
+        )
+    )
+    assert problems == [
+        ConfigProblem(
+            path="providers[0].models[0].keep_recent_tokens",
+            kind=ProblemKind.INVALID_VALUE,
+            message=(
+                "model 'm': keep_recent_tokens (50000) must be less than "
+                "context_window_tokens (32000)"
+            ),
+            hint="把 keep_recent_tokens 调小（压缩保留区必须小于上下文窗口）",
+        )
+    ]
+
+
+def test_window_pair_valid_and_defaulted_sides() -> None:
+    """合规组合：显式成对 / 只声明保留区（窗口取默认）都无问题。"""
+    assert (
+        _problems(
+            _raw(
+                [
+                    _provider(
+                        models=[
+                            {
+                                "name": "m",
+                                "context_window_tokens": 32_000,
+                                "keep_recent_tokens": 4_000,
+                            }
+                        ]
+                    )
+                ],
+                [{"name": "a", "model": "m"}],
+            )
+        )
+        == []
+    )
+    assert (
+        _problems(
+            _raw(
+                [_provider(models=[{"name": "m", "keep_recent_tokens": 60_000}])],
+                [{"name": "a", "model": "m"}],
+            )
+        )
+        == []
+    )
+
+
+def test_window_pair_reported_for_every_model_declaration() -> None:
+    """逐声明报出：裸字符串（没有窗口键）跳过，坏的那条按各自下标定位。"""
+    problems = _problems(
+        _raw(
+            [
+                _provider(
+                    models=[
+                        "bare",
+                        {
+                            "name": "good",
+                            "context_window_tokens": 8_000,
+                            "keep_recent_tokens": 1_000,
+                        },
+                        {
+                            "id": "bad",
+                            "name": "upstream",
+                            "context_window_tokens": 100,
+                            "keep_recent_tokens": 100,
+                        },
+                    ]
+                )
+            ],
+            [{"name": "a", "model": "bare"}],
+        )
+    )
+    assert [problem.path for problem in problems] == [
+        "providers[0].models[2].keep_recent_tokens"
+    ]
+
+
+def test_window_pair_preempts_unknown_agent_model() -> None:
+    """优先级：⑦ 在 ⑧（agents[].model 未命中）之前——坏声明比引用错误更靠前。"""
+    problems = _problems(
+        _raw(
+            [_provider(models=[{"name": "m", "context_window_tokens": 10}])],
+            [{"name": "a", "model": "nope"}],
+        )
+    )
+    assert [problem.kind for problem in problems] == [
+        ProblemKind.INVALID_VALUE,
+        ProblemKind.UNKNOWN_REFERENCE,
+    ]
+
+
+def test_window_pair_load_path_message_equals_first_problem() -> None:
+    """加载期 raise 的文案 = 第一条 problem（同一份实现，两个消费方）。"""
+    raw = _raw(
+        [_provider(models=[{"name": "m", "context_window_tokens": 32_000}])],
+        [{"name": "a", "model": "m"}],
+    )
+    assert _raised(raw) == _problems(raw)[0].render()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑧ agents[].model 未命中 id 空间
 # ─────────────────────────────────────────────────────────────────────────────
 
 

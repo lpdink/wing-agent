@@ -683,6 +683,8 @@ export class FakeGateway {
               name: entry.name,
               display_name: entry.display_name,
               description: null,
+              context_window_tokens: 256000,
+              keep_recent_tokens: 50000,
               capabilities: { vision: false },
             })),
           })),
