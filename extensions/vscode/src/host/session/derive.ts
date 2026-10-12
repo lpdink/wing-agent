@@ -145,7 +145,7 @@ export function fallbackArgsSummary(args: JsonValue | null): string {
   }
   const parts: string[] = [];
   for (const [key, value] of Object.entries(object)) {
-    if (key === 'purpose') {
+    if (key === 'description') {
       continue;
     }
     const rendered = typeof value === 'string' ? value : JSON.stringify(value);

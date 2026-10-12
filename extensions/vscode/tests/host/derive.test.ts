@@ -100,7 +100,7 @@ describe('tool display', () => {
   });
 
   it('falls back to key=value pairs for unknown tools', () => {
-    expect(toolDisplay('MysteryTool', { prompt: 'find things', purpose: 'skip me' })).toEqual({
+    expect(toolDisplay('MysteryTool', { prompt: 'find things', description: 'skip me' })).toEqual({
       title: 'MysteryTool',
       subject: 'prompt=find things',
     });

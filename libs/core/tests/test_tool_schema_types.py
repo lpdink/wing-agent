@@ -139,15 +139,15 @@ class TestDecoratorParamTable:
         assert by_name["extra"].type == "integer"  # 未显式给出的照常推断
         assert by_name["extra"].default == 3
 
-    def test_add_purpose_appends_purpose_param(self):
+    def test_add_description_appends_description_param(self):
         reg = _registry()
 
-        @reg.register(name="T", add_purpose=True)
+        @reg.register(name="T", add_description=True)
         async def tool(query: str) -> str:
             """Doc."""
             return query
 
         registered = reg.resolve("T")
         assert registered is not None
-        assert [p.name for p in registered.params] == ["query", "purpose"]
+        assert [p.name for p in registered.params] == ["query", "description"]
         assert registered.params[-1].default == ""

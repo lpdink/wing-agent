@@ -903,7 +903,7 @@ fn fallback_args_summary(args: &serde_json::Value) -> String {
         serde_json::Value::Object(map) => {
             let parts: Vec<String> = map
                 .iter()
-                .filter(|(k, _)| k.as_str() != "purpose")
+                .filter(|(k, _)| k.as_str() != "description")
                 .map(|(k, v)| {
                     let val = match v {
                         serde_json::Value::String(s) => truncate_by_chars(s, 50),
@@ -1472,6 +1472,21 @@ mod tests {
             !text.contains("CustomTool  "),
             "double space detected: {text}"
         );
+    }
+
+    #[test]
+    fn test_fallback_hides_description_param() {
+        // The schema's optional `description` param (auto-added for Bash-like
+        // tools) is style noise in the key=value summary — hidden there, while
+        // every other arg still shows.
+        let block = ToolCallBlock::new(
+            "CustomTool".into(),
+            json!({"command": "ls", "description": "list files"}),
+            "tc-desc".into(),
+        );
+        let text = lines_text(&block.to_lines(&p(), 10));
+        assert!(text.contains("command=ls"), "missing fallback args: {text}");
+        assert!(!text.contains("description"), "description leaked: {text}");
     }
 
     #[test]
