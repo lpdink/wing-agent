@@ -50,7 +50,7 @@ class HttpCall:
     detail: str | None = None
     """留档之外的补充说明（如"响应不是 JSON 对象"）。"""
     response_headers: Mapping[str, str] = field(default_factory=dict)
-    """原始响应头（字节流端点 / Range 断言的素材；所有调用都留）。"""
+    """原始响应头（字节流端点 / Range 断言的素材；所有调用都留；键恒小写）。"""
 
     @property
     def ok(self) -> bool:

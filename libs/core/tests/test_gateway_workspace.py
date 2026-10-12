@@ -340,6 +340,20 @@ class TestResolveRead:
             service.resolve_read(str(tmp_path / "nope"))
         assert exc.value.status == 404
 
+    def test_unreadable_file_is_403(self, tmp_path: Path) -> None:
+        """校验靠真正 open——权限错误在这里就变成 403（不是流中途断掉的 200）。"""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root bypasses the file's read bits")
+        locked = tmp_path / "locked.txt"
+        locked.write_text("secret", encoding="utf-8")
+        locked.chmod(0o000)
+        try:
+            with pytest.raises(service.WorkspaceError) as exc:
+                service.resolve_read(str(locked))
+            assert exc.value.status == 403
+        finally:
+            locked.chmod(0o600)
+
 
 class TestRoots:
     def test_home_and_cwd(self) -> None:
@@ -503,6 +517,22 @@ class TestRouterWire:
             "/api/workspace/read", params={"path": str(tree / "nope")}
         )
         assert missing_read.status_code == 404
+
+    def test_read_unreadable_file_is_403(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """不可读文件 → 403（**不是** 200 + 长度撒谎的空 body）。"""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root bypasses the file's read bits")
+        locked = tmp_path / "locked.txt"
+        locked.write_text("secret", encoding="utf-8")
+        locked.chmod(0o000)
+        try:
+            resp = client.get("/api/workspace/read", params={"path": str(locked)})
+            assert resp.status_code == 403
+            assert "permission denied" in resp.json()["detail"]
+        finally:
+            locked.chmod(0o600)
 
     def test_validation_errors(self, client: TestClient, tree: Path) -> None:
         assert client.get("/api/workspace/list").status_code == 422  # path 缺失

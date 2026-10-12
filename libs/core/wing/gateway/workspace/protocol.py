@@ -27,7 +27,8 @@ class WorkspaceEntry(BaseModel):
         default=None, description="按扩展名猜的 MIME（仅常规文件；猜不出为 null）"
     )
     symlink_target: str | None = Field(
-        default=None, description="链接原文（仅 symlink；读取失败为 null）"
+        default=None,
+        description="链接原文（仅 symlink；读取失败或不可编码为 UTF-8 为 null）",
     )
     broken: bool = Field(
         default=False, description="symlink 的目标不可解析（缺失 / 环 / 不可访问）"

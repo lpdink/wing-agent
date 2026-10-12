@@ -324,6 +324,15 @@ def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNo
         children = _children_of(inner, path)
     elif kind is SettingKind.LIST:
         element, variants = _list_shape(inner, path)
+        if element is not None and element.kind not in (
+            SettingKind.OBJECT,
+            SettingKind.LIST,
+        ):
+            # 标量元素模板继承列表声明的生效域：元素没有自己的声明，而它的每个实例
+            # 都随列表一起生效——`restart_required_paths` 解析的正是元素路径
+            # （`gateway.cors.origins[0]`），元素 apply 若是合成的 hot 就会静默漏报。
+            # 对象 / 联合形态不继承：它们的子字段各自有声明（元素 apply 取子树最粗）。
+            element.apply = meta.apply
 
     default, has_default = _default_of(field, kind)
     minimum, maximum, exclusive_min, exclusive_max = _number_bounds(field)

@@ -719,7 +719,8 @@ class CorsConfig(BaseModel):
             "完全不被用到，这里保持为空即可。\n"
             "默认放通 loopback 来源（http/https + localhost / 127.0.0.1 / [::1]，任意\n"
             "端口）；异机前端是**跨源**的，把它的来源写进来（如 https://ui.example.com；\n"
-            "写 * 会放开全部来源）。\n"
+            "写 * 会放开全部来源）。值必须与浏览器 Origin **逐字一致**（带 scheme、无尾\n"
+            "斜杠、无路径），否则静默不匹配。\n"
             "**restart 域**：中间件在网关启动时装配，改完要重启。WebSocket 不受 CORS 约束。"
         ),
         apply=ApplyScope.RESTART,

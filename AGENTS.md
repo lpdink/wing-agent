@@ -133,8 +133,8 @@ libs/core/wing/
     ├── projection.py                领域 → 协议响应投影（session info / branches）
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
-    ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes
-    └── routes/                      session(16) · system(6) · settings(4) · tools(1) · health(1) · workspace(4) · ws（事件传输 + 上行帧）
+    ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
+    └── routes/                      session(16) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）

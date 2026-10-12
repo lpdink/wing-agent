@@ -200,7 +200,9 @@ def roots() -> tuple[Root, ...]:
     seen: set[str] = set()
     candidates = (("home", os.path.expanduser("~")), ("cwd", _process_cwd()))
     for kind, raw in candidates:
-        if raw is None or raw.startswith("~"):
+        if raw is None or raw.startswith("~") or raw == os.sep:
+            # ``HOME=""`` 时 ``expanduser("~")`` 回落到 ``/``——根目录不是「家目录」
+            # （前端会把它当起点入口），宁可不给。
             continue
         try:
             path = os.path.abspath(raw)
@@ -275,18 +277,26 @@ def stat_path(raw: str) -> Entry:
 def resolve_read(raw: str) -> ReadTarget:
     """读取的前置校验：只允许**常规文件**（符号链接跟随一次）。
 
+    校验方式是**真正 open 一次**（``O_RDONLY | O_NONBLOCK``，随即关闭）：权限错误在
+    这里就变成 403，而不是流式响应发出 ``200`` 后再中途断掉（长度撒谎）；``O_NONBLOCK``
+    让 FIFO 的 open 立即返回（不挂住调用线程），类型由 ``fstat`` 判定。
+
     Raises:
         WorkspaceError: 不存在（404）/ 不可访问（403）/ 目录或非常规文件（400）。
     """
     path = normalize_path(raw)
     try:
-        st = os.stat(path)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError as exc:
         raise WorkspaceError(404, f"no such entry: {path}") from exc
     except PermissionError as exc:
         raise WorkspaceError(403, f"permission denied: {path}") from exc
     except OSError as exc:
         raise WorkspaceError(400, f"cannot read: {path}") from exc
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
     if stat.S_ISDIR(st.st_mode):
         raise WorkspaceError(400, f"is a directory: {path}")
     if not stat.S_ISREG(st.st_mode):

@@ -176,3 +176,21 @@ class TestPreflight:
             )
             assert admin.status_code == 200
             assert _allow_origin(admin) == CONFIGURED_ORIGIN
+
+
+class TestSetupMode:
+    def test_origins_are_empty_in_setup_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """配置不可信（setup mode）⇒ 只保留 loopback 默认放通（``origins=[]``）。"""
+        monkeypatch.setenv("WING_HOME", str(tmp_path))
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        reset_config()
+        try:
+            from wing.gateway.server import GatewayServer
+
+            server = GatewayServer()  # 无 config.yaml → 降级启动
+            assert server.in_setup_mode is True
+            assert server.cors_origins == []
+        finally:
+            reset_config()

@@ -113,10 +113,10 @@ def create_app(server: GatewayServer) -> FastAPI:
 
     app.state.server = server
     # 中间件顺序（Starlette：``add_middleware`` 是 ``user_middleware.insert(0, …)``，
-    # 即**后 add 的在外层**）。AuthMiddleware 必须在最外层：修复模式的 loopback
-    # 判定要**先**发生——setup mode 下非 loopback 的任何路径都先吃 403，
-    # loopback 才轮到守门中间件决定「放行 or 503」（总设计 §8.4）。
-    # CORS 比 AuthMiddleware 还外一层：预检请求不带凭据，必须就地应答。
+    # 即**后 add 的在外层**）。AuthMiddleware 必须在最外层（只有 CORS 比它更外）：
+    # 修复模式的 loopback 判定要**先**发生——setup mode 下非 loopback 的任何路径都先
+    # 吃 403，loopback 才轮到守门中间件决定「放行 or 503」（总设计 §8.4）。
+    # CORS 最外一层：预检请求不带凭据，必须就地应答（不能被鉴权拦下）。
     app.add_middleware(SetupGuardMiddleware)
     app.add_middleware(AuthMiddleware)
     install_cors(app, server.cors_origins)

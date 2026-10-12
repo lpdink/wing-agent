@@ -27,6 +27,17 @@ LOOPBACK_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 CORS_METHODS = ["GET", "POST", "HEAD", "OPTIONS"]
 CORS_HEADERS = ["Authorization", "Content-Type", "X-API-Key", "X-Client-Id"]
 
+#: 跨源前端能读到的响应头：Fetch 规范的 safelist 只有 Cache-Control / Content-Language /
+#: Content-Length / Content-Type / Expires / Last-Modified / Pragma——`read` 的 Range /
+#: inline 文件名素材（Content-Range / Content-Disposition / ETag / Accept-Ranges）
+#: 必须显式 expose，否则 JS 里读到 null。
+CORS_EXPOSE_HEADERS = [
+    "Content-Range",
+    "Content-Disposition",
+    "ETag",
+    "Accept-Ranges",
+]
+
 
 def install_cors(app: FastAPI, origins: list[str]) -> None:
     """装配 CORS 中间件（**必须最外层**：预检不带凭据，不能先被鉴权拦下）。
@@ -41,4 +52,5 @@ def install_cors(app: FastAPI, origins: list[str]) -> None:
         allow_credentials=False,
         allow_methods=CORS_METHODS,
         allow_headers=CORS_HEADERS,
+        expose_headers=CORS_EXPOSE_HEADERS,
     )

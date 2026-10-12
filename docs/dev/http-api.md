@@ -178,7 +178,7 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/workspace/roots` | 可浏览的起点：`home`（进程用户家目录）与 `cwd`（网关进程工作目录）——「工作区选择」的入口，去重、只含真实存在的目录（会话自己的 workspace 在 session 面端点） |
-| GET | `/api/workspace/list` | 列举目录。`path`（绝对路径，必填）、`offset`（≥0，默认 0）、`limit`（1..1000，默认 200）。响应 `{path, entries[], total, next_offset}`：`total` 是扫描到的有效条目数，`next_offset=null` 表示已到末尾。**排序是契约**：目录在前，组内按 `name.casefold()` 再按 `name`（全序，翻页稳定）；隐藏文件（点开头）不做过滤 |
+| GET | `/api/workspace/list` | 列举目录。`path`（绝对路径，必填）、`offset`（≥0，默认 0）、`limit`（1..1000，默认 200）。响应 `{path, entries[], total, next_offset}`：`total` 是扫描到的有效条目数，`next_offset=null` 表示已到末尾。**排序是契约**：目录在前，组内按 `name.casefold()` 再按 `name`（全序，翻页稳定）；隐藏文件（点开头）不做过滤。**每页成本与 offset 无关**（整目录扫描 + 排序；条目数以文件系统为界），超大目录由前端自行限幅展示 |
 | GET | `/api/workspace/stat` | 单个条目元数据（形状同 list 元素）。**lstat 口径**：符号链接不解析目标（`type: "symlink"`，附 `symlink_target` 与 `broken`） |
 | GET / HEAD | `/api/workspace/read` | 读取**常规文件**：流式 + `Range`（206 / 416）+ `Content-Disposition: inline`；MIME 按扩展名猜（猜不出 = `application/octet-stream`，`text/*` 附 `charset=utf-8`）。符号链接跟随一次；目录 / FIFO / 设备一律 400（FIFO 会挂住读线程，设备是无界流）；`HEAD` 只回头（大小 / 类型 / Range 支持） |
 
@@ -338,9 +338,22 @@ WebSocket（`/ws`）不受 CORS 约束，不需要也不提供任何跨源处理
 | 其它来源 | 默认不放通 | 写进 `gateway.cors.origins` 才生效（如 `https://ui.example.com`；写 `*` = 放开全部来源） |
 
 - `allow_credentials` 恒 `false`（API key 走 header，不用 cookie）；允许的方法 / 头按前端
-  最小需求：`GET / POST / HEAD / OPTIONS` + `Authorization / Content-Type / X-API-Key / X-Client-Id`。
+  最小需求：`GET / POST / HEAD / OPTIONS` + `Authorization / Content-Type / X-API-Key / X-Client-Id`；
+  `Access-Control-Expose-Headers` 放通 `Content-Range / Content-Disposition / ETag / Accept-Ranges`
+  （Fetch 的 safelist 不含它们，跨源前端要读 Range / 文件名素材必须显式 expose）。
   401 / 403 响应同样带 CORS 头，前端能读到错误体。
 - **生效域 = `restart`**：中间件在网关启动时装配，改 `gateway.cors.origins` 要重启网关
-  （保存回执的 `restart_required` 会点名 `gateway.cors.origins`）。
-- 安全性：CORS 不是鉴权边界（能过鉴权即全权）。默认放通 loopback 不构成新权限——本机
-  进程本就不受浏览器同源策略约束（可直连 API），且非 loopback 页面不受影响。
+  （保存回执的 `restart_required` 会点名 `gateway.cors.origins[i]`）。
+- 安全性：CORS 不是鉴权边界（能过鉴权即全权）。对**本机进程**这层默认不构成新权限
+  （不受同源策略约束，本就能直连 API）；对**页面**成立的边界变化与部署指引见下。
+
+**风险与部署指引（如实声明）**：默认放通 loopback + `auth.enabled=false` 的组合下，
+**本机页面**（任意端口的本地 dev server / 本地 HTML）可以 `fetch` 读走宿主文件与
+`~/.wing/core/config.yaml` 里的密钥——这是「本机开发便利」换来的代价。因此：
+
+- **推荐同源部署**（前端与 API 同一个反向代理 + HTTPS + 鉴权），该形态下 CORS 不参与；
+- 网关**绑定非 loopback 地址**（`gateway.host: 0.0.0.0`）或**多用户 / 非本人可控的机器**上，
+  必须开 `gateway.auth`（或由反代在鉴权后面转发），否则 `/api/workspace/read` 是免鉴权的
+  任意文件读原语；
+- 网关不校验 `Host`（既有现状），DNS rebinding 类攻击不靠 CORS 挡住——别把裸网关
+  暴露到不可信网络。

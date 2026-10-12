@@ -317,10 +317,11 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
 `POST /api/system/reload` 与保存事务的第 ⑦ 步走**同一条管道**：config 项失败立即中止（后续项不再尝试），
 其余项失败继续，逐项 `ok` / `detail` 如实上报；失败**不回滚文件**（配置本身合法）。
 
-已知边界：**列表元素模板（`[]` 节点）是合成节点，apply 恒为 `hot`**（不继承字段的 apply）——
-`agents[].skills` 这个**字段**是 `next_session`，而 `agents[0].skills[0]` 这个**元素行**显示 `hot`。
-今天无功能影响（唯一的 `restart` 叶子都不在列表里，`restart_required` 只读叶子），
-但**不要**依赖元素模板的 apply 做判定。
+已知边界：**对象 / 联合形态的元素模板（`[]` 节点）是合成节点**，apply 取子树最粗、**不**继承列表声明
+（`providers[]` 显示 `next_session`）；**标量**元素模板（`list[str]` 等）继承列表声明的 apply
+（`gateway.cors.origins[0]` 显示 `restart`）——`restart_required_paths` 读变更路径处的 apply，而列表
+变更的路径是元素路径，所以 `apply=restart` 的标量列表必须让元素继承，否则回执静默漏报。
+不要把元素模板的 apply 当「元素级独立配置」：它只是列表声明的投影。
 
 ## 8. Setup Mode（配置不可用时的降级启动）
 
