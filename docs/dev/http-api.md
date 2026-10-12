@@ -168,6 +168,43 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 - 断连即失败并注销：WS 断开时在途调用立即失败、工具从 registry 移除。**已加载 agent 持有的工具引用不受影响**（保护 KV cache）——再次调用时清晰返回 "tool unavailable / not connected"。运行期工具集切换已由 `POST /api/session/update`（`tools`）支持（PR #50，见 [architecture.md](architecture.md) 远程工具一节）。
 - 总超时：`gateway.remote_tool_timeout`（默认 1800s）仅为安全网，断连是首要失败信号。
 
+### Workspace（`gateway/workspace/`，4 个）
+
+**只读**的工作区文件浏览（异机 Web 前端的接入面）：目录树浏览 / 工作区选择 / 文件预览
+/@ 引用补全的素材。落位是「文件浏览器」的**过渡形态**——终态由远程工具宿主暴露"它所在
+环境的文件系统"；本实现即「workspace provider 的本地实现」（网关宿主机文件系统），
+是 Gateway 下的**自含子包**（只依赖 stdlib + FastAPI，拆 Gateway 时原样带走）。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/workspace/roots` | 可浏览的起点：`home`（进程用户家目录）与 `cwd`（网关进程工作目录）——「工作区选择」的入口，去重、只含真实存在的目录（会话自己的 workspace 在 session 面端点） |
+| GET | `/api/workspace/list` | 列举目录。`path`（绝对路径，必填）、`offset`（≥0，默认 0）、`limit`（1..1000，默认 200）。响应 `{path, entries[], total, next_offset}`：`total` 是扫描到的有效条目数，`next_offset=null` 表示已到末尾。**排序是契约**：目录在前，组内按 `name.casefold()` 再按 `name`（全序，翻页稳定）；隐藏文件（点开头）不做过滤。**每页成本与 offset 无关**（整目录扫描 + 排序；条目数以文件系统为界），超大目录由前端自行限幅展示 |
+| GET | `/api/workspace/stat` | 单个条目元数据（形状同 list 元素）。**lstat 口径**：符号链接不解析目标（`type: "symlink"`，附 `symlink_target` 与 `broken`） |
+| GET / HEAD | `/api/workspace/read` | 读取**常规文件**：流式 + `Range`（206 / 416）+ `Content-Disposition: inline`；MIME 按扩展名猜（猜不出 = `application/octet-stream`，`text/*` 附 `charset=utf-8`）。符号链接跟随一次；目录 / FIFO / 设备一律 400（FIFO 会挂住读线程，设备是无界流）；`HEAD` 只回头（大小 / 类型 / Range 支持） |
+
+不变量与取舍（实现见 `service.py`，单测 + probe `test_workspace_files` 钉住）：
+
+- **只读**：没有写 / 上传 / 删除路径（写继续只走 agent）；全部操作是 scandir / lstat /
+  readlink / 常规文件 read。
+- **路径是提供方命名空间的绝对路径**：相对路径 400——不把「网关进程 cwd」这类本地细节
+  写进协议（远程实现里没有对应物）；`.` / `..` / 重复分隔符做**词法归一**（`abspath`，
+  不触盘、不解析符号链接），响应回显归一后的路径。
+- **条目类型**（`type`）：`file` / `dir` / `symlink` / `other`（lstat 口径）；`size` /
+  `mime` 只对常规文件有意义（其余为 `null`）；`mtime` 是 lstat 的 epoch 秒。
+- **错误面**：404（不存在）/ 403（无权限）/ 400（相对路径、NUL 字节、对非目录列举、
+  读非常规文件）/ 422（参数校验）；统一 `ErrorResponse` 形状。
+- **`read` 的安全响应头**：`X-Content-Type-Options: nosniff` 恒在；`text/html` /
+  `application/xhtml+xml` / `image/svg+xml` / XML 这些**浏览器会执行**的文档类型额外带
+  `Content-Security-Policy: sandbox`——渲染照常（HTML / SVG 可预览），但脚本被禁、资源
+  降成唯一源，防止「直接导航 / iframe 预览文件」把任意文件读升级成同源 XSS（能读
+  localStorage / 驱动 API 的那个源）。
+- **安全口径**：整流在鉴权面之后（反代 + HTTPS + 应用层鉴权 + 内网 VPC，"能过鉴权即
+  全权"），不做过度加固。本端点族没有"根约束"——它浏览的就是宿主文件系统，`..` 只是
+  普通导航，因此不存在"越出根"的穿越面；基本卫生落在：绝对路径校验、NUL 拒绝、词法
+  归一、列举 / 分页限幅（单页 ≤1000）、符号链接策略显式、错误文案克制（不带堆栈 /
+  不读文件内容）。RBAC：对 `tool_runtime` 默认关闭（allowlist 之外，403）；setup mode
+  下随其余端点一律 503。
+
 ## WebSocket 协议（`/ws`）
 
 握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是**双向**通道：
@@ -291,3 +328,45 @@ gateway:
 - key 用 `hmac.compare_digest` 常量时间比较；须为 ASCII 可打印字符（配置解析时校验）。
 - `auth_config` 每次请求读取最新配置单例，`/api/system/reload` 可即时生效。
 - **加密（TLS）由外部反向代理（nginx 等）负责**，应用层只做身份验证。
+
+## CORS（跨源访问）
+
+装配在 `gateway/cors.py`（中间件最外层——**预检不带凭据，必须就地应答**，不能先被鉴权拦下）。
+
+**部署口径：推荐同源部署**——前端静态文件与 API 走**同一个反向代理**（同源），该形态下
+CORS 完全不被用到、网关零配置（也是唯一的推荐形态；跨源只服务本机开发与边缘场景）。
+WebSocket（`/ws`）不受 CORS 约束，不需要也不提供任何跨源处理。
+
+| 来源 | 是否放通 | 说明 |
+|------|----------|------|
+| loopback（`http(s)://localhost` / `127.0.0.1` / `[::1]`，**任意端口**） | **默认放通**（网关自身绑 loopback 时） | CORS 规范不支持端口通配，实现用 host 谓词匹配、按请求回声具体 origin（`allow_origin_regex`）。只服务本机页面 / 开发服务器；注意 `file://` 页面的 Origin 是字面量 `null`，**不在**放通范围 |
+| 其它来源 | 默认不放通 | 写进 `gateway.cors.origins` 才生效（如 `https://ui.example.com`；写 `*` = 放开全部来源） |
+
+**loopback 回声有个前提**：网关自身绑在 loopback 地址（`gateway.host`）上。绑 `0.0.0.0` /
+外部地址是**远端可达**的部署，本机任意页面的跨源读权限随之关闭（那不是「本机开发」形态；
+需要就显式写 `origins`，loopback 来源也可以写进去）。
+
+- `allow_credentials` 恒 `false`（API key 走 header，不用 cookie）；允许的方法 / 头按前端
+  最小需求：`GET / POST / HEAD / OPTIONS` + `Authorization / Content-Type / X-API-Key / X-Client-Id`；
+  `Access-Control-Expose-Headers` 放通 `Content-Range / Content-Disposition / ETag / Accept-Ranges`
+  （Fetch 的 safelist 不含它们，跨源前端要读 Range / 文件名素材必须显式 expose）。
+  401 / 403 响应同样带 CORS 头，前端能读到错误体。
+- **生效域 = `restart`**：中间件在网关启动时装配，改 `gateway.cors.origins` 要重启网关
+  （保存回执的 `restart_required` 会点名 `gateway.cors.origins[i]`）。**setup 修复也一视同仁**：
+  配置坏掉后经保存事务**就地**转入正常模式（不重启进程）时，origins 仍是装配时的空值——
+  运行期重建中间件在 Starlette 里不可行，修复流程里刚写的外部来源仍需重启才生效。
+- 安全性：CORS 不是鉴权边界（能过鉴权即全权）。对**本机进程**这层默认不构成新权限
+  （不受同源策略约束，本就能直连 API）；对**页面**成立的边界变化与部署指引见下。
+
+**风险与部署指引（如实声明）**：默认放通 loopback + `auth.enabled=false` 的组合下，
+**本机 http(s) 服务上的页面**（任意端口的本地 dev server / 本地工具里的页面）可以 `fetch`
+读走宿主文件与 `~/.wing/core/config.yaml` 里的密钥——这是「本机开发便利」换来的代价
+（`file://` 打开的本地 HTML 不受影响：其 Origin 是 `null`，不在放通范围）。缓解：
+loopback 回声要求网关自身绑 loopback（见上），远端可达的部署默认就没有这层。因此：
+
+- **推荐同源部署**（前端与 API 同一个反向代理 + HTTPS + 鉴权），该形态下 CORS 不参与；
+- 网关**绑定非 loopback 地址**（`gateway.host: 0.0.0.0`）或**多用户 / 非本人可控的机器**上，
+  必须开 `gateway.auth`（或由反代在鉴权后面转发），否则 `/api/workspace/read` 是免鉴权的
+  任意文件读原语；
+- 网关不校验 `Host`（既有现状），DNS rebinding 类攻击不靠 CORS 挡住——别把裸网关
+  暴露到不可信网络。

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -42,13 +42,15 @@ class HttpCall:
     response: Any = None
     """解析后的 JSON 响应（非 JSON 响应为 None）。"""
     text: str = ""
-    """原始响应文本（截断到 ``HTTP_TEXT_LIMIT``）。"""
+    """响应文本摘要（至多 ``HTTP_TEXT_LIMIT``；字节流端点只解前缀，不做整包解码）。"""
     params: Mapping[str, Any] | None = None
     at: float = 0.0
     """相对 env 启动的单调时钟（秒）。"""
     duration_ms: float = 0.0
     detail: str | None = None
     """留档之外的补充说明（如"响应不是 JSON 对象"）。"""
+    response_headers: Mapping[str, str] = field(default_factory=dict)
+    """原始响应头（字节流端点 / Range 断言的素材；所有调用都留；键恒小写）。"""
 
     @property
     def ok(self) -> bool:
@@ -239,6 +241,25 @@ class DriverHttp(GatewayClient):
         )
         return payload
 
+    async def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> tuple[HttpCall, bytes]:
+        """低层口子：任意端点的留档调用，返回**原始字节**（非 2xx 抛错）。
+
+        与 ``request`` 的唯一区别是不做 JSON 解析——断言二进制响应 / Range 的
+        ``content-range`` 这类"载荷不是 JSON"的端点用它；响应头一并留在
+        ``HttpCall.response_headers``。
+        """
+        call, payload = await self._call(
+            method, path, params=params, headers=headers, parse_json=False
+        )
+        return call, payload
+
     async def _call(
         self,
         method: str,
@@ -247,6 +268,7 @@ class DriverHttp(GatewayClient):
         body: Any = None,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        parse_json: bool = True,
     ) -> tuple[HttpCall, Any]:
         """执行一次请求：留档（无论成败）→ 非 2xx 抛错。"""
         started = self._clock()
@@ -261,22 +283,29 @@ class DriverHttp(GatewayClient):
         duration_ms = (self._clock() - started) * 1000.0
         payload: Any = None
         detail: str | None = None
-        try:
-            payload = response.json()
-        except ValueError:
-            detail = "response body is not JSON"
+        if parse_json:
+            try:
+                payload = response.json()
+            except ValueError:
+                detail = "response body is not JSON"
+            text = _truncate(response.text, self._text_limit)
+        else:
+            payload = response.content
+            # 字节流端点只解前缀：大二进制不做整包解码（内存翻倍、留档还是乱码）。
+            text = response.content[: self._text_limit].decode("utf-8", "replace")
         call = self._record(
             HttpCall(
                 method=method.upper(),
                 path=path,
                 body=body if isinstance(body, dict) else None,
                 status=response.status_code,
-                response=payload,
-                text=_truncate(response.text, self._text_limit),
+                response=payload if parse_json else None,
+                text=text,
                 params=dict(params) if params is not None else None,
                 at=at,
                 duration_ms=duration_ms,
                 detail=detail,
+                response_headers=dict(response.headers),
             )
         )
         if not call.ok:

@@ -713,6 +713,26 @@ class AuthConfig(BaseModel):
         return None
 
 
+class CorsConfig(BaseModel):
+    """跨源访问（CORS）配置——异机 Web 前端接入面。"""
+
+    origins: list[str] = S(
+        doc="额外允许的跨源来源（loopback 默认放通）",
+        notes=(
+            "**推荐同源部署**：前端静态文件与 API 走同一个反向代理——该形态下 CORS\n"
+            "完全不被用到，这里保持为空即可。\n"
+            "默认放通 loopback 来源（http/https + localhost / 127.0.0.1 / [::1]，任意\n"
+            "端口；仅当网关自身绑 loopback 时——绑 0.0.0.0 / 外部地址的远端可达部署\n"
+            "默认不放通，要放就写进这里）；异机前端是**跨源**的，把它的来源写进来\n"
+            "（如 https://ui.example.com；写 * 会放开全部来源）。值必须与浏览器 Origin\n"
+            "**逐字一致**（带 scheme、无尾斜杠、无路径），否则静默不匹配。\n"
+            "**restart 域**：中间件在网关启动时装配，改完要重启。WebSocket 不受 CORS 约束。"
+        ),
+        apply=ApplyScope.RESTART,
+        default_factory=list,
+    )
+
+
 class GatewayConfig(BaseModel):
     host: str = S(
         doc="监听地址",
@@ -728,6 +748,11 @@ class GatewayConfig(BaseModel):
         doc="API key 鉴权配置",
         apply=ApplyScope.HOT,
         default_factory=AuthConfig,
+    )
+    cors: CorsConfig = S(
+        doc="跨源访问（异机 Web 前端）",
+        apply=ApplyScope.RESTART,
+        default_factory=CorsConfig,
     )
     remote_tool_timeout: float = S(
         doc="远程工具调用总超时（秒）",

@@ -50,7 +50,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 | `tool_result_truncate` | 超长工具结果截断（`max_length` / `keep_chars`，头尾保留 + 全文落临时文件） |
 | `images` | 图片读入与请求期保留预算（`max_bytes` 4718592（4.5 MiB）/ `max_images` -1（≤0 = **关闭计数驱逐**）/ `count_quantum` 8 / `request_budget_bytes` 37748736 / `evict_quantum_bytes` 18874368，除 `max_images` 外全部 > 0）——读图链路与投影算法见 [media-images.md](media-images.md) |
 | `log.level` | 网关**控制台**级别（守护进程 stdout/stderr，被 `gateway.log` 捕获）保存即热生效；每日文件日志恒为 DEBUG |
-| `gateway` | `host` / `port`（**restart 域**：改完需重启网关，不做假热更）/ `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`；保存即热生效） |
+| `gateway` | `host` / `port`（**restart 域**：改完需重启网关，不做假热更）/ `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`；保存即热生效）/ `cors`（`origins`：额外允许的跨源来源，**restart 域**；loopback 默认放通——仅当网关自身绑 loopback，见 [http-api.md](http-api.md)「CORS」） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |
 | `user_agent.preset` | HTTP User-Agent 预设（`opencode` / `qwen-code`） |
 | `sessions` | `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取））。**存储路径不是配置字段**：`WING_SESSIONS_PATH` env > `$WING_HOME/core/sessions` |

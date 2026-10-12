@@ -266,6 +266,8 @@ class TestSetupGuard:
                 ("/api/agents", "GET"),
                 ("/api/commands", "GET"),
                 ("/api/tools", "GET"),
+                ("/api/workspace/roots", "GET"),
+                ("/api/workspace/list", "GET"),
                 ("/api/system/reload", "POST"),
             ):
                 resp = tc.request(method, blocked, json={})

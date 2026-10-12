@@ -235,6 +235,21 @@ def test_list_element_template(kinds: dict[str, SettingNode]) -> None:
     assert node.element.order == 0
 
 
+def test_scalar_element_template_inherits_declared_apply() -> None:
+    """标量元素模板继承列表声明的 ``apply``（对象 / 联合形态不继承）。
+
+    `restart_required_paths` 解析的正是元素路径（如 `gateway.cors.origins[0]`）——
+    元素 apply 若是合成的 `hot`，`apply=restart` 的标量列表变更会被静默漏报。
+    """
+    catalog = build_catalog()
+    element = _by_path(catalog, "gateway.cors.origins[]")
+    assert element.kind is SettingKind.STR
+    assert element.apply is ApplyScope.RESTART
+    # 对象元素（providers[]）：子字段各自有声明，元素取子树最粗——不随列表声明走。
+    assert _by_path(catalog, "providers[]").apply is ApplyScope.NEXT_SESSION
+    assert _by_path(catalog, "agents[].tools[]").apply is ApplyScope.NEXT_SESSION
+
+
 def test_union_list_yields_variants(kinds: dict[str, SettingNode]) -> None:
     node = kinds["a_union_list"]
     assert node.kind is SettingKind.LIST
@@ -449,9 +464,9 @@ def test_images_defaults_are_pinned() -> None:
 
 
 def test_declared_field_scale_matches_01_report() -> None:
-    """规模断言：声明字段总数 = 68（01 报告的迁移字段数）；路径不重复。"""
+    """规模断言：声明字段总数 = 70（01 报告的 68 + 后续新增的 gateway.cors 两项）；路径不重复。"""
     declared = _declared(build_catalog())
-    assert len(declared) == 68
+    assert len(declared) == 70
     paths = [node.path for node in declared]
     assert len(set(paths)) == len(paths)
 

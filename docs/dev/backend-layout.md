@@ -82,7 +82,8 @@
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |
 | `system.py`（原 `runtime.reload_system`） | L4 | 系统级热重载流程（config → hooks → commands → provider → skills & rules → log level；名字序是对外契约） |
 | `background.py` | L4 | BackgroundScheduler：周期任务宿主（逐出、未来的 dreaming 等） |
-| `gateway/` | L4 | FastAPI 网关：HTTP 路由 + WS 事件流 + 鉴权 + 远程工具宿主 + setup mode 守门（`setup_guard.py`，503 `error="setup_mode"`） |
+| `gateway/` | L4 | FastAPI 网关：HTTP 路由 + WS 事件流 + 鉴权 + 远程工具宿主 + setup mode 守门（`setup_guard.py`，503 `error="setup_mode"`）+ CORS 装配（`cors.py`） |
+| `gateway/workspace/` | L4 | 只读工作区文件浏览（`service` 本地 provider 实现 / `protocol` wire 模型 / `routes` 端点，自含子包——不 import 会话 / runtime，拆 Gateway 时原样带走） |
 | `__init__.py` | — | 包入口；**不得 import 任何 wing 子模块**（R6：顶层无副作用，组合根负责显式装配） |
 
 ## 3. 迁移映射（历史记录：旧路径 → 新路径）

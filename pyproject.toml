@@ -96,6 +96,7 @@ ignore_names = ["model_config", "relpath", "side_effect", "pytestmark"]
 ignore_decorators = [
     "@router.get",
     "@router.post",
+    "@router.api_route",
     "@router.websocket",
     "@app.exception_handler",
     "@field_validator",

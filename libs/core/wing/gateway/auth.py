@@ -37,6 +37,8 @@ EXEMPT_PATHS: set[str] = {"/api/health"}
 # loopback 主机名：**修复模式**（setup mode）免 key 的判据。HTTP 侧以
 # ``request.client.host`` 判定，WS 侧同义复用（``websocket.client.host``）。
 # 三种拼写覆盖 uvicorn 在本机监听时的全部常见来源（IPv4 / IPv6 / 名字）。
+# 第二个消费方：CORS 的 loopback 默认放通（``gateway/cors.py`` 只在网关自身绑
+# loopback 时启用 host 谓词）——语义同为「这个地址是不是 loopback」。
 LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 # ── 身份角色 ─────────────────────────────────────────────────

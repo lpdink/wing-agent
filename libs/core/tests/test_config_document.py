@@ -1034,6 +1034,14 @@ class TestRestartRequiredPaths:
         assert restart_required_paths(["providers[0].models[0].id"], _catalog()) == []
         assert restart_required_paths(["providers[0].name"], _catalog()) == []
 
+    def test_scalar_list_element_is_reported(self):
+        """标量列表变更的路径是元素路径（`origins[0]`）；元素继承列表声明的 apply。"""
+        assert restart_required_paths(["gateway.cors.origins[0]"], _catalog()) == [
+            "gateway.cors.origins[0]"
+        ]
+        assert restart_required_paths(["agents[0].tools[0]"], _catalog()) == []
+        assert restart_required_paths(["commands.paths[0]"], _catalog()) == []
+
 
 # ============================================================
 # 路径文法（三变体，与 02 的 parse_path 同一口径）

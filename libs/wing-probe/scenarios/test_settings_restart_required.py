@@ -16,11 +16,12 @@
 from __future__ import annotations
 
 import socket
+from collections.abc import Mapping
 
 import pytest
 import yaml
 
-from wing_probe import Probe, reserve_port
+from wing_probe import DriverHttp, DriverHttpError, Probe, reserve_port
 
 #: 热重载六项（R3：`log level` 追加在末尾）。
 RELOAD_ITEMS = [
@@ -103,3 +104,64 @@ async def test_port_change_needs_a_restart_and_does_not_rebind(probe: Probe) -> 
     # 保存是真的：盘上文件里是新端口。
     written = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
     assert written["gateway"]["port"] == new_port, written["gateway"]
+
+
+#: 一个新加的跨源来源（loopback 之外；默认不放通）。
+CORS_ORIGIN = "https://ui.probe.example"
+
+
+async def _preflight_headers(
+    http: DriverHttp, headers: dict[str, str]
+) -> Mapping[str, str]:
+    """一次 CORS 预检的响应头。
+
+    未放通时 ``CORSMiddleware`` **就地**回 ``400 "Disallowed CORS origin"``（无
+    ACAO；不落路由），放通时 200 + 回声——两条路径都要拿到响应头，所以捕获
+    ``DriverHttpError``。
+    """
+    try:
+        call, _ = await http.request_raw(
+            "OPTIONS", "/api/workspace/list", headers=headers
+        )
+    except DriverHttpError as exc:
+        return exc.call.response_headers
+    return call.response_headers
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_cors_origins_change_names_the_restart_path(probe: Probe) -> None:
+    """改 ``gateway.cors.origins`` → 回执点名元素路径；运行中的网关不做假热更。
+
+    CORS 中间件在 app 装配（进程启动）时读配置——保存事务写文件 + 在
+    ``restart_required`` 里点名，运行中的网关**不放通新来源**。元素路径
+    （``origins[0]``）也要被点名：标量列表元素继承列表声明的生效域，否则这条
+    信号会被静默吞掉（面板的 Ctrl+R 提示因此永远不出现）。
+
+    「重启后真的生效」由单测覆盖（``test_gateway_cors.py`` 用配置文件构造 app，
+    预检放通新来源）；probe 侧不重启——``ProbeEnv`` 重启会按旋钮重新生成配置，
+    文件里的保存结果不跨重启保留，这是 env 的已知语义。
+    """
+    http = probe.driver_required.http
+    current = await http.request("GET", "/api/settings/get")
+    document = current["values"]
+    document.setdefault("gateway", {})["cors"] = {"origins": [CORS_ORIGIN]}
+
+    receipt = await http.request(
+        "POST",
+        "/api/settings/set",
+        body={"base": current["fingerprint"], "document": document},
+    )
+    assert receipt["ok"] is True, receipt
+    assert receipt["changed"] == ["gateway.cors.origins[0]"], receipt["changed"]
+    assert receipt["restart_required"] == ["gateway.cors.origins[0]"], receipt
+    assert receipt["reload"]["ok"] is True, receipt["reload"]
+
+    # 假热更的负向证据：运行中的网关仍不放通新来源（预检就地吃 400，无 ACAO）。
+    preflight = {"Origin": CORS_ORIGIN, "Access-Control-Request-Method": "GET"}
+    headers = await _preflight_headers(http, preflight)
+    assert headers.get("access-control-allow-origin") is None, dict(headers)
+
+    # 保存是真的：盘上文件里已经有新来源（生效时机才是重启）。
+    written = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
+    assert written["gateway"]["cors"]["origins"] == [CORS_ORIGIN], written["gateway"]
