@@ -100,9 +100,10 @@ describe('tool display', () => {
   });
 
   it('falls back to key=value pairs for unknown tools', () => {
-    expect(toolDisplay('MysteryTool', { prompt: 'find things', description: 'skip me' })).toEqual({
+    // `description` is not special-cased: it may be the tool's own field.
+    expect(toolDisplay('MysteryTool', { prompt: 'find things', description: 'shown too' })).toEqual({
       title: 'MysteryTool',
-      subject: 'prompt=find things',
+      subject: 'prompt=find things description=shown too',
     });
     expect(toolDisplay('MysteryTool', null).subject).toBe('');
   });

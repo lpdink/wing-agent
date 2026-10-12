@@ -142,9 +142,12 @@ class ToolRegistry:
                     )
                 )
 
-            if add_description:
+            if add_description and not any(
+                p.name == "description" for p in tool_params
+            ):
                 # 名用 description 对齐 Claude Code：模型惯于自发填这个字段，
-                # 部分第三方集成也只认这个名字。
+                # 部分第三方集成也只认这个名字。工具自带同名参数时让位——
+                # 追加会在 to_openai() 里按名覆盖掉它自己的 schema。
                 description_param = ToolParam(
                     name="description",
                     type="string",

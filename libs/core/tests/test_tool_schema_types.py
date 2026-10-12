@@ -151,3 +151,23 @@ class TestDecoratorParamTable:
         assert registered is not None
         assert [p.name for p in registered.params] == ["query", "description"]
         assert registered.params[-1].default == ""
+
+    def test_add_description_defers_to_authored_description_param(self):
+        reg = _registry()
+
+        @reg.register(name="T", add_description=True)
+        async def tool(title: str, description: str) -> str:
+            """Doc."""
+            return title
+
+        registered = reg.resolve("T")
+        assert registered is not None
+        # 工具自己声明的那条留下（无默认值 → required），自动追加的那条让位
+        # （default="" 且带固定说明文案）——同名的两条会在 to_openai() 里互相覆盖。
+        assert [(p.name, p.default) for p in registered.params] == [
+            ("title", None),
+            ("description", None),
+        ]
+        parameters = registered.to_openai()["function"]["parameters"]
+        assert parameters["required"] == ["title", "description"]
+        assert "default" not in parameters["properties"]["description"]

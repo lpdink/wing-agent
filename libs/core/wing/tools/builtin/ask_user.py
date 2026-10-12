@@ -150,9 +150,7 @@ def _normalize_question(raw: Any, index: int) -> AskQuestion:
     )
 
 
-@tool_registry.register(
-    name="AskUserQuestion", add_description=False, params=[_QUESTIONS_PARAM]
-)
+@tool_registry.register(name="AskUserQuestion", params=[_QUESTIONS_PARAM])
 async def ask_user(
     questions: list[dict],
     ctx: ToolContext,

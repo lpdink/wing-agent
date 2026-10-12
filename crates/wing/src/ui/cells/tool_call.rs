@@ -897,13 +897,16 @@ impl ToolCallBlock {
 
 /// Fallback args summary for unknown tools (key=value pairs, truncated).
 ///
+/// Renders every arg as-is: no per-name denylist. A `description` arg may be a
+/// remote tool's own meaningful field, not the auto-added slot (that one only
+/// ever rides on `Bash`, which has its own renderer and never lands here).
+///
 /// Returns the summary WITHOUT a leading space — caller controls spacing.
 fn fallback_args_summary(args: &serde_json::Value) -> String {
     match args {
         serde_json::Value::Object(map) => {
             let parts: Vec<String> = map
                 .iter()
-                .filter(|(k, _)| k.as_str() != "description")
                 .map(|(k, v)| {
                     let val = match v {
                         serde_json::Value::String(s) => truncate_by_chars(s, 50),
@@ -1475,10 +1478,9 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_hides_description_param() {
-        // The schema's optional `description` param (auto-added for Bash-like
-        // tools) is style noise in the key=value summary — hidden there, while
-        // every other arg still shows.
+    fn test_fallback_shows_every_arg() {
+        // No per-name denylist: a `description` arg renders like any other
+        // (it may be the tool's own field, not the auto-added slot).
         let block = ToolCallBlock::new(
             "CustomTool".into(),
             json!({"command": "ls", "description": "list files"}),
@@ -1486,7 +1488,10 @@ mod tests {
         );
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(text.contains("command=ls"), "missing fallback args: {text}");
-        assert!(!text.contains("description"), "description leaked: {text}");
+        assert!(
+            text.contains("description=list files"),
+            "description must render: {text}"
+        );
     }
 
     #[test]

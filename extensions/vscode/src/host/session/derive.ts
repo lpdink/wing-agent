@@ -137,7 +137,14 @@ const TOOL_NAMES = {
   todo: 'TodoWrite',
 } as const;
 
-/** Fallback args summary for unknown tools: `key=value` pairs, truncated. */
+/**
+ * Fallback args summary for unknown tools: `key=value` pairs, truncated.
+ *
+ * Every arg renders as-is — no per-name denylist. A `description` arg may be a
+ * remote tool's own field, not the auto-added slot (that one only ever rides
+ * on `Bash`, which has its own renderer and never lands here). Mirrors the
+ * TUI's `fallback_args_summary`.
+ */
 export function fallbackArgsSummary(args: JsonValue | null): string {
   const object = asObject(args);
   if (object === null) {
@@ -145,9 +152,6 @@ export function fallbackArgsSummary(args: JsonValue | null): string {
   }
   const parts: string[] = [];
   for (const [key, value] of Object.entries(object)) {
-    if (key === 'description') {
-      continue;
-    }
     const rendered = typeof value === 'string' ? value : JSON.stringify(value);
     parts.push(`${key}=${truncateChars(rendered, 50)}`);
   }
