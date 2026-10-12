@@ -920,6 +920,8 @@ mod tests {
                 name: "dfmodel".into(),
                 display_name: Some("DeepSeek-Flash".into()),
                 description: None,
+                context_window_tokens: None,
+                keep_recent_tokens: None,
                 capabilities: Default::default(),
             }],
         }
@@ -963,6 +965,8 @@ mod tests {
                 name: "plain".into(),
                 display_name: None,
                 description: None,
+                context_window_tokens: None,
+                keep_recent_tokens: None,
                 capabilities: Default::default(),
             }],
         }];

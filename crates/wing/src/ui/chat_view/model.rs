@@ -1800,6 +1800,8 @@ mod tests {
                     name: "m".into(),
                     display_name: None,
                     description: None,
+                    context_window_tokens: None,
+                    keep_recent_tokens: None,
                     capabilities: Default::default(),
                 }],
             }],

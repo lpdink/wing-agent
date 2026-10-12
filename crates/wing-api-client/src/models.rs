@@ -483,8 +483,9 @@ pub struct ModelCapabilities {
 /// 字段即线格式：`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给
 /// 上游的调用名，`display_name` 可空（展示层回落 `name`）。
 ///
-/// `display_name` / `description` / `capabilities` 都可能在部分覆盖的响应里缺席，
-/// 解码必须容忍——**缺省不影响任何一份数据行**。
+/// `display_name` / `description` / `capabilities` / `context_window_tokens` /
+/// `keep_recent_tokens` 都可能在部分覆盖的响应里缺席，解码必须容忍——**缺省不影响
+/// 任何一份数据行**。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelDetail {
     /// 全局唯一引用词（Apply / 匹配 / 上报一律用它）。
@@ -496,6 +497,12 @@ pub struct ModelDetail {
     pub display_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// 生效的上下文窗口 / 压缩保留区（token）——模型声明是唯一配置来源。
+    /// 旧网关不发这两个字段 → `None`（客户端不替网关猜默认值）。
+    #[serde(default)]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default)]
+    pub keep_recent_tokens: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_capabilities")]
     pub capabilities: ModelCapabilities,
 }
@@ -1498,7 +1505,8 @@ mod tests {
     // ── /api/models 目录（对象数组 + id 引用词） ──────
 
     /// 现行网关的形状：对象数组，`id` / `name` / `display_name` / `description` /
-    /// `capabilities`；`display_name: null` / 缺 `description` / 缺 `capabilities` 全部容忍。
+    /// `context_window_tokens` / `keep_recent_tokens` / `capabilities`；
+    /// `display_name: null` / 缺 `description` / 缺窗口 / 缺 `capabilities` 全部容忍。
     #[test]
     fn models_response_decodes_the_object_array_with_ids() {
         let json = r#"{
@@ -1507,7 +1515,8 @@ mod tests {
                 "models": [
                     {"id": "dfmodel", "name": "dfmodel", "display_name": null,
                      "description": null, "capabilities": null},
-                    {"id": "ds-flash", "name": "dfmodel-2026", "display_name": "DeepSeek-Flash"},
+                    {"id": "ds-flash", "name": "dfmodel-2026", "display_name": "DeepSeek-Flash",
+                     "context_window_tokens": 128000, "keep_recent_tokens": 16000},
                     {"id": "bare", "name": "bare"}
                 ]
             }]
@@ -1516,12 +1525,14 @@ mod tests {
         let group = &resp.providers[0];
         assert_eq!(group.models.len(), 3);
 
-        // null display_name / capabilities → 回落调用名 / vision=false。
+        // null display_name / capabilities → 回落调用名 / vision=false；旧网关不发窗口 → None。
         let first = &group.models[0];
         assert_eq!(first.id, "dfmodel");
         assert_eq!(first.name, "dfmodel");
         assert_eq!(first.display_name, None);
         assert_eq!(first.description, None);
+        assert_eq!(first.context_window_tokens, None);
+        assert_eq!(first.keep_recent_tokens, None);
         assert!(!first.capabilities.vision);
         assert_eq!(first.display_label(), "dfmodel");
 
@@ -1531,6 +1542,13 @@ mod tests {
         assert_eq!(second.display_name.as_deref(), Some("DeepSeek-Flash"));
         assert_eq!(second.display_label(), "DeepSeek-Flash");
         assert_eq!(group.label_for("ds-flash"), "DeepSeek-Flash");
+
+        // 窗口字段如实解析（生效值由网关给出，客户端不猜默认）。
+        assert_eq!(second.context_window_tokens, Some(128_000));
+        assert_eq!(second.keep_recent_tokens, Some(16_000));
+        let third = group.find("bare").expect("id lookup");
+        assert_eq!(third.context_window_tokens, None);
+        assert_eq!(third.keep_recent_tokens, None);
 
         // 未命中：`find` = None，`label_for` 回落 id 本身。
         assert!(group.find("nope").is_none());
