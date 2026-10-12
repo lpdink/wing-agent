@@ -761,6 +761,32 @@ def test_bind_model_windows_respects_explicit_declarations() -> None:
     ) == ["probe/bare"]
 
 
+def test_window_knobs_must_form_a_valid_pair() -> None:
+    """单侧偏离会生成非法声明（后端拒绝、网关落 setup mode）——探针侧直接报错。"""
+    with pytest.raises(ProbeEnvError, match="must be greater than"):
+        ProbeEnv(
+            Path("/tmp/never-starts"),
+            context_window_tokens=1000,
+            keep_recent_tokens=DEFAULT_KEEP_RECENT_TOKENS,
+        )
+    with pytest.raises(ProbeEnvError, match="must be greater than"):
+        bind_model_windows(
+            ["probe/bare"],
+            context_window_tokens=1000,
+            keep_recent_tokens=DEFAULT_KEEP_RECENT_TOKENS,
+        )
+
+
+def test_bind_model_windows_rejects_pairs_it_cannot_merge() -> None:
+    """显式声明的小窗口 + 旋钮合并进去的保留区同样要拦住（不产出坏配置）。"""
+    with pytest.raises(ProbeEnvError, match="invalid window pair"):
+        bind_model_windows(
+            [{"name": "probe/small", "context_window_tokens": 300}],
+            context_window_tokens=1000,
+            keep_recent_tokens=400,
+        )
+
+
 @pytest.mark.asyncio
 async def test_restart_gateway_refuses_stopped_env(tmp_path: Path) -> None:
     """重启是"活环境"的操作：已 stop 的实例直接报错（单向闸门不破）。"""

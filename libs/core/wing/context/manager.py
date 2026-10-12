@@ -46,12 +46,13 @@ class ContextManager:
             session_id: Session 标识符（只读，不用于生成或路径计算）
             messages: TrackedList 混合链（Message + 事件节点，外部创建）
             system_prompt: 系统提示词
-            compactor: 压缩助手（必填）
+            compactor: 压缩助手原型（必填；本 CM 持有**独立副本**——模板 / 兄弟会话
+                共享同一个 Compactor 对象，换模型改写阈值必须只影响本会话）
             skills_patterns: Skills glob 模式列表
             rules_patterns: Rules glob 模式列表
             workspace: 工作目录，相对路径的 patterns 基于此解析
         """
-        self.compactor = compactor
+        self.compactor = compactor.copy() if compactor is not None else None
         self.setin_system_prompt = system_prompt
 
         self._session_id = session_id

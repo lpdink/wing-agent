@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from wing.common.logger import log
 from wing.config import (
     ModelCapabilities,
+    ModelSpec,
     get_config,
     resolve_model_capabilities,
     resolve_model_display_name,
@@ -68,6 +69,19 @@ _REFERENT_AWAITABLES: tuple[type, ...] = (
     types.AsyncGeneratorType,
     types.GeneratorType,
 )
+
+
+def _find_model_spec(provider_name: str, model: str) -> ModelSpec | None:
+    """按 (provider, 调用名) 查目录里的模型声明；provider 已从配置移除时返回 None。
+
+    目录数据一律从 ``get_config()`` 读（模型级窗口 / 能力的唯一来源；provider
+    池按设计不持有第二份目录快照）——切换目标不可查时不拦切换、也不改阈值。
+    """
+    try:
+        provider_cfg = get_config().get_provider(provider_name)
+    except ValueError:
+        return None
+    return provider_cfg.find_model(model)
 
 
 def _worker_frames(worker: asyncio.Task[Any], *, limit: int = 8) -> str:
@@ -443,16 +457,20 @@ class WingAgent:
         获取，无需传播。
 
         生效窗口 / 压缩保留区随目标模型的声明重绑定（模型级是唯一配置来源）；
-        目标模型未声明（id 已从配置删除的恢复路径）时保持现值。
+        目标模型未声明（id 已从配置删除的恢复路径 / provider 已移除）时保持现值。
         """
         if provider_name is not None and provider_name != self._provider_name:
-            provider = get_provider(provider_name)  # 校验（不可解析 → raise，状态不变）
-        else:
-            provider = self.model_provider
-        spec = provider.config.find_model(model)
-        compactor = self.context_manager.compactor
-        if spec is not None and compactor is not None:
-            compactor.set_window(spec.context_window_tokens, spec.keep_recent_tokens)
+            get_provider(provider_name)  # 校验（不可解析 → raise，状态不变）
+        target_provider = (
+            provider_name if provider_name is not None else self._provider_name
+        )
+        spec = _find_model_spec(target_provider, model)
+        if spec is not None:
+            compactor = self.context_manager.compactor
+            if compactor is not None:
+                compactor.set_window(
+                    spec.context_window_tokens, spec.keep_recent_tokens
+                )
         if provider_name is not None:
             self._provider_name = provider_name
         self.model = model

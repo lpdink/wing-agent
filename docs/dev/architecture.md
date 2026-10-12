@@ -322,7 +322,7 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
   - **不上链**：活跃链由 tip 沿 `parent_uuid` 回溯自然得出——压缩节点是根（`parent_uuid=None` + `unzip_last_uuid` 指向区间末），已摘要内容不复活；选压缩**之前**的节点时压缩节点被切在前缀之外，子会话里压缩仿佛没发生过。
   没有链遍历（`walk_full_chain` / `trace_chain` 都退出 fork 路径）：活跃链是加载语义的**结果**，不是拷贝时要算的东西。
 - **压缩节点的 `unzip_last_uuid` 是唯一编码**：任何复制 / 重链路径都必须把它带上——丢了，被压缩区间（乃至整段历史）就从 `/rewind`、`/fork` 候选里消失。已覆盖的两条路径：fork（记录前缀拷贝 + 全量重映射，见上）与 rewind（回退行复制 parent 时带上，回退到"压缩后第一条消息"不再塌候选）。
-- 压缩双阈值（`context_window_tokens` 触发应用、`keep_recent_tokens` 是保留区）是**模型级声明**（`providers[].models[]`，唯一配置来源）：会话构造与换模型时解析进 `Compactor`——生效窗口跟随当前模型，`/api/session/info` 的 `context_window_tokens` 即此刻的生效值；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。
+- 压缩双阈值（`context_window_tokens` 触发应用、`keep_recent_tokens` 是保留区）是**模型级声明**（`providers[].models[]`，唯一配置来源）：会话构造与换模型时解析进 `Compactor`——生效窗口跟随当前模型，`/api/session/info` 的 `context_window_tokens` 即此刻的生效值；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。换模型只改后续判定：已生成的 pending compact 是链快照的预计算（切点算好、uuid 自校验），换窗口不重算它，apply 只看新窗口。
 
 **KV cache 的已知边界（有意不处理）**：
 

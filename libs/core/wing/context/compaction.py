@@ -121,6 +121,10 @@ class Compactor:
         self.keep_recent_tokens = keep_recent_tokens
         self.compact_window_tokens = context_window_tokens - keep_recent_tokens
 
+    def copy(self) -> "Compactor":
+        """独立副本——每个会话持有自己的阈值（换模型只改本会话）。"""
+        return Compactor(self.context_window_tokens, self.keep_recent_tokens)
+
     # ── Token 估算 ──────────────────────────────
 
     def _estimate_tokens(self, messages: list[Message]) -> int:

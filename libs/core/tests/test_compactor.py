@@ -102,6 +102,20 @@ class TestCompactorInit:
         assert c.keep_recent_tokens == 20_000
         assert c.compact_window_tokens == 80_000
 
+    def test_copy_is_independent(self):
+        """副本各自持有阈值：改写副本不影响原件（每会话一份的隔离语义）。"""
+        original = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        clone = original.copy()
+        assert clone is not original
+        assert (clone.context_window_tokens, clone.keep_recent_tokens) == (
+            100_000,
+            20_000,
+        )
+        clone.set_window(context_window_tokens=1_000, keep_recent_tokens=400)
+        assert original.context_window_tokens == 100_000
+        assert original.keep_recent_tokens == 20_000
+        assert clone.compact_window_tokens == 600
+
 
 # ===================================================================
 # 2. Threshold Methods

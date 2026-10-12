@@ -92,16 +92,20 @@ class ModelSpec(BaseModel):
         doc="上下文窗口 token 上限",
         notes=(
             "达到后触发压缩（双阈值：窗口 − 保留区启动后台压缩，窗口换入结果）。\n"
+            "必须大于 keep_recent_tokens（加载期与设置面板共用同一校验）。\n"
             "模型级是唯一配置来源：生效窗口与压缩行为跟随**当前模型**，"
             "会话换模型即换阈值。"
         ),
         apply=ApplyScope.NEXT_SESSION,
         default=DEFAULT_CONTEXT_WINDOW_TOKENS,
+        gt=0,
     )
     keep_recent_tokens: int = S(
         doc="压缩后保留的近期 token 数",
+        notes="必须小于 context_window_tokens。",
         apply=ApplyScope.NEXT_SESSION,
         default=DEFAULT_KEEP_RECENT_TOKENS,
+        ge=0,
     )
     capabilities: ModelCapabilities = S(
         doc="能力声明（未声明 = 全 false 的安全默认）",

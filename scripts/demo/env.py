@@ -28,6 +28,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "libs" / "wing-probe"))
 
 from wing_probe.env import (  # noqa: E402
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
     render_config_yaml,
     reserve_port,
     resolve_gateway_bin,
@@ -70,7 +71,7 @@ def write_config(
     display_name: str | None = None,
     system_prompt: str,
     tools: tuple[str, ...] = TOOLS,
-    context_window_tokens: int = 256_000,
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
     log_level: str = "INFO",
 ) -> Path:
     """写 ``$WING_HOME/core/config.yaml``：provider 指向假 Provider，agent 预置。"""

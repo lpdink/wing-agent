@@ -285,6 +285,21 @@ def resolve_model_declarations(
     return declared
 
 
+def check_window_knobs(context_window_tokens: int, keep_recent_tokens: int) -> None:
+    """旋钮必须是一对合法值（窗口 > 保留区）——写进模型声明前先拦。
+
+    单侧偏离（如只压小窗口而保留区仍是默认 50000）会生成后端拒绝的声明，那会让
+    网关以 setup mode 起来、场景报一个与真实原因无关的错；这里直接报错，而不是
+    产出坏配置。
+    """
+    if context_window_tokens <= keep_recent_tokens:
+        raise ProbeEnvError(
+            "context_window_tokens must be greater than keep_recent_tokens: "
+            f"{context_window_tokens} <= {keep_recent_tokens} — pass both knobs "
+            "as a valid pair (the probe writes them into the model declarations)"
+        )
+
+
 def bind_model_windows(
     declarations: Sequence[str | Mapping[str, Any]],
     *,
@@ -297,7 +312,10 @@ def bind_model_windows(
     时，为每条**尚未自行声明**窗口的模型补上这两个键；显式声明过窗口的条目原样保留
     （场景要对不同模型给不同阈值时自己写 spec）。旋钮保持默认值时不写——生成的配置
     形态与历史一致，而产品默认本来就是同一份数字。
+
+    旋钮对的合法性由 :func:`check_window_knobs` 先拦（单侧偏离的坏配置不会产出）。
     """
+    check_window_knobs(context_window_tokens, keep_recent_tokens)
     if (
         context_window_tokens == DEFAULT_CONTEXT_WINDOW_TOKENS
         and keep_recent_tokens == DEFAULT_KEEP_RECENT_TOKENS
@@ -317,6 +335,14 @@ def bind_model_windows(
         merged = dict(entry)
         merged.setdefault("context_window_tokens", context_window_tokens)
         merged.setdefault("keep_recent_tokens", keep_recent_tokens)
+        window = merged["context_window_tokens"]
+        keep = merged["keep_recent_tokens"]
+        if isinstance(window, int) and isinstance(keep, int) and window <= keep:
+            raise ProbeEnvError(
+                f"model declaration has an invalid window pair (context_window_tokens "
+                f"{window} <= keep_recent_tokens {keep}): {merged!r} — the window "
+                "knobs must not be merged into a declaration they cannot hold"
+            )
         bound.append(merged)
     return bound
 
@@ -606,6 +632,7 @@ class ProbeEnv:
                     f"config_text replaces the generated config.yaml, so these "
                     f"generation knobs would be silently ignored: {', '.join(conflicts)}"
                 )
+        check_window_knobs(context_window_tokens, keep_recent_tokens)
         self.root = Path(root).expanduser().resolve()
         self.wing_home = self.root / "wing_home"
         self.sessions_path = self.root / "sessions"

@@ -144,10 +144,11 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 @pytest.mark.probe_env(context_window_tokens=1000, keep_recent_tokens=400)
 #   → providers[0].models[]（模型声明是这两个值的唯一来源）：压缩双阈值——
-#   early trigger = 窗口 − 保留区、apply = 窗口。旋钮偏离产品默认值时写进每条
-#   **未自行声明窗口**的模型（场景要按模型给不同阈值时直接在 models 里写）；
-#   保持默认值时不动声明形态。自动压缩场景把它压到千级，让 early / apply 在
-#   几轮内确定性触发。
+#   early trigger = 窗口 − 保留区、apply = 窗口。旋钮必须是一对合法值（窗口 >
+#   保留区，否则探针直接报错——单侧偏离会生成网关拒绝的声明）；偏离产品默认
+#   值时写进每条**未自行声明窗口**的模型（场景要按模型给不同阈值时直接在
+#   models 里写）；保持默认值时不动声明形态。自动压缩场景把它压到千级，让
+#   early / apply 在几轮内确定性触发。
 
 @pytest.mark.probe_env(images={"max_images": 3, "count_quantum": 2})
 #   → 顶层 images: 段：读图保留预算/高水位（压小阈值即得确定性的驱逐断言）。
