@@ -5,7 +5,8 @@
 - 存量字符串形态零修改可用；对象形态携带 display_name / description / capabilities；
 - 未声明能力 = 全 false（安全默认，不做名字启发式）；
 - 同一 provider 内实际调用名不得重复（对象/字符串混排也查）；
-- ``image_max_bytes`` 与 ``images.*`` 非法值在解析期报错。
+- ``image_max_bytes`` 与 ``images.*`` 非法值在解析期报错（``max_images`` 例外：
+  ``<= 0`` = 关闭计数驱逐，是合法配置）。
 
 id 空间（``ModelSpec.id`` / 全局唯一 / 解析入口）的测试见 ``test_model_catalog.py``。
 """
@@ -221,7 +222,7 @@ class TestImagesConfig:
         provider = _provider(models=["m"])
         assert _config(provider).images == ImagesConfig(
             max_bytes=4_718_592,
-            max_images=32,
+            max_images=-1,
             count_quantum=8,
             request_budget_bytes=37_748_736,
             evict_quantum_bytes=18_874_368,
@@ -246,7 +247,6 @@ class TestImagesConfig:
         "field",
         [
             "max_bytes",
-            "max_images",
             "count_quantum",
             "request_budget_bytes",
             "evict_quantum_bytes",
@@ -256,3 +256,8 @@ class TestImagesConfig:
     def test_non_positive_values_rejected(self, field, value):
         with pytest.raises(ValidationError):
             ImagesConfig(**{field: value})
+
+    @pytest.mark.parametrize("value", [0, -1, -100])
+    def test_max_images_non_positive_is_disabled_not_rejected(self, value):
+        """``max_images <= 0`` = 关闭计数驱逐（默认 -1），不是误配。"""
+        assert ImagesConfig(max_images=value).max_images == value

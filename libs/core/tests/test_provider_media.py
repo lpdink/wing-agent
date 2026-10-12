@@ -32,6 +32,7 @@ from wing.provider.media import (
     UNAVAILABLE_PLACEHOLDER,
     plan_for_request,
     resolve_image_delivery,
+    resolve_media_policy,
 )
 from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import LLMResponse, MediaRef, Message, ToolUseBlock
@@ -873,6 +874,17 @@ class TestPlanForRequest:
             msgs, provider_cfg=openai_cfg(), model=VISION_MODEL, policy=policy
         )
         assert [p.kept for p in plans] == [False, False, True]
+
+    def test_config_default_disables_count_eviction(self):
+        """配置默认（``images.max_images = -1``）→ 计数驱逐关闭：40 张图全保留。"""
+        assert resolve_media_policy().max_images == -1
+        data = [png_bytes(4, 4, bytes([i])) for i in range(40)]
+        msgs = [
+            Message(role="tool", tool_call_id=f"c{i}", content="e", media=[make_ref(d)])
+            for i, d in enumerate(data)
+        ]
+        plans = plan_for_request(msgs, provider_cfg=openai_cfg(), model=VISION_MODEL)
+        assert all(p.kept for p in plans)
 
     def test_system_message_media_is_not_projected(self):
         """system 消息的 media 不产生任何 plan：既不保留，也不占位（两协议共同语义）。"""

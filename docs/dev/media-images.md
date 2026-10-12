@@ -1,11 +1,12 @@
 # 媒体与图片（read-image）
 
 「图片文件 → 模型可见」这条链路的机制说明：`ReadImage` 工具、内容寻址的媒体存储、
-消息里的媒体引用、**请求期图片投影**（高水位 + 量子批量驱逐）与两条协议线格式。
+消息里的媒体引用、**请求期图片投影**（字节高水位 + 量子批量驱逐；计数驱逐默认关闭）
+与两条协议线格式。
 
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
 `libs/core/wing/tools/builtin/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
-（本文末列 12 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
+（本文末列 14 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
 
@@ -139,7 +140,8 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 ```
 0) vision=False                       → 全部 dropped("no_vision")
 1) image_max_bytes 设置且 bytes > cap → dropped("too_large")（严格大于）
-2) 计数：eligible 数量超 max_images   → 丢 ceil(excess / count_quantum) * count_quantum 条
+2) 计数：max_images <= 0 = 关闭（默认）；否则
+   eligible 数量超 max_images        → 丢 ceil(excess / count_quantum) * count_quantum 条
 3) 字节：Σ encoded_len(bytes) 超 request_budget_bytes
                                      → 目标释放量 = ceil(excess / evict_quantum_bytes)
                                        * evict_quantum_bytes，从最旧累加直到覆盖
@@ -175,12 +177,13 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 直到 compaction 把窗口整体改写）。因此策略是：
 
 - **常态一张不丢**（cache 友好）；只有硬阈值逼到才丢，且**按量子批量**丢最旧的：
-  计数规则一次至少丢 `count_quantum`（默认 8）条 → 稳态下每新增约 `count_quantum` 张图
-  才会断一次 cache；字节规则一次释放 `evict_quantum_bytes`（默认 18 MiB）的整数倍。
+  字节规则一次释放 `evict_quantum_bytes`（默认 18 MiB）的整数倍；计数规则（默认关闭，
+  显式调回正数才生效）一次至少丢 `count_quantum`（默认 8）条。
+- **计数驱逐默认关闭**（`max_images: -1`；≤0 同为关闭）：高强度读图（前端开发大量截图）
+  会让图片数很快越过任何固定张数，从而**每次请求都在驱逐**、请求图片集合周期性变化——
+  断 cache 的代价远超收益。字节高水位（36 MiB 编码后）在真实场景远够不到，保留为兜底。
 - 被丢弃的出现**不修改原文本块**，只在其后追加占位文本——保留部分的消息字节不变，
   受影响前缀从该位置起才重算，而不是整条请求重放。
-- 两个高水位都远高于日常用量（32 张 / 36 MiB 编码后）——正常会话基本不会触发驱逐，
-  触发时也是一次批量、而非逐张抖动。
 
 `TokenCounter.estimate_message` 为每个 media 出现累加 `ceil(w*h/750)`（保守口径，
 覆盖全部出现），驱动 compaction 提前触发。
@@ -209,8 +212,8 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 ```yaml
 images:                       # 顶层段（声明在 config/models.py::ImagesConfig，模板由 config/emit.py 生成）
   max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示）
-  max_images: 32              # 请求期计数高水位（超出触发批量驱逐）
-  count_quantum: 8            # 计数驱逐量子（每次超限至少丢这么多张）
+  max_images: -1              # 请求期计数高水位；≤0 = 关闭计数驱逐（默认 -1）
+  count_quantum: 8            # 计数驱逐量子（启用计数驱逐时每次超限至少丢这么多张）
   request_budget_bytes: 37748736   # 请求期 base64 编码后累计高水位（36 MiB）
   evict_quantum_bytes: 18874368    # 字节驱逐量子（18 MiB = 预算一半，与 DSH 同构）
 
@@ -220,9 +223,9 @@ providers:
     image_max_bytes: 5242880  # 可选：单图请求期兜底（Anthropic 建议 5 MiB）
 ```
 
-> 数值全部要求 > 0：`count_quantum` / `evict_quantum_bytes` 是投影算法的除数，
-> 高水位为 0 会让所有图被丢——属误配而非"关闭"。保留策略只有一套口径：
-> `max_images`（计数）+ `request_budget_bytes`（字节）+ 两个量子。
+> 保留策略只有一套口径：`max_images`（计数，**≤0 = 关闭**，默认 -1）+
+> `request_budget_bytes`（字节兜底）+ 两个量子（`count_quantum` /
+> `evict_quantum_bytes`，要求 > 0——它们是投影算法的除数，0 会除零）。
 
 ## 已知边界与 future work
 
@@ -266,6 +269,8 @@ providers:
 | `test_images_max_bytes_refuses_read_without_writing` | `images={"max_bytes": 100}`：读时拒绝（文案含大小与上限 + `images.max_bytes`）；`.media` 目录不存在（零写入）；请求无图无占位 |
 | `test_missing_media_object_degrades_to_unavailable` | 删除 `.media/<id[:2]>/<id>` 对象后再发一轮：该位为 `UNAVAILABLE` 占位、请求成功、无 error 事件 |
 | `test_default_max_bytes_refuses_read_without_writing` | **不注入** `images`（走代码默认值 4.5 MiB）：5 MiB 文件读时拒绝（文案含 `5.0 MB exceeds the 4.5 MB per-image limit`）；`.media` 目录不存在（零写入）；请求无图无占位 |
+| `test_default_count_eviction_off_keeps_all_images`（红线） | **不注入** `images`（走代码默认 `max_images=-1`）：一轮连读 33 张（> 旧默认 32）→ 请求体里 33 张全为 image part、零占位（计数驱逐回退即变红） |
+| `test_zero_max_images_disables_count_eviction`（红线） | `images={"max_images": 0, "count_quantum": 2}`：0 与 -1 同为"关闭"——配置合法（网关能起）、连读 4 张全保留 |
 
 跑法：
 

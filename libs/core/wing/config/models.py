@@ -586,8 +586,9 @@ class ToolResultTruncateConfig(BaseModel):
 class ImagesConfig(BaseModel):
     """图片读入与请求期保留预算配置（read-image）。
 
-    数值全部 > 0：count_quantum / evict_quantum_bytes 是请求期投影算法的
-    除数（0 会除零）；高水位为 0 会让所有图被丢，属误配而非「关闭」。
+    ``max_images <= 0`` = 关闭计数驱逐（默认 -1）；其余数值全部 > 0：
+    count_quantum / evict_quantum_bytes 是请求期投影算法的除数（0 会除零），
+    字节高水位保留为兜底——实践中远够不到上限。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -604,11 +605,14 @@ class ImagesConfig(BaseModel):
         gt=0,
     )
     max_images: int = S(
-        doc="计数高水位（超出即批量驱逐）",
-        notes="从最旧开始按 count_quantum 批量丢（KV-cache 友好）。",
+        doc="计数高水位（≤0 = 关闭计数驱逐）",
+        notes=(
+            "默认 -1（关闭）：重读图会话里计数高水位会让请求图片集合周期性变化，"
+            "从首个受影响 token 起打断前缀 / KV cache。\n"
+            "设为正数时，从最旧开始按 count_quantum 批量丢（KV-cache 友好）。"
+        ),
         apply=ApplyScope.HOT,
-        default=32,
-        gt=0,
+        default=-1,
     )
     count_quantum: int = S(
         doc="计数驱逐量子（每次超限批量丢这么多张）",

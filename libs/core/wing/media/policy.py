@@ -53,13 +53,15 @@ PLACEHOLDER_BY_REASON: dict[DropReason, str] = {
 class MediaPolicy:
     """图片保留策略（高水位 + 量子批量驱逐，KV-cache 友好）。
 
-    默认值是任务书冻结值：
-    - max_images / count_quantum：计数高水位 32，超出按 8 的倍数从最旧丢；
+    默认值是冻结契约：
+    - max_images / count_quantum：计数驱逐默认**关闭**（``max_images <= 0`` =
+      不按数量驱逐——重读图会话里计数高水位会让请求图片集合周期性变化，从首个
+      受影响 token 起打断前缀 / KV cache）；启用（正数）时超出按 8 的倍数从最旧丢；
     - request_budget_bytes / evict_quantum_bytes：base64 编码后累计 36 MiB，
       超出按 18 MiB 的倍数从最旧丢（DeepSeek 48 MiB 请求体上限的 75%）。
     """
 
-    max_images: int = 32
+    max_images: int = -1  # ≤0 = 计数驱逐关闭（默认）
     count_quantum: int = 8
     request_budget_bytes: int = 37_748_736  # 36 MiB，base64 编码后
     evict_quantum_bytes: int = 18_874_368  # 18 MiB
@@ -123,8 +125,9 @@ def plan_request_media(
        此处是"会话中切到文本模型"的兜底投影）。
     1. ``max_image_bytes`` 已设置且 ``ref.bytes > cap`` → ``too_large``
        （单图尺寸兜底，严格大于）。
-    2. 计数：剩余（eligible）超过 ``max_images`` 时，按 ``count_quantum``
-       向上取整得到需丢条数。
+    2. 计数：``max_images > 0`` 且剩余（eligible）超过 ``max_images`` 时，按
+       ``count_quantum`` 向上取整得到需丢条数；``max_images <= 0`` = 关闭
+       （默认）。
     3. 字节：eligible 的 ``Σ encoded_len(bytes)`` 超过
        ``request_budget_bytes`` 时，按 ``evict_quantum_bytes`` 向上取整得到
        **目标释放量**，从最旧起累加 ``encoded_len`` 直到覆盖目标，得到需丢
@@ -174,7 +177,9 @@ def plan_request_media(
 
 
 def _count_rule_drops(eligible: list[int], policy: MediaPolicy) -> int:
-    """计数规则：超出 max_images 的量按 count_quantum 向上取整。"""
+    """计数规则：``max_images <= 0`` = 关闭；超出量按 count_quantum 向上取整。"""
+    if policy.max_images <= 0:
+        return 0
     excess = len(eligible) - policy.max_images
     if excess <= 0:
         return 0
