@@ -107,7 +107,7 @@ class ToolRegistry:
         name: str | None = None,
         description: str | None = None,
         params: list[ToolParam] | None = None,
-        add_purpose: bool = False,
+        add_description: bool = False,
         namespace: str = DEFAULT_NAMESPACE,
         llm_name: str | None = None,
     ) -> Callable[[Callable], Callable]:
@@ -142,14 +142,19 @@ class ToolRegistry:
                     )
                 )
 
-            if add_purpose:
-                purpose_param = ToolParam(
-                    name="purpose",
+            if add_description and not any(
+                p.name == "description" for p in tool_params
+            ):
+                # 名用 description 对齐 Claude Code：模型惯于自发填这个字段，
+                # 部分第三方集成也只认这个名字。工具自带同名参数时让位——
+                # 追加会在 to_openai() 里按名覆盖掉它自己的 schema。
+                description_param = ToolParam(
+                    name="description",
                     type="string",
                     description="简要说明本次工具调用的目的，控制在20个字以内",
                     default="",
                 )
-                tool_params.append(purpose_param)
+                tool_params.append(description_param)
 
             tool = Tool(
                 name=name or getattr(fn, "__name__", ""),

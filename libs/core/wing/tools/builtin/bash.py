@@ -16,7 +16,7 @@ from wing.tools.internal.shell_safety import is_dangerous_command
 FEEDBACK_TIMEOUT = 6000
 
 
-@tool_registry.register(name="Bash", add_purpose=True)
+@tool_registry.register(name="Bash", add_description=True)
 async def execute_shell(command: str, ctx: ToolContext, timeout: int = 30) -> str:
     """Execute a shell command.
 
