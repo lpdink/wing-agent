@@ -37,6 +37,7 @@ use crate::ui::toast::Toast;
 use crate::ui::welcome::SessionFacts;
 use crate::util::program_status::State;
 use crate::util::title::AttentionKind;
+use wing_api_client::models::SessionUsage;
 
 impl App {
     /// Handle a gateway event.
@@ -466,6 +467,7 @@ impl App {
                 draft,
                 name,
                 agent,
+                usage,
                 ..
             } => {
                 self.apply_sync_session(
@@ -479,6 +481,7 @@ impl App {
                     draft,
                     name,
                     agent,
+                    usage,
                 );
             }
             // ---- Turn result (rich completion data) ----
@@ -568,6 +571,7 @@ impl App {
         draft: Option<String>,
         name: Option<String>,
         agent: Option<Box<AgentInfo>>,
+        usage: Option<SessionUsage>,
     ) {
         // Update session_id to the new session (Phase 3c).
         //
@@ -614,6 +618,16 @@ impl App {
             });
             self.status.workdir = agent_info.workspace.clone();
         }
+
+        // 用量基线：快照与快照之后的 live 增量同一条有序 WS 通道——这里的
+        // 三个累计器**赋值**（不是累加），此后每个 `llm_call_metrics` 加增量。
+        // 这正是「resume 后不再从 0 累起」的落点：快照带什么就是什么（旧网关
+        // 不带 → 零基线，与旧会话没有用量同义）。绝不用 HTTP `/api/session/info`
+        // 做基线：两个通道无定序，在途事件会被重复计入。
+        let usage = usage.unwrap_or_default();
+        self.status.session_prompt_tokens = usage.prompt_tokens;
+        self.status.session_completion_tokens = usage.completion_tokens;
+        self.status.session_cached_tokens = usage.cached_tokens;
 
         // Ask flows are session-scoped interactive state, not rendered
         // history: without this, a reconnect / session switch while an

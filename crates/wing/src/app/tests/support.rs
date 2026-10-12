@@ -67,6 +67,7 @@ pub(super) fn sync_event_with_status(
         agent: None,
         name: None,
         draft: None,
+        usage: None,
         meta: EventMeta {
             created_at: "2026-01-01T00:00:00+00:00".into(),
             session_id: Some("test-session".into()),

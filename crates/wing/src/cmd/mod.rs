@@ -23,6 +23,7 @@ pub mod common;
 pub mod config;
 pub mod control;
 mod discover;
+mod exit_summary;
 pub mod lifecycle;
 pub mod messages;
 pub mod ps;
@@ -984,9 +985,16 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Restore original panic hook.
     restore_panic_hook();
 
-    result?;
-    tracing::info!("wing exited cleanly");
-    Ok(())
+    match result {
+        Ok(exit) => {
+            // 终端恢复后打印退出摘要（仅 TUI 形态；stdio / acp 的 stdout 是
+            // 协议通道，绝不到这里）。
+            exit_summary::print_exit_summary(&exit);
+            tracing::info!("wing exited cleanly");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

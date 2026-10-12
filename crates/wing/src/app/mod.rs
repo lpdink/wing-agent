@@ -84,6 +84,7 @@ use self::turn_state::TurnState;
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
 use crate::shared::panels::ask::PanelMode;
+use wing_api_client::models::SessionUsage;
 
 /// Threshold for wide-mode status bar (shows cumulative usage details).
 const WIDE_THRESHOLD: u16 = 100;
@@ -920,6 +921,49 @@ async fn image_freshness_tick(deadline: Option<std::time::Instant>) {
     }
 }
 
+/// TUI 退出时携带出的状态——终端恢复后打印的退出摘要素材。
+///
+/// 用量主体来自退出前的一次 `/api/session/info` 快照（`usage`）；网关不可达
+/// （或本次连接已断）时降级为 None，摘只打印本地能证实的部分（墙钟 + 状态栏
+/// 累计值）并注明用量不可用。
+pub struct TuiExit {
+    pub session_id: String,
+    /// 展示用模型名（display name ‖ 调用名；与状态栏同一取法）。
+    pub model: String,
+    /// 进入 TUI → 退出（run_app 本地计时，与网关时钟无关）。
+    pub wall: std::time::Duration,
+    /// 退出时的服务端账本（None = 网关不可达 / 旧网关不带字段）。
+    pub usage: Option<SessionUsage>,
+    /// 状态栏累计（基线 + live 增量）——降级摘要的素材。
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cached_tokens: i64,
+}
+
+/// 退出摘要的 info 取数预算：超时即有界降级，绝不把「退出」卡在网络上。
+const EXIT_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 取一次退出用的用量快照；任何失败（断连 / 超时 / 旧网关）都返回 None。
+async fn fetch_exit_usage(transport: Option<&Transport>, session_id: &str) -> Option<SessionUsage> {
+    let transport = transport?;
+    match tokio::time::timeout(
+        EXIT_INFO_TIMEOUT,
+        transport.http.get_session_info(session_id),
+    )
+    .await
+    {
+        Ok(Ok(info)) => info.usage,
+        Ok(Err(e)) => {
+            tracing::debug!("exit summary: session info unavailable: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("exit summary: session info timed out");
+            None
+        }
+    }
+}
+
 /// Run the main application loop.
 pub async fn run_app(
     terminal: &mut WingTerminal,
@@ -928,7 +972,8 @@ pub async fn run_app(
     mut endpoint: GatewayEndpoint,
     config: AppConfig,
     launch_workspace: Option<String>,
-) -> Result<()> {
+) -> Result<TuiExit> {
+    let entered = std::time::Instant::now();
     // Terminal graphics: probe **once**, before `spawn_event_stream` — the
     // query writes to stdout and reads stdin, so starting the event reader
     // first would let the two race for the same file descriptors. `off` skips
@@ -1302,7 +1347,18 @@ pub async fn run_app(
         let _ = title::set_title(writer, "");
     }
 
-    Ok(())
+    // Exit material: one last accounting read of the server ledger (bounded —
+    // an unreachable gateway degrades the summary instead of stalling exit).
+    let usage = fetch_exit_usage(transport.as_ref(), &app.session_id).await;
+    Ok(TuiExit {
+        session_id: app.session_id.clone(),
+        model: app.status.model_label().to_string(),
+        wall: entered.elapsed(),
+        usage,
+        prompt_tokens: app.status.session_prompt_tokens,
+        completion_tokens: app.status.session_completion_tokens,
+        cached_tokens: app.status.session_cached_tokens,
+    })
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use wing_api_client::models::SessionUsage;
+
 // ============================================================
 // Shared / nested types
 // ============================================================
@@ -522,6 +524,11 @@ pub enum WingEvent {
         name: Option<String>,
         #[serde(default)]
         draft: Option<String>,
+        /// 快照时刻的会话用量账本——前端累计的**基线**（快照之后的 live
+        /// 增量恰好是它未包含的部分；HTTP `/api/session/info` 的快照与 WS 帧
+        /// 无跨通道定序，不能拿来做基线）。旧网关不带 → None（按零基线）。
+        #[serde(default)]
+        usage: Option<SessionUsage>,
         #[serde(flatten)]
         meta: EventMeta,
     },

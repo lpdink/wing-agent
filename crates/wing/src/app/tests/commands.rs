@@ -577,6 +577,7 @@ fn feed_info_full(
             system_prompt: String::new(),
             tags,
             tag_meta: Default::default(),
+            usage: None,
         })),
     });
 }
