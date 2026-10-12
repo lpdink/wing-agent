@@ -6,7 +6,7 @@
 
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
 `libs/core/wing/tools/builtin/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
-（本文末列 14 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
+（本文末列 15 条场景）。本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
 
@@ -181,7 +181,10 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
   显式调回正数才生效）一次至少丢 `count_quantum`（默认 8）条。
 - **计数驱逐默认关闭**（`max_images: -1`；≤0 同为关闭）：高强度读图（前端开发大量截图）
   会让图片数很快越过任何固定张数，从而**每次请求都在驱逐**、请求图片集合周期性变化——
-  断 cache 的代价远超收益。字节高水位（36 MiB 编码后）在真实场景远够不到，保留为兜底。
+  断 cache 的代价远超收益。字节高水位保留为兜底，触发点随单图大小变化
+  （`encoded_len = 4*ceil(raw/3)`，预算 36 MiB 编码后 ≈ 27 MiB 原始字节）：
+  200 KB 截图约 139 张、1 MiB 约 27 张、2 MiB 约 14 张、4 MiB 约 7 张——
+  小图会话基本够不到，MiB 级大图仍会触发（它就是留给大图的上限兜底）。
 - 被丢弃的出现**不修改原文本块**，只在其后追加占位文本——保留部分的消息字节不变，
   受影响前缀从该位置起才重算，而不是整条请求重放。
 
@@ -225,10 +228,14 @@ providers:
 
 > 保留策略只有一套口径：`max_images`（计数，**≤0 = 关闭**，默认 -1）+
 > `request_budget_bytes`（字节兜底）+ 两个量子（`count_quantum` /
-> `evict_quantum_bytes`，要求 > 0——它们是投影算法的除数，0 会除零）。
+> `evict_quantum_bytes`，要求 > 0——非正数会让量子退化为逐条驱逐，配置层拒绝以免误配）。
 
 ## 已知边界与 future work
 
+- **请求内图片数量没有上界**（计数驱逐默认关闭）：唯一请求期约束是字节高水位。若某个
+  provider 对单请求图片数有硬上限（外部文档口径），超限表现为该 provider 的请求错误；
+  需要时把 `images.max_images` 调回一个远高于日常用量的正数，或调低
+  `request_budget_bytes` 让字节兜底更早生效（两者触发时都会断一次前缀 cache）。
 - **读时缩图（read-time downscale）未做**：超限图片是"拒绝 + `sips` 提示"，模型自己转换/
   降采样后再读。
 - **媒体 GC 未做**：对象只增不减（孤儿对象保留），没有 `delete_media` 入口，也没有按引用
@@ -271,6 +278,7 @@ providers:
 | `test_default_max_bytes_refuses_read_without_writing` | **不注入** `images`（走代码默认值 4.5 MiB）：5 MiB 文件读时拒绝（文案含 `5.0 MB exceeds the 4.5 MB per-image limit`）；`.media` 目录不存在（零写入）；请求无图无占位 |
 | `test_default_count_eviction_off_keeps_all_images`（红线） | **不注入** `images`（走代码默认 `max_images=-1`）：一轮连读 33 张（> 旧默认 32）→ 请求体里 33 张全为 image part、零占位（计数驱逐回退即变红） |
 | `test_zero_max_images_disables_count_eviction`（红线） | `images={"max_images": 0, "count_quantum": 2}`：0 与 -1 同为"关闭"——配置合法（网关能起）、连读 4 张全保留 |
+| `test_byte_eviction_still_applies_when_count_disabled`（红线） | `images={"max_images": 0, "request_budget_bytes": 250, "evict_quantum_bytes": 100}`：4 张图 Σencoded 400 > 250 → 字节规则丢最旧 2 张（占位追加、最新 2 张仍为 image part）；计数关闭不参与 |
 
 跑法：
 

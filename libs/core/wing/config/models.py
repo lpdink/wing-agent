@@ -587,8 +587,8 @@ class ImagesConfig(BaseModel):
     """图片读入与请求期保留预算配置（read-image）。
 
     ``max_images <= 0`` = 关闭计数驱逐（默认 -1）；其余数值全部 > 0：
-    count_quantum / evict_quantum_bytes 是请求期投影算法的除数（0 会除零），
-    字节高水位保留为兜底——实践中远够不到上限。
+    count_quantum / evict_quantum_bytes 是请求期投影算法的量子（非正数会退化为
+    逐条驱逐，配置层拒绝以免误配）；字节高水位保留为兜底，触发点随单图大小变化。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -615,7 +615,7 @@ class ImagesConfig(BaseModel):
         default=-1,
     )
     count_quantum: int = S(
-        doc="计数驱逐量子（每次超限批量丢这么多张）",
+        doc="计数驱逐量子（每次超限批量丢这么多张；max_images > 0 时生效）",
         apply=ApplyScope.HOT,
         default=8,
         gt=0,
