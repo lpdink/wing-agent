@@ -371,8 +371,7 @@ class SessionManager:
         if tags:
             session.apply_tag_ops(add=tags)
 
-        self._sessions[sid] = session
-        self.touch(sid)
+        self._register(session)
 
         # 触发 before_session_start hook，随后把 hook 注入落盘：resume 重建 CM
         # 时恢复同一系统提示词（前缀身份不因换入内存而漂移）。
@@ -381,6 +380,19 @@ class SessionManager:
 
         log.info(f"Session created: {sid} (template={template.name})")
         return session
+
+    def _register(self, session: Session) -> None:
+        """把会话放进工作集并激活用量账本（**唯一注册入口**）。
+
+        注册即激活（`Session.activate_usage`）：账本的事件订阅跟随在场生命
+        周期（注册 → 逐出退订），构造期不订阅——构造与注册之间可能因覆盖 /
+        标签校验失败而中止，那类被放弃的会话必须能被 GC（构造期订阅会把它
+        永久钉在全局总线上，而它持有整份消息历史）。
+        """
+        session_id = session.session_id
+        self._sessions[session_id] = session
+        session.activate_usage()
+        self.touch(session_id)
 
     # ── resolve ───────────────────────────────
 
@@ -476,8 +488,7 @@ class SessionManager:
         )
         if agent_override is not None:
             session.apply_resume_override(agent_override)
-        self._sessions[resolved] = session
-        self.touch(resolved)
+        self._register(session)
         log.info(f"Session resumed: {resolved}")
         return session
 
@@ -614,8 +625,7 @@ class SessionManager:
         )
         # 先注册 / 刷新计时器再跑 hook（与 create_session 同序）：hook 内 emit 的
         # 事件能命中 SessionReaper 的 touch 订阅，hook 内查 SM 也能看到子会话。
-        self._sessions[new_session_id] = new_session
-        self.touch(new_session_id)
+        self._register(new_session)
 
         # fork 也是"创建新 session"（session id 变化）：before_session_start 在子会话
         # 上生效，hook 注入的环境信息属于这个新 session。子会话已继承源的追加内容
@@ -708,6 +718,10 @@ class SessionManager:
         摘除（pop）是同步的、且发生在拆解协程真正运行之前——单线程事件
         循环下即原子，拆解失败不影响「已逐出」这个事实。拆解任务登记在
         `_teardowns` 里（强引用防 GC，测试可等待其完成）。
+
+        摘除前同步落一次用量账本：拆解是异步的，进程在它跑完前退出时它就
+        不再有机会写盘（lifespan 的收尾 flush 只覆盖当时还在 `_sessions`
+        里的会话）——逐出即落盘把「摘除」与「最后一次累计持久化」绑成一步。
         """
         session = self._sessions.get(session_id)
         if session is None:
@@ -715,6 +729,7 @@ class SessionManager:
         # 先建任务：无运行中的事件循环时在此抛错，状态未被改动（会话保持
         # 在场），不会留下"已摘除却没拆解"的孤儿对象。
         task = asyncio.create_task(self._teardown(session, reason))
+        session.flush_usage()
         self._sessions.pop(session_id, None)
         self._last_active.pop(session_id, None)
         self._teardowns.add(task)

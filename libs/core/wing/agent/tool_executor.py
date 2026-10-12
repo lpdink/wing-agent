@@ -163,14 +163,19 @@ class ToolExecutor:
         返回约定：带 media 时返回 ``ToolOutput``，否则返回 ``str``。
 
         每个终态都把实测时长（毫秒）交给 tool_finished——会话用量账本据此
-        累计工具总时长；中断合成的结果由 execute() 直接发射，不经这里，
-        因此不会被记成一次执行。
+        累计工具总时长；**没有真正执行**的两条短路（参数非法 / 未知工具）
+        交 ``duration_ms=None``（账本按「不是一次执行」处理），中断合成的
+        结果由 execute() 直接发射、不经这里，同样不会被记成一次执行。
         """
         self._sink.tool_started(tc)
         started = time.monotonic()
 
         def finish(
-            content: str, *, success: bool, media: list[MediaRef] | None = None
+            content: str,
+            *,
+            success: bool,
+            media: list[MediaRef] | None = None,
+            executed: bool = True,
         ) -> None:
             self._sink.tool_finished(
                 tc,
@@ -178,7 +183,9 @@ class ToolExecutor:
                 success=success,
                 model=model,
                 media=media,
-                duration_ms=int((time.monotonic() - started) * 1000),
+                duration_ms=(
+                    int((time.monotonic() - started) * 1000) if executed else None
+                ),
             )
 
         # 参数 JSON 解析失败（provider 已容错并置 arguments_error）：不执行
@@ -191,7 +198,7 @@ class ToolExecutor:
                 f"you generated are invalid.\n{tc.arguments_error}\n"
                 f"Please re-issue the tool call with corrected arguments."
             )
-            finish(result, success=False)
+            finish(result, success=False, executed=False)
             return result
 
         tool = self._tools.get(tc.name)
@@ -200,7 +207,7 @@ class ToolExecutor:
                 f"Error: unknown tool: {tc.name}, "
                 f"or you don't have permission to use it."
             )
-            finish(result, success=False)
+            finish(result, success=False, executed=False)
             return result
 
         try:

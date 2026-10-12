@@ -67,15 +67,18 @@ class SessionUsage(BaseModel):
 
     - 计数：``user_messages`` 按被消费进上下文的用户消息计（一轮合并输入逐条
       计）；``llm_calls`` 每次完成的 LLM 调用计一次（含随后被判无效重试的
-      尝试——token 真花掉了）；``tool_calls`` 每次**真实执行**的工具调用计
-      一次（中断合成的结果不计）；``turns`` 每个收尾的回合（发出 turn_result）
-      计一次；
+      尝试——token 真花掉了），**只覆盖 ReAct 循环内的调用**：上下文压缩
+      （compaction）与其它旁路调用不计（它们的 token 也不进本账本）；
+      ``tool_calls`` 每次**真实执行**的工具调用计一次——参数非法 / 未知工具
+      两条短路与中断合成的结果都不计；``turns`` 每个收尾的回合（发出
+      turn_result）计一次；
     - token：``prompt_tokens`` / ``completion_tokens`` / ``cached_tokens``
-      与直播 ``llm_call_metrics`` 事件逐字段同源；
-    - 时长：``llm_time_ms`` 各次调用的总时长之和，``tool_time_ms`` 各次执行
-      时长之和（并行工具按各自时长求和，因此两者可能重叠）。工作时长 =
-      ``llm_time_ms + tool_time_ms`` 是客户端可直接断言的下界，账本不另存
-      派生值（命中率 = ``cached_tokens / prompt_tokens`` 同理）。
+      与直播 ``llm_call_metrics`` 事件逐字段同源（口径同 ``llm_calls``）；
+    - 时长：``llm_time_ms`` 各次 ReAct 调用（从发起到 usage 帧）的总时长
+      之和，``tool_time_ms`` 各次真实执行时长之和（并行工具按各自时长求和，
+      因此两者可能重叠）。工作时长 = ``llm_time_ms + tool_time_ms`` 是客户端
+      可直接断言的下界，账本不另存派生值（命中率 =
+      ``cached_tokens / prompt_tokens`` 同理）。
 
     全字段非负整数、缺省 0：旧会话（引入前落盘、字段缺失）读出的就是零，
     不回填、不发明数字。

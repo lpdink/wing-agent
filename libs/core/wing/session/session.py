@@ -181,11 +181,13 @@ class Session:
             )
 
         # 用量账本：以盘上记录为基线（resume 延续累计），由事件流增量记账
-        # （`_on_usage_event`）。订阅保持到 aclose——事件是本会话账本的唯一
-        # 来源，与直播给前端的是同一批事件、同一批数字。
+        # （`_on_usage_event`）。**构造期不订阅**——订阅（`activate_usage`）跟随
+        # 「被 manager 接纳进工作集」这一步：构造与注册之间可能因覆盖校验失败
+        # 而中止，构造期订阅会把被放弃的会话永久钉在全局总线上（它持有整份
+        # 消息历史）。事件是账本与前端直播的唯一同源素材。
         self._usage = UsageTracker(self._metadata.usage, persist=self._persist_usage)
         self._usage_subscription: Callable[[WingEvent], None] = self._on_usage_event
-        event_bus.subscribe(self._usage_subscription)
+        self._usage_attached = False
 
         log.info(f"Session initialized: {session_id}")
 
@@ -332,7 +334,9 @@ class Session:
         元数据在该落的时候已落——session 仍可经 resume 完整水合回来。
         """
         await self._agent.shutdown()
-        event_bus.unsubscribe(self._usage_subscription)
+        if self._usage_attached:
+            self._usage_attached = False
+            event_bus.unsubscribe(self._usage_subscription)
         self.flush_usage()
 
     def apply_agent_override(self, override: AgentOverride) -> None:
@@ -604,6 +608,18 @@ class Session:
         """把用量账本落一次盘（回合收尾 / 释放 / 进程退出前的落盘点；no-op 幂等）。"""
         self._usage.flush()
 
+    def activate_usage(self) -> None:
+        """把用量账本挂上事件流（会话被接纳进工作集时由 SessionManager 调用）。
+
+        订阅跟随**在场**生命周期：注册（本方法，`SessionManager._register`）
+        → 逐出（`aclose` 退订）。幂等——重复激活只会退化成 no-op，不会让同
+        一批事件计两次。
+        """
+        if self._usage_attached:
+            return
+        self._usage_attached = True
+        event_bus.subscribe(self._usage_subscription)
+
     def _on_usage_event(self, event: "WingEvent") -> None:
         """用量账本的事件入口（EventBus 订阅；只记本会话的事件）。
 
@@ -635,12 +651,13 @@ class Session:
 
         与 `_persist_model` 同口径：磁盘写失败只打 warning 并抛给
         `UsageTracker` 保留脏标记稍后重试——live 账本已经生效，改不了任何
-        请求结果。
+        请求结果。**任何**失败都在这里带会话 id 留痕（tracker 的 except 只
+        保留重试标记，不重复记日志）。
         """
         self._metadata.usage = usage
         try:
             self._save_metadata()
-        except (OSError, UnicodeEncodeError) as e:
+        except Exception as e:
             log.warning(
                 f"Session {self._session_id}: usage not persisted ({e}); will retry"
             )

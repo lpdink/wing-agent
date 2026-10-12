@@ -160,24 +160,49 @@ async def test_usage_accumulates_persists_and_survives_release_and_restart(
     assert recorded is not None and recorded.get("usage") == third
 
 
+#: 非法参数（尾逗号）：工具执行器短路回灌，不执行、不计一次调用。
+MALFORMED_ARGS = '{"command": "printf nope",}'
+
+
 @pytest.mark.probe_env(models=[MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_usage_starts_at_zero_and_skips_interrupted_synthesized_results(
+async def test_usage_starts_at_zero_and_skips_unexecuted_tool_calls(
     probe: Probe,
 ) -> None:
-    """未产生用量的会话读零；中断合成的工具结果不计一次执行。"""
+    """未产生用量的会话读零；没真正执行的工具调用（短路 / 中断合成）都不计。"""
     probe.register(
         MODEL,
-        # 慢分片：给中断留出窗口（首个 tool_call 之前）。
+        # ① 非法 args 的 Bash 调用：短路回灌（不执行）。
+        Turn.of(tool_calls=[ToolCall("Bash", MALFORMED_ARGS)]),
+        # ② 自纠收尾：本轮正常结束（turn 收尾计入）。
+        Turn.of(text="recovered"),
+        # ③ 慢分片：给中断留出窗口（tool_call 之前）。
         Turn.of(text="thinking out loud", chunk=1, delay=0.5),
         Turn.of(text="never reached"),
+    )
+    probe.allow_arguments_error(
+        "usage 场景：有意让模型吐出坏参数——断言面是「短路没有真正执行」不进账本"
     )
     session = await probe.session(model=MODEL, yolo=True)
 
     zeros = await _usage(probe, session.session_id)
     assert zeros == dict.fromkeys(COUNTS, 0), zeros
 
+    result = await session.chat("try a broken tool call")
+    assert result.data["subtype"] == "success", result.data
+
+    after_short_circuit = await _usage(probe, session.session_id)
+    # 一轮完整对话：用户消息 1、收尾 1；坏参数的调用没有执行，不计调用与时长。
+    assert after_short_circuit["user_messages"] == 1, after_short_circuit
+    assert after_short_circuit["turns"] == 1, after_short_circuit
+    assert after_short_circuit["tool_calls"] == 0, after_short_circuit
+    assert after_short_circuit["tool_time_ms"] == 0, after_short_circuit
+    # 剧本没给 usage：token / llm 调用也不计（账本不发明数字）。
+    assert after_short_circuit["llm_calls"] == 0, after_short_circuit
+    assert after_short_circuit["prompt_tokens"] == 0, after_short_circuit
+
+    # 中断：合成的结果同样不算一次执行，被中断的轮也没有收尾。
     await session.send("go")
     await session.watch.expect("turn_started", within=15)
     response = await session.interrupt()
@@ -186,8 +211,7 @@ async def test_usage_starts_at_zero_and_skips_interrupted_synthesized_results(
     session.watch.assert_never("error")
 
     usage = await _usage(probe, session.session_id)
-    # 用户消息被消费（一次）；被中断的轮没有收尾、也没有任何工具真实执行。
-    assert usage["user_messages"] == 1, usage
-    assert usage["turns"] == 0, usage
+    assert usage["user_messages"] == 2, usage
+    assert usage["turns"] == 1, usage
     assert usage["tool_calls"] == 0, usage
     assert usage["tool_time_ms"] == 0, usage

@@ -34,6 +34,12 @@ def _usage_of(store: SessionStore, session_id: str) -> SessionUsage | None:
     return metadata.usage if metadata is not None else None
 
 
+def _override(**kwargs):
+    from wing.session import AgentOverride
+
+    return AgentOverride(**kwargs)
+
+
 # ============================================================
 # UsageTracker — 纯累计 / 节流 / 落盘
 # ============================================================
@@ -308,6 +314,49 @@ async def test_persist_failure_keeps_the_live_ledger(
     assert any("usage not persisted" in message for message in wing_warnings), (
         wing_warnings
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_resume_leaves_no_subscription_and_no_accounting(runtime):
+    """覆盖校验失败的 resume 必须零残留：不注册、不订阅、不记账。
+
+    构造期订阅（而不是注册时激活）会把这条 400 路径变成资源泄漏——被放弃
+    的 Session 持有整份消息历史，却永远等不到 aclose 的退订。
+    """
+    session = runtime.create_session()
+    sid = session.session_id
+    session.set_title("usage-test")  # 落一份 metadata：逐出后仍在磁盘上可见
+    assert runtime.sm.evict(sid, reason="test")
+    await runtime.sm.wait_teardowns()
+    before = event_bus.subscriber_count
+
+    with pytest.raises(ValueError):
+        runtime.sm.resume_session(sid, agent_override=_override(model_id="typo-model"))
+
+    assert event_bus.subscriber_count == before
+    # 被放弃的构造没有污染盘上记录：元数据原样（无 usage 记录）。
+    assert _usage_of(session.store, sid) is None
+
+
+@pytest.mark.asyncio
+async def test_unexecuted_tool_calls_are_not_counted(runtime):
+    """参数非法 / 未知工具的短路没有真正执行：不计 tool_calls、不计时长。"""
+    from wing.agent.tool_executor import ToolExecutor
+
+    session = runtime.create_session()
+    executor = ToolExecutor(session.agent.sink)
+    executor.set_tools({})
+
+    malformed = ToolCall(
+        id="c1", name="Bash", arguments={}, arguments_error="Expecting value"
+    )
+    unknown = ToolCall(id="c2", name="Nope", arguments={})
+    results = await executor.execute([malformed, unknown], "m")
+
+    assert [r.content for r in results] != []
+    usage = session.usage
+    assert usage.tool_calls == 0
+    assert usage.tool_time_ms == 0
 
 
 @pytest.mark.asyncio

@@ -74,8 +74,8 @@ class UsageTracker:
         self._touch()
 
     def record_tool_call(self, *, duration_ms: int | None) -> None:
-        """记一次工具执行；``duration_ms`` 为 None 表示未真实执行（中断合成
-        的结果）——不是一次调用。"""
+        """记一次工具执行；``duration_ms`` 为 None 表示未真实执行——中断合成
+        的结果，或参数非法 / 未知工具两条短路——不是一次调用。"""
         if duration_ms is None:
             return
         u = self._usage
