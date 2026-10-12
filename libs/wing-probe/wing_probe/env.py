@@ -84,9 +84,10 @@ DEFAULT_AGENT_TOOLS: tuple[str, ...] = (
 #: （``max_retry_delay``）保证场景快。
 PROBE_MAX_RETRIES = 2
 
-#: 默认模板的上下文窗口 / 保留区（与产品默认同量级）。自动压缩场景用
+#: 模型声明的上下文窗口 / 保留区默认值（与产品默认同量级）。自动压缩场景用
 #: ``@pytest.mark.probe_env(context_window_tokens=…, keep_recent_tokens=…)``
-#: 压小它们，让 early trigger / apply 在几轮对话内确定性触发。
+#: 压小它们（落到 ``providers[].models[]`` 的声明上），让 early trigger / apply
+#: 在几轮对话内确定性触发。
 DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 DEFAULT_KEEP_RECENT_TOKENS = 50_000
 
@@ -284,6 +285,42 @@ def resolve_model_declarations(
     return declared
 
 
+def bind_model_windows(
+    declarations: Sequence[str | Mapping[str, Any]],
+    *,
+    context_window_tokens: int,
+    keep_recent_tokens: int,
+) -> list[str | Mapping[str, Any]]:
+    """把上下文窗口旋钮写进模型声明（对象形态）。
+
+    模型级是窗口 / 保留区的唯一配置来源（agent 段不再有它们）：旋钮偏离产品默认值
+    时，为每条**尚未自行声明**窗口的模型补上这两个键；显式声明过窗口的条目原样保留
+    （场景要对不同模型给不同阈值时自己写 spec）。旋钮保持默认值时不写——生成的配置
+    形态与历史一致，而产品默认本来就是同一份数字。
+    """
+    if (
+        context_window_tokens == DEFAULT_CONTEXT_WINDOW_TOKENS
+        and keep_recent_tokens == DEFAULT_KEEP_RECENT_TOKENS
+    ):
+        return list(declarations)
+    bound: list[str | Mapping[str, Any]] = []
+    for entry in declarations:
+        if isinstance(entry, str):
+            bound.append(
+                {
+                    "name": entry,
+                    "context_window_tokens": context_window_tokens,
+                    "keep_recent_tokens": keep_recent_tokens,
+                }
+            )
+            continue
+        merged = dict(entry)
+        merged.setdefault("context_window_tokens", context_window_tokens)
+        merged.setdefault("keep_recent_tokens", keep_recent_tokens)
+        bound.append(merged)
+    return bound
+
+
 def _default_provider_block(
     *, name: str, base_url: str, api_key: str
 ) -> dict[str, Any]:
@@ -339,6 +376,11 @@ def render_config_yaml(
     ——组合规则见 :func:`resolve_model_declarations`。``agents[].provider`` 不再
     生成（后端已删该字段；provider 是运行期事实，不是引用词）。
 
+    ``context_window_tokens`` / ``keep_recent_tokens`` 是压缩双阈值的来源，落在
+    **模型声明**上（``providers[].models[]``；agent 段不再有它们）——偏离
+    :data:`DEFAULT_CONTEXT_WINDOW_TOKENS` / :data:`DEFAULT_KEEP_RECENT_TOKENS`
+    时为每条未自行声明的模型补键，见 :func:`bind_model_windows`。
+
     ``extra_providers`` 是**附加 provider** 的条目（跨 provider 场景用）：每个
     条目 ``{"name", "base_url", "models"}``（``api_key`` 可选，缺省同主 provider）
     ——接线与主 provider 逐字段同形（同一份 :func:`_default_provider_block`）。
@@ -368,7 +410,11 @@ def render_config_yaml(
     provider: dict[str, Any] = _default_provider_block(
         name=provider_name, base_url=provider_base_url, api_key=provider_api_key
     )
-    provider["models"] = resolve_model_declarations(model=model, models=models)
+    provider["models"] = bind_model_windows(
+        resolve_model_declarations(model=model, models=models),
+        context_window_tokens=context_window_tokens,
+        keep_recent_tokens=keep_recent_tokens,
+    )
     if provider_extra is not None:
         provider.update(provider_extra)
     providers: list[dict[str, Any]] = [provider]
@@ -403,8 +449,6 @@ def render_config_yaml(
                 "default": True,
                 "system_prompt": system_prompt,
                 "tools": list(tools),
-                "context_window_tokens": context_window_tokens,
-                "keep_recent_tokens": keep_recent_tokens,
                 "skills": [],
                 "rules": [],
             }
@@ -592,9 +636,9 @@ class ProbeEnv:
         self.system_prompt = system_prompt
         """默认模板的 system prompt（非空；场景可与请求里的 system 段对照）。"""
         self.context_window_tokens = context_window_tokens
-        """默认模板的上下文窗口（压缩 apply 阈值；压小即得确定性自动压缩）。"""
+        """模型声明的上下文窗口（压缩 apply 阈值；压小即得确定性自动压缩）。"""
         self.keep_recent_tokens = keep_recent_tokens
-        """默认模板的保留区预算（``compact_window = window - keep_recent``）。"""
+        """模型声明的保留区预算（``compact_window = window - keep_recent``）。"""
 
         self.auth = dict(auth) if auth is not None else None
         """``gateway.auth`` 段原文（None = 缺省关闭；见 ``render_config_yaml``）。"""

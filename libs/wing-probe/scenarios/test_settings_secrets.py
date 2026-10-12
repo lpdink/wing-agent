@@ -153,18 +153,18 @@ async def test_secrets_are_never_echoed_and_null_keeps_the_value(probe: Probe) -
     }, current["secrets"]
 
     document = current["values"]
-    document["agents"][0]["keep_recent_tokens"] = 40_000
+    document["providers"][0]["timeout_total"] = 121.0
     receipt = await http.request(
         "POST",
         "/api/settings/set",
         body={"base": current["fingerprint"], "document": document},
     )
     assert receipt["ok"] is True, receipt
-    assert receipt["changed"] == ["agents[0].keep_recent_tokens"], receipt["changed"]
+    assert receipt["changed"] == ["providers[0].timeout_total"], receipt["changed"]
 
     written = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
     assert written["providers"][0]["api_key"] == NEW_KEY, written["providers"][0]
-    assert written["agents"][0]["keep_recent_tokens"] == 40_000, written["agents"][0]
+    assert written["providers"][0]["timeout_total"] == 121.0, written["providers"][0]
 
     third = await session.chat("after the null round-trip")
     assert third.data["subtype"] == "success", third.data

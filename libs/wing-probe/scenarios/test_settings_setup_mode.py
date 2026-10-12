@@ -151,7 +151,13 @@ async def test_broken_config_repairs_in_place(probe: Probe) -> None:
                     "protocol": "openai",
                     "base_url": probe.env.provider.base_url,
                     "api_key": "probe-key",
-                    "models": [SETUP_MODEL],
+                    "models": [
+                        {
+                            "name": SETUP_MODEL,
+                            "context_window_tokens": 256_000,
+                            "keep_recent_tokens": 50_000,
+                        }
+                    ],
                 }
             ],
             "agents": [
@@ -161,8 +167,6 @@ async def test_broken_config_repairs_in_place(probe: Probe) -> None:
                     "default": True,
                     "system_prompt": probe.env.system_prompt,
                     "tools": ["Bash"],
-                    "context_window_tokens": 256_000,
-                    "keep_recent_tokens": 50_000,
                 }
             ],
         }
@@ -262,7 +266,13 @@ def _fixed_document(probe: Probe) -> dict:
                 "protocol": "openai",
                 "base_url": probe.env.provider.base_url,
                 "api_key": "probe-key",
-                "models": [SETUP_MODEL],
+                "models": [
+                    {
+                        "name": SETUP_MODEL,
+                        "context_window_tokens": 256_000,
+                        "keep_recent_tokens": 50_000,
+                    }
+                ],
             }
         ],
         "agents": [
@@ -272,8 +282,6 @@ def _fixed_document(probe: Probe) -> dict:
                 "default": True,
                 "system_prompt": probe.env.system_prompt,
                 "tools": ["Bash"],
-                "context_window_tokens": 256_000,
-                "keep_recent_tokens": 50_000,
             }
         ],
     }

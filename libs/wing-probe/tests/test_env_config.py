@@ -21,6 +21,7 @@ from wing_probe.env import (
     LOOPBACK_HOSTS,
     ProbeEnv,
     ProbeEnvError,
+    bind_model_windows,
     log_section,
     merge_no_proxy,
     model_declaration_id,
@@ -109,8 +110,15 @@ def test_render_config_overrides() -> None:
     assert config["agents"][0]["model"] == "probe/thing"
     assert config["agents"][0]["tools"] == ["Bash"]
     assert config["agents"][0]["system_prompt"] == "be terse"
-    assert config["agents"][0]["context_window_tokens"] == 1000
-    assert config["agents"][0]["keep_recent_tokens"] == 100
+    # 窗口旋钮落在模型声明上（agent 段不再有这两个键）。
+    assert config["providers"][0]["models"] == [
+        {
+            "name": "probe/thing",
+            "context_window_tokens": 1000,
+            "keep_recent_tokens": 100,
+        }
+    ]
+    assert "context_window_tokens" not in config["agents"][0]
 
 
 def test_write_config_creates_core_layout(tmp_path: Path) -> None:
@@ -693,19 +701,64 @@ async def test_wait_for_health_ignores_env_proxy(
 
 
 def test_env_render_config_passes_context_window_knobs(tmp_path: Path) -> None:
-    """ProbeEnv 的上下文窗口旋钮进入 agent 配置（自动压缩场景的阈值来源）。
+    """ProbeEnv 的上下文窗口旋钮落在模型声明上（自动压缩场景的阈值来源）。
 
-    默认与 ``render_config_yaml`` 的缺省一致（不因新增参数而漂移）；显式压小
-    之后 ``compact_window = window - keep_recent`` 才是场景能算出来的数。
+    默认（= 产品默认）时不写键——生成的声明形态与历史一致；显式压小之后
+    ``compact_window = window - keep_recent`` 才是场景能算出来的数。
     """
-    default = yaml.safe_load(ProbeEnv(tmp_path)._render_config(45124))["agents"][0]
-    assert default["context_window_tokens"] == DEFAULT_CONTEXT_WINDOW_TOKENS
-    assert default["keep_recent_tokens"] == DEFAULT_KEEP_RECENT_TOKENS
+    default = yaml.safe_load(ProbeEnv(tmp_path)._render_config(45124))
+    assert default["providers"][0]["models"] == [DEFAULT_PROBE_MODEL]
+    assert "context_window_tokens" not in default["agents"][0]
 
     env = ProbeEnv(tmp_path, context_window_tokens=1000, keep_recent_tokens=400)
-    agent = yaml.safe_load(env._render_config(45124))["agents"][0]
-    assert agent["context_window_tokens"] == 1000
-    assert agent["keep_recent_tokens"] == 400
+    declared = yaml.safe_load(env._render_config(45124))["providers"][0]["models"]
+    assert declared == [
+        {
+            "name": DEFAULT_PROBE_MODEL,
+            "context_window_tokens": 1000,
+            "keep_recent_tokens": 400,
+        }
+    ]
+
+
+def test_bind_model_windows_respects_explicit_declarations() -> None:
+    """旋钮是校准默认值：显式声明过窗口的模型原样保留（场景可按模型给不同阈值）。"""
+    declared: list[Any] = [
+        "probe/bare",
+        {
+            "name": "probe/pinned",
+            "context_window_tokens": 64_000,
+            "keep_recent_tokens": 8_000,
+        },
+        {"name": "probe/half", "context_window_tokens": 128_000},
+    ]
+    bound = bind_model_windows(
+        declared, context_window_tokens=1000, keep_recent_tokens=400
+    )
+    assert bound == [
+        {
+            "name": "probe/bare",
+            "context_window_tokens": 1000,
+            "keep_recent_tokens": 400,
+        },
+        {
+            "name": "probe/pinned",
+            "context_window_tokens": 64_000,
+            "keep_recent_tokens": 8_000,
+        },
+        {
+            "name": "probe/half",
+            "context_window_tokens": 128_000,
+            "keep_recent_tokens": 400,
+        },
+    ]
+
+    # 默认值（= 产品默认）时不写键：既有形态零变化。
+    assert bind_model_windows(
+        ["probe/bare"],
+        context_window_tokens=DEFAULT_CONTEXT_WINDOW_TOKENS,
+        keep_recent_tokens=DEFAULT_KEEP_RECENT_TOKENS,
+    ) == ["probe/bare"]
 
 
 @pytest.mark.asyncio

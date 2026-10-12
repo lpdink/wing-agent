@@ -67,9 +67,19 @@ PATH_EXPECTATIONS: dict[str, dict[str, Any]] = {
         "choices": ["low", "medium", "high", "max"],
     },
     # ── 模型声明（union） ──
-    "providers[].models": {"kind": "list", "apply": "hot", "min_items": 1},
+    "providers[].models": {"kind": "list", "apply": "next_session", "min_items": 1},
     "providers[].models[].id": {"kind": "str", "nullable": True},
     "providers[].models[].name": {"kind": "str"},
+    "providers[].models[].context_window_tokens": {
+        "kind": "int",
+        "apply": "next_session",
+        "default": 256_000,
+    },
+    "providers[].models[].keep_recent_tokens": {
+        "kind": "int",
+        "apply": "next_session",
+        "default": 50_000,
+    },
     "providers[].models[].capabilities.vision": {"kind": "bool"},
     # ── agent 模板 ──
     "agents[].name": {"kind": "str", "apply": "next_session", "required": True},
