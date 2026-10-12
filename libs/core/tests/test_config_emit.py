@@ -673,6 +673,7 @@ def test_every_list_declaration_defaults_to_empty() -> None:
         "agents.tools",
         "commands.paths",
         "gateway.auth.keys",
+        "gateway.cors.origins",
         "hooks",
         "providers",
         "providers.models",

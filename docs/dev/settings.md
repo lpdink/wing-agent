@@ -301,6 +301,7 @@ git-tracked 的 `config.yaml` + `.bak`。
 | `sessions.eviction.sweep_interval_seconds` | `restart` | 启动时注册 job 的间隔读一次（热重载不改变已注册 job） |
 | `gateway.host` / `gateway.port` | `restart` | uvicorn 已绑定；且 Rust 侧启动时读文件决定连哪（不做假热更） |
 | `gateway.auth.enabled` / `keys[]` | `hot` | `server.auth_config` property 每请求 `load_config()`，中间件不缓存 |
+| `gateway.cors.origins[]` | `restart` | CORS 中间件在 app 装配（进程启动）时读一次；loopback 来源恒放通，`origins` 是额外白名单 |
 | `gateway.remote_tool_timeout` | `hot` | 每次远程工具 dispatch 读 |
 | `hooks[]` | `hot` | 热重载第 2 项 `hooks.clear() + load_hooks()` |
 | `commands.paths[]` | `hot` | 热重载第 3 项 `remove_by_source("prompt") + register_prompt_commands()` |

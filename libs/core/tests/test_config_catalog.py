@@ -446,9 +446,9 @@ def test_images_defaults_are_pinned() -> None:
 
 
 def test_declared_field_scale_matches_01_report() -> None:
-    """规模断言：声明字段总数 = 68（01 报告的迁移字段数）；路径不重复。"""
+    """规模断言：声明字段总数 = 70（01 报告的 68 + 后续新增的 gateway.cors 两项）；路径不重复。"""
     declared = _declared(build_catalog())
-    assert len(declared) == 68
+    assert len(declared) == 70
     paths = [node.path for node in declared]
     assert len(set(paths)) == len(paths)
 

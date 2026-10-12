@@ -358,6 +358,17 @@ class GatewayServer:
             return AuthConfig()
         return load_config().gateway.auth
 
+    @property
+    def cors_origins(self) -> list[str]:
+        """CORS 额外允许的 origins（``gateway.cors.origins``）。
+
+        **app 装配时读一次**（CORS 中间件在进程启动时装配）——改配置要重启网关；
+        setup mode 下配置不可信，返回空列表（只保留 loopback 默认放通）。
+        """
+        if self._in_setup_mode:
+            return []
+        return list(load_config().gateway.cors.origins)
+
     def _warn_auth_lockout(self, auth: AuthConfig | None = None) -> str | None:
         """检查 auth 配置，空 keys 锁死时发出警告；返回告警文案（未锁死 = ``None``）。
 

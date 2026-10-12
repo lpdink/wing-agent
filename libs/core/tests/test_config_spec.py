@@ -128,7 +128,7 @@ def test_every_declared_model_is_reachable() -> None:
 
 def test_field_count_is_sane() -> None:
     """健全性：字段规模与声明层现状一致（防止遍历器写坏导致假绿）。"""
-    assert len(_ALL_FIELDS) == 68, [path for path, _ in _ALL_FIELDS]
+    assert len(_ALL_FIELDS) == 70, [path for path, _ in _ALL_FIELDS]
 
 
 @pytest.mark.parametrize("path", _FIELD_IDS)
