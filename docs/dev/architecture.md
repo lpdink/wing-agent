@@ -377,3 +377,5 @@ libs/core/hatch_build.py（hatchling custom build hook，构建/安装时执行�
 - 生成文件缺失时 `wing/build_info.py` 返回 None，health 回落到发行包元数据。
 - commit 反映**上次安装/构建时**的 HEAD：改完代码要做集成测试前，重新安装并重启 gateway，`wing status` 才不会显示旧 commit。
   - `pip install libs/core`（in-tree 构建）会重跑钩子；uv workspace 里必须用 **`uv sync --reinstall-package wing-gateway`**——普通 `uv sync` 只看 `libs/core/pyproject.toml` 的 mtime 决定是否复用 editable 构建缓存，源码改了、提交了都不重跑钩子，生成文件停在上一次构建的 commit（实测）。
+- **两侧错配会被指出来**：CLI 自己的 commit 同样是构建期注入（`crates/wing/build.rs` → `WING_COMMIT_HASH`，无 git 的构建回落 `"unknown"`），`wing status` 在两侧都报出哈希且不相等时于 **stderr** 打一行 `Warning: CLI build … differs from gateway build …`（stdout 保持纯状态报告）。任一侧拿不到哈希——旧网关不返回 `commit`、无 git 构建——不构成错配，保持沉默。
+  - 比对口径是**构建注入的 commit**：同一 commit 上带未提交改动构建的两侧会被判为一致（构建不记录工作区状态）——这种情况 `wing status` 看不出来，得靠重装/重建的纪律。
