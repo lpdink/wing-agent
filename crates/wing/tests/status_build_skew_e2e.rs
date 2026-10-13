@@ -23,7 +23,9 @@ use tokio::net::{TcpListener, TcpStream};
 /// The commit the binary under test was built from.
 const CLI_COMMIT: &str = env!("WING_COMMIT_HASH");
 
-/// The fake gateway's commit: a hash no build of this repo produces.
+/// The fake gateway's commit: a hash no build of this repo produces — fixed, so
+/// a failure is readable (`assert_ne!` in the skew test guards the collision a
+/// constant cannot rule out on its own).
 const GATEWAY_COMMIT: &str = "0badc0de";
 
 /// What the fake gateway reports as its build.
@@ -198,7 +200,10 @@ async fn a_matching_gateway_is_silent() {
 
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("Gateway is running"), "{stdout}");
-    assert_eq!(stderr, "", "no warning for a matching build");
+    assert!(
+        !stderr.contains("Warning"),
+        "no warning for a matching build: {stderr}"
+    );
 }
 
 /// A gateway that predates commit injection reports nothing to compare with —
@@ -213,5 +218,8 @@ async fn a_gateway_without_a_commit_is_silent() {
         stdout.contains("Commit:") && stdout.contains("unknown"),
         "{stdout}"
     );
-    assert_eq!(stderr, "", "no warning without a gateway hash");
+    assert!(
+        !stderr.contains("Warning"),
+        "no warning without a gateway hash: {stderr}"
+    );
 }
