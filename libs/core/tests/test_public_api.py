@@ -34,17 +34,20 @@ assert tool_registry.tools == [], [t.name for t in tool_registry.tools]
 
 import wing.tools  # 显式安装①：内置工具注册（装饰器 + 模块导入）
 
-names = sorted(t.name for t in tool_registry.tools)
+names = sorted((t.namespace, t.name) for t in tool_registry.tools)
 assert names == [
-    "AskUserQuestion",
-    "Bash",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Read",
-    "ReadImage",
-    "TodoWrite",
-    "Write",
+    ("default", "AskUserQuestion"),
+    ("default", "Bash"),
+    ("default", "Edit"),
+    ("default", "Glob"),
+    ("default", "Grep"),
+    ("default", "Read"),
+    ("default", "ReadImage"),
+    ("default", "TodoWrite"),
+    ("default", "Write"),
+    # 实验域：行锚编辑实验（注册即安装，启用按会话工具集）
+    ("experimental", "Edit"),
+    ("experimental", "Read"),
 ], names
 
 audit.install()  # 显式安装②：metrics 订阅
