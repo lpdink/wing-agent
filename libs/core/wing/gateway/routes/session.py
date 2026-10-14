@@ -24,6 +24,7 @@ from wing.gateway.protocol import (
     ForkSessionRequest,
     ForkSessionResponse,
     InterruptRequest,
+    LiveSessionsResponse,
     OkResponse,
     ReleaseRequest,
     ReleaseResponse,
@@ -247,6 +248,22 @@ async def list_sessions(request: Request) -> SessionListResponse:
     server = _get_server(request)
     sessions = server.runtime.list_sessions()
     return SessionListResponse(sessions=sessions)
+
+
+@router.get(
+    "/api/session/live",
+    response_model=LiveSessionsResponse,
+    summary="列出在内存会话的实时状态（轻量投影）",
+)
+async def list_live_sessions(request: Request) -> LiveSessionsResponse:
+    """只报在内存会话的 ``{id, status}``——给"只补状态"的轮询消费方。
+
+    与 `/api/session/list` 的分工：那份回答"有哪些会话"（跨 store 全量 +
+    模型绑定，逐会话读盘），这份回答"哪些还在跑"（纯内存、无盘扫描）。
+    只读快照，不水合、不触碰任何会话（对已逐出会话调用不会把它换入内存）。
+    """
+    server = _get_server(request)
+    return LiveSessionsResponse(sessions=server.runtime.list_live_sessions())
 
 
 @router.get(

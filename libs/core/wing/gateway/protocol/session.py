@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from wing.event import AgentInfo, SessionInfo
+from wing.event import AgentInfo, LiveSessionInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
 from wing.session.override import AgentOverride
 
@@ -238,6 +238,20 @@ class SessionListResponse(BaseModel):
     """session 列表响应。"""
 
     sessions: list[SessionInfo] = Field(description="所有活跃 session 的摘要列表")
+
+
+class LiveSessionsResponse(BaseModel):
+    """`GET /api/session/live` 响应——在内存（已水合）会话的轻量实时投影。
+
+    行集只含此刻进程内已加载的会话（未加载 / 已逐出者**不出现**，而不是以
+    `inactive` 出现）；`status ∈ {idle, working, waiting}`，与
+    `/api/session/list` 同取值域。顺序与 list 的活跃组同序（组内
+    `last_interaction` 降序、并列按 id 升序）——两份响应的活跃行可逐行对齐。
+    """
+
+    sessions: list[LiveSessionInfo] = Field(
+        description="在内存会话的 {id, status} 投影（不触盘、不水合）"
+    )
 
 
 class SessionGetResponse(BaseModel):

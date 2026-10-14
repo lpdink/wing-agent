@@ -20,7 +20,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 ## HTTP 端点
 
-### Session（`routes/session.py`，16 个）
+### Session（`routes/session.py`，17 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -31,6 +31,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/unsubscribe` | 取消订阅 |
 | POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask）；无该 id / id 已失效则回退普通入队 |
 | GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）与 `tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags），以及生效模型的四件套 `model_id`（引用词）/ `model_name`（调用名）/ `provider_name` / `model_display_name`（口径同 `/api/session/info`；在内存的会话取 live agent，未加载的按 resume 链解析盘上记录，解析不出的降级路径为 null，展示层回落 展示名 → 调用名 → 引用词）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及 `/ss <args>` 的 exact > prefix > contains 分层（层内保持上述顺序）；后端不感知 `pin`（它只是普通标签），状态优先级（`waiting` 不提前）与 workspace 不参与排序 |
+| GET | `/api/session/live` | **在内存（已水合）会话的轻量实时投影**：只含 `{id, status}`（`status ∈ idle\|working\|waiting`，与 list 同取值域；不做模型绑定解析、不读盘）。**行集 = 此刻进程内已加载的会话**——未加载 / 已逐出的会话**不出现在响应里**（不是以 `inactive` 出现；客户端按 id 合并时未知 id 忽略、消失即"不在内存"）。**顺序与 `/api/session/list` 的活跃组同序**（组内 `last_interaction` 降序、并列按 id 升序）：两份响应的活跃行可逐行对齐。**只读**：不水合、不触碰任何会话（对已逐出会话调用不会把它换入内存）。用途：会话列表 / rail **只补状态**的轮询（全量清单仍走 `/api/session/list`，那是逐会话读盘的全量枚举） |
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `model`（调用名）+ `model_id`（引用词；不可用时 null）+ `provider_name`（运行期事实）+ `model_display_name`（展示名；未声明 = null，前端回落 `model`）、`context_stats`、`skills_info`、`reasoning_effort`、`tags`（会话标签）、`tag_meta`（标签记录，含 `added_at`）与 `usage`（会话用量账本：计数 `user_messages` / `llm_calls` / `tool_calls` / `turns` + token `prompt_tokens` / `completion_tokens` / `cached_tokens` + 时长 `llm_time_ms` / `tool_time_ms`，跨 release / 网关重启延续；旧会话 / 无记录读出即全零，不回填。口径：`llm_*` 只计 ReAct 循环内的调用（压缩等旁路不计），tool 只计真实执行的调用（参数非法 / 未知工具的短路与中断合成不计）。命中率 = `cached_tokens / prompt_tokens`、工作时长 = `llm_time_ms + tool_time_ms` 由客户端推导——线格式不含派生值） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
@@ -46,7 +47,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > 只回收 worker 与 provider client，`history.jsonl` / `metadata.json` 一概不动。
 > `resume` / `subscribe` / `send` 按需水合；`session/get`、`info`、`branches` 不
 > 自动水合，对已逐出会话仍回 404（`wing tail` / `head` / `info` 内部按 404→resume
-> 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹）。
+> 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹，
+> `/api/session/live` 的形态则是"行消失"——它只报在内存会话）。
 > `wing release <sid>` 是对应的显式操作。
 >
 > **session id 是闸门（只防穿越与卫生）**：id 由后端生成（默认形态
@@ -236,6 +238,12 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
 
 **网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），客户端重连后应重新 `GET /api/settings/status`，重放一条旧通知只会误导。消费侧**用指纹比对**判断是不是别人改的（自己的保存会更新本地指纹，相同即忽略；不同则提示"配置已被其它客户端修改"并作废本地缓存）。
+
+> **运行状态不是事件、也不进全局流**：会话事件只发给**订阅了该会话**的 client（`target.scope="session"`
+> 按路由表解析），全局广播面目前只有 `settings_changed`；而 `idle ↔ working ↔ waiting` 的翻转本身
+> **没有**任何事件（`session_state_changed` 是模型/开关/标题变更，不含状态）。因此"没订阅的观察者"
+> （会话列表 / rail / `wing ps`）要看到即时状态只能走 HTTP：`GET /api/session/live`（只补状态）
+> 或 `GET /api/session/list`（全量，逐会话读盘）。
 
 > `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（前端终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。
 

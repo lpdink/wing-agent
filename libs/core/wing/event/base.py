@@ -92,6 +92,23 @@ class SessionInfo(BaseModel):
     model_display_name: str | None = None
 
 
+class LiveSessionInfo(BaseModel):
+    """在内存（已水合）会话的轻量实时投影——只报状态，不报别的。
+
+    行集 = 此刻**进程内已加载**的会话（`SessionManager._sessions`），
+    `status` 是即时读取的运行状态。刻意不是 :class:`SessionInfo` 的子集：
+    它不做模型绑定解析、不读盘、不取标题——消费方（会话列表/rail）手里
+    已经有完整行，缺的只是"还在跑吗"这一位。行里没有 `inactive`（不在内存
+    的会话是**不出现在投影里**，而不是以 `inactive` 出现）。
+
+    两份响应的活跃行可以逐行对齐（同一排序口径），但**只有状态**是同一时刻
+    的：其余字段以 `/api/session/list` 的取值为准。
+    """
+
+    id: str
+    status: SessionStatus
+
+
 class AgentInfo(BaseModel):
     """创建 agent 的完整配置，用于 Activate 时前端恢复 UI 状态。
 

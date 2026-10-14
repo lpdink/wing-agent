@@ -24,6 +24,7 @@ from wing.event import (
     ContextStatsEvent,
     EventTarget,
     InterruptedEvent,
+    LiveSessionInfo,
     SessionInfo,
     SessionInitEvent,
     SessionStateChangedEvent,
@@ -400,6 +401,14 @@ class WingRuntime:
     def list_sessions(self) -> list[SessionInfo]:
         """列出所有 session（磁盘上的），按时间降序，携带运行时状态。"""
         return self.sm.list_sessions()
+
+    def list_live_sessions(self) -> list[LiveSessionInfo]:
+        """列出**在内存**会话的实时状态（轻量投影：id + status）。
+
+        只读快照：不水合、不触盘，供"只补状态"的轮询消费方（会话列表 / rail）
+        使用——全量清单仍走 :meth:`list_sessions`。
+        """
+        return self.sm.list_live_sessions()
 
     def get_session_state(self, session_id: str) -> dict | None:
         """获取 session 完整状态。返回 dict 或 None。"""

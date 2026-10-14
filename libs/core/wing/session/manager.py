@@ -36,6 +36,7 @@ from wing.hooks import hooks
 from wing.event import (
     DeliveredEvent,
     EventTarget,
+    LiveSessionInfo,
     SessionInfo,
 )
 from wing.event_bus import event_bus
@@ -107,8 +108,8 @@ def _warn_alias(requested: str, resolved: str) -> None:
     )
 
 
-def _timestamp_key(s: SessionInfo) -> float:
-    """归一化 session 的「最后一次交互时间」为可比较的 epoch 秒。
+def _interaction_time(last_interaction: object, session_id: str) -> float:
+    """归一化「最后一次交互时间」为可比较的 epoch 秒。
 
     「有啥用啥」的三级回退：`metadata.last_interaction`（ISO 字符串或数值）→
     缺失 / 不可解析时用 session id 前缀（`YYYYMMDD-HHMMSS`）→ 都没有按 0。
@@ -119,7 +120,7 @@ def _timestamp_key(s: SessionInfo) -> float:
     UTC 折算——同一份列表里不要混写两种字符串，否则按本地 UTC 偏移错序（小时级）。
     数值分支是防御代码（`SessionMetadata.last_interaction` 只声明 `str`）。
     """
-    ts = s.last_interaction
+    ts = last_interaction
     if ts is not None:
         if isinstance(ts, str):
             try:
@@ -129,12 +130,17 @@ def _timestamp_key(s: SessionInfo) -> float:
                 pass
         elif isinstance(ts, (int, float)):
             return float(ts)
-    prefix = s.id[:15] if len(s.id) >= 15 else s.id
+    prefix = session_id[:15] if len(session_id) >= 15 else session_id
     try:
         dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
         return dt.timestamp()
     except Exception:
         return 0.0
+
+
+def _timestamp_key(s: SessionInfo) -> float:
+    """:class:`SessionInfo` 行的时间键（口径见 :func:`_interaction_time`）。"""
+    return _interaction_time(s.last_interaction, s.id)
 
 
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
@@ -891,6 +897,27 @@ class SessionManager:
         result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s), s.id))
 
         return result
+
+    def list_live_sessions(self) -> list[LiveSessionInfo]:
+        """在内存（已水合）会话的轻量实时投影——只读、不水合、不触盘。
+
+        行集 = 此刻 `self._sessions` 里的会话（含刚创建还没发言的空会话）：
+        未加载 / 已逐出的会话**不出现在投影里**（不是以 `inactive` 出现）。
+        `status` 就地取自 live agent（idle / working / waiting），因此调用方
+        不必订阅该会话也能拿到即时状态——这是"全局 rail 只补状态"的素材面，
+        与 :meth:`list_sessions` 的全量盘扫描（跨 store 枚举 + 模型绑定解析）
+        分工明确：那份回答"有哪些会话"，这份回答"哪些还在跑"。
+
+        顺序与 :meth:`list_sessions` 的**活跃组**同序（组内按
+        `_interaction_time` 降序、完全并列按 id 升序）——两份响应的活跃行
+        可以逐行对齐。在内存会话的 metadata 就在内存里，排序零 IO。
+        """
+        items = [
+            (sid, session.status, session.last_interaction)
+            for sid, session in self._sessions.items()
+        ]
+        items.sort(key=lambda it: (-_interaction_time(it[2], it[0]), it[0]))
+        return [LiveSessionInfo(id=sid, status=status) for sid, status, _ in items]
 
     # ============================================================
     # 外部方法：消息路由入口

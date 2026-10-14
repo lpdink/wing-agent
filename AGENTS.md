@@ -10,7 +10,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ┌─────────────────────────────┐             ┌─────────────────────────┐               ┌─────────────────────────┐
 │ Frontends（wing 二进制）    │             │ Gateway (FastAPI)       │               │ Runtime (Python)        │
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
-│ stdio（wing -p）· NDJSON    │             │ · routes/session(16)    │               │ ├ SessionManager        │
+│ stdio（wing -p）· NDJSON    │             │ · routes/session(17)    │               │ ├ SessionManager        │
 │ acp（wing acp）· ACP v1     │             │ · routes/system(6)      │               │ ├ SessionStore          │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/settings(4)    │◄──────────────│ ├ ContextManager        │
 │ 网关生命周期 · start/stop   │             │ · tools/health · ws     │               │ ├ EventBus              │
@@ -20,7 +20,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ```
 
 - **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（32 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（33 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知；provider 实例无状态、归全进程共享池（`provider/pool.py`），会话级参数（session id 缓存亲和 / media / thinking）经 `RequestOptions` 每次调用注入。
 
@@ -134,7 +134,7 @@ libs/core/wing/
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(16) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(17) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）

@@ -5,6 +5,8 @@
 - Session.status 委托 agent
 - SessionManager.list_sessions 的 status 填充（inactive vs live）与排序口径
   （活跃优先 + 组内最后交互时间降序；workspace 不参与；时间缺失回退 id 前缀）
+- SessionManager.list_live_sessions 的轻量投影（只含在内存会话、与 list 活跃组
+  同序、行形状只有 id / status）
 """
 
 from __future__ import annotations
@@ -148,11 +150,15 @@ def _make_manager(sessions_path: Path):
     return SessionManager({"file": FileSessionStore(sessions_path)})
 
 
-def _mark_active(sm, session_id: str, status: str = "idle") -> None:
+def _mark_active(
+    sm, session_id: str, status: str = "idle", *, last: str | None = None
+) -> None:
     """把 session 标记为「已加载进内存」（active）并给定 live 状态。
 
     列表条目还投影模型四件套（`Session.model_binding`）——假会话照实给一份
     （未声明任何模型的降级形态），本文件断言的是状态与排序。
+
+    ``last`` 是该会话的 ``last_interaction``（None = 缺失，排序回退 id 前缀）。
     """
     from unittest.mock import MagicMock
 
@@ -160,6 +166,7 @@ def _mark_active(sm, session_id: str, status: str = "idle") -> None:
 
     live = MagicMock()
     live.status = status
+    live.last_interaction = last
     live.model_binding.return_value = ModelBinding(
         model_id=None,
         model_name="stub-model",
@@ -384,3 +391,99 @@ class TestListSessionsOrder:
             "20250101-000000-bbbbbbbb",
             "20250101-000000-cccccccc",
         ]
+
+
+class TestListLiveSessions:
+    """在内存会话的轻量投影（`/api/session/live` 的素材面）。
+
+    契约：行集 = 已加载进内存的会话（未加载 / 已逐出者不出现，而不是
+    `inactive`）；status 是即时读的 live agent 状态；顺序与 `list_sessions`
+    的活跃组同序（时间降序 + id 定序）；行形状只有 id / status。
+    """
+
+    def test_projects_only_loaded_sessions(self, tmp_path: Path):
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(sessions_path, _sid("loaded"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("disk-only"), "2025-06-01T00:00:00")
+
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("loaded"), "working", last="2025-01-01T00:00:00")
+
+        rows = sm.list_live_sessions()
+
+        assert [row.id for row in rows] == [_sid("loaded")]
+        assert rows[0].status == "working"
+
+    def test_empty_when_nothing_is_loaded(self, tmp_path: Path):
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(sessions_path, _sid("disk-only"), "2025-01-01T00:00:00")
+
+        assert _make_manager(sessions_path).list_live_sessions() == []
+
+    def test_every_live_status_is_projected(self, tmp_path: Path):
+        sessions_path = tmp_path / "sessions"
+        for name in (_sid("idle"), _sid("working"), _sid("waiting")):
+            _write_session_dir(sessions_path, name, "2025-01-01T00:00:00")
+
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("idle"), "idle", last="2025-01-01T00:00:00")
+        _mark_active(sm, _sid("working"), "working", last="2025-01-02T00:00:00")
+        _mark_active(sm, _sid("waiting"), "waiting", last="2025-01-03T00:00:00")
+
+        assert {row.id: row.status for row in sm.list_live_sessions()} == {
+            _sid("idle"): "idle",
+            _sid("working"): "working",
+            _sid("waiting"): "waiting",
+        }
+
+    def test_order_matches_the_list_active_group(self, tmp_path: Path):
+        # 两份响应的活跃行必须逐行对齐（同序是契约：消费方按序叠加/对齐）。
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(sessions_path, _sid("live-old"), "2025-01-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("live-new"), "2025-06-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("disk-newer"), "2025-07-01T00:00:00")
+
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("live-old"), "idle", last="2025-01-01T00:00:00")
+        _mark_active(sm, _sid("live-new"), "working", last="2025-06-01T00:00:00")
+
+        active = [s.id for s in sm.list_sessions() if s.status != "inactive"]
+
+        assert (
+            [row.id for row in sm.list_live_sessions()]
+            == active
+            == [
+                _sid("live-new"),
+                _sid("live-old"),
+            ]
+        )
+
+    def test_ordering_falls_back_to_id_prefix(self, tmp_path: Path):
+        # 内存态缺 last_interaction → 与 list 同款回退（id 前缀 YYYYMMDD-HHMMSS）。
+        sessions_path = tmp_path / "sessions"
+        for session_id in (
+            "20250101-101010-aaaaaaaa",
+            "20250601-101010-aaaaaaaa",
+            "20250301-101010-aaaaaaaa",
+        ):
+            _write_session_dir(sessions_path, session_id, None)
+
+        sm = _make_manager(sessions_path)
+        for session_id in (
+            "20250101-101010-aaaaaaaa",
+            "20250601-101010-aaaaaaaa",
+            "20250301-101010-aaaaaaaa",
+        ):
+            _mark_active(sm, session_id, "idle")
+
+        assert [row.id for row in sm.list_live_sessions()] == [
+            "20250601-101010-aaaaaaaa",
+            "20250301-101010-aaaaaaaa",
+            "20250101-101010-aaaaaaaa",
+        ]
+
+    def test_rows_carry_id_and_status_only(self):
+        # 行形状是契约：加字段会改变所有消费方的解码面（轻量投影的意义就在这）。
+        from wing.event import LiveSessionInfo
+
+        assert set(LiveSessionInfo.model_fields) == {"id", "status"}
