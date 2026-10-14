@@ -19,6 +19,12 @@ pub use client_request::ClientRequest;
 pub use connect_response::ConnectResponse;
 pub use events::*;
 pub use history::*;
+/// 媒体引用（镜像 Python `wing.schema.MediaRef`）。
+///
+/// 与 `SyncSession.usage` 同一条纪律：同一份线格式只定义一次——本体在
+/// [`wing_api_client::models::MediaRef`]，这里只是把它抬到协议层的公共名字
+/// （上行 `ClientRequest.media`、上传回执、下行 `tool_media` 共用）。
+pub use wing_api_client::models::MediaRef;
 
 /// Monotonic counter for generating unique request IDs within a process.
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);

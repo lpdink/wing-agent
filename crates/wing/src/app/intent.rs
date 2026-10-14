@@ -74,10 +74,15 @@ pub enum AppIntent {
     /// `request_id` — client-generated correlation id; echoes back in
     /// `delivered` / `user_message_accepted` events so the app can match
     /// the message against its pending queue.
+    ///
+    /// `images` — 随消息发出的图片（压缩产物，按提交顺序）。空 = 纯文本，
+    /// runner 走原路径（不上传、帧里没有 `media` 键）；非空时 runner 先逐张
+    /// 上传再发消息（见 `runner::send_user_message`）。
     SendMessage {
         content: String,
         tool_call_id: Option<String>,
         request_id: String,
+        images: Vec<crate::util::image_compress::CompressedImage>,
     },
 
     /// Write text to clipboard via OSC52 escape sequence.

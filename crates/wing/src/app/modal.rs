@@ -708,6 +708,8 @@ impl App {
             content,
             tool_call_id: Some(tool_call_id),
             request_id: crate::protocol::generate_request_id(),
+            // Ask 的应答是纯文本（面板只产文本）。
+            images: Vec::new(),
         });
     }
 

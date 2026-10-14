@@ -15,6 +15,7 @@ mod program_status;
 mod projection;
 mod scrollbar;
 mod selection;
+mod send;
 mod settings;
 mod support;
 mod usage;
