@@ -359,6 +359,9 @@ impl Session {
     }
 
     /// 下一次需要 [`Session::on_timeout`] 的时刻（无在途 = 无需唤醒）。
+    ///
+    /// `read` 为空 ⟹ 队列为空：每条让 `read` 变空的路径都在同一次调用里推进队列
+    /// （见 [`Session::abort_read`]），待服务的事件不会停在「没有任何 deadline」上。
     pub fn deadline(&self) -> Option<Instant> {
         let event = self.event.as_ref().map(|e| e.deadline);
         let read = self.read.as_ref().map(|r| r.deadline);
@@ -377,9 +380,8 @@ impl Session {
         let Some(packet) = Packet::parse(raw) else {
             // 坏包：读中途算致命（响应不可信），其余忽略（可能是别人的协议流量）。
             if self.read.is_some() {
-                self.read = None;
                 tracing::debug!("clipboard: malformed packet during read");
-                return vec![Effect::Fail(ClipboardFailure::Malformed)];
+                return self.abort_read(ClipboardFailure::Malformed, now);
             }
             tracing::debug!("clipboard: ignoring malformed OSC 5522 packet");
             return Vec::new();
@@ -477,23 +479,24 @@ impl Session {
                 Vec::new()
             }
             "DATA" => {
+                let mut too_large = false;
                 if let Some(read) = &mut self.read
                     && packet.mime.as_deref() == Some(read.mime.as_str())
                 {
                     if read.data.len() + packet.payload.len() > MAX_PAYLOAD {
-                        self.read = None;
-                        return vec![Effect::Fail(ClipboardFailure::TooLarge)];
+                        too_large = true;
+                    } else {
+                        read.data.extend_from_slice(&packet.payload);
+                        read.deadline = now + IDLE_TIMEOUT;
                     }
-                    read.data.extend_from_slice(&packet.payload);
-                    read.deadline = now + IDLE_TIMEOUT;
+                }
+                if too_large {
+                    return self.abort_read(ClipboardFailure::TooLarge, now);
                 }
                 Vec::new()
             }
             "DONE" => self.finish_read(now),
-            other => {
-                self.read = None;
-                vec![Effect::Fail(failure_for(other))]
-            }
+            other => self.abort_read(failure_for(other), now),
         }
     }
 
@@ -512,9 +515,21 @@ impl Session {
         if let Some(read) = &self.read
             && now >= read.deadline
         {
-            self.read = None;
-            effects.push(Effect::Fail(ClipboardFailure::Timeout));
+            effects.extend(self.abort_read(ClipboardFailure::Timeout, now));
         }
+        effects.extend(self.pump_queue(now));
+        effects
+    }
+
+    /// 放弃在途的读：交付失败，并把队列推进一格。
+    ///
+    /// **让 `read` 变空的失败路径必须走这里**（正常收尾走 [`Session::finish_read`]）：
+    /// 只置空会让 `deadline()` 变成 `None`，驱动任务的 `select!` 从此不再唤醒——
+    /// 队列里已到齐的粘贴事件无反馈卡死，而后续粘贴因 `read.is_none()` 直接开始新读
+    /// （插队），被卡的事件要等下一次读完成才被取出（那时 OTP 多半已失效）。
+    fn abort_read(&mut self, failure: ClipboardFailure, now: Instant) -> Vec<Effect> {
+        self.read = None;
+        let mut effects = vec![Effect::Fail(failure)];
         effects.extend(self.pump_queue(now));
         effects
     }
@@ -544,14 +559,18 @@ impl Session {
     }
 
     /// 队列里下一个事件（读空出来了就开始）。
+    ///
+    /// `start` 自己也会失败（listing 里没有可读的表示 → 直接交付失败）：读仍空着，
+    /// 必须继续拿下一个，否则排在他后面的事件们同样卡死。
     fn pump_queue(&mut self, now: Instant) -> Vec<Effect> {
-        if self.read.is_some() {
-            return Vec::new();
+        let mut effects = Vec::new();
+        while self.read.is_none() {
+            let Some(next) = self.queue.pop_front() else {
+                return effects;
+            };
+            effects.extend(self.start(next, now));
         }
-        match self.queue.pop_front() {
-            Some(next) => self.start(next, now),
-            None => Vec::new(),
-        }
+        effects
     }
 
     fn start(&mut self, event: PendingEvent, now: Instant) -> Vec<Effect> {
@@ -1151,6 +1170,155 @@ mod tests {
         }
     }
 
+    /// [B] 读中途失败的三种形态（终端拒绝 / 数据超限 / 坏包）都必须把队列推进一格。
+    ///
+    /// 修复前的反例：失败路径只把 `read` 置空（不 pump、不留 deadline）→ 驱动任务的
+    /// `select!` 拿 `None` 永远 pending，队列里已到齐的第二个粘贴事件无反馈卡死；
+    /// 后续粘贴还会因 `read.is_none()` 直接开始新读（插队），被卡的事件要等下一次读
+    /// 完成才被取出（那时它的 OTP 多半已失效 → 迟到错误 + 顺序错乱）。
+    #[test]
+    fn read_failure_serves_the_queued_paste_instead_of_stranding_it() {
+        type Kill = fn(&mut Session) -> Vec<Effect>;
+        let kills: [(&str, Kill, ClipboardFailure); 4] = [
+            (
+                "EPERM",
+                |s| {
+                    s.on_sequence(
+                        &response("type=read:status=EPERM:id=wing-paste-1", None),
+                        at(10),
+                    )
+                },
+                ClipboardFailure::Denied,
+            ),
+            (
+                "EFBIG",
+                |s| {
+                    s.on_sequence(
+                        &response("type=read:status=EFBIG:id=wing-paste-1", None),
+                        at(10),
+                    )
+                },
+                ClipboardFailure::TooLarge,
+            ),
+            (
+                "malformed",
+                |s| s.on_sequence(b"type=read:status", at(10)),
+                ClipboardFailure::Malformed,
+            ),
+            (
+                "oversize data",
+                |s| {
+                    s.on_sequence(
+                        &response(
+                            &format!(
+                                "type=read:status=DATA:id=wing-paste-1:mime={}",
+                                b64_encode(b"text/plain")
+                            ),
+                            Some(&vec![0u8; MAX_PAYLOAD + 1]),
+                        ),
+                        at(10),
+                    )
+                },
+                ClipboardFailure::TooLarge,
+            ),
+        ];
+
+        for (label, kill, expected) in kills {
+            let mut s = Session::new();
+            event_triplet("one", &["text/plain"], 0, &mut s);
+            assert!(
+                event_triplet("two", &["text/plain"], 1, &mut s).is_empty(),
+                "{label}: 第二个事件先排队"
+            );
+
+            let effects = kill(&mut s);
+
+            // 失败有反馈，第二个事件在同一批里被服务（既不卡死也不被插队）。
+            assert_eq!(
+                effects.len(),
+                2,
+                "{label}: 失败要有反馈、队列要推进：{effects:?}"
+            );
+            assert_eq!(effects[0], Effect::Fail(expected), "{label}");
+            let Effect::Send(bytes) = &effects[1] else {
+                panic!("{label}: 期望第二个事件的 read 请求，得到 {:?}", effects[1]);
+            };
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            assert!(
+                text.contains("id=wing-paste-2"),
+                "{label}: 新读要用下一个序号（旧 id 的残留包才不会串场）：{text}"
+            );
+            assert!(
+                text.contains(&b64_encode(b"two")),
+                "{label}: 授权必须来自第二个事件：{text}"
+            );
+
+            // 第三次粘贴不插队：read#2 在途 → 排队；read#2 收完才轮到它（FIFO）。
+            assert!(
+                event_triplet("three", &["text/plain"], 11, &mut s).is_empty(),
+                "{label}: 第三次粘贴排队"
+            );
+            assert!(
+                s.on_sequence(
+                    &response(
+                        "type=read:status=DATA:id=wing-paste-2:mime=dGV4dC9wbGFpbg==",
+                        Some(b"second"),
+                    ),
+                    at(12),
+                )
+                .is_empty()
+            );
+            let effects = s.on_sequence(
+                &response("type=read:status=DONE:id=wing-paste-2", None),
+                at(13),
+            );
+            assert_eq!(effects.len(), 2, "{label}: {effects:?}");
+            assert_eq!(
+                effects[0],
+                Effect::Deliver(ClipboardPayload::Text("second".into())),
+                "{label}: 先交付第二个事件"
+            );
+            let Effect::Send(bytes) = &effects[1] else {
+                panic!("{label}: 期望第三次的 read 请求，得到 {:?}", effects[1]);
+            };
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            assert!(
+                text.contains("id=wing-paste-3") && text.contains(&b64_encode(b"three")),
+                "{label}: {text}"
+            );
+        }
+    }
+
+    /// 队列推进撞上「没有可读表示」的事件不能停在那里：它自己要有失败反馈，
+    /// 排在它后面的事件也必须继续被服务（同一类卡死：`read` 空着、队列非空、
+    /// 没有任何 deadline 会再来叫醒 [`Session::on_timeout`]）。
+    #[test]
+    fn pump_queue_serves_past_an_event_with_no_usable_representation() {
+        let mut s = Session::new();
+        event_triplet("one", &["text/plain"], 0, &mut s);
+        event_triplet("two", &["text/html"], 1, &mut s);
+        event_triplet("three", &["text/plain"], 2, &mut s);
+
+        // read#1 零数据 DONE：自己失败，随后 #2 失败、#3 立刻开始。
+        let effects = s.on_sequence(
+            &response("type=read:status=DONE:id=wing-paste-1", None),
+            at(3),
+        );
+        assert_eq!(effects.len(), 3, "{effects:?}");
+        assert_eq!(effects[0], Effect::Fail(ClipboardFailure::NoRepresentation));
+        assert_eq!(effects[1], Effect::Fail(ClipboardFailure::NoRepresentation));
+        let Effect::Send(bytes) = &effects[2] else {
+            panic!("期望第三次的 read 请求，得到 {:?}", effects[2]);
+        };
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        // 序号按**已开始的读**计数（#2 没有可读表示、从未起读，所以这次是 wing-paste-2）。
+        assert!(
+            text.contains("id=wing-paste-2") && text.contains(&b64_encode(b"three")),
+            "{text}"
+        );
+        assert!(s.deadline().is_some(), "第三次读在途");
+    }
+
     #[test]
     fn queue_is_bounded() {
         let mut s = Session::new();
@@ -1270,6 +1438,89 @@ mod tests {
             .expect("失败事件必须到达")
             .expect("通道还开着");
         assert_eq!(event_failure(&event), Some(ClipboardFailure::Denied));
+    }
+
+    /// [B] 驱动面：第一次读以失败收场（EPERM）时，队列里的第二次粘贴必须当场被服务。
+    ///
+    /// 修复前的形态：失败让 `read` 变空、队列仍非空 → `deadline()` 变 `None`，驱动
+    /// 的 `select!` 不再唤醒，第二个请求要等下一次流量路过才被写出（若流量迟迟不来，
+    /// 用户看到的是"粘了没反应"）。
+    #[tokio::test]
+    async fn driver_serves_the_queued_paste_after_a_read_failure() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let (seq_tx, seq_rx) = mpsc::channel(8);
+        let (ev_tx, mut ev_rx) = mpsc::channel(8);
+        let written = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&written);
+        spawn_with(seq_rx, ev_tx, move |bytes| {
+            sink.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        });
+
+        // event#1（pw=one）→ 读在途；event#2（pw=two）→ 排队。
+        for pw in [b"one".as_slice(), b"two".as_slice()] {
+            seq_tx
+                .send(packet(
+                    &format!("type=read:status=OK:pw={}", b64_encode(pw)),
+                    None,
+                ))
+                .await
+                .unwrap();
+            seq_tx
+                .send(packet(
+                    &format!(
+                        "type=read:status=DATA:mime={}:pw={}",
+                        b64_encode(b"."),
+                        b64_encode(pw)
+                    ),
+                    Some(b"text/plain\n"),
+                ))
+                .await
+                .unwrap();
+            seq_tx
+                .send(packet(
+                    &format!("type=read:status=DONE:pw={}", b64_encode(pw)),
+                    None,
+                ))
+                .await
+                .unwrap();
+        }
+        wait_for("第一个 read 请求写出去", || {
+            !written.lock().unwrap().is_empty()
+        })
+        .await;
+
+        seq_tx
+            .send(packet("type=read:status=EPERM:id=wing-paste-1", None))
+            .await
+            .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+            .await
+            .expect("失败事件必须到达")
+            .expect("通道还开着");
+        assert_eq!(event_failure(&event), Some(ClipboardFailure::Denied));
+
+        wait_for("第二个 read 请求写出去", || {
+            String::from_utf8_lossy(&written.lock().unwrap()).contains("id=wing-paste-2")
+        })
+        .await;
+        let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains(&format!("pw={}", b64_encode(b"two"))),
+            "第二个请求必须带第二个事件的授权：{text}"
+        );
+    }
+
+    /// 轮询等待驱动任务（独立 tokio 任务）完成某件事；超时即断言失败。
+    async fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !done() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(done(), "等待超时：{what}");
     }
 
     fn event_failure(event: &TermEvent) -> Option<ClipboardFailure> {
