@@ -470,6 +470,27 @@ class TestListSessionFilters:
             _sid("disk-pin")
         ]
 
+    def test_visibility_runs_before_the_filter(self, tmp_path: Path):
+        """无名且无标的会话不进列表（无论过滤什么）——过滤只做减法，不造行。
+
+        构造：盘上有 `history.jsonl`（store 因此把它作为候选报上来）但里面没有
+        user 记录（名字回退取不到东西）、metadata 也没有标签 → 被 manager 的
+        可见性规则滤掉。这条路径只有可见性判断能挡：去掉它，两种查询都会多出行。
+        """
+        sessions_path = tmp_path / "sessions"
+        session_dir = sessions_path / _sid("untitled")
+        session_dir.mkdir(parents=True)
+        (session_dir / "history.jsonl").write_text(
+            json.dumps({"role": "assistant", "content": "orphan", "uuid": "u1"}) + "\n"
+        )
+        (session_dir / "metadata.json").write_text(json.dumps({}))
+
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("untitled"), "idle")
+
+        assert _ids(sm) == []
+        assert _ids_filtered(sm, statuses={"idle", "working", "waiting"}) == []
+
     def test_filtered_rows_are_a_subsequence_of_the_full_list(self, tmp_path: Path):
         sessions_path = tmp_path / "sessions"
         for index, (session_id, tag) in enumerate(
