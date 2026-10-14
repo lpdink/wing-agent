@@ -186,9 +186,9 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`），漏了就退回「要用户确认」甚至被拒。
 
-**包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。event 侧没有 id 可比，就比**一次性密码**（终端为每次粘贴新生成、三连里每包回显）：被放弃的 event 迟到的 listing / DONE 因此同样落不到下一次粘贴上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）一律走 toast，不出现「粘了但什么都没发生」。
+**包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。event 侧没有 id 可比，就比**一次性密码**（终端为每次粘贴新生成、三连里每包回显）：被放弃的 event 迟到的 listing / DONE 因此同样落不到下一次粘贴上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）、**event 队列满导致的丢弃**一律走 toast，不出现「粘了但什么都没发生」。
 
-**图片：入队 → 压缩 → chip（单并发流水线）**。`App::on_clipboard_image` 把字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张），队列非空且没有在飞的压缩时取队首、**move** 进 `AppIntent::CompressClipboardImage { bytes, options }`（`options` 来自 `paste.image.*`，入队那一刻取，越界值已夹紧）。runner 在**阻塞池**上跑 `util/image_compress`（解码 / 白底 flatten / 长边缩放 / JPEG + 预算循环），结果经 `FetchPayload::ClipboardImage` 回到 `App::on_clipboard_compressed`：成功 → `input.insert_image`（chip 号码 = 插入序 = 粘贴序），失败 → warning toast（`Image dropped: <原因>`）。**一次只压一张**不是保守而是顺序契约（并发压完的到达序不确定，号码就会跳序）；**成功不 toast**（chip 出现本身就是反馈，与文本粘贴一致）。这条回执**不属于任何会话**：`handle_fetch_result` 在会话守卫**之前**分派它——丢掉它会让「在飞」永远为真，之后所有粘贴都不落地。
+**图片：入队 → 压缩 → chip（单并发流水线）**。`App::on_clipboard_image` 把字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张并给 warning toast `Image dropped: too many pending images`——与其它失败同一条红线），队列非空且没有在飞的压缩时取队首、**move** 进 `AppIntent::CompressClipboardImage { bytes, options }`（`options` 来自 `paste.image.*`，入队那一刻取，越界值已夹紧）。runner 在**阻塞池**上跑 `util/image_compress`（解码 / 白底 flatten / 长边缩放 / JPEG + 预算循环），结果经 `FetchPayload::ClipboardImage` 回到 `App::on_clipboard_compressed`：成功 → `input.insert_image`（chip 号码 = 插入序 = 粘贴序），失败 → warning toast（`Image dropped: <原因>`）。**一次只压一张**不是保守而是顺序契约（并发压完的到达序不确定，号码就会跳序）；**成功不 toast**（chip 出现本身就是反馈，与文本粘贴一致）。这条回执**不属于任何会话**：`handle_fetch_result` 在会话守卫**之前**分派它——丢掉它会让「在飞」永远为真，之后所有粘贴都不落地。
 
 chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标签行共用一份实现，`util/format.rs::image_label`；形状断言钉在那里，chip 侧钉在 `ui/input_area/image.rs`），其中 `W×H` 与 `SIZE` 取的都是**压缩后**的产物（那才是真正发出去的字节；`SIZE` 用紧凑记法 `512B` / `384KB` / `1.0MB`，永不写 `1024KB`）。渲染与粘贴 chip 完全同款：accent 上色、行内、整块不切开、ghost 态随草稿一起 dim。
 
@@ -210,7 +210,7 @@ chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标�
 | tmux / zellij 内 | 多路复用器拦未知 OSC（除非用户开 passthrough）→ 登记为**已知限制**（先进终端直连） |
 | Windows | 不承诺（接驳层是 `cfg(unix)`；非 Unix 上 `install()` 是空操作，也不开 `?5522`） |
 
-**不做的事**：不查 DECRQM 探测支持性（忽略模式集的终端本就不受影响）；不做终端无确认弹窗之外的授权流程（OTP 由 event 自带，`clipboard_read=ask` 下也免弹窗）；不做「一次粘贴多 item」的强承诺（尽力：分片与多 event 队列处理，队列满了才丢弃并记 WARN）。
+**不做的事**：不查 DECRQM 探测支持性（忽略模式集的终端本就不受影响）；不做终端无确认弹窗之外的授权流程（OTP 由 event 自带，`clipboard_read=ask` 下也免弹窗）；不做「一次粘贴多 item」的强承诺（尽力：分片与多 event 队列处理；**队列满 / 图片流水线超预算时丢弃是取舍，但丢弃一定有反馈**——warning toast，不做静默丢弃）。
 
 **待真机确认项**见文末「真机验收清单」的 D 节：macOS 侧 listing 的 MIME 名称按 `UTType.preferredMIMEType`
 推断应是标准 MIME（`image/png` 等），需在 Ghostty 实机确认（截图 / 浏览器复制图片两种来源）；确认 `Cmd+V`

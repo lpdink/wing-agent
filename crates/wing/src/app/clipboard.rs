@@ -133,12 +133,16 @@ impl App {
     }
 
     /// 把队列收进上限（FIFO 丢最旧的，见 [`MAX_PENDING_IMAGES`]）。
+    ///
+    /// 丢弃要出声（与协议机队列满同一条红线）：静默丢图是「粘了没反应」的最坏形态，
+    /// 所以这里和别的失败一样走 warning toast。
     fn trim_pending_images(&mut self) {
         let mut total: usize = self
             .pending_clipboard_images
             .iter()
             .map(|i| i.bytes.len())
             .sum();
+        let mut dropped = 0usize;
         while self.pending_clipboard_images.len() > MAX_PENDING_IMAGES
             || total > MAX_PENDING_IMAGE_BYTES
         {
@@ -146,13 +150,20 @@ impl App {
                 // 最后一张再大也留着：它就是用户刚粘的那一张。
                 break;
             }
-            let dropped = self.pending_clipboard_images.remove(0);
-            total -= dropped.bytes.len();
+            let oldest = self.pending_clipboard_images.remove(0);
+            total -= oldest.bytes.len();
+            dropped += 1;
             tracing::warn!(
-                bytes = dropped.bytes.len(),
-                mime = %dropped.mime,
+                bytes = oldest.bytes.len(),
+                mime = %oldest.mime,
                 "clipboard image queue over budget, dropped the oldest"
             );
+        }
+        if dropped > 0 {
+            self.show_toast(Toast::warning(
+                "Image dropped: too many pending images",
+                Duration::from_secs(4),
+            ));
         }
     }
 }

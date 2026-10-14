@@ -86,6 +86,8 @@ pub enum ClipboardFailure {
     TooLarge,
     /// 数据不可解析（坏 base64 / 坏包）。
     Malformed,
+    /// 队列满（连续粘贴超出 [`MAX_QUEUED_EVENTS`]）：这一次粘贴被丢弃。
+    QueueFull,
     /// 其它协议状态码（原样带上）。
     Status(String),
 }
@@ -100,6 +102,8 @@ impl ClipboardFailure {
             Self::Timeout => "Clipboard read timed out".to_string(),
             Self::TooLarge => "Clipboard content is too large to paste".to_string(),
             Self::Malformed => "Clipboard response was malformed".to_string(),
+            // 队列里可能是文本也可能是图片（还没读，无从知道），所以说 "Paste"。
+            Self::QueueFull => "Paste dropped: the paste queue is full".to_string(),
             Self::Status(code) => format!("Clipboard read failed ({code})"),
         }
     }
@@ -458,10 +462,13 @@ impl Session {
                     // 上一次读还在途：排队，读完再服务它。
                     if self.queue.len() < MAX_QUEUED_EVENTS {
                         self.queue.push_back(pending);
+                        Vec::new()
                     } else {
+                        // 队列满 = 这次粘贴被丢弃。丢弃也要出声（与读失败同一条红线：
+                        // 不出现「粘了但什么都没发生」）——App 侧转成 warning toast。
                         tracing::warn!("clipboard: paste event dropped (queue full)");
+                        vec![Effect::Fail(ClipboardFailure::QueueFull)]
                     }
-                    Vec::new()
                 } else {
                     self.start(pending, now)
                 }
@@ -1319,14 +1326,34 @@ mod tests {
         assert!(s.deadline().is_some(), "第三次读在途");
     }
 
+    /// 队列有上限：多出来的事件被丢弃——但**丢弃要出声**（红线：不出现「粘了但什么
+    /// 都没发生」），每个被丢的事件给一条 [`ClipboardFailure::QueueFull`]。
     #[test]
-    fn queue_is_bounded() {
+    fn queue_is_bounded_and_a_drop_is_announced() {
         let mut s = Session::new();
         event_triplet("first", &["text/plain"], 0, &mut s);
+        let mut effects = Vec::new();
         for i in 0..(MAX_QUEUED_EVENTS + 3) {
-            event_triplet(&format!("pw{i}"), &["text/plain"], 1 + i as u64, &mut s);
+            effects.extend(event_triplet(
+                &format!("pw{i}"),
+                &["text/plain"],
+                1 + i as u64,
+                &mut s,
+            ));
         }
         assert_eq!(s.queue.len(), MAX_QUEUED_EVENTS, "队列有上限，多余的丢掉");
+        assert_eq!(effects.len(), 3, "每个被丢的事件都要有反馈：{effects:?}");
+        assert!(
+            effects
+                .iter()
+                .all(|e| *e == Effect::Fail(ClipboardFailure::QueueFull)),
+            "{effects:?}"
+        );
+        // 文案是 App 直接转 toast 的那句（队列里可能是文本也可能是图片，还没读）。
+        assert_eq!(
+            ClipboardFailure::QueueFull.message(),
+            "Paste dropped: the paste queue is full"
+        );
     }
 
     // ── 驱动（tokio 任务）─────────────────────────────────────────────────
@@ -1677,6 +1704,7 @@ mod tests {
             ClipboardFailure::Timeout,
             ClipboardFailure::TooLarge,
             ClipboardFailure::Malformed,
+            ClipboardFailure::QueueFull,
             ClipboardFailure::Status("EIO".into()),
         ] {
             assert!(!failure.message().is_empty(), "{failure:?}");

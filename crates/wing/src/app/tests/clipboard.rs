@@ -109,6 +109,17 @@ fn failure_does_not_break_later_pastes() {
     assert_eq!(app.input.text(), "still works");
 }
 
+/// 协议机队列满（连续粘贴超出上限）的丢弃同样落成 toast：丢弃可以，静默不行
+/// （红线：不出现「粘了但什么都没发生」）。
+#[test]
+fn a_full_paste_queue_reaches_the_toast() {
+    let mut app = test_app();
+    app.handle_clipboard(Err(ClipboardFailure::QueueFull));
+    let toast = app.toast.as_ref().expect("丢弃要看得见");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert_eq!(toast.message, "Paste dropped: the paste queue is full");
+}
+
 /// 一张合成图走完整条链路：Paste event → 队列 → intent → 真压缩 → chip。
 #[test]
 fn a_pasted_picture_becomes_an_image_chip() {
@@ -251,7 +262,8 @@ fn a_picture_is_not_gated_by_a_modal_panel() {
     );
 }
 
-/// 队列上限（条数）：到顶丢最旧的一张，用户刚粘的那张永远留着。
+/// 队列上限（条数）：到顶丢最旧的一张，用户刚粘的那张永远留着；**丢弃要出声**
+/// （红线：不出现「粘了但什么都没发生」——这里与协议机队列满走同一条反馈）。
 #[test]
 fn the_queue_is_capped_by_count() {
     let mut app = test_app();
@@ -268,9 +280,12 @@ fn the_queue_is_capped_by_count() {
         (MAX_PENDING_IMAGES + 2) as u8,
         "最新的一张必须留着"
     );
+    let toast = app.toast.as_ref().expect("丢图要看得见");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert_eq!(toast.message, "Image dropped: too many pending images");
 }
 
-/// 队列上限（总字节）：一次 64 MiB 级的大图不会把内存顶穿。
+/// 队列上限（总字节）：一次 64 MiB 级的大图不会把内存顶穿；丢弃同样有 toast。
 #[test]
 fn the_queue_is_capped_by_bytes() {
     let mut app = test_app();
@@ -293,6 +308,9 @@ fn the_queue_is_capped_by_bytes() {
         Some(3),
         "最新的一张必须留着"
     );
+    let toast = app.toast.as_ref().expect("丢图要看得见");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert_eq!(toast.message, "Image dropped: too many pending images");
 }
 
 /// 多张图累积进同一份草稿，与文本粘贴混排：chip 号码各自单调，提交产物两路分开。
