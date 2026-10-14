@@ -184,7 +184,7 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **已知边界（段间隙的按键语义）**：raw mode 与接驳跨段保持（这正是上面第 1 条的代价），所以向导段与主 TUI 段之间那几十毫秒（connect / create_session / subscribe）里键入的字节不再走行规程——`Ctrl+C` 不会立刻 `SIGINT`，而是作为 `0x03` 排队、交给主 TUI 的按键语义（双击退出），其余按键照旧回放。要连 Ctrl+C 也拦下来的话，只能把向导拆成独立进程（或先关 raw，但那会精确打破第 1 条）。
 
-**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`），漏了就退回「要用户确认」甚至被拒。
+**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写（`normalize_mime`：**请求侧挑表示与 read DATA 的 mime 归属共用这一份归一**——终端可以只在回显时带上参数 / 大小写不同，逐字相等会把 DATA 静默丢光）。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`），漏了就退回「要用户确认」甚至被拒。
 
 **包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。event 侧没有 id 可比，就比**一次性密码**（终端为每次粘贴新生成、三连里每包回显）：被放弃的 event 迟到的 listing / DONE 因此同样落不到下一次粘贴上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）、**event 队列满导致的丢弃**一律走 toast，不出现「粘了但什么都没发生」。
 

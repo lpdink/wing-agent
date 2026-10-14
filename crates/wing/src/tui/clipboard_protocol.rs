@@ -258,16 +258,27 @@ fn parse_listing(payload: &[u8]) -> Vec<String> {
 /// 图片表示的优先级（先精确命中，再任意 `image/*` 兜底）。
 const IMAGE_PRIORITY: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
+/// MIME 的归一形态：剥掉 `;charset=…` 之类的参数、去首尾空白、转小写。
+///
+/// **请求侧与响应侧必须用同一份归一**（[`choose_mime`] 挑表示、read DATA 的 mime 归属
+/// 比对）：终端在 listing 里列的名字与它自己 DATA 回显的名字不必逐字一致（参数 / 大小写
+/// 都是允许的差异），两侧口径一旦分叉，DATA 会被静默丢弃——读停在空数据上，最后以
+/// 「没有可用表示」或超时收场，而终端明明把字节发过来了。
+pub(crate) fn normalize_mime(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// 从 listing 里挑一个要读的 MIME（纯函数）。
 ///
 /// 规则：图片优先（按 [`IMAGE_PRIORITY`]，其余 `image/*` 按 listing 顺序兜底），否则
 /// `text/plain`；都没有 → `None`（不读，直接降级）。比较前会剥掉 `;charset=…` 之类的
-/// 参数并忽略大小写，以容纳各终端列出的名字差异。
+/// 参数并忽略大小写（[`normalize_mime`]），以容纳各终端列出的名字差异。
 pub(crate) fn choose_mime(available: &[String]) -> Option<String> {
-    let bases: Vec<String> = available
-        .iter()
-        .map(|m| m.split(';').next().unwrap_or(m).trim().to_ascii_lowercase())
-        .collect();
+    let bases: Vec<String> = available.iter().map(|m| normalize_mime(m)).collect();
     for want in IMAGE_PRIORITY {
         if bases.iter().any(|b| b == want) {
             return Some(want.to_string());
@@ -487,8 +498,14 @@ impl Session {
             }
             "DATA" => {
                 let mut too_large = false;
+                // mime 归属按**归一形态**比对（与 `choose_mime` 同一份归一）：终端回显
+                // 带参数（`text/plain;charset=utf-8`）或大小写不同是允许的差异，逐字相等
+                // 会把 DATA 静默丢掉。
                 if let Some(read) = &mut self.read
-                    && packet.mime.as_deref() == Some(read.mime.as_str())
+                    && packet
+                        .mime
+                        .as_deref()
+                        .is_some_and(|mime| normalize_mime(mime) == read.mime)
                 {
                     if read.data.len() + packet.payload.len() > MAX_PAYLOAD {
                         too_large = true;
@@ -903,6 +920,99 @@ mod tests {
         // 只有不认识的东西 → 不读。
         assert_eq!(choose_mime(&s(&["text/html", "application/pdf"])), None);
         assert_eq!(choose_mime(&[]), None);
+    }
+
+    /// 终端回显的 mime 带参数 / 大小写不同：DATA 的归属按**归一形态**（与 `choose_mime`
+    /// 同一份归一）——逐字相等会把字节静默掉光，读停在空数据上，收场是误导性的
+    /// 「没有可用表示」（或超时），而终端明明把字节发来了。
+    #[test]
+    fn read_data_matches_the_echoed_mime_normalized() {
+        for echo in [
+            "text/plain",
+            "text/plain;charset=utf-8",
+            "TEXT/PLAIN",
+            " text/plain ",
+        ] {
+            let mut s = Session::new();
+            event_triplet("otp", &["text/plain"], 0, &mut s);
+            assert!(
+                s.on_sequence(
+                    &response(
+                        &format!(
+                            "type=read:status=DATA:id=wing-paste-1:mime={}",
+                            b64_encode(echo.as_bytes())
+                        ),
+                        Some(b"hello"),
+                    ),
+                    at(1),
+                )
+                .is_empty(),
+                "{echo:?}"
+            );
+            assert_eq!(
+                s.on_sequence(
+                    &response("type=read:status=DONE:id=wing-paste-1", None),
+                    at(2)
+                ),
+                vec![Effect::Deliver(ClipboardPayload::Text("hello".into()))],
+                "{echo:?}: 等价的回显必须归属到这次读"
+            );
+        }
+    }
+
+    /// 归一不是「谁的 DATA 都收」：类型真的不同仍然被忽略（否则文本字节会被当成
+    /// PNG 交付），大小写 / 参数的等价变体才归属。
+    #[test]
+    fn read_data_mime_match_stays_strict_about_the_actual_type() {
+        let mut s = Session::new();
+        event_triplet("otp", &["image/png"], 0, &mut s);
+        assert!(
+            s.on_sequence(
+                &response(
+                    &format!(
+                        "type=read:status=DATA:id=wing-paste-1:mime={}",
+                        b64_encode(b"text/plain")
+                    ),
+                    Some(b"NOT-PNG"),
+                ),
+                at(1),
+            )
+            .is_empty()
+        );
+        assert!(
+            s.on_sequence(
+                &response(
+                    &format!(
+                        "type=read:status=DATA:id=wing-paste-1:mime={}",
+                        b64_encode(b"IMAGE/PNG")
+                    ),
+                    Some(b"\x89PNG"),
+                ),
+                at(2),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            s.on_sequence(
+                &response("type=read:status=DONE:id=wing-paste-1", None),
+                at(3)
+            ),
+            vec![Effect::Deliver(ClipboardPayload::Image {
+                bytes: b"\x89PNG".to_vec(),
+                mime: "image/png".into(),
+                name: None,
+            })],
+            "只有归一后等价的那些片字节进了读"
+        );
+    }
+
+    #[test]
+    fn normalize_mime_strips_parameters_whitespace_and_case() {
+        assert_eq!(normalize_mime("text/plain;charset=utf-8"), "text/plain");
+        assert_eq!(normalize_mime("IMAGE/PNG"), "image/png");
+        assert_eq!(normalize_mime(" image/jpeg "), "image/jpeg");
+        assert_eq!(normalize_mime("image/webp; q=0.3"), "image/webp");
+        assert_eq!(normalize_mime("application/x-foo"), "application/x-foo");
     }
 
     // ── 请求构造 ──────────────────────────────────────────────────────────
