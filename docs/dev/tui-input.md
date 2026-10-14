@@ -132,7 +132,7 @@
 | 路径 | 图片的去向 | 可见性 |
 |---|---|---|
 | 命令补全（popup Enter 把草稿改写为 `name + args`） | 随 `set_text` 丢弃（粘贴 chip 则改以**展开后的文本**留在草稿里，参数里提交的是 payload 不是标签） | 无提示（用户主动改写草稿） |
-| must-select 命令的草稿恢复（`/fork` 等回车后回填文本、重开 popup） | 同上，随 `set_text` 丢弃 | 无提示 |
+| must-select 命令的草稿恢复（`/fork` 等回车后回填文本、重开 popup） | 同上，随 `set_text` 丢弃 | **info toast**：`Image dropped: <命令名> takes no image`（与命令路径同一句，见下） |
 | **提交的文本恰好是前端命令**（`try_frontend_command` 命中：`/clear`、`/model …`、`/tips` …） | 命令在本地执行、不是消息，图片**没有落点**：`SubmitPayload.images` 随 `payload` 一起消失，既不发也不上传 | **info toast**：`Image dropped: <命令名> takes no image` |
 | `/clear`（清 chat）/ Esc 清草稿 / 提交 | 走同一个 `clear`：两本注册表一起归零、号码从头计数 | 无提示（用户自己的动作） |
 | rewind / fork / 重连带回的 server draft（`set_text`） | 随被替换的草稿丢弃 | 无提示 |

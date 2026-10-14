@@ -23,6 +23,8 @@
 
 use super::App;
 use super::AppIntent;
+use super::commands::frontend_command;
+use super::commands::image_dropped_toast;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelAction;
 use crate::shared::panels::picker::ModelPanel;
@@ -517,6 +519,14 @@ impl App {
                     self.input.set_text(&payload.text);
                     self.update_popup_from_input();
                     if self.popup.active.is_active() {
+                        // 提交被拦下（等候选选择）而草稿已被换回纯文本：图片就丢在
+                        // 这一下——和命令路径用同一句提示（见 `image_dropped_toast`）。
+                        if !payload.images.is_empty() {
+                            let command = frontend_command(&payload.text)
+                                .map(|route| route.name)
+                                .unwrap_or(cmd);
+                            self.show_toast(image_dropped_toast(command));
+                        }
                         return;
                     }
                     self.input.clear();

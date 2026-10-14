@@ -72,8 +72,21 @@ type CommandHandler = fn(&mut App, &str) -> bool;
 /// The one predicate behind [`App::try_frontend_command`] — callers that only
 /// need the *name* (the submit path's dropped-picture notice) ask it instead of
 /// re-deriving the match, so "matched" and "named" cannot disagree.
-fn frontend_command(text: &str) -> Option<&'static CommandRoute> {
+pub(super) fn frontend_command(text: &str) -> Option<&'static CommandRoute> {
     COMMANDS.iter().find(|route| route.matches(text))
+}
+
+/// 图片随一次提交被丢掉时的提示文案（命令不是消息，图片没有落点）。
+///
+/// 两个丢图点必须说同一句话：`submit_message`（命令真的开始跑）与
+/// `handle_composer_key` 的 must-select 重写路径（草稿被换回纯文本、提交被拦下
+/// 去重开候选 popup）。静默丢一张图是最坏的结果，而文案分叉会让"丢的是哪条命令"
+/// 在两个入口上对不上。
+pub(super) fn image_dropped_toast(command: &str) -> Toast {
+    Toast::info(
+        format!("Image dropped: {command} takes no image"),
+        std::time::Duration::from_secs(3),
+    )
 }
 
 /// One row of the TUI command table.
@@ -245,10 +258,7 @@ impl App {
                 // 命令不是消息，图片没有落点。罕见，但静默丢一张图是最坏的结果，
                 // 所以这里说一句（命令自己的 toast 若也有，会被它顶掉——命令的效果
                 // 在屏幕上看得见，而图片的消失看不见）。
-                self.show_toast(Toast::info(
-                    format!("Image dropped: {command} takes no image"),
-                    std::time::Duration::from_secs(3),
-                ));
+                self.show_toast(image_dropped_toast(command));
             }
             return true;
         }

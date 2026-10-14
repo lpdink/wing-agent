@@ -882,6 +882,10 @@ fn test_submitting_a_command_drops_the_pictures_with_a_notice() {
 /// draft as plain text and re-arms the popup instead of sending anything, so
 /// the pictures the draft carried go with the rewrite (the drop table in
 /// `docs/dev/tui-input.md` registers it).
+///
+/// The drop is announced here too — same notice as the command path, not a
+/// different one: the picture is gone either way, and the user is about to
+/// re-paste to send it.
 #[test]
 fn test_a_must_select_command_rewrite_drops_the_pictures_too() {
     let mut app = app_with_draft("/fork");
@@ -905,6 +909,12 @@ fn test_a_must_select_command_rewrite_drops_the_pictures_too() {
     assert!(
         app.input.submit_payload().images.is_empty(),
         "注册表里也没有留下载荷（不会变成看不见的附件）"
+    );
+    let toast = app.toast.as_ref().expect("图片丢了要看得见");
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert!(
+        toast.message.contains("dropped") && toast.message.contains("/fork"),
+        "提示要说清是哪条命令：{toast:?}"
     );
 }
 
