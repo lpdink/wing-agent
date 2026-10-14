@@ -403,6 +403,12 @@ impl Session {
     }
 
     fn on_event_packet(&mut self, packet: &Packet, now: Instant) -> Vec<Effect> {
+        // event 三连没有 id 可比，就比**一次性密码**：它由终端为每一次粘贴新生成（Ghostty
+        // 的 `otp`），三连里每个包都回显。旧事件被放弃后迟到的 listing / DONE 因此落不到
+        // 新事件上（read 侧的同款隔离见唯一 id）。
+        let same_event = |packet: &Packet, event: &EventCollector| {
+            packet.pw_b64.as_deref() == Some(event.pw_b64.as_str())
+        };
         match packet.status.as_str() {
             "OK" => {
                 let Some(pw_b64) = packet.pw_b64.clone() else {
@@ -422,6 +428,7 @@ impl Session {
             "DATA" => {
                 if let Some(event) = &mut self.event
                     && packet.mime.as_deref() == Some(".")
+                    && same_event(packet, event)
                 {
                     event.mimes = parse_listing(&packet.payload);
                     event.deadline = now + IDLE_TIMEOUT;
@@ -429,6 +436,14 @@ impl Session {
                 Vec::new()
             }
             "DONE" => {
+                if self
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| !same_event(packet, event))
+                {
+                    tracing::debug!("clipboard: ignoring a stale paste event packet");
+                    return Vec::new();
+                }
                 let Some(event) = self.event.take() else {
                     return Vec::new();
                 };
@@ -1328,6 +1343,64 @@ mod tests {
             })],
             "只有新读自己的字节"
         );
+    }
+
+    /// [N1] event 侧的孪生 S2：旧事件（被放弃）迟到的 listing / DONE 带的是**旧 pw**，
+    /// 必须当噪声 —— 否则新事件会被旧 listing 定死 mime、被旧 DONE 提前终结。
+    #[test]
+    fn stale_event_packets_with_another_password_are_ignored() {
+        let mut s = Session::new();
+        // event#1（pw=otp1）：OK 到了，listing / DONE 拖到超时被放弃。
+        s.on_sequence(&packet("type=read:status=OK:pw=b3RwMQ==", None), at(0));
+        assert_eq!(
+            s.on_timeout(at(6000)),
+            vec![Effect::Fail(ClipboardFailure::Timeout)]
+        );
+        // 用户又粘一次：event#2（pw=otp2，剪贴板只有文本）。
+        s.on_sequence(&packet("type=read:status=OK:pw=b3RwMg==", None), at(6001));
+        // event#1 迟到的 listing（image/png）+ DONE：不得记到 event#2 上。
+        assert!(
+            s.on_sequence(
+                &packet(
+                    &format!(
+                        "type=read:status=DATA:mime={}:pw=b3RwMQ==",
+                        b64_encode(b".")
+                    ),
+                    Some(b"image/png\n"),
+                ),
+                at(6002),
+            )
+            .is_empty(),
+            "旧 pw 的 listing 不得被采纳"
+        );
+        assert!(
+            s.on_sequence(&packet("type=read:status=DONE:pw=b3RwMQ==", None), at(6003))
+                .is_empty(),
+            "旧 pw 的 DONE 不得终结新事件"
+        );
+        // event#2 自己的 listing + DONE 正常：请求用 otp2 的授权、读的是 text/plain。
+        s.on_sequence(
+            &packet(
+                &format!(
+                    "type=read:status=DATA:mime={}:pw=b3RwMg==",
+                    b64_encode(b".")
+                ),
+                Some(b"text/plain\n"),
+            ),
+            at(6004),
+        );
+        let effects = s.on_sequence(&packet("type=read:status=DONE:pw=b3RwMg==", None), at(6005));
+        match &effects[0] {
+            Effect::Send(bytes) => {
+                let text = String::from_utf8(bytes.clone()).unwrap();
+                assert!(text.contains("pw=b3RwMg=="), "授权必须来自 event#2：{text}");
+                assert!(
+                    text.ends_with(&format!("{}\x1b\\", b64_encode(b"text/plain"))),
+                    "读的必须是 event#2 的表示：{text}"
+                );
+            }
+            other => panic!("期望 event#2 的 read 请求，得到 {other:?}"),
+        }
     }
 
     /// 零数据 DONE（协议用它表示「该表示不可用」）走失败路径，而不是投空载荷。
