@@ -908,9 +908,14 @@ class SessionManager:
         与 :meth:`list_sessions` 的全量盘扫描（跨 store 枚举 + 模型绑定解析）
         分工明确：那份回答"有哪些会话"，这份回答"哪些还在跑"。
 
-        顺序与 :meth:`list_sessions` 的**活跃组**同序（组内按
-        `_interaction_time` 降序、完全并列按 id 升序）——两份响应的活跃行
-        可以逐行对齐。在内存会话的 metadata 就在内存里，排序零 IO。
+        行集是 list 活跃组的**超集**：list 隐藏无名且无标的条目（如刚创建还没
+        发言的空会话），它们只在 live 里出现；两边的**交集**保持同一相对顺序
+        （组内按 `_interaction_time` 降序、完全并列按 id 升序）——调用方按 id
+        合并，不要按下标 zip（live 可能多出行）。在内存会话的 metadata 就在内存
+        里，排序零 IO。
+
+        同步、无 await：在事件循环内调用时是一个原子快照（迭代 `self._sessions`
+        中途不会被并发改动插入）。
         """
         items = [
             (sid, session.status, session.last_interaction)

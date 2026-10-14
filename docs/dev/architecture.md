@@ -195,7 +195,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | 触发 | `BackgroundScheduler`（gateway lifespan 启停）周期扫描（`sweep_interval_seconds`，启动时读取）；`release` 立即判定（忽略空闲时长，不忽略钉住条件） |
 | 拆解 | pop 同步原子摘除 → `Session.aclose()`（`agent.shutdown()`，异步收尾；agent 只持 provider name，无 client 所有权要终结） |
 | 水合 | 被逐出 ≠ 不存在：`resume` / `subscribe` / `send`（HTTP 与 WS 上行）按需水合；空会话（无消息、无磁盘痕迹）逐出后不可恢复 |
-| 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
+| 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；`/api/session/live` 的形态则是"行消失"（它只报在内存会话）；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
 
 `BackgroundScheduler`（`wing/background.py`）是通用周期任务宿主（单 task 顺序执行、job 异常隔离、start/stop 显式），逐出只是第一个 job——将来的后台机制（dreaming 等）直接 `add_job`。`SessionReaper`（`wing/session/reaper.py`）只做"触摸订阅 + 一次扫描"，不依赖调度器即可单测。
 

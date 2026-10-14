@@ -482,6 +482,23 @@ class TestListLiveSessions:
             "20250101-101010-aaaaaaaa",
         ]
 
+    def test_tied_timestamps_are_ordered_by_id(self, tmp_path: Path):
+        # 完全并列（同一时间戳）时按 id 升序（全序，与 list 同一 tie-break）。
+        # 会话只存在于内存（store 目录是空的）——投影不触盘，照常出行。
+        sm = _make_manager(tmp_path / "sessions")
+        for session_id in (
+            "20250101-000000-cccccccc",
+            "20250101-000000-bbbbbbbb",
+            "20250101-000000-aaaaaaaa",
+        ):
+            _mark_active(sm, session_id, "idle", last="2025-01-01T00:00:00")
+
+        assert [row.id for row in sm.list_live_sessions()] == [
+            "20250101-000000-aaaaaaaa",
+            "20250101-000000-bbbbbbbb",
+            "20250101-000000-cccccccc",
+        ]
+
     def test_rows_carry_id_and_status_only(self):
         # 行形状是契约：加字段会改变所有消费方的解码面（轻量投影的意义就在这）。
         from wing.event import LiveSessionInfo

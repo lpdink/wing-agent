@@ -99,10 +99,12 @@ class LiveSessionInfo(BaseModel):
     `status` 是即时读取的运行状态。刻意不是 :class:`SessionInfo` 的子集：
     它不做模型绑定解析、不读盘、不取标题——消费方（会话列表/rail）手里
     已经有完整行，缺的只是"还在跑吗"这一位。行里没有 `inactive`（不在内存
-    的会话是**不出现在投影里**，而不是以 `inactive` 出现）。
+    的会话是**不出现在投影里**，而不是以 `inactive` 出现；类型沿用共享的
+    :data:`SessionStatus`（超集），运行期不产出该值——与 `SyncSessionEvent`
+    同一口径）。
 
-    两份响应的活跃行可以逐行对齐（同一排序口径），但**只有状态**是同一时刻
-    的：其余字段以 `/api/session/list` 的取值为准。
+    行集是 `/api/session/list` 活跃组的**超集**（list 隐藏无名且无标的条目），
+    交集内顺序一致；**只有状态**是同一时刻的：其余字段以 list 的取值为准。
     """
 
     id: str

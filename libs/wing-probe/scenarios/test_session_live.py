@@ -1,11 +1,12 @@
 """会话实时状态端点（``GET /api/session/live``）场景。
 
-被守的契约（`docs/dev/http-api.md`「会话实时状态」）：
+被守的契约（`docs/dev/http-api.md` 的 `GET /api/session/live` 行）：
 
 - **行集 = 此刻在内存（已水合）的会话**，行形状只有 ``{id, status}``；
   未加载 / 已逐出的会话**不出现在响应里**（不是以 ``inactive`` 出现）；
 - ``status ∈ {idle, working, waiting}``，是即时读取的运行状态——**不需要订阅**；
-- 顺序与 ``/api/session/list`` 的活跃组同序（组内时间降序 + id 定序）；
+- 行集是 ``/api/session/list`` 活跃组的**超集**（list 隐藏无名且无标的条目，
+  如刚创建还没发言的空会话），交集的相对顺序一致（组内时间降序 + id 定序）；
 - **只读**：不水合、不触盘、不改变任何会话状态（对已逐出会话反复读也不会把它
   换入内存）。
 
@@ -69,13 +70,13 @@ async def _live_status(http: DriverHttp, session_id: str) -> str | None:
 
 
 async def _wait_live_status(http: DriverHttp, session_id: str, expected: str) -> str:
-    """轮询到 live 状态等于 ``expected``（超时即失败，报告带最后观察值）。"""
+    """轮询到 live 状态等于 ``expected``，返回**实测值**（超时即失败）。"""
     deadline = time.monotonic() + POLL_DEADLINE
     observed: str | None = None
     while time.monotonic() < deadline:
         observed = await _live_status(http, session_id)
-        if observed == expected:
-            return expected
+        if observed is not None and observed == expected:
+            return observed
         await asyncio.sleep(POLL_INTERVAL)
     raise AssertionError(
         f"live status of {session_id} stayed {observed!r} for {POLL_DEADLINE:.0f}s, "
@@ -123,7 +124,8 @@ async def test_live_reports_status_transitions_to_a_non_subscriber(
             == "working"
         )
 
-        # 与 list 的活跃组逐行一致（行集 + 顺序 + 状态同刻）。
+        # 与 list 的活跃组逐行一致（本场景只有一条会话且已发言 → 列表里可见、
+        # 无"隐藏行"；超集关系与隐藏行由 alignment 场景钉住）。
         assert await _live_rows(observer) == await _list_active(observer)
 
         result = await session.watch.expect("turn_result", within=20.0)
@@ -231,18 +233,32 @@ async def test_live_drops_evicted_session_and_never_hydrates(probe: Probe) -> No
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_live_order_aligns_with_the_list_active_group(probe: Probe) -> None:
-    """两个在内存会话：live 的行序 == list 活跃组的行序（后交互者在前）。
+    """live 是 list 活跃组的超集：交集逐行一致，多出的是"还没落盘"的新会话。
 
     WHEN 两条会话各自跑完一轮（B 更晚交互）
-    THEN live 与 list 的活跃行逐行一致：``[B, A]``——消费方可以按序对齐叠加。
+    AND 再建一条还没发言的空会话（无名无标、磁盘无痕迹）
+    THEN live 行集 ⊇ list 活跃组（空会话只有 live 有——list 隐藏无名无标条目），
+    且交集在 live 里的相对顺序与 list 的活跃组一致（按 id 合并安全，按下标
+    zip 会错位）。空会话自身的排位由「缺失 last_interaction → id 前缀」回退
+    决定，不在此断言（见 `TestListLiveSessions` 的排序用例）。
     """
     probe.register(ALIGNMENT_MODEL, Turn.of(text="reply a"), Turn.of(text="reply b"))
     first = await probe.session(model=ALIGNMENT_MODEL)
     await first.chat("a")
     second = await probe.session(model=ALIGNMENT_MODEL)
     await second.chat("b")
+    empty = await probe.session(model=ALIGNMENT_MODEL)
 
     async with _observer(probe) as observer:
         active = await _list_active(observer)
         assert [row["id"] for row in active] == [second.session_id, first.session_id]
-        assert await _live_rows(observer) == active
+
+        rows = await _live_rows(observer)
+        by_id = {row["id"]: row for row in rows}
+        assert set(by_id) == {empty.session_id, second.session_id, first.session_id}, (
+            rows
+        )
+        assert set(by_id) > {row["id"] for row in active}, (
+            rows
+        )  # 空会话是"多出来"的那行
+        assert [by_id[row["id"]] for row in active] == active

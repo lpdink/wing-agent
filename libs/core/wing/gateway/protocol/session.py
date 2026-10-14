@@ -245,8 +245,9 @@ class LiveSessionsResponse(BaseModel):
 
     行集只含此刻进程内已加载的会话（未加载 / 已逐出者**不出现**，而不是以
     `inactive` 出现）；`status ∈ {idle, working, waiting}`，与
-    `/api/session/list` 同取值域。顺序与 list 的活跃组同序（组内
-    `last_interaction` 降序、并列按 id 升序）——两份响应的活跃行可逐行对齐。
+    `/api/session/list` 同取值域。行集是该端点活跃组的**超集**（list 隐藏
+    无名且无标条目），交集保持同一相对顺序（组内 `last_interaction` 降序、
+    并列按 id 升序）——消费方按 id 合并，不要按下标 zip。
     """
 
     sessions: list[LiveSessionInfo] = Field(
