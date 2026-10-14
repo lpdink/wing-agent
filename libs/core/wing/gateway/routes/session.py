@@ -262,6 +262,20 @@ def _parse_status_filter(raw: str | None) -> set[str] | None:
     return set(values)
 
 
+def _reject_repeated_filters(request: Request) -> None:
+    """同一过滤参数重复给出 → 400。
+
+    重复参数会被 FastAPI 静默 last-wins（`?status=bogus&status=idle` 只剩后者、
+    `?tag=pin&tag=crew` 只按 crew 过滤）——与"非法取值一律 400"的立场冲突。
+    多值用单个逗号分隔参数表达（`?status=idle,working`）。
+    """
+    for name in ("status", "tag"):
+        if len(request.query_params.getlist(name)) > 1:
+            raise ValueError(
+                f"{name} filter must be given once (pass a single comma-separated value)"
+            )
+
+
 def _parse_tag_filter(raw: str | None) -> list[str]:
     """`?tag=pin,crew` → 标签列表（AND：必须全部携带）；缺省 = 不过滤。
 
@@ -306,6 +320,7 @@ async def list_sessions(
     """
     server = _get_server(request)
     try:
+        _reject_repeated_filters(request)
         statuses = _parse_status_filter(status)
         tags = _parse_tag_filter(tag)
     except ValueError as e:

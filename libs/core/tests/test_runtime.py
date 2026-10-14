@@ -458,6 +458,14 @@ class TestQueryInterface:
             s for s in full if s.status == "inactive"
         ]
 
+        # 可见性先于过滤：刚建、无名无标的空会话哪个方向都不出现
+        # （过滤只做减法，不造行）。
+        empty = runtime.create_session()
+        assert empty.session_id not in [s.id for s in runtime.list_sessions()]
+        assert empty.session_id not in [
+            s.id for s in runtime.list_sessions(statuses={"idle", "working", "waiting"})
+        ]
+
 
 # ============================================================
 # 工具绑定隔离

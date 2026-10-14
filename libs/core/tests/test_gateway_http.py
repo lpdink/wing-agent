@@ -676,6 +676,18 @@ class TestSessionList:
         assert "status filter" in resp.json()["detail"]
         mock_runtime.list_sessions.assert_not_called()
 
+    @pytest.mark.parametrize("name", ["status", "tag"])
+    def test_list_rejects_repeated_filter_params(
+        self, client: TestClient, mock_runtime, name: str
+    ):
+        """重复参数 400（FastAPI 默认 last-wins 会静默丢掉前一个）。"""
+        resp = client.get(
+            "/api/session/list", params=[(name, "idle"), (name, "working")]
+        )
+        assert resp.status_code == 400, resp.text
+        assert "must be given once" in resp.json()["detail"]
+        mock_runtime.list_sessions.assert_not_called()
+
     @pytest.mark.parametrize("value", ["pin,", ",pin", "pin,,crew", ""])
     def test_list_rejects_empty_tag_values(
         self, client: TestClient, mock_runtime, value: str

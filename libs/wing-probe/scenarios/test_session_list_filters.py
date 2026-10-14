@@ -26,11 +26,12 @@ from collections.abc import AsyncIterator, Callable, Mapping
 
 import pytest
 
-from wing_probe import Probe, Turn
+from wing_probe import Probe, ToolCall, Turn
 from wing_probe.driver import DriverHttp, DriverHttpError
 
 FILTER_MODEL = "probe/list-filters"
 RAIL_MODEL = "probe/list-filters-rail"
+WAITING_MODEL = "probe/list-filters-waiting"
 
 #: 状态翻转的轮询预算（轮次窗口留足余量）。
 POLL_DEADLINE = 20.0
@@ -154,7 +155,9 @@ async def test_status_filter_observes_transitions_without_subscription(
     """未订阅的观察者用 ``?status=idle,working,waiting`` 看得到 working → idle。
 
     这是过滤参数的动机面：rail 只取"在内存的会话"那批完整行轮询，不拉全量；
-    状态变更不进全局 WS 流，所以"没订阅"不等于"看不到"。
+    状态变更不进全局 WS 流，所以"没订阅"不等于"看不到"。（过滤本身的语义由
+    `test_filters_select_a_subsequence_of_the_full_list` 钉——本场景即使过滤被
+    整体忽略也照样通过，它钉的是"未订阅观察者读得到即时状态"。）
     """
     probe.register(RAIL_MODEL, Turn.of(text="hello there", chunk=2, delay=1.2))
     session = await probe.session(model=RAIL_MODEL)
@@ -169,6 +172,55 @@ async def test_status_filter_observes_transitions_without_subscription(
 
         result = await session.watch.expect("turn_result", within=20.0)
         assert result.data["subtype"] == "success", result.data
+        assert await _wait_status(observer, session.session_id, "idle") == "idle"
+
+
+@pytest.mark.probe_env(models=[WAITING_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_waiting_is_queryable_while_an_ask_is_pending(probe: Probe) -> None:
+    """挂起 Ask 期间 `?status=waiting` 命中该会话，且在活跃投影里报 waiting。
+
+    状态的第三个取值同样可过滤（waiting > working 的优先级与 live 状态同源）——
+    rail 想单独展示「等你回答」的那批时用它，不必拉全量再自己筛。
+    """
+    probe.register(
+        WAITING_MODEL,
+        Turn.of(
+            tool_calls=[
+                ToolCall(
+                    "AskUserQuestion",
+                    {
+                        "questions": [
+                            {
+                                "id": "flavor",
+                                "header": "Flavor",
+                                "question": "Which flavor?",
+                                "options": [{"label": "vanilla"}],
+                            }
+                        ]
+                    },
+                )
+            ]
+        ),
+        Turn.of(text="thanks"),
+    )
+    session = await probe.session(model=WAITING_MODEL)
+    await session.send("pick something")
+    ask = await session.watch.expect("ask", within=15)
+
+    async with _observer(probe) as observer:
+        assert _ids(await _list(observer, status="waiting")) == [session.session_id]
+        active = await _list(observer, status=ACTIVE_STATUSES)
+        row = next(r for r in active if r["id"] == session.session_id)
+        assert row["status"] == "waiting", row
+
+    await session.answer(ask, "flavor: vanilla")
+    result = await session.watch.expect("turn_result", within=20.0)
+    assert result.data["subtype"] == "success", result.data
+
+    async with _observer(probe) as observer:
+        assert await _list(observer, status="waiting") == []
         assert await _wait_status(observer, session.session_id, "idle") == "idle"
 
 
@@ -188,6 +240,14 @@ async def test_invalid_filter_values_are_rejected(probe: Probe) -> None:
             with pytest.raises(DriverHttpError) as excinfo:
                 await _list(observer, **filters)
             assert excinfo.value.status == 400, (filters, excinfo.value.call.response)
+
+        # 重复参数同样 400（FastAPI 默认 last-wins 会静默丢值）。
+        for name in ("status", "tag"):
+            with pytest.raises(DriverHttpError) as excinfo:
+                await observer.request(
+                    "GET", "/api/session/list", params={name: ["idle", "working"]}
+                )
+            assert excinfo.value.status == 400, (name, excinfo.value.call.response)
 
         # 合法取值照常 200（对照组：不是"带参数就 400"）。
         assert await _list(observer, status="idle", tag="crew") == []
