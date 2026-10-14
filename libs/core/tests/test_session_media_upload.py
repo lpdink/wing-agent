@@ -283,6 +283,32 @@ class TestManagerUpload:
         assert (media_dir(runtime, sid) / ref.id).read_bytes() == png(2, 2, tint=0x33)
 
     @pytest.mark.asyncio
+    async def test_alias_id_writes_into_the_canonical_session_dir(
+        self, runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """别名（大小写 / 归一化不敏感 FS）解析成磁盘真名：落真名目录、不另起一份。
+
+        大小写敏感的 FS 上真别名不存在，这里照 ``test_session_create_or_adopt.py``
+        的做法**造一个**——要钉的是"写目标是解析出的键，不是请求字符串"。
+        """
+        session = runtime.create_session()
+        session.context_manager.add_message(Message(role="user", content="hi"))
+        sid = session.session_id
+        store = runtime.sm._stores["file"]
+        original = store.resolve_stored_id
+
+        def alias_resolve(session_id: str) -> str | None:
+            return sid if session_id == "alias-of-session" else original(session_id)
+
+        monkeypatch.setattr(store, "resolve_stored_id", alias_resolve)
+        data = png(2, 2, tint=0x88)
+
+        ref = runtime.upload_media("alias-of-session", data)
+
+        assert (media_dir(runtime, sid) / ref.id).read_bytes() == data
+        assert not (sessions_root(runtime) / "alias-of-session").exists()
+
+    @pytest.mark.asyncio
     async def test_memory_backend_keeps_object_in_session_bucket(
         self, runtime: WingRuntime
     ) -> None:
