@@ -634,3 +634,23 @@ async def test_raw_body_detail_survives_a_non_json_response(
     assert [call.status for call in http.calls] == [200, 500], http.calls
     assert "not json" in http.calls[0].text, http.calls[0].text
     await http.close()
+
+
+@pytest.mark.asyncio
+async def test_body_and_content_are_mutually_exclusive(
+    stub_gateway: StubGateway,
+) -> None:
+    """同时给 JSON 体与原始体 → ``TypeError``，且**不发请求**。
+
+    httpx 会让 ``content`` 静默胜出：请求线上是原始字节，而留档 ``HttpCall.body``
+    记的是那份 JSON——留档是本基础设施唯一的取证面，"静默"在这里等于伪造现场。
+    """
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        await http.request(
+            "POST", "/api/session/media", body={"session_id": "s"}, content=b"xy"
+        )
+
+    assert http.calls == [], http.calls
+    await http.close()

@@ -50,6 +50,11 @@ SMALL_LIMIT_IMAGES: dict[str, Any] = {"max_bytes": 150}
 #: 补零后恰好超过 SMALL_LIMIT_IMAGES 的 PNG 尺寸。
 PADDED_PNG_BYTES = 200
 
+#: 别名场景的会话 id：**显式**给（先例 `test_custom_session_id.py::_create`）。
+#: 自动 id 的尾部是 8 位十六进制（`generate_session_id`），全为数字时
+#: `swapcase()` 一字不变——别名断言不能建立在那个抽签上（16^8 分之 10^8 ≈ 2.4%）。
+ALIAS_SESSION_ID = "Upload-Alias-1"
+
 # ── 图片与消息助手（本文件自足） ────────────────────────────────
 
 
@@ -388,15 +393,32 @@ async def test_alias_spelling_lands_in_the_canonical_session_dir(probe: Probe) -
     返回真名 → 写目标跟着真名（别名不分裂会话）。大小写敏感的 FS（CI 的 Linux）
     上别名**不是同一个会话**——按"不存在"处理（404）、同样不得留下第二份目录。
     两个分支各自断言（比 skip 强：敏感 FS 也能守住"不另起目录"）。
+
+    会话由**显式 id**（`ALIAS_SESSION_ID`）建，别名 = 它的 `swapcase()`：前提是
+    "id 里有大小写字母"，自动 id 不保证（尾部十六进制全为数字时无差），不能用它
+    当断言前提。
     """
     probe.register(VISION_MODEL, Turn.of(text="seeded"))
-    session = await probe.session(model=VISION_MODEL)
+    response = await probe.driver_required.http.request(
+        "POST",
+        "/api/session/create",
+        body={
+            "session_id": ALIAS_SESSION_ID,
+            "workspace": str(probe.workspace),
+            "agent": {"model_id": VISION_MODEL},
+        },
+    )
+    assert response["session_id"] == ALIAS_SESSION_ID, response
+    session = await probe.driver_required.attach(
+        ALIAS_SESSION_ID, response=response, workspace=probe.workspace
+    )
     # 会话要真的"是会话"（`_resolve_with_store` 的 exists 判据 = metadata / history）：
-    # 首轮对话落链——刚建的空会话连逐字拼写都不在磁盘事实里。
+    # 首轮对话落链——刚建的空会话不在磁盘事实里（别名拼写只会拿到 404）。
     await session.chat("seed the history")
     sid = session.session_id
     alias = sid.swapcase()
-    assert alias != sid, sid  # 自动 id（YYYYMMDD-HHMMSS-hex）必有可翻的大小写
+    # 别名恒有差：id 是显式给的（含大小写字母），与自动 id 的抽签无关。
+    assert alias != sid, (alias, sid)
     data = png(2, 2, tint=0xDD)
     http = probe.driver_required.http
 

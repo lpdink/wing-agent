@@ -306,12 +306,19 @@ class DriverHttp(GatewayClient):
     ) -> tuple[HttpCall, Any]:
         """执行一次请求：留档（无论成败）→ 非 2xx 抛错。
 
-        ``body`` 是 JSON 体，``content`` 是**原始字节体**（互斥）——字节不进
-        ``HttpCall.body``（那是 JSON 留档），只在 ``detail`` 里记长度：图片体积
-        灌进现场转储没有信息量，只有噪声。detail 是**累积**的（原始体长度 +
-        非 JSON 响应各自成句）：raw-body 请求撞上非 JSON 响应（500 的 HTML 错误页）
-        时两条事实都要留在留档里。
+        ``body`` 是 JSON 体，``content`` 是**原始字节体**——两者**互斥**，同时给
+        即 ``TypeError``（httpx 会让 ``content`` 静默胜出，而留档的 ``HttpCall.body``
+        会记下与线上一字不符的 JSON）。字节不进 ``HttpCall.body``，只在 ``detail``
+        里记长度：图片体积灌进现场转储没有信息量，只有噪声。detail 是**累积**的
+        （原始体长度 + 非 JSON 响应各自成句）：raw-body 请求撞上非 JSON 响应
+        （500 的 HTML 错误页）时两条事实都要留在留档里。
         """
+        if body is not None and content is not None:
+            raise TypeError(
+                "DriverHttp._call: body (JSON) and content (raw bytes) are "
+                "mutually exclusive — httpx would silently drop the JSON, and the "
+                "recorded HttpCall.body would not match what was sent"
+            )
         started = self._clock()
         at = started - self._started_at
         response = await self._client.request(

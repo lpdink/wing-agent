@@ -285,7 +285,7 @@ def plan_request_media(messages, *, policy: MediaPolicy, vision: bool,
 
 ```yaml
 images:                       # 顶层段（声明在 config/models.py::ImagesConfig，模板由 config/emit.py 生成）
-  max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示）
+  max_bytes: 4718592          # 单图原始字节上限 4.5 MiB（读时拒绝 + 降采样提示；上传端点超限 400）
   max_images: -1              # 请求期计数高水位；≤0 = 关闭计数驱逐（默认 -1）
   count_quantum: 8            # 计数驱逐量子（启用计数驱逐时每次超限至少丢这么多张）
   request_budget_bytes: 37748736   # 请求期 base64 编码后累计高水位（36 MiB）
