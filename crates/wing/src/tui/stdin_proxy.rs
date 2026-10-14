@@ -244,8 +244,17 @@ impl Splitter {
             }
         }
 
-        // 队列已空 + 尾部半截候选：留着只可能把 `Esc` 键扣住（它就是一个孤立的 ESC 字节）。
-        if queue_drained && let Hold::Candidate { bytes, .. } = &mut self.hold {
+        // 队列已空 + 尾部是**孤立的 ESC**（`Esc` 键的形态）→ 立刻冲回，零延迟。
+        //
+        // 多字节候选**不能**在这里冲回：`queue_drained` 只证明「此刻内核队列空」，不证明
+        // 写方没有后续字节（pty 的 `write(2)` 允许短写、SSH 转发按传输窗口分片）。把半截
+        // `ESC]5522;` 前缀当用户数据冲回，整条 5522 包就会漏给 crossterm（`Alt+]` + 杂
+        // 字符灌进 composer 草稿），协议机这边丢包、以 5s 超时的 toast 收场（归因错误）。
+        // 那些字节交给 [`PREFIX_HOLD`]（25 ms）兜底冲回；代价只是 Alt 组合键晚 25 ms。
+        if queue_drained
+            && let Hold::Candidate { bytes, .. } = &mut self.hold
+            && bytes.len() == 1
+        {
             out.passthrough.append(bytes);
             self.hold = Hold::None;
         }
@@ -705,14 +714,48 @@ mod tests {
         let expected = b"type=read:status=DATA:mime=Lg==;dGV4dA==".to_vec();
         for cut in 1..raw.len() {
             let mut s = Splitter::new();
-            // 两段（每一段都不是 drained 的尾部，模拟终端一次 write 被两次 read 切开的形态）
-            let a = s.feed(&raw[..cut], false, at(0));
+            // 两段，且第一段按 **drained** 喂（内核队列已空 + 短读——pty 短写 / SSH 分片的
+            // 形态）：切点落在前缀内（`ESC` / `ESC]` / …）时多字节候选必须扣住等后续字节，
+            // 否则整条包漏给 crossterm。
+            //
+            // 唯一例外是 `cut == 1`（第一段就是一个孤立 `ESC`）：它可能是 `Esc` 键，按既定
+            // 取舍立刻冲回（见 `lone_esc_at_a_drained_read_is_flushed_immediately`），
+            // 因此那一段仍按非 drained 喂。
+            let a = s.feed(&raw[..cut], cut > 1, at(0));
             let b = s.feed(&raw[cut..], true, at(1));
             let mut seqs = a.sequences;
             seqs.extend(b.sequences);
             assert_eq!(seqs, vec![expected.clone()], "cut at {cut}");
             assert_eq!(a.passthrough.len() + b.passthrough.len(), 0, "cut at {cut}");
         }
+    }
+
+    /// [S1] 短读 + 切点落在包前缀内：`queue_drained` 只证明「此刻队列空」，不证明写方
+    /// 没有后续字节。把半截 `ESC]5522;` 前缀当用户数据冲回，整条 5522 包会漏给
+    /// crossterm（`Alt+]` + 杂字符灌进草稿），协议机丢包、以超时 toast 收场（归因错误）。
+    #[test]
+    fn a_short_read_inside_the_sequence_prefix_does_not_leak_to_crossterm() {
+        let mut s = Splitter::new();
+        // 第一次 read：切在 `ESC]`，且本次 read 短于内核缓冲（drained）。
+        assert_eq!(feed(&mut s, b"\x1b]", 0).passthrough, b"", "候选不能冲回");
+        assert_eq!(
+            s.deadline(),
+            Some(at(0) + PREFIX_HOLD),
+            "扣住的字节要有兜底冲回的时刻（不是无限期）"
+        );
+        // 后续字节到达：整条包作为**一条序列**提取，零透传。
+        let out = feed(&mut s, b"5522;type=read:status=OK:pw=b3Rw\x1b\\", 1);
+        assert_eq!(out.passthrough, b"");
+        assert_eq!(out.sequences, vec![b"type=read:status=OK:pw=b3Rw".to_vec()]);
+
+        // 反例（切点落在一个不是任何 5522 形态的候选上）：到点仍原样冲回。
+        let mut s = Splitter::new();
+        assert_eq!(feed(&mut s, b"\x1b]", 0).passthrough, b"");
+        assert_eq!(
+            s.expire(at(30)),
+            Some(Expiry::Flush(b"\x1b]".to_vec())),
+            "25 ms 没等到后续：原样透传（Alt+] 不被吞）"
+        );
     }
 
     #[test]
