@@ -20,8 +20,8 @@ use crate::util::image_compress::CompressedImage;
 /// 消息的显示文本：正文 + 每张图一行标签（正文为空时只有标签行）。
 ///
 /// 图片排在正文**之后**（D5：不承诺文本与图片的交错顺序，后端也是两个字段）。正文已经以
-/// `\n` 收尾时不再补一行——别的入口（CLI / HTTP）写进历史的尾换行不该在 resume 时多出一个
-/// 空行。（TUI 自己的提交路径先 `trim()`，走不到这一支。）
+/// `\n` 收尾时不再补一行——带 media 的原始 HTTP / WS 客户端写进历史的尾换行不该在 resume 时
+/// 多出一个空行。（TUI 自己的提交路径先 `trim()`，走不到这一支。）
 pub fn text_with_labels(content: &str, labels: &[String]) -> String {
     if labels.is_empty() {
         return content.to_string();
