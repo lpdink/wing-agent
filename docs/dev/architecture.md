@@ -306,7 +306,7 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
               目标即停，MiB 级日志的装载 / 分叉峰值因此显著下降）
 ```
 
-接口与存储无关：`SessionStore` 8 方法（含内容寻址媒体池的 `write_media` / `read_media`）+ `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是几张表（sessions / messages / aux / 媒体字节）。
+接口与存储无关：`SessionStore` 12 方法（含会话私有内容寻址媒体的 `write_media` / `read_media` / `media_exists` / `media_path` / `materialize`）+ `MessageLog` 5 方法，全是 kv / append-only / listing 语义，不泄漏路径 / fsync / glob。一个 PG 后端就是几张表（sessions / messages / aux / 媒体字节）。
 
 **存量 session 零迁移**：老日志无事件记录 → `TrackedList.load` 按 role 分发（事件走 `EVENT_TYPES` 注册表，未知 type 跳过——前向容忍），事件重放为空即回退纯消息重放。不承诺老版本代码读新格式日志（新 session 由新代码产生，该场景不存在）。
 

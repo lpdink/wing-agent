@@ -52,7 +52,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > **session id 是闸门（只防穿越与卫生）**：id 由后端生成（默认形态
 > `YYYYMMDD-HHMMSS-<8 位小写 hex>`）**或由编排方自带**（`/api/session/create`
 > 的 `session_id` = create-or-adopt）。校验只拒绝危险值：含路径分隔符 / `..`、
-> 点开头（`<sessions root>/.media` 是媒体池，存储自己的点命名空间）、ASCII
+> 点开头（`<sessions root>/.media` 是遗留媒体池，存储的点命名空间）、ASCII
 > 控制字符、不可编码为 UTF-8（孤立代理字符）、空串、超过 **128 字节**
 > （`common.utils.is_valid_session_id`；字节而非字符——Linux/macOS 的
 > `NAME_MAX` 是 255 字节，`"收" * 128` 是 384 字节，会在首次写入炸

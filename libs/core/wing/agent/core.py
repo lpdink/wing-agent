@@ -500,7 +500,7 @@ class WingAgent:
     def request_options(self) -> RequestOptions:
         """本次模型调用的会话级参数（provider 无状态化的唯一注入点）。
 
-        缓存亲和（session id → prompt_cache_key）、媒体池读接口、thinking /
+        缓存亲和（session id → prompt_cache_key）、会话媒体读接口、thinking /
         reasoning_effort 覆盖——全部经这里下发；provider 实例零会话状态。
         """
         return RequestOptions(

@@ -8,9 +8,11 @@
 - ``POST /api/session/resume`` 的 ``agent`` 只应用 **model_id / effort /
   tools** 子集；``system_prompt`` / ``append_system_prompt`` / ``max_turns``
   一律不应用（不改链上前缀 / 不改会话既有限额）——给了也不该出现在请求体里；
-- 闸门只防穿越与卫生：跨越型 id（``../escape``、含 ``/``）、点开头（``.media``
-  是媒体池）、超长一律 400，且**磁盘零痕迹**；任意安全字符串（UUID、``team.run-7``）
-  照常可用。
+- 闸门只防穿越与卫生：跨越型 id（``../escape``、含 ``/``）、点开头
+  （``.media`` 是遗留媒体池的保留命名空间）、超长一律 400，且**磁盘零痕迹**；
+  任意安全字符串（UUID、``team.run-7``）照常可用。
+  （会话私有媒体目录 ``<sid>/media/`` 在会话目录**内部**，不是 root 层命名空间——
+  与 id 闸门无关。）
 
 "id 生效"与"覆盖生效"都是**可观测事实**：前者看响应与 ``history.jsonl`` 的目录名，
 后者看假 Provider 留档的请求体（模型名 / tools 声明 / system 段）与落盘 metadata。
@@ -44,7 +46,7 @@ def _driver(probe: Probe) -> Driver:
 
 
 def _session_dirs(probe: Probe) -> list[str]:
-    """sessions root 下的会话目录名（跳过存储自己的点命名空间，如 ``.media``）。"""
+    """sessions root 下的会话目录名（跳过存储的点命名空间，如遗留媒体池 ``.media``）。"""
     root = probe.env.sessions_path
     if not root.exists():
         return []

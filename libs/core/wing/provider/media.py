@@ -44,7 +44,7 @@ UNAVAILABLE_PLACEHOLDER = (
     "(image unavailable: stored image bytes could not be read; "
     "re-read the file to attach it again)"
 )
-"""字节缺失的占位文本（媒体池不可用 / read 返回 None / read 抛异常）。
+"""字节缺失的占位文本（媒体存储不可用 / read 返回 None / read 抛异常）。
 
 独立于 wing.media 的三条 dropped 文案：那三条解释「为什么没发这张图」
 （能力/预算/尺寸），本条解释「存储侧故障」——混淆文案会把归因引向错误方向。

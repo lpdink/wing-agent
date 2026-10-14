@@ -96,8 +96,10 @@ class ChainNode(BaseModel):
 class MediaRef(BaseModel):
     """图片媒体引用（内容寻址，仅元数据不含字节）。
 
-    字节由 SessionStore 以 id 为键托管（file 后端 `<sessions-root>/.media/`，
-    memory 后端进程内）。history.jsonl 只落本引用——绝不落 base64。
+    字节由 SessionStore 以 id 为键**随会话**托管（file 后端
+    `<sessions-root>/<sid>/media/<id>`，memory 后端进程内 per-session 桶）——
+    session 目录自包含，拷贝换机后引用照常可兑现。history.jsonl 只落本引用
+    ——绝不落 base64。
 
     注：id 的格式校验（64 位小写 hex，防路径穿越）在**存储层**，模型层保持
     宽松——一条损坏的历史记录不至于让整条 Message 加载失败（加载路径对未知/

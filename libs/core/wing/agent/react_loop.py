@@ -397,7 +397,7 @@ class ReActLoop:
     ) -> Message:
         """消费 provider 的 chunk 流：发射流式事件，组装 assistant Message。
 
-        options 是本次调用的会话级参数（session id 缓存亲和 / 媒体池 / 开关）——
+        options 是本次调用的会话级参数（session id 缓存亲和 / 会话媒体 / 开关）——
         入口到首次迭代之间 MUST 保持无 await（晚解析纪律的落点，见
         `_call_llm_validated`）。
 

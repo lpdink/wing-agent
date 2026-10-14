@@ -126,6 +126,19 @@ def ignored_override_fields(override: "AgentOverride", *, resume: bool) -> list[
     return ignored
 
 
+def bind_media(store: SessionStore, session_id: str) -> MediaAccess:
+    """把 store 的媒体读写绑定到某个会话（窄接口签名不变）。
+
+    媒体对象是会话私有资产（file 后端 ``<sessions-root>/<sid>/media/<id>``）：
+    存储接口带 session 上下文，而工具（ReadImage）与 provider 序列化只认
+    ``MediaAccess.read(id) / write(id, bytes)``——这里用闭包完成绑定，消费方零改动。
+    """
+    return MediaAccess(
+        read=lambda media_id: store.read_media(session_id, media_id),
+        write=lambda media_id, data: store.write_media(session_id, media_id, data),
+    )
+
+
 class Session:
     """有行为的 Session 对象。
 
@@ -224,8 +237,8 @@ class Session:
         # provider name 先校验（不可解析 = 模板/配置错误，创建即失败）；
         # 实例经共享池解析（无状态化，见 wing.provider.pool）。
         get_config().get_provider(template.provider_name)
-        # 会话媒体池：读/写都经窄接口，工具与 provider 序列化不直接触存储。
-        media = MediaAccess(read=store.read_media, write=store.write_media)
+        # 会话媒体读写：窄接口经闭包绑定本会话的存储根（工具与序列化零感知）。
+        media = bind_media(store, session_id)
         agent = WingAgent(
             model=template.model,
             provider_name=template.provider_name,
@@ -283,7 +296,7 @@ class Session:
             )
 
         get_config().get_provider(template.provider_name)
-        media = MediaAccess(read=self._store.read_media, write=self._store.write_media)
+        media = bind_media(self._store, self._session_id)
         self._agent = WingAgent(
             model=template.model,
             provider_name=template.provider_name,

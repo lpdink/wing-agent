@@ -167,6 +167,86 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
     return clones
 
 
+def _message_media_ids(nodes: Iterable[ChainNode]) -> list[str]:
+    """链节点引用的媒体 id（去重、保持出现序）。
+
+    ``ChainNode`` 家族里只有 ``Message`` 带 ``media``（事件没有）——按属性
+    探测，加载路径对两类记录混排的链无感。
+    """
+    seen: dict[str, None] = {}
+    for node in nodes:
+        for ref in getattr(node, "media", None) or []:
+            seen.setdefault(ref.id, None)
+    return list(seen)
+
+
+def _record_media_ids(records: Iterable[dict]) -> list[str]:
+    """raw 记录引用的媒体 id（去重、保持出现序；坏形态跳过）。
+
+    记录契约归 ``MessageLog`` 管：这里只做防御性取值（media 不是数组、
+    元素不是 dict、id 不是 str 一律跳过）——fork 复制是 best-effort 路径，
+    不值得为一条坏记录炸掉整个 fork。
+    """
+    seen: dict[str, None] = {}
+    for record in records:
+        refs = record.get("media")
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if isinstance(ref, dict) and isinstance(ref.get("id"), str):
+                seen.setdefault(ref["id"], None)
+    return list(seen)
+
+
+def _materialize_loaded_media(
+    store: SessionStore, session_id: str, nodes: Iterable[ChainNode]
+) -> None:
+    """加载路径：把活跃链引用的媒体对象幂等物化进会话目录（best-effort）。
+
+    老会话的对象在遗留共享池（``<root>/.media/``）里，读路径虽能双读兜底，
+    但"会话自包含"要求对象在**首次加载**时就搬进 ``<sid>/media/``——此后
+    整个会话目录拷贝到另一台机器即可用。对象通常已在目录里（快路径 stat
+    即返回），miss 时才碰老池。失败只 WARN（含历史里的非法 id）：读取侧
+    双读仍在，最坏是该位降级为占位文本，绝不阻断加载。
+    """
+    for media_id in _message_media_ids(nodes):
+        try:
+            store.materialize(session_id, media_id)
+        except Exception as e:  # noqa: BLE001 —— 迁移失败不能阻断会话加载
+            log.warning(
+                f"Session {session_id}: materialize media '{media_id[:8]}' "
+                f"failed: {e} (read path keeps its fallback)"
+            )
+
+
+def _copy_session_media(
+    store: SessionStore, source_id: str, child_id: str, records: Iterable[dict]
+) -> None:
+    """fork：把子会话记录引用的媒体对象复制进子会话目录（自包含；best-effort）。
+
+    复制源是**源会话目录优先、老池回退**（经 ``read_media``，顺带把老池命中
+    物化进源目录）。失败只 WARN 不阻断 fork——读取侧双读兜底仍在，代价是复制
+    失败的那个对象在子会话里会降级为占位（回退池不含源会话目录，这是刻意的：
+    不给"自包含"留第二条隐式依赖）。判据是常规路径全部复制成功（probe 钉住）。
+    """
+    for media_id in _record_media_ids(records):
+        try:
+            data = store.read_media(source_id, media_id)
+            if data is None:
+                log.warning(
+                    f"fork: media '{media_id[:8]}' referenced by session "
+                    f"'{source_id}' not found (session dir or legacy pool); "
+                    f"child '{child_id}' will degrade it to a placeholder"
+                )
+                continue
+            store.write_media(child_id, media_id, data)
+        except Exception as e:  # noqa: BLE001 —— 复制失败不能阻断 fork
+            log.warning(
+                f"fork: copying media '{media_id[:8]}' from '{source_id}' to "
+                f"'{child_id}' failed: {e}"
+            )
+
+
 class SessionManager:
     """管理 session 生命周期、消息路由、魔术命令分发。
 
@@ -475,6 +555,9 @@ class SessionManager:
         messages: TrackedList[ChainNode] = TrackedList.load(
             store.open_log(resolved), Message
         )
+        # 会话自包含：把活跃链引用的媒体对象幂等物化进会话目录（老池兼容面；
+        # 见 _materialize_loaded_media）。失败 WARN 不阻断加载。
+        _materialize_loaded_media(store, resolved, messages)
         # workspace 从 metadata 恢复，使 CM 构造时即以正确工作目录加载相对路径的
         # rules/skills。漏传会让 CM 以 workspace=None 构建、patterns 退化到进程
         # cwd 展开，把错误文件加载进系统提示词（Session.__init__ 的事后回填救不
@@ -572,7 +655,11 @@ class SessionManager:
             log.warning(f"fork_session: uuid {target_uuid} not found")
             return None
         child_log = store.open_log(new_session_id)
-        child_log.append(_remap_record_uuids(copied))
+        child_records = _remap_record_uuids(copied)
+        child_log.append(child_records)
+        # 子会话自包含：把记录（含压缩区间——用户仍可回退到压缩点之前）引用的
+        # 媒体对象复制进子目录。失败 WARN 不阻断 fork。
+        _copy_session_media(store, session_id, new_session_id, child_records)
 
         # 用加载路径构造内存态（同 resume）：活跃链 = tip 回溯，压缩区间不进链
         new_messages: TrackedList[ChainNode] = TrackedList.load(child_log, Message)
