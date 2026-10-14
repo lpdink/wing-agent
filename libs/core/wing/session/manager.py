@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Sequence
 from uuid import uuid4
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -829,7 +829,12 @@ class SessionManager:
     # 外部方法：查询
     # ============================================================
 
-    def list_sessions(self) -> list[SessionInfo]:
+    def list_sessions(
+        self,
+        *,
+        statuses: Collection[str] | None = None,
+        tags: Sequence[str] = (),
+    ) -> list[SessionInfo]:
         """列出所有有效 session（跨 stores 聚合），按「活跃优先 + 最后交互时间降序」。
 
         每个 session 携带运行时 `status`：已加载进内存（在 `self._sessions` 中）→ 取 live 状态
@@ -847,6 +852,22 @@ class SessionManager:
         模型四件套（`model_id` / `model_name` / `provider_name` / `model_display_name`）与 `status`
         同源同刻地投影：在内存的会话取 live agent（`Session.model_binding`），未加载的按 resume 链
         解析盘上记录（`resolve_model_binding`）。两条路都不发网络请求、不建会话。
+
+        ``statuses`` / ``tags`` 是**子集过滤**（缺省不过滤，两者同时给出即 AND）：
+
+        - ``statuses``：只保留状态落在集合内的行（``None`` = 不过滤；空集合 = 无行）。
+          「在内存的会话」即 ``statuses={"idle","working","waiting"}``。
+        - ``tags``：只保留**携带全部**给定标签的行（AND，与 ``wing ps --tag`` 的
+          既有标签口径一致）；标签按字面比对（写侧已保证不存在的标签不可能命中，
+          滤它是空结果，不是错误）。
+
+        过滤发生在**可见性规则之后**：无名且无标的会话本就不进列表（无论状态如何），
+        过滤不会让它们出现——过滤只做减法，不造行。
+
+        过滤发生在聚合之后：结果是**全量列表的子序列**（同样的行、同样的相对顺序，
+        只是少了几行）——调用方可以按"全量 + 谓词"理解它。服务端成本与不过滤时
+        相同（聚合本身即既有的一次跨 store 遍历），省下的是响应体积与调用方的
+        清洗/合并成本。
         """
         config = get_config()
         result = []
@@ -870,7 +891,7 @@ class SessionManager:
                         self._template_or_default(metadata.template_name),
                     )
                 )
-                tags = sanitize_tags(metadata.tags)
+                row_tags = sanitize_tags(metadata.tags)
                 result.append(
                     SessionInfo(
                         id=summary.id,
@@ -878,14 +899,19 @@ class SessionManager:
                         workspace=metadata.workspace,
                         last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
-                        tags=tags,
-                        tag_meta=sanitize_tag_meta(metadata.tag_meta, tags),
+                        tags=row_tags,
+                        tag_meta=sanitize_tag_meta(metadata.tag_meta, row_tags),
                         model_id=binding.model_id,
                         model_name=binding.model_name,
                         provider_name=binding.provider_name,
                         model_display_name=binding.model_display_name,
                     )
                 )
+
+        if statuses is not None:
+            result = [s for s in result if s.status in statuses]
+        if tags:
+            result = [s for s in result if all(t in s.tags for t in tags)]
 
         # 活跃优先（False < True），组内时间新的在前；并列时按 id 定序（见 docstring）。
         result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s), s.id))

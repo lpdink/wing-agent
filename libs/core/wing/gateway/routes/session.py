@@ -13,7 +13,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from wing.gateway.protocol import (
     BranchesResponse,
@@ -46,7 +46,9 @@ from wing.gateway.protocol import (
 from wing.gateway.projection import build_session_branches, build_session_info
 from wing.common.utils import InvalidInputError
 from wing.common.logger import log
+from wing.event import SessionStatus
 from wing.request_context import session_context
+from wing.session.tags import validate_tag
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -234,6 +236,71 @@ async def send_message(
 
 
 # ============================================================
+# 查询过滤参数解析（列表端点的子集过滤）
+# ============================================================
+
+#: 状态过滤的取值域 = 会话状态全集（唯一声明处 `wing.event.SessionStatus`）。
+_STATUS_FILTER_VALUES = frozenset(get_args(SessionStatus))
+
+#: 取值域的展示形态（OpenAPI 描述与 400 报错共用，避免复制字面量）。
+_STATUS_FILTER_VALUES_TEXT = ", ".join(sorted(_STATUS_FILTER_VALUES))
+
+
+def _parse_status_filter(raw: str | None) -> set[str] | None:
+    """`?status=idle,working` → 状态集合；缺省（None）= 不过滤。
+
+    空段 / 未知取值一律 ValueError（路由折成 400）：过滤是子集语义，静默丢弃
+    一个拼错的取值会让调用方以为过滤生效了。
+    """
+    if raw is None:
+        return None
+    values = [part.strip() for part in raw.split(",")]
+    if any(not value for value in values):
+        raise ValueError("status filter must not contain empty values")
+    unknown = sorted(set(values) - _STATUS_FILTER_VALUES)
+    if unknown:
+        raise ValueError(
+            f"unknown status filter value(s): {', '.join(unknown)}; "
+            f"available: {_STATUS_FILTER_VALUES_TEXT}"
+        )
+    return set(values)
+
+
+def _reject_repeated_filters(request: Request) -> None:
+    """同一过滤参数重复给出 → 400。
+
+    重复参数会被 FastAPI 静默 last-wins（`?status=bogus&status=idle` 只剩后者、
+    `?tag=pin&tag=crew` 只按 crew 过滤）——与"非法取值一律 400"的立场冲突。
+    多值用单个逗号分隔参数表达（`?status=idle,working`）。
+    """
+    for name in ("status", "tag"):
+        if len(request.query_params.getlist(name)) > 1:
+            raise ValueError(
+                f"{name} filter must be given once (pass a single comma-separated value)"
+            )
+
+
+def _parse_tag_filter(raw: str | None) -> list[str]:
+    """`?tag=pin,crew` → 标签列表（AND：必须全部携带）；缺省 = 不过滤。
+
+    值走写入侧同一套校验（:func:`wing.session.tags.validate_tag` 是标签词汇的
+    唯一入口）：**词法非法**（空 / 超长 / 空白 / 控制符 / `-` 开头）一律 400
+    ——这类值不可能命中任何行（列表行的 tags 恒为清洗后的合法值），静默返回空
+    结果只会掩盖调用方的笔误；**语法合法但不存在**的标签则是空结果（词表开放，
+    无从枚举）。
+    """
+    if raw is None:
+        return []
+    tags: list[str] = []
+    for part in raw.split(","):
+        try:
+            tags.append(validate_tag(part.strip()))
+        except ValueError as e:
+            raise ValueError(f"tag filter: {e}")
+    return tags
+
+
+# ============================================================
 # 查询
 # ============================================================
 
@@ -241,11 +308,35 @@ async def send_message(
 @router.get(
     "/api/session/list",
     response_model=SessionListResponse,
-    summary="列出所有 session",
+    summary="列出所有 session（可按状态 / 标签过滤）",
 )
-async def list_sessions(request: Request) -> SessionListResponse:
+async def list_sessions(
+    request: Request,
+    status: str | None = Query(
+        None,
+        description=(
+            f"按会话状态过滤（逗号分隔：{_STATUS_FILTER_VALUES_TEXT}）；"
+            "只请求在内存的会话即 `status=idle,working,waiting`"
+        ),
+    ),
+    tag: str | None = Query(
+        None,
+        description="按标签过滤（逗号分隔，AND：必须全部携带）",
+    ),
+) -> SessionListResponse:
+    """列表 / 子集过滤共用一条查询。
+
+    过滤是**子集**语义：结果是全量列表的子序列（同样的行、同样的相对顺序）。
+    非法过滤值一律 400（静默忽略会让调用方以为过滤生效了）。
+    """
     server = _get_server(request)
-    sessions = server.runtime.list_sessions()
+    try:
+        _reject_repeated_filters(request)
+        statuses = _parse_status_filter(status)
+        tags = _parse_tag_filter(tag)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    sessions = server.runtime.list_sessions(statuses=statuses, tags=tags)
     return SessionListResponse(sessions=sessions)
 
 
