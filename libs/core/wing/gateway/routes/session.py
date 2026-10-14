@@ -47,7 +47,9 @@ from wing.gateway.protocol import (
 from wing.gateway.projection import build_session_branches, build_session_info
 from wing.common.utils import InvalidInputError
 from wing.common.logger import log
+from wing.config import get_config
 from wing.event import SessionStatus
+from wing.media import too_large_message
 from wing.request_context import session_context
 from wing.session.tags import validate_tag
 
@@ -243,6 +245,21 @@ async def send_message(
 # ============================================================
 
 
+def _declared_content_length(request: Request) -> int | None:
+    """``Content-Length`` 头解析成整数（缺失 / 不可解析 = ``None``）。
+
+    不可解析的值不在这里拒绝：声明值与真实字节不符（缺失 / 说谎的头）一律由字节闸门
+    按**真实字节**兜底。
+    """
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 @router.post(
     "/api/session/media",
     response_model=MediaUploadResponse,
@@ -263,12 +280,33 @@ async def upload_session_media(
 
     校验（会话存在 → 字节非空 → 上限 → 格式 → 尺寸）全部发生在落盘之前：失败（400/404）
     不产生任何存储副作用。响应里的 ``media`` 可直接作为消息的 ``media`` 元素回投。
+
+    **校验顺序 vs 收包顺序**：``request.body()`` 没有大小上限（Starlette 会先把整个
+    body 缓冲进内存），因此这里刻意不先收包——顺序是「会话存在性（404）→
+    ``Content-Length`` 预检（声明值超 ``images.max_bytes`` 直接 400，一个字节都不读）
+    → 收包 → 字节闸门」。幽灵会话与声明超限的请求都不必先被吞进内存；声明值与真实
+    字节不符（缺头 / 说谎的头）由闸门按真实字节兜底。
     """
     server = _get_server(request)
+
+    # 会话存在性先于收包：404 不该以"读完整个 body"为代价（与 send 同序：存在性先于
+    # 内容校验，body 合法或非法都回 404）。
+    if not server.runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="session not found")
+
+    # Content-Length 预检（收包之前）：超限的声明值不必先读进内存再在闸门里拒绝。
+    max_bytes = get_config().images.max_bytes
+    declared = _declared_content_length(request)
+    if declared is not None and declared > max_bytes:
+        raise HTTPException(
+            status_code=400, detail=too_large_message(declared, max_bytes)
+        )
+
     data = await request.body()
     try:
         media = server.runtime.upload_media(session_id, data, name=name)
     except LookupError:
+        # 预检之后的解析只会在这里再失败于竞态（会话在两步之间消失）——保留映射。
         raise HTTPException(status_code=404, detail="session not found")
     except InvalidInputError as e:
         # 字节不合规（空 / 超限 / 非支持格式 / 尺寸不可解析）——输入问题 → 400。

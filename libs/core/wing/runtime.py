@@ -356,6 +356,15 @@ class WingRuntime:
         """
         return self.sm.set_session_tags(session_id, add=add, remove=remove)
 
+    def session_exists(self, session_id: str) -> bool:
+        """会话是否存在（纯解析，不水合、不发事件）。
+
+        上传端点的收包前预检：``request.body()`` 没有大小上限，幽灵会话不该先把
+        整个 body 吞进内存再吃 404。判据与 :meth:`upload_media` 完全一致（同一个
+        ``_resolve_with_store``）。
+        """
+        return self.sm.session_exists(session_id)
+
     def upload_media(
         self, session_id: str, data: bytes, *, name: str | None = None
     ) -> MediaRef:

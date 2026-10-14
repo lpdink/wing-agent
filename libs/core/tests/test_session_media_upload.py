@@ -1,16 +1,20 @@
-"""上传端点（``POST /api/session/media``）单元测试：字节闸门 / 会话层用例 / 路由映射。
+"""上传端点（``POST /api/session/media``）单元测试：字节闸门 / 会话解析 / 路由映射。
 
-三层各测自己那一层的契约：
+各层各测自己那一层的契约：
 
-- ``wing.media.upload_image_ref``：**纯闸门**——四道检查（非空 / 上限 / 格式 / 尺寸）的
-  顺序与文案、id = sha256、name 归一、返回的事实；
+- ``wing.media.upload_image_ref``：**纯闸门**——五道检查（非空 / 上限 / 展示名长度 /
+  格式 / 尺寸）的顺序与文案、id = sha256、name 归一、返回的事实；
+- ``MediaRef``：展示名的模型层上限（``max_length``，pydantic 兜底）；
 - ``SessionManager.upload_media``：会话解析（**不水合**）+ 落盘——幂等、拒绝零副作用、
-  幽灵会话不建目录、memory 后端、已逐出会话不因上传被唤醒；
+  幽灵会话不建目录、memory 后端、已逐出会话不因上传被唤醒；``session_exists`` 同判据、
+  同样不水合；
 - 路由：query / 原始字节体 → 200/400/404/422 映射与响应形状（真实 ``WingRuntime`` +
-  ``TestClient``——mock 掉 runtime 就只剩路由胶水，证明不了"字节真的进了会话目录"）。
+  ``TestClient``——mock 掉 runtime 就只剩路由胶水，证明不了"字节真的进了会话目录"），
+  以及**收包顺序**（会话存在性 → ``Content-Length`` 预检 → 收包，用 ASGI 读包计数器取证）。
 
-整机链路（上传 → 发消息携带 ref → 假 Provider 请求体 image part 逐字节 == 上传字节）由
-probe 场景 ``libs/wing-probe/scenarios/test_session_media_upload.py`` 钉住。
+整机链路（上传 → 发消息携带 ref → 假 Provider 请求体 image part 逐字节 == 上传字节）与
+"只写请求头就拿到拒绝"的收包顺序由 probe 场景
+``libs/wing-probe/scenarios/test_session_media_upload.py`` 钉住。
 """
 
 from __future__ import annotations
@@ -19,16 +23,18 @@ import hashlib
 import struct
 import zlib
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from wing.common.utils import InvalidInputError
 from wing.config import AuthConfig, get_config
 from wing.media import upload_image_ref
 from wing.runtime import WingRuntime
-from wing.schema import Message
+from wing.schema import MEDIA_NAME_MAX_LENGTH, MediaRef, Message
 
 
 # ── 图片工厂（本文件自足：stdlib 造合法头部，不解码像素） ──────────
@@ -196,6 +202,40 @@ class TestUploadImageRef:
         assert "empty request body" in str(failure.value)
 
 
+# ── 1b. 展示名的长度上限（客户端可控字符串） ────────────────────
+
+
+class TestMediaNameCap:
+    """``MediaRef.name`` 的长度上限：客户端可控字符串进响应、进 history、进界面。
+
+    两个消费面各测一次：模型字段（pydantic 兜底）与上传闸门（把超限翻译成 400 的
+    ``InvalidInputError``，而不是让 ``ValidationError`` 冒到 500）。
+    """
+
+    def test_model_field_caps_the_name(self) -> None:
+        def ref(name: str) -> MediaRef:
+            return MediaRef(
+                id="a" * 64, mime="image/png", bytes=1, width=1, height=1, name=name
+            )
+
+        assert ref("a" * MEDIA_NAME_MAX_LENGTH).name == "a" * MEDIA_NAME_MAX_LENGTH
+        with pytest.raises(ValidationError):
+            ref("a" * (MEDIA_NAME_MAX_LENGTH + 1))
+
+    def test_gate_rejects_an_overlong_name(self) -> None:
+        data = png()
+        longest = "名" * MEDIA_NAME_MAX_LENGTH
+        assert (
+            upload_image_ref(data, max_bytes=1 << 20, name=longest).name == longest
+        ), "长度按**字符**数算（多字节字符不提前撞线）"
+        with pytest.raises(InvalidInputError) as failure:
+            upload_image_ref(
+                data, max_bytes=1 << 20, name="名" * (MEDIA_NAME_MAX_LENGTH + 1)
+            )
+        message = str(failure.value)
+        assert "name too long" in message and str(MEDIA_NAME_MAX_LENGTH) in message
+
+
 # ── 2. 会话层用例：SessionManager.upload_media ─────────────────
 
 
@@ -350,6 +390,30 @@ class TestManagerUpload:
         assert store.media_path(session.session_id, ref.id) is None
 
 
+# ── 2b. 会话解析：SessionManager.session_exists ────────────────
+
+
+class TestSessionExists:
+    """纯解析（不水合）：判据与 ``upload_media`` 是同一个 ``_resolve_with_store``。"""
+
+    @pytest.mark.asyncio
+    async def test_exists_parses_without_hydrating(self, runtime: WingRuntime) -> None:
+        session = runtime.create_session()
+        session.context_manager.add_message(Message(role="user", content="hi"))
+        sid = session.session_id
+        assert runtime.session_exists(sid) is True
+
+        assert runtime.sm.evict(sid, reason="test") is True
+        await runtime.sm.wait_teardowns()
+        assert runtime.sm.get_session(sid) is None
+        assert runtime.session_exists(sid) is True, "被逐出的会话仍在磁盘上"
+        assert runtime.sm.get_session(sid) is None, "解析不该把它水合回来"
+
+        assert runtime.session_exists("ghost-session") is False
+        # 非法 id（路径穿越）与"不存在"同价：绝不触达 store。
+        assert runtime.session_exists("../escape") is False
+
+
 # ── 3. 路由：POST /api/session/media ──────────────────────────
 
 
@@ -372,6 +436,45 @@ def real_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     server.runtime = WingRuntime()
     with TestClient(server._app) as client:
         yield client, tmp_path / "sessions"
+
+
+class _BodyWatcher:
+    """ASGI 包装：记录下游从 ``receive`` 拉走的每一条消息。
+
+    "先校验、后收包"没有别的观测面：请求体是 ASGI 拉的，拉没拉过可数。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.messages: list[dict[str, Any]] = []
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        async def counting_receive() -> Any:
+            message = await receive()
+            self.messages.append(message)
+            return message
+
+        await self.app(scope, counting_receive, send)
+
+    def request_bodies(self) -> list[bytes]:
+        return [
+            m.get("body", b"") for m in self.messages if m["type"] == "http.request"
+        ]
+
+
+@pytest.fixture
+def body_watching_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """同 ``real_client``，但外层包了读包计数器（见 ``_BodyWatcher``）。"""
+    from wing.gateway.server import GatewayServer
+
+    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+    with patch("wing.gateway.server.load_config") as mock_load_config:
+        mock_load_config.return_value = _gateway_config()
+        server = GatewayServer()
+    server.runtime = WingRuntime()
+    watcher = _BodyWatcher(server._app)
+    with TestClient(watcher) as client:
+        yield client, tmp_path / "sessions", watcher
 
 
 class TestUploadRoute:
@@ -488,7 +591,89 @@ class TestUploadRoute:
             }
         assert not (root / "nope").exists()
 
+    def test_overlong_name_is_400_and_never_reaches_storage(self, real_client) -> None:
+        """展示名超限 → 400（与字节闸门同一句理由）；恰好到上限的名字照常回显。"""
+        client, root = real_client
+        sid = self._create_session(client)
+        data = png(2, 2, tint=0x99)
+
+        response = client.post(
+            "/api/session/media",
+            params={"session_id": sid, "name": "n" * (MEDIA_NAME_MAX_LENGTH + 1)},
+            content=data,
+        )
+        assert response.status_code == 400, response.text
+        assert "name too long" in response.json()["detail"], response.text
+        assert not (root / sid / "media").exists(), "400 路径在存储上留下了痕迹"
+
+        longest = "名" * MEDIA_NAME_MAX_LENGTH
+        accepted = client.post(
+            "/api/session/media",
+            params={"session_id": sid, "name": longest},
+            content=data,
+        )
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["media"]["name"] == longest
+
     def test_missing_session_id_is_422(self, real_client) -> None:
         client, _ = real_client
         response = client.post("/api/session/media", content=png())
         assert response.status_code == 422, response.text
+
+    def test_ghost_session_is_404_before_the_body_is_read(
+        self, body_watching_client
+    ) -> None:
+        """幽灵会话的 404 不以"读完整个 body"为代价（Starlette 的 ``body()`` 无上限）。"""
+        client, root, watcher = body_watching_client
+        response = client.post(
+            "/api/session/media", params={"session_id": "nope"}, content=b"x" * 4096
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "session not found"
+        assert watcher.request_bodies() == [], "404 路径把请求体读走了"
+        assert not (root / "nope").exists()
+
+    def test_declared_oversize_is_rejected_before_the_body_is_read(
+        self, body_watching_client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``Content-Length`` 预检：声明超限直接 400，一个字节都不读。"""
+        client, root, watcher = body_watching_client
+        sid = self._create_session(client)
+        watcher.messages.clear()  # 建会话那次读了自己的 body，与本次无关
+        monkeypatch.setattr(get_config().images, "max_bytes", 1024)
+
+        response = client.post(
+            "/api/session/media",
+            params={"session_id": sid},
+            content=b"x" * 4096,
+        )
+
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        # 与字节闸门同一句文案（同一个拒绝不该有两套说法）。
+        assert "image too large" in detail and "images.max_bytes" in detail, detail
+        assert watcher.request_bodies() == [], "声明超限的请求体被读进来了"
+        assert not (root / sid / "media").exists()
+
+    def test_oversize_body_without_content_length_is_still_rejected_by_the_gate(
+        self, real_client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """没有 ``Content-Length``（分块传输 / 声明缺失）时由字节闸门按真实字节兜底。
+
+        生成器 body ⇒ httpx 走 chunked（无 CL 头），预检无从下手——闸门是唯一的闸门。
+        """
+        client, root = real_client
+        sid = self._create_session(client)
+        monkeypatch.setattr(get_config().images, "max_bytes", 1024)
+
+        def chunks():
+            yield b"x" * 2048
+            yield b"y" * 2048
+
+        response = client.post(
+            "/api/session/media", params={"session_id": sid}, content=chunks()
+        )
+
+        assert response.status_code == 400, response.text
+        assert "images.max_bytes" in response.json()["detail"], response.text
+        assert not (root / sid / "media").exists()

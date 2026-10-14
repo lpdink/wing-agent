@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 
 from wing.common.utils import InvalidInputError
-from wing.schema import MediaRef
+from wing.schema import MEDIA_NAME_MAX_LENGTH, MediaRef
 
 
 ########## 字节 → 事实
@@ -254,20 +254,34 @@ def estimate_image_tokens(ref: MediaRef) -> int:
 ########## 上传闸门（字节 → 校验通过的引用）
 
 
+def too_large_message(nbytes: int, max_bytes: int) -> str:
+    """「超限」的拒绝理由（400 的 ``detail``）。
+
+    字节闸门（真实字节）与端点的 ``Content-Length`` 预检（声明字节）共用同一份
+    文案——同一个拒绝不该有两条说法。
+    """
+    return (
+        f"image too large: {format_size(nbytes)} exceeds the "
+        f"{format_size(max_bytes)} per-image limit (config images.max_bytes)"
+    )
+
+
 def upload_image_ref(
     data: bytes, *, max_bytes: int, name: str | None = None
 ) -> MediaRef:
     """上传端点的字节闸门：校验一份原始图片字节并给出引用（**零存储副作用**）。
 
-    检查顺序：非空 → 尺寸上限 → magic bytes（``sniff_image_mime``）→ 头部尺寸
-    （``image_dimensions``）。前两步 O(1)（不为畸形 / 超限载荷做格式解析），格式判定
-    先于尺寸解析（尺寸按格式解析，无 mime 无从下手）。任一不过抛
+    检查顺序：非空 → 尺寸上限 → 展示名长度 → magic bytes（``sniff_image_mime``）→
+    头部尺寸（``image_dimensions``）。前三步 O(1)（不为畸形 / 超限载荷做格式解析），
+    格式判定先于尺寸解析（尺寸按格式解析，无 mime 无从下手）。任一不过抛
     ``InvalidInputError``（HTTP 400 语义）——调用方据此在**任何落盘之前**拒绝，
     这就是"拒绝不产生副作用"的实现方式：本函数只读入参，不碰文件系统 / 存储。
 
     ``max_bytes`` 由调用方传入（生效值 = 配置的 ``images.max_bytes``）：本模块不依赖
     config。``name`` 是展示名（空串与缺省同价，归一为 None），不参与寻址——id 是内容
-    sha256，恒由字节现算，与 ``name`` 无关。
+    sha256，恒由字节现算，与 ``name`` 无关；但它会进响应与 history，因此长度按
+    :data:`~wing.schema.MEDIA_NAME_MAX_LENGTH` 拒绝（与 ``MediaRef`` 字段同一常量，
+    超限在构造引用之前就回落成 400，而不是让 pydantic 的 ``ValidationError`` 冒到 500）。
     """
     if not data:
         raise InvalidInputError(
@@ -275,9 +289,11 @@ def upload_image_ref(
             f"detected by content)"
         )
     if len(data) > max_bytes:
+        raise InvalidInputError(too_large_message(len(data), max_bytes))
+    if name is not None and len(name) > MEDIA_NAME_MAX_LENGTH:
         raise InvalidInputError(
-            f"image too large: {format_size(len(data))} exceeds the "
-            f"{format_size(max_bytes)} per-image limit (config images.max_bytes)"
+            f"image name too long: {len(name)} characters exceeds the "
+            f"{MEDIA_NAME_MAX_LENGTH} character limit"
         )
     mime = sniff_image_mime(data)
     if mime is None:

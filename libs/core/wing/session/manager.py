@@ -730,6 +730,15 @@ class SessionManager:
 
         return new_session, draft
 
+    def session_exists(self, session_id: str) -> bool:
+        """会话是否存在（纯解析，不水合、不发事件）。
+
+        与 ``upload_media`` / ``set_session_tags`` 走同一个 ``_resolve_with_store``：
+        判据（id 形状 + 内存 + 各 store）与它们看到的完全一致——两个调用点对
+        「同一个 id 算不算存在」不能有第二套说法。
+        """
+        return self._resolve_with_store(session_id) is not None
+
     # ── 标签 ─────────────────────────────────
 
     def set_session_tags(

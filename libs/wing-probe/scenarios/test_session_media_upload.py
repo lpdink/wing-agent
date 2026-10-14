@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import struct
@@ -28,6 +30,7 @@ import zlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -436,3 +439,78 @@ async def test_alias_spelling_lands_in_the_canonical_session_dir(probe: Probe) -
     assert (
         media_object_path(probe, sid, uploaded["media"]["id"]).read_bytes() == data
     ), "别名上传的对象没有落进磁盘真名目录"
+
+
+# ── 场景 7：收包顺序（会话存在性 → Content-Length 预检 → 收包） ──────
+
+#: 裸 socket 场景读响应的上限：拒绝要发生在**收包之前**，所以"没有 body"的请求
+#: 也该在毫秒级拿到响应。5s 是给"响应确实缺席"留的可诊断余量（超时即失败）。
+NO_BODY_WAIT_SECONDS = 5.0
+
+
+async def raw_upload_head(
+    probe: Probe, session_id: str, declared: int
+) -> tuple[int, str]:
+    """只写请求头（声明 ``declared`` 字节）、一个 body 字节都不发的上传请求。
+
+    返回 ``(状态码, 响应原文)``。这是"先校验后收包"的观测面：实现若先把
+    ``await request.body()`` 跑完（Starlette 的 ``body()`` 没有大小上限），这里会一直
+    等一个永远不会来（也不该来）的 body——读超时即断言失败。
+    """
+    assert probe.env.port is not None, "网关还没起来"
+    endpoint = urlsplit(probe.env.gateway_url)
+    host = endpoint.hostname or "127.0.0.1"
+    port = endpoint.port or probe.env.port
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        writer.write(
+            (
+                f"POST /api/session/media?session_id={session_id} HTTP/1.1\r\n"
+                f"Host: {host}:{port}\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                f"Content-Length: {declared}\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode()
+        )
+        await writer.drain()
+        try:
+            raw = await asyncio.wait_for(reader.read(-1), timeout=NO_BODY_WAIT_SECONDS)
+        except TimeoutError:
+            pytest.fail("拒绝必须发生在收包之前：body 一个字节都没发，响应却迟迟不回来")
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    text = raw.decode("utf-8", errors="replace")
+    assert text.startswith("HTTP/"), f"响应不是 HTTP 报文：{text!r}"
+    return int(text.split(" ", 2)[1]), text
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC], images=SMALL_LIMIT_IMAGES)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_upload_rejects_by_headers_before_reading_the_body(probe: Probe) -> None:
+    """收包顺序（协议面）：会话存在性 → ``Content-Length`` 预检 → 收包。
+
+    - 幽灵会话 + 声明超限 → **404**（存在性先于大小校验，与"body 合法或非法都回
+      404"同一条序）；
+    - 真实会话 + 声明超限 → **400**（按声明值拒绝，detail 与字节闸门同一句
+      ``image too large … images.max_bytes``），存储零痕迹。
+
+    两个请求都一个 body 字节都不发：响应只能来自"读包之前"的判定。
+    """
+    session = await probe.session(model=VISION_MODEL)
+    declared = SMALL_LIMIT_IMAGES["max_bytes"] + 1
+
+    ghost_status, ghost_raw = await raw_upload_head(probe, "ghost-upload", declared)
+    assert ghost_status == 404, ghost_raw
+    assert "session not found" in ghost_raw, ghost_raw
+    assert not probe.env.session_dir("ghost-upload").exists()
+
+    status, raw = await raw_upload_head(probe, session.session_id, declared)
+    assert status == 400, raw
+    assert "image too large" in raw and "images.max_bytes" in raw, raw
+    assert not media_dir(probe, session.session_id).exists(), (
+        "预检 400 在存储上留下了痕迹"
+    )

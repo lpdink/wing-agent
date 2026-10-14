@@ -7,7 +7,7 @@
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
 `libs/core/wing/gateway/routes/session.py`（上传端点）、`libs/core/wing/tools/builtin/read_image.py`；
 整机证据 `libs/wing-probe/scenarios/`：`test_read_image.py`（15 条）/ `test_media_layout.py`（3 条存储布局）
-/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（8 条上传端点），本文末列。
+/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（9 条上传端点），本文末列。
 本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
@@ -69,7 +69,7 @@ class MediaRef(BaseModel):          # 仅元数据，绝无字节
     bytes: int     # 原始字节数
     width: int
     height: int
-    name: str | None = None          # basename（展示用）
+    name: str | None = None          # basename（展示用；≤ 255 字符，超限的写入侧 400）
 
 class Message(ChainNode):
     media: list[MediaRef] | None = None   # user（贴图）与 tool（ReadImage）携带；assistant/system 不携带
@@ -112,8 +112,10 @@ class Message(ChainNode):
 D5/D6/D7 拍板：
 
 - **上传（字节侧入口）**：`POST /api/session/media?session_id=<sid>[&name=<n>]`，body = **原始图片字节**
-  （非 JSON / 非 multipart；`name` 是展示素材，缺省 / 空串 = 不记录，建议给 basename）。校验顺序：
-  会话存在（否则 404；**不隐式建会话**）→ body 非空 → `≤ images.max_bytes` → magic bytes ∈
+  （非 JSON / 非 multipart；`name` 是展示素材，缺省 / 空串 = 不记录，建议给 basename，长度上限
+  255 字符、超限 400）。**收包顺序**：会话存在（否则 404；**不隐式建会话**）→ `Content-Length`
+  预检（声明值超 `images.max_bytes` 直接 400、**不读 body**）→ 收包 → 字节校验：body 非空 →
+  `≤ images.max_bytes`（无声明 / 声明说谎时按**真实字节**兜底）→ magic bytes ∈
   {png, jpeg, webp, gif}（`sniff_image_mime`）→ 头部尺寸可解析（`image_dimensions`）。闸门是纯函数
   （`wing.media.upload_image_ref`：不碰存储、不依赖 config——上限由调用方传入），**落盘是最后一步**：
   任何失败都**零副作用**（不建目录、不写对象）。id = 字节的 sha256 → `store.write_media`（内容寻址、
@@ -323,8 +325,10 @@ providers:
 - 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、`GET /api/media/{id}` 端点、TUI/VSCode 像素渲染
   （kitty/iTerm2 协议、webview）不在本期；用户侧入口的**服务端**链路见「用户贴图」一节，前端
   （composer 图片 chip / 终端协议 / 压缩）在前端侧交付。
-- **上传 body 没有服务级大小上限**：`≤ images.max_bytes` 的判定发生在 `await request.body()` **之后**
-  （原始字节先收进内存）——超限请求会被 400 拒绝，但字节已经过了一遍内存。熔断点该是 ASGI 服务级的
+- **上传 body 没有服务级大小上限**：端点自己做了两道前置（会话存在性 → `Content-Length`
+  预检）——声明超限的请求在收包**之前**就 400，幽灵会话也先 404；但**没有声明 / 声明说谎**
+  的 body 仍会先被 `await request.body()` 整包收进内存，`≤ images.max_bytes` 的字节判定
+  发生在收包**之后**（超限会被 400 拒绝，只是字节已经过了一遍内存）。熔断点该是 ASGI 服务级的
   body 上限（中间件 / 反代），而不是这一个端点自己补一条口径；与既有 JSON 端点同源（它们也先整包收）。
 - **贴图引用的元数据不校验内容一致性**：入口闸门只认 id 格式 + mime + 对象存在（安全面与"线格式
   可用性"）；ref 里的 `bytes` / `width` / `height` 是提示性元数据，只参与请求期驱逐启发式——服务端
@@ -378,6 +382,7 @@ providers:
 | `test_rejected_uploads_leave_no_trace` | 空 body / 非图 / 头部截断 → 400（文案各自可辨）；`<sid>/media/` **不存在**；随后合法上传照常成功（闸门不把会话弄坏） |
 | `test_oversize_upload_is_rejected_by_config_limit` | `images={"max_bytes": 150}`：200 B 图 → 400（detail 含 `image too large` + `images.max_bytes`）、目录对象数不增；同环境小图照常上传 |
 | `test_ghost_session_upload_is_404` | 幽灵会话 / 路径穿越式 id → 404 `session not found`，无目录残留 |
+| `test_upload_rejects_by_headers_before_reading_the_body`（收包顺序） | 裸 socket 只写请求头、**不发 body**：幽灵会话 + 声明超限 → 404（存在性先于大小校验）；真实会话 + 声明超限 → 400（detail 含 `image too large` + `images.max_bytes`）、媒体目录不存在——"先校验后收包"的观测面（读包即超时失败） |
 | `test_uploaded_bytes_reach_the_model_request`（红线） | 上传 → 消息带 ref → 请求体 user content = [原文本, image part]、解码**逐字节 == 上传字节**；history 有引用、**无 base64**；对象仍在 |
 | `test_upload_without_name_is_referencable` | 不带 `name` → `name: null`；对象照样可被引用（`name` 不是寻址键） |
 | `test_alias_spelling_lands_in_the_canonical_session_dir` | 别名拼写（大小写不敏感 FS）：200 + 对象落**真名目录**、目录清单只一份；敏感 FS（CI）：404 + 同样不产生第二套目录（两分支各自断言） |
