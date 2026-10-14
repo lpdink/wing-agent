@@ -28,6 +28,12 @@ use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
+pub mod clipboard_protocol;
+pub mod stdin_proxy;
+
+pub use clipboard_protocol::ClipboardFailure;
+pub use clipboard_protocol::ClipboardPayload;
+
 pub type WingTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 /// Events from the terminal (keyboard, mouse, resize, paste, focus).
@@ -36,6 +42,9 @@ pub enum TermEvent {
     Key(KeyEvent),
     Mouse(crossterm::event::MouseEvent),
     Paste(String),
+    /// OSC 5522 通道读回的剪贴板内容（或失败原因）——见 [`clipboard_protocol`]。
+    /// 文本与 bracketed paste 走同一个入口（`App::handle_paste`）。
+    Clipboard(Result<ClipboardPayload, ClipboardFailure>),
     Resize(u16, u16),
     Focus(bool),
     Tick,
@@ -143,11 +152,16 @@ impl Command for DisableMouseReporting {
 /// must not write these commands ad hoc. The exact bytes are asserted by
 /// `test_enter_sequence_is_exact`, so reordering the arguments here is a
 /// test failure, not a silent behavior change.
+///
+/// `?5522`（kitty clipboard protocol paste events：文本与图片的粘贴通道，见
+/// [`stdin_proxy`] 与 [`clipboard_protocol`]）只在 stdin 接驳装上了才发：没装上还开，
+/// 终端发来的协议数据会直接进 crossterm（被解析成按键），正是接驳层要拦的东西。
 pub fn enter_sequence(w: &mut impl io::Write) -> io::Result<()> {
     enter_sequence_for(
         w,
         |key| std::env::var(key).ok(),
         std::env::var("TERM").ok().as_deref(),
+        stdin_proxy::is_installed(),
     )
 }
 
@@ -157,6 +171,7 @@ fn enter_sequence_for(
     w: &mut impl io::Write,
     env: impl Fn(&str) -> Option<String>,
     term: Option<&str>,
+    paste_events: bool,
 ) -> io::Result<()> {
     crossterm::execute!(
         w,
@@ -168,6 +183,10 @@ fn enter_sequence_for(
         EnableFocusChange,
         crossterm::cursor::Hide
     )?;
+    if paste_events {
+        // 与下面几条一样是裸 DECSET：没有 crossterm 的 Command 包装，字节在单测里钉死。
+        write!(w, "\x1b[?5522h")?;
+    }
     push_keyboard_enhancement(w);
     Ok(())
 }
@@ -208,6 +227,9 @@ fn pop_keyboard_enhancement(_w: &mut impl io::Write) {}
 /// terminal forwarding mouse reports to the shell. Shared by the clean-exit
 /// path and the panic hook (both are byte-asserted by
 /// `test_leave_sequence_is_exact`).
+///
+/// `?5522l` 无条件写（关一个没开过的模式是 no-op），理由与 `?1003l` 相同：
+/// panic hook 只有一条路径，不必重新判断环境。
 pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
     // 键盘增强先收回：留着的话退出后连 shell 都会收到 CSI-u 编码的按键。
     // 丢失败也无所谓（没发过的平台上是空操作），绝不能连累下面这串恢复。
@@ -220,12 +242,36 @@ pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
         DisableFocusChange,
         crossterm::cursor::Show
     )?;
+    // 粘贴通道只在这里收回（`?2004` 之后的固定位置，单测逐字节断言）。
+    write!(w, "\x1b[?5522l")?;
     Ok(())
 }
 
 /// Initialize the terminal for TUI rendering.
 pub fn init_terminal() -> Result<WingTerminal> {
+    init_terminal_with(true)
+}
+
+/// [`init_terminal`] 的「**不装 stdin 接驳**」形态：setup 向导（`cmd::setup`）用它。
+///
+/// 为什么向导不能装：crossterm 的事件源是**进程级单例**（`INTERNAL_EVENT_READER`，
+/// 首次 `poll` 时按当时的 fd 0 注册，之后永不重建），而向导与主 TUI 是同一进程里的
+/// **两段** TUI（配置不可用 → 向导 → 修好后继续起主 TUI）。第一段若换接 fd 0，
+/// 单例就注册在第一段的 pty slave 上；`restore` 把它关掉之后，第二段里那个单例的
+/// 就绪源已经消失 —— 主 TUI 会彻底收不到按键（回归证据：
+/// `tests/stdin_proxy_stale_event_source.rs`）。向导本来也不需要图片粘贴。
+pub fn init_terminal_without_stdin_splice() -> Result<WingTerminal> {
+    init_terminal_with(false)
+}
+
+fn init_terminal_with(splices_stdin: bool) -> Result<WingTerminal> {
     crossterm::terminal::enable_raw_mode()?;
+    // stdin 接驳必须晚于 raw（raw 打在真实 tty 上）且早于 crossterm 事件源的首次创建
+    // （`spawn_event_stream`）——顺序与理由见 `stdin_proxy` 模块文档。装不上只是没有
+    // 5522 通道（`enter_sequence` 据此不开 mode），TUI 照常。
+    if splices_stdin && let Err(e) = stdin_proxy::install() {
+        tracing::warn!("stdin proxy unavailable, clipboard paste events disabled: {e}");
+    }
     let mut stdout = io::stdout();
     enter_sequence(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
@@ -236,6 +282,8 @@ pub fn init_terminal() -> Result<WingTerminal> {
 /// Restore the terminal to its original state.
 pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
     leave_sequence(terminal.backend_mut())?;
+    // fd 0 必须先还回真实 tty：`disable_raw_mode` 是把 termios 写回 fd 0 的。
+    stdin_proxy::restore();
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }
@@ -274,8 +322,16 @@ where
 ///
 /// Returns the receiver end. The task runs until the sender is dropped or
 /// a fatal error occurs.
+///
+/// 若 stdin 接驳装上了（[`stdin_proxy::is_installed`]），同时把 OSC 5522 协议机
+/// （[`clipboard_protocol::spawn`]）接上：它消费分流层提取的序列，把读回的文本 / 图片
+/// 投到**同一个**事件通道。必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经
+/// 是 pty slave，事件源注册的就是它）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
     let (tx, rx) = mpsc::channel(128);
+    if let Some(sequences) = stdin_proxy::take_sequences() {
+        clipboard_protocol::spawn(sequences, tx.clone());
+    }
     tokio::spawn(async move {
         loop {
             // Poll crossterm with a timeout so we can emit ticks.
@@ -347,17 +403,26 @@ mod tests {
     ///
     /// `ENTER_BYTES` is the non-multiplexed variant (any-motion on);
     /// `ENTER_BYTES_BUTTON_MOTION_ONLY` is what tmux / zellij / screen get.
+    /// Both carry `?5522h`（粘贴通道装上了才有这一条，见 `ENTER_BYTES_NO_PASTE_EVENTS`）。
     const ENTER_BYTES: &str = concat!(
         "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
+        "\x1b[?5522h",
         "\x1b[>1u",
     );
     const ENTER_BYTES_BUTTON_MOTION_ONLY: &str = concat!(
         "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
+        "\x1b[?5522h",
+        "\x1b[>1u",
+    );
+    /// stdin 接驳没装上时的进入序列：一个 5522 字节都不发（否则协议数据会喂给 crossterm）。
+    const ENTER_BYTES_NO_PASTE_EVENTS: &str = concat!(
+        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
         "\x1b[>1u",
     );
     const LEAVE_BYTES: &str = concat!(
         "\x1b[<1u",
         "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h",
+        "\x1b[?5522l",
     );
 
     /// Stub environment lookup (`std::env` is not readable in a deterministic
@@ -433,9 +498,26 @@ mod tests {
         // real environment to this function; the env is injected here so the
         // assertion does not depend on whether the suite runs inside tmux.
         let mut out = Vec::new();
-        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"))
+        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"), true)
             .expect("write enter sequence");
         assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES);
+    }
+
+    /// 没装上 stdin 接驳就不开 5522：开了等于把协议数据喂给 crossterm（本层要拦的东西）。
+    #[test]
+    fn test_enter_sequence_skips_paste_events_without_the_stdin_proxy() {
+        let mut out = Vec::new();
+        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"), false)
+            .expect("write enter sequence");
+        assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES_NO_PASTE_EVENTS);
+        assert!(!ENTER_BYTES_NO_PASTE_EVENTS.contains("?5522"));
+        // 两个变体只差这一条字节。
+        assert_eq!(
+            ENTER_BYTES.replace("\x1b[?5522h", ""),
+            ENTER_BYTES_NO_PASTE_EVENTS
+        );
+        // 收回是无条件的（panic hook 只有一条路径）。
+        assert!(LEAVE_BYTES.ends_with("\x1b[?5522l"));
     }
 
     #[test]
@@ -450,7 +532,7 @@ mod tests {
         ];
         for (env, term) in cases {
             let mut out = Vec::new();
-            enter_sequence_for(&mut out, env, Some(term)).expect("write enter sequence");
+            enter_sequence_for(&mut out, env, Some(term), true).expect("write enter sequence");
             let seq = String::from_utf8(out).unwrap();
             assert_eq!(seq, ENTER_BYTES_BUTTON_MOTION_ONLY);
             assert_eq!(
@@ -549,6 +631,7 @@ mod tests {
                 (2004, true),
                 (1004, true),
                 (25, false),
+                (5522, true),
             ]
         );
         assert_eq!(
@@ -561,7 +644,15 @@ mod tests {
                 (2004, true),
                 (1004, true),
                 (25, false),
+                (5522, true),
             ]
+        );
+        assert_eq!(
+            parse_modes(ENTER_BYTES_NO_PASTE_EVENTS),
+            parse_modes(ENTER_BYTES)
+                .into_iter()
+                .filter(|(mode, _)| *mode != 5522)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             parse_modes(LEAVE_BYTES),
@@ -574,6 +665,7 @@ mod tests {
                 (2004, false),
                 (1004, false),
                 (25, true),
+                (5522, false),
             ]
         );
     }

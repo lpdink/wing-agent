@@ -840,6 +840,8 @@ async fn smart_default_tui() -> Result<()> {
 fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        // fd 0 必须先从 pty 接驳还原：`disable_raw_mode` 是把 termios 写回 fd 0 的。
+        tui::stdin_proxy::restore();
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = tui::leave_sequence(&mut std::io::stdout());
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
@@ -894,7 +896,9 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                 http_base: http_base.clone(),
                 api_key: api_key.clone(),
             };
-            let mut terminal = tui::init_terminal()?;
+            // 向导是**同进程两段 TUI** 的第一段：不能装 stdin 接驳（crossterm 事件源是
+            // 进程级单例，会把第二段的输入掐死，见 `init_terminal_without_stdin_splice`）。
+            let mut terminal = tui::init_terminal_without_stdin_splice()?;
             install_panic_hook();
             // 先无损收尾再 `?`：setup 内部报错（如拉数据失败）也绝不能把终端留在 raw mode。
             let outcome = setup::run_setup_tui(&mut terminal, &http, &mut config, &endpoint).await;

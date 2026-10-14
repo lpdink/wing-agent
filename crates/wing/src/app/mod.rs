@@ -21,6 +21,7 @@ pub mod runner;
 pub mod transport;
 pub mod turn_state;
 
+mod clipboard;
 mod commands;
 mod frame;
 mod images;
@@ -187,6 +188,8 @@ pub struct App {
     /// 读它的只有 [`App::sync_welcome`]：它曾是 transcript 顶部一条 system
     /// 消息，现在归名牌（见 [`crate::ui::welcome::SessionFacts`]）。
     session_facts: Option<SessionFacts>,
+    /// OSC 5522 通道读回的图片（[`clipboard`] 边界）：本步骤只暂存，05 转成 chip。
+    pending_clipboard_images: Vec<clipboard::PendingClipboardImage>,
     /// 设置面板（`/settings`）：`Some` ⇔ 面板开着（`ModalOwner::Settings` 接管键盘）。
     /// 生命周期与分派全在 [`settings`] 模块。
     settings_panel: Option<crate::shared::panels::settings::SettingsPanel>,
@@ -282,6 +285,7 @@ impl App {
             geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
             images,
+            pending_clipboard_images: Vec::new(),
             session_facts: None,
             settings_panel: None,
             settings_cache: None,
@@ -1085,6 +1089,10 @@ pub async fn run_app(
                     }
                     TermEvent::Paste(text) => {
                         app.handle_paste(&text);
+                        app.input_dirty = true;
+                    }
+                    TermEvent::Clipboard(result) => {
+                        app.handle_clipboard(result);
                         app.input_dirty = true;
                     }
                     TermEvent::Resize(_, _) => {

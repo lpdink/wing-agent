@@ -138,7 +138,49 @@
 | 换行（整块不切开） | `crates/wing/src/ui/input_area/wrap.rs` |
 | 每行 run 级着色 | `crates/wing/src/ui/input_area/widget.rs` |
 
-**已知限制**：ask 面板的内联编辑器是另一套单行编辑器（多行粘贴折叠成空格），不参与 chip 机制；chip 比整行还宽时标签尾部被裁剪（该行裁剪线以外的列按「行末」解析）；号码不复用，所以删掉若干 chip 后编号会有空档（这是刻意的——号码是身份，不是计数）。
+**已知限制**：ask 面板的内联编辑器是另一套单行编辑器（多行粘贴折叠成空格），不参与 chip 机制；chip 比整行还宽时标签尾部被裁剪（该行裁剪线以外的列按「行末」解析）；号码不复用，所以删掉若干 chip 后序号会有空档（这是刻意的——号码是身份，不是计数）。
+
+## 粘贴（文本 / 图片）：OSC 5522 终端协议
+
+除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），TUI 还启用 **kitty clipboard protocol（DECSET 5522）**：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），图片落到 `App::on_clipboard_image` 边界暂存（压缩 / chip / 上传是后续步骤的事）。
+
+```text
+TUI 启动:  CSI ? 5522 h          （与 ?2004 等在同一处：tui::enter_sequence，退出时 CSI ? 5522 l 收回）
+Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
+                      ESC]5522;…status=DATA:mime=<.>;…   （targets listing：空格分隔的 MIME）
+                      ESC]5522;…status=DONE…
+           应用 → 终端  ESC]5522;type=read:name=<b64 程序名>:id=…:pw=<b64 OTP>;<b64 MIME>
+           终端 → 应用  OK → DATA（每片 ≤4096 原始字节、各自独立 base64）→ DONE
+```
+
+**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走，**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。顺序同样硬：`enable_raw_mode()` → 接驳 → `spawn_event_stream()`（事件源在首次 `poll` 时把 fd 0 注册进 epoll，之后 `dup2` 就唤不醒了）；退出时先还 fd 0 再 `disable_raw_mode()`（rename 到 fd 0 的 termios 操作）。`cmd` 的 panic hook 走同一条恢复路径。
+
+分流的状态机细节（都是单测钉住的）：前缀候选最长持有 25 ms（`Esc` 键的形态就是一个孤立 `ESC` 字节，队列已空时立刻放行，不吃延迟）；序列体 5 s 等不到终止符就丢弃（BEL 与 ST 两种终止符都认）；**bracketed paste 保护区内一律原样透传**（粘贴内容里的字面 `ESC]5522;` 是用户数据，不能吃）。
+
+**两段 TUI 的例外**：crossterm 的事件源是**进程级单例**（首次 `poll` 按当时的 fd 0 注册，永不重建），而首次运行时的 setup 向导与主 TUI 是同一进程里的两段 TUI。向导因此走 `tui::init_terminal_without_stdin_splice()`（不装接驳、也不发 `?5522h`）——第一段换接 fd 0 会把第二段的输入掐死（回归证据：`tests/stdin_proxy_stale_event_source.rs`）。向导本来也不需要图片粘贴。
+
+**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`），漏了就退回「要用户确认」甚至被拒。
+
+| 关注点 | 位置 |
+|---|---|
+| 分流状态机 + fd 接驳 / 泵线程 | `crates/wing/src/tui/stdin_proxy.rs` |
+| 协议机（包解析 / 请求构造 / 分片重组 / 超时）+ 驱动任务 | `crates/wing/src/tui/clipboard_protocol.rs` |
+| mode 启停（逐字节断言）与接线 | `crates/wing/src/tui/mod.rs`（`enter_sequence` / `leave_sequence` / `spawn_event_stream`） |
+| App 边界（文本 / 图片 / 失败） | `crates/wing/src/app/clipboard.rs` |
+| 端到端证据（自开 pty，headless 可跑） | `crates/wing/tests/stdin_proxy_pty.rs`、`tests/crossterm_osc5522_misparse.rs` |
+
+**支持终端与政策**：
+
+| 环境 | 行为 |
+|---|---|
+| Ghostty（1.3.1 起） | 完整可用（文本 + 图片，本地 / SSH 同）；kitty 预期一致（协议同源） |
+| 其它终端（忽略 `?5522h`） | DECSET 被忽略 → 图片粘贴不可用（**不做回落**：政策是让用户用支持协议的终端）；文本粘贴走 bracketed paste，行为不变 |
+| tmux / zellij 内 | 多路复用器拦未知 OSC（除非用户开 passthrough）→ 登记为**已知限制**（先进终端直连） |
+| Windows | 不承诺（接驳层是 `cfg(unix)`；非 Unix 上 `install()` 是空操作，也不开 `?5522`） |
+
+**不做的事**：不查 DECRQM 探测支持性（忽略模式集的终端本就不受影响）；不做终端无确认弹窗之外的授权流程（OTP 由 event 自带，`clipboard_read=ask` 下也免弹窗）；不做「一次粘贴多 item」的强承诺（尽力：分片与多 event 队列处理，队列满了才丢弃并记 WARN）。
+
+**待真机确认项**（headless 测不了，验收清单必过）：macOS 侧 listing 的 MIME 名称按 `UTType.preferredMIMEType` 推断应是标准 MIME（`image/png` 等），需在 Ghostty 实机确认（截图 / 浏览器复制图片两种来源）；确认 `Cmd+V` 文本与图片各一次的行为、以及图片字节与剪贴板一致。
 
 ## 链接渲染与单击打开（`tui-link-open`）
 

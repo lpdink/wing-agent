@@ -4,6 +4,7 @@
 //! private fields and the lanes' `pub(super)` entry points. `support` holds
 //! only the fixtures shared by more than one file.
 
+mod clipboard;
 mod commands;
 mod composer;
 mod core;
