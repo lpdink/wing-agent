@@ -89,6 +89,21 @@ def webp(width: int, height: int) -> bytes:
     )
 
 
+def cgbi_png() -> bytes:
+    """Apple CgBI 变体 PNG：签名 + ``CgBI`` chunk（IHDR 被推到偏移 28）。
+
+    文件本身合法可显示，只是尺寸无法按标准 PNG 布局解析。
+    """
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 4)
+        + b"CgBI"
+        + b"PROF"  # CgBI chunk payload（内容不参与判定）
+        + b"\x00\x00\x00\x00"  # chunk CRC（内容不参与判定）
+        + b"\x00" * 16
+    )
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -155,6 +170,19 @@ class TestUploadImageRef:
         with pytest.raises(InvalidInputError) as failure:
             upload_image_ref(truncated, max_bytes=1 << 20)
         assert "cannot read png image dimensions" in str(failure.value)
+
+    def test_apple_cgbi_png_is_named_as_a_variant_not_as_corruption(self) -> None:
+        """CgBI（Apple 非标准 PNG）：归因是"变体需转换"，不是"头部损坏"。
+
+        与读图路径同一条归因（`read_image.py` 的 CgBI 分支）——同一个文件不该因
+        入口不同得到两种可诊断性。
+        """
+        with pytest.raises(InvalidInputError) as failure:
+            upload_image_ref(cgbi_png(), max_bytes=1 << 20)
+        message = str(failure.value)
+        assert "Apple CgBI PNG variant" in message
+        assert "Convert it first" in message
+        assert "truncated or corrupt" not in message
 
     def test_size_check_precedes_format_check(self) -> None:
         """顺序：超限的垃圾字节报"过大"（先 O(1) 检查，不为非法载荷做解析）。"""
@@ -416,6 +444,19 @@ class TestUploadRoute:
         assert response.json()["error"] == "bad_request"
         assert response.json()["detail"], response.text
         assert not (root / sid / "media").exists(), "400 路径在存储上留下了痕迹"
+
+    def test_cgbi_variant_is_400_with_the_variant_message(self, real_client) -> None:
+        """HTTP 面同样按"变体需转换"归因，且不留痕。"""
+        client, root = real_client
+        sid = self._create_session(client)
+
+        response = client.post(
+            "/api/session/media", params={"session_id": sid}, content=cgbi_png()
+        )
+
+        assert response.status_code == 400, response.text
+        assert "Apple CgBI PNG variant" in response.json()["detail"], response.text
+        assert not (root / sid / "media").exists()
 
     def test_oversize_bytes_are_400_against_config_limit(
         self, real_client, monkeypatch: pytest.MonkeyPatch

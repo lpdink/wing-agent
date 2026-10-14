@@ -72,6 +72,11 @@ class HttpCall:
         return "\n".join(parts)
 
 
+def _append_detail(existing: str | None, note: str) -> str:
+    """把一条留档说明追加到已有说明之后（``; `` 分隔）。"""
+    return f"{existing}; {note}" if existing else note
+
+
 def _truncate(text: str, limit: int) -> str:
     return (
         text if len(text) <= limit else f"{text[:limit]}…(+{len(text) - limit} chars)"
@@ -251,10 +256,15 @@ class DriverHttp(GatewayClient):
         body: Any = None,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        content: bytes | None = None,
     ) -> Any:
-        """低层口子：任意端点的留档调用（非 2xx 抛 ``DriverHttpError``）。"""
+        """低层口子：任意端点的留档调用（非 2xx 抛 ``DriverHttpError``）。
+
+        ``body`` 是 JSON 体、``content`` 是**原始字节体**（互斥）——两个低层口子
+        都能带原始体，场景碰上新 raw-body 端点时不必再动驱动。
+        """
         _, payload = await self._call(
-            method, path, body=body, params=params, headers=headers
+            method, path, body=body, params=params, headers=headers, content=content
         )
         return payload
 
@@ -265,15 +275,21 @@ class DriverHttp(GatewayClient):
         *,
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        content: bytes | None = None,
     ) -> tuple[HttpCall, bytes]:
         """低层口子：任意端点的留档调用，返回**原始字节**（非 2xx 抛错）。
 
         与 ``request`` 的唯一区别是不做 JSON 解析——断言二进制响应 / Range 的
         ``content-range`` 这类"载荷不是 JSON"的端点用它；响应头一并留在
-        ``HttpCall.response_headers``。
+        ``HttpCall.response_headers``。``content`` 语义同 ``request``。
         """
         call, payload = await self._call(
-            method, path, params=params, headers=headers, parse_json=False
+            method,
+            path,
+            params=params,
+            headers=headers,
+            parse_json=False,
+            content=content,
         )
         return call, payload
 
@@ -292,7 +308,9 @@ class DriverHttp(GatewayClient):
 
         ``body`` 是 JSON 体，``content`` 是**原始字节体**（互斥）——字节不进
         ``HttpCall.body``（那是 JSON 留档），只在 ``detail`` 里记长度：图片体积
-        灌进现场转储没有信息量，只有噪声。
+        灌进现场转储没有信息量，只有噪声。detail 是**累积**的（原始体长度 +
+        非 JSON 响应各自成句）：raw-body 请求撞上非 JSON 响应（500 的 HTML 错误页）
+        时两条事实都要留在留档里。
         """
         started = self._clock()
         at = started - self._started_at
@@ -313,7 +331,7 @@ class DriverHttp(GatewayClient):
             try:
                 payload = response.json()
             except ValueError:
-                detail = "response body is not JSON"
+                detail = _append_detail(detail, "response body is not JSON")
             text = _truncate(response.text, self._text_limit)
         else:
             payload = response.content

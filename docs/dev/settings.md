@@ -296,7 +296,7 @@ git-tracked 的 `config.yaml` + `.bak`。
 | `safe_command_patterns[]` | `hot` | `tools/internal/shell_safety.py` 每调用 `get_config()` |
 | `yolo` / `steer` | `next_session` | agent / ReAct 循环构造时读 |
 | `tool_result_truncate.*` | `hot` | 工具执行器每调用读 |
-| `images.*` | `hot` | ReadImage 与请求期媒体投影每调用读（见 [media-images.md](media-images.md)） |
+| `images.*` | `hot` | ReadImage、上传端点（`POST /api/session/media`，同一上限）与请求期媒体投影每调用读（见 [media-images.md](media-images.md)） |
 | `sessions.eviction.enabled` / `idle_ttl_seconds` | `hot` | 逐出扫描每次 sweep 读 |
 | `sessions.eviction.sweep_interval_seconds` | `restart` | 启动时注册 job 的间隔读一次（热重载不改变已注册 job） |
 | `gateway.host` / `gateway.port` | `restart` | uvicorn 已绑定；且 Rust 侧启动时读文件决定连哪（不做假热更） |

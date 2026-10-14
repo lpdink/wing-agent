@@ -278,6 +278,7 @@ class StubGateway:
         app.router.add_post("/api/session/release", self._echo)
         app.router.add_post("/api/session/media", self._media)
         app.router.add_post("/api/session/boom", self._boom)
+        app.router.add_post("/api/session/text", self._text)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -344,6 +345,13 @@ class StubGateway:
 
     async def _ok(self, request: web.Request) -> web.Response:
         return web.json_response({"ok": True})
+
+    async def _text(self, request: web.Request) -> web.Response:
+        """非 JSON 响应（如网关 500 的 HTML 错误页）；``?fail=1`` 取 500 分支。"""
+        status = 500 if "fail" in request.query else 200
+        return web.Response(
+            text="<html>not json</html>", content_type="text/html", status=status
+        )
 
     async def _boom(self, request: web.Request) -> web.Response:
         return web.json_response({"detail": "stub exploded"}, status=500)
@@ -567,4 +575,62 @@ async def test_upload_media_omits_name_when_absent(stub_gateway: StubGateway) ->
     assert response["echo"]["name"] is None, response
     assert response["echo"]["has_name_param"] is False, response
     assert http.calls[0].params == {"session_id": "sid-2"}, http.calls[0].params
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_low_level_doors_carry_raw_bytes(stub_gateway: StubGateway) -> None:
+    """两个低层口子（``request`` / ``request_raw``）都能带原始字节体。
+
+    具名动作（``upload_media``）不是唯一通道：将来测别的 raw-body 端点时，低层
+    口子必须能一次到位（否则又得改驱动）。
+    """
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+    data = b"\x89PNG-low-level-raw"
+
+    payload = await http.request(
+        "POST",
+        "/api/session/media",
+        content=data,
+        params={"session_id": "sid-7"},
+    )
+
+    assert payload["echo"]["bytes"] == len(data), payload
+    assert payload["echo"]["sha256"] == hashlib.sha256(data).hexdigest(), payload
+    assert http.calls[0].detail == f"raw body: {len(data)} byte(s)"
+
+    tiny = b"\x00\x01"
+    call, raw = await http.request_raw(
+        "POST", "/api/session/media", content=tiny, params={"session_id": "sid-8"}
+    )
+    assert call.params == {"session_id": "sid-8"}, call.params
+    assert call.detail == f"raw body: {len(tiny)} byte(s)", call.detail
+    assert call.response is None, "parse_json=False：响应只留原始字节"
+    assert json.loads(raw)["echo"]["sha256"] == hashlib.sha256(tiny).hexdigest(), raw
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_raw_body_detail_survives_a_non_json_response(
+    stub_gateway: StubGateway,
+) -> None:
+    """raw body 长度与非 JSON 响应两条留档事实**同时**保留（不互相覆盖）。
+
+    最现实的那一支是"raw-body 请求撞上 500 的 HTML 错误页"：两条事实都在，才是
+    可离线复盘的现场。
+    """
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+    merged = "raw body: 5 byte(s); response body is not JSON"
+
+    payload = await http.request("POST", "/api/session/text", content=b"12345")
+    assert payload is None, "非 JSON 响应：低层口子原样回 None（留档才是断言面）"
+
+    with pytest.raises(DriverHttpError):
+        await http.request(
+            "POST", "/api/session/text", content=b"12345", params={"fail": "1"}
+        )
+
+    assert [call.detail for call in http.calls] == [merged, merged], http.calls
+    assert [call.status for call in http.calls] == [200, 500], http.calls
+    assert "not json" in http.calls[0].text, http.calls[0].text
     await http.close()

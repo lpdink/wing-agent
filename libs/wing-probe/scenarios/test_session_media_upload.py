@@ -132,6 +132,26 @@ def assert_no_base64_in_history(session_id: str, probe: Probe, data: bytes) -> N
     assert "image_url" not in raw and "data:image" not in raw, raw[-400:]
 
 
+def session_dirs(probe: Probe) -> list[str]:
+    """sessions 根下的会话目录名清单（点开头的遗留池不算；不存在 = 空清单）。"""
+    root = probe.env.sessions_path
+    if not root.is_dir():
+        return []
+    return sorted(
+        p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+    )
+
+
+def fs_is_case_insensitive(base: Path) -> bool:
+    """本机文件系统对大小写是否不敏感（决定"别名"是否真的解析到同一目录）。"""
+    probe_dir = base / "fs-case-probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return (base / "FS-CASE-PROBE").is_dir()
+    finally:
+        probe_dir.rmdir()
+
+
 # ── 场景 1：成功四件套（响应 / 存储 / 留档） ──────────────────────
 
 
@@ -353,3 +373,44 @@ async def test_upload_without_name_is_referencable(probe: Probe) -> None:
 
     wire = json.dumps(context.body, ensure_ascii=False)
     assert "image_url" in wire  # 图确实以 image part 发射（不是占位）
+
+
+# ── 场景 6：别名拼写（大小写不敏感 FS）写进真名目录 ───────────────
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_alias_spelling_lands_in_the_canonical_session_dir(probe: Probe) -> None:
+    """别名拼写上传：对象必须落**磁盘真名**目录，不能另起第二个会话目录。
+
+    大小写不敏感的 FS（macOS APFS / 开发机）上真别名成立：`_resolve_with_store`
+    返回真名 → 写目标跟着真名（别名不分裂会话）。大小写敏感的 FS（CI 的 Linux）
+    上别名**不是同一个会话**——按"不存在"处理（404）、同样不得留下第二份目录。
+    两个分支各自断言（比 skip 强：敏感 FS 也能守住"不另起目录"）。
+    """
+    probe.register(VISION_MODEL, Turn.of(text="seeded"))
+    session = await probe.session(model=VISION_MODEL)
+    # 会话要真的"是会话"（`_resolve_with_store` 的 exists 判据 = metadata / history）：
+    # 首轮对话落链——刚建的空会话连逐字拼写都不在磁盘事实里。
+    await session.chat("seed the history")
+    sid = session.session_id
+    alias = sid.swapcase()
+    assert alias != sid, sid  # 自动 id（YYYYMMDD-HHMMSS-hex）必有可翻的大小写
+    data = png(2, 2, tint=0xDD)
+    http = probe.driver_required.http
+
+    if not fs_is_case_insensitive(probe.env.sessions_path):
+        with pytest.raises(DriverHttpError) as failure:
+            await http.upload_media(alias, data)
+        assert failure.value.call.status == 404, failure.value.call.render()
+        assert session_dirs(probe) == [sid], session_dirs(probe)
+        return
+
+    uploaded = await http.upload_media(alias, data)
+    assert uploaded["media"]["id"] == sha256(data), uploaded
+    # 目录清单里没有第二个变体目录；对象落在真名目录里。
+    assert session_dirs(probe) == [sid], session_dirs(probe)
+    assert (
+        media_object_path(probe, sid, uploaded["media"]["id"]).read_bytes() == data
+    ), "别名上传的对象没有落进磁盘真名目录"

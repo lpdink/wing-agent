@@ -287,6 +287,16 @@ def upload_image_ref(
         )
     dims = image_dimensions(data, mime)
     if dims is None:
+        if is_apple_cgbi_png(data):
+            # 与读图路径同一归因：CgBI 是 Apple 的非标准 PNG 变体（IHDR 在偏移 28），
+            # 文件本身合法可显示——报"损坏"是误导。上传端只有字节、没有源文件路径，
+            # 所以给的是通用转换命令（读图路径给的是可照抄的具体路径版本）。
+            raise InvalidInputError(
+                "Apple CgBI PNG variant — dimensions cannot be read "
+                "(non-standard layout: the CgBI chunk precedes IHDR; the file "
+                "itself is valid). Convert it first, e.g.: "
+                "sips -s format png <file> --out <file>.png"
+            )
         raise InvalidInputError(
             f"cannot read {_MIME_SHORT.get(mime, mime)} image dimensions "
             f"(header truncated or corrupt)"
