@@ -7,7 +7,7 @@
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
 `libs/core/wing/gateway/routes/session.py`（上传端点）、`libs/core/wing/tools/builtin/read_image.py`；
 整机证据 `libs/wing-probe/scenarios/`：`test_read_image.py`（15 条）/ `test_media_layout.py`（3 条存储布局）
-/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（7 条上传端点），本文末列。
+/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（8 条上传端点），本文末列。
 本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
@@ -380,6 +380,7 @@ providers:
 | `test_ghost_session_upload_is_404` | 幽灵会话 / 路径穿越式 id → 404 `session not found`，无目录残留 |
 | `test_uploaded_bytes_reach_the_model_request`（红线） | 上传 → 消息带 ref → 请求体 user content = [原文本, image part]、解码**逐字节 == 上传字节**；history 有引用、**无 base64**；对象仍在 |
 | `test_upload_without_name_is_referencable` | 不带 `name` → `name: null`；对象照样可被引用（`name` 不是寻址键） |
+| `test_alias_spelling_lands_in_the_canonical_session_dir` | 别名拼写（大小写不敏感 FS）：200 + 对象落**真名目录**、目录清单只一份；敏感 FS（CI）：404 + 同样不产生第二套目录（两分支各自断言） |
 
 用户贴图链路（`libs/wing-probe/scenarios/test_user_media.py`，02 message_chain；对象由场景预置进
 `<sid>/media/<id>`——上传端点落地后，同一存储布局的写入侧由上面的文件走真上传覆盖）：
