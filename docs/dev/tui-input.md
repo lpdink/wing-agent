@@ -192,6 +192,8 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **图片：入队 → 压缩 → chip（单并发流水线）**。`App::on_clipboard_image` 把字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张并给 warning toast `Image dropped: too many pending images`——与其它失败同一条红线），队列非空且没有在飞的压缩时取队首、**move** 进 `AppIntent::CompressClipboardImage { bytes, options }`（`options` 来自 `paste.image.*`，入队那一刻取，越界值已夹紧）。runner 在**阻塞池**上跑 `util/image_compress`（解码 / 白底 flatten / 长边缩放 / JPEG + 预算循环），结果经 `FetchPayload::ClipboardImage` 回到 `App::on_clipboard_compressed`：成功 → `input.insert_image`（chip 号码 = 插入序 = 粘贴序），失败 → warning toast（`Image dropped: <原因>`）。**一次只压一张**不是保守而是顺序契约（并发压完的到达序不确定，号码就会跳序）；**成功不 toast**（chip 出现本身就是反馈，与文本粘贴一致）。这条回执**不属于任何会话**：`handle_fetch_result` 在会话守卫**之前**分派它——丢掉它会让「在飞」永远为真，之后所有粘贴都不落地。
 
+**已知边界（图片 chip 的落点）**：chip 落在**压缩回执时刻**的光标处而非粘贴时刻（压缩在阻塞池异步跑，大图可达数百毫秒），期间用户移动过光标的话 chip 就跟随最新光标——这是有意取舍（原位插入要假定粘贴时刻的行列在压缩期间仍有效，而那恰是草稿最可能变的地方；号码 = 粘贴序的契约不受影响）。
+
 chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标签行共用一份实现，`util/format.rs::image_label`；形状断言钉在那里，chip 侧钉在 `ui/input_area/image.rs`），其中 `W×H` 与 `SIZE` 取的都是**压缩后**的产物（那才是真正发出去的字节；`SIZE` 用紧凑记法 `512B` / `384KB` / `1.0MB`，永不写 `1024KB`）。渲染与粘贴 chip 完全同款：accent 上色、行内、整块不切开、ghost 态随草稿一起 dim。
 
 | 关注点 | 位置 |

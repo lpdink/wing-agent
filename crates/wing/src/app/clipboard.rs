@@ -101,6 +101,9 @@ impl App {
 
     /// 一张压完了：插 chip（失败则 toast），然后看队列里还有没有下一张。
     ///
+    /// 插入点取**此刻**的光标，不是粘贴时刻的（压缩异步，原位插入要假定那时的行列仍
+    /// 有效）——见 `docs/dev/tui-input.md` 的「已知边界（图片 chip 的落点）」。
+    ///
     /// 会话无关：哪怕这张图是在另一个会话里粘的，草稿还在，chip 就还得插（所以
     /// `handle_fetch_result` 对这条回执不查会话守卫）。
     pub(crate) fn on_clipboard_compressed(&mut self, result: Result<CompressedImage, String>) {
