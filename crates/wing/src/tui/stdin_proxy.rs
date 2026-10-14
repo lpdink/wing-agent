@@ -33,6 +33,16 @@
 //! - 失败不致命：[`install`] 任何一步出错都先在返回前还原 fd 0，调用方降级即可；但**没有
 //!   装上就不要开 mode 5522**（[`is_installed`] 是 `enter_sequence` 的判据）——否则协议
 //!   数据会直接喂给 crossterm，正是本层要避免的事。
+//!
+//! # 已知边界：粘贴内容以字面 `ESC` 结尾
+//!
+//! bracketed paste 保护区内，只扣「可能是闭界 `ESC[201~` 开头」的尾部字节，粘贴内容末尾的
+//! 字面 `ESC` 因此先被当作前缀候选；真闭界到达时它原样冲回，透传流里出现**连续的
+//! `ESC` + `ESC[201~`**。本层一字节不丢（「透传 + 序列 == 输入」的不变式钉住，
+//! `bracketed_paste_keeps_a_trailing_literal_esc_byte_for_byte` 钉这一形态），但这段流对
+//! 任何下游都是两义的：哪个 `ESC` 属于粘贴内容、哪个属于闭界，只有终端知道——协议里除
+//! 「闭界紧跟数据」没有别的信息可分。固有歧义 + 极罕见，登记为已知边界，本层不做
+//! （也做不了）区分。
 
 use std::time::{Duration, Instant};
 
@@ -835,6 +845,23 @@ mod tests {
         assert_eq!(feed(&mut s, b"\x1b[200~", 0).passthrough, b"\x1b[200~");
         assert_eq!(feed(&mut s, b"abc\x1b", 1).passthrough, b"abc");
         assert_eq!(feed(&mut s, b"Z", 2).passthrough, b"\x1bZ");
+    }
+
+    /// 已知边界（登记，见模块注释）：粘贴内容以字面 ESC 结尾、紧跟闭界时，保护区先把
+    /// 这个 ESC 当作闭界前缀候选扣住，闭界到达后再原样冲回——**本层一字节不丢**（字节流
+    /// 里出现 `ESC` + `ESC[201~`；哪个 ESC 属于内容只有终端知道，歧义在下游收场）。
+    #[test]
+    fn bracketed_paste_keeps_a_trailing_literal_esc_byte_for_byte() {
+        let mut raw = b"\x1b[200~A\x1b".to_vec();
+        raw.extend_from_slice(PASTE_CLOSE);
+        raw.extend_from_slice(b"B");
+        let mut s = Splitter::new();
+        let out = feed(&mut s, &raw, 0);
+        assert_eq!(out.passthrough, raw, "含尾部字面 ESC 的每个字节都原样放行");
+        assert!(out.sequences.is_empty());
+        // 保护区已退出：后续的 5522 又是协议数据。
+        let out = feed(&mut s, &seq("after"), 1);
+        assert_eq!(out.sequences, vec![b"after".to_vec()]);
     }
 
     #[test]
