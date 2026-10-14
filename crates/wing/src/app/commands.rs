@@ -228,6 +228,8 @@ impl App {
             content: text.to_string(),
             tool_call_id: None,
             request_id,
+            // 图片段由 composer 层挂上（05 的 chip / 提交产物）；纯文本路径保持原样。
+            images: Vec::new(),
         });
         self.turn.usage = TurnUsage::default();
         true

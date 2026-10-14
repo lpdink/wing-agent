@@ -17,9 +17,11 @@ use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
 use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
+use crate::protocol::MediaRef;
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
+use crate::util::image_compress::CompressedImage;
 use crate::util::program_status;
 use crate::util::title;
 
@@ -132,33 +134,17 @@ pub async fn execute_intent(
             content,
             tool_call_id,
             request_id,
+            images,
         } => {
-            match transport {
-                Some(t) => {
-                    if let Err(e) = t
-                        .ws
-                        .send_message(&app.session_id, &content, tool_call_id, request_id.clone())
-                        .await
-                    {
-                        tracing::error!("failed to send message: {e}");
-                        // Never left the client — drop from the pending queue.
-                        app.chat.remove_pending(&request_id);
-                        app.show_toast(Toast::warning(
-                            format!("Send failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                }
-                None => {
-                    // Gateway connection lost — the intent is discarded, so the
-                    // pending entry must not linger on screen.
-                    app.chat.remove_pending(&request_id);
-                    app.show_toast(Toast::warning(
-                        "Not sent — gateway disconnected".to_string(),
-                        std::time::Duration::from_secs(3),
-                    ));
-                }
-            }
+            send_user_message(
+                app,
+                transport.as_ref(),
+                content,
+                tool_call_id,
+                request_id,
+                images,
+            )
+            .await;
         }
         AppIntent::FetchInfo => {
             if let Some(t) = transport {
@@ -699,6 +685,94 @@ pub async fn execute_intent(
             super::settings::restart_gateway(app, transport, endpoint).await;
         }
     }
+}
+
+/// 一条用户消息的完整发送：带图先把每张上传成引用，再把消息（含引用）交给网关。
+///
+/// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
+/// （真实 stdout），单测造不出来（同 `apply_update_session` 的抽取理由）。
+///
+/// **失败契约（本步骤版）**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
+/// 少一张图的引用列表会被当成完整输入），丢掉 pending 条目 + warning toast；
+/// 已经上传成功的图留在存储里（政策：媒体永不删除）。
+/// **过渡点（07 升级）**：失败时内容 / 图片不回填草稿。回填需要在 App 侧留存提交产物，
+/// 届时把这里改成返回失败原因（调用点只有 runner 一处）。
+pub(super) async fn send_user_message(
+    app: &mut App,
+    transport: Option<&Transport>,
+    content: String,
+    tool_call_id: Option<String>,
+    request_id: String,
+    images: Vec<CompressedImage>,
+) {
+    let Some(transport) = transport else {
+        // Gateway connection lost — the intent is discarded, so the
+        // pending entry must not linger on screen.
+        app.chat.remove_pending(&request_id);
+        app.show_toast(Toast::warning(
+            "Not sent — gateway disconnected".to_string(),
+            std::time::Duration::from_secs(3),
+        ));
+        return;
+    };
+
+    let media = if images.is_empty() {
+        // 纯文本：帧里没有 `media` 键，行为与引入图片之前逐字节相同。
+        None
+    } else {
+        match upload_images(&transport.http, &app.session_id, images).await {
+            Ok(refs) => Some(refs),
+            Err(e) => {
+                tracing::warn!("image upload failed: {e}");
+                app.chat.remove_pending(&request_id);
+                app.show_toast(Toast::warning(
+                    format!("Image upload failed: {e}"),
+                    std::time::Duration::from_secs(3),
+                ));
+                return;
+            }
+        }
+    };
+
+    if let Err(e) = transport
+        .ws
+        .send_message(
+            &app.session_id,
+            &content,
+            tool_call_id,
+            request_id.clone(),
+            media,
+        )
+        .await
+    {
+        tracing::error!("failed to send message: {e}");
+        // Never left the client — drop from the pending queue.
+        app.chat.remove_pending(&request_id);
+        app.show_toast(Toast::warning(
+            format!("Send failed: {e}"),
+            std::time::Duration::from_secs(3),
+        ));
+    }
+}
+
+/// 逐张上传（顺序 = 提交顺序 = 消息内 media 列表顺序）。
+///
+/// 错误在这里格式化成给 toast 的文案（调用点只 toast）；展示名（`name`）不走上传：
+/// chip 的 `label` 是纯前端展示（05），后端只存字节与元数据。
+async fn upload_images(
+    http: &wing_api_client::GatewayClient,
+    session_id: &str,
+    images: Vec<CompressedImage>,
+) -> Result<Vec<MediaRef>, String> {
+    let mut refs = Vec::with_capacity(images.len());
+    for image in images {
+        let uploaded = http
+            .upload_media(session_id, image.bytes, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        refs.push(uploaded);
+    }
+    Ok(refs)
 }
 
 /// Apply optimistic local status update after a successful UpdateSession HTTP call.
