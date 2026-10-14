@@ -236,6 +236,8 @@ async def test_invalid_filter_values_are_rejected(probe: Probe) -> None:
             {"status": "idle,"},
             {"tag": "pin,"},
             {"tag": ""},
+            {"tag": "-pin"},
+            {"tag": "pin x"},
         ):
             with pytest.raises(DriverHttpError) as excinfo:
                 await _list(observer, **filters)

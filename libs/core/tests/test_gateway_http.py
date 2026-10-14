@@ -697,6 +697,20 @@ class TestSessionList:
         assert "tag filter" in resp.json()["detail"]
         mock_runtime.list_sessions.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "value",
+        ["-pin", "pin x", "pin\tx", "x" * 65, "pin,-crew"],
+    )
+    def test_list_rejects_lexically_invalid_tags(
+        self, client: TestClient, mock_runtime, value: str
+    ):
+        """词法非法（`-` 开头 / 空白 / 控制符 / 超长）→ 400：这类值不可能命中
+        任何行（列表行的 tags 恒为清洗后的合法值），静默空结果只会掩盖笔误。"""
+        resp = client.get("/api/session/list", params={"tag": value})
+        assert resp.status_code == 400, resp.text
+        assert "tag filter" in resp.json()["detail"]
+        mock_runtime.list_sessions.assert_not_called()
+
 
 class TestSessionGet:
     """GET /api/session/get 测试。"""

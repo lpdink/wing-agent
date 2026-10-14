@@ -48,6 +48,7 @@ from wing.common.utils import InvalidInputError
 from wing.common.logger import log
 from wing.event import SessionStatus
 from wing.request_context import session_context
+from wing.session.tags import validate_tag
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -241,6 +242,9 @@ async def send_message(
 #: 状态过滤的取值域 = 会话状态全集（唯一声明处 `wing.event.SessionStatus`）。
 _STATUS_FILTER_VALUES = frozenset(get_args(SessionStatus))
 
+#: 取值域的展示形态（OpenAPI 描述与 400 报错共用，避免复制字面量）。
+_STATUS_FILTER_VALUES_TEXT = ", ".join(sorted(_STATUS_FILTER_VALUES))
+
 
 def _parse_status_filter(raw: str | None) -> set[str] | None:
     """`?status=idle,working` → 状态集合；缺省（None）= 不过滤。
@@ -257,7 +261,7 @@ def _parse_status_filter(raw: str | None) -> set[str] | None:
     if unknown:
         raise ValueError(
             f"unknown status filter value(s): {', '.join(unknown)}; "
-            f"available: {', '.join(sorted(_STATUS_FILTER_VALUES))}"
+            f"available: {_STATUS_FILTER_VALUES_TEXT}"
         )
     return set(values)
 
@@ -279,13 +283,20 @@ def _reject_repeated_filters(request: Request) -> None:
 def _parse_tag_filter(raw: str | None) -> list[str]:
     """`?tag=pin,crew` → 标签列表（AND：必须全部携带）；缺省 = 不过滤。
 
-    标签是不透明字符串（写入侧已校验取值）：这里只拒绝空段，匹配按字面进行。
+    值走写入侧同一套校验（:func:`wing.session.tags.validate_tag` 是标签词汇的
+    唯一入口）：**词法非法**（空 / 超长 / 空白 / 控制符 / `-` 开头）一律 400
+    ——这类值不可能命中任何行（列表行的 tags 恒为清洗后的合法值），静默返回空
+    结果只会掩盖调用方的笔误；**语法合法但不存在**的标签则是空结果（词表开放，
+    无从枚举）。
     """
     if raw is None:
         return []
-    tags = [part.strip() for part in raw.split(",")]
-    if any(not t for t in tags):
-        raise ValueError("tag filter must not contain empty values")
+    tags: list[str] = []
+    for part in raw.split(","):
+        try:
+            tags.append(validate_tag(part.strip()))
+        except ValueError as e:
+            raise ValueError(f"tag filter: {e}")
     return tags
 
 
@@ -304,7 +315,7 @@ async def list_sessions(
     status: str | None = Query(
         None,
         description=(
-            "按会话状态过滤（逗号分隔：inactive / idle / working / waiting）；"
+            f"按会话状态过滤（逗号分隔：{_STATUS_FILTER_VALUES_TEXT}）；"
             "只请求在内存的会话即 `status=idle,working,waiting`"
         ),
     ),
