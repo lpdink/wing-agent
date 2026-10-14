@@ -647,6 +647,44 @@ class TestSessionList:
         statuses = {s["id"]: s["status"] for s in data["sessions"]}
         assert statuses == {"s1": "working", "s2": "inactive"}
 
+    def test_list_forwards_status_and_tag_filters(
+        self, client: TestClient, mock_runtime
+    ):
+        """过滤参数在路由层解析后原样交给 runtime（语义落在会话层）。"""
+        resp = client.get(
+            "/api/session/list", params={"status": "idle, working", "tag": "pin, crew"}
+        )
+        assert resp.status_code == 200
+        mock_runtime.list_sessions.assert_called_once_with(
+            statuses={"idle", "working"}, tags=["pin", "crew"]
+        )
+
+    def test_list_without_params_passes_no_filter(
+        self, client: TestClient, mock_runtime
+    ):
+        """缺省 = 不过滤（全量列表；行为与加参数之前逐字一致）。"""
+        assert client.get("/api/session/list").status_code == 200
+        mock_runtime.list_sessions.assert_called_once_with(statuses=None, tags=[])
+
+    @pytest.mark.parametrize("value", ["idle,bogus", "active", "", "idle,"])
+    def test_list_rejects_unknown_or_empty_status(
+        self, client: TestClient, mock_runtime, value: str
+    ):
+        """未知取值 / 空段一律 400（静默忽略会让调用方以为过滤生效了）。"""
+        resp = client.get("/api/session/list", params={"status": value})
+        assert resp.status_code == 400, resp.text
+        assert "status filter" in resp.json()["detail"]
+        mock_runtime.list_sessions.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["pin,", ",pin", "pin,,crew", ""])
+    def test_list_rejects_empty_tag_values(
+        self, client: TestClient, mock_runtime, value: str
+    ):
+        resp = client.get("/api/session/list", params={"tag": value})
+        assert resp.status_code == 400, resp.text
+        assert "tag filter" in resp.json()["detail"]
+        mock_runtime.list_sessions.assert_not_called()
+
 
 class TestSessionGet:
     """GET /api/session/get 测试。"""

@@ -422,6 +422,42 @@ class TestQueryInterface:
         result = runtime.list_sessions()
         assert isinstance(result, list)
 
+    @pytest.mark.asyncio
+    async def test_list_sessions_filters_are_subsets(self, tmp_path, monkeypatch):
+        """`statuses` / `tags` 是子集过滤（AND）；缺省不过滤——结果是全量的子序列。
+
+        用独立 sessions 根：共享临时目录里其它用例的会话会污染精确断言。
+        """
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        from wing.runtime import WingRuntime
+
+        runtime = WingRuntime()
+        active = runtime.create_session(tags=["crew"])
+        pinned = runtime.create_session(tags=["crew", "pin"])
+        released, _ = runtime.release_session(pinned.session_id)
+        assert released is True
+
+        full = runtime.list_sessions()
+        assert [s.id for s in full] == [active.session_id, pinned.session_id]
+
+        assert [
+            s.id for s in runtime.list_sessions(statuses={"idle", "working", "waiting"})
+        ] == [active.session_id]
+        assert [s.id for s in runtime.list_sessions(tags=["pin"])] == [
+            pinned.session_id
+        ]
+        # AND：在内存 **且** 带 pin。
+        assert [
+            s.id
+            for s in runtime.list_sessions(
+                statuses={"idle", "working", "waiting"}, tags=["pin"]
+            )
+        ] == []
+        # 子序列契约：过滤结果 == 全量 + 谓词（行序不变）。
+        assert runtime.list_sessions(statuses={"inactive"}) == [
+            s for s in full if s.status == "inactive"
+        ]
+
 
 # ============================================================
 # 工具绑定隔离

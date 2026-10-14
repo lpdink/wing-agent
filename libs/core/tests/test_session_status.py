@@ -122,6 +122,7 @@ def _write_session_dir(
     last_interaction: str | None,
     workspace: str | None = None,
     name: str = "test session",
+    tags: list[str] | None = None,
 ) -> None:
     """在磁盘上构造一个合法 session 目录（history.jsonl + metadata.json）。
 
@@ -138,6 +139,8 @@ def _write_session_dir(
         metadata["last_interaction"] = last_interaction
     if workspace is not None:
         metadata["workspace"] = workspace
+    if tags is not None:
+        metadata["tags"] = tags
     (session_dir / "metadata.json").write_text(json.dumps(metadata))
 
 
@@ -152,7 +155,9 @@ def _mark_active(sm, session_id: str, status: str = "idle") -> None:
     """把 session 标记为「已加载进内存」（active）并给定 live 状态。
 
     列表条目还投影模型四件套（`Session.model_binding`）——假会话照实给一份
-    （未声明任何模型的降级形态），本文件断言的是状态与排序。
+    （未声明任何模型的降级形态），本文件断言的是状态与排序。**只给这两样**：
+    其余字段（含 last_interaction）来自盘上 metadata——列表不读 live 会话的
+    这些字段。
     """
     from unittest.mock import MagicMock
 
@@ -171,6 +176,11 @@ def _mark_active(sm, session_id: str, status: str = "idle") -> None:
 
 def _ids(sm) -> list[str]:
     return [s.id for s in sm.list_sessions()]
+
+
+def _ids_filtered(sm, *, statuses=None, tags=()) -> list[str]:
+    """过滤后的 id 序列（过滤口径见 `SessionManager.list_sessions`）。"""
+    return [s.id for s in sm.list_sessions(statuses=statuses, tags=tags)]
 
 
 class TestListSessions:
@@ -384,3 +394,116 @@ class TestListSessionsOrder:
             "20250101-000000-bbbbbbbb",
             "20250101-000000-cccccccc",
         ]
+
+
+class TestListSessionFilters:
+    """列表的子集过滤（`/api/session/list` 的 `status` / `tag` 参数）。
+
+    契约：过滤结果是**全量列表的子序列**（同样的行、同样的相对顺序，只是少了几行）
+    ——调用方可以按"全量 + 谓词"理解它；服务端聚合成本与不过滤时相同。
+    """
+
+    def _sm(self, tmp_path: Path):
+        """三条会话：两个在内存（idle / working）、一个在盘上（inactive）。"""
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(sessions_path, _sid("live-idle"), "2025-03-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("live-working"), "2025-02-01T00:00:00")
+        _write_session_dir(sessions_path, _sid("disk-only"), "2025-01-01T00:00:00")
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("live-idle"), "idle")
+        _mark_active(sm, _sid("live-working"), "working")
+        return sm
+
+    def test_no_filter_is_the_default(self, tmp_path: Path):
+        sm = self._sm(tmp_path)
+        assert sm.list_sessions() == sm.list_sessions(statuses=None, tags=[])
+
+    def test_status_filter_keeps_the_matching_rows(self, tmp_path: Path):
+        sm = self._sm(tmp_path)
+
+        assert _ids_filtered(sm, statuses={"idle", "working", "waiting"}) == [
+            _sid("live-idle"),
+            _sid("live-working"),
+        ]
+        assert _ids_filtered(sm, statuses={"inactive"}) == [_sid("disk-only")]
+        assert _ids_filtered(sm, statuses={"working"}) == [_sid("live-working")]
+
+    def test_empty_status_set_matches_nothing(self, tmp_path: Path):
+        # "" 与 None 是两回事：空集合是谓词本身的语义（无行），None 才是不过滤。
+        assert _ids_filtered(self._sm(tmp_path), statuses=set()) == []
+
+    def test_tag_filter_requires_all_tags(self, tmp_path: Path):
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(
+            sessions_path, _sid("crew-a"), "2025-03-01T00:00:00", tags=["crew", "a"]
+        )
+        _write_session_dir(
+            sessions_path, _sid("crew-b"), "2025-02-01T00:00:00", tags=["crew", "b"]
+        )
+        _write_session_dir(
+            sessions_path, _sid("pin-only"), "2025-01-01T00:00:00", tags=["pin"]
+        )
+        sm = _make_manager(sessions_path)
+
+        assert _ids_filtered(sm, tags=["crew"]) == [_sid("crew-a"), _sid("crew-b")]
+        assert _ids_filtered(sm, tags=["crew", "b"]) == [_sid("crew-b")]
+        assert _ids_filtered(sm, tags=["crew", "missing"]) == []
+        assert _ids_filtered(sm, tags=["pin"]) == [_sid("pin-only")]
+
+    def test_status_and_tag_combine_as_and(self, tmp_path: Path):
+        sessions_path = tmp_path / "sessions"
+        _write_session_dir(
+            sessions_path, _sid("live-pin"), "2025-02-01T00:00:00", tags=["pin"]
+        )
+        _write_session_dir(
+            sessions_path, _sid("disk-pin"), "2025-01-01T00:00:00", tags=["pin"]
+        )
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("live-pin"), "idle")
+
+        # 只要"在内存 + 带 pin"：两个条件同时成立才出行（= wing ps 默认视图里
+        # 那类"活跃 OR 置顶"之外的最小查询单元）。
+        assert _ids_filtered(
+            sm, statuses={"idle", "working", "waiting"}, tags=["pin"]
+        ) == [_sid("live-pin")]
+        assert _ids_filtered(sm, statuses={"inactive"}, tags=["pin"]) == [
+            _sid("disk-pin")
+        ]
+
+    def test_filtered_rows_are_a_subsequence_of_the_full_list(self, tmp_path: Path):
+        sessions_path = tmp_path / "sessions"
+        for index, (session_id, tag) in enumerate(
+            (
+                (_sid("a"), "crew"),
+                (_sid("b"), "pin"),
+                (_sid("c"), "crew"),
+                (_sid("d"), None),
+            )
+        ):
+            _write_session_dir(
+                sessions_path,
+                session_id,
+                f"2025-0{index + 1}-01T00:00:00",
+                tags=[tag] if tag else None,
+            )
+        sm = _make_manager(sessions_path)
+        _mark_active(sm, _sid("b"), "working")
+        _mark_active(sm, _sid("c"), "idle")
+
+        full = sm.list_sessions()
+        for statuses, tags, predicate in (
+            ({"idle", "working", "waiting"}, (), lambda s: s.status != "inactive"),
+            ({"inactive"}, (), lambda s: s.status == "inactive"),
+            (None, ("crew",), lambda s: "crew" in s.tags),
+            (
+                {"inactive"},
+                ("crew",),
+                lambda s: s.status == "inactive" and "crew" in s.tags,
+            ),
+        ):
+            filtered = sm.list_sessions(statuses=statuses, tags=tags)
+            assert filtered == [s for s in full if predicate(s)], (
+                statuses,
+                tags,
+                [s.id for s in filtered],
+            )

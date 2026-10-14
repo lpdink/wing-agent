@@ -13,7 +13,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from wing.gateway.protocol import (
     BranchesResponse,
@@ -46,6 +46,7 @@ from wing.gateway.protocol import (
 from wing.gateway.projection import build_session_branches, build_session_info
 from wing.common.utils import InvalidInputError
 from wing.common.logger import log
+from wing.event import SessionStatus
 from wing.request_context import session_context
 
 if TYPE_CHECKING:
@@ -234,6 +235,47 @@ async def send_message(
 
 
 # ============================================================
+# 查询过滤参数解析（列表端点的子集过滤）
+# ============================================================
+
+#: 状态过滤的取值域 = 会话状态全集（唯一声明处 `wing.event.SessionStatus`）。
+_STATUS_FILTER_VALUES = frozenset(get_args(SessionStatus))
+
+
+def _parse_status_filter(raw: str | None) -> set[str] | None:
+    """`?status=idle,working` → 状态集合；缺省（None）= 不过滤。
+
+    空段 / 未知取值一律 ValueError（路由折成 400）：过滤是子集语义，静默丢弃
+    一个拼错的取值会让调用方以为过滤生效了。
+    """
+    if raw is None:
+        return None
+    values = [part.strip() for part in raw.split(",")]
+    if any(not value for value in values):
+        raise ValueError("status filter must not contain empty values")
+    unknown = sorted(set(values) - _STATUS_FILTER_VALUES)
+    if unknown:
+        raise ValueError(
+            f"unknown status filter value(s): {', '.join(unknown)}; "
+            f"available: {', '.join(sorted(_STATUS_FILTER_VALUES))}"
+        )
+    return set(values)
+
+
+def _parse_tag_filter(raw: str | None) -> list[str]:
+    """`?tag=pin,crew` → 标签列表（AND：必须全部携带）；缺省 = 不过滤。
+
+    标签是不透明字符串（写入侧已校验取值）：这里只拒绝空段，匹配按字面进行。
+    """
+    if raw is None:
+        return []
+    tags = [part.strip() for part in raw.split(",")]
+    if any(not t for t in tags):
+        raise ValueError("tag filter must not contain empty values")
+    return tags
+
+
+# ============================================================
 # 查询
 # ============================================================
 
@@ -241,11 +283,34 @@ async def send_message(
 @router.get(
     "/api/session/list",
     response_model=SessionListResponse,
-    summary="列出所有 session",
+    summary="列出所有 session（可按状态 / 标签过滤）",
 )
-async def list_sessions(request: Request) -> SessionListResponse:
+async def list_sessions(
+    request: Request,
+    status: str | None = Query(
+        None,
+        description=(
+            "按会话状态过滤（逗号分隔：inactive / idle / working / waiting）；"
+            "只请求在内存的会话即 `status=idle,working,waiting`"
+        ),
+    ),
+    tag: str | None = Query(
+        None,
+        description="按标签过滤（逗号分隔，AND：必须全部携带）",
+    ),
+) -> SessionListResponse:
+    """列表 / 子集过滤共用一条查询。
+
+    过滤是**子集**语义：结果是全量列表的子序列（同样的行、同样的相对顺序）。
+    非法过滤值一律 400（静默忽略会让调用方以为过滤生效了）。
+    """
     server = _get_server(request)
-    sessions = server.runtime.list_sessions()
+    try:
+        statuses = _parse_status_filter(status)
+        tags = _parse_tag_filter(tag)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    sessions = server.runtime.list_sessions(statuses=statuses, tags=tags)
     return SessionListResponse(sessions=sessions)
 
 
