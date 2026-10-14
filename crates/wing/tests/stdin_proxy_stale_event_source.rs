@@ -1,9 +1,19 @@
-//! 回归证据：crossterm 的事件源是**进程级单例**（首次 `poll` 时按当时的 fd 0 注册，
-//! 之后永不重建），所以「两次安装接驳」之间换掉 fd 0 会让第二段彻底收不到输入。
+//! 反面证据（B1）：**事件源先注册、接驳后装** → 输入永久哑掉。
 //!
-//! 这就是为什么 setup 向导用 `tui::init_terminal_without_stdin_splice()`：向导与主 TUI
-//! 是同一进程里的两段 TUI，第一段不能换接 fd 0。若将来 crossterm 支持重建事件源，
-//! 本测试会失败——那正是重新评估这条分支的信号。
+//! crossterm 的事件源是进程级单例：首次 `poll` 时把 fd 0 的**文件描述**注册进就绪源
+//! （epoll / kqueue），之后永不重建；而读取永远走「当时的 fd 0」。于是注册与读端一旦
+//! 不是同一个文件描述，就凑不出事件：
+//!
+//! - 单例注册在**真实 tty** 上，接驳随后把 fd 0 换成内层 pty 的 slave；
+//! - 泵线程是真实 tty 的唯一读者，它把就绪**吃掉**（level-triggered：被读空就不再上报）；
+//! - 单例从此再也不被唤醒，而它要读的 fd 0（内层 slave）里字节明明躺在那儿。
+//!
+//! 实测（本测试断言的就是这个形态）：Crossterm 收到 0 条事件，字节滞留内层 pty —— 直接
+//! `read(fd 0)` 反而读得到，证明转发没问题，坏的是**唤醒源**。
+//!
+//! 这就是为什么 [`crate::tui`] 的会话把接驳放在**任何一段 TUI 的第一次 `poll` 之前**，
+//! 并且段与段之间绝不拆：安装顺序是硬不变量，不是性能偏好。正确顺序的正面证据见
+//! `stdin_proxy_pty.rs`（单段）与 `stdin_proxy_two_segments.rs`（跨段）。
 //!
 //! 单独一个集成测试文件 = 单独一个进程（fd 0 与事件源都是进程级全局）。
 
@@ -41,12 +51,6 @@ fn write_all(fd: RawFd, bytes: &[u8]) {
     assert_eq!(n as usize, bytes.len(), "pty write");
 }
 
-/// 「终端」一侧：写一个字节并等它被读走。
-fn feed(master: RawFd, byte: u8) {
-    write_all(master, &[byte]);
-    std::thread::sleep(Duration::from_millis(120));
-}
-
 fn drain_events(ms: u64) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_millis(ms);
     let mut events = Vec::new();
@@ -61,7 +65,7 @@ fn drain_events(ms: u64) -> Vec<String> {
 }
 
 #[test]
-fn a_second_splice_cannot_retarget_the_cached_event_source() {
+fn a_source_registered_before_the_splice_never_wakes_again() {
     let (outer_master, outer_slave) = openpty_pair();
     make_raw(outer_slave);
     let saved = unsafe { libc::dup(0) };
@@ -71,44 +75,38 @@ fn a_second_splice_cannot_retarget_the_cached_event_source() {
         "fd 0 → outer slave"
     );
 
-    // 第一段：装接驳 → 第一次 poll（事件源在这一刻注册 fd 0）→ 输入正常。
-    wing::tui::stdin_proxy::install().expect("install #1");
-    let _sequences = wing::tui::stdin_proxy::take_sequences();
-    feed(outer_master, b'a');
-    let first = drain_events(300);
+    // ① 危险顺序的第一步：事件源先注册（fd 0 = 外层 pty slave，代表真实 tty）。
     assert!(
-        first.iter().any(|e| e.contains("Char('a')")),
-        "第一段应当收到按键：{first:?}"
+        !crossterm::event::poll(Duration::from_millis(1)).expect("poll"),
+        "还没有输入"
     );
 
-    // 收尾第一段：fd 0 还回外层 tty（此时被注册的那个文件描述随之消失）。
-    wing::tui::stdin_proxy::restore();
+    // ② 之后才装接驳：fd 0 → 新 pty 的 slave，泵线程开始独占读外层 tty。
+    wing::tui::stdin_proxy::install().expect("install");
+    write_all(outer_master, b"A");
+    std::thread::sleep(Duration::from_millis(300));
 
-    // 第二段：重新装接驳（新的 pty），再喂一个字节。
-    wing::tui::stdin_proxy::install().expect("install #2");
-    let _sequences = wing::tui::stdin_proxy::take_sequences();
-    feed(outer_master, b'b');
+    // ③ 单例再也收不到唤醒 —— 尽管字节已经被泵线程搬进了内层 pty。
+    let events = drain_events(300);
+    assert!(
+        events.is_empty(),
+        "错误顺序下不该有事件（有的话说明 crossterm 行为变了，本不变量需要重估）：{events:?}"
+    );
 
-    // 数据确实到了 fd 0（泵线程转发进了新的 pty slave）……
+    // ④ 证据：字节就在 fd 0 的队列里，只是没人被唤醒去读它。
     let mut buf = [0u8; 8];
     let mut fds = [libc::pollfd {
         fd: 0,
         events: libc::POLLIN,
         revents: 0,
     }];
-    let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, 1000) };
-    assert_eq!(rc, 1, "泵线程应当把字节转发进新的 pty slave");
-    let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-    assert_eq!(&buf[..n as usize], b"b");
-
-    // ……但缓存的事件源看不见它：就绪源还挂在**上一段**那个已经关掉的文件描述上。
-    // 这就是「两段 TUI 之间不能换接 fd 0」的事实依据。
-    feed(outer_master, b'c');
-    let second = drain_events(400);
-    assert!(
-        second.is_empty(),
-        "缓存的事件源不该再看到任何按键（看到就说明 crossterm 变了）：{second:?}"
+    assert_eq!(
+        unsafe { libc::poll(fds.as_mut_ptr(), 1, 1000) },
+        1,
+        "泵线程应当已经把它转发进内层 pty"
     );
+    let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    assert_eq!(&buf[..n as usize], b"A");
 
     wing::tui::stdin_proxy::restore();
     unsafe {

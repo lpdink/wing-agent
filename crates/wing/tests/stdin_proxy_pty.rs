@@ -75,6 +75,14 @@ fn splice_extracts_osc_5522_and_leaves_every_other_event_untouched() {
         "装上接驳就该开 5522：{:?}",
         String::from_utf8_lossy(&enter)
     );
+    // 向导形态：接驳装着（进程级会话）也不开粘贴事件模式 —— 它自己不驱动协议机。
+    let mut wizard = Vec::new();
+    wing::tui::enter_sequence_without_paste_events(&mut wizard).expect("write enter sequence");
+    assert!(
+        !String::from_utf8_lossy(&wizard).contains("?5522"),
+        "向导不该开 5522：{:?}",
+        String::from_utf8_lossy(&wizard)
+    );
 
     // 「终端」：注入混合流（三个 5522 包**跨 write 边界**）。
     let writer = std::thread::spawn(move || {

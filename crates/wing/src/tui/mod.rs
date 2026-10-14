@@ -165,6 +165,20 @@ pub fn enter_sequence(w: &mut impl io::Write) -> io::Result<()> {
     )
 }
 
+/// [`enter_sequence`] 的「**不发 `?5522h`**」形态：setup 向导用它。
+///
+/// 向导自己的事件循环（`cmd/setup.rs` 的 `TerminalEvents`）只吃按键与 resize，**不驱动
+/// 5522 协议机**：开了模式只会把用户 Cmd+V 的文本吞成一条没人读的协议事件，还会把这条
+/// 陈旧事件留给主 TUI 的协议机。向导因此保持 bracketed paste 路径（与从前逐字相同）。
+pub fn enter_sequence_without_paste_events(w: &mut impl io::Write) -> io::Result<()> {
+    enter_sequence_for(
+        w,
+        |key| std::env::var(key).ok(),
+        std::env::var("TERM").ok().as_deref(),
+        false,
+    )
+}
+
 /// [`enter_sequence`] with an injectable environment, so the multiplexer
 /// downgrade is covered by tests that do not depend on how the suite is run.
 fn enter_sequence_for(
@@ -247,45 +261,75 @@ pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
     Ok(())
 }
 
-/// Initialize the terminal for TUI rendering.
-pub fn init_terminal() -> Result<WingTerminal> {
-    init_terminal_with(true)
-}
-
-/// [`init_terminal`] 的「**不装 stdin 接驳**」形态：setup 向导（`cmd::setup`）用它。
+/// Initialize the terminal for TUI rendering (main TUI segment).
 ///
-/// 为什么向导不能装：crossterm 的事件源是**进程级单例**（`INTERNAL_EVENT_READER`，
-/// 首次 `poll` 时按当时的 fd 0 注册，之后永不重建），而向导与主 TUI 是同一进程里的
-/// **两段** TUI（配置不可用 → 向导 → 修好后继续起主 TUI）。第一段若换接 fd 0，
-/// 单例就注册在第一段的 pty slave 上；`restore` 把它关掉之后，第二段里那个单例的
-/// 就绪源已经消失 —— 主 TUI 会彻底收不到按键（回归证据：
-/// `tests/stdin_proxy_stale_event_source.rs`）。向导本来也不需要图片粘贴。
-pub fn init_terminal_without_stdin_splice() -> Result<WingTerminal> {
-    init_terminal_with(false)
+/// 会话（raw mode + stdin 接驳）由**第一段** TUI 开启、各段共用；进入 / 离开序列是每段
+/// 各写一次。收尾必须走 [`end_tui_session`] —— 会话不是段级资源。
+pub fn init_terminal() -> Result<WingTerminal> {
+    init_terminal_with(enter_sequence)
 }
 
-fn init_terminal_with(splices_stdin: bool) -> Result<WingTerminal> {
-    crossterm::terminal::enable_raw_mode()?;
-    // stdin 接驳必须晚于 raw（raw 打在真实 tty 上）且早于 crossterm 事件源的首次创建
-    // （`spawn_event_stream`）——顺序与理由见 `stdin_proxy` 模块文档。装不上只是没有
-    // 5522 通道（`enter_sequence` 据此不开 mode），TUI 照常。
-    if splices_stdin && let Err(e) = stdin_proxy::install() {
-        tracing::warn!("stdin proxy unavailable, clipboard paste events disabled: {e}");
-    }
+/// [`init_terminal`] 的「不发 `?5522h`」形态：setup 向导（同进程的**第一段** TUI）用它。
+///
+/// 会话（含接驳）与主 TUI 完全一致 —— [`stdin_proxy`] 的安装**必须早于本进程任何一次
+/// crossterm 事件源创建**，向导正是最早的机会；差别只在粘贴事件模式（见
+/// [`enter_sequence_without_paste_events`]）。
+pub fn init_terminal_without_paste_events() -> Result<WingTerminal> {
+    init_terminal_with(enter_sequence_without_paste_events)
+}
+
+fn init_terminal_with(enter: fn(&mut Stdout) -> io::Result<()>) -> Result<WingTerminal> {
+    // 会话幂等：第一段真开（真实 tty 进 raw → 装接驳，顺序见 [`begin_tui_session`]），
+    // 后续段原样复用。任何失败都把会话收回去，绝不把终端留在 raw。
+    begin_tui_session()?;
     let mut stdout = io::stdout();
-    enter_sequence(&mut stdout)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+    let entered = enter(&mut stdout);
+    let built = entered.and_then(|()| Terminal::new(CrosstermBackend::new(stdout)));
+    match built {
+        Ok(terminal) => Ok(terminal),
+        Err(e) => {
+            let _ = end_tui_session();
+            Err(e.into())
+        }
+    }
 }
 
-/// Restore the terminal to its original state.
+/// Restore the terminal to its pre-TUI *screen* form: the leave sequence only.
+///
+/// **不碰 raw mode 与 stdin 接驳** —— 两者属于进程级会话（[`end_tui_session`]）：段与段
+/// 之间拆接驳会让 crossterm 事件源（进程级单例，就绪源绑定注册时刻的文件描述）与读端
+/// 错配，第二段的输入就永远不来了。
 pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
     leave_sequence(terminal.backend_mut())?;
-    // fd 0 必须先还回真实 tty：`disable_raw_mode` 是把 termios 写回 fd 0 的。
-    stdin_proxy::restore();
-    crossterm::terminal::disable_raw_mode()?;
     Ok(())
+}
+
+/// 开启进程级 TUI 会话（幂等）：
+///
+/// 1. 真实 tty 进 raw —— 必须发生在接驳**之前**：crossterm 的 raw 打在 `tty_fd()`（此刻
+///    是 fd 0 = 真实 tty）上，它把「原始 termios」存成静态、`disable_raw_mode` 时再写回
+///    fd 0；顺序反过来保存的就是 pty slave 的 termios（收尾会污染真实 tty）。
+/// 2. 装 stdin 接驳（[`stdin_proxy::install`]）：换掉 fd 0 之后本进程**所有** crossterm
+///    输入都走分流层，事件源也只能在此之后创建（注册与读端必须是同一个文件描述，否则
+///    主 TUI 的键盘会被掐死 —— 反面证据见 `tests/stdin_proxy_stale_event_source.rs`）。
+///
+/// 失败不致命：接驳装不上只是没有 5522 通道（[`enter_sequence`] 据此不发 `?5522h`）。
+fn begin_tui_session() -> io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    if let Err(e) = stdin_proxy::install() {
+        tracing::warn!("stdin proxy unavailable, clipboard paste events disabled: {e}");
+    }
+    Ok(())
+}
+
+/// 收尾进程级 TUI 会话：还原 fd 0（真实 tty）→ 把保存的 termios 写回。幂等。
+///
+/// 顺序是硬约束：`disable_raw_mode` 是把 termios 写回 **fd 0** 的，而 TUI 段里 fd 0 是
+/// 内层 pty 的 slave。**离开 `run_tui` 的任何路径都要走到这里**（正常收尾、提前 `?`、
+/// panic hook）。
+pub fn end_tui_session() -> io::Result<()> {
+    stdin_proxy::restore();
+    crossterm::terminal::disable_raw_mode()
 }
 
 /// Draw one frame and let the terminal have it.
@@ -504,12 +548,20 @@ mod tests {
     }
 
     /// 没装上 stdin 接驳就不开 5522：开了等于把协议数据喂给 crossterm（本层要拦的东西）。
+    /// 向导形态（[`enter_sequence_without_paste_events`]）则永远不发 —— 与环境无关的
+    /// 断言在这里查一遍字节（进程内是否装上接驳由集成测试查，见 `stdin_proxy_pty.rs`）。
     #[test]
     fn test_enter_sequence_skips_paste_events_without_the_stdin_proxy() {
         let mut out = Vec::new();
         enter_sequence_for(&mut out, plain_env, Some("xterm-256color"), false)
             .expect("write enter sequence");
         assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES_NO_PASTE_EVENTS);
+        let mut wizard = Vec::new();
+        enter_sequence_without_paste_events(&mut wizard).expect("write enter sequence");
+        assert!(
+            !String::from_utf8_lossy(&wizard).contains("?5522"),
+            "向导形态永不发 ?5522h（真实 env 下也成立）"
+        );
         assert!(!ENTER_BYTES_NO_PASTE_EVENTS.contains("?5522"));
         // 两个变体只差这一条字节。
         assert_eq!(

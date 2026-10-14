@@ -66,6 +66,55 @@ fn two_images_accumulate() {
     assert_eq!(app.pending_clipboard_images().len(), 2, "多次粘贴累积");
 }
 
+/// 暂存区有上限（条数）：到顶丢最旧的一张，用户刚粘的那张永远留着。
+#[test]
+fn the_stash_is_capped_by_count() {
+    let mut app = test_app();
+    for i in 0..(crate::app::clipboard::MAX_PENDING_IMAGES + 3) {
+        app.handle_clipboard(Ok(ClipboardPayload::Image {
+            bytes: vec![i as u8; 4],
+            mime: "image/png".into(),
+            name: None,
+        }));
+    }
+    let stashed = app.pending_clipboard_images();
+    assert_eq!(stashed.len(), crate::app::clipboard::MAX_PENDING_IMAGES);
+    assert_eq!(stashed[0].bytes[0], 3, "丢的是最旧的那张（FIFO）");
+    assert_eq!(
+        stashed[stashed.len() - 1].bytes[0],
+        (crate::app::clipboard::MAX_PENDING_IMAGES + 2) as u8,
+        "最新的一张必须留着"
+    );
+}
+
+/// 暂存区有上限（总字节）：一次 64 MiB 级的大图不会把内存顶穿。
+#[test]
+fn the_stash_is_capped_by_bytes() {
+    let mut app = test_app();
+    let bite = 24 * 1024 * 1024; // 24 MiB × 4 张 > 64 MiB 上限
+    for i in 0..4u8 {
+        app.handle_clipboard(Ok(ClipboardPayload::Image {
+            bytes: vec![i; bite],
+            mime: "image/png".into(),
+            name: None,
+        }));
+    }
+    let total: usize = app
+        .pending_clipboard_images()
+        .iter()
+        .map(|i| i.bytes.len())
+        .sum();
+    assert!(
+        total <= crate::app::clipboard::MAX_PENDING_IMAGE_BYTES,
+        "总字节必须回到预算内：{total}"
+    );
+    assert_eq!(
+        app.pending_clipboard_images().last().map(|i| i.bytes[0]),
+        Some(3),
+        "最新的一张必须留着"
+    );
+}
+
 #[test]
 fn failure_only_toasts() {
     let mut app = test_app();

@@ -840,13 +840,22 @@ async fn smart_default_tui() -> Result<()> {
 fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        // fd 0 必须先从 pty 接驳还原：`disable_raw_mode` 是把 termios 写回 fd 0 的。
-        tui::stdin_proxy::restore();
-        let _ = crossterm::terminal::disable_raw_mode();
+        // 会话收尾（fd 0 先还原，`disable_raw_mode` 才写得到真实 tty）必须在写离开序列之前。
+        let _ = tui::end_tui_session();
         let _ = tui::leave_sequence(&mut std::io::stdout());
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
         original_hook(panic_info);
     }));
+}
+
+/// RAII：退出 `run_tui` 的任何路径（含提前 `?`）都收尾 TUI 会话，绝不把终端留在 raw。
+/// 没开过会话时 [`tui::end_tui_session`] 是空操作。
+struct TuiSessionGuard;
+
+impl Drop for TuiSessionGuard {
+    fn drop(&mut self) {
+        let _ = tui::end_tui_session();
+    }
 }
 
 /// 摘掉 [`install_panic_hook`] 装的自定义 hook（装回默认 hook）。
@@ -861,6 +870,8 @@ fn restore_panic_hook() {
 async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize logging (file only, no console output).
     let _log_guard = init_logging();
+    // TUI 会话（raw + stdin 接驳）一旦开启就活到进程收尾；本 guard 兜住所有提前返回。
+    let _session = TuiSessionGuard;
 
     // Load user configuration (needed early for api_key). `mut`: setup 阶段会预览
     // Interface 根（颜色等改动当场生效），随后原样交给 run_app。
@@ -896,18 +907,24 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                 http_base: http_base.clone(),
                 api_key: api_key.clone(),
             };
-            // 向导是**同进程两段 TUI** 的第一段：不能装 stdin 接驳（crossterm 事件源是
-            // 进程级单例，会把第二段的输入掐死，见 `init_terminal_without_stdin_splice`）。
-            let mut terminal = tui::init_terminal_without_stdin_splice()?;
+            // 向导是**同进程两段 TUI** 的第一段：它开进程级会话（接驳必须早于本进程任何
+            // 一次 crossterm 事件源创建），但不发 `?5522h`（自己不驱动协议机）。
+            let mut terminal = tui::init_terminal_without_paste_events()?;
             install_panic_hook();
-            // 先无损收尾再 `?`：setup 内部报错（如拉数据失败）也绝不能把终端留在 raw mode。
             let outcome = setup::run_setup_tui(&mut terminal, &http, &mut config, &endpoint).await;
             restore_panic_hook();
-            tui::restore_terminal(&mut terminal)?;
-            match outcome? {
-                setup::SetupOutcome::Quit => {
+            // 先记下屏恢复的结果；会话收尾按分支单独走（Ready 时留给主 TUI 共用）。
+            let screen = tui::restore_terminal(&mut terminal);
+            match outcome {
+                Err(e) => {
+                    tui::end_tui_session()?;
+                    return Err(e);
+                }
+                Ok(setup::SetupOutcome::Quit) => {
                     // 终端恢复后打印（§16.2）：配置仍不可用时的出路。路径取后端权威值，
-                    // 拿不到就省略那半句。
+                    // 拿不到就省略那半句。会话必须先收尾，否则 raw mode 下的 eprintln 会
+                    // 变成阶梯状输出。
+                    tui::end_tui_session()?;
                     let config_path = http
                         .settings_get()
                         .await
@@ -916,7 +933,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                     eprintln!("{}", setup::quit_note(config_path.as_deref()));
                     return Ok(());
                 }
-                setup::SetupOutcome::Ready => {}
+                Ok(setup::SetupOutcome::Ready) => screen?,
             }
         }
         setup::Preflight::Failed(e) => {
@@ -957,7 +974,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
 
     tracing::info!("subscribed to session, entering TUI");
 
-    // Initialize terminal.
+    // Initialize terminal（会话已在向导段开启；这里是第二段，只写进入序列）。
     let mut terminal = tui::init_terminal()?;
 
     // Set up panic hook to restore terminal on panic (see `install_panic_hook`).
@@ -983,11 +1000,12 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     )
     .await;
 
-    // Restore terminal.
-    tui::restore_terminal(&mut terminal)?;
-
-    // Restore original panic hook.
+    // Restore terminal：屏恢复（离开序列）与会话收尾都要跑，谁都别短路谁。
+    let screen = tui::restore_terminal(&mut terminal);
+    let session = tui::end_tui_session();
     restore_panic_hook();
+    screen?;
+    session?;
 
     match result {
         Ok(exit) => {

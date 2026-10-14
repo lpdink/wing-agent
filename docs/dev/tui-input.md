@@ -153,13 +153,20 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
            终端 → 应用  OK → DATA（每片 ≤4096 原始字节、各自独立 base64）→ DONE
 ```
 
-**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走，**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。顺序同样硬：`enable_raw_mode()` → 接驳 → `spawn_event_stream()`（事件源在首次 `poll` 时把 fd 0 注册进 epoll，之后 `dup2` 就唤不醒了）；退出时先还 fd 0 再 `disable_raw_mode()`（rename 到 fd 0 的 termios 操作）。`cmd` 的 panic hook 走同一条恢复路径。
+**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走，**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。生命周期是**进程级**的：`tui::init_terminal()` 的第一段（`begin_session`）做「真实 tty 进 raw → 装接驳」，`tui::end_tui_session()` 在**所有** TUI 段结束后做「还 fd 0 → `disable_raw_mode`」（它是对 fd 0 的 termios 操作，顺序反过来会把 pty 的 termios 写进真实 tty）；`cmd` 的 panic hook 走同一条收尾路径，`run_tui` 另有一层 RAII guard 兜住提前 `?`。
 
 分流的状态机细节（都是单测钉住的）：前缀候选最长持有 25 ms（`Esc` 键的形态就是一个孤立 `ESC` 字节，队列已空时立刻放行，不吃延迟）；序列体 5 s 等不到终止符就丢弃（BEL 与 ST 两种终止符都认）；**bracketed paste 保护区内一律原样透传**（粘贴内容里的字面 `ESC]5522;` 是用户数据，不能吃）。
 
-**两段 TUI 的例外**：crossterm 的事件源是**进程级单例**（首次 `poll` 按当时的 fd 0 注册，永不重建），而首次运行时的 setup 向导与主 TUI 是同一进程里的两段 TUI。向导因此走 `tui::init_terminal_without_stdin_splice()`（不装接驳、也不发 `?5522h`）——第一段换接 fd 0 会把第二段的输入掐死（回归证据：`tests/stdin_proxy_stale_event_source.rs`）。向导本来也不需要图片粘贴。
+**两段 TUI（首次运行：向导 → 主 TUI）**：crossterm 的事件源是**进程级单例**，首次 `poll` 时把当时的 fd 0 注册进就绪源、永不重建，而**读取永远走当时的 fd 0**。于是注册与读端必须是同一个文件描述，这给出两条硬约束：
+
+1. **接驳必须早于本进程任何一次 `poll`**。向导正是最早的机会（它自己也用 crossterm 的全局事件源），所以第一段就把接驳装上；反过来（先 `poll` 再装）泵线程会把真实 tty 的就绪吃掉，事件源从此再不被唤醒 —— 键盘永久哑掉（反面证据：`tests/stdin_proxy_stale_event_source.rs`）。
+2. **段与段之间绝不拆接驳**（`restore_terminal` 只写离开序列，raw mode 与 fd 0 归会话）——拆了就必须重装，而复用的单例仍指着旧的文件描述（`tests/stdin_proxy_two_segments.rs` 把「一段接驳服务两段 TUI」钉住）。
+
+向导与主 TUI 的唯一差别是**粘贴事件模式**：向导走 `tui::init_terminal_without_paste_events()`（不发 `?5522h`），因为向导自己的事件循环不驱动协议机，开了模式只会把用户 Cmd+V 吞成一条没人读的协议事件、并把它留给主 TUI 的协议机；文本粘贴在向导里因此保持 bracketed paste（行为与从前逐字相同）。
 
 **MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`），漏了就退回「要用户确认」甚至被拒。
+
+**包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）一律走 toast，不出现「粘了但什么都没发生」。图片载荷暂存在 `App::on_clipboard_image`（条数与总字节都有上限，超限丢最旧一张；05 消费它）。
 
 | 关注点 | 位置 |
 |---|---|

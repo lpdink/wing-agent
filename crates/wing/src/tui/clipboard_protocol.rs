@@ -27,7 +27,8 @@
 //!   （`stream_terminal.zig`：`const pw = if (meta.name.len > 0) meta.pw else ""`）。请求里
 //!   漏了 name，一次性密码不参与授权判定 → 用户被弹确认框（`clipboard-read=ask`）或被拒。
 //! - **event 的 OK 包没有 `id`，我们的 read 响应回显 `id`**：这是区分「新事件」与「响应」
-//!   的唯一依据（`pw` 两边都有；listing 的 DATA 与数据的 DATA 靠 `mime` 区分）。
+//!   的唯一依据（`pw` 两边都有；listing 的 DATA 与数据的 DATA 靠 `mime` 区分）。每次 read
+//!   用**唯一 id**（`wing-paste-<n>`），被放弃的 read 残留的包因此不会被记到下一次读上。
 
 use std::collections::VecDeque;
 use std::io;
@@ -47,8 +48,12 @@ pub(crate) const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 /// 阅读器身份：`name` 参与授权判定（见模块文档），也是终端权限提示里显示的字符串。
 const REQUESTER_NAME: &str = "wing";
 
-/// 我们发出的 read 请求的 id（响应回显；用于与 unsolicited event 区分）。
-const REQUEST_ID: &str = "wing-paste";
+/// 我们发出的 read 请求的 id 前缀（响应回显；用于与 unsolicited event 区分）。
+///
+/// 每次 read 追加序号：被放弃的 read（超时 / 超限）之后终端仍会把剩下的包补发完，唯一 id
+/// 让这些残留包落不到下一次读上（同 id 时无法区分：同 mime、同 pw）。
+/// 字符集必须是 Ghostty `sanitizeId` 的白名单（`[a-zA-Z0-9-_+.]`），`-` 在内 ✓。
+const REQUEST_ID_PREFIX: &str = "wing-paste-";
 
 /// 一次事件最多排队几个（连续快速粘贴时后面的等前一个读完）。
 const MAX_QUEUED_EVENTS: usize = 4;
@@ -188,8 +193,10 @@ pub(crate) struct Packet {
     pub primary: bool,
     /// base64 解码后的 MIME（DATA 包）。
     pub mime: Option<String>,
-    /// base64 解码后的一次性密码（event 包）。
-    pub pw: Option<String>,
+    /// 一次性密码的**线上原样**（base64 文本，event 包）。回显进 read 请求时逐字使用：
+    /// 不解码、也就不要求它是合法 UTF-8（协议只规定是 base64；Ghostty 的 OTP 字母表是
+    /// ASCII，但这里没必要依赖这一点）。
+    pub pw_b64: Option<String>,
     /// base64 解码后的负载字节。
     pub payload: Vec<u8>,
 }
@@ -209,7 +216,7 @@ impl Packet {
             id: None,
             primary: false,
             mime: None,
-            pw: None,
+            pw_b64: None,
             payload: Vec::new(),
         };
         for record in meta.split(':') {
@@ -220,7 +227,7 @@ impl Packet {
                 "id" => packet.id = Some(value.to_string()),
                 "loc" => packet.primary = value == "primary",
                 "mime" => packet.mime = Some(String::from_utf8(b64_decode(value)?).ok()?),
-                "pw" => packet.pw = Some(String::from_utf8(b64_decode(value)?).ok()?),
+                "pw" => packet.pw_b64 = Some(value.to_string()),
                 // 未知键（含 kitty 的 `list`、`name`）忽略：协议允许扩展。
                 _ => {}
             }
@@ -266,19 +273,19 @@ pub(crate) fn choose_mime(available: &[String]) -> Option<String> {
         return Some(other.clone());
     }
     // 文本统一按规范名 `text/plain` 请求：终端（Ghostty 的 `isTextMime`）会把各种文本别名
-    // 都算成同一个表示，请求规范名最稳。
-    if bases
-        .iter()
-        .any(|b| b == "text/plain" || b.starts_with("text/plain"))
-    {
+    // （含 `text/plain;charset=utf-8`）都算成同一个表示，请求规范名最稳。`starts_with`
+    // 同时覆盖等值形态。
+    if bases.iter().any(|b| b.starts_with("text/plain")) {
         return Some("text/plain".to_string());
     }
     None
 }
 
 /// 构造带 OTP 的 follow-up read 请求（`ESC]5522;…ST`）。
-pub(crate) fn read_request(pw: &str, mime: &str, primary: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(mime.len() + pw.len() + REQUESTER_NAME.len() + 64);
+///
+/// `pw_b64` = 事件包里带过来的**原样 base64 文本**（逐字回显，不解码）；`id` 每次唯一。
+pub(crate) fn read_request(pw_b64: &str, mime: &str, primary: bool, id: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(mime.len() + pw_b64.len() + REQUESTER_NAME.len() + 64);
     out.extend_from_slice(b"\x1b]5522;type=read");
     if primary {
         out.extend_from_slice(b":loc=primary");
@@ -286,9 +293,9 @@ pub(crate) fn read_request(pw: &str, mime: &str, primary: bool) -> Vec<u8> {
     out.extend_from_slice(b":name=");
     out.extend_from_slice(b64_encode(REQUESTER_NAME.as_bytes()).as_bytes());
     out.extend_from_slice(b":id=");
-    out.extend_from_slice(REQUEST_ID.as_bytes());
+    out.extend_from_slice(id.as_bytes());
     out.extend_from_slice(b":pw=");
-    out.extend_from_slice(b64_encode(pw.as_bytes()).as_bytes());
+    out.extend_from_slice(pw_b64.as_bytes());
     out.push(b';');
     out.extend_from_slice(b64_encode(mime.as_bytes()).as_bytes());
     out.extend_from_slice(b"\x1b\\");
@@ -313,7 +320,7 @@ pub(crate) enum Effect {
 /// 一次已完成的 paste event（listing 与 DONE 都到齐了）。
 #[derive(Debug)]
 struct PendingEvent {
-    pw: String,
+    pw_b64: String,
     primary: bool,
     mimes: Vec<String>,
 }
@@ -321,15 +328,16 @@ struct PendingEvent {
 /// 正在收集的 event（OK 已到，等 listing 与 DONE）。
 #[derive(Debug)]
 struct EventCollector {
-    pw: String,
+    pw_b64: String,
     primary: bool,
     mimes: Vec<String>,
     deadline: Instant,
 }
 
-/// 在途的 read。
+/// 在途的 read。`id` 每次唯一：被放弃的 read 残留的包（同 mime、同 pw）必须落不到下一次。
 #[derive(Debug)]
 struct ReadState {
+    id: String,
     mime: String,
     data: Vec<u8>,
     deadline: Instant,
@@ -341,6 +349,8 @@ pub(crate) struct Session {
     event: Option<EventCollector>,
     read: Option<ReadState>,
     queue: VecDeque<PendingEvent>,
+    /// 下一次 read 的序号（唯一 id 的来源）。
+    reads_started: u64,
 }
 
 impl Session {
@@ -360,6 +370,9 @@ impl Session {
     }
 
     /// 喂一条分流层提取出来的包。
+    ///
+    /// 归属规则（协议里没有别的手段）：**没有 `id` = 终端自发的事件**（三连包），
+    /// `id == 当前 read 的 id` = 我们这次读的响应，其余一律是噪声（例如被放弃的读的残留包）。
     pub fn on_sequence(&mut self, raw: &[u8], now: Instant) -> Vec<Effect> {
         let Some(packet) = Packet::parse(raw) else {
             // 坏包：读中途算致命（响应不可信），其余忽略（可能是别人的协议流量）。
@@ -374,72 +387,99 @@ impl Session {
         if packet.op != "read" {
             return Vec::new();
         }
-        let ours = packet.id.as_deref() == Some(REQUEST_ID);
+        match packet.id.as_deref() {
+            // 终端自发的事件（event 三连不带 id）。
+            None => self.on_event_packet(&packet, now),
+            Some(id) => {
+                let ours = self.read.as_ref().is_some_and(|read| read.id == id);
+                if !ours {
+                    // 上一次读（已放弃）的残留，或别人的流量：忽略。
+                    tracing::debug!("clipboard: ignoring OSC 5522 response for another read");
+                    return Vec::new();
+                }
+                self.on_read_packet(&packet, now)
+            }
+        }
+    }
+
+    fn on_event_packet(&mut self, packet: &Packet, now: Instant) -> Vec<Effect> {
         match packet.status.as_str() {
             "OK" => {
-                if ours {
-                    if let Some(read) = &mut self.read {
-                        read.deadline = now + IDLE_TIMEOUT;
-                    }
-                } else if let Some(pw) = packet.pw.clone() {
-                    if self.event.is_some() {
-                        tracing::debug!("clipboard: superseding an unfinished paste event");
-                    }
-                    self.event = Some(EventCollector {
-                        pw,
-                        primary: packet.primary,
-                        mimes: Vec::new(),
-                        deadline: now + IDLE_TIMEOUT,
-                    });
+                let Some(pw_b64) = packet.pw_b64.clone() else {
+                    return Vec::new();
+                };
+                if self.event.is_some() {
+                    tracing::debug!("clipboard: superseding an unfinished paste event");
                 }
+                self.event = Some(EventCollector {
+                    pw_b64,
+                    primary: packet.primary,
+                    mimes: Vec::new(),
+                    deadline: now + IDLE_TIMEOUT,
+                });
+                Vec::new()
             }
             "DATA" => {
-                if ours {
-                    if let Some(read) = &mut self.read
-                        && packet.mime.as_deref() == Some(read.mime.as_str())
-                    {
-                        if read.data.len() + packet.payload.len() > MAX_PAYLOAD {
-                            self.read = None;
-                            return vec![Effect::Fail(ClipboardFailure::TooLarge)];
-                        }
-                        read.data.extend_from_slice(&packet.payload);
-                        read.deadline = now + IDLE_TIMEOUT;
-                    }
-                } else if let Some(event) = &mut self.event
+                if let Some(event) = &mut self.event
                     && packet.mime.as_deref() == Some(".")
                 {
                     event.mimes = parse_listing(&packet.payload);
                     event.deadline = now + IDLE_TIMEOUT;
                 }
+                Vec::new()
             }
             "DONE" => {
-                if ours {
-                    return self.finish_read(now);
-                }
-                if let Some(event) = self.event.take() {
-                    let pending = PendingEvent {
-                        pw: event.pw,
-                        primary: event.primary,
-                        mimes: event.mimes,
-                    };
-                    if self.read.is_some() {
-                        if self.queue.len() < MAX_QUEUED_EVENTS {
-                            self.queue.push_back(pending);
-                        } else {
-                            tracing::warn!("clipboard: paste event dropped (queue full)");
-                        }
-                        return Vec::new();
+                let Some(event) = self.event.take() else {
+                    return Vec::new();
+                };
+                let pending = PendingEvent {
+                    pw_b64: event.pw_b64,
+                    primary: event.primary,
+                    mimes: event.mimes,
+                };
+                if self.read.is_some() {
+                    // 上一次读还在途：排队，读完再服务它。
+                    if self.queue.len() < MAX_QUEUED_EVENTS {
+                        self.queue.push_back(pending);
+                    } else {
+                        tracing::warn!("clipboard: paste event dropped (queue full)");
                     }
-                    return self.start(pending, now);
+                    Vec::new()
+                } else {
+                    self.start(pending, now)
                 }
             }
-            other if ours => {
-                self.read = None;
-                return vec![Effect::Fail(failure_for(other))];
-            }
-            _ => {}
+            _ => Vec::new(),
         }
-        Vec::new()
+    }
+
+    fn on_read_packet(&mut self, packet: &Packet, now: Instant) -> Vec<Effect> {
+        match packet.status.as_str() {
+            "OK" => {
+                if let Some(read) = &mut self.read {
+                    read.deadline = now + IDLE_TIMEOUT;
+                }
+                Vec::new()
+            }
+            "DATA" => {
+                if let Some(read) = &mut self.read
+                    && packet.mime.as_deref() == Some(read.mime.as_str())
+                {
+                    if read.data.len() + packet.payload.len() > MAX_PAYLOAD {
+                        self.read = None;
+                        return vec![Effect::Fail(ClipboardFailure::TooLarge)];
+                    }
+                    read.data.extend_from_slice(&packet.payload);
+                    read.deadline = now + IDLE_TIMEOUT;
+                }
+                Vec::new()
+            }
+            "DONE" => self.finish_read(now),
+            other => {
+                self.read = None;
+                vec![Effect::Fail(failure_for(other))]
+            }
+        }
     }
 
     /// 推进超时。
@@ -448,8 +488,11 @@ impl Session {
         if let Some(event) = &self.event
             && now >= event.deadline
         {
+            // 收不全的事件（OK 到了、listing / DONE 没到）也要给用户一个交代：粘贴了却
+            // 毫无动静是最难排查的形态。
             tracing::debug!("clipboard: paste event incomplete, giving up");
             self.event = None;
+            effects.push(Effect::Fail(ClipboardFailure::Timeout));
         }
         if let Some(read) = &self.read
             && now >= read.deadline
@@ -465,16 +508,22 @@ impl Session {
         let Some(read) = self.read.take() else {
             return Vec::new();
         };
-        let payload = if read.mime.starts_with("image/") {
-            ClipboardPayload::Image {
-                bytes: read.data,
-                mime: read.mime.clone(),
-                name: None,
-            }
+        // 一个 DATA 都没到 = 终端表示「这个表示不可用」（协议正是用它表达不可用），
+        // 不是「空粘贴」：空载荷投给 App 只会变成静默无操作或 0 字节的图。
+        let mut effects = if read.data.is_empty() {
+            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
         } else {
-            ClipboardPayload::Text(String::from_utf8_lossy(&read.data).into_owned())
+            let payload = if read.mime.starts_with("image/") {
+                ClipboardPayload::Image {
+                    bytes: read.data,
+                    mime: read.mime.clone(),
+                    name: None,
+                }
+            } else {
+                ClipboardPayload::Text(String::from_utf8_lossy(&read.data).into_owned())
+            };
+            vec![Effect::Deliver(payload)]
         };
-        let mut effects = vec![Effect::Deliver(payload)];
         effects.extend(self.pump_queue(now));
         effects
     }
@@ -495,12 +544,20 @@ impl Session {
             tracing::debug!(mimes = ?event.mimes, "clipboard: no usable representation");
             return vec![Effect::Fail(ClipboardFailure::NoRepresentation)];
         };
+        self.reads_started += 1;
+        let id = format!("{REQUEST_ID_PREFIX}{}", self.reads_started);
         self.read = Some(ReadState {
+            id: id.clone(),
             mime: mime.clone(),
             data: Vec::new(),
             deadline: now + IDLE_TIMEOUT,
         });
-        vec![Effect::Send(read_request(&event.pw, &mime, event.primary))]
+        vec![Effect::Send(read_request(
+            &event.pw_b64,
+            &mime,
+            event.primary,
+            &id,
+        ))]
     }
 }
 
@@ -689,7 +746,11 @@ mod tests {
         let p = Packet::parse(&raw).expect("parse");
         assert_eq!(p.op, "read");
         assert_eq!(p.status, "OK");
-        assert_eq!(p.pw.as_deref(), Some("otp"));
+        assert_eq!(
+            p.pw_b64.as_deref(),
+            Some("b3Rw"),
+            "pw 按线上原样（base64 文本）保留"
+        );
         assert_eq!(p.id, None);
         assert!(!p.primary);
         assert!(p.payload.is_empty());
@@ -718,12 +779,22 @@ mod tests {
     #[test]
     fn packet_rejects_structural_garbage() {
         for bad in [
-            &b"type=read:status"[..],           // 缺 '='
-            &b"type=read:status=OK:pw=!!!"[..], // 坏 base64
-            &b"\xff\xfe"[..],                   // 不是 UTF-8
+            &b"type=read:status"[..],          // 缺 '='
+            &b"type=read:status=OK:x;!!!"[..], // 坏 base64 负载
+            &b"\xff\xfe"[..],                  // 不是 UTF-8
         ] {
             assert_eq!(Packet::parse(bad), None, "{bad:?}");
         }
+    }
+
+    /// `pw` 按**线上原样**保留：不解码、不要求 UTF-8，回显进请求时逐字使用。
+    #[test]
+    fn packet_keeps_the_password_in_wire_form() {
+        let p = Packet::parse(b"type=read:status=OK:pw=!!not-base64!!").expect("parse");
+        assert_eq!(p.pw_b64.as_deref(), Some("!!not-base64!!"));
+        // 非 UTF-8 的 base64 也不该让整个包作废（解码成 String 会把它判坏）。
+        let p = Packet::parse(b"type=read:status=OK:pw=//8=").expect("parse");
+        assert_eq!(p.pw_b64.as_deref(), Some("//8="));
     }
 
     // ── MIME 选择 ─────────────────────────────────────────────────────────
@@ -742,6 +813,27 @@ mod tests {
         assert_eq!(
             choose_mime(&s(&["image/webp", "image/gif"])).as_deref(),
             Some("image/webp")
+        );
+        // 相对优先级：两个候选同时在列时也必须按表选（只断言「能识别」会漏掉顺序回归）。
+        assert_eq!(
+            choose_mime(&s(&["image/jpeg", "image/png", "text/plain"])).as_deref(),
+            Some("image/png"),
+            "png 优于 jpeg"
+        );
+        assert_eq!(
+            choose_mime(&s(&["image/gif", "image/webp"])).as_deref(),
+            Some("image/webp"),
+            "webp 优于 gif"
+        );
+        assert_eq!(
+            choose_mime(&s(&["image/tiff", "image/gif"])).as_deref(),
+            Some("image/gif"),
+            "优先级表内的 gif 优于兜底的任意 image/*"
+        );
+        assert_eq!(
+            choose_mime(&s(&["text/plain", "image/tiff"])).as_deref(),
+            Some("image/tiff"),
+            "任意 image/* 兜底都优于文本"
         );
     }
 
@@ -776,23 +868,26 @@ mod tests {
 
     #[test]
     fn read_request_is_exact_bytes() {
-        let bytes = read_request("otpxyz", "image/png", false);
+        let bytes = read_request(&b64_encode(b"otpxyz"), "image/png", false, "wing-paste-7");
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
-            "\x1b]5522;type=read:name=d2luZw==:id=wing-paste:pw=b3RweHl6;aW1hZ2UvcG5n\x1b\\"
+            "\x1b]5522;type=read:name=d2luZw==:id=wing-paste-7:pw=b3RweHl6;aW1hZ2UvcG5n\x1b\\"
         );
-        // primary 带上 loc；请求里的 name / pw / mime 都是 base64（协议要求）。
-        let bytes = read_request("otp", "text/plain", true);
+        // primary 带上 loc；请求里的 name / mime 是 base64、pw 逐字回显事件里的 base64。
+        let bytes = read_request(&b64_encode(b"otp"), "text/plain", true, "wing-paste-8");
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
-            "\x1b]5522;type=read:loc=primary:name=d2luZw==:id=wing-paste:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\"
+            "\x1b]5522;type=read:loc=primary:name=d2luZw==:id=wing-paste-8:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\"
         );
     }
 
     /// `name` 不是装饰：Ghostty 的授权判定要求它非空（见模块文档）。
     #[test]
     fn read_request_always_carries_a_name() {
-        assert!(read_request("x", "text/plain", false).starts_with(b"\x1b]5522;type=read:name="));
+        assert!(
+            read_request("x", "text/plain", false, "wing-paste-1")
+                .starts_with(b"\x1b]5522;type=read:name=")
+        );
     }
 
     // ── 状态机 ────────────────────────────────────────────────────────────
@@ -806,7 +901,7 @@ mod tests {
             Effect::Send(bytes) => {
                 assert_eq!(
                     String::from_utf8(bytes.clone()).unwrap(),
-                    "\x1b]5522;type=read:name=d2luZw==:id=wing-paste:pw=b3RwMTIz;aW1hZ2UvcG5n\x1b\\"
+                    "\x1b]5522;type=read:name=d2luZw==:id=wing-paste-1:pw=b3RwMTIz;aW1hZ2UvcG5n\x1b\\"
                 );
             }
             other => panic!("期望发出 read 请求，得到 {other:?}"),
@@ -819,13 +914,16 @@ mod tests {
         let mut s = Session::new();
         event_triplet("otp", &["text/plain"], 0, &mut s);
         assert!(
-            s.on_sequence(&response("type=read:status=OK:id=wing-paste", None), at(10))
-                .is_empty()
+            s.on_sequence(
+                &response("type=read:status=OK:id=wing-paste-1", None),
+                at(10)
+            )
+            .is_empty()
         );
         assert!(
             s.on_sequence(
                 &response(
-                    "type=read:status=DATA:id=wing-paste:mime=dGV4dC9wbGFpbg==",
+                    "type=read:status=DATA:id=wing-paste-1:mime=dGV4dC9wbGFpbg==",
                     Some("hello 世界".as_bytes()),
                 ),
                 at(11),
@@ -833,7 +931,7 @@ mod tests {
             .is_empty()
         );
         let effects = s.on_sequence(
-            &response("type=read:status=DONE:id=wing-paste", None),
+            &response("type=read:status=DONE:id=wing-paste-1", None),
             at(12),
         );
         assert_eq!(
@@ -852,14 +950,14 @@ mod tests {
         for chunk in [&b"\x89PNG"[..], &[0u8; 8192], &b"tail"[..]] {
             effects.extend(s.on_sequence(
                 &response(
-                    "type=read:status=DATA:id=wing-paste:mime=aW1hZ2UvcG5n",
+                    "type=read:status=DATA:id=wing-paste-1:mime=aW1hZ2UvcG5n",
                     Some(chunk),
                 ),
                 at(20),
             ));
         }
         effects.extend(s.on_sequence(
-            &response("type=read:status=DONE:id=wing-paste", None),
+            &response("type=read:status=DONE:id=wing-paste-1", None),
             at(21),
         ));
         let mut expected = b"\x89PNG".to_vec();
@@ -886,7 +984,7 @@ mod tests {
             let mut s = Session::new();
             event_triplet("otp", &["image/png"], 0, &mut s);
             let effects = s.on_sequence(
-                &response(&format!("type=read:status={status}:id=wing-paste"), None),
+                &response(&format!("type=read:status={status}:id=wing-paste-1"), None),
                 at(5),
             );
             assert_eq!(effects, vec![Effect::Fail(expected)], "{status}");
@@ -905,13 +1003,19 @@ mod tests {
         assert!(s.deadline().is_none());
     }
 
+    /// 收不全的事件（OK 到了、listing / DONE 没到）也要给用户反馈：粘贴了却毫无动静
+    /// 是最难排查的形态。
     #[test]
-    fn incomplete_event_is_dropped_without_effects() {
+    fn incomplete_event_reports_a_failure() {
         let mut s = Session::new();
         // 只有 OK：listing / DONE 都没来。
         s.on_sequence(&packet("type=read:status=OK:pw=b3Rw", None), at(0));
         assert!(s.on_timeout(at(100)).is_empty());
-        assert!(s.on_timeout(at(6000)).is_empty(), "收不全的 event 只是丢掉");
+        assert_eq!(
+            s.on_timeout(at(6000)),
+            vec![Effect::Fail(ClipboardFailure::Timeout)],
+            "收不全也要有反馈"
+        );
         assert!(s.deadline().is_none());
     }
 
@@ -932,14 +1036,14 @@ mod tests {
         let big = vec![0u8; MAX_PAYLOAD];
         let mut effects = s.on_sequence(
             &response(
-                "type=read:status=DATA:id=wing-paste:mime=aW1hZ2UvcG5n",
+                "type=read:status=DATA:id=wing-paste-1:mime=aW1hZ2UvcG5n",
                 Some(&big),
             ),
             at(1),
         );
         effects.extend(s.on_sequence(
             &response(
-                "type=read:status=DATA:id=wing-paste:mime=aW1hZ2UvcG5n",
+                "type=read:status=DATA:id=wing-paste-1:mime=aW1hZ2UvcG5n",
                 Some(b"x"),
             ),
             at(2),
@@ -952,7 +1056,8 @@ mod tests {
     fn malformed_packet_during_read_is_fatal() {
         let mut s = Session::new();
         event_triplet("otp", &["text/plain"], 0, &mut s);
-        let effects = s.on_sequence(b"type=read:status=DATA:pw=!!!", at(1));
+        // 结构坏掉（记录缺 '='）：读中途的响应不可信，直接放弃这次读。
+        let effects = s.on_sequence(b"type=read:status", at(1));
         assert_eq!(effects, vec![Effect::Fail(ClipboardFailure::Malformed)]);
     }
 
@@ -979,13 +1084,13 @@ mod tests {
             s.on_sequence(&response("type=read:status=DONE:id=other", None), at(3))
                 .is_empty()
         );
-        // 我们的读仍然活着。
+        // 我们的读仍然活着；零数据 DONE = 该表示不可用（不是「空粘贴」）。
         assert_eq!(
             s.on_sequence(
-                &response("type=read:status=DONE:id=wing-paste", None),
+                &response("type=read:status=DONE:id=wing-paste-1", None),
                 at(4)
             ),
-            vec![Effect::Deliver(ClipboardPayload::Text(String::new()))]
+            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
         );
     }
 
@@ -997,17 +1102,20 @@ mod tests {
         let effects = event_triplet("two", &["text/plain"], 1, &mut s);
         assert!(effects.is_empty(), "排队 = 先不发请求");
         // 第一条读完：第二条的请求立刻发出。
-        s.on_sequence(&response("type=read:status=OK:id=wing-paste", None), at(2));
+        s.on_sequence(
+            &response("type=read:status=OK:id=wing-paste-1", None),
+            at(2),
+        );
         let effects = s.on_sequence(
             &response(
-                "type=read:status=DATA:id=wing-paste:mime=dGV4dC9wbGFpbg==",
+                "type=read:status=DATA:id=wing-paste-1:mime=dGV4dC9wbGFpbg==",
                 Some(b"first"),
             ),
             at(3),
         );
         assert!(effects.is_empty());
         let effects = s.on_sequence(
-            &response("type=read:status=DONE:id=wing-paste", None),
+            &response("type=read:status=DONE:id=wing-paste-1", None),
             at(4),
         );
         assert_eq!(
@@ -1080,23 +1188,23 @@ mod tests {
         let request = String::from_utf8(written.lock().unwrap().clone()).unwrap();
         assert_eq!(
             request,
-            "\x1b]5522;type=read:name=d2luZw==:id=wing-paste:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\"
+            "\x1b]5522;type=read:name=d2luZw==:id=wing-paste-1:pw=b3Rw;dGV4dC9wbGFpbg==\x1b\\"
         );
 
         // 终端回 OK + DATA + DONE。
         seq_tx
-            .send(packet("type=read:status=OK:id=wing-paste", None))
+            .send(packet("type=read:status=OK:id=wing-paste-1", None))
             .await
             .unwrap();
         seq_tx
             .send(packet(
-                "type=read:status=DATA:id=wing-paste:mime=dGV4dC9wbGFpbg==",
+                "type=read:status=DATA:id=wing-paste-1:mime=dGV4dC9wbGFpbg==",
                 Some(b"pasted text"),
             ))
             .await
             .unwrap();
         seq_tx
-            .send(packet("type=read:status=DONE:id=wing-paste", None))
+            .send(packet("type=read:status=DONE:id=wing-paste-1", None))
             .await
             .unwrap();
 
@@ -1138,7 +1246,7 @@ mod tests {
         // 读请求已发出（等一小会儿），然后终端拒绝。
         tokio::time::sleep(Duration::from_millis(20)).await;
         seq_tx
-            .send(packet("type=read:status=EPERM:id=wing-paste", None))
+            .send(packet("type=read:status=EPERM:id=wing-paste-1", None))
             .await
             .unwrap();
 
@@ -1154,6 +1262,86 @@ mod tests {
             TermEvent::Clipboard(Err(f)) => Some(f.clone()),
             _ => None,
         }
+    }
+
+    /// [S2] 上一次读被放弃后，终端仍会把剩下的包补发完。唯一 id 让这些残留落不到下一次
+    /// 读上（同 id 时无法区分：同 mime、同 pw）——否则新读会被旧的 DONE 提前终结，投出
+    /// 上一次的内容。
+    #[test]
+    fn stale_residue_from_an_abandoned_read_is_ignored() {
+        let mut s = Session::new();
+        event_triplet("otp", &["image/png"], 0, &mut s);
+        // 第一次读：请求 id = wing-paste-1，然后超时放弃。
+        assert_eq!(
+            s.on_timeout(at(IDLE_TIMEOUT.as_millis() as u64 + 100)),
+            vec![Effect::Fail(ClipboardFailure::Timeout)]
+        );
+        // 用户又粘了一次 → 第二次读，id 必须换了。
+        let effects = event_triplet("otp", &["image/png"], 6000, &mut s);
+        match &effects[0] {
+            Effect::Send(bytes) => {
+                let text = String::from_utf8(bytes.clone()).unwrap();
+                assert!(text.contains("id=wing-paste-2"), "{text}");
+            }
+            other => panic!("期望第二次读的请求，得到 {other:?}"),
+        }
+        // 终端补发**第一次**读的残留：DATA + DONE（旧 id）。
+        assert!(
+            s.on_sequence(
+                &response(
+                    "type=read:status=DATA:id=wing-paste-1:mime=aW1hZ2UvcG5n",
+                    Some(b"STALE")
+                ),
+                at(6010)
+            )
+            .is_empty(),
+            "旧 id 的 DATA 不该进新读"
+        );
+        assert!(
+            s.on_sequence(
+                &response("type=read:status=DONE:id=wing-paste-1", None),
+                at(6011)
+            )
+            .is_empty(),
+            "旧 id 的 DONE 不该终结新读"
+        );
+        // 新读自己的响应照常收。
+        assert!(
+            s.on_sequence(
+                &response(
+                    "type=read:status=DATA:id=wing-paste-2:mime=aW1hZ2UvcG5n",
+                    Some(b"FRESH")
+                ),
+                at(6020)
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            s.on_sequence(
+                &response("type=read:status=DONE:id=wing-paste-2", None),
+                at(6021)
+            ),
+            vec![Effect::Deliver(ClipboardPayload::Image {
+                bytes: b"FRESH".to_vec(),
+                mime: "image/png".into(),
+                name: None,
+            })],
+            "只有新读自己的字节"
+        );
+    }
+
+    /// 零数据 DONE（协议用它表示「该表示不可用」）走失败路径，而不是投空载荷。
+    #[test]
+    fn zero_data_read_fails_instead_of_delivering_empty() {
+        let mut s = Session::new();
+        event_triplet("otp", &["text/plain"], 0, &mut s);
+        assert_eq!(
+            s.on_sequence(
+                &response("type=read:status=DONE:id=wing-paste-1", None),
+                at(1)
+            ),
+            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
+        );
     }
 
     #[test]

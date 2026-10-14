@@ -10,6 +10,14 @@
 
 use std::time::Duration;
 
+/// 暂存区的上限：**条数**与**总字节**。
+///
+/// 暂存是「不丢」的落点、不是仓库：05 接手把它变成 chip 并在提交后清空，但在这之前
+/// 用户可能反复粘贴，而单张图最大 64 MiB（`clipboard_protocol::MAX_PAYLOAD`）。到顶时
+/// 丢掉**最旧**的一张（FIFO）并记日志：新的一次粘贴是用户的当下意图，优先保住。
+pub(crate) const MAX_PENDING_IMAGES: usize = 8;
+pub(crate) const MAX_PENDING_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
 use crate::ui::toast::Toast;
@@ -60,6 +68,7 @@ impl App {
             mime: mime.clone(),
             name,
         });
+        self.trim_pending_images();
         self.show_toast(Toast::info(
             format!("Image pasted ({mime} · {size})"),
             Duration::from_secs(3),
@@ -75,6 +84,30 @@ impl App {
     /// 暂存的图片（05 的消费口；本步骤只由测试读取）。
     pub fn pending_clipboard_images(&self) -> &[PendingClipboardImage] {
         &self.pending_clipboard_images
+    }
+
+    /// 把暂存区收进上限（FIFO 丢最旧的，见 [`MAX_PENDING_IMAGES`]）。
+    fn trim_pending_images(&mut self) {
+        let mut total: usize = self
+            .pending_clipboard_images
+            .iter()
+            .map(|i| i.bytes.len())
+            .sum();
+        while self.pending_clipboard_images.len() > MAX_PENDING_IMAGES
+            || total > MAX_PENDING_IMAGE_BYTES
+        {
+            if self.pending_clipboard_images.len() == 1 {
+                // 最后一张再大也留着：它就是用户刚粘的那一张。
+                break;
+            }
+            let dropped = self.pending_clipboard_images.remove(0);
+            total -= dropped.bytes.len();
+            tracing::warn!(
+                bytes = dropped.bytes.len(),
+                mime = %dropped.mime,
+                "clipboard image stash over budget, dropped the oldest"
+            );
+        }
     }
 }
 

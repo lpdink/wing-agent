@@ -33,7 +33,7 @@ use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
-use wing::tui::{WingTerminal, init_terminal, restore_terminal};
+use wing::tui::{WingTerminal, end_tui_session, init_terminal, restore_terminal};
 use wing::ui::image::{
     CellPixels, DEFAULT_DETECT_TIMEOUT, ImageMeta, ImageProtocol, ImageState, ImageStore,
     ImageSupport, MetaState, ReadyImage, paint,
@@ -134,12 +134,15 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // 会话（raw + stdin 接驳）随第一个 TUI 段开启，收尾统一走 `end_tui_session`（屏的
+    // 离开序列是段级的，raw 与 fd 0 是会话级的）。
     let mut terminal = init_terminal()?;
     // Upstream's rule: query the terminal after entering the alternate screen, before the
     // event loop starts reading stdin.
     let support = ImageSupport::detect(DEFAULT_DETECT_TIMEOUT);
     if !support.is_enabled() {
         restore_terminal(&mut terminal)?;
+        end_tui_session()?;
         let _ = writeln!(
             io::stdout(),
             "image_demo: no terminal graphics protocol detected (kitty/sixel/iTerm2) — the \
@@ -152,6 +155,7 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut width_scale: u16 = 1;
     let outcome = event_loop(&mut terminal, &mut store, path, &mut width_scale);
     restore_terminal(&mut terminal)?;
+    end_tui_session()?;
     outcome
 }
 

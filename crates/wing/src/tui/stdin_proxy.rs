@@ -10,10 +10,10 @@
 //! crossterm 的输入 fd 由 `terminal::sys::file_descriptor::tty_fd()` 决定：`isatty(stdin)`
 //! 为真用 fd 0，否则打开 `/dev/tty`。若把 fd 0 换成 pipe，`isatty` 变假 → crossterm 改开
 //! `/dev/tty`，绕过本层、且与泵线程抢同一个 tty 的字节；就算预热注册过事件源也没用——
-//! epoll 的 interest 绑定的是**注册时刻的文件描述**，`dup2` 之后 fd 0 与它就绪源不再对应。
-//! 换成 **pty slave** 就不一样：它本身是 tty，`isatty(0)` 仍为真，crossterm 照旧读 fd 0
-//! （spike 实证，见 `crates/wing/tests/stdin_proxy_pty.rs` 与
-//! `crates/wing/tests/crossterm_osc5522_misparse.rs`）。
+//! 事件源的就绪注册（epoll / kqueue）绑定的是**注册时刻的文件描述**，`dup2` 之后 fd 0
+//! 与它就绪源不再对应。换成 **pty slave** 就不一样：它本身是 tty，`isatty(0)` 仍为真，
+//! crossterm 照旧读 fd 0（端到端证据见 `tests/stdin_proxy_pty.rs` 与
+//! `tests/crossterm_osc5522_misparse.rs`）。
 //!
 //! ```text
 //!  真实 tty ──read──► 泵线程（Splitter）──write──► pty master ⇄ pty slave（fd 0）──► crossterm
@@ -23,7 +23,11 @@
 //! # 生命周期（顺序是硬约束）
 //!
 //! - [`install`] 必须晚于 `crossterm::terminal::enable_raw_mode()`（raw 打在真实 tty 上）、
-//!   早于 crossterm 事件源的首次创建（`spawn_event_stream` 的第一次 `poll`）。
+//!   早于 crossterm 事件源的首次创建 —— 后者是**进程级单例**，首次 `poll` 时把当时的
+//!   fd 0 注册进就绪源、之后永不重建；而「`poll` 可能在同进程的第一段 TUI（setup 向导）
+//!   就发生」，所以安装提升为**进程级一次性**（`tui::init_terminal` 的第一段负责开、
+//!   `tui::end_tui_session` 负责关，段与段之间绝不拆）。反面证据：
+//!   `tests/stdin_proxy_stale_event_source.rs`。
 //! - [`restore`] 必须早于 `crossterm::terminal::disable_raw_mode()`（它把 termios 写回
 //!   fd 0，彼时 fd 0 必须已经是真实 tty）。
 //! - 失败不致命：[`install`] 任何一步出错都先在返回前还原 fd 0，调用方降级即可；但**没有
