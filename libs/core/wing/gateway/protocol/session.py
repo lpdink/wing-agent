@@ -105,7 +105,7 @@ class SendMessageRequest(BaseModel):
         default=None,
         description=(
             "消息携带的媒体引用（缺省 / null = 无媒体）。id 必须指向该会话已存在的"
-            "媒体对象，否则 400（整条消息被拒，不进历史）"
+            "媒体对象且 mime 在支持列表内，否则 400（整条消息被拒，不进历史）"
         ),
     )
     tool_call_id: str | None = Field(

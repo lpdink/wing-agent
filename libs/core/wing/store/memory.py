@@ -15,6 +15,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    first_user_title,
     validate_media_content,
     validate_media_id,
 )
@@ -181,10 +182,7 @@ class MemorySessionStore(SessionStore):
 
             first_user: str | None = None
             if metadata.session_name is None and message_log is not None:
-                for record in message_log.iter_all():
-                    if record.get("role") == "user":
-                        first_user = (record.get("content") or "")[:100]
-                        break
+                first_user = first_user_title(message_log.iter_all())
 
             result.append(
                 SessionSummary(

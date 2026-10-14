@@ -19,10 +19,11 @@
 - **budget 驱逐（D5）**：user 图与 tool 图混合超字节预算 → 按最旧驱逐，user 位用
   user 变体占位（"仍在会话中"），原文本 part 逐字节不动；
 - **幽灵引用拒绝**：不存在的 ref 被拒（HTTP 400 / WS error 帧），不进历史、没有
-  送达 ack；id 格式非法同样 400。
+  送达 ack；id 格式非法 / mime 不在支持列表同样 400；WS 错误帧携带客户端
+  `request_id` 与 `session_id`（前端据此把拒绝关联回刚发出的那条消息）。
 
 断言只锚定四个取证面：**假 Provider 请求留档**（请求体 part 与字节）、**事件时间线**
-（`user_message_accepted` 的 `origin_request_id` / 占位事件）/ driver 级 error 帧、
+（`user_message_accepted` 的 `origin_request_id` / 占位事件 / 带帧层关联字段的 `error` 帧）、
 **history.jsonl**（引用与无 base64）、**文件系统**（对象落点与存续）。图片字节由场景
 现场生成（stdlib zlib + struct 构造的合法 PNG），独立成文件、不 import 其它场景模块。
 
@@ -80,6 +81,9 @@ BUDGET_TOOL_PLACEHOLDER = (
     "re-read the file to attach it again)"
 )
 NO_VISION_TOOL_PLACEHOLDER = "(image omitted: this model does not accept image input)"
+IMAGE_ONLY_TITLE = "[image message]"
+"""会话标题回退（wing/store/base.py 的 `IMAGE_ONLY_TITLE`）：链上只有纯图 user
+消息时的会话名——没有它，这类会话会因"无名"在 /api/session/list 里被隐藏。"""
 
 #: 字节预算驱逐场景的 images 配置：两张 96 B 图（encoded 各 128 B）合计超 200
 #: → 目标释放 64 B（量化 64）→ 恰丢最旧一张。
@@ -293,6 +297,19 @@ async def test_pure_image_message_is_accepted(probe: Probe) -> None:
     view = probe.history(session)
     records = [m for m in view.messages() if m["role"] == "user"]
     assert records[0]["content"] == "" and records[0]["media"] == [ref], records[0]
+
+    # 只有一张图的首条消息不让会话在列表里消失：标题回退为短标记（N3）。
+    listing = await probe.driver_required.http.request("GET", "/api/session/list")
+    entry = next(
+        (
+            item
+            for item in listing.get("sessions", [])
+            if item.get("id") == session.session_id
+        ),
+        None,
+    )
+    assert entry is not None, listing
+    assert entry["name"] == IMAGE_ONLY_TITLE, entry
 
 
 # ── 场景 3：多条带图消息合并（消息序 × 消息内序） ──────────────────
@@ -555,7 +572,7 @@ async def test_budget_eviction_includes_user_images(probe: Probe) -> None:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_ghost_media_reference_is_rejected(probe: Probe) -> None:
-    """不存在的 ref / 非法 id：HTTP 400、WS error 帧；不进历史、无送达 ack。"""
+    """不存在的 ref / 非法 id / 非法 mime：HTTP 400、WS 错误帧（可关联）；不进历史。"""
     probe.register(VISION_MODEL, Turn.of(text="should never run"))
     session = await probe.session(model=VISION_MODEL)
     ghost: dict[str, Any] = {
@@ -599,19 +616,32 @@ async def test_ghost_media_reference_is_rejected(probe: Probe) -> None:
         (failure.value.call.response or {}).get("detail", "")
     )
 
-    # WS 路径：错误帧（不是静默吞掉），且消息没有进队列。
-    await session.send("ghost via ws", media=[ghost])
-    driver = probe.driver_required
-    matched = await driver.timeline.wait_for(
-        lambda event: (
-            event.type == "error"
-            and ghost["id"][:8] in str(event.data.get("message", ""))
-        ),
-        within=10.0,
+    # 非法 mime 同样 400：mime 原样进线格式（data URL / media_type），写错会
+    # 让整次请求被上游打死——入口挡下（对象存在也不放行）。
+    bad_mime = dict(ghost, id=media_id(b"mime-rejected"), mime="image/svg+xml")
+    with pytest.raises(DriverHttpError) as failure:
+        await http.request(
+            "POST",
+            "/api/session/send",
+            body={
+                "session_id": session.session_id,
+                "content": "bad mime",
+                "media": [bad_mime],
+            },
+        )
+    assert failure.value.call.status == 400, failure.value.call.render()
+    assert "unsupported media reference mime" in str(
+        (failure.value.call.response or {}).get("detail", "")
     )
-    assert matched is not None, [
-        (event.type, event.data) for event in driver.timeline.all()
-    ]
+
+    # WS 路径：错误帧（不是静默吞掉），且**可关联**回刚发出的那条消息——帧携带
+    # 客户端自己的 request_id 与 session_id（前端据此走"拒绝 → 丢弃 pending /
+    # 回填草稿"，而不是把它当成无主的服务端错误）。
+    request_id = await session.send("ghost via ws", media=[ghost])
+    error = await session.watch.expect("error", within=10)
+    assert error.data["request_id"] == request_id, error.data
+    assert error.data["session_id"] == session.session_id, error.data
+    assert ghost["id"][:8] in str(error.data["message"]), error.data
 
     # 幽灵引用不进历史、也没有送达 ack / 消费确认。
     assert probe.history(session).messages() == [], probe.history(session).describe()

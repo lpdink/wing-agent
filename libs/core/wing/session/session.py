@@ -32,7 +32,7 @@ from wing.event import (
     UserMessageAcceptedEvent,
 )
 from wing.event_bus import event_bus
-from wing.media import MediaAccess
+from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
 from wing.schema import ChainNode, MediaRef, Message, Tool
 from wing.store import SessionMetadata, SessionStore, SessionUsage, TagMeta
 from wing.store.base import validate_media_id
@@ -146,13 +146,21 @@ def bind_media(store: SessionStore, session_id: str) -> MediaAccess:
 def validate_media_refs(
     store: SessionStore, session_id: str, media: list[MediaRef] | None
 ) -> None:
-    """校验消息携带的媒体引用可兑现（id 格式 + 对象存在）；不合规即 raise。
+    """校验消息携带的媒体引用可兑现（id 格式 + mime + 对象存在）；不合规即 raise。
 
-    消息入口闸门（``SessionManager._post`` 调用）：引用的 id 必须是 64 位小写
-    hex（防路径穿越 + 防把逻辑错误静默带进历史），且对象必须已存在（会话目录或
-    遗留池——``media_exists`` 是**纯查询**，不物化、不写盘）。缺任何一条即
-    ``InvalidInputError``（HTTP 400 语义）：幽灵引用不是"暂时读不到"，而是调用方
-    发了不该发的请求——放它进历史只会让后续每一轮请求都渲染一个永远缺失的占位。
+    消息入口闸门（``SessionManager._post`` 调用）：
+
+    - id 必须是 64 位小写 hex（防路径穿越 + 防把逻辑错误静默带进历史）；
+    - mime 必须在读图支持列表内（``SUPPORTED_IMAGE_MIMES``）——它原样进线格式
+      （``data:{mime};base64`` / anthropic 的 ``media_type``），一个写错的 mime
+      会让整次请求被上游 400，在这里挡下比让它烧掉一轮划算；
+    - 对象必须已存在（会话目录或遗留池——``media_exists`` 是**纯查询**，不物化、
+      不写盘）。
+
+    缺任何一条即 ``InvalidInputError``（HTTP 400 语义）：幽灵引用不是"暂时读不到"，
+    而是调用方发了不该发的请求——放它进历史只会让后续每一轮请求都渲染一个永远缺失
+    的占位。校验仍只认"id 格式 + mime + 存在"：``bytes`` / 尺寸是提示性元数据
+    （只进驱逐启发式），不读字节复核。
 
     None / 空列表 = 无媒体（no-op）：无媒体路径不因本闸门产生任何分支或开销。
     """
@@ -161,6 +169,11 @@ def validate_media_refs(
             validate_media_id(ref.id)
         except ValueError as e:
             raise InvalidInputError(f"invalid media reference: {e}") from e
+        if ref.mime not in SUPPORTED_IMAGE_MIMES:
+            raise InvalidInputError(
+                f"unsupported media reference mime {ref.mime!r} for id={ref.id!r} "
+                f"(supported: {sorted(SUPPORTED_IMAGE_MIMES)})"
+            )
         if not store.media_exists(session_id, ref.id):
             raise InvalidInputError(
                 f"media reference not found in session {session_id!r}: "

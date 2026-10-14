@@ -213,13 +213,41 @@ class TagMeta(BaseModel):
 class SessionSummary(BaseModel):
     """session 列举条目：id + metadata + 标题回退素材。
 
-    first_user_message: 快照中第一条用户消息（截断至 100 字符），
-    仅在 metadata.session_name 为 None 时由后端填充，供上层做标题回退。
+    first_user_message: 快照中第一条**非空文本**用户消息（截断至 100 字符），
+    仅在 metadata.session_name 为 None 时由后端填充，供上层做标题回退；
+    纯图消息（content 为空、media 非空）回退为 :data:`IMAGE_ONLY_TITLE`。
     """
 
     id: str
     metadata: SessionMetadata
     first_user_message: str | None = None
+
+
+IMAGE_ONLY_TITLE = "[image message]"
+"""会话标题回退：链上只有纯图 user 消息（content 为空、内容全在 media）时的占位名。
+
+没有它，这类会话的标题回退为空 → 上层（``SessionManager.list_sessions``）把
+"无名且无标"的会话隐藏，用户刚建的贴图会话在列表里凭空消失（02 之前不可达：
+纯图消息会被 ``run_turn`` 丢弃；之后是正常可达状态）。
+"""
+
+
+def first_user_title(records: Iterator[dict[str, Any]]) -> str | None:
+    """会话标题回退：第一条**非空文本** user 记录（截断 100 字符）；没有文本但有
+    携带 media 的 user 记录时回退为 ``IMAGE_ONLY_TITLE``；两者都没有 → None。
+
+    跳过空 content 的 user 记录继续往后找——"图片先行"的会话不该因为第一条
+    用户消息没有文本而在列表里无名。两个后端共用本函数（同一条规则只有一份实现）。
+    """
+    image_only = False
+    for record in records:
+        if record.get("role") != "user":
+            continue
+        text = str(record.get("content") or "")[:100]
+        if text:
+            return text
+        image_only = image_only or bool(record.get("media"))
+    return IMAGE_ONLY_TITLE if image_only else None
 
 
 class MessageLog(ABC):

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from wing.context import Compactor
+from wing.context.compaction import COMPACT_IMAGE_MARKER
 from wing.config import ModelCapabilities, ModelSpec, ProviderConfig
 from wing.media import (
     BUDGET_PLACEHOLDER,
@@ -1142,6 +1143,47 @@ class TestCompactStripsMedia:
         # 端到端投影：压缩请求即使走真实 provider 序列化也不含 image part
         body = await openai_body(provider.messages, media=make_media(data))
         assert "image_url" not in json.dumps(body)
+
+    @pytest.mark.asyncio
+    async def test_compact_request_replaces_image_only_message_with_marker(self):
+        """纯图消息（content 空、media 非空）：压缩请求换成短标记，绝不出现空 content。
+
+        02 之后"content 为空、media 非空"的 user 消息合法进链，而压缩请求剥离
+        media——不处理就会以 `{"role": "user", "content": ""}` 上线（部分 OpenAI
+        兼容网关直接 400，长会话里图片一多就再也压不动）。
+        """
+        data = png_bytes(4, 4, b"image-only")
+        ref = make_ref(data)
+        full = [
+            Message(role="user", content="", media=[ref]),
+            Message(role="user", content="text after the image"),
+            Message(role="assistant", content="ok"),
+        ]
+        provider = _CapturingProvider()
+        c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        await c.do_compact(
+            full,
+            VISION_MODEL,
+            provider,  # ty: ignore[invalid-argument-type]
+        )
+
+        assert provider.messages is not None
+        marker = provider.messages[0]
+        assert marker.role == "user"
+        assert marker.content == COMPACT_IMAGE_MARKER
+        assert marker.media is None
+        # 原链零改动：正文（空串）与引用都还在。
+        assert full[0].content == "" and full[0].media is not None
+
+        # 端到端序列化：请求体里没有任何空 content 的消息。
+        body = await openai_body(provider.messages, media=make_media(data))
+        empties = [
+            message
+            for message in body["messages"]
+            if message.get("content") in ("", None)
+        ]
+        assert empties == [], body["messages"]
+        assert COMPACT_IMAGE_MARKER in json.dumps(body)
 
 
 ########## fixture：media 模块 logger 替身（log.propagate=False，caplog 收不到）

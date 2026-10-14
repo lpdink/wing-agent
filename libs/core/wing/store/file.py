@@ -30,6 +30,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    first_user_title,
     validate_media_content,
     validate_media_id,
 )
@@ -440,16 +441,13 @@ class FileSessionStore(SessionStore):
         return result
 
     def _first_user_message(self, session_id: str) -> str | None:
-        """提取第一条 user 消息（截断 100 字符）作标题回退。
+        """会话标题回退素材（截断 100 字符）；规则见 ``first_user_title``。
 
         流式：命中即停——标题只用这一条文本，不把整份历史读进内存；解析与
         "跳过损坏行"复用 ``MessageLog.iter_all``，不另写一份。日志不可读
         返回 None（上层按"无标题"处理）。
         """
         try:
-            for record in self.open_log(session_id).iter_all():
-                if record.get("role") == "user":
-                    return (record.get("content") or "")[:100]
+            return first_user_title(self.open_log(session_id).iter_all())
         except OSError:
             return None
-        return None

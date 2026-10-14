@@ -47,7 +47,8 @@ class ClientRequest(BaseModel):
         default=None,
         description=(
             "消息携带的媒体引用（缺省 / null = 无媒体）。id 必须指向该会话已存在的"
-            "媒体对象，否则网关拒绝整条消息（错误帧，不进历史）"
+            "媒体对象且 mime 在支持列表内，否则网关拒绝整条消息（错误帧携带本帧的"
+            "session_id / request_id，不进历史）"
         ),
     )
     tool_call_id: str | None = Field(

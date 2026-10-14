@@ -15,10 +15,13 @@ SESSION_ID_MAX_BYTES = 128
 
 
 class InvalidInputError(ValueError):
-    """请求携带了**无法表示**的输入（当前唯一来源：不可编码为 UTF-8 的文本）。
+    """请求携带了**无法表示 / 不可兑现**的输入。
+
+    来源：① 不可编码为 UTF-8 的文本（``require_utf8``）；② 消息携带的媒体引用
+    不可兑现（id 格式 / mime 不在支持列表 / 对象不存在——``validate_media_refs``）。
 
     继承 ``ValueError``：既有的"非法输入 → 400"捕获点（create / update / tag）
-    不需要改动；需要把 400 的口径钉死的地方（如 send 路由只该为"正文非法"回
+    不需要改动；需要把 400 的口径钉死的地方（如 send 路由只该为"输入问题"回
     400，不该吞掉链上未来出现的其它 ``ValueError``）可以精确捕获本类型。
     """
 

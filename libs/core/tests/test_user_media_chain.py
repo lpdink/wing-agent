@@ -28,6 +28,8 @@ import pytest
 from wing.common.utils import InvalidInputError
 from wing.event import DeliveredEvent, UserMessageAcceptedEvent
 from wing.event_bus import event_bus
+from wing.gateway.protocol import ClientRequest
+from wing.gateway.protocol.session import SendMessageRequest
 from wing.schema import LLMResponse, LLMUsage, MediaRef, TextBlock
 
 
@@ -183,6 +185,29 @@ class TestMediaValidation:
 
         assert "invalid media reference" in str(excinfo.value)
         assert session.agent._inbox.has_pending is False
+
+    @pytest.mark.asyncio
+    async def test_unsupported_mime_is_rejected(self, runtime: Any):
+        """mime 不在读图支持列表内：即使对象存在也拒（mime 原样进线格式）。"""
+        session = runtime.create_session()
+        await _stop_worker(session.agent)
+        ref = seed(session, png_bytes(b"mime")).model_copy(
+            update={"mime": "image/svg+xml"}
+        )
+
+        with pytest.raises(InvalidInputError) as excinfo:
+            await runtime.post("x", session_id=session.session_id, media=[ref])
+
+        assert "unsupported media reference mime" in str(excinfo.value)
+        assert session.agent._inbox.has_pending is False
+
+        # mime 闸门先于存在性查询（ghost id + 非法 mime → 报 mime，不报 not found）
+        both_bad = make_ref(png_bytes(b"both")).model_copy(
+            update={"id": "c" * 64, "mime": "text/plain"}
+        )
+        with pytest.raises(InvalidInputError) as excinfo:
+            await runtime.post("x", session_id=session.session_id, media=[both_bad])
+        assert "unsupported media reference mime" in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_existing_ref_passes_and_delivers(self, runtime: Any):
@@ -415,6 +440,62 @@ class TestSteerPartialDrain:
         ]
         assert user_msgs[-1].content == "after"
         assert [r.id for r in user_msgs[-1].media or []] == [ref.id]
+
+
+class TestProtocolMediaField:
+    """协议模型的 media 字段契约（WS ``ClientRequest`` / HTTP ``SendMessageRequest``）。
+
+    字段是**尾随可选字段**（缺省 None）：缺省与显式 null 在 wire 上必须无差别
+    （旧客户端 / 旧帧零影响），空数组在协议层保形、进 ``Message`` 时归一为 None，
+    带 media 的 dump 与 ``MediaRef.model_dump()`` 逐键相同（前端上行帧的镜像形状）。
+    """
+
+    MODELS = [ClientRequest, SendMessageRequest]
+
+    @staticmethod
+    def _without_request_id(dump: dict[str, Any]) -> dict[str, Any]:
+        """去掉自动生成的 request_id（只有 ClientRequest 有，且是随机 uuid）。"""
+        return {key: value for key, value in dump.items() if key != "request_id"}
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_absent_and_null_decode_identically(self, model: Any):
+        absent = model.model_validate({"session_id": "s", "content": "c"})
+        explicit = model.model_validate(
+            {"session_id": "s", "content": "c", "media": None}
+        )
+        assert absent.media is None and explicit.media is None
+        assert self._without_request_id(
+            absent.model_dump()
+        ) == self._without_request_id(explicit.model_dump())
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_absent_media_not_in_exclude_none_dump(self, model: Any):
+        """exclude_none dump 里不出现 media（旧客户端的观感：字段不存在）。"""
+        dump = model.model_validate({"session_id": "s", "content": "c"}).model_dump(
+            exclude_none=True
+        )
+        assert "media" not in dump
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_empty_media_array_decodes_and_message_normalizes_to_none(self, model: Any):
+        """空数组：协议层保形（[]），进 Message 边界归一为 None（"无媒体"只有一种表示）。"""
+        from wing.schema import Message
+
+        decoded = model.model_validate({"session_id": "s", "content": "c", "media": []})
+        assert decoded.media == []
+        assert Message(role="user", content="c", media=decoded.media).media is None
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_media_dump_matches_media_ref(self, model: Any):
+        ref = make_ref(png_bytes(b"proto"))
+        raw = {"session_id": "s", "content": "c", "media": [ref.model_dump()]}
+
+        decoded = model.model_validate(raw)
+
+        assert decoded.media == [ref]
+        assert decoded.model_dump()["media"] == [ref.model_dump()]
+        # round-trip：dump 能原样解析回同一引用（上行帧 = 该 dump）。
+        assert model.model_validate(decoded.model_dump()).media == [ref]
 
 
 class TestFirstMessageTitle:

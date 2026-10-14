@@ -115,10 +115,12 @@ D5/D6/D7 拍板：
   Session.post → Agent.post → Inbox.post → Message(media=…)`）。字段缺省 / null = 无媒体——旧客户端
   / 旧帧与引入 media 之前**逐字节一致**。
 - **入口闸门**（`session.validate_media_refs`，在 `SM._post` 里、`DeliveredEvent` **之前**）：
-  每个 ref 的 id 必须是 64 位小写 hex 且对象必须已存在（会话目录或老池；`media_exists` 是纯查询，
-  不物化）。不合规 → `InvalidInputError`：HTTP 400 / WS `error` 帧；消息**不进历史、不进队列、
-  没有送达 ack**。校验只认"id 格式 + 对象存在"——mime / bytes / 尺寸是提示性元数据（只进驱逐
-  启发式），不是安全面。
+  每个 ref 的 id 必须是 64 位小写 hex、mime 必须在读图支持列表内（`SUPPORTED_IMAGE_MIMES`——
+  它原样进线格式 `data:{mime};base64` / anthropic `media_type`，写错会让整次请求被上游打死），
+  且对象必须已存在（会话目录或老池；`media_exists` 是纯查询，不物化）。不合规 →
+  `InvalidInputError`：HTTP 400 / WS `error` 帧；消息**不进历史、不进队列、没有送达 ack**。
+  `bytes` / 尺寸仍是提示性元数据（只进驱逐启发式），不读字节复核。WS 错误帧携带客户端随帧发来的
+  `request_id` 与 `session_id`——前端据此把"拒绝"关联回刚发出的那条消息。
 - **合并**（drain-and-merge）：同一轮取出的多条消息拼成一条 user message——`content` 用
   `\n` 拼接、`media` 按**消息序 × 消息内序** concat。**纯图消息合法**（content 为空、media 非空：
   请求体只有一个 image part、没有空 text part），`user_message_accepted` 的发射条件相应放宽为
@@ -311,9 +313,9 @@ providers:
 - 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、`GET /api/media/{id}` 端点、TUI/VSCode 像素渲染
   （kitty/iTerm2 协议、webview）不在本期；用户侧入口的**服务端**链路见「用户贴图」一节，前端
   （composer 图片 chip / 终端协议 / 压缩）在前端侧交付。
-- **贴图引用的元数据不校验内容一致性**：入口闸门只认 id 格式 + 对象存在（安全面）；ref 里的
-  `bytes` / `width` / `height` 是提示性元数据，只参与请求期驱逐启发式——服务端不读字节复核
-  （要读字节就意味着每次发消息都全量哈希，代价与收益不成比例）。
+- **贴图引用的元数据不校验内容一致性**：入口闸门只认 id 格式 + mime + 对象存在（安全面与"线格式
+  可用性"）；ref 里的 `bytes` / `width` / `height` 是提示性元数据，只参与请求期驱逐启发式——服务端
+  不读字节复核（要读字节就意味着每次发消息都全量哈希，代价与收益不成比例）。
 - `vision: auto` 名字启发式**刻意不做**（未声明 = text-only）。
 
 ## 整机证据（wing-probe）

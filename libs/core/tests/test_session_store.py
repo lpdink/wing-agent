@@ -14,6 +14,7 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
+from wing.store.base import IMAGE_ONLY_TITLE
 
 
 def _sid(label: str) -> str:
@@ -396,6 +397,36 @@ class TestListSummaries:
         assert summaries[0].first_user_message is not None
         assert len(summaries[0].first_user_message) <= 100
         assert summaries[0].first_user_message.startswith("hello")
+
+    def test_image_only_first_message_is_skipped(self, store: SessionStore):
+        """首条是纯图消息（content 空、media 非空）：跳过它继续找后面的文本。"""
+        sid = _sid("image-first")
+        store.save_metadata(sid, SessionMetadata(workspace="/ws"))
+        store.open_log(sid).append(
+            [
+                {"role": "user", "content": "", "media": [{"id": "a" * 64}]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "later text"},
+            ]
+        )
+
+        summaries = store.list_summaries()
+
+        assert len(summaries) == 1
+        assert summaries[0].first_user_message == "later text"
+
+    def test_image_only_session_gets_marker_title(self, store: SessionStore):
+        """整条链只有纯图 user 消息：回退名是短标记——会话不再因"无名"被隐藏。"""
+        sid = _sid("image-only")
+        store.save_metadata(sid, SessionMetadata(workspace="/ws"))
+        store.open_log(sid).append(
+            [{"role": "user", "content": "", "media": [{"id": "b" * 64}]}]
+        )
+
+        summaries = store.list_summaries()
+
+        assert len(summaries) == 1, "只有图片的会话必须在列表里被列出"
+        assert summaries[0].first_user_message == IMAGE_ONLY_TITLE
 
 
 class TestMemoryNoDisk:
