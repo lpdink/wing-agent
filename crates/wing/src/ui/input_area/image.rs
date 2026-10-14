@@ -184,6 +184,9 @@ mod tests {
         assert_eq!(chip_size(1023), "1023B");
         assert_eq!(chip_size(1024), "1KB");
         assert_eq!(chip_size(1536), "2KB", "rounded to the nearest KB");
+        // 非整除：四舍五入，不是向上取整（ceil 会给 2KB / 3KB）。
+        assert_eq!(chip_size(1025), "1KB");
+        assert_eq!(chip_size(2047), "2KB");
         assert_eq!(chip_size(393_216), "384KB");
         // Just under a mebibyte rounds to 1024KB *only* if that were allowed —
         // the branch hands it to MB instead, so the label never reads `1024KB`.

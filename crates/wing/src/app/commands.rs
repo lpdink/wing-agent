@@ -66,6 +66,15 @@ fn parse_string_arg(text: &str, prefix: &str) -> Option<String> {
 /// Handler for one table row: the raw input line in, "consumed" out.
 type CommandHandler = fn(&mut App, &str) -> bool;
 
+/// The command table row a line routes to, if any.
+///
+/// The one predicate behind [`App::try_frontend_command`] — callers that only
+/// need the *name* (the submit path's dropped-picture notice) ask it instead of
+/// re-deriving the match, so "matched" and "named" cannot disagree.
+fn frontend_command(text: &str) -> Option<&'static CommandRoute> {
+    COMMANDS.iter().find(|route| route.matches(text))
+}
+
 /// One row of the TUI command table.
 pub(super) struct CommandRoute {
     /// Canonical spelling, leading slash included.
@@ -217,14 +226,29 @@ impl App {
     /// Submit the composer's product: try the command table, else send as
     /// message.
     ///
-    /// The payload travels whole — the command table reads its text (a
-    /// frontend command consumes no pictures, like it consumes no payloads),
-    /// while the message keeps the text and the pictures apart, exactly as the
-    /// wire does.
+    /// The payload travels whole, and the two halves part ways here: a
+    /// frontend command reads the text and **never touches the pictures** — a
+    /// command runs locally, it is not a message, so there is nowhere for a
+    /// picture to ride. A paste chip's payload survives that path (its text
+    /// form is already inside `text`), a picture's does not, so the drop is
+    /// announced (see below).
     ///
     /// Returns `true` if it was consumed (either as a command or message).
     pub(super) fn submit_message(&mut self, payload: SubmitPayload) -> bool {
+        // 同一个谓词：`Some` ⟺ `try_frontend_command` 命中（下面那句提示读它取命令名）。
+        let command = frontend_command(&payload.text).map(|route| route.name);
         if self.try_frontend_command(&payload.text) {
+            if let Some(command) = command
+                && !payload.images.is_empty()
+            {
+                // 命令不是消息，图片没有落点。罕见，但静默丢一张图是最坏的结果，
+                // 所以这里说一句（命令自己的 toast 若也有，会被它顶掉——命令的效果
+                // 在屏幕上看得见，而图片的消失看不见）。
+                self.show_toast(Toast::info(
+                    format!("Image dropped: {command} takes no image"),
+                    std::time::Duration::from_secs(3),
+                ));
+            }
             return true;
         }
         // The message only moves up into chat history when the
@@ -253,7 +277,7 @@ impl App {
     /// Returns `true` if the command was recognized and handled locally;
     /// `false` if it should be sent to the gateway as usual.
     pub(super) fn try_frontend_command(&mut self, text: &str) -> bool {
-        let Some(route) = COMMANDS.iter().find(|route| route.matches(text)) else {
+        let Some(route) = frontend_command(text) else {
             return false;
         };
         (route.handler)(self, text)

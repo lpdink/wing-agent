@@ -127,7 +127,17 @@
 
 **两种 chip 是同一个单元**：模型的原子操作只认「chip」这个身份（`ChipId`），不问它属于哪本注册表——图片 chip 因此与粘贴 chip 共享**同一段**跨块步进 / 整块删除 / 换行不切开 / 指针前缘吸附 / ghost dim 的代码，不存在两套实现漂移的余地。
 
-**草稿被重写的路径**：命令补全（popup Enter 把草稿改写为 `name + args`）用**展开后**的文本重建草稿，参数里的 chip 提交的是 payload，不是标签。图片走 `set_text` / `clear` 这条路时会**丢掉载荷**（图片没有文本形态，而留下没有 chip 的载荷会造出一个用户看不见、却会被发出的附件）；`/clear`、Esc 清草稿、提交都走同一个 `clear`，两本注册表一起归零、号码从头计数。
+**草稿被重写 / 被命令消费的路径（图片的丢点，逐条登记）**：
+
+| 路径 | 图片的去向 | 可见性 |
+|---|---|---|
+| 命令补全（popup Enter 把草稿改写为 `name + args`） | 随 `set_text` 丢弃（粘贴 chip 则改以**展开后的文本**留在草稿里，参数里提交的是 payload 不是标签） | 无提示（用户主动改写草稿） |
+| must-select 命令的草稿恢复（`/fork` 等回车后回填文本、重开 popup） | 同上，随 `set_text` 丢弃 | 无提示 |
+| **提交的文本恰好是前端命令**（`try_frontend_command` 命中：`/clear`、`/model …`、`/tips` …） | 命令在本地执行、不是消息，图片**没有落点**：`SubmitPayload.images` 随 `payload` 一起消失，既不发也不上传 | **info toast**：`Image dropped: <命令名> takes no image` |
+| `/clear`（清 chat）/ Esc 清草稿 / 提交 | 走同一个 `clear`：两本注册表一起归零、号码从头计数 | 无提示（用户自己的动作） |
+| rewind / fork / 重连带回的 server draft（`set_text`） | 随被替换的草稿丢弃 | 无提示 |
+
+丢弃而不是「留载荷不留 chip」的理由：那会造出一个用户看不见、却会被发出的附件。消息路径（`submit_message` 的发送分支）永远两半都带：`text` 与 `images` 分开进 `SendMessage`。
 
 **提交产物**（`SubmitPayload { text, images }`，`InputAction::Submit` 的载荷）：`text` 是展开后的草稿（粘贴 chip → 全文，**图片 chip 不贡献任何字符**），`images` 是图片 chip 的载荷列表、按**出现序**（行序 × 段序）取走（不是克隆）。两者分开是因为消息本身就这么承载（后端 content / media 是两个字段，且不承诺交错顺序）；`ImagePayload.label` 只供前端展示（pending / 历史标签行），上传只要图片本身。
 
@@ -147,7 +157,7 @@
 
 ## 粘贴（文本 / 图片）：OSC 5522 终端协议
 
-除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），TUI 还启用 **kitty clipboard protocol（DECSET 5522）**：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），图片进 `App::on_clipboard_image` 的单并发流水线（入队 → 后台压缩 → 图片 chip，见下）——两者都不受模态挡板影响的一致性问题只在那里判（图片不做门控：落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果）。
+除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），TUI 还启用 **kitty clipboard protocol（DECSET 5522）**：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片进 `App::on_clipboard_image` 的单并发流水线（入队 → 后台压缩 → 图片 chip，见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。
 
 ```text
 TUI 启动:  CSI ? 5522 h          （与 ?2004 等在同一处：tui::enter_sequence，退出时 CSI ? 5522 l 收回）
