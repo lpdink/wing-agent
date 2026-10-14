@@ -105,7 +105,8 @@ async def test_live_reports_status_transitions_to_a_non_subscriber(
     WHEN 另一端（本会话的订阅者）驱动一轮对话
     AND 观测端只走 HTTP、从未订阅任何会话
     THEN ``/api/session/live`` 在该轮里报 ``working``、收口后报 ``idle``；
-    行键集精确等于 ``{id, status}``；同一刻的活跃行与 ``list`` 的活跃组逐行一致。
+    行键集精确等于 ``{id, status}``；同一刻 live 与 ``list`` 活跃组一致
+    （本场景只有这一条会话且列表可见；超集关系见 alignment 场景）。
 
     这是本端点存在的理由：状态变更不进全局 WS 流，rail 只能靠 HTTP 轮询补状态。
     """
@@ -261,4 +262,10 @@ async def test_live_order_aligns_with_the_list_active_group(probe: Probe) -> Non
         assert set(by_id) > {row["id"] for row in active}, (
             rows
         )  # 空会话是"多出来"的那行
+
+        # 交集在 live 里的**相对顺序** == list 活跃组的顺序（行序也是契约，不只是集合）。
+        active_ids = {row["id"] for row in active}
+        assert [row["id"] for row in rows if row["id"] in active_ids] == [
+            row["id"] for row in active
+        ]
         assert [by_id[row["id"]] for row in active] == active

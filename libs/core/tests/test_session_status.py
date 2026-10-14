@@ -437,7 +437,8 @@ class TestListLiveSessions:
         }
 
     def test_order_matches_the_list_active_group(self, tmp_path: Path):
-        # 两份响应的活跃行必须逐行对齐（同序是契约：消费方按序叠加/对齐）。
+        # live 与 list 活跃组的**交集**同序（本用例的会话都能被 list 看见，
+        # 因此两者相等）；超集关系与"多出行"由 probe 场景钉住。
         sessions_path = tmp_path / "sessions"
         _write_session_dir(sessions_path, _sid("live-old"), "2025-01-01T00:00:00")
         _write_session_dir(sessions_path, _sid("live-new"), "2025-06-01T00:00:00")
