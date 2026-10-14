@@ -113,4 +113,14 @@ impl InputArea {
         self.clear_desired_col();
         self.cursor_col = self.current_line_len();
     }
+
+    /// 光标移到**整份草稿**的末尾（最后一行行尾）。
+    ///
+    /// 与 [`Self::move_end`]（当前行行尾）分开：失败回填把消息接在草稿末尾时，草稿
+    /// 可能是多行的，而用户在飞的那几秒里把光标留在了中间某行。
+    pub(crate) fn move_draft_end(&mut self) {
+        self.clear_desired_col();
+        self.cursor_row = self.lines.len() - 1;
+        self.cursor_col = self.current_line_len();
+    }
 }

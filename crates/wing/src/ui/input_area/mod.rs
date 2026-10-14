@@ -714,6 +714,26 @@ mod tests {
         assert_eq!(input.cursor_col, 5);
     }
 
+    /// `move_end` 只管当前行；`move_draft_end` 才落到**整份草稿**的末尾（失败回填
+    /// 把消息接在草稿末尾时，用户的光标可能停在中间某行）。
+    #[test]
+    fn move_draft_end_reaches_the_last_line() {
+        let mut input = InputArea::new("");
+        input.set_text("第一行\n第二行\n第三行");
+        input.cursor_row = 0;
+        input.cursor_col = 1;
+        input.move_end();
+        assert_eq!((input.cursor_row, input.cursor_col), (0, 3), "只在当前行");
+
+        input.cursor_col = 0;
+        input.move_draft_end();
+        assert_eq!(
+            (input.cursor_row, input.cursor_col),
+            (2, "第三行".chars().count()),
+            "最后一行行尾"
+        );
+    }
+
     // ── Key event tests ──────────────────────────────────────
 
     #[test]

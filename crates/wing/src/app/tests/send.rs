@@ -288,7 +288,13 @@ async fn send(
     images: Vec<CompressedImage>,
 ) {
     // 与 submit 侧同构：先挂 pending，再发。
-    app.chat.push_pending("req-1".into(), content.to_string());
+    app.chat.push_pending(
+        "req-1".into(),
+        crate::ui::chat_view::Submission {
+            content: content.to_string(),
+            images: images.clone(),
+        },
+    );
     super::super::runner::send_user_message(
         app,
         transport,
@@ -372,9 +378,9 @@ async fn a_text_only_message_is_the_old_frame_without_an_upload() {
     assert_eq!(app.chat.pending.len(), 1, "成功发送不丢 pending 条目");
 }
 
-/// 上传失败：整条不发（不发送半截）、pending 清掉、warning toast 带原因。
+/// 上传失败：整条不发（不发送半截）、pending 取回、内容回到草稿、warning toast 带原因。
 #[tokio::test]
-async fn an_upload_failure_sends_nothing_and_toasts() {
+async fn an_upload_failure_sends_nothing_and_gives_the_draft_back() {
     let gateway = FakeGateway::start().await;
     gateway.fail_uploads_after(0, 400, r#"{"error":"bad_media","detail":"not an image"}"#);
     let transport = connect(&gateway).await;
@@ -383,7 +389,12 @@ async fn an_upload_failure_sends_nothing_and_toasts() {
     send(&mut app, Some(&transport), "图呢", vec![image(0x01, 10)]).await;
 
     assert!(gateway.frames().is_empty(), "半截消息绝不发送");
-    assert!(app.chat.pending.is_empty(), "pending 条目清掉");
+    assert!(app.chat.pending.is_empty(), "pending 条目取回");
+    assert_eq!(
+        app.input.text(),
+        "图呢[Image #1 8×8 10B]",
+        "文本与图片 chip 都回到草稿"
+    );
     let toast = app.toast.as_ref().expect("failure toast");
     assert_eq!(toast.kind, ToastKind::Warning);
     assert!(
@@ -392,9 +403,16 @@ async fn an_upload_failure_sends_nothing_and_toasts() {
         toast.message
     );
     assert!(toast.message.contains("not an image"), "{}", toast.message);
+    assert!(
+        toast.message.contains("draft restored"),
+        "{}",
+        toast.message
+    );
+    assert_restore_is_pure(&mut app);
 }
 
-/// 多张图中的第 2 张失败：第 3 张不再上传，整条不发（顺序语义 + 不留半截）。
+/// 多张图中的第 2 张失败：第 3 张不再上传，整条不发（顺序语义 + 不留半截），
+/// 三张**全部**回到草稿（发出去的半截不成立，用户拿到的是完整原件）。
 #[tokio::test]
 async fn a_failure_stops_the_remaining_uploads_and_the_send() {
     let gateway = FakeGateway::start().await;
@@ -409,30 +427,73 @@ async fn a_failure_stops_the_remaining_uploads_and_the_send() {
     assert_eq!(uploads.len(), 2, "第 3 张不再尝试：失败就停");
     assert!(gateway.frames().is_empty(), "整条不发");
     assert!(app.chat.pending.is_empty());
+    assert_eq!(
+        app.input.text(),
+        "三张[Image #1 8×8 10B][Image #2 8×8 20B][Image #3 8×8 30B]",
+        "失败不吞图：整条原件回到草稿"
+    );
+    assert_restore_is_pure(&mut app);
 }
 
-/// 网关断开（transport 为 None）：不上传、不发送、pending 清掉 + 原有文案。
+/// 网关断开（transport 为 None）：不上传、不发送，文本与图片回到草稿 + toast 说明。
 #[tokio::test]
-async fn a_disconnected_gateway_drops_the_message_without_uploading() {
+async fn a_disconnected_gateway_gives_the_message_back() {
     let mut app = test_app();
     send(&mut app, None, "hello", vec![image(0x01, 10)]).await;
 
     assert!(app.chat.pending.is_empty());
+    assert_eq!(app.input.text(), "hello[Image #1 8×8 10B]", "内容回到草稿");
     let toast = app.toast.as_ref().expect("failure toast");
     assert_eq!(toast.kind, ToastKind::Warning);
-    assert_eq!(toast.message, "Not sent — gateway disconnected");
+    assert_eq!(
+        toast.message,
+        "Not sent — gateway disconnected; draft restored"
+    );
+    assert_restore_is_pure(&mut app);
 }
 
-/// 无媒体时的失败文案不变（`Send failed: …` 前缀是既有契约）。
+/// 无媒体的断连路径同款（文案保留旧子句 + 说明内容去向）。
 #[tokio::test]
 async fn a_text_only_send_keeps_the_disconnected_behaviour() {
     let mut app = test_app();
     send(&mut app, None, "hello", Vec::new()).await;
     let toast = app.toast.as_ref().expect("failure toast");
-    assert_eq!(toast.message, "Not sent — gateway disconnected");
+    assert_eq!(
+        toast.message,
+        "Not sent — gateway disconnected; draft restored"
+    );
+    assert_eq!(app.input.text(), "hello");
 }
 
-/// WS 发不出去（死连接）：同一失败契约（pending 清掉 + `Send failed` toast），且不发半截。
+/// 回填时草稿里已经有东西（用户在消息在飞的那几秒里又打了字）：**不覆盖**——
+/// 失败的消息追加在末尾，草稿里原有的内容（含 chip）一根不动。
+#[tokio::test]
+async fn a_refill_appends_after_a_draft_the_user_retyped_in() {
+    let mut app = test_app();
+    app.submit_message(crate::ui::input_area::SubmitPayload {
+        text: "第一句".into(),
+        images: vec![crate::ui::input_area::ImagePayload {
+            image: image(0x07, 12),
+            label: "[Image #1 8×8 12B]".into(),
+        }],
+    });
+    app.drain_intents();
+    // 消息在飞：用户又写了一句（光标在草稿中间，回填必须落到整份草稿末尾）。
+    app.input.set_text("第二句");
+    app.input.insert_str("\n接着写");
+    app.input.cursor_row = 0;
+    app.input.cursor_col = 0;
+
+    send(&mut app, None, "第一句", vec![image(0x07, 12)]).await;
+
+    assert_eq!(
+        app.input.text(),
+        "第二句\n接着写\n第一句[Image #1 8×8 12B]",
+        "用户新写的没有被吃掉，失败的消息接在末尾"
+    );
+}
+
+/// WS 发不出去（死连接）：同一失败契约（内容回到草稿 + `Send failed` toast），且不发半截。
 #[tokio::test]
 async fn a_dead_ws_connection_fails_the_send_with_the_same_contract() {
     let gateway = FakeGateway::start_with_a_dead_ws().await;
@@ -468,8 +529,9 @@ async fn a_dead_ws_connection_fails_the_send_with_the_same_contract() {
     assert!(rejected, "写任务没有随死连接退出");
 
     let mut app = test_app();
-    send(&mut app, Some(&transport), "hi", Vec::new()).await;
-    assert!(app.chat.pending.is_empty(), "pending 条目清掉");
+    send(&mut app, Some(&transport), "hi", vec![image(0x05, 4)]).await;
+    assert!(app.chat.pending.is_empty(), "pending 条目取回");
+    assert_eq!(app.input.text(), "hi[Image #1 8×8 4B]", "内容回到草稿");
     let toast = app.toast.as_ref().expect("failure toast");
     assert_eq!(toast.kind, ToastKind::Warning);
     assert!(
@@ -477,4 +539,18 @@ async fn a_dead_ws_connection_fails_the_send_with_the_same_contract() {
         "{}",
         toast.message
     );
+    assert!(
+        toast.message.ends_with("draft restored"),
+        "{}",
+        toast.message
+    );
+}
+
+/// 回填是**纯数据恢复**：不产生 intent（不重发、不重复上传）、不往 chat 里写 cell。
+fn assert_restore_is_pure(app: &mut crate::app::App) {
+    assert!(
+        app.drain_intents().is_empty(),
+        "回填不发任何 intent（重发 / 上传都没有）"
+    );
+    assert!(app.chat.cells.is_empty(), "回填不写 chat（内容只回草稿）");
 }

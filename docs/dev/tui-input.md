@@ -136,10 +136,11 @@
 | **提交的文本恰好是前端命令**（`try_frontend_command` 命中：`/clear`、`/model …`、`/tips` …） | 命令在本地执行、不是消息，图片**没有落点**：`SubmitPayload.images` 随 `payload` 一起消失，既不发也不上传 | **info toast**：`Image dropped: <命令名> takes no image` |
 | `/clear`（清 chat）/ Esc 清草稿 / 提交 | 走同一个 `clear`：两本注册表一起归零、号码从头计数 | 无提示（用户自己的动作） |
 | rewind / fork / 重连带回的 server draft（`set_text`） | 随被替换的草稿丢弃 | 无提示 |
+| **发送失败 / 被服务端拒绝（回填）** | **反向**：文本与图片 chip 都回到草稿（原件存在 pending 条目里，见下节） | **warning toast**：原因 + `draft restored` |
 
 丢弃而不是「留载荷不留 chip」的理由：那会造出一个用户看不见、却会被发出的附件。消息路径（`submit_message` 的发送分支）永远两半都带：`text` 与 `images` 分开进 `SendMessage`。
 
-**提交产物**（`SubmitPayload { text, images }`，`InputAction::Submit` 的载荷）：`text` 是展开后的草稿（粘贴 chip → 全文，**图片 chip 不贡献任何字符**），`images` 是图片 chip 的载荷列表、按**出现序**（行序 × 段序）取走（不是克隆）。两者分开是因为消息本身就这么承载（后端 content / media 是两个字段，且不承诺交错顺序）；`ImagePayload.label` 只供前端展示（pending / 历史标签行），上传只要图片本身。
+**提交产物**（`SubmitPayload { text, images }`，`InputAction::Submit` 的载荷）：`text` 是展开后的草稿（粘贴 chip → 全文，**图片 chip 不贡献任何字符**），`images` 是图片 chip 的载荷列表、按**出现序**（行序 × 段序）取走（不是克隆）。两者分开是因为消息本身就这么承载（后端 content / media 是两个字段，且不承诺交错顺序）；`ImagePayload.label` 是**草稿内号码**的 chip 文案（纯展示，不上传），消息侧（pending / 历史 / 回填）各自按自己的口径重建标签——见「消息里的图片」一节。
 
 **渲染与换行**：chip 按 accent 绘制（键盘被接管的 ghost 态随草稿一起变 dim），周围文本不受影响。换行**永不切开 chip**：放不下时整块换到下一视觉行（比整行还宽时溢出该行、由 widget 裁剪——终端窄到装不下标签时仍然看得见它是什么）。`text()`（草稿指纹、命令解析、选区复制）给出屏幕上的 chip 文本，提交的那一刻由 `expand_and_get_text` 换成 payload。
 
@@ -189,7 +190,7 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **图片：入队 → 压缩 → chip（单并发流水线）**。`App::on_clipboard_image` 把字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张），队列非空且没有在飞的压缩时取队首、**move** 进 `AppIntent::CompressClipboardImage { bytes, options }`（`options` 来自 `paste.image.*`，入队那一刻取，越界值已夹紧）。runner 在**阻塞池**上跑 `util/image_compress`（解码 / 白底 flatten / 长边缩放 / JPEG + 预算循环），结果经 `FetchPayload::ClipboardImage` 回到 `App::on_clipboard_compressed`：成功 → `input.insert_image`（chip 号码 = 插入序 = 粘贴序），失败 → warning toast（`Image dropped: <原因>`）。**一次只压一张**不是保守而是顺序契约（并发压完的到达序不确定，号码就会跳序）；**成功不 toast**（chip 出现本身就是反馈，与文本粘贴一致）。这条回执**不属于任何会话**：`handle_fetch_result` 在会话守卫**之前**分派它——丢掉它会让「在飞」永远为真，之后所有粘贴都不落地。
 
-chip 的文案是**契约**（单测钉在 `ui/input_area/image.rs`）：`[Image #N W×H SIZE]`，其中 `W×H` 与 `SIZE` 取的都是**压缩后**的产物（那才是真正发出去的字节；`SIZE` 用紧凑记法 `512B` / `384KB` / `1.0MB`，永不写 `1024KB`）。渲染与粘贴 chip 完全同款：accent 上色、行内、整块不切开、ghost 态随草稿一起 dim。
+chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标签行共用一份实现，`util/format.rs::image_label`；形状断言钉在那里，chip 侧钉在 `ui/input_area/image.rs`），其中 `W×H` 与 `SIZE` 取的都是**压缩后**的产物（那才是真正发出去的字节；`SIZE` 用紧凑记法 `512B` / `384KB` / `1.0MB`，永不写 `1024KB`）。渲染与粘贴 chip 完全同款：accent 上色、行内、整块不切开、ghost 态随草稿一起 dim。
 
 | 关注点 | 位置 |
 |---|---|
@@ -211,7 +212,94 @@ chip 的文案是**契约**（单测钉在 `ui/input_area/image.rs`）：`[Image
 
 **不做的事**：不查 DECRQM 探测支持性（忽略模式集的终端本就不受影响）；不做终端无确认弹窗之外的授权流程（OTP 由 event 自带，`clipboard_read=ask` 下也免弹窗）；不做「一次粘贴多 item」的强承诺（尽力：分片与多 event 队列处理，队列满了才丢弃并记 WARN）。
 
-**待真机确认项**（headless 测不了，验收清单必过）：macOS 侧 listing 的 MIME 名称按 `UTType.preferredMIMEType` 推断应是标准 MIME（`image/png` 等），需在 Ghostty 实机确认（截图 / 浏览器复制图片两种来源）；确认 `Cmd+V` 文本与图片各一次的行为、以及图片字节与剪贴板一致。
+**待真机确认项**见文末「真机验收清单」的 D 节：macOS 侧 listing 的 MIME 名称按 `UTType.preferredMIMEType`
+推断应是标准 MIME（`image/png` 等），需在 Ghostty 实机确认（截图 / 浏览器复制图片两种来源）；确认 `Cmd+V`
+文本与图片各一次的行为、以及图片字节与剪贴板一致。
+
+## 消息里的图片：正文之后的标签行
+
+发出去（`pending`）与重放（resume / `SyncSession`）的用户消息，正文之后一行一张地渲染图片标签：
+`[Image #1 1024×768 384KB]`——与 composer 的 chip **同一套记法**（`util/format.rs::image_label`），
+但号码是**消息内**的 1-based 序号（按媒体在消息里的顺序），**不是**草稿里的 chip 号码：重放只有媒体列表、
+没有草稿号码，重编号让 resume 前后同一条消息长得一样（删过 chip 时最明显）。草稿号码与消息号码是两套
+自洽的口径，各自记在 `ui/input_area/image.rs` / `ui/chat_view/media.rs`。
+
+| 关注点 | 位置 |
+|---|---|
+| 显示文本（正文 + 标签行）与两侧标签构造（活体 `CompressedImage` / 重放 `MediaRef`） | `crates/wing/src/ui/chat_view/media.rs`（唯一一份；无图片时**恒等**返回正文） |
+| 历史投影里的 `media` 解析（宽容：缺省 / `null` / 坏条目 / 非数组都不炸整条记录） | `crates/wing/src/protocol/history.rs::SessionMessage.media` |
+| 重放路径（`role=user` → cell） | `crates/wing/src/app/replay.rs` |
+| pending 入队时的显示文本定格 | `ChatView::push_pending`（`ui/chat_view/model.rs`） |
+
+**三条路径一段文本**：本客户端发出去的消息（pending → `promote` 原样搬进历史）、重连 / resume 的
+重放、以及纯图消息（正文为空）——都走 `text_with_labels`。无 media 的消息**恒等**（cell 的文本就是
+正文），这是「与从前逐字节一致」的落点；坏掉的媒体条目只花掉一行标签，不花掉整条消息。
+样式上标签行走消息自身的颜色（pending 是 dim、历史是正常色），**不单列 accent**：cell 的文本是单一
+样式的 `String`，要分色就得把「哪几行是标签」带进 `ChatCell`（而 `ChatCell::UserMessage(String)` 的
+形状正是 frame / viewport / selection 四处特殊处理的前提）。形态（括号 / `Image` / `#N` / `W×H` / 紧凑
+字节记法）与 chip 逐字一致——对齐的是形状。
+
+## 发送失败 / 被拒：把内容还给草稿
+
+草稿在提交那一刻就清了，内容只在 `pending` 队列里；所以**每一条失败路径都要把内容放回去**，否则用户
+刚写的字与刚贴的图就没了。`pending` 条目因此携带**提交产物原件**（`Submission { content, images }`，
+`ChatView::push_pending`），失败时 `ChatView::take_pending` 出队并交回原件，`App::restore_failed_send`
+写回 composer + warning toast：
+
+| 失败路径 | 触发点 | 行为 |
+|---|---|---|
+| 网关断连（transport 为 None） | `runner::send_user_message` | 不上传不发送 → 回填 + `Not sent — gateway disconnected; draft restored` |
+| 上传失败 | 同上（`upload_media` 出错） | 整条不发（**不发送半截**：少一张图的引用列表会被当成完整输入）→ 回填 + `Image upload failed: …; draft restored` |
+| WS 发送失败 | 同上 | 回填 + `Send failed: …; draft restored` |
+| **服务端拒绝** | `WingEvent::Error` 携带的 `request_id` 命中本地 pending（网关对失败的 `ClientRequest` 帧回填客户端的 `request_id`） | 取回 + 回填 + toast；条目**已出队**，随后 `done` 的兜底提升绝不把它当「已发送」 |
+
+**回填是纯数据恢复**：只写 composer 与 toast——不 push intent（不重发、不重复上传）、不往 chat 写 cell
+（内容回到草稿，不该同时在历史里显示一遍；这与**打断**路径刻意相反：打断用 `discard_pending` 留下一条
+struck-through 的 cell，因为那内容没有回到草稿）。空草稿走 `set_text` 精确还原；草稿里已经有东西
+（消息在飞的那几秒用户又打了字 / 粘了图）时**追加在整份草稿末尾**（`move_draft_end` + `insert_str`）——
+`set_text` 的既定语义是替换整份草稿、连它的 chip 一起丢，那会吃掉用户刚写的东西。图片用
+`insert_image` 重新入册（号码从头计，与「清空草稿即重编号」一致）。
+
+**关联不到 pending 的 `error` 什么都不做**：turn 级失败（LLM 报错等）的 `request_id` 是后端新生成的
+uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到任何条目，行为与从前逐字相同。
+
+## 真机验收清单（图片粘贴链路，最终版）
+
+人工过一遍（headless 测不了：真终端 + 真剪贴板 + 真模型）。环境：**Ghostty 1.3.1+**（本地或 SSH 同款）。
+
+**A. 粘贴与 chip（05）**
+
+1. 截图到系统剪贴板 → `Cmd+V`：草稿里出现 accent 色的 `[Image #1 1024×768 384KB]`（数字 / 尺寸 / 大小以真实截图为准），
+   光标停在 chip 之后，**无 toast**。
+2. 再粘一张 → `[Image #2 …]` 追加在光标处；`←/→` 一步跨过整块；chip 尾 `Backspace` / 首 `Delete` 整块删除（号码不复用）。
+3. 长文本粘贴仍是 `[Pasted text #N +M lines]`（与图片 chip 互不干扰）；`Esc` 清草稿后 chip 与图片一起消失。
+
+**B. 发送与模型读图（06 + 07）**
+
+4. 草稿里打几个字（或纯图）→ `Enter`：pending 气泡显示正文 + `[Image #1 …]` 标签行（dim）；
+   模型收到图（让它描述图片内容 / 读图上的文字）。
+5. 多张：一次消息带 2–3 张，模型按提交顺序提到它们；`/clear` + 图 → 见到
+   `Image dropped: /clear takes no image` 的 info toast。
+6. 发送后 `resume`（`/session` 切走再切回，或重启 TUI）：历史里那条消息仍带 `[Image #1 …]` 标签行，
+   **号码与 pending 时一致**（消息内 1-based）。
+
+**C. 失败与回填（07）**
+
+7. 断开网关（`wing stop` 或杀掉进程）后 `Enter`：warning toast `Not sent — gateway disconnected; draft restored`，
+   文本与图片 chip **都在草稿里**（图片可再删）。
+8. 上传失败：把**网关**的 `images.max_bytes`（不属于 TUI 配置，默认 4.5 MiB）调到比压缩产物小
+   （如 `1024`，前端 `paste.image.max_bytes` 保持默认）再粘一张截图 → 上传 400：整条不发（无半截消息），
+   内容回填 + `Image upload failed: …; draft restored`。
+9. 消息在飞的那几秒里往草稿里打字：失败后新写的内容**没有被覆盖**，失败的消息接在末尾。
+
+**D. 终端协议与退出（04）**
+
+10. 配置不可用 → 走完首次运行向导 → 主 TUI 里按键正常（B1 命中路径）；退出后 shell 输入正常（无残留读者）。
+11. `Shift/Option` 原生拖选、滚轮、面板键位手感无变化。
+12. tmux 内确认图片粘贴不可用（登记限制）、文本粘贴照旧；非 Ghostty 的 kitty 终端预期同源可用（未实测）。
+
+**待实机核对**：macOS 侧 listing 的 MIME 名称（推断为标准 MIME，`image/png` 等）；截图与浏览器「复制图片」
+两种来源的 listing 差异；SSH 场景同一流程（协议走 pty，预期同效，未实测）。
 
 ## 链接渲染与单击打开（`tui-link-open`）
 

@@ -28,6 +28,7 @@ use crate::shared::panels::picker::ModelPanel;
 use crate::shared::tips::full_text as tips_full_text;
 use crate::ui::cells::tool_call::truncate_by_chars;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::chat_view::Submission;
 use crate::ui::input_area::ImagePayload;
 use crate::ui::input_area::SubmitPayload;
 use crate::ui::popup::command::PopupAction;
@@ -253,23 +254,77 @@ impl App {
         }
         // The message only moves up into chat history when the
         // model actually receives it (user_message_accepted). Until then it
-        // queues in the pending area below in-flight streaming output.
+        // queues in the pending area below in-flight streaming output — and
+        // carries the submission itself, so a failure can hand it back to the
+        // composer (see `restore_failed_send`).
         let request_id = crate::protocol::generate_request_id();
-        self.chat
-            .push_pending(request_id.clone(), payload.text.clone());
+        let images: Vec<_> = payload
+            .images
+            .into_iter()
+            .map(ImagePayload::into_image)
+            .collect();
+        // 提交产物随 pending 条目一起留下（正文 + 图片各存一份）：气泡用它拼显示文本，
+        // 失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），换来「被拒 /
+        // 失败之后内容还在用户手里」。
+        self.chat.push_pending(
+            request_id.clone(),
+            Submission {
+                content: payload.text.clone(),
+                images: images.clone(),
+            },
+        );
         self.push_intent(AppIntent::SendMessage {
             content: payload.text,
             tool_call_id: None,
             request_id,
-            // 展示标签留在前端（07 的 pending / 历史行）；上传只要图片本身。
-            images: payload
-                .images
-                .into_iter()
-                .map(ImagePayload::into_image)
-                .collect(),
+            // 上传只要图片本身（标签是纯展示）。
+            images,
         });
         self.turn.usage = TurnUsage::default();
         true
+    }
+
+    /// 一条发不出去的用户消息：从 pending 队列取回产物、还给草稿、提示原因。
+    ///
+    /// 三条发送失败路径（上传 / WS / 断连）与服务端拒绝共用这里——共同点是草稿在提交
+    /// 时就清了，内容只在 pending 里。**纯数据恢复**：只写 composer 与 toast，不 push
+    /// intent、不碰 chat（不重发、不重复上传）。
+    ///
+    /// 条目已经不在队列里（被打断丢弃 / 已提升）⇒ 只提示原因：内容要么已经在历史里
+    /// 看得见，要么由那条路径自己解释过了。
+    pub(super) fn restore_failed_send(&mut self, request_id: &str, reason: &str) -> bool {
+        let Some(submission) = self.chat.take_pending(request_id) else {
+            self.show_toast(Toast::warning(
+                reason.to_string(),
+                std::time::Duration::from_secs(3),
+            ));
+            return false;
+        };
+        self.restore_draft(submission);
+        self.show_toast(Toast::warning(
+            format!("{reason}; draft restored"),
+            std::time::Duration::from_secs(3),
+        ));
+        true
+    }
+
+    /// 把一份提交产物放回草稿：文本 + 图片 chip。
+    ///
+    /// 空草稿走 `set_text`（提交时的原文精确还原）；草稿里已经有内容（消息在飞的那几
+    /// 秒里用户又打了字 / 粘了图）时**追加在末尾**——`set_text` 的既定语义是替换整份
+    /// 草稿、连同它的 chip 一起丢，那会吃掉用户刚写的东西。
+    pub(super) fn restore_draft(&mut self, submission: Submission) {
+        if self.input.is_empty() {
+            self.input.set_text(&submission.content);
+        } else {
+            self.input.move_draft_end();
+            if !submission.content.is_empty() {
+                self.input.insert_str(&format!("\n{}", submission.content));
+            }
+        }
+        for image in submission.images {
+            self.input.insert_image(image);
+        }
     }
 
     /// Route `text` through the command table.

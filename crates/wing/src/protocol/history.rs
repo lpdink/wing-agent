@@ -10,7 +10,8 @@
 //! replaced (in-place shadow structs / raw `Value` sniffing): missing optional
 //! fields default, `null` optional fields count as absent, unknown fields are
 //! ignored (forward tolerant), and a payload that is not a Message projection
-//! fails to decode — callers skip it.
+//! fails to decode — callers skip it. One field goes further on purpose:
+//! malformed `media` entries never fail the record (see [`media_refs`]).
 //!
 //! Decode-only on purpose: serializing a mirror would drop unknown fields and
 //! change key order, which would break `wing tail --json --type all` (raw
@@ -18,6 +19,8 @@
 //! typed view.
 
 use serde::Deserialize;
+
+use super::MediaRef;
 
 /// One tool call on a history message.
 ///
@@ -70,6 +73,43 @@ pub struct SessionMessage {
     pub tool_calls: Option<Vec<SessionToolCall>>,
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    /// The pictures the message carries (`serialize_message` projects
+    /// `Message.media`). Always a list — see [`media_refs`] for the decoding
+    /// rules (absent / `null` / a malformed entry all degrade to "fewer
+    /// pictures", never to a dropped record).
+    #[serde(default, deserialize_with = "media_refs")]
+    pub media: Vec<MediaRef>,
+}
+
+/// Decode the `media` field **without ever failing the record**.
+///
+/// The pictures are a rendering adornment: a malformed entry must cost one
+/// label line, not the whole message (the backend's model layer is tolerant
+/// for the same reason — a corrupt history record must not break the load).
+/// Absent (never reaches here — `#[serde(default)]`), `null` and a non-array
+/// value all mean "no pictures"; a bad entry inside the array is skipped with
+/// a warning, the rest are kept.
+fn media_refs<'de, D>(deserializer: D) -> Result<Vec<MediaRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Array(entries) = value else {
+        if !value.is_null() {
+            tracing::warn!(value = %value, "history media is not an array, ignoring");
+        }
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| match serde_json::from_value::<MediaRef>(entry) {
+            Ok(media) => Some(media),
+            Err(err) => {
+                tracing::warn!(error = %err, "skipping malformed history media entry");
+                None
+            }
+        })
+        .collect())
 }
 
 impl SessionMessage {
@@ -234,6 +274,86 @@ mod tests {
         .unwrap();
         assert_eq!(msg.role, "tool");
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc1"));
+    }
+
+    #[test]
+    fn media_decodes_the_full_projection() {
+        // The shape `serialize_message` emits: `Message.media` dumped field by
+        // field (`name` is present-and-null when there is none).
+        let msg = SessionMessage::from_json(&json!({
+            "role": "user",
+            "content": "看这两张",
+            "media": [
+                {"id": "a".repeat(64), "mime": "image/jpeg", "bytes": 393216,
+                 "width": 1024, "height": 768, "name": null},
+                {"id": "b".repeat(64), "mime": "image/png", "bytes": 7,
+                 "width": 8, "height": 8, "name": "shot.png"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(msg.media.len(), 2, "顺序即消息内顺序");
+        assert_eq!(msg.media[0].mime, "image/jpeg");
+        assert_eq!(msg.media[0].bytes, 393_216);
+        assert_eq!((msg.media[0].width, msg.media[0].height), (1024, 768));
+        assert!(msg.media[0].name.is_none());
+        assert_eq!(msg.media[1].name.as_deref(), Some("shot.png"));
+    }
+
+    #[test]
+    fn media_absent_null_and_empty_all_mean_no_pictures() {
+        let absent = SessionMessage::from_json(&json!({"role": "user", "content": "hi"})).unwrap();
+        assert!(absent.media.is_empty(), "缺省 = 没有图片");
+
+        let null = SessionMessage::from_json(&json!({
+            "role": "user", "content": "hi", "media": null
+        }))
+        .unwrap();
+        assert!(null.media.is_empty(), "null = 没有图片");
+
+        let empty = SessionMessage::from_json(&json!({
+            "role": "user", "content": "hi", "media": []
+        }))
+        .unwrap();
+        assert!(empty.media.is_empty(), "空数组 = 没有图片");
+    }
+
+    #[test]
+    fn a_malformed_media_entry_costs_one_picture_not_the_record() {
+        // A picture is a rendering adornment: the record must survive the entry
+        // (the backend's model layer is tolerant for the same reason).
+        let msg = SessionMessage::from_json(&json!({
+            "role": "user",
+            "content": "mixed",
+            "media": [
+                {"id": "a".repeat(64), "mime": "image/jpeg", "bytes": 1,
+                 "width": 2, "height": 3},
+                {"mime": "image/png", "bytes": 1, "width": 2, "height": 3},
+                {"id": "b".repeat(64), "mime": "image/png", "bytes": "lots",
+                 "width": 2, "height": 3},
+                "not an object",
+                {"id": "c".repeat(64), "mime": "image/webp", "bytes": 5,
+                 "width": 4, "height": 6}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(msg.content, "mixed", "坏条目不影响记录本身");
+        assert_eq!(msg.media.len(), 2, "好的条目照旧（顺序不变）");
+        assert_eq!(msg.media[0].mime, "image/jpeg");
+        assert_eq!(msg.media[1].mime, "image/webp");
+    }
+
+    #[test]
+    fn a_non_array_media_value_is_no_pictures() {
+        // Not a shape the gateway sends — but a corrupt record must degrade to
+        // "no pictures" rather than to "no message".
+        for value in [json!("image/png"), json!({"id": "x"}), json!(42)] {
+            let msg = SessionMessage::from_json(
+                &json!({"role": "user", "content": "hi", "media": value}),
+            )
+            .unwrap();
+            assert!(msg.media.is_empty(), "{value} 不炸也不产出图片");
+            assert_eq!(msg.content, "hi");
+        }
     }
 
     #[test]

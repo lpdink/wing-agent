@@ -709,11 +709,10 @@ pub async fn execute_intent(
 /// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
 /// （真实 stdout），单测造不出来（同 `apply_update_session` 的抽取理由）。
 ///
-/// **失败契约（本步骤版）**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
-/// 少一张图的引用列表会被当成完整输入），丢掉 pending 条目 + warning toast；
+/// **失败契约**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
+/// 少一张图的引用列表会被当成完整输入），并把提交产物**还给草稿**（`restore_failed_send`
+/// 从 pending 队列取回文本与图片 chip）+ warning toast；
 /// 已经上传成功的图留在存储里（政策：媒体永不删除）。
-/// **过渡点（07 升级）**：失败时内容 / 图片不回填草稿。回填需要在 App 侧留存提交产物，
-/// 届时把这里改成返回失败原因（调用点只有 runner 一处）。
 pub(super) async fn send_user_message(
     app: &mut App,
     transport: Option<&Transport>,
@@ -723,13 +722,9 @@ pub(super) async fn send_user_message(
     images: Vec<CompressedImage>,
 ) {
     let Some(transport) = transport else {
-        // Gateway connection lost — the intent is discarded, so the
-        // pending entry must not linger on screen.
-        app.chat.remove_pending(&request_id);
-        app.show_toast(Toast::warning(
-            "Not sent — gateway disconnected".to_string(),
-            std::time::Duration::from_secs(3),
-        ));
+        // Gateway connection lost — nothing left the client, so the content
+        // goes back to the composer.
+        app.restore_failed_send(&request_id, "Not sent — gateway disconnected");
         return;
     };
 
@@ -741,11 +736,7 @@ pub(super) async fn send_user_message(
             Ok(refs) => Some(refs),
             Err(e) => {
                 tracing::warn!("image upload failed: {e}");
-                app.chat.remove_pending(&request_id);
-                app.show_toast(Toast::warning(
-                    format!("Image upload failed: {e}"),
-                    std::time::Duration::from_secs(3),
-                ));
+                app.restore_failed_send(&request_id, &format!("Image upload failed: {e}"));
                 return;
             }
         }
@@ -763,12 +754,8 @@ pub(super) async fn send_user_message(
         .await
     {
         tracing::error!("failed to send message: {e}");
-        // Never left the client — drop from the pending queue.
-        app.chat.remove_pending(&request_id);
-        app.show_toast(Toast::warning(
-            format!("Send failed: {e}"),
-            std::time::Duration::from_secs(3),
-        ));
+        // Never left the client — the submission goes back to the composer.
+        app.restore_failed_send(&request_id, &format!("Send failed: {e}"));
     }
 }
 

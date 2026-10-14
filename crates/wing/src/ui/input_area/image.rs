@@ -10,9 +10,13 @@
 //!
 //! * the **label text** — `[Image #N W×H SIZE]`, with the compressed picture's
 //!   own dimensions and byte count (that is what really leaves the machine, and
-//!   it is what tells the user how much of the budget the picture costs);
+//!   it is what tells the user how much of the budget the picture costs). The
+//!   notation itself is shared with the message rows ([`crate::util::format`]):
+//!   one spelling, two callers;
 //! * the **number** — monotonic, never reused, and the chip's identity, exactly
-//!   like a paste chip's (clearing the draft starts the count over).
+//!   like a paste chip's (clearing the draft starts the count over). It is the
+//!   *draft's* number; a message numbers its pictures by position instead
+//!   (`crate::ui::chat_view::media`).
 //!
 //! The label is computed once, at insertion, and cached next to the payload: it
 //! is read on every frame, keystroke and hit test, while the picture behind it
@@ -20,6 +24,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::util::format;
 use crate::util::image_compress::CompressedImage;
 
 use super::InputArea;
@@ -97,33 +102,10 @@ impl Images {
 /// together), so it only ever shows up in a defensive read.
 const CHIP_WITHOUT_IMAGE: &str = "[Image #?]";
 
-/// The label an image chip shows: `[Image #N W×H SIZE]` (`W×H` the size the
-/// JPEG was encoded at, `SIZE` its byte count — see [`chip_size`]).
+/// The label an image chip shows — the shared notation ([`format::image_label`])
+/// under the draft's own numbers (see [`Images`]).
 fn chip_label(number: ImageNumber, image: &CompressedImage) -> String {
-    format!(
-        "[Image #{number} {}×{} {}]",
-        image.width,
-        image.height,
-        chip_size(image.bytes.len())
-    )
-}
-
-/// The compact byte notation the label carries: `512B`, `384KB`, `1.0MB`.
-///
-/// Deliberately not the CLI's general formatter (`util::format`): the label is
-/// a fixed-width chip, and the contract is this shape. KB is rounded to the
-/// nearest whole one and never rounds *up* into `1024KB` — that reads as
-/// `1.0MB`.
-fn chip_size(bytes: usize) -> String {
-    const KIB: usize = 1024;
-    const MIB: usize = KIB * 1024;
-    if bytes < KIB {
-        format!("{bytes}B")
-    } else if bytes + KIB / 2 < MIB {
-        format!("{}KB", (bytes + KIB / 2) / KIB)
-    } else {
-        format!("{:.1}MB", bytes as f64 / MIB as f64)
-    }
+    format::image_label(number, image.width, image.height, image.bytes.len() as u64)
 }
 
 impl InputArea {
@@ -164,6 +146,8 @@ mod tests {
         }
     }
 
+    /// 标签的**形状**契约（单测钉住用户看到的文案；字节记法的边界在
+    /// `util::format`，那是两处共用的那一份）。
     #[test]
     fn the_label_carries_the_number_the_size_and_the_bytes() {
         assert_eq!(
@@ -175,24 +159,6 @@ mod tests {
             "[Image #12 800×600 1.0MB]"
         );
         assert_eq!(chip_label(3, &picture(8, 8, 7)), "[Image #3 8×8 7B]");
-    }
-
-    #[test]
-    fn the_byte_notation_covers_its_boundaries() {
-        assert_eq!(chip_size(0), "0B");
-        assert_eq!(chip_size(7), "7B");
-        assert_eq!(chip_size(1023), "1023B");
-        assert_eq!(chip_size(1024), "1KB");
-        assert_eq!(chip_size(1536), "2KB", "rounded to the nearest KB");
-        // 非整除：四舍五入，不是向上取整（ceil 会给 2KB / 3KB）。
-        assert_eq!(chip_size(1025), "1KB");
-        assert_eq!(chip_size(2047), "2KB");
-        assert_eq!(chip_size(393_216), "384KB");
-        // Just under a mebibyte rounds to 1024KB *only* if that were allowed —
-        // the branch hands it to MB instead, so the label never reads `1024KB`.
-        assert_eq!(chip_size(1_048_575), "1.0MB");
-        assert_eq!(chip_size(1_048_576), "1.0MB");
-        assert_eq!(chip_size(1_572_864), "1.5MB");
     }
 
     #[test]
