@@ -5,16 +5,18 @@
 **请求期图片投影**（字节高水位 + 量子批量驱逐；计数驱逐默认关闭）与两条协议线格式。
 
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
-`libs/core/wing/tools/builtin/read_image.py`；整机证据 `libs/wing-probe/scenarios/test_read_image.py`
-（15 条）+ `test_media_layout.py`（3 条存储布局）+ `test_user_media.py`（8 条用户贴图链路），本文末列。
+`libs/core/wing/gateway/routes/session.py`（上传端点）、`libs/core/wing/tools/builtin/read_image.py`；
+整机证据 `libs/wing-probe/scenarios/`：`test_read_image.py`（15 条）/ `test_media_layout.py`（3 条存储布局）
+/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（7 条上传端点），本文末列。
 本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
 
 ```
-用户贴图（TUI composer → WS ClientRequest.media）        ReadImage(path)（模型发起）
-   │ 仅引用上行（字节此前已写入会话媒体目录）              │ magic bytes 判格式（png/jpeg/webp/gif）
-   │                                                      │ 能力门禁：未声明 vision → ToolError
+用户贴图（TUI 粘贴 → 上传字节 → composer 引用）           ReadImage(path)（模型发起）
+   │ ① POST /api/session/media（原始字节）→ MediaRef      │ magic bytes 判格式（png/jpeg/webp/gif）
+   │    校验（非空/上限/格式/尺寸）→ id=sha256 → 落盘     │ 能力门禁：未声明 vision → ToolError
+   │ ② 仅引用上行（WS / send 的 media 数组）              │
    ▼                                                      ▼
 消息入口闸门（id 格式 + media_exists）                 SessionStore.write_media(sid, id, bytes)
    │ 幽灵引用 → 400 / error 帧，不进历史                   │ <sessions-root>/<sid>/media/<id>，id=sha256
@@ -109,8 +111,16 @@ class Message(ChainNode):
 用户侧整条入口的服务端部分（前端 composer / 终端协议 / 压缩见前端侧文档）。语义由总任务书
 D5/D6/D7 拍板：
 
-- **上行链路**：字节先入会话媒体目录（写入端点 `POST /api/session/media` 由后续步骤交付；在那之前
-  唯一写口是 `ReadImage` 与测试预置），客户端把 refs 放进消息——WS `ClientRequest.media` 或 HTTP
+- **上传（字节侧入口）**：`POST /api/session/media?session_id=<sid>[&name=<n>]`，body = **原始图片字节**
+  （非 JSON / 非 multipart；`name` 是展示素材，缺省 / 空串 = 不记录，建议给 basename）。校验顺序：
+  会话存在（否则 404；**不隐式建会话**）→ body 非空 → `≤ images.max_bytes` → magic bytes ∈
+  {png, jpeg, webp, gif}（`sniff_image_mime`）→ 头部尺寸可解析（`image_dimensions`）。闸门是纯函数
+  （`wing.media.upload_image_ref`：不碰存储、不依赖 config——上限由调用方传入），**落盘是最后一步**：
+  任何失败都**零副作用**（不建目录、不写对象）。id = 字节的 sha256 → `store.write_media`（内容寻址、
+  幂等：同字节二次上传返回同一 id 且不重写对象）。响应 `{"ok":true,"media":{id,mime,bytes,width,height,name?}}`，
+  其中 `media` 与消息 `media` 数组的元素同形——可直接回投。**不水合**已逐出会话（`/api/session/tag`
+  同款：上传一张图不该把 inactive 会话翻成活跃，见 `docs/dev/http-api.md`）。
+- **引用（引用侧入口）**：客户端把 refs 放进消息——WS `ClientRequest.media` 或 HTTP
   `POST /api/session/send` 的 `media`（两条等价路径共用同一透传链：`WingRuntime.post → SM._post →
   Session.post → Agent.post → Inbox.post → Message(media=…)`）。字段缺省 / null = 无媒体——旧客户端
   / 旧帧与引入 media 之前**逐字节一致**。
@@ -313,6 +323,9 @@ providers:
 - 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、`GET /api/media/{id}` 端点、TUI/VSCode 像素渲染
   （kitty/iTerm2 协议、webview）不在本期；用户侧入口的**服务端**链路见「用户贴图」一节，前端
   （composer 图片 chip / 终端协议 / 压缩）在前端侧交付。
+- **上传 body 没有服务级大小上限**：`≤ images.max_bytes` 的判定发生在 `await request.body()` **之后**
+  （原始字节先收进内存）——超限请求会被 400 拒绝，但字节已经过了一遍内存。熔断点该是 ASGI 服务级的
+  body 上限（中间件 / 反代），而不是这一个端点自己补一条口径；与既有 JSON 端点同源（它们也先整包收）。
 - **贴图引用的元数据不校验内容一致性**：入口闸门只认 id 格式 + mime + 对象存在（安全面与"线格式
   可用性"）；ref 里的 `bytes` / `width` / `height` 是提示性元数据，只参与请求期驱逐启发式——服务端
   不读字节复核（要读字节就意味着每次发消息都全量哈希，代价与收益不成比例）。
@@ -355,8 +368,21 @@ providers:
 | `test_legacy_pool_object_is_materialized_on_load` | 对象搬到老布局 `<root>/.media/<id[:2]>/<id>` → 逐出内存态 → resume：**发消息之前**对象已出现在 `<sid>/media/`（加载期物化），老对象保留；请求体 image part 逐字节 == 原文件 |
 | `test_fork_copies_media_into_child` | fork 后子会话目录有独立副本（inode 不同）；删掉源会话副本（且无老池）后子会话请求仍成功——子会话自包含 |
 
+上传端点（`libs/wing-probe/scenarios/test_session_media_upload.py`，03 upload_endpoint；响应 / 文件系统 /
+假 Provider 请求 / history 四个取证面）：
+
+| 场景 | 断言要点 |
+|------|----------|
+| `test_upload_returns_facts_and_persists_object` | 响应 `media` 逐字段 == 文件事实（sha256 id / mime / bytes / 尺寸 / name）；对象落 `<sid>/media/<id>` 且字节全等、目录只此一份；HTTP 留档显示走的是**原始字节体**（非 JSON body） |
+| `test_reupload_of_same_bytes_is_idempotent` | 同字节二次上传 → 同一 id；对象 inode / mtime 不变（不重写）、目录仍一份 |
+| `test_rejected_uploads_leave_no_trace` | 空 body / 非图 / 头部截断 → 400（文案各自可辨）；`<sid>/media/` **不存在**；随后合法上传照常成功（闸门不把会话弄坏） |
+| `test_oversize_upload_is_rejected_by_config_limit` | `images={"max_bytes": 150}`：200 B 图 → 400（detail 含 `image too large` + `images.max_bytes`）、目录对象数不增；同环境小图照常上传 |
+| `test_ghost_session_upload_is_404` | 幽灵会话 / 路径穿越式 id → 404 `session not found`，无目录残留 |
+| `test_uploaded_bytes_reach_the_model_request`（红线） | 上传 → 消息带 ref → 请求体 user content = [原文本, image part]、解码**逐字节 == 上传字节**；history 有引用、**无 base64**；对象仍在 |
+| `test_upload_without_name_is_referencable` | 不带 `name` → `name: null`；对象照样可被引用（`name` 不是寻址键） |
+
 用户贴图链路（`libs/wing-probe/scenarios/test_user_media.py`，02 message_chain；对象由场景预置进
-`<sid>/media/<id>`，03 的上传端点落地后同一链路改由上传写入）：
+`<sid>/media/<id>`——上传端点落地后，同一存储布局的写入侧由上面的文件走真上传覆盖）：
 
 | 场景 | 断言要点 |
 |------|----------|
@@ -374,7 +400,8 @@ providers:
 ```bash
 uv run --no-sync pytest libs/wing-probe/scenarios/test_read_image.py \
     libs/wing-probe/scenarios/test_media_layout.py \
-    libs/wing-probe/scenarios/test_user_media.py -q --timeout=120
+    libs/wing-probe/scenarios/test_user_media.py \
+    libs/wing-probe/scenarios/test_session_media_upload.py -q --timeout=120
 make test-probe        # 全量（含基础设施自测）
 ```
 

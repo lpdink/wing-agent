@@ -24,6 +24,7 @@ from wing.gateway.protocol import (
     ForkSessionRequest,
     ForkSessionResponse,
     InterruptRequest,
+    MediaUploadResponse,
     OkResponse,
     ReleaseRequest,
     ReleaseResponse,
@@ -233,6 +234,45 @@ async def send_message(
         # "客户端的错"（500 让它带着栈进日志，而不是骗调用方去改请求）。
         raise HTTPException(status_code=400, detail=str(e))
     return SendMessageResponse(ok=True, request_id=request_id)
+
+
+# ============================================================
+# 媒体上传
+# ============================================================
+
+
+@router.post(
+    "/api/session/media",
+    response_model=MediaUploadResponse,
+    summary="上传媒体（原始字节）",
+)
+async def upload_session_media(
+    request: Request,
+    session_id: str = Query(..., description="目标 session ID"),
+    name: str | None = Query(
+        None, description="媒体展示名（建议给 basename；缺省 / 空串 = 不记录）"
+    ),
+) -> MediaUploadResponse:
+    """上传一份原始图片字节到会话媒体目录，返回可被消息引用的 ``media``。
+
+    body 是**原始字节**（不是 JSON / 不是 multipart），大小上限 = ``images.max_bytes``，
+    格式按 magic bytes 判定（png/jpeg/webp/gif）；id = 字节的 sha256，同字节重复上传返回
+    同一 id（幂等）。会话必须先存在（本端点**不隐式建会话**，也不水合已逐出的会话）。
+
+    校验（会话存在 → 字节非空 → 上限 → 格式 → 尺寸）全部发生在落盘之前：失败（400/404）
+    不产生任何存储副作用。响应里的 ``media`` 可直接作为消息的 ``media`` 元素回投。
+    """
+    server = _get_server(request)
+    data = await request.body()
+    try:
+        media = server.runtime.upload_media(session_id, data, name=name)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
+    except InvalidInputError as e:
+        # 字节不合规（空 / 超限 / 非支持格式 / 尺寸不可解析）——输入问题 → 400。
+        # 与 send 同一条窄捕获：写失败（OSError 等）是服务端故障，不在此拦。
+        raise HTTPException(status_code=400, detail=str(e))
+    return MediaUploadResponse(ok=True, media=media)
 
 
 # ============================================================

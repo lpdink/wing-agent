@@ -226,6 +226,23 @@ class DriverHttp(GatewayClient):
         """
         return await self._get("/api/tools")
 
+    async def upload_media(
+        self, session_id: str, data: bytes, *, name: str | None = None
+    ) -> dict:
+        """``POST /api/session/media``（**原始字节体**）——用户贴图的上传端点。
+
+        ``data`` 就是图片原始字节（非 JSON / 非 multipart，也不声明内容类型）；``name``
+        缺省 = 不记录展示名。非 2xx 抛 ``DriverHttpError``——负路径断言从
+        ``failure.value.call.status`` / ``.response`` 读（与其它调用同一个留档面）。
+        """
+        params: dict[str, Any] = {"session_id": session_id}
+        if name is not None:
+            params["name"] = name
+        call, payload = await self._call(
+            "POST", "/api/session/media", content=data, params=params
+        )
+        return self._as_object(call, payload)
+
     async def request(
         self,
         method: str,
@@ -269,20 +286,29 @@ class DriverHttp(GatewayClient):
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         parse_json: bool = True,
+        content: bytes | None = None,
     ) -> tuple[HttpCall, Any]:
-        """执行一次请求：留档（无论成败）→ 非 2xx 抛错。"""
+        """执行一次请求：留档（无论成败）→ 非 2xx 抛错。
+
+        ``body`` 是 JSON 体，``content`` 是**原始字节体**（互斥）——字节不进
+        ``HttpCall.body``（那是 JSON 留档），只在 ``detail`` 里记长度：图片体积
+        灌进现场转储没有信息量，只有噪声。
+        """
         started = self._clock()
         at = started - self._started_at
         response = await self._client.request(
             method.upper(),
             path,
             json=body,
+            content=content,
             params=dict(params) if params is not None else None,
             headers=dict(headers) if headers is not None else None,
         )
         duration_ms = (self._clock() - started) * 1000.0
         payload: Any = None
-        detail: str | None = None
+        detail: str | None = (
+            f"raw body: {len(content)} byte(s)" if content is not None else None
+        )
         if parse_json:
             try:
                 payload = response.json()

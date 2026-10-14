@@ -10,7 +10,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ┌─────────────────────────────┐             ┌─────────────────────────┐               ┌─────────────────────────┐
 │ Frontends（wing 二进制）    │             │ Gateway (FastAPI)       │               │ Runtime (Python)        │
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
-│ stdio（wing -p）· NDJSON    │             │ · routes/session(16)    │               │ ├ SessionManager        │
+│ stdio（wing -p）· NDJSON    │             │ · routes/session(17)    │               │ ├ SessionManager        │
 │ acp（wing acp）· ACP v1     │             │ · routes/system(6)      │               │ ├ SessionStore          │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/settings(4)    │◄──────────────│ ├ ContextManager        │
 │ 网关生命周期 · start/stop   │             │ · tools/health · ws     │               │ ├ EventBus              │
@@ -75,7 +75,7 @@ libs/core/wing/
 │   ├── llm.py                       LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall
 │   └── tool.py                      ToolError / ToolParam / Tool / ToolOutput / AgentSkill
 ├── media/                           图片媒体纯函数层包（id/格式/尺寸/信封/请求期投影）
-│   ├── facts.py                     字节 → 事实（sha256 id / mime / 尺寸 / 信封 / 估算）
+│   ├── facts.py                     字节 → 事实（sha256 id / mime / 尺寸 / 信封 / 估算 / 上传闸门）
 │   └── policy.py                    请求期投影（高水位 + 量子驱逐）+ 占位常量
 ├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析
 ├── event_bus.py                     EventBus — 全局单例事件路由
@@ -134,7 +134,7 @@ libs/core/wing/
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(16) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(17) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）

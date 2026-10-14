@@ -1,5 +1,5 @@
 # wing/media/facts.py
-"""字节 → 事实：sha256 id / mime 嗅探 / 尺寸解析 / 信封文本与尺寸估算。
+"""字节 → 事实：sha256 id / mime 嗅探 / 尺寸解析 / 信封文本与尺寸估算 / 上传字节闸门。
 
 纯函数与不可变数据：不依赖 config、不读存储、不做投影决策（投影见 ``policy``）。
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 
+from wing.common.utils import InvalidInputError
 from wing.schema import MediaRef
 
 
@@ -248,3 +249,59 @@ def encoded_len(nbytes: int) -> int:
 def estimate_image_tokens(ref: MediaRef) -> int:
     """估算一张图片占用的 token 数：``ceil(w*h/750)``（保守经验口径）。"""
     return (ref.width * ref.height + 749) // 750
+
+
+########## 上传闸门（字节 → 校验通过的引用）
+
+
+def upload_image_ref(
+    data: bytes, *, max_bytes: int, name: str | None = None
+) -> MediaRef:
+    """上传端点的字节闸门：校验一份原始图片字节并给出引用（**零存储副作用**）。
+
+    检查顺序：非空 → 尺寸上限 → magic bytes（``sniff_image_mime``）→ 头部尺寸
+    （``image_dimensions``）。前两步 O(1)（不为畸形 / 超限载荷做格式解析），格式判定
+    先于尺寸解析（尺寸按格式解析，无 mime 无从下手）。任一不过抛
+    ``InvalidInputError``（HTTP 400 语义）——调用方据此在**任何落盘之前**拒绝，
+    这就是"拒绝不产生副作用"的实现方式：本函数只读入参，不碰文件系统 / 存储。
+
+    ``max_bytes`` 由调用方传入（生效值 = 配置的 ``images.max_bytes``）：本模块不依赖
+    config。``name`` 是展示名（空串与缺省同价，归一为 None），不参与寻址——id 是内容
+    sha256，恒由字节现算，与 ``name`` 无关。
+    """
+    if not data:
+        raise InvalidInputError(
+            f"empty request body: expected image bytes ({_supported_label()}, "
+            f"detected by content)"
+        )
+    if len(data) > max_bytes:
+        raise InvalidInputError(
+            f"image too large: {format_size(len(data))} exceeds the "
+            f"{format_size(max_bytes)} per-image limit (config images.max_bytes)"
+        )
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise InvalidInputError(
+            f"not a supported image ({_supported_label()} expected; detected from "
+            f"content, not from the file extension)"
+        )
+    dims = image_dimensions(data, mime)
+    if dims is None:
+        raise InvalidInputError(
+            f"cannot read {_MIME_SHORT.get(mime, mime)} image dimensions "
+            f"(header truncated or corrupt)"
+        )
+    width, height = dims
+    return MediaRef(
+        id=media_id(data),
+        mime=mime,
+        bytes=len(data),
+        width=width,
+        height=height,
+        name=name or None,
+    )
+
+
+def _supported_label() -> str:
+    """支持格式的短名清单（``"gif/jpeg/png/webp"``，报错文案用）。"""
+    return "/".join(sorted(m.removeprefix("image/") for m in SUPPORTED_IMAGE_MIMES))

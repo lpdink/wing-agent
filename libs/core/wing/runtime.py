@@ -356,6 +356,20 @@ class WingRuntime:
         """
         return self.sm.set_session_tags(session_id, add=add, remove=remove)
 
+    def upload_media(
+        self, session_id: str, data: bytes, *, name: str | None = None
+    ) -> MediaRef:
+        """把一份媒体字节写进会话媒体目录（上传端点 `POST /api/session/media` 的用例）。
+
+        不水合会话；校验失败（``InvalidInputError``）时存储零副作用。语义见
+        :meth:`SessionManager.upload_media`。
+
+        Raises:
+            LookupError: session 不存在
+            InvalidInputError: 字节不合规（空 / 超 `images.max_bytes` / 非支持格式 / 尺寸不可解析）
+        """
+        return self.sm.upload_media(session_id, data, name=name)
+
     # ============================================================
     # Session 逐出（eviction）
     # ============================================================

@@ -27,6 +27,7 @@ from .facts import (
     is_apple_cgbi_png,
     media_id,
     sniff_image_mime,
+    upload_image_ref,
 )
 from .policy import (
     BUDGET_PLACEHOLDER,
@@ -69,4 +70,5 @@ __all__ = [
     "media_id",
     "plan_request_media",
     "sniff_image_mime",
+    "upload_image_ref",
 ]

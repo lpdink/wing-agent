@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
@@ -275,6 +276,7 @@ class StubGateway:
         app.router.add_get("/api/tools", self._tools)
         app.router.add_post("/api/session/update", self._echo)
         app.router.add_post("/api/session/release", self._echo)
+        app.router.add_post("/api/session/media", self._media)
         app.router.add_post("/api/session/boom", self._boom)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -298,6 +300,22 @@ class StubGateway:
     async def _echo(self, request: web.Request) -> web.Response:
         """回显请求体（driver 具名动作的请求形状断言用）。"""
         return web.json_response({"ok": True, "echo": await request.json()})
+
+    async def _media(self, request: web.Request) -> web.Response:
+        """回显**原始字节体**的摘要 + query（``upload_media`` 的请求形状断言用）。"""
+        raw = await request.read()
+        return web.json_response(
+            {
+                "ok": True,
+                "echo": {
+                    "session_id": request.query.get("session_id"),
+                    "name": request.query.get("name"),
+                    "has_name_param": "name" in request.query,
+                    "bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                },
+            }
+        )
 
     async def _tools(self, request: web.Request) -> web.Response:
         return web.json_response(
@@ -502,4 +520,51 @@ async def test_list_tools_reads_registry_surface(stub_gateway: StubGateway) -> N
 
     assert [tool["llm_name"] for tool in payload["tools"]] == ["Bash"], payload
     assert [(call.method, call.path) for call in http.calls] == [("GET", "/api/tools")]
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_media_posts_raw_bytes(stub_gateway: StubGateway) -> None:
+    """``upload_media``：字节**逐字节**到达端点，query 带 session_id / name。
+
+    这是 03 的 raw-body 通道：请求体不是 JSON，因此它不进 ``HttpCall.body``，
+    只在 ``detail`` 里留长度（现场转储不该被图片字节灌满）。
+    """
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+    data = b"\x89PNG\r\n\x1a\nraw-upload-payload"
+
+    response = await http.upload_media("sid-1", data, name="shot.png")
+
+    assert response == {
+        "ok": True,
+        "echo": {
+            "session_id": "sid-1",
+            "name": "shot.png",
+            "has_name_param": True,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        },
+    }, response
+    call = http.calls[0]
+    assert (call.method, call.path, call.status) == (
+        "POST",
+        "/api/session/media",
+        200,
+    )
+    assert call.body is None, "原始字节体不该进 JSON 留档"
+    assert call.detail == f"raw body: {len(data)} byte(s)", call.detail
+    assert call.params == {"session_id": "sid-1", "name": "shot.png"}, call.params
+    await http.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_media_omits_name_when_absent(stub_gateway: StubGateway) -> None:
+    """``name`` 缺省 = 不发这个 query 参数（空串与缺省在服务端同价，但不替客户端造值）。"""
+    http = DriverHttp(stub_gateway.url, started_at=0.0)
+
+    response = await http.upload_media("sid-2", b"tiny")
+
+    assert response["echo"]["name"] is None, response
+    assert response["echo"]["has_name_param"] is False, response
+    assert http.calls[0].params == {"session_id": "sid-2"}, http.calls[0].params
     await http.close()

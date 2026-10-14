@@ -33,6 +33,7 @@ from wing.common.utils import (
 )
 from wing.config import get_config
 from wing.hooks import hooks
+from wing.media import upload_image_ref
 from wing.event import (
     DeliveredEvent,
     EventTarget,
@@ -771,6 +772,36 @@ class SessionManager:
             metadata.tag_meta = mutation.tag_meta or None
             store.save_metadata(resolved_id, metadata)
         return mutation
+
+    # ── 媒体（上行字节） ─────────────────────
+
+    def upload_media(
+        self, session_id: str, data: bytes, *, name: str | None = None
+    ) -> MediaRef:
+        """把一份媒体字节写进会话媒体目录并返回引用（内容寻址，幂等）。
+
+        上传是"字节 → 存储 → 引用"的用例，落点与 `set_session_tags` 同款：**不水合**
+        会话（``_resolve_with_store`` 纯解析）——被逐出的会话不该因一次上传被换入内存
+        （`/api/session/list` 的「活跃在前」顺序契约与 `inactive` 痕迹都会被搅动）。
+        写入目标是解析出的**磁盘真名**（别名不另起一份会话目录）。id 由字节现算
+        （sha256），``name`` 只作展示素材，不参与寻址。
+
+        校验（``wing.media.upload_image_ref``：非空 / 上限 / 支持格式 / 尺寸可解析）全部
+        发生在落盘**之前**：失败抛 ``InvalidInputError``，存储零副作用（不建目录、不写
+        对象）。上限取生效配置 ``images.max_bytes``（与 ReadImage 同一口径）。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
+            InvalidInputError: 字节不合规（空 / 超上限 / 非支持格式 / 尺寸不可解析）
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise LookupError(f"Session not found: {session_id!r}")
+        resolved_id, store = resolved
+
+        ref = upload_image_ref(data, max_bytes=get_config().images.max_bytes, name=name)
+        store.write_media(resolved_id, ref.id, data)
+        return ref
 
     # ============================================================
     # 外部方法：逐出（eviction）

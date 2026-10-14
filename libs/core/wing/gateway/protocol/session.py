@@ -242,6 +242,20 @@ class SendMessageResponse(BaseModel):
     request_id: str = Field(description="请求 ID，用于前端关联 agent 响应")
 
 
+class MediaUploadResponse(BaseModel):
+    """POST /api/session/media 响应——入库的媒体引用。
+
+    ``media`` 与消息 ``media`` 数组的元素**同一形状**（``MediaRef``）：客户端可以把它
+    原样放进 `/api/session/send` / WS `ClientRequest.media`，无需字段搬运。``name``
+    缺省（未给 / 空串）时为 null。
+    """
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    media: MediaRef = Field(
+        description="入库的媒体引用（id / mime / bytes / width / height / name）"
+    )
+
+
 class SessionListResponse(BaseModel):
     """session 列表响应。"""
 
