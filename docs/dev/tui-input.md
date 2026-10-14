@@ -235,6 +235,12 @@ chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标�
 | 重放路径（`role=user` → cell） | `crates/wing/src/app/replay.rs` |
 | pending 入队时的显示文本定格 | `ChatView::push_pending`（`ui/chat_view/model.rs`） |
 
+**已知边界（合并轮次下的号码漂移）**：后端在队列 / steer 窗口里把多份提交合并成**一条**历史记录
+（正文拼接、media 按提交序 concat）时，活体视图按「每份提交各自从 1 编号」渲染（两个 pending 气泡各一份
+`[Image #1 …]`），resume 后重放同一条记录给的是「消息内序号」（`[Image #1 …]`、`[Image #2 …]`）——
+同一段内容重启前后长得不一样。纯展示、链上无数据影响（号码不是寻址键），登记为已知边界，
+不为对齐而重编号。
+
 **三条路径一段文本**：本客户端发出去的消息（pending → `promote` 原样搬进历史）、重连 / resume 的
 重放、以及纯图消息（正文为空）——都走 `text_with_labels`。无 media 的消息**恒等**（cell 的文本就是
 正文），这是「与从前逐字节一致」的落点；坏掉的媒体条目只花掉一行标签，不花掉整条消息。正文已经以
