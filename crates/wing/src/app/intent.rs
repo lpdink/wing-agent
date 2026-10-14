@@ -13,6 +13,9 @@ use wing_api_client::models::{
     SessionListResponse, SettingsGetResponse, SettingsSchemaResponse, SettingsSetResponse,
 };
 
+use crate::util::image_compress::CompressOptions;
+use crate::util::image_compress::CompressedImage;
+
 /// Payload of a background fetch result.
 pub enum FetchPayload {
     /// Session runtime info (model, tokens, thinking, yolo).
@@ -45,6 +48,11 @@ pub enum FetchPayload {
     SettingsSaved(Box<SettingsSetResponse>),
     /// Gateway 半边失败：`conflict` 区分 409（指纹冲突）与传输 / 协议错误。
     SettingsSaveError { message: String, conflict: bool },
+    /// 一条粘贴图片的压缩回执（[`AppIntent::CompressClipboardImage`]）。
+    ///
+    /// `Err` 是给 toast 的文案（压缩器错误已格式化）。这个变体**不属于任何会话**：
+    /// 它回来时走 `App::on_clipboard_compressed`，不看会话守卫（草稿跨会话还在）。
+    ClipboardImage(Result<CompressedImage, String>),
     /// Show a toast message (for errors or success feedback from background tasks).
     Toast { message: String, is_error: bool },
 }
@@ -87,6 +95,17 @@ pub enum AppIntent {
 
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
+
+    /// 压缩一张刚粘贴进来的图片（通道给的是原始字节）。
+    ///
+    /// 压缩在阻塞池上跑（解码 / 缩放 / 编码是纯 CPU），结果经
+    /// [`FetchPayload::ClipboardImage`] 回到 App —— 事件循环只做入队与插 chip。
+    /// 选项由 App 在入队时从 `paste.image.*` 取（`PasteImageConfig::compress_options`
+    /// 已夹紧越界值），所以改配置只影响之后的那一张。
+    CompressClipboardImage {
+        bytes: Vec<u8>,
+        options: CompressOptions,
+    },
 
     /// 切换当前会话的 pin（置顶 = 会话上的一个普通标签，前端约定、后端零感知
     /// ——见 `crate::shared::pinning`；写入走通用的 `/api/session/tag`）。

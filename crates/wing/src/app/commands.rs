@@ -28,6 +28,8 @@ use crate::shared::panels::picker::ModelPanel;
 use crate::shared::tips::full_text as tips_full_text;
 use crate::ui::cells::tool_call::truncate_by_chars;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::input_area::ImagePayload;
+use crate::ui::input_area::SubmitPayload;
 use crate::ui::popup::command::PopupAction;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
@@ -212,24 +214,35 @@ pub(super) const COMMANDS: &[CommandRoute] = &[
 ];
 
 impl App {
-    /// Submit text from the input area: try the command table, else send as message.
+    /// Submit the composer's product: try the command table, else send as
+    /// message.
     ///
-    /// Returns `true` if the text was consumed (either as a command or message).
-    pub(super) fn submit_message(&mut self, text: &str) -> bool {
-        if self.try_frontend_command(text) {
+    /// The payload travels whole — the command table reads its text (a
+    /// frontend command consumes no pictures, like it consumes no payloads),
+    /// while the message keeps the text and the pictures apart, exactly as the
+    /// wire does.
+    ///
+    /// Returns `true` if it was consumed (either as a command or message).
+    pub(super) fn submit_message(&mut self, payload: SubmitPayload) -> bool {
+        if self.try_frontend_command(&payload.text) {
             return true;
         }
         // The message only moves up into chat history when the
         // model actually receives it (user_message_accepted). Until then it
         // queues in the pending area below in-flight streaming output.
         let request_id = crate::protocol::generate_request_id();
-        self.chat.push_pending(request_id.clone(), text.to_string());
+        self.chat
+            .push_pending(request_id.clone(), payload.text.clone());
         self.push_intent(AppIntent::SendMessage {
-            content: text.to_string(),
+            content: payload.text,
             tool_call_id: None,
             request_id,
-            // 图片段由 composer 层挂上（05 的 chip / 提交产物）；纯文本路径保持原样。
-            images: Vec::new(),
+            // 展示标签留在前端（07 的 pending / 历史行）；上传只要图片本身。
+            images: payload
+                .images
+                .into_iter()
+                .map(ImagePayload::into_image)
+                .collect(),
         });
         self.turn.usage = TurnUsage::default();
         true
@@ -333,17 +346,30 @@ impl App {
     pub(super) fn handle_fetch_result(&mut self, result: crate::app::intent::FetchResult) {
         use crate::app::intent::FetchPayload;
 
+        let crate::app::intent::FetchResult {
+            session_id,
+            payload,
+        } = result;
+
+        // 粘贴图片的压缩回执属于 **composer**，不属于会话：草稿跨会话还在，而守卫一旦
+        // 丢掉它，流水线的「在飞」标记就永远为真（之后所有粘贴都不落地）。所以它在
+        // 守卫**之前**分派。
+        if let FetchPayload::ClipboardImage(result) = payload {
+            self.on_clipboard_compressed(result);
+            return;
+        }
+
         // Session guard: discard results from a previous session.
-        if result.session_id != self.session_id {
+        if session_id != self.session_id {
             tracing::debug!(
-                stale = %result.session_id,
+                stale = %session_id,
                 current = %self.session_id,
                 "discarding stale fetch result"
             );
             return;
         }
 
-        match result.payload {
+        match payload {
             FetchPayload::Info(info) => {
                 // The model identity group travels whole: `model_id` is the
                 // reference word, `model` the call name, `provider_name` the
@@ -517,6 +543,8 @@ impl App {
                     conflict,
                 });
             }
+            // 上面已经分派过（这个回执属于 composer，不是会话）。
+            FetchPayload::ClipboardImage(_) => {}
         }
     }
 }

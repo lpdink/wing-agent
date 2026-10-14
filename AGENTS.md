@@ -212,7 +212,7 @@ crates/wing/src/
 │   ├── shimmer.rs                   扫光 / 混色原语（开屏 wordmark 与思考块标题行共用）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
-│   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + 粘贴 chip 注册表 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
+│   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + chip 引擎（粘贴 chip 与图片 chip 同一套原子语义）· 注册表捆包 Chips / image：图片 chip（载荷 / 号码 / 标签文案 / insert_image）/ widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker / notice）
 ├── render/                          Markdown + 语法高亮

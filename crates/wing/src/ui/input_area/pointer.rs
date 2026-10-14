@@ -67,7 +67,7 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
     let chrome = Chrome::of(area);
     let text_width = chrome.text_width as usize;
     // Same expression the widget renders with, so the rows are identical.
-    let vis_rows = wrap::build_visual_rows(&input.lines, &input.pastes, text_width.max(1));
+    let vis_rows = wrap::build_visual_rows(&input.lines, &input.chips, text_width.max(1));
     let last = vis_rows.len().checked_sub(1)?;
 
     // Rows on the rails and rows off the card both clamp into the text band:
@@ -88,7 +88,7 @@ pub fn hit(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Compo
     let row = vis_rows[vis_row];
     let point = model::column_point(
         &input.lines[row.logical_line],
-        &input.pastes,
+        &input.chips,
         &row,
         display_col as usize,
         text_width,
@@ -149,7 +149,7 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
     }
     let chrome = Chrome::of(area);
     let text_width = chrome.text_width as usize;
-    let vis_rows = wrap::build_visual_rows(&input.lines, &input.pastes, text_width.max(1));
+    let vis_rows = wrap::build_visual_rows(&input.lines, &input.chips, text_width.max(1));
     let first_row = area.y + chrome.top_row();
     let last_row = first_row + chrome.text_rows;
     for (visible, screen_row) in (first_row..last_row).enumerate() {
@@ -160,7 +160,7 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
         if row.logical_line < start.row || row.logical_line > end.row {
             continue;
         }
-        let line = model::flat(&input.lines[row.logical_line], &input.pastes);
+        let line = model::flat(&input.lines[row.logical_line], &input.chips);
         // The selected char range, intersected with this visual row.
         let from = if row.logical_line == start.row {
             (start.col as usize).max(row.char_start)
@@ -215,7 +215,7 @@ pub fn selected_text(
         };
         // The draft's own projection: a chip copies as the visible chip text
         // (`[Pasted text #1 …]`), which is exactly what is on screen.
-        let chars: Vec<char> = model::flat(line, &input.pastes).chars().collect();
+        let chars: Vec<char> = model::flat(line, &input.chips).chars().collect();
         let from = if row == start.row {
             (start.col as usize).min(chars.len())
         } else {

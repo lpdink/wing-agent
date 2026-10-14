@@ -741,7 +741,7 @@ fn test_composer_delete_removes_a_chip_whole() {
     assert_eq!(app.input.text(), "see ");
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 4));
     assert_eq!(
-        app.input.pastes.payload(1),
+        app.input.chips.paste_payload(1),
         None,
         "the payload goes with the chip"
     );
@@ -756,10 +756,89 @@ fn test_composer_backspace_removes_a_chip_whole() {
     assert_eq!(app.input.text(), "see ");
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 4));
     assert_eq!(
-        app.input.pastes.payload(1),
+        app.input.chips.paste_payload(1),
         None,
         "the payload goes with the chip"
     );
+}
+
+/// A compressed picture of `bytes` bytes, 4 × 2.
+fn picture(bytes: usize) -> crate::util::image_compress::CompressedImage {
+    crate::util::image_compress::CompressedImage {
+        bytes: vec![0; bytes],
+        width: 4,
+        height: 2,
+    }
+}
+
+/// Submitting a draft with pictures: the intent keeps the text and the pictures
+/// apart (06's `SendMessage` shape), the pictures in appearance order — and the
+/// label never leaks into the text.
+#[test]
+fn test_composer_submit_carries_the_pictures_apart_from_the_text() {
+    let mut app = app_with_draft("看看这个");
+    app.input.insert_image(picture(1024));
+    app.input.insert_image(picture(2048));
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    match app.drain_intents().as_slice() {
+        [
+            AppIntent::SendMessage {
+                content, images, ..
+            },
+        ] => {
+            assert_eq!(content, "看看这个", "标签不进文本");
+            assert_eq!(images.len(), 2);
+            assert_eq!(images[0].bytes.len(), 1024, "顺序 = 出现序");
+            assert_eq!(images[1].bytes.len(), 2048);
+            assert_eq!((images[0].width, images[0].height), (4, 2));
+        }
+        other => panic!("expected exactly one SendMessage, got {other:?}"),
+    }
+    assert_eq!(app.input.text(), "", "提交后草稿（含 chip）清空");
+    assert!(app.input.chips.paste_payload(1).is_none());
+}
+
+/// A picture-only draft submits too: a chip is content, and the message carries
+/// the picture with an empty text.
+#[test]
+fn test_composer_submits_a_picture_only_draft() {
+    let mut app = app_with_draft("");
+    app.input.insert_image(picture(16));
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    match app.drain_intents().as_slice() {
+        [
+            AppIntent::SendMessage {
+                content, images, ..
+            },
+        ] => {
+            assert_eq!(content, "");
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].bytes.len(), 16);
+        }
+        other => panic!("expected a picture-only SendMessage, got {other:?}"),
+    }
+}
+
+/// The plain-text path is byte-for-byte what it was: no pictures, no `media`.
+#[test]
+fn test_composer_submit_without_pictures_keeps_an_empty_image_list() {
+    let mut app = app_with_draft("hello");
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+    match app.drain_intents().as_slice() {
+        [
+            AppIntent::SendMessage {
+                content, images, ..
+            },
+        ] => {
+            assert_eq!(content, "hello");
+            assert!(images.is_empty());
+        }
+        other => panic!("expected one SendMessage, got {other:?}"),
+    }
 }
 
 #[test]

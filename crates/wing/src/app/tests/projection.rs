@@ -12,6 +12,7 @@ use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelMode;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::input_area::SubmitPayload;
 use crate::ui::welcome::SessionFacts;
 
 fn utc_ago(secs: i64) -> String {
@@ -1316,7 +1317,7 @@ fn accepted_event(origin_request_id: &str) -> WingEvent {
 #[test]
 fn test_accepted_event_promotes_pending() {
     let mut app = test_app();
-    assert!(app.submit_message("hello"));
+    assert!(app.submit_message(SubmitPayload::text("hello")));
     let pending_id = app.chat.pending[0].request_id.clone();
     app.drain_intents();
 
@@ -1334,7 +1335,7 @@ fn test_accepted_event_promotes_pending() {
 #[test]
 fn test_accepted_event_unknown_id_ignored() {
     let mut app = test_app();
-    assert!(app.submit_message("hello"));
+    assert!(app.submit_message(SubmitPayload::text("hello")));
     app.drain_intents();
 
     app.handle_event(accepted_event("someone-elses-id"));
@@ -1347,7 +1348,7 @@ fn test_accepted_event_unknown_id_ignored() {
 #[test]
 fn test_done_flushes_remaining_pending() {
     let mut app = test_app();
-    assert!(app.submit_message("hello"));
+    assert!(app.submit_message(SubmitPayload::text("hello")));
     app.drain_intents();
 
     app.handle_event(WingEvent::Done { meta: event_meta() });
@@ -1364,7 +1365,7 @@ fn test_done_flushes_remaining_pending() {
 #[test]
 fn test_interrupted_discards_pending() {
     let mut app = test_app();
-    assert!(app.submit_message("hello"));
+    assert!(app.submit_message(SubmitPayload::text("hello")));
     app.drain_intents();
 
     // 旧网关：不带丢弃清单 → 回落到"全部丢弃"的兼容形态。
@@ -1386,10 +1387,10 @@ fn test_interrupted_discards_pending() {
 #[test]
 fn test_interrupted_discards_only_reported_requests() {
     let mut app = test_app();
-    assert!(app.submit_message("dropped"));
+    assert!(app.submit_message(SubmitPayload::text("dropped")));
     app.drain_intents();
     let dropped_id = app.chat.pending[0].request_id.clone();
-    assert!(app.submit_message("survives"));
+    assert!(app.submit_message(SubmitPayload::text("survives")));
     app.drain_intents();
     let survives_id = app.chat.pending[1].request_id.clone();
 

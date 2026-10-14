@@ -21,7 +21,9 @@ use crate::protocol::MediaRef;
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
+use crate::util::image_compress::CompressOptions;
 use crate::util::image_compress::CompressedImage;
+use crate::util::image_compress::compress_image;
 use crate::util::program_status;
 use crate::util::title;
 
@@ -145,6 +147,21 @@ pub async fn execute_intent(
                 images,
             )
             .await;
+        }
+        AppIntent::CompressClipboardImage { bytes, options } => {
+            let tx = fetch_tx.clone();
+            // 结果属于 composer 而不是会话（`handle_fetch_result` 不看会话守卫），
+            // 这里的 session_id 只是 `FetchResult` 的形状要求。
+            let session_id = app.session_id.clone();
+            tokio::spawn(async move {
+                let result = compress_clipboard_image(bytes, options).await;
+                let _ = tx
+                    .send(FetchResult {
+                        session_id,
+                        payload: FetchPayload::ClipboardImage(result),
+                    })
+                    .await;
+            });
         }
         AppIntent::FetchInfo => {
             if let Some(t) = transport {
@@ -752,6 +769,23 @@ pub(super) async fn send_user_message(
             format!("Send failed: {e}"),
             std::time::Duration::from_secs(3),
         ));
+    }
+}
+
+/// 压缩一张粘贴进来的图片，在阻塞池上（解码 / 缩放 / JPEG 编码都是纯 CPU）。
+///
+/// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
+/// （真实 stdout），单测造不出来（同 `send_user_message` 的抽取理由）。错误在这里
+/// 格式化成给 toast 的文案；`Err(String)` 而不是 `CompressError`，是因为调用点只需要
+/// 一句话（阻塞池的 join 失败也只有这句话能说）。
+pub(super) async fn compress_clipboard_image(
+    bytes: Vec<u8>,
+    options: CompressOptions,
+) -> Result<CompressedImage, String> {
+    match tokio::task::spawn_blocking(move || compress_image(&bytes, &options)).await {
+        Ok(Ok(image)) => Ok(image),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(join) => Err(format!("compression task failed: {join}")),
     }
 }
 
