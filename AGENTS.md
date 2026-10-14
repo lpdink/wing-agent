@@ -181,7 +181,7 @@ crates/wing/src/
 ├── gateway/client.rs                GatewayClient — WS 连接 + 读写任务
 ├── protocol/                        WingEvent + ClientRequest + ConnectResponse（Python 事件的 Rust 镜像）
 │   ├── events.rs / client_request.rs / connect_response.rs
-│   └── history.rs                   SessionMessage — 会话历史 Message 投影的 typed 镜像
+│   └── history.rs                   SessionMessage — 会话历史 Message 投影的 typed 镜像（media 宽容解析）
 ├── shared/                          中立层：App 与 UI 共享的状态机与词汇（不依赖 app / ui）
 │   ├── panels/mod.rs                选择面板内核（翻页 / 光标 / 窗口 / commit；存储归 adapter）
 │   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
@@ -195,13 +195,14 @@ crates/wing/src/
 │   ├── mod.rs                       run_app() 主循环 + handle_event()
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
 │   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
+│   ├── clipboard.rs                 粘贴通道边界（文本 → composer / 图片 → 单并发压缩流水线 → chip）
 │   ├── images.rs                   图片 lane：能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟）
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
 │   ├── popup_state.rs               Popup + 候选缓存 + 去重
 │   └── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
 ├── ui/                              UI 组件
-│   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染）· model（内容模型）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
+│   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染 + pending 条目）· model（内容模型）· media（消息里的图片标签行）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
@@ -212,7 +213,7 @@ crates/wing/src/
 │   ├── shimmer.rs                   扫光 / 混色原语（开屏 wordmark 与思考块标题行共用）
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
-│   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + 粘贴 chip 注册表 / widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
+│   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + chip 引擎（粘贴 chip 与图片 chip 同一套原子语义）· 注册表捆包 Chips / image：图片 chip（载荷 / 号码 / 标签文案 / insert_image）/ widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker / notice）
 ├── render/                          Markdown + 语法高亮
@@ -224,8 +225,8 @@ crates/wing/src/
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）
 │   └── line_utils.rs / renderable.rs
 ├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
-├── config/                          TUI 配置（mod / colors / rendering / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / format（token / 命中率等共享数字记法）/ open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
+├── config/                          TUI 配置（mod / colors / rendering / paste=粘贴图片压缩参数 / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
+└── util/                            clipboard / format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
 配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。

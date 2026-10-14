@@ -17,9 +17,13 @@ use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
 use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
+use crate::protocol::MediaRef;
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
+use crate::util::image_compress::CompressOptions;
+use crate::util::image_compress::CompressedImage;
+use crate::util::image_compress::compress_image;
 use crate::util::program_status;
 use crate::util::title;
 
@@ -132,33 +136,32 @@ pub async fn execute_intent(
             content,
             tool_call_id,
             request_id,
+            images,
         } => {
-            match transport {
-                Some(t) => {
-                    if let Err(e) = t
-                        .ws
-                        .send_message(&app.session_id, &content, tool_call_id, request_id.clone())
-                        .await
-                    {
-                        tracing::error!("failed to send message: {e}");
-                        // Never left the client — drop from the pending queue.
-                        app.chat.remove_pending(&request_id);
-                        app.show_toast(Toast::warning(
-                            format!("Send failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
-                }
-                None => {
-                    // Gateway connection lost — the intent is discarded, so the
-                    // pending entry must not linger on screen.
-                    app.chat.remove_pending(&request_id);
-                    app.show_toast(Toast::warning(
-                        "Not sent — gateway disconnected".to_string(),
-                        std::time::Duration::from_secs(3),
-                    ));
-                }
-            }
+            send_user_message(
+                app,
+                transport.as_ref(),
+                content,
+                tool_call_id,
+                request_id,
+                images,
+            )
+            .await;
+        }
+        AppIntent::CompressClipboardImage { bytes, options } => {
+            let tx = fetch_tx.clone();
+            // 结果属于 composer 而不是会话（`handle_fetch_result` 不看会话守卫），
+            // 这里的 session_id 只是 `FetchResult` 的形状要求。
+            let session_id = app.session_id.clone();
+            tokio::spawn(async move {
+                let result = compress_clipboard_image(bytes, options).await;
+                let _ = tx
+                    .send(FetchResult {
+                        session_id,
+                        payload: FetchPayload::ClipboardImage(result),
+                    })
+                    .await;
+            });
         }
         AppIntent::FetchInfo => {
             if let Some(t) = transport {
@@ -699,6 +702,98 @@ pub async fn execute_intent(
             super::settings::restart_gateway(app, transport, endpoint).await;
         }
     }
+}
+
+/// 一条用户消息的完整发送：带图先把每张上传成引用，再把消息（含引用）交给网关。
+///
+/// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
+/// （真实 stdout），单测造不出来（同 `apply_update_session` 的抽取理由）。
+///
+/// **失败契约**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
+/// 少一张图的引用列表会被当成完整输入），并把提交产物**还给草稿**（`restore_failed_send`
+/// 从 pending 队列取回文本与图片 chip）+ warning toast；
+/// 已经上传成功的图留在存储里（政策：媒体永不删除）。
+pub(super) async fn send_user_message(
+    app: &mut App,
+    transport: Option<&Transport>,
+    content: String,
+    tool_call_id: Option<String>,
+    request_id: String,
+    images: Vec<CompressedImage>,
+) {
+    let Some(transport) = transport else {
+        // Gateway connection lost — nothing left the client, so the content
+        // goes back to the composer.
+        app.restore_failed_send(&request_id, "Not sent — gateway disconnected");
+        return;
+    };
+
+    let media = if images.is_empty() {
+        // 纯文本：帧里没有 `media` 键，行为与引入图片之前逐字节相同。
+        None
+    } else {
+        match upload_images(&transport.http, &app.session_id, images).await {
+            Ok(refs) => Some(refs),
+            Err(e) => {
+                tracing::warn!("image upload failed: {e}");
+                app.restore_failed_send(&request_id, &format!("Image upload failed: {e}"));
+                return;
+            }
+        }
+    };
+
+    if let Err(e) = transport
+        .ws
+        .send_message(
+            &app.session_id,
+            &content,
+            tool_call_id,
+            request_id.clone(),
+            media,
+        )
+        .await
+    {
+        tracing::error!("failed to send message: {e}");
+        // Never left the client — the submission goes back to the composer.
+        app.restore_failed_send(&request_id, &format!("Send failed: {e}"));
+    }
+}
+
+/// 压缩一张粘贴进来的图片，在阻塞池上（解码 / 缩放 / JPEG 编码都是纯 CPU）。
+///
+/// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
+/// （真实 stdout），单测造不出来（同 `send_user_message` 的抽取理由）。错误在这里
+/// 格式化成给 toast 的文案；`Err(String)` 而不是 `CompressError`，是因为调用点只需要
+/// 一句话（阻塞池的 join 失败也只有这句话能说）。
+pub(super) async fn compress_clipboard_image(
+    bytes: Vec<u8>,
+    options: CompressOptions,
+) -> Result<CompressedImage, String> {
+    match tokio::task::spawn_blocking(move || compress_image(&bytes, &options)).await {
+        Ok(Ok(image)) => Ok(image),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(join) => Err(format!("compression task failed: {join}")),
+    }
+}
+
+/// 逐张上传（顺序 = 提交顺序 = 消息内 media 列表顺序）。
+///
+/// 错误在这里格式化成给 toast 的文案（调用点只 toast）；展示名（`name`）不走上传：
+/// chip 的 `label` 是纯前端展示（05），后端只存字节与元数据。
+async fn upload_images(
+    http: &wing_api_client::GatewayClient,
+    session_id: &str,
+    images: Vec<CompressedImage>,
+) -> Result<Vec<MediaRef>, String> {
+    let mut refs = Vec::with_capacity(images.len());
+    for image in images {
+        let uploaded = http
+            .upload_media(session_id, image.bytes, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        refs.push(uploaded);
+    }
+    Ok(refs)
 }
 
 /// Apply optimistic local status update after a successful UpdateSession HTTP call.

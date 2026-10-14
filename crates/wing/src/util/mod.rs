@@ -2,6 +2,7 @@
 
 pub mod clipboard;
 pub mod format;
+pub mod image_compress;
 pub mod logging;
 pub mod open;
 pub mod osc9;

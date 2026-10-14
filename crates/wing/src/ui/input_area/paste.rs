@@ -36,7 +36,7 @@ impl InputArea {
             // Single-line paste: insert into the current line.
             model::insert_text(
                 &mut self.lines[self.cursor_row],
-                &self.pastes,
+                &self.chips,
                 self.cursor_col,
                 parts[0],
             );
@@ -46,12 +46,12 @@ impl InputArea {
             // in; the text that followed the cursor closes the last one.
             let tail = model::split_off(
                 &mut self.lines[self.cursor_row],
-                &self.pastes,
+                &self.chips,
                 self.cursor_col,
             );
             model::insert_text(
                 &mut self.lines[self.cursor_row],
-                &self.pastes,
+                &self.chips,
                 self.cursor_col,
                 parts[0],
             );
@@ -84,23 +84,31 @@ impl InputArea {
     /// is expanded again on submit ([`Self::expand_and_get_text`]); until then
     /// the chip is one atomic unit (see [`model`]).
     pub(crate) fn insert_paste(&mut self, text: String) {
-        let number = self.pastes.add(text);
-        let width = self.pastes.chip(number).chars().count();
+        let number = self.chips.add_paste(text);
+        let width = self
+            .chips
+            .label(model::ChipId::Paste(number))
+            .chars()
+            .count();
         model::insert_chip(
             &mut self.lines[self.cursor_row],
-            &self.pastes,
+            &self.chips,
             self.cursor_col,
-            number,
+            model::ChipId::Paste(number),
         );
         self.cursor_col += width;
         self.clear_desired_col();
     }
 
-    /// Return full text with chips expanded to their original paste content.
+    /// Return full text with paste chips expanded to their original content.
+    ///
+    /// Image chips contribute nothing: a picture is not text, and it is
+    /// carried by [`SubmitPayload`](super::SubmitPayload) instead — see
+    /// [`model::expanded`].
     pub(crate) fn expand_and_get_text(&self) -> String {
         self.lines
             .iter()
-            .map(|line| model::expanded(line, &self.pastes))
+            .map(|line| model::expanded(line, &self.chips))
             .collect::<Vec<_>>()
             .join("\n")
     }

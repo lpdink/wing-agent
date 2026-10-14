@@ -70,6 +70,9 @@ thiserror = "2"
 agent-client-protocol = { version = "3.0.0", features = ["stdio"] }
 
 # Utilities
+# 跨平台 syscall 原语（pty / dup2 / termios / poll）：本就是 crossterm / ratatui / tokio 的
+# 传递依赖，这里只是显式声明（stdin 接驳层直接用，见 crates/wing/src/tui/stdin_proxy.rs）。
+libc = "0.2"
 unicode-width = "0.2"
 unicode-linebreak = "0.1.5"
 dirs = "7"

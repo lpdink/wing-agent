@@ -161,6 +161,44 @@ impl GatewayClient {
     }
 
     // ============================================================
+    // 媒体上传
+    // ============================================================
+
+    /// 上传媒体字节，返回存储引用（内容寻址：同字节重复上传幂等）。
+    ///
+    /// `POST /api/session/media?session_id=<sid>[&name=<n>]`，body 是**原始字节**
+    /// （`application/octet-stream`，无 base64 / 无 multipart）。`name` 是展示名
+    /// （basename），`None` ⇒ query 里不出现该键。
+    ///
+    /// 错误面与其它 RPC 一致：400（非图 / 超限）/ 404（会话不存在）走
+    /// [`ApiClientError::Api`]。
+    pub async fn upload_media(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        name: Option<&str>,
+    ) -> Result<MediaRef, ApiClientError> {
+        let mut query: Vec<(&str, &str)> = vec![("session_id", session_id)];
+        if let Some(name) = name {
+            query.push(("name", name));
+        }
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base_url, "/api/session/media"))
+            .query(&query)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        let parsed: UploadMediaResponse = resp.json().await?;
+        Ok(parsed.media)
+    }
+
+    // ============================================================
     // 查询
     // ============================================================
 
@@ -648,7 +686,10 @@ mod tests {
         method: String,
         path: String,
         authorization: Option<String>,
+        content_type: Option<String>,
         body: String,
+        /// 原始 body 字节：二进制上传（`upload_media`）在 `body` 里是有损的。
+        body_raw: Vec<u8>,
     }
 
     /// 进程内假网关：`127.0.0.1:0` 临时端口，按路径回放预置的 `(status, body)`，记录全部请求。
@@ -715,15 +756,19 @@ mod tests {
                             method,
                             path: path.clone(),
                             authorization: header_value(&head, "authorization"),
+                            content_type: header_value(&head, "content-type"),
                             body: String::from_utf8_lossy(
                                 &buf[body_start..body_end.min(buf.len())],
                             )
                             .to_string(),
+                            body_raw: buf[body_start..body_end.min(buf.len())].to_vec(),
                         });
 
+                        // 路由按**路径**匹配（查询串是参数，不参与路由）。
+                        let route_path = path.split('?').next().unwrap_or("");
                         let (status, body) = routes
                             .iter()
-                            .find(|(route, _, _)| *route == path.as_str())
+                            .find(|(route, _, _)| *route == route_path)
                             .map(|(_, status, body)| (*status, *body))
                             .unwrap_or((404, r#"{"error":"not_found"}"#));
                         let response = format!(
@@ -900,5 +945,101 @@ mod tests {
             .unwrap_err();
         assert!(err.is_conflict(), "{err}");
         assert!(!err.is_setup_mode());
+    }
+
+    // ============================================================
+    // 媒体上传（POST /api/session/media）— 冻结契约 #2
+    // ============================================================
+
+    const MEDIA_BODY: &str = r#"{"ok":true,"media":{"id":"ab12","mime":"image/jpeg",
+        "bytes":5,"width":2,"height":1,"name":"shot.jpg"}}"#;
+
+    #[tokio::test]
+    async fn upload_media_posts_raw_bytes_and_parses_the_reference() {
+        let server = MockGateway::start(vec![("/api/session/media", 200, MEDIA_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), Some("secret-key")).unwrap();
+
+        let bytes = vec![0xFF, 0xD8, 0xFF, 0x00, 0xFE];
+        let media = client
+            .upload_media("sid-1", bytes.clone(), Some("shot.jpg"))
+            .await
+            .unwrap();
+        assert_eq!(media.id, "ab12");
+        assert_eq!(media.mime, "image/jpeg");
+        assert_eq!((media.bytes, media.width, media.height), (5, 2, 1));
+        assert_eq!(media.name.as_deref(), Some("shot.jpg"));
+
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "POST");
+        assert_eq!(
+            recorded[0].path, "/api/session/media?session_id=sid-1&name=shot.jpg",
+            "query 参数（不是 body / 不是路径段）"
+        );
+        assert_eq!(
+            recorded[0].body_raw, bytes,
+            "原始字节：无 base64、无 multipart"
+        );
+        assert_eq!(
+            recorded[0].content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            recorded[0].authorization.as_deref(),
+            Some("Bearer secret-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_media_without_a_name_omits_the_query_key() {
+        let server = MockGateway::start(vec![("/api/session/media", 200, MEDIA_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let media = client
+            .upload_media("sid-2", vec![1, 2, 3], None)
+            .await
+            .unwrap();
+        // 不带 name 上传是常态：query 里没有该键；响应里有什么就用什么。
+        assert_eq!(media.name.as_deref(), Some("shot.jpg"));
+        assert_eq!(
+            server.recorded()[0].path,
+            "/api/session/media?session_id=sid-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_media_rejections_carry_the_wire_error() {
+        // 400（非图 / 超限）/ 404（会话不存在）都走既有的结构化错误面。
+        let bad = MockGateway::start(vec![(
+            "/api/session/media",
+            400,
+            r#"{"error":"bad_media","detail":"not an image"}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(bad.url.clone(), None).unwrap();
+        let err = client
+            .upload_media("sid", vec![1, 2, 3], None)
+            .await
+            .unwrap_err();
+        match &err {
+            ApiClientError::Api { status, detail, .. } => {
+                assert_eq!(*status, 400);
+                assert!(detail.contains("not an image"), "{detail}");
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+
+        let missing = MockGateway::start(vec![(
+            "/api/session/media",
+            404,
+            r#"{"error":"not_found","detail":"unknown session"}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(missing.url.clone(), None).unwrap();
+        let err = client
+            .upload_media("gone", vec![1], None)
+            .await
+            .unwrap_err();
+        assert!(err.is_not_found(), "{err}");
     }
 }

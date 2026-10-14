@@ -29,6 +29,7 @@ use crate::shared::panels::picker::ModelPanel;
 use crate::shared::panels::picker::ModelPanelAction;
 use crate::tui::is_quit_key;
 use crate::ui::input_area::InputAction;
+use crate::ui::input_area::SubmitPayload;
 use crate::ui::popup::ActivePopup;
 use crate::ui::popup::command::candidate_request_for;
 use crate::ui::popup::command::is_must_select_command;
@@ -501,17 +502,19 @@ impl App {
         // columns the card really has (the float and any squeeze included).
         let chrome = self.input.chrome();
         match self.input.handle_key(key, chrome) {
-            InputAction::Submit(text) => {
+            InputAction::Submit(payload) => {
                 // Submitting a message pins the view to the bottom so the
                 // sent message and the agent's reply come into view.
                 self.chat.jump_bottom();
                 // must-select 命令：参数必须来自候选选择。popup 若被关闭
                 //（如 Esc），重开 popup 而非发送自由文本——消灭未定义请求
-                //（如 /fork 携带未经验证的 uuid）。
-                if let Some((cmd, _)) = parse_slash_input(&text)
+                //（如 /fork 携带未经验证的 uuid）。草稿被整体换回文本：图片
+                // 没有文本形态，因此这条路会丢图（`set_text` 的既定语义，
+                // 见 `docs/dev/tui-input.md` 的「草稿被重写的路径」）。
+                if let Some((cmd, _)) = parse_slash_input(&payload.text)
                     && is_must_select_command(cmd)
                 {
-                    self.input.set_text(&text);
+                    self.input.set_text(&payload.text);
                     self.update_popup_from_input();
                     if self.popup.active.is_active() {
                         return;
@@ -519,7 +522,7 @@ impl App {
                     self.input.clear();
                 }
                 self.popup.active = ActivePopup::None;
-                self.submit_message(&text);
+                self.submit_message(payload);
             }
             InputAction::Escape | InputAction::None => {
                 // Update popup based on new text.
@@ -588,7 +591,9 @@ impl App {
                     let text = self.input.expand_and_get_text();
                     let text = text.trim().to_string();
                     if !text.is_empty() {
-                        self.submit_message(&text);
+                        // 命令补全只提交文本：改写草稿的那一步已经用文本重建过
+                        // 草稿（图片没有文本形态，重写即丢，见 `set_text`）。
+                        self.submit_message(SubmitPayload::text(text));
                     }
                     self.input.clear();
                 } else {
@@ -708,6 +713,8 @@ impl App {
             content,
             tool_call_id: Some(tool_call_id),
             request_id: crate::protocol::generate_request_id(),
+            // Ask 的应答是纯文本（面板只产文本）。
+            images: Vec::new(),
         });
     }
 

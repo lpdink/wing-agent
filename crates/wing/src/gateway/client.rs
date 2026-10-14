@@ -21,6 +21,7 @@ use crate::gateway::chunk::Outcome;
 use crate::gateway::chunk::Reassembler;
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
+use crate::protocol::MediaRef;
 use crate::protocol::WingEvent;
 
 /// Connection info returned after successful Gateway handshake.
@@ -390,18 +391,23 @@ impl GatewayClient {
     ///
     /// `request_id` — caller-generated correlation id, echoed back in the
     /// `delivered` / `user_message_accepted` events for this message.
+    ///
+    /// `media` — 图片引用（先经 HTTP 上传端点拿到）；`None` = 纯文本，
+    /// 帧里不出现 `media` 键（旧网关逐字节兼容）。
     pub async fn send_message(
         &self,
         session_id: &str,
         content: &str,
         tool_call_id: Option<String>,
         request_id: String,
+        media: Option<Vec<MediaRef>>,
     ) -> Result<()> {
         let req = ClientRequest {
             request_id,
             session_id: session_id.to_string(),
             content: content.to_string(),
             tool_call_id,
+            media,
         };
         self.tx
             .send(req)
@@ -417,6 +423,7 @@ impl GatewayClient {
             session_id: session_id.to_string(),
             content: content.to_string(),
             tool_call_id: None,
+            media: None,
         };
         self.tx
             .send(req)
