@@ -62,8 +62,8 @@ from wing.request_context import (
     reset_request_context,
     set_request_context,
 )
+from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
-from collections.abc import Iterable
 from wing.schema import MediaRef
 from wing.session import Session, SessionManager, SessionReaper, TagMutation
 from wing.system import ReloadResult, reload_system as _reload_system
@@ -414,9 +414,18 @@ class WingRuntime:
     # 查询
     # ============================================================
 
-    def list_sessions(self) -> list[SessionInfo]:
-        """列出所有 session（磁盘上的），按时间降序，携带运行时状态。"""
-        return self.sm.list_sessions()
+    def list_sessions(
+        self,
+        *,
+        statuses: Collection[str] | None = None,
+        tags: Sequence[str] = (),
+    ) -> list[SessionInfo]:
+        """列出所有 session（磁盘上的），按时间降序，携带运行时状态。
+
+        ``statuses`` / ``tags`` 是子集过滤（AND；缺省不过滤），口径见
+        :meth:`SessionManager.list_sessions`——结果是全量列表的子序列。
+        """
+        return self.sm.list_sessions(statuses=statuses, tags=tags)
 
     def get_session_state(self, session_id: str) -> dict | None:
         """获取 session 完整状态。返回 dict 或 None。"""
