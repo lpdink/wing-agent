@@ -126,8 +126,9 @@ class Message(ChainNode):
     media: list[MediaRef] | None = None
     """消息携带的图片引用（仅引用，字节在 SessionStore）。
 
-    当前仅 tool 消息使用（预留 user）；None = 无媒体——落盘时 None 被
-    自然剥除，无媒体消息的 history 记录与引入 media 之前完全一致。"""
+    当前两条链路使用：**user**（用户贴图，WS/HTTP 消息的 media 列表）与
+    **tool**（ReadImage 读图结果）；assistant / system 不携带。None = 无媒体——
+    落盘时 None 被自然剥除，无媒体消息的 history 记录与引入 media 之前完全一致。"""
     tool_call_id: str | None = None
     usage: "LLMUsage | None" = (
         None  # assistant 消息的 token 审计信息，持久化后重放可恢复

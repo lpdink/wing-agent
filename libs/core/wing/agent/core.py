@@ -32,7 +32,7 @@ from wing.event import AskEvent, NoticeEvent, WingEvent
 from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
 from wing.provider.pool import get_provider
-from wing.schema import Message, Tool
+from wing.schema import MediaRef, Message, Tool
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
@@ -516,9 +516,10 @@ class WingAgent:
         request_id: str | None = None,
         role: str = "user",
         tool_call_id: str | None = None,
+        media: list[MediaRef] | None = None,
     ) -> None:
-        """接收用户消息或 feedback。"""
-        await self._inbox.post(content, request_id, role, tool_call_id)
+        """接收用户消息或 feedback。media 非空时消息携带媒体引用（字节在存储）。"""
+        await self._inbox.post(content, request_id, role, tool_call_id, media=media)
 
     async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。

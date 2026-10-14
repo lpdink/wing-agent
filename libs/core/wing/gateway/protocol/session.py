@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
+from wing.schema import MediaRef
 from wing.session.override import AgentOverride
 
 # 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
@@ -100,6 +101,13 @@ class SendMessageRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
+    media: list[MediaRef] | None = Field(
+        default=None,
+        description=(
+            "消息携带的媒体引用（缺省 / null = 无媒体）。id 必须指向该会话已存在的"
+            "媒体对象，否则 400（整条消息被拒，不进历史）"
+        ),
+    )
     tool_call_id: str | None = Field(
         default=None,
         description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",

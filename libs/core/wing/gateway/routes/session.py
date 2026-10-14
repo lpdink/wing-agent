@@ -224,9 +224,11 @@ async def send_message(
             request_id=request_id,
             session_id=body.session_id,
             tool_call_id=body.tool_call_id,
+            media=body.media,
         )
     except InvalidInputError as e:
-        # 正文非法（不可编码为 UTF-8）：输入问题 → 400，不是 500。
+        # 正文非法（不可编码为 UTF-8）/ 媒体引用不可兑现（幽灵引用 / 非法 id）：
+        # 输入问题 → 400，不是 500。
         # 只认这一种——链上将来出现的其它 ValueError 是内部故障，不该被报成
         # "客户端的错"（500 让它带着栈进日志，而不是骗调用方去改请求）。
         raise HTTPException(status_code=400, detail=str(e))

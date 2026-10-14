@@ -41,12 +41,12 @@ from wing.event import (
 from wing.event_bus import event_bus
 from wing.commands import expand_prompt_command
 from wing.request_context import session_context
-from wing.schema import ChainNode, Message
+from wing.schema import ChainNode, MediaRef, Message
 from wing.store import SessionMetadata, SessionStore
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
-from .session import Session, tool_refs, validate_tool_refs
+from .session import Session, tool_refs, validate_media_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
@@ -989,21 +989,26 @@ class SessionManager:
         request_id: str | None = None,
         session_id: str | None = None,
         tool_call_id: str | None = None,
+        media: list[MediaRef] | None = None,
     ) -> None:
         """路由消息到指定 session。（内部方法，由 WingRuntime 调用）
 
         Contextvars 由 WingRuntime.post() 统一管理，此方法不设置/恢复。
 
         - 不在内存的会话先按需水合（逐出后仍可投递）
+        - 携带的媒体引用先过闸门（id 格式 + 对象存在）——不可兑现即拒（幽灵引用
+          不进历史，也**没有**送达 ack：拒绝发生在 DeliveredEvent 之前）
         - / 开头且匹配 prompt 命令 → 展开为纯文本后投递
         - 否则 → 直接投递给 session.post()
 
         Raises:
             LookupError: 内存与磁盘都没有该会话（调用方负责映射错误面）
+            InvalidInputError: 携带的媒体引用不可兑现（id 非法 / 对象不存在）
         """
         assert session_id is not None, "session_id is required by WingRuntime"
 
         session = self.ensure_loaded(session_id)
+        validate_media_refs(session.store, session.session_id, media)
 
         event_bus.emit(
             DeliveredEvent(
@@ -1023,4 +1028,9 @@ class SessionManager:
         log.info(
             f"SM._post: routing '{content[:50]}' to session.post (session={session_id})"
         )
-        await session.post(content, request_id=request_id, tool_call_id=tool_call_id)
+        await session.post(
+            content,
+            request_id=request_id,
+            tool_call_id=tool_call_id,
+            media=media,
+        )

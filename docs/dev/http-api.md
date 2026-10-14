@@ -10,7 +10,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 1. WS  GET/WS  /ws                 → ConnectResponse { type:"connected", client_id }
 2. HTTP POST  /api/session/create   → { session_id }
 3. HTTP POST  /api/session/subscribe { session_id, client_id }
-4. HTTP POST  /api/session/send      { session_id, content, tool_call_id? } → agent loop 启动
+4. HTTP POST  /api/session/send      { session_id, content, tool_call_id?, media? } → agent loop 启动
    （`tool_call_id` = 定向回答一个在挂 Ask 的 feedback waiter；CLI 侧：`wing asks` 拿 id，
    `wing run --tool-call-id` 回答）
 5. WS   接收 ReAct 事件流（text / tool_call / … / turn_result）
@@ -29,7 +29,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
-| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask）；无该 id / id 已失效则回退普通入队 |
+| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 = 无媒体；id 必须是该会话已存在的对象——幽灵引用 / 非法 id 回 400，消息不进历史）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask；该通道**只承载文本**，同时带 `media` 时记 WARN 后按文本 resolve）；无该 id / id 已失效则回退普通入队 |
 | GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）与 `tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags），以及生效模型的四件套 `model_id`（引用词）/ `model_name`（调用名）/ `provider_name` / `model_display_name`（口径同 `/api/session/info`；在内存的会话取 live agent，未加载的按 resume 链解析盘上记录，解析不出的降级路径为 null，展示层回落 展示名 → 调用名 → 引用词）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及 `/ss <args>` 的 exact > prefix > contains 分层（层内保持上述顺序）；后端不感知 `pin`（它只是普通标签），状态优先级（`waiting` 不提前）与 workspace 不参与排序 |
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `model`（调用名）+ `model_id`（引用词；不可用时 null）+ `provider_name`（运行期事实）+ `model_display_name`（展示名；未声明 = null，前端回落 `model`）、`context_stats`、`skills_info`、`reasoning_effort`、`tags`（会话标签）、`tag_meta`（标签记录，含 `added_at`）与 `usage`（会话用量账本：计数 `user_messages` / `llm_calls` / `tool_calls` / `turns` + token `prompt_tokens` / `completion_tokens` / `cached_tokens` + 时长 `llm_time_ms` / `tool_time_ms`，跨 release / 网关重启延续；旧会话 / 无记录读出即全零，不回填。口径：`llm_*` 只计 ReAct 循环内的调用（压缩等旁路不计），tool 只计真实执行的调用（参数非法 / 未知工具的短路与中断合成不计）。命中率 = `cached_tokens / prompt_tokens`、工作时长 = `llm_time_ms + tool_time_ms` 由客户端推导——线格式不含派生值） |
@@ -210,7 +210,7 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是**双向**通道：
 
 - **服务端 → 客户端**：推送 `WingEvent` 事件流，事件均为 `WingEvent` 子类，按 `type` 字段区分。
-- **客户端 → 服务端**：发送 `ClientRequest` 帧 `{ request_id, session_id, content, tool_call_id? }`，用于投递用户消息，或携带 `tool_call_id` 定向回复某个 `ask` 事件（resolve 对应的 feedback waiter）。Gateway 注入 `client_id` 后转给 `WingRuntime.post()`。
+- **客户端 → 服务端**：发送 `ClientRequest` 帧 `{ request_id, session_id, content, tool_call_id?, media? }`，用于投递用户消息，或携带 `tool_call_id` 定向回复某个 `ask` 事件（resolve 对应的 feedback waiter）。Gateway 注入 `client_id` 后转给 `WingRuntime.post()`。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 / null = 无媒体；每个 id 必须是该会话已存在的对象，否则整条消息被拒——客户端收 `error` 帧、消息不进历史、也没有 `delivered`）。
 
 > 投递消息有两条等价路径：WS `ClientRequest`（TUI 实际所用，便于与 Ask 回复复用同一连接）或 HTTP `POST /api/session/send`。
 

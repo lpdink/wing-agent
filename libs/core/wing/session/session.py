@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
-from wing.common.utils import require_utf8
+from wing.common.utils import InvalidInputError, require_utf8
 from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
@@ -33,8 +33,9 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.media import MediaAccess
-from wing.schema import ChainNode, Message, Tool
+from wing.schema import ChainNode, MediaRef, Message, Tool
 from wing.store import SessionMetadata, SessionStore, SessionUsage, TagMeta
+from wing.store.base import validate_media_id
 from wing.tool_registry import ToolRef
 
 from .model_binding import ModelBinding
@@ -132,11 +133,39 @@ def bind_media(store: SessionStore, session_id: str) -> MediaAccess:
     媒体对象是会话私有资产（file 后端 ``<sessions-root>/<sid>/media/<id>``）：
     存储接口带 session 上下文，而工具（ReadImage）与 provider 序列化只认
     ``MediaAccess.read(id) / write(id, bytes)``——这里用闭包完成绑定，消费方零改动。
+    ``path`` 是**投影层**（占位文案）用的只读查询：不含字节、不物化（memory
+    后端恒 None → 文案降级）。
     """
     return MediaAccess(
         read=lambda media_id: store.read_media(session_id, media_id),
         write=lambda media_id, data: store.write_media(session_id, media_id, data),
+        path=lambda media_id: store.media_path(session_id, media_id),
     )
+
+
+def validate_media_refs(
+    store: SessionStore, session_id: str, media: list[MediaRef] | None
+) -> None:
+    """校验消息携带的媒体引用可兑现（id 格式 + 对象存在）；不合规即 raise。
+
+    消息入口闸门（``SessionManager._post`` 调用）：引用的 id 必须是 64 位小写
+    hex（防路径穿越 + 防把逻辑错误静默带进历史），且对象必须已存在（会话目录或
+    遗留池——``media_exists`` 是**纯查询**，不物化、不写盘）。缺任何一条即
+    ``InvalidInputError``（HTTP 400 语义）：幽灵引用不是"暂时读不到"，而是调用方
+    发了不该发的请求——放它进历史只会让后续每一轮请求都渲染一个永远缺失的占位。
+
+    None / 空列表 = 无媒体（no-op）：无媒体路径不因本闸门产生任何分支或开销。
+    """
+    for ref in media or []:
+        try:
+            validate_media_id(ref.id)
+        except ValueError as e:
+            raise InvalidInputError(f"invalid media reference: {e}") from e
+        if not store.media_exists(session_id, ref.id):
+            raise InvalidInputError(
+                f"media reference not found in session {session_id!r}: "
+                f"id={ref.id!r} (upload the media object before referencing it)"
+            )
 
 
 class Session:
@@ -1080,10 +1109,13 @@ class Session:
         fork 产生的 session 已有 metadata（forked_from 等），但标题仍为空，
         应正常获得自动标题，且保存时不会覆盖其他字段（模型整体保存）。
 
+        空 content（纯图消息：内容全在 media）**不写标题**：空串不是 None 语义
+        ——写进去会让 `session_name is not None` 永久挡住后续文本消息的自动标题。
+
         持久化由 post 流程中紧随其后的 touch_last_interaction 一次性完成，
         避免首条消息两次连续落盘。
         """
-        if self._metadata.session_name is not None:
+        if self._metadata.session_name is not None or not content:
             return
         self._metadata.session_name = content[:100]
 
@@ -1092,12 +1124,15 @@ class Session:
         content: str,
         request_id: str | None = None,
         tool_call_id: str | None = None,
+        media: list[MediaRef] | None = None,
     ) -> None:
         """投递用户消息。
 
         先检查并写入第一条消息 metadata，更新最后互动时间，再转发给 agent。
         标题与 last_interaction 合并为一次 metadata 落盘（touch_last_interaction）。
         tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
+        media 非空时消息携带媒体引用（字节在会话媒体目录；引用已由
+        ``SessionManager._post`` 闸门校验可兑现）。
 
         Raises:
             ValueError: 正文不可编码为 UTF-8（它在首条消息时会成为标题，也会进
@@ -1107,5 +1142,8 @@ class Session:
         self._check_first_message_metadata(content)
         self.touch_last_interaction()
         await self._agent.post(
-            content, request_id=request_id, tool_call_id=tool_call_id
+            content,
+            request_id=request_id,
+            tool_call_id=tool_call_id,
+            media=media,
         )

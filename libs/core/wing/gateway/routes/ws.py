@@ -144,6 +144,7 @@ async def handle_ws(ws: WebSocket) -> None:
                         session_id=req.session_id,
                         client_id=client_id,
                         tool_call_id=req.tool_call_id,
+                        media=req.media,
                     )
             except Exception as e:
                 log.error(f"Failed to handle request: {e}")

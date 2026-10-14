@@ -19,7 +19,10 @@ from wing.context import Compactor
 from wing.config import ModelCapabilities, ModelSpec, ProviderConfig
 from wing.media import (
     BUDGET_PLACEHOLDER,
+    BUDGET_USER_PLACEHOLDER,
     NO_VISION_PLACEHOLDER,
+    NO_VISION_USER_PLACEHOLDER,
+    NO_VISION_USER_PLACEHOLDER_NO_PATH,
     TOO_LARGE_PLACEHOLDER,
     MediaAccess,
     MediaPolicy,
@@ -904,9 +907,9 @@ class TestPlanForRequest:
 class TestSystemMessageMediaIgnored:
     """`Message.media` 挂在 system 消息上时两协议行为对齐：不发图、也不加占位（N1）。
 
-    当前不可达（ReadImage 只写 tool 消息，`Message.media` 注明「仅 tool，预留
-    user」）——本组测试是未来扩展（user 贴图等）的对齐锚点：任何协议都不得把
-    image part / 占位文本发射进 system 段。
+    system 消息的 media 在真实链路里不产生（user 贴图与 ReadImage 都只写
+    user / tool 消息）——本组是扩展对齐锚点：任何协议都不得把 image part /
+    占位文本发射进 system 段。
     """
 
     @staticmethod
@@ -950,6 +953,144 @@ class TestSystemMessageMediaIgnored:
             UNAVAILABLE_PLACEHOLDER,
         ):
             assert placeholder not in wire
+
+
+########## user 贴图的占位分流（D6）
+
+
+class TestUserMessagePlaceholderVariants:
+    """user 图与 tool 图的占位分流：no_vision 附保存路径、budget 改述为"仍在会话中"。
+
+    tool 侧三条文案是冻结字符串（上面各组的逐字断言继续生效）——本组同时钉住
+    "user 变体只出现在 user 消息上"，以及路径查询只在真要渲染时发生。
+    """
+
+    @staticmethod
+    def _user_msg(data: bytes) -> tuple[Message, MediaRef]:
+        ref = make_ref(data)
+        return Message(role="user", content="see this", media=[ref]), ref
+
+    @staticmethod
+    def _media(data: bytes, *, path: Any = None) -> MediaAccess:
+        store = {hashlib.sha256(data).hexdigest(): data}
+        return MediaAccess(read=store.get, write=store.__setitem__, path=path)
+
+    @pytest.mark.asyncio
+    async def test_no_vision_user_image_carries_saved_path(self):
+        """text 模型收到 user 贴图：无 image part，占位附**保存路径**；原文本不动。"""
+        data = png_bytes(4, 4, b"user-novision")
+        msg, ref = self._user_msg(data)
+        saved = f"/sessions/s1/media/{ref.id}"
+        media = self._media(data, path=lambda mid: saved if mid == ref.id else None)
+
+        body = await openai_body([msg], model=TEXT_MODEL, media=media)
+
+        parts = content_parts(body["messages"][0])
+        assert [p["type"] for p in parts] == ["text", "text"]
+        assert parts[0]["text"] == "see this"  # 原文本一字节不改
+        assert parts[1]["text"] == NO_VISION_USER_PLACEHOLDER.format(path=saved)
+        assert "image_url" not in json.dumps(body)
+
+    @pytest.mark.asyncio
+    async def test_no_vision_user_image_without_path_degrades(self):
+        """memory 后端 / 不带 path 的替身 → 降级文案（只说明图片存在）。"""
+        data = png_bytes(4, 4, b"user-nopath")
+        msg, _ = self._user_msg(data)
+
+        body = await openai_body([msg], model=TEXT_MODEL, media=self._media(data))
+
+        assert content_parts(body["messages"][0])[-1]["text"] == (
+            NO_VISION_USER_PLACEHOLDER_NO_PATH
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_vision_user_path_failure_degrades(self, caplog_log):
+        """path 查询抛异常：降级为无路径文案 + WARN（可选素材不得打断序列化）。"""
+        data = png_bytes(4, 4, b"user-pathboom")
+        msg, _ = self._user_msg(data)
+
+        def _boom(mid: str) -> str | None:
+            raise RuntimeError("no path for you")
+
+        body = await openai_body(
+            [msg], model=TEXT_MODEL, media=self._media(data, path=_boom)
+        )
+
+        assert content_parts(body["messages"][0])[-1]["text"] == (
+            NO_VISION_USER_PLACEHOLDER_NO_PATH
+        )
+        assert caplog_log.warnings
+
+    @pytest.mark.asyncio
+    async def test_budget_user_image_says_still_in_session(self, monkeypatch):
+        """user 图被字节预算驱逐 → user 变体（"仍在会话中"），tool 图照常发射。"""
+        datas = [sized_png(96), sized_png(96)]
+        refs = [make_ref(d) for d in datas]
+        policy = MediaPolicy(
+            max_images=100, request_budget_bytes=200, evict_quantum_bytes=64
+        )
+        monkeypatch.setattr("wing.provider.media.resolve_media_policy", lambda: policy)
+        msgs = [
+            Message(role="user", content="look", media=[refs[0]]),
+            Message(role="tool", tool_call_id="c1", content="env", media=[refs[1]]),
+        ]
+
+        body = await openai_body(
+            msgs, cfg=openai_cfg(image_delivery="inline"), media=make_media(*datas)
+        )
+
+        assert content_parts(body["messages"][0])[-1]["text"] == BUDGET_USER_PLACEHOLDER
+        assert len(image_urls(body["messages"][1])) == 1
+        assert BUDGET_PLACEHOLDER not in json.dumps(body)
+
+    @pytest.mark.asyncio
+    async def test_tool_variants_never_leak_into_user_and_vice_versa(self):
+        """同一条 no_vision 投影：user 位用 user 文案、tool 位用 tool 文案（不串味）。"""
+        udata, tdata = png_bytes(4, 4, b"u"), png_bytes(4, 4, b"t")
+        uref, tref = make_ref(udata), make_ref(tdata)
+        msgs = [
+            Message(role="user", content="look", media=[uref]),
+            Message(role="tool", tool_call_id="c1", content="env", media=[tref]),
+        ]
+
+        body = await openai_body(
+            msgs, model=TEXT_MODEL, media=self._media(b"", path=lambda _: "/saved/x")
+        )
+
+        user_parts = content_parts(body["messages"][0])
+        tool_parts = content_parts(body["messages"][1])
+        assert user_parts[-1]["text"] == NO_VISION_USER_PLACEHOLDER.format(
+            path="/saved/x"
+        )
+        assert tool_parts[-1]["text"] == NO_VISION_PLACEHOLDER
+
+    @pytest.mark.asyncio
+    async def test_anthropic_user_image_placeholder_uses_user_variant(self):
+        """anthropic 路径同样按 role 分流（user 占位附路径、tool 保持冻结文案）。"""
+        udata, tdata = png_bytes(4, 4, b"ua"), png_bytes(4, 4, b"ta")
+        uref, tref = make_ref(udata), make_ref(tdata)
+        saved = f"/sessions/s2/media/{uref.id}"
+        msgs = [
+            Message(role="user", content="look", media=[uref]),
+            Message(role="tool", tool_call_id="c1", content="env", media=[tref]),
+        ]
+
+        _, am = await anthropic_messages(
+            msgs, model=TEXT_MODEL, media=self._media(b"", path=lambda _: saved)
+        )
+
+        # 连续同角色（user）在 anthropic 序列化里合并为一条消息：user 文本 →
+        # user 占位 → tool_result（tool 占位在 tool_result 的 content 数组内）。
+        assert len(am) == 1, am
+        blocks = am[0]["content"]
+        assert blocks[0] == {"type": "text", "text": "look"}
+        assert blocks[1] == {
+            "type": "text",
+            "text": NO_VISION_USER_PLACEHOLDER.format(path=saved),
+        }
+        inner = blocks[2]["content"]
+        assert inner[-1]["text"] == NO_VISION_PLACEHOLDER
+        assert '"type": "image"' not in json.dumps(am)
 
 
 ########## 压缩剥离

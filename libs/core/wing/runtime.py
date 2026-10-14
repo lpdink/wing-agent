@@ -64,6 +64,7 @@ from wing.request_context import (
 )
 from typing import TYPE_CHECKING, Any
 from collections.abc import Iterable
+from wing.schema import MediaRef
 from wing.session import Session, SessionManager, SessionReaper, TagMutation
 from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
@@ -244,6 +245,7 @@ class WingRuntime:
         session_id: str | None = None,
         client_id: str | None = None,
         tool_call_id: str | None = None,
+        media: list[MediaRef] | None = None,
     ) -> None:
         """唯一入站入口。设置 RequestContext，try/finally 确保恢复。"""
         token = set_request_context(
@@ -257,6 +259,7 @@ class WingRuntime:
                 request_id=request_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
+                media=media,
             )
         finally:
             reset_request_context(token)

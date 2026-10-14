@@ -85,7 +85,9 @@ class _SerializeMixin:
             # system 消息的 media 一律忽略（投影层已剔除，见 plan_request_media）：
             # 本协议 system content 只允许文本 part——此处 slots 恒为空，不发图
             # 也不加占位，与 anthropic 路径行为一致。
-            slots = message_slots(plans.get(i, []), media=media, cache=cache)
+            slots = message_slots(
+                plans.get(i, []), media=media, cache=cache, role=msg.role
+            )
             base = msg.to_openai()
             move_kept = delivery == "followup" and msg.role == "tool"
             extra: list[dict] = []
