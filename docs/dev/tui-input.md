@@ -258,10 +258,14 @@ chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标�
 struck-through 的 cell，因为那内容没有回到草稿）。空草稿走 `set_text` 精确还原；草稿里已经有东西
 （消息在飞的那几秒用户又打了字 / 粘了图）时**追加在整份草稿末尾**（`move_draft_end` + `insert_str`）——
 `set_text` 的既定语义是替换整份草稿、连它的 chip 一起丢，那会吃掉用户刚写的东西。图片用
-`insert_image` 重新入册（号码从头计，与「清空草稿即重编号」一致）。
+`insert_image` 重新入册：号码按 composer 的既有契约走——**空草稿从头计，草稿里已有 chip（用户在这几
+秒里自己粘了图 / 大段文本）时从现有号码之后续号**（号码是草稿内的身份，不是计数）。
 
 **关联不到 pending 的 `error` 什么都不做**：turn 级失败（LLM 报错等）的 `request_id` 是后端新生成的
-uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到任何条目，行为与从前逐字相同。
+uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到任何条目，行为与从前逐字相同。同类边界还有
+**重连 / 切会话**：`SyncSession` 到达时 `chat.clear()` 连 pending 一起清（既有行为），若失败回调
+恰好落在其后，`take_pending` 取不回内容——此时只提示原因（toast **不带** `draft restored`），
+不假装回填。
 
 ## 真机验收清单（图片粘贴链路，最终版）
 
@@ -281,7 +285,9 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 5. 多张：一次消息带 2–3 张，模型按提交顺序提到它们；`/clear` + 图 → 见到
    `Image dropped: /clear takes no image` 的 info toast。
 6. 发送后 `resume`（`/session` 切走再切回，或重启 TUI）：历史里那条消息仍带 `[Image #1 …]` 标签行，
-   **号码与 pending 时一致**（消息内 1-based）。
+   **号码与 pending 时一致**（消息内 1-based）。**例外**：排队期间被后端 batch 合并的多条消息在历史里
+   是**一条**（`run_turn` 的 drain-and-merge），标签行按合并后的消息重排（`#1..#N` 覆盖 batch 内的全部
+   图片）——live 的每个 pending 气泡各自从 #1 数，合并行不会。
 
 **C. 失败与回填（07）**
 

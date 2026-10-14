@@ -1607,8 +1607,10 @@ mod tests {
         ));
     }
 
+    /// 取回一个**只有一条**的队列：取走即空，且什么都不渲染（回填把内容还回草稿，
+    /// 不在这里留 cell）。
     #[test]
-    fn test_remove_pending_drops_unsent_message() {
+    fn test_take_pending_drops_unsent_message() {
         let mut view = ChatView::new();
         view.push_pending("req-1".into(), Submission::text("never sent"));
 

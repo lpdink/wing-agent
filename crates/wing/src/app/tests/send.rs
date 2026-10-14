@@ -452,9 +452,10 @@ async fn a_disconnected_gateway_gives_the_message_back() {
     assert_restore_is_pure(&mut app);
 }
 
-/// 无媒体的断连路径同款（文案保留旧子句 + 说明内容去向）。
+/// 无媒体的断连路径（toast 保留旧子句 + 说明内容去向）：纯文本也走同一条回填路径，
+/// 文本原样回到草稿。
 #[tokio::test]
-async fn a_text_only_send_keeps_the_disconnected_behaviour() {
+async fn a_text_only_send_also_gives_the_text_back() {
     let mut app = test_app();
     send(&mut app, None, "hello", Vec::new()).await;
     let toast = app.toast.as_ref().expect("failure toast");

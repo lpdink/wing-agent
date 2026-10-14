@@ -47,8 +47,9 @@ pub struct ImagePayload {
 
 impl ImagePayload {
     /// The picture alone — the one conversion point to the sender's
-    /// `CompressedImage` (the label stays behind with the frontend's own
-    /// pending/history rows).
+    /// `CompressedImage`. The label stays behind with the **composer chip**
+    /// (nothing else reads it): a message rebuilds its own label rows from the
+    /// pictures it carries (`crate::ui::chat_view::media`).
     pub fn into_image(self) -> CompressedImage {
         self.image
     }

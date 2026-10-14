@@ -19,14 +19,16 @@ use crate::util::image_compress::CompressedImage;
 
 /// 消息的显示文本：正文 + 每张图一行标签（正文为空时只有标签行）。
 ///
-/// 图片排在正文**之后**（D5：不承诺文本与图片的交错顺序，后端也是两个字段）。
+/// 图片排在正文**之后**（D5：不承诺文本与图片的交错顺序，后端也是两个字段）。正文已经以
+/// `\n` 收尾时不再补一行——别的入口（CLI / HTTP）写进历史的尾换行不该在 resume 时多出一个
+/// 空行。（TUI 自己的提交路径先 `trim()`，走不到这一支。）
 pub fn text_with_labels(content: &str, labels: &[String]) -> String {
     if labels.is_empty() {
         return content.to_string();
     }
     let mut text = String::from(content);
     for label in labels {
-        if !text.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
         text.push_str(label);
@@ -122,6 +124,21 @@ mod tests {
         // 纯图消息（content 为空）合法：显示文本就是标签行，不带前导空行。
         let labels = labels(&[picture(8, 8, 7)]);
         assert_eq!(text_with_labels("", &labels), "[Image #1 8×8 7B]");
+    }
+
+    #[test]
+    fn a_trailing_newline_does_not_grow_a_blank_line() {
+        // 正文已经以 `\n` 收尾（别的入口写进历史的尾换行）：标签接在下一行的行首，
+        // 不再补一个换行——否则 resume 时正文与标签之间会多出一个空行。
+        assert_eq!(
+            text_with_labels("foo\n", &labels(&[picture(8, 8, 7)])),
+            "foo\n[Image #1 8×8 7B]"
+        );
+        assert_eq!(
+            text_with_labels("foo\n", &labels(&[picture(8, 8, 7), picture(8, 8, 7)])),
+            "foo\n[Image #1 8×8 7B]\n[Image #2 8×8 7B]",
+            "只有紧邻正文的那一个换行被省掉"
+        );
     }
 
     #[test]
