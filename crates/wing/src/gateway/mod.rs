@@ -8,3 +8,4 @@ pub use chunk::Limits;
 pub use chunk::Reassembler;
 pub use client::CloseReason;
 pub use client::GatewayClient;
+pub use client::RequestSender;

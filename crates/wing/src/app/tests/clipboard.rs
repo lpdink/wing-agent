@@ -335,7 +335,7 @@ fn pictures_and_text_share_the_draft() {
 /// 变成 JPEG 产物，错误面转成给 toast 的一句话。
 ///
 /// 直接驱动抽出来的函数而不是 `execute_intent`：后者需要 `WingTerminal`（真实
-/// stdout），单测造不出来（同 `send_user_message` 的抽取理由）。
+/// stdout），单测造不出来（同 `deliver_user_message` 的抽取理由）。
 #[tokio::test]
 async fn the_runner_compresses_on_the_blocking_pool() {
     let mut app = test_app();

@@ -448,6 +448,14 @@ impl App {
             return;
         }
 
+        // 消息的后台发送失败回执：属于那条 pending 条目（按 `request_id` 认领），
+        // 同样在守卫之前分派——换过会话后条目多半已被 `chat.clear()` 清掉，此时
+        // `restore_failed_send` 只 toast 原因（不碰草稿、不假装回填）。
+        if let FetchPayload::SendFailed { request_id, reason } = payload {
+            self.restore_failed_send(&request_id, &reason);
+            return;
+        }
+
         // Session guard: discard results from a previous session.
         if session_id != self.session_id {
             tracing::debug!(
@@ -632,8 +640,8 @@ impl App {
                     conflict,
                 });
             }
-            // 上面已经分派过（这个回执属于 composer，不是会话）。
-            FetchPayload::ClipboardImage(_) => {}
+            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / pending 的发送失败）。
+            FetchPayload::ClipboardImage(_) | FetchPayload::SendFailed { .. } => {}
         }
     }
 }

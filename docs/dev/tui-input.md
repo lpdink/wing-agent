@@ -254,10 +254,17 @@ TUI 自己的提交路径先 `trim()`，走不到这一支）。
 
 | 失败路径 | 触发点 | 行为 |
 |---|---|---|
-| 网关断连（transport 为 None） | `runner::send_user_message` | 不上传不发送 → 回填 + `Not sent — gateway disconnected; draft restored` |
-| 上传失败 | 同上（`upload_media` 出错） | 整条不发（**不发送半截**：少一张图的引用列表会被当成完整输入）→ 回填 + `Image upload failed: …; draft restored` |
-| WS 发送失败 | 同上 | 回填 + `Send failed: …; draft restored` |
+| 网关断连（transport 为 None） | `runner::dispatch_send_message` 的本地分支 | 不上传不发送 → 回填 + `Not sent — gateway disconnected; draft restored` |
+| 上传失败 | 后台任务（`runner::deliver_user_message`，`upload_media` 出错） | 整条不发（**不发送半截**：少一张图的引用列表会被当成完整输入）→ 回执 → 回填 + `Image upload failed: …; draft restored` |
+| WS 发送失败 | 同上 | 回执 → 回填 + `Send failed: …; draft restored` |
 | **服务端拒绝** | `WingEvent::Error` 携带的 `request_id` 命中本地 pending（网关对失败的 `ClientRequest` 帧回填客户端的 `request_id`） | 取回 + 回填 + toast；条目**已出队**，随后 `done` 的兜底提升绝不把它当「已发送」 |
+
+**后台发送（慢链路）**：逐张上传 + WS 发送跑在**后台任务**里（`runner::spawn_send_message`），
+事件循环一步不等网络——慢链路（远程网关 / SSH 隧道）上 N 张图 = N 个完整往返，内联 await 会把 UI 冻住
+秒级（冻结还会把 `TermEvent` / sequences 通道填满，联动丢粘贴流量）。失败经 `FetchPayload::SendFailed`
+回执回到 App（与压缩回执同一条通道，且同样在会话守卫**之前**分派：条目按 `request_id` 认领）。
+两条契约照旧：**相邻提交串行**（链尾把任务串起来，帧到达顺序 = 提交顺序，后端按到达序入队），
+每条消息内部**先逐张上传（失败即停）再发帧**。
 
 **回填是纯数据恢复**：只写 composer 与 toast——不 push intent（不重发、不重复上传）、不往 chat 写 cell
 （内容回到草稿，不该同时在历史里显示一遍；这与**打断**路径刻意相反：打断用 `discard_pending` 留下一条

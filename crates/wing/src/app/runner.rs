@@ -46,6 +46,10 @@ const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(
 /// ([`AppIntent::RestartGateway`]) may rewrite it (the config file is the
 /// source of truth for host:port, and `Ctrl+R` exists to apply that change).
 ///
+/// `send_chain` is the tail of the message-send pipeline: [`AppIntent::SendMessage`]
+/// runs in a background task, and the tail chains consecutive sends so their
+/// frames reach the gateway in submission order (see `spawn_send_message`).
+///
 /// Fetch-type intents are spawned as background tasks; their results arrive
 /// asynchronously via `fetch_tx`.
 pub async fn execute_intent(
@@ -55,6 +59,7 @@ pub async fn execute_intent(
     terminal: &mut WingTerminal,
     intent: AppIntent,
     fetch_tx: &mpsc::Sender<FetchResult>,
+    send_chain: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
     match intent {
         AppIntent::CopyToClipboard(text) => {
@@ -138,15 +143,19 @@ pub async fn execute_intent(
             request_id,
             images,
         } => {
-            send_user_message(
+            dispatch_send_message(
                 app,
                 transport.as_ref(),
-                content,
-                tool_call_id,
-                request_id,
-                images,
-            )
-            .await;
+                send_chain,
+                OutgoingMessage {
+                    session_id: app.session_id.clone(),
+                    content,
+                    tool_call_id,
+                    request_id,
+                    images,
+                },
+                fetch_tx.clone(),
+            );
         }
         AppIntent::CompressClipboardImage { bytes, options } => {
             let tx = fetch_tx.clone();
@@ -710,59 +719,123 @@ pub async fn execute_intent(
 /// （真实 stdout），单测造不出来（同 `apply_update_session` 的抽取理由）。
 ///
 /// **失败契约**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
-/// 少一张图的引用列表会被当成完整输入），并把提交产物**还给草稿**（`restore_failed_send`
-/// 从 pending 队列取回文本与图片 chip）+ warning toast；
-/// 已经上传成功的图留在存储里（政策：媒体永不删除）。
-pub(super) async fn send_user_message(
-    app: &mut App,
-    transport: Option<&Transport>,
-    content: String,
-    tool_call_id: Option<String>,
-    request_id: String,
-    images: Vec<CompressedImage>,
-) {
-    let Some(transport) = transport else {
-        // Gateway connection lost — nothing left the client, so the content
-        // goes back to the composer.
-        app.restore_failed_send(&request_id, "Not sent — gateway disconnected");
-        return;
-    };
-
-    let media = if images.is_empty() {
+/// 少一张图的引用列表会被当成完整输入）。调用方拿 `Err(reason)` 去把提交产物**还给
+/// 草稿**（后台任务把它包成回执 → `App::restore_failed_send` 从 pending 队列取回文本
+/// 与图片 chip + warning toast）；已经上传成功的图留在存储里（政策：媒体永不删除）。
+///
+/// **返回**：`Ok(())` = 帧已投进 WS 写通道（成功路径不动 pending：条目等后端的
+/// `user_message_accepted` 提升）；`Err(reason)` = 整条没发出去（无连接 / 上传失败 /
+/// WS 写不出去），`reason` 是给 toast 的文案。
+pub(super) async fn deliver_user_message(
+    http: &wing_api_client::GatewayClient,
+    ws: &crate::gateway::RequestSender,
+    message: &mut OutgoingMessage,
+) -> Result<(), String> {
+    // 图片 move 出去（不克隆压缩产物）：回执只需要剩下的两个 id。
+    let media = if message.images.is_empty() {
         // 纯文本：帧里没有 `media` 键，行为与引入图片之前逐字节相同。
         None
     } else {
-        match upload_images(&transport.http, &app.session_id, images).await {
+        let images = std::mem::take(&mut message.images);
+        match upload_images(http, &message.session_id, images).await {
             Ok(refs) => Some(refs),
             Err(e) => {
                 tracing::warn!("image upload failed: {e}");
-                app.restore_failed_send(&request_id, &format!("Image upload failed: {e}"));
-                return;
+                return Err(format!("Image upload failed: {e}"));
             }
         }
     };
 
-    if let Err(e) = transport
-        .ws
+    if let Err(e) = ws
         .send_message(
-            &app.session_id,
-            &content,
-            tool_call_id,
-            request_id.clone(),
+            &message.session_id,
+            &message.content,
+            message.tool_call_id.take(),
+            message.request_id.clone(),
             media,
         )
         .await
     {
         tracing::error!("failed to send message: {e}");
-        // Never left the client — the submission goes back to the composer.
-        app.restore_failed_send(&request_id, &format!("Send failed: {e}"));
+        return Err(format!("Send failed: {e}"));
     }
+    Ok(())
+}
+
+/// 一条待发消息的载荷：`SendMessage` 的字段 + 目标会话，总是整体传递（也把下面几个
+/// 函数的参数表压回可读范围）。
+pub(super) struct OutgoingMessage {
+    pub(super) session_id: String,
+    pub(super) content: String,
+    pub(super) tool_call_id: Option<String>,
+    pub(super) request_id: String,
+    pub(super) images: Vec<CompressedImage>,
+}
+
+/// `AppIntent::SendMessage` 的落地：无连接 → 本地回填；有连接 → 后台任务（[`spawn_send_message`]）。
+///
+/// 事件循环**一步都不等网络**：逐张上传 + WS 发送在慢链路（远程网关 / SSH 隧道）上是
+/// N 个完整往返，内联 await 会把 UI（重绘 / 按键）冻住秒级；冻结足够久还会把
+/// `TermEvent` 通道填满，联动丢粘贴流量（见 `docs/dev/tui-input.md` 的「后台发送」段）。
+/// 与 `CompressClipboardImage` 同一个范式：副作用在后台跑，结果经 `FetchResult` 回执回 App。
+pub(super) fn dispatch_send_message(
+    app: &mut App,
+    transport: Option<&Transport>,
+    send_chain: &mut Option<tokio::task::JoinHandle<()>>,
+    message: OutgoingMessage,
+    fetch_tx: mpsc::Sender<FetchResult>,
+) {
+    let Some(transport) = transport else {
+        // Gateway connection lost — nothing left the client, so the content
+        // goes back to the composer. 纯本地动作（无 I/O），不必绕后台任务。
+        app.restore_failed_send(&message.request_id, "Not sent — gateway disconnected");
+        return;
+    };
+    spawn_send_message(transport, send_chain, message, fetch_tx);
+}
+
+/// 把一条消息的发送挪进后台任务（[`dispatch_send_message`] 的「有连接」分支）。
+///
+/// **顺序是契约**：`send_chain` 把相邻两条消息的任务串起来——第二条要等第一条整条
+/// （上传 + 发送）结束才开始。后端按帧到达顺序入队（消息顺序是合并语义的一部分），
+/// 而两条快速提交（第一条的图还在上传、用户又发了一条）本来由「事件循环内联 await」
+/// 天然串行；挪进后台后若不串，第二条会超车。串行只发生在**后台任务之间**，事件循环
+/// 一步不等；每条消息内部仍是「先逐张上传（失败即停）→ 再发帧」。
+fn spawn_send_message(
+    transport: &Transport,
+    send_chain: &mut Option<tokio::task::JoinHandle<()>>,
+    mut message: OutgoingMessage,
+    fetch_tx: mpsc::Sender<FetchResult>,
+) {
+    let http = transport.http.clone();
+    let ws = transport.ws.request_sender();
+    let previous = send_chain.take();
+    let handle = tokio::spawn(async move {
+        if let Some(previous) = previous {
+            // 上一条的成败由它自己的回执处理，这里只接顺序。
+            let _ = previous.await;
+        }
+        if let Err(reason) = deliver_user_message(&http, &ws, &mut message).await {
+            // 内容还给草稿：回执走和压缩同一条 fetch 通道（App 侧不看会话守卫——
+            // 条目按 request_id 认领，找不到就只 toast，不碰草稿）。
+            let _ = fetch_tx
+                .send(FetchResult {
+                    session_id: message.session_id,
+                    payload: FetchPayload::SendFailed {
+                        request_id: message.request_id,
+                        reason,
+                    },
+                })
+                .await;
+        }
+    });
+    *send_chain = Some(handle);
 }
 
 /// 压缩一张粘贴进来的图片，在阻塞池上（解码 / 缩放 / JPEG 编码都是纯 CPU）。
 ///
 /// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
-/// （真实 stdout），单测造不出来（同 `send_user_message` 的抽取理由）。错误在这里
+/// （真实 stdout），单测造不出来（同 `deliver_user_message` 的抽取理由）。错误在这里
 /// 格式化成给 toast 的文案；`Err(String)` 而不是 `CompressError`，是因为调用点只需要
 /// 一句话（阻塞池的 join 失败也只有这句话能说）。
 pub(super) async fn compress_clipboard_image(

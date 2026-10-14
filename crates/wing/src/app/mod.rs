@@ -1007,6 +1007,11 @@ pub async fn run_app(
     let (fetch_tx, mut fetch_rx) =
         tokio::sync::mpsc::channel::<crate::app::intent::FetchResult>(32);
 
+    // Message-send pipeline tail: `SendMessage` runs in a background task, and
+    // each new send waits for the previous one so frames keep submission order
+    // (see `runner::spawn_send_message`). The loop never awaits the chain.
+    let mut send_chain: Option<tokio::task::JoinHandle<()>> = None;
+
     // Request system info on startup via HTTP intents.
     app.push_intent(AppIntent::FetchInfo);
     app.push_intent(AppIntent::FetchCommands);
@@ -1039,6 +1044,7 @@ pub async fn run_app(
                 terminal,
                 intent,
                 &fetch_tx,
+                &mut send_chain,
             )
             .await;
             app.mark_dirty();
