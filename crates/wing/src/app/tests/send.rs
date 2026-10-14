@@ -546,6 +546,36 @@ async fn a_dead_ws_connection_fails_the_send_with_the_same_contract() {
     );
 }
 
+/// 失败回调到达时 pending 条目已经不在队列里（被打断丢弃 / 已提升）：只提示原因，
+/// **不假装回填**（草稿一根不动，toast 也不说 `draft restored`——那句只属于真的把内容
+/// 还回去的路径）。
+#[tokio::test]
+async fn a_failure_with_no_pending_entry_only_toasts() {
+    let mut app = test_app();
+    app.input.set_text("draft");
+
+    super::super::runner::send_user_message(
+        &mut app,
+        None,
+        "gone".into(),
+        None,
+        "req-gone".into(),
+        vec![image(0x01, 4)],
+    )
+    .await;
+
+    let toast = app.toast.as_ref().expect("failure toast");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert!(toast.message.contains("Not sent"), "{}", toast.message);
+    assert!(
+        !toast.message.contains("draft restored"),
+        "没有回填就不说回填：{}",
+        toast.message
+    );
+    assert_eq!(app.input.text(), "draft", "草稿不被碰");
+    assert!(app.chat.pending.is_empty());
+}
+
 /// 回填是**纯数据恢复**：不产生 intent（不重发、不重复上传）、不往 chat 里写 cell。
 fn assert_restore_is_pure(app: &mut crate::app::App) {
     assert!(
