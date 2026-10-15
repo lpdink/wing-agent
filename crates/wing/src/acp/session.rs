@@ -532,7 +532,9 @@ impl SessionHub {
             // ACP 的 `session/new` 没有客户端指定 id 的位置：由网关铸 id，原样回给客户端
             // 作 ACP sessionId（`--session-id` 那套 create-or-adopt 是 CLI 用法）。
             session_id: None,
-            parent_session_id: None,
+            // 血缘（软信号）：本进程被 agent 拉起时（env 里有 `WING_SESSION_ID`）
+            // 记下创建者（docs/dev/session-lineage.md §3）。
+            parent_session_id: crate::cmd::common::parent_session_id_from_env(),
         };
         let created = self
             .http

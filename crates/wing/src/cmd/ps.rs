@@ -6,7 +6,10 @@
 //! The human-readable session list is rendered through the shared table
 //! engine (`render::table`) with the same skin as TUI markdown tables; every
 //! measurement is display columns (CJK-safe). `--json` is the machine surface
-//! and is left untouched.
+//! and is left untouched (a flat list in the existing order — `--tree` only
+//! shapes the human table). `--parent <sid>` narrows the list to that
+//! session's direct children; `--tree` draws the lineage forest with the
+//! shared algorithm (`shared::session_tree`).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -25,20 +28,28 @@ use crate::config::ThemePalette;
 use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
+use crate::shared::session_tree::{TreeRow, build_forest};
 
 use super::common;
 use super::common::TableOutput;
 
 /// Entry point for `wing ps`.
-pub async fn run_ps(all: bool, tags: &[String], json: bool, watch: bool) -> ExitCode {
+pub async fn run_ps(
+    all: bool,
+    tags: &[String],
+    parent: Option<&str>,
+    tree: bool,
+    json: bool,
+    watch: bool,
+) -> ExitCode {
     if watch {
-        return run_ps_watch(all, tags, json).await;
+        return run_ps_watch(all, tags, parent, tree, json).await;
     }
-    match fetch_sessions().await {
+    match fetch_sessions(parent).await {
         Ok(sessions) => {
-            let mut filtered = filter_sessions(sessions, all, tags);
+            let mut filtered = filter_sessions(sessions, all, tags, parent);
             order_sessions(&mut filtered);
-            emit_sessions(&filtered, json);
+            emit_sessions(&filtered, json, tree);
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -51,7 +62,13 @@ pub async fn run_ps(all: bool, tags: &[String], json: bool, watch: bool) -> Exit
 /// Watch mode: clear screen and reprint every 2 seconds.
 /// Creates the HTTP client once, then polls in a loop. The palette and the
 /// output environment are resolved once too — they do not change mid-watch.
-async fn run_ps_watch(all: bool, tags: &[String], json: bool) -> ExitCode {
+async fn run_ps_watch(
+    all: bool,
+    tags: &[String],
+    parent: Option<&str>,
+    tree: bool,
+    json: bool,
+) -> ExitCode {
     let (host, port) = match common::ensure_gateway().await {
         Ok(hp) => hp,
         Err(e) => {
@@ -70,13 +87,13 @@ async fn run_ps_watch(all: bool, tags: &[String], json: bool) -> ExitCode {
     let out = TableOutput::detect();
 
     loop {
-        match http.list_sessions().await {
+        match http.list_sessions_with_parent(parent).await {
             Ok(resp) => {
-                let mut filtered = filter_sessions(resp.sessions, all, tags);
+                let mut filtered = filter_sessions(resp.sessions, all, tags, parent);
                 order_sessions(&mut filtered);
                 // Clear screen.
                 print!("\x1b[2J\x1b[H");
-                emit_sessions_with(&filtered, json, &palette, &out);
+                emit_sessions_with(&filtered, json, tree, &palette, &out);
             }
             Err(e) => {
                 eprintln!("wing ps error: {e}");
@@ -106,19 +123,21 @@ pub async fn run_info(session_id: &str, json: bool) -> ExitCode {
 
 /// Human/JSON output for one session snapshot (`--json` stays the machine
 /// surface; the table only serves humans).
-fn emit_sessions(sessions: &[SessionInfo], json: bool) {
+fn emit_sessions(sessions: &[SessionInfo], json: bool, tree: bool) {
     let palette = ThemePalette::from_config(&AppConfig::load().colors);
     let out = TableOutput::detect();
-    emit_sessions_with(sessions, json, &palette, &out);
+    emit_sessions_with(sessions, json, tree, &palette, &out);
 }
 
 fn emit_sessions_with(
     sessions: &[SessionInfo],
     json: bool,
+    tree: bool,
     palette: &ThemePalette,
     out: &TableOutput,
 ) {
     if json {
+        // 机器面：与今天逐字节相同（平铺、既有呈现序）——`--tree` 只作用于人类表格。
         common::print_json_compact(sessions);
         return;
     }
@@ -127,46 +146,100 @@ fn emit_sessions_with(
         return;
     }
     let now = Local::now().naive_local();
-    print!("{}", format_sessions_table(sessions, palette, out, now));
+    let rows = if tree {
+        tree_rows(sessions)
+    } else {
+        flat_rows(sessions)
+    };
+    print!("{}", format_sessions_table(&rows, palette, out, now));
 }
 
-/// Filter sessions by status and tags.
+/// 表格的一行素材：会话本体 + 树前缀（平铺模式恒为空串）。
+struct SessionRow<'a> {
+    session: &'a SessionInfo,
+    prefix: String,
+}
+
+/// 平铺呈现序（后端基准序 + pin 叠加，由 [`order_sessions`] 定）。
+fn flat_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
+    sessions
+        .iter()
+        .map(|session| SessionRow {
+            session,
+            prefix: String::new(),
+        })
+        .collect()
+}
+
+/// 树序：交给 [`build_forest`] 定序（输入序不参与），每个节点带回自己的
+/// 渲染前缀。pin 分两层、孤儿升根、环与深链防御都在算法里。
+fn tree_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
+    let input: Vec<TreeRow<'_>> = sessions
+        .iter()
+        .map(|session| TreeRow {
+            id: session.id.as_str(),
+            parent: session.parent_session_id.as_deref(),
+            pinned: is_pinned(&session.tags),
+            pin_added_at: pin_added_at(&session.tag_meta),
+            last_interaction: session.last_interaction.as_deref(),
+        })
+        .collect();
+    build_forest(&input)
+        .into_iter()
+        .map(|entry| SessionRow {
+            session: &sessions[entry.index],
+            prefix: entry.prefix,
+        })
+        .collect()
+}
+
+/// Filter sessions by status, tags and lineage parent.
 ///
 /// - With `tags` given: keep sessions carrying ALL tags (AND), **inactive
 ///   included** — tags describe long-term taxonomy (favorites / task crews
 ///   are often archived), so the default inactive-drop does not apply.
-/// - Without `tags`: `all=true` keeps everything; otherwise drop `inactive`
+/// - With `parent` given: keep the parent's **direct children**, inactive
+///   included (same rationale as `tags` — lineage is a long-term fact). The
+///   gateway already applied `?parent=`; the re-check covers a gateway that
+///   predates the parameter and answered with the full list (a documented
+///   superset), so `--parent` means the same thing everywhere.
+/// - Without either: `all=true` keeps everything; otherwise drop `inactive`
 ///   — except **pinned** sessions, which the default view keeps on purpose
 ///   (pin means "keep this one in sight", and what you pin is usually a
 ///   session you stepped away from).
-fn filter_sessions(sessions: Vec<SessionInfo>, all: bool, tags: &[String]) -> Vec<SessionInfo> {
+fn filter_sessions(
+    sessions: Vec<SessionInfo>,
+    all: bool,
+    tags: &[String],
+    parent: Option<&str>,
+) -> Vec<SessionInfo> {
+    let mut sessions = sessions;
+    if let Some(parent) = parent {
+        sessions.retain(|s| s.parent_session_id.as_deref() == Some(parent));
+    }
     if !tags.is_empty() {
-        return sessions
-            .into_iter()
-            .filter(|s| tags.iter().all(|t| s.tags.iter().any(|st| st == t)))
-            .collect();
+        sessions.retain(|s| tags.iter().all(|t| s.tags.iter().any(|st| st == t)));
     }
-    if all {
-        sessions
-    } else {
-        sessions
-            .into_iter()
-            .filter(|s| s.status != "inactive" || is_pinned(&s.tags))
-            .collect()
+    if tags.is_empty() && parent.is_none() && !all {
+        sessions.retain(|s| s.status != "inactive" || is_pinned(&s.tags));
     }
+    sessions
 }
 
 /// 呈现顺序：后端基准序 + 前端 pin 叠加 —— 被 pin 的置顶，组内后 pin 的更靠前
 /// （唯一实现在 [`crate::shared::pinning`]，与 `/ss` 面板共用）；其余保持
 /// 后端下发的顺序（活跃优先、组内按最后交互时间降序）。
+///
+/// 只作用于平铺与 `--json` 输出；`--tree` 的定序归 [`build_forest`]（它不读
+/// 输入顺序），这里的排序对树是空操作。
 fn order_sessions(sessions: &mut [SessionInfo]) {
     sessions.sort_by_cached_key(|s| pin_key(is_pinned(&s.tags), pin_added_at(&s.tag_meta)));
 }
 
-async fn fetch_sessions() -> Result<Vec<SessionInfo>> {
+async fn fetch_sessions(parent: Option<&str>) -> Result<Vec<SessionInfo>> {
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
-    let resp = http.list_sessions().await?;
+    let resp = http.list_sessions_with_parent(parent).await?;
     Ok(resp.sessions)
 }
 
@@ -192,11 +265,15 @@ async fn fetch_session_info(session_id: &str) -> Result<SessionInfoResponse> {
 /// SESSION ID the secondary one (copied on demand), LAST stays the faintest —
 /// and STATUS carries the one semantic colour per state.
 ///
+/// The tree prefix (empty in flat mode) is part of the SESSION ID cell: the
+/// column is `keep_natural`, so the widest `prefix + id` sets the column and
+/// the engine keeps every row at the same display width.
+///
 /// MODEL is the model's display name (gateway config) with the call name / id
 /// as fallback; it is a short label rather than prose, so it classifies as
 /// `Compact` (shrinks after NAME/TAGS) and is capped like the other columns.
 fn format_sessions_table(
-    sessions: &[SessionInfo],
+    rows: &[SessionRow<'_>],
     palette: &ThemePalette,
     out: &TableOutput,
     now: NaiveDateTime,
@@ -212,27 +289,40 @@ fn format_sessions_table(
         PlainColumn::capped("MODEL", ColumnKind::Compact, 32),
         PlainColumn::capped("TAGS", ColumnKind::Narrative, 40),
     ];
-    let rows = sessions
+    let table_rows = rows
         .iter()
-        .map(|s| {
+        .map(|row| {
+            let session = row.session;
             vec![
-                PlainCell::styled(s.id.clone(), Style::new().fg(palette.tool_result)),
-                PlainCell::styled(s.status.clone(), status_style(&s.status, palette)),
                 PlainCell::styled(
-                    format_last_interaction(s.last_interaction.as_deref(), now),
+                    format!("{}{}", row.prefix, session.id),
+                    Style::new().fg(palette.tool_result),
+                ),
+                PlainCell::styled(
+                    session.status.clone(),
+                    status_style(&session.status, palette),
+                ),
+                PlainCell::styled(
+                    format_last_interaction(session.last_interaction.as_deref(), now),
                     Style::new().fg(palette.dim),
                 ),
                 PlainCell::styled(
-                    common::single_line(s.name.as_deref().unwrap_or("-")),
+                    common::single_line(session.name.as_deref().unwrap_or("-")),
                     Style::new().fg(palette.text),
                 ),
-                PlainCell::styled(model_text(s), Style::new().fg(palette.tool_result)),
-                PlainCell::styled(tags_text(&s.tags), Style::new().fg(palette.tool_result)),
+                PlainCell::styled(model_text(session), Style::new().fg(palette.tool_result)),
+                PlainCell::styled(
+                    tags_text(&session.tags),
+                    Style::new().fg(palette.tool_result),
+                ),
             ]
         })
         .collect();
 
-    let table = PlainTable { columns, rows };
+    let table = PlainTable {
+        columns,
+        rows: table_rows,
+    };
     common::render_table(&table, palette, out)
 }
 
@@ -330,6 +420,9 @@ fn print_session_info(info: &SessionInfoResponse) {
     if let Some(ref name) = info.session_name {
         println!("session_name:        {name}");
     }
+    if let Some(ref parent) = info.parent_session_id {
+        println!("parent:              {parent}");
+    }
     if !info.tags.is_empty() {
         println!("tags:                {}", info.tags.join(", "));
     }
@@ -399,6 +492,32 @@ mod tests {
 
     fn ids(sessions: &[SessionInfo]) -> Vec<String> {
         sessions.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// 有父会话的行（血缘边）。
+    fn child_of(mut info: SessionInfo, parent: &str) -> SessionInfo {
+        info.parent_session_id = Some(parent.into());
+        info
+    }
+
+    /// 平铺表格（多数渲染用例的形态）。
+    fn flat_table(
+        sessions: &[SessionInfo],
+        palette: &ThemePalette,
+        out: &TableOutput,
+        now: NaiveDateTime,
+    ) -> String {
+        format_sessions_table(&flat_rows(sessions), palette, out, now)
+    }
+
+    /// 树表格（`--tree` 的渲染面）。
+    fn tree_table(
+        sessions: &[SessionInfo],
+        palette: &ThemePalette,
+        out: &TableOutput,
+        now: NaiveDateTime,
+    ) -> String {
+        format_sessions_table(&tree_rows(sessions), palette, out, now)
     }
 
     // ── 表格渲染（共享引擎 + 显示宽度记账）────────────────────────
@@ -546,7 +665,7 @@ mod tests {
             width: 100,
             color: false,
         };
-        let table = format_sessions_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
+        let table = flat_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
 
         let lines: Vec<&str> = table.lines().collect();
         assert!(lines[1].contains("MODEL"), "{table}");
@@ -572,7 +691,7 @@ mod tests {
             width: 100,
             color: false,
         };
-        let table = format_sessions_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
+        let table = flat_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
         let row: Vec<&str> = table.lines().filter(|l| l.contains("idle")).collect();
         assert_eq!(row.len(), 1, "{table}");
         // 单元格按体行分隔符切：SESSION ID / STATUS / LAST / NAME / MODEL / TAGS。
@@ -605,7 +724,7 @@ mod tests {
             width: 100,
             color: false,
         };
-        let table = format_sessions_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
+        let table = flat_table(&sessions, &palette, &out, naive("2026-10-09T21:11:00"));
 
         let lines: Vec<&str> = table.lines().collect();
         // 顶框 / 表头 / 表头分隔 / 行 / 行分隔 / 行 / 底框。
@@ -652,7 +771,7 @@ mod tests {
                 width,
                 color: false,
             };
-            let table = format_sessions_table(&sessions, &palette, &out, now);
+            let table = flat_table(&sessions, &palette, &out, now);
             assert!(
                 table.contains("20261009-210702-217d85f2"),
                 "width={width}: id 不能被截断\n{table}"
@@ -671,14 +790,14 @@ mod tests {
             width: 100,
             color: false,
         };
-        let plain = format_sessions_table(&sessions, &palette, &plain_out, now);
+        let plain = flat_table(&sessions, &palette, &plain_out, now);
         assert!(!plain.contains('\u{1b}'), "no ANSI when colour is off");
 
         let colored_out = TableOutput {
             width: 100,
             color: true,
         };
-        let colored = format_sessions_table(&sessions, &palette, &colored_out, now);
+        let colored = flat_table(&sessions, &palette, &colored_out, now);
         assert!(
             colored.contains('\u{1b}'),
             "ANSI expected when colour is on"
@@ -712,7 +831,7 @@ mod tests {
             width: 100,
             color: false,
         };
-        let table = format_sessions_table(&[s], &palette, &out, naive("2026-10-09T21:11:00"));
+        let table = flat_table(&[s], &palette, &out, naive("2026-10-09T21:11:00"));
         assert!(!table.contains("第一行\n第二行"), "{table}");
         assert!(table.contains("第一行 第二行"), "{table}");
     }
@@ -720,8 +839,11 @@ mod tests {
     #[test]
     fn default_filter_drops_inactive_but_all_keeps() {
         let sessions = vec![session("a", "working", &[]), session("b", "inactive", &[])];
-        assert_eq!(ids(&filter_sessions(sessions.clone(), false, &[])), ["a"]);
-        assert_eq!(ids(&filter_sessions(sessions, true, &[])), ["a", "b"]);
+        assert_eq!(
+            ids(&filter_sessions(sessions.clone(), false, &[], None)),
+            ["a"]
+        );
+        assert_eq!(ids(&filter_sessions(sessions, true, &[], None)), ["a", "b"]);
     }
 
     #[test]
@@ -734,10 +856,13 @@ mod tests {
             pinned("c", "inactive", Some("2026-10-05T21:30:12")),
         ];
         assert_eq!(
-            ids(&filter_sessions(sessions.clone(), false, &[])),
+            ids(&filter_sessions(sessions.clone(), false, &[], None)),
             ["a", "c"]
         );
-        assert_eq!(ids(&filter_sessions(sessions, true, &[])), ["a", "b", "c"]);
+        assert_eq!(
+            ids(&filter_sessions(sessions, true, &[], None)),
+            ["a", "b", "c"]
+        );
     }
 
     #[test]
@@ -778,16 +903,261 @@ mod tests {
             session("s4", "inactive", &[]),
         ];
         // 单标签：命中即保留（含 inactive）。
-        let out = filter_sessions(sessions.clone(), false, &["executor".into()]);
+        let out = filter_sessions(sessions.clone(), false, &["executor".into()], None);
         assert_eq!(ids(&out), ["s1", "s2", "s3"]);
         // 多标签：AND；不因 inactive 被默认丢弃。
-        let out = filter_sessions(sessions, false, &["executor".into(), "task=a".into()]);
+        let out = filter_sessions(sessions, false, &["executor".into(), "task=a".into()], None);
         assert_eq!(ids(&out), ["s1", "s2"]);
     }
 
     #[test]
     fn tag_filter_no_match_returns_empty() {
         let sessions = vec![session("a", "working", &["x"])];
-        assert!(filter_sessions(sessions, true, &["nope".into()]).is_empty());
+        assert!(filter_sessions(sessions, true, &["nope".into()], None).is_empty());
+    }
+
+    // ── 血缘：--parent 过滤与 --tree 渲染 ─────────────────────────
+
+    #[test]
+    fn parent_filter_keeps_direct_children_including_inactive() {
+        let sessions = vec![
+            session("parent", "working", &[]),
+            session("child-live", "idle", &[]),
+            session("child-idle", "inactive", &[]),
+            session("grandchild", "inactive", &[]),
+            session("stranger", "inactive", &[]),
+        ];
+        let sessions = sessions
+            .into_iter()
+            .map(|s| match s.id.as_str() {
+                "child-live" | "child-idle" => child_of(s, "parent"),
+                "grandchild" => child_of(s, "child-live"),
+                _ => s,
+            })
+            .collect();
+        // `--parent` 隐含 `--all`：inactive 的直接子照样列出；孙不在（只列直接子）；
+        // 父自己不在。
+        let out = filter_sessions(sessions, false, &[], Some("parent"));
+        assert_eq!(ids(&out), ["child-live", "child-idle"]);
+    }
+
+    #[test]
+    fn parent_filter_ands_with_tags() {
+        let sessions = vec![
+            child_of(session("s1", "inactive", &["task=a"]), "P"),
+            child_of(session("s2", "inactive", &["task=b"]), "P"),
+            child_of(session("s3", "inactive", &["task=a"]), "Q"),
+        ];
+        let out = filter_sessions(sessions, false, &["task=a".into()], Some("P"));
+        assert_eq!(ids(&out), ["s1"]);
+    }
+
+    /// 孤儿：父不在展示集合（被过滤 / 幽灵引用）→ 升为根（无前缀）。
+    #[test]
+    fn orphan_child_renders_as_a_root() {
+        let sessions = vec![
+            child_of(session("lost", "idle", &[]), "gone"),
+            session("root", "idle", &[]),
+        ];
+        let rows = tree_rows(&sessions);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.session.id.as_str(), r.prefix.as_str()))
+                .collect::<Vec<_>>(),
+            [("lost", ""), ("root", "")]
+        );
+    }
+
+    /// 子会话挂在父之后，带连接前缀；兄弟组内 `├─` / `└─` 收尾正确。
+    #[test]
+    fn tree_rows_nest_children_with_drawing_prefixes() {
+        let sessions = vec![
+            session("A", "working", &[]),
+            child_of(session("c1", "idle", &[]), "A"),
+            child_of(session("c2", "idle", &[]), "A"),
+            session("B", "idle", &[]),
+        ];
+        let rows = tree_rows(&sessions);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.session.id.as_str(), r.prefix.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("A", ""),
+                ("c1", "├─ "),
+                ("c2", "└─ "),
+                // 树与树之间不连线（每棵树独立成画）。
+                ("B", ""),
+            ]
+        );
+    }
+
+    /// 孙辈要延续祖先层的 `│`（非末位祖先的竖线不能断）。
+    #[test]
+    fn tree_rows_keep_the_trunk_line_for_grandchildren() {
+        let sessions = vec![
+            session("A", "idle", &[]),
+            child_of(session("B", "idle", &[]), "A"),
+            child_of(session("C", "idle", &[]), "A"),
+            child_of(session("G", "idle", &[]), "B"),
+        ];
+        let rows = tree_rows(&sessions);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.session.id.as_str(), r.prefix.as_str()))
+                .collect::<Vec<_>>(),
+            [("A", ""), ("B", "├─ "), ("G", "│  └─ "), ("C", "└─ "),]
+        );
+    }
+
+    /// pin 分层（文档 §4）：pin 的**根**整棵上浮；pin 的**子**只在兄弟组里
+    /// 排前，不提升父节点。
+    #[test]
+    fn tree_rows_float_a_pinned_root_with_its_subtree() {
+        let mut sessions = vec![
+            session("r1", "idle", &[]),
+            pinned("r2", "idle", Some("2026-10-01T09:00:00")),
+            child_of(session("r2child", "idle", &[]), "r2"),
+        ];
+        // 输入顺序不参与定序：倒着给也一样。
+        sessions.reverse();
+        let rows = tree_rows(&sessions);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.session.id.as_str(), r.prefix.as_str()))
+                .collect::<Vec<_>>(),
+            [("r2", ""), ("r2child", "└─ "), ("r1", "")]
+        );
+    }
+
+    #[test]
+    fn tree_rows_order_a_pinned_child_first_under_its_parent() {
+        let sessions = vec![
+            child_of(session("P", "idle", &[]), "root"),
+            session("root", "idle", &[]),
+            child_of(pinned("pinned-child", "idle", None), "P"),
+            child_of(session("plain-child", "idle", &[]), "P"),
+        ];
+        let rows = tree_rows(&sessions);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.session.id.as_str(), r.prefix.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("root", ""),
+                ("P", "└─ "),
+                ("pinned-child", "   ├─ "),
+                ("plain-child", "   └─ "),
+            ]
+        );
+    }
+
+    /// 子树活跃度：子树里有新动静的根上浮（排序语义来自 `shared::session_tree`，
+    /// 这里锚定 CLI 侧确实消费了它）。
+    #[test]
+    fn tree_rows_rank_roots_by_subtree_activity() {
+        let mut quiet = session("quiet", "idle", &[]);
+        quiet.last_interaction = Some("2026-10-01T00:00:00".into());
+        let mut busy = session("busy", "idle", &[]);
+        busy.last_interaction = Some("2026-10-02T00:00:00".into());
+        let mut busy_child = child_of(session("busy-child", "idle", &[]), "busy");
+        busy_child.last_interaction = Some("2026-10-03T00:00:00".into());
+
+        let input = [quiet, busy, busy_child];
+        let rows = tree_rows(&input);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["busy", "busy-child", "quiet"]
+        );
+    }
+
+    /// 树表格：前缀进 SESSION ID 列，行等宽（显示列记账）、不超终端宽；
+    /// 无父子关系的会话在树模式下与平铺逐行一致（退化面）。
+    #[test]
+    fn tree_table_indents_the_session_id_column_and_stays_aligned() {
+        let mut parent = session("20261015-211837-87e3fac2", "working", &[]);
+        parent.name = Some("调度者".into());
+        let mut child = child_of(
+            session("20261015-215945-bf5b1d00", "idle", &[]),
+            parent.id.as_str(),
+        );
+        child.name = Some("执行者一号".into());
+        let sessions = vec![parent, child];
+
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 100,
+            color: false,
+        };
+        let table = tree_table(&sessions, &palette, &out, naive("2026-10-15T22:00:00"));
+
+        // 子行：前缀进第一列（`┃ ` 是外框，后跟前缀 + id）。
+        assert!(table.contains("┃ └─ 20261015-215945-bf5b1d00"), "{table}");
+        // 根行没有前缀（第一列紧接着就是 id）。
+        assert!(table.contains("┃ 20261015-211837-87e3fac2"), "{table}");
+        let widths: Vec<usize> = table
+            .lines()
+            .map(unicode_width::UnicodeWidthStr::width)
+            .collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        assert!(widths[0] <= 100, "{widths:?}");
+        // CJK 名字不把行推歪（引擎按显示宽度截断/补齐）。
+        assert!(table.contains("调度者"), "{table}");
+        assert!(table.contains("执行者一号"), "{table}");
+    }
+
+    /// 空前缀 = 平滑退化：没有任何血缘时，树模式的表格与平铺一模一样。
+    #[test]
+    fn tree_table_without_lineage_matches_the_flat_table() {
+        let sessions = vec![
+            session("a", "working", &[]),
+            session("b", "idle", &["task=a"]),
+        ];
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 100,
+            color: false,
+        };
+        let now = naive("2026-10-09T21:11:00");
+        assert_eq!(
+            tree_table(&sessions, &palette, &out, now),
+            flat_table(&sessions, &palette, &out, now)
+        );
+    }
+
+    /// 深链防御：前缀宽度封顶（`shared::session_tree::MAX_INDENT_DEPTH`），
+    /// 渲染不会把行推到爆。
+    #[test]
+    fn tree_table_caps_the_indent_of_a_deep_chain() {
+        let n = 40;
+        let mut sessions: Vec<SessionInfo> = Vec::new();
+        for i in 0..n {
+            let mut s = session(&format!("n{i}"), "idle", &[]);
+            if i > 0 {
+                s.parent_session_id = Some(format!("n{}", i - 1));
+            }
+            sessions.push(s);
+        }
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 200,
+            color: false,
+        };
+        let table = tree_table(&sessions, &palette, &out, naive("2026-10-15T22:00:00"));
+        // 最深一行仍存在（被放置），但前缀长度封顶（不随链深无限加宽）。
+        let deepest = table
+            .lines()
+            .find(|l| l.contains("n39"))
+            .expect("deepest row rendered");
+        assert!(deepest.contains("└─ n39"), "{deepest}");
+        // 去掉外框（`┃ `）后的前缀宽度必须封顶。
+        let cell = deepest.strip_prefix("┃ ").expect("data row border");
+        let prefix_width = unicode_width::UnicodeWidthStr::width(cell.split("n39").next().unwrap());
+        assert!(
+            prefix_width <= crate::shared::session_tree::MAX_INDENT_DEPTH * 3 + 3,
+            "prefix not capped: {prefix_width}\n{table}"
+        );
     }
 }
