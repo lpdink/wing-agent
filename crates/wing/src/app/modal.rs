@@ -136,20 +136,28 @@ fn is_toggle_reasoning_key(key: &crossterm::event::KeyEvent) -> bool {
 /// （crossterm → `Char('v') + CONTROL`）；开了协议的终端把 Cmd+V 回传成
 /// `CSI 118;9u`（crossterm → `Char('v') + SUPER`，见 `tests/clipboard_paste_keys.rs`）。
 ///
-/// `Ctrl+Shift+V` 刻意不接：Linux 终端的「粘贴」默认键，动作发生在终端一侧、
-/// 到不了应用 —— 绑上只会得到「有时被终端吃掉、有时没有」的不一致。
-/// `Ctrl+Alt+V` 也不接：kitty 协议把 AltGr 报成 ctrl+alt，抢下来会吃掉某些键盘
-/// 布局的字符输入。
+/// 口径（两分支不对称是刻意的）：
+///
+/// - `super+v` 与 `super+shift+v`（macOS 的 Paste and Match Style）都触发粘贴 ——
+///   SHIFT 只改变粘贴的“样式”，语义仍是粘贴；`super+alt/ctrl+v` 是与粘贴无关的
+///   系统/终端组合，不接。
+/// - `Ctrl+V` 触发；`Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧）与
+///   `Ctrl+Alt+V`（kitty 把 AltGr 报成 ctrl+alt）不接 —— 绑上只会吃掉字符输入或
+///   得到「有时被终端吃掉、有时没有」的不一致。
 fn is_paste_clipboard_key(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyModifiers;
 
     matches!(key.code, KeyCode::Char('v' | 'V'))
-        && (key.modifiers.contains(KeyModifiers::SUPER)
-            || (key.modifiers.contains(KeyModifiers::CONTROL)
+        && if key.modifiers.contains(KeyModifiers::SUPER) {
+            !key.modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+        } else {
+            key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key
                     .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)))
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        }
 }
 
 /// The chat-scroll meaning of a key, if it has one.
@@ -344,7 +352,13 @@ impl App {
             }
             KeyRoute::PasteClipboard => {
                 self.reset_quit_counter();
-                self.push_intent(AppIntent::ReadClipboard);
+                // 在飞合并：第一次读取落地前连按只算一次（同
+                // `clipboard_compress_in_flight` 的纪律）——最坏 ~23 s 的读取窗口里
+                // 堆 N 条子进程链只会换来 N 倍 churn 与 N 个收尾 toast。落地（成功
+                // 或失败）由 runner 的开闸恢复可读。
+                if crate::app::runner::claim_clipboard_read() {
+                    self.push_intent(AppIntent::ReadClipboard);
+                }
             }
             KeyRoute::Settings => self.handle_settings_key(key),
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),

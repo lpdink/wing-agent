@@ -77,7 +77,11 @@ pub enum PasteFailure {
     Timeout,
     /// 内容超过 [`MAX_PAYLOAD`]。
     TooLarge,
-    /// 命令跑完了但不是一次成功的读取；`reason` 是给日志与 toast 的一句话。
+    /// 读取器报告「这个剪贴板没有该表示」（普通非零退出：`wl-paste` 的空剪贴板 /
+    /// 类型不可用都是这种）。不是通道故障 —— 收场由 [`settle`] 归入空结果。
+    NoRepresentation,
+    /// 真实失败（临时文件读不动、无法预占、读任务 panic 等）。**不是**「没有内容」：
+    /// 收场必须上报错误，不能粉饰成空剪贴板。
     Failed(String),
 }
 
@@ -94,6 +98,7 @@ impl std::fmt::Display for PasteFailure {
             ),
             Self::Timeout => write!(f, "Clipboard read timed out"),
             Self::TooLarge => write!(f, "Clipboard content is too large to paste"),
+            Self::NoRepresentation => write!(f, "Clipboard has no text or image"),
             Self::Failed(reason) => write!(f, "Clipboard read failed: {reason}"),
         }
     }
@@ -180,11 +185,39 @@ fn macos_image_spec(path: &Path) -> CommandSpec {
     }
 }
 
-/// 新建临时文件的唯一路径（`$TMPDIR` 下，进程 id + 计数器）。
-fn temp_image_path() -> PathBuf {
+/// 预占候选名的重试上限（名字被抢占 / 上次残留都是极端情况）。
+const TEMP_RESERVE_ATTEMPTS: usize = 16;
+
+/// 新建并**预占**临时文件的唯一路径（`$TMPDIR` 下，进程 id + 计数器）。
+///
+/// `create_new` 先由本进程创建：sticky 目录（`/tmp`）里别人无法替换已存在的文件，
+/// 关掉「路径被预换成符号链接 → osascript 覆写链接目标」的面 ——
+/// `open for access … with write permission` 自己没有 O_EXCL 语义。名字被占用
+/// （上一次残留 / 并行进程）就换一个计数重试。
+fn temp_image_path() -> io::Result<PathBuf> {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("wing-paste-{}-{n}.png", std::process::id()))
+    reserve_temp_file((0..).map(|_| {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("wing-paste-{}-{n}.png", std::process::id()))
+    }))
+}
+
+/// 逐个尝试候选路径，`create_new` 成功即预占；名字已被占用（`AlreadyExists`）就试
+/// 下一个，其它错误立即上报（`$TMPDIR` 不可写之类）。
+fn reserve_temp_file(candidates: impl Iterator<Item = PathBuf>) -> io::Result<PathBuf> {
+    let mut last = None;
+    for path in candidates.take(TEMP_RESERVE_ATTEMPTS) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("no free clipboard temp name")))
 }
 
 /// Linux 的图片读取工具：Wayland 优先，X11 兜底。
@@ -241,8 +274,10 @@ trait CommandRunner {
     /// `Ok(bytes)` = the helper was spawned **and** exited successfully, with at
     /// most [`MAX_PAYLOAD`] bytes (an empty `Ok` is legal). A helper that cannot
     /// serve the read (an `osascript` on a text-only clipboard included) exits
-    /// non-zero and comes back as `Err`; the callers decide per command whether
-    /// that is a normal "no representation" signal or a failure.
+    /// non-zero and comes back as `Err` with `ErrorKind::Unsupported` — the
+    /// callers decide per command whether to keep looking (another reader may
+    /// answer) or settle for "no representation". Every other `Err` kind is a
+    /// real failure.
     ///
     /// `timeout` is a **hard bound on this call**: on expiry the helper's whole
     /// process group is killed and `ErrorKind::TimedOut` comes back without
@@ -261,6 +296,16 @@ fn too_large(program: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::FileTooLarge,
         format!("{program} produced more than {MAX_PAYLOAD} bytes"),
+    )
+}
+
+/// 读取器「普通非零退出」的错误 kind：它说的是「这个剪贴板没有该表示」（`wl-paste`
+/// 的空剪贴板 / 类型不可用都是 exit 1），`classify_io` 认它并把收场交给 [`settle`]
+/// （→ 空结果）；**不是**通道故障，别和 `ErrorKind` 的通用错误混为一谈。
+fn exited(program: &str, status: std::process::ExitStatus) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("{program} exited with {status}"),
     )
 }
 
@@ -331,7 +376,15 @@ impl CommandRunner for ProcessCommandRunner {
         let mut data: Option<Vec<u8>> = None;
         while status.is_none() || data.is_none() {
             if status.is_none() {
-                status = child.try_wait()?;
+                match child.try_wait() {
+                    Ok(found) => status = found,
+                    Err(e) => {
+                        // 早退也守纪律：先收进程组再返回（deadline 硬上界 + 整组回收
+                        // 适用于每一条出口）；读线程随管道关闭自行收尾，不 join。
+                        kill_group(&mut child);
+                        return Err(e);
+                    }
+                }
             }
             if data.is_none() {
                 data = match rx.try_recv() {
@@ -378,10 +431,7 @@ impl CommandRunner for ProcessCommandRunner {
         if status.success() {
             Ok(bytes)
         } else {
-            Err(io::Error::other(format!(
-                "{} exited with {}",
-                spec.program, status
-            )))
+            Err(exited(spec.program, status))
         }
     }
 }
@@ -404,6 +454,8 @@ fn classify_io(error: io::Error) -> PasteFailure {
         io::ErrorKind::NotFound => PasteFailure::Unavailable,
         io::ErrorKind::TimedOut => PasteFailure::Timeout,
         io::ErrorKind::FileTooLarge => PasteFailure::TooLarge,
+        // 普通非零退出（「没有该表示」）：见 `exited`。
+        io::ErrorKind::Unsupported => PasteFailure::NoRepresentation,
         _ => PasteFailure::Failed(error.to_string()),
     }
 }
@@ -456,9 +508,14 @@ fn read_macos(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure>
 /// macOS 图片读取：`osascript` 写临时文件 → 读文件。
 ///
 /// 非零退出（含实测的「纯文本剪贴板 → 0 字节文件 + exit 1」）不是失败：0 字节 /
-/// 文件缺失就是「剪贴板没有图片」，照常走文本。只有超时 / 缺命令 / 超限按失败报。
+/// 文件缺失就是「剪贴板没有图片」，照常走文本。只有超时 / 缺命令 / 超限，以及临时
+/// 路径预占不了，按失败报。
 fn read_macos_image(runner: &impl CommandRunner) -> Result<Option<Vec<u8>>, PasteFailure> {
-    let path = temp_image_path();
+    // 路径先预占（`create_new`，见 `temp_image_path`）；预占不了就没什么可读。
+    let path = match temp_image_path() {
+        Ok(path) => path,
+        Err(e) => return Err(classify_io(e)),
+    };
     let spec = macos_image_spec(&path);
     match runner.run(&spec, IMAGE_TIMEOUT) {
         Err(e) if e.kind() == io::ErrorKind::TimedOut => {
@@ -593,14 +650,21 @@ fn read_text(
     }
 }
 
-/// 收场规则：只有**结构性**失败（缺命令 / 超时 / 超限）才是失败，其余的普通
-/// 非零退出归「没有对应表示」——空剪贴板在各平台读取器上都是一次普通失败，
-/// 把读取器的退出码原样抛给用户会得到一个误导性的「读取失败」toast。
+/// 收场规则：**结构性失败与真实错误**（缺命令 / 超时 / 超限 / `Failed`）都要上报 ——
+/// 超限的文案与 5522 通道一字不差，`Failed`（临时文件读不动、读任务 panic 等）是
+/// 真实故障，不能被粉饰成「剪贴板是空的」。
+///
+/// 「没有该表示」（普通非零退出：空剪贴板在各平台读取器上都是一次普通退出）与
+/// 「什么都没读到」才归空结果 —— 把读取器的退出码原样抛给用户会得到误导性的
+/// 「读取失败」toast。
 fn settle(failure: Option<PasteFailure>) -> Result<(), PasteFailure> {
     match failure {
-        Some(e @ (PasteFailure::Unavailable | PasteFailure::Timeout | PasteFailure::TooLarge)) => {
-            Err(e)
-        }
+        Some(
+            e @ (PasteFailure::Unavailable
+            | PasteFailure::Timeout
+            | PasteFailure::TooLarge
+            | PasteFailure::Failed(_)),
+        ) => Err(e),
         _ => Ok(()),
     }
 }
@@ -663,6 +727,10 @@ fn remove_temp_file(path: &Path) {
 /// 不 join 读线程，见 [`ProcessCommandRunner`]），所以最坏时长 = 各命令超时之和：
 /// macOS 5 s（图片）+ 1 s（文本）；Linux 2 个图片工具 ×（listing 5 s + read 5 s）+
 /// 3 个文本工具 × 1 s ≈ 23 s —— 期间 UI 不冻，只是这段时间内不回粘贴结果。
+///
+/// **读取期间没有「进行中」提示**（取舍：正常路径毫秒级、最坏时长如上已量化，加提示
+/// 要多一份跨窗口状态，收益低）；TUI 侧对连击做合并 —— 一次只跑一条读取链，落地
+/// （成功或失败）后恢复可读，见 `app::runner` 的在飞闸门。
 pub(crate) async fn read_clipboard() -> Result<PasteOutcome, PasteFailure> {
     let remote = is_remote_session();
     let platform = host_platform();
@@ -744,11 +812,19 @@ mod tests {
     fn osascript_without_picture(spec: &CommandSpec) -> io::Result<Vec<u8>> {
         let path = spec.image_file.as_ref().expect("osascript writes a file");
         std::fs::write(path, b"").expect("touch the temp file");
-        Err(io::Error::other("osascript exited with exit status: 1"))
+        Err(plain_exit("osascript"))
     }
 
     fn not_found(program: &str) -> io::Error {
         io::Error::new(io::ErrorKind::NotFound, format!("{program} not installed"))
+    }
+
+    /// 读取器普通非零退出的真 runner 形态（`ErrorKind::Unsupported`，见 `exited`）。
+    fn plain_exit(program: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{program} exited with exit status: 1"),
+        )
     }
 
     #[test]
@@ -782,6 +858,7 @@ mod tests {
             PasteFailure::Unavailable,
             PasteFailure::Timeout,
             PasteFailure::TooLarge,
+            PasteFailure::NoRepresentation,
             PasteFailure::Failed("boom".to_string()),
         ];
         for failure in failures {
@@ -789,6 +866,10 @@ mod tests {
         }
         assert!(PasteFailure::Remote.message().contains("SSH"));
         assert_eq!(PasteFailure::Timeout.message(), "Clipboard read timed out");
+        assert_eq!(
+            PasteFailure::NoRepresentation.message(),
+            "Clipboard has no text or image"
+        );
         assert!(
             PasteFailure::Failed("boom".to_string())
                 .message()
@@ -796,17 +877,68 @@ mod tests {
         );
     }
 
+    /// `settle` 只放行「没有该表示」与「什么都没读到」；真实错误（`Failed`）与结构性
+    /// 失败都要上报 —— 临时文件读不动不能被粉饰成「剪贴板是空的」。
+    #[test]
+    fn settle_upgrades_real_failures_but_not_missing_representations() {
+        assert!(settle(None).is_ok());
+        assert!(settle(Some(PasteFailure::NoRepresentation)).is_ok());
+        assert!(
+            settle(Some(PasteFailure::Failed(
+                "cannot read the clipboard temp file".to_string()
+            )))
+            .is_err()
+        );
+        for failure in [
+            PasteFailure::Unavailable,
+            PasteFailure::Timeout,
+            PasteFailure::TooLarge,
+        ] {
+            assert!(settle(Some(failure.clone())).is_err(), "{failure:?}");
+        }
+    }
+
     #[test]
     fn temp_paths_are_unique_and_named_after_the_process() {
-        let a = temp_image_path();
-        let b = temp_image_path();
+        let a = temp_image_path().expect("reserve a");
+        let b = temp_image_path().expect("reserve b");
         assert_ne!(a, b);
+        assert!(a.exists() && b.exists(), "预占 = 文件真的被创建");
         assert!(
             a.to_string_lossy()
                 .contains(&std::process::id().to_string()),
             "the name carries the pid: {}",
             a.display()
         );
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    /// 路径预占（N4 加固）：候选名已被占用（预置的符号链接 / 上次残留）时换下一个，
+    /// 不把已有路径交给 osascript 覆写。
+    #[test]
+    fn a_taken_temp_name_is_skipped_instead_of_reused() {
+        let stem = format!("wing-paste-test-{}-", std::process::id());
+        let taken = std::env::temp_dir().join(format!("{stem}0.png"));
+        let _ = std::fs::remove_file(&taken);
+        std::fs::write(&taken, b"occupied").expect("occupy the first candidate");
+
+        let reserved =
+            reserve_temp_file((0..4).map(|n| std::env::temp_dir().join(format!("{stem}{n}.png"))))
+                .expect("reserve");
+        assert!(
+            reserved.ends_with(format!("{stem}1.png")),
+            "已占用的名字必须被跳过：{}",
+            reserved.display()
+        );
+        assert!(reserved.exists(), "预占 = 文件真的被创建");
+        assert_eq!(
+            std::fs::read(&taken).expect("the taken path is untouched"),
+            b"occupied"
+        );
+
+        let _ = std::fs::remove_file(&taken);
+        let _ = std::fs::remove_file(&reserved);
     }
 
     #[test]
@@ -847,6 +979,7 @@ mod tests {
         let runner = FakeRunner::new(move |spec| match spec.program {
             "/usr/bin/osascript" => {
                 let path = spec.image_file.as_ref().expect("osascript writes a file");
+                assert!(path.exists(), "路径先被本进程预占（N4 加固）");
                 std::fs::write(path, &written).expect("write the fixture");
                 Ok(Vec::new())
             }
@@ -1083,7 +1216,7 @@ mod tests {
         let runner = FakeRunner::new(|spec| match (spec.program, spec.args.join(" ")) {
             ("wl-paste", ref args) if args == "--list-types" => Ok(b"image/png\n".to_vec()),
             ("wl-paste", ref args) if args == "--no-newline --type image/png" => {
-                Err(io::Error::other("wl-paste exited with exit status: 1"))
+                Err(plain_exit("wl-paste"))
             }
             ("wl-paste", ref args) if args == "--no-newline" => Ok(b"text wins".to_vec()),
             other => panic!("unexpected command {other:?}"),
@@ -1150,12 +1283,7 @@ mod tests {
     /// exit 1；X11 工具同类），不是通道失败：工具全按非零退出时收场必须是 Empty。
     #[test]
     fn linux_without_a_selection_is_empty_not_a_failure() {
-        let runner = FakeRunner::new(|spec| {
-            Err(io::Error::other(format!(
-                "{} exited with exit status: 1",
-                spec.program
-            )))
-        });
+        let runner = FakeRunner::new(|spec| Err(plain_exit(spec.program)));
         assert_eq!(
             read_from_clipboard(&runner, Platform::Linux, false),
             Ok(PasteOutcome::Empty)
@@ -1172,13 +1300,33 @@ mod tests {
     fn macos_treats_a_plain_text_reader_failure_as_no_text() {
         let runner = FakeRunner::new(|spec| match spec.program {
             "/usr/bin/osascript" => osascript_without_picture(spec),
-            "/usr/bin/pbpaste" => Err(io::Error::other("pbpaste exited with exit status: 1")),
+            "/usr/bin/pbpaste" => Err(plain_exit("pbpaste")),
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
             read_from_clipboard(&runner, Platform::Macos, false),
             Ok(PasteOutcome::Empty)
         );
+    }
+
+    /// 真实错误（这里是读取器起不来：PermissionDenied）**不是**「没有内容」：
+    /// 收场必须是错误（N6）—— 否则用户看到的是误导性的「剪贴板没有文本或图片」。
+    #[test]
+    fn a_real_reader_failure_is_not_masked_as_an_empty_clipboard() {
+        let runner = FakeRunner::new(|spec| match spec.program {
+            "/usr/bin/osascript" => osascript_without_picture(spec),
+            "/usr/bin/pbpaste" => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "pbpaste is not executable",
+            )),
+            other => panic!("unexpected program {other}"),
+        });
+        match read_from_clipboard(&runner, Platform::Macos, false) {
+            Err(PasteFailure::Failed(reason)) => {
+                assert!(reason.contains("not executable"), "{reason}");
+            }
+            other => panic!("a real failure must stay a failure: {other:?}"),
+        }
     }
 
     /// 文本也受 64 MiB 上限（S2）：超限字节**在返回 / 插入之前**被拒绝，文案与

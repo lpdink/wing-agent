@@ -813,8 +813,10 @@ fn test_key_routing_of_the_idle_app() {
 /// Ctrl+V / super+v 都是「读系统剪贴板」（L1）：前者是控制字节 0x16 的解码形态
 /// （`Char('v') + CONTROL`），后者是开了 kitty 键盘协议的终端回传 Cmd+V 的形态
 /// （`CSI 118;9u` → `Char('v') + SUPER`；两种形态的 crossterm 解码钉在
-/// `tests/clipboard_paste_keys.rs`）。`Ctrl+Shift+V` 刻意不接（Linux 终端的粘贴
-/// 默认键，动作发生在终端一侧）；裸 `v` 与 `V+SHIFT` 仍是普通输入。
+/// `tests/clipboard_paste_keys.rs`）。口径：`super+shift+v`（macOS 的 Paste and
+/// Match Style，语义就是粘贴）触发；`super+alt/ctrl+v` 与 `Ctrl+Shift+V`（Linux
+/// 终端的粘贴默认键，动作发生在终端一侧）/ `Ctrl+Alt+V`（AltGr）不接；裸 `v` 与
+/// `V+SHIFT` 仍是普通输入。
 #[test]
 fn test_ctrl_v_and_super_v_route_to_the_local_clipboard() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -824,6 +826,31 @@ fn test_ctrl_v_and_super_v_route_to_the_local_clipboard() {
     let super_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER);
     assert_eq!(app.route_key(&ctrl_v), KeyRoute::PasteClipboard);
     assert_eq!(app.route_key(&super_v), KeyRoute::PasteClipboard);
+    // SUPER 分支：允许 SHIFT（粘贴样式变体），排除 ALT / CTRL（与粘贴无关）。
+    assert_eq!(
+        app.route_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT
+        )),
+        KeyRoute::PasteClipboard,
+        "super+shift+v 是 Paste and Match Style，语义就是粘贴"
+    );
+    assert_eq!(
+        app.route_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER | KeyModifiers::ALT
+        )),
+        KeyRoute::Composer,
+        "super+alt+v 与粘贴语义无关"
+    );
+    assert_eq!(
+        app.route_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER | KeyModifiers::CONTROL
+        )),
+        KeyRoute::Composer,
+        "super+ctrl+v 与粘贴语义无关"
+    );
     assert_eq!(
         app.route_key(&KeyEvent::new(
             KeyCode::Char('v'),
@@ -867,22 +894,38 @@ fn test_paste_clipboard_key_is_reserved_below_the_panels() {
     }
 }
 
-/// 按下手势：草稿不动（不再插字面 `v`），推出一条读取 intent（读取在后台任务上跑）。
+/// 按下手势：草稿不动（不再插字面 `v`），推出一条读取 intent（读取在后台任务上跑）；
+/// 在飞期间连按被合并（第一次落地前不再起第二条链），落地后恢复可读。
 #[test]
-fn test_paste_clipboard_key_pushes_the_read_intent() {
+fn test_paste_clipboard_key_merges_repeats_while_a_read_is_in_flight() {
+    use crate::app::runner::release_clipboard_read;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// 数一次并取走草稿里的读取 intent。
+    fn reads(app: &mut App) -> usize {
+        app.drain_intents()
+            .into_iter()
+            .filter(|i| matches!(i, AppIntent::ReadClipboard))
+            .count()
+    }
+
+    // 闸门是进程级静态：先清干净、跑完也清干净（整个测试二进制只有这个用例碰它）。
+    release_clipboard_read();
 
     let mut app = test_app();
     for mods in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), mods));
     }
     assert_eq!(app.input.text(), "", "手势不产生字面 `v`");
-    let reads = app
-        .drain_intents()
-        .into_iter()
-        .filter(|i| matches!(i, AppIntent::ReadClipboard))
-        .count();
-    assert_eq!(reads, 2, "按两次推两条读取 intent");
+    assert_eq!(reads(&mut app), 1, "在飞期间连按合并成一条读取链");
+
+    // 真循环里第一条 intent 会被 runner 执行（闸门已在分派点认领）；这里模拟读取
+    // 落地（成功或失败都会释放闸门）。
+    release_clipboard_read();
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    assert_eq!(reads(&mut app), 1, "落地后的新手势重新起链");
+
+    release_clipboard_read();
 }
 
 #[test]

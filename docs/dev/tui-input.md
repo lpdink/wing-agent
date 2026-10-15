@@ -228,6 +228,8 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些不实现 5522 的终端�
   收，到点即返回、不等管道关闭）。事件循环只 await 回执（`AppIntent::ReadClipboard` →
   `FetchPayload::ClipboardPaste`）；临时文件（pid + 计数命名）读完即删、**失败也删**，
   超过 64 MiB 拒绝（读取在上限处截断；与 5522 通道同一个上限）。
+  **读取期间没有「进行中」提示**（正常路径毫秒级；最坏时长在 `util/clipboard_paste.rs`
+  量化），`Ctrl+V` / `super+v` **连击已合并为一次读取**（一次只跑一条读取链，落地后恢复）。
 - **落点**：文本 → `App::handle_paste`（模态挡板自动继承）；图片 → 同一条
   `App::on_clipboard_image` 单并发流水线；空 → `Clipboard has no text or image` toast；
   失败（远程 / 缺命令 / 超时 / 超限）各有定向 toast，**不静默**。
