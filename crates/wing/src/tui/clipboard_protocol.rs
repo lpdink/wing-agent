@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 use super::TermEvent;
 use super::stdin_proxy::Sequence;
 use crate::util::image_compress::KNOWN_IMAGE_MIMES;
+use crate::util::mime::normalize_mime;
 
 /// 一条 read 事务 / 一次 event 收集的空闲上限：正常终端毫秒级回完整串，超了就是没指望。
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -255,20 +256,6 @@ fn parse_listing(payload: &[u8]) -> Vec<String> {
 // ---------------------------------------------------------------------------
 // MIME 选择与请求构造
 // ---------------------------------------------------------------------------
-
-/// MIME 的归一形态：剥掉 `;charset=…` 之类的参数、去首尾空白、转小写。
-///
-/// **请求侧与响应侧必须用同一份归一**（[`choose_mime`] 挑表示、read DATA 的 mime 归属
-/// 比对）：终端在 listing 里列的名字与它自己 DATA 回显的名字不必逐字一致（参数 / 大小写
-/// 都是允许的差异），两侧口径一旦分叉，DATA 会被静默丢弃——读停在空数据上，最后以
-/// 「没有可用表示」或超时收场，而终端明明把字节发过来了。
-pub(crate) fn normalize_mime(mime: &str) -> String {
-    mime.split(';')
-        .next()
-        .unwrap_or(mime)
-        .trim()
-        .to_ascii_lowercase()
-}
 
 /// 从 listing 里挑一个要读的 MIME（纯函数）。
 ///

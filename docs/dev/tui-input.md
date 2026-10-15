@@ -214,7 +214,8 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些不实现 5522 的终端�
 
 - **键位**：`Ctrl+V`（控制字节 `0x16`，终端基本都原样转发）与终端回传的 `super+v`
   （kitty 键盘协议下 Ghostty 把不可执行的 `Cmd+V` 以 `CSI 118;9u` 交回应用）路由到同一个
-  `KeyRoute::PasteClipboard`，是**应用保留键**（面板之下也接住，落点再做挡板）。
+  `KeyRoute::PasteClipboard`，是**应用保留键**（ask / `/model` / 候选 popup 之下也接住，
+  落点再做挡板；**设置浮层除外** —— 它连应用保留键也接管，与 `Ctrl+O` 同档）。
   **不接** `Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧，接上只会「有时被
   终端吃掉、有时没有」）。两种字节形态的 crossterm 解码钉在 `tests/clipboard_paste_keys.rs`。
 - **顺序**：图片 → 文本。macOS：`osascript` 让 AppKit 把剪贴板的 PNG 表示写进 `$TMPDIR`
@@ -223,9 +224,10 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些不实现 5522 的终端�
   Linux：`wl-paste`（Wayland）→ `xclip` / `xsel`（X11）；图片先列类型（`--list-types` /
   `TARGETS`）再从 **`KNOWN_IMAGE_MIMES`** 里选一个。
 - **执行**：子进程不带 shell、stdio 全管道（不继承终端），在阻塞池上跑；每条命令带超时
-  （文本 ~1 s、图片 ~5 s），事件循环只 await 回执（`AppIntent::ReadClipboard` →
-  `FetchPayload::ClipboardPaste`）。临时文件（pid + 计数命名）读完即删、**失败也删**，
-  超过 64 MiB 拒绝（与 5522 通道同一个上限）。
+  （文本 ~1 s、图片 ~5 s），超时是**硬上界**并对**进程组**生效（读取器 fork 的孙进程一并
+  收，到点即返回、不等管道关闭）。事件循环只 await 回执（`AppIntent::ReadClipboard` →
+  `FetchPayload::ClipboardPaste`）；临时文件（pid + 计数命名）读完即删、**失败也删**，
+  超过 64 MiB 拒绝（读取在上限处截断；与 5522 通道同一个上限）。
 - **落点**：文本 → `App::handle_paste`（模态挡板自动继承）；图片 → 同一条
   `App::on_clipboard_image` 单并发流水线；空 → `Clipboard has no text or image` toast；
   失败（远程 / 缺命令 / 超时 / 超限）各有定向 toast，**不静默**。

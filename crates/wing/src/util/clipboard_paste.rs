@@ -34,6 +34,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::util::image_compress::KNOWN_IMAGE_MIMES;
+use crate::util::mime::normalize_mime;
 
 /// Environment variables that mark the session as remote (SSH / MOSH).
 ///
@@ -237,13 +238,48 @@ fn linux_text_specs() -> Vec<CommandSpec> {
 /// picture-first fall-through and the temp-file lifecycle are unit-testable
 /// without touching the real clipboard.
 trait CommandRunner {
-    /// `Ok(stdout)` = the helper was spawned **and** exited successfully. A
-    /// helper that cannot serve the read (an `osascript` on a text-only
-    /// clipboard included) exits non-zero and comes back as `Err`; the callers
-    /// decide per command whether that is a normal "no representation" signal
-    /// or a failure. `ErrorKind::TimedOut` means the deadline was hit and the
-    /// child was killed.
+    /// `Ok(bytes)` = the helper was spawned **and** exited successfully, with at
+    /// most [`MAX_PAYLOAD`] bytes (an empty `Ok` is legal). A helper that cannot
+    /// serve the read (an `osascript` on a text-only clipboard included) exits
+    /// non-zero and comes back as `Err`; the callers decide per command whether
+    /// that is a normal "no representation" signal or a failure.
+    ///
+    /// `timeout` is a **hard bound on this call**: on expiry the helper's whole
+    /// process group is killed and `ErrorKind::TimedOut` comes back without
+    /// waiting for the output pipe to close (`wl-paste` forks a `cat` per read
+    /// that can hold it). Reading stops at `MAX_PAYLOAD + 1` bytes, reported as
+    /// `ErrorKind::FileTooLarge`.
     fn run(&self, spec: &CommandSpec, timeout: Duration) -> io::Result<Vec<u8>>;
+}
+
+/// stdout 读取上限：比 [`MAX_PAYLOAD`] 多一个字节 —— 刚好能分辨「在上限内」与
+/// 「超了」，又不会把超限内容整个读进内存。
+const READ_CAP: u64 = MAX_PAYLOAD as u64 + 1;
+
+/// 一条命令的输出超过上限时给调用方的错误 kind（`classify_io` 认它）。
+fn too_large(program: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!("{program} produced more than {MAX_PAYLOAD} bytes"),
+    )
+}
+
+/// 杀掉子进程**及其进程组**（子进程以 `process_group(0)` 起，pgid == pid），并
+/// reap 直接子进程。
+///
+/// 只 `kill()` 直接子进程不够：`wl-paste` 每次读都会 fork 一个 `cat` 持有我们的
+/// stdout 写端，父进程死了写端照样敞开 —— 读侧的 EOF 永远不来。
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        // 对已经不存在的组返回 ESRCH，忽略即可。
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 /// Production runner: `std::process::Command` with piped stdio and a deadline.
@@ -258,42 +294,87 @@ impl CommandRunner for ProcessCommandRunner {
         // raw mode, and the crate denies direct printing. stderr is discarded
         // on purpose — an unread stderr pipe can fill up and stall the helper,
         // and the exit status is what the callers classify.
-        let mut child = Command::new(spec.program)
+        let mut command = Command::new(spec.program);
+        command
             .args(&spec.args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        // 自己的进程组：超时要杀的是整组（见 `kill_group`）。仓库先例：
+        // `cmd::start` 的网关守护进程。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn()?;
+
         // stdout must be drained concurrently: a large payload (pictures run to
-        // 64 MiB) fills the pipe buffer and the helper would never exit — the
-        // read would collapse into a timeout with the bytes stuck in the pipe.
+        // 64 MiB) fills the pipe buffer and the helper would never exit. The
+        // drain is bounded (`READ_CAP`) and hands the bytes back over a channel:
+        // the timeout path must not join the reader — a grandchild can keep the
+        // write end open indefinitely, and `join` would stretch the deadline
+        // into a hang (the reader thread then finishes on its own once the
+        // process group is killed and the pipe closes).
         let mut stdout = child.stdout.take().expect("stdout is piped");
+        let (tx, rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let _ = io::Read::read_to_end(&mut stdout, &mut bytes);
-            bytes
+            let mut limited = io::Read::take(&mut stdout, READ_CAP);
+            let _ = io::Read::read_to_end(&mut limited, &mut bytes);
+            // 接收端在超时路径上可能已经走了：发送失败无所谓。
+            let _ = tx.send(bytes);
         });
+
         let deadline = Instant::now() + timeout;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
+        let mut status = None;
+        let mut data: Option<Vec<u8>> = None;
+        while status.is_none() || data.is_none() {
+            if status.is_none() {
+                status = child.try_wait()?;
             }
+            if data.is_none() {
+                data = match rx.try_recv() {
+                    Ok(bytes) => Some(bytes),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    // 读线程死了：等价于没有数据（进程退出状态仍照常判定）。
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
+                };
+            }
+            // 数据已经超限：不必再等退出状态（写端多半正堵在满管道上）。
+            if matches!(&data, Some(bytes) if bytes.len() > MAX_PAYLOAD) {
+                break;
+            }
+            if status.is_some() && data.is_some() {
+                break;
+            }
+            // 到点即收，不给读线程调度宽限：deadline 是硬上界；代价是「子进程恰在
+            // 到点前一瞬退出、reader 还没被调度出 send」的窄窗口里可用数据被丢
+            // （微秒~毫秒级，登记为取舍）。
             if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "{} timed out after {} ms",
-                        spec.program,
-                        timeout.as_millis()
-                    ),
-                ));
+                break;
             }
             std::thread::sleep(WAIT_POLL);
+        }
+        if matches!(&data, Some(bytes) if bytes.len() > MAX_PAYLOAD) {
+            kill_group(&mut child);
+            let _ = reader.join();
+            return Err(too_large(spec.program));
+        }
+        let (Some(status), Some(bytes)) = (status, data) else {
+            // deadline 到了但还没配齐：超时是硬上界，**不 join** 读线程。
+            kill_group(&mut child);
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{} timed out after {} ms",
+                    spec.program,
+                    timeout.as_millis()
+                ),
+            ));
         };
-        let bytes = reader.join().unwrap_or_default();
+        // 数据已回传：读线程正在收尾，join 即刻返回（有界）。
+        let _ = reader.join();
         if status.success() {
             Ok(bytes)
         } else {
@@ -322,6 +403,7 @@ fn classify_io(error: io::Error) -> PasteFailure {
     match error.kind() {
         io::ErrorKind::NotFound => PasteFailure::Unavailable,
         io::ErrorKind::TimedOut => PasteFailure::Timeout,
+        io::ErrorKind::FileTooLarge => PasteFailure::TooLarge,
         _ => PasteFailure::Failed(error.to_string()),
     }
 }
@@ -458,6 +540,7 @@ fn image_via_linux_tool(
         Ok(bytes) if bytes.len() > MAX_PAYLOAD => Err(PasteFailure::TooLarge),
         Ok(bytes) => Ok(Some((mime, bytes))),
         Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(PasteFailure::Timeout),
+        Err(e) if e.kind() == io::ErrorKind::FileTooLarge => Err(PasteFailure::TooLarge),
         // 清单里有、读却失败：最可能是表示在两次调用之间消失（剪贴板易主）——
         // 按「没有图片」处理，文本照常继续。
         Err(e) => {
@@ -475,6 +558,10 @@ fn read_linux_text(runner: &impl CommandRunner) -> Result<Option<String>, PasteF
     for spec in linux_text_specs() {
         match read_text(runner, &spec) {
             Ok(found) => return Ok(found),
+            // 超限是硬拒绝（与图片链 `read_linux_image` 对齐）：后面的工具
+            // 「成功但空」（`Ok(None)`）不能把已经读到的超限事实掩蔽成 Empty ——
+            // 那样用户看到的是一句误导性的「没有文本或图片」。
+            Err(e @ PasteFailure::TooLarge) => return Err(e),
             Err(e) => {
                 tracing::debug!(program = spec.program, error = %e, "text reader unavailable");
                 failure = failure.or(Some(e));
@@ -491,11 +578,15 @@ fn read_linux_text(runner: &impl CommandRunner) -> Result<Option<String>, PasteF
 /// 普通非零退出**不是**通道失败：读取器用它表示「这个剪贴板没有文本表示」
 /// （`wl-paste` 在空剪贴板 / 无选中时就是 `Nothing is copied` + exit 1），所以链条
 /// 要继续试下一个工具，但也不该把它升级成定向失败 —— 由 [`settle`] 统一收场。
+///
+/// 上限判在**返回之前**：超限文本一旦返回，上游会整段插进 composer（5522 通道对
+/// 同一份内容给的是 `TooLarge` toast，两条通道对同一手势必须一致）。
 fn read_text(
     runner: &impl CommandRunner,
     spec: &CommandSpec,
 ) -> Result<Option<String>, PasteFailure> {
     match runner.run(spec, TEXT_TIMEOUT) {
+        Ok(bytes) if bytes.len() > MAX_PAYLOAD => Err(PasteFailure::TooLarge),
         Ok(bytes) if bytes.is_empty() => Ok(None),
         Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
         Err(e) => Err(classify_io(e)),
@@ -517,23 +608,14 @@ fn settle(failure: Option<PasteFailure>) -> Result<(), PasteFailure> {
 /// 从类型清单里挑一个已知可解码的图片 MIME（偏好序见 [`KNOWN_IMAGE_MIMES`]）。
 ///
 /// 表外的 `image/*`（avif / heic…）不选：读回来也解不了（与 OSC 5522 通道的
-/// `choose_mime` 同一条规则）。
+/// `choose_mime` 同一条规则）。比较前先过 [`normalize_mime`]（X11 target 与
+/// Wayland MIME 都可能带参数 / 大小写差异）。
 fn choose_image_mime(types: &[String]) -> Option<String> {
-    let bases: Vec<String> = types.iter().map(|t| normalize_type(t)).collect();
+    let bases: Vec<String> = types.iter().map(|t| normalize_mime(t)).collect();
     KNOWN_IMAGE_MIMES
         .iter()
         .find(|want| bases.iter().any(|base| base == *want))
         .map(|want| (*want).to_string())
-}
-
-/// 类型串的归一形态：剥参数、去首尾空白、转小写（X11 target 与 Wayland MIME
-/// 都可能带参数 / 大小写差异）。
-fn normalize_type(raw: &str) -> String {
-    raw.split(';')
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .to_ascii_lowercase()
 }
 
 /// 读临时文件 → 按上限裁决 → **无论成败都删文件**（on-error 也删，见模块文档）。
@@ -577,8 +659,10 @@ fn remove_temp_file(path: &Path) {
 
 /// 读系统剪贴板：远程短路 → 图片 → 文本，整个同步流程都在阻塞池上。
 ///
-/// 事件循环只 await 这一个结果；时长被每条命令的超时封顶（最坏 图片 5 s +
-/// 文本 1 s，期间 UI 不冻）。
+/// 事件循环只 await 这一个结果；每条命令的超时都是**硬上界**（超时即杀进程组并返回，
+/// 不 join 读线程，见 [`ProcessCommandRunner`]），所以最坏时长 = 各命令超时之和：
+/// macOS 5 s（图片）+ 1 s（文本）；Linux 2 个图片工具 ×（listing 5 s + read 5 s）+
+/// 3 个文本工具 × 1 s ≈ 23 s —— 期间 UI 不冻，只是这段时间内不回粘贴结果。
 pub(crate) async fn read_clipboard() -> Result<PasteOutcome, PasteFailure> {
     let remote = is_remote_session();
     let platform = host_platform();
@@ -833,7 +917,12 @@ mod tests {
     #[test]
     fn macos_reports_the_picture_failure_when_text_is_empty_too() {
         let runner = FakeRunner::new(|spec| match spec.program {
-            "/usr/bin/osascript" => Err(io::Error::new(io::ErrorKind::TimedOut, "wedged")),
+            "/usr/bin/osascript" => {
+                // 超时路径也要删临时文件：让脚本「已经写了半截」再超时。
+                let path = spec.image_file.as_ref().expect("temp file");
+                std::fs::write(path, b"partial").expect("touch the temp file");
+                Err(io::Error::new(io::ErrorKind::TimedOut, "wedged"))
+            }
             "/usr/bin/pbpaste" => Ok(Vec::new()),
             other => panic!("unexpected program {other}"),
         });
@@ -842,6 +931,8 @@ mod tests {
             Err(PasteFailure::Timeout),
             "空剪贴板不能把一次超时粉饰成 Empty"
         );
+        let path = runner.call(0).image_file.clone().expect("temp file");
+        assert!(!path.exists(), "超时分支也要把临时文件删掉");
     }
 
     #[test]
@@ -985,6 +1076,76 @@ mod tests {
         );
     }
 
+    /// 清单承诺了可解码的 MIME、真正读却普通失败（表示在两次调用之间消失）：
+    /// 按「没有图片」收场、**不阻断文本**，也不去问下一个图片工具。
+    #[test]
+    fn linux_falls_back_to_text_when_the_promised_type_cannot_be_read() {
+        let runner = FakeRunner::new(|spec| match (spec.program, spec.args.join(" ")) {
+            ("wl-paste", ref args) if args == "--list-types" => Ok(b"image/png\n".to_vec()),
+            ("wl-paste", ref args) if args == "--no-newline --type image/png" => {
+                Err(io::Error::other("wl-paste exited with exit status: 1"))
+            }
+            ("wl-paste", ref args) if args == "--no-newline" => Ok(b"text wins".to_vec()),
+            other => panic!("unexpected command {other:?}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Linux, false),
+            Ok(PasteOutcome::Text("text wins".to_string()))
+        );
+        assert_eq!(
+            runner.called(),
+            ["wl-paste", "wl-paste", "wl-paste"],
+            "list → read（失败）→ 文本；不落到 xclip"
+        );
+    }
+
+    /// Linux 图片读取超限（runner 的 `FileTooLarge`）是**硬拒绝**：与 macOS 临时文件
+    /// 超限同一条失败面，不能静默按「没有图片」处理（否则 >64 MiB 的图会变成
+    /// 误导性的「没有文本或图片」）。
+    #[test]
+    fn an_oversized_linux_picture_is_rejected_not_ignored() {
+        let runner = FakeRunner::new(|spec| match (spec.program, spec.args.join(" ")) {
+            ("wl-paste", ref args) if args == "--list-types" => Ok(b"image/png\n".to_vec()),
+            ("wl-paste", ref args) if args == "--no-newline --type image/png" => {
+                Err(io::Error::new(io::ErrorKind::FileTooLarge, "capped"))
+            }
+            other => panic!("unexpected command {other:?}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Linux, false),
+            Err(PasteFailure::TooLarge)
+        );
+        assert_eq!(
+            runner.called(),
+            ["wl-paste", "wl-paste"],
+            "超限即收场，不再问文本、也不落到 xclip"
+        );
+    }
+
+    /// 文本链的超限同样**硬拒绝**：即使后面的工具「成功但空」（`Ok(None)`，空剪贴板
+    /// 在某档工具上的形态），也不能把已经读到的超限事实掩蔽成 Empty —— 否则用户看到
+    /// 的是一句误导性的「没有文本或图片」，而不是「内容过大」。
+    #[test]
+    fn linux_text_oversize_is_not_masked_by_a_later_empty_tool() {
+        let runner = FakeRunner::new(|spec| match (spec.program, spec.args.join(" ")) {
+            ("wl-paste", ref args) if args == "--list-types" => Ok(Vec::new()),
+            ("wl-paste", ref args) if args == "--no-newline" => {
+                Err(io::Error::new(io::ErrorKind::FileTooLarge, "capped"))
+            }
+            ("xclip", ref args) if args == "-selection clipboard -o" => Ok(Vec::new()),
+            other => panic!("unexpected command {other:?}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Linux, false),
+            Err(PasteFailure::TooLarge)
+        );
+        assert_eq!(
+            runner.called(),
+            ["wl-paste", "wl-paste"],
+            "超限即收场，下一个工具的空结果不能把它掩蔽成 Empty"
+        );
+    }
+
     /// 空剪贴板在 Linux 上是一条**普通非零退出**（`wl-paste`：`Nothing is copied` +
     /// exit 1；X11 工具同类），不是通道失败：工具全按非零退出时收场必须是 Empty。
     #[test]
@@ -1017,6 +1178,131 @@ mod tests {
         assert_eq!(
             read_from_clipboard(&runner, Platform::Macos, false),
             Ok(PasteOutcome::Empty)
+        );
+    }
+
+    /// 文本也受 64 MiB 上限（S2）：超限字节**在返回 / 插入之前**被拒绝，文案与
+    /// OSC 5522 通道逐字一致 —— 两条通道对同一份内容给同一种结果。
+    ///
+    /// 两条防线都钉住：读取器（或任何实现）给出超限的 `Ok(bytes)`；以及 runner 用
+    /// `ErrorKind::FileTooLarge` 上报超限（真 runner 的上限截断走这一条）。
+    #[test]
+    fn oversized_text_is_rejected_before_it_can_reach_the_composer() {
+        let message = PasteFailure::TooLarge.message();
+        assert_eq!(message, "Clipboard content is too large to paste");
+
+        let huge = vec![b'x'; MAX_PAYLOAD + 1];
+        let runner = FakeRunner::new(move |spec| match spec.program {
+            "/usr/bin/osascript" => osascript_without_picture(spec),
+            "/usr/bin/pbpaste" => Ok(huge.clone()),
+            other => panic!("unexpected program {other}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Macos, false),
+            Err(PasteFailure::TooLarge),
+            "超限文本不能落进草稿"
+        );
+
+        let runner = FakeRunner::new(|spec| match spec.program {
+            "/usr/bin/osascript" => osascript_without_picture(spec),
+            "/usr/bin/pbpaste" => Err(io::Error::new(io::ErrorKind::FileTooLarge, "capped")),
+            other => panic!("unexpected program {other}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Macos, false),
+            Err(PasteFailure::TooLarge),
+            "runner 的 FileTooLarge 归类为 TooLarge"
+        );
+    }
+
+    /// 真进程（unix）：成功路径拿回 stdout；普通超时在**有界时间内**返回 TimedOut
+    /// 且把进程收干净（S1）。
+    #[test]
+    #[cfg(unix)]
+    fn the_real_runner_returns_stdout_and_times_out_a_plain_sleeper() {
+        let ok = ProcessCommandRunner.run(
+            &CommandSpec::stdout("/bin/echo", &["hi"]),
+            Duration::from_secs(2),
+        );
+        assert_eq!(ok.expect("echo"), b"hi\n");
+
+        let started = Instant::now();
+        let timed_out = ProcessCommandRunner.run(
+            &CommandSpec::stdout("/bin/sleep", &["10"]),
+            Duration::from_millis(200),
+        );
+        assert!(
+            matches!(&timed_out, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{timed_out:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "超时是有界返回：{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 真进程（unix）：直接子进程退出后**孙进程**还持有 stdout 写端时，读侧的 EOF
+    /// 不会来 —— 但「每条命令的超时」仍是硬上界：到点杀**进程组**、返回 TimedOut，
+    /// 而不是卡在 reader.join 上（`wl-paste` fork 的 `cat` 就是这种形态，S1）。
+    /// 孙进程的 pid 由脚本写进文件：断言它在超时后真的不存在（整组被杀，不是只杀
+    /// 直接子进程），测试不留活进程。
+    #[test]
+    #[cfg(unix)]
+    fn a_grandchild_holding_stdout_cannot_stretch_the_deadline() {
+        let pidfile = std::env::temp_dir().join(format!("wing-pg-test-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        let script = format!("sleep 30 & echo $! > {}; ", pidfile.display());
+
+        let started = Instant::now();
+        let result = ProcessCommandRunner.run(
+            &CommandSpec::stdout("/bin/sh", &["-c", &script]),
+            // 给 sh 启动 + 写 pidfile 留足预算（极端负载的 CI 上 300ms 会 flake）；
+            // 断言仍要求远小于 sleep 的 30 s。
+            Duration::from_secs(1),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(&result, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "硬上界：{elapsed:?}（修复前这里会被 sleep 的写端拖到 30 s）"
+        );
+
+        let pid_text = std::fs::read_to_string(&pidfile).expect("the grandchild pid was written");
+        let _ = std::fs::remove_file(&pidfile);
+        let pid: libc::pid_t = pid_text.trim().parse().expect("pid");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "孙进程 {pid} 在超时后仍活着（killpg 没生效？）"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 真进程（unix）：输出超过上限时读取**在读满 `MAX_PAYLOAD + 1` 处停下**并报
+    /// TooLarge，不把超限 payload 整个读进内存（`yes` 会一直写；唯一的出口是截断）。
+    #[test]
+    #[cfg(unix)]
+    fn the_real_runner_stops_at_the_payload_cap() {
+        let started = Instant::now();
+        let result =
+            ProcessCommandRunner.run(&CommandSpec::stdout("yes", &[]), Duration::from_secs(10));
+        assert!(
+            matches!(&result, Err(e) if e.kind() == io::ErrorKind::FileTooLarge),
+            "{result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "必须在读满上限处停下，而不是等超时：{:?}",
+            started.elapsed()
         );
     }
 
@@ -1079,8 +1365,8 @@ mod tests {
 
     #[test]
     fn types_are_normalized_before_matching() {
-        assert_eq!(normalize_type(" IMAGE/PNG;charset=utf-8 "), "image/png");
-        assert_eq!(normalize_type("image/tiff"), "image/tiff");
+        assert_eq!(normalize_mime(" IMAGE/PNG;charset=utf-8 "), "image/png");
+        assert_eq!(normalize_mime("image/tiff"), "image/tiff");
     }
 
     #[test]

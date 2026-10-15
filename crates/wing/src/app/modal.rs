@@ -229,9 +229,10 @@ impl App {
         if is_toggle_reasoning_key(key) {
             return KeyRoute::ToggleReasoning;
         }
-        // Ctrl+V / super+v 同样是应用保留键：粘贴手势在面板之下也要接住（落点再做
-        // 挡板），且必须赶在 composer 之前 —— 否则 super+v 会被当字面 `v` 输入
-        // （Ghostty 图片剪贴板回传 super+v 时的实测行为）。
+        // Ctrl+V / super+v 同样是应用保留键（设置浮层除外，早期分支已接管，与 Ctrl+O
+        // 同档）：粘贴手势在其余面板之下也要接住（落点再做挡板），且必须赶在 composer
+        // 之前 —— 否则 super+v 会被当字面 `v` 输入（Ghostty 图片剪贴板回传 super+v
+        // 时的实测行为）。
         if is_paste_clipboard_key(key) {
             return KeyRoute::PasteClipboard;
         }
