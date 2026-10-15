@@ -80,8 +80,14 @@ pub fn format_last_active(iso: &str) -> String {
     if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' || bytes[13] != b':' {
         return String::new();
     }
+    // 前面四个分隔符检查顺带保证了 5/8/11/14 都是字符边界，16 没有：一个横跨
+    // 14..16 的非 ASCII 字符（手改 metadata / 第三方网关写脏的 last_interaction）
+    // 会让字节切片 panic，而这里的契约是「看不懂就给空串」。
+    let Some(minute) = s.get(14..16) else {
+        return String::new();
+    };
     // "MM-DD HH:MM"
-    format!("{}-{} {}:{}", &s[5..7], &s[8..10], &s[11..13], &s[14..16])
+    format!("{}-{} {}:{}", &s[5..7], &s[8..10], &s[11..13], minute)
 }
 
 /// A single row in a selection popup.
@@ -379,6 +385,9 @@ impl<'a> SelectionPopup<'a> {
         // 的那行就会整体左移 2 列——树的引导线在同一屏里各画各的。空闲的列
         // 归 workspace（它按本行的实际占用算）。
         const STAR_W: usize = 2; // " ★"
+        // 必须等于 `format_last_active` 的输出宽度（恒 14 列 = 11 字符 + 空格
+        // 与方括号；空串时没有时间标签）：它是记账用的格式常量，不是实测值，
+        // 改格式（例如加秒）必须同时改这里，否则行 1 会超宽。
         const TIME_TAG_W: usize = 14; // " [MM-DD HH:MM]"
         let time_tag = if rich.last_active.is_empty() {
             String::new()
@@ -968,5 +977,19 @@ mod tests {
         assert_eq!(format_last_active(""), "");
         assert_eq!(format_last_active("short"), "");
         assert_eq!(format_last_active("not-a-timestamp!!"), "");
+    }
+
+    #[test]
+    fn test_format_last_active_survives_non_ascii_input() {
+        // `last_interaction` 是后端事实（可被手改 metadata / 第三方网关写脏），
+        // 面板的每一行都要过这里：非 ASCII 字符横跨 14..16（结构检查唯一没盖住
+        // 的边界）时必须降级为空串，而不是让面板把 TUI 带走。
+        assert_eq!(format_last_active("2025-01-01T00:0中"), "");
+        assert_eq!(format_last_active("2025-01-01T00:0🎉"), "");
+        assert_eq!(format_last_active("2025-01-01T00:0中:00"), "");
+        // 结构检查挡下的多字节（分隔符位置不是 ASCII）照旧是空串。
+        assert_eq!(format_last_active("20中5-01-01T00:00:00"), "");
+        // 边界外的正常值不受影响。
+        assert_eq!(format_last_active("2025-01-01T00:00:00"), "01-01 00:00");
     }
 }
