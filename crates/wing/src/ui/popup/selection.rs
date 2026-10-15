@@ -373,14 +373,20 @@ impl<'a> SelectionPopup<'a> {
         // 让位顺序：星标 / 时间标签 → 前缀 → workspace。深链前缀的头几十列是
         // 每行都一样的引导槽（信息量最低），但前缀自己也要让位——它不能反过来
         // 把图标甚至整行挤出面板（裁剪保留尾部：连接符与最近几层缩进）。
+        //
+        // 前缀的预算按**行的最宽形态**（星标 + 时间标签）统一扣除，不随本行
+        // 实际有没有它们变化：同深度的行前缀一样长，裁剪宽度若各行不同，带星标
+        // 的那行就会整体左移 2 列——树的引导线在同一屏里各画各的。空闲的列
+        // 归 workspace（它按本行的实际占用算）。
+        const STAR_W: usize = 2; // " ★"
+        const TIME_TAG_W: usize = 14; // " [MM-DD HH:MM]"
         let time_tag = if rich.last_active.is_empty() {
             String::new()
         } else {
             format!(" [{}]", rich.last_active)
         };
-        let star_w = if rich.pinned { 2 } else { 0 };
-        let reserve = 3 + star_w + UnicodeWidthStr::width(time_tag.as_str());
-        let max_prefix_w = width.saturating_sub(reserve).max(3);
+        let star_w = if rich.pinned { STAR_W } else { 0 };
+        let max_prefix_w = width.saturating_sub(3 + STAR_W + TIME_TAG_W).max(3);
         let prefix = if UnicodeWidthStr::width(rich.tree_prefix.as_str()) > max_prefix_w {
             truncate_left_to_display_width(&rich.tree_prefix, max_prefix_w)
         } else {
@@ -663,6 +669,25 @@ mod tests {
         (text(0), text(1))
     }
 
+    /// Render several rich rows into one frame and return each one's line 1
+    /// (跨行的列对齐要靠同一帧才看得见).
+    fn line1s(rows: &[SelectionRow], width: u16) -> Vec<String> {
+        let state = SelectionState::new(rows.len());
+        let area = Rect::new(0, 0, width, (rows.len() * 2) as u16);
+        let mut buf = Buffer::empty(area);
+        SelectionPopup::new(rows, &state, "", &ThemePalette::default()).render(area, &mut buf);
+        (0..rows.len())
+            .map(|i| {
+                let y = (i * 2) as u16;
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
     fn session_row(status: SessionStatus, last_active: &str, title: &str) -> SelectionRow {
         session_row_at(status, last_active, title, "/ws/wing", false)
     }
@@ -858,6 +883,65 @@ mod tests {
         // 行 2 跟着**裁剪后**的前缀走（缩进 = 21 + 4），标题仍有一席之地。
         assert_eq!(line2.trim_start(), "deep title", "{line2:?}");
         assert_eq!(line2.chars().take_while(|c| *c == ' ').count(), 25);
+    }
+
+    #[test]
+    fn test_clipped_rows_keep_a_title_even_without_a_time_tag() {
+        // 时间缺失（创建即打标窗口期的会话）时前缀与标题争的是同一段宽度：
+        // 前缀的预算按行的最宽形态扣，标题因此始终留着（≥ 14 列）。
+        let deep = format!("{}└─ ", "│  ".repeat(16));
+        let row = session_row_tree(
+            SessionStatus::Inactive,
+            "",
+            "deep title",
+            "/ws",
+            false,
+            &deep,
+        );
+
+        let (line1, line2) = rich_lines(&row, "", 40);
+        assert!(
+            UnicodeWidthStr::width(line1.as_str()) <= 40,
+            "line 1 must fit: {line1:?}"
+        );
+        assert!(line1.contains("└─  ●"), "{line1:?}");
+        // 没有时间标签占位，省下的列归 workspace。
+        assert!(line1.contains("/ws"), "{line1:?}");
+        assert_eq!(line2.trim_start(), "deep title", "{line2:?}");
+    }
+
+    #[test]
+    fn test_sibling_rows_clip_the_prefix_to_the_same_width() {
+        // 同深度 = 同前缀长；裁剪宽度不随本行有没有星标变化，否则带星标的兄弟
+        // 会整体左移，树的引导线在同一屏里对不上。
+        let deep = format!("{}└─ ", "│  ".repeat(16));
+        let rows = vec![
+            session_row_tree(
+                SessionStatus::Idle,
+                "07-22 21:41",
+                "pinned",
+                "/ws",
+                true,
+                &deep,
+            ),
+            session_row_tree(
+                SessionStatus::Idle,
+                "07-22 21:41",
+                "plain",
+                "/ws",
+                false,
+                &deep,
+            ),
+        ];
+
+        let lines = line1s(&rows, 40);
+        let icon_col = |line: &str| line.chars().take_while(|c| *c != '●').count();
+        assert!(lines.iter().all(|l| l.starts_with('…')), "{lines:?}");
+        assert_eq!(
+            icon_col(&lines[0]),
+            icon_col(&lines[1]),
+            "the branch column must not depend on the star: {lines:?}"
+        );
     }
 
     #[test]
