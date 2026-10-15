@@ -5,6 +5,11 @@
 use std::fmt;
 use std::io;
 use std::io::Stdout;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::Command;
@@ -322,12 +327,18 @@ fn begin_tui_session() -> io::Result<()> {
     Ok(())
 }
 
-/// 收尾进程级 TUI 会话：还原 fd 0（真实 tty）→ 把保存的 termios 写回。幂等。
+/// 收尾进程级 TUI 会话：停事件流 → 还原 fd 0（真实 tty）→ 把保存的 termios 写回。幂等。
 ///
-/// 顺序是硬约束：`disable_raw_mode` 是把 termios 写回 **fd 0** 的，而 TUI 段里 fd 0 是
-/// 内层 pty 的 slave。**离开 `run_tui` 的任何路径都要走到这里**（正常收尾、提前 `?`、
-/// panic hook）。
+/// 顺序是硬约束：
+/// 1. [`stop_event_stream`] 最先——事件任务若正卡在对 fd 0 的阻塞读上（或将被卡上），
+///    `restore` 的 `dup2` 会让它「读的是新 tty、就绪源却还指着旧 slave」，永远退不出来，
+///    进程收尾挂在 `Runtime::drop` 等 worker 上（用户可见：双击 Ctrl+C 不退，按 Enter 才退）。
+/// 2. `disable_raw_mode` 是把 termios 写回 **fd 0** 的，而 TUI 段里 fd 0 是内层 pty 的
+///    slave，所以 `restore` 必须在前。
+///
+/// **离开 `run_tui` 的任何路径都要走到这里**（正常收尾、提前 `?`、panic hook）。
 pub fn end_tui_session() -> io::Result<()> {
+    stop_event_stream();
     stdin_proxy::restore();
     crossterm::terminal::disable_raw_mode()
 }
@@ -362,53 +373,139 @@ where
     Ok(())
 }
 
+/// 事件流的收尾信号（进程内一次性；`end_tui_session` 置位）。
+///
+/// 必须用独立 flag 而不是「通道关闭」：panic hook 在 unwind **之前**跑，彼时接收端还
+/// 活着——唤醒字节会被当成一条真实事件成功送进通道，任务继续循环、再卡回 `read(fd 0)`。
+static EVENT_STOP: AtomicBool = AtomicBool::new(false);
+
+/// 事件流任务的句柄（`spawn_event_stream` 全进程只调一次；收尾时取走）。
+static EVENT_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
+/// 收尾等待事件任务退出的上限：正常是毫秒级（唤醒字节 → 任务在循环顶 / send 前看到
+/// flag）。上限只用于「不让收尾无限期停在一个坏掉的读上」；到点记 warn 后照常收尾，
+/// 终端绝不能因为等不到一个任务而留在 raw。
+const EVENT_STOP_WAIT: Duration = Duration::from_millis(200);
+
+/// 有界等待期间的唤醒字节重投间隔（见 [`stop_event_stream`] 的「半截序列」一段）。
+const EVENT_WAKE_REPOST: Duration = Duration::from_millis(20);
+
+fn event_task_slot() -> std::sync::MutexGuard<'static, Option<tokio::task::JoinHandle<()>>> {
+    EVENT_TASK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 转发一个事件：停止信号已置 / 通道已断都返回 `false`（调用方退出循环）。
+async fn forward(tx: &mpsc::Sender<TermEvent>, event: TermEvent) -> bool {
+    if EVENT_STOP.load(Ordering::SeqCst) {
+        return false;
+    }
+    tx.send(event).await.is_ok()
+}
+
+/// 停止事件流并**有界**等待它退出（[`end_tui_session`] 的第一步；幂等）。
+///
+/// 顺序：置 flag → [`stdin_proxy::wake_reader`]（向 fd 0 投 1 字节，打断 crossterm 的
+/// 阻塞读）→ 轮询 `is_finished`，其间每 [`EVENT_WAKE_REPOST`] 重投一次唤醒字节。
+///
+/// 重投要救的形态：crossterm 的解析器扣着**半截序列**（半截 CSI / `ESC O` / 残缺 UTF-8；
+/// OSC 不在其列——`ESC]` 会被立即解析成 `Alt+]` 事件）时，首个唤醒字节会被当成序列的
+/// final 清掉（不产事件），任务再次阻塞在 `read(fd 0)` 上；下一次重投落在空解析器上，
+/// 必然产出事件并把任务带回 flag 检查。CSI 分支由
+/// `tests/stdin_proxy_teardown_partial_seq.rs` 钉住。
+///
+/// 重投够不到的可达形态有二：① panic 展开路径上任务停在 `tx.send(...).await`（通道满、
+/// rx 还活着，唤醒字节无处着力）；② 等待窗口内新字节持续到达，解析器被一直喂成半截。
+/// 两种都在 200ms 上限到点后照常收尾；②留下的读者会继续在 crossterm 的读循环里，
+/// `dup2` 之后它阻塞读的是**真实 tty**——用户回 shell 后的第一下按键会被它吃掉
+/// （与旧症状同源，只是不再挂住进程）。
+///
+/// 不能 `.join()` / `.await()`：本函数是同步函数、也会从 panic hook 走到，在 runtime
+/// worker 上同步 join 有自锁风险。
+fn stop_event_stream() {
+    let handle = event_task_slot().take();
+    let Some(handle) = handle else {
+        return; // 没起过（向导 / 初始化失败路径）或已停过：no-op
+    };
+    EVENT_STOP.store(true, Ordering::SeqCst);
+    stdin_proxy::wake_reader();
+    let deadline = Instant::now() + EVENT_STOP_WAIT;
+    let mut next_wake = Instant::now() + EVENT_WAKE_REPOST;
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+        let now = Instant::now();
+        if now >= next_wake {
+            stdin_proxy::wake_reader();
+            next_wake = now + EVENT_WAKE_REPOST;
+        }
+    }
+    if !handle.is_finished() {
+        tracing::warn!(
+            "crossterm event task did not stop within {EVENT_STOP_WAIT:?}; continuing teardown"
+        );
+    }
+}
+
 /// Spawn a task that reads crossterm events and sends them over a channel.
 ///
-/// Returns the receiver end. The task runs until the sender is dropped or
-/// a fatal error occurs.
+/// Returns the receiver end. The task runs until the sender is dropped, a
+/// fatal error occurs, or the session is torn down ([`stop_event_stream`]).
 ///
 /// 若 stdin 接驳装上了（[`stdin_proxy::is_installed`]），同时把 OSC 5522 协议机
 /// （[`clipboard_protocol::spawn`]）接上：它消费分流层提取的序列，把读回的文本 / 图片
 /// 投到**同一个**事件通道。必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经
 /// 是 pty slave，事件源注册的就是它）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
+    let mut slot = event_task_slot();
+    // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 要么覆盖旧 handle
+    // （旧任务永远停不下来），要么（收尾过之后再 spawn）踩上不复位的 `EVENT_STOP`——新流
+    // 在循环顶立即退出，键盘永久哑掉且零日志。常开断言（而不是 debug_assert!）：这个
+    // 不变量被打破时的静默失败比启动路径上响一声坏得多；断言先于任何 spawn，所以失败
+    // 调用什么都不留（`tests/tui_event_stream_once.rs` 钉住拒绝路径）。
+    assert!(
+        slot.is_none() && !EVENT_STOP.load(Ordering::SeqCst),
+        "spawn_event_stream must run once per process"
+    );
     let (tx, rx) = mpsc::channel(128);
     if let Some(sequences) = stdin_proxy::take_sequences() {
         clipboard_protocol::spawn(sequences, tx.clone());
     }
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
+            // 收尾信号先于一切：置位后连一次 poll 都不再进（见 `stop_event_stream`）。
+            if EVENT_STOP.load(Ordering::SeqCst) {
+                break;
+            }
             // Poll crossterm with a timeout so we can emit ticks.
             let timeout = std::time::Duration::from_millis(100);
             match crossterm::event::poll(timeout) {
                 Ok(true) => match crossterm::event::read() {
                     Ok(crossterm::event::Event::Key(key)) => {
                         if key.kind == KeyEventKind::Press
-                            && tx.send(TermEvent::Key(key)).await.is_err()
+                            && !forward(&tx, TermEvent::Key(key)).await
                         {
                             break;
                         }
                     }
                     Ok(crossterm::event::Event::Mouse(mouse)) => {
-                        if tx.send(TermEvent::Mouse(mouse)).await.is_err() {
+                        if !forward(&tx, TermEvent::Mouse(mouse)).await {
                             break;
                         }
                     }
                     Ok(crossterm::event::Event::Resize(w, h)) => {
-                        if tx.send(TermEvent::Resize(w, h)).await.is_err() {
+                        if !forward(&tx, TermEvent::Resize(w, h)).await {
                             break;
                         }
                     }
                     Ok(crossterm::event::Event::Paste(text)) => {
-                        if tx.send(TermEvent::Paste(text)).await.is_err() {
+                        if !forward(&tx, TermEvent::Paste(text)).await {
                             break;
                         }
                     }
                     Ok(crossterm::event::Event::FocusGained) => {
-                        let _ = tx.send(TermEvent::Focus(true)).await;
+                        let _ = forward(&tx, TermEvent::Focus(true)).await;
                     }
                     Ok(crossterm::event::Event::FocusLost) => {
-                        let _ = tx.send(TermEvent::Focus(false)).await;
+                        let _ = forward(&tx, TermEvent::Focus(false)).await;
                     }
                     Err(e) => {
                         tracing::error!("crossterm read error: {e}");
@@ -416,7 +513,7 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
                     }
                 },
                 Ok(false) => {
-                    if tx.send(TermEvent::Tick).await.is_err() {
+                    if !forward(&tx, TermEvent::Tick).await {
                         break;
                     }
                 }
@@ -427,6 +524,7 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
             }
         }
     });
+    *slot = Some(handle);
     rx
 }
 
@@ -766,8 +864,8 @@ mod tests {
         // Type guard only: it fails to compile if the payload stops carrying
         // the full `MouseEvent` (kind / modifiers / 0-based coords), which is
         // what selection & scrollbar build on. The actual forwarding in
-        // `spawn_event_stream` is not unit-testable without a pty — it was
-        // verified by a pty probe recorded in the commit that added it.
+        // `spawn_event_stream` is covered end-to-end by
+        // `tests/tui_event_stream_events.rs` (pty-fed real sequences).
         let event = TermEvent::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::ScrollUp,
             column: 42,
@@ -783,5 +881,12 @@ mod tests {
             }
             other => panic!("expected a mouse event, got {other:?}"),
         }
+    }
+
+    /// 没起过事件流（向导 / 初始化失败路径）：收尾是 no-op——不 panic、不动 flag
+    /// （接驳与 raw mode 此前也没装 / 没开，两步还原都是空操作）。
+    #[test]
+    fn teardown_without_an_event_stream_is_a_noop() {
+        end_tui_session().expect("teardown without a session");
     }
 }

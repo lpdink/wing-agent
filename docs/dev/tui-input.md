@@ -169,9 +169,11 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
            终端 → 应用  OK → DATA（每片 ≤4096 原始字节、各自独立 base64）→ DONE
 ```
 
-**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走，**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。生命周期是**进程级**的：**第一段** TUI（配置可用时是 `tui::init_terminal()`，配置不可用时是向导的 `tui::init_terminal_without_paste_events()`）经私有的 `begin_tui_session()` 做「真实 tty 进 raw → 装接驳」，`tui::end_tui_session()` 在**所有** TUI 段结束后做「还 fd 0 → `disable_raw_mode`」（它是对 fd 0 的 termios 操作，顺序反过来会把 pty 的 termios 写进真实 tty）；`cmd` 的 panic hook 走同一条收尾路径，`run_tui` 另有一层 RAII guard 兜住提前 `?`。
+**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走，**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。生命周期是**进程级**的：**第一段** TUI（配置可用时是 `tui::init_terminal()`，配置不可用时是向导的 `tui::init_terminal_without_paste_events()`）经私有的 `begin_tui_session()` 做「真实 tty 进 raw → 装接驳」，`tui::end_tui_session()` 在**所有** TUI 段结束后做「停事件流 → 还 fd 0 → `disable_raw_mode`」；`cmd` 的 panic hook 走同一条收尾路径，`run_tui` 另有一层 RAII guard 兜住提前 `?`。
 
-分流的状态机细节（都是单测钉住的）：前缀候选最长持有 25 ms（`Esc` 键的形态就是一个孤立 `ESC` 字节，队列已空时立刻放行，不吃延迟）；序列体 5 s 等不到终止符就丢弃（BEL 与 ST 两种终止符都认）；**bracketed paste 保护区内一律原样透传**（粘贴内容里的字面 `ESC]5522;` 是用户数据，不能吃）。
+收尾的三步顺序都是硬约束：停事件流必须最先——事件任务（tokio 托管的同步 crossterm 读）若在 `restore` 的 `dup2` 之后还卡在对 fd 0 的读上就永远退不出来，`Runtime::drop` 等 worker、进程挂死（双击 Ctrl+C 不退、按 Enter 才退的根因），所以 `end_tui_session` 先置进程级停止 flag、向 fd 0 投唤醒字节（有界等待里每 20ms 重投一次——半截 CSI 会把首个字节当序列 final 吃掉），再有界等待任务退出（超时记 `warn!` 后照常收尾；`tests/stdin_proxy_teardown.rs` / `tests/stdin_proxy_teardown_partial_seq.rs` 钉住）；`dup2` 之后才是 `disable_raw_mode`（它把 termios 写回 fd 0，彼时 fd 0 必须已是真实 tty——顺序反过来会把 pty 的 termios 写进真实 tty）。
+
+分流的状态机细节（都是单测钉住的）：候选按档持有——孤立 `ESC`（`Esc` 键的形态，也可能是被拆开的序列开头）本地 10 ms / SSH 100 ms，多字节前缀（`ESC]55…` / `ESC[20…`）本地 25 ms / SSH 100 ms（SSH 档检测 `SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY` / `MOSH_CONNECTION`）；到点之前任何候选都不冲回（代价是 `Esc` 键多 ≤10 ms 的本地判定延迟，换来「协议字节绝不在未确认时漏给 crossterm」，与 PI 同款取舍）。序列体 5 s 等不到终止符就丢弃（BEL 与 ST 两种终止符都认；单包负载超 1 MiB 的坏流丢弃，后续字节吞到终止符再恢复分流）；**bracketed paste 保护区内一律原样透传**（粘贴内容里的字面 `ESC]5522;` 是用户数据，不能吃）。
 
 **已知边界（粘贴内容以字面 `ESC` 结尾）**：保护区内「可能是闭界开头」的尾部字节会被扣住，内容末尾的字面 `ESC` 因此先被当作 `ESC[201~` 的前缀候选；真闭界到达时它原样冲回，字节流里出现连续的 `ESC` + `ESC[201~`。分流层**一字节不丢**（「透传 + 序列 == 输入」的不变式钉住），但这段流对任何下游都是两义的：哪个 `ESC` 属于粘贴内容、哪个属于闭界，只有终端知道（协议里除「闭界紧跟数据」没有别的信息可分）。固有歧义 + 极罕见，登记为已知边界，本层不做（也做不了）区分。
 
@@ -186,7 +188,7 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **已知边界（段间隙的按键语义）**：raw mode 与接驳跨段保持（这正是上面第 1 条的代价），所以向导段与主 TUI 段之间那几十毫秒（connect / create_session / subscribe）里键入的字节不再走行规程——`Ctrl+C` 不会立刻 `SIGINT`，而是作为 `0x03` 排队、交给主 TUI 的按键语义（双击退出），其余按键照旧回放。要连 Ctrl+C 也拦下来的话，只能把向导拆成独立进程（或先关 raw，但那会精确打破第 1 条）。
 
-**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写（`normalize_mime`：**请求侧挑表示与 read DATA 的 mime 归属共用这一份归一**——终端可以只在回显时带上参数 / 大小写不同，逐字相等会把 DATA 静默丢光）。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`），漏了就退回「要用户确认」甚至被拒。
+**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写（`normalize_mime`：**请求侧挑表示与 read DATA 的 mime 归属共用这一份归一**——终端可以只在回显时带上参数 / 大小写不同，逐字相等会把 DATA 静默丢光）。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`；本文引用的 Ghostty 源码均以 `main` 为准），漏了就退回「要用户确认」甚至被拒。
 
 **包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。event 侧没有 id 可比，就比**一次性密码**（终端为每次粘贴新生成、三连里每包回显）：被放弃的 event 迟到的 listing / DONE 因此同样落不到下一次粘贴上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）、**event 队列满导致的丢弃**一律走 toast，不出现「粘了但什么都没发生」。
 
@@ -209,7 +211,7 @@ chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标�
 
 | 环境 | 行为 |
 |---|---|
-| Ghostty（1.3.1 起） | 完整可用（文本 + 图片，本地 / SSH 同）；kitty 预期一致（协议同源） |
+| Ghostty（nightly / main） | 完整可用（文本 + 图片，本地 / SSH 同）——OSC 5522 目前只在 main：v1.3.1 stable 只有 parser、stream 层 handler `unimplemented`、无 mode 5522（DECRQM 应答 0）；kitty 预期一致（协议同源） |
 | 其它终端（忽略 `?5522h`） | DECSET 被忽略 → 图片粘贴不可用（**不做回落**：政策是让用户用支持协议的终端）；文本粘贴走 bracketed paste，行为不变 |
 | tmux / zellij 内 | 多路复用器拦未知 OSC（除非用户开 passthrough）→ 登记为**已知限制**（先进终端直连） |
 | Windows | 不承诺（接驳层是 `cfg(unix)`；非 Unix 上 `install()` 是空操作，也不开 `?5522`） |
@@ -288,7 +290,7 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 
 ## 真机验收清单（图片粘贴链路，最终版）
 
-人工过一遍（headless 测不了：真终端 + 真剪贴板 + 真模型）。环境：**Ghostty 1.3.1+**（本地或 SSH 同款）。
+人工过一遍（headless 测不了：真终端 + 真剪贴板 + 真模型）。环境：**Ghostty nightly（含 OSC 5522 实现）**（本地或 SSH 同款）。stable 1.3.1 上图片粘贴不可用（`?5522h` 被忽略 → read 无应答 → 超时 toast），验证本清单必须用 nightly。
 
 **A. 粘贴与 chip（05）**
 
@@ -319,7 +321,7 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 
 **D. 终端协议与退出（04）**
 
-10. 配置不可用 → 走完首次运行向导 → 主 TUI 里按键正常（B1 命中路径）；退出后 shell 输入正常（无残留读者）。
+10. 配置不可用 → 走完首次运行向导 → 主 TUI 里按键正常（B1 命中路径）；**双击 Ctrl+C 后进程自行退出（不需要补任何输入），退出后 shell 的第一次输入不被吞**（无残留读者）。
 11. `Shift/Option` 原生拖选、滚轮、面板键位手感无变化。
 12. tmux 内确认图片粘贴不可用（登记限制）、文本粘贴照旧；非 Ghostty 的 kitty 终端预期同源可用（未实测）。
 
