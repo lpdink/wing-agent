@@ -347,8 +347,8 @@ fn read_from_clipboard(
 
 /// macOS：`osascript` 图片（PNG）→ `pbpaste` 文本。
 ///
-/// 图片失败不阻断文本（纯文本剪贴板是常态）；但失败原因会保留 — 文本也为空时
-/// 它才是给用户的解释，而不是一个不实的「剪贴板是空的」。
+/// 图片失败不阻断文本（纯文本剪贴板是常态）；超限硬拒绝（文件已删，toast 由
+/// 上层给），其余失败保留到最后由 [`settle`] 裁决。
 fn read_macos(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure> {
     let mut failure: Option<PasteFailure> = None;
     match read_macos_image(runner) {
@@ -359,7 +359,6 @@ fn read_macos(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure>
             });
         }
         Ok(None) => {}
-        // 超限是硬失败：拒绝 + 删除 + toast（设计 §3.2 的失败模式）。
         Err(e @ PasteFailure::TooLarge) => return Err(e),
         Err(e) => failure = Some(e),
     }
@@ -368,10 +367,8 @@ fn read_macos(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure>
         Ok(None) => {}
         Err(e) => failure = failure.or(Some(e)),
     }
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(PasteOutcome::Empty),
-    }
+    settle(failure)?;
+    Ok(PasteOutcome::Empty)
 }
 
 /// macOS 图片读取：`osascript` 写临时文件 → 读文件。
@@ -412,17 +409,17 @@ fn read_linux(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure>
         Ok(None) => {}
         Err(e) => failure = failure.or(Some(e)),
     }
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(PasteOutcome::Empty),
-    }
+    settle(failure)?;
+    Ok(PasteOutcome::Empty)
 }
 
 /// 图片：`wl-paste`（Wayland）→ `xclip`（X11）。
 ///
 /// 「第一个跑成功的工具是权威的」：它列出的类型就是用户会话里真实的剪贴板，
 /// 空清单是「这个会话没有图片」，而不是「换一个显示协议再问一遍」（两个显示协议
-/// 同时活跃时 Wayland 侧才是主剪贴板）。工具没装 / 连不上（错误退出）才落到下一档。
+/// 同时活跃时 Wayland 侧才是主剪贴板）。工具没装 / 超时才落到下一档并记账；普通
+/// 非零退出归「没有图片」（空剪贴板与类型不可用都是这种退出），全部如此收场时就是
+/// 干净的 `Ok(None)`，不是失败。
 fn read_linux_image(
     runner: &impl CommandRunner,
 ) -> Result<Option<(String, Vec<u8>)>, PasteFailure> {
@@ -437,10 +434,8 @@ fn read_linux_image(
             }
         }
     }
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(None),
-    }
+    settle(failure)?;
+    Ok(None)
 }
 
 /// 一个 Linux 图片工具的一趟：列类型 → 选已知 MIME → 取字节。
@@ -458,20 +453,23 @@ fn image_via_linux_tool(
     let Some(mime) = choose_image_mime(&types) else {
         return Ok(None);
     };
-    let bytes = runner
-        .run(&tool.read_spec(&mime), IMAGE_TIMEOUT)
-        .map_err(classify_io)?;
-    if bytes.is_empty() {
-        return Ok(None);
+    match runner.run(&tool.read_spec(&mime), IMAGE_TIMEOUT) {
+        Ok(bytes) if bytes.is_empty() => Ok(None),
+        Ok(bytes) if bytes.len() > MAX_PAYLOAD => Err(PasteFailure::TooLarge),
+        Ok(bytes) => Ok(Some((mime, bytes))),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(PasteFailure::Timeout),
+        // 清单里有、读却失败：最可能是表示在两次调用之间消失（剪贴板易主）——
+        // 按「没有图片」处理，文本照常继续。
+        Err(e) => {
+            tracing::debug!(tool = tool.program(), error = %e, "picture read found no data");
+            Ok(None)
+        }
     }
-    if bytes.len() > MAX_PAYLOAD {
-        return Err(PasteFailure::TooLarge);
-    }
-    Ok(Some((mime, bytes)))
 }
 
 /// 文本：`wl-paste` → `xclip` → `xsel`，第一个跑成功的命令是权威的
-/// （它说没有文本就是没有，不再问下一个工具）。
+/// （它说没有文本就是没有，不再问下一个工具）；全部只是普通失败时收场也是
+/// 「没有文本」（空剪贴板在三个工具上都是一次普通失败），只有缺命令 / 超时才上报。
 fn read_linux_text(runner: &impl CommandRunner) -> Result<Option<String>, PasteFailure> {
     let mut failure: Option<PasteFailure> = None;
     for spec in linux_text_specs() {
@@ -483,14 +481,16 @@ fn read_linux_text(runner: &impl CommandRunner) -> Result<Option<String>, PasteF
             }
         }
     }
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(None),
-    }
+    settle(failure)?;
+    Ok(None)
 }
 
 /// 跑一条文本命令：空输出 = 没有文本（合法），非空按 UTF-8 宽容解码
 /// （与 OSC 5522 通道的文本口径一致）。
+///
+/// 普通非零退出**不是**通道失败：读取器用它表示「这个剪贴板没有文本表示」
+/// （`wl-paste` 在空剪贴板 / 无选中时就是 `Nothing is copied` + exit 1），所以链条
+/// 要继续试下一个工具，但也不该把它升级成定向失败 —— 由 [`settle`] 统一收场。
 fn read_text(
     runner: &impl CommandRunner,
     spec: &CommandSpec,
@@ -499,6 +499,18 @@ fn read_text(
         Ok(bytes) if bytes.is_empty() => Ok(None),
         Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
         Err(e) => Err(classify_io(e)),
+    }
+}
+
+/// 收场规则：只有**结构性**失败（缺命令 / 超时 / 超限）才是失败，其余的普通
+/// 非零退出归「没有对应表示」——空剪贴板在各平台读取器上都是一次普通失败，
+/// 把读取器的退出码原样抛给用户会得到一个误导性的「读取失败」toast。
+fn settle(failure: Option<PasteFailure>) -> Result<(), PasteFailure> {
+    match failure {
+        Some(e @ (PasteFailure::Unavailable | PasteFailure::Timeout | PasteFailure::TooLarge)) => {
+            Err(e)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -969,6 +981,41 @@ mod tests {
         });
         assert_eq!(
             read_from_clipboard(&runner, Platform::Linux, false),
+            Ok(PasteOutcome::Empty)
+        );
+    }
+
+    /// 空剪贴板在 Linux 上是一条**普通非零退出**（`wl-paste`：`Nothing is copied` +
+    /// exit 1；X11 工具同类），不是通道失败：工具全按非零退出时收场必须是 Empty。
+    #[test]
+    fn linux_without_a_selection_is_empty_not_a_failure() {
+        let runner = FakeRunner::new(|spec| {
+            Err(io::Error::other(format!(
+                "{} exited with exit status: 1",
+                spec.program
+            )))
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Linux, false),
+            Ok(PasteOutcome::Empty)
+        );
+        assert_eq!(
+            runner.called(),
+            ["wl-paste", "xclip", "wl-paste", "xclip", "xsel"],
+            "每个工具都问过（图片两档 + 文本三档）"
+        );
+    }
+
+    /// macOS 的文本读取器普通非零退出同理：空结果（不是 Failed）。
+    #[test]
+    fn macos_treats_a_plain_text_reader_failure_as_no_text() {
+        let runner = FakeRunner::new(|spec| match spec.program {
+            "/usr/bin/osascript" => osascript_without_picture(spec),
+            "/usr/bin/pbpaste" => Err(io::Error::other("pbpaste exited with exit status: 1")),
+            other => panic!("unexpected program {other}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Macos, false),
             Ok(PasteOutcome::Empty)
         );
     }
