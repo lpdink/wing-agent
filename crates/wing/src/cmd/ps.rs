@@ -5,11 +5,11 @@
 //!
 //! The human-readable session list is rendered through the shared table
 //! engine (`render::table`) with the same skin as TUI markdown tables; every
-//! measurement is display columns (CJK-safe). `--json` is the machine surface
-//! and is left untouched (a flat list in the existing order — `--tree` only
-//! shapes the human table). `--parent <sid>` narrows the list to that
-//! session's direct children; `--tree` draws the lineage forest with the
-//! shared algorithm (`shared::session_tree`).
+//! measurement is display columns (CJK-safe). `--json` is the machine surface:
+//! a flat list in the existing order — `--tree` only shapes the human table
+//! (the lineage feature adds just the `parent_session_id` key to each row).
+//! `--parent <sid>` narrows the list to that session's direct children; `--tree`
+//! draws the lineage forest with the shared algorithm (`shared::session_tree`).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -137,7 +137,8 @@ fn emit_sessions_with(
     out: &TableOutput,
 ) {
     if json {
-        // 机器面：与今天逐字节相同（平铺、既有呈现序）——`--tree` 只作用于人类表格。
+        // 机器面：平铺、既有呈现序——`--tree` 只作用于人类表格，行序不受影响
+        // （血缘特性只在每行上新增一个可忽略的 `parent_session_id` 键）。
         common::print_json_compact(sessions);
         return;
     }
