@@ -353,8 +353,8 @@ impl<'a> SelectionPopup<'a> {
     /// line 2 = `    <title>`（缩进与前缀宽度对齐）。
     ///
     /// workspace 只做展示（#145 删掉的是「按 workspace 排序」，不是这段显示）：
-    /// 行 1 的容量先让给时间标签与星标，剩下的才画 workspace（超长截断）。
-    /// 树前缀（父子的连接线）另占一列预算，同样先于 workspace 保下来。
+    /// 行 1 的容量先让给时间标签与星标，再让给树前缀（放不下时截前缀，保尾部
+    /// 连接符），剩下的才画 workspace（超长截断）。
     #[allow(clippy::too_many_arguments)]
     fn render_rich_row(
         &self,
@@ -368,9 +368,26 @@ impl<'a> SelectionPopup<'a> {
         buf: &mut Buffer,
     ) {
         let width = area.width as usize;
-        let prefix_w = UnicodeWidthStr::width(rich.tree_prefix.as_str());
 
         // ── Line 1: [tree prefix] + status icon + workspace + [last_active] + [★] ──
+        // 让位顺序：星标 / 时间标签 → 前缀 → workspace。深链前缀的头几十列是
+        // 每行都一样的引导槽（信息量最低），但前缀自己也要让位——它不能反过来
+        // 把图标甚至整行挤出面板（裁剪保留尾部：连接符与最近几层缩进）。
+        let time_tag = if rich.last_active.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", rich.last_active)
+        };
+        let star_w = if rich.pinned { 2 } else { 0 };
+        let reserve = 3 + star_w + UnicodeWidthStr::width(time_tag.as_str());
+        let max_prefix_w = width.saturating_sub(reserve).max(3);
+        let prefix = if UnicodeWidthStr::width(rich.tree_prefix.as_str()) > max_prefix_w {
+            truncate_left_to_display_width(&rich.tree_prefix, max_prefix_w)
+        } else {
+            rich.tree_prefix.clone()
+        };
+        let prefix_w = UnicodeWidthStr::width(prefix.as_str());
+
         Self::clear_line(buf, area, y, base_style);
         let mut line1: Vec<Span<'static>> = Vec::new();
         if prefix_w > 0 {
@@ -378,7 +395,7 @@ impl<'a> SelectionPopup<'a> {
             // 不该和会话内容抢注意力。
             let prefix_fg = if is_selected { accent } else { dim_color };
             line1.push(Span::styled(
-                rich.tree_prefix.clone(),
+                prefix,
                 Style::default().fg(prefix_fg).patch(base_style),
             ));
         }
@@ -391,17 +408,13 @@ impl<'a> SelectionPopup<'a> {
 
         // "<prefix> ● " prefix occupies prefix_w + 3 columns; the time tag
         // " [MM-DD HH:MM]" 14; the pin star " ★" 2. The workspace gets what is left.
-        let time_tag = if rich.last_active.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", rich.last_active)
-        };
-        let star_w = if rich.pinned { 2 } else { 0 };
         let available = width.saturating_sub(prefix_w + 3 + star_w);
         let ws_budget = available.saturating_sub(UnicodeWidthStr::width(time_tag.as_str()));
 
         let workspace = if rich.workspace.is_empty() {
-            "(no workspace)".to_string()
+            // 占位符同样走预算：它替的是 workspace 这一格，不该反过来把时间
+            // 标签顶出行外。
+            truncate_to_display_width("(no workspace)", ws_budget)
         } else if UnicodeWidthStr::width(rich.workspace.as_str()) > ws_budget {
             // 左截断：路径的区分度在尾段（`…/ws/wing-agent`）——右截断留下的
             // 是每个会话都一样的 `/Users/…` 前缀，等于没显示。
@@ -732,6 +745,12 @@ mod tests {
         let row = session_row_at(SessionStatus::Idle, "07-22 21:41", "t", "", false);
         let (line1, _) = rich_lines(&row, "", 40);
         assert_eq!(line1, " ● (no workspace) [07-22 21:41]");
+
+        // 放不下时占位符自己也走预算：它不该把时间标签顶出行外。
+        let (line1, _) = rich_lines(&row, "", 30);
+        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 30, "{line1:?}");
+        assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
+        assert!(line1.starts_with(" ● (no workspa"), "{line1:?}");
     }
 
     #[test]
@@ -810,6 +829,35 @@ mod tests {
             "the workspace keeps its tail, got: {line1:?}"
         );
         assert!(line2.starts_with("          title"), "{line2:?}");
+    }
+
+    #[test]
+    fn test_rich_row_clips_a_deep_prefix_instead_of_losing_the_row() {
+        // 深链（前缀吃到 16 层封顶 = 51 列）+ 窄面板：前缀自己是第一个让位的
+        // 结构元素——它不能让图标 / 时间标签 / 星标跟着整行消失。
+        let deep = format!("{}└─ ", "│  ".repeat(16));
+        assert_eq!(UnicodeWidthStr::width(deep.as_str()), 51);
+        let row = session_row_tree(
+            SessionStatus::Idle,
+            "07-22 21:41",
+            "deep title",
+            "/ws",
+            true,
+            &deep,
+        );
+
+        let (line1, line2) = rich_lines(&row, "", 40);
+        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 40, "{line1:?}");
+        assert!(line1.starts_with('…'), "clipped head: {line1:?}");
+        assert!(
+            line1.contains("└─  ●"),
+            "the branch marker survives: {line1:?}"
+        );
+        assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
+        assert!(line1.ends_with("★"), "the pin star survives: {line1:?}");
+        // 行 2 跟着**裁剪后**的前缀走（缩进 = 21 + 4），标题仍有一席之地。
+        assert_eq!(line2.trim_start(), "deep title", "{line2:?}");
+        assert_eq!(line2.chars().take_while(|c| *c == ' ').count(), 25);
     }
 
     #[test]

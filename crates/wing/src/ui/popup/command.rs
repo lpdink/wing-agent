@@ -385,6 +385,7 @@ pub struct SessionCandidate {
     /// Runtime status string from the backend (inactive|idle|working|waiting).
     pub status: String,
     /// Last interaction timestamp (ISO 8601), displayed on line 1.
+    /// 定序已经发生在抓取时（树序用后端字段），这里只做展示。
     pub last_interaction: String,
     /// 是否被 pin（`pin` 标签；前端约定，见 [`crate::shared::pinning`]）。
     /// 定序发生在抓取时（`shared::session_tree::build_forest`），这里只留

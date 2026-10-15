@@ -583,14 +583,22 @@ impl App {
                 // 定序输入——树序的每个排序键都是自足的（pin 时间 / 子树活跃 /
                 // id），workspace 与 status 只做展示与搜索。
                 let anchor = self.popup.active.selected_name().map(str::to_string);
+                // pin 事实（标签 + 时间）算一次喂两处：树的排序键与候选行的星标
+                // 谓词——两者共用同一份投影，不会各算各的。
+                let pins: Vec<(bool, Option<&str>)> = resp
+                    .sessions
+                    .iter()
+                    .map(|s| (is_pinned(&s.tags), pin_added_at(&s.tag_meta)))
+                    .collect();
                 let rows: Vec<TreeRow<'_>> = resp
                     .sessions
                     .iter()
-                    .map(|s| TreeRow {
+                    .zip(&pins)
+                    .map(|(s, &(pinned, pin_at))| TreeRow {
                         id: &s.id,
                         parent: s.parent_session_id.as_deref(),
-                        pinned: is_pinned(&s.tags),
-                        pin_added_at: pin_added_at(&s.tag_meta),
+                        pinned,
+                        pin_added_at: pin_at,
                         last_interaction: s.last_interaction.as_deref(),
                     })
                     .collect();
@@ -604,7 +612,7 @@ impl App {
                             workspace: s.workspace.clone().unwrap_or_default(),
                             status: s.status.clone(),
                             last_interaction: s.last_interaction.clone().unwrap_or_default(),
-                            pinned: is_pinned(&s.tags),
+                            pinned: pins[entry.index].0,
                             tree_prefix: entry.prefix,
                         }
                     })

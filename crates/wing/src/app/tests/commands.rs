@@ -1184,6 +1184,13 @@ mod session_list {
         assert!(app.popup.cache.sessions[0].pinned);
     }
 
+    /// pin 标签在、但 `tag_meta` 里没有对应记录（时间未知的真样本）。
+    fn pinned_without_record(mut s: SessionInfo) -> SessionInfo {
+        s.tags = vec![PIN_TAG.to_string()];
+        s.tag_meta.clear();
+        s
+    }
+
     #[test]
     fn test_later_pins_sort_earlier_and_unknown_times_sort_last() {
         let mut app = app();
@@ -1214,19 +1221,20 @@ mod session_list {
                     "2025-01-01T00:00:00",
                     Some("2025-06-02T00:00:00"),
                 ),
-                session(
+                pinned_without_record(session(
                     "bare-pin",
                     "no record",
                     "/ws",
                     "idle",
                     "2025-01-01T00:00:00",
                     None,
-                ),
+                )),
             ],
         );
 
-        // 有时间的按时间降序；未知 / 不可解析的排在其后（稳定保原序）。
-        assert_eq!(ids(&app), ["new-pin", "old-pin", "loose-pin", "bare-pin"]);
+        // 有时间的按时间降序；时间未知 / 不可解析的 pin 排在其后，两者并列
+        // （活跃度同分）时按 id 升序（`build_forest` 的确定性 tie-break）。
+        assert_eq!(ids(&app), ["new-pin", "old-pin", "bare-pin", "loose-pin"]);
     }
 
     #[test]
