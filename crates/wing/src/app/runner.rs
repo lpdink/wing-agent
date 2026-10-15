@@ -963,7 +963,7 @@ mod tests {
             status: "idle".into(),
             last_interaction: "2025-01-01T00:00:00Z".into(),
             pinned: false,
-            pin_added_at: None,
+            tree_prefix: String::new(),
         }];
         app
     }

@@ -669,22 +669,25 @@ fn test_info_carries_model_id_and_provider_without_a_clearing_hack() {
     );
 }
 
-// ── Session list: backend base order + the pin overlay ──
+// ── Session list: the tree order + the two-layer pin ──
 
-/// `/session`（`/ss`）的候选缓存：后端下发的**基准序**原样保留，唯一的前端
-/// 语义叠加是「pin 置顶」（组内后 pin 的更靠前，见 `shared::pinning`）。
+/// `/session`（`/ss`）的候选缓存按**树序**排列（唯一实现
+/// `shared::session_tree::build_forest`，与 `wing ps --tree` 共用）：子会话
+/// 跟在父下面并带连接前缀，pin 的根连同子树整块上浮，子节点的 pin 只在兄弟
+/// 组内说话。行序由每行自足的排序键（pin 时间 / 子树活跃 / id）决定。
 ///
-/// 断言用的仍是「旧代码会重排」的形状，三条旧重排键逐一覆盖：
+/// 三条旧重排键仍逐一覆盖（它们都不再参与定序）：
 /// - **workspace 匹配**：inactive 行的 workspace 正是启动目录，active 行的不是；
 /// - **状态优先级**：payload 里更旧的 `waiting`（旧 rank 0）排在更新的 `idle`
 ///   （旧 rank 2）之后——只看 rank 会把它提到最前；
-/// - **组合**：旧的全键 `(ws_mismatch, rank)` 给出的顺序与 payload 完全相反。
+/// - **后端基准序**（active 优先）也不再是行序的来源。
 mod session_list {
     use crate::app::App;
     use crate::app::intent::FetchPayload;
     use crate::app::intent::FetchResult;
     use crate::config::AppConfig;
     use crate::shared::pinning::PIN_TAG;
+    use crate::ui::popup::selection::SelectionRow;
     use wing_api_client::models::SessionInfo;
     use wing_api_client::models::SessionListResponse;
     use wing_api_client::models::TagMeta;
@@ -758,8 +761,23 @@ mod session_list {
             .collect()
     }
 
+    fn prefixes(app: &App) -> Vec<&str> {
+        app.popup
+            .cache
+            .sessions
+            .iter()
+            .map(|c| c.tree_prefix.as_str())
+            .collect()
+    }
+
+    /// 把 `s` 挂到 `parent` 名下（血缘：谁创建了我）。
+    fn under(mut s: SessionInfo, parent: &str) -> SessionInfo {
+        s.parent_session_id = Some(parent.into());
+        s
+    }
+
     #[test]
-    fn test_session_list_keeps_the_backend_order() {
+    fn test_flat_list_orders_by_subtree_activity_not_workspace_or_status() {
         let mut app = app();
         feed(
             &mut app,
@@ -796,8 +814,8 @@ mod session_list {
 
         assert_eq!(
             ids(&app),
-            ["active-new", "active-old-waiting", "inactive-mid"],
-            "无 pin 时原序透传——workspace / status 都不参与重排"
+            ["active-new", "inactive-mid", "active-old-waiting"],
+            "无父子关系的列表按「最后交互降序」；workspace / status 都不参与"
         );
         assert_eq!(app.popup.cache.sessions[0].status, "idle");
         assert_eq!(
@@ -805,7 +823,332 @@ mod session_list {
             "2025-06-01T00:00:00"
         );
         // workspace 随候选带下来（展示 + 搜索），但不参与排序。
-        assert_eq!(app.popup.cache.sessions[2].workspace, "/launch/project");
+        assert_eq!(app.popup.cache.sessions[1].workspace, "/launch/project");
+        // 全是根 → 全不带前缀（平滑退化：看起来和树形之前一样）。
+        assert_eq!(prefixes(&app), ["", "", ""]);
+    }
+
+    #[test]
+    fn test_children_follow_their_parent_with_drawing_prefixes() {
+        // A → B → G，且 B 之后还有兄弟 C：树序 + 连接前缀，
+        // G 的祖先前缀里要保留 B 那一层的 `│` 延续线。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session(
+                    "r2",
+                    "other root",
+                    "/ws",
+                    "idle",
+                    "2025-06-01T00:00:00",
+                    None,
+                ),
+                session("A", "the team", "/ws", "idle", "2025-01-01T00:00:00", None),
+                under(
+                    session(
+                        "B",
+                        "worker one",
+                        "/ws",
+                        "idle",
+                        "2025-02-01T00:00:00",
+                        None,
+                    ),
+                    "A",
+                ),
+                under(
+                    session(
+                        "C",
+                        "worker two",
+                        "/ws",
+                        "idle",
+                        "2025-03-01T00:00:00",
+                        None,
+                    ),
+                    "A",
+                ),
+                under(
+                    session(
+                        "G",
+                        "sub-worker",
+                        "/ws",
+                        "idle",
+                        "2025-04-01T00:00:00",
+                        None,
+                    ),
+                    "B",
+                ),
+            ],
+        );
+
+        assert_eq!(ids(&app), ["r2", "A", "B", "G", "C"]);
+        assert_eq!(prefixes(&app), ["", "", "├─ ", "│  └─ ", "└─ "]);
+    }
+
+    #[test]
+    fn test_a_pinned_root_floats_with_its_whole_subtree() {
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session(
+                    "busy",
+                    "recent work",
+                    "/ws",
+                    "idle",
+                    "2025-06-01T00:00:00",
+                    None,
+                ),
+                session(
+                    "pinned",
+                    "the team",
+                    "/ws",
+                    "inactive",
+                    "2025-01-01T00:00:00",
+                    Some("2025-05-01T09:00:00"),
+                ),
+                under(
+                    session(
+                        "worker",
+                        "worker",
+                        "/ws",
+                        "idle",
+                        "2025-02-01T00:00:00",
+                        None,
+                    ),
+                    "pinned",
+                ),
+            ],
+        );
+
+        assert_eq!(
+            ids(&app),
+            ["pinned", "worker", "busy"],
+            "pin 的根连同子树整块上浮（置顶区只对根开放）"
+        );
+        assert_eq!(prefixes(&app), ["", "└─ ", ""]);
+    }
+
+    #[test]
+    fn test_a_pinned_child_leads_its_siblings_without_moving_the_parent() {
+        // 子节点的 pin 只在兄弟组内说话：它排到兄弟组第一，但既不提升自己
+        // （仍然在父下面），也不影响父节点在根组里的位置（父的子树活跃时间
+        // 比根兄弟旧，pin 时间不算进父的排序键）。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("busy", "recent", "/ws", "idle", "2025-06-01T00:00:00", None),
+                session("parent", "team", "/ws", "idle", "2025-01-01T00:00:00", None),
+                under(
+                    session(
+                        "kid-pinned",
+                        "kid",
+                        "/ws",
+                        "idle",
+                        "2025-02-01T00:00:00",
+                        Some("2025-05-01T09:00:00"),
+                    ),
+                    "parent",
+                ),
+                under(
+                    session(
+                        "kid-newer",
+                        "newer kid",
+                        "/ws",
+                        "idle",
+                        "2025-03-01T00:00:00",
+                        None,
+                    ),
+                    "parent",
+                ),
+            ],
+        );
+
+        assert_eq!(ids(&app), ["busy", "parent", "kid-pinned", "kid-newer"]);
+        assert_eq!(prefixes(&app), ["", "", "├─ ", "└─ "]);
+    }
+
+    #[test]
+    fn test_a_ghost_parent_degrades_to_a_root() {
+        // 父不在列表里（被删 / memory 后端重启 / 弱引用的野生值）→ 升为根，
+        // 不挂死、不污染健康行。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                under(
+                    session(
+                        "orphan",
+                        "lost child",
+                        "/ws",
+                        "idle",
+                        "2025-06-01T00:00:00",
+                        None,
+                    ),
+                    "ghost",
+                ),
+                session(
+                    "healthy",
+                    "fine",
+                    "/ws",
+                    "idle",
+                    "2025-01-01T00:00:00",
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(ids(&app), ["orphan", "healthy"]);
+        assert_eq!(prefixes(&app), ["", ""]);
+    }
+
+    #[test]
+    fn test_the_search_state_flattens_the_rendered_rows() {
+        // 全量（无过滤词）带树前缀；一旦输入过滤词，命中行平铺（前缀清空）——
+        // 命中集合与树不同构，悬空的连接线只会误导。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("root", "root", "/ws", "idle", "2025-02-01T00:00:00", None),
+                under(
+                    session(
+                        "kid",
+                        "kid worker",
+                        "/ws",
+                        "idle",
+                        "2025-01-01T00:00:00",
+                        None,
+                    ),
+                    "root",
+                ),
+            ],
+        );
+
+        let panel_prefixes = |app: &mut App| -> Vec<String> {
+            app.update_popup_from_input();
+            let (rows, ..) = app.popup.active.render_data().expect("panel is open");
+            rich_prefixes(rows)
+        };
+        app.input.set_text("/ss");
+        assert_eq!(panel_prefixes(&mut app), ["", "└─ "]);
+
+        app.input.set_text("/ss worker");
+        assert_eq!(panel_prefixes(&mut app), [""]);
+    }
+
+    /// 面板行的树前缀（顺序 = 渲染顺序）。
+    fn rich_prefixes(rows: &[SelectionRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                r.rich
+                    .as_ref()
+                    .expect("session rows are rich")
+                    .tree_prefix
+                    .clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_the_frame_draws_the_tree_block_with_aligned_second_lines() {
+        // 端到端：把面板画进帧缓冲，读真正上了屏的行——树块成画（`├─` /
+        // `│` / `└─`），行 2 的标题缩进与行 1 的图标列对齐。
+        use super::{draw, test_terminal};
+
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("A", "the team", "/ws", "idle", "2025-01-01T00:00:00", None),
+                under(
+                    session(
+                        "B",
+                        "worker one",
+                        "/ws",
+                        "idle",
+                        "2025-02-01T00:00:00",
+                        None,
+                    ),
+                    "A",
+                ),
+                under(
+                    session(
+                        "G",
+                        "sub-worker",
+                        "/ws",
+                        "idle",
+                        "2025-04-01T00:00:00",
+                        None,
+                    ),
+                    "B",
+                ),
+                under(
+                    session(
+                        "C",
+                        "worker two",
+                        "/ws",
+                        "idle",
+                        "2025-03-01T00:00:00",
+                        None,
+                    ),
+                    "A",
+                ),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+
+        let mut term = test_terminal(60, 24);
+        draw(&mut app, &mut term);
+        let buf = term.backend().buffer();
+        let rows: Vec<String> = (buf.area.y..buf.area.bottom())
+            .map(|y| {
+                (buf.area.x..buf.area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let row_of = |needle: &str| {
+            rows.iter()
+                .position(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("no row contains {needle:?}:\n{}", frame_rows(&rows)))
+        };
+
+        // 树块：父在子上面，孙的祖先前缀里保留 `│` 延续线，C 是最后一个。
+        // 时间标签唯一，用它定位行（前缀 `└─` 是 `│  └─` 的子串，不唯一）。
+        let a = row_of("[01-01 00:00]");
+        let b = row_of("[02-01 00:00]");
+        let g = row_of("[04-01 00:00]");
+        let c = row_of("[03-01 00:00]");
+        assert!(
+            a < b && b < g && g < c,
+            "tree order:\n{}",
+            frame_rows(&rows)
+        );
+        assert!(rows[a].contains("  ● /ws [01-01 00:00]"), "root: no prefix");
+        assert!(rows[b].contains("├─  ● /ws [02-01 00:00]"));
+        assert!(rows[g].contains("│  └─  ● /ws [04-01 00:00]"));
+        assert!(rows[c].contains("└─  ● /ws [03-01 00:00]"));
+
+        // 行 2 的对齐：标题列 = 图标列 + 前缀宽 + 1（根行照旧）。
+        for (icon_row, title) in [(a, "the team"), (b, "worker one"), (g, "sub-worker")] {
+            let icon_col = rows[icon_row].chars().take_while(|c| *c != '●').count();
+            let title_row = row_of(title);
+            let title_col = rows[title_row].chars().take_while(|c| *c == ' ').count();
+            assert_eq!(
+                title_col,
+                icon_col + 3,
+                "line 2 aligns under line 1:\n{}",
+                frame_rows(&rows)
+            );
+        }
+    }
+
+    /// 行文本的调试视图（断言消息用）。
+    fn frame_rows(rows: &[String]) -> String {
+        rows.iter().map(|r| format!("|{r}|\n")).collect::<String>()
     }
 
     #[test]
@@ -839,10 +1182,6 @@ mod session_list {
             "pin 是前端的第一排序键：即使 inactive 也置顶"
         );
         assert!(app.popup.cache.sessions[0].pinned);
-        assert_eq!(
-            app.popup.cache.sessions[0].pin_added_at.as_deref(),
-            Some("2025-05-01T09:00:00")
-        );
     }
 
     #[test]
@@ -896,28 +1235,30 @@ mod session_list {
         feed(
             &mut app,
             vec![
-                session("first", "one", "/ws", "idle", "2025-01-01T00:00:00", None),
-                session("second", "two", "/ws", "idle", "2025-01-02T00:00:00", None),
+                session("first", "one", "/ws", "idle", "2025-01-02T00:00:00", None),
+                session("second", "two", "/ws", "idle", "2025-01-01T00:00:00", None),
             ],
         );
+        // 树序（时间降序）把更旧的 second 放在第二行。
+        assert_eq!(ids(&app), ["first", "second"]);
         app.input.set_text("/ss");
         app.update_popup_from_input();
         app.popup.active.move_down(); // 用户把光标移到第二行
         assert_eq!(app.popup.active.selected_name(), Some("second"));
 
-        // 刷新响应：行序变化（second 被 pin 到最前）——光标跟着 id 走。
+        // 刷新响应：行序翻转（second 被 pin）——光标跟着 id 走。
         feed(
             &mut app,
             vec![
+                session("first", "one", "/ws", "idle", "2025-01-02T00:00:00", None),
                 session(
                     "second",
                     "two",
                     "/ws",
                     "idle",
-                    "2025-01-02T00:00:00",
+                    "2025-01-01T00:00:00",
                     Some("2025-07-01T00:00:00"),
                 ),
-                session("first", "one", "/ws", "idle", "2025-01-01T00:00:00", None),
             ],
         );
         assert_eq!(ids(&app), ["second", "first"]);
@@ -944,7 +1285,7 @@ fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        pin_added_at: None,
+        tree_prefix: String::new(),
     }];
     app.popup.cache.sessions_fetched = true;
 
@@ -994,7 +1335,7 @@ fn test_the_refresh_response_does_not_trigger_another_request() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        pin_added_at: None,
+        tree_prefix: String::new(),
     }];
     app.popup.cache.sessions_fetched = true;
     app.input.set_text("/ss");
@@ -1108,7 +1449,7 @@ fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        pin_added_at: None,
+        tree_prefix: String::new(),
     }];
     app.popup.cache.sessions_fetched = true;
     app.turn.working = true;
