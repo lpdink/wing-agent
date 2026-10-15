@@ -28,6 +28,7 @@ from wing.gateway.setup_guard import (
     SetupModeError,
     render_setup_detail,
 )
+from wing.session import SessionArchivedError
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -66,6 +67,16 @@ def _register_error_handlers(app: FastAPI) -> None:
         return error_response(
             503, render_setup_detail(exc.problems), error="setup_mode"
         )
+
+    @app.exception_handler(SessionArchivedError)
+    async def _on_session_archived(
+        request: Request, exc: SessionArchivedError
+    ) -> JSONResponse:
+        # 404 + 显式 error 码（同 setup_mode 的手法）：状态码与"真不存在"一致
+        # （不给探测反馈），但 error 码让客户端能给出**可行动**的提示而不是
+        # 干巴巴的 "session not found"。SessionArchivedError 刻意不是 LookupError
+        # ——路由的 `except LookupError` 不会把它吞成普通 404，这里才收得到。
+        return error_response(404, str(exc), error="session_archived")
 
 
 def create_app(server: GatewayServer) -> FastAPI:

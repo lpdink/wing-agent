@@ -4,6 +4,8 @@
 
 Route handler 只做：参数验证 → 调 Runtime → 构造 HTTP 响应。
 异常映射：LookupError → 404, ValueError → 400, RuntimeError → 400/500。
+归档例外：SessionArchivedError **不是** LookupError（可行动的存在性结论），由
+app 级 handler 单独映射 404 + error="session_archived"，提示"先恢复再使用"。
 """
 
 from __future__ import annotations
@@ -16,6 +18,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from typing import TYPE_CHECKING, get_args
 
 from wing.gateway.protocol import (
+    ArchiveRequest,
+    ArchiveResponse,
+    ArchivedSessionsResponse,
     BranchesResponse,
     CompactRequest,
     CompactResponse,
@@ -290,8 +295,12 @@ async def upload_session_media(
     server = _get_server(request)
 
     # 会话存在性先于收包：404 不该以"读完整个 body"为代价（与 send 同序：存在性先于
-    # 内容校验，body 合法或非法都回 404）。
-    if not server.runtime.session_exists(session_id):
+    # 内容校验，body 合法或非法都回 404）。归档命中的 SessionArchivedError 刻意
+    # 逃出这个捕获（不是 LookupError）——由 app handler 回 404 + session_archived，
+    # 冻结面在"按 id 解析"的端点上保持一致。
+    try:
+        server.runtime.require_live_session(session_id)
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
 
     # Content-Length 预检（收包之前）：超限的声明值不必先读进内存再在闸门里拒绝。
@@ -431,8 +440,23 @@ async def get_session(
     server = _get_server(request)
     state = server.runtime.get_session_state(session_id)
     if state is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise _missing_session(server, session_id)
     return SessionGetResponse(**state)
+
+
+def _missing_session(server: GatewayServer, session_id: str) -> Exception:
+    """「内存态查询」找不到会话时的错误：归档命中 → SessionArchivedError
+    （app handler 映射 404 + session_archived，可行动提示），否则普通 404。
+
+    这些端点本来只查内存态（不水合），归档会话对它们同样是"不在场"；区别只在
+    错误的可行动性——裸 API 消费方要看得出"它没消失，只是被归档了"。
+    """
+    from wing.session import SessionArchivedError
+
+    error = server.runtime.missing_session_error(session_id)
+    if isinstance(error, SessionArchivedError):
+        return error
+    return HTTPException(status_code=404, detail="session not found")
 
 
 # ============================================================
@@ -452,7 +476,7 @@ async def session_info(
     server = _get_server(request)
     session = server.runtime.get_session(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise _missing_session(server, session_id)
     return build_session_info(session)
 
 
@@ -468,7 +492,7 @@ async def session_branches(
     server = _get_server(request)
     session = server.runtime.get_session(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise _missing_session(server, session_id)
     return build_session_branches(session)
 
 
@@ -660,3 +684,65 @@ async def rewind_session(
         raise HTTPException(status_code=400, detail=str(e))
 
     return RewindResponse(ok=True, draft=draft)
+
+
+# ============================================================
+# 归档（archive）
+# ============================================================
+
+
+@router.post(
+    "/api/session/archive",
+    response_model=ArchiveResponse,
+    summary="归档 / 恢复 session（设置归档状态）",
+)
+async def archive_session(
+    body: ArchiveRequest,
+    request: Request,
+) -> ArchiveResponse:
+    """把一个会话移入 / 移出归档区（幂等）。
+
+    归档区（``<sessions root>/.archive/``）不参与列表与解析：归档后的会话从
+    ``/api/session/list`` 消失，resume / send / tag 等一律 404 +
+    ``error="session_archived"``（提示先恢复）。移动是纯 rename——不改任何字节。
+
+    钉住条件与 release 同一套：忙碌 / 有待处理输入 / 被订阅 / 非归档后端一律
+    409 拒绝；空闲可收回的会话会先逐出再移动。幂等：归档已归档的会话 /
+    恢复未归档的会话返回 200 + ``changed=false``。
+    """
+    server = _get_server(request)
+    try:
+        if body.archived:
+            changed, detail = server.runtime.archive_session(body.session_id)
+        else:
+            changed, detail = server.runtime.unarchive_session(body.session_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return ArchiveResponse(
+        ok=True,
+        session_id=body.session_id,
+        # 操作**之后**的真实状态（不是请求意图）：空会话的归档是 no-op——它
+        # 既没进归档区也不在 live 区，回执谎报 true 会误导只看 archived 的
+        # 消费方（CLI 只看 changed/detail，不受影响）。
+        archived=server.runtime.is_archived(body.session_id),
+        changed=changed,
+        detail=detail,
+    )
+
+
+@router.get(
+    "/api/session/archive",
+    response_model=ArchivedSessionsResponse,
+    summary="列出归档区 session（读索引，不扫会话目录）",
+)
+async def list_archived_sessions(request: Request) -> ArchivedSessionsResponse:
+    """归档区条目（标题 / tags / 模型 / 归档时间）。
+
+    读取归档索引（``.archive/index.json``）——归档是低频路径，列表不该为此
+    扫全量会话目录；索引缺失 / 损坏时按归档目录重建。模型展示名按当前配置
+    现算（与 ``/api/session/list`` 同一口径）。
+    """
+    server = _get_server(request)
+    return ArchivedSessionsResponse(sessions=server.runtime.list_archived_sessions())

@@ -469,6 +469,7 @@ class TestEnterOperational:
             assert not isinstance(server.runtime, _SetupRuntime)
             assert get_config().providers[0].name == "p"
             assert "session-eviction" in server._background.jobs
+            assert "session-archive" in server._background.jobs
             # hooks 已加载（WingRuntime 构造的一部分）+ 后台任务在跑（lifespan 已请求）。
             assert server._background.running is True
 

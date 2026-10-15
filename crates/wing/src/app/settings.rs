@@ -725,6 +725,7 @@ pub(super) async fn restart_gateway(
     }
 
     // 5. 重连 + 会话恢复（与 run loop 的 retry 臂同一对原语）。
+    let lost_session = app.session_id.clone();
     match connect_transport(endpoint).await {
         Ok(new_transport) => {
             let workspace = app.launch_workspace.clone();
@@ -732,14 +733,15 @@ pub(super) async fn restart_gateway(
                 .recover_session(&app.session_id, workspace.as_deref())
                 .await
             {
-                Ok(()) => {
+                Ok(recovery) => {
                     *transport = Some(new_transport);
                     app.set_connected(true);
                     app.clear_toast();
-                    app.show_toast(Toast::info(
-                        "网关已重启，会话已恢复",
-                        Duration::from_secs(3),
-                    ));
+                    // 归档（重启窗口里被 sweep 收走）→ 起的是新会话：不能对用户
+                    // 说"会话已恢复"，提示由 `Recovery::notice` 给出（带恢复命令）。
+                    app.show_toast(recovery.notice(&lost_session).unwrap_or_else(|| {
+                        Toast::info("网关已重启，会话已恢复", Duration::from_secs(3))
+                    }));
                     app.invalidate_session_cache();
                     // 与既有 recovery 路径同一组刷新（会话快照 + 命令表）。
                     app.push_intent(AppIntent::FetchInfo);

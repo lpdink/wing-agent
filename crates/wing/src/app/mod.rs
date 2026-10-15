@@ -1238,15 +1238,17 @@ pub async fn run_app(
                     // The pushed SyncSession updates App state (session_id,
                     // chat replay), exactly like the `/new` command.
                     let workspace = app.launch_workspace.clone();
+                    let lost_session = app.session_id.clone();
                     match t.recover_session(&app.session_id, workspace.as_deref()).await {
-                        Ok(()) => {
+                        Ok(recovery) => {
                             recovery_pending = false;
                             app.set_connected(true);
                             app.clear_toast();
-                            app.show_toast(Toast::info(
-                                "Reconnected!",
-                                std::time::Duration::from_secs(2),
-                            ));
+                            // 归档会话：新会话可用，但老会话要用户自己恢复——
+                            // 提示由 `Recovery::notice` 给出（带可复制的命令）。
+                            app.show_toast(recovery.notice(&lost_session).unwrap_or_else(|| {
+                                Toast::info("Reconnected!", std::time::Duration::from_secs(2))
+                            }));
                             // The session may have been silently replaced —
                             // the popup list must re-fetch.
                             app.invalidate_session_cache();

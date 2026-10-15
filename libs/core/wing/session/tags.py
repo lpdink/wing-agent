@@ -4,7 +4,8 @@
 
 标签是会话级结构化标记（``SessionMetadata.tags``）：**不透明字符串**——
 ``scheduler`` / ``favorite`` 这样的裸词与 ``task=wing-tag`` 这样的 k=v 约定
-都是普通标签，系统不做语义解析（匹配一律精确字符串比较）。约定全小写、
+都是普通标签，系统不做语义解析（匹配一律精确字符串比较）。唯一的例外是
+:data:`PIN_TAG`（保留标签：自动归档的豁免判据）。约定全小写、
 ``k=v`` 作命名空间；这些是建议不是语法。
 
 两条边：**写**（``add`` / ``remove``）走 ``validate_tag`` 严格校验，违规即
@@ -43,6 +44,16 @@ from wing.store import TagMeta
 
 MAX_TAG_LENGTH = 64
 MAX_TAGS_PER_SESSION = 64
+
+PIN_TAG = "pin"
+"""置顶标记（唯一被**后端**感知语义的保留标签）。
+
+pin 本是前端约定（TUI 星标 / 排序，见 ``crates/wing/src/shared/pinning.rs``），
+但自动归档（``sessions.archive``）必须知道"这个会话用户明确要留着"——否则
+被置顶的会话到了天数照样被扫进归档区，从列表里凭空消失。感知范围**仅此一处**
+（自动 sweep 的豁免），其余读写路径仍把 pin 当普通不透明标签；显式归档同样
+不受豁免（用户明确动作优先）。
+"""
 
 
 def validate_tag(tag: str) -> str:

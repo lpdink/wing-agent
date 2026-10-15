@@ -471,6 +471,45 @@ class EvictionConfig(BaseModel):
     )
 
 
+class ArchiveConfig(BaseModel):
+    """会话归档（archive）配置。
+
+    自动归档 = 把「超过 ``idle_days`` 未交互」的会话移入存储根的
+    ``.archive/``：不再参与 ``/api/session/list``（ps 的性能解法），冻结
+    （不可 resume / send），恢复必须显式 unarchive。判定与豁免细节见
+    ``SessionManager.archive_stale_sessions``。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    idle_days: float = S(
+        doc="超过该天数未交互的会话自动归档；<= 0 = 关闭自动归档",
+        notes=(
+            "年龄按 metadata.last_interaction 判定（缺失时回退 session id 的"
+            "时间前缀；都取不到则跳过该会话）。\n"
+            "带 pin 标签（TUI 置顶）的会话不自动归档；钉住条件（忙碌 / 排队输入 / "
+            "被订阅）命中的会话跳过本轮。\n"
+            "显式归档（`wing archive <session-id>`）不受本项影响。"
+        ),
+        apply=ApplyScope.HOT,
+        default=90.0,
+    )
+    sweep_interval_seconds: float = S(
+        doc="扫描周期（秒）",
+        notes="启动时读取；热重载不改变已注册 job 的间隔。",
+        apply=ApplyScope.RESTART,
+        default=86400.0,
+        gt=0,
+    )
+    startup_delay_seconds: float = S(
+        doc="启动后首轮扫描的延迟（秒）",
+        notes="「启动过一会先扫一轮」，避免与启动竞争资源；之后按扫描周期运行。",
+        apply=ApplyScope.RESTART,
+        default=60.0,
+        ge=0,
+    )
+
+
 class SessionsConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -485,6 +524,18 @@ class SessionsConfig(BaseModel):
         ),
         apply=ApplyScope.RESTART,
         default_factory=EvictionConfig,
+    )
+    archive: ArchiveConfig = S(
+        doc="会话归档（超过 N 天未交互的会话移入 .archive，不再参与列表）",
+        notes=(
+            "归档 = 会话目录移入存储根的 .archive/（纯移动，字节不变）；归档后"
+            "从列表消失且不可使用，恢复用 `wing archive --restore <session-id>`。\n"
+            "归档区不在 /api/session/list 中（这是 ps 性能的解法），列出用 "
+            "`wing archive --list`（读索引，不扫会话目录）。\n"
+            "memory 后端的会话不支持归档。"
+        ),
+        apply=ApplyScope.RESTART,
+        default_factory=ArchiveConfig,
     )
 
     def resolved_path(self) -> Path:

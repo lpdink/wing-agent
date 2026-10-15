@@ -14,6 +14,7 @@ use crate::tui;
 use crate::util::logging::init_logging;
 use wing_api_client::GatewayClient as GatewayApiClient;
 
+pub mod archive;
 pub mod args;
 pub mod argv;
 pub mod asks;
@@ -378,6 +379,31 @@ pub enum Command {
     Release {
         /// Session IDs to release (space-separated).
         session_ids: Vec<String>,
+    },
+
+    /// Archive sessions (cold storage), restore them, or list the archive.
+    ///
+    /// `wing archive <ids>` moves sessions into the gateway's archive: they
+    /// disappear from `wing ps` and any command addressing them reports
+    /// "archived" with a restore hint. `--restore <ids>` moves them back
+    /// (restore lives under the same subcommand on purpose — no `unarchive`
+    /// sibling); `--list` shows the archive (a gateway-side index read, no
+    /// session-directory scan). Archiving is a pure move: session bytes are
+    /// untouched. Restoring refreshes the session's age (an explicit restore
+    /// is an interest signal — the auto-archive sweep must not immediately
+    /// re-archive it).
+    ///
+    /// The gateway refuses busy / subscribed / non-archivable-backend
+    /// sessions with 409 (same pinning rules as `wing release`).
+    Archive {
+        /// Session IDs to archive / restore (space-separated).
+        session_ids: Vec<String>,
+        /// Restore archived sessions instead of archiving.
+        #[arg(long)]
+        restore: bool,
+        /// List archived sessions (cannot be combined with IDs / --restore).
+        #[arg(long)]
+        list: bool,
     },
 
     /// Read and change the gateway configuration (Setting API).
@@ -751,6 +777,11 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
             Command::Release { session_ids } => {
                 crate::cmd::release::run(&session_ids, cli.json).await
             }
+            Command::Archive {
+                session_ids,
+                restore,
+                list,
+            } => crate::cmd::archive::run(&session_ids, restore, list, cli.json).await,
             Command::Config { command } => crate::cmd::config::run(command, cli.json).await,
             Command::Tail {
                 session_id,
@@ -1042,6 +1073,53 @@ mod tests {
         assert_eq!(cli.tag, vec!["executor".to_string()]);
         assert!(matches!(cli.command, Some(Command::Ps { .. })));
         assert!(misplaced_global_tag_error(&cli.tag).is_some());
+    }
+
+    #[test]
+    fn clap_parses_archive_shapes() {
+        use crate::cmd::archive;
+
+        // 三种形态：默认归档（多 id）、--restore、--list。
+        let cli = Cli::try_parse_from(["wing", "archive", "s1", "s2"]).expect("ids");
+        let Some(Command::Archive {
+            session_ids,
+            restore,
+            list,
+        }) = cli.command
+        else {
+            panic!("expected archive command");
+        };
+        assert_eq!(session_ids, vec!["s1".to_string(), "s2".to_string()]);
+        assert!(!restore && !list);
+
+        let cli =
+            Cli::try_parse_from(["wing", "archive", "--restore", "s1"]).expect("restore flag");
+        let Some(Command::Archive {
+            session_ids,
+            restore,
+            list,
+        }) = cli.command
+        else {
+            panic!("expected archive command");
+        };
+        assert!(restore && !list);
+        assert_eq!(session_ids, vec!["s1".to_string()]);
+
+        let cli = Cli::try_parse_from(["wing", "archive", "--list"]).expect("list flag");
+        let Some(Command::Archive {
+            session_ids,
+            restore,
+            list,
+        }) = cli.command
+        else {
+            panic!("expected archive command");
+        };
+        assert!(list && !restore && session_ids.is_empty());
+
+        // 形态互斥由 archive 模块自己的校验守（网关不可达前就得失败）。
+        assert!(archive::validate(&[] as &[String], true, false).is_err());
+        assert!(archive::validate(&["s1".to_string()], false, true).is_err());
+        assert!(archive::validate(&[] as &[String], false, true).is_ok());
     }
 
     #[test]

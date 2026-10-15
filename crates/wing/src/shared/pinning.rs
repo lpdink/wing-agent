@@ -1,4 +1,9 @@
-//! 会话置顶（pin）—— **前端约定，后端零感知**。
+//! 会话置顶（pin）—— **前端约定**；后端对 `pin` 的感知仅限一处例外。
+//!
+//! 例外：自动归档（`sessions.archive`）豁免带 `pin` 标签的会话（见
+//! `libs/core/wing/session/tags.py` 的 `PIN_TAG`）——置顶是"我要留着"的
+//! 明确信号，被后台扫进归档区从列表消失很突兀。其余一切路径（读取、
+//! 排序、增删）后端仍只当它是普通标签。
 //!
 //! pin 就是一个普通标签（[`PIN_TAG`]）：后端照常存、照常回，不认识它是
 //! 什么意思（它只通用地记录「这个标签什么时候被加上的」——
@@ -104,6 +109,22 @@ mod tests {
 
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|t| (*t).to_string()).collect()
+    }
+
+    /// 跨语言守卫：后端（`libs/core/wing/session/tags.py`）的 `PIN_TAG` 与这里的
+    /// 常量必须一致——自动归档的豁免靠它，一侧改名另一侧就静默失效（用户会话
+    /// 半夜被扫进归档区）。仓库里唯一的跨语言契约测试。
+    #[test]
+    fn pin_tag_matches_the_backend_reserved_tag() {
+        let backend = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../libs/core/wing/session/tags.py"
+        ))
+        .expect("backend tags.py (tests run from the repo checkout)");
+        assert!(
+            backend.contains(&format!("PIN_TAG = {PIN_TAG:?}")),
+            "backend PIN_TAG drifted from {PIN_TAG:?} — update both sides together"
+        );
     }
 
     #[test]

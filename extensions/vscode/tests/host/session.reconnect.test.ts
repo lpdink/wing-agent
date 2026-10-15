@@ -105,6 +105,44 @@ describe('reconnect', () => {
     expect(harness.host.sessionManager.openSessionIds).toEqual([sessionId]);
   });
 
+  it('names the restore path for an archived session instead of calling it gone', async () => {
+    vi.useFakeTimers();
+    const harness = createHostHarness();
+    teardown.push(harness);
+    await harness.boot();
+    const sessionId = harness.gateway.createdOrder[0] ?? '';
+
+    harness.gateway.dropConnections(1006);
+    harness.gateway.httpFailures.set('/api/session/subscribe', { status: 404 });
+    harness.gateway.httpFailures.set('/api/session/resume', {
+      status: 404,
+      body: JSON.stringify({
+        error: 'session_archived',
+        detail: `session '${sessionId}' is archived; restore it before use`,
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks(30);
+
+    const record = harness.host.sessionManager.record(sessionId);
+    const systemCells = (record?.cells ?? []).filter((cell) => cell.kind === 'system');
+    expect(systemCells).toHaveLength(1);
+    // 消息点名"归档 + 怎么恢复"，不是"已不存在"。
+    expect(systemCells[0]?.kind === 'system' && systemCells[0].text).toContain('is archived');
+    expect(systemCells[0]?.kind === 'system' && systemCells[0].text).toContain('wing archive --restore');
+    const toasts = harness
+      .ofType('ui')
+      .filter((message) => message.action.kind === 'toast')
+      .map((message) => (message.action.kind === 'toast' ? message.action.message : ''));
+    expect(toasts).toContain('Session is archived on the gateway.');
+
+    // 与 gone 同样的纪律：不重试。
+    const attempts = harness.gateway.calls('/api/session/subscribe').length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks(20);
+    expect(harness.gateway.calls('/api/session/subscribe').length).toBe(attempts);
+  });
+
   it('marks a session the gateway has forgotten instead of retrying forever', async () => {
     vi.useFakeTimers();
     const harness = createHostHarness();

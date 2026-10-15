@@ -10,8 +10,9 @@
   - **生命周期显式**：start/stop 由进程宿主调用（gateway lifespan），
     不 start 就完全不跑——单测与嵌入式使用零副作用。
 
-第一个 job 是 session 逐出（``SessionReaper``）；将来的后台机制
-（dreaming 等）直接 ``add_job`` 复用同一宿主。
+第一个 job 是 session 逐出（``SessionReaper``），第二个是自动归档
+（``SessionArchiver``）；将来的后台机制（dreaming 等）直接 ``add_job``
+复用同一宿主。
 """
 
 from __future__ import annotations
@@ -71,25 +72,44 @@ class BackgroundScheduler:
         return self._task is not None
 
     def add_job(
-        self, name: str, interval_seconds: float, callback: JobCallback
+        self,
+        name: str,
+        interval_seconds: float,
+        callback: JobCallback,
+        *,
+        initial_delay_seconds: float | None = None,
     ) -> None:
-        """注册周期 job（首次触发在 ``interval_seconds`` 之后）。
+        """注册周期 job（缺省首轮触发在 ``interval_seconds`` 之后）。
+
+        ``initial_delay_seconds`` 给定时改写**首轮**触发时刻（之后仍按
+        ``interval_seconds`` 周期）——「启动过一会先跑一轮、之后按天运行」
+        （如自动归档）靠它表达；``0`` = 下一个 tick 立即跑一轮。
 
         Raises:
-            ValueError: 间隔非正或名称重复
+            ValueError: 间隔非正、首轮延迟为负或名称重复
         """
         interval = float(interval_seconds)
         if interval <= 0:
             raise ValueError(f"job '{name}': interval must be > 0, got {interval}")
         if name in self._jobs:
             raise ValueError(f"job '{name}' is already registered")
+        first_delay = (
+            interval if initial_delay_seconds is None else float(initial_delay_seconds)
+        )
+        if first_delay < 0:
+            raise ValueError(
+                f"job '{name}': initial delay must be >= 0, got {first_delay}"
+            )
         self._jobs[name] = _Job(
             name=name,
             interval=interval,
             callback=callback,
-            next_run=self._clock() + interval,
+            next_run=self._clock() + first_delay,
         )
-        log.info(f"Background job registered: {name} (every {interval:.1f}s)")
+        log.info(
+            f"Background job registered: {name} "
+            f"(every {interval:.1f}s, first in {first_delay:.1f}s)"
+        )
 
     def remove_job(self, name: str) -> None:
         """注销 job（未知名称静默忽略）。"""

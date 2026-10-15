@@ -56,6 +56,22 @@ impl ApiClientError {
         )
     }
 
+    /// 会话已被归档（404 + 结构化 `error="session_archived"`）。
+    ///
+    /// 与"真不存在"（404 `not_found`）区分：归档是一条**可行动**的结论
+    /// （恢复它再继续），调用方应给出恢复指引而不是干巴巴的"找不到"。判定
+    /// 走结构化 `error` 码，不嗅探 detail 文案（同 `is_setup_mode`）。
+    pub fn is_session_archived(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                status: 404,
+                body: Some(body),
+                ..
+            } if body.error == "session_archived"
+        )
+    }
+
     /// 保存设置时的**乐观并发冲突**（409：持有指纹与磁盘不一致）。
     ///
     /// 这不是请求非法，而是"别人先改了"——调用方应重新 `settings_get()` 后重试，
@@ -118,6 +134,18 @@ mod tests {
                 uuid: None,
             }),
         }
+    }
+
+    #[test]
+    fn is_session_archived_requires_404_and_the_error_code() {
+        assert!(api_err_with_body(404, "session_archived").is_session_archived());
+        // 结构化码是唯一判据：同码不同 error 不命中。
+        assert!(!api_err_with_body(404, "not_found").is_session_archived());
+        // 同 error 不同码不命中（防御：错误码可被任何层改写）。
+        assert!(!api_err_with_body(409, "session_archived").is_session_archived());
+        // 无结构化 body / 连接层错误不命中。
+        assert!(!api_err(404).is_session_archived());
+        assert!(!ApiClientError::Connection("reset".into()).is_session_archived());
     }
 
     #[test]

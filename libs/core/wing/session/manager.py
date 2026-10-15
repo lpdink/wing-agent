@@ -17,6 +17,7 @@ wing/session/manager.py — SessionManager
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 import time
 from collections.abc import Collection, Iterable, Sequence
 from uuid import uuid4
@@ -43,16 +44,34 @@ from wing.event_bus import event_bus
 from wing.commands import expand_prompt_command
 from wing.request_context import session_context
 from wing.schema import ChainNode, MediaRef, Message
-from wing.store import SessionMetadata, SessionStore
+from wing.store import ArchivedSession, SessionMetadata, SessionStore
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
 from .session import Session, tool_refs, validate_media_refs, validate_tool_refs
-from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
+from .tags import PIN_TAG, TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
 if TYPE_CHECKING:
     from .override import AgentOverride
+
+
+class SessionArchivedError(Exception):
+    """目标会话已被归档（live 区找不到、归档区命中）。
+
+    **刻意不是 ``LookupError`` 的子类**：网关路由把 LookupError 统一折成 404 +
+    "session not found"，而"已归档"是一条**可行动**的存在性结论（"恢复它再继续"）
+    ——gateway 为它单独注册异常处理器，回 404 + 结构化 ``error="session_archived"``，
+    与"真不存在"（``not_found``）区分。子类化会让所有既有 ``except LookupError``
+    把它吞成普通 404，提示就没了。
+
+    message 面向客户端（HTTP detail / WS error 帧 / TUI toast）：只说"要恢复"，
+    不背 CLI 语法（命令怎么拼是各自前端的事；CLI 自己组装提示）。
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"session {session_id!r} is archived; restore it before use")
+        self.session_id = session_id
 
 
 def _fork_slice(
@@ -108,19 +127,22 @@ def _warn_alias(requested: str, resolved: str) -> None:
     )
 
 
-def _timestamp_key(s: SessionInfo) -> float:
-    """归一化 session 的「最后一次交互时间」为可比较的 epoch 秒。
+def _session_epoch(session_id: str, last_interaction: str | None) -> float | None:
+    """归一化会话的「最后一次交互时间」为可比较的 epoch 秒；未知返回 None。
 
-    「有啥用啥」的三级回退：`metadata.last_interaction`（ISO 字符串或数值）→
-    缺失 / 不可解析时用 session id 前缀（`YYYYMMDD-HHMMSS`）→ 都没有按 0。
-    永不抛：排序键不可解析时退化成「排最后」，而不是让整个列表 500。
+    「有啥用啥」的三级回退：``metadata.last_interaction``（ISO 字符串或数值）→
+    缺失 / 不可解析时用 session id 前缀（``YYYYMMDD-HHMMSS``）→ 都没有返回 None。
 
     时区口径：naive 的 ISO 字符串（仓库内唯一实际写法，`datetime.now().isoformat()`）
     与 id 前缀回退按**宿主本地时区**折算 epoch，带 `Z` / `+00:00` 的 aware 字符串按
     UTC 折算——同一份列表里不要混写两种字符串，否则按本地 UTC 偏移错序（小时级）。
     数值分支是防御代码（`SessionMetadata.last_interaction` 只声明 `str`）。
+
+    调用方分两类：**排序**（``list_sessions``）把 None 折成 0.0 用（"排最后"，
+    永不抛——排序键不可解析不该让整个列表 500）；**归档判定**必须把 None 当
+    「年龄未知」跳过（不发明时间，保守不动未知会话）。
     """
-    ts = s.last_interaction
+    ts = last_interaction
     if ts is not None:
         if isinstance(ts, str):
             try:
@@ -130,12 +152,12 @@ def _timestamp_key(s: SessionInfo) -> float:
                 pass
         elif isinstance(ts, (int, float)):
             return float(ts)
-    prefix = s.id[:15] if len(s.id) >= 15 else s.id
+    prefix = session_id[:15] if len(session_id) >= 15 else session_id
     try:
         dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
         return dt.timestamp()
     except Exception:
-        return 0.0
+        return None
 
 
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
@@ -508,6 +530,39 @@ class SessionManager:
             return canonical, store
         return None
 
+    def _archived_store(self, session_id: str) -> SessionStore | None:
+        """该 id 落在（任一后端的）归档区时返回其 store；否则 None。
+
+        归档区**不参与** :meth:`_resolve_with_store` 的正常解析（冻结语义）：
+        这里的探测只服务"找不到时给一句可行动的提示"。
+        """
+        if not is_valid_session_id(session_id):
+            return None
+        for store in self._stores.values():
+            if store.resolve_archived_id(session_id) is not None:
+                return store
+        return None
+
+    def is_archived(self, session_id: str) -> bool:
+        """该 id 是否在（任一后端的）归档区（纯查询，不涉 live 区）。
+
+        回执用的**真实状态**：显式归档一个空会话是 no-op（它没进归档区），
+        响应里的 ``archived`` 不能照抄请求意图。
+        """
+        store = self._archived_store(session_id)
+        return store is not None and store.is_archived(session_id)
+
+    def missing_session_error(self, session_id: str) -> Exception:
+        """构造「会话不存在」的错误：归档区命中 → :class:`SessionArchivedError`，
+        否则普通 ``LookupError``。
+
+        只在**找不到**的路径上探测归档区（每后端一次目录 stat）——正常路径零
+        额外成本。id 不合规与真不存在同价（LookupError），不向客户端区分。
+        """
+        if self._archived_store(session_id) is not None:
+            return SessionArchivedError(session_id)
+        return LookupError(f"Session not found: {session_id!r}")
+
     def resume_session(
         self,
         session_id: str,
@@ -535,7 +590,7 @@ class SessionManager:
         """
         result = self._resolve_with_store(session_id)
         if result is None:
-            raise LookupError(f"Session not found: {session_id!r}")
+            raise self.missing_session_error(session_id)
         resolved, store = result
 
         existing = self._sessions.get(resolved)
@@ -594,8 +649,15 @@ class SessionManager:
 
         Returns:
             收养到的 Session；``session_id`` 不存在（或未成会话）时返回 None。
+
+        Raises:
+            SessionArchivedError: 该 id 落在归档区——**不做隐式恢复**（冻结语义
+                没有例外路径；要接着用先显式 unarchive），也绝不因此新建一个
+                同 id 的 live 会话（两个区同 id 是数据分裂）。
         """
         if self._resolve_with_store(session_id) is None:
+            if self._archived_store(session_id) is not None:
+                raise SessionArchivedError(session_id)
             return None
         return self._finish_adoption(
             session_id, agent_override=agent_override, tags=tags
@@ -765,7 +827,7 @@ class SessionManager:
         """
         resolved = self._resolve_with_store(session_id)
         if resolved is None:
-            raise LookupError(f"Session not found: {session_id!r}")
+            raise self.missing_session_error(session_id)
         resolved_id, store = resolved
 
         session = self._sessions.get(resolved_id)
@@ -805,7 +867,7 @@ class SessionManager:
         """
         resolved = self._resolve_with_store(session_id)
         if resolved is None:
-            raise LookupError(f"Session not found: {session_id!r}")
+            raise self.missing_session_error(session_id)
         resolved_id, store = resolved
 
         ref = upload_image_ref(data, max_bytes=get_config().images.max_bytes, name=name)
@@ -856,7 +918,11 @@ class SessionManager:
         # 先建任务：无运行中的事件循环时在此抛错，状态未被改动（会话保持
         # 在场），不会留下"已摘除却没拆解"的孤儿对象。
         task = asyncio.create_task(self._teardown(session, reason))
+        # 摘除即封写：最后一次同步落盘 → 封盘 → 摘除（顺序即语义）。此后
+        # 迟到的落盘（teardown 收尾 / 节流重试）都是 no-op——否则会把 live
+        # 目录写回来（归档场景下的数据分裂红线，见 Session.detach）。
         session.flush_usage()
+        session.detach()
         self._sessions.pop(session_id, None)
         self._last_active.pop(session_id, None)
         self._teardowns.add(task)
@@ -910,7 +976,7 @@ class SessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             if self._resolve_with_store(session_id) is None:
-                raise LookupError(f"Session not found: {session_id!r}")
+                raise self.missing_session_error(session_id)
             return False, "not loaded"
         blocker = self._blocked_reason(session)
         if blocker is not None:
@@ -953,6 +1019,289 @@ class SessionManager:
         return None
 
     # ============================================================
+    # 外部方法：归档（archive）
+    # ============================================================
+
+    def archive_session(self, session_id: str) -> tuple[bool, str]:
+        """把会话移入归档区（幂等；用户显式动作 / sweep 共用本入口）。
+
+        归档区是**冷存储**：归档后的会话从列表消失、不可解析（resume / send /
+        tag 一律"已归档"），恢复必须显式 :meth:`unarchive_session`。移动是纯
+        rename——不改任何字节，归档只是换了位置。
+
+        钉住条件与 :meth:`release_session` 同一套（忙碌 / 待处理输入 / 订阅中 /
+        非归档后端）；**空闲可收回**的会话会先逐出再移动：归档必然要让它离开
+        内存，而且"先摘除、再 rename"是同一事件循环轮次里的同步两步——此窗口内
+        不可能有水合/订阅插入（否则活 Session 会把目录写回 live 区，数据分裂）。
+
+        Returns:
+            (archived, detail)：archived=False 是幂等 / 空动作（不是错误）——
+            已在归档区（"already archived"）或**不构成"会话"**的目录（"nothing
+            to archive"：空会话 / 只写过 metadata 未发言未打标 / 只有媒体——
+            按展示判据它们本来就不出现在列表里）；detail ∈ {"archived",
+            "already archived", "nothing to archive"}。
+
+        Raises:
+            LookupError: live 区与归档区都没有该会话
+            RuntimeError: 钉住（忙碌 / 待处理输入 / 订阅中）、后端不支持归档、
+                或 live 与归档区同时存在（手工拷贝等异常态）
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            if self._archived_store(session_id) is not None:
+                return False, "already archived"
+            raise LookupError(f"Session not found: {session_id!r}")
+
+        resolved_id, store = resolved
+        if not store.archivable:
+            raise RuntimeError(f"store '{store.name}' does not support archiving")
+
+        if not store.is_listed_session(resolved_id):
+            # 准入判据 = **展示判据**（history 或带标签的 metadata，与列表 /
+            # 归档区重建同一口径）：只有"会出现在 ps 里的会话"才值得归档。
+            # - 内存中的空会话（从未发言 → 磁盘零痕迹）：没有可归档的磁盘状态；
+            # - 只写过 metadata（模型绑定 / workspace 等）却没发言、没标签的目录：
+            #   它本来就不出现在任何列表里，归档它只会造出一个"索引重建后不可
+            #   发现"的归档条目；
+            # - 只传过媒体的会话同档（media 目录留在 live 区不动）。
+            # 如实回答空动作，而不是让 store 抛 FileNotFoundError（500）。
+            return False, "nothing to archive"
+
+        # 双存在预检**先于**任何副作用：否则 evict 之后 store 再抛（双存在 /
+        # rename 竞态）会留下"已逐出但没归档"的半截状态（无回滚）。
+        if store.resolve_archived_id(resolved_id) is not None:
+            raise RuntimeError(
+                f"session '{resolved_id}' exists in both live and archive dirs"
+            )
+
+        session = self._sessions.get(resolved_id)
+        if session is not None:
+            blocker = self._blocked_reason(session)
+            if blocker is not None:
+                raise RuntimeError(f"session cannot be archived: {blocker}")
+            self.evict(resolved_id, reason="archived")
+        try:
+            store.archive(resolved_id)
+        except OSError as e:
+            # 移动失败（rename / 建目录）：内存态已摘除，磁盘照旧（会话仍可
+            # 水合，重跑归档即可修复）——转成 RuntimeError 让路由回 409 而不是
+            # 500，并把原因说清楚（半副作用是内存态，不是数据）。
+            raise RuntimeError(
+                f"session '{resolved_id}' could not be moved to the archive: {e}"
+            ) from e
+        log.info(f"Session archived: {resolved_id}")
+        return True, "archived"
+
+    def unarchive_session(self, session_id: str) -> tuple[bool, str]:
+        """把会话从归档区移回 live 区（幂等）。
+
+        恢复会**刷新 last_interaction**（显式动作 = 兴趣信号）：否则自动 sweep
+        会按"归档前的旧年龄"在下一轮把它立刻收回去（恢复后只看 tail / ps 的
+        用户会觉得会话又凭空消失）。这是恢复方向的唯一写操作（改一个字段）；
+        归档方向仍是纯 rename（字节零变化）。
+
+        Returns:
+            (restored, detail)：restored=False 表示不在归档区（幂等 no-op——
+            会话在 live 区存在即这一种）；detail ∈ {"restored", "not archived"}。
+
+        Raises:
+            LookupError: live 区与归档区都没有该会话
+            RuntimeError: live 区已有同名会话（双存在异常态，不覆盖）
+        """
+        live = self._resolve_with_store(session_id)
+        archived: tuple[SessionStore, str] | None = None
+        if is_valid_session_id(session_id):
+            for store in self._stores.values():
+                canonical = store.resolve_archived_id(session_id)
+                if canonical is not None:
+                    archived = (store, canonical)
+                    break
+
+        if archived is not None and live is not None:
+            raise RuntimeError(
+                f"session {session_id!r} exists in both live and archive dirs"
+            )
+        if archived is not None:
+            store, canonical = archived
+            _warn_alias(session_id, canonical)
+            try:
+                store.unarchive(canonical)
+            except OSError as e:
+                # 与归档方向对称：移动失败（权限 / IO）转 RuntimeError → 409，
+                # 而不是让 OSError 逃逸成 500（两个方向的失败类该长一样）。
+                raise RuntimeError(
+                    f"session '{canonical}' could not be moved back from the "
+                    f"archive: {e}"
+                ) from e
+            # 恢复是显式动作 = 兴趣信号：刷新 last_interaction，否则自动 sweep
+            # 下一轮（启动 +startup_delay 或每天）会按旧年龄把它立刻收回去，
+            # 用户"刚恢复的会话又消失"。落盘失败只 WARN——移动已完成，
+            # 报错只会让调用方以为没恢复（脏状态自愈路径：下一轮 sweep 再看）。
+            self._refresh_last_interaction(store, canonical)
+            log.info(f"Session restored from archive: {canonical}")
+            return True, "restored"
+        if live is not None:
+            return False, "not archived"
+        raise LookupError(f"Session not found: {session_id!r}")
+
+    def _refresh_last_interaction(self, store: SessionStore, session_id: str) -> None:
+        """把会话的 last_interaction 拨到现在（恢复路径专用；失败只 WARN）。"""
+        try:
+            metadata = store.load_metadata(session_id) or SessionMetadata()
+            metadata.last_interaction = datetime.now().isoformat()
+            store.save_metadata(session_id, metadata)
+        except Exception as e:  # noqa: BLE001 —— 恢复已完成，落盘失败不反悔
+            log.warning(
+                f"Session {session_id}: failed to refresh last_interaction "
+                f"after restore: {e}"
+            )
+
+    def list_archived_sessions(self) -> list[ArchivedSession]:
+        """列出归档区条目（跨后端聚合；读索引，不扫会话目录）。
+
+        投影口径与 ``list_sessions`` 对齐：tags 清洗后投影；模型四件套经
+        ``resolve_model_binding`` 现算（id 命中走当前映射、未命中回落归档快照、
+        再退模板默认——归档条目的"在跑什么模型"与 ps 用同一条链读）。
+
+        排序：最后交互时间降序（未知排最后）→ id 升序定序——与 list_sessions
+        同一精神：并列项顺序不能取决于索引文件的物理顺序。
+        """
+        config = get_config()
+        result: list[ArchivedSession] = []
+        for store in self._stores.values():
+            if not store.archivable:
+                continue
+            for entry in store.list_archived():
+                binding = resolve_model_binding(
+                    SessionMetadata(
+                        model_id=entry.model_id,
+                        model_name=entry.model_name,
+                        provider_name=entry.provider_name,
+                        template_name=entry.template_name,
+                    ),
+                    config,
+                    self._template_or_default(entry.template_name),
+                )
+                result.append(
+                    entry.model_copy(
+                        update={
+                            "tags": sanitize_tags(entry.tags),
+                            "model_id": binding.model_id,
+                            "model_name": binding.model_name,
+                            "provider_name": binding.provider_name,
+                            "model_display_name": binding.model_display_name,
+                        }
+                    )
+                )
+        result.sort(
+            key=lambda e: (-(_session_epoch(e.id, e.last_interaction) or 0.0), e.id)
+        )
+        return result
+
+    async def archive_stale_sessions(self, idle_days: float) -> list[str]:
+        """归档所有「超过 ``idle_days`` 未交互」的会话，返回被归档的 id 列表。
+
+        与逐出（纯内存判定）不同：归档要碰磁盘、成本 O(会话数)，因此分两阶段：
+
+        ① **线程内**枚举候选（读 metadata 判年龄；见 :meth:`_collect_stale`）——
+        这一阶段在事件循环上会卡住网关（流式 token / 请求响应全被拖住）；
+        ② **事件循环上**逐个终检（重读磁盘事实）并复用 :meth:`archive_session`
+        完成「逐出 + 移动」（显式归档路径；sweep 只碰不在内存里的会话）——移动必须与 resume / subscribe 等同步路径同线程
+        顺序执行，否则"目录被搬走时刚好在加载"会留下幽灵目录（数据分裂）。
+
+        ``idle_days <= 0`` = 关闭（关闭自动归档；显式归档不受影响）；带 ``pin``
+        标签的会话豁免；钉住条件命中（忙碌 / 订阅 / 待处理输入）跳过本轮。
+        """
+        if idle_days <= 0:
+            return []
+        candidates = await asyncio.to_thread(self._collect_stale, idle_days)
+        archived: list[str] = []
+        with ExitStack() as index_batches:
+            # 索引批量写：n 条候选只读改写一次（不做的话每条都要读+写整份
+            # index.json，O(n²) 且 n 次 fsync）。目录移动仍逐条即时、原子。
+            for store in self._distinct_stores(candidates):
+                index_batches.enter_context(store.index_batch())
+            for store, session_id in candidates:
+                try:
+                    if not self._still_stale(store, session_id, idle_days):
+                        continue  # 期间被交互 / 被打了 pin / 已消失 / 已归档
+                    changed, _ = self.archive_session(session_id)
+                    if changed:
+                        archived.append(session_id)
+                except (LookupError, RuntimeError) as e:
+                    # 钉住 / 双存在 / 竞态消失：跳过本轮，下一轮再判定
+                    log.warning(f"Archive sweep: skipping {session_id!r}: {e}")
+                except OSError as e:
+                    log.error(f"Archive sweep: {session_id!r} failed: {e}")
+                finally:
+                    # 批量 sweep 的候选可能上千（老用户升级后的第一轮）：候选之间
+                    # 让出事件循环，否则整批是一个同步长块——所有会话的流式输出与
+                    # 请求全停。单条候选内部（终检 → 逐出 → rename）仍是同一轮次，
+                    # 原子性不受影响。
+                    await asyncio.sleep(0)
+        return archived
+
+    @staticmethod
+    def _distinct_stores(
+        candidates: list[tuple[SessionStore, str]],
+    ) -> list[SessionStore]:
+        """候选里出现过的存储（保持出现顺序；索引批量窗口按 store 开一次）。"""
+        seen: dict[int, SessionStore] = {}
+        for store, _ in candidates:
+            seen.setdefault(id(store), store)
+        return list(seen.values())
+
+    def _collect_stale(self, idle_days: float) -> list[tuple[SessionStore, str]]:
+        """（阶段①，线程内调用）枚举「超过阈值未交互」的候选（纯读）。
+
+        判据：是会话（``list_summaries`` 口径）、年龄**已知且**超过阈值——
+        ``_session_epoch`` 为 None（时间取不到）的**跳过**：不发明时间，保守
+        不动未知会话。pin 豁免在这里初筛（省掉阶段②的重读），但结论以阶段②
+        的终检为准（见 :meth:`_still_stale`）。
+        """
+        threshold = time.time() - idle_days * 86400.0
+        candidates: list[tuple[SessionStore, str]] = []
+        for store in self._stores.values():
+            if not store.archivable:
+                continue
+            for summary in store.list_summaries():
+                epoch = _session_epoch(summary.id, summary.metadata.last_interaction)
+                if epoch is None or epoch >= threshold:
+                    continue
+                if PIN_TAG in sanitize_tags(summary.metadata.tags):
+                    continue
+                candidates.append((store, summary.id))
+        return candidates
+
+    def _still_stale(
+        self, store: SessionStore, session_id: str, idle_days: float
+    ) -> bool:
+        """（阶段②，事件循环上调用）终检候选是否**仍然**应该归档。
+
+        重读磁盘事实：阶段①到②之间有真实的等待窗口（线程调度 / 事件循环让出），
+        期间的交互（新消息、打 pin、甚至已归档）必须让候选当场失效——归档是
+        破坏可见性的动作，不能按过期的快照执行。
+
+        **在内存里的一律不动**：sweep 只管"不在工作集里"的会话（内存 tier 的
+        回收是逐出 job 的职责）。这条规则的两面都必要：用户刚 resume 打开的
+        旧会话不能被后台从脚下收走（resume 刻意不写 metadata——"空转 resume
+        零写盘"是既有不变量——所以不能靠刷新年龄保护它）；而还在被前端订阅 /
+        正忙的会话本来也不该被动。会话被逐出后重新成为磁盘会话，下一轮 sweep
+        按它的磁盘年龄照常处理。
+        """
+        if session_id in self._sessions:
+            return False
+        metadata = store.load_metadata(session_id)
+        if metadata is None:
+            return False  # 已消失（手工删除等）
+        if PIN_TAG in sanitize_tags(metadata.tags):
+            return False
+        epoch = _session_epoch(session_id, metadata.last_interaction)
+        if epoch is None:
+            return False
+        return epoch < time.time() - idle_days * 86400.0
+
+    # ============================================================
     # 外部方法：查询
     # ============================================================
 
@@ -968,7 +1317,7 @@ class SessionManager:
         （idle/working/waiting）；未 resume → `inactive`。
 
         排序口径（唯一事实来源，前端按原序渲染、不再重排）：① `status != "inactive"` 的（= 已在
-        内存里的工作集）在前，未加载的在后；② 组内按 `_timestamp_key`（最后一次交互时间）降序；
+        内存里的工作集）在前，未加载的在后；② 组内按 `_session_epoch`（最后一次交互时间）降序；
         ③ 完全并列（含都取不到时间）时按 session id 升序——**只为定序**，不是优先级：没有它，并列
         项的先后就取决于 store 的枚举顺序（`iterdir()` / SQL 返回序），同一个列表两次请求可能给出
         不同顺序。
@@ -1041,7 +1390,13 @@ class SessionManager:
             result = [s for s in result if all(t in s.tags for t in tags)]
 
         # 活跃优先（False < True），组内时间新的在前；并列时按 id 定序（见 docstring）。
-        result.sort(key=lambda s: (s.status == "inactive", -_timestamp_key(s), s.id))
+        result.sort(
+            key=lambda s: (
+                s.status == "inactive",
+                -(_session_epoch(s.id, s.last_interaction) or 0.0),
+                s.id,
+            )
+        )
 
         return result
 
