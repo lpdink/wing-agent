@@ -144,6 +144,38 @@ async def test_parent_is_recorded_and_projected(probe: Probe) -> None:
 @pytest.mark.probe_env(models=[LINEAGE_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
+async def test_auto_generated_id_records_parent(probe: Probe) -> None:
+    """**自动生成 id**（不带 session_id）的带父创建同样落盘血缘。
+
+    `wing run` 是血缘采集的主力路径且不暴露 `--session-id`——它不经过认领键，
+    会话目录的创建依赖 metadata 落盘那次 mkdir，因此值得有独立覆盖：
+
+    WHEN 不带 session_id 带父创建 child（另建一个无标 quiet 验证"创建即落盘"）
+    THEN 响应是读回、``metadata.json`` 立刻有字段、列表行与 info 投影一致。
+    """
+    parent = await _create(probe, tags=[VISIBLE_TAG])
+    parent_id = parent["session_id"]
+    child = await _create(
+        probe, parent=parent_id, model_id=LINEAGE_MODEL, tags=[VISIBLE_TAG]
+    )
+    child_id = child["session_id"]
+    assert child_id != parent_id
+    assert child[FIELD] == parent_id, child
+
+    # 落盘不依赖任何后续动作：无标子会话的唯一写盘来自血缘本身。
+    quiet = await _create(probe, parent=parent_id)
+    assert quiet[FIELD] == parent_id, quiet
+    assert _metadata(probe, quiet["session_id"])[FIELD] == parent_id
+
+    assert _metadata(probe, child_id)[FIELD] == parent_id
+    rows = _rows_by_id(await _list(probe))
+    assert rows[child_id][FIELD] == parent_id, rows[child_id]
+    assert (await _info(probe, child_id))[FIELD] == parent_id
+
+
+@pytest.mark.probe_env(models=[LINEAGE_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
 async def test_parent_survives_eviction_and_resume(probe: Probe) -> None:
     """逐出 + 水合后血缘仍在：跑过一轮的 child 被 release，resume 后字段照旧。
 
