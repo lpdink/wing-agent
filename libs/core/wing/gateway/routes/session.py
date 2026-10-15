@@ -45,7 +45,7 @@ from wing.gateway.protocol import (
     UpdateSessionResponse,
 )
 from wing.gateway.projection import build_session_branches, build_session_info
-from wing.common.utils import InvalidInputError
+from wing.common.utils import InvalidInputError, validate_session_id
 from wing.common.logger import log
 from wing.config import get_config
 from wing.event import SessionStatus
@@ -97,6 +97,7 @@ async def create_session(
             backend=body.backend,
             tags=body.tags,
             session_id=body.session_id,
+            parent_session_id=body.parent_session_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -105,6 +106,7 @@ async def create_session(
         template_name=session.template_name or "",
         workspace=session.session_workspace,
         backend=session.store.name,
+        parent_session_id=session.parent_session_id,
     )
 
 
@@ -350,13 +352,27 @@ def _reject_repeated_filters(request: Request) -> None:
 
     重复参数会被 FastAPI 静默 last-wins（`?status=bogus&status=idle` 只剩后者、
     `?tag=pin&tag=crew` 只按 crew 过滤）——与"非法取值一律 400"的立场冲突。
-    多值用单个逗号分隔参数表达（`?status=idle,working`）。
+    多值用单个逗号分隔参数表达（`?status=idle,working`；`parent` 是单值）。
     """
-    for name in ("status", "tag"):
+    for name in ("status", "tag", "parent"):
         if len(request.query_params.getlist(name)) > 1:
-            raise ValueError(
-                f"{name} filter must be given once (pass a single comma-separated value)"
-            )
+            raise ValueError(f"{name} filter must be given once")
+
+
+def _parse_parent_filter(raw: str | None) -> str | None:
+    """`?parent=<sid>` → 该父的**直接子**过滤值；缺省（None）= 不过滤。
+
+    值走 session id 的**卫生规则**（同一套闸门）：词法非法（空 / 含路径分隔符 /
+    控制符 / 点开头 / 超长）一律 400——这类值不可能命中任何行（列表行的
+    parent_session_id 恒为写入时校验过的合法值），静默返回空结果只会掩盖调用方
+    的笔误；**格式合法但不存在的父**是空结果（弱引用 + 词表开放，无从枚举）。
+    """
+    if raw is None:
+        return None
+    try:
+        return validate_session_id(raw)
+    except ValueError as e:
+        raise ValueError(f"parent filter: {e}")
 
 
 def _parse_tag_filter(raw: str | None) -> list[str]:
@@ -387,7 +403,7 @@ def _parse_tag_filter(raw: str | None) -> list[str]:
 @router.get(
     "/api/session/list",
     response_model=SessionListResponse,
-    summary="列出所有 session（可按状态 / 标签过滤）",
+    summary="列出所有 session（可按状态 / 标签 / 父会话过滤）",
 )
 async def list_sessions(
     request: Request,
@@ -402,6 +418,13 @@ async def list_sessions(
         None,
         description="按标签过滤（逗号分隔，AND：必须全部携带）",
     ),
+    parent: str | None = Query(
+        None,
+        description=(
+            "按创建者会话过滤（单个 session id）：只保留直接子（parent_session_id "
+            "逐字等于该值）；格式非法 400"
+        ),
+    ),
 ) -> SessionListResponse:
     """列表 / 子集过滤共用一条查询。
 
@@ -413,9 +436,12 @@ async def list_sessions(
         _reject_repeated_filters(request)
         statuses = _parse_status_filter(status)
         tags = _parse_tag_filter(tag)
+        parent_filter = _parse_parent_filter(parent)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sessions = server.runtime.list_sessions(statuses=statuses, tags=tags)
+    sessions = server.runtime.list_sessions(
+        statuses=statuses, tags=tags, parent=parent_filter
+    )
     return SessionListResponse(sessions=sessions)
 
 

@@ -58,6 +58,7 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         yolo=session.agent.yolo,
         session_name=session.session_name,
         workdir=session.session_workspace,
+        parent_session_id=session.parent_session_id,
         status=session.status,
         context_stats=ContextStatsInfo(
             message_count=msg_count,

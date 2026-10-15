@@ -548,6 +548,16 @@ class Session:
         return self._metadata.workspace
 
     @property
+    def parent_session_id(self) -> str | None:
+        """创建者会话 id（来自 metadata；血缘，只读投影）。
+
+        弱引用语义见 ``SessionMetadata.parent_session_id``：这里只如实投影记录，
+        不解析父会话是否存在（幽灵父由展示层降级为根）。**只读**——创建之后没有
+        任何写入路径（树是创建时刻的事实）。
+        """
+        return self._metadata.parent_session_id
+
+    @property
     def tags(self) -> list[str]:
         """当前会话标签（metadata.tags 的投影；插入序，读侧已清洗）。
 

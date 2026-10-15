@@ -60,6 +60,17 @@ class CreateSessionRequest(BaseModel):
             "别名会被归一到磁盘真名并在响应里回报（日志留 warning）。"
         ),
     )
+    parent_session_id: str | None = Field(
+        default=None,
+        description=(
+            "创建者会话 id（**血缘**：谁创建了我；由 CLI 从 WING_SESSION_ID 填入，"
+            "显式调用方可给任意格式合法的 id）。创建时一次写入 metadata，此后没有"
+            "修改路径；缺省 = 根会话（零字段）。只做格式卫生（同 session_id 规则）、"
+            "**不校验父是否存在**（弱引用）；与 session_id 同时给出且字面相等"
+            "（自指）→ 400。**收养路径忽略它**（resume 语义：既有会话的记录不被改写），"
+            "日志留 warning。"
+        ),
+    )
 
 
 class ResumeSessionRequest(BaseModel):
@@ -210,6 +221,15 @@ class CreateSessionResponse(BaseModel):
     template_name: str = Field(description="使用的模板名称")
     workspace: str | None = Field(default=None, description="工作目录路径")
     backend: str = Field(default="file", description="存储后端（file/memory）")
+    parent_session_id: str | None = Field(
+        default=None,
+        description=(
+            "**读回的**父会话 id（血缘——不是请求值的回声，同 tags 的读回惯例）："
+            "None = 该会话无父（根会话 / 旧网关不带此字段），调用方据此对账请求是否"
+            "被记录。收养路径请求里的 parent 被忽略（resume 语义），这里反映的是"
+            "**既有记录**。"
+        ),
+    )
 
 
 class ResumeSessionResponse(BaseModel):
@@ -315,6 +335,13 @@ class SessionInfoResponse(BaseModel):
     workdir: str | None = Field(
         default=None,
         description="session 工作目录（session workspace，非进程启动目录）",
+    )
+    parent_session_id: str | None = Field(
+        default=None,
+        description=(
+            "创建者会话 id（血缘：谁创建了我，见 docs/dev/session-lineage.md）；"
+            "根会话为 None。弱引用：不保证父会话当前可解析。"
+        ),
     )
     status: str = Field(
         default="idle", description="运行时状态: inactive|idle|working|waiting"
