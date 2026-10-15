@@ -497,6 +497,16 @@ class SessionStore(ABC):
         """
         raise NotImplementedError(f"{self.name} does not support archiving")
 
+    def is_listed_session(self, session_id: str) -> bool:
+        """该 id 是否算「会话」（**展示判据**：与 :meth:`list_summaries` 同一口径）。
+
+        比 :meth:`exists`（metadata 或 history；服务解析 / 水合）窄一档：只有
+        "有 history 或带标签的 metadata"的目录会被列出。归档准入用它——归档一个
+        从不出现在任何列表里的目录，只会在索引重建后留下不可发现的条目。
+        默认回落到 :meth:`exists`（后端未区分两者时的安全近似）。
+        """
+        return self.exists(session_id)
+
     @contextmanager
     def index_batch(self) -> Iterator[None]:
         """归档索引的批量写窗口（批量 sweep 专用；默认 no-op）。

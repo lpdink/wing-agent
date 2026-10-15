@@ -233,6 +233,22 @@ class TestArchiveIndexRebuild:
             assert writes == 2
         assert writes == 3
 
+    def test_listed_session_predicate_is_narrower_than_exists(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """展示判据（history 或带标签 metadata）比 exists（metadata 或 history）窄：
+        只写过 metadata 的目录可解析/可水合，但不算"会话"、不进任何列表。"""
+        store.save_metadata("meta-only", SessionMetadata(session_name="ghost"))
+        assert store.exists("meta-only") is True
+        assert store.is_listed_session("meta-only") is False
+
+        store.save_metadata("tagged", SessionMetadata(tags=["favorite"]))
+        assert store.is_listed_session("tagged") is True
+
+        _seed(store, "chatty")
+        assert store.is_listed_session("chatty") is True
+        assert store.is_listed_session("../escape") is False
+
     def test_sealed_log_drops_writes(self, root: Path) -> None:
         """`MessageLog.seal`：封盘后 append / write_aux 都是 no-op（目录不重建）。"""
         log = FileMessageLog(root / "s1")

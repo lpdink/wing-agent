@@ -371,6 +371,15 @@ class FileSessionStore(SessionStore):
             session_dir / FileMessageLog._HISTORY
         ).exists()
 
+    def is_listed_session(self, session_id: str) -> bool:
+        """展示判据（见基类契约）：``history.jsonl`` 或带标签的 metadata。"""
+        try:
+            session_dir = self._session_dir(session_id)
+        except ValueError:
+            return False
+        metadata = self._load_metadata_at(session_dir, session_id)
+        return self._looks_like_session(session_dir, metadata)
+
     def resolve_stored_id(self, session_id: str) -> str | None:
         """该 id 在磁盘上对应的**目录名**；目录不存在返回 None。
 

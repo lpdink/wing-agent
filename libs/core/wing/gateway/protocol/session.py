@@ -422,7 +422,10 @@ class ArchiveResponse(BaseModel):
         description="本次调用是否真的移动了会话（false = 幂等 no-op）"
     )
     detail: str = Field(
-        description="结果说明（archived / already archived / restored / not archived）"
+        description=(
+            "结果说明（archived / already archived / restored / not archived / "
+            "nothing to archive）"
+        )
     )
 
 

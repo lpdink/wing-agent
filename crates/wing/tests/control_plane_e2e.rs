@@ -329,6 +329,7 @@ fn route(
             ("POST", "/api/session/resume")
             | ("POST", "/api/session/send")
             | ("POST", "/api/session/interrupt")
+            | ("POST", "/api/session/release")
             | ("GET", "/api/session/get")
             | ("GET", "/api/session/info")
             | ("GET", "/api/session/branches") => archived_404(),
@@ -1702,6 +1703,12 @@ async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
     let (code, _, stderr) = run_wing(&["-p", "hi", "-r", ARCHIVED_ID], &stub).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
+
+    // `release` 同档（它只逐出内存态，归档会话本来就"不在场"）。
+    let (code, stdout, stderr) = run_wing(&["release", ARCHIVED_ID], &stub).await;
+    assert_ne!(code, 0);
+    let both = format!("{stdout}{stderr}");
+    assert!(both.contains("wing archive --restore"), "{both}");
 
     // `run -r` 也走统一文案（编排方拿到的不是裸网关 detail）。
     let (code, _, stderr) = run_wing(&["run", "-r", ARCHIVED_ID, "-p", "hi"], &stub).await;

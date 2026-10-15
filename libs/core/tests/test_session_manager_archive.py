@@ -103,6 +103,39 @@ class TestExplicitArchive:
         assert (root / "old").exists()
         await sm.wait_teardowns()
 
+    async def test_metadata_only_session_is_not_archivable(
+        self, root: Path, file_store: FileSessionStore
+    ) -> None:
+        """只写过 metadata（未发言、未打标）的目录不算"会话"：归档是空动作。
+
+        它本来就不出现在任何列表里；归档它只会造出一个"索引重建后不可发现"的
+        归档条目（CI review N4）。准入判据 = 展示判据。
+        """
+        session = SessionManager({"file": file_store}).create_session()
+        session.set_title("metadata only")
+        assert (root / session.session_id / "metadata.json").exists()
+
+        sm = SessionManager({"file": file_store})
+        assert sm.archive_session(session.session_id) == (False, "nothing to archive")
+        assert (root / session.session_id).exists()
+        assert file_store.is_archived(session.session_id) is False
+
+    async def test_unarchive_move_failure_is_a_conflict_not_a_500(
+        self, root: Path, sm: SessionManager, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        """恢复方向的移动失败（权限 / IO）也转 RuntimeError → 409（与归档方向对称）。"""
+        _seed_old(file_store, "old", days_ago=1)
+        assert sm.archive_session("old") == (True, "archived")
+
+        def broken_unarchive(session_id: str) -> None:
+            raise PermissionError(13, "Operation not permitted")
+
+        monkeypatch.setattr(file_store, "unarchive", broken_unarchive)
+        with pytest.raises(RuntimeError, match="moved back"):
+            sm.unarchive_session("old")
+        # 移动没发生：会话仍在归档区。
+        assert file_store.is_archived("old") is True
+
     async def test_roundtrip_keeps_history_bytes_and_chain(
         self, root: Path, sm: SessionManager, file_store: FileSessionStore
     ) -> None:

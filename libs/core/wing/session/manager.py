@@ -1036,8 +1036,9 @@ class SessionManager:
 
         Returns:
             (archived, detail)：archived=False 是幂等 / 空动作（不是错误）——
-            已在归档区（"already archived"）或内存中的空会话（"nothing to
-            archive"，从未落盘，没有可移动的东西）；detail ∈ {"archived",
+            已在归档区（"already archived"）或**不构成"会话"**的目录（"nothing
+            to archive"：空会话 / 只写过 metadata 未发言未打标 / 只有媒体——
+            按展示判据它们本来就不出现在列表里）；detail ∈ {"archived",
             "already archived", "nothing to archive"}。
 
         Raises:
@@ -1055,13 +1056,15 @@ class SessionManager:
         if not store.archivable:
             raise RuntimeError(f"store '{store.name}' does not support archiving")
 
-        session = self._sessions.get(resolved_id)
-        if session is not None and not store.exists(resolved_id):
-            # 内存中的**空会话**：没有 metadata、没有 history，按"是会话"的判据
-            # （history 或 tags）它不算会话、本来就不进列表，所以没有可归档的
-            # 状态。如实回答空动作，而不是让 store 抛 FileNotFoundError（500）。
-            # （只传过媒体、没有 metadata/history 的会话走同一档：media 目录留
-            # 在 live 区不动——归档区只收"会话"。）
+        if not store.is_listed_session(resolved_id):
+            # 准入判据 = **展示判据**（history 或带标签的 metadata，与列表 /
+            # 归档区重建同一口径）：只有"会出现在 ps 里的会话"才值得归档。
+            # - 内存中的空会话（从未发言 → 磁盘零痕迹）：没有可归档的磁盘状态；
+            # - 只写过 metadata（模型绑定 / workspace 等）却没发言、没标签的目录：
+            #   它本来就不出现在任何列表里，归档它只会造出一个"索引重建后不可
+            #   发现"的归档条目；
+            # - 只传过媒体的会话同档（media 目录留在 live 区不动）。
+            # 如实回答空动作，而不是让 store 抛 FileNotFoundError（500）。
             return False, "nothing to archive"
 
         # 双存在预检**先于**任何副作用：否则 evict 之后 store 再抛（双存在 /
@@ -1071,6 +1074,7 @@ class SessionManager:
                 f"session '{resolved_id}' exists in both live and archive dirs"
             )
 
+        session = self._sessions.get(resolved_id)
         if session is not None:
             blocker = self._blocked_reason(session)
             if blocker is not None:
@@ -1120,7 +1124,15 @@ class SessionManager:
         if archived is not None:
             store, canonical = archived
             _warn_alias(session_id, canonical)
-            store.unarchive(canonical)
+            try:
+                store.unarchive(canonical)
+            except OSError as e:
+                # 与归档方向对称：移动失败（权限 / IO）转 RuntimeError → 409，
+                # 而不是让 OSError 逃逸成 500（两个方向的失败类该长一样）。
+                raise RuntimeError(
+                    f"session '{canonical}' could not be moved back from the "
+                    f"archive: {e}"
+                ) from e
             # 恢复是显式动作 = 兴趣信号：刷新 last_interaction，否则自动 sweep
             # 下一轮（启动 +startup_delay 或每天）会按旧年龄把它立刻收回去，
             # 用户"刚恢复的会话又消失"。落盘失败只 WARN——移动已完成，
