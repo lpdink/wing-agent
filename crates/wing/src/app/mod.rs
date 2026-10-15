@@ -1244,25 +1244,11 @@ pub async fn run_app(
                             recovery_pending = false;
                             app.set_connected(true);
                             app.clear_toast();
-                            match recovery {
-                                // 归档会话：新会话可用，但老会话要用户自己恢复
-                                // ——提示里带上可复制的命令（日志里也有）。
-                                crate::app::transport::Recovery::Archived => {
-                                    app.show_toast(Toast::warning(
-                                        format!(
-                                            "Session {lost_session} is archived; started a fresh one. \
-                                             Restore it with `wing archive --restore {lost_session}`"
-                                        ),
-                                        std::time::Duration::from_secs(10),
-                                    ));
-                                }
-                                _ => {
-                                    app.show_toast(Toast::info(
-                                        "Reconnected!",
-                                        std::time::Duration::from_secs(2),
-                                    ));
-                                }
-                            }
+                            // 归档会话：新会话可用，但老会话要用户自己恢复——
+                            // 提示由 `Recovery::notice` 给出（带可复制的命令）。
+                            app.show_toast(recovery.notice(&lost_session).unwrap_or_else(|| {
+                                Toast::info("Reconnected!", std::time::Duration::from_secs(2))
+                            }));
                             // The session may have been silently replaced —
                             // the popup list must re-fetch.
                             app.invalidate_session_cache();

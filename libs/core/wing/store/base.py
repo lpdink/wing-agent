@@ -311,6 +311,16 @@ class MessageLog(ABC):
         能解析但不是 dict 的行都不产出——消费方可以假定每条记录都是 dict。
         """
 
+    def seal(self) -> None:
+        """封住**本实例**的写口（会话被逐出时调用；默认 no-op）。
+
+        封的是"迟到的写"：会话摘除后，任何落盘都会把 ``<root>/<sid>/`` 连
+        父目录一起重建（文件后端写前 mkdir），与归档 rename 叠加即 live 与
+        归档区**双存在**的数据分裂。判据只在当前实例上生效——重新水合的会话
+        拿到的是新实例（`SessionStore.open_log` 新建）。
+        """
+        return None
+
     @abstractmethod
     def append(self, records: list[dict[str, Any]]) -> None:
         """批量追加记录（append-only，永不修改已有记录）。空列表为 NOP。"""

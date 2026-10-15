@@ -379,6 +379,14 @@ class WingRuntime:
         """
         return self.sm.session_exists(session_id)
 
+    def missing_session_error(self, session_id: str) -> Exception:
+        """构造「会话不存在」的错误（归档命中 → ``SessionArchivedError``）。
+
+        路由用来区分两种 404：归档是**可行动**的（提示恢复），真不存在是普通
+        404。纯查询（只探归档区一次 stat）。
+        """
+        return self.sm.missing_session_error(session_id)
+
     def is_archived(self, session_id: str) -> bool:
         """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""
         return self.sm.is_archived(session_id)
@@ -435,12 +443,14 @@ class WingRuntime:
         """把会话移入归档区（幂等；钉住条件同 release）。
 
         Returns:
-            (archived, detail)：archived=False 表示本就在归档区（幂等 no-op）。
+            (archived, detail)：archived=False 是幂等 / 空动作（不是错误）——
+            已在归档区（``already archived``）或内存中的空会话、从未落盘
+            （``nothing to archive``）。
 
         Raises:
             LookupError: 两个区都没有该会话
             RuntimeError: 钉住（忙碌 / 待处理输入 / 订阅中）/ 后端不支持归档 /
-                live 与归档区同时存在
+                live 与归档区同时存在 / 目录移动失败
         """
         return self.sm.archive_session(session_id)
 

@@ -62,11 +62,16 @@ class FileMessageLog(MessageLog):
 
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
+        self._sealed = False
 
     @property
     def path(self) -> Path:
         """日志目录（文件后端特有，不属于 MessageLog 接口）。"""
         return self._path
+
+    def seal(self) -> None:
+        """封住写口（见基类契约）：此后 append / write_aux / delete_aux 都是 no-op。"""
+        self._sealed = True
 
     def _aux_path(self, key: str) -> Path:
         return self._path / f"{key}.json"
@@ -98,6 +103,8 @@ class FileMessageLog(MessageLog):
     def append(self, records: list[dict[str, Any]]) -> None:
         """追加记录：整批先序列化 + UTF-8 编码，再打开文件逐条写。
 
+        （封盘后的追加被丢弃并留一行 WARNING——见 `seal`。）
+
         两件事都要保：
 
         - **不留半批**：序列化 / 编码失败（不可序列化的值、孤立代理字符）
@@ -111,6 +118,9 @@ class FileMessageLog(MessageLog):
         代价是整批一份编码副本（``blobs``）——批量只出现在 fork / compact
         这类重塑路径上，换 all-or-nothing 划算；逐轮的小批量追加可忽略。
         """
+        if self._sealed:
+            log.warning(f"Message log sealed ('{self._path.name}'), dropping append")
+            return
         if not records:
             return
         blobs = [json.dumps(r, ensure_ascii=False).encode("utf-8") for r in records]
@@ -137,9 +147,14 @@ class FileMessageLog(MessageLog):
             return None
 
     def write_aux(self, key: str, data: dict[str, Any]) -> None:
+        if self._sealed:
+            log.warning(f"Message log sealed ('{self._path.name}'), dropping write_aux")
+            return
         atomic_write_json(self._aux_path(key), data)
 
     def delete_aux(self, key: str) -> None:
+        if self._sealed:
+            return
         path = self._aux_path(key)
         if path.exists():
             try:
@@ -162,9 +177,13 @@ class FileSessionStore(SessionStore):
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
-        # 批量索引窗口（`index_batch`）：非 None 时索引操作攒在这里，
-        # 窗口结束一次读改写落盘（[去重条目, 待删 id]）。
-        self._deferred_index: tuple[list[ArchivedSession], list[str]] | None = None
+        # 批量索引窗口（`index_batch`）：非 None 时索引操作按序攒在这里
+        # （``(kind, id, entry)``，kind ∈ {"upsert", "remove"}），窗口结束按序重放。
+        # **必须有序**：同一个 id 在窗口内可能 archive → unarchive → archive，
+        # 集合式合并（去重 + 删除优先）会丢掉「最后一次操作」或留下重复条目。
+        self._deferred_index: list[tuple[str, str, ArchivedSession | None]] | None = (
+            None
+        )
 
     @property
     def root(self) -> Path:
@@ -510,30 +529,36 @@ class FileSessionStore(SessionStore):
         if self._deferred_index is not None:
             yield
             return
-        self._deferred_index = ([], [])
+        self._deferred_index = []
         try:
             yield
         finally:
-            upserts, removals = self._deferred_index
-            self._deferred_index = None
-            self._apply_deferred_index(upserts, removals)
+            ops, self._deferred_index = self._deferred_index, None
+            self._apply_deferred_index(ops)
 
     def _apply_deferred_index(
-        self, upserts: list[ArchivedSession], removals: list[str]
+        self, ops: list[tuple[str, str, ArchivedSession | None]]
     ) -> None:
-        """（内部）块尾一次性对账落盘（读一次、写一次；空窗口不落盘）。"""
-        if not upserts and not removals:
+        """（内部）块尾一次性对账落盘：按操作顺序重放（last-wins），读一次写一次。
+
+        只在盘上本来就有索引、或有新条目要登记时落盘——「只有删除且没有索引」
+        是纯 no-op（读取路径不该创造存储痕迹，与 `list_archived` 同一条原则）。
+        """
+        if not ops:
             return
-        current = self._read_archive_index() or []
-        removed = set(removals)
-        replaced = {entry.id for entry in upserts}
-        merged = [
-            entry
-            for entry in current
-            if entry.id not in removed and entry.id not in replaced
-        ]
-        merged.extend(upserts)
-        self._write_archive_index(merged)
+        current = self._read_archive_index()
+        if current is None and not any(kind == "upsert" for kind, _, _ in ops):
+            return
+        merged: dict[str, ArchivedSession] = {
+            entry.id: entry for entry in (current or [])
+        }
+        for kind, session_id, entry in ops:
+            if kind == "remove":
+                merged.pop(session_id, None)
+            else:
+                assert entry is not None
+                merged[session_id] = entry
+        self._write_archive_index(list(merged.values()))
 
     def archive(self, session_id: str) -> None:
         """移入归档区 + 登记索引（见基类契约；rename 与索引更新同一次调用）。"""
@@ -597,8 +622,10 @@ class FileSessionStore(SessionStore):
                 # 索引被手改出脏 id：不投影（也无法寻址）
                 log.warning(f"Archive index holds an invalid session id: {entry.id!r}")
                 continue
-            if real is None:
-                continue  # 目录已消失 → 剔除（下面统一落盘自愈）
+            if real is None or real in known:
+                # 目录已消失 → 剔除；同一目录的第二条（手改索引 / 历史窗口留下的
+                # 重复条目）→ 同样剔除（按**磁盘真名**判重，别名也算同一条）。
+                continue
             # 投影用磁盘真名：索引被写成大小写 / Unicode 变体时不展示"假 id"
             # （查找本来就能归一，这里只是让展示口径也统一）。
             alive.append(
@@ -688,7 +715,7 @@ class FileSessionStore(SessionStore):
     def _upsert_archive_index(self, entry: ArchivedSession) -> None:
         """登记一条归档条目（同 id 替换）；索引不可读时先重建再写入。"""
         if self._deferred_index is not None:
-            self._deferred_index[0].append(entry)
+            self._deferred_index.append(("upsert", entry.id, entry))
             return
         current = self._read_archive_index()
         if current is None:
@@ -698,7 +725,7 @@ class FileSessionStore(SessionStore):
     def _remove_from_archive_index(self, session_id: str) -> None:
         """删除一条归档条目（条目不存在为 no-op）。"""
         if self._deferred_index is not None:
-            self._deferred_index[1].append(session_id)
+            self._deferred_index.append(("remove", session_id, None))
             return
         current = self._read_archive_index()
         if current is None:

@@ -124,6 +124,15 @@ class TrackedList(Generic[T]):
         if self._log is not None:
             self._log.append([self._to_record(it) for it in items])
 
+    def seal(self) -> None:
+        """封住底层 MessageLog 的写口（会话摘除时调用；log=None 时 NOP）。
+
+        链的内存态照旧（读、查询不受影响），只是**不再落盘**——摘除后的写会把
+        live 目录连父目录一起重建（见 `MessageLog.seal` 与 `Session.detach`）。
+        """
+        if self._log is not None:
+            self._log.seal()
+
     # ── 内部：内存 map 维护 ───────────────────
 
     def _update_memory(self, item: T) -> None:

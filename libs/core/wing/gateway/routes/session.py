@@ -440,8 +440,23 @@ async def get_session(
     server = _get_server(request)
     state = server.runtime.get_session_state(session_id)
     if state is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise _missing_session(server, session_id)
     return SessionGetResponse(**state)
+
+
+def _missing_session(server: GatewayServer, session_id: str) -> Exception:
+    """「内存态查询」找不到会话时的错误：归档命中 → SessionArchivedError
+    （app handler 映射 404 + session_archived，可行动提示），否则普通 404。
+
+    这些端点本来只查内存态（不水合），归档会话对它们同样是"不在场"；区别只在
+    错误的可行动性——裸 API 消费方要看得出"它没消失，只是被归档了"。
+    """
+    from wing.session import SessionArchivedError
+
+    error = server.runtime.missing_session_error(session_id)
+    if isinstance(error, SessionArchivedError):
+        return error
+    return HTTPException(status_code=404, detail="session not found")
 
 
 # ============================================================
@@ -461,7 +476,7 @@ async def session_info(
     server = _get_server(request)
     session = server.runtime.get_session(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise _missing_session(server, session_id)
     return build_session_info(session)
 
 
@@ -477,7 +492,7 @@ async def session_branches(
     server = _get_server(request)
     session = server.runtime.get_session(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise _missing_session(server, session_id)
     return build_session_branches(session)
 
 

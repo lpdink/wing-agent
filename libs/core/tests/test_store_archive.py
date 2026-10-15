@@ -26,6 +26,7 @@ from wing.store import (
     MemorySessionStore,
     SessionMetadata,
 )
+from wing.store.file import FileMessageLog  # 实现细节：直测耐久语义
 
 
 @pytest.fixture
@@ -231,6 +232,69 @@ class TestArchiveIndexRebuild:
                 pass
             assert writes == 2
         assert writes == 3
+
+    def test_sealed_log_drops_writes(self, root: Path) -> None:
+        """`MessageLog.seal`：封盘后 append / write_aux 都是 no-op（目录不重建）。"""
+        log = FileMessageLog(root / "s1")
+        log.append([{"role": "user", "content": "x"}])
+        assert (root / "s1" / "history.jsonl").exists()
+
+        log.seal()
+        log.append([{"role": "user", "content": "y"}])
+        log.write_aux("pending_compact", {"x": 1})
+
+        assert [r["content"] for r in log.iter_all()] == ["x"]
+        assert not (root / "s1" / "pending_compact.json").exists()
+
+    def test_index_batch_replays_ops_in_order(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """窗口内的操作按序重放（last-wins）：不留重复条目，删除不被先前的
+        upsert 盖回来。"""
+        _seed(store, "a")
+        store.archive("a")
+        with store.index_batch():
+            store.unarchive("a")  # remove
+            store.archive("a")  # upsert
+            store.unarchive("a")  # remove
+            store.archive("a")  # upsert —— 最后一次是 upsert，且只留一条
+        assert [e.id for e in store.list_archived()] == ["a"]
+        assert len(_index(store)) == 1, _index(store)
+
+        # 窗口内"归档后恢复"：条目必须消失（顺序语义，不是集合语义）。
+        _seed(store, "b")
+        with store.index_batch():
+            store.archive("b")
+            store.unarchive("b")
+        assert [e.id for e in store.list_archived()] == ["a"]
+
+    def test_batch_without_index_and_only_removals_writes_nothing(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """没有索引 + 窗口内只有删除 → 不落盘（读取路径不创造存储痕迹）。"""
+        _seed(store, "a")
+        store.archive("a")
+        index = root / ".archive" / "index.json"
+        index.unlink()  # 模拟索引丢失
+
+        with store.index_batch():
+            store.unarchive("a")
+
+        assert not index.exists()
+
+    def test_duplicate_index_entries_are_deduped_and_healed(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """手改索引造出重复条目：列表按磁盘真名去重并自愈落盘。"""
+        _seed(store, "a")
+        store.archive("a")
+        index = root / ".archive" / "index.json"
+        payload = json.loads(index.read_text(encoding="utf-8"))
+        payload["sessions"].append(payload["sessions"][0])
+        index.write_text(json.dumps(payload), encoding="utf-8")
+
+        assert [e.id for e in store.list_archived()] == ["a"]
+        assert len(_index(store)) == 1, _index(store)
 
     def test_index_with_a_dirty_id_is_ignored_not_projected(
         self, root: Path, store: FileSessionStore

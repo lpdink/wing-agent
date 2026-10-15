@@ -712,6 +712,26 @@ class TestSessionArchive:
         assert resp.status_code == 404
         assert resp.json()["error"] == "not_found"
 
+    def test_memory_state_endpoints_keep_the_archived_marker(
+        self, client: TestClient, mock_runtime
+    ):
+        """内存态查询（get / info / branches）的 404 也区分归档：裸 API 消费方
+        要看得出"它没消失，只是被归档了"。"""
+        mock_runtime.get_session_state.return_value = None
+        mock_runtime.get_session.return_value = None
+        mock_runtime.missing_session_error.return_value = SessionArchivedError("old-1")
+
+        for path in ("/api/session/get", "/api/session/info", "/api/session/branches"):
+            resp = client.get(f"{path}?session_id=old-1")
+            assert resp.status_code == 404, path
+            assert resp.json()["error"] == "session_archived", path
+
+        # 真不存在仍是普通 404（不区分给探测器反馈）。
+        mock_runtime.missing_session_error.return_value = LookupError("nope")
+        resp = client.get("/api/session/info?session_id=ghost")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"
+
     def test_archived_session_yields_actionable_404(
         self, client: TestClient, mock_runtime
     ):

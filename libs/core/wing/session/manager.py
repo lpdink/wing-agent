@@ -1057,9 +1057,11 @@ class SessionManager:
 
         session = self._sessions.get(resolved_id)
         if session is not None and not store.exists(resolved_id):
-            # 内存中的**空会话**（从未发言 → 磁盘零痕迹）：没有可归档的磁盘
-            # 状态。归档它是个空动作（它本来就不进列表），如实回答而不是让
-            # store 抛 FileNotFoundError（那会变成 500）。
+            # 内存中的**空会话**：没有 metadata、没有 history，按"是会话"的判据
+            # （history 或 tags）它不算会话、本来就不进列表，所以没有可归档的
+            # 状态。如实回答空动作，而不是让 store 抛 FileNotFoundError（500）。
+            # （只传过媒体、没有 metadata/history 的会话走同一档：media 目录留
+            # 在 live 区不动——归档区只收"会话"。）
             return False, "nothing to archive"
 
         # 双存在预检**先于**任何副作用：否则 evict 之后 store 再抛（双存在 /
@@ -1074,7 +1076,15 @@ class SessionManager:
             if blocker is not None:
                 raise RuntimeError(f"session cannot be archived: {blocker}")
             self.evict(resolved_id, reason="archived")
-        store.archive(resolved_id)
+        try:
+            store.archive(resolved_id)
+        except OSError as e:
+            # 移动失败（rename / 建目录）：内存态已摘除，磁盘照旧（会话仍可
+            # 水合，重跑归档即可修复）——转成 RuntimeError 让路由回 409 而不是
+            # 500，并把原因说清楚（半副作用是内存态，不是数据）。
+            raise RuntimeError(
+                f"session '{resolved_id}' could not be moved to the archive: {e}"
+            ) from e
         log.info(f"Session archived: {resolved_id}")
         return True, "archived"
 

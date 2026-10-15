@@ -328,7 +328,10 @@ fn route(
         return match (method, path) {
             ("POST", "/api/session/resume")
             | ("POST", "/api/session/send")
-            | ("POST", "/api/session/interrupt") => archived_404(),
+            | ("POST", "/api/session/interrupt")
+            | ("GET", "/api/session/get")
+            | ("GET", "/api/session/info")
+            | ("GET", "/api/session/branches") => archived_404(),
             _ => not_loaded(),
         };
     }
@@ -1695,8 +1698,23 @@ async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
     assert!(stderr.contains("is archived"), "{stderr}");
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
 
+    // stdio（`-p -r`）同样走统一文案：编排方看到的是可行动的恢复指引。
+    let (code, _, stderr) = run_wing(&["-p", "hi", "-r", ARCHIVED_ID], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("wing archive --restore"), "{stderr}");
+
     // `run -r` 也走统一文案（编排方拿到的不是裸网关 detail）。
     let (code, _, stderr) = run_wing(&["run", "-r", ARCHIVED_ID, "-p", "hi"], &stub).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
+
+    // 内存态查询（get / info）也回结构化码：裸 API 消费方看得出来"它没消失，
+    // 只是被归档了"——上面 info / tail 两条链各留下一条记录。
+    for endpoint in ["session/info", "session/get"] {
+        let hits = stub.path_hits(&format!("/api/{endpoint}"));
+        let hit = hits
+            .last()
+            .unwrap_or_else(|| panic!("no request recorded for {endpoint}"));
+        assert_eq!(hit.status, 404, "{endpoint} 应为 404");
+    }
 }

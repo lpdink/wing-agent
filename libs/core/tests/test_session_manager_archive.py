@@ -377,6 +377,28 @@ class TestEvictedSessionWriteSeal:
         assert file_store.is_archived(sid) is True
         assert (root / ".archive" / sid / "history.jsonl").exists()
 
+    async def test_detached_session_log_appends_are_sealed(
+        self, root: Path, sm: SessionManager, file_store: FileSessionStore
+    ) -> None:
+        """消息日志写口同样被封：摘除后 append 不得把 live 目录写回来。
+
+        日志 append 是最"深"的一条写路径（worker 直接持有 ContextManager，
+        不经 `_sessions` 查找）——封盘必须盖住它，否则它能把归档后的目录重建。
+        """
+        session = sm.create_session()
+        sid = session.session_id
+        session.context_manager.add_message(Message(role="user", content="hello"))
+        assert (root / sid / "history.jsonl").exists()
+
+        sm.evict(sid, reason="test")
+        await sm.wait_teardowns()
+        shutil.rmtree(root / sid)  # 模拟归档 rename 把目录移走
+
+        session.context_manager.add_message(Message(role="user", content="late"))
+
+        assert not (root / sid).exists(), "迟到的 append 把 live 目录写回来了"
+        assert session.context_manager.get_context_window()  # 内存态照旧
+
     async def test_detached_session_persistence_is_sealed(
         self, root: Path, sm: SessionManager, file_store: FileSessionStore, monkeypatch
     ) -> None:
@@ -398,20 +420,24 @@ class TestEvictedSessionWriteSeal:
         assert writes == []
 
 
-class TestResumeIsAnInterestSignal:
-    """S-2：resume 与「恢复」对称——显式接触即刷新年龄，sweep 不得立刻收走。"""
+class TestResumedSessionIsProtectedWhileResident:
+    """resume 打开的旧会话不被后台收走——保护来自「sweep 只看磁盘会话」，
+    而不是年龄刷新（resume 刻意不写 metadata：空转 resume 零写盘是既有不变量）。"""
 
-    async def test_resume_refreshes_age_so_the_next_sweep_skips_it(
+    async def test_resumed_old_session_survives_the_next_sweep(
         self, root: Path, file_store: FileSessionStore
     ) -> None:
         _seed_old(file_store, "old", days_ago=200)
         sm = SessionManager({"file": FileSessionStore(root)})
 
-        sm.resume_session("old")
+        sm.resume_session("old")  # 磁盘年龄仍是 200 天
+        metadata = file_store.load_metadata("old")
+        assert metadata is not None and metadata.last_interaction is not None
 
-        # 阈值 90 天：resume 刚刷新过 → 不再满足"年龄超过阈值"。
+        # 阈值 90 天：年龄超阈值，但它在内存里 → sweep 不动它。
         assert await sm.archive_stale_sessions(idle_days=90.0) == []
         assert file_store.is_archived("old") is False
+        assert sm.get_session("old") is not None
 
     async def test_resume_still_requires_an_existing_session(
         self, root: Path, file_store: FileSessionStore
@@ -563,6 +589,14 @@ class TestArchiverAndRuntimeEntryPoints:
             runtime.archive_session("no-such-session")
         with pytest.raises(LookupError):
             runtime.unarchive_session("no-such-session")
+
+        # missing_session_error：找不到时按归档区区分两种错误（路由的 404 用）。
+        assert isinstance(runtime.missing_session_error("no-such-session"), LookupError)
+        assert runtime.archive_session(session_id) == (True, "archived")
+        assert isinstance(
+            runtime.missing_session_error(session_id), SessionArchivedError
+        )
+        assert runtime.unarchive_session(session_id) == (True, "restored")
 
         # require_live_session：live 命中放行；归档命中抛结构化错误（media 预检用）。
         runtime.require_live_session(session_id)

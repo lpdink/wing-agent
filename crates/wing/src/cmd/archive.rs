@@ -33,8 +33,9 @@ use super::common;
 #[derive(Serialize, Clone)]
 struct ArchiveResult {
     session_id: String,
-    /// 结果状态是否处于目标状态（true = 现在在归档区 / 已恢复）。
-    archived: bool,
+    /// 操作后的真实状态（网关回执；失败行没有回执 → 省略，而不是编造）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archived: Option<bool>,
     /// 本次调用是否真的移动了会话（false = 幂等 no-op）。
     changed: bool,
     detail: String,
@@ -108,7 +109,7 @@ async fn run_inner(
         match http.archive_session(sid, !restore).await {
             Ok(resp) => results.push(ArchiveResult {
                 session_id: sid.clone(),
-                archived: resp.archived,
+                archived: Some(resp.archived),
                 changed: resp.changed,
                 detail: resp.detail,
                 is_error: false,
@@ -117,7 +118,7 @@ async fn run_inner(
             // 共享的会话错误（普通 404 有"怎么找"，归档 404 有"怎么恢复"）。
             Err(e) => results.push(ArchiveResult {
                 session_id: sid.clone(),
-                archived: restore,
+                archived: None, // 没有回执 = 不知道真实状态，别编造
                 changed: false,
                 detail: common::session_error(sid, &e).to_string(),
                 is_error: true,
@@ -294,7 +295,7 @@ mod tests {
     fn result_label_reports_the_action() {
         let archived = ArchiveResult {
             session_id: "s1".into(),
-            archived: true,
+            archived: Some(true),
             changed: true,
             detail: "archived".into(),
             is_error: false,
@@ -400,14 +401,14 @@ mod tests {
         let results = vec![
             ArchiveResult {
                 session_id: "s1".into(),
-                archived: true,
+                archived: Some(true),
                 changed: true,
                 detail: "archived".into(),
                 is_error: false,
             },
             ArchiveResult {
                 session_id: "s2".into(),
-                archived: true,
+                archived: Some(true),
                 changed: false,
                 detail: "already archived".into(),
                 is_error: false,

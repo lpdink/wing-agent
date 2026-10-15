@@ -41,6 +41,26 @@ pub enum Recovery {
     Archived,
 }
 
+impl Recovery {
+    /// 需要用户知道时的提示（`lost_session` = 原来的会话 id）。
+    ///
+    /// 归档是唯一"数据还在、但要用命令拿回来"的结局：提示里给出可复制的恢复
+    /// 命令（`wing archive --restore`）。Resumed / Fresh 不需要额外解释
+    /// （Fresh = 空白会话/已删除，与首次启动无异）。
+    pub fn notice(self, lost_session: &str) -> Option<crate::ui::toast::Toast> {
+        match self {
+            Recovery::Archived => Some(crate::ui::toast::Toast::warning(
+                format!(
+                    "Session {lost_session} is archived; started a fresh one. \
+                     Restore it with `wing archive --restore {lost_session}`"
+                ),
+                Duration::from_secs(10),
+            )),
+            Recovery::Resumed | Recovery::Fresh => None,
+        }
+    }
+}
+
 impl Transport {
     /// Switch event subscription from an old session to a new one.
     ///
@@ -169,6 +189,26 @@ impl Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 归档结局必须说清"怎么回去"；其余结局不该多嘴。
+    #[test]
+    fn recovery_notice_names_the_restore_command_for_archived_sessions() {
+        let notice = Recovery::Archived
+            .notice("20261001-120000-abcd")
+            .expect("archived must tell the user something");
+        assert!(notice.message.contains("is archived"), "{}", notice.message);
+        assert!(
+            notice
+                .message
+                .contains("wing archive --restore 20261001-120000-abcd"),
+            "{}",
+            notice.message
+        );
+        assert_eq!(notice.kind, crate::ui::toast::ToastKind::Warning);
+
+        assert!(Recovery::Resumed.notice("s1").is_none());
+        assert!(Recovery::Fresh.notice("s1").is_none());
+    }
 
     #[test]
     fn test_backoff_sequence() {

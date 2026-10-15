@@ -678,12 +678,13 @@ class Session:
         architecture.md 的数据分裂红线）。摘除前的同步落盘
         （``SessionManager.evict``）是最后一次正确写点。
 
-        封的口径：用量账本（``UsageTracker.seal``）与 metadata
-        （``_save_metadata``）。消息日志的 append 只来自 worker 与会话控制面，
-        两者都经 ``_sessions`` 查找——摘除后不可达（由对象不可达兜底）。
+        封的口径 = 三类写口：用量账本（``UsageTracker.seal``）、metadata
+        （``_save_metadata``）、消息日志（``TrackedList.seal`` → 后端实例）。
+        三者之外没有第四条落盘路径（``SessionStore`` 是全部持久状态的唯一所有者）。
         """
         self._detached = True
         self._usage.seal()
+        self._messages.seal()
 
     def activate_usage(self) -> None:
         """把用量账本挂上事件流（会话被接纳进工作集时由 SessionManager 调用）。
