@@ -272,8 +272,10 @@ pub enum Command {
         /// created them (├─ / └─ prefixes), pinned roots float with their
         /// whole subtree.
         ///
-        /// Human table only: with --json the machine surface stays the flat
-        /// list.
+        /// Filters keep the same rule as everywhere else: a session whose
+        /// creator is not in the listed set renders as a root (so
+        /// `--parent X --tree` shows X's children at depth 0). Human table
+        /// only: with --json the machine surface stays the flat list.
         #[arg(long = "tree")]
         tree: bool,
     },

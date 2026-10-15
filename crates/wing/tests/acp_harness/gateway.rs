@@ -50,6 +50,10 @@ pub struct RecordedRequest {
     pub path: String,
     /// `X-Client-Id` 头（订阅 / 退订请求才有）。
     pub client_id: Option<String>,
+    /// 查询串原样（无查询串为 None）。`wing ps --parent` 这类子集过滤只有它能断言；
+    /// ACP 场景不发查询参数，故该字段在那边是 dead code。
+    #[allow(dead_code)]
+    pub query: Option<String>,
     /// JSON 请求体（无体 / 非 JSON 为 None）。
     pub body: Option<Value>,
 }
@@ -428,6 +432,7 @@ async fn handle_http(
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or_default().to_string();
+    let recorded_query = (!query.is_empty()).then(|| query.clone());
     let client_id = request
         .headers()
         .get("x-client-id")
@@ -444,6 +449,7 @@ async fn handle_http(
         method: method.clone(),
         path: path.clone(),
         client_id,
+        query: recorded_query,
         body: body.clone(),
     });
 

@@ -53,7 +53,6 @@ use std::sync::atomic::Ordering;
 
 use acp_harness::gateway::FakeGateway;
 use acp_harness::gateway::RecordedRequest;
-use acp_harness::wait_until;
 
 static HOME_SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -226,7 +225,7 @@ async fn wing_info_shows_the_parent_line() {
     assert!(!stdout.contains("parent:"), "{stdout}");
 }
 
-/// `wing ps --parent`：种子行来自网关，CLI 只列直接子（含 inactive；不含孙）。
+/// `wing ps --parent`：查询串带上参数，且 CLI 只列直接子（含 inactive；不含孙）。
 #[tokio::test(flavor = "multi_thread")]
 async fn wing_ps_filters_by_parent() {
     let gateway = FakeGateway::start();
@@ -244,14 +243,17 @@ async fn wing_ps_filters_by_parent() {
     let ids: Vec<&str> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
     assert_eq!(ids, ["kid"], "只列直接子（inactive 也要在）：{rows:?}");
 
-    let _ = wait_until("session/list", || {
-        gateway
-            .requests_for("/api/session/list")
-            .into_iter()
-            .last()
-            .map(|_| ())
-    })
-    .await;
+    // client 参数本身：假网关不看它（旧网关形态），但请求必须带上。
+    let list = gateway
+        .wait_request("session/list", |request| {
+            request.path == "/api/session/list"
+        })
+        .await;
+    assert_eq!(
+        list.query.as_deref(),
+        Some("parent=sched"),
+        "查询串必须带 ?parent="
+    );
 }
 
 /// `wing ps --tree`：子会话挂在创建者下面（前缀进 SESSION ID 列）。
