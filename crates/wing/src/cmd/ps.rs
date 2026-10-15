@@ -226,12 +226,13 @@ fn filter_sessions(
     sessions
 }
 
-/// 呈现顺序：后端基准序 + 前端 pin 叠加 —— 被 pin 的置顶，组内后 pin 的更靠前
-/// （唯一实现在 [`crate::shared::pinning`]，与 `/ss` 面板共用）；其余保持
-/// 后端下发的顺序（活跃优先、组内按最后交互时间降序）。
+/// 呈现顺序（平铺模式）：后端基准序 + 前端 pin 叠加 —— 被 pin 的置顶，组内后
+/// pin 的更靠前（pin 排序键见 [`crate::shared::pinning`]）；其余保持后端下发的
+/// 顺序（活跃优先、组内按最后交互时间降序）。
 ///
 /// 只作用于平铺与 `--json` 输出；`--tree` 的定序归 [`build_forest`]（它不读
-/// 输入顺序），这里的排序对树是空操作。
+/// 输入顺序），这里的排序对树是空操作。`/ss` 面板全量视图同样走树序——pin 在
+/// 那里的语义是「分两层」（见 session_tree）。
 fn order_sessions(sessions: &mut [SessionInfo]) {
     sessions.sort_by_cached_key(|s| pin_key(is_pinned(&s.tags), pin_added_at(&s.tag_meta)));
 }

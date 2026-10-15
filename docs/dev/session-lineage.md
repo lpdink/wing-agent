@@ -37,9 +37,11 @@
 
 ## 3. CLI 采集
 
-- 创建点（`wing run` / `wing new` / `wing -p`（stdio）/ `wing acp` 的 session/new /
-  TUI 的 `/new`）统一经 `cmd/common.rs` 的一个 helper 读取 `WING_SESSION_ID`：
-  合法 → 带上；**非法 → 丢弃 + 日志，绝不阻断创建**（env 是软信号）。
+- 创建点统一经 `cmd/common.rs` 的一个 helper 读取 `WING_SESSION_ID`（合法 → 带上；
+  **非法 → 丢弃 + 日志，绝不阻断创建**——env 是软信号）：`wing run` / `wing new` /
+  `wing -p`（stdio，含 create-or-adopt）/ `wing acp` 的 session/new，以及 **TUI 进程的
+  全部创建路径**——启动建会话、`/new`、以及恢复时磁盘无此会话后的重新铸造
+  （`app/transport.rs` 的新铸路径同样创建新会话）。
 - 输出对账：`wing run` / `wing new` 的文本与 `--json` 输出展示**读回的** parent；
   请求了但网关没带（旧网关）只记日志（软机制，不吵）。
 - `wing ps --parent <sid>` 列出某会话的直接子（隐含 `--all`——血缘是长期事实，与
