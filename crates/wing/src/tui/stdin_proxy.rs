@@ -66,6 +66,10 @@
 //!   静默一样保留接驳，代价是接驳风险面原样留下。
 //! - **被拆散成多段的迟到应答**：候选前缀被丢弃后，后续字节按普通输入透传——最多漏出
 //!   `$y` 这类尾巴（一个普通按键），但前缀（`ESC[?…`）绝不会落进 crossterm（那才致命）。
+//! - **拆解窗口内的键入**：装 → 判定 → 拆的窗口里已经进入内层 pty 输入队列 / 泵 pending 的
+//!   用户字节会随 pty 对一起消失（crossterm 那时还没有读者，也没有廉价回注手段——TIOCSTI
+//!   在多数平台受限）。窗口有界（预算量级：本地 ≤150ms / SSH ≤600ms，且只发生在启动期），
+//!   属低概率事件；不接受这一点就只能保留接驳（放弃阴性终端的风险退场）。
 //! - **保护区 / 序列体内的应答**：bracketed paste 保护区内一律当用户数据透传，5522 序列体
 //!   内的同类字节并入载荷——都不会被当作探针应答，登记为已知边界（两种形态在真实终端上
 //!   不会出现）。
@@ -145,8 +149,8 @@ const SEQUENCE_PREFIX: &[u8] = b"\x1b]5522;";
 const REPORT_OPEN: &[u8] = b"\x1b[?";
 
 /// DECRPM 应答参数段（`Pa;Ps`）的字节上限。真实应答 ≤ 10 字节；超长参数不是任何真实
-/// 终端的形态，按失配冲回（冲回后 crossterm 照样解析不了 `ESC[?…`，但那已经是垃圾流，
-/// 本层不为它特判——防的是**协议流量**，不是任意坏字节）。
+/// 终端的形态——处置与「到点没等全」对齐：**整段丢弃**。既然已经确认了 `ESC[?` 前缀，
+/// 冲回就是毒化 crossterm 的那条路径，坏流也不例外（见 [`Candidate::Junk`]）。
 const REPORT_PARAM_MAX: usize = 16;
 
 /// `ESC[200~` / `ESC[201~`——bracketed paste 的开闭界。
@@ -213,7 +217,10 @@ enum Candidate {
     PasteOpen,
     /// 完整匹配一条 DECRPM 应答（`ESC[?` + 参数 + `$y`）。
     Report,
-    /// 不是任何候选序列（含超长），立即冲回。
+    /// `ESC[?` 起头、参数段超限：不是任何真实终端的形态。**整段丢弃**——冲回 `ESC[?…`
+    /// 就是毒化 crossterm 的那条路径（与到点丢弃同类，语义对齐）；之后的字节回到普通分流。
+    Junk,
+    /// 不是任何候选序列（含失配），立即冲回。
     No,
 }
 
@@ -254,7 +261,7 @@ fn classify_report_params(rest: &[u8]) -> Candidate {
         .take_while(|b| b.is_ascii_digit() || **b == b';')
         .count();
     if params > REPORT_PARAM_MAX {
-        return Candidate::No;
+        return Candidate::Junk;
     }
     match &rest[params..] {
         b"" | b"$" => Candidate::Partial,
@@ -370,6 +377,14 @@ impl Splitter {
                             // 完整应答：摘走参数段（`ESC[?` 与 `$y` 之间）。
                             out.reports
                                 .push(bytes[REPORT_OPEN.len()..bytes.len() - 2].to_vec());
+                            self.hold = Hold::None;
+                        }
+                        Candidate::Junk => {
+                            // 参数超限：整段丢弃（冲回前缀 = 毒化 crossterm）；后续字节回普通分流。
+                            tracing::debug!(
+                                "stdin proxy: overlong DECRPM parameter run ({} bytes), dropping it",
+                                bytes.len()
+                            );
                             self.hold = Hold::None;
                         }
                         Candidate::No => {
@@ -1288,17 +1303,26 @@ mod tests {
         assert_eq!(feed(&mut s, b"y", 31).passthrough, b"y");
     }
 
-    /// 超长参数段（坏包）：到不了任何真协议的形状（真应答 ≤ 10 字节），按失配冲回——
-    /// 不会无限持有、不会 panic。
+    /// 超长参数段（坏包）：到不了任何真协议的形状（真应答 ≤ 10 字节）——但已经确认了
+    /// `ESC[?` 前缀，处置与到点丢弃对齐：整段丢弃，绝不冲回（冲回 = 毒化 crossterm）。
+    /// 之后的字节回到普通分流（尾巴按单字节透传，前缀不落进 crossterm）。
     #[test]
-    fn overlong_decrpm_params_are_waved_through_not_held() {
+    fn overlong_decrpm_params_are_dropped_not_flushed() {
+        let _logs = debug_logs();
         let mut raw = REPORT_OPEN.to_vec();
         raw.extend(std::iter::repeat_n(b'9', REPORT_PARAM_MAX + 1));
         let mut s = local();
         let out = feed(&mut s, &raw, 0);
         assert!(out.reports.is_empty());
-        assert_eq!(out.passthrough, raw, "参数超限 = 失配：前面的字节原样冲回");
-        assert_eq!(s.deadline(), None);
+        assert_eq!(out.passthrough, b"", "超限前缀一个字节都不许冲回（毒化面）");
+        assert_eq!(s.deadline(), None, "丢弃后不再持有");
+        // 尾巴（同一坏流的剩余字节）按普通输入透传——不含 `ESC`，不会毒化。
+        let out = feed(&mut s, b"$y", 1);
+        assert_eq!(out.passthrough, b"$y");
+        // 分流已恢复：新的候选解析不受影响。
+        let out = feed(&mut s, b"\x1b[?5522;0$y", 2);
+        assert_eq!(out.reports, vec![b"5522;0".to_vec()]);
+        assert_eq!(out.passthrough, b"");
     }
 
     /// 探针判定：只有 `Ps ∈ {1,2,3}` 是「真支持」；未应答 / `0/4` / 非法值都不启用。

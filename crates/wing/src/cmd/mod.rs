@@ -965,6 +965,8 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
             // 一次 crossterm 事件源创建）。探针判定在这里收束——向导自己的事件循环
             // （`TerminalEvents`）马上要 poll，而事件源注册之后 fd 0 就不能再换（阴性拆接驳
             // 只有这一次机会，见 `stdin_proxy::settle_paste_channel`）。
+            // 判定同步阻塞当前 worker（静默终端等到预算上限：本地 150ms / SSH 600ms）——
+            // 与 `ImageSupport::detect` 的既有阻塞形态同款：一次性、有界，且只发生在启动期。
             let mut terminal = tui::init_terminal()?;
             tui::stdin_proxy::settle_paste_channel();
             install_panic_hook();
