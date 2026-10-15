@@ -4,6 +4,8 @@
 
 Route handler 只做：参数验证 → 调 Runtime → 构造 HTTP 响应。
 异常映射：LookupError → 404, ValueError → 400, RuntimeError → 400/500。
+归档例外：SessionArchivedError **不是** LookupError（可行动的存在性结论），由
+app 级 handler 单独映射 404 + error="session_archived"，提示"先恢复再使用"。
 """
 
 from __future__ import annotations
@@ -16,6 +18,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from typing import TYPE_CHECKING, get_args
 
 from wing.gateway.protocol import (
+    ArchiveRequest,
+    ArchiveResponse,
+    ArchivedSessionsResponse,
     BranchesResponse,
     CompactRequest,
     CompactResponse,
@@ -660,3 +665,62 @@ async def rewind_session(
         raise HTTPException(status_code=400, detail=str(e))
 
     return RewindResponse(ok=True, draft=draft)
+
+
+# ============================================================
+# 归档（archive）
+# ============================================================
+
+
+@router.post(
+    "/api/session/archive",
+    response_model=ArchiveResponse,
+    summary="归档 / 恢复 session（设置归档状态）",
+)
+async def archive_session(
+    body: ArchiveRequest,
+    request: Request,
+) -> ArchiveResponse:
+    """把一个会话移入 / 移出归档区（幂等）。
+
+    归档区（``<sessions root>/.archive/``）不参与列表与解析：归档后的会话从
+    ``/api/session/list`` 消失，resume / send / tag 等一律 404 +
+    ``error="session_archived"``（提示先恢复）。移动是纯 rename——不改任何字节。
+
+    钉住条件与 release 同一套：忙碌 / 有待处理输入 / 被订阅 / 非归档后端一律
+    409 拒绝；空闲可收回的会话会先逐出再移动。幂等：归档已归档的会话 /
+    恢复未归档的会话返回 200 + ``changed=false``。
+    """
+    server = _get_server(request)
+    try:
+        if body.archived:
+            changed, detail = server.runtime.archive_session(body.session_id)
+        else:
+            changed, detail = server.runtime.unarchive_session(body.session_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return ArchiveResponse(
+        ok=True,
+        session_id=body.session_id,
+        archived=body.archived,
+        changed=changed,
+        detail=detail,
+    )
+
+
+@router.get(
+    "/api/session/archive",
+    response_model=ArchivedSessionsResponse,
+    summary="列出归档区 session（读索引，不扫会话目录）",
+)
+async def list_archived_sessions(request: Request) -> ArchivedSessionsResponse:
+    """归档区条目（标题 / tags / 模型 / 归档时间）。
+
+    读取归档索引（``.archive/index.json``）——归档是低频路径，列表不该为此
+    扫全量会话目录；索引缺失 / 损坏时按归档目录重建。模型展示名按当前配置
+    现算（与 ``/api/session/list`` 同一口径）。
+    """
+    server = _get_server(request)
+    return ArchivedSessionsResponse(sessions=server.runtime.list_archived_sessions())

@@ -17,7 +17,8 @@
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
 │   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）
 │   │                   ├── <sid>/media/   会话私有图片媒体对象（内容寻址，session 自包含）
-│   │                   └── .media/        遗留共享媒体池（只读：老会话引用回退读取 + 物化；不删不写）
+│   │                   ├── .media/        遗留共享媒体池（只读：老会话引用回退读取 + 物化；不删不写）
+│   │                   └── .archive/      归档区（index.json 索引 + 被归档会话目录；纯 rename，字节不变）
 │   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）
@@ -55,7 +56,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 | `gateway` | `host` / `port`（**restart 域**：改完需重启网关，不做假热更）/ `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`；保存即热生效）/ `cors`（`origins`：额外允许的跨源来源，**restart 域**；loopback 默认放通——仅当网关自身绑 loopback，见 [http-api.md](http-api.md)「CORS」） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |
 | `user_agent.preset` | HTTP User-Agent 预设（`opencode` / `qwen-code`） |
-| `sessions` | `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取））。**存储路径不是配置字段**：`WING_SESSIONS_PATH` env > `$WING_HOME/core/sessions` |
+| `sessions` | `eviction`（空闲会话逐出：`enabled` / `idle_ttl_seconds`（默认 1800）/ `sweep_interval_seconds`（默认 300，启动时读取））；`archive`（自动归档：`idle_days`（默认 90，`<= 0` 关闭）/ `sweep_interval_seconds`（默认 86400）/ `startup_delay_seconds`（默认 60）；`<= 0` 关闭也在此表）。**存储路径不是配置字段**：`WING_SESSIONS_PATH` env > `$WING_HOME/core/sessions` |
 
 > 改一个键什么时候生效（哪些要重启网关）都写在字段声明里（`apply`），面板行与
 > `wing config list` 会显示；完整全表见 [settings.md](settings.md) 的「生效域」一节。

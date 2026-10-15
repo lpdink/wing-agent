@@ -70,7 +70,12 @@ async fn interrupt_inner(session_id: &str) -> Result<InterruptOutput> {
     // 刻意不做 404→resume：中断的语义对象是"在飞的任务"，而在飞的任务只存在于
     // 已加载的会话里——把已逐出的会话重新水合只为中断一个不存在的过程，是假动作。
     http.interrupt_session(session_id).await.map_err(|e| {
-        if e.is_not_found() {
+        if e.is_session_archived() {
+            anyhow::anyhow!(
+                "session {session_id} is archived — restore it with \
+                 `wing archive --restore {session_id}` before interrupting"
+            )
+        } else if e.is_not_found() {
             anyhow::anyhow!(
                 "session {session_id} is not loaded in the gateway — nothing is running to \
                  interrupt (`wing ps --all` lists every known session)"

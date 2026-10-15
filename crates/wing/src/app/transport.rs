@@ -102,6 +102,15 @@ impl Transport {
         let effective_id = match self.http.resume_session(session_id).await {
             Ok(_) => session_id.to_string(),
             Err(e) if e.is_not_found() => {
+                // 归档会话不可 resume（冻结）：仍然落到新会话兜底，但日志把
+                // 「怎么回去」写清楚（`wing archive --restore`）。
+                if e.is_session_archived() {
+                    tracing::warn!(
+                        session = session_id,
+                        "session is archived; starting a fresh one \
+                         (restore it with `wing archive --restore`)"
+                    );
+                }
                 let req = CreateSessionRequest {
                     workspace: workspace.map(str::to_string),
                     ..Default::default()

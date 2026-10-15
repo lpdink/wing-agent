@@ -21,7 +21,7 @@ GatewayClient(WS) + ApiClient    · auth（opt-in）            ├─ ContextMa
 启动路径是**永不抛的两段式**（细节见 [settings.md](settings.md)）：`config/boot.py::boot_config()` 读
 `$WING_HOME/core/config.yaml` 并给出四种结局之一（文件缺失并写出由声明生成的模板 / YAML 语法错 /
 校验不过 / 成功）——任何意外都收敛成一条可展示的 problem（最外层兜底），网关**不再因配置非法而退出**。
-`boot.ok` 为真 ⇒ 正常模式（建 `WingRuntime`、注册逐出 job、加载 hooks / prompt commands）；否则
+`boot.ok` 为真 ⇒ 正常模式（建 `WingRuntime`、注册逐出 / 归档 job、加载 hooks / prompt commands）；否则
 **降级启动 = setup mode**。
 
 - **setup mode 只服务修复所需的最小面**：`/api/health` 与四个设置端点（+ `/api/shutdown` /
@@ -183,6 +183,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | compact | `POST /api/session/compact` | 委托 `ContextManager.do_manual_compact()` |
 | interrupt | `POST /api/session/interrupt` | 委托 `Session.agent.interrupt()`；打断对账见下 |
 | release | `POST /api/session/release` | 逐出内存态（显式 eviction）；钉住条件不满足时 409 |
+| archive | `POST /api/session/archive` | 归档 / 恢复（设置归档状态）；纯移动（字节不变）；钉住条件不满足时 409 |
 
 ### 会话逐出（eviction）
 
@@ -197,7 +198,21 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | 水合 | 被逐出 ≠ 不存在：`resume` / `subscribe` / `send`（HTTP 与 WS 上行）按需水合；空会话（无消息、无磁盘痕迹）逐出后不可恢复 |
 | 可见痕迹 | `/api/session/list` 的 `status: inactive` 是主信号；此外 `session/get` / `info` / `branches` 对已逐出会话回 404（`wing tail` / `head` / `info` 内部 404→resume），`release` 返回 `not loaded` |
 
-`BackgroundScheduler`（`wing/background.py`）是通用周期任务宿主（单 task 顺序执行、job 异常隔离、start/stop 显式），逐出只是第一个 job——将来的后台机制（dreaming 等）直接 `add_job`。`SessionReaper`（`wing/session/reaper.py`）只做"触摸订阅 + 一次扫描"，不依赖调度器即可单测。
+`BackgroundScheduler`（`wing/background.py`）是通用周期任务宿主（单 task 顺序执行、job 异常隔离、start/stop 显式，`add_job` 支持首轮延迟）——现有两个 job：逐出（`SessionReaper`）与自动归档（`SessionArchiver`）；将来的后台机制（dreaming 等）直接复用。两个 *er 都只做"读配置 + 一次扫描"，不依赖调度器即可单测。
+
+### 会话归档（archive）
+
+**归档区是冷存储**：`<sessions root>/.archive/`（点前缀 = 存储保留命名空间，与 `.media` 同类，不可寻址成会话）。归档 = 目录 **rename**（字节零变化）；恢复 = rename 回来。归档后的会话从 `/api/session/list` 消失（= ps 性能的解法：根目录只留活跃批），且**冻结**——对它的任何按 id 解析（resume / send / tag / create-or-adopt）都以 `SessionArchivedError` 结束，映射 404 + `error="session_archived"`（可行动提示；刻意不是 `LookupError` 的子类，路由的 `except LookupError` 不会把它吞成普通 404）。
+
+| 维度 | 口径 |
+|------|------|
+| 判定 | 年龄 = `metadata.last_interaction` → 回退 session id 前缀；**都取不到则跳过**（不发明时间）。阈值 `sessions.archive.idle_days`（默认 90；`<= 0` = 关闭） |
+| 豁免 | 带 `pin` 标签的会话不自动归档（`session.tags.PIN_TAG`——后端感知的唯一保留标签；显式归档不受限） |
+| 触发 | `BackgroundScheduler` 的 `session-archive` job：启动延迟 `startup_delay_seconds` 先扫一轮，此后每 `sweep_interval_seconds`（默认一天）；阈值每轮现读（热重载生效） |
+| 两阶段 | ① 线程内枚举候选（读 metadata 判年龄，不阻塞事件循环）；② 事件循环上终检（重读磁盘事实——期间被交互 / 被 pin / 已消失的当场失效）并复用显式归档路径（钉住条件命中跳过本轮） |
+| 顺序 | 先逐出（同步 pop）再 rename（同一事件循环轮次内，无 await 插入）——**绝不容许活 Session 把目录写回 live 区**（两个 `history.jsonl` = 数据分裂）；`aclose` 的 usage flush 已是 no-op（evict 时同步落过） |
+| 索引 | 归档时登记 `.archive/index.json`（条目 = 归档时刻事实快照 + `archived_at`）；列表只读索引（1 个文件 + 每条目 1 次 stat），目录才是事实源（索引缺失 / 损坏 → 重建；目录消失的条目剔除并自愈）。手工拷入归档区的目录要删索引重建后才可见 |
+| 冲突 | live 与归档区**双存在**（手工拷贝等异常态）→ 两个方向都 `RuntimeError`（409），不猜谁对 |
 
 **不做的**（刻意缺席）：容量上限 / LRU（只有 TTL）；逐出以外的入口不自动水合（`session/get`、`info`、`branches` 对已逐出会话仍 404——`wing tail` 的 404→resume 是既有惯例，需要时按同一模式补）；动态状态（tools 热切换的冻结声明集、thinking / yolo）不落盘，逐出后按模板默认重建（与重启同语义）。
 

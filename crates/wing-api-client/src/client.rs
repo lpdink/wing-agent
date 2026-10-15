@@ -343,6 +343,42 @@ impl GatewayClient {
         self.post_json("/api/session/release", &body).await
     }
 
+    // ============================================================
+    // Session 归档（archive）
+    // ============================================================
+
+    /// 设置会话的归档状态（幂等）：true = 移入归档区、false = 移回 live 区。
+    ///
+    /// 归档区不参与列表与解析（冻结语义）：归档后的会话从 `/api/session/list`
+    /// 消失，按其 id 的正常调用由网关以 404 + `error="session_archived"` 拒绝
+    /// （用 [`ApiClientError::is_session_archived`] 区分于"真不存在"）。
+    /// 钉住条件（忙碌 / 排队输入 / 被订阅 / 非归档后端）由网关以 409 拒绝。
+    pub async fn archive_session(
+        &self,
+        session_id: &str,
+        archived: bool,
+    ) -> Result<ArchiveResponse, ApiClientError> {
+        let body = ArchiveRequest {
+            session_id: session_id.to_owned(),
+            archived,
+        };
+        self.post_json("/api/session/archive", &body).await
+    }
+
+    /// 列出归档区条目（读网关侧索引，不扫会话目录）。
+    pub async fn list_archived(&self) -> Result<ArchivedSessionsResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/archive"))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
     /// 回退 session 到指定消息节点。
     pub async fn rewind_session(
         &self,

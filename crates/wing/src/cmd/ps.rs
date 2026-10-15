@@ -178,7 +178,11 @@ async fn fetch_session_info(session_id: &str) -> Result<SessionInfoResponse> {
     match http.get_session_info(session_id).await {
         Ok(info) => Ok(info),
         Err(e) if e.is_not_found() => {
-            http.resume_session(session_id).await?;
+            // resume 失败（含"已归档"）走统一的会话错误文案：归档会话在这里
+            // 得到"恢复它"的指引，而不是裸的 gateway detail。
+            http.resume_session(session_id)
+                .await
+                .map_err(|e| common::session_error(session_id, &e))?;
             Ok(http.get_session_info(session_id).await?)
         }
         Err(e) => Err(e.into()),

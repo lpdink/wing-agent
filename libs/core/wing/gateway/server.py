@@ -157,9 +157,10 @@ class GatewayServer:
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
         self._remote_tools = RemoteToolManager()
-        # 后台周期任务宿主（首个 job：空闲会话逐出）。interval 在**进入正常模式**时
-        # 读取一次——config 热重载不改变已注册 job 的间隔；TTL 每个 sweep 都从当前
-        # config 读，热重载即时生效。setup mode 下没有 reaper 可 attach，job 也不注册。
+        # 后台周期任务宿主（job：空闲会话逐出 + 过期会话自动归档）。interval 在
+        # **进入正常模式**时读取一次——config 热重载不改变已注册 job 的间隔；
+        # 阈值（TTL / idle_days）每个 sweep 都从当前 config 读，热重载即时生效。
+        # setup mode 下没有 reaper 可 attach，job 也不注册。
         self._background = BackgroundScheduler()
         self._background_requested = False
         self._started_at = datetime.now(timezone.utc)
@@ -270,9 +271,10 @@ class GatewayServer:
             return ReloadResult(ok=False, items=items)
         items.append(ReloadResultItem(name="runtime", ok=True))
 
-        # ⑤ 逐出 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
+        # ⑤ 逐出 job + 归档 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
         try:
             self._install_eviction_job(config, runtime)
+            self._install_archive_job(config, runtime)
             if self._background_requested:
                 runtime.reaper.attach()
                 self._background.start()
@@ -339,6 +341,21 @@ class GatewayServer:
             "session-eviction",
             config.sessions.eviction.sweep_interval_seconds,
             runtime.reap_idle_sessions,
+        )
+
+    def _install_archive_job(self, config: Config, runtime: WingRuntime) -> None:
+        """注册自动归档 job（幂等：同上，remove + add 即 replace）。
+
+        首轮扫描延迟 ``sessions.archive.startup_delay_seconds``（"启动过一会先
+        扫一轮"），之后按 ``sweep_interval_seconds`` 周期运行；阈值每个 sweep
+        现读配置（热重载即时生效）。
+        """
+        self._background.remove_job("session-archive")
+        self._background.add_job(
+            "session-archive",
+            config.sessions.archive.sweep_interval_seconds,
+            runtime.archive_stale_sessions,
+            initial_delay_seconds=config.sessions.archive.startup_delay_seconds,
         )
 
     @property

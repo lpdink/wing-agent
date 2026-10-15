@@ -20,7 +20,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Iterator
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from wing.media import media_id as compute_media_id
 
@@ -250,6 +250,38 @@ def first_user_title(records: Iterator[dict[str, Any]]) -> str | None:
     return IMAGE_ONLY_TITLE if image_only else None
 
 
+class ArchivedSession(BaseModel):
+    """归档区条目：索引持久化形态 + 列表投影素材。
+
+    **归档时刻的事实快照**（写入索引时定稿）：标题（含首条消息回退）、tags、
+    模型三元组、最后交互时间、归档时间。归档区内的会话是冻结的（不可读写），
+    因此这些字段不会过时——列表（``GET /api/session/archive``）读索引即可，
+    不扫任何会话目录（归档路径必须保持低频、廉价）。
+
+    ``model_display_name`` 是**投影期补全**的展示素材（不在索引里持久化）：
+    展示名随配置演化（改名 / 新增声明），与 ``/api/session/list`` 同一口径，
+    在读取时按 ``model_id`` 经配置现算。
+
+    ``archived_at`` 可能为 None：索引重建路径（索引缺失 / 损坏，从目录反推）
+    不知道当时的归档时刻，不回填、不发明数字（用目录 mtime 冒充是错的——
+    目录 rename 不更新目录自身的 mtime）。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str | None = None
+    workspace: str | None = None
+    template_name: str | None = None
+    last_interaction: str | None = None
+    archived_at: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    model_id: str | None = None
+    model_name: str | None = None
+    provider_name: str | None = None
+    model_display_name: str | None = None
+
+
 class MessageLog(ABC):
     """消息日志的耐久语义。传输单位为 raw dict 记录（schema 归 TrackedList 管）。
 
@@ -387,6 +419,73 @@ class SessionStore(ABC):
 
         实现契约：不合规的 id 抛 ``ValueError``；返回值是**能通过闸门的键**。
         """
+
+    # ── 归档区（archive）────────────────────────
+    #
+    # 归档 = 把会话从 live 区移入后端的「归档区」（file 后端 = <root>/.archive/，
+    # 点前缀是存储保留命名空间，永远不可被寻址成会话）。语义是**冷存储**：
+    # 归档后的会话不参与列表 / 解析 / 水合，恢复必须显式 unarchive。
+    # 归档只移动目录、不改任何字节；`.archive` 名与 <root> 自身同在，因此
+    # rename 恒在同一文件系统上（原子）。
+    #
+    # 能力位 `archivable` 是调用方（SessionManager）的唯一判据：不具备该能力的
+    # 后端（memory）在显式归档时 409 拒绝、在自动 sweep 时被跳过。
+
+    archivable: bool = False
+    """归档能力：True = 支持把会话移入归档区（archive/unarchive/list_archived）。
+
+    MemorySessionStore 不置位——进程内数据没有冷热之分（重启即消失），
+    "归档"只是一种更隐蔽的销毁。
+    """
+
+    def resolve_archived_id(self, session_id: str) -> str | None:
+        """把请求的 session id 解析为**归档区**里的真实键；不在归档区返回 None。
+
+        与 :meth:`resolve_stored_id` 同一精神（别名归一、逐字比对真实目录名），
+        作用域换成归档区：归档区内的 id 同样不能被两个拼写各写一份。没有归档区
+        的后端恒返回 None。不合规 id 抛 ValueError（闸门先于一切）。
+        """
+        return None
+
+    def is_archived(self, session_id: str) -> bool:
+        """该 id 是否在归档区（纯查询，不涉 live 区）。"""
+        return self.resolve_archived_id(session_id) is not None
+
+    def archive(self, session_id: str) -> None:
+        """把会话移入归档区并登记索引（**同一次调用内完成**，单线程下原子）。
+
+        调用契约：
+        - ``session_id`` 必须是 live 区的**真实键**（调用方先经
+          :meth:`resolve_stored_id` 归一并确认存在），且调用时归档区没有同名会话；
+        - live 目录不存在 → ``FileNotFoundError``（调用方逻辑错误的防御）；
+        - live 与归档区**同时存在**（手工拷贝等异常态）→ ``RuntimeError``
+          （不猜谁对，交由人裁决）。
+
+        实现契约：目录移动是纯 rename（字节不变）；索引写入失败不阻断归档
+        （目录是事实源，索引缺失时列表按目录重建）。
+        """
+        raise NotImplementedError(f"{self.name} does not support archiving")
+
+    def unarchive(self, session_id: str) -> None:
+        """把会话移回 live 区并删除索引条目（幂等：条目缺失即跳过）。
+
+        调用契约：``session_id`` 必须是归档区的**真实键**（调用方先经
+        :meth:`resolve_archived_id` 归一）且 live 区没有同名会话。
+
+        Raises:
+            FileNotFoundError: 归档目录不存在（调用方逻辑错误）。
+            RuntimeError: live 区已存在同名会话（不覆盖，交由人裁决）。
+        """
+        raise NotImplementedError(f"{self.name} does not support archiving")
+
+    def list_archived(self) -> list[ArchivedSession]:
+        """列出归档条目（**读索引**；索引缺失 / 损坏时按归档目录重建）。
+
+        保证：条目对应的归档目录必须存在（已手工删掉的目录不投影）；索引里没有
+        但目录存在的条目（手工拷贝进归档区）**不**自动收编，索引重建（删除
+        index.json）后可见。
+        """
+        raise NotImplementedError(f"{self.name} does not support archiving")
 
     # ── 媒体字节（内容寻址，**session 私有**）──────
     #

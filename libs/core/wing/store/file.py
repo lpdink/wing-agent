@@ -11,6 +11,10 @@ history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
     └── subagents/           遗留：旧子 agent 历史（写入方已删除；不再写入，现有数据不读不删）
 
+    <root>/.archive/         归档区（点前缀 = 存储保留命名空间，不可寻址成会话）
+    ├── index.json           归档索引（条目 = 归档时刻的事实快照；列表的唯一读取口）
+    └── <session_id>/        被归档的会话目录（结构与 live 区一致，字节不变）
+
     <root>/.media/<id[:2]>/<id>   遗留共享媒体池（**只读**：老会话的引用仍解析
                                   到这里；读 miss 时物化进会话目录。不删、不写）
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -26,6 +31,7 @@ from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
 from wing.common.utils import is_valid_session_id, validate_session_id
 from wing.store.base import (
+    ArchivedSession,
     MessageLog,
     SessionMetadata,
     SessionStore,
@@ -145,10 +151,13 @@ class FileSessionStore(SessionStore):
     """文件后端：session 目录布局的唯一管理者。"""
 
     name = "file"
+    archivable = True
 
     _METADATA = "metadata.json"
     _MEDIA_DIR = "media"
     _LEGACY_MEDIA_DIR = ".media"
+    _ARCHIVE_DIR = ".archive"
+    _ARCHIVE_INDEX = "index.json"
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
@@ -173,7 +182,13 @@ class FileSessionStore(SessionStore):
     # ── metadata ──────────────────────────────
 
     def load_metadata(self, session_id: str) -> SessionMetadata | None:
-        path = self._session_dir(session_id) / self._METADATA
+        return self._load_metadata_at(self._session_dir(session_id), session_id)
+
+    def _load_metadata_at(
+        self, session_dir: Path, session_id: str
+    ) -> SessionMetadata | None:
+        """按**目录**读取 metadata（live / 归档区共用；session_id 只用于日志）。"""
+        path = session_dir / self._METADATA
         if not path.exists():
             return None
         try:
@@ -347,7 +362,7 @@ class FileSessionStore(SessionStore):
         否则同一个目录会被两个 id 写。
         """
         safe_id = validate_session_id(session_id)
-        real = self._on_disk_name(self._root / safe_id)
+        real = self._on_disk_name(self._root / safe_id, self._root)
         # 别名名同样要过闸门（否则会给内存索引塞进一个闸门拒绝的键）
         return real if real is not None and is_valid_session_id(real) else None
 
@@ -373,24 +388,26 @@ class FileSessionStore(SessionStore):
         try:
             target.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
-            real = self._on_disk_name(target)
+            real = self._on_disk_name(target, self._root)
             return real if real is not None and is_valid_session_id(real) else safe_id
         except OSError as e:
             log.warning(f"session dir '{target}' not created here: {e}")
             return safe_id
         return safe_id
 
-    def _on_disk_name(self, target: Path) -> str | None:
-        """（内部）``target`` 解析到的**真实目录名**，逐字优先；不是目录返回 None。
+    def _on_disk_name(self, target: Path, parent: Path) -> str | None:
+        """（内部）``target`` 在 ``parent`` 下解析到的**真实目录名**，逐字优先；
+        不是目录返回 None。
 
         逐字命中是常见情形（大小写敏感的 FS 上唯一可能的情形），也是唯一不必
         探测别名的情形；逐字目录项不在时用 ``samefile`` 找别名——别名即"请求路径
         能被解析、但磁盘上的名字是另一个"（大小写 / Unicode 归一化不敏感）。
+        live 区与归档区共用本函数（各自传自己的父目录）。
         """
         if not target.is_dir():
             return None
         alias: str | None = None
-        for entry in self._root.iterdir():
+        for entry in parent.iterdir():
             if entry.name == target.name:
                 return target.name
             if alias is None and _is_same_directory(entry, target):
@@ -451,3 +468,198 @@ class FileSessionStore(SessionStore):
             return first_user_title(self.open_log(session_id).iter_all())
         except OSError:
             return None
+
+    def _first_user_message_at(self, session_dir: Path) -> str | None:
+        """按**目录**取标题回退素材（归档区路径用；live 区走 ``open_log``）。"""
+        try:
+            return first_user_title(FileMessageLog(session_dir).iter_all())
+        except OSError:
+            return None
+
+    # ── 归档区 ────────────────────────────────
+
+    def _archive_root(self) -> Path:
+        return self._root / self._ARCHIVE_DIR
+
+    def _archive_dir(self, session_id: str) -> Path:
+        """归档区里的会话目录。拼接前先过 session id 闸门（同 live 区）。"""
+        return self._archive_root() / validate_session_id(session_id)
+
+    def _archive_index_path(self) -> Path:
+        return self._archive_root() / self._ARCHIVE_INDEX
+
+    def resolve_archived_id(self, session_id: str) -> str | None:
+        """该 id 在归档区里对应的目录名；不在归档区返回 None。
+
+        判据与 :meth:`resolve_stored_id` 逐字对齐（目录存在即算、别名逐字比对、
+        真实名过闸门），作用域换成归档区。
+        """
+        safe_id = validate_session_id(session_id)
+        root = self._archive_root()
+        real = self._on_disk_name(root / safe_id, root)
+        return real if real is not None and is_valid_session_id(real) else None
+
+    def archive(self, session_id: str) -> None:
+        """移入归档区 + 登记索引（见基类契约；rename 与索引更新同一次调用）。"""
+        safe_id = validate_session_id(session_id)
+        live = self._root / safe_id
+        if not live.is_dir():
+            raise FileNotFoundError(f"session dir not found: {live}")
+        target = self._archive_root() / safe_id
+        if target.exists():
+            raise RuntimeError(
+                f"session '{safe_id}' exists in both live and archive dirs"
+            )
+        entry = self._archive_entry_at(
+            safe_id, live, archived_at=datetime.now().isoformat()
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(live, target)
+        self._upsert_archive_index(entry)
+
+    def unarchive(self, session_id: str) -> None:
+        """移回 live 区 + 删除索引条目（索引失败不回滚移动——目录是事实源）。"""
+        safe_id = validate_session_id(session_id)
+        source = self._archive_root() / safe_id
+        if not source.is_dir():
+            raise FileNotFoundError(f"archived session dir not found: {source}")
+        target = self._root / safe_id
+        if target.exists():
+            raise RuntimeError(
+                f"session '{safe_id}' exists in both live and archive dirs"
+            )
+        os.rename(source, target)
+        self._remove_from_archive_index(safe_id)
+
+    def list_archived(self) -> list[ArchivedSession]:
+        """列出归档条目：读索引；索引缺失 / 损坏时按归档目录重建。
+
+        索引里目录已不存在的条目（手工删除）不投影，且剔除后顺带自愈落盘。
+        索引里没有、目录却存在的条目（手工拷入归档区）不在本路径收编——删除
+        index.json 触发一次重建即可。
+        """
+        entries = self._read_archive_index()
+        if entries is None:
+            entries = self._scan_archive_entries()
+            # 空结果不落盘：读取路径不该创造存储痕迹（没有归档区、没有条目时，
+            # 一次列表调用不该无中生有一个 .archive/index.json）。
+            if entries:
+                self._write_archive_index(entries)
+            return entries
+
+        alive: list[ArchivedSession] = []
+        for entry in entries:
+            try:
+                if self._archive_dir(entry.id).is_dir():
+                    alive.append(entry)
+            except ValueError:
+                # 索引被手改出脏 id：不投影（也无法寻址）
+                log.warning(f"Archive index holds an invalid session id: {entry.id!r}")
+        if len(alive) != len(entries):
+            log.info(
+                f"Archive index: dropped {len(entries) - len(alive)} stale entry(ies)"
+            )
+            self._write_archive_index(alive)
+        return alive
+
+    # ── 归档索引（内部）───────────────────────
+
+    def _read_archive_index(self) -> list[ArchivedSession] | None:
+        """读索引；文件不存在 → None（= 需要重建）；整份不可解析 → None + WARN。
+
+        单条条目损坏逐条丢弃（不让一条坏记录打挂整个归档列表）。
+        """
+        path = self._archive_index_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning(f"Corrupted archive index at {path}: {e}; rebuilding")
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+            log.warning(f"Malformed archive index at {path}; rebuilding")
+            return None
+        entries: list[ArchivedSession] = []
+        for raw in data["sessions"]:
+            try:
+                entries.append(ArchivedSession.model_validate(raw))
+            except Exception:
+                continue
+        return entries
+
+    def _write_archive_index(self, entries: list[ArchivedSession]) -> None:
+        """落盘索引（原子写）；失败只 WARN——目录是事实源，索引可由重建恢复。"""
+        payload = {"sessions": [e.model_dump(exclude_none=True) for e in entries]}
+        try:
+            self._archive_index_path().parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self._archive_index_path(), payload)
+        except OSError as e:
+            log.warning(f"Failed to write archive index: {e}")
+
+    def _upsert_archive_index(self, entry: ArchivedSession) -> None:
+        """登记一条归档条目（同 id 替换）；索引不可读时先重建再写入。"""
+        current = self._read_archive_index()
+        if current is None:
+            current = self._scan_archive_entries()
+        self._write_archive_index([e for e in current if e.id != entry.id] + [entry])
+
+    def _remove_from_archive_index(self, session_id: str) -> None:
+        """删除一条归档条目（条目不存在为 no-op）。"""
+        current = self._read_archive_index()
+        if current is None:
+            return
+        pruned = [e for e in current if e.id != session_id]
+        if len(pruned) != len(current):
+            self._write_archive_index(pruned)
+
+    def _scan_archive_entries(self) -> list[ArchivedSession]:
+        """从归档目录反推条目（重建素材；只读，不写索引）。
+
+        ``archived_at`` 留空：重建不知道当时的归档时刻，不回填、不发明数字。
+        """
+        root = self._archive_root()
+        if not root.is_dir():
+            return []
+        entries: list[ArchivedSession] = []
+        for session_dir in root.iterdir():
+            if not session_dir.is_dir() or not is_valid_session_id(session_dir.name):
+                continue
+            metadata = (
+                self._load_metadata_at(session_dir, session_dir.name)
+                or SessionMetadata()
+            )
+            history = session_dir / FileMessageLog._HISTORY
+            if not history.exists() and not metadata.tags:
+                continue
+            entries.append(
+                self._archive_entry_at(
+                    session_dir.name, session_dir, archived_at=None, metadata=metadata
+                )
+            )
+        return entries
+
+    def _archive_entry_at(
+        self,
+        session_id: str,
+        session_dir: Path,
+        *,
+        archived_at: str | None,
+        metadata: SessionMetadata | None = None,
+    ) -> ArchivedSession:
+        """归档条目 = 归档时刻的事实快照（metadata + 标题回退）。"""
+        if metadata is None:
+            metadata = self._load_metadata_at(session_dir, session_id)
+        metadata = metadata or SessionMetadata()
+        return ArchivedSession(
+            id=session_id,
+            name=metadata.session_name or self._first_user_message_at(session_dir),
+            workspace=metadata.workspace,
+            template_name=metadata.template_name,
+            last_interaction=metadata.last_interaction,
+            archived_at=archived_at,
+            tags=list(metadata.tags or []),
+            model_id=metadata.model_id,
+            model_name=metadata.model_name,
+            provider_name=metadata.provider_name,
+        )

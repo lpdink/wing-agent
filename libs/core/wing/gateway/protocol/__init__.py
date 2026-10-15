@@ -19,6 +19,9 @@
 from __future__ import annotations
 from .errors import HTTP_ERROR_TYPES, ErrorResponse, error_response
 from .session import (
+    ArchiveRequest,
+    ArchiveResponse,
+    ArchivedSessionsResponse,
     BranchesResponse,
     CompactRequest,
     CompactResponse,
@@ -81,6 +84,9 @@ from .ws import ClientRequest, ConnectResponse, ToolCallRequest, ToolCallResult
 
 __all__ = [
     "AgentsResponse",
+    "ArchiveRequest",
+    "ArchiveResponse",
+    "ArchivedSessionsResponse",
     "BranchesResponse",
     "ClientRequest",
     "CommandsResponse",
