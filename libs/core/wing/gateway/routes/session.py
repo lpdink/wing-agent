@@ -295,8 +295,12 @@ async def upload_session_media(
     server = _get_server(request)
 
     # 会话存在性先于收包：404 不该以"读完整个 body"为代价（与 send 同序：存在性先于
-    # 内容校验，body 合法或非法都回 404）。
-    if not server.runtime.session_exists(session_id):
+    # 内容校验，body 合法或非法都回 404）。归档命中的 SessionArchivedError 刻意
+    # 逃出这个捕获（不是 LookupError）——由 app handler 回 404 + session_archived，
+    # 冻结面在"按 id 解析"的端点上保持一致。
+    try:
+        server.runtime.require_live_session(session_id)
+    except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
 
     # Content-Length 预检（收包之前）：超限的声明值不必先读进内存再在闸门里拒绝。

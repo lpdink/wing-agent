@@ -313,6 +313,66 @@ class TestRestoredSessionSurvivesNextSweep:
         assert file_store.is_archived("old") is False
 
 
+class TestEvictedSessionWriteSeal:
+    """摘除即封写：evict 之后任何落盘重试不得复活 live 目录。
+
+    现实触发链（CI review B1）：逐出时的同步 usage 落盘失败（ENOSPC / I/O
+    错误）→ 脏标记保留（usage.flush 失败绝不抛出）→ 归档 rename → teardown
+    的 aclose 收尾重试 → 写路径把 ``<root>/<sid>/`` 连父目录一起重建 →
+    live 与归档区双存在（两侧 409，用户被锁死）。封盘让收尾重试成为 no-op。
+    """
+
+    async def test_failed_flush_retry_cannot_resurrect_the_live_dir(
+        self, root: Path, sm: SessionManager, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        session = sm.create_session()
+        sid = session.session_id
+        session.context_manager.add_message(Message(role="user", content="hello"))
+
+        # 注入"逐出时落盘失败"：usage.flush 吞掉异常但保留脏标记，等待下一个
+        # 落盘点——那个落盘点（teardown 的 aclose）落在 rename 之后。
+        real_save = file_store.save_metadata
+        attempts: list[str] = []
+
+        def flaky_save(session_id: str, metadata: SessionMetadata) -> None:
+            attempts.append(session_id)
+            raise OSError("disk full (injected)")
+
+        monkeypatch.setattr(file_store, "save_metadata", flaky_save)
+        session._usage.record_turn()  # 未落盘的增量（turn 收尾走同一条路）
+
+        assert sm.archive_session(sid) == (True, "archived")
+
+        # 磁盘"恢复"：若收尾重试还敢写，这里就会把 live 目录写回来。
+        monkeypatch.setattr(file_store, "save_metadata", real_save)
+        await sm.wait_teardowns()
+
+        assert attempts == [sid], "只该发生逐出时那一次（失败的）落盘尝试"
+        assert not (root / sid).exists(), "live 目录被收尾落盘写回来了（数据分裂红线）"
+        assert file_store.is_archived(sid) is True
+        assert (root / ".archive" / sid / "history.jsonl").exists()
+
+    async def test_detached_session_persistence_is_sealed(
+        self, root: Path, sm: SessionManager, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        """封盘本身：detach 之后 flush_usage / aclose 收尾都不再触达 store。"""
+        session = sm.create_session()
+        session.context_manager.add_message(Message(role="user", content="hello"))
+        session.detach()
+        session._usage.record_turn()  # 制造脏标记
+
+        writes: list[str] = []
+        monkeypatch.setattr(
+            file_store,
+            "save_metadata",
+            lambda session_id, metadata: writes.append(session_id),
+        )
+        session.flush_usage()
+        await session.aclose()
+
+        assert writes == []
+
+
 class TestArchivedList:
     async def test_entry_carries_tags_and_model(
         self, root: Path, sm: SessionManager
@@ -407,6 +467,15 @@ class TestArchiverAndRuntimeEntryPoints:
             runtime.archive_session("no-such-session")
         with pytest.raises(LookupError):
             runtime.unarchive_session("no-such-session")
+
+        # require_live_session：live 命中放行；归档命中抛结构化错误（media 预检用）。
+        runtime.require_live_session(session_id)
+        assert runtime.archive_session(session_id) == (True, "archived")
+        with pytest.raises(SessionArchivedError):
+            runtime.require_live_session(session_id)
+        with pytest.raises(LookupError):
+            runtime.require_live_session("no-such-session")
+        assert runtime.unarchive_session(session_id) == (True, "restored")
 
         # job 入口：走 archiver → 当前配置（默认 90 天）→ 新会话不够老。
         assert await runtime.archive_stale_sessions() == []

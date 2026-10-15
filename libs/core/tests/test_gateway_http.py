@@ -682,6 +682,20 @@ class TestSessionArchive:
         assert sessions[0]["name"] == "old chat"
         assert sessions[0]["tags"] == ["favorite"]
 
+    def test_media_precheck_keeps_the_archived_marker(
+        self, client: TestClient, mock_runtime
+    ):
+        """media 的存在性预检也区分归档：归档命中带结构化码（冻结面一致）。"""
+        mock_runtime.require_live_session.side_effect = SessionArchivedError("old-1")
+        resp = client.post("/api/session/media?session_id=old-1", content=b"xyz")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "session_archived"
+
+        mock_runtime.require_live_session.side_effect = LookupError("Session not found")
+        resp = client.post("/api/session/media?session_id=ghost", content=b"xyz")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"
+
     def test_archived_session_yields_actionable_404(
         self, client: TestClient, mock_runtime
     ):

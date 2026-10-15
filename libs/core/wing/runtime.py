@@ -379,6 +379,16 @@ class WingRuntime:
         """
         return self.sm.session_exists(session_id)
 
+    def require_live_session(self, session_id: str) -> None:
+        """会话存在性预检（纯解析）：不存在即抛——归档命中是
+        ``SessionArchivedError``（app handler 映射 404 + ``error="session_archived"``，
+        可行动提示），真不存在是 ``LookupError``（路由折成普通 404）。
+        ``session_exists`` 的抛错版：需要区分两种 404 的预检用这个。
+        """
+        if self.sm.session_exists(session_id):
+            return
+        raise self.sm.missing_session_error(session_id)
+
     def upload_media(
         self, session_id: str, data: bytes, *, name: str | None = None
     ) -> MediaRef:

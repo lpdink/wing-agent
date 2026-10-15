@@ -410,7 +410,8 @@ class ArchiveResponse(BaseModel):
 
     ``archived`` 是**操作后的状态**（请求要什么，这里就是什么）；``changed``
     说明本次调用是否真的移动了会话（false = 幂等 no-op：归档已归档的 / 恢复
-    未归档的）。``detail`` ∈ {archived, already archived, restored, not archived}。
+    未归档的 / 归档一个从未落盘的空会话）。``detail`` ∈ {archived,
+    already archived, restored, not archived, nothing to archive}。
     """
 
     ok: bool = Field(default=True, description="操作是否成功")

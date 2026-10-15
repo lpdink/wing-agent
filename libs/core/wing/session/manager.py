@@ -908,7 +908,11 @@ class SessionManager:
         # 先建任务：无运行中的事件循环时在此抛错，状态未被改动（会话保持
         # 在场），不会留下"已摘除却没拆解"的孤儿对象。
         task = asyncio.create_task(self._teardown(session, reason))
+        # 摘除即封写：最后一次同步落盘 → 封盘 → 摘除（顺序即语义）。此后
+        # 迟到的落盘（teardown 收尾 / 节流重试）都是 no-op——否则会把 live
+        # 目录写回来（归档场景下的数据分裂红线，见 Session.detach）。
         session.flush_usage()
+        session.detach()
         self._sessions.pop(session_id, None)
         self._last_active.pop(session_id, None)
         self._teardowns.add(task)

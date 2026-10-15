@@ -582,11 +582,29 @@ class FileSessionStore(SessionStore):
                 continue
             if session_dir.name in known:
                 continue
+            metadata = self._load_metadata_at(session_dir, session_dir.name)
+            if not self._looks_like_session(session_dir, metadata):
+                continue
             log.info(f"Archive index: adopting untracked dir '{session_dir.name}'")
             adopted.append(
-                self._archive_entry_at(session_dir.name, session_dir, archived_at=None)
+                self._archive_entry_at(
+                    session_dir.name, session_dir, archived_at=None, metadata=metadata
+                )
             )
         return adopted
+
+    def _looks_like_session(
+        self, session_dir: Path, metadata: SessionMetadata | None
+    ) -> bool:
+        """归档区「是会话」的判据（与 live 区 ``list_summaries`` 同一口径）：
+        有 ``history.jsonl`` 或带标签的 metadata。
+
+        收编（索引在）与重建（索引缺失）共用本判据——否则同一个盘上"两次列表
+        结果不一样"（索引在时收编、索引重建后又消失）。
+        """
+        if metadata is not None and metadata.tags:
+            return True
+        return (session_dir / FileMessageLog._HISTORY).exists()
 
     # ── 归档索引（内部）───────────────────────
 
@@ -651,12 +669,8 @@ class FileSessionStore(SessionStore):
         for session_dir in root.iterdir():
             if not session_dir.is_dir() or not is_valid_session_id(session_dir.name):
                 continue
-            metadata = (
-                self._load_metadata_at(session_dir, session_dir.name)
-                or SessionMetadata()
-            )
-            history = session_dir / FileMessageLog._HISTORY
-            if not history.exists() and not metadata.tags:
+            metadata = self._load_metadata_at(session_dir, session_dir.name)
+            if not self._looks_like_session(session_dir, metadata):
                 continue
             entries.append(
                 self._archive_entry_at(

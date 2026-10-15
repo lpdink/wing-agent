@@ -210,7 +210,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | 豁免 | 带 `pin` 标签的会话不自动归档（`session.tags.PIN_TAG`——后端感知的唯一保留标签；显式归档不受限） |
 | 触发 | `BackgroundScheduler` 的 `session-archive` job：启动延迟 `startup_delay_seconds` 先扫一轮，此后每 `sweep_interval_seconds`（默认一天）；阈值每轮现读（热重载生效） |
 | 两阶段 | ① 线程内枚举候选（读 metadata 判年龄，不阻塞事件循环）；② 事件循环上终检（重读磁盘事实——期间被交互 / 被 pin / 已消失的当场失效）并复用显式归档路径（钉住条件命中跳过本轮） |
-| 顺序 | 先逐出（同步 pop）再 rename（同一事件循环轮次内，无 await 插入）——**绝不容许活 Session 把目录写回 live 区**（两个 `history.jsonl` = 数据分裂）；`aclose` 的 usage flush 已是 no-op（evict 时同步落过） |
+| 顺序 | 先逐出（同步 flush → **封盘 `Session.detach`** → pop）再 rename（同一事件循环轮次内，无 await 插入）——**绝不容许活 Session 把目录写回 live 区**（两个 `history.jsonl` = 数据分裂）。封盘堵的是「迟到的落盘」：`usage.flush` 失败会保留脏标记等下一个落盘点（teardown 的 `aclose` / 节流重试），那个落盘点落在 rename 之后就会把 `<root>/<sid>/` 连父目录写回来 |
 | 索引 | 归档时登记 `.archive/index.json`（条目 = 归档时刻事实快照 + `archived_at`）；列表只读索引（1 个文件 + 每条目 1 次 stat），目录才是事实源（索引缺失 / 损坏 → 重建；目录消失的条目剔除并自愈）。手工拷入归档区的目录要删索引重建后才可见 |
 | 冲突 | live 与归档区**双存在**（手工拷贝等异常态）→ 两个方向都 `RuntimeError`（409），不猜谁对 |
 

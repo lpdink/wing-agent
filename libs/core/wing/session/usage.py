@@ -44,6 +44,7 @@ class UsageTracker:
         self._clock = clock
         self._last_flush = clock()
         self._dirty = False
+        self._sealed = False
 
     # ── 读 ───────────────────────────────────────
 
@@ -89,6 +90,16 @@ class UsageTracker:
 
     # ── 落盘 ─────────────────────────────────────
 
+    def seal(self) -> None:
+        """封盘：此后**任何**落盘（含节流刷新的脏标记重试）都是 no-op。
+
+        会话被摘除（逐出）后调用——那之后对象已离开 live 区，落盘重试会把
+        ``<root>/<sid>/`` 连父目录一起写回来（原子写建父目录），与归档
+        rename 叠加就是「live 与归档区双存在」的数据分裂红线。摘除前的同步
+        flush（``SessionManager.evict``）是最后一次正确写点；失败就让它失败。
+        """
+        self._sealed = True
+
     def flush(self) -> None:
         """把当前全量写回（无未落盘增量时是 no-op）。
 
@@ -96,7 +107,7 @@ class UsageTracker:
         不该把 turn 拖垮）。日志由 persist 实现负责——它知道该报什么上下文
         （如会话 id）。
         """
-        if not self._dirty:
+        if self._sealed or not self._dirty:
             return
         self._last_flush = self._clock()
         try:

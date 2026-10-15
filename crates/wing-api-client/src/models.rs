@@ -246,7 +246,8 @@ pub struct ArchiveResponse {
     pub archived: bool,
     /// 本次调用是否真的移动了会话（false = 幂等 no-op）。
     pub changed: bool,
-    /// 结果说明（archived / already archived / restored / not archived）。
+    /// 结果说明（archived / already archived / restored / not archived /
+    /// nothing to archive）。
     pub detail: String,
 }
 

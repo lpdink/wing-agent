@@ -205,6 +205,24 @@ class TestArchiveIndexRebuild:
         # 收编落盘：下一次读取不再重复收编（索引里已有 s2）。
         assert sorted(e["id"] for e in _index(store)) == ["s1", "s2"]
 
+    def test_untracked_non_session_dir_is_never_adopted(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """「不是会话」的目录（无 history、无标签）在收编与重建两侧都被跳过——
+        同一盘上两次列表（索引在 / 索引重建后）结果必须一致。"""
+        _seed(store, "s1")
+        store.archive("s1")
+        # 手工造一个"半成品"目录：只有 metadata，没有 history、没有 tags。
+        ghost = root / ".archive" / "ghost-dir"
+        ghost.mkdir()
+        (ghost / "metadata.json").write_text(
+            json.dumps({"session_name": "ghost"}), encoding="utf-8"
+        )
+
+        assert [e.id for e in store.list_archived()] == ["s1"]
+        (root / ".archive" / "index.json").unlink()  # 重建路径
+        assert [e.id for e in store.list_archived()] == ["s1"]
+
     def test_dropped_and_adopted_entries_heal_together(
         self, root: Path, store: FileSessionStore
     ) -> None:
