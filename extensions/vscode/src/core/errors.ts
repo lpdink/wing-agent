@@ -81,6 +81,19 @@ export class GatewayHttpError extends Error {
     return this.status === 404;
   }
 
+  /**
+   * The session exists but sits in the gateway's archive (404 tagged
+   * `error="session_archived"`).
+   *
+   * Not "gone": the data is intact and the way out is an explicit restore
+   * (`wing archive --restore <id>`). Tabbing into an archived id must say
+   * *that*, not "this session no longer exists" — the structured code is the
+   * only judge (never sniff the detail text).
+   */
+  isSessionArchived(): boolean {
+    return this.status === 404 && this.body?.error === 'session_archived';
+  }
+
   /** 401 / 403 — credentials missing, wrong, or the role is not allowed. */
   isUnauthorized(): boolean {
     return this.status === 401 || this.status === 403;

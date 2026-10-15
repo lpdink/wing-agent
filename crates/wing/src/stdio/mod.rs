@@ -711,7 +711,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
         let resp = http
             .resume_session_with_override(resume_id, resume_override(&args).as_ref())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to resume session: {e}"))?;
+            .map_err(|e| crate::cmd::common::session_error(resume_id, &e))?;
         // `-r` + `--tag`: add tags to the resumed session before anything is sent.
         if !args.tag.is_empty() {
             http.tag_session(&resp.session_id, Some(args.tag.clone()), None)

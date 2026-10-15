@@ -698,7 +698,14 @@ async fn attach_existing(
     cwd: &std::path::Path,
 ) -> Result<Attached, Error> {
     let resumed = hub.http.resume_session(session_id).await.map_err(|err| {
-        if err.is_not_found() {
+        if err.is_session_archived() {
+            // 已归档不是"未知"：会话还在，只是冻着——给出可行动的指引
+            // （ACP 客户端把 data 展示给用户）。
+            Error::invalid_params().data(format!(
+                "session {session_id} is archived; restore it with \
+                 `wing archive --restore {session_id}`"
+            ))
+        } else if err.is_not_found() {
             // 未知会话：客户端拿 invalid params（与 hub 的 UnknownSession 同码）。
             Error::invalid_params().data(format!("unknown session: {session_id}"))
         } else {

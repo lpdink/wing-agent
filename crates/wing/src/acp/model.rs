@@ -380,7 +380,16 @@ async fn fetch_state(hub: &SessionHub, session_id: &str) -> Result<SessionModel,
 }
 
 /// 读会话状态失败 → JSON-RPC error（未知会话 = invalid params；其余 = internal error）。
+///
+/// 归档命中（404 + `session_archived`）**不是**未知会话：它是可行动的结论，
+/// 提示恢复而不是让调用方以为这个 id 从未存在。
 fn state_error(session_id: &str, err: ApiClientError) -> Error {
+    if err.is_session_archived() {
+        return Error::invalid_params().data(format!(
+            "session {session_id} is archived; restore it with \
+             `wing archive --restore {session_id}`"
+        ));
+    }
     if err.is_not_found() {
         return Error::invalid_params().data(format!("unknown session: {session_id}"));
     }

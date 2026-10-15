@@ -10,7 +10,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ┌─────────────────────────────┐             ┌─────────────────────────┐               ┌─────────────────────────┐
 │ Frontends（wing 二进制）    │             │ Gateway (FastAPI)       │               │ Runtime (Python)        │
 │ TUI（默认）· ratatui 循环   │──── WS ────►│ GatewayServer           │──── HTTP ────►│ WingRuntime（协调者）   │
-│ stdio（wing -p）· NDJSON    │             │ · routes/session(17)    │               │ ├ SessionManager        │
+│ stdio（wing -p）· NDJSON    │             │ · routes/session(19)    │               │ ├ SessionManager        │
 │ acp（wing acp）· ACP v1     │             │ · routes/system(6)      │               │ ├ SessionStore          │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/settings(4)    │◄──────────────│ ├ ContextManager        │
 │ 网关生命周期 · start/stop   │             │ · tools/health · ws     │               │ ├ EventBus              │
@@ -20,7 +20,7 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 ```
 
 - **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（33 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（35 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header / WS query param），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知；provider 实例无状态、归全进程共享池（`provider/pool.py`），会话级参数（session id 缓存亲和 / media / thinking）经 `RequestOptions` 每次调用注入。
 
@@ -49,6 +49,7 @@ libs/core/wing/
 │   ├── session.py                   Session — messages + state + metadata（经 SessionStore）
 │   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
 │   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
+│   ├── archiver.py                  SessionArchiver — 过期会话自动归档（读配置 + 一次扫描）
 │   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
 │   ├── model_binding.py             生效模型绑定（resume 链的只读投影；会话列表的模型列）
 │   ├── usage.py                     UsageTracker — 会话用量账本（事件驱动累计 + 节流落盘）
@@ -99,7 +100,7 @@ libs/core/wing/
 │   ├── openai/                      OpenAI 兼容协议子包（provider / serialize / stream）
 │   ├── anthropic/                   Anthropic 协议子包（provider / serialize / stream）
 │   └── __init__.py                  ModelProvider + create_provider（稳定入口）
-├── store/                           SessionStore — 会话持久状态唯一所有者
+├── store/                           SessionStore — 会话持久状态唯一所有者（含归档区：archive / unarchive / list_archived）
 │   ├── base.py                      SessionStore / MessageLog ABC + SessionMetadata
 │   ├── file.py                      File 后端（history.jsonl 混合日志，零迁移）
 │   └── memory.py                    Memory 后端（进程内，不落盘）
@@ -134,7 +135,7 @@ libs/core/wing/
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(17) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(19) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
@@ -160,6 +161,7 @@ crates/wing/src/
 │   ├── control.rs                   `wing interrupt`（别名 int）/ `compact` / `update`（会话控制面）
 │   ├── lifecycle.rs                 `wing new` / `resume`（建空会话 / 显式水合）
 │   ├── release.rs                   `wing release` 逐出会话内存态（显式 eviction，幂等）
+│   ├── archive.rs                   `wing archive` 归档 / 恢复 / 列出归档区（一个子命令三形态）
 │   ├── reload.rs                    `wing reload` 系统热重载（逐项结果按契约名字序）
 │   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
 │   ├── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
@@ -187,7 +189,7 @@ crates/wing/src/
 │   ├── panels/ask.rs                ask 模型与归一化入口（AskUserQuestion 面板 / Bash 确认的必选形态 / 只读提示）
 │   ├── panels/picker.rs             /model 适配器（provider tab × model 行，Enter 即应用）
 │   ├── panels/settings/             设置面板状态机（左栏分组锚点 · 右栏树扁平化 · 双栏焦点 · 内联编辑器 · 列表增删移 · 搜索 · 问题清单 · 键位与 Esc 阶梯）
-│   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端零感知）
+│   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端仅在自动归档豁免处感知 `pin`）
 │   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）

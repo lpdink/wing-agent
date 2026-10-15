@@ -10,7 +10,8 @@ wing/runtime.py — WingRuntime：service 层协调者
   - 订阅管理封装路由注册 + SyncSession 推送
   - 所有事件通过 _emit_session_event() 发射，保证 scope="session"
   - 异常层次：LookupError（not found）/ ValueError（bad input）/ RuntimeError（bad state），
-    route 按类型映射 HTTP status
+    route 按类型映射 HTTP status；SessionArchivedError（找不到但落在归档区）**不是**
+    LookupError——它是可行动的存在性结论，gateway 单独映射 404 + error="session_archived"
 """
 
 from __future__ import annotations
@@ -65,9 +66,20 @@ from wing.request_context import (
 from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 from wing.schema import MediaRef
-from wing.session import Session, SessionManager, SessionReaper, TagMutation
+from wing.session import (
+    Session,
+    SessionArchiver,
+    SessionManager,
+    SessionReaper,
+    TagMutation,
+)
 from wing.system import ReloadResult, reload_system as _reload_system
-from wing.store import FileSessionStore, MemorySessionStore, SessionStore
+from wing.store import (
+    ArchivedSession,
+    FileSessionStore,
+    MemorySessionStore,
+    SessionStore,
+)
 
 if TYPE_CHECKING:
     from wing.session import AgentOverride, AgentTemplateManager
@@ -228,6 +240,8 @@ class WingRuntime:
         self.sm = SessionManager(stores)
         self.reaper = SessionReaper(self.sm)
         """空闲会话逐出器（gateway lifespan 负责 attach/detach）。"""
+        self.archiver = SessionArchiver(self.sm)
+        """自动归档器（BackgroundScheduler 的 session-archive job 入口，无订阅）。"""
 
     @property
     def template_manager(self) -> AgentTemplateManager:
@@ -365,6 +379,28 @@ class WingRuntime:
         """
         return self.sm.session_exists(session_id)
 
+    def missing_session_error(self, session_id: str) -> Exception:
+        """构造「会话不存在」的错误（归档命中 → ``SessionArchivedError``）。
+
+        路由用来区分两种 404：归档是**可行动**的（提示恢复），真不存在是普通
+        404。纯查询（只探归档区一次 stat）。
+        """
+        return self.sm.missing_session_error(session_id)
+
+    def is_archived(self, session_id: str) -> bool:
+        """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""
+        return self.sm.is_archived(session_id)
+
+    def require_live_session(self, session_id: str) -> None:
+        """会话存在性预检（纯解析）：不存在即抛——归档命中是
+        ``SessionArchivedError``（app handler 映射 404 + ``error="session_archived"``，
+        可行动提示），真不存在是 ``LookupError``（路由折成普通 404）。
+        ``session_exists`` 的抛错版：需要区分两种 404 的预检用这个。
+        """
+        if self.sm.session_exists(session_id):
+            return
+        raise self.sm.missing_session_error(session_id)
+
     def upload_media(
         self, session_id: str, data: bytes, *, name: str | None = None
     ) -> MediaRef:
@@ -398,6 +434,45 @@ class WingRuntime:
     async def reap_idle_sessions(self) -> list[str]:
         """扫描一轮并逐出空闲会话（BackgroundScheduler 的 job 入口）。"""
         return await self.reaper.sweep()
+
+    # ============================================================
+    # Session 归档（archive）
+    # ============================================================
+
+    def archive_session(self, session_id: str) -> tuple[bool, str]:
+        """把会话移入归档区（幂等；钉住条件同 release）。
+
+        Returns:
+            (archived, detail)：archived=False 是幂等 / 空动作（不是错误）——
+            已在归档区（``already archived``）或内存中的空会话、从未落盘
+            （``nothing to archive``）。
+
+        Raises:
+            LookupError: 两个区都没有该会话
+            RuntimeError: 钉住（忙碌 / 待处理输入 / 订阅中）/ 后端不支持归档 /
+                live 与归档区同时存在 / 目录移动失败
+        """
+        return self.sm.archive_session(session_id)
+
+    def unarchive_session(self, session_id: str) -> tuple[bool, str]:
+        """把会话从归档区移回 live 区（幂等）。
+
+        Returns:
+            (restored, detail)：restored=False 表示不在归档区（幂等 no-op）。
+
+        Raises:
+            LookupError: 两个区都没有该会话
+            RuntimeError: live 区已有同名会话（双存在异常态）
+        """
+        return self.sm.unarchive_session(session_id)
+
+    def list_archived_sessions(self) -> list[ArchivedSession]:
+        """列出归档区条目（读索引，不扫会话目录；展示名按当前配置现算）。"""
+        return self.sm.list_archived_sessions()
+
+    async def archive_stale_sessions(self) -> list[str]:
+        """扫描一轮并归档过期会话（BackgroundScheduler 的 job 入口）。"""
+        return await self.archiver.sweep()
 
     # ============================================================
     # 订阅管理
@@ -818,10 +893,11 @@ class WingRuntime:
     # ============================================================
 
     def _require_session(self, session_id: str) -> Session:
-        """获取 session，不存在则 raise LookupError。"""
+        """获取 session（必须在内存）；不在内存则 raise——归档区命中时是
+        SessionArchivedError（可行动提示），否则 LookupError。"""
         session = self.sm.get_session(session_id)
         if session is None:
-            raise LookupError(f"Session not found: {session_id!r}")
+            raise self.sm.missing_session_error(session_id)
         return session
 
     def _emit_session_event(

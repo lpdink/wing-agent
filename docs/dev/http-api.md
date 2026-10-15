@@ -22,7 +22,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 ## HTTP 端点
 
-### Session（`routes/session.py`，17 个）
+### Session（`routes/session.py`，19 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -43,6 +43,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/interrupt` | 中断当前任务（Esc 键） |
 | POST | `/api/session/rewind` | 回退到指定消息 uuid |
 | POST | `/api/session/release` | 逐出 session 内存态（只回收内存，磁盘不动）：忽略空闲时长，不忽略钉住条件——忙碌 / inbox 有待处理输入 / 被订阅 / 非持久后端以 409 拒绝；本就不在内存返回 `released: false`（幂等） |
+| POST | `/api/session/archive` | **设置会话的归档状态**（幂等）。body `{session_id, archived?}`：`archived` 缺省 `true` = 归档（会话目录移入 `<sessions root>/.archive/`）；`false` = 恢复（移回 live 区）。响应 `{ok, session_id, archived, changed, detail}`——`archived` 是操作后的状态、`changed` 说明本次是否真的移动（`detail` ∈ `archived` / `already archived` / `restored` / `not archived` / `nothing to archive`——最后一档 = 内存中的空会话，从未落盘、没有可移动的东西）。**归档是纯移动**（不改任何字节）；**恢复会刷新会话的 `last_interaction`**——恢复是显式兴趣信号，否则自动 sweep 会按旧年龄在下一轮立刻把它收回去（resume 刻意**不写** metadata——「空转 resume 零写盘」是既有不变量——所以「刚打开的旧会话」由 sweep 的「内存中的会话不动」规则保护）。钉住条件同 release（忙碌 / 排队输入 / 被订阅 / 非归档后端（memory）以 409 拒绝）；空闲可收回的会话先逐出再移动。未知 id 404（归档区未命中即普通 `not_found`） |
+| GET | `/api/session/archive` | 列出归档区条目（**读网关侧索引** `.archive/index.json`，不扫会话目录；索引缺失 / 损坏时按目录重建，`archived_at` 为 null）。条目 = 归档时刻事实快照（`id` / `name`（标题回退同 ps）/ `workspace` / `template_name` / `last_interaction` / `archived_at` / `tags`）+ 投影期补全的模型四件套（与 `/api/session/list` 同一读法）。按最后交互时间降序。`wing archive --list` 对应的端点 |
 
 > **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无人订阅、
 > 非 memory 后端，且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
@@ -51,6 +53,16 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > 自动水合，对已逐出会话仍回 404（`wing tail` / `head` / `info` 内部按 404→resume
 > 惯例处理；`/api/session/list` 的 `status: inactive` 是逐出的可观测痕迹）。
 > `wing release <sid>` 是对应的显式操作。
+>
+> **会话归档（archive）**：归档区是**冷存储**——不在 `/api/session/list` 里
+> （这正是 `wing ps` 性能的解法），也不参与任何解析：对归档会话调 resume /
+> send / tag / media / create-or-adopt 一律 404，但带结构化 `error="session_archived"`
+> （与"真不存在"的 `not_found` 区分），调用方可给出"先恢复"的指引。恢复必须
+> 显式（`archived: false` / `wing archive --restore`）——没有隐式恢复路径。
+> 自动归档（`sessions.archive`，默认 90 天）由后台周期任务执行：带 `pin`
+> 标签的会话豁免（后端感知的唯一保留标签，见 `session.tags.PIN_TAG`），
+> `idle_days <= 0` 关闭。`wing archive <sid>` / `wing archive --restore <sid>` /
+> `wing archive --list` 是对应的 CLI。
 >
 > **session id 是闸门（只防穿越与卫生）**：id 由后端生成（默认形态
 > `YYYYMMDD-HHMMSS-<8 位小写 hex>`）**或由编排方自带**（`/api/session/create`

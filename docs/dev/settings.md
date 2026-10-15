@@ -299,6 +299,8 @@ git-tracked 的 `config.yaml` + `.bak`。
 | `images.*` | `hot` | ReadImage、上传端点（`POST /api/session/media`，同一上限）与请求期媒体投影每调用读（见 [media-images.md](media-images.md)） |
 | `sessions.eviction.enabled` / `idle_ttl_seconds` | `hot` | 逐出扫描每次 sweep 读 |
 | `sessions.eviction.sweep_interval_seconds` | `restart` | 启动时注册 job 的间隔读一次（热重载不改变已注册 job） |
+| `sessions.archive.idle_days` | `hot` | 自动归档扫描每次 sweep 读（`<= 0` = 关闭） |
+| `sessions.archive.sweep_interval_seconds` / `startup_delay_seconds` | `restart` | 启动时注册 job 的周期 / 首轮延迟读一次（热重载不改变已注册 job） |
 | `gateway.host` / `gateway.port` | `restart` | uvicorn 已绑定；且 Rust 侧启动时读文件决定连哪（不做假热更） |
 | `gateway.auth.enabled` / `keys[]` | `hot` | `server.auth_config` property 每请求 `load_config()`，中间件不缓存 |
 | `gateway.cors.origins[]` | `restart` | CORS 中间件在 app 装配（进程启动）时读一次；loopback 来源默认放通（仅当 `gateway.host` 绑 loopback），`origins` 是额外白名单 |

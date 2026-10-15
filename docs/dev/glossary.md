@@ -52,6 +52,7 @@ restore 后内存态与记录不一致才落盘对齐（一次性迁移，非写
 | **MessageLog** | 追加式混合记录 + aux kv（`store/base.py`）。pending compaction 存于 aux。newest.json 快照已移除（重放由混合日志承担）。 |
 | **TrackedList** | 纯内存链拓扑引擎（uuid/parentUuid），ChainNode 家族混排（Message + 事件节点），I/O 全委托 MessageLog（`chain.py`）。 |
 | **SessionMetadata** | 会话元数据模型（workspace、forked_from、template_name、model_id/provider_name/model_name、last_interaction…）。 |
+| **归档（archive）** | 会话的冷存储：目录 rename 进 `<sessions root>/.archive/`（点命名空间，与 `.media` 同类），**归档字节零变化**（恢复刷新 `last_interaction`；resume 刻意不写盘，靠 sweep 的「内存中的会话不动」规则保护）。归档后不参与列表（ps 的解法）、不参与解析（`resume` / `send` … 回 404 + `error="session_archived"`）；恢复必须显式（`wing archive --restore`）。自动归档（`sessions.archive`，默认 90 天）豁免带 `pin` 标签的会话；`.archive/index.json` 是列表读口（目录才是事实源）。 |
 | **模型绑定持久化** | 会话当前模型的**三元组** `(model_id, provider_name, model_name)`：`model_id` 是引用词，`provider_name` / `model_name` 是当时的运行期事实快照（`session/session.py::_persist_model`）。写入时机是**显式动作**（模型切换、模板切换、创建 override、fork 快照；未动过模型的 session 不写）。resume 按上面「恢复链」还原（id 优先 → 快照兜底 → 模板默认）；进程存活期间前端渲染与后端使用同源于 agent，本机制解决的是重启后的还原。 |
 
 ## 事件系统

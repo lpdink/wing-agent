@@ -17,8 +17,9 @@ from wing.schema import MediaRef
 from wing.session.override import AgentOverride
 
 # 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
-# 刻意不另立一份：见 `wing/event/base.py` 的同一说明）。
-from wing.store import SessionUsage, TagMeta
+# 刻意不另立一份：见 `wing/event/base.py` 的同一说明）。ArchivedSession 同理：
+# 归档条目就是存储层模型（含投影期补全的展示名），不另立一份镜像。
+from wing.store import ArchivedSession, SessionUsage, TagMeta
 
 
 # ============================================================
@@ -182,6 +183,20 @@ class TagSessionRequest(BaseModel):
     remove: list[str] | None = Field(
         default=None,
         description="要移除的标签（幂等；不存在为 no-op；与 add 同值则移除胜出）",
+    )
+
+
+class ArchiveRequest(BaseModel):
+    """POST /api/session/archive 请求——设置会话的归档状态。
+
+    ``archived`` 缺省 true（省略即归档）。归档 = 移入存储根的 ``.archive/``
+    （纯移动，字节不变）；恢复 = 移回 live 区。归档区不参与列表与解析
+    （冻结语义），钉住条件（忙碌 / 排队输入 / 订阅中）命中时 409。
+    """
+
+    session_id: str = Field(description="目标 session ID")
+    archived: bool = Field(
+        default=True, description="true = 归档（默认）；false = 恢复"
     )
 
 
@@ -387,4 +402,36 @@ class TagSessionResponse(BaseModel):
     tag_meta: dict[str, TagMeta] = Field(
         default_factory=dict,
         description="变更后的全量标签记录（键集 ⊆ tags）；当前含 added_at 打标时间",
+    )
+
+
+class ArchiveResponse(BaseModel):
+    """POST /api/session/archive 响应——设置归档状态的结果。
+
+    ``archived`` 是**操作后的真实状态**（不是请求意图）：空会话的归档是 no-op，
+    回执如实给 false。``changed`` 说明本次调用是否真的移动了会话（false = 幂等
+    no-op：归档已归档的 / 恢复未归档的 / 归档一个从未落盘的空会话）。
+    ``detail`` ∈ {archived, already archived, restored, not archived,
+    nothing to archive}。
+    """
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    session_id: str = Field(description="目标 session ID")
+    archived: bool = Field(description="操作后的归档状态（true = 在归档区）")
+    changed: bool = Field(
+        description="本次调用是否真的移动了会话（false = 幂等 no-op）"
+    )
+    detail: str = Field(
+        description=(
+            "结果说明（archived / already archived / restored / not archived / "
+            "nothing to archive）"
+        )
+    )
+
+
+class ArchivedSessionsResponse(BaseModel):
+    """GET /api/session/archive 响应——归档区条目（读索引，不扫会话目录）。"""
+
+    sessions: list[ArchivedSession] = Field(
+        default_factory=list, description="归档条目（按最后交互时间降序）"
     )

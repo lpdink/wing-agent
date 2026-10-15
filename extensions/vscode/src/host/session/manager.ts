@@ -1192,6 +1192,10 @@ export class SessionManager {
           void this.refreshRuntimeState(managed);
           return;
         } catch (resumeError) {
+          if (resumeError instanceof GatewayHttpError && resumeError.isSessionArchived()) {
+            this.markArchived(managed, resumeError);
+            return;
+          }
           this.markGone(managed, resumeError);
           return;
         }
@@ -1221,6 +1225,26 @@ export class SessionManager {
       clearTimeout(managed.retryTimer);
       managed.retryTimer = null;
     }
+  }
+
+  /**
+   * The session is archived (resume 404 + `session_archived`) — same
+   * stop-don't-retry posture as gone, but the message names the way back:
+   * restore it on the gateway, then reopen the tab.
+   */
+  private markArchived(managed: ManagedSession, error: unknown): void {
+    managed.gone = true;
+    managed.subscribed = false;
+    this.deps.logger.warn(`session ${managed.record.sessionId} is archived on the gateway`, error);
+    managed.record.pushCell({
+      kind: 'system',
+      id: managed.record.newCellId(),
+      createdAt: managed.record.now(),
+      level: 'error',
+      text: `This session is archived. Restore it with \`wing archive --restore ${managed.record.sessionId}\`, then reopen the tab.`,
+    });
+    this.flush(managed.record);
+    this.toast('error', 'Session is archived on the gateway.');
   }
 
   /** The session vanished from the gateway (resume 404) — say so, don't retry. */
