@@ -332,6 +332,10 @@ pub async fn execute_intent(
                 let old_session_id = app.session_id.clone();
                 let req = wing_api_client::models::CreateSessionRequest {
                     workspace: workspace.clone(),
+                    // 血缘（软信号）：TUI 被 agent 拉起时（env 里有
+                    // `WING_SESSION_ID`），它创建的每个会话都记下创建者；
+                    // 用户自己的 shell 里没有这个变量 = 根会话。
+                    parent_session_id: crate::cmd::common::parent_session_id_from_env(),
                     ..Default::default()
                 };
                 match t.http.create_session(&req).await {

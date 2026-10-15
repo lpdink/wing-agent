@@ -54,6 +54,9 @@ pub struct NewArgs {
 #[derive(Serialize)]
 struct NewOutput {
     session_id: String,
+    /// The **recorded** creator of this session (read back; `null` for a root
+    /// or when the gateway predates session lineage).
+    parent_session_id: Option<String>,
     template_name: String,
     workspace: Option<String>,
     /// Storage backend ("file" = durable, "memory" = ephemeral); `null` on
@@ -94,11 +97,16 @@ async fn new_inner(args: &NewArgs) -> Result<NewOutput> {
             .map(|p| p.to_string_lossy().to_string()),
     };
 
+    // 血缘采集：Bash 工具给 agent 的 shell 注入了 `WING_SESSION_ID`，于是"由谁
+    // 创建"随创建请求带上；用户自己的 shell 里没有它 = 根会话（软信号：
+    // 非法值丢弃 + 留痕，绝不阻断创建）。
+    let requested_parent = common::parent_session_id_from_env();
     let request = CreateSessionRequest {
         template_name: args.agent.clone(),
         workspace,
         // Atomic: the session is born tagged (no dispatch-without-tags window).
         tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
+        parent_session_id: requested_parent.clone(),
         ..Default::default()
     };
     let resp = http
@@ -108,9 +116,15 @@ async fn new_inner(args: &NewArgs) -> Result<NewOutput> {
     // 创建即带标；读回校验——旧网关（早于 tags 端点）在这里响亮失败，
     // 而不是静默丢标后让调用方以为会话已按标签登记。
     let tags = common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
+    // 血缘是软机制：请求了但网关没带（旧网关）只记日志，不吵。
+    common::warn_if_parent_dropped(
+        requested_parent.as_deref(),
+        resp.parent_session_id.as_deref(),
+    );
 
     Ok(NewOutput {
         session_id: resp.session_id,
+        parent_session_id: resp.parent_session_id,
         template_name: resp.template_name,
         workspace: resp.workspace,
         backend: resp.backend,
@@ -120,6 +134,9 @@ async fn new_inner(args: &NewArgs) -> Result<NewOutput> {
 
 fn print_new(output: &NewOutput) {
     println!("session_id:  {}", output.session_id);
+    if let Some(parent) = &output.parent_session_id {
+        println!("parent:      {parent}");
+    }
     println!("template:    {}", output.template_name);
     if let Some(backend) = &output.backend {
         println!("backend:     {backend}");

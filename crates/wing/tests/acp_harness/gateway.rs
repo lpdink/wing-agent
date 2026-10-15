@@ -50,6 +50,10 @@ pub struct RecordedRequest {
     pub path: String,
     /// `X-Client-Id` 头（订阅 / 退订请求才有）。
     pub client_id: Option<String>,
+    /// 查询串原样（无查询串为 None）。`wing ps --parent` 这类子集过滤只有它能断言；
+    /// ACP 场景不发查询参数，故该字段在那边是 dead code。
+    #[allow(dead_code)]
+    pub query: Option<String>,
     /// JSON 请求体（无体 / 非 JSON 为 None）。
     pub body: Option<Value>,
 }
@@ -85,6 +89,8 @@ struct SessionInfoState {
     name: Option<String>,
     total_tokens: i64,
     context_window_tokens: i64,
+    /// 血缘（`SessionInfoResponse.parent_session_id`）：创建时请求里的值。
+    parent_session_id: Option<String>,
 }
 
 impl Default for SessionInfoState {
@@ -93,6 +99,7 @@ impl Default for SessionInfoState {
             name: None,
             total_tokens: 42,
             context_window_tokens: 262_144,
+            parent_session_id: None,
         }
     }
 }
@@ -289,6 +296,7 @@ impl FakeGateway {
                 name: name.map(str::to_string),
                 total_tokens,
                 context_window_tokens,
+                ..SessionInfoState::default()
             },
         );
     }
@@ -424,6 +432,7 @@ async fn handle_http(
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or_default().to_string();
+    let recorded_query = (!query.is_empty()).then(|| query.clone());
     let client_id = request
         .headers()
         .get("x-client-id")
@@ -440,6 +449,7 @@ async fn handle_http(
         method: method.clone(),
         path: path.clone(),
         client_id,
+        query: recorded_query,
         body: body.clone(),
     });
 
@@ -493,7 +503,11 @@ fn route(
                 .and_then(|body| body.get("workspace"))
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            register_session(state, &session_id, workspace.clone());
+            let parent = body
+                .and_then(|body| body.get("parent_session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            register_session(state, &session_id, workspace.clone(), parent.clone());
             (
                 200,
                 json!({
@@ -504,9 +518,13 @@ fn route(
                         .unwrap_or("default"),
                     "workspace": workspace,
                     "backend": "memory",
+                    // 契约（`CreateSessionResponse.parent_session_id`）：响应携带**读回**
+                    // 的 parent（不是回显）——调用方据此对账。
+                    "parent_session_id": parent,
                 }),
             )
         }
+        ("POST", "/api/session/send") => (200, json!({"ok": true, "request_id": "req-e2e"})),
         ("POST", "/api/session/resume") => {
             let session_id = body
                 .and_then(|body| body.get("session_id"))
@@ -613,7 +631,12 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 }
 
 /// 会话注册：建会话 / resume 之后都能被 list、get、info 看到（形状与真网关一致）。
-fn register_session(state: &GatewayState, session_id: &str, workspace: Option<String>) {
+fn register_session(
+    state: &GatewayState,
+    session_id: &str,
+    workspace: Option<String>,
+    parent_session_id: Option<String>,
+) {
     state
         .resumable
         .lock()
@@ -626,11 +649,13 @@ fn register_session(state: &GatewayState, session_id: &str, workspace: Option<St
             ..SessionState::default()
         },
     );
-    state
-        .infos
-        .lock()
-        .expect("gateway state")
-        .insert(session_id.to_string(), SessionInfoState::default());
+    state.infos.lock().expect("gateway state").insert(
+        session_id.to_string(),
+        SessionInfoState {
+            parent_session_id,
+            ..SessionInfoState::default()
+        },
+    );
 }
 
 fn session_get_frame(state: &GatewayState, session_id: &str) -> Value {
@@ -679,6 +704,7 @@ fn session_info_frame(state: &GatewayState, session_id: &str) -> Value {
         "yolo": false,
         "session_name": info.name,
         "workdir": current.workspace,
+        "parent_session_id": info.parent_session_id,
         "status": "idle",
         "context_stats": {"message_count": 1, "total_tokens": info.total_tokens},
         "skills_info": "",

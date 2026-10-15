@@ -154,6 +154,75 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     format!("{truncated}...")
 }
 
+/// session id 的字节上限——与后端闸门 `common.utils.SESSION_ID_MAX_BYTES` 同值。
+const SESSION_ID_MAX_BYTES: usize = 128;
+
+/// The lineage parent for a session being created right now, read from the
+/// environment: `WING_SESSION_ID` is injected into every agent shell by the
+/// Bash tool, so a CLI invocation that runs inside a session can record *who
+/// created it* (`docs/dev/session-lineage.md` §1/§3).
+///
+/// The env is a **soft signal**: absent (`None`) means "the user's own shell"
+/// → a root session; a malformed value is dropped with a warning and never
+/// blocks creation. The hygiene gate mirrors the backend's
+/// `is_valid_session_id` (a bad value would be a 400 there anyway) — this
+/// side just fails earlier and leaves a trace.
+pub fn parent_session_id_from_env() -> Option<String> {
+    match std::env::var_os("WING_SESSION_ID") {
+        Some(raw) => match raw.into_string() {
+            Ok(value) => parent_session_id(Some(value)),
+            Err(raw) => {
+                tracing::warn!(
+                    value = ?raw,
+                    "WING_SESSION_ID is not valid UTF-8; ignoring it (lineage is a soft signal)"
+                );
+                None
+            }
+        },
+        None => parent_session_id(None),
+    }
+}
+
+/// [`parent_session_id_from_env`]'s pure core (the env is process-global and
+/// therefore untestable): `None` = variable absent, `Some` = its value.
+///
+/// Hygiene rules (same gate as the backend): non-empty, ≤ 128 **bytes**,
+/// no leading `.`, no path separators or `..`, no ASCII control characters.
+/// (`String` is UTF-8 by construction, so the encodability rule coincides.)
+fn parent_session_id(raw: Option<String>) -> Option<String> {
+    let value = raw?;
+    if !value.is_empty()
+        && value.len() <= SESSION_ID_MAX_BYTES
+        && !value.starts_with('.')
+        && !value.contains(['/', '\\'])
+        && !value.contains("..")
+        && !value.bytes().any(|b| b < 0x20 || b == 0x7f)
+    {
+        return Some(value);
+    }
+    // `?value` (Debug) escapes control characters: a malformed value must not
+    // be able to inject newlines into the log.
+    tracing::warn!(
+        value = ?value,
+        "WING_SESSION_ID is not a well-formed session id; ignoring it (lineage is a soft signal)"
+    );
+    None
+}
+
+/// Log-only reconciliation for the create read-back: the caller requested a
+/// parent (the env had one) but the gateway did not record it — an older
+/// gateway silently ignores the field. Soft mechanism: the session was still
+/// created, so this is a warning, never an error.
+pub fn warn_if_parent_dropped(requested: Option<&str>, read_back: Option<&str>) {
+    if requested.is_some() && read_back.is_none() {
+        tracing::warn!(
+            parent = ?requested,
+            "gateway did not record the session's parent (does the running gateway predate \
+             session lineage? restart it: wing stop && wing start)"
+        );
+    }
+}
+
 /// Verify the requested tags actually landed on `session_id`.
 ///
 /// Guards against a gateway that predates session tags: the create endpoint
@@ -284,6 +353,48 @@ mod tests {
         assert_eq!(missing_tags(&requested, &actual), vec!["executor"]);
         assert!(missing_tags(&requested, &requested).is_empty());
         assert_eq!(missing_tags(&requested, &[]).len(), 2);
+    }
+
+    /// 合法 env 值原样带上；缺席（`None`）静默——两类合法形态。
+    /// 卫生判据与后端闸门同口径：只防穿越与卫生，不限定 id 形态。
+    #[test]
+    fn a_well_formed_parent_passes_through_verbatim() {
+        for ok in [
+            "20261015-211837-87e3fac2",
+            "team-A_1.2", // 内部点、任意 Unicode 都放行（只防穿越与卫生）
+            "会话-一",
+            &"x".repeat(SESSION_ID_MAX_BYTES), // 上限本身是合法值（字节）
+        ] {
+            assert_eq!(
+                parent_session_id(Some(ok.to_string())).as_deref(),
+                Some(ok),
+                "{ok:?} should pass"
+            );
+        }
+        assert_eq!(parent_session_id(None), None, "absent is silent");
+    }
+
+    #[test]
+    fn malformed_parent_values_are_dropped() {
+        let too_long = "x".repeat(SESSION_ID_MAX_BYTES + 1);
+        for bad in [
+            "",        // 空串
+            ".hidden", // 点开头（存储的点命名空间）
+            "a/b",     // 路径分隔符
+            "a\\b",    // Windows 分隔符也防（id 是单层路径组件）
+            "a..b",    // 父目录引用
+            "..",
+            "line\nbreak", // 控制字符（也防日志注入）
+            "tab\there",
+            "del\u{7f}",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                parent_session_id(Some(bad.to_string())),
+                None,
+                "{bad:?} must be dropped"
+            );
+        }
     }
 
     #[test]
