@@ -356,7 +356,7 @@ class TestManagerSetTags:
             "../escape",
             "../../etc/passwd",
             "/tmp/absolute",
-            ".media",  # 存储保留的点命名空间（遗留媒体池）
+            ".media",  # 存储保留的点命名空间（媒体池）
             "..",
             "a..b",
             "line\nbreak",

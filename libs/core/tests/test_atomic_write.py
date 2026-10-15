@@ -62,13 +62,12 @@ class TestConcurrentAtomicWrite:
     def test_store_write_media_same_id(self, tmp_path: Path):
         """真实调用路径：并发对同一文件写同一 media id（内容寻址 → 同内容）。"""
         store = FileSessionStore(tmp_path / "sessions")
-        sid = "20250101-000000-aaaaaaaa"
         data = b"img-bytes"
         mid = hashlib.sha256(data).hexdigest()
-        errors = _race(8, lambda: store.write_media(sid, mid, data))
+        errors = _race(8, lambda: store.write_media(mid, data))
         assert errors == []
-        assert store.read_media(sid, mid) == data
-        media_dir = tmp_path / "sessions" / sid / "media"
+        assert store.read_media(mid) == data
+        media_dir = tmp_path / "sessions" / ".media" / mid[:2]
         assert sorted(p.name for p in media_dir.iterdir()) == [mid]
 
 

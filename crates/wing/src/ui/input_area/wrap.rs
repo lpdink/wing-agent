@@ -12,8 +12,8 @@
 use unicode_width::UnicodeWidthChar;
 
 use super::model;
-use super::model::Chips;
 use super::model::Line;
+use super::model::Pastes;
 use super::model::Segment;
 
 /// A visual row — one screen line produced by wrapping a logical line.
@@ -32,12 +32,16 @@ pub struct VisualRow {
 /// Build the visual row list from logical lines and available text width.
 ///
 /// `available_width` is the text area width (total width minus prefix).
-pub fn build_visual_rows(lines: &[Line], chips: &Chips, available_width: usize) -> Vec<VisualRow> {
+pub fn build_visual_rows(
+    lines: &[Line],
+    pastes: &Pastes,
+    available_width: usize,
+) -> Vec<VisualRow> {
     let mut result = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if available_width == 0 {
             // Zero-width: emit as single visual row.
-            let flat = model::flat(line, chips);
+            let flat = model::flat(line, pastes);
             let w: usize = flat.chars().map(|c| c.width().unwrap_or(0)).sum();
             result.push(VisualRow {
                 logical_line: i,
@@ -47,7 +51,7 @@ pub fn build_visual_rows(lines: &[Line], chips: &Chips, available_width: usize) 
             });
             continue;
         }
-        wrap_line(line, chips, i, available_width, &mut result);
+        wrap_line(line, pastes, i, available_width, &mut result);
     }
     result
 }
@@ -55,12 +59,12 @@ pub fn build_visual_rows(lines: &[Line], chips: &Chips, available_width: usize) 
 /// Wrap a single logical line into visual rows.
 fn wrap_line(
     line: &[Segment],
-    chips: &Chips,
+    pastes: &Pastes,
     logical_idx: usize,
     max_width: usize,
     out: &mut Vec<VisualRow>,
 ) {
-    let flat = model::flat(line, chips);
+    let flat = model::flat(line, pastes);
     let chars: Vec<char> = flat.chars().collect();
     if chars.is_empty() {
         out.push(VisualRow {
@@ -72,7 +76,7 @@ fn wrap_line(
         return;
     }
 
-    let chips = model::chip_spans(line, chips);
+    let chips = model::chip_spans(line, pastes);
     let mut next_chip = 0;
     let mut char_start = 0;
     let mut row_width = 0;
@@ -207,35 +211,30 @@ pub fn char_display_offset(line: &str, vr: &VisualRow, char_col: usize) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::input_area::model::Chips;
+    use crate::ui::input_area::model::Pastes;
 
     fn lines(texts: &[&str]) -> Vec<Line> {
         texts.iter().map(|s| model::text_line(s)).collect()
     }
 
-    /// A bundle with `count` paste payloads of `extra + 1` lines each; chip
-    /// `n` (1-based) reads `[Pasted text #n +{extra} lines]`.
-    fn chips(extra: usize, count: usize) -> Chips {
-        let mut chips = Chips::default();
+    /// A registry with `count` payloads of `extra + 1` lines each; chip `n`
+    /// (1-based) reads `[Pasted text #n +{extra} lines]`.
+    fn pastes(extra: usize, count: usize) -> Pastes {
+        let mut pastes = Pastes::default();
         for _ in 0..count {
             let payload = (0..=extra)
                 .map(|i| format!("l{i}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            chips.add_paste(payload);
+            pastes.add(payload);
         }
-        chips
-    }
-
-    /// The label paste chip `number` shows.
-    fn chip(chips: &Chips, number: model::PasteNumber) -> &str {
-        chips.label(model::ChipId::Paste(number))
+        pastes
     }
 
     #[test]
     fn test_short_line_no_wrap() {
         let ls = lines(&["hello"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 80);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 80);
         assert_eq!(vis.len(), 1);
         assert_eq!(vis[0].logical_line, 0);
         assert_eq!(vis[0].char_start, 0);
@@ -246,7 +245,7 @@ mod tests {
     #[test]
     fn test_long_line_wraps() {
         let ls = lines(&["abcdefghij"]); // 10 chars
-        let vis = build_visual_rows(&ls, &Chips::default(), 4); // width 4
+        let vis = build_visual_rows(&ls, &Pastes::default(), 4); // width 4
         assert_eq!(vis.len(), 3); // 4+4+2
         assert_eq!(vis[0].char_end, 4);
         assert_eq!(vis[1].char_start, 4);
@@ -258,7 +257,7 @@ mod tests {
     #[test]
     fn test_empty_line() {
         let ls = lines(&[""]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 80);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 80);
         assert_eq!(vis.len(), 1);
         assert_eq!(vis[0].char_start, 0);
         assert_eq!(vis[0].char_end, 0);
@@ -269,7 +268,7 @@ mod tests {
     fn test_cjk_boundary() {
         // "你好世界" = 4 chars × 2 width = 8 display cols
         let ls = lines(&["你好世界"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 5); // width 5: fits 2 CJK chars (4 cols), 3rd would be 6
+        let vis = build_visual_rows(&ls, &Pastes::default(), 5); // width 5: fits 2 CJK chars (4 cols), 3rd would be 6
         assert_eq!(vis.len(), 2);
         assert_eq!(vis[0].char_start, 0);
         assert_eq!(vis[0].char_end, 2); // "你好" = 4 display width
@@ -281,7 +280,7 @@ mod tests {
     #[test]
     fn test_cjk_exact_fit() {
         let ls = lines(&["你好"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 4); // exactly fits "你好"
+        let vis = build_visual_rows(&ls, &Pastes::default(), 4); // exactly fits "你好"
         assert_eq!(vis.len(), 1);
         assert_eq!(vis[0].char_end, 2);
     }
@@ -289,7 +288,7 @@ mod tests {
     #[test]
     fn test_multiple_lines_mixed() {
         let ls = lines(&["short", "abcdefghij", ""]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 4);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 4);
         // "short" = 5 chars → 2 vis rows (4+1)
         // "abcdefghij" = 10 chars → 3 vis rows (4+4+2)
         // "" = 1 vis row
@@ -306,12 +305,12 @@ mod tests {
 
     #[test]
     fn test_a_chip_is_never_split() {
-        let chips = chips(4, 1); // chip 1 = "[Pasted text #1 +4 lines]" (25 chars)
-        let chip = chip(&chips, 1);
+        let pastes = pastes(4, 1); // chip 1 = "[Pasted text #1 +4 lines]" (25 chars)
+        let chip = pastes.chip(1);
         let mut ls = lines(&["see "]);
         ls[0].push(model::Segment::Paste(1));
         // Width 20: "see " + chip (25 chars) does not fit on one row.
-        let vis = build_visual_rows(&ls, &chips, 20);
+        let vis = build_visual_rows(&ls, &pastes, 20);
         assert_eq!(vis.len(), 2, "the chip opens a row of its own");
         assert_eq!(vis[0].char_end, 4, "the text before it keeps the first row");
         assert_eq!(vis[1].char_start, 4);
@@ -324,23 +323,23 @@ mod tests {
 
     #[test]
     fn test_a_chip_that_fits_stays_inline() {
-        let chips = chips(4, 1);
+        let pastes = pastes(4, 1);
         let mut ls = lines(&["see "]);
         ls[0].push(model::Segment::Paste(1));
-        let vis = build_visual_rows(&ls, &chips, 80);
+        let vis = build_visual_rows(&ls, &pastes, 80);
         assert_eq!(vis.len(), 1, "plenty of room: one row");
-        assert_eq!(vis[0].char_end, model::flat_len(&ls[0], &chips));
+        assert_eq!(vis[0].char_end, model::flat_len(&ls[0], &pastes));
     }
 
     #[test]
     fn test_text_after_a_chip_keeps_its_place() {
-        let chips = chips(4, 1);
+        let pastes = pastes(4, 1);
         let mut ls = lines(&["ab"]);
         ls[0].push(model::Segment::Paste(1));
         ls[0].push(model::Segment::Text("cd".into()));
-        let chip_len = chip(&chips, 1).chars().count();
+        let chip_len = pastes.chip(1).chars().count();
         // Width 8: "ab" | chip (clipped) | "cd".
-        let vis = build_visual_rows(&ls, &chips, 8);
+        let vis = build_visual_rows(&ls, &pastes, 8);
         assert_eq!(vis.len(), 3);
         assert_eq!((vis[0].char_start, vis[0].char_end), (0, 2));
         assert_eq!((vis[1].char_start, vis[1].char_end), (2, 2 + chip_len));
@@ -352,14 +351,14 @@ mod tests {
 
     #[test]
     fn test_an_over_wide_chip_overflows_its_row_and_keeps_going() {
-        let chips = chips(9, 1); // "[Pasted text #1 +9 lines]" = 26 chars
-        let chip_len = chip(&chips, 1).chars().count();
+        let pastes = pastes(9, 1); // "[Pasted text #1 +9 lines]" = 26 chars
+        let chip_len = pastes.chip(1).chars().count();
         let mut ls = lines(&["ab"]);
         ls[0].push(model::Segment::Paste(1));
         ls[0].push(model::Segment::Text("cd".into()));
         // Width 10: the chip cannot fit any row — it gets one of its own (the
         // widget clips it) and the text after it continues below.
-        let vis = build_visual_rows(&ls, &chips, 10);
+        let vis = build_visual_rows(&ls, &pastes, 10);
         assert_eq!(vis.len(), 3);
         assert_eq!((vis[1].char_start, vis[1].char_end), (2, 2 + chip_len));
         assert_eq!(vis[1].display_width, chip_len);
@@ -371,16 +370,16 @@ mod tests {
 
     #[test]
     fn test_two_chips_do_not_share_a_row_that_does_not_fit_them() {
-        let chips = chips(0, 2); // two "[Pasted text #n]" chips (18 chars each)
+        let pastes = pastes(0, 2); // two "[Pasted text #n]" chips (18 chars each)
         let mut ls = lines(&[""]);
         ls[0].push(model::Segment::Paste(1));
         ls[0].push(model::Segment::Text(" ".into()));
         ls[0].push(model::Segment::Paste(2));
-        let one = chip(&chips, 1).chars().count();
+        let one = pastes.chip(1).chars().count();
         // Width 40: 18 + 1 + 18 = 37 fits.
-        assert_eq!(build_visual_rows(&ls, &chips, 40).len(), 1);
+        assert_eq!(build_visual_rows(&ls, &pastes, 40).len(), 1);
         // Width 30: the second chip moves to a row of its own.
-        let vis = build_visual_rows(&ls, &chips, 30);
+        let vis = build_visual_rows(&ls, &pastes, 30);
         assert_eq!(vis.len(), 2);
         assert_eq!((vis[0].char_start, vis[0].char_end), (0, one + 1));
         assert_eq!((vis[1].char_start, vis[1].char_end), (one + 1, 2 * one + 1));
@@ -391,7 +390,7 @@ mod tests {
     #[test]
     fn test_logical_to_visual_basic() {
         let ls = lines(&["abcdefghij"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 4);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 4);
         // col 0 → vis row 0, col 0
         assert_eq!(logical_to_visual(&vis, 0, 0), (0, 0));
         // col 3 → vis row 0, col 3
@@ -407,7 +406,7 @@ mod tests {
     #[test]
     fn test_logical_to_visual_multi_line() {
         let ls = lines(&["ab", "cdefgh"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 3);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 3);
         // "ab" → 1 vis row
         // "cdefgh" → 2 vis rows (3+3)
         assert_eq!(vis.len(), 3);
@@ -422,8 +421,8 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         let ls = lines(&["hello world this is a test"]);
-        let flat = model::flat(&ls[0], &Chips::default());
-        let vis = build_visual_rows(&ls, &Chips::default(), 10);
+        let flat = model::flat(&ls[0], &Pastes::default());
+        let vis = build_visual_rows(&ls, &Pastes::default(), 10);
         for log_col in 0..flat.chars().count() {
             let (vr, vc) = logical_to_visual(&vis, 0, log_col);
             assert_eq!(
@@ -439,7 +438,7 @@ mod tests {
     #[test]
     fn test_display_col_to_char_ascii_rows() {
         let ls = lines(&["abcdefghij"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 4); // "abcd" | "efgh" | "ij"
+        let vis = build_visual_rows(&ls, &Pastes::default(), 4); // "abcd" | "efgh" | "ij"
         assert_eq!(vis.len(), 3);
         assert_eq!(display_col_to_char("abcdefghij", &vis[0], 0), 0);
         assert_eq!(display_col_to_char("abcdefghij", &vis[0], 3), 3);
@@ -455,7 +454,7 @@ mod tests {
     fn test_display_col_to_char_wide_glyphs() {
         // "你好世界" at width 5 → "你好" (4 cols) | "世界".
         let ls = lines(&["你好世界"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 5);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 5);
         assert_eq!(vis.len(), 2);
         // Either cell of a wide character resolves to *before* that character
         // (a char index has no half-cell precision).
@@ -472,16 +471,16 @@ mod tests {
     #[test]
     fn test_display_col_to_char_empty_and_chip_rows() {
         let ls = lines(&[""]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 10);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 10);
         assert_eq!(display_col_to_char("", &vis[0], 0), 0);
         assert_eq!(display_col_to_char("", &vis[0], 5), 0);
 
         // A chip row maps its cells to the chip's characters (the composer
         // turns that into the whole chip — see `model::column_point`).
-        let chips = chips(4, 1);
-        let chip = chip(&chips, 1);
+        let pastes = pastes(4, 1);
+        let chip = pastes.chip(1);
         let ls: Vec<Line> = vec![vec![model::Segment::Paste(1)]];
-        let vis = build_visual_rows(&ls, &chips, 40);
+        let vis = build_visual_rows(&ls, &pastes, 40);
         assert_eq!(vis.len(), 1);
         assert_eq!(display_col_to_char(chip, &vis[0], 3), 3);
     }
@@ -490,7 +489,7 @@ mod tests {
     fn test_char_display_offset_maps_char_ranges_to_cells() {
         // "你好a好你" at width 6 → "你好a" (5 cols) | "好你".
         let ls = lines(&["你好a好你"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 6);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 6);
         assert_eq!(vis.len(), 2);
         assert_eq!(vis[0].char_end, 3);
         assert_eq!(char_display_offset("你好a好你", &vis[0], 0), 0);
@@ -506,7 +505,7 @@ mod tests {
     #[test]
     fn test_display_col_round_trips_through_char_offsets() {
         let ls = lines(&["你好a好你"]);
-        let vis = build_visual_rows(&ls, &Chips::default(), 6);
+        let vis = build_visual_rows(&ls, &Pastes::default(), 6);
         for (index, vr) in vis.iter().enumerate() {
             for char_col in vr.char_start..vr.char_end {
                 let display = char_display_offset("你好a好你", vr, char_col);

@@ -596,8 +596,7 @@ class ImagesConfig(BaseModel):
     max_bytes: int = S(
         doc="单图原始字节上限（默认 4.5 MiB）",
         notes=(
-            "两个入口同口径：ReadImage 读时拒绝 + 降采样提示；上传端点"
-            "（POST /api/session/media）超限即 400（客户端压缩目标要留在它之下）。\n"
+            "ReadImage 读时拒绝 + 降采样提示。\n"
             "4.5 MiB 是对多数 provider 服务端单图上限（约 5 MB 档）的保守取值；"
             "你的 provider 接受更大时可以调大。"
         ),

@@ -4279,7 +4279,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
- "libc",
  "pretty_assertions",
  "pulldown-cmark",
  "ratatui",

@@ -13,9 +13,6 @@ use wing_api_client::models::{
     SessionListResponse, SettingsGetResponse, SettingsSchemaResponse, SettingsSetResponse,
 };
 
-use crate::util::image_compress::CompressOptions;
-use crate::util::image_compress::CompressedImage;
-
 /// Payload of a background fetch result.
 pub enum FetchPayload {
     /// Session runtime info (model, tokens, thinking, yolo).
@@ -48,22 +45,6 @@ pub enum FetchPayload {
     SettingsSaved(Box<SettingsSetResponse>),
     /// Gateway 半边失败：`conflict` 区分 409（指纹冲突）与传输 / 协议错误。
     SettingsSaveError { message: String, conflict: bool },
-    /// 一条粘贴图片的压缩回执（[`AppIntent::CompressClipboardImage`]）。
-    ///
-    /// `Err` 是给 toast 的文案（压缩器错误已格式化）。这个变体**不属于任何会话**：
-    /// 它回来时走 `App::on_clipboard_compressed`，不看会话守卫（草稿跨会话还在）。
-    ClipboardImage(Result<CompressedImage, String>),
-    /// 一条消息的**后台发送失败**回执（`SendMessage` 后台任务，见
-    /// `runner::spawn_send_message`）。
-    ///
-    /// 条目按 `request_id` 认领（pending 就是它的锚），所以和压缩一样在会话守卫
-    /// **之前**分派：换过会话后也该有反馈（条目不在时只 toast，不碰草稿）。
-    SendFailed {
-        /// 与 `SendMessage` / pending 条目同一个关联 id。
-        request_id: String,
-        /// 给 toast 的文案（`Image upload failed: …` / `Send failed: …`）。
-        reason: String,
-    },
     /// Show a toast message (for errors or success feedback from background tasks).
     Toast { message: String, is_error: bool },
 }
@@ -93,30 +74,14 @@ pub enum AppIntent {
     /// `request_id` — client-generated correlation id; echoes back in
     /// `delivered` / `user_message_accepted` events so the app can match
     /// the message against its pending queue.
-    ///
-    /// `images` — 随消息发出的图片（压缩产物，按提交顺序）。空 = 纯文本，
-    /// runner 走原路径（不上传、帧里没有 `media` 键）；非空时 runner 先逐张
-    /// 上传再发消息（见 `runner::spawn_send_message`）。
     SendMessage {
         content: String,
         tool_call_id: Option<String>,
         request_id: String,
-        images: Vec<crate::util::image_compress::CompressedImage>,
     },
 
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
-
-    /// 压缩一张刚粘贴进来的图片（通道给的是原始字节）。
-    ///
-    /// 压缩在阻塞池上跑（解码 / 缩放 / 编码是纯 CPU），结果经
-    /// [`FetchPayload::ClipboardImage`] 回到 App —— 事件循环只做入队与插 chip。
-    /// 选项由 App 在入队时从 `paste.image.*` 取（`PasteImageConfig::compress_options`
-    /// 已夹紧越界值），所以改配置只影响之后的那一张。
-    CompressClipboardImage {
-        bytes: Vec<u8>,
-        options: CompressOptions,
-    },
 
     /// 切换当前会话的 pin（置顶 = 会话上的一个普通标签，前端约定、后端零感知
     /// ——见 `crate::shared::pinning`；写入走通用的 `/api/session/tag`）。

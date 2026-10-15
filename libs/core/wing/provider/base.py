@@ -6,7 +6,7 @@
 
 **无状态契约**：provider 实例共享于全部会话（生命周期归
 ``wing.provider.pool``），实例上只允许存在「配置 + 连接池」两类状态；
-一切会话级参数（缓存亲和的 session id、会话媒体读接口、thinking / effort
+一切会话级参数（缓存亲和的 session id、媒体池读接口、thinking / effort
 开关）经 `RequestOptions` 在**每次调用**时注入。实例的关闭（`retire`）
 不打断在途请求：退场只在在途计数归零时真正关闭 client——重试栈因此
 不会绑死在一个已被关闭的 client 上（reload 与在途调用的竞态根因）。
@@ -35,7 +35,7 @@ class RequestOptions:
     - ``session_id``：缓存亲和的 prompt cache key（explicit_cache_mode 的
       OpenAI 兼容 provider 据此下发 ``prompt_cache_key``；
       Anthropic 走 cache_control，不需要）；
-    - ``media``：会话媒体读接口——序列化图片时按 id 读字节；
+    - ``media``：会话媒体池读接口——序列化图片时按 id 读字节；
     - ``thinking`` / ``reasoning_effort``：会话级开关覆盖；None = 跟随
       provider 配置（extra_body / config.reasoning_effort）的默认。
     """

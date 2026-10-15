@@ -73,7 +73,7 @@ impl Widget for ComposerWidget<'_> {
 
         // Build visual rows.
         let vis_rows =
-            wrap::build_visual_rows(&self.input.lines, &self.input.chips, text_area_w.max(1));
+            wrap::build_visual_rows(&self.input.lines, &self.input.pastes, text_area_w.max(1));
 
         // Update vertical scroll.
         self.input.update_vertical_scroll(chrome);
@@ -154,7 +154,7 @@ impl Widget for ComposerWidget<'_> {
             // is — the accent is what tells a paste from typing.
             let runs = model::runs(
                 &self.input.lines[vr.logical_line],
-                &self.input.chips,
+                &self.input.pastes,
                 vr.char_start..vr.char_end,
             );
             if runs.is_empty() {

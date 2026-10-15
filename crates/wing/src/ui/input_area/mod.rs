@@ -3,7 +3,6 @@
 pub(crate) mod chrome;
 pub(crate) mod editing;
 pub(crate) mod helpers;
-pub(crate) mod image;
 pub(crate) mod model;
 pub(crate) mod movement;
 pub(crate) mod paste;
@@ -18,48 +17,20 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use chrome::Chrome;
-use model::Chips;
 use model::Line;
+use model::Pastes;
 
 // Re-exports for external use.
 pub use chrome::ActivityRail;
 pub use chrome::MetaRail;
-pub use image::ImagePayload;
 pub use widget::ComposerWidget;
 pub use widget::cursor_screen_pos;
-
-/// What pressing Enter produces: the message text, and the pictures the draft
-/// carried.
-///
-/// The two travel apart on purpose — the text is the draft with its paste
-/// chips expanded, the pictures are their own list in appearance order — because
-/// that is how the message is carried (the backend takes content and media as
-/// separate fields). An image chip therefore leaves *no* trace in `text`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubmitPayload {
-    /// The message text (trimmed; paste chips expanded, pictures absent).
-    pub text: String,
-    /// The pictures the draft held, in appearance order (line by line).
-    pub images: Vec<ImagePayload>,
-}
-
-impl SubmitPayload {
-    /// A text-only payload — the popup completion path, and the tests' entry
-    /// point into the single dispatch path.
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            images: Vec::new(),
-        }
-    }
-}
 
 /// Actions the input area wants the app to take.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputAction {
-    /// User pressed Enter — submit the draft (the composer is already
-    /// cleared).
-    Submit(SubmitPayload),
+    /// User pressed Enter — submit the text.
+    Submit(String),
     /// User pressed Esc.
     Escape,
     /// No action (just editing text).
@@ -69,10 +40,10 @@ pub enum InputAction {
 /// Multi-line text input.
 ///
 /// Text is stored as lines of [`model::Segment`]s (no embedded newlines):
-/// literal text, plus the chips of large pastes and of pasted pictures. Cursor
-/// position is `(row, col)` where `col` is a char index into the line's flat
-/// projection — a chip counts as its visible text (see [`model`]), and the
-/// cursor never rests inside one.
+/// literal text, plus the chips of large pastes. Cursor position is
+/// `(row, col)` where `col` is a char index into the line's flat projection —
+/// a chip counts as its visible text (see [`model`]), and the cursor never
+/// rests inside one.
 pub struct InputArea {
     /// Lines of text. Always has at least one element.
     pub(crate) lines: Vec<Line>,
@@ -86,9 +57,8 @@ pub struct InputArea {
     pub(crate) placeholder: String,
     /// Vertical scroll offset (first visible visual row index).
     pub(crate) vertical_scroll: usize,
-    /// The chips the draft's segments stand for: pastes (expanded on submit)
-    /// and pictures (submitted beside the text).
-    pub(crate) chips: Chips,
+    /// The pastes the draft's chips stand for (expanded on submit).
+    pub(crate) pastes: Pastes,
     /// Maximum number of input lines (configurable).
     pub(crate) max_lines: usize,
     /// The rect the widget rendered into on the last frame.
@@ -114,7 +84,7 @@ impl InputArea {
             desired_col: None,
             placeholder,
             vertical_scroll: 0,
-            chips: Chips::default(),
+            pastes: Pastes::default(),
             max_lines,
             rendered_area: Rect::default(),
         }
@@ -129,7 +99,7 @@ impl InputArea {
     pub fn text(&self) -> String {
         self.lines
             .iter()
-            .map(|line| model::flat(line, &self.chips))
+            .map(|line| model::flat(line, &self.pastes))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -138,7 +108,7 @@ impl InputArea {
     pub fn lines(&self) -> Vec<String> {
         self.lines
             .iter()
-            .map(|line| model::flat(line, &self.chips))
+            .map(|line| model::flat(line, &self.pastes))
             .collect()
     }
 
@@ -190,7 +160,7 @@ impl InputArea {
         let rows = if text_width == 0 {
             1
         } else {
-            wrap::build_visual_rows(&self.lines, &self.chips, text_width)
+            wrap::build_visual_rows(&self.lines, &self.pastes, text_width)
                 .len()
                 .clamp(1, self.max_lines) as u16
         };
@@ -201,14 +171,14 @@ impl InputArea {
     pub(crate) fn is_empty(&self) -> bool {
         self.lines
             .iter()
-            .all(|line| model::flat(line, &self.chips).trim().is_empty())
+            .all(|line| model::flat(line, &self.pastes).trim().is_empty())
     }
 
     // ── Cursor helpers ──────────────────────────────────────────
 
     /// Length of the current line in chars.
     pub(crate) fn current_line_len(&self) -> usize {
-        model::flat_len(&self.lines[self.cursor_row], &self.chips)
+        model::flat_len(&self.lines[self.cursor_row], &self.pastes)
     }
 
     /// Last valid row index.
@@ -231,7 +201,7 @@ impl InputArea {
         // regression here would let typing corrupt a chip's label, so it is
         // worth catching at the key that did it rather than in a later test.
         debug_assert!(
-            !model::inside_chip(&self.lines[self.cursor_row], &self.chips, self.cursor_col),
+            !model::inside_chip(&self.lines[self.cursor_row], &self.pastes, self.cursor_col),
             "cursor at ({}, {}) landed inside a chip",
             self.cursor_row,
             self.cursor_col
@@ -268,7 +238,10 @@ impl InputArea {
                 if self.is_empty() {
                     return InputAction::None;
                 }
-                InputAction::Submit(self.submit_payload())
+                let text = self.expand_and_get_text();
+                let text = text.trim().to_string();
+                self.clear();
+                InputAction::Submit(text)
             }
             KeyCode::Esc => InputAction::Escape,
             KeyCode::Char(c) => {
@@ -313,29 +286,11 @@ impl InputArea {
 
     // ── Text manipulation ───────────────────────────────────────
 
-    /// The submit product: the draft's text with its paste chips expanded, the
-    /// pictures it holds in appearance order — then the draft is cleared.
-    ///
-    /// The payloads are *taken* (not copied) because the draft is on its way
-    /// out; the text is read first so an expansion never races the clear. A
-    /// draft that holds nothing but an image still submits: the chip is
-    /// content (`is_empty` reads the screen), and a picture-only message is a
-    /// legal one.
-    pub(crate) fn submit_payload(&mut self) -> SubmitPayload {
-        let text = self.expand_and_get_text().trim().to_string();
-        let images = self.chips.take_images(&self.lines);
-        self.clear();
-        SubmitPayload { text, images }
-    }
-
     /// Set the text (used for draft restoration / popup completion).
     ///
     /// The text is taken literally: it can never grow a live chip, even if it
     /// spells one out — chips belong to the draft that inserted them, and this
-    /// one has no payloads. Both registries go with the old draft, so a
-    /// replaced draft **drops its pictures**: a paste payload survives as the
-    /// text it stood for, a picture has no text form, and keeping the bytes
-    /// without a chip would build an attachment the user cannot see.
+    /// one has no payloads.
     pub fn set_text(&mut self, text: &str) {
         self.lines = if text.is_empty() {
             vec![Vec::new()]
@@ -346,7 +301,7 @@ impl InputArea {
         self.cursor_col = self.current_line_len();
         self.desired_col = None;
         self.vertical_scroll = 0;
-        self.chips.clear();
+        self.pastes.clear();
     }
 
     /// Clear input and reset cursor.
@@ -356,7 +311,7 @@ impl InputArea {
         self.cursor_col = 0;
         self.desired_col = None;
         self.vertical_scroll = 0;
-        self.chips.clear();
+        self.pastes.clear();
     }
 
     // ── Scroll management ───────────────────────────────────────
@@ -371,7 +326,7 @@ impl InputArea {
         // the rows that were really drawn (a collapsed text area still wraps at
         // one column).
         let text_width = (chrome.text_width as usize).max(1);
-        let vis_rows = wrap::build_visual_rows(&self.lines, &self.chips, text_width);
+        let vis_rows = wrap::build_visual_rows(&self.lines, &self.pastes, text_width);
         let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
         if vis_row < self.vertical_scroll {
@@ -399,14 +354,14 @@ impl InputArea {
     /// ([`model::column_point`]) — the same unit-snapping the hit test reports.
     pub fn set_cursor_from_visual(&mut self, chrome: Chrome, vis_row: usize, vis_col: u16) {
         let text_width = chrome.text_width as usize;
-        let vis_rows = wrap::build_visual_rows(&self.lines, &self.chips, text_width.max(1));
+        let vis_rows = wrap::build_visual_rows(&self.lines, &self.pastes, text_width.max(1));
         let Some(last) = vis_rows.len().checked_sub(1) else {
             return;
         };
         let row = vis_rows[vis_row.min(last)];
         let point = model::column_point(
             &self.lines[row.logical_line],
-            &self.chips,
+            &self.pastes,
             &row,
             vis_col as usize,
             text_width,
@@ -422,12 +377,12 @@ impl InputArea {
     pub fn cursor_screen_pos(&self, area: &Rect) -> (u16, u16) {
         let chrome = Chrome::of(*area);
         let text_width = chrome.text_width as usize;
-        let vis_rows = wrap::build_visual_rows(&self.lines, &self.chips, text_width.max(1));
+        let vis_rows = wrap::build_visual_rows(&self.lines, &self.pastes, text_width.max(1));
         let (vis_row, vis_col) =
             wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
 
         // Compute display width of the visual column portion.
-        let line = model::flat(&self.lines[self.cursor_row], &self.chips);
+        let line = model::flat(&self.lines[self.cursor_row], &self.pastes);
         let vr = &vis_rows[vis_row.min(vis_rows.len() - 1)];
         let col_display: usize = line
             .chars()
@@ -714,26 +669,6 @@ mod tests {
         assert_eq!(input.cursor_col, 5);
     }
 
-    /// `move_end` 只管当前行；`move_draft_end` 才落到**整份草稿**的末尾（失败回填
-    /// 把消息接在草稿末尾时，用户的光标可能停在中间某行）。
-    #[test]
-    fn move_draft_end_reaches_the_last_line() {
-        let mut input = InputArea::new("");
-        input.set_text("第一行\n第二行\n第三行");
-        input.cursor_row = 0;
-        input.cursor_col = 1;
-        input.move_end();
-        assert_eq!((input.cursor_row, input.cursor_col), (0, 3), "只在当前行");
-
-        input.cursor_col = 0;
-        input.move_draft_end();
-        assert_eq!(
-            (input.cursor_row, input.cursor_col),
-            (2, "第三行".chars().count()),
-            "最后一行行尾"
-        );
-    }
-
     // ── Key event tests ──────────────────────────────────────
 
     #[test]
@@ -741,7 +676,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("hello");
         let action = input.handle_key(key(KeyCode::Enter), chrome(80));
-        assert_eq!(action, InputAction::Submit(SubmitPayload::text("hello")));
+        assert_eq!(action, InputAction::Submit("hello".into()));
         assert_eq!(input.text(), "");
     }
 
@@ -901,7 +836,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("hello");
         let action = input.handle_key(key(KeyCode::Char('\r')), chrome(80));
-        assert_eq!(action, InputAction::Submit(SubmitPayload::text("hello")));
+        assert_eq!(action, InputAction::Submit("hello".into()));
     }
 
     #[test]
@@ -909,7 +844,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.set_text("hello");
         let action = input.handle_key(key(KeyCode::Char('\n')), chrome(80));
-        assert_eq!(action, InputAction::Submit(SubmitPayload::text("hello")));
+        assert_eq!(action, InputAction::Submit("hello".into()));
     }
 
     #[test]
@@ -928,7 +863,7 @@ mod tests {
         input.insert_paste("big\npaste\ntext".into());
         input.set_text("[Pasted text #1 +2 lines]");
         assert_eq!(
-            input.chips.paste_payload(1),
+            input.pastes.payload(1),
             None,
             "a restored draft holds no payloads"
         );
@@ -989,7 +924,7 @@ mod tests {
         assert_eq!(input.lines(), ["see "]);
         assert_eq!(input.cursor_col, 4, "the cursor lands where the chip was");
         assert_eq!(
-            input.chips.paste_payload(1),
+            input.pastes.payload(1),
             None,
             "the payload goes with the chip"
         );
@@ -1006,7 +941,7 @@ mod tests {
         input.cursor_col = 4;
         input.delete_forward();
         assert_eq!(input.lines(), ["see "]);
-        assert_eq!(input.chips.paste_payload(1), None);
+        assert_eq!(input.pastes.payload(1), None);
     }
 
     #[test]
@@ -1067,7 +1002,7 @@ mod tests {
             (0, 4 + chip.chars().count()),
             "the cursor lands at the chip's trailing edge"
         );
-        assert_eq!(input.chips.paste_payload(1), Some("x\ny"));
+        assert_eq!(input.pastes.payload(1), Some("x\ny"));
         assert_eq!(input.expand_and_get_text(), "see x\nytail");
     }
 
@@ -1086,7 +1021,7 @@ mod tests {
         let chip = "[Pasted text #1 +1 lines]";
         assert_eq!(input.lines(), [format!("see {chip}tail")]);
         assert_eq!((input.cursor_row, input.cursor_col), (0, 4));
-        assert_eq!(input.chips.paste_payload(1), Some("x\ny"));
+        assert_eq!(input.pastes.payload(1), Some("x\ny"));
         assert_eq!(input.expand_and_get_text(), "see x\nytail");
     }
 
@@ -1110,10 +1045,7 @@ mod tests {
         let mut input = InputArea::new("");
         input.insert_str("1\n2\n3\n4\n5");
         let action = input.handle_key(key(KeyCode::Enter), chrome(80));
-        assert_eq!(
-            action,
-            InputAction::Submit(SubmitPayload::text("1\n2\n3\n4\n5"))
-        );
+        assert_eq!(action, InputAction::Submit("1\n2\n3\n4\n5".into()));
     }
 
     #[test]
@@ -1125,7 +1057,7 @@ mod tests {
         // nothing), and submitting gives the text back untouched.
         assert_eq!(input.lines(), ["[Pasted text #1]"]);
         let action = input.handle_key(key(KeyCode::Enter), chrome(80));
-        assert_eq!(action, InputAction::Submit(SubmitPayload::text(long_text)));
+        assert_eq!(action, InputAction::Submit(long_text));
     }
 
     #[test]
@@ -1134,100 +1066,6 @@ mod tests {
         let text = "x".repeat(200);
         input.insert_str(&text);
         assert!(!input.lines().iter().any(|l| l.starts_with("[Pasted text")));
-    }
-
-    // ── Submit product (text + pictures) ─────────────────────
-
-    /// A compressed picture of `bytes` bytes, 4 × 2.
-    fn picture(bytes: usize) -> crate::util::image_compress::CompressedImage {
-        crate::util::image_compress::CompressedImage {
-            bytes: vec![0; bytes],
-            width: 4,
-            height: 2,
-        }
-    }
-
-    #[test]
-    fn submit_carries_the_text_and_the_pictures_apart() {
-        let mut input = InputArea::new("");
-        input.insert_str("look\nat this");
-        input.insert_image(picture(2048));
-        input.insert_char('!');
-        let payload = input.submit_payload();
-        assert_eq!(
-            payload.text, "look\nat this!",
-            "the picture leaves no trace in the text"
-        );
-        assert_eq!(payload.images.len(), 1);
-        assert_eq!(payload.images[0].label, "[Image #1 4×2 2KB]");
-        assert_eq!(payload.images[0].image.bytes.len(), 2048);
-        // The draft and both registries are gone.
-        assert_eq!(input.text(), "");
-        assert!(input.chips.paste_payload(1).is_none());
-        assert!(input.submit_payload().images.is_empty());
-    }
-
-    #[test]
-    fn submit_keeps_the_pictures_in_appearance_order() {
-        let mut input = InputArea::new("");
-        input.insert_image(picture(111));
-        input.insert_image(picture(222));
-        input.insert_newline();
-        input.cursor_row = 0;
-        input.cursor_col = 0;
-        input.insert_image(picture(333));
-        // Line 0 now shows 3 then 1, line 1 shows 2: appearance order is the
-        // draft's order, not the registration order.
-        let payload = input.submit_payload();
-        let sizes: Vec<usize> = payload
-            .images
-            .iter()
-            .map(|image| image.image.bytes.len())
-            .collect();
-        assert_eq!(sizes, vec![333, 111, 222]);
-        assert_eq!(payload.images[0].label, "[Image #3 4×2 333B]");
-    }
-
-    #[test]
-    fn a_draft_of_pictures_alone_submits() {
-        let mut input = InputArea::new("");
-        input.insert_image(picture(10));
-        assert!(!input.is_empty(), "a chip is content, not blank");
-        match input.handle_key(key(KeyCode::Enter), chrome(80)) {
-            InputAction::Submit(payload) => {
-                assert_eq!(payload.text, "");
-                assert_eq!(payload.images.len(), 1);
-            }
-            other => panic!("a picture-only draft must submit, got {other:?}"),
-        }
-    }
-
-    /// The documented edge: a rewritten draft cannot keep a payload whose chip
-    /// it no longer shows (see `set_text`).
-    #[test]
-    fn set_text_drops_the_pictures_of_the_replaced_draft() {
-        let mut input = InputArea::new("");
-        input.insert_str("see this\n");
-        input.insert_image(picture(64));
-        input.set_text("/model gpt");
-        assert_eq!(input.text(), "/model gpt");
-        assert!(input.submit_payload().images.is_empty());
-    }
-
-    #[test]
-    fn enter_clears_both_registries() {
-        let mut input = InputArea::new("");
-        input.insert_str("see ");
-        input.insert_paste("one\ntwo\nthree".into());
-        input.insert_image(picture(64));
-        let action = input.handle_key(key(KeyCode::Enter), chrome(80));
-        match action {
-            InputAction::Submit(payload) => assert_eq!(payload.images.len(), 1),
-            other => panic!("expected a submit, got {other:?}"),
-        }
-        // Numbers start over on the next draft, exactly like paste chips.
-        input.insert_image(picture(64));
-        assert_eq!(input.text(), "[Image #1 4×2 64B]");
     }
 
     #[test]

@@ -64,7 +64,7 @@
 | `common/` | L0 | 基础库：日志（按日切分 + 轮转）、原子写、进程组管理、重试、token 估算、路径与 id 工具 |
 | `build_info.py`（+`_build_info`、`_version`） | L0 | 构建信息读取口：版本 + commit hash（构建期注入，运行期零 git） |
 | `schema/` | L1 | 领域模型：Message / Tool / ToolParam / ToolError / MediaRef 等公共类型与校验 |
-| `media/` | L1 | 图片媒体纯函数层：id / 格式 / 尺寸 / 信封 / 上传闸门 / 请求期投影 |
+| `media/` | L1 | 图片媒体纯函数层：id / 格式 / 尺寸 / 信封 / 请求期投影 |
 | `chain.py` | L1 | 链拓扑引擎 TrackedList：uuid/parentUuid 链模型，I/O 全部委托 MessageLog |
 | `store/` | L2 | 会话持久状态唯一所有者：SessionStore / MessageLog / SessionMetadata（file / memory 后端） |
 | `event/`、`event_bus.py` | L2 | 事件类型 + 注册表 + 序列化边界（WingEvent / EVENT_TYPES / wire_dump）与全局 EventBus 路由 |

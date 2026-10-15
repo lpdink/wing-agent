@@ -15,7 +15,6 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
-    first_user_title,
     validate_media_content,
     validate_media_id,
 )
@@ -54,12 +53,9 @@ class MemorySessionStore(SessionStore):
     def __init__(self) -> None:
         self._metadata: dict[str, SessionMetadata] = {}
         self._logs: dict[str, MemoryMessageLog] = {}
-        self._media: dict[str, dict[str, bytes]] = {}
-        """媒体对象：per-session 键空间（``dict[session_id][media_id]``）。
-
-        与 file 后端同语义——媒体是**会话私有**资产，两个会话互不可见（自包含）；
-        没有老池兼容面（内存后端从未有过跨会话的持久池）。durable=False 决定它
-        不跨进程。"""
+        self._media: dict[str, bytes] = {}
+        """媒体池：实例级共享（同一 store 的多个会话读写同一字典，与 file
+        后端"同一 root 共享 .media"语义一致）。durable=False 决定它不跨进程。"""
 
     # ── metadata ──────────────────────────────
 
@@ -89,43 +85,22 @@ class MemorySessionStore(SessionStore):
             self._logs[session_id] = message_log
         return message_log
 
-    # ── 媒体字节（内容寻址，session 私有）─────────
+    # ── 媒体字节 ──────────────────────────────
 
-    def _media_bucket(self, session_id: str) -> dict[str, bytes]:
-        """该会话的媒体桶（只读视图；键空间按会话隔离）。"""
-        validate_session_id(session_id)
-        return self._media.get(session_id, {})
-
-    def write_media(self, session_id: str, media_id: str, data: bytes) -> None:
+    def write_media(self, media_id: str, data: bytes) -> None:
         """写入媒体字节（幂等：内容寻址下同名即同内容，首写即终值）。
 
         首写路径校验 id 与字节一致（内容寻址完整性）。
         """
-        validate_session_id(session_id)
         validate_media_id(media_id)
-        bucket = self._media.get(session_id)
-        if bucket is not None and media_id in bucket:
+        if media_id in self._media:
             return
         validate_media_content(media_id, data)
-        self._media.setdefault(session_id, {})[media_id] = data
+        self._media[media_id] = data
 
-    def read_media(self, session_id: str, media_id: str) -> bytes | None:
+    def read_media(self, media_id: str) -> bytes | None:
         validate_media_id(media_id)
-        return self._media_bucket(session_id).get(media_id)
-
-    def media_exists(self, session_id: str, media_id: str) -> bool:
-        validate_media_id(media_id)
-        return media_id in self._media_bucket(session_id)
-
-    def media_path(self, session_id: str, media_id: str) -> str | None:
-        """内存后端没有本地文件——恒 None（消费方降级为"不带路径"的占位文本）。"""
-        validate_media_id(media_id)
-        self._media_bucket(session_id)
-        return None
-
-    def materialize(self, session_id: str, media_id: str) -> bool:
-        """内存后端没有老池可物化：真值即"该会话桶里已有此对象"。"""
-        return self.media_exists(session_id, media_id)
+        return self._media.get(media_id)
 
     # ── 查询 ──────────────────────────────────
 
@@ -182,7 +157,10 @@ class MemorySessionStore(SessionStore):
 
             first_user: str | None = None
             if metadata.session_name is None and message_log is not None:
-                first_user = first_user_title(message_log.iter_all())
+                for record in message_log.iter_all():
+                    if record.get("role") == "user":
+                        first_user = (record.get("content") or "")[:100]
+                        break
 
             result.append(
                 SessionSummary(

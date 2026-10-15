@@ -14,7 +14,6 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use wing_api_client::models::MediaRef;
 use wing_api_client::models::SessionUsage;
 
 // ============================================================
@@ -203,16 +202,38 @@ fn default_role() -> String {
     "user".into()
 }
 
+/// 一条媒体引用（`tool_call_result` 追加的 `tool_media` 项）——镜像
+/// Python `wing.schema.MediaRef` 的投影。
+///
+/// 放在 `protocol/events.rs` 而非 `protocol/history.rs`：唯一消费点是 WS
+/// 事件镜像；`SessionMessage`（history 投影）本期保持原样，改动面收敛在
+/// 单文件内。
+///
+/// 容忍策略：整个 `tool_media` 键在旧网关上缺席；`name` 还可能缺键、也可能
+/// 为 `null`（wire 只剥离顶层 null，嵌套 null 原样在线）。条目级容错见
+/// `deserialize_tool_media`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMediaRef {
+    /// 图片字节的 sha256 hex——即存储 id。
+    pub id: String,
+    /// `image/png` | `image/jpeg` | `image/webp` | `image/gif`。
+    pub mime: String,
+    /// 原始字节数。
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    /// 展示名（basename，不含目录）；旧载荷上缺席。
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// `tool_media` 的宽容解码，两层：
 ///
 /// - `null` / 缺席 / 非数组形状 → 空表（旧网关只发缺键；中间代理可能发 null）；
 /// - 数组里单条畸形（缺字段 / 类型不符）→ **只跳过该条**，保留其余合法条目
 ///   与整帧事件——一条坏数据不应让 `tool_call_result` 整帧消失（卡片会永远
 ///   停在 Pending、结果行不出现）。
-///
-/// 条目类型是 [`MediaRef`]（见 `wing_api_client::models`）：`name` 缺键或 `null` 都退化
-/// 为 `None`。
-fn deserialize_tool_media<'de, D>(deserializer: D) -> Result<Vec<MediaRef>, D::Error>
+fn deserialize_tool_media<'de, D>(deserializer: D) -> Result<Vec<SessionMediaRef>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -222,13 +243,15 @@ where
     };
     Ok(items
         .into_iter()
-        .filter_map(|item| match serde_json::from_value::<MediaRef>(item) {
-            Ok(media) => Some(media),
-            Err(err) => {
-                tracing::warn!(error = %err, "skipping malformed tool_media entry");
-                None
-            }
-        })
+        .filter_map(
+            |item| match serde_json::from_value::<SessionMediaRef>(item) {
+                Ok(media) => Some(media),
+                Err(err) => {
+                    tracing::warn!(error = %err, "skipping malformed tool_media entry");
+                    None
+                }
+            },
+        )
         .collect())
 }
 
@@ -344,7 +367,7 @@ pub enum WingEvent {
         /// 工具产生的媒体引用（如 ReadImage 的图片）——追加属性。
         /// 旧网关不返回该键；null / 单条畸形都容忍（见 `deserialize_tool_media`）。
         #[serde(default, deserialize_with = "deserialize_tool_media")]
-        tool_media: Vec<MediaRef>,
+        tool_media: Vec<SessionMediaRef>,
         #[serde(flatten)]
         meta: EventMeta,
     },

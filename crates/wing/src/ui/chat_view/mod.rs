@@ -4,8 +4,6 @@
 //!
 //! * **content unit** (`cell`) — [`ChatCell`] and its rendering (what a cell looks like, nothing else)
 //!   plus the pending-message wrapper.
-//! * **message pictures** (`media`) — the label row a user message carries per picture (one display
-//!   text, shared by the live and the replayed paths).
 //! * **content model** (`model`) — the cells, the pending queue, anchored insertion and every streaming
 //!   / by-index mutation. It never reads scroll state or rendering.
 //! * **viewport** (`viewport`) — the scroll offset, the follow contract (pinning / freezing), the
@@ -32,7 +30,6 @@ mod cell;
 mod frame;
 mod image;
 mod link;
-pub(crate) mod media;
 mod model;
 mod viewport;
 
@@ -41,7 +38,6 @@ mod test_support;
 
 pub use cell::ChatCell;
 pub use cell::PendingMessage;
-pub use cell::Submission;
 pub use image::FrameImage;
 pub use link::FrameLink;
 pub use viewport::ChatGeometry;

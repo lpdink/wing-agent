@@ -24,7 +24,7 @@ import re
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -438,13 +438,8 @@ class GatewayWS:
         *,
         tool_call_id: str | None = None,
         request_id: str | None = None,
-        media: Sequence[Mapping[str, Any]] | None = None,
     ) -> str:
-        """发一个 ``ClientRequest`` 帧（返回 request_id）。
-
-        ``media`` 是消息携带的媒体引用（``MediaRef`` 形状的 dict 列表；省略 = 不
-        带该字段，与旧客户端逐字节一致）。
-        """
+        """发一个 ``ClientRequest`` 帧（返回 request_id）。"""
         if self.closed:
             raise WsError(
                 f"cannot send on a closed connection ({self._close_reason or 'closed'})"
@@ -456,8 +451,6 @@ class GatewayWS:
         }
         if tool_call_id is not None:
             frame["tool_call_id"] = tool_call_id
-        if media is not None:
-            frame["media"] = [dict(ref) for ref in media]
         await self._ws.send(json.dumps(frame, ensure_ascii=False))
         self.sent_requests.append(frame)
         return str(frame["request_id"])

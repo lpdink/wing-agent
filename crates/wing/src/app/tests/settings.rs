@@ -55,9 +55,7 @@ use crate::app::settings::save_notice_ok;
 use crate::app::settings::save_notice_text;
 use crate::config::rendering::ImagesMode;
 use crate::shared::panels::settings::InterfaceSource;
-use crate::shared::panels::settings::RowAction;
 use crate::shared::panels::settings::SaveOutcome;
-use crate::shared::panels::settings::ScalarKind;
 use crate::shared::panels::settings::SettingsAction;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
@@ -750,49 +748,6 @@ fn the_open_panel_hands_the_scrollbar_over_and_gives_it_back_on_close() {
 }
 
 // ── 4. 实时预览（§15.3） ───────────────────────────────────
-
-/// 06 落地的 `paste.image.*` 在**真实 catalog** 的面板里可见、可改（本步骤只验证，
-/// 不重复添加条目——声明由 06 完成，重复声明会触 phantom-key 门禁）。
-///
-/// 走的是与用户完全相同的按键路径：Tab 到 Interface 锚点 → 搜索定位 → Enter 打开
-/// 内联编辑器 → 改值提交 → Interface 根的实时预览写进 `self.config`。
-#[test]
-fn the_real_catalog_exposes_the_paste_picture_rows() {
-    let mut app = test_app();
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(InterfaceSource {
-            groups: crate::config::catalog::interface_groups(),
-            catalog: crate::config::catalog::interface_catalog(),
-            doc: json!({}),
-        }),
-    );
-
-    press(&mut app, KeyCode::Tab);
-    goto(&mut app, "paste.image.quality");
-
-    let row = {
-        let panel = panel(&app);
-        panel.rows()[panel.cursor()].clone()
-    };
-    assert_eq!(row.path, "paste.image.quality", "搜索命中 ⇒ 行在右栏可见");
-    assert!(
-        matches!(row.action, RowAction::Edit(ScalarKind::Int)),
-        "可改：内联数字编辑器（{:?}）",
-        row.action
-    );
-
-    press(&mut app, KeyCode::Enter); // 打开编辑器（预填声明默认 85）
-    press_event(&mut app, ctrl(KeyCode::Char('u'))); // 清空缓冲
-    type_text(&mut app, "90");
-    press(&mut app, KeyCode::Enter); // 提交
-
-    assert_eq!(
-        app.config.paste.image.quality, 90,
-        "Interface 根的值改动即时预览（下一次粘贴读新参数）"
-    );
-}
 
 #[test]
 fn editing_an_interface_color_through_the_real_key_path_previews_it() {

@@ -292,69 +292,6 @@ fn test_a_paste_chip_never_breaks_in_half() {
     );
 }
 
-/// A compressed picture of `bytes` bytes, 4 × 2.
-fn picture(bytes: usize) -> crate::util::image_compress::CompressedImage {
-    crate::util::image_compress::CompressedImage {
-        bytes: vec![0; bytes],
-        width: 4,
-        height: 2,
-    }
-}
-
-/// An image chip draws like a paste chip: inline on the draft's own row, the
-/// whole label in the accent colour, no row of its own.
-#[test]
-fn test_an_image_chip_sits_inline_in_the_draft() {
-    let mut app = app_with_draft("see ");
-    app.input.insert_image(picture(4096)); // → "[Image #1 4×2 4KB]"
-    let (buf, composer) = draw_frame(&mut app, 60, 10);
-    let (text_x, text_y, _) = composer_text(&app);
-    let palette = crate::config::ThemePalette::default();
-
-    let width = composer.width as usize;
-    let content = "│ ❯ see [Image #1 4×2 4KB]";
-    assert_eq!(
-        card_row(&buf, composer, composer.y + 1),
-        format!("{content}{}│", " ".repeat(pad(width, content))),
-        "the chip stays on the draft's own row:\n{}",
-        frame_text(&buf)
-    );
-    assert_eq!(composer.height, 1 + 2, "and it adds no row of its own");
-
-    // "see " is draft text, the label is a chip (the accent is its only mark).
-    assert_eq!(buf[(text_x, text_y)].fg, palette.text, "the typed text");
-    let chip_x = text_x + "see ".chars().count() as u16;
-    assert_eq!(buf[(chip_x, text_y)].fg, palette.accent, "the chip");
-    assert_eq!(
-        buf[(chip_x + 1, text_y)].fg,
-        palette.accent,
-        "the whole label, not its first cell"
-    );
-}
-
-/// An image chip never breaks in half either — the wrapper knows one kind of
-/// chip, not two.
-#[test]
-fn test_an_image_chip_never_breaks_in_half() {
-    let mut app = app_with_draft("see ");
-    app.input.insert_image(picture(4096));
-    // Width 24 → a 16-column text area: "see " + the 19-char label cannot fit.
-    let (buf, composer) = draw_frame(&mut app, 24, 11);
-    assert_eq!(composer.height, 2 + 2, "the chip opens a row of its own");
-
-    let first = card_row(&buf, composer, composer.y + 1);
-    let second = card_row(&buf, composer, composer.y + 2);
-    assert!(first.starts_with("│ ❯ see"), "{first}");
-    assert!(
-        second.starts_with("│   [Image #1"),
-        "the label starts on the second row: {second}"
-    );
-    assert!(
-        !first.contains("[Image"),
-        "nothing of the label is left behind: {first}"
-    );
-}
-
 /// A squeezed composer (the terminal is too short for the whole layout) gets
 /// fewer rows than the height request asked for, so the card degrades to a
 /// bare text area — and the editor must wrap at *those* columns. The chrome

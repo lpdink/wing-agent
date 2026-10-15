@@ -336,7 +336,7 @@ class TestSessionWiring:
 
     @pytest.mark.asyncio
     async def test_media_access_wired_to_store_root(self):
-        """file 后端：MediaAccess 的读写落到本会话目录（session 私有媒体目录）。"""
+        """file 后端：MediaAccess 的读写落到 WING_SESSIONS_PATH 的 .media 池。"""
         from wing.runtime import WingRuntime
 
         session = WingRuntime().create_session()
@@ -348,8 +348,7 @@ class TestSessionWiring:
             mid = hashlib.sha256(payload).hexdigest()
             media.write(mid, payload)
             root = Path(os.environ["WING_SESSIONS_PATH"])
-            sid = session.session_id
-            assert (root / sid / "media" / mid).read_bytes() == payload
-            assert FileSessionStore(root).read_media(sid, mid) == payload
+            assert (root / ".media" / mid[:2] / mid).read_bytes() == payload
+            assert FileSessionStore(root).read_media(mid) == payload
         finally:
             await agent.shutdown()

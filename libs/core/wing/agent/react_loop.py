@@ -154,11 +154,6 @@ class ReActLoop:
 
         消费语义为 drain-and-merge——block 等待首条消息，再 non-blocking
         取出剩余消息，将所有 user content 拼接为一条消息注入 context。
-
-        媒体同样合并：batch 内各条 user 消息的 media 按**消息序 × 消息内序**
-        concat 成一条消息的 media（与 content 的拼接同源同序）。content 为空但
-        携带 media 的消息（纯图贴图）**合法**——只有 content 与 media 都空才
-        直接返回。
         """
         first = await self._inbox.get()
         batch = [first] + self._inbox.drain()
@@ -168,16 +163,10 @@ class ReActLoop:
             for b in batch
             if b.message.role == "user" and b.message.content
         )
-        media = [
-            ref
-            for b in batch
-            if b.message.role == "user"
-            for ref in (b.message.media or [])
-        ]
-        if not content and not media:
+        if not content:
             return
 
-        message = Message(role="user", content=content, media=media or None)
+        message = Message(role="user", content=content)
         request_id = first.request_id
 
         # 进入 working 状态（inbox.get 返回后才设置——等待期间为 idle）
@@ -190,17 +179,10 @@ class ReActLoop:
             # 消费确认：被合并进本轮输入的用户消息在此正式"被模型接受"。
             # 前端据此把排队中的消息上移进聊天历史。只对外部投递发射
             # （request_id 存在）；内部投递（无 request_id）不发射。
-            # 纯图消息（content 为空、media 非空）同样发射——否则它的 pending
-            # 会一直卡到 turn end。先于 turn_started——事件流顺序即渲染顺序。
+            # 先于 turn_started——事件流顺序即渲染顺序。
             for b in batch:
-                if (
-                    b.request_id
-                    and b.message.role == "user"
-                    and (b.message.content or b.message.media)
-                ):
-                    self._sink.user_message_accepted(
-                        b.message.content or "", b.request_id
-                    )
+                if b.request_id and b.message.role == "user" and b.message.content:
+                    self._sink.user_message_accepted(b.message.content, b.request_id)
             self._sink.turn_started()
 
             modified_content = await hooks.invoke_async(
@@ -291,9 +273,6 @@ class ReActLoop:
         # Steer: drain inbox 中积攒的用户消息。每条被消费的消息都是在此刻
         # 真正"被模型接受"——逐条发射 UserMessageAcceptedEvent，前端据此
         # 把排队消息上移（落在工具结果之后、下一轮输出之前）。
-        # `drain_for_steer` 是**部分** drain（D7）：只取队首连续的无 media
-        # 纯文本；首条带图消息起全部留队列——本轮的注入口径因此恒为纯文本，
-        # 带图消息与它后面的消息一起走下一轮 drain-and-merge。
         if self.steer and tc_results:
             steer_items = self._inbox.drain_for_steer()
             if steer_items:
@@ -418,7 +397,7 @@ class ReActLoop:
     ) -> Message:
         """消费 provider 的 chunk 流：发射流式事件，组装 assistant Message。
 
-        options 是本次调用的会话级参数（session id 缓存亲和 / 会话媒体 / 开关）——
+        options 是本次调用的会话级参数（session id 缓存亲和 / 媒体池 / 开关）——
         入口到首次迭代之间 MUST 保持无 await（晚解析纪律的落点，见
         `_call_llm_validated`）。
 

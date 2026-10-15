@@ -178,13 +178,7 @@ impl App {
                 }
             }
 
-            WingEvent::Error { message, meta, .. } => {
-                // 被拒的 `ClientRequest` 帧带回客户端的 `request_id`（02 的帧关联）：
-                // 命中的那条消息根本没进模型（闸门在 Delivered 之前），所以把产物从
-                // pending 队列取回、还给草稿——否则随后 `done` 的 `promote_all_pending`
-                // 会把它当「已发送」晋升。**无关联的 error**（request_id 是新 uuid 的
-                // turn 级失败，或旧网关的帧）匹配不到任何条目，行为逐字不变。
-                let rejected = self.chat.take_pending(&meta.request_id);
+            WingEvent::Error { message, .. } => {
                 self.finish_turn();
                 // The backend cancels every feedback waiter when a turn dies —
                 // a stale ask panel must not outlive it (nor get answered into
@@ -194,14 +188,6 @@ impl App {
                 // The most specific failure text wing has for the record.
                 self.set_program_status(State::Error, Some(&message));
                 self.notify_unfocused(message.clone(), AttentionKind::Error);
-                if let Some(submission) = rejected {
-                    // 与发送失败同一条回填路径（内容已经在草稿里，理由在 Error cell / toast 里）。
-                    self.restore_draft(submission);
-                    self.show_toast(Toast::warning(
-                        format!("Not sent — {message}; draft restored"),
-                        std::time::Duration::from_secs(3),
-                    ));
-                }
             }
 
             // ---- Reasoning events ----

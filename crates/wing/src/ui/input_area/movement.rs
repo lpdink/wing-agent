@@ -13,7 +13,7 @@ impl InputArea {
         if self.cursor_col > 0 {
             self.cursor_col = model::unit_start_before(
                 &self.lines[self.cursor_row],
-                &self.chips,
+                &self.pastes,
                 self.cursor_col,
             );
         } else if self.cursor_row > 0 {
@@ -28,7 +28,7 @@ impl InputArea {
         let line_len = self.current_line_len();
         if self.cursor_col < line_len {
             self.cursor_col =
-                model::unit_end_at(&self.lines[self.cursor_row], &self.chips, self.cursor_col);
+                model::unit_end_at(&self.lines[self.cursor_row], &self.pastes, self.cursor_col);
         } else if self.cursor_row < self.last_row() {
             self.cursor_row += 1;
             self.cursor_col = 0;
@@ -38,7 +38,7 @@ impl InputArea {
     /// Build visual rows for movement computation (the rendered chrome).
     fn visual_rows(&self, chrome: Chrome) -> Vec<wrap::VisualRow> {
         let text_width = chrome.text_width as usize;
-        wrap::build_visual_rows(&self.lines, &self.chips, text_width.max(1))
+        wrap::build_visual_rows(&self.lines, &self.pastes, text_width.max(1))
     }
 
     /// The column ↑/↓ should aim at: the sticky one if the previous move set
@@ -49,7 +49,7 @@ impl InputArea {
             return desired;
         }
         let (vis_row, _) = wrap::logical_to_visual(vis_rows, self.cursor_row, self.cursor_col);
-        let flat = model::flat(&self.lines[self.cursor_row], &self.chips);
+        let flat = model::flat(&self.lines[self.cursor_row], &self.pastes);
         wrap::char_display_offset(
             &flat,
             &vis_rows[vis_row.min(vis_rows.len() - 1)],
@@ -70,7 +70,7 @@ impl InputArea {
         let row = vis_rows[target];
         let point = model::column_point(
             &self.lines[row.logical_line],
-            &self.chips,
+            &self.pastes,
             &row,
             desired,
             text_width,
@@ -111,16 +111,6 @@ impl InputArea {
 
     pub(crate) fn move_end(&mut self) {
         self.clear_desired_col();
-        self.cursor_col = self.current_line_len();
-    }
-
-    /// 光标移到**整份草稿**的末尾（最后一行行尾）。
-    ///
-    /// 与 [`Self::move_end`]（当前行行尾）分开：失败回填把消息接在草稿末尾时，草稿
-    /// 可能是多行的，而用户在飞的那几秒里把光标留在了中间某行。
-    pub(crate) fn move_draft_end(&mut self) {
-        self.clear_desired_col();
-        self.cursor_row = self.lines.len() - 1;
         self.cursor_col = self.current_line_len();
     }
 }

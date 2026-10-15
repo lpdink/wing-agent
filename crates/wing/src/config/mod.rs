@@ -4,7 +4,6 @@
 
 pub mod catalog;
 pub mod colors;
-pub mod paste;
 pub mod rendering;
 pub mod store;
 
@@ -194,15 +193,13 @@ impl Default for LayoutConfig {
 ///
 /// Gateway host:port is NOT stored here — it is read from the backend
 /// config (`$WING_HOME/core/config.yaml`) via `backend_config::read_backend_gateway_config()`.
-/// This struct only contains TUI-specific settings (colors, layout, rendering, paste).
+/// This struct only contains TUI-specific settings (colors, layout, rendering).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub colors: ColorsConfig,
     pub layout: LayoutConfig,
     pub rendering: RenderingConfig,
-    /// 粘贴内容在发出前的处理（图片压缩参数）。
-    pub paste: paste::PasteConfig,
     /// API key for gateway authentication.
     /// Empty or None → no auth header sent.
     pub api_key: Option<String>,

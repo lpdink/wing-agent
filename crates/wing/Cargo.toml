@@ -34,7 +34,6 @@ similar = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-libc = { workspace = true }
 unicode-width = { workspace = true }
 unicode-linebreak = { workspace = true }
 dirs = { workspace = true }
@@ -48,8 +47,6 @@ agent-client-protocol = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = "1"
-# stdin 接驳的集成测试（tests/stdin_proxy_pty.rs 等）自己开 pty、动 fd 0。
-libc = { workspace = true }
 criterion = "0.5"
 # Integration tests build their own PNG fixtures through the same decoder the library uses.
 image = { workspace = true }

@@ -12,7 +12,6 @@ use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelMode;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::input_area::SubmitPayload;
 use crate::ui::welcome::SessionFacts;
 
 fn utc_ago(secs: i64) -> String {
@@ -1317,7 +1316,7 @@ fn accepted_event(origin_request_id: &str) -> WingEvent {
 #[test]
 fn test_accepted_event_promotes_pending() {
     let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(app.submit_message("hello"));
     let pending_id = app.chat.pending[0].request_id.clone();
     app.drain_intents();
 
@@ -1335,7 +1334,7 @@ fn test_accepted_event_promotes_pending() {
 #[test]
 fn test_accepted_event_unknown_id_ignored() {
     let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(app.submit_message("hello"));
     app.drain_intents();
 
     app.handle_event(accepted_event("someone-elses-id"));
@@ -1348,7 +1347,7 @@ fn test_accepted_event_unknown_id_ignored() {
 #[test]
 fn test_done_flushes_remaining_pending() {
     let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(app.submit_message("hello"));
     app.drain_intents();
 
     app.handle_event(WingEvent::Done { meta: event_meta() });
@@ -1362,95 +1361,10 @@ fn test_done_flushes_remaining_pending() {
     );
 }
 
-/// 服务端拒绝（02 的帧关联）：`error` 帧带回**客户端的 `request_id`** 时，命中的
-/// pending 条目从队列取回、内容还给草稿；绝不能被随后 `done` 的兜底晋升成「已发送」。
-#[test]
-fn test_rejected_send_returns_to_the_draft_and_is_never_promoted() {
-    let mut app = test_app();
-    let picture = crate::util::image_compress::CompressedImage {
-        bytes: vec![0xFF; 16],
-        width: 8,
-        height: 8,
-    };
-    app.submit_message(SubmitPayload {
-        text: "看这张".into(),
-        images: vec![crate::ui::input_area::ImagePayload {
-            image: picture,
-            label: "[Image #1 8×8 16B]".into(),
-        }],
-    });
-    let pending_id = app.chat.pending[0].request_id.clone();
-    app.drain_intents();
-
-    app.handle_event(WingEvent::Error {
-        message: "invalid media ref".into(),
-        status_code: 400,
-        error_code: None,
-        detail: None,
-        meta: EventMeta {
-            created_at: "2026-01-01T00:00:00+00:00".into(),
-            session_id: Some("test-session".into()),
-            request_id: pending_id,
-        },
-    });
-
-    assert!(app.chat.pending.is_empty(), "被拒的条目出队");
-    assert_eq!(
-        app.input.text(),
-        "看这张[Image #1 8×8 16B]",
-        "文本与图片 chip 回到草稿"
-    );
-    assert!(
-        matches!(
-            app.chat.cells.last().map(|c| c.cell()),
-            Some(ChatCell::ErrorMessage(text)) if text == "invalid media ref"
-        ),
-        "错误照旧进 chat"
-    );
-    let toast = app.toast.as_ref().expect("回填要看得见");
-    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Warning);
-    assert!(
-        toast.message.contains("draft restored"),
-        "{}",
-        toast.message
-    );
-
-    // 随后到达的 `done` 不得把它晋升成「已发送」——它已经不在队列里了。
-    app.handle_event(WingEvent::Done { meta: event_meta() });
-    assert!(app.chat.pending.is_empty());
-    assert!(
-        !app.chat
-            .cells
-            .iter()
-            .any(|c| matches!(c.cell(), ChatCell::UserMessage(_))),
-        "被拒的消息绝不进历史（否则它看起来像发成功了）"
-    );
-}
-
-/// 无关联的 `error`（turn 级失败：`request_id` 是后端新生成的 uuid）匹配不到任何
-/// pending 条目——既不碰队列，也不改草稿。
-#[test]
-fn test_uncorrelated_error_leaves_the_pending_alone() {
-    let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("hello")));
-    app.drain_intents();
-
-    app.handle_event(WingEvent::Error {
-        message: "llm exploded".into(),
-        status_code: 500,
-        error_code: None,
-        detail: None,
-        meta: event_meta(),
-    });
-
-    assert_eq!(app.chat.pending.len(), 1, "还在队列里等 accepted");
-    assert_eq!(app.input.text(), "", "草稿没被改写");
-}
-
 #[test]
 fn test_interrupted_discards_pending() {
     let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(app.submit_message("hello"));
     app.drain_intents();
 
     // 旧网关：不带丢弃清单 → 回落到"全部丢弃"的兼容形态。
@@ -1472,10 +1386,10 @@ fn test_interrupted_discards_pending() {
 #[test]
 fn test_interrupted_discards_only_reported_requests() {
     let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("dropped")));
+    assert!(app.submit_message("dropped"));
     app.drain_intents();
     let dropped_id = app.chat.pending[0].request_id.clone();
-    assert!(app.submit_message(SubmitPayload::text("survives")));
+    assert!(app.submit_message("survives"));
     app.drain_intents();
     let survives_id = app.chat.pending[1].request_id.clone();
 

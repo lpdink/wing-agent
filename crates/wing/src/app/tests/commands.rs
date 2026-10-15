@@ -8,7 +8,6 @@ use crate::app::commands;
 use crate::app::*;
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::input_area::SubmitPayload;
 
 /// Assert that `text` is consumed as a command (not sent to LLM).
 fn assert_consumed(text: &str) {
@@ -384,7 +383,7 @@ fn test_submit_jumps_to_bottom_and_queues_pending() {
 #[test]
 fn test_submit_intent_carries_pending_request_id() {
     let mut app = test_app();
-    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(app.submit_message("hello"));
 
     assert_eq!(app.chat.pending.len(), 1);
     let pending_id = app.chat.pending[0].request_id.clone();

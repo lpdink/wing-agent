@@ -1020,9 +1020,8 @@ async fn pump(
                 match command {
                     Some(Outbound::Message { session_id, content, tool_call_id }) => {
                         let request_id = crate::protocol::generate_request_id();
-                        // ACP 消息不带图片（图片入口是 TUI 的粘贴通道；契约字段 `None` = 无）。
                         if let Err(err) = ws
-                            .send_message(&session_id, &content, tool_call_id, request_id, None)
+                            .send_message(&session_id, &content, tool_call_id, request_id)
                             .await
                         {
                             tracing::warn!(session_id = %session_id, error = %err, "acp: send_message failed");

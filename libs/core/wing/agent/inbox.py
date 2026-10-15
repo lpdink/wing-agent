@@ -13,7 +13,7 @@ import asyncio
 from dataclasses import dataclass
 
 from wing.common.logger import log
-from wing.schema import MediaRef, Message
+from wing.schema import Message
 
 
 @dataclass
@@ -53,38 +53,14 @@ class Inbox:
         return items
 
     def drain_for_steer(self) -> list[Inbound]:
-        """部分 drain：只取**队首连续**的「无 media 纯文本」user 消息（D7）。
+        """Drain 并筛选可 steer 的用户消息（user role + 非空 content）。
 
         返回 Inbound 列表（保留 request_id），由调用方发射
         UserMessageAcceptedEvent 并经 `format_steer_note` 格式化注入。
-
-        队列语义 = 「steer 变 next turn」：遇到第一条不可 steer 的消息（带 media
-        的贴图消息 / 空 content / 非 user）**立即停止**——它与其后所有消息（含
-        后续纯文本）按原序留在队列，等下一轮 drain-and-merge 一起进上下文。
-        首条带图消息因此天然阻断其后消息：图片与文本同轮进模型，顺序不被打乱
-        （D5：文本/图片分开承载、不承诺交错顺序——但绝不把队列切碎）。
-
-        实现是「先全部 drain、前缀留给调用方、其余按原序回填」：方法体内**无
-        await**，单线程事件循环下取空与回填之间不会与新的 `post` 交错；无界
-        队列的 `put_nowait` 恒不阻塞。旧实现的过滤式 drain 会把不合条件的条目
-        **直接丢弃**（带图消息静默消失）——这里修掉的就是那条数据丢失路径。
         """
-        batch = self.drain()
-        steerable: list[Inbound] = []
-        index = 0
-        while index < len(batch):
-            candidate = batch[index]
-            if not (
-                candidate.message.role == "user"
-                and candidate.message.content
-                and not candidate.message.media
-            ):
-                break
-            steerable.append(candidate)
-            index += 1
-        for item in batch[index:]:
-            self._queue.put_nowait(item)
-        return steerable
+        return [
+            b for b in self.drain() if b.message.role == "user" and b.message.content
+        ]
 
     @staticmethod
     def format_steer_note(items: list[Inbound]) -> str:
@@ -175,30 +151,19 @@ class Inbox:
         request_id: str | None = None,
         role: str = "user",
         tool_call_id: str | None = None,
-        media: list[MediaRef] | None = None,
     ) -> None:
         """接收用户消息或 feedback。
 
         Feedback 严格寻址：只有携带 tool_call_id 且命中 waiter 的消息才会
         resolve 对应 Future；无 id 或 id 已失效的消息一律进队列。
-
-        media 进 ``Message(media=...)``（空列表由 Message 归一为 None）。**定向
-        答复只承载文本**：命中 waiter 时 media 无处安放（Ask 答复通道是纯文本），
-        记 WARN 后按文本 resolve——不发明新语义，也不静默吞掉调用方的意图。
         """
         if tool_call_id is not None:
             if self.resolve(tool_call_id, content):
-                if media:
-                    log.warning(
-                        f"inbox.post: feedback answer for tool_call_id="
-                        f"{tool_call_id} carries {len(media)} media ref(s); "
-                        "directed answers are text-only, media ignored"
-                    )
                 return
             log.info(
                 f"inbox.post: no live feedback waiter for tool_call_id="
                 f"{tool_call_id}, falling through to queue"
             )
 
-        msg = Message(role=role, content=content, media=media)  # ty: ignore
+        msg = Message(role=role, content=content)  # ty: ignore
         await self._queue.put(Inbound(message=msg, request_id=request_id))

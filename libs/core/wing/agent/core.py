@@ -32,7 +32,7 @@ from wing.event import AskEvent, NoticeEvent, WingEvent
 from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
 from wing.provider.pool import get_provider
-from wing.schema import MediaRef, Message, Tool
+from wing.schema import Message, Tool
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
@@ -500,7 +500,7 @@ class WingAgent:
     def request_options(self) -> RequestOptions:
         """本次模型调用的会话级参数（provider 无状态化的唯一注入点）。
 
-        缓存亲和（session id → prompt_cache_key）、会话媒体读接口、thinking /
+        缓存亲和（session id → prompt_cache_key）、媒体池读接口、thinking /
         reasoning_effort 覆盖——全部经这里下发；provider 实例零会话状态。
         """
         return RequestOptions(
@@ -516,10 +516,9 @@ class WingAgent:
         request_id: str | None = None,
         role: str = "user",
         tool_call_id: str | None = None,
-        media: list[MediaRef] | None = None,
     ) -> None:
-        """接收用户消息或 feedback。media 非空时消息携带媒体引用（字节在存储）。"""
-        await self._inbox.post(content, request_id, role, tool_call_id, media=media)
+        """接收用户消息或 feedback。"""
+        await self._inbox.post(content, request_id, role, tool_call_id)
 
     async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。

@@ -382,10 +382,7 @@ mod tests {
     use crate::ui::selection::Selection;
     use crate::ui::selection::SelectionPoint;
 
-    use super::super::Submission;
-    use super::super::test_support::{
-        buffer_text, render_view, render_view_in, reversed_columns, selection_over,
-    };
+    use super::super::test_support::{render_view_in, reversed_columns, selection_over};
 
     #[test]
     fn test_geometry_records_the_frame_that_was_rendered() {
@@ -459,44 +456,6 @@ mod tests {
         let _ = render_view_in(&mut view, Rect::new(0, 0, 40, 10), band);
         assert_eq!(view.geometry().scroll_offset, first - 5);
         assert_eq!(view.content_point_at(0, 0).map(|p| p.row), Some(first - 5));
-    }
-
-    /// 一条带图的用户消息把标签行画在正文之后（frame 断言）：历史行与 pending 行
-    /// 用的是同一段文本（promote 不重拼），形状 = composer chip 的记法。
-    #[test]
-    fn picture_labels_reach_the_frame_for_pending_and_history() {
-        let picture = crate::util::image_compress::CompressedImage {
-            bytes: vec![0xFF; 393_216],
-            width: 1024,
-            height: 768,
-        };
-        let mut view = ChatView::new();
-        view.push_pending(
-            "req-1".into(),
-            Submission {
-                content: "看这张".into(),
-                images: vec![picture.clone()],
-            },
-        );
-        view.promote_pending("req-1");
-        view.push_pending(
-            "req-2".into(),
-            Submission {
-                content: "排队中".into(),
-                images: vec![picture],
-            },
-        );
-
-        let text = buffer_text(&render_view(&mut view, 40, 12));
-        // CJK 字素在 buffer 里各占一格 + 一个填充空格，比较前把空格收掉。
-        let tight = text.replace(' ', "");
-        assert!(tight.contains("看这张"), "{text}");
-        assert!(tight.contains("排队中"), "{text}");
-        assert_eq!(
-            text.matches("[Image #1 1024×768 384KB]").count(),
-            2,
-            "历史行与 pending 行各画一条：{text}"
-        );
     }
 
     #[test]
@@ -778,7 +737,7 @@ mod tests {
         view.set_header(vec![Line::from("wing header")]);
         view.push(ChatCell::UserMessage("first question".into()));
         view.push(ChatCell::AssistantMessage("answer".into()));
-        view.push_pending("req-1".into(), Submission::text("queued"));
+        view.push_pending("req-1".into(), "queued".into());
         let band = Rect::new(0, 0, 30, 14);
         let buf = render_view_in(&mut view, band, band);
         view.capture_visible_rows(&buf);

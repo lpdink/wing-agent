@@ -18,7 +18,6 @@ use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
-use crate::ui::chat_view::media;
 use crate::ui::chat_view::{ChatCell, ChatView};
 
 /// Replay durable fact-event nodes onto the message-rendered chat view.
@@ -128,13 +127,8 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
 
         match msg.role.as_str() {
             "user" => {
-                // 显示文本 = 正文 + 图片标签行（`chat_view::media`，与 pending / promote
-                // 同一段文本：resume 前后同一条消息长得一样）。无 media 时恒等，纯图
-                // 消息（正文为空）因此也进历史——它是一条合法的消息。
-                let text =
-                    media::text_with_labels(&msg.content, &media::labels_of_media(&msg.media));
-                if !text.is_empty() {
-                    chat.push(ChatCell::UserMessage(text));
+                if !msg.content.is_empty() {
+                    chat.push(ChatCell::UserMessage(msg.content));
                 }
             }
             "assistant" => {
@@ -237,72 +231,7 @@ mod tests {
         let messages = vec![json!({"role": "user", "content": "hello"})];
         replay_messages(&mut chat, &messages);
         assert_eq!(chat.len(), 1);
-        // 无 media 的红线：cell 的文本**就是**正文（快路径恒等，逐字节不变）。
-        assert!(matches!(
-            chat.cells[0].cell(),
-            ChatCell::UserMessage(text) if text == "hello"
-        ));
-    }
-
-    #[test]
-    fn test_replay_user_message_media_is_an_extra_line() {
-        let mut chat = ChatView::new();
-        let messages = vec![json!({
-            "role": "user",
-            "content": "看这两张",
-            "media": [
-                {"id": "a".repeat(64), "mime": "image/jpeg", "bytes": 393216,
-                 "width": 1024, "height": 768, "name": null},
-                {"id": "b".repeat(64), "mime": "image/png", "bytes": 7,
-                 "width": 8, "height": 8, "name": null}
-            ]
-        })];
-        replay_messages(&mut chat, &messages);
-        assert_eq!(chat.len(), 1);
-        assert!(
-            matches!(
-                chat.cells[0].cell(),
-                ChatCell::UserMessage(text)
-                    if text == "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]"
-            ),
-            "正文之后一行一张标签（消息内编号）"
-        );
-    }
-
-    #[test]
-    fn test_replay_picture_only_message_is_a_user_cell() {
-        // 纯图消息（正文为空、media 非空）是一条合法消息，必须进历史——修复前它
-        // 因为 `content.is_empty()` 被整个丢掉。
-        let mut chat = ChatView::new();
-        let messages = vec![json!({
-            "role": "user",
-            "content": "",
-            "media": [{"id": "a".repeat(64), "mime": "image/jpeg", "bytes": 7,
-                       "width": 8, "height": 8, "name": null}]
-        })];
-        replay_messages(&mut chat, &messages);
-        assert_eq!(chat.len(), 1);
-        assert!(matches!(
-            chat.cells[0].cell(),
-            ChatCell::UserMessage(text) if text == "[Image #1 8×8 7B]"
-        ));
-    }
-
-    #[test]
-    fn test_replay_malformed_media_still_renders_the_text() {
-        // 坏媒体条目只花掉一行标签，不花掉整条消息（宽容解析）。
-        let mut chat = ChatView::new();
-        let messages = vec![json!({
-            "role": "user",
-            "content": "hello",
-            "media": ["not a ref"]
-        })];
-        replay_messages(&mut chat, &messages);
-        assert_eq!(chat.len(), 1);
-        assert!(matches!(
-            chat.cells[0].cell(),
-            ChatCell::UserMessage(text) if text == "hello"
-        ));
+        assert!(matches!(chat.cells[0].cell(), ChatCell::UserMessage(_)));
     }
 
     #[test]

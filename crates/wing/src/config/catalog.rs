@@ -31,7 +31,6 @@ use wing_api_client::models::SettingNode;
 
 use crate::config::LayoutConfig;
 use crate::config::ThemePalette;
-use crate::config::paste::PasteImageConfig;
 
 // ── 声明 ────────────────────────────────────────────────────────
 
@@ -120,13 +119,6 @@ const THINKING_NOTES: [&str; 2] = [
 const MATH_DOC: &str = "`text` (render formulas) or `off` (leave LaTeX source verbatim).";
 const IMAGES_DOC: &str = "Markdown image rendering: `off` | `auto` (see `ImagesMode`).";
 
-const PASTE_SECTION_DOC: &str = "粘贴：贴进来的图片在发送前的压缩参数。";
-const PASTE_DOC: &str = "Paste configuration section.";
-const PASTE_IMAGE_DOC: &str = "粘贴图片的压缩参数（发送前在本地完成）。";
-const PASTE_MAX_BYTES_DOC: &str = "每张图发送前的字节上限（超出时先降质量、再缩尺寸）。";
-const PASTE_QUALITY_DOC: &str = "JPEG 质量（1..=100）。";
-const PASTE_MAX_EDGE_DOC: &str = "长边像素上限（超出等比缩小）。";
-
 const GATEWAY_SECTION_DOC: &str = "网关连接：TUI 对着网关鉴权用。";
 const API_KEY_DOC: &str = "API key for gateway authentication.";
 const API_KEY_NOTES: [&str; 1] = ["Empty or None → no auth header sent."];
@@ -135,7 +127,7 @@ const API_KEY_EXAMPLE: &str = "sk-xxx";
 /// Interface 根的设置目录（TUI 自己的配置）。
 ///
 /// 结构与后端 catalog 同构：同一个 [`SettingNode`] 类型。覆盖 `AppConfig` 的**全部** YAML 键
-/// （`colors.*` 15 + `layout.*` 3 + `rendering.*` 3 + `paste.image.*` 3 + `api_key`）。
+/// （`colors.*` 15 + `layout.*` 3 + `rendering.*` 3 + `api_key`）。
 ///
 /// 根节点的 `key` / `path` 是 `"interface"`（与后端根的 `"config"` 对称）；
 /// 子节点的 `path` **不带根前缀**——它们就是稀疏文档（`settings/get` 的 `values`）里的真实键路径，
@@ -269,75 +261,12 @@ pub fn interface_catalog() -> SettingNode {
         ),
     ];
 
-    let mut paste = node(
-        "paste",
-        "paste",
-        SettingKind::Object,
-        PASTE_DOC,
-        3,
-        "Paste",
-        PASTE_SECTION_DOC,
-    );
-    let paste_defaults = PasteImageConfig::default();
-    let mut paste_image = node(
-        "image",
-        "paste.image",
-        SettingKind::Object,
-        PASTE_IMAGE_DOC,
-        0,
-        "Paste",
-        PASTE_SECTION_DOC,
-    );
-    let int_leaf = |key: &str, doc: &str, order: i64, default: u64, min: f64, max: Option<f64>| {
-        let mut child = node(
-            key,
-            &format!("paste.image.{key}"),
-            SettingKind::Int,
-            doc,
-            order,
-            "Paste",
-            PASTE_SECTION_DOC,
-        );
-        child.default = Some(Value::from(default));
-        child.has_default = true;
-        child.min = Some(min);
-        child.max = max;
-        child
-    };
-    paste_image.children = vec![
-        int_leaf(
-            "max_bytes",
-            PASTE_MAX_BYTES_DOC,
-            0,
-            paste_defaults.max_bytes,
-            1.0,
-            None,
-        ),
-        int_leaf(
-            "quality",
-            PASTE_QUALITY_DOC,
-            1,
-            u64::from(paste_defaults.quality),
-            1.0,
-            Some(100.0),
-        ),
-        int_leaf(
-            "max_edge",
-            PASTE_MAX_EDGE_DOC,
-            2,
-            u64::from(paste_defaults.max_edge),
-            1.0,
-            None,
-        ),
-    ];
-    paste.children = vec![paste_image];
-
     let mut api_key = node(
         "api_key",
         "api_key",
         SettingKind::Secret,
         API_KEY_DOC,
-        4,
+        3,
         "Gateway",
         GATEWAY_SECTION_DOC,
     );
@@ -361,7 +290,7 @@ pub fn interface_catalog() -> SettingNode {
     root.notes = ROOT_NOTES.iter().map(|n| (*n).to_owned()).collect();
     root.section = None;
     root.section_doc = None;
-    root.children = vec![colors, layout, rendering, paste, api_key];
+    root.children = vec![colors, layout, rendering, api_key];
     root
 }
 
@@ -369,8 +298,8 @@ pub fn interface_catalog() -> SettingNode {
 ///
 /// 与后端 `config/groups.py` 的 `SETTING_GROUPS` 同一份建模、同一个 wire 类型
 /// （[`SettingGroup`]），只是声明在 Rust 侧——TUI 自己的配置后端不知道。
-/// 一个锚点装下全部顶层键：Interface 的全部键（`colors` / `layout` / `rendering` / `paste` /
-/// `api_key`）是一件事（"这个终端长什么样、贴进来的东西怎么处理"），拆成多个锚点只会把左列挤满。
+/// 一个锚点装下全部顶层键：Interface 的四个键（`colors` / `layout` / `rendering` / `api_key`）
+/// 是一件事（"这个终端长什么样"），拆成四个锚点只会把左列挤满。
 ///
 /// 门禁（本文件的单测）：成员必须与 [`interface_catalog`] 的 root 子节点**双向对账**——
 /// 加了字段忘了归类 ⇒ 它在面板里无处可去；归类了不存在的键 ⇒ 空锚点。
@@ -379,13 +308,11 @@ pub fn interface_groups() -> Vec<SettingGroup> {
         id: "interface".to_owned(),
         title: "Interface".to_owned(),
         // 这段 doc 会原样画在右栏的组头（纯文本，不渲染 markdown）：不写反引号。
-        doc: "TUI 自身：配色 / 布局 / 渲染 / 粘贴（改动即时预览，s 保存到 tui/config.yaml)"
-            .to_owned(),
+        doc: "TUI 自身：配色 / 布局 / 渲染（改动即时预览，s 保存到 tui/config.yaml）".to_owned(),
         members: vec![
             "colors".to_owned(),
             "layout".to_owned(),
             "rendering".to_owned(),
-            "paste".to_owned(),
             "api_key".to_owned(),
         ],
     }]
@@ -1085,7 +1012,6 @@ mod tests {
     use crate::config::ColorPreset;
     use crate::config::ColorsConfig;
     use crate::config::RenderingConfig;
-    use crate::config::paste::PasteConfig;
     use crate::config::rendering::ImagesMode;
     use crate::config::rendering::MathMode;
     use crate::config::rendering::ThinkingMode;
@@ -1097,8 +1023,7 @@ mod tests {
     /// 一张"每个字段都填上值"的样本。
     ///
     /// **穷尽 struct 字面量**（不用 `..Default::default()`）：给 `AppConfig` /
-    /// `ColorsConfig` / `LayoutConfig` / `RenderingConfig` / `PasteConfig` /
-    /// `PasteImageConfig` 加字段会让这里**编译失败**，
+    /// `ColorsConfig` / `LayoutConfig` / `RenderingConfig` 加字段会让这里**编译失败**，
     /// 于是门禁的样本不可能悄悄过期。`Option<String>` + `skip_serializing_if` 的颜色槽
     /// 只有在这个样本里才会出现在 serde 输出中（default 样本里它们是缺席的）。
     fn full_sample() -> AppConfig {
@@ -1130,13 +1055,6 @@ mod tests {
                 thinking: ThinkingMode::Hidden,
                 math: MathMode::Off,
                 images: ImagesMode::Off,
-            },
-            paste: PasteConfig {
-                image: PasteImageConfig {
-                    max_bytes: 512_000,
-                    quality: 75,
-                    max_edge: 1024,
-                },
             },
             api_key: Some("sk-test".into()),
         }
@@ -1262,7 +1180,7 @@ mod tests {
             .iter()
             .map(|child| child.key.as_str())
             .collect();
-        assert_eq!(keys, ["colors", "layout", "rendering", "paste", "api_key"]);
+        assert_eq!(keys, ["colors", "layout", "rendering", "api_key"]);
         // 带 / 不带根名前缀两种寻址都命中（与 06 的 node_at 口径对齐）
         assert!(catalog.node_at("colors.accent").is_some());
         assert!(catalog.node_at("interface.colors.accent").is_some());
@@ -1352,32 +1270,6 @@ mod tests {
     }
 
     #[test]
-    fn the_paste_bounds_and_defaults_come_from_the_real_types() {
-        let defaults = PasteImageConfig::default();
-        let catalog = interface_catalog();
-        let cases = [
-            ("max_bytes", defaults.max_bytes, None),
-            ("quality", u64::from(defaults.quality), Some(100.0)),
-            ("max_edge", u64::from(defaults.max_edge), None),
-        ];
-        for (key, expected, max) in cases {
-            let path = format!("paste.image.{key}");
-            let node = catalog.node_at(&path).expect("paste key");
-            assert_eq!(node.kind, SettingKind::Int, "{path}");
-            assert!(node.has_default, "{path}");
-            assert_eq!(node.default, Some(Value::from(expected)), "{path}");
-            assert_eq!(node.min, Some(1.0), "{path} 的下界是 1");
-            assert!(!node.exclusive_min, "{path}");
-            assert_eq!(node.max, max, "{path}");
-        }
-        // paste 是热生效（下一次粘贴读新参数）：不是重启项。
-        assert_eq!(
-            catalog.node_at("paste.image.max_bytes").unwrap().apply,
-            ApplyScope::Hot
-        );
-    }
-
-    #[test]
     fn the_enum_choices_are_lowercase_and_contain_their_defaults() {
         let catalog = interface_catalog();
         let cases: [(&str, &[&str], &str); 4] = [
@@ -1407,7 +1299,7 @@ mod tests {
         let catalog = interface_catalog();
         let leaves: Vec<&SettingNode> = catalog.leaves().collect();
         let paths: Vec<&str> = leaves.iter().map(|node| node.path.as_str()).collect();
-        assert_eq!(leaves.len(), 25, "{paths:?}");
+        assert_eq!(leaves.len(), 22, "{paths:?}");
         fn count(leaves: &[&SettingNode], predicate: impl Fn(&SettingNode) -> bool) -> usize {
             leaves.iter().filter(|node| predicate(node)).count()
         }
@@ -1419,7 +1311,7 @@ mod tests {
         );
         assert_eq!(count(&leaves, |node| node.required), 0);
         assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Restart), 1);
-        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 24);
+        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 21);
         assert!(leaves.iter().all(|node| node.editable));
     }
 
@@ -1516,7 +1408,6 @@ mod tests {
             "# ── Colors",
             "# ── Layout",
             "# ── Rendering",
-            "# ── Paste",
             "# ── Gateway",
         ] {
             assert!(dumped.contains(section), "缺分组：{section}\n{dumped}");

@@ -17,7 +17,6 @@ Message 扁平 tool_calls ↔ ToolCall、LLMResponse.content_blocks ↔ ContentB
 
 from .llm import LLMResponse, LLMUsage, PendingCall, ToolCall, ToolCallDelta
 from .message import (
-    MEDIA_NAME_MAX_LENGTH,
     ChainNode,
     ContentBlock,
     MediaRef,
@@ -34,7 +33,6 @@ __all__ = [
     "ContentBlock",
     "LLMResponse",
     "LLMUsage",
-    "MEDIA_NAME_MAX_LENGTH",
     "MediaRef",
     "Message",
     "PendingCall",

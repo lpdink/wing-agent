@@ -9,7 +9,7 @@ impl InputArea {
         self.clear_desired_col();
         model::insert_text(
             &mut self.lines[self.cursor_row],
-            &self.chips,
+            &self.pastes,
             self.cursor_col,
             &c.to_string(),
         );
@@ -26,7 +26,7 @@ impl InputArea {
         self.clear_desired_col();
         let tail = model::split_off(
             &mut self.lines[self.cursor_row],
-            &self.chips,
+            &self.pastes,
             self.cursor_col,
         );
         self.lines.insert(self.cursor_row + 1, tail);
@@ -45,7 +45,7 @@ impl InputArea {
         if self.cursor_col > 0 {
             let removed = model::remove_unit_before(
                 &mut self.lines[self.cursor_row],
-                &mut self.chips,
+                &mut self.pastes,
                 self.cursor_col,
             );
             self.cursor_col -= removed.min(self.cursor_col);
@@ -53,7 +53,7 @@ impl InputArea {
             // Merge with previous line.
             let current = self.lines.remove(self.cursor_row);
             self.cursor_row -= 1;
-            let joined = model::flat_len(&self.lines[self.cursor_row], &self.chips);
+            let joined = model::flat_len(&self.lines[self.cursor_row], &self.pastes);
             self.lines[self.cursor_row].extend(current);
             model::coalesce(&mut self.lines[self.cursor_row]);
             self.cursor_col = joined;
@@ -70,7 +70,7 @@ impl InputArea {
         if self.cursor_col < line_len {
             model::remove_unit_at(
                 &mut self.lines[self.cursor_row],
-                &mut self.chips,
+                &mut self.pastes,
                 self.cursor_col,
             );
         } else if self.cursor_row < self.last_row() {

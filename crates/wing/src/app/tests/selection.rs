@@ -7,7 +7,6 @@ use super::support::*;
 use crate::app::selection_session::SELECTION_AUTOSCROLL_DELAY;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::chat_view::Submission;
 
 #[test]
 fn test_composer_selection_survives_chat_structure_changes() {
@@ -22,8 +21,7 @@ fn test_composer_selection_survives_chat_structure_changes() {
     // moves the draft's logical coordinates.
     app.chat
         .push(ChatCell::AssistantMessage("streaming".into()));
-    app.chat
-        .push_pending("req-1".into(), Submission::text("queued"));
+    app.chat.push_pending("req-1".into(), "queued".into());
     app.chat.clear();
     app.chat.push(ChatCell::UserMessage("rebuilt".into()));
     draw(&mut app, &mut terminal);
@@ -255,8 +253,7 @@ fn test_structural_change_aborts_the_selection() {
         (
             "pending count",
             Box::new(|app: &mut App| {
-                app.chat
-                    .push_pending("req-1".into(), Submission::text("queued"));
+                app.chat.push_pending("req-1".into(), "queued".into());
             }),
         ),
         (

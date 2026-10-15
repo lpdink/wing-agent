@@ -23,11 +23,10 @@ from typing import TYPE_CHECKING, Literal
 from wing.common.logger import log
 from wing.config import resolve_model_capabilities
 from wing.media import (
-    DropReason,
+    PLACEHOLDER_BY_REASON,
     MediaAccess,
     MediaPlan,
     MediaPolicy,
-    drop_placeholder,
     plan_request_media,
 )
 from wing.schema import MediaRef, Message
@@ -45,7 +44,7 @@ UNAVAILABLE_PLACEHOLDER = (
     "(image unavailable: stored image bytes could not be read; "
     "re-read the file to attach it again)"
 )
-"""字节缺失的占位文本（媒体存储不可用 / read 返回 None / read 抛异常）。
+"""字节缺失的占位文本（媒体池不可用 / read 返回 None / read 抛异常）。
 
 独立于 wing.media 的三条 dropped 文案：那三条解释「为什么没发这张图」
 （能力/预算/尺寸），本条解释「存储侧故障」——混淆文案会把归因引向错误方向。
@@ -151,23 +150,6 @@ def _read_media_bytes(media: MediaAccess | None, ref: MediaRef) -> bytes | None:
     return data
 
 
-def _media_path(media: MediaAccess | None, ref: MediaRef) -> str | None:
-    """查询媒体对象的保存路径（占位文案素材）；不可得一律 None，绝不抛。
-
-    memory 后端恒 None（进程内桶没有本地文件），path 闭包缺失（老构造的测试
-    替身）同样 None——两者都走"只说明存在"的降级文案。查询失败是**展示素材**
-    缺失，不影响投影结果，因此只 WARN 不抛出。
-    """
-    lookup = getattr(media, "path", None)
-    if lookup is None:
-        return None
-    try:
-        return lookup(ref.id)
-    except Exception as e:  # noqa: BLE001 —— 路径查询是可选素材，不能打断序列化
-        log.warning(f"resolve media path {ref.id[:8]} failed: {e}")
-        return None
-
-
 def encode_media_ref(
     media: MediaAccess | None, ref: MediaRef, cache: dict[str, str | None]
 ) -> str | None:
@@ -190,31 +172,20 @@ def message_slots(
     *,
     media: MediaAccess | None,
     cache: dict[str, str | None],
-    role: str,
 ) -> list[MediaSlot]:
     """把一条消息的媒体处置投影成按出现序的 MediaSlot 列表。
 
     ``plans`` 只含本消息的条目（调用方用 group_plans_by_message 按
     message_index 过滤后传入——本函数不校验消息归属，只按给定顺序处理）。
-    kept 位读字节编码（失败 → UNAVAILABLE 占位）；dropped 位取占位文案——
-    ``role`` 决定文案档位（user 贴图与 tool 读图不同，见
-    ``wing.media.drop_placeholder``）：原文本块由序列化层负责「不动」，本函数
-    只产出追加物。保存路径只在 user + no_vision 时查询（要渲染才查）。
+    kept 位读字节编码（失败 → UNAVAILABLE 占位）；dropped 位取 wing.media
+    的三条占位常量之一——原文本块由序列化层负责「不动」，本函数只产出追加物。
     """
     slots: list[MediaSlot] = []
     for plan in plans:
         if plan.drop_reason is not None:
-            path = (
-                _media_path(media, plan.ref)
-                if role == "user" and plan.drop_reason is DropReason.NO_VISION
-                else None
-            )
             slots.append(
                 MediaSlot(
-                    ref=plan.ref,
-                    placeholder=drop_placeholder(
-                        plan.drop_reason, role=role, path=path
-                    ),
+                    ref=plan.ref, placeholder=PLACEHOLDER_BY_REASON[plan.drop_reason]
                 )
             )
             continue

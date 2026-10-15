@@ -142,22 +142,15 @@ class Session:
 
     # ── 上行消息 ──────────────────────────────────────────────
 
-    async def send(
-        self,
-        content: str,
-        *,
-        tool_call_id: str | None = None,
-        media: Sequence[Mapping[str, Any]] | None = None,
-    ) -> str:
+    async def send(self, content: str, *, tool_call_id: str | None = None) -> str:
         """经 WS 发一条用户消息（返回 ``request_id``——可对上 ``delivered`` 等事件）。
 
         ``tool_call_id`` 非空时是**定向答复**（resolve 对应 ask 的 feedback waiter）；
         场景里更常见的是 ``await session.answer(ask_event, "...")``。
-        ``media`` 是消息携带的媒体引用（``MediaRef`` 形状 dict 列表；缺省 = 无媒体）。
         """
         ws = self.driver.websocket
         return await ws.send_request(
-            self.session_id, content, tool_call_id=tool_call_id, media=media
+            self.session_id, content, tool_call_id=tool_call_id
         )
 
     async def chat(self, text: str, *, within: float = DEFAULT_TURN_WITHIN) -> Event:

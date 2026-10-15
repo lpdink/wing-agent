@@ -85,27 +85,6 @@ pub struct AgentInfo {
     pub model_display_name: Option<String>,
 }
 
-/// 媒体引用（`MediaRef`）——镜像 Python `wing.schema.MediaRef`。
-///
-/// 同一份线格式出现在三个方向：WS `ClientRequest.media`（上行）、
-/// `POST /api/session/media` 的响应 `media`（上行回执）、`tool_call_result.tool_media`（下行）。
-/// 因此只定义这一份（与 `SessionUsage` 同一条纪律：两份定义必然漂移）。
-///
-/// `id` 是字节的 sha256 hex，也就是存储键；`name` 是展示名（basename），旧载荷上缺席、
-/// 也可能显式 `null`（wire 只剥顶层 null，嵌套 null 原样在线）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MediaRef {
-    pub id: String,
-    /// `image/png` | `image/jpeg` | `image/webp` | `image/gif`。
-    pub mime: String,
-    /// 原始字节数。
-    pub bytes: u64,
-    pub width: u32,
-    pub height: u32,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
 // ============================================================
 // Session 生命周期 — Request
 // ============================================================
@@ -273,13 +252,6 @@ pub struct OkResponse {
 pub struct SendMessageResponse {
     pub ok: bool,
     pub request_id: String,
-}
-
-/// `POST /api/session/media` 的回执：`{"ok":true,"media":{id,mime,bytes,width,height,name?}}`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadMediaResponse {
-    pub ok: bool,
-    pub media: MediaRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

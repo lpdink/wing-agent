@@ -256,31 +256,7 @@ impl Renderable for ChatCell {
 pub struct PendingMessage {
     /// ClientRequest.request_id — correlates with UserMessageAccepted.
     pub request_id: String,
-    /// 提交产物（正文 + 图片）：气泡不读它——它留着给**失败回填**（发送失败 / 服务端
-    /// 拒绝时把内容原样还给草稿）。生命周期与条目本身绑定，没有第二处需要清理。
-    pub(crate) submission: Submission,
-    pub(crate) cell: CachedCell, // PendingUserMessage(display text)
-}
-
-/// 一次提交的产物（`SubmitPayload` 去掉展示那一半后的**原件**）：正文 + 图片。
-///
-/// 正文是消息文本本身（图片 chip 不贡献字符）；图片按提交顺序。显示文本由
-/// [`crate::ui::chat_view::media`] 现拼（正文 + 每张图一行标签），两者分开存是因为
-/// 回填草稿时标签行**不能再进正文**（chip 会自己重建标签）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Submission {
-    pub content: String,
-    pub images: Vec<crate::util::image_compress::CompressedImage>,
-}
-
-impl Submission {
-    /// 一份纯文本产物（没有图片的提交）。
-    pub fn text(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            images: Vec::new(),
-        }
-    }
+    pub(crate) cell: CachedCell, // PendingUserMessage(content)
 }
 
 #[cfg(test)]

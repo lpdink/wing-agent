@@ -66,7 +66,7 @@ _DEFAULT_THINKING_BUDGET = 4096
 class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     """Anthropic Messages API provider（httpx 实现）。
 
-    无状态：实例只含配置与连接池；会话级参数（会话媒体 / thinking 开关）经
+    无状态：实例只含配置与连接池；会话级参数（媒体池 / thinking 开关）经
     `generate(..., options=RequestOptions)` 注入（见 ModelProvider）。
     """
 

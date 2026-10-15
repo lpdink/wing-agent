@@ -22,8 +22,6 @@ use crate::ui::cells::tool_call::ToolStatus;
 use super::ChatCell;
 use super::ChatView;
 use super::PendingMessage;
-use super::Submission;
-use super::media;
 
 impl ChatView {
     /// The header lines as last set (tests read them back).
@@ -63,40 +61,14 @@ impl ChatView {
     // by `user_message_accepted` or discarded by an interrupt.
 
     /// Queue a sent-but-not-yet-accepted user message.
-    ///
-    /// The bubble's text is frozen here ([`media::text_with_labels`]): the
-    /// pictures' labels are part of the message from the moment it leaves the
-    /// composer, and promote hands the same string on to history.
-    pub fn push_pending(&mut self, request_id: String, submission: Submission) {
-        let display =
-            media::text_with_labels(&submission.content, &media::labels(&submission.images));
+    pub fn push_pending(&mut self, request_id: String, content: String) {
         self.pending.push(PendingMessage {
             request_id,
-            submission,
-            cell: CachedCell::new(ChatCell::PendingUserMessage(display)),
+            cell: CachedCell::new(ChatCell::PendingUserMessage(content)),
         });
         // The user's own submission must be visible immediately — pending
         // messages render below in-flight streaming content.
         self.jump_bottom();
-    }
-
-    /// Take a pending message **out of the queue without rendering it**, handing
-    /// its submission back for a refill of the composer.
-    ///
-    /// This is the failure path's exit (a failed / rejected send gives the user
-    /// their text and pictures back — see `App::restore_failed_send`), which is
-    /// why it differs from [`Self::discard_pending`]: an *interrupt* commits
-    /// the dropped message as a struck-through cell (the user must see it did
-    /// not go out), while a refill puts the content back in the draft — both
-    /// at once would show the same message twice.
-    ///
-    /// `None` when nothing matches (already promoted, or another client's).
-    pub fn take_pending(&mut self, request_id: &str) -> Option<Submission> {
-        let pos = self
-            .pending
-            .iter()
-            .position(|p| p.request_id == request_id)?;
-        Some(self.pending.remove(pos).submission)
     }
 
     /// Promote the pending message matching `request_id` into history.
@@ -170,6 +142,14 @@ impl ChatView {
             .collect();
         for content in contents {
             self.push(ChatCell::DiscardedUserMessage(content));
+        }
+    }
+
+    /// Remove a pending message without committing it (send failed /
+    /// gateway unreachable — the message never left the client).
+    pub fn remove_pending(&mut self, request_id: &str) {
+        if let Some(pos) = self.pending.iter().position(|p| p.request_id == request_id) {
+            self.pending.remove(pos);
         }
     }
 
@@ -1413,7 +1393,7 @@ mod tests {
     #[test]
     fn test_push_pending_keeps_message_out_of_history() {
         let mut view = ChatView::new();
-        view.push_pending("req-1".into(), Submission::text("queued"));
+        view.push_pending("req-1".into(), "queued".into());
 
         assert!(view.cells.is_empty());
         assert_eq!(view.pending.len(), 1);
@@ -1429,7 +1409,7 @@ mod tests {
     fn test_promote_pending_moves_message_into_history() {
         let mut view = ChatView::new();
         view.push(ChatCell::AssistantMessage("answer".into()));
-        view.push_pending("req-1".into(), Submission::text("follow-up"));
+        view.push_pending("req-1".into(), "follow-up".into());
 
         assert!(view.promote_pending("req-1"));
         assert!(view.pending.is_empty());
@@ -1440,116 +1420,10 @@ mod tests {
         ));
     }
 
-    /// 一张 `W×H`、字节数为 `bytes` 的压缩产物（内容不读，只看长度）。
-    fn picture(
-        width: u32,
-        height: u32,
-        bytes: usize,
-    ) -> crate::util::image_compress::CompressedImage {
-        crate::util::image_compress::CompressedImage {
-            bytes: vec![0xFF; bytes],
-            width,
-            height,
-        }
-    }
-
-    #[test]
-    fn test_pending_bubble_carries_the_pictures_labels() {
-        let mut view = ChatView::new();
-        view.push_pending(
-            "req-1".into(),
-            Submission {
-                content: "看这两张".into(),
-                images: vec![picture(1024, 768, 393_216), picture(8, 8, 7)],
-            },
-        );
-
-        // 气泡的文本在入队时定格（消息内编号），promote 原样搬进历史——标签不能只
-        // 活在草稿的 chip 里。
-        assert!(matches!(
-            view.pending[0].cell.cell(),
-            ChatCell::PendingUserMessage(text)
-                if text == "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]"
-        ));
-        assert!(view.promote_pending("req-1"));
-        assert!(matches!(
-            view.cells[0].cell(),
-            ChatCell::UserMessage(text)
-                if text == "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]"
-        ));
-    }
-
-    #[test]
-    fn test_picture_only_pending_is_its_labels() {
-        let mut view = ChatView::new();
-        view.push_pending(
-            "req-1".into(),
-            Submission {
-                content: String::new(),
-                images: vec![picture(8, 8, 7)],
-            },
-        );
-
-        assert!(matches!(
-            view.pending[0].cell.cell(),
-            ChatCell::PendingUserMessage(text) if text == "[Image #1 8×8 7B]"
-        ));
-    }
-
-    #[test]
-    fn test_take_pending_hands_the_submission_back_without_a_cell() {
-        let mut view = ChatView::new();
-        view.push_pending(
-            "req-1".into(),
-            Submission {
-                content: "跑不动".into(),
-                images: vec![picture(8, 8, 7)],
-            },
-        );
-        view.push_pending("req-2".into(), Submission::text("still queued"));
-
-        let taken = view.take_pending("req-1").expect("the submission");
-        assert_eq!(taken.content, "跑不动");
-        assert_eq!(
-            taken.images,
-            vec![picture(8, 8, 7)],
-            "原件（含字节）还给调用方"
-        );
-        assert_eq!(view.pending.len(), 1, "只取走命中的那一条");
-        assert_eq!(view.pending[0].request_id, "req-2");
-        assert!(
-            view.cells.is_empty(),
-            "回填不渲染 cell：内容回到草稿，不该同时在历史里显示一遍"
-        );
-        assert!(view.take_pending("req-1").is_none(), "取走一次");
-        assert!(view.take_pending("req-nope").is_none());
-    }
-
-    #[test]
-    fn test_interrupt_discard_keeps_the_pictures_in_the_display_text() {
-        // 打断路径（`discard_pending`）与回填路径分开：被丢弃的消息带标签进历史，
-        // 标成「没送出去」。
-        let mut view = ChatView::new();
-        view.push_pending(
-            "req-1".into(),
-            Submission {
-                content: "打断".into(),
-                images: vec![picture(8, 8, 7)],
-            },
-        );
-
-        view.discard_all_pending();
-
-        assert!(matches!(
-            view.cells[0].cell(),
-            ChatCell::DiscardedUserMessage(text) if text == "打断\n[Image #1 8×8 7B]"
-        ));
-    }
-
     #[test]
     fn test_promote_pending_unknown_id_returns_false() {
         let mut view = ChatView::new();
-        view.push_pending("req-1".into(), Submission::text("queued"));
+        view.push_pending("req-1".into(), "queued".into());
 
         assert!(!view.promote_pending("req-other"));
         assert_eq!(view.pending.len(), 1);
@@ -1559,8 +1433,8 @@ mod tests {
     #[test]
     fn test_promote_all_pending_preserves_send_order() {
         let mut view = ChatView::new();
-        view.push_pending("req-1".into(), Submission::text("first"));
-        view.push_pending("req-2".into(), Submission::text("second"));
+        view.push_pending("req-1".into(), "first".into());
+        view.push_pending("req-2".into(), "second".into());
 
         view.promote_all_pending();
 
@@ -1579,7 +1453,7 @@ mod tests {
     #[test]
     fn test_discard_all_pending_marks_messages_unsent() {
         let mut view = ChatView::new();
-        view.push_pending("req-1".into(), Submission::text("lost"));
+        view.push_pending("req-1".into(), "lost".into());
 
         view.discard_all_pending();
 
@@ -1594,8 +1468,8 @@ mod tests {
     #[test]
     fn test_discard_pending_keeps_unlisted_messages() {
         let mut view = ChatView::new();
-        view.push_pending("req-1".into(), Submission::text("dropped"));
-        view.push_pending("req-2".into(), Submission::text("survives"));
+        view.push_pending("req-1".into(), "dropped".into());
+        view.push_pending("req-2".into(), "survives".into());
 
         view.discard_pending(&["req-1".to_string()]);
 
@@ -1607,14 +1481,12 @@ mod tests {
         ));
     }
 
-    /// 取回一个**只有一条**的队列：取走即空，且什么都不渲染（回填把内容还回草稿，
-    /// 不在这里留 cell）。
     #[test]
-    fn test_take_pending_drops_unsent_message() {
+    fn test_remove_pending_drops_unsent_message() {
         let mut view = ChatView::new();
-        view.push_pending("req-1".into(), Submission::text("never sent"));
+        view.push_pending("req-1".into(), "never sent".into());
 
-        view.take_pending("req-1");
+        view.remove_pending("req-1");
 
         assert!(view.pending.is_empty());
         assert!(view.cells.is_empty());
@@ -1624,7 +1496,7 @@ mod tests {
     fn test_clear_removes_pending() {
         let mut view = ChatView::new();
         view.push(ChatCell::AssistantMessage("a".into()));
-        view.push_pending("req-1".into(), Submission::text("queued"));
+        view.push_pending("req-1".into(), "queued".into());
 
         view.clear();
 

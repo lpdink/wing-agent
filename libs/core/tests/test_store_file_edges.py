@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from wing.store.base import IMAGE_ONLY_TITLE
 from wing.store.file import FileMessageLog, FileSessionStore, _is_same_directory
 
 
@@ -101,28 +100,6 @@ class TestFirstUserMessage:
         store.claim_session_id("sess-1")
 
         assert store._first_user_message("sess-1") is None
-
-    def test_empty_content_is_skipped_for_later_text(self, store: FileSessionStore):
-        """纯图消息（content 为空、media 非空）跳过，改取后面第一条非空文本。"""
-        _write_history(
-            store,
-            "sess-1",
-            '{"role": "user", "content": "", "media": [{"id": "aa"}]}\n'
-            '{"role": "assistant", "content": "ok"}\n'
-            '{"role": "user", "content": "later text"}\n',
-        )
-
-        assert store._first_user_message("sess-1") == "later text"
-
-    def test_image_only_chain_falls_back_to_marker(self, store: FileSessionStore):
-        """整条链只有纯图消息：回退名为短标记（不返回空串——空串会让会话被隐藏）。"""
-        _write_history(
-            store,
-            "sess-1",
-            '{"role": "user", "content": "", "media": [{"id": "bb"}]}\n',
-        )
-
-        assert store._first_user_message("sess-1") == IMAGE_ONLY_TITLE
 
     def test_unreadable_log_returns_none(self, store: FileSessionStore, monkeypatch):
         _write_history(store, "sess-1", '{"role": "user", "content": "ask"}\n')

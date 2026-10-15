@@ -64,7 +64,6 @@ from wing.request_context import (
 )
 from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
-from wing.schema import MediaRef
 from wing.session import Session, SessionManager, SessionReaper, TagMutation
 from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import FileSessionStore, MemorySessionStore, SessionStore
@@ -245,7 +244,6 @@ class WingRuntime:
         session_id: str | None = None,
         client_id: str | None = None,
         tool_call_id: str | None = None,
-        media: list[MediaRef] | None = None,
     ) -> None:
         """唯一入站入口。设置 RequestContext，try/finally 确保恢复。"""
         token = set_request_context(
@@ -259,7 +257,6 @@ class WingRuntime:
                 request_id=request_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
-                media=media,
             )
         finally:
             reset_request_context(token)
@@ -355,29 +352,6 @@ class WingRuntime:
             ValueError: 标签非法 / 超过单会话上限
         """
         return self.sm.set_session_tags(session_id, add=add, remove=remove)
-
-    def session_exists(self, session_id: str) -> bool:
-        """会话是否存在（纯解析，不水合、不发事件）。
-
-        上传端点的收包前预检：``request.body()`` 没有大小上限，幽灵会话不该先把
-        整个 body 吞进内存再吃 404。判据与 :meth:`upload_media` 完全一致（同一个
-        ``_resolve_with_store``）。
-        """
-        return self.sm.session_exists(session_id)
-
-    def upload_media(
-        self, session_id: str, data: bytes, *, name: str | None = None
-    ) -> MediaRef:
-        """把一份媒体字节写进会话媒体目录（上传端点 `POST /api/session/media` 的用例）。
-
-        不水合会话；校验失败（``InvalidInputError``）时存储零副作用。语义见
-        :meth:`SessionManager.upload_media`。
-
-        Raises:
-            LookupError: session 不存在
-            InvalidInputError: 字节不合规（空 / 超 `images.max_bytes` / 非支持格式 / 尺寸不可解析）
-        """
-        return self.sm.upload_media(session_id, data, name=name)
 
     # ============================================================
     # Session 逐出（eviction）

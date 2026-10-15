@@ -41,64 +41,12 @@ BUDGET_PLACEHOLDER = (
 )
 TOO_LARGE_PLACEHOLDER = "(image omitted: exceeds this provider's per-image size limit)"
 
-NO_VISION_USER_PLACEHOLDER = (
-    "(image omitted: this model does not accept image input; "
-    "the image is saved at {path})"
-)
-"""user 贴图的 no_vision 占位（D6）：告知图片存在与**保存路径**——模型可自行换路
-（换视觉模型 / 让用户换带视觉的模型 / 对文件做 OCR），比"不可见"有出路。
-
-``{path}`` 取 ``MediaAccess.path``（纯查询、不读字节）；memory 后端与存储不可用
-时换成 :data:`NO_VISION_USER_PLACEHOLDER_NO_PATH`。
-"""
-
-NO_VISION_USER_PLACEHOLDER_NO_PATH = (
-    "(image omitted: this model does not accept image input; "
-    "the image is kept in the session)"
-)
-"""路径不可得时的降级文案（memory 后端 / path 查询失败）：只说明图片存在。"""
-
-BUDGET_USER_PLACEHOLDER = (
-    "(image omitted from this request: context image budget; "
-    "the image is still in the session)"
-)
-"""user 贴图的 budget 占位：图片被请求期字节预算驱逐，但**仍在会话里**。
-
-tool 侧原文案 "re-read the file to attach it again" 只对"模型自己读过文件"成立；
-user 贴图没有可重读的文件，"仍在会话中"才是语义正确的说法（原文案对 tool 不变）。
-"""
-
 PLACEHOLDER_BY_REASON: dict[DropReason, str] = {
     DropReason.NO_VISION: NO_VISION_PLACEHOLDER,
     DropReason.TOO_LARGE: TOO_LARGE_PLACEHOLDER,
     DropReason.BUDGET: BUDGET_PLACEHOLDER,
 }
 """被丢弃出现的固定说明文本块——追加在原文本块之后，原文本块不动。"""
-
-
-def drop_placeholder(reason: DropReason, *, role: str, path: str | None = None) -> str:
-    """被丢弃出现的追加占位文本（按**消息角色**分流；原文本块永不动）。
-
-    - tool / system：``PLACEHOLDER_BY_REASON`` 的冻结文案（tool 读图链路逐字节
-      不变）；
-    - user（贴图，D6）：no_vision 附保存路径（``path`` 缺失 → 存在性降级文案）；
-      budget 改述为"仍在会话中"（见 ``BUDGET_USER_PLACEHOLDER``）；too_large 与
-      tool 同文（"图过大"对两者语义相同）。
-
-    ``role`` 必填（调用方必须表态是哪种消息的位）；``path`` 只在 user + no_vision
-    时被消费——调用方**按需**查询，避免为不会渲染的路径触碰存储。
-    """
-    if role != "user":
-        return PLACEHOLDER_BY_REASON[reason]
-    if reason is DropReason.NO_VISION:
-        return (
-            NO_VISION_USER_PLACEHOLDER.format(path=path)
-            if path
-            else NO_VISION_USER_PLACEHOLDER_NO_PATH
-        )
-    if reason is DropReason.BUDGET:
-        return BUDGET_USER_PLACEHOLDER
-    return PLACEHOLDER_BY_REASON[reason]
 
 
 @dataclass(frozen=True)
@@ -141,14 +89,10 @@ class MediaAccess:
 
     工具（写图）与 provider 序列化（读图编码）都只经此接口，不直接触碰
     SessionStore——同一实例共享同一存储池。
-
-    ``path`` 是**只读查询**（不读字节、不物化）：占位文案要告知"图存在且在哪"
-    时用它（D6）；None = 该后端没有本地文件（memory）或不支持该查询 → 文案降级。
     """
 
     read: Callable[[str], bytes | None]
     write: Callable[[str, bytes], None]
-    path: Callable[[str], str | None] | None = None
 
 
 def _ceil_div(a: int, b: int) -> int:
