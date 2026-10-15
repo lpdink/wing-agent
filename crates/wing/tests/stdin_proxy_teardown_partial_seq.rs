@@ -5,10 +5,11 @@
 //! 唤醒字节会被解析器当成该序列的 final 吃掉（`Err` → 只清缓冲、不产事件，见
 //! `event/sys/unix/{mio,parse}.rs`），任务再次阻塞在 read 上。`stop_event_stream` 在有界
 //! 等待里周期性重投唤醒字节：第二次落在空解析器上必然产出事件，把任务带回 flag 检查。
+//! 这是解析器能扣住等后续字节的形态之一（半截 CSI / `ESC O` / 残缺 UTF-8；OSC 不在其列
+//! ——`ESC]` 会被立即解析成 `Alt+]`），也是本测试钉的那条路径。
 //!
 //! 单独一个集成测试文件 = 单独一个进程（fd 0、crossterm 事件源与 `EVENT_*` 都是进程级
-//! 全局）。去掉重投后本测试红：任务卡在 `read(fd 0)`，`drop(rt)` 永不返回；半截 OSC
-//! 字符串（无终止符）重投也救不回，属既定「超时后继续收尾」规格，不在这里钉。
+//! 全局）。去掉重投后本测试红：任务卡在 `read(fd 0)`，`drop(rt)` 永不返回。
 
 use std::os::fd::RawFd;
 use std::time::Duration;
@@ -69,6 +70,9 @@ fn teardown_rescues_a_reader_holding_a_partial_csi() {
 
     // 半截 CSI（`ESC [` 是粘贴开界的前缀，接驳层最多扣 25ms 后冲给 crossterm）：解析器
     // 扣住它、不产事件，reader 进入「阻塞 read → 无事件 → 再 read」的卡死形态。
+    // 退化模式（登记）：极慢 runner 上这两个字节可能未及被解析器吃住，本测试会退化成
+    // 「空解析器 + 单次唤醒即产事件」的弱路径——仍绿，但不再钉住重投（无廉价手段观测
+    // 解析器内部状态，现状可接受）。
     write_all(outer_master, b"\x1b[");
     std::thread::sleep(Duration::from_millis(150));
     drop(rx);

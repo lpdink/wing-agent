@@ -827,6 +827,19 @@ mod tests {
         }
     }
 
+    /// 让 `tracing::debug!` 的参数真正求值：没有订阅者时宏连参数都不碰（callsite 的
+    /// interest 缓存先被注册成 never），日志行因此永远「未执行」。thread-local 订阅者
+    /// + 显式重建 interest 缓存（与 ACP 侧的日志测试同一套路；缓存不会自愈）。
+    fn debug_logs() -> tracing::subscriber::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::level_filters::LevelFilter::DEBUG)
+            .with_writer(std::io::sink)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        guard
+    }
+
     fn seq(inner: &str) -> Vec<u8> {
         let mut out = SEQUENCE_PREFIX.to_vec();
         out.extend_from_slice(inner.as_bytes());
@@ -899,6 +912,7 @@ mod tests {
     /// crossterm（`Alt+]` + 杂字符灌进草稿），协议机丢包、以超时 toast 收场（归因错误）。
     #[test]
     fn a_short_read_inside_the_sequence_prefix_does_not_leak_to_crossterm() {
+        let _logs = debug_logs();
         let mut s = local();
         // 第一次 read：切在 `ESC]`（短读）。
         assert_eq!(feed(&mut s, b"\x1b]", 0).passthrough, b"", "候选不能冲回");
@@ -948,6 +962,7 @@ mod tests {
     #[test]
     fn alt_bracket_is_passed_through_when_it_turns_out_not_to_be_a_sequence() {
         // `Alt+]`（crossterm 会解析成 Alt+']'）：前缀候选失配后必须原样冲回。
+        let _logs = debug_logs();
         let mut s = local();
         let out = feed(&mut s, b"\x1b]x", 0);
         assert_eq!(out.passthrough, b"\x1b]x");

@@ -407,15 +407,17 @@ async fn forward(tx: &mpsc::Sender<TermEvent>, event: TermEvent) -> bool {
 /// 顺序：置 flag → [`stdin_proxy::wake_reader`]（向 fd 0 投 1 字节，打断 crossterm 的
 /// 阻塞读）→ 轮询 `is_finished`，其间每 [`EVENT_WAKE_REPOST`] 重投一次唤醒字节。
 ///
-/// 重投只为救一种残留形态：crossterm 的解析器扣着**半截 CSI 序列**时，首个唤醒字节会
-/// 被当成序列的 final 吃掉（只清缓冲、不产事件），任务再次阻塞在 `read(fd 0)` 上；下一次
-/// 重投落在空解析器上，必然产出事件并把任务带回 flag 检查。
-///
-/// **半截 OSC 字符串没有终止符，重投也救不回**：这种形态（quit 时恰好留一个被永久截断的
-/// 分片）按既定的「超时后继续收尾」走——终端一定恢复（`restore` 先送掉 master 的最后一个
-/// 副本，卡在 `read(fd 0)` 上的任务随即拿到 0 继续自己的读循环，`dup2` 不被拖住），但任务
-/// 本身退不出来，进程收尾可能停在 `Runtime::drop` 等它。可救回的 CSI 分支由
+/// 重投要救的形态：crossterm 的解析器扣着**半截序列**（半截 CSI / `ESC O` / 残缺 UTF-8；
+/// OSC 不在其列——`ESC]` 会被立即解析成 `Alt+]` 事件）时，首个唤醒字节会被当成序列的
+/// final 清掉（不产事件），任务再次阻塞在 `read(fd 0)` 上；下一次重投落在空解析器上，
+/// 必然产出事件并把任务带回 flag 检查。CSI 分支由
 /// `tests/stdin_proxy_teardown_partial_seq.rs` 钉住。
+///
+/// 重投够不到的可达形态有二：① panic 展开路径上任务停在 `tx.send(...).await`（通道满、
+/// rx 还活着，唤醒字节无处着力）；② 等待窗口内新字节持续到达，解析器被一直喂成半截。
+/// 两种都在 200ms 上限到点后照常收尾；②留下的读者会继续在 crossterm 的读循环里，
+/// `dup2` 之后它阻塞读的是**真实 tty**——用户回 shell 后的第一下按键会被它吃掉
+/// （与旧症状同源，只是不再挂住进程）。
 ///
 /// 不能 `.join()` / `.await()`：本函数是同步函数、也会从 panic hook 走到，在 runtime
 /// worker 上同步 join 有自锁风险。
@@ -453,6 +455,16 @@ fn stop_event_stream() {
 /// 投到**同一个**事件通道。必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经
 /// 是 pty slave，事件源注册的就是它）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
+    let mut slot = event_task_slot();
+    // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 要么覆盖旧 handle
+    // （旧任务永远停不下来），要么（收尾过之后再 spawn）踩上不复位的 `EVENT_STOP`——新流
+    // 在循环顶立即退出，键盘永久哑掉且零日志。常开断言（而不是 debug_assert!）：这个
+    // 不变量被打破时的静默失败比启动路径上响一声坏得多；断言先于任何 spawn，所以失败
+    // 调用什么都不留（`tests/tui_event_stream_once.rs` 钉住拒绝路径）。
+    assert!(
+        slot.is_none() && !EVENT_STOP.load(Ordering::SeqCst),
+        "spawn_event_stream must run once per process"
+    );
     let (tx, rx) = mpsc::channel(128);
     if let Some(sequences) = stdin_proxy::take_sequences() {
         clipboard_protocol::spawn(sequences, tx.clone());
@@ -512,15 +524,6 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
             }
         }
     });
-    let mut slot = event_task_slot();
-    // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 会覆盖旧 handle
-    // （旧任务永远停不下来），收尾过之后再 spawn 则踩上不复位的 `EVENT_STOP`（新事件流
-    // 在循环顶立即退出、键盘永久哑掉）。`session_guard` 只钉 install/restore 的唯一性，
-    // 这条只有本断言守着。
-    debug_assert!(
-        slot.is_none() && !EVENT_STOP.load(Ordering::SeqCst),
-        "spawn_event_stream must run once per process"
-    );
     *slot = Some(handle);
     rx
 }
@@ -861,8 +864,8 @@ mod tests {
         // Type guard only: it fails to compile if the payload stops carrying
         // the full `MouseEvent` (kind / modifiers / 0-based coords), which is
         // what selection & scrollbar build on. The actual forwarding in
-        // `spawn_event_stream` is not unit-testable without a pty — it was
-        // verified by a pty probe recorded in the commit that added it.
+        // `spawn_event_stream` is covered end-to-end by
+        // `tests/tui_event_stream_events.rs` (pty-fed real sequences).
         let event = TermEvent::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::ScrollUp,
             column: 42,
@@ -878,5 +881,12 @@ mod tests {
             }
             other => panic!("expected a mouse event, got {other:?}"),
         }
+    }
+
+    /// 没起过事件流（向导 / 初始化失败路径）：收尾是 no-op——不 panic、不动 flag
+    /// （接驳与 raw mode 此前也没装 / 没开，两步还原都是空操作）。
+    #[test]
+    fn teardown_without_an_event_stream_is_a_noop() {
+        end_tui_session().expect("teardown without a session");
     }
 }

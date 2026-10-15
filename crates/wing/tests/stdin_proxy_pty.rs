@@ -160,6 +160,8 @@ fn splice_extracts_osc_5522_and_leaves_every_other_event_untouched() {
     // 4. 卸载：fd 0 还给外层 pty，泵线程退出（之后的字节只能由 fd 0 直接读到）。
     wing::tui::stdin_proxy::restore();
     assert!(!wing::tui::stdin_proxy::is_installed());
+    // 卸载后再唤醒：没有接驳层 → 空操作（收尾路径的正常形态，不许 panic / 不许写）。
+    wing::tui::stdin_proxy::wake_reader();
     let mut enter = Vec::new();
     wing::tui::enter_sequence(&mut enter).expect("write enter sequence");
     assert!(
