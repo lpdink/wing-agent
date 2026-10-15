@@ -369,10 +369,7 @@ def _parse_parent_filter(raw: str | None) -> str | None:
     """
     if raw is None:
         return None
-    try:
-        return validate_session_id(raw)
-    except ValueError as e:
-        raise ValueError(f"parent filter: {e}")
+    return validate_session_id(raw, field="parent filter")
 
 
 def _parse_tag_filter(raw: str | None) -> list[str]:

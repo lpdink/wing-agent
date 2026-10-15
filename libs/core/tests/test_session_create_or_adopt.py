@@ -473,6 +473,31 @@ class TestFilesystemAliases:
         )
 
     @pytest.mark.asyncio
+    async def test_empty_alias_adopts_without_recording_lineage(
+        self, aliasing: SessionManager, root: Path, wing_warnings: list[str]
+    ):
+        """认领键归一的收养（空会话变体）同样忽略 parent：不认父、不改写、留 warning。
+
+        走的是 `_finish_adoption` 那条分支（`_adopt_session` 看不见它：目录存在但
+        还不是会话，只有"认领键"能把别名变成事实）——血缘是创建时刻的事实，这里
+        既不能补写也不能改写。
+        """
+        created = aliasing.create_session(session_id="Team-E")  # 无 tags：只有认领
+        adopted = aliasing.create_session(
+            session_id="team-e", parent_session_id="lineage-root"
+        )
+
+        assert adopted is created
+        assert adopted.session_id == "Team-E"
+        assert adopted.parent_session_id is None
+        assert _session_dirs(root) == ["Team-E"]
+        # 零写盘：收养没有为它写下任何 metadata。
+        assert not (root / "Team-E" / "metadata.json").exists()
+        assert any("ignores parent session id" in line for line in wing_warnings), (
+            wing_warnings
+        )
+
+    @pytest.mark.asyncio
     async def test_real_filesystem_never_shares_one_history(self, tmp_path: Path):
         """真实 FS 上的不变量：变体 id 要么同一会话，要么**两个目录**——绝不混写。
 

@@ -294,6 +294,36 @@ class TestSessionCreate:
         assert resp.status_code == 400
         assert "invalid session id" in resp.json()["detail"]
 
+    def test_create_with_parent_session_id(self, client: TestClient, mock_runtime):
+        """parent_session_id 透传（血缘的请求面）；响应是**读回**该记录。"""
+        mock_runtime.create_session.return_value.parent_session_id = "root-1"
+        resp = client.post("/api/session/create", json={"parent_session_id": "root-1"})
+        assert resp.status_code == 200
+        mock_runtime.create_session.assert_called_once_with(
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend=None,
+            tags=None,
+            session_id=None,
+            parent_session_id="root-1",
+        )
+        assert resp.json()["parent_session_id"] == "root-1"
+
+    def test_create_invalid_parent_session_id_is_400(
+        self, client: TestClient, mock_runtime
+    ):
+        """不合规的 parent（含自指）→ runtime raise ValueError → 400。"""
+        mock_runtime.create_session.side_effect = ValueError(
+            "invalid parent session id: '../escape'"
+        )
+        resp = client.post(
+            "/api/session/create",
+            json={"session_id": "kid", "parent_session_id": "../escape"},
+        )
+        assert resp.status_code == 400
+        assert "invalid parent session id" in resp.json()["detail"]
+
     def test_create_with_agent_override(self, client: TestClient, mock_runtime):
         """创建 session 时传入 agent override。"""
         resp = client.post(

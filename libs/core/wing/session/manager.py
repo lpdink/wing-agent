@@ -464,16 +464,6 @@ class SessionManager:
                     sid, agent_override=agent_override, tags=tags
                 )
 
-        # 血缘落盘（先于 Session 构造）：parent 是**创建时刻的一次性事实**，
-        # 此后没有修改路径。先写 store、让构造器从盘上载入的 metadata 天然带上
-        # 它——之后任何一次 _save_metadata（hook 注入 / 打标 / 用量落盘）写的都是
-        # 同一个内存对象，字段不会被抹掉；写反了顺序就会在第一次落盘时被覆盖。
-        # 无 parent 时不写（零字段、零写盘，存量行为逐字不变）。
-        if parent_session_id is not None:
-            store.save_metadata(
-                sid, SessionMetadata(parent_session_id=parent_session_id)
-            )
-
         messages: TrackedList[ChainNode] = TrackedList(store.open_log(sid))
 
         session = Session.from_template(
@@ -483,6 +473,14 @@ class SessionManager:
             store=store,
             workspace=workspace,
         )
+
+        # 血缘落盘：创建时刻的一次性事实（此后没有修改路径），写在**构造成功
+        # 之后**——构造期失败（provider 解析等）因此不会留下"有 parent 无会话"的
+        # 记录（那种残骸会让同 id 的下一次 create 收养到一个幽灵事实）。此后任何
+        # 一次 _save_metadata（hook 注入 / 打标 / 用量落盘）写的都是这个已带上字段
+        # 的内存对象，不会被抹掉；无 parent 时不写（零字段、零写盘，存量不变）。
+        if parent_session_id is not None:
+            session.record_parent_session_id(parent_session_id)
 
         # agent override 需在 session 完全构建后应用
         if agent_override is not None:

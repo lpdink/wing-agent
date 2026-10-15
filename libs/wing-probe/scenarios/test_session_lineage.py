@@ -121,7 +121,15 @@ async def test_parent_is_recorded_and_projected(probe: Probe) -> None:
     assert child["session_id"] == "lineage-child", child
     assert child[FIELD] == "lineage-root", child
 
-    # 持久事实：创建即落盘（不依赖后续任何动作）。
+    # 持久事实：创建**即**落盘（不依赖任何后续动作）——无标（因此后续没有别的
+    # 写盘）的子会话立刻读盘就有字段；无父且无标的会话则零写盘（连文件都不建）。
+    quiet = await _create(probe, session_id="lineage-quiet", parent="lineage-root")
+    assert quiet[FIELD] == "lineage-root", quiet
+    assert _metadata(probe, "lineage-quiet")[FIELD] == "lineage-root"
+    await _create(probe, session_id="lineage-bare")
+    assert read_metadata(probe.env.session_dir("lineage-bare")) is None
+
+    # 投影：列表行与 info 携带同一个值。
     assert _metadata(probe, "lineage-child")[FIELD] == "lineage-root"
     assert FIELD not in _metadata(probe, "lineage-root")
 
@@ -209,6 +217,8 @@ async def test_parent_filter_selects_direct_children(probe: Probe) -> None:
         "lineage-b"
     ]
     assert await _list(probe, parent="lineage-a", tag="no-such-tag") == []
+    assert _ids(await _list(probe, parent="lineage-a", status="idle")) == ["lineage-b"]
+    assert await _list(probe, parent="lineage-a", status="inactive") == []
 
     # 词法非法（空 / 穿越 / 点开头 / 超长）→ 400：这类值不可能命中任何行。
     for bad in ("", "../escape", "a/b", ".media", "x" * 129):
@@ -272,6 +282,13 @@ async def test_invalid_parent_is_rejected_without_traces(probe: Probe) -> None:
     assert ghost[FIELD] == "lineage-nowhere", ghost
     assert _metadata(probe, "lineage-ghost")[FIELD] == "lineage-nowhere"
     assert _ids(await _list(probe, parent="lineage-nowhere")) == ["lineage-ghost"]
+
+    # 自指在任何路径上都是 400——**已存在**的 id 也不例外（不被"已存在 → 收养"
+    # 吞掉），且既有记录逐字未变。
+    with pytest.raises(DriverHttpError) as failure:
+        await _create(probe, session_id="lineage-ghost", parent="lineage-ghost")
+    assert failure.value.status == 400, failure.value.call.render()
+    assert _metadata(probe, "lineage-ghost")[FIELD] == "lineage-nowhere"
 
 
 @pytest.mark.probe_env(models=[LINEAGE_MODEL])
