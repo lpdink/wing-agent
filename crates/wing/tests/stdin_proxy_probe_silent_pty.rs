@@ -1,18 +1,16 @@
 //! 探针**静默**路径的端到端证据（pty 级；单独进程 = fd 0/1、crossterm 事件源与环境快照都是进程级全局）：
 //!
-//! 1. 本地档静默（不实现 DECRQM 的 tmux / Terminal.app 形态）：判定阴性 → 就地拆接驳；
-//! 2. SSH 档静默：**保留接驳**（迟到应答必须仍被分流层吸收），但一个 `?5522h` 都不发；
-//!    随后迟到的应答（含被拆开的半截）不得毒化 crossterm 的按键解析——键盘照常。
+//! **SSH 档静默**（远程 tmux / 慢链路）：判定阴性但**保留接驳**（迟到的应答必须仍被分流层
+//! 吸收），一个 `?5522h` 都不发；随后迟到的应答（含被拆开的半截）不得毒化 crossterm 的按键
+//! 解析——键盘照常。本地档静默（拆接驳）见 `stdin_proxy_probe_local_silent_pty.rs`。
 //!
-//! 环境变量在同一进程内注入（测试各自独立进程、注入发生在任何线程读它之前；edition 2024
-//! 的 `set_var` / `remove_var` 因此是 unsafe 的、但此处无并发读者），这样本地 / SSH 两档
-//! 的判定与预算**与跑测试的机器环境无关**。
+//! 环境变量在同一进程内注入（测试各自独立进程、注入发生在 install 读它之前；edition 2024
+//! 的 `set_var` 因此是 unsafe 的、但此处无并发读者），这样远端档的判定与预算**与跑测试的
+//! 机器环境无关**。
 
 use std::os::fd::RawFd;
 use std::time::Duration;
 use std::time::Instant;
-
-const SSH_ENV: [&str; 4] = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION"];
 
 fn openpty_pair() -> (RawFd, RawFd) {
     let mut master: RawFd = -1;
@@ -70,7 +68,7 @@ fn read_written(fd: RawFd, budget: Duration, want: impl Fn(&[u8]) -> bool) -> Ve
 }
 
 #[test]
-fn a_silent_probe_dismantles_locally_and_keeps_the_splice_over_ssh() {
+fn a_silent_remote_probe_keeps_the_splice_without_enabling_the_channel() {
     let (outer_master, outer_slave) = openpty_pair();
     make_raw(outer_slave);
     let saved_stdin = unsafe { libc::dup(0) };
@@ -85,25 +83,14 @@ fn a_silent_probe_dismantles_locally_and_keeps_the_splice_over_ssh() {
         1,
         "fd 1 → outer slave（读应用写出的控制序列）"
     );
-    // 本地档：清掉继承来的 SSH 环境（注入对后面的单测进程无影响——本文件只有一个测试）。
-    for key in SSH_ENV {
+    // 远端档：注入 SSH 环境（任何继承值都先清掉，避免与本地档混档）。
+    for key in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION"] {
         unsafe { std::env::remove_var(key) };
     }
-
-    // ── 本地档静默：判定阴性、接驳就地拆除。 ──
-    wing::tui::stdin_proxy::install().expect("install stdin proxy");
-    assert_eq!(
-        wing::tui::stdin_proxy::settle_paste_channel(),
-        wing::tui::stdin_proxy::PasteChannel::Unsupported
-    );
-    assert!(
-        !wing::tui::stdin_proxy::is_installed(),
-        "本地静默（不实现 DECRQM 的终端）必须拆接驳"
-    );
-
-    // ── SSH 档静默：保留接驳、不开 mode。 ──
     unsafe { std::env::set_var("SSH_CONNECTION", "10.0.0.1 51000 10.0.0.2 22") };
-    wing::tui::stdin_proxy::install().expect("re-install stdin proxy");
+
+    // 装上接驳（发出探针查询），但终端一直不回答。
+    wing::tui::stdin_proxy::install().expect("install stdin proxy");
     assert!(wing::tui::stdin_proxy::is_installed());
     let settle_started = Instant::now();
     assert_eq!(
@@ -137,22 +124,37 @@ fn a_silent_probe_dismantles_locally_and_keeps_the_splice_over_ssh() {
         "静默终端不许收到 ?5522h，实收 {written:?}"
     );
 
-    // 迟到的应答（先半截、后被拆开补齐）必须被分流层吞掉：半截到点丢弃、完整条吸收，
-    // 都不能落进 crossterm——落了就会永久挂住按键解析，下面的 `k` 永远到不了。
+    // 迟到的应答被分流层吞掉：先半截 `ESC[?5522;0$`（到点整段丢弃），再补 `y`——丢弃策略下
+    // 尾巴按普通字节透传（一个普通按键），但**前缀**绝不能落进 crossterm：落了就会永久挂住
+    // 按键解析，后面的 `k` 永远到不了。
     write_all(outer_master, b"\x1b[?5522;0$");
     std::thread::sleep(Duration::from_millis(150)); // 超过 SSH 档 100ms 的候选持有上限
     write_all(outer_master, b"y");
     std::thread::sleep(Duration::from_millis(50));
     write_all(outer_master, b"k");
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut got_key = false;
-    while Instant::now() < deadline && !got_key {
+    let mut events = Vec::new();
+    while Instant::now() < deadline {
         match rx.try_recv() {
-            Ok(event) => got_key = format!("{event:?}").contains("Char('k')"),
+            Ok(event) => {
+                let text = format!("{event:?}");
+                let done = text.contains("Char('k')");
+                events.push(text);
+                if done {
+                    break;
+                }
+            }
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
         }
     }
-    assert!(got_key, "迟到应答必须被吸收：键盘在它之后仍要照常工作");
+    assert!(
+        events.iter().any(|e| e.contains("Char('k')")),
+        "迟到应答必须被吸收：键盘在它之后仍要照常工作：{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e.contains("Char('y')")),
+        "半截被丢弃后的尾巴按普通字节透传（登记行为，钉住形态）：{events:?}"
+    );
 
     wing::tui::end_tui_session().expect("end tui session");
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();

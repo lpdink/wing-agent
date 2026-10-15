@@ -84,6 +84,10 @@ fn a_negative_probe_drops_the_splice_and_leaves_the_plain_input_path() {
         1,
         "fd 1 → outer slave（读应用写出的控制序列）"
     );
+    // 本地档：清掉继承来的 SSH 环境（注入发生在 install 读它之前；本文件只有一个测试）。
+    for key in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION"] {
+        unsafe { std::env::remove_var(key) };
+    }
 
     // 装上接驳：探针查询立即写出（stdout 现在是外层 pty）。
     wing::tui::stdin_proxy::install().expect("install stdin proxy");
@@ -129,6 +133,20 @@ fn a_negative_probe_drops_the_splice_and_leaves_the_plain_input_path() {
     );
     let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     assert_eq!(&buf[..n as usize], b"q");
+
+    // 阴性拆解是进程级结论：向导段跑完后主 TUI 的第二次 `init_terminal()` 会再走一遍
+    // `install()`——它必须是个空操作。先模拟向导段的第一次 poll（事件源单例在这里注册，
+    // 此时 fd 0 已是原 tty），再调 install：任何重装都会把 fd 0 从单例底下换走（B1 形态：
+    // 泵吃掉就绪、键盘永久哑掉）。
+    assert!(
+        !crossterm::event::poll(Duration::from_millis(1)).expect("wizard poll"),
+        "没有输入的 1ms poll 必须超时"
+    );
+    wing::tui::stdin_proxy::install().expect("second install must be a no-op");
+    assert!(
+        !wing::tui::stdin_proxy::is_installed(),
+        "探针判定之后的 install 不许重装接驳（事件源单例已注册，fd 0 不能再换）"
+    );
 
     // 主 TUI 的事件流：阴性判定下不得开 `?5522h`、不得起协议机；键盘事件照常。
     let rt = tokio::runtime::Builder::new_multi_thread()

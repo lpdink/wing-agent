@@ -27,8 +27,8 @@
 //!   早于 crossterm 事件源的首次创建 —— 后者是**进程级单例**，首次 `poll` 时把当时的
 //!   fd 0 注册进就绪源、之后永不重建；而「`poll` 可能在同进程的第一段 TUI（setup 向导）
 //!   就发生」，所以安装提升为**进程级一次性**（`tui::init_terminal` 的第一段负责开、
-//!   `tui::end_tui_session` 负责关，段与段之间绝不拆）。反面证据：
-//!   `tests/stdin_proxy_stale_event_source.rs`。
+//!   `tui::end_tui_session` 负责关，段与段之间绝不拆；探针一经判定，`install` 也永久闩住，
+//!   见其实现注释）。反面证据：`tests/stdin_proxy_stale_event_source.rs`。
 //! - [`restore`] 必须早于 `crossterm::terminal::disable_raw_mode()`（它把 termios 写回
 //!   fd 0，彼时 fd 0 必须已经是真实 tty）。
 //! - 收尾时若要打断卡在 fd 0 阻塞读里的读者，用 [`wake_reader`]：字节走 master→slave
@@ -56,6 +56,22 @@
 //!
 //! 判定预算本地短（150ms）、SSH 长（600ms）；查询发出得早（`install` 时），到判定点的
 //! 网络往返与图像能力探测通常已覆盖等待，额外延迟只发生在静默终端上、且一次性。
+//!
+//! ## 已知边界（拆接驳之后）
+//!
+//! - **本地静默的赌注**：本地拆接驳押的是「不实现 DECRQM 的终端不会迟到应答」。若某个本地
+//!   终端实现了 DECRQM 却把应答拖过 150ms（负载 / 应答排在积压输入之后），拆掉之后那条
+//!   `ESC[?…$y` 会直接落进 crossterm，永久挂住按键解析（同下）。不实现 DECRQM 的终端
+//!   （tmux / Terminal.app）不在此列——它们不发任何应答。要完全消除这一赌注，只能像 SSH
+//!   静默一样保留接驳，代价是接驳风险面原样留下。
+//! - **被拆散成多段的迟到应答**：候选前缀被丢弃后，后续字节按普通输入透传——最多漏出
+//!   `$y` 这类尾巴（一个普通按键），但前缀（`ESC[?…`）绝不会落进 crossterm（那才致命）。
+//! - **保护区 / 序列体内的应答**：bracketed paste 保护区内一律当用户数据透传，5522 序列体
+//!   内的同类字节并入载荷——都不会被当作探针应答，登记为已知边界（两种形态在真实终端上
+//!   不会出现）。
+//! - **阴性终端的收尾**：拆掉接驳后 [`wake_reader`] 是空操作，`stop_event_stream` 的唤醒
+//!   字节无处着力——若退出瞬间事件任务正卡在「半截序列的阻塞读」里，只有 200ms 有界等待
+//!   兜底（与 install 失败时的既有降级形态同款）。
 //!
 //! ## 为什么应答必须在这里被摘走
 //!
@@ -128,8 +144,9 @@ const SEQUENCE_PREFIX: &[u8] = b"\x1b]5522;";
 /// `ESC[?`——DECRPM 应答（`CSI ? Pa ; Ps $ y`）的固定开头。
 const REPORT_OPEN: &[u8] = b"\x1b[?";
 
-/// DECRPM 应答参数段（`Pa;Ps`）的字节上限。真实应答 ≤ 10 字节；到不了 `$y` 的超长参数
-/// 是坏流，按失配冲回（与 `?1u` / `?62;c` 这些 crossterm 自己能消化的形态同路）。
+/// DECRPM 应答参数段（`Pa;Ps`）的字节上限。真实应答 ≤ 10 字节；超长参数不是任何真实
+/// 终端的形态，按失配冲回（冲回后 crossterm 照样解析不了 `ESC[?…`，但那已经是垃圾流，
+/// 本层不为它特判——防的是**协议流量**，不是任意坏字节）。
 const REPORT_PARAM_MAX: usize = 16;
 
 /// `ESC[200~` / `ESC[201~`——bracketed paste 的开闭界。
@@ -821,8 +838,11 @@ mod imp {
 
     pub fn install() -> io::Result<()> {
         let mut shared = lock();
-        if shared.proxy.is_some() {
-            // 幂等（第二段 TUI）：查询不重发，探针状态原样保留。
+        if shared.proxy.is_some() || shared.settled.is_some() {
+            // 幂等（第二段 TUI）：接驳已在，或探针已经决策过——后者意味着阴性判定可能已经
+            // 拆掉接驳，而 `init_terminal*` 是逐段调用的：不闩住，第二段会重新换走 fd 0，
+            // 向导段已注册在真实 tty 上的事件源单例就与读端错配（键盘全哑，同 B1 形态）。
+            // 判定一经作出就是进程级结论，不再重探。
             return Ok(());
         }
 
@@ -1236,8 +1256,9 @@ mod tests {
         }
     }
 
-    /// 形似而**不是** DECRPM 的 `ESC[?…`（键盘协议应答 / DA 应答 / 缺 `$y`）：原样放行，
-    /// crossterm 自己能消化（`?…u` / `?…c`）或者本就与 5522 无关。
+    /// 形似而**不是** DECRPM 的 `ESC[?…`（键盘协议应答 / DA 应答 / 缺 `$y`）：原样放行。
+    /// `?…u` / `?…c` 是 crossterm 认的 final；`$z` / `R` 这类在真实终端不会出现——放行是
+    /// 「失配即冲回」这条统一语义的结果，不为它们特判（本层防的是协议流量）。
     #[test]
     fn lookalike_esc_bracket_question_sequences_are_waved_through() {
         for raw in [

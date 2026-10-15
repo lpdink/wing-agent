@@ -207,6 +207,15 @@ fn enclosing_fn(text: &str, line: usize) -> Option<String> {
     found
 }
 
+/// 只算「真调用」的命中：行首不是 `//` 的（把调用注释掉不再算数——规则 4/5 数的是调用点，
+/// 注释里点名不算；既有规则 1-3 仍按「引用也是引用」的老口径）。
+fn live_hits(text: &str, needle: &str) -> Vec<Hit> {
+    hits(text, needle)
+        .into_iter()
+        .filter(|hit| !hit.text.starts_with("//"))
+        .collect()
+}
+
 /// `name` 这个顶层函数的正文（从声明行到下一个行首 `}`）。找不到即 panic（门禁不得空转）。
 fn function_body(text: &str, name: &str) -> String {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
@@ -352,11 +361,14 @@ fn production_of(path: &str) -> String {
 fn the_probe_settles_before_the_first_poll_of_each_segment() {
     const APP_FILE: &str = "app/mod.rs";
     const CMD_FILE: &str = "cmd/mod.rs";
-    let settles = hits_in_sources(SETTLE_CALL);
+    let settles = hits_in_sources(SETTLE_CALL)
+        .into_iter()
+        .filter(|(_, hit)| !hit.text.starts_with("//"))
+        .collect::<Vec<_>>();
     assert_eq!(
         settles.len(),
         2,
-        "`{SETTLE_CALL}` 必须恰好两处（主 TUI 与向导各一次）：{}",
+        "`{SETTLE_CALL}` 必须恰好两处真调用（主 TUI 与向导各一次）：{}",
         describe(&settles)
     );
 
@@ -411,19 +423,19 @@ fn the_paste_channel_starts_only_after_a_positive_probe() {
     let source = production_of(SESSION_FILE);
     let body = function_body(&source, "spawn_event_stream");
 
-    let verdict = hits(&body, VERDICT_READ);
+    let verdict = live_hits(&body, VERDICT_READ);
     assert_eq!(
         verdict.len(),
         1,
         "`spawn_event_stream` 必须恰好读一次判定：{verdict:?}"
     );
     assert!(
-        hits(&body, "PasteChannel::Supported").len() == 1,
+        live_hits(&body, "PasteChannel::Supported").len() == 1,
         "门控必须显式比 `PasteChannel::Supported`"
     );
-    let machine = hits(&body, MACHINE_CALL);
+    let machine = live_hits(&body, MACHINE_CALL);
     assert_eq!(machine.len(), 1, "协议机启动点必须唯一");
-    let mode = hits(&body, ENABLE_CALL);
+    let mode = live_hits(&body, ENABLE_CALL);
     assert_eq!(mode.len(), 1, "`?5522h` 的发送点必须唯一");
     assert!(
         verdict[0].line < mode[0].line && mode[0].line < machine[0].line,
@@ -434,7 +446,10 @@ fn the_paste_channel_starts_only_after_a_positive_probe() {
     );
 
     // 唯一的 5522 开模式字节：整棵生产树只有那一处 `\x1b[?5522h`（测试正文已切掉）。
-    let writers = hits_in_sources(PASTE_EVENTS_BYTES);
+    let writers = hits_in_sources(PASTE_EVENTS_BYTES)
+        .into_iter()
+        .filter(|(_, hit)| !hit.text.starts_with("//"))
+        .collect::<Vec<_>>();
     assert_eq!(
         writers.len(),
         1,
@@ -444,7 +459,7 @@ fn the_paste_channel_starts_only_after_a_positive_probe() {
     assert_eq!(writers[0].0, SESSION_FILE);
     let enable_body = function_body(&source, "enable_paste_events");
     assert_eq!(
-        hits(&enable_body, PASTE_EVENTS_BYTES).len(),
+        live_hits(&enable_body, PASTE_EVENTS_BYTES).len(),
         1,
         "唯一的发送点必须在 `enable_paste_events` 里"
     );
