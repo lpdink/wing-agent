@@ -1077,6 +1077,7 @@ mod tests {
             created_at: None,
             template_name: None,
             workspace: workspace.map(str::to_string),
+            parent_session_id: None,
             last_interaction: last_interaction.map(str::to_string),
             status: "inactive".to_string(),
             tags: Vec::new(),

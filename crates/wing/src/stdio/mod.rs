@@ -737,6 +737,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
             // create-or-adopt：给了 id 就是它（已存在则被收养）。
             session_id: args.session_id.clone(),
+            parent_session_id: None,
         };
 
         let resp = http

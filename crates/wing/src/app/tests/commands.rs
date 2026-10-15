@@ -569,6 +569,7 @@ fn feed_info_full(
             yolo: false,
             session_name: None,
             workdir: None,
+            parent_session_id: None,
             status: "idle".into(),
             context_stats: ContextStatsInfo {
                 message_count: 0,
@@ -720,6 +721,7 @@ mod session_list {
             created_at: None,
             template_name: None,
             workspace: Some(ws.into()),
+            parent_session_id: None,
             last_interaction: Some(at.into()),
             status: status.into(),
             tags,

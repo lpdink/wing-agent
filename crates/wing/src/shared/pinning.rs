@@ -62,20 +62,21 @@ pub fn pin_key(pinned: bool, added_at: Option<&str>) -> (bool, Reverse<Option<i6
     // 时间只在置顶组内说话：未置顶的键恒等，靠稳定排序保持原序
     // （否则一条手写的旧记录会悄悄改写"非置顶"一栏的顺序）。
     let recency = if pinned {
-        added_at.and_then(parse_added_at)
+        added_at.and_then(parse_timestamp_micros)
     } else {
         None
     };
     (!pinned, Reverse(recency))
 }
 
-/// ISO 时间 → 微秒（只用于**定序**）。
+/// ISO 时间 → 微秒（只用于**定序**）。会话树排序（[`super::session_tree`]）
+/// 与这里的 pin 排序共用同一套解析——同一种「时间怎么比」只有一份实现。
 ///
 /// naive 值按 UTC 基准解释：对单一写者产出的同格式值，取哪个基准都不改变
 /// 它们彼此的先后（这里是 Rust 侧的口径；后端 `_timestamp_key` 另按宿主本地
 /// 解释 naive——两条路径**不互为一致性合约**）。带偏移 / `Z` 的值按瞬时比较；
 /// 两类混排（只有手改 metadata 才会出现）会差一个时区偏移，是已知边界。
-fn parse_added_at(value: &str) -> Option<i64> {
+pub fn parse_timestamp_micros(value: &str) -> Option<i64> {
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f") {
         return Some(naive.and_utc().timestamp_micros());
     }

@@ -17,6 +17,11 @@ pub struct SessionInfo {
     pub created_at: Option<DateTime<Utc>>,
     pub template_name: Option<String>,
     pub workspace: Option<String>,
+    /// 创建该会话的父会话 id（血缘：谁创建了我，见 docs/dev/session-lineage.md）；
+    /// 根会话（用户直接创建）为 None。**弱引用**：不保证父会话当前可解析。
+    /// 旧网关 / 老数据缺省。
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
     pub last_interaction: Option<String>,
     /// 运行时状态: inactive|idle|working|waiting（旧网关缺省时为空串，前端降级为 inactive）。
     #[serde(default)]
@@ -152,6 +157,12 @@ pub struct CreateSessionRequest {
     /// generates an id (the default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Parent session id (lineage: who created this session). The CLI fills it
+    /// from `WING_SESSION_ID` when it runs inside an agent's shell; explicit
+    /// callers may set any well-formed id. Ignored when the request adopts an
+    /// existing session (resume semantics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +259,13 @@ pub struct CreateSessionResponse {
     /// compatibility with gateways predating backend selection.
     #[serde(default)]
     pub backend: Option<String>,
+    /// The **resulting** parent session id (read back, not echoed — mirrors
+    /// the `tags` read-back convention): `None` when the session has no parent
+    /// or the gateway predates the field, so a caller that sent one can tell
+    /// whether it was recorded. On the adopt path the request's parent is
+    /// ignored (resume semantics) and this reflects the existing record.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +403,9 @@ pub struct SessionInfoResponse {
     pub session_name: Option<String>,
     #[serde(default)]
     pub workdir: Option<String>,
+    /// 创建该会话的父会话 id（血缘）；根会话 / 旧网关为 None。
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
     #[serde(default)]
     pub status: String,
     pub context_stats: ContextStatsInfo,

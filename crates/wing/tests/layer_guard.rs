@@ -245,6 +245,7 @@ const SHARED_ANCHORS: &[&str] = &[
     "shared/constants.rs",
     "shared/tips.rs",
     "shared/doc_edit.rs",
+    "shared/session_tree.rs",
     "shared/panels/mod.rs",
     "shared/panels/ask.rs",
     "shared/panels/picker.rs",
