@@ -15,10 +15,15 @@ SESSION_ID_MAX_BYTES = 128
 
 
 class InvalidInputError(ValueError):
-    """请求携带了**无法表示**的输入（当前唯一来源：不可编码为 UTF-8 的文本）。
+    """请求携带了**无法表示 / 不可兑现**的输入。
+
+    来源：① 不可编码为 UTF-8 的文本（``require_utf8``）；② 消息携带的媒体引用
+    不可兑现（id 格式 / mime 不在支持列表 / 对象不存在——``validate_media_refs``）；
+    ③ 上传的媒体字节不合规（空 / 超 ``images.max_bytes`` / 非支持格式 / 尺寸不可解析
+    ——``wing.media.upload_image_ref``）。
 
     继承 ``ValueError``：既有的"非法输入 → 400"捕获点（create / update / tag）
-    不需要改动；需要把 400 的口径钉死的地方（如 send 路由只该为"正文非法"回
+    不需要改动；需要把 400 的口径钉死的地方（如 send 路由只该为"输入问题"回
     400，不该吞掉链上未来出现的其它 ``ValueError``）可以精确捕获本类型。
     """
 
@@ -58,7 +63,7 @@ def is_valid_session_id(value: object) -> bool:
     - 含路径分隔符（``/`` ``\\``）或父目录引用 ``..``——id 是单层路径组件，
       防穿越（这也是它必须拒绝而非清洗的原因）；
     - 以 ``.`` 开头——覆盖 ``.`` / ``..`` 两个特例，并保留存储自己的点命名
-      空间（``<sessions root>/.media`` 是媒体池，绝不能被寻址成会话）；
+      空间（``<sessions root>/.media`` 是遗留媒体池，绝不能被寻址成会话）；
     - 含 ASCII 控制字符（0x00–0x1F、0x7F）——路径与终端展示的卫生；
     - **无法编码为 UTF-8**（孤立代理字符 ``"\\ud800"``：合法 JSON 但不是合法
       UTF-8——放行的话 create 会成功、随后在落盘与 HTTP 序列化处炸 500）；

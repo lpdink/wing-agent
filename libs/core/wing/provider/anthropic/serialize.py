@@ -44,7 +44,7 @@ class _SerializeMixin:
     ) -> tuple[str, list[dict]]:
         """将 Message 列表转换为 Anthropic 格式（含请求期媒体投影）。
 
-        媒体池读接口经 ``options.media`` 注入（会话级；None = 无存储）。
+        会话媒体读接口经 ``options.media`` 注入（会话级；None = 无存储）。
 
         无媒体的消息与引入媒体前逐字节一致（快路径不触碰全局配置）。有媒体时：
 
@@ -104,6 +104,7 @@ class _SerializeMixin:
                 plans.get(i, []),
                 media=options.media if options is not None else None,
                 cache=cache,
+                role=msg.role,
             )
 
             if msg.role == "assistant":
@@ -150,7 +151,8 @@ class _SerializeMixin:
                 blocks: list[dict] = []
                 if msg.content:
                     blocks.append({"type": "text", "text": msg.content})
-                # 预留的 user 媒体位（followup 下无"轮"可挂靠，就地发射）
+                # user 贴图的媒体位（无"轮"可挂靠，就地发射）——纯图消息
+                # （content 为空）只发射 image block。
                 for slot in slots:
                     if slot.b64 is None:
                         blocks.append({"type": "text", "text": slot.placeholder})

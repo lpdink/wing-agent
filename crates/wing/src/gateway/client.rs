@@ -21,6 +21,7 @@ use crate::gateway::chunk::Outcome;
 use crate::gateway::chunk::Reassembler;
 use crate::protocol::ClientRequest;
 use crate::protocol::ConnectResponse;
+use crate::protocol::MediaRef;
 use crate::protocol::WingEvent;
 
 /// Connection info returned after successful Gateway handshake.
@@ -390,24 +391,31 @@ impl GatewayClient {
     ///
     /// `request_id` — caller-generated correlation id, echoed back in the
     /// `delivered` / `user_message_accepted` events for this message.
+    ///
+    /// `media` — 图片引用（先经 HTTP 上传端点拿到）；`None` = 纯文本，
+    /// 帧里不出现 `media` 键（旧网关逐字节兼容）。
     pub async fn send_message(
         &self,
         session_id: &str,
         content: &str,
         tool_call_id: Option<String>,
         request_id: String,
+        media: Option<Vec<MediaRef>>,
     ) -> Result<()> {
-        let req = ClientRequest {
-            request_id,
-            session_id: session_id.to_string(),
-            content: content.to_string(),
-            tool_call_id,
-        };
-        self.tx
-            .send(req)
+        self.request_sender()
+            .send_message(session_id, content, tool_call_id, request_id, media)
             .await
-            .context("gateway write channel closed")?;
-        Ok(())
+    }
+
+    /// 写口句柄：把请求投进 WS 写任务的那一半（[`GatewayClient`] 本体不可克隆——
+    /// 读端 `rx` 是单消费者的，归事件循环独占）。
+    ///
+    /// 后台任务（带图消息的逐张上传 + 发送）只需要写口，拿这份可克隆的窄句柄即可，
+    /// 与 `send_message` 走同一条通道、同一套错误面。
+    pub fn request_sender(&self) -> RequestSender {
+        RequestSender {
+            tx: self.tx.clone(),
+        }
     }
 
     /// Send a request with a specific session_id.
@@ -417,6 +425,7 @@ impl GatewayClient {
             session_id: session_id.to_string(),
             content: content.to_string(),
             tool_call_id: None,
+            media: None,
         };
         self.tx
             .send(req)
@@ -430,6 +439,41 @@ impl GatewayClient {
     /// Returns `None` if the connection is closed.
     pub async fn recv_event(&mut self) -> Option<WingEvent> {
         self.rx.recv().await
+    }
+}
+
+/// [`GatewayClient`] 的**写口**（[`GatewayClient::request_sender`] 取）：可克隆，只做投递。
+///
+/// 存在的理由：连接本体不可克隆（读端 `rx` 单消费者），而后台任务（带图消息的上传 +
+/// 发送）只需要「把一条 [`ClientRequest`] 投进写任务」。帧构造与错误面与
+/// [`GatewayClient::send_message`] 逐字一致——后者就是转发到这里。
+#[derive(Clone)]
+pub struct RequestSender {
+    tx: mpsc::Sender<ClientRequest>,
+}
+
+impl RequestSender {
+    /// 发送一条用户消息（语义见 [`GatewayClient::send_message`]）。
+    pub async fn send_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        tool_call_id: Option<String>,
+        request_id: String,
+        media: Option<Vec<MediaRef>>,
+    ) -> Result<()> {
+        let req = ClientRequest {
+            request_id,
+            session_id: session_id.to_string(),
+            content: content.to_string(),
+            tool_call_id,
+            media,
+        };
+        self.tx
+            .send(req)
+            .await
+            .context("gateway write channel closed")?;
+        Ok(())
     }
 }
 

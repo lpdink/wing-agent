@@ -1,5 +1,5 @@
 # wing/media/facts.py
-"""字节 → 事实：sha256 id / mime 嗅探 / 尺寸解析 / 信封文本与尺寸估算。
+"""字节 → 事实：sha256 id / mime 嗅探 / 尺寸解析 / 信封文本与尺寸估算 / 上传字节闸门。
 
 纯函数与不可变数据：不依赖 config、不读存储、不做投影决策（投影见 ``policy``）。
 """
@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import hashlib
 
-from wing.schema import MediaRef
+from wing.common.utils import InvalidInputError
+from wing.schema import MEDIA_NAME_MAX_LENGTH, MediaRef
 
 
 ########## 字节 → 事实
@@ -248,3 +249,85 @@ def encoded_len(nbytes: int) -> int:
 def estimate_image_tokens(ref: MediaRef) -> int:
     """估算一张图片占用的 token 数：``ceil(w*h/750)``（保守经验口径）。"""
     return (ref.width * ref.height + 749) // 750
+
+
+########## 上传闸门（字节 → 校验通过的引用）
+
+
+def too_large_message(nbytes: int, max_bytes: int) -> str:
+    """「超限」的拒绝理由（400 的 ``detail``）。
+
+    字节闸门（真实字节）与端点的 ``Content-Length`` 预检（声明字节）共用同一份
+    文案——同一个拒绝不该有两条说法。
+    """
+    return (
+        f"image too large: {format_size(nbytes)} exceeds the "
+        f"{format_size(max_bytes)} per-image limit (config images.max_bytes)"
+    )
+
+
+def upload_image_ref(
+    data: bytes, *, max_bytes: int, name: str | None = None
+) -> MediaRef:
+    """上传端点的字节闸门：校验一份原始图片字节并给出引用（**零存储副作用**）。
+
+    检查顺序：非空 → 尺寸上限 → 展示名长度 → magic bytes（``sniff_image_mime``）→
+    头部尺寸（``image_dimensions``）。前三步 O(1)（不为畸形 / 超限载荷做格式解析），
+    格式判定先于尺寸解析（尺寸按格式解析，无 mime 无从下手）。任一不过抛
+    ``InvalidInputError``（HTTP 400 语义）——调用方据此在**任何落盘之前**拒绝，
+    这就是"拒绝不产生副作用"的实现方式：本函数只读入参，不碰文件系统 / 存储。
+
+    ``max_bytes`` 由调用方传入（生效值 = 配置的 ``images.max_bytes``）：本模块不依赖
+    config。``name`` 是展示名（空串与缺省同价，归一为 None），不参与寻址——id 是内容
+    sha256，恒由字节现算，与 ``name`` 无关；但它会进响应与 history，因此长度按
+    :data:`~wing.schema.MEDIA_NAME_MAX_LENGTH` 拒绝（与 ``MediaRef`` 字段同一常量，
+    超限在构造引用之前就回落成 400，而不是让 pydantic 的 ``ValidationError`` 冒到 500）。
+    """
+    if not data:
+        raise InvalidInputError(
+            f"empty request body: expected image bytes ({_supported_label()}, "
+            f"detected by content)"
+        )
+    if len(data) > max_bytes:
+        raise InvalidInputError(too_large_message(len(data), max_bytes))
+    if name is not None and len(name) > MEDIA_NAME_MAX_LENGTH:
+        raise InvalidInputError(
+            f"image name too long: {len(name)} characters exceeds the "
+            f"{MEDIA_NAME_MAX_LENGTH} character limit"
+        )
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise InvalidInputError(
+            f"not a supported image ({_supported_label()} expected; detected from "
+            f"content, not from the file extension)"
+        )
+    dims = image_dimensions(data, mime)
+    if dims is None:
+        if is_apple_cgbi_png(data):
+            # 与读图路径同一归因：CgBI 是 Apple 的非标准 PNG 变体（IHDR 在偏移 28），
+            # 文件本身合法可显示——报"损坏"是误导。上传端只有字节、没有源文件路径，
+            # 所以给的是通用转换命令（读图路径给的是可照抄的具体路径版本）。
+            raise InvalidInputError(
+                "Apple CgBI PNG variant — dimensions cannot be read "
+                "(non-standard layout: the CgBI chunk precedes IHDR; the file "
+                "itself is valid). Convert it first, e.g.: "
+                "sips -s format png <file> --out <file>.png"
+            )
+        raise InvalidInputError(
+            f"cannot read {_MIME_SHORT.get(mime, mime)} image dimensions "
+            f"(header truncated or corrupt)"
+        )
+    width, height = dims
+    return MediaRef(
+        id=media_id(data),
+        mime=mime,
+        bytes=len(data),
+        width=width,
+        height=height,
+        name=name or None,
+    )
+
+
+def _supported_label() -> str:
+    """支持格式的短名清单（``"gif/jpeg/png/webp"``，报错文案用）。"""
+    return "/".join(sorted(m.removeprefix("image/") for m in SUPPORTED_IMAGE_MIMES))

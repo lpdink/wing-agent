@@ -6,6 +6,7 @@
 use super::support::*;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::toast::ToastKind;
 
 #[test]
 fn test_drag_select_copies_the_selected_text() {
@@ -741,7 +742,7 @@ fn test_composer_delete_removes_a_chip_whole() {
     assert_eq!(app.input.text(), "see ");
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 4));
     assert_eq!(
-        app.input.pastes.payload(1),
+        app.input.chips.paste_payload(1),
         None,
         "the payload goes with the chip"
     );
@@ -756,9 +757,164 @@ fn test_composer_backspace_removes_a_chip_whole() {
     assert_eq!(app.input.text(), "see ");
     assert_eq!((app.input.cursor_row, app.input.cursor_col), (0, 4));
     assert_eq!(
-        app.input.pastes.payload(1),
+        app.input.chips.paste_payload(1),
         None,
         "the payload goes with the chip"
+    );
+}
+
+/// A compressed picture of `bytes` bytes, 4 × 2.
+fn picture(bytes: usize) -> crate::util::image_compress::CompressedImage {
+    crate::util::image_compress::CompressedImage {
+        bytes: vec![0; bytes],
+        width: 4,
+        height: 2,
+    }
+}
+
+/// Submitting a draft with pictures: the intent keeps the text and the pictures
+/// apart (06's `SendMessage` shape), the pictures in appearance order — and the
+/// label never leaks into the text.
+#[test]
+fn test_composer_submit_carries_the_pictures_apart_from_the_text() {
+    let mut app = app_with_draft("看看这个");
+    app.input.insert_image(picture(1024));
+    app.input.insert_image(picture(2048));
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    match app.drain_intents().as_slice() {
+        [
+            AppIntent::SendMessage {
+                content, images, ..
+            },
+        ] => {
+            assert_eq!(content, "看看这个", "标签不进文本");
+            assert_eq!(images.len(), 2);
+            assert_eq!(images[0].bytes.len(), 1024, "顺序 = 出现序");
+            assert_eq!(images[1].bytes.len(), 2048);
+            assert_eq!((images[0].width, images[0].height), (4, 2));
+        }
+        other => panic!("expected exactly one SendMessage, got {other:?}"),
+    }
+    assert_eq!(app.input.text(), "", "提交后草稿（含 chip）清空");
+    assert!(app.input.chips.paste_payload(1).is_none());
+}
+
+/// A picture-only draft submits too: a chip is content, and the message carries
+/// the picture with an empty text.
+#[test]
+fn test_composer_submits_a_picture_only_draft() {
+    let mut app = app_with_draft("");
+    app.input.insert_image(picture(16));
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    match app.drain_intents().as_slice() {
+        [
+            AppIntent::SendMessage {
+                content, images, ..
+            },
+        ] => {
+            assert_eq!(content, "");
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].bytes.len(), 16);
+        }
+        other => panic!("expected a picture-only SendMessage, got {other:?}"),
+    }
+}
+
+/// The plain-text path is byte-for-byte what it was: no pictures, no `media`.
+#[test]
+fn test_composer_submit_without_pictures_keeps_an_empty_image_list() {
+    let mut app = app_with_draft("hello");
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+    match app.drain_intents().as_slice() {
+        [
+            AppIntent::SendMessage {
+                content, images, ..
+            },
+        ] => {
+            assert_eq!(content, "hello");
+            assert!(images.is_empty());
+        }
+        other => panic!("expected one SendMessage, got {other:?}"),
+    }
+}
+
+/// Submitting text that **is** a frontend command drops the pictures the draft
+/// carried: the command runs locally, it is not a message, so there is nowhere
+/// for a picture to ride (a paste chip's payload survives that path — its text
+/// form is already inside the submitted text — a picture's does not).
+///
+/// The drop is announced: it is rare, but a silently vanished picture is the
+/// worst outcome.
+#[test]
+fn test_submitting_a_command_drops_the_pictures_with_a_notice() {
+    let mut app = app_with_draft("/clear");
+    app.input.insert_image(picture(1024));
+    // What the screen shows (the chip) and what the command sees (the text)
+    // are two different things — the label is dropped from the expanded text.
+    assert_eq!(app.input.text(), "/clear[Image #1 4×2 1KB]");
+    app.chat
+        .push(ChatCell::AssistantMessage("about to be cleared".into()));
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    let intents = app.drain_intents();
+    assert!(
+        !intents
+            .iter()
+            .any(|i| matches!(i, AppIntent::SendMessage { .. })),
+        "a picture never rides a command: {intents:?}"
+    );
+    assert!(app.chat.is_empty(), "the command itself ran");
+    let toast = app.toast.as_ref().expect("图片丢了要看得见");
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert!(
+        toast.message.contains("dropped") && toast.message.contains("/clear"),
+        "提示要说清是哪条命令：{toast:?}"
+    );
+    assert_eq!(app.input.text(), "", "提交后草稿（含 chip）清空");
+}
+
+/// A **must-select** command is the other rewrite point: Enter restores the
+/// draft as plain text and re-arms the popup instead of sending anything, so
+/// the pictures the draft carried go with the rewrite (the drop table in
+/// `docs/dev/tui-input.md` registers it).
+///
+/// The drop is announced here too — same notice as the command path, not a
+/// different one: the picture is gone either way, and the user is about to
+/// re-paste to send it.
+#[test]
+fn test_a_must_select_command_rewrite_drops_the_pictures_too() {
+    let mut app = app_with_draft("/fork");
+    app.input.insert_image(picture(1024));
+    assert_eq!(app.input.text(), "/fork[Image #1 4×2 1KB]");
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+
+    let intents = app.drain_intents();
+    assert!(
+        !intents
+            .iter()
+            .any(|i| matches!(i, AppIntent::SendMessage { .. })),
+        "must-select 命令不会被当消息发出去: {intents:?}"
+    );
+    assert_eq!(app.input.text(), "/fork", "草稿回到纯文本");
+    assert!(
+        app.popup.active.is_active(),
+        "must-select 命令的 popup 重新打开（回车留在草稿里等候选）"
+    );
+    assert!(
+        app.input.submit_payload().images.is_empty(),
+        "注册表里也没有留下载荷（不会变成看不见的附件）"
+    );
+    let toast = app.toast.as_ref().expect("图片丢了要看得见");
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert!(
+        toast.message.contains("dropped") && toast.message.contains("/fork"),
+        "提示要说清是哪条命令：{toast:?}"
     );
 }
 

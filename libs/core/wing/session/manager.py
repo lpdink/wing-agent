@@ -33,6 +33,7 @@ from wing.common.utils import (
 )
 from wing.config import get_config
 from wing.hooks import hooks
+from wing.media import upload_image_ref
 from wing.event import (
     DeliveredEvent,
     EventTarget,
@@ -41,12 +42,12 @@ from wing.event import (
 from wing.event_bus import event_bus
 from wing.commands import expand_prompt_command
 from wing.request_context import session_context
-from wing.schema import ChainNode, Message
+from wing.schema import ChainNode, MediaRef, Message
 from wing.store import SessionMetadata, SessionStore
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
-from .session import Session, tool_refs, validate_tool_refs
+from .session import Session, tool_refs, validate_media_refs, validate_tool_refs
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .template import AgentTemplate, AgentTemplateManager
 
@@ -165,6 +166,86 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
             if isinstance(value, str):
                 clone[key] = uuid_map.get(value)
     return clones
+
+
+def _message_media_ids(nodes: Iterable[ChainNode]) -> list[str]:
+    """链节点引用的媒体 id（去重、保持出现序）。
+
+    ``ChainNode`` 家族里只有 ``Message`` 带 ``media``（事件没有）——按属性
+    探测，加载路径对两类记录混排的链无感。
+    """
+    seen: dict[str, None] = {}
+    for node in nodes:
+        for ref in getattr(node, "media", None) or []:
+            seen.setdefault(ref.id, None)
+    return list(seen)
+
+
+def _record_media_ids(records: Iterable[dict]) -> list[str]:
+    """raw 记录引用的媒体 id（去重、保持出现序；坏形态跳过）。
+
+    记录契约归 ``MessageLog`` 管：这里只做防御性取值（media 不是数组、
+    元素不是 dict、id 不是 str 一律跳过）——fork 复制是 best-effort 路径，
+    不值得为一条坏记录炸掉整个 fork。
+    """
+    seen: dict[str, None] = {}
+    for record in records:
+        refs = record.get("media")
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if isinstance(ref, dict) and isinstance(ref.get("id"), str):
+                seen.setdefault(ref["id"], None)
+    return list(seen)
+
+
+def _materialize_loaded_media(
+    store: SessionStore, session_id: str, nodes: Iterable[ChainNode]
+) -> None:
+    """加载路径：把活跃链引用的媒体对象幂等物化进会话目录（best-effort）。
+
+    老会话的对象在遗留共享池（``<root>/.media/``）里，读路径虽能双读兜底，
+    但"会话自包含"要求对象在**首次加载**时就搬进 ``<sid>/media/``——此后
+    整个会话目录拷贝到另一台机器即可用。对象通常已在目录里（快路径 stat
+    即返回），miss 时才碰老池。失败只 WARN（含历史里的非法 id）：读取侧
+    双读仍在，最坏是该位降级为占位文本，绝不阻断加载。
+    """
+    for media_id in _message_media_ids(nodes):
+        try:
+            store.materialize(session_id, media_id)
+        except Exception as e:  # noqa: BLE001 —— 迁移失败不能阻断会话加载
+            log.warning(
+                f"Session {session_id}: materialize media '{media_id[:8]}' "
+                f"failed: {e} (read path keeps its fallback)"
+            )
+
+
+def _copy_session_media(
+    store: SessionStore, source_id: str, child_id: str, records: Iterable[dict]
+) -> None:
+    """fork：把子会话记录引用的媒体对象复制进子会话目录（自包含；best-effort）。
+
+    复制源是**源会话目录优先、老池回退**（经 ``read_media``，顺带把老池命中
+    物化进源目录）。失败只 WARN 不阻断 fork——读取侧双读兜底仍在，代价是复制
+    失败的那个对象在子会话里会降级为占位（回退池不含源会话目录，这是刻意的：
+    不给"自包含"留第二条隐式依赖）。判据是常规路径全部复制成功（probe 钉住）。
+    """
+    for media_id in _record_media_ids(records):
+        try:
+            data = store.read_media(source_id, media_id)
+            if data is None:
+                log.warning(
+                    f"fork: media '{media_id[:8]}' referenced by session "
+                    f"'{source_id}' not found (session dir or legacy pool); "
+                    f"child '{child_id}' will degrade it to a placeholder"
+                )
+                continue
+            store.write_media(child_id, media_id, data)
+        except Exception as e:  # noqa: BLE001 —— 复制失败不能阻断 fork
+            log.warning(
+                f"fork: copying media '{media_id[:8]}' from '{source_id}' to "
+                f"'{child_id}' failed: {e}"
+            )
 
 
 class SessionManager:
@@ -475,6 +556,9 @@ class SessionManager:
         messages: TrackedList[ChainNode] = TrackedList.load(
             store.open_log(resolved), Message
         )
+        # 会话自包含：把活跃链引用的媒体对象幂等物化进会话目录（老池兼容面；
+        # 见 _materialize_loaded_media）。失败 WARN 不阻断加载。
+        _materialize_loaded_media(store, resolved, messages)
         # workspace 从 metadata 恢复，使 CM 构造时即以正确工作目录加载相对路径的
         # rules/skills。漏传会让 CM 以 workspace=None 构建、patterns 退化到进程
         # cwd 展开，把错误文件加载进系统提示词（Session.__init__ 的事后回填救不
@@ -572,7 +656,11 @@ class SessionManager:
             log.warning(f"fork_session: uuid {target_uuid} not found")
             return None
         child_log = store.open_log(new_session_id)
-        child_log.append(_remap_record_uuids(copied))
+        child_records = _remap_record_uuids(copied)
+        child_log.append(child_records)
+        # 子会话自包含：把记录（含压缩区间——用户仍可回退到压缩点之前）引用的
+        # 媒体对象复制进子目录。失败 WARN 不阻断 fork。
+        _copy_session_media(store, session_id, new_session_id, child_records)
 
         # 用加载路径构造内存态（同 resume）：活跃链 = tip 回溯，压缩区间不进链
         new_messages: TrackedList[ChainNode] = TrackedList.load(child_log, Message)
@@ -642,6 +730,15 @@ class SessionManager:
 
         return new_session, draft
 
+    def session_exists(self, session_id: str) -> bool:
+        """会话是否存在（纯解析，不水合、不发事件）。
+
+        与 ``upload_media`` / ``set_session_tags`` 走同一个 ``_resolve_with_store``：
+        判据（id 形状 + 内存 + 各 store）与它们看到的完全一致——两个调用点对
+        「同一个 id 算不算存在」不能有第二套说法。
+        """
+        return self._resolve_with_store(session_id) is not None
+
     # ── 标签 ─────────────────────────────────
 
     def set_session_tags(
@@ -684,6 +781,36 @@ class SessionManager:
             metadata.tag_meta = mutation.tag_meta or None
             store.save_metadata(resolved_id, metadata)
         return mutation
+
+    # ── 媒体（上行字节） ─────────────────────
+
+    def upload_media(
+        self, session_id: str, data: bytes, *, name: str | None = None
+    ) -> MediaRef:
+        """把一份媒体字节写进会话媒体目录并返回引用（内容寻址，幂等）。
+
+        上传是"字节 → 存储 → 引用"的用例，落点与 `set_session_tags` 同款：**不水合**
+        会话（``_resolve_with_store`` 纯解析）——被逐出的会话不该因一次上传被换入内存
+        （`/api/session/list` 的「活跃在前」顺序契约与 `inactive` 痕迹都会被搅动）。
+        写入目标是解析出的**磁盘真名**（别名不另起一份会话目录）。id 由字节现算
+        （sha256），``name`` 只作展示素材，不参与寻址。
+
+        校验（``wing.media.upload_image_ref``：非空 / 上限 / 支持格式 / 尺寸可解析）全部
+        发生在落盘**之前**：失败抛 ``InvalidInputError``，存储零副作用（不建目录、不写
+        对象）。上限取生效配置 ``images.max_bytes``（与 ReadImage 同一口径）。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
+            InvalidInputError: 字节不合规（空 / 超上限 / 非支持格式 / 尺寸不可解析）
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise LookupError(f"Session not found: {session_id!r}")
+        resolved_id, store = resolved
+
+        ref = upload_image_ref(data, max_bytes=get_config().images.max_bytes, name=name)
+        store.write_media(resolved_id, ref.id, data)
+        return ref
 
     # ============================================================
     # 外部方法：逐出（eviction）
@@ -928,21 +1055,26 @@ class SessionManager:
         request_id: str | None = None,
         session_id: str | None = None,
         tool_call_id: str | None = None,
+        media: list[MediaRef] | None = None,
     ) -> None:
         """路由消息到指定 session。（内部方法，由 WingRuntime 调用）
 
         Contextvars 由 WingRuntime.post() 统一管理，此方法不设置/恢复。
 
         - 不在内存的会话先按需水合（逐出后仍可投递）
+        - 携带的媒体引用先过闸门（id 格式 + 对象存在）——不可兑现即拒（幽灵引用
+          不进历史，也**没有**送达 ack：拒绝发生在 DeliveredEvent 之前）
         - / 开头且匹配 prompt 命令 → 展开为纯文本后投递
         - 否则 → 直接投递给 session.post()
 
         Raises:
             LookupError: 内存与磁盘都没有该会话（调用方负责映射错误面）
+            InvalidInputError: 携带的媒体引用不可兑现（id 非法 / 对象不存在）
         """
         assert session_id is not None, "session_id is required by WingRuntime"
 
         session = self.ensure_loaded(session_id)
+        validate_media_refs(session.store, session.session_id, media)
 
         event_bus.emit(
             DeliveredEvent(
@@ -962,4 +1094,9 @@ class SessionManager:
         log.info(
             f"SM._post: routing '{content[:50]}' to session.post (session={session_id})"
         )
-        await session.post(content, request_id=request_id, tool_call_id=tool_call_id)
+        await session.post(
+            content,
+            request_id=request_id,
+            tool_call_id=tool_call_id,
+            media=media,
+        )

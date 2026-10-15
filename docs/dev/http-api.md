@@ -10,7 +10,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 1. WS  GET/WS  /ws                 → ConnectResponse { type:"connected", client_id }
 2. HTTP POST  /api/session/create   → { session_id }
 3. HTTP POST  /api/session/subscribe { session_id, client_id }
-4. HTTP POST  /api/session/send      { session_id, content, tool_call_id? } → agent loop 启动
+4. HTTP POST  /api/session/send      { session_id, content, tool_call_id?, media? } → agent loop 启动
    （`tool_call_id` = 定向回答一个在挂 Ask 的 feedback waiter；CLI 侧：`wing asks` 拿 id，
    `wing run --tool-call-id` 回答）
 5. WS   接收 ReAct 事件流（text / tool_call / … / turn_result）
@@ -18,9 +18,11 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 查询（弹窗候选、系统信息等）走 GET 端点；状态变更（切模型、压缩、回退等）走 POST 端点。TUI 中的斜杠命令多数被前端拦截并转换为这些 HTTP 调用（见 [glossary.md](glossary.md) 中「命令」条目）。
 
+带图消息是两步：先 `POST /api/session/media` 上传字节、拿回 `media` 引用，再把该引用放进消息的 `media`（见下表与 [media-images.md](media-images.md)「用户贴图」）。
+
 ## HTTP 端点
 
-### Session（`routes/session.py`，16 个）
+### Session（`routes/session.py`，17 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -29,7 +31,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
-| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask）；无该 id / id 已失效则回退普通入队 |
+| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 = 无媒体；id 必须是该会话已存在的对象、mime 必须在支持列表内——幽灵引用 / 非法 id / 非法 mime 回 400，消息不进历史）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask；该通道**只承载文本**，同时带 `media` 时记 WARN 后按文本 resolve）；无该 id / id 已失效则回退普通入队 |
+| POST | `/api/session/media` | 上传媒体（**原始字节体**：`?session_id=<sid>[&name=<n>]`，body = 图片字节，非 JSON / 非 multipart）。收包顺序：会话存在（否则 404，且**不隐式建会话**）→ `Content-Length` 预检（声明值 > `images.max_bytes` 直接 400，**不收包**）→ 收包 → 字节校验：body 非空 → `≤ images.max_bytes`（真实字节兜底）→ magic bytes ∈ {png, jpeg, webp, gif} → 头部尺寸可解析；失败一律 400 且**零存储副作用**（不建目录、不写对象）。id = 字节的 sha256（内容寻址），同字节重复上传返回**同一 id** 且不重写对象（幂等）；响应 `{"ok":true,"media":{id,mime,bytes,width,height,name?}}`，`media` 就是消息 `media` 数组的元素形状（可直接回投 `/api/session/send`）。`name` 是展示素材（缺省 / 空串 = 不记录，建议给 basename；长度上限 255 字符，超限 400；id 才是寻址键）。**不水合**已逐出会话（与 `/api/session/tag` 同款）；写入只落 `<sessions-root>/<sid>/media/<id>`，老共享池只读不写。鉴权 / setup mode 行为与其它 session 端点一致 |
 | GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）与 `tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags），以及生效模型的四件套 `model_id`（引用词）/ `model_name`（调用名）/ `provider_name` / `model_display_name`（口径同 `/api/session/info`；在内存的会话取 live agent，未加载的按 resume 链解析盘上记录，解析不出的降级路径为 null，展示层回落 展示名 → 调用名 → 引用词）；**带标签的会话即使还没有首条消息也列出**（"创建即打标"窗口期可查，name 为 null）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及 `/ss <args>` 的 exact > prefix > contains 分层（层内保持上述顺序）；后端不感知 `pin`（它只是普通标签），状态优先级（`waiting` 不提前）与 workspace 不参与排序。可选**子集过滤**（查询参数，逗号分隔）：`status=idle,working,waiting` 只保留状态命中者（取值域 = 状态全集）；`tag=pin,crew` 只保留**携带全部**给定标签的行（AND，与 `wing ps --tag` 的既有标签口径一致；`/ss <args>` 的 args 是 id / 标题 / workspace 的子串匹配，与标签无关）；两者同时给出即 AND。**过滤 = 子集**：结果是全量列表的**子序列**（同样的行、同样的相对顺序，只是少了几行），聚合成本与不过滤时相同——省下的是响应体积与调用方的清洗 / 合并成本。「在内存的会话」（能在跑的那批，含完整行）即 `status=idle,working,waiting`：会话列表 / rail 的状态轮询走它，不必每次拉全量——注意可见性规则先于过滤生效（无名且无标的会话本就不在列表里，过滤不会让它出现）；旧网关不识别这两个参数时会静默返回全量（仍是正确的超集——消费方按 id 处理多出来的行即可）。非法取值一律 400（未知状态 / 空段 / **同一参数重复给出**——多值用单个逗号分隔参数表达；标签取值按写入侧同一套规则校验（`wing.session.tags.validate_tag`），词法非法（空 / 超长 / 空白 / 控制符 / `-` 开头）即 400）；**语法合法但不存在**的标签是空结果（词表开放，无从枚举——字面匹配，不是错误） |
 | GET | `/api/session/get` | 获取 session 详情 |
 | GET | `/api/session/info` | 运行时状态，含 `model`（调用名）+ `model_id`（引用词；不可用时 null）+ `provider_name`（运行期事实）+ `model_display_name`（展示名；未声明 = null，前端回落 `model`）、`context_stats`、`skills_info`、`reasoning_effort`、`tags`（会话标签）、`tag_meta`（标签记录，含 `added_at`）与 `usage`（会话用量账本：计数 `user_messages` / `llm_calls` / `tool_calls` / `turns` + token `prompt_tokens` / `completion_tokens` / `cached_tokens` + 时长 `llm_time_ms` / `tool_time_ms`，跨 release / 网关重启延续；旧会话 / 无记录读出即全零，不回填。口径：`llm_*` 只计 ReAct 循环内的调用（压缩等旁路不计），tool 只计真实执行的调用（参数非法 / 未知工具的短路与中断合成不计）。命中率 = `cached_tokens / prompt_tokens`、工作时长 = `llm_time_ms + tool_time_ms` 由客户端推导——线格式不含派生值） |
@@ -52,7 +55,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 > **session id 是闸门（只防穿越与卫生）**：id 由后端生成（默认形态
 > `YYYYMMDD-HHMMSS-<8 位小写 hex>`）**或由编排方自带**（`/api/session/create`
 > 的 `session_id` = create-or-adopt）。校验只拒绝危险值：含路径分隔符 / `..`、
-> 点开头（`<sessions root>/.media` 是媒体池，存储自己的点命名空间）、ASCII
+> 点开头（`<sessions root>/.media` 是遗留媒体池，存储的点命名空间）、ASCII
 > 控制字符、不可编码为 UTF-8（孤立代理字符）、空串、超过 **128 字节**
 > （`common.utils.is_valid_session_id`；字节而非字符——Linux/macOS 的
 > `NAME_MAX` 是 255 字节，`"收" * 128` 是 384 字节，会在首次写入炸
@@ -210,7 +213,7 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 握手成功后服务端推送 `ConnectResponse { type: "connected", client_id }`。之后是**双向**通道：
 
 - **服务端 → 客户端**：推送 `WingEvent` 事件流，事件均为 `WingEvent` 子类，按 `type` 字段区分。
-- **客户端 → 服务端**：发送 `ClientRequest` 帧 `{ request_id, session_id, content, tool_call_id? }`，用于投递用户消息，或携带 `tool_call_id` 定向回复某个 `ask` 事件（resolve 对应的 feedback waiter）。Gateway 注入 `client_id` 后转给 `WingRuntime.post()`。
+- **客户端 → 服务端**：发送 `ClientRequest` 帧 `{ request_id, session_id, content, tool_call_id?, media? }`，用于投递用户消息，或携带 `tool_call_id` 定向回复某个 `ask` 事件（resolve 对应的 feedback waiter）。Gateway 注入 `client_id` 后转给 `WingRuntime.post()`。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 / null = 无媒体；每个 id 必须是该会话已存在的对象、mime 必须在支持列表内，否则整条消息被拒——客户端收 `error` 帧（携带该帧的 `session_id` 与客户端自己的 `request_id`，供「拒绝 → 丢弃 pending」关联）、消息不进历史、也没有 `delivered`）。
 
 > 投递消息有两条等价路径：WS `ClientRequest`（TUI 实际所用，便于与 Ask 回复复用同一连接）或 HTTP `POST /api/session/send`。
 

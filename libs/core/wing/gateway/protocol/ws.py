@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from wing.schema import MediaRef
+
 
 # ============================================================
 # WS 协议（WebSocket）
@@ -41,6 +43,14 @@ class ClientRequest(BaseModel):
     )
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
+    media: list[MediaRef] | None = Field(
+        default=None,
+        description=(
+            "消息携带的媒体引用（缺省 / null = 无媒体）。id 必须指向该会话已存在的"
+            "媒体对象且 mime 在支持列表内，否则网关拒绝整条消息（错误帧携带本帧的"
+            "session_id / request_id，不进历史）"
+        ),
+    )
     tool_call_id: str | None = Field(
         default=None,
         description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",

@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
     """OpenAI 兼容协议 provider（httpx 实现）。
 
-    无状态：实例只含配置与连接池；会话级参数（session id / 媒体池 / 开关）
+    无状态：实例只含配置与连接池；会话级参数（session id / 会话媒体 / 开关）
     经 `generate(..., options=RequestOptions)` 注入（见 ModelProvider）。
     """
 

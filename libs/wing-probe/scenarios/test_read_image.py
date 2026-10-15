@@ -9,7 +9,7 @@ provider `image_max_bytes` 请求期降级 / `images.max_bytes` 读时拒绝（�
 
 断言只锚定四个取证面：**事件时间线**（WS 事件 data）、**假 Provider 请求留档**
 （`probe.context` / `probe.request`）、**history.jsonl**（独立解析）、**文件系统**
-（workspace 文件 + `<sessions-root>/.media/<id[:2]>/<id>` 对象文件）。图片字节由
+（workspace 文件 + 会话私有媒体对象 `<sessions-root>/<sid>/media/<id>`）。图片字节由
 场景现场生成（stdlib zlib + struct 构造的合法 PNG），bytes / width / height / sha256
 与被测文件同源，不使用大 base64 常量。
 
@@ -255,9 +255,14 @@ def tool_messages(request_body: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def media_object_path(probe: Probe, ref_id: str) -> Path:
-    """会话媒体池对象：`<sessions-root>/.media/<id[:2]>/<id>`。"""
-    return probe.env.sessions_path / ".media" / ref_id[:2] / ref_id
+def media_object_path(probe: Probe, session_id: str, ref_id: str) -> Path:
+    """会话私有媒体对象：`<sessions-root>/<sid>/media/<id>`（session 自包含的落点）。"""
+    return probe.env.session_dir(session_id) / "media" / ref_id
+
+
+def session_media_dir(probe: Probe, session_id: str) -> Path:
+    """会话私有媒体目录：`<sessions-root>/<sid>/media/`。"""
+    return probe.env.session_dir(session_id) / "media"
 
 
 async def _session_status(probe: Probe, session_id: str) -> str | None:
@@ -355,8 +360,8 @@ async def test_positive_read_default_followup(probe: Probe) -> None:
     history.assert_chain_invariants()
     history.assert_no_transient_records()
 
-    # ④ 存储：内容寻址对象落盘，sha256(对象内容) == id。
-    object_path = media_object_path(probe, ref["id"])
+    # ④ 存储：对象落在**本会话目录**（<sid>/media/<id>），sha256(对象内容) == id。
+    object_path = media_object_path(probe, session.session_id, ref["id"])
     assert object_path.is_file(), sorted(
         item.relative_to(probe.env.sessions_path).as_posix()
         for item in probe.env.sessions_path.rglob("*")
@@ -410,7 +415,7 @@ async def test_inline_delivery_keeps_image_in_tool_message(probe: Probe) -> None
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_vision_gate_refuses_without_side_effects(probe: Probe) -> None:
-    """能力门禁：拒绝文案 + 请求无 image part + 媒体池零写入（spec 场景 3）。"""
+    """能力门禁：拒绝文案 + 请求无 image part + 会话媒体目录零写入（spec 场景 3）。"""
     data = png(2, 2, tint=0x33)
     write_image(probe, "nope.png", data)
 
@@ -439,8 +444,8 @@ async def test_vision_gate_refuses_without_side_effects(probe: Probe) -> None:
     for entry in probe.requests_for(TEXT_MODEL):
         assert "image_url" not in json.dumps(entry.body), entry.describe()
 
-    # 拒绝不产生副作用：媒体池对象目录整个不存在。
-    assert not (probe.env.sessions_path / ".media").exists()
+    # 拒绝不产生副作用：本会话的媒体目录整个不存在（零写入）。
+    assert not session_media_dir(probe, session.session_id).exists()
 
 
 # ── 场景 4：换模型降级（红线） ─────────────────────────────────────
@@ -616,7 +621,7 @@ async def test_compact_request_strips_media(probe: Probe) -> None:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_fork_keeps_media_usable(probe: Probe) -> None:
-    """fork 后媒体可用：子会话请求里图片仍是 image part（引用池共享，无拷贝）。"""
+    """fork 后媒体可用：子会话请求里图片仍是 image part（字节复制进子目录，自包含）。"""
     data = png(2, 3, tint=0x77)
     write_image(probe, "fork.png", data)
     ref_id = media_id(data)
@@ -649,14 +654,13 @@ async def test_fork_keeps_media_usable(probe: Probe) -> None:
     ], context.describe()
     assert not any(placeholder_texts(m) for m in messages_of(context.body))
 
-    # 存储：对象仍在那一个内容寻址路径上（fork 只共享引用，绝不拷贝字节）。
-    media_dir = probe.env.sessions_path / ".media"
-    objects = sorted(
-        item.relative_to(media_dir).as_posix()
-        for item in media_dir.rglob("*")
-        if item.is_file()
-    )
-    assert objects == [f"{ref_id[:2]}/{ref_id}"], objects
+    # 存储：fork 把被引用的对象**复制**进子会话目录（自包含——子目录拷走即可用），
+    # 源会话目录保持原样；老共享池（<root>/.media）不参与（新写入不落那里）。
+    source_object = media_object_path(probe, session.session_id, ref_id)
+    child_object = media_object_path(probe, child.session_id, ref_id)
+    assert source_object.read_bytes() == data, source_object
+    assert child_object.read_bytes() == data, child_object
+    assert not (probe.env.sessions_path / ".media").exists()
 
 
 # ── 场景 8：存量回放兼容（history.jsonl 无 media 键） ────────────────
@@ -765,7 +769,7 @@ async def test_provider_image_max_bytes_degrades_too_large(probe: Probe) -> None
     result = await session.chat("look")
     assert result.data["subtype"] == "success", result.data
 
-    # ① 工具侧不受影响：成功事件、引用照带、字节照常入内容寻址池。
+    # ① 工具侧不受影响：成功事件、引用照带、字节照常入会话媒体目录。
     call_events = session.watch.events(
         "tool_call_result", where={"tool_name": "ReadImage"}
     )
@@ -774,7 +778,7 @@ async def test_provider_image_max_bytes_degrades_too_large(probe: Probe) -> None
     assert call_event.data["tool_success"] is True, call_event.data
     assert call_event.data["tool_result"] == envelope, call_event.data["tool_result"]
     assert call_event.data["tool_media"] == [ref], call_event.data["tool_media"]
-    object_path = media_object_path(probe, ref["id"])
+    object_path = media_object_path(probe, session.session_id, ref["id"])
     assert object_path.is_file(), sorted(
         item.relative_to(probe.env.sessions_path).as_posix()
         for item in probe.env.sessions_path.rglob("*")
@@ -799,7 +803,7 @@ async def test_provider_image_max_bytes_degrades_too_large(probe: Probe) -> None
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_images_max_bytes_refuses_read_without_writing(probe: Probe) -> None:
-    """`images.max_bytes`：超限图片在工具层被拒（文案含大小与上限）；媒体池零写入。"""
+    """`images.max_bytes`：超限图片在工具层被拒（文案含大小与上限）；媒体目录零写入。"""
     data = png(64, 64, tint=0xAA)
     assert len(data) > IMAGE_BYTES_CAP, len(data)
     write_image(probe, "too-big.png", data)
@@ -828,8 +832,8 @@ async def test_images_max_bytes_refuses_read_without_writing(probe: Probe) -> No
     assert "images.max_bytes" in message, message
     assert call_event.data["tool_media"] == [], call_event.data
 
-    # 拒绝发生在入库之前：媒体池目录整个不存在（零写入）。
-    assert not (probe.env.sessions_path / ".media").exists()
+    # 拒绝发生在入库之前：本会话的媒体目录整个不存在（零写入）。
+    assert not session_media_dir(probe, session.session_id).exists()
 
     # 请求里也没有 image part / 占位（工具没产出引用，请求链上无任何媒体）。
     for entry in probe.requests_for(VISION_MODEL):
@@ -846,10 +850,10 @@ async def test_images_max_bytes_refuses_read_without_writing(probe: Probe) -> No
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_missing_media_object_degrades_to_unavailable(probe: Probe) -> None:
-    """存储故障：删除 `.media` 对象后，下一轮该位为 UNAVAILABLE 占位且请求照常完成。
+    """存储故障：删除会话媒体对象后，下一轮该位为 UNAVAILABLE 占位且请求照常完成。
 
-    路径：读图入库（基线请求确认图片确实在线上）→ `unlink()` 内容寻址对象 →
-    再发一轮 → 序列化层读到缺失 → WARN + 占位（不抛、不打断请求）。
+    路径：读图入库（基线请求确认图片确实在线上）→ `unlink()` 会话目录里的内容寻址
+    对象 → 再发一轮 → 序列化层读到缺失 → WARN + 占位（不抛、不打断请求）。
     """
     data = png(2, 4, tint=0xBB)
     path = write_image(probe, "gone.png", data)
@@ -869,8 +873,8 @@ async def test_missing_media_object_degrades_to_unavailable(probe: Probe) -> Non
     before = probe.context(VISION_MODEL, 1)
     assert len(bearer_messages(before.body)) == 1, before.describe()
 
-    # 存储故障：对象文件被删除（工具早已把它写进内容寻址池）。
-    object_path = media_object_path(probe, ref_id)
+    # 存储故障：对象文件被删除（工具早已把它写进本会话的媒体目录）。
+    object_path = media_object_path(probe, session.session_id, ref_id)
     assert object_path.is_file(), object_path
     object_path.unlink()
 
@@ -896,7 +900,7 @@ async def test_missing_media_object_degrades_to_unavailable(probe: Probe) -> Non
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_default_max_bytes_refuses_read_without_writing(probe: Probe) -> None:
-    """**代码默认值** `images.max_bytes`（4.5 MiB）：超限读时拒绝、媒体池零写入。
+    """**代码默认值** `images.max_bytes`（4.5 MiB）：超限读时拒绝、会话媒体目录零写入。
 
     与场景 10 互补：那条注入 `images={"max_bytes": 100}` 探"配置生效"；这条
     不写 `images:` 段（`probe_env` 缺省即不注入）、探"缺省配置生效"——把默认值
@@ -927,8 +931,8 @@ async def test_default_max_bytes_refuses_read_without_writing(probe: Probe) -> N
     assert "images.max_bytes" in message, message
     assert call_event.data["tool_media"] == [], call_event.data
 
-    # ② 文件系统：拒绝发生在入库之前——媒体池目录整个不存在（零写入）。
-    assert not (probe.env.sessions_path / ".media").exists()
+    # ② 文件系统：拒绝发生在入库之前——本会话媒体目录整个不存在（零写入）。
+    assert not session_media_dir(probe, session.session_id).exists()
 
     # 工具失败不打断轮次（正常收尾）。
     result = await session.watch.expect("turn_result", within=30)

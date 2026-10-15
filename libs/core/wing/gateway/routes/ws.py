@@ -28,7 +28,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from wing.common.logger import log
 from wing.event import ErrorEvent, wire_dump
-from wing.request_context import reset_request_context, set_request_context
+from wing.request_context import (
+    get_request_context,
+    reset_request_context,
+    set_request_context,
+)
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
 from wing.gateway.protocol import ClientRequest, ConnectResponse, ToolCallResult
@@ -144,10 +148,28 @@ async def handle_ws(ws: WebSocket) -> None:
                         session_id=req.session_id,
                         client_id=client_id,
                         tool_call_id=req.tool_call_id,
+                        media=req.media,
                     )
             except Exception as e:
                 log.error(f"Failed to handle request: {e}")
-                await ws.send_text(json.dumps(wire_dump(ErrorEvent(message=str(e)))))
+                # 错误帧携带**帧层关联上下文**：ClientRequest 帧在上面的
+                # set_request_context 里设过 session / request 归属，这里原样带上
+                # ——客户端据此把"服务端拒绝"关联回刚发出的那条消息（request_id
+                # 是它自己生成、随帧带来的那个）。非 ClientRequest 帧（工具结果等）
+                # 没设过上下文 → 两字段为 None / 新 uuid，wire_dump 剥除 null 后
+                # 与历史形状一致。
+                ctx = get_request_context()
+                await ws.send_text(
+                    json.dumps(
+                        wire_dump(
+                            ErrorEvent(
+                                message=str(e),
+                                session_id=ctx.session_id,
+                                request_id=ctx.request_id or uuid.uuid4().hex,
+                            )
+                        )
+                    )
+                )
             finally:
                 # 恢复必须在 except 之后：失败日志本身也要带归属。
                 if token is not None:

@@ -213,13 +213,41 @@ class TagMeta(BaseModel):
 class SessionSummary(BaseModel):
     """session 列举条目：id + metadata + 标题回退素材。
 
-    first_user_message: 快照中第一条用户消息（截断至 100 字符），
-    仅在 metadata.session_name 为 None 时由后端填充，供上层做标题回退。
+    first_user_message: 快照中第一条**非空文本**用户消息（截断至 100 字符），
+    仅在 metadata.session_name 为 None 时由后端填充，供上层做标题回退；
+    纯图消息（content 为空、media 非空）回退为 :data:`IMAGE_ONLY_TITLE`。
     """
 
     id: str
     metadata: SessionMetadata
     first_user_message: str | None = None
+
+
+IMAGE_ONLY_TITLE = "[image message]"
+"""会话标题回退：链上只有纯图 user 消息（content 为空、内容全在 media）时的占位名。
+
+没有它，这类会话的标题回退为空 → 上层（``SessionManager.list_sessions``）把
+"无名且无标"的会话隐藏，用户刚建的贴图会话在列表里凭空消失（02 之前不可达：
+纯图消息会被 ``run_turn`` 丢弃；之后是正常可达状态）。
+"""
+
+
+def first_user_title(records: Iterator[dict[str, Any]]) -> str | None:
+    """会话标题回退：第一条**非空文本** user 记录（截断 100 字符）；没有文本但有
+    携带 media 的 user 记录时回退为 ``IMAGE_ONLY_TITLE``；两者都没有 → None。
+
+    跳过空 content 的 user 记录继续往后找——"图片先行"的会话不该因为第一条
+    用户消息没有文本而在列表里无名。两个后端共用本函数（同一条规则只有一份实现）。
+    """
+    image_only = False
+    for record in records:
+        if record.get("role") != "user":
+            continue
+        text = str(record.get("content") or "")[:100]
+        if text:
+            return text
+        image_only = image_only or bool(record.get("media"))
+    return IMAGE_ONLY_TITLE if image_only else None
 
 
 class MessageLog(ABC):
@@ -360,28 +388,63 @@ class SessionStore(ABC):
         实现契约：不合规的 id 抛 ``ValueError``；返回值是**能通过闸门的键**。
         """
 
-    # ── 媒体字节（内容寻址的会话媒体池）──────────
+    # ── 媒体字节（内容寻址，**session 私有**）──────
     #
-    # 媒体池按"存储根"共享：file 后端多个 session 共用 <root>/.media/，
-    # memory 后端同一个 store 实例共享——会话消息只持有 MediaRef 引用，
-    # 字节随会话可恢复性走（durable 后端跨进程存活，memory 后端重启即
-    # 消失，与既有语义一致）。
+    # 媒体对象是会话的私有资产：file 后端落 <root>/<sid>/media/<id>，memory
+    # 后端是"实例内 per-session 键空间"——session 目录自此**自包含**（整个
+    # 目录拷贝到另一台机器后历史引用全部可用，不依赖任何共享池）。会话消息
+    # 只持有 MediaRef 引用，字节随会话可恢复性走（durable 后端跨进程存活，
+    # memory 后端重启即消失，与既有语义一致）。
+    #
+    # 兼容：老布局的共享池（file 后端 <root>/.media/<id[:2]>/<id>）**只读不删**
+    # ——读路径 miss 会话目录时回退老池并**物化**（复制进会话目录）。写路径
+    # 一律只写会话目录。没有任何删除 API，也不清理老池（媒体永不删除）。
 
     @abstractmethod
-    def write_media(self, media_id: str, data: bytes) -> None:
-        """写入媒体字节（内容寻址，幂等：已存在即跳过）。
+    def write_media(self, session_id: str, media_id: str, data: bytes) -> None:
+        """把媒体字节写入**该 session 的**媒体目录（内容寻址，幂等）。
 
-        media_id 必须是 64 位小写 hex 的内容 sha256，否则抛 ValueError
-        （防路径穿越）。**首写路径**还校验 id 与字节一致
-        （``validate_media_content``，内容寻址完整性）；已存在对象直接
-        跳过（同 id 必然同内容，跳过省一次全量哈希）。I/O 失败由后端抛出
-        （调用方决定是否降级）。
+        media_id 必须是 64 位小写 hex 的内容 sha256、session_id 必须过会话
+        闸门，否则抛 ValueError（两者都是路径组件，防穿越）。**首写路径**还
+        校验 id 与字节一致（``validate_media_content``，内容寻址完整性）；
+        已存在对象直接跳过（同 id 必然同内容，跳过省一次全量哈希）。I/O 失败
+        由后端抛出（调用方决定是否降级）。
         """
 
     @abstractmethod
-    def read_media(self, media_id: str) -> bytes | None:
-        """读取媒体字节。合法 id 但对象缺失返回 None；非法 id 抛 ValueError。
+    def read_media(self, session_id: str, media_id: str) -> bytes | None:
+        """读取媒体字节：session 目录优先，miss 回退老池并**物化**。
 
-        读取 I/O 失败（权限/损坏）按"读不到"处理：WARN 日志 + 返回 None
-        ——序列化侧据此降级为占位文本，绝不打断模型请求。
+        合法 id 但两处都缺失返回 None；非法 id / session_id 抛 ValueError。
+        读取 I/O 失败（权限/损坏）按"读不到"处理：WARN + None——序列化侧据此
+        降级为占位文本，绝不打断模型请求。回退命中的**物化是 best-effort**：
+        复制失败只 WARN，本次读取照常返回字节（下次再试，幂等）。
+        """
+
+    @abstractmethod
+    def media_exists(self, session_id: str, media_id: str) -> bool:
+        """该媒体对象是否可寻址（session 目录或老池任一存在）。**无副作用**。
+
+        供消息入口校验（引用的对象必须可兑现）：只回答"在不在"，不物化
+        （存在性查询不该产生写）。
+        """
+
+    @abstractmethod
+    def media_path(self, session_id: str, media_id: str) -> str | None:
+        """该媒体对象的**本地绝对路径**（session 目录优先、老池兜底）；不可寻址返回 None。
+
+        供无视觉能力时的占位文案（"图片保存在哪"）。**纯查询，不物化**——物化
+        时机统一归加载路径与读路径。没有本地文件的后端（memory）恒返回 None，
+        调用方自行降级（不带路径的占位文本）。
+        """
+
+    @abstractmethod
+    def materialize(self, session_id: str, media_id: str) -> bool:
+        """把老池对象幂等物化进该 session 的媒体目录。
+
+        返回 ``True`` = 调用后 session 目录内已有该对象（本来就在，或刚从老池
+        复制成功）；``False`` = 两处都缺或复制失败（实现已 WARN）。先 stat 目标
+        （快路径，命中即返回），miss 才碰老池——加载路径的对象量级 = 单会话引用
+        数。不含内容校验：老池对象在首写时已校验，物化只保证"读回什么就存什么"
+        （与读路径等价）。
         """

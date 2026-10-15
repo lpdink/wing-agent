@@ -28,6 +28,9 @@ use crate::shared::panels::picker::ModelPanel;
 use crate::shared::tips::full_text as tips_full_text;
 use crate::ui::cells::tool_call::truncate_by_chars;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::chat_view::Submission;
+use crate::ui::input_area::ImagePayload;
+use crate::ui::input_area::SubmitPayload;
 use crate::ui::popup::command::PopupAction;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
@@ -63,6 +66,28 @@ fn parse_string_arg(text: &str, prefix: &str) -> Option<String> {
 
 /// Handler for one table row: the raw input line in, "consumed" out.
 type CommandHandler = fn(&mut App, &str) -> bool;
+
+/// The command table row a line routes to, if any.
+///
+/// The one predicate behind [`App::try_frontend_command`] — callers that only
+/// need the *name* (the submit path's dropped-picture notice) ask it instead of
+/// re-deriving the match, so "matched" and "named" cannot disagree.
+pub(super) fn frontend_command(text: &str) -> Option<&'static CommandRoute> {
+    COMMANDS.iter().find(|route| route.matches(text))
+}
+
+/// 图片随一次提交被丢掉时的提示文案（命令不是消息，图片没有落点）。
+///
+/// 两个丢图点必须说同一句话：`submit_message`（命令真的开始跑）与
+/// `handle_composer_key` 的 must-select 重写路径（草稿被换回纯文本、提交被拦下
+/// 去重开候选 popup）。静默丢一张图是最坏的结果，而文案分叉会让"丢的是哪条命令"
+/// 在两个入口上对不上。
+pub(super) fn image_dropped_toast(command: &str) -> Toast {
+    Toast::info(
+        format!("Image dropped: {command} takes no image"),
+        std::time::Duration::from_secs(3),
+    )
+}
 
 /// One row of the TUI command table.
 pub(super) struct CommandRoute {
@@ -212,25 +237,104 @@ pub(super) const COMMANDS: &[CommandRoute] = &[
 ];
 
 impl App {
-    /// Submit text from the input area: try the command table, else send as message.
+    /// Submit the composer's product: try the command table, else send as
+    /// message.
     ///
-    /// Returns `true` if the text was consumed (either as a command or message).
-    pub(super) fn submit_message(&mut self, text: &str) -> bool {
-        if self.try_frontend_command(text) {
+    /// The payload travels whole, and the two halves part ways here: a
+    /// frontend command reads the text and **never touches the pictures** — a
+    /// command runs locally, it is not a message, so there is nowhere for a
+    /// picture to ride. A paste chip's payload survives that path (its text
+    /// form is already inside `text`), a picture's does not, so the drop is
+    /// announced (see below).
+    ///
+    /// Returns `true` if it was consumed (either as a command or message).
+    pub(super) fn submit_message(&mut self, payload: SubmitPayload) -> bool {
+        // 同一个谓词：`Some` ⟺ `try_frontend_command` 命中（下面那句提示读它取命令名）。
+        let command = frontend_command(&payload.text).map(|route| route.name);
+        if self.try_frontend_command(&payload.text) {
+            if let Some(command) = command
+                && !payload.images.is_empty()
+            {
+                // 命令不是消息，图片没有落点。罕见，但静默丢一张图是最坏的结果，
+                // 所以这里说一句（命令自己的 toast 若也有，会被它顶掉——命令的效果
+                // 在屏幕上看得见，而图片的消失看不见）。
+                self.show_toast(image_dropped_toast(command));
+            }
             return true;
         }
         // The message only moves up into chat history when the
         // model actually receives it (user_message_accepted). Until then it
-        // queues in the pending area below in-flight streaming output.
+        // queues in the pending area below in-flight streaming output — and
+        // carries the submission itself, so a failure can hand it back to the
+        // composer (see `restore_failed_send`).
         let request_id = crate::protocol::generate_request_id();
-        self.chat.push_pending(request_id.clone(), text.to_string());
+        let images: Vec<_> = payload
+            .images
+            .into_iter()
+            .map(ImagePayload::into_image)
+            .collect();
+        // 提交产物随 pending 条目一起留下（正文 + 图片各存一份）：气泡用它拼显示文本，
+        // 失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），换来「被拒 /
+        // 失败之后内容还在用户手里」。
+        self.chat.push_pending(
+            request_id.clone(),
+            Submission {
+                content: payload.text.clone(),
+                images: images.clone(),
+            },
+        );
         self.push_intent(AppIntent::SendMessage {
-            content: text.to_string(),
+            content: payload.text,
             tool_call_id: None,
             request_id,
+            // 上传只要图片本身（标签是纯展示）。
+            images,
         });
         self.turn.usage = TurnUsage::default();
         true
+    }
+
+    /// 一条发不出去的用户消息：从 pending 队列取回产物、还给草稿、提示原因。
+    ///
+    /// 三条发送失败路径（上传 / WS / 断连）与服务端拒绝共用这里——共同点是草稿在提交
+    /// 时就清了，内容只在 pending 里。**纯数据恢复**：只写 composer 与 toast，不 push
+    /// intent、不碰 chat（不重发、不重复上传）。
+    ///
+    /// 条目已经不在队列里（被打断丢弃 / 已提升）⇒ 只提示原因：内容要么已经在历史里
+    /// 看得见，要么由那条路径自己解释过了。
+    pub(super) fn restore_failed_send(&mut self, request_id: &str, reason: &str) -> bool {
+        let Some(submission) = self.chat.take_pending(request_id) else {
+            self.show_toast(Toast::warning(
+                reason.to_string(),
+                std::time::Duration::from_secs(3),
+            ));
+            return false;
+        };
+        self.restore_draft(submission);
+        self.show_toast(Toast::warning(
+            format!("{reason}; draft restored"),
+            std::time::Duration::from_secs(3),
+        ));
+        true
+    }
+
+    /// 把一份提交产物放回草稿：文本 + 图片 chip。
+    ///
+    /// 空草稿走 `set_text`（提交时的原文精确还原）；草稿里已经有内容（消息在飞的那几
+    /// 秒里用户又打了字 / 粘了图）时**追加在末尾**——`set_text` 的既定语义是替换整份
+    /// 草稿、连同它的 chip 一起丢，那会吃掉用户刚写的东西。
+    pub(super) fn restore_draft(&mut self, submission: Submission) {
+        if self.input.is_empty() {
+            self.input.set_text(&submission.content);
+        } else {
+            self.input.move_draft_end();
+            if !submission.content.is_empty() {
+                self.input.insert_str(&format!("\n{}", submission.content));
+            }
+        }
+        for image in submission.images {
+            self.input.insert_image(image);
+        }
     }
 
     /// Route `text` through the command table.
@@ -238,7 +342,7 @@ impl App {
     /// Returns `true` if the command was recognized and handled locally;
     /// `false` if it should be sent to the gateway as usual.
     pub(super) fn try_frontend_command(&mut self, text: &str) -> bool {
-        let Some(route) = COMMANDS.iter().find(|route| route.matches(text)) else {
+        let Some(route) = frontend_command(text) else {
             return false;
         };
         (route.handler)(self, text)
@@ -331,17 +435,38 @@ impl App {
     pub(super) fn handle_fetch_result(&mut self, result: crate::app::intent::FetchResult) {
         use crate::app::intent::FetchPayload;
 
+        let crate::app::intent::FetchResult {
+            session_id,
+            payload,
+        } = result;
+
+        // 粘贴图片的压缩回执属于 **composer**，不属于会话：草稿跨会话还在，而守卫一旦
+        // 丢掉它，流水线的「在飞」标记就永远为真（之后所有粘贴都不落地）。所以它在
+        // 守卫**之前**分派。
+        if let FetchPayload::ClipboardImage(result) = payload {
+            self.on_clipboard_compressed(result);
+            return;
+        }
+
+        // 消息的后台发送失败回执：属于那条 pending 条目（按 `request_id` 认领），
+        // 同样在守卫之前分派——换过会话后条目多半已被 `chat.clear()` 清掉，此时
+        // `restore_failed_send` 只 toast 原因（不碰草稿、不假装回填）。
+        if let FetchPayload::SendFailed { request_id, reason } = payload {
+            self.restore_failed_send(&request_id, &reason);
+            return;
+        }
+
         // Session guard: discard results from a previous session.
-        if result.session_id != self.session_id {
+        if session_id != self.session_id {
             tracing::debug!(
-                stale = %result.session_id,
+                stale = %session_id,
                 current = %self.session_id,
                 "discarding stale fetch result"
             );
             return;
         }
 
-        match result.payload {
+        match payload {
             FetchPayload::Info(info) => {
                 // The model identity group travels whole: `model_id` is the
                 // reference word, `model` the call name, `provider_name` the
@@ -515,6 +640,8 @@ impl App {
                     conflict,
                 });
             }
+            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / pending 的发送失败）。
+            FetchPayload::ClipboardImage(_) | FetchPayload::SendFailed { .. } => {}
         }
     }
 }

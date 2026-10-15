@@ -44,6 +44,35 @@ class PendingCompact:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
+COMPACT_IMAGE_MARKER = "[image message]"
+"""纯图消息（content 为空、媒体被剥离）在**压缩请求**里的替代文本。
+
+压缩请求剥离媒体引用（摘要目标是文本），但不能因此出现空 content 的 user 消息
+——部分 OpenAI 兼容网关对空 content 直接 400，压缩整轮失败（长会话里图片一多
+就再也压不动）。短标记保留"该位置有一条只有图片的用户消息"这一事实，原链消息
+零改动。
+"""
+
+
+def _for_summary(message: Message) -> Message:
+    """把一条消息投影进压缩请求：剥离媒体引用；纯图消息换成短标记。
+
+    无媒体的消息原样返回（同一个对象——请求路径只读）；有媒体的浅拷贝，
+    原链消息（含 uuid / media）零改动。``content`` 为空且有 media 的消息
+    （user 贴图；正常链路 tool 消息恒有文本）重建为等价消息：正文换成短标记、
+    保留 role 与 tool_call_id（tool 消息在两条协议里都必须携带它）。
+    """
+    if not message.media:
+        return message
+    if message.content:
+        return message.model_copy(update={"media": None})
+    return Message(
+        role=message.role,
+        content=COMPACT_IMAGE_MARKER,
+        tool_call_id=message.tool_call_id,
+    )
+
+
 class Compactor:
     """上下文压缩引擎。
 
@@ -253,10 +282,9 @@ class Compactor:
         # 压缩请求纯文本：剥离消息里的媒体引用（浅拷贝，原链消息零改动——
         # model_copy 不写 uuid/parent_uuid，也不携带 media 字节）。摘要目标是
         # 文本，连占位都不需要；图片引用留在原消息里，会话继续可用。
-        request_messages = [
-            m.model_copy(update={"media": None}) if m.media else m
-            for m in full_messages
-        ]
+        # 纯图消息（content 为空、内容全在 media）不能以空 content 出现在请求里
+        # （部分 OpenAI 兼容网关直接 400）——换成短标记（见 `_for_summary`）。
+        request_messages = [_for_summary(m) for m in full_messages]
         messages = request_messages + [Message(role="user", content=prompt)]
 
         # 消费完整（非流式路径只产出一个响应）：不 break——被 break 放弃的

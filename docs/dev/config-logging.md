@@ -15,7 +15,9 @@
 │   │   ├── wing_YYYY-MM-DD.log            网关运行时日志（按本地日期，append；恒 DEBUG）
 │   │   ├── new.log → wing_YYYY-MM-DD.log  指向活跃后端日志的符号链接（仅后端；每次轮转 / setup 刷新）
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
-│   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）；.media/ 为跨会话共享的图片媒体池（内容寻址）
+│   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）
+│   │                   ├── <sid>/media/   会话私有图片媒体对象（内容寻址，session 自包含）
+│   │                   └── .media/        遗留共享媒体池（只读：老会话引用回退读取 + 物化；不删不写）
 │   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）

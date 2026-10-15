@@ -36,7 +36,7 @@ class _SerializeMixin:
     ) -> list[dict]:
         """序列化请求消息（含请求期媒体投影：能力降级 / 高水位驱逐 / 线格式）。
 
-        媒体池读接口经 ``options.media`` 注入（会话级；None = 无存储，图片位
+        会话媒体读接口经 ``options.media`` 注入（会话级；None = 无存储，图片位
         退化占位）。整条请求任何消息都无媒体时，直接 ``[m.to_openai() ...]``
         返回——与引入媒体前的请求体逐字节一致，且不触碰全局配置。请求内有
         媒体时按 ``image_delivery`` 发射（无媒体的邻座消息仍逐条经
@@ -85,7 +85,9 @@ class _SerializeMixin:
             # system 消息的 media 一律忽略（投影层已剔除，见 plan_request_media）：
             # 本协议 system content 只允许文本 part——此处 slots 恒为空，不发图
             # 也不加占位，与 anthropic 路径行为一致。
-            slots = message_slots(plans.get(i, []), media=media, cache=cache)
+            slots = message_slots(
+                plans.get(i, []), media=media, cache=cache, role=msg.role
+            )
             base = msg.to_openai()
             move_kept = delivery == "followup" and msg.role == "tool"
             extra: list[dict] = []

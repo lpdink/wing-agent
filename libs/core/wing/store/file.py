@@ -7,10 +7,12 @@ history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
     <root>/<session_id>/
     ├── metadata.json        SessionMetadata（exclude_none）
     ├── history.jsonl        append-only 混合记录（Message + 事件，每行一条 dict + ts）
+    ├── media/<sha256>       session 私有媒体对象（内容寻址；会话自包含的关键）
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
     └── subagents/           遗留：旧子 agent 历史（写入方已删除；不再写入，现有数据不读不删）
 
-    <root>/.media/<id[:2]>/<id>   会话媒体池（内容寻址，跨 session 共享）
+    <root>/.media/<id[:2]>/<id>   遗留共享媒体池（**只读**：老会话的引用仍解析
+                                  到这里；读 miss 时物化进会话目录。不删、不写）
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    first_user_title,
     validate_media_content,
     validate_media_id,
 )
@@ -144,7 +147,8 @@ class FileSessionStore(SessionStore):
     name = "file"
 
     _METADATA = "metadata.json"
-    _MEDIA_DIR = ".media"
+    _MEDIA_DIR = "media"
+    _LEGACY_MEDIA_DIR = ".media"
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
@@ -201,38 +205,122 @@ class FileSessionStore(SessionStore):
     def open_log(self, session_id: str) -> FileMessageLog:
         return FileMessageLog(self._session_dir(session_id))
 
-    # ── 媒体字节 ──────────────────────────────
+    # ── 媒体字节（内容寻址，session 私有）─────────
 
-    def _media_path(self, media_id: str) -> Path:
-        """内容寻址路径：<root>/.media/<id[:2]>/<id>（两级散列，防单目录膨胀）。
+    def _media_path(self, session_id: str, media_id: str) -> Path:
+        """会话私有媒体对象路径：<root>/<sid>/media/<id>。
+
+        两道闸门都在拼接路径之前——session id 与 media id 都是路径组件，
+        脏值即路径穿越（``_session_dir`` 先过 ``validate_session_id``，
+        ``validate_media_id`` 校验 id 本身）。
+        """
+        return (
+            self._session_dir(session_id)
+            / self._MEDIA_DIR
+            / validate_media_id(media_id)
+        )
+
+    def _legacy_media_path(self, media_id: str) -> Path:
+        """遗留共享池路径：<root>/.media/<id[:2]>/<id>（只读兼容，永不写入）。
 
         id 校验必须发生在拼接路径之前——它是文件名本身，脏 id 即路径穿越。
         """
         safe_id = validate_media_id(media_id)
-        return self._root / self._MEDIA_DIR / safe_id[:2] / safe_id
+        return self._root / self._LEGACY_MEDIA_DIR / safe_id[:2] / safe_id
 
-    def write_media(self, media_id: str, data: bytes) -> None:
-        """原子写入媒体字节（幂等：内容寻址下已存在即同内容，跳过）。
+    def write_media(self, session_id: str, media_id: str, data: bytes) -> None:
+        """原子写入会话媒体目录（幂等：内容寻址下已存在即同内容，跳过）。
 
         首写路径校验 id 与字节一致（内容寻址完整性）——已存在
         时跳过（对象内容在首写时已校验过，跳过省一次全量哈希）。
         """
-        path = self._media_path(media_id)
+        path = self._media_path(session_id, media_id)
         if path.exists():
             return
         validate_media_content(media_id, data)
         atomic_write_bytes(path, data)
 
-    def read_media(self, media_id: str) -> bytes | None:
-        path = self._media_path(media_id)
-        if not path.exists():
+    def read_media(self, session_id: str, media_id: str) -> bytes | None:
+        """读取媒体字节：会话目录优先，miss 回退老池并物化（best-effort）。"""
+        path = self._media_path(session_id, media_id)
+        if path.exists():
+            try:
+                return path.read_bytes()
+            except OSError as e:
+                # 损坏/权限问题按"读不到"降级（序列化侧转占位文本），不打断请求。
+                log.warning(f"Failed to read media '{media_id}' at {path}: {e}")
+                return None
+        return self._read_legacy_and_materialize(session_id, media_id, path)
+
+    def media_exists(self, session_id: str, media_id: str) -> bool:
+        """对象是否可寻址（会话目录或老池任一存在）。纯查询，不物化。"""
+        return (
+            self._media_path(session_id, media_id).exists()
+            or self._legacy_media_path(media_id).exists()
+        )
+
+    def media_path(self, session_id: str, media_id: str) -> str | None:
+        """对象的本地绝对路径（会话目录优先、老池兜底）；不可寻址为 None。
+
+        纯查询（不物化）：物化时机统一归加载路径与读路径。
+        """
+        path = self._media_path(session_id, media_id)
+        if path.exists():
+            return str(path)
+        legacy = self._legacy_media_path(media_id)
+        return str(legacy) if legacy.exists() else None
+
+    def materialize(self, session_id: str, media_id: str) -> bool:
+        """把老池对象幂等复制进会话目录（见 SessionStore.materialize）。"""
+        target = self._media_path(session_id, media_id)
+        if target.exists():
+            return True  # 快路径：对象已在会话目录，不碰老池
+        legacy = self._legacy_media_path(media_id)
+        if not legacy.exists():
+            return False
+        try:
+            data = legacy.read_bytes()
+        except OSError as e:
+            log.warning(f"Failed to read media '{media_id}' at {legacy}: {e}")
+            return False
+        return self._materialize_into(session_id, media_id, target, data)
+
+    def _read_legacy_and_materialize(
+        self, session_id: str, media_id: str, target: Path
+    ) -> bytes | None:
+        """（内部）读路径的老池回退：读字节 + best-effort 物化；两处都缺返回 None。
+
+        物化失败只 WARN——本次读取照常返回字节（序列化不该因复制失败而降级），
+        下一次读取自然重试（幂等）。
+        """
+        legacy = self._legacy_media_path(media_id)
+        if not legacy.exists():
             return None
         try:
-            return path.read_bytes()
+            data = legacy.read_bytes()
         except OSError as e:
-            # 损坏/权限问题按"读不到"降级（序列化侧转占位文本），不打断请求。
-            log.warning(f"Failed to read media '{media_id}' at {path}: {e}")
+            log.warning(f"Failed to read media '{media_id}' at {legacy}: {e}")
             return None
+        self._materialize_into(session_id, media_id, target, data)
+        return data
+
+    def _materialize_into(
+        self, session_id: str, media_id: str, target: Path, data: bytes
+    ) -> bool:
+        """（内部）把字节原子写进会话媒体目录（失败 WARN + False，不抛）。
+
+        不做内容校验：老池对象在首写时已校验（``validate_media_content``），
+        物化只保证"读回什么就存什么"——与读路径的字节等价是迁移的正确性要求。
+        """
+        try:
+            atomic_write_bytes(target, data)
+            return True
+        except OSError as e:
+            log.warning(
+                f"Failed to materialize media '{media_id}' into session "
+                f"'{session_id}' at {target}: {e} (legacy copy remains readable)"
+            )
+            return False
 
     # ── 查询 ──────────────────────────────────
 
@@ -318,7 +406,7 @@ class FileSessionStore(SessionStore):
 
         目录名不过 session id 闸门的一律跳过：它们不是会话（也无法经任何
         API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物，或是存储
-        自己的点命名空间（``.media`` 媒体池）。闸门只防穿越与卫生，因此
+        自己的点命名空间（``.media`` 遗留媒体池）。闸门只防穿越与卫生，因此
         "点开头 / 含 ``..`` / 控制字符 / 超长"之外的名字都可能是合法会话
         （编排方可自带 UUID 等任意 id）。
         标题回退从 history.jsonl 提取第一条 user 消息；history.jsonl 不可读
@@ -353,16 +441,13 @@ class FileSessionStore(SessionStore):
         return result
 
     def _first_user_message(self, session_id: str) -> str | None:
-        """提取第一条 user 消息（截断 100 字符）作标题回退。
+        """会话标题回退素材（截断 100 字符）；规则见 ``first_user_title``。
 
         流式：命中即停——标题只用这一条文本，不把整份历史读进内存；解析与
         "跳过损坏行"复用 ``MessageLog.iter_all``，不另写一份。日志不可读
         返回 None（上层按"无标题"处理）。
         """
         try:
-            for record in self.open_log(session_id).iter_all():
-                if record.get("role") == "user":
-                    return (record.get("content") or "")[:100]
+            return first_user_title(self.open_log(session_id).iter_all())
         except OSError:
             return None
-        return None

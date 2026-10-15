@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
+from wing.schema import MediaRef
 from wing.session.override import AgentOverride
 
 # 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
@@ -100,6 +101,13 @@ class SendMessageRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
+    media: list[MediaRef] | None = Field(
+        default=None,
+        description=(
+            "消息携带的媒体引用（缺省 / null = 无媒体）。id 必须指向该会话已存在的"
+            "媒体对象且 mime 在支持列表内，否则 400（整条消息被拒，不进历史）"
+        ),
+    )
     tool_call_id: str | None = Field(
         default=None,
         description="回复某个 Ask 事件时携带其 tool_call_id，定向 resolve feedback waiter",
@@ -232,6 +240,20 @@ class SendMessageResponse(BaseModel):
 
     ok: bool = Field(default=True, description="操作是否成功")
     request_id: str = Field(description="请求 ID，用于前端关联 agent 响应")
+
+
+class MediaUploadResponse(BaseModel):
+    """POST /api/session/media 响应——入库的媒体引用。
+
+    ``media`` 与消息 ``media`` 数组的元素**同一形状**（``MediaRef``）：客户端可以把它
+    原样放进 `/api/session/send` / WS `ClientRequest.media`，无需字段搬运。``name``
+    缺省（未给 / 空串）时为 null。
+    """
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    media: MediaRef = Field(
+        description="入库的媒体引用（id / mime / bytes / width / height / name）"
+    )
 
 
 class SessionListResponse(BaseModel):

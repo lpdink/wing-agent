@@ -93,11 +93,23 @@ class ChainNode(BaseModel):
     unzip_last_uuid: str | None = None
 
 
+#: 媒体展示名（``MediaRef.name``）的长度上限（**字符**数）。
+#:
+#: name 是客户端可控的展示字符串（上传端点的 ``name`` query、消息 ``media`` 元素），
+#: 只喂界面与提示、不参与寻址（寻址键是内容 sha256），但会进响应、进 history.jsonl：
+#: 给一个与"文件名 basename"用途匹配的上限（POSIX NAME_MAX = 255 字节，字符数只会更
+#: 小），防止无界字符串被夹带进来。写入侧（``wing.media.upload_image_ref``）按同一
+#: 常量拒绝超限值——这里再兜一层，历史文件 / 请求体里的超长值不会静默通过。
+MEDIA_NAME_MAX_LENGTH = 255
+
+
 class MediaRef(BaseModel):
     """图片媒体引用（内容寻址，仅元数据不含字节）。
 
-    字节由 SessionStore 以 id 为键托管（file 后端 `<sessions-root>/.media/`，
-    memory 后端进程内）。history.jsonl 只落本引用——绝不落 base64。
+    字节由 SessionStore 以 id 为键**随会话**托管（file 后端
+    `<sessions-root>/<sid>/media/<id>`，memory 后端进程内 per-session 桶）——
+    session 目录自包含，拷贝换机后引用照常可兑现。history.jsonl 只落本引用
+    ——绝不落 base64。
 
     注：id 的格式校验（64 位小写 hex，防路径穿越）在**存储层**，模型层保持
     宽松——一条损坏的历史记录不至于让整条 Message 加载失败（加载路径对未知/
@@ -112,8 +124,9 @@ class MediaRef(BaseModel):
     """原始字节数。"""
     width: int
     height: int
-    name: str | None = None
-    """展示名（basename，不含路径）。"""
+    name: str | None = Field(default=None, max_length=MEDIA_NAME_MAX_LENGTH)
+    """展示名（basename，不含路径）。长度上限见 :data:`~wing.schema.MEDIA_NAME_MAX_LENGTH`
+    ——客户端可控字符串，进响应、进 history、进界面，不能无界。"""
 
 
 class Message(ChainNode):
@@ -124,8 +137,9 @@ class Message(ChainNode):
     media: list[MediaRef] | None = None
     """消息携带的图片引用（仅引用，字节在 SessionStore）。
 
-    当前仅 tool 消息使用（预留 user）；None = 无媒体——落盘时 None 被
-    自然剥除，无媒体消息的 history 记录与引入 media 之前完全一致。"""
+    当前两条链路使用：**user**（用户贴图，WS/HTTP 消息的 media 列表）与
+    **tool**（ReadImage 读图结果）；assistant / system 不携带。None = 无媒体——
+    落盘时 None 被自然剥除，无媒体消息的 history 记录与引入 media 之前完全一致。"""
     tool_call_id: str | None = None
     usage: "LLMUsage | None" = (
         None  # assistant 消息的 token 审计信息，持久化后重放可恢复

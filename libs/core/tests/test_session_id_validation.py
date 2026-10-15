@@ -9,7 +9,7 @@
 - 拒绝：路径分隔符、``..``、点开头（含 ``.`` / ``..`` 与存储保留的
   ``.media``）、ASCII 控制字符、空串、超长。
 
-为什么"点开头"也要拒：``<sessions root>/.media`` 是 file 后端的媒体池，
+为什么"点开头"也要拒：``<sessions root>/.media`` 是 file 后端的**遗留**媒体池，
 id 直接作路径组件——放行点开头就等于把存储基础设施变成可寻址的"会话"
 （见 ``test_store_media.py::TestMediaNotASession``）。
 """
@@ -53,7 +53,7 @@ REJECTED = [
     "a/b/c",
     "..evil",  # 含 `..`
     "a..b",
-    ".media",  # 存储保留命名空间（媒体池）
+    ".media",  # 存储保留命名空间（遗留媒体池）
     ".hidden",
     "\\windows\\style",
     "back\\slash",
