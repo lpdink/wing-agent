@@ -5,6 +5,7 @@
 use std::fmt;
 use std::io;
 use std::io::Stdout;
+use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -158,29 +159,14 @@ impl Command for DisableMouseReporting {
 /// `test_enter_sequence_is_exact`, so reordering the arguments here is a
 /// test failure, not a silent behavior change.
 ///
-/// `?5522`（kitty clipboard protocol paste events：文本与图片的粘贴通道，见
-/// [`stdin_proxy`] 与 [`clipboard_protocol`]）只在 stdin 接驳装上了才发：没装上还开，
-/// 终端发来的协议数据会直接进 crossterm（被解析成按键），正是接驳层要拦的东西。
+/// **没有 `?5522h`**：mode 5522（kitty clipboard paste events）只在启动探针阳性
+/// （[`stdin_proxy::settle_paste_channel`]）之后、协议机启动处（[`spawn_event_stream`]）才开
+/// ——对全部终端无条件开，等于让不支持的终端把协议流量直接喂给 crossterm。
 pub fn enter_sequence(w: &mut impl io::Write) -> io::Result<()> {
     enter_sequence_for(
         w,
         |key| std::env::var(key).ok(),
         std::env::var("TERM").ok().as_deref(),
-        stdin_proxy::is_installed(),
-    )
-}
-
-/// [`enter_sequence`] 的「**不发 `?5522h`**」形态：setup 向导用它。
-///
-/// 向导自己的事件循环（`cmd/setup.rs` 的 `TerminalEvents`）只吃按键与 resize，**不驱动
-/// 5522 协议机**：开了模式只会把用户 Cmd+V 的文本吞成一条没人读的协议事件，还会把这条
-/// 陈旧事件留给主 TUI 的协议机。向导因此保持 bracketed paste 路径（与从前逐字相同）。
-pub fn enter_sequence_without_paste_events(w: &mut impl io::Write) -> io::Result<()> {
-    enter_sequence_for(
-        w,
-        |key| std::env::var(key).ok(),
-        std::env::var("TERM").ok().as_deref(),
-        false,
     )
 }
 
@@ -190,7 +176,6 @@ fn enter_sequence_for(
     w: &mut impl io::Write,
     env: impl Fn(&str) -> Option<String>,
     term: Option<&str>,
-    paste_events: bool,
 ) -> io::Result<()> {
     crossterm::execute!(
         w,
@@ -202,10 +187,6 @@ fn enter_sequence_for(
         EnableFocusChange,
         crossterm::cursor::Hide
     )?;
-    if paste_events {
-        // 与下面几条一样是裸 DECSET：没有 crossterm 的 Command 包装，字节在单测里钉死。
-        write!(w, "\x1b[?5522h")?;
-    }
     push_keyboard_enhancement(w);
     Ok(())
 }
@@ -274,15 +255,6 @@ pub fn init_terminal() -> Result<WingTerminal> {
     init_terminal_with(enter_sequence)
 }
 
-/// [`init_terminal`] 的「不发 `?5522h`」形态：setup 向导（同进程的**第一段** TUI）用它。
-///
-/// 会话（含接驳）与主 TUI 完全一致 —— [`stdin_proxy`] 的安装**必须早于本进程任何一次
-/// crossterm 事件源创建**，向导正是最早的机会；差别只在粘贴事件模式（见
-/// [`enter_sequence_without_paste_events`]）。
-pub fn init_terminal_without_paste_events() -> Result<WingTerminal> {
-    init_terminal_with(enter_sequence_without_paste_events)
-}
-
 fn init_terminal_with(enter: fn(&mut Stdout) -> io::Result<()>) -> Result<WingTerminal> {
     // 会话幂等：第一段真开（真实 tty 进 raw → 装接驳，顺序见 [`begin_tui_session`]），
     // 后续段原样复用。任何失败都把会话收回去，绝不把终端留在 raw。
@@ -318,7 +290,8 @@ pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
 ///    输入都走分流层，事件源也只能在此之后创建（注册与读端必须是同一个文件描述，否则
 ///    主 TUI 的键盘会被掐死 —— 反面证据见 `tests/stdin_proxy_stale_event_source.rs`）。
 ///
-/// 失败不致命：接驳装不上只是没有 5522 通道（[`enter_sequence`] 据此不发 `?5522h`）。
+/// 失败不致命：接驳装不上只是没有 5522 通道（探针判定在 [`stdin_proxy::settle_paste_channel`]，
+/// 没装上就是阴性——不会被误开）。
 fn begin_tui_session() -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     if let Err(e) = stdin_proxy::install() {
@@ -445,15 +418,25 @@ fn stop_event_stream() {
     }
 }
 
+/// 探针阳性后由协议机启动处发出：开 mode 5522（kitty clipboard paste events）。
+///
+/// 这是 `?5522h` 的**唯一发送点**——`enter_sequence` 不再发（它够不着探针结果），
+/// 阴性终端因此一个字节都不发。与 [`leave_sequence`] 的 `?5522l` 成对；字节在这里钉死。
+fn enable_paste_events(w: &mut impl io::Write) -> io::Result<()> {
+    write!(w, "\x1b[?5522h")
+}
+
 /// Spawn a task that reads crossterm events and sends them over a channel.
 ///
 /// Returns the receiver end. The task runs until the sender is dropped, a
 /// fatal error occurs, or the session is torn down ([`stop_event_stream`]).
 ///
-/// 若 stdin 接驳装上了（[`stdin_proxy::is_installed`]），同时把 OSC 5522 协议机
-/// （[`clipboard_protocol::spawn`]）接上：它消费分流层提取的序列，把读回的文本 / 图片
-/// 投到**同一个**事件通道。必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经
-/// 是 pty slave，事件源注册的就是它）。
+/// 若 [`stdin_proxy::paste_channel`] 判定阳性（探针应答 `Ps ∈ {1,2,3}`），先把 mode 5522
+/// 打开、再把 OSC 5522 协议机（[`clipboard_protocol::spawn`]）接上：它消费分流层提取的
+/// 序列，把读回的文本 / 图片投到**同一个**事件通道。mode 与协议机是同一次激活的两半——
+/// 开了 mode 没人读，粘贴会静默消失；起了机器没开 mode，它永远收不到数据。
+///
+/// 必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经确定：阳性时是 pty slave）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
     let mut slot = event_task_slot();
     // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 要么覆盖旧 handle
@@ -466,7 +449,13 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
         "spawn_event_stream must run once per process"
     );
     let (tx, rx) = mpsc::channel(128);
-    if let Some(sequences) = stdin_proxy::take_sequences() {
+    if stdin_proxy::paste_channel() == stdin_proxy::PasteChannel::Supported
+        && let Some(sequences) = stdin_proxy::take_sequences()
+    {
+        // 写失败不致命（stdout 没了，协议机也没数据可谈）；模式没开成通道自然静默。
+        let mut out = io::stdout();
+        let _ = enable_paste_events(&mut out);
+        let _ = out.flush();
         clipboard_protocol::spawn(sequences, tx.clone());
     }
     let handle = tokio::spawn(async move {
@@ -545,22 +534,17 @@ mod tests {
     ///
     /// `ENTER_BYTES` is the non-multiplexed variant (any-motion on);
     /// `ENTER_BYTES_BUTTON_MOTION_ONLY` is what tmux / zellij / screen get.
-    /// Both carry `?5522h`（粘贴通道装上了才有这一条，见 `ENTER_BYTES_NO_PASTE_EVENTS`）。
+    /// **进入序列里没有 `?5522h`**：它由 [`enable_paste_events`] 在探针阳性后单独发。
     const ENTER_BYTES: &str = concat!(
         "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
-        "\x1b[?5522h",
         "\x1b[>1u",
     );
     const ENTER_BYTES_BUTTON_MOTION_ONLY: &str = concat!(
         "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
-        "\x1b[?5522h",
         "\x1b[>1u",
     );
-    /// stdin 接驳没装上时的进入序列：一个 5522 字节都不发（否则协议数据会喂给 crossterm）。
-    const ENTER_BYTES_NO_PASTE_EVENTS: &str = concat!(
-        "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?25l",
-        "\x1b[>1u",
-    );
+    /// 探针阳性后由 [`enable_paste_events`] 写出的那一条。
+    const PASTE_EVENTS_BYTES: &str = "\x1b[?5522h";
     const LEAVE_BYTES: &str = concat!(
         "\x1b[<1u",
         "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?2004l\x1b[?1004l\x1b[?25h",
@@ -640,33 +624,28 @@ mod tests {
         // real environment to this function; the env is injected here so the
         // assertion does not depend on whether the suite runs inside tmux.
         let mut out = Vec::new();
-        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"), true)
+        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"))
             .expect("write enter sequence");
         assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES);
     }
 
-    /// 没装上 stdin 接驳就不开 5522：开了等于把协议数据喂给 crossterm（本层要拦的东西）。
-    /// 向导形态（[`enter_sequence_without_paste_events`]）则永远不发 —— 与环境无关的
-    /// 断言在这里查一遍字节（进程内是否装上接驳由集成测试查，见 `stdin_proxy_pty.rs`）。
+    /// `?5522h` 只有一个发送点：探针阳性后由 [`enable_paste_events`] 单独写。
+    /// 进入序列里没有它（对全部终端无条件开 = 把不支持的终端的协议流量喂给 crossterm），
+    /// 收回仍是无条件的一条（panic hook 只有一条路径）。
     #[test]
-    fn test_enter_sequence_skips_paste_events_without_the_stdin_proxy() {
+    fn test_paste_events_are_written_only_by_enable_paste_events() {
         let mut out = Vec::new();
-        enter_sequence_for(&mut out, plain_env, Some("xterm-256color"), false)
+        enable_paste_events(&mut out).expect("write paste events");
+        assert_eq!(String::from_utf8(out).unwrap(), PASTE_EVENTS_BYTES);
+        // 进入序列与环境无关：任何形态都不带 5522。
+        let mut enter = Vec::new();
+        enter_sequence_for(&mut enter, plain_env, Some("xterm-256color"))
             .expect("write enter sequence");
-        assert_eq!(String::from_utf8(out).unwrap(), ENTER_BYTES_NO_PASTE_EVENTS);
-        let mut wizard = Vec::new();
-        enter_sequence_without_paste_events(&mut wizard).expect("write enter sequence");
-        assert!(
-            !String::from_utf8_lossy(&wizard).contains("?5522"),
-            "向导形态永不发 ?5522h（真实 env 下也成立）"
-        );
-        assert!(!ENTER_BYTES_NO_PASTE_EVENTS.contains("?5522"));
-        // 两个变体只差这一条字节。
-        assert_eq!(
-            ENTER_BYTES.replace("\x1b[?5522h", ""),
-            ENTER_BYTES_NO_PASTE_EVENTS
-        );
-        // 收回是无条件的（panic hook 只有一条路径）。
+        assert!(!String::from_utf8_lossy(&enter).contains("?5522"));
+        let mut tmux = Vec::new();
+        enter_sequence_for(&mut tmux, tmux_env, Some("xterm-256color"))
+            .expect("write enter sequence");
+        assert!(!String::from_utf8_lossy(&tmux).contains("?5522"));
         assert!(LEAVE_BYTES.ends_with("\x1b[?5522l"));
     }
 
@@ -682,7 +661,7 @@ mod tests {
         ];
         for (env, term) in cases {
             let mut out = Vec::new();
-            enter_sequence_for(&mut out, env, Some(term), true).expect("write enter sequence");
+            enter_sequence_for(&mut out, env, Some(term)).expect("write enter sequence");
             let seq = String::from_utf8(out).unwrap();
             assert_eq!(seq, ENTER_BYTES_BUTTON_MOTION_ONLY);
             assert_eq!(
@@ -781,7 +760,6 @@ mod tests {
                 (2004, true),
                 (1004, true),
                 (25, false),
-                (5522, true),
             ]
         );
         assert_eq!(
@@ -794,16 +772,10 @@ mod tests {
                 (2004, true),
                 (1004, true),
                 (25, false),
-                (5522, true),
             ]
         );
-        assert_eq!(
-            parse_modes(ENTER_BYTES_NO_PASTE_EVENTS),
-            parse_modes(ENTER_BYTES)
-                .into_iter()
-                .filter(|(mode, _)| *mode != 5522)
-                .collect::<Vec<_>>()
-        );
+        // `?5522h` 不在进入序列里（探针阳性后单独发）；`?5522l` 照旧无条件收回。
+        assert_eq!(parse_modes(PASTE_EVENTS_BYTES), vec![(5522, true)]);
         assert_eq!(
             parse_modes(LEAVE_BYTES),
             vec![

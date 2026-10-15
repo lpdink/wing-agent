@@ -1,10 +1,13 @@
-//! A′ 接驳的端到端证据（spike 结论）：装上 `tui::stdin_proxy` 之后，
+//! A′ 接驳的端到端证据（spike 结论），走**探针阳性**的真实路径：
 //!
-//! 1. crossterm 读到的事件与「没有接驳时」逐个相同（按键 / 方向键 / SGR 鼠标 /
-//!    bracketed paste 零影响）；
-//! 2. `OSC 5522` 序列一条不漏地进协议通道，且**不再**被解析成按键；
-//! 3. 空闲 `poll` 正常超时（pty slave 上没有死锁）；
-//! 4. `restore()` 把 fd 0 还给原 tty，泵线程退出。
+//! 1. 装上 `tui::stdin_proxy` 后终端应答 DECRQM（`Ps=2`），`settle_paste_channel` 判阳性
+//!    → 接驳保留（负路径见 `stdin_proxy_probe_negative_pty.rs`）；
+//! 2. crossterm 读到的事件与「没有接驳时」逐个相同（按键 / 方向键 / SGR 鼠标 /
+//!    bracketed paste 零影响），**探针应答本身零泄漏**（泄漏会让 crossterm 永久挂在
+//!    半截 `ESC[?…` 上，第一个按键事件就永远不会到达）；
+//! 3. `OSC 5522` 序列一条不漏地进协议通道，且**不再**被解析成按键；
+//! 4. 空闲 `poll` 正常超时（pty slave 上没有死锁）；
+//! 5. `restore()` 把 fd 0 还给原 tty，泵线程退出。
 //!
 //! 单独一个集成测试文件 = 单独一个进程：fd 0 与 crossterm 的事件源都是进程级全局。
 //! 本测试不碰真实终端（自己开 pty），headless CI 可跑。
@@ -66,22 +69,16 @@ fn splice_extracts_osc_5522_and_leaves_every_other_event_untouched() {
     );
     let mut sequences = wing::tui::stdin_proxy::take_sequences().expect("sequence channel");
 
-    // 生产接线的一致性：装上接驳之后，进入序列必须真的带上 `?5522h`（单测用的是注入的
-    // 开关，这里查的是真实 `is_installed()` 判据）；卸载之后必须不带。
-    let mut enter = Vec::new();
-    wing::tui::enter_sequence(&mut enter).expect("write enter sequence");
-    assert!(
-        String::from_utf8_lossy(&enter).contains("\x1b[?5522h"),
-        "装上接驳就该开 5522：{:?}",
-        String::from_utf8_lossy(&enter)
+    // 「终端」应答启动探针（DECRQM `CSI ? 5522 $ p` → `CSI ? 5522 ; 2 $ y`），判定阳性：
+    // 接驳保留、通道启用。应答由分流层摘走，不走透传。
+    write_all(outer_master, b"\x1b[?5522;2$y");
+    assert_eq!(
+        wing::tui::stdin_proxy::settle_paste_channel(),
+        wing::tui::stdin_proxy::PasteChannel::Supported
     );
-    // 向导形态：接驳装着（进程级会话）也不开粘贴事件模式 —— 它自己不驱动协议机。
-    let mut wizard = Vec::new();
-    wing::tui::enter_sequence_without_paste_events(&mut wizard).expect("write enter sequence");
     assert!(
-        !String::from_utf8_lossy(&wizard).contains("?5522"),
-        "向导不该开 5522：{:?}",
-        String::from_utf8_lossy(&wizard)
+        wing::tui::stdin_proxy::is_installed(),
+        "阳性判定必须保留接驳"
     );
 
     // 「终端」：注入混合流（三个 5522 包**跨 write 边界**）。
@@ -122,7 +119,8 @@ fn splice_extracts_osc_5522_and_leaves_every_other_event_untouched() {
     }
     writer.join().expect("writer");
 
-    // 1. 事件逐个相同：5522 一个字节都没漏进来。
+    // 1. 事件逐个相同：5522 与探针应答一个字节都没漏进来（探针应答泄漏会毒化解析器，
+    //    之后的事件全都不会到达，这里的相等断言会直接变红）。
     assert_eq!(events.len(), 5, "多出来的事件就是污染：{events:#?}");
     assert!(events[0].contains("Char('a')"), "{}", events[0]);
     assert!(events[1].contains("Up"), "{}", events[1]);
@@ -162,12 +160,6 @@ fn splice_extracts_osc_5522_and_leaves_every_other_event_untouched() {
     assert!(!wing::tui::stdin_proxy::is_installed());
     // 卸载后再唤醒：没有接驳层 → 空操作（收尾路径的正常形态，不许 panic / 不许写）。
     wing::tui::stdin_proxy::wake_reader();
-    let mut enter = Vec::new();
-    wing::tui::enter_sequence(&mut enter).expect("write enter sequence");
-    assert!(
-        !String::from_utf8_lossy(&enter).contains("?5522"),
-        "接驳没了就不该开 5522"
-    );
     write_all(outer_master, b"q");
     let mut buf = [0u8; 8];
     let mut fds = [libc::pollfd {

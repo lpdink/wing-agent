@@ -6,9 +6,13 @@
 //! 把 `install()` 挪走 / 删掉、或在 `restore_terminal` 里加回 `restore()`，全量测试照样
 //! 全绿，而端到端会精确复现 B1（复审 r2 的 M1/M2/M10 变异与实验）。
 //!
+//! 探针化（DECRQM）又加了两条同类时序：**settle 必须早于本段第一次 poll**（阴性拆接驳
+//! 只有这一次机会，事件源注册之后 fd 0 不能再换），**mode 5522 与协议机只在阳性后**启动
+//! （阴性终端一个 5522 字节都不许发）。它们同样只活在源码文本里，所以照旧在这里钉。
+//!
 //! 所以这里用与 `tests/layer_guard.rs` **同构**的做法：扫描真实 `src/**`，文本匹配、零豁免。
 //!
-//! 三条规则：
+//! 五条规则：
 //!
 //! 1. `stdin_proxy::install(` 在生产源码里**恰好一次**，且位于 `begin_tui_session`
 //!    （安装点唯一 = 时序不可被挪走）；`begin_tui_session()` 的调用点恰好一次，位于
@@ -16,6 +20,11 @@
 //! 2. `stdin_proxy::restore(` **恰好一次**，且位于 `end_tui_session`；`end_tui_session()`
 //!    在 `cmd/mod.rs` 至少被调用一次（收尾路径存在：guard / panic hook / 主路径 / 向导分支）。
 //! 3. `restore_terminal`（段级屏恢复）**不含**这两个名字 —— 段边界永远不碰会话。
+//! 4. `stdin_proxy::settle_paste_channel(` **恰好两处**：`app/mod.rs::run_app` 中位于
+//!    `spawn_event_stream()`（主 TUI 第一次 poll 的创建点）之前，`cmd/mod.rs::run_tui` 中
+//!    位于 `run_setup_tui(`（向导第一次 poll）之前。
+//! 5. `spawn_event_stream` 里 mode 5522 与协议机都门控在探针 verdict 上（`paste_channel()`
+//!    在前，`?5522h` 与 `clipboard_protocol::spawn(` 在后）；`\x1b[?5522h` 全生产只有这一处。
 //!
 //! 白空格不敏感（`stdin_proxy :: install (` 也算命中，与 `layer_guard` 同一约定）；测试代码
 //! 不算生产源码（文件尾部的 `#[cfg(test)] mod …` 之前的部分才是生产正文）。
@@ -34,6 +43,13 @@ const INSTALL_CALL: &str = "stdin_proxy::install(";
 const RESTORE_CALL: &str = "stdin_proxy::restore(";
 const BEGIN_CALL: &str = "begin_tui_session()";
 const END_CALL: &str = "end_tui_session()";
+const SETTLE_CALL: &str = "stdin_proxy::settle_paste_channel(";
+const VERDICT_READ: &str = "stdin_proxy::paste_channel()";
+const SPAWN_CALL: &str = "spawn_event_stream()";
+const MACHINE_CALL: &str = "clipboard_protocol::spawn(";
+const ENABLE_CALL: &str = "enable_paste_events(&mut";
+/// 源码里的字面量（含转义字节），不是渲染后的 `?5522h`。
+const PASTE_EVENTS_BYTES: &str = r"\x1b[?5522h";
 
 /// 一条命中：文件内 1 起的行号 + 该行原文。
 #[derive(Debug, PartialEq, Eq)]
@@ -165,13 +181,14 @@ fn hits(text: &str, needle: &str) -> Vec<Hit> {
     out
 }
 
-/// 顶层函数声明（行首的 `fn` / `pub fn` / `pub(crate) fn`）：返回名字。
+/// 顶层函数声明（行首的 `fn` / `pub fn` / `pub(crate) fn`，含 `async fn`）：返回名字。
 fn top_level_fn(line: &str) -> Option<&str> {
     let line = line
         .strip_prefix("pub(crate) ")
         .or_else(|| line.strip_prefix("pub "))
-        .unwrap_or(line)
-        .strip_prefix("fn ")?;
+        .unwrap_or(line);
+    let line = line.strip_prefix("async ").unwrap_or(line);
+    let line = line.strip_prefix("fn ")?;
     let end = line.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
     Some(&line[..end])
 }
@@ -188,6 +205,15 @@ fn enclosing_fn(text: &str, line: usize) -> Option<String> {
         }
     }
     found
+}
+
+/// 只算「真调用」的命中：行首不是 `//` 的（把调用注释掉不再算数——规则 4/5 数的是调用点，
+/// 注释里点名不算；既有规则 1-3 仍按「引用也是引用」的老口径）。
+fn live_hits(text: &str, needle: &str) -> Vec<Hit> {
+    hits(text, needle)
+        .into_iter()
+        .filter(|hit| !hit.text.starts_with("//"))
+        .collect()
 }
 
 /// `name` 这个顶层函数的正文（从声明行到下一个行首 `}`）。找不到即 panic（门禁不得空转）。
@@ -314,6 +340,129 @@ fn restore_terminal_never_touches_the_session() {
             "`restore_terminal` 不得引用 `{needle}` —— 段边界拆接驳会把第二段键盘掐死"
         );
     }
+}
+
+/// 某文件的生产正文（找不到即 panic：门禁不得空转）。
+fn production_of(path: &str) -> String {
+    sources()
+        .into_iter()
+        .find(|source| source.path == path)
+        .unwrap_or_else(|| panic!("门禁没有扫到 {path}"))
+        .production
+}
+
+/// 规则 4：探针判定只在两处，且都赶在各自段的第一次 crossterm `poll` 之前。
+///
+/// - `app/mod.rs::run_app`：`spawn_event_stream()`（主 TUI 第一次 poll 的创建点）之前；
+/// - `cmd/mod.rs::run_tui`：`run_setup_tui(`（向导自己的第一次 poll）之前。
+///
+/// 阴性拆接驳（`restore` 的 `dup2`）只有这一次机会：事件源单例一注册，fd 0 就不能再换。
+#[test]
+fn the_probe_settles_before_the_first_poll_of_each_segment() {
+    const APP_FILE: &str = "app/mod.rs";
+    const CMD_FILE: &str = "cmd/mod.rs";
+    let settles = hits_in_sources(SETTLE_CALL)
+        .into_iter()
+        .filter(|(_, hit)| !hit.text.starts_with("//"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settles.len(),
+        2,
+        "`{SETTLE_CALL}` 必须恰好两处真调用（主 TUI 与向导各一次）：{}",
+        describe(&settles)
+    );
+
+    // 主 TUI：位于 `run_app`，且在 `spawn_event_stream()` 之前。
+    let app = production_of(APP_FILE);
+    let (path, hit) = settles
+        .iter()
+        .find(|(path, _)| path == APP_FILE)
+        .unwrap_or_else(|| panic!("{APP_FILE} 必须有 settle 调用点：{}", describe(&settles)));
+    assert_eq!(path, APP_FILE);
+    assert_eq!(
+        enclosing_fn(&app, hit.line).as_deref(),
+        Some("run_app"),
+        "主 TUI 的判定必须在 `run_app`（{APP_FILE}:{}）",
+        hit.line
+    );
+    let spawns = hits(&app, SPAWN_CALL);
+    assert_eq!(spawns.len(), 1, "`{SPAWN_CALL}` 必须恰好一次：{spawns:?}");
+    assert!(
+        hit.line < spawns[0].line,
+        "settle（{}）必须早于 `{SPAWN_CALL}`（{}）——后者创建本进程第一次 poll",
+        hit.line,
+        spawns[0].line
+    );
+
+    // 向导：位于 `run_tui`，且在 `run_setup_tui(`（向导的第一次 poll）之前。
+    let cmd = production_of(CMD_FILE);
+    let (path, hit) = settles
+        .iter()
+        .find(|(path, _)| path == CMD_FILE)
+        .unwrap_or_else(|| panic!("{CMD_FILE} 必须有 settle 调用点：{}", describe(&settles)));
+    assert_eq!(path, CMD_FILE);
+    assert_eq!(
+        enclosing_fn(&cmd, hit.line).as_deref(),
+        Some("run_tui"),
+        "向导的判定必须在 `run_tui`（{CMD_FILE}:{}）",
+        hit.line
+    );
+    let wizard = hits(&cmd, "run_setup_tui(");
+    assert_eq!(wizard.len(), 1, "向导循环必须恰好启动一次：{wizard:?}");
+    assert!(
+        hit.line < wizard[0].line,
+        "settle（{}）必须早于向导的第一次 poll（{}）",
+        hit.line,
+        wizard[0].line
+    );
+}
+
+/// 规则 5：mode 5522 与协议机都门控在探针 verdict 上，且 `?5522h` 全生产只有一处。
+#[test]
+fn the_paste_channel_starts_only_after_a_positive_probe() {
+    let source = production_of(SESSION_FILE);
+    let body = function_body(&source, "spawn_event_stream");
+
+    let verdict = live_hits(&body, VERDICT_READ);
+    assert_eq!(
+        verdict.len(),
+        1,
+        "`spawn_event_stream` 必须恰好读一次判定：{verdict:?}"
+    );
+    assert!(
+        live_hits(&body, "PasteChannel::Supported").len() == 1,
+        "门控必须显式比 `PasteChannel::Supported`"
+    );
+    let machine = live_hits(&body, MACHINE_CALL);
+    assert_eq!(machine.len(), 1, "协议机启动点必须唯一");
+    let mode = live_hits(&body, ENABLE_CALL);
+    assert_eq!(mode.len(), 1, "`?5522h` 的发送点必须唯一");
+    assert!(
+        verdict[0].line < mode[0].line && mode[0].line < machine[0].line,
+        "顺序必须是「先判定、再开 mode、最后起协议机」（{} / {} / {}）",
+        verdict[0].line,
+        mode[0].line,
+        machine[0].line
+    );
+
+    // 唯一的 5522 开模式字节：整棵生产树只有那一处 `\x1b[?5522h`（测试正文已切掉）。
+    let writers = hits_in_sources(PASTE_EVENTS_BYTES)
+        .into_iter()
+        .filter(|(_, hit)| !hit.text.starts_with("//"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        writers.len(),
+        1,
+        "`{PASTE_EVENTS_BYTES}` 必须恰好一处（唯一发送点）：{}",
+        describe(&writers)
+    );
+    assert_eq!(writers[0].0, SESSION_FILE);
+    let enable_body = function_body(&source, "enable_paste_events");
+    assert_eq!(
+        live_hits(&enable_body, PASTE_EVENTS_BYTES).len(),
+        1,
+        "唯一的发送点必须在 `enable_paste_events` 里"
+    );
 }
 
 // ── 扫描器自检（合成输入）：门禁的牙长在这儿 ───────────────────

@@ -962,8 +962,13 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                 api_key: api_key.clone(),
             };
             // 向导是**同进程两段 TUI** 的第一段：它开进程级会话（接驳必须早于本进程任何
-            // 一次 crossterm 事件源创建），但不发 `?5522h`（自己不驱动协议机）。
-            let mut terminal = tui::init_terminal_without_paste_events()?;
+            // 一次 crossterm 事件源创建）。探针判定在这里收束——向导自己的事件循环
+            // （`TerminalEvents`）马上要 poll，而事件源注册之后 fd 0 就不能再换（阴性拆接驳
+            // 只有这一次机会，见 `stdin_proxy::settle_paste_channel`）。
+            // 判定同步阻塞当前 worker（静默终端等到预算上限：本地 150ms / SSH 600ms）——
+            // 与 `ImageSupport::detect` 的既有阻塞形态同款：一次性、有界，且只发生在启动期。
+            let mut terminal = tui::init_terminal()?;
+            tui::stdin_proxy::settle_paste_channel();
             install_panic_hook();
             let outcome = setup::run_setup_tui(&mut terminal, &http, &mut config, &endpoint).await;
             restore_panic_hook();
