@@ -308,10 +308,15 @@ pub fn filter_candidates(candidates: &[(String, String)], args: &str) -> Vec<Sel
 ///
 /// Matching is done on id, title, and workspace (case-insensitive; workspace is
 /// search-only — it drives no ordering). The order of `candidates` is preserved
-/// within each match tier (exact > prefix > contains), so the backend order
-/// (active first, then last interaction descending) survives filtering.
+/// within each match tier (exact > prefix > contains), so the tree order the
+/// candidates were built in survives filtering.
+///
+/// **全量是树、搜索是平铺**：过滤词为空时每行带树前缀（父子关系可读），
+/// 一旦有过滤词就丢掉前缀——过滤后的集合与树不再同构（父可能不在命中里），
+/// 搜索的诉求是快速扫描命中项，留一段悬空的 `│  └─ ` 只会误导。
 pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) -> Vec<SelectionRow> {
     let args_lower = args.to_lowercase();
+    let tree_view = args.is_empty();
 
     let mut exact = Vec::new();
     let mut prefix = Vec::new();
@@ -332,6 +337,11 @@ pub fn filter_session_candidates(candidates: &[SessionCandidate], args: &str) ->
                 title: c.title.clone(),
                 workspace: c.workspace.clone(),
                 pinned: c.pinned,
+                tree_prefix: if tree_view {
+                    c.tree_prefix.clone()
+                } else {
+                    String::new()
+                },
             }),
         };
         if args.is_empty() {
@@ -375,11 +385,15 @@ pub struct SessionCandidate {
     /// Runtime status string from the backend (inactive|idle|working|waiting).
     pub status: String,
     /// Last interaction timestamp (ISO 8601), displayed on line 1.
+    /// 定序已经发生在抓取时（树序用后端字段），这里只做展示。
     pub last_interaction: String,
     /// 是否被 pin（`pin` 标签；前端约定，见 [`crate::shared::pinning`]）。
+    /// 定序发生在抓取时（`shared::session_tree::build_forest`），这里只留
+    /// 渲染谓词：行末的星标。
     pub pinned: bool,
-    /// pin 时间（`tag_meta.pin.added_at`）——排序用，不渲染。
-    pub pin_added_at: Option<String>,
+    /// 树形渲染前缀（`shared::session_tree::build_forest` 的输出；根 = 空串）。
+    /// 候选列表本身已按树序排列，前缀只是把这条序画出来。
+    pub tree_prefix: String,
 }
 
 /// Cached sub-command candidate data and dynamic command list.
@@ -596,7 +610,7 @@ mod tests {
         assert!(!is_session_command("/fork"));
     }
 
-    /// A session candidate as the backend orders it (active first, then time desc).
+    /// A session candidate as the tree-ordered fetch builds it.
     fn session(id: &str, title: &str, workspace: &str, status: &str) -> SessionCandidate {
         SessionCandidate {
             id: id.into(),
@@ -605,7 +619,7 @@ mod tests {
             status: status.into(),
             last_interaction: "2025-07-22T21:41:00".into(),
             pinned: false,
-            pin_added_at: None,
+            tree_prefix: String::new(),
         }
     }
 
@@ -617,8 +631,8 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_session_candidates_keeps_backend_order() {
-        // 无过滤词：原序透传（active 在前、组内时间降序 = 后端下发顺序）。
+    fn test_filter_session_candidates_keeps_the_candidate_order() {
+        // 无过滤词：候选序（树序，由 `build_forest` 在抓取时定下）原样透传。
         let candidates = vec![
             session("sess-active", "current work", "/a", "idle"),
             session("sess-inactive-old", "older work", "/b", "inactive"),
@@ -654,7 +668,7 @@ mod tests {
         ];
         assert_eq!(filtered_ids(&candidates, "wing-agent"), ["sess-1"]);
 
-        // 层内顺序 = 后端顺序：两条都命中 workspace 时按原序给出。
+        // 层内顺序 = 候选顺序：两条都命中 workspace 时按原序给出。
         let both = vec![
             session("sess-a", "one", "/home/me/repo", "idle"),
             session("sess-b", "two", "/home/me/repo", "inactive"),
@@ -670,5 +684,37 @@ mod tests {
         assert_eq!(rich.status, crate::protocol::SessionStatus::Working);
         assert_eq!(rich.last_active, "07-22 21:41");
         assert_eq!(rich.title, "one");
+    }
+
+    #[test]
+    fn test_filter_session_candidates_keeps_tree_prefixes_only_in_the_full_view() {
+        let mut child = session("child", "kid", "/ws", "idle");
+        child.tree_prefix = "├─ ".into();
+        let mut grandchild = session("grand", "grandkid", "/ws", "idle");
+        grandchild.tree_prefix = "│  └─ ".into();
+        let candidates = vec![session("root", "r", "/ws", "idle"), child, grandchild];
+
+        // 全量视图（无过滤词）：前缀随行带出去（父子关系可读）。
+        let rows = filter_session_candidates(&candidates, "");
+        let prefixes = |rows: &[SelectionRow]| -> Vec<String> {
+            rows.iter()
+                .map(|r| {
+                    r.rich
+                        .as_ref()
+                        .expect("session rows are rich")
+                        .tree_prefix
+                        .clone()
+                })
+                .collect()
+        };
+        assert_eq!(
+            prefixes(&rows),
+            ["", "├─ ", "│  └─ "],
+            "根不带前缀，子/孙保留自己的连接符"
+        );
+
+        // 搜索态：前缀一律消失（命中集合与树不同构，悬空的连接线只会误导）。
+        let rows = filter_session_candidates(&candidates, "ws");
+        assert_eq!(prefixes(&rows), ["", "", ""]);
     }
 }

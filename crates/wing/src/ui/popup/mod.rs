@@ -389,7 +389,7 @@ mod tests {
             status: "idle".into(),
             last_interaction: "2025-07-22T21:41:00".into(),
             pinned: false,
-            pin_added_at: None,
+            tree_prefix: String::new(),
         }
     }
 
