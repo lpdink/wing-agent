@@ -10,8 +10,12 @@
 //! `tag_meta[tag].added_at`）。语义全部发生在读到的这一侧：哪些会话被置顶、
 //! 置顶的排在前面、后 pin 的排得更前。
 //!
-//! 排序规则的**唯一实现**在这里，TUI 的面板与 `wing ps` 共用（两处各自
-//! 重写同一条规则就是漂移的开始）。它是一条稳定排序的键：
+//! 排序键的**唯一实现**在这里：当前生产消费者只有 `wing ps` 的平铺模式。
+//! 会话树（`/ss` 面板与 `wing ps --tree`）的顺序走 [`super::session_tree`]
+//! ——它复用本模块的 pin 谓词与时间解析，语义是「pin 分两层」（根的 pin 连
+//! 子树整棵上浮；子节点的 pin 只在兄弟组内排前），见那里的文档。状态栏 /
+//! 标签侧共用的是本模块的谓词与打标操作（`is_pinned` / `pin_tag_ops`），
+//! 不消费排序键。它是一条稳定排序的键：
 //!
 //! ```text
 //! 升序 = [ 置顶的（后 pin 的在前，时间未知的排已知之后）, 未置顶的（原序） ]
@@ -67,20 +71,21 @@ pub fn pin_key(pinned: bool, added_at: Option<&str>) -> (bool, Reverse<Option<i6
     // 时间只在置顶组内说话：未置顶的键恒等，靠稳定排序保持原序
     // （否则一条手写的旧记录会悄悄改写"非置顶"一栏的顺序）。
     let recency = if pinned {
-        added_at.and_then(parse_added_at)
+        added_at.and_then(parse_timestamp_micros)
     } else {
         None
     };
     (!pinned, Reverse(recency))
 }
 
-/// ISO 时间 → 微秒（只用于**定序**）。
+/// ISO 时间 → 微秒（只用于**定序**）。会话树排序（[`super::session_tree`]）
+/// 与这里的 pin 排序共用同一套解析——同一种「时间怎么比」只有一份实现。
 ///
 /// naive 值按 UTC 基准解释：对单一写者产出的同格式值，取哪个基准都不改变
 /// 它们彼此的先后（这里是 Rust 侧的口径；后端 `_timestamp_key` 另按宿主本地
 /// 解释 naive——两条路径**不互为一致性合约**）。带偏移 / `Z` 的值按瞬时比较；
 /// 两类混排（只有手改 metadata 才会出现）会差一个时区偏移，是已知边界。
-fn parse_added_at(value: &str) -> Option<i64> {
+pub fn parse_timestamp_micros(value: &str) -> Option<i64> {
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f") {
         return Some(naive.and_utc().timestamp_micros());
     }

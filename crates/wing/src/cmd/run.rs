@@ -27,6 +27,9 @@ use super::common;
 #[derive(Serialize)]
 struct RunOutput {
     session_id: String,
+    /// The **recorded** creator of this session (read back; `null` for a root
+    /// or when the gateway predates session lineage).
+    parent_session_id: Option<String>,
     template_name: String,
     /// 当前模型的调用名（发给上游的值）。
     model: String,
@@ -82,62 +85,79 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
 
     let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let (session_id, template_name, resolved_workspace) = if let Some(ref resume_id) = args.resume {
-        // `--agent` 只作用在创建路径：resume 的会话保持自己的 agent。给了没反应
-        // 必须可诊断（与 stdio 路径的 resume-ignored 警告同口径）。
-        if args.agent.is_some() {
-            tracing::warn!(
-                "--agent is ignored on resume: the resumed session keeps its agent \
+    let (session_id, template_name, resolved_workspace, created_parent) =
+        if let Some(ref resume_id) = args.resume {
+            // `--agent` 只作用在创建路径：resume 的会话保持自己的 agent。给了没反应
+            // 必须可诊断（与 stdio 路径的 resume-ignored 警告同口径）。
+            if args.agent.is_some() {
+                tracing::warn!(
+                    "--agent is ignored on resume: the resumed session keeps its agent \
                  (switch it with `wing update <sid> --agent <name>`)"
-            );
-        }
-        // 恢复失败（含"已归档"）走统一的会话错误文案：`wing run -r <归档 id>`
-        // 拿到的是一句可行动的提示，不是裸的网关 detail。
-        let resp = http
-            .resume_session(resume_id)
-            .await
-            .map_err(|e| common::session_error(resume_id, &e))?;
-        // `-r` + `--tag`: tags are added to the resumed session (idempotent;
-        // the resumed session keeps its existing tags).
-        if !args.tag.is_empty() {
-            http.tag_session(&resp.session_id, Some(args.tag.clone()), None)
+                );
+            }
+            // 恢复失败（含"已归档"）走统一的会话错误文案：`wing run -r <归档 id>`
+            // 拿到的是一句可行动的提示，不是裸的网关 detail。
+            let resp = http
+                .resume_session(resume_id)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
-        }
-        (
-            resp.session_id,
-            resp.template_name.unwrap_or_default(),
-            resp.workspace,
-        )
-    } else {
-        let override_ = AgentOverride {
-            model_id: args.model.clone(),
-            system_prompt: args.system_prompt.clone(),
-            append_system_prompt: args.append_system_prompt.clone(),
-            tools,
-            max_turns: args.max_turns,
-            effort: args.effort.clone(),
-            yolo: Some(true),
-        };
+                .map_err(|e| common::session_error(resume_id, &e))?;
+            // `-r` + `--tag`: tags are added to the resumed session (idempotent;
+            // the resumed session keeps its existing tags).
+            if !args.tag.is_empty() {
+                http.tag_session(&resp.session_id, Some(args.tag.clone()), None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
+            }
+            // 恢复不是创建：不读 env（既有会话的 parent 是它出生时的事实）。
+            (
+                resp.session_id,
+                resp.template_name.unwrap_or_default(),
+                resp.workspace,
+                None,
+            )
+        } else {
+            let override_ = AgentOverride {
+                model_id: args.model.clone(),
+                system_prompt: args.system_prompt.clone(),
+                append_system_prompt: args.append_system_prompt.clone(),
+                tools,
+                max_turns: args.max_turns,
+                effort: args.effort.clone(),
+                yolo: Some(true),
+            };
 
-        let create_req = CreateSessionRequest {
-            template_name: args.agent.clone(),
-            workspace: workspace.clone(),
-            agent: Some(override_),
-            backend: None,
-            // Atomic: the session is born tagged (no dispatch-without-tags window).
-            tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
-            // `wing run` 不暴露 --session-id：id 由后端生成（stdio 前端才有
-            // create-or-adopt，见 crates/wing/src/stdio/mod.rs）。
-            session_id: None,
-        };
+            // 血缘采集：Bash 工具给 agent 的 shell 注入了 `WING_SESSION_ID`，
+            // 于是"由谁创建"在创建请求里带上（软信号，非法值丢弃 + 留痕）。
+            let requested_parent = common::parent_session_id_from_env();
+            let create_req = CreateSessionRequest {
+                template_name: args.agent.clone(),
+                workspace: workspace.clone(),
+                agent: Some(override_),
+                backend: None,
+                // Atomic: the session is born tagged (no dispatch-without-tags window).
+                tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
+                // `wing run` 不暴露 --session-id：id 由后端生成（stdio 前端才有
+                // create-or-adopt，见 crates/wing/src/stdio/mod.rs）。
+                session_id: None,
+                parent_session_id: requested_parent.clone(),
+            };
 
-        let resp = http.create_session(&create_req).await?;
-        // 创建即带标；读回校验——旧网关（早于 tags 端点）会在这里响亮失败，
-        // 而不是静默丢标后继续把 prompt 发出去。
-        common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
-        (resp.session_id, resp.template_name, resp.workspace)
-    };
+            let resp = http.create_session(&create_req).await?;
+            // 创建即带标；读回校验——旧网关（早于 tags 端点）会在这里响亮失败，
+            // 而不是静默丢标后继续把 prompt 发出去。
+            common::ensure_tags_applied(&http, &resp.session_id, &args.tag).await?;
+            // 血缘是软机制：请求了但网关没带（旧网关）只记日志，不吵。
+            common::warn_if_parent_dropped(
+                requested_parent.as_deref(),
+                resp.parent_session_id.as_deref(),
+            );
+            (
+                resp.session_id,
+                resp.template_name,
+                resp.workspace,
+                resp.parent_session_id,
+            )
+        };
 
     // 3. Send prompt (non-blocking — the HTTP call returns immediately,
     //    the agent processes asynchronously). Always sent, including on
@@ -152,7 +172,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     //    on `-r` this includes tags the session already had). The model
     //    identity comes from the session itself (`model_id` + call name +
     //    provider fact + declared label).
-    let (model, model_id, provider, model_display_name, tools_list, tags) =
+    let (model, model_id, provider, model_display_name, tools_list, tags, info_parent) =
         match http.get_session_info(&session_id).await {
             Ok(info) => (
                 info.model,
@@ -161,6 +181,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
                 info.model_display_name,
                 info.tools,
                 info.tags,
+                info.parent_session_id,
             ),
             Err(e) => {
                 // Non-fatal: the session was created and the prompt was sent.
@@ -176,12 +197,18 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
                     None,
                     vec![],
                     args.tag,
+                    None,
                 )
             }
         };
 
+    // 血缘（读回）：创建路径以 create 响应为准（对账的权威通道，上面已比对）；
+    // `-r` 没有 create 响应，取 info 读回的既有事实。
+    let parent_session_id = created_parent.or(info_parent);
+
     Ok(RunOutput {
         session_id,
+        parent_session_id,
         template_name,
         model,
         model_id,
@@ -197,6 +224,9 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
 
 fn print_text(output: &RunOutput) {
     println!("session_id:  {}", output.session_id);
+    if let Some(ref parent) = output.parent_session_id {
+        println!("parent:      {parent}");
+    }
     println!("model:       {}", output.model);
     if let Some(ref id) = output.model_id {
         println!("model_id:    {id}");

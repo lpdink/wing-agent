@@ -52,6 +52,8 @@ use acp_harness::turn_result;
 use acp_harness::update_kind;
 use acp_harness::wait_until;
 use acp_harness::wing_event;
+use agent_client_protocol::AcpAgent;
+use agent_client_protocol::AcpAgentConfig;
 use agent_client_protocol::Agent;
 use agent_client_protocol::ConnectionTo;
 use agent_client_protocol::schema::ProtocolVersion;
@@ -1328,6 +1330,56 @@ async fn session_close_unsubscribes_and_releases_idempotently() {
     )
     .await
     .expect("close 场景");
+}
+
+// ============================================================
+// B11 session/new 血缘采集（WING_SESSION_ID → create 请求的 parent）
+// ============================================================
+
+/// 本进程被 agent 拉起（env 里有 `WING_SESSION_ID`）时，ACP 的 `session/new`
+/// 在创建请求里带上创建者：判据是假网关收到的**请求体**（协议面）。
+#[tokio::test(flavor = "multi_thread")]
+async fn session_new_records_the_env_parent() {
+    let harness = Harness::start().await;
+    let gateway = Arc::clone(&harness.gateway);
+    let workspace = harness.workspace();
+
+    // 与 `Harness::agent()` 同一装置，只多一条 env（被测进程"被谁拉起"）。
+    let agent = AcpAgent::new(
+        AcpAgentConfig::new(env!("CARGO_BIN_EXE_wing"))
+            .arg("acp")
+            .env("WING_HOME", workspace.clone())
+            .env("WING_SESSION_ID", "20261015-211837-sched"),
+    );
+
+    let recorder = Recorder::new();
+    let permissions = PermissionScript::new();
+    let elicitations = ElicitationScript::new();
+    let gw = Arc::clone(&gateway);
+    let ws = workspace.clone();
+
+    run_client(
+        agent,
+        recorder,
+        permissions,
+        elicitations,
+        async move |connection: ConnectionTo<Agent>| {
+            initialize(&connection, false).await?;
+            connection
+                .send_request(NewSessionRequest::new(ws))
+                .block_task()
+                .await?;
+
+            let create = gw
+                .wait_request("session/create", |r| r.path == "/api/session/create")
+                .await;
+            let body = create.body.expect("create 请求体");
+            assert_eq!(body["parent_session_id"], "20261015-211837-sched");
+            Ok(())
+        },
+    )
+    .await
+    .expect("session/new 血缘场景");
 }
 
 // ============================================================

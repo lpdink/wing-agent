@@ -82,19 +82,22 @@ def is_valid_session_id(value: object) -> bool:
     return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
-def validate_session_id(session_id: str) -> str:
+def validate_session_id(session_id: str, *, field: str = "session id") -> str:
     """校验 session id 并原样返回；不合规即 raise ValueError。
 
     与 ``validate_media_id`` 同一精神：id 直接充当存储路径组件（会话目录名），
     脏值说明调用方逻辑已错（或是对抗输入），必须大声失败——静默清洗只会把
     问题藏起来，还留下路径穿越口子。
 
+    ``field`` 是错误文案里的字段名（同一套规则服务多个入口：session id 本身、
+    创建请求里的 parent、列表的过滤参数——各自点名，调用方才知道是谁脏了）。
+
     错误文案里的 id 用 ``repr``（转义形式，恒为 ASCII）：原始代理字符直接拼进
     消息会在 HTTP 错误体序列化处再次炸。
     """
     if not is_valid_session_id(session_id):
         raise ValueError(
-            f"invalid session id: {session_id!r} "
+            f"invalid {field}: {session_id!r} "
             f"(expect non-empty UTF-8 encodable id, ≤ {SESSION_ID_MAX_BYTES} bytes, "
             "no path separator / '..' / control char / leading '.')"
         )

@@ -579,30 +579,51 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
-                use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
+                use crate::shared::pinning::{is_pinned, pin_added_at};
+                use crate::shared::session_tree::{TreeRow, build_forest};
                 use crate::ui::popup::command::SessionCandidate;
 
-                // 后端下发的是**基准序**（active 优先 + 组内最后交互时间降序，
-                // 见 SessionManager.list_sessions）；前端在它之上叠加自己的
-                // 语义：被 pin 的会话置顶（组内后 pin 的更靠前，见
-                // `shared::pinning`）。其余条目保持后端原序——workspace 匹配
-                // 与 status 优先级这两个旧排序键已删除（它们是「在哪启动 TUI」
-                // 压过「正在用哪几个会话」的根源），workspace 只做展示与搜索。
+                // 面板的展示序 = **树序**（`shared::session_tree`，与 `wing ps
+                // --tree` 共用同一份实现，见 docs/dev/session-lineage.md §4）：
+                // 有父的会话跟在父下面并带连接前缀，pin 的根连同子树整块上浮，
+                // 子节点的 pin 只在兄弟组内说话。后端下发的基准序不再是面板的
+                // 定序输入——树序的每个排序键都是自足的（pin 时间 / 子树活跃 /
+                // id），workspace 与 status 只做展示与搜索。
                 let anchor = self.popup.active.selected_name().map(str::to_string);
-                let mut candidates: Vec<SessionCandidate> = resp
+                // pin 事实（标签 + 时间）算一次喂两处：树的排序键与候选行的星标
+                // 谓词——两者共用同一份投影，不会各算各的。
+                let pins: Vec<(bool, Option<&str>)> = resp
                     .sessions
                     .iter()
-                    .map(|s| SessionCandidate {
-                        id: s.id.clone(),
-                        title: s.name.clone().unwrap_or_default(),
-                        workspace: s.workspace.clone().unwrap_or_default(),
-                        status: s.status.clone(),
-                        last_interaction: s.last_interaction.clone().unwrap_or_default(),
-                        pinned: is_pinned(&s.tags),
-                        pin_added_at: pin_added_at(&s.tag_meta).map(str::to_string),
+                    .map(|s| (is_pinned(&s.tags), pin_added_at(&s.tag_meta)))
+                    .collect();
+                let rows: Vec<TreeRow<'_>> = resp
+                    .sessions
+                    .iter()
+                    .zip(&pins)
+                    .map(|(s, &(pinned, pin_at))| TreeRow {
+                        id: &s.id,
+                        parent: s.parent_session_id.as_deref(),
+                        pinned,
+                        pin_added_at: pin_at,
+                        last_interaction: s.last_interaction.as_deref(),
                     })
                     .collect();
-                candidates.sort_by_cached_key(|c| pin_key(c.pinned, c.pin_added_at.as_deref()));
+                let candidates: Vec<SessionCandidate> = build_forest(&rows)
+                    .into_iter()
+                    .map(|entry| {
+                        let s = &resp.sessions[entry.index];
+                        SessionCandidate {
+                            id: s.id.clone(),
+                            title: s.name.clone().unwrap_or_default(),
+                            workspace: s.workspace.clone().unwrap_or_default(),
+                            status: s.status.clone(),
+                            last_interaction: s.last_interaction.clone().unwrap_or_default(),
+                            pinned: pins[entry.index].0,
+                            tree_prefix: entry.prefix,
+                        }
+                    })
+                    .collect();
 
                 self.popup.cache.sessions = candidates;
                 self.popup.cache.sessions_fetched = true;

@@ -553,6 +553,30 @@ class Session:
         return self._metadata.workspace
 
     @property
+    def parent_session_id(self) -> str | None:
+        """创建者会话 id（来自 metadata；血缘，只读投影）。
+
+        弱引用语义见 ``SessionMetadata.parent_session_id``：这里只如实投影记录，
+        不解析父会话是否存在（幽灵父由展示层降级为根）。
+        """
+        return self._metadata.parent_session_id
+
+    def record_parent_session_id(self, parent_session_id: str) -> None:
+        """创建路径专用：把创建者（血缘）写进 metadata 并落盘——**唯一**写入点。
+
+        由 ``SessionManager.create_session`` 在 Session 构造成功之后调用一次；
+        此后没有任何修改路径（血缘是创建时刻的事实，见 docs/dev/session-lineage.md）
+        ——本方法没有第二个调用方，也没有端点 / 命令路由到这里。
+
+        写在构造之后是刻意的：构造期失败不该在盘上留下"有 parent 无会话"的记录
+        （那会让同 id 的下一次 create 收养到一个幽灵事实）。而写在这个位置意味着
+        从此刻起内存对象已带上字段——之后每一次 ``_save_metadata``（hook 注入 /
+        打标 / 用量 flush）写的都是同一个对象，不会把它抹掉。
+        """
+        self._metadata.parent_session_id = parent_session_id
+        self._save_metadata()
+
+    @property
     def tags(self) -> list[str]:
         """当前会话标签（metadata.tags 的投影；插入序，读侧已清洗）。
 

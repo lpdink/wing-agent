@@ -368,6 +368,7 @@ class SessionManager:
         backend: str | None = None,
         tags: Iterable[str] | None = None,
         session_id: str | None = None,
+        parent_session_id: str | None = None,
     ) -> Session:
         """创建（或按 id 收养）session。
 
@@ -379,6 +380,12 @@ class SessionManager:
         会话（此时 agent 覆盖是创建语义：全字段应用）。不给 ``session_id`` 时 id 由后端生成（见
         :meth:`_generate_session_id`）——**既有策略是默认，不是唯一**。
 
+        ``parent_session_id`` 是**血缘**（谁创建了我，产品语义见 docs/dev/session-lineage.md）：
+        只做格式卫生（同 session id 规则）、**不校验存在性**（弱引用——幽灵父由展示层降级为根），
+        与 ``session_id`` 同时给出且字面相等（自指）即 400。带父创建时在本方法内一次写入
+        metadata（此后没有修改路径）；**收养路径忽略它**（resume 语义：既有会话的记录不被改写）
+        并记 warning。无父创建零字段、零写盘。
+
         Args:
             template_name: Agent 模板名称，None 时使用默认模板（仅新会话生效）
             workspace: 工作目录（仅新会话生效）
@@ -387,19 +394,37 @@ class SessionManager:
             backend: 存储后端名称（如 file/memory），None 时使用默认后端
             tags: 创建即打标 / 收养时并入（经 :meth:`set_session_tags` 同一套校验）
             session_id: 指定 session id（create-or-adopt）；None = 自生成
+            parent_session_id: 创建者会话 id（血缘）；None = 根会话（用户直接创建）
 
         Raises:
-            ValueError: session_id 不合规 / 模板不存在 / backend 未知 / 标签非法
+            ValueError: session_id / parent_session_id 不合规（含自指）/ 模板不存在 /
+                backend 未知 / 标签非法
         """
         # 闸门先于一切：不合规的 id 不得触达任何 store（防路径穿越），也必须
         # 在任何写盘之前失败——否则一个失败的 create 会在磁盘上留下半份
         # metadata，下一次同 id 的 create 就会"收养"一个幽灵会话。
+        # parent 同属纯校验（血缘是创建动作的事实，脏值即请求错），且**先于收养
+        # 分支**：自指在任何路径上都是 400，不被"已存在 → 收养"吞掉。
         if session_id is not None:
             validate_session_id(session_id)
+        if parent_session_id is not None:
+            validate_session_id(parent_session_id, field="parent session id")
+            if session_id is not None and parent_session_id == session_id:
+                raise ValueError(
+                    "parent session id must differ from session id "
+                    f"(self-reference: {session_id!r})"
+                )
+        if session_id is not None:
             adopted = self._adopt_session(
                 session_id, agent_override=agent_override, tags=tags
             )
             if adopted is not None:
+                if parent_session_id is not None:
+                    log.warning(
+                        f"Session {adopted.session_id}: create-or-adopt ignores "
+                        f"parent session id {parent_session_id!r} "
+                        "(lineage is written once, at creation)"
+                    )
                 return adopted
 
         backend_name = backend if backend is not None else self._default_backend
@@ -451,6 +476,12 @@ class SessionManager:
         if session_id is not None:
             _warn_alias(session_id, sid)
             if sid in self._sessions:
+                if parent_session_id is not None:
+                    log.warning(
+                        f"Session {sid}: create-or-adopt ignores parent session "
+                        f"id {parent_session_id!r} (lineage is written once, "
+                        "at creation)"
+                    )
                 return self._finish_adoption(
                     sid, agent_override=agent_override, tags=tags
                 )
@@ -464,6 +495,14 @@ class SessionManager:
             store=store,
             workspace=workspace,
         )
+
+        # 血缘落盘：创建时刻的一次性事实（此后没有修改路径），写在**构造成功
+        # 之后**——构造期失败（provider 解析等）因此不会留下"有 parent 无会话"的
+        # 记录（那种残骸会让同 id 的下一次 create 收养到一个幽灵事实）。此后任何
+        # 一次 _save_metadata（hook 注入 / 打标 / 用量落盘）写的都是这个已带上字段
+        # 的内存对象，不会被抹掉；无 parent 时不写（零字段、零写盘，存量不变）。
+        if parent_session_id is not None:
+            session.record_parent_session_id(parent_session_id)
 
         # agent override 需在 session 完全构建后应用
         if agent_override is not None:
@@ -1310,6 +1349,7 @@ class SessionManager:
         *,
         statuses: Collection[str] | None = None,
         tags: Sequence[str] = (),
+        parent: str | None = None,
     ) -> list[SessionInfo]:
         """列出所有有效 session（跨 stores 聚合），按「活跃优先 + 最后交互时间降序」。
 
@@ -1329,13 +1369,16 @@ class SessionManager:
         同源同刻地投影：在内存的会话取 live agent（`Session.model_binding`），未加载的按 resume 链
         解析盘上记录（`resolve_model_binding`）。两条路都不发网络请求、不建会话。
 
-        ``statuses`` / ``tags`` 是**子集过滤**（缺省不过滤，两者同时给出即 AND）：
+        ``statuses`` / ``tags`` / ``parent`` 是**子集过滤**（缺省不过滤，同时给出即 AND）：
 
         - ``statuses``：只保留状态落在集合内的行（``None`` = 不过滤；空集合 = 无行）。
           「在内存的会话」即 ``statuses={"idle","working","waiting"}``。
         - ``tags``：只保留**携带全部**给定标签的行（AND，与 ``wing ps --tag`` 的
           既有标签口径一致）；标签按字面比对（写侧已保证不存在的标签不可能命中，
           滤它是空结果，不是错误）。
+        - ``parent``：只保留 **parent_session_id 逐字等于**该值的行（直接子——不含
+          父自己、不含孙辈）。血缘是弱引用，值只做字面比对：**格式合法但不存在的
+          父**是空结果（无从枚举、也不该报错），词法非法由路由层折成 400。
 
         过滤发生在**可见性规则之后**：无名且无标的会话本就不进列表（无论状态如何），
         过滤不会让它们出现——过滤只做减法，不造行。
@@ -1373,6 +1416,7 @@ class SessionManager:
                         id=summary.id,
                         name=name,
                         workspace=metadata.workspace,
+                        parent_session_id=metadata.parent_session_id,
                         last_interaction=metadata.last_interaction,
                         status=loaded.status if loaded is not None else "inactive",
                         tags=row_tags,
@@ -1388,6 +1432,8 @@ class SessionManager:
             result = [s for s in result if s.status in statuses]
         if tags:
             result = [s for s in result if all(t in s.tags for t in tags)]
+        if parent is not None:
+            result = [s for s in result if s.parent_session_id == parent]
 
         # 活跃优先（False < True），组内时间新的在前；并列时按 id 定序（见 docstring）。
         result.sort(

@@ -204,9 +204,24 @@ impl GatewayClient {
 
     /// 列出所有活跃 session。
     pub async fn list_sessions(&self) -> Result<SessionListResponse, ApiClientError> {
+        self.list_sessions_with_parent(None).await
+    }
+
+    /// 列出 session，可选按父过滤：`Some(parent)` = 只保留该会话的**直接子**
+    /// （后端 `?parent=` 子集过滤，与 `?status=` / `?tag=` 同款语义——结果是
+    /// 全量列表的子序列）。
+    ///
+    /// 旧网关不识别该参数，会静默返回全量（仍是正确的超集：调用方按
+    /// `parent_session_id` 复核即可，`wing ps --parent` 就是这么做的）。
+    pub async fn list_sessions_with_parent(
+        &self,
+        parent: Option<&str>,
+    ) -> Result<SessionListResponse, ApiClientError> {
+        let query: Vec<(&str, &str)> = parent.into_iter().map(|p| ("parent", p)).collect();
         let resp = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/list"))
+            .query(&query)
             .send()
             .await?;
 

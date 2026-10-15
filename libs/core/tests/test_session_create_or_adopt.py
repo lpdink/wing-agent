@@ -473,6 +473,31 @@ class TestFilesystemAliases:
         )
 
     @pytest.mark.asyncio
+    async def test_empty_alias_adopts_without_recording_lineage(
+        self, aliasing: SessionManager, root: Path, wing_warnings: list[str]
+    ):
+        """认领键归一的收养（空会话变体）同样忽略 parent：不认父、不改写、留 warning。
+
+        走的是 `_finish_adoption` 那条分支（`_adopt_session` 看不见它：目录存在但
+        还不是会话，只有"认领键"能把别名变成事实）——血缘是创建时刻的事实，这里
+        既不能补写也不能改写。
+        """
+        created = aliasing.create_session(session_id="Team-E")  # 无 tags：只有认领
+        adopted = aliasing.create_session(
+            session_id="team-e", parent_session_id="lineage-root"
+        )
+
+        assert adopted is created
+        assert adopted.session_id == "Team-E"
+        assert adopted.parent_session_id is None
+        assert _session_dirs(root) == ["Team-E"]
+        # 零写盘：收养没有为它写下任何 metadata。
+        assert not (root / "Team-E" / "metadata.json").exists()
+        assert any("ignores parent session id" in line for line in wing_warnings), (
+            wing_warnings
+        )
+
+    @pytest.mark.asyncio
     async def test_real_filesystem_never_shares_one_history(self, tmp_path: Path):
         """真实 FS 上的不变量：变体 id 要么同一会话，要么**两个目录**——绝不混写。
 
@@ -728,3 +753,94 @@ class TestNonUtf8InputGates:
         assert metadata is None or (
             metadata.model_id is None and metadata.model_name is None
         )
+
+
+class TestParentSessionId:
+    """血缘（`parent_session_id`）的创建语义（见 docs/dev/session-lineage.md §2）。
+
+    这些用例走**真实 manager 路径**（网关侧是 mock、probe 侧是 HTTP 面）：
+    把「创建即落盘 / 收养忽略 / 自指闸门 / 直接子过滤」这组不变量钉在单元层。
+    """
+
+    @pytest.mark.asyncio
+    async def test_auto_generated_id_persists_parent_on_disk_and_reloads(
+        self, sm: SessionManager, root: Path
+    ):
+        """自动 id（不给 session_id）的带父创建：**创建即落盘**，重启后仍在。
+
+        `wing run`（血缘采集的主力）不暴露 `--session-id`——它走的正是这条
+        不经过认领键的路径，目录创建完全依赖 metadata 落盘的那次 mkdir。
+        """
+        session = sm.create_session(parent_session_id="root-a")
+        assert session.parent_session_id == "root-a"
+
+        # 落盘不依赖任何后续动作：无标会话的唯一写盘就来自血缘本身。
+        meta_path = root / session.session_id / "metadata.json"
+        assert json.loads(meta_path.read_text(encoding="utf-8"))[
+            "parent_session_id"
+        ] == ("root-a")
+
+        # 新进程等价物：同一存储根、内存归零——resume 读回同一个事实。
+        _seed(session, "child work")
+        reloaded = _restart(root).resume_session(session.session_id)
+        assert reloaded.parent_session_id == "root-a"
+
+    @pytest.mark.asyncio
+    async def test_no_parent_writes_nothing(self, sm: SessionManager, root: Path):
+        """无父 = 零字段：无标会话连 metadata 文件都不建；带标会话没有该键。"""
+        bare = sm.create_session()
+        assert bare.parent_session_id is None
+        assert not (root / bare.session_id / "metadata.json").exists()
+
+        tagged = sm.create_session(tags=["crew"])
+        assert tagged.parent_session_id is None
+        metadata = json.loads(
+            (root / tagged.session_id / "metadata.json").read_text(encoding="utf-8")
+        )
+        assert "parent_session_id" not in metadata
+
+    @pytest.mark.asyncio
+    async def test_self_reference_is_rejected_before_any_write(
+        self, sm: SessionManager, root: Path
+    ):
+        """自指（session_id == parent_session_id）在任何写盘之前拒绝（零残留）。"""
+        with pytest.raises(ValueError, match="self-reference"):
+            sm.create_session(session_id=CUSTOM_ID, parent_session_id=CUSTOM_ID)
+        assert _session_dirs(root) == []
+
+    @pytest.mark.asyncio
+    async def test_adopting_a_stored_session_ignores_parent_and_warns(
+        self, sm: SessionManager, root: Path, wing_warnings: list[str]
+    ):
+        """磁盘收养（真会话、换进程）忽略请求里的 parent：不改写、留 warning。"""
+        first = sm.create_session(session_id=CUSTOM_ID)
+        _seed(first, "hello")
+
+        adopted = _restart(root).create_session(
+            session_id=CUSTOM_ID, parent_session_id="wannabe-parent"
+        )
+        assert adopted.parent_session_id is None
+        meta_path = root / CUSTOM_ID / "metadata.json"
+        if meta_path.exists():  # resume 可能写别的字段；只有 parent 绝不允许出现
+            assert "parent_session_id" not in json.loads(
+                meta_path.read_text(encoding="utf-8")
+            )
+        assert any("ignores parent session id" in line for line in wing_warnings), (
+            wing_warnings
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_filters_by_parent_direct_children_only(
+        self, sm: SessionManager
+    ):
+        """`list_sessions(parent=...)` = 直接子（不含父自己、不含孙辈）。"""
+        top = sm.create_session(session_id="root-a")
+        _seed(top, "root")
+        child = sm.create_session(session_id="child-b", parent_session_id="root-a")
+        _seed(child, "child")
+        grand = sm.create_session(session_id="grand-c", parent_session_id="child-b")
+        _seed(grand, "grand")
+
+        assert [s.id for s in sm.list_sessions(parent="root-a")] == ["child-b"]
+        assert [s.id for s in sm.list_sessions(parent="child-b")] == ["grand-c"]
+        assert sm.list_sessions(parent="grand-c") == []

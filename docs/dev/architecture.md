@@ -143,7 +143,9 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 面向脚本与外部编排器的非交互子命令，全部走 HTTP；`--json` 输出可直接被 agent 消费：
 
 - `wing run [--agent <name>] "<prompt>"`：建会话（`--agent` 选模板，缺省 = 网关默认模板）+ 发送 prompt 后**立即返回 session id**（非阻塞）；`wing wait <sid>…` 阻塞至会话进入 idle/inactive（HTTP 轮询 + WS `TurnResult` 双通道，`--timeout` 兜底）。事件流终止（帧超限 / Close 帧 / 读错误）时**立即报错退出**（stderr 含关闭原因与未完成 session，非零退出码）——不空转、不静默降级为纯 HTTP 轮询；细节见 `gateway/client.rs` 的 `CloseReason`；
-- `wing ps [--all] [--watch]` / `wing info <sid>`：会话列表 / 单会话运行时信息（model、tools、tokens、status）；
+- `wing ps [--all] [--watch] [--parent <sid>] [--tree]` / `wing info <sid>`：会话列表
+  （`--parent` 只列该会话的直接子、`--tree` 血缘树）/ 单会话运行时信息（model、tools、
+  tokens、status、parent）；
 - `wing tail|head <sid> -n N -t <element>[,…]`：消息窗口（类 Unix head/tail；平铺元素模型——`-t` 逗号分隔 / 可重复即**并集**（`user,content` = 用户文本 + 助手文本，其余元素一个字节都不出），元素取 user / assistant（= reasoning+content+tool_call）/ reasoning / content / tool_call / tool_result，输出侧按同一元素集剥离，文本与 `--json` 一致（例外：tool_result 文本模式为 500 字符 peek、`--json` 为存储全文；`all` 保持原样 payload 且是唯一渲染「角色无元素归属」行——如 rewind 哨兵——的视图）；未知取值由 clap 报错，不静默降级为不过滤）；
 - **控制面补全**（TUI 已有而 CLI 缺失的语义，日常运维不必再手搓 curl）：
   - `wing new [--workspace] [--agent] [--tag]` / `wing resume <sid>` / `wing update <sid> [flags]`：建空会话（`--agent` 选模板、workspace 默认 cwd、标签创建即带标）、显式水合（打印状态摘要）、**部分**状态更新——只发显式给出的字段（`--model` 是引用词 `model_id`；`--agent` / `--title` / `--thinking` / `--effort` / `--yolo` / `--workspace` / `--tools`（全量替换）；一个字段都不给即在发请求前拒绝）；
