@@ -23,8 +23,8 @@ from fastapi.testclient import TestClient
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
-from wing.session import TagMutation
-from wing.store import SessionUsage, TagMeta
+from wing.session import SessionArchivedError, TagMutation
+from wing.store import ArchivedSession, SessionUsage, TagMeta
 
 
 def _raise_package_not_found(name: str) -> str:
@@ -636,6 +636,149 @@ class TestSessionRelease:
         )
         assert resp.status_code == 409
         assert "status=working" in resp.json()["detail"]
+
+
+# ============================================================
+# 6.7b Session Archive
+# ============================================================
+
+
+class TestSessionArchive:
+    """POST /api/session/archive（设置归档状态）+ GET（读索引列表）。"""
+
+    def test_archive_ok(self, client: TestClient, mock_runtime):
+        """归档成功 → archived=true / changed=true。"""
+        mock_runtime.archive_session.return_value = (True, "archived")
+        mock_runtime.is_archived.return_value = True
+        resp = client.post(
+            "/api/session/archive", json={"session_id": "test-session-id"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "session_id": "test-session-id",
+            "archived": True,
+            "changed": True,
+            "detail": "archived",
+        }
+        mock_runtime.archive_session.assert_called_once_with("test-session-id")
+
+    def test_archive_defaults_to_archive_direction(
+        self, client: TestClient, mock_runtime
+    ):
+        """省 ``archived`` = 归档（默认方向）；``archived=false`` = 恢复。"""
+        mock_runtime.archive_session.return_value = (False, "already archived")
+        mock_runtime.is_archived.return_value = True
+        resp = client.post("/api/session/archive", json={"session_id": "s"})
+        assert resp.json()["changed"] is False
+        mock_runtime.unarchive_session.assert_not_called()
+
+        mock_runtime.unarchive_session.return_value = (True, "restored")
+        mock_runtime.is_archived.return_value = False
+        resp = client.post(
+            "/api/session/archive", json={"session_id": "s", "archived": False}
+        )
+        assert resp.json() == {
+            "ok": True,
+            "session_id": "s",
+            "archived": False,
+            "changed": True,
+            "detail": "restored",
+        }
+        mock_runtime.unarchive_session.assert_called_once_with("s")
+
+    def test_archive_response_reports_the_real_state(
+        self, client: TestClient, mock_runtime
+    ):
+        """``archived`` 是操作后的真实状态：空会话归档是 no-op，回执不得谎报 true。"""
+        mock_runtime.archive_session.return_value = (False, "nothing to archive")
+        mock_runtime.is_archived.return_value = False
+        resp = client.post(
+            "/api/session/archive", json={"session_id": "blank", "archived": True}
+        )
+        assert resp.json()["archived"] is False
+        assert resp.json()["detail"] == "nothing to archive"
+        mock_runtime.is_archived.assert_called_once_with("blank")
+
+    def test_archive_unknown_session_404(self, client: TestClient, mock_runtime):
+        mock_runtime.archive_session.side_effect = LookupError("Session not found")
+        resp = client.post("/api/session/archive", json={"session_id": "xxx"})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"
+
+    def test_archive_pinned_conflict_409(self, client: TestClient, mock_runtime):
+        """钉住条件命中 → 409，附原因（与 release 同一套）。"""
+        mock_runtime.archive_session.side_effect = RuntimeError(
+            "session cannot be archived: status=working"
+        )
+        resp = client.post("/api/session/archive", json={"session_id": "s"})
+        assert resp.status_code == 409
+        assert "status=working" in resp.json()["detail"]
+
+    def test_list_archived(self, client: TestClient, mock_runtime):
+        """GET 返回归档条目（读索引的投影）。"""
+        mock_runtime.list_archived_sessions.return_value = [
+            ArchivedSession(
+                id="old-1",
+                name="old chat",
+                archived_at="2026-10-01T10:00:00",
+                tags=["favorite"],
+                model_id="gpt-4",
+                model_name="gpt-4",
+            )
+        ]
+        resp = client.get("/api/session/archive")
+        assert resp.status_code == 200
+        sessions = resp.json()["sessions"]
+        assert [s["id"] for s in sessions] == ["old-1"]
+        assert sessions[0]["name"] == "old chat"
+        assert sessions[0]["tags"] == ["favorite"]
+
+    def test_media_precheck_keeps_the_archived_marker(
+        self, client: TestClient, mock_runtime
+    ):
+        """media 的存在性预检也区分归档：归档命中带结构化码（冻结面一致）。"""
+        mock_runtime.require_live_session.side_effect = SessionArchivedError("old-1")
+        resp = client.post("/api/session/media?session_id=old-1", content=b"xyz")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "session_archived"
+
+        mock_runtime.require_live_session.side_effect = LookupError("Session not found")
+        resp = client.post("/api/session/media?session_id=ghost", content=b"xyz")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"
+
+    def test_memory_state_endpoints_keep_the_archived_marker(
+        self, client: TestClient, mock_runtime
+    ):
+        """内存态查询（get / info / branches）的 404 也区分归档：裸 API 消费方
+        要看得出"它没消失，只是被归档了"。"""
+        mock_runtime.get_session_state.return_value = None
+        mock_runtime.get_session.return_value = None
+        mock_runtime.missing_session_error.return_value = SessionArchivedError("old-1")
+
+        for path in ("/api/session/get", "/api/session/info", "/api/session/branches"):
+            resp = client.get(f"{path}?session_id=old-1")
+            assert resp.status_code == 404, path
+            assert resp.json()["error"] == "session_archived", path
+
+        # 真不存在仍是普通 404（不区分给探测器反馈）。
+        mock_runtime.missing_session_error.return_value = LookupError("nope")
+        resp = client.get("/api/session/info?session_id=ghost")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"
+
+    def test_archived_session_yields_actionable_404(
+        self, client: TestClient, mock_runtime
+    ):
+        """归档命中的 404：结构化 error=session_archived（与真不存在区分）。"""
+        mock_runtime.resume_session.side_effect = SessionArchivedError("old-1")
+        resp = client.post("/api/session/resume", json={"session_id": "old-1"})
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["error"] == "session_archived"
+        assert "archived" in body["detail"]
+        assert "restore" in body["detail"]
 
 
 # ============================================================

@@ -85,11 +85,12 @@ async fn release_inner(session_ids: &[String]) -> Result<ReleaseOutput> {
                 detail: resp.detail,
                 is_error: false,
             }),
-            // 单会话失败（404 不存在 / 409 被钉住）不阻断其余会话。
+            // 单会话失败（404 不存在 / 409 被钉住）不阻断其余会话；文案走共享
+            // 的会话错误（普通 404 有"怎么找"，归档 404 有"怎么恢复"）。
             Err(e) => results.push(ReleaseResult {
                 session_id: sid.clone(),
                 released: false,
-                detail: e.to_string(),
+                detail: common::session_error(sid, &e).to_string(),
                 is_error: true,
             }),
         }

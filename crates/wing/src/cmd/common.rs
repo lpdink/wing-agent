@@ -318,12 +318,20 @@ pub fn session_failed(session_id: &str, error: &ApiClientError) -> anyhow::Error
 /// One friendly line for a session-scoped API failure.
 ///
 /// 404 gets the "evicted ≠ missing" wording (with the way out: `wing resume`
-/// or `wing ps --all`); 409 passes through the gateway's own reason (busy /
+/// or `wing ps --all`) — except an **archived** 404 (tagged
+/// `error="session_archived"`): there the way out is `wing archive
+/// --restore`. 409 passes through the gateway's own reason (busy /
 /// subscribed / not durable) — the status code and the reason are the useful
 /// part, so both stay in the message. Everything else keeps the transport
 /// error verbatim (never re-classify a network failure as "not found").
 pub fn session_error(session_id: &str, error: &ApiClientError) -> anyhow::Error {
-    if error.is_not_found() {
+    if error.is_session_archived() {
+        anyhow::anyhow!(
+            "session {session_id} is archived — restore it with \
+             `wing archive --restore {session_id}` \
+             (`wing archive --list` shows the archive)"
+        )
+    } else if error.is_not_found() {
         anyhow::anyhow!(
             "session {session_id} not found (not loaded and not on disk); \
              `wing ps --all` lists every known session"

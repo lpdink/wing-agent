@@ -53,6 +53,16 @@ pub enum FetchPayload {
     /// `Err` 是给 toast 的文案（压缩器错误已格式化）。这个变体**不属于任何会话**：
     /// 它回来时走 `App::on_clipboard_compressed`，不看会话守卫（草稿跨会话还在）。
     ClipboardImage(Result<CompressedImage, String>),
+    /// 一条本地剪贴板读取回执（[`AppIntent::ReadClipboard`]）。
+    ///
+    /// 与 `ClipboardImage` 同一条契约：结果属于 composer 而不是会话，
+    /// `handle_fetch_result` 在会话守卫**之前**分派它（换过会话草稿还在，粘贴照落）。
+    ClipboardPaste(
+        Result<
+            crate::util::clipboard_paste::PasteOutcome,
+            crate::util::clipboard_paste::PasteFailure,
+        >,
+    ),
     /// 一条消息的**后台发送失败**回执（`SendMessage` 后台任务，见
     /// `runner::spawn_send_message`）。
     ///
@@ -106,6 +116,13 @@ pub enum AppIntent {
 
     /// Write text to clipboard via OSC52 escape sequence.
     CopyToClipboard(String),
+
+    /// 读系统剪贴板（L1；`Ctrl+V` / 终端回传的 `super+v` 的唯一动作）。
+    ///
+    /// runner 把读取放进后台任务（子进程 + 每条命令的超时在 `util::clipboard_paste`），
+    /// 结果经 [`FetchPayload::ClipboardPaste`] 回到 App —— 事件循环一步不等
+    /// （图片读取本来就要秒级，内联 await 会冻 UI）。
+    ReadClipboard,
 
     /// 压缩一张刚粘贴进来的图片（通道给的是原始字节）。
     ///

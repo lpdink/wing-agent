@@ -95,7 +95,12 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
                  (switch it with `wing update <sid> --agent <name>`)"
                 );
             }
-            let resp = http.resume_session(resume_id).await?;
+            // 恢复失败（含"已归档"）走统一的会话错误文案：`wing run -r <归档 id>`
+            // 拿到的是一句可行动的提示，不是裸的网关 detail。
+            let resp = http
+                .resume_session(resume_id)
+                .await
+                .map_err(|e| common::session_error(resume_id, &e))?;
             // `-r` + `--tag`: tags are added to the resumed session (idempotent;
             // the resumed session keeps its existing tags).
             if !args.tag.is_empty() {

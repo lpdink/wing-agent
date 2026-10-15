@@ -240,6 +240,65 @@ pub struct ReleaseResponse {
     pub detail: String,
 }
 
+/// `POST /api/session/archive` 请求——设置会话的归档状态。
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveRequest {
+    pub session_id: String,
+    /// true = 归档（默认方向）；false = 恢复。
+    pub archived: bool,
+}
+
+/// `POST /api/session/archive` 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveResponse {
+    pub ok: bool,
+    pub session_id: String,
+    /// 操作后的归档状态（请求要什么就是什么）。
+    pub archived: bool,
+    /// 本次调用是否真的移动了会话（false = 幂等 no-op）。
+    pub changed: bool,
+    /// 结果说明（archived / already archived / restored / not archived /
+    /// nothing to archive）。
+    pub detail: String,
+}
+
+/// 归档区条目（`GET /api/session/archive`；读索引，不扫会话目录）。
+///
+/// 字段是**归档时刻的事实快照** + 投影期补全的展示名（模型四件套与
+/// `/api/session/list` 同一读法）。`archived_at` 可能为 None（索引重建路径
+/// 不知道当时的时刻，不发明数字）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArchivedSession {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub template_name: Option<String>,
+    #[serde(default)]
+    pub last_interaction: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub model_name: Option<String>,
+    #[serde(default)]
+    pub provider_name: Option<String>,
+    #[serde(default)]
+    pub model_display_name: Option<String>,
+}
+
+/// `GET /api/session/archive` 响应——归档条目（按最后交互时间降序）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArchivedSessionsResponse {
+    #[serde(default)]
+    pub sessions: Vec<ArchivedSession>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RewindRequest {
     pub session_id: String,

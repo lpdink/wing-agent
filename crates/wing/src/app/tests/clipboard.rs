@@ -12,6 +12,8 @@ use crate::app::clipboard::MAX_PENDING_IMAGES;
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
 use crate::ui::toast::ToastKind;
+use crate::util::clipboard_paste::PasteFailure;
+use crate::util::clipboard_paste::PasteOutcome;
 use crate::util::image_compress::CompressOptions;
 use crate::util::image_compress::CompressedImage;
 use crate::util::image_compress::compress_image;
@@ -358,4 +360,83 @@ async fn the_runner_compresses_on_the_blocking_pool() {
         .await
         .expect_err("garbage must not decode");
     assert!(error.contains("cannot decode"), "错误文案给 toast：{error}");
+}
+
+// ── L1（本地读取）的回执落点 ─────────────────────────────────────────
+
+/// 本地读取的文本与 bracketed paste / OSC 5522 通道**同一个入口**（`handle_paste`），
+/// 模态挡板的语义自动一致。
+#[test]
+fn local_paste_text_lands_in_the_composer() {
+    let mut app = test_app();
+    app.on_clipboard_paste(Ok(PasteOutcome::Text("local 文本".into())));
+    assert_eq!(app.input.text(), "local 文本");
+}
+
+#[test]
+fn local_paste_text_respects_the_composer_gate() {
+    let mut app = test_app();
+    app.model_panel = Some(crate::shared::panels::picker::ModelPanel::new(
+        Vec::new(),
+        None,
+    ));
+    app.on_clipboard_paste(Ok(PasteOutcome::Text("hidden".into())));
+    assert_eq!(app.input.text(), "", "面板开着时本地读取的文本也不进草稿");
+}
+
+/// 本地读取的图片进既有单并发流水线（与 OSC 5522 图片同一落点，同样不受挡板）。
+#[test]
+fn local_paste_image_joins_the_pipeline() {
+    let mut app = test_app();
+    app.on_clipboard_paste(Ok(PasteOutcome::Image {
+        bytes: vec![1, 2, 3],
+        mime: "image/png".into(),
+    }));
+    assert!(
+        app.drain_intents()
+            .iter()
+            .any(|i| matches!(i, AppIntent::CompressClipboardImage { .. })),
+        "字节进了压缩流水线"
+    );
+    assert_eq!(app.pending_clipboard_images().len(), 0, "队首已出队去压");
+}
+
+/// 空剪贴板 / 失败都要出声（红线：不静默），且不动用户已有内容。
+#[test]
+fn local_paste_empty_and_failure_speak_up() {
+    let mut app = test_app();
+    app.input.set_text("draft stays");
+    app.on_clipboard_paste(Ok(PasteOutcome::Empty));
+    let toast = app.toast.as_ref().expect("空剪贴板要看得见");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert_eq!(toast.message, "Clipboard has no text or image");
+    assert_eq!(app.input.text(), "draft stays", "失败面不碰草稿");
+
+    for failure in [
+        PasteFailure::Remote,
+        PasteFailure::Unavailable,
+        PasteFailure::Timeout,
+    ] {
+        let mut app = test_app();
+        app.on_clipboard_paste(Err(failure.clone()));
+        let toast = app.toast.as_ref().expect("失败要看得见");
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert_eq!(toast.message, failure.message(), "定向文案：{failure:?}");
+        assert_eq!(app.input.text(), "");
+    }
+}
+
+/// 回执与压缩回执同一条契约：不属于任何会话（换过会话草稿还在）——
+/// `handle_fetch_result` 在会话守卫**之前**分派它。
+#[test]
+fn local_paste_result_survives_a_session_switch() {
+    let mut app = test_app();
+    app.session_id = "another-session".into();
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::ClipboardPaste(Ok(PasteOutcome::Text(
+            "kept".into(),
+        ))),
+    });
+    assert_eq!(app.input.text(), "kept");
 }

@@ -29,6 +29,38 @@ pub struct Transport {
     pub client_id: String,
 }
 
+/// 会话恢复的结局（调用方据此决定要不要给用户一句提示）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// 原会话被 resume 回来了（正常重连）。
+    Resumed,
+    /// 原 id 在网关上已不存在（从未落盘的空白会话 / 被删）；起了一个新会话。
+    Fresh,
+    /// 原 id 在归档区（数据完好且可恢复）；起了一个新会话——必须让用户知道
+    /// 「怎么回去」（`wing archive --restore <id>`）。
+    Archived,
+}
+
+impl Recovery {
+    /// 需要用户知道时的提示（`lost_session` = 原来的会话 id）。
+    ///
+    /// 归档是唯一"数据还在、但要用命令拿回来"的结局：提示里给出可复制的恢复
+    /// 命令（`wing archive --restore`）。Resumed / Fresh 不需要额外解释
+    /// （Fresh = 空白会话/已删除，与首次启动无异）。
+    pub fn notice(self, lost_session: &str) -> Option<crate::ui::toast::Toast> {
+        match self {
+            Recovery::Archived => Some(crate::ui::toast::Toast::warning(
+                format!(
+                    "Session {lost_session} is archived; started a fresh one. \
+                     Restore it with `wing archive --restore {lost_session}`"
+                ),
+                Duration::from_secs(10),
+            )),
+            Recovery::Resumed | Recovery::Fresh => None,
+        }
+    }
+}
+
 impl Transport {
     /// Switch event subscription from an old session to a new one.
     ///
@@ -98,10 +130,24 @@ impl Transport {
     /// Any other failure (network error, 5xx) is transient: returned as `Err`
     /// for the caller to retry with backoff. The WebSocket itself stays
     /// untouched either way — one client, one socket, many session attempts.
-    pub async fn recover_session(&self, session_id: &str, workspace: Option<&str>) -> Result<()> {
-        let effective_id = match self.http.resume_session(session_id).await {
-            Ok(_) => session_id.to_string(),
+    pub async fn recover_session(
+        &self,
+        session_id: &str,
+        workspace: Option<&str>,
+    ) -> Result<Recovery> {
+        let (effective_id, outcome) = match self.http.resume_session(session_id).await {
+            Ok(_) => (session_id.to_string(), Recovery::Resumed),
             Err(e) if e.is_not_found() => {
+                // 归档会话不可 resume（冻结）：仍然落到新会话兜底，但把
+                // 「怎么回去」交给调用方（用户可见的提示），日志也留一行。
+                let archived = e.is_session_archived();
+                if archived {
+                    tracing::warn!(
+                        session = session_id,
+                        "session is archived; starting a fresh one \
+                         (restore it with `wing archive --restore`)"
+                    );
+                }
                 let req = CreateSessionRequest {
                     workspace: workspace.map(str::to_string),
                     // 血缘（软信号，与首建 / `/new` 同一口径）：TUI 进程被 agent
@@ -119,7 +165,14 @@ impl Transport {
                     fresh = %resp.session_id,
                     "session not found; started a fresh one"
                 );
-                resp.session_id
+                (
+                    resp.session_id,
+                    if archived {
+                        Recovery::Archived
+                    } else {
+                        Recovery::Fresh
+                    },
+                )
             }
             // Transient: caller retries with backoff; transport stays up.
             Err(e) => {
@@ -132,13 +185,33 @@ impl Transport {
             .await
             .context("subscribe failed during session recovery")?;
 
-        Ok(())
+        Ok(outcome)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 归档结局必须说清"怎么回去"；其余结局不该多嘴。
+    #[test]
+    fn recovery_notice_names_the_restore_command_for_archived_sessions() {
+        let notice = Recovery::Archived
+            .notice("20261001-120000-abcd")
+            .expect("archived must tell the user something");
+        assert!(notice.message.contains("is archived"), "{}", notice.message);
+        assert!(
+            notice
+                .message
+                .contains("wing archive --restore 20261001-120000-abcd"),
+            "{}",
+            notice.message
+        );
+        assert_eq!(notice.kind, crate::ui::toast::ToastKind::Warning);
+
+        assert!(Recovery::Resumed.notice("s1").is_none());
+        assert!(Recovery::Fresh.notice("s1").is_none());
+    }
 
     #[test]
     fn test_backoff_sequence() {

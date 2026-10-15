@@ -585,6 +585,33 @@ describe('error surface', () => {
     expect((error as { message: string }).message).toContain('session not found');
   });
 
+  it('tags an archived-session 404 with the structured code (not "gone")', async () => {
+    const archived = new ScriptedTransport().reply(404, {
+      error: 'session_archived',
+      detail: "session 'sess-1' is archived; restore it before use",
+      session_id: null,
+      uuid: null,
+    });
+    const error = await makeClient(archived)
+      .resumeSession('sess-1')
+      .catch((cause: unknown) => cause);
+    const shaped = error as { isNotFound(): boolean; isSessionArchived(): boolean };
+    // 归档命中与"真不存在"同码不同 error：判定只认结构化码。
+    expect(shaped.isNotFound()).toBe(true);
+    expect(shaped.isSessionArchived()).toBe(true);
+
+    const gone = new ScriptedTransport().reply(404, {
+      error: 'not_found',
+      detail: 'session not found',
+      session_id: null,
+      uuid: null,
+    });
+    const notFound = await makeClient(gone)
+      .resumeSession('sess-1')
+      .catch((cause: unknown) => cause);
+    expect((notFound as { isSessionArchived(): boolean }).isSessionArchived()).toBe(false);
+  });
+
   it('keeps the raw body when the error shape is unknown', async () => {
     const transport = new ScriptedTransport().reply(502, '<html>bad gateway</html>');
     const error = await makeClient(transport)

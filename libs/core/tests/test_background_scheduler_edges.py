@@ -158,7 +158,37 @@ async def test_add_job_validation():
         scheduler.add_job("b", 0, lambda: None)
     with pytest.raises(ValueError, match="already registered"):
         scheduler.add_job("a", 1, lambda: None)
-
+    with pytest.raises(ValueError, match="initial delay must be >= 0"):
+        scheduler.add_job("c", 1, lambda: None, initial_delay_seconds=-1)
     scheduler.remove_job("a")
     scheduler.remove_job("missing")  # 未知名称静默忽略
     assert scheduler.jobs == []
+
+
+async def test_initial_delay_zero_runs_immediately():
+    """``initial_delay_seconds=0`` = 下一个 tick 立即跑首轮（不等 interval），
+    之后仍按 interval 周期——"启动过一会先扫一轮"的机制（自动归档用）。"""
+    scheduler = BackgroundScheduler()
+    ran: list[int] = []
+    scheduler.add_job("now", 3600, lambda: ran.append(1), initial_delay_seconds=0)
+    scheduler.start()
+
+    await asyncio.sleep(0.05)
+    await scheduler.stop()
+
+    assert ran == [1]  # 首轮跑了、周期没到（3600s）
+
+
+async def test_initial_delay_defers_first_run():
+    """``initial_delay_seconds`` 给定时首轮延后（只改写首轮触发时刻）。"""
+    scheduler = BackgroundScheduler()
+    ran: list[int] = []
+    scheduler.add_job("later", 0.02, lambda: ran.append(1), initial_delay_seconds=0.1)
+    scheduler.start()
+
+    await asyncio.sleep(0.05)
+    assert ran == []  # 还没到首轮窗口
+    await asyncio.sleep(0.12)
+    await scheduler.stop()
+
+    assert ran  # 窗口过后照常跑（并按周期续跑）

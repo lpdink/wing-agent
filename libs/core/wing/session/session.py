@@ -198,6 +198,9 @@ class Session:
         workspace: str | None = None,
     ) -> None:
         """底层构造器——由 from_template 调用，不建议直接使用。"""
+        # 摘除标志（见 `detach`）：封住摘除后的 metadata / 账本落盘。构造期就要
+        # 存在——_restore_persisted_model 会在 __init__ 里就写一次 metadata。
+        self._detached = False
         self._session_id = session_id
         self._messages = messages
         self._store = store
@@ -384,9 +387,11 @@ class Session:
         只关闭本会话的 worker；provider 实例归共享池（其他会话共用、逐出
         不拆池）——agent 只持有 name，没有任何 client 所有权要终结。
 
-        内存态回收之外只做一件事：退订用量事件并把账本落一次盘（释放前
-        落盘点——回合收尾已落过的是 no-op）。消息日志已 append+fsync 落盘，
-        元数据在该落的时候已落——session 仍可经 resume 完整水合回来。
+        内存态回收之外只做一件事：退订用量事件并做一次防御性的账本落盘——
+        正常路径此时已被封盘（`SessionManager.evict` 在摘除前同步落盘并
+        `detach`），这一次是 no-op；留着它只为兜住"未来有别的调用方不经
+        evict 直接收尾"的形状。消息日志已 append+fsync 落盘，元数据在该落
+        的时候已落——session 仍可经 resume 完整水合回来。
         """
         await self._agent.shutdown()
         if self._usage_attached:
@@ -687,6 +692,24 @@ class Session:
         """把用量账本落一次盘（回合收尾 / 释放 / 进程退出前的落盘点；no-op 幂等）。"""
         self._usage.flush()
 
+    def detach(self) -> None:
+        """与会话解绑（逐出路径专用）：此后本对象的落盘写口全部封住（幂等）。
+
+        为什么必须封：摘除后的会话对象可能还有迟到的落盘（teardown 的
+        ``aclose`` 收尾、节流窗口内的账本重试、任何仍持有引用的迟到调用方）
+        ——写路径会把 ``<root>/<sid>/`` 连父目录一起重建，紧接着归档 rename
+        之后写回 = live 与归档区**双存在**（两侧 409、只能手工清理；见
+        architecture.md 的数据分裂红线）。摘除前的同步落盘
+        （``SessionManager.evict``）是最后一次正确写点。
+
+        封的口径 = 三类写口：用量账本（``UsageTracker.seal``）、metadata
+        （``_save_metadata``）、消息日志（``TrackedList.seal`` → 后端实例）。
+        三者之外没有第四条落盘路径（``SessionStore`` 是全部持久状态的唯一所有者）。
+        """
+        self._detached = True
+        self._usage.seal()
+        self._messages.seal()
+
     def activate_usage(self) -> None:
         """把用量账本挂上事件流（会话被接纳进工作集时由 SessionManager 调用）。
 
@@ -761,7 +784,12 @@ class Session:
     # ── metadata 管理 ──────────────────────────────
 
     def _save_metadata(self) -> None:
-        """将当前 metadata 模型保存到 store。"""
+        """将当前 metadata 模型保存到 store（摘除后是 no-op，见 detach）。"""
+        if self._detached:
+            log.warning(
+                f"Session {self._session_id}: metadata write skipped (detached)"
+            )
+            return
         self._store.save_metadata(self._session_id, self._metadata)
 
     def set_title(self, title: str) -> None:

@@ -456,6 +456,13 @@ impl App {
             return;
         }
 
+        // 本地剪贴板读取（L1）的回执同样是 composer 的：换过会话草稿还在，粘贴照落
+        // （文本进草稿、图片进流水线）。
+        if let FetchPayload::ClipboardPaste(result) = payload {
+            self.on_clipboard_paste(result);
+            return;
+        }
+
         // Session guard: discard results from a previous session.
         if session_id != self.session_id {
             tracing::debug!(
@@ -661,8 +668,10 @@ impl App {
                     conflict,
                 });
             }
-            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / pending 的发送失败）。
-            FetchPayload::ClipboardImage(_) | FetchPayload::SendFailed { .. } => {}
+            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的发送失败）。
+            FetchPayload::ClipboardImage(_)
+            | FetchPayload::ClipboardPaste(_)
+            | FetchPayload::SendFailed { .. } => {}
         }
     }
 }

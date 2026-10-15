@@ -411,8 +411,11 @@ async fn fetch_messages(session_id: &str) -> Result<Vec<Value>> {
             // Check if it's a 404 (session not in memory).
             let err_str = e.to_string();
             if err_str.contains("404") || err_str.contains("not found") {
-                // Try to resume the session from disk.
-                http.resume_session(session_id).await?;
+                // Try to resume the session from disk. 恢复失败（含"已归档"）
+                // 走统一的会话错误文案：归档会话在这里得到恢复指引。
+                http.resume_session(session_id)
+                    .await
+                    .map_err(|e| common::session_error(session_id, &e))?;
                 let resp = http.get_session(session_id).await?;
                 Ok(resp.messages)
             } else {
