@@ -262,6 +262,23 @@ pub enum Command {
         /// task crews are often inactive), so inactive matches are included.
         #[arg(long = "tag", value_delimiter = ',')]
         tag: Vec<String>,
+        /// List the sessions created by SESSION_ID (its direct children).
+        ///
+        /// Lineage in one question: "who did I spawn?". Implies --all —
+        /// lineage is a long-term fact (same rationale as --tag): a
+        /// scheduler's crew is usually idle or inactive by the time you look.
+        #[arg(long = "parent", value_name = "SESSION_ID")]
+        parent: Option<String>,
+        /// Draw the lineage forest: children nest under the session that
+        /// created them (├─ / └─ prefixes), pinned roots float with their
+        /// whole subtree.
+        ///
+        /// Filters keep the same rule as everywhere else: a session whose
+        /// creator is not in the listed set renders as a root (so
+        /// `--parent X --tree` shows X's children at depth 0). Human table
+        /// only: with --json the machine surface stays the flat list.
+        #[arg(long = "tree")]
+        tree: bool,
     },
 
     /// Show session runtime info (model, tools, tokens, status).
@@ -733,8 +750,14 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 session_ids,
                 timeout,
             } => crate::cmd::wait::run_wait(&session_ids, timeout, cli.json).await,
-            Command::Ps { all, tag } => {
-                crate::cmd::ps::run_ps(all, &tag, cli.json, cli.watch).await
+            Command::Ps {
+                all,
+                tag,
+                parent,
+                tree,
+            } => {
+                crate::cmd::ps::run_ps(all, &tag, parent.as_deref(), tree, cli.json, cli.watch)
+                    .await
             }
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
             Command::Interrupt { session_id } => {
@@ -986,8 +1009,12 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     tracing::info!(client_id = %client_id, "WS connected");
 
     // 2. HTTP create session.
+    // 血缘：TUI 自己也是被启动的进程——env 里有 `WING_SESSION_ID`（被 agent 拉起，
+    // 例如让用户接手对话）就记下创建者；用户自己的 shell 里没有这个变量 = 根会话。
+    // 与 `/new` / stdio / acp 同一口径（docs/dev/session-lineage.md §3）。
     let create_req = wing_api_client::models::CreateSessionRequest {
         workspace: workspace.clone(),
+        parent_session_id: common::parent_session_id_from_env(),
         ..Default::default()
     };
     let session = http
@@ -1063,6 +1090,30 @@ mod tests {
             .expect("tags outside stdio mode must be rejected");
         assert!(message.contains("stdio"), "{message}");
         assert!(message.contains("wing run --tag"), "{message}");
+    }
+
+    /// `wing ps` 的两个血缘旗标：`--parent` 收一个会话 id、`--tree` 是布尔；
+    /// 语义（隐含 --all / JSON 优先）在 `cmd::ps` 的 help 与实现里。
+    #[test]
+    fn clap_parses_ps_lineage_flags() {
+        let cli = Cli::try_parse_from(["wing", "ps"]).expect("parses");
+        match cli.command {
+            Some(Command::Ps { parent, tree, .. }) => {
+                assert_eq!(parent, None);
+                assert!(!tree);
+            }
+            other => panic!("expected ps, got {other:?}"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["wing", "ps", "--parent", "upstream", "--tree"]).expect("parses");
+        match cli.command {
+            Some(Command::Ps { parent, tree, .. }) => {
+                assert_eq!(parent.as_deref(), Some("upstream"));
+                assert!(tree);
+            }
+            other => panic!("expected ps, got {other:?}"),
+        }
     }
 
     #[test]

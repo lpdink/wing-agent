@@ -290,6 +290,7 @@ class WingRuntime:
         backend: str | None = None,
         tags: list[str] | None = None,
         session_id: str | None = None,
+        parent_session_id: str | None = None,
     ) -> Session:
         """创建（或按 id 收养）session。
 
@@ -298,9 +299,13 @@ class WingRuntime:
             tags: 创建即打标（校验语义同 :meth:`set_session_tags`）。
             session_id: 指定 id 的 **create-or-adopt**（None = 自生成；
                 已存在则收养既有会话，语义同 :meth:`resume_session`）。
+            parent_session_id: 创建者会话 id（血缘；None = 根会话）。只做格式
+                卫生、不校验存在性；收养路径忽略它。语义见
+                docs/dev/session-lineage.md。
 
         Raises:
-            ValueError: session_id 不合规 / 模板不存在 / backend 未知 / 标签非法
+            ValueError: session_id / parent_session_id 不合规（含自指）/
+                模板不存在 / backend 未知 / 标签非法
         """
         return self.sm.create_session(
             template_name=template_name,
@@ -309,6 +314,7 @@ class WingRuntime:
             backend=backend,
             tags=tags,
             session_id=session_id,
+            parent_session_id=parent_session_id,
         )
 
     def resume_session(
@@ -503,13 +509,14 @@ class WingRuntime:
         *,
         statuses: Collection[str] | None = None,
         tags: Sequence[str] = (),
+        parent: str | None = None,
     ) -> list[SessionInfo]:
         """列出所有 session（磁盘上的），按时间降序，携带运行时状态。
 
-        ``statuses`` / ``tags`` 是子集过滤（AND；缺省不过滤），口径见
-        :meth:`SessionManager.list_sessions`——结果是全量列表的子序列。
+        ``statuses`` / ``tags`` / ``parent`` 是子集过滤（AND；缺省不过滤），
+        口径见 :meth:`SessionManager.list_sessions`——结果是全量列表的子序列。
         """
-        return self.sm.list_sessions(statuses=statuses, tags=tags)
+        return self.sm.list_sessions(statuses=statuses, tags=tags, parent=parent)
 
     def get_session_state(self, session_id: str) -> dict | None:
         """获取 session 完整状态。返回 dict 或 None。"""

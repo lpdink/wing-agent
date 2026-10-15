@@ -75,6 +75,10 @@ class SessionInfo(BaseModel):
     （见 ``wing.session.model_binding``）：解析不到的降级路径下各字段为 None /
     缺省，展示层自行回落（展示名 → 调用名 → 引用词）。身份仍是 ``model_id``，
     展示名只是素材。
+
+    parent_session_id：创建者会话 id（血缘：谁创建了我，见
+    docs/dev/session-lineage.md）。根会话（用户直接创建）为 None。**弱引用**：
+    不保证父会话当前可解析（幽灵父由展示层降级为根），也不参与任何门禁。
     """
 
     id: str
@@ -82,6 +86,7 @@ class SessionInfo(BaseModel):
     created_at: datetime | None = None
     template_name: str | None = None
     workspace: str | None = None
+    parent_session_id: str | None = None
     last_interaction: str | None = None
     status: SessionStatus = "inactive"
     tags: list[str] = Field(default_factory=list)

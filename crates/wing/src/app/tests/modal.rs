@@ -600,7 +600,7 @@ fn test_composer_pointer_stays_blocked_by_an_itemless_must_select_popup() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        pin_added_at: None,
+        tree_prefix: String::new(),
     }];
     app.popup.cache.sessions_fetched = true;
     app.update_popup();

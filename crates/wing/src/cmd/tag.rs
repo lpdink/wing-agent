@@ -159,6 +159,7 @@ mod tests {
             created_at: None,
             template_name: None,
             workspace: None,
+            parent_session_id: None,
             last_interaction: None,
             status: "inactive".into(),
             tags: tags.iter().map(|t| t.to_string()).collect(),

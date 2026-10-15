@@ -150,6 +150,9 @@ impl Transport {
                 }
                 let req = CreateSessionRequest {
                     workspace: workspace.map(str::to_string),
+                    // 血缘（软信号，与首建 / `/new` 同一口径）：TUI 进程被 agent
+                    // 拉起时，接替会话也记下同一个创建者。
+                    parent_session_id: crate::cmd::common::parent_session_id_from_env(),
                     ..Default::default()
                 };
                 let resp = self

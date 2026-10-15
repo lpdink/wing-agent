@@ -737,6 +737,9 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             tags: (!args.tag.is_empty()).then(|| args.tag.clone()),
             // create-or-adopt：给了 id 就是它（已存在则被收养）。
             session_id: args.session_id.clone(),
+            // 血缘（软信号）：`WING_SESSION_ID` 是本进程被谁拉起的证据；收养
+            // 路径由网关忽略该字段（resume 语义），这里无需分叉。
+            parent_session_id: crate::cmd::common::parent_session_id_from_env(),
         };
 
         let resp = http

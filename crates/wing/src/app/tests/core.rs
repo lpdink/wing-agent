@@ -69,7 +69,7 @@ fn test_invalidate_session_cache_clears_sessions() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        pin_added_at: None,
+        tree_prefix: String::new(),
     }];
     app.popup.cache.sessions_fetched = true;
     assert!(app.popup.cache.has_sessions());
