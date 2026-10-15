@@ -52,6 +52,7 @@ def mock_runtime():
     mock_session.session_id = "test-session-id"
     mock_session.template_name = "default"
     mock_session.session_workspace = "/tmp"
+    mock_session.parent_session_id = None
     mock_session.store.name = "file"
     runtime.create_session.return_value = mock_session
 
@@ -197,6 +198,7 @@ class TestSessionCreate:
             backend=None,
             tags=None,
             session_id=None,
+            parent_session_id=None,
         )
 
     def test_create_with_template(self, client: TestClient, mock_runtime):
@@ -213,6 +215,7 @@ class TestSessionCreate:
             backend=None,
             tags=None,
             session_id=None,
+            parent_session_id=None,
         )
 
     def test_create_template_not_found(self, client: TestClient, mock_runtime):
@@ -232,6 +235,7 @@ class TestSessionCreate:
             backend="memory",
             tags=None,
             session_id=None,
+            parent_session_id=None,
         )
 
     def test_create_unknown_backend_returns_400(self, client: TestClient, mock_runtime):
@@ -256,6 +260,7 @@ class TestSessionCreate:
             backend=None,
             tags=["scheduler", "task=x"],
             session_id=None,
+            parent_session_id=None,
         )
 
         mock_runtime.create_session.side_effect = ValueError("invalid tag: 'bad tag'")
@@ -277,6 +282,7 @@ class TestSessionCreate:
             backend=None,
             tags=None,
             session_id="3f2b9d1e-6c1a-4f2b-9d3e-1a2b3c4d5e6f",
+            parent_session_id=None,
         )
 
     def test_create_invalid_session_id_is_400(self, client: TestClient, mock_runtime):
@@ -287,6 +293,36 @@ class TestSessionCreate:
         resp = client.post("/api/session/create", json={"session_id": "../escape"})
         assert resp.status_code == 400
         assert "invalid session id" in resp.json()["detail"]
+
+    def test_create_with_parent_session_id(self, client: TestClient, mock_runtime):
+        """parent_session_id 透传（血缘的请求面）；响应是**读回**该记录。"""
+        mock_runtime.create_session.return_value.parent_session_id = "root-1"
+        resp = client.post("/api/session/create", json={"parent_session_id": "root-1"})
+        assert resp.status_code == 200
+        mock_runtime.create_session.assert_called_once_with(
+            template_name=None,
+            workspace=None,
+            agent_override=None,
+            backend=None,
+            tags=None,
+            session_id=None,
+            parent_session_id="root-1",
+        )
+        assert resp.json()["parent_session_id"] == "root-1"
+
+    def test_create_invalid_parent_session_id_is_400(
+        self, client: TestClient, mock_runtime
+    ):
+        """不合规的 parent（含自指）→ runtime raise ValueError → 400。"""
+        mock_runtime.create_session.side_effect = ValueError(
+            "invalid parent session id: '../escape'"
+        )
+        resp = client.post(
+            "/api/session/create",
+            json={"session_id": "kid", "parent_session_id": "../escape"},
+        )
+        assert resp.status_code == 400
+        assert "invalid parent session id" in resp.json()["detail"]
 
     def test_create_with_agent_override(self, client: TestClient, mock_runtime):
         """创建 session 时传入 agent override。"""
@@ -652,11 +688,12 @@ class TestSessionList:
     ):
         """过滤参数在路由层解析后原样交给 runtime（语义落在会话层）。"""
         resp = client.get(
-            "/api/session/list", params={"status": "idle, working", "tag": "pin, crew"}
+            "/api/session/list",
+            params={"status": "idle, working", "tag": "pin, crew", "parent": "root-1"},
         )
         assert resp.status_code == 200
         mock_runtime.list_sessions.assert_called_once_with(
-            statuses={"idle", "working"}, tags=["pin", "crew"]
+            statuses={"idle", "working"}, tags=["pin", "crew"], parent="root-1"
         )
 
     def test_list_without_params_passes_no_filter(
@@ -664,7 +701,9 @@ class TestSessionList:
     ):
         """缺省 = 不过滤（全量列表；行为与加参数之前逐字一致）。"""
         assert client.get("/api/session/list").status_code == 200
-        mock_runtime.list_sessions.assert_called_once_with(statuses=None, tags=[])
+        mock_runtime.list_sessions.assert_called_once_with(
+            statuses=None, tags=[], parent=None
+        )
 
     @pytest.mark.parametrize("value", ["idle,bogus", "active", "", "idle,"])
     def test_list_rejects_unknown_or_empty_status(
@@ -676,7 +715,7 @@ class TestSessionList:
         assert "status filter" in resp.json()["detail"]
         mock_runtime.list_sessions.assert_not_called()
 
-    @pytest.mark.parametrize("name", ["status", "tag"])
+    @pytest.mark.parametrize("name", ["status", "tag", "parent"])
     def test_list_rejects_repeated_filter_params(
         self, client: TestClient, mock_runtime, name: str
     ):
@@ -687,6 +726,31 @@ class TestSessionList:
         assert resp.status_code == 400, resp.text
         assert "must be given once" in resp.json()["detail"]
         mock_runtime.list_sessions.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["", "../escape", "a/b", ".media", "x" * 129])
+    def test_list_rejects_invalid_parent_filter(
+        self, client: TestClient, mock_runtime, value: str
+    ):
+        """parent 过滤值走 session id 卫生规则：词法非法 → 400。
+
+        这类值不可能命中任何行（行的 parent 恒为写入时校验过的合法值），
+        静默空结果只会掩盖调用方的笔误。
+        """
+        resp = client.get("/api/session/list", params={"parent": value})
+        assert resp.status_code == 400, resp.text
+        assert "parent filter" in resp.json()["detail"]
+        mock_runtime.list_sessions.assert_not_called()
+
+    def test_list_rows_carry_parent_session_id(self, client: TestClient, mock_runtime):
+        """列表行携带血缘字段（无父会话为 null）。"""
+        mock_runtime.list_sessions.return_value = [
+            SessionInfo(id="child", name="child", parent_session_id="root"),
+            SessionInfo(id="root", name="root"),
+        ]
+        resp = client.get("/api/session/list")
+        assert resp.status_code == 200
+        rows = {row["id"]: row["parent_session_id"] for row in resp.json()["sessions"]}
+        assert rows == {"child": "root", "root": None}
 
     @pytest.mark.parametrize("value", ["pin,", ",pin", "pin,,crew", ""])
     def test_list_rejects_empty_tag_values(
@@ -771,6 +835,7 @@ class TestSessionInfo:
         mock_session.agent.yolo = False
         mock_session.session_name = "Test Session"
         mock_session.session_workspace = "/tmp/ws"
+        mock_session.parent_session_id = None
         mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
         mock_session.agent.context_manager.get_skills_info.return_value = (
@@ -824,6 +889,7 @@ class TestSessionInfo:
         mock_session.agent.yolo = False
         mock_session.session_name = None
         mock_session.session_workspace = None
+        mock_session.parent_session_id = None
         mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
@@ -855,6 +921,7 @@ class TestSessionInfo:
         mock_session.agent.yolo = False
         mock_session.session_name = None
         mock_session.session_workspace = None
+        mock_session.parent_session_id = None
         mock_session.status = "waiting"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
