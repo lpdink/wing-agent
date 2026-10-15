@@ -191,6 +191,60 @@ class TestArchiveIndexRebuild:
         assert [e.id for e in store.list_archived()] == ["s2"]
         assert [e["id"] for e in _index(store)] == ["s2"]
 
+    def test_index_batch_defers_and_applies_once(
+        self, root: Path, store: FileSessionStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """批量窗口：块内攒、块尾一次落盘；空窗口不落盘；嵌套不改变语义。"""
+        writes = 0
+        real_write = store._write_archive_index
+
+        def counting_write(entries) -> None:
+            nonlocal writes
+            writes += 1
+            real_write(entries)
+
+        monkeypatch.setattr(store, "_write_archive_index", counting_write)
+
+        _seed(store, "a")
+        _seed(store, "b")
+        with store.index_batch():
+            store.archive("a")
+            store.archive("b")
+            assert writes == 0, "块内不得落盘"
+        assert writes == 1, "块尾一次落盘"
+        assert sorted(e.id for e in store.list_archived()) == ["a", "b"]
+
+        # 空窗口不落盘；恢复（删除条目）同样攒到块尾。
+        with store.index_batch():
+            pass
+        assert writes == 1
+        with store.index_batch():
+            store.unarchive("a")
+        assert writes == 2
+        assert [e.id for e in store.list_archived()] == ["b"]
+
+        # 嵌套：内层窗口不改变外层语义（外层兜底）。
+        _seed(store, "c")
+        with store.index_batch():
+            store.archive("c")
+            with store.index_batch():
+                pass
+            assert writes == 2
+        assert writes == 3
+
+    def test_index_with_a_dirty_id_is_ignored_not_projected(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """索引被手改出非法 id：不投影、不炸（逐条丢弃）。"""
+        index = root / ".archive" / "index.json"
+        index.parent.mkdir(parents=True)
+        index.write_text(
+            json.dumps({"sessions": [{"id": "../escape"}, {"id": "ghost"}]}),
+            encoding="utf-8",
+        )
+
+        assert store.list_archived() == []
+
     def test_untracked_dirs_are_adopted_on_list(
         self, root: Path, store: FileSessionStore
     ) -> None:
@@ -222,6 +276,25 @@ class TestArchiveIndexRebuild:
         assert [e.id for e in store.list_archived()] == ["s1"]
         (root / ".archive" / "index.json").unlink()  # 重建路径
         assert [e.id for e in store.list_archived()] == ["s1"]
+
+    def test_index_id_is_projected_as_the_on_disk_name(
+        self, root: Path, store: FileSessionStore, monkeypatch
+    ) -> None:
+        """索引被写成别名（大小写 / Unicode 变体）时，列表展示磁盘真名。"""
+        _seed(store, "Team-A")
+        store.archive("Team-A")
+        index = root / ".archive" / "index.json"
+        payload = json.loads(index.read_text(encoding="utf-8"))
+        payload["sessions"][0]["id"] = "team-a"  # 手改出的别名
+        index.write_text(json.dumps(payload), encoding="utf-8")
+        # 不依赖宿主 FS 是否大小写敏感：直接把解析固定成别名 → 真名。
+        monkeypatch.setattr(
+            store,
+            "resolve_archived_id",
+            lambda sid: "Team-A" if sid == "team-a" else None,
+        )
+
+        assert [e.id for e in store.list_archived()] == ["Team-A"]
 
     def test_dropped_and_adopted_entries_heal_together(
         self, root: Path, store: FileSessionStore

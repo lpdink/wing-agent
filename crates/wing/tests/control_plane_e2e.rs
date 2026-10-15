@@ -1694,4 +1694,9 @@ async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
     assert_ne!(code, 0);
     assert!(stderr.contains("is archived"), "{stderr}");
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
+
+    // `run -r` 也走统一文案（编排方拿到的不是裸网关 detail）。
+    let (code, _, stderr) = run_wing(&["run", "-r", ARCHIVED_ID, "-p", "hi"], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("wing archive --restore"), "{stderr}");
 }

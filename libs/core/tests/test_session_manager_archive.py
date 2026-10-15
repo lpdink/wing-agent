@@ -6,8 +6,10 @@ archive_stale_sessions / list_archived_sessions``）：
 - **冻结**：归档区不参与解析——resume / tag / release / create-or-adopt 一律
   以「已归档」结束（``SessionArchivedError``，可行动提示），绝不隐式恢复；
 - **纯移动**：归档 → 恢复往返之后链与磁盘字节逐字一致（红线）；
-- **先逐出再移动**：内存中的会话归档前先摘除（无活 Session 写旧路径）；
-  钉住条件（忙碌 / 排队输入 / 被订阅）命中 → RuntimeError（显式）或跳过（sweep）；
+- **先逐出再移动**（显式归档）：内存中的会话归档前先摘除（无活 Session 写旧
+  路径）；钉住条件（忙碌 / 排队输入 / 被订阅）命中 → RuntimeError；
+- **sweep 只管不在内存里的会话**：在内存的一律不动（内存回收是逐出 job 的
+  职责），逐出后重新成为磁盘会话；
 - **sweep**：只动「年龄已知且超过阈值」的会话；带 ``pin`` 标签的豁免；
   ``idle_days <= 0`` = 关闭；年龄未知（自定义 id 且无 last_interaction）不动；
 - **列表投影**：归档条目把标题 / tags / 模型带出来（与 ps 同一读法）。
@@ -15,6 +17,7 @@ archive_stale_sessions / list_archived_sessions``）：
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from datetime import datetime, timedelta
@@ -82,6 +85,24 @@ def _seed_old(
 
 
 class TestExplicitArchive:
+    async def test_explicit_archive_refuses_both_exists_without_side_effects(
+        self, root: Path, file_store: FileSessionStore
+    ) -> None:
+        """双存在预检**先于**逐出：抛错时不得留下"已逐出但没归档"的半截状态。"""
+        _seed_old(file_store, "old", days_ago=1)
+        sm = SessionManager({"file": file_store})
+        session = sm.resume_session("old")  # 换入内存
+        # 手工造出双存在（异常态）。
+        (root / ".archive" / "old").mkdir(parents=True)
+        (root / ".archive" / "old" / "history.jsonl").write_text("")
+
+        with pytest.raises(RuntimeError, match="both"):
+            sm.archive_session("old")
+
+        assert sm.get_session("old") is session, "预检失败不该先逐出（半副作用）"
+        assert (root / "old").exists()
+        await sm.wait_teardowns()
+
     async def test_roundtrip_keeps_history_bytes_and_chain(
         self, root: Path, sm: SessionManager, file_store: FileSessionStore
     ) -> None:
@@ -262,37 +283,41 @@ class TestArchiveSweep:
         shutil.rmtree(root / "old")
         assert await sm.archive_stale_sessions(idle_days=30.0) == []
 
-    async def test_sweep_evicts_loaded_idle_session(
+    async def test_sweep_leaves_in_memory_sessions_alone(
         self, root: Path, file_store: FileSessionStore
     ) -> None:
-        """内存中的过期会话：先逐出再移动（归档必然要让它离开内存）。"""
+        """内存中的过期会话不动（sweep 只管不在工作集里的会话）。
+
+        这是 S-2 的解法：resume 刻意不写 metadata（"空转 resume 零写盘"是既有
+        不变量），所以"用户刚打开的旧会话"不能靠年龄刷新保护——靠"在内存"这条
+        规则：前端持有 / 刚被打开的会话不为后台所动；逐出后重新是磁盘会话。
+        """
         _seed_old(file_store, "old", days_ago=90)
         sm = SessionManager({"file": FileSessionStore(root)})
         session = sm.resume_session("old")  # 换入内存
         assert sm.get_session(session.session_id) is not None
 
-        archived = await sm.archive_stale_sessions(idle_days=30.0)
+        assert await sm.archive_stale_sessions(idle_days=30.0) == []
+        assert sm.get_session("old") is not None
+        assert file_store.is_archived("old") is False
 
-        assert archived == ["old"]
-        assert sm.get_session("old") is None
-        assert file_store.is_archived("old") is True
+        # 逐出（release / 空闲回收 / 显式）之后它是磁盘会话，下一轮照常收走。
+        sm.evict("old", reason="test")
         await sm.wait_teardowns()
+        assert await sm.archive_stale_sessions(idle_days=30.0) == ["old"]
+        assert file_store.is_archived("old") is True
         # 拆解不得把目录写回 live 区（数据分裂红线）。
         assert not (root / "old").exists()
 
-    async def test_sweep_archives_what_error_paths_skipped(
+    async def test_sweep_moves_a_disk_only_session_despite_subscribers(
         self, root: Path, file_store: FileSessionStore
     ) -> None:
-        """订阅中的过期会话跳过本轮；解除订阅后下一轮收走。"""
+        """订阅状态属于 live 区，磁盘会话的 sweep 不看它：过期即收走。"""
         _seed_old(file_store, "old", days_ago=90)
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.resume_session("old")
-        event_bus.route_attach("client-1", session.session_id)
-        try:
-            assert await sm.archive_stale_sessions(idle_days=30.0) == []
-        finally:
-            event_bus.route_detach("client-1", session.session_id)
+
         assert await sm.archive_stale_sessions(idle_days=30.0) == ["old"]
+        assert file_store.is_archived("old") is True
 
 
 class TestRestoredSessionSurvivesNextSweep:
@@ -371,6 +396,74 @@ class TestEvictedSessionWriteSeal:
         await session.aclose()
 
         assert writes == []
+
+
+class TestResumeIsAnInterestSignal:
+    """S-2：resume 与「恢复」对称——显式接触即刷新年龄，sweep 不得立刻收走。"""
+
+    async def test_resume_refreshes_age_so_the_next_sweep_skips_it(
+        self, root: Path, file_store: FileSessionStore
+    ) -> None:
+        _seed_old(file_store, "old", days_ago=200)
+        sm = SessionManager({"file": FileSessionStore(root)})
+
+        sm.resume_session("old")
+
+        # 阈值 90 天：resume 刚刷新过 → 不再满足"年龄超过阈值"。
+        assert await sm.archive_stale_sessions(idle_days=90.0) == []
+        assert file_store.is_archived("old") is False
+
+    async def test_resume_still_requires_an_existing_session(
+        self, root: Path, file_store: FileSessionStore
+    ) -> None:
+        """resume 只对已存在的会话生效（不凭空建目录）——年龄刷新因此只发生在
+        磁盘上真实存在的会话上，"resume 一个陌生 id 就落一个目录"不成立。"""
+        sm = SessionManager({"file": FileSessionStore(root)})
+
+        with pytest.raises(LookupError):
+            sm.resume_session("brand-new-id")
+        assert not (root / "brand-new-id").exists()
+
+
+class TestSweepBatching:
+    """B-1：批量 sweep 不得是事件循环上的同步长块，索引也不得逐条重写。"""
+
+    async def test_sweep_yields_and_writes_the_index_once(
+        self, root: Path, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        for i in range(30):
+            _seed_old(file_store, f"old-{i:02d}", days_ago=90)
+        sm = SessionManager({"file": file_store})
+
+        writes = 0
+        real_write = file_store._write_archive_index
+
+        def counting_write(entries):
+            nonlocal writes
+            writes += 1
+            real_write(entries)
+
+        monkeypatch.setattr(file_store, "_write_archive_index", counting_write)
+
+        # 心跳任务：只有 sweep 让出事件循环它才有机会跑（同步长块 = 停摆）。
+        ticks = 0
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        hb = asyncio.create_task(heartbeat())
+        try:
+            archived = await sm.archive_stale_sessions(idle_days=30.0)
+        finally:
+            hb.cancel()
+
+        assert len(archived) == 30
+        assert ticks > 0, "sweep 必须让出事件循环（否则整批是一个同步长块）"
+        assert writes == 1, f"索引应一次落盘（实际 {writes} 次 = O(n²) 写）"
+        assert file_store.list_archived() and len(file_store.list_archived()) == 30
 
 
 class TestArchivedList:
@@ -460,9 +553,12 @@ class TestArchiverAndRuntimeEntryPoints:
         session.context_manager.add_message(Message(role="user", content="hi"))
 
         assert runtime.list_archived_sessions() == []
+        assert runtime.is_archived(session_id) is False
         assert runtime.archive_session(session_id) == (True, "archived")
         assert [e.id for e in runtime.list_archived_sessions()] == [session_id]
+        assert runtime.is_archived(session_id) is True  # 回执用的真实状态
         assert runtime.unarchive_session(session_id) == (True, "restored")
+        assert runtime.is_archived(session_id) is False
         with pytest.raises(LookupError):
             runtime.archive_session("no-such-session")
         with pytest.raises(LookupError):

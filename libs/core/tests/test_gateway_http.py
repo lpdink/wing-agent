@@ -613,6 +613,7 @@ class TestSessionArchive:
     def test_archive_ok(self, client: TestClient, mock_runtime):
         """归档成功 → archived=true / changed=true。"""
         mock_runtime.archive_session.return_value = (True, "archived")
+        mock_runtime.is_archived.return_value = True
         resp = client.post(
             "/api/session/archive", json={"session_id": "test-session-id"}
         )
@@ -631,11 +632,13 @@ class TestSessionArchive:
     ):
         """省 ``archived`` = 归档（默认方向）；``archived=false`` = 恢复。"""
         mock_runtime.archive_session.return_value = (False, "already archived")
+        mock_runtime.is_archived.return_value = True
         resp = client.post("/api/session/archive", json={"session_id": "s"})
         assert resp.json()["changed"] is False
         mock_runtime.unarchive_session.assert_not_called()
 
         mock_runtime.unarchive_session.return_value = (True, "restored")
+        mock_runtime.is_archived.return_value = False
         resp = client.post(
             "/api/session/archive", json={"session_id": "s", "archived": False}
         )
@@ -647,6 +650,19 @@ class TestSessionArchive:
             "detail": "restored",
         }
         mock_runtime.unarchive_session.assert_called_once_with("s")
+
+    def test_archive_response_reports_the_real_state(
+        self, client: TestClient, mock_runtime
+    ):
+        """``archived`` 是操作后的真实状态：空会话归档是 no-op，回执不得谎报 true。"""
+        mock_runtime.archive_session.return_value = (False, "nothing to archive")
+        mock_runtime.is_archived.return_value = False
+        resp = client.post(
+            "/api/session/archive", json={"session_id": "blank", "archived": True}
+        )
+        assert resp.json()["archived"] is False
+        assert resp.json()["detail"] == "nothing to archive"
+        mock_runtime.is_archived.assert_called_once_with("blank")
 
     def test_archive_unknown_session_404(self, client: TestClient, mock_runtime):
         mock_runtime.archive_session.side_effect = LookupError("Session not found")

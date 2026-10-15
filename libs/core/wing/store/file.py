@@ -25,6 +25,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
@@ -161,6 +162,9 @@ class FileSessionStore(SessionStore):
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
+        # 批量索引窗口（`index_batch`）：非 None 时索引操作攒在这里，
+        # 窗口结束一次读改写落盘（[去重条目, 待删 id]）。
+        self._deferred_index: tuple[list[ArchivedSession], list[str]] | None = None
 
     @property
     def root(self) -> Path:
@@ -495,6 +499,42 @@ class FileSessionStore(SessionStore):
         real = self._on_disk_name(root / safe_id, root)
         return real if real is not None and is_valid_session_id(real) else None
 
+    @contextmanager
+    def index_batch(self) -> Iterator[None]:
+        """归档索引的批量写窗口（见基类契约）：块内攒、块尾一次落盘。
+
+        嵌套调用不改变语义（外层窗口兜底）。块尾**不重建**索引：重建要读 N 份
+        metadata（又一个大块），而索引内容完全可由列表读取路径收编补齐——
+        真正需要重建时才付这份成本。
+        """
+        if self._deferred_index is not None:
+            yield
+            return
+        self._deferred_index = ([], [])
+        try:
+            yield
+        finally:
+            upserts, removals = self._deferred_index
+            self._deferred_index = None
+            self._apply_deferred_index(upserts, removals)
+
+    def _apply_deferred_index(
+        self, upserts: list[ArchivedSession], removals: list[str]
+    ) -> None:
+        """（内部）块尾一次性对账落盘（读一次、写一次；空窗口不落盘）。"""
+        if not upserts and not removals:
+            return
+        current = self._read_archive_index() or []
+        removed = set(removals)
+        replaced = {entry.id for entry in upserts}
+        merged = [
+            entry
+            for entry in current
+            if entry.id not in removed and entry.id not in replaced
+        ]
+        merged.extend(upserts)
+        self._write_archive_index(merged)
+
     def archive(self, session_id: str) -> None:
         """移入归档区 + 登记索引（见基类契约；rename 与索引更新同一次调用）。"""
         safe_id = validate_session_id(session_id)
@@ -559,7 +599,11 @@ class FileSessionStore(SessionStore):
                 continue
             if real is None:
                 continue  # 目录已消失 → 剔除（下面统一落盘自愈）
-            alive.append(entry)
+            # 投影用磁盘真名：索引被写成大小写 / Unicode 变体时不展示"假 id"
+            # （查找本来就能归一，这里只是让展示口径也统一）。
+            alive.append(
+                entry if entry.id == real else entry.model_copy(update={"id": real})
+            )
             known.add(real)
 
         adopted = self._adopt_untracked_entries(known)
@@ -643,6 +687,9 @@ class FileSessionStore(SessionStore):
 
     def _upsert_archive_index(self, entry: ArchivedSession) -> None:
         """登记一条归档条目（同 id 替换）；索引不可读时先重建再写入。"""
+        if self._deferred_index is not None:
+            self._deferred_index[0].append(entry)
+            return
         current = self._read_archive_index()
         if current is None:
             current = self._scan_archive_entries()
@@ -650,6 +697,9 @@ class FileSessionStore(SessionStore):
 
     def _remove_from_archive_index(self, session_id: str) -> None:
         """删除一条归档条目（条目不存在为 no-op）。"""
+        if self._deferred_index is not None:
+            self._deferred_index[1].append(session_id)
+            return
         current = self._read_archive_index()
         if current is None:
             return

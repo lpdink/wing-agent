@@ -97,6 +97,10 @@ class UsageTracker:
         ``<root>/<sid>/`` 连父目录一起写回来（原子写建父目录），与归档
         rename 叠加就是「live 与归档区双存在」的数据分裂红线。摘除前的同步
         flush（``SessionManager.evict``）是最后一次正确写点；失败就让它失败。
+
+        取舍：逐出时那次失败 flush 的增量（最多一个节流窗口，见
+        ``FLUSH_INTERVAL_S``）随封盘永久丢弃——账本是可再生统计，丢一个窗口
+        比复活目录（数据分裂）便宜得多。
         """
         self._sealed = True
 

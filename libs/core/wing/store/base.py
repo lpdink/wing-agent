@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -467,6 +468,10 @@ class SessionStore(ABC):
 
         实现契约：目录移动是纯 rename（字节不变）；索引写入失败不阻断归档
         （目录是事实源，索引缺失时列表按目录重建）。
+
+        与 live 区同一假设：sessions 根由**单网关进程**独占。索引是读改写派生
+        数据，多进程并发写会互相覆盖（目录移动本身是原子 rename，事实不丢，
+        索引可由重建自愈）；跨进程 / 跨机共享同一根不在支持范围内。
         """
         raise NotImplementedError(f"{self.name} does not support archiving")
 
@@ -481,6 +486,18 @@ class SessionStore(ABC):
             RuntimeError: live 区已存在同名会话（不覆盖，交由人裁决）。
         """
         raise NotImplementedError(f"{self.name} does not support archiving")
+
+    @contextmanager
+    def index_batch(self) -> Iterator[None]:
+        """归档索引的批量写窗口（批量 sweep 专用；默认 no-op）。
+
+        块内每次归档 / 恢复**照常即时落目录**（rename 的原子性不变），索引
+        更新攒到块尾一次落盘——批量 sweep 不做这件事的话，n 条候选就是 n 次
+        "读整份索引 + 写整份索引 + fsync"（O(n²)，同步块还会卡住事件循环）。
+        代价是"目录已移动但索引未登记"的窗口随块长放大：列表读取会当场收编
+        （目录是事实源），窗口不落盘也不丢事实。
+        """
+        yield
 
     def list_archived(self) -> list[ArchivedSession]:
         """列出归档条目（读索引；索引缺失 / 损坏时按归档目录重建）。

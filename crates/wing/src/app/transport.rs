@@ -29,6 +29,18 @@ pub struct Transport {
     pub client_id: String,
 }
 
+/// 会话恢复的结局（调用方据此决定要不要给用户一句提示）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// 原会话被 resume 回来了（正常重连）。
+    Resumed,
+    /// 原 id 在网关上已不存在（从未落盘的空白会话 / 被删）；起了一个新会话。
+    Fresh,
+    /// 原 id 在归档区（数据完好且可恢复）；起了一个新会话——必须让用户知道
+    /// 「怎么回去」（`wing archive --restore <id>`）。
+    Archived,
+}
+
 impl Transport {
     /// Switch event subscription from an old session to a new one.
     ///
@@ -98,13 +110,18 @@ impl Transport {
     /// Any other failure (network error, 5xx) is transient: returned as `Err`
     /// for the caller to retry with backoff. The WebSocket itself stays
     /// untouched either way — one client, one socket, many session attempts.
-    pub async fn recover_session(&self, session_id: &str, workspace: Option<&str>) -> Result<()> {
-        let effective_id = match self.http.resume_session(session_id).await {
-            Ok(_) => session_id.to_string(),
+    pub async fn recover_session(
+        &self,
+        session_id: &str,
+        workspace: Option<&str>,
+    ) -> Result<Recovery> {
+        let (effective_id, outcome) = match self.http.resume_session(session_id).await {
+            Ok(_) => (session_id.to_string(), Recovery::Resumed),
             Err(e) if e.is_not_found() => {
-                // 归档会话不可 resume（冻结）：仍然落到新会话兜底，但日志把
-                // 「怎么回去」写清楚（`wing archive --restore`）。
-                if e.is_session_archived() {
+                // 归档会话不可 resume（冻结）：仍然落到新会话兜底，但把
+                // 「怎么回去」交给调用方（用户可见的提示），日志也留一行。
+                let archived = e.is_session_archived();
+                if archived {
                     tracing::warn!(
                         session = session_id,
                         "session is archived; starting a fresh one \
@@ -125,7 +142,14 @@ impl Transport {
                     fresh = %resp.session_id,
                     "session not found; started a fresh one"
                 );
-                resp.session_id
+                (
+                    resp.session_id,
+                    if archived {
+                        Recovery::Archived
+                    } else {
+                        Recovery::Fresh
+                    },
+                )
             }
             // Transient: caller retries with backoff; transport stays up.
             Err(e) => {
@@ -138,7 +162,7 @@ impl Transport {
             .await
             .context("subscribe failed during session recovery")?;
 
-        Ok(())
+        Ok(outcome)
     }
 }
 

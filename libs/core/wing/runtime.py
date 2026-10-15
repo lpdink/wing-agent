@@ -379,6 +379,10 @@ class WingRuntime:
         """
         return self.sm.session_exists(session_id)
 
+    def is_archived(self, session_id: str) -> bool:
+        """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""
+        return self.sm.is_archived(session_id)
+
     def require_live_session(self, session_id: str) -> None:
         """会话存在性预检（纯解析）：不存在即抛——归档命中是
         ``SessionArchivedError``（app handler 映射 404 + ``error="session_archived"``，

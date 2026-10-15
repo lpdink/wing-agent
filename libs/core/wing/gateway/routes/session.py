@@ -708,7 +708,10 @@ async def archive_session(
     return ArchiveResponse(
         ok=True,
         session_id=body.session_id,
-        archived=body.archived,
+        # 操作**之后**的真实状态（不是请求意图）：空会话的归档是 no-op——它
+        # 既没进归档区也不在 live 区，回执谎报 true 会误导只看 archived 的
+        # 消费方（CLI 只看 changed/detail，不受影响）。
+        archived=server.runtime.is_archived(body.session_id),
         changed=changed,
         detail=detail,
     )

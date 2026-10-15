@@ -17,6 +17,7 @@ wing/session/manager.py — SessionManager
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 import time
 from collections.abc import Collection, Iterable, Sequence
 from uuid import uuid4
@@ -541,6 +542,15 @@ class SessionManager:
             if store.resolve_archived_id(session_id) is not None:
                 return store
         return None
+
+    def is_archived(self, session_id: str) -> bool:
+        """该 id 是否在（任一后端的）归档区（纯查询，不涉 live 区）。
+
+        回执用的**真实状态**：显式归档一个空会话是 no-op（它没进归档区），
+        响应里的 ``archived`` 不能照抄请求意图。
+        """
+        store = self._archived_store(session_id)
+        return store is not None and store.is_archived(session_id)
 
     def missing_session_error(self, session_id: str) -> Exception:
         """构造「会话不存在」的错误：归档区命中 → :class:`SessionArchivedError`，
@@ -1174,7 +1184,7 @@ class SessionManager:
         ① **线程内**枚举候选（读 metadata 判年龄；见 :meth:`_collect_stale`）——
         这一阶段在事件循环上会卡住网关（流式 token / 请求响应全被拖住）；
         ② **事件循环上**逐个终检（重读磁盘事实）并复用 :meth:`archive_session`
-        完成「逐出 + 移动」——移动必须与 resume / subscribe 等同步路径同线程
+        完成「逐出 + 移动」（显式归档路径；sweep 只碰不在内存里的会话）——移动必须与 resume / subscribe 等同步路径同线程
         顺序执行，否则"目录被搬走时刚好在加载"会留下幽灵目录（数据分裂）。
 
         ``idle_days <= 0`` = 关闭（关闭自动归档；显式归档不受影响）；带 ``pin``
@@ -1184,19 +1194,40 @@ class SessionManager:
             return []
         candidates = await asyncio.to_thread(self._collect_stale, idle_days)
         archived: list[str] = []
-        for store, session_id in candidates:
-            try:
-                if not self._still_stale(store, session_id, idle_days):
-                    continue  # 期间被交互 / 被打了 pin / 已消失 / 已归档
-                changed, _ = self.archive_session(session_id)
-                if changed:
-                    archived.append(session_id)
-            except (LookupError, RuntimeError) as e:
-                # 钉住 / 双存在 / 竞态消失：跳过本轮，下一轮再判定
-                log.warning(f"Archive sweep: skipping {session_id!r}: {e}")
-            except OSError as e:
-                log.error(f"Archive sweep: {session_id!r} failed: {e}")
+        with ExitStack() as index_batches:
+            # 索引批量写：n 条候选只读改写一次（不做的话每条都要读+写整份
+            # index.json，O(n²) 且 n 次 fsync）。目录移动仍逐条即时、原子。
+            for store in self._distinct_stores(candidates):
+                index_batches.enter_context(store.index_batch())
+            for store, session_id in candidates:
+                try:
+                    if not self._still_stale(store, session_id, idle_days):
+                        continue  # 期间被交互 / 被打了 pin / 已消失 / 已归档
+                    changed, _ = self.archive_session(session_id)
+                    if changed:
+                        archived.append(session_id)
+                except (LookupError, RuntimeError) as e:
+                    # 钉住 / 双存在 / 竞态消失：跳过本轮，下一轮再判定
+                    log.warning(f"Archive sweep: skipping {session_id!r}: {e}")
+                except OSError as e:
+                    log.error(f"Archive sweep: {session_id!r} failed: {e}")
+                finally:
+                    # 批量 sweep 的候选可能上千（老用户升级后的第一轮）：候选之间
+                    # 让出事件循环，否则整批是一个同步长块——所有会话的流式输出与
+                    # 请求全停。单条候选内部（终检 → 逐出 → rename）仍是同一轮次，
+                    # 原子性不受影响。
+                    await asyncio.sleep(0)
         return archived
+
+    @staticmethod
+    def _distinct_stores(
+        candidates: list[tuple[SessionStore, str]],
+    ) -> list[SessionStore]:
+        """候选里出现过的存储（保持出现顺序；索引批量窗口按 store 开一次）。"""
+        seen: dict[int, SessionStore] = {}
+        for store, _ in candidates:
+            seen.setdefault(id(store), store)
+        return list(seen.values())
 
     def _collect_stale(self, idle_days: float) -> list[tuple[SessionStore, str]]:
         """（阶段①，线程内调用）枚举「超过阈值未交互」的候选（纯读）。
@@ -1228,7 +1259,16 @@ class SessionManager:
         重读磁盘事实：阶段①到②之间有真实的等待窗口（线程调度 / 事件循环让出），
         期间的交互（新消息、打 pin、甚至已归档）必须让候选当场失效——归档是
         破坏可见性的动作，不能按过期的快照执行。
+
+        **在内存里的一律不动**：sweep 只管"不在工作集里"的会话（内存 tier 的
+        回收是逐出 job 的职责）。这条规则的两面都必要：用户刚 resume 打开的
+        旧会话不能被后台从脚下收走（resume 刻意不写 metadata——"空转 resume
+        零写盘"是既有不变量——所以不能靠刷新年龄保护它）；而还在被前端订阅 /
+        正忙的会话本来也不该被动。会话被逐出后重新成为磁盘会话，下一轮 sweep
+        按它的磁盘年龄照常处理。
         """
+        if session_id in self._sessions:
+            return False
         metadata = store.load_metadata(session_id)
         if metadata is None:
             return False  # 已消失（手工删除等）

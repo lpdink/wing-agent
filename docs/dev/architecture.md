@@ -209,9 +209,9 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | 判定 | 年龄 = `metadata.last_interaction` → 回退 session id 前缀；**都取不到则跳过**（不发明时间）。阈值 `sessions.archive.idle_days`（默认 90；`<= 0` = 关闭） |
 | 豁免 | 带 `pin` 标签的会话不自动归档（`session.tags.PIN_TAG`——后端感知的唯一保留标签；显式归档不受限） |
 | 触发 | `BackgroundScheduler` 的 `session-archive` job：启动延迟 `startup_delay_seconds` 先扫一轮，此后每 `sweep_interval_seconds`（默认一天）；阈值每轮现读（热重载生效） |
-| 两阶段 | ① 线程内枚举候选（读 metadata 判年龄，不阻塞事件循环）；② 事件循环上终检（重读磁盘事实——期间被交互 / 被 pin / 已消失的当场失效）并复用显式归档路径（钉住条件命中跳过本轮） |
+| 两阶段 | ① 线程内枚举候选（读 metadata 判年龄，不阻塞事件循环）；② 事件循环上终检（重读磁盘事实——期间被交互 / 被 pin / 已消失的当场失效）并复用显式归档路径。**在内存里的一律不动**：sweep 只管不在工作集里的会话（内存 tier 的回收是逐出 job 的职责；用户刚 resume 打开的旧会话不能被后台从脚下收走——resume 刻意不写 metadata，年龄刷新这条路走不通）。**候选之间 `await asyncio.sleep(0)`**：老用户升级后的首轮可能上千条，整批不许是一个同步长块（单条候选内部仍是一个轮次） |
 | 顺序 | 先逐出（同步 flush → **封盘 `Session.detach`** → pop）再 rename（同一事件循环轮次内，无 await 插入）——**绝不容许活 Session 把目录写回 live 区**（两个 `history.jsonl` = 数据分裂）。封盘堵的是「迟到的落盘」：`usage.flush` 失败会保留脏标记等下一个落盘点（teardown 的 `aclose` / 节流重试），那个落盘点落在 rename 之后就会把 `<root>/<sid>/` 连父目录写回来 |
-| 索引 | 归档时登记 `.archive/index.json`（条目 = 归档时刻事实快照 + `archived_at`）；列表只读索引（1 个文件 + 每条目 1 次 stat），目录才是事实源（索引缺失 / 损坏 → 重建；目录消失的条目剔除并自愈）。手工拷入归档区的目录要删索引重建后才可见 |
+| 索引 | 归档时登记 `.archive/index.json`（条目 = 归档时刻事实快照 + `archived_at`）；列表 = 读索引 + 与目录**双向对账**（目录才是事实源）：目录消失的条目剔除、未登记的目录（手工拷入 / rename 后索引没写上）当场收编、索引缺失或损坏则整体重建（`archived_at` 留空）。批量 sweep 走 `index_batch`：块内攒、块尾一次落盘（否则 n 条候选 = n 次整份读改写 = O(n²) + n 次 fsync） |
 | 冲突 | live 与归档区**双存在**（手工拷贝等异常态）→ 两个方向都 `RuntimeError`（409），不猜谁对 |
 
 **不做的**（刻意缺席）：容量上限 / LRU（只有 TTL）；逐出以外的入口不自动水合（`session/get`、`info`、`branches` 对已逐出会话仍 404——`wing tail` 的 404→resume 是既有惯例，需要时按同一模式补）；动态状态（tools 热切换的冻结声明集、thinking / yolo）不落盘，逐出后按模板默认重建（与重启同语义）。

@@ -732,7 +732,7 @@ pub(super) async fn restart_gateway(
                 .recover_session(&app.session_id, workspace.as_deref())
                 .await
             {
-                Ok(()) => {
+                Ok(_recovery) => {
                     *transport = Some(new_transport);
                     app.set_connected(true);
                     app.clear_toast();

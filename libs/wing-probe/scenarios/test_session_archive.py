@@ -10,8 +10,8 @@
 - **幂等**：重复归档 / 恢复 200 + ``changed=false``；
 - **钉住**：订阅中的会话 409；memory 后端 409（不支持归档）；
 - **sweep**：超过 ``sessions.archive.idle_days`` 的会话自动归档；带 ``pin``
-  标签的豁免；``idle_days <= 0`` = 关闭；内存中的过期会话先逐出再移动
-  （live 目录不得复活——数据分裂红线）；
+  标签的豁免；``idle_days <= 0`` = 关闭；**内存中的会话不动**（逐出后
+  变成磁盘会话，下一轮照常收走；live 目录不得复活——数据分裂红线）；
 - **保留命名空间**：``.archive`` 不成会话、不进列表。
 
 环境：``sessions.archive.idle_days = 0`` 关闭自动 sweep（显式归档不受影响）；
@@ -269,7 +269,13 @@ async def test_archive_conflicts_memory_backend_and_create_or_adopt(
 @pytest.mark.timeout(180)
 @pytest.mark.asyncio
 async def test_sweep_archives_expired_sessions_with_pin_exemption(probe: Probe) -> None:
-    """自动 sweep：过期归档、pin 豁免、内存中的过期会话先逐出再移动。"""
+    """自动 sweep：过期的磁盘会话归档、pin 豁免、**内存中的会话不动**。
+
+    内存豁免是「sweep 只管不在工作集里的会话」的口径：用户刚 resume 打开的
+    旧会话不能被后台从脚下收走（resume 刻意不写 metadata——"空转 resume 零
+    写盘"是既有不变量——所以年龄刷新这条路走不通，靠"在内存"这条规则保护）。
+    逐出（release）之后它重新是磁盘会话，下一轮 sweep 按磁盘年龄照常收走。
+    """
     stale = "20200101-000000-aaaaaaa1"
     pinned = "20200101-000000-aaaaaaa2"
     _seed_stale_session(probe, stale)
@@ -282,17 +288,24 @@ async def test_sweep_archives_expired_sessions_with_pin_exemption(probe: Probe) 
     # 新建的会话不在豁免保护之下（只有年龄保护它）——断言才有区分度。
     await driver.http.unsubscribe(fresh.session_id, driver.client_id)
 
-    # 过期种子被收走；pin 豁免（等它先被看到一次再断言"没被收"+ 再等几个周期）。
+    # 过期种子被收走（它从未进过内存——纯磁盘会话）。
     await _wait_archived(probe, stale, expected=True)
 
-    # 内存中的过期会话：拨旧时间戳 → sweep 逐出 + 移动。
+    # 内存中的过期会话：把磁盘年龄拨旧也不动（sweep 跳过工作集里的会话）。
     _rewrite_last_interaction(probe, fresh.session_id)
+    await asyncio.sleep(1.2)  # 数个扫描周期
+    ids = {entry["id"] for entry in await _archived_entries(probe)}
+    assert ids == {stale}, f"内存中的会话被 sweep 收走了：{ids}"
+    assert fresh.session_id in await _live_ids(probe)
+
+    # 逐出（release）之后它重新是磁盘会话 → 下一轮 sweep 按磁盘年龄收走。
+    await driver.http.release_session(fresh.session_id)
     await _wait_archived(probe, fresh.session_id, expected=True)
     assert not probe.env.session_dir(fresh.session_id).exists(), (
         "被归档会话的 live 目录复活了（数据分裂红线）"
     )
 
-    # 再等两个扫描周期：pin 的、新的都不动。
+    # pin 的始终不动；`.archive` 不成会话。
     await asyncio.sleep(1.2)
     ids = {entry["id"] for entry in await _archived_entries(probe)}
     assert ids == {stale, fresh.session_id}, ids
