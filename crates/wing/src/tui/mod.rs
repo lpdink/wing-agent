@@ -387,6 +387,9 @@ static EVENT_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None)
 /// 终端绝不能因为等不到一个任务而留在 raw。
 const EVENT_STOP_WAIT: Duration = Duration::from_millis(200);
 
+/// 有界等待期间的唤醒字节重投间隔（见 [`stop_event_stream`] 的「半截序列」一段）。
+const EVENT_WAKE_REPOST: Duration = Duration::from_millis(20);
+
 fn event_task_slot() -> std::sync::MutexGuard<'static, Option<tokio::task::JoinHandle<()>>> {
     EVENT_TASK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -402,8 +405,20 @@ async fn forward(tx: &mpsc::Sender<TermEvent>, event: TermEvent) -> bool {
 /// 停止事件流并**有界**等待它退出（[`end_tui_session`] 的第一步；幂等）。
 ///
 /// 顺序：置 flag → [`stdin_proxy::wake_reader`]（向 fd 0 投 1 字节，打断 crossterm 的
-/// 阻塞读）→ 轮询 `is_finished`。不能 `.join()` / `.await()`：本函数是同步函数、也会
-/// 从 panic hook 走到，在 runtime worker 上同步 join 有自锁风险。
+/// 阻塞读）→ 轮询 `is_finished`，其间每 [`EVENT_WAKE_REPOST`] 重投一次唤醒字节。
+///
+/// 重投只为救一种残留形态：crossterm 的解析器扣着**半截 CSI 序列**时，首个唤醒字节会
+/// 被当成序列的 final 吃掉（只清缓冲、不产事件），任务再次阻塞在 `read(fd 0)` 上；下一次
+/// 重投落在空解析器上，必然产出事件并把任务带回 flag 检查。
+///
+/// **半截 OSC 字符串没有终止符，重投也救不回**：这种形态（quit 时恰好留一个被永久截断的
+/// 分片）按既定的「超时后继续收尾」走——终端一定恢复（`restore` 先送掉 master 的最后一个
+/// 副本，卡在 `read(fd 0)` 上的任务随即拿到 0 继续自己的读循环，`dup2` 不被拖住），但任务
+/// 本身退不出来，进程收尾可能停在 `Runtime::drop` 等它。可救回的 CSI 分支由
+/// `tests/stdin_proxy_teardown_partial_seq.rs` 钉住。
+///
+/// 不能 `.join()` / `.await()`：本函数是同步函数、也会从 panic hook 走到，在 runtime
+/// worker 上同步 join 有自锁风险。
 fn stop_event_stream() {
     let handle = event_task_slot().take();
     let Some(handle) = handle else {
@@ -412,8 +427,14 @@ fn stop_event_stream() {
     EVENT_STOP.store(true, Ordering::SeqCst);
     stdin_proxy::wake_reader();
     let deadline = Instant::now() + EVENT_STOP_WAIT;
+    let mut next_wake = Instant::now() + EVENT_WAKE_REPOST;
     while !handle.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(2));
+        let now = Instant::now();
+        if now >= next_wake {
+            stdin_proxy::wake_reader();
+            next_wake = now + EVENT_WAKE_REPOST;
+        }
     }
     if !handle.is_finished() {
         tracing::warn!(
@@ -491,7 +512,16 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
             }
         }
     });
-    *event_task_slot() = Some(handle);
+    let mut slot = event_task_slot();
+    // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 会覆盖旧 handle
+    // （旧任务永远停不下来），收尾过之后再 spawn 则踩上不复位的 `EVENT_STOP`（新事件流
+    // 在循环顶立即退出、键盘永久哑掉）。`session_guard` 只钉 install/restore 的唯一性，
+    // 这条只有本断言守着。
+    debug_assert!(
+        slot.is_none() && !EVENT_STOP.load(Ordering::SeqCst),
+        "spawn_event_stream must run once per process"
+    );
+    *slot = Some(handle);
     rx
 }
 

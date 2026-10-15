@@ -122,7 +122,7 @@ enum Hold {
     /// 已确认 `ESC]5522;` 开头，累积到终止符为止的负载。
     ///
     /// `overflow`：体积超过 [`SEQUENCE_BODY_MAX`] 后置位——负载丢弃、`payload` 降级成
-    /// 两字节滑动窗口（只为等终止符），绝不把坏流的后续字节冲回透传。
+    /// 三字节滑动窗口（ST 判定看最近**两个**字节；留三字节是为了配对跨溢出点时也不丢）。
     Body {
         payload: Vec<u8>,
         since: Instant,
@@ -193,13 +193,22 @@ impl Holds {
         }
     }
 
-    /// 该长度的候选用的持有上限。
+    /// 该长度的候选用的持有上限（与 [`candidate_kind`] 同一判据）。
     fn hold_for(&self, candidate_len: usize) -> Duration {
         if candidate_len == 1 {
             self.escape
         } else {
             self.prefix
         }
+    }
+}
+
+/// 候选的形状名（排障日志用）：单 ESC 与多字节前缀是两类现场。
+fn candidate_kind(candidate_len: usize) -> &'static str {
+    if candidate_len == 1 {
+        "lone-esc"
+    } else {
+        "prefix"
     }
 }
 
@@ -265,7 +274,8 @@ impl Splitter {
                         Candidate::No => {
                             // 失配：持有的字节全部原样冲回（`Alt+]` 之类语义一字不差）。
                             tracing::debug!(
-                                "stdin proxy: candidate prefix does not match, waving {} bytes through",
+                                "stdin proxy: {} candidate ({} bytes) mismatch, waving through",
+                                candidate_kind(bytes.len()),
                                 bytes.len()
                             );
                             out.passthrough.append(bytes);
@@ -292,8 +302,9 @@ impl Splitter {
                     }
                     *since = now;
                     if *overflow {
+                        // 降级窗口：只保留最近 3 字节（最近两字节对总在其中，见 `Hold::Body`）。
                         payload.push(b);
-                        let excess = payload.len().saturating_sub(2);
+                        let excess = payload.len().saturating_sub(3);
                         if excess > 0 {
                             payload.drain(..excess);
                         }
@@ -310,13 +321,14 @@ impl Splitter {
                         }
                         self.hold = Hold::None;
                     } else if !*overflow && payload.len() > SEQUENCE_BODY_MAX {
-                        // 坏流：丢负载，转成「吞到终止符」的降级窗口（见 SEQUENCE_BODY_MAX）。
+                        // 坏流：丢负载，转成「吞到终止符」的降级窗口（见 SEQUENCE_BODY_MAX）；
+                        // 转档时也保留最近 3 字节，`ESC\` 配对跨溢出点时不漏检。
                         tracing::warn!(
                             "stdin proxy: OSC 5522 body over {SEQUENCE_BODY_MAX} bytes, dropping it"
                         );
                         *overflow = true;
-                        payload.clear();
-                        payload.push(b);
+                        let keep = payload.len().saturating_sub(3);
+                        payload.drain(..keep);
                     }
                 }
                 // 保护区：粘贴内容里的字面 `ESC]5522;` 属于用户数据，必须保全。
@@ -353,6 +365,11 @@ impl Splitter {
             {
                 let bytes = bytes.clone();
                 self.hold = Hold::None;
+                tracing::debug!(
+                    "stdin proxy: {} candidate hold expired ({} bytes), waving through",
+                    candidate_kind(bytes.len()),
+                    bytes.len()
+                );
                 Some(Expiry::Flush(bytes))
             }
             Hold::Body { since, .. } if now.duration_since(*since) >= SEQUENCE_IDLE => {
@@ -543,13 +560,7 @@ mod imp {
             // 「只有 master 可写」这种 rc≥1 的轮次把到期的持有拖住。
             let mut feed = Feed::default();
             match splitter.expire(Instant::now()) {
-                Some(Expiry::Flush(bytes)) => {
-                    tracing::debug!(
-                        "stdin proxy: candidate hold expired, waving {} bytes through",
-                        bytes.len()
-                    );
-                    feed.passthrough.extend_from_slice(&bytes);
-                }
+                Some(Expiry::Flush(bytes)) => feed.passthrough.extend_from_slice(&bytes),
                 Some(Expiry::Drop) => {
                     tracing::warn!("stdin proxy: dropping unterminated OSC 5522 sequence")
                 }
@@ -707,8 +718,9 @@ mod imp {
     /// 向「读 fd 0」的一方投递 1 字节唤醒（收尾时打断 crossterm 的阻塞读）。
     ///
     /// 字节走 master→slave 的内核路径，泵线程不参与；**必须在 [`restore`] 之前调用**
-    /// （那时 fd 0 还是内层 slave、master 还没关）。没装上接驳 / 唤醒副本创建失败时是
-    /// 空操作——调用方另有有界等待兜底。
+    /// （那时 fd 0 还是内层 slave、master 还没关）。解析器扣着半截转义序列时，这个字节
+    /// 可能被当成序列的 final 吃掉（不产事件）——收尾方按需重复投递，别只投一次。
+    /// 没装上接驳 / 唤醒副本创建失败时是空操作——调用方另有有界等待兜底。
     pub fn wake_reader() {
         let shared = lock();
         let Some(proxy) = shared.proxy.as_ref() else {
@@ -729,13 +741,16 @@ mod imp {
         if let Some(join) = proxy.join.take() {
             let _ = join.join();
         }
+        // wake_fd 是 master 的最后一个副本，必须在 `dup2` **之前**送掉：macOS 上「对端还
+        // 活着的 pty slave 上有人卡在 read」会让 `dup2`（关闭旧 fd 0）阻塞；最后一个 master
+        // 副本一关，卡住的 read 立刻返回，`dup2` 只花微秒级（超时后「继续收尾」才真的走得动）。
+        if proxy.wake_fd >= 0 {
+            close(proxy.wake_fd);
+        }
         unsafe {
             libc::dup2(proxy.restore_fd, 0);
             close(proxy.restore_fd);
             close(proxy.stop_w);
-            if proxy.wake_fd >= 0 {
-                close(proxy.wake_fd);
-            }
         }
     }
 
@@ -1085,6 +1100,51 @@ mod tests {
         assert_eq!(s.deadline(), Some(at(0) + SEQUENCE_IDLE));
         assert_eq!(s.expire(at(6000)), Some(Expiry::Drop));
         assert_eq!(feed(&mut s, b"z", 6100).passthrough, b"z");
+    }
+
+    /// ST 终止符与溢出点重叠的每一种错位：终止符到齐就必须立刻释放持有并恢复分流——
+    /// 降级窗口的字节保留不许把 `ESC\` 配对漏进「吞到下一个终止符」的分支。
+    #[test]
+    fn overlong_body_terminator_crossing_the_overflow_point_is_honoured() {
+        // (ESC 在体里的 0-based 位置, 期望整段丢弃)。
+        for (esc_offset, dropped) in [
+            (SEQUENCE_BODY_MAX - 2, false), // 未超限：照常提取
+            (SEQUENCE_BODY_MAX - 1, false), // `\` 是触发溢出的字节：ST 检查先于降级
+            (SEQUENCE_BODY_MAX, true),      // `ESC` 触发溢出：配对落在降级窗口
+            (SEQUENCE_BODY_MAX + 1, true),  // 溢出已发生：配对落在降级窗口内
+        ] {
+            let mut raw = SEQUENCE_PREFIX.to_vec();
+            raw.extend(std::iter::repeat_n(b'a', esc_offset));
+            raw.extend_from_slice(b"\x1b\\");
+            let mut s = local();
+            let out = feed(&mut s, &raw, 0);
+            assert!(
+                out.passthrough.is_empty(),
+                "esc_offset={esc_offset}: 终止符之前的字节不许透传"
+            );
+            if dropped {
+                assert!(
+                    out.sequences.is_empty(),
+                    "esc_offset={esc_offset}: 超限体丢弃"
+                );
+            } else {
+                assert_eq!(
+                    out.sequences,
+                    vec![vec![b'a'; esc_offset]],
+                    "esc_offset={esc_offset}: 未超限体照常提取"
+                );
+            }
+            assert_eq!(
+                s.deadline(),
+                None,
+                "esc_offset={esc_offset}: 终止符到齐后必须立刻释放持有"
+            );
+            let out = feed(&mut s, b"tail", 1);
+            assert_eq!(
+                out.passthrough, b"tail",
+                "esc_offset={esc_offset}: 分流必须恢复，后续字节不许被吞"
+            );
+        }
     }
 
     #[test]
