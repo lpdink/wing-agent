@@ -79,6 +79,10 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
+        text: "Ctrl+V 读系统剪贴板（图片）",
+    },
+    Tip {
+        group: TipGroup::Keys,
         text: "Ctrl+O 切换思考的详细/简略显示",
     },
     // ── 命令 ─────────────────────────────────────────────────

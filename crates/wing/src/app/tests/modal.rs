@@ -810,6 +810,81 @@ fn test_key_routing_of_the_idle_app() {
     );
 }
 
+/// Ctrl+V / super+v 都是「读系统剪贴板」（L1）：前者是控制字节 0x16 的解码形态
+/// （`Char('v') + CONTROL`），后者是开了 kitty 键盘协议的终端回传 Cmd+V 的形态
+/// （`CSI 118;9u` → `Char('v') + SUPER`；两种形态的 crossterm 解码钉在
+/// `tests/clipboard_paste_keys.rs`）。`Ctrl+Shift+V` 刻意不接（Linux 终端的粘贴
+/// 默认键，动作发生在终端一侧）；裸 `v` 与 `V+SHIFT` 仍是普通输入。
+#[test]
+fn test_ctrl_v_and_super_v_route_to_the_local_clipboard() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let app = test_app();
+    let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+    let super_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER);
+    assert_eq!(app.route_key(&ctrl_v), KeyRoute::PasteClipboard);
+    assert_eq!(app.route_key(&super_v), KeyRoute::PasteClipboard);
+    assert_eq!(
+        app.route_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )),
+        KeyRoute::Composer,
+        "Ctrl+Shift+V 刻意不接"
+    );
+    assert_eq!(
+        app.route_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT
+        )),
+        KeyRoute::Composer,
+        "Ctrl+Alt 是 kitty 协议下的 AltGr 形态，不能抢"
+    );
+    assert_eq!(
+        app.route_key(&KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)),
+        KeyRoute::Composer
+    );
+    assert_eq!(app.route_key(&key(KeyCode::Char('v'))), KeyRoute::Composer);
+}
+
+/// 粘贴手势是应用保留键（与 Ctrl+O 同档）：ask 面板 / `/model` 面板 / 候选 popup
+/// 之下也接住（文本的模态挡板在**落点**，见 `app::clipboard`）。
+#[test]
+fn test_paste_clipboard_key_is_reserved_below_the_panels() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+    for app in [
+        app_with_ask_panel(),
+        app_with_model_panel(),
+        app_with_visible_popup(),
+    ] {
+        assert_eq!(
+            app.route_key(&ctrl_v),
+            KeyRoute::PasteClipboard,
+            "面板之下也要接住（落点再挡）"
+        );
+    }
+}
+
+/// 按下手势：草稿不动（不再插字面 `v`），推出一条读取 intent（读取在后台任务上跑）。
+#[test]
+fn test_paste_clipboard_key_pushes_the_read_intent() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app();
+    for mods in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), mods));
+    }
+    assert_eq!(app.input.text(), "", "手势不产生字面 `v`");
+    let reads = app
+        .drain_intents()
+        .into_iter()
+        .filter(|i| matches!(i, AppIntent::ReadClipboard))
+        .count();
+    assert_eq!(reads, 2, "按两次推两条读取 intent");
+}
+
 #[test]
 fn test_key_routing_reserves_esc_and_page_keys_for_the_app() {
     use crossterm::event::KeyCode;

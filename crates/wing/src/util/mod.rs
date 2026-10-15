@@ -1,6 +1,7 @@
 //! Utilities.
 
 pub mod clipboard;
+pub mod clipboard_paste;
 pub mod format;
 pub mod image_compress;
 pub mod logging;

@@ -397,6 +397,9 @@ fn settings_owns_the_app_reserved_keys_and_ctrl_o() {
     }
     // Ctrl+C 永远归应用（双击退出）。
     assert_eq!(app.route_key(&ctrl(KeyCode::Char('c'))), KeyRoute::Quit);
+    // Ctrl+V（粘贴手势，同样是应用保留键）也不例外：面板开着时它不出声 ——
+    // 文本粘贴本就不进面板（`handle_paste` 的第一道挡板），与 bracketed paste 同款。
+    assert_eq!(app.route_key(&ctrl(KeyCode::Char('v'))), KeyRoute::Settings);
 }
 
 #[test]

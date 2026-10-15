@@ -96,6 +96,22 @@ pub async fn execute_intent(
                 }
             }
         }
+        AppIntent::ReadClipboard => {
+            // 本地剪贴板读取（L1）：所有子进程都在模块里的阻塞池上调起，这里只把
+            // "读取 → 回执" 放进后台任务（同 `CompressClipboardImage` 的范式）。
+            // 结果属于 composer 而不是会话，`session_id` 只是 `FetchResult` 的形状要求。
+            let tx = fetch_tx.clone();
+            let session_id = app.session_id.clone();
+            tokio::spawn(async move {
+                let result = crate::util::clipboard_paste::read_clipboard().await;
+                let _ = tx
+                    .send(FetchResult {
+                        session_id,
+                        payload: FetchPayload::ClipboardPaste(result),
+                    })
+                    .await;
+            });
+        }
         AppIntent::SetSessionPin { pinned } => {
             // pin = 当前会话上的一个普通标签（前端约定，后端零感知）。写走
             // 通用标签端点：加 `pin` / 删 `pin`，幂等——重复点击不会累积。
