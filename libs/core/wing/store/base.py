@@ -265,6 +265,10 @@ class ArchivedSession(BaseModel):
     ``archived_at`` 可能为 None：索引重建路径（索引缺失 / 损坏，从目录反推）
     不知道当时的归档时刻，不回填、不发明数字（用目录 mtime 冒充是错的——
     目录 rename 不更新目录自身的 mtime）。
+
+    索引是**派生数据**（目录才是事实源），读写走"整份读 → 改写 → 写回"：
+    ``extra="ignore"`` 意味着更新版本写入的未知字段会被旧版本一读一写抹掉
+    ——可接受（条目可由目录重建，字段按需再加）。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -479,11 +483,11 @@ class SessionStore(ABC):
         raise NotImplementedError(f"{self.name} does not support archiving")
 
     def list_archived(self) -> list[ArchivedSession]:
-        """列出归档条目（**读索引**；索引缺失 / 损坏时按归档目录重建）。
+        """列出归档条目（读索引；索引缺失 / 损坏时按归档目录重建）。
 
-        保证：条目对应的归档目录必须存在（已手工删掉的目录不投影）；索引里没有
-        但目录存在的条目（手工拷贝进归档区）**不**自动收编，索引重建（删除
-        index.json）后可见。
+        保证（目录是事实源、索引只是加速）：条目对应的归档目录必须存在
+        （手工删除的不投影）；目录存在但索引未登记的（手工拷入 / 索引写失败的
+        窗口）被当场收编。索引整份损坏时按目录重建（``archived_at`` 留空）。
         """
         raise NotImplementedError(f"{self.name} does not support archiving")
 

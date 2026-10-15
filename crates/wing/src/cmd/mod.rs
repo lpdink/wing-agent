@@ -389,7 +389,9 @@ pub enum Command {
     /// (restore lives under the same subcommand on purpose — no `unarchive`
     /// sibling); `--list` shows the archive (a gateway-side index read, no
     /// session-directory scan). Archiving is a pure move: session bytes are
-    /// untouched, so a restored session is bit-for-bit what it was.
+    /// untouched. Restoring refreshes the session's age (an explicit restore
+    /// is an interest signal — the auto-archive sweep must not immediately
+    /// re-archive it).
     ///
     /// The gateway refuses busy / subscribed / non-archivable-backend
     /// sessions with 409 (same pinning rules as `wing release`).

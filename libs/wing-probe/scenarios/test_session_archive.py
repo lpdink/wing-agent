@@ -38,7 +38,8 @@ CONFLICT_MODEL = "probe/archive-conflict"
 SWEEP_MODEL = "probe/archive-sweep"
 DISABLED_MODEL = "probe/archive-disabled"
 
-#: 显式归档场景：关掉自动 sweep（它的存在只会在恢复后抢跑，干扰断言）。
+#: 显式归档场景：关掉自动 sweep——本组断言的是"显式动作"的确定性，
+#: 自动扫瞄（即使恢复已刷新年龄）仍会让"何时被移动"取决于时钟。
 NO_SWEEP: dict = {"archive": {"idle_days": 0}}
 
 #: sweep 场景：0.002 天 ≈ 2.9 分钟——种子（2020）远超阈值，新建会话远在阈值内。

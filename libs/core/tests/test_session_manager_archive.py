@@ -16,6 +16,7 @@ archive_stale_sessions / list_archived_sessions``）：
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -82,7 +83,7 @@ def _seed_old(
 
 class TestExplicitArchive:
     async def test_roundtrip_keeps_history_bytes_and_chain(
-        self, root: Path, sm: SessionManager
+        self, root: Path, sm: SessionManager, file_store: FileSessionStore
     ) -> None:
         """归档往返是纯移动：链内容逐字一致，恢复后照常 resume（红线）。"""
         session = sm.create_session()
@@ -119,10 +120,14 @@ class TestExplicitArchive:
         assert entries[0].name == "hello"  # 标题回退到首条用户消息
         assert entries[0].model_name  # 模型列有素材（与 ps 同一读法）
 
-        # 恢复：字节一致 + 链一致 + 可以继续用。
+        # 恢复：history 字节一致 + 链一致 + 可以继续用。
         assert sm.unarchive_session(sid) == (True, "restored")
         assert _history(root, sid) == before
         assert sm.unarchive_session(sid) == (False, "not archived")
+        # 恢复刷新 last_interaction（显式动作 = 兴趣信号；见
+        # TestRestoredSessionSurvivesNextSweep）。
+        refreshed = file_store.load_metadata(sid)
+        assert refreshed is not None and refreshed.last_interaction is not None
         resumed = sm.resume_session(sid)
         assert [
             node.uuid for node in resumed.context_manager.get_context_window()
@@ -201,14 +206,21 @@ class TestArchiveSweep:
         assert await sm.archive_stale_sessions(idle_days=-1.0) == []
         assert file_store.is_archived("old") is False
 
-    async def test_sweep_skips_touched_session(
-        self, root: Path, file_store: FileSessionStore
+    async def test_final_check_invalidates_touched_candidate(
+        self, root: Path, file_store: FileSessionStore, monkeypatch
     ) -> None:
-        """阶段①到②之间被交互 → 当场失效（重读磁盘事实，不按旧快照执行）。"""
+        """阶段①到②之间被交互 → 当场失效（重读磁盘事实，不按旧快照执行）。
+
+        用"冻结阶段①产物"的方式只测阶段②：直接把候选塞给 sweep，再改现场——
+        不这样做的话候选会被阶段①按现场重新算一遍，终检永远走不到。
+        """
         _seed_old(file_store, "old", days_ago=90)
         sm = SessionManager({"file": FileSessionStore(root)})
+        candidates = sm._collect_stale(30.0)
+        assert [session_id for _, session_id in candidates] == ["old"]
+        monkeypatch.setattr(sm, "_collect_stale", lambda idle_days: candidates)
 
-        # 模拟"终检前刚被交互"：直接把 metadata 拨新（阶段②会重读）。
+        # 终检前刚被交互：metadata 拨新 → 失效。
         file_store.save_metadata(
             "old",
             SessionMetadata(
@@ -217,6 +229,38 @@ class TestArchiveSweep:
         )
         assert await sm.archive_stale_sessions(idle_days=30.0) == []
         assert file_store.is_archived("old") is False
+
+    async def test_final_check_invalidates_pinned_candidate(
+        self, root: Path, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        """候选被补打 pin → 终检豁免（pin 豁免在阶段②也生效）。"""
+        _seed_old(file_store, "old", days_ago=90)
+        sm = SessionManager({"file": FileSessionStore(root)})
+        candidates = sm._collect_stale(30.0)
+        monkeypatch.setattr(sm, "_collect_stale", lambda idle_days: candidates)
+
+        file_store.save_metadata(
+            "old",
+            SessionMetadata(
+                session_name="pinned",
+                last_interaction=datetime.now().isoformat(),
+                tags=["pin"],
+            ),
+        )
+        assert await sm.archive_stale_sessions(idle_days=30.0) == []
+        assert file_store.is_archived("old") is False
+
+    async def test_final_check_invalidates_disappeared_candidate(
+        self, root: Path, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        """候选目录在终检前消失（手工删除）→ 跳过，不是报错。"""
+        _seed_old(file_store, "old", days_ago=90)
+        sm = SessionManager({"file": FileSessionStore(root)})
+        candidates = sm._collect_stale(30.0)
+        monkeypatch.setattr(sm, "_collect_stale", lambda idle_days: candidates)
+
+        shutil.rmtree(root / "old")
+        assert await sm.archive_stale_sessions(idle_days=30.0) == []
 
     async def test_sweep_evicts_loaded_idle_session(
         self, root: Path, file_store: FileSessionStore
@@ -249,6 +293,24 @@ class TestArchiveSweep:
         finally:
             event_bus.route_detach("client-1", session.session_id)
         assert await sm.archive_stale_sessions(idle_days=30.0) == ["old"]
+
+
+class TestRestoredSessionSurvivesNextSweep:
+    """恢复是显式兴趣信号：下一轮 sweep 不能按旧年龄把它立刻收回去（S1）。"""
+
+    async def test_restore_is_sticky(
+        self, root: Path, file_store: FileSessionStore
+    ) -> None:
+        _seed_old(file_store, "old", days_ago=90)
+        sm = SessionManager({"file": FileSessionStore(root)})
+        assert await sm.archive_stale_sessions(idle_days=30.0) == ["old"]
+
+        assert sm.unarchive_session("old") == (True, "restored")
+
+        # 阈值 30 天：恢复刚刷新过 last_interaction → 不再满足"年龄已知且超过
+        # 阈值"，sweep 不得再收走它。
+        assert await sm.archive_stale_sessions(idle_days=30.0) == []
+        assert file_store.is_archived("old") is False
 
 
 class TestArchivedList:
@@ -287,3 +349,64 @@ class TestArchivedList:
             (root / ".archive" / "index.json").read_text(encoding="utf-8")
         )
         assert payload["sessions"][0]["id"] == "old"
+
+
+class TestArchiverAndRuntimeEntryPoints:
+    """BackgroundScheduler 实际注册的两个入口（archiver.sweep / runtime 转发）。"""
+
+    async def test_archiver_reads_config_and_sweeps(
+        self, root: Path, file_store: FileSessionStore, monkeypatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from wing.session import SessionArchiver
+
+        _seed_old(file_store, "old", days_ago=90)
+        sm = SessionManager({"file": FileSessionStore(root)})
+        archiver = SessionArchiver(sm)
+
+        def fake_config(idle_days: float) -> SimpleNamespace:
+            return SimpleNamespace(
+                sessions=SimpleNamespace(archive=SimpleNamespace(idle_days=idle_days))
+            )
+
+        monkeypatch.setattr(
+            "wing.session.archiver.get_config", lambda: fake_config(30.0)
+        )
+        assert await archiver.sweep() == ["old"]
+        assert file_store.is_archived("old") is True
+
+        # <= 0 = 关闭：再种一个也不扫（sweep 直接返回空，不触达 store）。
+        _seed_old(file_store, "old-2", days_ago=90)
+        monkeypatch.setattr(
+            "wing.session.archiver.get_config", lambda: fake_config(0.0)
+        )
+        assert await archiver.sweep() == []
+        assert file_store.is_archived("old-2") is False
+
+    async def test_runtime_forwards_roundtrip_and_sweep(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """WingRuntime 的四个转发方法（网关路由与 job 的实际入口）。"""
+        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+        from wing.runtime import WingRuntime
+
+        runtime = WingRuntime()
+        session = runtime.create_session()
+        session_id = session.session_id
+
+        # 空会话（从未落盘）：没有可归档的磁盘状态 → 幂等空动作，不是 500。
+        assert runtime.archive_session(session_id) == (False, "nothing to archive")
+        session.context_manager.add_message(Message(role="user", content="hi"))
+
+        assert runtime.list_archived_sessions() == []
+        assert runtime.archive_session(session_id) == (True, "archived")
+        assert [e.id for e in runtime.list_archived_sessions()] == [session_id]
+        assert runtime.unarchive_session(session_id) == (True, "restored")
+        with pytest.raises(LookupError):
+            runtime.archive_session("no-such-session")
+        with pytest.raises(LookupError):
+            runtime.unarchive_session("no-such-session")
+
+        # job 入口：走 archiver → 当前配置（默认 90 天）→ 新会话不够老。
+        assert await runtime.archive_stale_sessions() == []

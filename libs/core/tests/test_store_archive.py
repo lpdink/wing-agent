@@ -191,19 +191,34 @@ class TestArchiveIndexRebuild:
         assert [e.id for e in store.list_archived()] == ["s2"]
         assert [e["id"] for e in _index(store)] == ["s2"]
 
-    def test_manual_copy_visible_after_rebuild(
+    def test_untracked_dirs_are_adopted_on_list(
         self, root: Path, store: FileSessionStore
     ) -> None:
-        """手工搬进归档区的目录：删索引重建后可见（索引收编不是自动的）。"""
+        """目录存在而索引未登记（手工拷入 / 索引写失败的窗口）→ 列表当场收编。"""
         _seed(store, "s1")
         store.archive("s1")
-        # 手工“搬”一个新目录进归档区（源目录直接构造）。
+        # 手工"搬"一个新目录进归档区（源目录直接构造）。
         _seed(store, "s2")
         (root / "s2").rename(root / ".archive" / "s2")
 
-        assert [e.id for e in store.list_archived()] == ["s1"]
-        (root / ".archive" / "index.json").unlink()
         assert sorted(e.id for e in store.list_archived()) == ["s1", "s2"]
+        # 收编落盘：下一次读取不再重复收编（索引里已有 s2）。
+        assert sorted(e["id"] for e in _index(store)) == ["s1", "s2"]
+
+    def test_dropped_and_adopted_entries_heal_together(
+        self, root: Path, store: FileSessionStore
+    ) -> None:
+        """一次列表里同时剔除消失的条目、收编未登记的目录（索引自愈）。"""
+        _seed(store, "s1")
+        _seed(store, "s2")
+        store.archive("s1")
+        store.archive("s2")
+        shutil.rmtree(root / ".archive" / "s1")  # s1 目录消失
+        _seed(store, "s3")
+        (root / "s3").rename(root / ".archive" / "s3")  # s3 未登记
+
+        assert sorted(e.id for e in store.list_archived()) == ["s2", "s3"]
+        assert sorted(e["id"] for e in _index(store)) == ["s2", "s3"]
 
 
 class TestMemoryStoreHasNoArchive:

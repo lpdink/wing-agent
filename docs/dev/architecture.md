@@ -202,7 +202,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 ### 会话归档（archive）
 
-**归档区是冷存储**：`<sessions root>/.archive/`（点前缀 = 存储保留命名空间，与 `.media` 同类，不可寻址成会话）。归档 = 目录 **rename**（字节零变化）；恢复 = rename 回来。归档后的会话从 `/api/session/list` 消失（= ps 性能的解法：根目录只留活跃批），且**冻结**——对它的任何按 id 解析（resume / send / tag / create-or-adopt）都以 `SessionArchivedError` 结束，映射 404 + `error="session_archived"`（可行动提示；刻意不是 `LookupError` 的子类，路由的 `except LookupError` 不会把它吞成普通 404）。
+**归档区是冷存储**：`<sessions root>/.archive/`（点前缀 = 存储保留命名空间，与 `.media` 同类，不可寻址成会话）。归档 = 目录 **rename**（字节零变化）；恢复 = rename 回来 + 刷新 `last_interaction`（显式兴趣信号：否则下一轮 sweep 按旧年龄立刻收回去）。归档后的会话从 `/api/session/list` 消失（= ps 性能的解法：根目录只留活跃批），且**冻结**——对它的任何按 id 解析（resume / send / tag / create-or-adopt）都以 `SessionArchivedError` 结束，映射 404 + `error="session_archived"`（可行动提示；刻意不是 `LookupError` 的子类，路由的 `except LookupError` 不会把它吞成普通 404）。
 
 | 维度 | 口径 |
 |------|------|

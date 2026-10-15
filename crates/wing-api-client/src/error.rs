@@ -137,6 +137,18 @@ mod tests {
     }
 
     #[test]
+    fn is_session_archived_requires_404_and_the_error_code() {
+        assert!(api_err_with_body(404, "session_archived").is_session_archived());
+        // 结构化码是唯一判据：同码不同 error 不命中。
+        assert!(!api_err_with_body(404, "not_found").is_session_archived());
+        // 同 error 不同码不命中（防御：错误码可被任何层改写）。
+        assert!(!api_err_with_body(409, "session_archived").is_session_archived());
+        // 无结构化 body / 连接层错误不命中。
+        assert!(!api_err(404).is_session_archived());
+        assert!(!ApiClientError::Connection("reset".into()).is_session_archived());
+    }
+
+    #[test]
     fn is_setup_mode_requires_503_and_the_error_code() {
         // 真信号：503 + error=setup_mode。
         assert!(api_err_with_body(503, "setup_mode").is_setup_mode());

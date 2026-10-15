@@ -111,6 +111,22 @@ mod tests {
         values.iter().map(|t| (*t).to_string()).collect()
     }
 
+    /// 跨语言守卫：后端（`libs/core/wing/session/tags.py`）的 `PIN_TAG` 与这里的
+    /// 常量必须一致——自动归档的豁免靠它，一侧改名另一侧就静默失效（用户会话
+    /// 半夜被扫进归档区）。仓库里唯一的跨语言契约测试。
+    #[test]
+    fn pin_tag_matches_the_backend_reserved_tag() {
+        let backend = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../libs/core/wing/session/tags.py"
+        ))
+        .expect("backend tags.py (tests run from the repo checkout)");
+        assert!(
+            backend.contains(&format!("PIN_TAG = {PIN_TAG:?}")),
+            "backend PIN_TAG drifted from {PIN_TAG:?} — update both sides together"
+        );
+    }
+
     #[test]
     fn pinned_is_the_bare_tag() {
         assert!(is_pinned(&tags(&["pin"])));

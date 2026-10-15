@@ -481,10 +481,6 @@ class FileSessionStore(SessionStore):
     def _archive_root(self) -> Path:
         return self._root / self._ARCHIVE_DIR
 
-    def _archive_dir(self, session_id: str) -> Path:
-        """归档区里的会话目录。拼接前先过 session id 闸门（同 live 区）。"""
-        return self._archive_root() / validate_session_id(session_id)
-
     def _archive_index_path(self) -> Path:
         return self._archive_root() / self._ARCHIVE_INDEX
 
@@ -532,11 +528,16 @@ class FileSessionStore(SessionStore):
         self._remove_from_archive_index(safe_id)
 
     def list_archived(self) -> list[ArchivedSession]:
-        """列出归档条目：读索引；索引缺失 / 损坏时按归档目录重建。
+        """列出归档条目：读索引 + 与目录**双向对账**。
 
-        索引里目录已不存在的条目（手工删除）不投影，且剔除后顺带自愈落盘。
-        索引里没有、目录却存在的条目（手工拷入归档区）不在本路径收编——删除
-        index.json 触发一次重建即可。
+        - 索引缺失 / 损坏 → 按归档目录整体重建；
+        - 索引里目录已不存在的条目（手工删除）→ 不投影并剔除；
+        - 目录存在但索引未登记（手工拷入；或"rename 成功 + 索引写失败 /
+          进程恰好死在这里"的窗口）→ 当场收编（读该目录的 metadata 建条目）。
+
+        目录是事实源，索引只是读取加速——只信索引会让上面第二类会话永远
+        列不出来。对账成本 = 每个条目一次解析 + 一次 readdir（收编才读
+        metadata），低频路径上可接受。
         """
         entries = self._read_archive_index()
         if entries is None:
@@ -548,19 +549,44 @@ class FileSessionStore(SessionStore):
             return entries
 
         alive: list[ArchivedSession] = []
+        known: set[str] = set()
         for entry in entries:
             try:
-                if self._archive_dir(entry.id).is_dir():
-                    alive.append(entry)
+                real = self.resolve_archived_id(entry.id)
             except ValueError:
                 # 索引被手改出脏 id：不投影（也无法寻址）
                 log.warning(f"Archive index holds an invalid session id: {entry.id!r}")
-        if len(alive) != len(entries):
-            log.info(
-                f"Archive index: dropped {len(entries) - len(alive)} stale entry(ies)"
+                continue
+            if real is None:
+                continue  # 目录已消失 → 剔除（下面统一落盘自愈）
+            alive.append(entry)
+            known.add(real)
+
+        adopted = self._adopt_untracked_entries(known)
+        if adopted or len(alive) != len(entries):
+            if len(alive) != len(entries):
+                log.info(
+                    f"Archive index: dropped {len(entries) - len(alive)} stale entry(ies)"
+                )
+            self._write_archive_index(alive + adopted)
+        return alive + adopted
+
+    def _adopt_untracked_entries(self, known: set[str]) -> list[ArchivedSession]:
+        """（内部）收编归档区里索引未登记的目录（按已知真名去重；只读）。"""
+        root = self._archive_root()
+        if not root.is_dir():
+            return []
+        adopted: list[ArchivedSession] = []
+        for session_dir in root.iterdir():
+            if not session_dir.is_dir() or not is_valid_session_id(session_dir.name):
+                continue
+            if session_dir.name in known:
+                continue
+            log.info(f"Archive index: adopting untracked dir '{session_dir.name}'")
+            adopted.append(
+                self._archive_entry_at(session_dir.name, session_dir, archived_at=None)
             )
-            self._write_archive_index(alive)
-        return alive
+        return adopted
 
     # ── 归档索引（内部）───────────────────────
 

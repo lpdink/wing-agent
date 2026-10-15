@@ -40,6 +40,15 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 const SESSION_ID: &str = "20261010-120000-abcdef01";
 /// The one session on disk; every other id is a 404.
 const UNKNOWN_ID: &str = "ghost-session";
+/// A session that sits in the archive: resume / send answer the structured
+/// 404 (`error="session_archived"`) the CLI must turn into a restore hint.
+const ARCHIVED_ID: &str = "archived-session";
+/// A session the gateway refuses to archive (busy): 409 with the reason.
+const BUSY_ID: &str = "busy-session";
+/// A session already in the archive (archive → `already archived`);
+/// restoring it is a no-op (`not archived` only applies to live ids, but the
+/// stub reuses this id for the restore-side skip too).
+const SETTLED_ID: &str = "settled-session";
 
 // ============================================================
 // Stub gateway
@@ -312,6 +321,18 @@ fn route(
         return not_loaded();
     }
 
+    // An archived session: hydration-style endpoints answer the structured
+    // 404 the real gateway tags (`error="session_archived"`); plain lookups
+    // stay a plain not-found, exactly like the real routes.
+    if session_id == ARCHIVED_ID && path != "/api/session/archive" {
+        return match (method, path) {
+            ("POST", "/api/session/resume")
+            | ("POST", "/api/session/send")
+            | ("POST", "/api/session/interrupt") => archived_404(),
+            _ => not_loaded(),
+        };
+    }
+
     match (method, path) {
         ("GET", "/api/health") => (
             200,
@@ -345,6 +366,53 @@ fn route(
             }
             (200, json!({"ok": true}).to_string())
         }
+
+        // 归档 / 恢复（`wing archive` 的唯一写端点）。
+        ("POST", "/api/session/archive") => {
+            let archived = request["archived"].as_bool().unwrap_or(true);
+            let sid = request["session_id"]
+                .as_str()
+                .unwrap_or(SESSION_ID)
+                .to_string();
+            if sid == BUSY_ID {
+                return (
+                    409,
+                    json!({"error": "conflict",
+                           "detail": "session cannot be archived: status=working"})
+                    .to_string(),
+                );
+            }
+            let (changed, detail) = if sid == SETTLED_ID {
+                (false, if archived { "already archived" } else { "not archived" })
+            } else if sid == ARCHIVED_ID && archived {
+                (false, "already archived")
+            } else {
+                (true, if archived { "archived" } else { "restored" })
+            };
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "session_id": sid,
+                    "archived": archived,
+                    "changed": changed,
+                    "detail": detail,
+                })
+                .to_string(),
+            )
+        }
+
+        // 归档列表（读索引的投影；第二条故意带多字节时间戳）。
+        ("GET", "/api/session/archive") => (
+            200,
+            json!({"sessions": [
+                {"id": ARCHIVED_ID, "name": "old chat", "archived_at": "2026-10-01T10:20:30.9",
+                 "tags": ["favorite"], "model_display_name": "DeepSeek Flash"},
+                {"id": "archived-multibyte", "name": "日本語のセッション",
+                 "archived_at": "日本語日本語日本語日"}
+            ]})
+            .to_string(),
+        ),
 
         // The stdio / ACP preflight (`cmd::setup::preflight_or_report`).
         ("GET", "/api/settings/status") => (
@@ -579,6 +647,19 @@ fn not_loaded() -> (u16, String) {
     (
         404,
         json!({"error": "not_found", "detail": "session not found"}).to_string(),
+    )
+}
+
+/// The gateway's archived-session 404: same status as a plain miss, a
+/// different structured `error` — exactly what the CLI must branch on.
+fn archived_404() -> (u16, String) {
+    (
+        404,
+        json!({
+            "error": "session_archived",
+            "detail": "session 'archived-session' is archived; restore it before use",
+        })
+        .to_string(),
     )
 }
 
@@ -1507,4 +1588,110 @@ async fn asks_fails_loudly_on_a_drifted_ask_event() {
     assert!(stderr.contains("`ask`"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+// ============================================================
+// 归档（wing archive）
+// ============================================================
+
+/// 归档一条会话：请求体是"设置状态"（archived=true），回执进结果表。
+#[tokio::test]
+async fn archive_moves_the_session_and_reports_it() {
+    let stub = Stub::start("archive-move").await;
+    let (code, stdout, stderr) = run_wing(&["archive", SESSION_ID], &stub).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        body_of(&stub, "/api/session/archive"),
+        json!({"session_id": SESSION_ID, "archived": true}),
+        "归档 = 把状态设为 true（不是动作对）"
+    );
+    assert!(stdout.contains("archived"), "{stdout}");
+    assert!(stdout.contains(SESSION_ID), "{stdout}");
+
+    // --json 与文本同源。
+    let (code, stdout, _) = run_wing(&["archive", SESSION_ID, "--json"], &stub).await;
+    assert_eq!(code, 0);
+    let parsed = json_of(&stdout);
+    assert_eq!(parsed["results"][0]["archived"], json!(true));
+    assert_eq!(parsed["results"][0]["changed"], json!(true));
+}
+
+/// 恢复是同一个子命令的另一个方向；幂等 no-op 是 skipped，不是错误。
+#[tokio::test]
+async fn archive_restore_direction_and_idempotent_skip() {
+    let stub = Stub::start("archive-restore").await;
+    let (code, stdout, stderr) = run_wing(&["archive", "--restore", SETTLED_ID], &stub).await;
+    assert_eq!(code, 0, "{stderr}");
+    let body = body_of(&stub, "/api/session/archive");
+    assert_eq!(
+        body["archived"],
+        json!(false),
+        "--restore 发的是 archived=false"
+    );
+    assert!(stdout.contains("skipped"), "{stdout}");
+    assert!(stdout.contains("not archived"), "{stdout}");
+}
+
+/// 单会话失败（409）只让它那一行是 error，其余照常，退出码非零。
+#[tokio::test]
+async fn archive_conflicts_fail_their_row_only() {
+    let stub = Stub::start("archive-conflict").await;
+    let (code, stdout, _) = run_wing(&["archive", BUSY_ID, SESSION_ID], &stub).await;
+    assert_ne!(code, 0, "失败行必须让退出码非零");
+    assert!(stdout.contains("status=working"), "{stdout}");
+    assert!(stdout.contains("archived"), "其余行照常处理：{stdout}");
+    assert_eq!(
+        stub.path_hits("/api/session/archive").len(),
+        2,
+        "两个 id 都必须发出（单会话失败不阻断其余）"
+    );
+}
+
+/// 列表渲染：表格 / JSON 同源；多字节时间戳不得 panic（B2 回归）。
+#[tokio::test]
+async fn archive_list_renders_the_index_and_survives_multibyte_timestamps() {
+    let stub = Stub::start("archive-list").await;
+    let (code, stdout, stderr) = run_wing(&["archive", "--list"], &stub).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("old chat"), "{stdout}");
+    assert!(stdout.contains("2026-10-01 10:20"), "{stdout}");
+    assert!(stdout.contains("DeepSeek Flash"), "{stdout}");
+    assert!(stdout.contains("favorite"), "{stdout}");
+    assert!(stdout.contains("日本語のセッション"), "{stdout}");
+
+    let (code, stdout, _) = run_wing(&["archive", "--list", "--json"], &stub).await;
+    assert_eq!(code, 0);
+    let parsed = json_of(&stdout);
+    assert_eq!(parsed[0]["id"], json!(ARCHIVED_ID));
+    assert_eq!(parsed[1]["archived_at"], json!("日本語日本語日本語日"));
+
+    // 形态互斥是使用错误：网关不可达也拦得住（校验先于 ensure_gateway）。
+    let (code, _, stderr) = run_wing(&["archive", "--list", SESSION_ID], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("--list cannot be combined"), "{stderr}");
+}
+
+/// 归档会话的 404 必须是可行动提示（结构化码 → CLI 文案），不是普通的
+/// "not found"，也不是裸的网关 detail（info 与 tail 两条链都验一遍）。
+#[tokio::test]
+async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
+    let stub = Stub::start("archive-hint").await;
+
+    let (code, _, stderr) = run_wing(&["info", ARCHIVED_ID], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("is archived"), "{stderr}");
+    assert!(stderr.contains("wing archive --restore"), "{stderr}");
+    assert!(
+        !stderr.contains("not loaded and not on disk"),
+        "归档提示不得退化成普通 404 文案：{stderr}"
+    );
+
+    let (code, _, stderr) = run_wing(&["tail", ARCHIVED_ID], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("wing archive --restore"), "{stderr}");
+
+    let (code, _, stderr) = run_wing(&["interrupt", ARCHIVED_ID], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("is archived"), "{stderr}");
+    assert!(stderr.contains("wing archive --restore"), "{stderr}");
 }

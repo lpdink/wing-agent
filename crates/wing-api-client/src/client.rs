@@ -1026,6 +1026,81 @@ mod tests {
         );
     }
 
+    // ============================================================
+    // 归档（POST / GET /api/session/archive）
+    // ============================================================
+
+    const ARCHIVE_OK_BODY: &str = r#"{"ok":true,"session_id":"sid-1","archived":true,
+        "changed":true,"detail":"archived"}"#;
+
+    #[tokio::test]
+    async fn archive_session_posts_the_state_and_parses_the_result() {
+        let server = MockGateway::start(vec![("/api/session/archive", 200, ARCHIVE_OK_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client.archive_session("sid-1", true).await.unwrap();
+        assert!(resp.ok && resp.archived && resp.changed);
+        assert_eq!(resp.session_id, "sid-1");
+        assert_eq!(resp.detail, "archived");
+
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "POST");
+        assert_eq!(recorded[0].path, "/api/session/archive");
+        let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"session_id": "sid-1", "archived": true}),
+            "恢复方向也必须发 archived=false（wire 上是一个状态，不是一个动作对）"
+        );
+
+        let _ = client.archive_session("sid-1", false).await;
+    }
+
+    #[tokio::test]
+    async fn archive_session_error_keeps_the_structured_code() {
+        let server = MockGateway::start(vec![(
+            "/api/session/archive",
+            404,
+            r#"{"error":"session_archived","detail":"session 'x' is archived; restore it before use"}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let err = client.archive_session("x", false).await.unwrap_err();
+        assert!(err.is_session_archived(), "{err}");
+        assert!(
+            err.is_not_found(),
+            "归档命中仍是 404（与真不存在同码，不同 error）"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_archived_gets_and_parses_the_index_projection() {
+        const BODY: &str = r#"{"sessions":[
+            {"id":"old-1","name":"old chat","archived_at":"2026-10-01T10:00:00",
+             "tags":["favorite"],"model_display_name":"DeepSeek Flash"},
+            {"id":"old-2"}
+        ]}"#;
+        let server = MockGateway::start(vec![("/api/session/archive", 200, BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client.list_archived().await.unwrap();
+        assert_eq!(resp.sessions.len(), 2);
+        assert_eq!(resp.sessions[0].id, "old-1");
+        assert_eq!(resp.sessions[0].tags, vec!["favorite".to_string()]);
+        assert_eq!(
+            resp.sessions[0].model_display_name.as_deref(),
+            Some("DeepSeek Flash")
+        );
+        // 缺省字段不炸（旧网关 / 重建条目缺 archived_at）。
+        assert_eq!(resp.sessions[1].archived_at, None);
+
+        let recorded = server.recorded();
+        assert_eq!(recorded[0].method, "GET");
+        assert_eq!(recorded[0].path, "/api/session/archive");
+    }
+
     #[tokio::test]
     async fn upload_media_without_a_name_omits_the_query_key() {
         let server = MockGateway::start(vec![("/api/session/media", 200, MEDIA_BODY)]).await;

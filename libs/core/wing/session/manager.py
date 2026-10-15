@@ -1021,8 +1021,10 @@ class SessionManager:
         不可能有水合/订阅插入（否则活 Session 会把目录写回 live 区，数据分裂）。
 
         Returns:
-            (archived, detail)：archived=False 表示会话本就在归档区（幂等 no-op，
-            不是错误）；detail ∈ {"archived", "already archived"}。
+            (archived, detail)：archived=False 是幂等 / 空动作（不是错误）——
+            已在归档区（"already archived"）或内存中的空会话（"nothing to
+            archive"，从未落盘，没有可移动的东西）；detail ∈ {"archived",
+            "already archived", "nothing to archive"}。
 
         Raises:
             LookupError: live 区与归档区都没有该会话
@@ -1040,6 +1042,19 @@ class SessionManager:
             raise RuntimeError(f"store '{store.name}' does not support archiving")
 
         session = self._sessions.get(resolved_id)
+        if session is not None and not store.exists(resolved_id):
+            # 内存中的**空会话**（从未发言 → 磁盘零痕迹）：没有可归档的磁盘
+            # 状态。归档它是个空动作（它本来就不进列表），如实回答而不是让
+            # store 抛 FileNotFoundError（那会变成 500）。
+            return False, "nothing to archive"
+
+        # 双存在预检**先于**任何副作用：否则 evict 之后 store 再抛（双存在 /
+        # rename 竞态）会留下"已逐出但没归档"的半截状态（无回滚）。
+        if store.resolve_archived_id(resolved_id) is not None:
+            raise RuntimeError(
+                f"session '{resolved_id}' exists in both live and archive dirs"
+            )
+
         if session is not None:
             blocker = self._blocked_reason(session)
             if blocker is not None:
@@ -1051,6 +1066,11 @@ class SessionManager:
 
     def unarchive_session(self, session_id: str) -> tuple[bool, str]:
         """把会话从归档区移回 live 区（幂等）。
+
+        恢复会**刷新 last_interaction**（显式动作 = 兴趣信号）：否则自动 sweep
+        会按"归档前的旧年龄"在下一轮把它立刻收回去（恢复后只看 tail / ps 的
+        用户会觉得会话又凭空消失）。这是恢复方向的唯一写操作（改一个字段）；
+        归档方向仍是纯 rename（字节零变化）。
 
         Returns:
             (restored, detail)：restored=False 表示不在归档区（幂等 no-op——
@@ -1077,11 +1097,28 @@ class SessionManager:
             store, canonical = archived
             _warn_alias(session_id, canonical)
             store.unarchive(canonical)
+            # 恢复是显式动作 = 兴趣信号：刷新 last_interaction，否则自动 sweep
+            # 下一轮（启动 +startup_delay 或每天）会按旧年龄把它立刻收回去，
+            # 用户"刚恢复的会话又消失"。落盘失败只 WARN——移动已完成，
+            # 报错只会让调用方以为没恢复（脏状态自愈路径：下一轮 sweep 再看）。
+            self._refresh_last_interaction(store, canonical)
             log.info(f"Session restored from archive: {canonical}")
             return True, "restored"
         if live is not None:
             return False, "not archived"
         raise LookupError(f"Session not found: {session_id!r}")
+
+    def _refresh_last_interaction(self, store: SessionStore, session_id: str) -> None:
+        """把会话的 last_interaction 拨到现在（恢复路径专用；失败只 WARN）。"""
+        try:
+            metadata = store.load_metadata(session_id) or SessionMetadata()
+            metadata.last_interaction = datetime.now().isoformat()
+            store.save_metadata(session_id, metadata)
+        except Exception as e:  # noqa: BLE001 —— 恢复已完成，落盘失败不反悔
+            log.warning(
+                f"Session {session_id}: failed to refresh last_interaction "
+                f"after restore: {e}"
+            )
 
     def list_archived_sessions(self) -> list[ArchivedSession]:
         """列出归档区条目（跨后端聚合；读索引，不扫会话目录）。
