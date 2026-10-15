@@ -30,6 +30,8 @@
 //!   `tests/stdin_proxy_stale_event_source.rs`。
 //! - [`restore`] 必须早于 `crossterm::terminal::disable_raw_mode()`（它把 termios 写回
 //!   fd 0，彼时 fd 0 必须已经是真实 tty）。
+//! - 收尾时若要打断卡在 fd 0 阻塞读里的读者，用 [`wake_reader`]：字节走 master→slave
+//!   的内核路径，**必须在 [`restore`] 之前**调用（之后 master 已关、fd 0 也已换回真实 tty）。
 //! - 失败不致命：[`install`] 任何一步出错都先在返回前还原 fd 0，调用方降级即可；但**没有
 //!   装上就不要开 mode 5522**（[`is_installed`] 是 `enter_sequence` 的判据）——否则协议
 //!   数据会直接喂给 crossterm，正是本层要避免的事。
@@ -49,14 +51,29 @@ use std::time::{Duration, Instant};
 /// 一条完整的 OSC 5522 负载：`ESC]5522;` 之后、终止符（BEL / ST）之前的原始字节。
 pub type Sequence = Vec<u8>;
 
-/// 前缀候选的持有上限：25ms 内没等到后续字节就冲回透传流。
-///
-/// `Esc` 键的形态就是「一个孤零零的 `ESC`」——不能无限期扣着（否则 Esc 会在下一次按键
-/// 到达时才生效，还会被 crossterm 读成 `Alt+某键`）。
+/// 触发「远端档」的环境变量：SSH / mosh 的转发会把同一次 `write` 拆到多个 read。
+const SSH_ENV: [&str; 4] = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION"];
+
+/// 远端档的候选持有上限：拆包间隔可能到几十 ms，本地档会把 `ESC` 与紧跟的字节判成两个
+/// 事件（Alt 组合退化成孤立 ESC → 误触发「打断」）。
+const SSH_HOLD: Duration = Duration::from_millis(100);
+
+/// 单 ESC 候选的本地持有上限：正好一个 `ESC` 字节可能是 `Esc` 键、也可能是被拆开的序列
+/// 开头（读边界落在哪里无从预知），只能等一小会儿再判定。代价是本地 `Esc` 键多 ≤10ms
+/// 判定延迟——有意接受的取舍（与 PI 同款），换来「协议字节绝不在未确认时漏给 crossterm」。
+const ESC_HOLD: Duration = Duration::from_millis(10);
+
+/// 多字节候选（`ESC]55…` / `ESC[20…`）的本地持有上限：这些形态不可能是 `Esc` 键，多等
+/// 几毫秒能把大多数拆包形态拼回来。代价：`Alt+[…]` 组合键晚 ≤25ms。
 const PREFIX_HOLD: Duration = Duration::from_millis(25);
 
 /// 序列体的空闲上限：正常终端毫秒级闭合（Ghostty 一条包一次 write），超过即视为坏数据。
 const SEQUENCE_IDLE: Duration = Duration::from_secs(5);
+
+/// 单个序列体的字节上限：正常 5522 包远小于此（DATA 分片 ≤4096 原始字节 → base64
+/// ≈5.5KiB），1MiB 已留近 200 倍余量；真正的会话级上限在协议机（`MAX_PAYLOAD` 64MiB）。
+/// 超限只可能来自坏流：已累积的负载丢弃，后续字节吞到终止符 / 空闲超时，绝不冲回透传。
+const SEQUENCE_BODY_MAX: usize = 1024 * 1024;
 
 /// 泵线程里「待写进内层 pty」的字节上限。到顶就暂时不读源（也让真实 tty 的环形缓冲
 /// 把背压顶回终端，而不是在我们这里无限吃内存）——poll 的 POLLIN 只能撤掉，否则
@@ -103,7 +120,14 @@ enum Hold {
     /// `ESC]5522;` 或 `ESC[200~` 的**部分前缀**（含开头的 ESC）。
     Candidate { bytes: Vec<u8>, since: Instant },
     /// 已确认 `ESC]5522;` 开头，累积到终止符为止的负载。
-    Body { payload: Vec<u8>, since: Instant },
+    ///
+    /// `overflow`：体积超过 [`SEQUENCE_BODY_MAX`] 后置位——负载丢弃、`payload` 降级成
+    /// 两字节滑动窗口（只为等终止符），绝不把坏流的后续字节冲回透传。
+    Body {
+        payload: Vec<u8>,
+        since: Instant,
+        overflow: bool,
+    },
     /// bracketed paste 保护区内：`ESC[201~` 之前一律原样透传，尾部最多 6 字节待判。
     Paste { tail: Vec<u8> },
 }
@@ -144,11 +168,53 @@ fn classify(buf: &[u8]) -> Candidate {
     Candidate::No
 }
 
-/// 字节流分流器。**不丢用户数据**是唯一红线：除「已确认的 5522 序列」与「等不到终止符的
-/// 5522 序列体」外，所有字节按原顺序从 [`Feed::passthrough`] 出来。
+/// 候选持有的档位（本地终端 / 远端转发）。构造时快照一次，之后不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Holds {
+    /// 单 ESC 候选（`Esc` 键的形态）。
+    escape: Duration,
+    /// 多字节候选前缀。
+    prefix: Duration,
+}
+
+impl Holds {
+    /// 从环境探测档位。`env` 注入是为单测——套件跑在 SSH 会话里时，本地档用例也必须确定。
+    fn detect(env: impl Fn(&str) -> Option<String>) -> Self {
+        if SSH_ENV.iter().any(|key| env(key).is_some()) {
+            Self {
+                escape: SSH_HOLD,
+                prefix: SSH_HOLD,
+            }
+        } else {
+            Self {
+                escape: ESC_HOLD,
+                prefix: PREFIX_HOLD,
+            }
+        }
+    }
+
+    /// 该长度的候选用的持有上限。
+    fn hold_for(&self, candidate_len: usize) -> Duration {
+        if candidate_len == 1 {
+            self.escape
+        } else {
+            self.prefix
+        }
+    }
+}
+
+impl Default for Holds {
+    fn default() -> Self {
+        Self::detect(|key| std::env::var(key).ok())
+    }
+}
+
+/// 字节流分流器。**不丢用户数据**是唯一红线：除「已确认的 5522 序列」与「超限 / 等不到
+/// 终止符的 5522 序列体」外，所有字节按原顺序从 [`Feed::passthrough`] 出来。
 #[derive(Debug, Default)]
 pub(crate) struct Splitter {
     hold: Hold,
+    holds: Holds,
 }
 
 impl Splitter {
@@ -158,10 +224,10 @@ impl Splitter {
 
     /// 喂一次 read 的字节。
     ///
-    /// `queue_drained`：本次 `read` 返回的字节数小于缓冲区（内核队列已空）。据此决定
-    /// **尾部半截候选前缀**是立刻冲回还是继续持有——`Esc` 键（单字节 `ESC`）落在这一条上，
-    /// 它是零延迟的；只有「缓冲读满 + 尾部长这样」的罕见形态才吃 [`PREFIX_HOLD`]。
-    pub fn feed(&mut self, chunk: &[u8], queue_drained: bool, now: Instant) -> Feed {
+    /// 任何候选（包括孤立的 `ESC`）都不在这里冲回：`read` 返回不代表写方没有后续字节
+    /// （pty 的 `write(2)` 允许短写、SSH 转发按传输窗口分片），把半截候选当用户数据冲回，
+    /// 整条 5522 包就会漏给 crossterm。冲回统一交给 [`Splitter::expire`] 的持有超时。
+    pub fn feed(&mut self, chunk: &[u8], now: Instant) -> Feed {
         let mut out = Feed::default();
         let mut i = 0;
         while i < chunk.len() {
@@ -188,6 +254,7 @@ impl Splitter {
                             self.hold = Hold::Body {
                                 payload: Vec::new(),
                                 since: now,
+                                overflow: false,
                             };
                         }
                         Candidate::PasteOpen => {
@@ -197,27 +264,59 @@ impl Splitter {
                         }
                         Candidate::No => {
                             // 失配：持有的字节全部原样冲回（`Alt+]` 之类语义一字不差）。
+                            tracing::debug!(
+                                "stdin proxy: candidate prefix does not match, waving {} bytes through",
+                                bytes.len()
+                            );
                             out.passthrough.append(bytes);
                             self.hold = Hold::None;
                         }
                     }
                 }
                 // 序列体：累积到 BEL 或 ST。
-                Hold::Body { payload, since } => {
+                Hold::Body {
+                    payload,
+                    since,
+                    overflow,
+                } => {
                     let b = chunk[i];
                     i += 1;
                     if b == BEL {
-                        out.sequences.push(std::mem::take(payload));
+                        if *overflow {
+                            payload.clear(); // 超限包已 warn，这里只把槽位还给下一个候选
+                        } else {
+                            out.sequences.push(std::mem::take(payload));
+                        }
                         self.hold = Hold::None;
                         continue;
                     }
-                    payload.push(b);
                     *since = now;
+                    if *overflow {
+                        payload.push(b);
+                        let excess = payload.len().saturating_sub(2);
+                        if excess > 0 {
+                            payload.drain(..excess);
+                        }
+                    } else {
+                        payload.push(b);
+                    }
                     // `ends_with` 天然覆盖 ST 被 read 边界切开的情况（base64 负载里不含 ESC）。
                     if payload.ends_with(b"\x1b\\") {
-                        payload.truncate(payload.len() - 2);
-                        out.sequences.push(std::mem::take(payload));
+                        if *overflow {
+                            payload.clear();
+                        } else {
+                            payload.truncate(payload.len() - 2);
+                            out.sequences.push(std::mem::take(payload));
+                        }
                         self.hold = Hold::None;
+                    } else if !*overflow && payload.len() > SEQUENCE_BODY_MAX {
+                        // 坏流：丢负载，转成「吞到终止符」的降级窗口（见 SEQUENCE_BODY_MAX）。
+                        tracing::warn!(
+                            "stdin proxy: OSC 5522 body over {SEQUENCE_BODY_MAX} bytes, dropping it"
+                        );
+                        *overflow = true;
+                        payload.clear();
+                        payload.push(b);
                     }
                 }
                 // 保护区：粘贴内容里的字面 `ESC]5522;` 属于用户数据，必须保全。
@@ -243,28 +342,15 @@ impl Splitter {
                 }
             }
         }
-
-        // 队列已空 + 尾部是**孤立的 ESC**（`Esc` 键的形态）→ 立刻冲回，零延迟。
-        //
-        // 多字节候选**不能**在这里冲回：`queue_drained` 只证明「此刻内核队列空」，不证明
-        // 写方没有后续字节（pty 的 `write(2)` 允许短写、SSH 转发按传输窗口分片）。把半截
-        // `ESC]5522;` 前缀当用户数据冲回，整条 5522 包就会漏给 crossterm（`Alt+]` + 杂
-        // 字符灌进 composer 草稿），协议机这边丢包、以 5s 超时的 toast 收场（归因错误）。
-        // 那些字节交给 [`PREFIX_HOLD`]（25 ms）兜底冲回；代价只是 Alt 组合键晚 25 ms。
-        if queue_drained
-            && let Hold::Candidate { bytes, .. } = &mut self.hold
-            && bytes.len() == 1
-        {
-            out.passthrough.append(bytes);
-            self.hold = Hold::None;
-        }
         out
     }
 
     /// 推进超时。调用方在 [`Splitter::deadline`] 到点（或更晚）时调用。
     pub fn expire(&mut self, now: Instant) -> Option<Expiry> {
         match &self.hold {
-            Hold::Candidate { bytes, since } if now.duration_since(*since) >= PREFIX_HOLD => {
+            Hold::Candidate { bytes, since }
+                if now.duration_since(*since) >= self.holds.hold_for(bytes.len()) =>
+            {
                 let bytes = bytes.clone();
                 self.hold = Hold::None;
                 Some(Expiry::Flush(bytes))
@@ -280,7 +366,7 @@ impl Splitter {
     /// 下一次需要 [`Splitter::expire`] 的时刻（无持有 = 无需唤醒）。
     pub fn deadline(&self) -> Option<Instant> {
         match &self.hold {
-            Hold::Candidate { since, .. } => Some(*since + PREFIX_HOLD),
+            Hold::Candidate { bytes, since } => Some(*since + self.holds.hold_for(bytes.len())),
             Hold::Body { since, .. } => Some(*since + SEQUENCE_IDLE),
             Hold::None | Hold::Paste { .. } => None,
         }
@@ -305,6 +391,9 @@ mod imp {
         /// 真实 tty 的副本：`restore` 用它还原 fd 0。泵线程另有一份自己的 dup。
         restore_fd: RawFd,
         stop_w: RawFd,
+        /// `dup(master)` 的唤醒副本：泵线程收工时关掉 master，要打断 crossterm 阻塞读的
+        /// 收尾方必须自己留一份（向它写 1 字节，字节走 master→slave 的内核路径）。`-1` = 降级。
+        wake_fd: RawFd,
         join: Option<JoinHandle<()>>,
     }
 
@@ -383,9 +472,9 @@ mod imp {
     }
 
     /// `install` 走到一半失败的兜底：把 fd 0 还回原 tty 并关掉已开的 fd（`-1` 忽略）。
-    fn abort(restore_fd: RawFd, master: RawFd, stop_r: RawFd, stop_w: RawFd) {
+    fn abort(restore_fd: RawFd, master: RawFd, stop_r: RawFd, stop_w: RawFd, wake_fd: RawFd) {
         unsafe { libc::dup2(restore_fd, 0) };
-        for fd in [restore_fd, master, stop_r, stop_w] {
+        for fd in [restore_fd, master, stop_r, stop_w, wake_fd] {
             if fd >= 0 {
                 close(fd);
             }
@@ -454,7 +543,13 @@ mod imp {
             // 「只有 master 可写」这种 rc≥1 的轮次把到期的持有拖住。
             let mut feed = Feed::default();
             match splitter.expire(Instant::now()) {
-                Some(Expiry::Flush(bytes)) => feed.passthrough.extend_from_slice(&bytes),
+                Some(Expiry::Flush(bytes)) => {
+                    tracing::debug!(
+                        "stdin proxy: candidate hold expired, waving {} bytes through",
+                        bytes.len()
+                    );
+                    feed.passthrough.extend_from_slice(&bytes);
+                }
                 Some(Expiry::Drop) => {
                     tracing::warn!("stdin proxy: dropping unterminated OSC 5522 sequence")
                 }
@@ -466,7 +561,7 @@ mod imp {
                     unsafe { libc::read(src, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if n > 0 {
                     let n = n as usize;
-                    let part = splitter.feed(&buf[..n], n < buf.len(), Instant::now());
+                    let part = splitter.feed(&buf[..n], Instant::now());
                     feed.passthrough.extend_from_slice(&part.passthrough);
                     feed.sequences.extend(part.sequences);
                 } else if n == 0 {
@@ -544,11 +639,22 @@ mod imp {
             close(src);
             return Err(e);
         }
+        // 唤醒副本：泵线程收工时关掉 master，`wake_reader` 必须自己留一份（失败降级为 -1）。
+        let wake_fd = unsafe { libc::dup(master) };
+        if wake_fd < 0 {
+            tracing::warn!(
+                "stdin proxy: cannot duplicate master for reader wake-up: {}",
+                io_err()
+            );
+        }
         if unsafe { libc::dup2(slave, 0) } < 0 {
             let e = io_err();
             close(slave);
             close(master);
             close(src);
+            if wake_fd >= 0 {
+                close(wake_fd);
+            }
             return Err(e);
         }
         close(slave);
@@ -561,12 +667,15 @@ mod imp {
             unsafe { libc::dup2(src, 0) };
             close(master);
             close(src);
+            if wake_fd >= 0 {
+                close(wake_fd);
+            }
             return Err(e);
         }
         let mut pipe_fds = [0 as RawFd; 2];
         if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
             let e = io_err();
-            abort(restore_fd, master, -1, -1);
+            abort(restore_fd, master, -1, -1, wake_fd);
             close(src);
             return Err(e);
         }
@@ -581,15 +690,33 @@ mod imp {
                 shared.proxy = Some(Proxy {
                     restore_fd,
                     stop_w,
+                    wake_fd,
                     join: Some(join),
                 });
                 shared.seq_rx = Some(rx);
                 Ok(())
             }
             Err(e) => {
-                abort(restore_fd, master, stop_r, stop_w);
+                abort(restore_fd, master, stop_r, stop_w, wake_fd);
                 close(src);
                 Err(e)
+            }
+        }
+    }
+
+    /// 向「读 fd 0」的一方投递 1 字节唤醒（收尾时打断 crossterm 的阻塞读）。
+    ///
+    /// 字节走 master→slave 的内核路径，泵线程不参与；**必须在 [`restore`] 之前调用**
+    /// （那时 fd 0 还是内层 slave、master 还没关）。没装上接驳 / 唤醒副本创建失败时是
+    /// 空操作——调用方另有有界等待兜底。
+    pub fn wake_reader() {
+        let shared = lock();
+        let Some(proxy) = shared.proxy.as_ref() else {
+            return;
+        };
+        if proxy.wake_fd >= 0 {
+            unsafe {
+                libc::write(proxy.wake_fd, b"x".as_ptr() as *const libc::c_void, 1);
             }
         }
     }
@@ -606,6 +733,9 @@ mod imp {
             libc::dup2(proxy.restore_fd, 0);
             close(proxy.restore_fd);
             close(proxy.stop_w);
+            if proxy.wake_fd >= 0 {
+                close(proxy.wake_fd);
+            }
         }
     }
 
@@ -630,6 +760,9 @@ mod imp {
 
     pub fn restore() {}
 
+    /// 非 Unix：没有接驳层（不会有人读内层 pty），空操作。
+    pub fn wake_reader() {}
+
     pub fn is_installed() -> bool {
         false
     }
@@ -643,6 +776,7 @@ pub use imp::install;
 pub use imp::is_installed;
 pub use imp::restore;
 pub use imp::take_sequences;
+pub use imp::wake_reader;
 
 #[cfg(test)]
 mod tests {
@@ -654,9 +788,28 @@ mod tests {
         *BASE.get_or_init(Instant::now) + Duration::from_millis(ms)
     }
 
-    /// 一次「完整」的读（内核队列已空）：单测里就是常态。
+    /// 一次 read 的字节：单测不区分「队列已空」（`Splitter` 也不再据此做零延迟优化）。
     fn feed(s: &mut Splitter, chunk: &[u8], ms: u64) -> Feed {
-        s.feed(chunk, true, at(ms))
+        s.feed(chunk, at(ms))
+    }
+
+    /// 本地档：不读真实环境——套件跑在 SSH 会话里时用例也必须确定。
+    fn local() -> Splitter {
+        Splitter {
+            hold: Hold::None,
+            holds: Holds {
+                escape: ESC_HOLD,
+                prefix: PREFIX_HOLD,
+            },
+        }
+    }
+
+    /// 远端档（注入 `SSH_CONNECTION`）。
+    fn remote() -> Splitter {
+        Splitter {
+            hold: Hold::None,
+            holds: Holds::detect(|key| (key == "SSH_CONNECTION").then(String::new)),
+        }
     }
 
     fn seq(inner: &str) -> Vec<u8> {
@@ -668,12 +821,12 @@ mod tests {
 
     #[test]
     fn plain_bytes_pass_through_byte_for_byte() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let out = feed(&mut s, b"hello \xe4\xb8\x96\xe7\x95\x8c", 0);
         assert_eq!(out.passthrough, "hello 世界".as_bytes());
         assert!(out.sequences.is_empty());
         // 分块喂同样一致。
-        let mut s = Splitter::new();
+        let mut s = local();
         let mut acc = Vec::new();
         for chunk in [&b"he"[..], &b"ll"[..], &b"o"[..]] {
             acc.extend(feed(&mut s, chunk, 0).passthrough);
@@ -683,7 +836,7 @@ mod tests {
 
     #[test]
     fn complete_sequence_is_extracted_not_passed_through() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let out = feed(&mut s, &seq("type=read:status=OK:pw=b3Rw"), 0);
         assert_eq!(out.passthrough, b"");
         assert_eq!(out.sequences, vec![b"type=read:status=OK:pw=b3Rw".to_vec()]);
@@ -691,7 +844,7 @@ mod tests {
 
     #[test]
     fn bel_terminated_sequence_is_extracted_too() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let mut raw = SEQUENCE_PREFIX.to_vec();
         raw.extend_from_slice(b"type=read:status=DONE:pw=b3Rw");
         raw.push(BEL);
@@ -713,16 +866,12 @@ mod tests {
         };
         let expected = b"type=read:status=DATA:mime=Lg==;dGV4dA==".to_vec();
         for cut in 1..raw.len() {
-            let mut s = Splitter::new();
-            // 两段，且第一段按 **drained** 喂（内核队列已空 + 短读——pty 短写 / SSH 分片的
-            // 形态）：切点落在前缀内（`ESC` / `ESC]` / …）时多字节候选必须扣住等后续字节，
-            // 否则整条包漏给 crossterm。
-            //
-            // 唯一例外是 `cut == 1`（第一段就是一个孤立 `ESC`）：它可能是 `Esc` 键，按既定
-            // 取舍立刻冲回（见 `lone_esc_at_a_drained_read_is_flushed_immediately`），
-            // 因此那一段仍按非 drained 喂。
-            let a = s.feed(&raw[..cut], cut > 1, at(0));
-            let b = s.feed(&raw[cut..], true, at(1));
+            let mut s = local();
+            // 两段各按一次 read 喂：切点落在任何位置（`ESC` / `ESC]` / … / 体内部）时，
+            // 第一段留下的**任何**候选都要扣住等后续字节——包括 `cut == 1` 的孤立
+            // `ESC`（它可能只是 `Esc` 键，但拆分窗口内不许提前冲回）。
+            let a = s.feed(&raw[..cut], at(0));
+            let b = s.feed(&raw[cut..], at(1));
             let mut seqs = a.sequences;
             seqs.extend(b.sequences);
             assert_eq!(seqs, vec![expected.clone()], "cut at {cut}");
@@ -730,13 +879,13 @@ mod tests {
         }
     }
 
-    /// [S1] 短读 + 切点落在包前缀内：`queue_drained` 只证明「此刻队列空」，不证明写方
+    /// 短读 + 切点落在包前缀内：`read` 返回短于缓冲只证明「此刻内核队列空」，不证明写方
     /// 没有后续字节。把半截 `ESC]5522;` 前缀当用户数据冲回，整条 5522 包会漏给
     /// crossterm（`Alt+]` + 杂字符灌进草稿），协议机丢包、以超时 toast 收场（归因错误）。
     #[test]
     fn a_short_read_inside_the_sequence_prefix_does_not_leak_to_crossterm() {
-        let mut s = Splitter::new();
-        // 第一次 read：切在 `ESC]`，且本次 read 短于内核缓冲（drained）。
+        let mut s = local();
+        // 第一次 read：切在 `ESC]`（短读）。
         assert_eq!(feed(&mut s, b"\x1b]", 0).passthrough, b"", "候选不能冲回");
         assert_eq!(
             s.deadline(),
@@ -749,7 +898,7 @@ mod tests {
         assert_eq!(out.sequences, vec![b"type=read:status=OK:pw=b3Rw".to_vec()]);
 
         // 反例（切点落在一个不是任何 5522 形态的候选上）：到点仍原样冲回。
-        let mut s = Splitter::new();
+        let mut s = local();
         assert_eq!(feed(&mut s, b"\x1b]", 0).passthrough, b"");
         assert_eq!(
             s.expire(at(30)),
@@ -760,7 +909,7 @@ mod tests {
 
     #[test]
     fn st_terminator_split_across_reads() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let raw = seq("x");
         let (head, tail) = raw.split_at(raw.len() - 1); // 尾部只剩 '\'
         assert!(feed(&mut s, head, 0).sequences.is_empty(), "还没到终止符");
@@ -775,7 +924,7 @@ mod tests {
         raw.extend(b"b");
         raw.extend(seq("two"));
         raw.extend(b"c");
-        let mut s = Splitter::new();
+        let mut s = local();
         let out = feed(&mut s, &raw, 0);
         assert_eq!(out.passthrough, b"abc");
         assert_eq!(out.sequences, vec![b"one".to_vec(), b"two".to_vec()]);
@@ -784,55 +933,103 @@ mod tests {
     #[test]
     fn alt_bracket_is_passed_through_when_it_turns_out_not_to_be_a_sequence() {
         // `Alt+]`（crossterm 会解析成 Alt+']'）：前缀候选失配后必须原样冲回。
-        let mut s = Splitter::new();
+        let mut s = local();
         let out = feed(&mut s, b"\x1b]x", 0);
         assert_eq!(out.passthrough, b"\x1b]x");
         assert!(out.sequences.is_empty());
     }
 
     #[test]
-    fn lone_esc_at_a_drained_read_is_flushed_immediately() {
-        // Esc 键的形态：一个孤立的 ESC 字节，队列已空 → 零延迟放行。
-        let mut s = Splitter::new();
+    fn lone_esc_is_held_until_the_escape_hold_expires() {
+        // Esc 键的形态：一个孤立的 ESC 字节——它也可能是一条被拆开的序列的开头，
+        // 按 `ESC_HOLD` 判一次；不立即冲回（协议字节零泄漏的代价）。
+        let mut s = local();
         let out = feed(&mut s, b"\x1b", 0);
-        assert_eq!(out.passthrough, b"\x1b");
-        assert!(s.deadline().is_none(), "不持有 = 不需要唤醒");
+        assert_eq!(out.passthrough, b"", "不立即冲回");
+        assert_eq!(s.deadline(), Some(at(0) + ESC_HOLD));
+        assert_eq!(s.expire(at(5)), None, "还没到点");
+        assert_eq!(s.expire(at(10)), Some(Expiry::Flush(b"\x1b".to_vec())));
+        assert_eq!(s.deadline(), None, "冲回后不再持有");
+    }
+
+    /// 超时之前 `]5522;…` 到达：孤立 ESC 归位成整条序列，零透传、零按键污染。
+    #[test]
+    fn a_lone_esc_tail_is_reattached_when_the_sequence_continues() {
+        let mut s = local();
+        assert_eq!(feed(&mut s, b"\x1b", 0).passthrough, b"", "先扣住");
+        assert_eq!(s.expire(at(5)), None, "还没到判定点");
+        let out = feed(&mut s, b"]5522;type=read:status=OK:pw=b3Rw\x1b\\", 6);
+        assert_eq!(out.passthrough, b"", "一个字节都不许透传");
+        assert_eq!(out.sequences, vec![b"type=read:status=OK:pw=b3Rw".to_vec()]);
+        assert_eq!(s.deadline(), None);
     }
 
     #[test]
-    fn lone_esc_at_a_full_read_is_held_then_flushed_on_timeout() {
-        // 满缓冲读的尾部：可能还有后续（序列前缀被切开），持有到 25ms 上限。
-        let mut s = Splitter::new();
-        let out = s.feed(b"\x1b", false, at(0));
-        assert_eq!(out.passthrough, b"", "先持有");
-        assert_eq!(s.deadline(), Some(at(0) + PREFIX_HOLD));
-        assert_eq!(s.expire(at(10)), None, "还没到点");
-        assert_eq!(s.expire(at(30)), Some(Expiry::Flush(b"\x1b".to_vec())));
-        assert_eq!(s.deadline(), None);
+    fn ssh_env_degrades_the_holds_to_one_hundred_ms() {
+        // 单 ESC：本地 10ms 的判定点不许在远端档生效（分片间隔可能到几十 ms）。
+        let mut s = remote();
+        assert_eq!(feed(&mut s, b"\x1b", 0).passthrough, b"");
+        assert_eq!(s.deadline(), Some(at(0) + SSH_HOLD));
+        assert_eq!(s.expire(at(10)), None, "10ms 只在本地档生效");
+        assert_eq!(s.expire(at(99)), None);
+        assert_eq!(s.expire(at(100)), Some(Expiry::Flush(b"\x1b".to_vec())));
+
+        // 多字节候选：25ms 的本地判定点同样不许在远端档生效。
+        let mut s = remote();
+        assert_eq!(feed(&mut s, b"\x1b]", 0).passthrough, b"");
+        assert_eq!(s.deadline(), Some(at(0) + SSH_HOLD));
+        assert_eq!(s.expire(at(30)), None);
+        assert_eq!(s.expire(at(100)), Some(Expiry::Flush(b"\x1b]".to_vec())));
+    }
+
+    #[test]
+    fn holds_detect_the_remote_tier_from_each_env_var() {
+        let local_tier = Holds {
+            escape: ESC_HOLD,
+            prefix: PREFIX_HOLD,
+        };
+        assert_eq!(Holds::detect(|_| None), local_tier);
+        // 任一 SSH / mosh 变量存在（哪怕空串）就是远端档。
+        for key in SSH_ENV {
+            let holds = Holds::detect(|asked| (asked == key).then(String::new));
+            assert_eq!(
+                holds,
+                Holds {
+                    escape: SSH_HOLD,
+                    prefix: SSH_HOLD
+                },
+                "{key} 应该切到远端档"
+            );
+        }
+        // 无关变量不影响档位。
+        assert_eq!(
+            Holds::detect(|asked| (asked == "TERM").then(|| "xterm-256color".to_string())),
+            local_tier
+        );
     }
 
     #[test]
     fn held_prefix_resolves_with_the_next_read() {
         // `ESC` 与 `[A` 分两次读到：拼起来是方向键，按原序透传。
-        let mut s = Splitter::new();
-        assert_eq!(s.feed(b"\x1b", false, at(0)).passthrough, b"");
-        let out = s.feed(b"[A", true, at(1));
+        let mut s = local();
+        assert_eq!(s.feed(b"\x1b", at(0)).passthrough, b"");
+        let out = s.feed(b"[A", at(1));
         assert_eq!(out.passthrough, b"\x1b[A");
         assert!(out.sequences.is_empty());
     }
 
     #[test]
     fn held_prefix_split_inside_the_sequence_prefix_still_matches() {
-        let mut s = Splitter::new();
-        assert_eq!(s.feed(b"\x1b]55", false, at(0)).passthrough, b"");
-        let out = s.feed(b"22;hello\x1b\\", true, at(1));
+        let mut s = local();
+        assert_eq!(s.feed(b"\x1b]55", at(0)).passthrough, b"");
+        let out = s.feed(b"22;hello\x1b\\", at(1));
         assert_eq!(out.passthrough, b"");
         assert_eq!(out.sequences, vec![b"hello".to_vec()]);
     }
 
     #[test]
     fn unterminated_sequence_is_dropped_after_the_idle_timeout() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let mut raw = SEQUENCE_PREFIX.to_vec();
         raw.extend_from_slice(b"type=read:status=OK");
         let out = feed(&mut s, &raw, 0);
@@ -846,7 +1043,7 @@ mod tests {
 
     #[test]
     fn sequence_idle_clock_advances_with_each_byte() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let mut raw = SEQUENCE_PREFIX.to_vec();
         raw.extend_from_slice(b"1234");
         feed(&mut s, &raw, 0);
@@ -856,13 +1053,47 @@ mod tests {
         assert_eq!(s.deadline(), Some(at(4000) + SEQUENCE_IDLE));
     }
 
+    /// 体超限（坏流，没有合法 5522 包会到这个体积）：负载丢弃，后续字节吞到终止符再
+    /// 恢复分流——绝不把坏流的尾巴冲回透传（那正是本层要防的按键污染）。
+    #[test]
+    fn overlong_sequence_body_is_dropped_without_leaking() {
+        for terminator in [&b"\x07"[..], b"\x1b\\"] {
+            let mut raw = SEQUENCE_PREFIX.to_vec();
+            raw.extend(std::iter::repeat_n(b'a', SEQUENCE_BODY_MAX + 1));
+            raw.extend_from_slice(terminator);
+            let mut s = local();
+            let out = feed(&mut s, &raw, 0);
+            assert!(out.sequences.is_empty(), "超限的序列体整段丢弃");
+            assert!(out.passthrough.is_empty(), "一个字节都不许漏给 crossterm");
+            assert_eq!(s.deadline(), None, "终止符到了，持有清空");
+
+            // 终止符之后分流恢复：后续字节照常透传。
+            let out = feed(&mut s, b"tail", 1);
+            assert_eq!(out.passthrough, b"tail");
+            assert!(out.sequences.is_empty());
+        }
+    }
+
+    /// 超限的坏流一直不来终止符：空闲超时照样清掉（不会把持有没有限地拖住）。
+    #[test]
+    fn overlong_sequence_body_without_a_terminator_still_expires() {
+        let mut raw = SEQUENCE_PREFIX.to_vec();
+        raw.extend(std::iter::repeat_n(b'a', SEQUENCE_BODY_MAX + 1));
+        let mut s = local();
+        let out = feed(&mut s, &raw, 0);
+        assert!(out.passthrough.is_empty());
+        assert_eq!(s.deadline(), Some(at(0) + SEQUENCE_IDLE));
+        assert_eq!(s.expire(at(6000)), Some(Expiry::Drop));
+        assert_eq!(feed(&mut s, b"z", 6100).passthrough, b"z");
+    }
+
     #[test]
     fn bracketed_paste_content_keeps_a_literal_5522_intact() {
         // 保护区的意义：非 5522 终端上，粘贴内容里的字面 OSC 5522 是用户数据，不能吃。
         let mut raw = b"\x1b[200~".to_vec();
         raw.extend(seq("literal"));
         raw.extend(b" tail\x1b[201~");
-        let mut s = Splitter::new();
+        let mut s = local();
         let out = feed(&mut s, &raw, 0);
         assert!(out.sequences.is_empty(), "保护区内的序列不当协议数据");
         assert_eq!(out.passthrough, raw, "含开闭界的每个字节都原样放行");
@@ -870,7 +1101,7 @@ mod tests {
 
     #[test]
     fn bracketed_paste_terminator_split_across_reads() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let open = b"\x1b[200~hi";
         assert_eq!(feed(&mut s, open, 0).passthrough, open);
         // 闭界被切成两段：`ESC[20` 是终止符前缀（要扣住等下一字节），到齐后整段放行。
@@ -884,7 +1115,7 @@ mod tests {
     #[test]
     fn bracketed_paste_region_does_not_stall_non_terminator_bytes() {
         // 保护区内除了「可能是终止符开头」的那几字节，其余都该立刻出去（包括裸 ESC）。
-        let mut s = Splitter::new();
+        let mut s = local();
         assert_eq!(feed(&mut s, b"\x1b[200~", 0).passthrough, b"\x1b[200~");
         assert_eq!(feed(&mut s, b"abc\x1b", 1).passthrough, b"abc");
         assert_eq!(feed(&mut s, b"Z", 2).passthrough, b"\x1bZ");
@@ -898,7 +1129,7 @@ mod tests {
         let mut raw = b"\x1b[200~A\x1b".to_vec();
         raw.extend_from_slice(PASTE_CLOSE);
         raw.extend_from_slice(b"B");
-        let mut s = Splitter::new();
+        let mut s = local();
         let out = feed(&mut s, &raw, 0);
         assert_eq!(out.passthrough, raw, "含尾部字面 ESC 的每个字节都原样放行");
         assert!(out.sequences.is_empty());
@@ -909,7 +1140,7 @@ mod tests {
 
     #[test]
     fn other_osc_sequences_pass_through_untouched() {
-        let mut s = Splitter::new();
+        let mut s = local();
         let raw = b"\x1b]52;c;aGVsbG8=\x07";
         assert_eq!(feed(&mut s, raw, 0).passthrough, raw);
         let raw = b"\x1b]0;title\x1b\\";
@@ -947,15 +1178,15 @@ mod tests {
                     .wrapping_add(1442695040888963407);
                 (state >> 33) as usize
             };
-            let mut s = Splitter::new();
+            let mut s = local();
             let mut passthrough = Vec::new();
             let mut sequences = Vec::new();
             let mut i = 0;
             while i < stream.len() {
                 let take = (next() % 7 + 1).min(stream.len() - i);
-                let last = i + take == stream.len();
-                // 段的末尾故意报「队列未空」：模拟一次 write 被多次 read 切开的形态。
-                let out = s.feed(&stream[i..i + take], last, at(i as u64));
+                // 任意切块（含「一次 write 被多次 read 切开」的形态）：任何位置的候选都
+                // 只能等后续字节或超时，不许提前冲回。
+                let out = s.feed(&stream[i..i + take], at(i as u64));
                 passthrough.extend_from_slice(&out.passthrough);
                 sequences.extend(out.sequences);
                 i += take;
