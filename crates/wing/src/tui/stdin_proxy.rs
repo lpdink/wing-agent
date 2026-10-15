@@ -17,7 +17,8 @@
 //!
 //! ```text
 //!  真实 tty ──read──► 泵线程（Splitter）──write──► pty master ⇄ pty slave（fd 0）──► crossterm
-//!                                    └─ 完整 OSC 5522 序列 ─► 协议机（clipboard_protocol）
+//!                                    ├─ 完整 OSC 5522 序列 ─► 协议机（clipboard_protocol）
+//!                                    └─ DECRPM 应答（ESC[? … $y）─► 吸收（探针判定 / 丢弃）
 //! ```
 //!
 //! # 生命周期（顺序是硬约束）
@@ -32,9 +33,36 @@
 //!   fd 0，彼时 fd 0 必须已经是真实 tty）。
 //! - 收尾时若要打断卡在 fd 0 阻塞读里的读者，用 [`wake_reader`]：字节走 master→slave
 //!   的内核路径，**必须在 [`restore`] 之前**调用（之后 master 已关、fd 0 也已换回真实 tty）。
+//! - [`settle_paste_channel`] 必须早于本进程任何一次 crossterm `poll`（事件源注册之后 fd 0
+//!   不能再换）；阴性判定会在模块内部直接 [`restore`]（首 poll 前的第二次拆解机会）。
 //! - 失败不致命：[`install`] 任何一步出错都先在返回前还原 fd 0，调用方降级即可；但**没有
-//!   装上就不要开 mode 5522**（[`is_installed`] 是 `enter_sequence` 的判据）——否则协议
-//!   数据会直接喂给 crossterm，正是本层要避免的事。
+//!   装上就不要开 mode 5522**（唯一发送点在协议机启动处，见 `tui::spawn_event_stream`）
+//!   ——否则协议数据会直接喂给 crossterm，正是本层要避免的事。
+//!
+//! # 启动探针：只在真支持 5522 的终端上留着接驳
+//!
+//! 接驳不是免费的：fd 0 被换成 pty slave、泵线程独占真实 tty、退出收尾多一层时序。不实现
+//! 5522 的终端（Ghostty stable 明确应答 `0`；iTerm2 / Terminal.app / tmux 静默）从这套机制
+//! 里拿不到任何东西，却要背下全部事故面。所以 [`install`] 装好接驳后立刻发 DECRQM 查询
+//! `CSI ? 5522 $ p`，[`settle_paste_channel`] 在**第一段 TUI 的第一次 crossterm poll 之前**
+//! 收束判定（crossterm 的事件源是进程级单例，注册之后 fd 0 就不能再换——反面证据
+//! `tests/stdin_proxy_stale_event_source.rs`）：
+//!
+//! - 应答 `Ps ∈ {1,2,3}`：保留接驳，`?5522h` 与协议机由 `tui::spawn_event_stream` 启动；
+//! - `Ps ∈ {0,4}`（明确阴性）：就地还原 fd 0，不再有任何 5522 流量会到达，接驳全部风险退场；
+//! - 本地无应答（超时）：同上（不实现 DECRQM 的终端不会迟到应答）；
+//! - SSH 无应答：**保留接驳、不开 mode** —— 远程链路的迟到应答必须仍被这里摘走，
+//!   否则 `ESC[?…$y` 落进 crossterm 会永久毒化按键解析（见下）。
+//!
+//! 判定预算本地短（150ms）、SSH 长（600ms）；查询发出得早（`install` 时），到判定点的
+//! 网络往返与图像能力探测通常已覆盖等待，额外延迟只发生在静默终端上、且一次性。
+//!
+//! ## 为什么应答必须在这里被摘走
+//!
+//! crossterm 0.29 的解析器对 `ESC [ ? … y` 永远返回 `Ok(None)`（`parse.rs` 的 `b'?'` 分支
+//! 只认 `u`/`c` 两种 final），缓冲永不清理：一条迟到的 `CSI ? 5522 ; 0 $ y` 会让之后所有
+//! 按键都被吞进这个「半截序列」。所以候选 `ESC[? <params> $y`（任意 DECRPM 应答，不只 5522）
+//! 被摘取并吸收；**到点等不到 final 时丢弃而不是冲回**——冲回正是毒化本身。
 //!
 //! # 已知边界：粘贴内容以字面 `ESC` 结尾
 //!
@@ -53,6 +81,19 @@ pub type Sequence = Vec<u8>;
 
 /// 触发「远端档」的环境变量：SSH / mosh 的转发会把同一次 `write` 拆到多个 read。
 const SSH_ENV: [&str; 4] = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION"];
+
+/// DECRQM 查询：`CSI ? 5522 $ p`（kitty clipboard protocol 的 paste events，mode 5522）。
+const PROBE_QUERY: &[u8] = b"\x1b[?5522$p";
+
+/// mode 5522 的编号（探针应答的 Pa 字段）。
+const PASTE_EVENTS_MODE: u32 = 5522;
+
+/// 探针判定预算：本地短（本地终端毫秒级应答，静默就是真静默）、SSH 长（RTT + 重排余量）。
+const PROBE_BUDGET_LOCAL: Duration = Duration::from_millis(150);
+const PROBE_BUDGET_SSH: Duration = Duration::from_millis(600);
+
+/// 等待应答的轮询步长：应答由泵线程写入共享状态，没有可等待的事件源，只能轻量轮询。
+const PROBE_POLL_STEP: Duration = Duration::from_millis(5);
 
 /// 远端档的候选持有上限：拆包间隔可能到几十 ms，本地档会把 `ESC` 与紧跟的字节判成两个
 /// 事件（Alt 组合退化成孤立 ESC → 误触发「打断」）。
@@ -84,6 +125,13 @@ const PUMP_PENDING_HIGH_WATER: usize = 64 * 1024;
 /// `ESC]5522;`——OSC 5522（kitty clipboard protocol）的前缀。
 const SEQUENCE_PREFIX: &[u8] = b"\x1b]5522;";
 
+/// `ESC[?`——DECRPM 应答（`CSI ? Pa ; Ps $ y`）的固定开头。
+const REPORT_OPEN: &[u8] = b"\x1b[?";
+
+/// DECRPM 应答参数段（`Pa;Ps`）的字节上限。真实应答 ≤ 10 字节；到不了 `$y` 的超长参数
+/// 是坏流，按失配冲回（与 `?1u` / `?62;c` 这些 crossterm 自己能消化的形态同路）。
+const REPORT_PARAM_MAX: usize = 16;
+
 /// `ESC[200~` / `ESC[201~`——bracketed paste 的开闭界。
 const PASTE_OPEN: &[u8] = b"\x1b[200~";
 const PASTE_CLOSE: &[u8] = b"\x1b[201~";
@@ -102,6 +150,9 @@ pub(crate) struct Feed {
     pub passthrough: Vec<u8>,
     /// 提取出的 OSC 5522 负载（可一次多个）。
     pub sequences: Vec<Sequence>,
+    /// 提取出的 DECRPM 应答参数段（`Pa;Ps`，如 `5522;2`；可一次多个）。**绝不透传**：
+    /// crossterm 对 `ESC[?…y` 会永久挂在半截序列上（见模块文档）。
+    pub reports: Vec<Vec<u8>>,
 }
 
 /// 超时产生的结果。
@@ -111,6 +162,9 @@ pub(crate) enum Expiry {
     Flush(Vec<u8>),
     /// 序列体等不到终止符：整段丢弃（调用方记日志）。
     Drop,
+    /// DECRPM 候选等不到 final：整段丢弃（**不能冲回**——`ESC[?…` 喂给 crossterm 正是
+    /// 永久毒化按键解析的那条路径，见模块文档）。
+    DropReport,
 }
 
 #[derive(Debug, Default)]
@@ -140,6 +194,8 @@ enum Candidate {
     Sequence,
     /// 完整匹配 `ESC[200~`。
     PasteOpen,
+    /// 完整匹配一条 DECRPM 应答（`ESC[?` + 参数 + `$y`）。
+    Report,
     /// 不是任何候选序列（含超长），立即冲回。
     No,
 }
@@ -165,7 +221,29 @@ fn classify(buf: &[u8]) -> Candidate {
             Candidate::Partial
         };
     }
+    if REPORT_OPEN.starts_with(buf) {
+        return Candidate::Partial; // `ESC` / `ESC[` / `ESC[?` 都还可能长成应答
+    }
+    if buf.starts_with(REPORT_OPEN) {
+        return classify_report_params(&buf[REPORT_OPEN.len()..]);
+    }
     Candidate::No
+}
+
+/// `ESC[?` 之后的部分：参数段 `[0-9;]*` + intermediate `$` + final `y`。
+fn classify_report_params(rest: &[u8]) -> Candidate {
+    let params = rest
+        .iter()
+        .take_while(|b| b.is_ascii_digit() || **b == b';')
+        .count();
+    if params > REPORT_PARAM_MAX {
+        return Candidate::No;
+    }
+    match &rest[params..] {
+        b"" | b"$" => Candidate::Partial,
+        b"$y" => Candidate::Report,
+        _ => Candidate::No,
+    }
 }
 
 /// 候选持有的档位（本地终端 / 远端转发）。构造时快照一次，之后不变。
@@ -271,6 +349,12 @@ impl Splitter {
                             out.passthrough.append(bytes);
                             self.hold = Hold::Paste { tail: Vec::new() };
                         }
+                        Candidate::Report => {
+                            // 完整应答：摘走参数段（`ESC[?` 与 `$y` 之间）。
+                            out.reports
+                                .push(bytes[REPORT_OPEN.len()..bytes.len() - 2].to_vec());
+                            self.hold = Hold::None;
+                        }
                         Candidate::No => {
                             // 失配：持有的字节全部原样冲回（`Alt+]` 之类语义一字不差）。
                             tracing::debug!(
@@ -365,6 +449,10 @@ impl Splitter {
             {
                 let bytes = bytes.clone();
                 self.hold = Hold::None;
+                if bytes.starts_with(REPORT_OPEN) {
+                    // 已在 `ESC[?` 的形态里：冲回就是毒化 crossterm 的那条路径，只能丢。
+                    return Some(Expiry::DropReport);
+                }
                 tracing::debug!(
                     "stdin proxy: {} candidate hold expired ({} bytes), waving through",
                     candidate_kind(bytes.len()),
@@ -391,6 +479,54 @@ impl Splitter {
 }
 
 // ---------------------------------------------------------------------------
+// 探针判定（纯逻辑）
+//
+// 非 Unix 上 fd 接驳整体不存在（`imp` 的 cfg），这几个判定只有单测用得到——
+// 按仓库约定对「声明的平台」放行 dead_code，而不是让它们只在 Unix 编译（与
+// `util/clipboard.rs` 的候选表同一约定）。
+// ---------------------------------------------------------------------------
+
+/// 粘贴通道的启用判定（[`settle_paste_channel`] 的产物；也是协议机的启动门控）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteChannel {
+    /// 探针阳性：接驳保留、`?5522h` 该发、协议机该起。
+    Supported,
+    /// 阴性（明确 `0/4`、本地静默或 SSH 静默）：不开 mode、不起协议机。
+    /// 接驳是否还在走 [`is_installed`] 单独看——SSH 静默时它保留（吸收迟到应答）。
+    Unsupported,
+}
+
+/// DECRPM 应答的语义：`Ps ∈ {1,2,3}`（已设 / 未设 / 永久设）才是真支持；`{0,4}` 与
+/// 未应答（含非法 `Ps`）都不启用。
+#[allow(dead_code)]
+pub(crate) fn probe_verdict(ps: Option<u8>) -> PasteChannel {
+    match ps {
+        Some(1..=3) => PasteChannel::Supported,
+        _ => PasteChannel::Unsupported,
+    }
+}
+
+/// 判定阴性后是否就地拆接驳：阳性不拆；明确阴性（有任何应答，含非法 `Ps`）无论档位都拆；
+/// 静默只拆本地——SSH 静默保留是为了兜住迟到应答（拆掉后它会直接落进 crossterm，
+/// 永久毒化按键解析）。
+#[allow(dead_code)]
+pub(crate) fn should_dismantle(ps: Option<u8>, remote: bool) -> bool {
+    match probe_verdict(ps) {
+        PasteChannel::Supported => false,
+        PasteChannel::Unsupported => ps.is_some() || !remote,
+    }
+}
+
+/// 解析 DECRPM 应答的参数段（`Pa;Ps`，如 `5522;2`）；形状不对（缺 `Ps` / 溢出 / 多段）
+/// 返回 `None`——分流层只负责摘取，语义在这里。
+#[allow(dead_code)]
+pub(crate) fn parse_decrmp(params: &[u8]) -> Option<(u32, u8)> {
+    let text = std::str::from_utf8(params).ok()?;
+    let (mode, ps) = text.split_once(';')?;
+    Some((mode.parse().ok()?, ps.parse().ok()?))
+}
+
+// ---------------------------------------------------------------------------
 // fd 接驳（Unix）
 // ---------------------------------------------------------------------------
 
@@ -398,6 +534,7 @@ impl Splitter {
 mod imp {
     use super::*;
     use std::io;
+    use std::io::Write;
     use std::os::fd::RawFd;
     use std::sync::Mutex;
     use std::thread::JoinHandle;
@@ -414,16 +551,31 @@ mod imp {
         join: Option<JoinHandle<()>>,
     }
 
+    /// 启动探针的进行态：`install` 登记（查询发出后开始计时），泵线程记录应答。
+    struct Probe {
+        /// 判定截止（`查询时刻 + 预算`）；应答先到就提前结束等待。
+        deadline: Instant,
+        /// 远端档（静默时决定拆 / 留，也决定预算）。
+        remote: bool,
+        /// 5522 的 DECRPM 应答（`Ps`）。
+        ps: Option<u8>,
+    }
+
     #[derive(Default)]
     struct Shared {
         proxy: Option<Proxy>,
         seq_rx: Option<mpsc::Receiver<Sequence>>,
+        probe: Option<Probe>,
+        /// 判定缓存（`settle_paste_channel` 幂等；`paste_channel` 读这里）。
+        settled: Option<PasteChannel>,
     }
 
     /// 全局句柄（安装 / 卸载各只有一次；`is_installed` 每次进序列读一次）。
     static SHARED: Mutex<Shared> = Mutex::new(Shared {
         proxy: None,
         seq_rx: None,
+        probe: None,
+        settled: None,
     });
 
     /// 锁 poisoned 也继续（panic hook 会在别的线程 panic 之后走到这里）。
@@ -564,6 +716,9 @@ mod imp {
                 Some(Expiry::Drop) => {
                     tracing::warn!("stdin proxy: dropping unterminated OSC 5522 sequence")
                 }
+                Some(Expiry::DropReport) => {
+                    tracing::warn!("stdin proxy: dropping unterminated DECRPM reply candidate")
+                }
                 None => {}
             }
 
@@ -575,6 +730,9 @@ mod imp {
                     let part = splitter.feed(&buf[..n], Instant::now());
                     feed.passthrough.extend_from_slice(&part.passthrough);
                     feed.sequences.extend(part.sequences);
+                    for report in &part.reports {
+                        record_report(report);
+                    }
                 } else if n == 0 {
                     tracing::warn!("stdin proxy: input stream closed");
                     break;
@@ -630,9 +788,41 @@ mod imp {
         close(src);
     }
 
+    /// 本进程是否在远端转发里（SSH / mosh）——决定探针预算与静默时的拆 / 留。
+    fn is_remote() -> bool {
+        SSH_ENV.iter().any(|key| std::env::var(key).is_ok())
+    }
+
+    /// 泵线程每次读到一条 DECRPM 应答时登记（只认 5522 的、只认第一条）。
+    fn record_report(params: &[u8]) {
+        let Some((mode, ps)) = parse_decrmp(params) else {
+            tracing::debug!("stdin proxy: swallowed a malformed DECRPM-shaped reply");
+            return;
+        };
+        if mode != PASTE_EVENTS_MODE {
+            tracing::debug!("stdin proxy: DECRPM reply for mode {mode} (status {ps})");
+            return;
+        }
+        let mut shared = lock();
+        match shared.probe.as_mut() {
+            Some(probe) if probe.ps.is_none() => probe.ps = Some(ps),
+            // 判定已收束 / 重复应答：没有新信息。
+            _ => {}
+        }
+    }
+
+    /// 写出探针查询。失败只是没有应答（判定走阴性），不影响接驳本身。
+    fn write_probe_query() {
+        let mut out = io::stdout();
+        if let Err(e) = out.write_all(PROBE_QUERY).and_then(|()| out.flush()) {
+            tracing::warn!("stdin proxy: cannot send the 5522 DECRQM probe: {e}");
+        }
+    }
+
     pub fn install() -> io::Result<()> {
         let mut shared = lock();
         if shared.proxy.is_some() {
+            // 幂等（第二段 TUI）：查询不重发，探针状态原样保留。
             return Ok(());
         }
 
@@ -693,6 +883,7 @@ mod imp {
         let (stop_r, stop_w) = (pipe_fds[0], pipe_fds[1]);
 
         let (tx, rx) = mpsc::channel(16);
+        let remote = is_remote();
         let spawned = std::thread::Builder::new()
             .name("wing-stdin-proxy".into())
             .spawn(move || pump(src, master, stop_r, tx));
@@ -705,6 +896,15 @@ mod imp {
                     join: Some(join),
                 });
                 shared.seq_rx = Some(rx);
+                // 探针状态先于查询置好（应答可能快到与查询同拍）；重装 = 重新探测。
+                shared.settled = None;
+                shared.probe = Some(Probe {
+                    deadline: Instant::now() + probe_budget(remote),
+                    remote,
+                    ps: None,
+                });
+                drop(shared);
+                write_probe_query();
                 Ok(())
             }
             Err(e) => {
@@ -713,6 +913,67 @@ mod imp {
                 Err(e)
             }
         }
+    }
+
+    /// 探针预算：远端档长（RTT + 重排余量），本地短。
+    fn probe_budget(remote: bool) -> Duration {
+        if remote {
+            PROBE_BUDGET_SSH
+        } else {
+            PROBE_BUDGET_LOCAL
+        }
+    }
+
+    /// 等应答（到预算截止或第一条 5522 应答到达为止）；没有接驳 / 没发过查询立即返回。
+    fn wait_for_probe_reply() {
+        loop {
+            let deadline = {
+                let shared = lock();
+                match shared.probe.as_ref() {
+                    Some(probe) if probe.ps.is_none() => probe.deadline,
+                    _ => return,
+                }
+            };
+            let now = Instant::now();
+            if now >= deadline {
+                return;
+            }
+            std::thread::sleep((deadline - now).min(PROBE_POLL_STEP));
+        }
+    }
+
+    /// 首 poll 前的判定点（幂等）：收束探针结果，阴性就地拆接驳。
+    ///
+    /// - 阳性（`Ps ∈ {1,2,3}`）：保留接驳，协议机由 `tui::spawn_event_stream` 启动；
+    /// - 明确阴性（`0/4`）：任何档位都拆——终端自己说了不支持，不会再有 5522 流量；
+    /// - 静默：本地拆（不实现 DECRQM 的终端不会迟到应答）；SSH 保留（迟到应答必须仍被
+    ///   分流层摘走，见模块文档）。
+    pub fn settle_paste_channel() -> PasteChannel {
+        if let Some(verdict) = lock().settled {
+            return verdict;
+        }
+        wait_for_probe_reply();
+        let (ps, remote, installed) = {
+            let shared = lock();
+            let probe = shared.probe.as_ref();
+            (
+                probe.and_then(|probe| probe.ps),
+                probe.is_some_and(|probe| probe.remote),
+                shared.proxy.is_some(),
+            )
+        };
+        let verdict = probe_verdict(ps);
+        if installed && should_dismantle(ps, remote) {
+            tracing::debug!("stdin proxy: 5522 unsupported, dropping the stdin splice");
+            restore();
+        }
+        lock().settled = Some(verdict);
+        verdict
+    }
+
+    /// 判定结果的读口（未判定 = [`PasteChannel::Unsupported`]）。
+    pub fn paste_channel() -> PasteChannel {
+        lock().settled.unwrap_or(PasteChannel::Unsupported)
     }
 
     /// 向「读 fd 0」的一方投递 1 字节唤醒（收尾时打断 crossterm 的阻塞读）。
@@ -734,7 +995,13 @@ mod imp {
     }
 
     pub fn restore() {
-        let proxy = lock().proxy.take();
+        let proxy = {
+            let mut shared = lock();
+            // seq_rx 一并清掉：拆接驳后 `take_sequences()` 不许再给出一个残端
+            // （阴性判定后协议机不许起）。
+            shared.seq_rx = None;
+            shared.proxy.take()
+        };
         let Some(mut proxy) = proxy else { return };
         // 唤醒泵线程（写 stop pipe），等它自己退出——没有孤儿读者去抢 shell 的输入。
         unsafe { libc::write(proxy.stop_w, b"x".as_ptr() as *const libc::c_void, 1) };
@@ -785,11 +1052,23 @@ mod imp {
     pub fn take_sequences() -> Option<tokio::sync::mpsc::Receiver<Sequence>> {
         None
     }
+
+    /// 非 Unix：没有接驳（也不发探针查询）——通道永不启用。
+    pub fn settle_paste_channel() -> PasteChannel {
+        PasteChannel::Unsupported
+    }
+
+    /// 非 Unix：同 [`settle_paste_channel`]。
+    pub fn paste_channel() -> PasteChannel {
+        PasteChannel::Unsupported
+    }
 }
 
 pub use imp::install;
 pub use imp::is_installed;
+pub use imp::paste_channel;
 pub use imp::restore;
+pub use imp::settle_paste_channel;
 pub use imp::take_sequences;
 pub use imp::wake_reader;
 
@@ -905,6 +1184,146 @@ mod tests {
             assert_eq!(seqs, vec![expected.clone()], "cut at {cut}");
             assert_eq!(a.passthrough.len() + b.passthrough.len(), 0, "cut at {cut}");
         }
+    }
+
+    // ── DECRQM 探针应答（`ESC[? Pa ; Ps $ y`）───────────────────────────
+
+    /// 一条完整应答的原始字节。
+    fn report(params: &str) -> Vec<u8> {
+        let mut out = REPORT_OPEN.to_vec();
+        out.extend_from_slice(params.as_bytes());
+        out.extend_from_slice(b"$y");
+        out
+    }
+
+    #[test]
+    fn decrpm_reply_is_extracted_for_every_status() {
+        for ps in [0u8, 1, 2, 3, 4] {
+            let params = format!("5522;{ps}");
+            let mut s = local();
+            let out = feed(&mut s, &report(&params), 0);
+            assert_eq!(out.passthrough, b"", "ps={ps}: 应答一个字节都不许透传");
+            assert_eq!(out.reports, vec![params.into_bytes()], "ps={ps}");
+            assert_eq!(s.deadline(), None, "ps={ps}: 完整应答不留持有");
+            // 应答吸收后分流恢复：后续字节照常。
+            assert_eq!(feed(&mut s, b"x", 1).passthrough, b"x", "ps={ps}");
+        }
+    }
+
+    /// 任意 DECRPM 应答都吸收（不只 5522）：crossterm 对 `ESC[?…y` 一律挂死，
+    /// 「不是 5522 就放行」等于给别的探测应答留一条毒化路径。
+    #[test]
+    fn decrpm_reply_for_another_mode_is_absorbed_too() {
+        let mut s = local();
+        let out = feed(&mut s, &report("2026;2"), 0);
+        assert_eq!(out.passthrough, b"");
+        assert_eq!(out.reports, vec![b"2026;2".to_vec()]);
+    }
+
+    /// 分片重组：切点落在任何位置都不能把半截 `ESC[?…` 漏给 crossterm。
+    #[test]
+    fn decrpm_reply_split_at_every_boundary_is_reassembled() {
+        let raw = report("5522;2");
+        let expected = b"5522;2".to_vec();
+        for cut in 1..raw.len() {
+            let mut s = local();
+            let a = s.feed(&raw[..cut], at(0));
+            let b = s.feed(&raw[cut..], at(1));
+            let mut reports = a.reports;
+            reports.extend(b.reports);
+            assert_eq!(reports, vec![expected.clone()], "cut at {cut}");
+            assert_eq!(a.passthrough.len() + b.passthrough.len(), 0, "cut at {cut}");
+        }
+    }
+
+    /// 形似而**不是** DECRPM 的 `ESC[?…`（键盘协议应答 / DA 应答 / 缺 `$y`）：原样放行，
+    /// crossterm 自己能消化（`?…u` / `?…c`）或者本就与 5522 无关。
+    #[test]
+    fn lookalike_esc_bracket_question_sequences_are_waved_through() {
+        for raw in [
+            &b"\x1b[?1u"[..],
+            b"\x1b[?62;c",
+            b"\x1b[?5522;2$z",
+            b"\x1b[?25;1R",
+        ] {
+            let mut s = local();
+            let out = feed(&mut s, raw, 0);
+            assert_eq!(out.passthrough, raw, "{raw:?} 必须原样放行");
+            assert!(out.reports.is_empty(), "{raw:?}");
+            assert_eq!(s.deadline(), None, "{raw:?}");
+        }
+    }
+
+    /// 到点仍不完整：**丢弃**，绝不冲回——`ESC[?…` 喂给 crossterm 正是永久毒化
+    /// 按键解析的那条路径（见模块文档）。
+    #[test]
+    fn decrpm_candidate_stall_is_dropped_not_flushed() {
+        let mut s = local();
+        assert_eq!(feed(&mut s, b"\x1b[?5522;2$", 0).passthrough, b"");
+        assert_eq!(s.deadline(), Some(at(0) + PREFIX_HOLD));
+        assert_eq!(s.expire(at(30)), Some(Expiry::DropReport), "冲回就是毒化");
+        assert_eq!(s.deadline(), None);
+        // 持有清空后分流恢复：迟到的尾巴只是一个普通字节（前缀已被吞掉，不会毒化）。
+        assert_eq!(feed(&mut s, b"y", 31).passthrough, b"y");
+    }
+
+    /// 超长参数段（坏包）：到不了任何真协议的形状（真应答 ≤ 10 字节），按失配冲回——
+    /// 不会无限持有、不会 panic。
+    #[test]
+    fn overlong_decrpm_params_are_waved_through_not_held() {
+        let mut raw = REPORT_OPEN.to_vec();
+        raw.extend(std::iter::repeat_n(b'9', REPORT_PARAM_MAX + 1));
+        let mut s = local();
+        let out = feed(&mut s, &raw, 0);
+        assert!(out.reports.is_empty());
+        assert_eq!(out.passthrough, raw, "参数超限 = 失配：前面的字节原样冲回");
+        assert_eq!(s.deadline(), None);
+    }
+
+    /// 探针判定：只有 `Ps ∈ {1,2,3}` 是「真支持」；未应答 / `0/4` / 非法值都不启用。
+    #[test]
+    fn probe_verdict_only_enables_on_a_supporting_status() {
+        for ps in [1u8, 2, 3] {
+            assert_eq!(probe_verdict(Some(ps)), PasteChannel::Supported, "Ps={ps}");
+        }
+        for ps in [0u8, 4, 5, 255] {
+            assert_eq!(
+                probe_verdict(Some(ps)),
+                PasteChannel::Unsupported,
+                "Ps={ps}"
+            );
+        }
+        assert_eq!(probe_verdict(None), PasteChannel::Unsupported);
+    }
+
+    /// 拆除条件：明确阴性（有任何应答）都拆；静默只拆本地——SSH 静默保留接驳，
+    /// 迟到应答必须仍被分流层吸收（拆掉它会落进 crossterm）。
+    #[test]
+    fn dismantle_rule_keeps_the_splice_for_a_silent_remote_only() {
+        assert!(should_dismantle(None, false), "本地静默：拆");
+        assert!(!should_dismantle(None, true), "SSH 静默：留");
+        for ps in [0u8, 4] {
+            assert!(should_dismantle(Some(ps), false), "Ps={ps}");
+            assert!(
+                should_dismantle(Some(ps), true),
+                "Ps={ps} 明确阴性在远端也拆"
+            );
+        }
+        assert!(!should_dismantle(Some(2), false));
+        assert!(!should_dismantle(Some(2), true));
+    }
+
+    #[test]
+    fn decrmp_params_parse_to_mode_and_status() {
+        assert_eq!(parse_decrmp(b"5522;2"), Some((5522, 2)));
+        assert_eq!(parse_decrmp(b"2026;0"), Some((2026, 0)));
+        assert_eq!(parse_decrmp(b"65535;4"), Some((65535, 4)));
+        // 缺 Ps / 多段 / 溢出 / 非数字都是坏包。
+        assert_eq!(parse_decrmp(b"5522"), None);
+        assert_eq!(parse_decrmp(b"5522;2;3"), None);
+        assert_eq!(parse_decrmp(b"99999999999;2"), None);
+        assert_eq!(parse_decrmp(b"5522;300"), None);
+        assert_eq!(parse_decrmp(b""), None);
     }
 
     /// 短读 + 切点落在包前缀内：`read` 返回短于缓冲只证明「此刻内核队列空」，不证明写方
@@ -1222,7 +1641,7 @@ mod tests {
         assert_eq!(feed(&mut s, raw, 1).passthrough, raw);
     }
 
-    /// 不变式：**透传 + 提取出的序列（补回前缀与 ST）= 输入**，一字节不增不减。
+    /// 不变式：**透传 + 提取出的序列 / 应答（补回前缀与终结符）= 输入**，一字节不增不减。
     /// 用确定性的 LCG 切块（跨越前缀 / 终止符 / 保护区闭界的所有边界）跑 64 轮。
     #[test]
     fn reconstruction_identity_over_arbitrary_chunking() {
@@ -1233,6 +1652,7 @@ mod tests {
         stream.extend(seq("inside-paste"));
         stream.extend_from_slice(b"\x1b[201~");
         stream.extend_from_slice("后文 \x1b[A\x1b]0;t\x07".as_bytes());
+        stream.extend(report("5522;2"));
         stream.extend(seq("two"));
         stream.extend_from_slice(b"done");
 
@@ -1244,6 +1664,7 @@ mod tests {
         expected_passthrough.extend_from_slice("后文 \x1b[A\x1b]0;t\x07".as_bytes());
         expected_passthrough.extend_from_slice(b"done");
         let expected_sequences = vec![b"one".to_vec(), b"two".to_vec()];
+        let expected_reports = vec![b"5522;2".to_vec()];
 
         for seed in 0..64u64 {
             let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1256,6 +1677,7 @@ mod tests {
             let mut s = local();
             let mut passthrough = Vec::new();
             let mut sequences = Vec::new();
+            let mut reports = Vec::new();
             let mut i = 0;
             while i < stream.len() {
                 let take = (next() % 7 + 1).min(stream.len() - i);
@@ -1264,21 +1686,26 @@ mod tests {
                 let out = s.feed(&stream[i..i + take], at(i as u64));
                 passthrough.extend_from_slice(&out.passthrough);
                 sequences.extend(out.sequences);
+                reports.extend(out.reports);
                 i += take;
             }
-            if let Some(expiry) = s.expire(at(10_000)) {
-                match expiry {
-                    Expiry::Flush(bytes) => passthrough.extend_from_slice(&bytes),
-                    Expiry::Drop => panic!("seed {seed}: unterminated sequence"),
-                }
-            }
+            // 流干净收尾：没有候选 / 序列体残留（有的话下面是 seed 的红）。
+            assert!(
+                s.expire(at(10_000)).is_none(),
+                "seed {seed}: stream left a held candidate behind"
+            );
             assert_eq!(sequences, expected_sequences, "seed {seed}");
+            assert_eq!(reports, expected_reports, "seed {seed}");
             assert_eq!(passthrough, expected_passthrough, "seed {seed}");
-            // 长度恒等：透传 + Σ(前缀 + 负载 + ST) == 输入总长。
+            // 长度恒等：透传 + Σ(前缀 + 负载 + ST) + Σ(`ESC[?` + 参数 + `$y`) == 输入总长。
             let rebuilt: usize = passthrough.len()
                 + sequences
                     .iter()
                     .map(|s| SEQUENCE_PREFIX.len() + s.len() + 2)
+                    .sum::<usize>()
+                + reports
+                    .iter()
+                    .map(|r| REPORT_OPEN.len() + r.len() + 2)
                     .sum::<usize>();
             assert_eq!(rebuilt, stream.len(), "seed {seed}: 字节不增不减");
         }

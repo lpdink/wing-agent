@@ -990,6 +990,12 @@ pub async fn run_app(
     };
     let images = Images::new(config.rendering.images, image_support, image_waker);
 
+    // stdin 接驳的探针判定（查询在 `begin_tui_session` 里随 install 发出）：必须收束在
+    // `spawn_event_stream` 之前——那是本进程第一次 crossterm poll 的创建点，事件源注册之后
+    // fd 0 就不能再换，阴性拆接驳只有这一次机会。等待预算与上面的图像能力探测重叠，
+    // 正常路径到这里应答早已到达、不再花时间。
+    let _ = crate::tui::stdin_proxy::settle_paste_channel();
+
     let mut app = App::with_images(session_id, config, launch_workspace, images);
     // Initial program-status record: the session starts at rest (a mid-turn
     // resume replaces this with `working` when its SyncSession lands).

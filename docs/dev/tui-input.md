@@ -160,8 +160,14 @@
 
 除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片进 `App::on_clipboard_image` 的单并发流水线（入队 → 后台压缩 → 图片 chip，见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。
 
+**通道先探测再启用**：不实现 5522 的终端从这套机制里拿不到任何东西，却要背下 fd 0 接驳的全部事故面（见下），所以启动时先问一句 DECRQM「你支持 mode 5522 吗」，按诚实答案决定装不装——阴性终端**在第一次 crossterm poll 之前**就把接驳拆掉、一个 `?5522h` 都不发，回到 #221 之前的纯输入路径。
+
 ```text
-TUI 启动:  CSI ? 5522 h          （与 ?2004 等在同一处：tui::enter_sequence，退出时 CSI ? 5522 l 收回）
+TUI 启动:  CSI ? 5522 $ p          （DECRQM 探针：装接驳后立即发，判定预算本地 150ms / SSH 600ms）
+           CSI ? 5522 ; Ps $ y     （终端应答：1/2/3 = 支持（已设/未设/永久设）；0/4 = 不支持；
+                                    不实现 DECRQM 的终端（tmux / Terminal.app…）静默）
+阳性后:    CSI ? 5522 h            （唯一发送点：协议机启动处 `tui::spawn_event_stream`；
+                                    退出时 CSI ? 5522 l 收回——关一个没开过的模式是 no-op）
 Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
                       ESC]5522;…status=DATA:mime=<.>;…   （targets listing：空格分隔的 MIME）
                       ESC]5522;…status=DONE…
@@ -169,11 +175,13 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
            终端 → 应用  OK → DATA（每片 ≤4096 原始字节、各自独立 base64）→ DONE
 ```
 
-**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走，**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。生命周期是**进程级**的：**第一段** TUI（配置可用时是 `tui::init_terminal()`，配置不可用时是向导的 `tui::init_terminal_without_paste_events()`）经私有的 `begin_tui_session()` 做「真实 tty 进 raw → 装接驳」，`tui::end_tui_session()` 在**所有** TUI 段结束后做「停事件流 → 还 fd 0 → `disable_raw_mode`」；`cmd` 的 panic hook 走同一条收尾路径，`run_tui` 另有一层 RAII guard 兜住提前 `?`。
+**四态判定与时机**：查询在 `install()`（`begin_tui_session`，第一段 TUI）发出；判定（`stdin_proxy::settle_paste_channel`，幂等）必须赶在本段的第一次 crossterm `poll` 之前——主 TUI 在 `run_app` 里（图像能力探测之后、`spawn_event_stream` 之前），向导在 `run_tui` 里（`run_setup_tui` 之前）。阳性保留接驳；**明确阴性（`0/4`）任何档位都拆、本地静默也拆**（不实现 DECRQM 的终端不会迟到应答）；**SSH 静默保留接驳、但不开 mode**（远程链路的迟到应答必须仍被分流层摘走，否则会永久毒化 crossterm 的按键解析）。等待预算与图像能力探测（≤500ms）重叠，阳性/明确阴性的应答一到立即结束等待；额外延迟只发生在静默终端上，且一次性。阴性拆接驳在模块内部完成（复用 `restore`：fd 0 还原、`seq_rx` 一并清掉），`is_installed()` 随之为 false。
+
+**为什么需要 stdin 预处理层**（`crates/wing/src/tui/stdin_proxy.rs`）：crossterm 0.29 会把 `ESC ] 5522 ; …` 解析成 `Alt+]` + 逐字符按键（协议数据污染成用户输入，负数基线钉在 `tests/crossterm_osc5522_misparse.rs`）；**DECRQM 应答 `ESC[?…$y` 更狠**——解析器的 `b'?'` 分支只认 `u`/`c` 两种 final，半截序列会把缓冲**永久**扣住，之后所有按键都被吞进去（负数基线钉在 `tests/crossterm_decrpm_misparse.rs`）。分流层在 crossterm 看到输入之前把完整的 5522 序列抽走、把 DECRPM 应答摘走（任意 mode，不只 5522），**其余字节逐字节透传**；用 **pty 接驳**而不是 pipe 是硬要求——crossterm 的输入 fd 由 `isatty(stdin)` 决定（false 时改开 `/dev/tty`，会绕过接驳），所以把 fd 0 换成**新 pty 的 slave**（仍是 tty），泵线程读原 tty、把透传字节写进 master。生命周期是**进程级**的：**第一段** TUI（配置可用时是 `tui::init_terminal()`，配置不可用时是向导的同一个 `tui::init_terminal()`）经私有的 `begin_tui_session()` 做「真实 tty 进 raw → 装接驳（并发出探针查询）」，`tui::end_tui_session()` 在**所有** TUI 段结束后做「停事件流 → 还 fd 0 → `disable_raw_mode`」；`cmd` 的 panic hook 走同一条收尾路径，`run_tui` 另有一层 RAII guard 兜住提前 `?`。
 
 收尾的三步顺序都是硬约束：停事件流必须最先——事件任务（tokio 托管的同步 crossterm 读）若在 `restore` 的 `dup2` 之后还卡在对 fd 0 的读上就永远退不出来，`Runtime::drop` 等 worker、进程挂死（双击 Ctrl+C 不退、按 Enter 才退的根因），所以 `end_tui_session` 先置进程级停止 flag、向 fd 0 投唤醒字节（有界等待里每 20ms 重投一次——半截 CSI 会把首个字节当序列 final 吃掉），再有界等待任务退出（超时记 `warn!` 后照常收尾；`tests/stdin_proxy_teardown.rs` / `tests/stdin_proxy_teardown_partial_seq.rs` 钉住）；`dup2` 之后才是 `disable_raw_mode`（它把 termios 写回 fd 0，彼时 fd 0 必须已是真实 tty——顺序反过来会把 pty 的 termios 写进真实 tty）。
 
-分流的状态机细节（都是单测钉住的）：候选按档持有——孤立 `ESC`（`Esc` 键的形态，也可能是被拆开的序列开头）本地 10 ms / SSH 100 ms，多字节前缀（`ESC]55…` / `ESC[20…`）本地 25 ms / SSH 100 ms（SSH 档检测 `SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY` / `MOSH_CONNECTION`）；到点之前任何候选都不冲回（代价是 `Esc` 键多 ≤10 ms 的本地判定延迟，换来「协议字节绝不在未确认时漏给 crossterm」，与 PI 同款取舍）。序列体 5 s 等不到终止符就丢弃（BEL 与 ST 两种终止符都认；单包负载超 1 MiB 的坏流丢弃，后续字节吞到终止符再恢复分流）；**bracketed paste 保护区内一律原样透传**（粘贴内容里的字面 `ESC]5522;` 是用户数据，不能吃）。
+分流的状态机细节（都是单测钉住的）：候选按档持有——孤立 `ESC`（`Esc` 键的形态，也可能是被拆开的序列开头）本地 10 ms / SSH 100 ms，多字节前缀（`ESC]55…` / `ESC[20…` / `ESC[?…`）本地 25 ms / SSH 100 ms（SSH 档检测 `SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY` / `MOSH_CONNECTION`）；到点之前协议类候选都不冲回（代价是 `Esc` 键多 ≤10 ms 的本地判定延迟，换来「协议字节绝不在未确认时漏给 crossterm」，与 PI 同款取舍）；**DECRPM 候选（`ESC[? Pa;Ps $y`，任意 mode）到点不完整时整段丢弃、绝不冲回**（冲回就是毒化本体）；失配的 `ESC[?…`（如键盘协议应答 `?1u`、DA 应答 `?62;c`）照旧原样放行，crossterm 自己能消化。序列体 5 s 等不到终止符就丢弃（BEL 与 ST 两种终止符都认；单包负载超 1 MiB 的坏流丢弃，后续字节吞到终止符再恢复分流）；**bracketed paste 保护区内一律原样透传**（粘贴内容里的字面 `ESC]5522;` 是用户数据，不能吃）。
 
 **已知边界（粘贴内容以字面 `ESC` 结尾）**：保护区内「可能是闭界开头」的尾部字节会被扣住，内容末尾的字面 `ESC` 因此先被当作 `ESC[201~` 的前缀候选；真闭界到达时它原样冲回，字节流里出现连续的 `ESC` + `ESC[201~`。分流层**一字节不丢**（「透传 + 序列 == 输入」的不变式钉住），但这段流对任何下游都是两义的：哪个 `ESC` 属于粘贴内容、哪个属于闭界，只有终端知道（协议里除「闭界紧跟数据」没有别的信息可分）。固有歧义 + 极罕见，登记为已知边界，本层不做（也做不了）区分。
 
@@ -182,9 +190,9 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 1. **接驳必须早于本进程任何一次 `poll`**。向导正是最早的机会（它自己也用 crossterm 的全局事件源），所以第一段就把接驳装上；反过来（先 `poll` 再装）泵线程会把真实 tty 的就绪吃掉，事件源从此再不被唤醒 —— 键盘永久哑掉（反面证据：`tests/stdin_proxy_stale_event_source.rs`）。
 2. **段与段之间绝不拆接驳**（`restore_terminal` 只写离开序列，raw mode 与 fd 0 归会话）——拆了就必须重装，而复用的单例仍指着旧的文件描述。
 
-两条都有测试，但分工要说清：`tests/stdin_proxy_two_segments.rs` / `stdin_proxy_stale_event_source.rs` 钉的是**机制**（同一单例跨段工作、注册先于接驳才有效），生产接线则由源码门禁 `tests/session_guard.rs` 钉住——它扫真实 `src/**`，断言 `stdin_proxy::install(` 恰好一处且位于 `begin_tui_session`、`stdin_proxy::restore(` 恰好一处且位于 `end_tui_session`、`restore_terminal` 不引用这两者（零豁免；把安装挪走或把拆解加回段边界都会变红）。
+两条都有测试，但分工要说清：`tests/stdin_proxy_two_segments.rs` / `stdin_proxy_stale_event_source.rs` 钉的是**机制**（同一单例跨段工作、注册先于接驳才有效），生产接线则由源码门禁 `tests/session_guard.rs` 钉住——它扫真实 `src/**`，断言 `stdin_proxy::install(` 恰好一处且位于 `begin_tui_session`、`stdin_proxy::restore(` 恰好一处且位于 `end_tui_session`、`restore_terminal` 不引用这两者，再加探针化的两条：`stdin_proxy::settle_paste_channel(` 恰好两处且各自早于本段第一次 poll（`run_app` 里早于 `spawn_event_stream`、`run_tui` 里早于 `run_setup_tui`）、`spawn_event_stream` 里 mode 5522 与协议机都门控在阳性判定之后（`\x1b[?5522h` 全生产唯一发送点）——零豁免；把安装挪走、把拆解加回段边界、或让协议机绕开判定，都会变红。
 
-向导与主 TUI 的唯一差别是**粘贴事件模式**：向导走 `tui::init_terminal_without_paste_events()`（不发 `?5522h`），因为向导自己的事件循环不驱动协议机，开了模式只会把用户 Cmd+V 吞成一条没人读的协议事件、并把它留给主 TUI 的协议机；文本粘贴在向导里因此保持 bracketed paste（行为与从前逐字相同）。
+向导与主 TUI 的进入序列现在**逐字相同**（`?5522h` 移出 `enter_sequence`，见上「四态判定与时机」）：mode 只在协议机启动处（主 TUI 的 `spawn_event_stream`）才开，而向导自己的事件循环不驱动协议机——「向导把用户 Cmd+V 吞成没人读的协议事件」在构造上不再可能。向导同样在自己的第一次 poll 前收束探针判定（阴性共享拆解收益）。
 
 **已知边界（段间隙的按键语义）**：raw mode 与接驳跨段保持（这正是上面第 1 条的代价），所以向导段与主 TUI 段之间那几十毫秒（connect / create_session / subscribe）里键入的字节不再走行规程——`Ctrl+C` 不会立刻 `SIGINT`，而是作为 `0x03` 排队、交给主 TUI 的按键语义（双击退出），其余按键照旧回放。要连 Ctrl+C 也拦下来的话，只能把向导拆成独立进程（或先关 raw，但那会精确打破第 1 条）。
 
@@ -202,15 +210,15 @@ chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标�
 |---|---|
 | 分流状态机 + fd 接驳 / 泵线程 | `crates/wing/src/tui/stdin_proxy.rs` |
 | 协议机（包解析 / 请求构造 / 分片重组 / 超时）+ 驱动任务 | `crates/wing/src/tui/clipboard_protocol.rs` |
-| mode 启停（逐字节断言）与接线 | `crates/wing/src/tui/mod.rs`（`enter_sequence` / `leave_sequence` / `spawn_event_stream`） |
+| mode 启停（逐字节断言）与接线 | `crates/wing/src/tui/mod.rs`（`enter_sequence` / `leave_sequence` / `enable_paste_events` / `spawn_event_stream`） |
 | App 边界（文本 / 图片流水线 / 失败） | `crates/wing/src/app/clipboard.rs` |
 | 图片 chip 的接口（注册表 / 标签 / 插入） | `crates/wing/src/ui/input_area/image.rs` |
-| 端到端证据（自开 pty，headless 可跑） | `crates/wing/tests/stdin_proxy_pty.rs`、`tests/crossterm_osc5522_misparse.rs` |
+| 端到端证据（自开 pty，headless 可跑） | `crates/wing/tests/stdin_proxy_pty.rs`（阳性路径）、`stdin_proxy_probe_supported_pty.rs` / `stdin_proxy_probe_negative_pty.rs`（探针双路径）、`crossterm_osc5522_misparse.rs` / `crossterm_decrpm_misparse.rs`（负数基线） |
 
 ### 本地读取（L1）：`Ctrl+V` / `super+v`
 
 应用直接读**本机**系统剪贴板（`util/clipboard_paste.rs`），不依赖任何终端协议 ——
-Ghostty stable / iTerm2 / Terminal.app / VS Code 这些不实现 5522 的终端，图片粘贴靠它才
+Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（见上表），图片粘贴靠它才
 可用；代价是**只在本地会话有效**（`SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY` /
 `MOSH_CONNECTION` 命中即短路，不产生任何子进程 —— 远端机器的剪贴板不是用户的剪贴板）。
 
@@ -240,16 +248,16 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些不实现 5522 的终端�
   「只粘贴了一个 v」）。`SHIFT` 不受影响（CSI-u 下大写字母带 SHIFT），`Ctrl+J/M` 的换行
   例外照旧。
 
-**支持终端与政策**：
+**支持终端与政策**（以探针应答为准，不以终端名字赌行为）：
 
-| 环境 | 行为 |
-|---|---|
-| Ghostty（nightly / main） | 完整可用（文本 + 图片，本地 / SSH 同）——OSC 5522 目前只在 main：v1.3.1 stable 只有 parser、stream 层 handler `unimplemented`、无 mode 5522（DECRQM 应答 0）；kitty 预期一致（协议同源） |
-| 其它终端（忽略 `?5522h`） | DECSET 被忽略 → 终端侧图片通道不可用；`Ctrl+V` / `super+v` 走 L1 本地读取（仅本机；SSH 下图片仍不可用）；文本粘贴走 bracketed paste，行为不变 |
-| tmux / zellij 内 | 多路复用器拦未知 OSC（除非用户开 passthrough）→ 登记为**已知限制**（先进终端直连） |
-| Windows | 不承诺（接驳层是 `cfg(unix)`；非 Unix 上 `install()` 是空操作，也不开 `?5522`） |
+| 探针结果 | 终端 | 行为 |
+|---|---|---|
+| 阳性 `1/2/3` | kitty、Ghostty nightly / main（协议同源）；未来新实现 5522 的终端自动升级 | 接驳保留、`?5522h` + 协议机（文本 + 图片，本地 / SSH 同） |
+| 明确阴性 `0/4` | **Ghostty v1.3.1 stable**（只有 parser、stream 层 `unimplemented`、无 mode 5522，DECRQM 明确回 `0`）、iTerm2、Alacritty、VS Code 的 xterm.js（未识别 private mode 恒回 `0`）等 | 首 poll 前拆接驳（回到 pre-#221 纯输入路径）、一个 `?5522` 字节都不发；`Ctrl+V` / `super+v` 走 L1 本地读取（仅本机；SSH 下图片仍不可用）；文本粘贴走 bracketed paste，行为不变 |
+| 静默（不实现 DECRQM） | tmux / zellij / Terminal.app / 老终端 | **本地**：同明确阴性（拆接驳、L1 兜底）；**SSH**：保留接驳但不开 mode（迟到应答仍由分流层吸收，防毒化）→ 图片在 SSH 下不可用。tmux 需自身实现 5522 才能升级（未知 OSC / CSI 不会被转发给外层终端，passthrough 帮不上） |
+| —— | Windows | 不承诺（接驳层是 `cfg(unix)`；非 Unix 上 `install()` 是空操作、探针也不发，判定恒为阴性） |
 
-**不做的事**：不查 DECRQM 探测支持性（忽略模式集的终端本就不受影响）；不做终端无确认弹窗之外的授权流程（OTP 由 event 自带，`clipboard_read=ask` 下也免弹窗）；不做「一次粘贴多 item」的强承诺（尽力：分片与多 event 队列处理；**队列满 / 图片流水线超预算时丢弃是取舍，但丢弃一定有反馈**——warning toast，不做静默丢弃）。
+**不做的事**：~~不查 DECRQM 探测支持性~~ 改为**启动时查**（`CSI ? 5522 $ p`；阴性/静默按上表降级）；不做终端无确认弹窗之外的授权流程（OTP 由 event 自带，`clipboard_read=ask` 下也免弹窗）；不做「一次粘贴多 item」的强承诺（尽力：分片与多 event 队列处理；**队列满 / 图片流水线超预算时丢弃是取舍，但丢弃一定有反馈**——warning toast，不做静默丢弃）。
 
 **待真机确认项**见文末「真机验收清单」的 D 节：macOS 侧 listing 的 MIME 名称按 `UTType.preferredMIMEType`
 推断应是标准 MIME（`image/png` 等），需在 Ghostty 实机确认（截图 / 浏览器复制图片两种来源）；确认 `Cmd+V`
@@ -323,7 +331,7 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 
 ## 真机验收清单（图片粘贴链路，最终版）
 
-人工过一遍（headless 测不了：真终端 + 真剪贴板 + 真模型）。环境：**Ghostty nightly（含 OSC 5522 实现）**（本地或 SSH 同款）。stable 1.3.1 上图片粘贴不可用（`?5522h` 被忽略 → read 无应答 → 超时 toast），验证本清单必须用 nightly。
+人工过一遍（headless 测不了：真终端 + 真剪贴板 + 真模型）。环境：**Ghostty nightly（含 OSC 5522 实现，探针阳性）**（本地或 SSH 同款）；另找一台 **stable 1.3.1**（探针阴性）验降级路径——它上面协议通道整套不装，`Cmd+V` 图片走 L1（本地）、文本走 bracketed paste，行为与 pre-#221 输入路径一致。
 
 **A. 粘贴与 chip（05）**
 
@@ -357,9 +365,11 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 10. 配置不可用 → 走完首次运行向导 → 主 TUI 里按键正常（B1 命中路径）；**双击 Ctrl+C 后进程自行退出（不需要补任何输入），退出后 shell 的第一次输入不被吞**（无残留读者）。
 11. `Shift/Option` 原生拖选、滚轮、面板键位手感无变化。
 12. tmux 内确认图片粘贴不可用（登记限制）、文本粘贴照旧；非 Ghostty 的 kitty 终端预期同源可用（未实测）。
+13. **降级路径（探针阴性）**：Ghostty stable 1.3.1 / iTerm2 / Terminal.app 上启动后输入、面板、退出与 pre-#221 无差别（无 `?5522` 字节、无接驳层）；`Cmd+V` 图片经 L1 落 chip；**阴性终端上不再出现「只粘贴了一个 v」之外的任何 5522 相关症状**（探针应答不会漏成按键垃圾）。
+14. **阳性路径非回归**：Ghostty nightly 上 `Cmd+V` 图片/文本仍走协议通道（chip / 文本粘贴；SSH 同款），退出后 shell 不吞输入。
 
 **待实机核对**：macOS 侧 listing 的 MIME 名称（推断为标准 MIME，`image/png` 等）；截图与浏览器「复制图片」
-两种来源的 listing 差异；SSH 场景同一流程（协议走 pty，预期同效，未实测）。
+两种来源的 listing 差异；SSH 场景同一流程（协议走 pty，预期同效，未实测）；**SSH + 静默终端**（远程 tmux / stable）的降级形态（保留接驳不开 mode，迟到的 DECRQM 应答由分流层吸收、不得毒化按键）。
 
 ## 链接渲染与单击打开（`tui-link-open`）
 
