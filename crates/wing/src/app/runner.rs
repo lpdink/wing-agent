@@ -10,6 +10,9 @@
 
 use tokio::sync::mpsc;
 
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
 use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
@@ -37,6 +40,26 @@ use super::App;
 /// Timing out degrades to the OSC52-less failure path: a `Copy failed` toast
 /// with the reason.
 const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// L1 读取的在飞闸门：同一时刻只允许一条读取链。
+///
+/// 与 `App::clipboard_compress_in_flight` 同一条「单并发 + 落地恢复」纪律；读任务的
+/// 整个生命周期都在本模块（`ReadClipboard` 分支起任务、任务落地时释放），所以状态
+/// 住在这里。分派点（`modal::handle_key`）先 [`claim_clipboard_read`] 再推 intent：
+/// 最坏 ~23 s 的读取窗口里连按只会被合并，不再堆 N 条子进程链（N 倍 churn 与 N 个
+/// 收尾 toast）。
+static CLIPBOARD_READ_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// 认领一次 L1 读取：`true` = 本次起链（调用方推 `ReadClipboard`），`false` = 已
+/// 有在飞读取，本次触发被合并（调用方什么都不做）。
+pub(super) fn claim_clipboard_read() -> bool {
+    !CLIPBOARD_READ_IN_FLIGHT.swap(true, Ordering::AcqRel)
+}
+
+/// 读取落地（成功或失败都）释放闸门：之后的手势恢复可读。
+pub(super) fn release_clipboard_read() {
+    CLIPBOARD_READ_IN_FLIGHT.store(false, Ordering::Release);
+}
 
 /// Execute a single intent, performing any necessary I/O.
 ///
@@ -95,6 +118,26 @@ pub async fn execute_intent(
                     ));
                 }
             }
+        }
+        AppIntent::ReadClipboard => {
+            // 本地剪贴板读取（L1）：所有子进程都在模块里的阻塞池上调起，这里只把
+            // "读取 → 回执" 放进后台任务（同 `CompressClipboardImage` 的范式）。
+            // 结果属于 composer 而不是会话，`session_id` 只是 `FetchResult` 的形状要求。
+            // 在飞闸门已在分派点认领（`claim_clipboard_read`）。
+            let tx = fetch_tx.clone();
+            let session_id = app.session_id.clone();
+            tokio::spawn(async move {
+                let result = crate::util::clipboard_paste::read_clipboard().await;
+                // 先开闸、再把回执送回去（成功或失败都开）：App 处理回执时闸门必须已经
+                // 打开，否则紧接着的那次 Ctrl+V 会被误合并成「还在飞」。
+                release_clipboard_read();
+                let _ = tx
+                    .send(FetchResult {
+                        session_id,
+                        payload: FetchPayload::ClipboardPaste(result),
+                    })
+                    .await;
+            });
         }
         AppIntent::SetSessionPin { pinned } => {
             // pin = 当前会话上的一个普通标签（前端约定，后端零感知）。写走

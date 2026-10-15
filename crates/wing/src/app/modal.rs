@@ -81,6 +81,12 @@ pub(super) enum KeyRoute {
     Quit,
     /// Ctrl+O — 展开 / 收起思考块（**全局**：所有轮一起切；应用保留键，面板之下也可用）。
     ToggleReasoning,
+    /// `Ctrl+V` / `super+v` — 读系统剪贴板（L1，见 `util::clipboard_paste`）。
+    ///
+    /// 应用保留键（与 Ctrl+O 同档）：读取在后台任务上跑，**落点**才做门控 —
+    /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_image`
+    /// （不受挡板，与 OSC 5522 通道同一条既定取舍）。
+    PasteClipboard,
     /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它，AD2；
     /// `Ctrl+C` 在它之前就被应用截走）。
     Settings,
@@ -122,6 +128,36 @@ fn is_toggle_reasoning_key(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::KeyModifiers;
 
     matches!(key.code, KeyCode::Char('o' | 'O')) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// `Ctrl+V` / `super+v` — 读系统剪贴板（L1）。
+///
+/// 两种解码形态都要接住：没开 kitty 键盘协议的终端把 Ctrl+V 发成控制字节 `0x16`
+/// （crossterm → `Char('v') + CONTROL`）；开了协议的终端把 Cmd+V 回传成
+/// `CSI 118;9u`（crossterm → `Char('v') + SUPER`，见 `tests/clipboard_paste_keys.rs`）。
+///
+/// 口径（两分支不对称是刻意的）：
+///
+/// - `super+v` 与 `super+shift+v`（macOS 的 Paste and Match Style）都触发粘贴 ——
+///   SHIFT 只改变粘贴的“样式”，语义仍是粘贴；`super+alt/ctrl+v` 是与粘贴无关的
+///   系统/终端组合，不接。
+/// - `Ctrl+V` 触发；`Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧）与
+///   `Ctrl+Alt+V`（kitty 把 AltGr 报成 ctrl+alt）不接 —— 绑上只会吃掉字符输入或
+///   得到「有时被终端吃掉、有时没有」的不一致。
+fn is_paste_clipboard_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    matches!(key.code, KeyCode::Char('v' | 'V'))
+        && if key.modifiers.contains(KeyModifiers::SUPER) {
+            !key.modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+        } else {
+            key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        }
 }
 
 /// The chat-scroll meaning of a key, if it has one.
@@ -200,6 +236,13 @@ impl App {
         // 面板之前截住 —— 落到 composer 会变成输入 `o`）。
         if is_toggle_reasoning_key(key) {
             return KeyRoute::ToggleReasoning;
+        }
+        // Ctrl+V / super+v 同样是应用保留键（设置浮层除外，早期分支已接管，与 Ctrl+O
+        // 同档）：粘贴手势在其余面板之下也要接住（落点再做挡板），且必须赶在 composer
+        // 之前 —— 否则 super+v 会被当字面 `v` 输入（Ghostty 图片剪贴板回传 super+v
+        // 时的实测行为）。
+        if is_paste_clipboard_key(key) {
+            return KeyRoute::PasteClipboard;
         }
         for layer in self.modal_chain() {
             match layer {
@@ -306,6 +349,16 @@ impl App {
             KeyRoute::ToggleReasoning => {
                 self.reset_quit_counter();
                 self.toggle_reasoning_expansion();
+            }
+            KeyRoute::PasteClipboard => {
+                self.reset_quit_counter();
+                // 在飞合并：第一次读取落地前连按只算一次（同
+                // `clipboard_compress_in_flight` 的纪律）——最坏 ~23 s 的读取窗口里
+                // 堆 N 条子进程链只会换来 N 倍 churn 与 N 个收尾 toast。落地（成功
+                // 或失败）由 runner 的开闸恢复可读。
+                if crate::app::runner::claim_clipboard_read() {
+                    self.push_intent(AppIntent::ReadClipboard);
+                }
             }
             KeyRoute::Settings => self.handle_settings_key(key),
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),

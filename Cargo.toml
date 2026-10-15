@@ -32,7 +32,7 @@ pulldown-cmark = "0.13"
 # SignedPosition / Protocol 均可直接用），且它内部依赖 `image 0.25.x` + `ratatui 0.30.x`。
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 
-# 图片解码。`default-features = false` 避免 image 把 tiff/exr/dds/avif 等全拉进来；
+# 图片解码。`default-features = false` 避免 image 把 exr/dds/avif 等全拉进来；
 # 版本必须与 ratatui-image 内部的 `image ^0.25.6` 同代，否则 `cargo tree` 会出现两份 image。
 #
 # 开的 codec 必须与 `render/markdown/images.rs` 的 `IMAGE_EXTENSIONS`（以及文档里给用户的
@@ -40,7 +40,12 @@ ratatui-image = { version = "11.1.0", default-features = false, features = ["cro
 # 永远解析不了 → 那三类图只会显示成链接（能力声明与事实不符）。gif/webp/bmp 三个纯 Rust
 # codec 的代价实测：release 冷构建 +0.9s（24.1s → 25.0s），`wing` 二进制 +450 KiB
 # （13.14 MiB → 13.60 MiB，+3.5%）。`tests/image_pipeline.rs` 有把两侧钉在一起的测试。
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+#
+# `tiff` 不在这条对齐里：它是**粘贴通道的输入格式**（macOS 剪贴板的规范表示常是
+# TIFF，本地读取与 OSC 5522 两条路都会收到），markdown 里画 `.tif` 文件仍不承诺。
+# 代价实测：release 二进制 +559 KiB（19.07 MiB → 19.61 MiB，+2.9%）；纯 Rust codec
+# （tiff 0.11），不引入 C 工具链。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 
 # Syntax highlighting
 syntect = "5"

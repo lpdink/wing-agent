@@ -1,4 +1,5 @@
-//! App 侧的粘贴通道边界：`TermEvent::Clipboard` 的唯一落点。
+//! App 侧的粘贴通道边界：两条读取通道（OSC 5522 的 `TermEvent::Clipboard`，本地
+//! 读取的 `FetchPayload::ClipboardPaste`）在这里汇进同一个落点。
 //!
 //! 文本与 bracketed paste 走**同一个**入口（[`App::handle_paste`]），语义逐点等价；
 //! 图片走一条**单并发流水线**：入队（原始字节，含上限）→ 后台压缩 → 插入 composer 的
@@ -27,6 +28,8 @@ use crate::app::intent::AppIntent;
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
 use crate::ui::toast::Toast;
+use crate::util::clipboard_paste::PasteFailure;
+use crate::util::clipboard_paste::PasteOutcome;
 use crate::util::image_compress::CompressedImage;
 
 use super::App;
@@ -52,6 +55,27 @@ impl App {
                 self.on_clipboard_image(bytes, mime, name)
             }
             Err(failure) => self.on_clipboard_failure(failure),
+        }
+    }
+
+    /// 本地剪贴板读取（L1，`Ctrl+V` / `super+v`）的回执落点：文本 → 与 bracketed
+    /// paste 同一个入口（模态挡板自动继承）；图片 → 同一条单并发流水线；空 / 失败 →
+    /// 定向 toast（与 OSC 5522 通道同一条「不静默」红线）。
+    pub(crate) fn on_clipboard_paste(&mut self, result: Result<PasteOutcome, PasteFailure>) {
+        match result {
+            Ok(PasteOutcome::Text(text)) => self.handle_paste(&text),
+            // 本地读取的通道不带文件名（OSC 5522 也不带）。
+            Ok(PasteOutcome::Image { bytes, mime }) => self.on_clipboard_image(bytes, mime, None),
+            Ok(PasteOutcome::Empty) => {
+                self.show_toast(Toast::warning(
+                    "Clipboard has no text or image",
+                    Duration::from_secs(4),
+                ));
+            }
+            Err(failure) => {
+                tracing::warn!(failure = %failure, "local clipboard read failed");
+                self.show_toast(Toast::warning(failure.message(), Duration::from_secs(4)));
+            }
         }
     }
 

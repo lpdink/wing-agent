@@ -119,6 +119,11 @@ sccache）：**+0.9 s 构建时间、二进制 +450 KiB（13.14 → 13.60 MiB，
 codec 打开而不是收缩声明。`tests/image_pipeline.rs::every_claimed_image_extension_has_a_working_codec`
 为每个扩展名写一个真 fixture 并走完「探测 → 编码」，两侧再漂移会红。
 
+**例外：`tiff` 不在对齐里**。根 `Cargo.toml` 的 `image` feature 集还开着 `tiff`，那是**粘贴通道的
+输入格式**（macOS 剪贴板的规范表示常是 TIFF，本地读取与 OSC 5522 两条路都会收到），不是 markdown 的
+能力声明：`IMAGE_EXTENSIONS` 不含 `.tif/.tiff`，那张对齐测试是单向的（声明的扩展名必须有 codec，
+反向不成立），所以两者不矛盾。
+
 **压力验证**（`app/tests/images.rs::a_hundred_pictures_stay_within_the_cache_budget`）：120 张不同图片、
 整屏滚动若干步，每一步断言 `cached ≤ 8`、`cached_bytes ≤ 24 MiB`、`memo ≤ 256`、`failed ≤ 64`、
 worker 存活、可见图全部画出。变异实验（把 LRU 上限改成永不淘汰）→ `cached: 9` 立刻红。

@@ -271,10 +271,19 @@ impl InputArea {
                 InputAction::Submit(self.submit_payload())
             }
             KeyCode::Esc => InputAction::Escape,
-            KeyCode::Char(c) => {
+            // SUPER / META / HYPER 修饰的字符只可能来自终端/系统快捷键路径（如
+            // Ghostty 把图片剪贴板下的 Cmd+V 回传为 `Char('v') + SUPER`），不是
+            // 字面输入 —— 插入它们正是用户实测的「只粘贴了一个 v」。SHIFT 不受
+            // 影响（CSI-u 下大写字母带 SHIFT，照常插入）；Ctrl 的既有例外
+            // （Ctrl+J/M 换行）在上面先匹配。
+            KeyCode::Char(c)
+                if !mods
+                    .intersects(KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::HYPER) =>
+            {
                 self.insert_char(c);
                 InputAction::None
             }
+            KeyCode::Char(_) => InputAction::None,
             KeyCode::Backspace => {
                 self.backspace();
                 InputAction::None
@@ -532,6 +541,39 @@ mod tests {
         input.handle_key(key(KeyCode::Char('h')), chrome(80));
         input.handle_key(key(KeyCode::Char('i')), chrome(80));
         assert_eq!(input.text(), "hi");
+    }
+
+    /// 终端/系统快捷键回传的字符（`Cmd+V` = `Char('v') + SUPER`）不是字面输入：
+    /// 路由层已把它接成粘贴手势，这里钉住即便落到 composer 也不往草稿里塞 `v`
+    /// （用户实测的「只粘贴了一个 v」）。
+    #[test]
+    fn super_modified_chars_are_not_text() {
+        let mut input = InputArea::new("");
+        for mods in [
+            KeyModifiers::SUPER,
+            KeyModifiers::META,
+            KeyModifiers::HYPER,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        ] {
+            assert_eq!(
+                input.handle_key(key_with(KeyCode::Char('v'), mods), chrome(80)),
+                InputAction::None,
+                "{mods:?}"
+            );
+        }
+        assert_eq!(input.text(), "", "没有字符落地");
+    }
+
+    /// SHIFT 是大写字母的正常形态（CSI-u 下 `V` 带 SHIFT），照常插入 —— 防误伤。
+    #[test]
+    fn shift_modified_uppercase_still_inserts() {
+        let mut input = InputArea::new("");
+        let action = input.handle_key(
+            key_with(KeyCode::Char('V'), KeyModifiers::SHIFT),
+            chrome(80),
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(input.text(), "V");
     }
 
     #[test]

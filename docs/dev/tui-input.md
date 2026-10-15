@@ -156,9 +156,9 @@
 
 **已知限制**：ask 面板的内联编辑器是另一套单行编辑器（多行粘贴折叠成空格），不参与 chip 机制；chip 比整行还宽时标签尾部被裁剪（该行裁剪线以外的列按「行末」解析）；号码不复用，所以删掉若干 chip 后序号会有空档（这是刻意的——号码是身份，不是计数）。
 
-## 粘贴（文本 / 图片）：OSC 5522 终端协议
+## 粘贴（文本 / 图片）：OSC 5522 协议 + 本地读取（L1）
 
-除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），TUI 还启用 **kitty clipboard protocol（DECSET 5522）**：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片进 `App::on_clipboard_image` 的单并发流水线（入队 → 后台压缩 → 图片 chip，见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。
+除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片进 `App::on_clipboard_image` 的单并发流水线（入队 → 后台压缩 → 图片 chip，见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。
 
 ```text
 TUI 启动:  CSI ? 5522 h          （与 ?2004 等在同一处：tui::enter_sequence，退出时 CSI ? 5522 l 收回）
@@ -188,7 +188,7 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **已知边界（段间隙的按键语义）**：raw mode 与接驳跨段保持（这正是上面第 1 条的代价），所以向导段与主 TUI 段之间那几十毫秒（connect / create_session / subscribe）里键入的字节不再走行规程——`Ctrl+C` 不会立刻 `SIGINT`，而是作为 `0x03` 排队、交给主 TUI 的按键语义（双击退出），其余按键照旧回放。要连 Ctrl+C 也拦下来的话，只能把向导拆成独立进程（或先关 raw，但那会精确打破第 1 条）。
 
-**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：image/png → image/jpeg → image/webp → image/gif → 任意 `image/*` 兜底 → `text/plain`；都没有就不读（toast 告知）。比较前剥掉 `;charset=…` 参数并忽略大小写（`normalize_mime`：**请求侧挑表示与 read DATA 的 mime 归属共用这一份归一**——终端可以只在回显时带上参数 / 大小写不同，逐字相等会把 DATA 静默丢光）。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`；本文引用的 Ghostty 源码均以 `main` 为准），漏了就退回「要用户确认」甚至被拒。
+**MIME 选择**（`tui/clipboard_protocol.rs::choose_mime`）：**已知可解码集合** png → jpeg → webp → gif → bmp → tiff（`KNOWN_IMAGE_MIMES`，与压缩器的 codec 清单同一份声明）→ `text/plain`；都没有就不读（toast 告知）。集合外的 `image/*`（avif / heic…）**不选、也不遮蔽 `text/plain`**——读回来也解不了，宁可拿到文本。比较前剥掉 `;charset=…` 参数并忽略大小写（`normalize_mime`：**请求侧挑表示与 read DATA 的 mime 归属共用这一份归一**——终端可以只在回显时带上参数 / 大小写不同，逐字相等会把 DATA 静默丢光）。请求里**必须带 `name`**——Ghostty 的授权判定把「没有 name 的 pw」当成没有密码（`stream_terminal.zig`；本文引用的 Ghostty 源码均以 `main` 为准），漏了就退回「要用户确认」甚至被拒。
 
 **包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。event 侧没有 id 可比，就比**一次性密码**（终端为每次粘贴新生成、三连里每包回显）：被放弃的 event 迟到的 listing / DONE 因此同样落不到下一次粘贴上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）、**event 队列满导致的丢弃**一律走 toast，不出现「粘了但什么都没发生」。
 
@@ -207,12 +207,45 @@ chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标�
 | 图片 chip 的接口（注册表 / 标签 / 插入） | `crates/wing/src/ui/input_area/image.rs` |
 | 端到端证据（自开 pty，headless 可跑） | `crates/wing/tests/stdin_proxy_pty.rs`、`tests/crossterm_osc5522_misparse.rs` |
 
+### 本地读取（L1）：`Ctrl+V` / `super+v`
+
+应用直接读**本机**系统剪贴板（`util/clipboard_paste.rs`），不依赖任何终端协议 ——
+Ghostty stable / iTerm2 / Terminal.app / VS Code 这些不实现 5522 的终端，图片粘贴靠它才
+可用；代价是**只在本地会话有效**（`SSH_CONNECTION` / `SSH_CLIENT` / `SSH_TTY` /
+`MOSH_CONNECTION` 命中即短路，不产生任何子进程 —— 远端机器的剪贴板不是用户的剪贴板）。
+
+- **键位**：`Ctrl+V`（控制字节 `0x16`，终端基本都原样转发）与终端回传的 `super+v`
+  （kitty 键盘协议下 Ghostty 把不可执行的 `Cmd+V` 以 `CSI 118;9u` 交回应用）路由到同一个
+  `KeyRoute::PasteClipboard`，是**应用保留键**（ask / `/model` / 候选 popup 之下也接住，
+  落点再做挡板；**设置浮层除外** —— 它连应用保留键也接管，与 `Ctrl+O` 同档）。
+  **不接** `Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧，接上只会「有时被
+  终端吃掉、有时没有」）。两种字节形态的 crossterm 解码钉在 `tests/clipboard_paste_keys.rs`。
+- **顺序**：图片 → 文本。macOS：`osascript` 让 AppKit 把剪贴板的 PNG 表示写进 `$TMPDIR`
+  临时文件（TIFF-only 的剪贴板——截图的规范表示——在这里被转换；纯文本剪贴板非零退出并
+  留下 0 字节文件，即「没有图片」的信号），然后 `pbpaste` 读文本，图片失败不阻断文本。
+  Linux：`wl-paste`（Wayland）→ `xclip` / `xsel`（X11）；图片先列类型（`--list-types` /
+  `TARGETS`）再从 **`KNOWN_IMAGE_MIMES`** 里选一个。
+- **执行**：子进程不带 shell、stdio 全管道（不继承终端），在阻塞池上跑；每条命令带超时
+  （文本 ~1 s、图片 ~5 s），超时是**硬上界**并对**进程组**生效（读取器 fork 的孙进程一并
+  收，到点即返回、不等管道关闭）。事件循环只 await 回执（`AppIntent::ReadClipboard` →
+  `FetchPayload::ClipboardPaste`）；临时文件（pid + 计数命名）读完即删、**失败也删**，
+  超过 64 MiB 拒绝（读取在上限处截断；与 5522 通道同一个上限）。
+  **读取期间没有「进行中」提示**（正常路径毫秒级；最坏时长在 `util/clipboard_paste.rs`
+  量化），`Ctrl+V` / `super+v` **连击已合并为一次读取**（一次只跑一条读取链，落地后恢复）。
+- **落点**：文本 → `App::handle_paste`（模态挡板自动继承）；图片 → 同一条
+  `App::on_clipboard_image` 单并发流水线；空 → `Clipboard has no text or image` toast；
+  失败（远程 / 缺命令 / 超时 / 超限）各有定向 toast，**不静默**。
+- **composer 修饰键**：带 `SUPER` / `META` / `HYPER` 的 `Char` 一律不插入（`ui/input_area`
+  的 `dispatch_key`）—— 否则终端回传的 `Cmd+V` 会先在草稿里留下一个字面 `v`（用户实测的
+  「只粘贴了一个 v」）。`SHIFT` 不受影响（CSI-u 下大写字母带 SHIFT），`Ctrl+J/M` 的换行
+  例外照旧。
+
 **支持终端与政策**：
 
 | 环境 | 行为 |
 |---|---|
 | Ghostty（nightly / main） | 完整可用（文本 + 图片，本地 / SSH 同）——OSC 5522 目前只在 main：v1.3.1 stable 只有 parser、stream 层 handler `unimplemented`、无 mode 5522（DECRQM 应答 0）；kitty 预期一致（协议同源） |
-| 其它终端（忽略 `?5522h`） | DECSET 被忽略 → 图片粘贴不可用（**不做回落**：政策是让用户用支持协议的终端）；文本粘贴走 bracketed paste，行为不变 |
+| 其它终端（忽略 `?5522h`） | DECSET 被忽略 → 终端侧图片通道不可用；`Ctrl+V` / `super+v` 走 L1 本地读取（仅本机；SSH 下图片仍不可用）；文本粘贴走 bracketed paste，行为不变 |
 | tmux / zellij 内 | 多路复用器拦未知 OSC（除非用户开 passthrough）→ 登记为**已知限制**（先进终端直连） |
 | Windows | 不承诺（接驳层是 `cfg(unix)`；非 Unix 上 `install()` 是空操作，也不开 `?5522`） |
 
@@ -384,7 +417,7 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 `Ctrl+O` 翻转思考块的展开（[`app/modal.rs`](../../crates/wing/src/app/modal.rs) 的 `is_toggle_reasoning_key` → `KeyRoute::ToggleReasoning`）：
 
-* **应用保留键**，与 `Esc` / `Ctrl+C` 同档：在弹层（ask 面板 / `/model` picker / 命令 popup）之下也生效；唯一的硬要求是**必须在 composer 之前截住** —— 落到 composer 会被当普通字符 `o` 输入（composer 对 `Char(c)` 不做修饰键过滤，只有 `Ctrl+J/M` 是例外）；
+* **应用保留键**，与 `Esc` / `Ctrl+C` 同档：在弹层（ask 面板 / `/model` picker / 命令 popup）之下也生效；唯一的硬要求是**必须在 composer 之前截住** —— 落到 composer 会被当普通字符 `o` 输入（composer 只拦 `SUPER`/`META`/`HYPER` 修饰的 `Char`，`Ctrl+字母` 照旧插入，只有 `Ctrl+J/M` 是例外）；
 * **全局**：整条 transcript（所有轮）一起翻转，不是"只作用于当前回"；模式是 `ChatView` 的一个会话级字段（`thinking_expanded: Option<bool>`），会话内一直有效 —— resume / compaction / sync 重建后保持，新起的块天然跟随；
 * **初始默认**由配置给：`hidden` = 默认折叠（只剩标题行），`visible` = 默认展开（标题行 + 正文）。标题行（刷光 + 读秒）是所有思考块的固有部分；语义细节见 [tui-rendering.md](tui-rendering.md) 的「思考块：标题行与刷光」；
 * **发现**：这次会话还没按过 `Ctrl+O` 时，**进行中**的标题行行尾带一条静态提示 —— 展开中 `· Ctrl+O 折叠`、折叠中 `· Ctrl+O 展开`（不扫光；按过一次即退场；宽度装不下时第一个让位）—— 键位本身也在开屏 tips 池里（`shared/tips.rs`）。

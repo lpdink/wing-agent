@@ -3,7 +3,7 @@
 //! 流程（每一步都只因需求存在；触发通道与 chip 见 05/07 的交付）：
 //!
 //! ```text
-//! decode          png/jpeg/gif/webp/bmp（`image` 已开的 codec；GIF 取首帧）
+//! decode          png/jpeg/gif/webp/bmp/tiff（`image` 已开的 codec；GIF 取首帧）
 //! → flatten       半透明像素按白底合成（丢 alpha 会变黑边，白底是中性底）
 //! → 尺寸上限      长边 > `max_edge` 时一次性缩到 `max_edge`（等比）
 //! → JPEG(q)       质量 `quality`
@@ -20,6 +20,21 @@ use image::RgbImage;
 use image::RgbaImage;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
+
+/// 已知可解码的图片 MIME，按偏好序（png → jpeg → webp → gif → bmp → tiff）。
+///
+/// 这是上面 codec 清单的 MIME 面孔，两条粘贴通道共用它：OSC 5522 挑终端表示
+/// （`tui::clipboard_protocol::choose_mime`）与本地剪贴板的类型选择
+/// （`util::clipboard_paste`）。表外的 `image/*`（avif / heic…）一律不选——读回来
+/// 也解不了。tiff 在表内：macOS 剪贴板的规范表示（截图）常是 TIFF。
+pub(crate) const KNOWN_IMAGE_MIMES: [&str; 6] = [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+    "image/tiff",
+];
 
 /// 压缩产物：JPEG 字节 + 编码时的像素尺寸（mime 恒 `image/jpeg`）。
 ///
@@ -397,6 +412,45 @@ mod tests {
         let out = compress_image(&gif, &defaults()).expect("compress");
         let [r, g, b] = center_pixel(&decode(&out.bytes)).0;
         assert!(r >= 245 && g <= 10 && b <= 10, "首帧是红：{r},{g},{b}");
+    }
+
+    /// macOS 剪贴板的规范表示常是 TIFF（截图）：tiff codec 是本地读取与 OSC 5522
+    /// 两条粘贴通道的共同前提，压缩走与其它格式相同的 decode → flatten → JPEG 路径。
+    #[test]
+    fn a_tiff_source_compresses_like_any_other_picture() {
+        let rgba = RgbaImage::from_pixel(20, 10, Rgba([255, 0, 0, 128]));
+        let mut tiff = Vec::new();
+        DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut std::io::Cursor::new(&mut tiff), ImageFormat::Tiff)
+            .expect("encode tiff fixture");
+        let out = compress_image(&tiff, &defaults()).expect("compress tiff");
+        assert_eq!(&out.bytes[..3], &[0xFF, 0xD8, 0xFF], "产物是 JPEG");
+        assert_eq!((out.width, out.height), (20, 10));
+        // 半透明像素按白底合成（flatten 对 TIFF 同样生效）。
+        let [r, g, b] = center_pixel(&decode(&out.bytes)).0;
+        assert!(r >= 245, "红通道留在顶部：{r}");
+        assert!(
+            (120..=140).contains(&g) && (120..=140).contains(&b),
+            "绿蓝 ≈ 127（白底的一半）：{g},{b}"
+        );
+    }
+
+    /// `KNOWN_IMAGE_MIMES` 的每一项都必须真有编解码器：它是两条粘贴通道的选型依据，
+    /// 表里混进一个没开的 codec，用户会收到一张「读得回来但解不了」的图。
+    #[test]
+    fn every_known_mime_has_a_compiled_in_codec() {
+        for mime in KNOWN_IMAGE_MIMES {
+            let format = ImageFormat::from_mime_type(mime)
+                .unwrap_or_else(|| panic!("{mime} is not an `image` format"));
+            // 真编一份再解一份：feature 没开时 from_mime_type 仍认得格式，
+            // 只有缺 codec 才会在这一步炸出来。
+            let mut encoded = Vec::new();
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 2, WHITE))
+                .write_to(&mut std::io::Cursor::new(&mut encoded), format)
+                .unwrap_or_else(|e| panic!("cannot encode a {mime} fixture: {e}"));
+            image::load_from_memory(&encoded)
+                .unwrap_or_else(|e| panic!("{mime} has no compiled-in codec: {e}"));
+        }
     }
 
     #[test]

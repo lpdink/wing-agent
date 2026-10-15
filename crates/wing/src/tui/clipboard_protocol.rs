@@ -38,6 +38,8 @@ use tokio::sync::mpsc;
 
 use super::TermEvent;
 use super::stdin_proxy::Sequence;
+use crate::util::image_compress::KNOWN_IMAGE_MIMES;
+use crate::util::mime::normalize_mime;
 
 /// 一条 read 事务 / 一次 event 收集的空闲上限：正常终端毫秒级回完整串，超了就是没指望。
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -255,37 +257,19 @@ fn parse_listing(payload: &[u8]) -> Vec<String> {
 // MIME 选择与请求构造
 // ---------------------------------------------------------------------------
 
-/// 图片表示的优先级（先精确命中，再任意 `image/*` 兜底）。
-const IMAGE_PRIORITY: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-
-/// MIME 的归一形态：剥掉 `;charset=…` 之类的参数、去首尾空白、转小写。
-///
-/// **请求侧与响应侧必须用同一份归一**（[`choose_mime`] 挑表示、read DATA 的 mime 归属
-/// 比对）：终端在 listing 里列的名字与它自己 DATA 回显的名字不必逐字一致（参数 / 大小写
-/// 都是允许的差异），两侧口径一旦分叉，DATA 会被静默丢弃——读停在空数据上，最后以
-/// 「没有可用表示」或超时收场，而终端明明把字节发过来了。
-pub(crate) fn normalize_mime(mime: &str) -> String {
-    mime.split(';')
-        .next()
-        .unwrap_or(mime)
-        .trim()
-        .to_ascii_lowercase()
-}
-
 /// 从 listing 里挑一个要读的 MIME（纯函数）。
 ///
-/// 规则：图片优先（按 [`IMAGE_PRIORITY`]，其余 `image/*` 按 listing 顺序兜底），否则
-/// `text/plain`；都没有 → `None`（不读，直接降级）。比较前会剥掉 `;charset=…` 之类的
-/// 参数并忽略大小写（[`normalize_mime`]），以容纳各终端列出的名字差异。
+/// 规则：**已知可解码**的图片（按 [`KNOWN_IMAGE_MIMES`] 的偏好序），否则 `text/plain`；
+/// 都没有 → `None`（不读，直接降级）。表外的 `image/*`（avif / heic…）不选——读回来
+/// 解不了，也**不再遮蔽 `text/plain`**（宁可拿到文本，也别拿到一张解不了的图）。
+/// 比较前会剥掉 `;charset=…` 之类的参数并忽略大小写（[`normalize_mime`]），以容纳各
+/// 终端列出的名字差异。
 pub(crate) fn choose_mime(available: &[String]) -> Option<String> {
     let bases: Vec<String> = available.iter().map(|m| normalize_mime(m)).collect();
-    for want in IMAGE_PRIORITY {
+    for want in KNOWN_IMAGE_MIMES {
         if bases.iter().any(|b| b == want) {
             return Some(want.to_string());
         }
-    }
-    if let Some(other) = bases.iter().find(|b| b.starts_with("image/")) {
-        return Some(other.clone());
     }
     // 文本统一按规范名 `text/plain` 请求：终端（Ghostty 的 `isTextMime`）会把各种文本别名
     // （含 `text/plain;charset=utf-8`）都算成同一个表示，请求规范名最稳。`starts_with`
@@ -858,7 +842,7 @@ mod tests {
     // ── MIME 选择 ─────────────────────────────────────────────────────────
 
     #[test]
-    fn choose_mime_prefers_the_priority_list() {
+    fn choose_mime_prefers_the_known_image_list() {
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             choose_mime(&s(&["text/plain", "image/png"])).as_deref(),
@@ -886,22 +870,27 @@ mod tests {
         assert_eq!(
             choose_mime(&s(&["image/tiff", "image/gif"])).as_deref(),
             Some("image/gif"),
-            "优先级表内的 gif 优于兜底的任意 image/*"
+            "gif 在 tiff 之前"
+        );
+        assert_eq!(
+            choose_mime(&s(&["image/bmp", "image/tiff"])).as_deref(),
+            Some("image/bmp"),
+            "bmp 在 tiff 之前"
         );
         assert_eq!(
             choose_mime(&s(&["text/plain", "image/tiff"])).as_deref(),
             Some("image/tiff"),
-            "任意 image/* 兜底都优于文本"
+            "tiff 在已知集合内（macOS 截图的规范表示），仍优于文本"
         );
     }
 
     #[test]
-    fn choose_mime_falls_back_to_any_image_then_text() {
+    fn choose_mime_skips_undecodable_images_and_falls_back_to_text() {
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        // 未知的 image/* 也认（真机 MIME 名称待验收，宽容比精确重要）。
         assert_eq!(
             choose_mime(&s(&["image/tiff"])).as_deref(),
-            Some("image/tiff")
+            Some("image/tiff"),
+            "已知集合内的图片照读"
         );
         assert_eq!(
             choose_mime(&s(&["text/plain"])).as_deref(),
@@ -917,6 +906,14 @@ mod tests {
             choose_mime(&s(&["IMAGE/PNG"])).as_deref(),
             Some("image/png")
         );
+        // 解不了的 image/*（avif / heic）不再遮蔽文本，也不再被兜底选中。
+        assert_eq!(
+            choose_mime(&s(&["text/plain", "image/avif"])).as_deref(),
+            Some("text/plain"),
+            "未知 image/* 不能把文本挤掉"
+        );
+        assert_eq!(choose_mime(&s(&["image/avif"])), None);
+        assert_eq!(choose_mime(&s(&["image/avif", "image/heic"])), None);
         // 只有不认识的东西 → 不读。
         assert_eq!(choose_mime(&s(&["text/html", "application/pdf"])), None);
         assert_eq!(choose_mime(&[]), None);
