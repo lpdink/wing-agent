@@ -498,6 +498,45 @@ class TestUploadFileRoute:
         )
         assert response.status_code == 422, response.text
 
+    def test_upload_runs_off_the_event_loop_thread(
+        self, real_client, monkeypatch
+    ) -> None:
+        """大文件 I/O 在线程池里执行（64 MiB 级读写不该卡住事件循环）。
+
+        观测面：`require_live_session`（收包前的同步预检）跑在事件循环线程，
+        `upload_file` 必须**不在**同一个线程上——否则它就在循环里做整读 / fsync。
+        """
+        import threading
+
+        client, runtime, _ = real_client
+        sid = self._create_session(client, runtime)
+        threads: dict[str, int] = {}
+        real_require = runtime.require_live_session
+        real_upload = runtime.upload_file
+
+        def spy_require(session_id: str) -> None:
+            threads["loop"] = threading.get_ident()
+            real_require(session_id)
+
+        def spy_upload(session_id: str, data: bytes, *, name: str):
+            threads["upload"] = threading.get_ident()
+            return real_upload(session_id, data, name=name)
+
+        monkeypatch.setattr(runtime, "require_live_session", spy_require)
+        monkeypatch.setattr(runtime, "upload_file", spy_upload)
+
+        response = client.post(
+            "/api/session/files",
+            params={"session_id": sid, "name": "a.txt"},
+            content=b"x",
+        )
+
+        assert response.status_code == 200, response.text
+        assert set(threads) == {"loop", "upload"}, threads
+        assert threads["upload"] != threads["loop"], (
+            "上传仍在事件循环线程上执行（大文件会把整个网关卡住）"
+        )
+
     def test_upload_does_not_hydrate_an_evicted_session(self, real_client) -> None:
         client, runtime, _ = real_client
         sid = self._create_session(client, runtime)

@@ -438,7 +438,12 @@ async def upload_session_file(
 
     data = await request.body()
     try:
-        file = server.runtime.upload_file(session_id, data, name=name)
+        # 大文件 I/O（幂等比对整读 / fsync 落盘）必须离开事件循环：64 MiB 级载荷在
+        # 循环线程上跑会让整个网关停摆（WS 事件流 / send / health 全排队）。
+        # 异常从工作线程原样抛出，窄捕获语义不变。
+        file = await asyncio.to_thread(
+            server.runtime.upload_file, session_id, data, name=name
+        )
     except LookupError:
         # 预检之后的解析只会在这里再失败于竞态（会话在两步之间消失）——保留映射。
         raise HTTPException(status_code=404, detail="session not found")
