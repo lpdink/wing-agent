@@ -24,6 +24,7 @@ use model::Line;
 // Re-exports for external use.
 pub use chrome::ActivityRail;
 pub use chrome::MetaRail;
+pub use image::ChipLabelShift;
 pub use image::ImageChipTarget;
 pub use image::ImagePayload;
 pub use image::ImageStage;
@@ -215,6 +216,31 @@ impl InputArea {
             .all(|line| model::flat(line, &self.chips).trim().is_empty())
     }
 
+    /// The draft as the composer's **selection guard** reads it (see
+    /// [`model::flat_stable`]): identical to [`Self::text`] for everything the
+    /// user controls, but an in-flight chip's animated label reads as its
+    /// identity instead of the ticking spinner / progress figure.
+    pub(crate) fn guard_text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| model::flat_stable(line, &self.chips))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether submitting would produce nothing at all: no text (typed or
+    /// standing behind a paste chip) and no picture.
+    ///
+    /// A draft that holds nothing but a **failed** placeholder reads as
+    /// `[Image #1 ✗]` on screen — visible, but carrying neither text nor
+    /// picture (a picture chip contributes no characters, and a failed one has
+    /// no picture to ride along). Enter on such a draft is the same no-op as
+    /// Enter on an empty one, instead of sending an empty message and wiping
+    /// the last trace of the lost image.
+    pub(crate) fn submit_product_is_empty(&self) -> bool {
+        self.expand_and_get_text().trim().is_empty() && self.chips.images.ready() == 0
+    }
+
     // ── Cursor helpers ──────────────────────────────────────────
 
     /// Length of the current line in chars.
@@ -283,6 +309,11 @@ impl InputArea {
                 // 用户删掉占位符即可放行 —— 那是他明确表示「不要这张」的动作。
                 if self.has_unsettled_images() {
                     return InputAction::SubmitBlocked;
+                }
+                // 屏幕上看得见、产物却是空的（只剩失败态占位符）：与空草稿同样
+                // 静默无操作 —— 不许发出空消息、也不许把 `✗` 从草稿里抹掉。
+                if self.submit_product_is_empty() {
+                    return InputAction::None;
                 }
                 InputAction::Submit(self.submit_payload())
             }

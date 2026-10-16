@@ -69,7 +69,7 @@ impl App {
             ClipboardEvent::Delivered(payload) => match payload {
                 ClipboardPayload::Text(text) => self.handle_paste(&text),
                 ClipboardPayload::Image { bytes, mime, name } => {
-                    self.on_clipboard_image(bytes, mime, name)
+                    self.on_clipboard_image_delivered(bytes, mime, name)
                 }
             },
             // 在途读的失败：占位符就地翻成 `✗`（**只在它还在的时候**：用户可能已经
@@ -89,8 +89,9 @@ impl App {
     pub(crate) fn on_clipboard_paste(&mut self, result: Result<PasteOutcome, PasteFailure>) {
         match result {
             Ok(PasteOutcome::Text(text)) => self.handle_paste(&text),
-            // 本地读取的通道不带文件名（OSC 5522 也不带）。
-            Ok(PasteOutcome::Image { bytes, mime }) => self.on_clipboard_image(bytes, mime, None),
+            // 本地读取的通道不带文件名（OSC 5522 也不带），也**没有「读开始」信号**：
+            // 占位符只能在此刻插（见 `on_clipboard_local_image`）。
+            Ok(PasteOutcome::Image { bytes, mime }) => self.on_clipboard_local_image(bytes, mime),
             Ok(PasteOutcome::Empty) => {
                 self.show_toast(Toast::warning(
                     "Clipboard has no text or image",
@@ -107,8 +108,8 @@ impl App {
     /// 5522 通道：一条图片读开始了（协议机已选定图片 MIME，字节还没到）。
     ///
     /// 占位符就在这一刻落地 —— 这是「粘贴已受理」对用户唯一的证据，也是整个特性的
-    /// 起点（见 [`Self::on_clipboard_image`] 对「本地通道没这一步」的说明）。句柄入队，
-    /// 与随后的交付 / 失败配对（见 `App::image_reads`）。
+    /// 起点（见 [`Self::on_clipboard_local_image`] 对「本地通道没这一步」的说明）。
+    /// 句柄入队，与随后的交付 / 失败配对（见 `App::image_reads`）。
     fn on_clipboard_image_started(&mut self, mime: String) {
         let target = self
             .input
@@ -128,30 +129,61 @@ impl App {
         let Some(target) = self.image_reads.front().copied() else {
             return;
         };
-        self.input
-            .set_image_stage(target, ImageStage::Receiving { bytes: received });
+        if let Some(shift) = self
+            .input
+            .set_image_stage(target, ImageStage::Receiving { bytes: received })
+        {
+            self.selection.shift_composer_selection(shift);
+        }
     }
 
-    /// 图片载荷边界：字节到手 → 占位符进入「处理中」→ 交给压缩流水线。
+    /// 5522 通道：一条图片读的**字节到手** —— 认领它在开始时登记的占位符，
+    /// 把它翻成「处理中」并交给压缩流水线。
+    ///
+    /// 认领是 `image_reads` 队首，且**只属于这条通道**（每条 5522 读都有对应的
+    /// `ImageReadStarted`）。本地通道绝不进这里：认领会把一张本地图片塞进正在传的
+    /// 那张图的占位符里（号码 / 位置全错，而那张 5522 图反倒在字节到时新建 chip）。
+    ///
+    /// 占位符已经不在了（草稿被清空 / 重写、chip 被删）⇒ 字节直接丢掉：那次粘贴在
+    /// 用户眼里早已作废，重新插一个 chip 才是意外（删占位符 = 「这张我不要了」）。
+    fn on_clipboard_image_delivered(&mut self, bytes: Vec<u8>, mime: String, name: Option<String>) {
+        let Some(target) = self.image_reads.pop_front() else {
+            // 没有在途读却收到图片字节（不该发生）：按本地通道处理，至少让字节落地。
+            tracing::debug!(mime = %mime, "clipboard image arrived with no read in flight");
+            self.on_clipboard_local_image(bytes, mime);
+            return;
+        };
+        if !self.input.image_target_is_live(target) {
+            tracing::debug!(
+                chip = target.number,
+                "pasted image dropped: its placeholder is gone"
+            );
+            return;
+        }
+        if let Some(shift) = self.input.set_image_stage(target, ImageStage::Compressing) {
+            self.selection.shift_composer_selection(shift);
+        }
+        self.enqueue_clipboard_image(target, bytes, mime, name);
+    }
+
+    /// 本地通道（L1）：读回字节才知道是图片 —— **永远新插**一个占位符，此刻进入
+    /// 「处理中」。
     ///
     /// **不查模态挡板**（与文本不同）：文本粘贴是往某个输入框里送字，模态面板该拦；
     /// 图片落的是草稿上一个可见、可删的 chip，静默丢字节才是最坏的结果。
-    ///
-    /// 通道差异只在这一处：5522 通道的读开始过（[`Self::on_clipboard_image_started`]），
-    /// 用那个占位符；本地读取通道读回来才知道是图片，占位符此刻插。
-    pub(crate) fn on_clipboard_image(
+    pub(crate) fn on_clipboard_local_image(&mut self, bytes: Vec<u8>, mime: String) {
+        let target = self.input.insert_pending_image(ImageStage::Compressing);
+        self.enqueue_clipboard_image(target, bytes, mime, None);
+    }
+
+    /// 图片载荷的入队尾巴（两条通道共用）：日志 → 队列 → 上限 → 泵。
+    fn enqueue_clipboard_image(
         &mut self,
+        target: ImageChipTarget,
         bytes: Vec<u8>,
         mime: String,
         name: Option<String>,
     ) {
-        let target = match self.image_reads.pop_front() {
-            Some(target) => {
-                self.input.set_image_stage(target, ImageStage::Compressing);
-                target
-            }
-            None => self.input.insert_pending_image(ImageStage::Compressing),
-        };
         tracing::info!(
             bytes = bytes.len(),
             mime = %mime,
@@ -208,19 +240,23 @@ impl App {
     ) {
         self.clipboard_compress_in_flight = false;
         match result {
-            Ok(image) => {
-                if self.input.complete_image(target, image) {
+            Ok(image) => match self.input.complete_image(target, image) {
+                Some(shift) => {
+                    self.selection.shift_composer_selection(shift);
                     tracing::info!(chip = target.number, "pasted image chip settled");
-                } else {
+                }
+                None => {
                     tracing::debug!(
                         chip = target.number,
                         "pasted image dropped: the chip is gone"
                     );
                 }
-            }
+            },
             Err(reason) => {
                 tracing::warn!(reason = %reason, "pasted image could not be compressed");
-                self.input.fail_image(target);
+                if let Some(shift) = self.input.fail_image(target) {
+                    self.selection.shift_composer_selection(shift);
+                }
                 self.show_toast(Toast::warning(
                     format!("Image dropped: {reason}"),
                     Duration::from_secs(5),
@@ -237,8 +273,9 @@ impl App {
     pub(crate) fn on_clipboard_read_failed(&mut self, mime: &str, failure: ClipboardFailure) {
         if mime.starts_with("image/")
             && let Some(target) = self.image_reads.pop_front()
+            && let Some(shift) = self.input.fail_image(target)
         {
-            self.input.fail_image(target);
+            self.selection.shift_composer_selection(shift);
         }
         tracing::warn!(mime, failure = ?failure, "clipboard read failed");
         self.show_toast(Toast::warning(failure.message(), Duration::from_secs(4)));
@@ -282,7 +319,9 @@ impl App {
                 mime = %oldest.mime,
                 "clipboard image queue over budget, dropped the oldest"
             );
-            self.input.fail_image(oldest.target);
+            if let Some(shift) = self.input.fail_image(oldest.target) {
+                self.selection.shift_composer_selection(shift);
+            }
         }
         if dropped > 0 {
             self.show_toast(Toast::warning(

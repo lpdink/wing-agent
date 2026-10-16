@@ -30,6 +30,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::ui::input_area::ChipLabelShift;
 use crate::ui::input_area::pointer;
 use crate::ui::selection::Selection;
 use crate::ui::selection::SelectionPoint;
@@ -94,7 +95,7 @@ pub(super) enum SelectionGuard {
     },
     /// Composer: the draft itself plus the width it was wrapped against.
     Composer {
-        /// Current draft text (`InputArea::text`).
+        /// Current draft text as the guard reads it (`InputArea::guard_text`).
         text: String,
         /// Terminal width the visual rows were computed against.
         width: u16,
@@ -148,6 +149,20 @@ impl SelectionSession {
     /// Extend the gesture to `at`.
     fn drag_to(&mut self, at: SelectionPoint) {
         self.selection.drag_to(at);
+    }
+
+    /// Recompose the composer selection after an in-flight chip's label was
+    /// rewritten: the endpoints behind the chip move with it (see
+    /// [`Selection::shift_composer`]).
+    ///
+    /// The rewrite is *content-preserving* — the same chip keeps its place,
+    /// only its animated label (spinner frame / progress figure) changes
+    /// length — so it must not read as "the user's text changed": the drag
+    /// follows the label instead of being aborted. Nothing to do when the
+    /// selection lives in the chat band, and a no-op when there is none.
+    pub(super) fn shift_composer_selection(&mut self, shift: ChipLabelShift) {
+        self.selection
+            .shift_composer(shift.row, shift.from, shift.delta);
     }
 
     /// Finish the drag: returns the ordered bounds when the selection is
@@ -499,7 +514,10 @@ impl App {
     pub(super) fn selection_fingerprint(&self, region: SelectionRegion) -> SelectionGuard {
         match region {
             SelectionRegion::Composer => SelectionGuard::Composer {
-                text: self.input.text(),
+                // `guard_text`, not `text`: an in-flight chip's label is
+                // animated (spinner / progress) and must not read as a content
+                // change — see `InputArea::guard_text`.
+                text: self.input.guard_text(),
                 width: self.geometry.width(),
             },
             SelectionRegion::Chat => SelectionGuard::Chat {

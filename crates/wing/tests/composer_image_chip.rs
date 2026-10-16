@@ -94,25 +94,33 @@ fn the_placeholder_surface_is_reachable_through_the_public_api() {
     assert_eq!(input.text(), "pic: [Image #1 ⠋]");
     assert!(input.has_unsettled_images(), "在途 = 门关着");
 
-    assert!(input.set_image_stage(target, ImageStage::Receiving { bytes: 12_582_912 }));
+    assert!(
+        input
+            .set_image_stage(target, ImageStage::Receiving { bytes: 12_582_912 })
+            .is_some()
+    );
     assert_eq!(input.text(), "pic: [Image #1 ⠋ ↓12.0MB]");
-    assert!(input.set_image_stage(target, ImageStage::Compressing));
+    assert!(
+        input
+            .set_image_stage(target, ImageStage::Compressing)
+            .is_some()
+    );
     assert_eq!(input.text(), "pic: [Image #1 ⠋ 处理中…]");
 
-    assert!(input.complete_image(target, picture(4096)));
+    assert!(input.complete_image(target, picture(4096)).is_some());
     assert_eq!(input.text(), "pic: [Image #1 4×2 4KB]");
     assert!(!input.has_unsettled_images(), "落定 = 门开了");
 
     // 失败态：同一个句柄、同一个位置，标签换成 ✗；它不是「在途」，不拦发送。
     let failed = input.insert_pending_image(ImageStage::Compressing);
-    assert!(input.fail_image(failed));
+    assert!(input.fail_image(failed).is_some());
     assert_eq!(input.text(), "pic: [Image #1 4×2 4KB][Image #2 ✗]");
     assert!(!input.has_unsettled_images());
 
     // 陈旧句柄（草稿被清空之后）什么都不落地。
     let stale = input.insert_pending_image(ImageStage::Compressing);
     input.clear();
-    assert!(!input.complete_image(stale, picture(8)));
+    assert!(input.complete_image(stale, picture(8)).is_none());
     assert_eq!(input.text(), "");
     assert!(!input.tick_pending_images(std::time::Duration::from_millis(100)));
 }

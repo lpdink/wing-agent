@@ -177,6 +177,31 @@ impl Selection {
         self.reset();
     }
 
+    /// Shift the `Composer` points on `row` at or past `from` by `delta` chars.
+    ///
+    /// A chip's label is rewritten while a paste is in flight (progress
+    /// figures, the spinner, the settle), and the chip's span is part of the
+    /// flat projection the composer's columns speak — so everything behind it
+    /// on the same line moves, exactly like the cursor moves. A highlight that
+    /// did not follow would cover (and copy) text the user never selected.
+    /// Points before the chip, on other rows, or in the chat band are
+    /// untouched; a point can never land inside the chip (its leading edge is
+    /// the floor).
+    pub fn shift_composer(&mut self, row: usize, from: usize, delta: isize) {
+        for point in [self.anchor.as_mut(), self.focus.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if point.region != SelectionRegion::Composer || point.row != row {
+                continue;
+            }
+            let col = point.col as usize;
+            if col > from {
+                point.col = (col as isize + delta).max(from as isize) as u16;
+            }
+        }
+    }
+
     fn reset(&mut self) {
         self.anchor = None;
         self.focus = None;
@@ -421,6 +446,40 @@ mod tests {
     }
 
     // ── 状态机 ──────────────────────────────────────────────
+
+    /// 在途 chip 的标签变长/变短时，选区端点跟着走（同 `relabel_image` 对光标做的事）：
+    /// chip 之前、别的行、chat 区的点都不动，且端点永远落不到 chip 里面。
+    #[test]
+    fn shift_composer_moves_only_the_positions_behind_the_chip() {
+        use super::*;
+
+        let mut selection = Selection::default();
+        // [3, 9) —— 与 chip（前缘 5）交叉：anchor 在 chip 前，focus 在 chip 后。
+        selection.begin(SelectionPoint::composer(0, 3));
+        selection.drag_to(SelectionPoint::composer(0, 9));
+
+        selection.shift_composer(0, 5, 4);
+        assert_eq!(selection.anchor(), Some(SelectionPoint::composer(0, 3)));
+        assert_eq!(selection.focus(), Some(SelectionPoint::composer(0, 13)));
+
+        // 收缩：焦点被夹在 chip 的前缘上（端点不许落进标签里）。
+        selection.shift_composer(0, 5, -20);
+        assert_eq!(selection.focus(), Some(SelectionPoint::composer(0, 5)));
+        assert_eq!(selection.anchor(), Some(SelectionPoint::composer(0, 3)));
+
+        // 别的行 / 别的区域：一动不动。
+        let mut selection = Selection::default();
+        selection.begin(SelectionPoint::composer(1, 8));
+        selection.drag_to(SelectionPoint::composer(1, 9));
+        selection.shift_composer(0, 0, 4);
+        assert_eq!(selection.anchor(), Some(SelectionPoint::composer(1, 8)));
+
+        let mut selection = Selection::default();
+        selection.begin(SelectionPoint::chat(2, 8));
+        selection.drag_to(SelectionPoint::chat(2, 9));
+        selection.shift_composer(0, 0, 4);
+        assert_eq!(selection.anchor(), Some(SelectionPoint::chat(2, 8)));
+    }
 
     #[test]
     fn test_begin_without_drag_has_no_bounds() {

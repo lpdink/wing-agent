@@ -84,7 +84,7 @@ pub(super) enum KeyRoute {
     /// `Ctrl+V` / `super+v` — 读系统剪贴板（L1，见 `util::clipboard_paste`）。
     ///
     /// 应用保留键（与 Ctrl+O 同档）：读取在后台任务上跑，**落点**才做门控 —
-    /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_image`
+    /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_local_image`
     /// （不受挡板，与 OSC 5522 通道同一条既定取舍）。
     PasteClipboard,
     /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它，AD2；

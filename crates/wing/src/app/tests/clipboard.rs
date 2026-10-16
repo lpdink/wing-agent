@@ -284,7 +284,8 @@ fn a_read_failure_flips_the_placeholder_to_failed() {
     );
 }
 
-/// 用户在传输途中把占位符删了：那张图**不要了** —— 回执落地时不重新插入。
+/// 用户在传输途中把占位符删了：那张图**不要了** —— 字节到时连压缩都不跑，
+/// 更不会重新插一个 chip（「删占位符 = 这张我不要了」）。
 #[test]
 fn deleting_the_placeholder_drops_the_paste_in_flight() {
     let mut app = test_app();
@@ -293,12 +294,16 @@ fn deleting_the_placeholder_drops_the_paste_in_flight() {
     assert_eq!(app.input.text(), "");
 
     deliver_image(&mut app, png(8, 8, [3, 3, 3]), None);
-    let (queued_target, bytes, options) = take_compression(&mut app);
-    assert_eq!(queued_target, target);
-    // 压缩照跑（已经出队了，没有取消的理由），但结果没有落点。
-    app.on_clipboard_compressed(target, Ok(compress(&bytes, &options).expect("compress")));
+    assert!(
+        app.drain_intents().is_empty(),
+        "没有落点的字节不该再花 CPU 去压"
+    );
+    assert!(app.pending_clipboard_images().is_empty());
     assert_eq!(app.input.text(), "", "回执被丢弃，不重新插入");
     assert!(app.toast.is_none(), "这不是失败：用户自己的动作");
+    // 句柄已经从在途队列里出队（交付消费掉了它）。
+    assert!(app.image_reads.is_empty());
+    let _ = target;
 }
 
 /// 草稿被清空（Esc）之后，在途的字节与压缩回执都不许落进新草稿：
@@ -309,14 +314,13 @@ fn a_paste_in_flight_never_lands_in_a_new_draft() {
     start_image_read(&mut app);
     // 用户在传输途中清空草稿（Esc）。
     app.input.clear();
-    // 老读照常收场：字节到手 → 压缩 → 回执落地时 chip 已经没了。
+    // 老读的字节随后到齐：占位符已经不在了 ⇒ 字节丢掉（不压、不插）。
     deliver_image(&mut app, png(8, 8, [3, 3, 3]), None);
-    let (target, bytes, options) = take_compression(&mut app);
-    app.on_clipboard_compressed(target, Ok(compress(&bytes, &options).expect("compress")));
+    assert!(app.drain_intents().is_empty(), "回到旧草稿的字节没有落点");
     assert_eq!(app.input.text(), "", "老读不许落进新草稿");
     assert!(app.toast.is_none(), "这不是失败：用户自己的动作");
 
-    // 新的一次粘贴（协议机在旧读收场后才开始它）：号码从头计，不受老回执影响。
+    // 新的一次粘贴（协议机在旧读收场后才开始它）：号码从头计，不受老读影响。
     let fresh = start_image_read(&mut app);
     assert_eq!(fresh.number, 1, "号码确实重来了");
     deliver_image(&mut app, png(8, 8, [5, 5, 5]), None);
@@ -324,6 +328,44 @@ fn a_paste_in_flight_never_lands_in_a_new_draft() {
     assert_eq!(target, fresh, "配对到的是新读自己的占位符");
     let image = settle(&mut app, target, &bytes, &options);
     assert_eq!(app.input.text(), chip_text(1, &image));
+}
+
+/// **跨通道**：5522 的读还在飞时用本地通道（Ctrl+V）粘一张图 —— 它必须落进
+/// **自己的**新占位符，而不是抢走那条 5522 读的（否则两张图的号码与位置全错，
+/// 而且 5522 那张会在字节到时新建 chip）。
+#[test]
+fn a_local_paste_never_claims_the_read_in_flight() {
+    let mut app = test_app();
+    app.input.set_text("a ");
+    let remote = start_image_read(&mut app);
+    assert_eq!(remote.number, 1);
+
+    // 本地通道交付一张图（读回字节才知道是图片）：新占位符 #2。
+    app.on_clipboard_paste(Ok(PasteOutcome::Image {
+        bytes: png(8, 8, [1, 1, 1]),
+        mime: "image/png".into(),
+    }));
+    assert_eq!(app.input.text(), "a [Image #1 ⠋][Image #2 ⠋ 处理中…]");
+    assert_eq!(app.image_reads.front(), Some(&remote), "在途读纹丝不动");
+
+    // 本地那张压完：落进 #2（不是 #1）。
+    let (target, bytes, options) = take_compression(&mut app);
+    assert_eq!(target.number, 2);
+    let local = settle(&mut app, target, &bytes, &options);
+    assert_eq!(
+        app.input.text(),
+        format!("a [Image #1 ⠋]{}", chip_text(2, &local))
+    );
+
+    // 5522 那张随后到齐：落进它自己的 #1。
+    deliver_image(&mut app, png(8, 8, [2, 2, 3]), None);
+    let (target, bytes, options) = take_compression(&mut app);
+    assert_eq!(target, remote);
+    let remote_image = settle(&mut app, target, &bytes, &options);
+    assert_eq!(
+        app.input.text(),
+        format!("a {}{}", chip_text(1, &remote_image), chip_text(2, &local))
+    );
 }
 
 /// 队列是 FIFO：两次粘贴按顺序压、按顺序落定 —— chip 号码 = 粘贴顺序。
@@ -575,6 +617,54 @@ fn deleting_the_placeholder_lets_enter_through_again() {
     };
     assert_eq!(content, "look");
     assert!(images.is_empty());
+}
+
+/// 只剩一张 `✗`（失败占位符）的草稿：Enter 与空草稿同样静默无操作 —— 不许发出
+/// 空消息（正文与图片都空），也不许把用户丢图的唯一痕迹抹掉。
+#[test]
+fn enter_on_a_failed_chip_only_draft_sends_nothing() {
+    let mut app = test_app();
+    start_image_read(&mut app);
+    app.handle_clipboard(ClipboardEvent::ReadFailed {
+        mime: "image/png".into(),
+        failure: ClipboardFailure::Timeout,
+    });
+    assert_eq!(app.input.text(), "[Image #1 ✗]");
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|i| matches!(i, AppIntent::SendMessage { .. })),
+        "没有正文也没有图片：不发"
+    );
+    assert_eq!(app.input.text(), "[Image #1 ✗]", "草稿照旧（✗ 还在）");
+}
+
+/// 有正文时 `✗` 不拦发送：消息照发，草稿连同 `✗` 一起清掉。
+#[test]
+fn a_failed_chip_does_not_hold_a_real_message_back() {
+    let mut app = test_app();
+    app.input.set_text("note ");
+    start_image_read(&mut app);
+    app.handle_clipboard(ClipboardEvent::ReadFailed {
+        mime: "image/png".into(),
+        failure: ClipboardFailure::Timeout,
+    });
+
+    app.handle_key(key(crossterm::event::KeyCode::Enter));
+    let sent = app
+        .drain_intents()
+        .into_iter()
+        .find(|i| matches!(i, AppIntent::SendMessage { .. }));
+    let Some(AppIntent::SendMessage {
+        content, images, ..
+    }) = sent
+    else {
+        panic!("有正文就要照常发送");
+    };
+    assert_eq!(content, "note");
+    assert!(images.is_empty(), "失败的图片没有载荷可发");
 }
 
 /// 落定的图片照常发送（门只拦在途的那些）。

@@ -95,6 +95,25 @@ pub enum ImageStage {
     Failed,
 }
 
+/// Where a rewritten chip label moved its line: positions at or past `from`
+/// (a flat char index) shifted by `delta` characters.
+///
+/// A label is rewritten while the paste is in flight (progress figures, the
+/// spinner, the settle), and the chip's span is part of the flat projection
+/// every position speaks — so everything behind it on the same line moves.
+/// The composer's own cursor is shifted inside [`InputArea`]; the drag
+/// selection's anchors are the caller's (they live in the app), which is why
+/// the shift comes back out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChipLabelShift {
+    /// The logical line the chip lives on.
+    pub row: usize,
+    /// The chip's leading edge (flat char index): the first position that moved.
+    pub from: usize,
+    /// How far the positions moved (negative = the label shrank).
+    pub delta: isize,
+}
+
 /// A handle to a chip that has not settled: its number, and the draft epoch it
 /// belongs to (see the module docs).
 ///
@@ -225,6 +244,21 @@ impl Images {
             }),
         );
         Some(label)
+    }
+
+    /// Whether a chip is one of our placeholders (no picture yet) — the claim
+    /// check for a delivered read, and the selection guard's "this label is
+    /// still animating" test.
+    pub fn is_pending(&self, number: ImageNumber) -> bool {
+        matches!(self.entries.get(&number), Some(Entry::Pending(_)))
+    }
+
+    /// How many chips hold a picture (settled — what a message would carry).
+    pub fn ready(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| matches!(entry, Entry::Ready(_)))
+            .count()
     }
 
     /// How many chips are waiting for something (transfer or compression).
@@ -370,51 +404,49 @@ impl InputArea {
     /// the label is rewritten in place and the cursor kept on the same
     /// character.
     ///
-    /// Returns `false` when the handle is stale: the draft was cleared or
+    /// Returns `None` when the handle is stale: the draft was cleared or
     /// rewritten since ([`ImageChipTarget`]'s epoch), or the chip was deleted.
     /// A stale update is a no-op, never an error: the paste simply lost its
     /// audience.
-    pub fn set_image_stage(&mut self, target: ImageChipTarget, stage: ImageStage) -> bool {
+    pub fn set_image_stage(
+        &mut self,
+        target: ImageChipTarget,
+        stage: ImageStage,
+    ) -> Option<ChipLabelShift> {
         if target.epoch != self.chips.images.epoch() {
-            return false;
+            return None;
         }
         let before = self.chips.label(model::ChipId::Image(target.number));
         let old_chars = before.chars().count();
-        match self.chips.images.set_stage(target.number, stage) {
-            Some(label) => {
-                self.relabel_image(target.number, old_chars, &label);
-                true
-            }
-            None => false,
-        }
+        let label = self.chips.images.set_stage(target.number, stage)?;
+        self.relabel_image(target.number, old_chars, &label)
     }
 
     /// Settle a placeholder into the real chip: the picture replaces the stage
     /// text **where the placeholder is** (the number and the position do not
     /// move).
     ///
-    /// `false` for a stale handle (see [`Self::set_image_stage`]) — the result
+    /// `None` for a stale handle (see [`Self::set_image_stage`]) — the result
     /// is dropped, not inserted somewhere else.
-    pub fn complete_image(&mut self, target: ImageChipTarget, image: CompressedImage) -> bool {
+    pub fn complete_image(
+        &mut self,
+        target: ImageChipTarget,
+        image: CompressedImage,
+    ) -> Option<ChipLabelShift> {
         if target.epoch != self.chips.images.epoch() {
-            return false;
+            return None;
         }
         let before = self.chips.label(model::ChipId::Image(target.number));
         let old_chars = before.chars().count();
-        match self.chips.images.settle(target.number, image) {
-            Some(label) => {
-                self.relabel_image(target.number, old_chars, &label);
-                true
-            }
-            None => false,
-        }
+        let label = self.chips.images.settle(target.number, image)?;
+        self.relabel_image(target.number, old_chars, &label)
     }
 
     /// Flip a placeholder into its failed state (`[Image #N ✗]`) — the chip
     /// stays where it is, as the visible mark of what was lost.
     ///
-    /// `false` for a stale handle (see [`Self::set_image_stage`]).
-    pub fn fail_image(&mut self, target: ImageChipTarget) -> bool {
+    /// `None` for a stale handle (see [`Self::set_image_stage`]).
+    pub fn fail_image(&mut self, target: ImageChipTarget) -> Option<ChipLabelShift> {
         self.set_image_stage(target, ImageStage::Failed)
     }
 
@@ -437,6 +469,13 @@ impl InputArea {
         self.chips.images.unsettled() > 0
     }
 
+    /// Whether `target` still names one of this draft's in-flight chips — the
+    /// check a delivered read makes before it claims the handle (a draft that
+    /// was cleared since would have handed the number to somebody else).
+    pub fn image_target_is_live(&self, target: ImageChipTarget) -> bool {
+        target.epoch == self.chips.images.epoch() && self.chips.images.is_pending(target.number)
+    }
+
     /// Rewrite chip `number`'s label and keep the cursor on the same character.
     ///
     /// `old_chars` is the label's char length **before** the registry was
@@ -452,10 +491,13 @@ impl InputArea {
     /// column is dropped rather than re-derived (it is measured in display
     /// cells of a visual row the re-wrap may have just redrawn — the cheap
     /// correct answer is to let the next Up/Down re-measure).
-    fn relabel_image(&mut self, number: ImageNumber, old_chars: usize, label: &str) {
-        let Some(row) = self.image_row(number) else {
-            return;
-        };
+    fn relabel_image(
+        &mut self,
+        number: ImageNumber,
+        old_chars: usize,
+        label: &str,
+    ) -> Option<ChipLabelShift> {
+        let row = self.image_row(number)?;
         let new_chars = label.chars().count() as isize;
         let start: usize = self.lines[row]
             .iter()
@@ -467,6 +509,11 @@ impl InputArea {
             self.cursor_col = shifted.max(start as isize) as usize;
             self.clear_desired_col();
         }
+        Some(ChipLabelShift {
+            row,
+            from: start,
+            delta: new_chars - old_chars as isize,
+        })
     }
 
     /// The line an image chip lives on (`None` once the chip is gone — a
@@ -575,7 +622,18 @@ mod tests {
         assert_eq!(input.text(), "see [Image #1 ⠋]");
         input.insert_str("after");
 
-        assert!(input.set_image_stage(target, ImageStage::Receiving { bytes: 12_582_912 }));
+        let shift = input
+            .set_image_stage(target, ImageStage::Receiving { bytes: 12_582_912 })
+            .expect("标签改写");
+        assert_eq!(
+            shift,
+            ChipLabelShift {
+                row: 0,
+                from: 4,
+                delta: 8,
+            },
+            "位移 = chip 前缘 + 标签的字符增量（调用方按它平移选区锚点）"
+        );
         assert_eq!(input.text(), "see [Image #1 ⠋ ↓12.0MB]after");
         assert_eq!(
             input.cursor_col,
@@ -583,7 +641,10 @@ mod tests {
             "光标还在行尾（chip 变长，位置被平移）"
         );
 
-        assert!(input.complete_image(target, picture(2048, 1324, 428_032)));
+        let shift = input
+            .complete_image(target, picture(2048, 1324, 428_032))
+            .expect("落定");
+        assert_eq!((shift.from, shift.delta), (4, 6), "落定也是一次标签改写");
         assert_eq!(input.text(), "see [Image #1 2048×1324 418KB]after");
         assert_eq!(
             input.cursor_col,
@@ -599,10 +660,10 @@ mod tests {
         let mut input = InputArea::new("");
         let target = input.insert_pending_image(ImageStage::Compressing);
         assert!(input.has_unsettled_images());
-        assert!(input.fail_image(target));
+        assert!(input.fail_image(target).is_some());
         assert_eq!(input.text(), "[Image #1 ✗]");
         assert!(!input.has_unsettled_images(), "失败不拦发送");
-        assert!(!input.fail_image(target), "失败态不重复改写");
+        assert!(input.fail_image(target).is_none(), "失败态不重复改写");
     }
 
     /// 陈旧句柄（草稿被清空 / 重写）不落地：号码重来之后同号 chip 是**别人**的。
@@ -615,17 +676,17 @@ mod tests {
         assert_eq!(fresh.number, stale.number, "号码确实重来了");
         assert_ne!(fresh.epoch, stale.epoch);
         assert!(
-            !input.complete_image(stale, picture(4, 4, 10)),
+            input.complete_image(stale, picture(4, 4, 10)).is_none(),
             "老回执不许碰新 chip"
         );
-        assert!(!input.fail_image(stale));
-        assert!(!input.set_image_stage(stale, ImageStage::Failed));
+        assert!(input.fail_image(stale).is_none());
+        assert!(input.set_image_stage(stale, ImageStage::Failed).is_none());
         assert_eq!(
             input.text(),
             "[Image #1 ⠋ 处理中…]",
             "新 chip 还是它自己的样子"
         );
-        assert!(input.complete_image(fresh, picture(4, 4, 10)));
+        assert!(input.complete_image(fresh, picture(4, 4, 10)).is_some());
         assert_eq!(input.text(), "[Image #1 4×4 10B]");
     }
 
@@ -636,8 +697,8 @@ mod tests {
         let target = input.insert_pending_image(ImageStage::Compressing);
         input.backspace();
         assert_eq!(input.text(), "");
-        assert!(!input.complete_image(target, picture(4, 4, 10)));
-        assert!(!input.fail_image(target));
+        assert!(input.complete_image(target, picture(4, 4, 10)).is_none());
+        assert!(input.fail_image(target).is_none());
         assert_eq!(input.text(), "");
     }
 
@@ -650,12 +711,14 @@ mod tests {
         assert!(input.tick_pending_images(Duration::from_millis(100)));
         let shown = input.text();
         assert!(shown.starts_with("[Image #1 ⠙"), "{shown}");
-        input.complete_image(target, picture(4, 4, 10));
+        input
+            .complete_image(target, picture(4, 4, 10))
+            .expect("落定");
         assert!(!input.tick_pending_images(Duration::from_millis(100)));
         assert_eq!(input.text(), "[Image #1 4×4 10B]");
         // 失败态也不转。
         let failed = input.insert_pending_image(ImageStage::Compressing);
-        input.fail_image(failed);
+        input.fail_image(failed).expect("失败态");
         assert!(!input.tick_pending_images(Duration::from_millis(500)));
         assert!(input.text().ends_with("[Image #2 ✗]"), "{}", input.text());
     }
@@ -669,7 +732,11 @@ mod tests {
         input.insert_str("cd");
         input.move_home();
         input.cursor_col = 1;
-        assert!(input.set_image_stage(target, ImageStage::Receiving { bytes: 1_048_576 }));
+        assert!(
+            input
+                .set_image_stage(target, ImageStage::Receiving { bytes: 1_048_576 })
+                .is_some()
+        );
         assert_eq!(input.cursor_col, 1, "chip 之前的列不动");
         assert_eq!(input.text(), "ab[Image #1 ⠋ ↓1.0MB]cd");
     }

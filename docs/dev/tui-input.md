@@ -135,7 +135,7 @@
 | must-select 命令的草稿恢复（`/fork` 等回车后回填文本、重开 popup） | 同上，随 `set_text` 丢弃 | **info toast**：`Image dropped: <命令名> takes no image`（与命令路径同一句，见下） |
 | **提交的文本恰好是前端命令**（`try_frontend_command` 命中：`/clear`、`/model …`、`/tips` …） | 命令在本地执行、不是消息，图片**没有落点**：`SubmitPayload.images` 随 `payload` 一起消失，既不发也不上传（在途的占位符本就被提交门拦着，走不到这里） | **info toast**：`Image dropped: <命令名> takes no image` |
 | `/clear`（清 chat）/ Esc 清草稿 / 提交 | 走同一个 `clear`：两本注册表一起归零、号码从头计数、纪元 +1 | 无提示（用户自己的动作） |
-| **删掉在途的占位符**（Backspace / Delete 吃掉整块） | 那张图**不要了**：字节还在传 / 还在压，但回执落地时找不到 chip → 丢弃 | 无提示（占位符消失本身就是用户的动作） |
+| **删掉在途的占位符**（Backspace / Delete 吃掉整块） | 那张图**不要了**：字节随后到齐时句柄已失效 → 字节直接丢掉（不压、不插）；已经出队去压的那张则丢弃回执 | 无提示（占位符消失本身就是用户的动作） |
 | rewind / fork / 重连带回的 server draft（`set_text`） | 随被替换的草稿丢弃 | 无提示 |
 | **发送失败 / 被服务端拒绝（回填）** | **反向**：文本与图片 chip 都回到草稿（原件存在 pending 条目里，见下节）。在途的占位符走不到这里（提交门拦着） | **warning toast**：原因 + `draft restored` |
 
@@ -234,9 +234,24 @@ Cmd+V（5522）        ✓ [Image #1 ⠋]             占位符（读开始；�
   压缩回执按它认领：chip 还在 → 原地翻面；草稿清空 / 重写、或 chip 被删 → 结果**丢弃**
   （号码会从头计，同号 chip 是别人的）。这消灭了旧的「chip 落在压缩回执时刻的光标处」边界：
   chip 落在**粘贴那一刻**的光标处，之后不再移动。
+- **两条通道各自认领，绝不互抢**：`App::image_reads` 这条在途队列**只属于 5522**（每条读都有
+  一条 `ImageReadStarted`），本地通道（L1）永远**新插**自己的占位符。交付时先校验句柄还活着
+  （epoch + 仍在途）：占位符已经被删 / 草稿已被清空的，字节直接丢掉、**连压缩都不跑**——
+  「删占位符 = 这张我不要了」。若两条通道共用一个队首，一张本地图会顶替正在传的那张的占位符
+  （号码 / 位置全错），而它反倒在字节到时新建 chip（App 层的跨通道回归测试钉住）。
+- **标签变长 / 变短时，光标与拖选一起平移**：光标在 `InputArea` 内部按字符增量平移
+  （`relabel_image` 返回的 `ChipLabelShift`：行号 + chip 前缘 + delta），composer 选区的两个
+  端点由 App 用同一个位移平移（`SelectionSession::shift_composer_selection` 只作用于 composer
+  区、同一行、chip 之后的位置）。**选区守卫**读的是 `InputArea::guard_text` 而不是 `text()`：
+  在途 chip 的标签在守卫眼里固定读成 `[Image #N]`（spinner / 进度数字不算内容变化），
+  而它的**阶段跃迁**（落定 / 失败）与用户输入照旧改变守卫 —— 于是「拖选跨过一次进度刷新」
+  不会莫名中止，chip 落定却会（那时标签的语义真的变了）。
 - **提交门**：草稿里有**在途**（传输 / 压缩中）的占位符时，Enter 不提交（
   `InputAction::SubmitBlocked`，App 弹一句 `Image still uploading — delete the chip to send
   without it`），用户删掉占位符即放行；**失败态不拦**（图已经没了，toast 是它的故事）。
+  反向的一条：只剩 `✗` 的草稿在屏幕上"看得见"、产物却是空的（没有正文、没有图片），
+  Enter 与空草稿同样静默无操作（`submit_product_is_empty`）——既不发出空消息，也不把用户
+  丢图的唯一痕迹抹掉。
 - **spinner**：占位符上的 `⠋` 随系统 tick（10 Hz）推进（`Images::tick_spinner`，没有在途
   chip 时一次活都不干），它解释了「为什么看起来在动」而不必每帧重排任何东西。
 - **入队与单并发**：字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张：那张的
@@ -262,7 +277,9 @@ chip 的文案是**契约**：落定的 `[Image #N W×H SIZE]`（记法与消息
 | 协议机（包解析 / 请求构造 / 分片重组 / 超时 / 进度节流）+ 驱动任务 | `crates/wing/src/tui/clipboard_protocol.rs` |
 | mode 启停（逐字节断言）与接线 | `crates/wing/src/tui/mod.rs`（`enter_sequence` / `leave_sequence` / `enable_paste_events` / `spawn_event_stream`） |
 | App 边界（文本 / 占位符 / 流水线 / 失败） | `crates/wing/src/app/clipboard.rs` |
-| 图片 chip 的接口（注册表 / 阶段 / 标签 / 句柄 / 插入） | `crates/wing/src/ui/input_area/image.rs` |
+| 图片 chip 的接口（注册表 / 阶段 / 标签 / 句柄 / 位移 / 插入） | `crates/wing/src/ui/input_area/image.rs` |
+| 选区守卫的草稿投影（在途标签读成身份） | `crates/wing/src/ui/input_area/model.rs`（`flat_stable`）+ `InputArea::guard_text` |
+| 标签位移作用到拖选端点 | `crates/wing/src/ui/selection.rs`（`Selection::shift_composer`）+ `app::selection_session` |
 | 端到端证据（自开 pty，headless 可跑） | `crates/wing/tests/stdin_proxy_pty.rs`（阳性路径）、`stdin_proxy_probe_supported_pty.rs` / `stdin_proxy_probe_negative_pty.rs`（探针双路径）、`crossterm_osc5522_misparse.rs` / `crossterm_decrpm_misparse.rs`（负数基线） |
 
 ### 本地读取（L1）：`Ctrl+V` / `super+v`
