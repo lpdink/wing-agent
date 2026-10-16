@@ -675,6 +675,19 @@ class Session:
         return self._metadata.last_interaction
 
     @property
+    def last_turn_end(self) -> str | None:
+        """最近一次收口轮次的结束时刻（本地 naive ISO；None = 还没有收口过）。
+
+        口径与写点见 ``SessionMetadata.last_turn_end``。
+        """
+        return self._metadata.last_turn_end
+
+    @property
+    def last_turn_subtype(self) -> str | None:
+        """该轮的 ``turn_result`` subtype（逐字透传，未收口过为 None）。"""
+        return self._metadata.last_turn_subtype
+
+    @property
     def store(self) -> SessionStore:
         """该 session 所属的 SessionStore（fork 继承后端、SM 聚合用）。"""
         return self._store
@@ -745,6 +758,11 @@ class Session:
         elif isinstance(event, UserMessageAcceptedEvent):
             self._usage.record_user_message()
         elif isinstance(event, TurnResultEvent):
+            # 收口事实先写进 metadata、再记账本：``record_turn`` 的 ``_touch`` 在
+            # 节流窗口到期时会立刻落盘，字段晚写就只能留在内存里（随后的显式
+            # flush 因脏标记已清而是 no-op）。
+            self._metadata.last_turn_end = datetime.now().isoformat()
+            self._metadata.last_turn_subtype = event.subtype
             self._usage.record_turn()
             self._usage.flush()
 
