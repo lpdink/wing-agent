@@ -4,6 +4,7 @@
 
 提供：
   - extract_key_from_headers: 从 HTTP headers 提取 API key
+  - extract_key_from_request: 从 HTTP 请求提取 API key（headers > query param）
   - extract_key_from_ws: 从 WebSocket 连接提取 API key（headers + query param）
   - AuthMiddleware: Starlette HTTP 中间件，拦截未鉴权请求
 
@@ -16,7 +17,9 @@ AuthMiddleware 不缓存 AuthConfig——每次请求从 ``app.state.server.auth
 两者都成立才不要求 key；否则一律 403。这是收紧不是放松（正常模式下 auth 关闭时任何人都能访问）。
 第二个条件关掉的是「任何 loopback 转发者即修复者」：绑 ``0.0.0.0`` 且配置坏掉时，
 本机反代 / 端口转发会让远端流量以 loopback 来源到达——那种部署不提供免 key 修复访问。
-既有鉴权逻辑（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**。
+既有鉴权逻辑（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**；
+唯一后续变更在 key 提取点：HTTP 侧也接受 ``?api_key=``（镜像 WS，见
+``extract_key_from_request``）。
 """
 
 from __future__ import annotations
@@ -87,6 +90,15 @@ def extract_key_from_headers(headers: Mapping[str, str]) -> str | None:
     return None
 
 
+def _query_key(query_params: Mapping[str, str]) -> str | None:
+    """从 query param ``api_key`` 取 key（缺省 / 空串 = None）。
+
+    ``<img>`` / ``<video>`` 这类由浏览器直接发起的请求带不了自定义请求头，因此
+    HTTP 与 WS 都提供这条路（WS 侧早已如此）。优先级的唯一实现点在这里。
+    """
+    return query_params.get("api_key") or None
+
+
 def extract_key_from_ws(ws: WebSocket) -> str | None:
     """从 WebSocket 连接提取 API key。
 
@@ -96,7 +108,22 @@ def extract_key_from_ws(ws: WebSocket) -> str | None:
     if key:
         return key
 
-    return ws.query_params.get("api_key") or None
+    return _query_key(ws.query_params)
+
+
+def extract_key_from_request(request: Request) -> str | None:
+    """从 HTTP 请求提取 API key。
+
+    优先级与 WS 逐字一致：headers（``Authorization: Bearer`` > ``X-API-Key``）>
+    query param ``api_key``。query 回退是 `GET /api/session/media` 这类**字节直出**
+    端点的存在前提（`<img>` 带不了请求头）；代价是 URL 里的 key 会进浏览器历史，
+    因此只建议同源部署使用（见 docs/dev/http-api.md 的鉴权章节）。
+    """
+    key = extract_key_from_headers(request.headers)
+    if key:
+        return key
+
+    return _query_key(request.query_params)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -158,7 +185,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in EXEMPT_PATHS:
             return await call_next(request)
 
-        key = extract_key_from_headers(request.headers)
+        key = extract_key_from_request(request)
         if key is None:
             return _unauthorized()
 

@@ -1911,6 +1911,11 @@ class TestAuthDisabled:
         resp = client.get("/api/session/list")
         assert resp.status_code == 200
 
+    def test_query_param_is_ignored_when_disabled(self, client: TestClient):
+        """鉴权关闭时 query param 不参与判定：坏 key 照样通过（行为零变化）。"""
+        resp = client.get("/api/session/list", params={"api_key": "whatever"})
+        assert resp.status_code == 200
+
 
 class TestAuthEnabled:
     """auth.enabled=true 时的鉴权行为。"""
@@ -1946,6 +1951,21 @@ class TestAuthEnabled:
             headers={"X-API-Key": "test-key-1"},
         )
         assert resp.status_code == 200
+
+    def test_query_param_api_key_ok(self, auth_client: TestClient):
+        """query param api_key → 200（镜像 WS；`<img>` 类请求带不了 header）。"""
+        resp = auth_client.get("/api/session/list", params={"api_key": "test-key-1"})
+        assert resp.status_code == 200
+
+    def test_bad_query_param_api_key_rejected(self, auth_client: TestClient):
+        """query param 里的坏 key 与"没有 key"同类（401，不泄露 key 是否存在）。"""
+        resp = auth_client.get("/api/session/list", params={"api_key": "wrong"})
+        assert resp.status_code == 401
+
+    def test_empty_query_param_api_key_rejected(self, auth_client: TestClient):
+        """空串 query key 不是 key（不能因为"参数在"就放行）。"""
+        resp = auth_client.get("/api/session/list", params={"api_key": ""})
+        assert resp.status_code == 401
 
     def test_health_exempt(self, auth_client: TestClient):
         """/api/health 免鉴权。"""

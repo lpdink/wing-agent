@@ -19,7 +19,7 @@ from wing.session.override import AgentOverride
 # 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
 # 刻意不另立一份：见 `wing/event/base.py` 的同一说明）。ArchivedSession 同理：
 # 归档条目就是存储层模型（含投影期补全的展示名），不另立一份镜像。
-from wing.store import ArchivedSession, SessionUsage, TagMeta
+from wing.store import ArchivedSession, FileRef, SessionUsage, TagMeta
 
 
 # ============================================================
@@ -288,6 +288,21 @@ class MediaUploadResponse(BaseModel):
     ok: bool = Field(default=True, description="操作是否成功")
     media: MediaRef = Field(
         description="入库的媒体引用（id / mime / bytes / width / height / name）"
+    )
+
+
+class FileUploadResponse(BaseModel):
+    """POST /api/session/files 响应——入库的文件引用（存储层 ``FileRef`` 的线格式）。
+
+    ``file.name`` 是**实际落盘名**（同名异字节冲突时带 ``-2`` / ``-3`` 后缀，不是
+    请求里的名字）；``file.path`` 是网关宿主机上的**绝对路径**，消费方把它写进消息
+    正文（``[file: 名 · 大小 · 路径]``），agent 用 Read / Bash 直接读——memory
+    后端没有本地文件，恒为 null（如实降级，不编路径）。
+    """
+
+    ok: bool = Field(default=True, description="操作是否成功")
+    file: FileRef = Field(
+        description="入库的文件（name = 实际落盘名；path = 绝对路径；bytes = 字节数）"
     )
 
 
