@@ -368,5 +368,12 @@ async def test_query_api_key_serves_bytes_without_headers(probe: Probe) -> None:
                 "GET", endpoint, params={**params, "api_key": "wrong"}
             )
         assert failure.value.status == 401, failure.value.call.render()
+
+        # query 回退只对字节直出端点开放：普通端点上带 query key 仍 401。
+        with pytest.raises(DriverHttpError) as failure:
+            await keyless.request(
+                "GET", "/api/session/list", params={"api_key": ADMIN_KEY}
+            )
+        assert failure.value.status == 401, failure.value.call.render()
     finally:
         await keyless.close()
