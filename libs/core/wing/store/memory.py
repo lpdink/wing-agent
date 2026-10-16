@@ -7,7 +7,6 @@ wing/store/memory.py — 内存后端（不落盘）。
 
 from __future__ import annotations
 
-import os
 from typing import Any, Iterator
 
 from wing.common.utils import validate_session_id
@@ -17,6 +16,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    disambiguated_file_name,
     first_user_title,
     validate_file_name,
     validate_media_content,
@@ -140,21 +140,23 @@ class MemorySessionStore(SessionStore):
 
         与 file 后端同语义（候选名逐个比字节），只是没有路径可言：``FileRef.path``
         恒 None——字节读不到文件系统（agent 拿不到可 Read 的路径），如实降级。
+        桶在**首次真正落定**时才创建：拒绝路径（名字 / 候选名超长）不留下空条目。
         """
         validate_session_id(session_id)
         safe = validate_file_name(filename)
-        bucket = self._files.setdefault(session_id, {})
-        stem, suffix = os.path.splitext(safe)
+        bucket = self._files.get(session_id)
         candidate = safe
         index = 2
         while True:
-            existing = bucket.get(candidate)
+            existing = None if bucket is None else bucket.get(candidate)
             if existing is None:
+                if bucket is None:
+                    bucket = self._files.setdefault(session_id, {})
                 bucket[candidate] = data
                 return FileRef(name=candidate, path=None, bytes=len(data))
             if existing == data:
                 return FileRef(name=candidate, path=None, bytes=len(data))
-            candidate = validate_file_name(f"{stem}-{index}{suffix}")
+            candidate = disambiguated_file_name(safe, index)
             index += 1
 
     # ── 查询 ──────────────────────────────────

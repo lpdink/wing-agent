@@ -16,6 +16,7 @@ wing/store/base.py — 持久化层抽象。
 
 from __future__ import annotations
 
+import os
 import re
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -103,6 +104,25 @@ def file_too_large_message(nbytes: int, max_bytes: int) -> str:
         f"file too large: {format_size(nbytes)} exceeds the "
         f"{format_size(max_bytes)} per-file limit (config files.max_bytes)"
     )
+
+
+def disambiguated_file_name(name: str, index: int) -> str:
+    """同名异字节冲突时的候选名：``stem-<index>.ext``（无扩展名 ``name-<index>``）。
+
+    候选名同样过名字闸门——**加后缀后超长**（原名已顶到字节上限）即
+    :class:`InvalidInputError`，文案点明是"冲突后缀把名字顶出上限"而不是调用方
+    给的名字本身脏了（原名合法，是"重名 + 超长"这个组合没有合法解）。**不截断**
+    stem：静默改名比一次大声失败更糟（那是把用户的标识符悄悄改样）。
+    """
+    stem, suffix = os.path.splitext(name)
+    candidate = f"{stem}-{index}{suffix}"
+    if not is_valid_file_name(candidate):
+        raise InvalidInputError(
+            f"file name too long to disambiguate: {name!r} is already taken by "
+            f"different bytes, and the suffixed name {candidate!r} exceeds the "
+            f"{FILE_NAME_MAX_BYTES} byte limit"
+        )
+    return candidate
 
 
 class FileRef(BaseModel):

@@ -39,6 +39,7 @@ from wing.store.base import (
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    disambiguated_file_name,
     first_user_title,
     validate_file_name,
     validate_media_content,
@@ -371,23 +372,25 @@ class FileSessionStore(SessionStore):
 
         候选名从原名人肉递增：**命中且字节全等 → 幂等返回**（不重写，inode /
         mtime 不动）；命中但字节不同（或不是普通文件）→ 下一个 ``stem-N.ext``；
-        不命中 → 原子写。加后缀后过不了名字闸门（超长）即失败——不静默截断 stem。
+        不命中 → 原子写。返回的 ``path`` 一律是**绝对路径**（相对 root 时按进程
+        cwd 绝对化——store 的 I/O 本来就相对进程 cwd，agent 侧要能直接读）。
         """
         safe = validate_file_name(filename)
-        stem, suffix = os.path.splitext(safe)
         candidate = safe
         index = 2
         while True:
             path = self._session_dir(session_id) / self._FILES_DIR / candidate
             if path.is_file() and path.stat().st_size == len(data):
                 if path.read_bytes() == data:
-                    return FileRef(name=candidate, path=str(path), bytes=len(data))
+                    return FileRef(
+                        name=candidate, path=os.path.abspath(path), bytes=len(data)
+                    )
             if path.exists():
-                candidate = validate_file_name(f"{stem}-{index}{suffix}")
+                candidate = disambiguated_file_name(safe, index)
                 index += 1
                 continue
             atomic_write_bytes(path, data)
-            return FileRef(name=candidate, path=str(path), bytes=len(data))
+            return FileRef(name=candidate, path=os.path.abspath(path), bytes=len(data))
 
     # ── 查询 ──────────────────────────────────
 

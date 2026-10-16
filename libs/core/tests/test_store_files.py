@@ -203,12 +203,17 @@ class TestFileStoreWriteFile:
     def test_suffix_that_overflows_the_byte_limit_is_rejected(
         self, store: FileSessionStore
     ) -> None:
-        """加后缀后超长 → 拒绝（不截断 stem：那会把用户的标识符悄悄改样）。"""
+        """加后缀后超长 → 拒绝（不截断 stem：那会把用户的标识符悄悄改样）。
+
+        文案点明是**冲突后缀**把名字顶出上限（原名本身合法，是"重名 + 超长"这个
+        组合没有合法解）——否则用户看到的是一个自己没发过的、带着 `-2` 的名字。
+        """
         name = "a" * FILE_NAME_MAX_BYTES
         store.write_file(SESSION, name, b"first")
 
-        with pytest.raises(InvalidInputError):
+        with pytest.raises(InvalidInputError) as excinfo:
             store.write_file(SESSION, name, b"second")
+        assert "too long to disambiguate" in str(excinfo.value)
         assert sorted(p.name for p in files_dir(store).iterdir()) == [name]
 
     def test_invalid_name_never_touches_the_filesystem(
@@ -232,6 +237,23 @@ class TestFileStoreWriteFile:
         ref = store.write_file("store-files-b", "notes.txt", b"b")
         assert ref.name == "notes.txt"
         assert (files_dir(store, "store-files-b") / "notes.txt").read_bytes() == b"b"
+
+    def test_path_is_absolute_even_with_a_relative_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """相对 root（`WING_SESSIONS_PATH=sessions`）下返回的 path 仍是绝对路径。
+
+        store 的 I/O 本来就相对进程 cwd，而消费方要把 path 写进消息正文让 agent 去读
+        ——相对路径到了 agent 侧会按它自己的 cwd 解析（读错文件）。
+        """
+        monkeypatch.chdir(tmp_path)
+        relative = FileSessionStore("sessions")
+
+        ref = relative.write_file(SESSION, "notes.txt", b"hello")
+
+        assert Path(str(ref.path)).is_absolute()
+        assert ref.path == str(tmp_path / "sessions" / SESSION / "files" / "notes.txt")
+        assert Path(str(ref.path)).read_bytes() == b"hello"
 
 
 # ── 3. memory 后端 ─────────────────────────────────────────────
@@ -258,3 +280,15 @@ class TestMemoryStoreWriteFile:
         store = MemorySessionStore()
         with pytest.raises(InvalidInputError):
             store.write_file("mem-1", "a/b", b"x")
+
+    def test_suffix_overflow_leaves_no_bucket_entry(self) -> None:
+        """拒绝路径不留下空桶条目（"失败零副作用"在内存后端也成立）。"""
+        store = MemorySessionStore()
+        name = "a" * FILE_NAME_MAX_BYTES
+        store.write_file("mem-1", name, b"first")
+
+        with pytest.raises(InvalidInputError) as excinfo:
+            store.write_file("mem-1", name, b"second")
+
+        assert "too long to disambiguate" in str(excinfo.value)
+        assert sorted(store._files["mem-1"]) == [name]
