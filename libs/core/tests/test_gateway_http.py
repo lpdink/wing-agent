@@ -979,6 +979,8 @@ class TestSessionInfo:
         mock_session.session_name = "Test Session"
         mock_session.session_workspace = "/tmp/ws"
         mock_session.parent_session_id = None
+        mock_session.last_turn_end = "2026-01-01T10:00:00.123456"
+        mock_session.last_turn_subtype = "success"
         mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
         mock_session.agent.context_manager.get_skills_info.return_value = (
@@ -1012,6 +1014,8 @@ class TestSessionInfo:
         assert data["context_stats"]["total_tokens"] == 800
         assert data["skills_info"] == "skill-a: desc"
         assert data["system_prompt"] == "You are a helpful assistant."
+        assert data["last_turn_end"] == "2026-01-01T10:00:00.123456"
+        assert data["last_turn_subtype"] == "success"
         assert data["usage"] == SessionUsage().model_dump()
 
     def test_info_no_workspace(self, client: TestClient, mock_runtime):
@@ -1033,6 +1037,8 @@ class TestSessionInfo:
         mock_session.session_name = None
         mock_session.session_workspace = None
         mock_session.parent_session_id = None
+        mock_session.last_turn_end = None
+        mock_session.last_turn_subtype = None
         mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
@@ -1045,6 +1051,8 @@ class TestSessionInfo:
         assert resp.status_code == 200
         assert resp.json()["workdir"] is None
         assert resp.json()["model_display_name"] is None
+        assert resp.json()["last_turn_end"] is None
+        assert resp.json()["last_turn_subtype"] is None
 
     def test_info_includes_status(self, client: TestClient, mock_runtime):
         """info 响应携带运行时 status（如 waiting）。"""
@@ -1065,6 +1073,8 @@ class TestSessionInfo:
         mock_session.session_name = None
         mock_session.session_workspace = None
         mock_session.parent_session_id = None
+        mock_session.last_turn_end = None
+        mock_session.last_turn_subtype = None
         mock_session.status = "waiting"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
