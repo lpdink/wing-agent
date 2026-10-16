@@ -381,9 +381,10 @@ class ReActLoop:
         if assistant_msg.tool_calls:
             return assistant_msg
 
-        ctx.record_usage(assistant_msg.usage)
-
         if not (assistant_msg.content or "").strip():
+            # 只记被丢弃的尝试（token 真花掉了）；正常返回的消息由 _llm_turn
+            # 统一记账——wrapper 同处再记会让收尾调用双计。
+            ctx.record_usage(assistant_msg.usage)
             self._current_acc = None
             raise InvalidGenerationError(
                 "模型本轮未产出 content，也没有收敛的 tool call"
@@ -391,6 +392,7 @@ class ReActLoop:
             )
 
         if self._has_unfinished_tool_calls(provider):
+            ctx.record_usage(assistant_msg.usage)
             self._cm.add_messages([assistant_msg])
             self._current_acc = None
             raise InvalidGenerationError(
@@ -491,6 +493,11 @@ class ReActLoop:
                         chunk.usage,
                         duration_ms=int((time.monotonic() - started) * 1000),
                     )
+                    # 已知边界：标准协议一次调用只有一条非零 usage 帧（末帧），
+                    # 「turn 账 == Σmetrics 事件」于是精确成立；若上游多帧报
+                    # usage、或传输重试在 usage 帧之后重放（with_retry 重启
+                    # 同一 generator 会重放已 yield 的帧），事件账按帧累计而
+                    # turn 账 last-wins——两者可能再次漂移（方向：账本多）。
         except asyncio.CancelledError:
             # 中断补提交：快照当前 accumulator（与 resume 未提交投影同源）。
             partial_blocks = provider.snapshot_blocks(self._current_acc)

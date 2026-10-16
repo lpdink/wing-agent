@@ -246,7 +246,7 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 
-> **`sync_session.usage`（用量基线）**：与 `status` / `turn_started_at` 同刻的会话用量账本快照（形状同 `/api/session/info.usage`），是前端累计的**唯一**基线来源——快照与快照之后的 live 事件走同一条有序 WS 通道，"基线 = 快照值、增量 = 其后 `llm_call_metrics` 之和"精确成立。**不要**拿 HTTP `/api/session/info.usage` 做基线：两个通道无跨通道定序，快照可能已包含尚在途的事件（重复计数）或在它之后才到（丢增量）。旧网关不带这个字段——按零基线显示。
+> **`sync_session.usage`（用量基线）**：与 `status` / `turn_started_at` 同刻的会话用量账本快照（形状同 `/api/session/info.usage`），是前端累计的**唯一**基线来源——快照与快照之后的 live 事件走同一条有序 WS 通道，"基线 = 快照值、增量 = 其后 `llm_call_metrics` 之和"精确成立。**不要**拿 HTTP `/api/session/info.usage` 做基线：两个通道无跨通道定序，快照可能已包含尚在途的事件（重复计数）或在它之后才到（丢增量）。旧网关不带这个字段——按零基线显示（只累计订阅后的增量）；前端也可退化为**只读快照口径**：轮末回拉 `/api/session/info.usage` 仅作展示、零累加，不得与 WS 增量混算（混算即前述重复计数/丢增量）。两种口径都合法，二选一即可（wing-app 的旧网关路径采用后者）。
 
 > **模型四元组**（`model` / `model_id` / `provider_name` / `model_display_name`）：会话 agent 快照（`sync_session.agent`、`GET /api/session/get.agent`）、`session_state_changed`（模型变更时四者同刻下发）与 `GET /api/session/info` 携带同一组字段。`model_id` 是配置声明 `providers[].models[].id` 的投影（可空——旧会话的 id 已删除且反查不中时为 null），是**身份**：前端的选择态匹配、状态展示的「当前模型」判定与一切变更请求都以它为准；未命中任何候选即视为未知，绝不按调用名反查。`model_display_name` 是**展示层素材**（未声明 / 空串 = 缺失或 null）：前端渲染展示名、缺省回落调用名，不参与匹配。
 
