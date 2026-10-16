@@ -79,6 +79,13 @@ class SessionInfo(BaseModel):
     parent_session_id：创建者会话 id（血缘：谁创建了我，见
     docs/dev/session-lineage.md）。根会话（用户直接创建）为 None。**弱引用**：
     不保证父会话当前可解析（幽灵父由展示层降级为根），也不参与任何门禁。
+
+    last_turn_end / last_turn_subtype：最近一次收口轮次的结束时刻（本地 naive
+    ISO）与该轮 subtype（``success`` / ``error_during_execution`` /
+    ``error_max_turns``）。来自 ``metadata``（**冷读磁盘**）——未加载 / 已逐出的
+    会话同样有值，这是「已完成」收件箱跨设备、跨重启的事实源。旧会话 / 还没有
+    收口过的会话为 None（永不伪装成已完成）；中断不写字段（见
+    ``SessionMetadata.last_turn_end``）。
     """
 
     id: str
@@ -88,6 +95,8 @@ class SessionInfo(BaseModel):
     workspace: str | None = None
     parent_session_id: str | None = None
     last_interaction: str | None = None
+    last_turn_end: str | None = None
+    last_turn_subtype: str | None = None
     status: SessionStatus = "inactive"
     tags: list[str] = Field(default_factory=list)
     tag_meta: dict[str, TagMeta] = Field(default_factory=dict)
