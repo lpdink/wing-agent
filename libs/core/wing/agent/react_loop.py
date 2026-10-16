@@ -381,9 +381,10 @@ class ReActLoop:
         if assistant_msg.tool_calls:
             return assistant_msg
 
-        ctx.record_usage(assistant_msg.usage)
-
         if not (assistant_msg.content or "").strip():
+            # 只记被丢弃的尝试（token 真花掉了）；正常返回的消息由 _llm_turn
+            # 统一记账——wrapper 同处再记会让收尾调用双计。
+            ctx.record_usage(assistant_msg.usage)
             self._current_acc = None
             raise InvalidGenerationError(
                 "模型本轮未产出 content，也没有收敛的 tool call"
@@ -391,6 +392,7 @@ class ReActLoop:
             )
 
         if self._has_unfinished_tool_calls(provider):
+            ctx.record_usage(assistant_msg.usage)
             self._cm.add_messages([assistant_msg])
             self._current_acc = None
             raise InvalidGenerationError(

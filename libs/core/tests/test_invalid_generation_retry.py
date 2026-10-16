@@ -57,9 +57,14 @@ class _Ctx:
     def record_usage(self, usage: Any) -> None:
         self.usage_calls.append(usage)
 
+    def record_text(self, text: str | None) -> None:
+        pass
+
 
 class _FakeCM:
     """最小 ContextManager 桩：记录提交，固定返回空消息列表。"""
+
+    compactor = None
 
     def __init__(self) -> None:
         self.added: list[list[Message]] = []
@@ -69,6 +74,16 @@ class _FakeCM:
 
     def add_messages(self, messages: list[Message]) -> None:
         self.added.append(list(messages))
+
+    def get_context_stats(self) -> tuple[int, int]:
+        return 0, 0
+
+
+class _FakeExecutor:
+    """最小工具执行器桩：不执行、无结果。"""
+
+    async def execute(self, calls: list, model: str) -> list:
+        return []
 
 
 @dataclass
@@ -147,6 +162,18 @@ def _text(content: str) -> dict:
     return _attempt(
         [
             LLMResponse(content=content),
+            LLMResponse(content_blocks=[TextBlock(text=content)]),
+        ]
+    )
+
+
+def _text_with_usage(content: str) -> dict:
+    return _attempt(
+        [
+            LLMResponse(
+                content=content,
+                usage=LLMUsage(prompt_tokens=11, completion_tokens=5, cached_tokens=3),
+            ),
             LLMResponse(content_blocks=[TextBlock(text=content)]),
         ]
     )
@@ -256,16 +283,46 @@ class TestInvalidGenerationRetry:
 
     @pytest.mark.asyncio
     async def test_content_without_tool_attempt_ends_normally(self):
-        """规则 4：有 content、无 tool call 尝试 → 正常收尾，不重试。"""
-        cm = _FakeCM()
-        provider = _FakeProvider([_text("final")])
-        loop = _make_loop(cm, provider)
+        """规则 4：有 content、无 tool call 尝试 → 正常收尾，不重试。
 
-        msg = await loop._call_llm_validated(_Ctx(), model="m")
+        有效消息的 usage **不**由 wrapper 记账——它归 `_llm_turn` 的唯一
+        入口（wrapper 顺手记会让收尾调用双计，见下一条回归）。
+        """
+        cm = _FakeCM()
+        provider = _FakeProvider([_text_with_usage("final")])
+        loop = _make_loop(cm, provider)
+        ctx = _Ctx()
+
+        msg = await loop._call_llm_validated(ctx, model="m")
 
         assert msg.content == "final"
         assert provider.calls == 1
         assert cm.added == []
+        assert ctx.usage_calls == []
+
+    @pytest.mark.asyncio
+    async def test_turn_counts_final_call_usage_once(self):
+        """回归：收尾调用（无 tool call）的 usage 在本轮账里恰记一次。
+
+        wrapper 曾对"无 tool call"的返回也记一笔、`_llm_turn` 再记一笔——
+        最后一笔 prompt/completion/cached 双计进 `turn_result.usage`，与按
+        `llm_call_metrics` 事件累计的持久账本漂移（app 结算缓存命中率、
+        stdio result 帧同源受影响）。
+        """
+        cm = _FakeCM()
+        provider = _FakeProvider([_text_with_usage("final")])
+        loop = _make_loop(cm, provider)
+        loop._executor = _FakeExecutor()  # ty: ignore[invalid-assignment]
+        ctx = _Ctx()
+
+        done = await loop._llm_turn(ctx)  # ty: ignore[invalid-argument-type]
+
+        assert done is False
+        assert [
+            (u.prompt_tokens, u.completion_tokens, u.cached_tokens)
+            for u in ctx.usage_calls
+            if u
+        ] == [(11, 5, 3)]
 
     @pytest.mark.asyncio
     async def test_exhausted_retries_raise(self):
