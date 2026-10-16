@@ -493,6 +493,11 @@ class ReActLoop:
                         chunk.usage,
                         duration_ms=int((time.monotonic() - started) * 1000),
                     )
+                    # 已知边界：标准协议一次调用只有一条非零 usage 帧（末帧），
+                    # 「turn 账 == Σmetrics 事件」于是精确成立；若上游多帧报
+                    # usage、或传输重试在 usage 帧之后重放（with_retry 重启
+                    # 同一 generator 会重放已 yield 的帧），事件账按帧累计而
+                    # turn 账 last-wins——两者可能再次漂移（方向：账本多）。
         except asyncio.CancelledError:
             # 中断补提交：快照当前 accumulator（与 resume 未提交投影同源）。
             partial_blocks = provider.snapshot_blocks(self._current_acc)

@@ -13,8 +13,8 @@ cached 双计进 ``turn_result.usage``，与账本及直播事件对所有消费
   相同）——``turn_result.usage`` 逐字段等于两次 ``llm_call_metrics`` 之和，
   与盘上账本一致（双计会把和抬成"多记一笔收尾"）；
 - ``test_retried_attempt_usage_counted_once``：空的无效尝试（带 usage）被
-  丢弃后重试成功——被丢弃尝试的 usage 计入一次、收尾一次，和不变（不丢、
-  不重）。
+  丢弃后重试成功——被丢弃尝试的 usage 计入一次、收尾一次：turn 账、逐
+  调用事件与盘上账本三方一致（不丢、不重）。
 """
 
 from __future__ import annotations
@@ -119,3 +119,13 @@ async def test_retried_attempt_usage_counted_once(probe: Probe) -> None:
     ), [e.data for e in metrics]
 
     assert _turn_tokens(result.data["usage"]) == summed, result.data["usage"]
+
+    # 盘上账本与逐调用事件同源：被丢弃尝试的 token 真花掉了，必须一并入账。
+    recorded = probe.history(session).metadata()
+    assert recorded is not None, "metadata.json missing"
+    ledger = recorded["usage"]
+    assert (
+        ledger["prompt_tokens"],
+        ledger["completion_tokens"],
+        ledger["cached_tokens"],
+    ) == summed, ledger
