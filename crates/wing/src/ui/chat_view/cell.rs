@@ -161,7 +161,7 @@ impl ChatCell {
             Self::Diff(view) => view.to_lines(palette, width),
             Self::Todo(msg) => msg.to_lines(palette),
             Self::Ask(msg) => msg.to_lines(palette, width),
-            Self::ModelPicker(panel) => model_picker_lines(panel, palette),
+            Self::ModelPicker(panel) => model_picker_lines(panel, width, palette),
             Self::Separator => {
                 let sep = "─".repeat(width as usize);
                 vec![Line::from(Span::styled(

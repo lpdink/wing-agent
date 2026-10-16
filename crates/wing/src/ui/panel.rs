@@ -1,14 +1,17 @@
-//! Shared rendering for interactive selection panels (Ask, model picker).
+//! Shared rendering primitives for the text-register panels: the Ask panel's
+//! rows in the transcript and the settings overlay's list rows.
 //!
-//! The window math lives in the kernel ([`crate::shared::panels`]):
-//! both panels render at most [`PANEL_WINDOW`] tabs / option rows, the
-//! cursor's slot stays centered while the window scrolls, the window is
-//! pinned at the ends, and there are deliberately no overflow indicator
-//! glyphs — the rows stay column-aligned instead.
+//! The `/model` picker deliberately does **not** go through them — it is a
+//! bordered card with its own column maths and degrade ladder
+//! ([`crate::ui::cells::model_picker`]). What every panel shares is the
+//! navigation kernel ([`crate::shared::panels`]): at most [`PANEL_WINDOW`]
+//! visible tabs / rows, the cursor's slot centered while the window scrolls,
+//! the window pinned at the ends, and no indicator glyphs (the rows stay
+//! column-aligned instead).
 //!
-//! Adapter-specific row decorations (Ask's ordinals/checkboxes/editor, the
-//! model picker's `●` mark) stay with the adapters; the shared helpers here
-//! cover the cursor marker, label styling and footer hint.
+//! Adapter-specific row decorations (Ask's ordinals/checkboxes/editor) stay
+//! with the adapters; the shared helpers here cover the cursor marker, label
+//! styling and footer hint.
 
 use ratatui::style::Modifier;
 use ratatui::style::Style;
