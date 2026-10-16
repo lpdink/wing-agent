@@ -7,6 +7,7 @@ wing/store/memory.py — 内存后端（不落盘）。
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Iterator
 
 from wing.common.utils import validate_session_id
@@ -66,6 +67,9 @@ class MemorySessionStore(SessionStore):
         self._files: dict[str, dict[str, bytes]] = {}
         """用户文件：per-session 键空间（``dict[session_id][落盘名]``），语义同媒体
         （含同名异字节的 ``-N`` 后缀），只是没有本地路径（``FileRef.path`` 恒 None）。"""
+        # 与 file 后端同款：路由在线程池里调用 write_file，"扫描 + 写"必须互斥
+        # （dict 的 check-then-set 不是原子的，两个同名上传会互相覆盖）。
+        self._file_lock = threading.Lock()
 
     # ── metadata ──────────────────────────────
 
@@ -144,20 +148,21 @@ class MemorySessionStore(SessionStore):
         """
         validate_session_id(session_id)
         safe = validate_file_name(filename)
-        bucket = self._files.get(session_id)
-        candidate = safe
-        index = 2
-        while True:
-            existing = None if bucket is None else bucket.get(candidate)
-            if existing is None:
-                if bucket is None:
-                    bucket = self._files.setdefault(session_id, {})
-                bucket[candidate] = data
-                return FileRef(name=candidate, path=None, bytes=len(data))
-            if existing == data:
-                return FileRef(name=candidate, path=None, bytes=len(data))
-            candidate = disambiguated_file_name(safe, index)
-            index += 1
+        with self._file_lock:
+            bucket = self._files.get(session_id)
+            candidate = safe
+            index = 2
+            while True:
+                existing = None if bucket is None else bucket.get(candidate)
+                if existing is None:
+                    if bucket is None:
+                        bucket = self._files.setdefault(session_id, {})
+                    bucket[candidate] = data
+                    return FileRef(name=candidate, path=None, bytes=len(data))
+                if existing == data:
+                    return FileRef(name=candidate, path=None, bytes=len(data))
+                candidate = disambiguated_file_name(safe, index)
+                index += 1
 
     # ── 查询 ──────────────────────────────────
 

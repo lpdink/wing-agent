@@ -282,7 +282,120 @@ class TestFileStoreWriteFile:
         assert not (tmp_path / "sessions").exists()
 
 
-# ── 3. memory 后端 ─────────────────────────────────────────────
+# ── 3. 别名解析（大小写 / Unicode 归一化不敏感 FS） ─────────────
+
+
+def _fake_insensitive_fs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把"别名判据"改成大小写 / NFC 归一化不敏感（模拟 macOS APFS / Windows NTFS）。
+
+    Linux CI 的 FS 上真别名不存在，但**要钉的语义**（判定用磁盘真名，不是请求名）
+    与平台无关：这里只替换那一处 `_is_same_entry` 判据，其余逻辑（扫描、幂等、递增）
+    全走真实实现。
+    """
+    import unicodedata
+
+    import wing.store.file as file_module
+
+    real = file_module._is_same_entry
+
+    def same_entry(candidate: Path, target: Path) -> bool:
+        if real(candidate, target):
+            return True
+        left = unicodedata.normalize("NFC", candidate.name).lower()
+        right = unicodedata.normalize("NFC", target.name).lower()
+        return left == right
+
+    monkeypatch.setattr(file_module, "_is_same_entry", same_entry)
+
+
+class TestFileStoreAliases:
+    def test_alias_spelling_returns_the_on_disk_name(
+        self, store: FileSessionStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """请求名是别名时，幂等命中返回**磁盘真名**（不产生第二份、不谎报名字）。"""
+        _fake_insensitive_fs(monkeypatch)
+        first = store.write_file(SESSION, "Report.pdf", b"one")
+
+        alias = store.write_file(SESSION, "report.pdf", b"one")
+
+        assert alias == first, alias
+        assert alias.name == "Report.pdf"
+        assert sorted(p.name for p in files_dir(store).iterdir()) == ["Report.pdf"]
+
+    def test_unicode_normalization_variant_is_the_same_file(
+        self, store: FileSessionStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NFC / NFD 变体是同一个目录项（APFS 的归一化不敏感）。"""
+        _fake_insensitive_fs(monkeypatch)
+        nfc = "caf\u00e9.pdf"
+        nfd = "cafe\u0301.pdf"
+        store.write_file(SESSION, nfc, b"one")
+
+        ref = store.write_file(SESSION, nfd, b"one")
+
+        assert ref.name == nfc
+        assert sorted(p.name for p in files_dir(store).iterdir()) == [nfc]
+
+    def test_alias_with_different_bytes_gets_a_suffixed_new_file(
+        self, store: FileSessionStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """别名 + 异字节：以请求名生成后缀新文件，原文件字节原样保留。
+
+        续传第二次的内容（这次用别名拼写）仍解析到**磁盘真名**——候选名也走真名判定。
+        """
+        _fake_insensitive_fs(monkeypatch)
+        store.write_file(SESSION, "Report.pdf", b"one")
+
+        second = store.write_file(SESSION, "report.pdf", b"two")
+
+        assert second.name == "report-2.pdf"
+        assert (files_dir(store) / "Report.pdf").read_bytes() == b"one"
+        assert (files_dir(store) / "report-2.pdf").read_bytes() == b"two"
+
+        replayed = store.write_file(SESSION, "REPORT-2.PDF", b"two")
+        assert replayed.name == "report-2.pdf"
+        assert sorted(p.name for p in files_dir(store).iterdir()) == [
+            "Report.pdf",
+            "report-2.pdf",
+        ]
+
+    def test_directory_squatting_the_name_is_still_occupied(
+        self, store: FileSessionStore
+    ) -> None:
+        """名字被一个目录占住时不写进它、也不崩：换后缀（`_on_disk_file_name` 返回 None）。"""
+        directory = files_dir(store) / "notes.txt"
+        directory.mkdir(parents=True)
+
+        ref = store.write_file(SESSION, "notes.txt", b"x")
+
+        assert ref.name == "notes-2.txt"
+        assert (files_dir(store) / "notes-2.txt").read_bytes() == b"x"
+        assert directory.is_dir()
+
+    def test_concurrent_same_name_writes_do_not_collide(
+        self, store: FileSessionStore
+    ) -> None:
+        """并发（线程池，路由的 `asyncio.to_thread` 形态）同名上传互不覆盖。
+
+        「扫描 + 写」在锁里：没有锁时两个线程会双双看到"名字空闲"、互相覆盖
+        （响应都声称同一个名字、字节少一份）。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        payloads = [f"payload-{index}".encode() for index in range(8)]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            refs = list(
+                pool.map(
+                    lambda data: store.write_file(SESSION, "race.txt", data), payloads
+                )
+            )
+
+        assert len({ref.name for ref in refs}) == len(payloads), [r.name for r in refs]
+        for ref, data in zip(refs, payloads):
+            assert Path(str(ref.path)).read_bytes() == data
+
+
+# ── 4. memory 后端 ─────────────────────────────────────────────
 
 
 class TestMemoryStoreWriteFile:

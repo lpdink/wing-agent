@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
@@ -47,11 +48,13 @@ from wing.store.base import (
 )
 
 
-def _is_same_directory(candidate: Path, target: Path) -> bool:
-    """两个路径是否指向同一个目录（同 inode）；任一侧不可达即 False。
+def _is_same_entry(candidate: Path, target: Path) -> bool:
+    """两个路径是否指向同一个文件系统条目（同 inode）；任一侧不可达即 False。
 
     仅用于探测文件系统别名（大小写 / Unicode 归一化不敏感）：请求路径解析成功
-    但目录项名字对不上时，逐个目录项与它比对。
+    但目录项名字对不上时，逐个目录项与它比对。文件与目录都适用（``samefile``
+    按 stat 判定）——目录别名（``_on_disk_name``）与文件名别名
+    （``_on_disk_file_name``）共用同一判据。
     """
     try:
         return os.path.samefile(candidate, target)
@@ -189,6 +192,10 @@ class FileSessionStore(SessionStore):
         self._deferred_index: list[tuple[str, str, ArchivedSession | None]] | None = (
             None
         )
+        # 用户文件上传的「扫描 + 写」临界区（见 write_file）：路由把它放进线程池
+        # （大文件 I/O 不阻塞事件循环），两个同名上传因此可能真并行——没有锁就会
+        # 双双看到"名字空闲"再互相覆盖（静默丢字节）。
+        self._file_lock = threading.Lock()
 
     @property
     def root(self) -> Path:
@@ -378,30 +385,75 @@ class FileSessionStore(SessionStore):
         """
         return str(rooted if rooted.is_absolute() else Path.cwd() / rooted)
 
+    @staticmethod
+    def _on_disk_file_name(directory: Path, name: str) -> str | None:
+        """（内部）``directory`` 下 ``name`` 解析到的**真实文件名**（逐字优先）；无文件返回 None。
+
+        与目录版 :meth:`_on_disk_name` 同一精神：大小写 / Unicode 归一化不敏感的文件
+        系统上（macOS APFS / Windows NTFS），请求名会解析到另一个目录项——按请求名做
+        幂等 / 递增判定会把同一份文件看成两个名字，响应里的 ``name`` 也就不是实际落盘
+        名（历史里同一物理文件挂两个名字）。逐字命中是常见情形（大小写敏感 FS 上唯一
+        可能的情形），也是唯一不必探测别名的情形。
+
+        目录名同名（如 ``files/notes.txt/`` 这种占位物）不算文件：返回 None，由调用方
+        按"名字被占"处理。
+        """
+        if not directory.is_dir():
+            return None
+        alias: str | None = None
+        for entry in directory.iterdir():
+            if entry.name == name:
+                return name if entry.is_file() else None
+            if (
+                alias is None
+                and entry.is_file()
+                and _is_same_entry(entry, directory / name)
+            ):
+                alias = entry.name
+        return alias
+
     def write_file(self, session_id: str, filename: str, data: bytes) -> FileRef:
         """把用户文件写进 ``<root>/<sid>/files/``（见基类契约）。
 
-        候选名从原名人肉递增：**命中且字节全等 → 幂等返回**（不重写，inode /
-        mtime 不动）；命中但字节不同（或不是普通文件）→ 下一个 ``stem-N.ext``；
-        不命中 → 原子写。返回的 ``path`` 一律是**绝对形式**（见 :meth:`_absolute`）
-        ——store 的 I/O 本来就相对进程 cwd，而 agent 侧要能直接读。
+        **磁盘真名先行**：每个候选名（含请求名本身）先经 :meth:`_on_disk_file_name`
+        解析成磁盘上的真实目录项名，再以真名做幂等 / 递增判定——否则不敏感文件系统上
+        的别名会让"同一份文件"拿到两个名字。候选名从原名人肉递增：命中且字节全等 →
+        幂等返回（不重写，inode / mtime 不动）；命中但字节不同（或不是普通文件）→
+        下一个 ``stem-N.ext``；不命中 → 原子写，写后**再对账一次真名**（文件系统可能
+        按自己的归一化改写存储名）。返回的 ``path`` 一律是绝对形式（见 :meth:`_absolute`）。
+
+        调用方可能来自线程池（路由用 ``asyncio.to_thread`` 卸载大文件 I/O）：扫描 +
+        写入必须互斥，否则两个同名上传会双双看到"名字空闲"再互相覆盖（静默丢字节）。
         """
         safe = validate_file_name(filename)
-        candidate = safe
-        index = 2
-        while True:
-            path = self._session_dir(session_id) / self._FILES_DIR / candidate
-            if path.is_file() and path.stat().st_size == len(data):
-                if path.read_bytes() == data:
-                    return FileRef(
-                        name=candidate, path=self._absolute(path), bytes=len(data)
-                    )
-            if path.exists():
-                candidate = disambiguated_file_name(safe, index)
-                index += 1
-                continue
-            atomic_write_bytes(path, data)
-            return FileRef(name=candidate, path=self._absolute(path), bytes=len(data))
+        directory = self._session_dir(session_id) / self._FILES_DIR
+        with self._file_lock:
+            candidate = safe
+            index = 2
+            while True:
+                real = self._on_disk_file_name(directory, candidate)
+                if real is not None:
+                    path = directory / real
+                    if path.stat().st_size == len(data) and path.read_bytes() == data:
+                        return FileRef(
+                            name=real, path=self._absolute(path), bytes=len(data)
+                        )
+                    candidate = disambiguated_file_name(safe, index)
+                    index += 1
+                    continue
+                if (directory / candidate).exists():
+                    # 名字被占（目录 / 非常规文件）——不当文件用，换下一个候选名。
+                    candidate = disambiguated_file_name(safe, index)
+                    index += 1
+                    continue
+                path = directory / candidate
+                atomic_write_bytes(path, data)
+                written = self._on_disk_file_name(directory, candidate) or candidate
+                return FileRef(
+                    name=written,
+                    path=self._absolute(directory / written),
+                    bytes=len(data),
+                )
 
     # ── 查询 ──────────────────────────────────
 
@@ -485,7 +537,7 @@ class FileSessionStore(SessionStore):
         for entry in parent.iterdir():
             if entry.name == target.name:
                 return target.name
-            if alias is None and _is_same_directory(entry, target):
+            if alias is None and _is_same_entry(entry, target):
                 alias = entry.name
         return alias
 

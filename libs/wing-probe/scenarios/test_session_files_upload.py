@@ -78,6 +78,16 @@ async def upload(
     )
 
 
+def fs_is_case_insensitive(base: Path) -> bool:
+    """本机文件系统对大小写是否不敏感（决定"别名"是否解析到同一个目录项）。"""
+    probe_dir = base / "fs-case-probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return (base / "FS-CASE-PROBE").is_dir()
+    finally:
+        probe_dir.rmdir()
+
+
 async def seed(probe: Probe) -> Any:
     """一个"是会话"的已订阅会话（有历史记录才算真的存在）。"""
     probe.register(FILES_MODEL, Turn.of(text="seeded"))
@@ -190,6 +200,49 @@ async def test_same_name_never_overwrites_and_same_bytes_is_idempotent(
     assert (files_dir(probe, sid) / "report-2.pdf").read_bytes() == b"two"
     assert (files_dir(probe, sid) / "report-3.pdf").read_bytes() == b"three"
     assert file_names(probe, sid) == ["report-2.pdf", "report-3.pdf", "report.pdf"]
+
+
+# ── 场景 3b：文件名别名（大小写 / 归一化不敏感 FS） ─────────────
+
+
+@pytest.mark.probe_env(models=[FILES_SPEC])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_alias_spelling_resolves_to_the_on_disk_file_name(probe: Probe) -> None:
+    """请求名是别名（大小写不敏感 FS）时，返回的 name/path 是**磁盘真名**。
+
+    敏感 FS（CI 的 Linux）上别名不是同一个文件——按"两个名字"处理（各自落盘），
+    同样不得把请求名当成磁盘事实。两个分支各自断言（比 skip 强：敏感 FS 也能守住
+    "响应与磁盘一致"）。
+    """
+    session = await seed(probe)
+    sid = session.session_id
+
+    first = await upload(probe, sid, b"one", name="Report.pdf")
+    assert first["file"]["name"] == "Report.pdf", first
+    assert (files_dir(probe, sid) / "Report.pdf").read_bytes() == b"one"
+
+    if not fs_is_case_insensitive(probe.env.sessions_path):
+        # 敏感 FS：别名是另一个文件名 → 同名同字节但**不同名** → 新落一份。
+        same_bytes = await upload(probe, sid, b"one", name="report.pdf")
+        assert same_bytes["file"]["name"] == "report.pdf", same_bytes
+        assert file_names(probe, sid) == ["Report.pdf", "report.pdf"]
+        return
+
+    # 不敏感 FS：解析到同一个目录项 → 幂等命中**磁盘真名**（不产生第二份、不谎报名字）。
+    same_bytes = await upload(probe, sid, b"one", name="report.pdf")
+    assert same_bytes["file"]["name"] == "Report.pdf", same_bytes
+    assert same_bytes["file"]["path"] == first["file"]["path"], same_bytes
+
+    # 别名 + 异字节 → 冲突递增（以请求名生成后缀），原文件字节原样保留。
+    second = await upload(probe, sid, b"two", name="report.pdf")
+    assert second["file"]["name"] == "report-2.pdf", second
+    assert (files_dir(probe, sid) / "Report.pdf").read_bytes() == b"one"
+
+    # 候选名的别名拼写同样解析到真名（不再产生第三份）。
+    replayed = await upload(probe, sid, b"two", name="REPORT-2.PDF")
+    assert replayed["file"]["name"] == "report-2.pdf", replayed
+    assert file_names(probe, sid) == ["Report.pdf", "report-2.pdf"]
 
 
 # ── 场景 4：拒绝零副作用 ────────────────────────────────────────

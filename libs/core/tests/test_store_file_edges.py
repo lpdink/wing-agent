@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from wing.store.base import IMAGE_ONLY_TITLE
-from wing.store.file import FileMessageLog, FileSessionStore, _is_same_directory
+from wing.store.file import FileMessageLog, FileSessionStore, _is_same_entry
 
 
 @pytest.fixture
@@ -157,9 +157,9 @@ class TestAuxEdges:
         assert log.read_aux("k") == {"a": 1}
 
 
-class TestSameDirectoryProbe:
+class TestSameEntryProbe:
     def test_same_path_is_true(self, tmp_path: Path):
-        assert _is_same_directory(tmp_path, tmp_path) is True
+        assert _is_same_entry(tmp_path, tmp_path) is True
 
     def test_missing_candidate_is_false(self, tmp_path: Path):
-        assert _is_same_directory(tmp_path / "gone", tmp_path) is False
+        assert _is_same_entry(tmp_path / "gone", tmp_path) is False
