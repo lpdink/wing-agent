@@ -135,7 +135,7 @@ libs/core/wing/
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(19) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(21) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
