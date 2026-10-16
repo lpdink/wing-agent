@@ -75,7 +75,7 @@ libs/core/wing/
 │   ├── message.py                   ChainNode / 内容块 / MediaRef / Message（落盘格式守门人）
 │   ├── llm.py                       LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall
 │   └── tool.py                      ToolError / ToolParam / Tool / ToolOutput / AgentSkill
-├── media/                           图片媒体纯函数层包（id/格式/尺寸/信封/请求期投影）
+├── media/                           图片媒体纯函数层包（id/格式/尺寸/信封/上传闸门与拒绝文案/请求期投影）
 │   ├── facts.py                     字节 → 事实（sha256 id / mime / 尺寸 / 信封 / 估算 / 上传闸门）
 │   └── policy.py                    请求期投影（高水位 + 量子驱逐）+ 占位常量
 ├── tool_registry.py                 ToolRegistry — 命名空间感知注册表 + ToolRef 解析

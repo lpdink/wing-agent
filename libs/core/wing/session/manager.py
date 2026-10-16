@@ -35,7 +35,7 @@ from wing.common.utils import (
 )
 from wing.config import get_config
 from wing.hooks import hooks
-from wing.media import upload_image_ref
+from wing.media import file_too_large_message, upload_image_ref
 from wing.event import (
     DeliveredEvent,
     EventTarget,
@@ -51,7 +51,7 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
-from wing.store.base import file_too_large_message, validate_file_name
+from wing.store.base import validate_file_name
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8

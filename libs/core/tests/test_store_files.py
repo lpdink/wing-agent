@@ -21,9 +21,9 @@ import pytest
 
 from wing.common.utils import InvalidInputError
 from wing.store import FileRef, FileSessionStore, MemorySessionStore
+from wing.media import file_too_large_message
 from wing.store.base import (
     FILE_NAME_MAX_BYTES,
-    file_too_large_message,
     is_valid_file_name,
     validate_file_name,
 )

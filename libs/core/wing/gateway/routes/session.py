@@ -55,10 +55,10 @@ from wing.common.utils import InvalidInputError, validate_session_id
 from wing.common.logger import log
 from wing.config import get_config
 from wing.event import SessionStatus
-from wing.media import sniff_image_mime, too_large_message
+from wing.media import file_too_large_message, sniff_image_mime, too_large_message
 from wing.request_context import session_context
 from wing.session.tags import validate_tag
-from wing.store.base import file_too_large_message, validate_file_name
+from wing.store.base import validate_file_name
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer

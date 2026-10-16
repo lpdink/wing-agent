@@ -25,7 +25,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from wing.common.utils import InvalidInputError, is_utf8_encodable
-from wing.media import format_size, media_id as compute_media_id
+from wing.media import media_id as compute_media_id
 
 _MEDIA_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -92,18 +92,6 @@ def validate_file_name(name: str) -> str:
             "no path separator / '..' / control char / leading '.')"
         )
     return name
-
-
-def file_too_large_message(nbytes: int, max_bytes: int) -> str:
-    """「文件超限」的拒绝理由（400 的 ``detail``）。
-
-    端点的 ``Content-Length`` 预检（声明字节）与 ``SessionManager.upload_file`` 的
-    字节闸门（真实字节）共用同一份文案——同一个拒绝不该有两条说法。
-    """
-    return (
-        f"file too large: {format_size(nbytes)} exceeds the "
-        f"{format_size(max_bytes)} per-file limit (config files.max_bytes)"
-    )
 
 
 def disambiguated_file_name(name: str, index: int) -> str:
