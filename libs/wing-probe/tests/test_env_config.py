@@ -478,6 +478,21 @@ def test_render_config_images_section() -> None:
     }
 
 
+def test_render_config_files_section() -> None:
+    """files 原样写进顶层 files: 段（文件上传场景把上限压小）。"""
+    config = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            files={"max_bytes": 16},
+        )
+    )
+    assert config["files"] == {"max_bytes": 16}
+    assert "files" not in yaml.safe_load(
+        render_config_yaml(provider_base_url="http://127.0.0.1:1/v1", gateway_port=2)
+    )
+
+
 def test_env_render_config_passes_models_and_images(tmp_path: Path) -> None:
     """ProbeEnv 的 models / images 参数进入生成的配置文本（probe_env 标记透传的落点）。"""
     env = ProbeEnv(
