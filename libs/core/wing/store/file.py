@@ -8,6 +8,7 @@ history.jsonl 的混合日志承担，遗留快照文件不读不写不删）：
     ├── metadata.json        SessionMetadata（exclude_none）
     ├── history.jsonl        append-only 混合记录（Message + 事件，每行一条 dict + ts）
     ├── media/<sha256>       session 私有媒体对象（内容寻址；会话自包含的关键）
+    ├── files/<name>         session 私有用户文件（按名寻址；同名异字节带 -N 后缀）
     ├── <aux-key>.json       aux kv（如 pending_compact.json）
     └── subagents/           遗留：旧子 agent 历史（写入方已删除；不再写入，现有数据不读不删）
 
@@ -33,11 +34,13 @@ from wing.common.logger import log
 from wing.common.utils import is_valid_session_id, validate_session_id
 from wing.store.base import (
     ArchivedSession,
+    FileRef,
     MessageLog,
     SessionMetadata,
     SessionStore,
     SessionSummary,
     first_user_title,
+    validate_file_name,
     validate_media_content,
     validate_media_id,
 )
@@ -171,6 +174,7 @@ class FileSessionStore(SessionStore):
 
     _METADATA = "metadata.json"
     _MEDIA_DIR = "media"
+    _FILES_DIR = "files"
     _LEGACY_MEDIA_DIR = ".media"
     _ARCHIVE_DIR = ".archive"
     _ARCHIVE_INDEX = "index.json"
@@ -359,6 +363,31 @@ class FileSessionStore(SessionStore):
                 f"'{session_id}' at {target}: {e} (legacy copy remains readable)"
             )
             return False
+
+    # ── 用户文件（按名寻址，session 私有）─────────
+
+    def write_file(self, session_id: str, filename: str, data: bytes) -> FileRef:
+        """把用户文件写进 ``<root>/<sid>/files/``（见基类契约）。
+
+        候选名从原名人肉递增：**命中且字节全等 → 幂等返回**（不重写，inode /
+        mtime 不动）；命中但字节不同（或不是普通文件）→ 下一个 ``stem-N.ext``；
+        不命中 → 原子写。加后缀后过不了名字闸门（超长）即失败——不静默截断 stem。
+        """
+        safe = validate_file_name(filename)
+        stem, suffix = os.path.splitext(safe)
+        candidate = safe
+        index = 2
+        while True:
+            path = self._session_dir(session_id) / self._FILES_DIR / candidate
+            if path.is_file() and path.stat().st_size == len(data):
+                if path.read_bytes() == data:
+                    return FileRef(name=candidate, path=str(path), bytes=len(data))
+            if path.exists():
+                candidate = validate_file_name(f"{stem}-{index}{suffix}")
+                index += 1
+                continue
+            atomic_write_bytes(path, data)
+            return FileRef(name=candidate, path=str(path), bytes=len(data))
 
     # ── 查询 ──────────────────────────────────
 
