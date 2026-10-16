@@ -7,9 +7,11 @@
 //!   there is no confirm page (model switching is a cheap, reversible act),
 //! - `Esc` cancels (the app closes the panel; no request is sent),
 //! - provider tabs and model rows are windowed by the kernel (≤ 5 visible),
-//!   the cursor / active tab stays centered while scrolling, the window is
-//!   pinned at the ends, and there are **no** indicator glyphs (`‹`/`›`)
-//!   — the rows stay column-aligned instead.
+//!   the cursor / active tab stays centered while scrolling, and the window is
+//!   pinned at the ends. The card renderer
+//!   ([`crate::ui::cells::model_picker`]) draws the tabs it was handed: model
+//!   rows carry no overflow glyphs (they stay column-aligned), while a tab
+//!   strip that scrolls gets `‹` / `›` at its edges.
 //!
 //! Opening preselects the session's current model **by id**: the cursor lands
 //! on that row (its provider page becomes active) and a `●` mark (the kernel's
@@ -196,18 +198,40 @@ impl ModelPanel {
             .map_or(&[], |group| group.models.as_slice())
     }
 
+    /// Name of the active provider page ("" when the catalog is empty) — the
+    /// card title / rail header label.
+    pub fn provider(&self) -> &str {
+        self.sources
+            .get(self.current_page())
+            .map_or("", |group| group.provider.as_str())
+    }
+
+    /// Model declaration of a row on the active provider page (`None` out of
+    /// range) — the data columns and the detail line read it.
+    pub fn model_at(&self, row: usize) -> Option<&ModelDetail> {
+        self.sources
+            .get(self.current_page())
+            .and_then(|group| group.models.get(row))
+    }
+
     /// Display label for a row on the active provider page: the model's
     /// declared `display_name` when present (non-empty), otherwise its call
     /// name. Rendering-only — Apply / cursor / mark keep resolving by the id
     /// (`models()`), so the identity layer never sees this.
     pub fn label_at(&self, row: usize) -> &str {
-        let Some(group) = self.sources.get(self.current_page()) else {
-            return "";
-        };
-        let Some(detail) = group.models.get(row) else {
-            return "";
-        };
-        detail.display_label()
+        self.model_at(row)
+            .map_or("", |detail| detail.display_label())
+    }
+
+    /// The session's active model as the card's title bar wants it:
+    /// `(display label, provider)` of the marked row. `None` when no row is
+    /// marked (legacy session / identify miss) — the card then shows a plain
+    /// border rather than inventing a model.
+    pub fn current_mark(&self) -> Option<(&str, &str)> {
+        self.sources.iter().enumerate().find_map(|(page, group)| {
+            let detail = group.models.get(self.committed_at(page)?)?;
+            Some((detail.display_label(), group.provider.as_str()))
+        })
     }
 
     /// Cursor row on the active provider.
@@ -439,6 +463,58 @@ mod tests {
         assert_eq!(panel.cursor(), 0);
         panel.handle_key(key(KeyCode::Left)); // can move on
         assert_eq!(panel.current_page(), 0, "back to the full page");
+    }
+
+    // ── Render-facing accessors ─────────────────────────────────
+
+    #[test]
+    fn render_accessors_read_the_active_page() {
+        let panel = ModelPanel::new(same_name_sources(), None);
+        assert_eq!(panel.provider(), "dashscope");
+        assert_eq!(panel.model_at(0).map(|d| d.id.as_str()), Some("shared-a"));
+        assert_eq!(panel.label_at(0), "shared");
+        assert_eq!(panel.model_at(99), None);
+        assert_eq!(panel.label_at(99), "");
+
+        // The active page follows the cursor's page, not the committed mark.
+        let mut panel = ModelPanel::new(same_name_sources(), None);
+        panel.handle_key(key(KeyCode::Right));
+        assert_eq!(panel.provider(), "dashscope-openai");
+        assert_eq!(panel.model_at(0).map(|d| d.id.as_str()), Some("shared-b"));
+    }
+
+    #[test]
+    fn empty_catalog_has_no_provider_and_no_models() {
+        let panel = ModelPanel::new(vec![], None);
+        assert_eq!(panel.provider(), "");
+        assert_eq!(panel.model_at(0), None);
+        assert_eq!(panel.current_mark(), None);
+    }
+
+    /// The card's title status: the marked row's display label and its
+    /// provider — `None` when nothing is marked (legacy session / id miss).
+    #[test]
+    fn current_mark_is_the_committed_row_and_its_provider() {
+        let panel = ModelPanel::new(same_name_sources(), Some("only-b"));
+        assert_eq!(
+            panel.current_mark(),
+            Some(("only-b", "dashscope-openai")),
+            "the mark's row, on the mark's page"
+        );
+
+        let panel = ModelPanel::new(same_name_sources(), None);
+        assert_eq!(panel.current_mark(), None, "no mark, no status");
+    }
+
+    #[test]
+    fn current_mark_prefers_the_declared_display_label() {
+        let sources = vec![group_with_labels(
+            "qoder",
+            &["dfmodel"],
+            &[("dfmodel", "DeepSeek-Flash")],
+        )];
+        let panel = ModelPanel::new(sources, Some("dfmodel"));
+        assert_eq!(panel.current_mark(), Some(("DeepSeek-Flash", "qoder")));
     }
 
     // ── Display labels (display_name) ───────────────────────────
