@@ -8,10 +8,9 @@
 //! - `Esc` cancels (the app closes the panel; no request is sent),
 //! - provider tabs and model rows are windowed by the kernel (≤ 5 visible),
 //!   the cursor / active tab stays centered while scrolling, and the window is
-//!   pinned at the ends. The card renderer
-//!   ([`crate::ui::cells::model_picker`]) draws the tabs it was handed: model
-//!   rows carry no overflow glyphs (they stay column-aligned), while a tab
-//!   strip that scrolls gets `‹` / `›` at its edges.
+//!   pinned at the ends. How a window is drawn is the render layer's business:
+//!   model rows carry no overflow glyphs (they stay column-aligned), while a
+//!   tab strip that scrolls gets `‹` / `›` at its edges.
 //!
 //! Opening preselects the session's current model **by id**: the cursor lands
 //! on that row (its provider page becomes active) and a `●` mark (the kernel's

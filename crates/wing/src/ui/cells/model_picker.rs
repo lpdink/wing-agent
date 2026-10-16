@@ -63,6 +63,7 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 use wing_api_client::models::ModelDetail;
+use wing_api_client::models::ProviderModels;
 
 use crate::config::ThemePalette;
 use crate::render::markdown::truncate_to_display_width;
@@ -94,6 +95,10 @@ const BADGE_COMPACT_WIDTH: usize = 1;
 /// The footer's position zone (`NN / NN`) — reserved even when blank, so the
 /// card width does not jump when a page crosses the window size.
 const POS_WIDTH: usize = 7;
+/// The tab strip's overflow glyphs (`‹` / `›`).
+const MARK_LEFT: &str = "‹";
+const MARK_RIGHT: &str = "›";
+const MARKER_WIDTH: usize = 1;
 /// The card's right margin inside the cell.
 const RIGHT_MARGIN: usize = 2;
 
@@ -146,19 +151,30 @@ fn catalog_metrics(panel: &ModelPanel) -> (usize, usize) {
 /// for a single reading, too noisy for a scannable column. Values landing on a
 /// whole unit drop the fraction, the rest keep one digit.
 fn ctx_label(tokens: u64) -> String {
-    let fmt = |v: f64, suffix: char| -> String {
-        if (v - v.round()).abs() < 0.05 {
-            format!("{:.0}{suffix}", v.round())
-        } else {
-            format!("{v:.1}{suffix}")
+    const SCALES: [(u64, char); 3] = [(1_000, 'k'), (1_000_000, 'M'), (1_000_000_000, 'G')];
+    if tokens < SCALES[0].0 {
+        return tokens.to_string();
+    }
+    let mut index = 0;
+    for (i, (unit, _)) in SCALES.iter().enumerate() {
+        if tokens >= *unit {
+            index = i;
         }
-    };
-    if tokens >= 1_000_000 {
-        fmt(tokens as f64 / 1_000_000.0, 'M')
-    } else if tokens >= 1_000 {
-        fmt(tokens as f64 / 1_000.0, 'k')
-    } else {
-        tokens.to_string()
+    }
+    loop {
+        let (unit, suffix) = SCALES[index];
+        let value = tokens as f64 / unit as f64;
+        // The notation rounds, so a value just short of the next scale would
+        // read as `1000k` — walk up a scale instead (`999_950` → `1M`).
+        if value.round() >= 1_000.0 && index + 1 < SCALES.len() {
+            index += 1;
+            continue;
+        }
+        return if (value - value.round()).abs() < 0.05 {
+            format!("{:.0}{suffix}", value.round())
+        } else {
+            format!("{value:.1}{suffix}")
+        };
     }
 }
 
@@ -338,12 +354,8 @@ fn column_plan(panel: &ModelPanel, avail: usize, badge: usize) -> (Columns, usiz
     } else {
         HINT_COMPACT
     };
-    let tabs_need = PAD
-        + tab_segments(panel, usize::MAX).plain_width()
-        + GAP
-        + count_text(models.len()).width()
-        + PAD;
-    let footer_need = PAD + hint.width() + GAP + POS_WIDTH + PAD;
+    let tabs_need = tab_strip_need(panel);
+    let footer_need = PAD + hint.width() + GAP + pos_zone(panel) + PAD;
     let rows_need = |plan: &Columns| {
         if models.is_empty() {
             PAD + EMPTY_STATE.width() + PAD
@@ -385,6 +397,60 @@ fn column_plan(panel: &ModelPanel, avail: usize, badge: usize) -> (Columns, usiz
         },
         width,
     )
+}
+
+/// Width the tab strip needs at its worst: the widest window **any** provider
+/// could show (edge markers included) plus the widest page count. A maximum
+/// over all windows, never a reading of the active one — otherwise the card
+/// would resize by a column or two on every tab switch.
+fn tab_strip_need(panel: &ModelPanel) -> usize {
+    let sources = panel.sources();
+    let widest_window = (0..sources.len().max(1))
+        .map(|page| strip_width(sources, window_range(page, sources.len(), PANEL_WINDOW)))
+        .max()
+        .unwrap_or(0);
+    let widest_count = sources
+        .iter()
+        .map(|group| count_text(group.models.len()).width())
+        .max()
+        .unwrap_or(0);
+    PAD + widest_window + GAP + widest_count + PAD
+}
+
+/// Width of one visible window of the strip, markers included.
+fn strip_width(sources: &[ProviderModels], range: std::ops::Range<usize>) -> usize {
+    let mut widths: Vec<usize> = Vec::new();
+    if range.start > 0 {
+        widths.push(MARKER_WIDTH);
+    }
+    for group in &sources[range.clone()] {
+        widths.push(group.provider.width());
+    }
+    if range.end < sources.len() {
+        widths.push(MARKER_WIDTH);
+    }
+    widths.iter().sum::<usize>() + Strip::SEP * widths.len().saturating_sub(1)
+}
+
+/// Width reserved for the footer's position counter: the widest `N / N` any
+/// page can produce, never below [`POS_WIDTH`]. Sized from the catalog, so a
+/// page of 150 models cannot squeeze the counter out of a card whose width was
+/// computed from a page of 9.
+fn pos_zone(panel: &ModelPanel) -> usize {
+    panel
+        .sources()
+        .iter()
+        .map(|group| {
+            let models = group.models.len();
+            if models == 0 {
+                0
+            } else {
+                format!("{models} / {models}").width()
+            }
+        })
+        .max()
+        .unwrap_or(0)
+        .max(POS_WIDTH)
 }
 
 /// Whether any model in the catalog declares the vision capability.
@@ -492,13 +558,6 @@ struct Strip {
 impl Strip {
     /// Columns painted between two tabs.
     const SEP: usize = 4;
-
-    /// Plain width of the strip (separators included) — the width maths reads
-    /// this through [`tab_segments`] before any style exists.
-    fn plain_width(&self) -> usize {
-        self.tabs.iter().map(|t| t.text.width()).sum::<usize>()
-            + Self::SEP * self.tabs.len().saturating_sub(1)
-    }
 }
 
 /// Walk the visible providers once, keeping whatever fits `budget` and
@@ -513,7 +572,7 @@ fn tab_segments(panel: &ModelPanel, budget: usize) -> Strip {
 
     let mut candidates: Vec<(String, bool)> = Vec::new();
     if range.start > 0 {
-        candidates.push(("‹".to_string(), false));
+        candidates.push((MARK_LEFT.to_string(), false));
     }
     for (i, group) in sources.iter().enumerate().take(range.end).skip(range.start) {
         candidates.push((group.provider.clone(), i == current));
@@ -541,7 +600,7 @@ fn tab_segments(panel: &ModelPanel, budget: usize) -> Strip {
         let gap = if tabs.is_empty() { 0 } else { Strip::SEP };
         if width + gap < budget {
             tabs.push(Tab {
-                text: "›".to_string(),
+                text: MARK_RIGHT.to_string(),
                 active: false,
             });
         }
@@ -702,6 +761,11 @@ fn detail_line(panel: &ModelPanel, inner: usize, palette: &ThemePalette) -> Line
 }
 
 /// Keys on the left, position on the right.
+///
+/// When both cannot fit, the position is what survives (an abbreviated hint is
+/// still a hint; a missing counter in a long list is lost orientation) — the
+/// card's width maths reserves the zone, so this only happens on a cell too
+/// narrow for the card it asked for.
 fn footer_line(
     panel: &ModelPanel,
     inner: usize,
@@ -710,27 +774,27 @@ fn footer_line(
 ) -> Line<'static> {
     let dim = Style::default().fg(palette.dim);
     let models = panel.models();
-    let hint = if PAD + hint.width() + GAP + POS_WIDTH + PAD > inner {
-        HINT_MIN
-    } else {
-        hint
-    };
     let pos = if models.is_empty() {
         String::new()
     } else {
         format!("{} / {}", panel.cursor() + 1, models.len())
     };
-    let pos = if PAD + hint.width() + GAP + pos.width() + PAD <= inner {
-        pos
-    } else {
-        String::new()
-    };
+    let fits = |hint: &str, pos: &str| PAD + hint.width() + GAP + pos.width() + PAD <= inner;
+    let (hint, pos) = [
+        (hint, pos.as_str()),
+        (HINT_MIN, pos.as_str()),
+        (hint, ""),
+        (HINT_MIN, ""),
+    ]
+    .into_iter()
+    .find(|(hint, pos)| fits(hint, pos))
+    .unwrap_or((HINT_MIN, ""));
     let mut row = Row::new();
     row.push(" ".repeat(PAD), Style::default());
     row.push(hint.to_string(), dim);
     row.fill(inner - PAD - pos.width());
     if !pos.is_empty() {
-        row.push(pos, dim);
+        row.push(pos.to_string(), dim);
     }
     row.finish(inner, false, palette)
 }
@@ -750,14 +814,14 @@ fn rail_lines(panel: &ModelPanel, avail: usize, palette: &ThemePalette) -> Vec<L
     let mut lines = Vec::new();
 
     let mut head = Row::new();
-    let title = format!("Model · {}", panel.provider());
-    let title = if title.width() + GAP + count_text(models.len()).width() <= avail {
-        title
+    let count = count_text(models.len());
+    let with_prefix = format!("Model · {}", panel.provider());
+    let title = if with_prefix.width() + GAP + count.width() <= avail {
+        with_prefix
     } else {
         panel.provider().to_string()
     };
-    head.push(title, text.add_modifier(Modifier::BOLD));
-    let count = count_text(models.len());
+    head.push(clip(&title, avail), text.add_modifier(Modifier::BOLD));
     if head.width + GAP + count.width() <= avail {
         head.fill(avail - count.width());
         head.push(count, dim);
@@ -776,17 +840,36 @@ fn rail_lines(panel: &ModelPanel, avail: usize, palette: &ThemePalette) -> Vec<L
         let detail = &models[index];
         let is_cursor = index == cursor;
         let mut row = Row::new();
-        if is_cursor {
-            row.push("❯ ", accent);
+        // The narrowest cells show the label alone: first the cursor column
+        // goes, then the badge — each is dropped while the label still has a
+        // column, because a row that overflows would wrap and break the tier's
+        // one promise.
+        let marked = committed == Some(index);
+        let marker_width = if avail >= CURSOR_WIDTH {
+            CURSOR_WIDTH
         } else {
-            row.push(" ".repeat(CURSOR_WIDTH), Style::default());
+            0
+        };
+        // One column of label must survive beside the badge's two.
+        let badge_width = if marked && avail > marker_width + GAP {
+            GAP
+        } else {
+            0
+        };
+        if marker_width > 0 {
+            row.push(
+                if is_cursor { "❯ " } else { "  " },
+                if is_cursor { accent } else { Style::default() },
+            );
         }
-        let reserved = CURSOR_WIDTH + if committed == Some(index) { GAP } else { 0 };
         row.push(
-            clip(detail.display_label(), avail.saturating_sub(reserved)),
+            clip(
+                detail.display_label(),
+                avail.saturating_sub(marker_width + badge_width),
+            ),
             if is_cursor { accent } else { text },
         );
-        if committed == Some(index) {
+        if badge_width > 0 {
             row.push(" ".to_string(), Style::default());
             row.push("●".to_string(), success);
         }
@@ -980,20 +1063,33 @@ mod tests {
     /// switching tabs never moves the eye's landmarks.
     #[test]
     fn card_width_is_stable_across_providers() {
-        let mut panel = hero_panel();
-        let mut widths = Vec::new();
-        for _ in 0..3 {
-            let lines = line_widths(&panel, 100);
+        // Page counts straddle the 9 → 10 digit boundary and the provider list
+        // is long enough to scroll, so both the count slot and the `‹`/`›`
+        // markers differ per page — the card must not care.
+        let sources: Vec<ProviderModels> = (0..7)
+            .map(|i| ProviderModels {
+                provider: format!("provider-{i}"),
+                models: (0..(7 + i))
+                    .map(|m| model(&format!("m{m}"), None, Some(128_000), None, false))
+                    .collect(),
+            })
+            .collect();
+        let mut panel = ModelPanel::new(sources, None);
+        let mut cards = Vec::new();
+        for _ in 0..7 {
+            let lines = line_widths(&panel, 120);
             let card = *lines.first().expect("title line");
             assert!(
                 lines.iter().all(|w| *w == card || *w == 0),
                 "every line of a card shares one width: {lines:?}"
             );
-            widths.push(card);
+            cards.push(card);
             right(&mut panel, 1);
         }
-        assert_eq!(widths[0], widths[1], "MacMachine vs magpie: {widths:?}");
-        assert_eq!(widths[0], widths[2], "MacMachine vs dashscope: {widths:?}");
+        assert!(
+            cards.windows(2).all(|pair| pair[0] == pair[1]),
+            "card width must not move with the active tab: {cards:?}"
+        );
     }
 
     /// Declared data renders in its column; undeclared cells stay blank (the
@@ -1063,6 +1159,11 @@ mod tests {
         assert_eq!(ctx_label(1_000_000), "1M");
         assert_eq!(ctx_label(1_048_576), "1M");
         assert_eq!(ctx_label(1_500_000), "1.5M");
+        // Rounding must not push a reading into the next scale's digits.
+        assert_eq!(ctx_label(999_950), "1M");
+        assert_eq!(ctx_label(999_999), "1M");
+        assert_eq!(ctx_label(999_999_999), "1G");
+        assert_eq!(ctx_label(999), "999");
     }
 
     /// A label wider than its column clips with `…` and never pushes the data
@@ -1192,30 +1293,62 @@ mod tests {
         );
     }
 
-    /// Even under pressure every line is exactly as wide as the card — a
-    /// wrapped border would be a rendering bug, not a degrade. The unmarked
-    /// catalog exercises the title's plain-border branch.
+    /// Every line fits the cell at every width — a wrapped border would be a
+    /// rendering bug, not a degrade. Sweeps the whole ladder (rail included),
+    /// both title branches, a provider name wider than the cell and a catalog
+    /// big enough to widen the count / position slots.
     #[test]
     fn every_line_fits_the_cell_at_every_width() {
-        for width in [0u16, 12, 34, 40, 42, 48, 56, 63, 64, 80, 100, 160] {
-            let unmarked = ModelPanel::new(hero_sources(), None);
-            let unmarked_widths = line_widths(&unmarked, width);
-            for (i, w) in unmarked_widths.iter().enumerate() {
-                assert!(
-                    *w <= width as usize,
-                    "unmarked line {i} is {w} wide in a {width}-column cell"
-                );
-            }
-            let widths = line_widths(&hero_panel(), width);
-            let card = widths.first().copied().unwrap_or_default();
-            let rail = width < RAIL_MAX_WIDTH as u16;
-            for (i, w) in widths.iter().enumerate() {
-                assert!(
-                    *w <= width as usize,
-                    "line {i} is {w} wide in a {width}-column cell: {widths:?}"
-                );
-                if *w > 0 && !rail {
-                    assert_eq!(*w, card, "line {i} breaks the card's width: {widths:?}");
+        let long_provider = vec![ProviderModels {
+            provider: "provider-with-a-very-long-name".into(),
+            models: vec![model("m", None, Some(500_000), Some(100_000), true)],
+        }];
+        let big: Vec<ModelDetail> = (0..150)
+            .map(|i| {
+                model(
+                    &format!("m{i}"),
+                    None,
+                    Some(128_000 * (i + 1)),
+                    None,
+                    i % 3 == 0,
+                )
+            })
+            .collect();
+        let catalogs: Vec<Vec<ProviderModels>> = vec![
+            hero_sources(),
+            long_provider,
+            (0..7)
+                .map(|i| ProviderModels {
+                    provider: format!("provider-{i}"),
+                    models: (0..(9 + i))
+                        .map(|m| model(&format!("m{m}"), None, None, None, false))
+                        .collect(),
+                })
+                .collect(),
+            vec![ProviderModels {
+                provider: "big".into(),
+                models: big,
+            }],
+        ];
+        for sources in catalogs {
+            for current in [None, Some("m3")] {
+                let mut panel = ModelPanel::new(sources.clone(), current);
+                for width in 1..=128u16 {
+                    let widths = line_widths(&panel, width);
+                    let card = widths.first().copied().unwrap_or_default();
+                    let rail = width < RAIL_MAX_WIDTH as u16;
+                    for (i, w) in widths.iter().enumerate() {
+                        assert!(
+                            *w <= width as usize,
+                            "line {i} is {w} wide in a {width}-column cell: {widths:?}"
+                        );
+                        if *w > 0 && !rail {
+                            assert_eq!(*w, card, "line {i} breaks the card's width: {widths:?}");
+                        }
+                    }
+                    // Walk the cursor through the page: the window, the
+                    // position counter and the detail line all move with it.
+                    down(&mut panel, 1);
                 }
             }
         }
@@ -1247,6 +1380,27 @@ mod tests {
         assert!(out.starts_with("Model · MacMachine"), "{out}");
         assert!(out.contains("❯ DeepSeek-Flash ●"), "{out}");
         assert!(out.contains("↑↓ · Enter · Esc"), "{out}");
+    }
+
+    /// A catalog big enough to widen the counter (`100 / 150` is 9 columns)
+    /// must widen the card, not lose the counter: orientation in a long list
+    /// is the whole point of it.
+    #[test]
+    fn position_counter_survives_a_big_catalog() {
+        let models: Vec<ModelDetail> = (0..150)
+            .map(|i| model(&format!("m{i}"), None, None, None, false))
+            .collect();
+        let mut panel = ModelPanel::new(
+            vec![ProviderModels {
+                provider: "big".into(),
+                models,
+            }],
+            None,
+        );
+        down(&mut panel, 99);
+        let out = render(&panel, 72);
+        assert!(out.contains("100 / 150"), "{out}");
+        assert!(out.contains("❯ m99"), "{out}");
     }
 
     /// An empty provider page keeps the card's shape and explains itself
