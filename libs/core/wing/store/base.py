@@ -16,6 +16,7 @@ wing/store/base.py — 持久化层抽象。
 
 from __future__ import annotations
 
+import os
 import re
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from wing.common.utils import InvalidInputError, is_utf8_encodable
 from wing.media import media_id as compute_media_id
 
 _MEDIA_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -40,6 +42,91 @@ def validate_media_id(media_id: str) -> str:
             f"invalid media id: {media_id!r} (expect 64 lowercase hex chars)"
         )
     return media_id
+
+
+FILE_NAME_MAX_BYTES = 128
+"""上传文件名长度上限（**字节**，不是字符）。
+
+与 session id 同源的理由（``NAME_MAX`` = 255 字节）但更保守：文件名前面还要挂
+``stem-2`` 这类冲突后缀，且它只作展示与 agent 识别用，128 字节远超真实文件名。
+按字节计 = 中文名合法（``"报告.pdf"`` 是 10 字节），不会在 ``ENAMETOOLONG`` 上炸。
+"""
+
+
+def is_valid_file_name(name: object) -> bool:
+    """判断值是否可作为上传文件名（不抛异常，供调用方做闸门判断）。
+
+    规则与 session id 同**精神**不同**实现**（文件名的语义不同：允许 ``-`` 开头、
+    允许空格与中文，但仍拒绝点开头——保留存储的点命名空间与"隐藏文件"的歧义）：
+    非空、可编码为 UTF-8（孤立代理字符不能）、≤ :data:`FILE_NAME_MAX_BYTES` 字节、
+    不含路径分隔符（``/`` ``\\``）或父目录引用（``..``）、不以 ``.`` 开头、
+    不含 ASCII 控制字符（0x00–0x1F / 0x7F）。
+
+    拒绝而非清洗：名字是**路径组件**（防穿越），也是一份**用户标识**（agent 通过
+    它认得这个文件）——静默归一（替换 / 截断）会让实际落盘名与用户给的名字悄悄
+    对不上，违背"响应里的 name 永远是实际落盘名"的契约。
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if not is_utf8_encodable(name):
+        return False
+    if len(name.encode("utf-8")) > FILE_NAME_MAX_BYTES:
+        return False
+    if name.startswith("."):
+        return False
+    if "/" in name or "\\" in name or ".." in name:
+        return False
+    return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name)
+
+
+def validate_file_name(name: str) -> str:
+    """校验上传文件名并原样返回；不合规即 ``InvalidInputError``（HTTP 400 语义）。
+
+    错误文案里的名字用 ``repr``（转义形式，恒为 ASCII）：孤立代理字符直接拼进
+    消息会在 HTTP 错误体序列化处再次炸（与 ``validate_session_id`` 同款）。
+    """
+    if not is_valid_file_name(name):
+        raise InvalidInputError(
+            f"invalid file name: {name!r} "
+            f"(expect non-empty UTF-8 encodable name, ≤ {FILE_NAME_MAX_BYTES} bytes, "
+            "no path separator / '..' / control char / leading '.')"
+        )
+    return name
+
+
+def disambiguated_file_name(name: str, index: int) -> str:
+    """同名异字节冲突时的候选名：``stem-<index>.ext``（无扩展名 ``name-<index>``）。
+
+    候选名同样过名字闸门——**加后缀后超长**（原名已顶到字节上限）即
+    :class:`InvalidInputError`，文案点明是"冲突后缀把名字顶出上限"而不是调用方
+    给的名字本身脏了（原名合法，是"重名 + 超长"这个组合没有合法解）。**不截断**
+    stem：静默改名比一次大声失败更糟（那是把用户的标识符悄悄改样）。
+    """
+    stem, suffix = os.path.splitext(name)
+    candidate = f"{stem}-{index}{suffix}"
+    if not is_valid_file_name(candidate):
+        raise InvalidInputError(
+            f"file name too long to disambiguate: {name!r} is already taken by "
+            f"different bytes, and the suffixed name {candidate!r} exceeds the "
+            f"{FILE_NAME_MAX_BYTES} byte limit"
+        )
+    return candidate
+
+
+class FileRef(BaseModel):
+    """一份落盘文件的引用（``SessionStore.write_file`` 的返回值 / 上传端点的响应元素）。
+
+    - ``name`` 是**实际落盘名**：同名异字节冲突时带 ``-2`` / ``-3`` 后缀——调用方
+      永远不要拿请求里的名字当事实（响应与磁盘以本字段为准）。
+    - ``path`` 是**网关宿主机上的绝对路径**（消费方把它写进消息正文，agent 用
+      Read / Bash 直接读）；没有本地文件的后端（memory）恒为 None，如实降级
+      （与 ``media_path`` 同款——内存里的字节读不到就没有路径可给）。
+    - ``bytes`` 是本次写入的字节数（= 请求体字节数；同名同字节的幂等命中也是它）。
+    """
+
+    name: str
+    path: str | None = None
+    bytes: int
 
 
 def validate_media_content(media_id: str, data: bytes) -> None:
@@ -601,4 +688,32 @@ class SessionStore(ABC):
         （快路径，命中即返回），miss 才碰老池——加载路径的对象量级 = 单会话引用
         数。不含内容校验：老池对象在首写时已校验，物化只保证"读回什么就存什么"
         （与读路径等价）。
+        """
+
+    # ── 用户文件（按名寻址，**session 私有**）──────
+    #
+    # 与媒体（内容寻址）刻意不同的两点：**按名寻址**（名字本身是给 agent 与用户
+    # 的语义——保留原名，agent 的 Read 才看得懂）与**允许同名多份**（字节不同即
+    # 递增后缀，绝不覆盖：链上的 `[file: …]` 引用指向既有那份，覆盖 = 静默数据损坏）。
+    # 落点 <root>/<sid>/files/<实际名>——与 media/ 平级，随会话目录一起搬运 / 归档，
+    # 会话自包含 doctrine 不变。没有删除 / 列目录 / 读取 API（与媒体同 doctrine：
+    # 只增不减，目录本身就是事实源）。
+
+    @abstractmethod
+    def write_file(self, session_id: str, filename: str, data: bytes) -> FileRef:
+        """把用户文件写进**该 session 的文件目录**，返回**实际落盘**引用。
+
+        契约：
+        - 文件名过 :func:`validate_file_name` 闸门（路径组件，防穿越；不合规抛
+          ``InvalidInputError``）；``session_id`` 同样过会话闸门；
+        - **同名同字节幂等**：同名对象已存在且字节全等 → 直接返回既有引用
+          （不重写：inode / mtime 不动）；逐候选比较的语义同样适用于冲突后缀名
+          （``name-2.ext`` 已存在且同字节 → 复用它，不产生第三份）；
+        - **同名异字节递增**：``stem-2.ext`` / ``stem-3.ext``…（无扩展名
+          ``name-2``）；加后缀后过不了名字闸门（超长）→ ``InvalidInputError``
+          （不静默截断 stem——那是把用户的标识符悄悄改样）；
+        - 字节闸门（非空 / 上限）**不在这一层**：上限来自配置，store 不读配置
+          （见 ``SessionManager.upload_file``）；本方法假定 ``data`` 已被放行；
+        - 返回的 ``FileRef.name`` 是实际落盘名（后缀可能被加过），``path`` 是
+          本地绝对路径（memory 后端 None）。
         """

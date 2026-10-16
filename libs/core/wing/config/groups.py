@@ -75,6 +75,12 @@ SETTING_GROUPS: tuple[SettingGroup, ...] = (
         members=("images",),
     ),
     SettingGroup(
+        id="files",
+        title="Files",
+        doc="用户上传文件（文件系统通道：落盘 + 路径告知 agent）",
+        members=("files",),
+    ),
+    SettingGroup(
         id="sessions",
         title="Sessions",
         doc="会话内存态回收（磁盘状态一概不动）",

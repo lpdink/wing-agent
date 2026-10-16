@@ -2,6 +2,8 @@
 """字节 → 事实：sha256 id / mime 嗅探 / 尺寸解析 / 信封文本与尺寸估算 / 上传字节闸门。
 
 纯函数与不可变数据：不依赖 config、不读存储、不做投影决策（投影见 ``policy``）。
+两条上传通道（图片 / 用户文件）的**拒绝文案**同处一份（``too_large_message`` /
+``file_too_large_message``）——同一句模式，各自焊死自己的配置键名。
 """
 
 from __future__ import annotations
@@ -255,7 +257,7 @@ def estimate_image_tokens(ref: MediaRef) -> int:
 
 
 def too_large_message(nbytes: int, max_bytes: int) -> str:
-    """「超限」的拒绝理由（400 的 ``detail``）。
+    """「图片超限」的拒绝理由（400 的 ``detail``）。
 
     字节闸门（真实字节）与端点的 ``Content-Length`` 预检（声明字节）共用同一份
     文案——同一个拒绝不该有两条说法。
@@ -263,6 +265,19 @@ def too_large_message(nbytes: int, max_bytes: int) -> str:
     return (
         f"image too large: {format_size(nbytes)} exceeds the "
         f"{format_size(max_bytes)} per-image limit (config images.max_bytes)"
+    )
+
+
+def file_too_large_message(nbytes: int, max_bytes: int) -> str:
+    """「文件超限」的拒绝理由（400 的 ``detail``）——与 :func:`too_large_message` 并排。
+
+    两条上传通道（媒体 / 用户文件）各自焊死自己的配置键名，但共用同一句模式：
+    端点的 ``Content-Length`` 预检（声明字节）与 ``SessionManager.upload_file`` 的
+    字节闸门（真实字节）都读它——同一个拒绝不该有两条说法。
+    """
+    return (
+        f"file too large: {format_size(nbytes)} exceeds the "
+        f"{format_size(max_bytes)} per-file limit (config files.max_bytes)"
     )
 
 

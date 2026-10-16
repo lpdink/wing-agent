@@ -3,11 +3,15 @@
 「图片文件 → 模型可见」这条链路的机制说明：`ReadImage` 工具、内容寻址的媒体存储
 （**会话私有目录** `<sessions-root>/<sid>/media/`，session 自包含）、消息里的媒体引用、
 **请求期图片投影**（字节高水位 + 量子批量驱逐；计数驱逐默认关闭）与两条协议线格式。
+非图片文件是**另一条通道**（文件系统：`POST /api/session/files` 落 `<sid>/files/` + 路径告知
+agent），本文在「用户贴图」末尾与配置 / 整机证据处给出交叉引用，端点级细节见
+[http-api.md](http-api.md)。
 
 事实来源：代码 `libs/core/wing/{media/,schema/,store/,agent/,provider/,context/compaction.py}`、
-`libs/core/wing/gateway/routes/session.py`（上传端点）、`libs/core/wing/tools/builtin/read_image.py`；
+`libs/core/wing/gateway/routes/session.py`（上传 / 读取 / 文件端点）、`libs/core/wing/tools/builtin/read_image.py`；
 整机证据 `libs/wing-probe/scenarios/`：`test_read_image.py`（15 条）/ `test_media_layout.py`（3 条存储布局）
-/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（9 条上传端点），本文末列。
+/ `test_user_media.py`（8 条用户贴图链路）/ `test_session_media_upload.py`（9 条上传端点）/
+`test_session_media_read.py`（7 条读取端点）/ `test_session_files_upload.py`（9 条文件上传），本文末列。
 本页只讲 *why* 与不变量，逐行契约以代码为准。
 
 ## 链路总览
@@ -111,7 +115,7 @@ class Message(ChainNode):
 用户侧整条入口的服务端部分（前端 composer / 终端协议 / 压缩见前端侧文档）。语义由总任务书
 D5/D6/D7 拍板：
 
-- **上传（字节侧入口）**：`POST /api/session/media?session_id=<sid>[&name=<n>]`，body = **原始图片字节**
+- **用户贴图（字节侧入口）**：`POST /api/session/media?session_id=<sid>[&name=<n>]`，body = **原始图片字节**
   （非 JSON / 非 multipart；`name` 是展示素材，缺省 / 空串 = 不记录，建议给 basename，长度上限
   255 字符、超限 400）。**收包顺序**：会话存在（否则 404；**不隐式建会话**）→ `Content-Length`
   预检（声明值超 `images.max_bytes` 直接 400、**不读 body**）→ 收包 → 字节校验：body 非空 →
@@ -122,6 +126,26 @@ D5/D6/D7 拍板：
   幂等：同字节二次上传返回同一 id 且不重写对象）。响应 `{"ok":true,"media":{id,mime,bytes,width,height,name?}}`，
   其中 `media` 与消息 `media` 数组的元素同形——可直接回投。**不水合**已逐出会话（`/api/session/tag`
   同款：上传一张图不该把 inactive 会话翻成活跃，见 `docs/dev/http-api.md`）。
+- **字节读取端点（图片预览的字节源）**：`GET /api/session/media?session_id=<sid>&media_id=<id>`——
+  原始字节响应（非 JSON），头 = `Content-Type`（**由字节嗅探现读**：不水合会话就拿不到 MediaRef 的
+  mime；四类受支持图片的 magic bytes 就是事实，嗅探不出回落 `application/octet-stream`）+
+  `ETag: "<id>"` + `Cache-Control: private, max-age=31536000, immutable`（内容寻址 ⇒ 内容永不
+  变更，白拿强缓存）+ `X-Content-Type-Options: nosniff`。读路径 = `store.read_media` 原样复用
+  （会话目录优先、老池回退并**物化**）；**非法 id 与不存在同价 404**（`validate_media_id` 的闸门在
+  路径拼接之前）；归档会话 404 + `error="session_archived"`；memory 后端天然可读（字节在进程内桶）。
+  鉴权开启时 `?api_key=` 可用（`<img>` 带不了请求头，见 `docs/dev/http-api.md` 的鉴权章节）。
+- **文件上传端点（非图片，文件系统通道）**：`POST /api/session/files?session_id=<sid>&name=<n>`——
+  body = 原始文件字节，落 `<root>/<sid>/files/<实际名>`（**保留原名**：agent 的 Read 看得懂），响应
+  `{ok, file:{name, path, bytes}}`，`path` = 网关宿主机绝对路径（消费方写进消息正文
+  `[file: 名 · 大小 · 路径]`，agent 用 Read / Bash 去读）。收包纪律 / 零副作用 / 不水合与上传端点
+  同款（多一道免费的 query 名字闸门）；上限是 **`files.max_bytes`**（默认 64 MiB，与图片的
+  `images.max_bytes` 互不感知）。存储 API：`SessionStore.write_file(session_id, filename, data)
+  -> FileRef`（幂等 / 冲突递增在 store 层实现；`FileRef.path` 是本地绝对路径，memory 后端 null）。
+  大小写 / Unicode 归一化不敏感的文件系统上（macOS APFS / Windows NTFS）请求名先解析成
+  **磁盘真名**再判定：别名拼写（`report.pdf` vs `Report.pdf`）命中时返回真名、不产生第二份
+  （响应里的 `name` 恒为实际落盘名）。同名**同字节幂等**、同名**异字节 `stem-2.ext` 递增且绝不覆盖**
+  （链上的 `[file: …]` 引用指向既有那份；覆盖 = 静默数据损坏）。memory 后端 `path` 为 null。
+  端点级细节见 `docs/dev/http-api.md` 的 session 端点表。
 - **引用（引用侧入口）**：客户端把 refs 放进消息——WS `ClientRequest.media` 或 HTTP
   `POST /api/session/send` 的 `media`（两条等价路径共用同一透传链：`WingRuntime.post → SM._post →
   Session.post → Agent.post → Inbox.post → Message(media=…)`）。字段缺省 / null = 无媒体——旧客户端
@@ -293,6 +317,9 @@ images:                       # 顶层段（声明在 config/models.py::ImagesCo
   request_budget_bytes: 37748736   # 请求期 base64 编码后累计高水位（36 MiB）
   evict_quantum_bytes: 18874368    # 字节驱逐量子（18 MiB = 预算一半，与 DSH 同构）
 
+files:                        # 顶层段（声明在 config/models.py::FilesConfig）——非图片文件的落盘上限
+  max_bytes: 67108864         # 单份上传文件 ≤ 64 MiB（只走 POST /api/session/files；图片不受它管）
+
 providers:
   - name: my-provider
     image_delivery: inline    # 可选：inline | followup（缺省按协议）
@@ -302,6 +329,7 @@ providers:
 > 保留策略只有一套口径：`max_images`（计数，**≤0 = 关闭**，默认 -1）+
 > `request_budget_bytes`（字节兜底）+ 两个量子（`count_quantum` /
 > `evict_quantum_bytes`，要求 > 0——非正数会让量子退化为逐条驱逐，配置层拒绝以免误配）。
+> `files.max_bytes` 是**另一条通道**的预算（文件系统 vs 视觉），两端点互不感知。
 
 ## 已知边界与 future work
 
@@ -315,21 +343,32 @@ providers:
   的反向索引；老共享池物化后也**不清理**（只读历史）。语义是"任何对上下文的操作都不删字节"——
   删除会让历史引用悬空，是比磁盘占用差得多的失败模式；当前量级下收益不足。后续若要清理，
   只能以「会话目录整体删除」为粒度（session 即搬运单元）。
-- **Files API / file_id 引用模式未做**（DeepSeek Files API 这类"先上传再引用"的上游优化）。
+- **Files API / file_id 引用模式未做**（DeepSeek Files API 这类"先上传再引用"的上游优化）——
+  本仓的 `POST /api/session/files` 是**网关侧**落盘 + 路径告知（文件系统通道），与上游 Files API 无关。
+- **文件名卫生不覆盖 Windows 的形态约束**：保留设备名（`CON` / `PRN` / `AUX` / `NUL` /
+  `COM1`…）与尾随点 / 空格（Windows 会在写入时剥掉，于是 `foo.` 与 `foo` 是同一个名字）不在
+  `validate_file_name` 的闸门里——那些名字在 macOS / Linux 上完全合法，按平台条件化拒绝会让
+  同一个请求在不同宿主上得到不同结论（更差的失败模式）。现状：尾随点 / 空格靠**别名解析**
+  落回真名（响应仍诚实），保留设备名在 Windows 上写入失败会如实报 5xx（日志里有系统错误）。
+- **用户文件（`files/`）无 GC / 无列目录 / 无下载端点**（与媒体同 doctrine：只增不减，目录就是
+  事实源）；上限由 `files.max_bytes` 框住。**fork 不复制 `files/`**（设计如此：文件是"用户现场
+  素材"而非链上引用，没有悬空引用的失败模式——agent 只拿到过一次路径）。
 - **DSH 式持久 offload 决策 + 请求失败自愈重试未做**：投影是无状态纯函数，失败不做重试调整。
 - 不做 EXIF 方向修正、动画 GIF 多帧解析（只读头部尺寸）、图片自动重编码。
 - **Apple CgBI 变体 PNG 不解析尺寸**：CgBI 是 Apple 的非标准 PNG（`CgBI` chunk 排在
   IHDR 之前，IHDR 位于偏移 28），标准布局解析器读不到尺寸——`ReadImage` 识别该特征并报
   "Apple CgBI variant … convert it first"（附 `sips -s format png` 示例），**不**误报
   "truncated or corrupt"。其私有字节序刻意不解析（无可验证的规范来源）。
-- 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、`GET /api/media/{id}` 端点、TUI/VSCode 像素渲染
+- 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、**全局**媒体池端点（`GET /api/media/{id}`——
+  会话私有媒体已由 `GET /api/session/media` 提供，见「用户贴图」）、TUI/VSCode 像素渲染
   （kitty/iTerm2 协议、webview）不在本期；用户侧入口的**服务端**链路见「用户贴图」一节，前端
   （composer 图片 chip / 终端协议 / 压缩）在前端侧交付。
-- **上传 body 没有服务级大小上限**：端点自己做了两道前置（会话存在性 → `Content-Length`
-  预检）——声明超限的请求在收包**之前**就 400，幽灵会话也先 404；但**没有声明 / 声明说谎**
-  的 body 仍会先被 `await request.body()` 整包收进内存，`≤ images.max_bytes` 的字节判定
-  发生在收包**之后**（超限会被 400 拒绝，只是字节已经过了一遍内存）。熔断点该是 ASGI 服务级的
-  body 上限（中间件 / 反代），而不是这一个端点自己补一条口径；与既有 JSON 端点同源（它们也先整包收）。
+- **上传 body 没有服务级大小上限**：两个上传端点（媒体 / 文件）都自己做了两道前置（会话存在性 →
+  `Content-Length` 预检）——声明超限的请求在收包**之前**就 400，幽灵会话也先 404；但**没有声明 /
+  声明说谎**的 body 仍会先被 `await request.body()` 整包收进内存，`≤ images.max_bytes`（/ 文件端点的
+  `files.max_bytes`）的字节判定发生在收包**之后**（超限会被 400 拒绝，只是字节已经过了一遍内存）。
+  熔断点该是 ASGI 服务级的 body 上限（中间件 / 反代），而不是端点自己补一条口径；与既有 JSON 端点
+  同源（它们也先整包收）。
 - **贴图引用的元数据不校验内容一致性**：入口闸门只认 id 格式 + mime + 对象存在（安全面与"线格式
   可用性"）；ref 里的 `bytes` / `width` / `height` 是提示性元数据，只参与请求期驱逐启发式——服务端
   不读字节复核（要读字节就意味着每次发消息都全量哈希，代价与收益不成比例）。
@@ -387,6 +426,34 @@ providers:
 | `test_upload_without_name_is_referencable` | 不带 `name` → `name: null`；对象照样可被引用（`name` 不是寻址键） |
 | `test_alias_spelling_lands_in_the_canonical_session_dir` | 别名拼写（大小写不敏感 FS）：200 + 对象落**真名目录**、目录清单只一份；敏感 FS（CI）：404 + 同样不产生第二套目录（两分支各自断言） |
 
+字节读取端点（`libs/wing-probe/scenarios/test_session_media_read.py`，B1；HTTP 响应 / 文件系统 /
+列表投影三个取证面）：
+
+| 场景 | 断言要点 |
+|------|----------|
+| `test_read_returns_bytes_and_cache_headers` | 上传 → 读回：字节逐字节相等；`Content-Type: image/png` + `ETag: "<id>"` + `Cache-Control: private, max-age=31536000, immutable` + `X-Content-Type-Options: nosniff`；query 只有 `session_id` / `media_id` |
+| `test_404_faces_leave_no_trace` | 不存在的 64-hex id → 404 `media not found`；非法 id（非 hex / 路径穿越）同价 404；幽灵会话 404 `session not found`；媒体目录清单不增、无越界目录 |
+| `test_archived_session_read_is_frozen` | 归档后读 → 404 + `error="session_archived"`（含 restore 提示）；对象随目录进 `.archive` 且字节不变；**恢复后同一 id 立刻可读** |
+| `test_evicted_session_can_read_without_being_hydrated` | 逐出后读 200 + 字节相等，且 `/api/session/list` 里仍是 `inactive`（读端点不水合） |
+| `test_legacy_pool_object_is_served_and_materialized` | 只有 `.media/<id[:2]>/<id>` 有对象时照常 200；读路径把它物化进 `<sid>/media/`；老池对象保留（只读不删） |
+| `test_memory_backend_serves_bytes_from_its_bucket` | memory 后端天然可读（200 + 字节）；桶里没有的 id 仍 404 |
+| `test_query_api_key_serves_bytes_without_headers` | 鉴权开启：无 key 401；`?api_key=` 200 + 字节相等；坏 key 401（`<img>` 通道的存在前提） |
+
+文件上传端点（`libs/wing-probe/scenarios/test_session_files_upload.py`，B2；响应 / 文件系统 /
+假 Provider 请求 / HTTP 留档四个取证面）：
+
+| 场景 | 断言要点 |
+|------|----------|
+| `test_upload_returns_path_and_persists_bytes` | 响应 `{ok, file:{name, path, bytes}}` 与磁盘一致（`path` 是绝对路径）；中文名保留原名、目录只此一份；HTTP 留档 = 原始字节体（非 JSON body） |
+| `test_agent_reads_the_uploaded_file_by_returned_path`（红线） | 把返回的绝对路径写进消息正文 → 模型发起的 `Read` 工具续轮里 tool 消息含文件内容（这条通道真能用） |
+| `test_same_name_never_overwrites_and_same_bytes_is_idempotent` | 同名同字节 → 同路径、inode / mtime 不变；同名异字节 → `report-2.pdf` / `report-3.pdf`，首份字节**原样保留** |
+| `test_rejected_uploads_leave_no_trace` | 坏名字（`../x` / 点开头 / 分隔符 / 控制符 / 超长）/ 缺 name / 空 body → 400；`<sid>/files/` 不存在；随后合法上传照常 |
+| `test_oversize_upload_is_rejected_by_config_limit` | `files={"max_bytes": 16}`：100 B → 400（`file too large` + `files.max_bytes`）、目录文件数不增 |
+| `test_upload_rejects_by_headers_before_reading_the_body`（收包顺序） | 裸 socket 不发 body：幽灵会话 + 声明超限 → 404；坏名字 → 400；真实会话 + 声明超限 → 400（同一句文案）、`files/` 不存在 |
+| `test_ghost_session_upload_is_404` / `test_archived_session_upload_is_404_with_the_marker` | 幽灵会话 / 穿越式 id → 404 无残留；归档 → 404 + `session_archived`、`.archive/<sid>/files` 不存在；恢复后照常可上传 |
+| `test_memory_backend_has_no_path` | memory 后端 `path: null`（没有本地文件，如实降级） |
+| `test_alias_spelling_resolves_to_the_on_disk_file_name` | 大小写不敏感 FS：别名拼写（`report.pdf` vs `Report.pdf`）幂等命中返回**磁盘真名**、不产生第二份；候选名的别名拼写同样解析到真名。敏感 FS（CI）：别名是另一个名字 → 各落一份（两分支各自断言） |
+
 用户贴图链路（`libs/wing-probe/scenarios/test_user_media.py`，02 message_chain；对象由场景预置进
 `<sid>/media/<id>`——上传端点落地后，同一存储布局的写入侧由上面的文件走真上传覆盖）：
 
@@ -407,7 +474,9 @@ providers:
 uv run --no-sync pytest libs/wing-probe/scenarios/test_read_image.py \
     libs/wing-probe/scenarios/test_media_layout.py \
     libs/wing-probe/scenarios/test_user_media.py \
-    libs/wing-probe/scenarios/test_session_media_upload.py -q --timeout=120
+    libs/wing-probe/scenarios/test_session_media_upload.py \
+    libs/wing-probe/scenarios/test_session_media_read.py \
+    libs/wing-probe/scenarios/test_session_files_upload.py -q --timeout=120
 make test-probe        # 全量（含基础设施自测）
 ```
 

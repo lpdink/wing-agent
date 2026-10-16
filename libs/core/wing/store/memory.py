@@ -7,15 +7,19 @@ wing/store/memory.py — 内存后端（不落盘）。
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Iterator
 
 from wing.common.utils import validate_session_id
 from wing.store.base import (
+    FileRef,
     MessageLog,
     SessionMetadata,
     SessionStore,
     SessionSummary,
+    disambiguated_file_name,
     first_user_title,
+    validate_file_name,
     validate_media_content,
     validate_media_id,
 )
@@ -60,6 +64,12 @@ class MemorySessionStore(SessionStore):
         与 file 后端同语义——媒体是**会话私有**资产，两个会话互不可见（自包含）；
         没有老池兼容面（内存后端从未有过跨会话的持久池）。durable=False 决定它
         不跨进程。"""
+        self._files: dict[str, dict[str, bytes]] = {}
+        """用户文件：per-session 键空间（``dict[session_id][落盘名]``），语义同媒体
+        （含同名异字节的 ``-N`` 后缀），只是没有本地路径（``FileRef.path`` 恒 None）。"""
+        # 与 file 后端同款：路由在线程池里调用 write_file，"扫描 + 写"必须互斥
+        # （dict 的 check-then-set 不是原子的，两个同名上传会互相覆盖）。
+        self._file_lock = threading.Lock()
 
     # ── metadata ──────────────────────────────
 
@@ -126,6 +136,33 @@ class MemorySessionStore(SessionStore):
     def materialize(self, session_id: str, media_id: str) -> bool:
         """内存后端没有老池可物化：真值即"该会话桶里已有此对象"。"""
         return self.media_exists(session_id, media_id)
+
+    # ── 用户文件（按名寻址，session 私有）─────────
+
+    def write_file(self, session_id: str, filename: str, data: bytes) -> FileRef:
+        """把用户文件写进该会话的内存文件桶（同名同字节幂等、异字节递增后缀）。
+
+        与 file 后端同语义（候选名逐个比字节），只是没有路径可言：``FileRef.path``
+        恒 None——字节读不到文件系统（agent 拿不到可 Read 的路径），如实降级。
+        桶在**首次真正落定**时才创建：拒绝路径（名字 / 候选名超长）不留下空条目。
+        """
+        validate_session_id(session_id)
+        safe = validate_file_name(filename)
+        with self._file_lock:
+            bucket = self._files.get(session_id)
+            candidate = safe
+            index = 2
+            while True:
+                existing = None if bucket is None else bucket.get(candidate)
+                if existing is None:
+                    if bucket is None:
+                        bucket = self._files.setdefault(session_id, {})
+                    bucket[candidate] = data
+                    return FileRef(name=candidate, path=None, bytes=len(data))
+                if existing == data:
+                    return FileRef(name=candidate, path=None, bytes=len(data))
+                candidate = disambiguated_file_name(safe, index)
+                index += 1
 
     # ── 查询 ──────────────────────────────────
 

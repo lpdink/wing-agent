@@ -7,7 +7,7 @@
 
 覆盖的断言点：
 
-- **顺序与成员**：7 个组的 id / title 顺序固定（Providers → Advanced），成员两两不相交、
+- **顺序与成员**：8 个组的 id / title 顺序固定（Providers → Advanced），成员两两不相交、
   合起来恰好等于 root 的全部直接子节点（漏一个 = 它在界面里无处可去）；
 - **同源**：每个顶层节点的 ``section`` == 它所属组的 ``title``，``section_doc`` 只在组的
   声明序首成员上；嵌套节点的 ``section`` 恒 null（分组只属于顶层）；
@@ -36,6 +36,7 @@ EXPECTED_GROUPS: list[tuple[str, str, list[str]]] = [
         ["safe_command_patterns", "yolo", "steer", "tool_result_truncate"],
     ),
     ("images", "Images", ["images"]),
+    ("files", "Files", ["files"]),
     ("sessions", "Sessions", ["sessions"]),
     ("gateway", "Gateway", ["gateway"]),
     ("advanced", "Advanced", ["hooks", "commands", "log", "user_agent"]),

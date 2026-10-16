@@ -10,6 +10,7 @@ MemoryMessageLog）是直测耐久语义时才需要的实现细节，经
 
 from wing.store.base import (
     ArchivedSession,
+    FileRef,
     MessageLog,
     SessionMetadata,
     SessionStore,
@@ -22,6 +23,7 @@ from wing.store.memory import MemorySessionStore
 
 __all__ = [
     "ArchivedSession",
+    "FileRef",
     "MessageLog",
     "SessionMetadata",
     "SessionStore",

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from typing import TYPE_CHECKING, get_args
 
@@ -26,6 +26,7 @@ from wing.gateway.protocol import (
     CompactResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    FileUploadResponse,
     ForkSessionRequest,
     ForkSessionResponse,
     InterruptRequest,
@@ -54,9 +55,10 @@ from wing.common.utils import InvalidInputError, validate_session_id
 from wing.common.logger import log
 from wing.config import get_config
 from wing.event import SessionStatus
-from wing.media import too_large_message
+from wing.media import file_too_large_message, sniff_image_mime, too_large_message
 from wing.request_context import session_context
 from wing.session.tags import validate_tag
+from wing.store.base import validate_file_name
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -248,7 +250,7 @@ async def send_message(
 
 
 # ============================================================
-# 媒体上传
+# 媒体（上传 / 读取）
 # ============================================================
 
 
@@ -324,6 +326,132 @@ async def upload_session_media(
         # 与 send 同一条窄捕获：写失败（OSError 等）是服务端故障，不在此拦。
         raise HTTPException(status_code=400, detail=str(e))
     return MediaUploadResponse(ok=True, media=media)
+
+
+@router.get(
+    "/api/session/media",
+    response_class=Response,
+    summary="读取媒体字节（原始字节响应）",
+)
+async def read_session_media(
+    request: Request,
+    session_id: str = Query(..., description="目标 session ID"),
+    media_id: str = Query(
+        ..., description="媒体对象 id（64 位小写 hex 的内容 sha256）"
+    ),
+) -> Response:
+    """按 id 读取会话媒体对象的**原始字节**（图片预览的字节源，非 JSON）。
+
+    响应头：``Content-Type`` 由字节嗅探（池里只有四种受支持图片，magic bytes 就是
+    事实）+ ``ETag``（= media id，内容寻址 ⇒ 字节永不变更）+ ``Cache-Control: private,
+    max-age=31536000, immutable`` + ``X-Content-Type-Options: nosniff``。
+
+    非法 ``media_id``（不是 64 位小写 hex）与对象不存在同价（404）：闸门在
+    ``store.read_media`` 的路径拼接之前（防路径穿越），路由把它的 ``ValueError``
+    折成同一个 404。**不水合**已逐出会话（与上传 / tag 同款纯解析）——读一张图不该
+    把 inactive 会话翻成活跃；老池对象走 ``store.read_media`` 的既有回退 + 物化路径。
+    归档命中的 ``SessionArchivedError`` 刻意逃逸（app handler 回 404 +
+    ``session_archived``）。
+    """
+    server = _get_server(request)
+    try:
+        data = server.runtime.read_media(session_id, media_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
+    except ValueError:
+        # media id 不合规——它是路径组件，闸门必须先于任何文件系统操作（store 层
+        # 已保证）；对外与"对象不存在"同价，不给探测反馈。
+        raise HTTPException(status_code=404, detail="media not found")
+    if data is None:
+        raise HTTPException(status_code=404, detail="media not found")
+    return Response(
+        content=data,
+        # 嗅探失败（老池里不可识别的手工对象）如实回落——不猜 mime，也不拒绝可读字节。
+        media_type=sniff_image_mime(data) or "application/octet-stream",
+        headers={
+            "ETag": f'"{media_id}"',
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# ============================================================
+# 用户文件（上传）
+# ============================================================
+
+
+@router.post(
+    "/api/session/files",
+    response_model=FileUploadResponse,
+    summary="上传文件（原始字节）",
+)
+async def upload_session_file(
+    request: Request,
+    session_id: str = Query(..., description="目标 session ID"),
+    name: str | None = Query(
+        None,
+        description="文件名（basename；**必填**——agent 与用户都靠名字识别它）",
+    ),
+) -> FileUploadResponse:
+    """把一份用户文件写进会话文件目录，返回 agent 可直接读取的绝对路径。
+
+    body 是**原始字节**（不是 JSON / 不是 multipart），大小上限 = ``files.max_bytes``；
+    落点 ``<sessions-root>/<sid>/files/<实际名>``——**保留原名**（agent 的 Read 看得懂），
+    同名同字节幂等、同名异字节 ``stem-2.ext`` 递增（绝不覆盖：链上的 ``[file: …]``
+    引用指向既有那份）。响应 ``{ok, file:{name, path, bytes}}`` 的 ``path`` 是网关
+    宿主机**绝对路径**，消费方把它写进消息正文告知 agent。
+
+    收包顺序（与媒体上传同构，多一道免费的 query 名字闸门）：会话存在性（404）→
+    名字卫生（400，不读 body）→ ``Content-Length`` 预检（声明值超 ``files.max_bytes``
+    直接 400，不读 body）→ 收包 → 字节闸门（非空 / 真实字节兜底）→ 落盘。
+    校验全在落盘之前：失败（400/404）**零存储副作用**（不建目录、不写字节）。
+    """
+    server = _get_server(request)
+
+    # 会话存在性先于一切内容校验（与 send / media 同序）：幽灵会话与归档命中不因
+    # 请求体或名字的形态改变结论。归档命中的 SessionArchivedError 刻意逃逸。
+    try:
+        server.runtime.require_live_session(session_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    # 名字是 query 参数（读 body 之前就能判）：缺省与不合规都是 400，且一个字节
+    # 都不读——没有名字的文件无法被 agent 与用户引用，不该先吞进内存再拒绝。
+    if name is None:
+        raise HTTPException(
+            status_code=400,
+            detail="file name is required: pass ?name=<basename>",
+        )
+    try:
+        validate_file_name(name)
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Content-Length 预检（收包之前）：口径与字节闸门同一份文案。
+    max_bytes = get_config().files.max_bytes
+    declared = _declared_content_length(request)
+    if declared is not None and declared > max_bytes:
+        raise HTTPException(
+            status_code=400, detail=file_too_large_message(declared, max_bytes)
+        )
+
+    data = await request.body()
+    try:
+        # 大文件 I/O（幂等比对整读 / fsync 落盘）必须离开事件循环：64 MiB 级载荷在
+        # 循环线程上跑会让整个网关停摆（WS 事件流 / send / health 全排队）。
+        # 异常从工作线程原样抛出，窄捕获语义不变。
+        file = await asyncio.to_thread(
+            server.runtime.upload_file, session_id, data, name=name
+        )
+    except LookupError:
+        # 预检之后的解析只会在这里再失败于竞态（会话在两步之间消失）——保留映射。
+        raise HTTPException(status_code=404, detail="session not found")
+    except InvalidInputError as e:
+        # 字节 / 名字不合规（空 / 超限 / 加后缀后超长）——输入问题 → 400。
+        # 与 send / media 同一条窄捕获：写失败（OSError 等）是服务端故障，不在此拦。
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileUploadResponse(ok=True, file=file)
 
 
 # 查询过滤参数解析（列表端点的子集过滤）

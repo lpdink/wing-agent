@@ -687,6 +687,27 @@ class ImagesConfig(BaseModel):
     )
 
 
+class FilesConfig(BaseModel):
+    """用户上传文件（``POST /api/session/files``）的落盘预算。
+
+    与 ``ImagesConfig`` 是**两条独立通道**：图片走 ``images.max_bytes``（视觉通道，字节会进
+    模型请求），其它文件走这里（文件系统通道，只落盘 + 把路径告知 agent）——互不感知。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_bytes: int = S(
+        doc="单份上传文件的字节上限（默认 64 MiB）",
+        notes=(
+            "两道闸门共用它：`Content-Length` 预检（声明超限不读 body）+ 真实字节兜底。\n"
+            "只管用户上传的**文件**；图片走 images.max_bytes。"
+        ),
+        apply=ApplyScope.HOT,
+        default=67_108_864,
+        gt=0,
+    )
+
+
 class ApiKeyEntry(BaseModel):
     """Single API key with an identity role.
 
@@ -900,6 +921,12 @@ class Config(BaseModel):
         doc="图片读入与请求期保留预算",
         apply=ApplyScope.HOT,
         default_factory=ImagesConfig,
+    )
+    # ── Files ──────────────────────────────────────
+    files: FilesConfig = S(
+        doc="用户上传文件的落盘预算",
+        apply=ApplyScope.HOT,
+        default_factory=FilesConfig,
     )
     # ── Sessions ───────────────────────────────────
     sessions: SessionsConfig = S(

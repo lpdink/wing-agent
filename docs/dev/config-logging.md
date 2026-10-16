@@ -17,6 +17,7 @@
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
 │   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）
 │   │                   ├── <sid>/media/   会话私有图片媒体对象（内容寻址，session 自包含）
+│   │                   ├── <sid>/files/   会话私有用户文件（按名寻址；同名异字节带 -N 后缀）
 │   │                   ├── .media/        遗留共享媒体池（只读：老会话引用回退读取 + 物化；不删不写）
 │   │                   └── .archive/      归档区（index.json 索引 + 被归档会话目录；纯 rename，字节不变）
 │   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
@@ -52,6 +53,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 | `steer` | steer 模式开关 |
 | `tool_result_truncate` | 超长工具结果截断（`max_length` / `keep_chars`，头尾保留 + 全文落临时文件） |
 | `images` | 图片读入与请求期保留预算（`max_bytes` 4718592（4.5 MiB）/ `max_images` -1（≤0 = **关闭计数驱逐**）/ `count_quantum` 8 / `request_budget_bytes` 37748736 / `evict_quantum_bytes` 18874368，除 `max_images` 外全部 > 0）——读图链路与投影算法见 [media-images.md](media-images.md) |
+| `files` | 用户上传文件（`POST /api/session/files`）的落盘上限（`max_bytes` 67108864（64 MiB），> 0）——只管非图片上传；图片走 `images.max_bytes`，见 [http-api.md](http-api.md) |
 | `log.level` | 网关**控制台**级别（守护进程 stdout/stderr，被 `gateway.log` 捕获）保存即热生效；每日文件日志恒为 DEBUG |
 | `gateway` | `host` / `port`（**restart 域**：改完需重启网关，不做假热更）/ `remote_tool_timeout` / `auth`（opt-in API key：`enabled` + `keys[{key, role}]`，角色 `admin` / `tool_runtime`；保存即热生效）/ `cors`（`origins`：额外允许的跨源来源，**restart 域**；loopback 默认放通——仅当网关自身绑 loopback，见 [http-api.md](http-api.md)「CORS」） |
 | `commands.paths` | prompt 命令（`/xxx` 展开）的 glob 列表，每个 .md（frontmatter: name / description / aliases，正文 `$ARGUMENTS` 占位）定义一个命令 |

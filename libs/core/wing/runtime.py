@@ -76,6 +76,7 @@ from wing.session import (
 from wing.system import ReloadResult, reload_system as _reload_system
 from wing.store import (
     ArchivedSession,
+    FileRef,
     FileSessionStore,
     MemorySessionStore,
     SessionStore,
@@ -420,6 +421,30 @@ class WingRuntime:
             InvalidInputError: 字节不合规（空 / 超 `images.max_bytes` / 非支持格式 / 尺寸不可解析）
         """
         return self.sm.upload_media(session_id, data, name=name)
+
+    def read_media(self, session_id: str, media_id: str) -> bytes | None:
+        """读取会话媒体对象的字节（读端点 `GET /api/session/media` 的用例）。
+
+        不水合会话（纯解析 + 存储读）；合法 id 但对象不在返回 None。语义见
+        :meth:`SessionManager.read_media`。
+
+        Raises:
+            LookupError: session 不存在（归档命中是 ``SessionArchivedError``）
+            ValueError: media id 不合规（路由按"不存在"折成 404）
+        """
+        return self.sm.read_media(session_id, media_id)
+
+    def upload_file(self, session_id: str, data: bytes, *, name: str) -> FileRef:
+        """把一份用户文件写进会话文件目录（上传端点 `POST /api/session/files` 的用例）。
+
+        不水合会话；校验失败（``InvalidInputError``）时存储零副作用。语义见
+        :meth:`SessionManager.upload_file`。
+
+        Raises:
+            LookupError: session 不存在
+            InvalidInputError: 名字不合规 / 空 body / 超 `files.max_bytes`
+        """
+        return self.sm.upload_file(session_id, data, name=name)
 
     # ============================================================
     # Session 逐出（eviction）

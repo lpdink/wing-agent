@@ -1879,7 +1879,7 @@ class TestSystemReload:
 
 @pytest.fixture
 def auth_client(mock_runtime):
-    """创建开启鉴权的 TestClient（两个 key：test-key-1, test-key-2）。"""
+    """创建开启鉴权的 TestClient（两个 admin key + 一个 tool_runtime key）。"""
     with (
         patch("wing.gateway.server.WingRuntime") as MockRuntime,
         patch("wing.gateway.server.load_config") as mock_load_config,
@@ -1890,6 +1890,7 @@ def auth_client(mock_runtime):
             auth_keys=[
                 ApiKeyEntry(key="test-key-1", role="admin"),
                 ApiKeyEntry(key="test-key-2", role="admin"),
+                ApiKeyEntry(key="test-tool-key", role="tool_runtime"),
             ],
         )
 
@@ -1909,6 +1910,11 @@ class TestAuthDisabled:
     def test_no_key_passes(self, client: TestClient):
         """鉴权关闭时，无 key 请求正常通过。"""
         resp = client.get("/api/session/list")
+        assert resp.status_code == 200
+
+    def test_query_param_is_ignored_when_disabled(self, client: TestClient):
+        """鉴权关闭时 query param 不参与判定：坏 key 照样通过（行为零变化）。"""
+        resp = client.get("/api/session/list", params={"api_key": "whatever"})
         assert resp.status_code == 200
 
 
@@ -1946,6 +1952,73 @@ class TestAuthEnabled:
             headers={"X-API-Key": "test-key-1"},
         )
         assert resp.status_code == 200
+
+    def test_query_param_api_key_ok_on_byte_endpoint(
+        self, auth_client: TestClient, mock_runtime
+    ):
+        """字节直出端点（`<img>` 的目标）接受 query key：无请求头也 200。"""
+        mock_runtime.read_media.return_value = b"\x89PNG\r\n\x1a\nfake"
+        resp = auth_client.get(
+            "/api/session/media",
+            params={
+                "session_id": "test-session-id",
+                "media_id": "0" * 64,
+                "api_key": "test-key-1",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.content == b"\x89PNG\r\n\x1a\nfake"
+
+    def test_query_param_api_key_rejected_outside_the_allowlist(
+        self, auth_client: TestClient
+    ):
+        """query 回退只对字节直出端点开放：普通端点上带 query key 仍 401。"""
+        resp = auth_client.get("/api/session/list", params={"api_key": "test-key-1"})
+        assert resp.status_code == 401
+
+    def test_bad_query_param_api_key_rejected(self, auth_client: TestClient):
+        """query param 里的坏 key 与"没有 key"同类（401，不泄露 key 是否存在）。"""
+        resp = auth_client.get(
+            "/api/session/media",
+            params={
+                "session_id": "test-session-id",
+                "media_id": "0" * 64,
+                "api_key": "wrong",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_empty_query_param_api_key_rejected(self, auth_client: TestClient):
+        """空串 query key 不是 key（不能因为"参数在"就放行）。"""
+        resp = auth_client.get(
+            "/api/session/media",
+            params={
+                "session_id": "test-session-id",
+                "media_id": "0" * 64,
+                "api_key": "",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_query_param_does_not_bypass_rbac(
+        self, auth_client: TestClient, mock_runtime
+    ):
+        """query key 与 header key 走同一条角色判定：tool_runtime 仍被 403 拦下。
+
+        成对证据：同一端点上 admin 的 query key 是 200（401/403 都不是"谁都进不来"）。
+        """
+        mock_runtime.read_media.return_value = b"fake bytes"
+        params = {"session_id": "test-session-id", "media_id": "0" * 64}
+
+        forbidden = auth_client.get(
+            "/api/session/media", params={**params, "api_key": "test-tool-key"}
+        )
+        assert forbidden.status_code == 403, forbidden.text
+
+        allowed = auth_client.get(
+            "/api/session/media", params={**params, "api_key": "test-key-1"}
+        )
+        assert allowed.status_code == 200, allowed.text
 
     def test_health_exempt(self, auth_client: TestClient):
         """/api/health 免鉴权。"""

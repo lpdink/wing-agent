@@ -4,6 +4,8 @@
 
 提供：
   - extract_key_from_headers: 从 HTTP headers 提取 API key
+  - extract_key_from_request: 从 HTTP 请求提取 API key（headers > query param，
+    后者限字节直出端点）
   - extract_key_from_ws: 从 WebSocket 连接提取 API key（headers + query param）
   - AuthMiddleware: Starlette HTTP 中间件，拦截未鉴权请求
 
@@ -16,7 +18,9 @@ AuthMiddleware 不缓存 AuthConfig——每次请求从 ``app.state.server.auth
 两者都成立才不要求 key；否则一律 403。这是收紧不是放松（正常模式下 auth 关闭时任何人都能访问）。
 第二个条件关掉的是「任何 loopback 转发者即修复者」：绑 ``0.0.0.0`` 且配置坏掉时，
 本机反代 / 端口转发会让远端流量以 loopback 来源到达——那种部署不提供免 key 修复访问。
-既有鉴权逻辑（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**。
+既有鉴权逻辑（enabled / EXEMPT_PATHS / key 校验 / RBAC）在 setup 分支之外**一字未改**；
+唯一后续变更在 key 提取点：HTTP 侧也接受 ``?api_key=``（镜像 WS，见
+``extract_key_from_request``）。
 """
 
 from __future__ import annotations
@@ -33,6 +37,15 @@ from wing.gateway.protocol import error_response
 
 # 免鉴权路径——无论 auth.enabled 如何，这些路径始终开放。
 EXEMPT_PATHS: set[str] = {"/api/health"}
+
+#: 接受 query param ``api_key`` 的 HTTP 路径（**字节直出端点**的 allowlist）。
+#:
+#: query 回退只为一种消费方存在：浏览器发起的子资源请求（``<img>`` / ``<video>`` /
+#: ``<iframe>``）带不了自定义请求头。那些请求都是字节直出的 GET，所以只有这类端点
+#: 登记在此——写面（settings / session 变更）与普通查询没有合法的无头场景
+#: （fetch / XHR 能带请求头），却会把 key 留在 URL 里（浏览器历史 / 中间层日志）。
+#: 新增字节直出端点时在这里登记。WS 侧不受此表约束（``/ws`` 是长连接，既有行为）。
+QUERY_KEY_ALLOWED_PATHS: set[str] = {"/api/session/media", "/api/workspace/read"}
 
 # loopback 主机名：**修复模式**（setup mode）免 key 的判据。HTTP 侧以
 # ``request.client.host`` 判定，WS 侧同义复用（``websocket.client.host``）。
@@ -87,6 +100,16 @@ def extract_key_from_headers(headers: Mapping[str, str]) -> str | None:
     return None
 
 
+def _query_key(query_params: Mapping[str, str]) -> str | None:
+    """从 query param ``api_key`` 取 key（缺省 / 空串 = None）。
+
+    ``<img>`` / ``<video>`` 这类由浏览器直接发起的请求带不了自定义请求头，因此
+    HTTP 与 WS 都提供这条路（WS 侧早已如此）。HTTP 的适用范围由
+    :data:`QUERY_KEY_ALLOWED_PATHS` 收窄，判定在 :func:`extract_key_from_request`。
+    """
+    return query_params.get("api_key") or None
+
+
 def extract_key_from_ws(ws: WebSocket) -> str | None:
     """从 WebSocket 连接提取 API key。
 
@@ -96,7 +119,23 @@ def extract_key_from_ws(ws: WebSocket) -> str | None:
     if key:
         return key
 
-    return ws.query_params.get("api_key") or None
+    return _query_key(ws.query_params)
+
+
+def extract_key_from_request(request: Request) -> str | None:
+    """从 HTTP 请求提取 API key。
+
+    优先级：headers（``Authorization: Bearer`` > ``X-API-Key``）> query param
+    ``api_key``——**后者只在 :data:`QUERY_KEY_ALLOWED_PATHS` 登记的字节直出端点上
+    生效**（理由见那里的注释；写面与普通查询一律只认请求头）。
+    """
+    key = extract_key_from_headers(request.headers)
+    if key:
+        return key
+    if request.url.path not in QUERY_KEY_ALLOWED_PATHS:
+        return None
+
+    return _query_key(request.query_params)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -158,7 +197,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in EXEMPT_PATHS:
             return await call_next(request)
 
-        key = extract_key_from_headers(request.headers)
+        key = extract_key_from_request(request)
         if key is None:
             return _unauthorized()
 
