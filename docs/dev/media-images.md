@@ -141,7 +141,9 @@ D5/D6/D7 拍板：
   同款（多一道免费的 query 名字闸门）；上限是 **`files.max_bytes`**（默认 64 MiB，与图片的
   `images.max_bytes` 互不感知）。存储 API：`SessionStore.write_file(session_id, filename, data)
   -> FileRef`（幂等 / 冲突递增在 store 层实现；`FileRef.path` 是本地绝对路径，memory 后端 null）。
-  同名**同字节幂等**、同名**异字节 `stem-2.ext` 递增且绝不覆盖**
+  大小写 / Unicode 归一化不敏感的文件系统上（macOS APFS / Windows NTFS）请求名先解析成
+  **磁盘真名**再判定：别名拼写（`report.pdf` vs `Report.pdf`）命中时返回真名、不产生第二份
+  （响应里的 `name` 恒为实际落盘名）。同名**同字节幂等**、同名**异字节 `stem-2.ext` 递增且绝不覆盖**
   （链上的 `[file: …]` 引用指向既有那份；覆盖 = 静默数据损坏）。memory 后端 `path` 为 null。
   端点级细节见 `docs/dev/http-api.md` 的 session 端点表。
 - **引用（引用侧入口）**：客户端把 refs 放进消息——WS `ClientRequest.media` 或 HTTP
@@ -343,6 +345,11 @@ providers:
   只能以「会话目录整体删除」为粒度（session 即搬运单元）。
 - **Files API / file_id 引用模式未做**（DeepSeek Files API 这类"先上传再引用"的上游优化）——
   本仓的 `POST /api/session/files` 是**网关侧**落盘 + 路径告知（文件系统通道），与上游 Files API 无关。
+- **文件名卫生不覆盖 Windows 的形态约束**：保留设备名（`CON` / `PRN` / `AUX` / `NUL` /
+  `COM1`…）与尾随点 / 空格（Windows 会在写入时剥掉，于是 `foo.` 与 `foo` 是同一个名字）不在
+  `validate_file_name` 的闸门里——那些名字在 macOS / Linux 上完全合法，按平台条件化拒绝会让
+  同一个请求在不同宿主上得到不同结论（更差的失败模式）。现状：尾随点 / 空格靠**别名解析**
+  落回真名（响应仍诚实），保留设备名在 Windows 上写入失败会如实报 5xx（日志里有系统错误）。
 - **用户文件（`files/`）无 GC / 无列目录 / 无下载端点**（与媒体同 doctrine：只增不减，目录就是
   事实源）；上限由 `files.max_bytes` 框住。**fork 不复制 `files/`**（设计如此：文件是"用户现场
   素材"而非链上引用，没有悬空引用的失败模式——agent 只拿到过一次路径）。
@@ -445,6 +452,7 @@ providers:
 | `test_upload_rejects_by_headers_before_reading_the_body`（收包顺序） | 裸 socket 不发 body：幽灵会话 + 声明超限 → 404；坏名字 → 400；真实会话 + 声明超限 → 400（同一句文案）、`files/` 不存在 |
 | `test_ghost_session_upload_is_404` / `test_archived_session_upload_is_404_with_the_marker` | 幽灵会话 / 穿越式 id → 404 无残留；归档 → 404 + `session_archived`、`.archive/<sid>/files` 不存在；恢复后照常可上传 |
 | `test_memory_backend_has_no_path` | memory 后端 `path: null`（没有本地文件，如实降级） |
+| `test_alias_spelling_resolves_to_the_on_disk_file_name` | 大小写不敏感 FS：别名拼写（`report.pdf` vs `Report.pdf`）幂等命中返回**磁盘真名**、不产生第二份；候选名的别名拼写同样解析到真名。敏感 FS（CI）：别名是另一个名字 → 各落一份（两分支各自断言） |
 
 用户贴图链路（`libs/wing-probe/scenarios/test_user_media.py`，02 message_chain；对象由场景预置进
 `<sid>/media/<id>`——上传端点落地后，同一存储布局的写入侧由上面的文件走真上传覆盖）：
