@@ -37,6 +37,7 @@ use tokio::sync::mpsc;
 pub mod clipboard_protocol;
 pub mod stdin_proxy;
 
+pub use clipboard_protocol::ClipboardEvent;
 pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
 
@@ -48,9 +49,9 @@ pub enum TermEvent {
     Key(KeyEvent),
     Mouse(crossterm::event::MouseEvent),
     Paste(String),
-    /// OSC 5522 通道读回的剪贴板内容（或失败原因）——见 [`clipboard_protocol`]。
+    /// OSC 5522 通道的一条事件（读的生命周期 / 丢弃）——见 [`clipboard_protocol`]。
     /// 文本与 bracketed paste 走同一个入口（`App::handle_paste`）。
-    Clipboard(Result<ClipboardPayload, ClipboardFailure>),
+    Clipboard(ClipboardEvent),
     Resize(u16, u16),
     Focus(bool),
     Tick,

@@ -180,10 +180,15 @@ pub fn text_line(text: &str) -> Line {
 /// other's map. This type is only the *lookup* both kinds share (a label, a
 /// payload) plus the two counters; the model's atomic operations go through it
 /// and never care which side answers.
+///
+/// The registries stay reachable one level down (`pub(super)`) because a chip
+/// kind's own operations — an image's stages, its spinner, its draft epoch —
+/// belong to [`super::image`], which is also where they are implemented: this
+/// module stays the kind-agnostic core.
 #[derive(Debug, Default)]
 pub(crate) struct Chips {
     pastes: Pastes,
-    images: Images,
+    pub(super) images: Images,
 }
 
 impl Chips {

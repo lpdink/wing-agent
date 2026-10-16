@@ -41,7 +41,11 @@ pub fn image_label(number: usize, width: u32, height: u32, bytes: u64) -> String
 /// 图片字节数的紧凑记法：`512B` / `384KB` / `1.0MB`。
 ///
 /// KB 四舍五入到整数，且**永不落成 `1024KB`**——那读起来该是 `1.0MB`。
-fn image_bytes(bytes: u64) -> String {
+///
+/// 也用在**在途** chip 的进度文案上（`[Image #1 ⠋ ↓12.4MB]`，见
+/// `ui/input_area/image.rs`）：同一份记法读的是「这张图多大」，无论是已经压好的
+/// 产物还是正在传来的字节。
+pub(crate) fn image_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
     if bytes < KIB {

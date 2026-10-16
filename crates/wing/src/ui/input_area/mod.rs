@@ -24,7 +24,9 @@ use model::Line;
 // Re-exports for external use.
 pub use chrome::ActivityRail;
 pub use chrome::MetaRail;
+pub use image::ImageChipTarget;
 pub use image::ImagePayload;
+pub use image::ImageStage;
 pub use widget::ComposerWidget;
 pub use widget::cursor_screen_pos;
 
@@ -60,6 +62,15 @@ pub enum InputAction {
     /// User pressed Enter — submit the draft (the composer is already
     /// cleared).
     Submit(SubmitPayload),
+    /// Enter was pressed, but the draft holds an image that has not settled
+    /// (transfer or compression in flight) — nothing is submitted and the
+    /// draft stays put.
+    ///
+    /// The refusal is the *model's* (the gate belongs to the draft's own
+    /// invariant); saying it out loud is the app's business. Deleting the
+    /// placeholder lifts the gate: the user keeps the last word on what they
+    /// send.
+    SubmitBlocked,
     /// User pressed Esc.
     Escape,
     /// No action (just editing text).
@@ -267,6 +278,11 @@ impl InputArea {
                 // Plain Enter → submit.
                 if self.is_empty() {
                     return InputAction::None;
+                }
+                // 在途图片：发送会把这张图留在草稿里（或被静默吃掉），门先关上。
+                // 用户删掉占位符即可放行 —— 那是他明确表示「不要这张」的动作。
+                if self.has_unsettled_images() {
+                    return InputAction::SubmitBlocked;
                 }
                 InputAction::Submit(self.submit_payload())
             }

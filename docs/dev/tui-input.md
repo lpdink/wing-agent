@@ -121,7 +121,7 @@
 
 大粘贴（`>2` 行或 `>200` 字符，阈值在 `paste.rs`）不在草稿里铺开，而是在**光标处**留下一个 chip；**放不下的多行粘贴也一样**（草稿已到 `max_lines`、装不下全部行 → 整块变 chip，而不是像以前那样被静默截掉尾巴——chip 不占行，所以永远放得下）：`[Pasted text #N +M lines]`（`M` 是除首行外的行数；单行大粘贴不带行数，`[Pasted text #N]`）。chip 就是普通插入点上的一个单元——**前后文本与它在同一行**，光标落在 chip 之后继续输入，粘贴不再重排草稿。
 
-**模型**（`ui/input_area/model.rs`，也是本节的权威）：一行的内容 = `Vec<Segment>`，段要么是 `Text`，要么是 `Paste(号码)`，要么是 `Image(号码)`（见下一节的图片 chip）；payload 与**标签文本**都在注册表里（号码 → 载荷 + 标签，标签在插入时算一次——它每帧、每次击键都被读，不能跟着粘贴体量线性变慢）：粘贴是 `Pastes`（号码 → 全文 + 标签），图片是 `Images`（号码 → 压缩产物 + 标签），两本注册表**平级**、各自计数，由 `Chips` 捆在一起供模型取用。**chip 的号码单调分配、绝不复用**：号码是 chip 的身份，用户已经读到的号码在邻居被删除后仍是它自己的（清空 / 恢复草稿才从头计数）。整块 chip 只有一个来源——插入它的人；**任何文本都不会被反向解析成 chip**，所以经 `set_text` 恢复的草稿（rewind / fork 带回来的内容）里就算写着 `[Pasted text #1 +2 lines]`，它也只是一串普通字符（不会被原子删除、提交时也不会展开）。
+**模型**（`ui/input_area/model.rs`，也是本节的权威）：一行的内容 = `Vec<Segment>`，段要么是 `Text`，要么是 `Paste(号码)`，要么是 `Image(号码)`（见下一节的图片 chip）；payload 与**标签文本**都在注册表里（号码 → 载荷 + 标签，标签在插入时算一次——它每帧、每次击键都被读，不能跟着粘贴体量线性变慢）：粘贴是 `Pastes`（号码 → 全文 + 标签），图片是 `Images`（号码 → 阶段 / 压缩产物 + 标签），两本注册表**平级**、各自计数，由 `Chips` 捆在一起供模型取用。**chip 的号码单调分配、绝不复用**：号码是 chip 的身份，用户已经读到的号码在邻居被删除后仍是它自己的（清空 / 恢复草稿才从头计数）。整块 chip 只有一个来源——插入它的人；**任何文本都不会被反向解析成 chip**，所以经 `set_text` 恢复的草稿（rewind / fork 带回来的内容）里就算写着 `[Pasted text #1 +2 lines]`，它也只是一串普通字符（不会被原子删除、提交时也不会展开）。
 
 **原子性**：光标永不落在 chip 内部。←/→ 一步跨过整块；chip **尾端** Backspace、**首端** Delete 把整块删掉（payload 同时丢弃，不会留在注册表里）；在它两端打字则分别落在块前 / 块后。指针与上下移动命中 chip 的任何一格都解析到它的**前缘**（`model::column_point`，与宽字符「取字符之前」同款）；chip 比整行还宽、被 widget 裁剪时，**裁剪线之外**的列按「行末」处理——那是行文本之外的空白，与普通行一致，也不会把光标送进 chip 的隐藏半截（`column_point` 的 `visible_cols` 就是这条裁剪线）。拖选因此是不对称的——锚点总在块前缘，`focus` 给的是后缘：**从块内向右拖**会把整块带进选区，向左拖则从块前缘开始（块本身不在选区内），与宽字符的插入点语义一致。行合并（列 0 的 Backspace / 行末的 Delete）不特殊处理 chip：合并只是把两行的段接起来，chip 仍是整块。
 
@@ -131,12 +131,13 @@
 
 | 路径 | 图片的去向 | 可见性 |
 |---|---|---|
-| 命令补全（popup Enter 把草稿改写为 `name + args`） | 随 `set_text` 丢弃（粘贴 chip 则改以**展开后的文本**留在草稿里，参数里提交的是 payload 不是标签） | 无提示（用户主动改写草稿） |
+| 命令补全（popup Enter 把草稿改写为 `name + args`） | 随 `set_text` 丢弃（粘贴 chip 则改以**展开后的文本**留在草稿里，参数里提交的是 payload 不是标签）；**在途的占位符也一样丢**（epoch 前进 → 它之后的回执全部作废） | 无提示（用户主动改写草稿） |
 | must-select 命令的草稿恢复（`/fork` 等回车后回填文本、重开 popup） | 同上，随 `set_text` 丢弃 | **info toast**：`Image dropped: <命令名> takes no image`（与命令路径同一句，见下） |
-| **提交的文本恰好是前端命令**（`try_frontend_command` 命中：`/clear`、`/model …`、`/tips` …） | 命令在本地执行、不是消息，图片**没有落点**：`SubmitPayload.images` 随 `payload` 一起消失，既不发也不上传 | **info toast**：`Image dropped: <命令名> takes no image` |
-| `/clear`（清 chat）/ Esc 清草稿 / 提交 | 走同一个 `clear`：两本注册表一起归零、号码从头计数 | 无提示（用户自己的动作） |
+| **提交的文本恰好是前端命令**（`try_frontend_command` 命中：`/clear`、`/model …`、`/tips` …） | 命令在本地执行、不是消息，图片**没有落点**：`SubmitPayload.images` 随 `payload` 一起消失，既不发也不上传（在途的占位符本就被提交门拦着，走不到这里） | **info toast**：`Image dropped: <命令名> takes no image` |
+| `/clear`（清 chat）/ Esc 清草稿 / 提交 | 走同一个 `clear`：两本注册表一起归零、号码从头计数、纪元 +1 | 无提示（用户自己的动作） |
+| **删掉在途的占位符**（Backspace / Delete 吃掉整块） | 那张图**不要了**：字节还在传 / 还在压，但回执落地时找不到 chip → 丢弃 | 无提示（占位符消失本身就是用户的动作） |
 | rewind / fork / 重连带回的 server draft（`set_text`） | 随被替换的草稿丢弃 | 无提示 |
-| **发送失败 / 被服务端拒绝（回填）** | **反向**：文本与图片 chip 都回到草稿（原件存在 pending 条目里，见下节） | **warning toast**：原因 + `draft restored` |
+| **发送失败 / 被服务端拒绝（回填）** | **反向**：文本与图片 chip 都回到草稿（原件存在 pending 条目里，见下节）。在途的占位符走不到这里（提交门拦着） | **warning toast**：原因 + `draft restored` |
 
 丢弃而不是「留载荷不留 chip」的理由：那会造出一个用户看不见、却会被发出的附件。消息路径（`submit_message` 的发送分支）永远两半都带：`text` 与 `images` 分开进 `SendMessage`。
 
@@ -147,7 +148,7 @@
 | 关注点 | 位置 |
 |---|---|
 | 段 / 注册表 / 单元步进 / 列解析 | `crates/wing/src/ui/input_area/model.rs` |
-| 图片 chip（载荷 / 号码 / 标签文案 / `insert_image`） | `crates/wing/src/ui/input_area/image.rs` |
+| 图片 chip（载荷 / 阶段 / 号码 / 标签文案 / `insert_image` / 占位符与句柄） | `crates/wing/src/ui/input_area/image.rs` |
 | 粘贴入口（阈值、小粘贴铺开、chip 插入） | `crates/wing/src/ui/input_area/paste.rs` |
 | 原子删除 / 编辑 | `crates/wing/src/ui/input_area/editing.rs` |
 | 光标移动（跨块步进、上下吸附） | `crates/wing/src/ui/input_area/movement.rs` |
@@ -158,7 +159,7 @@
 
 ## 粘贴（文本 / 图片）：OSC 5522 协议 + 本地读取（L1）
 
-除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片进 `App::on_clipboard_image` 的单并发流水线（入队 → 后台压缩 → 图片 chip，见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。
+除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片走「占位符 → 字节 → 压缩 → 原地落定」的流水线（见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。协议机投给 App 的是一条读的**生命周期**（`ClipboardEvent`：`ImageReadStarted` / `ReadProgress` / `Delivered` / `ReadFailed` / `PasteRejected`），占位符与进度就挂在前两支上。
 
 **通道先探测再启用**：不实现 5522 的终端从这套机制里拿不到任何东西，却要背下 fd 0 接驳的全部事故面（见下），所以启动时先问一句 DECRQM「你支持 mode 5522 吗」，按诚实答案决定装不装——阴性终端**在第一次 crossterm poll 之前**就把接驳拆掉、一个 `?5522h` 都不发，回到 #221 之前的纯输入路径。
 
@@ -173,6 +174,10 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
                       ESC]5522;…status=DONE…
            应用 → 终端  ESC]5522;type=read:name=<b64 程序名>:id=…:pw=<b64 OTP>;<b64 MIME>
            终端 → 应用  OK → DATA（每片 ≤4096 原始字节、各自独立 base64）→ DONE
+App 侧边沿（图片读，文本读不发前两支）:
+           ImageReadStarted{mime}   ← 选定图片 MIME、请求发出前：占位符 chip 此刻出现
+           ReadProgress{received}   ← 每个 DATA 片按水位检查（≥256 KiB 或距上次 ≥100 ms）
+           Delivered / ReadFailed / PasteRejected（后者与在读的那条无关，不碰占位符）
 ```
 
 **四态判定与时机**：查询在 `install()`（`begin_tui_session`，第一段 TUI）发出；判定（`stdin_proxy::settle_paste_channel`，幂等）必须赶在本段的第一次 crossterm `poll` 之前——主 TUI 在 `run_app` 里（图像能力探测之后、`spawn_event_stream` 之前），向导在 `run_tui` 里（`run_setup_tui` 之前）。阳性保留接驳；**明确阴性（`0/4`）任何档位都拆、本地静默也拆**（不实现 DECRQM 的终端不会迟到应答）；**SSH 静默保留接驳、但不开 mode**（远程链路的迟到应答必须仍被分流层摘走，否则会永久毒化 crossterm 的按键解析）。等待预算与图像能力探测（≤500ms）重叠，阳性/明确阴性的应答一到立即结束等待；额外延迟只发生在静默终端上，且一次性。阴性拆接驳在模块内部完成（复用 `restore`：fd 0 还原、`seq_rx` 一并清掉），`is_installed()` 随之为 false。**判定一经作出就是进程级结论**：`install()` 此后永久闩住（向导段拆掉接驳后，主 TUI 段的第二次 `init_terminal()` 不许重新换走 fd 0——事件源单例已经注册，重装就是 B1 形态的键盘全哑）。
@@ -202,19 +207,62 @@ Cmd+V:     终端 → 应用  ESC]5522;type=read:status=OK:pw=<OTP>ST
 
 **包归属**：event 三连**不带 `id`**（这是「终端自发事件」的唯一标志），我们发的 read 请求带**唯一 id**（`wing-paste-<n>`）且响应会回显——被放弃的读（超时 / 64 MiB 超限）之后终端仍会把剩下的包补发完，唯一 id 让这些残留落不到下一次读上。event 侧没有 id 可比，就比**一次性密码**（终端为每次粘贴新生成、三连里每包回显）：被放弃的 event 迟到的 listing / DONE 因此同样落不到下一次粘贴上。**失败都要有反馈**：收不全的 event、读超时、终端拒绝（EPERM/ENOSYS）、零数据 DONE（协议用它表示「该表示不可用」）、**event 队列满导致的丢弃**一律走 toast，不出现「粘了但什么都没发生」。
 
-**图片：入队 → 压缩 → chip（单并发流水线）**。`App::on_clipboard_image` 把字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张并给 warning toast `Image dropped: too many pending images`——与其它失败同一条红线），队列非空且没有在飞的压缩时取队首、**move** 进 `AppIntent::CompressClipboardImage { bytes, options }`（`options` 来自 `paste.image.*`，入队那一刻取，越界值已夹紧）。runner 在**阻塞池**上跑 `util/image_compress`（解码 / 白底 flatten / 长边缩放 / JPEG + 预算循环），结果经 `FetchPayload::ClipboardImage` 回到 `App::on_clipboard_compressed`：成功 → `input.insert_image`（chip 号码 = 插入序 = 粘贴序），失败 → warning toast（`Image dropped: <原因>`）。**一次只压一张**不是保守而是顺序契约（并发压完的到达序不确定，号码就会跳序）；**成功不 toast**（chip 出现本身就是反馈，与文本粘贴一致）。这条回执**不属于任何会话**：`handle_fetch_result` 在会话守卫**之前**分派它——丢掉它会让「在飞」永远为真，之后所有粘贴都不落地。
+**图片：占位符 → 字节 → 压缩 → 原地落定（单并发流水线）**。
 
-**已知边界（图片 chip 的落点）**：chip 落在**压缩回执时刻**的光标处而非粘贴时刻（压缩在阻塞池异步跑，大图可达数百毫秒），期间用户移动过光标的话 chip 就跟随最新光标——这是有意取舍（原位插入要假定粘贴时刻的行列在压缩期间仍有效，而那恰是草稿最可能变的地方；号码 = 粘贴序的契约不受影响）。
+图片从「按下粘贴」到「有东西可发」中间隔着两段真时间：字节要经终端协议传进来（5522 通道
+可达秒级），压缩要在后台跑。**占位符 chip 是这两段时间的唯一可见面**：
 
-chip 的文案是**契约**：`[Image #N W×H SIZE]`（记法与消息侧的标签行共用一份实现，`util/format.rs::image_label`；形状断言钉在那里，chip 侧钉在 `ui/input_area/image.rs`），其中 `W×H` 与 `SIZE` 取的都是**压缩后**的产物（那才是真正发出去的字节；`SIZE` 用紧凑记法 `512B` / `384KB` / `1.0MB`，永不写 `1024KB`）。渲染与粘贴 chip 完全同款：accent 上色、行内、整块不切开、ghost 态随草稿一起 dim。
+```text
+Cmd+V（5522）        ✓ [Image #1 ⠋]             占位符（读开始；本地通道没有这一步）
+传输中（节流）       ✓ [Image #1 ⠋ ↓12.4MB]     协议机每 ≥256 KiB 或 ≥100 ms 报一次累计字节
+字节到齐 → 压缩      ✓ [Image #1 ⠋ 处理中…]
+落定                 ✓ [Image #1 2048×1324 419KB]  同一处、同一个号码，位置不动
+失败（传输 / 压缩）  ✓ [Image #1 ✗] + 现有 toast
+```
+
+- **占位符什么时候出现**：5522 通道在**读开始**时（协议机选定了图片 MIME、
+  发请求之前）就投一条 `ClipboardEvent::ImageReadStarted`，App 插占位符；本地读取通道
+  读回字节才知道是图片，占位符在那一刻以「处理中」出现（`App::on_clipboard_image`
+  的两支）。**号码在这里就定了**（= 粘贴序），落定只是把标签换个写法。
+- **进度是节流的、且只改这一个 chip**：协议机按水位（`PROGRESS_STEP` = 256 KiB /
+  `PROGRESS_INTERVAL` = 100 ms，谁先到算谁）投 `ReadProgress`，App 只重写该 chip 的标签并
+  **修光标列**（标签变长 → 它后面同一行的位置整体平移，否则用户打字的位置会跟着进度条爬）。
+  进度事件在事件循环里走**帧闸门**（`chat_dirty`，合并重绘），不是每条都逼一帧；终端把一个
+  12 MiB 的图切成 ~4000 个包，落到 App 的只有十几个快照。
+- **落定靠句柄，不靠光标**：`ImageChipTarget { epoch, number }`（`ui/input_area/image.rs`）
+  是 App 流水线持有的锚——epoch 是草稿纪元（`clear` / `set_text` 时 +1），号码在其中唯一。
+  压缩回执按它认领：chip 还在 → 原地翻面；草稿清空 / 重写、或 chip 被删 → 结果**丢弃**
+  （号码会从头计，同号 chip 是别人的）。这消灭了旧的「chip 落在压缩回执时刻的光标处」边界：
+  chip 落在**粘贴那一刻**的光标处，之后不再移动。
+- **提交门**：草稿里有**在途**（传输 / 压缩中）的占位符时，Enter 不提交（
+  `InputAction::SubmitBlocked`，App 弹一句 `Image still uploading — delete the chip to send
+  without it`），用户删掉占位符即放行；**失败态不拦**（图已经没了，toast 是它的故事）。
+- **spinner**：占位符上的 `⠋` 随系统 tick（10 Hz）推进（`Images::tick_spinner`，没有在途
+  chip 时一次活都不干），它解释了「为什么看起来在动」而不必每帧重排任何东西。
+- **入队与单并发**：字节按 FIFO 入队（条数 8 / 总字节 64 MiB，超限丢**最旧**一张：那张的
+  占位符同时翻 `✗`，再给一句 warning toast `Image dropped: too many pending images`——与其它
+  失败同一条红线），队列非空且没有在飞的压缩时取队首、**move** 进
+  `AppIntent::CompressClipboardImage { target, bytes, options }`（`options` 来自
+  `paste.image.*`，入队那一刻取，越界值已夹紧）。runner 在**阻塞池**上跑
+  `util/image_compress`（解码 / 白底 flatten / 长边缩放 / JPEG + 预算循环），结果经
+  `FetchPayload::ClipboardImage { target, result }` 回到 `App::on_clipboard_compressed`。
+  **一次只压一张**不是保守而是顺序契约（并发压完的到达序不确定，号码就会跳序）；
+  **成功不 toast**（chip 原地翻面本身就是反馈）。这条回执**不属于任何会话**：
+  `handle_fetch_result` 在会话守卫**之前**分派它——丢掉它会让「在飞」永远为真，之后所有
+  粘贴都不落地。
+- **失败归类**（`ClipboardEvent`「在途读失败」/「与读无关的丢弃」两支）：读超时 / 超限 /
+  终端拒绝 / 坏包 = 在途读的失败 → 占位符翻 `✗` + toast；event 三连收不全、没有可读表示、
+  协议机队列满 = 与任何读无关（**尤其队列满不能误伤正在传的那张图**）→ 只有 toast。
+
+chip 的文案是**契约**：落定的 `[Image #N W×H SIZE]`（记法与消息侧的标签行共用一份实现，`util/format.rs::image_label`；形状断言钉在那里，chip 侧钉在 `ui/input_area/image.rs`），其中 `W×H` 与 `SIZE` 取的都是**压缩后**的产物（那才是真正发出去的字节；`SIZE` 用紧凑记法 `512B` / `384KB` / `1.0MB`，永不写 `1024KB`）；在途的四种写法（`⠋` / `⠋ ↓12.4MB` / `⠋ 处理中…` / `✗`）由 `image.rs::pending_label` 生成、同样钉在那里。渲染与粘贴 chip 完全同款：accent 上色、行内、整块不切开、ghost 态随草稿一起 dim。
 
 | 关注点 | 位置 |
 |---|---|
 | 分流状态机 + fd 接驳 / 泵线程 | `crates/wing/src/tui/stdin_proxy.rs` |
-| 协议机（包解析 / 请求构造 / 分片重组 / 超时）+ 驱动任务 | `crates/wing/src/tui/clipboard_protocol.rs` |
+| 协议机（包解析 / 请求构造 / 分片重组 / 超时 / 进度节流）+ 驱动任务 | `crates/wing/src/tui/clipboard_protocol.rs` |
 | mode 启停（逐字节断言）与接线 | `crates/wing/src/tui/mod.rs`（`enter_sequence` / `leave_sequence` / `enable_paste_events` / `spawn_event_stream`） |
-| App 边界（文本 / 图片流水线 / 失败） | `crates/wing/src/app/clipboard.rs` |
-| 图片 chip 的接口（注册表 / 标签 / 插入） | `crates/wing/src/ui/input_area/image.rs` |
+| App 边界（文本 / 占位符 / 流水线 / 失败） | `crates/wing/src/app/clipboard.rs` |
+| 图片 chip 的接口（注册表 / 阶段 / 标签 / 句柄 / 插入） | `crates/wing/src/ui/input_area/image.rs` |
 | 端到端证据（自开 pty，headless 可跑） | `crates/wing/tests/stdin_proxy_pty.rs`（阳性路径）、`stdin_proxy_probe_supported_pty.rs` / `stdin_proxy_probe_negative_pty.rs`（探针双路径）、`crossterm_osc5522_misparse.rs` / `crossterm_decrpm_misparse.rs`（负数基线） |
 
 ### 本地读取（L1）：`Ctrl+V` / `super+v`
@@ -242,9 +290,10 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
   超过 64 MiB 拒绝（读取在上限处截断；与 5522 通道同一个上限）。
   **读取期间没有「进行中」提示**（正常路径毫秒级；最坏时长在 `util/clipboard_paste.rs`
   量化），`Ctrl+V` / `super+v` **连击已合并为一次读取**（一次只跑一条读取链，落地后恢复）。
-- **落点**：文本 → `App::handle_paste`（模态挡板自动继承）；图片 → 同一条
-  `App::on_clipboard_image` 单并发流水线；空 → `Clipboard has no text or image` toast；
-  失败（远程 / 缺命令 / 超时 / 超限）各有定向 toast，**不静默**。
+- **落点**：文本 → `App::handle_paste`（模态挡板自动继承）；图片 → 同一条「占位符 → 压缩 →
+  原地落定」的流水线（本通道没有「读开始」信号，占位符在字节到手那一刻以「处理中」出现）；
+  空 → `Clipboard has no text or image` toast；失败（远程 / 缺命令 / 超时 / 超限）各有定向
+  toast，**不静默**。
 - **composer 修饰键**：带 `SUPER` / `META` / `HYPER` 的 `Char` 一律不插入（`ui/input_area`
   的 `dispatch_key`）—— 否则终端回传的 `Cmd+V` 会先在草稿里留下一个字面 `v`（用户实测的
   「只粘贴了一个 v」）。`SHIFT` 不受影响（CSI-u 下大写字母带 SHIFT），`Ctrl+J/M` 的换行
@@ -337,10 +386,17 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 
 **A. 粘贴与 chip（05）**
 
-1. 截图到系统剪贴板 → `Cmd+V`：草稿里出现 accent 色的 `[Image #1 1024×768 384KB]`（数字 / 尺寸 / 大小以真实截图为准），
-   光标停在 chip 之后，**无 toast**。
-2. 再粘一张 → `[Image #2 …]` 追加在光标处；`←/→` 一步跨过整块；chip 尾 `Backspace` / 首 `Delete` 整块删除（号码不复用）。
-3. 长文本粘贴仍是 `[Pasted text #N +M lines]`（与图片 chip 互不干扰）；`Esc` 清草稿后 chip 与图片一起消失。
+1. 截图到系统剪贴板 → `Cmd+V`（5522 阳性终端）：光标处**立刻**出现 `[Image #1 ⠋]`（大图 / SSH 下能看到
+   它一路变成 `⠋ ↓12.4MB`），随后 `⠋ 处理中…`，最终**原地**变成 `[Image #1 1024×768 384KB]`
+   （数字 / 尺寸 / 大小以真实截图为准），位置与号码不动、**无 toast**；期间打字、移动光标都照常，
+   chip 后面的输入不被进度数字推动。
+2. **在途期 `Enter` 被拦**：toast `Image still uploading — delete the chip to send without it`；
+   `Backspace` 删掉占位符后再 `Enter` → 消息正常发出（不带图）。
+3. 大图传输途中删掉占位符：图不再出现（回执被丢弃），也没有任何报错；终端侧的字节照常被读干净。
+4. 再粘一张 → `[Image #2 …]` 追加在光标处；`←/→` 一步跨过整块；chip 尾 `Backspace` / 首 `Delete` 整块删除（号码不复用）。
+5. 长文本粘贴仍是 `[Pasted text #N +M lines]`（与图片 chip 互不干扰）；`Esc` 清草稿后 chip 与图片一起消失。
+6. 失败面：把终端读打断（如传输中途拔 SSH / 超时）→ 占位符原地变 `[Image #1 ✗]` + warning toast；
+   这张 ✗ 不拦 `Enter`。
 
 **B. 发送与模型读图（06 + 07）**
 
@@ -367,7 +423,7 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
 10. 配置不可用 → 走完首次运行向导 → 主 TUI 里按键正常（B1 命中路径）；**双击 Ctrl+C 后进程自行退出（不需要补任何输入），退出后 shell 的第一次输入不被吞**（无残留读者）。
 11. `Shift/Option` 原生拖选、滚轮、面板键位手感无变化。
 12. tmux 内确认图片粘贴不可用（登记限制）、文本粘贴照旧；非 Ghostty 的 kitty 终端预期同源可用（未实测）。
-13. **降级路径（探针阴性）**：Ghostty stable 1.3.1 / iTerm2 / Terminal.app 上启动后输入、面板、退出与 pre-#221 无差别（无 `?5522` 字节、无接驳层）；`Cmd+V` 图片经 L1 落 chip；**阴性终端上不再出现「只粘贴了一个 v」之外的任何 5522 相关症状**（探针应答不会漏成按键垃圾）。
+13. **降级路径（探针阴性）**：Ghostty stable 1.3.1 / iTerm2 / Terminal.app 上启动后输入、面板、退出与 pre-#221 无差别（无 `?5522` 字节、无接驳层）；`Cmd+V` 图片经 L1 落 chip（读回来那一刻先出 `⠋ 处理中…` 占位符，再原地落定）；**阴性终端上不再出现「只粘贴了一个 v」之外的任何 5522 相关症状**（探针应答不会漏成按键垃圾）。
 14. **阳性路径非回归**：Ghostty nightly 上 `Cmd+V` 图片/文本仍走协议通道（chip / 文本粘贴；SSH 同款），退出后 shell 不吞输入。
 
 **待实机核对**：macOS 侧 listing 的 MIME 名称（推断为标准 MIME，`image/png` 等）；截图与浏览器「复制图片」

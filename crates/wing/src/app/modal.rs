@@ -587,6 +587,15 @@ impl App {
                 self.popup.active = ActivePopup::None;
                 self.submit_message(payload);
             }
+            InputAction::SubmitBlocked => {
+                // 草稿里还有在途的图片：提交会把这张图留在草稿里（或被静默吃掉）。
+                // 拦下来，并把「怎么继续」一起说清：等它落地，或者删掉占位符。
+                // 草稿一个字都没动（没有提交），所以这里也不碰 popup / 输入状态。
+                self.show_toast(Toast::info(
+                    "Image still uploading — delete the chip to send without it",
+                    std::time::Duration::from_secs(3),
+                ));
+            }
             InputAction::Escape | InputAction::None => {
                 // Update popup based on new text.
                 self.update_popup_from_input();

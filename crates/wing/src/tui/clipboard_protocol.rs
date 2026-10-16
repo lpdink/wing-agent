@@ -60,6 +60,15 @@ const REQUEST_ID_PREFIX: &str = "wing-paste-";
 /// 一次事件最多排队几个（连续快速粘贴时后面的等前一个读完）。
 const MAX_QUEUED_EVENTS: usize = 4;
 
+/// 进度上报的两个阈值：**累计**新增这么多字节、或距上次上报这么久 —— 谁先到算谁。
+///
+/// 节流发生在**协议机里**，不是 App 里：终端把一个 12 MiB 的图切成 ~4000 个包推过来，
+/// 每个包都投一次事件等于让事件循环跑 4000 圈；这里只按水位数出十几个快照。两条阈值各
+/// 管一种形态：大包快速流由字节步长兜住（最多 ~48 次/12 MiB），小包慢速流由时间兜住
+/// （最多 10 次/秒）。
+const PROGRESS_STEP: usize = 256 * 1024;
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
 /// 剪贴板读回的载荷（App 边界，冻结给 05）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardPayload {
@@ -71,6 +80,33 @@ pub enum ClipboardPayload {
         mime: String,
         name: Option<String>,
     },
+}
+
+/// 通道投给 App 的一条事件：一次读的**整个生命周期**（开始 / 进度 / 交付 / 失败），
+/// 外加与任何读无关的丢弃。
+///
+/// 拆成这五支而不是「载荷 / 失败」两态，是因为 App 侧要维护一个**占位符 chip**：
+/// 它得知道字节何时开始到、到了多少、这次失败该归给在途的那张图还是与它无关
+/// （队列满时在途的读照常继续，误伤它会把一张正在传的图翻成失败态）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardEvent {
+    /// 一条**图片**读刚开始（字节还没到）：App 在光标处插占位符 chip。
+    ///
+    /// 只在图片上发：文本读没有占位符可言，App 侧收不到就不必认识它。
+    ImageReadStarted { mime: String },
+    /// 在途读的进度快照（节流后；`received` 是**累计**字节数，不是增量）。
+    ReadProgress { received: u64 },
+    /// 读回完成，交付载荷。
+    Delivered(ClipboardPayload),
+    /// **在途读**的失败：归属当前这条读（App 侧把它的占位符翻成失败态 + toast）。
+    /// `mime` 就是这次读的表示 —— 只有 `image/*` 的读才有占位符可翻。
+    ReadFailed {
+        mime: String,
+        failure: ClipboardFailure,
+    },
+    /// 与任何读无关的失败（粘贴事件被丢弃 / 起始就没有可读表示）：只有 toast，
+    /// 没有读、也就没有占位符可翻。
+    PasteRejected(ClipboardFailure),
 }
 
 /// 读失败的原因（App 侧转 toast；文案由 [`ClipboardFailure::message`] 统一给）。
@@ -310,10 +346,20 @@ pub(crate) fn read_request(pw_b64: &str, mime: &str, primary: bool, id: &str) ->
 pub(crate) enum Effect {
     /// 发给终端：read 请求字节。
     Send(Vec<u8>),
+    /// 一条**图片**读刚开始：占位符该出现了。
+    ImageReadStarted { mime: String },
+    /// 在途读的进度快照（节流后；`received` 是累计字节数）。
+    Progress { received: u64 },
     /// 读回完成：交付 App。
     Deliver(ClipboardPayload),
-    /// 失败：交付 App（toast）。
-    Fail(ClipboardFailure),
+    /// 在途读失败：归属当前这条读。带上它的 MIME —— App 侧据此判断这条读有没有
+    /// 占位符（只有图片读有，见 [`Effect::ImageReadStarted`]）。
+    ReadFailed {
+        mime: String,
+        failure: ClipboardFailure,
+    },
+    /// 与在途读无关的失败（丢弃 / 无可读表示）：只有 toast。
+    PasteRejected(ClipboardFailure),
 }
 
 /// 一次已完成的 paste event（listing 与 DONE 都到齐了）。
@@ -340,6 +386,10 @@ struct ReadState {
     mime: String,
     data: Vec<u8>,
     deadline: Instant,
+    /// 进度水位：最后一次报出去的累计字节数，与那次上报的时刻（[`PROGRESS_STEP`] /
+    /// [`PROGRESS_INTERVAL`] 的节流基准）。
+    reported: usize,
+    reported_at: Instant,
 }
 
 /// 协议状态机：纯逻辑（时钟注入），驱动的 I/O 在外面。
@@ -461,8 +511,10 @@ impl Session {
                     } else {
                         // 队列满 = 这次粘贴被丢弃。丢弃也要出声（与读失败同一条红线：
                         // 不出现「粘了但什么都没发生」）——App 侧转成 warning toast。
+                        // **丢的不是在途那条**：它没有 id，也就找不到在途的读，所以按
+                        // 「与读无关」投递，别把正在传的那张图的占位符翻成失败态。
                         tracing::warn!("clipboard: paste event dropped (queue full)");
-                        vec![Effect::Fail(ClipboardFailure::QueueFull)]
+                        vec![Effect::PasteRejected(ClipboardFailure::QueueFull)]
                     }
                 } else {
                     self.start(pending, now)
@@ -482,6 +534,7 @@ impl Session {
             }
             "DATA" => {
                 let mut too_large = false;
+                let mut progress: Option<u64> = None;
                 // mime 归属按**归一形态**比对（与 `choose_mime` 同一份归一）：终端回显
                 // 带参数（`text/plain;charset=utf-8`）或大小写不同是允许的差异，逐字相等
                 // 会把 DATA 静默丢掉。
@@ -496,12 +549,23 @@ impl Session {
                     } else {
                         read.data.extend_from_slice(&packet.payload);
                         read.deadline = now + IDLE_TIMEOUT;
+                        // 进度只对图片发（文本读没有占位符可更新）：见 [`PROGRESS_STEP`]。
+                        if read.mime.starts_with("image/")
+                            && (read.data.len() >= read.reported + PROGRESS_STEP
+                                || now.duration_since(read.reported_at) >= PROGRESS_INTERVAL)
+                        {
+                            read.reported = read.data.len();
+                            read.reported_at = now;
+                            progress = Some(read.data.len() as u64);
+                        }
                     }
                 }
                 if too_large {
                     return self.abort_read(ClipboardFailure::TooLarge, now);
                 }
-                Vec::new()
+                progress
+                    .map(|received| vec![Effect::Progress { received }])
+                    .unwrap_or_default()
             }
             "DONE" => self.finish_read(now),
             other => self.abort_read(failure_for(other), now),
@@ -518,7 +582,8 @@ impl Session {
             // 毫无动静是最难排查的形态。
             tracing::debug!("clipboard: paste event incomplete, giving up");
             self.event = None;
-            effects.push(Effect::Fail(ClipboardFailure::Timeout));
+            // 事件三连没到齐 = 这条粘贴根本没开始读，与在途的读无关。
+            effects.push(Effect::PasteRejected(ClipboardFailure::Timeout));
         }
         if let Some(read) = &self.read
             && now >= read.deadline
@@ -536,8 +601,8 @@ impl Session {
     /// 队列里已到齐的粘贴事件无反馈卡死，而后续粘贴因 `read.is_none()` 直接开始新读
     /// （插队），被卡的事件要等下一次读完成才被取出（那时 OTP 多半已失效）。
     fn abort_read(&mut self, failure: ClipboardFailure, now: Instant) -> Vec<Effect> {
-        self.read = None;
-        let mut effects = vec![Effect::Fail(failure)];
+        let mime = self.read.take().map_or_else(String::new, |read| read.mime);
+        let mut effects = vec![Effect::ReadFailed { mime, failure }];
         effects.extend(self.pump_queue(now));
         effects
     }
@@ -549,7 +614,10 @@ impl Session {
         // 一个 DATA 都没到 = 终端表示「这个表示不可用」（协议正是用它表达不可用），
         // 不是「空粘贴」：空载荷投给 App 只会变成静默无操作或 0 字节的图。
         let mut effects = if read.data.is_empty() {
-            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
+            vec![Effect::ReadFailed {
+                mime: read.mime.clone(),
+                failure: ClipboardFailure::NoRepresentation,
+            }]
         } else {
             let payload = if read.mime.starts_with("image/") {
                 ClipboardPayload::Image {
@@ -584,7 +652,8 @@ impl Session {
     fn start(&mut self, event: PendingEvent, now: Instant) -> Vec<Effect> {
         let Some(mime) = choose_mime(&event.mimes) else {
             tracing::debug!(mimes = ?event.mimes, "clipboard: no usable representation");
-            return vec![Effect::Fail(ClipboardFailure::NoRepresentation)];
+            // 没有读被建立：这条粘贴连开始都没开始，App 侧没有占位符可谈。
+            return vec![Effect::PasteRejected(ClipboardFailure::NoRepresentation)];
         };
         self.reads_started += 1;
         let id = format!("{REQUEST_ID_PREFIX}{}", self.reads_started);
@@ -593,13 +662,20 @@ impl Session {
             mime: mime.clone(),
             data: Vec::new(),
             deadline: now + IDLE_TIMEOUT,
+            reported: 0,
+            reported_at: now,
         });
-        vec![Effect::Send(read_request(
+        let mut effects = Vec::new();
+        if mime.starts_with("image/") {
+            effects.push(Effect::ImageReadStarted { mime: mime.clone() });
+        }
+        effects.push(Effect::Send(read_request(
             &event.pw_b64,
             &mime,
             event.primary,
             &id,
-        ))]
+        )));
+        effects
     }
 }
 
@@ -669,11 +745,37 @@ where
                 tracing::warn!("clipboard: failed to send read request: {e}");
             }
         }
-        Effect::Deliver(payload) => {
-            let _ = events.send(TermEvent::Clipboard(Ok(payload))).await;
+        Effect::ImageReadStarted { mime } => {
+            let _ = events
+                .send(TermEvent::Clipboard(ClipboardEvent::ImageReadStarted {
+                    mime,
+                }))
+                .await;
         }
-        Effect::Fail(failure) => {
-            let _ = events.send(TermEvent::Clipboard(Err(failure))).await;
+        Effect::Progress { received } => {
+            let _ = events
+                .send(TermEvent::Clipboard(ClipboardEvent::ReadProgress {
+                    received,
+                }))
+                .await;
+        }
+        Effect::Deliver(payload) => {
+            let _ = events
+                .send(TermEvent::Clipboard(ClipboardEvent::Delivered(payload)))
+                .await;
+        }
+        Effect::ReadFailed { mime, failure } => {
+            let _ = events
+                .send(TermEvent::Clipboard(ClipboardEvent::ReadFailed {
+                    mime,
+                    failure,
+                }))
+                .await;
+        }
+        Effect::PasteRejected(failure) => {
+            let _ = events
+                .send(TermEvent::Clipboard(ClipboardEvent::PasteRejected(failure)))
+                .await;
         }
     }
 }
@@ -743,6 +845,14 @@ mod tests {
 
     fn response(meta: &str, payload: Option<&[u8]>) -> Vec<u8> {
         packet(meta, payload)
+    }
+
+    /// 一条在途读的失败（带上这条读的 MIME —— 只有图片读有占位符）。
+    fn read_failed(mime: &str, failure: ClipboardFailure) -> Effect {
+        Effect::ReadFailed {
+            mime: mime.to_string(),
+            failure,
+        }
     }
 
     // ── base64 ────────────────────────────────────────────────────────────
@@ -1044,8 +1154,19 @@ mod tests {
     fn paste_event_starts_a_read_with_the_granted_password() {
         let mut s = Session::new();
         let effects = event_triplet("otp123", &["text/plain", "image/png"], 0, &mut s);
-        assert_eq!(effects.len(), 1);
-        match &effects[0] {
+        assert_eq!(
+            effects.len(),
+            2,
+            "图片读先通知 App（占位符），再发请求：{effects:?}"
+        );
+        assert_eq!(
+            effects[0],
+            Effect::ImageReadStarted {
+                mime: "image/png".into()
+            },
+            "通知带着要读的 MIME"
+        );
+        match &effects[1] {
             Effect::Send(bytes) => {
                 assert_eq!(
                     String::from_utf8(bytes.clone()).unwrap(),
@@ -1055,6 +1176,78 @@ mod tests {
             other => panic!("期望发出 read 请求，得到 {other:?}"),
         }
         assert!(s.deadline().is_some(), "在途读要有超时");
+    }
+
+    /// 文本读**不**通知 App：占位符是图片独有的东西，文本没有可更新的 chip。
+    #[test]
+    fn a_text_read_does_not_announce_itself() {
+        let mut s = Session::new();
+        let effects = event_triplet("otp", &["text/plain"], 0, &mut s);
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        assert!(matches!(effects[0], Effect::Send(_)));
+    }
+
+    /// 节流：小于步长、且离上次上报不到 [`PROGRESS_INTERVAL`] 的片**不**出声；
+    /// 攒到步长就报一次；步长不够但时间到了也报（小包慢速流照常有进度）。
+    #[test]
+    fn progress_is_throttled_by_bytes_and_time() {
+        let mime = b64_encode(b"image/png");
+        let chunk = |s: &mut Session, len: usize, at_ms: u64| {
+            s.on_sequence(
+                &response(
+                    &format!("type=read:status=DATA:id=wing-paste-1:mime={mime}"),
+                    Some(&vec![0u8; len]),
+                ),
+                at(at_ms),
+            )
+        };
+
+        let mut s = Session::new();
+        event_triplet("otp", &["image/png"], 0, &mut s);
+        // 4 KiB 一片、间隔 1 ms：既不到步长也不到时间 → 一片都不报。
+        let mut effects = Vec::new();
+        for i in 1..=16u64 {
+            effects.extend(chunk(&mut s, 4096, i));
+        }
+        assert!(effects.is_empty(), "还没攒够：{effects:?}");
+        // 到 256 KiB：报一次，数字是**累计**字节数。
+        for i in 17..=64u64 {
+            effects.extend(chunk(&mut s, 4096, i));
+        }
+        assert_eq!(
+            effects,
+            vec![Effect::Progress {
+                received: 256 * 1024
+            }],
+            "步长到了就报一次"
+        );
+        // 之后的 4 KiB 片不再出声（水位已经推上去）。
+        assert!(chunk(&mut s, 4096, 70).is_empty());
+
+        // 时间到：一片 1 KiB、距上次上报 100 ms 以上 → 报。
+        let mut s = Session::new();
+        event_triplet("otp", &["image/png"], 0, &mut s);
+        assert!(chunk(&mut s, 1024, 1).is_empty(), "刚起步，时间没到");
+        assert_eq!(
+            chunk(&mut s, 1024, 200),
+            vec![Effect::Progress { received: 2048 }],
+            "小包慢速流由时间兜住"
+        );
+    }
+
+    /// 进度只在**图片**读上报：文本读没有占位符可更新，报了也是白跑一趟事件循环。
+    #[test]
+    fn a_text_read_reports_no_progress() {
+        let mut s = Session::new();
+        event_triplet("otp", &["text/plain"], 0, &mut s);
+        let effects = s.on_sequence(
+            &response(
+                "type=read:status=DATA:id=wing-paste-1:mime=dGV4dC9wbGFpbg==",
+                Some(&vec![0u8; 512 * 1024]),
+            ),
+            at(1),
+        );
+        assert!(effects.is_empty(), "{effects:?}");
     }
 
     #[test]
@@ -1135,7 +1328,11 @@ mod tests {
                 &response(&format!("type=read:status={status}:id=wing-paste-1"), None),
                 at(5),
             );
-            assert_eq!(effects, vec![Effect::Fail(expected)], "{status}");
+            assert_eq!(
+                effects,
+                vec![read_failed("image/png", expected)],
+                "{status}"
+            );
         }
     }
 
@@ -1146,13 +1343,13 @@ mod tests {
         assert!(s.on_timeout(at(1000)).is_empty(), "没到点");
         assert_eq!(
             s.on_timeout(at(IDLE_TIMEOUT.as_millis() as u64 + 100)),
-            vec![Effect::Fail(ClipboardFailure::Timeout)]
+            vec![read_failed("image/png", ClipboardFailure::Timeout)]
         );
         assert!(s.deadline().is_none());
     }
 
     /// 收不全的事件（OK 到了、listing / DONE 没到）也要给用户反馈：粘贴了却毫无动静
-    /// 是最难排查的形态。
+    /// 是最难排查的形态。这条**没有读**（连请求都没发），所以是「与读无关」的失败。
     #[test]
     fn incomplete_event_reports_a_failure() {
         let mut s = Session::new();
@@ -1161,7 +1358,7 @@ mod tests {
         assert!(s.on_timeout(at(100)).is_empty());
         assert_eq!(
             s.on_timeout(at(6000)),
-            vec![Effect::Fail(ClipboardFailure::Timeout)],
+            vec![Effect::PasteRejected(ClipboardFailure::Timeout)],
             "收不全也要有反馈"
         );
         assert!(s.deadline().is_none());
@@ -1173,10 +1370,12 @@ mod tests {
         let effects = event_triplet("otp", &["text/html"], 0, &mut s);
         assert_eq!(
             effects,
-            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
+            vec![Effect::PasteRejected(ClipboardFailure::NoRepresentation)]
         );
     }
 
+    /// 超限读：放弃前那一片是**真的收到了**（占了 64 MiB 的一半以上），进度照报 ——
+    /// 占位符上的数字不该在失败前假装什么都没发生。
     #[test]
     fn oversized_read_aborts() {
         let mut s = Session::new();
@@ -1189,14 +1388,24 @@ mod tests {
             ),
             at(1),
         );
-        effects.extend(s.on_sequence(
+        assert_eq!(
+            effects,
+            vec![Effect::Progress {
+                received: MAX_PAYLOAD as u64
+            }],
+            "整块字节先按节流报一次进度"
+        );
+        effects = s.on_sequence(
             &response(
                 "type=read:status=DATA:id=wing-paste-1:mime=aW1hZ2UvcG5n",
                 Some(b"x"),
             ),
             at(2),
-        ));
-        assert_eq!(effects, vec![Effect::Fail(ClipboardFailure::TooLarge)]);
+        );
+        assert_eq!(
+            effects,
+            vec![read_failed("image/png", ClipboardFailure::TooLarge)]
+        );
         assert!(s.deadline().is_none());
     }
 
@@ -1206,7 +1415,10 @@ mod tests {
         event_triplet("otp", &["text/plain"], 0, &mut s);
         // 结构坏掉（记录缺 '='）：读中途的响应不可信，直接放弃这次读。
         let effects = s.on_sequence(b"type=read:status", at(1));
-        assert_eq!(effects, vec![Effect::Fail(ClipboardFailure::Malformed)]);
+        assert_eq!(
+            effects,
+            vec![read_failed("text/plain", ClipboardFailure::Malformed)]
+        );
     }
 
     /// 别的协议流量（write 事务、别人的 id）不能影响我们的读。
@@ -1238,7 +1450,10 @@ mod tests {
                 &response("type=read:status=DONE:id=wing-paste-1", None),
                 at(4)
             ),
-            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
+            vec![read_failed(
+                "text/plain",
+                ClipboardFailure::NoRepresentation
+            )]
         );
     }
 
@@ -1353,7 +1568,7 @@ mod tests {
                 2,
                 "{label}: 失败要有反馈、队列要推进：{effects:?}"
             );
-            assert_eq!(effects[0], Effect::Fail(expected), "{label}");
+            assert_eq!(effects[0], read_failed("text/plain", expected), "{label}");
             let Effect::Send(bytes) = &effects[1] else {
                 panic!("{label}: 期望第二个事件的 read 请求，得到 {:?}", effects[1]);
             };
@@ -1419,8 +1634,14 @@ mod tests {
             at(3),
         );
         assert_eq!(effects.len(), 3, "{effects:?}");
-        assert_eq!(effects[0], Effect::Fail(ClipboardFailure::NoRepresentation));
-        assert_eq!(effects[1], Effect::Fail(ClipboardFailure::NoRepresentation));
+        assert_eq!(
+            effects[0],
+            read_failed("text/plain", ClipboardFailure::NoRepresentation)
+        );
+        assert_eq!(
+            effects[1],
+            Effect::PasteRejected(ClipboardFailure::NoRepresentation)
+        );
         let Effect::Send(bytes) = &effects[2] else {
             panic!("期望第三次的 read 请求，得到 {:?}", effects[2]);
         };
@@ -1453,7 +1674,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .all(|e| *e == Effect::Fail(ClipboardFailure::QueueFull)),
+                .all(|e| *e == Effect::PasteRejected(ClipboardFailure::QueueFull)),
             "{effects:?}"
         );
         // 文案是 App 直接转 toast 的那句（队列里可能是文本也可能是图片，还没读）。
@@ -1530,7 +1751,7 @@ mod tests {
             .expect("交付不超时")
             .expect("事件通道还开着");
         match event {
-            TermEvent::Clipboard(Ok(ClipboardPayload::Text(text))) => {
+            TermEvent::Clipboard(ClipboardEvent::Delivered(ClipboardPayload::Text(text))) => {
                 assert_eq!(text, "pasted text");
             }
             other => panic!("期望一条文本粘贴事件，得到 {other:?}"),
@@ -1566,6 +1787,18 @@ mod tests {
             .send(packet("type=read:status=EPERM:id=wing-paste-1", None))
             .await
             .unwrap();
+
+        // 图片读先来一条「开始」（占位符该出现了）——驱动面也钉住它先于失败到达。
+        let started = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+            .await
+            .expect("开始事件必须到达")
+            .expect("通道还开着");
+        match started {
+            TermEvent::Clipboard(ClipboardEvent::ImageReadStarted { mime }) => {
+                assert_eq!(mime, "image/png");
+            }
+            other => panic!("期望「图片读开始」，得到 {other:?}"),
+        }
 
         let event = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
             .await
@@ -1659,7 +1892,9 @@ mod tests {
 
     fn event_failure(event: &TermEvent) -> Option<ClipboardFailure> {
         match event {
-            TermEvent::Clipboard(Err(f)) => Some(f.clone()),
+            // 在途读的失败与「与读无关」的丢弃走同一个通道，测试只关心文案。
+            TermEvent::Clipboard(ClipboardEvent::ReadFailed { failure, .. })
+            | TermEvent::Clipboard(ClipboardEvent::PasteRejected(failure)) => Some(failure.clone()),
             _ => None,
         }
     }
@@ -1674,17 +1909,16 @@ mod tests {
         // 第一次读：请求 id = wing-paste-1，然后超时放弃。
         assert_eq!(
             s.on_timeout(at(IDLE_TIMEOUT.as_millis() as u64 + 100)),
-            vec![Effect::Fail(ClipboardFailure::Timeout)]
+            vec![read_failed("image/png", ClipboardFailure::Timeout)]
         );
         // 用户又粘了一次 → 第二次读，id 必须换了。
         let effects = event_triplet("otp", &["image/png"], 6000, &mut s);
-        match &effects[0] {
-            Effect::Send(bytes) => {
-                let text = String::from_utf8(bytes.clone()).unwrap();
-                assert!(text.contains("id=wing-paste-2"), "{text}");
-            }
-            other => panic!("期望第二次读的请求，得到 {other:?}"),
-        }
+        let Some(Effect::Send(bytes)) = effects.iter().find(|e| matches!(e, Effect::Send(_)))
+        else {
+            panic!("期望第二次读的请求，得到 {effects:?}");
+        };
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("id=wing-paste-2"), "{text}");
         // 终端补发**第一次**读的残留：DATA + DONE（旧 id）。
         assert!(
             s.on_sequence(
@@ -1739,7 +1973,7 @@ mod tests {
         s.on_sequence(&packet("type=read:status=OK:pw=b3RwMQ==", None), at(0));
         assert_eq!(
             s.on_timeout(at(6000)),
-            vec![Effect::Fail(ClipboardFailure::Timeout)]
+            vec![Effect::PasteRejected(ClipboardFailure::Timeout)]
         );
         // 用户又粘一次：event#2（pw=otp2，剪贴板只有文本）。
         s.on_sequence(&packet("type=read:status=OK:pw=b3RwMg==", None), at(6001));
@@ -1798,7 +2032,10 @@ mod tests {
                 &response("type=read:status=DONE:id=wing-paste-1", None),
                 at(1)
             ),
-            vec![Effect::Fail(ClipboardFailure::NoRepresentation)]
+            vec![read_failed(
+                "text/plain",
+                ClipboardFailure::NoRepresentation
+            )]
         );
     }
 

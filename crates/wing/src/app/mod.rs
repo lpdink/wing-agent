@@ -194,6 +194,14 @@ pub struct App {
     /// 是否有一张图正在压缩（单并发门）。它同时保证 **chip 插入序 = 粘贴序**：
     /// 一次只压一张，结果就按序回来（见 [`clipboard`]）。
     clipboard_compress_in_flight: bool,
+    /// 5522 通道在途的图片读：每一条的占位符，按**开始序**排队。
+    ///
+    /// 协议机一次只服务一条读，所以队里通常恰好一个；用队列而不是单个 `Option`，是为了
+    /// 让「Started 与交付 / 失败严格配对」这条不变量在 App 侧**显式**成立——配对错乱时
+    /// 字节不会落进另一张图的 chip（交付取队首、进度看队首，一一对应）。
+    ///
+    /// 本地读取通道不走这里（那条通道读回字节才知道是图片，占位符在那一刻插）。
+    image_reads: std::collections::VecDeque<crate::ui::input_area::ImageChipTarget>,
     /// 设置面板（`/settings`）：`Some` ⇔ 面板开着（`ModalOwner::Settings` 接管键盘）。
     /// 生命周期与分派全在 [`settings`] 模块。
     settings_panel: Option<crate::shared::panels::settings::SettingsPanel>,
@@ -291,6 +299,7 @@ impl App {
             images,
             pending_clipboard_images: Vec::new(),
             clipboard_compress_in_flight: false,
+            image_reads: std::collections::VecDeque::new(),
             session_facts: None,
             settings_panel: None,
             settings_cache: None,
@@ -1109,9 +1118,17 @@ pub async fn run_app(
                         app.handle_paste(&text);
                         app.input_dirty = true;
                     }
-                    TermEvent::Clipboard(result) => {
-                        app.handle_clipboard(result);
-                        app.input_dirty = true;
+                    TermEvent::Clipboard(event) => {
+                        // 进度只是「同一张 chip 换了个数字」：让它走帧闸门（合并重绘，
+                        // 传输中最多 10 次/秒），不要每条都逼一帧。开始 / 交付 / 失败
+                        // 都是离散的用户可见状态，立即画。
+                        let coalesced = matches!(event, crate::tui::ClipboardEvent::ReadProgress { .. });
+                        app.handle_clipboard(event);
+                        if coalesced {
+                            app.chat_dirty = true;
+                        } else {
+                            app.input_dirty = true;
+                        }
                     }
                     TermEvent::Resize(_, _) => {
                         // ratatui auto-resizes its buffers on the next draw;
@@ -1159,6 +1176,11 @@ pub async fn run_app(
                         let now = std::time::Instant::now();
                         let dt = now.duration_since(app.last_tick);
                         app.last_tick = now;
+                        // 在途图片的 spinner（与 turn 的 spinner 同一个节拍）：有在飞的
+                        // 占位符才动，动过才重绘 —— 空闲草稿一次活都不干。
+                        if app.input.tick_pending_images(dt) {
+                            app.chat_dirty = true;
+                        }
                         if app.turn.working {
                             app.turn.spinner.tick(dt);
                             // Update title only when spinner frame changed.

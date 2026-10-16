@@ -2,15 +2,25 @@
 //! 读取的 `FetchPayload::ClipboardPaste`）在这里汇进同一个落点。
 //!
 //! 文本与 bracketed paste 走**同一个**入口（[`App::handle_paste`]），语义逐点等价；
-//! 图片走一条**单并发流水线**：入队（原始字节，含上限）→ 后台压缩 → 插入 composer 的
-//! 图片 chip（见 `ui/input_area/image.rs`）。失败一律降级为 toast，绝不动用户已有内容。
+//! 图片走一条**单并发流水线**：占位符 chip 先落地（粘贴那一刻）→ 字节到齐 → 后台压缩
+//! → 原地翻成正式 chip（见 `ui/input_area/image.rs`）。失败一律降级为 toast + 原地
+//! 的 `✗`，绝不动用户已有内容。
+//!
+//! **占位符是这条流水线的锚**。字节要经终端传、压缩要在后台跑，两者加起来可以是一秒
+//! 级；在图片「已经贴上去了」这件事上，用户的体感只有占位符给得了。所以：
+//!
+//! - 5522 通道在**读开始**时就插一个（协议机选定了图片 MIME，字节还没到）；
+//! - 本地读取通道读回字节才知道是图片，占位符在那一刻插（`Compressing`）；
+//! - 进度（节流后的累计字节数）与阶段变化只改这一个 chip 的标签，位置不动；
+//! - 尺寸与号码在插入时就定了 —— 号码 = 粘贴序，落定只是换个标签。
 //!
 //! 「一次一张」不是保守，而是**顺序契约**：两张并发压完的到达序不确定，chip 的号码
 //! （= 插入序）就会跳序。出队即消费（队列里只留还没开始压的那些），所以 04 的暂存区
 //! 在这里升级为流水线，而不是被丢掉。
 //!
 //! 这一层刻意薄：协议 / 通道 / 超时全在 [`crate::tui::clipboard_protocol`]，压缩在
-//! `util/image_compress`，chip 在 composer；这里只有「读回的字节怎么变成 chip」这一件事。
+//! `util/image_compress`，chip 在 composer；这里只有「读回来 / 正在读的字节怎么变成
+//! chip」这一件事。
 
 use std::time::Duration;
 
@@ -25,8 +35,11 @@ pub(crate) const MAX_PENDING_IMAGES: usize = 8;
 pub(crate) const MAX_PENDING_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::app::intent::AppIntent;
+use crate::tui::ClipboardEvent;
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
+use crate::ui::input_area::ImageChipTarget;
+use crate::ui::input_area::ImageStage;
 use crate::ui::toast::Toast;
 use crate::util::clipboard_paste::PasteFailure;
 use crate::util::clipboard_paste::PasteOutcome;
@@ -37,6 +50,8 @@ use super::App;
 /// 终端协议通道读回、还没有变成 chip 的图片：流水线的队列元素。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingClipboardImage {
+    /// 这张图在草稿里的占位符（字节到手时它已经在了）。
+    pub target: ImageChipTarget,
     /// 原始字节（未压缩；压缩在出队之后做）。
     pub bytes: Vec<u8>,
     /// 终端给出的 MIME（如 `image/png`）——只用于日志与失败文案，压缩器自己嗅探格式。
@@ -46,15 +61,25 @@ pub struct PendingClipboardImage {
 }
 
 impl App {
-    /// `TermEvent::Clipboard` 的分派：文本 → composer（或当前模态接受者），图片 → 流水线，
-    /// 失败 → toast。
-    pub(crate) fn handle_clipboard(&mut self, result: Result<ClipboardPayload, ClipboardFailure>) {
-        match result {
-            Ok(ClipboardPayload::Text(text)) => self.handle_paste(&text),
-            Ok(ClipboardPayload::Image { bytes, mime, name }) => {
-                self.on_clipboard_image(bytes, mime, name)
+    /// `TermEvent::Clipboard` 的分派：读的生命周期五态（见 [`ClipboardEvent`]）。
+    pub(crate) fn handle_clipboard(&mut self, event: ClipboardEvent) {
+        match event {
+            ClipboardEvent::ImageReadStarted { mime } => self.on_clipboard_image_started(mime),
+            ClipboardEvent::ReadProgress { received } => self.on_clipboard_image_progress(received),
+            ClipboardEvent::Delivered(payload) => match payload {
+                ClipboardPayload::Text(text) => self.handle_paste(&text),
+                ClipboardPayload::Image { bytes, mime, name } => {
+                    self.on_clipboard_image(bytes, mime, name)
+                }
+            },
+            // 在途读的失败：占位符就地翻成 `✗`（**只在它还在的时候**：用户可能已经
+            // 把占位符删了 —— 那正是「这张我不要了」的动作）。只有图片读有占位符，
+            // 所以 MIME 决定要不要动草稿。
+            ClipboardEvent::ReadFailed { mime, failure } => {
+                self.on_clipboard_read_failed(&mime, failure)
             }
-            Err(failure) => self.on_clipboard_failure(failure),
+            // 与在读的那条无关的丢弃：没有占位符可翻，别误伤正在传的那张图。
+            ClipboardEvent::PasteRejected(failure) => self.on_clipboard_rejected(failure),
         }
     }
 
@@ -79,23 +104,66 @@ impl App {
         }
     }
 
-    /// 图片载荷边界：收下字节并把它交给压缩流水线。
+    /// 5522 通道：一条图片读开始了（协议机已选定图片 MIME，字节还没到）。
+    ///
+    /// 占位符就在这一刻落地 —— 这是「粘贴已受理」对用户唯一的证据，也是整个特性的
+    /// 起点（见 [`Self::on_clipboard_image`] 对「本地通道没这一步」的说明）。句柄入队，
+    /// 与随后的交付 / 失败配对（见 `App::image_reads`）。
+    fn on_clipboard_image_started(&mut self, mime: String) {
+        let target = self
+            .input
+            .insert_pending_image(ImageStage::Receiving { bytes: 0 });
+        tracing::info!(
+            chip = target.number,
+            mime = %mime,
+            "clipboard image read started"
+        );
+        self.image_reads.push_back(target);
+    }
+
+    /// 5522 通道：在途读的进度（协议机节流后的**累计**字节数）。
+    ///
+    /// 只改标签：不碰 chat、不重排草稿，位置与号码都不动。
+    fn on_clipboard_image_progress(&mut self, received: u64) {
+        let Some(target) = self.image_reads.front().copied() else {
+            return;
+        };
+        self.input
+            .set_image_stage(target, ImageStage::Receiving { bytes: received });
+    }
+
+    /// 图片载荷边界：字节到手 → 占位符进入「处理中」→ 交给压缩流水线。
     ///
     /// **不查模态挡板**（与文本不同）：文本粘贴是往某个输入框里送字，模态面板该拦；
-    /// 图片落的是草稿上的一个可见、可删的 chip，静默丢字节才是最坏的结果。
+    /// 图片落的是草稿上一个可见、可删的 chip，静默丢字节才是最坏的结果。
+    ///
+    /// 通道差异只在这一处：5522 通道的读开始过（[`Self::on_clipboard_image_started`]），
+    /// 用那个占位符；本地读取通道读回来才知道是图片，占位符此刻插。
     pub(crate) fn on_clipboard_image(
         &mut self,
         bytes: Vec<u8>,
         mime: String,
         name: Option<String>,
     ) {
+        let target = match self.image_reads.pop_front() {
+            Some(target) => {
+                self.input.set_image_stage(target, ImageStage::Compressing);
+                target
+            }
+            None => self.input.insert_pending_image(ImageStage::Compressing),
+        };
         tracing::info!(
             bytes = bytes.len(),
             mime = %mime,
+            chip = target.number,
             "clipboard image queued for compression"
         );
-        self.pending_clipboard_images
-            .push(PendingClipboardImage { bytes, mime, name });
+        self.pending_clipboard_images.push(PendingClipboardImage {
+            target,
+            bytes,
+            mime,
+            name,
+        });
         self.trim_pending_images();
         self.pump_clipboard_images();
     }
@@ -114,31 +182,45 @@ impl App {
             bytes = image.bytes.len(),
             mime = %image.mime,
             name = ?image.name,
+            chip = image.target.number,
             "compressing a pasted image"
         );
         self.clipboard_compress_in_flight = true;
         self.push_intent(AppIntent::CompressClipboardImage {
+            target: image.target,
             bytes: image.bytes,
             options: self.config.paste.image.compress_options(),
         });
     }
 
-    /// 一张压完了：插 chip（失败则 toast），然后看队列里还有没有下一张。
+    /// 一张压完了：把它的占位符**原地**翻成正式 chip（失败则 `✗` + toast），
+    /// 然后看队列里还有没有下一张。
     ///
-    /// 插入点取**此刻**的光标，不是粘贴时刻的（压缩异步，原位插入要假定那时的行列仍
-    /// 有效）——见 `docs/dev/tui-input.md` 的「已知边界（图片 chip 的落点）」。
+    /// 句柄作废（草稿被清空 / 重写、chip 被删）时结果直接丢弃：那张图已经不在任何人的
+    /// 视野里了，插回去才是意外。
     ///
-    /// 会话无关：哪怕这张图是在另一个会话里粘的，草稿还在，chip 就还得插（所以
+    /// 会话无关：哪怕这张图是在另一个会话里粘的，草稿还在，chip 就还得落地（所以
     /// `handle_fetch_result` 对这条回执不查会话守卫）。
-    pub(crate) fn on_clipboard_compressed(&mut self, result: Result<CompressedImage, String>) {
+    pub(crate) fn on_clipboard_compressed(
+        &mut self,
+        target: ImageChipTarget,
+        result: Result<CompressedImage, String>,
+    ) {
         self.clipboard_compress_in_flight = false;
         match result {
             Ok(image) => {
-                let number = self.input.insert_image(image);
-                tracing::info!(chip = number, "pasted image inserted as a chip");
+                if self.input.complete_image(target, image) {
+                    tracing::info!(chip = target.number, "pasted image chip settled");
+                } else {
+                    tracing::debug!(
+                        chip = target.number,
+                        "pasted image dropped: the chip is gone"
+                    );
+                }
             }
             Err(reason) => {
                 tracing::warn!(reason = %reason, "pasted image could not be compressed");
+                self.input.fail_image(target);
                 self.show_toast(Toast::warning(
                     format!("Image dropped: {reason}"),
                     Duration::from_secs(5),
@@ -148,9 +230,23 @@ impl App {
         self.pump_clipboard_images();
     }
 
-    /// 通道失败（权限 / 超时 / 坏数据）：toast + 日志，别的一个都不动。
-    pub(crate) fn on_clipboard_failure(&mut self, failure: ClipboardFailure) {
-        tracing::warn!(failure = ?failure, "clipboard read failed");
+    /// 在途**读**的失败（超时 / 超限 / 终端拒绝 / 坏包）：占位符翻 `✗` + toast。
+    ///
+    /// 只有 `image/*` 的读有占位符（文本读没有 Started，也就没有 chip）：文本读的失败
+    /// 只 toast，绝不去动队列里的句柄。
+    pub(crate) fn on_clipboard_read_failed(&mut self, mime: &str, failure: ClipboardFailure) {
+        if mime.starts_with("image/")
+            && let Some(target) = self.image_reads.pop_front()
+        {
+            self.input.fail_image(target);
+        }
+        tracing::warn!(mime, failure = ?failure, "clipboard read failed");
+        self.show_toast(Toast::warning(failure.message(), Duration::from_secs(4)));
+    }
+
+    /// 没有读、也不属于某条读的失败（粘贴被丢弃 / 没有可读表示）：只有 toast。
+    pub(crate) fn on_clipboard_rejected(&mut self, failure: ClipboardFailure) {
+        tracing::warn!(failure = ?failure, "clipboard paste rejected");
         self.show_toast(Toast::warning(failure.message(), Duration::from_secs(4)));
     }
 
@@ -162,7 +258,8 @@ impl App {
     /// 把队列收进上限（FIFO 丢最旧的，见 [`MAX_PENDING_IMAGES`]）。
     ///
     /// 丢弃要出声（与协议机队列满同一条红线）：静默丢图是「粘了没反应」的最坏形态，
-    /// 所以这里和别的失败一样走 warning toast。
+    /// 所以这里和别的失败一样走 warning toast —— 被丢的那张图的占位符同时翻成 `✗`
+    /// （它已经在用户眼前，不能凭空消失）。
     fn trim_pending_images(&mut self) {
         let mut total: usize = self
             .pending_clipboard_images
@@ -185,6 +282,7 @@ impl App {
                 mime = %oldest.mime,
                 "clipboard image queue over budget, dropped the oldest"
             );
+            self.input.fail_image(oldest.target);
         }
         if dropped > 0 {
             self.show_toast(Toast::warning(
