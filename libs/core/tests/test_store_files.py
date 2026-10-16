@@ -255,6 +255,32 @@ class TestFileStoreWriteFile:
         assert ref.path == str(tmp_path / "sessions" / SESSION / "files" / "notes.txt")
         assert Path(str(ref.path)).read_bytes() == b"hello"
 
+    def test_path_keeps_dotdot_for_the_kernel_to_resolve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """路径不做词法归一：`..` 原样保留，返回的路径必须指向**实际文件**。
+
+        `..` 之前是符号链接时，词法折叠（`abspath` / `normpath`）会指到另一处而内核
+        不是——返回给 agent 的路径会在读的时候失效。
+        """
+        real = tmp_path / "real"
+        (real / "elsewhere").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "link").symlink_to(real / "elsewhere")
+        store = FileSessionStore("link/../sessions")
+
+        ref = store.write_file(SESSION, "notes.txt", b"hello")
+
+        # 内核解析（先展开链接、再上跳）落在 real/sessions；词法折叠会落在 cwd/sessions。
+        assert (real / "sessions" / SESSION / "files" / "notes.txt").read_bytes() == (
+            b"hello"
+        )
+        assert ref.path == str(
+            tmp_path / "link" / ".." / "sessions" / SESSION / "files" / "notes.txt"
+        )
+        assert Path(str(ref.path)).read_bytes() == b"hello"
+        assert not (tmp_path / "sessions").exists()
+
 
 # ── 3. memory 后端 ─────────────────────────────────────────────
 

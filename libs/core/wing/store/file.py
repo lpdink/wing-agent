@@ -367,13 +367,24 @@ class FileSessionStore(SessionStore):
 
     # ── 用户文件（按名寻址，session 私有）─────────
 
+    @staticmethod
+    def _absolute(rooted: Path) -> str:
+        """把 store 内的路径转成**绝对形式**（相对 root 时按进程 cwd 前缀）。
+
+        刻意**不做词法归一**（不用 ``abspath`` / ``normpath``）：路径里若出现 ``..``
+        或符号链接，词法折叠会偏离内核解析（``link/../x`` 的内核目标是"链接目标的
+        上一级 + x"，词法折叠却给出"链接所在目录的上一级 + x"）——那会让返回给 agent
+        的路径不指向实际文件。原样保留、交给内核解析，才是文件真正所在。
+        """
+        return str(rooted if rooted.is_absolute() else Path.cwd() / rooted)
+
     def write_file(self, session_id: str, filename: str, data: bytes) -> FileRef:
         """把用户文件写进 ``<root>/<sid>/files/``（见基类契约）。
 
         候选名从原名人肉递增：**命中且字节全等 → 幂等返回**（不重写，inode /
         mtime 不动）；命中但字节不同（或不是普通文件）→ 下一个 ``stem-N.ext``；
-        不命中 → 原子写。返回的 ``path`` 一律是**绝对路径**（相对 root 时按进程
-        cwd 绝对化——store 的 I/O 本来就相对进程 cwd，agent 侧要能直接读）。
+        不命中 → 原子写。返回的 ``path`` 一律是**绝对形式**（见 :meth:`_absolute`）
+        ——store 的 I/O 本来就相对进程 cwd，而 agent 侧要能直接读。
         """
         safe = validate_file_name(filename)
         candidate = safe
@@ -383,14 +394,14 @@ class FileSessionStore(SessionStore):
             if path.is_file() and path.stat().st_size == len(data):
                 if path.read_bytes() == data:
                     return FileRef(
-                        name=candidate, path=os.path.abspath(path), bytes=len(data)
+                        name=candidate, path=self._absolute(path), bytes=len(data)
                     )
             if path.exists():
                 candidate = disambiguated_file_name(safe, index)
                 index += 1
                 continue
             atomic_write_bytes(path, data)
-            return FileRef(name=candidate, path=os.path.abspath(path), bytes=len(data))
+            return FileRef(name=candidate, path=self._absolute(path), bytes=len(data))
 
     # ── 查询 ──────────────────────────────────
 
