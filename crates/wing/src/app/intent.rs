@@ -50,9 +50,14 @@ pub enum FetchPayload {
     SettingsSaveError { message: String, conflict: bool },
     /// 一条粘贴图片的压缩回执（[`AppIntent::CompressClipboardImage`]）。
     ///
-    /// `Err` 是给 toast 的文案（压缩器错误已格式化）。这个变体**不属于任何会话**：
-    /// 它回来时走 `App::on_clipboard_compressed`，不看会话守卫（草稿跨会话还在）。
-    ClipboardImage(Result<CompressedImage, String>),
+    /// `Err` 是给 toast 的文案（压缩器错误已格式化）。落点靠 `target` 认领：它是
+    /// 那张占位符 chip 的句柄（草稿被清空 / 重写之后句柄作废，结果被丢弃而不是插到
+    /// 别处）。这个变体**不属于任何会话**：它回来时走 `App::on_clipboard_compressed`，
+    /// 不看会话守卫（草稿跨会话还在）。
+    ClipboardImage {
+        target: crate::ui::input_area::ImageChipTarget,
+        result: Result<CompressedImage, String>,
+    },
     /// 一条本地剪贴板读取回执（[`AppIntent::ReadClipboard`]）。
     ///
     /// 与 `ClipboardImage` 同一条契约：结果属于 composer 而不是会话，
@@ -130,7 +135,11 @@ pub enum AppIntent {
     /// [`FetchPayload::ClipboardImage`] 回到 App —— 事件循环只做入队与插 chip。
     /// 选项由 App 在入队时从 `paste.image.*` 取（`PasteImageConfig::compress_options`
     /// 已夹紧越界值），所以改配置只影响之后的那一张。
+    ///
+    /// `target` 是那张**已经在草稿里的**占位符（字节到手时它就在了）：压缩完成
+    /// 只是把它翻成正式 chip，不新建、不挪位置。
     CompressClipboardImage {
+        target: crate::ui::input_area::ImageChipTarget,
         bytes: Vec<u8>,
         options: CompressOptions,
     },

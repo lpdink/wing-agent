@@ -84,7 +84,7 @@ pub(super) enum KeyRoute {
     /// `Ctrl+V` / `super+v` — 读系统剪贴板（L1，见 `util::clipboard_paste`）。
     ///
     /// 应用保留键（与 Ctrl+O 同档）：读取在后台任务上跑，**落点**才做门控 —
-    /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_image`
+    /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_local_image`
     /// （不受挡板，与 OSC 5522 通道同一条既定取舍）。
     PasteClipboard,
     /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它，AD2；
@@ -586,6 +586,15 @@ impl App {
                 }
                 self.popup.active = ActivePopup::None;
                 self.submit_message(payload);
+            }
+            InputAction::SubmitBlocked => {
+                // 草稿里还有在途的图片：提交会把这张图留在草稿里（或被静默吃掉）。
+                // 拦下来，并把「怎么继续」一起说清：等它落地，或者删掉占位符。
+                // 草稿一个字都没动（没有提交），所以这里也不碰 popup / 输入状态。
+                self.show_toast(Toast::info(
+                    "Image still uploading — delete the chip to send without it",
+                    std::time::Duration::from_secs(3),
+                ));
             }
             InputAction::Escape | InputAction::None => {
                 // Update popup based on new text.

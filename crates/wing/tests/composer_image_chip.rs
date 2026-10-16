@@ -73,3 +73,54 @@ fn the_label_reports_the_compressed_size_and_shape() {
         "[Image #1 4×2 7B][Image #2 4×2 1KB][Image #3 4×2 384KB][Image #4 4×2 1.0MB]"
     );
 }
+
+/// The **placeholder** half of the same surface: a chip that has no picture
+/// yet is settled through the handle `insert_pending_image` hands back, and
+/// the draft gate is a plain predicate on it.
+///
+/// A consumer outside the crate (the next step's app wiring) must be able to
+/// drive the whole lifecycle: insert → progress / compressing → settle (or
+/// fail), with the chip never leaving its place.
+#[test]
+fn the_placeholder_surface_is_reachable_through_the_public_api() {
+    use wing::ui::input_area::ImageChipTarget;
+    use wing::ui::input_area::ImageStage;
+
+    let mut input = InputArea::new("");
+    // `set_text` 而不是 `insert_str`：后者按粘贴语义吃掉行尾空白。
+    input.set_text("pic: ");
+    let target: ImageChipTarget = input.insert_pending_image(ImageStage::Receiving { bytes: 0 });
+    assert_eq!(target.number, 1);
+    assert_eq!(input.text(), "pic: [Image #1 ⠋]");
+    assert!(input.has_unsettled_images(), "在途 = 门关着");
+
+    assert!(
+        input
+            .set_image_stage(target, ImageStage::Receiving { bytes: 12_582_912 })
+            .is_some()
+    );
+    assert_eq!(input.text(), "pic: [Image #1 ⠋ ↓12.0MB]");
+    assert!(
+        input
+            .set_image_stage(target, ImageStage::Compressing)
+            .is_some()
+    );
+    assert_eq!(input.text(), "pic: [Image #1 ⠋ 处理中…]");
+
+    assert!(input.complete_image(target, picture(4096)).is_some());
+    assert_eq!(input.text(), "pic: [Image #1 4×2 4KB]");
+    assert!(!input.has_unsettled_images(), "落定 = 门开了");
+
+    // 失败态：同一个句柄、同一个位置，标签换成 ✗；它不是「在途」，不拦发送。
+    let failed = input.insert_pending_image(ImageStage::Compressing);
+    assert!(input.fail_image(failed).is_some());
+    assert_eq!(input.text(), "pic: [Image #1 4×2 4KB][Image #2 ✗]");
+    assert!(!input.has_unsettled_images());
+
+    // 陈旧句柄（草稿被清空之后）什么都不落地。
+    let stale = input.insert_pending_image(ImageStage::Compressing);
+    input.clear();
+    assert!(input.complete_image(stale, picture(8)).is_none());
+    assert_eq!(input.text(), "");
+    assert!(!input.tick_pending_images(std::time::Duration::from_millis(100)));
+}

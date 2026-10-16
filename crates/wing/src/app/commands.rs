@@ -443,8 +443,8 @@ impl App {
         // 粘贴图片的压缩回执属于 **composer**，不属于会话：草稿跨会话还在，而守卫一旦
         // 丢掉它，流水线的「在飞」标记就永远为真（之后所有粘贴都不落地）。所以它在
         // 守卫**之前**分派。
-        if let FetchPayload::ClipboardImage(result) = payload {
-            self.on_clipboard_compressed(result);
+        if let FetchPayload::ClipboardImage { target, result } = payload {
+            self.on_clipboard_compressed(target, result);
             return;
         }
 
@@ -669,7 +669,7 @@ impl App {
                 });
             }
             // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的发送失败）。
-            FetchPayload::ClipboardImage(_)
+            FetchPayload::ClipboardImage { .. }
             | FetchPayload::ClipboardPaste(_)
             | FetchPayload::SendFailed { .. } => {}
         }

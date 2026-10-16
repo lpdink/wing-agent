@@ -217,9 +217,9 @@ fn a_positive_probe_opens_5522_and_serves_a_clipboard_read() {
     let mut delivered = None;
     while Instant::now() < deadline && delivered.is_none() {
         match rx.try_recv() {
-            Ok(wing::tui::TermEvent::Clipboard(Ok(wing::tui::ClipboardPayload::Text(text)))) => {
-                delivered = Some(text)
-            }
+            Ok(wing::tui::TermEvent::Clipboard(wing::tui::ClipboardEvent::Delivered(
+                wing::tui::ClipboardPayload::Text(text),
+            ))) => delivered = Some(text),
             Ok(_) => {}
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
         }

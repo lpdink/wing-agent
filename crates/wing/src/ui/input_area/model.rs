@@ -180,10 +180,15 @@ pub fn text_line(text: &str) -> Line {
 /// other's map. This type is only the *lookup* both kinds share (a label, a
 /// payload) plus the two counters; the model's atomic operations go through it
 /// and never care which side answers.
+///
+/// The registries stay reachable one level down (`pub(super)`) because a chip
+/// kind's own operations — an image's stages, its spinner, its draft epoch —
+/// belong to [`super::image`], which is also where they are implemented: this
+/// module stays the kind-agnostic core.
 #[derive(Debug, Default)]
 pub(crate) struct Chips {
     pastes: Pastes,
-    images: Images,
+    pub(super) images: Images,
 }
 
 impl Chips {
@@ -260,6 +265,29 @@ pub fn flat(line: &[Segment], chips: &Chips) -> String {
     let mut out = String::new();
     for segment in line {
         out.push_str(chips.segment_label(segment));
+    }
+    out
+}
+
+/// The line as the **selection guard** reads it: [`flat`], except that a chip
+/// which has not settled contributes a stable spelling (`[Image #N]`) instead
+/// of its animated label (the spinner glyph, the progress figure).
+///
+/// The guard exists to drop a highlight when the text under it moved; a
+/// pending label is rewritten ~10×/s, and reading that as "the user's text
+/// changed" would abort every drag that outlives one tick. The chip's own
+/// *content* transitions still show up here — settling and failing both leave
+/// the pending set, so the projection changes with them — as does every
+/// character the user types or deletes.
+pub fn flat_stable(line: &[Segment], chips: &Chips) -> String {
+    let mut out = String::new();
+    for segment in line {
+        match segment {
+            Segment::Image(number) if chips.images.is_pending(*number) => {
+                out.push_str(&format!("[Image #{number}]"));
+            }
+            other => out.push_str(chips.segment_label(other)),
+        }
     }
     out
 }
@@ -997,6 +1025,43 @@ mod tests {
 
     fn image_label(chips: &Chips, number: ImageNumber) -> &str {
         chips.label(ChipId::Image(number))
+    }
+
+    /// 选区守卫的投影：在途 chip 的标签（spinner / 进度）读成它的身份 —— 动画不是内容
+    /// 变化；chip 的**阶段跃迁**（落定 / 失败）与用户输入照旧改变投影。
+    #[test]
+    fn flat_stable_hides_an_animating_label_but_not_a_stage_change() {
+        use crate::ui::input_area::ImageStage;
+
+        let mut chips = Chips::default();
+        let pending = chips.images.add_pending(ImageStage::Receiving { bytes: 0 });
+        let line: Line = vec![Segment::Text("see ".into()), Segment::Image(pending)];
+        assert_eq!(flat(&line, &chips), "see [Image #1 ⠋]");
+        assert_eq!(flat_stable(&line, &chips), "see [Image #1]");
+
+        // 进度 / spinner 帧只动标签：守卫的读法不变。
+        chips
+            .images
+            .set_stage(pending, ImageStage::Receiving { bytes: 12_582_912 })
+            .expect("进度");
+        chips
+            .images
+            .tick_spinner(std::time::Duration::from_millis(200));
+        assert_eq!(flat_stable(&line, &chips), "see [Image #1]");
+
+        // 落定：真正的跃迁 —— 守卫的读法必须跟着变（拖选该中止）。
+        chips
+            .images
+            .settle(
+                pending,
+                CompressedImage {
+                    bytes: vec![0xFF; 2048],
+                    width: 4,
+                    height: 2,
+                },
+            )
+            .expect("落定");
+        assert_eq!(flat_stable(&line, &chips), "see [Image #1 4×2 2KB]");
     }
 
     #[test]

@@ -730,6 +730,103 @@ fn test_composer_drag_over_a_chip_copies_the_whole_label() {
     }
 }
 
+/// 在途图片 chip 的标签动画（进度 / spinner，每 ~100ms 一次）**不是**用户的内容变更：
+/// composer 的拖选必须跟着标签平移，而不是被判为「草稿变了」被中止。
+#[test]
+fn test_composer_drag_survives_an_in_flight_chip_label_update() {
+    use crate::tui::ClipboardEvent;
+
+    let mut app = app_with_draft("aa ");
+    // 走 App 的接线（协议机的「读开始」）——占位符与在途句柄一起建立。
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    app.input.insert_str(" zz");
+    let mut terminal = test_terminal(40, 12);
+    draw(&mut app, &mut terminal);
+    let (tx, ty, _) = composer_text(&app);
+    assert_eq!(app.input.text(), "aa [Image #1 ⠋] zz");
+
+    // 拖选 "zz"：`aa ` 占 3 格，标签 12 格，空格 1 格 → 两个 z 在 16 / 17。
+    let first_z = tx + 3 + 12 + 1;
+    assert_eq!(
+        app.handle_mouse(press((first_z, ty))),
+        MouseOutcome::Immediate
+    );
+    assert_eq!(
+        app.handle_mouse(drag((first_z + 1, ty))),
+        MouseOutcome::Coalesced
+    );
+
+    // 传输中的进度：同一个 chip 的标签变长，选区跟着平移。
+    app.handle_clipboard(ClipboardEvent::ReadProgress {
+        received: 256 * 1024,
+    });
+    assert_eq!(app.input.text(), "aa [Image #1 ⠋ ↓256KB] zz");
+    assert_eq!(
+        app.selection.region(),
+        Some(SelectionRegion::Composer),
+        "标签动画不许中止拖选"
+    );
+
+    // 高亮落在平移后的那两个字符上（指针跟着文本走）。
+    draw(&mut app, &mut terminal);
+    // 标签长了多少，选区就该挪多少（两个 z 永远在同一个逻辑位置）。
+    let grew = "aa [Image #1 ⠋ ↓256KB] zz".chars().count() - "aa [Image #1 ⠋] zz".chars().count();
+    let shifted_z = first_z + grew as u16;
+    assert_eq!(
+        reversed_cells(&terminal),
+        vec![(shifted_z, ty), (shifted_z + 1, ty)],
+        "高亮跟着标签平移"
+    );
+
+    app.handle_mouse(release((shifted_z + 1, ty)));
+    match app.drain_intents().as_slice() {
+        [AppIntent::CopyToClipboard(text)] => assert_eq!(text, "zz"),
+        other => panic!("expected the draft fragment, got {other:?}"),
+    }
+}
+
+/// 反向对照：占位符**落定**是真正的内容变化（标签换成图片信息），拖选照旧中止 ——
+/// 守卫只放行"标签在动、内容没动"的那一类改写。
+#[test]
+fn test_composer_selection_aborts_when_a_chip_settles() {
+    use crate::tui::ClipboardEvent;
+    use crate::util::image_compress::CompressedImage;
+
+    let mut app = app_with_draft("aa ");
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    app.input.insert_str(" zz");
+    let mut terminal = test_terminal(40, 12);
+    draw(&mut app, &mut terminal);
+    let (tx, ty, _) = composer_text(&app);
+
+    let first_z = tx + "aa [Image #1 ⠋] ".chars().count() as u16;
+    app.handle_mouse(press((first_z, ty)));
+    app.handle_mouse(drag((first_z + 1, ty)));
+    assert_eq!(app.selection.region(), Some(SelectionRegion::Composer));
+
+    // 图片压缩完成 → 占位符落定（标签换成正式文案）：内容变了。
+    let target = *app.image_reads.front().expect("在途句柄");
+    app.on_clipboard_compressed(
+        target,
+        Ok(CompressedImage {
+            bytes: vec![0xFF; 2048],
+            width: 4,
+            height: 2,
+        }),
+    );
+    draw(&mut app, &mut terminal);
+    assert_eq!(
+        app.selection.region(),
+        None,
+        "落定改变了标签的语义，拖选中止（保守侧）"
+    );
+    assert!(app.input.text().ends_with("[Image #1 4×2 2KB] zz"));
+}
+
 /// Delete (forward) deletes a chip whole from its leading edge — the mirror
 /// of Backspace from the trailing one.
 #[test]

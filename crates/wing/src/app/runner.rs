@@ -200,7 +200,11 @@ pub async fn execute_intent(
                 fetch_tx.clone(),
             );
         }
-        AppIntent::CompressClipboardImage { bytes, options } => {
+        AppIntent::CompressClipboardImage {
+            target,
+            bytes,
+            options,
+        } => {
             let tx = fetch_tx.clone();
             // 结果属于 composer 而不是会话（`handle_fetch_result` 不看会话守卫），
             // 这里的 session_id 只是 `FetchResult` 的形状要求。
@@ -210,7 +214,7 @@ pub async fn execute_intent(
                 let _ = tx
                     .send(FetchResult {
                         session_id,
-                        payload: FetchPayload::ClipboardImage(result),
+                        payload: FetchPayload::ClipboardImage { target, result },
                     })
                     .await;
             });
