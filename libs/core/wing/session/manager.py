@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from wing.chain import TrackedList
 from wing.common.logger import log
 from wing.common.utils import (
+    InvalidInputError,
     generate_session_id,
     is_valid_session_id,
     require_utf8,
@@ -44,7 +45,13 @@ from wing.event_bus import event_bus
 from wing.commands import expand_prompt_command
 from wing.request_context import session_context
 from wing.schema import ChainNode, MediaRef, Message
-from wing.store import ArchivedSession, SessionMetadata, SessionStore
+from wing.store import (
+    ArchivedSession,
+    FileRef,
+    SessionMetadata,
+    SessionStore,
+)
+from wing.store.base import file_too_large_message, validate_file_name
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
@@ -912,6 +919,53 @@ class SessionManager:
         ref = upload_image_ref(data, max_bytes=get_config().images.max_bytes, name=name)
         store.write_media(resolved_id, ref.id, data)
         return ref
+
+    def read_media(self, session_id: str, media_id: str) -> bytes | None:
+        """读取会话媒体对象的字节（B1 读端点；**纯解析 + 存储读，不水合**）。
+
+        与 ``upload_media`` 同款解析：被逐出的会话不该因一次读图被换入内存。字节
+        缺失（合法 id 但对象不在）返回 None——两个 404（会话 / 对象）由路由分开报。
+        老池回退与物化是 ``store.read_media`` 的既有语义，原样透传。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
+            ValueError: media id 不合规（不是 64 位小写 hex——防路径穿越的闸门）
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise self.missing_session_error(session_id)
+        resolved_id, store = resolved
+        return store.read_media(resolved_id, media_id)
+
+    # ── 用户文件（上行字节） ─────────────────
+
+    def upload_file(self, session_id: str, data: bytes, *, name: str) -> FileRef:
+        """把一份用户文件写进会话文件目录并返回**实际落盘**引用。
+
+        与 ``upload_media`` 同一落点（**不水合**、写入解析出的磁盘真名），差别在
+        寻址方式：文件按名寻址且**允许同名多份**（字节不同即 ``-N`` 后缀，绝不覆盖
+        ——链上的 ``[file: …]`` 引用指向既有那份）。``name`` 是必填的：agent 与
+        用户都靠名字识别这个文件（没有名字的文件无法被引用）。
+
+        校验（名字卫生 / 非空 / ≤ ``files.max_bytes``）全部发生在落盘**之前**：
+        失败抛 ``InvalidInputError``，存储零副作用（不建目录、不写字节）。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
+            InvalidInputError: 名字不合规 / 空 body / 超 ``files.max_bytes``
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise self.missing_session_error(session_id)
+        resolved_id, store = resolved
+
+        name = validate_file_name(name)
+        max_bytes = get_config().files.max_bytes
+        if not data:
+            raise InvalidInputError("empty request body: expected file bytes")
+        if len(data) > max_bytes:
+            raise InvalidInputError(file_too_large_message(len(data), max_bytes))
+        return store.write_file(resolved_id, name, data)
 
     # ============================================================
     # 外部方法：逐出（eviction）
