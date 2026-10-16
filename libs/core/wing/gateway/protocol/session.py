@@ -358,6 +358,20 @@ class SessionInfoResponse(BaseModel):
             "根会话为 None。弱引用：不保证父会话当前可解析。"
         ),
     )
+    last_turn_end: str | None = Field(
+        default=None,
+        description=(
+            "最近一次收口轮次的结束时刻（本地 naive ISO，与 last_interaction "
+            "同口径）；还没有收口过（含中断收场——中断不发 turn_result）为 None"
+        ),
+    )
+    last_turn_subtype: str | None = Field(
+        default=None,
+        description=(
+            "该轮 turn_result 的 subtype: success|error_during_execution|"
+            "error_max_turns（逐字透传；与 last_turn_end 同生同灭）"
+        ),
+    )
     status: str = Field(
         default="idle", description="运行时状态: inactive|idle|working|waiting"
     )

@@ -141,6 +141,13 @@ class SessionMetadata(BaseModel):
       **弱引用**：创建时只做格式卫生（同 session id 规则），不校验父是否存在；创建时刻一次写入，此后没有
       修改路径（树是创建时刻的事实）。与 ``forked_from``（内容血统：fork 的源会话）正交——它记录的是
       **创建动作**。收养（create-or-adopt 命中已存在 id）忽略请求里的 parent，绝不改写既有记录。
+    - last_turn_end / last_turn_subtype：最近一次**收口轮次**的结束时刻（本地 naive ISO，与
+      ``last_interaction`` 同口径）与该轮的 ``TurnResultEvent.subtype``（``success`` /
+      ``error_during_execution`` / ``error_max_turns``，逐字透传不收敛）。写点搭回合收口的 usage
+      flush 便车（每轮零新增写盘，见 ``Session._on_usage_event``）；下一次收口覆盖，两轮之间反映
+      上一轮。**中断不写**（中断沿 CancelledError 路径收场、不发 ``turn_result``——用户主动停止
+      不是交付），因此字段只在真的收口过时才有值，旧会话读出 None。跨进程事实：落盘于
+      ``metadata.json``，未加载 / 已逐出的会话读列表同样可得。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -164,6 +171,8 @@ class SessionMetadata(BaseModel):
     tags: list[str] | None = None
     tag_meta: dict[str, "TagMeta"] | None = None
     usage: SessionUsage | None = None
+    last_turn_end: str | None = None
+    last_turn_subtype: str | None = None
 
     @field_validator("tags", mode="after")
     @classmethod

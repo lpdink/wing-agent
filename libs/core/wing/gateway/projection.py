@@ -59,6 +59,8 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         session_name=session.session_name,
         workdir=session.session_workspace,
         parent_session_id=session.parent_session_id,
+        last_turn_end=session.last_turn_end,
+        last_turn_subtype=session.last_turn_subtype,
         status=session.status,
         context_stats=ContextStatsInfo(
             message_count=msg_count,

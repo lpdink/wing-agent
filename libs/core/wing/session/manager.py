@@ -1369,6 +1369,10 @@ class SessionManager:
         同源同刻地投影：在内存的会话取 live agent（`Session.model_binding`），未加载的按 resume 链
         解析盘上记录（`resolve_model_binding`）。两条路都不发网络请求、不建会话。
 
+        `last_turn_end` / `last_turn_subtype` 取自 `summary.metadata`（冷读磁盘，与是否存在内存无关）
+        ——「已完成」收件箱要的就是「未加载 / 已被逐出的会话也带着最近一次收口事实」；旧会话 /
+        没收口过的会话为 None。
+
         ``statuses`` / ``tags`` / ``parent`` 是**子集过滤**（缺省不过滤，同时给出即 AND）：
 
         - ``statuses``：只保留状态落在集合内的行（``None`` = 不过滤；空集合 = 无行）。
@@ -1418,6 +1422,8 @@ class SessionManager:
                         workspace=metadata.workspace,
                         parent_session_id=metadata.parent_session_id,
                         last_interaction=metadata.last_interaction,
+                        last_turn_end=metadata.last_turn_end,
+                        last_turn_subtype=metadata.last_turn_subtype,
                         status=loaded.status if loaded is not None else "inactive",
                         tags=row_tags,
                         tag_meta=sanitize_tag_meta(metadata.tag_meta, row_tags),
