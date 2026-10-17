@@ -73,8 +73,9 @@ impl ChatView {
     /// cells are kept: the caller looks every path up in its own table anyway,
     /// which is both the dedupe and the "already probed" check.
     ///
-    /// Pending user messages are not walked: they render as plain text, so they
-    /// can carry no anchors and no image destinations.
+    /// User messages are not walked for *media* either: their pictures are gateway objects,
+    /// not files, so there is no header to probe (`media::render_body` gets the shape from
+    /// the ref itself). This walk is about local files only.
     pub fn image_candidates(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for cell in &self.cells {

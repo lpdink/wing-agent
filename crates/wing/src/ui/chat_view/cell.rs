@@ -308,13 +308,7 @@ impl Submission {
         content: impl Into<String>,
         images: Vec<crate::util::image_compress::CompressedImage>,
     ) -> Self {
-        let media: Vec<crate::protocol::MediaRef> =
-            images.iter().map(media::predicted_media).collect();
-        debug_assert_eq!(
-            media.len(),
-            images.len(),
-            "every picture carries the ref it will get"
-        );
+        let media = images.iter().map(media::predicted_media).collect();
         Self {
             content: content.into(),
             images,

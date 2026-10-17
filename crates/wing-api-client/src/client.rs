@@ -9,6 +9,13 @@ use crate::models::*;
 /// Gateway 默认端口。
 pub const DEFAULT_PORT: u16 = 32523;
 
+/// 字节直出端点（`GET /api/session/media`）的响应体上限。
+///
+/// 16 MiB = 图片管线的单文件上限（`ui::image::DEFAULT_FILE_BYTES`）：比它更大的字节到本机
+/// 也解码不了，缓冲到那个尺寸之上只是白占内存。远端若真配了更大的 `images.max_bytes`，
+/// 这张图在客户端降级为「取不到」（captions 留着），而不是把进程的内存交给它。
+pub const MAX_MEDIA_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Wing Gateway HTTP API 客户端。
 ///
 /// # Example
@@ -200,6 +207,9 @@ impl GatewayClient {
 
     /// 读取媒体对象的原始字节（图片预览的字节源）。
     ///
+    /// 响应体有客户端上限（[`MAX_MEDIA_BODY_BYTES`]）：`Content-Length` 先看，其次流式累积，
+    /// 超了立刻中止——远端（或中间层）可以无限流，缓冲不能跟着它长。
+    ///
     /// `GET /api/session/media?session_id=<sid>&media_id=<id>`，响应是**原始字节**
     /// （非 JSON）。`media_id` 必须是 64 位小写 hex；非法 id 与对象不存在同价 404
     /// （网关不给探测反馈）。鉴权开启时请求头照常生效——这条通道给 TUI 画消息里的图
@@ -219,10 +229,28 @@ impl GatewayClient {
             .send()
             .await?;
 
+        let mut resp = resp;
         if !resp.status().is_success() {
             return Err(extract_api_error(resp).await);
         }
-        Ok(resp.bytes().await?.to_vec())
+        if resp
+            .content_length()
+            .is_some_and(|len| len > MAX_MEDIA_BODY_BYTES as u64)
+        {
+            return Err(ApiClientError::TooLarge {
+                limit: MAX_MEDIA_BODY_BYTES,
+            });
+        }
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if body.len() + chunk.len() > MAX_MEDIA_BODY_BYTES {
+                return Err(ApiClientError::TooLarge {
+                    limit: MAX_MEDIA_BODY_BYTES,
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     // ============================================================
@@ -1223,6 +1251,39 @@ mod tests {
             "字节通道走请求头鉴权（?api_key= 是给 <img> 的）"
         );
         assert!(recorded[0].body_raw.is_empty(), "读端点没有请求体");
+    }
+
+    /// 超限在**读之前**就拒（`Content-Length` 预检）：远端可以无限流，缓冲不能跟着它长。
+    #[tokio::test]
+    async fn read_media_refuses_an_oversize_body_before_buffering_it() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            // 声明的长度超上限，一个字节的 body 都不发。
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n",
+                MAX_MEDIA_BODY_BYTES + 1
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.flush().await;
+            // 不关连接：真去收 body 的调用会卡住并超时（反面证据）。
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let client = GatewayClient::new(url, None).unwrap();
+        let err = client.read_media("sid", &"a".repeat(64)).await.unwrap_err();
+        assert!(
+            matches!(err, ApiClientError::TooLarge { limit } if limit == MAX_MEDIA_BODY_BYTES),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

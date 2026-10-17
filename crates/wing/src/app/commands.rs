@@ -465,6 +465,17 @@ impl App {
             return;
         }
 
+        // 媒体图的字节回执也在守卫**之前**：字节是内容寻址的（id 就是内容），与会话无关，
+        // 而 lane 的「在飞」只在 `supply` / `fail` 里按 id 撤销——守卫丢掉它，这几张图就会
+        // 被永久跳过（切回原会话也只有 caption）。同 `ClipboardImage` 的先例。
+        if let FetchPayload::MediaBytes { media_id, result } = payload {
+            match result {
+                Ok(bytes) => self.images.supply_media(&media_id, bytes),
+                Err(_) => self.images.media_failed(&media_id),
+            }
+            return;
+        }
+
         // Session guard: discard results from a previous session.
         if session_id != self.session_id {
             tracing::debug!(
@@ -664,23 +675,18 @@ impl App {
             FetchPayload::SettingsSaved(response) => {
                 self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Saved(*response));
             }
-            FetchPayload::MediaBytes { media_id, result } => {
-                // 字节到手 → 下一帧编码并画出来；抓不到 → 记下来（离开视口再重试）。
-                match result {
-                    Ok(bytes) => self.images.supply_media(&media_id, bytes),
-                    Err(_) => self.images.media_failed(&media_id),
-                }
-            }
             FetchPayload::SettingsSaveError { message, conflict } => {
                 self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Failed {
                     message,
                     conflict,
                 });
             }
-            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的发送失败）。
+            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的
+            // 发送失败 / 内容寻址的媒体字节）。
             FetchPayload::ClipboardImage { .. }
             | FetchPayload::ClipboardPaste(_)
-            | FetchPayload::SendFailed { .. } => {}
+            | FetchPayload::SendFailed { .. }
+            | FetchPayload::MediaBytes { .. } => {}
         }
     }
 }

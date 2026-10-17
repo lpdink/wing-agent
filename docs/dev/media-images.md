@@ -189,7 +189,7 @@ FrameImage{ source: PictureSource::Media(id) }              ui/chat_view/image.r
    ▼
 app/images/media.rs：屏幕上有、本机没有、也没在飞 → AppIntent::LoadMedia
    ▼
-后台 GET /api/session/media?session_id&media_id → FetchPayload::MediaBytes
+后台 GET /api/session/media?session_id&media_id（响应体客户端上限 16 MiB）→ FetchPayload::MediaBytes
    ▼
 字节缓存（目标 max(8, 在屏张数)、硬上限 24 MiB）→ ImageStore::request_media(id, target, bytes) → 编码 → 画出来
 ```

@@ -291,9 +291,12 @@ impl Images {
         // picture stops being a *link*, and shrinking the table would flip it
         // back); a rebuild starts a new generation, so it starts empty.
         self.known.clear();
-        // A failed media fetch gets another chance too (the build may have been transient);
-        // the bytes themselves are content-addressed and stay cached.
-        self.media.forget_failures();
+        // The media half restarts with the new content: the old frame's target set, its
+        // in-flight set and its failure records all belong to the previous generation (a
+        // stale id would otherwise be asked for under the new session id, and a receipt
+        // dropped by a session switch must not leave an id "in flight" forever). The bytes
+        // themselves are content-addressed and stay cached.
+        self.media.forget_content();
         self.rebuild_opts();
     }
 

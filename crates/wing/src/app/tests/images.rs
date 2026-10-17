@@ -2369,3 +2369,37 @@ async fn the_media_fetch_asks_the_gateway_and_reports_the_bytes_back() {
         crate::app::intent::FetchPayload::MediaBytes { result: Err(_), .. }
     ));
 }
+
+/// 换会话期间回来的抓取回执不能被会话守卫丢掉（评审 [B]1）：字节是内容寻址的，而 lane 的
+/// 「在飞」只在回执里按 id 撤销——丢一次就永久漏一张，切回原会话也只有空盒子。
+#[test]
+fn a_media_receipt_survives_a_session_switch() {
+    let bytes = png_bytes(200, 150);
+    let picture = media_ref(&bytes, 200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 32);
+    // 第一帧：登记在飞（抓取意图发出去）。
+    frame(&mut app, &mut term);
+    app.drain_intents();
+
+    // 回执在半路，用户切走了会话。
+    app.session_id = "another-session".into();
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::MediaBytes {
+            media_id: picture.id.clone(),
+            result: Ok(std::sync::Arc::new(bytes)),
+        },
+    });
+
+    // 切回来：字节已经在 lane 里，图立刻能画（不是「永远空盒子」）。
+    app.session_id = "test-session".into();
+    let buf = draw_until(
+        &mut app,
+        &mut term,
+        "the picture after the switch",
+        |_, buf| has_placeholder(buf),
+    );
+    assert!(placeholder_rect(&buf).is_some());
+}

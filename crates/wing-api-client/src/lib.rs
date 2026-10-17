@@ -18,5 +18,5 @@ mod error;
 pub mod models;
 pub mod tool_host;
 
-pub use client::{DEFAULT_PORT, GatewayClient};
+pub use client::{DEFAULT_PORT, GatewayClient, MAX_MEDIA_BODY_BYTES};
 pub use error::ApiClientError;

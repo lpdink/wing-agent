@@ -14,7 +14,9 @@
 //! 重抓」与一直留着是等价的，只是内存更省。
 //!
 //! **字节缓存的边界**：在屏的图不受张数目标约束（同屏超过目标时，纯 LRU 会变成每帧
-//! 重抓的自激环），离屏的按最久未用淘汰；`BYTE_BUDGET` 是硬上限，内存有界优先。
+//! 重抓的自激环），离屏的按最久未用淘汰；`BYTE_BUDGET` 是硬上限——真要在屏的图也装不下
+//! 时，被挤掉的那张在这一代内容里不再要（否则同样是每帧重抓的自激环），屏幕上看是它退回
+//! caption，滚出去再滚回来就恢复。
 //!
 //! **失败是一种状态**：抓不到（对象缺失 / 归档 / 网关不可达）记在 `failed` 里，本代内容内
 //! 不再自动重试——气泡里那一张保持 caption（不空白、不闪）。它会在图片**离开视口**时被
@@ -52,7 +54,8 @@ pub(crate) struct MediaLane {
     bytes_total: usize,
     /// 在飞的抓取（每个 id 至多一个请求；回执按 id 认领）。
     inflight: HashSet<String>,
-    /// 抓取失败（见模块文档的「失败是一种状态」）。
+    /// 「这一代内容里不再向网关要」：抓失败，或字节被预算挤出缓存（见
+    /// [`MediaLane::evict_one`]）。离开视口时忘掉。
     failed: HashSet<String>,
 }
 
@@ -102,19 +105,32 @@ impl MediaLane {
     }
 
     /// 挤掉一条字节缓存：**离屏的**优先（最久未用优先），全都在屏幕上时退化为纯 LRU。
+    ///
+    /// 被挤掉的**在屏**条目记成「不再要」：它只在字节预算（硬上限）下才会发生——不记的话
+    /// 「挤出 → 下一帧重抓 → 回执把它挤回来」是一个不需要用户输入的自激环（同屏原始字节
+    /// 大于预算时每帧一次 GET + 重编码）。屏幕上看：那张图退回 caption，滚出去再滚回来就好。
     fn evict_one(&mut self) {
         let index = self
             .bytes
             .iter()
             .position(|(key, _)| !self.watch.contains(key))
             .unwrap_or(0);
-        let (_, evicted) = self.bytes.remove(index);
+        let (victim, evicted) = self.bytes.remove(index);
         self.bytes_total = self.bytes_total.saturating_sub(evicted.len());
+        if self.watch.contains(&victim) {
+            self.record(&victim);
+        }
     }
 
     /// 一张图抓失败了。
     pub(crate) fn fail(&mut self, id: &str) {
         self.inflight.remove(id);
+        self.record(id);
+    }
+
+    /// 「这一代内容里不再向网关要这张」：抓失败，或它的字节被预算挤出了缓存（见
+    /// [`MediaLane::evict_one`]）。离开视口时忘掉（[`MediaLane::observe`]），滚回来再试。
+    fn record(&mut self, id: &str) {
         if self.failed.len() >= MAX_FAILED {
             self.failed.clear();
         }
@@ -148,10 +164,14 @@ impl MediaLane {
         out
     }
 
-    /// 内容重建（切会话 / 压缩 / rewind）：忘掉失败，让下一帧重新试。
+    /// 内容重建（切会话 / 压缩 / rewind）：屏幕目标集与失败记录都归零，让下一帧重来。
     ///
     /// 字节**不丢**：内容是内容寻址的，同一份字节在重建之后依然有效（LRU 会自己淘汰）。
-    pub(crate) fn forget_failures(&mut self) {
+    /// 在飞集合也清掉——重建之后「还在飞」的那张要么已经落地（回执按 id 幂等），要么会在
+    /// 下一次 `requests` 里重新问一次（内容寻址：重复抓同一份字节没有副作用）。
+    pub(crate) fn forget_content(&mut self) {
+        self.watch.clear();
+        self.inflight.clear();
         self.failed.clear();
     }
 
@@ -213,15 +233,37 @@ mod tests {
     }
 
     #[test]
-    fn a_content_rebuild_forgets_failures_but_keeps_the_bytes() {
+    fn a_content_rebuild_forgets_the_generation_but_keeps_the_bytes() {
         let mut lane = lane_with(&["a", "b"]);
         lane.requests();
         lane.supply("a", Arc::new(vec![0; 4]));
         lane.fail("b");
-        lane.forget_failures();
+        lane.forget_content();
         assert!(!lane.is_failed("b"));
         assert_eq!(lane.cached(), 1, "字节是内容寻址的，重建之后依然有效");
-        assert_eq!(lane.requests(), vec!["b"], "失败的那张重新试");
+        assert_eq!(lane.watch.len(), 0, "旧一代的屏幕目标集不能带进新内容");
+        // 新一代观察到同样的图：失败的那张重新试，已缓存的那张不问。
+        lane.observe(["a".to_string(), "b".to_string()]);
+        assert_eq!(lane.requests(), vec!["b"]);
+    }
+
+    /// 字节预算（硬上限）被逼到要挤在屏的图时：那一张在这一代里不再要——否则「挤出 →
+    /// 下一帧重抓 → 回执再把它挤回来」是一个不需要用户输入的自激环。
+    #[test]
+    fn a_picture_evicted_by_the_byte_budget_is_not_asked_for_again_while_on_screen() {
+        let mut lane = MediaLane::default();
+        lane.observe(["a".to_string(), "b".to_string()]);
+        // 两张都在屏上，加起来超预算：后进的把先前的挤出缓存。
+        lane.supply("a", Arc::new(vec![0; BYTE_BUDGET / 2 + 1]));
+        lane.supply("b", Arc::new(vec![0; BYTE_BUDGET / 2 + 1]));
+        assert_eq!(lane.cached(), 1, "预算硬上限：装不下两张");
+        assert!(lane.bytes("a").is_none(), "最久未用的那张先走");
+        assert!(lane.is_failed("a"), "被预算挤掉的在屏图记成「不再要」");
+        assert_eq!(lane.requests(), Vec::<String>::new(), "不形成抓取环");
+        // 滚出视口 → 忘掉那条记录；滚回来 → 重新试一次。
+        lane.observe(["b".to_string()]);
+        lane.observe(["a".to_string(), "b".to_string()]);
+        assert_eq!(lane.requests(), vec!["a"]);
     }
 
     #[test]
