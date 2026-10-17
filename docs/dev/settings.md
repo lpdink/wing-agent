@@ -25,13 +25,13 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 
 | 元信息 | 含义 |
 |---|---|
-| `doc` | 一行摘要（必填）：面板行内提示 + YAML 注释 |
-| `notes` | 多行详解：面板详情栏 + YAML 块注释（按 `\n` 切行） |
+| `doc` | 一行摘要（必填）：面板行内提示 / 详情栏标题（**不进 config.yaml**） |
+| `notes` | 多行详解：面板详情栏（按 `\n` 切行；**不进 config.yaml**） |
 | `title` | 人类标签；缺省 = 字段名 |
 | `apply` | 生效域（见 §7）；**门禁强制每个 `S(` 调用显式写出** |
 | `secret` | 密文：只写不回显（见 §6） |
 | `choices` | 枚举值域：值 → 含义（面板的内联选择项；`Literal` 之外的补充） |
-| `example` | 示例值（详情栏 + YAML `# e.g. …` 注释） |
+| `example` | 示例值（面板详情栏；**不进 config.yaml**） |
 | `editable` | `false` = 面板灰显只读 |
 | `summary_fields` | 列表项标题行的字段名序（`providers` / `agents` / `providers[].models` 各声明一组） |
 | `min_items` / `max_items` | 列表规模**声明**（"不得为空" = `min_items: 1`）；强制仍归跨字段检查 |
@@ -48,7 +48,7 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 产物 | 模块 | 消费方 |
 |---|---|---|
 | 设置目录树（`SettingNode`）+ 路径文法（`parse_path`） | `config/catalog.py` | `GET /api/settings/schema`、TUI 面板、`wing config` CLI、`emit.py` 自己 |
-| 规范形 YAML（注释来自声明） | `config/emit.py` | 首启模板（`loader._create_config_template`）与保存写盘（`apply_settings` 第 ⑥ 步）**共用同一个函数** |
+| 规范形 YAML（数据 + 注释掉的默认值） | `config/emit.py` | 首启模板（`loader._create_config_template`）与保存写盘（`apply_settings` 第 ⑥ 步）**共用同一个函数** |
 | 跨字段检查（`ConfigProblem` / `check` 纯函数） | `config/problems.py` | 加载期（`Config._validate_config` 只 raise 第一个）+ 面板 / `status` / `doctor`（全部问题 + 精确路径） |
 
 **`config/default_config.py`（247 行手写 YAML 模板）已删除**，`# SYNC` 那套纪律随之死亡：
@@ -86,8 +86,8 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 消费方 | 读什么 |
 |---|---|
 | `GET /api/settings/schema` | `groups[]`（id / title / doc / members）——**前端左列锚点的唯一来源**，前端零硬编码 |
-| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（emitter 的一条块注释） |
-| `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**，分隔行按组的首次出现发一次（分组表管界面顺序，不管文件顺序） |
+| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（面板左栏锚点的说明；不进 config.yaml） |
+| `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**（分组表管界面顺序，不管文件顺序；同组成员必须连续，见门禁） |
 
 门禁（`tests/test_config_groups.py`）：id / title 唯一、成员非空且都是真实顶层字段、
 每个顶层字段**恰好**属于一个组（漏 = 界面里无处可去，重复 = 两份真相）、顺序钉死。
@@ -107,10 +107,10 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 门禁 | 位置 | 钉住 |
 |---|---|---|
 | 每个配置字段必须声明 | `libs/core/tests/test_config_spec.py` | 递归遍历 `Config` 及嵌套模型：字段缺声明 / `apply` 没显式写（AST 检查）/ 字段 docstring 残留 / `secret` 不是 `str` / `choices` 缺 `Literal` 的键 → 红；**声明层不再携带分组**（AST 拒绝 `S(section=...)`） |
-| 分组是一张完整的划分 | `libs/core/tests/test_config_groups.py` | 顺序钉死、id / title 唯一、成员都是真实顶层字段、每个顶层字段**恰好**属于一个组；坏表（漏 / 重 / 幻影 / 空组）→ `validate_groups` 抛；目录投影（`section` = title、`section_doc` 只在首成员）+ wire 形状 |
+| 分组是一张完整的划分 | `libs/core/tests/test_config_groups.py` | 顺序钉死、id / title 唯一、成员都是真实顶层字段、每个顶层字段**恰好**属于一个组、**同组成员在声明序里连续**（否则文件里会出现两条同名分隔行）；坏表（漏 / 重 / 幻影 / 空组 / 不连续）→ `validate_groups` 抛；目录投影（`section` = title、`section_doc` 只在首成员）+ wire 形状 |
 | 分组的 wire 形状 | probe `scenarios/test_settings_groups.py` | 真网关的 `groups[]`（顺序 / 成员 / 与节点 `section` 同源）+ 零迁移与保存回归（改跨旧分组的键、文件顶层键不变、分隔行跟着新分组） |
 | Interface 根双向对账 | `crates/wing/src/config/catalog.rs` 的单测 | **穷尽 struct 字面量**构造 `AppConfig` 全字段样本（加字段即编译失败）→ catalog 缺声明 / 声明了幻影键 → 红；`interface_groups()` 的成员 = catalog root 的子节点 |
-| 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 + **分隔行恰好是分组表的 title 序** |
+| 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个有值可展示的声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 + **分隔行恰好是分组表的 title 序** + **声明层的文案一条都不出现** |
 
 `config/catalog.rs` 是 Rust 侧的**声明表**（后端不知道 TUI 的类型），与后端 catalog **同构**：
 同一个 `SettingNode` 类型（来自 `wing-api-client`），所以树 widget 零分支。Interface 根 22 个叶子 =
@@ -120,25 +120,34 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 ## 3. 稀疏文档与「缺席即默认」
 
 `config.yaml` 是**稀疏文档**：只写用户显式设置的键。没有写下的键 = 跟随声明默认值，
-升级后未钉住的值会跟随新默认。两条推论写进产品的每一层：
+升级后未钉住的值会跟随新默认。三条推论写进产品的每一层：
 
-- **emitter 把缺席且有默认的值写成注释掉的行**（`# timeout_first_chunk: 300.0`）——文件自文档，
-  想钉住就取消注释，想跟随升级就留着注释；
+- **emitter 把缺席且有默认的值写成注释掉的行**（`# timeout_first_chunk: 300.0`）——想钉住就
+  取消注释，想跟随升级就留着注释；
+- **文件里只有两类注释**：分组分隔行与注释掉的默认值。字段的 `doc` / `notes` / `example` /
+  生效域 / 密文说明**一概不写进文件**——它们的归宿是设置面板与 `wing config`（同一份声明）。
+  散文注释曾把 264 行数据的配置写成 1217 行（其中 938 行是注释），手动改配置的人看到的是
+  噪声而不是指引；机制级红线在 `wing-probe` 的 `test_settings_file_shape.py`（保存后文件里
+  不许出现任何 schema 文案）；
 - **「复位为默认」= 从文档里移除该键**（面板的 `r`、CLI 的 `unset`），不是往文件里写默认值。
 
 emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘都是它的产物）：
 
 | 规则 | 行为 |
 |---|---|
-| 文件头 | 4 行注释（产品名 / 文件路径 / "推荐在 TUI 里用 `/settings` 编辑" / 无时间戳——避免 diff 噪声） |
-| 分组 | 按业务分组（§1.1）分段：`# ── Name ───` 分隔行 + `section_doc`，按组的**首次出现**发一次（键序恒为声明序） |
-| 注释位置 | 文档注释在值**上方**（`doc` → `notes` → `# e.g. …` → 生效域 → 密钥说明），不用行尾注释 |
-| 缺席有默认 | 标量写成注释行；object 整棵子树注释；list / map 注释成 `# key: []` / `# key: {}` |
+| 文件头 | 1 行（产品名 + 文件位置）；**不写时间戳**——它会让每次保存都产生 diff 噪声 |
+| 分组 | 按业务分组（§1.1）分段：`# ── Name ───` 分隔行（每组一条；`validate_groups` 强制同组成员在声明序里连续）；键序恒为声明序；正文为空的分组连分隔行一起省掉 |
+| 有值 | 原样写出（标量 / `key: {}` / `key: []` / 子树） |
+| 缺席有默认 | 写成注释行：标量 `# key: value`；object 整棵子树注释；list / map `# key: []` / `# key: {}` |
+| 缺席且默认是 `null` | **不写**（`null` 没有可展示的事实；`id` / `description` / `max_turns` 这类可选键靠面板发现） |
+| 缺席、可空、无默认值 | 写一行裸注释 `# key: null`（取消注释 = 显式 null = 与缺席等价；TUI 的 `api_key` 是唯一实例） |
 | 缺席必填 | 写出键 + 空值（`""` / `0` / `false` / `[]` / `{}`）——它就是一条 problem，向导据此指路 |
-| 生效域标记 | `restart` → `# 生效：需重启网关`；`next_session` → `# 生效：新会话`；`hot` 不加（避免噪声） |
-| 密文 | 值照写（文件本来就是明文密钥的家）+ 注释 `# 密钥：面板里只写不回显（末 4 位提示）` |
-| 空容器 | 必须显式写 `key: {}` / `key: []`（只写 `key:` 是 YAML null，round-trip 会破） |
+| 列表项 | 只展开**第一项**的缺席默认值：条目级开关一次可发现，又不随条目数膨胀（40 个模型不再重复 40 遍） |
+| 空容器 | 必须显式写 `key: {}` / `key: []`（只写 `key:` 是 YAML null，round-trip 会破）——注释块里同理 |
 | 引号 | 能不加就不加（判据 = 不加引号能否原样读回）；需要时双引号 + JSON 转义，非 ASCII 原样 |
+
+**取消注释 = 一份合法值**：注释块里的每一行都是它所在键的完整默认值（object 整块注释、
+空容器显式写 `{}` / `[]`），所以整份文件的注释全部取消后仍是一份可解析的配置。
 
 **未知键保留（前向兼容）**：`config/document.py` 读取时把 schema 之外的键收进 `extra`
 （**结构性三元组** `ExtraKey(父容器前缀, 原始键名, 值)`，如 `("gateway", "weird", …)` /
@@ -151,7 +160,7 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 代价：`get` 不下发未知键（面板没有节点可渲染它们），客户端无法删除它们。
 
 **`.bak`**：保存前把现有文件**字节级**复制到 `config.yaml.bak`（覆盖式，只留最近一份；
-读不出文档的坏文件也逐字留证）。它是"第一次经面板保存会把手写注释换成声明生成的注释"的兜底。
+读不出文档的坏文件也逐字留证）。它是"第一次经面板保存会把手写注释规范化"的兜底。
 
 ## 4. 路径文法（catalog 与 values 共用）
 
@@ -564,9 +573,10 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 |---|---|
 | `extra_body` 只有单行 JSON 编辑器 | freeform map 不能编辑多行 YAML 块、不能带注释；CLI 侧同样不可寻址其内部键 |
 | YAML 锚点 / 别名会丢失 | 解析后写回规范形，锚点不保留（emitter 是"声明 → 文本"的函数） |
-| 首次经面板保存会换掉手写注释 | 注释来自声明、永远更新；`.bak` 兜底 |
-| 生成模板里"取消注释"对自己是误导的 | 注释行的形态对**单行标量**成立；嵌套块（`colors:` 等）取消注释没有意义——推荐用面板的"复位为默认"逐项调整（TUI 模板文件头的那句提示只对单行成立） |
-| 两个 `config.yaml` 的注释语言不一致 | Gateway 侧全中文（面板直接展示这些文案）；TUI 侧字段 `doc` 沿用既有的英文、新增 `notes` 用中文 |
+| 首次经面板保存会规范化手写注释 | 手写注释一概不保留（emitter 是「稀疏文档 → 文本」的函数）；`.bak` 兜底 |
+| 注释掉的默认值只写在**用户没写过的键**上 | 已写下的键不会有第二条提示；想改值就改值，想跟随升级就先 `unset`（= 从文档移除） |
+| TUI 的 `api_key` 在文件里是 `# api_key: null` | 它可空但没有默认值：写一行裸注释保住可发现性（取消注释 = 显式 null = 与缺席等价）。给它编一个 `""` 默认值会把面板的「未设置」变成「空 + default」，得不偿失——默认值归声明，展示形态归 emitter |
+| 两个 `config.yaml` 的注释语言 | 文件里只剩分隔行与注释掉的默认值（无散文）；字段文案只活在两个 catalog 的 `doc` / `notes` 里（Gateway 侧全中文，TUI 侧字段 `doc` 沿用既有的英文） |
 | `--dump-config` **默认掩码**，掩码后的输出不是 round-trip artifact | `wing tui --dump-config` 打印的是**当前文件**的规范形（本 PR 之前它打印的是默认模板，从不带用户密钥），因此密文叶子默认写成 `api_key: null` + 一行指向真值的注释；round-trip 要显式 `--show-secrets`。**掩码输出重定向回文件会让密钥变成"缺席"**，这是默认掩码的必然代价。保存路径用的是 `DumpMode::Raw`（写真值），**别把两者"顺手统一"** |
 | 颜色槽"注释掉的默认值"是 `preset: wing` 下的值 | 改 `preset` 后它们仅供参考（不随预设重算） |
 | setup mode 下非 loopback 无法修复 | 刻意的安全姿态（§8）：免 key 还要求**网关自身绑定 loopback**，所以把网关绑到 `0.0.0.0` 时连本机来源也不放行（防本机转发洗白）。修法：把 `gateway.host` 改回 `127.0.0.1` 重启，或手工编辑 `config.yaml` |

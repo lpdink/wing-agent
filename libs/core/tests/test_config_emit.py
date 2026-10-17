@@ -1,17 +1,18 @@
 # tests/test_config_emit.py
-"""emit（``config/emit.py``）的单测 —— 规范形 YAML 的 round-trip 与八条输出规则。
+"""emit（``config/emit.py``）的单测 —— 规范形 YAML 的 round-trip 与输出规则。
 
-覆盖面（对应 02 design.md 的 D9–D13）：
+覆盖面：
 
 1. **round-trip**：``emit → yaml.safe_load`` 与输入稀疏文档逐项相等（含多级嵌套列表、空容器、
    多行字符串、非 ASCII、需要引号的值）；
 2. **幂等**：``emit(load(emit(doc))) == emit(doc)``；
-3. 注释就位：``doc`` 在值上方、``notes`` 逐行、``example`` 追加、section 分隔行与 ``section_doc``；
-4. 缺席且有默认 → **注释掉的默认值**；缺席且必填 → 不注释的空值；
-5. ``apply`` 标记（restart / next_session 有，hot 没有）与 secret 说明行；
-6. 未知键保留（父容器末尾 + 标记注释）；
-7. ``default_document()`` 的产出 = 首启模板（两个空列表 + 全套注释、无 ``ChangeHere``）；
-8. **模板可用性**：喂给 ``Config(**raw)`` 只失败在「providers / agents 不得为空」这两条上。
+3. 注释只有两类：分组分隔行与注释掉的默认值；声明层的 ``doc`` / ``notes`` / ``example`` /
+   生效域 / 密文说明一条都不进文件；
+4. 缺席且有默认 → **注释掉的默认值**（列表项只展开第一项）；默认是 ``null`` → 不写；
+   缺席且必填 → 不注释的空值；
+5. 未知键保留（父容器末尾 + 标记注释，含「父容器是显式空对象」的边界）；
+6. ``default_document()`` 的产出 = 首启模板（两个空列表 + 注释掉的默认值、无 ``ChangeHere``）；
+7. **模板可用性**：喂给 ``Config(**raw)`` 只失败在「providers / agents 不得为空」这两条上。
 """
 
 from __future__ import annotations
@@ -98,28 +99,6 @@ def _minimal_document() -> dict:
     }
 
 
-def _blocks(text: str) -> list[list[str]]:
-    """按空行切块（注释与字段成组，便于断言"哪个注释挨着哪个值"）。"""
-    blocks: list[list[str]] = [[]]
-    for line in text.splitlines():
-        if line.strip():
-            blocks[-1].append(line)
-        else:
-            blocks.append([])
-    return [block for block in blocks if block]
-
-
-def _block_of(text: str, needle: str) -> list[str]:
-    for block in _blocks(text):
-        if any(needle in line for line in block):
-            return block
-    raise AssertionError(f"输出里没有包含 {needle!r} 的块")
-
-
-def _has(block: list[str], needle: str) -> bool:
-    return any(needle in line for line in block)
-
-
 def _declared_nodes(node: SettingNode):
     """声明节点（不含 root / 元素模板 / 变体）：缺省的顶层与嵌套字段。"""
     if node.path != "config" and not node.path.endswith("[]"):
@@ -201,34 +180,71 @@ def test_empty_document_falls_back_to_required_empties(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. 注释来自声明
+# 3. 文件里只有两类注释：分组分隔行 + 注释掉的默认值
+#
+# 字段的 doc / notes / example / 生效域 / 密文说明归设置面板与 `wing config` 所有
+# （同一个声明层），文件只承载数据与可发现性——散文注释会把几十行的配置撑成上千行。
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-def test_doc_and_notes_sit_above_the_value(provider_text: str) -> None:
-    block = _block_of(provider_text, "timeout_first_chunk")
-    assert _has(block, "# 流式首块超时（秒）")
-    assert _has(block, "# 这是**响应头**超时")
-    # 注释在值上方（不用行尾注释）
-    index = next(i for i, line in enumerate(block) if "timeout_first_chunk" in line)
-    assert block[index].lstrip().startswith("#")
+_COMMENT_MARKERS = ("e.g. ", "生效：", "密钥：")
 
 
-def test_example_line_is_appended(provider_text: str) -> None:
-    block = _block_of(provider_text, "base_url: b")
-    assert _has(block, "# e.g. https://api.openai.com/v1")
+def test_no_prose_comments_from_the_declarations(
+    catalog: SettingNode, template: str, provider_text: str
+) -> None:
+    """声明层的文案一个都不许进文件（反查全部 doc / notes，不是抽查几句）。"""
+    prose: list[str] = []
+    for node in _declared_nodes(catalog):
+        if node.doc:
+            prose.append(node.doc)
+        prose.extend(node.notes)
+        if node.example:
+            prose.append(f"e.g. {node.example}")
+    assert len(prose) > 50, "声明层的文案是这份测试的前提，读不到说明遍历坏了"
+    for text in (template, provider_text):
+        for line in prose:
+            assert line not in text, line
+        for marker in _COMMENT_MARKERS:
+            assert marker not in text, marker
 
 
-def test_section_banner_and_section_doc(template: str) -> None:
+def test_every_comment_line_is_a_banner_or_a_keyed_value(template: str) -> None:
+    """注释行只有三种形态：文件头那一行、`# ── Name ──…` 分隔行、一条 `key:` 行。"""
+    lines = template.splitlines()
+    assert lines[0].startswith("# wing-agent configuration")
+    for line in lines[1:]:
+        if not line.lstrip().startswith("#"):
+            continue
+        stripped = line.lstrip()
+        assert stripped.startswith("# ── ") or ":" in stripped, line
+
+
+def test_section_banners_have_no_section_doc(template: str) -> None:
     assert "# ── Providers ─" in template
     assert "# ── Advanced ─" in template
     lines = template.splitlines()
     banner = lines.index(
         next(line for line in lines if line.startswith("# ── Sessions"))
     )
-    assert lines[banner + 1] == "# 会话内存态回收（磁盘状态一概不动）"
+    assert lines[banner + 1] == "# sessions:"  # 分隔行之后直接是键，没有分组说明
     # 分隔行宽度固定（旧模板的观感）
     assert len(lines[banner]) == 64
+
+
+def test_empty_section_drops_its_banner() -> None:
+    """正文为空的分组连分隔行一起省掉（一条没有内容的横幅只会让人以为文件被截断）。"""
+    mini = create_model(
+        "_M",
+        a=(bool, S(doc="开关", default=True)),
+        b=(str | None, S(doc="可空（默认 null → 不写）", default=None)),
+    )
+    catalog = build_catalog(mini)
+    catalog.children[0].section = "First"
+    catalog.children[1].section = "Second"
+    text = emit_config_yaml({}, catalog)
+    assert "# ── First" in text
+    assert "# ── Second" not in text, text
+    assert "# a: true" in text
 
 
 def test_section_banners_are_exactly_the_group_table(template: str) -> None:
@@ -241,14 +257,12 @@ def test_section_banners_are_exactly_the_group_table(template: str) -> None:
     assert banners == [group.title for group in build_groups()], banners
 
 
-def test_header_has_no_timestamp(template: str) -> None:
-    header = template.splitlines()[:4]
-    assert header[0].startswith("# ──")
-    assert header[1] == "# wing-agent configuration"
-    assert "$WING_HOME/core/config.yaml" in header[2]
-    assert "/settings" in header[3]
+def test_header_is_one_line_without_timestamp(template: str) -> None:
+    lines = template.splitlines()
+    assert lines[0] == "# wing-agent configuration — $WING_HOME/core/config.yaml"
+    assert lines[1] == ""
     # 不写生成时间戳（会让每次保存都产生 diff 噪声）；文件头里不许出现日期形态
-    assert not re.search(r"\d{4}-\d{2}-\d{2}", "\n".join(header))
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", lines[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,6 +277,13 @@ def test_absent_default_is_commented_out(provider_text: str, template: str) -> N
     assert "# safe_command_patterns: []" in template
 
 
+def test_absent_null_default_is_not_written(provider_text: str, template: str) -> None:
+    """默认是 ``null`` 的键连注释行都不写：``null`` 没有可展示的事实。"""
+    for needle in ("description", "max_turns", "image_delivery"):
+        assert f"# {needle}: null" not in provider_text, needle
+        assert f"# {needle}: null" not in template, needle
+
+
 def test_absent_object_subtree_is_commented_out(template: str) -> None:
     assert re.search(r"(?m)^# gateway:$", template)
     assert re.search(r"(?m)^  # host: 127\.0\.0\.1$", template)
@@ -272,10 +293,20 @@ def test_absent_object_subtree_is_commented_out(template: str) -> None:
     assert loaded == {"providers": [], "agents": []}
 
 
+def test_object_default_without_showable_children_degrades_to_empty_map() -> None:
+    """子树里没有一个可展示的默认值 ⇒ 写 ``{}``（裸 `key:` 取消注释是 null）。"""
+    inner = create_model("_Inner", note=(str | None, S(doc="注", default=None)))
+    mini = create_model(
+        "_Outer", box=(inner, S(doc="盒子", default_factory=lambda: inner()))
+    )
+    text = emit_config_yaml({}, build_catalog(mini))
+    assert "# box: {}" in text
+    assert yaml.safe_load(text) in (None, {})
+
+
 def test_absent_required_is_written_as_an_empty_value(catalog: SettingNode) -> None:
     doc = {"providers": [{"name": "p"}], "agents": [{"name": "a", "model": "m"}]}
     text = emit_config_yaml(doc, catalog)
-    assert "# 服务端点" in text
     assert '    base_url: ""' in text
     assert '    api_key: ""' in text
     # models 有默认值（[]）→ 缺席时是注释行；它仍会在跨字段检查里报「没有模型」
@@ -313,26 +344,51 @@ def test_empty_object_item_is_written_explicitly(catalog: SettingNode) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. 生效域标记与密文说明
+# 5. 列表项：只展开第一项的缺席默认值
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_apply_markers(template: str, provider_text: str) -> None:
-    port_block = _block_of(template, "# port: 32523")
-    assert _has(port_block, "# 生效：需重启网关")
-    assert "# 生效：新会话" in provider_text
-    # hot 是默认档，不加噪声：紧邻的注释窗口里没有生效域标记
-    assert "# 生效：热重载" not in template
-    lines = provider_text.splitlines()
-    index = next(i for i, line in enumerate(lines) if "timeout_first_chunk" in line)
-    assert not any("生效" in line for line in lines[max(0, index - 3) : index])
+def test_list_items_expand_defaults_only_for_the_first_item(
+    catalog: SettingNode,
+) -> None:
+    """条目级开关一次可发现（第一项），又不随条目数膨胀（第 2..N 项只写用户写下的键）。"""
+    provider = {
+        "name": "p",
+        "base_url": "b",
+        "api_key": "k",
+        "models": ["m"],
+    }
+    doc = {
+        "providers": [dict(provider, name="p1"), dict(provider, name="p2")],
+        "agents": [{"name": "a1", "model": "m"}, {"name": "a2", "model": "m"}],
+    }
+    text = emit_config_yaml(doc, catalog)
+    first, second = text.split("  - name: p2", 1)
+    assert "# protocol: openai" in first
+    assert "# protocol: openai" not in second
+    assert "# max_retries: 10" in first and "# max_retries: 10" not in second
+    agents = text.split("  - name: a1", 1)[1]
+    head, tail = agents.split("  - name: a2", 1)
+    assert "# default: false" in head
+    assert "# default: false" not in tail
+    assert yaml.safe_load(text) == doc
 
 
-def test_secret_note(provider_text: str) -> None:
-    block = _block_of(provider_text, "api_key: k")
-    assert _has(block, "# 密钥：面板里只写不回显（末 4 位提示）")
-    index = next(i for i, line in enumerate(block) if "api_key: k" in line)
-    assert "密钥" in block[index - 1]
+def test_nested_first_item_expansion_follows_the_outer_list(
+    catalog: SettingNode,
+) -> None:
+    """``allow_defaults`` 沿首项链条传下去：第 2 个 provider 的第 1 个 model 也不展开。"""
+    doc = {
+        "providers": [
+            {"name": "p1", "base_url": "b", "api_key": "k", "models": ["m"]},
+            {"name": "p2", "base_url": "b", "api_key": "k", "models": [{"name": "m2"}]},
+        ],
+        "agents": [{"name": "a", "model": "m"}],
+    }
+    text = emit_config_yaml(doc, catalog)
+    tail = text.split("  - name: p2", 1)[1]
+    assert "# capabilities:" not in tail
+    assert yaml.safe_load(text) == doc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -362,6 +418,26 @@ def test_unknown_root_key_is_written_at_the_file_tail(catalog: SettingNode) -> N
     assert text.rstrip().endswith(("- 2", "2"))
     assert "# unknown key (not recognized by this wing version)" in text
     assert yaml.safe_load(text) == doc
+
+
+def test_unknown_key_under_an_explicitly_empty_parent_stays_in_place(
+    catalog: SettingNode,
+) -> None:
+    """父容器是**用户显式写下的空对象**时，未知键也必须留在容器里（不是甩到文件末尾）。
+
+    真实路径：磁盘上写 `gateway:\n  weird: 1` → `_split_known` 把它拆成
+    `data["gateway"] = {}` + `extra=("gateway", ...)`。空对象若直接写成 `gateway: {}`，
+    那个 `{}` 会吞掉位置信息，`weird` 就变成顶层键了。
+    """
+    doc = {
+        "providers": [{"name": "p", "base_url": "b", "api_key": "k", "models": ["m"]}],
+        "agents": [{"name": "a", "model": "m"}],
+        "gateway": {},
+    }
+    text = emit_config_yaml(doc, catalog, extra=[ExtraKey("gateway", "weird", 1)])
+    loaded = yaml.safe_load(text)
+    assert loaded["gateway"] == {"weird": 1}, loaded
+    assert "weird" not in loaded, loaded
 
 
 def test_unknown_key_without_its_parent_is_still_preserved(
@@ -705,9 +781,12 @@ def test_element_template_fields_are_rendered_when_items_exist(
         "agents": [{"name": "a", "model": "m"}],
     }
     text = emit_config_yaml(doc, catalog)
-    assert re.search(r"(?m)^\s*# image_delivery: null$", text)
-    assert re.search(r"(?m)^\s*# image_max_bytes: null$", text)
+    # 对象形态的默认子树照常展开（`# capabilities:` → `# vision: false`）；
+    # 默认是 null 的元素字段（image_delivery / image_max_bytes）没有可展示的事实。
+    assert re.search(r"(?m)^\s*# capabilities:$", text)
     assert re.search(r"(?m)^\s*# vision: false$", text)
+    assert "# image_delivery: null" not in text
+    assert "# image_max_bytes: null" not in text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -723,29 +802,43 @@ def test_default_document_shape() -> None:
 def test_default_template_is_the_first_file_a_user_sees(template: str) -> None:
     assert yaml.safe_load(template) == default_document()
     assert "ChangeHere" not in template
-    assert "# 推荐在 TUI 里用 /settings 编辑" in template
+    assert template.startswith("# wing-agent configuration —")
 
 
 def test_default_template_covers_every_declared_field(
     catalog: SettingNode, template: str
 ) -> None:
-    """emitter 的覆盖性守门：每个声明字段都以值行或注释行的形式出现。
+    """emitter 的覆盖性守门：可展示的声明字段都以值行或注释行的形式出现。
 
     旧版守的是「手写模板与 models.py 的 SYNC」；模板由声明生成后，这份纪律死亡——
-    守门改为「emitter 不许漏掉任何字段」。
+    守门改为「emitter 不许漏掉任何有值可展示的字段」。默认是 ``null`` 的标量没有可展示
+    的事实（不写），其余一律出现（在首项里展开）。
     """
     for node in _declared_nodes(catalog):
+        if node.kind is SettingKind.OBJECT:
+            showable = True  # 子树（活的或整块注释的）总会写出容器键
+        elif node.kind is SettingKind.LIST:
+            showable = node.has_default or node.required  # 缺席形态是 `# key: []`
+        else:
+            showable = node.required or (node.has_default and node.default is not None)
+        if not showable:
+            continue
         assert f"# {node.key}:" in template or f"{node.key}:" in template, node.path
 
 
-def test_default_template_loses_no_documentation(
+def test_default_template_carries_no_documentation(
     catalog: SettingNode, template: str
 ) -> None:
-    """每个被展开的字段（root 的非元素后代）的 ``doc`` / ``notes`` 都出现在文件里。"""
+    """每个被展开的字段的 ``doc`` / ``notes`` 都不许出现在文件里（文档归面板与 CLI）。"""
+    checked = 0
     for node in _declared_nodes(catalog):
-        assert node.doc in template, node.path
+        if not node.doc:
+            continue
+        checked += 1
+        assert node.doc not in template, node.path
         for note in node.notes:
-            assert note in template, node.path
+            assert note not in template, node.path
+    assert checked > 20  # 声明层确实有文案（否则本测试是空转）
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -783,5 +876,5 @@ def test_emitter_works_on_a_hand_made_catalog() -> None:
     small = build_catalog(mini)
     text = emit_config_yaml({"nested": {"flag": False}, "items": ["x"]}, small)
     assert yaml.safe_load(text) == {"nested": {"flag": False}, "items": ["x"]}
-    assert "# 标题" in text
     assert "# title: hi" in text
+    assert "# 标题" not in text

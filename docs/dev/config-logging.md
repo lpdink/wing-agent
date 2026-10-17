@@ -32,11 +32,12 @@
 字段元信息的**唯一来源**是 `wing/config/models.py` 的 `S(...)` 声明（`config/spec.py` 的声明层）；
 规范形模板 / 保存写盘 / 面板 / CLI 全部由它生成——**手写模板 `config/default_config.py` 已删除**，
 改字段只需改声明（门禁测试会迫使模板 / 目录 / 校验同步，见 [settings.md](settings.md)）。
-每个字段的声明维度：`doc`（一行摘要 + YAML 注释）/ `notes`（多行详解）/ `title` / `apply`（生效域，
+每个字段的声明维度：`doc`（一行摘要，面板用）/ `notes`（多行详解，面板用）/ `title` / `apply`（生效域，
 四档 `hot` / `next_session` / `restart` / `readonly`）/ `secret`（只写不回显）/ `choices`（枚举含义）/
 `example` / `editable` / `section`（+`section_doc`）/ `summary_fields` / `min_items`；必填 = 无默认值。
 
-文件是**稀疏文档**：缺席的键跟随声明默认值（emitter 把它们写成**注释掉的行**，想钉住就取消注释）；
+文件是**稀疏文档**：缺席的键跟随声明默认值（emitter 把它们写成**注释掉的行**，想钉住就取消注释；
+文件里没有散文注释——字段文档只活在声明层，见 [settings.md](settings.md) §3）；
 「复位为默认」= 从文件里移除该键。保存经 `POST /api/settings/set`（唯一写盘路径）：
 校验（全有或全无）→ 备份 `config.yaml.bak` → 规范形 YAML 原子写 → 热重载。
 schema 之外的未知键**保留并写回**（前向兼容）。
@@ -86,7 +87,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 编辑入口有三个，共用同一份声明（`config/catalog.rs::interface_catalog()`）：
 
 - **TUI `/settings` 面板的 Interface 根**：实时预览（改颜色当场变色，`Esc` 回退）+ `s` 保存；
-- **`wing tui --dump-config`**：读**当前文件**、输出它的规范形（注释来自声明、缺席的默认值写成注释行）；
+- **`wing tui --dump-config`**：读**当前文件**、输出它的规范形（只有分隔行与注释掉的默认值）；
   文件坏掉时 stderr 报错 + 非零退出（不假装一切正常）。
   - **密文默认掩码**（本 PR **改变了它的语义**：旧实现打印的是 `AppConfig::default()` —— 一份
     `api_key` 恒为空的默认模板；现在打印的是**当前文件**，所以必须管住文件里的密文）：
@@ -106,7 +107,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 - **手写文件**（仍然支持）：外部改动在面板 `R` 重新载入时读入。
 
 > 颜色槽「注释掉的默认值」是 `preset: wing` 下的值；改 `preset` 后它们仅供参考（不随预设重算）。
-> 注释行的"取消注释"只对**单行标量**成立；嵌套块（`colors:` 等）请用面板的"复位为默认"逐项调整。
+> 取消注释 = 一份合法值：嵌套块（`colors:` / `paste:` 等）也是整块注释的，取消整块即可。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
 

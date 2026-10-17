@@ -66,7 +66,7 @@ libs/core/wing/
 │   ├── problems.py                  跨字段检查纯函数 + ConfigProblem（加载期 / 设置面板共用）
 │   ├── catalog.py                   设置目录树：SettingNode / build_catalog() / parse_path()
 │   ├── groups.py                    业务分组表：SETTING_GROUPS / build_groups()（界面分类的唯一声明处）
-│   ├── emit.py                      规范形 YAML emitter（默认模板与保存共用；注释来自声明）
+│   ├── emit.py                      规范形 YAML emitter（默认模板与保存共用；只有分隔行与注释掉的默认值）
 │   ├── document.py                  稀疏文档视图（读 / 指纹 / 密文三态 / 未知键 / changed_paths）
 │   ├── boot.py                      启动读取（永不抛：模板生成 / 语法错 / 校验不过 → 降级启动）
 │   ├── loader.py                    get_wing_home / get_config_path / load_config / get_config / reset_config

@@ -34,7 +34,7 @@ class SettingGroup:
     Attributes:
         id: 稳定标识（wire 上是 ``groups[].id``）；改名 / 调序都不该改它。
         title: 显示名（面板锚点、YAML 分隔行、``wing config list`` 的分组头）。
-        doc: 一行说明（面板锚点的详情、YAML 分隔行下方的块注释）。
+        doc: 一行说明（面板锚点的详情；**不进 config.yaml**）。
         members: 成员 = ``Config`` 的**顶层键名**（catalog root 直接子节点的 ``key``）。
             顺序不表达文件顺序（文件顺序恒为模型声明序）；它只用于「这一组包含什么」。
     """
@@ -114,12 +114,16 @@ def group_of(
 def validate_groups(groups: Sequence[SettingGroup], fields: Sequence[str]) -> None:
     """校验一张分组表对一组顶层字段的**覆盖**（违反即 ``ValueError``）。
 
-    悄悄漏掉一个顶层键会让它在界面里无处可去，所以这里是硬失败。四条：
+    悄悄漏掉一个顶层键会让它在界面里无处可去，所以这里是硬失败。五条：
 
     1. 组 ``id`` / ``title`` 不重复（id 是稳定标识，title 是界面文案，两者都要唯一）；
     2. 组不为空（没有成员的组是一个点不开的锚点）；
     3. 每个成员都是真实存在的顶层字段，且只属于一个组；
-    4. 每个顶层字段都被某个组认领。
+    4. 每个顶层字段都被某个组认领；
+    5. **同组成员覆盖的顶层字段在声明序里构成一段连续区间**（成员**列举序**无关——它只
+       表达"这一组包含什么"）：文件按声明序写、分组只靠分隔行表达边界，一个组被拆成两段
+       就会出现两条同名分隔行（看起来像文件被切错了）。加字段时把它放在本组已有字段的
+       邻接位置即可——这条门禁会在忘记时立刻变红。
     """
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
@@ -145,6 +149,17 @@ def validate_groups(groups: Sequence[SettingGroup], fields: Sequence[str]) -> No
     missing = known - set(seen_members)
     if missing:
         raise ValueError(f"顶层字段没有归入任何设置分组：{sorted(missing)}")
+    # 5. 同组成员覆盖的字段在声明序里必须构成连续区间（列举序无关，见 docstring）。
+    order = list(fields)
+    for group in groups:
+        spans = sorted(
+            order.index(member) for member in group.members if member in known
+        )
+        if spans != list(range(spans[0], spans[0] + len(spans))):
+            raise ValueError(
+                f"设置分组 {group.id} 的成员在声明序里不连续："
+                f"{[order[i] for i in spans]}（声明序：{order}）"
+            )
 
 
 def build_groups(

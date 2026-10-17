@@ -80,7 +80,7 @@ class SettingNode(BaseModel):
     notes: list[str] = Field(default_factory=list)
     """详解（``SettingMeta.notes`` 按行切分）。"""
     example: str | None = None
-    """示例值（详情栏 + YAML 注释）。"""
+    """示例值（面板详情栏）。"""
     order: int = 0
     """同级声明序（= ``model_fields`` 插入序；union 变体 = 变体序）。"""
 
@@ -128,7 +128,7 @@ class SettingNode(BaseModel):
     （:func:`build_catalog` 的最后一步）——界面分类与文件存储形式解耦，改分组只动那张表。
     """
     section_doc: str | None = None
-    """分组说明（每个分组只盖在该组**声明序首个**成员上，emitter 据此写块注释）。"""
+    """分组说明（每个分组只盖在该组**声明序首个**成员上；面板左栏锚点用）。"""
 
     # ── 渲染提示 ──
     summary_fields: list[str] = Field(default_factory=list)
@@ -276,7 +276,7 @@ def _stamp_groups(node: SettingNode, root: type[BaseModel]) -> None:
 
     - ``section`` = 组的 ``title``（emitter 的分隔行、``wing config list`` 的分组头、
       旧客户端的分组渲染都读它，形状不变）；
-    - ``section_doc`` 只盖在**声明序首个**成员上（emitter 的一条块注释，写多处 = 重复）；
+    - ``section_doc`` 只盖在**声明序首个**成员上（写多处 = 重复）；
     - ``root`` 不是 :class:`Config`（单测的手工小模型）时没有分组表，一切留 ``None``；
       是 ``Config`` 而有顶层键没被任何组认领 → ``ValueError``（界面里它会无处可去）。
     """

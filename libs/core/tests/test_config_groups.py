@@ -151,6 +151,14 @@ def test_validate_groups_accepts_a_complete_partition() -> None:
     )
 
 
+def test_member_enumeration_order_does_not_have_to_match_declaration_order() -> None:
+    """`members` 的列举序只表达"这一组包含什么"（连续性看的是它们覆盖的字段）。"""
+    validate_groups(
+        [_group("one", ("b", "a")), _group("two", ("c",))],
+        _FIELDS,
+    )
+
+
 @pytest.mark.parametrize(
     ("groups", "fragment"),
     [
@@ -164,6 +172,8 @@ def test_validate_groups_accepts_a_complete_partition() -> None:
         ([_group("x", ("a", "b")), _group("y", ("b", "c"))], "同时属于"),
         ([_group("x", ("a", "b"))], "没有归入任何设置分组"),
         ([], "没有归入任何设置分组"),
+        # 声明序 a b c 上，一个组被拆成两段（文件里会出现两条同名分隔行）
+        ([_group("x", ("a", "c")), _group("y", ("b",))], "声明序里不连续"),
     ],
 )
 def test_validate_groups_rejects_broken_tables(
@@ -202,7 +212,7 @@ def test_catalog_stamps_group_titles_on_top_level_children() -> None:
 
 
 def test_group_doc_lands_on_the_first_declared_member_only() -> None:
-    """``section_doc`` 是 emitter 的一条块注释：每组恰好一次，且在声明序首成员上。"""
+    """``section_doc`` 只盖在声明序首成员上：每组恰好一次（面板左栏锚点的说明）。"""
     catalog = build_catalog()
     by_id = {group.id: group for group in SETTING_GROUPS}
     seen: set[str] = set()

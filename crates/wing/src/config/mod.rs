@@ -305,7 +305,7 @@ impl AppConfig {
         }
     }
 
-    /// Serialize this config to canonical YAML (catalog comments included).
+    /// Serialize this config to canonical YAML (section banners + commented defaults).
     ///
     /// A thin shell over [`catalog::dump_config_yaml`]: the emitter is catalog-driven, so the Rust
     /// side still has exactly one declaration. This is the *struct* dump (every key present with

@@ -565,12 +565,7 @@ const COMMENT_WIDTH: usize = 78;
 /// `# ── Section ──…` 分隔线的总列宽。
 const SEPARATOR_WIDTH: usize = 66;
 
-const HEADER: [&str; 4] = [
-    "wing — TUI configuration (interface)",
-    "File: $WING_HOME/tui/config.yaml (default: ~/.wing/tui/config.yaml)",
-    "Prefer editing it in the TUI: `/settings` — one tree, both configs.",
-    "A commented line is an unset default: uncomment it to pin the value.",
-];
+const HEADER: [&str; 1] = ["wing — TUI configuration — $WING_HOME/tui/config.yaml"];
 
 /// 密文叶子的发射模式——**同一个 emitter 的两个用途在这里分岔**。
 ///
@@ -590,26 +585,32 @@ pub enum DumpMode {
 /// `--show-secrets` 的完整拼写（掩码注释里的指引用它，测试也 grep 它）。
 pub const SHOW_SECRETS_HINT: &str = "wing tui --dump-config --show-secrets";
 
-/// 由 catalog 生成的规范形 YAML（带注释）。
+/// 由 catalog 生成的规范形 YAML。
 ///
 /// `--dump-config` 与 [`crate::config::store::write_interface_doc`] 共用它：Rust 侧也只有一份声明。
-/// 输出规则照 design.md §6.2（后端的同一套产品品味）：
+/// 输出规则（与后端 `config/emit.py` 同一套产品口味）：
 ///
-/// 1. 文件头固定 4 行注释（产品名 / 文件位置 / "推荐用 `/settings` 编辑" / 无时间戳）；
-/// 2. 按 `section` 分组，每组一个 `# ── Section ──…` 分隔行 + `section_doc`；
-/// 3. 文档注释在上方（不用行尾注释）；值存在 → 原样写出；值缺席且有默认 → 写成注释掉的默认值；
-///    `example` → `# e.g. …`；
-/// 4. `secret` → `# 密钥：面板里只写不回显（末 4 位提示）`；[`DumpMode::Masked`] 下再跟一行
-///    `# 已掩码（•••••••• 1234）——真值：…`，值本身写 `null`（见 [`DumpMode`]）；
-/// 5. `apply == restart / next_session` → `# 生效：…`（hot 不加，避免噪声）；
-/// 6. 引号能不加就不加（含特殊字符 / 看起来像别的类型 → 双引号 + 转义，非 ASCII 原样）；
-/// 7. 缩进 2 空格；注释折行到 78 列（见模块内的列宽常量）。
+/// 1. 文件头固定 1 行（产品名 + 文件位置）；**不写时间戳**——它会让每次保存都产生 diff 噪声；
+/// 2. 按 `section` 分组，每组一个 `# ── Section ──…` 分隔行；
+/// 3. 值存在 → 原样写出；值缺席且有非 null 默认 → 写成注释掉的默认值；声明了 null 默认 /
+///    无默认且不可空 → **不写**（`null` 没有可展示的事实）；无默认但**可空** → 写一行
+///    `# key: null`（取消注释 = 显式 null = 与缺席等价；唯一的文件内发现口）。
+///    字段的 `doc` / `notes` / `example` / 生效域 / 密文说明**一概不进文件**——它们的归宿是
+///    设置面板与 `wing config`（同一个 catalog）；
+/// 4. [`DumpMode::Masked`] 下密文叶子写 `null` + 一行 `# 已掩码（•••••••• 1234）——真值：…`
+///    （安全事实，不是文档；保存路径从不产生它）；
+/// 5. 引号能不加就不加（含特殊字符 / 看起来像别的类型 → 双引号 + 转义，非 ASCII 原样）；
+/// 6. 缩进 2 空格；注释折行到 78 列（见模块内的列宽常量）。
+///
+/// 不变量：**取消注释即一份合法的值**。
 ///
 /// 它仍是 `(doc, catalog, mode)` 的**纯函数**：不读 env、不写时间戳、不含主机信息——
 /// `mode` 是参数不是环境，round-trip 与幂等照样可以被单测机械证明。
 ///
 /// **与后端的差异**（见 `09_interface_catalog/design.md` 的差异清单）：未知键丢弃（既有
-/// `--dump-config` 行为）、没有必填字段、`null` 与缺席等价，以及——
+/// `--dump-config` 行为）、没有必填字段、`null` 与缺席等价；**list 的缺席默认值**后端写
+/// `# key: []`（catalog 里 list 的 default 恒为 `None`、展示形态是空列表），这里没有同形
+/// 分支——Interface 根今天没有 list 字段，真加一个时要补上同一条规则；以及——
 /// **一个子树没有任何用户写下的值时，整块（含容器行）注释掉**：`colors:` 带空 body 是 `null`，
 /// 而 `AppConfig.colors` 不是 `Option`，裸容器行会让整份配置反序列化失败。
 pub fn dump_config_yaml(doc: &Value, mode: DumpMode) -> String {
@@ -625,24 +626,30 @@ fn emit_document(doc: &Value, catalog: &SettingNode, mode: DumpMode) -> String {
     }
     out.push('\n');
 
-    let mut section: Option<&str> = None;
-    for child in &catalog.children {
-        if let Some(name) = child.section.as_deref()
-            && section != Some(name)
-        {
-            // 文件头之后已经有一个空行了（N-1：第一个 section 前不再重复补，
-            // 否则输出里会出现两个连着的空行）。
-            if section.is_some() {
-                out.push('\n');
-            }
-            section = Some(name);
+    // 按分组缓冲：正文为空的分组连分隔行一起省掉（一条没有内容的横幅只会让人以为文件被截断）。
+    let children = &catalog.children;
+    let mut index = 0;
+    while index < children.len() {
+        let section = children[index].section.as_deref();
+        let start = index;
+        while index < children.len() && children[index].section.as_deref() == section {
+            index += 1;
+        }
+        let mut body = String::new();
+        for child in &children[start..index] {
+            emit_node(&mut body, child, doc.get(&child.key), 0, false, mode);
+        }
+        if body.is_empty() {
+            continue;
+        }
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        if let Some(name) = section {
             out.push_str(&section_header(name));
             out.push('\n');
-            if let Some(section_doc) = child.section_doc.as_deref() {
-                comment(&mut out, 0, section_doc);
-            }
         }
-        emit_node(&mut out, child, doc.get(&child.key), 0, false, mode);
+        out.push_str(&body);
     }
     out
 }
@@ -660,50 +667,46 @@ fn emit_node(
     mode: DumpMode,
 ) {
     let value = value.filter(|v| !v.is_null());
-    if !node.doc.trim().is_empty() {
-        comment(out, indent, &node.doc);
-    }
-    for note in &node.notes {
-        if !note.trim().is_empty() {
-            comment(out, indent, note);
-        }
-    }
-    if let Some(example) = node.example.as_deref() {
-        comment(out, indent, &format!("e.g. {example}"));
-    }
-    match node.apply {
-        ApplyScope::Restart => comment(out, indent, "生效：重启 wing 后生效"),
-        ApplyScope::NextSession => comment(out, indent, "生效：新会话"),
-        _ => {}
-    }
-    if node.secret {
-        comment(out, indent, "密钥：面板里只写不回显（末 4 位提示）");
-        // 只有"真的掩了一个值"时才加这一行：文件里没有密文时 Masked 与 Raw 逐字节相同。
-        if mode == DumpMode::Masked
-            && let Some(note) = masked_note(value)
-        {
-            comment(out, indent, &note);
-        }
+    // 密文掩码提示是**安全事实**（"这个值被换掉了"），不是文档：只有展示路径会产出它，
+    // 且只在真的掩了一个值时出现——文件里没有密文时 Masked 与 Raw 逐字节相同。
+    if node.secret
+        && mode == DumpMode::Masked
+        && let Some(note) = masked_note(value)
+    {
+        comment(out, indent, &note);
     }
 
     match node.kind {
         SettingKind::Object => {
+            // 用户显式写下的空对象是**值**（`colors: {}` 能反序列化），照原样写出：
+            // 走到"整块注释"那条路会让这个键从 round-trip 里消失。
+            if !commented && value.is_some_and(|v| v.as_object().is_some_and(|m| m.is_empty())) {
+                line(out, indent, &format!("{}: {{}}", node.key), false);
+                return;
+            }
             let has_values = value.is_some_and(|v| v.is_object())
                 && node
                     .children
                     .iter()
                     .any(|child| subtree_has_value(child, value.and_then(|v| v.get(&child.key))));
             let block = commented || !has_values;
-            line(out, indent, &format!("{}:", node.key), block);
+            let mut body = String::new();
             for child in &node.children {
                 emit_node(
-                    out,
+                    &mut body,
                     child,
                     value.and_then(|v| v.get(&child.key)),
                     indent + 2,
                     block,
                     mode,
                 );
+            }
+            if body.is_empty() {
+                // 子树里没有一个可展示的值：裸 `key:` 取消注释是 null，必须显式写 `{}`。
+                line(out, indent, &format!("{}: {{}}", node.key), block);
+            } else {
+                line(out, indent, &format!("{}:", node.key), block);
+                out.push_str(&body);
             }
         }
         _ => emit_leaf(out, node, value, indent, mode),
@@ -745,13 +748,15 @@ fn emit_leaf(
         let text = inline(default).unwrap_or_default();
         line(out, indent, &format!("{key}: {text}"), true);
     } else if node.required {
-        // 值缺席且必填 → 写出键 + 空值（后端 §6.2 规则 3；Interface 根今天没有这种字段）。
+        // 值缺席且必填 → 写出键 + 空值（后端规则 3；Interface 根今天没有这种字段）。
         let empty = empty_value(node);
         line(out, indent, &format!("{key}: {empty}"), false);
-    } else {
-        let empty = empty_value(node);
-        line(out, indent, &format!("{key}: {empty}"), true);
+    } else if !node.has_default && node.nullable {
+        // 可空但**没有声明默认值**：空值是它的一种状态，写一行裸注释保住可发现性
+        // （`api_key` 没有它就只能靠面板发现）。取消注释 = 显式 null = 与缺席等价。
+        line(out, indent, &format!("{key}: null"), true);
     }
+    // 其余（声明了 null 默认 / 无默认且不可空）：没有可展示的事实，不写。
 }
 
 /// [`DumpMode::Masked`] 下密文叶的掩码注释；`None` = 这个值不需要掩（缺席 / `null` / 空串）。
@@ -1323,6 +1328,7 @@ mod tests {
         assert_eq!(node.kind, SettingKind::Secret);
         assert!(node.secret);
         assert!(node.nullable);
+        // 没有默认值：它是一个「可空的空值」键，文件里因此**没有**它的行（面板显示 not set）。
         assert!(!node.has_default);
         assert_eq!(node.default, None);
         assert_eq!(node.example.as_deref(), Some(API_KEY_EXAMPLE));
@@ -1456,7 +1462,7 @@ mod tests {
     fn the_header_is_followed_by_exactly_one_blank_line() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         let mut lines = dumped.lines();
-        // 文件头 4 行。
+        // 文件头 1 行。
         for _ in 0..HEADER.len() {
             assert!(lines.next().is_some_and(|l| l.starts_with("# ")));
         }
@@ -1471,6 +1477,96 @@ mod tests {
             !dumped.contains("\n\n\n"),
             "输出里不该有连续两个空行：\n{dumped}"
         );
+    }
+
+    /// 空文档的 dump 就是首启模板：叶子「缺席 → 有没有注释行」严格跟着默认值走。
+    #[test]
+    fn the_empty_document_dump_lists_exactly_the_leaves_with_a_default() {
+        let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
+        let sections: Vec<&str> = dumped
+            .lines()
+            .filter_map(|line| line.strip_prefix("# ── "))
+            .map(|rest| rest.split(' ').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            sections,
+            ["Colors", "Layout", "Rendering", "Paste", "Gateway"],
+            "{dumped}"
+        );
+
+        let mut nodes = Vec::new();
+        fn walk<'a>(node: &'a SettingNode, out: &mut Vec<&'a SettingNode>) {
+            out.push(node);
+            for child in &node.children {
+                walk(child, out);
+            }
+        }
+        let catalog = interface_catalog();
+        walk(&catalog, &mut nodes);
+        let mut showable = 0;
+        for leaf in nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, SettingKind::Object | SettingKind::List))
+        {
+            let listed =
+                leaf.has_default && leaf.default.as_ref().is_some_and(|value| !value.is_null());
+            // 可空且没有默认值的叶子也出现（一行裸注释 `# key: null`）。
+            let appears = listed || (!leaf.has_default && leaf.nullable);
+            let needle = format!("# {}:", leaf.key);
+            assert_eq!(
+                dumped.contains(&needle),
+                appears,
+                "{}：缺席叶子的注释行必须严格跟着「默认值 / 可空性」走\n{dumped}",
+                leaf.path
+            );
+            showable += usize::from(appears);
+        }
+        assert!(showable >= 20, "可展示叶子只有 {showable} 个，遍历坏了");
+    }
+
+    /// 正文为空的分组连分隔行一起省掉（一条没有内容的横幅只会让人以为文件被截断）。
+    #[test]
+    fn an_empty_section_drops_its_banner() {
+        let mut on = node("a", "a", SettingKind::Bool, "开关", 0, "First", "");
+        on.default = Some(Value::from(true));
+        on.has_default = true;
+        // 没有默认值、不可空 ⇒ 什么都不写，这个分组因此没有正文。
+        let silent = node("b", "b", SettingKind::Str, "无默认", 1, "Second", "");
+
+        let mut root = node("config", "config", SettingKind::Object, "", 0, "", "");
+        root.children = vec![on, silent];
+        let dumped = emit_document(&json!({}), &root, DumpMode::Raw);
+        assert!(dumped.contains("# ── First"), "{dumped}");
+        assert!(!dumped.contains("# ── Second"), "{dumped}");
+        assert!(dumped.contains("# a: true"), "{dumped}");
+    }
+
+    /// 显式写下的空对象是值：`colors: {}` 原样写回（round-trip 不丢键）。
+    #[test]
+    fn an_explicitly_empty_object_round_trips_as_an_empty_map() {
+        let doc = json!({"colors": {}});
+        let dumped = dump_config_yaml(&doc, DumpMode::Raw);
+        assert!(dumped.contains("colors: {}"), "{dumped}");
+        assert_eq!(doc_from_text(&dumped), doc);
+        assert_eq!(
+            appconfig_from_doc(&doc_from_text(&dumped)).colors.preset,
+            ColorPreset::Wing
+        );
+    }
+
+    /// 一个 object 的子树里**没有一个可展示的值** ⇒ 写 `{}`（裸 `key:` 取消注释是 null）。
+    #[test]
+    fn an_object_with_no_showable_children_degrades_to_an_empty_map() {
+        // 没有默认值、不可空、非必填 ⇒ 这个叶子什么都不写。
+        let leaf = node("note", "box.note", SettingKind::Str, "一行说明", 0, "", "");
+        let mut wrapper = node("box", "box", SettingKind::Object, "盒子", 0, "S", "段");
+        wrapper.children = vec![leaf];
+        let mut root = node("config", "config", SettingKind::Object, "", 0, "", "");
+        root.children = vec![wrapper];
+
+        let dumped = emit_document(&json!({}), &root, DumpMode::Raw);
+        assert!(dumped.contains("# box: {}"), "{dumped}");
+        assert_eq!(doc_from_text(&dumped), json!({}));
     }
 
     /// 稀疏文档保持稀疏：只有写下的键回到文档里，再 dump 逐字相同。
@@ -1508,37 +1604,46 @@ mod tests {
         );
     }
 
-    /// 注释来自 catalog：分组、字段 doc / notes / example / 密文 / 生效域 / 注释掉的默认值。
+    /// 文件里只有两类注释：分组分隔行 + 注释掉的默认值（散文注释一概不进文件）。
     #[test]
-    fn the_comments_come_from_the_catalog() {
+    fn the_file_carries_only_banners_and_commented_defaults() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
-        for section in [
-            "# ── Colors",
-            "# ── Layout",
-            "# ── Rendering",
-            "# ── Paste",
-            "# ── Gateway",
-        ] {
+        for section in ["# ── Colors", "# ── Layout", "# ── Rendering", "# ── Paste"]
+        {
             assert!(dumped.contains(section), "缺分组：{section}\n{dumped}");
         }
-        // ⚠ 这些字符串是 `config/mod.rs` 字段文档的**拷贝**：改那边时也要改 catalog
-        //（门禁只保键集，文案靠这两处对齐）。
-        assert!(dumped.contains("# Brand color: logo, commands, links, code, popups."));
-        assert!(dumped.contains("# Maximum input area lines."));
-        assert!(dumped.contains("# API key for gateway authentication."));
-        // catalog 自己的 notes / 产品文案
-        assert!(dumped.contains("# 缺席 = 跟随 `preset`。"));
-        assert!(dumped.contains("# 配色：`preset` 选定底色，其余每个槽位键覆盖该槽位。"));
-        assert!(dumped.contains("# e.g. sk-xxx"));
-        assert!(dumped.contains("# 密钥：面板里只写不回显（末 4 位提示）"));
-        assert!(dumped.contains("# 生效：重启 wing 后生效"));
-        assert!(!dumped.contains("生效：hot"));
-        // 注释掉的默认值（小写拼写 = choices 口径）
+        // Gateway 组只有 `api_key`（可空、无默认值 → 一行裸注释保住可发现性）。
+        assert!(dumped.contains("# ── Gateway"), "{dumped}");
+        assert!(dumped.contains("# api_key: null"), "{dumped}");
+        // 声明层的文案（`config/mod.rs` 的字段文档 + catalog 自己的 notes / example /
+        // 生效域 / 密文说明）一个都不许出现。
+        for prose in [
+            "Brand color",
+            "Maximum input area lines",
+            "API key for gateway authentication",
+            "缺席 = 跟随",
+            "配色：",
+            "e.g. ",
+            "密钥：",
+            "生效：",
+        ] {
+            assert!(!dumped.contains(prose), "{prose} 泄漏进文件：\n{dumped}");
+        }
+        // 注释行只剩两种形态：分隔行，或一条 `key:` 行（注释掉的默认值）。
+        for line in dumped.lines().filter(|l| l.trim_start().starts_with('#')) {
+            let body = line.trim_start_matches([' ', '#']).trim_start();
+            assert!(
+                line.starts_with("# ── ") || line.starts_with("# wing") || body.contains(':'),
+                "没见过的注释行：{line}\n{dumped}"
+            );
+        }
+        // 注释掉的默认值（小写拼写 = choices 口径）；`api_key` 没有默认值 → 不写。
         assert!(dumped.contains("  # preset: wing"));
         assert!(dumped.contains("  # accent: \"#3ac6e0\""));
         assert!(dumped.contains("  # max_input_lines: 10"));
         assert!(dumped.contains("  # thinking: visible"));
-        assert!(dumped.contains("# api_key: \"\""));
+        // 没有默认值的可空叶子（`api_key`）写成 `# key: null`（取消注释 = 缺席）。
+        assert!(dumped.contains("# api_key: null"));
     }
 
     /// 引号策略：能不加就不加；需要时双引号 + 转义；非 ASCII 原样。全部 round-trip。
@@ -1593,7 +1698,7 @@ mod tests {
         assert_eq!(doc_from_text(&dump_config_yaml(&doc, DumpMode::Raw)), doc);
     }
 
-    /// 注释行不超过列宽预算（长文档注释真的被折了）。
+    /// 注释行不超过列宽预算（只剩掩码提示这种注释，它也要折行）。
     #[test]
     fn comment_lines_stay_within_the_column_budget() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
@@ -1603,11 +1708,15 @@ mod tests {
                 "超宽：{line}"
             );
         }
-        let quiet: Vec<&str> = dumped
-            .lines()
-            .filter(|line| line.contains("Quiet register") || line.contains("secondary"))
-            .collect();
-        assert!(quiet.len() >= 2, "长注释没有被折行：{quiet:?}");
+        // `wrap` 本身仍按列宽折行（掩码提示是今天唯一的长注释来源）。
+        let wrapped = wrap(
+            "这是一段很长的中文注释，用来验证折行确实发生在列宽预算之内，而不是靠运气。",
+            20,
+        );
+        assert!(wrapped.len() >= 2, "{wrapped:?}");
+        for line in &wrapped {
+            assert!(UnicodeWidthStr::width(line.as_str()) <= 20, "{line}");
+        }
     }
 
     /// 小写 choices 拼写的端到端 round-trip；同时确认既有的大小写不敏感解析没被动过。
@@ -1673,7 +1782,7 @@ mod tests {
     }
 
     /// 取消注释注释掉的默认值 = 一份合法配置，且**生效值**就是默认值
-    /// （`api_key` 的占位是空串——语义等于未设置：空 → 不发鉴权头）。
+    /// （`api_key` 的裸注释行取消后是显式 null，与缺席等价 → `None`）。
     #[test]
     fn uncommenting_the_commented_defaults_yields_the_default_config() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
@@ -1686,7 +1795,7 @@ mod tests {
         assert_eq!(parsed.rendering.thinking, ThinkingMode::Visible);
         assert_eq!(parsed.rendering.math, MathMode::Text);
         assert_eq!(parsed.rendering.images, ImagesMode::Auto);
-        assert_eq!(parsed.api_key.as_deref(), Some(""));
+        assert_eq!(parsed.api_key, None);
         assert_eq!(
             parsed.layout.max_input_lines,
             LayoutConfig::default().max_input_lines
@@ -1743,10 +1852,10 @@ mod tests {
         // `null` 与缺席等价：accent 回到注释掉的默认值
         assert!(dumped.contains("  # accent: \"#3ac6e0\""));
         assert_eq!(doc_from_text(&dumped), json!({}));
-        // 空对象同样等价于缺席（整块回到注释状态）
+        // 但**显式写下的空对象是值**（不是"缺席"）：`colors: {}` 原样保留，round-trip 不丢键。
         assert_eq!(
             doc_from_text(&dump_config_yaml(&json!({"colors": {}}), DumpMode::Raw)),
-            json!({})
+            json!({"colors": {}})
         );
     }
 
@@ -1790,7 +1899,8 @@ mod tests {
             !again.contains("已掩码"),
             "没有值可掩时不该再出现掩码行：\n{again}"
         );
-        assert!(again.lines().any(|l| l == "# api_key: \"\""), "{again}");
+        // 再 dump 时 `api_key` 没有值 → 回到那行裸注释（没有掩码提示可加）。
+        assert!(again.lines().any(|l| l == "# api_key: null"), "{again}");
     }
 
     /// `Raw`（= 保存路径 / `--show-secrets`）写出真值，round-trip 逐字相同。
@@ -1841,10 +1951,10 @@ mod tests {
                 "{doc}"
             );
         }
-        // 空文档 dump 出来的仍是全注释模板（含 `# 密钥：…` 那行）。
+        // 空文档 dump 出来的仍是注释模板。
         let empty = dump_config_yaml(&json!({}), DumpMode::Masked);
-        assert!(empty.lines().any(|l| l == "# api_key: \"\""));
-        assert!(empty.contains("# 密钥：面板里只写不回显（末 4 位提示）"));
+        assert!(empty.contains("# ── Gateway"));
+        assert!(empty.lines().any(|l| l == "# api_key: null"));
     }
 
     /// 短密钥（< 8）既不出现在输出里，也不给 hint（比例过高 = 泄露）。
