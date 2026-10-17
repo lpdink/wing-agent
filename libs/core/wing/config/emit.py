@@ -2,25 +2,29 @@
 """规范形 YAML emitter —— 默认模板与保存路径**共用**的唯一实现。
 
 为什么自己写（不用 ``yaml.dump`` 输出结构）：``yaml.dump`` 不能输出注释、不能控制键序、
-更不能做「缺席即默认 → 注释掉的默认值」这件事。而这份文件的注释全部来自声明
-（``SettingMeta`` 的 ``doc`` / ``notes`` / ``example`` / ``apply`` / ``secret``），
-是「两份镜像靠 ``# SYNC`` 维系」这段历史的终点：默认模板与保存写盘从此都只有一条路径。
+更不能做「缺席即默认 → 注释掉的默认值」这件事。默认模板与保存写盘从此都只有一条路径。
 
-输出规则（总设计 §6.2 的八条，产品品味，逐条落地）：
+**文件里只有两类注释**：分组分隔行与注释掉的默认值。字段的 ``doc`` / ``notes`` /
+``example`` / 生效域 / 密文说明**一概不写进文件**——它们的归宿是设置面板与
+``wing config``（同一个声明层，见 ``spec.SettingMeta``）；文件只承载数据与可发现性
+（这个键存在、它的默认值是什么）。散文注释把几十行的配置撑成上千行，是文件难读的主因。
 
-1. 文件头 4 行注释（产品名 / 文件位置 / 「推荐在 TUI 里用 ``/settings`` 编辑」；**不写时间戳**——
-   它会让每次保存都产生 diff 噪声）；
+输出规则：
+
+1. 文件头 1 行（产品名 + 文件位置）；**不写时间戳**——它会让每次保存都产生 diff 噪声；
 2. 按业务分组（``config/groups.py`` 的表盖到目录节点上的 ``section``）分段，每组一行
-   ``# ── Name ───…`` 分隔 + ``section_doc`` 块注释；**键序恒为模型声明序**，分隔行按组
-   的首次出现发一次（分组表管界面顺序，不管文件顺序）；
-3. 每个字段：``doc`` / ``notes`` / ``example`` 在上方（不用行尾注释）；值存在 → 写出；
-   值缺席且有默认 → **注释掉的默认值**；值缺席且必填 → 键 + 空值（天然的 problem，
-   ``ChangeHere`` 占位符彻底死亡）；
-4. ``secret`` 字段加一行「只写不回显」说明（值本身照写——文件本来就是明文密钥的家）；
-5. ``apply`` 为 ``restart`` / ``next_session`` 时加一行生效域标记（``hot`` 是默认，不加噪声）；
-6. schema 之外的未知键（``extra``）在父容器末尾原样写回 + 标记注释（前向兼容）；
-7. 字符串引号策略：能不加就不加（判据 = 「不加引号能否原样读回」），需要时双引号 + 转义；
-8. 缩进 2 空格；列表项 ``- `` 缩进在父键下一级（与旧模板一致的形态）。
+   ``# ── Name ───…`` 分隔；**键序恒为模型声明序**，分隔行按组的首次出现发一次
+   （分组表管界面顺序，不管文件顺序）；
+3. 每个字段：值存在 → 写出；值缺席且默认有值 → **注释掉的默认值**（object 整棵子树注释）；
+   值缺席且默认是 ``null`` → 不写（``null`` 没有可展示的事实）；值缺席且必填 → 键 + 空值
+   （天然的 problem）；
+4. 列表项只展开**第一项**的缺席默认值：条目级开关一次可发现，又不随条目数膨胀；
+5. schema 之外的未知键（``extra``）在父容器末尾原样写回 + 标记注释（前向兼容）；
+6. 字符串引号策略：能不加就不加（判据 = 「不加引号能否原样读回」），需要时双引号 + 转义；
+7. 缩进 2 空格；列表项 ``- `` 缩进在父键下一级（与旧模板一致的形态）。
+
+不变量：**取消注释即一份合法的值**——注释块里的每一行都是它所在键的完整默认值，
+空容器显式写 ``{}`` / ``[]``（只写 ``key:`` 是 YAML null，round-trip 会破）。
 
 纯逻辑：不读文件、不 import gateway / runtime / event_bus；结构脚本自己拼，只借 PyYAML 序列化
 **单个标量与原始载荷**（引号 / 转义 / 数值形态交给它，那是它最擅长的部分）。
@@ -34,7 +38,6 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from .catalog import SettingKind, SettingNode
-from .spec import ApplyScope
 
 if TYPE_CHECKING:
     # 只在类型层需要（运行时只用属性访问）：document 依赖 emit 的 _item_template，
@@ -44,24 +47,20 @@ if TYPE_CHECKING:
 _MISSING = object()
 """稀疏文档里的「键缺席」（与显式 ``None`` 区分：``null`` 是用户写下的值）。"""
 
-_HEADER: tuple[str, ...] = (
-    "# ──────────────────────────────────────────────────────────────",
-    "# wing-agent configuration",
-    "# Location: $WING_HOME/core/config.yaml (default: ~/.wing/core/config.yaml)",
-    "# 推荐在 TUI 里用 /settings 编辑（本文件由声明生成，未写出的键跟随默认）。",
-)
+_HEADER = "# wing-agent configuration — $WING_HOME/core/config.yaml"
+"""文件头（1 行：产品名 + 文件位置）。"""
 
 _SECTION_WIDTH = 64
 """``# ── Name ───…`` 分隔行的总宽度（照旧模板的观感）。"""
 
 _UNKNOWN_KEY_NOTE = "unknown key (not recognized by this wing version)"
-"""未知键上方的标记注释（§6.2 规则 6）。"""
+"""未知键上方的标记注释（规则 5）。"""
 
 
 def default_document() -> dict[str, Any]:
     """首次运行的稀疏文档：两个空列表 = **天然的 problem**（04 的 setup 向导据此指路）。
 
-    其余键全部缺席 → emitter 把它们的默认值写成注释掉的行使文件自文档；没有 ``ChangeHere``
+    其余键全部缺席 → emitter 把它们的默认值写成注释掉的行使文件可发现；没有 ``ChangeHere``
     这种"假值"，也不需要一套特殊的占位符语义（总设计 §20 D24）。
     """
     return {"providers": [], "agents": []}
@@ -81,7 +80,7 @@ def emit_config_yaml(
             由**父前缀**定位，写在该容器已知键之后（找不到容器的条目兜底追加在文件末尾
             ——绝不丢用户的键）。
     """
-    out: list[str] = list(_HEADER)
+    out: list[str] = [_HEADER]
     out.append("")
     extras = _Extras(extra)
     body = data if isinstance(data, dict) else {}
@@ -173,30 +172,10 @@ def _key_text(key: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _comment_lines(node: SettingNode) -> list[str]:
-    """一个字段的文档注释块（规则 3/4/5）：doc → notes → example → 生效域 → 密钥。"""
-    lines: list[str] = []
-    if node.doc:
-        lines.append(node.doc)
-    lines.extend(node.notes)
-    if node.example:
-        lines.append(f"e.g. {node.example}")
-    if node.apply is ApplyScope.RESTART:
-        lines.append("生效：需重启网关")
-    elif node.apply is ApplyScope.NEXT_SESSION:
-        lines.append("生效：新会话")
-    if node.secret:
-        lines.append("密钥：面板里只写不回显（末 4 位提示）")
-    return lines
-
-
 def _emit_section_banner(out: list[str], node: SettingNode) -> None:
-    """``# ── Providers ───…`` + ``section_doc``（规则 2）。"""
+    """``# ── Providers ───…`` 分隔行（规则 2）。"""
     prefix = f"# ── {node.section} "
     out.append(prefix + "─" * max(0, _SECTION_WIDTH - len(prefix)))
-    if node.section_doc:
-        for line in node.section_doc.splitlines():
-            _comment(out, 0, line)
 
 
 def _emit_children(
@@ -209,26 +188,74 @@ def _emit_children(
     *,
     top_level: bool = False,
     commented: bool = False,
+    allow_defaults: bool = True,
 ) -> None:
-    """一个 object 节点的子字段（``data`` 是它的值；缺席的子字段照规则 3 处理）。"""
-    banner_for: set[str] = set()
-    emitted = 0
+    """一个 object 节点的子字段（``data`` 是它的值；缺席的子字段照规则 3 处理）。
+
+    ``allow_defaults=False`` 只用在**非首项的列表项**里：条目级开关不随条目数膨胀。
+    """
+    if top_level:
+        _emit_sections(out, extras, node, data, prefix, allow_defaults)
+        return
     for child in node.children:
-        child_path = _child_path(prefix, child.key)
-        if top_level:
-            if emitted:
-                out.append("")
-            # 分隔行按「首次出现」发一次：分组表是界面顺序，文件顺序恒为声明序，
-            # 两者不一致时也不重复发（同一组的两段分隔行只会让人以为文件被切错了）。
-            if child.section is not None and child.section not in banner_for:
-                banner_for.add(child.section)
-                _emit_section_banner(out, child)
         raw = data.get(child.key, _MISSING) if isinstance(data, dict) else _MISSING
-        _emit_field(out, extras, child, child_path, raw, indent, commented=commented)
-        emitted += 1
+        _emit_field(
+            out,
+            extras,
+            child,
+            _child_path(prefix, child.key),
+            raw,
+            indent,
+            commented=commented,
+            allow_defaults=allow_defaults,
+        )
     if not commented:
-        # 未知键写在父容器末尾（§6.2 规则 6）；注释态没有文档可承载它们，留给文件末尾兜底。
+        # 未知键写在父容器末尾（规则 5）；注释态没有文档可承载它们，留给文件末尾兜底。
         _emit_extras(out, extras, prefix, indent)
+
+
+def _emit_sections(
+    out: list[str],
+    extras: _Extras,
+    node: SettingNode,
+    data: dict[str, Any],
+    prefix: str,
+    allow_defaults: bool,
+) -> None:
+    """顶层：按分组缓冲后分段。
+
+    分隔行按组的**首次出现**发一次（分组表是界面顺序，文件顺序恒为声明序，两者不一致时
+    也不重复发——同一组的两段分隔行只会让人以为文件被切错了）；**正文为空的分组连分隔行
+    一起省掉**（一条没有内容的横幅只会让人以为文件被截断）。
+    """
+    children = node.children
+    index = 0
+    while index < len(children):
+        section = children[index].section
+        start = index
+        while index < len(children) and children[index].section == section:
+            index += 1
+        body: list[str] = []
+        for child in children[start:index]:
+            raw = data.get(child.key, _MISSING) if isinstance(data, dict) else _MISSING
+            _emit_field(
+                body,
+                extras,
+                child,
+                _child_path(prefix, child.key),
+                raw,
+                0,
+                commented=False,
+                allow_defaults=allow_defaults,
+            )
+        if not body:
+            continue
+        if out and out[-1] != "":
+            out.append("")
+        if section is not None:
+            _emit_section_banner(out, children[start])
+        out.extend(body)
+    _emit_extras(out, extras, prefix, 0)
 
 
 def _emit_field(
@@ -240,20 +267,35 @@ def _emit_field(
     indent: int,
     *,
     commented: bool,
+    allow_defaults: bool,
 ) -> None:
-    """一个字段：文档注释块 + 值（存在 / 注释掉的默认值 / 必填空值）。"""
-    for line in _comment_lines(node):
-        _comment(out, indent, line)
+    """一个字段：值（存在 / 注释掉的默认值 / 必填空值）。"""
     if raw is _MISSING:
         if node.required:
             _emit_value(
-                out, extras, node, path, _empty_value(node), indent, commented=commented
+                out,
+                extras,
+                node,
+                path,
+                _empty_value(node),
+                indent,
+                commented=commented,
+                allow_defaults=allow_defaults,
             )
-        elif node.has_default:
+        elif node.has_default and allow_defaults:
             _emit_absent_default(out, extras, node, path, indent, commented=commented)
-        # 无值、无默认、非必填 ⇒ 没有可展示的事实（Interface 根才有这种字段）
+        # 无值、无默认（或默认是 null）、非必填 ⇒ 没有可展示的事实
         return
-    _emit_value(out, extras, node, path, raw, indent, commented=commented)
+    _emit_value(
+        out,
+        extras,
+        node,
+        path,
+        raw,
+        indent,
+        commented=commented,
+        allow_defaults=allow_defaults,
+    )
 
 
 def _emit_absent_default(
@@ -265,19 +307,27 @@ def _emit_absent_default(
     *,
     commented: bool,
 ) -> None:
-    """缺席且有默认：标量写成注释掉的默认值；object 把整棵子树注释掉（§6.2 规则 3 的推广）。
+    """缺席且有默认：标量写成注释掉的默认值；object 把整棵子树注释掉（规则 3 的推广）。
 
     list 的 ``default`` 在 catalog 里恒为 ``None``（结构由 ``element`` 表达），但展示形态要
     写出可读的默认值——空列表（现状所有 list 默认都是 ``[]``）。
     """
     if node.kind is SettingKind.OBJECT:
+        body: list[str] = []
+        _emit_children(body, extras, node, {}, indent + 2, path, commented=True)
+        if not body:
+            # 子树里没有一个可展示的默认值：`key:` 取消注释是 null，必须显式写 `{}`。
+            _line(out, indent, f"{_key_text(node.key)}: {{}}", True)
+            return
         _line(out, indent, f"{_key_text(node.key)}:", True)
-        _emit_children(out, extras, node, {}, indent + 2, path, commented=True)
+        out.extend(body)
         return
-    default = node.default
-    if default is None and node.kind is SettingKind.LIST:
-        default = []
-    _emit_value(out, extras, node, path, default, indent, commented=True)
+    if node.kind is SettingKind.LIST:
+        _emit_value(out, extras, node, path, [], indent, commented=True)
+        return
+    if node.default is None:
+        return
+    _emit_value(out, extras, node, path, node.default, indent, commented=True)
 
 
 def _emit_value(
@@ -289,6 +339,7 @@ def _emit_value(
     indent: int,
     *,
     commented: bool,
+    allow_defaults: bool = True,
 ) -> None:
     """一个字段的取值形态（object / list / map / 标量；``commented`` 时整体注释化）。"""
     key = _key_text(node.key)
@@ -299,7 +350,14 @@ def _emit_value(
         else:
             _line(out, indent, f"{key}:", commented)
             _emit_children(
-                out, extras, node, value, indent + 2, path, commented=commented
+                out,
+                extras,
+                node,
+                value,
+                indent + 2,
+                path,
+                commented=commented,
+                allow_defaults=allow_defaults,
             )
         return
     if node.kind is SettingKind.LIST and isinstance(value, list):
@@ -309,7 +367,14 @@ def _emit_value(
             _line(out, indent, f"{key}:", commented)
             for index, item in enumerate(value):
                 _emit_list_item(
-                    out, extras, node, item, f"{path}[{index}]", indent + 2, commented
+                    out,
+                    extras,
+                    node,
+                    item,
+                    f"{path}[{index}]",
+                    indent + 2,
+                    commented,
+                    allow_defaults=allow_defaults and index == 0,
                 )
     elif isinstance(value, (dict, list)):
         _emit_keyed_raw(out, node.key, value, indent, commented)
@@ -355,6 +420,8 @@ def _emit_list_item(
     item_path: str,
     indent: int,
     commented: bool,
+    *,
+    allow_defaults: bool,
 ) -> None:
     """一个列表项：对象形态走 ``- key: value`` 合并，标量一项一行，其余原样。"""
     template = _item_template(node, item)
@@ -363,7 +430,16 @@ def _emit_list_item(
         and template.kind is SettingKind.OBJECT
         and isinstance(item, dict)
     ):
-        _emit_object_item(out, extras, template, item, item_path, indent, commented)
+        _emit_object_item(
+            out,
+            extras,
+            template,
+            item,
+            item_path,
+            indent,
+            commented,
+            allow_defaults=allow_defaults,
+        )
     elif isinstance(item, (dict, list)):
         _emit_raw_item(out, item, indent, commented)
     else:
@@ -405,17 +481,26 @@ def _emit_object_item(
     item_path: str,
     indent: int,
     commented: bool,
+    *,
+    allow_defaults: bool,
 ) -> None:
-    """对象列表项：``- `` 与第一条非空行合并（可能是该字段的文档注释——``- # doc``）。
+    """对象列表项：``- `` 与第一条非空行合并（注释块的首行是 ``- # …``）。
 
-    不把注释提升到 ``- `` 上方：那样后面的项会因为"前一项的行尾"而看起来带着别的项的注释。
+    不把行提升到 ``- `` 上方：那样后面的项会因为"前一项的行尾"而看起来带着别的项的行。
     """
     if not item:
         _line(out, indent, "- {}", commented)
         return
     body: list[str] = []
     _emit_children(
-        body, extras, template, item, indent + 2, item_path, commented=commented
+        body,
+        extras,
+        template,
+        item,
+        indent + 2,
+        item_path,
+        commented=commented,
+        allow_defaults=allow_defaults,
     )
     merge_at = next((index for index, line in enumerate(body) if line.strip()), 0)
     for index, line in enumerate(body):

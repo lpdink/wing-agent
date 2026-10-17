@@ -43,9 +43,9 @@ class SettingMeta(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     doc: str
-    """一行摘要（面板行内提示 + YAML 行上注释）。"""
+    """一行摘要（面板行内提示 / 详情栏标题）。"""
     notes: str | None = None
-    """多行详解（面板详情栏 + YAML 块注释）；02 按 ``\\n`` 切行。"""
+    """多行详解（面板详情栏）；02 按 ``\\n`` 切行。"""
     title: str | None = None
     """人类标签；缺省 = 字段名。"""
     apply: ApplyScope = ApplyScope.HOT
@@ -55,7 +55,7 @@ class SettingMeta(BaseModel):
     choices: dict[str, str] | None = None
     """枚举：值 -> 含义（`Literal` 之外的补充说明；面板的内联选择项）。"""
     example: str | None = None
-    """示例值（详情栏 + YAML 注释）。"""
+    """示例值（面板详情栏）。"""
     editable: bool = True
     """False = 面板灰显只读。"""
     deprecated: str | None = None

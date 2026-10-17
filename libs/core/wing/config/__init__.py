@@ -10,7 +10,7 @@
 ``problems``（跨字段检查的纯函数 + ``ConfigProblem``，加载期与设置面板共用）·
 ``catalog``（设置目录树：``SettingNode`` / ``build_catalog()`` / ``parse_path()``）·
 ``groups``（业务分组表：``SETTING_GROUPS`` / ``build_groups()``——界面分类的唯一声明处）·
-``emit``（规范形 YAML emitter：默认模板与保存路径共用，注释来自声明）·
+``emit``（规范形 YAML emitter：默认模板与保存路径共用，文件里只有分隔行与注释掉的默认值）·
 ``loader``（WING_HOME 解析 + 配置单例加载）·
 ``user_agent``（UA 预设与请求头构造）。
 """

@@ -34,7 +34,7 @@ class SettingGroup:
     Attributes:
         id: 稳定标识（wire 上是 ``groups[].id``）；改名 / 调序都不该改它。
         title: 显示名（面板锚点、YAML 分隔行、``wing config list`` 的分组头）。
-        doc: 一行说明（面板锚点的详情、YAML 分隔行下方的块注释）。
+        doc: 一行说明（面板锚点的详情；**不进 config.yaml**）。
         members: 成员 = ``Config`` 的**顶层键名**（catalog root 直接子节点的 ``key``）。
             顺序不表达文件顺序（文件顺序恒为模型声明序）；它只用于「这一组包含什么」。
     """

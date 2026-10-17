@@ -95,7 +95,7 @@ class SettingNodeProto(BaseModel):
     )
     section_doc: str | None = Field(
         default=None,
-        description="分组说明：只在每组的声明序首成员上非空（emitter 的一条块注释）",
+        description="分组说明：只在每组的声明序首成员上非空",
     )
 
     # ── 结构 ──
