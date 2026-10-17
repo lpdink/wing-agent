@@ -173,6 +173,37 @@ D5/D6/D7 拍板：
   优先、量子批量）；user 文本**永不被驱逐**，被驱逐的 user 图用 user 变体占位（见「请求期图片
   投影」的占位表）。
 
+### TUI 里的用户图（前端侧的消费链路）
+
+后端一侧到这里就完整了：消息只携带引用。**把它画出来**是前端的活，TUI 的这条链路是：
+
+```text
+ChatCell::UserMessage(UserMessageBody{ text, media })       ui/chat_view/media.rs
+   │ 形状来自 MediaRef（上传闸门按 magic bytes 解析的像素尺寸）—— 不探测、不读盘、不等网络
+   ▼
+每图一个锚点块：caption `▢ Image #1 · 1024×768` + 覆盖行   （行数 = render/fit 的共享 fit）
+   │ 图在画不了时（off / 无协议 / 丢弃态）退回一行标签：`[Image #1 1024×768 384KB]`
+   ▼
+FrameImage{ source: PictureSource::Media(id) }              ui/chat_view/image.rs
+   │ 屏幕上要哪几张由 `App::draw` 记录下来（与新鲜度 lane 同一个观察点）
+   ▼
+app/images/media.rs：屏幕上有、本机没有、也没在飞 → AppIntent::LoadMedia
+   ▼
+后台 GET /api/session/media?session_id&media_id → FetchPayload::MediaBytes
+   ▼
+字节 LRU（8 张 / 24 MiB）→ ImageStore::request_media(id, target, bytes) → 编码 → 画出来
+```
+
+三条前端口径（机制细节见 [tui-images.md](tui-images.md)）：
+
+- **布局是内容的纯函数**：形状来自引用，字节到没到只决定「图上不上」（画不出来时 caption 留着）。
+  滚动不会因为某张图加载完成而跳动，这是刻意的取舍——代价是幽灵引用（对象被手工删掉）会在气泡里
+  留下一个空盒子（caption 可见），不会退回标签行。
+- **只抓屏幕上的**：打开一个 50 张图的老会话不会立刻发 50 个 GET，滚到哪抓到哪（内容寻址 ⇒ 抓到的
+  永远同一份字节，丢掉再抓与一直留着等价）。
+- **提交路径不抓网**：本机的压缩产物在上传之前就能算出它将要得到的 `id`（`id = sha256(bytes)`，
+  见 `protocol/media.rs::predicted_ref`），所以 pending 气泡立刻有图、promote 之后命中同一份编码缓存。
+
 ## 事件与序列化面
 
 - `ToolCallResultEvent.tool_media: list[dict]`（`MediaRef.model_dump()` 列表）——只服务
@@ -360,9 +391,10 @@ providers:
   "Apple CgBI variant … convert it first"（附 `sips -s format png` 示例），**不**误报
   "truncated or corrupt"。其私有字节序刻意不解析（无可验证的规范来源）。
 - 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、**全局**媒体池端点（`GET /api/media/{id}`——
-  会话私有媒体已由 `GET /api/session/media` 提供，见「用户贴图」）、TUI/VSCode 像素渲染
-  （kitty/iTerm2 协议、webview）不在本期；用户侧入口的**服务端**链路见「用户贴图」一节，前端
-  （composer 图片 chip / 终端协议 / 压缩）在前端侧交付。
+  会话私有媒体已由 `GET /api/session/media` 提供，见「用户贴图」）不在本期。TUI 侧的用户图渲染
+  已交付（见「TUI 里的用户图」一节与 [tui-images.md](tui-images.md)）；**VSCode 的 webview 渲染**
+  仍未做，`tool_call_result.tool_media` / tool 消息里的 `media`（ReadImage 的结果）也还没进
+  TUI 图块——两处都只差「同一套锚点接到另一张卡片上」。
 - **上传 body 没有服务级大小上限**：两个上传端点（媒体 / 文件）都自己做了两道前置（会话存在性 →
   `Content-Length` 预检）——声明超限的请求在收包**之前**就 400，幽灵会话也先 404；但**没有声明 /
   声明说谎**的 body 仍会先被 `await request.body()` 整包收进内存，`≤ images.max_bytes`（/ 文件端点的

@@ -380,6 +380,33 @@ impl Widget for ChatViewWidget<'_> {
                 cell_visible as u16,
             );
 
+            // User-message bubbles inset their text (2 left, 1 top, 1 bottom) — the picture
+            // anchors sit inside the same inset, so their screen row is
+            // `render_y + line - skip + top_pad`. Computed once here and used by both the
+            // placement recording and the render below; the two must not disagree about
+            // where row 0 of the text is.
+            let user_pads = match cached.cell() {
+                ChatCell::UserMessage(_)
+                | ChatCell::PendingUserMessage(_)
+                | ChatCell::DiscardedUserMessage(_) => {
+                    // Padding rows only consume visible height while actually on screen:
+                    // once the cell top is scrolled past (skip > 0) the top padding is gone,
+                    // and the bottom padding only exists when the cell end lies inside the
+                    // window. Reserving both unconditionally clipped the last text row
+                    // whenever the cell top was scrolled off (big-paste / replay bug).
+                    Some((usize::from(skip == 0), usize::from(cell_end <= view_end)))
+                }
+                _ => None,
+            };
+            let (img_render_y, img_skip, img_visible) = match user_pads {
+                Some((top, bottom)) => (
+                    render_y + top as u16,
+                    skip.saturating_sub(top),
+                    cell_visible.saturating_sub(top + bottom),
+                ),
+                None => (render_y, skip, cell_visible),
+            };
+
             // Pre-wrapped cells (streaming Thinking / AssistantMessage,
             // before and after their turn-end reconcile): every line is
             // already ≤ width — blit the visible slice directly, no
@@ -434,9 +461,9 @@ impl Widget for ChatViewWidget<'_> {
                 &mut frame_images,
                 &cell,
                 content_area,
-                skip,
-                render_y,
-                cell_visible,
+                img_skip,
+                img_render_y,
+                img_visible,
             );
 
             // User messages (normal / pending / discarded): fill full-width
@@ -447,12 +474,7 @@ impl Widget for ChatViewWidget<'_> {
             //
             // KEEP IN SYNC with `frame::USER_MESSAGE_INSET`: the copy skips
             // exactly this many leading columns on these rows.
-            if matches!(
-                cached.cell(),
-                ChatCell::UserMessage(_)
-                    | ChatCell::PendingUserMessage(_)
-                    | ChatCell::DiscardedUserMessage(_)
-            ) {
+            if let Some((top_pad, bottom_pad)) = user_pads {
                 let bg = Style::default().bg(self.ctx.palette.surface);
                 for y in cell_area.y..cell_area.y + cell_area.height {
                     for x in cell_area.x..cell_area.x + cell_area.width {
@@ -460,14 +482,6 @@ impl Widget for ChatViewWidget<'_> {
                     }
                 }
                 // Inset text area: 2 left, 1 top, 1 bottom padding.
-                // Padding rows only consume visible height while actually on
-                // screen: once the cell top is scrolled past (skip > 0) the
-                // top padding is gone, and the bottom padding only exists
-                // when the cell end lies inside the window. Reserving both
-                // unconditionally clipped the last text row whenever the
-                // cell top was scrolled off (big-paste / replay bug).
-                let top_pad = usize::from(skip == 0);
-                let bottom_pad = usize::from(cell_end <= view_end);
                 let text_area = Rect::new(
                     cell_area.x + 2,
                     cell_area.y + top_pad as u16,
@@ -560,7 +574,7 @@ mod tests {
     fn test_chat_view_scroll() {
         let mut view = ChatView::new();
         for i in 0..10 {
-            view.push(ChatCell::UserMessage(format!("message {i}")));
+            view.push(ChatCell::UserMessage(format!("message {i}").into()));
         }
         assert!(view.auto_scroll);
 
@@ -634,7 +648,7 @@ mod tests {
             .map(|i| format!("line-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::UserMessage(text.into()));
         view.push(ChatCell::AssistantMessage("reply".into()));
 
         // Window of 12 rows: auto-scroll pins to bottom, so the top of the
@@ -660,7 +674,7 @@ mod tests {
             .map(|i| format!("row-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::UserMessage(text.into()));
 
         let buf = render_view(&mut view, 40, 10);
         let rendered = buffer_text(&buf);

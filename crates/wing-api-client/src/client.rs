@@ -198,6 +198,33 @@ impl GatewayClient {
         Ok(parsed.media)
     }
 
+    /// 读取媒体对象的原始字节（图片预览的字节源）。
+    ///
+    /// `GET /api/session/media?session_id=<sid>&media_id=<id>`，响应是**原始字节**
+    /// （非 JSON）。`media_id` 必须是 64 位小写 hex；非法 id 与对象不存在同价 404
+    /// （网关不给探测反馈）。鉴权开启时请求头照常生效——这条通道给 TUI 画消息里的图
+    /// 用，`?api_key=` 只服务带不了请求头的 `<img>`。
+    ///
+    /// 错误面与其它 RPC 一致（走 [`ApiClientError::Api`]）：404（`media not found` /
+    /// 会话不存在 / 归档）。
+    pub async fn read_media(
+        &self,
+        session_id: &str,
+        media_id: &str,
+    ) -> Result<Vec<u8>, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/media"))
+            .query(&[("session_id", session_id), ("media_id", media_id)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     // ============================================================
     // 查询
     // ============================================================
@@ -1005,6 +1032,9 @@ mod tests {
     const MEDIA_BODY: &str = r#"{"ok":true,"media":{"id":"ab12","mime":"image/jpeg",
         "bytes":5,"width":2,"height":1,"name":"shot.jpg"}}"#;
 
+    /// 字节直出端点的响应体：只要不是 JSON 就是有意义的样本（真网关回的是图片字节）。
+    const RAW_MEDIA_BODY: &str = "\u{89}PNG\r\n\u{1a}\n not-json bytes";
+
     #[tokio::test]
     async fn upload_media_posts_raw_bytes_and_parses_the_reference() {
         let server = MockGateway::start(vec![("/api/session/media", 200, MEDIA_BODY)]).await;
@@ -1167,5 +1197,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_not_found(), "{err}");
+    }
+
+    /// 字节直出不是 JSON：响应体必须原样回来（不能被当作结构体解析）。
+    #[tokio::test]
+    async fn read_media_returns_the_raw_body_and_asks_the_right_question() {
+        let server = MockGateway::start(vec![("/api/session/media", 200, RAW_MEDIA_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), Some("k3y")).unwrap();
+
+        let bytes = client.read_media("sid-9", &"ab".repeat(32)).await.unwrap();
+        assert_eq!(bytes, RAW_MEDIA_BODY.as_bytes());
+
+        let recorded = server.recorded();
+        assert_eq!(recorded[0].method, "GET");
+        assert_eq!(
+            recorded[0].path,
+            format!(
+                "/api/session/media?session_id=sid-9&media_id={}",
+                "ab".repeat(32)
+            )
+        );
+        assert_eq!(
+            recorded[0].authorization.as_deref(),
+            Some("Bearer k3y"),
+            "字节通道走请求头鉴权（?api_key= 是给 <img> 的）"
+        );
+        assert!(recorded[0].body_raw.is_empty(), "读端点没有请求体");
+    }
+
+    #[tokio::test]
+    async fn read_media_rejections_carry_the_wire_error() {
+        for (status, body) in [
+            (
+                404u16,
+                r#"{"error":"not_found","detail":"media not found"}"#,
+            ),
+            (
+                404,
+                r#"{"error":"session_archived","detail":"session is archived"}"#,
+            ),
+        ] {
+            let server = MockGateway::start(vec![("/api/session/media", status, body)]).await;
+            let client = GatewayClient::new(server.url.clone(), None).unwrap();
+            let err = client.read_media("sid", &"a".repeat(64)).await.unwrap_err();
+            match &err {
+                ApiClientError::Api {
+                    status: got,
+                    detail,
+                    body,
+                    ..
+                } => {
+                    assert_eq!(*got, 404);
+                    assert!(!detail.is_empty(), "{detail}");
+                    assert!(body.is_some(), "结构化错误体不该被吞掉");
+                }
+                other => panic!("expected Api error, got {other:?}"),
+            }
+        }
     }
 }

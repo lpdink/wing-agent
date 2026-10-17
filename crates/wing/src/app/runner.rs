@@ -242,6 +242,39 @@ pub async fn execute_intent(
                 });
             }
         }
+        AppIntent::LoadMedia {
+            session_id,
+            media_ids,
+        } => {
+            // 一张一个任务（lane 已经把并发压在 `MAX_INFLIGHT` 以内）：慢链路上一张慢图
+            // 不拖住同屏的其它图。没有连接就立刻回失败——lane 把它记成「抓不到」，
+            // 不会把这几张图永远挂在「在飞」上（重连后内容重建会重新试）。
+            let http = transport.as_ref().map(|t| t.http.clone());
+            for media_id in media_ids {
+                let tx = fetch_tx.clone();
+                let session_id = session_id.clone();
+                let http = http.clone();
+                tokio::spawn(async move {
+                    let result = match http {
+                        Some(http) => http
+                            .read_media(&session_id, &media_id)
+                            .await
+                            .map(std::sync::Arc::new)
+                            .map_err(|e| e.to_string()),
+                        None => Err("gateway disconnected".to_string()),
+                    };
+                    if let Err(reason) = &result {
+                        tracing::warn!(media_id = %media_id, "media fetch failed: {reason}");
+                    }
+                    let _ = tx
+                        .send(FetchResult {
+                            session_id,
+                            payload: FetchPayload::MediaBytes { media_id, result },
+                        })
+                        .await;
+                });
+            }
+        }
         AppIntent::FetchCommands => {
             if let Some(t) = transport {
                 let http = t.http.clone();

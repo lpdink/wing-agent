@@ -269,7 +269,7 @@ fn test_structural_change_aborts_the_selection() {
                     .collect::<Vec<_>>()
                     .join("\n");
                 app.chat.clear();
-                app.chat.push(ChatCell::UserMessage(text));
+                app.chat.push(ChatCell::UserMessage(text.into()));
             }),
         ),
     ];
@@ -555,7 +555,8 @@ fn app_with_link_at_the_content_edge() -> App {
     let mut app = test_app();
     app.clear_welcome();
     for i in 0..4 {
-        app.chat.push(ChatCell::UserMessage(format!("filler {i}")));
+        app.chat
+            .push(ChatCell::UserMessage(format!("filler {i}").into()));
     }
     app.chat.push(ChatCell::AssistantMessage(format!(
         "see [{label}](https://example.com)"

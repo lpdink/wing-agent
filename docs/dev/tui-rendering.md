@@ -279,16 +279,21 @@ cargo run -q -p wing --example render_probe -- --images --workspace . \
 完整契约——能力阶梯、三态、遮挡与选择、失效触发点、**新鲜度**（文件被重写）、资源上限、性能数字与
 真机验收——在 [`tui-images.md`](tui-images.md)。这一页只留两条对**渲染层**有约束的事实：
 
-- **记录**：每个可见锚点记一条 `FrameImage { area, offset, target, path }`。`area` = 锚点盒子 ∩ band
+- **记录**：每个可见锚点记一条 `FrameImage { area, offset, target, source }`。`area` = 锚点盒子 ∩ band
   （垂直裁、宽度不裁），`offset` = 盒子左上角相对 band 的**带符号**偏移（图上滚为负），
-  `target` = **整个盒子** `(cols, rows)`（不是可见部分——滚动不重编码）。`target` 进 `ImageStore` 的
-  cache key（连同文件 canonical + mtime + 终端 cell 像素），所以宽度/布局变化会自动重编码。
+  `target` = **整个盒子** `(cols, rows)`（不是可见部分——滚动不重编码），`source` = 这张图的**身份**
+  （[`render/picture.rs`](../../crates/wing/src/render/picture.rs)：本地文件，或网关媒体对象 id）。
+  `target` 进 `ImageStore` 的 cache key（本地文件连同 canonical + mtime、媒体对象连同 id，再加终端 cell
+  像素），所以宽度/布局变化会自动重编码。
 - **行号**：锚点的屏幕行 = 它的**行号**，除非它上面有超宽行——`Paragraph` 把它们折成多行、`scroll` 又是
   按行算的，所以此时要用包装后的行号（`CellFrame::image_row`，超宽行由 ratatui 自己的
   `Paragraph::line_count` 量，不是我们重写折行）。**下面**有超宽行不影响锚点自己的行，因此「cell 里有一行
   很长的代码」不会让整张图消失（`rows_exact` 是**链接层**的门，不是图片的）。
 
 **一套 opts**：`CellContext.images` 是唯一权威，`CachedCell` 在每次投影（高度 / 帧）前从 ctx 同步给流式引擎与非流式 `RenderOpts`——这是「同一张图在流式与终态行数一致」的机械保证。
+
+**用户消息里的图不走这张表**：形状来自 `MediaRef` 自身（`ui/chat_view/media.rs`），流式引擎不参与，
+字节按视口抓取——见 [`tui-images.md`](tui-images.md) 第九节。
 
 **元数据表怎么前进（06 的接线 + 07 的新鲜度）**：每个 cell 在算出线条时把链接目标过一遍 `resolve_image_path`（与产锚点同一个纯函数）得到候选路径，app 的 lane（`app/images.rs`）对候选调 `ImageStore::meta` 探测头信息并填表。表的生命周期有两条规则：**一个内容代内只增不减**（锚点会吃掉链接 span，缩表会让锚点在链接路径之间振荡）；**内容重建**（会话切换 / 压缩重同步 / rewind / `/clear`，即 `ChatView::structure_epoch` 变化）则整表清空 + `ImageStore::reset()`，下一帧按新内容重新探测——被替换的图按新头信息排版，被删掉的图不再产锚点（重建是重新读盘的**硬重置**；同一会话内的文件重写由 app lane 的**新鲜度检查**覆盖，见 [`tui-images.md`](tui-images.md) 第四节）。`rendering.images = off` / 终端无图形协议 / 探测失败 → 不建 store、不读盘，渲染层拿到的是共享的 `ImageOpts::off()`，逐 cell 等于今天的链接路径。
 

@@ -333,6 +333,7 @@ fn dispatch(
         Submission {
             content: content.to_string(),
             images: images.clone(),
+            media: Vec::new(),
         },
     );
     let (tx, rx) = mpsc::channel(8);

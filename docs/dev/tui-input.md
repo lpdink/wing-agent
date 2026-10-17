@@ -331,20 +331,33 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
 推断应是标准 MIME（`image/png` 等），需在 Ghostty 实机确认（截图 / 浏览器复制图片两种来源）；确认 `Cmd+V`
 文本与图片各一次的行为、以及图片字节与剪贴板一致。
 
-## 消息里的图片：正文之后的标签行
+## 消息里的图片：图块，或（画不了时）一行标签
 
-发出去（`pending`）与重放（resume / `SyncSession`）的用户消息，正文之后一行一张地渲染图片标签：
-`[Image #1 1024×768 384KB]`——与 composer 的 chip **同一套记法**（`util/format.rs::image_label`），
-但号码是**消息内**的 1-based 序号（按媒体在消息里的顺序），**不是**草稿里的 chip 号码：重放只有媒体列表、
-没有草稿号码，重编号让 resume 前后同一条消息长得一样（删过 chip 时最明显）。草稿号码与消息号码是两套
-自洽的口径，各自记在 `ui/input_area/image.rs` / `ui/chat_view/media.rs`。
+发出去（`pending`）与重放（resume / `SyncSession`）的用户消息，内容是
+`UserMessageBody { text, media }`（`ui/chat_view/media.rs`）：正文 + 媒体引用。它渲染成什么取决于这一帧的
+图片能力——
+
+| 状态 | 屏幕上是什么 |
+|---|---|
+| 能画（`rendering.images` 开 + 终端有图形协议） | 每张图一个**锚点块**：caption `▢ Image #1 · 1024×768` + 覆盖行，图由 app 画上去（机制见 [tui-images.md](tui-images.md) 第九节） |
+| 画不了（配置 `off` / 无协议） | 标签行 `[Image #1 1024×768 384KB]`，**与引入图块之前逐字节一致** |
+| 被打断丢弃（墓碑态） | 只留标签行（图块的像素不受 cell 样式影响，画不出「划掉」） |
+| 这张引用不可锚定（id 不是 64-hex / 尺寸退化） | 该图退回标签行（与 markdown「没有元数据走链接」同一条阶梯） |
+
+标签 / caption 的号码都是**消息内** 1-based 序号（按媒体在消息里的顺序），**不是**草稿里的 chip 号码：
+重放只有媒体列表、没有草稿号码，重编号让 resume 前后同一条消息长得一样（删过 chip 时最明显）。草稿号码与
+消息号码是两套自洽的口径，各自记在 `ui/input_area/image.rs` / `ui/chat_view/media.rs`。标签形态（括号 /
+`Image` / `#N` / `W×H` / 紧凑字节记法）与 chip 逐字一致；caption 与 markdown 锚点同一份格式
+（`▢ {label} · W×H`，`render/markdown::caption_of`）。
 
 | 关注点 | 位置 |
 |---|---|
-| 显示文本（正文 + 标签行）与两侧标签构造（活体 `CompressedImage` / 重放 `MediaRef`） | `crates/wing/src/ui/chat_view/media.rs`（唯一一份；无图片时**恒等**返回正文） |
+| 内容模型（正文 + 引用）与两种形态的合成 | `crates/wing/src/ui/chat_view/media.rs`（唯一一份；无图片时**恒等**返回正文） |
+| 引用形态（`is_media_id`）与上传前的预测引用（`id = sha256`） | `crates/wing/src/protocol/media.rs` |
 | 历史投影里的 `media` 解析（宽容：缺省 / `null` / 坏条目 / 非数组都不炸整条记录） | `crates/wing/src/protocol/history.rs::SessionMessage.media` |
 | 重放路径（`role=user` → cell） | `crates/wing/src/app/replay.rs` |
-| pending 入队时的显示文本定格 | `ChatView::push_pending`（`ui/chat_view/model.rs`） |
+| pending 入队时的内容定格 | `ChatView::push_pending`（`ui/chat_view/model.rs`） |
+| 提交时把本机字节喂给图片 lane（pending 立刻有图） | `App::submit_message`（`app/commands.rs`） |
 
 **已知边界（合并轮次下的号码漂移）**：后端在队列 / steer 窗口里把多份提交合并成**一条**历史记录
 （正文拼接、media 按提交序 concat）时，活体视图按「每份提交各自从 1 编号」渲染（两个 pending 气泡各一份
@@ -352,20 +365,18 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
 同一段内容重启前后长得不一样。纯展示、链上无数据影响（号码不是寻址键），登记为已知边界，
 不为对齐而重编号。
 
-**三条路径一段文本**：本客户端发出去的消息（pending → `promote` 原样搬进历史）、重连 / resume 的
-重放、以及纯图消息（正文为空）——都走 `text_with_labels`。无 media 的消息**恒等**（cell 的文本就是
-正文），这是「与从前逐字节一致」的落点；坏掉的媒体条目只花掉一行标签，不花掉整条消息。正文已经以
-`\n` 收尾时不再补行——标签接在下一行行首（别的入口写进历史的尾换行不该在 resume 时露出一个空行；
-TUI 自己的提交路径先 `trim()`，走不到这一支）。
-样式上标签行走消息自身的颜色（pending 是 dim、历史是正常色），**不单列 accent**：cell 的文本是单一
-样式的 `String`，要分色就得把「哪几行是标签」带进 `ChatCell`（而 `ChatCell::UserMessage(String)` 的
-形状正是 frame / viewport / selection 四处特殊处理的前提）。形态（括号 / `Image` / `#N` / `W×H` / 紧凑
-字节记法）与 chip 逐字一致——对齐的是形状。
+**三条路径一份内容**：本客户端发出去的消息（pending → `promote` 原样搬 body，编码缓存因此不失效）、
+重连 / resume 的重放、以及纯图消息（正文为空）——都是 `UserMessageBody` + 同一份 `render_body`。
+无 media 的消息**恒等**（渲染结果就是正文），这是「与从前逐字节一致」的落点；坏掉的媒体条目只花掉一行
+标签，不花掉整条消息。正文已经以 `\n` 收尾时不再补行——图块 / 标签接在下一行行首（别的入口写进历史的
+尾换行不该在 resume 时露出一个空行；TUI 自己的提交路径先 `trim()`，走不到这一支）。
+样式上图块与文字都走消息自身的颜色（pending 是 dim、历史是正常色），**不单列 accent**：caption 与标签
+是 cell 里的普通文本行，图本身没有「样式」可言。
 
 ## 发送失败 / 被拒：把内容还给草稿
 
 草稿在提交那一刻就清了，内容只在 `pending` 队列里；所以**每一条失败路径都要把内容放回去**，否则用户
-刚写的字与刚贴的图就没了。`pending` 条目因此携带**提交产物原件**（`Submission { content, images }`，
+刚写的字与刚贴的图就没了。`pending` 条目因此携带**提交产物原件**（`Submission { content, images, media }`，
 `ChatView::push_pending`），失败时 `ChatView::take_pending` 出队并交回原件，`App::restore_failed_send`
 写回 composer + warning toast：
 

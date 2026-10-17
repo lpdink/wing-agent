@@ -4,8 +4,9 @@
 //!
 //! * **content unit** (`cell`) — [`ChatCell`] and its rendering (what a cell looks like, nothing else)
 //!   plus the pending-message wrapper.
-//! * **message pictures** (`media`) — the label row a user message carries per picture (one display
-//!   text, shared by the live and the replayed paths).
+//! * **message pictures** (`media`) — a user message's content: text plus the pictures it carries,
+//!   rendered as an anchor block per picture when the terminal can draw them, and as one label row
+//!   per picture otherwise (one composition, shared by the live and the replayed paths).
 //! * **content model** (`model`) — the cells, the pending queue, anchored insertion and every streaming
 //!   / by-index mutation. It never reads scroll state or rendering.
 //! * **viewport** (`viewport`) — the scroll offset, the follow contract (pinning / freezing), the
@@ -44,6 +45,7 @@ pub use cell::PendingMessage;
 pub use cell::Submission;
 pub use image::FrameImage;
 pub use link::FrameLink;
+pub use media::UserMessageBody;
 pub use viewport::ChatGeometry;
 pub use viewport::ChatViewWidget;
 

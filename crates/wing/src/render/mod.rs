@@ -4,6 +4,7 @@ pub mod diff_highlight;
 pub mod fit;
 pub mod line_utils;
 pub mod markdown;
+pub mod picture;
 pub mod renderable;
 pub mod syntax;
 pub mod table;

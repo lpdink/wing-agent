@@ -273,16 +273,18 @@ impl App {
             .into_iter()
             .map(ImagePayload::into_image)
             .collect();
-        // 提交产物随 pending 条目一起留下（正文 + 图片各存一份）：气泡用它拼显示文本，
-        // 失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），换来「被拒 /
-        // 失败之后内容还在用户手里」。
-        self.chat.push_pending(
-            request_id.clone(),
-            Submission {
-                content: payload.text.clone(),
-                images: images.clone(),
-            },
-        );
+        // 提交产物随 pending 条目一起留下（正文 + 图片 + 预测引用）：气泡用它拼内容
+        // （图块 / 标签），失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），
+        // 换来「被拒 / 失败之后内容还在用户手里」。
+        let submission = Submission::new(payload.text.clone(), images.clone());
+        // 本机就有字节：pending 气泡立刻能画（不必等上传往返，也不必再抓一次）。引用是
+        // 按内容寻址预测的（`Submission::media`，与上传回执同 id）；这里再拷一份字节进
+        // 图片 lane 的缓存（同一张图通常只活在各处一次，这份拷贝随图片一起被淘汰）。
+        for (image, picture) in submission.images.iter().zip(&submission.media) {
+            self.images
+                .supply_media(&picture.id, std::sync::Arc::new(image.bytes.clone()));
+        }
+        self.chat.push_pending(request_id.clone(), submission);
         self.push_intent(AppIntent::SendMessage {
             content: payload.text,
             tool_call_id: None,
@@ -661,6 +663,13 @@ impl App {
             }
             FetchPayload::SettingsSaved(response) => {
                 self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Saved(*response));
+            }
+            FetchPayload::MediaBytes { media_id, result } => {
+                // 字节到手 → 下一帧编码并画出来；抓不到 → 记下来（离开视口再重试）。
+                match result {
+                    Ok(bytes) => self.images.supply_media(&media_id, bytes),
+                    Err(_) => self.images.media_failed(&media_id),
+                }
             }
             FetchPayload::SettingsSaveError { message, conflict } => {
                 self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Failed {

@@ -52,6 +52,7 @@ use ratatui::layout::Size;
 use super::types::truncate_to_display_width;
 use crate::render::fit::CellPixels;
 use crate::render::fit::fit_cells;
+use crate::render::picture::PictureSource;
 
 // ============================================================
 // Layout constants (the shared fit's inputs)
@@ -522,6 +523,14 @@ pub fn anchor_caption(alt: &str, path: &Path, shape: ImageShape, max_cols: u16) 
     } else {
         alt.to_string()
     };
+    caption_of(&label, shape, max_cols)
+}
+
+/// [`anchor_caption`] from an explicit label — the shared shape (`▢ {label} · {W}×{H}`).
+///
+/// Markdown图片的 label 来自 alt / 文件名；用户消息里的图（`ui::chat_view::media`）用的是
+/// 消息内的号码（`Image #1`）—— 两处共用这一份格式化与截断，caption 的形态因此只有一处定义。
+pub fn caption_of(label: &str, shape: ImageShape, max_cols: u16) -> String {
     let caption = format!("{CAPTION_MARKER} {label} · {}×{}", shape.px_w, shape.px_h);
     truncate_to_display_width(&caption, usize::from(max_cols))
 }
@@ -564,8 +573,11 @@ pub struct ImageSpan {
     pub cols: u16,
     /// Box height in rows (the caption row is the first of them).
     pub rows: u16,
-    /// Resolved path — hand it straight to `ImageStore`.
-    pub path: PathBuf,
+    /// What the box holds — hand it straight to the drawing layer.
+    ///
+    /// Markdown images are always [`PictureSource::File`]; a user message's pictures
+    /// (`ui::chat_view::media`) are media objects and carry their id instead.
+    pub source: PictureSource,
     /// Raw alt text (may be empty).
     pub alt: String,
     /// Pixel width the box was laid out from.
@@ -677,7 +689,7 @@ pub(crate) fn span_for_anchor(anchor: &ImageAnchor, line: usize, column: u16) ->
         column,
         cols: anchor.cols,
         rows: anchor.rows,
-        path: anchor.path.clone(),
+        source: PictureSource::File(anchor.path.clone()),
         alt: anchor.alt.clone(),
         px_w: anchor.shape.px_w,
         px_h: anchor.shape.px_h,

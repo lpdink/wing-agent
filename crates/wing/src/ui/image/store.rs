@@ -160,13 +160,26 @@ pub struct StoreStats {
     pub worker_alive: bool,
 }
 
-/// Identity of an encoded image: the file (by canonical path and mtime, so a rewrite is a
-/// different key) plus what it was encoded *for* (target cells and the terminal's cell size,
-/// so a resize, a re-layout or a font change is a different key too).
+/// What an encoded image was made from, as the cache tells two versions apart.
+///
+/// A file's identity is its canonical path **and** its mtime (a rewrite is a different
+/// picture); a media object's is its content id — content-addressed and therefore immutable,
+/// so the id *is* the version and no timestamp takes part.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum EncodeSource {
+    File {
+        canonical: PathBuf,
+        mtime: Option<SystemTime>,
+    },
+    Media(String),
+}
+
+/// Identity of an encoded image: the source version plus what it was encoded *for* (target
+/// cells and the terminal's cell size, so a resize, a re-layout or a font change is a
+/// different key too).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EncodeKey {
-    canonical: PathBuf,
-    mtime: Option<SystemTime>,
+    source: EncodeSource,
     target: Size,
     cell: CellPixels,
 }
@@ -246,6 +259,12 @@ enum JobKind {
     },
     Encode {
         path: PathBuf,
+        target: Size,
+        key: EncodeKey,
+    },
+    /// Encode bytes the caller already holds (a gateway media object): no file involved.
+    EncodeBytes {
+        bytes: Arc<Vec<u8>>,
         target: Size,
         key: EncodeKey,
     },
@@ -438,6 +457,44 @@ impl ImageStore {
         }
     }
 
+    /// Non-blocking lookup of an encoded **media object** sized for `target` cells.
+    ///
+    /// `bytes` are the caller's copy of the object: media objects are content-addressed
+    /// (`id == sha256(bytes)`), so the id *is* the version — no header probe, no freshness
+    /// check, no `stat` takes part. The three states and the memoisation are
+    /// [`ImageStore::request`]'s: this store caches *encodings* only, the caller keeps the
+    /// bytes (and therefore owns their budget).
+    pub fn request_media(
+        &mut self,
+        media_id: &str,
+        target: Size,
+        bytes: &Arc<Vec<u8>>,
+    ) -> ImageState {
+        if let Some(reason) = self.unavailable() {
+            return ImageState::Unavailable(reason);
+        }
+        if target.width == 0 || target.height == 0 {
+            return ImageState::Unavailable(Unavailable::NoSpace);
+        }
+        let key = self.media_key(media_id, target);
+        if let Some(image) = self.cache.get(&key) {
+            return ImageState::Ready(image);
+        }
+        if let Some(reason) = self.failed.get(&key) {
+            return ImageState::Unavailable(reason.clone());
+        }
+        if self.in_flight.contains(&key) {
+            return ImageState::Pending;
+        }
+        if self
+            .enqueue_encode_bytes(Arc::clone(bytes), target, key)
+            .is_none()
+        {
+            return ImageState::Unavailable(Unavailable::WorkerFailed);
+        }
+        ImageState::Pending
+    }
+
     /// Move finished worker results into the cache.
     ///
     /// Returns `true` when something changed (metadata arrived, an image finished encoding,
@@ -556,9 +613,23 @@ impl ImageStore {
     }
 
     fn encode_key(&self, canonical: PathBuf, meta: ImageMeta, target: Size) -> EncodeKey {
+        self.key_for(
+            EncodeSource::File {
+                canonical,
+                mtime: meta.mtime,
+            },
+            target,
+        )
+    }
+
+    /// The cache identity of a media object at `target` (content-addressed: no timestamp).
+    fn media_key(&self, media_id: &str, target: Size) -> EncodeKey {
+        self.key_for(EncodeSource::Media(media_id.to_string()), target)
+    }
+
+    fn key_for(&self, source: EncodeSource, target: Size) -> EncodeKey {
         EncodeKey {
-            canonical,
-            mtime: meta.mtime,
+            source,
             target,
             cell: self
                 .support
@@ -614,6 +685,29 @@ impl ImageStore {
                 target,
                 key,
             },
+        };
+        if jobs.send(job).is_err() {
+            self.in_flight.clear();
+            self.mark_worker_failed();
+            return None;
+        }
+        Some(())
+    }
+
+    /// Queue an encode of bytes the caller holds (a media object). `None` means the worker
+    /// is gone.
+    #[must_use]
+    fn enqueue_encode_bytes(
+        &mut self,
+        bytes: Arc<Vec<u8>>,
+        target: Size,
+        key: EncodeKey,
+    ) -> Option<()> {
+        let jobs = self.jobs.as_ref()?;
+        self.in_flight.insert(key.clone());
+        let job = Job {
+            generation: self.generation(),
+            kind: JobKind::EncodeBytes { bytes, target, key },
         };
         if jobs.send(job).is_err() {
             self.in_flight.clear();
@@ -757,7 +851,25 @@ impl Worker {
                     guard(|| self.encode(&path, target)).unwrap_or(Err(Unavailable::EncodeFailed));
                 Outcome::Encoded { key, result }
             }
+            JobKind::EncodeBytes { bytes, target, key } => {
+                let result = guard(|| self.encode_bytes(&bytes, target))
+                    .unwrap_or(Err(Unavailable::EncodeFailed));
+                Outcome::Encoded { key, result }
+            }
         }
+    }
+
+    fn encode_bytes(&self, bytes: &[u8], target: Size) -> Result<SlicedProtocol, Unavailable> {
+        let Some(protocol) = self.support.protocol() else {
+            return Err(Unavailable::Disabled);
+        };
+        let Some(cell) = self.support.cell_pixel_size() else {
+            return Err(Unavailable::Disabled);
+        };
+        // Same two-phase discipline as the file path: the byte budget is checked before the
+        // decoder is built, the pixel budget after the header is read (see `encode::decode_bytes`).
+        let image = encode::decode_bytes(bytes, &self.limits)?;
+        encode::encode(image, target, protocol, cell, self.support.is_tmux())
     }
 
     fn encode(&self, path: &Path, target: Size) -> Result<SlicedProtocol, Unavailable> {
@@ -1392,8 +1504,10 @@ mod tests {
                 path: path.clone(),
                 target: Size::new(4, 2),
                 key: EncodeKey {
-                    canonical: path,
-                    mtime: None,
+                    source: EncodeSource::File {
+                        canonical: path,
+                        mtime: None,
+                    },
                     target: Size::new(4, 2),
                     cell: CELL,
                 },
@@ -1748,5 +1862,135 @@ mod tests {
             panic!("expected a failure");
         };
         assert!(!reason.to_string().is_empty());
+    }
+
+    // ── Media objects (bytes handed in, no file, no probe) ──────────────
+
+    /// A PNG in memory: what a gateway media object is.
+    fn png_bytes(px_w: u32, px_h: u32) -> Arc<Vec<u8>> {
+        let img =
+            image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(px_w, px_h, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, 96])
+            }));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encode png fixture");
+        Arc::new(out)
+    }
+
+    fn ready_media(
+        store: &mut ImageStore,
+        id: &str,
+        target: Size,
+        bytes: &Arc<Vec<u8>>,
+    ) -> ReadyImage {
+        pump_until(store, "a ready media image", |store| {
+            matches!(store.request_media(id, target, bytes), ImageState::Ready(_))
+        });
+        match store.request_media(id, target, bytes) {
+            ImageState::Ready(image) => image,
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_media_object_encodes_from_bytes_without_a_probe() {
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        let bytes = png_bytes(64, 32);
+        let target = Size::new(8, 4);
+        assert!(matches!(
+            store.request_media("m1", target, &bytes),
+            ImageState::Pending
+        ));
+        let image = ready_media(&mut store, "m1", target, &bytes);
+        assert!(image.size().width <= target.width);
+        assert_eq!(
+            store.stats().memo,
+            0,
+            "a media object never enters the metadata memo (no header probe, no path)"
+        );
+        // Cached: asking again is a hash lookup, not a second job.
+        let before = store.stats().in_flight;
+        assert!(matches!(
+            store.request_media("m1", target, &bytes),
+            ImageState::Ready(_)
+        ));
+        assert_eq!(store.stats().in_flight, before);
+    }
+
+    #[test]
+    fn the_same_id_at_two_targets_is_two_encodings() {
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        let bytes = png_bytes(80, 40);
+        ready_media(&mut store, "m1", Size::new(8, 4), &bytes);
+        ready_media(&mut store, "m1", Size::new(4, 2), &bytes);
+        assert_eq!(store.stats().cached, 2, "target 是缓存身份的一部分");
+    }
+
+    #[test]
+    fn bad_media_bytes_fail_once_and_are_memoised() {
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        let junk = Arc::new(b"not an image".to_vec());
+        assert!(matches!(
+            store.request_media("bad", Size::new(4, 2), &junk),
+            ImageState::Pending
+        ));
+        pump_until(&mut store, "the refusal", |store| {
+            !matches!(
+                store.request_media("bad", Size::new(4, 2), &junk),
+                ImageState::Pending
+            )
+        });
+        assert!(matches!(
+            store.request_media("bad", Size::new(4, 2), &junk),
+            ImageState::Unavailable(Unavailable::NotAnImage)
+        ));
+        // The byte budget is the decode path's too (the caller's bytes are re-checked).
+        let big = Arc::new(vec![0u8; 4096]);
+        let mut tight = store_with(
+            ImageProtocol::Kitty,
+            Limits {
+                file_bytes: 1024,
+                ..Limits::default()
+            },
+            None,
+        );
+        pump_until(&mut tight, "the oversize refusal", |store| {
+            !matches!(
+                store.request_media("big", Size::new(4, 2), &big),
+                ImageState::Pending
+            )
+        });
+        assert!(matches!(
+            tight.request_media("big", Size::new(4, 2), &big),
+            ImageState::Unavailable(Unavailable::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn invalidate_drops_the_encoding_but_the_callers_bytes_still_encode() {
+        let mut store = store_with(ImageProtocol::Kitty, Limits::default(), None);
+        let bytes = png_bytes(40, 40);
+        let target = Size::new(8, 4);
+        ready_media(&mut store, "m1", target, &bytes);
+        store.invalidate();
+        assert_eq!(store.stats().cached, 0, "终端清屏后旧协议不许再用");
+        // The bytes did not move (content-addressed): re-encoding needs no fetch.
+        assert!(matches!(
+            store.request_media("m1", target, &bytes),
+            ImageState::Pending
+        ));
+        ready_media(&mut store, "m1", target, &bytes);
+    }
+
+    #[test]
+    fn a_disabled_store_never_encodes_media_bytes() {
+        let mut store = ImageStore::new(ImageSupport::disabled());
+        let bytes = png_bytes(8, 8);
+        assert!(matches!(
+            store.request_media("m1", Size::new(4, 2), &bytes),
+            ImageState::Unavailable(Unavailable::Disabled)
+        ));
+        assert_eq!(store.stats().in_flight, 0);
     }
 }

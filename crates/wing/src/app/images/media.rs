@@ -1,0 +1,259 @@
+//! 消息里的媒体图（网关对象）的**字节侧**：屏幕上要哪几张、谁在飞、字节缓存多大。
+//!
+//! 三层分工，各自的生命周期不同：
+//!
+//! ```text
+//! 布局   ui::chat_view::media       形状来自 MediaRef（零 I/O），盒高与行号纯函数
+//! 字节   本模块（app::images::media）随视口来去：滚出屏幕就该还内存
+//! 编码   ui::image::ImageStore      按 (id, target, cell) 缓存，随终端状态作废
+//! ```
+//!
+//! **只抓屏幕上的**：`observe` 每帧用这一帧的 `FrameImage` 重算目标集（与新鲜度 lane 的
+//! `watch` 同一来源、同一种「由屏高封顶」的有界性）。打开一个 50 张图的老会话不会立刻发
+//! 50 个 GET；滚到哪抓到哪。内容寻址保证抓到的永远同一份字节，所以「滚出去丢掉、滚回来
+//! 重抓」与一直留着是等价的，只是内存更省。
+//!
+//! **失败是一种状态**：抓不到（对象缺失 / 归档 / 网关不可达）记在 `failed` 里，本代内容内
+//! 不再自动重试——气泡里那一张保持 caption（不空白、不闪）。它会在图片**离开视口**时被
+//! 忘掉（再滚回来就再试一次），内容重建（切会话 / 压缩 / rewind）也会整表清空。
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+/// 同时在飞的抓取上限：滚过一串图时不会一次压出二十个请求。
+pub(crate) const MAX_INFLIGHT: usize = 8;
+
+/// 字节缓存的张数上限（与编码 LRU 的 `DEFAULT_CACHE_ENTRIES` 同量级）。
+pub(crate) const BYTE_ENTRIES: usize = 8;
+
+/// 字节缓存的字节上限。
+///
+/// 单张 ≤ 网关的 `images.max_bytes`（默认 4.5 MiB），8 张通常够不到这里；这条是给
+/// 「网关放宽了上限 / 别的客户端传了大图」留的兜底。淘汰顺序是最久未用（index 0）。
+pub(crate) const BYTE_BUDGET: usize = 24 * 1024 * 1024;
+
+/// 失败记录的上限（整表丢弃，与 store 的 `failed` memo 同一策略）。
+const MAX_FAILED: usize = 64;
+
+/// 媒体图的字节缓存与抓取账本。默认（`disabled` lane）为空且每次调用都是空操作。
+#[derive(Default)]
+pub(crate) struct MediaLane {
+    /// 这一帧屏幕上的媒体 id（去重，按出现序；随帧重算）。
+    watch: Vec<String>,
+    /// 已抓到的字节，index 0 = 最久未用。
+    bytes: Vec<(String, Arc<Vec<u8>>)>,
+    bytes_total: usize,
+    /// 在飞的抓取（每个 id 至多一个请求；回执按 id 认领）。
+    inflight: HashSet<String>,
+    /// 抓取失败（见模块文档的「失败是一种状态」）。
+    failed: HashSet<String>,
+}
+
+impl MediaLane {
+    /// 这一帧要画的媒体 id（`FrameImage` 的来源，已去重）。
+    ///
+    /// 顺手修剪失败记录：离开视口的失败不再记账，滚回来时重新试一次。
+    pub(crate) fn observe(&mut self, wanted: impl IntoIterator<Item = String>) {
+        self.watch.clear();
+        for id in wanted {
+            if !self.watch.contains(&id) {
+                self.watch.push(id);
+            }
+        }
+        let watch = &self.watch;
+        self.failed.retain(|id| watch.contains(id));
+    }
+
+    /// 已抓到的字节（命中即刷新 LRU 位置）。
+    pub(crate) fn bytes(&mut self, id: &str) -> Option<Arc<Vec<u8>>> {
+        let index = self.bytes.iter().position(|(key, _)| key == id)?;
+        let entry = self.bytes.remove(index);
+        let bytes = Arc::clone(&entry.1);
+        self.bytes.push(entry);
+        Some(bytes)
+    }
+
+    /// 一张图抓回来了。
+    pub(crate) fn supply(&mut self, id: &str, bytes: Arc<Vec<u8>>) {
+        self.inflight.remove(id);
+        self.failed.remove(id);
+        if let Some(index) = self.bytes.iter().position(|(key, _)| key == id) {
+            let (_, old) = self.bytes.remove(index);
+            self.bytes_total = self.bytes_total.saturating_sub(old.len());
+        }
+        self.bytes_total = self.bytes_total.saturating_add(bytes.len());
+        self.bytes.push((id.to_string(), bytes));
+        // 单张超预算时至少留下它自己（否则每一帧都要重抓重编码）。
+        while self.bytes.len() > BYTE_ENTRIES.max(1)
+            || (self.bytes_total > BYTE_BUDGET && self.bytes.len() > 1)
+        {
+            let (_, evicted) = self.bytes.remove(0);
+            self.bytes_total = self.bytes_total.saturating_sub(evicted.len());
+        }
+    }
+
+    /// 一张图抓失败了。
+    pub(crate) fn fail(&mut self, id: &str) {
+        self.inflight.remove(id);
+        if self.failed.len() >= MAX_FAILED {
+            self.failed.clear();
+        }
+        self.failed.insert(id.to_string());
+    }
+
+    /// 下一批要抓的 id（屏幕上的、没字节的、没在飞的、没失败过的），并把它们记成在飞。
+    ///
+    /// 上限是 [`MAX_INFLIGHT`]：剩下的留在屏幕上，等这一批的回执把位置腾出来——
+    /// 每个回执都会让 App 重画，所以进度不会停。
+    pub(crate) fn requests(&mut self) -> Vec<String> {
+        if self.inflight.len() >= MAX_INFLIGHT {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for id in &self.watch {
+            if self.inflight.len() + out.len() >= MAX_INFLIGHT {
+                break;
+            }
+            if self.failed.contains(id) || self.inflight.contains(id) {
+                continue;
+            }
+            if self.bytes.iter().any(|(key, _)| key == id) {
+                continue;
+            }
+            out.push(id.clone());
+        }
+        for id in &out {
+            self.inflight.insert(id.clone());
+        }
+        out
+    }
+
+    /// 内容重建（切会话 / 压缩 / rewind）：忘掉失败，让下一帧重新试。
+    ///
+    /// 字节**不丢**：内容是内容寻址的，同一份字节在重建之后依然有效（LRU 会自己淘汰）。
+    pub(crate) fn forget_failures(&mut self) {
+        self.failed.clear();
+    }
+
+    /// 一张媒体图的字节是否已经没有指望（诊断 / 测试）。
+    #[cfg(test)]
+    pub(crate) fn is_failed(&self, id: &str) -> bool {
+        self.failed.contains(id)
+    }
+
+    /// 已缓存的张数（诊断 / 测试）。
+    #[cfg(test)]
+    pub(crate) fn cached(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lane_with(wanted: &[&str]) -> MediaLane {
+        let mut lane = MediaLane::default();
+        lane.observe(wanted.iter().map(|id| (*id).to_string()));
+        lane
+    }
+
+    #[test]
+    fn only_what_is_on_screen_is_ever_requested() {
+        let mut lane = lane_with(&["a", "b", "a"]);
+        assert_eq!(lane.requests(), vec!["a", "b"], "同一帧里重复的只抓一次");
+        assert_eq!(lane.requests(), Vec::<String>::new(), "在飞的不重复抓");
+
+        // 滚出视口：目标集重算，屏幕上的图才有理由抓。
+        lane.observe(["c".to_string()]);
+        assert_eq!(lane.requests(), vec!["c"]);
+    }
+
+    #[test]
+    fn a_supplied_picture_is_not_requested_again() {
+        let mut lane = lane_with(&["a"]);
+        assert_eq!(lane.requests(), vec!["a"]);
+        lane.supply("a", Arc::new(vec![1, 2, 3]));
+        assert_eq!(lane.requests(), Vec::<String>::new());
+        assert_eq!(lane.bytes("a").map(|b| b.len()), Some(3));
+    }
+
+    #[test]
+    fn a_failure_is_not_retried_until_the_picture_leaves_the_screen() {
+        let mut lane = lane_with(&["a"]);
+        assert_eq!(lane.requests(), vec!["a"]);
+        lane.fail("a");
+        assert!(lane.is_failed("a"));
+        assert_eq!(lane.requests(), Vec::<String>::new(), "屏幕上不重试");
+        // 滚出去再滚回来：重新给一次机会。
+        lane.observe(std::iter::empty());
+        assert!(!lane.is_failed("a"), "离开视口的失败被忘掉");
+        lane.observe(["a".to_string()]);
+        assert_eq!(lane.requests(), vec!["a"]);
+    }
+
+    #[test]
+    fn a_content_rebuild_forgets_failures_but_keeps_the_bytes() {
+        let mut lane = lane_with(&["a", "b"]);
+        lane.requests();
+        lane.supply("a", Arc::new(vec![0; 4]));
+        lane.fail("b");
+        lane.forget_failures();
+        assert!(!lane.is_failed("b"));
+        assert_eq!(lane.cached(), 1, "字节是内容寻址的，重建之后依然有效");
+        assert_eq!(lane.requests(), vec!["b"], "失败的那张重新试");
+    }
+
+    #[test]
+    fn inflight_is_bounded() {
+        let ids: Vec<String> = (0..MAX_INFLIGHT + 5).map(|i| format!("m{i}")).collect();
+        let mut lane = MediaLane::default();
+        lane.observe(ids.iter().cloned());
+        assert_eq!(lane.requests().len(), MAX_INFLIGHT);
+        assert_eq!(lane.requests(), Vec::<String>::new(), "上限到了就等回执");
+        // 回执腾出位置：下一帧继续。
+        lane.supply("m0", Arc::new(vec![0; 1]));
+        let next = lane.requests();
+        assert_eq!(next.len(), 1, "{next:?}");
+        assert!(next[0].starts_with('m'));
+    }
+
+    #[test]
+    fn the_byte_cache_evicts_the_least_recently_used() {
+        let mut lane = MediaLane::default();
+        let ids: Vec<String> = (0..BYTE_ENTRIES).map(|i| format!("m{i}")).collect();
+        for id in &ids {
+            lane.supply(id, Arc::new(vec![0; 8]));
+        }
+        assert_eq!(lane.cached(), BYTE_ENTRIES);
+        // 摸一下最旧的，让它变成最新。
+        lane.bytes("m0").expect("cached");
+        lane.supply("fresh", Arc::new(vec![0; 8]));
+        assert_eq!(lane.cached(), BYTE_ENTRIES, "张数上限生效");
+        assert!(lane.bytes("m0").is_some(), "刚用过的留下来了");
+        assert!(lane.bytes("m1").is_none(), "最久未用的被淘汰");
+    }
+
+    #[test]
+    fn one_oversized_picture_stays_alone_in_the_cache() {
+        let mut lane = MediaLane::default();
+        lane.supply("big", Arc::new(vec![0; BYTE_BUDGET + 1]));
+        lane.supply("small", Arc::new(vec![0; 8]));
+        assert_eq!(lane.cached(), 1);
+        assert!(
+            lane.bytes("small").is_some(),
+            "超预算的那张被挤出去（它自己进来时至少留自己）"
+        );
+    }
+
+    #[test]
+    fn a_supply_after_eviction_is_requested_again() {
+        let mut lane = lane_with(&["a"]);
+        lane.supply("a", Arc::new(vec![0; 4]));
+        // 被别的图挤出缓存，但仍在屏幕上 → 下一帧重新抓。
+        for i in 0..BYTE_ENTRIES {
+            lane.supply(&format!("x{i}"), Arc::new(vec![0; 4]));
+        }
+        assert_eq!(lane.requests(), vec!["a"]);
+    }
+}

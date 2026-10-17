@@ -18,7 +18,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 查询（弹窗候选、系统信息等）走 GET 端点；状态变更（切模型、压缩、回退等）走 POST 端点。TUI 中的斜杠命令多数被前端拦截并转换为这些 HTTP 调用（见 [glossary.md](glossary.md) 中「命令」条目）。
 
-带图消息是两步：先 `POST /api/session/media` 上传字节、拿回 `media` 引用，再把该引用放进消息的 `media`（见下表与 [media-images.md](media-images.md)「用户贴图」）。**非图片文件**走另一条通道：`POST /api/session/files` 上传、把返回的宿主绝对路径写进消息正文（`[file: 名 · 大小 · 路径]`），agent 用 Read / Bash 去读；图片预览的字节源是 `GET /api/session/media`（前端 `<img>` 直接指过来）。
+带图消息是两步：先 `POST /api/session/media` 上传字节、拿回 `media` 引用，再把该引用放进消息的 `media`（见下表与 [media-images.md](media-images.md)「用户贴图」）。**非图片文件**走另一条通道：`POST /api/session/files` 上传、把返回的宿主绝对路径写进消息正文（`[file: 名 · 大小 · 路径]`），agent 用 Read / Bash 去读；图片预览的字节源是 `GET /api/session/media`（浏览器 `<img>` 直接指过来；TUI 用同一个端点把用户消息里的图画出来，见 [tui-images.md](tui-images.md) 第九节）。
 
 ## HTTP 端点
 
