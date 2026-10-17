@@ -130,10 +130,9 @@ pub(super) fn buffer_row_graphemes(buf: &Buffer, row: u16, area: Rect) -> Vec<Gr
     graphemes
 }
 
-/// Columns a user-message cell fills with background before its text starts
-/// (`cell_area.x + 2` in the render path, `super::viewport`) — the padding the
-/// copy skips. KEEP IN SYNC with that literal.
-const USER_MESSAGE_INSET: u16 = 2;
+/// Columns a user-message cell fills with background before its text starts — the padding the
+/// copy skips. One declaration (`super::media::LEFT_INSET`), read by the render path too.
+const USER_MESSAGE_INSET: u16 = super::media::LEFT_INSET;
 
 /// Append the padding inset of `height` content rows to `out`, clipped to the
 /// visible range `[top, bottom)`; `vrow` advances past them.

@@ -673,7 +673,9 @@ impl CachedCell {
             let content_width = match &self.cell {
                 ChatCell::UserMessage(_)
                 | ChatCell::PendingUserMessage(_)
-                | ChatCell::DiscardedUserMessage(_) => width.saturating_sub(3),
+                | ChatCell::DiscardedUserMessage(_) => {
+                    width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB)
+                }
                 _ => width,
             };
             // The row arithmetic is what the link hit boxes and the image
@@ -792,7 +794,7 @@ impl CachedCell {
             ChatCell::UserMessage(_)
             | ChatCell::PendingUserMessage(_)
             | ChatCell::DiscardedUserMessage(_) => {
-                let text_width = width.saturating_sub(3);
+                let text_width = width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB);
                 Paragraph::new(lines.to_vec())
                     .wrap(Wrap { trim: false })
                     .line_count(text_width)

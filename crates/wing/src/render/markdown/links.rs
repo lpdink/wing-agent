@@ -258,9 +258,10 @@ impl ComposedLines {
         for (index, spans) in self.images.iter().enumerate() {
             if let Some(span) = spans.first() {
                 // Markdown 行只会携带文件锚点：媒体锚点来自用户消息气泡（`ui::chat_view::media`），
-                // 从不进入这条 compose 通道。
+                // 从不进入这条 compose 通道。真出现了就丢掉那一个锚点并留痕（静默丢图比丢一个
+                // 锚点更糟，直接 panic 又会把一条渲染 bug 升级成崩溃）。
                 let crate::render::picture::PictureSource::File(path) = &span.source else {
-                    debug_assert!(false, "markdown lines never carry media anchors");
+                    tracing::warn!("markdown lines never carry media anchors; dropping one");
                     continue;
                 };
                 tags[index] = Some(ImageAnchor {

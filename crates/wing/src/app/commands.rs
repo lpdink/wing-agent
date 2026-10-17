@@ -278,9 +278,9 @@ impl App {
         // 换来「被拒 / 失败之后内容还在用户手里」。
         let submission = Submission::new(payload.text.clone(), images.clone());
         // 本机就有字节：pending 气泡立刻能画（不必等上传往返，也不必再抓一次）。引用是
-        // 按内容寻址预测的（`Submission::media`，与上传回执同 id）；这里再拷一份字节进
-        // 图片 lane 的缓存（同一张图通常只活在各处一次，这份拷贝随图片一起被淘汰）。
-        for (image, picture) in submission.images.iter().zip(&submission.media) {
+        // 按内容寻址预测的（`Submission::media`，与上传回执同 id）；这里把字节**再拷一份**
+        // 进图片 lane 的缓存（提交产物那份随 pending 条目走，lane 这份随图片被淘汰）。
+        for (image, picture) in submission.images.iter().zip(submission.media()) {
             self.images
                 .supply_media(&picture.id, std::sync::Arc::new(image.bytes.clone()));
         }

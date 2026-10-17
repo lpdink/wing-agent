@@ -2173,3 +2173,199 @@ fn a_submitted_picture_draws_before_the_upload_lands() {
     let buf = frame(&mut app, &mut term);
     assert!(has_placeholder(&buf), "promote 不打断已画出来的图");
 }
+
+/// 滚动回归（评审 [B]1）：气泡的文本比 cell 顶早一行（1 行上内边距 + `Paragraph::scroll(skip-1)`），
+/// 图块必须用同一对数字定位。任何一级滚动后图都应落在 caption 行上——之前 `img_skip` 少减了那一行，
+/// 图会整体上移一行、被 caption 闸门整张拒掉（只剩空盒子）。
+#[test]
+fn a_scrolled_user_picture_stays_on_its_caption_row() {
+    let bytes = png_bytes(200, 150);
+    let picture = media_ref(&bytes, 200, 150);
+
+    for up in [0usize, 1, 2, 3, 8] {
+        // A bubble taller than the viewport: its top padding is scrolled away early.
+        let body = (0..12)
+            .map(|i| format!("正文 {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+        app.chat.push(user_cell(&body, vec![picture.clone()]));
+        let mut term = test_terminal(60, 20);
+
+        // 先在没有字节的时候滚到位：caption 还没被图盖住，它的行就是图该落的那一行。
+        let mut buf = frame(&mut app, &mut term);
+        for _ in 0..up {
+            app.chat.scroll_up(1);
+            buf = frame(&mut app, &mut term);
+        }
+        let Some(caption_row) = row_with(&buf, "▢ Image #1 · 200×150") else {
+            // 滚到 caption 都不在屏幕上了：图当然也不该出现。
+            app.images
+                .supply_media(&picture.id, std::sync::Arc::new(bytes.clone()));
+            let buf = frame(&mut app, &mut term);
+            assert!(
+                !has_placeholder(&buf),
+                "up={up}: nothing on screen, nothing painted"
+            );
+            continue;
+        };
+
+        app.images
+            .supply_media(&picture.id, std::sync::Arc::new(bytes.clone()));
+        let buf = draw_until(&mut app, &mut term, "the picture", |_, buf| {
+            has_placeholder(buf)
+        });
+        let painted = placeholder_rect(&buf).expect("painted");
+        assert_eq!(
+            painted.y, caption_row,
+            "up={up}: the picture must start on its caption row"
+        );
+    }
+}
+
+/// 回执 → 落账 → 编码 → 画出来：这是抓取链路的最后一段（评审 [S]2 指出的接缝）。
+#[test]
+fn a_media_receipt_turns_into_a_picture() {
+    let bytes = png_bytes(200, 150);
+    let picture = media_ref(&bytes, 200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 32);
+
+    // 第一帧：没有字节，只有 caption。
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf));
+    assert!(row_with(&buf, "▢ Image #1 · 200×150").is_some());
+
+    // 后台抓取回来了（回执走的是事件循环既有的 fetch 通道）。
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::MediaBytes {
+            media_id: picture.id.clone(),
+            result: Ok(std::sync::Arc::new(bytes)),
+        },
+    });
+    let buf = draw_until(&mut app, &mut term, "the fetched picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    assert!(placeholder_rect(&buf).is_some());
+}
+
+/// 抓取失败的回执：caption 留着，且这一代内容里不再重试（失败是一种状态）。
+#[test]
+fn a_failed_media_receipt_keeps_the_caption_and_stops_asking() {
+    let picture = media_ref(b"object is gone", 200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 32);
+    frame(&mut app, &mut term);
+    app.drain_intents();
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::MediaBytes {
+            media_id: picture.id.clone(),
+            result: Err("404 media not found".into()),
+        },
+    });
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf));
+    assert!(row_with(&buf, "▢ Image #1 · 200×150").is_some());
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, crate::app::intent::AppIntent::LoadMedia { .. })),
+        "a failure is a state, not a retry loop"
+    );
+}
+
+/// 抓取任务本身：打的是 `GET /api/session/media`（带 session 与 id），字节原样回执；
+/// 没有连接时立刻回失败（lane 不会被永久挂在「在飞」上）。
+#[tokio::test]
+async fn the_media_fetch_asks_the_gateway_and_reports_the_bytes_back() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let bytes = png_bytes(120, 90);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let served = bytes.clone();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    {
+        let seen = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let served = served.clone();
+                let seen = std::sync::Arc::clone(&seen);
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        head.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&head).to_string();
+                    let target = head.split(' ').nth(1).unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(target);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n",
+                        served.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&served).await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+    }
+
+    let http = wing_api_client::GatewayClient::new(base, None).expect("client");
+    let media_id = "a".repeat(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::spawn_media_fetch(Some(http), "sid-7".into(), vec![media_id.clone()], tx);
+    let receipt = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("a receipt")
+        .expect("payload");
+    match receipt.payload {
+        crate::app::intent::FetchPayload::MediaBytes {
+            media_id: got,
+            result,
+        } => {
+            assert_eq!(got, media_id);
+            assert_eq!(
+                *result.expect("bytes"),
+                bytes,
+                "字节原样回来（非 JSON 通道）"
+            );
+        }
+        _ => panic!("expected a media receipt"),
+    }
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [format!(
+            "/api/session/media?session_id=sid-7&media_id={media_id}"
+        )],
+        "读的是字节直出端点，参数就是契约"
+    );
+
+    // 没有连接：立刻回失败（不把图永远挂在在飞）。
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::spawn_media_fetch(None, "sid-7".into(), vec![media_id.clone()], tx);
+    let receipt = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("a receipt")
+        .expect("payload");
+    assert!(matches!(
+        receipt.payload,
+        crate::app::intent::FetchPayload::MediaBytes { result: Err(_), .. }
+    ));
+}

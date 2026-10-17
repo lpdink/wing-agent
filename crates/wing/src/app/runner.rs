@@ -246,34 +246,12 @@ pub async fn execute_intent(
             session_id,
             media_ids,
         } => {
-            // 一张一个任务（lane 已经把并发压在 `MAX_INFLIGHT` 以内）：慢链路上一张慢图
-            // 不拖住同屏的其它图。没有连接就立刻回失败——lane 把它记成「抓不到」，
-            // 不会把这几张图永远挂在「在飞」上（重连后内容重建会重新试）。
-            let http = transport.as_ref().map(|t| t.http.clone());
-            for media_id in media_ids {
-                let tx = fetch_tx.clone();
-                let session_id = session_id.clone();
-                let http = http.clone();
-                tokio::spawn(async move {
-                    let result = match http {
-                        Some(http) => http
-                            .read_media(&session_id, &media_id)
-                            .await
-                            .map(std::sync::Arc::new)
-                            .map_err(|e| e.to_string()),
-                        None => Err("gateway disconnected".to_string()),
-                    };
-                    if let Err(reason) = &result {
-                        tracing::warn!(media_id = %media_id, "media fetch failed: {reason}");
-                    }
-                    let _ = tx
-                        .send(FetchResult {
-                            session_id,
-                            payload: FetchPayload::MediaBytes { media_id, result },
-                        })
-                        .await;
-                });
-            }
+            spawn_media_fetch(
+                transport.as_ref().map(|t| t.http.clone()),
+                session_id,
+                media_ids,
+                fetch_tx.clone(),
+            );
         }
         AppIntent::FetchCommands => {
             if let Some(t) = transport {
@@ -854,6 +832,44 @@ pub(super) struct OutgoingMessage {
     pub(super) tool_call_id: Option<String>,
     pub(super) request_id: String,
     pub(super) images: Vec<CompressedImage>,
+}
+
+/// `AppIntent::LoadMedia` 的落地：每张媒体图一个后台任务。
+///
+/// 一张一个任务（lane 已经把并发压在 `MAX_INFLIGHT` 以内）：慢链路上一张慢图不拖住同屏的
+/// 其它图。没有连接就立刻回失败——lane 把它记成「抓不到」，不会把这几张图永远挂在「在飞」上
+/// （重连后内容重建会重新试）。从 `execute_intent` 抽出来是为了可测（同 `spawn_send_message`：
+/// 调用点需要真实终端）。
+pub(super) fn spawn_media_fetch(
+    http: Option<wing_api_client::GatewayClient>,
+    session_id: String,
+    media_ids: Vec<String>,
+    fetch_tx: mpsc::Sender<FetchResult>,
+) {
+    for media_id in media_ids {
+        let tx = fetch_tx.clone();
+        let session_id = session_id.clone();
+        let http = http.clone();
+        tokio::spawn(async move {
+            let result = match http {
+                Some(http) => http
+                    .read_media(&session_id, &media_id)
+                    .await
+                    .map(std::sync::Arc::new)
+                    .map_err(|e| e.to_string()),
+                None => Err("gateway disconnected".to_string()),
+            };
+            if let Err(reason) = &result {
+                tracing::warn!(media_id = %media_id, "media fetch failed: {reason}");
+            }
+            let _ = tx
+                .send(FetchResult {
+                    session_id,
+                    payload: FetchPayload::MediaBytes { media_id, result },
+                })
+                .await;
+        });
+    }
 }
 
 /// `AppIntent::SendMessage` 的落地：无连接 → 本地回填；有连接 → 后台任务（[`spawn_send_message`]）。

@@ -380,11 +380,12 @@ impl Widget for ChatViewWidget<'_> {
                 cell_visible as u16,
             );
 
-            // User-message bubbles inset their text (2 left, 1 top, 1 bottom) — the picture
-            // anchors sit inside the same inset, so their screen row is
-            // `render_y + line - skip + top_pad`. Computed once here and used by both the
-            // placement recording and the render below; the two must not disagree about
-            // where row 0 of the text is.
+            // User-message bubbles inset their text (2 left, 1 top, 1 bottom) and scroll it
+            // one row ahead of the cell (line 0 lives under the top padding). A picture's
+            // screen row must be derived from **the same two numbers the Paragraph below
+            // uses** — `cell_area.y + top_pad` and `skip - 1` — or a scrolled bubble places
+            // its picture one row above the caption and the paint pass refuses it (the box
+            // stays empty).
             let user_pads = match cached.cell() {
                 ChatCell::UserMessage(_)
                 | ChatCell::PendingUserMessage(_)
@@ -401,7 +402,8 @@ impl Widget for ChatViewWidget<'_> {
             let (img_render_y, img_skip, img_visible) = match user_pads {
                 Some((top, bottom)) => (
                     render_y + top as u16,
-                    skip.saturating_sub(top),
+                    // `Paragraph::scroll(skip - 1)` below (`row 0 is top padding`).
+                    skip.saturating_sub(1),
                     cell_visible.saturating_sub(top + bottom),
                 ),
                 None => (render_y, skip, cell_visible),
@@ -472,8 +474,8 @@ impl Widget for ChatViewWidget<'_> {
             // so we pre-fill the cell area with the background color.
             // Text is rendered in an inset area for padding (2 left, 1 top, 1 bottom).
             //
-            // KEEP IN SYNC with `frame::USER_MESSAGE_INSET`: the copy skips
-            // exactly this many leading columns on these rows.
+            // The inset is `media::LEFT_INSET` (one declaration shared with `frame`'s copy
+            // table and `cached_cell`'s wrap width).
             if let Some((top_pad, bottom_pad)) = user_pads {
                 let bg = Style::default().bg(self.ctx.palette.surface);
                 for y in cell_area.y..cell_area.y + cell_area.height {
@@ -483,9 +485,9 @@ impl Widget for ChatViewWidget<'_> {
                 }
                 // Inset text area: 2 left, 1 top, 1 bottom padding.
                 let text_area = Rect::new(
-                    cell_area.x + 2,
+                    cell_area.x + super::media::LEFT_INSET,
                     cell_area.y + top_pad as u16,
-                    cell_area.width.saturating_sub(3),
+                    cell_area.width.saturating_sub(super::media::TEXT_WIDTH_SUB),
                     cell_visible.saturating_sub(top_pad + bottom_pad) as u16,
                 );
                 Paragraph::new(cell_lines)

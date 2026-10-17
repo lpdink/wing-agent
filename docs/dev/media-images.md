@@ -191,7 +191,7 @@ app/images/media.rs：屏幕上有、本机没有、也没在飞 → AppIntent::
    ▼
 后台 GET /api/session/media?session_id&media_id → FetchPayload::MediaBytes
    ▼
-字节 LRU（8 张 / 24 MiB）→ ImageStore::request_media(id, target, bytes) → 编码 → 画出来
+字节缓存（目标 max(8, 在屏张数)、硬上限 24 MiB）→ ImageStore::request_media(id, target, bytes) → 编码 → 画出来
 ```
 
 三条前端口径（机制细节见 [tui-images.md](tui-images.md)）：

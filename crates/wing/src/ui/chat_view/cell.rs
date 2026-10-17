@@ -248,7 +248,7 @@ impl Renderable for ChatCell {
             self,
             Self::UserMessage(_) | Self::PendingUserMessage(_) | Self::DiscardedUserMessage(_)
         ) {
-            let text_width = width.saturating_sub(3);
+            let text_width = width.saturating_sub(media::TEXT_WIDTH_SUB);
             return Paragraph::new(self.to_lines(width, ctx))
                 .wrap(Wrap { trim: false })
                 .line_count(text_width)
@@ -282,12 +282,15 @@ pub struct PendingMessage {
 pub struct Submission {
     pub content: String,
     pub images: Vec<crate::util::image_compress::CompressedImage>,
-    /// 上传之后会就绪的媒体引用（本机按内容寻址预测，与 `images` 同序）。
+    /// 上传之后会就绪的媒体引用（本机按内容寻址预测，与 `images` 同序同长）。
     ///
     /// 预测而不是等回执，是为了让 pending 气泡**立刻**有图（字节就在 `images` 里）：
     /// 端点的 id 恒为字节的 sha256，所以预测与响应逐字节一致（`protocol::media`）。
     /// 回填草稿只读 `content` / `images`，这些引用不参与。
-    pub media: Vec<crate::protocol::MediaRef>,
+    ///
+    /// 私有：唯一合法的来源是 [`Submission::new`]（派生自 `images`，两者等长）——
+    /// 绕过它构造出「有图无引用」会让气泡静默丢掉图。
+    media: Vec<crate::protocol::MediaRef>,
 }
 
 impl Submission {
@@ -305,12 +308,23 @@ impl Submission {
         content: impl Into<String>,
         images: Vec<crate::util::image_compress::CompressedImage>,
     ) -> Self {
-        let media = images.iter().map(media::predicted_media).collect();
+        let media: Vec<crate::protocol::MediaRef> =
+            images.iter().map(media::predicted_media).collect();
+        debug_assert_eq!(
+            media.len(),
+            images.len(),
+            "every picture carries the ref it will get"
+        );
         Self {
             content: content.into(),
             images,
             media,
         }
+    }
+
+    /// 这条消息的媒体引用（与 [`Submission::images`] 同序同长）。
+    pub fn media(&self) -> &[crate::protocol::MediaRef] {
+        &self.media
     }
 
     /// 这条消息在气泡里的内容（正文 + 图片引用）。

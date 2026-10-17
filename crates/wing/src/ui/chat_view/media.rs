@@ -36,11 +36,14 @@ use crate::render::markdown::render_plain;
 use crate::render::picture::PictureSource;
 use crate::util::format;
 
-/// 气泡左侧内缩（`viewport` 的背景填充与文本区共用这个数列）。
+/// 气泡的左侧内缩（背景填充与文本区共用这个列数）。
+///
+/// **唯一声明处**：`viewport` 的文本区、`frame` 的复制内缩表、`cached_cell` 的折行宽度都读它，
+/// 改内边距只改这里。
 pub(crate) const LEFT_INSET: u16 = 2;
 
-/// 气泡文本区比 cell 窄掉的列数：左 2 + 右 1（`LEFT_INSET` 加上右侧留白）。
-pub(crate) const TEXT_WIDTH_SUB: u16 = 3;
+/// 气泡文本区比 cell 窄掉的列数：左内缩 + 右侧留白 1 列。
+pub(crate) const TEXT_WIDTH_SUB: u16 = LEFT_INSET + 1;
 
 /// 一条 user 消息的内容：正文 + 它携带的图片引用。
 ///
@@ -71,8 +74,8 @@ impl UserMessageBody {
 
     /// 显示文本：正文 + 每张图一行标签。
     ///
-    /// 这是**画不了图**时的形态（`images.off` / 无图形协议 / 丢弃态），也是探针
-    /// （`wing tail`、复制）读到的文本形态。无 media 时**恒等**返回正文。
+    /// 这是**画不了图**时的形态（`images.off` / 无图形协议 / 丢弃态），也是测试与基线比较
+    /// 用的文本形态。无 media 时**恒等**返回正文。
     pub fn label_text(&self) -> String {
         text_with_labels(&self.text, &labels_of_media(&self.media))
     }

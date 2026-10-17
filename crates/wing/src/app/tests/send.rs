@@ -328,14 +328,8 @@ fn dispatch(
     content: &str,
     images: Vec<CompressedImage>,
 ) -> mpsc::Receiver<FetchResult> {
-    app.chat.push_pending(
-        request_id.into(),
-        Submission {
-            content: content.to_string(),
-            images: images.clone(),
-            media: Vec::new(),
-        },
-    );
+    app.chat
+        .push_pending(request_id.into(), Submission::new(content, images.clone()));
     let (tx, rx) = mpsc::channel(8);
     super::super::runner::dispatch_send_message(
         app,

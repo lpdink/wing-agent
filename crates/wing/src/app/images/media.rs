@@ -13,6 +13,9 @@
 //! 50 个 GET；滚到哪抓到哪。内容寻址保证抓到的永远同一份字节，所以「滚出去丢掉、滚回来
 //! 重抓」与一直留着是等价的，只是内存更省。
 //!
+//! **字节缓存的边界**：在屏的图不受张数目标约束（同屏超过目标时，纯 LRU 会变成每帧
+//! 重抓的自激环），离屏的按最久未用淘汰；`BYTE_BUDGET` 是硬上限，内存有界优先。
+//!
 //! **失败是一种状态**：抓不到（对象缺失 / 归档 / 网关不可达）记在 `failed` 里，本代内容内
 //! 不再自动重试——气泡里那一张保持 caption（不空白、不闪）。它会在图片**离开视口**时被
 //! 忘掉（再滚回来就再试一次），内容重建（切会话 / 压缩 / rewind）也会整表清空。
@@ -23,13 +26,17 @@ use std::sync::Arc;
 /// 同时在飞的抓取上限：滚过一串图时不会一次压出二十个请求。
 pub(crate) const MAX_INFLIGHT: usize = 8;
 
-/// 字节缓存的张数上限（与编码 LRU 的 `DEFAULT_CACHE_ENTRIES` 同量级）。
+/// 字节缓存的**软**张数目标（与编码 LRU 的 `DEFAULT_CACHE_ENTRIES` 同量级）。
+///
+/// 实际目标是 `max(BYTE_ENTRIES, 屏幕上的张数)`：同屏超过这个数时，纯 LRU 会形成
+/// 「每帧挤掉一张在屏的图 → 下一帧重抓重编码」的自激环（屏幕上看是闪烁），而一屏的图
+/// 本来就受屏高约束，不该被自己的数量挤掉。
 pub(crate) const BYTE_ENTRIES: usize = 8;
 
-/// 字节缓存的字节上限。
+/// 字节缓存的字节上限（**硬**上限：内存有界优先于避免重抓）。
 ///
 /// 单张 ≤ 网关的 `images.max_bytes`（默认 4.5 MiB），8 张通常够不到这里；这条是给
-/// 「网关放宽了上限 / 别的客户端传了大图」留的兜底。淘汰顺序是最久未用（index 0）。
+/// 「网关放宽了上限 / 别的客户端传了大图 / 同屏图特别多」留的兜底。
 pub(crate) const BYTE_BUDGET: usize = 24 * 1024 * 1024;
 
 /// 失败记录的上限（整表丢弃，与 store 的 `failed` memo 同一策略）。
@@ -83,13 +90,26 @@ impl MediaLane {
         }
         self.bytes_total = self.bytes_total.saturating_add(bytes.len());
         self.bytes.push((id.to_string(), bytes));
-        // 单张超预算时至少留下它自己（否则每一帧都要重抓重编码）。
-        while self.bytes.len() > BYTE_ENTRIES.max(1)
-            || (self.bytes_total > BYTE_BUDGET && self.bytes.len() > 1)
-        {
-            let (_, evicted) = self.bytes.remove(0);
-            self.bytes_total = self.bytes_total.saturating_sub(evicted.len());
+        // 张数：软目标（见 `BYTE_ENTRIES`），在屏的图不受它约束。
+        let target = BYTE_ENTRIES.max(self.watch.len()).max(1);
+        while self.bytes.len() > target {
+            self.evict_one();
         }
+        // 字节：硬上限。单张就超预算时也至少留下它自己（否则每一帧都要重抓重编码）。
+        while self.bytes_total > BYTE_BUDGET && self.bytes.len() > 1 {
+            self.evict_one();
+        }
+    }
+
+    /// 挤掉一条字节缓存：**离屏的**优先（最久未用优先），全都在屏幕上时退化为纯 LRU。
+    fn evict_one(&mut self) {
+        let index = self
+            .bytes
+            .iter()
+            .position(|(key, _)| !self.watch.contains(key))
+            .unwrap_or(0);
+        let (_, evicted) = self.bytes.remove(index);
+        self.bytes_total = self.bytes_total.saturating_sub(evicted.len());
     }
 
     /// 一张图抓失败了。
@@ -234,6 +254,38 @@ mod tests {
         assert!(lane.bytes("m1").is_none(), "最久未用的被淘汰");
     }
 
+    /// 同屏超过软张数目标时，在屏的图不许被自己的数量挤掉——那是「每帧重抓」的自激环。
+    #[test]
+    fn a_screenful_of_pictures_is_never_evicted_by_its_own_count() {
+        let ids: Vec<String> = (0..BYTE_ENTRIES + 4).map(|i| format!("m{i}")).collect();
+        let mut lane = MediaLane::default();
+        lane.observe(ids.iter().cloned());
+        for id in &ids {
+            lane.supply(id, Arc::new(vec![0; 8]));
+        }
+        assert_eq!(lane.cached(), ids.len(), "一屏的图全部留下");
+        assert_eq!(
+            lane.requests(),
+            Vec::<String>::new(),
+            "不重抓：屏幕上刚抓到的那些还在缓存里"
+        );
+    }
+
+    /// 淘汰先走离屏的：滚回去再滚回来的图不该把在屏的图挤掉。
+    #[test]
+    fn eviction_prefers_the_pictures_that_left_the_screen() {
+        let mut lane = lane_with(&["on-screen-a", "on-screen-b"]);
+        lane.supply("on-screen-a", Arc::new(vec![0; 8]));
+        lane.supply("on-screen-b", Arc::new(vec![0; 8]));
+        // 一堆离屏的图把它们挤走：张数目标 ≥ 8，所以淘汰掉的是离屏的那几张。
+        for i in 0..BYTE_ENTRIES {
+            lane.supply(&format!("gone-{i}"), Arc::new(vec![0; 8]));
+        }
+        assert!(lane.bytes("on-screen-a").is_some(), "在屏的不被挤掉");
+        assert!(lane.bytes("on-screen-b").is_some());
+        assert!(lane.bytes("gone-0").is_none(), "最久未用的离屏图先走");
+    }
+
     #[test]
     fn one_oversized_picture_stays_alone_in_the_cache() {
         let mut lane = MediaLane::default();
@@ -247,13 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn a_supply_after_eviction_is_requested_again() {
+    fn a_picture_whose_bytes_were_evicted_is_requested_again() {
         let mut lane = lane_with(&["a"]);
         lane.supply("a", Arc::new(vec![0; 4]));
-        // 被别的图挤出缓存，但仍在屏幕上 → 下一帧重新抓。
+        // a 滚出视口：它的字节可以被挤掉（离屏优先）。
+        lane.observe(std::iter::empty());
         for i in 0..BYTE_ENTRIES {
             lane.supply(&format!("x{i}"), Arc::new(vec![0; 4]));
         }
+        assert!(lane.bytes("a").is_none(), "离屏的字节被挤出缓存");
+        // 滚回来 → 没有字节 → 重新抓一次（内容寻址：抓到的是同一份）。
+        lane.observe(["a".to_string()]);
         assert_eq!(lane.requests(), vec!["a"]);
     }
 }
