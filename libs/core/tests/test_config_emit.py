@@ -1,17 +1,18 @@
 # tests/test_config_emit.py
-"""emit（``config/emit.py``）的单测 —— 规范形 YAML 的 round-trip 与八条输出规则。
+"""emit（``config/emit.py``）的单测 —— 规范形 YAML 的 round-trip 与输出规则。
 
-覆盖面（对应 02 design.md 的 D9–D13）：
+覆盖面：
 
 1. **round-trip**：``emit → yaml.safe_load`` 与输入稀疏文档逐项相等（含多级嵌套列表、空容器、
    多行字符串、非 ASCII、需要引号的值）；
 2. **幂等**：``emit(load(emit(doc))) == emit(doc)``；
-3. 注释就位：``doc`` 在值上方、``notes`` 逐行、``example`` 追加、section 分隔行与 ``section_doc``；
-4. 缺席且有默认 → **注释掉的默认值**；缺席且必填 → 不注释的空值；
-5. ``apply`` 标记（restart / next_session 有，hot 没有）与 secret 说明行；
-6. 未知键保留（父容器末尾 + 标记注释）；
-7. ``default_document()`` 的产出 = 首启模板（两个空列表 + 全套注释、无 ``ChangeHere``）；
-8. **模板可用性**：喂给 ``Config(**raw)`` 只失败在「providers / agents 不得为空」这两条上。
+3. 注释只有两类：分组分隔行与注释掉的默认值；声明层的 ``doc`` / ``notes`` / ``example`` /
+   生效域 / 密文说明一条都不进文件；
+4. 缺席且有默认 → **注释掉的默认值**（列表项只展开第一项）；默认是 ``null`` → 不写；
+   缺席且必填 → 不注释的空值；
+5. 未知键保留（父容器末尾 + 标记注释，含「父容器是显式空对象」的边界）；
+6. ``default_document()`` 的产出 = 首启模板（两个空列表 + 注释掉的默认值、无 ``ChangeHere``）；
+7. **模板可用性**：喂给 ``Config(**raw)`` 只失败在「providers / agents 不得为空」这两条上。
 """
 
 from __future__ import annotations
@@ -230,6 +231,22 @@ def test_section_banners_have_no_section_doc(template: str) -> None:
     assert len(lines[banner]) == 64
 
 
+def test_empty_section_drops_its_banner() -> None:
+    """正文为空的分组连分隔行一起省掉（一条没有内容的横幅只会让人以为文件被截断）。"""
+    mini = create_model(
+        "_M",
+        a=(bool, S(doc="开关", default=True)),
+        b=(str | None, S(doc="可空（默认 null → 不写）", default=None)),
+    )
+    catalog = build_catalog(mini)
+    catalog.children[0].section = "First"
+    catalog.children[1].section = "Second"
+    text = emit_config_yaml({}, catalog)
+    assert "# ── First" in text
+    assert "# ── Second" not in text, text
+    assert "# a: true" in text
+
+
 def test_section_banners_are_exactly_the_group_table(template: str) -> None:
     """分隔行 = 分组表（顺序、名字、每组恰好一次）；文件里的键序仍是声明序。
 
@@ -401,6 +418,26 @@ def test_unknown_root_key_is_written_at_the_file_tail(catalog: SettingNode) -> N
     assert text.rstrip().endswith(("- 2", "2"))
     assert "# unknown key (not recognized by this wing version)" in text
     assert yaml.safe_load(text) == doc
+
+
+def test_unknown_key_under_an_explicitly_empty_parent_stays_in_place(
+    catalog: SettingNode,
+) -> None:
+    """父容器是**用户显式写下的空对象**时，未知键也必须留在容器里（不是甩到文件末尾）。
+
+    真实路径：磁盘上写 `gateway:\n  weird: 1` → `_split_known` 把它拆成
+    `data["gateway"] = {}` + `extra=("gateway", ...)`。空对象若直接写成 `gateway: {}`，
+    那个 `{}` 会吞掉位置信息，`weird` 就变成顶层键了。
+    """
+    doc = {
+        "providers": [{"name": "p", "base_url": "b", "api_key": "k", "models": ["m"]}],
+        "agents": [{"name": "a", "model": "m"}],
+        "gateway": {},
+    }
+    text = emit_config_yaml(doc, catalog, extra=[ExtraKey("gateway", "weird", 1)])
+    loaded = yaml.safe_load(text)
+    assert loaded["gateway"] == {"weird": 1}, loaded
+    assert "weird" not in loaded, loaded
 
 
 def test_unknown_key_without_its_parent_is_still_preserved(

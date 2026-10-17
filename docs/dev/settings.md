@@ -87,7 +87,7 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 |---|---|
 | `GET /api/settings/schema` | `groups[]`（id / title / doc / members）——**前端左列锚点的唯一来源**，前端零硬编码 |
 | catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（面板左栏锚点的说明；不进 config.yaml） |
-| `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**，分隔行按组的首次出现发一次（分组表管界面顺序，不管文件顺序） |
+| `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**（分组表管界面顺序，不管文件顺序；同组成员必须连续，见门禁） |
 
 门禁（`tests/test_config_groups.py`）：id / title 唯一、成员非空且都是真实顶层字段、
 每个顶层字段**恰好**属于一个组（漏 = 界面里无处可去，重复 = 两份真相）、顺序钉死。
@@ -107,7 +107,7 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 门禁 | 位置 | 钉住 |
 |---|---|---|
 | 每个配置字段必须声明 | `libs/core/tests/test_config_spec.py` | 递归遍历 `Config` 及嵌套模型：字段缺声明 / `apply` 没显式写（AST 检查）/ 字段 docstring 残留 / `secret` 不是 `str` / `choices` 缺 `Literal` 的键 → 红；**声明层不再携带分组**（AST 拒绝 `S(section=...)`） |
-| 分组是一张完整的划分 | `libs/core/tests/test_config_groups.py` | 顺序钉死、id / title 唯一、成员都是真实顶层字段、每个顶层字段**恰好**属于一个组；坏表（漏 / 重 / 幻影 / 空组）→ `validate_groups` 抛；目录投影（`section` = title、`section_doc` 只在首成员）+ wire 形状 |
+| 分组是一张完整的划分 | `libs/core/tests/test_config_groups.py` | 顺序钉死、id / title 唯一、成员都是真实顶层字段、每个顶层字段**恰好**属于一个组、**同组成员在声明序里连续**（否则文件里会出现两条同名分隔行）；坏表（漏 / 重 / 幻影 / 空组 / 不连续）→ `validate_groups` 抛；目录投影（`section` = title、`section_doc` 只在首成员）+ wire 形状 |
 | 分组的 wire 形状 | probe `scenarios/test_settings_groups.py` | 真网关的 `groups[]`（顺序 / 成员 / 与节点 `section` 同源）+ 零迁移与保存回归（改跨旧分组的键、文件顶层键不变、分隔行跟着新分组） |
 | Interface 根双向对账 | `crates/wing/src/config/catalog.rs` 的单测 | **穷尽 struct 字面量**构造 `AppConfig` 全字段样本（加字段即编译失败）→ catalog 缺声明 / 声明了幻影键 → 红；`interface_groups()` 的成员 = catalog root 的子节点 |
 | 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个有值可展示的声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 + **分隔行恰好是分组表的 title 序** + **声明层的文案一条都不出现** |
@@ -136,7 +136,7 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 | 规则 | 行为 |
 |---|---|
 | 文件头 | 1 行（产品名 + 文件位置）；**不写时间戳**——它会让每次保存都产生 diff 噪声 |
-| 分组 | 按业务分组（§1.1）分段：`# ── Name ───` 分隔行，按组的**首次出现**发一次（键序恒为声明序）；正文为空的分组连分隔行一起省掉 |
+| 分组 | 按业务分组（§1.1）分段：`# ── Name ───` 分隔行（每组一条；`validate_groups` 强制同组成员在声明序里连续）；键序恒为声明序；正文为空的分组连分隔行一起省掉 |
 | 有值 | 原样写出（标量 / `key: {}` / `key: []` / 子树） |
 | 缺席有默认 | 写成注释行：标量 `# key: value`；object 整棵子树注释；list / map `# key: []` / `# key: {}` |
 | 缺席且默认是 `null` | **不写**（`null` 没有可展示的事实；`id` / `description` / `max_turns` 这类可选键靠面板发现） |
@@ -574,6 +574,7 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 | YAML 锚点 / 别名会丢失 | 解析后写回规范形，锚点不保留（emitter 是"声明 → 文本"的函数） |
 | 首次经面板保存会规范化手写注释 | 手写注释一概不保留（emitter 是「稀疏文档 → 文本」的函数）；`.bak` 兜底 |
 | 注释掉的默认值只写在**用户没写过的键**上 | 已写下的键不会有第二条提示；想改值就改值，想跟随升级就先 `unset`（= 从文档移除） |
+| TUI 的 `api_key` 不出现在 `tui/config.yaml` | 它没有默认值（`AppConfig::default()` 是 `None`）→ 按「默认是 null 的键不写」不出现；网关鉴权密钥在设置面板 / `wing config` 里改（给它编一个 `""` 默认值会把面板的「未设置」变成「空 + default」，得不偿失） |
 | 两个 `config.yaml` 的注释语言 | 文件里只剩分隔行与注释掉的默认值（无散文）；字段文案只活在两个 catalog 的 `doc` / `notes` 里（Gateway 侧全中文，TUI 侧字段 `doc` 沿用既有的英文） |
 | `--dump-config` **默认掩码**，掩码后的输出不是 round-trip artifact | `wing tui --dump-config` 打印的是**当前文件**的规范形（本 PR 之前它打印的是默认模板，从不带用户密钥），因此密文叶子默认写成 `api_key: null` + 一行指向真值的注释；round-trip 要显式 `--show-secrets`。**掩码输出重定向回文件会让密钥变成"缺席"**，这是默认掩码的必然代价。保存路径用的是 `DumpMode::Raw`（写真值），**别把两者"顺手统一"** |
 | 颜色槽"注释掉的默认值"是 `preset: wing` 下的值 | 改 `preset` 后它们仅供参考（不随预设重算） |

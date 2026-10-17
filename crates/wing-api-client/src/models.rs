@@ -1084,7 +1084,7 @@ pub struct SettingNode {
     /// 顶层分组名（面板按它分组，顺序 = 声明序）；`None` = 不分组。
     #[serde(default)]
     pub section: Option<String>,
-    /// 分组说明（emitter 的块注释来源）。
+    /// 分组说明（面板左栏锚点的说明；不进 config.yaml）。
     #[serde(default)]
     pub section_doc: Option<String>,
 

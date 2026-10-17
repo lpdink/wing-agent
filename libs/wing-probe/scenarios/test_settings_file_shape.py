@@ -48,6 +48,15 @@ def _walk(root: dict[str, Any]) -> Iterator[dict[str, Any]]:
         stack.extend(node.get("variants") or [])
 
 
+#: 文件里允许出现的注释形态（除此之外**任何**注释行都是散文泄漏）。
+_ALLOWED_COMMENTS = (
+    re.compile(r"^# wing-agent configuration — "),
+    re.compile(r"^# ── .+ ─+$"),
+    re.compile(r"^# [^\s:]+:(\s.*)?$"),  # 注释掉的默认值（`# key:` / `# key: value`）
+    re.compile(r"^# unknown key \(not recognized by this wing version\)$"),
+)
+
+
 def _prose_of(schema: dict[str, Any]) -> list[str]:
     """schema 里所有给人读的文案（它们在文件里一个都不该出现）。"""
     prose: list[str] = []
@@ -90,26 +99,25 @@ async def test_saved_config_carries_no_prose_and_lists_every_key(probe: Probe) -
     parsed = yaml.safe_load(text)
     assert parsed["user_agent"]["preset"] == "opencode", parsed
 
-    # ① 散文零残留：声明层的文案（数百条）一条都不许进文件。
+    lines = text.splitlines()
+    comments = [line.lstrip() for line in lines if line.lstrip().startswith("#")]
+
+    # ① 散文零残留：声明层的文案（数百条）一条都不许出现在注释里。
+    #    只看注释行——数据行本来就该出现用户自己的字（`system_prompt` 里可能有任何文案）。
     prose = _prose_of(schema)
     assert len(prose) > 100, "schema 里读不到文案说明遍历坏了"
-    leaked = [line for line in prose if line in text]
+    leaked = [line for line in prose if any(line in c for c in comments)]
     assert leaked == [], leaked
 
     # ② 发现性不靠散文：每个顶层键都出现（有值 → 值行；用默认 → 注释行）。
-    lines = text.splitlines()
     for child in schema["root"]["children"]:
         key = child["key"]
         present = any(re.match(rf"^\s*(# )?{re.escape(key)}:", line) for line in lines)
         assert present, (key, text)
 
-    # ③ 注释只有两类形态（文件头那一行是唯一例外）。
-    for line in lines[1:]:
-        stripped = line.lstrip()
-        if not stripped.startswith("#"):
-            continue
-        body = stripped.lstrip("# ").strip()
-        assert stripped.startswith("# ── ") or ":" in body, line
+    # ③ 注释只有白名单里的形态（文件头 / 分隔行 / 注释掉的默认值 / 未知键标记）。
+    for line in comments:
+        assert any(pattern.match(line) for pattern in _ALLOWED_COMMENTS), line
 
     # ④ 注释掉的默认值与 schema 一致。
     for path, expected in COMMENTED_DEFAULTS.items():

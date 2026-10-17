@@ -4,8 +4,9 @@
 为什么自己写（不用 ``yaml.dump`` 输出结构）：``yaml.dump`` 不能输出注释、不能控制键序、
 更不能做「缺席即默认 → 注释掉的默认值」这件事。默认模板与保存写盘从此都只有一条路径。
 
-**文件里只有两类注释**：分组分隔行与注释掉的默认值。字段的 ``doc`` / ``notes`` /
-``example`` / 生效域 / 密文说明**一概不写进文件**——它们的归宿是设置面板与
+**文件里只有两类注释**：分组分隔行与注释掉的默认值（另有两处安全注记：未知键标记、
+以及只有展示路径才会产生的掩码提示——后者不在本文件的落盘路径上）。字段的 ``doc`` /
+``notes`` / ``example`` / 生效域 / 密文说明**一概不写进文件**——它们的归宿是设置面板与
 ``wing config``（同一个声明层，见 ``spec.SettingMeta``）；文件只承载数据与可发现性
 （这个键存在、它的默认值是什么）。散文注释把几十行的配置撑成上千行，是文件难读的主因。
 
@@ -124,7 +125,7 @@ def _scalar_text(value: Any) -> str:
 
 
 def _string_scalar(text: str) -> str:
-    """字符串引号策略（规则 7）：能不加就不加；需要时双引号 + 转义、非 ASCII 原样。"""
+    """字符串引号策略（规则 6）：能不加就不加；需要时双引号 + 转义、非 ASCII 原样。"""
     if _plain_safe(text):
         return text
     return json.dumps(text, ensure_ascii=False)
@@ -224,9 +225,9 @@ def _emit_sections(
 ) -> None:
     """顶层：按分组缓冲后分段。
 
-    分隔行按组的**首次出现**发一次（分组表是界面顺序，文件顺序恒为声明序，两者不一致时
-    也不重复发——同一组的两段分隔行只会让人以为文件被切错了）；**正文为空的分组连分隔行
-    一起省掉**（一条没有内容的横幅只会让人以为文件被截断）。
+    分组表管界面顺序、文件顺序恒为声明序；`validate_groups` 保证同组成员在声明序里**连续**，
+    所以每组恰好一段、一条分隔行。**正文为空的分组连分隔行一起省掉**（一条没有内容的横幅
+    只会让人以为文件被截断）。
     """
     children = node.children
     index = 0
@@ -323,7 +324,9 @@ def _emit_absent_default(
         out.extend(body)
         return
     if node.kind is SettingKind.LIST:
-        _emit_value(out, extras, node, path, [], indent, commented=True)
+        # catalog 里 list 的 default 恒为 None（结构由 element 表达）；声明了非空默认值时照写。
+        default = node.default if isinstance(node.default, list) else []
+        _emit_value(out, extras, node, path, default, indent, commented=True)
         return
     if node.default is None:
         return
@@ -344,7 +347,7 @@ def _emit_value(
     """一个字段的取值形态（object / list / map / 标量；``commented`` 时整体注释化）。"""
     key = _key_text(node.key)
     if node.kind is SettingKind.OBJECT and isinstance(value, dict):
-        if not value:
+        if not value and not extras.pending(path):
             # `key:` 后面只有注释 = YAML null，会把 `{}` 读成 None——空容器必须显式写。
             _line(out, indent, f"{key}: {{}}", commented)
         else:
@@ -551,6 +554,10 @@ class _Extras:
             self._by_parent.setdefault(entry.parent, []).append(
                 (entry.key, entry.value)
             )
+
+    def pending(self, parent: str) -> bool:
+        """这个父容器还有没写回的未知键？（决定空对象写成 `{}` 还是块）"""
+        return bool(self._by_parent.get(parent))
 
     def take(self, parent: str) -> list[tuple[str, Any]]:
         self._consumed.add(parent)

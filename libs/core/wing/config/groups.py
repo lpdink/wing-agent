@@ -114,12 +114,15 @@ def group_of(
 def validate_groups(groups: Sequence[SettingGroup], fields: Sequence[str]) -> None:
     """校验一张分组表对一组顶层字段的**覆盖**（违反即 ``ValueError``）。
 
-    悄悄漏掉一个顶层键会让它在界面里无处可去，所以这里是硬失败。四条：
+    悄悄漏掉一个顶层键会让它在界面里无处可去，所以这里是硬失败。五条：
 
     1. 组 ``id`` / ``title`` 不重复（id 是稳定标识，title 是界面文案，两者都要唯一）；
     2. 组不为空（没有成员的组是一个点不开的锚点）；
     3. 每个成员都是真实存在的顶层字段，且只属于一个组；
-    4. 每个顶层字段都被某个组认领。
+    4. 每个顶层字段都被某个组认领；
+    5. **同组成员在顶层字段声明序里连续**：文件按声明序写、分组只靠分隔行表达边界，
+       一个组被拆成两段就会出现两条同名分隔行（看起来像文件被切错了）。加字段时把它
+       放在本组**已有成员之后**即可——这条门禁会在忘记时立刻变红。
     """
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
@@ -145,6 +148,15 @@ def validate_groups(groups: Sequence[SettingGroup], fields: Sequence[str]) -> No
     missing = known - set(seen_members)
     if missing:
         raise ValueError(f"顶层字段没有归入任何设置分组：{sorted(missing)}")
+    # 5. 同组成员在声明序里必须连续（见 docstring 第 5 条）。
+    order = list(fields)
+    for group in groups:
+        positions = [order.index(member) for member in group.members if member in known]
+        if positions != list(range(positions[0], positions[0] + len(positions))):
+            raise ValueError(
+                f"设置分组 {group.id} 的成员在声明序里不连续："
+                f"{[(order[i], i) for i in positions]}"
+            )
 
 
 def build_groups(
