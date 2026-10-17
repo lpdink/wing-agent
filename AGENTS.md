@@ -296,6 +296,23 @@ make fmt                          # 格式化全部
 
 **注释纪律**：注释**宁缺毋滥**，只承载代码本身读不出的信息——不变量、协议 / 契约、红线、非显然的 why（平台差异、竞态、外部约束）。保持**高信息密度**：函数 / 类型名已说清的不复述，同一主题的连续多行注释压成要点式，与代码不符的过期注释直接删。**严禁**添加「解释自己这处改动为什么正确」的辩护式注释（"原来 XX 会出问题"、"这样改是对的"、"按评审意见修成…"）——改动理由写进 commit message / PR 正文。
 
+### Worktree 纪律
+
+Rust 的构建产物是**按路径独立的一整套**：新建 worktree 后首次构建会凭空造出一整套 `target/`；
+本地若还跑插桩覆盖率，会再多一整套 `target/llvm-cov-target/`。并行开几个 lane 就足以把磁盘吃满。
+
+- **建**：用 `scripts/dev/new-worktree.sh <name> [base]`，不要裸 `git worktree add`。
+  它从主仓克隆 `target/debug`：在支持写时复制的文件系统（APFS / btrfs / XFS）上物理占用≈0，
+  外部依赖免重编（工作区自己的 crate 因路径变化仍需重编），磁盘只付差异。
+- **收**：任务交付即 `git worktree remove --force <path>`。不要过夜、不要囤着等下一轮 review。
+- **收尾进程**：从 worktree 里起过 `wing-gateway` / dev server 的，交付前确认已退出
+  （`lsof -nP -iTCP -sTCP:LISTEN`）。一台机器上只应存在一个网关。
+- **本地不跑插桩覆盖率**：`make test-rust-cov` 会留一整套 `target/llvm-cov-target/`，
+  本地日常用 `make test`（普通构建）即可，覆盖率交 CI 的 `rust-check` job。
+- **不依赖 sccache**：开发循环已经用它不上了。若 `~/.cargo/config.toml` 还挂着
+  `rustc-wrapper = "sccache"`，建议摘掉 —— 它不会让构建失败，但增量编译开着时本地
+  crate 的编译进不了缓存，而 `CARGO_INCREMENTAL=1` 这种临时覆盖会让 sccache 直接报错退出。
+
 ## 分发
 
 - **Python**：`pip install wing-agent` → 安装 `wing-gateway`（Python 网关）与 `wing-cli`（maturin 构建的 Rust 二进制，提供 `wing` 命令）。

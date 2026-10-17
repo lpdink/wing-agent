@@ -1,4 +1,4 @@
-.PHONY: check test test-python test-python-html test-rust test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
+.PHONY: check test test-python test-python-html test-rust test-rust-cov test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -177,22 +177,31 @@ patch-cov-python:
 		--min $(PATCH_COV_MIN) --out-json patch-python.json
 
 # 增量覆盖率门禁（Rust）：先由既有 profraw 出 LCOV（不重跑测试），再判定。
-# 前提：最近一次 `make test-rust` 的插桩产物还在（target/llvm-cov-target/）。
+# 前提：最近一次 `make test-rust-cov` 的插桩产物还在（target/llvm-cov-target/）。
 patch-cov-rust:
 	cargo llvm-cov report --lcov --output-path coverage-rust.lcov
 	python3 scripts/ci/patch_coverage.py --lang rust \
 		--coverage coverage-rust.lcov --base $(PATCH_BASE) \
 		--min $(PATCH_COV_MIN) --out-json patch-rust.json
 
+# Rust 测试：普通构建。本地默认走这条。
+#
+# 插桩构建会额外产出一整套 target/llvm-cov-target，并且与普通构建的产物互不通用
+# （见下面 test-rust-cov）——本地日常测试不需要为覆盖率付这个代价，覆盖率交给 CI 跑。
+test-rust:
+	cargo test --workspace
+	cargo test --workspace --doc
+
 # Rust 测试（插桩构建；覆盖率产物供上面的增量门禁与 PR 评论复用）。
+# 本地只在需要复现覆盖率问题时才跑；CI 的 rust-check job 走这条。
 #
 # - cargo-llvm-cov 是 cargo 子命令、不在 Cargo.toml 依赖里：缺失时硬失败 + 安装指引，
-#   不静默退化成裸 `cargo test` —— 那样本地「过了」而 CI 才拦，门禁形同虚设。
+#   不静默退化成裸 `cargo test` —— 那样「跑过了」而门禁没有数据。
 # - doctests 单独一条：cargo-llvm-cov 的 --doctests 依赖 nightly 的 -Z unstable-options，
-#   stable 上不可用；分开跑保持与原本 `cargo test` 相同的目标覆盖面。
+#   stable 上不可用；分开跑保持与 `cargo test` 相同的目标覆盖面。
 # - 插桩构建（RUSTFLAGS 带 -C instrument-coverage）与普通构建在 target 里是两套产物：
-#   刚跑过裸 `cargo test` 再跑本命令会整树重编译（反之亦然）。日常统一走本命令。
-test-rust:
+#   刚跑过裸 `cargo test` 再跑本命令会整树重编译（反之亦然）。
+test-rust-cov:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { \
 		echo "❌ cargo-llvm-cov not found — the Rust coverage tooling needs it."; \
 		echo "   Install:"; \

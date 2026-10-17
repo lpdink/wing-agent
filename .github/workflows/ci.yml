@@ -177,6 +177,11 @@ jobs:
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
+    env:
+      # 每次都是干净 checkout，增量产物不会跨 run 复用（rust-cache 存缓存前会丢掉
+      # incremental 目录），开着只是白付构建时间与缓存体积。cargo 在 CI 环境下本就
+      # 不传 -C incremental，这里显式写死，免得依赖那条环境检测。
+      CARGO_INCREMENTAL: "0"
 
     steps:
       # fetch-depth: 0 —— 增量覆盖率门禁要算与目标分支的 merge-base（同 python-check）。
@@ -205,10 +210,10 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy -- -D warnings
 
-      # 与本地同一条命令：单测 + 插桩覆盖率产物（供增量门禁与评论复用；总量不再门禁）。
+      # 与本地默认命令不同：这里必须用插桩构建，覆盖率产物供增量门禁与评论复用。
       # 插桩构建落在 target/llvm-cov-target/（独立于普通构建产物，互不失效）。
-      - name: Cargo test
-        run: make test-rust
+      - name: Cargo test (instrumented)
+        run: make test-rust-cov
 
       # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：测试挂掉时也要导。
       # 只读既有 profraw 生成报告，不重跑测试；--summary-only 去掉 segments 明细
