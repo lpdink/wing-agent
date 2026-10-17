@@ -1255,7 +1255,7 @@ fn header_shape_matches_the_reference_body() {
                     assert_eq!(body.rows, want.rows, "{context}");
                     assert_eq!(body.px_w, want.px_w, "{context}");
                     assert_eq!(body.px_h, want.px_h, "{context}");
-                    assert_eq!(body.path, want.path, "{context}");
+                    assert_eq!(body.source, want.source, "{context}");
                     assert_eq!(body.alt, want.alt, "{context}");
                 }
             }

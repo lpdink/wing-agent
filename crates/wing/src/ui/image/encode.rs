@@ -108,6 +108,32 @@ pub(crate) fn decode(path: &Path, limits: &Limits) -> Result<DynamicImage, Unava
     DynamicImage::from_decoder(decoder).map_err(|_| Unavailable::NotAnImage)
 }
 
+/// [`decode`] over bytes the caller already holds (a gateway media object).
+///
+/// Same two gates, same reasons, same order: the byte budget is checked before a decoder is
+/// built, the pixel budget after the header is read and before any pixel buffer is allocated.
+/// Media objects are content-addressed — the bytes cannot change under us — so there is no
+/// "the file was swapped after the probe" half to worry about: the caller's bytes *are* what
+/// was probed (their shape came from the upload's own header parse).
+pub(crate) fn decode_bytes(bytes: &[u8], limits: &Limits) -> Result<DynamicImage, Unavailable> {
+    let len = bytes.len() as u64;
+    if len > limits.file_bytes {
+        return Err(Unavailable::TooLarge { bytes: len });
+    }
+    if len == 0 {
+        return Err(Unavailable::Empty);
+    }
+    let reader = ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| Unavailable::Unreadable)?;
+    let decoder = reader.into_decoder().map_err(|_| Unavailable::NotAnImage)?;
+    let (px_w, px_h) = decoder.dimensions();
+    if u64::from(px_w) * u64::from(px_h) > limits.pixels {
+        return Err(Unavailable::TooManyPixels { px_w, px_h });
+    }
+    DynamicImage::from_decoder(decoder).map_err(|_| Unavailable::NotAnImage)
+}
+
 /// Encode an already-decoded image for `protocol`, targeting `target` cells.
 ///
 /// The result's cell `size()` is `≤ target` on both axes, aspect ratio preserved, and it is
@@ -185,6 +211,64 @@ mod tests {
         let (_dir, path) = fixture("encode-decode", 40, 30);
         let image = decode(&path, &Limits::default()).expect("decode");
         assert_eq!((image.width(), image.height()), (40, 30));
+    }
+
+    /// The same fixture, in memory — what a gateway media object is (bytes, no file).
+    fn png_bytes(px_w: u32, px_h: u32) -> Vec<u8> {
+        let img =
+            image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(px_w, px_h, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+            }));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encode png fixture");
+        out
+    }
+
+    #[test]
+    fn decode_bytes_reads_an_in_memory_png() {
+        let bytes = png_bytes(40, 30);
+        let image = decode_bytes(&bytes, &Limits::default()).expect("decode");
+        assert_eq!((image.width(), image.height()), (40, 30));
+    }
+
+    #[test]
+    fn decode_bytes_enforces_both_budgets() {
+        let bytes = png_bytes(64, 64);
+        // 字节预算：不建解码器就拒绝。
+        assert_eq!(
+            decode_bytes(
+                &bytes,
+                &Limits {
+                    file_bytes: 8,
+                    ..Limits::default()
+                }
+            )
+            .unwrap_err(),
+            Unavailable::TooLarge {
+                bytes: bytes.len() as u64
+            }
+        );
+        // 像素预算：只读头就拒绝（不分配 64×64 的解码缓冲）。
+        assert_eq!(
+            decode_bytes(
+                &bytes,
+                &Limits {
+                    pixels: 100,
+                    ..Limits::default()
+                }
+            )
+            .unwrap_err(),
+            Unavailable::TooManyPixels { px_w: 64, px_h: 64 }
+        );
+        assert_eq!(
+            decode_bytes(b"", &Limits::default()).unwrap_err(),
+            Unavailable::Empty
+        );
+        assert_eq!(
+            decode_bytes(b"this is not a png", &Limits::default()).unwrap_err(),
+            Unavailable::NotAnImage
+        );
     }
 
     #[test]

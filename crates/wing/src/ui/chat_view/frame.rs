@@ -130,10 +130,9 @@ pub(super) fn buffer_row_graphemes(buf: &Buffer, row: u16, area: Rect) -> Vec<Gr
     graphemes
 }
 
-/// Columns a user-message cell fills with background before its text starts
-/// (`cell_area.x + 2` in the render path, `super::viewport`) — the padding the
-/// copy skips. KEEP IN SYNC with that literal.
-const USER_MESSAGE_INSET: u16 = 2;
+/// Columns a user-message cell fills with background before its text starts — the padding the
+/// copy skips. One declaration (`super::media::LEFT_INSET`), read by the render path too.
+const USER_MESSAGE_INSET: u16 = super::media::LEFT_INSET;
 
 /// Append the padding inset of `height` content rows to `out`, clipped to the
 /// visible range `[top, bottom)`; `vrow` advances past them.
@@ -396,7 +395,7 @@ mod tests {
             .map(|i| format!("row-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::UserMessage(text.into()));
         let band = Rect::new(0, 1, 40, 12);
         let _ = render_view_in(&mut view, Rect::new(0, 0, 40, 20), band);
         let geom = view.geometry();
@@ -443,7 +442,7 @@ mod tests {
             .map(|i| format!("row-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::UserMessage(text.into()));
         let band = Rect::new(0, 0, 40, 10);
         let _ = render_view_in(&mut view, Rect::new(0, 0, 40, 10), band);
 
@@ -473,19 +472,10 @@ mod tests {
         let mut view = ChatView::new();
         view.push_pending(
             "req-1".into(),
-            Submission {
-                content: "看这张".into(),
-                images: vec![picture.clone()],
-            },
+            Submission::new("看这张", vec![picture.clone()]),
         );
         view.promote_pending("req-1");
-        view.push_pending(
-            "req-2".into(),
-            Submission {
-                content: "排队中".into(),
-                images: vec![picture],
-            },
-        );
+        view.push_pending("req-2".into(), Submission::new("排队中", vec![picture]));
 
         let text = buffer_text(&render_view(&mut view, 40, 12));
         // CJK 字素在 buffer 里各占一格 + 一个填充空格，比较前把空格收掉。
@@ -663,7 +653,7 @@ mod tests {
             .map(|i| format!("line-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::UserMessage(text.into()));
         let band = Rect::new(3, 2, 30, 8);
         let buf = render_view_in(&mut view, Rect::new(0, 0, 40, 20), band);
         view.capture_visible_rows(&buf);
@@ -701,7 +691,7 @@ mod tests {
             .map(|i| format!("row-{i:02}"))
             .collect::<Vec<_>>()
             .join("\n");
-        view.push(ChatCell::UserMessage(text));
+        view.push(ChatCell::UserMessage(text.into()));
         let band = Rect::new(0, 0, 40, 10);
         let buf = render_view_in(&mut view, band, band);
         view.capture_visible_rows(&buf);

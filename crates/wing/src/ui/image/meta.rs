@@ -80,6 +80,10 @@ pub enum Unavailable {
     /// The terminal protocol encoder rejected the decoded image (a panic in the encoder is
     /// reported this way too).
     EncodeFailed,
+    /// A media object's bytes have not been fetched yet (the app fetches them for the
+    /// pictures on screen; see `app::images::media`). Transient by construction — the caller
+    /// keeps the caption until the bytes land.
+    NotFetched,
     /// The worker thread is gone: no further probe or encode will ever be answered.
     ///
     /// Distinct from [`Unavailable::Disabled`] on purpose — the terminal *can* draw, but this
@@ -105,6 +109,7 @@ impl fmt::Display for Unavailable {
                 write!(f, "image is too large ({px_w}x{px_h} pixels)")
             }
             Self::EncodeFailed => f.write_str("terminal encoder rejected the image"),
+            Self::NotFetched => f.write_str("the image bytes have not been fetched yet"),
             Self::WorkerFailed => f.write_str("the image pipeline stopped working"),
         }
     }
@@ -297,6 +302,7 @@ mod tests {
             Unavailable::NotAnImage,
             Unavailable::TooManyPixels { px_w: 1, px_h: 2 },
             Unavailable::EncodeFailed,
+            Unavailable::NotFetched,
             Unavailable::WorkerFailed,
         ];
         for reason in reasons {

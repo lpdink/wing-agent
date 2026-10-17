@@ -176,7 +176,10 @@ impl Fixture {
             if !frame.area.intersects(area) {
                 continue;
             }
-            let ImageState::Ready(image) = self.store.request(&frame.path, frame.target) else {
+            let ImageState::Ready(image) = self.store.request(
+                frame.source.as_file().expect("bench fixtures are files"),
+                frame.target,
+            ) else {
                 continue;
             };
             paint(&image, area, frame.offset, buf);
@@ -191,7 +194,10 @@ impl Fixture {
             self.store.poll();
             if self.view.frame_images().iter().all(|frame| {
                 matches!(
-                    self.store.request(&frame.path, frame.target),
+                    self.store.request(
+                        frame.source.as_file().expect("bench fixtures are files"),
+                        frame.target
+                    ),
                     ImageState::Ready(_)
                 )
             }) {

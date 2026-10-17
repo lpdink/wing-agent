@@ -64,16 +64,16 @@ impl ChatView {
 
     /// Queue a sent-but-not-yet-accepted user message.
     ///
-    /// The bubble's text is frozen here ([`media::text_with_labels`]): the
-    /// pictures' labels are part of the message from the moment it leaves the
-    /// composer, and promote hands the same string on to history.
+    /// The bubble's content is frozen here (text + the submission's predicted media
+    /// refs): the pictures are part of the message from the moment it leaves the
+    /// composer, so the queued bubble draws them right away, and promote hands the same
+    /// body on to history (the encode cache therefore survives the move).
     pub fn push_pending(&mut self, request_id: String, submission: Submission) {
-        let display =
-            media::text_with_labels(&submission.content, &media::labels(&submission.images));
+        let body = submission.body();
         self.pending.push(PendingMessage {
             request_id,
             submission,
-            cell: CachedCell::new(ChatCell::PendingUserMessage(display)),
+            cell: CachedCell::new(ChatCell::PendingUserMessage(body)),
         });
         // The user's own submission must be visible immediately — pending
         // messages render below in-flight streaming content.
@@ -108,26 +108,26 @@ impl ChatView {
             return false;
         };
         let msg = self.pending.remove(pos);
-        let ChatCell::PendingUserMessage(content) = msg.cell.into_inner() else {
+        let ChatCell::PendingUserMessage(body) = msg.cell.into_inner() else {
             return false;
         };
-        self.push(ChatCell::UserMessage(content));
+        self.push(ChatCell::UserMessage(body));
         true
     }
 
     /// Promote all pending messages into history (turn-end safety net —
     /// e.g. accepted events lost across a disconnect/reconnect).
     pub fn promote_all_pending(&mut self) {
-        let contents: Vec<String> = self
+        let bodies: Vec<media::UserMessageBody> = self
             .pending
             .drain(..)
             .filter_map(|msg| match msg.cell.into_inner() {
-                ChatCell::PendingUserMessage(content) => Some(content),
+                ChatCell::PendingUserMessage(body) => Some(body),
                 _ => None,
             })
             .collect();
-        for content in contents {
-            self.push(ChatCell::UserMessage(content));
+        for body in bodies {
+            self.push(ChatCell::UserMessage(body));
         }
     }
 
@@ -140,19 +140,19 @@ impl ChatView {
     /// `user_message_accepted` when that happens).
     pub fn discard_pending(&mut self, request_ids: &[String]) {
         let mut kept = Vec::with_capacity(self.pending.len());
-        let mut discarded: Vec<String> = Vec::new();
+        let mut discarded: Vec<media::UserMessageBody> = Vec::new();
         for msg in self.pending.drain(..) {
             if request_ids.contains(&msg.request_id) {
-                if let ChatCell::PendingUserMessage(content) = msg.cell.into_inner() {
-                    discarded.push(content);
+                if let ChatCell::PendingUserMessage(body) = msg.cell.into_inner() {
+                    discarded.push(body);
                 }
             } else {
                 kept.push(msg);
             }
         }
         self.pending = kept;
-        for content in discarded {
-            self.push(ChatCell::DiscardedUserMessage(content));
+        for body in discarded {
+            self.push(ChatCell::DiscardedUserMessage(body));
         }
     }
 
@@ -160,16 +160,16 @@ impl ChatView {
     /// pending message was dropped and commit them as discarded (dim +
     /// struck through).
     pub fn discard_all_pending(&mut self) {
-        let contents: Vec<String> = self
+        let bodies: Vec<media::UserMessageBody> = self
             .pending
             .drain(..)
             .filter_map(|msg| match msg.cell.into_inner() {
-                ChatCell::PendingUserMessage(content) => Some(content),
+                ChatCell::PendingUserMessage(body) => Some(body),
                 _ => None,
             })
             .collect();
-        for content in contents {
-            self.push(ChatCell::DiscardedUserMessage(content));
+        for body in bodies {
+            self.push(ChatCell::DiscardedUserMessage(body));
         }
     }
 
@@ -1419,7 +1419,7 @@ mod tests {
         assert_eq!(view.pending.len(), 1);
         assert!(matches!(
             view.pending[0].cell.cell(),
-            ChatCell::PendingUserMessage(text) if text == "queued"
+            ChatCell::PendingUserMessage(text) if text.text == "queued"
         ));
         // The user's own submission must be visible — auto-scroll re-armed.
         assert!(view.is_at_bottom());
@@ -1436,7 +1436,7 @@ mod tests {
         assert_eq!(view.cells.len(), 2);
         assert!(matches!(
             view.cells[1].cell(),
-            ChatCell::UserMessage(text) if text == "follow-up"
+            ChatCell::UserMessage(text) if text.text == "follow-up"
         ));
     }
 
@@ -1453,47 +1453,49 @@ mod tests {
         }
     }
 
+    /// The queued bubble carries the pictures themselves (text + predicted media refs), and
+    /// its text form — what is drawn when pictures cannot be — is the label lines.
     #[test]
-    fn test_pending_bubble_carries_the_pictures_labels() {
+    fn test_pending_bubble_carries_the_pictures() {
         let mut view = ChatView::new();
         view.push_pending(
             "req-1".into(),
-            Submission {
-                content: "看这两张".into(),
-                images: vec![picture(1024, 768, 393_216), picture(8, 8, 7)],
-            },
+            Submission::new(
+                "看这两张",
+                vec![picture(1024, 768, 393_216), picture(8, 8, 7)],
+            ),
         );
 
-        // 气泡的文本在入队时定格（消息内编号），promote 原样搬进历史——标签不能只
-        // 活在草稿的 chip 里。
-        assert!(matches!(
-            view.pending[0].cell.cell(),
-            ChatCell::PendingUserMessage(text)
-                if text == "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]"
-        ));
+        let ChatCell::PendingUserMessage(body) = view.pending[0].cell.cell() else {
+            panic!("expected a pending user message");
+        };
+        assert_eq!(body.text, "看这两张");
+        assert_eq!(body.media.len(), 2, "引用随提交一起进气泡");
+        assert!(body.media.iter().all(|m| m.id.len() == 64));
+        assert_eq!(
+            body.label_text(),
+            "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]",
+            "画不了图时的文本形态（消息内编号）"
+        );
+
+        // Promote hands the same body on to history — the pictures survive the move.
         assert!(view.promote_pending("req-1"));
         assert!(matches!(
             view.cells[0].cell(),
-            ChatCell::UserMessage(text)
-                if text == "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]"
+            ChatCell::UserMessage(body) if body.media.len() == 2
         ));
     }
 
     #[test]
-    fn test_picture_only_pending_is_its_labels() {
+    fn test_picture_only_pending_keeps_its_pictures() {
         let mut view = ChatView::new();
-        view.push_pending(
-            "req-1".into(),
-            Submission {
-                content: String::new(),
-                images: vec![picture(8, 8, 7)],
-            },
-        );
+        view.push_pending("req-1".into(), Submission::new("", vec![picture(8, 8, 7)]));
 
-        assert!(matches!(
-            view.pending[0].cell.cell(),
-            ChatCell::PendingUserMessage(text) if text == "[Image #1 8×8 7B]"
-        ));
+        let ChatCell::PendingUserMessage(body) = view.pending[0].cell.cell() else {
+            panic!("expected a pending user message");
+        };
+        assert!(body.text.is_empty());
+        assert_eq!(body.label_text(), "[Image #1 8×8 7B]", "纯图消息的文本形态");
     }
 
     #[test]
@@ -1501,10 +1503,7 @@ mod tests {
         let mut view = ChatView::new();
         view.push_pending(
             "req-1".into(),
-            Submission {
-                content: "跑不动".into(),
-                images: vec![picture(8, 8, 7)],
-            },
+            Submission::new("跑不动", vec![picture(8, 8, 7)]),
         );
         view.push_pending("req-2".into(), Submission::text("still queued"));
 
@@ -1532,18 +1531,17 @@ mod tests {
         let mut view = ChatView::new();
         view.push_pending(
             "req-1".into(),
-            Submission {
-                content: "打断".into(),
-                images: vec![picture(8, 8, 7)],
-            },
+            Submission::new("打断", vec![picture(8, 8, 7)]),
         );
 
         view.discard_all_pending();
 
-        assert!(matches!(
-            view.cells[0].cell(),
-            ChatCell::DiscardedUserMessage(text) if text == "打断\n[Image #1 8×8 7B]"
-        ));
+        let ChatCell::DiscardedUserMessage(body) = view.cells[0].cell() else {
+            panic!("expected a discarded user message");
+        };
+        assert_eq!(body.text, "打断");
+        assert_eq!(body.media.len(), 1, "墓碑仍记得它带了一张图");
+        assert_eq!(body.label_text(), "打断\n[Image #1 8×8 7B]");
     }
 
     #[test]
@@ -1569,7 +1567,7 @@ mod tests {
             .cells
             .iter()
             .filter_map(|c| match c.cell() {
-                ChatCell::UserMessage(t) => Some(t.as_str()),
+                ChatCell::UserMessage(t) => Some(t.text.as_str()),
                 _ => None,
             })
             .collect();
@@ -1587,7 +1585,7 @@ mod tests {
         assert_eq!(view.cells.len(), 1);
         assert!(matches!(
             view.cells[0].cell(),
-            ChatCell::DiscardedUserMessage(text) if text == "lost"
+            ChatCell::DiscardedUserMessage(text) if text.text == "lost"
         ));
     }
 
@@ -1603,7 +1601,7 @@ mod tests {
         assert_eq!(view.pending[0].request_id, "req-2");
         assert!(matches!(
             view.cells[0].cell(),
-            ChatCell::DiscardedUserMessage(text) if text == "dropped"
+            ChatCell::DiscardedUserMessage(text) if text.text == "dropped"
         ));
     }
 

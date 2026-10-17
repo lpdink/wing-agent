@@ -11,6 +11,7 @@ mod client_request;
 mod connect_response;
 mod events;
 mod history;
+pub mod media;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -19,6 +20,7 @@ pub use client_request::ClientRequest;
 pub use connect_response::ConnectResponse;
 pub use events::*;
 pub use history::*;
+pub use media::{is_media_id, media_id_of, predicted_ref};
 /// 媒体引用（镜像 Python `wing.schema.MediaRef`）。
 ///
 /// 与 `SyncSession.usage` 同一条纪律：同一份线格式只定义一次——本体在

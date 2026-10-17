@@ -289,7 +289,7 @@ pub(super) fn app_with_tall_message() -> App {
         .map(|i| format!("line-{i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.chat.push(ChatCell::UserMessage(text));
+    app.chat.push(ChatCell::UserMessage(text.into()));
     app
 }
 

@@ -128,13 +128,12 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
 
         match msg.role.as_str() {
             "user" => {
-                // 显示文本 = 正文 + 图片标签行（`chat_view::media`，与 pending / promote
-                // 同一段文本：resume 前后同一条消息长得一样）。无 media 时恒等，纯图
-                // 消息（正文为空）因此也进历史——它是一条合法的消息。
-                let text =
-                    media::text_with_labels(&msg.content, &media::labels_of_media(&msg.media));
-                if !text.is_empty() {
-                    chat.push(ChatCell::UserMessage(text));
+                // 正文 + 图片引用一起进 cell（`chat_view::media`）：图片画成图块还是标签行
+                // 由渲染期的图片能力决定，与 pending / promote 同一条路径。纯图消息
+                // （正文为空、media 非空）因此也进历史——它是一条合法的消息。
+                let body = media::UserMessageBody::new(msg.content.clone(), msg.media.clone());
+                if !body.is_empty() {
+                    chat.push(ChatCell::UserMessage(body));
                 }
             }
             "assistant" => {
@@ -240,7 +239,7 @@ mod tests {
         // 无 media 的红线：cell 的文本**就是**正文（快路径恒等，逐字节不变）。
         assert!(matches!(
             chat.cells[0].cell(),
-            ChatCell::UserMessage(text) if text == "hello"
+            ChatCell::UserMessage(text) if text.text == "hello"
         ));
     }
 
@@ -262,8 +261,8 @@ mod tests {
         assert!(
             matches!(
                 chat.cells[0].cell(),
-                ChatCell::UserMessage(text)
-                    if text == "看这两张\n[Image #1 1024×768 384KB]\n[Image #2 8×8 7B]"
+                ChatCell::UserMessage(body)
+                    if body.text == "看这两张" && body.media.len() == 2
             ),
             "正文之后一行一张标签（消息内编号）"
         );
@@ -282,10 +281,12 @@ mod tests {
         })];
         replay_messages(&mut chat, &messages);
         assert_eq!(chat.len(), 1);
-        assert!(matches!(
-            chat.cells[0].cell(),
-            ChatCell::UserMessage(text) if text == "[Image #1 8×8 7B]"
-        ));
+        let ChatCell::UserMessage(body) = chat.cells[0].cell() else {
+            panic!("expected a user message");
+        };
+        assert!(body.text.is_empty());
+        assert_eq!(body.media.len(), 1, "引用随消息一起重放");
+        assert_eq!(body.label_text(), "[Image #1 8×8 7B]", "纯图消息的文本形态");
     }
 
     #[test]
@@ -301,7 +302,7 @@ mod tests {
         assert_eq!(chat.len(), 1);
         assert!(matches!(
             chat.cells[0].cell(),
-            ChatCell::UserMessage(text) if text == "hello"
+            ChatCell::UserMessage(text) if text.text == "hello"
         ));
     }
 

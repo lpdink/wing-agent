@@ -69,6 +69,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 # Error handling
 thiserror = "2"
 
+# 内容寻址：媒体对象 id = 字节的 sha256（网关 `POST /api/session/media` 的落盘名）。
+# 前端只在「上传之前预测引用」这一处用它 —— 用户气泡里的图因此不必等一次往返。
+sha2 = "0.10"
+
 # Agent Client Protocol —— `wing acp` 前端（stdio 上的 ACP agent 服务端）。
 # schema v1 stable；`stdio` feature 提供 `Stdio` 传输（本仓库只充当 agent 侧，
 # 不需要 `process`）。

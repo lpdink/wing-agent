@@ -101,13 +101,15 @@ fn app_with_scrollable_link() -> App {
     let mut app = test_app();
     app.clear_welcome();
     for i in 0..4 {
-        app.chat.push(ChatCell::UserMessage(format!("above {i}")));
+        app.chat
+            .push(ChatCell::UserMessage(format!("above {i}").into()));
     }
     app.chat.push(ChatCell::AssistantMessage(
         "[docs](https://example.com)".into(),
     ));
     for i in 0..2 {
-        app.chat.push(ChatCell::UserMessage(format!("below {i}")));
+        app.chat
+            .push(ChatCell::UserMessage(format!("below {i}").into()));
     }
     app
 }
@@ -1082,7 +1084,7 @@ fn test_wheel_scrolls_the_chat_during_a_composer_selection() {
         .map(|i| format!("line-{i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.chat.push(ChatCell::UserMessage(text));
+    app.chat.push(ChatCell::UserMessage(text.into()));
     let mut terminal = test_terminal(40, 12);
     draw(&mut app, &mut terminal);
     let (tx, ty, _rows) = composer_text(&app);

@@ -58,6 +58,16 @@ pub enum FetchPayload {
         target: crate::ui::input_area::ImageChipTarget,
         result: Result<CompressedImage, String>,
     },
+    /// 一张媒体图的字节回执（[`AppIntent::LoadMedia`]）。
+    ///
+    /// `Err` 是给日志的一句话（对象缺失 / 归档 / 网关不可达）：气泡里那一张保持 caption，
+    /// lane 记下失败、离开视口再回来时重试（见 `app::images::media`）。
+    MediaBytes {
+        /// 媒体对象 id（认领键；同一 id 的重复回执按后到者算）。
+        media_id: String,
+        result: Result<std::sync::Arc<Vec<u8>>, String>,
+    },
+
     /// 一条本地剪贴板读取回执（[`AppIntent::ReadClipboard`]）。
     ///
     /// 与 `ClipboardImage` 同一条契约：结果属于 composer 而不是会话，
@@ -170,6 +180,16 @@ pub enum AppIntent {
 
     /// Fetch available commands list via HTTP API.
     FetchCommands,
+
+    /// 抓网关上的媒体图字节（`GET /api/session/media`），给消息里的图用。
+    ///
+    /// 由 `Images` 的媒体 lane 在**画帧之后**发现（`media_requests`：屏幕上、没字节、
+    /// 没在飞的那些），所以它和其它 fetch intent 一样只是「后台去查」，事件循环一步不等。
+    /// `media_ids` 一批 ≤ `app::images::media::MAX_INFLIGHT`；每张的回执按 id 认领。
+    LoadMedia {
+        session_id: String,
+        media_ids: Vec<String>,
+    },
 
     /// Fetch available model list via HTTP API for popup candidates.
     FetchModels,

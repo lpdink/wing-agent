@@ -257,8 +257,15 @@ impl ComposedLines {
         let mut tags = vec![None; self.lines.len()];
         for (index, spans) in self.images.iter().enumerate() {
             if let Some(span) = spans.first() {
+                // Markdown 行只会携带文件锚点：媒体锚点来自用户消息气泡（`ui::chat_view::media`），
+                // 从不进入这条 compose 通道。真出现了就丢掉那一个锚点并留痕（静默丢图比丢一个
+                // 锚点更糟，直接 panic 又会把一条渲染 bug 升级成崩溃）。
+                let crate::render::picture::PictureSource::File(path) = &span.source else {
+                    tracing::warn!("markdown lines never carry media anchors; dropping one");
+                    continue;
+                };
                 tags[index] = Some(ImageAnchor {
-                    path: span.path.clone(),
+                    path: path.clone(),
                     alt: span.alt.clone(),
                     shape: super::images::ImageShape::new(span.px_w, span.px_h),
                     cols: span.cols,
@@ -786,7 +793,9 @@ mod tests {
             column: 2,
             cols: 78,
             rows: 3,
-            path: std::path::PathBuf::from("/ws/plot.png"),
+            source: crate::render::picture::PictureSource::File(std::path::PathBuf::from(
+                "/ws/plot.png",
+            )),
             alt: "plot".into(),
             px_w: 800,
             px_h: 600,
@@ -824,7 +833,10 @@ mod tests {
         assert_eq!(spans[0].column, 2);
         assert_eq!(spans[0].cols, 78);
         assert_eq!(spans[0].rows, 3);
-        assert_eq!(spans[0].path, std::path::PathBuf::from("/ws/plot.png"));
+        assert_eq!(
+            spans[0].source,
+            crate::render::picture::PictureSource::File(std::path::PathBuf::from("/ws/plot.png"))
+        );
         assert_eq!((spans[0].px_w, spans[0].px_h), (800, 600));
         assert_eq!(spans[0].rows_range(), 1..4);
         assert!(composed.images()[2].is_empty());
