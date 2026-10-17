@@ -592,9 +592,11 @@ pub const SHOW_SECRETS_HINT: &str = "wing tui --dump-config --show-secrets";
 ///
 /// 1. 文件头固定 1 行（产品名 + 文件位置）；**不写时间戳**——它会让每次保存都产生 diff 噪声；
 /// 2. 按 `section` 分组，每组一个 `# ── Section ──…` 分隔行；
-/// 3. 值存在 → 原样写出；值缺席且有非 null 默认 → 写成注释掉的默认值；默认是 `null`（或没有
-///    默认）→ **不写**（`null` 没有可展示的事实）。字段的 `doc` / `notes` / `example` / 生效域 /
-///    密文说明**一概不进文件**——它们的归宿是设置面板与 `wing config`（同一个 catalog）；
+/// 3. 值存在 → 原样写出；值缺席且有非 null 默认 → 写成注释掉的默认值；声明了 null 默认 /
+///    无默认且不可空 → **不写**（`null` 没有可展示的事实）；无默认但**可空** → 写一行
+///    `# key: null`（取消注释 = 显式 null = 与缺席等价；唯一的文件内发现口）。
+///    字段的 `doc` / `notes` / `example` / 生效域 / 密文说明**一概不进文件**——它们的归宿是
+///    设置面板与 `wing config`（同一个 catalog）；
 /// 4. [`DumpMode::Masked`] 下密文叶子写 `null` + 一行 `# 已掩码（•••••••• 1234）——真值：…`
 ///    （安全事实，不是文档；保存路径从不产生它）；
 /// 5. 引号能不加就不加（含特殊字符 / 看起来像别的类型 → 双引号 + 转义，非 ASCII 原样）；
@@ -606,7 +608,9 @@ pub const SHOW_SECRETS_HINT: &str = "wing tui --dump-config --show-secrets";
 /// `mode` 是参数不是环境，round-trip 与幂等照样可以被单测机械证明。
 ///
 /// **与后端的差异**（见 `09_interface_catalog/design.md` 的差异清单）：未知键丢弃（既有
-/// `--dump-config` 行为）、没有必填字段、`null` 与缺席等价，以及——
+/// `--dump-config` 行为）、没有必填字段、`null` 与缺席等价；**list 的缺席默认值**后端写
+/// `# key: []`（catalog 里 list 的 default 恒为 `None`、展示形态是空列表），这里没有同形
+/// 分支——Interface 根今天没有 list 字段，真加一个时要补上同一条规则；以及——
 /// **一个子树没有任何用户写下的值时，整块（含容器行）注释掉**：`colors:` 带空 body 是 `null`，
 /// 而 `AppConfig.colors` 不是 `Option`，裸容器行会让整份配置反序列化失败。
 pub fn dump_config_yaml(doc: &Value, mode: DumpMode) -> String {
@@ -747,8 +751,12 @@ fn emit_leaf(
         // 值缺席且必填 → 写出键 + 空值（后端规则 3；Interface 根今天没有这种字段）。
         let empty = empty_value(node);
         line(out, indent, &format!("{key}: {empty}"), false);
+    } else if !node.has_default && node.nullable {
+        // 可空但**没有声明默认值**：空值是它的一种状态，写一行裸注释保住可发现性
+        // （`api_key` 没有它就只能靠面板发现）。取消注释 = 显式 null = 与缺席等价。
+        line(out, indent, &format!("{key}: null"), true);
     }
-    // 其余（默认是 null / 没有默认）：没有可展示的事实，不写。
+    // 其余（声明了 null 默认 / 无默认且不可空）：没有可展示的事实，不写。
 }
 
 /// [`DumpMode::Masked`] 下密文叶的掩码注释；`None` = 这个值不需要掩（缺席 / `null` / 空串）。
@@ -1475,7 +1483,6 @@ mod tests {
     #[test]
     fn the_empty_document_dump_lists_exactly_the_leaves_with_a_default() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
-        // 分隔行（Gateway 组只有 `api_key`：没有默认值 → 整组连横幅一起省掉）。
         let sections: Vec<&str> = dumped
             .lines()
             .filter_map(|line| line.strip_prefix("# ── "))
@@ -1483,7 +1490,7 @@ mod tests {
             .collect();
         assert_eq!(
             sections,
-            ["Colors", "Layout", "Rendering", "Paste"],
+            ["Colors", "Layout", "Rendering", "Paste", "Gateway"],
             "{dumped}"
         );
 
@@ -1503,14 +1510,16 @@ mod tests {
         {
             let listed =
                 leaf.has_default && leaf.default.as_ref().is_some_and(|value| !value.is_null());
+            // 可空且没有默认值的叶子也出现（一行裸注释 `# key: null`）。
+            let appears = listed || (!leaf.has_default && leaf.nullable);
             let needle = format!("# {}:", leaf.key);
             assert_eq!(
                 dumped.contains(&needle),
-                listed,
-                "{}：缺席叶子的注释行必须严格跟着「有没有默认值」走\n{dumped}",
+                appears,
+                "{}：缺席叶子的注释行必须严格跟着「默认值 / 可空性」走\n{dumped}",
                 leaf.path
             );
-            showable += usize::from(listed);
+            showable += usize::from(appears);
         }
         assert!(showable >= 20, "可展示叶子只有 {showable} 个，遍历坏了");
     }
@@ -1521,11 +1530,11 @@ mod tests {
         let mut on = node("a", "a", SettingKind::Bool, "开关", 0, "First", "");
         on.default = Some(Value::from(true));
         on.has_default = true;
-        let mut nullable = node("b", "b", SettingKind::Str, "可空", 1, "Second", "");
-        nullable.nullable = true; // 没有默认值 → 没有可展示的事实
+        // 没有默认值、不可空 ⇒ 什么都不写，这个分组因此没有正文。
+        let silent = node("b", "b", SettingKind::Str, "无默认", 1, "Second", "");
 
         let mut root = node("config", "config", SettingKind::Object, "", 0, "", "");
-        root.children = vec![on, nullable];
+        root.children = vec![on, silent];
         let dumped = emit_document(&json!({}), &root, DumpMode::Raw);
         assert!(dumped.contains("# ── First"), "{dumped}");
         assert!(!dumped.contains("# ── Second"), "{dumped}");
@@ -1548,8 +1557,8 @@ mod tests {
     /// 一个 object 的子树里**没有一个可展示的值** ⇒ 写 `{}`（裸 `key:` 取消注释是 null）。
     #[test]
     fn an_object_with_no_showable_children_degrades_to_an_empty_map() {
-        let mut leaf = node("note", "box.note", SettingKind::Str, "一行说明", 0, "", "");
-        leaf.nullable = true; // 没有默认值：可选的空值键
+        // 没有默认值、不可空、非必填 ⇒ 这个叶子什么都不写。
+        let leaf = node("note", "box.note", SettingKind::Str, "一行说明", 0, "", "");
         let mut wrapper = node("box", "box", SettingKind::Object, "盒子", 0, "S", "段");
         wrapper.children = vec![leaf];
         let mut root = node("config", "config", SettingKind::Object, "", 0, "", "");
@@ -1603,8 +1612,9 @@ mod tests {
         {
             assert!(dumped.contains(section), "缺分组：{section}\n{dumped}");
         }
-        // Gateway 组只有 `api_key`，它没有默认值 → 整个分组连横幅一起省掉。
-        assert!(!dumped.contains("# ── Gateway"), "{dumped}");
+        // Gateway 组只有 `api_key`（可空、无默认值 → 一行裸注释保住可发现性）。
+        assert!(dumped.contains("# ── Gateway"), "{dumped}");
+        assert!(dumped.contains("# api_key: null"), "{dumped}");
         // 声明层的文案（`config/mod.rs` 的字段文档 + catalog 自己的 notes / example /
         // 生效域 / 密文说明）一个都不许出现。
         for prose in [
@@ -1632,8 +1642,8 @@ mod tests {
         assert!(dumped.contains("  # accent: \"#3ac6e0\""));
         assert!(dumped.contains("  # max_input_lines: 10"));
         assert!(dumped.contains("  # thinking: visible"));
-        // 没有默认值的可空叶子（`api_key`）没有可展示的事实 → 不写，分组横幅随之省掉。
-        assert!(!dumped.contains("api_key"));
+        // 没有默认值的可空叶子（`api_key`）写成 `# key: null`（取消注释 = 缺席）。
+        assert!(dumped.contains("# api_key: null"));
     }
 
     /// 引号策略：能不加就不加；需要时双引号 + 转义；非 ASCII 原样。全部 round-trip。
@@ -1772,7 +1782,7 @@ mod tests {
     }
 
     /// 取消注释注释掉的默认值 = 一份合法配置，且**生效值**就是默认值
-    /// （`api_key` 没有默认值 → 文件里连注释行都没有，解析回来是 `None`）。
+    /// （`api_key` 的裸注释行取消后是显式 null，与缺席等价 → `None`）。
     #[test]
     fn uncommenting_the_commented_defaults_yields_the_default_config() {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
@@ -1889,8 +1899,8 @@ mod tests {
             !again.contains("已掩码"),
             "没有值可掩时不该再出现掩码行：\n{again}"
         );
-        // 再 dump 时 `api_key` 既没有值也没有默认值 → 它整条不出现在文件里。
-        assert!(!again.contains("api_key"), "{again}");
+        // 再 dump 时 `api_key` 没有值 → 回到那行裸注释（没有掩码提示可加）。
+        assert!(again.lines().any(|l| l == "# api_key: null"), "{again}");
     }
 
     /// `Raw`（= 保存路径 / `--show-secrets`）写出真值，round-trip 逐字相同。
@@ -1941,10 +1951,10 @@ mod tests {
                 "{doc}"
             );
         }
-        // 空文档 dump 出来的仍是注释模板（`api_key` 没有默认值 → 它与 Gateway 横幅都不出现）。
+        // 空文档 dump 出来的仍是注释模板。
         let empty = dump_config_yaml(&json!({}), DumpMode::Masked);
-        assert!(empty.contains("# ── Paste"));
-        assert!(!empty.contains("api_key"));
+        assert!(empty.contains("# ── Gateway"));
+        assert!(empty.lines().any(|l| l == "# api_key: null"));
     }
 
     /// 短密钥（< 8）既不出现在输出里，也不给 hint（比例过高 = 泄露）。

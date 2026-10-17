@@ -151,6 +151,14 @@ def test_validate_groups_accepts_a_complete_partition() -> None:
     )
 
 
+def test_member_enumeration_order_does_not_have_to_match_declaration_order() -> None:
+    """`members` 的列举序只表达"这一组包含什么"（连续性看的是它们覆盖的字段）。"""
+    validate_groups(
+        [_group("one", ("b", "a")), _group("two", ("c",))],
+        _FIELDS,
+    )
+
+
 @pytest.mark.parametrize(
     ("groups", "fragment"),
     [

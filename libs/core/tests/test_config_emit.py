@@ -815,8 +815,10 @@ def test_default_template_covers_every_declared_field(
     的事实（不写），其余一律出现（在首项里展开）。
     """
     for node in _declared_nodes(catalog):
-        if node.kind is SettingKind.OBJECT or node.kind is SettingKind.LIST:
-            showable = True
+        if node.kind is SettingKind.OBJECT:
+            showable = True  # 子树（活的或整块注释的）总会写出容器键
+        elif node.kind is SettingKind.LIST:
+            showable = node.has_default or node.required  # 缺席形态是 `# key: []`
         else:
             showable = node.required or (node.has_default and node.default is not None)
         if not showable:

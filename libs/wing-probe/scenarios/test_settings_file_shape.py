@@ -49,6 +49,9 @@ def _walk(root: dict[str, Any]) -> Iterator[dict[str, Any]]:
 
 
 #: 文件里允许出现的注释形态（除此之外**任何**注释行都是散文泄漏）。
+#:
+#: 备注：`# [^\s:]+:(\s.*)?` 只覆盖单行标量与空容器。若将来某个 list 声明了**非空**默认值，
+#: emitter 会写出 `# - item` 形态——届时把那一形态加进来（并补一条断言）。
 _ALLOWED_COMMENTS = (
     re.compile(r"^# wing-agent configuration — "),
     re.compile(r"^# ── .+ ─+$"),

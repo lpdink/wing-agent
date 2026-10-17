@@ -120,9 +120,10 @@ def validate_groups(groups: Sequence[SettingGroup], fields: Sequence[str]) -> No
     2. 组不为空（没有成员的组是一个点不开的锚点）；
     3. 每个成员都是真实存在的顶层字段，且只属于一个组；
     4. 每个顶层字段都被某个组认领；
-    5. **同组成员在顶层字段声明序里连续**：文件按声明序写、分组只靠分隔行表达边界，
-       一个组被拆成两段就会出现两条同名分隔行（看起来像文件被切错了）。加字段时把它
-       放在本组**已有成员之后**即可——这条门禁会在忘记时立刻变红。
+    5. **同组成员覆盖的顶层字段在声明序里构成一段连续区间**（成员**列举序**无关——它只
+       表达"这一组包含什么"）：文件按声明序写、分组只靠分隔行表达边界，一个组被拆成两段
+       就会出现两条同名分隔行（看起来像文件被切错了）。加字段时把它放在本组已有字段的
+       邻接位置即可——这条门禁会在忘记时立刻变红。
     """
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
@@ -148,14 +149,16 @@ def validate_groups(groups: Sequence[SettingGroup], fields: Sequence[str]) -> No
     missing = known - set(seen_members)
     if missing:
         raise ValueError(f"顶层字段没有归入任何设置分组：{sorted(missing)}")
-    # 5. 同组成员在声明序里必须连续（见 docstring 第 5 条）。
+    # 5. 同组成员覆盖的字段在声明序里必须构成连续区间（列举序无关，见 docstring）。
     order = list(fields)
     for group in groups:
-        positions = [order.index(member) for member in group.members if member in known]
-        if positions != list(range(positions[0], positions[0] + len(positions))):
+        spans = sorted(
+            order.index(member) for member in group.members if member in known
+        )
+        if spans != list(range(spans[0], spans[0] + len(spans))):
             raise ValueError(
                 f"设置分组 {group.id} 的成员在声明序里不连续："
-                f"{[(order[i], i) for i in positions]}"
+                f"{[order[i] for i in spans]}（声明序：{order}）"
             )
 
 
