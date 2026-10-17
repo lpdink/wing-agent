@@ -45,10 +45,12 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
 ## Rust 覆盖率（cargo-llvm-cov）
 
 - 工具链：`cargo install cargo-llvm-cov --locked` + `rustup component add llvm-tools-preview`。
-  缺工具时 `make test-rust` 硬失败并打印安装指引，不静默退化 —— 否则本地「过了」而 CI 才拦。
+  缺工具时 `make test-rust-cov` 硬失败并打印安装指引，不静默退化 —— 否则「跑过了」而门禁没有数据。
 - 插桩产物在 `target/llvm-cov-target/`（`RUSTFLAGS` 带 `-C instrument-coverage`），与普通
-  `cargo test` 的产物**互不失效**：交替跑两者会各触发一次整树重编译，日常统一走 `make test-rust`。
-- doctests 由 `make test-rust` 里单独的 `cargo test --doc` 兜住：cargo-llvm-cov 的 `--doctests`
+  `cargo test` 的产物**互不通用**：交替跑两者会各触发一次整树重编译。因此本地日常测试走
+  `make test-rust`（普通构建、不留插桩产物），**插桩只在 CI 与本地复现覆盖率问题时跑**
+  （`make test-rust-cov`）。
+- doctests 由两个 target 里各自的 `cargo test --workspace --doc` 兜住：cargo-llvm-cov 的 `--doctests`
   依赖 nightly 的 `-Z unstable-options`，stable 不可用。
 - 集成测试 spawn 的子进程覆盖率**会被收集**（`CARGO_BIN_EXE_wing` 指向插桩二进制，
   `LLVM_PROFILE_FILE` 随环境继承）——e2e 的贡献没有丢，报告里那些按 PID 命名的 profraw 就是证据。
@@ -73,9 +75,10 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
 
 ```bash
 make test-python        # Python 测试（总量参考）· make test-python-html → target/coverage-python/
-make test-rust          # Rust 测试（插桩构建）· make test-rust-html → target/coverage-rust/
+make test-rust          # Rust 测试（普通构建，不留插桩产物）
+make test-rust-cov      # Rust 测试（插桩构建）· make test-rust-html → target/coverage-rust/
 make patch-cov-python   # 增量门禁（基线 PATCH_BASE=origin/develop，可覆盖）
-make patch-cov-rust     # 同上（Rust；需先跑过 make test-rust）
+make patch-cov-rust     # 同上（Rust；需先跑过 make test-rust-cov）
 uv run python scripts/ci/patch_coverage.py --selftest   # 门禁脚本自检
 
 # 离线演练 PR 评论（不联网、不贴出去）

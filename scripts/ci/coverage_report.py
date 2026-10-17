@@ -357,7 +357,7 @@ def render(
         out += ["", "---", "", "### ⚠️ 注意", "", *notes]
 
     footer = (
-        "本地复现：`make test-python` / `make test-rust` 后跑 "
+        "本地复现：`make test-python` / `make test-rust-cov` 后跑 "
         "`make patch-cov-python` / `make patch-cov-rust`"
         "（基线 `PATCH_BASE`、阈值 `PATCH_COV_MIN`，见 docs/dev/coverage.md）"
     )

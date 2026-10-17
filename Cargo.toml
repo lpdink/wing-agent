@@ -87,13 +87,10 @@ clap = { version = "4", features = ["derive"] }
 url = "2"
 
 # ── 开发构建磁盘优化 ───────────────────────────────────────────
-# 多 worktree + sccache 的工作流下（实测，2026-10）：
-# - dev 中间产物（.o / .rlib）里 DWARF 占 80%+，增量目录单仓可达 4G；
-# - 增量编译会使本地 crate 的编译无法进 sccache（non-cacheable:
-#   incremental），跨 worktree 的缓存复用被掐断。
-# 因此关闭 debuginfo 与增量编译；需要同树小步快速迭代时，
-# 单次 CARGO_INCREMENTAL=1 即可临时覆盖。CI 不受影响
-# （GitHub Actions 默认 CARGO_INCREMENTAL=0）。
+# dev 中间产物（.o / .rlib）里 DWARF 占 80%+，关掉它显著缩小每个 worktree 的
+# target（实测，2026-10）。增量编译保持 cargo 默认开启 —— 本地编辑-重建快一个量级；
+# 新 worktree 的磁盘成本由 `scripts/dev/new-worktree.sh` 克隆 target/debug 兜住。
+# CI 不跑增量：干净 checkout 没有可复用的增量状态，cargo 在 CI 环境下也会自行
+# 关掉，ci.yml 另显式设 CARGO_INCREMENTAL=0 兜底。
 [profile.dev]
 debug = false
-incremental = false
