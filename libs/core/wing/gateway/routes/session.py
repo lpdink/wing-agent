@@ -668,6 +668,17 @@ async def session_cache(
     端点一致（由 app 级中间件统一处理）。
     """
     server = _get_server(request)
+    # 读 + 规整 + 投影（MB 级 JSON 解析）留在循环线程上会让所有会话的流式帧排队——
+    # 与写路径（`observe_cache_call`）同理，整笔工作进线程池。
+    return await asyncio.to_thread(
+        _cache_report_response, server, session_id, limit=limit
+    )
+
+
+def _cache_report_response(
+    server: GatewayServer, session_id: str, *, limit: int
+) -> SessionCacheResponse:
+    """端点的工作体（线程池执行）：读账本 → 投影 → 强类型响应。"""
     return SessionCacheResponse(**server.runtime.cache_report(session_id, limit=limit))
 
 

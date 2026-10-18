@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 from datetime import datetime
@@ -59,6 +60,15 @@ CACHE_TTL_HOURS = 72
 MIN_TOL_TOKENS = 256
 TOL_RATIO = 0.02
 """块粒度容差 `tol = max(256, ceil(0.02 * ref.prompt))`（contract §4）。"""
+
+MAX_LEDGER_BYTES = 512 * 1024
+"""账本落盘的字节预算（`json.dumps(..., ensure_ascii=False)` 的 UTF-8 长度，与
+`MessageLog.write_aux` 同一序列化口径）。
+
+段落表按调用冗余存储：常规 40 轮会话约 160 KB，200 条 × 上百段的极端形态能到数 MB
+（contract §3 的「~60KB/会话」按「多条调用共享同一份段落表」估，见 docs/dev）。超出预算
+就从**最旧调用**开始淘汰（连带 GC 失去引用的指纹），永远保留最近一条调用。
+"""
 
 
 # ── 账本形状 ──────────────────────────────────────────────────────────────
@@ -107,6 +117,11 @@ def normalize_ledger(raw: Any, session_id: str) -> dict[str, Any]:
 _CALL_TEXT_FIELDS = ("ts", "fp", "purpose", "model", "provider", "verdict")
 
 
+def _is_int(value: Any) -> bool:
+    """真整数才算计数：`bool` 是 `int` 的子类，手改账本写成 `true` 不能当 1 收下。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _normalize_call(entry: Any) -> dict[str, Any] | None:
     """单条调用记录的类型归一（坏记录返回 None = 丢弃）。"""
     if not isinstance(entry, dict):
@@ -119,8 +134,8 @@ def _normalize_call(entry: Any) -> dict[str, Any] | None:
         call[field] = value
     for field in ("prompt", "cached", "expected"):
         value = entry.get(field)
-        call[field] = value if isinstance(value, int) else None
-    if not isinstance(call["prompt"], int) or not isinstance(call["cached"], int):
+        call[field] = value if _is_int(value) else None
+    if call["prompt"] is None or call["cached"] is None:
         return None
     ref_fp = entry.get("ref_fp")
     call["ref_fp"] = ref_fp if isinstance(ref_fp, str) else None
@@ -137,10 +152,10 @@ def _normalize_fork(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "kind": kind,
-        "index": index if isinstance(index, int) else 0,
+        "index": index if _is_int(index) else 0,
         "label": label,
-        "segments_affected": affected if isinstance(affected, int) else 0,
-        "tokens_lost": lost if isinstance(lost, int) else None,
+        "segments_affected": affected if _is_int(affected) else 0,
+        "tokens_lost": lost if _is_int(lost) else None,
     }
 
 
@@ -362,13 +377,39 @@ def record_call(
     fingerprints = {key: value for key, value in fingerprints.items() if key in alive}
 
     return (
-        {**data, "calls": trimmed, "fingerprints": fingerprints},
+        _fit_budget({**data, "calls": trimmed, "fingerprints": fingerprints}),
         CacheObservation(
             expected=expected,
             verdict=verdict,
             diverged=fork.label if fork is not None else "",
         ),
     )
+
+
+def _ledger_bytes(data: dict[str, Any]) -> int:
+    return len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+
+def _fit_budget(data: dict[str, Any]) -> dict[str, Any]:
+    """把账本压进 `MAX_LEDGER_BYTES`：最旧调用先淘汰，至少留最近一条。
+
+    批量淘汰（一次丢最旧的 1/8）而不是逐条：大账本上逐条全量序列化是 O(n²)。裁剪后同步
+    回收失去引用的指纹——孤儿段落表比 calls 本身更占地方。
+    """
+    calls = list(data.get("calls") or [])
+    fingerprints = dict(data.get("fingerprints") or {})
+    if _ledger_bytes(data) <= MAX_LEDGER_BYTES:
+        return data
+    while len(calls) > 1:
+        calls = calls[max(1, len(calls) // 8) :]
+        alive = {call.get("fp") for call in calls}
+        fingerprints = {
+            key: value for key, value in fingerprints.items() if key in alive
+        }
+        fitted = {**data, "calls": calls, "fingerprints": fingerprints}
+        if _ledger_bytes(fitted) <= MAX_LEDGER_BYTES:
+            return fitted
+    return {**data, "calls": calls, "fingerprints": fingerprints}
 
 
 # ── 端点投影（contract §6）────────────────────────────────────────────────
@@ -404,13 +445,15 @@ def build_report(
         if fork is None:
             continue
         new_segments = _segments_of(fingerprints, call.get("fp"))
-        # 分叉的「另一侧」：有参照就是参照（前缀延续的正常形态）；没有参照说明
-        # 前缀被外部改动打断（改 rules / 换工具），此时对照侧就是记录时分叉的
-        # 对象——最近一条调用。缺了它 `--why` 在**主用例**里拿不到 sha_before。
-        baseline = _segments_of(fingerprints, call.get("ref_fp")) or (
-            _segments_of(fingerprints, recent[position + 1].get("fp"))
-            if position + 1 < len(recent)
-            else []
+        sha_after = _segment_sha(new_segments, fork.index)
+        # 分叉的「另一侧」= 「改前」那一版：记录时分叉相对的那条调用（见 `_baseline`）。
+        baseline = _baseline(
+            recent,
+            position,
+            call,
+            fingerprints,
+            index=fork.index,
+            sha_after=sha_after,
         )
         source = _segment_source(new_segments, fork.index) or _segment_source(
             baseline, fork.index
@@ -435,7 +478,7 @@ def build_report(
                         recent, position, call.get("ref_fp"), fallback=position + 1
                     ),
                     "sha_before": _segment_sha(baseline, fork.index),
-                    "sha_after": _segment_sha(new_segments, fork.index),
+                    "sha_after": sha_after,
                 },
             }
         )
@@ -464,6 +507,45 @@ def _segment_sha(segments: Sequence[dict[str, Any]], index: int) -> str | None:
     return sha if isinstance(sha, str) else None
 
 
+def _baseline(
+    recent: Sequence[dict[str, Any]],
+    position: int,
+    call: dict[str, Any],
+    fingerprints: dict[str, Any],
+    *,
+    index: int,
+    sha_after: str | None,
+) -> list[dict[str, Any]]:
+    """分叉的对照侧段列表——「改前」那一版是谁。
+
+    `_find_ref` 只接受本次段列表的**前缀**（或完全相同）作参照，因此参照在自身长度范围内
+    与本次逐段同值：`index < len(ref)` 时它的 sha 恒等于 `sha_after`（拿它当 `sha_before`
+    只会重复 `sha_after`，解释不了「这里变了」），`index >= len(ref)` 时它在该位点上没有段。
+    能解释这一行的是记录时分叉真正相对的那条调用（`recent[position + 1]`）；参照只在邻座
+    已经滚出账本、或邻座在该位点没有段时兜底。
+    """
+    neighbour = position + 1 if position + 1 < len(recent) else None
+    latest = (
+        _segments_of(fingerprints, recent[neighbour].get("fp"))
+        if neighbour is not None
+        else []
+    )
+    reference = _segments_of(fingerprints, call.get("ref_fp"))
+    if _explains(latest, index, sha_after):
+        return latest
+    if _explains(reference, index, sha_after):
+        return reference
+    return latest or reference
+
+
+def _explains(
+    segments: Sequence[dict[str, Any]], index: int, sha_after: str | None
+) -> bool:
+    """这一侧在该位点上有段、且与本次不同（能当「改前」的证据）。"""
+    sha = _segment_sha(segments, index)
+    return sha is not None and sha != sha_after
+
+
 def _ref_ts(
     recent: Sequence[dict[str, Any]],
     position: int,
@@ -471,15 +553,17 @@ def _ref_ts(
     *,
     fallback: int,
 ) -> str | None:
-    """对照侧调用的时刻：同指纹取 `position` 之后最近的一条（记录时的那个参照）。
+    """对照侧调用的时刻。
 
-    没有参照（前缀被外部改动打断）时取 `fallback`（紧跟本次的更新一条调用）——
-    那正是分叉对照的对象，比 null 更能回答「什么时候变的」。
+    `ref_fp` 记在案时只认它自己的那条调用（同指纹）；它已经滚出环形账本 → `None`——
+    拿邻居的 ts 冒充参照会把「什么时候变的」指向一条无关的调用。没有参照（前缀被外部改动
+    打断）时对照侧就是邻居，那正是分叉相对的对象，ts 是准确值。
     """
     if isinstance(ref_fp, str):
         for index in range(position + 1, len(recent)):
             if recent[index].get("fp") == ref_fp:
                 return _ts_of(recent[index])
+        return None
     if fallback < len(recent):
         return _ts_of(recent[fallback])
     return None

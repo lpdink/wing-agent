@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ from wing.context import Compactor, ContextManager
 from wing.context.cache_ledger import (
     CACHE_LEDGER_KEY,
     MAX_CALLS,
+    MAX_LEDGER_BYTES,
     CacheLedger,
     build_report,
     empty_ledger,
@@ -437,7 +439,8 @@ class TestAttribution:
         assert fork["blame"] == "external"
         assert fork["avoidable"] is True
         assert fork["verdict"] == "prefix_broken"
-        assert fork["segments_affected"] == len(first) - 1  # 参照侧 fork 点之后的段数
+        # 最近一条调用（分叉的对照侧）fork 点之后的段数：len(C) - k
+        assert fork["segments_affected"] == len(first) - 1
         # 前缀彻底断裂 ⇒ 没有参照 ⇒ tokens_lost 为 null（contract §4，展示为 `—`）
         assert fork["tokens_lost"] is None
         # 证据：能直接点名文件与两侧 sha
@@ -482,7 +485,7 @@ class TestAttribution:
         assert fork["kind"] == "insert"
         assert fork["label"] == new_label
         assert fork["index"] == 2  # system:base / rules:a-first.md 之后
-        # 参照侧尾部段数 = 总段数 - 公共前缀长度
+        # 对照侧尾部段数 = 总段数 - 公共前缀长度
         assert fork["segments_affected"] == len(first) - 2
 
     def test_tool_declaration_change_blames_tools(self, tmp_path: Path):
@@ -667,6 +670,125 @@ class TestAttribution:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 8b. fork detail 的「对照侧」：说「这里变了」的那一行必须对得上证据（cloud S2/N4）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestForkDetailSides:
+    def test_reverted_rules_compare_against_the_intermediate_state(
+        self, tmp_path: Path
+    ):
+        """改 rules → 改回：`sha_before` 必须是**中间那一版**。
+
+        参照（第 2 轮）是本次的前缀，因此它在 rules 位上与本次同值——拿它当 `sha_before`
+        只能得到「两个相同的 sha」，与「modify、有变化」自相矛盾（cloud S2 的复现）。
+        """
+        rule_path = write_rules(tmp_path / "rules", "one.md", "V1 RULE")
+        rule_label = f"rules:{rule_path}"
+        cm = make_cm(tmp_path, rules="rules/*.md")
+        ledger = CacheLedger(FileMessageLog(tmp_path / "s-revert"), "s-revert")
+
+        def segments(*ask_uuids: str) -> list[CachePart]:
+            return (
+                cm.cache_system_parts()
+                + [CachePart.text("system:wire", "wire")]
+                + [CachePart.text(f"history:{uuid}:user", uuid) for uuid in ask_uuids]
+            )
+
+        first = segments("u1")
+        ledger.record(
+            first, purpose="main", model="m", provider="p", prompt=1000, cached=0
+        )
+        second = segments("u1", "u2")
+        ledger.record(
+            second, purpose="main", model="m", provider="p", prompt=1500, cached=1000
+        )
+        write_rules(tmp_path / "rules", "one.md", "V2 RULE")
+        cm.reload_skills_and_rules()
+        changed = segments("u1", "u2", "u3")
+        ledger.record(
+            changed, purpose="main", model="m", provider="p", prompt=2000, cached=1500
+        )
+        write_rules(tmp_path / "rules", "one.md", "V1 RULE")
+        cm.reload_skills_and_rules()
+        reverted = segments("u1", "u2", "u3", "u4")
+        ledger.record(
+            reverted, purpose="main", model="m", provider="p", prompt=2500, cached=2000
+        )
+
+        fork = ledger.report()["forks"][0]
+        assert fork["label"] == rule_label
+        assert fork["kind"] == "modify"
+        sha_v1 = next(part.sha for part in first if part.label == rule_label)
+        sha_v2 = next(part.sha for part in changed if part.label == rule_label)
+        assert next(part.sha for part in reverted if part.label == rule_label) == sha_v1
+        assert fork["detail"]["sha_before"] == sha_v2, (
+            "对照侧必须是中间那一版："
+            f"sha_before={fork['detail']['sha_before']} sha_v2={sha_v2}"
+        )
+        assert fork["detail"]["sha_after"] == sha_v1
+        assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
+        # `ref` 只报记在案的那条参照（第 2 轮，满前缀延续点）的时刻——不拿邻居冒充。
+        calls = ledger.load()["calls"]
+        assert calls[-1]["ref_fp"] == calls[1]["fp"]
+        assert fork["detail"]["ref_ts"] == calls[1]["ts"]
+
+    def test_ref_ts_is_null_when_the_recorded_reference_left_the_ledger(self):
+        """记在案的参照已滚出账本 → `ref_ts` 缺省，不拿邻居的 ts 冒充（cloud N4）。"""
+        base = {"label": "system:base", "sha": "aaaa0000aaaa0000", "chars": 10}
+        old_rule = {"label": "rules:/r.md", "sha": "cc", "chars": 2}
+        new_rule = {"label": "rules:/r.md", "sha": "bb", "chars": 2}
+        data = {
+            "version": 1,
+            "session_id": "gone",
+            "fingerprints": {
+                "new": {"segments": [base, new_rule]},
+                "old": {"segments": [base, old_rule]},
+            },
+            "calls": [
+                {
+                    "ts": "2026-10-18T10:00:00.000",
+                    "fp": "old",
+                    "purpose": "main",
+                    "model": "m",
+                    "provider": "p",
+                    "prompt": 900,
+                    "cached": 0,
+                    "expected": None,
+                    "ref_fp": None,
+                    "verdict": "cold",
+                    "fork": None,
+                },
+                {
+                    "ts": "2026-10-18T10:05:00.000",
+                    "fp": "new",
+                    "purpose": "main",
+                    "model": "m",
+                    "provider": "p",
+                    "prompt": 1000,
+                    "cached": 0,
+                    "expected": None,
+                    "ref_fp": "gone",
+                    "verdict": "prefix_broken",
+                    "fork": {
+                        "kind": "modify",
+                        "index": 1,
+                        "label": "rules:/r.md",
+                        "segments_affected": 1,
+                        "tokens_lost": None,
+                    },
+                },
+            ],
+        }
+        fork = build_report(
+            normalize_ledger(data, "gone"), session_id="gone", limit=20
+        )["forks"][0]
+        assert fork["detail"]["ref_ts"] is None
+        assert fork["detail"]["sha_before"] == "cc"
+        assert fork["detail"]["sha_after"] == "bb"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 9. 环形上界 + fingerprint GC
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -695,6 +817,115 @@ class TestRingBound:
         # 保留的是最近 200 条（最旧的 50 条被挤出）
         assert data["calls"][0]["prompt"] == 100 + 50
         assert data["calls"][-1]["prompt"] == 100 + 249
+
+    def test_over_budget_ledger_is_trimmed_and_keeps_the_newest_call(
+        self, tmp_path: Path
+    ):
+        """字节预算（cloud S3）：超了按「最旧调用先淘汰」裁到预算内，最近一条必留。"""
+        ledger = CacheLedger(FileSessionStore(tmp_path).open_log("budget"), "budget")
+        path = ledger_path(tmp_path, "budget")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fat_segments = [
+            {
+                "label": f"history:seg-{index:03d}:user",
+                "sha": f"{index:016x}",
+                "chars": 900,
+            }
+            for index in range(200)
+        ]
+        seeded = empty_ledger("budget")
+        for index in range(MAX_CALLS):
+            fp = f"fp{index:04d}"
+            seeded["fingerprints"][fp] = {"segments": fat_segments}
+            seeded["calls"].append(
+                {
+                    "ts": f"2026-10-18T10:{index // 60:02d}:{index % 60:02d}.000",
+                    "fp": fp,
+                    "purpose": "main",
+                    "model": "m",
+                    "provider": "p",
+                    "prompt": 1000 + index,
+                    "cached": 0,
+                    "expected": None,
+                    "ref_fp": None,
+                    "verdict": "cold",
+                    "fork": None,
+                }
+            )
+        path.write_text(json.dumps(seeded, ensure_ascii=False), encoding="utf-8")
+        assert path.stat().st_size > MAX_LEDGER_BYTES  # 前置：确实超预算
+
+        newest = parts("system:base")
+        observation = ledger.record(
+            newest, purpose="main", model="m", provider="p", prompt=42, cached=0
+        )
+        assert observation is not None
+
+        raw = path.read_text(encoding="utf-8")
+        assert len(raw.encode("utf-8")) <= MAX_LEDGER_BYTES
+        stored = json.loads(raw)
+        # 最近一条（刚记的这条）仍在
+        assert stored["calls"][-1]["prompt"] == 42
+        assert stored["calls"][-1]["fp"] == fingerprint(newest)
+        # 旧的被淘汰，且没有留下孤儿段落表
+        assert len(stored["calls"]) < MAX_CALLS
+        assert set(stored["fingerprints"]) == {call["fp"] for call in stored["calls"]}
+
+    def test_bool_is_not_accepted_as_a_count(self):
+        """`bool` 是 `int` 的子类：手改账本写成 `true` 不能当 1 收下（cloud N2）。"""
+        row = {
+            "ts": "2026-10-18T15:41:02.123",
+            "fp": "f",
+            "purpose": "main",
+            "model": "m",
+            "provider": "p",
+            "prompt": 100,
+            "cached": 0,
+            "expected": None,
+            "ref_fp": None,
+            "verdict": "cold",
+            "fork": None,
+        }
+        calls = normalize_ledger(
+            {
+                "version": 1,
+                "session_id": "b",
+                "fingerprints": {},
+                "calls": [
+                    {**row, "prompt": True},  # prompt 是 bool → 整行丢弃
+                    {**row, "cached": False},  # cached 同理
+                    {
+                        **row,
+                        "expected": True,
+                        "fork": {
+                            "kind": "modify",
+                            "label": "rules:/r.md",
+                            "index": True,
+                            "segments_affected": True,
+                            "tokens_lost": True,
+                        },
+                    },
+                ],
+            },
+            "b",
+        )["calls"]
+        assert len(calls) == 1
+        assert calls[0]["expected"] is None
+        assert calls[0]["fork"] == {
+            "kind": "modify",
+            "index": 0,
+            "label": "rules:/r.md",
+            "segments_affected": 0,
+            "tokens_lost": None,
+        }
+        # 合法值照旧
+        assert (
+            normalize_ledger(
+                {"version": 1, "session_id": "b", "fingerprints": {}, "calls": [row]},
+                "b",
+            )["calls"][0]["prompt"]
+            == 100
+        )
 
     def test_corrupted_ledger_is_treated_as_empty(self, tmp_path: Path):
         store = FileSessionStore(tmp_path)
@@ -1051,6 +1282,35 @@ class TestCacheEndpoint:
         assert body["summary"]["actual_rate"] is None
         # 非法 id 同样不炸（闸门 → 空报告，不 500）
         assert client.get("/api/session/cache?session_id=../etc").status_code == 200
+
+    def test_read_path_does_not_run_on_the_event_loop(self, real_client):
+        """读 + 规整 + 投影不在循环线程上：否则一次查询会挡住所有会话的流式帧（S1）。"""
+        client, _ = real_client
+        session_id = "cache-off-loop"
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+
+        server = client.app.state.server
+        real = server.runtime.cache_report
+        on_loop: list[bool] = []
+
+        def spy(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                on_loop.append(False)
+            else:
+                on_loop.append(True)
+            return real(*args, **kwargs)
+
+        with patch.object(server.runtime, "cache_report", new=spy):
+            response = client.get(f"/api/session/cache?session_id={session_id}")
+        assert response.status_code == 200
+        assert on_loop == [False], "cache_report 在事件循环线程上跑了"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

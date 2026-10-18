@@ -472,9 +472,9 @@ class CacheSummary(BaseModel):
 
 
 class CacheForkDetail(BaseModel):
-    """分叉点的证据：来源文件事实 + 参照时刻 + 两侧 sha。
+    """分叉点的证据：来源文件事实 + 对照侧时刻 + 两侧 sha。
 
-    文件事实取自分叉处段落的 `src`（新侧优先，缺则参照侧）；非文件段落
+    文件事实取自分叉处段落的 `src`（新侧优先，缺则对照侧）；非文件段落
     （`tools:` / `history:` / `system:*`）的 path/mtime/size 为 null。
     """
 
@@ -486,9 +486,11 @@ class CacheForkDetail(BaseModel):
     )
     size: int | None = Field(default=None, description="来源文件字节数")
     ref_ts: str | None = Field(
-        default=None, description="参照调用的时刻（无参照 → null）"
+        default=None, description="对照侧调用的时刻（不可定位 → null）"
     )
-    sha_before: str | None = Field(default=None, description="参照侧该段落的 sha")
+    sha_before: str | None = Field(
+        default=None, description="对照侧（记录时分叉相对的那条调用）该段落的 sha"
+    )
     sha_after: str | None = Field(default=None, description="本次该段落的 sha")
 
 
@@ -510,7 +512,9 @@ class CacheForkRow(BaseModel):
     tokens_lost: int | None = Field(
         default=None, description="≈ 丢失的 prompt token（估算；无参照 → null）"
     )
-    segments_affected: int = Field(description="参照侧 fork 点之后的段数")
+    segments_affected: int = Field(
+        description="最近一条调用（分叉的对照侧）fork 点之后的段数（contract §4 的 len(C) - k）"
+    )
     verdict: str = Field(description="该次调用的缓存判定（contract §4）")
     detail: CacheForkDetail = Field(
         default_factory=CacheForkDetail, description="分叉点证据"
