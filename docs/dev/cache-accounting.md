@@ -39,7 +39,8 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 - `sha` = 该段**确定性规范形**（`json.dumps(sort_keys=True, ensure_ascii=False,
   separators=(",", ":"))`）的 sha256 前 16 位。文本段传字符串，协议段传序列化后的 dict
   ——同一套规则，不会出现「文本 / dict 两套口径」。
-- `chars` = 该段字符数，**只用于估算代价**（`tokens_lost`），不参与判定。
+- `chars` = 该段的长度，**只用于估算代价**（`tokens_lost`），不参与判定：文本段是文本的
+  字符数，协议段（tools / history / `system:wire`）是协议序列化后**规范形的长度**。
 - `src = {path, mtime, size}` 只在 `rules:*` / `skills:*` 上出现，**在加载时**采集一次
   （`load_rule_files` / `collect_skill_sources`）——每次 LLM 调用的热路径不扫目录、不 stat。
 - 两侧分工：CM 知道文本与来源（system 侧），provider 知道真实字节（wire 侧）；分组经
@@ -73,8 +74,8 @@ provider_debt_rate = Σ max(0, expected - cached)
                      （仅 verdict ∈ {provider_underdelivered, block_granularity}） / Σ prompt
 ```
 
-- 分母是**整本账本**的 `Σprompt`（不是最近 N 条）；`calls` 默认只回 20 条，`--limit 200`
-  才是全量——想手工对账就取全量。
+- 分母是**整本账本**的 `Σprompt`（不是最近 N 条）；端点的 `calls` 默认只回 20 条
+  （`limit=200` 才是全量），`wing cache --limit 200` 同理——想手工对账就取全量。
 - 分母为 0（空账本）→ 三个 rate 均为 `null`。首调用的 `prompt > 0` 而 `Σexpected = 0`，
   所以 `theory_rate` 是 **`0.0` 而不是 `null`**：有分母、没有理论水位，就是 0%。
 - `expected` = 参照调用的 `prompt`（仅当前缀延续且未过期）；无参照（cold / 前缀破碎 /
@@ -116,14 +117,20 @@ provider_debt_rate = Σ max(0, expected - cached)
 | `system:base` / `system:append` / `system:wire` | `composition` | `false` | 什么都做不了（模板 / 协议层，不是用户输入） |
 | `history:` 且参照与本调用之间有 `compact` | `compact` | `false` | 什么都不用做（压缩的必然代价） |
 | 其它 `history:` | `composition` | `false` | 什么都做不了（链拓扑变化：rewind / fork / steer） |
-| verdict `provider_underdelivered` | `provider` | `null` | 报 bug（只出现在欠兑现的调用上） |
-| verdict `cold` / `cold_expired` | `cold` | `null` | 什么都不用做 |
+| verdict `provider_underdelivered` | `provider` | `null` | 报 bug（当前口径下不可达，见下注） |
+| verdict `cold` / `cold_expired` | `cold` | `null` | 什么都不用做（当前口径下不可达，见下注） |
 
 `blame` 是读取侧现算的派生值（不落盘），唯一依据是 `fork.label` 与 `verdict`。
 
-> `forks` 只收 `fork != null` 的调用：`provider_underdelivered` / `cold` 的前提是「前缀
-> 其实延续了」，它们不产生分叉行，只进 `summary`（`provider_debt_rate`）。人类视图
-> （`wing cache`）因此只列真正可行动的 `external` / `tools` / `compact` 行。
+> **后两行为什么不可达**：`forks` 只收 `fork != null` 的调用，而 `fork` 只在「前缀没能
+> 延续」时产生、`prefix_broken` / `cold_expired` 又优先于其余 verdict——所以
+> `provider_underdelivered` 的调用永远带不上 fork，`cold` 更是首调用的判定。这两行留在
+> 表里是因为契约给了它们位置（读取侧的 blame 派生规则）；实际输出里你只会看到前五行。
+> 换句话说：欠账只进 `summary.provider_debt_rate`，分叉行只谈「前缀碎在哪一段」。
+
+> **人类视图（`wing cache`）的过滤**：按 **verdict** 兜底——`hit` / `cold` / `cold_expired` /
+> `block_granularity` / 未计算一律不出现。`composition` 行**会**出现在表里（它确实是分叉），
+> 只是 `AVOIDABLE=no` 表示你无法行动——看到它不必当 CLI 的 bug。
 
 ### 分叉的形状
 
@@ -145,7 +152,7 @@ provider_debt_rate = Σ max(0, expected - cached)
 | 会话还没调用过 / 无账本 / 会话不存在 | 端点 200 + 空 `forks` / `calls` + `summary` 计数 0、三 rate `null` | 显示「还没数据」（`—`），**不要**显示 0%，也不要当错误处理 |
 | 账本损坏 / 读失败 | 当空账本 + WARNING（`grep 'cache ledger' <wing_*.log>`） | 不用管；下一次调用会重建 |
 | 记账写盘失败 | 只 WARNING，本轮 LLM 调用照常返回（无 `cache_*` 字段） | 不用管；磁盘 / 权限问题在日志里 |
-| `memory` 后端（`sessions.backend: memory`） | 账本仅在进程内，重启即丢 | 跨重启比对时不要期待它 |
+| `memory` 后端（建会话时 `backend: memory`，不是配置字段） | 账本仅在进程内，重启即丢 | 跨重启比对时不要期待它 |
 | 端点 404 | 运行中的网关**没有这个路由**（旧二进制 / 另一个 gateway 可执行文件） | 换当前 checkout 的网关；`wing cache` 的 404 只有这一个含义 |
 
 ## 4. 排错手册
@@ -160,7 +167,7 @@ provider_debt_rate = Σ max(0, expected - cached)
 | 理论值远高于实际，且 `provider_debt_rate` 大 | 报 bug：provider 没兑现我们这侧完整的前缀。附 `--json` 原始响应 |
 | 端点 200 但 `calls` 空 | 会话真的没跑过模型调用；或 `WING_SESSIONS_PATH` 指到了别的目录（读的是另一个会话树） |
 | 账本文件不存在而调用在跑 | `memory` 后端；或记账 WARNING（`grep 'cache ledger'`） |
-| 前端数字与 `wing cache` 不一致 | 两边都可能只取了部分行：`summary` 覆盖整本账本，`calls` 默认 20 条——`--limit 200` 取全量再对账 |
+| 前端数字与 `wing cache` 不一致 | 两边都可能只取了部分行：`summary` 覆盖整本账本，`calls` 默认 20 条——端点 `limit=200` / `wing cache --limit 200` 取全量再对账 |
 | 想知道某条结论怎么复现 | `make test-probe` 的 `scenarios/test_cache_ledger.py`（A–F 六条红线，假 Provider 剧本驱动） |
 
 常用命令：
@@ -170,8 +177,10 @@ wing cache                            # 最近活跃会话（表头打印解析�
 wing cache <sid> --limit 50           # 更多调用行
 wing cache <sid> --why 1              # 展开第一条分叉：index/总段数、label、sha 对照、src、≈代价
 wing cache <sid> --json               # 端点原始响应 + resolved_session_id
-curl -s "http://127.0.0.1:<port>/api/session/cache?session_id=<sid>&limit=200"
-jq '.summary, .calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
+curl -s "http://127.0.0.1:<port>/api/session/cache?session_id=<sid>&limit=200" | jq .summary
+# 账本文件是原始账本（version / session_id / fingerprints / calls）——汇总不在文件里，
+# 它是端点现算的投影；文件里值得看的只有指纹表与最近几行调用。
+jq '.calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
 ```
 
 ## 5. 已知边界

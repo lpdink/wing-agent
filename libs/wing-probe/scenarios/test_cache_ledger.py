@@ -10,7 +10,8 @@
 - **B｜前缀延续即命中**：provider 兑现整段参照前缀 → `expected` == 参照调用的
   `prompt`、`verdict == hit`、`forks` 仍空；直播字段（`llm_call_metrics`）与账本同源。
 - **C｜块粒度**：只差一个缓存块（≤ `tol = max(256, 2% · 参照 prompt)`）→
-  `block_granularity`，不是 `provider_underdelivered`。
+  `block_granularity`，不是 `provider_underdelivered`。容差的两条分支各有一个用例：
+  小 prompt 走 256 兜底，2 万 token 的 prompt 走 `2%` 比例分支。
 - **D｜provider 欠兑现**：前缀逐段延续而 `cached == 0` → `provider_underdelivered`，
   归因是 provider 欠账（进 `summary.provider_debt_rate`），**不是**我们的分叉。
 - **E｜外部分叉可点名**：改一个 rules 文件 → reload → 下一轮 `forks` 点名
@@ -47,6 +48,9 @@ RULES_PATTERN = "rules/*.md"
 RULE_FILE = "team.md"
 
 #: 端点 limit 取上界：`summary` 覆盖整本账本，`calls` 也要全量才对得上。
+#: 与 `cache_ledger.MAX_CALLS`（环形上界 200）同值——把上界调大的话这里要跟上，
+#: 否则 `_assert_rates_are_consistent` 的 `summary.calls == len(calls)` 会以
+#: 「端点拿不全」的形式变红。
 FULL_LIMIT = 200
 
 #: 空账本 summary 的精确形状（contract §6：无数据 = 计数 0 + 三档 rate 全 null）。
@@ -84,6 +88,23 @@ async def _cache_report(probe: Probe, session_id: str) -> dict[str, Any]:
     return payload
 
 
+async def _cache_report_expecting_200(
+    probe: Probe, session_id: str, *, context: str
+) -> dict[str, Any]:
+    """`_cache_report` 的「必须 200」版本：404 折成可读的判据失败（contract §6）。
+
+    驱动对非 2xx 一律抛 `DriverHttpError`——不折的话「回了 404」只会以一条裸 HTTP
+    报错出现在报告里，读的人得自己去翻契约才知道破坏了什么。
+    """
+    try:
+        return await _cache_report(probe, session_id)
+    except DriverHttpError as exc:
+        pytest.fail(
+            f"{context}: 必须回 200 + 空账本（contract §6：不要 404），"
+            f"实际 HTTP {exc.status}"
+        )
+
+
 def _assert_rates_are_consistent(report: dict[str, Any], *, context: str) -> None:
     """三档 rate 与 `calls` 逐项对账（contract §6 的公式）。
 
@@ -110,8 +131,14 @@ def _assert_rates_are_consistent(report: dict[str, Any], *, context: str) -> Non
         f"{context}：summary.calls 必须等于账本里的调用条数（账本丢了记录？）:"
         f" {summary['calls']} vs {len(calls)}"
     )
-    assert summary["prompt_tokens"] == prompt, f"{context}: Σprompt 对不上"
-    assert summary["cached_tokens"] == cached, f"{context}: Σcached 对不上"
+    assert summary["prompt_tokens"] == prompt, (
+        f"{context}: summary.prompt_tokens 必须是 Σprompt:"
+        f" {summary['prompt_tokens']!r} vs {prompt!r}"
+    )
+    assert summary["cached_tokens"] == cached, (
+        f"{context}: summary.cached_tokens 必须是 Σcached:"
+        f" {summary['cached_tokens']!r} vs {cached!r}"
+    )
     assert summary["expected_tokens"] == expected, (
         f"{context}: Σexpected 只累计非 null 的 expected:"
         f" {summary['expected_tokens']} vs {expected}"
@@ -176,7 +203,10 @@ async def test_first_call_is_cold_without_theoretical_watermark(probe: Probe) ->
 
     # 分母是 Σprompt（非 0）→ 理论命中率是 0.0，**不是 null**：null 只属于空账本
     # （contract §6「分母为 0 时三个 rate 均为 null」，空账本由 F 覆盖）。
-    assert report["summary"]["expected_tokens"] == 0, report["summary"]
+    assert report["summary"]["expected_tokens"] == 0, (
+        "cold 的 expected 不进 Σexpected（null 不按 0 计入）:"
+        f" {report['summary']['expected_tokens']!r}"
+    )
     assert report["summary"]["theory_rate"] == 0.0, (
         "首调用有 prompt 却无 expected → theory_rate 必须是 0.0（null 只属于空账本）"
     )
@@ -267,7 +297,10 @@ async def test_block_granularity_is_not_provider_underdelivery(probe: Probe) -> 
     assert len(calls) == 3, f"三轮对话三次调用: {[call['verdict'] for call in calls]}"
 
     latest, reference = calls[0], calls[1]
-    assert latest["expected"] == reference["prompt"], latest
+    assert latest["expected"] == reference["prompt"], (
+        "前缀延续时理论水位就是参照调用的 prompt（参照 = 上一次调用）:"
+        f" {latest['expected']!r} vs {reference['prompt']!r}"
+    )
     gap = reference["prompt"] - latest["cached"]
     assert 0 < gap <= max(256, reference["prompt"] * 0.02), (
         f"剧本构造的缺口必须真的落在 tol 之内: gap={gap}, ref={reference['prompt']}"
@@ -282,6 +315,55 @@ async def test_block_granularity_is_not_provider_underdelivery(probe: Probe) -> 
         "块粒度缺口进 provider 欠账汇总（provider_debt_rate > 0）"
     )
     _assert_rates_are_consistent(report, context="C 块粒度")
+
+
+#: 比例分支的剧本：prompt 要大到 `2% × ref.prompt` 超过 `tol` 的下限 256。
+LARGE_PROMPT = 20_000
+LARGE_RATIO_SLACK = 300
+"""(256, ceil(0.02 × 20000) = 400] 之内的缺口——只有按比例算容差才会判块粒度。"""
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_ratio_tolerance_absorbs_large_prompt_gaps(probe: Probe) -> None:
+    """C（比例分支）｜大 prompt 时容差是 `ceil(2% × ref.prompt)`，不是写死的 256。
+
+    WHY：`tol = max(256, ceil(0.02 × 参照 prompt))`。小 prompt 下永远由 256 兜底，
+    比例分支写错也不会被发现；这里把参照 prompt 抬到 2 万（2% = 400 > 256）、缺口取
+    300——按比例算容差才判 `block_granularity`，把容差写成常量 256 就会误判成
+    provider 欠账（用户于是去报一个不存在的 bug）。
+    """
+    probe.register(
+        MODEL,
+        _turn("reply one", LARGE_PROMPT),
+        _turn(
+            "reply two",
+            LARGE_PROMPT + 1000,
+            cached=LARGE_PROMPT - LARGE_RATIO_SLACK,
+        ),
+    )
+    session = await probe.session(model=MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+
+    report = await _cache_report(probe, session.session_id)
+    calls = report["calls"]
+    assert len(calls) == 2, f"两轮对话两次调用: {[c['verdict'] for c in calls]}"
+    latest, reference = calls[0], calls[1]
+    gap = reference["prompt"] - latest["cached"]
+    assert gap > 256, (
+        f"这个用例必须让缺口超过 tol 的下限 256（否则测的仍是兜底分支）: gap={gap}"
+    )
+    assert gap <= reference["prompt"] * 0.02, (
+        f"缺口必须落在 2% 比例容差之内: gap={gap}, ref={reference['prompt']}"
+    )
+    assert latest["verdict"] == "block_granularity", (
+        f"tol = max(256, ceil(2% × {reference['prompt']})) → 缺口 {gap} 仍算块粒度"
+        f"（不是 provider_underdelivered）: {latest}"
+    )
+    assert report["forks"] == [], "块粒度缺口不是分叉"
+    _assert_rates_are_consistent(report, context="C 比例容差")
 
 
 # ── D｜provider 欠兑现 ────────────────────────────────────────────────────
@@ -461,10 +543,12 @@ async def test_rules_change_is_an_external_avoidable_fork(probe: Probe) -> None:
         "cache_diverged 就是分叉处的段 label（contract §5）:"
         f" {live['cache_diverged']!r} vs {fork['label']!r}"
     )
-    # wire 出口剥除值为 null 的字段（`event.wire_dump`）：没有理论水位时该键**缺席**，
-    # 与「旧网关没有这个字段」是同一形态（contract §5「缺省/旧网关 = 无」）。
-    assert live.get("cache_expected_tokens") is None, (
-        f"前缀破碎没有理论水位 → 该字段在帧里缺席（null 不下发）: {live}"
+    # wire 出口剥除值为 null 的字段（`event.wire_dump`）：没有理论水位时该键
+    # **完全不出现**，与「旧网关没有这个字段」是同一形态（contract §5「缺省/旧网关
+    # = 无」）。`is None` 不够——它对「键缺席」与「键在、值为 null」都成立，而下发
+    # null 会让按「键是否存在」判定的消费方走错分支。
+    assert "cache_expected_tokens" not in live, (
+        f"前缀破碎没有理论水位 → 该键必须完全不出现（不是下发 null）: {live}"
     )
     _assert_rates_are_consistent(report, context="E 外部分叉")
 
@@ -482,13 +566,9 @@ async def test_session_without_calls_reports_empty_ledger(probe: Probe) -> None:
     当成错误，或者在错误处理里再分一遍支。
     """
     session = await probe.session(model=MODEL)  # 建会话，但一轮都不跑
-    try:
-        report = await _cache_report(probe, session.session_id)
-    except DriverHttpError as exc:
-        pytest.fail(
-            "无账本的会话必须回 200 + 空账本（contract §6：不要 404），"
-            f"实际 HTTP {exc.status}"
-        )
+    report = await _cache_report_expecting_200(
+        probe, session.session_id, context="F 新建未跑轮的会话"
+    )
 
     recorded = probe.last_http_call(path="/api/session/cache")
     assert recorded is not None and recorded.status == 200, (
@@ -502,8 +582,16 @@ async def test_session_without_calls_reports_empty_ledger(probe: Probe) -> None:
 
     # 会话不存在同样 200（前端不该为「新会话」与「没这个会话」分两条路径）。
     ghost = "19990101-000000-ghost001"
-    ghost_report = await _cache_report(probe, ghost)
-    assert ghost_report["calls"] == [], ghost_report
-    assert ghost_report["forks"] == [], ghost_report
-    assert ghost_report["summary"] == EMPTY_SUMMARY, ghost_report["summary"]
+    ghost_report = await _cache_report_expecting_200(
+        probe, ghost, context="F 不存在的会话"
+    )
+    assert ghost_report["calls"] == [], (
+        f"不存在的会话必须回空 calls（不是 404，也不是报错）: {ghost_report['calls']}"
+    )
+    assert ghost_report["forks"] == [], (
+        f"不存在的会话必须回空 forks: {ghost_report['forks']}"
+    )
+    assert ghost_report["summary"] == EMPTY_SUMMARY, (
+        f"不存在的会话 summary 必须全 0 / 全 null: {ghost_report['summary']}"
+    )
     _assert_rates_are_consistent(ghost_report, context="F 不存在的会话")
