@@ -40,6 +40,7 @@ from wing.gateway.protocol import (
     RewindResponse,
     SendMessageRequest,
     SendMessageResponse,
+    SessionCacheResponse,
     SessionGetResponse,
     SessionInfoResponse,
     SessionListResponse,
@@ -645,6 +646,40 @@ async def session_branches(
     if session is None:
         raise _missing_session(server, session_id)
     return build_session_branches(session)
+
+
+@router.get(
+    "/api/session/cache",
+    response_model=SessionCacheResponse,
+    summary="获取 session 的 KV 缓存账本（理论命中率 + 分叉归因）",
+)
+async def session_cache(
+    request: Request,
+    session_id: str = Query(..., description="目标 session ID"),
+    limit: int = Query(
+        20, ge=1, le=200, description="forks / calls 各返回多少条（新→旧，1..200）"
+    ),
+) -> SessionCacheResponse:
+    """缓存账本报告（contract §6）。
+
+    只读观察面：账本由 LLM 调用路径 best-effort 写入，本端点**不水合**会话（纯解析 +
+    读一份边车 JSON）。会话不存在 / 无账本 → 200 + 空 forks/calls + 全 0 summary
+    （**不 404**——前端与 CLI 都按同一条路径渲染"还没数据"）。鉴权与其他 session
+    端点一致（由 app 级中间件统一处理）。
+    """
+    server = _get_server(request)
+    # 读 + 规整 + 投影（MB 级 JSON 解析）留在循环线程上会让所有会话的流式帧排队——
+    # 与写路径（`observe_cache_call`）同理，整笔工作进线程池。
+    return await asyncio.to_thread(
+        _cache_report_response, server, session_id, limit=limit
+    )
+
+
+def _cache_report_response(
+    server: GatewayServer, session_id: str, *, limit: int
+) -> SessionCacheResponse:
+    """端点的工作体（线程池执行）：读账本 → 投影 → 强类型响应。"""
+    return SessionCacheResponse(**server.runtime.cache_report(session_id, limit=limit))
 
 
 # ============================================================

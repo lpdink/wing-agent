@@ -20,6 +20,7 @@ pub mod argv;
 pub mod asks;
 pub(crate) mod backend_config;
 pub mod branch;
+pub mod cache;
 pub mod common;
 pub mod config;
 pub mod control;
@@ -285,6 +286,29 @@ pub enum Command {
     Info {
         /// Session ID.
         session_id: String,
+    },
+
+    /// Show a session's KV prefix-cache ledger: theory vs actual hit rate, and which
+    /// call broke the prefix (with who to blame).
+    ///
+    /// The human view lists **forks only** — one row per call that could not continue
+    /// the previous prefix, with the segment label that diverged, the blame
+    /// (external / tools / composition / compact / provider), whether you could have
+    /// avoided it, and the estimated tokens lost. Clean calls (cold / hit /
+    /// block-granularity delivery) never appear: there is nothing to act on.
+    ///
+    /// Without a SESSION_ID the most recently active session is read, and the resolved
+    /// id is printed in the header (the command never silently picks one).
+    Cache {
+        /// Session ID (omit to read the most recently active session).
+        session_id: Option<String>,
+        /// How many forks / calls to read (1..=200; default 20).
+        #[arg(long, value_name = "N", default_value_t = cache::DEFAULT_LIMIT)]
+        limit: u32,
+        /// Expand one fork: its row ordinal as shown in the table (1 = newest) or
+        /// its timestamp (copy the WHEN column).
+        #[arg(long, value_name = "TS|INDEX")]
+        why: Option<String>,
     },
 
     /// Interrupt the session's current task (the TUI's Esc).
@@ -760,6 +784,13 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     .await
             }
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
+            Command::Cache {
+                session_id,
+                limit,
+                why,
+            } => {
+                crate::cmd::cache::run(session_id.as_deref(), limit, why.as_deref(), cli.json).await
+            }
             Command::Interrupt { session_id } => {
                 crate::cmd::control::run_interrupt(&session_id, cli.json).await
             }
@@ -1119,6 +1150,46 @@ mod tests {
             }
             other => panic!("expected ps, got {other:?}"),
         }
+    }
+
+    /// `wing cache` 的三种形态：省略 session（解析最近活跃）、`--limit` / `--why`、
+    /// 以及 `--json`。`--limit` 的取值范围是运行时闸门（`cmd::cache::validate_limit`），
+    /// 所以 clap 收下 0 也照样解析成功。
+    #[test]
+    fn clap_parses_cache_shapes() {
+        let cli = Cli::try_parse_from(["wing", "cache"]).expect("parses");
+        match cli.command {
+            Some(Command::Cache {
+                session_id,
+                limit,
+                why,
+            }) => {
+                assert_eq!(session_id, None);
+                assert_eq!(limit, crate::cmd::cache::DEFAULT_LIMIT);
+                assert_eq!(why, None);
+            }
+            other => panic!("expected cache, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["wing", "cache", "sid-1", "--limit", "50", "--why", "2"])
+            .expect("parses");
+        match cli.command {
+            Some(Command::Cache {
+                session_id,
+                limit,
+                why,
+            }) => {
+                assert_eq!(session_id.as_deref(), Some("sid-1"));
+                assert_eq!(limit, 50);
+                assert_eq!(why.as_deref(), Some("2"));
+            }
+            other => panic!("expected cache, got {other:?}"),
+        }
+
+        // `--json` 是全局旗标，落在 Cli 上（不在子命令里）。
+        let cli = Cli::try_parse_from(["wing", "cache", "--json"]).expect("parses");
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Command::Cache { .. })));
     }
 
     #[test]

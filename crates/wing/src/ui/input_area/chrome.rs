@@ -621,6 +621,7 @@ mod tests {
             cached_tokens: 800,
             tokens_per_sec: 42.5,
             ttft_ms: 320.0,
+            ..TurnUsage::default()
         }
     }
 

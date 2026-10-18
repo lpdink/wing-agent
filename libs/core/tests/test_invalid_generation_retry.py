@@ -70,7 +70,7 @@ class _FakeCM:
         self.added: list[list[Message]] = []
 
     async def get_messages_for_llm(self, **_: Any) -> SimpleNamespace:
-        return SimpleNamespace(messages=[], tools=[])
+        return SimpleNamespace(messages=[], tools=[], cache_parts=())
 
     def add_messages(self, messages: list[Message]) -> None:
         self.added.append(list(messages))

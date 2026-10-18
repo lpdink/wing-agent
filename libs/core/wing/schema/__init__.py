@@ -7,7 +7,8 @@
 
 内部模块：``message``（ChainNode / 内容块 / MediaRef / Message——落盘格式守门人）·
 ``llm``（LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall）·
-``tool``（ToolError / ToolParam / Tool / ToolOutput / AgentSkill）。
+``tool``（ToolError / ToolParam / Tool / ToolOutput / AgentSkill）·
+``cache``（缓存账本的段 label / 规范形 hash / CachePart / CacheProbe）。
 
 注意：``message`` 与 ``llm`` 互引对方的类型（Message.usage ↔ LLMUsage、
 Message 扁平 tool_calls ↔ ToolCall、LLMResponse.content_blocks ↔ ContentBlock）。
@@ -15,6 +16,16 @@ Message 扁平 tool_calls ↔ ToolCall、LLMResponse.content_blocks ↔ ContentB
 导入完成后各自 ``model_rebuild()``——本包内导入顺序不敏感。
 """
 
+from .cache import (
+    CacheFork,
+    CacheObservation,
+    CachePart,
+    CacheProbe,
+    CacheSource,
+    canonical_json,
+    fingerprint,
+    sha16,
+)
 from .llm import LLMResponse, LLMUsage, PendingCall, ToolCall, ToolCallDelta
 from .message import (
     MEDIA_NAME_MAX_LENGTH,
@@ -30,6 +41,11 @@ from .tool import AgentSkill, Tool, ToolError, ToolOutput, ToolParam
 
 __all__ = [
     "AgentSkill",
+    "CacheFork",
+    "CacheObservation",
+    "CachePart",
+    "CacheProbe",
+    "CacheSource",
     "ChainNode",
     "ContentBlock",
     "LLMResponse",
@@ -47,4 +63,7 @@ __all__ = [
     "ToolOutput",
     "ToolParam",
     "ToolUseBlock",
+    "canonical_json",
+    "fingerprint",
+    "sha16",
 ]

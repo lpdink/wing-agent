@@ -36,12 +36,14 @@ from wing.provider.transport import (
     raise_with_body,
 )
 from wing.schema import (
+    CachePart,
     LLMResponse,
     LLMUsage,
     Message,
     Tool,
     ToolCall,
 )
+from wing.schema.cache import SYSTEM_WIRE, tools_label
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
@@ -187,7 +189,16 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         options: RequestOptions | None = None,
     ) -> dict:
         options = options or RequestOptions()
-        openai_messages = self._serialize_messages(messages, model, options)
+        # 缓存探针：只在开启时收集分段（关闭 = 零额外计算，body 逐字节不变）。
+        # cache_control 的断点标记打在本次请求最后一帧上——history 段取打标记
+        # **之前**的序列化形态（断点标记每轮都在移动位置，计入会让内容没变的相邻
+        # 两次调用在末段对不上 → 假 prefix_broken）。
+        history_parts: list[CachePart] | None = (
+            [] if options.cache_probe is not None else None
+        )
+        openai_messages = self._serialize_messages(
+            messages, model, options, history_parts
+        )
         if self.explicit_cache_mode:
             self._apply_cache_control(openai_messages)
 
@@ -196,8 +207,17 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             "messages": openai_messages,
             "stream": stream,
         }
+        tool_parts: list[CachePart] = []
         if tools:
             body["tools"] = [t.to_openai() for t in tools]
+            if history_parts is not None:
+                for declared in body["tools"]:
+                    part = self.probe_part(
+                        tools_label(declared.get("function", {}).get("name", "")),
+                        declared,
+                    )
+                    if part is not None:
+                        tool_parts.append(part)
         if stream:
             body["stream_options"] = {"include_usage": True}
 
@@ -224,6 +244,28 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         # （见 docs/dev/architecture.md「压缩与缓存哲学」的已知边界）。
         if self.explicit_cache_mode and options.session_id:
             body["prompt_cache_key"] = options.session_id
+
+        # 分段写进探针：顺序 = tokenize 顺序（system 块 → tools → messages），
+        # 其中 system:wire 紧跟 CM 侧段落封口——放末尾会让 history 增长时前缀关系
+        # 恒不成立（每次调用都判 prefix_broken）。
+        if options.cache_probe is not None:
+            wire_part = self.probe_part(
+                SYSTEM_WIRE,
+                [
+                    message
+                    for message in body["messages"]
+                    if message.get("role") == "system"
+                ],
+            )
+            self.publish_cache_segments(
+                options,
+                (
+                    *options.cache_parts,
+                    *([wire_part] if wire_part is not None else []),
+                    *tool_parts,
+                    *(history_parts or []),
+                ),
+            )
 
         return body
 

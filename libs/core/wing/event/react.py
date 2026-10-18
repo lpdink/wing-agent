@@ -134,6 +134,16 @@ class LLMCallMetricsEvent(WingEvent):
     """本次 LLM 调用从发起到 usage 帧的时长（毫秒；0 = 未测量）。
 
     ReAct 层测量（含上游流式等待），服务会话用量账本与直播路径——不落盘。"""
+    cache_expected_tokens: int | None = None
+    """理论可命中的 prompt token 数（缓存账本，contract §5）。
+
+    参照调用存在且前缀延续时的水位；`None` = 无参照（cold / 前缀破碎 / 探针关闭）。
+    """
+    cache_verdict: str = ""
+    """缓存判定（contract §4：hit / block_granularity / provider_underdelivered /
+    prefix_broken / cold / cold_expired）。空串 = 未计算（降级路径 / 探针关闭）。"""
+    cache_diverged: str = ""
+    """分叉处的段 label（如 `skills:pdf-tools`）。空串 = 本次没有分叉。"""
 
 
 class AskEvent(WingEvent):

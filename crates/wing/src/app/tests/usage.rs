@@ -38,6 +38,15 @@ fn sync_with(session_id: &str, usage: Option<SessionUsage>) -> WingEvent {
 }
 
 fn metrics(prompt: i64, completion: i64, cached: i64) -> WingEvent {
+    metrics_with_theory(prompt, completion, cached, None)
+}
+
+fn metrics_with_theory(
+    prompt: i64,
+    completion: i64,
+    cached: i64,
+    cache_expected_tokens: Option<i64>,
+) -> WingEvent {
     WingEvent::LlmCallMetrics {
         model: "m".into(),
         prompt_tokens: prompt,
@@ -46,6 +55,9 @@ fn metrics(prompt: i64, completion: i64, cached: i64) -> WingEvent {
         first_chunk_rt_ms: 1.0,
         tokens_per_sec: 1.0,
         stop_reason: None,
+        cache_expected_tokens,
+        cache_verdict: String::new(),
+        cache_diverged: String::new(),
         meta: meta("test-session"),
     }
 }
@@ -123,4 +135,21 @@ fn a_switch_without_usage_zeroes_the_counters() {
     app.handle_event(sync_with("other-session", None));
     assert_eq!(app.session_id, "other-session");
     assert_eq!(counters(&app), (0, 0, 0), "换会话不夹带上一个会话的累计");
+}
+
+/// 缓存账本探针的理论水位：事件带 `cache_expected_tokens` 时进 `TurnUsage`，
+/// 不带（旧网关 / 无参照）时是 0——状态栏据此退回今天那一个数字。
+#[test]
+fn the_metrics_event_carries_the_theory_into_the_turn_usage() {
+    let mut app = test_app();
+    app.handle_event(metrics_with_theory(12_000, 300, 9_000, Some(10_800)));
+    assert_eq!(app.turn.usage.prompt_tokens, 12_000);
+    assert_eq!(app.turn.usage.cached_tokens, 9_000);
+    assert_eq!(app.turn.usage.cache_expected_tokens, 10_800);
+
+    app.handle_event(metrics(1_000, 10, 500));
+    assert_eq!(
+        app.turn.usage.cache_expected_tokens, 0,
+        "没有理论水位的那一帧不能继承上一帧的理论值"
+    );
 }

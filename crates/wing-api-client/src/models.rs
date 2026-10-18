@@ -538,6 +538,136 @@ pub struct BranchesResponse {
 }
 
 // ============================================================
+// 缓存账本（GET /api/session/cache）
+// ============================================================
+
+/// GET /api/session/cache 的会话级汇总。
+///
+/// 三个 rate 是**分数**（`0.881` = 88.1%），分母为 0 时服务端给 `null`——读取方
+/// 因此必须能表达"无数据"而不是 0%（`—` 与 `0.0%` 是两个结论）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheSummary {
+    /// 账本里的调用条数（会话累计，不是本次 `calls` 的条数）。
+    #[serde(default)]
+    pub calls: i64,
+    #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
+    pub cached_tokens: i64,
+    /// 理论可命中 token 之和（只累加有参照的调用）。
+    #[serde(default)]
+    pub expected_tokens: i64,
+    /// `Σ expected / Σ prompt`；分母为 0 → None。
+    #[serde(default)]
+    pub theory_rate: Option<f64>,
+    /// `Σ cached / Σ prompt`；分母为 0 → None。
+    #[serde(default)]
+    pub actual_rate: Option<f64>,
+    /// `Σ max(0, expected-cached)`（只统计 provider 欠账 / 块粒度两类）/ Σ prompt。
+    #[serde(default)]
+    pub provider_debt_rate: Option<f64>,
+}
+
+/// 一条分叉的补充事实（`rules:*` / `skills:*` 带来源文件；其余只有 sha 对照）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheForkDetail {
+    /// 来源文件绝对路径（`rules:*` 即 label 里的路径；`skills:*` = `AgentSkill.dir`）。
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 来源文件的修改时间（本地 naive ISO；加载时采集）。
+    #[serde(default)]
+    pub mtime: Option<String>,
+    #[serde(default)]
+    pub size: Option<i64>,
+    /// 对照侧调用的时间戳（与 `sha_before` 同源）；对照侧已经滚出账本 → `None`
+    /// （`--why` 因此不打这一行）。
+    #[serde(default)]
+    pub ref_ts: Option<String>,
+    /// 分叉点两侧的段 hash（`modify` 时两者都存在；`insert` / `remove` 只有一侧有值）。
+    #[serde(default)]
+    pub sha_before: Option<String>,
+    #[serde(default)]
+    pub sha_after: Option<String>,
+}
+
+/// 一次**可点名**的前缀分叉（契约 §4 的 `fork` + 读取侧派生的 `blame`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheFork {
+    /// 本次调用的时间戳（本地 naive ISO，毫秒）。
+    #[serde(default)]
+    pub ts: String,
+    /// 分叉点在段列表里的下标。
+    #[serde(default)]
+    pub index: i64,
+    /// 分叉处的 label（`remove` 时取参照侧）。
+    #[serde(default)]
+    pub label: String,
+    /// `insert` | `remove` | `modify`（未知值原样带出——枚举的权威在后端）。
+    #[serde(default)]
+    pub kind: String,
+    /// `external` | `tools` | `composition` | `compact` | `provider` | `cold`。
+    ///
+    /// 可空：后端把它声明为 `str | None`（派生值，判定不适用时不给），`null` 与
+    /// 缺席同义（`#[serde(default)]` 只兜得住键缺席，兜不住 null）。
+    #[serde(default)]
+    pub blame: Option<String>,
+    /// 用户能不能避开这次分叉（`null` = 该归因不适用：provider 欠账 / cold）。
+    #[serde(default)]
+    pub avoidable: Option<bool>,
+    /// 这次分叉丢掉的 token（估算值，展示必须带 `≈`）；无参照 → None。
+    #[serde(default)]
+    pub tokens_lost: Option<i64>,
+    /// 最近一条调用（分叉的对照侧）fork 点之后的段数（契约 §4 的 `len(C) - k`）。
+    #[serde(default)]
+    pub segments_affected: i64,
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub detail: CacheForkDetail,
+}
+
+/// 账本里的一次调用（报告用投影）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheCall {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default)]
+    pub model: String,
+    /// `main` | `compact`。
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default)]
+    pub prompt: i64,
+    #[serde(default)]
+    pub cached: i64,
+    /// 理论可命中；None = 无参照（cold / 前缀破碎）。
+    #[serde(default)]
+    pub expected: Option<i64>,
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub fp: String,
+}
+
+/// GET /api/session/cache 响应——账本报告。
+///
+/// 会话不存在 / 无账本一律 `200` + 空 `forks` / `calls` + 全 0 summary（**不是 404**）：
+/// 前端与 CLI 都按同一条路径渲染"还没数据"。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheReportResponse {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub summary: CacheSummary,
+    /// 只含 `fork != null` 的调用，**新→旧**。
+    #[serde(default)]
+    pub forks: Vec<CacheFork>,
+    /// 最近 N 次调用，**新→旧**。
+    #[serde(default)]
+    pub calls: Vec<CacheCall>,
+}
+
+// ============================================================
 // Session 更新端点 Request / Response
 // ============================================================
 

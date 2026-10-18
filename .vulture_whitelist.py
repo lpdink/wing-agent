@@ -33,6 +33,17 @@ tool_args
 system_prompt_parts
 multi_select
 
+# 缓存账本（`GET /api/session/cache`）的 wire 字段：Python 侧只负责填值，
+# 消费方是序列化之后的前端（Rust CLI/TUI / VSCode / SDK）——无人读字段名。
+expected_tokens
+theory_rate
+actual_rate
+provider_debt_rate
+ref_ts
+sha_before
+sha_after
+forks
+
 # audit 指标 entry：写入由 aggregate() 完成，读出经 model_dump
 tokens_per_sec_total
 tokens_per_sec_count

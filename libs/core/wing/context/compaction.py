@@ -15,6 +15,7 @@ from wing.schema import LLMResponse, LLMUsage, Message, Tool
 
 if TYPE_CHECKING:
     from wing.provider.base import RequestOptions
+    from wing.schema import CachePart
 
 
 @dataclass
@@ -23,10 +24,15 @@ class LLMMessagesResult:
 
     tools: 本次 LLM 调用应使用的工具列表（声明集快照）。
     Agent 直接将此传给 provider.generate(tools=...)。
+
+    cache_parts: system 侧的分段（缓存账本探针的输入，契约 §1）。由 CM 产出、经
+    ``RequestOptions.cache_parts`` 交给 provider 与 wire 侧分段合并成完整段列表。
+    无探针时为空元组（不产生任何额外计算）。
     """
 
     messages: list[Message]
     tools: list[Tool]
+    cache_parts: tuple["CachePart", ...] = ()
 
 
 @dataclass

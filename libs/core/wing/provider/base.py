@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence
 
-from wing.schema import LLMResponse, Message, Tool
+from wing.common.logger import log
+from wing.schema import CachePart, CacheProbe, LLMResponse, Message, Tool
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
@@ -37,13 +38,20 @@ class RequestOptions:
       Anthropic 走 cache_control，不需要）；
     - ``media``：会话媒体读接口——序列化图片时按 id 读字节；
     - ``thinking`` / ``reasoning_effort``：会话级开关覆盖；None = 跟随
-      provider 配置（extra_body / config.reasoning_effort）的默认。
+      provider 配置（extra_body / config.reasoning_effort）的默认；
+    - ``cache_parts``：ContextManager 产出的 system 侧分段（缓存账本的探针输入，
+      契约 §1）。空元组 = 没有 system 侧段落；
+    - ``cache_probe``：本次调用的分段累积器。provider 在构建 body 的同一处把
+      ``[*cache_parts, *wire 侧段落]`` 写进去。**None = 探针关闭**（一个分段都
+      不算）——这正是「开/关探针时请求体逐字节相同」可被测试钉住的开关。
     """
 
     session_id: str | None = None
     media: MediaAccess | None = None
     thinking: bool | None = None
     reasoning_effort: str | None = None
+    cache_parts: tuple[CachePart, ...] = ()
+    cache_probe: CacheProbe | None = None
 
 
 class ProviderClosedError(RuntimeError):
@@ -277,3 +285,33 @@ class ModelProvider(ABC):
         但从未收到终结信号），上层据此判定无效轮次。基类默认 0（无累积语义）。
         """
         return 0
+
+    # ── 缓存账本探针（只观察，不改写请求）───────
+
+    def probe_part(self, label: str, obj: Any) -> "CachePart | None":
+        """构造一个探针分段；**永不抛**（构造失败只丢这一段）。
+
+        探针是观察面：分段构造（协议 dict → 规范形 JSON）失败绝不能把请求构造
+        打断——这是「账本全部工作在 try/except 内」在 provider 侧的落点。
+        """
+        try:
+            return CachePart.obj(label, obj)
+        except Exception as e:
+            log.warning(f"Cache probe segment failed ({label}): {e}")
+            return None
+
+    def publish_cache_segments(
+        self, options: "RequestOptions | None", segments: Sequence[CachePart]
+    ) -> None:
+        """把本次调用的完整分段写进探针（探针关闭 = 零动作、零计算）。
+
+        协议实现在**构建 body 之后**调用：`segments` 必须已经包含 system 侧
+        段落（`options.cache_parts`，由 CM 产出）与 wire 侧段落，顺序即 tokenize
+        顺序（contract §1）。写入是覆盖式的——重试重放同一请求不会翻倍。
+        """
+        if options is None or options.cache_probe is None:
+            return
+        try:
+            options.cache_probe.set_segments(segments)
+        except Exception as e:
+            log.warning(f"Cache probe failed to record segments: {e}")
