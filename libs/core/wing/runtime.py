@@ -34,6 +34,8 @@ from wing.event import (
 )
 from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
+from wing.context import build_cache_report
+from wing.context.cache_ledger import CACHE_LEDGER_KEY
 from wing.event_bus import event_bus
 from wing.config import (
     Config,
@@ -393,6 +395,16 @@ class WingRuntime:
         404。纯查询（只探归档区一次 stat）。
         """
         return self.sm.missing_session_error(session_id)
+
+    def cache_report(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
+        """会话的 KV 缓存账本报告（`GET /api/session/cache` 的数据源）。
+
+        不水合会话：账本是会话目录里的边车数据，查询不该把会话换入内存。会话不存在 /
+        从没调用过模型 → 空报告（**200，不 404**——前端与 CLI 都按同一条路径渲染
+        "还没数据"，见 contract §6）。
+        """
+        data = self.sm.read_session_aux(session_id, CACHE_LEDGER_KEY)
+        return build_cache_report(session_id, data, limit=limit)
 
     def is_archived(self, session_id: str) -> bool:
         """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""

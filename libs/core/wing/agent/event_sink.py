@@ -296,7 +296,20 @@ class AgentEventSink:
             )
         )
 
-    def llm_metrics(self, usage: LLMUsage, *, duration_ms: int = 0) -> None:
+    def llm_metrics(
+        self,
+        usage: LLMUsage,
+        *,
+        duration_ms: int = 0,
+        cache_expected_tokens: int | None = None,
+        cache_verdict: str = "",
+        cache_diverged: str = "",
+    ) -> None:
+        """发射一次 LLM 调用指标（含缓存账本的三个直播字段）。
+
+        `cache_*` 由 ReAct 层在记账的同一次调用里算好传入——账本记录与直播字段
+        因此永远同源（contract §5）；缺省值 = 未计算，旧消费方行为不变。
+        """
         self.emit(
             LLMCallMetricsEvent(
                 session_id=self._session_id,
@@ -308,5 +321,8 @@ class AgentEventSink:
                 model=usage.model,
                 stop_reason=usage.stop_reason,
                 duration_ms=duration_ms,
+                cache_expected_tokens=cache_expected_tokens,
+                cache_verdict=cache_verdict,
+                cache_diverged=cache_diverged,
             )
         )

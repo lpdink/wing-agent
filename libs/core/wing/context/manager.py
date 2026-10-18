@@ -3,6 +3,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,18 +12,34 @@ from wing.common.logger import log
 from wing.provider.base import ModelProvider
 from wing.schema import (
     AgentSkill,
+    CacheObservation,
+    CachePart,
+    CacheProbe,
+    CacheSource,
     ChainNode,
     LLMUsage,
     Message,
     Tool,
 )
+from wing.schema.cache import (
+    PURPOSE_COMPACT,
+    SYSTEM_APPEND,
+    SYSTEM_BASE,
+    rules_label,
+    skills_label,
+)
 
+from .cache_ledger import CacheLedger
 from .compaction import Compactor, LLMMessagesResult, PendingCompact
 from .resources import (
+    RuleFile,
     build_skills_prompt,
+    collect_skill_sources,
     load_all_skills,
-    load_rules,
+    load_rule_files,
     render_skills_info,
+    rules_prompt,
+    skill_block,
 )
 
 if TYPE_CHECKING:
@@ -62,14 +79,20 @@ class ContextManager:
         self._skills_patterns = skills_patterns or []
         self._rules_patterns = rules_patterns or []
 
-        # _rules_files：实际匹配并成功读取的规则文件路径（load_rules 的返回）
-        self._rules_prompt, self._rules_files = load_rules(
+        # _rules_files：实际匹配并成功读取的规则文件路径（load_rule_files 的投影）
+        # _rule_files 同时保存内容与加载时刻的文件事实（缓存账本的 `src`）。
+        self._rule_files: list[RuleFile] = load_rule_files(
             self._rules_patterns, self._workspace
         )
+        self._rules_prompt, self._rules_files = rules_prompt(self._rule_files)
         self._skills_cache: dict[str, AgentSkill] = load_all_skills(
             self._skills_patterns, self._workspace
         )
         self._skills_prompt = build_skills_prompt(self._skills_cache)
+        # skills 的 `src`（path/mtime/size）加载时采集一次，热路径不再 stat。
+        self._skill_sources: dict[str, CacheSource] = collect_skill_sources(
+            self._skills_cache
+        )
         # 会话级持久状态（metadata.append_system_prompt）：Session 构造时恢复、
         # create/update 后落盘——丢失会让系统提示词变化，碎掉 KV cache 前缀。
         self.append_system_prompt: str = ""
@@ -243,11 +266,131 @@ class ContextManager:
 
     def reload_skills_and_rules(self) -> None:
         """重新加载 skills 和 rules，用于 /reload 命令。"""
-        self._rules_prompt, self._rules_files = load_rules(
-            self._rules_patterns, self._workspace
-        )
+        self._rule_files = load_rule_files(self._rules_patterns, self._workspace)
+        self._rules_prompt, self._rules_files = rules_prompt(self._rule_files)
         self._skills_cache = load_all_skills(self._skills_patterns, self._workspace)
         self._skills_prompt = build_skills_prompt(self._skills_cache)
+        self._skill_sources = collect_skill_sources(self._skills_cache)
+
+    # ── 缓存账本（探针只观察，绝不改写请求）─────────
+
+    def cache_system_parts(self) -> list[CachePart]:
+        """system 侧分段（契约 §1）：base / append / rules:<path> / skills:<name>。
+
+        顺序即它们拼进系统提示的顺序；`src` 取自加载期快照——本方法在每次 LLM 调用的
+        热路径上跑，只做 sha256，**不碰文件系统**。
+        """
+        parts: list[CachePart] = []
+        if self.setin_system_prompt:
+            parts.append(CachePart.text(SYSTEM_BASE, self.setin_system_prompt))
+        if self.append_system_prompt:
+            parts.append(CachePart.text(SYSTEM_APPEND, self.append_system_prompt))
+        for rule in self._rule_files:
+            parts.append(
+                CachePart.text(
+                    rules_label(rule.path),
+                    f"{rule.path}\n\n{rule.content}",
+                    rule.source(),
+                )
+            )
+        for name, skill in self._skills_cache.items():
+            parts.append(
+                CachePart.text(
+                    skills_label(name),
+                    skill_block(skill),
+                    self._skill_sources.get(name),
+                )
+            )
+        return parts
+
+    def _cache_parts_for(
+        self, options: "RequestOptions | None"
+    ) -> tuple[CachePart, ...]:
+        """探针开启时才计算 system 侧分段（关闭 = 零额外计算，请求体与今天一致）。
+
+        分段计算失败按「没有分段」降级（WARNING）：探针是观察面，绝不能因为它把
+        模型调用打断。
+        """
+        if options is None or options.cache_probe is None:
+            return ()
+        try:
+            return tuple(self.cache_system_parts())
+        except Exception as e:
+            log.warning(
+                f"Cache segment computation failed (session={self._session_id}): {e}"
+            )
+            return ()
+
+    def compact_options(
+        self, options: "RequestOptions | None"
+    ) -> "RequestOptions | None":
+        """压缩调用的 options：**自己的**探针 + system 侧分段。
+
+        压缩是**另一次** LLM 调用，而 `provider` 对探针是覆盖式写入
+        （`CacheProbe.set_segments`）。与主调用共享 options 的对象关系在增量压缩
+        触发时才出现（`get_messages_for_llm` 拿到的正是主调用的 options），共用一个
+        探针会让主调用的账本行与直播字段记成压缩请求的段列表。探针关闭时原样返回。
+        """
+        if options is None or options.cache_probe is None:
+            return options
+        return replace(
+            options,
+            cache_probe=CacheProbe(),
+            cache_parts=self._cache_parts_for(options),
+        )
+
+    async def observe_cache_call(
+        self,
+        probe: CacheProbe | None,
+        *,
+        purpose: str,
+        model: str,
+        provider: str,
+        prompt: int,
+        cached: int,
+    ) -> CacheObservation | None:
+        """把一个已完成调用的探针结果记进缓存账本（best-effort，永不抛）。
+
+        返回本次调用的归因（理论命中 / verdict / 分叉点），供 `llm_call_metrics`
+        直播字段直接透传——账本记录与直播字段因此永远同源。
+
+        落盘走线程池：账本是「整份读 → 改 → 整份原子写」，最坏形态（200 段 ×
+        200 条调用）实测数十毫秒，同步执行会把整个网关（所有会话的流式帧）挡住。
+        """
+        if probe is None or not probe.segments:
+            return None
+        return await asyncio.to_thread(
+            CacheLedger(self._messages, self._session_id).record,
+            probe.segments,
+            purpose=purpose,
+            model=model,
+            provider=provider,
+            prompt=prompt,
+            cached=cached,
+        )
+
+    async def _record_compact_call(
+        self,
+        options: "RequestOptions | None",
+        usage: LLMUsage | None,
+        *,
+        model: str,
+        provider: str,
+    ) -> None:
+        """压缩调用同样进账本（`purpose="compact"`，contract §8.8）。
+
+        无 usage 的压缩响应（服务端没回带内 usage）不记——账本不发明 token 数。
+        """
+        if options is None or usage is None:
+            return
+        await self.observe_cache_call(
+            options.cache_probe,
+            purpose=PURPOSE_COMPACT,
+            model=model,
+            provider=provider,
+            prompt=usage.prompt_tokens,
+            cached=usage.cached_tokens,
+        )
 
     def get_skills_info(self) -> str:
         """返回 skills/rules 信息，用于 /skills 命令显示。"""
@@ -284,10 +427,13 @@ class ContextManager:
             options: 会话级调用参数（缓存亲和 session id / 开关）——compact 请求与主调用保持同一
                 prompt cache key 与开关口径。
         """
+        cache_parts = self._cache_parts_for(options)
+
         if not self.compactor:
             return LLMMessagesResult(
                 [self.system_prompt] + self.get_context_window(),
                 tools=list(self._declared_tools),
+                cache_parts=cache_parts,
             )
 
         msgs = self.get_context_window()
@@ -311,13 +457,16 @@ class ContextManager:
                         return LLMMessagesResult(
                             [self.system_prompt] + self.get_context_window(),
                             tools=list(self._declared_tools),
+                            cache_parts=cache_parts,
                         )
                     else:
                         self._discard_pending_compact()
             else:
                 # 未到 apply 阈值：不能走 Step 2/3（避免重复启动 compact task）
                 return LLMMessagesResult(
-                    [self.system_prompt] + msgs, tools=list(self._declared_tools)
+                    [self.system_prompt] + msgs,
+                    tools=list(self._declared_tools),
+                    cache_parts=cache_parts,
                 )
 
         # ── Step 2: task 还在跑？ ──
@@ -326,7 +475,9 @@ class ContextManager:
                 self._pending_compact_task = None
             else:
                 return LLMMessagesResult(
-                    [self.system_prompt] + msgs, tools=list(self._declared_tools)
+                    [self.system_prompt] + msgs,
+                    tools=list(self._declared_tools),
+                    cache_parts=cache_parts,
                 )
 
         # ── Step 3: 该触发 early compact 了？ ──
@@ -334,7 +485,9 @@ class ContextManager:
             self._start_background_compact(msgs, model, model_provider, options)
 
         return LLMMessagesResult(
-            [self.system_prompt] + msgs, tools=list(self._declared_tools)
+            [self.system_prompt] + msgs,
+            tools=list(self._declared_tools),
+            cache_parts=cache_parts,
         )
 
     # ── 异步 compact 内部方法 ─────────────────────
@@ -362,12 +515,19 @@ class ContextManager:
 
         async def _run() -> None:
             try:
+                compact_options = self.compact_options(options)
                 response = await self.compactor.do_compact(
                     full_context,
                     model,
                     model_provider,
                     tools=compact_tools,
-                    options=options,
+                    options=compact_options,
+                )
+                await self._record_compact_call(
+                    compact_options,
+                    response.usage,
+                    model=model,
+                    provider=getattr(model_provider, "name", ""),
                 )
                 result = PendingCompact(
                     compact_content=response.content or "",
@@ -499,13 +659,20 @@ class ContextManager:
         msgs = self.get_context_window()
         full_context = [self.system_prompt] + msgs
 
+        compact_options = self.compact_options(options)
         compacted = await self.compactor.do_compact(
             full_context,
             model,
             model_provider,
             tools=list(self._declared_tools),
             instruction=instruction,
-            options=options,
+            options=compact_options,
+        )
+        await self._record_compact_call(
+            compact_options,
+            compacted.usage,
+            model=model,
+            provider=getattr(model_provider, "name", ""),
         )
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None
