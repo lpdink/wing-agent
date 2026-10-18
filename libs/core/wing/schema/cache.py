@@ -111,16 +111,6 @@ class CacheSource:
     def to_wire(self) -> dict[str, Any]:
         return {"path": self.path, "mtime": self.mtime, "size": self.size}
 
-    @classmethod
-    def from_wire(cls, raw: Any) -> "CacheSource | None":
-        if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
-            return None
-        return cls(
-            path=raw["path"],
-            mtime=raw.get("mtime"),
-            size=raw.get("size") if isinstance(raw.get("size"), int) else None,
-        )
-
 
 @dataclass(frozen=True)
 class CachePart:
@@ -143,21 +133,6 @@ class CachePart:
         if self.src is not None:
             wire["src"] = self.src.to_wire()
         return wire
-
-    @classmethod
-    def from_wire(cls, raw: Any) -> "CachePart | None":
-        if not isinstance(raw, dict):
-            return None
-        label, sha = raw.get("label"), raw.get("sha")
-        if not isinstance(label, str) or not isinstance(sha, str):
-            return None
-        chars = raw.get("chars")
-        return cls(
-            label=label,
-            sha=sha,
-            chars=chars if isinstance(chars, int) else 0,
-            src=CacheSource.from_wire(raw.get("src")),
-        )
 
     @classmethod
     def text(cls, label: str, text: str, src: CacheSource | None = None) -> "CachePart":
@@ -221,11 +196,6 @@ class CacheObservation:
     verdict: str = ""
     diverged: str = ""
 
-    @classmethod
-    def none(cls) -> "CacheObservation":
-        """未计算（探针关闭 / 无分段）：三个直播字段保持缺省。"""
-        return cls()
-
 
 class CacheProbe:
     """一次 LLM 调用的分段累积器（caller 创建 → provider 写入 → caller 消费）。
@@ -241,10 +211,3 @@ class CacheProbe:
 
     def set_segments(self, segments: Sequence[CachePart]) -> None:
         self.segments = list(segments)
-
-    def fingerprint(self) -> str:
-        return fingerprint(self.segments)
-
-    def __bool__(self) -> bool:
-        """有分段才算有效探针（空探针 = 本次调用什么都没观察）。"""
-        return bool(self.segments)

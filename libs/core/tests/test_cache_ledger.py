@@ -443,8 +443,11 @@ class TestAttribution:
         # 证据：能直接点名文件与两侧 sha
         assert fork["detail"]["path"] == str(rule_path)
         assert fork["detail"]["mtime"] is not None
+        # 无参照（前缀被外部改动打断）时对照侧回落到最近一条调用：`--why` 才能
+        # 给出 `sha_before → sha_after` 与「什么时候变的」——这是本功能的主用例。
+        assert fork["detail"]["sha_before"] is not None
         assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
-        assert fork["detail"]["ref_ts"] is None  # 无参照 → null
+        assert fork["detail"]["ref_ts"] is not None
 
     def test_inserted_rules_file_reports_tail_segment_count(self, tmp_path: Path):
         write_rules(tmp_path / "rules", "a-first.md", "A")
@@ -945,7 +948,9 @@ class TestCacheEndpoint:
         assert fork["verdict"] == "prefix_broken"
         assert fork["detail"]["path"] == "/rules/one.md"
         assert fork["detail"]["mtime"] == "2026-10-18T15:00:00"
+        assert fork["detail"]["sha_before"] is not None
         assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
+        assert fork["detail"]["ref_ts"] is not None
 
         limited = client.get(f"/api/session/cache?session_id={session_id}&limit=1")
         assert limited.status_code == 200
@@ -965,6 +970,51 @@ class TestCacheEndpoint:
             ).status_code
             == 422
         )
+
+    def test_corrupted_ledger_rows_do_not_break_the_endpoint(self, real_client):
+        """合法 JSON 但字段类型错位的账本 → 仍是 200（坏行丢弃，不 500）。"""
+        client, sessions_root = real_client
+        session_id = "cache-bad"
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        directory = sessions_root / session_id
+        (directory / f"{CACHE_LEDGER_KEY}.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": session_id,
+                    "fingerprints": {"abc": {"segments": "nonsense"}},
+                    "calls": [
+                        {"ts": 123, "fp": "abc"},  # 类型错位的行 → 丢弃
+                        "not-a-dict",
+                        {
+                            "ts": "2026-10-18T15:41:02.123",
+                            "fp": "abc",
+                            "purpose": "main",
+                            "model": "m",
+                            "provider": "p",
+                            "prompt": 100,
+                            "cached": 0,
+                            "expected": None,
+                            "ref_fp": None,
+                            "verdict": "cold",
+                            "fork": None,
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        response = client.get(f"/api/session/cache?session_id={session_id}")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert [call["verdict"] for call in body["calls"]] == ["cold"]
+        assert body["summary"]["calls"] == 1
+        assert body["summary"]["prompt_tokens"] == 100
 
     def test_empty_ledger_is_200(self, real_client):
         client, _ = real_client
@@ -1155,6 +1205,148 @@ class TestLiveMetricsAndCompact:
         assert [call["purpose"] for call in data["calls"]] == ["compact"]
         assert data["calls"][0]["prompt"] == 4321
         assert data["calls"][0]["verdict"] == "cold"
+
+
+class TestProbeIsolation:
+    @pytest.mark.asyncio
+    async def test_background_compact_gets_its_own_probe(self, tmp_path: Path):
+        """增量压缩是**另一次**调用：不得覆盖主调用的探针。
+
+        生产常态路径：主调用的 `get_messages_for_llm` 触发后台压缩，压缩请求在
+        同一个 event loop 上先构建 body 并写入探针（覆盖式）。共用探针会让
+        `purpose="main"` 的账本行记成压缩请求的段列表，把后续所有归因污染。
+        """
+
+        class _SegmentingProvider:
+            """模拟 provider 契约：构建请求时分段写进**自己的**探针。"""
+
+            name = "main"
+
+            @staticmethod
+            async def generate(messages, model, tools=None, stream=False, options=None):
+                assert options is not None and options.cache_probe is not None
+                options.cache_probe.set_segments(
+                    [
+                        *options.cache_parts,
+                        CachePart.text("history:COMPACT:user", "squash me"),
+                    ]
+                )
+                yield LLMResponse(
+                    content="<summary>squashed</summary>",
+                    usage=LLMUsage(prompt_tokens=900, completion_tokens=10),
+                )
+
+        cm = make_cm(
+            tmp_path,
+            session_id="bg",
+            compactor=Compactor(context_window_tokens=200, keep_recent_tokens=20),
+        )
+        cm.add_messages(
+            [
+                Message(role="user", content="x" * 400),
+                Message(role="assistant", content="y" * 400),
+                Message(role="user", content="z" * 400),
+            ]
+        )
+        main_probe = CacheProbe()
+        await cm.get_messages_for_llm(
+            model="m",
+            model_provider=_SegmentingProvider(),  # ty: ignore[invalid-argument-type]
+            current_tools=lambda: [],
+            options=RequestOptions(
+                cache_parts=(CachePart.text("system:base", "S"),),
+                cache_probe=main_probe,
+            ),
+        )
+        assert cm._pending_compact_task is not None
+        await cm._pending_compact_task
+
+        # 主调用的探针没有被压缩请求覆盖（它此时还没把请求发出去）
+        assert main_probe.segments == []
+        data = json.loads(
+            (tmp_path / "bg" / f"{CACHE_LEDGER_KEY}.json").read_text(encoding="utf-8")
+        )
+        assert [call["purpose"] for call in data["calls"]] == ["compact"]
+        labels = [
+            segment["label"]
+            for segment in data["fingerprints"][data["calls"][0]["fp"]]["segments"]
+        ]
+        assert labels == ["system:base", "history:COMPACT:user"]
+
+    @pytest.mark.asyncio
+    async def test_validated_call_hands_parts_and_probe_to_the_provider(
+        self, tmp_path: Path
+    ):
+        """接线：`_call_llm_validated` 把 CM 的分段 + 发送时刻的探针交给 provider。
+
+        缺少这条接线时账本一行都不会记，而单元测试里直接调 `_call_llm` 看不出来。
+        """
+        seen: dict[str, Any] = {}
+
+        class _CapturingProvider:
+            name = "main"
+
+            @staticmethod
+            def create_accumulator():
+                return None
+
+            @staticmethod
+            def snapshot_blocks(accumulator: Any) -> None:
+                return None
+
+            @staticmethod
+            def unfinished_tool_calls(accumulator: Any) -> int:
+                return 0
+
+            @staticmethod
+            async def generate(**kwargs: Any):
+                options = kwargs["options"]
+                seen["cache_parts"] = options.cache_parts
+                seen["probe"] = options.cache_probe
+                if options.cache_probe is not None:
+                    options.cache_probe.set_segments(
+                        [*options.cache_parts, CachePart.text("system:wire", "w")]
+                    )
+                yield LLMResponse(
+                    content="ok",
+                    usage=LLMUsage(prompt_tokens=100, completion_tokens=2, model="m"),
+                )
+                yield LLMResponse(
+                    content_blocks=[TextBlock(text="ok")], usage=LLMUsage(model="m")
+                )
+
+        cm = make_cm(tmp_path, session_id="wired")
+        cm.add_message(USER)
+        probe = CacheProbe()
+        loop = ReActLoop(
+            tool_executor=None,  # ty: ignore[invalid-argument-type]
+            sink=AgentEventSink(session_id=cm.id, append_event=cm.append_event),
+            context_manager=cm,
+            inbox=None,  # ty: ignore[invalid-argument-type]
+            current_model=lambda: "m",
+            current_provider=lambda: _CapturingProvider(),  # ty: ignore[invalid-argument-type]
+            current_tools=lambda: [],
+            current_options=lambda: RequestOptions(cache_probe=probe),
+            stream=True,
+        )
+        await loop._call_llm_validated(_turn_ctx(), model="m")
+
+        assert [part.label for part in seen["cache_parts"]] == ["system:base"]
+        assert seen["probe"] is probe
+        data = json.loads(
+            (tmp_path / "wired" / f"{CACHE_LEDGER_KEY}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert [call["purpose"] for call in data["calls"]] == ["main"]
+        assert data["calls"][0]["prompt"] == 100
+
+
+def _turn_ctx() -> Any:
+    """`_call_llm_validated` 只用到 usage / text 累计。"""
+    from wing.agent.react_loop import _TurnAccumulator
+
+    return _TurnAccumulator()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

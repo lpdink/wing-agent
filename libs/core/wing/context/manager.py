@@ -306,20 +306,40 @@ class ContextManager:
     def _cache_parts_for(
         self, options: "RequestOptions | None"
     ) -> tuple[CachePart, ...]:
-        """探针开启时才计算 system 侧分段（关闭 = 零额外计算，请求体与今天一致）。"""
+        """探针开启时才计算 system 侧分段（关闭 = 零额外计算，请求体与今天一致）。
+
+        分段计算失败按「没有分段」降级（WARNING）：探针是观察面，绝不能因为它把
+        模型调用打断。
+        """
         if options is None or options.cache_probe is None:
             return ()
-        return tuple(self.cache_system_parts())
+        try:
+            return tuple(self.cache_system_parts())
+        except Exception as e:
+            log.warning(
+                f"Cache segment computation failed (session={self._session_id}): {e}"
+            )
+            return ()
 
-    def cache_options(
+    def compact_options(
         self, options: "RequestOptions | None"
     ) -> "RequestOptions | None":
-        """把 system 侧分段装进本次调用的 options（探针关闭时原样返回）。"""
+        """压缩调用的 options：**自己的**探针 + system 侧分段。
+
+        压缩是**另一次** LLM 调用，而 `provider` 对探针是覆盖式写入
+        （`CacheProbe.set_segments`）。与主调用共享 options 的对象关系在增量压缩
+        触发时才出现（`get_messages_for_llm` 拿到的正是主调用的 options），共用一个
+        探针会让主调用的账本行与直播字段记成压缩请求的段列表。探针关闭时原样返回。
+        """
         if options is None or options.cache_probe is None:
             return options
-        return replace(options, cache_parts=self._cache_parts_for(options))
+        return replace(
+            options,
+            cache_probe=CacheProbe(),
+            cache_parts=self._cache_parts_for(options),
+        )
 
-    def observe_cache_call(
+    async def observe_cache_call(
         self,
         probe: CacheProbe | None,
         *,
@@ -333,10 +353,14 @@ class ContextManager:
 
         返回本次调用的归因（理论命中 / verdict / 分叉点），供 `llm_call_metrics`
         直播字段直接透传——账本记录与直播字段因此永远同源。
+
+        落盘走线程池：账本是「整份读 → 改 → 整份原子写」，最坏形态（200 段 ×
+        200 条调用）实测数十毫秒，同步执行会把整个网关（所有会话的流式帧）挡住。
         """
         if probe is None or not probe.segments:
             return None
-        return CacheLedger(self._messages, self._session_id).record(
+        return await asyncio.to_thread(
+            CacheLedger(self._messages, self._session_id).record,
             probe.segments,
             purpose=purpose,
             model=model,
@@ -345,7 +369,7 @@ class ContextManager:
             cached=cached,
         )
 
-    def _record_compact_call(
+    async def _record_compact_call(
         self,
         options: "RequestOptions | None",
         usage: LLMUsage | None,
@@ -359,7 +383,7 @@ class ContextManager:
         """
         if options is None or usage is None:
             return
-        self.observe_cache_call(
+        await self.observe_cache_call(
             options.cache_probe,
             purpose=PURPOSE_COMPACT,
             model=model,
@@ -491,7 +515,7 @@ class ContextManager:
 
         async def _run() -> None:
             try:
-                compact_options = self.cache_options(options)
+                compact_options = self.compact_options(options)
                 response = await self.compactor.do_compact(
                     full_context,
                     model,
@@ -499,7 +523,7 @@ class ContextManager:
                     tools=compact_tools,
                     options=compact_options,
                 )
-                self._record_compact_call(
+                await self._record_compact_call(
                     compact_options,
                     response.usage,
                     model=model,
@@ -635,7 +659,7 @@ class ContextManager:
         msgs = self.get_context_window()
         full_context = [self.system_prompt] + msgs
 
-        compact_options = self.cache_options(options)
+        compact_options = self.compact_options(options)
         compacted = await self.compactor.do_compact(
             full_context,
             model,
@@ -644,7 +668,7 @@ class ContextManager:
             instruction=instruction,
             options=compact_options,
         )
-        self._record_compact_call(
+        await self._record_compact_call(
             compact_options,
             compacted.usage,
             model=model,

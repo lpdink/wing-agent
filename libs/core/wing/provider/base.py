@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence
 
+from wing.common.logger import log
 from wing.schema import CachePart, CacheProbe, LLMResponse, Message, Tool
 
 if TYPE_CHECKING:
@@ -287,6 +288,18 @@ class ModelProvider(ABC):
 
     # ── 缓存账本探针（只观察，不改写请求）───────
 
+    def probe_part(self, label: str, obj: Any) -> "CachePart | None":
+        """构造一个探针分段；**永不抛**（构造失败只丢这一段）。
+
+        探针是观察面：分段构造（协议 dict → 规范形 JSON）失败绝不能把请求构造
+        打断——这是「账本全部工作在 try/except 内」在 provider 侧的落点。
+        """
+        try:
+            return CachePart.obj(label, obj)
+        except Exception as e:
+            log.warning(f"Cache probe segment failed ({label}): {e}")
+            return None
+
     def publish_cache_segments(
         self, options: "RequestOptions | None", segments: Sequence[CachePart]
     ) -> None:
@@ -298,4 +311,7 @@ class ModelProvider(ABC):
         """
         if options is None or options.cache_probe is None:
             return
-        options.cache_probe.set_segments(segments)
+        try:
+            options.cache_probe.set_segments(segments)
+        except Exception as e:
+            log.warning(f"Cache probe failed to record segments: {e}")

@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from wing.provider.media import (
     FOLLOWUP_GUIDE_TEXT,
@@ -38,6 +39,9 @@ class _SerializeMixin:
 
     _config: ProviderConfig
 
+    probe_part: Callable[[str, Any], "CachePart | None"]
+    """由 ``ModelProvider`` 提供（分段构造的永不抛边界，见 base）。"""
+
     def _serialize_messages(
         self,
         messages: list[Message],
@@ -63,7 +67,8 @@ class _SerializeMixin:
 
         ``parts`` 非 None 时顺带收集缓存探针的 ``history:<uuid>:<role>`` 分段
         （每条产生协议 dict 的非 system 消息一段）。hash 取**合并 / cache_control
-        之前**的形态：两者都在本次请求的末尾动手（见设计文 D3）。
+        之前**的形态：合并与 cache_control 都在本次请求的末尾动手，把它的移动
+        算进 hash 会让内容没变的相邻两次调用在末段对不上（假 prefix_broken）。
 
         Returns:
             (system_text, anthropic_messages)
@@ -124,11 +129,11 @@ class _SerializeMixin:
                     continue
                 wire = {"role": "assistant", "content": blocks}
                 anthropic_msgs.append(wire)
+                # hash 在这一刻定型（合并 / cache_control 都还没动 wire）
                 if parts is not None:
-                    # hash 在这一刻定型（合并 / cache_control 都还没动 wire）
-                    parts.append(
-                        CachePart.obj(history_label(msg.uuid, "assistant"), wire)
-                    )
+                    part = self.probe_part(history_label(msg.uuid, "assistant"), wire)
+                    if part is not None:
+                        parts.append(part)
 
             elif msg.role == "tool":
                 content: str | list[dict] = msg.content or ""
@@ -159,7 +164,9 @@ class _SerializeMixin:
                 }
                 anthropic_msgs.append(wire)
                 if parts is not None:
-                    parts.append(CachePart.obj(history_label(msg.uuid, "tool"), wire))
+                    part = self.probe_part(history_label(msg.uuid, "tool"), wire)
+                    if part is not None:
+                        parts.append(part)
 
             elif msg.role == "user":
                 blocks: list[dict] = []
@@ -176,9 +183,9 @@ class _SerializeMixin:
                     wire = {"role": "user", "content": blocks}
                     anthropic_msgs.append(wire)
                     if parts is not None:
-                        parts.append(
-                            CachePart.obj(history_label(msg.uuid, "user"), wire)
-                        )
+                        part = self.probe_part(history_label(msg.uuid, "user"), wire)
+                        if part is not None:
+                            parts.append(part)
 
         flush_pending()
         # 合并连续同角色消息：Anthropic Messages API 要求 user/assistant

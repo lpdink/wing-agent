@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from wing.provider.media import (
     FOLLOWUP_GUIDE_TEXT,
@@ -28,6 +29,9 @@ class _SerializeMixin:
     """``OpenAICompatProvider`` 的请求期序列化方法组（与 provider 类合体后生效）。"""
 
     _config: ProviderConfig
+
+    probe_part: Callable[[str, Any], "CachePart | None"]
+    """由 ``ModelProvider`` 提供（分段构造的永不抛边界，见 base）。"""
 
     def _serialize_messages(
         self,
@@ -61,9 +65,11 @@ class _SerializeMixin:
             for message in messages:
                 wire = message.to_openai()
                 if parts is not None and message.role != "system":
-                    parts.append(
-                        CachePart.obj(history_label(message.uuid, message.role), wire)
+                    part = self.probe_part(
+                        history_label(message.uuid, message.role), wire
                     )
+                    if part is not None:
+                        parts.append(part)
                 serialized.append(wire)
             return serialized
 
@@ -121,7 +127,9 @@ class _SerializeMixin:
                     else []
                 ) + extra
             if parts is not None and msg.role != "system":
-                parts.append(CachePart.obj(history_label(msg.uuid, msg.role), base))
+                part = self.probe_part(history_label(msg.uuid, msg.role), base)
+                if part is not None:
+                    parts.append(part)
             out.append(base)
 
         flush_pending()

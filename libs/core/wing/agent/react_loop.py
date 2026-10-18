@@ -360,26 +360,25 @@ class ReActLoop:
         重试失败、走错误路径，内容不丢）。
         """
         # 触发后台 compact 用触发时刻的 provider / options 快照（compact 是
-        # 预计算：允许因 reload 退场而失败——下一轮重新触发）。
-        # 本次调用只解析一次 options：CM 把 system 侧分段交回来（cache_parts），
-        # 与探针（cache_probe）一起经同一份 options 交给 provider——分段与探针
-        # 必须是同一次调用的那一对，重试则整对重建。
-        options = self._current_options()
+        # 预计算：允许因 reload 退场而失败——下一轮重新触发）。CM 把 system 侧
+        # 分段交回来（cache_parts），与**发送时刻**解析出的探针一起交给 provider。
         llm_result = await self._cm.get_messages_for_llm(
             model=model,
             model_provider=self._current_provider(),
             current_tools=self._current_tools,
-            options=options,
+            options=self._current_options(),
         )
+        # 发送时刻重新解析（晚解析纪律）：「解析 → 首次迭代」之间 MUST 无
+        # await（此处到 `_call_llm` 进入流迭代全是同步代码）——池换新与
+        # 在途迭代之间因此不存在竞态窗口（provider/base.py 的退场语义）。
+        # options 同理重解析：会话级开关（thinking / effort）与探针都取发送时刻的值。
+        provider = self._current_provider()
+        options = self._current_options()
         call_options = (
             replace(options, cache_parts=llm_result.cache_parts)
             if options is not None and llm_result.cache_parts
             else options
         )
-        # 发送时刻重新解析（晚解析纪律）：「解析 → 首次迭代」之间 MUST 无
-        # await（此处到 `_call_llm` 进入流迭代全是同步代码）——池换新与
-        # 在途迭代之间因此不存在竞态窗口（provider/base.py 的退场语义）。
-        provider = self._current_provider()
         assistant_msg = await self._call_llm(
             provider=provider,
             messages=llm_result.messages,
@@ -508,7 +507,7 @@ class ReActLoop:
                     probe = options.cache_probe if options is not None else None
                     if probe is not None and not observed:
                         observed = True
-                        observation = self._cm.observe_cache_call(
+                        observation = await self._cm.observe_cache_call(
                             probe,
                             purpose=PURPOSE_MAIN,
                             model=model,
