@@ -32,6 +32,15 @@
 //! anchor), **throttled** ([`FRESHNESS_INTERVAL`], with the clock injected so tests need no
 //! sleeping), and **not on the render path** (the check runs from the event loop, never from
 //! `draw`).
+//!
+//! **Two kinds of picture, one lane.** A markdown image is a *file*: its shape comes from a header
+//! probe and "the file was rewritten" from the freshness check. A user message's picture is a
+//! gateway **media object** (content-addressed, immutable): its shape rides in the `MediaRef`
+//! itself, so layout never probes or downloads anything, and the bytes are fetched on demand for
+//! the pictures actually on screen — see [`media`] for that half's bookkeeping (in-flight, byte
+//! LRU, failures) and `Images::request` for the dispatch.
+
+mod media;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -48,6 +57,7 @@ use crate::render::markdown::ImageEntry;
 use crate::render::markdown::ImageOpts;
 use crate::render::markdown::ImageShape;
 use crate::render::markdown::images::CAPTION_MARKER;
+use crate::render::picture::PictureSource;
 use crate::ui::chat_view::FrameImage;
 use crate::ui::image::ImageState;
 use crate::ui::image::ImageStore;
@@ -143,6 +153,9 @@ pub(crate) struct Images {
     /// The options handed to the render layer — `Off` while disabled, otherwise
     /// `Anchor(workspace, known)`.
     opts: ImageOpts,
+    /// The bytes half of gateway media pictures: what is on screen, what was fetched, what
+    /// failed (see [`media`]).
+    media: media::MediaLane,
 }
 
 impl Images {
@@ -161,6 +174,7 @@ impl Images {
             watch: Vec::new(),
             last_check: None,
             opts: ImageOpts::off().clone(),
+            media: media::MediaLane::default(),
         }
     }
 
@@ -198,6 +212,7 @@ impl Images {
             watch: Vec::new(),
             last_check: None,
             opts: ImageOpts::off().clone(),
+            media: media::MediaLane::default(),
         };
         lane.rebuild_opts();
         lane
@@ -276,6 +291,12 @@ impl Images {
         // picture stops being a *link*, and shrinking the table would flip it
         // back); a rebuild starts a new generation, so it starts empty.
         self.known.clear();
+        // The media half restarts with the new content: the old frame's target set, its
+        // in-flight set and its failure records all belong to the previous generation (a
+        // stale id would otherwise be asked for under the new session id, and a receipt
+        // dropped by a session switch must not leave an id "in flight" forever). The bytes
+        // themselves are content-addressed and stay cached.
+        self.media.forget_content();
         self.rebuild_opts();
     }
 
@@ -329,12 +350,21 @@ impl Images {
         }
         self.watch.clear();
         for frame in frames {
-            if !self.watch.contains(&frame.path) {
-                self.watch.push(frame.path.clone());
+            if let Some(path) = frame.source.as_file()
+                && !self.watch.iter().any(|seen| seen == path)
+            {
+                self.watch.push(path.to_path_buf());
             }
         }
         let watch = &self.watch;
         self.stamps.retain(|path, _| watch.contains(path));
+        // 媒体图没有文件可 stat（内容寻址 ⇒ 字节不可变），它们走另一条账：
+        // 「屏幕上要哪几张」，由 `media_requests` 交给后台去抓。
+        self.media
+            .observe(frames.iter().filter_map(|frame| match &frame.source {
+                PictureSource::Media(id) => Some(id.clone()),
+                PictureSource::File(_) => None,
+            }));
     }
 
     /// When the next freshness check is due, or `None` when there is nothing to
@@ -411,11 +441,50 @@ impl Images {
     ///
     /// A hash lookup plus a redraw at most: encoding happens on the worker, and
     /// asking again in the next frame is the normal case (`Pending`).
-    pub(crate) fn request(&mut self, path: &Path, target: Size) -> ImageState {
-        match self.store.as_mut() {
-            Some(store) => store.request(path, target),
-            None => ImageState::Unavailable(crate::ui::image::Unavailable::Disabled),
+    ///
+    /// Media pictures answer [`Unavailable::NotFetched`] until their bytes land
+    /// ([`Images::supply_media`]) — the caption stays on screen, and the fetch itself is the
+    /// event loop's job ([`Images::media_requests`]).
+    pub(crate) fn request(&mut self, source: &PictureSource, target: Size) -> ImageState {
+        let Some(store) = self.store.as_mut() else {
+            return ImageState::Unavailable(crate::ui::image::Unavailable::Disabled);
+        };
+        match source {
+            PictureSource::File(path) => store.request(path, target),
+            PictureSource::Media(id) => match self.media.bytes(id) {
+                Some(bytes) => store.request_media(id, target, &bytes),
+                None => ImageState::Unavailable(crate::ui::image::Unavailable::NotFetched),
+            },
         }
+    }
+
+    /// Bytes for one media picture arrived (a fetch receipt): cache them and let the next
+    /// frame encode and draw it.
+    pub(crate) fn supply_media(&mut self, media_id: &str, bytes: Arc<Vec<u8>>) {
+        if self.store.is_none() {
+            return;
+        }
+        self.media.supply(media_id, bytes);
+    }
+
+    /// A media fetch failed: stop asking for this id until the picture leaves the screen
+    /// (or the content is rebuilt) — see [`media`].
+    pub(crate) fn media_failed(&mut self, media_id: &str) {
+        if self.store.is_none() {
+            return;
+        }
+        self.media.fail(media_id);
+    }
+
+    /// The media pictures this frame wants and does not have yet — the fetch list.
+    ///
+    /// Bounded by [`media::MAX_INFLIGHT`] and by the frame's own placement table (one entry
+    /// per visible anchor), so it never grows with the session.
+    pub(crate) fn media_requests(&mut self) -> Vec<String> {
+        if self.store.is_none() {
+            return Vec::new();
+        }
+        self.media.requests()
     }
 
     /// The terminal may no longer show what we sent it (`terminal.clear()`,
@@ -472,7 +541,7 @@ impl Images {
             if frame.offset.1 >= 0 && !caption_at(frame.area, buf) {
                 continue;
             }
-            let ImageState::Ready(image) = self.request(&frame.path, frame.target) else {
+            let ImageState::Ready(image) = self.request(&frame.source, frame.target) else {
                 // Pending / unavailable: the caption is the fallback, and it is
                 // already on screen — never blank the box.
                 continue;
@@ -605,7 +674,10 @@ mod tests {
         assert!(!images.set_workspace(Some("/ws")));
         assert!(!images.sync(&[PathBuf::from("/ws/plot.png")]));
         assert!(matches!(
-            images.request(Path::new("/ws/plot.png"), Size::new(10, 4)),
+            images.request(
+                &PictureSource::File(PathBuf::from("/ws/plot.png")),
+                Size::new(10, 4)
+            ),
             ImageState::Unavailable(_)
         ));
         images.invalidate();
@@ -622,7 +694,7 @@ mod tests {
             area: Rect::new(2, 0, 10, 4),
             offset: (2, 0),
             target: Size::new(10, 4),
-            path: PathBuf::from(path),
+            source: PictureSource::File(PathBuf::from(path)),
         }
     }
 

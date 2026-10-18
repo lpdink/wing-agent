@@ -273,16 +273,18 @@ impl App {
             .into_iter()
             .map(ImagePayload::into_image)
             .collect();
-        // 提交产物随 pending 条目一起留下（正文 + 图片各存一份）：气泡用它拼显示文本，
-        // 失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），换来「被拒 /
-        // 失败之后内容还在用户手里」。
-        self.chat.push_pending(
-            request_id.clone(),
-            Submission {
-                content: payload.text.clone(),
-                images: images.clone(),
-            },
-        );
+        // 提交产物随 pending 条目一起留下（正文 + 图片 + 预测引用）：气泡用它拼内容
+        // （图块 / 标签），失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），
+        // 换来「被拒 / 失败之后内容还在用户手里」。
+        let submission = Submission::new(payload.text.clone(), images.clone());
+        // 本机就有字节：pending 气泡立刻能画（不必等上传往返，也不必再抓一次）。引用是
+        // 按内容寻址预测的（`Submission::media`，与上传回执同 id）；这里把字节**再拷一份**
+        // 进图片 lane 的缓存（提交产物那份随 pending 条目走，lane 这份随图片被淘汰）。
+        for (image, picture) in submission.images.iter().zip(submission.media()) {
+            self.images
+                .supply_media(&picture.id, std::sync::Arc::new(image.bytes.clone()));
+        }
+        self.chat.push_pending(request_id.clone(), submission);
         self.push_intent(AppIntent::SendMessage {
             content: payload.text,
             tool_call_id: None,
@@ -460,6 +462,17 @@ impl App {
         // （文本进草稿、图片进流水线）。
         if let FetchPayload::ClipboardPaste(result) = payload {
             self.on_clipboard_paste(result);
+            return;
+        }
+
+        // 媒体图的字节回执也在守卫**之前**：字节是内容寻址的（id 就是内容），与会话无关，
+        // 而 lane 的「在飞」只在 `supply` / `fail` 里按 id 撤销——守卫丢掉它，这几张图就会
+        // 被永久跳过（切回原会话也只有 caption）。同 `ClipboardImage` 的先例。
+        if let FetchPayload::MediaBytes { media_id, result } = payload {
+            match result {
+                Ok(bytes) => self.images.supply_media(&media_id, bytes),
+                Err(_) => self.images.media_failed(&media_id),
+            }
             return;
         }
 
@@ -668,10 +681,12 @@ impl App {
                     conflict,
                 });
             }
-            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的发送失败）。
+            // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的
+            // 发送失败 / 内容寻址的媒体字节）。
             FetchPayload::ClipboardImage { .. }
             | FetchPayload::ClipboardPaste(_)
-            | FetchPayload::SendFailed { .. } => {}
+            | FetchPayload::SendFailed { .. }
+            | FetchPayload::MediaBytes { .. } => {}
         }
     }
 }

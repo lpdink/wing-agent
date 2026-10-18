@@ -32,7 +32,6 @@ use crate::render::markdown::RenderOpts;
 use crate::render::markdown::compose_lines;
 use crate::render::markdown::links::CELL_PREFIX_WIDTH;
 use crate::render::markdown::render_markdown_lines_with;
-use crate::render::markdown::render_plain;
 use crate::render::renderable::CellContext;
 use crate::shared::panels::picker::ModelPanel;
 use crate::ui::cached_cell::CachedCell;
@@ -44,6 +43,8 @@ use crate::ui::cells::notice::notice_lines;
 use crate::ui::cells::thinking::ThinkingBlock;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
+use crate::ui::chat_view::media;
+use crate::ui::chat_view::media::UserMessageBody;
 
 /// A single cell in the chat view.
 ///
@@ -57,17 +58,18 @@ use crate::ui::cells::tool_call::ToolCallBlock;
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum ChatCell {
-    /// User message.
-    UserMessage(String),
+    /// User message: text plus the pictures it carries (`media`), rendered as an anchor
+    /// block per picture when the terminal can draw them (see `media`).
+    UserMessage(UserMessageBody),
     /// User message awaiting model acceptance — rendered in the pending
     /// area below all committed cells, dimmed to signal "queued, not yet
     /// fed to the model". Promoted to `UserMessage` on
     /// `user_message_accepted`, or demoted to `DiscardedUserMessage` when
     /// an interrupt discards it.
-    PendingUserMessage(String),
+    PendingUserMessage(UserMessageBody),
     /// User message discarded by an interrupt before reaching the model —
     /// dimmed + struck through to signal "never sent".
-    DiscardedUserMessage(String),
+    DiscardedUserMessage(UserMessageBody),
     /// Assistant text (may be accumulated from streaming TextEvents).
     AssistantMessage(String),
     /// System message.
@@ -104,6 +106,23 @@ impl ChatCell {
     /// re-deriving what the renderer produced (see `tui-link-open`).
     pub fn render_lines(&self, width: u16, ctx: &CellContext<'_>) -> ComposedLines {
         match self {
+            Self::UserMessage(body) => {
+                let style = Style::default()
+                    .bg(ctx.palette.surface)
+                    .fg(ctx.palette.text);
+                media::render_body(body, style, width, ctx.images, true)
+            }
+            Self::PendingUserMessage(body) => {
+                let style = Style::default().bg(ctx.palette.surface).fg(ctx.palette.dim);
+                media::render_body(body, style, width, ctx.images, true)
+            }
+            Self::DiscardedUserMessage(body) => {
+                let style = Style::default()
+                    .bg(ctx.palette.surface)
+                    .fg(ctx.palette.dim)
+                    .add_modifier(Modifier::CROSSED_OUT);
+                media::render_body(body, style, width, ctx.images, false)
+            }
             Self::AssistantMessage(text) => {
                 assistant_message_lines(text, width, ctx.palette, ctx.images)
             }
@@ -122,23 +141,24 @@ impl ChatCell {
     pub fn to_lines(&self, width: u16, ctx: &CellContext<'_>) -> Vec<Line<'static>> {
         let palette = ctx.palette;
         match self {
-            Self::UserMessage(text) => {
+            Self::UserMessage(body) => {
                 let style = Style::default().bg(palette.surface).fg(palette.text);
-                Self::user_message_lines(text, style)
+                media::render_body(body, style, width, ctx.images, true).into_lines()
             }
-            Self::PendingUserMessage(text) => {
+            Self::PendingUserMessage(body) => {
                 // Queued, not yet accepted by the model — dimmed.
                 let style = Style::default().bg(palette.surface).fg(palette.dim);
-                Self::user_message_lines(text, style)
+                media::render_body(body, style, width, ctx.images, true).into_lines()
             }
-            Self::DiscardedUserMessage(text) => {
+            Self::DiscardedUserMessage(body) => {
                 // Discarded by an interrupt before reaching the model —
-                // dimmed + struck through.
+                // dimmed + struck through. 只留标签：一张没被划掉的图会让人以为
+                // 它发出去了（图块的像素不受 cell 样式影响，画不出「划掉」）。
                 let style = Style::default()
                     .bg(palette.surface)
                     .fg(palette.dim)
                     .add_modifier(Modifier::CROSSED_OUT);
-                Self::user_message_lines(text, style)
+                media::render_body(body, style, width, ctx.images, false).into_lines()
             }
             Self::AssistantMessage(text) => {
                 assistant_message_lines(text, width, palette, ctx.images).into_lines()
@@ -170,15 +190,6 @@ impl ChatCell {
                 ))]
             }
         }
-    }
-
-    /// Shared rendering for the three user-message cell states (normal /
-    /// pending / discarded) — plain text lines under the given style.
-    fn user_message_lines(text: &str, style: Style) -> Vec<Line<'static>> {
-        render_plain(text)
-            .iter()
-            .map(|line| Line::from(Span::styled(line.to_string(), style)))
-            .collect()
     }
 }
 
@@ -237,7 +248,7 @@ impl Renderable for ChatCell {
             self,
             Self::UserMessage(_) | Self::PendingUserMessage(_) | Self::DiscardedUserMessage(_)
         ) {
-            let text_width = width.saturating_sub(3);
+            let text_width = width.saturating_sub(media::TEXT_WIDTH_SUB);
             return Paragraph::new(self.to_lines(width, ctx))
                 .wrap(Wrap { trim: false })
                 .line_count(text_width)
@@ -271,6 +282,15 @@ pub struct PendingMessage {
 pub struct Submission {
     pub content: String,
     pub images: Vec<crate::util::image_compress::CompressedImage>,
+    /// 上传之后会就绪的媒体引用（本机按内容寻址预测，与 `images` 同序同长）。
+    ///
+    /// 预测而不是等回执，是为了让 pending 气泡**立刻**有图（字节就在 `images` 里）：
+    /// 端点的 id 恒为字节的 sha256，所以预测与响应逐字节一致（`protocol::media`）。
+    /// 回填草稿只读 `content` / `images`，这些引用不参与。
+    ///
+    /// 私有：唯一合法的来源是 [`Submission::new`]（派生自 `images`，两者等长）——
+    /// 绕过它构造出「有图无引用」会让气泡静默丢掉图。
+    media: Vec<crate::protocol::MediaRef>,
 }
 
 impl Submission {
@@ -279,7 +299,31 @@ impl Submission {
         Self {
             content: content.into(),
             images: Vec::new(),
+            media: Vec::new(),
         }
+    }
+
+    /// 正文 + 图片的提交产物：媒体引用按内容寻址预测（见 [`Submission::media`]）。
+    pub fn new(
+        content: impl Into<String>,
+        images: Vec<crate::util::image_compress::CompressedImage>,
+    ) -> Self {
+        let media = images.iter().map(media::predicted_media).collect();
+        Self {
+            content: content.into(),
+            images,
+            media,
+        }
+    }
+
+    /// 这条消息的媒体引用（与 [`Submission::images`] 同序同长）。
+    pub fn media(&self) -> &[crate::protocol::MediaRef] {
+        &self.media
+    }
+
+    /// 这条消息在气泡里的内容（正文 + 图片引用）。
+    pub fn body(&self) -> UserMessageBody {
+        UserMessageBody::new(self.content.clone(), self.media.clone())
     }
 }
 

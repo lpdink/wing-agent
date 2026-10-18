@@ -55,6 +55,7 @@ pub use images::MIN_ANCHOR_ROWS;
 pub use images::PathReject;
 pub use images::anchor_caption;
 pub use images::anchor_rows;
+pub use images::caption_of;
 pub use images::resolve_image_path;
 
 // The pixel-to-cell fit the row count is computed with (see `render::fit`) —

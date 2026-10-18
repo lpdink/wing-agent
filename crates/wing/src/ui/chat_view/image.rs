@@ -1,11 +1,11 @@
-//! The picture face: where this frame's markdown anchors go, and which files
-//! the view references.
+//! The picture face: where this frame's anchors go (markdown images and the pictures a
+//! user message carries), and which local files the view references.
 //!
 //! Two facts, both produced **while the band renders** and both consumed by the
 //! app — the same shape as the link table next door:
 //!
 //! * [`FrameImage`] — one paint request per visible anchor (box, signed offset,
-//!   encode target, path). Recorded by [`ChatViewWidget`](super::ChatViewWidget)
+//!   encode target, source). Recorded by [`ChatViewWidget`](super::ChatViewWidget)
 //!   and installed in one assignment at the end of the frame, so a half-rendered
 //!   frame is never painted. The app resolves them through the image store and
 //!   paints *after* every overlay (see `app::images`), which is what makes a
@@ -15,10 +15,9 @@
 //!   so the app can probe their headers. Discovery only: a path that stops being
 //!   listed keeps whatever the table already knows.
 //!
-//! Nothing here draws, reads a file or decides a policy: geometry is the
-//! anchor's (`ImageSpan`), the path is [`resolve_image_path`](crate::render::markdown::resolve_image_path)'s
-//! output (keyed by the markdown layer), and the picture itself is
-//! [`crate::ui::image`]'s.
+//! Nothing here draws, reads a file, fetches bytes or decides a policy: geometry is the
+//! anchor's (`ImageSpan`), the identity is the anchor's [`PictureSource`], and the pixels are
+//! [`crate::ui::image`]'s (files) or `app::images::media`'s (gateway objects) to produce.
 
 use std::path::PathBuf;
 
@@ -26,6 +25,7 @@ use ratatui::layout::Rect;
 use ratatui::layout::Size;
 
 use crate::render::markdown::ImageSpan;
+use crate::render::picture::PictureSource;
 
 use super::ChatView;
 
@@ -50,8 +50,9 @@ pub struct FrameImage {
     /// visible part — scrolling must not change the target, or every wheel
     /// notch would re-encode.
     pub target: Size,
-    /// Resolved image path: the metadata table's key and the store's.
-    pub path: PathBuf,
+    /// What the box holds: a local file (the metadata table's key and the store's)
+    /// or a gateway media object (its bytes are fetched by `app::images`).
+    pub source: PictureSource,
 }
 
 impl ChatView {
@@ -72,8 +73,9 @@ impl ChatView {
     /// cells are kept: the caller looks every path up in its own table anyway,
     /// which is both the dedupe and the "already probed" check.
     ///
-    /// Pending user messages are not walked: they render as plain text, so they
-    /// can carry no anchors and no image destinations.
+    /// User messages are not walked for *media* either: their pictures are gateway objects,
+    /// not files, so there is no header to probe (`media::render_body` gets the shape from
+    /// the ref itself). This walk is about local files only.
     pub fn image_candidates(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for cell in &self.cells {
@@ -119,8 +121,13 @@ pub(super) fn frame_image_for(
         return None;
     }
     let top = i32::from(render_y) + line - skip;
-    let clipped_top = top.max(i32::from(band.y));
-    let clipped_bottom = (top + rows).min(i32::from(band.bottom()));
+    // The window a picture may touch is the cell's own visible slice, bounded by the band:
+    // a box whose tail runs past the rows its cell actually rendered (a user bubble's bottom
+    // padding is one such row) is clipped rather than painted over someone else's row.
+    let window_top = i32::from(band.y).max(i32::from(render_y));
+    let window_bottom = i32::from(band.bottom()).min(i32::from(render_y) + visible);
+    let clipped_top = top.max(window_top);
+    let clipped_bottom = (top + rows).min(window_bottom);
     if clipped_bottom <= clipped_top {
         return None;
     }
@@ -137,7 +144,7 @@ pub(super) fn frame_image_for(
             i16::try_from(offset_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX))).ok()?,
         ),
         target: Size::new(span.cols, span.rows),
-        path: span.path.clone(),
+        source: span.source.clone(),
     })
 }
 
@@ -158,7 +165,7 @@ mod tests {
             column: 2,
             cols,
             rows: anchor_rows(cols, ImageShape::new(800, 600), CELL),
-            path: PathBuf::from("/ws/plot.png"),
+            source: PictureSource::File(PathBuf::from("/ws/plot.png")),
             alt: "plot".into(),
             px_w: 800,
             px_h: 600,
@@ -173,7 +180,10 @@ mod tests {
         assert_eq!(frame.area, Rect::new(2, 5, 38, span.rows));
         assert_eq!(frame.offset, (2, 4));
         assert_eq!(frame.target, Size::new(38, span.rows));
-        assert_eq!(frame.path, PathBuf::from("/ws/plot.png"));
+        assert_eq!(
+            frame.source,
+            PictureSource::File(PathBuf::from("/ws/plot.png"))
+        );
     }
 
     #[test]

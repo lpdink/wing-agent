@@ -801,13 +801,13 @@ mod tests {
         // the middle of the band, so it stays visible across a 2-row scroll.
         let mut view = ChatView::new();
         for i in 0..4 {
-            view.push(ChatCell::UserMessage(format!("above {i}")));
+            view.push(ChatCell::UserMessage(format!("above {i}").into()));
         }
         view.push(ChatCell::AssistantMessage(
             "[docs](https://example.com)".into(),
         ));
         for i in 0..2 {
-            view.push(ChatCell::UserMessage(format!("below {i}")));
+            view.push(ChatCell::UserMessage(format!("below {i}").into()));
         }
         render(&mut view, 40, 12);
         let (row, link) = only_link(&view);

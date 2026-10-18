@@ -36,6 +36,9 @@ pub(crate) const KNOWN_IMAGE_MIMES: [&str; 6] = [
     "image/tiff",
 ];
 
+/// 压缩产物的 MIME：预算循环的产物恒为 JPEG（媒体引用的 `mime` 字段取它）。
+pub const JPEG_MIME: &str = "image/jpeg";
+
 /// 压缩产物：JPEG 字节 + 编码时的像素尺寸（mime 恒 `image/jpeg`）。
 ///
 /// `width` / `height` 是**编码后**的尺寸（记录用；调用方不需要自己解码回来）。

@@ -47,6 +47,7 @@ use crate::render::markdown::CellPixels as LayoutCellPixels;
 use crate::render::markdown::ImageShape;
 use crate::render::markdown::MAX_ANCHOR_ROWS;
 use crate::render::markdown::anchor_rows;
+use crate::render::picture::PictureSource;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::chat_view::FrameImage;
 use crate::ui::image::CellPixels;
@@ -301,7 +302,7 @@ fn a_ready_image_is_painted_into_its_anchor_box() {
 
     // The request: the cell's prefix column, the box at the markdown width,
     // and the whole box as the encode target.
-    assert_eq!(frame.path, plot);
+    assert_eq!(frame.source, PictureSource::File(plot.clone()));
     assert_eq!(frame.offset, (2, 0));
     assert_eq!(frame.target, Size::new(content.width - 2, rows));
     assert_eq!(frame.area.x, content.x + 2);
@@ -678,7 +679,7 @@ fn a_box_that_does_not_start_on_its_caption_is_not_painted() {
         area: Rect::new(2, 0, 38, 5),
         offset: (2, 0),
         target: Size::new(38, 5),
-        path: plot.clone(),
+        source: PictureSource::File(plot.clone()),
     };
 
     // Over the caption, once the encode lands, the picture is painted.
@@ -900,7 +901,7 @@ fn a_pending_encode_leaves_the_caption_untouched() {
         area: Rect::new(2, 0, 38, 5),
         offset: (2, 0),
         target: Size::new(38, 5),
-        path: plot.clone(),
+        source: PictureSource::File(plot.clone()),
     };
     let mut buf = caption.clone();
     images.paint(std::slice::from_ref(&requested), clip, &[], &mut buf);
@@ -1897,4 +1898,508 @@ fn a_resize_re_encodes_for_the_new_box() {
         1,
         "one encoding, for the new target"
     );
+}
+
+// ── 7. user pictures (gateway media objects) ────────────────────
+
+/// A `MediaRef` pointing at `bytes` — what an uploaded picture looks like, with the
+/// content-addressed id the real endpoint would hand back.
+fn media_ref(bytes: &[u8], px_w: u32, px_h: u32) -> crate::protocol::MediaRef {
+    crate::protocol::predicted_ref(bytes, "image/jpeg", px_w, px_h)
+}
+
+/// A PNG in memory (the bytes a gateway media object carries).
+fn png_bytes(px_w: u32, px_h: u32) -> Vec<u8> {
+    let img = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(px_w, px_h, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 200])
+    }));
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .expect("encode png fixture");
+    out
+}
+
+fn user_cell(text: &str, media: Vec<crate::protocol::MediaRef>) -> ChatCell {
+    ChatCell::UserMessage(crate::ui::chat_view::media::UserMessageBody::new(
+        text, media,
+    ))
+}
+
+#[test]
+fn a_user_picture_is_painted_inside_its_bubble() {
+    let bytes = png_bytes(400, 300);
+    let picture = media_ref(&bytes, 400, 300);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    // The bytes are already on this machine (a just-submitted picture).
+    app.images
+        .supply_media(&picture.id, std::sync::Arc::new(bytes.clone()));
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+
+    let mut term = test_terminal(60, 48);
+    // The first frame shows the reserved box with its caption (the encode is in flight).
+    let first = frame(&mut app, &mut term);
+    let caption_row = row_with(&first, "▢ Image #1 · 400×300").expect("caption");
+    assert!(!has_placeholder(&first), "the encode has not landed yet");
+
+    let buf = draw_until(&mut app, &mut term, "the user picture", |_, buf| {
+        has_placeholder(buf)
+    });
+
+    let content = app.chat.geometry().area;
+    let text_width = content.width - 3;
+    let rows = anchor_rows(text_width, ImageShape::new(400, 300), LAYOUT_CELL);
+    let painted = placeholder_rect(&buf).expect("painted");
+    // The bubble insets its text by 2 columns, its pictures with it; the picture starts on
+    // the caption row (the caption is what it covers, and what stays if it cannot be drawn).
+    assert_eq!(painted.x, content.x + 2);
+    assert_eq!(
+        painted.y, caption_row,
+        "the picture starts on its caption row"
+    );
+    assert!(
+        painted.width <= text_width,
+        "the picture is fitted into the text width, never wider: {painted:?}"
+    );
+    assert_eq!(
+        painted.height, rows,
+        "the picture occupies exactly the rows the layout reserved"
+    );
+    // The box's top-left cell carries the transmit payload plus the placeholder characters
+    // (the caption is what the picture covers).
+    assert!(
+        buf[(content.x + 2, caption_row)]
+            .symbol()
+            .contains(PLACEHOLDER),
+        "the caption cell carries the protocol payload"
+    );
+
+    // …and it is inside the band, never over the composer/status rows.
+    let band = app.geometry.chat_band();
+    assert!(painted.bottom() <= band.bottom(), "{painted:?} vs {band:?}");
+}
+
+#[test]
+fn a_user_picture_without_bytes_keeps_its_reserved_box_and_caption() {
+    // The shape comes from the ref, so the layout does not wait for the bytes: the box is
+    // reserved and the caption shows until (and unless) the picture arrives.
+    let picture = media_ref(b"not fetched yet", 400, 300);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+
+    let mut term = test_terminal(60, 48);
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf), "no bytes, no picture");
+    let caption_row = row_with(&buf, "▢ Image #1 · 400×300").expect("caption");
+
+    let content = app.chat.geometry().area;
+    let rows = anchor_rows(content.width - 3, ImageShape::new(400, 300), LAYOUT_CELL);
+    assert_eq!(
+        buf[(content.x + 2, caption_row)].symbol(),
+        "▢",
+        "the caption is the anchor's first row"
+    );
+
+    // The box is reserved: a cell pushed after the bubble starts below `caption + rows`,
+    // so no later content can slide into the space the picture will occupy.
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture]));
+    app.chat.push(ChatCell::SystemMessage("after".into()));
+    let mut term = test_terminal(60, 48);
+    let buf = frame(&mut app, &mut term);
+    let after = row_with(&buf, "after").expect("the next cell");
+    assert!(
+        after >= caption_row + rows,
+        "the bubble reserves the picture's rows: next cell at {after}, \
+         caption {caption_row} + {rows} rows"
+    );
+}
+
+#[test]
+fn the_media_of_a_visible_picture_is_requested_once() {
+    let picture = media_ref(b"some bytes", 400, 300);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 48);
+
+    frame(&mut app, &mut term);
+    let intents = app.drain_intents();
+    let requested: Vec<&str> = intents
+        .iter()
+        .filter_map(|intent| match intent {
+            crate::app::intent::AppIntent::LoadMedia { media_ids, .. } => Some(media_ids),
+            _ => None,
+        })
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        requested,
+        vec![picture.id.as_str()],
+        "one fetch per picture"
+    );
+
+    // A second frame does not ask again (the id is in flight).
+    frame(&mut app, &mut term);
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, crate::app::intent::AppIntent::LoadMedia { .. })),
+        "an in-flight id must not be requested twice"
+    );
+}
+
+#[test]
+fn a_failed_fetch_is_not_requested_again_while_the_picture_is_on_screen() {
+    let picture = media_ref(b"missing object", 400, 300);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 48);
+    frame(&mut app, &mut term);
+    app.drain_intents();
+
+    app.images.media_failed(&picture.id);
+    frame(&mut app, &mut term);
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, crate::app::intent::AppIntent::LoadMedia { .. })),
+        "a failure is a state, not a retry loop"
+    );
+}
+
+/// The two-tier rule for user pictures: with no way to draw, the bubble is exactly the
+/// label form it has always had.
+#[test]
+fn a_lane_that_cannot_draw_renders_the_user_label_form() {
+    let picture = media_ref(b"some bytes", 400, 300);
+    let mut off = app_with_images(ImagesMode::Off, kitty(), None);
+    off.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut off_term = test_terminal(60, 24);
+    let baseline = frame(&mut off, &mut off_term);
+    assert!(!has_placeholder(&baseline));
+
+    // A text-only message whose text *is* the label form renders the same cells: the label
+    // path is the pre-existing rendering, character for character.
+    let mut plain = app_with_images(ImagesMode::Auto, kitty(), None);
+    plain.chat.push(ChatCell::UserMessage(
+        "看这张\n[Image #1 400×300 10B]".into(),
+    ));
+    let mut plain_term = test_terminal(60, 24);
+    assert_eq!(
+        frame(&mut plain, &mut plain_term),
+        baseline,
+        "off mode == the label text, cell for cell"
+    );
+
+    let mut incapable = app_with_images(ImagesMode::Auto, ImageSupport::disabled(), None);
+    incapable.chat.push(user_cell("看这张", vec![picture]));
+    let mut incapable_term = test_terminal(60, 24);
+    assert_eq!(
+        frame(&mut incapable, &mut incapable_term),
+        baseline,
+        "an incapable terminal must not differ either"
+    );
+}
+
+#[test]
+fn a_discarded_user_picture_stays_a_label() {
+    // 墓碑态：一张没被划掉的图会让人以为它发出去了。
+    let bytes = png_bytes(200, 200);
+    let picture = media_ref(&bytes, 200, 200);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.images
+        .supply_media(&picture.id, std::sync::Arc::new(bytes));
+    app.chat.push(ChatCell::DiscardedUserMessage(
+        crate::ui::chat_view::media::UserMessageBody::new("没发出去", vec![picture]),
+    ));
+    let mut term = test_terminal(60, 24);
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf), "the tombstone never draws pixels");
+    assert!(row_with(&buf, "[Image #1 200×200").is_some());
+}
+
+/// 提交（本机字节已知）→ pending 气泡立刻有图：引用是按内容寻址预测的，字节直接进 lane，
+/// 不必等一次上传往返，也不必再抓一次；promote 之后缓存命中，不重编码。
+#[test]
+fn a_submitted_picture_draws_before_the_upload_lands() {
+    let bytes = png_bytes(200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    let picture = crate::util::image_compress::CompressedImage {
+        bytes: bytes.clone(),
+        width: 200,
+        height: 150,
+    };
+    app.submit_message(crate::ui::input_area::SubmitPayload {
+        text: "看这张".into(),
+        images: vec![crate::ui::input_area::ImagePayload {
+            image: picture.clone(),
+            label: "[Image #1 200×150 1KB]".into(),
+        }],
+    });
+    // 引用是预测的（内容寻址 = 上传端点会返回的那个 id）。
+    let expected = crate::protocol::media_id_of(&bytes);
+    let (request_id, seen) = {
+        let pending = &app.chat.pending[0];
+        let ChatCell::PendingUserMessage(body) = pending.cell.cell() else {
+            panic!("expected a pending user message");
+        };
+        assert_eq!(body.media.len(), 1);
+        (
+            pending.request_id.clone(),
+            (
+                body.media[0].id.clone(),
+                body.media[0].width,
+                body.media[0].height,
+            ),
+        )
+    };
+    assert_eq!(seen, (expected, 200, 150));
+
+    let mut term = test_terminal(60, 40);
+    let buf = draw_until(&mut app, &mut term, "the submitted picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    assert!(has_placeholder(&buf));
+    // 本机字节已经在 lane 里：不需要抓，也就没有抓取意图。
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, crate::app::intent::AppIntent::LoadMedia { .. })),
+        "bytes in hand are never fetched"
+    );
+
+    // promote 只搬 body：同一 id 命中编码缓存（不再有一次 Pending 的空白）。
+    assert!(app.chat.promote_pending(&request_id));
+    let buf = frame(&mut app, &mut term);
+    assert!(has_placeholder(&buf), "promote 不打断已画出来的图");
+}
+
+/// 滚动回归（评审 [B]1）：气泡的文本比 cell 顶早一行（1 行上内边距 + `Paragraph::scroll(skip-1)`），
+/// 图块必须用同一对数字定位。任何一级滚动后图都应落在 caption 行上——之前 `img_skip` 少减了那一行，
+/// 图会整体上移一行、被 caption 闸门整张拒掉（只剩空盒子）。
+#[test]
+fn a_scrolled_user_picture_stays_on_its_caption_row() {
+    let bytes = png_bytes(200, 150);
+    let picture = media_ref(&bytes, 200, 150);
+
+    for up in [0usize, 1, 2, 3, 8] {
+        // A bubble taller than the viewport: its top padding is scrolled away early.
+        let body = (0..12)
+            .map(|i| format!("正文 {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+        app.chat.push(user_cell(&body, vec![picture.clone()]));
+        let mut term = test_terminal(60, 20);
+
+        // 先在没有字节的时候滚到位：caption 还没被图盖住，它的行就是图该落的那一行。
+        let mut buf = frame(&mut app, &mut term);
+        for _ in 0..up {
+            app.chat.scroll_up(1);
+            buf = frame(&mut app, &mut term);
+        }
+        let Some(caption_row) = row_with(&buf, "▢ Image #1 · 200×150") else {
+            // 滚到 caption 都不在屏幕上了：图当然也不该出现。
+            app.images
+                .supply_media(&picture.id, std::sync::Arc::new(bytes.clone()));
+            let buf = frame(&mut app, &mut term);
+            assert!(
+                !has_placeholder(&buf),
+                "up={up}: nothing on screen, nothing painted"
+            );
+            continue;
+        };
+
+        app.images
+            .supply_media(&picture.id, std::sync::Arc::new(bytes.clone()));
+        let buf = draw_until(&mut app, &mut term, "the picture", |_, buf| {
+            has_placeholder(buf)
+        });
+        let painted = placeholder_rect(&buf).expect("painted");
+        assert_eq!(
+            painted.y, caption_row,
+            "up={up}: the picture must start on its caption row"
+        );
+    }
+}
+
+/// 回执 → 落账 → 编码 → 画出来：这是抓取链路的最后一段（评审 [S]2 指出的接缝）。
+#[test]
+fn a_media_receipt_turns_into_a_picture() {
+    let bytes = png_bytes(200, 150);
+    let picture = media_ref(&bytes, 200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 32);
+
+    // 第一帧：没有字节，只有 caption。
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf));
+    assert!(row_with(&buf, "▢ Image #1 · 200×150").is_some());
+
+    // 后台抓取回来了（回执走的是事件循环既有的 fetch 通道）。
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::MediaBytes {
+            media_id: picture.id.clone(),
+            result: Ok(std::sync::Arc::new(bytes)),
+        },
+    });
+    let buf = draw_until(&mut app, &mut term, "the fetched picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    assert!(placeholder_rect(&buf).is_some());
+}
+
+/// 抓取失败的回执：caption 留着，且这一代内容里不再重试（失败是一种状态）。
+#[test]
+fn a_failed_media_receipt_keeps_the_caption_and_stops_asking() {
+    let picture = media_ref(b"object is gone", 200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 32);
+    frame(&mut app, &mut term);
+    app.drain_intents();
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::MediaBytes {
+            media_id: picture.id.clone(),
+            result: Err("404 media not found".into()),
+        },
+    });
+    let buf = frame(&mut app, &mut term);
+    assert!(!has_placeholder(&buf));
+    assert!(row_with(&buf, "▢ Image #1 · 200×150").is_some());
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, crate::app::intent::AppIntent::LoadMedia { .. })),
+        "a failure is a state, not a retry loop"
+    );
+}
+
+/// 抓取任务本身：打的是 `GET /api/session/media`（带 session 与 id），字节原样回执；
+/// 没有连接时立刻回失败（lane 不会被永久挂在「在飞」上）。
+#[tokio::test]
+async fn the_media_fetch_asks_the_gateway_and_reports_the_bytes_back() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let bytes = png_bytes(120, 90);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let served = bytes.clone();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    {
+        let seen = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let served = served.clone();
+                let seen = std::sync::Arc::clone(&seen);
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        head.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&head).to_string();
+                    let target = head.split(' ').nth(1).unwrap_or_default().to_string();
+                    seen.lock().unwrap().push(target);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n",
+                        served.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&served).await;
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+    }
+
+    let http = wing_api_client::GatewayClient::new(base, None).expect("client");
+    let media_id = "a".repeat(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::spawn_media_fetch(Some(http), "sid-7".into(), vec![media_id.clone()], tx);
+    let receipt = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("a receipt")
+        .expect("payload");
+    match receipt.payload {
+        crate::app::intent::FetchPayload::MediaBytes {
+            media_id: got,
+            result,
+        } => {
+            assert_eq!(got, media_id);
+            assert_eq!(
+                *result.expect("bytes"),
+                bytes,
+                "字节原样回来（非 JSON 通道）"
+            );
+        }
+        _ => panic!("expected a media receipt"),
+    }
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [format!(
+            "/api/session/media?session_id=sid-7&media_id={media_id}"
+        )],
+        "读的是字节直出端点，参数就是契约"
+    );
+
+    // 没有连接：立刻回失败（不把图永远挂在在飞）。
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::spawn_media_fetch(None, "sid-7".into(), vec![media_id.clone()], tx);
+    let receipt = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("a receipt")
+        .expect("payload");
+    assert!(matches!(
+        receipt.payload,
+        crate::app::intent::FetchPayload::MediaBytes { result: Err(_), .. }
+    ));
+}
+
+/// 换会话期间回来的抓取回执不能被会话守卫丢掉（评审 [B]1）：字节是内容寻址的，而 lane 的
+/// 「在飞」只在回执里按 id 撤销——丢一次就永久漏一张，切回原会话也只有空盒子。
+#[test]
+fn a_media_receipt_survives_a_session_switch() {
+    let bytes = png_bytes(200, 150);
+    let picture = media_ref(&bytes, 200, 150);
+    let mut app = app_with_images(ImagesMode::Auto, kitty(), None);
+    app.chat.push(user_cell("看这张", vec![picture.clone()]));
+    let mut term = test_terminal(60, 32);
+    // 第一帧：登记在飞（抓取意图发出去）。
+    frame(&mut app, &mut term);
+    app.drain_intents();
+
+    // 回执在半路，用户切走了会话。
+    app.session_id = "another-session".into();
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::MediaBytes {
+            media_id: picture.id.clone(),
+            result: Ok(std::sync::Arc::new(bytes)),
+        },
+    });
+
+    // 切回来：字节已经在 lane 里，图立刻能画（不是「永远空盒子」）。
+    app.session_id = "test-session".into();
+    let buf = draw_until(
+        &mut app,
+        &mut term,
+        "the picture after the switch",
+        |_, buf| has_placeholder(buf),
+    );
+    assert!(placeholder_rect(&buf).is_some());
 }

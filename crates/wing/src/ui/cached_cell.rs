@@ -237,7 +237,10 @@ fn image_candidates_of(
         }
     };
     for span in anchors.iter().flatten() {
-        push(span.path.clone());
+        // 媒体锚点不参与头信息探测：形状由 `MediaRef` 自带（见 `ui::chat_view::media`）。
+        if let Some(path) = span.source.as_file() {
+            push(path.to_path_buf());
+        }
     }
     for span in links.iter().flatten() {
         if let Ok(path) = resolve_image_path(opts.workspace(), &span.target) {
@@ -664,6 +667,17 @@ impl CachedCell {
 
         if !cached_valid {
             let composed = self.cell.render_lines(width, ctx);
+            // `width` is the cell's box; a user message renders its text in an inset area
+            // (2 left, 1 right), so the row walk and the "does every line fit" test below
+            // must measure against the width its lines actually wrap at.
+            let content_width = match &self.cell {
+                ChatCell::UserMessage(_)
+                | ChatCell::PendingUserMessage(_)
+                | ChatCell::DiscardedUserMessage(_) => {
+                    width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB)
+                }
+                _ => width,
+            };
             // The row arithmetic is what the link hit boxes and the image
             // anchors depend on: a line wider than the render area is wrapped
             // by `Paragraph` into two screen rows, and every link/anchor row
@@ -672,7 +686,7 @@ impl CachedCell {
             // (`wrap::is_prose_line`), so an over-wide code line in the same
             // cell really does break the mapping — measure and refuse rather
             // than point a click or a picture at the wrong rows.
-            let rows_exact = !composed.has_spans() || composed.rows_are_exact(width);
+            let rows_exact = !composed.has_spans() || composed.rows_are_exact(content_width);
             // The pictures' own row arithmetic: an over-wide line above an
             // anchor wraps into extra rows and pushes it down, and the widget's
             // `Paragraph` scroll counts rows — so the anchor's screen row is the
@@ -682,7 +696,7 @@ impl CachedCell {
             let needs_row_walk =
                 !rows_exact && composed.images().iter().any(|spans| !spans.is_empty());
             let image_rows = if needs_row_walk {
-                image_rows_in_wrapped_rows(composed.lines(), composed.images(), width)
+                image_rows_in_wrapped_rows(composed.lines(), composed.images(), content_width)
             } else {
                 Vec::new()
             };
@@ -780,7 +794,7 @@ impl CachedCell {
             ChatCell::UserMessage(_)
             | ChatCell::PendingUserMessage(_)
             | ChatCell::DiscardedUserMessage(_) => {
-                let text_width = width.saturating_sub(3);
+                let text_width = width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB);
                 Paragraph::new(lines.to_vec())
                     .wrap(Wrap { trim: false })
                     .line_count(text_width)
@@ -976,7 +990,10 @@ mod tests {
         assert_eq!(anchor.column, 2, "the cell prefix shifts the box");
         assert_eq!(anchor.cols, width - 2);
         assert_eq!(anchor.rows, expected_rows);
-        assert_eq!(anchor.path, std::path::PathBuf::from("/ws/plot.png"));
+        assert_eq!(
+            anchor.source,
+            crate::render::picture::PictureSource::File(std::path::PathBuf::from("/ws/plot.png"))
+        );
         assert_eq!(anchor.alt, "销售趋势");
         assert_eq!(
             anchor.rows_range().end - anchor.line,
@@ -1153,12 +1170,107 @@ mod tests {
         // (`ComposedLines::has_spans`), see the `links` module tests.
     }
 
+    // ── User-message pictures (media anchors) ──────────────────────
+
+    fn media_picture() -> crate::protocol::MediaRef {
+        crate::protocol::MediaRef {
+            id: "a".repeat(64),
+            mime: "image/jpeg".into(),
+            bytes: 4096,
+            width: 800,
+            height: 600,
+            name: None,
+        }
+    }
+
+    fn user_body(text: &str, media: Vec<crate::protocol::MediaRef>) -> ChatCell {
+        ChatCell::UserMessage(crate::ui::chat_view::media::UserMessageBody::new(
+            text, media,
+        ))
+    }
+
+    #[test]
+    fn a_user_picture_projects_its_block_geometry() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let opts = ImageOpts::anchor(None, Vec::new(), LAYOUT_CELL);
+        let ctx = image_ctx(&palette, &layout, &opts);
+        let mut cell = CachedCell::new(user_body("看这张", vec![media_picture()]));
+
+        let width = 80u16;
+        let text_width = width - 3;
+        let expected_rows = crate::render::markdown::anchor_rows(
+            text_width,
+            crate::render::markdown::ImageShape::new(800, 600),
+            LAYOUT_CELL,
+        );
+        let (span, lines) = {
+            let frame = cell.compute_cell_frame(width, &ctx);
+            assert!(frame.has_images());
+            let spans = frame.images.iter().flatten().collect::<Vec<_>>();
+            assert_eq!(spans.len(), 1);
+            let span = spans[0].clone();
+            assert_eq!(frame.lines[span.line].to_string(), "▢ Image #1 · 800×600");
+            assert!(
+                matches!(span.source, crate::render::picture::PictureSource::Media(_)),
+                "user pictures are media objects"
+            );
+            (span, frame.lines.len())
+        };
+        assert_eq!(span.column, 2, "the bubble's left inset");
+        assert_eq!(span.cols, text_width, "the bubble's text width");
+        assert_eq!(span.rows, expected_rows);
+        assert_eq!(lines, 1 + usize::from(expected_rows), "正文 + 图块");
+        assert_eq!(
+            cell.compute_height(width, &ctx),
+            lines + 2,
+            "气泡的上下各一行内边距"
+        );
+
+        // With pictures off the same cell is the label form (no anchors, two lines).
+        let off = test_ctx(&palette, &layout);
+        let frame = cell.compute_cell_frame(width, &off);
+        assert!(!frame.has_images());
+        assert_eq!(frame.lines.len(), 2);
+        assert_eq!(frame.lines[1].to_string(), "[Image #1 800×600 4KB]");
+    }
+
+    /// A wrapped line above the anchor pushes it down by the extra rows — measured at the
+    /// bubble's **text** width, not the cell's.
+    #[test]
+    fn an_over_wide_user_line_moves_the_picture_to_its_wrapped_row() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let opts = ImageOpts::anchor(None, Vec::new(), LAYOUT_CELL);
+        let ctx = image_ctx(&palette, &layout, &opts);
+        let text = format!("{}\n\n", "字".repeat(60));
+        let mut cell = CachedCell::new(user_body(&text, vec![media_picture()]));
+
+        let width = 40u16;
+        let (span_line, span_row, rows_exact) = {
+            let frame = cell.compute_cell_frame(width, &ctx);
+            let span = frame
+                .images
+                .iter()
+                .flatten()
+                .next()
+                .cloned()
+                .expect("anchor");
+            (span.line, frame.image_row(span.line), frame.rows_exact)
+        };
+        assert!(!rows_exact, "60 CJK columns do not fit 37 columns of text");
+        assert!(
+            span_row > span_line,
+            "the wrapped line above pushes the picture down: row {span_row} vs line {span_line}"
+        );
+    }
+
     #[test]
     fn test_cached_cell_width_change() {
         let palette = ThemePalette::default();
         let layout = LayoutConfig::default();
         let ctx = test_ctx(&palette, &layout);
-        let mut cell = CachedCell::new(ChatCell::UserMessage("a ".repeat(100)));
+        let mut cell = CachedCell::new(ChatCell::UserMessage("a ".repeat(100).into()));
         let h_narrow = cell.compute_height(40, &ctx);
         let h_wide = cell.compute_height(120, &ctx);
         assert!(h_narrow >= h_wide);

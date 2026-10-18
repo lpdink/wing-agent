@@ -333,7 +333,10 @@ fn print_anchors(
             anchor.rows,
             anchor.px_w,
             anchor.px_h,
-            anchor.path,
+            match &anchor.source {
+                wing::render::picture::PictureSource::File(path) => path.display().to_string(),
+                wing::render::picture::PictureSource::Media(id) => format!("media:{id}"),
+            },
         )?;
     }
     Ok(())

@@ -45,6 +45,7 @@ chrono = { workspace = true }
 wing-api-client = { path = "../wing-api-client" }
 wing-math = { path = "../wing-math" }
 agent-client-protocol = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = "1"

@@ -22,6 +22,10 @@ pub enum ApiClientError {
     #[error("failed to deserialize response: {0}")]
     Deserialize(#[from] serde_json::Error),
 
+    /// 响应体超过了客户端上限（字节直出端点：远端可以无限流，缓冲要有界）。
+    #[error("response body exceeds the client limit of {limit} bytes")]
+    TooLarge { limit: usize },
+
     /// API key 含非法 HTTP header 字符。
     #[error("invalid API key for HTTP header: {0}")]
     InvalidApiKey(#[from] reqwest::header::InvalidHeaderValue),

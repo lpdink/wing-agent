@@ -1328,7 +1328,7 @@ fn test_accepted_event_promotes_pending() {
         app.chat
             .cells
             .iter()
-            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "hello"))
+            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s.text == "hello"))
     );
 }
 
@@ -1358,7 +1358,7 @@ fn test_done_flushes_remaining_pending() {
         app.chat
             .cells
             .iter()
-            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "hello"))
+            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s.text == "hello"))
     );
 }
 
@@ -1464,7 +1464,7 @@ fn test_interrupted_discards_pending() {
         app.chat
             .cells
             .iter()
-            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "hello")),
+            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s.text == "hello")),
         "interrupted pending message must be committed as discarded, not lost"
     );
 }
@@ -1492,13 +1492,13 @@ fn test_interrupted_discards_only_reported_requests() {
         app.chat
             .cells
             .iter()
-            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "dropped"))
+            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s.text == "dropped"))
     );
     assert!(
         !app.chat
             .cells
             .iter()
-            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s == "survives"))
+            .any(|c| matches!(c.cell(), ChatCell::DiscardedUserMessage(s) if s.text == "survives"))
     );
 
     app.handle_event(accepted_event(&survives_id));
@@ -1507,7 +1507,7 @@ fn test_interrupted_discards_only_reported_requests() {
         app.chat
             .cells
             .iter()
-            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s == "survives"))
+            .any(|c| matches!(c.cell(), ChatCell::UserMessage(s) if s.text == "survives"))
     );
 }
 

@@ -403,7 +403,19 @@ impl App {
         // files that changed on disk: re-read them rather than trusting the memo.
         self.images.set_structure_epoch(self.chat.structure_epoch());
         let candidates = self.chat.image_candidates();
-        self.images.sync(&candidates)
+        let changed = self.images.sync(&candidates);
+        // Media pictures: what the frame asked for and the lane does not have becomes one
+        // background fetch (the intent is drained after this draw). Media objects are
+        // immutable and session-scoped, so a batch that is still in flight is simply not
+        // asked for again (`media_requests` owns that bookkeeping).
+        let wanted = self.images.media_requests();
+        if !wanted.is_empty() {
+            self.push_intent(AppIntent::LoadMedia {
+                session_id: self.session_id.clone(),
+                media_ids: wanted,
+            });
+        }
+        changed
     }
 
     /// The picture lane's freshness check — the event loop's half of

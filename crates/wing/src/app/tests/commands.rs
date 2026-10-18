@@ -377,7 +377,7 @@ fn test_submit_jumps_to_bottom_and_queues_pending() {
     assert_eq!(app.chat.pending.len(), 1);
     assert!(matches!(
         app.chat.pending[0].cell.cell(),
-        ChatCell::PendingUserMessage(s) if s == "hi"
+        ChatCell::PendingUserMessage(s) if s.text == "hi"
     ));
 }
 
