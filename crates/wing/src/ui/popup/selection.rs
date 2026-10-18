@@ -126,7 +126,8 @@ pub struct SelectionState {
     pub selected: usize,
     /// Number of items in the list.
     pub count: usize,
-    /// Scroll offset (first visible index).
+    /// Scroll offset — the first row the list *wants* drawn. 版面给的矩形装不下
+    /// `max_visible` 条时由 [`visible_window`] 校正，这里记的是导航侧的意图。
     pub scroll: usize,
     /// Maximum number of items visible at once (scroll window size, in items).
     /// Single-line popups use [`MAX_VISIBLE_ROWS`]; double-line session popups
@@ -241,6 +242,51 @@ pub fn popup_height(rows: &[SelectionRow], max_visible: usize) -> u16 {
 /// Default visible-item window for rich (double-line) session popups.
 pub fn rich_max_visible() -> usize {
     MAX_VISIBLE_RICH_ROWS
+}
+
+/// 一个高 `height` 的矩形里装得下多少条行（整行装不下就停在它前面）。
+///
+/// 与 [`popup_height`] 同一条口径（按行高累加、从第 0 条起算），所以「要了多高」
+/// 与「装得下几条」永远是同一份数学。
+fn rows_fitting(rows: &[SelectionRow], height: u16) -> usize {
+    let mut used = 0usize;
+    for (idx, row) in rows.iter().enumerate() {
+        used += row.height();
+        if used > height as usize {
+            return idx;
+        }
+    }
+    rows.len()
+}
+
+/// 这一帧真正画得出来的行窗口（`first..end`，单位是**条目**，不是行）。
+///
+/// [`SelectionState::scroll`] 只是导航侧的意图：它按 `max_visible` 条维护窗口，
+/// 而版面给 popup 的矩形未必有 `max_visible` 条那么高 —— 矮终端上输入卡下面只
+/// 剩下几行、开屏里弹层是挂在输入卡下面的浮层（见 `app::splash_popup`），都被
+/// 裁过。窗口因此**以矩形为准**：装不下时取 `min(max_visible, 装得下的条数)`，
+/// 并把 `selected` 夹进窗口。否则滚到底时选中的那一条正好落在画不出来的那半截
+/// 里 —— 上下键看得见列表在动，却看不见它停在哪一条上。
+///
+/// 窗口语义沿用 [`SelectionState`]：先钉住 `scroll`，选中项越界才滑；到底时
+/// 窗口贴住列表尾部（露出的是最后几条，不是被裁掉的那几条）。
+fn visible_window(
+    rows: &[SelectionRow],
+    state: &SelectionState,
+    height: u16,
+) -> std::ops::Range<usize> {
+    let window = rows_fitting(rows, height).min(state.max_visible);
+    if window == 0 {
+        return 0..0;
+    }
+    let selected = state.selected.min(rows.len() - 1);
+    let mut first = state.scroll.min(rows.len() - window);
+    if selected < first {
+        first = selected;
+    } else if selected >= first + window {
+        first = selected + 1 - window;
+    }
+    first..first + window
 }
 
 /// Highlight matching characters in the name with bold+underline.
@@ -508,10 +554,13 @@ impl Widget for SelectionPopup<'_> {
             .unwrap_or(10)
             .min(area.width as usize / 2);
 
-        // Render visible rows, advancing y by each row's height.
+        // 画窗口里的行。`visible_window` 已经保证了每条都装得下（`rows_fitting`
+        // 与 `popup_height` 同一份数学），两个 `bottom` 判断是**矩形栅栏**：
+        // 万一行高不再整齐（混排），宁可少画一条也不许画到矩形外去覆盖邻座
+        // 的控件（`buf.set_line` 只按缓冲区裁剪，不认这个矩形）。
         let bottom = area.y + area.height;
         let mut y = area.y;
-        for idx in self.state.scroll..self.rows.len() {
+        for idx in visible_window(self.rows, self.state, area.height) {
             if y >= bottom {
                 break;
             }
@@ -522,7 +571,7 @@ impl Widget for SelectionPopup<'_> {
 
             if let Some(rich) = &row.rich {
                 if y + 1 >= bottom {
-                    break; // not enough room for both lines
+                    break;
                 }
                 self.render_rich_row(
                     rich,
@@ -631,6 +680,103 @@ mod tests {
         assert_eq!(popup_height(&rows, MAX_VISIBLE_RICH_ROWS), 6);
         // Capped by max_visible: 2 rich rows × 2 = 4.
         assert_eq!(popup_height(&rows, 2), 4);
+    }
+
+    /// `count` 条双行 session 行（标题 `title-NN`）。
+    fn rich_rows(count: usize) -> Vec<SelectionRow> {
+        (0..count)
+            .map(|i| session_row(SessionStatus::Idle, "07-22 21:41", &format!("title-{i:02}")))
+            .collect()
+    }
+
+    #[test]
+    fn test_rows_fitting_counts_whole_rows_only() {
+        // 与 `popup_height` 同一份数学：装不下整条就停在它前面（rich 行两行一条，
+        // 奇数高的矩形最后那条只露出半截 —— 那半截不画）。
+        assert_eq!(rows_fitting(&[], 10), 0);
+        let plain: Vec<SelectionRow> = (0..5).map(|i| plain_row(format!("r{i}"), "")).collect();
+        assert_eq!(rows_fitting(&plain, 0), 0);
+        assert_eq!(rows_fitting(&plain, 3), 3);
+        assert_eq!(rows_fitting(&plain, 99), 5);
+
+        let rich = rich_rows(5);
+        assert_eq!(rows_fitting(&rich, 1), 0);
+        assert_eq!(rows_fitting(&rich, 7), 3);
+        assert_eq!(rows_fitting(&rich, 8), 4);
+        assert_eq!(rows_fitting(&rich, 99), 5);
+    }
+
+    #[test]
+    fn test_visible_window_is_the_state_scroll_when_the_rect_fits() {
+        // 矩形装得下策略窗口时渲染侧不改任何东西（会话里的常规版式）。
+        let rich = rich_rows(12);
+        let mut state = SelectionState::with_max_visible(rich.len(), MAX_VISIBLE_RICH_ROWS);
+        assert_eq!(visible_window(&rich, &state, 12), 0..6);
+        for _ in 0..7 {
+            state.move_down();
+        }
+        assert_eq!(state.scroll, 2);
+        assert_eq!(visible_window(&rich, &state, 12), 2..8);
+        assert_eq!(
+            visible_window(&rich, &state, 40),
+            2..8,
+            "更高的矩形不改变窗口"
+        );
+    }
+
+    #[test]
+    fn test_visible_window_shrinks_to_the_rect_and_keeps_the_selection_inside() {
+        // 矩形只有 7 行 = 3 条 rich 行，而策略窗口是 6 条：滚到底时窗口贴住尾部，
+        // 选中的最后一条必须落在窗口里（它曾经正好落在画不出来的那半截）。
+        let rich = rich_rows(12);
+        let mut state = SelectionState::with_max_visible(rich.len(), MAX_VISIBLE_RICH_ROWS);
+        for _ in 0..rich.len() - 1 {
+            state.move_down();
+        }
+        assert_eq!((state.selected, state.scroll), (11, 6));
+        let window = visible_window(&rich, &state, 7);
+        assert_eq!(window, 9..12, "窗口按矩形收缩并贴住尾部");
+        assert!(
+            window.contains(&state.selected),
+            "选中的这条在窗口里：{window:?} vs {}",
+            state.selected
+        );
+
+        // 选中项跑到窗口外（窗口比策略窗口小、scroll 还钉在上面）时窗口跟着它滑。
+        let mut state = SelectionState::with_max_visible(rich.len(), MAX_VISIBLE_RICH_ROWS);
+        state.select(9);
+        assert_eq!(visible_window(&rich, &state, 7), 7..10);
+        // 往上走不滑：只要选中项还在窗口里，窗口就钉住 `scroll`。
+        state.select(7);
+        assert_eq!(visible_window(&rich, &state, 7), 5..8);
+        state.select(6);
+        assert_eq!(visible_window(&rich, &state, 7), 4..7);
+
+        // 连一条 rich 行都装不下 → 什么都不画（不是画半条出去）。
+        assert_eq!(visible_window(&rich, &state, 1), 0..0);
+    }
+
+    #[test]
+    fn test_visible_window_covers_the_last_item_of_a_short_plain_list() {
+        // 单行窗口 8 条，矩形只有 7 行：最后一条不能掉在矩形外面。
+        let plain: Vec<SelectionRow> = (0..10).map(|i| plain_row(format!("r{i:02}"), "")).collect();
+        let mut state = SelectionState::new(plain.len());
+        for _ in 0..plain.len() - 1 {
+            state.move_down();
+        }
+        assert_eq!((state.selected, state.scroll), (9, 2));
+        assert_eq!(visible_window(&plain, &state, 7), 3..10);
+    }
+
+    #[test]
+    fn test_visible_window_clamps_a_stale_selection() {
+        // rows 变短（过滤收窄）时 selected 可能还没被 `set_count` 夹住：窗口按
+        // 列表尾部算，不越界。
+        let plain: Vec<SelectionRow> = (0..3).map(|i| plain_row(format!("r{i}"), "")).collect();
+        let mut state = SelectionState::with_max_visible(3, 8);
+        state.selected = 9;
+        assert_eq!(visible_window(&plain, &state, 8), 0..3);
+        assert_eq!(visible_window(&plain, &state, 0), 0..0);
     }
 
     #[test]
@@ -950,6 +1096,82 @@ mod tests {
             icon_col(&lines[0]),
             icon_col(&lines[1]),
             "the branch column must not depend on the star: {lines:?}"
+        );
+    }
+
+    /// 渲染一帧，返回 (缓冲区, 行文本)。
+    fn render_frame(
+        rows: &[SelectionRow],
+        state: &SelectionState,
+        area: Rect,
+    ) -> (Buffer, Vec<String>, ThemePalette) {
+        let palette = ThemePalette::default();
+        let mut buf = Buffer::empty(area);
+        SelectionPopup::new(rows, state, "", &palette).render(area, &mut buf);
+        let lines = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (buf, lines, palette)
+    }
+
+    /// 一帧里**被选中**（背景 = palette.dim）的那些行文本。
+    fn highlighted_rows(rows: &[SelectionRow], state: &SelectionState, area: Rect) -> Vec<String> {
+        let (buf, lines, palette) = render_frame(rows, state, area);
+        (area.y..area.bottom())
+            .filter(|&y| (area.x..area.right()).any(|x| buf[(x, y)].bg == palette.dim))
+            .map(|y| lines[(y - area.y) as usize].clone())
+            .collect()
+    }
+
+    #[test]
+    fn test_a_rect_shorter_than_the_window_still_draws_the_selected_row() {
+        // 12 条 session（策略窗口 6 条 = 12 行），矩形只给 7 行 —— 开屏里弹层挂在
+        // 输入卡下面就是这个形状。滚到底时选中的最后一条必须画在矩形里：原来窗口
+        // 按 6 条算，画面只画得下 3 条，高亮的那一条正好落在被裁掉的半截里。
+        let rows = rich_rows(12);
+        let mut state = SelectionState::with_max_visible(rows.len(), MAX_VISIBLE_RICH_ROWS);
+        for _ in 0..rows.len() - 1 {
+            state.move_down();
+        }
+        let area = Rect::new(0, 0, 40, 7);
+        let highlighted = highlighted_rows(&rows, &state, area);
+        assert_eq!(highlighted.len(), 2, "选中项的两行都在：{highlighted:?}");
+        assert!(
+            highlighted[0].contains("/ws/wing") && highlighted[1].contains("title-11"),
+            "高亮的是选中的最后一条：{highlighted:?}"
+        );
+        // 画出来的正好是尾部三条（不是开头三条）：滚到底看得见的是列表末尾。
+        let (_, lines, _) = render_frame(&rows, &state, area);
+        let text = lines.join("\n");
+        assert!(
+            text.contains("title-09") && text.contains("title-10"),
+            "{text}"
+        );
+        assert!(!text.contains("title-00"), "开头的行已经不在了：{text}");
+    }
+
+    #[test]
+    fn test_a_rect_one_row_short_still_draws_the_last_plain_item() {
+        // 单行窗口 8 条、矩形 7 行（开屏里常见）：最后一条也要画得出来。
+        let rows: Vec<SelectionRow> = (0..10)
+            .map(|i| plain_row(format!("cmd-{i:02}"), "desc"))
+            .collect();
+        let mut state = SelectionState::new(rows.len());
+        for _ in 0..rows.len() - 1 {
+            state.move_down();
+        }
+        let area = Rect::new(0, 0, 40, 7);
+        let highlighted = highlighted_rows(&rows, &state, area);
+        assert_eq!(highlighted.len(), 1, "{highlighted:?}");
+        assert!(
+            highlighted[0].contains("cmd-09"),
+            "最后一条被高亮：{highlighted:?}"
         );
     }
 
