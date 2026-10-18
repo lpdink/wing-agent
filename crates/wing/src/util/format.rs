@@ -19,18 +19,38 @@ pub fn tokens(n: i64) -> String {
     }
 }
 
-/// 容量记法：整数位（`500k` / `1M`）—— 给"分母"用。
+/// 容量记法：`128k` / `500k` / `1M` / `1.5M` —— 给"上限"用（上下文窗口、保留量）。
 ///
-/// 窗口大小天生是整数量级，`500.0k` 里的 `.0` 只让人以为量到了个位；而
-/// `0 / 500.0k` 这种读数在状态栏上像一块仪表。已用量仍走 [`tokens`]（那位小数
-/// 是真的在动）。
-pub fn tokens_round(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.0}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.0}k", n as f64 / 1_000.0)
-    } else {
-        format!("{n}")
+/// 与 [`tokens`] 的差别是**可扫读**：整数量级不写 `.0`（`500k` 而不是 `500.0k`，
+/// 那位小数只让人以为量到了个位），非整数保留一位。舍入不许把读数推进下一档的
+/// 位数 —— `999_950` 报 `1M` 而不是 `1000k`（走档）。
+///
+/// 记法只有一份：model picker 的 ctx 列与状态栏的 `0 / 500k` 都读它，否则同一个
+/// 窗口会在两处显示成两个数。
+pub fn tokens_capacity(n: u64) -> String {
+    const SCALES: [(u64, char); 3] = [(1_000, 'k'), (1_000_000, 'M'), (1_000_000_000, 'G')];
+    if n < SCALES[0].0 {
+        return n.to_string();
+    }
+    let mut index = 0;
+    for (i, (unit, _)) in SCALES.iter().enumerate() {
+        if n >= *unit {
+            index = i;
+        }
+    }
+    loop {
+        let (unit, suffix) = SCALES[index];
+        let value = n as f64 / unit as f64;
+        // 记法会舍入，差一点到下一档的数会读成 `1000k` —— 走一档（`999_950` → `1M`）。
+        if value.round() >= 1_000.0 && index + 1 < SCALES.len() {
+            index += 1;
+            continue;
+        }
+        return if (value - value.round()).abs() < 0.05 {
+            format!("{:.0}{suffix}", value.round())
+        } else {
+            format!("{value:.1}{suffix}")
+        };
     }
 }
 
@@ -83,6 +103,21 @@ mod tests {
         assert_eq!(tokens(1_200), "1.2k");
         assert_eq!(tokens(120_500), "120.5k");
         assert_eq!(tokens(3_400_000), "3.4M");
+    }
+
+    #[test]
+    fn the_capacity_notation_drops_the_zero_and_walks_a_scale() {
+        assert_eq!(tokens_capacity(0), "0");
+        assert_eq!(tokens_capacity(999), "999");
+        assert_eq!(tokens_capacity(1_000), "1k");
+        assert_eq!(tokens_capacity(128_000), "128k");
+        assert_eq!(tokens_capacity(131_072), "131.1k");
+        assert_eq!(tokens_capacity(500_000), "500k");
+        assert_eq!(tokens_capacity(1_000_000), "1M");
+        assert_eq!(tokens_capacity(1_500_000), "1.5M");
+        // 舍入不许把读数推进下一档的位数：差一点到 1M 的报 `1M`，不是 `1000k`。
+        assert_eq!(tokens_capacity(999_950), "1M");
+        assert_eq!(tokens_capacity(999_999), "1M");
     }
 
     #[test]

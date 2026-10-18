@@ -418,7 +418,8 @@ impl Welcome {
             }
         }
 
-        let pad = top_pad(view.height, lines.len(), view.empty);
+        // 尾部那一格空行也算块高：它和牌子的最后一行是同一块版面的一部分。
+        let pad = top_pad(view.height, lines.len() + 1, view.empty);
         let mut out = Vec::with_capacity(pad + lines.len() + 1);
         out.resize(pad, Line::from(""));
         out.append(&mut lines);
@@ -437,6 +438,11 @@ fn top_pad(height: u16, block_rows: usize, empty: bool) -> usize {
         return 1;
     }
     let slack = (height as usize).saturating_sub(block_rows);
+    // 余量为 0（块正好填满视口）时不留白：`.max(1)` 会凭空多出一行，让 header
+    // 比视口还高、顶部那格被滚掉 —— 与注释说的"退回一格"不符。
+    if slack == 0 {
+        return 0;
+    }
     (slack * HERO_CENTER_PCT as usize / 100).max(1)
 }
 
@@ -815,32 +821,40 @@ mod tests {
     #[test]
     fn every_line_fits_every_width() {
         // 核心不变量：任何宽度下都不能有行超出（Paragraph 不换行，超了就是被切）。
+        // 两种版面各跑一遍：**有消息**（左对齐，x_pad = 0）与**空会话**（整块水平
+        // 居中，x_pad > 0）—— 后者正是"块宽"与"每行宽度"分成两个量的地方，
+        // 少测一遍就少了一层保护。
         let palette = palette();
+        let views = |width: u16| {
+            [
+                Viewport::width_only(width),
+                Viewport {
+                    width,
+                    height: 24,
+                    empty: true,
+                },
+            ]
+        };
         for width in 2u16..200 {
             let now = Instant::now();
             for working in [false, true] {
                 for facts in [None, facts(2, 1), facts(12, 130)] {
-                    let mut w = welcome();
-                    let lines = w.build(
-                        &palette,
-                        Viewport::width_only(width),
-                        now,
-                        working,
-                        true,
-                        facts,
-                    );
-                    for line in &lines {
-                        assert!(
-                            line_width(line) <= width as usize,
-                            "width={width} working={working} facts={facts:?} 行超宽：{line:?}"
-                        );
+                    for view in views(width) {
+                        let mut w = welcome();
+                        let lines = w.build(&palette, view, now, working, true, facts);
+                        for line in &lines {
+                            assert!(
+                                line_width(line) <= width as usize,
+                                "width={width} empty={} working={working} facts={facts:?} \
+                                 行超宽：{line:?}",
+                                view.empty
+                            );
+                        }
                     }
                 }
             }
         }
     }
-
-    // ── 会话事实行 ────────────────────────────────────────
 
     #[test]
     fn facts_line_carries_the_counts_with_correct_plurals() {
@@ -1060,7 +1074,7 @@ mod tests {
         );
     }
 
-    // ── 信息卡与大字档位 ──────────────────────────────────
+    // ── 名牌、分节线与大字档位 ────────────────────────────
 
     #[test]
     fn the_info_column_never_overflows_the_art_box() {

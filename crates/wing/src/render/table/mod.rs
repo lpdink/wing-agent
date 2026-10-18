@@ -7,9 +7,9 @@
 //!
 //! Everything here works on numbers and string measurements only: no
 //! `ratatui` styles, no assumption about which frontend is drawing — [`plain`]
-//! must stay paintable without them. The welcome nameplate deliberately draws
-//! its own skin and does **not** come through here: it is a letterhead, not a
-//! table (see `docs/dev/welcome-mascot.md`).
+//! must stay paintable without them. The welcome nameplate shares only the
+//! width-splitting primitive ([`split_str_by_width`]) and none of the skin:
+//! it is a letterhead, not a table (see `docs/dev/welcome-mascot.md`).
 //!
 //! The width policy (which column gives up width first, which one is preserved
 //! last) is a product decision that lives in [`compute_column_widths`] —

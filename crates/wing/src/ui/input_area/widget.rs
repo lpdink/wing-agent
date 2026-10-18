@@ -108,14 +108,20 @@ impl Widget for ComposerWidget<'_> {
 
             // The prompt glyph opens the draft — first visual row of the first
             // logical line only; every other row keeps the text alignment.
-            // Accent in both states: it is the one glyph that says "you can
-            // type here", and on an empty session it is the only accent the
-            // composer has (the workdir rail carries the other one).
+            //
+            // 常态 accent：它是"这里可以打字"的那个字形，也是空会话里 composer 唯一的
+            // accent（另一处在 workdir rail）。但**键盘被别的层接管**时整张卡都不能
+            // 编辑（正文已被画成 dim），光标还亮着就是在说反话。
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
+                let ink = if self.keyboard_held {
+                    self.palette.dim
+                } else {
+                    self.palette.accent
+                };
                 buf.set_span(
                     area.x + chrome::PROMPT_X,
                     y,
-                    &Span::styled(chrome::PROMPT, Style::default().fg(self.palette.accent)),
+                    &Span::styled(chrome::PROMPT, Style::default().fg(ink)),
                     2,
                 );
             }

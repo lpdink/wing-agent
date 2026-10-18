@@ -326,11 +326,13 @@ impl Widget for StatusBar<'_> {
             // 空的轨道用细横线而不是 `░`：25% 阴影块在暗底上读起来是"满格的灰条"，
             // 空会话的 `0/500.0k` 因此恰好长得像用完了（截图里就是这么骗人的）。
             right_spans.push(Span::styled("─".repeat(empty), dim));
+            // 两侧同一套记法：`100k / 200k`。混用（`100.0k / 200k`）会让读数看起来
+            // 像两个不同精度的仪表拼在一起。
             right_spans.push(Span::styled(
                 format!(
                     " {} / {}",
-                    format::tokens(d.total_tokens),
-                    format::tokens_round(d.context_window_tokens),
+                    format::tokens_capacity(d.total_tokens.max(0) as u64),
+                    format::tokens_capacity(d.context_window_tokens.max(0) as u64),
                 ),
                 dim,
             ));
@@ -730,6 +732,45 @@ mod tests {
         let star = regions.star.unwrap();
         assert_eq!(slice(&text, star), "★", "pinned is a filled star");
         assert!(!text.contains(&"☆".to_string()));
+    }
+
+    #[test]
+    fn test_the_context_meter_reads_zero_on_a_fresh_session() {
+        // 空会话的读数必须**看起来是空的**：旧的空轨道用 `░`（25% 阴影块），
+        // 暗底上就是一整条灰带 —— `0/500.0k` 因此长得像"用完了"。轨道换成细横线，
+        // 分母走容量记法（`500k`，不是 `500.0k`）。
+        let data = StatusData {
+            model: "m".into(),
+            total_tokens: 0,
+            context_window_tokens: 500_000,
+            ..StatusData::default()
+        };
+        let (text, _) = render_bar(&data, SID, 120);
+        let joined = text.join("");
+        assert!(joined.contains("0 / 500k"), "读数：{joined:?}");
+        assert!(!joined.contains('░'), "空轨道不该是阴影块：{joined:?}");
+        assert!(
+            joined.contains(&"─".repeat(10)),
+            "10 格空轨道都是细横线：{joined:?}"
+        );
+    }
+
+    #[test]
+    fn test_the_context_meter_fills_with_success_ink() {
+        // 半满：5 格实心 + 5 格细线，数字仍是 `100k / 200k`。
+        let data = StatusData {
+            model: "m".into(),
+            total_tokens: 100_000,
+            context_window_tokens: 200_000,
+            ..StatusData::default()
+        };
+        let (text, _) = render_bar(&data, SID, 120);
+        let joined = text.join("");
+        assert!(
+            joined.contains(&format!("{}─────", "█".repeat(5))),
+            "{joined:?}"
+        );
+        assert!(joined.contains("100k / 200k"), "读数：{joined:?}");
     }
 
     #[test]

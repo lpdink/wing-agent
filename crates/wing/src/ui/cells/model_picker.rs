@@ -71,6 +71,7 @@ use crate::shared::panels::PANEL_WINDOW;
 use crate::shared::panels::SelectionPanel;
 use crate::shared::panels::picker::ModelPanel;
 use crate::shared::panels::window_range;
+use crate::util::format::tokens_capacity;
 
 /// The card never grows past this.
 const CARD_MAX_WIDTH: usize = 88;
@@ -138,44 +139,11 @@ fn catalog_metrics(panel: &ModelPanel) -> (usize, usize) {
         for detail in &group.models {
             max_label = max_label.max(detail.display_label().width());
             if let Some(tokens) = detail.context_window_tokens {
-                max_ctx = max_ctx.max(ctx_label(tokens).width());
+                max_ctx = max_ctx.max(tokens_capacity(tokens).width());
             }
         }
     }
     (max_label, max_ctx)
-}
-
-/// Compact context-window notation: `128k` / `500k` / `1M` / `1.5M`.
-///
-/// [`tokens`](crate::util::format::tokens) keeps one decimal (`500.0k`) — right
-/// for a single reading, too noisy for a scannable column. Values landing on a
-/// whole unit drop the fraction, the rest keep one digit.
-fn ctx_label(tokens: u64) -> String {
-    const SCALES: [(u64, char); 3] = [(1_000, 'k'), (1_000_000, 'M'), (1_000_000_000, 'G')];
-    if tokens < SCALES[0].0 {
-        return tokens.to_string();
-    }
-    let mut index = 0;
-    for (i, (unit, _)) in SCALES.iter().enumerate() {
-        if tokens >= *unit {
-            index = i;
-        }
-    }
-    loop {
-        let (unit, suffix) = SCALES[index];
-        let value = tokens as f64 / unit as f64;
-        // The notation rounds, so a value just short of the next scale would
-        // read as `1000k` — walk up a scale instead (`999_950` → `1M`).
-        if value.round() >= 1_000.0 && index + 1 < SCALES.len() {
-            index += 1;
-            continue;
-        }
-        return if (value - value.round()).abs() < 0.05 {
-            format!("{:.0}{suffix}", value.round())
-        } else {
-            format!("{value:.1}{suffix}")
-        };
-    }
 }
 
 /// Clip `text` to `max` columns, marking the cut with `…`.
@@ -198,7 +166,7 @@ fn count_text(models: usize) -> String {
 fn ctx_text(detail: &ModelDetail) -> String {
     detail
         .context_window_tokens
-        .map(ctx_label)
+        .map(tokens_capacity)
         .unwrap_or_default()
 }
 
@@ -743,7 +711,7 @@ fn detail_line(panel: &ModelPanel, inner: usize, palette: &ThemePalette) -> Line
             parts.push(format!("id {}", detail.id));
         }
         if let Some(keep) = detail.keep_recent_tokens {
-            parts.push(format!("keep {}", ctx_label(keep)));
+            parts.push(format!("keep {}", tokens_capacity(keep)));
         }
         if let Some(description) = detail
             .description
@@ -1150,20 +1118,20 @@ mod tests {
     /// The ctx notation drops a whole-unit fraction and keeps one digit
     /// otherwise: `1M` / `1.5M` / `131.1k` / `500k` / `999`.
     #[test]
-    fn ctx_label_is_compact() {
-        assert_eq!(ctx_label(999), "999");
-        assert_eq!(ctx_label(1_000), "1k");
-        assert_eq!(ctx_label(128_000), "128k");
-        assert_eq!(ctx_label(131_072), "131.1k");
-        assert_eq!(ctx_label(500_000), "500k");
-        assert_eq!(ctx_label(1_000_000), "1M");
-        assert_eq!(ctx_label(1_048_576), "1M");
-        assert_eq!(ctx_label(1_500_000), "1.5M");
+    fn the_capacity_notation_is_compact() {
+        assert_eq!(tokens_capacity(999), "999");
+        assert_eq!(tokens_capacity(1_000), "1k");
+        assert_eq!(tokens_capacity(128_000), "128k");
+        assert_eq!(tokens_capacity(131_072), "131.1k");
+        assert_eq!(tokens_capacity(500_000), "500k");
+        assert_eq!(tokens_capacity(1_000_000), "1M");
+        assert_eq!(tokens_capacity(1_048_576), "1M");
+        assert_eq!(tokens_capacity(1_500_000), "1.5M");
         // Rounding must not push a reading into the next scale's digits.
-        assert_eq!(ctx_label(999_950), "1M");
-        assert_eq!(ctx_label(999_999), "1M");
-        assert_eq!(ctx_label(999_999_999), "1G");
-        assert_eq!(ctx_label(999), "999");
+        assert_eq!(tokens_capacity(999_950), "1M");
+        assert_eq!(tokens_capacity(999_999), "1M");
+        assert_eq!(tokens_capacity(999_999_999), "1G");
+        assert_eq!(tokens_capacity(999), "999");
     }
 
     /// A label wider than its column clips with `…` and never pushes the data

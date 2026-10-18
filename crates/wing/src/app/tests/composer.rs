@@ -229,6 +229,11 @@ fn test_a_held_keyboard_ghosts_the_draft() {
         palette.dim,
         "the frozen draft is drawn as inactive text"
     );
+    assert_eq!(
+        buf[(text_x - 2, text_y)].fg,
+        palette.dim,
+        "❯ 一起变暗：光标不能一边说\"可以打字\"、一边把正文画成不可编辑"
+    );
     // The panel closes: the draft is live again, in the message's own color,
     // and its glyph takes the accent back.
     app.ask_panels.clear();

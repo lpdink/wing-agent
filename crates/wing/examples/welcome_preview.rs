@@ -180,8 +180,8 @@ fn draw(
     let dashes = "─".repeat((width as usize).saturating_sub(label.len() + 4));
     let _ = writeln!(out, "── {label} {dashes}");
     for line in &lines {
-        // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的行会被
-        // 截掉最后一列（信息卡的右边框正好在那里）。
+        // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的那一行
+        // 会被截掉最后一列（分节线正好画到那里 —— 它的长度就是块宽）。
         out.push_str(&render_line(line, width + 1, plain));
         out.push('\n');
     }
