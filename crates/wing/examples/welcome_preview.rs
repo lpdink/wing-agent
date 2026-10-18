@@ -18,6 +18,11 @@
 //! # 会话事实行的两种样子：`2 skills · 1 rule`（默认）/ 什么都没加载
 //! cargo run -p wing --example welcome_preview -- --facts 2,1
 //! cargo run -p wing --example welcome_preview -- --facts 0,0
+//!
+//! # 开屏版面：给定视口高，看整块落在光学中心（空会话）还是顶对齐（有消息）
+//! # （真机里输入卡紧贴牌子下面；这里只画牌子与它上方的空气）
+//! cargo run -p wing --example welcome_preview -- --width 120 --height 32
+//! cargo run -p wing --example welcome_preview -- --width 120 --height 32 --filled
 //! ```
 //!
 //! 画的就是 TUI 里那一份：与 `App::sync_welcome` 同一个 `Welcome::build`，
@@ -37,7 +42,9 @@ use unicode_width::UnicodeWidthStr;
 use wing::config::ThemePalette;
 use wing::ui::welcome::SWEEP_MS;
 use wing::ui::welcome::SessionFacts;
+use wing::ui::welcome::Viewport;
 use wing::ui::welcome::Welcome;
+use wing::ui::welcome::splash_pad;
 
 /// 前景 / 背景的 SGR 参数（`38;` / `48;` 之后接的那一段）。
 fn sgr(color: Option<Color>) -> Option<String> {
@@ -131,6 +138,8 @@ fn render_line(line: &Line<'_>, width: u16, plain: bool) -> String {
 #[allow(clippy::too_many_arguments)] // 预览的参数就是真 `build` 的参数 + 打印开关
 fn draw(
     width: u16,
+    height: u16,
+    empty: bool,
     phase: Option<f32>,
     working: bool,
     ms: u64,
@@ -148,7 +157,8 @@ fn draw(
         None => ms,
     };
     let now = started + Duration::from_millis(at);
-    let lines = welcome.build(&palette, width, now, working, true, facts);
+    let view = Viewport { width, empty };
+    let lines = welcome.build(&palette, view, now, working, true, facts);
 
     let label = match phase {
         Some(p) => format!("width={width} sweep={:.0}%", p * 100.0),
@@ -159,11 +169,27 @@ fn draw(
     } else {
         label
     };
+    let label = if height > 0 {
+        let band = if empty { "空会话" } else { "有消息" };
+        format!("{label} h={height} {band}")
+    } else {
+        label
+    };
     let dashes = "─".repeat((width as usize).saturating_sub(label.len() + 4));
     let _ = writeln!(out, "── {label} {dashes}");
+    // 开屏的空气由 App 的版式给（见 `app::frame_layout`）：这里按同一份数学
+    // 补上上方的空行，"牌子停在光学中心"就是真机上看到的位置。
+    let pad = if empty {
+        splash_pad(height, lines.len() as u16, 1 + 2 + 1)
+    } else {
+        0
+    };
+    for _ in 0..pad {
+        out.push('\n');
+    }
     for line in &lines {
-        // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的行会被
-        // 截掉最后一列（信息卡的右边框正好在那里）。
+        // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的那一行
+        // 会被截掉最后一列（分节线正好画到那里 —— 它的长度就是块宽）。
         out.push_str(&render_line(line, width + 1, plain));
         out.push('\n');
     }
@@ -200,6 +226,11 @@ fn main() {
     let plain = std::env::args().any(|a| a == "--plain");
     let working = std::env::args().any(|a| a == "--working");
     let width = argument("--width").and_then(|v| v.parse::<u16>().ok());
+    let height = argument("--height")
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(0);
+    // 没给 --height 就是"只画块"：不居中，等同于已经有消息的会话。
+    let empty = height > 0 && !std::env::args().any(|a| a == "--filled");
     let phase = argument("--phase").and_then(|v| v.parse::<f32>().ok());
     let ms = argument("--ms")
         .and_then(|v| v.parse::<u64>().ok())
@@ -208,19 +239,36 @@ fn main() {
 
     let mut out = String::new();
     match width {
-        Some(width) => draw(width, phase, working, ms, plain, facts, &mut out),
+        Some(width) => draw(
+            width, height, empty, phase, working, ms, plain, facts, &mut out,
+        ),
         None => {
             for width in [120u16, 96, 80, 70, 60, 40, 24] {
-                draw(width, None, false, 0, plain, facts, &mut out);
+                draw(width, height, empty, None, false, 0, plain, facts, &mut out);
             }
             for phase in [0.0f32, 0.25, 0.5, 0.75] {
-                draw(96, Some(phase), false, 0, plain, facts, &mut out);
+                draw(
+                    96,
+                    height,
+                    empty,
+                    Some(phase),
+                    false,
+                    0,
+                    plain,
+                    facts,
+                    &mut out,
+                );
             }
             // 两个姿态各来一张：待机标准姿势 / 干活飞行。
-            draw(96, None, false, 0, plain, facts, &mut out);
-            draw(96, None, true, 0, plain, facts, &mut out);
+            draw(96, height, empty, None, false, 0, plain, facts, &mut out);
+            draw(96, height, empty, None, true, 0, plain, facts, &mut out);
             // 事实行缺席的样子（0/0 或老网关）。
-            draw(96, None, false, 0, plain, None, &mut out);
+            draw(96, height, empty, None, false, 0, plain, None, &mut out);
+            // 开屏版面：同一块，空会话（居中）vs 有消息（顶对齐）。
+            if height == 0 {
+                draw(100, 32, true, None, false, 0, plain, facts, &mut out);
+                draw(100, 32, false, None, false, 0, plain, facts, &mut out);
+            }
         }
     }
     let mut stdout = std::io::stdout();

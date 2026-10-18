@@ -1100,7 +1100,9 @@ mod session_list {
         app.input.set_text("/ss");
         app.update_popup_from_input();
 
-        let mut term = test_terminal(60, 24);
+        // 32 行：开屏版式下牌子占 12 行、输入卡 3 行，剩下的空气要放得下整张
+        // 会话列表（`MAX_VISIBLE_ROWS` = 8）。
+        let mut term = test_terminal(60, 32);
         draw(&mut app, &mut term);
         let buf = term.backend().buffer();
         let rows: Vec<String> = (buf.area.y..buf.area.bottom())

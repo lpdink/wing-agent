@@ -847,14 +847,22 @@ fn previewing_rebuilds_the_welcome_header_with_the_new_palette() {
     // 因此只可能来自主题（姿态只换字形，不换每个字母的取色）。
     let settled = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let palette = app.palette();
-    app.sync_welcome(&palette, 120, settled);
+    app.sync_welcome(
+        &palette,
+        crate::ui::welcome::Viewport::width_only(120),
+        settled,
+    );
     let before = header_colors(&app);
     assert!(!before.is_empty(), "header 有色可用");
 
     app.apply_settings_preview(&json!({"colors": {"accent": "cyan"}}));
     assert!(app.welcome_theme_dirty, "调色板变了，header 要重建一次");
     let palette = app.palette();
-    app.sync_welcome(&palette, 120, settled);
+    app.sync_welcome(
+        &palette,
+        crate::ui::welcome::Viewport::width_only(120),
+        settled,
+    );
     assert!(!app.welcome_theme_dirty, "重建一次即清");
     let after = header_colors(&app);
     assert_ne!(
