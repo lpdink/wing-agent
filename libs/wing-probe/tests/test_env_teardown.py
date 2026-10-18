@@ -15,6 +15,7 @@ import os
 import signal
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -59,6 +60,36 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+async def _wait_for_pid_file(path: Path, *, timeout: float) -> None:
+    """等 ``path`` 出现且非空（让出事件循环，不阻塞假网关的调度）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text(encoding="utf-8").strip():
+            return
+        await asyncio.sleep(0.02)
+
+
+def _real_health_wait_after_pid(
+    pid_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``wait_for_health`` 换成「先等假网关写出 pid，再交给真实实现」。
+
+    假网关是 fork 出来的 shell：8 worker 并行时它可能还没被调度到 ``echo $$`` 就被
+    ``_terminate_process()`` 收掉（健康检查超时窗口只有 0.3s），pid 文件永不出现——
+    用例在**读 pid** 那一步假红（本机 ``-n 8`` 三跑两中）。先握手再放行超时分支：
+    被测路径（超时 → ``ProbeEnvError`` → 收尸）一字不变，竞态消失。
+    """
+    from wing_probe import env as probe_env
+
+    real = probe_env.wait_for_health
+
+    async def _wait_for_health(url: str, **kwargs: Any) -> None:
+        await _wait_for_pid_file(pid_file, timeout=5.0)
+        await real(url, **kwargs)
+
+    monkeypatch.setattr("wing_probe.env.wait_for_health", _wait_for_health)
+
+
 @pytest.mark.asyncio
 @pytest.mark.timeout(60)
 async def test_start_failure_terminates_the_spawned_gateway(
@@ -72,6 +103,7 @@ async def test_start_failure_terminates_the_spawned_gateway(
 
     # terminate 的等待窗口压到 0.2s：本用例只验"收干净"，不验真实关停的耐心。
     monkeypatch.setattr("wing_probe.env.DEFAULT_SHUTDOWN_WAIT", 0.2)
+    _real_health_wait_after_pid(pid_file, monkeypatch)
 
     from wing_probe.env import ProbeEnv
 
@@ -100,6 +132,7 @@ async def test_stop_is_safe_after_start_failure(
     fake_gateway.chmod(0o755)
     pid_file = tmp_path / "child.pid"
     monkeypatch.setattr("wing_probe.env.DEFAULT_SHUTDOWN_WAIT", 0.2)
+    _real_health_wait_after_pid(pid_file, monkeypatch)
 
     from wing_probe.env import ProbeEnv
 
@@ -141,15 +174,6 @@ async def _explode_with(
     """
     await _wait_for_pid_file(pid_file, timeout=5.0)
     raise exc
-
-
-async def _wait_for_pid_file(path: Path, *, timeout: float) -> None:
-    """等 ``path`` 出现且非空（让出事件循环，不阻塞假网关的调度）。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists() and path.read_text(encoding="utf-8").strip():
-            return
-        await asyncio.sleep(0.02)
 
 
 @pytest.mark.asyncio
