@@ -286,12 +286,11 @@ fn visible_window(
         return 0..0;
     }
     let selected = state.selected.min(rows.len() - 1);
-    let mut first = state.scroll.min(rows.len() - window);
-    if selected < first {
-        first = selected;
-    } else if selected >= first + window {
-        first = selected + 1 - window;
-    }
+    // 窗口必须包住选中项：`first` 落在 `[selected + 1 - window, selected]` 里。
+    // 导航侧本来就维持着这个区间（先钉住 `scroll`，越界才滑），只有窗口被矩形
+    // 缩小之后两者才会分开 —— 夹取把「高亮永远在画出来的范围里」写成一句。
+    let lo = (selected + 1).saturating_sub(window);
+    let first = state.scroll.min(rows.len() - window).clamp(lo, selected);
     first..first + window
 }
 
