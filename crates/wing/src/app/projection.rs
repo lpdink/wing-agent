@@ -330,6 +330,7 @@ impl App {
                 cached_tokens,
                 tokens_per_sec,
                 first_chunk_rt_ms,
+                cache_expected_tokens,
                 ..
             } => {
                 self.status.session_prompt_tokens += prompt_tokens;
@@ -342,6 +343,8 @@ impl App {
                     cached_tokens,
                     tokens_per_sec,
                     ttft_ms: first_chunk_rt_ms,
+                    // `None`（旧网关 / 无参照）与 0 同义：理论水位未知。
+                    cache_expected_tokens: cache_expected_tokens.unwrap_or(0).max(0),
                 };
 
                 tracing::debug!(

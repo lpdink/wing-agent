@@ -362,6 +362,15 @@ pub enum WingEvent {
         /// Termination cause (end_turn / max_tokens / tool_use / stop / length).
         #[serde(default)]
         stop_reason: Option<String>,
+        /// 理论可命中 token（缓存账本探针；旧网关 / 无参照 → None）。
+        #[serde(default)]
+        cache_expected_tokens: Option<i64>,
+        /// 归因判定（`hit` / `prefix_broken` / …；空串 = 未计算）。
+        #[serde(default)]
+        cache_verdict: String,
+        /// 分叉点的 label（空串 = 无分叉）。
+        #[serde(default)]
+        cache_diverged: String,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -1241,6 +1250,86 @@ mod tests {
                 assert_eq!(context_window_tokens, 80000);
             }
             _ => panic!("expected ContextStats"),
+        }
+    }
+
+    /// 缓存账本探针的三个可选字段（契约 §5）：带字段的帧可读，缺字段的旧帧照样解码成功。
+    #[test]
+    fn deserialize_llm_call_metrics_with_and_without_the_cache_fields() {
+        let with_cache = r#"{
+            "type": "llm_call_metrics",
+            "model": "deepseek-v3",
+            "prompt_tokens": 14200,
+            "completion_tokens": 320,
+            "cached_tokens": 0,
+            "first_chunk_rt_ms": 210.0,
+            "tokens_per_sec": 42.5,
+            "cache_expected_tokens": 14200,
+            "cache_verdict": "prefix_broken",
+            "cache_diverged": "skills:pdf-tools",
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req-metrics"
+        }"#;
+        let event: WingEvent = serde_json::from_str(with_cache).unwrap();
+        match &event {
+            WingEvent::LlmCallMetrics {
+                cache_expected_tokens,
+                cache_verdict,
+                cache_diverged,
+                cached_tokens,
+                ..
+            } => {
+                assert_eq!(*cache_expected_tokens, Some(14_200));
+                assert_eq!(cache_verdict, "prefix_broken");
+                assert_eq!(cache_diverged, "skills:pdf-tools");
+                assert_eq!(*cached_tokens, 0);
+            }
+            _ => panic!("expected LlmCallMetrics"),
+        }
+
+        // 旧网关：三个键都不发 → 理论水位未知（None）、判定为空串，其余字段照旧可用。
+        let legacy = r#"{
+            "type": "llm_call_metrics",
+            "prompt_tokens": 900,
+            "completion_tokens": 12,
+            "cached_tokens": 700,
+            "first_chunk_rt_ms": 1.0,
+            "tokens_per_sec": 2.0,
+            "created_at": "2025-01-01T00:00:00",
+            "session_id": "abc123",
+            "request_id": "req-metrics"
+        }"#;
+        let event: WingEvent = serde_json::from_str(legacy).unwrap();
+        match &event {
+            WingEvent::LlmCallMetrics {
+                cache_expected_tokens,
+                cache_verdict,
+                cache_diverged,
+                prompt_tokens,
+                ..
+            } => {
+                assert_eq!(*cache_expected_tokens, None);
+                assert_eq!(cache_verdict, "");
+                assert_eq!(cache_diverged, "");
+                assert_eq!(*prompt_tokens, 900);
+            }
+            _ => panic!("expected LlmCallMetrics"),
+        }
+        assert_eq!(event.event_type(), "llm_call_metrics");
+
+        // 显式 null（中间代理改写）与缺席同义。
+        let nulled = legacy.replace(
+            r#""tokens_per_sec": 2.0,"#,
+            r#""tokens_per_sec": 2.0, "cache_expected_tokens": null,"#,
+        );
+        let event: WingEvent = serde_json::from_str(&nulled).unwrap();
+        match &event {
+            WingEvent::LlmCallMetrics {
+                cache_expected_tokens,
+                ..
+            } => assert_eq!(*cache_expected_tokens, None),
+            _ => panic!("expected LlmCallMetrics"),
         }
     }
 
