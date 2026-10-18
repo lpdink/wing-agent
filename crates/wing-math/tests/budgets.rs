@@ -103,9 +103,9 @@ fn brace_free_chains_hit_the_depth_gate_before_layout() {
     for (label, head, tail) in chains {
         let src = format!("{head}{tail}");
         assert!(src.chars().count() <= MAX_SOURCE_CHARS, "{label}");
-        let start = Instant::now();
-        assert!(render_block(&src).is_none(), "{label} should be rejected");
-        let elapsed = start.elapsed();
+        let elapsed = best_of(3, || {
+            assert!(render_block(&src).is_none(), "{label} should be rejected");
+        });
         assert!(
             elapsed < Duration::from_millis(100),
             "{label}: rejecting took {elapsed:?}（应当远在排版之前）"
@@ -142,9 +142,7 @@ fn row_and_column_separator_budgets_reject_before_laying_out() {
         r"\begin{{align}} {} \end{{align}}",
         vec!["a &= b"; MAX_ROW_SEPARATORS + 100].join(r" \\ ")
     );
-    let start = Instant::now();
-    assert!(render_block(&many_rows).is_none());
-    let elapsed = start.elapsed();
+    let elapsed = best_of(3, || assert!(render_block(&many_rows).is_none()));
     assert!(
         elapsed < Duration::from_millis(50),
         "rejecting {MAX_ROW_SEPARATORS}+ rows took {elapsed:?} (should be pre-layout)"
@@ -155,9 +153,7 @@ fn row_and_column_separator_budgets_reject_before_laying_out() {
         r"\begin{{array}}{{c}} {} \end{{array}}",
         vec!["1"; 1000].join(" & ")
     );
-    let start = Instant::now();
-    assert!(render_block(&many_cols).is_none());
-    let elapsed = start.elapsed();
+    let elapsed = best_of(3, || assert!(render_block(&many_cols).is_none()));
     assert!(
         elapsed < Duration::from_millis(50),
         "rejecting 1000 columns took {elapsed:?} (should be pre-layout)"
@@ -181,29 +177,28 @@ fn display_width_budget_is_the_callers() {
 fn budget_boundaries_are_fast() {
     // 越界输入应当在毫秒级被拒绝（先查预算、不做无谓排版）
     let huge = "x".repeat(MAX_SOURCE_CHARS + 1000);
-    let start = Instant::now();
-    for _ in 0..50 {
-        assert!(render_block(&huge).is_none());
-    }
-    let elapsed = start.elapsed();
+    let elapsed = best_of(3, || {
+        for _ in 0..50 {
+            assert!(render_block(&huge).is_none());
+        }
+    });
     assert!(
         elapsed < Duration::from_secs(2),
         "rejecting oversized input took {elapsed:?} for 50 iterations"
     );
 }
 
-/// 渲染一次并返回耗时（**取 3 次的最小值**：本套件与别的测试二进制并行跑时，
-/// 单次墙钟会被调度噪声抬高，最小值才是"没有被打断"的那次——用均值/单次会让
-/// 下面的比值断言假红）。
-fn best_of_three(src: &str) -> Duration {
-    (0..3)
+/// 采样 `samples` 次并返回**最小**耗时：本套件与别的测试二进制并行跑时，单次墙钟
+/// 会被调度噪声抬高——最小值是"没有被打断"的那次，毫秒级上界与耗时比值都该用它。
+fn best_of(samples: usize, mut run: impl FnMut()) -> Duration {
+    (0..samples)
         .map(|_| {
             let start = Instant::now();
-            let _ = render_block(src);
+            run();
             start.elapsed()
         })
         .min()
-        .expect("three samples")
+        .expect("at least one sample")
 }
 
 #[test]
@@ -212,7 +207,9 @@ fn long_flat_formulas_are_not_quadratic() {
     // 这里给一个宽松的上界（真实值远低于它），防止二次方路径回归。
     let src = "x + ".repeat(1000) + "y"; // 2001 项，4005 字符
     assert!(render_block(&src).unwrap().width() > 4000);
-    let elapsed = best_of_three(&src);
+    let elapsed = best_of(3, || {
+        let _ = render_block(&src);
+    });
     assert!(
         elapsed < Duration::from_millis(300),
         "2000-term formula took {elapsed:?} (quadratic regression?)"
@@ -220,7 +217,9 @@ fn long_flat_formulas_are_not_quadratic() {
 
     // 项数翻倍，耗时不应翻两倍以上（二次方会 ~4×）
     let src2 = "x + ".repeat(2000) + "y";
-    let doubled = best_of_three(&src2);
+    let doubled = best_of(3, || {
+        let _ = render_block(&src2);
+    });
     assert!(
         doubled < elapsed * 4,
         "doubling terms scaled {elapsed:?} -> {doubled:?} (quadratic?)"
