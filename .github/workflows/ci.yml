@@ -61,9 +61,11 @@ jobs:
       - name: Dead code detection (vulture)
         run: uv run vulture libs/ --min-confidence 70 --exclude .venv/
 
-      # 与本地同一条命令：core + SDK 两套单测（总量覆盖率只作参考，见 docs/dev/coverage.md）
+      # core + SDK 两套单测（总量覆盖率只作参考，见 docs/dev/coverage.md）。
+      # 必须走带覆盖率的 target：本地的 `make test-python` 为提速不带 `--cov`，
+      # 下游的 patch 门禁与评论要用 .coverage。
       - name: Unit tests
-        run: make test-python
+        run: make test-python-cov
 
       # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：测试挂掉时也要导 ——
       # 评论要能展示「低在哪」。--fail-under=0 关掉 coverage 自带的阈值检查

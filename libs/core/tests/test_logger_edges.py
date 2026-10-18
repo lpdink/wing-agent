@@ -51,6 +51,35 @@ class TestFormatter:
         formatter = _Formatter(root=Path("/tmp"), use_color=False, context=None)
         assert "\033[" not in formatter.format(_record())
 
+    def test_lone_surrogate_is_escaped_so_the_line_still_writes(self):
+        """孤立代理字符不得让整行日志丢失（文件按 utf-8 strict 写）。
+
+        同一份记录还会被 xdist 经 execnet 送回 controller——那里同样要求可编码，
+        原始码点会让整轮测试崩（`DumpError: strings must be utf-8 encodable`）。
+        """
+        from wing.common.logger import _PathFormatter as _Formatter
+
+        formatter = _Formatter(root=Path("/tmp"), use_color=False, context=None)
+        line = formatter.format(_record(msg="before\ud800after"))
+        assert line.encode("utf-8")  # 可编码 = 文件写与 execnet 都不会炸
+        assert "\\ud800" in line
+        assert "\ud800" not in line
+
+
+class TestLogExcerpt:
+    def test_truncates_before_escaping(self):
+        """截断先于转义：转义后的文本（6 字符/码点）不参与 50 字符预算。"""
+        from wing.common.logger import log_excerpt
+
+        assert log_excerpt("a" * 10 + "\ud800" + "b" * 10, 12) == (
+            "a" * 10 + "\\ud800" + "b"
+        )
+
+    def test_plain_text_passes_through_unchanged(self):
+        from wing.common.logger import log_excerpt
+
+        assert log_excerpt("hello 世界", 50) == "hello 世界"
+
 
 class TestSymlinkAndPrune:
     def test_symlink_failure_is_swallowed(self, tmp_path: Path, monkeypatch):

@@ -52,8 +52,24 @@ if [ -n "$SKIP_TS" ] && [ "$SKIP_TS" != "0" ]; then
 fi
 
 TMP_BASE="${TMPDIR:-/tmp}"
-LOG_DIR="${TMP_BASE%/}/wing-${MODE}-logs"
+# 日志目录按 checkout 分开：一台机器上并行开几个 worktree 是常态（见 AGENTS.md
+# 「Worktree 纪律」），而每个 worktree 里都有 agent 在跑 `make test`。共用一个目录
+# 时并发两轮会互相覆盖 .code / .dur / *.log——实测出现过「失败的组被判成通过」
+# （结论块读到了另一轮刚写下的 exit=0）。cksum 是 POSIX，macOS / Linux 都能用。
+ROOT_TAG="$(printf '%s' "$ROOT" | cksum | cut -d' ' -f1)"
+LOG_DIR="${TMP_BASE%/}/wing-${MODE}-logs-${ROOT_TAG}"
+# 目录带 tag 之后每个曾经存在过的 checkout 都会留一份：worktree 按纪律收走后
+# 没人回来删它。按目录里记下的 ROOT 判活，已消失的整份清掉。旧的无 tag 目录
+# （`wing-<mode>-logs`）没有 root 记录，不碰。
+for stale in "$TMP_BASE"/wing-*-logs-*; do
+  [ -d "$stale" ] && [ "$stale" != "$LOG_DIR" ] || continue
+  recorded="$(cat "$stale/root" 2>/dev/null || true)"
+  if [ -n "$recorded" ] && [ ! -d "$recorded" ]; then
+    rm -rf "$stale"
+  fi
+done
 mkdir -p "$LOG_DIR"
+printf '%s\n' "$ROOT" >"$LOG_DIR/root"
 
 # ── 并行执行（组间互不依赖；各自输出入独立日志，避免互相刷屏）──────
 # 串行执行时总耗时 = 各组之和；三组并行后 ≈ 最慢的一组。

@@ -73,6 +73,31 @@ LogContextProvider = Callable[[], LogContext | None]
 NO_CORRELATION = "wing_no_correlation"
 
 
+def utf8_safe(text: str) -> str:
+    """把非法码点（孤立代理字符）转成 ``\\ud800`` 这种可编码的文本形式。
+
+    合法 JSON 允许 ``"\\ud800"``，但它不是合法 UTF-8：日志文件按 utf-8 strict 写
+    会抛错（整行日志丢失），xdist 把 test report 经 execnet 送回 controller 时要求
+    字符串可编码（抛 ``DumpError``，整轮测试崩溃）。日志内容不该有能力打挂进程。
+    """
+    if text.isascii():
+        return text
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text
+
+
+def log_excerpt(text: str, limit: int) -> str:
+    """日志里的用户输入摘要：截断到 ``limit`` 字符并走 :func:`utf8_safe`。
+
+    回显用户输入的地方（routing / 队列摘要）专用：``content[:50]`` 这种原样切片
+    会把孤立代理字符带进日志记录，而记录还会被再序列化一次（见 ``utf8_safe``）。
+    """
+    return utf8_safe(text[:limit])
+
+
 class _PathFormatter(logging.Formatter):
     """行格式：``时间 - 级别 - [关联] - 路径:行号 - 消息``。
 
@@ -137,7 +162,7 @@ class _PathFormatter(logging.Formatter):
         record.relpath = f"{self._rel_path(record.pathname)}:{record.lineno}"
         record.correlation = self._correlation(record)
 
-        msg = super().format(record)
+        msg = utf8_safe(super().format(record))
         if self._use_color and record.levelname in _COLORS:
             return f"{_COLORS[record.levelname]}{msg}\033[0m"
         return msg

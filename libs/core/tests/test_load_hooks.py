@@ -11,7 +11,25 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from wing.hooks import load_hooks
+
+
+@pytest.fixture(autouse=True)
+def clean_global_hooks():
+    """擦掉进程级 registry：本文件把 hook 文件 import 进全局 ``hooks``，用完必须还原。
+
+    没擦干净的后果不是本文件红，而是**同一 worker 里后续的任意用例**：任何 post 用户
+    消息的用例都会被套上 ``[hooked] …`` / ``hook0(…)`` 前缀。串行时靠文件名顺序
+    （``test_inbox…`` 在 ``test_load_hooks`` 前面）侥幸躲过，xdist 下文件→worker 的
+    分配一变就红（``test_inbox_drain_merge`` 就是这么撞上的）。
+    """
+    from wing.hooks import hooks as global_hooks
+
+    global_hooks.clear()
+    yield
+    global_hooks.clear()
 
 
 class TestLoadHooks:

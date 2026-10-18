@@ -1,4 +1,4 @@
-.PHONY: check test test-python test-python-html test-rust test-rust-cov test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
+.PHONY: check test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -82,8 +82,19 @@ fmt-check-ts:
 gateway:
 	uv run wing-gateway
 
+# 单测并行度：默认 min(6, 核数)。3720 个用例里一半在等 I/O（asyncio 超时 / 子
+# 进程），实测单进程 33s → 6 进程 11s（10 核）。xdist 每个 worker 是独立进程，
+# 只看本文件内的状态；跨文件的时序耦合由 `--dist loadfile` 挡掉。
+PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 6 ]; then echo 6; else echo $$n; fi)
+PYTEST_WORKER_ARGS = $(if $(filter 1,$(PYTEST_WORKERS)),,--dist loadfile -n $(PYTEST_WORKERS))
+
+# 本地日常：不带覆盖率（`--cov` 让同一套用例多花 ~10s）。覆盖率数据只有 CI 的
+# patch 门禁与 PR 评论要，走 test-python-cov。
 test-python:
-	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ --cov
+	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ $(PYTEST_WORKER_ARGS)
+
+test-python-cov:
+	uv run pytest libs/core/tests/ libs/wing-sdk/tests/ --cov $(PYTEST_WORKER_ARGS)
 
 # 覆盖率 HTML 报告（本地排查用；总量口径见 pyproject 的 [tool.coverage.*] ——
 # 总量只作参考，PR 门禁是增量覆盖率：make patch-cov-python）
@@ -95,12 +106,12 @@ test-python-html:
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
 #
 # 并行度：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
-# 按核数铺开是安全的——实测全量 80s → 16s（12 核）。默认 min(8, 核数)：本机 12 核
-# 取 8（给 `make test` 里同时跑的 rust / ts 组留核），CI 的 4 核 runner 取 4。
+# 按核数铺开是安全的——实测全量 39s → 26s（10 核，worker 8 → 12；再往上到 16 只
+# 剩 1s，拐点在核数附近）。默认 min(12, 核数)：CI 的 4 核 runner 取 4。
 # PROBE_WORKERS 可覆盖；WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——
 # 只关组间并行等于没关。解析成 1 时不传 -n：逃生舱要的是原样的串行，不是
 # "xdist 里只开一个 worker"。
-PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
+PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 12 ]; then echo 12; else echo $$n; fi)
 PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,-n $(PROBE_WORKERS))
 
 test-probe:
@@ -186,11 +197,16 @@ patch-cov-rust:
 
 # Rust 测试：普通构建。本地默认走这条。
 #
+# 跨二进制并行（`scripts/test_rust_parallel.py`）：cargo 逐个跑测试二进制，53 个
+# 套件的耗时直接相加（本机实测 41s，最长的单个只有 11.5s）——脚本复用
+# `--no-run` 的产物自己按并发上限铺开，顺带把 doctests 丢进同一个池子。
+# RUST_TEST_ARGS 覆盖并行度（`-j <二进制数> -t <每套件线程数>`），排查并发干扰时用。
+#
 # 插桩构建会额外产出一整套 target/llvm-cov-target，并且与普通构建的产物互不通用
 # （见下面 test-rust-cov）——本地日常测试不需要为覆盖率付这个代价，覆盖率交给 CI 跑。
+RUST_TEST_ARGS ?=
 test-rust:
-	cargo test --workspace
-	cargo test --workspace --doc
+	uv run python scripts/test_rust_parallel.py $(RUST_TEST_ARGS)
 
 # Rust 测试（插桩构建；覆盖率产物供上面的增量门禁与 PR 评论复用）。
 # 本地只在需要复现覆盖率问题时才跑；CI 的 rust-check job 走这条。

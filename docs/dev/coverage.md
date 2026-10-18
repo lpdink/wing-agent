@@ -74,7 +74,8 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
 ## 本地复现
 
 ```bash
-make test-python        # Python 测试（总量参考）· make test-python-html → target/coverage-python/
+make test-python-cov    # Python 测试 + 覆盖率（本地日常的 make test-python 不带 --cov）
+make test-python-html   # 同上 + HTML 报告 → target/coverage-python/
 make test-rust          # Rust 测试（普通构建，不留插桩产物）
 make test-rust-cov      # Rust 测试（插桩构建）· make test-rust-html → target/coverage-rust/
 make patch-cov-python   # 增量门禁（基线 PATCH_BASE=origin/develop，可覆盖）

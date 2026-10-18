@@ -6,7 +6,54 @@
 //!   WING_BUILD_TIME   — UTC timestamp  (e.g. "2025-01-15 10:30:00 UTC")
 //!   WING_TARGET       — target triple   (e.g. "aarch64-apple-darwin")
 
+use std::path::PathBuf;
 use std::process::Command;
+
+/// `git rev-parse <arg>` 的路径结果（相对输出按当前目录解析——build script 的 cwd
+/// 就是包根，`--git-dir` 在主仓返回 `.git`）。git 不可用 / 不在仓库里返回 `None`。
+fn git_path(arg: &str) -> Option<PathBuf> {
+    let output = Command::new("git").args(["rev-parse", arg]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&text);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(std::env::current_dir().ok()?.join(path))
+    }
+}
+
+/// 把 git 状态挂进 cargo 的变更检测。
+///
+/// 只监视**存在**的路径：`rerun-if-changed` 指向缺失路径时 cargo 每次都判 dirty
+/// （`StaleItem(MissingFile)`）——worktree 的 `.git` 是文件不是目录，`.git/HEAD`
+/// 这类拼接路径在那里不存在。路径先规范化，`--git-dir` 的相对拼法与
+/// `--git-common-dir` 的绝对拼法指向同一个目录时只挂一次。
+fn watch_git_state() {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for arg in ["--absolute-git-dir", "--git-common-dir"] {
+        if let Some(dir) = git_path(arg).map(|dir| dir.canonicalize().unwrap_or(dir))
+            && !dirs.contains(&dir)
+        {
+            dirs.push(dir);
+        }
+    }
+    // HEAD 是「当前在哪个提交」的唯一来源；refs / packed-refs（后者在 common dir，
+    // worktree 自己的 git dir 只放 stash 一类的 per-worktree ref）跟着分支更新走。
+    for dir in &dirs {
+        for name in ["HEAD", "refs", "packed-refs"] {
+            let path = dir.join(name);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+}
 
 fn main() {
     // ── Git commit hash ───────────────────────────────────────────
@@ -39,10 +86,8 @@ fn main() {
     };
 
     println!("cargo:rustc-env=WING_COMMIT_HASH={commit}");
-
-    // Re-run when HEAD changes (checkout, commit, rebase, etc.).
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs");
+    println!("cargo:rerun-if-env-changed=WING_COMMIT_HASH");
+    watch_git_state();
 
     // ── Build time (UTC) ──────────────────────────────────────────
     let build_time = Command::new("date")

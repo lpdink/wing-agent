@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
-from wing.common.logger import log
+from wing.common.logger import log, log_excerpt
 from wing.common.utils import (
     InvalidInputError,
     generate_session_id,
@@ -1553,7 +1553,9 @@ class SessionManager:
                 content = expanded
 
         log.info(
-            f"SM._post: routing '{content[:50]}' to session.post (session={session_id})"
+            "SM._post: routing '%s' to session.post (session=%s)",
+            log_excerpt(content, 50),
+            session_id,
         )
         await session.post(
             content,

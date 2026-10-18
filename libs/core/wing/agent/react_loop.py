@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from wing.common.logger import log
+from wing.common.logger import log, utf8_safe
 from wing.common.with_retry import with_retry
 from wing.config import get_config
 from wing.hooks import hooks
@@ -224,7 +224,7 @@ class ReActLoop:
                     self._sink.done()
                     return
 
-                log.info(f"run with {message}, turn {ctx.num_turns}")
+                log.info("run with %s, turn %s", utf8_safe(str(message)), ctx.num_turns)
                 if not await self._llm_turn(ctx):
                     ctx.num_turns += 1
                     break

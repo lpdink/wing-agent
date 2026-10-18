@@ -13,7 +13,7 @@
 
 | 命令 | 做什么 |
 |------|--------|
-| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n <核数≤8>`） |
+| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n <核数≤12>`） |
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
@@ -26,11 +26,11 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `PROBE_WORKERS` | `min(8, 核数)` | 场景并行度（`make test-probe` 的 `-n`）。本机 12 核取 8（给 `make test` 里同时跑的 rust / ts 组留核），CI 的 4 核 runner 取 4。`WING_TEST_SERIAL=1` 同样归串行 |
+| `PROBE_WORKERS` | `min(12, 核数)` | 场景并行度（`make test-probe` 的 `-n`）。10 核实测 8 worker 39s → 12 worker 26s（16 worker 只再快 1s：拐点在核数附近）。CI 的 4 核 runner 取 4。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
 
-**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。跑起来也不吃 CPU（瓶颈是进程启动与 HTTP 握手这类等待，不是算力：8 worker 实测平均只占 1.35 核），所以并行度按核数铺开是安全的。实测全量 80s → 16s。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。瓶颈是进程启动与 HTTP 握手这类等待而非算力（12 worker 全量 27.7s 的墙钟只花掉 100s CPU，平均约占 3.6 核），所以并行度按核数铺开是安全的。实测全量 39s → 26s（10 核，8 → 12 worker）。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
