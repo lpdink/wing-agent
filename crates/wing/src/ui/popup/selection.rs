@@ -127,7 +127,8 @@ pub struct SelectionState {
     /// Number of items in the list.
     pub count: usize,
     /// Scroll offset — the first row the list *wants* drawn. 版面给的矩形装不下
-    /// `max_visible` 条时由 [`visible_window`] 校正，这里记的是导航侧的意图。
+    /// `max_visible` 条时渲染侧会按矩形收缩窗口（`visible_window`），这里记的是
+    /// 导航侧的意图。
     pub scroll: usize,
     /// Maximum number of items visible at once (scroll window size, in items).
     /// Single-line popups use [`MAX_VISIBLE_ROWS`]; double-line session popups
@@ -262,19 +263,24 @@ fn rows_fitting(rows: &[SelectionRow], height: u16) -> usize {
 /// 这一帧真正画得出来的行窗口（`first..end`，单位是**条目**，不是行）。
 ///
 /// [`SelectionState::scroll`] 只是导航侧的意图：它按 `max_visible` 条维护窗口，
-/// 而版面给 popup 的矩形未必有 `max_visible` 条那么高 —— 矮终端上输入卡下面只
-/// 剩下几行、开屏里弹层是挂在输入卡下面的浮层（见 `app::splash_popup`），都被
-/// 裁过。窗口因此**以矩形为准**：装不下时取 `min(max_visible, 装得下的条数)`，
-/// 并把 `selected` 夹进窗口。否则滚到底时选中的那一条正好落在画不出来的那半截
-/// 里 —— 上下键看得见列表在动，却看不见它停在哪一条上。
+/// 而版面给 popup 的矩形未必有 `max_visible` 条那么高（矮终端上被挤过的 popup 行、
+/// 开屏里挂在输入卡下面的浮层，见 `app::splash_popup`）。窗口因此**以矩形为准**：
+/// 取 `min(max_visible, 装得下的条数)`，再把窗口挪到包住 `selected` —— 选中的那一条
+/// 一定在画出来的范围里，否则高亮会停在视口外。
 ///
 /// 窗口语义沿用 [`SelectionState`]：先钉住 `scroll`，选中项越界才滑；到底时
 /// 窗口贴住列表尾部（露出的是最后几条，不是被裁掉的那几条）。
+///
+/// 前提：全列表行高一致（[`rows_fitting`] 从第 0 条起累加，见 [`popup_height`]）。
 fn visible_window(
     rows: &[SelectionRow],
     state: &SelectionState,
     height: u16,
 ) -> std::ops::Range<usize> {
+    debug_assert!(
+        rows.windows(2).all(|w| w[0].height() == w[1].height()),
+        "popup rows must share one height"
+    );
     let window = rows_fitting(rows, height).min(state.max_visible);
     if window == 0 {
         return 0..0;
@@ -558,6 +564,10 @@ impl Widget for SelectionPopup<'_> {
         // 与 `popup_height` 同一份数学），两个 `bottom` 判断是**矩形栅栏**：
         // 万一行高不再整齐（混排），宁可少画一条也不许画到矩形外去覆盖邻座
         // 的控件（`buf.set_line` 只按缓冲区裁剪，不认这个矩形）。
+        //
+        // `selected` 与窗口用同一条夹取口径：过界的陈旧下标两边都按最后一条算，
+        // 否则窗口正常却一条高亮都没有。
+        let selected = self.state.selected.min(self.rows.len().saturating_sub(1));
         let bottom = area.y + area.height;
         let mut y = area.y;
         for idx in visible_window(self.rows, self.state, area.height) {
@@ -565,7 +575,7 @@ impl Widget for SelectionPopup<'_> {
                 break;
             }
             let row = &self.rows[idx];
-            let is_selected = idx == self.state.selected;
+            let is_selected = idx == selected;
             let bg = if is_selected { dim_color } else { Color::Reset };
             let base_style = Style::default().bg(bg);
 
@@ -725,9 +735,27 @@ mod tests {
     }
 
     #[test]
+    fn test_rows_fitting_inverts_popup_height() {
+        // 「要了多高」与「装得下几条」是同一份数学：反过来也成立（两份实现由
+        // 这条性质钉在一起，改一份必须同时改另一份）。
+        let plain: Vec<SelectionRow> = (0..6).map(|i| plain_row(format!("r{i}"), "")).collect();
+        let rich = rich_rows(6);
+        for n in 1..=8 {
+            assert_eq!(
+                rows_fitting(&plain, popup_height(&plain, n)),
+                plain.len().min(n)
+            );
+            assert_eq!(
+                rows_fitting(&rich, popup_height(&rich, n)),
+                rich.len().min(n)
+            );
+        }
+    }
+
+    #[test]
     fn test_visible_window_shrinks_to_the_rect_and_keeps_the_selection_inside() {
         // 矩形只有 7 行 = 3 条 rich 行，而策略窗口是 6 条：滚到底时窗口贴住尾部，
-        // 选中的最后一条必须落在窗口里（它曾经正好落在画不出来的那半截）。
+        // 选中的最后一条落在窗口里。
         let rich = rich_rows(12);
         let mut state = SelectionState::with_max_visible(rich.len(), MAX_VISIBLE_RICH_ROWS);
         for _ in 0..rich.len() - 1 {
@@ -1131,9 +1159,8 @@ mod tests {
 
     #[test]
     fn test_a_rect_shorter_than_the_window_still_draws_the_selected_row() {
-        // 12 条 session（策略窗口 6 条 = 12 行），矩形只给 7 行 —— 开屏里弹层挂在
-        // 输入卡下面就是这个形状。滚到底时选中的最后一条必须画在矩形里：原来窗口
-        // 按 6 条算，画面只画得下 3 条，高亮的那一条正好落在被裁掉的半截里。
+        // 12 条 session（策略窗口 6 条 = 12 行），矩形只给 7 行 = 3 条 —— 开屏里
+        // 弹层挂在输入卡下面就是这个形状。滚到底时高亮的那一条必须在矩形里。
         let rows = rich_rows(12);
         let mut state = SelectionState::with_max_visible(rows.len(), MAX_VISIBLE_RICH_ROWS);
         for _ in 0..rows.len() - 1 {

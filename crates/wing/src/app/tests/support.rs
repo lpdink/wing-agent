@@ -269,6 +269,42 @@ pub(super) fn reversed_cells(
     cells
 }
 
+/// 打开 `/ss` 的会话候选面板，灌入 `count` 条双行（rich）候选 —— 策略窗口
+/// 6 条 = 12 行，比任何「输入卡下面只剩几行」的版式都高。
+pub(super) fn open_session_popup(app: &mut App, count: usize) {
+    use crate::ui::popup::command::SessionCandidate;
+    app.popup.cache.sessions = (0..count)
+        .map(|i| SessionCandidate {
+            id: format!("sess-{i:02}"),
+            title: format!("session-{i:02}"),
+            workspace: "/ws/wing".into(),
+            status: "idle".into(),
+            last_interaction: "2026-01-01T00:00:00".into(),
+            pinned: false,
+            tree_prefix: String::new(),
+        })
+        .collect();
+    app.popup.cache.sessions_fetched = true;
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+}
+
+/// 把弹层的选中位走到列表末尾（`Down` 在末条会绕回第一条，所以走 `count - 1` 步）。
+pub(super) fn walk_popup_to_the_end(app: &mut App, steps: usize) {
+    for _ in 0..steps {
+        app.popup.active.move_down();
+    }
+}
+
+/// 弹层当前选中项应当出现在帧上的那段文本（rich 行是标题，普通行是名字）。
+pub(super) fn popup_selection_label(app: &App) -> String {
+    let (rows, state, _) = app.popup.active.render_data().expect("popup");
+    let row = &rows[state.selected];
+    row.rich
+        .as_ref()
+        .map_or_else(|| row.name.clone(), |rich| rich.title.clone())
+}
+
 /// App with a draft in the composer, no chat header: the draft is the only
 /// content the chat lacks, so a frame assertion reads the card alone.
 /// [`composer_text`] returns the cell the draft starts at (`❯ ` is left of

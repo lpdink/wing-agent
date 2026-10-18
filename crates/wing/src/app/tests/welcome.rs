@@ -212,28 +212,10 @@ fn a_popup_does_not_move_the_splash() {
 
 /// 开屏的弹层只有输入卡下面那几行可用（浮层被屏幕底边裁过），窗口必须按**矩形**
 /// 收缩：滚到底时高亮的那一条要看得见，而不是落在被裁掉的半截里。
-///
-/// 回归：输入卡搬进开屏中间（#236）之后，`/ss` 要 12 行、实际只画得下 7 行 ——
-/// 窗口仍按 6 条算，走到末尾时选中的那一条正好画不出来（上下键看得见列表在动，
-/// 却看不见它停在哪条上）。
 #[test]
 fn a_short_splash_popup_keeps_the_selection_visible() {
-    use crate::ui::popup::command::SessionCandidate;
     let mut app = test_app();
-    app.popup.cache.sessions = (0..12)
-        .map(|i| SessionCandidate {
-            id: format!("sess-{i:02}"),
-            title: format!("session-{i:02}"),
-            workspace: "/ws/wing".into(),
-            status: "idle".into(),
-            last_interaction: "2026-01-01T00:00:00".into(),
-            pinned: false,
-            tree_prefix: String::new(),
-        })
-        .collect();
-    app.popup.cache.sessions_fetched = true;
-    app.input.set_text("/ss");
-    app.update_popup_from_input();
+    open_session_popup(&mut app, 12);
 
     // 开屏：输入卡在中间，弹层挂在它下面（可用行数 < 6 条 session 的 12 行）。
     let mut terminal = test_terminal(100, 30);
@@ -243,25 +225,20 @@ fn a_short_splash_popup_keeps_the_selection_visible() {
         "这个版式下弹层确实被屏幕底边裁过（否则本测试什么也没测）"
     );
 
-    for _ in 0..11 {
-        app.popup.active.move_down();
-    }
+    walk_popup_to_the_end(&mut app, 11);
     let mut terminal = test_terminal(100, 30);
     draw(&mut app, &mut terminal);
 
-    let (rows, state, _) = app.popup.active.render_data().expect("popup");
-    assert_eq!(state.selected, 11, "走到了列表末尾");
-    let selected = &rows[state.selected].rich.as_ref().expect("rich row").title;
+    let label = popup_selection_label(&app);
     let body = frame_text(terminal.backend().buffer());
     assert!(
-        body.contains(selected.as_str()),
-        "选中的「{selected}」要画得出来：\n{body}"
+        body.contains(&label),
+        "选中的「{label}」要画得出来：\n{body}"
     );
-    // 窗口贴住尾部：画出来的是最后三条，不是最早的几条。
-    assert!(
-        !body.contains("session-00"),
-        "滚到底后开头那几条已经不在了：\n{body}"
-    );
+    // 窗口贴住尾部：画出来的是最后几条，最早的几条已经滚出去了。
+    let (rows, _, _) = app.popup.active.render_data().expect("popup");
+    let first = rows[0].rich.as_ref().expect("rich row").title.clone();
+    assert!(!body.contains(&first), "开头那条已经不在了：\n{body}");
 }
 
 /// 第一条消息落地：开屏退位 —— 牌子回到 transcript 顶部（一格留白），
