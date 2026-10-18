@@ -2,23 +2,19 @@
 //! allocation.
 //!
 //! One copy of the maths, consumed by the TUI markdown table renderer
-//! ([`crate::render::markdown::tables`]), the CLI plain-text table renderer
-//! ([`plain`], used by `wing ps` / `wing tools`), and the welcome nameplate's
-//! info card ([`card`]).
+//! ([`crate::render::markdown::tables`]) and the CLI plain-text table renderer
+//! ([`plain`], used by `wing ps` / `wing tools`).
 //!
-//! The layout half — this module's own maths, plus [`plain`] — works on
-//! numbers and string measurements only: no `ratatui` styles, no assumption
-//! about which frontend is drawing. [`card`] is the deliberate TUI-only
-//! exception: the welcome nameplate draws `ratatui` lines, and routing it
-//! through the same skin and width accounting is what keeps the card from
-//! growing a look of its own. Keep styles out of everything else: `plain`
-//! must stay paintable without them.
+//! Everything here works on numbers and string measurements only: no
+//! `ratatui` styles, no assumption about which frontend is drawing — [`plain`]
+//! must stay paintable without them. The welcome nameplate deliberately draws
+//! its own skin and does **not** come through here: it is a letterhead, not a
+//! table (see `docs/dev/welcome-mascot.md`).
 //!
 //! The width policy (which column gives up width first, which one is preserved
 //! last) is a product decision that lives in [`compute_column_widths`] —
 //! sharing it is what keeps the frontends from growing two different looks.
 
-pub mod card;
 pub mod plain;
 
 use unicode_width::UnicodeWidthChar;

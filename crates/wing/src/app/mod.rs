@@ -66,6 +66,7 @@ use crate::ui::toast::Toast;
 use crate::ui::toast::ToastKind;
 use crate::ui::toast::render_toast;
 use crate::ui::welcome::SessionFacts;
+use crate::ui::welcome::Viewport;
 use crate::ui::welcome::Welcome;
 use crate::util::program_status;
 use crate::util::title;
@@ -255,7 +256,7 @@ impl App {
         let mut chat = ChatView::new();
         chat.set_header(welcome.build(
             &palette,
-            crate::ui::input_area::chrome::UNFRAMED_WIDTH,
+            Viewport::width_only(crate::ui::input_area::chrome::UNFRAMED_WIDTH),
             now,
             false,
             true,
@@ -312,14 +313,16 @@ impl App {
         }
     }
 
-    /// 按当前宽度 / 时刻决定要不要重建欢迎屏 header，要就重建。
+    /// 按当前版面 / 时刻决定要不要重建欢迎屏 header，要就重建。
     ///
     /// 每帧调用：海鸥动作 / 开屏扫光期间逐帧重建，定格且姿态没到点就一次不建 —— 动画
-    /// header 不该每帧重新分配。两个门控信号：**干活**（`turn.working`，站姿还是飞行）与
-    /// **在视口里**（`ChatView::header_in_view`）—— 欢迎屏被滚出去之后整条时钟停摆，常驻
-    /// idle 循环因此常态零成本。第三个信号是**会话事实**（skills / rules 计数，SyncSession
-    /// 到达时变化）：名牌右列那一行随它重建。`welcome == None`（测试关掉了）时什么都不做。
-    fn sync_welcome(&mut self, palette: &ThemePalette, width: u16, now: std::time::Instant) {
+    /// header 不该每帧重新分配。三个门控信号：**版面**（`Frame`：内容宽 + 视口高 +
+    /// transcript 空不空 —— 空会话时整块停在视口光学中心）、**干活**（`turn.working`，
+    /// 站姿还是飞行）与**在视口里**（`ChatView::header_in_view`）。欢迎屏被滚出去之后
+    /// 整条时钟停摆，常驻 idle 循环因此常态零成本。第四个信号是**会话事实**（skills /
+    /// rules 计数，SyncSession 到达时变化）：名牌右列那一行随它重建。`welcome == None`
+    /// （测试关掉了）时什么都不做。
+    fn sync_welcome(&mut self, palette: &ThemePalette, view: Viewport, now: std::time::Instant) {
         let working = self.turn.working;
         let visible = self.chat.header_in_view();
         let facts = self.session_facts;
@@ -331,12 +334,12 @@ impl App {
         let rebuild = if theme_dirty && visible {
             true
         } else {
-            welcome.needs_rebuild(width, now, working, visible, facts)
+            welcome.needs_rebuild(view, now, working, visible, facts)
         };
         if !rebuild {
             return;
         }
-        let lines = welcome.build(palette, width, now, working, visible, facts);
+        let lines = welcome.build(palette, view, now, working, visible, facts);
         self.chat.set_header(lines);
     }
 
@@ -674,15 +677,17 @@ impl App {
             chat_height = chunks[1].height;
             self.geometry.record_chat_band(chunks[1]);
 
-            // 欢迎屏 header：宽度档变了、或扫光还在扫，就重建一次 —— 在 chat
-            // widget 之前完成，这一帧画的就是新行。宽度按**内容宽**算：header
-            // 与消息渲染在同一个（减掉滚动条 gutter 的）矩形里，按终端整宽
-            // 构建会让最右一列连同省略号被裁掉。
-            self.sync_welcome(
-                &palette,
-                scrollbar::content_area(chunks[1]).width,
-                std::time::Instant::now(),
-            );
+            // 欢迎屏 header：版面（宽度档 / 视口高 / 空会话）、姿态、扫光变了就
+            // 重建一次 —— 在 chat widget 之前完成，这一帧画的就是新行。宽度按
+            // **内容宽**算：header 与消息渲染在同一个（减掉滚动条 gutter 的）
+            // 矩形里，按终端整宽构建会让最右一列连同省略号被裁掉。
+            let band = scrollbar::content_area(chunks[1]);
+            let view = Viewport {
+                width: band.width,
+                height: band.height,
+                empty: self.chat.is_empty(),
+            };
+            self.sync_welcome(&palette, view, std::time::Instant::now());
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,

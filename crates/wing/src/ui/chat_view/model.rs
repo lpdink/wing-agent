@@ -333,9 +333,14 @@ impl ChatView {
         self.cells.len()
     }
 
-    /// Check if empty.
+    /// Check if empty — committed cells *and* queued messages.
+    ///
+    /// The welcome block keys its "one-screen splash" layout on this
+    /// (`ui::welcome::Viewport::empty`): the moment the user's message is
+    /// queued it stops being a splash and becomes the opening of a
+    /// conversation, so pending counts as content.
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
+        self.cells.is_empty() && self.pending.is_empty()
     }
 
     /// Number of pending (sent, not yet accepted) messages.

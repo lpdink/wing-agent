@@ -6,9 +6,9 @@
 //!   agent 干活时切成飞行扇翅 —— "它在飞" = "它在干活"；
 //! * **wordmark**（[`wordmark`]）：手绘 5 行像素大字 `WING`，开屏一道扫光扫过；
 //!   按信息列宽度 1x / 2x 两档（半格像素只能整数倍放大，见 [`wordmark::Scale`]）；
-//! * **信息卡**：右侧那一列（版本 / 会话事实 / 键位 / 轮换 tip / 入口）由共享表格
-//!   引擎画成重框卡片（[`crate::render::table::card`]）；信息列窄到"上框就要折尾"
-//!   时退回纯文字（见 [`CARD_MIN`]）；
+//! * **名牌右列**：版本 / 会话事实 / **一条分节线** / 键位 / 轮换 tip / 入口。
+//!   没有框 —— 这是信笺（logo 下面是文字），不是一张表：框把两簇内容圈成了
+//!   "一张有六个格子的表"，还让分隔用的空行看起来像"数据缺了一行"；
 //! * **会话事实**：[`SessionFacts`]（`2 skills · 1 rule`）—— 这个会话加载了什么，
 //!   随 SyncSession 到达；0/0 时槽位留空（行数因此恒定，见 [`info_rows`]）；
 //! * **动作规划器**（[`motion`]）：纯 deadline 状态机，眨眼 / 抖翅 / 跳各管各的。
@@ -16,8 +16,15 @@
 //! **内容只放"永远是事实"的东西**：版本号、commit、会话的加载事实、键位、tips
 //! 池里抽的一条。想告诉用户新能力，就写进 `shared::tips` 池，那里只讲稳定能力。
 //!
-//! 窄终端按宽度档位降级：整块（大字 + 卡片）→ 整块（大字 + 纯文字列）→ 只文字列
-//! → 一行 wordmark，任何宽度都不截断、不折行、不溢出。
+//! ## 版面：空会话时是一屏开屏，不是一段贴顶的日志
+//!
+//! transcript 还空着（[`Viewport::empty`]）时整块落在视口的**光学中心**（略高于几何
+//! 中心）并水平居中；一旦有了消息就退回左对齐 + 一格留白 —— header 从此只是
+//! 会话的开头，跟消息一起滚走。这两个位置都由 [`Viewport`] 决定，一起进
+//! `needs_rebuild` 的键（否则改窗口大小后整块不重排）。
+//!
+//! 窄终端按宽度档位降级：整块（大字 + 名牌）→ 只名牌 → 一行 wordmark，任何宽度
+//! 都不截断、不折行、不溢出。
 //!
 //! ## 重绘成本
 //!
@@ -41,7 +48,7 @@ use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
-use crate::render::table::card;
+use crate::render::table::split_str_by_width;
 use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::tips;
 use crate::ui::shimmer::is_light_theme;
@@ -102,11 +109,43 @@ const TEXT_MIN: usize = 34;
 /// 文字列布局需要的最小列数（再窄就只剩一行 wordmark）。
 const COMPACT_MIN: u16 = 40;
 
-/// 信息卡里画几行正文（版本 / 会话事实 / 空 / 键位 / tip / 入口）—— 事实槽位
-/// 恒在，所以卡片高度也恒定（[`info_rows`]）。
+/// 空会话时整块停在视口高度的这个百分比处 —— **光学中心**略高于几何中心：
+/// 一屏里重的东西（图标、标题）稍稍上移比正中摆着更稳（老印刷排版的老规矩）。
+const HERO_CENTER_PCT: u16 = 45;
+
+/// 名牌右列里分节线的位置：版本 / 会话事实之后（0 起的行号 + 1）。
 ///
-/// `pub(crate)`：app 层的帧测试也数它（一张卡片 = 每行左右各一道竖线）。
-pub(crate) const CARD_BODY_ROWS: usize = 6;
+/// 线上是"这是什么"（身份），线下是"你能做什么"（键位 + tip + 入口）。
+const RULE_AFTER_ROW: usize = 2;
+
+/// 分节线的字形（细横线；重框退役了，见模块文档）。
+const RULE: char = '─';
+
+/// 这一帧给欢迎屏的几何 + 会话状态。
+///
+/// 三个都是**版面的输入**：宽度决定档位（[`Layout`]），高度与"是否空会话"决定
+/// 它在不在视口的光学中心。三者一起进 [`Welcome::needs_rebuild`] 的键 —— 只记
+/// 宽度的话，改窗口大小 / 第一条消息落地都不会重排。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewport {
+    /// 内容宽（终端宽减滚动条 gutter）。
+    pub width: u16,
+    /// 视口高（chat band 的行数）。
+    pub height: u16,
+    /// transcript 里除了这块 header 什么都没有。
+    pub empty: bool,
+}
+
+impl Viewport {
+    /// 只知道宽度的构造（预览 / 测试）：不居中，等同于"已经有消息了"。
+    pub fn width_only(width: u16) -> Self {
+        Self {
+            width,
+            height: 0,
+            empty: false,
+        }
+    }
+}
 
 /// 会话事实 —— 这个会话加载了多少 skills / rules。
 ///
@@ -182,8 +221,8 @@ pub struct Welcome {
     epoch: Instant,
     /// 动作规划器。
     motion: Motion,
-    /// 上次构建用的终端宽度（0 = 还没构建过）。
-    built_width: u16,
+    /// 上次构建用的版面输入（`None` = 还没构建过）。
+    built_view: Option<Viewport>,
     /// 上次构建时欢迎屏在不在视口里。
     built_visible: bool,
     /// 上次构建时 agent 是不是在干活。
@@ -203,7 +242,7 @@ impl Welcome {
             tip: tips::pick(seed),
             epoch: now,
             motion: Motion::new(0, seed),
-            built_width: 0,
+            built_view: None,
             built_visible: false,
             built_working: false,
             built_pose: None,
@@ -235,7 +274,7 @@ impl Welcome {
     /// —— 回到视口那一下的 `!built_visible` 会带着最新事实重建。
     pub fn needs_rebuild(
         &mut self,
-        width: u16,
+        view: Viewport,
         now: Instant,
         working: bool,
         visible: bool,
@@ -258,7 +297,7 @@ impl Welcome {
         // 扫光期逐帧重建；**扫光结束那一刻也要重建一次** —— 否则最后一帧的
         // 高光会留在屏上，直到下一个动作 deadline（可达 ~2.6s）。
         let sweeping = self.sweeping(now);
-        let rebuild = self.built_width != width
+        let rebuild = self.built_view != Some(view)
             || !self.built_visible
             || self.built_working != working
             || self.built_pose != Some(pose)
@@ -292,7 +331,7 @@ impl Welcome {
     pub fn build(
         &mut self,
         palette: &ThemePalette,
-        width: u16,
+        view: Viewport,
         now: Instant,
         working: bool,
         visible: bool,
@@ -303,7 +342,7 @@ impl Welcome {
         let pose = self.motion.pose(ms, working);
         let sweep = self.sweeping(now).then(|| ms as f32 / SWEEP_MS as f32);
 
-        self.built_width = width;
+        self.built_view = Some(view);
         self.built_visible = visible;
         self.built_working = working;
         self.built_pose = Some(pose);
@@ -312,11 +351,13 @@ impl Welcome {
 
         let accent = to_rgb(palette.accent);
         let light = is_light_theme(to_rgb(palette.text));
+        let width = view.width;
 
-        match layout_for(width) {
+        // 每一档都产出（行, 块宽）：块宽决定水平居中的位移，行自己只管左对齐。
+        let (mut lines, block) = match layout_for(width) {
             Layout::Full => {
                 let left = ART_COLS + ART_GAP;
-                let column = text_column(
+                let (column, column_width) = text_column(
                     palette,
                     width.saturating_sub(left as u16) as usize,
                     sweep,
@@ -326,14 +367,13 @@ impl Welcome {
                     facts,
                 );
                 let art = gull_lines(pose, accent);
-                // 右列竖直居中：2x 大字（5 + 8 行）正好填满海鸥盒，1x（3 + 8
+                // 右列竖直居中：2x 大字（5 + 6 行）正好填满海鸥盒，1x（3 + 6
                 // 行）上下各留一格。
                 let offset = ART_TERM_ROWS.saturating_sub(column.len()) / 2;
-                let mut lines = Vec::with_capacity(ART_TERM_ROWS + 2);
-                lines.push(Line::from(""));
+                let mut lines = Vec::with_capacity(ART_TERM_ROWS);
                 for (row, art_line) in art.into_iter().enumerate() {
                     let mut spans: Vec<Span<'static>> = art_line.spans;
-                    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+                    let used = width_of_spans(&spans);
                     spans.push(Span::raw(" ".repeat(left.saturating_sub(used))));
                     if let Some(text_line) = row.checked_sub(offset)
                         && let Some(line) = column.get(text_line)
@@ -342,12 +382,10 @@ impl Welcome {
                     }
                     lines.push(Line::from(spans));
                 }
-                lines.push(Line::from(""));
-                lines
+                (lines, left + column_width)
             }
             Layout::Compact => {
-                let mut lines = vec![Line::from("")];
-                lines.extend(text_column(
+                let (column, column_width) = text_column(
                     palette,
                     width.saturating_sub(1) as usize,
                     sweep,
@@ -355,17 +393,51 @@ impl Welcome {
                     light,
                     self.tip.text,
                     facts,
-                ));
-                lines.push(Line::from(""));
-                lines
+                );
+                (column, column_width)
             }
-            Layout::Minimal => vec![
-                Line::from(""),
-                wordmark_line(palette, width.saturating_sub(1) as usize),
-                Line::from(""),
-            ],
+            Layout::Minimal => {
+                let line = wordmark_line(palette, width.saturating_sub(1) as usize);
+                let block = width_of(&line);
+                (vec![line], block)
+            }
+        };
+
+        // 水平居中：整块居中的看着才像"一屏"，逐行居中会让名牌左右乱窜。
+        // 只对空会话生效 —— 有了消息，它就是 transcript 的第一段，左对齐。
+        let x_pad = if view.empty {
+            (width as usize).saturating_sub(block) / 2
+        } else {
+            0
+        };
+        if x_pad > 0 {
+            for line in &mut lines {
+                if width_of(line) > 0 {
+                    line.spans.insert(0, Span::raw(" ".repeat(x_pad)));
+                }
+            }
         }
+
+        let pad = top_pad(view.height, lines.len(), view.empty);
+        let mut out = Vec::with_capacity(pad + lines.len() + 1);
+        out.resize(pad, Line::from(""));
+        out.append(&mut lines);
+        out.push(Line::from(""));
+        out
     }
+}
+
+/// 整块上方的留白行数：空会话落在视口光学中心，否则只有一格呼吸。
+///
+/// 光学中心 = 上方留白占全部余量的 [`HERO_CENTER_PCT`]（不到一半），底下略多一点
+/// —— 视口中的块因此"坐"得住。余量不够分（块比视口还高）时退回一格：这时内容
+/// 本来就会被滚，居中只会在顶上留一块更没道理的空白。
+fn top_pad(height: u16, block_rows: usize, empty: bool) -> usize {
+    if !empty {
+        return 1;
+    }
+    let slack = (height as usize).saturating_sub(block_rows);
+    (slack * HERO_CENTER_PCT as usize / 100).max(1)
 }
 
 /// 这一帧的海鸥：姿态 → 字母网格 + 竖直偏移，统一补到 [`ART_TERM_ROWS`] 行。
@@ -413,23 +485,11 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
     }
 }
 
-/// 信息卡出现的最小信息列宽：卡内宽度（= 列宽 − 框的 4 列）要放得下最宽的一行
-/// —— tips 池里最宽的一条正文 36 列 + `Tip  ` 标签 5 列 = 41。
+/// 右侧文字列：wordmark（1x 3 行 / 2x 5 行）+ 名牌（版本 / 事实 / 分节线 / 键位 /
+/// tip / 入口）。
 ///
-/// 差一列卡片就会把 tip 的尾巴吃掉，而 tip 是欢迎屏的**内容**、框是装饰 ——
-/// 装饰不许花掉内容（同 `FULL_MIN` 那条"海鸥不能让出去"的对偶）。所以窄于这条
-/// 线时信息列保持纯文字（今天的形态）。45 与 2x 大字的 46 只差一列：**恰好 45
-/// 列**时是"卡片 + 1x 大字"，46 列起才是"卡片 + 2x"（两条线各自的来历见
-/// `docs/dev/welcome-mascot.md` 的档位表）。
-const CARD_MIN: usize = 45;
-
-/// 右侧文字列：wordmark（1x 3 行 / 2x 5 行）+ 信息列。
-///
-/// 信息列宽到放得下整块时用共享表格引擎画的**信息卡**（[`crate::render::table::card`]）：
-/// 重框包住六行，无表头带、无行间线 —— 与聊天里的 markdown 表格、CLI 的
-/// `wing ps` / `wing tools` 共用同一份皮肤与宽度账本。卡片宽度跟着大字走（至少和
-/// 大字同宽，内容更宽时让它长大）：2x 时两者都是 46 列，右列因此是一个整齐的
-/// 矩形。窄于此则退回纯文字列（诚实降级：宁可不要框，也不折 tip 的尾）。
+/// 返回（行, 块宽）：块宽 = `max(大字宽, 最宽的一行)`，不超过可用列数。分节线按
+/// 块宽画满 —— 它就是这块文字右缘的定义，没有框之后，线是唯一的收边。
 ///
 /// 事实只在这个会话真的有加载物时出现；它是**环境事实**，所以和版本行同簇、
 /// 同 dim 寄存器 —— 曾经它是 transcript 顶部的 system 消息，开屏时贴在像素名牌
@@ -442,21 +502,32 @@ fn text_column(
     light: bool,
     tip: &str,
     facts: Option<SessionFacts>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, usize) {
     let scale = wordmark::scale_for(width);
     let mut out = wordmark::lines(scale, sweep, accent, light);
+
     let rows = info_rows(palette, tip, facts);
-    if width >= CARD_MIN {
-        let frame = Style::default().fg(palette.dim);
-        out.extend(card::render(&rows, scale.columns(), width, frame));
-    } else {
-        // 纯文字列：按列宽省略（与卡片内同一份省略语义）。
-        out.extend(rows.into_iter().map(|row| card::fit_row(&row, width)));
+    let widest = rows.iter().map(width_of).max().unwrap_or(0);
+    let block = widest.max(scale.columns()).min(width);
+
+    let dim = Style::default().fg(palette.dim);
+    let mut body: Vec<Line<'static>> = Vec::with_capacity(rows.len() + 1);
+    for (index, row) in rows.iter().enumerate() {
+        if index == RULE_AFTER_ROW {
+            body.push(rule_line(block, dim));
+        }
+        body.push(fit_line(row, block));
     }
-    out
+    out.extend(body);
+    (out, block)
 }
 
-/// 信息卡里的六行：版本 / 会话事实 / 空行 / 键位 / tip / 入口。
+/// 分节线：`block` 列细横线。
+fn rule_line(block: usize, style: Style) -> Line<'static> {
+    Line::from(Span::styled(RULE.to_string().repeat(block), style))
+}
+
+/// 名牌的行：版本 / 会话事实 / 键位 / tip / 入口（分节线在 [`RULE_AFTER_ROW`] 处插入）。
 ///
 /// 像素大字是品牌形，但终端里还得有**文本**形态的 brand（grep / 读屏 / 测试
 /// 都读像素）—— 版本行带上它：`wing · dev · <commit>`。
@@ -467,51 +538,98 @@ fn text_column(
 fn info_rows(palette: &ThemePalette, tip: &str, facts: Option<SessionFacts>) -> Vec<Line<'static>> {
     let dim = Style::default().fg(palette.dim);
     let text = Style::default().fg(palette.text);
+    let key = Style::default().fg(palette.tool_result);
+    let cmd = Style::default().fg(palette.accent);
     let facts = match facts.and_then(SessionFacts::line) {
         Some(line) => Line::from(Span::styled(line, dim)),
         None => Line::from(""),
     };
-    let rows = vec![
+    vec![
         Line::from(Span::styled(format!("wing · {}", version_label()), dim)),
         facts,
-        Line::from(""),
-        Line::from(Span::styled(KEYS, dim)),
-        tip_line(tip, dim, text),
-        Line::from(Span::styled(hints_text(), dim)),
-    ];
-    debug_assert_eq!(
-        rows.len(),
-        CARD_BODY_ROWS,
-        "卡片行数变了：同步 CARD_BODY_ROWS（右列高度与测试都按它算）"
-    );
-    rows
+        keys_line(key, dim),
+        tip_line(tip, dim, text, cmd),
+        hints_line(dim, cmd),
+    ]
 }
 
-/// 键位提示（一行）。
+/// 键位提示（一行）：**按键亮、动作暗** —— 先看见敲什么，再读它做什么。
 ///
 /// 换行写 `Ctrl+J` 而不是 `Shift+Enter`：后者能不能到达取决于终端有没有
 /// 实现 kitty 键盘协议（见 `tui::push_keyboard_enhancement`），在 header 上
 /// 当既成事实写死就是在骗人 —— tips 池里有那条"看终端"的提示，这里只放
 /// 任何终端都成立的键。
-const KEYS: &str = "Esc 中断 · Ctrl+J 换行 · Ctrl+C×2 退出";
+const KEYS: &[(&str, &str)] = &[("Esc", "中断"), ("Ctrl+J", "换行"), ("Ctrl+C×2", "退出")];
+
+fn keys_line(key: Style, dim: Style) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(KEYS.len() * 3);
+    for (index, (keys, verb)) in KEYS.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", dim));
+        }
+        spans.push(Span::styled(*keys, key));
+        spans.push(Span::styled(format!(" {verb}"), dim));
+    }
+    Line::from(spans)
+}
 
 /// 入口提示（一行）。
 ///
 /// `/tips` 从常量拼，命令改名时这一行跟着走；「输入 / 看命令」不带命令名 ——
 /// 命令表来自网关（用户自己的 prompt 命令），写死某一个名字迟早会是假的。
-fn hints_text() -> String {
-    format!("{TIPS_COMMAND} 全部提示 · 输入 / 看全部命令")
+fn hints_line(dim: Style, cmd: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(TIPS_COMMAND, cmd),
+        Span::styled(" 全部提示", dim),
+        Span::styled(" · ", dim),
+        Span::styled("输入 ", dim),
+        Span::styled("/", cmd),
+        Span::styled(" 看全部命令", dim),
+    ])
 }
 
-/// `Tip  <正文>` —— 标签暗、正文正常色。
+/// `Tip  <正文>` —— 标签暗、正文正常色、正文里的 `/命令` verbatim 成 accent。
 ///
-/// 不再按宽度预截断：卡片自己会把放不下的行省略（`render::table::card`），
-/// 截断只发生在**它的**预算里，tip 两处各截一次就会多丢几个字。
-fn tip_line(tip: &str, dim: Style, text: Style) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("Tip  ", dim),
-        Span::styled(tip.to_string(), text),
-    ])
+/// 不再按宽度预截断：调用方按块宽统一省略（[`fit_line`]），截断只发生一次
+/// （两处各截一次就会多丢几个字）。
+fn tip_line(tip: &str, dim: Style, text: Style, cmd: Style) -> Line<'static> {
+    let mut spans = vec![Span::styled("Tip  ", dim)];
+    spans.extend(with_commands(tip, text, cmd));
+    Line::from(spans)
+}
+
+/// 把 `/xxx` 形态的词染成 accent：**命令是唯一可以照着敲的东西**，在整套 UI
+/// 里都是 accent（popup 候选、行内代码、composer 的 workdir），名牌里若是 dim
+/// 就成了看不见的字。
+fn with_commands(text: &str, base: Style, cmds: Style) -> Vec<Span<'static>> {
+    let flush = |out: &mut Vec<Span<'static>>, word: &mut String, is_cmd: bool| {
+        if !word.is_empty() {
+            out.push(Span::styled(
+                std::mem::take(word),
+                if is_cmd { cmds } else { base },
+            ));
+        }
+    };
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(3);
+    let mut word = String::new();
+    let mut word_is_command = false;
+    let mut at_word_start = true;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            flush(&mut out, &mut word, word_is_command);
+            out.push(Span::styled(ch.to_string(), base));
+            word_is_command = false;
+            at_word_start = true;
+            continue;
+        }
+        if at_word_start && ch == '/' {
+            word_is_command = true;
+        }
+        at_word_start = false;
+        word.push(ch);
+    }
+    flush(&mut out, &mut word, word_is_command);
+    out
 }
 
 /// 最窄档：一行 `wing` + 版本。
@@ -534,6 +652,53 @@ fn wordmark_line(palette: &ThemePalette, width: usize) -> Line<'static> {
         spans.push(Span::styled(tail, Style::default().fg(palette.dim)));
     }
     Line::from(spans)
+}
+
+/// 一行的显示宽度（CJK 记 2 列）。
+fn width_of(line: &Line<'_>) -> usize {
+    width_of_spans(&line.spans)
+}
+
+/// 一组 span 的显示宽度。
+fn width_of_spans(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.width()).sum()
+}
+
+/// 把一行按显示宽度装进 `max` 列，切了就补 `…`。
+///
+/// 整 span 先过；第一个越界的 span 按**字符边界**切（CJK 记 2 列）。每次切都
+/// 有标记：省略号的那一列先从预算里扣掉，所以"恰好用尽预算"的行结尾仍是 `…`
+/// （一行本来就放得下时原样返回 —— 恰好装下不是切）。
+///
+/// 名牌的每一行都要过它：行数是版面契约（宽度档内高度恒定，折行会让下面的
+/// 一切都挪位），所以降级只许丢掉行尾，不许长大。
+fn fit_line(row: &Line<'static>, max: usize) -> Line<'static> {
+    if width_of(row) <= max {
+        return row.clone();
+    }
+    if max == 0 {
+        return Line::from(Vec::new());
+    }
+    let budget = max - 1;
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for span in &row.spans {
+        let width = span.content.width();
+        if used + width <= budget {
+            used += width;
+            out.push(span.clone());
+            continue;
+        }
+        let (head, _) = split_str_by_width(&span.content, budget - used);
+        if head.is_empty() {
+            out.push(Span::styled("…".to_string(), span.style));
+        } else {
+            out.push(Span::styled(format!("{head}…"), span.style));
+        }
+        return Line::from(out);
+    }
+    out.push(Span::raw("…"));
+    Line::from(out)
 }
 
 /// 按**显示宽度**截断（CJK 记 2 列），截断处补 `…`。
@@ -577,7 +742,7 @@ mod tests {
     use super::*;
 
     #[allow(unused_imports)]
-    use ratatui::style::Color as _Color;
+    use ratatui::style::Color;
 
     fn welcome() -> Welcome {
         Welcome::new(3, Instant::now())
@@ -605,21 +770,18 @@ mod tests {
         Some(SessionFacts { skills, rules })
     }
 
-    /// 信息卡里某一行的内容：取左右 `┃` 边框之间的文本并去掉两侧留白。
-    ///
-    /// Full 档那一行前面还有海鸥的字形（半格 `▀`/`▄`），所以不能只看最后一个
-    /// span —— 按边框切才稳。
-    fn card_row_text(line: &Line<'_>) -> String {
+    /// 名牌右列的一行：取版本行 `wing · ` 的起始列之后的尾部（框已退役，
+    /// 没有边线可切；那一行左边是海鸥的字形）。
+    fn nameplate_tail(line: &Line<'_>, column: usize) -> String {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        match (text.find('┃'), text.rfind('┃')) {
-            (Some(start), Some(end)) if end > start => {
-                text[start + '┃'.len_utf8()..end].trim().to_string()
-            }
-            _ => String::new(),
-        }
+        text.chars()
+            .skip(column)
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 
-    /// 名牌右列的**事实槽位**：版本行的下一行（卡片内的一行；槽位缺席时空白）。
+    /// 名牌右列的**事实槽位**：版本行的下一行（槽位缺席时空白）。
     ///
     /// 断言走槽位而不是整块文本：tip 是抽签来的（池子里有 `/skills 看已装技能`
     /// 这类含 "skill" 的句子），对整块文本做"不含某词"的断言迟早会随池子改动
@@ -629,7 +791,15 @@ mod tests {
             .iter()
             .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
             .expect("版本行在名牌右列");
-        card_row_text(&lines[version + 1])
+        let text: String = lines[version]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        // `find` 给的是字节偏移（`▀` 是 3 字节），`nameplate_tail` 按字符跳。
+        let byte = text.find("wing · ").expect("版本行带 brand");
+        let column = text[..byte].chars().count();
+        nameplate_tail(&lines[version + 1], column)
     }
 
     #[test]
@@ -651,7 +821,14 @@ mod tests {
             for working in [false, true] {
                 for facts in [None, facts(2, 1), facts(12, 130)] {
                     let mut w = welcome();
-                    let lines = w.build(&palette, width, now, working, true, facts);
+                    let lines = w.build(
+                        &palette,
+                        Viewport::width_only(width),
+                        now,
+                        working,
+                        true,
+                        facts,
+                    );
                     for line in &lines {
                         assert!(
                             line_width(line) <= width as usize,
@@ -669,7 +846,14 @@ mod tests {
     fn facts_line_carries_the_counts_with_correct_plurals() {
         let mut w = welcome();
         let line = |w: &mut Welcome, facts| {
-            facts_slot(&w.build(&palette(), 120, Instant::now(), false, true, facts))
+            facts_slot(&w.build(
+                &palette(),
+                Viewport::width_only(120),
+                Instant::now(),
+                false,
+                true,
+                facts,
+            ))
         };
         assert_eq!(line(&mut w, facts(2, 1)), "2 skills · 1 rule");
         assert_eq!(line(&mut w, facts(1, 1)), "1 skill · 1 rule");
@@ -682,8 +866,22 @@ mod tests {
     fn facts_line_is_absent_when_nothing_is_loaded() {
         let mut w = welcome();
         let now = Instant::now();
-        let none = w.build(&palette(), 120, now, false, true, None);
-        let zero = w.build(&palette(), 120, now, false, true, facts(0, 0));
+        let none = w.build(
+            &palette(),
+            Viewport::width_only(120),
+            now,
+            false,
+            true,
+            None,
+        );
+        let zero = w.build(
+            &palette(),
+            Viewport::width_only(120),
+            now,
+            false,
+            true,
+            facts(0, 0),
+        );
         assert_eq!(facts_slot(&none), "", "无事实（老网关）时槽位留空");
         assert_eq!(facts_slot(&zero), "", "0/0 时槽位留空");
         // 槽位恒在：事实缺席时那一行是空白 —— header 的**高度**在任何宽度
@@ -691,9 +889,25 @@ mod tests {
         // 所以 sync 到达时下方内容不会跳一行。
         assert_eq!(none.len(), zero.len());
         for width in [120u16, 96, 80, 70, 60, 40] {
-            let without = w.build(&palette(), width, now, false, true, None).len();
+            let without = w
+                .build(
+                    &palette(),
+                    Viewport::width_only(width),
+                    now,
+                    false,
+                    true,
+                    None,
+                )
+                .len();
             let with = w
-                .build(&palette(), width, now, false, true, facts(2, 1))
+                .build(
+                    &palette(),
+                    Viewport::width_only(width),
+                    now,
+                    false,
+                    true,
+                    facts(2, 1),
+                )
                 .len();
             assert_eq!(without, with, "width={width}：事实行改变了 header 高度");
         }
@@ -702,7 +916,14 @@ mod tests {
     #[test]
     fn facts_sit_right_after_the_version_line() {
         let mut w = welcome();
-        let lines = w.build(&palette(), 120, Instant::now(), false, true, facts(2, 1));
+        let lines = w.build(
+            &palette(),
+            Viewport::width_only(120),
+            Instant::now(),
+            false,
+            true,
+            facts(2, 1),
+        );
         let text = text_of(&lines);
         let version = text.find("dev ·").expect("版本行");
         let facts = text.find("2 skills").expect("事实行");
@@ -719,16 +940,23 @@ mod tests {
     fn facts_change_rebuilds_the_header() {
         let mut w = welcome();
         let settled = Instant::now() + Duration::from_millis(SWEEP_MS + 500);
-        w.build(&palette(), 120, settled, false, true, facts(2, 1));
+        w.build(
+            &palette(),
+            Viewport::width_only(120),
+            settled,
+            false,
+            true,
+            facts(2, 1),
+        );
         // 同一事实、已定格、姿态未到点：不重建。
-        assert!(!w.needs_rebuild(120, settled, false, true, facts(2, 1)));
+        assert!(!w.needs_rebuild(Viewport::width_only(120), settled, false, true, facts(2, 1)));
         // 事实变了（sync 到达 / 换会话）：必须重建。
         assert!(
-            w.needs_rebuild(120, settled, false, true, facts(3, 1)),
+            w.needs_rebuild(Viewport::width_only(120), settled, false, true, facts(3, 1)),
             "事实变化要重建"
         );
         assert!(
-            w.needs_rebuild(120, settled, false, true, None),
+            w.needs_rebuild(Viewport::width_only(120), settled, false, true, None),
             "老网关 / 清空事实也要重建"
         );
     }
@@ -736,7 +964,14 @@ mod tests {
     #[test]
     fn full_layout_has_the_gull_and_the_wordmark() {
         let mut w = welcome();
-        let lines = w.build(&palette(), 120, Instant::now(), false, true, None);
+        let lines = w.build(
+            &palette(),
+            Viewport::width_only(120),
+            Instant::now(),
+            false,
+            true,
+            None,
+        );
         let joined: String = lines
             .iter()
             .map(|l| {
@@ -784,7 +1019,7 @@ mod tests {
             // needs_rebuild（那里推进规划器）。不推进的话 `next_due` 冻结在
             // 过去的时刻，`max(ms+1)` 会以 1ms 步进"救火"凑出 tick 数 ——
             // 那样测的就不是帧节奏了。
-            w.needs_rebuild(100, now, false, true, None);
+            w.needs_rebuild(Viewport::width_only(100), now, false, true, None);
         }
         // 2400/40 = 60 帧，外加动作 deadline 恰好插进帧网格的那一两次。
         assert!(
@@ -817,17 +1052,11 @@ mod tests {
         // 80 列（多数终端的默认宽）是最常见的档位：内容宽 = 80 - 滚动条 gutter(2)，
         // 减去海鸥与间隔就是文字预算。键位行差 1 列就会在最多人看到的宽度上省略。
         let budget = 80 - 2 - (ART_COLS + ART_GAP);
+        let keys = keys_line(Style::default(), Style::default());
         assert!(
-            KEYS.width() <= budget,
+            width_of(&keys) <= budget,
             "键位行 {} 列 > 80 列终端的预算 {budget} 列",
-            KEYS.width()
-        );
-        // 信息卡的框吃掉 4 列（左右竖线 + 各一格留白），所以卡片从 CARD_MIN 列
-        // 起才上框：80 列终端的信息列比它窄，保持纯文字 —— 上框就得让 tip /
-        // 键位折尾，而装饰不许花掉内容（见 CARD_MIN）。
-        assert!(
-            budget < CARD_MIN,
-            "80 列的信息列 {budget} 列已经够宽到上卡，CARD_MIN={CARD_MIN} 要重新定"
+            width_of(&keys)
         );
     }
 
@@ -836,11 +1065,12 @@ mod tests {
     #[test]
     fn the_info_column_never_overflows_the_art_box() {
         // Full 档右列骑在海鸥的 13 行盒子里：列比盒子高时多出来的行会被静默丢掉
-        // （不是截断，是整行消失）。2x 大字 5 行 + 卡片 8 行 = 13 是天花板 ——
-        // 卡片加行、大字加档都会撞到它，所以钉在每一个宽度上。
+        // （不是截断，是整行消失）。2x 大字 5 行 + 名牌 6 行 = 11 是当前天花板 ——
+        // 名牌加行、大字加档都会撞到它，所以钉在每一个宽度上。
         let palette = palette();
         for width in 0..200usize {
-            let column = text_column(&palette, width, None, (34, 211, 238), false, "tip", None);
+            let (column, _) =
+                text_column(&palette, width, None, (34, 211, 238), false, "tip", None);
             assert!(
                 column.len() <= ART_TERM_ROWS,
                 "信息列 {width} 列时高 {} 行 > 盒子的 {ART_TERM_ROWS} 行",
@@ -850,60 +1080,272 @@ mod tests {
     }
 
     #[test]
-    fn the_card_minimum_holds_every_row_it_draws() {
-        // CARD_MIN 的来历：卡内宽度（列宽 − 框的 4 列）要放得下**最宽的一行** ——
-        // 口径是整个 `info_rows`，不只是 tips 池：池子加一条更长的 tip、键位文案
-        // 加几列、`TIPS_COMMAND` 改名变长，都会在最小卡片里静默折尾，这里必须红
-        // （逼一次产品决定：抬 CARD_MIN，还是认了折尾）。
-        let inner = CARD_MIN - crate::render::table::frame_overhead(1);
+    fn the_nameplate_degrades_by_losing_the_tip_tail_never_by_wrapping() {
+        // 名牌是一行一条的：折行会把下面的东西全推下去（版面契约）。80 列终端
+        // （信息列 38 列）里，除 tip 之外的每一条**整行**都放得下；最宽的 tip
+        // （池子上限 36 + `Tip  ` 5 = 41）丢尾巴 —— 它由 `/tips` 兜底。
+        //
+        // 这条线同时也是产品约束：键位 / 入口行文案变长、事实位数变多，都会在
+        // 这里红（逼一次决定：缩文案，还是认了省略）。
+        let budget = 80 - 2 - (ART_COLS + ART_GAP);
         let widest_tip = tips::TIPS
             .iter()
             .map(|tip| tip.text)
             .max_by_key(|text| text.width())
             .unwrap_or("");
-        // 事实行的位数是动态的，按三位数（`999 skills · 999 rules`）取上界。
         let facts = Some(SessionFacts {
             skills: 999,
             rules: 999,
         });
-        for row in info_rows(&palette(), widest_tip, facts) {
-            let width = line_width(&row);
+        let rows = info_rows(&palette(), widest_tip, facts);
+        for row in &rows[..3] {
             assert!(
-                width <= inner,
-                "行「{row}」{width} 列 > 卡内 {inner} 列（CARD_MIN={CARD_MIN}）"
+                width_of(row) <= budget,
+                "80 列终端放得下整行：「{row}」{} 列 > {budget} 列",
+                width_of(row)
             );
         }
+        // tip：放不下就丢尾巴（一次性），永远不长出第二行。
+        let tip = &rows[3];
+        let fitted = fit_line(tip, budget);
+        assert_eq!(width_of(&fitted), budget, "tip 吃到满宽就停");
+        assert!(
+            fitted
+                .spans
+                .last()
+                .is_some_and(|s| s.content.ends_with('…')),
+            "丢的是尾巴，且有省略号：「{fitted}」"
+        );
     }
 
     /// 信息列里的 wordmark 宽度：前 `rows` 行是字形（行尾透明格已裁，取最宽的
     /// 一行 = 档位宽度）。
     fn wordmark_width(column: &[Line<'static>], rows: usize) -> usize {
-        column.iter().take(rows).map(line_width).max().unwrap_or(0)
+        column.iter().take(rows).map(width_of).max().unwrap_or(0)
     }
 
     #[test]
-    fn the_info_rows_are_framed_when_the_column_allows_it() {
+    fn the_nameplate_is_a_letterhead_not_a_table() {
+        // 框退役了：没有 `┏┓┃`，只有一条分节线。线夹在版本 / 事实之后、键位之前
+        // —— 上是"这是什么"，下是"你能做什么"。
         let mut w = welcome();
-        let lines = w.build(&palette(), 120, Instant::now(), false, true, facts(2, 1));
+        let lines = w.build(
+            &palette(),
+            Viewport::width_only(120),
+            Instant::now(),
+            false,
+            true,
+            facts(2, 1),
+        );
         let text = text_of(&lines);
-        assert!(text.contains("┏━━"), "卡片顶框在：{text}");
-        assert!(text.contains("┗━━"), "卡片底框在：{text}");
-        // 正文行数就是卡片行数（每行左右各一道竖线）。
-        assert_eq!(info_rows(&palette(), "tip", None).len(), CARD_BODY_ROWS);
+        for gone in ['┏', '┓', '┃', '┗', '┛'] {
+            assert!(!text.contains(gone), "名牌不该再有框（{gone}）：{text}");
+        }
+        let rule = lines
+            .iter()
+            .position(|line| line.spans.iter().any(|s| s.content.contains(RULE)))
+            .expect("分节线得在");
+        let version = lines
+            .iter()
+            .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
+            .expect("版本行");
+        let keys = lines
+            .iter()
+            .position(|line| line.spans.iter().any(|s| s.content.contains("Esc")))
+            .expect("键位行");
+        assert!(
+            version < rule && rule < keys,
+            "分节线夹在身份与操作之间：{text}"
+        );
+        // 分节线画满块宽（它就是这块文字的右缘）：46 列 = 2x 大字的宽度。
+        let line = lines[rule]
+            .spans
+            .iter()
+            .find(|span| span.content.chars().all(|c| c == RULE))
+            .expect("分节线自成 span");
         assert_eq!(
-            text.matches('┃').count(),
-            CARD_BODY_ROWS * 2,
-            "卡片的竖线数不对：{text}"
+            line.content.chars().count(),
+            46,
+            "2x 档的块宽 = 大字宽：{text}"
         );
     }
 
     #[test]
+    fn commands_in_the_nameplate_are_accent() {
+        // 命令是唯一可以照着敲的东西 —— 整套 UI 里都是 accent（palette 的约定：
+        // accent = logo / 命令 / 链接）。名牌里若是 dim，它就成了看不见的字。
+        let accent = Style::default().fg(Color::Red);
+        let tip = tip_line(
+            "输入 /skills 看已装技能",
+            Style::default(),
+            Style::default(),
+            accent,
+        );
+        assert!(
+            tip.spans
+                .iter()
+                .any(|s| s.content.as_ref() == "/skills" && s.style.fg == Some(Color::Red)),
+            "tip 里的命令要染成 accent：{tip:?}"
+        );
+        let hints = hints_line(Style::default(), accent);
+        assert_eq!(hints.spans[0].content.as_ref(), TIPS_COMMAND);
+        assert_eq!(
+            hints.spans[0].style.fg,
+            Some(Color::Red),
+            "入口行的命令名是 accent：{hints:?}"
+        );
+    }
+
+    #[test]
+    fn keys_split_into_keys_and_verbs() {
+        // 一行里先看见敲什么，再读它做什么：按键比动作亮一档。
+        let key = Style::default().fg(Color::Red);
+        let dim = Style::default().fg(Color::Blue);
+        let line = keys_line(key, dim);
+        let keys: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|s| s.style.fg == Some(Color::Red))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            keys,
+            ["Esc", "Ctrl+J", "Ctrl+C×2"],
+            "三个键各自成 span：{line:?}"
+        );
+    }
+
+    // ── 版面：居中与档位 ──────────────────────────────────
+
+    #[test]
+    fn the_block_sits_in_the_optical_center_of_an_empty_session() {
+        // 空会话是一屏开屏：上下留白按光学中心分（上面比下面少），左右也居中。
+        let view = Viewport {
+            width: 120,
+            height: 50,
+            empty: true,
+        };
+        let mut w = welcome();
+        let lines = w.build(&palette(), view, Instant::now(), false, true, None);
+        let first_ink = lines
+            .iter()
+            .position(|line| width_of(line) > 0)
+            .expect("总有内容");
+        let last_ink = lines
+            .iter()
+            .rposition(|line| width_of(line) > 0)
+            .expect("总有内容");
+        let top = first_ink;
+        // 视口里块**下面**还剩几行：header 之后的空行也是视口的一部分。
+        let bottom = view.height as usize - last_ink - 1;
+        assert!(top > 1, "空会话上方要有留白，实际 {top}");
+        assert!(
+            top < bottom,
+            "光学中心略高于几何中心：上面 {top} 行，下面 {bottom} 行"
+        );
+        // 上方留白 = (视口高 − 块高) × 45%；块高含尾部那一格空行。
+        let block = last_ink - first_ink + 2;
+        assert_eq!(
+            top,
+            (view.height as usize - block) * HERO_CENTER_PCT as usize / 100,
+            "留白按光学中心算"
+        );
+        // 水平居中：首行左侧有留白。
+        let left = lines[first_ink]
+            .spans
+            .first()
+            .map(|s| s.content.len() - s.content.trim_start().len())
+            .unwrap_or(0);
+        assert!(left > 0, "宽终端上整块水平居中，实际左留白 {left}");
+    }
+
+    #[test]
+    fn a_conversation_pins_the_block_to_the_top() {
+        // 有了消息就不是开屏了：header 退回"会话的开头"（一格留白、左对齐）。
+        let view = Viewport {
+            width: 120,
+            height: 50,
+            empty: false,
+        };
+        let mut w = welcome();
+        let lines = w.build(&palette(), view, Instant::now(), false, true, None);
+        let first_ink = lines
+            .iter()
+            .position(|line| width_of(line) > 0)
+            .expect("总有内容");
+        assert_eq!(first_ink, 1, "顶对齐只有一格呼吸");
+        // 左对齐：最左墨迹列比空会话时小一个居中位移。
+        let left_ink = |lines: &[Line<'static>]| -> usize {
+            lines
+                .iter()
+                .filter_map(|line| {
+                    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    text.chars()
+                        .any(|c| c != ' ')
+                        .then(|| text.chars().take_while(|c| *c == ' ').count())
+                })
+                .min()
+                .unwrap_or(0)
+        };
+        let empty = {
+            let mut w = welcome();
+            let centred = w.build(
+                &palette(),
+                Viewport {
+                    height: 50,
+                    empty: true,
+                    ..view
+                },
+                Instant::now(),
+                false,
+                true,
+                None,
+            );
+            left_ink(&centred)
+        };
+        assert!(
+            left_ink(&lines) < empty,
+            "有消息时退回左对齐（最左墨迹 {left_ink_of:?} < {empty}）",
+            left_ink_of = left_ink(&lines)
+        );
+    }
+
+    #[test]
+    fn every_layout_input_rebuilds() {
+        // 版面三件套都进 `needs_rebuild` 的键：只记宽度的话，改窗口大小 / 第一条
+        // 消息落地都不会重排（整块会留在错误的位置上）。
+        let mut w = welcome();
+        let settled = Instant::now() + Duration::from_millis(SWEEP_MS + 500);
+        let view = Viewport {
+            width: 120,
+            height: 40,
+            empty: true,
+        };
+        w.build(&palette(), view, settled, false, true, None);
+        assert!(
+            !w.needs_rebuild(view, settled, false, true, None),
+            "没变化不重建"
+        );
+        for changed in [
+            Viewport { width: 121, ..view },
+            Viewport { height: 41, ..view },
+            Viewport {
+                empty: false,
+                ..view
+            },
+        ] {
+            assert!(
+                w.needs_rebuild(changed, settled, false, true, None),
+                "版面变了要重建：{changed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_width_ladder_is_the_recorded_one() {
-        // 档位表（**内容宽** → 形态）。写成表是故意的：阶梯不是单调的 ——
-        // Full 档一出现，海鸥就吃掉 40 列，比它窄的 Compact 档反而更宽（73 列
-        // 有 2x 大字 + 卡片，74 列只剩 1x + 纯文字）。这条"变宽反而变小"是
-        // FULL_MIN 既定优先级的代价（80 列必须落在整块档、海鸥不能让出去），
-        // 表就是它的契约：哪一档出现在哪个区间，改了就红。
+        // 档位表（**内容宽** → 形态）。Full 档一出现，海鸥就吃掉 40 列，比它窄的
+        // Compact 档反而更宽 —— 这条"变宽反而变小"是 FULL_MIN 既定优先级的代价
+        // （80 列必须落在整块档、海鸥不能让出去），表就是它的契约。
         let palette = palette();
         let column_of = |content: u16| -> usize {
             match layout_for(content) {
@@ -923,47 +1365,35 @@ mod tests {
                 None,
             )
         };
+        // (是不是 2x 大字, 分节线在不在)
         let shape = |content: u16| -> (bool, bool) {
-            let lines = column(content);
+            let (lines, _) = column(content);
             let width = column_of(content);
             let rows = wordmark::scale_for(width).rows();
             (
                 wordmark_width(&lines, rows) == 46,
-                lines.iter().any(|l| l.to_string().contains('┏')),
+                lines.iter().any(|l| l.to_string().contains(RULE)),
             )
         };
-        let height = |content: u16| column(content).len();
+        let height = |content: u16| column(content).0.len();
 
         // Compact 档（无海鸥）：信息列 = 内容宽 − 1。
         assert_eq!(shape(COMPACT_MIN - 1), (false, false), "最窄档没列");
-        assert_eq!(shape(COMPACT_MIN), (false, false), "内容 40：1x + 纯文字");
-        assert_eq!(
-            shape(45),
-            (false, false),
-            "内容 45：纯文字段的上边界（信息列 44）"
-        );
-        assert_eq!(
-            shape(COMPACT_MIN + (CARD_MIN - 39) as u16),
-            (false, true),
-            "内容 46：1x + 卡片"
-        );
-        assert_eq!(
-            shape(47),
-            (true, true),
-            "内容 47：2x + 卡片段的下边界（信息列 46）"
-        );
-        assert_eq!(shape(FULL_MIN - 1), (true, true), "内容 73：2x + 卡片");
+        assert_eq!(shape(COMPACT_MIN), (false, true), "内容 40：1x + 分节线");
+        assert_eq!(shape(45), (false, true), "内容 45：1x（信息列 44 < 46）");
+        assert_eq!(shape(46), (false, true), "内容 46：1x（信息列 45）");
+        assert_eq!(shape(47), (true, true), "内容 47：2x 起（信息列 46）");
+        assert_eq!(shape(FULL_MIN - 1), (true, true), "内容 73：2x");
 
         // Full 档（海鸥 + 间隔 40 列）：信息列从 34 列起步。
-        assert_eq!(shape(FULL_MIN), (false, false), "内容 74：1x + 纯文字");
-        assert_eq!(shape(FULL_MIN + 10), (false, false), "内容 84：1x + 纯文字");
-        assert_eq!(shape(FULL_MIN + 11), (false, true), "内容 85：1x + 卡片");
-        assert_eq!(shape(FULL_MIN + 12), (true, true), "内容 86：2x + 卡片");
+        assert_eq!(shape(FULL_MIN), (false, true), "内容 74：1x + 分节线");
+        assert_eq!(shape(FULL_MIN + 11), (false, true), "内容 85：1x");
+        assert_eq!(shape(FULL_MIN + 12), (true, true), "内容 86：2x");
 
-        // 高度：1x + 纯文字 9 行、1x + 卡片 11 行、2x + 卡片 13 行。
+        // 高度：1x 3 + 6 行 = 9；2x 5 + 6 行 = 11。
         assert_eq!(height(40), 9);
-        assert_eq!(height(46), 11);
-        assert_eq!(height(120), 13);
+        assert_eq!(height(46), 9);
+        assert_eq!(height(120), 11);
     }
 
     #[test]
@@ -989,7 +1419,14 @@ mod tests {
         let tip = w.tip();
         let now = Instant::now();
         for (width, working) in [(120u16, false), (60, true), (30, false), (120, false)] {
-            w.build(&palette(), width, now, working, true, None);
+            w.build(
+                &palette(),
+                Viewport::width_only(width),
+                now,
+                working,
+                true,
+                None,
+            );
             assert!(std::ptr::eq(w.tip(), tip), "tip 不该在重建之间换");
         }
     }
@@ -1001,24 +1438,45 @@ mod tests {
         let mut w = welcome();
         let start = w.epoch;
         let mid = start + Duration::from_millis(SWEEP_MS - 300);
-        w.build(&palette(), 100, mid, false, true, None);
+        w.build(
+            &palette(),
+            Viewport::width_only(100),
+            mid,
+            false,
+            true,
+            None,
+        );
         let just_after = start + Duration::from_millis(SWEEP_MS + 1);
         assert!(
-            w.needs_rebuild(100, just_after, false, true, None),
+            w.needs_rebuild(Viewport::width_only(100), just_after, false, true, None),
             "扫光结束那一刻必须重建一次"
         );
         // 重建之后（已定格）就不该再因为扫光反复重建。
-        w.build(&palette(), 100, just_after, false, true, None);
-        assert!(!w.needs_rebuild(100, just_after, false, true, None));
+        w.build(
+            &palette(),
+            Viewport::width_only(100),
+            just_after,
+            false,
+            true,
+            None,
+        );
+        assert!(!w.needs_rebuild(Viewport::width_only(100), just_after, false, true, None));
     }
 
     #[test]
     fn offscreen_welcome_costs_nothing() {
         let mut w = welcome();
         let now = Instant::now();
-        w.build(&palette(), 120, now, false, true, None);
+        w.build(
+            &palette(),
+            Viewport::width_only(120),
+            now,
+            false,
+            true,
+            None,
+        );
         assert!(
-            !w.needs_rebuild(120, now, false, false, None),
+            !w.needs_rebuild(Viewport::width_only(120), now, false, false, None),
             "滚出视口就不重建"
         );
         assert!(
@@ -1031,9 +1489,16 @@ mod tests {
     fn working_switch_rebuilds() {
         let mut w = welcome();
         let now = Instant::now();
-        w.build(&palette(), 120, now, false, true, None);
+        w.build(
+            &palette(),
+            Viewport::width_only(120),
+            now,
+            false,
+            true,
+            None,
+        );
         assert!(
-            w.needs_rebuild(120, now, true, true, None),
+            w.needs_rebuild(Viewport::width_only(120), now, true, true, None),
             "干活/闲切换要换姿态，必须重建"
         );
     }
@@ -1043,9 +1508,16 @@ mod tests {
         let mut w = welcome();
         let start = Instant::now();
         let settled = start + Duration::from_millis(SWEEP_MS + 500);
-        w.build(&palette(), 120, settled, false, true, None);
+        w.build(
+            &palette(),
+            Viewport::width_only(120),
+            settled,
+            false,
+            true,
+            None,
+        );
         // 定格后、姿态没到点：不重建。
-        assert!(!w.needs_rebuild(120, settled, false, true, None));
+        assert!(!w.needs_rebuild(Viewport::width_only(120), settled, false, true, None));
     }
 
     #[test]

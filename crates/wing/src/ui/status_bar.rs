@@ -293,9 +293,11 @@ impl Widget for StatusBar<'_> {
         }
 
         if d.thinking {
+            // `· think[:effort]` —— 中间点与左侧链条同一套分隔符；不留分隔符的话
+            // `DeepSeek-Flash MacMachine think` 读起来像三个连写的词。
             let think_label = match &d.reasoning_effort {
-                Some(effort) => format!(" think:{}", effort),
-                None => " think".to_string(),
+                Some(effort) => format!(" · think:{effort}"),
+                None => " · think".to_string(),
             };
             spans.push((Span::styled(think_label, dim), None));
         }
@@ -321,12 +323,14 @@ impl Widget for StatusBar<'_> {
                 "█".repeat(filled),
                 Style::default().fg(bar_color),
             ));
-            right_spans.push(Span::styled("░".repeat(empty), dim));
+            // 空的轨道用细横线而不是 `░`：25% 阴影块在暗底上读起来是"满格的灰条"，
+            // 空会话的 `0/500.0k` 因此恰好长得像用完了（截图里就是这么骗人的）。
+            right_spans.push(Span::styled("─".repeat(empty), dim));
             right_spans.push(Span::styled(
                 format!(
-                    " {}/{}",
+                    " {} / {}",
                     format::tokens(d.total_tokens),
-                    format::tokens(d.context_window_tokens),
+                    format::tokens_round(d.context_window_tokens),
                 ),
                 dim,
             ));
