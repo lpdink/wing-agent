@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from wing.common.logger import log
+from wing.common.logger import log, log_excerpt
 from wing.schema import MediaRef, Message
 
 
@@ -154,8 +154,9 @@ class Inbox:
         future = self._feedback_waiters.get(tool_call_id)
         if future is not None and not future.done():
             log.info(
-                f"inbox.resolve: resolving feedback waiter "
-                f"tool_call_id={tool_call_id} with '{content[:40]}'"
+                "inbox.resolve: resolving feedback waiter tool_call_id=%s with '%s'",
+                tool_call_id,
+                log_excerpt(content, 40),
             )
             future.set_result(content)
             return True

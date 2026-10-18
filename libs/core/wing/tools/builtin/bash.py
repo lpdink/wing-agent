@@ -6,7 +6,7 @@ import os
 import time
 
 from wing.agent import ToolContext
-from wing.common.logger import log
+from wing.common.logger import log, utf8_safe
 from wing.common.process import kill_process_group
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
@@ -83,9 +83,9 @@ def _parse_feedback(feedback: str) -> str | None:
     """Parse user feedback for dangerous command."""
     value = feedback.strip().lower()
     if value in ("y", "n", "yolo"):
-        log.info(f"_parse_feedback('{feedback}') -> '{value}'")
+        log.info("_parse_feedback('%s') -> '%s'", utf8_safe(feedback), value)
         return value
-    log.info(f"_parse_feedback('{feedback}') -> None")
+    log.info("_parse_feedback('%s') -> None", utf8_safe(feedback))
     return None
 
 
