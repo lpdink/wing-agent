@@ -250,6 +250,9 @@ pub struct Welcome {
     built_facts: Option<SessionFacts>,
     /// 上次构建出来的牌子宽度（不含居中位移）。
     block_width: usize,
+    /// 构建次数（只给测试：钉住"一帧最多建一次"）。
+    #[cfg(test)]
+    builds: u32,
 }
 
 impl Welcome {
@@ -266,6 +269,8 @@ impl Welcome {
             settled_built: false,
             built_facts: None,
             block_width: 0,
+            #[cfg(test)]
+            builds: 0,
         }
     }
 
@@ -360,6 +365,10 @@ impl Welcome {
         let pose = self.motion.pose(ms, working);
         let sweep = self.sweeping(now).then(|| ms as f32 / SWEEP_MS as f32);
 
+        #[cfg(test)]
+        {
+            self.builds += 1;
+        }
         self.built_view = Some(view);
         self.built_visible = visible;
         self.built_working = working;
@@ -447,6 +456,12 @@ impl Welcome {
         out.append(&mut lines);
         out.push(Line::from(""));
         out
+    }
+
+    /// 构建过多少次（测试用：钉住"一帧最多建一次"）。
+    #[cfg(test)]
+    pub(crate) fn builds(&self) -> u32 {
+        self.builds
     }
 
     /// 上一帧那块牌子的宽度（**不含**水平居中塞进去的空列）。
@@ -783,6 +798,9 @@ mod tests {
             .join("\n")
     }
 
+    /// 名牌里 tip 那一行的下标（分节线在 `RULE_AFTER_ROW` 处插入，行序见 `info_rows`）。
+    const TIP_ROW: usize = 3;
+
     fn facts(skills: usize, rules: usize) -> Option<SessionFacts> {
         Some(SessionFacts { skills, rules })
     }
@@ -1114,7 +1132,13 @@ mod tests {
             rules: 999,
         });
         let rows = info_rows(&palette(), widest_tip, facts);
-        for row in &rows[..3] {
+        // **每一行**都过一遍（入口行也不例外：`TIPS_COMMAND` 改名、入口文案加列
+        // 都会把这一行顶出预算）。唯一的例外是最宽的那条 tip —— 它由 `/tips`
+        // 兜底，放不下只丢尾巴。
+        for (index, row) in rows.iter().enumerate() {
+            if index == TIP_ROW {
+                continue;
+            }
             assert!(
                 width_of(row) <= budget,
                 "80 列终端放得下整行：「{row}」{} 列 > {budget} 列",
@@ -1122,8 +1146,7 @@ mod tests {
             );
         }
         // tip：放不下就丢尾巴（一次性），永远不长出第二行。
-        let tip = &rows[3];
-        let fitted = fit_line(tip, budget);
+        let fitted = fit_line(&rows[TIP_ROW], budget);
         assert_eq!(width_of(&fitted), budget, "tip 吃到满宽就停");
         assert!(
             fitted

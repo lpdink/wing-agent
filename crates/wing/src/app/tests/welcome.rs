@@ -197,9 +197,16 @@ fn a_popup_does_not_move_the_splash() {
                 .collect()
         })
         .collect();
+    let first_popup = below
+        .iter()
+        .find(|row| !row.trim().is_empty())
+        .unwrap_or_else(|| panic!("弹层没画在输入卡下面：{below:?}"));
+    // 与卡片**同列**：`splash_popup` 的 rect 已经是卡片矩形，不该再缩进一层
+    // （缩了就会比卡片窄 2 列、相对卡片多缩进 1 列）。
+    let lead = first_popup.chars().take_while(|c| *c == ' ').count() as u16;
     assert!(
-        below.iter().any(|row| !row.trim().is_empty()),
-        "弹层画在输入卡下面：{below:?}"
+        lead >= composer.x && lead < composer.right(),
+        "弹层要落在卡片的横向范围内（lead={lead} card={composer:?}）：{first_popup:?}"
     );
 }
 
@@ -226,6 +233,58 @@ fn the_first_message_drops_the_composer_back_to_the_bottom() {
         1,
         "牌子回到会话开头（状态栏下面就是一格留白）"
     );
+}
+
+/// 回归：开屏的**空气也要算进"装不装得下"**。
+///
+/// 少算它的时候，草稿一长布局约束总和就超出屏高 —— ratatui 挤的是**牌子**
+/// （`Length` 也能被压）：band 比 header 还矮、名牌最后一行被整行裁掉，而且
+/// `content_height > band` 会顺手画出一条开屏上本不该有的滚动条。
+#[test]
+fn a_long_draft_never_squeezes_the_nameplate() {
+    for (width, height, draft_lines) in [(100u16, 30u16, 10usize), (60, 26, 8)] {
+        let mut app = test_app();
+        app.input.set_text(&"draft line\n".repeat(draft_lines));
+        let mut terminal = test_terminal(width, height);
+        draw(&mut app, &mut terminal);
+
+        let band = app.chat.geometry().area;
+        let header = app.chat.header_height();
+        assert!(
+            band.height as usize >= header,
+            "{width}x{height} + {draft_lines} 行草稿：band {} < header {header}",
+            band.height
+        );
+        assert!(
+            app.chat.content_height() <= band.height as usize,
+            "{width}x{height} + {draft_lines} 行草稿：内容比 band 高（会画出滚动条）"
+        );
+    }
+}
+
+/// 回归：**一帧最多建一次 header**。
+///
+/// 开屏判定要先按开屏宽度量一次牌子；矮终端上装不下、每帧都退回会话版式 ——
+/// 结论不缓存的话，每帧都会"先按开屏建一遍、再按会话重建一遍"（扫光期 ~25fps、
+/// 每次击键各两遍）。缓存之后稳态一帧零重建（版式没变，`built_view` 命中）。
+#[test]
+fn a_settled_frame_builds_the_header_at_most_once() {
+    // 矮终端：开屏装不下，退回会话版式（这条路径过去每帧建两遍）。
+    let mut app = test_app();
+    let mut terminal = test_terminal(60, 12);
+    draw(&mut app, &mut terminal);
+
+    // 扫光期本来就每帧重建一次；这里钉的是"**一次**，不是两次"。
+    for frame in 0..3 {
+        let mut next = test_terminal(60, 12);
+        let before = app.welcome_builds();
+        draw(&mut app, &mut next);
+        assert!(
+            app.welcome_builds() - before <= 1,
+            "第 {frame} 帧建了 {} 次（一帧最多一次）",
+            app.welcome_builds() - before
+        );
+    }
 }
 
 /// 矮终端装不下开屏版式：退回会话版式（牌子贴顶、输入卡钉底），不硬挤。

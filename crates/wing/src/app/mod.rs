@@ -227,6 +227,13 @@ pub struct App {
     /// 调色板刚变过（实时预览）：欢迎屏 header 的缓存键里没有调色板，
     /// `sync_welcome` 下一帧强制重建一次（同 Ctrl+O 需要显式作废 cell 缓存）。
     welcome_theme_dirty: bool,
+    /// 开屏判定要用的牌子高度，按**内容宽**缓存（`(width, rows)`）。
+    ///
+    /// 判定必须先量牌子（按开屏宽度建一次 header），而矮终端上开屏装不下时每帧
+    /// 都会退回会话版式 —— 不缓存的话每次 sync 都会把 header 重建两遍（扫光期
+    /// ~25fps、每次击键各两遍）。牌子高度只由宽度决定（行数恒定），所以宽度是
+    /// 完整的键。
+    splash_probe: Option<(u16, u16)>,
 }
 
 impl App {
@@ -310,6 +317,7 @@ impl App {
             settings_reload_pending: false,
             settings_save: None,
             welcome_theme_dirty: false,
+            splash_probe: None,
         }
     }
 
@@ -343,6 +351,52 @@ impl App {
         self.chat.set_header(lines);
     }
 
+    /// 这一帧走不走开屏版式：`Some((牌子行数, 输入卡宽度))` = 走。
+    ///
+    /// 判据是**装得下**：`状态栏 + 牌子 + 间隔 + 输入卡 ≤ 屏高`（上方的空气可以被
+    /// 压到 0，见 [`frame_layout`]）。牌子都没有（欢迎屏被关掉）时同样不走。
+    ///
+    /// 量牌子要按开屏宽度（终端整宽：开屏没有滚动条）建一次 header，所以结论按
+    /// **内容宽**缓存 —— 矮终端上每帧都会退回会话版式，不缓存就会每帧把 header
+    /// 重建两遍。缓存只存"高度"，装不装得下每帧用当前的输入卡高度重算（草稿
+    /// 长大时判定要跟着变）。
+    fn splash_plan(
+        &mut self,
+        palette: &ThemePalette,
+        area: Rect,
+        full_card_w: u16,
+        now: std::time::Instant,
+    ) -> Option<(u16, u16)> {
+        if !self.chat.is_empty() || self.welcome.is_none() {
+            return None;
+        }
+        let rows = match self.splash_probe {
+            Some((width, rows)) if width == area.width => rows,
+            _ => {
+                self.sync_welcome(
+                    palette,
+                    Viewport {
+                        width: area.width,
+                        empty: true,
+                    },
+                    now,
+                );
+                let rows = self.chat.header_height() as u16;
+                self.splash_probe = Some((area.width, rows));
+                rows
+            }
+        };
+        if rows == 0 {
+            return None;
+        }
+        // 输入卡与牌子同宽居中（读起来是一块东西）。
+        let composer_w = hero_block_width(self)
+            .max(SPLASH_INPUT_MIN)
+            .min(full_card_w);
+        let fits = 1 + rows + 1 + self.input.height(composer_w) <= area.height;
+        fits.then_some((rows, composer_w))
+    }
+
     /// 抽中的那条 tip（测试断言首帧文案）。
     #[cfg(test)]
     pub(crate) fn tip_text(&self) -> &'static str {
@@ -350,6 +404,12 @@ impl App {
             .as_ref()
             .map(|w| w.tip().text)
             .unwrap_or_default()
+    }
+
+    /// 欢迎屏 header 建过多少次（测试：开屏判定不该让一帧建两遍）。
+    #[cfg(test)]
+    pub(crate) fn welcome_builds(&self) -> u32 {
+        self.welcome.as_ref().map(Welcome::builds).unwrap_or(0)
     }
 
     /// 解析后的主题色板（测试要按同一份色板构建 header）。
@@ -638,33 +698,12 @@ impl App {
             // 排版才知道它多高 —— 整块与输入卡要一起算光学中心。
             let now = std::time::Instant::now();
             let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
-            let mut splash = false;
-            let mut hero_rows = 0u16;
-            let mut composer_w = full_card_w;
-            if self.chat.is_empty() {
-                self.sync_welcome(
-                    &palette,
-                    Viewport {
-                        width: area.width,
-                        empty: true,
-                    },
-                    now,
-                );
-                hero_rows = self.chat.header_height() as u16;
-                // 输入卡与牌子同宽居中（读起来是一块东西）。
-                let candidate = hero_block_width(self)
-                    .max(SPLASH_INPUT_MIN)
-                    .min(full_card_w);
-                // 矮终端上开屏版式会把输入卡挤出去：退回会话版式（牌子贴顶、
-                // 输入卡钉底），那才是那里唯一能用的版面。牌子都没有（欢迎屏被
-                // 关掉）时同理 —— 开屏得有个牌子。
-                let fits = hero_rows > 0
-                    && 1 + hero_rows + 1 + self.input.height(candidate) + 2 <= area.height;
-                splash = fits;
-                if fits {
-                    composer_w = candidate;
-                }
-            }
+            let splash_plan = self.splash_plan(&palette, area, full_card_w, now);
+            let (splash, hero_rows) = match splash_plan {
+                Some((hero_rows, _)) => (true, hero_rows),
+                None => (false, 0),
+            };
+            let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
             let composer_h = self.input.height(composer_w);
             let bands = frame_layout(area, splash, hero_rows, composer_h, self.popup.height());
 
@@ -789,10 +828,14 @@ impl App {
             if let Some(rect) = popup_rect
                 && let Some((rows, state, filter)) = self.popup.active.render_data()
             {
-                frame.render_widget(
-                    SelectionPopup::new(rows, state, filter, &palette),
-                    crate::ui::input_area::chrome::card_area(rect),
-                );
+                // 开屏的 `rect` 已经是卡片矩形（与输入卡同宽同列），再剥一层边距
+                // 会比卡片窄 2 列；会话里的 `rect` 是排版行，才要按惯例留边。
+                let area = if splash {
+                    rect
+                } else {
+                    crate::ui::input_area::chrome::card_area(rect)
+                };
+                frame.render_widget(SelectionPopup::new(rows, state, filter, &palette), area);
             }
 
             // Position the input cursor *inside* the render pass so ratatui
@@ -966,6 +1009,11 @@ async fn thinking_sweep_tick(deadline: Option<std::time::Instant>) {
     }
 }
 
+/// 牌子下面那几行的**基线**高度：一格间隔 + 单行输入卡（上下各一道边框）+ 一格。
+///
+/// 光学中心按它算（弹层与草稿长大不进这个账），见 `welcome::splash_pad`。
+const SPLASH_RESERVE: u16 = 1 + crate::ui::input_area::chrome::BORDER_ROWS + 1;
+
 /// 开屏输入卡的最小宽度：牌子在窄终端上只有 38 列左右（Compact 档），而
 /// composer 的两条轨道（workdir / 用量）比它更需要地方 —— 取一个下限，
 /// 读起来仍是"牌子下面一张卡"，不是一根细条。
@@ -1019,9 +1067,11 @@ fn frame_layout(
     }
 
     // 开屏的空气按**基线**算（单行输入卡 + 间隔）：弹层与草稿长大只吃下面的空气，
-    // 不吃上面那份 —— 否则牌子会跟着往上跳。
-    let baseline = 1 + crate::ui::input_area::chrome::BORDER_ROWS + 1;
-    let pad = crate::ui::welcome::splash_pad(area.height, hero_rows, baseline);
+    // 不吃上面那份 —— 否则牌子会跟着往上跳。装不下时先把空气压到 0，**绝不让约束
+    // 总和超出屏高**：超了 ratatui 会去挤牌子（`Length` 也能被压），名牌最后一行
+    // 被整行裁掉、band 还会变得比 header 矮（顺手画出一条滚动条）。
+    let pad = crate::ui::welcome::splash_pad(area.height, hero_rows, SPLASH_RESERVE)
+        .min(area.height.saturating_sub(1 + hero_rows + 1 + composer_h));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

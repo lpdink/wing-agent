@@ -735,6 +735,29 @@ mod tests {
     }
 
     #[test]
+    fn test_the_thinking_label_carries_the_effort_when_known() {
+        // `· think` / `· think:high` —— 中间点与左侧链条同一套分隔符（不然
+        // `DeepSeek-Flash MacMachine think` 读起来是三个连写的词）。
+        let data = StatusData {
+            model: "m".into(),
+            provider: Some("p".into()),
+            thinking: true,
+            ..StatusData::default()
+        };
+        let (text, _) = render_bar(&data, SID, 120);
+        let joined = text.join("");
+        assert!(joined.contains("m · p · think"), "无档位：{joined:?}");
+
+        let data = StatusData {
+            reasoning_effort: Some("high".into()),
+            ..data
+        };
+        let (text, _) = render_bar(&data, SID, 120);
+        let joined = text.join("");
+        assert!(joined.contains("· think:high"), "带档位：{joined:?}");
+    }
+
+    #[test]
     fn test_the_context_meter_reads_zero_on_a_fresh_session() {
         // 空会话的读数必须**看起来是空的**：旧的空轨道用 `░`（25% 阴影块），
         // 暗底上就是一整条灰带 —— `0/500.0k` 因此长得像"用完了"。轨道换成细横线，
