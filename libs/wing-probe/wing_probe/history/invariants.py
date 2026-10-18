@@ -488,6 +488,64 @@ def assert_no_transient_records(
         )
 
 
+# ── 不变量 4：落盘规范形（null 不写 · 派生字段不写）────────
+
+
+#: assistant 记录的派生扁平字段：``content_blocks`` 的派生物，落盘恒不写
+#: （``store/base.canonical_record``；读取侧 blocks 优先，存量旧形态照旧加载）。
+DERIVED_FLAT_FIELDS: frozenset[str] = frozenset(
+    {"content", "reasoning_content", "tool_calls"}
+)
+
+
+def assert_record_shape(view: HistoryView) -> None:
+    """落盘规范形：null 不写；assistant 记录不存 content_blocks 的副本。
+
+    检查**全量原始记录**（``view.records``，不经派生补齐）：
+
+    - 顶层不得有值为 null 的键（"缺席即默认"）；
+    - ``role="assistant"`` 且带 ``content_blocks`` 的记录不得携带
+      ``content`` / ``reasoning_content`` / ``tool_calls``——它们由块数组
+      派生，落盘只留 blocks（fork 的复制前缀也走同一规范形）；
+    - 非 assistant 的 ``content`` 是存储值，保留（不做要求，只禁止多存）。
+
+    不检查嵌套 null：``exclude_none`` 覆盖的 model 字段之外，**自由载荷**
+    （工具参数 / 问答选项）里的 null 是数据，必须原样保留——从记录形状上
+    无法区分两者，因此只对顶层下断言。
+
+    Raises:
+        HistoryAssertionError: 命中的每条记录都给出行号 / uuid / 多余或 null 的键。
+    """
+    problems: list[str] = []
+    for index, record in enumerate(view.records):
+        line = view.record_lines[index]
+        ref = _record_ref(record, line=line)
+        nulls = sorted(key for key, value in record.items() if value is None)
+        if nulls:
+            problems.append(
+                f"line {line}: null-valued key(s) {nulls} ({ref}) —— "
+                "缺席即默认，null 不入 history.jsonl"
+            )
+        if record.get("role") != "assistant" or "content_blocks" not in record:
+            continue
+        extra = sorted(DERIVED_FLAT_FIELDS & set(record))
+        if extra:
+            problems.append(
+                f"line {line}: assistant record stores derived field(s) {extra} "
+                f"({ref}) —— content_blocks 是唯一存储，派生字段不落盘"
+            )
+
+    if problems:
+        raise HistoryAssertionError(
+            _failure(
+                "record shape violates the on-disk canonical form",
+                problems,
+                sections=[view.describe()],
+                session_id=view.session_id,
+            )
+        )
+
+
 # ── 过渡断言的公共零件 ────────────────────────────────────
 
 
@@ -1476,6 +1534,7 @@ def assert_fork_of(
 __all__ = [
     "CURRENT_SENTINEL",
     "DELTA_EVENT_TYPES",
+    "DERIVED_FLAT_FIELDS",
     "FORK_METADATA_FIELDS",
     "FORK_SNAPSHOT_FIELDS",
     "TRANSIENT_EVENT_TYPES",
@@ -1483,6 +1542,7 @@ __all__ = [
     "assert_compact_transition",
     "assert_fork_of",
     "assert_no_transient_records",
+    "assert_record_shape",
     "assert_rewind_transition",
     "assert_tool_pairing",
     "fork_metadata",

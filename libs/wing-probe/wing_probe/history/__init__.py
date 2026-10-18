@@ -5,8 +5,8 @@
 - :mod:`wing_probe.history.view`：``HistoryView``（记录 / 索引 / 活跃链 /
   ``messages()`` / ``events()`` / ``full_chain()``）、语义投影与差异工具、
   ``metadata.json`` 解析；
-- :mod:`wing_probe.history.invariants`：三条内置不变量
-  （链拓扑 / tool 配对 / 瞬态不落盘）、三条红线过渡断言
+- :mod:`wing_probe.history.invariants`：四条内置不变量
+  （链拓扑 / tool 配对 / 瞬态不落盘 / 落盘规范形）、三条红线过渡断言
   （compact / rewind / fork）、``fork_metadata``。
 
 典型用法（场景内）：
@@ -23,6 +23,7 @@
 from wing_probe.history.invariants import (
     CURRENT_SENTINEL,
     DELTA_EVENT_TYPES,
+    DERIVED_FLAT_FIELDS,
     FORK_METADATA_FIELDS,
     FORK_SNAPSHOT_FIELDS,
     TRANSIENT_EVENT_TYPES,
@@ -30,6 +31,7 @@ from wing_probe.history.invariants import (
     assert_compact_transition,
     assert_fork_of,
     assert_no_transient_records,
+    assert_record_shape,
     assert_rewind_transition,
     assert_tool_pairing,
     fork_metadata,
@@ -44,6 +46,7 @@ from wing_probe.history.view import (
     TOPOLOGY_KEYS,
     HistoryAssertionError,
     HistoryView,
+    derive_flat_fields,
     describe_chain,
     describe_record,
     event_semantics,
@@ -61,6 +64,7 @@ __all__ = [
     "COMPACT_PREFIX",
     "CURRENT_SENTINEL",
     "DELTA_EVENT_TYPES",
+    "DERIVED_FLAT_FIELDS",
     "EVENT_ROLE",
     "FORK_METADATA_FIELDS",
     "FORK_SNAPSHOT_FIELDS",
@@ -76,8 +80,10 @@ __all__ = [
     "assert_compact_transition",
     "assert_fork_of",
     "assert_no_transient_records",
+    "assert_record_shape",
     "assert_rewind_transition",
     "assert_tool_pairing",
+    "derive_flat_fields",
     "describe_chain",
     "describe_record",
     "event_semantics",

@@ -322,7 +322,7 @@ async def test_fork_after_compact_keeps_region_out_of_context(probe: Probe) -> N
 
     # 记录：压缩前区间随行走（可回退 / 可再分叉）
     child_view = probe.history(child)
-    child_contents = [record.get("content") for record in child_view.records]
+    child_contents = [record["content"] for record in child_view.message_records()]
     assert {"alpha", "reply one", "beta", "reply two"} <= set(child_contents), (
         child_view.describe()
     )
@@ -413,7 +413,7 @@ async def test_fork_at_pre_compact_message_ignores_the_compaction(probe: Probe) 
         "alpha",
         "reply one",
     ], child_view.describe()
-    contents = [record.get("content") for record in child_view.records]
+    contents = [record["content"] for record in child_view.message_records()]
     assert not any(
         isinstance(content, str) and content.startswith("[Compact]")
         for content in contents

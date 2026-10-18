@@ -352,6 +352,40 @@ def first_user_title(records: Iterator[dict[str, Any]]) -> str | None:
     return IMAGE_ONLY_TITLE if image_only else None
 
 
+#: assistant 记录的派生字段：``content_blocks`` 的派生物，落盘恒不写
+#: （``Message`` 的访问器实时计算，见 :func:`canonical_record`）。
+_DERIVED_FLAT_FIELDS = ("content", "reasoning_content", "tool_calls")
+
+
+def canonical_record(record: dict[str, Any]) -> dict[str, Any]:
+    """history 记录的**规范形**——落盘前必过（规则唯一实现，新 dict 返回）。
+
+    两条规则，都只服务"落盘只存事实不存副本"：
+
+    - **null 不写**：缺席即默认。``model_dump(exclude_none=True)`` 已处理模型
+      字段（含嵌套），这里兜住 wrap 序列化器在内层 handler 之后注入的顶层键
+      ——``exclude_none`` 看不到它们。``0`` / ``False`` / ``""`` 照常写
+      （显式建模，见链模型改造的硬约束）。
+    - **assistant 的派生字段不写**：``content`` / ``reasoning_content`` /
+      ``tool_calls`` 由 ``content_blocks`` 派生。**只在该记录带 content_blocks
+      时剥**——没有 blocks 的存量记录（develop 基线格式）里扁平字段是唯一
+      存储，必须原样保留。
+
+    读取侧对两种形态都接受（``Message._route_flat``：blocks 在则扁平字段
+    忽略，blocks 缺则由扁平值重建），因此本规则**不需要迁移存量文件**，旧
+    版本代码读新记录也照常工作（blocks 优先）。
+
+    自由载荷（工具参数 ``input`` / ``arguments``、``questions`` 等）里的 null
+    是**数据**不是缺席，一律不动——它们不在 pydantic 模型字段上，天然不受
+    ``exclude_none`` 影响；本函数只做顶层过滤，不下钻。
+    """
+    canonical = {key: value for key, value in record.items() if value is not None}
+    if canonical.get("role") == "assistant" and "content_blocks" in canonical:
+        for key in _DERIVED_FLAT_FIELDS:
+            canonical.pop(key, None)
+    return canonical
+
+
 class ArchivedSession(BaseModel):
     """归档区条目：索引持久化形态 + 列表投影素材。
 

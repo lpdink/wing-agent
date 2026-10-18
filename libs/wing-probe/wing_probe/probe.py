@@ -38,6 +38,7 @@ from wing_probe.history.invariants import (
     HistoryAssertionError,
     assert_chain_invariants,
     assert_no_transient_records,
+    assert_record_shape,
     assert_tool_pairing,
 )
 from wing_probe.history.view import (
@@ -90,6 +91,7 @@ def invariant_checks(
             ),
         ),
         ("no_transient_records", assert_no_transient_records),
+        ("record_shape", assert_record_shape),
     )
 
 
@@ -118,7 +120,7 @@ class ProbeInvariantError(AssertionError):
 def run_invariants(
     views: Sequence[HistoryView], *, allow_arguments_error: bool = False
 ) -> list[str]:
-    """对一个 session 的全部视图运行三条内置不变量，返回问题清单（不抛）。
+    """对一个 session 的全部视图运行四条内置不变量，返回问题清单（不抛）。
 
     每条问题形如 ``[chain_topology] session <id>: <底层报告>``——来源、位置与
     原因都在一行里可读。``allow_arguments_error`` 见 :func:`invariant_checks`。

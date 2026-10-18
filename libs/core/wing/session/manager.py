@@ -51,7 +51,7 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
-from wing.store.base import validate_file_name
+from wing.store.base import canonical_record, validate_file_name
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
@@ -168,7 +168,7 @@ def _session_epoch(session_id: str, last_interaction: str | None) -> float | Non
 
 
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
-    """复制记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
+    """复制记录（顺带规范化）并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
     重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
     所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
@@ -178,12 +178,16 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
     缺省落到 None 是防御：万一出现前缀外的引用，宁可让它成为根节点，也不留
     跨 session 的引用。
 
+    ``canonical_record`` 让**复制也走落盘规范形**：fork 直接复用源记录的原始
+    dict（不经 ``TrackedList._to_record``），不过这一道，存量旧形态的冗余字段
+    （派生扁平字段 / null）就会被逐字节搬进子会话，越 fork 越多。
+
     只做**顶层浅拷贝**：重写的三个键都在顶层，而记录（含嵌套值）对读取方
     一律只读（``MessageLog`` 的记录契约：file 后端每次重新解析，memory
     后端直接交出内部结构，两边都没有就地改写记录的路径），深拷贝没有额外
     保护面。
     """
-    clones = [{**record} for record in records]
+    clones = [canonical_record(record) for record in records]
     uuid_map: dict[str, str] = {}
     for clone in clones:
         uuid = clone.get("uuid")

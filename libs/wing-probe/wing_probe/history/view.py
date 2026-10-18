@@ -191,6 +191,70 @@ def _normalize_blocks(blocks: Any) -> Any:
     return blocks
 
 
+def derive_flat_fields(record: Mapping[str, Any]) -> dict[str, Any]:
+    """assistant 记录的派生扁平字段（镜像实现：``content_blocks`` 是唯一真相）。
+
+    落盘只存事实：assistant 记录不再携带 ``content`` / ``reasoning_content`` /
+    ``tool_calls``（见 ``store/base.canonical_record``），读出来的值由实现按块
+    数组现算。断言口径必须同构——否则同一份上下文在"存量旧形态（带扁平字段）"
+    与"新记录（只带 blocks）"之间会呈现成两种语义。
+
+    派生规则（与 ``Message.content`` / ``reasoning_content`` / ``tool_calls``
+    逐字一致）：
+
+    - ``content``：拼接全部 ``text`` 块，无内容为 None；
+    - ``reasoning_content``：拼接非 redacted、非空的 ``thinking`` 块，无则 None；
+    - ``tool_calls``：``tool_use`` 块 → ``{id, name, arguments, arguments_error}``，
+      无则 None。
+
+    记录没有 ``content_blocks`` 时返回空 dict（扁平字段就是它的事实）。
+    """
+    blocks = record.get("content_blocks")
+    if not isinstance(blocks, list):
+        return {}
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for block in blocks:
+        mapping = _as_mapping(block)
+        if mapping is None:
+            continue
+        kind = mapping.get("type")
+        if kind == "text":
+            text_parts.append(str(mapping.get("text") or ""))
+        elif kind == "thinking":
+            thinking = mapping.get("thinking")
+            if not mapping.get("redacted") and thinking:
+                reasoning_parts.append(str(thinking))
+        elif kind == "tool_use":
+            tool_calls.append(
+                {
+                    "id": mapping.get("id"),
+                    "name": mapping.get("name"),
+                    "arguments": mapping.get("input") or {},
+                    "arguments_error": mapping.get("input_error"),
+                }
+            )
+    return {
+        "content": "".join(text_parts) or None,
+        "reasoning_content": "".join(reasoning_parts) or None,
+        "tool_calls": tool_calls or None,
+    }
+
+
+def _fill_derived_fields(record: Mapping[str, Any]) -> dict[str, Any]:
+    """记录 + 缺失的派生扁平字段（**只补缺**：已存的值原样保留）。
+
+    存量记录（旧形态）自带扁平字段，不动它们；新记录缺这些键，按块数组补齐。
+    """
+    filled = dict(record)
+    if filled.get("role") != "assistant":
+        return filled
+    for key, value in derive_flat_fields(filled).items():
+        filled.setdefault(key, value)
+    return filled
+
+
 def _normalize_tool_calls(calls: Any) -> Any:
     """tool_calls 归一化：``arguments`` 保持原样（dict / JSON 文本都不改写）。
 
@@ -228,7 +292,12 @@ def message_semantics(record: Mapping[str, Any]) -> dict[str, Any]:
     不参与比较：``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` / ``ts``
     （链拓扑与写入噪声）、``usage`` / ``stop_reason``（provider 响应审计，
     不属于上下文事实，且实现的 rewind 复制行不复制它们）。
+
+    assistant 的派生扁平字段先按 ``content_blocks`` 补齐（见
+    :func:`derive_flat_fields`）：存量旧形态与新的规范形因此呈现同一份事实，
+    "fork 复制前缀 vs 源前缀"这类对账不会因落盘形态不同而误报。
     """
+    record = _fill_derived_fields(record)
     blocks = record.get("content_blocks")
     return {
         "role": record.get("role"),
@@ -290,11 +359,14 @@ class HistoryView:
         self.path: Path = self.session_dir / HISTORY_FILE
         self.metadata_path: Path = self.session_dir / METADATA_FILE
 
-        #: 全量原始记录（Message + 事件，文件序）；损坏行已跳过。
+        #: 全量**原始**记录（Message + 事件，文件序）；损坏行已跳过。
+        #: 形状类断言（落盘规范形 / 瞬态不落盘）只看这里——事实读法走
+        #: :attr:`by_uuid` / :meth:`messages`。
         self.records: list[dict[str, Any]] = []
         #: 与 ``records`` 对齐的源文件行号（1-based，定位用）。
         self.record_lines: list[int] = []
-        #: uuid → 记录（同 uuid 重复时后者覆盖，镜像实现的 last-write-wins）。
+        #: uuid → **事实视图**记录（派生扁平字段已补齐；同 uuid 重复时后者覆盖，
+        #: 镜像实现的 last-write-wins）。链遍历 / :meth:`messages` 都经过这里。
         self.by_uuid: dict[str, dict[str, Any]] = {}
         #: 跳过的损坏行行号（非法 JSON / 非对象行）。
         self.corrupt_lines: list[int] = []
@@ -338,7 +410,10 @@ class HistoryView:
             if uuid is not None:
                 if uuid in self.by_uuid:
                     self.duplicate_uuids.setdefault(uuid, []).append(line_number)
-                self.by_uuid[uuid] = entry
+                # 链遍历交出**事实视图**（派生扁平字段补齐，见
+                # ``_fill_derived_fields``）；``records`` 保持原始形态——落盘
+                # 规范形（null 不写 / 派生字段不写）只能从原始记录断言。
+                self.by_uuid[uuid] = _fill_derived_fields(entry)
 
     def reload(self) -> HistoryView:
         """重新读盘，返回**新视图**（自身仍保持快照语义，不被修改）。"""
@@ -453,8 +528,16 @@ class HistoryView:
     # ── 分类过滤 ──────────────────────────────────────────
 
     def messages(self) -> list[dict[str, Any]]:
-        """活跃链上的 Message 记录（顺序保留）。"""
+        """活跃链上的 Message 记录（**事实视图**：派生扁平字段已补齐）。"""
         return [record for record in self.active_chain() if is_message(record)]
+
+    def message_records(self) -> list[dict[str, Any]]:
+        """全量 Message 记录（文件序，**事实视图**）——含链外记录（分叉 / 被压缩区间）。"""
+        return [
+            _fill_derived_fields(record)
+            for record in self.records
+            if is_message(record)
+        ]
 
     def events(self) -> list[dict[str, Any]]:
         """活跃链上的事件记录（顺序保留）。"""
@@ -568,6 +651,12 @@ class HistoryView:
         from wing_probe.history.invariants import assert_no_transient_records
 
         assert_no_transient_records(self, types=types)
+
+    def assert_record_shape(self) -> None:
+        """落盘规范形：null 不写、assistant 不存 ``content_blocks`` 的派生物。"""
+        from wing_probe.history.invariants import assert_record_shape
+
+        assert_record_shape(self)
 
     def __repr__(self) -> str:
         return (
