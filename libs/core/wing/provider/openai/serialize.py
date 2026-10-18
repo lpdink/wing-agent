@@ -16,7 +16,8 @@ from wing.provider.media import (
     plan_for_request,
     resolve_image_delivery,
 )
-from wing.schema import MediaRef, Message
+from wing.schema import CachePart, MediaRef, Message
+from wing.schema.cache import history_label
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
@@ -33,6 +34,7 @@ class _SerializeMixin:
         messages: list[Message],
         model: str,
         options: "RequestOptions | None" = None,
+        parts: list[CachePart] | None = None,
     ) -> list[dict]:
         """序列化请求消息（含请求期媒体投影：能力降级 / 高水位驱逐 / 线格式）。
 
@@ -49,9 +51,21 @@ class _SerializeMixin:
 
         被丢弃 / 字节缺失的图片位：不改原文本块，只在其后追加一个占位文本
         part（保留消息的字节在驱逐前后完全一致 → 前缀 cache 最大复用）。
+
+        ``parts`` 非 None 时顺带收集缓存探针的 ``history:<uuid>:<role>`` 分段
+        （每条非 system 消息一段，hash 对象就是这里产出的协议 dict）。system
+        消息不产生 history 段——它由 ``system:wire`` 封口段承载。
         """
         if not any(m.media for m in messages):
-            return [m.to_openai() for m in messages]
+            serialized: list[dict] = []
+            for message in messages:
+                wire = message.to_openai()
+                if parts is not None and message.role != "system":
+                    parts.append(
+                        CachePart.obj(history_label(message.uuid, message.role), wire)
+                    )
+                serialized.append(wire)
+            return serialized
 
         delivery = resolve_image_delivery(self._config)
         plans = group_plans_by_message(
@@ -106,6 +120,8 @@ class _SerializeMixin:
                     if base["content"]
                     else []
                 ) + extra
+            if parts is not None and msg.role != "system":
+                parts.append(CachePart.obj(history_label(msg.uuid, msg.role), base))
             out.append(base)
 
         flush_pending()

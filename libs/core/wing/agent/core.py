@@ -32,7 +32,7 @@ from wing.event import AskEvent, NoticeEvent, WingEvent
 from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
 from wing.provider.pool import get_provider
-from wing.schema import MediaRef, Message, Tool
+from wing.schema import CacheProbe, MediaRef, Message, Tool
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
@@ -502,12 +502,18 @@ class WingAgent:
 
         缓存亲和（session id → prompt_cache_key）、会话媒体读接口、thinking /
         reasoning_effort 覆盖——全部经这里下发；provider 实例零会话状态。
+
+        `cache_probe` 每次调用新建：它只累积**这一次**调用的分段（provider 在
+        构建 body 时写入），由 ReAct 层在 usage 帧记账消费。探针只观察不改写
+        请求体：不传探针（`cache_probe=None`）的 options 让 provider 一个分段
+        都不算，请求体因此逐字节相同。
         """
         return RequestOptions(
             session_id=self.session_id,
             media=self._media,
             thinking=self._thinking,
             reasoning_effort=self._reasoning_effort,
+            cache_probe=CacheProbe(),
         )
 
     async def post(

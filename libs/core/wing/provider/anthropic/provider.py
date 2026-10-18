@@ -45,6 +45,7 @@ from wing.provider.transport import (
     raise_with_body,
 )
 from wing.schema import (
+    CachePart,
     LLMResponse,
     LLMUsage,
     Message,
@@ -54,6 +55,7 @@ from wing.schema import (
     ToolCall,
     ToolUseBlock,
 )
+from wing.schema.cache import SYSTEM_WIRE, tools_label
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
@@ -239,8 +241,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         options: RequestOptions | None = None,
     ) -> dict:
         options = options or RequestOptions()
+        # 缓存探针：只在开启时收集分段（关闭 = 零额外计算，body 逐字节不变）。
+        # history 段取合并 / cache_control **之前**的 per-message 形态（设计文 D3）。
+        history_parts: list[CachePart] | None = (
+            [] if options.cache_probe is not None else None
+        )
         system_text, anthropic_messages = self._serialize_messages(
-            messages, model, options
+            messages, model, options, history_parts
         )
 
         body: dict = {
@@ -260,8 +267,14 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 ]
             else:
                 body["system"] = system_text
+        tool_parts: list[CachePart] = []
         if tools:
             body["tools"] = [self._tool_to_anthropic(t) for t in tools]
+            if history_parts is not None:
+                tool_parts = [
+                    CachePart.obj(tools_label(declared["name"]), declared)
+                    for declared in body["tools"]
+                ]
 
         # 会话级 thinking 覆盖：只改 per-request 视图，绝不写穿共享 extra_body。
         extra_body = self._extra_body
@@ -285,6 +298,19 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
 
         if self.explicit_cache_mode and anthropic_messages:
             self._apply_cache_control(anthropic_messages)
+
+        # 分段写进探针：顺序 = tokenize 顺序（system 块 → tools → messages），
+        # 其中 system:wire 紧跟 CM 侧段落封口（见设计文 D2）。
+        if options.cache_probe is not None:
+            self.publish_cache_segments(
+                options,
+                (
+                    *options.cache_parts,
+                    CachePart.obj(SYSTEM_WIRE, body.get("system")),
+                    *tool_parts,
+                    *(history_parts or []),
+                ),
+            )
 
         return body
 

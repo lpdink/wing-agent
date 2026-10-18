@@ -17,6 +17,7 @@ from wing.provider.media import (
     resolve_image_delivery,
 )
 from wing.schema import (
+    CachePart,
     MediaRef,
     Message,
     TextBlock,
@@ -24,6 +25,7 @@ from wing.schema import (
     Tool,
     ToolUseBlock,
 )
+from wing.schema.cache import history_label
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
@@ -41,6 +43,7 @@ class _SerializeMixin:
         messages: list[Message],
         model: str,
         options: "RequestOptions | None" = None,
+        parts: list[CachePart] | None = None,
     ) -> tuple[str, list[dict]]:
         """将 Message 列表转换为 Anthropic 格式（含请求期媒体投影）。
 
@@ -57,6 +60,10 @@ class _SerializeMixin:
 
         被丢弃 / 字节缺失的图片位：不改原文本 block，只在其后追加一个占位
         text block；缺文本块不发射（Anthropic 拒绝空 text block）。
+
+        ``parts`` 非 None 时顺带收集缓存探针的 ``history:<uuid>:<role>`` 分段
+        （每条产生协议 dict 的非 system 消息一段）。hash 取**合并 / cache_control
+        之前**的形态：两者都在本次请求的末尾动手（见设计文 D3）。
 
         Returns:
             (system_text, anthropic_messages)
@@ -115,7 +122,13 @@ class _SerializeMixin:
                 # 零块即无 tool_use，不会有后续 tool_result 引用本条。
                 if not blocks:
                     continue
-                anthropic_msgs.append({"role": "assistant", "content": blocks})
+                wire = {"role": "assistant", "content": blocks}
+                anthropic_msgs.append(wire)
+                if parts is not None:
+                    # hash 在这一刻定型（合并 / cache_control 都还没动 wire）
+                    parts.append(
+                        CachePart.obj(history_label(msg.uuid, "assistant"), wire)
+                    )
 
             elif msg.role == "tool":
                 content: str | list[dict] = msg.content or ""
@@ -134,18 +147,19 @@ class _SerializeMixin:
                     content = (
                         [{"type": "text", "text": msg.content}] if msg.content else []
                     ) + extra
-                anthropic_msgs.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id or "",
-                                "content": content,
-                            }
-                        ],
-                    }
-                )
+                wire = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg.tool_call_id or "",
+                            "content": content,
+                        }
+                    ],
+                }
+                anthropic_msgs.append(wire)
+                if parts is not None:
+                    parts.append(CachePart.obj(history_label(msg.uuid, "tool"), wire))
 
             elif msg.role == "user":
                 blocks: list[dict] = []
@@ -159,7 +173,12 @@ class _SerializeMixin:
                     else:
                         blocks.append(self._image_block(slot.ref, slot.b64))
                 if blocks:
-                    anthropic_msgs.append({"role": "user", "content": blocks})
+                    wire = {"role": "user", "content": blocks}
+                    anthropic_msgs.append(wire)
+                    if parts is not None:
+                        parts.append(
+                            CachePart.obj(history_label(msg.uuid, "user"), wire)
+                        )
 
         flush_pending()
         # 合并连续同角色消息：Anthropic Messages API 要求 user/assistant

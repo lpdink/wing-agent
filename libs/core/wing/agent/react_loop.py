@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log, utf8_safe
@@ -25,6 +25,7 @@ from wing.config import get_config
 from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message
+from wing.schema.cache import PURPOSE_MAIN
 
 from .event_sink import AgentEventSink
 from .inbox import Inbox
@@ -360,11 +361,20 @@ class ReActLoop:
         """
         # 触发后台 compact 用触发时刻的 provider / options 快照（compact 是
         # 预计算：允许因 reload 退场而失败——下一轮重新触发）。
+        # 本次调用只解析一次 options：CM 把 system 侧分段交回来（cache_parts），
+        # 与探针（cache_probe）一起经同一份 options 交给 provider——分段与探针
+        # 必须是同一次调用的那一对，重试则整对重建。
+        options = self._current_options()
         llm_result = await self._cm.get_messages_for_llm(
             model=model,
             model_provider=self._current_provider(),
             current_tools=self._current_tools,
-            options=self._current_options(),
+            options=options,
+        )
+        call_options = (
+            replace(options, cache_parts=llm_result.cache_parts)
+            if options is not None and llm_result.cache_parts
+            else options
         )
         # 发送时刻重新解析（晚解析纪律）：「解析 → 首次迭代」之间 MUST 无
         # await（此处到 `_call_llm` 进入流迭代全是同步代码）——池换新与
@@ -375,7 +385,7 @@ class ReActLoop:
             messages=llm_result.messages,
             model=model,
             tools=llm_result.tools,
-            options=self._current_options(),
+            options=call_options,
         )
 
         if assistant_msg.tool_calls:
@@ -443,6 +453,8 @@ class ReActLoop:
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
         stop_reason: str | None = None
+        # 缓存账本本次调用只记一次账（上游多帧报 usage 时按第一帧）。
+        observed = False
         # 本次调用从发起到 usage 帧的时长（会话用量账本的 llm_time_ms 来源）。
         started = time.monotonic()
         # accumulator 上提为 turn 级持有（self._current_acc）——未提交投影
@@ -489,9 +501,33 @@ class ReActLoop:
 
                 if chunk.usage.completion_tokens or chunk.usage.prompt_tokens:
                     last_usage = chunk.usage
+                    # 缓存账本：第一个非零 usage 帧记账一次（标准协议一次调用只
+                    # 有一条），归因直接进本次 metrics 的三个直播字段——账本与
+                    # 直播因此同源同刻（contract §5）。
+                    observation = None
+                    probe = options.cache_probe if options is not None else None
+                    if probe is not None and not observed:
+                        observed = True
+                        observation = self._cm.observe_cache_call(
+                            probe,
+                            purpose=PURPOSE_MAIN,
+                            model=model,
+                            provider=getattr(provider, "name", ""),
+                            prompt=chunk.usage.prompt_tokens,
+                            cached=chunk.usage.cached_tokens,
+                        )
                     self._sink.llm_metrics(
                         chunk.usage,
                         duration_ms=int((time.monotonic() - started) * 1000),
+                        cache_expected_tokens=(
+                            observation.expected if observation is not None else None
+                        ),
+                        cache_verdict=(
+                            observation.verdict if observation is not None else ""
+                        ),
+                        cache_diverged=(
+                            observation.diverged if observation is not None else ""
+                        ),
                     )
                     # 已知边界：标准协议一次调用只有一条非零 usage 帧（末帧），
                     # 「turn 账 == Σmetrics 事件」于是精确成立；若上游多帧报

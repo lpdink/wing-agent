@@ -440,6 +440,115 @@ class UpdateSessionResponse(BaseModel):
     ok: bool = Field(default=True, description="操作是否成功")
 
 
+# ============================================================
+# 缓存账本（GET /api/session/cache）——见 contract §6
+# ============================================================
+
+
+class CacheSummary(BaseModel):
+    """账本汇总：三个 rate 的分母都是 Σ prompt；分母为 0 时全为 null。"""
+
+    calls: int = Field(default=0, description="账本里的调用数（环形上界 200）")
+    prompt_tokens: int = Field(default=0, description="Σ prompt_tokens")
+    cached_tokens: int = Field(
+        default=0, description="Σ cached_tokens（provider 报告）"
+    )
+    expected_tokens: int = Field(
+        default=0, description="Σ expected（只累计有参照的调用）"
+    )
+    theory_rate: float | None = Field(
+        default=None, description="理论命中率 = Σexpected / Σprompt；分母 0 → null"
+    )
+    actual_rate: float | None = Field(
+        default=None, description="实际命中率 = Σcached / Σprompt；分母 0 → null"
+    )
+    provider_debt_rate: float | None = Field(
+        default=None,
+        description=(
+            "provider 欠账率 = Σmax(0, expected-cached)（仅 verdict ∈ "
+            "{provider_underdelivered, block_granularity}）/ Σprompt；分母 0 → null"
+        ),
+    )
+
+
+class CacheForkDetail(BaseModel):
+    """分叉点的证据：来源文件事实 + 参照时刻 + 两侧 sha。
+
+    文件事实取自分叉处段落的 `src`（新侧优先，缺则参照侧）；非文件段落
+    （`tools:` / `history:` / `system:*`）的 path/mtime/size 为 null。
+    """
+
+    path: str | None = Field(
+        default=None, description="来源文件路径（contract §1 的 src.path）"
+    )
+    mtime: str | None = Field(
+        default=None, description="来源文件 mtime（本地 naive ISO）"
+    )
+    size: int | None = Field(default=None, description="来源文件字节数")
+    ref_ts: str | None = Field(
+        default=None, description="参照调用的时刻（无参照 → null）"
+    )
+    sha_before: str | None = Field(default=None, description="参照侧该段落的 sha")
+    sha_after: str | None = Field(default=None, description="本次该段落的 sha")
+
+
+class CacheForkRow(BaseModel):
+    """一条分叉（只含 `fork != null` 的调用，新→旧）。"""
+
+    ts: str = Field(description="调用时刻（本地 naive ISO，毫秒）")
+    index: int = Field(description="分叉点 = 与最近一条调用的最长公共前缀长度")
+    label: str = Field(description="分叉处的段 label（如 `skills:pdf-tools`）")
+    kind: str = Field(description="insert | remove | modify")
+    blame: str | None = Field(
+        default=None,
+        description="external | tools | composition | compact | provider | cold（派生，不落盘）",
+    )
+    avoidable: bool | None = Field(
+        default=None,
+        description="这次分叉是否可避免（None = 不适用，如 provider 欠兑现）",
+    )
+    tokens_lost: int | None = Field(
+        default=None, description="≈ 丢失的 prompt token（估算；无参照 → null）"
+    )
+    segments_affected: int = Field(description="参照侧 fork 点之后的段数")
+    verdict: str = Field(description="该次调用的缓存判定（contract §4）")
+    detail: CacheForkDetail = Field(
+        default_factory=CacheForkDetail, description="分叉点证据"
+    )
+
+
+class CacheCallRow(BaseModel):
+    """一次调用的账本行（最近 limit 条，新→旧）。"""
+
+    ts: str = Field(description="调用时刻（本地 naive ISO，毫秒）")
+    model: str = Field(default="", description="模型名")
+    purpose: str = Field(default="", description="main | compact")
+    prompt: int = Field(default=0, description="prompt_tokens（provider 报告）")
+    cached: int = Field(default=0, description="cached_tokens（provider 报告）")
+    expected: int | None = Field(
+        default=None, description="理论可命中 token；null = 无参照"
+    )
+    verdict: str = Field(default="", description="缓存判定（contract §4）")
+    fp: str = Field(default="", description="本次调用的前缀指纹")
+
+
+class SessionCacheResponse(BaseModel):
+    """GET /api/session/cache 响应。
+
+    会话不存在 / 无账本同样是 200 + 空 `forks` / `calls` + 全 0 summary
+    （**不 404**）：前端与 CLI 都按同一条路径渲染"还没数据"。
+    """
+
+    session_id: str = Field(description="目标 session ID")
+    summary: CacheSummary = Field(default_factory=CacheSummary, description="账本汇总")
+    forks: list[CacheForkRow] = Field(
+        default_factory=list, description="有分叉的调用（新→旧，最多 limit 条）"
+    )
+    calls: list[CacheCallRow] = Field(
+        default_factory=list, description="最近 limit 条调用（新→旧）"
+    )
+
+
 class TagSessionResponse(BaseModel):
     """POST /api/session/tag 响应——变更后的标签全貌 + 实际增删。"""
 
