@@ -31,13 +31,13 @@ fn git_path(arg: &str) -> Option<PathBuf> {
 /// 把 git 状态挂进 cargo 的变更检测。
 ///
 /// 只监视**存在**的路径：`rerun-if-changed` 指向缺失路径时 cargo 每次都判 dirty
-/// （`StaleItem(MissingFile)`）——而 worktree 的 `.git` 是文件不是目录，硬编码的
-/// `../../.git/HEAD` 在那里永远不存在，于是每个 worktree 的**每次**构建都要重跑
-/// 本脚本、重编 `wing` 及其 53 个测试二进制（本机实测 +10s/次）。
+/// （`StaleItem(MissingFile)`）——worktree 的 `.git` 是文件不是目录，`.git/HEAD`
+/// 这类拼接路径在那里不存在。路径先规范化，`--git-dir` 的相对拼法与
+/// `--git-common-dir` 的绝对拼法指向同一个目录时只挂一次。
 fn watch_git_state() {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for arg in ["--absolute-git-dir", "--git-common-dir"] {
-        if let Some(dir) = git_path(arg)
+        if let Some(dir) = git_path(arg).map(|dir| dir.canonicalize().unwrap_or(dir))
             && !dirs.contains(&dir)
         {
             dirs.push(dir);
