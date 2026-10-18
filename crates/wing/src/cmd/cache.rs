@@ -405,7 +405,7 @@ fn format_why(report: &CacheReportResponse, raw: &str) -> Result<String> {
         what_text(fork),
         header_field(Some(fork.kind.as_str())),
     ));
-    for (label, value) in [
+    let mut fields = vec![
         ("segment", format!("{} / {total_segments}", fork.index)),
         ("sha", sha),
         (
@@ -427,14 +427,13 @@ fn format_why(report: &CacheReportResponse, raw: &str) -> Result<String> {
             format!("{} (avoidable: {})", blame_text(fork), avoidable_text(fork)),
         ),
         ("when", when_text(&fork.ts)),
-        (
-            "ref",
-            match detail.ref_ts.as_deref() {
-                Some(ref_ts) => when_text(ref_ts),
-                None => NONE_MARK.to_string(),
-            },
-        ),
-    ] {
+    ];
+    // 对照侧的调用已经滚出账本（后端给 null）时整行不显示：写成 `—` 会被读成
+    // 「sha 就是这一刻变的」，而那正是后端拒绝猜的那件事。
+    if let Some(ref_ts) = detail.ref_ts.as_deref() {
+        fields.push(("ref", when_text(ref_ts)));
+    }
+    for (label, value) in fields {
         out.push_str(&format!("  {label:<9}{value}\n"));
     }
     Ok(out)
@@ -826,6 +825,23 @@ mod tests {
         assert!(text.contains("avoidable: YES"), "{text}");
         // 人类的 WHEN 形态（表格里也是这一列）。
         assert!(text.contains("10-18 15:41:02"), "{text}");
+        // 有对照侧 → `ref` 行在。
+        assert!(text.contains("\n  ref      "), "{text}");
+    }
+
+    /// 对照侧已滚出账本（后端给 `ref_ts: null`）→ **整行不显示**（不拿 `—` 冒充）。
+    #[test]
+    fn why_hides_the_reference_row_when_the_comparison_side_is_gone() {
+        let mut report = report();
+        report.forks[0].detail.ref_ts = None;
+        let text = format_why(&report, "1").unwrap();
+        assert!(
+            !text.contains("\n  ref "),
+            "null 的 ref 不该占一行：\n{text}"
+        );
+        // 其余行照旧
+        assert!(text.contains("\n  sha      "), "{text}");
+        assert!(text.contains("\n  when     "), "{text}");
     }
 
     #[test]

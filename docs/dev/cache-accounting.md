@@ -41,6 +41,15 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
   ——同一套规则，不会出现「文本 / dict 两套口径」。
 - `chars` = 该段的长度，**只用于估算代价**（`tokens_lost`），不参与判定：文本段是文本的
   字符数，协议段（tools / history / `system:wire`）是协议序列化后**规范形的长度**。
+- **`cache_control` 断点与 hash 的不对称**：`system:wire` 与 `tools:*` 的 hash 对象含断点
+  （断点位置稳定，属于真实载荷）；`history:*` 的 hash 刻意取**打标记之前**的序列化形态——
+  断点打在「本次请求最后一帧」上、每轮都在移动，算进去会让内容完全没变的相邻两轮恒判
+  `prefix_broken`（假阳性，`test_cache_control_does_not_leak_into_history_hashes` 钉住）。
+- **`history:*` 覆盖的是链上的消息**（模型视图里每条非 system 消息一段），因此**段数 ≠ wire
+  消息数**：provider 在请求期合成的媒体 followup user 消息（连续 tool 段之后那条带图消息）
+  没有段。影响可忽略——那条消息的字节是「哪些媒体位被保留 + 顺序」的确定性投影，而同一个
+  投影决策在驱逐某位时会把占位文本追加回**所属 tool 消息**（该段 hash 随之变化），媒体本身
+  又是内容寻址的（字节变 ⇒ media id 变）。
 - `src = {path, mtime, size}` 只在 `rules:*` / `skills:*` 上出现，**在加载时**采集一次
   （`load_rule_files` / `collect_skill_sources`）——每次 LLM 调用的热路径不扫目录、不 stat。
 - 两侧分工：CM 知道文本与来源（system 侧），provider 知道真实字节（wire 侧）；分组经
@@ -55,14 +64,22 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 `<session-dir>/cache_ledger.json`（会话 aux kv，key = `cache_ledger`；`file` 后端 tmp +
 fsync + rename 原子写，`memory` 后端留在进程内字典）。形状见 `contract.md` §3。
 
-- **有界**：`calls` 只留最近 200 条；`fingerprints` 只留被存活 calls 引用到的条目（写盘时
-  GC）。量级 ~60KB/会话。
+- **有界**：三档，全部由代码里的常量决定，没有配置面。
+  - `calls` 只留最近 200 条（`MAX_CALLS`）；
+  - `fingerprints` 只留被存活 calls 引用到的条目（写盘时 GC）；
+  - **落盘字节预算 512 KiB**（`MAX_LEDGER_BYTES`）：超出即按「最旧调用先淘汰」裁剪，连带
+    GC 失去引用的指纹，**永远保留最近一条调用**。量级两档：常规 40 轮会话 **≈160 KB**，
+    200 条 × 上百段的极端形态在裁剪前能到**数 MB**——所以预算才是真上界。
+    （`contract.md` §3 的「~60 KB/会话」按「多条调用共享同一份段落表」估算；真实会话里消息
+    每轮增长、每条调用都有独立段落表。契约的字段与公式没变，只有量级口径以这里为准。）
 - **永不抛**：读、算、写全在 try/except 内，失败只 WARNING——记账坏了绝不影响 LLM 调用。
 - **前向容忍**：读不到 / 版本不认识 / 解析失败 / 单条记录类型错 → 当空账本（坏记录丢弃，
   不升级成整份失败，端点因此不会 500）。
 - **不碰 `history.jsonl`**：`Message` / `usage` 一个字段都不加；账本是边车文件。
 - 记账是「整份读 → 改 → 整份原子写」，跑在线程池里（同步写会挡住整个网关的流式帧），
   进程级一把锁覆盖 read-modify-write（主调用与后台增量压缩可能真并行）。
+- 端点的**读**路径同样跑在线程池里（`asyncio.to_thread`）：读盘 + 全量 JSON 规整 + 投影在
+  最坏形态是 MB 级、数十毫秒，留在事件循环上会让所有会话的流式帧一起排队。
 - 每次记录都重新读盘、不缓存内存态：`switch_template` 会重建 CM，内存态会留两个残影。
 
 ### 三档 rate（`GET /api/session/cache` 的 `summary`）
@@ -137,11 +154,18 @@ provider_debt_rate = Σ max(0, expected - cached)
 - `kind`：`S[k].label` 不在旧侧尾部 → `insert`；旧侧 `C[k].label` 不在新侧尾部 →
   `remove`；两侧 label 相同而 sha 不同 → `modify`。
 - `index` = 公共前缀长度 k（第 index 段起分叉）；`label` = 分叉处的 label。
-- `segments_affected` = 参照侧 fork 点之后的段数（「碎了多少段」）。
+- `segments_affected` = **最近一条调用（分叉的对照侧）** fork 点之后的段数
+  （`len(C) - k`，「碎了多少段」；不是参照侧的）。
 - `tokens_lost = round(ref.prompt × (1 - chars_before / ref_total_chars))`，**估算值**，
   展示必须带 `≈`；无参照时 `null`。
-- `detail`（`forks[].detail`）：`path` / `mtime` / `size`（`src`，能点名到文件）、
-  `ref_ts`（对照侧调用的时刻）、`sha_before` → `sha_after`。
+- `detail`（`forks[].detail`）：
+  - `path` / `mtime` / `size`：`src`，能点名到文件（优先取**新侧**——被改的那个文件的当下事实）。
+  - `sha_before` / `sha_after`：**对照侧** → 本次。对照侧 = 记录时分叉真正相对的那条调用
+    （`recent[position+1]`）；参照（前缀延续点）在自身长度范围内与本次逐段同值，因此它
+    解释不了「这里变了」——「改了又改回」时正是它会把 `sha_before` 抄成 `sha_after`。参照只在
+    邻座已经滚出账本、或邻座在该位点没有段时兜底。
+  - `ref_ts`：记在案的那条参照调用的时刻；它已经滚出环形账本 → `null`（不拿邻居的 ts 冒充），
+    `--why` 那一行整行不显示。没有参照（前缀被外部改动打断）时取邻居——那正是分叉相对的对象。
 
 ## 3. 降级
 
@@ -166,6 +190,7 @@ provider_debt_rate = Σ max(0, expected - cached)
 | `history:…` 分叉但没压缩 | 链拓扑变了（rewind / fork / steer）——回看那一轮的会话操作 |
 | 理论值远高于实际，且 `provider_debt_rate` 大 | 报 bug：provider 没兑现我们这侧完整的前缀。附 `--json` 原始响应 |
 | 端点 200 但 `calls` 空 | 会话真的没跑过模型调用；或 `WING_SESSIONS_PATH` 指到了别的目录（读的是另一个会话树） |
+| 账本里只剩最近几十条调用，更早的不见了 | 字节预算（512 KiB）按「最旧先淘汰」裁过——不是丢数据；分叉归因只需要「前一条」，不受影响 |
 | 账本文件不存在而调用在跑 | `memory` 后端；或记账 WARNING（`grep 'cache ledger'`） |
 | 前端数字与 `wing cache` 不一致 | 两边都可能只取了部分行：`summary` 覆盖整本账本，`calls` 默认 20 条——端点 `limit=200` / `wing cache --limit 200` 取全量再对账 |
 | 想知道某条结论怎么复现 | `make test-probe` 的 `scenarios/test_cache_ledger.py`（A–F 六条红线，假 Provider 剧本驱动） |
@@ -190,14 +215,15 @@ jq '.calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
   并排放，**无法解释** provider 内部为什么没兑现——这正是 `provider_underdelivered` 需要
   报 bug 而不是自行修复的原因。
 - **估算值**：`tokens_lost` 按字符比例估算（展示带 `≈`）；`chars` 是字符数不是 token 数。
-- **常量而非配置**：环形上界 200、`cache_ttl_hours=72`、`tol` 的 256 / 2% 都是
-  `context/cache_ledger.py` 的模块常量。本功能只观察，不新增配置面。
+- **常量而非配置**：环形上界 200（`MAX_CALLS`）、字节预算 512 KiB（`MAX_LEDGER_BYTES`）、
+  `cache_ttl_hours=72`、`tol` 的 256 / 2% 都是 `context/cache_ledger.py` 的模块常量。本功能
+  只观察，不新增配置面。
 - **只记事实不存副本**：`src` 只有 path / mtime / size，没有文件内容——能点名「哪个文件变了」，
   不能告诉你「变了什么」。
 - **粒度**：`history:*` 每条消息一段 → 任何消息内容变化只碎它之后的前缀；压缩 / rewind /
   fork 会让 history 段整体变化（归因落在 `compact` / `composition`）。
-- **协议无关**：openai 兼容与 anthropic 两条路径产出同一套 label；`cache_control` 断点属于
-  实际载荷，计入对应段 hash。
+- **协议无关**：openai 兼容与 anthropic 两条路径产出同一套 label。`cache_control` 与 hash 的
+  关系是**不对称**的（见 §1）：`system:wire` / `tools:*` 含断点，`history:*` 刻意不含。
 - **会话内单位**：账本是会话级，没有跨会话汇总（`--all` 不存在）。
 - **理论 ≠ 应然**：`theory_rate` 是「若 provider 满兑现能做到的水位」，不是「本该命中却没
   命中」的断言；只有 `provider_underdelivered` / `block_granularity` 才进 provider 债务。

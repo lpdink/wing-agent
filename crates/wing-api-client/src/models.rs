@@ -579,7 +579,7 @@ pub struct CacheForkDetail {
     pub mtime: Option<String>,
     #[serde(default)]
     pub size: Option<i64>,
-    /// 参照调用的时间戳。
+    /// 对照侧调用的时间戳；对照侧已经滚出账本 → `None`（`--why` 因此不打这一行）。
     #[serde(default)]
     pub ref_ts: Option<String>,
     /// 分叉点两侧的段 hash（`modify` 时两者都存在；`insert` / `remove` 只有一侧有值）。
@@ -616,7 +616,7 @@ pub struct CacheFork {
     /// 这次分叉丢掉的 token（估算值，展示必须带 `≈`）；无参照 → None。
     #[serde(default)]
     pub tokens_lost: Option<i64>,
-    /// 参照侧分叉点之后的段数。
+    /// 最近一条调用（分叉的对照侧）fork 点之后的段数（契约 §4 的 `len(C) - k`）。
     #[serde(default)]
     pub segments_affected: i64,
     #[serde(default)]
