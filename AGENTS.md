@@ -156,6 +156,7 @@ crates/wing/src/
 │   ├── run.rs                       `wing run` 非阻塞启动任务（建会话 + 发 prompt，返回 session id）
 │   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
 │   ├── ps.rs                        `wing ps` / `wing info`（会话列表 / 单会话运行时信息）
+│   ├── cache.rs                     `wing cache`（KV 前缀缓存账本：理论/实际命中率 + 分叉归因）
 │   ├── branch.rs                    `wing branches` / `fork` / `rewind`（消息节点导航：uuid 闭环 + draft）
 │   ├── asks.rs                      `wing asks`（在挂 Ask 的 tool_call_id 发现口：WS 快照 + `--wait`）
 │   ├── control.rs                   `wing interrupt`（别名 int）/ `compact` / `update`（会话控制面）

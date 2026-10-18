@@ -76,14 +76,16 @@ async fn run_inner(
         Some(id) => id.to_string(),
         None => {
             let resp = http.list_sessions().await?;
-            pick_latest_session(&resp.sessions)
-                .map(|session| session.id.clone())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no session to inspect — none of the known sessions reports a \
-                         last-interaction time; pass a SESSION_ID (`wing ps --all` lists them)"
-                    )
-                })?
+            match pick_latest_session(&resp.sessions) {
+                Some(session) => session.id.clone(),
+                None if resp.sessions.is_empty() => anyhow::bail!(
+                    "no sessions found; pass a SESSION_ID (`wing ps --all` lists them)"
+                ),
+                None => anyhow::bail!(
+                    "no session reports a usable last-interaction time; pass a \
+                     SESSION_ID (`wing ps --all` lists them)"
+                ),
+            }
         }
     };
 
@@ -193,8 +195,9 @@ fn format_report(
     );
 
     if forks.is_empty() {
+        let hidden = report.forks.len();
         text.push('\n');
-        text.push_str(&empty_line(report));
+        text.push_str(&empty_line(report, hidden));
         text.push('\n');
         return text;
     }
@@ -227,23 +230,27 @@ fn format_report(
 /// 人类视图只列「前缀真的断了」的行。
 ///
 /// 契约 §7 的硬要求（`cold` / `block_granularity` 绝不出现）。它们按契约 §4 本来
-/// 就不会带上 `fork`，这道过滤是**兜底**：网关若把非分叉判定也塞进 `forks`，
-/// 稀释掉的正是用户要读的那几行。
+/// 就不会带上 `fork`，`verdict == ""`（契约 §9：未计算）也不该给结论，这道过滤是
+/// **兜底**：网关若把非分叉判定也塞进 `forks`，稀释掉的正是用户要读的那几行。
 fn human_forks(forks: &[CacheFork]) -> Vec<&CacheFork> {
     forks
         .iter()
         .filter(|fork| {
             !matches!(
                 fork.verdict.as_str(),
-                "cold" | "cold_expired" | "block_granularity" | "hit"
+                "" | "cold" | "cold_expired" | "block_granularity" | "hit"
             )
         })
         .collect()
 }
 
-fn empty_line(report: &CacheReportResponse) -> String {
-    if report.calls.is_empty() && report.summary.calls == 0 {
+fn empty_line(report: &CacheReportResponse, hidden: usize) -> String {
+    if report.calls.is_empty() && report.forks.is_empty() && report.summary.calls == 0 {
         "No cache data yet (the ledger starts with the session's first LLM call).".to_string()
+    } else if hidden > 0 {
+        // 有分叉但都不该展示：说清是「没有可行动的」，而不是「账本说没分叉」。
+        // 文案里不点名判定（`cold` / `block_granularity` 这些词在人类视图里一律不出现）。
+        format!("No actionable cache forks ({hidden} row(s) hidden: none names a broken prefix).")
     } else {
         "No cache forks (no call diverged from the previous prefix).".to_string()
     }
@@ -305,10 +312,14 @@ fn what_text(fork: &CacheFork) -> String {
 }
 
 fn blame_text(fork: &CacheFork) -> String {
-    if fork.blame.is_empty() {
-        NONE_MARK.to_string()
-    } else {
-        common::single_line(&fork.blame)
+    match fork
+        .blame
+        .as_deref()
+        .map(str::trim)
+        .filter(|blame| !blame.is_empty())
+    {
+        Some(blame) => common::single_line(blame),
+        None => NONE_MARK.to_string(),
     }
 }
 
@@ -329,10 +340,12 @@ fn avoidable_style(fork: &CacheFork, palette: &ThemePalette) -> Style {
     Style::new().fg(color)
 }
 
-/// COST 列：`≈` + 既有 token 记法；无参照（`tokens_lost == null`）→ `—`。
+/// COST 列：`≈-` + 既有 token 记法（`tokens_lost` 是**丢失量**，所以符号由这一列
+/// 的语义给出；`format::tokens` 对负数会退化成裸数字，因此取绝对值自己拼符号）。
+/// 无参照（`tokens_lost == null`）→ `—`。
 fn cost_text(fork: &CacheFork) -> String {
     match fork.tokens_lost {
-        Some(lost) => format!("≈{}", format::tokens(lost)),
+        Some(lost) => format!("≈-{}", format::tokens(lost.abs())),
         None => NONE_MARK.to_string(),
     }
 }
@@ -439,8 +452,8 @@ fn select_fork<'a>(forks: &[&'a CacheFork], raw: &str) -> Result<(usize, &'a Cac
         WhySelector::Ordinal(ordinal) => {
             if ordinal == 0 || ordinal > forks.len() {
                 anyhow::bail!(
-                    "--why {ordinal} is out of range: the report lists {} fork(s) \
-                     (ordinals are 1-based, newest first)",
+                    "--why {ordinal} is out of range: the table lists {} fork(s) \
+                     (ordinals are 1-based row positions, newest first)",
                     forks.len()
                 );
             }
@@ -465,14 +478,14 @@ fn select_fork<'a>(forks: &[&'a CacheFork], raw: &str) -> Result<(usize, &'a Cac
             };
             match hits.as_slice() {
                 [] => anyhow::bail!(
-                    "no fork matches --why {needle} (the report lists {} fork(s); \
-                     `wing cache --json` shows their raw timestamps)",
+                    "no fork matches --why {needle} (the table lists {} fork(s); \
+                     `wing cache --json` shows the raw timestamps of every fork)",
                     forks.len()
                 ),
                 [index] => Ok((index + 1, forks[*index])),
                 _ => anyhow::bail!(
-                    "--why {needle} is ambiguous: {} forks match; use a longer timestamp \
-                     prefix or the row ordinal",
+                    "--why {needle} is ambiguous: {} table rows match; use a longer \
+                     timestamp prefix or the row ordinal",
                     hits.len()
                 ),
             }
@@ -504,7 +517,7 @@ mod tests {
             index,
             label: label.into(),
             kind: kind.into(),
-            blame: "external".into(),
+            blame: Some("external".into()),
             avoidable: Some(true),
             tokens_lost,
             segments_affected: 12,
@@ -561,7 +574,7 @@ mod tests {
                     index: 7,
                     label: "history:9f3a4b2c-1111-2222-3333-444455556666:tool".into(),
                     kind: "modify".into(),
-                    blame: "compact".into(),
+                    blame: Some("compact".into()),
                     avoidable: Some(false),
                     tokens_lost: Some(9_800),
                     segments_affected: 5,
@@ -610,17 +623,81 @@ mod tests {
         )
     }
 
+    /// 一条「脏」分叉：网关若把非分叉判定也塞进 `forks`，它必须被挡在人类视图之外。
+    fn dirty_fork(label: &str, verdict: &str) -> CacheFork {
+        CacheFork {
+            label: label.into(),
+            kind: "insert".into(),
+            blame: Some("composition".into()),
+            avoidable: Some(false),
+            ..fork_by("insert", 1, label, verdict, None)
+        }
+    }
+
+    /// 表体的数据行数（框线表格：`┃` 行减去表头那一行）。
+    fn body_rows(text: &str) -> usize {
+        text.lines()
+            .filter(|line| line.starts_with('┃'))
+            .count()
+            .saturating_sub(1)
+    }
+
+    /// 契约 §7 的硬要求：`cold` / `block_granularity` 绝不出现在人类视图。
+    ///
+    /// fixture 的 `forks` 里直接塞进这三类脏行——渲染只读 `forks`，所以把
+    /// `human_forks` 的过滤删掉，这条测试必红。
     #[test]
     fn the_human_view_never_surfaces_cold_or_block_granularity() {
-        let text = render(&report());
-        assert!(!text.contains("cold"), "人类视图不列 cold：\n{text}");
-        assert!(
-            !text.contains("block_granularity"),
-            "人类视图不列 block_granularity：\n{text}"
-        );
-        // 每条 fork 一行（两条），且行里带符号 + label。
+        let mut report = report();
+        let actionable = report.forks.len();
+        report.forks.push(dirty_fork("rules:/etc/rules.md", "cold"));
+        report
+            .forks
+            .push(dirty_fork("tools:Bash", "block_granularity"));
+        report.forks.push(dirty_fork("system:wire", "hit"));
+        report.forks.push(dirty_fork("system:base", "cold_expired"));
+        report.forks.push(dirty_fork("tools:Grep", ""));
+
+        let text = render(&report);
+        for verdict in [
+            "cold",
+            "cold_expired",
+            "block_granularity",
+            "hit",
+            "rules:/etc/rules.md",
+            "tools:Bash",
+            "system:wire",
+            "system:base",
+        ] {
+            assert!(!text.contains(verdict), "人类视图不列 {verdict}：\n{text}");
+        }
+        // 脏行不占行：表里恰好是 fixture 的可行动分叉数（Grep 那条空判定也被挡掉）。
+        assert_eq!(body_rows(&text), actionable, "{text}");
+        // 可行动的照常在（过滤没有把整张表吃掉）。
         assert!(text.contains("+ skills:pdf-tools"), "{text}");
         assert!(text.contains("~ history:9f3a4b2c"), "{text}");
+
+        // `--why` 的序位同样只数用户看到的行：第 2 行仍是 compact 那条。
+        let why = format_why(&report, "2").unwrap();
+        assert!(why.contains("~ history:"), "{why}");
+        assert!(format_why(&report, "3").is_err(), "脏行不占序位");
+    }
+
+    /// 全部被过滤时说实话：是「没有可行动的」，不是「账本说没分叉」。
+    #[test]
+    fn a_report_with_only_non_actionable_forks_says_so() {
+        let mut report = report();
+        report.forks = vec![
+            dirty_fork("rules:/etc/rules.md", "cold"),
+            dirty_fork("tools:Bash", "block_granularity"),
+        ];
+        let text = render(&report);
+        assert!(
+            text.contains("No actionable cache forks (2 row(s) hidden"),
+            "{text}"
+        );
+        assert!(!text.contains("block_granularity"), "{text}");
+        assert!(!text.contains("cold"), "{text}");
     }
 
     #[test]
@@ -643,16 +720,22 @@ mod tests {
         }
     }
 
-    /// COST = `≈` + 既有 token 记法（`≈14.2k`）；无参照 → `—`（不写 0）。
+    /// COST = `≈-` + 既有 token 记法（契约 §7 样列的 `≈-14.2k`）；无参照 → `—`。
     #[test]
     fn the_cost_column_uses_the_shared_token_notation() {
         let mut report = report();
         report.forks[0].tokens_lost = Some(14_200);
         report.forks[1].tokens_lost = None;
         let text = render(&report);
-        assert!(text.contains("≈14.2k"), "{text}");
+        assert!(text.contains("≈-14.2k"), "{text}");
         assert!(text.contains(NONE_MARK), "{text}");
-        assert!(!text.contains("≈0"), "没有参照时不许编 0：\n{text}");
+        assert!(
+            !text.contains("≈-0") && !text.contains("≈0"),
+            "没有参照时不许编 0：\n{text}"
+        );
+        // 负的 tokens_lost（不该发生）也不许退化成裸数字 `-14200`。
+        report.forks[0].tokens_lost = Some(-14_200);
+        assert!(render(&report).contains("≈-14.2k"), "{text}");
     }
 
     /// 窄终端不撕行：表体每一行等宽（`render/table/plain` 的截断不越预算）。
@@ -738,7 +821,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("2026-10-18T15:40:58.010"), "{text}");
-        assert!(text.contains("≈14.2k"), "{text}");
+        assert!(text.contains("≈-14.2k"), "{text}");
         assert!(text.contains("external"), "{text}");
         assert!(text.contains("avoidable: YES"), "{text}");
         // 人类的 WHEN 形态（表格里也是这一列）。

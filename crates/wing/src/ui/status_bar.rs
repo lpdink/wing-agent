@@ -457,7 +457,7 @@ impl TurnUsage {
             format!("{} out", format::tokens(self.completion_tokens)),
             dim,
         )]);
-        if self.cached_tokens > 0 && self.prompt_tokens > 0 {
+        if self.prompt_tokens > 0 && (self.cached_tokens > 0 || self.cache_expected_tokens > 0) {
             items.push(vec![Span::styled(self.cache_text(), dim)]);
         }
         if self.tokens_per_sec > 0.0 {
@@ -478,17 +478,21 @@ impl TurnUsage {
     /// 命中率一格：理论水位已知时成对显示 `67% / 理论 88% cache`，否则**就是今天那
     /// 一个数字**（`66.7% cache`，一位小数）——旧网关上的输出与改动前逐字节一致。
     ///
-    /// 状态栏要短，成对形态取整数百分比（摘要有余量，留一位小数）；理论值 clamp 到
-    /// `prompt` 以内，免得一个超发的手指把读数顶过 100%。
+    /// 状态栏要短，成对形态取整数百分比（摘要有余量，留一位小数）。两个读数都 clamp
+    /// 到 `prompt` 以内：超发的手指不该读出 100% 以上。
     fn cache_text(&self) -> String {
-        let actual = self.cached_tokens.max(0) as f64 / self.prompt_tokens as f64 * 100.0;
+        let actual_ratio =
+            self.cached_tokens.clamp(0, self.prompt_tokens) as f64 / self.prompt_tokens as f64;
         if self.cache_expected_tokens <= 0 {
-            return format!("{actual:.1}% cache");
+            return format!("{:.1}% cache", actual_ratio * 100.0);
         }
-        let theory = self.cache_expected_tokens.min(self.prompt_tokens) as f64
-            / self.prompt_tokens as f64
-            * 100.0;
-        format!("{actual:.0}% / 理论 {theory:.0}% cache")
+        let theory_ratio =
+            self.cache_expected_tokens.min(self.prompt_tokens) as f64 / self.prompt_tokens as f64;
+        format!(
+            "{:.0}% / 理论 {:.0}% cache",
+            actual_ratio * 100.0,
+            theory_ratio * 100.0
+        )
     }
 }
 
@@ -607,6 +611,42 @@ mod tests {
             ..TurnUsage::default()
         };
         assert_eq!(usage.cache_text(), "100% / 理论 100% cache");
+    }
+
+    /// 实际为零但理论已知：**必须**显示（`0% / 理论 99%`）——前缀碎裂、整段重算
+    /// 正是这个读数最该在场的一刻；旧行为（`cached == 0` 就不出数）在这里是缺席。
+    #[test]
+    fn test_turn_usage_shows_a_zero_actual_when_the_theory_is_known() {
+        let usage = TurnUsage {
+            prompt_tokens: 14_200,
+            completion_tokens: 300,
+            cached_tokens: 0,
+            cache_expected_tokens: 14_000,
+            ..TurnUsage::default()
+        };
+        let items: Vec<String> = usage
+            .items(&crate::config::ThemePalette::default())
+            .iter()
+            .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(items, vec!["14.2k in", "300 out", "0% / 理论 99% cache"]);
+    }
+
+    /// 没有理论水位时 `cached == 0` 仍然不出那一格（与改动前完全一致）。
+    #[test]
+    fn test_turn_usage_keeps_the_old_gate_without_a_theory() {
+        let usage = TurnUsage {
+            prompt_tokens: 14_200,
+            completion_tokens: 300,
+            cached_tokens: 0,
+            ..TurnUsage::default()
+        };
+        let items: Vec<String> = usage
+            .items(&crate::config::ThemePalette::default())
+            .iter()
+            .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(items, vec!["14.2k in", "300 out"]);
     }
 
     #[test]

@@ -605,8 +605,11 @@ pub struct CacheFork {
     #[serde(default)]
     pub kind: String,
     /// `external` | `tools` | `composition` | `compact` | `provider` | `cold`。
+    ///
+    /// 可空：后端把它声明为 `str | None`（派生值，判定不适用时不给），`null` 与
+    /// 缺席同义（`#[serde(default)]` 只兜得住键缺席，兜不住 null）。
     #[serde(default)]
-    pub blame: String,
+    pub blame: Option<String>,
     /// 用户能不能避开这次分叉（`null` = 该归因不适用：provider 欠账 / cold）。
     #[serde(default)]
     pub avoidable: Option<bool>,

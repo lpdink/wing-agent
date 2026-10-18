@@ -305,8 +305,8 @@ pub enum Command {
         /// How many forks / calls to read (1..=200; default 20).
         #[arg(long, value_name = "N", default_value_t = cache::DEFAULT_LIMIT)]
         limit: u32,
-        /// Expand one fork: its row ordinal (1 = newest) or its timestamp (as shown
-        /// in the WHEN column).
+        /// Expand one fork: its row ordinal as shown in the table (1 = newest) or
+        /// its timestamp (copy the WHEN column).
         #[arg(long, value_name = "TS|INDEX")]
         why: Option<String>,
     },

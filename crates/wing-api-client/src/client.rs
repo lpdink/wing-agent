@@ -1238,7 +1238,7 @@ mod tests {
         assert_eq!(fork.index, 3);
         assert_eq!(fork.label, "skills:pdf-tools");
         assert_eq!(fork.kind, "insert");
-        assert_eq!(fork.blame, "external");
+        assert_eq!(fork.blame.as_deref(), Some("external"));
         assert_eq!(fork.avoidable, Some(true));
         assert_eq!(fork.tokens_lost, Some(14_200));
         assert_eq!(fork.segments_affected, 12);
@@ -1292,6 +1292,27 @@ mod tests {
         let resp = client.get_cache_report("sid-1", 20).await.unwrap();
         assert!(resp.forks.is_empty() && resp.calls.is_empty());
         assert_eq!(resp.summary.theory_rate, None);
+    }
+
+    /// 后端把 `blame` 声明成 `str | None`（派生值，判定不适用时不给）：`null` 必须
+    /// 与缺席同义——`#[serde(default)]` 只兜得住键缺席。
+    #[tokio::test]
+    async fn get_cache_report_tolerates_a_null_blame() {
+        const NULL_BLAME: &str = r#"{"session_id":"sid-1",
+            "summary":{"calls":1},
+            "forks":[{"ts":"2026-10-18T15:41:02.123","index":3,"label":"rules:/etc/r.md",
+                      "kind":"remove","blame":null,"avoidable":null,
+                      "segments_affected":2,"verdict":"prefix_broken","detail":{}}],
+            "calls":[]}"#;
+        let server = MockGateway::start(vec![("/api/session/cache", 200, NULL_BLAME)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client.get_cache_report("sid-1", 20).await.unwrap();
+        assert_eq!(resp.forks.len(), 1);
+        assert_eq!(resp.forks[0].blame, None);
+        assert_eq!(resp.forks[0].avoidable, None);
+        assert_eq!(resp.forks[0].tokens_lost, None, "缺键 → None");
+        assert_eq!(resp.forks[0].detail.sha_before, None);
     }
 
     #[tokio::test]
