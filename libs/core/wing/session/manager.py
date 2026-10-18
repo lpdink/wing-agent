@@ -127,12 +127,14 @@ def _record_draft(record: dict) -> str:
     ``content_blocks`` 里，记录本身不带副本）；脏记录按"无文本"降级。
 
     fork 是**读请求**，不能因为一条记录校验不过就整单失败——降级为空串与
-    "目标没有可发送文本"同义。
+    "目标没有可发送文本"同义。``content`` 不做类型校验（私有属性直通），
+    因此非字符串值也在这里折成空串。
     """
     try:
-        return Message.model_validate(record).content or ""
+        draft = Message.model_validate(record).content
     except Exception:
         return ""
+    return draft if isinstance(draft, str) else ""
 
 
 def _warn_alias(requested: str, resolved: str) -> None:

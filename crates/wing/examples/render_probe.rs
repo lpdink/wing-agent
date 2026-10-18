@@ -2,9 +2,13 @@
 //! result.
 //!
 //! A debugging tool for rendering anomalies (wrong code-block detection, wrapping, thinking colors,
-//! streaming drift): feed it the exact text that rendered wrong — typically a `reasoning_content` /
-//! `content` field out of `$WING_HOME/core/sessions/<id>/history.jsonl` — and see what the renderer
-//! makes of it, through the same code paths the TUI uses.
+//! streaming drift): feed it the exact text that rendered wrong — typically the `content` /
+//! `reasoning_content` of a record in `$WING_HOME/core/sessions/<id>/history.jsonl` — and see what
+//! the renderer makes of it, through the same code paths the TUI uses.
+//!
+//! `--jsonl` extracts that text from a record: assistant records keep `content_blocks` only
+//! (`content` / `reasoning_content` are derived and never written), so the stored key is tried
+//! first and the blocks are joined when it is absent — both shapes resolve.
 //!
 //! Two views: **composed** (default) — `full_lines` / `StreamingRender` output, exactly what the chat
 //! cell shows (prefix, thinking recolor, hard wrap); **`--kinds`** — the markdown IR before
@@ -570,6 +574,35 @@ fn chunks_of(text: &str, size: usize) -> Vec<&str> {
     chunks
 }
 
+/// One text field out of a history record: the stored key, else derived from `content_blocks`.
+///
+/// Assistant records keep `content_blocks` only — `content` / `reasoning_content` are derived
+/// there (text blocks joined / non-redacted thinking blocks joined) and never written to disk.
+/// Older records still carry the flat keys, so both shapes resolve here.
+fn field_text(value: &serde_json::Value, key: &str) -> Option<String> {
+    if let Some(text) = value.get(key).and_then(|v| v.as_str())
+        && !text.is_empty()
+    {
+        return Some(text.to_string());
+    }
+    let block_kind = if key == "content" { "text" } else { "thinking" };
+    let text_key = if key == "content" { "text" } else { "thinking" };
+    let mut joined = String::new();
+    for block in value.get("content_blocks")?.as_array()? {
+        if block.get("type").and_then(|v| v.as_str()) != Some(block_kind) {
+            continue;
+        }
+        if block_kind == "thinking" && block.get("redacted").and_then(|v| v.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        if let Some(text) = block.get(text_key).and_then(|v| v.as_str()) {
+            joined.push_str(text);
+        }
+    }
+    (!joined.is_empty()).then_some(joined)
+}
+
 fn load_text(
     file: Option<String>,
     jsonl: Option<String>,
@@ -594,10 +627,8 @@ fn load_text(
             "content"
         };
         for key in [primary, fallback] {
-            if let Some(text) = value.get(key).and_then(|v| v.as_str())
-                && !text.is_empty()
-            {
-                return Ok(text.to_string());
+            if let Some(text) = field_text(&value, key) {
+                return Ok(text);
             }
         }
         return Err(format!("{path}#{index}: no non-empty {primary}/{fallback} field").into());

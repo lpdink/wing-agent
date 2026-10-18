@@ -457,11 +457,21 @@ class TestForkDraftFromDerivedContent:
         assert [r["uuid"] for r in prefix] == ["u1"]
 
     def test_fork_slice_draft_falls_back_for_corrupt_record(self):
-        """脏记录（校验不过）按"无文本"降级——读请求不因一条坏记录整单失败。"""
+        """脏记录按"无文本"降级——读请求不因一条坏记录整单失败。
+
+        两种脏法都要兜住：块数组形态不合法（校验抛），以及 ``content`` 不是
+        字符串（``_route_flat`` 把扁平值塞进私有属性、不做类型校验）。
+        """
         from wing.session.manager import _fork_slice
 
-        records = [{"role": "assistant", "uuid": "a1", "content_blocks": "not-a-list"}]
-        _, draft = _fork_slice(iter(records), "a1")
+        broken_blocks = [
+            {"role": "assistant", "uuid": "a1", "content_blocks": "not-a-list"}
+        ]
+        _, draft = _fork_slice(iter(broken_blocks), "a1")
+        assert draft == ""
+
+        non_string = [{"role": "user", "uuid": "u1", "content": 123}]
+        _, draft = _fork_slice(iter(non_string), "u1")
         assert draft == ""
 
 
