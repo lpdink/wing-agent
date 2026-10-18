@@ -682,11 +682,13 @@ class TestForkDetailSides:
 
         参照（第 2 轮）是本次的前缀，因此它在 rules 位上与本次同值——拿它当 `sha_before`
         只能得到「两个相同的 sha」，与「modify、有变化」自相矛盾（cloud S2 的复现）。
+        时间戳显式给（毫秒级 `datetime.now()` 在快机器上会同刻），`ref_ts` 与 `sha` 是否
+        指向同一条调用才可判。
         """
         rule_path = write_rules(tmp_path / "rules", "one.md", "V1 RULE")
         rule_label = f"rules:{rule_path}"
         cm = make_cm(tmp_path, rules="rules/*.md")
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s-revert"), "s-revert")
+        log = FileMessageLog(tmp_path / "s-revert")
 
         def segments(*ask_uuids: str) -> list[CachePart]:
             return (
@@ -696,29 +698,39 @@ class TestForkDetailSides:
             )
 
         first = segments("u1")
-        ledger.record(
-            first, purpose="main", model="m", provider="p", prompt=1000, cached=0
-        )
         second = segments("u1", "u2")
-        ledger.record(
-            second, purpose="main", model="m", provider="p", prompt=1500, cached=1000
-        )
         write_rules(tmp_path / "rules", "one.md", "V2 RULE")
         cm.reload_skills_and_rules()
         changed = segments("u1", "u2", "u3")
-        ledger.record(
-            changed, purpose="main", model="m", provider="p", prompt=2000, cached=1500
-        )
         write_rules(tmp_path / "rules", "one.md", "V1 RULE")
         cm.reload_skills_and_rules()
         reverted = segments("u1", "u2", "u3", "u4")
-        ledger.record(
-            reverted, purpose="main", model="m", provider="p", prompt=2500, cached=2000
-        )
 
-        fork = ledger.report()["forks"][0]
+        data = empty_ledger("s-revert")
+        for index, (parts_, prompt, cached) in enumerate(
+            [
+                (first, 1000, 0),
+                (second, 1500, 1000),
+                (changed, 2000, 1500),
+                (reverted, 2500, 2000),
+            ]
+        ):
+            data, _ = record_call(
+                data,
+                parts_,
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=prompt,
+                cached=cached,
+                now=datetime(2026, 10, 18, 10, index),
+            )
+        log.write_aux(CACHE_LEDGER_KEY, data)
+        fork = CacheLedger(log, "s-revert").report()["forks"][0]
+
         assert fork["label"] == rule_label
         assert fork["kind"] == "modify"
+        calls = data["calls"]
         sha_v1 = next(part.sha for part in first if part.label == rule_label)
         sha_v2 = next(part.sha for part in changed if part.label == rule_label)
         assert next(part.sha for part in reverted if part.label == rule_label) == sha_v1
@@ -728,63 +740,112 @@ class TestForkDetailSides:
         )
         assert fork["detail"]["sha_after"] == sha_v1
         assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
-        # `ref` 只报记在案的那条参照（第 2 轮，满前缀延续点）的时刻——不拿邻居冒充。
-        calls = ledger.load()["calls"]
+        # 时刻与 sha 同源：两者都指向对照侧（第 3 轮，带 V2 的那次调用），而不是参照（第 2 轮）。
         assert calls[-1]["ref_fp"] == calls[1]["fp"]
-        assert fork["detail"]["ref_ts"] == calls[1]["ts"]
+        assert fork["detail"]["ref_ts"] == calls[2]["ts"]
+        assert calls[2]["ts"] != calls[1]["ts"]
 
-    def test_ref_ts_is_null_when_the_recorded_reference_left_the_ledger(self):
-        """记在案的参照已滚出账本 → `ref_ts` 缺省，不拿邻居的 ts 冒充（cloud N4）。"""
+    def test_reference_left_the_ledger_but_the_compared_call_is_still_named(self):
+        """参照已滚出账本、对照侧（邻座）还在 → 时刻跟着对照侧，不指向无关的调用。"""
         base = {"label": "system:base", "sha": "aaaa0000aaaa0000", "chars": 10}
         old_rule = {"label": "rules:/r.md", "sha": "cc", "chars": 2}
         new_rule = {"label": "rules:/r.md", "sha": "bb", "chars": 2}
-        data = {
-            "version": 1,
-            "session_id": "gone",
-            "fingerprints": {
-                "new": {"segments": [base, new_rule]},
-                "old": {"segments": [base, old_rule]},
-            },
-            "calls": [
-                {
-                    "ts": "2026-10-18T10:00:00.000",
-                    "fp": "old",
-                    "purpose": "main",
-                    "model": "m",
-                    "provider": "p",
-                    "prompt": 900,
-                    "cached": 0,
-                    "expected": None,
-                    "ref_fp": None,
-                    "verdict": "cold",
-                    "fork": None,
-                },
-                {
-                    "ts": "2026-10-18T10:05:00.000",
-                    "fp": "new",
-                    "purpose": "main",
-                    "model": "m",
-                    "provider": "p",
-                    "prompt": 1000,
-                    "cached": 0,
-                    "expected": None,
-                    "ref_fp": "gone",
-                    "verdict": "prefix_broken",
-                    "fork": {
-                        "kind": "modify",
-                        "index": 1,
-                        "label": "rules:/r.md",
-                        "segments_affected": 1,
-                        "tokens_lost": None,
-                    },
-                },
-            ],
-        }
         fork = build_report(
-            normalize_ledger(data, "gone"), session_id="gone", limit=20
+            normalize_ledger(
+                {
+                    "version": 1,
+                    "session_id": "gone",
+                    "fingerprints": {
+                        "new": {"segments": [base, new_rule]},
+                        "old": {"segments": [base, old_rule]},
+                    },
+                    "calls": [
+                        {
+                            "ts": "2026-10-18T10:00:00.000",
+                            "fp": "old",
+                            "purpose": "main",
+                            "model": "m",
+                            "provider": "p",
+                            "prompt": 900,
+                            "cached": 0,
+                            "expected": None,
+                            "ref_fp": None,
+                            "verdict": "cold",
+                            "fork": None,
+                        },
+                        {
+                            "ts": "2026-10-18T10:05:00.000",
+                            "fp": "new",
+                            "purpose": "main",
+                            "model": "m",
+                            "provider": "p",
+                            "prompt": 1000,
+                            "cached": 0,
+                            "expected": None,
+                            "ref_fp": "gone",
+                            "verdict": "prefix_broken",
+                            "fork": {
+                                "kind": "modify",
+                                "index": 1,
+                                "label": "rules:/r.md",
+                                "segments_affected": 1,
+                                "tokens_lost": None,
+                            },
+                        },
+                    ],
+                },
+                "gone",
+            ),
+            session_id="gone",
+            limit=20,
         )["forks"][0]
-        assert fork["detail"]["ref_ts"] is None
         assert fork["detail"]["sha_before"] == "cc"
+        assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
+        # 对照侧是邻座那条（sha 与 ts 同源），而不是记在案却已不可定位的参照
+        assert fork["detail"]["ref_ts"] == "2026-10-18T10:00:00.000"
+
+    def test_comparison_side_gone_leaves_both_the_sha_and_the_ts_empty(self):
+        """对照侧整个滚出账本（分叉行成了最旧一条）→ `sha_before` 与 `ref_ts` 一起缺省。
+
+        `--why` 因此整行不显示 `ref`：不拿「紧邻的后来者」的 ts 冒充那个已经不可见的时刻。
+        """
+        base = {"label": "system:base", "sha": "aaaa0000aaaa0000", "chars": 10}
+        new_rule = {"label": "rules:/r.md", "sha": "bb", "chars": 2}
+        fork = build_report(
+            normalize_ledger(
+                {
+                    "version": 1,
+                    "session_id": "gone",
+                    "fingerprints": {"new": {"segments": [base, new_rule]}},
+                    "calls": [
+                        {
+                            "ts": "2026-10-18T10:05:00.000",
+                            "fp": "new",
+                            "purpose": "main",
+                            "model": "m",
+                            "provider": "p",
+                            "prompt": 1000,
+                            "cached": 0,
+                            "expected": None,
+                            "ref_fp": "gone",
+                            "verdict": "prefix_broken",
+                            "fork": {
+                                "kind": "modify",
+                                "index": 1,
+                                "label": "rules:/r.md",
+                                "segments_affected": 1,
+                                "tokens_lost": None,
+                            },
+                        }
+                    ],
+                },
+                "gone",
+            ),
+            session_id="gone",
+            limit=20,
+        )["forks"][0]
+        assert fork["detail"]["sha_before"] is None
+        assert fork["detail"]["ref_ts"] is None
         assert fork["detail"]["sha_after"] == "bb"
 
 
@@ -867,6 +928,11 @@ class TestRingBound:
         # 最近一条（刚记的这条）仍在
         assert stored["calls"][-1]["prompt"] == 42
         assert stored["calls"][-1]["fp"] == fingerprint(newest)
+        # 淘汰的是**最旧**的：存活的种子调用是原序列的后缀（prompt 连续递增且首条已晚于第 0 条）
+        prompts = [call["prompt"] for call in stored["calls"]][:-1]
+        assert prompts, "预算只该淘汰旧的，不该一次砍光"
+        assert prompts == list(range(prompts[0], prompts[0] + len(prompts)))
+        assert prompts[0] > 1000
         # 旧的被淘汰，且没有留下孤儿段落表
         assert len(stored["calls"]) < MAX_CALLS
         assert set(stored["fingerprints"]) == {call["fp"] for call in stored["calls"]}

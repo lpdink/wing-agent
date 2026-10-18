@@ -579,7 +579,8 @@ pub struct CacheForkDetail {
     pub mtime: Option<String>,
     #[serde(default)]
     pub size: Option<i64>,
-    /// 对照侧调用的时间戳；对照侧已经滚出账本 → `None`（`--why` 因此不打这一行）。
+    /// 对照侧调用的时间戳（与 `sha_before` 同源）；对照侧已经滚出账本 → `None`
+    /// （`--why` 因此不打这一行）。
     #[serde(default)]
     pub ref_ts: Option<String>,
     /// 分叉点两侧的段 hash（`modify` 时两者都存在；`insert` / `remove` 只有一侧有值）。

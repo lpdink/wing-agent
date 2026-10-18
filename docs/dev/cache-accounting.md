@@ -41,10 +41,13 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
   ——同一套规则，不会出现「文本 / dict 两套口径」。
 - `chars` = 该段的长度，**只用于估算代价**（`tokens_lost`），不参与判定：文本段是文本的
   字符数，协议段（tools / history / `system:wire`）是协议序列化后**规范形的长度**。
-- **`cache_control` 断点与 hash 的不对称**：`system:wire` 与 `tools:*` 的 hash 对象含断点
-  （断点位置稳定，属于真实载荷）；`history:*` 的 hash 刻意取**打标记之前**的序列化形态——
-  断点打在「本次请求最后一帧」上、每轮都在移动，算进去会让内容完全没变的相邻两轮恒判
-  `prefix_broken`（假阳性，`test_cache_control_does_not_leak_into_history_hashes` 钉住）。
+- **`cache_control` 断点与 hash 的关系是不对称的**：断点恒打在**本次请求的最后一帧消息**
+  上（每轮都在移动），Anthropic 另在 `body["system"]` 块上打一个（位置稳定；openai 兼容协议
+  没有独立 system 块，system 提示词本身就在 messages 里）。因此 `history:*` 的 hash 刻意取
+  **打标记之前**的形态（计入移动断点会让内容完全没变的相邻两轮恒判 `prefix_broken` —— 假
+  阳性，`test_cache_control_does_not_leak_into_history_hashes` 钉住）；Anthropic 的
+  `system:wire` 含那个 system 断点（属于下发的真实字节）；`tools:*` 的 hash 就是实际下发的
+  工具声明——两条协议的断点都不落在工具声明上。
 - **`history:*` 覆盖的是链上的消息**（模型视图里每条非 system 消息一段），因此**段数 ≠ wire
   消息数**：provider 在请求期合成的媒体 followup user 消息（连续 tool 段之后那条带图消息）
   没有段。影响可忽略——那条消息的字节是「哪些媒体位被保留 + 顺序」的确定性投影，而同一个
@@ -67,9 +70,11 @@ fsync + rename 原子写，`memory` 后端留在进程内字典）。形状见 `
 - **有界**：三档，全部由代码里的常量决定，没有配置面。
   - `calls` 只留最近 200 条（`MAX_CALLS`）；
   - `fingerprints` 只留被存活 calls 引用到的条目（写盘时 GC）；
-  - **落盘字节预算 512 KiB**（`MAX_LEDGER_BYTES`）：超出即按「最旧调用先淘汰」裁剪，连带
-    GC 失去引用的指纹，**永远保留最近一条调用**。量级两档：常规 40 轮会话 **≈160 KB**，
-    200 条 × 上百段的极端形态在裁剪前能到**数 MB**——所以预算才是真上界。
+  - **落盘字节预算 512 KiB**（`MAX_LEDGER_BYTES`）：超出即按「最旧调用先淘汰」裁剪，
+    连带 GC 失去引用的指纹，**永远保留最近一条调用**。量级两档：常规 40 轮会话
+    **≈160 KB**，200 条 × 上百段的极端形态在裁剪前能到**数 MB**——所以预算是账本的真上界。
+    两处例外：预算只在**记账时**生效（旧版本写下的超大账本要等下一次调用才被裁）；单条调用
+    自己的段落表就超预算时保留它（丢了它就没有「最近一条」可利用了）。
     （`contract.md` §3 的「~60 KB/会话」按「多条调用共享同一份段落表」估算；真实会话里消息
     每轮增长、每条调用都有独立段落表。契约的字段与公式没变，只有量级口径以这里为准。）
 - **永不抛**：读、算、写全在 try/except 内，失败只 WARNING——记账坏了绝不影响 LLM 调用。
@@ -164,8 +169,9 @@ provider_debt_rate = Σ max(0, expected - cached)
     （`recent[position+1]`）；参照（前缀延续点）在自身长度范围内与本次逐段同值，因此它
     解释不了「这里变了」——「改了又改回」时正是它会把 `sha_before` 抄成 `sha_after`。参照只在
     邻座已经滚出账本、或邻座在该位点没有段时兜底。
-  - `ref_ts`：记在案的那条参照调用的时刻；它已经滚出环形账本 → `null`（不拿邻居的 ts 冒充），
-    `--why` 那一行整行不显示。没有参照（前缀被外部改动打断）时取邻居——那正是分叉相对的对象。
+  - `ref_ts`：**与 `sha_before` 同源**——对照侧是邻座就是邻座的时刻，是参照就是参照的时刻。
+    两者都定位不到（对照侧已经滚出环形账本）→ `null`，`--why` 那一行整行不显示：不拿邻居的
+    ts 冒充一个已经不可见的时刻。
 
 ## 3. 降级
 
@@ -190,7 +196,7 @@ provider_debt_rate = Σ max(0, expected - cached)
 | `history:…` 分叉但没压缩 | 链拓扑变了（rewind / fork / steer）——回看那一轮的会话操作 |
 | 理论值远高于实际，且 `provider_debt_rate` 大 | 报 bug：provider 没兑现我们这侧完整的前缀。附 `--json` 原始响应 |
 | 端点 200 但 `calls` 空 | 会话真的没跑过模型调用；或 `WING_SESSIONS_PATH` 指到了别的目录（读的是另一个会话树） |
-| 账本里只剩最近几十条调用，更早的不见了 | 字节预算（512 KiB）按「最旧先淘汰」裁过——不是丢数据；分叉归因只需要「前一条」，不受影响 |
+| 账本里只剩最近几十条调用，更早的不见了 | 字节预算（512 KiB）按「最旧先淘汰」裁过——不是丢数据；被裁掉的旧行会失去 `ref_ts`，跨裁剪的 `compact` 归因也会退化成 `composition`，最新一行不受影响 |
 | 账本文件不存在而调用在跑 | `memory` 后端；或记账 WARNING（`grep 'cache ledger'`） |
 | 前端数字与 `wing cache` 不一致 | 两边都可能只取了部分行：`summary` 覆盖整本账本，`calls` 默认 20 条——端点 `limit=200` / `wing cache --limit 200` 取全量再对账 |
 | 想知道某条结论怎么复现 | `make test-probe` 的 `scenarios/test_cache_ledger.py`（A–F 六条红线，假 Provider 剧本驱动） |
@@ -223,7 +229,8 @@ jq '.calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
 - **粒度**：`history:*` 每条消息一段 → 任何消息内容变化只碎它之后的前缀；压缩 / rewind /
   fork 会让 history 段整体变化（归因落在 `compact` / `composition`）。
 - **协议无关**：openai 兼容与 anthropic 两条路径产出同一套 label。`cache_control` 与 hash 的
-  关系是**不对称**的（见 §1）：`system:wire` / `tools:*` 含断点，`history:*` 刻意不含。
+  关系是**不对称**的（见 §1）：断点落在最后一帧消息（两条协议）与 Anthropic 的 system 块上；
+  `history:*` 刻意取打标记之前的形态，`tools:*` 与断点无关。
 - **会话内单位**：账本是会话级，没有跨会话汇总（`--all` 不存在）。
 - **理论 ≠ 应然**：`theory_rate` 是「若 provider 满兑现能做到的水位」，不是「本该命中却没
   命中」的断言；只有 `provider_underdelivered` / `block_granularity` 才进 provider 债务。

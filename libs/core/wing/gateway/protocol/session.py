@@ -486,7 +486,8 @@ class CacheForkDetail(BaseModel):
     )
     size: int | None = Field(default=None, description="来源文件字节数")
     ref_ts: str | None = Field(
-        default=None, description="对照侧调用的时刻（不可定位 → null）"
+        default=None,
+        description="对照侧调用的时刻（与 sha_before 同源；对照侧已滚出账本 → null）",
     )
     sha_before: str | None = Field(
         default=None, description="对照侧（记录时分叉相对的那条调用）该段落的 sha"

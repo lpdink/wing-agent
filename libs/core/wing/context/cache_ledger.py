@@ -447,7 +447,7 @@ def build_report(
         new_segments = _segments_of(fingerprints, call.get("fp"))
         sha_after = _segment_sha(new_segments, fork.index)
         # 分叉的「另一侧」= 「改前」那一版：记录时分叉相对的那条调用（见 `_baseline`）。
-        baseline = _baseline(
+        baseline, ref_ts = _baseline(
             recent,
             position,
             call,
@@ -474,9 +474,7 @@ def build_report(
                     "path": source.get("path") if source else None,
                     "mtime": source.get("mtime") if source else None,
                     "size": source.get("size") if source else None,
-                    "ref_ts": _ref_ts(
-                        recent, position, call.get("ref_fp"), fallback=position + 1
-                    ),
+                    "ref_ts": ref_ts,
                     "sha_before": _segment_sha(baseline, fork.index),
                     "sha_after": sha_after,
                 },
@@ -515,14 +513,18 @@ def _baseline(
     *,
     index: int,
     sha_after: str | None,
-) -> list[dict[str, Any]]:
-    """分叉的对照侧段列表——「改前」那一版是谁。
+) -> tuple[list[dict[str, Any]], str | None]:
+    """分叉的对照侧（段列表 + 它的时刻）——「改前」那一版是谁、什么时候。
 
     `_find_ref` 只接受本次段列表的**前缀**（或完全相同）作参照，因此参照在自身长度范围内
     与本次逐段同值：`index < len(ref)` 时它的 sha 恒等于 `sha_after`（拿它当 `sha_before`
     只会重复 `sha_after`，解释不了「这里变了」），`index >= len(ref)` 时它在该位点上没有段。
     能解释这一行的是记录时分叉真正相对的那条调用（`recent[position + 1]`）；参照只在邻座
     已经滚出账本、或邻座在该位点没有段时兜底。
+
+    时刻与被选中的**那一侧**同源：`sha_before` 与 `ref_ts` 永远指向同一条调用，否则 `--why`
+    的 sha 行与 ref 行会各说各话。两侧都定位不到（对照侧已经滚出环形账本）时给空段列表 +
+    `None`——不拿邻居的 ts 冒充。
     """
     neighbour = position + 1 if position + 1 < len(recent) else None
     latest = (
@@ -530,12 +532,26 @@ def _baseline(
         if neighbour is not None
         else []
     )
-    reference = _segments_of(fingerprints, call.get("ref_fp"))
+    latest_ts = _ts_of(recent[neighbour]) if neighbour is not None else None
+    ref_fp = call.get("ref_fp")
+    reference = _segments_of(fingerprints, ref_fp)
+
+    def reference_ts() -> str | None:
+        """参照自己的时刻；`ref_fp` 那条调用已经滚出账本 → `None`。"""
+        if not isinstance(ref_fp, str):
+            return None
+        for older in recent[position + 1 :]:
+            if older.get("fp") == ref_fp:
+                return _ts_of(older)
+        return None
+
     if _explains(latest, index, sha_after):
-        return latest
+        return latest, latest_ts
     if _explains(reference, index, sha_after):
-        return reference
-    return latest or reference
+        return reference, reference_ts()
+    if latest:
+        return latest, latest_ts
+    return reference, reference_ts()
 
 
 def _explains(
@@ -544,29 +560,6 @@ def _explains(
     """这一侧在该位点上有段、且与本次不同（能当「改前」的证据）。"""
     sha = _segment_sha(segments, index)
     return sha is not None and sha != sha_after
-
-
-def _ref_ts(
-    recent: Sequence[dict[str, Any]],
-    position: int,
-    ref_fp: Any,
-    *,
-    fallback: int,
-) -> str | None:
-    """对照侧调用的时刻。
-
-    `ref_fp` 记在案时只认它自己的那条调用（同指纹）；它已经滚出环形账本 → `None`——
-    拿邻居的 ts 冒充参照会把「什么时候变的」指向一条无关的调用。没有参照（前缀被外部改动
-    打断）时对照侧就是邻居，那正是分叉相对的对象，ts 是准确值。
-    """
-    if isinstance(ref_fp, str):
-        for index in range(position + 1, len(recent)):
-            if recent[index].get("fp") == ref_fp:
-                return _ts_of(recent[index])
-        return None
-    if fallback < len(recent):
-        return _ts_of(recent[fallback])
-    return None
 
 
 def _ts_of(call: dict[str, Any]) -> str | None:
