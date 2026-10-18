@@ -32,6 +32,11 @@ impl ChatView {
         &self.header_lines
     }
 
+    /// 欢迎屏 header 的行数（开屏版式要用它排牌子的高度）。
+    pub(crate) fn header_height(&self) -> usize {
+        self.header_lines.len()
+    }
+
     /// Set the header lines (the welcome block — see `ui::welcome`).
     /// These are rendered at the top of the scrollable area and
     /// preserved across `clear()`.

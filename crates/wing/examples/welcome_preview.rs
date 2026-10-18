@@ -20,6 +20,7 @@
 //! cargo run -p wing --example welcome_preview -- --facts 0,0
 //!
 //! # 开屏版面：给定视口高，看整块落在光学中心（空会话）还是顶对齐（有消息）
+//! # （真机里输入卡紧贴牌子下面；这里只画牌子与它上方的空气）
 //! cargo run -p wing --example welcome_preview -- --width 120 --height 32
 //! cargo run -p wing --example welcome_preview -- --width 120 --height 32 --filled
 //! ```
@@ -43,6 +44,7 @@ use wing::ui::welcome::SWEEP_MS;
 use wing::ui::welcome::SessionFacts;
 use wing::ui::welcome::Viewport;
 use wing::ui::welcome::Welcome;
+use wing::ui::welcome::splash_pad;
 
 /// 前景 / 背景的 SGR 参数（`38;` / `48;` 之后接的那一段）。
 fn sgr(color: Option<Color>) -> Option<String> {
@@ -155,11 +157,7 @@ fn draw(
         None => ms,
     };
     let now = started + Duration::from_millis(at);
-    let view = Viewport {
-        width,
-        height,
-        empty,
-    };
+    let view = Viewport { width, empty };
     let lines = welcome.build(&palette, view, now, working, true, facts);
 
     let label = match phase {
@@ -179,6 +177,16 @@ fn draw(
     };
     let dashes = "─".repeat((width as usize).saturating_sub(label.len() + 4));
     let _ = writeln!(out, "── {label} {dashes}");
+    // 开屏的空气由 App 的版式给（见 `app::frame_layout`）：这里按同一份数学
+    // 补上上方的空行，"牌子停在光学中心"就是真机上看到的位置。
+    let pad = if empty {
+        splash_pad(height, lines.len() as u16, 1 + 2 + 1)
+    } else {
+        0
+    };
+    for _ in 0..pad {
+        out.push('\n');
+    }
     for line in &lines {
         // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的那一行
         // 会被截掉最后一列（分节线正好画到那里 —— 它的长度就是块宽）。

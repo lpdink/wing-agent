@@ -140,6 +140,108 @@ fn an_empty_session_centers_the_block() {
     assert_eq!(art_top, 3, "有消息时只有一格呼吸：\n{body}");
 }
 
+/// 开屏是一块：牌子在上、输入卡紧贴在它下面（同宽、居中），空气都在下面。
+#[test]
+fn the_splash_puts_the_composer_under_the_nameplate() {
+    let mut app = test_app();
+    let mut terminal = test_terminal(100, 30);
+    draw(&mut app, &mut terminal);
+
+    let band = app.chat.geometry().area;
+    let composer = app.geometry.composer_rect();
+    assert_eq!(
+        composer.y,
+        band.bottom() + 1,
+        "输入卡紧贴在牌子下面（中间一格呼吸）"
+    );
+    assert!(
+        composer.bottom() + 3 <= 30,
+        "下面的空气留给弹层：{composer:?}"
+    );
+    // 同宽同列：输入卡与牌子是一条边（牌子在 band 里水平居中）。
+    let block = app.welcome.as_ref().expect("welcome").block_width();
+    assert_eq!(composer.width, block, "输入卡与牌子同宽");
+    assert_eq!(
+        composer.x,
+        band.x + (band.width - block) / 2,
+        "两者居中在同一块里"
+    );
+}
+
+/// 敲 `/` 不会让开屏整块挪位（S1）：弹层在开屏里是浮层，挂在输入卡下面。
+#[test]
+fn a_popup_does_not_move_the_splash() {
+    let hero_top = |app: &mut App| -> u16 {
+        let mut terminal = test_terminal(100, 30);
+        draw(app, &mut terminal);
+        app.chat.geometry().area.y
+    };
+    let mut app = test_app();
+    let before = hero_top(&mut app);
+
+    app.input.set_text("/");
+    app.update_popup_from_input();
+    let mut terminal = test_terminal(100, 30);
+    draw(&mut app, &mut terminal);
+    assert_eq!(
+        app.chat.geometry().area.y,
+        before,
+        "打开命令列表不该推动牌子"
+    );
+    // 弹层挂在输入卡下面（浮层），不占排版：输入卡下面的空气里有东西。
+    let composer = app.geometry.composer_rect();
+    let below: Vec<String> = (composer.bottom()..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_string())
+                .collect()
+        })
+        .collect();
+    assert!(
+        below.iter().any(|row| !row.trim().is_empty()),
+        "弹层画在输入卡下面：{below:?}"
+    );
+}
+
+/// 第一条消息落地：开屏退位 —— 牌子回到 transcript 顶部（一格留白），
+/// 输入卡回到屏幕底部。
+#[test]
+fn the_first_message_drops_the_composer_back_to_the_bottom() {
+    let mut app = test_app();
+    let mut terminal = test_terminal(100, 30);
+    draw(&mut app, &mut terminal);
+    assert!(app.geometry.composer_rect().y > 10, "开屏时输入卡在中间");
+
+    app.chat
+        .push(crate::ui::chat_view::ChatCell::UserMessage("hello".into()));
+    let mut terminal = test_terminal(100, 30);
+    draw(&mut app, &mut terminal);
+    assert_eq!(
+        app.geometry.composer_rect().bottom(),
+        30,
+        "有了消息，输入卡钉回底部"
+    );
+    assert_eq!(
+        app.chat.geometry().area.y,
+        1,
+        "牌子回到会话开头（状态栏下面就是一格留白）"
+    );
+}
+
+/// 矮终端装不下开屏版式：退回会话版式（牌子贴顶、输入卡钉底），不硬挤。
+#[test]
+fn a_short_terminal_falls_back_to_the_conversation_layout() {
+    let mut app = test_app();
+    let mut terminal = test_terminal(60, 12);
+    draw(&mut app, &mut terminal);
+    assert_eq!(
+        app.geometry.composer_rect().bottom(),
+        12,
+        "矮屏上输入卡钉底"
+    );
+    assert_eq!(app.chat.geometry().area.y, 1, "牌子贴顶，不做光学居中");
+}
+
 #[test]
 fn narrow_terminal_drops_the_art_before_the_text() {
     let mut app = test_app();
@@ -160,9 +262,10 @@ fn narrow_terminal_drops_the_art_before_the_text() {
     });
     assert!(!gull_present, "窄屏先撤海鸥：\n{body}");
 
-    // 最窄档：连文字列也放不下，只剩一行 `wing` + 版本。
+    // 最窄档：连文字列也放不下，只剩一行 `wing` + 版本。开屏的 band 是终端整宽
+    // （没有滚动条 gutter —— 空会话没有可滚的内容），所以这一档从 38 列起。
     let mut app = test_app();
-    let body = frame_body(&mut app, 40, 30);
+    let body = frame_body(&mut app, 38, 30);
     let compacted = compact(&body);
     assert!(
         compacted.contains("wing") && compacted.contains("dev·"),
@@ -184,12 +287,18 @@ fn welcome_header_fits_the_chat_band() {
         let mut terminal = test_terminal(width, 30);
         draw(&mut app, &mut terminal);
 
-        let content_width =
-            crate::ui::scrollbar::content_area(app.geometry.chat_band()).width as usize;
-        assert!(
-            content_width < width as usize,
-            "内容区确实比终端窄（gutter 是常量 2）"
-        );
+        // 开屏（空会话）的 band 就是终端整宽：没有滚动条，也就没有 gutter。
+        // 有消息之后才是 `content_area`（终端宽 − 2）。
+        let content_width = if app.chat.is_empty() {
+            app.geometry.chat_band().width as usize
+        } else {
+            let area = crate::ui::scrollbar::content_area(app.geometry.chat_band()).width as usize;
+            assert!(
+                area < width as usize,
+                "内容区确实比终端窄（gutter 是常量 2）"
+            );
+            area
+        };
         for line in app.chat.header_lines() {
             let used: usize = line
                 .spans

@@ -18,10 +18,10 @@
 //!
 //! ## 版面：空会话时是一屏开屏，不是一段贴顶的日志
 //!
-//! transcript 还空着（[`Viewport::empty`]）时整块落在视口的**光学中心**（略高于几何
-//! 中心）并水平居中；一旦有了消息就退回左对齐 + 一格留白 —— header 从此只是
-//! 会话的开头，跟消息一起滚走。这两个位置都由 [`Viewport`] 决定，一起进
-//! `needs_rebuild` 的键（否则改窗口大小后整块不重排）。
+//! transcript 还空着（[`Viewport::empty`]）时整块**水平居中**，竖直位置交给
+//! App 的开屏版式（[`splash_pad`]）：牌子与输入卡作为一个整体停在视口的光学中心，
+//! 下面留一片空气吸收弹层与草稿长大。一旦有了消息就退回左对齐 + 一格留白 ——
+//! header 从此只是会话的开头，跟消息一起滚走，插在 chat band 的最上面。
 //!
 //! 窄终端按宽度档位降级：整块（大字 + 名牌）→ 只名牌 → 一行 wordmark，任何宽度
 //! 都不截断、不折行、不溢出。
@@ -121,30 +121,45 @@ const RULE_AFTER_ROW: usize = 2;
 /// 分节线的字形（细横线；重框退役了，见模块文档）。
 const RULE: char = '─';
 
-/// 这一帧给欢迎屏的几何 + 会话状态。
+/// 这一帧给欢迎屏的版面输入。
 ///
-/// 三个都是**版面的输入**：宽度决定档位（[`Layout`]），高度与"是否空会话"决定
-/// 它在不在视口的光学中心。三者一起进 [`Welcome::needs_rebuild`] 的键 —— 只记
-/// 宽度的话，改窗口大小 / 第一条消息落地都不会重排。
+/// 两个都是**内容的输入**（不是位置的）：宽度决定档位（[`Layout`]），`empty` 决定
+/// 是"开屏"（水平居中、竖直位置由 App 的版式给）还是"会话的开头"（左对齐 + 一格
+/// 留白）。两者一起进 [`Welcome::needs_rebuild`] 的键 —— 只记宽度的话，第一条消息
+/// 落地不会重排。
+///
+/// 竖直位置**不在这里**：开屏那一块要和输入卡一起算光学中心（见 [`splash_pad`]），
+/// 而输入卡是 App 的版块 —— 由 App 排版比让 header 自己塞空行更诚实。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
-    /// 内容宽（终端宽减滚动条 gutter）。
+    /// 内容宽（开屏 = 终端整宽，没有滚动条；会话里 = band 减滚动条 gutter）。
     pub width: u16,
-    /// 视口高（chat band 的行数）。
-    pub height: u16,
     /// transcript 里除了这块 header 什么都没有。
     pub empty: bool,
 }
 
 impl Viewport {
-    /// 只知道宽度的构造（预览 / 测试）：不居中，等同于"已经有消息了"。
+    /// 会话里的构造（不居中，等同于"已经有消息了"）。
     pub fn width_only(width: u16) -> Self {
         Self {
             width,
-            height: 0,
             empty: false,
         }
     }
+}
+
+/// 开屏整块上方的空气行数：把「牌子 + 一格间隔 + 输入卡」当一个整体放在**光学
+/// 中心**（略高于几何中心，见 [`HERO_CENTER_PCT`]）。
+///
+/// `reserved` 是牌子下面那些行的**基线**高度（输入卡单行 + 间隔）—— 弹层与草稿
+/// 长大**不**进这个账：它们由牌子下面的空气吸收（App 的 `frame_layout`）。否则用户
+/// 每敲一个 `/` 打开命令列表，整块都会往上跳几行。
+pub fn splash_pad(screen_h: u16, block_h: u16, reserved: u16) -> u16 {
+    let slack = screen_h
+        .saturating_sub(1) // 状态栏
+        .saturating_sub(block_h)
+        .saturating_sub(reserved);
+    (slack as u32 * HERO_CENTER_PCT as u32 / 100) as u16
 }
 
 /// 会话事实 —— 这个会话加载了多少 skills / rules。
@@ -233,6 +248,8 @@ pub struct Welcome {
     settled_built: bool,
     /// 上次构建用到的会话事实（`None` = 无 / 还没同步到）。
     built_facts: Option<SessionFacts>,
+    /// 上次构建出来的牌子宽度（不含居中位移）。
+    block_width: usize,
 }
 
 impl Welcome {
@@ -248,6 +265,7 @@ impl Welcome {
             built_pose: None,
             settled_built: false,
             built_facts: None,
+            block_width: 0,
         }
     }
 
@@ -403,6 +421,8 @@ impl Welcome {
             }
         };
 
+        self.block_width = block;
+
         // 水平居中：整块居中的看着才像"一屏"，逐行居中会让名牌左右乱窜。
         // 只对空会话生效 —— 有了消息，它就是 transcript 的第一段，左对齐。
         let x_pad = if view.empty {
@@ -418,32 +438,23 @@ impl Welcome {
             }
         }
 
-        // 尾部那一格空行也算块高：它和牌子的最后一行是同一块版面的一部分。
-        let pad = top_pad(view.height, lines.len() + 1, view.empty);
-        let mut out = Vec::with_capacity(pad + lines.len() + 1);
-        out.resize(pad, Line::from(""));
+        let mut out = Vec::with_capacity(lines.len() + 2);
+        // 会话里（顶对齐）留一格呼吸；开屏的空气由 App 的版式给（它要和输入卡
+        // 一起算光学中心），header 自己不再塞空行。
+        if !view.empty {
+            out.push(Line::from(""));
+        }
         out.append(&mut lines);
         out.push(Line::from(""));
         out
     }
-}
 
-/// 整块上方的留白行数：空会话落在视口光学中心，否则只有一格呼吸。
-///
-/// 光学中心 = 上方留白占全部余量的 [`HERO_CENTER_PCT`]（不到一半），底下略多一点
-/// —— 视口中的块因此"坐"得住。余量不够分（块比视口还高）时退回一格：这时内容
-/// 本来就会被滚，居中只会在顶上留一块更没道理的空白。
-fn top_pad(height: u16, block_rows: usize, empty: bool) -> usize {
-    if !empty {
-        return 1;
+    /// 上一帧那块牌子的宽度（**不含**水平居中塞进去的空列）。
+    ///
+    /// 开屏版式要用它来定输入卡的宽度：输入卡与牌子同宽居中，读起来是一块东西。
+    pub fn block_width(&self) -> u16 {
+        self.block_width.min(u16::MAX as usize) as u16
     }
-    let slack = (height as usize).saturating_sub(block_rows);
-    // 余量为 0（块正好填满视口）时不留白：`.max(1)` 会凭空多出一行，让 header
-    // 比视口还高、顶部那格被滚掉 —— 与注释说的"退回一格"不符。
-    if slack == 0 {
-        return 0;
-    }
-    (slack * HERO_CENTER_PCT as usize / 100).max(1)
 }
 
 /// 这一帧的海鸥：姿态 → 字母网格 + 竖直偏移，统一补到 [`ART_TERM_ROWS`] 行。
@@ -825,16 +836,7 @@ mod tests {
         // 居中，x_pad > 0）—— 后者正是"块宽"与"每行宽度"分成两个量的地方，
         // 少测一遍就少了一层保护。
         let palette = palette();
-        let views = |width: u16| {
-            [
-                Viewport::width_only(width),
-                Viewport {
-                    width,
-                    height: 24,
-                    empty: true,
-                },
-            ]
-        };
+        let views = |width: u16| [Viewport::width_only(width), Viewport { width, empty: true }];
         for width in 2u16..200 {
             let now = Instant::now();
             for working in [false, true] {
@@ -1232,45 +1234,46 @@ mod tests {
     // ── 版面：居中与档位 ──────────────────────────────────
 
     #[test]
-    fn the_block_sits_in_the_optical_center_of_an_empty_session() {
-        // 空会话是一屏开屏：上下留白按光学中心分（上面比下面少），左右也居中。
+    fn the_splash_block_is_centred_horizontally() {
+        // 空会话整块水平居中（竖直位置是 App 的版式，见 `splash_pad`）。
         let view = Viewport {
             width: 120,
-            height: 50,
             empty: true,
         };
         let mut w = welcome();
         let lines = w.build(&palette(), view, Instant::now(), false, true, None);
-        let first_ink = lines
-            .iter()
-            .position(|line| width_of(line) > 0)
-            .expect("总有内容");
-        let last_ink = lines
-            .iter()
-            .rposition(|line| width_of(line) > 0)
-            .expect("总有内容");
-        let top = first_ink;
-        // 视口里块**下面**还剩几行：header 之后的空行也是视口的一部分。
-        let bottom = view.height as usize - last_ink - 1;
-        assert!(top > 1, "空会话上方要有留白，实际 {top}");
-        assert!(
-            top < bottom,
-            "光学中心略高于几何中心：上面 {top} 行，下面 {bottom} 行"
-        );
-        // 上方留白 = (视口高 − 块高) × 45%；块高含尾部那一格空行。
-        let block = last_ink - first_ink + 2;
-        assert_eq!(
-            top,
-            (view.height as usize - block) * HERO_CENTER_PCT as usize / 100,
-            "留白按光学中心算"
-        );
-        // 水平居中：首行左侧有留白。
-        let left = lines[first_ink]
-            .spans
-            .first()
-            .map(|s| s.content.len() - s.content.trim_start().len())
-            .unwrap_or(0);
+        let lead = |line: &Line<'static>| -> usize {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.chars().take_while(|c| *c == ' ').count()
+        };
+        let ink: Vec<&Line<'static>> = lines.iter().filter(|l| width_of(l) > 0).collect();
+        let left = ink.iter().map(|l| lead(l)).min().expect("有内容");
+        // 左边距 = 最靠左的墨迹列；右边距 = 视口宽减**整行**宽度（`width_of`
+        // 已经把前导空格算进去了，不能再减一次 lead）。
+        let right = (view.width as usize)
+            .saturating_sub(ink.iter().map(|l| width_of(l)).max().expect("有内容"));
         assert!(left > 0, "宽终端上整块水平居中，实际左留白 {left}");
+        assert!(
+            left.abs_diff(right) <= 1,
+            "整块居中：左 {left} 右 {right}（差 ≤ 1 列）"
+        );
+        // 块宽本身不受居中位移影响（App 用它定输入卡的宽度）。
+        assert_eq!(w.block_width(), 86, "2x 大字 + 40 列海鸥");
+    }
+
+    #[test]
+    fn splash_pad_puts_the_unit_above_the_geometric_centre() {
+        // 「牌子 + 间隔 + 输入卡」当一个整体：上方空气 = 余量的 45%（少于一半），
+        // 下面留给空气 / 弹层。
+        for (screen, block) in [(30u16, 14u16), (50, 14), (24, 9), (120, 14)] {
+            let pad = splash_pad(screen, block, 4);
+            let slack = screen - 1 - block - 4;
+            assert_eq!(pad, (slack as u32 * HERO_CENTER_PCT as u32 / 100) as u16);
+            assert!(pad * 2 < slack, "光学中心在上：{screen}x{block} pad={pad}");
+        }
+        // 装不下：不溢出，也不凭空多一行。
+        assert_eq!(splash_pad(10, 14, 4), 0);
+        assert_eq!(splash_pad(20, 14, 4), 0);
     }
 
     #[test]
@@ -1278,7 +1281,6 @@ mod tests {
         // 有了消息就不是开屏了：header 退回"会话的开头"（一格留白、左对齐）。
         let view = Viewport {
             width: 120,
-            height: 50,
             empty: false,
         };
         let mut w = welcome();
@@ -1301,12 +1303,11 @@ mod tests {
                 .min()
                 .unwrap_or(0)
         };
-        let empty = {
+        let centred = {
             let mut w = welcome();
-            let centred = w.build(
+            w.build(
                 &palette(),
                 Viewport {
-                    height: 50,
                     empty: true,
                     ..view
                 },
@@ -1314,25 +1315,24 @@ mod tests {
                 false,
                 true,
                 None,
-            );
-            left_ink(&centred)
+            )
         };
         assert!(
-            left_ink(&lines) < empty,
-            "有消息时退回左对齐（最左墨迹 {left_ink_of:?} < {empty}）",
-            left_ink_of = left_ink(&lines)
+            left_ink(&lines) < left_ink(&centred),
+            "有消息时退回左对齐（最左墨迹 {} < {}）",
+            left_ink(&lines),
+            left_ink(&centred)
         );
     }
 
     #[test]
     fn every_layout_input_rebuilds() {
-        // 版面三件套都进 `needs_rebuild` 的键：只记宽度的话，改窗口大小 / 第一条
-        // 消息落地都不会重排（整块会留在错误的位置上）。
+        // 版面的两件都进 `needs_rebuild` 的键：宽度（档位）与"空会话没有"（居中
+        // vs 左对齐）。只记宽度的话，第一条消息落地时 header 不会重排。
         let mut w = welcome();
         let settled = Instant::now() + Duration::from_millis(SWEEP_MS + 500);
         let view = Viewport {
             width: 120,
-            height: 40,
             empty: true,
         };
         w.build(&palette(), view, settled, false, true, None);
@@ -1342,7 +1342,6 @@ mod tests {
         );
         for changed in [
             Viewport { width: 121, ..view },
-            Viewport { height: 41, ..view },
             Viewport {
                 empty: false,
                 ..view

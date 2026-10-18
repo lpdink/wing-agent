@@ -634,21 +634,39 @@ impl App {
             // running turn costs no row at all. The card *floats* inside its block (see
             // `chrome::card_area`), so the height is asked for in the columns the card will really
             // get — the request and the wrapping it produces have to describe the same frame.
-            let card_w = crate::ui::input_area::chrome::card_area(area).width;
-            let composer_h = self.input.height(card_w);
-            let popup_h = self.popup.height();
-            let mut constraints = vec![
-                Constraint::Length(1),          // status bar
-                Constraint::Min(3),             // chat view (min 3 rows)
-                Constraint::Length(composer_h), // composer card
-            ];
-            if popup_h > 0 {
-                constraints.push(Constraint::Length(popup_h)); // pop-down command popup
+            // 空会话 = 开屏：牌子先建一次（宽度 = 终端整宽，开屏没有滚动条），
+            // 排版才知道它多高 —— 整块与输入卡要一起算光学中心。
+            let now = std::time::Instant::now();
+            let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
+            let mut splash = false;
+            let mut hero_rows = 0u16;
+            let mut composer_w = full_card_w;
+            if self.chat.is_empty() {
+                self.sync_welcome(
+                    &palette,
+                    Viewport {
+                        width: area.width,
+                        empty: true,
+                    },
+                    now,
+                );
+                hero_rows = self.chat.header_height() as u16;
+                // 输入卡与牌子同宽居中（读起来是一块东西）。
+                let candidate = hero_block_width(self)
+                    .max(SPLASH_INPUT_MIN)
+                    .min(full_card_w);
+                // 矮终端上开屏版式会把输入卡挤出去：退回会话版式（牌子贴顶、
+                // 输入卡钉底），那才是那里唯一能用的版面。牌子都没有（欢迎屏被
+                // 关掉）时同理 —— 开屏得有个牌子。
+                let fits = hero_rows > 0
+                    && 1 + hero_rows + 1 + self.input.height(candidate) + 2 <= area.height;
+                splash = fits;
+                if fits {
+                    composer_w = candidate;
+                }
             }
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(area);
+            let composer_h = self.input.height(composer_w);
+            let bands = frame_layout(area, splash, hero_rows, composer_h, self.popup.height());
 
             // Status bar (model top-left, cumulative usage, connection) — plus
             // the session identity tail (id + pin star), the two pointer
@@ -664,7 +682,7 @@ impl App {
                     &palette,
                     &mut status_regions,
                 ),
-                chunks[0],
+                bands.status,
             );
             self.geometry.record_status_regions(status_regions);
 
@@ -674,20 +692,28 @@ impl App {
             // can reach the bar's column however its own width arithmetic
             // works out. The recorded chat band keeps the full width: that is
             // what the bar's geometry and its hit testing are derived from.
-            chat_height = chunks[1].height;
-            self.geometry.record_chat_band(chunks[1]);
+            chat_height = bands.band.height;
+            self.geometry.record_chat_band(bands.band);
 
             // 欢迎屏 header：版面（宽度档 / 视口高 / 空会话）、姿态、扫光变了就
             // 重建一次 —— 在 chat widget 之前完成，这一帧画的就是新行。宽度按
             // **内容宽**算：header 与消息渲染在同一个（减掉滚动条 gutter 的）
             // 矩形里，按终端整宽构建会让最右一列连同省略号被裁掉。
-            let band = scrollbar::content_area(chunks[1]);
-            let view = Viewport {
-                width: band.width,
-                height: band.height,
-                empty: self.chat.is_empty(),
+            // 开屏的 band 就是牌子本身（没有 gutter：没有内容可滚），会话里才
+            // 减掉滚动条 gutter —— header 与消息渲染在同一个矩形里。
+            let chat_area = if splash {
+                bands.band
+            } else {
+                scrollbar::content_area(bands.band)
             };
-            self.sync_welcome(&palette, view, std::time::Instant::now());
+            self.sync_welcome(
+                &palette,
+                Viewport {
+                    width: chat_area.width,
+                    empty: splash,
+                },
+                now,
+            );
             let ctx = crate::render::renderable::CellContext {
                 palette: &palette,
                 thinking_mode,
@@ -695,10 +721,7 @@ impl App {
                 layout: &layout,
                 images: self.images.opts(),
             };
-            frame.render_widget(
-                ChatViewWidget::new(&mut self.chat, ctx),
-                scrollbar::content_area(chunks[1]),
-            );
+            frame.render_widget(ChatViewWidget::new(&mut self.chat, ctx), chat_area);
 
             // Overlay scrollbar. Painted after the chat widget (so it overprints the gutter's
             // blank columns) and before the toast (so a toast is never hidden by it). It takes no
@@ -743,7 +766,16 @@ impl App {
                 visible_height: chat_height as usize,
                 scroll_offset: self.chat.scroll_position(),
             };
-            let input_rect = crate::ui::input_area::chrome::card_area(chunks[2]);
+            let input_rect = if splash {
+                centered_card(bands.composer, composer_w)
+            } else {
+                crate::ui::input_area::chrome::card_area(bands.composer)
+            };
+            let popup_rect = if splash {
+                splash_popup(input_rect, self.popup.height(), area)
+            } else {
+                bands.popup
+            };
             let keyboard_held = self.composer_typing_blocked();
             self.geometry.record_composer(input_rect);
             frame.render_widget(
@@ -754,12 +786,12 @@ impl App {
 
             // Pop-down command popup — below the composer and floated with it,
             // so the list hangs off the card instead of the screen edge.
-            if popup_h > 0
+            if let Some(rect) = popup_rect
                 && let Some((rows, state, filter)) = self.popup.active.render_data()
             {
                 frame.render_widget(
                     SelectionPopup::new(rows, state, filter, &palette),
-                    crate::ui::input_area::chrome::card_area(chunks[3]),
+                    crate::ui::input_area::chrome::card_area(rect),
                 );
             }
 
@@ -931,6 +963,119 @@ async fn thinking_sweep_tick(deadline: Option<std::time::Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
         None => std::future::pending::<()>().await,
+    }
+}
+
+/// 开屏输入卡的最小宽度：牌子在窄终端上只有 38 列左右（Compact 档），而
+/// composer 的两条轨道（workdir / 用量）比它更需要地方 —— 取一个下限，
+/// 读起来仍是"牌子下面一张卡"，不是一根细条。
+const SPLASH_INPUT_MIN: u16 = 48;
+
+/// 这一帧的版面：状态栏 / chat band / composer 块 / 弹层。
+///
+/// 两种版式，差别只在**空会话**：
+///
+/// * **会话里**：`status(1) | band(fill) | composer | [popup]` —— 输入卡钉在底部，
+///   band 吃掉剩下的全部高度（历史可滚）。
+/// * **开屏**（`hero_rows > 0`）：`status | 空气 | 牌子 | 间隔 | 输入卡 | [弹层] | 空气`
+///   —— 牌子与输入卡作为**一块**停在光学中心（[`splash_pad`]），下面那片空气吸收
+///   弹层与草稿长大：用户敲 `/` 打开命令列表时，牌子不动。
+struct FrameLayout {
+    status: Rect,
+    band: Rect,
+    /// composer 的**版块**（widget 会自己在这块里留边距，见 `chrome::card_area`）。
+    composer: Rect,
+    /// 命令弹层（挂在输入卡下面）；不显示时为 `None`。
+    popup: Option<Rect>,
+}
+
+/// 排这一帧的版面（见 [`FrameLayout`]）。`hero_rows == 0` = 会话版式。
+fn frame_layout(
+    area: Rect,
+    splash: bool,
+    hero_rows: u16,
+    composer_h: u16,
+    popup_h: u16,
+) -> FrameLayout {
+    if !splash {
+        let mut constraints = vec![
+            Constraint::Length(1),          // status bar
+            Constraint::Min(3),             // chat view (min 3 rows)
+            Constraint::Length(composer_h), // composer card
+        ];
+        if popup_h > 0 {
+            constraints.push(Constraint::Length(popup_h)); // pop-down command popup
+        }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        return FrameLayout {
+            status: chunks[0],
+            band: chunks[1],
+            composer: chunks[2],
+            popup: (popup_h > 0).then(|| chunks[3]),
+        };
+    }
+
+    // 开屏的空气按**基线**算（单行输入卡 + 间隔）：弹层与草稿长大只吃下面的空气，
+    // 不吃上面那份 —— 否则牌子会跟着往上跳。
+    let baseline = 1 + crate::ui::input_area::chrome::BORDER_ROWS + 1;
+    let pad = crate::ui::welcome::splash_pad(area.height, hero_rows, baseline);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),          // status bar
+            Constraint::Length(pad),        // 上方空气
+            Constraint::Length(hero_rows),  // 牌子（= chat band，只有 header）
+            Constraint::Length(1),          // 牌子与输入卡之间的呼吸
+            Constraint::Length(composer_h), // 输入卡
+            Constraint::Fill(1),            // 下方空气
+        ])
+        .split(area);
+
+    // 开屏的弹层是**浮层**，位置由 draw 按输入卡的真实矩形算（见
+    // [`splash_popup`]）：它不占排版空间，所以不推动任何东西。
+    let _ = popup_h;
+    FrameLayout {
+        status: chunks[0],
+        band: chunks[2],
+        composer: chunks[4],
+        popup: None,
+    }
+}
+
+/// 开屏的弹层：挂在输入卡下面（**同宽同列**）、盖住空气，不占排版空间。
+///
+/// 不占排版的理由有两条：一是它不推动任何东西（否则用户一按 `/` 整块就往上跳）；
+/// 二是开屏没有可滚的历史需要让位。屏幕太矮时它被屏幕底边裁掉（列表本身有窗口，
+/// 上下键翻）。
+fn splash_popup(input: Rect, popup_h: u16, screen: Rect) -> Option<Rect> {
+    let room = screen.bottom().saturating_sub(input.bottom());
+    (popup_h > 0 && room > 0).then(|| Rect {
+        x: input.x,
+        y: input.bottom(),
+        width: input.width,
+        height: popup_h.min(room),
+    })
+}
+
+/// 一块牌子的宽度：上一帧 title 行的显示宽度（不含居中的空列）。
+fn hero_block_width(app: &App) -> u16 {
+    app.welcome
+        .as_ref()
+        .map(|welcome| welcome.block_width())
+        .unwrap_or(0)
+}
+
+/// 把输入卡按 `width` 居中放进 `block`（先按 composer 的惯例留边距）。
+fn centered_card(block: Rect, width: u16) -> Rect {
+    let area = crate::ui::input_area::chrome::card_area(block);
+    let width = width.min(area.width);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..area
     }
 }
 
