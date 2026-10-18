@@ -262,6 +262,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 |------|------|
 | [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
 | [`docs/dev/backend-layout.md`](docs/dev/backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射（历史记录）、分层守门测试（`test_layering.py`） |
+| [`docs/dev/cache-accounting.md`](docs/dev/cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、账本位置与上界、理论命中率定义、verdict / blame / avoidable 全表（每条结论落到「我能避免 / 该报 bug / 什么都不用做」）、降级与排错手册、回滚 |
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
