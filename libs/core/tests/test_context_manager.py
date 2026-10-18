@@ -252,7 +252,8 @@ class TestRewind:
         assert len(entries) == 4  # 原始 3 条 + 1 条回退行
 
         rewind_entry = entries[-1]
-        assert rewind_entry["content"] == "hi"  # 复制了 parent 的内容
+        # 记录只存 content_blocks（派生字段不落盘），content 经 Message 派生
+        assert Message.model_validate(rewind_entry).content == "hi"
         assert rewind_entry["role"] == "assistant"
         assert rewind_entry["parent_uuid"] == msgs[0].uuid  # 祖父 uuid
 
@@ -293,7 +294,7 @@ class TestRewind:
         assert draft == "first post compact"
 
         rewind_entry = _read_history(tmp_dir / "test-session")[-1]
-        assert rewind_entry["content"] == "[Compact] summary"
+        assert Message.model_validate(rewind_entry).content == "[Compact] summary"
         assert rewind_entry["unzip_last_uuid"] == msgs[1].uuid
         assert [target["content"] for target in cm.get_branch_targets()] == [
             "old1",

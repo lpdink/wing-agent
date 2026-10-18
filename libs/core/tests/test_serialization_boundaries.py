@@ -1,12 +1,16 @@
-"""序列化边界测试：persist ClassVar、剥 null、wire 帧剥离、存量孪生容忍。
+"""序列化边界测试：persist ClassVar、落盘规范形、wire 帧剥离、存量孪生容忍。
 
 三个序列化边界，三套剥离规则（不可用一个 model_dump(exclude_none) 打通——
 Message._serialize_flat 是 wrap 序列化器，content/reasoning_content/tool_calls
 在内层 handler 之后才注入）：
 
-  磁盘记录   TrackedList._to_record   剥 null + 剥 target + disk_exclude
+  磁盘记录   TrackedList._to_record   exclude_none + canonical_record + 剥 target + disk_exclude
+             规范形（canonical_record）：null 不写、assistant 的派生扁平字段不写
   WS 直播帧  wire_dump                剥 null + 剥 parent_uuid/unzip_last_uuid/role/target，保留 uuid
   SyncSession wire_dump               同一出口（events 组装直用，无独立序列化器）
+
+磁盘侧的两条规则都**只影响新写入**：读取路径对"键缺失"与"值为 null"一视同仁，
+且 assistant 记录 blocks 优先（存量扁平格式照旧加载，不需要迁移）。
 """
 
 from __future__ import annotations
@@ -24,7 +28,15 @@ from wing.event import (
     ToolCallResultEvent,
     wire_dump,
 )
-from wing.schema import ChainNode, Message, TextBlock
+from wing.schema import (
+    LLMUsage,
+    ChainNode,
+    MediaRef,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+)
 from wing.store.file import FileMessageLog
 
 
@@ -86,38 +98,137 @@ class TestPersistClassVar:
 
 
 # ============================================================
-# 6.6 _to_record 剥 null 的往返等价
+# 6.6 落盘规范形：null 不写 · assistant 派生字段不写
 # ============================================================
 
 
-class TestToRecordStripNull:
-    def test_wrap_derived_null_fields_stripped_and_roundtrip(self, tmp_path):
-        """wrap 序列化器派生的 reasoning_content/tool_calls（值 None）被剥除，往返等价。"""
+class TestRecordCanonicalShape:
+    def test_assistant_record_carries_blocks_only(self, tmp_path):
+        """assistant 记录只存 content_blocks——扁平字段是派生物，落盘不写。"""
         tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
-        # assistant 只有 text 块 → reasoning_content / tool_calls 派生为 None
-        msg = Message(role="assistant", content_blocks=[TextBlock(text="hi")])
+        msg = Message(
+            role="assistant",
+            content_blocks=[
+                ThinkingBlock(thinking="hmm", signature="sig"),
+                TextBlock(text="hi"),
+                ToolUseBlock(id="c1", name="Bash", input={"command": "ls"}),
+            ],
+        )
         tl.append(msg)
 
         (record,) = _read_history(tmp_path)
-        # 派生 null 字段被剥除（exclude_none 看不到它们——必须字典过滤）
-        assert "reasoning_content" not in record
-        assert "tool_calls" not in record
-        assert "unzip_last_uuid" not in record
-        assert "tool_call_id" not in record
-        # 非 null 保留
-        assert record["content"] == "hi"
-        assert record["content_blocks"] == [{"type": "text", "text": "hi"}]
-        assert record["role"] == "assistant"
-        assert record["uuid"] == msg.uuid
+        for key in ("content", "reasoning_content", "tool_calls"):
+            assert key not in record, key
+        assert record["content_blocks"] == [
+            {
+                "type": "thinking",
+                "thinking": "hmm",
+                "signature": "sig",
+                "redacted": False,
+            },
+            {"type": "text", "text": "hi"},
+            {
+                "type": "tool_use",
+                "id": "c1",
+                "name": "Bash",
+                "input": {"command": "ls"},
+            },
+        ]
 
-        # 往返：还原对象逐字段相等
+        # 往返：派生字段由 blocks 还原（读路径不认识"落盘少了几键"这回事）
         tl2 = TrackedList.load(FileMessageLog(tmp_path), Message)
         restored = tl2.active_chain[0]
         assert isinstance(restored, Message)
         assert restored.content == "hi"
-        assert restored.reasoning_content is None
-        assert restored.tool_calls is None
-        assert restored.uuid == msg.uuid
+        assert restored.reasoning_content == "hmm"
+        assert restored.tool_calls is not None
+        assert restored.tool_calls[0].arguments == {"command": "ls"}
+
+    def test_non_assistant_record_keeps_content(self, tmp_path):
+        """非 assistant 的 content 是**存储值**（不是派生），含空串一并保留。"""
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
+        tl.append(Message(role="user", content="hello"))
+        tl.append(Message(role="tool", tool_call_id="c1", content=""))
+
+        user, tool = _read_history(tmp_path)
+        assert user["content"] == "hello"
+        assert tool["content"] == ""
+
+    def test_legacy_assistant_record_without_blocks_keeps_flat(self, tmp_path):
+        """无 content_blocks 的记录里扁平字段是唯一存储——任何路径都不得剥。"""
+        legacy = {
+            "role": "assistant",
+            "content": "hi",
+            "reasoning_content": "hmm",
+            "tool_calls": [
+                {"id": "c1", "name": "Bash", "arguments": {"command": "ls"}}
+            ],
+            "uuid": "u1",
+        }
+        log = FileMessageLog(tmp_path)
+        log.append([legacy])
+
+        (record,) = _read_history(tmp_path)
+        assert record["content"] == "hi"
+        assert record["reasoning_content"] == "hmm"
+        assert record["tool_calls"] == legacy["tool_calls"]
+
+        restored = TrackedList.load(FileMessageLog(tmp_path), Message).active_chain[0]
+        assert isinstance(restored, Message)
+        assert restored.content == "hi"
+        assert restored.reasoning_content == "hmm"
+
+    def test_nested_nulls_not_written(self, tmp_path):
+        """嵌套的 null（exclude_none 覆盖的 model 字段）不落盘，往返语义不变。"""
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
+        tl.append(
+            Message(
+                role="assistant",
+                content_blocks=[
+                    ThinkingBlock(thinking="hmm"),  # signature 为 None
+                    ToolUseBlock(id="c1", name="Bash", input={}),  # input_error 为 None
+                ],
+                usage=LLMUsage(
+                    prompt_tokens=1, completion_tokens=2
+                ),  # stop_reason None
+                media=[
+                    MediaRef(id="a" * 64, mime="image/png", bytes=1, width=1, height=1)
+                ],
+            )
+        )
+
+        (record,) = _read_history(tmp_path)
+        blocks = record["content_blocks"]
+        assert "signature" not in blocks[0]
+        assert "input_error" not in blocks[1]
+        assert "stop_reason" not in record["usage"]
+        assert "name" not in record["media"][0]
+        # 0/False 是显式建模的事实，照常写
+        assert record["usage"]["prompt_tokens"] == 1
+        assert blocks[1]["input"] == {}
+
+        restored = TrackedList.load(FileMessageLog(tmp_path), Message).active_chain[0]
+        assert isinstance(restored, Message)
+        assert restored.usage is not None and restored.usage.stop_reason is None
+        assert restored.media is not None and restored.media[0].name is None
+
+    def test_tool_args_nulls_preserved(self, tmp_path):
+        """工具参数里的 null 是**数据**（模型吐的参数），绝不能当"缺席"剥掉。"""
+        args = {"command": "ls", "timeout": None, "nested": {"y": None, "z": 1}}
+        tl: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_path))
+        tl.append(
+            Message(
+                role="assistant",
+                content_blocks=[ToolUseBlock(id="c1", name="Bash", input=args)],
+            )
+        )
+
+        (record,) = _read_history(tmp_path)
+        assert record["content_blocks"][0]["input"] == args
+        restored = TrackedList.load(FileMessageLog(tmp_path), Message).active_chain[0]
+        assert isinstance(restored, Message)
+        assert restored.tool_calls is not None
+        assert restored.tool_calls[0].arguments == args
 
     def test_diff_old_text_none_new_file_semantics_preserved(self, tmp_path):
         """DiffContentEvent.old_text=None（新建文件）剥除后往返语义不变。"""

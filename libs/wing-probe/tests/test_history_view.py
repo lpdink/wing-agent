@@ -24,6 +24,8 @@ from wing_probe.history import (
     DELTA_EVENT_TYPES,
     HistoryAssertionError,
     HistoryView,
+    derive_flat_fields,
+    node_semantics,
 )
 
 TS = "2026-01-01T00:00:00"
@@ -52,8 +54,14 @@ def message(
     tool_call_id: str | None = None,
     raw_arguments: Any = None,
     unzip: str | None = None,
+    legacy: bool = False,
 ) -> dict[str, Any]:
-    """一条 Message 记录（assistant 同时带 content_blocks 与派生扁平字段）。"""
+    """一条 Message 记录。
+
+    默认产出**落盘规范形**：assistant 只带 ``content_blocks``（派生扁平字段
+    不落盘，见 ``store/base.canonical_record``）。``legacy=True`` 还原本变更
+    之前的旧形态（同时带扁平字段），用于存量兼容断言。
+    """
     record: dict[str, Any] = {
         "role": role,
         "uuid": uuid,
@@ -81,12 +89,13 @@ def message(
             )
         if blocks:
             record["content_blocks"] = blocks
-        if content:
-            record["content"] = content
-        if reasoning:
-            record["reasoning_content"] = reasoning
-        if tool_calls:
-            record["tool_calls"] = tool_calls
+        if legacy:
+            if content:
+                record["content"] = content
+            if reasoning:
+                record["reasoning_content"] = reasoning
+            if tool_calls:
+                record["tool_calls"] = tool_calls
         if raw_arguments is not None:
             record["tool_calls"] = raw_arguments
             record.pop("content_blocks", None)
@@ -449,7 +458,6 @@ def test_tool_pairing_detects_arguments_error(tmp_path: Path) -> None:
 
 def test_tool_pairing_detects_duplicate_call_id(tmp_path: Path) -> None:
     records = paired_history()
-    records[1]["tool_calls"].append(call("call_1", "Bash", {"command": "ls -l"}))
     records[1]["content_blocks"].append(
         {
             "type": "tool_use",
@@ -518,6 +526,114 @@ def test_fact_events_are_not_flagged(tmp_path: Path) -> None:
     view = view_of(tmp_path, records)
     view.assert_no_transient_records()
     view.assert_chain_invariants()
+
+
+# ── 落盘规范形：派生字段 / null 不落盘 ──────────────────────────
+
+
+def test_derive_flat_fields_mirrors_message_accessors() -> None:
+    """派生口径：text 拼 content、非 redacted thinking 拼 reasoning、tool_use 出 calls。"""
+    record = message(
+        "assistant",
+        uuid="a1",
+        content="hello",
+        reasoning="think",
+        tool_calls=[call("call_1", "Bash", {"command": "ls"})],
+    )
+    assert "content" not in record  # 规范形：只存 blocks
+    assert derive_flat_fields(record) == {
+        "content": "hello",
+        "reasoning_content": "think",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "name": "Bash",
+                "arguments": {"command": "ls"},
+                "arguments_error": None,
+            }
+        ],
+    }
+    # 没有 blocks 的记录没有派生物（扁平字段就是它的事实）
+    assert derive_flat_fields({"role": "assistant", "content": "x"}) == {}
+    # redacted thinking 不进 reasoning（payload 不是推理文本）
+    redacted = {
+        "role": "assistant",
+        "content_blocks": [
+            {"type": "thinking", "thinking": "enc", "redacted": True, "signature": "s"}
+        ],
+    }
+    assert derive_flat_fields(redacted)["reasoning_content"] is None
+
+
+def test_facts_views_fill_derived_fields_for_both_shapes(tmp_path: Path) -> None:
+    """存量旧形态与规范形在事实视图上等价（records 保持原始形态）。"""
+    canonical = message(
+        "assistant", uuid="a1", parent="u1", content="hello", reasoning="think"
+    )
+    legacy = message(
+        "assistant",
+        uuid="a2",
+        parent="u1",
+        content="hello",
+        reasoning="think",
+        legacy=True,
+    )
+    assert "content" in legacy and "content" not in canonical
+    user = message("user", uuid="u1", content="hi")
+    view = view_of(tmp_path, [user, canonical])
+    legacy_view = view_of(tmp_path / "legacy", [user, legacy])
+
+    assert view.messages()[1]["content"] == "hello"
+    canonical_record = view.find("a1")
+    legacy_record = legacy_view.find("a2")
+    assert canonical_record is not None and legacy_record is not None
+    assert node_semantics(canonical_record) == node_semantics(legacy_record)
+    # 原始记录仍是落盘形态（形状断言只看这个）
+    assert "content" not in view.records[1]
+    assert "content" in legacy_view.records[1]
+
+
+def test_record_shape_passes_on_canonical_records(tmp_path: Path) -> None:
+    records = linear_history()
+    view = view_of(tmp_path, records)
+    view.assert_record_shape()
+
+
+def test_record_shape_detects_stored_derived_fields(tmp_path: Path) -> None:
+    records = [
+        message("user", uuid="u1", content="hi"),
+        message("assistant", uuid="a1", parent="u1", content="ok", legacy=True),
+    ]
+    view = view_of(tmp_path, records)
+    with pytest.raises(HistoryAssertionError) as excinfo:
+        view.assert_record_shape()
+    text = str(excinfo.value)
+    assert "stores derived field(s) ['content']" in text
+    assert "line 2" in text
+
+
+def test_record_shape_detects_null_valued_keys(tmp_path: Path) -> None:
+    records = [
+        message("user", uuid="u1", content="hi"),
+        {
+            **message("assistant", uuid="a1", parent="u1", content="ok"),
+            "stop_reason": None,
+        },
+    ]
+    view = view_of(tmp_path, records)
+    with pytest.raises(HistoryAssertionError) as excinfo:
+        view.assert_record_shape()
+    assert "null-valued key(s) ['stop_reason']" in str(excinfo.value)
+
+
+def test_record_shape_tolerates_legacy_flat_only_records(tmp_path: Path) -> None:
+    """无 content_blocks 的存量记录里扁平字段是唯一存储——不算违规。"""
+    records = [
+        message("user", uuid="u1", content="hi"),
+        {"role": "assistant", "uuid": "a1", "parent_uuid": "u1", "content": "ok"},
+    ]
+    view = view_of(tmp_path, records)
+    view.assert_record_shape()
 
 
 # ── aux kv 通道 ─────────────────────────────────────────────────

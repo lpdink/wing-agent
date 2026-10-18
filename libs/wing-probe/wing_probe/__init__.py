@@ -18,7 +18,7 @@
 - ``driver``：``Driver`` / ``Session``（HTTP + WS 公开协议驱动）与 ``HttpCall``；
 - ``watch``：``Watcher`` 断言原语（expect / expect_none / assert_never /
   assert_ordered / events）与 ``ExpectationError``；
-- ``history``：``HistoryView``（history.jsonl 独立解析）、三条内置不变量、
+- ``history``：``HistoryView``（history.jsonl 独立解析）、四条内置不变量、
   三条红线过渡断言（compact / rewind / fork）、``fork_metadata``；
 - ``files``：``FileAssertions``（workspace 文件断言）；
 - ``provider``：剧本模型（``Script`` / ``Turn`` / ``ToolCall`` / ``Usage``）、
@@ -87,6 +87,7 @@ from wing_probe.history import (
     CURRENT_SENTINEL,
     DELTA_EVENT_TYPES,
     EVENT_ROLE,
+    DERIVED_FLAT_FIELDS,
     FORK_METADATA_FIELDS,
     FORK_SNAPSHOT_FIELDS,
     HISTORY_FILE,
@@ -100,8 +101,10 @@ from wing_probe.history import (
     assert_compact_transition,
     assert_fork_of,
     assert_no_transient_records,
+    assert_record_shape,
     assert_rewind_transition,
     assert_tool_pairing,
+    derive_flat_fields,
     describe_chain,
     fork_metadata,
     is_event,
@@ -194,6 +197,7 @@ __all__ = [
     "ContextAssertionError",
     "ContextView",
     "Driver",
+    "DERIVED_FLAT_FIELDS",
     "DriverError",
     "DriverHttp",
     "DriverHttpError",
@@ -242,12 +246,14 @@ __all__ = [
     "assert_compact_transition",
     "assert_fork_of",
     "assert_no_transient_records",
+    "assert_record_shape",
     "assert_rewind_transition",
     "assert_tool_pairing",
     "candidate_gateway_binaries",
     "check_tree",
     "chunk_payload",
     "completion_response",
+    "derive_flat_fields",
     "describe_chain",
     "encode_turn_stream",
     "fork_metadata",

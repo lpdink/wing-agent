@@ -75,8 +75,30 @@ def _seed_compact(session) -> dict[str, str]:
 
 
 def _contents(records: list[dict]) -> list[str]:
-    """记录里的 content 序列（事件记录无 content → 空串占位）。"""
-    return [record.get("content") or "" for record in records]
+    """记录里的 content 序列（事件记录无 content → 空串占位）。
+
+    assistant 记录只存 content_blocks，content 经 ``Message`` 派生——与消费方
+    （载入路径 / 前端投影）读到的值一致。
+    """
+    return [
+        (
+            ""
+            if record.get("role") == "event"
+            else Message.model_validate(record).content
+        )
+        or ""
+        for record in records
+    ]
+
+
+def _record_with_content(records: list[dict], text: str) -> dict:
+    """按派生 content 找 Message 记录（事件记录跳过）。"""
+    for record in records:
+        if record.get("role") == "event":
+            continue
+        if Message.model_validate(record).content == text:
+            return record
+    raise AssertionError(f"no message record with content {text!r}")
 
 
 def _chain_contents(messages: list[Message]) -> list[str]:
@@ -258,9 +280,7 @@ class TestForkAfterCompact:
             "tail1",
         ]
         # 压缩节点的 unzip 指向重映射后的区间末记录（子记录集内部，不悬空）
-        compact_record = next(
-            r for r in child_records if r.get("content") == "[Compact] summary"
-        )
+        compact_record = _record_with_content(child_records, "[Compact] summary")
         child_uuids = {r["uuid"] for r in child_records}
         assert compact_record.get("parent_uuid") is None  # 根节点：落盘剥离 null 键
         assert compact_record["unzip_last_uuid"] in child_uuids
@@ -343,3 +363,135 @@ class TestForkReferenceIntegrity:
             child.session_id
         )
         assert _chain_contents(reloaded.context_manager.get_context_window()) == live
+
+
+# ============================================================
+# 复制路径的落盘规范形
+# ============================================================
+
+
+class TestForkCopiesCanonicalShape:
+    def test_legacy_source_records_are_canonicalised_on_copy(self):
+        """源记录是旧形态（扁平字段 + null）时，复制出的子记录走规范形。
+
+        fork 直接复用源记录的原始 dict（不经 ``_to_record``）——不过规范形这
+        一道，存量冗余会被逐字节搬进子会话，越 fork 越多。
+        """
+        from wing.session.manager import _remap_record_uuids
+
+        legacy = [
+            {
+                "role": "assistant",
+                "content": "hi",
+                "reasoning_content": "hmm",
+                "tool_calls": [{"id": "c1", "name": "Bash", "arguments": {}}],
+                "content_blocks": [{"type": "text", "text": "hi"}],
+                "parent_uuid": None,
+                "uuid": "u1",
+                "ts": "2026-01-01T00:00:00",
+            },
+            {
+                "role": "assistant",
+                "content": "flat-only",
+                "uuid": "u2",
+                "ts": "2026-01-01T00:00:00",
+            },
+        ]
+        first, flat_only = _remap_record_uuids(legacy)
+
+        for key in ("content", "reasoning_content", "tool_calls"):
+            assert key not in first, key
+        assert "parent_uuid" not in first  # null 不写
+        assert first["ts"] == "2026-01-01T00:00:00"  # 其余字段原样
+        # 无 content_blocks 的记录里扁平字段是唯一存储——不剥
+        assert flat_only["content"] == "flat-only"
+        # 源 dict 未被就地改写（记录对读取方只读）
+        assert legacy[0]["content"] == "hi"
+
+
+class TestForkDraftFromDerivedContent:
+    """fork 的 draft 必须从 records 派生（assistant 的 content 不落盘）。"""
+
+    @pytest.mark.asyncio
+    async def test_fork_at_compact_node_returns_its_text(self, sm, root):
+        """目标 = 压缩节点（assistant + content_blocks）→ draft 是摘要文本。"""
+        session = sm.create_session()
+        _seed_compact(session)
+
+        result = sm.fork_session(session.session_id, "cu")
+        assert result is not None
+        child, draft = result
+        assert draft == "[Compact] summary"
+        # 记录：压缩前区间随行走，压缩节点本身不进前缀
+        child_records = _records(root, child.session_id)
+        assert _contents(child_records) == ["old1", "old2"]
+
+    @pytest.mark.asyncio
+    async def test_fork_at_assistant_message_returns_its_text(self, sm, root):
+        """目标 = 普通 assistant 记录 → draft 仍是它派生出的文本。"""
+        session = sm.create_session()
+        ids = _seed_compact(session)
+
+        result = sm.fork_session(session.session_id, ids["old2"])
+        assert result is not None
+        _, draft = result
+        assert draft == "old2"
+
+    def test_fork_slice_derives_draft_from_blocks(self):
+        """`_fork_slice` 直接吃 raw record：canonical 记录也要给出 draft。"""
+        from wing.session.manager import _fork_slice
+
+        records = [
+            {"role": "user", "content": "hi", "uuid": "u1"},
+            {
+                "role": "assistant",
+                "uuid": "a1",
+                "content_blocks": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "text", "text": "reply"},
+                ],
+            },
+        ]
+        prefix, draft = _fork_slice(iter(records), "a1")
+        assert draft == "reply"
+        assert [r["uuid"] for r in prefix] == ["u1"]
+
+    def test_fork_slice_draft_falls_back_for_corrupt_record(self):
+        """脏记录按"无文本"降级——读请求不因一条坏记录整单失败。
+
+        两种脏法都要兜住：块数组形态不合法（校验抛），以及 ``content`` 不是
+        字符串（``_route_flat`` 把扁平值塞进私有属性、不做类型校验）。
+        """
+        from wing.session.manager import _fork_slice
+
+        broken_blocks = [
+            {"role": "assistant", "uuid": "a1", "content_blocks": "not-a-list"}
+        ]
+        _, draft = _fork_slice(iter(broken_blocks), "a1")
+        assert draft == ""
+
+        non_string = [{"role": "user", "uuid": "u1", "content": 123}]
+        _, draft = _fork_slice(iter(non_string), "u1")
+        assert draft == ""
+
+
+class TestRemapOutOfPrefixReferences:
+    def test_out_of_prefix_parent_is_dropped_not_nulled(self):
+        """前缀外引用 → 删键（缺席即默认），不把 null 写进子会话记录。"""
+        from wing.session.manager import _remap_record_uuids
+
+        records = [
+            {
+                "role": "user",
+                "uuid": "u1",
+                "content": "hi",
+                "parent_uuid": "outside-prefix",
+                "unzip_last_uuid": "outside-prefix",
+            }
+        ]
+        (clone,) = _remap_record_uuids(records)
+        assert "parent_uuid" not in clone
+        assert "unzip_last_uuid" not in clone
+        assert clone["uuid"] != "u1"
+        # 源记录未被就地改写
+        assert records[0]["parent_uuid"] == "outside-prefix"

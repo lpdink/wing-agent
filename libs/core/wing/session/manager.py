@@ -51,7 +51,7 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
-from wing.store.base import validate_file_name
+from wing.store.base import canonical_record, validate_file_name
 
 from .model_binding import resolve_model_binding
 from .override import AgentOverride, validate_override_utf8
@@ -91,6 +91,10 @@ def _fork_slice(
     - 其他 → 目标记录**之前**的全部记录（目标自身不进拷贝：它由响应里的
       draft 重新发送），draft = 目标记录的 content。
 
+    draft 走 ``Message`` 的访问器（assistant 的 content 由 ``content_blocks``
+    派生——记录里**不存**副本），因此与"用户看到的那条消息"同源：目标可以是
+    压缩节点（``[Compact] …``）或任何带文本的 assistant 记录。
+
     用记录口径（而不是链遍历）是刻意的：被压缩区间的记录原样保留在子会话里
     （用户仍可回退 / 分叉到压缩前的 User Message），而"活跃链从哪里开始"由
     压缩节点自身编码（``parent_uuid=None`` + ``unzip_last_uuid``）——子会话
@@ -113,10 +117,24 @@ def _fork_slice(
                 raise ValueError(
                     f"uuid {target_uuid!r} is an event record, not a Message"
                 )
-            content = record.get("content")
-            return prefix, content if isinstance(content, str) else ""
+            return prefix, _record_draft(record)
         prefix.append(record)
     raise ValueError(f"uuid {target_uuid!r} not found in {len(prefix)} record(s)")
+
+
+def _record_draft(record: dict) -> str:
+    """目标记录的 draft 文本：走 ``Message`` 派生（assistant 的 content 在
+    ``content_blocks`` 里，记录本身不带副本）；脏记录按"无文本"降级。
+
+    fork 是**读请求**，不能因为一条记录校验不过就整单失败——降级为空串与
+    "目标没有可发送文本"同义。``content`` 不做类型校验（私有属性直通），
+    因此非字符串值也在这里折成空串。
+    """
+    try:
+        draft = Message.model_validate(record).content
+    except Exception:
+        return ""
+    return draft if isinstance(draft, str) else ""
 
 
 def _warn_alias(requested: str, resolved: str) -> None:
@@ -168,22 +186,26 @@ def _session_epoch(session_id: str, last_interaction: str | None) -> float | Non
 
 
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
-    """复制记录并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
+    """复制记录（顺带规范化）并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
     重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
     所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
     重映射后子记录集自洽：不留悬空引用，也不需要清空任何引用——压缩节点的
     unzip 指向重映射后的区间末记录，子会话的 fork 候选列表与源会话一致。
 
-    缺省落到 None 是防御：万一出现前缀外的引用，宁可让它成为根节点，也不留
-    跨 session 的引用。
+    缺省是防御：万一出现前缀外的引用，宁可让它成为根节点（删键 = 缺席即默认），
+    也不留跨 session 的引用。
+
+    ``canonical_record`` 让**复制也走落盘规范形**：fork 直接复用源记录的原始
+    dict（不经 ``TrackedList._to_record``），不过这一道，存量旧形态的冗余字段
+    （派生扁平字段 / null）就会被逐字节搬进子会话，越 fork 越多。
 
     只做**顶层浅拷贝**：重写的三个键都在顶层，而记录（含嵌套值）对读取方
     一律只读（``MessageLog`` 的记录契约：file 后端每次重新解析，memory
     后端直接交出内部结构，两边都没有就地改写记录的路径），深拷贝没有额外
     保护面。
     """
-    clones = [{**record} for record in records]
+    clones = [canonical_record(record) for record in records]
     uuid_map: dict[str, str] = {}
     for clone in clones:
         uuid = clone.get("uuid")
@@ -192,8 +214,15 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
     for clone in clones:
         for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
             value = clone.get(key)
-            if isinstance(value, str):
-                clone[key] = uuid_map.get(value)
+            if not isinstance(value, str):
+                continue
+            mapped = uuid_map.get(value)
+            if mapped is None:
+                # 前缀外引用：**删键**而不是写 None（缺席即默认，与 None 对
+                # 加载等价——记录重新成为根节点，且不把 null 带进子会话）。
+                clone.pop(key, None)
+            else:
+                clone[key] = mapped
     return clones
 
 

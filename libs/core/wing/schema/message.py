@@ -246,17 +246,23 @@ class Message(ChainNode):
 
     @model_serializer(mode="wrap")
     def _serialize_flat(self, handler: Callable[[Any], dict]) -> dict:
-        """导出派生的扁平字段（向后兼容旧消费方与落盘格式）。
+        """导出派生的扁平字段（向后兼容旧消费方；落盘侧由 ``canonical_record``
+        再决定去留——assistant 的这三项是派生物，写入时剥除）。
 
         导出是派生行为，不是第二份存储：assistant 的 content /
-        reasoning_content / tool_calls 实时取自 content_blocks。
+        reasoning_content / tool_calls 实时取自 content_blocks。注入发生在内层
+        handler 之后，``exclude_none`` 看不到这些键——因此这里自己不给 null
+        （落盘侧的去留见 ``wing.store.base.canonical_record``）。
         """
         data = handler(self)
-        data["content"] = self.content
-        data["reasoning_content"] = self.reasoning_content
-        data["tool_calls"] = (
-            [tc.model_dump() for tc in self.tool_calls] if self.tool_calls else None
-        )
+        if self.content is not None:
+            data["content"] = self.content
+        if self.reasoning_content is not None:
+            data["reasoning_content"] = self.reasoning_content
+        if self.tool_calls:
+            data["tool_calls"] = [
+                tc.model_dump(exclude_none=True) for tc in self.tool_calls
+            ]
         return data
 
     @property

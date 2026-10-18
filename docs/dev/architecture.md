@@ -327,6 +327,28 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
 
 **存量 session 零迁移**：老日志无事件记录 → `TrackedList.load` 按 role 分发（事件走 `EVENT_TYPES` 注册表，未知 type 跳过——前向容忍），事件重放为空即回退纯消息重放。不承诺老版本代码读新格式日志（新 session 由新代码产生，该场景不存在）。
 
+**历史记录的规范形**（`store/base.canonical_record`，落盘前必过；`_to_record` 与 fork 的复制前缀共用）：
+
+- **null 不写**——缺席即默认。`model_dump(exclude_none=True)` 覆盖 model 字段（含嵌套：
+  `thinking.signature` / `tool_use.input_error` / `usage.stop_reason` …），wrap 序列化器
+  在内层 handler 之后注入的顶层键由字典过滤兜住。`0` / `False` / `""` 照常写（显式建模）；
+  **自由载荷**（工具参数 `input` / `arguments`、`questions`）里的 null 是数据，不动。
+- **派生字段不写**——assistant 的 `content` / `reasoning_content` / `tool_calls` 是
+  `content_blocks` 的派生物（`Message` 的访问器实时计算）。只在该记录**带 blocks** 时剥：
+  develop 基线的扁平格式里扁平字段是唯一存储，原样保留。存量实测：派生物占
+  `history.jsonl` 体积的 ~31%（reasoning 20% + tool_calls 10% + content 0.7%）。
+
+**Message 加载路径**不需要改：`Message._route_flat` 是"blocks 在则扁平忽略、blocks 缺
+则由扁平重建"——因此**存量文件零迁移**；对"能读新记录"的版本范围不做承诺（同上文
+的日志格式政策），但就本轮改动而言它不引入任何读取门槛：blocks 优先是既有行为。
+**直接读 raw record 的路径**必须按 blocks 派生（或用 `Message` 访问器），否则会读到
+一个已经不存在的键——目前四处：`first_user_title`（只读 user 记录，天然安全）、fork 的
+draft（`_record_draft`）、`render_probe --jsonl`（调试工具）、probe 的事实视图
+（`derive_flat_fields`）。
+
+规则只作用于**新写入**：已经落盘的存量冗余不回收（不重写 append-only 日志、不提供迁移
+脚本），随后续轮次自然增长的部分按新口径累积。
+
 ### 会话用量账本（`metadata.json.usage`）
 
 会话的累计用量与运行时长（计数 / token / 时长，见 `SessionUsage`）持久在
