@@ -341,6 +341,29 @@ impl GatewayClient {
         Ok(resp.json().await?)
     }
 
+    /// 读取会话的 KV 前缀缓存账本报告（`forks` / `calls` 各最多 `limit` 条，新→旧）。
+    ///
+    /// 会话不存在 / 无账本同样是 200 + 空账本（契约 §6）——所以这条路径上的 404
+    /// 只有一个解释：网关还没有这个路由。
+    pub async fn get_cache_report(
+        &self,
+        session_id: &str,
+        limit: u32,
+    ) -> Result<CacheReportResponse, ApiClientError> {
+        let limit = limit.to_string();
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/session/cache"))
+            .query(&[("session_id", session_id), ("limit", limit.as_str())])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
     // ============================================================
     // Session 更新
     // ============================================================
@@ -1172,6 +1195,103 @@ mod tests {
         let recorded = server.recorded();
         assert_eq!(recorded[0].method, "GET");
         assert_eq!(recorded[0].path, "/api/session/archive");
+    }
+
+    // ============================================================
+    // 缓存账本（GET /api/session/cache）
+    // ============================================================
+
+    /// 契约 §6 的完整响应形状（L1 的真端点此刻还没实现，这是离线唯一可核对的样本）。
+    const CACHE_REPORT_BODY: &str = r#"{
+        "session_id": "sid-1",
+        "summary": {"calls": 42, "prompt_tokens": 590000, "cached_tokens": 484000,
+                    "expected_tokens": 520000, "theory_rate": 0.881,
+                    "actual_rate": 0.82, "provider_debt_rate": 0.061},
+        "forks": [{"ts": "2026-10-18T15:41:02.123", "index": 3, "label": "skills:pdf-tools",
+                   "kind": "insert", "blame": "external", "avoidable": true,
+                   "tokens_lost": 14200, "segments_affected": 12,
+                   "verdict": "prefix_broken",
+                   "detail": {"path": "/home/u/.wing/core/skills/pdf-tools", 
+                              "mtime": "2026-10-18T15:40:58.010", "size": 1234,
+                              "ref_ts": "2026-10-18T15:39:00.500",
+                              "sha_before": "9f2c1a3b4d5e6f70",
+                              "sha_after": "8e1b2c3d4e5f6071"}}],
+        "calls": [{"ts": "2026-10-18T15:41:02.123", "model": "deepseek-v3",
+                   "purpose": "main", "prompt": 14200, "cached": 0, "expected": null,
+                   "verdict": "prefix_broken", "fp": "ab12cd34ef567890"}]
+    }"#;
+
+    #[tokio::test]
+    async fn get_cache_report_hits_the_frozen_path_query_and_auth() {
+        let server = MockGateway::start(vec![("/api/session/cache", 200, CACHE_REPORT_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), Some("secret-key")).unwrap();
+
+        let resp = client.get_cache_report("sid-1", 20).await.unwrap();
+        assert_eq!(resp.session_id, "sid-1");
+        assert_eq!(resp.summary.calls, 42);
+        assert_eq!(resp.summary.expected_tokens, 520_000);
+        assert_eq!(resp.summary.theory_rate, Some(0.881));
+        assert_eq!(resp.summary.actual_rate, Some(0.82));
+        assert_eq!(resp.summary.provider_debt_rate, Some(0.061));
+        assert_eq!(resp.forks.len(), 1);
+        let fork = &resp.forks[0];
+        assert_eq!(fork.index, 3);
+        assert_eq!(fork.label, "skills:pdf-tools");
+        assert_eq!(fork.kind, "insert");
+        assert_eq!(fork.blame, "external");
+        assert_eq!(fork.avoidable, Some(true));
+        assert_eq!(fork.tokens_lost, Some(14_200));
+        assert_eq!(fork.segments_affected, 12);
+        assert_eq!(
+            fork.detail.path.as_deref(),
+            Some("/home/u/.wing/core/skills/pdf-tools")
+        );
+        assert_eq!(
+            fork.detail.mtime.as_deref(),
+            Some("2026-10-18T15:40:58.010")
+        );
+        assert_eq!(fork.detail.size, Some(1234));
+        assert_eq!(fork.detail.sha_before.as_deref(), Some("9f2c1a3b4d5e6f70"));
+        assert_eq!(fork.detail.sha_after.as_deref(), Some("8e1b2c3d4e5f6071"));
+        assert_eq!(resp.calls.len(), 1);
+        assert_eq!(
+            resp.calls[0].expected, None,
+            "无参照的调用 expected 是 null"
+        );
+
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "GET");
+        assert_eq!(
+            recorded[0].path, "/api/session/cache?session_id=sid-1&limit=20",
+            "session_id 与 limit 都是 query 参数"
+        );
+        assert_eq!(
+            recorded[0].authorization.as_deref(),
+            Some("Bearer secret-key")
+        );
+    }
+
+    /// 空账本（会话不存在 / 还没调用）也走 200：全 0 summary + 空数组，不 404。
+    #[tokio::test]
+    async fn get_cache_report_tolerates_an_empty_ledger() {
+        const EMPTY: &str = r#"{"session_id":"sid-1",
+            "summary":{"calls":0,"prompt_tokens":0,"cached_tokens":0,"expected_tokens":0},
+            "forks":[],"calls":[]}"#;
+        let server = MockGateway::start(vec![("/api/session/cache", 200, EMPTY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client.get_cache_report("sid-1", 200).await.unwrap();
+        assert_eq!(resp.summary.calls, 0);
+        assert_eq!(resp.summary.theory_rate, None, "分母为 0 → null，不是 0.0");
+        assert!(resp.forks.is_empty() && resp.calls.is_empty());
+
+        // 更旧的形状（整个 summary / 数组都缺席）也不炸。
+        let bare = MockGateway::start(vec![("/api/session/cache", 200, "{}")]).await;
+        let client = GatewayClient::new(bare.url.clone(), None).unwrap();
+        let resp = client.get_cache_report("sid-1", 20).await.unwrap();
+        assert!(resp.forks.is_empty() && resp.calls.is_empty());
+        assert_eq!(resp.summary.theory_rate, None);
     }
 
     #[tokio::test]

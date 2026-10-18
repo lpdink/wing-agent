@@ -424,6 +424,8 @@ pub struct TurnUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub cached_tokens: i64,
+    /// 理论可命中 token（缓存账本探针）；`0` = 未知（旧网关 / 无参照 / 未计算）。
+    pub cache_expected_tokens: i64,
     pub tokens_per_sec: f64,
     pub ttft_ms: f64,
 }
@@ -456,8 +458,7 @@ impl TurnUsage {
             dim,
         )]);
         if self.cached_tokens > 0 && self.prompt_tokens > 0 {
-            let hit_rate = self.cached_tokens as f64 / self.prompt_tokens as f64 * 100.0;
-            items.push(vec![Span::styled(format!("{hit_rate:.1}% cache"), dim)]);
+            items.push(vec![Span::styled(self.cache_text(), dim)]);
         }
         if self.tokens_per_sec > 0.0 {
             items.push(vec![Span::styled(
@@ -472,6 +473,22 @@ impl TurnUsage {
             )]);
         }
         items
+    }
+
+    /// 命中率一格：理论水位已知时成对显示 `67% / 理论 88% cache`，否则**就是今天那
+    /// 一个数字**（`66.7% cache`，一位小数）——旧网关上的输出与改动前逐字节一致。
+    ///
+    /// 状态栏要短，成对形态取整数百分比（摘要有余量，留一位小数）；理论值 clamp 到
+    /// `prompt` 以内，免得一个超发的手指把读数顶过 100%。
+    fn cache_text(&self) -> String {
+        let actual = self.cached_tokens.max(0) as f64 / self.prompt_tokens as f64 * 100.0;
+        if self.cache_expected_tokens <= 0 {
+            return format!("{actual:.1}% cache");
+        }
+        let theory = self.cache_expected_tokens.min(self.prompt_tokens) as f64
+            / self.prompt_tokens as f64
+            * 100.0;
+        format!("{actual:.0}% / 理论 {theory:.0}% cache")
     }
 }
 
@@ -507,6 +524,7 @@ mod tests {
             cached_tokens: 800,
             tokens_per_sec: 42.5,
             ttft_ms: 320.0,
+            ..TurnUsage::default()
         };
         let items: Vec<String> = usage
             .items(&crate::config::ThemePalette::default())
@@ -539,6 +557,56 @@ mod tests {
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         assert_eq!(items, vec!["900 in", "12 out"]);
+    }
+
+    /// 理论水位未知（`cache_expected_tokens == 0`：旧网关 / 无参照）时，命中率那一格
+    /// **与改动前逐字节一致**——一位小数、单一数字。这是旧网关上"行为不变"的证据。
+    #[test]
+    fn test_turn_usage_cache_cell_is_unchanged_when_the_theory_is_unknown() {
+        let usage = TurnUsage {
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            cached_tokens: 800,
+            ..TurnUsage::default()
+        };
+        let items: Vec<String> = usage
+            .items(&crate::config::ThemePalette::default())
+            .iter()
+            .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(items, vec!["1.2k in", "340 out", "66.7% cache"]);
+    }
+
+    /// 理论水位已知 → 实际 / 理论成对（整数百分比，状态栏要短）。
+    #[test]
+    fn test_turn_usage_pairs_actual_with_the_theory_when_known() {
+        let usage = TurnUsage {
+            prompt_tokens: 1200,
+            completion_tokens: 340,
+            cached_tokens: 800,
+            cache_expected_tokens: 1056,
+            ..TurnUsage::default()
+        };
+        let items: Vec<String> = usage
+            .items(&crate::config::ThemePalette::default())
+            .iter()
+            .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // 800/1200 = 66.67% → 67%；1056/1200 = 88% （与契约样列的 88.1% 同量级）。
+        assert_eq!(items, vec!["1.2k in", "340 out", "67% / 理论 88% cache"]);
+    }
+
+    /// 理论值超过输入（provider/探针口径差异）不许读出 100% 以上的命中率。
+    #[test]
+    fn test_turn_usage_theory_is_capped_by_the_prompt() {
+        let usage = TurnUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 10,
+            cached_tokens: 1000,
+            cache_expected_tokens: 5000,
+            ..TurnUsage::default()
+        };
+        assert_eq!(usage.cache_text(), "100% / 理论 100% cache");
     }
 
     #[test]
