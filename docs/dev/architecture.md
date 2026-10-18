@@ -338,10 +338,13 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
   develop 基线的扁平格式里扁平字段是唯一存储，原样保留。存量实测：派生物占
   `history.jsonl` 体积的 ~31%（reasoning 20% + tool_calls 10% + content 0.7%）。
 
-读取侧两条路径都不需要改：`Message._route_flat` 是"blocks 在则扁平忽略、blocks 缺则由
-扁平重建"——因此**存量文件零迁移**，旧版本代码读新记录也照常工作（blocks 优先）。
+**Message 加载路径**不需要改：`Message._route_flat` 是"blocks 在则扁平忽略、blocks 缺
+则由扁平重建"——因此**存量文件零迁移**，旧版本代码读新记录也照常工作（blocks 优先）。
+**直接读 raw record 的辅助路径**（`first_user_title`、fork 的 draft）必须按 blocks 派生
+（或用 `Message` 访问器），否则会读到一个已经不存在的键。
+
 规则只作用于**新写入**：已经落盘的存量冗余不回收（不重写 append-only 日志、不提供迁移
-脚本），随会话自然增长的部分按新口径累积。
+脚本），随后续轮次自然增长的部分按新口径累积。
 
 ### 会话用量账本（`metadata.json.usage`）
 

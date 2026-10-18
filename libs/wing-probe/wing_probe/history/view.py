@@ -243,15 +243,18 @@ def derive_flat_fields(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _fill_derived_fields(record: Mapping[str, Any]) -> dict[str, Any]:
-    """记录 + 缺失的派生扁平字段（**只补缺**：已存的值原样保留）。
+    """记录的**事实视图**：assistant 的派生扁平字段按 ``content_blocks`` 现算。
 
-    存量记录（旧形态）自带扁平字段，不动它们；新记录缺这些键，按块数组补齐。
+    镜像实现的读取口径（``Message._route_flat``：**blocks 在则扁平字段忽略**，
+    blocks 缺才用扁平值）——存量记录同时带 blocks 与过时扁平值时，事实以
+    blocks 为准；没有 blocks 的记录（develop 基线格式）保留它自己的扁平字段。
     """
     filled = dict(record)
     if filled.get("role") != "assistant":
         return filled
-    for key, value in derive_flat_fields(filled).items():
-        filled.setdefault(key, value)
+    derived = derive_flat_fields(filled)
+    if derived:  # 有 blocks → blocks 优先
+        filled.update(derived)
     return filled
 
 

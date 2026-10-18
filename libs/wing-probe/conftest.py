@@ -21,7 +21,7 @@ import ``wing_probe`` 与 pytest）。
 1. **自举**：``Probe.start(tmp_path / "probe")`` —— 临时 ``WING_HOME`` + 独立
    网关子进程 + 进程内假 Provider（design D7/D10，场景之间零共享）；
 2. **teardown 自动不变量**：对场景创建／挂载的**全部** session（含 fork 出来的
-   子会话）运行三条内置不变量（链拓扑 / tool 配对 / transient 不落盘）。失败即
+   子会话）运行四条内置不变量（链拓扑 / tool 配对 / transient 不落盘 / 落盘规范形）。失败即
    抛 :class:`wing_probe.ProbeInvariantError`（场景失败，报告标注来源
    ``built-in invariants``、session id 与不变量名）；
 3. **失败现场转储**：场景失败（或 ``PROBE_DUMP=always``）时把时间线全帧、原始帧、

@@ -407,3 +407,81 @@ class TestForkCopiesCanonicalShape:
         assert flat_only["content"] == "flat-only"
         # 源 dict 未被就地改写（记录对读取方只读）
         assert legacy[0]["content"] == "hi"
+
+
+class TestForkDraftFromDerivedContent:
+    """fork 的 draft 必须从 records 派生（assistant 的 content 不落盘）。"""
+
+    @pytest.mark.asyncio
+    async def test_fork_at_compact_node_returns_its_text(self, sm, root):
+        """目标 = 压缩节点（assistant + content_blocks）→ draft 是摘要文本。"""
+        session = sm.create_session()
+        _seed_compact(session)
+
+        result = sm.fork_session(session.session_id, "cu")
+        assert result is not None
+        child, draft = result
+        assert draft == "[Compact] summary"
+        # 记录：压缩前区间随行走，压缩节点本身不进前缀
+        child_records = _records(root, child.session_id)
+        assert _contents(child_records) == ["old1", "old2"]
+
+    @pytest.mark.asyncio
+    async def test_fork_at_assistant_message_returns_its_text(self, sm, root):
+        """目标 = 普通 assistant 记录 → draft 仍是它派生出的文本。"""
+        session = sm.create_session()
+        ids = _seed_compact(session)
+
+        result = sm.fork_session(session.session_id, ids["old2"])
+        assert result is not None
+        _, draft = result
+        assert draft == "old2"
+
+    def test_fork_slice_derives_draft_from_blocks(self):
+        """`_fork_slice` 直接吃 raw record：canonical 记录也要给出 draft。"""
+        from wing.session.manager import _fork_slice
+
+        records = [
+            {"role": "user", "content": "hi", "uuid": "u1"},
+            {
+                "role": "assistant",
+                "uuid": "a1",
+                "content_blocks": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "text", "text": "reply"},
+                ],
+            },
+        ]
+        prefix, draft = _fork_slice(iter(records), "a1")
+        assert draft == "reply"
+        assert [r["uuid"] for r in prefix] == ["u1"]
+
+    def test_fork_slice_draft_falls_back_for_corrupt_record(self):
+        """脏记录（校验不过）按"无文本"降级——读请求不因一条坏记录整单失败。"""
+        from wing.session.manager import _fork_slice
+
+        records = [{"role": "assistant", "uuid": "a1", "content_blocks": "not-a-list"}]
+        _, draft = _fork_slice(iter(records), "a1")
+        assert draft == ""
+
+
+class TestRemapOutOfPrefixReferences:
+    def test_out_of_prefix_parent_is_dropped_not_nulled(self):
+        """前缀外引用 → 删键（缺席即默认），不把 null 写进子会话记录。"""
+        from wing.session.manager import _remap_record_uuids
+
+        records = [
+            {
+                "role": "user",
+                "uuid": "u1",
+                "content": "hi",
+                "parent_uuid": "outside-prefix",
+                "unzip_last_uuid": "outside-prefix",
+            }
+        ]
+        (clone,) = _remap_record_uuids(records)
+        assert "parent_uuid" not in clone
+        assert "unzip_last_uuid" not in clone
+        assert clone["uuid"] != "u1"
+        # 源记录未被就地改写
+        assert records[0]["parent_uuid"] == "outside-prefix"

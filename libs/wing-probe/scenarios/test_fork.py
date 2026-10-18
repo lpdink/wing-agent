@@ -422,3 +422,36 @@ async def test_fork_at_pre_compact_message_ignores_the_compaction(probe: Probe) 
         "alpha",
         "(current)",
     ], child_view.describe()
+
+
+@pytest.mark.probe_env(models=[COMPACT_FORK_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_fork_at_compact_node_derives_draft_from_blocks(probe: Probe) -> None:
+    """fork 目标是 assistant（压缩节点）时，draft 由 content_blocks 派生到 HTTP 面。
+
+    assistant 记录只存 ``content_blocks``（``content`` 是派生物、不落盘），而
+    ``draft`` 走 ``Message`` 访问器——record → draft → ``ForkSessionResponse``
+    这条链路必须把摘要文本原样交给客户端（CLI / SDK 用它重发被 fork 的那条）。
+    """
+    probe.register(
+        COMPACT_FORK_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text=f"<summary>{COMPACT_FORK_SUMMARY}</summary>"),
+    )
+    session = await probe.session(model=COMPACT_FORK_MODEL)
+    await session.chat("alpha")
+    await session.compact()
+    await session.watch.expect("compact_done", within=15)
+
+    source = probe.history(session)
+    compact_node = source.messages()[0]
+    assert compact_node["content"].startswith("[Compact]"), compact_node
+    # 原始记录里没有内容副本（find() 是事实视图，形状断言看 records）
+    raw = next(r for r in source.records if r.get("uuid") == compact_node["uuid"])
+    assert "content" not in raw, raw
+
+    child = await session.fork(compact_node["uuid"])
+    assert child.response["draft"] == compact_node["content"], child.response
+    # 目标自身不进前缀：子会话只有压缩之前的记录
+    assert_fork_of(source, probe.history(child), compact_node["uuid"])

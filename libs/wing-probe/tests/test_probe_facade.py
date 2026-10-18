@@ -28,6 +28,7 @@ from wing_probe.probe import (
     Probe,
     ProbeError,
     ProbeInvariantError,
+    invariant_checks,
     run_invariants,
 )
 from wing_probe.history import HistoryView
@@ -173,7 +174,7 @@ def test_probe_invariant_error_is_assertion_error() -> None:
 
 
 def test_run_invariants_aggregates_named_checks(tmp_path: Path) -> None:
-    """三条内置不变量逐条运行，问题带不变量名与 session id（构造历史）。"""
+    """内置不变量逐条运行，问题带不变量名与 session id（构造历史）。"""
     healthy = tmp_path / "healthy"
     write_history(
         healthy / SESSION_ID,
@@ -220,6 +221,39 @@ def test_run_invariants_aggregates_named_checks(tmp_path: Path) -> None:
     assert names == {"chain_topology", "tool_pairing", "no_transient_records"}, problems
     assert all(SESSION_ID in problem for problem in problems)
     assert all("history.jsonl" in problem for problem in problems)
+
+
+def test_record_shape_is_registered_as_builtin_check(tmp_path: Path) -> None:
+    """``record_shape`` 接入内置检查：带派生扁平字段的 assistant 记录被点名报出。
+
+    注册这一行是"落盘只存事实"的执行点——它被误删时其余不变量仍全绿，因此
+    这里既断言名字在册，也断言真能报到问题上。
+    """
+    names = {name for name, _ in invariant_checks()}
+    assert names == {
+        "chain_topology",
+        "tool_pairing",
+        "no_transient_records",
+        "record_shape",
+    }, names
+
+    session_dir = tmp_path / SESSION_ID
+    write_history(
+        session_dir,
+        [
+            {"uuid": "u1", "role": "user", "content": "hi"},
+            {
+                "uuid": "u2",
+                "parent_uuid": "u1",
+                "role": "assistant",
+                "content_blocks": [{"type": "text", "text": "ok"}],
+                "content": "ok",  # 派生物落盘 → 违规
+            },
+        ],
+    )
+    problems = run_invariants([HistoryView(session_dir)])
+    assert any(problem.startswith("[record_shape]") for problem in problems), problems
+    assert any("stores derived field(s) ['content']" in p for p in problems), problems
 
 
 def test_run_invariants_checks_every_view(tmp_path: Path) -> None:

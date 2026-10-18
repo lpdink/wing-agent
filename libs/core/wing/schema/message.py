@@ -252,7 +252,7 @@ class Message(ChainNode):
         导出是派生行为，不是第二份存储：assistant 的 content /
         reasoning_content / tool_calls 实时取自 content_blocks。注入发生在内层
         handler 之后，``exclude_none`` 看不到这些键——因此这里自己不给 null
-        （外层仍有顶层兜底，见 ``TrackedList._to_record``）。
+        （落盘侧的去留见 ``wing.store.base.canonical_record``）。
         """
         data = handler(self)
         if self.content is not None:

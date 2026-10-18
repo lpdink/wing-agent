@@ -178,10 +178,14 @@ async def test_legacy_records_still_load_and_stay_untouched(probe: Probe) -> Non
     """
     probe.register(
         SHAPE_MODEL,
-        Turn.of(thinking="legacy thinking", text="legacy reply"),
+        Turn.of(
+            thinking="legacy thinking",
+            tool_calls=[ToolCall("Bash", {"command": "printf legacy > marker.txt"})],
+        ),
+        Turn.of(text="legacy reply"),
         Turn.of(text="after resume"),
     )
-    session = await probe.session(model=SHAPE_MODEL)
+    session = await probe.session(model=SHAPE_MODEL, yolo=True)
     first = await session.chat("first question")
     assert first.data["result"] == "legacy reply", first.data
     session_id = session.session_id
@@ -191,34 +195,45 @@ async def test_legacy_records_still_load_and_stay_untouched(probe: Probe) -> Non
     legacy_lines = _rewrite_as_legacy_shape(probe, session_id)
     # 旧形态确实带上了派生字段（否则本场景没有验证到兼容路径）
     assert any('"reasoning_content"' in line for line in legacy_lines), legacy_lines
+    assert any('"tool_calls"' in line for line in legacy_lines), legacy_lines
 
-    resumed = await probe.resume(session_id)
-    await _resubscribe(probe, session_id)
-    after = await resumed.get()
-    assert [m["role"] for m in after["messages"]] == [
-        m["role"] for m in before["messages"]
-    ], after
-    assistant = after["messages"][1]
-    assert assistant["content"] == "legacy reply", assistant
-    assert assistant["reasoning_content"] == "legacy thinking", assistant
+    try:
+        resumed = await probe.resume(session_id)
+        await _resubscribe(probe, session_id)
+        after = await resumed.get()
+        assert [m["role"] for m in after["messages"]] == [
+            m["role"] for m in before["messages"]
+        ], after
+        assistant = after["messages"][1]
+        assert assistant["content"] == "", assistant  # 纯工具调用轮（投影为 ""）
+        assert assistant["reasoning_content"] == "legacy thinking", assistant
+        assert assistant["tool_calls"][0]["arguments"] == {
+            "command": "printf legacy > marker.txt"
+        }, assistant
+        assert after["messages"][3]["content"] == "legacy reply", after
 
-    result = await resumed.chat("second question")
-    assert result.data["result"] == "after resume", result.data
+        result = await resumed.chat("second question")
+        assert result.data["result"] == "after resume", result.data
 
-    # 旧行原样保留（append-only），新行是规范形
-    lines = _raw_lines(probe, session_id)
-    assert lines[: len(legacy_lines)] == legacy_lines, "legacy records were rewritten"
-    tail = [json.loads(line) for line in lines[len(legacy_lines) :]]
-    assert tail, lines
-    new_assistants = [r for r in tail if r.get("role") == "assistant"]
-    assert new_assistants, tail
-    for record in new_assistants:
-        for key in ("content", "reasoning_content", "tool_calls"):
-            assert key not in record, record
+        # 旧行原样保留（append-only），新行是规范形
+        lines = _raw_lines(probe, session_id)
+        assert lines[: len(legacy_lines)] == legacy_lines, (
+            "legacy records were rewritten"
+        )
+        tail = [json.loads(line) for line in lines[len(legacy_lines) :]]
+        assert tail, lines
+        new_assistants = [r for r in tail if r.get("role") == "assistant"]
+        assert new_assistants, tail
+        for record in new_assistants:
+            for key in ("content", "reasoning_content", "tool_calls"):
+                assert key not in record, record
 
-    resumed.history.assert_chain_invariants()
-    _restore_canonical_shape(probe, session_id, injected=len(legacy_lines))
-    resumed.history.assert_record_shape()
+        resumed.history.assert_chain_invariants()
+    finally:
+        # 注入行还原成规范形（见 docstring）——放在 finally 里，断言中途失败
+        # 时不让夹具把注入误报成产品缺陷。
+        _restore_canonical_shape(probe, session_id, injected=len(legacy_lines))
+    probe.history(session_id).assert_record_shape()
 
 
 def _restore_canonical_shape(probe: Probe, session_id: str, *, injected: int) -> None:

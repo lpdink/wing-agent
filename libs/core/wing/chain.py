@@ -98,10 +98,11 @@ class TrackedList(Generic[T]):
           （Message 无该字段，pop 为 NOP）；
         - `disk_exclude` 列出的字段（事件 ClassVar）：只服务直播、落盘即孪生
           （如 TurnResultEvent.result）——wire 帧仍携带，仅磁盘记录剥离；
-        - `exclude_none` 剥 model 字段的 null（含嵌套），:func:`canonical_record`
-          再兜住 wrap 序列化器注入的顶层 null，并剥掉 assistant 的派生扁平
-          字段（content / reasoning_content / tool_calls 由 content_blocks
-          派生，落盘只留 blocks）。
+        - `exclude_none` 剥 model 字段的 null（含嵌套）；:func:`canonical_record`
+          兜顶层 null 并剥掉 assistant 的派生扁平字段（content /
+          reasoning_content / tool_calls 由 content_blocks 派生，落盘只留
+          blocks）。两条规则在 canonical_record 里，是因为 fork 的**原始 dict
+          复制**也要走同一规范形（那里没有 pydantic 兜着）。
 
         链拓扑与记录判别字段（role / uuid / parent_uuid / unzip_last_uuid）
         在非 null 时保留。加载路径对"键缺失"与"值为 null"一视同仁

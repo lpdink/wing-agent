@@ -48,7 +48,7 @@ libs/wing-probe/
 │   ├── driver/            # http（动作封装 + 留档）· ws（订阅 + 信封重组）· session（会话句柄）
 │   ├── provider/          # script（剧本模型）· server（假 Provider）· sse（编码）· request_log · context（ContextView）
 │   ├── watch/             # timeline（事件缓存 + 游标）· expect（五原语）· report（失败报告）
-│   ├── history/           # view（history.jsonl 解析）· invariants（三条不变量 + 红线过渡断言）
+│   ├── history/           # view（history.jsonl 解析 + 事实视图）· invariants（四条不变量 + 红线过渡断言）
 │   ├── toolhost.py        # 最小 tool host（远程工具探针侧实现；只走公开 HTTP / WS 协议）
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
@@ -120,11 +120,12 @@ async def test_bash_write_then_history(probe: Probe) -> None:
     history.assert_no_transient_records()
 ```
 
-三条要点：
+四条要点：
 
 1. `probe.register(model, Turn...)` 支持关键字形式 `Turn.of(text=…, thinking=…, tool_calls=[…], usage=…, chunk=…, delay=…, first_delay=…)`，也支持 `Script(...)`（分片粒度 / 切断点 / 延迟）。两个延迟正交：`delay` 是**分片之间**的节奏（流式场景要多帧才有东西可断），`first_delay` 是**首个内容帧之前**的等待（撑「首帧未到」的窗口，例如中途加入场景要落在首块到达前）。**想只要窗口别用 `delay`**——它是逐帧的，5 帧的 turn 用 `delay=3.0` 会等成 12s；
 2. 剧本**按序消费**，请求次数超出即返回 5xx（`ScriptExhaustedError` 附可读报告）——"不该发生的额外调用"会立刻变红，这是特性不是噪音；
-3. 失败报告与场景断言并列：teardown 的三条内置不变量对**场景创建／挂载的全部会话**（含 fork 出来的子会话）自动运行，失败抛 `ProbeInvariantError`，报告标注 `built-in invariants` + session id + 不变量名。
+3. 失败报告与场景断言并列：teardown 的内置不变量对**场景创建／挂载的全部会话**（含 fork 出来的子会话）自动运行，失败抛 `ProbeInvariantError`，报告标注 `built-in invariants` + session id + 不变量名；
+4. `record_shape` 检查的是**实现写出的记录**（原始形态：null 不写、assistant 不存 `content_blocks` 的派生物）。场景**故意注入**存量旧形态记录时（兼容性场景），断言完成后要把注入行还原成规范形——否则夹具会把测试注入误报成产品缺陷；这也是它与 `assert_chain_invariants` 的唯一使用差别。
 
 模型名建议加注释锚定用途；`session.watch` 的游标随 `chat()` 推进会消耗已消费事件——需要回看整轮顺序时用 `since=0` 或 `since=<进入本轮前的 cursor>`。
 
@@ -228,7 +229,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 | `tip_uuid` / `last_record_uuid` / `parent_of(uuid)` / `find(uuid)` / `metadata()` | 拓扑与元数据 |
 | `aux(key)` / `aux_path(key)` | 会话 aux kv（如后台压缩的 `pending_compact`）——**每次访问重新读盘**，是"待生效状态是否已落盘"的观测点；`aux_path` 不读盘（存在性断言用） |
 | `reload()` / `describe(limit=24)` | 重读 / 人类可读摘要（贴进断言消息） |
-| `assert_chain_invariants()` / `assert_tool_pairing()` / `assert_no_transient_records(types=?)` | 三条内置不变量（单个视图） |
+| `assert_chain_invariants()` / `assert_tool_pairing()` / `assert_no_transient_records(types=?)` / `assert_record_shape()` | 四条内置不变量（单个视图） |
 | `assert_compact_transition(before, after, …)` / `assert_rewind_transition(before, after, target_uuid, …)` / `assert_fork_of(source, child, at_uuid, …)` | 红线过渡断言（返回结构化 `material` 供进一步断言） |
 | `fork_metadata(child_session_dir, require=FORK_METADATA_FIELDS)` | 子会话 `metadata.json` 独立解析 + 必需字段 |
 
