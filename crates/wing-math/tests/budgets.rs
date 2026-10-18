@@ -192,15 +192,27 @@ fn budget_boundaries_are_fast() {
     );
 }
 
+/// 渲染一次并返回耗时（**取 3 次的最小值**：本套件与别的测试二进制并行跑时，
+/// 单次墙钟会被调度噪声抬高，最小值才是"没有被打断"的那次——用均值/单次会让
+/// 下面的比值断言假红）。
+fn best_of_three(src: &str) -> Duration {
+    (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            let _ = render_block(src);
+            start.elapsed()
+        })
+        .min()
+        .expect("three samples")
+}
+
 #[test]
 fn long_flat_formulas_are_not_quadratic() {
     // `layout_seq` 原来是 O(n²)（2000 项 release 282 ms）。
     // 这里给一个宽松的上界（真实值远低于它），防止二次方路径回归。
     let src = "x + ".repeat(1000) + "y"; // 2001 项，4005 字符
-    let start = Instant::now();
-    let block = render_block(&src).unwrap();
-    let elapsed = start.elapsed();
-    assert!(block.width() > 4000);
+    assert!(render_block(&src).unwrap().width() > 4000);
+    let elapsed = best_of_three(&src);
     assert!(
         elapsed < Duration::from_millis(300),
         "2000-term formula took {elapsed:?} (quadratic regression?)"
@@ -208,9 +220,7 @@ fn long_flat_formulas_are_not_quadratic() {
 
     // 项数翻倍，耗时不应翻两倍以上（二次方会 ~4×）
     let src2 = "x + ".repeat(2000) + "y";
-    let start = Instant::now();
-    let _ = render_block(&src2);
-    let doubled = start.elapsed();
+    let doubled = best_of_three(&src2);
     assert!(
         doubled < elapsed * 4,
         "doubling terms scaled {elapsed:?} -> {doubled:?} (quadratic?)"
