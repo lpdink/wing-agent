@@ -144,6 +144,38 @@ fn test_geometry_is_rebuilt_by_every_frame() {
     );
 }
 
+/// 会话版式里 popup 占的排版行也会被挤（ratatui 让小 `Length` 段让位给 `Min`），
+/// 列表窗口因此跟着被挤过的矩形收缩：走到末尾时高亮的那一条必须画在帧上。
+#[test]
+fn test_a_squeezed_popup_row_still_draws_the_selected_item() {
+    let mut app = app_with_message();
+    open_session_popup(&mut app, 12);
+    // 14 行装不下 status(1) + chat(≥3) + 输入卡 + 12 行弹层：弹层行被挤到 7 行
+    // = 3 条 session，比策略窗口（6 条）小。
+    let mut terminal = test_terminal(100, 14);
+    draw(&mut app, &mut terminal);
+    // 前提断言必须看**画出来的**条数而不是 `popup.height()`（那是请求值，与排版
+    // 结果无关）：没有它，版式一旦漂移（弹层重新拿到 12 行），本测试就会静默退化
+    // 成恒真 —— 旧渲染循环下也能绿。
+    let shown = frame_text(terminal.backend().buffer())
+        .matches("session-")
+        .count();
+    assert!(
+        (1..6).contains(&shown),
+        "弹层行被挤过（画得出 {shown} 条，策略窗口 6 条）"
+    );
+
+    walk_popup_to_the_end(&mut app, 11);
+    let mut terminal = test_terminal(100, 14);
+    draw(&mut app, &mut terminal);
+    let label = popup_selection_label(&app);
+    let body = frame_text(terminal.backend().buffer());
+    assert!(
+        body.contains(&label),
+        "选中的「{label}」要画得出来：\n{body}"
+    );
+}
+
 #[test]
 fn test_unframed_geometry_claims_nothing_and_keeps_the_editor_width() {
     // Nothing has been drawn: no region can be claimed — a press *and* a drag
