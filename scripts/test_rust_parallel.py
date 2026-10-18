@@ -6,9 +6,13 @@ cargo 逐个串行执行测试二进制（只有**单个二进制内部**才多�
 测试叠出来的长尾。这里复用 ``cargo test --no-run`` 的构建产物，按并发上限同时跑
 多个二进制，把长尾摊平。
 
-**输出契约**（``scripts/collect_output.sh`` 依赖它）：每个二进制打印一行 libtest
-原样的 ``test result: …``，统计行按套件求和；失败二进制的完整输出贴在结论之前，
-最后列出失败套件并以 1 退出。构建失败时 cargo 的 stderr 原样透传（退出码同 cargo）。
+**输出契约**（``scripts/collect_output.sh`` 依赖它）：每条 ``test result: …`` 在
+日志里**恰好出现一次**（通过的套件在完成时打印，失败的套件只出现在完整输出里），
+统计行按套件求和。构建失败时 rustc 诊断按 cargo 的渲染形式打印，退出码用 cargo 的。
+
+并行度：``-j/--jobs``（同时几个二进制，默认半个核数）、``-t/--threads``（每个套件
+的 libtest 线程数，默认 4）；``WING_TEST_SERIAL=1`` 与另外两组同义（→ 1/1），显式
+参数优先。
 
 单套件 / 名称过滤请直接用 ``cargo test``：这里只服务"全量跑一遍"。
 """
@@ -24,40 +28,80 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
+#: 与 ``scripts/collect_output.sh`` 的逃生舱同名：排查并发干扰时四组一起退化成串行。
+SERIAL_ENV = "WING_TEST_SERIAL"
+
 
 @dataclass(frozen=True)
 class Suite:
-    """一个测试二进制（libtest 的构建产物）。"""
+    """一个测试二进制（libtest 的构建产物）。
 
-    name: str
+    ``label`` 是日志里的显示名：lib 单测与同名 bin 单测（如 ``wing``）会撞名，
+    撞名时补上 target kind，免得失败清单看起来像重复跑了同一套件。
+    """
+
+    label: str
     executable: str
+
+
+@dataclass(frozen=True)
+class Result:
+    suite: Suite
+    code: int
+    elapsed: float
+    output: str
 
 
 def _cpu_count() -> int:
     return os.cpu_count() or 4
 
 
+def _serial() -> bool:
+    """``WING_TEST_SERIAL=1``（非空且非 0）——与 python / probe 两组的判定一致。"""
+    value = os.environ.get(SERIAL_ENV, "")
+    return bool(value) and value != "0"
+
+
 def _default_jobs() -> int:
-    """同时跑的二进制个数：半个核数。
+    """同时跑的二进制个数：半个核数（串行逃生舱下为 1）。
 
     并行度加在**套件之间**收益最大——套件大多是 e2e（pty / 端口 / 子进程），单个
     套件内部的测试本来就在等 I/O，多给线程也吃不掉这些等待。
     """
-    return max(2, _cpu_count() // 2)
+    return 1 if _serial() else max(2, _cpu_count() // 2)
 
 
 def _default_threads() -> int:
-    """每个二进制的 libtest 线程数。
+    """每个二进制的 libtest 线程数（串行逃生舱下为 1）。
 
     例外是那个 CPU 大头：`wing` 的 2854 个单测（本机占 41s 总和里的 11.5s 墙钟、
     ~110s CPU）。给它 2 线程它就独自变成尾部长（实测该套件 31s → 22s、整体
     36s → 25s，10 核）；空转的小套件不在乎多分线程。
     """
-    return 4
+    return 1 if _serial() else 4
 
 
-def build_suites() -> list[Suite] | None:
-    """``cargo test --no-run`` 构建并返回去重后的测试二进制（构建失败返回 None）。"""
+def _label_suites(found: list[tuple[str, str, str]]) -> list[Suite]:
+    """``(name, kind, executable)`` → 去重后的套件表（撞名时带上 target kind）。"""
+    names = [name for name, _, _ in found]
+    suites: list[Suite] = []
+    seen: set[str] = set()
+    for name, kind, executable in found:
+        if executable in seen:
+            continue
+        seen.add(executable)
+        label = f"{name} ({kind})" if names.count(name) > 1 else name
+        suites.append(Suite(label=label, executable=executable))
+    return suites
+
+
+def build_suites() -> tuple[list[Suite], int]:
+    """``cargo test --no-run`` 构建并返回 ``(套件表, cargo 退出码)``。
+
+    ``--message-format=json`` 把 rustc 诊断搬到 **stdout**（``compiler-message``），
+    stderr 只剩 cargo 的摘要行——失败时把 ``rendered`` 打回 stderr，否则构建失败
+    退化成"知道挂了、不知道为什么"，得再跑一遍裸 ``cargo test``。
+    """
     proc = subprocess.run(
         [
             "cargo",
@@ -69,33 +113,31 @@ def build_suites() -> list[Suite] | None:
         stdout=subprocess.PIPE,
         text=True,
     )
-    if proc.returncode != 0:
-        return None
-    suites: list[Suite] = []
-    seen: set[str] = set()
+    found: list[tuple[str, str, str]] = []
     for line in proc.stdout.splitlines():
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if message.get("reason") == "compiler-message":
+            rendered = message.get("message", {}).get("rendered")
+            if rendered:
+                print(
+                    rendered,
+                    file=sys.stderr,
+                    end="" if rendered.endswith("\n") else "\n",
+                )
             continue
         if message.get("reason") != "compiler-artifact":
             continue
         if not message.get("profile", {}).get("test"):
             continue
         executable = message.get("executable")
-        if not executable or executable in seen:
+        if not executable:
             continue
-        seen.add(executable)
-        suites.append(Suite(name=message["target"]["name"], executable=executable))
-    return suites
-
-
-@dataclass(frozen=True)
-class Result:
-    suite: Suite
-    code: int
-    elapsed: float
-    output: str
+        target = message["target"]
+        found.append((target["name"], "+".join(target.get("kind") or []), executable))
+    return _label_suites(found), proc.returncode
 
 
 def run_suite(suite: Suite, threads: int) -> Result:
@@ -128,7 +170,7 @@ def run_doctests() -> Result:
         text=True,
     )
     return Result(
-        suite=Suite(name="doctests", executable="cargo test --doc"),
+        suite=Suite(label="doctests", executable="cargo test --doc"),
         code=proc.returncode,
         elapsed=time.monotonic() - started,
         output=proc.stdout or "",
@@ -140,25 +182,45 @@ def _result_lines(output: str) -> list[str]:
     return [line for line in output.splitlines() if line.startswith("test result:")]
 
 
-def main(argv: list[str]) -> int:
+USAGE = "[--jobs N|--serial] [--threads N]"
+
+
+def _parse_args(argv: list[str]) -> tuple[int, int] | None:
+    """解析并行度参数（非法值给 usage，不抛 traceback）。"""
     jobs = _default_jobs()
     threads = _default_threads()
-    args = list(argv[1:])
+    args = list(argv)
     while args:
         head = args.pop(0)
-        if head in ("--jobs", "-j") and args:
-            jobs = int(args.pop(0))
-        elif head in ("--threads", "-t") and args:
-            threads = int(args.pop(0))
-        else:
-            print(f"usage: {argv[0]} [--jobs N] [--threads N]", file=sys.stderr)
-            return 2
+        if head == "--serial":
+            jobs = threads = 1
+            continue
+        if head in ("--jobs", "-j", "--threads", "-t"):
+            if not args:
+                return None
+            raw = args.pop(0)
+            if not raw.isdigit() or int(raw) < 1:
+                return None
+            if head in ("--jobs", "-j"):
+                jobs = int(raw)
+            else:
+                threads = int(raw)
+            continue
+        return None
+    return jobs, threads
+
+
+def main(argv: list[str]) -> int:
+    parsed = _parse_args(argv[1:])
+    if parsed is None:
+        print(f"usage: {argv[0]} {USAGE}", file=sys.stderr)
+        return 2
+    jobs, threads = parsed
 
     started = time.monotonic()
-    suites = build_suites()
-    if suites is None:
-        print("cargo test --no-run failed", file=sys.stderr)
-        return 1
+    suites, cargo_code = build_suites()
+    if cargo_code != 0:
+        return cargo_code
     build_elapsed = time.monotonic() - started
     if not suites:
         print("no test binaries found", file=sys.stderr)
@@ -182,7 +244,7 @@ def main(argv: list[str]) -> int:
                 print(f"❌ suite crashed: {exc}", file=sys.stderr)
                 results.append(
                     Result(
-                        suite=Suite(name="<crashed>", executable=""),
+                        suite=Suite(label="<crashed>", executable=""),
                         code=1,
                         elapsed=0.0,
                         output=str(exc),
@@ -191,9 +253,12 @@ def main(argv: list[str]) -> int:
                 return
             results.append(result)
             status = "ok" if result.code == 0 else f"FAILED (exit {result.code})"
-            print(f"     Running {result.suite.name} … {result.elapsed:.1f}s {status}")
-            for line in _result_lines(result.output):
-                print(line)
+            print(f"     Running {result.suite.label} … {result.elapsed:.1f}s {status}")
+            # 失败套件的汇总行留给下面的完整输出：每条 `test result:` 只能出现一次，
+            # 否则 collect_output.sh 的求和会双重计数。
+            if result.code == 0:
+                for line in _result_lines(result.output):
+                    print(line)
 
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = [pool.submit(run_suite, suite, threads) for suite in suites]
@@ -208,11 +273,12 @@ def main(argv: list[str]) -> int:
         return 0
 
     for result in failed:
-        print(f"\n───── {result.suite.name} 失败（exit {result.code}）完整输出 ─────")
+        print(f"\n───── {result.suite.label} 失败（exit {result.code}）完整输出 ─────")
         print(result.output)
-        print(f"───── {result.suite.name} 输出结束 ─────")
+        print(f"───── {result.suite.label} 输出结束 ─────")
     print(
-        f"\n❌ {len(failed)} suite(s) failed: {', '.join(r.suite.name for r in failed)}"
+        f"\n❌ {len(failed)} suite(s) failed: "
+        f"{', '.join(r.suite.label for r in failed)}"
     )
     return 1
 
