@@ -93,11 +93,27 @@ enum NotifyPlan {
     Off(String),
 }
 
-/// `--no-notify` / 目标解析 → 计划。目标解析为空的隐式缺省是**静默关闭**
+/// `--no-notify` / 定向回答 / 目标解析 → 计划。目标解析为空的隐式缺省是**静默关闭**
 /// （没有父会话可叫，不是错误）。`parent` 是 `WING_SESSION_ID` 的**读回值**（注入以便单测）。
-fn plan_notify(no_notify: bool, notify_to: Option<&str>, parent: Option<&str>) -> NotifyPlan {
+///
+/// `answering` = 这次调用带着 `--tool-call-id`，即**定向回答一个待答复的 ask**。这种调用
+/// 不登记唤醒：派发时那条触发器仍在武装（ask 从不消耗 done 配额），再登记一次只会让同一个
+/// ask / 同一个收口被投递多次——父会话照两条信封各答一次时，第二次答复已经找不到 waiter，
+/// 会掉进子会话的 inbox 变成一条普通用户消息（凭空多起一轮）。网关侧对同源订阅做的是
+/// 刷新而不是新增，但这里连一次无意义的写都不发，并且**在输出里说明原因**。
+fn plan_notify(
+    no_notify: bool,
+    answering: bool,
+    notify_to: Option<&str>,
+    parent: Option<&str>,
+) -> NotifyPlan {
     if no_notify {
         return NotifyPlan::Off("off (--no-notify)".to_string());
+    }
+    if answering {
+        return NotifyPlan::Off(
+            "off (answering an ask: the dispatch-time trigger is still armed)".to_string(),
+        );
     }
     if let Some(target) = notify_to.map(str::trim).filter(|value| !value.is_empty()) {
         return NotifyPlan::Register(target.to_string());
@@ -225,16 +241,21 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     //    notify is a soft mechanism (same posture as lineage), and an explicit
     //    `--notify-to` mistake is reported verbatim rather than swallowed.
     let parent = common::parent_session_id_from_env();
-    let (notify, notify_off) =
-        match plan_notify(args.no_notify, args.notify_to.as_deref(), parent.as_deref()) {
-            NotifyPlan::Off(reason) => (None, Some(reason)),
-            NotifyPlan::Register(target) => {
-                match register_notify(&http, &args, &session_id, &target).await {
-                    Ok(notify) => (Some(notify), None),
-                    Err(e) => (None, Some(format!("off (registration failed: {e})"))),
-                }
+    let answering = args.tool_call_id.is_some();
+    let (notify, notify_off) = match plan_notify(
+        args.no_notify,
+        answering,
+        args.notify_to.as_deref(),
+        parent.as_deref(),
+    ) {
+        NotifyPlan::Off(reason) => (None, Some(reason)),
+        NotifyPlan::Register(target) => {
+            match register_notify(&http, &args, &session_id, &target).await {
+                Ok(notify) => (Some(notify), None),
+                Err(e) => (None, Some(format!("off (registration failed: {e})"))),
             }
-        };
+        }
+    };
 
     // 4. Send prompt (non-blocking — the HTTP call returns immediately,
     //    the agent processes asynchronously). Always sent, including on
@@ -390,7 +411,7 @@ mod tests {
     #[test]
     fn notify_defaults_to_the_parent_session() {
         assert_eq!(
-            plan_notify(false, None, Some("parent-1")),
+            plan_notify(false, false, None, Some("parent-1")),
             NotifyPlan::Register("parent-1".into())
         );
     }
@@ -398,7 +419,7 @@ mod tests {
     #[test]
     fn notify_to_wins_over_the_parent() {
         assert_eq!(
-            plan_notify(false, Some("  other  "), Some("parent-1")),
+            plan_notify(false, false, Some("  other  "), Some("parent-1")),
             NotifyPlan::Register("other".into())
         );
     }
@@ -406,12 +427,12 @@ mod tests {
     #[test]
     fn no_target_means_silently_off() {
         assert_eq!(
-            plan_notify(false, None, None),
+            plan_notify(false, false, None, None),
             NotifyPlan::Off("off (no parent session)".into())
         );
         // 空白值等同于没给
         assert_eq!(
-            plan_notify(false, Some("   "), Some("  ")),
+            plan_notify(false, false, Some("   "), Some("  ")),
             NotifyPlan::Off("off (no parent session)".into())
         );
     }
@@ -419,8 +440,36 @@ mod tests {
     #[test]
     fn no_notify_wins_over_every_target() {
         assert_eq!(
-            plan_notify(true, Some("other"), Some("parent-1")),
+            plan_notify(true, false, Some("other"), Some("parent-1")),
             NotifyPlan::Off("off (--no-notify)".into())
+        );
+    }
+
+    #[test]
+    fn answering_an_ask_never_registers_another_trigger() {
+        // 定向回答（`-r <child> --tool-call-id <id>`）：派发时那条触发器还在武装，
+        // 再登记一次会让同一个 ask / 同一个 done 被投递多次。
+        let plan = plan_notify(false, true, None, Some("parent-1"));
+        assert_eq!(
+            plan,
+            NotifyPlan::Off(
+                "off (answering an ask: the dispatch-time trigger is still armed)".into()
+            )
+        );
+        // 显式 --notify-to 也不改变这一点（输出里会说清为什么没登记）
+        assert!(matches!(
+            plan_notify(false, true, Some("other"), Some("parent-1")),
+            NotifyPlan::Off(_)
+        ));
+    }
+
+    #[test]
+    fn resuming_without_answering_still_registers() {
+        // `-r <sid> -p "next task"`（不是回答 ask）：网关对同源订阅做刷新，
+        // 所以重复登记是幂等的，`run` 照旧登记。
+        assert_eq!(
+            plan_notify(false, false, None, Some("parent-1")),
+            NotifyPlan::Register("parent-1".into())
         );
     }
 }

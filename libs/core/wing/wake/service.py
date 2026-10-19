@@ -180,6 +180,18 @@ class WakeService:
             next_fire_at_ms = first_fire_at_ms(parsed, self._clock())
             spec_text = parsed.text
 
+        prompt_text = prompt if prompt and prompt.strip() else None
+        if kind == KIND_SESSION:
+            refreshed = self._refresh_existing(
+                source=str(source),
+                target=target,
+                on_events=events,
+                budget=budget,
+                prompt=prompt_text,
+            )
+            if refreshed is not None:
+                return refreshed
+
         trigger = self._store.insert(
             kind=kind,
             target_session_id=target,
@@ -188,7 +200,7 @@ class WakeService:
             spec=spec_text,
             next_fire_at_ms=next_fire_at_ms,
             remaining_done=budget,
-            prompt=(prompt if prompt and prompt.strip() else None),
+            prompt=prompt_text,
             created_at_ms=self._clock(),
             created_by=created_by,
         )
@@ -200,6 +212,45 @@ class WakeService:
         )
         self._scheduler.notify()
         return trigger
+
+    def _refresh_existing(
+        self,
+        *,
+        source: str,
+        target: str,
+        on_events: str,
+        budget: int | None,
+        prompt: str | None,
+    ) -> WakeTrigger | None:
+        """同源重复登记 = **刷新**那条 active 订阅（不是再插一行）。
+
+        一条 active 的 session 订阅表达的是「下一次完成时告诉我」这个**状态**，不是队列：
+        同一 (source, target, on_events) 上再登记一次，语义只能是「把配额与内容重置成我
+        现在要的」。否则每登记一次就多一条投递路径——`ask` 不消耗配额，于是同一个提问 /
+        同一个收口会被投递多次（父会话照着两条信封各答一次时，第二次答复已经找不到
+        waiter，会掉进子会话的 inbox 变成一条普通用户消息，凭空多起一轮）。
+        """
+        existing = self._store.find_active_session(
+            source_session_id=source,
+            target_session_id=target,
+            on_events=on_events,
+        )
+        if existing is None:
+            return None
+        if not self._store.refresh(existing.id, remaining_done=budget, prompt=prompt):
+            raise WakeUnavailableError(
+                f"wake unavailable: failed to refresh trigger #{existing.id}"
+            )
+        refreshed = self._store.get(existing.id)
+        if refreshed is None:
+            raise WakeUnavailableError(
+                f"wake unavailable: trigger #{existing.id} vanished after refresh"
+            )
+        log.info(
+            f"wake: refreshed #{refreshed.id} (same subscription "
+            f"{source} → {target}, on {on_events})"
+        )
+        return refreshed
 
     def cancel(self, trigger_id: int) -> bool:
         """取消一条触发器。

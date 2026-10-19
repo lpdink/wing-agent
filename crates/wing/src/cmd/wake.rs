@@ -244,6 +244,12 @@ pub(crate) fn schedule_from_flags(
 }
 
 /// Normalize a `--on` value (`done,ask`).
+///
+/// Mirrors the gateway's value space on purpose (`wing/wake/model.py::parse_on_events`):
+/// both sides reject anything outside `done` / `ask` with the same wording, and both
+/// de-duplicate while keeping the user's order. Adding an alias on one side only
+/// (e.g. accepting `error` here) would let a request pass the local check and still
+/// land as a 400 from the gateway — and the two error messages would disagree.
 pub(crate) fn parse_on_events(raw: &str) -> Result<String> {
     let mut kinds: Vec<&str> = Vec::new();
     for part in raw.split(',') {
@@ -865,10 +871,7 @@ mod tests {
         };
         assert!(!has_schedule(&args));
         args.daily = Some("07:00".into());
-        assert!(
-            has_schedule(&args),
-            "--daily 也算 schedule（曾经在 --cancel 里被漏掉）"
-        );
+        assert!(has_schedule(&args), "--daily 也是 schedule 的一种");
         args.daily = None;
         args.at = Some("2026-03-01 09:00".into());
         assert!(has_schedule(&args));

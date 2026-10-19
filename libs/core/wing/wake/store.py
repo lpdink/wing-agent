@@ -99,6 +99,46 @@ class WakeStore:
             return None
         return self.get(int(rows[0]["id"]))
 
+    def find_active_session(
+        self,
+        *,
+        source_session_id: str,
+        target_session_id: str,
+        on_events: str,
+    ) -> WakeTrigger | None:
+        """同一条订阅（source → target，同一组 on_events）是否已在武装。
+
+        「谁该被叫醒」是**状态**不是队列：同一条 active 订阅只该存在一行（见
+        ``WakeService.create`` 的 upsert）。
+        """
+        rows = self.database().query(
+            f"SELECT {_COLUMNS} FROM wake_trigger "
+            "WHERE state = ? AND kind = 'session' "
+            "AND source_session_id = ? AND target_session_id = ? AND on_events = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (STATE_ACTIVE, source_session_id, target_session_id, on_events),
+        )
+        return WakeTrigger.from_row(rows[0]) if rows else None
+
+    def refresh(
+        self,
+        trigger_id: int,
+        *,
+        remaining_done: int | None,
+        prompt: str | None,
+    ) -> bool:
+        """把一条 active 订阅刷新成"下一次完成时告诉我"（保留 id 与 fire_count）。
+
+        ``last_error`` 一并清掉（它是上一次失败的痕迹，新订阅还没失败过）；
+        ``remaining_done`` 与 ``prompt`` 取本次请求的值（用户的**最新**意图）。
+        """
+        return self.database().execute(
+            "UPDATE wake_trigger "
+            "SET remaining_done = ?, prompt = ?, last_error = NULL "
+            "WHERE id = ? AND state = ?",
+            (remaining_done, prompt, trigger_id, STATE_ACTIVE),
+        )
+
     def set_state(
         self,
         trigger_id: int,

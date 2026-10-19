@@ -251,6 +251,67 @@ class TestCreate:
             _timer_trigger(service, times=0)
 
 
+class TestSameSubscriptionUpserts:
+    """同一 (source, target, on_events) 再登记一次 = 刷新，不是再插一行。
+
+    一条 active 订阅表达的是「下一次完成时告诉我」这个**状态**。多插一行会让同一个
+    ask / 同一个 done 被投递多次（`ask` 从不消耗配额，所以这个放大在提问期间一直成立）。
+    """
+
+    def test_second_create_refreshes_instead_of_inserting(
+        self, service: WakeService
+    ) -> None:
+        first = _session_trigger(service, times=2)
+        await_second = _session_trigger(service, times=2)
+        assert await_second.id == first.id
+        assert len(service.list_triggers()) == 1
+        assert await_second.remaining_done == 2
+
+    @pytest.mark.asyncio
+    async def test_refresh_resets_the_quota(
+        self, service: WakeService, ports: FakePorts
+    ) -> None:
+        """刷新是"下一次完成时告诉我"：用掉的配额被重置回本次请求的值。"""
+        first = _session_trigger(service, times=3)
+        await service._dispatch_one(first, EVENT_DONE, _done())
+        assert service.list_triggers()[0].remaining_done == 2
+
+        refreshed = _session_trigger(service, times=3)
+        assert refreshed.id == first.id
+        assert refreshed.remaining_done == 3
+        assert len(service.list_triggers()) == 1
+
+    def test_different_on_events_is_a_different_subscription(
+        self, service: WakeService
+    ) -> None:
+        both = _session_trigger(service)
+        only_ask = _session_trigger(service, on_events="ask")
+        assert only_ask.id != both.id
+        assert len(service.list_triggers()) == 2
+
+    def test_different_target_is_a_different_subscription(
+        self, service: WakeService
+    ) -> None:
+        _session_trigger(service)
+        other = _session_trigger(service, target_session_id=OTHER)
+        assert len(service.list_triggers()) == 2
+        assert other.target_session_id == OTHER
+
+    def test_finished_subscription_is_not_refreshed(self, service: WakeService) -> None:
+        """终结的那条不再是"下一次完成时告诉我"：再登记会得到一条新行。"""
+        first = _session_trigger(service)
+        service.cancel(first.id)
+        second = _session_trigger(service)
+        assert second.id != first.id
+        assert len(service.list_triggers()) == 1
+
+    def test_refreshed_prompt_wins(self, service: WakeService) -> None:
+        _session_trigger(service, prompt="old text")
+        refreshed = _session_trigger(service, prompt="new text")
+        assert refreshed.prompt == "new text"
+        assert len(service.list_triggers()) == 1
+
+
 # ============================================================
 # cancel / list
 # ============================================================
