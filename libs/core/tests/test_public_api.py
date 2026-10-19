@@ -2,7 +2,7 @@
 
 06 步骤把两件安装动作从 import 期副作用改为显式调用：
   - 内置工具注册：`import wing.tools`
-  - metrics 订阅：`wing.audit.install()`（幂等）
+  - 审计订阅：`wing.audit.install()`（幂等）
 
 「import 有没有副作用」「WingRuntime 会不会真安装」都只能在**全新进程**里
 断言（本测试进程已被 conftest 的 session fixture 全局安装，同进程无法区分
@@ -17,7 +17,7 @@ import sys
 
 # 全新解释器里的安装契约：`import wing` 不安装任何东西；两件安装显式各就各位；
 # install() 重复调用不产生第二次订阅（EventBus.subscribe 是 append 语义，
-# 重复订阅 = 指标双写）。
+# 重复订阅 = 审计双写）。
 _PROBE = """
 import wing
 
@@ -47,7 +47,7 @@ assert names == [
     "Write",
 ], names
 
-audit.install()  # 显式安装②：metrics 订阅
+audit.install()  # 显式安装②：审计订阅
 assert event_bus.subscriber_count == 1, event_bus.subscriber_count
 
 audit.install()  # 幂等：重复调用不重复订阅
@@ -60,7 +60,7 @@ print("ok")
 # load_config → WingRuntime()），断言两件事在构造后成立：
 #   1. 这份配置声明的工具（9 个）能被解析出来 —— 即工具注册确实在
 #      SessionManager/AgentTemplateManager 构造之前完成；
-#   2. metrics 订阅恰为 1（仅 metrics；SessionReaper 的订阅在 gateway attach）。
+#   2. 审计订阅恰为 1（仅审计；SessionReaper 的订阅在 gateway attach）。
 # 只钉「WingRuntime() 会安装」这一侧：这侧在同进程内不可断言（conftest 已装）。
 # 配置文本是显式写下的（不再用首启模板——模板现在是「providers/agents 空」的天然 problem，
 # 由 setup 向导消费，不是一份能直接跑的配置）。
@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory(prefix="wing-runtime-probe-") as tmp:
 
     runtime = WingRuntime()
 
-    # 构造之后：工具已注册（模板工具 9/9 解析）且 metrics 订阅恰一次
+    # 构造之后：工具已注册（模板工具 9/9 解析）且审计订阅恰一次
     tools = runtime.template_manager.default.resolved_tools
     assert len(tools) == 9, sorted(t.name for t in tools)
     assert event_bus.subscriber_count == 1, event_bus.subscriber_count
@@ -123,8 +123,8 @@ def test_top_level_import_is_side_effect_free_and_install_is_explicit():
     assert proc.stdout.strip() == "ok"
 
 
-def test_runtime_construction_installs_builtin_tools_and_metrics():
-    """组合根 `WingRuntime()` 会真安装（工具注册 + metrics 订阅各就各位）。
+def test_runtime_construction_installs_builtin_tools_and_audit():
+    """组合根 `WingRuntime()` 会真安装（工具注册 + 审计订阅各就各位）。
 
     同进程内 conftest 已全局安装，无法区分「runtime 装了」与「conftest
     装了」——因此用子进程走真实入口链（含临时 WING_HOME 与默认模板）。

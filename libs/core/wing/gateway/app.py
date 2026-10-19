@@ -112,6 +112,10 @@ def create_app(server: GatewayServer) -> FastAPI:
             from wing.provider.pool import close_providers
 
             await close_providers()
+            # 进程级 SQLite（审计行 / 唤醒触发器）：连接同样随进程收尾，幂等。
+            from wing.db import close_database
+
+            close_database()
 
     app = FastAPI(
         title=OPENAPI_METADATA["title"],

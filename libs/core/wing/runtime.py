@@ -227,11 +227,11 @@ class WingRuntime:
         # 显式安装内置能力（顶层 wing/__init__ 不再有 import 副作用）：
         #   - import wing.tools：装饰器注册内置工具（第一次 tool_registry.resolve
         #     之前必须完成，否则 AgentTemplate.from_config 解析不到任何工具）
-        #   - audit.install()：注册 handler 并订阅 EventBus（幂等）
+        #   - audit.install()：订阅 EventBus（审计行落 wing.db；幂等）
         import wing.tools  # noqa: F401
-        from wing.audit import install as install_metrics
+        from wing.audit import install as install_audit
 
-        install_metrics()
+        install_audit()
 
         load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——

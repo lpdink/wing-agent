@@ -114,9 +114,11 @@ libs/core/wing/
 │   ├── builtin/                     一工具一文件：bash · read/write/edit · glob/grep · read_image · ask_user · todo
 │   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
-├── audit/                           指标 / 审计注册中心（EventBus 订阅，原子写 JSON；install() 由组合根显式调用）
-│   ├── core.py                      MetricsRegistry 类 + 单例 + 原子读写工具
-│   └── _llm_metrics.py / _tool_call_metrics.py / _compact_metrics.py
+├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级；与 store/ 的会话持久化正交）
+│   ├── database.py                  Database（WAL / user_version 迁移 / 打开失败即降级，读写作 no-op）
+│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表）+ SCHEMA_VERSION
+├── audit/                           审计：事件 → wing.db 的 audit_* 追加行（EventBus 订阅；install() 由组合根显式调用）
+│   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩各一条 INSERT
 ├── common/
 │   ├── logger.py                    日志初始化（按本地日期切分 + 轮转 / prune）
 │   ├── fs.py                        原子写（tmp + fsync + rename）/ JSON 读写

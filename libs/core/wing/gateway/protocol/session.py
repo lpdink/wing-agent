@@ -39,7 +39,7 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description=(
             "存储后端：file（默认，落盘）| memory（session 状态不落盘，仅本次进程有效；"
-            "注意 metrics 审计文件不受此约束）"
+            "注意审计行（wing.db）不受此约束）"
         ),
     )
     tags: list[str] | None = Field(

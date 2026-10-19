@@ -149,11 +149,15 @@ class TestConfigModels:
 class TestLoadConfig:
     """测试配置加载"""
 
-    def test_get_config_path(self):
-        """Config file path is correct."""
-        path = get_config_path()
-        assert str(path).endswith(".wing/core/config.yaml")
-        assert str(path).startswith(str(Path.home()))
+    def test_get_config_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """默认路径 = `~/.wing/core/config.yaml`。
+
+        只挪开 ``WING_HOME``、**不动 HOME**：``Path.home()`` 在 HOME 被清掉时会回落到
+        passwd 家目录，若断言里外拿的是两个不同的 home（容器 / CI 常覆写 HOME），
+        测试就会假红——这里两条取值走的是同一个 ``Path.home()``。
+        """
+        monkeypatch.delenv("WING_HOME", raising=False)
+        assert get_config_path() == Path.home() / ".wing" / "core" / "config.yaml"
 
     def test_get_wing_home_default(self):
         """Without WING_HOME, returns ~/.wing/core."""

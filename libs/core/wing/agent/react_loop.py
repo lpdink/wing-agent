@@ -518,6 +518,7 @@ class ReActLoop:
                     self._sink.llm_metrics(
                         chunk.usage,
                         duration_ms=int((time.monotonic() - started) * 1000),
+                        provider=getattr(provider, "name", ""),
                         cache_expected_tokens=(
                             observation.expected if observation is not None else None
                         ),

@@ -2,16 +2,20 @@
 
 所有测试共享：
   - WING_SESSIONS_PATH 设为临时目录，避免测试 session 污染
-    用户真实的 ~/.wing/sessions/ 目录。
+    用户真实的 ~/.wing/sessions/ 目录；
+  - WING_HOME 每个测试一个临时目录（见 `_isolate_wing_home`），审计行（wing.db）
+    因此绝不落进开发者真实目录；
   - 自动 mock config，避免加载真实 config.yaml（可能使用旧格式）
-  - 显式安装内置工具注册与 metrics 订阅（`_install_wing`，见下）——
+  - 显式安装内置工具注册与审计订阅（`_install_wing`，见下）——
     顶层 `wing/__init__` 已无 import 副作用（06 步骤）。
 """
 
 import logging
 import os
+import shutil
 import tempfile
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -64,12 +68,32 @@ def _install_wing() -> None:
     SessionManager / AgentTemplate（不经 WingRuntime），必须在此完成与
     `WingRuntime.__init__` 相同的两件事：
       - `import wing.tools`：装饰器注册内置工具；
-      - `wing.audit.install()`：注册 handler 并订阅 EventBus。
+      - `wing.audit.install()`：订阅 EventBus（审计行写 wing.db）。
     """
     import wing.tools  # noqa: F401 — 导入触发装饰器注册
-    from wing.audit import install as install_metrics
+    from wing.audit import install as install_audit
 
-    install_metrics()
+    install_audit()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_wing_home(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """每个测试一枚临时 WING_HOME，并重置进程级 wing.db 单例。
+
+    不隔离的话审计行会写进开发者真实的 ``~/.wing/core/wing.db``。单例按 env 在
+    **首次 get_database() 时**解析路径，所以必须在测试前 reset（丢掉上一个测试
+    的连接）、测试后也 reset（关闭连接再删目录）。
+    """
+    from wing.db import reset_database
+
+    home = Path(tempfile.mkdtemp(prefix="wing-test-home-"))
+    monkeypatch.setenv("WING_HOME", str(home))
+    reset_database()
+    try:
+        yield
+    finally:
+        reset_database()
+        shutil.rmtree(home, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

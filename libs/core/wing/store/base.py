@@ -149,7 +149,7 @@ class SessionUsage(BaseModel):
 
     落 ``metadata.json`` 的 ``usage`` 字段，经 ``/api/session/info`` 与
     ``sync_session`` 快照对前端开放——它是「本会话自身花了多少」的持久账本，
-    与 audit / metrics.json 审计链路无关（那套将来重做，互不读写）。
+    与 audit（wing.db 的 audit_* 追加行）链路无关：那是进程级旁路审计，互不读写。
 
     字段语义是对外契约，客户端据此推导命中率与工作时长：
 
