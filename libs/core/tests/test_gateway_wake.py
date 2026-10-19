@@ -228,6 +228,24 @@ class TestCancel:
         assert "4242" in resp.json()["detail"]
 
 
+class TestCreateReportsCreated:
+    async def test_first_create_is_created_and_repeat_is_a_refresh(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """响应里的 ``created`` 是补偿取消的唯一依据（见 `wing run` 的失败路径）。"""
+        first = (await client.post("/api/wake/create", json=_session_body())).json()
+        assert first["created"] is True
+        again = (await client.post("/api/wake/create", json=_session_body())).json()
+        assert again["created"] is False
+        assert again["wake"]["id"] == first["wake"]["id"]
+        # 不同 on_events 是不同订阅：新的一行，created 回到 true
+        other = (
+            await client.post("/api/wake/create", json=_session_body(on_events="ask"))
+        ).json()
+        assert other["created"] is True
+        assert other["wake"]["id"] != first["wake"]["id"]
+
+
 class TestCancelWriteLostIs503:
     async def test_lost_write_is_not_reported_as_finished(
         self, client: httpx.AsyncClient, wake: WakeService

@@ -50,7 +50,7 @@ async def create_wake(body: WakeCreateRequest, request: Request) -> WakeCreateRe
     """
     server = _get_server(request)
     try:
-        trigger = server.runtime.wake.create(
+        created = server.runtime.wake.create(
             kind=body.kind,
             target_session_id=body.target_session_id,
             source_session_id=body.source_session_id,
@@ -66,7 +66,9 @@ async def create_wake(body: WakeCreateRequest, request: Request) -> WakeCreateRe
         raise HTTPException(status_code=503, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return WakeCreateResponse(wake=build_wake_info(trigger))
+    return WakeCreateResponse(
+        wake=build_wake_info(created.trigger), created=created.created
+    )
 
 
 @router.get(

@@ -242,6 +242,8 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     //    `--notify-to` mistake is reported verbatim rather than swallowed.
     let parent = common::parent_session_id_from_env();
     let answering = args.tool_call_id.is_some();
+    // `created` 决定 send 失败时能不能撤：只有**本次新建**的那一行才是我们的东西。
+    let mut created_by_us = false;
     let (notify, notify_off) = match plan_notify(
         args.no_notify,
         answering,
@@ -251,7 +253,10 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         NotifyPlan::Off(reason) => (None, Some(reason)),
         NotifyPlan::Register(target) => {
             match register_notify(&http, &args, &session_id, &target).await {
-                Ok(notify) => (Some(notify), None),
+                Ok((notify, created)) => {
+                    created_by_us = created;
+                    (Some(notify), None)
+                }
                 Err(e) => (None, Some(format!("off (registration failed: {e})"))),
             }
         }
@@ -268,7 +273,13 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     {
         // The prompt never went out: drop the registration instead of leaving a
         // trigger that would fire on some later completion nobody asked about.
-        if let Some(registered) = notify.as_ref()
+        //
+        // Only our own row. A registration that merely *refreshed* an existing
+        // subscription (`created == false`) belongs to whoever set it up: cancelling
+        // it would destroy their explicit `wing watch --times N -p "..."` — the very
+        // state this command promises never to overwrite — and leave the child with
+        // nobody to wake.
+        if let Some(registered) = notify.as_ref().filter(|_| created_by_us)
             && let Err(cancel_error) = http.cancel_wake(registered.id).await
         {
             tracing::warn!("failed to cancel wake #{}: {cancel_error}", registered.id);
@@ -333,12 +344,13 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
 }
 
 /// 注册唤醒登记（失败只回错误，由调用方降级为警告）。
+/// 注册唤醒；返回值里的 `bool` 是"本次新建"（`CreateWake.created`）。
 async fn register_notify(
     http: &GatewayApiClient,
     args: &RunArgs,
     session_id: &str,
     target: &str,
-) -> Result<NotifyOutput> {
+) -> Result<(NotifyOutput, bool)> {
     let on_events = match args.notify_on.as_deref() {
         Some(raw) => Some(wake::parse_on_events(raw)?),
         None => None,
@@ -358,12 +370,15 @@ async fn register_notify(
         times: None,
     };
     let resp = http.create_wake(&request).await?;
-    Ok(NotifyOutput {
-        id: resp.wake.id,
-        target_session_id: resp.wake.target_session_id,
-        on_events: resp.wake.on_events,
-        prompt: resp.wake.prompt,
-    })
+    Ok((
+        NotifyOutput {
+            id: resp.wake.id,
+            target_session_id: resp.wake.target_session_id,
+            on_events: resp.wake.on_events,
+            prompt: resp.wake.prompt,
+        },
+        resp.created,
+    ))
 }
 
 fn print_text(output: &RunOutput) {

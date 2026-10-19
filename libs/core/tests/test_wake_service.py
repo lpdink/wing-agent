@@ -138,7 +138,7 @@ def _session_trigger(service: WakeService, **overrides: Any):
         "source_session_id": CHILD,
     }
     payload.update(overrides)
-    return service.create(**payload)
+    return service.create(**payload).trigger
 
 
 def _timer_trigger(service: WakeService, **overrides: Any):
@@ -149,7 +149,7 @@ def _timer_trigger(service: WakeService, **overrides: Any):
         "prompt": "ping",
     }
     payload.update(overrides)
-    return service.create(**payload)
+    return service.create(**payload).trigger
 
 
 async def _drain() -> None:
@@ -266,6 +266,25 @@ class TestSameSubscriptionUpserts:
         assert await_second.id == first.id
         assert len(service.list_triggers()) == 1
         assert await_second.remaining_done == 2
+
+    def test_create_reports_whether_it_inserted_or_refreshed(
+        self, service: WakeService
+    ) -> None:
+        """调用方要能分清「我新建的」与「本来就在的」：补偿取消只许撤前者。"""
+        fresh = service.create(
+            kind="session", target_session_id=PARENT, source_session_id=CHILD
+        )
+        assert fresh.created is True
+        again = service.create(
+            kind="session", target_session_id=PARENT, source_session_id=CHILD
+        )
+        assert again.created is False
+        assert again.trigger.id == fresh.trigger.id
+
+        timer = service.create(
+            kind="timer", target_session_id=PARENT, spec="in:30m", prompt="ping"
+        )
+        assert timer.created is True
 
     @pytest.mark.asyncio
     async def test_refresh_resets_the_quota(
@@ -580,6 +599,42 @@ class TestBookkeepingFailure:
         service._on_event(_done())
         await _drain()
         assert len(ports.delivered) == 1
+
+
+class TestTerminalRowsHaveNoSchedule:
+    """终态没有「下一次」：cancel / failed 都要把 `next_fire_at_ms` 清掉。
+
+    留着一份过期排期，`wing wake --list --all` 的 NEXT 列就会给一条已经终结的触发器
+    显示未来时刻（CLI 承诺终态行显示 `-`）。
+    """
+
+    def test_cancel_clears_the_schedule(self, service: WakeService) -> None:
+        trigger = _timer_trigger(service)
+        assert trigger.next_fire_at_ms is not None
+        service.cancel(trigger.id)
+        row = service._store.get(trigger.id)
+        assert row is not None
+        assert (row.state, row.next_fire_at_ms) == ("canceled", None)
+
+    def test_archive_linkage_also_clears_the_schedule(
+        self, service: WakeService
+    ) -> None:
+        trigger = _timer_trigger(service)
+        service.cancel_for_session(PARENT)
+        row = service._store.get(trigger.id)
+        assert row is not None
+        assert (row.state, row.next_fire_at_ms) == ("canceled", None)
+
+    @pytest.mark.asyncio
+    async def test_delivery_failure_clears_the_schedule(
+        self, service: WakeService, ports: FakePorts
+    ) -> None:
+        trigger = _timer_trigger(service)
+        ports.error = LookupError("gone")
+        await service.fire_timer(trigger, service._clock())
+        row = service._store.get(trigger.id)
+        assert row is not None
+        assert (row.state, row.next_fire_at_ms) == ("failed", None)
 
 
 class TestCancelWriteLost:

@@ -31,7 +31,7 @@ from wing.wake.model import (
     parse_on_events,
 )
 from wing.wake.ports import WakePorts
-from wing.wake.service import WakeService, WakeUnavailableError
+from wing.wake.service import CreatedWake, WakeService, WakeUnavailableError
 from wing.wake.spec import (
     SpecError,
     WakeSpec,
@@ -48,6 +48,7 @@ __all__ = [
     "EVENT_DONE",
     "KIND_SESSION",
     "KIND_TIMER",
+    "CreatedWake",
     "STATE_ACTIVE",
     "STATE_CANCELED",
     "STATE_DONE",

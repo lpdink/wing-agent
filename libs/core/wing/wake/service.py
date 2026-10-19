@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Callable
 
 from wing.common.logger import log
@@ -59,6 +60,20 @@ class WakeUnavailableError(RuntimeError):
     与「不武装」配套：DB 打不开时 ``install()`` 什么都不做（订阅都不装），创建因此必须
     如实失败，而不是返回一条谁也读不到的触发器。
     """
+
+
+@dataclass(frozen=True)
+class CreatedWake:
+    """``create()`` 的结果：那条触发器，以及本次是**新建**还是**刷新**。
+
+    ``created=False`` 的意思是「这条订阅本来就在武装，本次只是把配额 / 正文刷成我
+    现在要的」。调用方**不得**把它当成自己的东西去撤销：``wing run`` 在 send 失败时
+    的补偿取消只允许撤掉**本次新建**的那一行——撤一条刷新过的订阅等于销毁用户显式
+    `wing watch --times N -p "..."` 建立的状态，子会话收口时再也无人被叫醒。
+    """
+
+    trigger: WakeTrigger
+    created: bool
 
 
 def _default_clock_ms() -> int:
@@ -127,8 +142,12 @@ class WakeService:
         prompt: str | None = None,
         times: int | None = None,
         created_by: str | None = None,
-    ) -> WakeTrigger:
-        """校验 + 落库 + 叫醒调度器。
+    ) -> CreatedWake:
+        """校验 + 落库（或刷新同源订阅）+ 叫醒调度器。
+
+        Returns:
+            :class:`CreatedWake`——``created=False`` 表示命中了一条已在武装的同源
+            订阅（本次只刷新，没有新增行）。
 
         Raises:
             ValueError: kind / on_events / spec / times 非法或组合非法（含 target == source）
@@ -190,7 +209,7 @@ class WakeService:
                 prompt=prompt_text,
             )
             if refreshed is not None:
-                return refreshed
+                return CreatedWake(trigger=refreshed, created=False)
 
         trigger = self._store.insert(
             kind=kind,
@@ -211,7 +230,7 @@ class WakeService:
             f"source={trigger.source_session_id or '-'} spec={spec_text or '-'}"
         )
         self._scheduler.notify()
-        return trigger
+        return CreatedWake(trigger=trigger, created=True)
 
     def _refresh_existing(
         self,
@@ -571,4 +590,4 @@ class WakeService:
         return times
 
 
-__all__ = ["WakeService", "WakeUnavailableError"]
+__all__ = ["CreatedWake", "WakeService", "WakeUnavailableError"]

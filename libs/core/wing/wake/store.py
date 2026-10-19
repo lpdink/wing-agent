@@ -149,6 +149,10 @@ class WakeStore:
     ) -> bool:
         """改状态（终态）；``next_fire_at_ms`` 给定时一并改写排期。
 
+        终态（非 ``active``）一律**清空** ``next_fire_at_ms``：终结的触发器没有「下一次」，
+        留着过期排期会让 ``--list --all`` 的 NEXT 列说谎（与 ``record_fire`` 判终结时的
+        口径一致）。
+
         Returns:
             写是否真的落库（``Database.execute`` 的返回值）。**调用方必须看它**：
             写不进去意味着一行 ``active`` 触发器会继续被 ``due_timers`` 捞出来，
@@ -159,7 +163,9 @@ class WakeStore:
         if state == STATE_FAILED:
             assignments.append("last_error = ?")
             params.append(error)
-        if next_fire_at_ms is not None:
+        if state != STATE_ACTIVE:
+            assignments.append("next_fire_at_ms = NULL")
+        elif next_fire_at_ms is not None:
             assignments.append("next_fire_at_ms = ?")
             params.append(next_fire_at_ms)
         params.append(trigger_id)
@@ -244,7 +250,11 @@ class WakeStore:
         if str(rows[0]["state"]) != STATE_ACTIVE:
             return False
         if not db.execute(
-            "UPDATE wake_trigger SET state = ? WHERE id = ? AND state = ?",
+            # 终态不再有"下一次"：排期一并清掉（否则 `--list --all` 的 NEXT 列
+            # 会给一条已取消的触发器显示过期时刻）。
+            "UPDATE wake_trigger "
+            "SET state = ?, next_fire_at_ms = NULL "
+            "WHERE id = ? AND state = ?",
             (STATE_CANCELED, trigger_id, STATE_ACTIVE),
         ):
             # **写丢失 ≠ 早就终结**：两者都让"取消没发生"，但原因不同，调用方
@@ -271,7 +281,9 @@ class WakeStore:
         if not ids:
             return 0, 0
         written = db.executemany(
-            "UPDATE wake_trigger SET state = ? WHERE id = ? AND state = ?",
+            "UPDATE wake_trigger "
+            "SET state = ?, next_fire_at_ms = NULL "
+            "WHERE id = ? AND state = ?",
             [(STATE_CANCELED, trigger_id, STATE_ACTIVE) for trigger_id in ids],
         )
         return (len(ids) if written else 0), len(ids)

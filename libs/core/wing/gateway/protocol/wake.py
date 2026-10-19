@@ -78,6 +78,13 @@ class WakeCreateResponse(BaseModel):
     """``POST /api/wake/create`` 响应。"""
 
     wake: WakeInfo
+    created: bool = Field(
+        default=True,
+        description=(
+            "true = 本次新建了一行；false = 命中同源 active 订阅，本次只是刷新"
+            "（配额 / 正文按本次请求更新，id 不变）。补偿取消只允许撤掉 created=true 的那条。"
+        ),
+    )
 
 
 class WakeListResponse(BaseModel):

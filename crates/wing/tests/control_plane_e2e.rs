@@ -100,6 +100,10 @@ struct StubState {
     /// Status served by `/api/wake/cancel` for every id (the "even the cleanup
     /// failed" path: the CLI must still exit non-zero and keep the why).
     wake_cancel_status: u16,
+    /// `POST /api/wake/create` answers `created: false` (the 同源订阅 already
+    /// existed — the caller merely refreshed it, so it is not the caller's row
+    /// to cancel).
+    wake_create_is_refresh: bool,
 }
 
 impl Default for StubState {
@@ -130,6 +134,7 @@ impl Default for StubState {
             wake_list_status: 200,
             send_status: 200,
             wake_cancel_status: 200,
+            wake_create_is_refresh: false,
         }
     }
 }
@@ -601,6 +606,8 @@ fn route(
                     "provider_name": "stub",
                     "api_url": "http://stub",
                     "tools": ["Bash"],
+                    // Tags echo back like the real gateway (create stores them).
+                    "tags": state.tags,
                     "total_tokens": 0,
                     "context_window_tokens": 128000,
                     "thinking": state.updated.get("thinking").cloned().unwrap_or(json!(false)),
@@ -661,7 +668,9 @@ fn route(
                 .unwrap_or_else(|| "done,ask".to_string());
             (
                 200,
-                json!({"wake": {
+                json!({
+                    "created": !state.wake_create_is_refresh,
+                    "wake": {
                     "id": 7,
                     "kind": kind,
                     "target_session_id": request["target_session_id"],
@@ -2229,6 +2238,8 @@ async fn run_notify_registration_and_its_four_opt_outs() {
             "ask",
             "--notify-prompt",
             "look at the failing test",
+            "--tag",
+            "dispatched",
         ],
         &stub,
         &[],
@@ -2335,6 +2346,23 @@ async fn run_notify_registration_and_its_four_opt_outs() {
         "send 失败必须撤回登记：{:?}",
         stub.trace()
     );
+
+    // 本次只是**刷新**同源订阅（`created=false`）：send 失败也**不能**撤它。
+    // 那条订阅是用户显式 `wing watch --times 3 -p "..."` 建立的——撤掉等于销毁他
+    // 设的配额与正文，子会话收口时再也无人被叫醒。
+    let cancels_before = stub.path_hits("/api/wake/cancel").len();
+    stub.with(|state| state.wake_create_is_refresh = true);
+    let (code, stdout, stderr) =
+        run_wing_env(&["run", "-p", "x", "--notify-to", "parent-1"], &stub, &[]).await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("Failed to send prompt"), "{stderr}");
+    assert_eq!(
+        stub.path_hits("/api/wake/cancel").len(),
+        cancels_before,
+        "刷新过的订阅不是本次的，不得撤销：{:?}",
+        stub.trace()
+    );
+    stub.with(|state| state.wake_create_is_refresh = false);
 
     // 连撤回都失败：仍然是"prompt 没发出去"这个错误（不是注册错误），
     // 但告警行必须留下"触发器没撤掉"的痕迹。

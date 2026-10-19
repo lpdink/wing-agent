@@ -1625,6 +1625,12 @@ pub struct WakeInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeCreateResponse {
     pub wake: WakeInfo,
+    /// `true` = 本次新建了一行；`false` = 命中同源 active 订阅，本次只是刷新。
+    ///
+    /// 缺省 `true`（老网关只会插新行）：补偿取消只允许撤掉 `created=true` 的那条，
+    /// 撤一条刷新过的订阅会销毁用户显式建立的状态。
+    #[serde(default = "default_true")]
+    pub created: bool,
 }
 
 /// `GET /api/wake/list` 响应（`?all=true` 含已终结的）。

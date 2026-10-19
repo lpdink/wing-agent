@@ -37,7 +37,13 @@
 刷新时 `times` 与 `prompt` 都是**三态**——不给 = **保持不变**，显式给了才覆盖。隐式登记
 （`wing run -r` 的 notify）两者都不带，所以既不会把 `wing watch --times 3` 剩下的配额降级成 1，
 也不会把 `wing watch -p "..."` 设的自定义正文清回内置信封（想主动清掉只能取消重建）。
-被 stall 过的订阅刷新后重新武装。已存在同三元的 `active` 订阅时，`POST /api/wake/create` **不新增行**，而是把那条刷成
+被 stall 过的订阅刷新后重新武装。
+
+**例外：身份含 `on_events`** —— `wing watch X --on done` 与隐式缺省的 `done,ask` 是**两条不同的
+订阅**（意图不同：只要收口 vs 收口与提问都要）。同一次收口因此会被投递两封，受目标 inbox 的
+drain-and-merge 缓解（多半并入同一轮）。这是刻意的：把「只看 done」与「都要看」合并成一行，等于
+让后者的 `ask` 悄悄失效。`POST /api/wake/create` 的响应因此带 `created`（`false` = 本次只是刷新
+了既有订阅）——调用方**不得**撤销一条 `created=false` 的订阅，那不是它建的。已存在同三元的 `active` 订阅时，`POST /api/wake/create` **不新增行**，而是把那条刷成
 「下一次完成时告诉我」（保留 `id` 与 `fire_count`，配额与 `prompt` 取本次请求的值，清掉
 `last_error`）。理由：一条 active 订阅表达的是**状态**，不是队列——多插一行会让同一个提问 /
 同一个收口被投递多次（`ask` 从不消耗配额，这个放大在整个提问期间都成立）；父会话若照着两条
@@ -135,8 +141,9 @@ prompt 是必填，它总是出现在 `#<n>` 出处行的下面。
 组合）→ **400**；`wing.db` 不可用（唤醒整体未武装）→ **503**。
 
 `WakeInfo` 字段：`id, kind, target_session_id, source_session_id, on_events, spec,
-prompt, state, fire_count, last_fire_at, last_error, created_at, next_fire_at`（后四个时间
-是本地 naive ISO，`null` = 不适用）。
+prompt, state, fire_count, last_fire_at, last_error, created_at, next_fire_at`（`last_fire_at` /
+`created_at` / `next_fire_at` 三个时间字段是本地 naive ISO，`null` = 不适用；终态的 `next_fire_at`
+恒为 `null`）。
 
 `cancel` 一个已终结的触发器 = `200 {ok: true, canceled: false}`（幂等 no-op，不是错误）。
 
@@ -163,7 +170,8 @@ wing run -p "..." [--no-notify] [--notify-to <SID>] [--notify-on done,ask] [--no
   exit 1 且消息可行动：`no target session: set WING_SESSION_ID or pass --to <sid>`；
   `wing run` 的隐式默认两者皆无 → **静默关闭**，文本输出 `notify: off (no parent session)`。
 - `wing run` 的 notify 注册在 **发 prompt 之前**（子会话极快收口也漏不了），send 失败时
-  best-effort 取消刚注册的触发器；注册失败（旧网关 / 网络 / `--notify-to` 指向子会话本身
+  best-effort 取消**本次新建**的触发器（响应 `created=false` = 只刷新了既有订阅，那一条不撤：
+  它是用户显式建立的，撤掉会连同配额与正文一起销毁）；注册失败（旧网关 / 网络 / `--notify-to` 指向子会话本身
   被 400 拦下）只 warn，`run` 不失败（与血缘的软机制同款）。
 - 改时间 / 改 prompt = 取消旧的再建一条（没有「编辑」语义）。
 - **stdio 参数过滤器**（`stdio::filter_unknown_args`）：`main.rs` 在 clap 之前按原始 argv
