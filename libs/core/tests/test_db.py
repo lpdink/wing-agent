@@ -177,7 +177,6 @@ class TestFirstOpenLockRetry:
     ) -> None:
         import wing.db.database as db_mod
 
-        monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 3)
         monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
         attempts = _flaky_open(monkeypatch, fail_times=1)
 
@@ -193,32 +192,45 @@ class TestFirstOpenLockRetry:
         """打不开文件（路径被占成目录）不是竞态，重试只是白等。"""
         import wing.db.database as db_mod
 
-        monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 3)
         monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
         attempts = _flaky_open(
             monkeypatch, fail_times=99, message="unable to open database file"
         )
-        blocked = tmp_path / "wing.db"
-        blocked.mkdir()
-
-        db = Database(blocked)
-
-        assert not db.ready
-        assert len(attempts) == 1
-
-    def test_exhausted_retries_degrade(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import wing.db.database as db_mod
-
-        monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 3)
-        monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
-        attempts = _flaky_open(monkeypatch, fail_times=99)
 
         db = Database(tmp_path / "wing.db")
 
         assert not db.ready
-        assert len(attempts) == 3
+        assert len(attempts) == 1
+
+    def test_retries_until_deadline_then_degrades(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """锁一直在 → 在时限内反复重试，到点才降级（不是第一次失败就放弃）。"""
+        import wing.db.database as db_mod
+
+        monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0.01)
+        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0.1)
+        attempts = _flaky_open(monkeypatch, fail_times=10**9)
+
+        db = Database(tmp_path / "wing.db")
+
+        assert not db.ready
+        assert len(attempts) > 1
+
+    def test_deadline_exhausted_degrades_immediately(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """时限已到 → 锁类错误也不再重试（总时长上界是硬约束）。"""
+        import wing.db.database as db_mod
+
+        monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
+        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0)
+        attempts = _flaky_open(monkeypatch, fail_times=1)
+
+        db = Database(tmp_path / "wing.db")
+
+        assert not db.ready
+        assert len(attempts) == 1
 
     def test_real_lock_from_another_connection_is_retryable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wing_warnings: list[str]
@@ -227,8 +239,8 @@ class TestFirstOpenLockRetry:
         import wing.db.database as db_mod
 
         monkeypatch.setattr(db_mod, "_OPEN_BUSY_TIMEOUT_MS", 20)
-        monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 2)
-        monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
+        monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0.01)
+        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0.2)
         attempts = _counting_open(monkeypatch)
 
         path = tmp_path / "wing.db"
@@ -244,8 +256,8 @@ class TestFirstOpenLockRetry:
             holder.execute("ROLLBACK")
             holder.close()
 
-        # 真的是锁类错误，且真的重试满了次数（不是别的错误恰好降级）
-        assert len(attempts) == 2
+        # 真的是锁类错误，且确实在时限内反复重试（不是别的错误恰好降级）
+        assert len(attempts) >= 2
         assert any(
             "wing.db disabled" in message and "database is locked" in message
             for message in wing_warnings
@@ -260,7 +272,6 @@ class TestFirstOpenLockRetry:
         """路径被占成目录走的是真实错误路径（不是人造异常），同样只尝试一次。"""
         import wing.db.database as db_mod
 
-        monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 3)
         monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
         attempts = _counting_open(monkeypatch)
         blocked = tmp_path / "wing.db"

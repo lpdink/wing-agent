@@ -7,10 +7,11 @@
 失败（返回 ``False``）、查询返回空列表，异常绝不逃出——审计与唤醒都不能把 agent
 带崩，DB 打不开时网关必须照常工作。
 
-**锁冲突不是降级理由**：把库转成 WAL 需要排他访问，多个进程同一刻首次打开同一个
-新库时，输家会拿到 ``database is locked``。那是良性竞态（赢家毫秒级就迁移完），
-整段打开因此对锁类错误重试几次；只有重试耗尽才降级。转换期的 ``busy_timeout``
-故意设得很短——否则一次竞态会在事件循环线程上冻满 5 秒。
+**并发首开不是降级理由**：把库转成 WAL 需要排他访问、迁移事务也可能被赢家挡住，
+多个进程同一刻首次打开同一个新库时输家会拿到 ``database is locked``。那是良性竞态
+（赢家毫秒级就迁移完），整段打开因此对锁类错误重试到总时限（``_OPEN_DEADLINE_S``）。
+打开期（转 WAL + 迁移）的 ``busy_timeout`` 故意设得很短——否则一次竞态会在事件循环
+线程上冻满 5 秒；迁移成功后设回稳态值。
 
 连接归属：单连接、只在事件循环线程使用（``check_same_thread`` 保持默认 ``True``）；
 写入一律同步 + 自动提交（``isolation_level=None``），单条 INSERT 微秒级，不引入写
@@ -28,15 +29,14 @@ from typing import Any
 from wing.common.logger import log
 from wing.db.migrations import MIGRATIONS, SCHEMA_VERSION
 
-#: 打开重试次数（含首次）与退避基数。只在**锁类**错误上重试。
-_OPEN_ATTEMPTS = 5
+#: 打开重试的退避（基数 / 上限）与整个打开的总时限。只在**锁类**错误上重试，
+#: 预算按时间算——到点即降级（它跑在事件循环线程上）。
 _OPEN_RETRY_DELAY_S = 0.05
+_OPEN_RETRY_DELAY_MAX_S = 0.2
+_OPEN_DEADLINE_S = 2.0
 
 #: 打开期（转 WAL + 迁移）的等锁上限；稳态值是 5000（见下）。
 _OPEN_BUSY_TIMEOUT_MS = 200
-
-#: 整个打开过程的总时长上界（秒）。到点即降级——它跑在事件循环线程上。
-_OPEN_DEADLINE_S = 2.0
 
 #: 稳态写等锁上限（契约值：5000）。
 _BUSY_TIMEOUT_MS = 5000
@@ -101,13 +101,17 @@ class Database:
     # ── 打开 + 迁移 ───────────────────────────────
 
     def _open(self) -> None:
-        """建目录 → 连接 → pragma → 迁移。锁类错误重试，其余立即降级。
+        """建目录 → 连接 → pragma → 迁移。锁类错误重试到时限，其余立即降级。
 
-        总时长有上界（``_OPEN_DEADLINE_S``）：这个调用点在事件循环线程上（懒打开
-        发生在 ``EventBus.emit`` 里），最坏情况也必须是一秒级而不是几十秒。
+        预算按**时间**算（``_OPEN_DEADLINE_S``），不按次数：迁移期的写锁冲突是立即
+        失败（内层读快照让升级直接 BUSY，不走 busy handler），按次数算的预算会被
+        这种「几乎不耗时」的尝试迅速烧穿。总时长上界必须存在——这个调用点在事件
+        循环线程上（懒打开发生在 ``EventBus.emit`` 里）。
         """
         deadline = time.monotonic() + _OPEN_DEADLINE_S
-        for attempt in range(1, _OPEN_ATTEMPTS + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 self._open_once()
             except SchemaVersionTooNew as exc:
@@ -115,14 +119,12 @@ class Database:
                 return
             except Exception as exc:
                 self._release_connection()
-                if (
-                    attempt == _OPEN_ATTEMPTS
-                    or not _is_lock_error(exc)
-                    or time.monotonic() >= deadline
-                ):
+                remaining = deadline - time.monotonic()
+                if not _is_lock_error(exc) or remaining <= 0:
                     self._degrade(exc)
                     return
-                time.sleep(_OPEN_RETRY_DELAY_S * attempt)
+                backoff = min(_OPEN_RETRY_DELAY_S * attempt, _OPEN_RETRY_DELAY_MAX_S)
+                time.sleep(min(backoff, remaining))
                 continue
             self._ready = True
             return
@@ -157,11 +159,18 @@ class Database:
                 continue
             conn.execute("BEGIN")
             try:
-                # 版本判定必须发生在**拿到写锁之后**：并发首开时另一个进程可能刚把
-                # 这一版迁完并提交，此刻本次事务的快照仍是旧的——照旧跑 DDL 会撞
+                # 版本判定必须在事务内重读：并发首开时另一个进程可能刚把这一版迁完
+                # 并提交，此刻本次事务的快照仍是旧的——照旧跑 DDL 会撞
                 # "table … already exists"（不是锁类错误，一次就把库判死）。重读即
-                # 跳过；若快照已过期，SQLite 会报 database is locked，落进外层重试。
-                if _user_version(conn) >= version:
+                # 跳过；快照若真的过期，SQLite 拒绝在过期快照上写（database is
+                # locked），落进外层重试。重读同样要复核「版本过新」：外层那次读
+                # 也可能是过期快照（更新的代码刚迁完 v2），放过去就等于用旧 schema 写。
+                observed = _user_version(conn)
+                if observed > SCHEMA_VERSION:
+                    raise SchemaVersionTooNew(
+                        f"user_version={observed} > known {SCHEMA_VERSION}"
+                    )
+                if observed >= version:
                     conn.execute("COMMIT")
                     continue
                 for statement in split_statements(script):
