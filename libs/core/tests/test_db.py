@@ -6,6 +6,7 @@
   - 未知高版本 → ready=False 且不写；
   - 打开失败（路径被占成目录）→ ready=False、execute 返回 False、异常不外泄、只留一条 ERROR；
   - 首开锁竞态（并发转 WAL）→ 重试，不因良性冲突永久降级；
+  - 迁移期并发（过期快照读到旧版本）→ 拿到写锁后重读版本并跳过，不撞「表已存在」；
   - 运行期写失败 → 首次一条 WARNING，此后静默；
   - executemany / query 的正常与异常路径；
   - 单例 get / close / reset 语义。
@@ -134,6 +135,31 @@ class TestMigrationRollback:
         fixed.close()
 
 
+class TestStaleMigrationSnapshot:
+    def test_already_applied_version_is_skipped_inside_the_transaction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """版本判定必须在**拿到写锁之后**重读——否则并发首开会把库判死。
+
+        并发首开的时序：赢家进了迁移事务（未提交），输家读到旧版本（0）→ 也进来跑
+        DDL → 拿到锁时赢家已提交 → "table … already exists"（**不是**锁类错误，
+        一次就永久降级）。这里用「同一版本出现两次」把那个**过期快照**确定性地做出来
+        （循环外读到的 current 是 0，第一条迁完后它不是 1 了，但局部变量没更新）。
+        """
+        import wing.db.database as db_mod
+
+        v1_script = MIGRATIONS[0][1]
+        monkeypatch.setattr(db_mod, "MIGRATIONS", ((1, v1_script), (1, v1_script)))
+        monkeypatch.setattr(db_mod, "SCHEMA_VERSION", 1)
+
+        db = Database(tmp_path / "wing.db")
+
+        assert db.ready
+        assert _tables(db) == {"audit_llm_call", "audit_tool_call", "audit_compaction"}
+        assert db.query("PRAGMA user_version")[0][0] == 1
+        db.close()
+
+
 # ============================================================
 # 首开锁竞态
 # ============================================================
@@ -195,7 +221,7 @@ class TestFirstOpenLockRetry:
         assert len(attempts) == 3
 
     def test_real_lock_from_another_connection_is_retryable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wing_warnings: list[str]
     ) -> None:
         """真 SQLite 的锁冲突（另一连接持写事务）走的就是重试路径，不是「库坏了」。"""
         import wing.db.database as db_mod
@@ -203,6 +229,7 @@ class TestFirstOpenLockRetry:
         monkeypatch.setattr(db_mod, "_OPEN_BUSY_TIMEOUT_MS", 20)
         monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 2)
         monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
+        attempts = _counting_open(monkeypatch)
 
         path = tmp_path / "wing.db"
         holder = sqlite3.connect(path, isolation_level=None)
@@ -217,8 +244,47 @@ class TestFirstOpenLockRetry:
             holder.execute("ROLLBACK")
             holder.close()
 
+        # 真的是锁类错误，且真的重试满了次数（不是别的错误恰好降级）
+        assert len(attempts) == 2
+        assert any(
+            "wing.db disabled" in message and "database is locked" in message
+            for message in wing_warnings
+        ), wing_warnings
+
         # 锁放开后同一个库重新打开即成功——上面那次降级没有污染文件
         assert Database(path).ready
+
+    def test_real_non_lock_error_is_tried_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """路径被占成目录走的是真实错误路径（不是人造异常），同样只尝试一次。"""
+        import wing.db.database as db_mod
+
+        monkeypatch.setattr(db_mod, "_OPEN_ATTEMPTS", 3)
+        monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0)
+        attempts = _counting_open(monkeypatch)
+        blocked = tmp_path / "wing.db"
+        blocked.mkdir()
+
+        db = Database(blocked)
+
+        assert not db.ready
+        assert len(attempts) == 1
+
+
+def _counting_open(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """包一层 ``Database._open_once`` 记尝试次数（转发到真实实现，不注入失败）。"""
+    import wing.db.database as db_mod
+
+    real = db_mod.Database._open_once
+    attempts: list[int] = []
+
+    def wrapped(self: Database) -> None:
+        attempts.append(len(attempts) + 1)
+        real(self)
+
+    monkeypatch.setattr(db_mod.Database, "_open_once", wrapped)
+    return attempts
 
 
 def _flaky_open(
@@ -265,6 +331,15 @@ class TestExecuteAndQuery:
             "s1",
             "s2",
         ]
+        db.close()
+
+    def test_executemany_error_returns_false(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "wing.db")
+
+        assert (
+            db.executemany("INSERT INTO no_such_table (x) VALUES (?)", [(1,), (2,)])
+            is False
+        )
         db.close()
 
     def test_query_error_returns_empty(self, tmp_path: Path) -> None:

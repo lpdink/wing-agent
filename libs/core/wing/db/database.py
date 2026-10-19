@@ -32,8 +32,11 @@ from wing.db.migrations import MIGRATIONS, SCHEMA_VERSION
 _OPEN_ATTEMPTS = 5
 _OPEN_RETRY_DELAY_S = 0.05
 
-#: 转换期（`journal_mode=WAL` 需要排他访问）的等锁上限；稳态值是 5000（见下）。
+#: 打开期（转 WAL + 迁移）的等锁上限；稳态值是 5000（见下）。
 _OPEN_BUSY_TIMEOUT_MS = 200
+
+#: 整个打开过程的总时长上界（秒）。到点即降级——它跑在事件循环线程上。
+_OPEN_DEADLINE_S = 2.0
 
 #: 稳态写等锁上限（契约值：5000）。
 _BUSY_TIMEOUT_MS = 5000
@@ -41,6 +44,10 @@ _BUSY_TIMEOUT_MS = 5000
 
 class SchemaVersionTooNew(RuntimeError):
     """磁盘上的 ``user_version`` 高于本代码认识的版本——不猜、不降级写。"""
+
+
+def _user_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
 def _is_lock_error(exc: BaseException) -> bool:
@@ -94,7 +101,12 @@ class Database:
     # ── 打开 + 迁移 ───────────────────────────────
 
     def _open(self) -> None:
-        """建目录 → 连接 → pragma → 迁移。锁类错误重试，其余立即降级。"""
+        """建目录 → 连接 → pragma → 迁移。锁类错误重试，其余立即降级。
+
+        总时长有上界（``_OPEN_DEADLINE_S``）：这个调用点在事件循环线程上（懒打开
+        发生在 ``EventBus.emit`` 里），最坏情况也必须是一秒级而不是几十秒。
+        """
+        deadline = time.monotonic() + _OPEN_DEADLINE_S
         for attempt in range(1, _OPEN_ATTEMPTS + 1):
             try:
                 self._open_once()
@@ -103,7 +115,11 @@ class Database:
                 return
             except Exception as exc:
                 self._release_connection()
-                if attempt == _OPEN_ATTEMPTS or not _is_lock_error(exc):
+                if (
+                    attempt == _OPEN_ATTEMPTS
+                    or not _is_lock_error(exc)
+                    or time.monotonic() >= deadline
+                ):
                     self._degrade(exc)
                     return
                 time.sleep(_OPEN_RETRY_DELAY_S * attempt)
@@ -116,14 +132,13 @@ class Database:
         conn = sqlite3.connect(self._path, isolation_level=None)
         conn.row_factory = sqlite3.Row
         self._conn = conn
-        # 转 WAL 要排他访问：并发首开时输家一直等到 busy_timeout 才拿到
-        # "database is locked"。这里只等一小会儿（冲突交给外层重试），稳态的
-        # 写等锁再设回 5s。
+        # 打开期（转 WAL + 迁移）的等锁上限故意很短：冲突交给外层重试，稳态的
+        # 写等锁在成功后设回 5s。否则一次良性竞态会在事件循环线程上冻满 5 秒。
         conn.execute(f"PRAGMA busy_timeout={_OPEN_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         self._migrate(conn)
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """按 ``MIGRATIONS`` 升级到 ``SCHEMA_VERSION``（已是最新则 no-op）。
@@ -131,7 +146,7 @@ class Database:
         每条迁移连同 ``PRAGMA user_version`` 在同一事务里：半截 schema 会让下一次
         启动重跑同一迁移并再次失败（永久降级），所以失败必须整体回滚。
         """
-        current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        current = _user_version(conn)
         if current > SCHEMA_VERSION:
             raise SchemaVersionTooNew(
                 f"user_version={current} > known {SCHEMA_VERSION}"
@@ -142,6 +157,13 @@ class Database:
                 continue
             conn.execute("BEGIN")
             try:
+                # 版本判定必须发生在**拿到写锁之后**：并发首开时另一个进程可能刚把
+                # 这一版迁完并提交，此刻本次事务的快照仍是旧的——照旧跑 DDL 会撞
+                # "table … already exists"（不是锁类错误，一次就把库判死）。重读即
+                # 跳过；若快照已过期，SQLite 会报 database is locked，落进外层重试。
+                if _user_version(conn) >= version:
+                    conn.execute("COMMIT")
+                    continue
                 for statement in split_statements(script):
                     conn.execute(statement)
                 conn.execute(f"PRAGMA user_version = {version}")
