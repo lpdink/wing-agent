@@ -7,6 +7,11 @@
 失败（返回 ``False``）、查询返回空列表，异常绝不逃出——审计与唤醒都不能把 agent
 带崩，DB 打不开时网关必须照常工作。
 
+**锁冲突不是降级理由**：把库转成 WAL 需要排他访问，多个进程同一刻首次打开同一个
+新库时，输家会拿到 ``database is locked``。那是良性竞态（赢家毫秒级就迁移完），
+整段打开因此对锁类错误重试几次；只有重试耗尽才降级。转换期的 ``busy_timeout``
+故意设得很短——否则一次竞态会在事件循环线程上冻满 5 秒。
+
 连接归属：单连接、只在事件循环线程使用（``check_same_thread`` 保持默认 ``True``）；
 写入一律同步 + 自动提交（``isolation_level=None``），单条 INSERT 微秒级，不引入写
 线程、不做批处理。
@@ -15,6 +20,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -22,9 +28,27 @@ from typing import Any
 from wing.common.logger import log
 from wing.db.migrations import MIGRATIONS, SCHEMA_VERSION
 
+#: 打开重试次数（含首次）与退避基数。只在**锁类**错误上重试。
+_OPEN_ATTEMPTS = 5
+_OPEN_RETRY_DELAY_S = 0.05
+
+#: 转换期（`journal_mode=WAL` 需要排他访问）的等锁上限；稳态值是 5000（见下）。
+_OPEN_BUSY_TIMEOUT_MS = 200
+
+#: 稳态写等锁上限（契约值：5000）。
+_BUSY_TIMEOUT_MS = 5000
+
 
 class SchemaVersionTooNew(RuntimeError):
     """磁盘上的 ``user_version`` 高于本代码认识的版本——不猜、不降级写。"""
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """是否锁类错误（SQLITE_BUSY / SQLITE_LOCKED 都被 sqlite3 报成 OperationalError）。"""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
 
 
 def split_statements(script: str) -> list[str]:
@@ -70,19 +94,36 @@ class Database:
     # ── 打开 + 迁移 ───────────────────────────────
 
     def _open(self) -> None:
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self._path, isolation_level=None)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            self._conn = conn
-            self._migrate(conn)
-        except Exception as exc:
-            self._degrade(exc)
+        """建目录 → 连接 → pragma → 迁移。锁类错误重试，其余立即降级。"""
+        for attempt in range(1, _OPEN_ATTEMPTS + 1):
+            try:
+                self._open_once()
+            except SchemaVersionTooNew as exc:
+                self._degrade(exc)
+                return
+            except Exception as exc:
+                self._release_connection()
+                if attempt == _OPEN_ATTEMPTS or not _is_lock_error(exc):
+                    self._degrade(exc)
+                    return
+                time.sleep(_OPEN_RETRY_DELAY_S * attempt)
+                continue
+            self._ready = True
             return
-        self._ready = True
+
+    def _open_once(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self._path, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        self._conn = conn
+        # 转 WAL 要排他访问：并发首开时输家一直等到 busy_timeout 才拿到
+        # "database is locked"。这里只等一小会儿（冲突交给外层重试），稳态的
+        # 写等锁再设回 5s。
+        conn.execute(f"PRAGMA busy_timeout={_OPEN_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        self._migrate(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """按 ``MIGRATIONS`` 升级到 ``SCHEMA_VERSION``（已是最新则 no-op）。
@@ -112,6 +153,10 @@ class Database:
 
     def _degrade(self, exc: BaseException) -> None:
         """关掉连接并留一行 ERROR；之后不再有任何日志。"""
+        self._release_connection()
+        log.error(f"wing.db disabled at {self._path}: {exc!r}")
+
+    def _release_connection(self) -> None:
         self._ready = False
         conn, self._conn = self._conn, None
         if conn is not None:
@@ -119,7 +164,6 @@ class Database:
                 conn.close()
             except Exception:
                 pass
-        log.error(f"wing.db disabled at {self._path}: {exc!r}")
 
     # ── 读 / 写 ───────────────────────────────────
 

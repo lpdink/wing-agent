@@ -32,14 +32,18 @@
 ### `core/wing.db`（进程级 SQLite）
 
 审计与唤醒的旁路库：**与会话持久化正交**（会话数据仍在 `sessions/` 的文件里，一行没搬）。
-`wing/db/` 打开时设 `journal_mode=WAL` / `synchronous=NORMAL` / `busy_timeout=5000`，按
-`PRAGMA user_version` 跑 `MIGRATIONS`；`user_version` 高于代码已知版本时不猜、不降级写
-（记 ERROR 后整个库降级）。
+`wing/db/` 打开时设 `journal_mode=WAL` / `synchronous=NORMAL` / `busy_timeout=5000`（转 WAL
+那一小段用 200ms，避免一次锁冲突冻住事件循环），按 `PRAGMA user_version` 跑 `MIGRATIONS`；
+`user_version` 高于代码已知版本时不猜、不降级写（记 ERROR 后整个库降级）。
 
 **打开失败即降级**：打一行 ERROR（带路径与异常）后 `ready=False`，此后所有读写作 no-op、
 不再刷日志——库坏了网关照常工作，只是没有审计行。迁移失败同样整体回滚并降级（半截 schema
-会让下一次启动永久失败）。本期审计**只写不读**（没有观测端点、没有保留期策略），需要看数据
-时直接用 `sqlite3` 读。
+会让下一次启动永久失败）。**首次打开的锁冲突不算「坏了」**：多个进程同时首开新库时，把库
+转成 WAL 会抢排他锁，输家重试几次（`database is locked` 是良性竞态，不是降级理由）。
+
+库是**懒创建**的：网关启动时不建文件，第一条审计事件到来时才打开并迁移。因此一轮没有任何
+可审计事实的对话（无 usage、工具结果又全是中断合成的）不会留下 `wing.db`。本期审计**只写
+不读**（没有观测端点、没有保留期策略），需要看数据时直接用 `sqlite3` 读。
 
 `metrics.json`（全局 / 会话两份）是**废止**的旧实现：每条事件读整份 JSON → 聚合 →
 tmp+fsync+rename 重写，给流式输出加延迟。历史文件保留在盘上（不主动删用户文件），但不再
