@@ -35,13 +35,17 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 pub mod clipboard_protocol;
+pub mod cursor;
 pub mod stdin_proxy;
 
 pub use clipboard_protocol::ClipboardEvent;
 pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
+pub use cursor::CursorGate;
 
-pub type WingTerminal = Terminal<CrosstermBackend<Stdout>>;
+/// 唯一的终端类型：`CursorGate` 是出帧口的 backend 装饰，让**稳态**的一帧只以一次 write
+/// 落到终端（`?25h` / `CUP` 只在真变化时发，见 [`cursor`]）。
+pub type WingTerminal = Terminal<CursorGate<CrosstermBackend<Stdout>>>;
 
 /// Events from the terminal (keyboard, mouse, resize, paste, focus).
 #[derive(Debug)]
@@ -262,7 +266,8 @@ fn init_terminal_with(enter: fn(&mut Stdout) -> io::Result<()>) -> Result<WingTe
     begin_tui_session()?;
     let mut stdout = io::stdout();
     let entered = enter(&mut stdout);
-    let built = entered.and_then(|()| Terminal::new(CrosstermBackend::new(stdout)));
+    let built =
+        entered.and_then(|()| Terminal::new(CursorGate::new(CrosstermBackend::new(stdout))));
     match built {
         Ok(terminal) => Ok(terminal),
         Err(e) => {
@@ -335,6 +340,9 @@ pub fn end_tui_session() -> io::Result<()> {
 /// file (so a new draw path cannot slip past the pass unnoticed), and
 /// `tests/vs16_row_drift.rs` paints through this function and checks the cell
 /// the backend receives.
+///
+/// 光标的两条收尾序列（`?25h` / `CUP`）由**装配处**的 backend 装饰去重，不在这里：
+/// ratatui 在闭包之外发它们，唯一能拦到的位置是 [`Backend`]（见 [`cursor`]）。
 pub fn draw_frame<B, F>(terminal: &mut Terminal<B>, render: F) -> Result<(), B::Error>
 where
     B: Backend,

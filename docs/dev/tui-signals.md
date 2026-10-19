@@ -10,6 +10,9 @@
 
 OSC 7501 = [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)（Mitchell Hashimoto 起草，2026-10 发布）：程序用 `ESC ] 7501 ; state=…:app=…:msg=<base64> ST` 告诉终端自己在干什么；终端/面板自行决定怎么展示（标签页角标、通知、未读清单）。wing 只发**根记录**、`app=wing`。它解决的是标题通道解决不了的问题：机器读标题需要**每个消费者**为每个程序手写正则（读标题/屏幕猜测），而协议是机器可读、一次发射全生态通用。
 
+光标转义不在这三类之内——它由帧收尾（ratatui）写出，与会话状态无关，见文末
+[「光标转义：只发变化」](#光标转义只发变化tuicursorrs)。
+
 ## 状态映射（`app/projection.rs` 等）
 
 | wing 事件 / 状态 | 报告 |
@@ -25,6 +28,51 @@ OSC 7501 = [Program Status Protocol](https://www.superlogical.com/rex/docs/build
 | `Done` 时记录仍停在 `working/blocked` | `idle`（`turn_result` 丢失时的兜底；`done/error` 不被覆盖） |
 | `SyncSession`（订阅 / 会话切换 / 重连） | 以快照重投影：重放的面板队列 → `blocked`，回合在飞 → `working`，否则 `idle` |
 | 退出 | 不写任何报告（见设计决策） |
+
+## 光标转义：只发变化（`tui/cursor.rs`）
+
+光标不在上表之列，但它同样是一族终端状态，而且它的写者不是 App 而是 **ratatui 的帧收尾**：
+`Terminal::draw` 每帧无条件 `show_cursor` / `hide_cursor` + `set_cursor_position`，而
+`CrosstermBackend` 把三条都实现成 `execute!`（自带 flush）。于是**一帧会切成两次 write**：
+先是「diff + SGR 复位 + `?25h`」（此刻物理光标停在 diff 最后一个被改写的格子上、而且可见，
+是一个完整可呈现的画面），然后才是把光标搬回落点的 `CUP`。终端可以在这两次 write 之间出帧
+——开屏扫光期（≈25fps、diff 全在牌子上、离 composer 光标十几行）看到的就是「光标在动画区域
+乱闪」。
+
+`tui::CursorGate`（装在 `CrosstermBackend` 外面的 backend 装饰，唯一装配点是
+`tui::init_terminal`）把光标命令从「每帧声明」改成「只在变化时声明」：
+
+| 契约 | 规则 |
+|---|---|
+| `?25h` / `?25l` | 可见性是显式状态，本装饰器是**参与这套状态机的**唯一写者：只在「未知→某值」与「值→另一个值」时发。`enter_sequence` / `leave_sequence` 只在段边界出现、不参与状态机（前者直写 raw stdout，后者经 `Write` 走本装饰器但不动可见性状态）。 |
+| `CUP` | 只在目标 ≠ **已知**物理位置时发。 |
+| 位置何时作废 | 写了任何一格 diff（后端对相邻格省略 `MoveTo`、宽字符前进量由终端裁定）、`clear_region`（`Terminal::clear` / `resize` 的必经之路）、`clear`、`append_lines`、终端尺寸变化（重排）、以及**走 `Write` 的原始写**（绕过 `Backend`：OSC 标题 / 通知 / 程序状态 / 剪贴板复制（OSC 52）/ `leave_sequence`）。作废后下一帧必发 `CUP`。 |
+| 覆盖范围 | 只限经过本装饰器的字节：`tui/clipboard_protocol.rs` 的协议机直写 stdout（OSC 5522，不移动光标），不经过这里、也就不在这次去重之内。 |
+| 红线 | **物理位置未知时不得省 `CUP`**：真实光标是输入法候选窗的锚，位置错了就是硬伤。所以"已知"只认装饰器自己设置过的位置，宁可多发一次。 |
+
+稳定态因此是：**一帧 = 一次 write**（diff 与 `CUP` 同批，终端不可能看到半截状态），内容没
+变化的那一帧连光标字节都没有（只剩后端无条件的 SGR 复位）。
+
+**残留**：光标从隐藏转为可见的那一帧仍不是一次 write——面板合上时是 `\e[2J` / `\e[1;1H` /
+`diff…?25h` / `CUP` 四段，`?25h` 与它前面那段 diff 同批出去，终端在两次之间看到的是「光标可见、
+停在 diff 最后一个被改写的格子上」。它只在**离散事件**上出现（本段首帧、每次 `needs_full_redraw`：
+设置面板开合、焦点恢复、调色板变更……），不在扫光那种 25fps 的稳态帧里，所以不构成"不停闪烁"。
+resize 也整屏重画、那一帧同样不原子（`\e[2J` ×2 + `diff…CUP`），只是它不翻转可见性，没有这一条。
+要连它们一起消掉得让整帧原子化（`CSI ? 2026 h/l` 同步输出，Ghostty 支持），那是另一件事
+（见 `design.md` 的 Non-Goals）。
+
+**已知取舍：可见性不再"每帧重申"，也就没有自愈。** 旧行为每帧都发 `?25h`，所以任何**在 app
+背后**把光标藏掉的东西（终端自身策略、别的写者、上一段 TUI 的残留状态）都会在下一帧被自动纠回
+来；现在只有在「未知→可见」和「隐藏→可见」这两个状态边上才发。契约成立的前提是"本装饰器是参与
+这套状态机的唯一写者"——段边界（`enter_sequence` 的 `?25l`、`leave_sequence` 的 `?25h`）与
+`tui/clipboard_protocol.rs` 都不改这个状态，所以今天不会出现"终端隐藏了光标而 gate 以为它还
+可见"。**将来若有第三方在运行期改 DECTCEM，必须同时经本装饰器，或在这里给 `visible` 加一条
+外部失效/周期性重申通道**；否则可见光标会一直不亮。
+
+单测在 `crates/wing/src/tui/cursor.rs`（真 `CrosstermBackend` + 按 `flush()` 切段的记录
+writer，字节级断言）：段边界（一帧一写）由 `a_repaint_reaches_the_terminal_in_one_write` 钉，
+宽字符 / emoji（含 `emoji_width::pin`）之后落点原样重发、行尾落点不折行由
+`a_wide_glyph_by_the_row_end_keeps_the_cursor_on_its_row` 钉。
 
 ## 设计决策
 
