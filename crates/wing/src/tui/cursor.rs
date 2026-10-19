@@ -184,9 +184,10 @@ impl<B: Backend> Backend for CursorGate<B> {
     }
 }
 
-/// 绕过后端直接写的字节（OSC 标题 / 桌面通知 / 程序状态，以及 `restore_terminal` 交给
-/// `leave_sequence` 的收尾序列）不经过 [`Backend`]，里面可能夹着光标序列：位置作废。
-/// `tui/clipboard_protocol.rs` 的协议机直写 stdout、不走这里（OSC 5522，不移动光标）。
+/// 绕过后端直接写的字节（OSC 标题 / 桌面通知 / 程序状态 / 剪贴板复制（OSC 52），以及
+/// `restore_terminal` 交给 `leave_sequence` 的收尾序列）不经过 [`Backend`]，里面可能夹着光标
+/// 序列：位置作废。`tui/clipboard_protocol.rs` 的**读取**协议机则直写 stdout、不走这里
+/// （OSC 5522，不移动光标）。
 impl<B: io::Write> io::Write for CursorGate<B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.forget_position();

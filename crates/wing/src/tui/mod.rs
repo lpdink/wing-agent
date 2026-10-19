@@ -43,8 +43,8 @@ pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
 pub use cursor::CursorGate;
 
-/// 唯一的终端类型：`CursorGate` 是出帧口的 backend 装饰，让一帧只以**一次 write** 落到
-/// 终端（`?25h` / `CUP` 只在真变化时发，见 [`cursor`]）。
+/// 唯一的终端类型：`CursorGate` 是出帧口的 backend 装饰，让**稳态**的一帧只以一次 write
+/// 落到终端（`?25h` / `CUP` 只在真变化时发，见 [`cursor`]）。
 pub type WingTerminal = Terminal<CursorGate<CrosstermBackend<Stdout>>>;
 
 /// Events from the terminal (keyboard, mouse, resize, paste, focus).
