@@ -115,8 +115,12 @@ pub async fn run(args: WatchArgs, json: bool) -> ExitCode {
 }
 
 async fn run_inner(args: WatchArgs, json: bool) -> Result<()> {
-    // 用法先判：纯参数错误不该先把网关拉起来。
+    // 校验全部前置：纯参数错误（含"没有目标会话"）不该先把网关拉起来。
     let mode = validate_mode(&args)?;
+    let request = match mode {
+        WatchMode::Create => Some(args.request(&resolve_target(args.to.as_deref())?)?),
+        WatchMode::List | WatchMode::Cancel(_) => None,
+    };
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
 
@@ -147,8 +151,7 @@ async fn run_inner(args: WatchArgs, json: bool) -> Result<()> {
             }
         }
         WatchMode::Create => {
-            let target = resolve_target(args.to.as_deref())?;
-            let request = args.request(&target)?;
+            let request = request.expect("WatchMode::Create 已经在起网关之前组装好请求");
             let resp = http.create_wake(&request).await?;
             if json {
                 common::print_json_compact(&WakeOutput { wake: resp.wake });

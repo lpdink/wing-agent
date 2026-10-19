@@ -353,8 +353,12 @@ pub async fn run(args: WakeArgs, json: bool) -> ExitCode {
 }
 
 async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
-    // 用法先判：纯参数错误不该先把网关拉起来（`ensure_gateway` 会启守护进程）。
+    // 校验全部前置：纯参数错误不该先把网关拉起来（`ensure_gateway` 会启守护进程）。
     let mode = validate_mode(&args)?;
+    let create = match mode {
+        Mode::Create => Some(create_plan(&args)?),
+        Mode::List | Mode::Cancel(_) => None,
+    };
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
 
@@ -381,18 +385,14 @@ async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
             }
         }
         Mode::Create => {
-            let schedule = schedule_from_flags(
-                args.in_.as_deref(),
-                args.at.as_deref(),
-                args.every.as_deref(),
-                args.daily.as_deref(),
-            )?;
-            validate_timer(&schedule, args.prompt.as_deref(), args.times)?;
-            let target = resolve_target(args.to.as_deref())?;
-            let spec = schedule.spec()?;
-            let prompt = args.prompt.clone().unwrap_or_default();
+            let plan = create.expect("Mode::Create 已经在起网关之前算好了计划");
             let resp = http
-                .create_wake(&timer_request(&spec, &prompt, args.times, &target))
+                .create_wake(&timer_request(
+                    &plan.spec,
+                    &plan.prompt,
+                    plan.times,
+                    &plan.target,
+                ))
                 .await?;
             if json {
                 common::print_json_compact(&WakeOutput { wake: resp.wake });
@@ -402,6 +402,32 @@ async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 创建路径的**纯**计划（spec / prompt / 目标 / 次数），全部可在起网关之前算完。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CreatePlan {
+    pub spec: String,
+    pub prompt: String,
+    pub target: String,
+    pub times: Option<i64>,
+}
+
+/// 纯校验 + 组装：spec 语法、`--times` 组合、目标会话都不过网络。
+pub(crate) fn create_plan(args: &WakeArgs) -> Result<CreatePlan> {
+    let schedule = schedule_from_flags(
+        args.in_.as_deref(),
+        args.at.as_deref(),
+        args.every.as_deref(),
+        args.daily.as_deref(),
+    )?;
+    validate_timer(&schedule, args.prompt.as_deref(), args.times)?;
+    Ok(CreatePlan {
+        spec: schedule.spec()?,
+        prompt: args.prompt.clone().unwrap_or_default(),
+        target: resolve_target(args.to.as_deref())?,
+        times: args.times,
+    })
 }
 
 /// 本次调用是哪一种形态（三种形态的参数集合互斥）。
@@ -547,11 +573,8 @@ pub(crate) fn format_wakes(
                 PlainCell::styled(wake.state.clone(), Style::new().fg(palette.text)),
                 PlainCell::styled(wake.fire_count.to_string(), Style::new().fg(palette.dim)),
                 PlainCell::styled(
-                    short_timestamp(
-                        wake.next_fire_at
-                            .as_deref()
-                            .or(wake.last_fire_at.as_deref()),
-                    ),
+                    // 终结的触发器没有"下一次"：别拿上次触发时刻冒充（列名就是 NEXT）。
+                    short_timestamp(wake.next_fire_at.as_deref()),
                     Style::new().fg(palette.dim),
                 ),
             ]
@@ -849,6 +872,24 @@ mod tests {
         args.daily = None;
         args.at = Some("2026-03-01 09:00".into());
         assert!(has_schedule(&args));
+    }
+
+    #[test]
+    fn the_next_column_never_shows_the_last_fire_time() {
+        let palette = ThemePalette::from_config(&AppConfig::load().colors);
+        let out = TableOutput {
+            width: common::PIPE_WIDTH,
+            color: false,
+        };
+        let mut finished = wake_info("timer");
+        finished.state = "done".into();
+        finished.next_fire_at = None;
+        finished.last_fire_at = Some("2026-03-01T09:30:00.5".into());
+        let text = format_wakes(&[finished], true, &palette, &out);
+        assert!(
+            !text.contains("2026-03-01T09:30:00"),
+            "终态行的 NEXT 必须是 '-'：{text}"
+        );
     }
 
     #[test]

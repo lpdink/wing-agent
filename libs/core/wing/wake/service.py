@@ -211,6 +211,13 @@ class WakeService:
             LookupError: 该 id 不存在
             WakeUnavailableError: 状态写没落库（"取消没生效"不是"它早完了"）
         """
+        database = self._store.database()
+        if not database.ready:
+            # 降级库里"查不到"与"库坏了"同形，但结论完全不同：前者是 404，后者是
+            # 503（唤醒整体不可用，别再投一条谁也读不到的取消）。
+            raise WakeUnavailableError(
+                f"wake unavailable: wing.db not usable at {database.path}"
+            )
         try:
             canceled = self._store.cancel(trigger_id)
         except WakeWriteLost as exc:
@@ -227,12 +234,21 @@ class WakeService:
         return self._store.list_triggers(include_finished=include_finished)
 
     def cancel_for_session(self, session_id: str) -> int:
-        """归档联动：source 或 target 命中该会话的 ``active`` 触发器全部取消。"""
-        canceled = self._store.cancel_for_session(session_id)
-        if canceled:
-            log.info(f"wake: canceled {canceled} trigger(s) for session {session_id}")
+        """归档联动：source 或 target 命中该会话的 ``active`` 触发器全部取消。
+
+        写丢失**不抛**（归档不能因为唤醒记账失败而失败），但必须出声——一次真的没写成
+        的联动会留下一行到点往归档会话投递的触发器（那边会以 ``failed`` 收场）。
+        """
+        written, matched = self._store.cancel_for_session(session_id)
+        if written:
+            log.info(f"wake: canceled {written} trigger(s) for session {session_id}")
             self._scheduler.notify()
-        return canceled
+        elif matched:
+            log.warning(
+                f"wake: failed to cancel {matched} trigger(s) for session "
+                f"{session_id}（wing.db write lost）"
+            )
+        return written
 
     # ── 调度器接口 ───────────────────────────────
 

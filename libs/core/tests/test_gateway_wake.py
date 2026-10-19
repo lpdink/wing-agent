@@ -228,6 +228,33 @@ class TestCancel:
         assert "4242" in resp.json()["detail"]
 
 
+class TestCancelWriteLostIs503:
+    async def test_lost_write_is_not_reported_as_finished(
+        self, client: httpx.AsyncClient, wake: WakeService
+    ) -> None:
+        """状态写没落库 → 503（"取消没发生"），不是 200 + canceled=false。"""
+        created = (await client.post("/api/wake/create", json=_session_body())).json()[
+            "wake"
+        ]
+        database = wake._store.database()
+        real_execute = database.execute
+
+        def flaky(sql: str, params=()):
+            if sql.strip().startswith("UPDATE wake_trigger"):
+                return False
+            return real_execute(sql, params)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(database, "execute", flaky)
+            resp = await client.post("/api/wake/cancel", json={"id": created["id"]})
+        assert resp.status_code == 503, resp.text
+        assert "write lost" in resp.json()["detail"]
+
+        # 那行仍在武装（这正是不能报 "already finished" 的理由）
+        still = (await client.get("/api/wake/list")).json()["wakes"]
+        assert [w["id"] for w in still] == [created["id"]]
+
+
 class TestDegradedDatabase:
     async def test_create_is_503(self, tmp_path: Path, ports: FakePorts) -> None:
         path = tmp_path / "wing.db"
@@ -238,6 +265,14 @@ class TestDegradedDatabase:
             resp = await client.post("/api/wake/create", json=_session_body())
         assert resp.status_code == 503
         assert "unavailable" in resp.json()["detail"]
+
+    async def test_cancel_is_503(self, tmp_path: Path, ports: FakePorts) -> None:
+        """降级库里 cancel 是"服务不可用"，不是"这条不存在"（404 会误导）。"""
+        path = tmp_path / "wing.db"
+        path.mkdir()
+        async with _client(WakeService(ports, database=Database(path))) as client:
+            resp = await client.post("/api/wake/cancel", json={"id": 1})
+        assert resp.status_code == 503, resp.text
 
     async def test_list_is_empty(self, tmp_path: Path, ports: FakePorts) -> None:
         path = tmp_path / "wing.db"

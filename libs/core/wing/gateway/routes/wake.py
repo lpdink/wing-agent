@@ -102,4 +102,7 @@ async def cancel_wake(body: WakeCancelRequest, request: Request) -> WakeCancelRe
         canceled = server.runtime.wake.cancel(body.id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except WakeUnavailableError as exc:
+        # 状态写没落库：取消**没有**发生（不能报成"它早完了"）。
+        raise HTTPException(status_code=503, detail=str(exc))
     return WakeCancelResponse(ok=True, canceled=canceled)

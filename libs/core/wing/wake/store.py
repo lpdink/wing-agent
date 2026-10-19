@@ -212,11 +212,14 @@ class WakeStore:
             raise WakeWriteLost(f"cancel of wake #{trigger_id}")
         return True
 
-    def cancel_for_session(self, session_id: str) -> int:
-        """把 source 或 target 命中该会话的 ``active`` 触发器全部取消，返回**真的写成**的条数。
+    def cancel_for_session(self, session_id: str) -> tuple[int, int]:
+        """把 source 或 target 命中该会话的 ``active`` 触发器全部取消。
 
-        写丢失时**不抛**（这条路径挂在归档上：归档本身不能因为唤醒记账失败而失败），
-        返回 0 并让调用方留一行 WARN——绝不像以前那样无条件回报 ``len(ids)``。
+        Returns:
+            ``(written, matched)``：真的写成的条数、命中的条数。两者不同就是**写丢失**
+            （不是"本来就没有"），调用方据此留一行 WARN。
+
+        写丢失时**不抛**：这条路径挂在归档上，归档本身不能因为唤醒记账失败而失败。
         """
         db = self.database()
         rows = db.query(
@@ -226,12 +229,12 @@ class WakeStore:
         )
         ids = [int(row["id"]) for row in rows]
         if not ids:
-            return 0
+            return 0, 0
         written = db.executemany(
             "UPDATE wake_trigger SET state = ? WHERE id = ? AND state = ?",
             [(STATE_CANCELED, trigger_id, STATE_ACTIVE) for trigger_id in ids],
         )
-        return len(ids) if written else 0
+        return (len(ids) if written else 0), len(ids)
 
     # ── 读 ───────────────────────────────────────
 

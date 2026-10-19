@@ -504,6 +504,19 @@ class TestCancelWriteLost:
         assert len(service.list_triggers()) == 1
 
 
+class TestCancelOnDegradedDatabase:
+    def test_cancel_reports_unavailable_not_missing(
+        self, ports: FakePorts, tmp_path: Path
+    ) -> None:
+        """降级库里"查不到"与"库坏了"同形，但对用户是两种结论（404 vs 503）。"""
+        path = tmp_path / "wing.db"
+        path.mkdir()
+        service = WakeService(ports, database=Database(path))
+        service.install()
+        with pytest.raises(WakeUnavailableError):
+            service.cancel(1)
+
+
 class TestRecoverySkipsStalled:
     @pytest.mark.asyncio
     async def test_a_stalled_trigger_is_not_compensated_on_restart_of_the_loop(

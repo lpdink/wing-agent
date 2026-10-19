@@ -189,12 +189,12 @@ class TestMutations:
     def test_cancel_for_session_counts(self, store: WakeStore) -> None:
         as_source = _insert(store)
         as_target = _insert(store, source_session_id="other", target_session_id="child")
-        assert store.cancel_for_session("child") == 2
+        assert store.cancel_for_session("child") == (2, 2)
         source = store.get(as_source.id)
         target = store.get(as_target.id)
         assert source is not None and source.state == STATE_CANCELED
         assert target is not None and target.state == STATE_CANCELED
-        assert store.cancel_for_session("child") == 0  # 重复调用不再计数
+        assert store.cancel_for_session("child") == (0, 0)  # 重复调用不再计数
 
 
 class TestDegradedDatabase:
@@ -225,5 +225,5 @@ class TestDegradedDatabase:
         assert degraded_store.list_triggers() == []
         assert degraded_store.next_due_ms() is None
         assert degraded_store.due_timers(10**12) == []
-        assert degraded_store.cancel_for_session("child") == 0
+        assert degraded_store.cancel_for_session("child") == (0, 0)
         degraded_store.set_state(1, STATE_FAILED, error="x")  # 不抛
