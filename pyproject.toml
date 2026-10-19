@@ -92,7 +92,9 @@ ignore = ["ANN401"]
 paths = ["libs/", ".vulture_whitelist.py"]
 exclude = [".venv/"]
 min_confidence = 60
-ignore_names = ["model_config", "relpath", "side_effect", "pytestmark"]
+# row_factory：stdlib sqlite3.Connection 的属性（`conn.row_factory = sqlite3.Row`），
+# 读它的是 sqlite3 自己的游标构造——vulture 看不到这条边。
+ignore_names = ["model_config", "relpath", "side_effect", "pytestmark", "row_factory"]
 ignore_decorators = [
     "@router.get",
     "@router.post",
@@ -103,7 +105,6 @@ ignore_decorators = [
     "@model_validator",
     "@model_serializer",
     "@hooks.on",
-    "@metrics_registry.on",
     "@tool_registry.register",
     "@pytest.fixture",
 ]

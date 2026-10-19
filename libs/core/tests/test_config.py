@@ -150,8 +150,9 @@ class TestLoadConfig:
     """测试配置加载"""
 
     def test_get_config_path(self):
-        """Config file path is correct."""
-        path = get_config_path()
+        """Config file path is correct（默认 WING_HOME 下的位置）。"""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            path = get_config_path()
         assert str(path).endswith(".wing/core/config.yaml")
         assert str(path).startswith(str(Path.home()))
 

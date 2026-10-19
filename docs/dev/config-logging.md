@@ -15,17 +15,35 @@
 │   │   ├── wing_YYYY-MM-DD.log            网关运行时日志（按本地日期，append；恒 DEBUG）
 │   │   ├── new.log → wing_YYYY-MM-DD.log  指向活跃后端日志的符号链接（仅后端；每次轮转 / setup 刷新）
 │   │   └── gateway.log                    网关守护进程 stdout/stderr（uvicorn 错误、traceback；append）
-│   ├── sessions/       会话持久化（metadata + history.jsonl + aux / metrics.json）
+│   ├── sessions/       会话持久化（metadata + history.jsonl + aux）
 │   │                   ├── <sid>/media/   会话私有图片媒体对象（内容寻址，session 自包含）
 │   │                   ├── <sid>/files/   会话私有用户文件（按名寻址；同名异字节带 -N 后缀）
 │   │                   ├── .media/        遗留共享媒体池（只读：老会话引用回退读取 + 物化；不删不写）
 │   │                   └── .archive/      归档区（index.json 索引 + 被归档会话目录；纯 rename，字节不变）
-│   └── metrics.json    全局指标（LLM / 工具调用 / 压缩，按天聚合）
+│   ├── wing.db         进程级 SQLite（WAL）：审计行 audit_llm_call / audit_tool_call / audit_compaction
+│   │                   （+ wing.db-wal / -shm 运行时旁文件；表结构与降级语义见下）
+│   └── metrics.json    **【废止】** 旧指标聚合（历史文件不再读也不再写，可自行删除）
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）
     ├── config.yaml.bak 最近一次保存前的原文（同上）
     └── logs/           TUI 日志：wing_YYYY-MM-DD.log（命名同后端，无符号链接）
 ```
+
+### `core/wing.db`（进程级 SQLite）
+
+审计与唤醒的旁路库：**与会话持久化正交**（会话数据仍在 `sessions/` 的文件里，一行没搬）。
+`wing/db/` 打开时设 `journal_mode=WAL` / `synchronous=NORMAL` / `busy_timeout=5000`，按
+`PRAGMA user_version` 跑 `MIGRATIONS`；`user_version` 高于代码已知版本时不猜、不降级写
+（记 ERROR 后整个库降级）。
+
+**打开失败即降级**：打一行 ERROR（带路径与异常）后 `ready=False`，此后所有读写作 no-op、
+不再刷日志——库坏了网关照常工作，只是没有审计行。迁移失败同样整体回滚并降级（半截 schema
+会让下一次启动永久失败）。本期审计**只写不读**（没有观测端点、没有保留期策略），需要看数据
+时直接用 `sqlite3` 读。
+
+`metrics.json`（全局 / 会话两份）是**废止**的旧实现：每条事件读整份 JSON → 聚合 →
+tmp+fsync+rename 重写，给流式输出加延迟。历史文件保留在盘上（不主动删用户文件），但不再
+读也不再写。
 
 ## 后端 config.yaml
 

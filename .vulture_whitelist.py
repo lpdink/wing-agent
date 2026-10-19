@@ -44,10 +44,6 @@ sha_before
 sha_after
 forks
 
-# audit 指标 entry：写入由 aggregate() 完成，读出经 model_dump
-tokens_per_sec_total
-tokens_per_sec_count
-
 # ── 配置问题分类（wire 词表）──────────────────────────────────────────
 # `ProblemKind` 是加载期 / 设置面板 / CLI 共用的分类词表（协议面）。
 # `invalid_value` 的产出方是 03 的 `document.locate_problems`（字段级错误翻译）与
