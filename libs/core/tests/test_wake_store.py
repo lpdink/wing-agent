@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from wing.db.database import Database
-from wing.wake.model import STATE_ACTIVE, STATE_CANCELED, STATE_FAILED
+from wing.wake.model import STATE_ACTIVE, STATE_CANCELED, STATE_DONE, STATE_FAILED
 from wing.wake.store import WakeStore
 
 
@@ -128,19 +128,49 @@ class TestQueries:
 
 
 class TestMutations:
-    def test_mark_fired_increments_and_reschedules(self, store: WakeStore) -> None:
-        trigger = _insert_timer(store, 100)
-        store.mark_fired(
-            trigger.id,
-            fired_at_ms=120,
-            next_fire_at_ms=200,
-            remaining_done=3,
-            state=STATE_ACTIVE,
+    def test_record_fire_increments_and_reschedules(self, store: WakeStore) -> None:
+        trigger = _insert_timer(store, 100, remaining_done=4)
+        assert store.record_fire(
+            trigger.id, fired_at_ms=120, decrement=1, next_fire_at_ms=200
         )
         loaded = store.get(trigger.id)
         assert loaded is not None
         assert (loaded.fire_count, loaded.last_fire_at_ms) == (1, 120)
         assert (loaded.next_fire_at_ms, loaded.remaining_done) == (200, 3)
+
+    def test_record_fire_exhausts_the_budget_atomically(self, store: WakeStore) -> None:
+        """预算扣到 0 与"清排期 + 终结"是同一条语句（并发下也不会丢一次扣减）。"""
+        trigger = _insert_timer(store, 100, remaining_done=1)
+        assert store.record_fire(
+            trigger.id, fired_at_ms=120, decrement=1, next_fire_at_ms=999
+        )
+        loaded = store.get(trigger.id)
+        assert loaded is not None
+        assert loaded.state == STATE_DONE
+        assert loaded.remaining_done == 0
+        assert loaded.next_fire_at_ms is None, "终态不该留下排期"
+
+    def test_record_fire_keeps_unlimited_budgets_unlimited(
+        self, store: WakeStore
+    ) -> None:
+        trigger = _insert_timer(store, 100, remaining_done=None)
+        assert store.record_fire(
+            trigger.id, fired_at_ms=120, decrement=1, next_fire_at_ms=200
+        )
+        loaded = store.get(trigger.id)
+        assert loaded is not None
+        assert loaded.remaining_done is None
+        assert loaded.state == STATE_ACTIVE
+        assert loaded.next_fire_at_ms == 200
+
+    def test_record_fire_is_a_noop_on_finished_rows(self, store: WakeStore) -> None:
+        trigger = _insert(store)
+        store.set_state(trigger.id, STATE_CANCELED)
+        assert store.record_fire(
+            trigger.id, fired_at_ms=1, decrement=1, next_fire_at_ms=None
+        )
+        loaded = store.get(trigger.id)
+        assert loaded is not None and loaded.fire_count == 0
 
     def test_set_state_failed_records_error(self, store: WakeStore) -> None:
         trigger = _insert(store)

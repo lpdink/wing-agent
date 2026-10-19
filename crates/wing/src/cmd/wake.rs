@@ -198,8 +198,8 @@ impl Schedule {
     /// The `spec` string on the wire (the gateway's single source of truth).
     pub(crate) fn spec(&self) -> Result<String> {
         match self {
-            // 时长原样透传（网关再校验一次）：用户写 `1h30m` 就在库里/回显里看到
-            // `1h30m`，而不是被 CLI 折成 `90m`。
+            // 时长原样透传（网关再校验一次并规范化：`90m` 落成 `1h30m`，一段时长
+            // 只有一种写法）。
             Schedule::In(raw) => Ok(format!("in:{}", raw.trim())),
             Schedule::Every(raw) => Ok(format!("every:{}", raw.trim())),
             Schedule::At(raw) => Ok(format!("at:{}", parse_at(raw)?.format("%Y-%m-%dT%H:%M:%S"))),
@@ -332,6 +332,11 @@ pub(crate) fn validate_timer(
     Ok(())
 }
 
+/// 本次调用有没有给时间参数（四种之一）。
+fn has_schedule(args: &WakeArgs) -> bool {
+    args.in_.is_some() || args.at.is_some() || args.every.is_some() || args.daily.is_some()
+}
+
 // ============================================================
 // 入口
 // ============================================================
@@ -349,8 +354,8 @@ pub async fn run(args: WakeArgs, json: bool) -> ExitCode {
 
 async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
     if let Some(id) = args.cancel {
-        if args.list || args.in_.is_some() || args.at.is_some() || args.every.is_some() {
-            bail!("--cancel cannot be combined with --list or a schedule");
+        if args.list || has_schedule(&args) || args.times.is_some() || args.prompt.is_some() {
+            bail!("--cancel cannot be combined with --list, a schedule, --times or --prompt");
         }
         let (host, port) = common::ensure_gateway().await?;
         let http = common::create_api_client(&host, port)?;
@@ -372,6 +377,9 @@ async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
     let http = common::create_api_client(&host, port)?;
 
     if args.list {
+        if has_schedule(&args) || args.times.is_some() || args.prompt.is_some() {
+            bail!("--list cannot be combined with a schedule, --times or --prompt");
+        }
         let resp = http.list_wakes(args.all).await?;
         if json {
             common::print_json_compact(&resp.wakes);
@@ -383,7 +391,7 @@ async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
     if args.all {
         bail!("--all only applies to --list");
     }
-    if args.in_.is_none() && args.at.is_none() && args.every.is_none() && args.daily.is_none() {
+    if !has_schedule(&args) {
         bail!(
             "nothing to do: pass a schedule (--in 30m | --at \"...\" | --every 30m | --daily 07:00), \
              or --list / --cancel <ID>"
@@ -717,6 +725,31 @@ mod tests {
         assert!(text.contains("on:      done,ask"), "{text}");
         assert!(text.contains("target:  parent"), "{text}");
         assert!(!text.contains("spec:"), "{text}");
+    }
+
+    #[test]
+    fn has_schedule_sees_every_form() {
+        let mut args = WakeArgs {
+            in_: None,
+            at: None,
+            every: None,
+            daily: None,
+            prompt: None,
+            times: None,
+            to: None,
+            list: false,
+            all: false,
+            cancel: None,
+        };
+        assert!(!has_schedule(&args));
+        args.daily = Some("07:00".into());
+        assert!(
+            has_schedule(&args),
+            "--daily 也算 schedule（曾经在 --cancel 里被漏掉）"
+        );
+        args.daily = None;
+        args.at = Some("2026-03-01 09:00".into());
+        assert!(has_schedule(&args));
     }
 
     #[test]

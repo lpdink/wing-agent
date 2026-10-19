@@ -33,6 +33,11 @@ INSERT INTO wake_trigger (
 _COLUMNS = "*"
 
 
+def _placeholders(count: int) -> str:
+    """``count`` 个逗号分隔的占位符（``IN (?, ?, …)``）。"""
+    return ", ".join("?" for _ in range(count))
+
+
 class WakeStore:
     """``wake_trigger`` 的 CRUD（无缓存：触发器是低频数据，每次现读库）。"""
 
@@ -90,8 +95,14 @@ class WakeStore:
         *,
         error: str | None = None,
         next_fire_at_ms: int | None = None,
-    ) -> None:
-        """改状态（终态）；``next_fire_at_ms`` 给定时一并改写排期。"""
+    ) -> bool:
+        """改状态（终态）；``next_fire_at_ms`` 给定时一并改写排期。
+
+        Returns:
+            写是否真的落库（``Database.execute`` 的返回值）。**调用方必须看它**：
+            写不进去意味着一行 ``active`` 触发器会继续被 ``due_timers`` 捞出来，
+            调度器会把它当"还没触发过"再投一次。
+        """
         assignments = ["state = ?"]
         params: list[Any] = [state]
         if state == STATE_FAILED:
@@ -101,36 +112,64 @@ class WakeStore:
             assignments.append("next_fire_at_ms = ?")
             params.append(next_fire_at_ms)
         params.append(trigger_id)
-        self.database().execute(
+        return self.database().execute(
             f"UPDATE wake_trigger SET {', '.join(assignments)} WHERE id = ?", params
         )
 
-    def mark_fired(
+    def record_fire(
         self,
         trigger_id: int,
         *,
         fired_at_ms: int,
+        decrement: int,
         next_fire_at_ms: int | None,
-        remaining_done: int | None,
-        state: str,
-    ) -> None:
-        """一次**成功投递**之后的记账：fire_count + 1、last_fire_at、预算、下一次排期、状态。"""
-        self.database().execute(
+    ) -> bool:
+        """一次**成功投递**之后的记账，全部在一条 SQL 里完成。
+
+        字段：``fire_count + 1``、``last_fire_at_ms``、预算 ``- decrement``
+        （``NULL`` = 无限则保持 ``NULL``）、下一次排期、以及"预算归零即终结"。
+
+        为什么不先读再写：done 配额是**读—改—写**就必然有丢更新的窗口（两个并发分发
+        基于同一份快照各扣一次，后写覆盖先写 → 配额永远到不了 0 → 整条触发器再也终结
+        不了）。SQLite 的 SET 表达式读的是**旧行**，所以扣减 + 判终结 + 清排期同一条
+        语句里做完是原子的；``WHERE state = 'active'`` 同时充当认领条件。
+
+        Args:
+            decrement: 本次扣多少（done 事件 1，ask 事件 0）。
+            next_fire_at_ms: 未终结时的下一次排期（session 型传 ``None``）。
+
+        Returns:
+            写是否真的落库。
+        """
+        return self.database().execute(
             """
             UPDATE wake_trigger
                SET fire_count = fire_count + 1,
                    last_fire_at_ms = ?,
-                   next_fire_at_ms = ?,
-                   remaining_done = ?,
-                   state = ?
-             WHERE id = ?
+                   remaining_done = CASE
+                       WHEN remaining_done IS NULL THEN NULL
+                       ELSE remaining_done - ? END,
+                   next_fire_at_ms = CASE
+                       WHEN remaining_done IS NOT NULL AND remaining_done - ? <= 0
+                       THEN NULL ELSE ? END,
+                   state = CASE
+                       WHEN remaining_done IS NOT NULL AND remaining_done - ? <= 0
+                       THEN 'done' ELSE 'active' END
+             WHERE id = ? AND state = 'active'
             """,
-            (fired_at_ms, next_fire_at_ms, remaining_done, state, trigger_id),
+            (
+                fired_at_ms,
+                decrement,
+                decrement,
+                next_fire_at_ms,
+                decrement,
+                trigger_id,
+            ),
         )
 
-    def reschedule(self, trigger_id: int, next_fire_at_ms: int) -> None:
-        """只改下一次排期（周期型重启对齐）。"""
-        self.database().execute(
+    def reschedule(self, trigger_id: int, next_fire_at_ms: int) -> bool:
+        """只改下一次排期（周期型重启对齐）。返回写是否落库。"""
+        return self.database().execute(
             "UPDATE wake_trigger SET next_fire_at_ms = ? WHERE id = ?",
             (next_fire_at_ms, trigger_id),
         )
@@ -148,11 +187,10 @@ class WakeStore:
             return None
         if str(rows[0]["state"]) != STATE_ACTIVE:
             return False
-        db.execute(
+        return db.execute(
             "UPDATE wake_trigger SET state = ? WHERE id = ? AND state = ?",
             (STATE_CANCELED, trigger_id, STATE_ACTIVE),
         )
-        return True
 
     def cancel_for_session(self, session_id: str) -> int:
         """把 source 或 target 命中该会话的 ``active`` 触发器全部取消，返回条数。"""
@@ -197,24 +235,37 @@ class WakeStore:
         )
         return [WakeTrigger.from_row(row) for row in rows]
 
-    def due_timers(self, now_ms: int) -> list[WakeTrigger]:
-        """所有已到期的 ``active`` timer（按排期、再按 id 定序——同一 tick 内顺序确定）。"""
-        rows = self.database().query(
+    def due_timers(
+        self, now_ms: int, *, exclude: frozenset[int] = frozenset()
+    ) -> list[WakeTrigger]:
+        """所有已到期的 ``active`` timer（按排期、再按 id 定序——同一 tick 内顺序确定）。
+
+        ``exclude`` 是本进程**暂不重试**的 id（记账写失败的那些，见
+        ``WakeService._stall``）：它们状态上仍是 ``active``，但再捞出来只会再投一次。
+        """
+        sql = (
             f"SELECT {_COLUMNS} FROM wake_trigger "
             "WHERE state = ? AND kind = 'timer' "
-            "AND next_fire_at_ms IS NOT NULL AND next_fire_at_ms <= ? "
-            "ORDER BY next_fire_at_ms, id",
-            (STATE_ACTIVE, now_ms),
+            "AND next_fire_at_ms IS NOT NULL AND next_fire_at_ms <= ?"
         )
-        return [WakeTrigger.from_row(row) for row in rows]
+        params: list[Any] = [STATE_ACTIVE, now_ms]
+        if exclude:
+            sql += f" AND id NOT IN ({_placeholders(len(exclude))})"
+            params.extend(sorted(exclude))
+        sql += " ORDER BY next_fire_at_ms, id"
+        return [WakeTrigger.from_row(row) for row in self.database().query(sql, params)]
 
-    def next_due_ms(self) -> int | None:
+    def next_due_ms(self, *, exclude: frozenset[int] = frozenset()) -> int | None:
         """最近一条 ``active`` timer 的排期（无则 ``None``——调度器据此无限等）。"""
-        rows = self.database().query(
+        sql = (
             "SELECT MIN(next_fire_at_ms) AS next FROM wake_trigger "
-            "WHERE state = ? AND kind = 'timer' AND next_fire_at_ms IS NOT NULL",
-            (STATE_ACTIVE,),
+            "WHERE state = ? AND kind = 'timer' AND next_fire_at_ms IS NOT NULL"
         )
+        params: list[Any] = [STATE_ACTIVE]
+        if exclude:
+            sql += f" AND id NOT IN ({_placeholders(len(exclude))})"
+            params.extend(sorted(exclude))
+        rows = self.database().query(sql, params)
         if not rows:
             return None
         value = rows[0]["next"]

@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 
 from wing.db.database import Database
+from wing.event_bus import event_bus
 from wing.gateway.app import create_app
 from wing.wake import WakeService
 
@@ -59,6 +60,16 @@ def _client(wake: WakeService) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     )
+
+
+@pytest.fixture(autouse=True)
+def clean_event_bus():
+    """EventBus 是全局单例：每个测试前后清空订阅（``install()`` 会往上挂 handler）。"""
+    event_bus._subscribers.clear()
+    event_bus._routing.clear()
+    yield
+    event_bus._subscribers.clear()
+    event_bus._routing.clear()
 
 
 @pytest.fixture

@@ -23,6 +23,7 @@ from wing.event import AskEvent, DoneEvent, TurnResultEvent
 from wing.event_bus import event_bus
 from wing.wake import WakeService, WakeUnavailableError
 from wing.wake.model import (
+    EVENT_DONE,
     STATE_ACTIVE,
     STATE_CANCELED,
     STATE_DONE,
@@ -410,6 +411,84 @@ class TestEventDispatch:
 # ============================================================
 
 
+class TestBookkeepingFailure:
+    """``wing.db`` 的写是**可能静默失败**的（磁盘满 / 只读 / 长锁）：记账丢了怎么办。"""
+
+    @pytest.mark.asyncio
+    async def test_lost_write_stalls_the_timer_instead_of_reposting(
+        self,
+        service: WakeService,
+        ports: FakePorts,
+        clock: Clock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """到点的 timer 记账失败 → 本进程不再重试（否则每 10ms 重投一次）。"""
+        trigger = _timer_trigger(service, spec="in:30s")
+        clock.now = trigger.next_fire_at_ms or 0
+        monkeypatch.setattr(service._store, "record_fire", lambda *a, **k: False)
+
+        await service.fire_timer(trigger, clock.now)
+        assert len(ports.delivered) == 1  # 这一次投递已经发生了
+
+        # 库里它仍是 active + 已过期，但调度器再也看不到它（stalled）
+        assert service.due_timers(clock.now + 10**6) == []
+        assert service.next_due_ms() is None
+
+    @pytest.mark.asyncio
+    async def test_lost_state_write_on_failure_also_stalls(
+        self,
+        service: WakeService,
+        ports: FakePorts,
+        clock: Clock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """投递失败后连 ``state=failed`` 都写不进去：同样撤出重试。"""
+        trigger = _timer_trigger(service, spec="in:30s")
+        clock.now = trigger.next_fire_at_ms or 0
+        ports.error = LookupError("gone")
+        monkeypatch.setattr(service._store, "set_state", lambda *a, **k: False)
+
+        await service.fire_timer(trigger, clock.now)
+        assert service.due_timers(clock.now + 10**6) == []
+
+    @pytest.mark.asyncio
+    async def test_stalled_session_trigger_stops_waking(
+        self,
+        service: WakeService,
+        ports: FakePorts,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        trigger = _session_trigger(service, times=2)
+        monkeypatch.setattr(service._store, "record_fire", lambda *a, **k: False)
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
+        assert service.list_triggers(include_finished=True)[0].id == trigger.id
+
+        # 同一条触发器后来的事件不再唤醒（记账已经丢了，不能当作它还有配额）
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
+
+
+class TestConcurrentDispatch:
+    @pytest.mark.asyncio
+    async def test_stale_snapshots_do_not_lose_a_decrement(
+        self, service: WakeService, ports: FakePorts
+    ) -> None:
+        """两次分发都用**同一份旧快照**：配额必须被扣两次（不能后写覆盖先写）。"""
+        trigger = _session_trigger(service, times=2)
+        stale = trigger  # 快照里 remaining_done == 2
+        await service._dispatch_one(stale, EVENT_DONE, _done())
+        await service._dispatch_one(stale, EVENT_DONE, _done())
+
+        row = service.list_triggers(include_finished=True)[0]
+        assert row.id == trigger.id
+        assert row.fire_count == 2
+        assert row.remaining_done == 0
+        assert row.state == STATE_DONE
+
+
 class TestDeliveryFailure:
     @pytest.mark.asyncio
     async def test_failure_marks_failed_and_never_raises(
@@ -594,10 +673,11 @@ class TestDatabaseUnavailable:
     ) -> None:
         service = WakeService(ports, database=degraded)
         service.install()
-        assert service.armed is False
-        assert event_bus.subscriber_count == 0  # 订阅都没装
+        assert event_bus.subscriber_count == 0  # 订阅都没装（整体不武装）
         service.start()  # 未武装：start 是 no-op（也不抛）
         assert service.list_triggers() == []
+        assert service.due_timers(10**12) == []
+        assert service.next_due_ms() is None
 
     @pytest.mark.asyncio
     async def test_stop_is_safe(self, ports: FakePorts, degraded: Database) -> None:

@@ -66,11 +66,14 @@ class WakeSpec:
 
     @property
     def text(self) -> str:
-        """规范化后的 spec 文本（写库 / 回显用）。"""
+        """规范化后的 spec 文本（写库 / `--list` 回显 / timer 信封里的出处行）。
+
+        时长走 :func:`format_duration`：`1h30m` 与 `90m` 都落成 `1h30m`——同一段时间
+        只有一种写法（用户不会在回执里看到自己没输入过的 `90m`）。
+        """
         if self.kind in ("in", "every"):
             assert self.duration_seconds is not None
-            unit, amount = _split_duration(self.duration_seconds)
-            return f"{self.kind}:{amount}{unit}"
+            return f"{self.kind}:{format_duration(self.duration_seconds)}"
         if self.kind == "at":
             assert self.instant_ms is not None
             return f"at:{datetime.fromtimestamp(self.instant_ms / 1000).isoformat()}"
@@ -121,15 +124,6 @@ def format_duration(seconds: int) -> str:
         if amount:
             parts.append(f"{amount}{unit}")
     return "".join(parts) or "0s"
-
-
-def _split_duration(seconds: int) -> tuple[str, int]:
-    """单分量时长 → ``(单位, 数量)``（整秒时取最大可用单位，``90m`` → ``1`` + ``h``）。"""
-    for unit in ("d", "h", "m"):
-        size = _DURATION_UNITS[unit]
-        if seconds and seconds % size == 0:
-            return unit, seconds // size
-    return "s", seconds
 
 
 # ============================================================

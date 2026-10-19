@@ -95,6 +95,13 @@ class TestParseSpec:
         assert spec.instant_ms == _ms(datetime(2026, 3, 1, 9, 0))
         assert spec.text == "at:2026-03-01T09:00:00"
 
+    def test_duration_is_normalized_in_the_spec_text(self) -> None:
+        """同一段时间只有一种写法：`90m` 与 `1h30m` 都落成 `1h30m`（回执/信封同源）。"""
+        assert parse_spec("in:1h30m").text == "in:1h30m"
+        assert parse_spec("in:90m").text == "in:1h30m"
+        assert parse_spec("every:3600s").text == "every:1h"
+        assert parse_spec("in:30s").text == "in:30s"
+
     def test_daily(self) -> None:
         spec = parse_spec("daily:07:00")
         assert spec.kind == "daily"

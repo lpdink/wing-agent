@@ -34,8 +34,6 @@ from wing.wake.model import (
     EVENT_DONE,
     KIND_SESSION,
     KINDS,
-    STATE_ACTIVE,
-    STATE_DONE,
     STATE_FAILED,
     WakeTrigger,
     parse_on_events,
@@ -82,6 +80,8 @@ class WakeService:
         self._store = WakeStore(database)
         self._scheduler = WakeScheduler(self, clock=clock)
         self._installed = False
+        self._stalled: set[int] = set()
+        """本进程**暂不重试**的触发器 id（记账写失败，见 :meth:`_stall`）。"""
 
     # ── 生命周期 ─────────────────────────────────
 
@@ -113,11 +113,6 @@ class WakeService:
     async def stop(self) -> None:
         """停止调度循环（幂等；lifespan shutdown 调用）。"""
         await self._scheduler.stop()
-
-    @property
-    def armed(self) -> bool:
-        """是否已武装（DB 可用且已订阅事件）。"""
-        return self._installed
 
     # ── 创建 / 取消 / 查询 ───────────────────────
 
@@ -238,10 +233,10 @@ class WakeService:
     # ── 调度器接口 ───────────────────────────────
 
     def due_timers(self, now_ms: int) -> list[WakeTrigger]:
-        return self._store.due_timers(now_ms)
+        return self._store.due_timers(now_ms, exclude=frozenset(self._stalled))
 
     def next_due_ms(self) -> int | None:
-        return self._store.next_due_ms()
+        return self._store.next_due_ms(exclude=frozenset(self._stalled))
 
     async def fire_timer(self, trigger: WakeTrigger, now_ms: int) -> None:
         """到点触发一条 timer：投递 → 记账（配额 / 下次排期 / 终态）。"""
@@ -255,18 +250,25 @@ class WakeService:
         try:
             parsed = parse_spec(trigger.spec or "")
         except SpecError as exc:  # 库里的 spec 坏了：一次性的事故，别让它每 tick 重试
-            self._store.set_state(trigger.id, STATE_FAILED, error=str(exc))
+            # `exc` 在 except 块结束时被删除（Python 语义）：先取出文案再闭包。
+            error = str(exc)
+            self._write(
+                trigger.id,
+                "spec failed",
+                lambda: self._store.set_state(trigger.id, STATE_FAILED, error=error),
+            )
             return
-        remaining = (
-            None if trigger.remaining_done is None else trigger.remaining_done - 1
-        )
-        finished = parsed.one_shot or (remaining is not None and remaining <= 0)
-        self._store.mark_fired(
+        # 一次性 spec 的预算是 1（创建期落库），所以"预算归零即终结"对它与对
+        # `--times N` 的周期型是同一条规则——记账在一条 SQL 里原子完成（见 store）。
+        self._write(
             trigger.id,
-            fired_at_ms=now_ms,
-            next_fire_at_ms=None if finished else advance_fire_at_ms(parsed, now_ms),
-            remaining_done=remaining,
-            state=STATE_DONE if finished else STATE_ACTIVE,
+            "record fire",
+            lambda: self._store.record_fire(
+                trigger.id,
+                fired_at_ms=now_ms,
+                decrement=1,
+                next_fire_at_ms=advance_fire_at_ms(parsed, now_ms),
+            ),
         )
         self._scheduler.notify()
 
@@ -287,14 +289,25 @@ class WakeService:
             try:
                 parsed = parse_spec(trigger.spec or "")
             except SpecError as exc:
-                self._store.set_state(trigger.id, STATE_FAILED, error=str(exc))
+                error = str(exc)
+                self._write(
+                    trigger.id,
+                    "spec failed",
+                    lambda: self._store.set_state(
+                        trigger.id, STATE_FAILED, error=error
+                    ),
+                )
                 continue
             if parsed.one_shot:
                 log.info(f"wake: compensating missed one-shot #{trigger.id}")
                 await self.fire_timer(trigger, now)
             else:
                 aligned = advance_fire_at_ms(parsed, now)
-                self._store.reschedule(trigger.id, aligned)
+                self._write(
+                    trigger.id,
+                    "realign",
+                    lambda: self._store.reschedule(trigger.id, aligned),
+                )
                 log.info(
                     f"wake: realigned recurring #{trigger.id} "
                     f"(missed, no catch-up) next={aligned}"
@@ -335,7 +348,7 @@ class WakeService:
             triggers = [
                 trigger
                 for trigger in self._store.active_for_source(session_id)
-                if kind in trigger.events
+                if kind in trigger.events and trigger.id not in self._stalled
             ]
         except Exception:
             log.exception(f"wake: failed to load triggers for {session_id}")
@@ -373,16 +386,16 @@ class WakeService:
         if not await self._deliver(trigger, content):
             return
 
-        remaining = trigger.remaining_done
-        if kind == EVENT_DONE and remaining is not None:
-            remaining -= 1
-        finished = remaining is not None and remaining <= 0
-        self._store.mark_fired(
+        # done 事件扣一次配额（归零即终结）；ask 事件不扣（decrement=0）。
+        self._write(
             trigger.id,
-            fired_at_ms=self._clock(),
-            next_fire_at_ms=None,
-            remaining_done=remaining,
-            state=STATE_DONE if finished else STATE_ACTIVE,
+            "record fire",
+            lambda: self._store.record_fire(
+                trigger.id,
+                fired_at_ms=self._clock(),
+                decrement=1 if kind == EVENT_DONE else 0,
+                next_fire_at_ms=None,
+            ),
         )
 
     # ── 投递 ─────────────────────────────────────
@@ -400,9 +413,43 @@ class WakeService:
             log.warning(
                 f"wake: deliver #{trigger.id} → {trigger.target_session_id} failed: {reason}"
             )
-            self._store.set_state(trigger.id, STATE_FAILED, error=reason[:ERROR_LIMIT])
+            self._write(
+                trigger.id,
+                "record failure",
+                lambda: self._store.set_state(
+                    trigger.id, STATE_FAILED, error=reason[:ERROR_LIMIT]
+                ),
+            )
             return False
         return True
+
+    def _write(self, trigger_id: int, what: str, write: Callable[[], bool]) -> None:
+        """执行一次记账写入；**写不进去就把这条触发器撤出重试**。
+
+        ``wing.db`` 的契约是"写失败静默返回 False"（磁盘满 / 只读 / 长锁）。到点的
+        timer 若记账没落库，状态上仍是 ``active AND next_fire_at_ms <= now``——
+        调度器下一轮（``_MIN_TICK_SECONDS`` = 10ms）会把它再捞出来，于是同一条消息被
+        反复 ``runtime.post`` 进目标会话（实测 ~83 次/秒）。投递成功但记不下来时，
+        这一进程不再碰它：留一行 ERROR，本进程内永不重试（重启后按库里的旧排期重新
+        判断，那时库可能已经好了）。
+        """
+        try:
+            ok = write()
+        except Exception:
+            ok = False
+        if ok:
+            return
+        self._stall(trigger_id, what)
+
+    def _stall(self, trigger_id: int, what: str) -> None:
+        if trigger_id in self._stalled:
+            return
+        self._stalled.add(trigger_id)
+        log.error(
+            f"wake: #{trigger_id} stalled ({what} failed: wing.db write lost); "
+            f"it will not fire again in this process"
+        )
+        self._scheduler.notify()
 
     def _describe_failure(self, session_id: str, exc: BaseException) -> str:
         """ "已归档" 是可行动结论（提示恢复），其余异常如实带出类型与文案。"""
