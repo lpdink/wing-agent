@@ -1014,6 +1014,36 @@ mod tests {
         assert!(!is_stdio_mode(&args));
     }
 
+    // ---- KnownFlags 的分层合并 ----
+
+    /// 同名跨层时**一律以顶层为准**（过滤器只有一张按名字的表，分层优先级是唯一
+    /// 确定性的解法——`--yolo` 在顶层是 bool、在 `wing update` 上是带值）。
+    /// 子命令里自己冲突的 flag（同一层既有 bool 又有值）取"带值"那一侧。
+    #[test]
+    fn fill_from_keeps_the_top_level_classification() {
+        let mut top = FlagSets::default();
+        top.long_bool.insert("--yolo".into());
+        top.short_with_value.insert('p');
+        let mut subs = FlagSets::default();
+        // 与顶层同名、分类不同：顶层赢
+        subs.long_with_value.insert("--yolo".into());
+        subs.short_bool.insert('p');
+        // 顶层没有的：补进来
+        subs.long_with_value.insert("--notify-to".into());
+        subs.long_bool.insert("--all".into());
+        subs.short_bool.insert('w');
+        subs.short_with_value.insert('j');
+        top.fill_from(subs);
+        assert!(top.long_bool.contains("--yolo"));
+        assert!(!top.long_with_value.contains("--yolo"));
+        assert!(top.short_with_value.contains(&'p'));
+        assert!(!top.short_bool.contains(&'p'));
+        assert!(top.long_with_value.contains("--notify-to"));
+        assert!(top.long_bool.contains("--all"));
+        assert!(top.short_bool.contains(&'w'));
+        assert!(top.short_with_value.contains(&'j'));
+    }
+
     // ---- filter_unknown_args ----
 
     /// 子命令专属 flag 也必须"已知"：`wing wake --in 30m -p ping` / `wing run -p ... --notify-to X`

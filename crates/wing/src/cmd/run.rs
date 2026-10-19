@@ -392,13 +392,15 @@ fn print_text(output: &RunOutput) {
     // Truncate prompt for display if too long.
     let prompt_display = common::truncate_chars(&output.prompt, 80);
     println!("prompt:      {prompt_display}");
-    match (&output.notify, &output.notify_off) {
-        (Some(notify), _) => println!(
+    // 每一行都在说"登记了没有、为什么"：`notify` 与 `notify_off` 恒有一侧在场
+    // （`plan_notify` 只有这两种结局），所以不需要第三臂。
+    if let Some(notify) = &output.notify {
+        println!(
             "notify:      #{} → {} (on {})",
             notify.id, notify.target_session_id, notify.on_events
-        ),
-        (None, Some(reason)) => println!("notify:      {reason}"),
-        (None, None) => {}
+        );
+    } else if let Some(reason) = &output.notify_off {
+        println!("notify:      {reason}");
     }
     println!("started_at:  {}", output.started_at);
 }

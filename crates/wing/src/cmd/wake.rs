@@ -628,14 +628,21 @@ mod tests {
             "wing", "wake", "--in", "1m", "-p", "ping", "--to", "p1",
         ])
         .expect("parses");
-        match cli.command {
-            Some(crate::cmd::Command::Wake(args)) => {
-                assert_eq!(args.in_.as_deref(), Some("1m"));
-                assert_eq!(args.prompt.as_deref(), Some("ping"));
-                assert_eq!(args.to.as_deref(), Some("p1"));
-            }
-            other => panic!("expected wake, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &cli.command,
+                Some(crate::cmd::Command::Wake(WakeArgs {
+                    in_,
+                    prompt,
+                    to,
+                    ..
+                })) if in_.as_deref() == Some("1m")
+                    && prompt.as_deref() == Some("ping")
+                    && to.as_deref() == Some("p1")
+            ),
+            "expected `wake --in 1m -p ping --to p1`, got {:?}",
+            cli.command
+        );
     }
 
     #[test]

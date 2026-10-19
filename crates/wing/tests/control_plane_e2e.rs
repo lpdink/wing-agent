@@ -59,6 +59,8 @@ const SETTLED_ID: &str = "settled-session";
 struct Recorded {
     method: String,
     path: String,
+    /// The raw query string (`""` when the request had none) — `--all` is one.
+    query: String,
     body: String,
     status: u16,
 }
@@ -90,6 +92,14 @@ struct StubState {
     /// Push the ask **before** the snapshot on subscribe: the live ask
     /// outrunning the replay.
     ask_before_snapshot: bool,
+    /// Status served by `/api/wake/list` (a broken list is a real failure mode).
+    wake_list_status: u16,
+    /// Status served by `/api/session/send` (a prompt that never went out must
+    /// drop the wake registration instead of leaving it armed).
+    send_status: u16,
+    /// Status served by `/api/wake/cancel` for every id (the "even the cleanup
+    /// failed" path: the CLI must still exit non-zero and keep the why).
+    wake_cancel_status: u16,
 }
 
 impl Default for StubState {
@@ -117,6 +127,9 @@ impl Default for StubState {
             pending_ask: None,
             ask_after_subscribe_ms: None,
             ask_before_snapshot: false,
+            wake_list_status: 200,
+            send_status: 200,
+            wake_cancel_status: 200,
         }
     }
 }
@@ -230,6 +243,7 @@ async fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<StubState>>) {
             guard.requests.push(Recorded {
                 method: method.clone(),
                 path: path.clone(),
+                query: query.clone(),
                 // The **request** body — what the CLI sent.
                 body: body.clone(),
                 status,
@@ -547,6 +561,12 @@ fn route(
         }
 
         ("POST", "/api/session/send") => {
+            if state.send_status != 200 {
+                return (
+                    state.send_status,
+                    json!({"error": "internal", "detail": "send exploded"}).to_string(),
+                );
+            }
             // A prompt starts a turn: subscribed frontends (stdio) hear the
             // terminal frame and can exit; one-shot `wing run` never listens.
             let frame = json!({
@@ -620,6 +640,122 @@ fn route(
             })
             .to_string(),
         ),
+
+        // ── 唤醒触发器（`wing wake` / `wing watch` 的读写面）──
+        ("POST", "/api/wake/create") => {
+            // Echo the row the real gateway would persist: canonical `on_events`
+            // (done before ask), and the fields the caller actually sent.
+            let kind = request["kind"].as_str().unwrap_or("session");
+            let spec = request["spec"].clone();
+            let canonical = request["on_events"]
+                .as_str()
+                .map(|raw| {
+                    let asked = raw.split(',').any(|part| part.trim() == "ask");
+                    let done = raw.split(',').any(|part| part.trim() == "done");
+                    match (done, asked) {
+                        (true, true) => "done,ask".to_string(),
+                        (false, true) => "ask".to_string(),
+                        _ => "done".to_string(),
+                    }
+                })
+                .unwrap_or_else(|| "done,ask".to_string());
+            (
+                200,
+                json!({"wake": {
+                    "id": 7,
+                    "kind": kind,
+                    "target_session_id": request["target_session_id"],
+                    "source_session_id": request["source_session_id"],
+                    "on_events": canonical,
+                    "spec": spec,
+                    "prompt": request["prompt"],
+                    "state": "active",
+                    "fire_count": 0,
+                    "last_fire_at": Value::Null,
+                    "last_error": Value::Null,
+                    "created_at": "2026-10-10T12:00:00",
+                    "next_fire_at": if kind == "timer" {
+                        json!("2026-10-10T12:30:00.123456")
+                    } else {
+                        Value::Null
+                    },
+                }})
+                .to_string(),
+            )
+        }
+
+        ("GET", "/api/wake/list") => {
+            if state.wake_list_status != 200 {
+                return (
+                    state.wake_list_status,
+                    json!({"error": "internal", "detail": "wake store unavailable"}).to_string(),
+                );
+            }
+            // A session subscription and a timer: the list is mixed by design
+            // (KIND is what tells them apart).
+            (
+                200,
+                json!({"wakes": [
+                    {
+                        "id": 1,
+                        "kind": "session",
+                        "target_session_id": "parent-1",
+                        "source_session_id": "child-1",
+                        "on_events": "done,ask",
+                        "spec": Value::Null,
+                        "prompt": Value::Null,
+                        "state": "active",
+                        "fire_count": 1,
+                        "last_fire_at": "2026-10-10T11:00:00",
+                        "last_error": Value::Null,
+                        "created_at": "2026-10-10T10:00:00",
+                        "next_fire_at": Value::Null,
+                    },
+                    {
+                        "id": 2,
+                        "kind": "timer",
+                        "target_session_id": "parent-1",
+                        "on_events": "done,ask",
+                        "spec": "every:30m",
+                        "prompt": "巡检",
+                        "state": "active",
+                        "fire_count": 0,
+                        "last_error": Value::Null,
+                        "created_at": "2026-10-10T10:00:00",
+                        "next_fire_at": "2026-10-10T12:30:00.987654",
+                    },
+                ]})
+                .to_string(),
+            )
+        }
+
+        ("POST", "/api/wake/cancel") => {
+            let id = request["id"].as_i64().unwrap_or_default();
+            if state.wake_cancel_status != 200 {
+                return (
+                    state.wake_cancel_status,
+                    json!({"error": "internal", "detail": "cancel exploded"}).to_string(),
+                );
+            }
+            match id {
+                // The two error faces the CLI must not swallow: an unknown id
+                // (404) and a lost state write (503 = "cancelling did not
+                // happen", which must never read as "already finished").
+                404 => (
+                    404,
+                    json!({"error": "not_found", "detail": "wake #404 not found"}).to_string(),
+                ),
+                503 => (
+                    503,
+                    json!({"error": "service_unavailable",
+                           "detail": "wake unavailable: wing.db write lost: cancel of wake #503"})
+                    .to_string(),
+                ),
+                // 4 is the id of an already finished trigger (`canceled: false`).
+                4 => (200, json!({"ok": true, "canceled": false}).to_string()),
+                _ => (200, json!({"ok": true, "canceled": true}).to_string()),
+            }
+        }
 
         ("POST", "/api/system/reload") => {
             let items: Vec<Value> = state
@@ -783,6 +919,36 @@ async fn run_wing(args: &[&str], stub: &Stub) -> (i32, String, String) {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    let child = command.spawn().unwrap();
+    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
+    {
+        Ok(result) => result.unwrap(),
+        Err(_) => panic!("`wing {args:?}` did not exit in 30s"),
+    };
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// Same as [`run_wing`], with extra environment variables (and the inherited
+/// `WING_SESSION_ID` removed first: the parent-session default would otherwise
+/// leak in from whatever started `cargo test`).
+async fn run_wing_env(args: &[&str], stub: &Stub, env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
+    command
+        .args(args)
+        .env("WING_HOME", &stub.home)
+        .env_remove("WING_SESSION_ID")
+        .env_remove("RUST_LOG")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     let child = command.spawn().unwrap();
     let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
     {
@@ -1724,4 +1890,459 @@ async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
             .unwrap_or_else(|| panic!("no request recorded for {endpoint}"));
         assert_eq!(hit.status, 404, "{endpoint} 应为 404");
     }
+}
+
+// ============================================================
+// 唤醒（`wing watch` / `wing wake` / `wing run --notify*`）
+// ============================================================
+
+/// `wing watch <sid> --to <target>`：一条会话订阅 —— 请求体、文本回执与
+/// `--json` 事实一致，`--on` 送出去之前已经规范成 `done,ask`。
+#[tokio::test]
+async fn watch_registers_a_session_subscription() {
+    let stub = Stub::start("watch-create").await;
+
+    let (code, stdout, stderr) = run_wing_env(
+        &[
+            "watch", SESSION_ID, "--to", "parent-1", "--on", "ask,done", "--times", "2",
+        ],
+        &stub,
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // 竖排回执：看它的人要知道三件事——叫醒谁、看谁、看什么事件。
+    for expected in [
+        "wake:    #7",
+        "kind:    session",
+        &format!("source:  {SESSION_ID}"),
+        "target:  parent-1",
+        "on:      done,ask",
+        "state:   active",
+    ] {
+        assert!(stdout.contains(expected), "{expected} missing:\n{stdout}");
+    }
+
+    assert_eq!(
+        body_of(&stub, "/api/wake/create"),
+        json!({
+            "kind": "session",
+            "target_session_id": "parent-1",
+            "source_session_id": SESSION_ID,
+            // `ask,done` 的顺序是身份的一部分：CLI 先规范成 done,ask 再发。
+            "on_events": "done,ask",
+            "times": 2,
+        }),
+        "only the fields the caller passed (spec / prompt stay absent)"
+    );
+
+    // `--json` 给出同一份事实（脚本消费面）。
+    let (code, stdout, stderr) = run_wing_env(
+        &["watch", SESSION_ID, "--to", "parent-1", "--json"],
+        &stub,
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let payload = json_of(&stdout);
+    assert_eq!(payload["wake"]["id"], 7);
+    assert_eq!(payload["wake"]["kind"], "session");
+    assert_eq!(payload["wake"]["on_events"], "done,ask");
+    assert_eq!(payload["wake"]["target_session_id"], "parent-1");
+    assert_eq!(payload["wake"]["source_session_id"], SESSION_ID);
+
+    // 目标缺省取 WING_SESSION_ID（agent 的 shell 里就有）。
+    let (code, stdout, stderr) = run_wing_env(
+        &["watch", SESSION_ID],
+        &stub,
+        &[("WING_SESSION_ID", "env-parent")],
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("target:  env-parent"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// 两条命令的 `--list` 都是同一张表（KIND 列区分会话型 / 定时型）；
+/// `--all` 走 `?all=true`，`--json` 是同一批行。
+#[tokio::test]
+async fn list_shows_both_kinds_for_watch_and_wake() {
+    let stub = Stub::start("wake-list").await;
+
+    let (code, stdout, stderr) = run_wing(&["watch", "--list"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for expected in ["#1", "#2", "session", "timer", "every:30m", "done,ask"] {
+        assert!(stdout.contains(expected), "{expected} missing:\n{stdout}");
+    }
+    let hits = stub.path_hits("/api/wake/list");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].method, "GET");
+    assert_eq!(
+        hits[0].query, "",
+        "plain --list must not ask for finished rows"
+    );
+
+    // `--all` 是同一个端点的 `?all=true`。
+    let (code, stdout, stderr) = run_wing(&["wake", "--list", "--all"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("every:30m"), "{stdout}");
+    let hits = stub.path_hits("/api/wake/list");
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[1].query, "all=true");
+
+    // 机器面：同一批行，一条不少。
+    let (code, stdout, stderr) = run_wing(&["watch", "--list", "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(json_of(&stdout).as_array().map(Vec::len), Some(2));
+    let (code, stdout, stderr) = run_wing(&["wake", "--list", "--all", "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let rows = json_of(&stdout);
+    assert_eq!(rows.as_array().map(Vec::len), Some(2), "{rows}");
+    assert_eq!(rows[0]["kind"], "session");
+    assert_eq!(rows[1]["kind"], "timer");
+    assert_eq!(rows[1]["spec"], "every:30m");
+
+    // 列表端点失败 ≠ 空列表：退出码非零，错误里带网关的 detail。
+    stub.with(|state| state.wake_list_status = 500);
+    let (code, stdout, stderr) = run_wing(&["wake", "--list"], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("wake store unavailable"), "{stderr}");
+    assert!(stdout.is_empty(), "失败时不该打印一张空表：{stdout}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// `--cancel <ID>`：body 是 `{id}`；三种结局（已取消 / 早就完了 / 错误面）
+/// 各有各的说法，退出码分得开。
+#[tokio::test]
+async fn cancel_reports_each_outcome_differently() {
+    let stub = Stub::start("wake-cancel").await;
+
+    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "3"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "canceled 3");
+    assert_eq!(body_of(&stub, "/api/wake/cancel"), json!({"id": 3}));
+
+    // 幂等的那一半：`canceled=false` 说的是"它本来就完了"，不是失败。
+    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "4"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("4 was already finished"), "{stdout}");
+
+    // `--json` 两种结局都给机器可读的 id + canceled（两条命令同一份事实）。
+    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "4", "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(json_of(&stdout), json!({"id": 4, "canceled": false}));
+    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "3", "--json"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(json_of(&stdout), json!({"id": 3, "canceled": true}));
+    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "4"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("4 was already finished"), "{stdout}");
+    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "3"], &stub).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "canceled 3");
+
+    // 404（没有这条）与 503（状态写没落库 = 取消**没有**发生）都是失败，
+    // 且都必须把网关的说法带出来——后者绝不能退化成"已终结"。
+    for (id, needle) in [
+        ("404", "wake #404 not found"),
+        ("503", "wing.db write lost"),
+    ] {
+        let (code, stdout, stderr) = run_wing(&["wake", "--cancel", id], &stub).await;
+        assert_ne!(code, 0, "`--cancel {id}` must fail:\n{stdout}{stderr}");
+        assert!(stderr.contains(needle), "{needle} missing:\n{stderr}");
+        assert!(
+            !stdout.contains("already finished"),
+            "错误面不得说成\"早就完了\"：{stdout}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// 定时唤醒：四种 spec 逐字透传（网关再规范化一次），`--times` 只对周期型
+/// 有意义，一次性 spec 带 `--times` 是用法错误。
+#[tokio::test]
+async fn timer_specs_and_prompts_are_passed_through() {
+    let stub = Stub::start("wake-timer").await;
+
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &[
+                "wake", "--every", "30m", "--times", "5", "-p", "巡检", "--to", "p1",
+            ],
+            "every:30m",
+        ),
+        (
+            &["wake", "--daily", "07:00", "-p", "早报", "--to", "p1"],
+            "daily:07:00",
+        ),
+        (
+            &["wake", "--in", "30m", "-p", "check", "--to", "p1"],
+            "in:30m",
+        ),
+        (
+            &[
+                "wake",
+                "--at",
+                "2026-03-01 09:00",
+                "-p",
+                "at-nine",
+                "--to",
+                "p1",
+            ],
+            "at:2026-03-01T09:00:00",
+        ),
+    ];
+    for (args, spec) in cases {
+        let (code, stdout, stderr) = run_wing(args, &stub).await;
+        assert_eq!(code, 0, "`{args:?}` failed: {stderr}");
+        assert!(
+            stdout.contains(&format!("spec:    {spec}")),
+            "{spec} missing:\n{stdout}"
+        );
+        let body = body_of(&stub, "/api/wake/create");
+        assert_eq!(body["kind"], "timer");
+        assert_eq!(body["spec"], spec, "spec 逐字透传");
+        assert_eq!(body["target_session_id"], "p1");
+        assert!(
+            body.get("on_events").is_none(),
+            "定时唤醒不送 on_events（缺省事件集是网关的事实）"
+        );
+        assert!(body.get("source_session_id").is_none());
+    }
+
+    // 最近一次是 `--at`：prompt 原样送出。
+    let body = body_of(&stub, "/api/wake/create");
+    assert_eq!(body["prompt"], "at-nine");
+
+    // `--json` 回执与文本是同一份事实（脚本从这里取 id 去 cancel）。
+    let (code, stdout, stderr) = run_wing(
+        &["wake", "--in", "45m", "-p", "json", "--to", "p1", "--json"],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let payload = json_of(&stdout);
+    assert_eq!(payload["wake"]["kind"], "timer");
+    assert_eq!(payload["wake"]["spec"], "in:45m");
+    assert_eq!(payload["wake"]["prompt"], "json");
+    assert_eq!(
+        payload["wake"]["next_fire_at"],
+        "2026-10-10T12:30:00.123456"
+    );
+
+    // 两个 schedule 同时给：picker 那一步就拒，不发请求。
+    let before = stub.trace().len();
+    let (code, stdout, stderr) = run_wing(
+        &[
+            "wake", "--in", "5m", "--every", "10m", "-p", "x", "--to", "p1",
+        ],
+        &stub,
+    )
+    .await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("pick exactly one"), "{stderr}");
+    assert_eq!(stub.trace().len(), before);
+
+    // `--every` + `--times` 的组合原样到网关（配额在那边解释）。
+    let (code, _, stderr) = run_wing(
+        &[
+            "wake", "--every", "30m", "--times", "5", "-p", "x", "--to", "p1",
+        ],
+        &stub,
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(body_of(&stub, "/api/wake/create")["times"], 5);
+
+    // 一次性 spec + `--times`：本地就拒（不必等一次网关往返），且不发请求。
+    let before = stub.trace().len();
+    let (code, stdout, stderr) = run_wing(
+        &[
+            "wake", "--in", "30m", "--times", "3", "-p", "x", "--to", "p1",
+        ],
+        &stub,
+    )
+    .await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("--times") && stderr.contains("in"),
+        "错误要指出冲突的两侧：{stderr}"
+    );
+    assert_eq!(stub.trace().len(), before, "用法错误不得访问网关");
+
+    // 时长语法在本机先过一遍（手误不必等往返）。
+    let (code, _, stderr) =
+        run_wing(&["wake", "--every", "10x", "-p", "x", "--to", "p1"], &stub).await;
+    assert_ne!(code, 0);
+    assert!(stderr.contains("invalid duration '10x'"), "{stderr}");
+    assert_eq!(stub.trace().len(), before);
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// 没有目标会话（没有 `WING_SESSION_ID`、也没有 `--to`）：可行动的报错，
+/// 且**不**去碰网关（否则会顺手把守护进程拉起来）。
+#[tokio::test]
+async fn wake_without_a_target_says_what_to_do() {
+    let stub = Stub::start("wake-no-target").await;
+
+    let (code, stdout, stderr) =
+        run_wing_env(&["wake", "--in", "30m", "-p", "x"], &stub, &[]).await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("no target session: set WING_SESSION_ID or pass --to <sid>"),
+        "{stderr}"
+    );
+    assert!(
+        stub.trace().is_empty(),
+        "参数不完整时不该起网关：{:?}",
+        stub.trace()
+    );
+
+    // 同一条规则对 `watch` 成立（目标缺省来自 env）。
+    let (code, stdout, stderr) = run_wing_env(&["watch", SESSION_ID], &stub, &[]).await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("no target session"), "{stderr}");
+    assert!(stub.trace().is_empty(), "{:?}", stub.trace());
+
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
+/// `wing run` 的 notify 接线：登记发生在 send **之前**；四种"不登记"各有
+/// 各的理由，且都写在输出里。
+#[tokio::test]
+async fn run_notify_registration_and_its_four_opt_outs() {
+    let stub = Stub::start("run-notify").await;
+
+    // 1) 登记（显式目标 + 事件 + 自定义正文）
+    let (code, stdout, stderr) = run_wing_env(
+        &[
+            "run",
+            "-p",
+            "x",
+            "--notify-to",
+            "parent-1",
+            "--notify-on",
+            "ask",
+            "--notify-prompt",
+            "look at the failing test",
+        ],
+        &stub,
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("notify:      #7 → parent-1 (on ask)"),
+        "{stdout}"
+    );
+    assert_eq!(
+        body_of(&stub, "/api/wake/create"),
+        json!({
+            "kind": "session",
+            "target_session_id": "parent-1",
+            "source_session_id": "created-by-stub",
+            "on_events": "ask",
+            "prompt": "look at the failing test",
+            // 配额不在这里解释：隐式登记不带 times（刷新时保持既有配额）。
+        }),
+        "run 的登记只送它知道的字段"
+    );
+    // 顺序：创建会话 → 登记唤醒 → 发 prompt（晚登记会漏掉"快子会话"）。
+    let trace = stub.trace();
+    let create_at = trace
+        .iter()
+        .position(|(_, path, _)| path == "/api/session/create")
+        .expect("create");
+    let notify_at = trace
+        .iter()
+        .position(|(_, path, _)| path == "/api/wake/create")
+        .expect("wake create");
+    let send_at = trace
+        .iter()
+        .position(|(_, path, _)| path == "/api/session/send")
+        .expect("send");
+    assert!(
+        create_at < notify_at && notify_at < send_at,
+        "登记必须在 send 之前：{trace:?}"
+    );
+
+    // 2) `--no-notify`：一个字节也不发
+    let before = stub.path_hits("/api/wake/create").len();
+    let (code, stdout, stderr) = run_wing_env(
+        &["run", "-p", "x", "--no-notify", "--notify-to", "parent-1"],
+        &stub,
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("notify:      off (--no-notify)"),
+        "{stdout}"
+    );
+    assert_eq!(stub.path_hits("/api/wake/create").len(), before);
+
+    // 3) 回答 ask（`--tool-call-id`）：派发时那条订阅还在武装，别再登记
+    let (code, stdout, stderr) = run_wing_env(
+        &[
+            "run",
+            "-p",
+            "red",
+            "--tool-call-id",
+            "call-42",
+            "--notify-to",
+            "parent-1",
+        ],
+        &stub,
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains(
+            "notify:      off (answering an ask: the dispatch-time trigger is still armed)"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(
+        stub.path_hits("/api/wake/create").len(),
+        before,
+        "回答 ask 不得再登记一条同源订阅"
+    );
+
+    // 4) 没有父会话也没有 `--to`：静默关闭（不是错误）
+    let (code, stdout, stderr) = run_wing_env(&["run", "-p", "x"], &stub, &[]).await;
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("notify:      off (no parent session)"),
+        "{stdout}"
+    );
+    assert_eq!(stub.path_hits("/api/wake/create").len(), before);
+
+    // 5) prompt 没发出去：撤回刚登记的触发器（不留一条会叫醒无关会话的订阅）
+    stub.with(|state| state.send_status = 500);
+    let (code, stdout, stderr) =
+        run_wing_env(&["run", "-p", "x", "--notify-to", "parent-1"], &stub, &[]).await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("Failed to send prompt"), "{stderr}");
+    let cancels = stub.path_hits("/api/wake/cancel");
+    assert_eq!(
+        cancels.last().map(|hit| hit.body.clone()),
+        Some(json!({"id": 7}).to_string()),
+        "send 失败必须撤回登记：{:?}",
+        stub.trace()
+    );
+
+    // 连撤回都失败：仍然是"prompt 没发出去"这个错误（不是注册错误），
+    // 但告警行必须留下"触发器没撤掉"的痕迹。
+    stub.with(|state| state.wake_cancel_status = 500);
+    let (code, stdout, stderr) =
+        run_wing_env(&["run", "-p", "x", "--notify-to", "parent-1"], &stub, &[]).await;
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("Failed to send prompt"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&stub.home);
 }
