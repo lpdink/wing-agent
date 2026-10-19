@@ -343,6 +343,24 @@ class TestSameSubscriptionUpserts:
         assert refreshed.prompt == "new text"
         assert len(service.list_triggers()) == 1
 
+    def test_implicit_refresh_keeps_a_custom_prompt(self, service: WakeService) -> None:
+        """`wing watch -p "..."` 之后的隐式刷新不得把正文清回内置信封。
+
+        与「配额不被降级」是同一条不变量：隐式登记不覆盖显式意图。隐式刷新
+        （`wing run -r` 的 notify）永远不带 prompt，`None` 必须读成「保持不变」。
+        """
+        explicit = _session_trigger(service, prompt="look at the failing test")
+        implicit = _session_trigger(service)  # prompt=None
+        assert implicit.id == explicit.id
+        assert implicit.prompt == "look at the failing test"
+
+        # 显式给了新正文才覆盖；新建（没有既有订阅时）仍然缺省内置信封
+        assert _session_trigger(service, prompt="new").prompt == "new"
+        service.cancel(explicit.id)
+        fresh = _session_trigger(service)
+        assert fresh.id != explicit.id
+        assert fresh.prompt is None
+
 
 # ============================================================
 # cancel / list

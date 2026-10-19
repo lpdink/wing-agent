@@ -230,9 +230,10 @@ class WakeService:
         同一个收口会被投递多次（父会话照着两条信封各答一次时，第二次答复已经找不到
         waiter，会掉进子会话的 inbox 变成一条普通用户消息，凭空多起一轮）。
 
-        ``times`` 在刷新路径上是**三态**：``None`` = 保持不变（不是"重置成缺省 1"）。
-        隐式刷新（`wing run -r` 的 notify 登记）永远不带 `times`，取缺省语义会把
-        `wing watch --times 3` 剩下的配额悄悄降级成 1。
+        隐式刷新（`wing run -r` 的 notify 登记）不覆盖**显式意图**，两条不变量同源：
+        ``times`` 与 ``prompt`` 在刷新路径上都是三态——``None`` = 保持不变，不是
+        「重置成缺省」（配额会从 `--times 3` 剩下的降成 1、自定义正文会被清回内置信封）。
+        新建路径的缺省仍然是「配额 1 / 内置信封」；想主动清掉自定义正文只能取消重建。
         """
         existing = self._store.find_active_session(
             source_session_id=source,
@@ -242,7 +243,8 @@ class WakeService:
         if existing is None:
             return None
         budget = existing.remaining_done if times is None else times
-        if not self._store.refresh(existing.id, remaining_done=budget, prompt=prompt):
+        text = existing.prompt if prompt is None else prompt
+        if not self._store.refresh(existing.id, remaining_done=budget, prompt=text):
             raise WakeUnavailableError(
                 f"wake unavailable: failed to refresh trigger #{existing.id}"
             )
