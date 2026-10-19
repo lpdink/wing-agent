@@ -61,9 +61,18 @@ resize 也整屏重画、那一帧同样不原子（`\e[2J` ×2 + `diff…CUP`�
 要连它们一起消掉得让整帧原子化（`CSI ? 2026 h/l` 同步输出，Ghostty 支持），那是另一件事
 （见 `design.md` 的 Non-Goals）。
 
+**已知取舍：可见性不再"每帧重申"，也就没有自愈。** 旧行为每帧都发 `?25h`，所以任何**在 app
+背后**把光标藏掉的东西（终端自身策略、别的写者、上一段 TUI 的残留状态）都会在下一帧被自动纠回
+来；现在只有在「未知→可见」和「隐藏→可见」这两个状态边上才发。契约成立的前提是"本装饰器是参与
+这套状态机的唯一写者"——段边界（`enter_sequence` 的 `?25l`、`leave_sequence` 的 `?25h`）与
+`tui/clipboard_protocol.rs` 都不改这个状态，所以今天不会出现"终端隐藏了光标而 gate 以为它还
+可见"。**将来若有第三方在运行期改 DECTCEM，必须同时经本装饰器，或在这里给 `visible` 加一条
+外部失效/周期性重申通道**；否则可见光标会一直不亮。
+
 单测在 `crates/wing/src/tui/cursor.rs`（真 `CrosstermBackend` + 按 `flush()` 切段的记录
-writer，字节级断言）；`?25h`/`CUP` 的段边界性质由 `a_repaint_reaches_the_terminal_in_one_write`
-钉住。
+writer，字节级断言）：段边界（一帧一写）由 `a_repaint_reaches_the_terminal_in_one_write` 钉，
+宽字符 / emoji（含 `emoji_width::pin`）之后落点原样重发、行尾落点不折行由
+`a_wide_glyph_by_the_row_end_keeps_the_cursor_on_its_row` 钉。
 
 ## 设计决策
 

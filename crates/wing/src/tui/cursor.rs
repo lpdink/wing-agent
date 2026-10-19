@@ -1,23 +1,19 @@
 //! 光标转义的**变化语义** —— 出帧口的 backend 装饰（唯一装配点是
-//! [`crate::tui::init_terminal`]）。
+//! [`crate::tui::init_terminal`]）。为什么需要它见 `docs/dev/tui-signals.md`。
 //!
 //! 契约：
 //!
-//! 1. **一帧一次 write。** ratatui 的帧收尾无条件发 `show_cursor` / `hide_cursor` +
-//!    `set_cursor_position`（ratatui-core 的 `apply_buffer_with_cursor`，不与上一帧比较），
-//!    而 `CrosstermBackend` 把它们都写成 `execute!`（自带 flush）。于是「diff `+ ?25h`」与
-//!    「`CUP`」本是两次 write，前一次已是完整可呈现的画面、只是光标停在 diff 最后一个被改写的
-//!    格子上——扫光期（≈25fps、diff 在牌子上、离 composer 十几行）终端在两次之间出帧就是
-//!    「光标在牌子上乱闪」。去重后稳态帧只有一次 write，静息帧连光标字节都没有。
-//! 2. **只在变化时声明。** `?25h` / `?25l` 只在「未知 → 某值」与「值 → 另一个值」时发——本
+//! 1. **只在变化时声明。** `?25h` / `?25l` 只在「未知 → 某值」与「值 → 另一个值」时发——本
 //!    装饰器是参与这套状态机的唯一写者，`tui::enter_sequence` / `leave_sequence` 只在段边界
 //!    出现、不参与；`CUP` 只在目标 ≠ **已知**物理位置时发。
-//! 3. **物理光标位置未知时不得省 `CUP`**（红线）。真实光标是输入法候选窗的锚，位置错了就是
-//!    硬伤。这里的"已知"只认本装饰器自己设置过的位置；任何可能移动物理光标、或让位置由终端
-//!    决定的动作之后立刻作废（[`CursorGate::forget_position`] 的调用点就是全部清单）。
+//! 2. **物理位置未知时不得省 `CUP`**（红线）：真实光标是输入法候选窗的锚，位置错了就是硬伤。
+//!    "已知"只认本装饰器自己设置过的位置——任何可能移动物理光标、或让前进量由终端决定的动作
+//!    之后立刻作废（[`CursorGate::forget_position`] 的调用点就是全部清单）。
+//! 3. **稳态帧一次 write**：省掉 `?25h` / `CUP` 也就省掉了 `execute!` 的提前 flush，diff 与
+//!    `CUP` 同批到达终端，终端看不到半截画面。
 //!
-//! 覆盖范围**只限经过本装饰器的字节**：`tui/clipboard_protocol.rs` 的协议机直写 stdout
-//! （OSC 5522，不移动光标，也不经过这里）。
+//! 覆盖范围**只限经过本装饰器的字节**：`tui/clipboard_protocol.rs` 的读取协议机直写 stdout
+//! （OSC 5522，不移动光标）。
 
 use std::cell::Cell;
 use std::io;
@@ -372,6 +368,30 @@ mod tests {
         format!("\x1b[{};{}H", y + 1, x + 1)
     }
 
+    /// 一段 write 里所有 `CUP`（`ESC [ r ; c H`），按出现顺序：diff 自己也用 `MoveTo` 定位，
+    /// 所以"落点对不对"要看**最后**一条 `CUP`，看条数没有意义。
+    fn cups(write: &str) -> Vec<String> {
+        let bytes = write.as_bytes();
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+                let start = i + 2;
+                let mut end = start;
+                while end < bytes.len() && (bytes[end] == b';' || bytes[end].is_ascii_digit()) {
+                    end += 1;
+                }
+                if end < bytes.len() && bytes[end] == b'H' && bytes[start..end].contains(&b';') {
+                    found.push(write[i..=end].to_string());
+                    i = end + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        found
+    }
+
     /// 空 diff 的帧里后端只留下这一串（`CrosstermBackend::draw` 的无条件收尾）。
     const SGR_RESET: &str = "\x1b[39m\x1b[49m\x1b[59m\x1b[0m";
 
@@ -465,6 +485,46 @@ mod tests {
             "写了格子之后位置未知，落点必须重发（红线）：{writes:?}"
         );
         assert!(writes[0].ends_with(&cup(7, 2)), "{writes:?}");
+    }
+
+    #[test]
+    fn a_wide_glyph_by_the_row_end_keeps_the_cursor_on_its_row() {
+        // 宽字符 / emoji（含 VS16 的 `emoji_width::pin`）的前进量由终端裁定 ⇒ 写过它们之后
+        // 位置不可信：落点必须原样重发，且列不得被推到下一行（行尾写满时终端会折行）。
+        let mut fixture = Fixture::new(20, 4);
+        fixture.settle("AB", Some((5, 0)));
+
+        // 走真正的出帧口（含 wire pass）：两张宽字换掉 "AB"。
+        crate::tui::draw_frame(&mut fixture.terminal, |frame| {
+            frame.render_widget(Paragraph::new("宽⚠️"), frame.area());
+            frame.set_cursor_position((5, 0));
+        })
+        .expect("draw");
+        let writes = fixture.writes();
+        assert_eq!(writes.len(), 1, "一帧一次 write：{writes:?}");
+        // diff 自己也会发 `MoveTo`；要断言的是**最后一次**定位 = 落点（且在第 1 行）。
+        assert_eq!(
+            cups(&writes[0]).last(),
+            Some(&cup(5, 0)),
+            "宽字之后落点必须原样重发、且仍在第 1 行：{writes:?}"
+        );
+        assert!(writes[0].ends_with(&cup(5, 0)), "{writes:?}");
+
+        // 行尾写满（10 张宽字 = 20 列）：落点是最后一列，CUP 只能是第 20 列——不是第 21 列
+        // （终端在行尾写满会折行，折了光标就不在落点上）。
+        let full = "宽".repeat(10);
+        fixture.frame(&full, Some((19, 0)));
+        let writes = fixture.writes();
+        assert_eq!(
+            cups(&writes[0]).last(),
+            Some(&cup(19, 0)),
+            "行尾落点必须是第 1 行第 20 列：{writes:?}"
+        );
+        assert!(writes[0].ends_with(&cup(19, 0)), "{writes:?}");
+
+        // 位置重新已知：同一帧再画不再发光标字节。
+        fixture.frame(&full, Some((19, 0)));
+        assert_eq!(fixture.writes(), vec![SGR_RESET.to_string()]);
     }
 
     #[test]
