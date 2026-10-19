@@ -54,7 +54,12 @@ class TestMigrations:
     def test_fresh_open_creates_schema_and_sets_version(self, tmp_path: Path) -> None:
         db = Database(tmp_path / "wing.db")
         assert db.ready
-        assert _tables(db) == {"audit_llm_call", "audit_tool_call", "audit_compaction"}
+        assert _tables(db) == {
+            "audit_llm_call",
+            "audit_tool_call",
+            "audit_compaction",
+            "wake_trigger",
+        }
         assert {
             "idx_audit_llm_call_ts",
             "idx_audit_llm_call_session",
@@ -113,14 +118,17 @@ class TestMigrationRollback:
         import wing.db.database as db_mod
 
         path = tmp_path / "wing.db"
-        monkeypatch.setattr(db_mod, "MIGRATIONS", MIGRATIONS + ((2, _BAD_V2),))
-        monkeypatch.setattr(db_mod, "SCHEMA_VERSION", 2)
+        next_version = SCHEMA_VERSION + 1
+        monkeypatch.setattr(
+            db_mod, "MIGRATIONS", MIGRATIONS + ((next_version, _BAD_V2),)
+        )
+        monkeypatch.setattr(db_mod, "SCHEMA_VERSION", next_version)
 
         broken = Database(path)
         assert not broken.ready
         conn = sqlite3.connect(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         finally:
             conn.close()
@@ -128,10 +136,12 @@ class TestMigrationRollback:
         assert {"audit_llm_call", "audit_tool_call", "audit_compaction"} <= names
 
         # 修好后同一个库能继续迁移（说明上面那次不是「半个 v2」）
-        monkeypatch.setattr(db_mod, "MIGRATIONS", MIGRATIONS + ((2, _GOOD_V2),))
+        monkeypatch.setattr(
+            db_mod, "MIGRATIONS", MIGRATIONS + ((next_version, _GOOD_V2),)
+        )
         fixed = Database(path)
         assert fixed.ready
-        assert fixed.query("PRAGMA user_version")[0][0] == 2
+        assert fixed.query("PRAGMA user_version")[0][0] == next_version
         assert "t2" in _tables(fixed)
         fixed.close()
 
@@ -172,9 +182,10 @@ def test_too_new_version_is_caught_inside_the_transaction(
     import wing.db.database as db_mod
 
     path = tmp_path / "wing.db"
+    too_new = SCHEMA_VERSION + 1
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("CREATE TABLE marker (x INTEGER)")
-    conn.execute("PRAGMA user_version = 2")
+    conn.execute(f"PRAGMA user_version = {too_new}")
     conn.close()
 
     real = db_mod._user_version
@@ -192,7 +203,8 @@ def test_too_new_version_is_caught_inside_the_transaction(
     assert len(reads) == 2  # 外层一次 + 事务内一次
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2  # 不猜、不降级写
+        # 不猜、不降级写
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == too_new
     finally:
         conn.close()
 

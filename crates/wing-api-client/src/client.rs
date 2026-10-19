@@ -486,6 +486,43 @@ impl GatewayClient {
     }
 
     // ============================================================
+    // 唤醒（wake）
+    // ============================================================
+
+    /// 注册一条唤醒触发器（`POST /api/wake/create`）。
+    ///
+    /// 校验失败（自指 / 非法 spec / times 组合）是 400，源或目标会话不可解析是 404——
+    /// 错误文案直接用网关的 `detail`（它已经是可行动的）。
+    pub async fn create_wake(
+        &self,
+        req: &WakeCreateRequest,
+    ) -> Result<WakeCreateResponse, ApiClientError> {
+        self.post_json("/api/wake/create", req).await
+    }
+
+    /// 列出唤醒触发器（`GET /api/wake/list`；`all=true` 含已终结的）。
+    pub async fn list_wakes(&self, all: bool) -> Result<WakeListResponse, ApiClientError> {
+        let query: Vec<(&str, &str)> = if all { vec![("all", "true")] } else { vec![] };
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/wake/list"))
+            .query(&query)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// 取消一条触发器（`POST /api/wake/cancel`）：`canceled=false` = 本来就已终结。
+    pub async fn cancel_wake(&self, id: i64) -> Result<WakeCancelResponse, ApiClientError> {
+        self.post_json("/api/wake/cancel", &WakeCancelRequest { id })
+            .await
+    }
+
+    // ============================================================
     // 系统级操作
     // ============================================================
 
@@ -1120,6 +1157,97 @@ mod tests {
             recorded[0].authorization.as_deref(),
             Some("Bearer secret-key")
         );
+    }
+
+    // ============================================================
+    // 唤醒（/api/wake/*）
+    // ============================================================
+
+    const WAKE_INFO_BODY: &str = r#"{"wake":{"id":7,"kind":"session",
+        "target_session_id":"parent","source_session_id":"child",
+        "on_events":"done,ask","spec":null,"prompt":null,"state":"active",
+        "fire_count":0,"last_fire_at":null,"last_error":null,
+        "created_at":"2026-03-01T09:00:00","next_fire_at":null}}"#;
+
+    #[tokio::test]
+    async fn create_wake_posts_only_the_fields_that_are_set() {
+        let server = MockGateway::start(vec![("/api/wake/create", 200, WAKE_INFO_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client
+            .create_wake(&WakeCreateRequest {
+                kind: "session".into(),
+                target_session_id: "parent".into(),
+                source_session_id: Some("child".into()),
+                on_events: None,
+                spec: None,
+                prompt: None,
+                times: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.wake.id, 7);
+        assert_eq!(resp.wake.state, "active");
+        assert_eq!(resp.wake.source_session_id.as_deref(), Some("child"));
+        assert_eq!(resp.wake.created_at.as_deref(), Some("2026-03-01T09:00:00"));
+
+        let recorded = server.recorded();
+        assert_eq!(recorded[0].method, "POST");
+        assert_eq!(recorded[0].path, "/api/wake/create");
+        let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "kind": "session",
+                "target_session_id": "parent",
+                "source_session_id": "child",
+            }),
+            "没设的字段不上 wire（缺省值由网关补齐）"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_wakes_sends_the_all_flag_only_when_asked() {
+        let server = MockGateway::start(vec![(
+            "/api/wake/list",
+            200,
+            r#"{"wakes":[{"id":1,"kind":"timer","target_session_id":"p","on_events":"done,ask","state":"active","fire_count":2}]}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let active = client.list_wakes(false).await.unwrap();
+        assert_eq!(active.wakes.len(), 1);
+        assert_eq!(active.wakes[0].fire_count, 2);
+        assert_eq!(active.wakes[0].spec, None);
+
+        let everything = client.list_wakes(true).await.unwrap();
+        assert_eq!(everything.wakes[0].kind, "timer");
+
+        let recorded = server.recorded();
+        assert_eq!(recorded[0].path, "/api/wake/list");
+        assert_eq!(recorded[1].path, "/api/wake/list?all=true");
+    }
+
+    #[tokio::test]
+    async fn cancel_wake_posts_the_id_and_parses_the_verdict() {
+        let server = MockGateway::start(vec![(
+            "/api/wake/cancel",
+            200,
+            r#"{"ok":true,"canceled":false}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client.cancel_wake(7).await.unwrap();
+        assert!(resp.ok);
+        assert!(!resp.canceled, "已终结的触发器是幂等 no-op");
+
+        let recorded = server.recorded();
+        assert_eq!(recorded[0].method, "POST");
+        assert_eq!(recorded[0].path, "/api/wake/cancel");
+        let body: serde_json::Value = serde_json::from_str(&recorded[0].body).unwrap();
+        assert_eq!(body, serde_json::json!({"id": 7}));
     }
 
     // ============================================================

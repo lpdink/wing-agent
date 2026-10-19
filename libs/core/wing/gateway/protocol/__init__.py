@@ -85,6 +85,14 @@ from .system import (
     ToolInfo,
     ToolsListResponse,
 )
+from .wake import (
+    WakeCancelRequest,
+    WakeCancelResponse,
+    WakeCreateRequest,
+    WakeCreateResponse,
+    WakeInfo,
+    WakeListResponse,
+)
 from .ws import ClientRequest, ConnectResponse, ToolCallRequest, ToolCallResult
 
 
@@ -156,5 +164,11 @@ __all__ = [
     "UnsubscribeRequest",
     "UpdateSessionRequest",
     "UpdateSessionResponse",
+    "WakeCancelRequest",
+    "WakeCancelResponse",
+    "WakeCreateRequest",
+    "WakeCreateResponse",
+    "WakeInfo",
+    "WakeListResponse",
     "error_response",
 ]

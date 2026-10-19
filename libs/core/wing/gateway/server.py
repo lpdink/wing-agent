@@ -278,6 +278,7 @@ class GatewayServer:
             if self._background_requested:
                 runtime.reaper.attach()
                 self._background.start()
+                runtime.wake.start()
         except Exception as e:
             items.append(
                 ReloadResultItem(name="background jobs", ok=False, detail=str(e))
@@ -429,12 +430,29 @@ class GatewayServer:
             return
         self.runtime.reaper.attach()
         self._background.start()
+        self._start_wake()
 
     async def stop_background(self) -> None:
         """停止后台周期任务（gateway lifespan shutdown 调用）；setup mode 下无 reaper 可 detach。"""
+        await self._stop_wake()
         await self._background.stop()
         if not self._in_setup_mode:
             self.runtime.reaper.detach()
+
+    def _start_wake(self) -> None:
+        """启动唤醒调度循环（幂等；生命周期与 ``BackgroundScheduler`` 同层）。
+
+        设置项在 ``WingRuntime.__init__`` 里已 ``install()``（订阅 EventBus），这里只起
+        调度 task（构造期没有运行中的事件循环）。
+        """
+        if self._in_setup_mode:
+            return
+        self.runtime.wake.start()
+
+    async def _stop_wake(self) -> None:
+        if self._in_setup_mode:
+            return
+        await self.runtime.wake.stop()
 
     def start(self) -> None:
         """启动服务器（阻塞）。"""

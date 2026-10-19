@@ -305,38 +305,101 @@ struct KnownFlags {
     short_bool: HashSet<char>,
 }
 
-impl KnownFlags {
-    fn from_cli() -> Self {
-        let cmd = Cli::command();
-        let mut long_with_value = HashSet::new();
-        let mut long_bool = HashSet::new();
-        let mut short_with_value = HashSet::new();
-        let mut short_bool = HashSet::new();
+/// 一组 flag 分类（顶层 / 子命令各自收一份，最后按优先级合并）。
+#[derive(Default)]
+struct FlagSets {
+    long_with_value: HashSet<String>,
+    long_bool: HashSet<String>,
+    short_with_value: HashSet<char>,
+    short_bool: HashSet<char>,
+}
 
+impl FlagSets {
+    /// 收**当前这一层**的 flag（不下潜）。
+    fn collect(&mut self, cmd: &clap::Command) {
         for arg in cmd.get_arguments() {
             let takes_value = arg.get_action().takes_values();
             if let Some(long) = arg.get_long() {
                 let flag = format!("--{long}");
                 if takes_value {
-                    long_with_value.insert(flag);
+                    self.long_with_value.insert(flag);
                 } else {
-                    long_bool.insert(flag);
+                    self.long_bool.insert(flag);
                 }
             }
             if let Some(short) = arg.get_short() {
                 if takes_value {
-                    short_with_value.insert(short);
+                    self.short_with_value.insert(short);
                 } else {
-                    short_bool.insert(short);
+                    self.short_bool.insert(short);
                 }
             }
         }
+    }
 
+    /// 递归收整棵子命令树（`wing run` / `wing wake` / `wing config get` … 各自的 flag）。
+    fn collect_recursive(&mut self, cmd: &clap::Command) {
+        self.collect(cmd);
+        for subcommand in cmd.get_subcommands() {
+            self.collect_recursive(subcommand);
+        }
+    }
+
+    /// 把 `other` 里**顶层没定义**的名字补进来：同名一律以顶层为准。
+    ///
+    /// 同名跨命令的分类可以不同（`--yolo` 顶层是 bool，`wing update` 上是
+    /// `--yolo <BOOL>`），而过滤器只有一张**按名字**的表——分层优先级是唯一的确定性
+    /// 解法：stdio 调用看到的就是顶层那张表。子命令内部若自己冲突，取"带值"那一侧
+    /// （贪心消费下一个 token；宁可多留一个值，也不把 flag 和值错位）。
+    fn fill_from(&mut self, other: FlagSets) {
+        for name in other.long_with_value {
+            if !self.long_bool.contains(&name) {
+                self.long_with_value.insert(name);
+            }
+        }
+        for name in other.long_bool {
+            if !self.long_with_value.contains(&name) {
+                self.long_bool.insert(name);
+            }
+        }
+        for short in other.short_with_value {
+            if !self.short_bool.contains(&short) {
+                self.short_with_value.insert(short);
+            }
+        }
+        for short in other.short_bool {
+            if !self.short_with_value.contains(&short) {
+                self.short_bool.insert(short);
+            }
+        }
+    }
+}
+
+impl KnownFlags {
+    /// 收集 wing 的**全部** flag：顶层优先，子命令（递归）补缺。
+    ///
+    /// 子命令那一层不能漏：`wing run -p ...` / `wing wake --in 30m -p ...` 同样是
+    /// "argv 里有 `-p`" 的调用形态（stdio 检测是**解析前**按原始 argv 判的），于是
+    /// 过滤器会跑到它们身上。只认顶层 flag 的话，`--in` / `--to` / `--on` /
+    /// `--notify-to` 这类子命令专属 flag 会在过滤器里被当成外部 SDK flag 丢掉——
+    /// 而 clap 只看得到"少了一个 flag 的程序"，静默变成另一次调用。
+    ///
+    /// 收全之后，放错位置的**已知** flag 会走到 clap 面前被**响亮**拒绝（这正是
+    /// `misplaced_*` 系列闸门的口径：宁可报错，也不静默丢弃）。
+    fn from_cli() -> Self {
+        let cmd = Cli::command();
+        let mut top = FlagSets::default();
+        top.collect(&cmd);
+        let mut subs = FlagSets::default();
+        for subcommand in cmd.get_subcommands() {
+            subs.collect_recursive(subcommand);
+        }
+        top.fill_from(subs);
         Self {
-            long_with_value,
-            long_bool,
-            short_with_value,
-            short_bool,
+            long_with_value: top.long_with_value,
+            long_bool: top.long_bool,
+            short_with_value: top.short_with_value,
+            short_bool: top.short_bool,
         }
     }
 }
@@ -371,7 +434,8 @@ pub fn is_stdio_mode(args: &[String]) -> bool {
 /// Filter unknown arguments in stdio mode.
 ///
 /// Strategy:
-/// - **Known flags** (from clap): kept with correct value handling.
+/// - **Known flags** (from clap, **every subcommand included** — see
+///   [`KnownFlags::from_cli`]): kept with correct value handling.
 /// - **Unknown `--flag=value`**: dropped (single token).
 /// - **Unknown `--flag value`**: heuristic — if the next token starts with
 ///   `-`, the flag is treated as boolean (dropped, next token preserved).
@@ -951,6 +1015,25 @@ mod tests {
     }
 
     // ---- filter_unknown_args ----
+
+    /// 子命令专属 flag 也必须"已知"：`wing wake --in 30m -p ping` / `wing run -p ... --notify-to X`
+    /// 都带着 `-p`，过滤器会跑到它们身上；漏认就等于把 `--in` 丢掉、静默变成另一次调用。
+    #[test]
+    fn filter_keeps_subcommand_flags() {
+        let args: Vec<String> = vec!["wake", "--in", "30m", "-p", "ping", "--to", "sid-1"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args.clone());
+        assert_eq!(filtered, args, "子命令 flag 一个都不能丢");
+
+        let args: Vec<String> = vec!["run", "-p", "go", "--notify-to", "sid-1", "--no-notify"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let filtered = filter_unknown_args(args.clone());
+        assert_eq!(filtered, args);
+    }
 
     #[test]
     fn filter_keeps_known_flags() {

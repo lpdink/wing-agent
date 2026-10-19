@@ -167,6 +167,11 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 # 非 tool_runtime 的 key（/api/shutdown 同样受鉴权保护）。见 scenarios/test_gateway_auth.py
 @pytest.mark.probe_env(auth={"enabled": True, "keys": [{"key": "k"}]}, api_key="k")
 
+# pre_start_dirs: 网关**启动前**要占住的目录（相对 WING_HOME，元素是路径字符串）。
+# 产品在启动期就会打开的东西（$WING_HOME/core/wing.db）没法在场景体里再改形态——
+# 「库打不开」这类降级现场必须在本进程 spawn 之前摆好。见 scenarios/test_audit_sqlite.py
+@pytest.mark.probe_env(pre_start_dirs=["core/wing.db"])
+
 # config_text: **逐字替换**生成的 core/config.yaml（None = 按参数生成，既有行为不变）。
 # 它与所有"生成配置"的旋钮互斥（显式偏离默认值即报错——那些旋钮会静默失效）；
 # 写一份语法错的配置只有它能表达。常与 connect=False 配套：setup mode 下 /ws 在

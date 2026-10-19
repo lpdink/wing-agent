@@ -99,17 +99,18 @@ async def test_audit_rows_land_in_wing_db(probe: Probe) -> None:
     assert not (probe.env.wing_home / "core" / "metrics.json").exists()
 
 
-@pytest.mark.probe_env(models=[DEGRADED_MODEL])
+@pytest.mark.probe_env(models=[DEGRADED_MODEL], pre_start_dirs=["core/wing.db"])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_unopenable_database_does_not_break_the_gateway(probe: Probe) -> None:
     """``wing.db`` 打不开：审计降级、网关照常跑（一轮工具对话成功收口）。
 
-    把库路径先占成目录（sqlite3 打不开），再跑一轮带工具调用的对话——审计是旁路，
-    既不能拖垮 turn，也不能拖垮进程；降级只在打开时留一行 ERROR。
+    库路径在网关**启动前**就被占成一个目录（``pre_start_dirs``：进程启动期就会打开
+    这个库——唤醒服务要拿它判"要不要武装"），于是 sqlite3 打不开；再跑一轮带工具调用的
+    对话——审计是旁路，既不能拖垮 turn，也不能拖垮进程；降级只在打开时留一行 ERROR。
     """
     db_path = probe.env.wing_home / "core" / "wing.db"
-    db_path.mkdir(parents=True)
+    assert db_path.is_dir(), "库路径没有被提前占成目录"
 
     probe.register(
         DEGRADED_MODEL,

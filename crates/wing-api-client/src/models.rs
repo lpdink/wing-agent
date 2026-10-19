@@ -1567,6 +1567,88 @@ pub struct SettingsSetResponse {
     pub warnings: Vec<String>,
 }
 
+// ============================================================
+// Wake（`/api/wake/*`）—— 唤醒触发器
+// ============================================================
+
+/// `POST /api/wake/create` 请求。
+///
+/// `kind=session` 由 `source_session_id` 的事件驱动（`on_events` 缺省 `done,ask`）；
+/// `kind=timer` 由 `spec` 驱动（`in:30m` / `at:<local iso>` / `every:30m` / `daily:07:00`），
+/// `prompt` 必填。校验失败由网关回 400 / 404。
+#[derive(Debug, Clone, Serialize)]
+pub struct WakeCreateRequest {
+    /// `session` | `timer`。
+    pub kind: String,
+    pub target_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_events: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub times: Option<i64>,
+}
+
+/// 一条唤醒触发器的快照（时间字段是网关本地 naive ISO 字符串）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeInfo {
+    pub id: i64,
+    pub kind: String,
+    pub target_session_id: String,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
+    #[serde(default)]
+    pub on_events: String,
+    #[serde(default)]
+    pub spec: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub fire_count: i64,
+    #[serde(default)]
+    pub last_fire_at: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub next_fire_at: Option<String>,
+}
+
+/// `POST /api/wake/create` 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeCreateResponse {
+    pub wake: WakeInfo,
+}
+
+/// `GET /api/wake/list` 响应（`?all=true` 含已终结的）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeListResponse {
+    #[serde(default)]
+    pub wakes: Vec<WakeInfo>,
+}
+
+/// `POST /api/wake/cancel` 请求。
+#[derive(Debug, Clone, Serialize)]
+pub struct WakeCancelRequest {
+    pub id: i64,
+}
+
+/// `POST /api/wake/cancel` 响应（`canceled=false` = 本来就已终结，幂等 no-op）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeCancelResponse {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub canceled: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

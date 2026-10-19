@@ -76,6 +76,7 @@ from wing.session import (
     TagMutation,
 )
 from wing.system import ReloadResult, reload_system as _reload_system
+from wing.wake import WakeService
 from wing.store import (
     ArchivedSession,
     FileRef,
@@ -212,6 +213,33 @@ async def settings_write_effect(sm: SessionManager) -> ReloadResult:
 
 
 # ============================================================
+# Wake ports —— 唤醒服务（L3）需要的会话能力，由本层（L4）注入
+# ============================================================
+
+
+class _RuntimeWakePorts:
+    """``wing.wake.ports.WakePorts`` 的实现体：三个方法都只是本 runtime 的窄投影。
+
+    ``wake`` 是 L3、不得 import ``runtime``，所以投递能力只能由组合根注入（与远程工具的
+    「注入 dispatch 闭包」同款）；这里是唯一的接线处——换投递语义只改这一个类。
+    """
+
+    def __init__(self, runtime: WingRuntime) -> None:
+        self._runtime = runtime
+
+    def session_exists(self, session_id: str) -> bool:
+        return self._runtime.session_exists(session_id)
+
+    def is_archived(self, session_id: str) -> bool:
+        return self._runtime.is_archived(session_id)
+
+    async def deliver(self, *, session_id: str, content: str, request_id: str) -> None:
+        await self._runtime.post(
+            content=content, request_id=request_id, session_id=session_id
+        )
+
+
+# ============================================================
 # WingRuntime
 # ============================================================
 
@@ -245,6 +273,13 @@ class WingRuntime:
         """空闲会话逐出器（gateway lifespan 负责 attach/detach）。"""
         self.archiver = SessionArchiver(self.sm)
         """自动归档器（BackgroundScheduler 的 session-archive job 入口，无订阅）。"""
+        self.wake = WakeService(_RuntimeWakePorts(self))
+        """会话唤醒（订阅 TurnResult / Ask + 定时触发 + 内置信封投递）。
+
+        这里只 ``install()``（订阅 EventBus；无循环依赖），调度循环由 gateway lifespan 的
+        ``start()`` 起（与 ``BackgroundScheduler`` 同层）——构造期没有运行中的事件循环。
+        """
+        self.wake.install()
 
     @property
     def template_manager(self) -> AgentTemplateManager:
@@ -495,7 +530,12 @@ class WingRuntime:
             RuntimeError: 钉住（忙碌 / 待处理输入 / 订阅中）/ 后端不支持归档 /
                 live 与归档区同时存在 / 目录移动失败
         """
-        return self.sm.archive_session(session_id)
+        archived, detail = self.sm.archive_session(session_id)
+        if archived:
+            # 归档联动：source 或 target 命中该会话的唤醒触发器一并取消（归档 = 冻结，
+            # 再唤醒它只会落到 failed）。联动住 L4：session_manager 不反向依赖 wake。
+            self.wake.cancel_for_session(session_id)
+        return archived, detail
 
     def unarchive_session(self, session_id: str) -> tuple[bool, str]:
         """把会话从归档区移回 live 区（幂等）。
@@ -515,7 +555,10 @@ class WingRuntime:
 
     async def archive_stale_sessions(self) -> list[str]:
         """扫描一轮并归档过期会话（BackgroundScheduler 的 job 入口）。"""
-        return await self.archiver.sweep()
+        archived = await self.archiver.sweep()
+        for session_id in archived:
+            self.wake.cancel_for_session(session_id)
+        return archived
 
     # ============================================================
     # 订阅管理

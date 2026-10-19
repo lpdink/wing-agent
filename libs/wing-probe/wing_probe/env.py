@@ -618,6 +618,7 @@ class ProbeEnv:
         hooks: Sequence[str] = (),
         auth: Mapping[str, Any] | None = None,
         config_text: str | None = None,
+        pre_start_dirs: Sequence[str] = (),
     ) -> None:
         if config_text is not None:
             conflicts = conflicting_config_knobs(
@@ -689,6 +690,14 @@ class ProbeEnv:
         与「配置生成」旋钮互斥（偏离默认值即 ``ProbeEnvError``，见
         :func:`conflicting_config_knobs`）。启动仍带 ``-p <OS 分配端口>``（``cli.py``
         的显式参数优先于配置），所以探针总能连上降级启动的网关。
+        """
+
+        self._pre_start_dirs = tuple(pre_start_dirs)
+        """网关**启动前**要占住的目录（相对 ``WING_HOME``）。
+
+        产品在启动期就打开的东西（``core/wing.db``）没法在场景体里再改写形态：
+        「库打不开」这类降级现场必须在本进程 spawn 之前就摆好。传相对路径，例如
+        ``pre_start_dirs=["core/wing.db"]`` = 那个位置先建一个目录（sqlite3 打不开）。
         """
 
         self.provider = FakeProvider(
@@ -770,6 +779,27 @@ class ProbeEnv:
             self._log_marker(f"--- probe: gateway healthy on port {port} ---")
             return
         raise last_error if last_error is not None else ProbeEnvError("gateway failed")
+
+    async def kill_gateway(self) -> None:
+        """**硬杀**网关子进程（SIGKILL，不给收尾机会）。
+
+        与 ``restart_gateway`` 的区别就是「有没有优雅停机」：这里进程拿不到
+        ``/api/shutdown``，lifespan 的收尾一行都跑不了——**停机窗口里该发生的触发
+        因此一定没发生**。跨重启的补偿类语义（唤醒的错过补发）只有它能确定性造出来：
+        否则触发时机与停机的先后只能靠 sleep 抢时间窗，不可靠。
+
+        杀完 ``_process`` 置空，``restart_gateway()`` 会跳过停机直接在同一套隔离目录上
+        重新起进程。
+        """
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        self._log_marker("--- probe: kill -9 gateway ---")
+        process.kill()
+        try:
+            await asyncio.to_thread(process.wait, timeout=DEFAULT_SHUTDOWN_WAIT)
+        finally:
+            self._process = None
 
     async def restart_gateway(self) -> None:
         """重启网关子进程（同一套隔离目录，新端口，假 Provider 不重启）。
@@ -885,6 +915,8 @@ class ProbeEnv:
         self.wing_home.mkdir(parents=True, exist_ok=True)
         self.sessions_path.mkdir(parents=True, exist_ok=True)
         self.artifacts_path.mkdir(parents=True, exist_ok=True)
+        for relative in self._pre_start_dirs:
+            (self.wing_home / relative).mkdir(parents=True, exist_ok=True)
 
     def _resolve_binary(self) -> Path:
         if self._gateway_bin is None:
