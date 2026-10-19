@@ -471,6 +471,59 @@ class TestBookkeepingFailure:
         assert len(ports.delivered) == 1
 
 
+class TestCancelWriteLost:
+    """取消时的"写丢失"必须是一种**独立的结局**，不能说成"它早完了"。"""
+
+    def test_cancel_write_lost_raises_unavailable(
+        self,
+        service: WakeService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        trigger = _session_trigger(service)
+        database = service._store.database()
+        real_execute = database.execute
+
+        def flaky(sql: str, params=()):
+            if sql.strip().startswith("UPDATE wake_trigger"):
+                return False
+            return real_execute(sql, params)
+
+        monkeypatch.setattr(database, "execute", flaky)
+        with pytest.raises(WakeUnavailableError, match="write lost"):
+            service.cancel(trigger.id)
+        # 库里那行仍在武装（这正是不能对用户说"已终结"的理由）
+        assert [t.id for t in service.list_triggers()] == [trigger.id]
+
+    def test_cancel_for_session_never_lies_about_the_count(
+        self, service: WakeService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _session_trigger(service)
+        database = service._store.database()
+        monkeypatch.setattr(database, "executemany", lambda sql, rows: False)
+        assert service.cancel_for_session(CHILD) == 0  # 一条都没写成
+        assert len(service.list_triggers()) == 1
+
+
+class TestRecoverySkipsStalled:
+    @pytest.mark.asyncio
+    async def test_a_stalled_trigger_is_not_compensated_on_restart_of_the_loop(
+        self,
+        service: WakeService,
+        ports: FakePorts,
+        clock: Clock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`_stalled` 必须也拦得住 ``recover_missed``：否则 stop()/start() 一次就再投一次。"""
+        trigger = _timer_trigger(service, spec="in:30s")
+        clock.now = trigger.next_fire_at_ms or 0
+        monkeypatch.setattr(service._store, "record_fire", lambda *a, **k: False)
+        await service.fire_timer(trigger, clock.now)
+        assert len(ports.delivered) == 1
+
+        assert await service.recover_missed() == 0
+        assert len(ports.delivered) == 1
+
+
 class TestConcurrentDispatch:
     @pytest.mark.asyncio
     async def test_stale_snapshots_do_not_lose_a_decrement(

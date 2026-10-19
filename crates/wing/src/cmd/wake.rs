@@ -353,71 +353,104 @@ pub async fn run(args: WakeArgs, json: bool) -> ExitCode {
 }
 
 async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
-    if let Some(id) = args.cancel {
-        if args.list || has_schedule(&args) || args.times.is_some() || args.prompt.is_some() {
-            bail!("--cancel cannot be combined with --list, a schedule, --times or --prompt");
-        }
-        let (host, port) = common::ensure_gateway().await?;
-        let http = common::create_api_client(&host, port)?;
-        let resp = http.cancel_wake(id).await?;
-        if json {
-            common::print_json_compact(&WakeCancelOutput {
-                id,
-                canceled: resp.canceled,
-            });
-        } else if resp.canceled {
-            println!("canceled {id}");
-        } else {
-            println!("{id} was already finished (nothing to cancel)");
-        }
-        return Ok(());
-    }
-
+    // 用法先判：纯参数错误不该先把网关拉起来（`ensure_gateway` 会启守护进程）。
+    let mode = validate_mode(&args)?;
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
 
+    match mode {
+        Mode::Cancel(id) => {
+            let resp = http.cancel_wake(id).await?;
+            if json {
+                common::print_json_compact(&WakeCancelOutput {
+                    id,
+                    canceled: resp.canceled,
+                });
+            } else if resp.canceled {
+                println!("canceled {id}");
+            } else {
+                println!("{id} was already finished (nothing to cancel)");
+            }
+        }
+        Mode::List => {
+            let resp = http.list_wakes(args.all).await?;
+            if json {
+                common::print_json_compact(&resp.wakes);
+            } else {
+                print!("{}", render_wakes(&resp.wakes, args.all));
+            }
+        }
+        Mode::Create => {
+            let schedule = schedule_from_flags(
+                args.in_.as_deref(),
+                args.at.as_deref(),
+                args.every.as_deref(),
+                args.daily.as_deref(),
+            )?;
+            validate_timer(&schedule, args.prompt.as_deref(), args.times)?;
+            let target = resolve_target(args.to.as_deref())?;
+            let spec = schedule.spec()?;
+            let prompt = args.prompt.clone().unwrap_or_default();
+            let resp = http
+                .create_wake(&timer_request(&spec, &prompt, args.times, &target))
+                .await?;
+            if json {
+                common::print_json_compact(&WakeOutput { wake: resp.wake });
+            } else {
+                print!("{}", render_wake(&resp.wake));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 本次调用是哪一种形态（三种形态的参数集合互斥）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Create,
+    List,
+    Cancel(i64),
+}
+
+/// 判定形态并拒绝**放错位置的**参数。
+///
+/// 静默吃掉一个参数等于把这次调用变成另一次调用（用户以为 schedule 生效了，
+/// 实际只打印了一张表）——与仓库对"放错位置的 flag"的既有口径一致：响亮报错。
+pub(crate) fn validate_mode(args: &WakeArgs) -> Result<Mode> {
+    if let Some(id) = args.cancel {
+        if args.list {
+            bail!("--cancel cannot be combined with --list");
+        }
+        if has_schedule(args) {
+            bail!("--cancel does not take a schedule (--in / --at / --every / --daily)");
+        }
+        if args.times.is_some() || args.prompt.is_some() || args.to.is_some() || args.all {
+            bail!("--cancel only takes --json");
+        }
+        return Ok(Mode::Cancel(id));
+    }
     if args.list {
-        if has_schedule(&args) || args.times.is_some() || args.prompt.is_some() {
-            bail!("--list cannot be combined with a schedule, --times or --prompt");
+        if has_schedule(args) || args.times.is_some() || args.prompt.is_some() {
+            bail!(
+                "--list cannot be combined with a schedule, --times or --prompt \
+                 (to create one: wing wake --in 30m -p \"...\")"
+            );
         }
-        let resp = http.list_wakes(args.all).await?;
-        if json {
-            common::print_json_compact(&resp.wakes);
-        } else {
-            print!("{}", render_wakes(&resp.wakes, args.all));
+        if args.to.is_some() {
+            bail!("--list does not take --to");
         }
-        return Ok(());
+        return Ok(Mode::List);
     }
     if args.all {
         bail!("--all only applies to --list");
     }
-    if !has_schedule(&args) {
+    if !has_schedule(args) {
         bail!(
             "nothing to do: pass a schedule (--in 30m | --at \"...\" | --every 30m | --daily 07:00), \
              or --list / --cancel <ID>"
         );
     }
-
-    let schedule = schedule_from_flags(
-        args.in_.as_deref(),
-        args.at.as_deref(),
-        args.every.as_deref(),
-        args.daily.as_deref(),
-    )?;
-    validate_timer(&schedule, args.prompt.as_deref(), args.times)?;
-    let target = resolve_target(args.to.as_deref())?;
-    let spec = schedule.spec()?;
-    let prompt = args.prompt.clone().unwrap_or_default();
-
-    let resp = http
-        .create_wake(&timer_request(&spec, &prompt, args.times, &target))
-        .await?;
-    if json {
-        common::print_json_compact(&WakeOutput { wake: resp.wake });
-    } else {
-        print!("{}", render_wake(&resp.wake));
-    }
-    Ok(())
+    Ok(Mode::Create)
 }
 
 // ============================================================
@@ -725,6 +758,72 @@ mod tests {
         assert!(text.contains("on:      done,ask"), "{text}");
         assert!(text.contains("target:  parent"), "{text}");
         assert!(!text.contains("spec:"), "{text}");
+    }
+
+    fn base_args() -> WakeArgs {
+        WakeArgs {
+            in_: None,
+            at: None,
+            every: None,
+            daily: None,
+            prompt: None,
+            times: None,
+            to: None,
+            list: false,
+            all: false,
+            cancel: None,
+        }
+    }
+
+    #[test]
+    fn validate_mode_rejects_misplaced_flags() {
+        let mut args = base_args();
+        args.cancel = Some(7);
+        assert_eq!(validate_mode(&args).unwrap(), Mode::Cancel(7));
+
+        // --cancel 只吃 id
+        for mutate in [
+            |a: &mut WakeArgs| a.list = true,
+            |a: &mut WakeArgs| a.in_ = Some("5m".into()),
+            |a: &mut WakeArgs| a.daily = Some("07:00".into()),
+            |a: &mut WakeArgs| a.times = Some(2),
+            |a: &mut WakeArgs| a.prompt = Some("x".into()),
+            |a: &mut WakeArgs| a.to = Some("sid".into()),
+            |a: &mut WakeArgs| a.all = true,
+        ] {
+            let mut args = base_args();
+            args.cancel = Some(7);
+            mutate(&mut args);
+            assert!(validate_mode(&args).is_err(), "{args:?} 应当被拒");
+        }
+
+        // --list 只吃 --all
+        let mut args = base_args();
+        args.list = true;
+        args.all = true;
+        assert_eq!(validate_mode(&args).unwrap(), Mode::List);
+        for mutate in [
+            |a: &mut WakeArgs| a.in_ = Some("5m".into()),
+            |a: &mut WakeArgs| a.times = Some(2),
+            |a: &mut WakeArgs| a.prompt = Some("x".into()),
+            |a: &mut WakeArgs| a.to = Some("sid".into()),
+        ] {
+            let mut args = base_args();
+            args.list = true;
+            mutate(&mut args);
+            assert!(validate_mode(&args).is_err(), "{args:?} 应当被拒");
+        }
+
+        // 创建：必须有 schedule；--all 只配 --list
+        assert!(validate_mode(&base_args()).is_err());
+        let mut args = base_args();
+        args.all = true;
+        assert!(validate_mode(&args).is_err());
+        let mut args = base_args();
+        args.every = Some("30m".into());
+        args.prompt = Some("ping".into());
+        args.to = Some("sid".into());
+        assert_eq!(validate_mode(&args).unwrap(), Mode::Create);
     }
 
     #[test]

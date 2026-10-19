@@ -115,40 +115,89 @@ pub async fn run(args: WatchArgs, json: bool) -> ExitCode {
 }
 
 async fn run_inner(args: WatchArgs, json: bool) -> Result<()> {
-    if let Some(id) = args.cancel {
-        if args.list || args.session_id.is_some() {
-            bail!("--cancel cannot be combined with --list or a SESSION_ID");
-        }
-        let (host, port) = common::ensure_gateway().await?;
-        let http = common::create_api_client(&host, port)?;
-        let resp = http.cancel_wake(id).await?;
-        if json {
-            common::print_json_compact(&WakeCancelOutput {
-                id,
-                canceled: resp.canceled,
-            });
-        } else if resp.canceled {
-            println!("canceled {id}");
-        } else {
-            println!("{id} was already finished (nothing to cancel)");
-        }
-        return Ok(());
-    }
-
+    // 用法先判：纯参数错误不该先把网关拉起来。
+    let mode = validate_mode(&args)?;
     let (host, port) = common::ensure_gateway().await?;
     let http = common::create_api_client(&host, port)?;
 
-    if args.list {
-        let resp = http.list_wakes(args.all).await?;
-        if json {
-            common::print_json_compact(&resp.wakes);
-        } else {
-            let palette =
-                crate::config::ThemePalette::from_config(&crate::config::AppConfig::load().colors);
-            let out = common::TableOutput::detect();
-            print!("{}", format_wakes(&resp.wakes, args.all, &palette, &out));
+    match mode {
+        WatchMode::Cancel(id) => {
+            let resp = http.cancel_wake(id).await?;
+            if json {
+                common::print_json_compact(&WakeCancelOutput {
+                    id,
+                    canceled: resp.canceled,
+                });
+            } else if resp.canceled {
+                println!("canceled {id}");
+            } else {
+                println!("{id} was already finished (nothing to cancel)");
+            }
         }
-        return Ok(());
+        WatchMode::List => {
+            let resp = http.list_wakes(args.all).await?;
+            if json {
+                common::print_json_compact(&resp.wakes);
+            } else {
+                let palette = crate::config::ThemePalette::from_config(
+                    &crate::config::AppConfig::load().colors,
+                );
+                let out = common::TableOutput::detect();
+                print!("{}", format_wakes(&resp.wakes, args.all, &palette, &out));
+            }
+        }
+        WatchMode::Create => {
+            let target = resolve_target(args.to.as_deref())?;
+            let request = args.request(&target)?;
+            let resp = http.create_wake(&request).await?;
+            if json {
+                common::print_json_compact(&WakeOutput { wake: resp.wake });
+            } else {
+                print!("{}", super::wake::format_wake_detail(&resp.wake));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 本次调用是哪一种形态（三种形态的参数集合互斥）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WatchMode {
+    Create,
+    List,
+    Cancel(i64),
+}
+
+/// 判定形态并拒绝**放错位置的**参数（静默吞掉参数 = 把这次调用变成另一次调用）。
+pub(crate) fn validate_mode(args: &WatchArgs) -> Result<WatchMode> {
+    let misplaced =
+        args.to.is_some() || args.on.is_some() || args.times.is_some() || args.prompt.is_some();
+    if let Some(id) = args.cancel {
+        if args.list {
+            bail!("--cancel cannot be combined with --list");
+        }
+        if args.session_id.is_some() {
+            bail!("--cancel does not take a SESSION_ID (only the trigger id: --cancel <ID>)");
+        }
+        if misplaced || args.all {
+            bail!("--cancel only takes --json");
+        }
+        return Ok(WatchMode::Cancel(id));
+    }
+    if args.list {
+        if args.session_id.is_some() {
+            bail!(
+                "--list does not take a SESSION_ID (list every trigger with --list; \
+                 to watch one session: wing watch <SID>)"
+            );
+        }
+        if misplaced {
+            bail!(
+                "--list cannot be combined with --to / --on / --times / --prompt \
+                 (to create one: wing watch <SID>)"
+            );
+        }
+        return Ok(WatchMode::List);
     }
     if args.all {
         bail!("--all only applies to --list");
@@ -156,16 +205,7 @@ async fn run_inner(args: WatchArgs, json: bool) -> Result<()> {
     if args.session_id.is_none() {
         bail!("nothing to do: pass a SESSION_ID to watch, or --list / --cancel <ID>");
     }
-
-    let target = resolve_target(args.to.as_deref())?;
-    let request = args.request(&target)?;
-    let resp = http.create_wake(&request).await?;
-    if json {
-        common::print_json_compact(&WakeOutput { wake: resp.wake });
-    } else {
-        print!("{}", super::wake::format_wake_detail(&resp.wake));
-    }
-    Ok(())
+    Ok(WatchMode::Create)
 }
 
 #[cfg(test)]
@@ -184,6 +224,55 @@ mod tests {
             all: false,
             cancel: None,
         }
+    }
+
+    #[test]
+    fn validate_mode_rejects_misplaced_flags() {
+        let watch = args(Some("child"));
+        assert_eq!(validate_mode(&watch).unwrap(), WatchMode::Create);
+
+        // --cancel 只吃 id + --json
+        let mut cancel = args(None);
+        cancel.cancel = Some(3);
+        assert_eq!(validate_mode(&cancel).unwrap(), WatchMode::Cancel(3));
+        for mutate in [
+            |a: &mut WatchArgs| a.list = true,
+            |a: &mut WatchArgs| a.session_id = Some("child".into()),
+            |a: &mut WatchArgs| a.on = Some("done".into()),
+            |a: &mut WatchArgs| a.times = Some(2),
+            |a: &mut WatchArgs| a.prompt = Some("x".into()),
+            |a: &mut WatchArgs| a.to = Some("sid".into()),
+            |a: &mut WatchArgs| a.all = true,
+        ] {
+            let mut cancel = args(None);
+            cancel.cancel = Some(3);
+            mutate(&mut cancel);
+            assert!(validate_mode(&cancel).is_err(), "{cancel:?} 应当被拒");
+        }
+
+        // --list 只吃 --all
+        let mut list = args(None);
+        list.list = true;
+        list.all = true;
+        assert_eq!(validate_mode(&list).unwrap(), WatchMode::List);
+        for mutate in [
+            |a: &mut WatchArgs| a.session_id = Some("child".into()),
+            |a: &mut WatchArgs| a.on = Some("done".into()),
+            |a: &mut WatchArgs| a.times = Some(2),
+            |a: &mut WatchArgs| a.prompt = Some("x".into()),
+            |a: &mut WatchArgs| a.to = Some("sid".into()),
+        ] {
+            let mut list = args(None);
+            list.list = true;
+            mutate(&mut list);
+            assert!(validate_mode(&list).is_err(), "{list:?} 应当被拒");
+        }
+
+        // 创建：必须有 SESSION_ID；--all 只配 --list
+        assert!(validate_mode(&args(None)).is_err());
+        let mut all_only = args(Some("child"));
+        all_only.all = true;
+        assert!(validate_mode(&all_only).is_err());
     }
 
     #[test]

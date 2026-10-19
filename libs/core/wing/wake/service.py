@@ -47,7 +47,7 @@ from wing.wake.spec import (
     first_fire_at_ms,
     parse_spec,
 )
-from wing.wake.store import WakeStore
+from wing.wake.store import WakeStore, WakeWriteLost
 
 #: 失败文案的落库上限（``last_error``）：异常可能带很长的栈描述，库列只留结论。
 ERROR_LIMIT = 500
@@ -209,8 +209,12 @@ class WakeService:
 
         Raises:
             LookupError: 该 id 不存在
+            WakeUnavailableError: 状态写没落库（"取消没生效"不是"它早完了"）
         """
-        canceled = self._store.cancel(trigger_id)
+        try:
+            canceled = self._store.cancel(trigger_id)
+        except WakeWriteLost as exc:
+            raise WakeUnavailableError(f"wake unavailable: {exc}") from exc
         if canceled is None:
             raise LookupError(f"wake trigger not found: {trigger_id}")
         if canceled:
@@ -284,7 +288,11 @@ class WakeService:
             本次处理的（曾错过的）触发器条数。
         """
         now = self._clock()
-        missed = self._store.due_timers(now)
+        missed = [
+            trigger
+            for trigger in self._store.due_timers(now)
+            if trigger.id not in self._stalled
+        ]
         for trigger in missed:
             try:
                 parsed = parse_spec(trigger.spec or "")

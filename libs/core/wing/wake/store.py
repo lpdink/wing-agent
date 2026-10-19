@@ -33,6 +33,17 @@ INSERT INTO wake_trigger (
 _COLUMNS = "*"
 
 
+class WakeWriteLost(RuntimeError):
+    """记账 / 状态写入没落库（``Database.execute`` 返回 false）。
+
+    单独一个类型，是因为它和"没找到""已经终结"是**三种不同的结局**：把它折成
+    ``False`` 会让 API 告诉用户"它早就完成了"，而库里那一行其实还在武装、到点照样投递。
+    """
+
+    def __init__(self, what: str) -> None:
+        super().__init__(f"wing.db write lost: {what}")
+
+
 def _placeholders(count: int) -> str:
     """``count`` 个逗号分隔的占位符（``IN (?, ?, …)``）。"""
     return ", ".join("?" for _ in range(count))
@@ -132,7 +143,9 @@ class WakeStore:
         为什么不先读再写：done 配额是**读—改—写**就必然有丢更新的窗口（两个并发分发
         基于同一份快照各扣一次，后写覆盖先写 → 配额永远到不了 0 → 整条触发器再也终结
         不了）。SQLite 的 SET 表达式读的是**旧行**，所以扣减 + 判终结 + 清排期同一条
-        语句里做完是原子的；``WHERE state = 'active'`` 同时充当认领条件。
+        语句里做完是原子的；``WHERE state = 'active'`` 只保证**终态行不会被改写**
+        （它**不是**认领条件：``Database.execute`` 不看 rowcount，猜不到是谁写的，
+        跨进程双投递的防线只有"一台机器一个网关"这条部署假设）。
 
         Args:
             decrement: 本次扣多少（done 事件 1，ask 事件 0）。
@@ -180,6 +193,9 @@ class WakeStore:
         Returns:
             ``True`` = 本次取消生效；``False`` = 存在但已终结（幂等 no-op）；
             ``None`` = 该 id 不存在（路由据此回 404）。
+
+        Raises:
+            WakeWriteLost: 状态写没落库（调用方要如实报"取消没生效"，不能说"它早完了"）
         """
         db = self.database()
         rows = db.query("SELECT state FROM wake_trigger WHERE id = ?", (trigger_id,))
@@ -187,13 +203,21 @@ class WakeStore:
             return None
         if str(rows[0]["state"]) != STATE_ACTIVE:
             return False
-        return db.execute(
+        if not db.execute(
             "UPDATE wake_trigger SET state = ? WHERE id = ? AND state = ?",
             (STATE_CANCELED, trigger_id, STATE_ACTIVE),
-        )
+        ):
+            # **写丢失 ≠ 早就终结**：两者都让"取消没发生"，但原因不同，调用方
+            # 要能对用户说出是哪一种（`False` 会被读成"它本来就完了"）。
+            raise WakeWriteLost(f"cancel of wake #{trigger_id}")
+        return True
 
     def cancel_for_session(self, session_id: str) -> int:
-        """把 source 或 target 命中该会话的 ``active`` 触发器全部取消，返回条数。"""
+        """把 source 或 target 命中该会话的 ``active`` 触发器全部取消，返回**真的写成**的条数。
+
+        写丢失时**不抛**（这条路径挂在归档上：归档本身不能因为唤醒记账失败而失败），
+        返回 0 并让调用方留一行 WARN——绝不像以前那样无条件回报 ``len(ids)``。
+        """
         db = self.database()
         rows = db.query(
             "SELECT id FROM wake_trigger WHERE state = ? "
@@ -203,11 +227,11 @@ class WakeStore:
         ids = [int(row["id"]) for row in rows]
         if not ids:
             return 0
-        db.executemany(
+        written = db.executemany(
             "UPDATE wake_trigger SET state = ? WHERE id = ? AND state = ?",
             [(STATE_CANCELED, trigger_id, STATE_ACTIVE) for trigger_id in ids],
         )
-        return len(ids)
+        return len(ids) if written else 0
 
     # ── 读 ───────────────────────────────────────
 
@@ -285,4 +309,5 @@ __all__ = [
     "STATE_DONE",
     "STATE_FAILED",
     "WakeStore",
+    "WakeWriteLost",
 ]
