@@ -194,9 +194,12 @@ class TestSkippedRows:
 
 class TestDegradation:
     def test_degraded_database_does_not_raise(self, tmp_path: Path) -> None:
+        """降级后记录事件既不抛、也写不进去（execute 返回 False、查询为空）。"""
         blocked = tmp_path / "wing.db"
         blocked.mkdir()
-        recorder = AuditRecorder(Database(blocked))
+        db = Database(blocked)
+        assert not db.ready
+        recorder = AuditRecorder(db)
 
         recorder.on_event(_llm_event())
         recorder.on_event(_tool_event())
@@ -204,13 +207,24 @@ class TestDegradation:
             CompactDoneEvent(session_id="s1", original_tokens=1, compressed_tokens=1)
         )
 
+        # 负断言：整条链路是 no-op，且没有替它改写出任何东西
+        assert (
+            db.execute(
+                "INSERT INTO audit_llm_call (ts_ms, ts, model) VALUES (1, 't', 'm')"
+            )
+            is False
+        )
+        for table in ("audit_llm_call", "audit_tool_call", "audit_compaction"):
+            assert db.query(f"SELECT * FROM {table}") == []
+        assert blocked.is_dir()
+
     def test_install_is_idempotent(self) -> None:
         """重复 install() 不追加订阅者（subscribe 是 append 语义 = 审计双写）。"""
         install()
-        before = len(event_bus._subscribers)
+        before = event_bus.subscriber_count
         install()
         install()
-        assert len(event_bus._subscribers) == before
+        assert event_bus.subscriber_count == before
 
 
 class TestEventBusIntegration:
