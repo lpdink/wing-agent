@@ -44,19 +44,20 @@ OSC 7501 = [Program Status Protocol](https://www.superlogical.com/rex/docs/build
 
 | 契约 | 规则 |
 |---|---|
-| `?25h` / `?25l` | 可见性是显式状态，本装饰器是 app 侧唯一写者：只在「未知→某值」与「值→另一个值」时发。`enter_sequence` / `leave_sequence` 的那两条参与写出、但不参与这套状态机（只在段边界出现，之后紧跟整屏重画）。 |
+| `?25h` / `?25l` | 可见性是显式状态，本装饰器是**参与这套状态机的**唯一写者：只在「未知→某值」与「值→另一个值」时发。`enter_sequence` / `leave_sequence` 只在段边界出现、不参与状态机（前者直写 raw stdout，后者经 `Write` 走本装饰器但不动可见性）。 |
 | `CUP` | 只在目标 ≠ **已知**物理位置时发。 |
-| 位置何时作废 | 写了任何一格 diff（后端对相邻格省略 `MoveTo`、宽字符前进量由终端裁定）、`clear` / `clear_region`、`append_lines`、终端尺寸变化（重排）、以及**绕过 gate 的原始写**（`Write` 直写的 OSC 标题 / 通知 / 程序状态 / `leave_sequence`）。作废后下一帧必发 `CUP`。 |
+| 位置何时作废 | 写了任何一格 diff（后端对相邻格省略 `MoveTo`、宽字符前进量由终端裁定）、`clear_region`（`Terminal::clear` / `resize` 的必经之路）、`clear`、`append_lines`、终端尺寸变化（重排）、以及**走 `Write` 的原始写**（绕过 `Backend`：OSC 标题 / 通知 / 程序状态 / `leave_sequence`）。作废后下一帧必发 `CUP`。 |
 | 覆盖范围 | 只限经过本装饰器的字节：`tui/clipboard_protocol.rs` 的协议机直写 stdout（OSC 5522，不移动光标），不经过这里、也就不在这次去重之内。 |
 | 红线 | **物理位置未知时不得省 `CUP`**：真实光标是输入法候选窗的锚，位置错了就是硬伤。所以"已知"只认装饰器自己设置过的位置，宁可多发一次。 |
 
 稳定态因此是：**一帧 = 一次 write**（diff 与 `CUP` 同批，终端不可能看到半截状态），内容没
 变化的那一帧连光标字节都没有（只剩后端无条件的 SGR 复位）。
 
-**残留**：光标可见性真的翻转的那一帧仍分成两次 write——`?25h` 与它前面那段 diff 同批出去，
-终端在两次之间看到的是「光标可见、停在 diff 最后一个被改写的格子上」。可接受的理由只有一条：
-每段 TUI 里它只发生一次（首帧；`needs_full_redraw`；设置面板开合），不构成 25fps 的闪烁。要
-连它一起消掉得让整帧原子化（`CSI ? 2026 h/l` 同步输出，Ghostty 支持），那是另一件事。
+**残留**：光标从隐藏转为可见的那一帧仍是两次 write——`?25h` 与它前面那段 diff 同批出去，终端
+在两次之间看到的是「光标可见、停在 diff 最后一个被改写的格子上」。它只在**离散事件**上出现
+（本段首帧、每次 `needs_full_redraw`：resize、设置面板开合……），不在扫光那种 25fps 的稳态帧里，
+所以不构成"不停闪烁"。要连它一起消掉得让整帧原子化（`CSI ? 2026 h/l` 同步输出，Ghostty 支持），
+那是另一件事（见 `design.md` 的 Non-Goals）。
 
 单测在 `crates/wing/src/tui/cursor.rs`（真 `CrosstermBackend` + 按 `flush()` 切段的记录
 writer，字节级断言）；`?25h`/`CUP` 的段边界性质由 `a_repaint_reaches_the_terminal_in_one_write`

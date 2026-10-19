@@ -1,7 +1,7 @@
 //! 光标转义的**变化语义** —— 出帧口的 backend 装饰（唯一装配点是
 //! [`crate::tui::init_terminal`]）。
 //!
-//! 两条契约：
+//! 契约：
 //!
 //! 1. **一帧一次 write。** ratatui 的帧收尾无条件发 `show_cursor` / `hide_cursor` +
 //!    `set_cursor_position`（ratatui-core 的 `apply_buffer_with_cursor`，不与上一帧比较），
@@ -9,17 +9,12 @@
 //!    「`CUP`」本是两次 write，前一次已是完整可呈现的画面、只是光标停在 diff 最后一个被改写的
 //!    格子上——扫光期（≈25fps、diff 在牌子上、离 composer 十几行）终端在两次之间出帧就是
 //!    「光标在牌子上乱闪」。去重后稳态帧只有一次 write，静息帧连光标字节都没有。
-//! 2. **物理光标位置未知时不得省 `CUP`**（见下）。
-//!
-//! 可见性：`?25h` / `?25l` 是显式状态，本装饰器是 app 侧唯一的写者，所以只在「未知 → 某值」
-//! 与「值 → 另一个值」时发。`tui::enter_sequence` / `leave_sequence` 的那两条不参与这套状态机
-//! （它们只在段边界出现，之后紧跟整屏重画）。
-//!
-//! ## 红线
-//!
-//! 真实光标是输入法候选窗的锚，位置错了就是硬伤。这里的"已知"只认本装饰器自己设置过的位置；
-//! 任何可能移动物理光标、或让位置由终端决定的动作之后立刻作废
-//! （[`CursorGate::forget_position`] 的调用点就是全部清单）。
+//! 2. **只在变化时声明。** `?25h` / `?25l` 只在「未知 → 某值」与「值 → 另一个值」时发——本
+//!    装饰器是参与这套状态机的唯一写者，`tui::enter_sequence` / `leave_sequence` 只在段边界
+//!    出现、不参与；`CUP` 只在目标 ≠ **已知**物理位置时发。
+//! 3. **物理光标位置未知时不得省 `CUP`**（红线）。真实光标是输入法候选窗的锚，位置错了就是
+//!    硬伤。这里的"已知"只认本装饰器自己设置过的位置；任何可能移动物理光标、或让位置由终端
+//!    决定的动作之后立刻作废（[`CursorGate::forget_position`] 的调用点就是全部清单）。
 //!
 //! 覆盖范围**只限经过本装饰器的字节**：`tui/clipboard_protocol.rs` 的协议机直写 stdout
 //! （OSC 5522，不移动光标，也不经过这里）。
@@ -135,13 +130,16 @@ impl<B: Backend> Backend for CursorGate<B> {
         Ok(())
     }
 
+    /// 防御性：ratatui 0.1.1 的 `Terminal` 清屏只走 [`Backend::clear_region`]（全屏视口用
+    /// `ClearType::All`），`clear` 在生产路径上没有调用点。
     fn clear(&mut self) -> Result<(), Self::Error> {
         self.inner.clear()?;
         self.forget_position();
         Ok(())
     }
 
-    /// 防御性（当前全屏视口不会走到这里）：屏幕内容一清，位置就该重问一遍。
+    /// `Terminal::clear()` / `Terminal::resize()` 的必经之路（整屏重画、resize 都从这里过）：
+    /// 屏幕内容一清，位置就该重问一遍。
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
         self.inner.clear_region(clear_type)?;
         self.forget_position();
@@ -484,7 +482,8 @@ mod tests {
 
     #[test]
     fn every_backend_side_wipe_forgets_the_position() {
-        // 全屏视口不会走到 clear_region / append_lines，但既然写了作废就得有一次断言。
+        // `clear_region` 是整屏重画的必经之路（`Terminal::clear` / `resize`），`append_lines`
+        // 只有 inline 视口会走；两者既然都写了作废，就各要一条断言。
         for wipe in [
             |gate: &mut CursorGate<SizedTerminal>| {
                 Backend::clear_region(gate, ClearType::All).expect("clear_region");
@@ -529,6 +528,25 @@ mod tests {
         assert_eq!(Backend::size(&gate).expect("size"), Size::new(20, 6));
         Backend::set_cursor_position(&mut gate, (7, 2)).expect("position");
         assert_eq!(wire.take(), vec![cup(7, 2)], "尺寸变了，落点必须重发");
+    }
+
+    #[test]
+    fn a_queried_position_is_not_recorded() {
+        // DSR 答的是终端已消费的屏幕，本帧还没 flush 出去的字节不在它的账上 —— 答案不能当
+        // "已知位置"用，否则后续那一帧会省掉一次必要的 CUP。
+        let (mut gate, wire, _size) = gate(20, 4);
+        Backend::show_cursor(&mut gate).expect("show");
+        let _ = wire.take();
+
+        // 桩后端答 ORIGIN；若这条被记成"已知"，下面那次同位置就被省掉了。
+        assert_eq!(
+            Backend::get_cursor_position(&mut gate).expect("query"),
+            Position::ORIGIN
+        );
+        let _ = wire.take();
+
+        Backend::set_cursor_position(&mut gate, Position::ORIGIN).expect("position");
+        assert_eq!(wire.take(), vec![cup(0, 0)], "查过一嘴不等于位置已知");
     }
 
     #[test]
