@@ -125,9 +125,11 @@ class Database:
                     return
                 backoff = min(_OPEN_RETRY_DELAY_S * attempt, _OPEN_RETRY_DELAY_MAX_S)
                 time.sleep(min(backoff, remaining))
-                continue
-            self._ready = True
-            return
+            else:
+                # 成功路径放在 else 里：try 块之后不得有「顺路也能走到」的语句——
+                # 失败分支睡完就该回到下一轮，绝不能落到成功。
+                self._ready = True
+                return
 
     def _open_once(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

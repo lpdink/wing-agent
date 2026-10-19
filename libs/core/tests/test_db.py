@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -160,6 +161,42 @@ class TestStaleMigrationSnapshot:
         db.close()
 
 
+def test_too_new_version_is_caught_inside_the_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """外层那次读也可能是过期快照：事务内重读到的「版本过新」必须同样降级。
+
+    竞态形状：更新的代码刚把库迁到 v2，本进程外层的读仍看到 0 —— 若只在事务外判
+    「版本过新」，这里会一路 `COMMIT` + 跳过，接着用旧 schema 写库。
+    """
+    import wing.db.database as db_mod
+
+    path = tmp_path / "wing.db"
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute("CREATE TABLE marker (x INTEGER)")
+    conn.execute("PRAGMA user_version = 2")
+    conn.close()
+
+    real = db_mod._user_version
+    reads: list[int] = []
+
+    def stale_first_read(conn: sqlite3.Connection) -> int:
+        reads.append(1)
+        return 0 if len(reads) == 1 else real(conn)
+
+    monkeypatch.setattr(db_mod, "_user_version", stale_first_read)
+
+    db = Database(path)
+
+    assert not db.ready
+    assert len(reads) == 2  # 外层一次 + 事务内一次
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2  # 不猜、不降级写
+    finally:
+        conn.close()
+
+
 # ============================================================
 # 首开锁竞态
 # ============================================================
@@ -216,6 +253,20 @@ class TestFirstOpenLockRetry:
 
         assert not db.ready
         assert len(attempts) > 1
+
+    def test_loser_waits_for_a_slow_winner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """赢家 0.6s 才迁完：输家靠**时间**预算等到它（按次数的预算会在 ~500ms 放弃）。"""
+        attempts = _failing_open_until(monkeypatch, release_after_s=0.6)
+        started = time.monotonic()
+
+        db = Database(tmp_path / "wing.db")
+
+        assert db.ready
+        assert len(attempts) >= 5
+        assert time.monotonic() - started >= 0.6
+        db.close()
 
     def test_deadline_exhausted_degrades_immediately(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -281,6 +332,29 @@ class TestFirstOpenLockRetry:
 
         assert not db.ready
         assert len(attempts) == 1
+
+
+def _failing_open_until(
+    monkeypatch: pytest.MonkeyPatch, *, release_after_s: float
+) -> list[int]:
+    """``_open_once`` 在 ``release_after_s`` 秒内一直抛锁错误，之后转发真实实现。
+
+    模拟「赢家在慢慢迁移」：输家能不能撑过去，取决于预算怎么算（时间 vs 次数）。
+    """
+    import wing.db.database as db_mod
+
+    real = db_mod.Database._open_once
+    started = time.monotonic()
+    attempts: list[int] = []
+
+    def flaky(self: Database) -> None:
+        attempts.append(len(attempts) + 1)
+        if time.monotonic() - started < release_after_s:
+            raise sqlite3.OperationalError("database is locked")
+        real(self)
+
+    monkeypatch.setattr(db_mod.Database, "_open_once", flaky)
+    return attempts
 
 
 def _counting_open(monkeypatch: pytest.MonkeyPatch) -> list[int]:
