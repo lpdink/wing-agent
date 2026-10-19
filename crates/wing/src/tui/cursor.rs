@@ -1,30 +1,28 @@
 //! 光标转义的**变化语义** —— 出帧口的 backend 装饰（唯一装配点是
 //! [`crate::tui::init_terminal`]）。
 //!
-//! ## 它解决什么
+//! 两条契约：
 //!
-//! `ratatui` 的 `Terminal::draw` 收尾是无条件的：`None => hide_cursor` /
-//! `Some(pos) => show_cursor + set_cursor_position`（ratatui-core 的
-//! `apply_buffer_with_cursor`，不与上一帧比较），而 `CrosstermBackend` 把这三条都写成
-//! `execute!`——`execute!` 自带 flush。于是**一帧变成两次 write**：
+//! 1. **一帧一次 write。** ratatui 的帧收尾无条件发 `show_cursor` / `hide_cursor` +
+//!    `set_cursor_position`（ratatui-core 的 `apply_buffer_with_cursor`，不与上一帧比较），
+//!    而 `CrosstermBackend` 把它们都写成 `execute!`（自带 flush）。于是「diff `+ ?25h`」与
+//!    「`CUP`」本是两次 write，前一次已是完整可呈现的画面、只是光标停在 diff 最后一个被改写的
+//!    格子上——扫光期（≈25fps、diff 在牌子上、离 composer 十几行）终端在两次之间出帧就是
+//!    「光标在牌子上乱闪」。去重后稳态帧只有一次 write，静息帧连光标字节都没有。
+//! 2. **物理光标位置未知时不得省 `CUP`**（见下）。
 //!
-//! 1. diff + SGR 复位 + `\x1b[?25h`，此时物理光标停在 diff 最后一个被改写的格子上，而
-//!    `?25h` 刚生效 —— 这是一个**完整、可呈现的画面**；
-//! 2. `CUP` 把光标搬回真正的落点。
-//!
-//! 终端可以在两次 write 之间出帧（读线程按 pty chunk 唤醒渲染），于是扫光期（≈25fps、diff
-//! 全在牌子上、离 composer 光标十几行）屏幕上就是「光标在牌子上乱闪」。去重之后一帧只有一次
-//! write，中间态不存在；静息帧连光标字节都没有。
+//! 可见性：`?25h` / `?25l` 是显式状态，本装饰器是 app 侧唯一的写者，所以只在「未知 → 某值」
+//! 与「值 → 另一个值」时发。`tui::enter_sequence` / `leave_sequence` 的那两条不参与这套状态机
+//! （它们只在段边界出现，之后紧跟整屏重画）。
 //!
 //! ## 红线
 //!
-//! **物理光标位置未知时不得省 `CUP`**：真实光标是输入法候选窗的锚，位置错了就是硬伤。
-//! 这里的"已知"只认本装饰器自己设置过的位置；任何可能移动物理光标、或让位置由终端决定的
-//! 动作之后立刻作废（[`CursorGate::forget_position`] 的调用点就是全部清单）。
+//! 真实光标是输入法候选窗的锚，位置错了就是硬伤。这里的"已知"只认本装饰器自己设置过的位置；
+//! 任何可能移动物理光标、或让位置由终端决定的动作之后立刻作废
+//! （[`CursorGate::forget_position`] 的调用点就是全部清单）。
 //!
-//! 可见性同理：`?25h` / `?25l` 是显式状态，本装饰器是 app 侧唯一的写者，所以只在
-//! 「未知 → 某值」与「值 → 另一个值」时发；`tui::enter_sequence` / `leave_sequence` 的
-//! 那两条是段边界的一次性序列，不经过这里。
+//! 覆盖范围**只限经过本装饰器的字节**：`tui/clipboard_protocol.rs` 的协议机直写 stdout
+//! （OSC 5522，不移动光标，也不经过这里）。
 
 use std::cell::Cell;
 use std::io;
@@ -121,10 +119,10 @@ impl<B: Backend> Backend for CursorGate<B> {
         Ok(())
     }
 
+    /// `CrosstermBackend` 这条绕过 `writer` 直接发 DSR，答的是**终端此刻的屏幕**——本帧
+    /// 还没 flush 出去的字节不在它的账上。所以答案只回给调用方，不记成"已知位置"。
     fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
-        let position = self.inner.get_cursor_position()?;
-        self.set_position(position);
-        Ok(position)
+        self.inner.get_cursor_position()
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
@@ -143,6 +141,7 @@ impl<B: Backend> Backend for CursorGate<B> {
         Ok(())
     }
 
+    /// 防御性（当前全屏视口不会走到这里）：屏幕内容一清，位置就该重问一遍。
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
         self.inner.clear_region(clear_type)?;
         self.forget_position();
@@ -173,6 +172,7 @@ impl<B: Backend> Backend for CursorGate<B> {
         Ok(window)
     }
 
+    /// 防御性（当前全屏视口不会走到这里）：换行把光标往下推了。
     fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
         self.inner.append_lines(n)?;
         if n > 0 {
@@ -186,8 +186,9 @@ impl<B: Backend> Backend for CursorGate<B> {
     }
 }
 
-/// 绕过后端直接写的字节（OSC 标题 / 桌面通知 / 程序状态 / 剪贴板）不经过 [`Backend`]，
-/// 里面可能夹着光标序列：位置作废。
+/// 绕过后端直接写的字节（OSC 标题 / 桌面通知 / 程序状态，以及 `restore_terminal` 交给
+/// `leave_sequence` 的收尾序列）不经过 [`Backend`]，里面可能夹着光标序列：位置作废。
+/// `tui/clipboard_protocol.rs` 的协议机直写 stdout、不走这里（OSC 5522，不移动光标）。
 impl<B: io::Write> io::Write for CursorGate<B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.forget_position();
@@ -482,6 +483,34 @@ mod tests {
     }
 
     #[test]
+    fn every_backend_side_wipe_forgets_the_position() {
+        // 全屏视口不会走到 clear_region / append_lines，但既然写了作废就得有一次断言。
+        for wipe in [
+            |gate: &mut CursorGate<SizedTerminal>| {
+                Backend::clear_region(gate, ClearType::All).expect("clear_region");
+            },
+            |gate: &mut CursorGate<SizedTerminal>| {
+                Backend::append_lines(gate, 1).expect("append_lines");
+            },
+        ] {
+            let (mut gate, wire, _size) = gate(20, 4);
+            Backend::show_cursor(&mut gate).expect("show");
+            Backend::set_cursor_position(&mut gate, (7, 2)).expect("position");
+            let _ = wire.take();
+
+            wipe(&mut gate);
+            let _ = wire.take();
+
+            Backend::set_cursor_position(&mut gate, (7, 2)).expect("position");
+            assert_eq!(
+                wire.take(),
+                vec![cup(7, 2)],
+                "擦过屏 / 换过行，落点必须重发"
+            );
+        }
+    }
+
+    #[test]
     fn a_resize_forgets_the_position() {
         let (mut gate, wire, size) = gate(20, 4);
         // 先问一次尺寸（`autoresize` 每帧就这么问）：建立"已知尺寸"的基线。
@@ -504,7 +533,7 @@ mod tests {
 
     #[test]
     fn raw_writes_forget_the_position() {
-        // OSC 标题 / 桌面通知 / 剪贴板都绕过后端直写：里面可能夹着光标序列。
+        // OSC 标题 / 桌面通知 / 程序状态都绕过后端直写：里面可能夹着光标序列。
         let (mut gate, wire, _size) = gate(20, 4);
         Backend::show_cursor(&mut gate).expect("show");
         Backend::set_cursor_position(&mut gate, (7, 2)).expect("position");
