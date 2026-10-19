@@ -243,13 +243,19 @@ pub(crate) fn schedule_from_flags(
     }
 }
 
-/// Normalize a `--on` value (`done,ask`).
+/// `--on` 的规范顺序（顺序即身份的一部分）。
+pub(crate) const EVENT_ORDER: [&str; 2] = ["done", "ask"];
+
+/// Normalize a `--on` value (`done,ask`) into the canonical order.
 ///
 /// Mirrors the gateway's value space on purpose (`wing/wake/model.py::parse_on_events`):
 /// both sides reject anything outside `done` / `ask` with the same wording, and both
-/// de-duplicate while keeping the user's order. Adding an alias on one side only
-/// (e.g. accepting `error` here) would let a request pass the local check and still
-/// land as a 400 from the gateway — and the two error messages would disagree.
+/// emit the **canonical order** (`done` before `ask`) — the value is part of a session
+/// subscription's identity, so `ask,done` and `done,ask` must normalize to the same
+/// string or the gateway would keep two subscriptions and deliver every completion
+/// twice. Adding an alias on one side only (e.g. accepting `error` here) would let a
+/// request pass the local check and still land as a 400 from the gateway — and the two
+/// error messages would disagree.
 pub(crate) fn parse_on_events(raw: &str) -> Result<String> {
     let mut kinds: Vec<&str> = Vec::new();
     for part in raw.split(',') {
@@ -267,7 +273,13 @@ pub(crate) fn parse_on_events(raw: &str) -> Result<String> {
     if kinds.is_empty() {
         bail!("--on must not be empty (expected a comma list of: done,ask)");
     }
-    Ok(kinds.join(","))
+    // 规范形（与网关同一个顺序）：先 done 后 ask。
+    Ok(EVENT_ORDER
+        .iter()
+        .filter(|kind| kinds.contains(kind))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(","))
 }
 
 /// The actionable message an explicit command (`watch` / `wake`) gets when it
@@ -733,10 +745,21 @@ mod tests {
     #[test]
     fn on_events_is_normalized_and_validated() {
         assert_eq!(parse_on_events("done,ask").unwrap(), "done,ask");
-        assert_eq!(parse_on_events(" ask , done ").unwrap(), "ask,done");
         assert_eq!(parse_on_events("done,done").unwrap(), "done");
         assert!(parse_on_events("done,error").is_err());
         assert!(parse_on_events("  ").is_err());
+    }
+
+    /// 顺序即身份：`ask,done` 必须与 `done,ask` 落到同一个字符串，否则网关会为同一条
+    /// 订阅保留两行、把每一次收口都投递两次。
+    #[test]
+    fn on_events_canonicalizes_the_order() {
+        assert_eq!(parse_on_events(" ask , done ").unwrap(), "done,ask");
+        assert_eq!(
+            parse_on_events("ask,done").unwrap(),
+            parse_on_events("done,ask").unwrap()
+        );
+        assert_eq!(parse_on_events("ask").unwrap(), "ask");
     }
 
     #[test]

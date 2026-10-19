@@ -27,12 +27,19 @@ EVENT_DONE = "done"
 EVENT_ASK = "ask"
 EVENT_KINDS: frozenset[str] = frozenset({EVENT_DONE, EVENT_ASK})
 
+#: ``on_events`` 的**规范顺序**（身份的一部分：同一组事件只有一种写法）。
+EVENT_ORDER: tuple[str, ...] = (EVENT_DONE, EVENT_ASK)
+
 #: ``on_events`` 列的缺省值（表定义里的 DEFAULT，同样在这里落地一次）。
-DEFAULT_ON_EVENTS = f"{EVENT_DONE},{EVENT_ASK}"
+DEFAULT_ON_EVENTS = ",".join(EVENT_ORDER)
 
 
 def parse_on_events(text: str | None) -> str:
-    """``done,ask`` 逗号列表 → 规范化文本。
+    """``done,ask`` 逗号列表 → **规范形**文本（固定顺序：先 ``done`` 后 ``ask``）。
+
+    顺序由这里唯一决定，不跟用户输入走：``on_events`` 是会话型订阅的**身份**之一
+    （``WakeStore.find_active_session`` 按字符串相等匹配），``ask,done`` 与 ``done,ask``
+    必须落到同一行——否则同一个收口会被两条订阅各投一次。
 
     Raises:
         ValueError: 空 / 含未知值（``done,error``）/ 只有分隔符
@@ -57,7 +64,8 @@ def parse_on_events(text: str | None) -> str:
         raise ValueError(
             "on_events must not be empty (expected a comma list of: done,ask)"
         )
-    return ",".join(kinds)
+    # 规范形：只在取值域里**存在**的才写进去，顺序固定（EVENT_ORDER 是唯一顺序来源）。
+    return ",".join(kind for kind in EVENT_ORDER if kind in kinds)
 
 
 @dataclass(frozen=True)

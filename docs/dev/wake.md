@@ -33,7 +33,10 @@
 | 保留期 | **不做**清理（先观察体积） |
 
 **同一订阅重复登记 = 刷新，不是新增**：`kind=session` 的触发器以 `(source, target, on_events)`
-为身份。已存在同三元的 `active` 订阅时，`POST /api/wake/create` **不新增行**，而是把那条刷成
+为身份（`on_events` 用**规范形**：固定先 `done` 后 `ask`，`ask,done` 与 `done,ask` 是同一条订阅）。
+刷新时 `times` 三态——**不给 = 保持不变**（隐式 `wing run -r` 的 notify 登记不带 `times`，
+不能把 `wing watch --times 3` 剩下的配额降级成 1），显式给了才覆盖；被 stall 过的订阅刷新后
+重新武装。已存在同三元的 `active` 订阅时，`POST /api/wake/create` **不新增行**，而是把那条刷成
 「下一次完成时告诉我」（保留 `id` 与 `fire_count`，配额与 `prompt` 取本次请求的值，清掉
 `last_error`）。理由：一条 active 订阅表达的是**状态**，不是队列——多插一行会让同一个提问 /
 同一个收口被投递多次（`ask` 从不消耗配额，这个放大在整个提问期间都成立）；父会话若照着两条

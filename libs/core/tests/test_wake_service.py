@@ -289,6 +289,38 @@ class TestSameSubscriptionUpserts:
         assert only_ask.id != both.id
         assert len(service.list_triggers()) == 2
 
+    @pytest.mark.asyncio
+    async def test_implicit_refresh_keeps_an_explicit_quota(
+        self, service: WakeService, ports: FakePorts
+    ) -> None:
+        """`wing watch --times 3` 之后一次隐式刷新（`wing run -r` 的 notify）不得降级配额。
+
+        隐式登记永远不带 `times`：刷新路径必须把 `None` 读成「保持不变」，而不是
+        「重置成缺省 1」——后者会让一次 `wing run -r <child> -p "..."` 悄悄吃掉剩余配额。
+        """
+        first = _session_trigger(service, times=3)
+        await service._dispatch_one(first, EVENT_DONE, _done())
+        assert service.list_triggers()[0].remaining_done == 2
+
+        implicit = _session_trigger(service)  # times=None（= run 的 notify 登记）
+        assert implicit.id == first.id
+        assert implicit.remaining_done == 2
+
+        # 显式给 1 仍然按 1 生效（三态里的第三态）
+        explicit = _session_trigger(service, times=1)
+        assert explicit.id == first.id
+        assert explicit.remaining_done == 1
+
+    def test_on_events_order_is_part_of_the_canonical_form(
+        self, service: WakeService
+    ) -> None:
+        """`ask,done` 与 `done,ask` 是同一条订阅（顺序不跟用户输入走）。"""
+        both = _session_trigger(service, on_events="done,ask")
+        reversed_order = _session_trigger(service, on_events="ask,done")
+        assert reversed_order.id == both.id
+        assert reversed_order.on_events == "done,ask"
+        assert len(service.list_triggers()) == 1
+
     def test_different_target_is_a_different_subscription(
         self, service: WakeService
     ) -> None:
@@ -596,6 +628,34 @@ class TestRecoverySkipsStalled:
 
         assert await service.recover_missed() == 0
         assert len(ports.delivered) == 1
+
+
+class TestRefreshRearms:
+    @pytest.mark.asyncio
+    async def test_refresh_re_arms_a_stalled_trigger(
+        self,
+        service: WakeService,
+        ports: FakePorts,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """被 stall 的订阅 refresh 之后重新武装（否则 200 + refreshed #N 却永远不再触发）。"""
+        trigger = _session_trigger(service, times=5)
+        monkeypatch.setattr(service._store, "record_fire", lambda *a, **k: False)
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
+        # 已 stall：后续事件不再投递
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
+
+        # 记账恢复 + 同一条订阅重新登记 → 重新武装
+        monkeypatch.undo()
+        refreshed = _session_trigger(service)
+        assert refreshed.id == trigger.id
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 2, "refresh 之后必须能再次触发"
 
 
 class TestConcurrentDispatch:

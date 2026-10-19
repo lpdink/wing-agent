@@ -186,7 +186,7 @@ class WakeService:
                 source=str(source),
                 target=target,
                 on_events=events,
-                budget=budget,
+                times=times,
                 prompt=prompt_text,
             )
             if refreshed is not None:
@@ -219,7 +219,7 @@ class WakeService:
         source: str,
         target: str,
         on_events: str,
-        budget: int | None,
+        times: int | None,
         prompt: str | None,
     ) -> WakeTrigger | None:
         """同源重复登记 = **刷新**那条 active 订阅（不是再插一行）。
@@ -229,6 +229,10 @@ class WakeService:
         现在要的」。否则每登记一次就多一条投递路径——`ask` 不消耗配额，于是同一个提问 /
         同一个收口会被投递多次（父会话照着两条信封各答一次时，第二次答复已经找不到
         waiter，会掉进子会话的 inbox 变成一条普通用户消息，凭空多起一轮）。
+
+        ``times`` 在刷新路径上是**三态**：``None`` = 保持不变（不是"重置成缺省 1"）。
+        隐式刷新（`wing run -r` 的 notify 登记）永远不带 `times`，取缺省语义会把
+        `wing watch --times 3` 剩下的配额悄悄降级成 1。
         """
         existing = self._store.find_active_session(
             source_session_id=source,
@@ -237,10 +241,16 @@ class WakeService:
         )
         if existing is None:
             return None
+        budget = existing.remaining_done if times is None else times
         if not self._store.refresh(existing.id, remaining_done=budget, prompt=prompt):
             raise WakeUnavailableError(
                 f"wake unavailable: failed to refresh trigger #{existing.id}"
             )
+        # 刷新 = 这条订阅重新开始工作：之前因记账写失败被撤出调度的，现在重新武装。
+        if existing.id in self._stalled:
+            self._stalled.discard(existing.id)
+            log.info(f"wake: re-armed stalled #{existing.id} after refresh")
+        self._scheduler.notify()
         refreshed = self._store.get(existing.id)
         if refreshed is None:
             raise WakeUnavailableError(
