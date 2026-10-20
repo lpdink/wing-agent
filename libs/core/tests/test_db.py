@@ -752,6 +752,49 @@ class TestTransactions:
         assert db.query("SELECT * FROM audit_compaction") == []
         db.close()
 
+    def test_a_failed_read_also_rolls_the_block_back(self, tmp_path: Path) -> None:
+        """读失败与写失败同样致命：事务块拿读结果决定写什么，读坏了写就不能提交。"""
+        db = Database(tmp_path / "wing.db")
+        with db.transaction() as txn:
+            assert db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (1, "t", "s"),
+            )
+            assert db.query("SELECT * FROM no_such_table") == []
+        assert txn.committed is False
+        assert db.query("SELECT * FROM audit_compaction") == []
+        db.close()
+
+    def test_read_failure_outside_a_transaction_is_still_silent(
+        self, tmp_path: Path
+    ) -> None:
+        db = Database(tmp_path / "wing.db")
+        assert db.query("SELECT * FROM no_such_table") == []
+        # 没有事务可连累：之后再开事务照常提交
+        with db.transaction() as txn:
+            assert db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (1, "t", "s"),
+            )
+        assert txn.committed is True
+        db.close()
+
+    def test_transaction_busy_timeout_override_is_restored(
+        self, tmp_path: Path
+    ) -> None:
+        """短等锁上限只对这一笔生效，退出后恢复稳态值。"""
+        db = Database(tmp_path / "wing.db")
+        with db.transaction(busy_timeout_ms=50) as txn:
+            assert txn.live is True
+            assert db.query("PRAGMA busy_timeout")[0][0] == 50
+        assert txn.committed is True
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        # 回滚路径也恢复
+        with db.transaction(busy_timeout_ms=50):
+            db.execute("INSERT INTO no_such_table (x) VALUES (1)")
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        db.close()
+
     def test_reads_inside_the_block_see_uncommitted_writes(
         self, tmp_path: Path
     ) -> None:

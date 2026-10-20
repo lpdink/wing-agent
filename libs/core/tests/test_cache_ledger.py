@@ -404,10 +404,9 @@ class TestAttribution:
         assert observation.verdict == "hit"
         assert observation.expected == 1000
         assert observation.diverged == ""
-        # 段列表按指纹去重：第二份段列表 = 第一份 + 1 段，段落行共 3 条（2 + 3）
-        assert len(
-            db_rows("SELECT 1 FROM cache_segment WHERE fp = ?", (fingerprint(base),))
-        )
+        # 段落行按指纹各存一份：第一份 2 段、第二份 3 段（去重由
+        # `test_shared_segment_lists_are_stored_once` 单独钉住）
+        assert db_rows("SELECT COUNT(*) AS n FROM cache_segment", ())[0]["n"] == 5
         report = ledger.report()
         assert report["summary"]["calls"] == 2
         assert report["summary"]["expected_tokens"] == 1000
@@ -1550,6 +1549,31 @@ class TestCacheEndpoint:
         body = client.get(f"/api/session/cache?session_id={session_id}").json()
         assert body["calls"] == [], f"新化身的账本必须从空开始: {body['calls']}"
         assert body["summary"]["calls"] == 0
+
+    def test_archiving_drops_the_ledger_rows(self, real_client):
+        """归档清掉账本行：归档会话没人读得到，留着只会让库随会话数线性长大。"""
+        client, _ = real_client
+        session_id = "cache-archive-clean"
+        assert (
+            client.post(
+                "/api/session/create",
+                json={"session_id": session_id, "tags": ["probe"]},
+            ).status_code
+            == 200
+        )
+        self._seed_ledger(session_id)
+        assert len(recorded_calls(session_id)) == 2
+        assert (
+            client.post("/api/session/archive", json={"session_id": session_id}).json()[
+                "archived"
+            ]
+            is True
+        )
+        assert recorded_calls(session_id) == []
+        assert (
+            db_rows("SELECT 1 FROM cache_segment WHERE session_id = ?", (session_id,))
+            == []
+        )
 
     def test_report_echoes_the_requested_id(self, real_client):
         """回显请求里的 id（别名归一不改对外读到的键）。"""

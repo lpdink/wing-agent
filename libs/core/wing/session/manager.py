@@ -1231,6 +1231,10 @@ class SessionManager:
             raise RuntimeError(
                 f"session '{resolved_id}' could not be moved to the archive: {e}"
             ) from e
+        # 归档即冻结：账本行没人再读得到（端点不解析归档会话），留着只会让进程级
+        # 库随"曾经存在过"的会话数线性长大（每会话几百 KB）。会话仍可 unarchive，
+        # 恢复后账本从空开始——它本来就是滚动窗口，而归档前的参照早就过了 72h TTL。
+        CacheStore(resolved_id).clear()
         log.info(f"Session archived: {resolved_id}")
         return True, "archived"
 

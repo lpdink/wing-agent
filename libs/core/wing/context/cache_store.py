@@ -32,6 +32,10 @@ from wing.db import Database, get_database
 from wing.db.database import Transaction
 from wing.schema import CacheCall, CacheFork, CachePart, CacheSource
 
+#: 记账等写锁的上限：远短于 `Database` 的稳态值（5000）。账本是 best-effort 的诊断
+#: 数据，跨进程写锁竞争时宁可丢这一笔，也不要把本进程的读路径拖成秒级。
+_BUSY_TIMEOUT_MS = 250
+
 _COLUMNS = (
     "id, ts, ts_ms, fp, purpose, model, provider, prompt, cached, "
     "expected, ref_fp, verdict, segment_count, "
@@ -190,8 +194,13 @@ class CacheStore:
         return self._database
 
     def transaction(self) -> AbstractContextManager[Transaction]:
-        """把一次「读—改—写」放进同一个 `BEGIN IMMEDIATE`（见 `Database.transaction`）。"""
-        return self.database().transaction()
+        """把一次「读—改—写」放进同一个 `BEGIN IMMEDIATE`（见 `Database.transaction`）。
+
+        等锁上限取短值（`_BUSY_TIMEOUT_MS`）：记账是 best-effort 的诊断数据，另一个
+        进程攥着写锁时不该陪着等满 5 秒——那段时间本进程的锁是持着的，读路径会一起
+        排队。放弃一笔账本记录远好过让所有会话的查询变慢。
+        """
+        return self.database().transaction(busy_timeout_ms=_BUSY_TIMEOUT_MS)
 
     # ── 读 ───────────────────────────────────────
 
@@ -257,7 +266,13 @@ class CacheStore:
         )
 
     def save_segments(self, fp: str, segments: Sequence[CachePart]) -> bool:
-        """存一份段列表（同一指纹已经存过就跳过——内容寻址，同指纹即同内容）。"""
+        """存一份段列表（同一指纹已经存过就跳过）。
+
+        `fp` 只覆盖 `(label, sha)`——**不含 `src`**。文件被 touch 过（内容没变、mtime
+        变了）时指纹不变，段落行因此保留首次落库的那份 `src`：`--why` 里的 mtime/size
+        可能比磁盘上的当下事实旧一点（旧实现每次记账都覆盖，会显示最新值）。这是刻意
+        的取舍——段列表按内容寻址，来源事实跟着「内容首次被记下的那一刻」。
+        """
         if self.database().query(_HAS_SEGMENTS, (self._session_id, fp)):
             return True
         return self.database().executemany(

@@ -277,17 +277,25 @@ class Database:
             return int(cursor.lastrowid)
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
-        """执行查询。降级 / 出错一律返回空列表（不抛、不刷日志）。"""
+        """执行查询。降级 / 出错一律返回空列表（不抛、不刷日志）。
+
+        **在事务里失败会连累整笔事务**：空结果与「读失败」看起来一样，而事务块拿读
+        结果决定写什么——写失败会回滚，读失败却照写就会落下一份错的、而且是"自洽"
+        的数据（比如把「读不到历史」记成 `cold`）。所以读失败同样让事务不可提交。
+        """
         with self._lock:
             if not self._ready or self._conn is None:
                 return []
             try:
                 return self._conn.execute(sql, params).fetchall()
-            except Exception:
+            except Exception as exc:
+                self._fail(exc)
                 return []
 
     @contextmanager
-    def transaction(self) -> Iterator[Transaction]:
+    def transaction(
+        self, *, busy_timeout_ms: int | None = None
+    ) -> Iterator[Transaction]:
         """把 with 块里的一切放进一个 ``BEGIN IMMEDIATE`` 事务（全有或全无）。
 
         yield 的是事务句柄：``live=False`` 表示库不可用或开不了事务（块内不必再发
@@ -301,6 +309,11 @@ class Database:
         的临界区（跨进程则由 SQLite 的写锁负责）。嵌套调用**并入外层事务**（拿到的
         是同一个句柄）——SQLite 没有嵌套事务，而分层（编排 → 存储）会让两端自然地
         各要一个原子块。
+
+        ``busy_timeout_ms`` 只给本事务一个更短的等锁上限（默认用连接的 5000）：另一个
+        进程攥着写锁时，`BEGIN IMMEDIATE` 会**持着本进程的锁**陪等——进程内所有 DB
+        访问（包括本该被 WAL 放行的读）一起排队。best-effort 的写入（如缓存账本）因此
+        宁可快点放弃，也不要把自己人的读路径拖成秒级。
         """
         with self._lock:
             conn = self._conn
@@ -311,10 +324,18 @@ class Database:
             if open_txn is not None:
                 yield open_txn  # 并入外层事务（SQLite 没有嵌套 BEGIN）
                 return
+            if busy_timeout_ms is not None:
+                try:
+                    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+                except Exception as exc:
+                    self._warn_error(exc)
+                    yield Transaction(live=False)
+                    return
             try:
                 conn.execute("BEGIN IMMEDIATE")
             except Exception as exc:
-                self._warn_write_error(exc)
+                self._warn_error(exc)
+                self._restore_busy_timeout(conn, busy_timeout_ms)
                 yield Transaction(live=False)
                 return
             handle = Transaction(live=True)
@@ -325,18 +346,22 @@ class Database:
             except BaseException:
                 self._txn = None
                 self._rollback()
+                self._restore_busy_timeout(conn, busy_timeout_ms)
                 raise
             else:
                 self._txn = None
                 if self._txn_failed:
                     self._rollback()
+                    self._restore_busy_timeout(conn, busy_timeout_ms)
                     return
                 try:
                     conn.execute("COMMIT")
                 except Exception as exc:
                     self._rollback()
-                    self._warn_write_error(exc)
+                    self._warn_error(exc)
+                    self._restore_busy_timeout(conn, busy_timeout_ms)
                     return
+                self._restore_busy_timeout(conn, busy_timeout_ms)
                 handle.committed = True
 
     def close(self) -> None:
@@ -357,7 +382,18 @@ class Database:
         """一条语句失败：标记事务不可提交 + 首次留一条 WARNING。"""
         if self._txn is not None:
             self._txn_failed = True
-        self._warn_write_error(exc)
+        self._warn_error(exc)
+
+    def _restore_busy_timeout(
+        self, conn: sqlite3.Connection, override: int | None
+    ) -> None:
+        """把临时调短的 ``busy_timeout`` 恢复成稳态值（无覆盖则什么都不做）。"""
+        if override is None:
+            return
+        try:
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        except Exception:
+            pass
 
     def _rollback(self) -> None:
         self._txn_failed = True
@@ -370,8 +406,8 @@ class Database:
         except Exception:
             pass
 
-    def _warn_write_error(self, exc: BaseException) -> None:
-        """首次写失败留一条 WARNING（正在丢数据），此后闭嘴——审计是 best-effort。"""
+    def _warn_error(self, exc: BaseException) -> None:
+        """首次操作失败留一条 WARNING（数据在丢），此后闭嘴——旁路数据是 best-effort。"""
         if self._warned_write_error:
             return
         self._warned_write_error = True
