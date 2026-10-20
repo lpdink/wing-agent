@@ -34,8 +34,7 @@ from wing.event import (
 )
 from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
-from wing.context import build_cache_report
-from wing.context.cache_ledger import CACHE_LEDGER_KEY
+from wing.context import CacheLedger, empty_report
 from wing.event_bus import event_bus
 from wing.config import (
     Config,
@@ -434,12 +433,18 @@ class WingRuntime:
     def cache_report(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
         """会话的 KV 缓存账本报告（`GET /api/session/cache` 的数据源）。
 
-        不水合会话：账本是会话目录里的边车数据，查询不该把会话换入内存。会话不存在 /
-        从没调用过模型 → 空报告（**200，不 404**——前端与 CLI 都按同一条路径渲染
-        "还没数据"，见 contract §6）。
+        不水合会话：账本在进程级 `wing.db` 里按会话键存着，查询不该把会话换入内存。
+        会话不存在 / 在归档区 / 从没调用过模型 → 空报告（**200，不 404**——前端与 CLI
+        都按同一条路径渲染"还没数据"，见 contract §6）。
+
+        解析一次会话真名再读库：写路径用的是存储里的键（大小写 / Unicode 归一化之后
+        的真名），读路径拿的是请求里的字符串，不归一就会读不到（`team-a` vs `Team-A`
+        在大小写不敏感的文件系统上是同一个会话）。
         """
-        data = self.sm.read_session_aux(session_id, CACHE_LEDGER_KEY)
-        return build_cache_report(session_id, data, limit=limit)
+        canonical = self.sm.resolve_session_id(session_id)
+        if canonical is None:
+            return empty_report(session_id)
+        return CacheLedger(canonical).report(limit=limit, session_id=session_id)
 
     def is_archived(self, session_id: str) -> bool:
         """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""

@@ -3,12 +3,17 @@
 覆盖步骤任务书 `01_backend` 的 12 条必须测试，外加三条实现级契约：直播字段与
 账本记录同源（contract §5）、压缩调用同样进账本（§8.8）、`src` 元信息在加载期
 采集（热路径不扫目录）。口径唯一来源是 `../contract.md`——任何断言都不该比它更宽。
+
+账本落在进程级 `wing.db`（`cache_call` / `cache_segment`）：断言尽量走
+`CacheLedger.report()`（对外口径），只有「存储真的这样落」的那几条才直接读库。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
@@ -23,21 +28,20 @@ from wing.chain import TrackedList
 from wing.config import ModelSpec, ProviderConfig
 from wing.context import Compactor, ContextManager
 from wing.context.cache_ledger import (
-    CACHE_LEDGER_KEY,
     MAX_CALLS,
-    MAX_LEDGER_BYTES,
+    _PrefixFingerprints,
     CacheLedger,
     build_report,
-    empty_ledger,
-    normalize_ledger,
-    record_call,
+    empty_report,
 )
+from wing.db import get_database
 from wing.event import LLMCallMetricsEvent
 from wing.event_bus import event_bus
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.base import ModelProvider, RequestOptions
 from wing.provider.openai.provider import OpenAICompatProvider
 from wing.schema import (
+    CacheCall,
     CachePart,
     CacheProbe,
     CacheSource,
@@ -50,7 +54,7 @@ from wing.schema import (
     ToolParam,
 )
 from wing.schema.cache import fingerprint
-from wing.store.file import FileMessageLog, FileSessionStore
+from wing.store.file import FileMessageLog
 from wing.store.memory import MemorySessionStore
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,8 +127,20 @@ def make_cm(
     )
 
 
-def ledger_path(tmp_path: Path, session_id: str) -> Path:
-    return tmp_path / session_id / "cache_ledger.json"
+def parts(*labels: str) -> list[CachePart]:
+    """一串固定文本段（label → 内容一一对应，内容与 label 绑定）。"""
+    return [CachePart.text(label, f"content of {label}") for label in labels]
+
+
+def db_rows(sql: str, params: tuple[Any, ...] = ()) -> list[Any]:
+    return get_database().query(sql, params)
+
+
+def recorded_calls(session_id: str) -> list[Any]:
+    """库里该会话的调用行（新→旧），直接读表（只给存储级断言用）。"""
+    return db_rows(
+        "SELECT * FROM cache_call WHERE session_id = ? ORDER BY id DESC", (session_id,)
+    )
 
 
 async def build_body(provider_cls, messages, tools, options):
@@ -137,11 +153,6 @@ async def build_body(provider_cls, messages, tools, options):
         )
     finally:
         await provider.aclose()
-
-
-def parts(*labels: str) -> list[CachePart]:
-    """一串固定文本段（label → 内容一一对应，内容与 label 绑定）。"""
-    return [CachePart.text(label, f"content of {label}") for label in labels]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -354,8 +365,8 @@ class TestCachePartsPlumbing:
 
 
 class TestAttribution:
-    def test_first_call_is_cold_without_fork(self, tmp_path: Path):
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s1"), "s1")
+    def test_first_call_is_cold_without_fork(self):
+        ledger = CacheLedger("s1")
         observation = ledger.record(
             parts("system:base", "tools:Bash"),
             purpose="main",
@@ -375,8 +386,8 @@ class TestAttribution:
         assert report["summary"]["expected_tokens"] == 0
         assert report["summary"]["theory_rate"] == 0.0
 
-    def test_second_call_with_same_prefix_and_full_cache_is_hit(self, tmp_path: Path):
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s2"), "s2")
+    def test_second_call_with_same_prefix_and_full_cache_is_hit(self):
+        ledger = CacheLedger("s2")
         base = parts("system:base", "tools:Bash")
         ledger.record(
             base, purpose="main", model="m", provider="p", prompt=1000, cached=0
@@ -393,6 +404,9 @@ class TestAttribution:
         assert observation.verdict == "hit"
         assert observation.expected == 1000
         assert observation.diverged == ""
+        # 段落行按指纹各存一份：第一份 2 段、第二份 3 段（去重由
+        # `test_shared_segment_lists_are_stored_once` 单独钉住）
+        assert db_rows("SELECT COUNT(*) AS n FROM cache_segment", ())[0]["n"] == 5
         report = ledger.report()
         assert report["summary"]["calls"] == 2
         assert report["summary"]["expected_tokens"] == 1000
@@ -404,7 +418,7 @@ class TestAttribution:
     ):
         rule_path = write_rules(tmp_path / "rules", "one.md", "OLD RULE")
         cm = make_cm(tmp_path, rules="rules/*.md")
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s3"), "s3")
+        ledger = CacheLedger("s3")
 
         first = cm.cache_system_parts() + [
             CachePart.text("system:wire", "wire"),
@@ -456,7 +470,7 @@ class TestAttribution:
         write_rules(tmp_path / "rules", "a-first.md", "A")
         write_rules(tmp_path / "rules", "c-third.md", "C")
         cm = make_cm(tmp_path, rules="rules/*.md")
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s4"), "s4")
+        ledger = CacheLedger("s4")
 
         def segments() -> list[CachePart]:
             return cm.cache_system_parts() + [
@@ -488,8 +502,8 @@ class TestAttribution:
         # 对照侧尾部段数 = 总段数 - 公共前缀长度
         assert fork["segments_affected"] == len(first) - 2
 
-    def test_tool_declaration_change_blames_tools(self, tmp_path: Path):
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s5"), "s5")
+    def test_tool_declaration_change_blames_tools(self):
+        ledger = CacheLedger("s5")
         first = [
             CachePart.text("system:base", "S"),
             CachePart.text("system:wire", "wire"),
@@ -520,10 +534,8 @@ class TestAttribution:
         assert fork["blame"] == "tools"
         assert fork["avoidable"] is True
 
-    def test_zero_cached_with_identical_prefix_is_provider_underdelivered(
-        self, tmp_path: Path
-    ):
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s6"), "s6")
+    def test_zero_cached_with_identical_prefix_is_provider_underdelivered(self):
+        ledger = CacheLedger("s6")
         base = parts("system:base", "system:wire", "tools:Bash", "history:u1:user")
         ledger.record(
             base, purpose="main", model="m", provider="p", prompt=10000, cached=0
@@ -552,11 +564,9 @@ class TestAttribution:
             (10000 - 257, "provider_underdelivered"),  # diff == tol + 1
         ],
     )
-    def test_tolerance_boundary(
-        self, tmp_path: Path, cached: int, expected_verdict: str
-    ):
+    def test_tolerance_boundary(self, cached: int, expected_verdict: str):
         """tol = max(256, ceil(0.02 * ref.prompt))；边界两侧各一条。"""
-        ledger = CacheLedger(FileMessageLog(tmp_path / f"s7-{cached}"), "s7")
+        ledger = CacheLedger("s7")
         base = parts("system:base", "tools:Bash")
         ledger.record(
             base, purpose="main", model="m", provider="p", prompt=10000, cached=0
@@ -573,9 +583,38 @@ class TestAttribution:
         assert observation.verdict == expected_verdict
         assert observation.expected == 10000
 
-    def test_twin_call_uses_identical_segments_as_reference(self, tmp_path: Path):
+    def test_reference_search_holds_up_as_the_session_grows(self):
+        """段数一路增长的长会话：每一轮都拿上一轮当参照（`hit`），不回退成 cold。
+
+        参照查找是「候选的段数 n + 前 n 段的指纹」——按需算前缀指纹的快路径若漏判，
+        长会话里就会表现为命中率突然掉成 0（每一轮都判 cold / prefix_broken）。
+        """
+        ledger = CacheLedger("long-session")
+        base = parts("system:base", "tools:Bash")
+        for round_index in range(60):
+            segments = base + [
+                CachePart.text(f"history:{n}:user", f"ask-{n}")
+                for n in range(round_index + 1)
+            ]
+            observation = ledger.record(
+                segments,
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=1000 + round_index * 100,
+                cached=1000 + (round_index - 1) * 100 if round_index else 0,
+            )
+            assert observation is not None
+            assert observation.verdict == ("cold" if round_index == 0 else "hit"), (
+                f"第 {round_index} 轮: {observation.verdict}"
+            )
+            if round_index:
+                assert observation.expected == 1000 + (round_index - 1) * 100
+        assert ledger.report(limit=1)["forks"] == []
+
+    def test_twin_call_uses_identical_segments_as_reference(self):
         """段列表完全相同（重试 / 重放）也有参照——契约的严格前缀格子之外的补齐。"""
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s8"), "s8")
+        ledger = CacheLedger("s8")
         base = parts("system:base", "tools:Bash")
         ledger.record(
             base, purpose="main", model="m", provider="p", prompt=5000, cached=0
@@ -588,24 +627,18 @@ class TestAttribution:
         assert observation.expected == 5000
         assert observation.diverged == ""
 
-    def test_expired_reference_is_cold_expired(self, tmp_path: Path):
+    def test_expired_reference_is_cold_expired(self):
         """参照调用超过 TTL（72h）→ cold_expired，expected 归 null。"""
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s9"), "s9")
+        ledger = CacheLedger("s9")
         base = parts("system:base", "tools:Bash")
-        old = datetime.now() - timedelta(hours=100)
-        data, _ = record_call(
-            empty_ledger("s9"),
+        ledger.record(
             base,
             purpose="main",
             model="m",
             provider="p",
             prompt=1000,
             cached=0,
-            now=old,
-        )
-        (tmp_path / "s9").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "s9" / f"{CACHE_LEDGER_KEY}.json").write_text(
-            json.dumps(data), encoding="utf-8"
+            now=datetime.now() - timedelta(hours=100),
         )
         observation = ledger.record(
             base + parts("history:u1:user"),
@@ -619,14 +652,14 @@ class TestAttribution:
         assert observation.verdict == "cold_expired"
         assert observation.expected is None
 
-    def test_compact_attribution_for_history_forks(self, tmp_path: Path):
+    def test_compact_attribution_for_history_forks(self):
         """history 分叉 + 参照与本次之间存在 compact 调用 → blame=compact（不可避免）。
 
         构造：c1 是本次的严格前缀（参照），c2 是夹在中间的压缩调用（最近一条，
         因此分叉点按 c2 算），c3 回落到 c1 分支继续跑 —— 这正是"压缩后换分支"的
         形状：参照存在、但上一次调用的前缀没能延续。
         """
-        ledger = CacheLedger(FileMessageLog(tmp_path / "s10"), "s10")
+        ledger = CacheLedger("s10")
         ledger.record(
             parts("system:base", "system:wire", "history:u1:user"),
             purpose="main",
@@ -688,7 +721,7 @@ class TestForkDetailSides:
         rule_path = write_rules(tmp_path / "rules", "one.md", "V1 RULE")
         rule_label = f"rules:{rule_path}"
         cm = make_cm(tmp_path, rules="rules/*.md")
-        log = FileMessageLog(tmp_path / "s-revert")
+        ledger = CacheLedger("s-revert")
 
         def segments(*ask_uuids: str) -> list[CachePart]:
             return (
@@ -706,8 +739,7 @@ class TestForkDetailSides:
         cm.reload_skills_and_rules()
         reverted = segments("u1", "u2", "u3", "u4")
 
-        data = empty_ledger("s-revert")
-        for index, (parts_, prompt, cached) in enumerate(
+        for index, (segments_, prompt, cached) in enumerate(
             [
                 (first, 1000, 0),
                 (second, 1500, 1000),
@@ -715,9 +747,8 @@ class TestForkDetailSides:
                 (reverted, 2500, 2000),
             ]
         ):
-            data, _ = record_call(
-                data,
-                parts_,
+            ledger.record(
+                segments_,
                 purpose="main",
                 model="m",
                 provider="p",
@@ -725,12 +756,10 @@ class TestForkDetailSides:
                 cached=cached,
                 now=datetime(2026, 10, 18, 10, index),
             )
-        log.write_aux(CACHE_LEDGER_KEY, data)
-        fork = CacheLedger(log, "s-revert").report()["forks"][0]
+        fork = ledger.report()["forks"][0]
 
         assert fork["label"] == rule_label
         assert fork["kind"] == "modify"
-        calls = data["calls"]
         sha_v1 = next(part.sha for part in first if part.label == rule_label)
         sha_v2 = next(part.sha for part in changed if part.label == rule_label)
         assert next(part.sha for part in reverted if part.label == rule_label) == sha_v1
@@ -741,65 +770,34 @@ class TestForkDetailSides:
         assert fork["detail"]["sha_after"] == sha_v1
         assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
         # 时刻与 sha 同源：两者都指向对照侧（第 3 轮，带 V2 的那次调用），而不是参照（第 2 轮）。
-        assert calls[-1]["ref_fp"] == calls[1]["fp"]
-        assert fork["detail"]["ref_ts"] == calls[2]["ts"]
-        assert calls[2]["ts"] != calls[1]["ts"]
+        calls = recorded_calls("s-revert")
+        assert calls[0]["ref_fp"] == calls[2]["fp"]
+        assert fork["detail"]["ref_ts"] == calls[1]["ts"]
+        assert calls[1]["ts"] != calls[2]["ts"]
 
     def test_reference_left_the_ledger_but_the_compared_call_is_still_named(self):
         """参照已滚出账本、对照侧（邻座）还在 → 时刻跟着对照侧，不指向无关的调用。"""
-        base = {"label": "system:base", "sha": "aaaa0000aaaa0000", "chars": 10}
-        old_rule = {"label": "rules:/r.md", "sha": "cc", "chars": 2}
-        new_rule = {"label": "rules:/r.md", "sha": "bb", "chars": 2}
-        fork = build_report(
-            normalize_ledger(
-                {
-                    "version": 1,
-                    "session_id": "gone",
-                    "fingerprints": {
-                        "new": {"segments": [base, new_rule]},
-                        "old": {"segments": [base, old_rule]},
-                    },
-                    "calls": [
-                        {
-                            "ts": "2026-10-18T10:00:00.000",
-                            "fp": "old",
-                            "purpose": "main",
-                            "model": "m",
-                            "provider": "p",
-                            "prompt": 900,
-                            "cached": 0,
-                            "expected": None,
-                            "ref_fp": None,
-                            "verdict": "cold",
-                            "fork": None,
-                        },
-                        {
-                            "ts": "2026-10-18T10:05:00.000",
-                            "fp": "new",
-                            "purpose": "main",
-                            "model": "m",
-                            "provider": "p",
-                            "prompt": 1000,
-                            "cached": 0,
-                            "expected": None,
-                            "ref_fp": "gone",
-                            "verdict": "prefix_broken",
-                            "fork": {
-                                "kind": "modify",
-                                "index": 1,
-                                "label": "rules:/r.md",
-                                "segments_affected": 1,
-                                "tokens_lost": None,
-                            },
-                        },
-                    ],
-                },
-                "gone",
+        base = CachePart.text("system:base", "base")
+        old_rule = CachePart.text("rules:/r.md", "old")
+        new_rule = CachePart.text("rules:/r.md", "new")
+        calls = [
+            _call_row(ts="2026-10-18T10:00:00.000", fp="old", verdict="cold"),
+            _call_row(
+                ts="2026-10-18T10:05:00.000",
+                fp="new",
+                verdict="prefix_broken",
+                ref_fp="gone",
+                fork=_fork_row(index=1),
             ),
-            session_id="gone",
+        ]
+        segment_lists = {"new": [base, new_rule], "old": [base, old_rule]}
+        fork = build_report(
+            "gone",
+            list(reversed(calls)),
             limit=20,
+            segment_at=lambda fp, index: _segment_of(segment_lists, fp, index),
         )["forks"][0]
-        assert fork["detail"]["sha_before"] == "cc"
+        assert fork["detail"]["sha_before"] == old_rule.sha
         assert fork["detail"]["sha_before"] != fork["detail"]["sha_after"]
         # 对照侧是邻座那条（sha 与 ts 同源），而不是记在案却已不可定位的参照
         assert fork["detail"]["ref_ts"] == "2026-10-18T10:00:00.000"
@@ -809,57 +807,76 @@ class TestForkDetailSides:
 
         `--why` 因此整行不显示 `ref`：不拿「紧邻的后来者」的 ts 冒充那个已经不可见的时刻。
         """
-        base = {"label": "system:base", "sha": "aaaa0000aaaa0000", "chars": 10}
-        new_rule = {"label": "rules:/r.md", "sha": "bb", "chars": 2}
+        new_rule = CachePart.text("rules:/r.md", "new")
+        segments = [CachePart.text("system:base", "base"), new_rule]
+        calls = [
+            _call_row(
+                ts="2026-10-18T10:05:00.000",
+                fp="new",
+                verdict="prefix_broken",
+                ref_fp="gone",
+                fork=_fork_row(index=1),
+            )
+        ]
         fork = build_report(
-            normalize_ledger(
-                {
-                    "version": 1,
-                    "session_id": "gone",
-                    "fingerprints": {"new": {"segments": [base, new_rule]}},
-                    "calls": [
-                        {
-                            "ts": "2026-10-18T10:05:00.000",
-                            "fp": "new",
-                            "purpose": "main",
-                            "model": "m",
-                            "provider": "p",
-                            "prompt": 1000,
-                            "cached": 0,
-                            "expected": None,
-                            "ref_fp": "gone",
-                            "verdict": "prefix_broken",
-                            "fork": {
-                                "kind": "modify",
-                                "index": 1,
-                                "label": "rules:/r.md",
-                                "segments_affected": 1,
-                                "tokens_lost": None,
-                            },
-                        }
-                    ],
-                },
-                "gone",
-            ),
-            session_id="gone",
+            "gone",
+            calls,
             limit=20,
+            segment_at=lambda fp, index: _segment_of({"new": segments}, fp, index),
         )["forks"][0]
         assert fork["detail"]["sha_before"] is None
         assert fork["detail"]["ref_ts"] is None
-        assert fork["detail"]["sha_after"] == "bb"
+        assert fork["detail"]["sha_after"] == new_rule.sha
+
+
+def _call_row(
+    *,
+    ts: str,
+    fp: str,
+    verdict: str,
+    ref_fp: str | None = None,
+    fork: Any = None,
+    purpose: str = "main",
+    prompt: int = 1000,
+    cached: int = 0,
+    expected: int | None = None,
+) -> CacheCall:
+    return CacheCall(
+        ts=ts,
+        fp=fp,
+        purpose=purpose,
+        model="m",
+        provider="p",
+        prompt=prompt,
+        cached=cached,
+        verdict=verdict,
+        ref_fp=ref_fp,
+        expected=expected,
+        fork=fork,
+    )
+
+
+def _fork_row(index: int) -> Any:
+    from wing.schema import CacheFork
+
+    return CacheFork(
+        kind="modify", index=index, label="rules:/r.md", segments_affected=1
+    )
+
+
+def _segment_of(lists: dict[str, list[CachePart]], fp: str | None, index: int):
+    segments = lists.get(fp or "", [])
+    return segments[index] if index < len(segments) else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. 环形上界 + fingerprint GC
+# 9. 环形上界 + 段落行回收
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestRingBound:
-    def test_calls_are_capped_and_fingerprints_are_garbage_collected(
-        self, tmp_path: Path
-    ):
-        store = FileSessionStore(tmp_path)
-        ledger = CacheLedger(store.open_log("ring"), "ring")
+    def test_calls_are_capped_and_orphan_segments_are_garbage_collected(self):
+        ledger = CacheLedger("ring")
         base = CachePart.text("system:base", "S")
         for index in range(250):
             ledger.record(
@@ -870,168 +887,111 @@ class TestRingBound:
                 prompt=100 + index,
                 cached=0,
             )
-        data = json.loads(ledger_path(tmp_path, "ring").read_text(encoding="utf-8"))
-        assert data["version"] == 1
-        assert len(data["calls"]) == MAX_CALLS == 200
-        alive = {call["fp"] for call in data["calls"]}
-        assert set(data["fingerprints"]) == alive  # 无孤儿指纹
+        stored = recorded_calls("ring")
+        assert len(stored) == MAX_CALLS == 200
         # 保留的是最近 200 条（最旧的 50 条被挤出）
-        assert data["calls"][0]["prompt"] == 100 + 50
-        assert data["calls"][-1]["prompt"] == 100 + 249
-
-    def test_over_budget_ledger_is_trimmed_and_keeps_the_newest_call(
-        self, tmp_path: Path
-    ):
-        """字节预算（cloud S3）：超了按「最旧调用先淘汰」裁到预算内，最近一条必留。"""
-        ledger = CacheLedger(FileSessionStore(tmp_path).open_log("budget"), "budget")
-        path = ledger_path(tmp_path, "budget")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fat_segments = [
-            {
-                "label": f"history:seg-{index:03d}:user",
-                "sha": f"{index:016x}",
-                "chars": 900,
-            }
-            for index in range(200)
-        ]
-        seeded = empty_ledger("budget")
-        for index in range(MAX_CALLS):
-            fp = f"fp{index:04d}"
-            seeded["fingerprints"][fp] = {"segments": fat_segments}
-            seeded["calls"].append(
-                {
-                    "ts": f"2026-10-18T10:{index // 60:02d}:{index % 60:02d}.000",
-                    "fp": fp,
-                    "purpose": "main",
-                    "model": "m",
-                    "provider": "p",
-                    "prompt": 1000 + index,
-                    "cached": 0,
-                    "expected": None,
-                    "ref_fp": None,
-                    "verdict": "cold",
-                    "fork": None,
-                }
-            )
-        path.write_text(json.dumps(seeded, ensure_ascii=False), encoding="utf-8")
-        assert path.stat().st_size > MAX_LEDGER_BYTES  # 前置：确实超预算
-
-        newest = parts("system:base")
-        observation = ledger.record(
-            newest, purpose="main", model="m", provider="p", prompt=42, cached=0
+        assert stored[-1]["prompt"] == 100 + 50
+        assert stored[0]["prompt"] == 100 + 249
+        # 无孤儿段落行：段落表里的指纹都被存活的调用引用
+        alive = {row["fp"] for row in stored}
+        orphans = db_rows(
+            "SELECT DISTINCT fp FROM cache_segment WHERE session_id = ?", ("ring",)
         )
-        assert observation is not None
+        assert {row["fp"] for row in orphans} == alive
 
-        raw = path.read_text(encoding="utf-8")
-        assert len(raw.encode("utf-8")) <= MAX_LEDGER_BYTES
-        stored = json.loads(raw)
-        # 最近一条（刚记的这条）仍在
-        assert stored["calls"][-1]["prompt"] == 42
-        assert stored["calls"][-1]["fp"] == fingerprint(newest)
-        # 淘汰的是**最旧**的：存活的种子调用是原序列的后缀（prompt 连续递增且首条已晚于第 0 条）
-        prompts = [call["prompt"] for call in stored["calls"]][:-1]
-        assert prompts, "预算只该淘汰旧的，不该一次砍光"
-        assert prompts == list(range(prompts[0], prompts[0] + len(prompts)))
-        assert prompts[0] > 1000
-        # 旧的被淘汰，且没有留下孤儿段落表
-        assert len(stored["calls"]) < MAX_CALLS
-        assert set(stored["fingerprints"]) == {call["fp"] for call in stored["calls"]}
-
-    def test_bool_is_not_accepted_as_a_count(self):
-        """`bool` 是 `int` 的子类：手改账本写成 `true` 不能当 1 收下（cloud N2）。"""
-        row = {
-            "ts": "2026-10-18T15:41:02.123",
-            "fp": "f",
-            "purpose": "main",
-            "model": "m",
-            "provider": "p",
-            "prompt": 100,
-            "cached": 0,
-            "expected": None,
-            "ref_fp": None,
-            "verdict": "cold",
-            "fork": None,
-        }
-        calls = normalize_ledger(
-            {
-                "version": 1,
-                "session_id": "b",
-                "fingerprints": {},
-                "calls": [
-                    {**row, "prompt": True},  # prompt 是 bool → 整行丢弃
-                    {**row, "cached": False},  # cached 同理
-                    {
-                        **row,
-                        "expected": True,
-                        "fork": {
-                            "kind": "modify",
-                            "label": "rules:/r.md",
-                            "index": True,
-                            "segments_affected": True,
-                            "tokens_lost": True,
-                        },
-                    },
-                ],
-            },
-            "b",
-        )["calls"]
-        assert len(calls) == 1
-        assert calls[0]["expected"] is None
-        assert calls[0]["fork"] == {
-            "kind": "modify",
-            "index": 0,
-            "label": "rules:/r.md",
-            "segments_affected": 0,
-            "tokens_lost": None,
-        }
-        # 合法值照旧
-        assert (
-            normalize_ledger(
-                {"version": 1, "session_id": "b", "fingerprints": {}, "calls": [row]},
-                "b",
-            )["calls"][0]["prompt"]
-            == 100
-        )
-
-    def test_corrupted_ledger_is_treated_as_empty(self, tmp_path: Path):
-        store = FileSessionStore(tmp_path)
-        log_ = store.open_log("broken")
-        (tmp_path / "broken").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "broken" / f"{CACHE_LEDGER_KEY}.json").write_text(
-            '{"version": 99, "calls": "nonsense"}', encoding="utf-8"
-        )
-        ledger = CacheLedger(log_, "broken")
-        assert ledger.load()["calls"] == []
-        assert normalize_ledger(None, "broken")["session_id"] == "broken"
-        observation = ledger.record(
+    def test_ring_is_per_session(self):
+        """裁剪只动本会话的行：另一个会话的调用与段落行一条都不许少。"""
+        keep = CacheLedger("keep")
+        owner = CacheLedger("owner")
+        keep.record(
             parts("system:base"),
             purpose="main",
             model="m",
             provider="p",
-            prompt=10,
+            prompt=42,
             cached=0,
         )
-        assert observation is not None and observation.verdict == "cold"
+        for index in range(MAX_CALLS + 5):
+            owner.record(
+                parts("system:base", f"history:{index}:user"),
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=100 + index,
+                cached=0,
+            )
+        assert len(recorded_calls("owner")) == MAX_CALLS
+        assert [row["prompt"] for row in recorded_calls("keep")] == [42]
+        kept = db_rows(
+            "SELECT COUNT(*) AS n FROM cache_segment WHERE session_id = ?", ("keep",)
+        )
+        assert kept[0]["n"] == 1
+
+    def test_shared_segment_lists_are_stored_once(self):
+        """同一份段列表被多条调用引用 → 段落行只存一份（内容寻址去重）。"""
+        ledger = CacheLedger("dedup")
+        base = parts("system:base", "tools:Bash")
+        for _ in range(5):
+            ledger.record(
+                base, purpose="main", model="m", provider="p", prompt=100, cached=0
+            )
+        assert len(recorded_calls("dedup")) == 5
+        rows = db_rows(
+            "SELECT COUNT(*) AS n FROM cache_segment WHERE session_id = ?", ("dedup",)
+        )
+        assert rows[0]["n"] == len(base)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. best-effort：写盘失败只 WARN，绝不影响 LLM 调用
+# 10. best-effort：写库失败只 WARN，绝不影响 LLM 调用
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class _ExplodingLog(FileMessageLog):
-    """写盘永远失败的 MessageLog（模拟 ENOSPC / 只读挂载）。"""
+class _ExplodingDatabase:
+    """永远失败 / 降级的库（模拟磁盘满、只读挂载、打不开）。"""
 
-    def write_aux(self, key: str, data: dict[str, Any]) -> None:
-        raise OSError("disk full")
+    ready = False
+
+    def query(self, sql: str, params: Any = ()) -> list[Any]:
+        return []
+
+    def execute(self, sql: str, params: Any = ()) -> bool:
+        return False
+
+    def executemany(self, sql: str, rows: Any) -> bool:
+        return False
+
+    def insert(self, sql: str, params: Any = ()) -> int | None:
+        return None
+
+    def transaction(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _degraded():
+            yield False
+
+        return _degraded()
+
+
+class _FailingDelete:
+    """`DELETE FROM cache_segment` 抛 IO 错的连接代理（模拟磁盘满）。"""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if sql.lstrip().startswith("DELETE FROM cache_segment"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
 
 
 class TestBestEffort:
-    def test_write_failure_returns_none_and_warns(
-        self, tmp_path: Path, wing_warnings: list[str]
-    ):
-        log_ = _ExplodingLog(tmp_path / "x")
-        ledger = CacheLedger(log_, "x")
+    def test_write_failure_returns_none_and_warns(self):
+        ledger = CacheLedger("boom", database=_ExplodingDatabase())  # ty: ignore[invalid-argument-type]
         assert (
             ledger.record(
                 parts("system:base"),
@@ -1043,30 +1003,81 @@ class TestBestEffort:
             )
             is None
         )
-        assert any("cache ledger record failed" in message for message in wing_warnings)
-
-    def test_read_failure_is_treated_as_empty(
-        self, tmp_path: Path, wing_warnings: list[str]
-    ):
-        class _UnreadableLog(FileMessageLog):
-            def read_aux(self, key: str) -> dict[str, Any] | None:
-                raise OSError("io error")
-
-        ledger = CacheLedger(_UnreadableLog(tmp_path / "y"), "y")
-        assert ledger.load()["calls"] == []
         assert ledger.report()["calls"] == []
-        assert any("cache ledger unreadable" in message for message in wing_warnings)
+
+    def test_write_failure_inside_a_live_transaction_is_reported(
+        self, wing_warnings: list[str]
+    ):
+        """库开着但写不进去（约束 / 磁盘满）→ 返回 None + 一条 WARNING，绝不上抛。"""
+        database = get_database()
+        with patch.object(database, "execute", return_value=False):
+            ledger = CacheLedger("rejected", database=database)
+            assert (
+                ledger.record(
+                    parts("system:base"),
+                    purpose="main",
+                    model="m",
+                    provider="p",
+                    prompt=10,
+                    cached=0,
+                )
+                is None
+            )
+        assert any("cache ledger record lost" in message for message in wing_warnings)
+        assert recorded_calls("rejected") == []
+
+    def test_a_rolled_back_record_never_returns_an_observation(
+        self, wing_warnings: list[str]
+    ):
+        """语句都返回了、事务最后回滚 → 不得回一个「账本里有」的归因。
+
+        构造的是「环形裁剪的孤儿回收失败」：它在一次记录的最后一笔写，插入与段落表
+        都已经成功——只看那两条的返回值会以为记上了。归因若照旧返回，直播字段就会
+        展示一条库里根本不存在的记录（contract §5 要求账本与直播同源）。
+        """
+        database = get_database()
+        ledger = CacheLedger("rolled-back")
+        for index in range(MAX_CALLS):
+            assert (
+                ledger.record(
+                    parts("system:base", f"history:{index}:user"),
+                    purpose="main",
+                    model="m",
+                    provider="p",
+                    prompt=100 + index,
+                    cached=0,
+                )
+                is not None
+            )
+        # 第 201 条触发环形裁剪：让孤儿段落的 DELETE 抛 IO 错（磁盘满的样子）
+        conn = database._conn
+        assert conn is not None
+        database._conn = _FailingDelete(conn)  # ty: ignore[invalid-assignment]
+        try:
+            observation = ledger.record(
+                parts("system:base", f"history:{MAX_CALLS}:user"),
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=100 + MAX_CALLS,
+                cached=0,
+            )
+        finally:
+            database._conn = conn
+        assert observation is None, "回滚的那次记录不许返回归因"
+        assert any("cache ledger record lost" in m for m in wing_warnings)
+        # 事务整体回滚：既没有多出一行，也没有把本该被裁掉的调用删掉
+        stored = recorded_calls("rolled-back")
+        assert len(stored) == MAX_CALLS
+        assert stored[0]["prompt"] == 100 + MAX_CALLS - 1
 
     @pytest.mark.asyncio
-    async def test_llm_call_survives_ledger_failure(
-        self, tmp_path: Path, wing_warnings: list[str]
-    ):
-        """整条链：账本写盘炸了，模型调用照常返回、metrics 照常发射。"""
+    async def test_llm_call_survives_ledger_failure(self, tmp_path: Path):
+        """整条链：账本写库炸了，模型调用照常返回、metrics 照常发射。"""
         events: list[Any] = []
         event_bus.subscribe(events.append)
         try:
-            cm = make_cm(tmp_path, session_id="boom")
-            cm._messages = TrackedList(_ExplodingLog(tmp_path / "boom"))
+            cm = make_cm(tmp_path, session_id="boom-chain")
             cm.add_message(USER)
             loop = _loop_for(cm)
             probe = CacheProbe()
@@ -1087,13 +1098,17 @@ class TestBestEffort:
                     ),
                 ]
             )
-            message = await loop._call_llm(
-                provider,  # ty: ignore[invalid-argument-type]
-                [SYSTEM, USER],
-                "m",
-                None,
-                options,
-            )
+            with patch(
+                "wing.context.cache_ledger.CacheLedger.record",
+                return_value=None,
+            ):
+                message = await loop._call_llm(
+                    provider,  # ty: ignore[invalid-argument-type]
+                    [SYSTEM, USER],
+                    "m",
+                    None,
+                    options,
+                )
             assert message.content == "hi"
             metrics = [
                 event for event in events if isinstance(event, LLMCallMetricsEvent)
@@ -1101,24 +1116,100 @@ class TestBestEffort:
             assert len(metrics) == 1
             # 记账失败 → 归因不可得，但事件照常发射（字段回落缺省）
             assert metrics[0].cache_verdict == ""
-            assert any(
-                "cache ledger record failed" in message for message in wing_warnings
-            )
+            assert metrics[0].cache_expected_tokens is None
         finally:
             event_bus._subscribers.clear()
             event_bus._routing.clear()
 
 
+class TestWeakTyping:
+    """SQLite 是弱类型：INTEGER 列里可以是 TEXT（外部写入 / 手工 sqlite3）。
+
+    旧实现有 `normalize_ledger` 逐字段归一；换成表之后这份防线要落在读行这一层，
+    否则一条类型错位的行就能让端点 500，或者把这个会话的记账永久卡死。
+    """
+
+    def _insert_bad_row(
+        self, session_id: str, column: str, value: Any, **overrides: Any
+    ) -> None:
+        row = {
+            "session_id": session_id,
+            "ts": "2026-10-18T15:41:02.123",
+            "ts_ms": 1,
+            "fp": "bad",
+            "purpose": "main",
+            "model": "m",
+            "provider": "p",
+            "prompt": 100,
+            "cached": 0,
+            "expected": None,
+            "ref_fp": None,
+            "verdict": "cold",
+            "segment_count": 1,
+        }
+        row.update(overrides)
+        row[column] = value  # 坏值最后写：overrides 不该盖掉它
+        assert get_database().execute(
+            f"INSERT INTO cache_call ({', '.join(row)}) "
+            f"VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+
+    def test_text_in_an_integer_column_does_not_break_the_report(self):
+        """`expected` 是 TEXT → 当「没有理论水位」收下，不参与汇总里的减法。"""
+        self._insert_bad_row("weak-report", "expected", "abc")
+        report = CacheLedger("weak-report").report()
+        assert [call["expected"] for call in report["calls"]] == [None]
+        assert report["summary"]["calls"] == 1
+        assert report["summary"]["expected_tokens"] == 0
+        assert report["summary"]["provider_debt_rate"] == 0.0
+
+    def test_text_in_an_integer_column_does_not_wedge_recording(self):
+        """坏行留在窗口里也不能让后续记账永久失败（参照比较会拿它的段数）。"""
+        self._insert_bad_row("weak-record", "segment_count", "abc")
+        ledger = CacheLedger("weak-record")
+        for index in range(3):
+            observation = ledger.record(
+                parts("system:base", f"history:{index}:user"),
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=100 + index,
+                cached=0,
+            )
+            assert observation is not None, f"第 {index} 轮被坏行卡住了"
+        # 坏行仍是「一行调用」（它的段数按 0 处理、不参与前缀比较），三笔新记录照常落库
+        assert len(ledger.report()["calls"]) == 4
+
+    def test_a_non_integer_fork_index_is_dropped_not_fatal(self):
+        """分叉位点不是整数 → 当成「没有分叉」，但这一行调用仍然算数。
+
+        （TEXT 列有 TEXT 亲和性，写进去的整数会被转成字符串，所以这里能构造出
+        类型错位的只有 INTEGER 亲和性的列。）
+        """
+        fork = {
+            "fork_kind": "modify",
+            "fork_index": 1,
+            "fork_label": "rules:/r.md",
+            "fork_segments_affected": 2,
+        }
+        self._insert_bad_row("weak-fork", "fork_index", "abc", **fork)
+        report = CacheLedger("weak-fork").report()
+        assert report["forks"] == []
+        assert len(report["calls"]) == 1
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. memory 后端：内存态可用、不抛、不产生文件
+# 11. 会话后端不再影响账本：写入的是进程级库，与会话日志解耦
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestMemoryBackend:
-    def test_memory_store_keeps_state_in_process(self, tmp_path: Path):
+class TestStorageIsDecoupledFromTheSessionLog:
+    def test_memory_backend_lands_in_the_database(self, tmp_path: Path):
+        """`backend: memory` 的会话：账本照样在库里（与审计行同口径），不产生会话文件。"""
         store = MemorySessionStore()
-        log_ = store.open_log("mem")
-        ledger = CacheLedger(log_, "mem")
+        assert store.open_log("mem") is not None
+        ledger = CacheLedger("mem")
         base = parts("system:base", "tools:Bash")
         first = ledger.record(
             base, purpose="main", model="m", provider="p", prompt=900, cached=0
@@ -1134,12 +1225,11 @@ class TestMemoryBackend:
         assert first is not None and first.verdict == "cold"
         assert second is not None and second.verdict == "hit"
         assert ledger.report()["summary"]["calls"] == 2
-        assert log_.read_aux(CACHE_LEDGER_KEY) is not None
-        assert list(tmp_path.rglob("*")) == []  # 零存储痕迹
+        assert list(tmp_path.rglob("*")) == []  # 会话目录里零痕迹
 
-    def test_logless_chain_works_without_persistence(self):
-        """`log=None` 的纯内存链：记账不抛、状态不落盘。"""
-        ledger = CacheLedger(TrackedList(), "pure")
+    def test_ledger_does_not_need_a_message_log(self):
+        """没有 MessageLog 的纯内存链：记账照旧（账本不再经 aux kv 通道）。"""
+        ledger = CacheLedger("pure")
         observation = ledger.record(
             parts("system:base"),
             purpose="main",
@@ -1149,7 +1239,43 @@ class TestMemoryBackend:
             cached=0,
         )
         assert observation is not None and observation.verdict == "cold"
-        assert ledger.report()["calls"] == []
+        assert ledger.report()["calls"][0]["verdict"] == "cold"
+
+    def test_a_ledger_handle_keeps_its_connection(self):
+        """一条账本操作只认一条连接：单例被换掉（测试隔离 / 收尾）也不换连接。"""
+        from wing.context.cache_store import CacheStore
+        from wing.db import get_database, reset_database
+
+        store = CacheStore("pinned")
+        database = store.database()
+        assert database is get_database()
+        reset_database()
+        try:
+            assert store.database() is database, "中途换连接会把事务劈成两半"
+        finally:
+            reset_database()
+
+    def test_concurrent_records_do_not_lose_rows(self):
+        """多线程同刻记账（主调用 + 后台增量压缩在真并行）：一行都不丢。"""
+
+        def record(index: int) -> None:
+            CacheLedger("threads").record(
+                parts("system:base", f"history:{index}:user"),
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=100 + index,
+                cached=0,
+            )
+
+        threads = [
+            threading.Thread(target=record, args=(index,)) for index in range(20)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(recorded_calls("threads")) == 20
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1172,19 +1298,16 @@ class TestCacheEndpoint:
         with TestClient(server._app) as tc:
             yield tc, tmp_path / "sessions"
 
-    def _seed_ledger(self, sessions_root: Path, session_id: str) -> None:
-        """按生产写入路径造一份账本（`record_call` + 落盘格式）。"""
-        directory = sessions_root / session_id
-        directory.mkdir(parents=True, exist_ok=True)
-        data = empty_ledger(session_id)
+    def _seed_ledger(self, session_id: str) -> None:
+        """按生产写入路径造一份账本（两次调用：改 rules 文件 → 前缀破碎）。"""
+        ledger = CacheLedger(session_id)
         rule = CacheSource(path="/rules/one.md", mtime="2026-10-18T15:00:00", size=12)
         first = [
             CachePart.text("system:base", "S"),
             CachePart.text("rules:/rules/one.md", "OLD RULE", rule),
             CachePart.text("system:wire", "wire"),
         ]
-        data, _ = record_call(
-            data,
+        ledger.record(
             first,
             purpose="main",
             model="deepseek-v3",
@@ -1198,8 +1321,7 @@ class TestCacheEndpoint:
             CachePart.text("system:wire", "wire"),
             CachePart.text("history:u1:user", "ask"),
         ]
-        data, _ = record_call(
-            data,
+        ledger.record(
             second,
             purpose="main",
             model="deepseek-v3",
@@ -1207,12 +1329,9 @@ class TestCacheEndpoint:
             prompt=15000,
             cached=12000,
         )
-        (directory / f"{CACHE_LEDGER_KEY}.json").write_text(
-            json.dumps(data), encoding="utf-8"
-        )
 
     def test_with_data(self, real_client):
-        client, sessions_root = real_client
+        client, _ = real_client
         session_id = "cache-demo"
         assert (
             client.post(
@@ -1220,7 +1339,7 @@ class TestCacheEndpoint:
             ).status_code
             == 200
         )
-        self._seed_ledger(sessions_root, session_id)
+        self._seed_ledger(session_id)
 
         response = client.get(f"/api/session/cache?session_id={session_id}")
         assert response.status_code == 200
@@ -1268,50 +1387,64 @@ class TestCacheEndpoint:
             == 422
         )
 
-    def test_corrupted_ledger_rows_do_not_break_the_endpoint(self, real_client):
-        """合法 JSON 但字段类型错位的账本 → 仍是 200（坏行丢弃，不 500）。"""
-        client, sessions_root = real_client
-        session_id = "cache-bad"
+    def test_sessions_do_not_see_each_other(self, real_client):
+        """同一个库里两个会话：各看各的（summary 覆盖的只是本会话的行）。"""
+        client, _ = real_client
+        for session_id in ("cache-a", "cache-b"):
+            assert (
+                client.post(
+                    "/api/session/create", json={"session_id": session_id}
+                ).status_code
+                == 200
+            )
+        self._seed_ledger("cache-a")
+
+        other = client.get("/api/session/cache?session_id=cache-b")
+        assert other.status_code == 200
+        assert other.json()["calls"] == []
+        assert other.json()["summary"]["calls"] == 0
+        assert (
+            client.get("/api/session/cache?session_id=cache-a").json()["summary"][
+                "calls"
+            ]
+            == 2
+        )
+
+    def test_odd_rows_do_not_break_the_endpoint(self, real_client):
+        """对外口径不会遇到的怪行（未知 verdict / 缺时间戳）→ 仍是 200，坏行只影响自己。"""
+        client, _ = real_client
+        session_id = "cache-odd"
         assert (
             client.post(
                 "/api/session/create", json={"session_id": session_id}
             ).status_code
             == 200
         )
-        directory = sessions_root / session_id
-        (directory / f"{CACHE_LEDGER_KEY}.json").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "session_id": session_id,
-                    "fingerprints": {"abc": {"segments": "nonsense"}},
-                    "calls": [
-                        {"ts": 123, "fp": "abc"},  # 类型错位的行 → 丢弃
-                        "not-a-dict",
-                        {
-                            "ts": "2026-10-18T15:41:02.123",
-                            "fp": "abc",
-                            "purpose": "main",
-                            "model": "m",
-                            "provider": "p",
-                            "prompt": 100,
-                            "cached": 0,
-                            "expected": None,
-                            "ref_fp": None,
-                            "verdict": "cold",
-                            "fork": None,
-                        },
-                    ],
-                }
+        assert get_database().execute(
+            "INSERT INTO cache_call (session_id, ts, ts_ms, fp, purpose, model, "
+            "provider, prompt, cached, expected, ref_fp, verdict, segment_count) "
+            "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+            (
+                session_id,
+                "2026-10-18T15:41:02.123",
+                "abc",
+                "main",
+                "m",
+                "p",
+                100,
+                0,
+                "future_verdict",
+                0,
             ),
-            encoding="utf-8",
         )
         response = client.get(f"/api/session/cache?session_id={session_id}")
         assert response.status_code == 200, response.text
         body = response.json()
-        assert [call["verdict"] for call in body["calls"]] == ["cold"]
+        assert [call["verdict"] for call in body["calls"]] == ["future_verdict"]
         assert body["summary"]["calls"] == 1
         assert body["summary"]["prompt_tokens"] == 100
+        # 未知 verdict 不进 provider 欠账（合同只认那两档）
+        assert body["summary"]["provider_debt_rate"] == 0.0
 
     def test_empty_ledger_is_200(self, real_client):
         client, _ = real_client
@@ -1349,8 +1482,115 @@ class TestCacheEndpoint:
         # 非法 id 同样不炸（闸门 → 空报告，不 500）
         assert client.get("/api/session/cache?session_id=../etc").status_code == 200
 
+    def test_archived_session_reports_empty(self, real_client):
+        """归档会话按"不存在"处理（与 `read_session_aux` 同口径的冻结语义）。"""
+        client, _ = real_client
+        session_id = "cache-archived"
+        assert (
+            client.post(
+                "/api/session/create",
+                json={"session_id": session_id, "tags": ["probe"]},
+            ).status_code
+            == 200
+        )
+        self._seed_ledger(session_id)
+        assert (
+            client.get(f"/api/session/cache?session_id={session_id}").json()["summary"][
+                "calls"
+            ]
+            == 2
+        )
+        archived = client.post(
+            "/api/session/archive", json={"session_id": session_id}
+        ).json()
+        assert archived["archived"] is True, archived
+        body = client.get(f"/api/session/cache?session_id={session_id}").json()
+        assert body["calls"] == [] and body["summary"]["calls"] == 0
+
+    def test_a_recreated_session_starts_from_an_empty_ledger(self, real_client):
+        """同一个 id 被新会话接管（目录被手工删掉后重建）→ 账本从空开始。
+
+        账本搬进进程级库之后，"会话目录没了账本就没了" 不再自动成立：不清一次的话，
+        新会话的第一轮会拿旧化身的窗口当参照（判成 prefix_broken / hit）。
+        """
+        import shutil
+
+        client, sessions_root = real_client
+        session_id = "cache-reuse"
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        self._seed_ledger(session_id)
+        assert (
+            client.get(f"/api/session/cache?session_id={session_id}").json()["summary"][
+                "calls"
+            ]
+            == 2
+        )
+
+        # 模拟"手工删掉会话目录"：目录没了、内存里也没了这个会话
+        assert (
+            client.post(
+                "/api/session/release", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        shutil.rmtree(sessions_root / session_id)
+
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        body = client.get(f"/api/session/cache?session_id={session_id}").json()
+        assert body["calls"] == [], f"新化身的账本必须从空开始: {body['calls']}"
+        assert body["summary"]["calls"] == 0
+
+    def test_archiving_drops_the_ledger_rows(self, real_client):
+        """归档清掉账本行：归档会话没人读得到，留着只会让库随会话数线性长大。"""
+        client, _ = real_client
+        session_id = "cache-archive-clean"
+        assert (
+            client.post(
+                "/api/session/create",
+                json={"session_id": session_id, "tags": ["probe"]},
+            ).status_code
+            == 200
+        )
+        self._seed_ledger(session_id)
+        assert len(recorded_calls(session_id)) == 2
+        assert (
+            client.post("/api/session/archive", json={"session_id": session_id}).json()[
+                "archived"
+            ]
+            is True
+        )
+        assert recorded_calls(session_id) == []
+        assert (
+            db_rows("SELECT 1 FROM cache_segment WHERE session_id = ?", (session_id,))
+            == []
+        )
+
+    def test_report_echoes_the_requested_id(self, real_client):
+        """回显请求里的 id（别名归一不改对外读到的键）。"""
+        client, _ = real_client
+        session_id = "cache-echo"
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        self._seed_ledger(session_id)
+        body = client.get(f"/api/session/cache?session_id={session_id}").json()
+        assert body["session_id"] == session_id
+
     def test_read_path_does_not_run_on_the_event_loop(self, real_client):
-        """读 + 规整 + 投影不在循环线程上：否则一次查询会挡住所有会话的流式帧（S1）。"""
+        """读 + 投影不在循环线程上：否则一次查询会挡住所有会话的流式帧（S1）。"""
         client, _ = real_client
         session_id = "cache-off-loop"
         assert (
@@ -1418,6 +1658,17 @@ def _loop_for(cm: ContextManager) -> ReActLoop:
     )
 
 
+def _segments_of(session_id: str, fp: str) -> list[str]:
+    return [
+        row["label"]
+        for row in db_rows(
+            "SELECT label FROM cache_segment WHERE session_id = ? AND fp = ? "
+            "ORDER BY idx",
+            (session_id, fp),
+        )
+    ]
+
+
 class TestLiveMetricsAndCompact:
     @pytest.mark.asyncio
     async def test_metrics_fields_come_from_the_same_ledger_record(
@@ -1462,22 +1713,12 @@ class TestLiveMetricsAndCompact:
             assert metrics[0].cache_expected_tokens is None
             assert metrics[0].cache_verdict == "cold"
             assert metrics[0].cache_diverged == ""
-            data = json.loads(
-                (tmp_path / "live" / f"{CACHE_LEDGER_KEY}.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            assert len(data["calls"]) == 1
-            assert data["calls"][0]["verdict"] == metrics[0].cache_verdict
-            assert data["calls"][0]["purpose"] == "main"
+            stored = recorded_calls("live")
+            assert len(stored) == 1
+            assert stored[0]["verdict"] == metrics[0].cache_verdict
+            assert stored[0]["purpose"] == "main"
             # 分段确实含 system 侧与 wire 侧（探针开着）
-            fingerprint_of_call = data["calls"][0]["fp"]
-            labels = [
-                segment["label"]
-                for segment in data["fingerprints"][fingerprint_of_call]["segments"]
-            ]
-            assert labels[0] == "system:base"
-            assert labels == ["system:base"]  # 直调 _call_llm 不经 provider 序列化
+            assert _segments_of("live", stored[0]["fp"]) == ["system:base"]
         finally:
             event_bus._subscribers.clear()
             event_bus._routing.clear()
@@ -1523,14 +1764,10 @@ class TestLiveMetricsAndCompact:
             current_tools=lambda: [],
             options=RequestOptions(cache_probe=CacheProbe()),
         )
-        data = json.loads(
-            (tmp_path / "compact" / f"{CACHE_LEDGER_KEY}.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert [call["purpose"] for call in data["calls"]] == ["compact"]
-        assert data["calls"][0]["prompt"] == 4321
-        assert data["calls"][0]["verdict"] == "cold"
+        stored = recorded_calls("compact")
+        assert [row["purpose"] for row in stored] == ["compact"]
+        assert stored[0]["prompt"] == 4321
+        assert stored[0]["verdict"] == "cold"
 
 
 class TestProbeIsolation:
@@ -1589,15 +1826,12 @@ class TestProbeIsolation:
 
         # 主调用的探针没有被压缩请求覆盖（它此时还没把请求发出去）
         assert main_probe.segments == []
-        data = json.loads(
-            (tmp_path / "bg" / f"{CACHE_LEDGER_KEY}.json").read_text(encoding="utf-8")
-        )
-        assert [call["purpose"] for call in data["calls"]] == ["compact"]
-        labels = [
-            segment["label"]
-            for segment in data["fingerprints"][data["calls"][0]["fp"]]["segments"]
+        stored = recorded_calls("bg")
+        assert [row["purpose"] for row in stored] == ["compact"]
+        assert _segments_of("bg", stored[0]["fp"]) == [
+            "system:base",
+            "history:COMPACT:user",
         ]
-        assert labels == ["system:base", "history:COMPACT:user"]
 
     @pytest.mark.asyncio
     async def test_validated_call_hands_parts_and_probe_to_the_provider(
@@ -1659,13 +1893,9 @@ class TestProbeIsolation:
 
         assert [part.label for part in seen["cache_parts"]] == ["system:base"]
         assert seen["probe"] is probe
-        data = json.loads(
-            (tmp_path / "wired" / f"{CACHE_LEDGER_KEY}.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert [call["purpose"] for call in data["calls"]] == ["main"]
-        assert data["calls"][0]["prompt"] == 100
+        stored = recorded_calls("wired")
+        assert [row["purpose"] for row in stored] == ["main"]
+        assert stored[0]["prompt"] == 100
 
 
 def _turn_ctx() -> Any:
@@ -1676,7 +1906,7 @@ def _turn_ctx() -> Any:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 纯函数卫生：指纹与规范形
+# 纯函数卫生：指纹 / 前缀指纹 / 空投影
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1685,6 +1915,17 @@ class TestFingerprintPrimitives:
         forward = parts("a", "b")
         assert fingerprint(forward) == fingerprint(parts("a", "b"))
         assert fingerprint(forward) != fingerprint(parts("b", "a"))
+        assert fingerprint([]) == fingerprint([])
+
+    def test_prefix_fingerprint_is_the_lazy_shortcut_of_the_full_one(self):
+        """「前 n 段的指纹」就是 `fingerprint(segments[:n])`，且全量那条与它同源。"""
+        segments = parts("system:base", "tools:Bash", "history:u1:user")
+        prefixes = _PrefixFingerprints(segments, fingerprint(segments))
+        assert prefixes.size == 3
+        for length in range(1, len(segments) + 1):
+            assert prefixes.at(length) == fingerprint(segments[:length])
+        # 全量那一条是构造时给进来的（不重复哈希）
+        assert prefixes.at(3) is prefixes.at(3)
 
     def test_segment_hash_is_16_hex_and_protocol_order_independent(self):
         one = CachePart.obj("tools:X", {"a": 1, "b": 2})
@@ -1694,8 +1935,10 @@ class TestFingerprintPrimitives:
         int(one.sha, 16)
 
     def test_build_report_on_empty_ledger(self):
-        report = build_report(empty_ledger("s"), session_id="s", limit=20)
+        report = build_report("s", [], limit=20, segment_at=lambda _fp, _index: None)
         assert report["summary"]["calls"] == 0
         assert report["summary"]["theory_rate"] is None
         assert report["forks"] == []
         assert report["calls"] == []
+        assert empty_report("s")["session_id"] == "s"
+        assert empty_report("s")["summary"]["actual_rate"] is None

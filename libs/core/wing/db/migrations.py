@@ -95,6 +95,67 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX idx_wake_next ON wake_trigger(state, next_fire_at_ms);
         """,
     ),
+    (
+        3,
+        """
+        -- 缓存账本（KV 前缀缓存）：一次 LLM 调用一行。与会话目录里的
+        -- cache_ledger.json（旧版本写过）无关——旧文件不再读，也不再写。
+        --
+        -- 与 audit_* 的区别：审计是「发生过什么」的流水（只追加、永不裁）；这里是
+        -- 「最近 MAX_CALLS 次调用」的**滚动窗口**——按会话裁剪，段落行随指纹回收。
+        --
+        -- 分叉事实（fork_*）与调用同生共死：要么四列非空，要么全空。
+        -- fork_index = 与上一次调用的最长公共前缀长度；fork_tokens_lost 是估算值，
+        -- 无参照时可为 NULL。
+        CREATE TABLE cache_call (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            ts_ms INTEGER,
+            fp TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            model TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            prompt INTEGER NOT NULL,
+            cached INTEGER NOT NULL,
+            expected INTEGER,
+            ref_fp TEXT,
+            verdict TEXT NOT NULL,
+            -- 该调用前缀的段数（= 它那份段列表的长度）。前缀比较的边界：比本次
+            -- 更长的候选连指纹都不必算。
+            segment_count INTEGER NOT NULL,
+            fork_kind TEXT,
+            fork_index INTEGER,
+            fork_label TEXT,
+            fork_segments_affected INTEGER,
+            fork_tokens_lost INTEGER,
+            CHECK (
+                (fork_kind IS NULL AND fork_index IS NULL AND fork_label IS NULL
+                 AND fork_segments_affected IS NULL)
+                OR (fork_kind IS NOT NULL AND fork_index IS NOT NULL
+                    AND fork_label IS NOT NULL AND fork_segments_affected IS NOT NULL)
+            )
+        );
+        -- id 是 rowid：索引项的隐式尾键就是它——「会话内新→旧」与环形裁剪都走这条。
+        CREATE INDEX idx_cache_call_session ON cache_call(session_id, id);
+
+        -- 一次调用的前缀被切成有序段（label / sha / chars / src）。主键
+        -- (session_id, fp, idx)：fp 是整份段列表的指纹（内容寻址，同一份段列表在
+        -- 会话内只存一遍），会话维度让「裁剪 / 归属 / 回收」都缩成一条 DELETE 说得清。
+        CREATE TABLE cache_segment (
+            session_id TEXT NOT NULL,
+            fp TEXT NOT NULL,
+            idx INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            sha TEXT NOT NULL,
+            chars INTEGER NOT NULL,
+            src_path TEXT,
+            src_mtime TEXT,
+            src_size INTEGER,
+            PRIMARY KEY (session_id, fp, idx)
+        ) WITHOUT ROWID;
+        """,
+    ),
 )
 
 #: 代码认识的最高 schema 版本（= 最后一个迁移的目标版本）。

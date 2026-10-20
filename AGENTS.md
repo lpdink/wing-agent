@@ -59,7 +59,8 @@ libs/core/wing/
 │   ├── manager.py                   ContextManager — 窗口投影 / 声明集 / rewind / pending compact 编排 / 缓存分段
 │   ├── compaction.py                Compactor — 压缩策略（LLM 摘要）+ PendingCompact / LLMMessagesResult
 │   ├── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关；加载期采 src 事实）
-│   └── cache_ledger.py              缓存账本 — 分段指纹 / 理论命中率 / 分叉归因 / 端点投影（best-effort 落 aux）
+│   ├── cache_ledger.py              缓存账本 — 分段指纹 / 理论命中率 / 分叉归因 / 端点投影（best-effort 记账）
+│   └── cache_store.py               账本的唯一 SQL 处：cache_call / cache_segment（进程级 wing.db）
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
 ├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
@@ -76,7 +77,7 @@ libs/core/wing/
 │   ├── message.py                   ChainNode / 内容块 / MediaRef / Message（落盘格式守门人）
 │   ├── llm.py                       LLMUsage / LLMResponse / ToolCall / ToolCallDelta / PendingCall
 │   ├── tool.py                      ToolError / ToolParam / Tool / ToolOutput / AgentSkill
-│   └── cache.py                     缓存账本的段 label / 规范形 hash / CachePart / CacheProbe
+│   └── cache.py                     缓存账本的段 label / 规范形 hash / CachePart / CacheCall / CacheProbe
 ├── media/                           图片媒体纯函数层包（id/格式/尺寸/信封/上传闸门与拒绝文案/请求期投影）
 │   ├── facts.py                     字节 → 事实（sha256 id / mime / 尺寸 / 信封 / 估算 / 上传闸门）
 │   └── policy.py                    请求期投影（高水位 + 量子驱逐）+ 占位常量
@@ -114,9 +115,9 @@ libs/core/wing/
 │   ├── builtin/                     一工具一文件：bash · read/write/edit · glob/grep · read_image · ask_user · todo
 │   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
-├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级；与 store/ 的会话持久化正交）
-│   ├── database.py                  Database（WAL / user_version 迁移 / 打开失败即降级，读写作 no-op）
-│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger）+ SCHEMA_VERSION
+├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级 + 跨线程事务；与 store/ 的会话持久化正交）
+│   ├── database.py                  Database（WAL / user_version 迁移 / 跨线程单连接 + 事务 / 打开失败即降级）
+│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger，v3 = 缓存账本）+ SCHEMA_VERSION
 ├── audit/                           审计：事件 → wing.db 的 audit_* 追加行（EventBus 订阅；install() 由组合根显式调用）
 │   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩各一条 INSERT
 ├── wake/                            会话唤醒（wake_trigger 表 + 事件/时间驱动 + 内置信封；投递经注入的 WakePorts）
