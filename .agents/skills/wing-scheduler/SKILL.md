@@ -29,7 +29,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 4. 整体 review 的 B/S 修完 → push / 开 PR → 写 summary.md → 汇报结论         （§10 / §11）
 ```
 
-两个必须同时守住的不变量：**一个 worktree 一个 executor**、**每个 session 都登记**。
+两个必须同时守住的不变量：**一个 worktree 一个 executor**、**每个 session 都登记**（你派发的当场记；执行者自派的 reviewer 靠它的回执补记，见铁律 10）。
 
 ## 0. 适用与不适用
 
@@ -78,7 +78,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 7. **push / 建 PR 只能你做**：executor 只 commit（commit message 要写清楚，reviewer 靠它取信息）。
 8. **任务文档一律放 `$WING_HOME/tasks/<task>/`，用绝对路径引用**：绝不写进 worktree（会污染 diff 与 review 范围）。任务目录在 worktree 之外是刻意设计。
 9. **先记录 base commit，再派发**：没有 base 就没有 review 范围（`<base>..HEAD`）。
-10. **每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。任务一大，不记就失忆。
+10. **你派发的每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。执行者**自派**的 reviewer 不经过你——契约要求在最终消息里报出它的 sid / 角色 / 结论（§6.2 第 8 条），你在验收复核时把这几行**补进台账**（reviewer 都带 `--tag task=<task_name>`，可用 `wing ps --tag task=<task_name>` 交叉核对）。任务一大，不记就失忆。
 11. **失败优先 `-r` 续跑**：`wing run -r <sid> -p "..."` 保留原上下文。开新 session 只在原上下文彻底跑偏时才考虑（不推荐）。
 12. **等待窗口给足**：执行者自派一轮 review 之后，单步实测 30–40 分钟。`wing wait --timeout` 与 Bash 工具的 timeout 都要同步放大（`--timeout 3600`、Bash timeout 3700 起步）；Bash 默认 30s 会把 `wing wait` 进程杀掉（会话本身不受影响，只是白等一轮）。更省的做法是根本不 wait：`wing run` 默认登记「子会话收口 / 提问 → 唤醒我」（§7.1）。
 13. **别相信自己的记忆，相信日志**：你自己的上下文会被自动压缩，跑到后面会忘掉前面。关键状态（sid、base sha、决策、结论）一律**当场**写进 `scheduler_log.md`，需要时读回来。
@@ -227,7 +227,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
 
 - 适用：任务要求「接着我现在的位置继续做」，而你一屏 prompt 写不全前因后果（典型：调试到一半、已验证的探索路径要复用）；
 - 代价：克隆是**独立会话**，整条链都会进它的上下文——上下文更大、每轮 token 更贵；它继承的是**那一刻**的链，父会话后续的改动不会同步过去；
-- 克隆仍然一无所知的部分要靠 prompt 补：你的计划、lane 归属、验收命令、以及「哪些是你没做过的决定」。
+- 克隆仍然一无所知的是 **fork 之后才发生的事**，要靠 prompt 补：本步任务书、lane / worktree、验收命令、纪律，以及哪些决定是你 fork 之后才做的。
 
 ### 6.2 执行者契约（原样内联，每次派发都要带）
 
@@ -248,12 +248,12 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
 7. **交付前自己派发一轮独立 review**（契约的一部分，不是可选）：写 <.../<NN>_<step>/review_request.md>（审查对象 / 范围 `<base_sha>..HEAD` / 验收标准 / 你的最终总结），用调度者给你的「审查者契约」文本派发：
    `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag task=<task_name> -p "<审查者契约 + review_request.md 绝对路径>"`
    （`--no-notify` 是必须的：你反正要阻塞等它，别让它的收口再往你这里投一条唤醒消息。）
-   然后 `wing wait <reviewer_sid> --timeout 1800 --json`（Bash 工具 timeout 给 2000）。读报告：**[B] 与 [S] 必修、[N] 你判断**；同一 step 最多 3 轮，复审写 review_r2.md / review_r3.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
+   然后 `wing wait <reviewer_sid> --timeout 3600 --json`（Bash 工具 timeout 给 3700——铁律 12 的同一套数字；wait 幂等，超时了重等即可）。读报告：**[B] 与 [S] 必修、[N] 你判断**；同一 step 最多 3 轮，复审写 review_r2.md / review_r3.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
 8. 最终消息（调度者会读，务必完整）：
    - 做了什么（对应 task.md 哪些项）
    - 关键文件清单
    - 验证命令与真实结果（贴关键输出摘要）
-   - 独立 review 的结论（B/S/N 各几条、逐条怎么处理、报告路径）
+   - 独立 review 的**回执**：reviewer 的 sid / 轮次 / B-S-N 各几条 / 逐条怎么处理 / 报告路径（调度者要靠这几行把它补进台账）
    - 风险 / 未完成项 / 需要下游注意的接口约定
    - commit sha 列表
 
@@ -365,6 +365,8 @@ grep -n '^- \[ \]' "$STEP/task.md"   # 空：全部勾完
 
 再确认最后一轮报告的结论是「通过」，并**抽查 1–2 条 B/S 的处理**（报告说修了 ≠ 修了：看 `git log -p` 或对应测试）。任一项不过 → §9.3 用 `-r` 退回；"报告结论是需返修、执行者却没再走一轮"也是退回。
 
+复核通过时顺手把**执行者自派的 reviewer 那几行**补进 `scheduler_log.md`（sid / 角色 / step / 结论，取自它的最终消息；`wing ps --tag task=<task_name>` 可交叉核对）——铁律 10 对自派 session 的登记就落在这里。
+
 ### 8.3 审查者契约（执行者派每步 review 用它；整体 review 你派的时候也用这一份）
 
 派发（workspace 用被审 worktree）：
@@ -386,7 +388,9 @@ EOF
 【角色】你是独立审查者（reviewer）。你的立场与执行者相反：默认它做得不对，用证据说话。没有人类在线，不要提问。
 【审查对象】worktree：<绝对路径>；范围：<base_sha>..HEAD；文件清单：<...>
 【审查要求】先读 <review_request.md 绝对路径>（含验收标准与上下文）
-【必读】① 总任务书 <...> ② 步骤任务书 <...> ③ design.md <...> ④ task.md <...>
+【必读】<按 review 类型填一处，删掉另一处>
+  · 每步 review：① 总任务书 <...> ② 步骤任务书 <...> ③ design.md <...> ④ task.md <...>
+  · 整体 review：① 总任务书 <...> ② 各 step 的 proposal 清单 <...> ③ 各 step 的 review 报告清单 <...>
 
 【你要做的】
 1. 读 commit（`git log -p <base>..HEAD`、`git show`）与相关代码，判断是否正确、完整、符合验收标准。
@@ -761,6 +765,7 @@ git push -u origin <task>/integration
 | sid | 角色 | step | lane | 派发时间 | 状态 | 结论 / 备注 |
 |---|---|---|---|---|---|---|
 | 2026… | executor | 01_xxx | l1 | 09-17 15:02 | idle | 交付 3 commit + 自派 review（review_r1/r2） |
+| 2026… | reviewer（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，B2/S1 已修，见 review_r2.md |
 
 ## 时间线
 | 时间 | 事件 | 对象 | 详情 |
