@@ -315,6 +315,8 @@ make fmt                          # 格式化全部
 
 **注释纪律**：注释**宁缺毋滥**，只承载代码本身读不出的信息——不变量、协议 / 契约、红线、非显然的 why（平台差异、竞态、外部约束）。保持**高信息密度**：函数 / 类型名已说清的不复述，同一主题的连续多行注释压成要点式，与代码不符的过期注释直接删。**严禁**添加「解释自己这处改动为什么正确」的辩护式注释（"原来 XX 会出问题"、"这样改是对的"、"按评审意见修成…"）——改动理由写进 commit message / PR 正文。
 
+`wing` 命令面（四种形态 / 命令表 / 编排脚本 / 红线 / 常见坑）→ [`.agents/skills/wing-cli/SKILL.md`](.agents/skills/wing-cli/SKILL.md)。
+
 ### Worktree 纪律
 
 Rust 的构建产物是**按路径独立的一整套**：新建 worktree 后首次构建会凭空造出一整套 `target/`；
@@ -337,6 +339,14 @@ Rust 的构建产物是**按路径独立的一整套**：新建 worktree 后首�
 - **Python**：`pip install wing-agent` → 安装 `wing-gateway`（Python 网关）与 `wing-cli`（maturin 构建的 Rust 二进制，提供 `wing` 命令）。
 - **Rust**：GitHub Release 预编译二进制 → `wing` CLI（TUI + stdio + 守护进程控制）。
 - **SDK**：`wing-sdk` 为 uv workspace 包（`libs/`），未发布 PyPI。
+
+## 交付终态
+
+能力交付 = **推送 + 开 PR + 等云端 review 结束 + 派执行者修完意见**：
+
+- 云端 review **只触发一次**，不因返修补提交而重复触发；
+- 调度方不需要用户二次确认即可推送与开 PR（**合并仍由用户决定**）；
+- 执行者只 commit，不推送。
 
 ## 提交信息
 

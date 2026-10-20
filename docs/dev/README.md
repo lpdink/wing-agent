@@ -7,6 +7,7 @@
 | [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、会话生命周期、持久化与压缩 |
 | [backend-layout.md](backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射表、分层守门测试（`test_layering.py`）与白名单 |
 | [http-api.md](http-api.md) | 完整 HTTP 端点表、WebSocket 事件协议、Gateway 鉴权 |
+| [wake.md](wake.md) | 会话唤醒：语义表（收口 / 提问 / 失败 / 归档联动）、同一订阅重复登记 = 刷新、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
 | [glossary.md](glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [config-logging.md](config-logging.md) | WING_HOME 布局、config.yaml 顶层键、TUI 配置、日志轮转与查询、环境变量 |
 | [settings.md](settings.md) | 设置面：声明层（`S(...)` → 目录 / 模板 / 校验）、稀疏文档与「缺席即默认」、Setting API 与保存事务、密文语义、生效域全表、setup mode、TUI 全屏面板（键位表）、首次运行向导、`wing config` CLI |

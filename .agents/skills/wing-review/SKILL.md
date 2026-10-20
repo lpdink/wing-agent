@@ -44,28 +44,30 @@ tags: [review, headless, quality-gate]
 要点：
 
 - **base 必须给**（`<base_sha>` / 基线分支）：没有 base 就没有 review 范围；
-- 多分支一次审：一个 reviewer 横向看全部 worktree（互相印证更容易看出问题）；分支之间无关也可以各派一个（在飞总数 ≤3）；
+- 多分支一次审：一个 reviewer 横向看全部 worktree（互相印证更容易看出问题）；分支之间无关也可以各派一个并行审，别让它们互相等（并发由你判断，不设固定上限）；
 - **工具集只读**：`--tools "Bash,Read,Glob,Grep"`——不给 Write / Edit，报告写在最终消息里（零落盘、零污染）；
 - prompt 先落盘（`/tmp/reviewer_prompt.md` 之类），便于事后复盘你发了什么。
 
 ### 2. 派发
 
 ```bash
-cd <能看见全部 worktree 的父目录> && wing run --json --tools "Bash,Read,Glob,Grep" -p "$(cat <prompt 文件>)"
+cd <能看见全部 worktree 的父目录> && wing run --json --no-notify \
+  --tools "Bash,Read,Glob,Grep" -p "$(cat <prompt 文件>)"
 # → {"session_id":"...", ...}
 ```
 
 - `cd` 决定 session 的 workspace——选 worktree 的**集散目录**（审查员要靠绝对路径进各 worktree）；
+- **`--no-notify`**：你反正要阻塞等它，别让它的收口再往你这里投一条唤醒消息（notify 语义见 [wing-cli](../wing-cli/SKILL.md) 的 `wing run` 一节）；
 - 派发后核对：`wing info <sid> --json` 看 `workdir` / `tools` 是否符合预期；
 - `wing run` 创建的 session 强制 yolo（无人值守），不要也不该附加额外工具。
 
 ### 3. 等待
 
 ```bash
-wing wait <sid> --timeout 1800 --json > /tmp/review_wait.json
+wing wait <sid> --timeout 3600 --json > /tmp/review_wait.json
 ```
 
-- **Bash 工具的 timeout 必须放大**（`wait --timeout + 200` 起步）——默认 30s 会把 wait 进程杀掉；会话不受影响，wait 幂等可重等；
+- **Bash 工具的 timeout 必须更大**（如 `--timeout 3600` + 工具 3700）——默认 30s 会把 wait 进程杀掉；会话不受影响，wait 幂等可重等；
 - 报告在 `results[0].result`；等 `status=idle` 再读；异常（`is_error` / `subtype`）先 `wing tail <sid> -t tool_call` 看现场。
 
 ## 读报告与处置

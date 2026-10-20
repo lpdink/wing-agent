@@ -1,15 +1,15 @@
 ---
 name: wing-scheduler
-description: 超大型任务的无人值守交付编排（scheduler 模式）。把一个大任务拆成步骤与波次，在独立 worktree 上并发派发 headless 子 agent（executor）执行、派独立子 agent（reviewer）以 B/S/N 分级审查，最后由 scheduler 集成收口、push 并产出单一 PR。当用户要求「实施/交付一个大型任务」「拆开并行做掉」「无人值守把这件事做完」「多子 agent 协同开发」，或任务明显需要多波次、多 worktree、跨模块大范围改动时使用。
+description: 超大型任务的无人值守交付编排（scheduler 模式）。把一个大任务拆成步骤与波次，在独立 worktree 上并发派发 headless 子 agent（executor）执行——执行者交付前自派一轮独立审查（B/S/N 分级），全部收口后 scheduler 再派一轮整体审查——最后由 scheduler 集成、push 并产出单一 PR。当用户要求「实施/交付一个大型任务」「拆开并行做掉」「无人值守把这件事做完」「多子 agent 协同开发」，或任务明显需要多波次、多 worktree、跨模块大范围改动时使用。
 category: Workflow
 tags: [orchestration, scheduler, multi-agent, delivery, headless]
 ---
 
 # Wing Scheduler — 超大型任务的全自动交付
 
-一句话：**你（scheduler）负责想清楚、拆、派、审、集成、收口；子 agent 负责执行。需求澄清之后全程无人值守。**
+一句话：**你（scheduler）负责想清楚、拆、派、验收复核、集成、收口；子 agent 负责执行与自审。**
 
-本 skill 只依赖 `wing` CLI（`wing run` / `wait` / `ps` / `info` / `tag` / `tail` / `head`）与普通 shell / git 命令，不需要额外脚本或编排框架。
+本 skill 只依赖 `wing` CLI（`wing run` / `wait` / `watch` / `wake` / `fork` / `ps` / `info` / `tag` / `tail` / `head`）与普通 shell / git 命令，不需要额外脚本或编排框架。`wing` 的形态、命令全集与常见坑见 [wing-cli](../wing-cli/SKILL.md)。
 
 本文用 `$WING_HOME` 指 wing 的状态目录（默认 `~/.wing`，可用同名环境变量覆盖）：任务文档与 worktree 都放在它下面，与目标仓库解耦。
 
@@ -19,18 +19,17 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 0. 需求澄清 → 写 proposal.md → 用户批准 → 初始化 scheduler_log.md          （§4）
 1. 拆 DAG + lane 规划 + 建 worktree + 写步骤 proposal                      （§5）
 2. while 还有未收敛的 step：
-     a. 选出"依赖已就绪"的 step，按 lane 上限派发 executor（≤3 在飞）        （§6）
-     b. wing wait 等它们，判读结果（idle / timeout / error 三种走法）        （§7）
-     c. 交付达标的 step：写 review_request.md → 派 reviewer                  （§8）
-     d. wing wait 等 reviewer → 读报告 → B/S 必修                            （§8.5）
-     e. 返修循环（≤3 轮）→ 该 step 收敛，或判定阻塞并跳过下游                （§9）
-     f. 该 lane 空闲 → 派这条 lane 的下一个 step（别的 lane 继续跑）
-     g. 更新 scheduler_log + 向用户播报两行进度                              （§4.3 / §11）
-3. 全部收敛 → 集成到单一分支 → 全量验收 → push / 开 PR                      （§10）
-4. 写 summary.md → 向用户汇报结论                                           （§11）
+     a. 选出"依赖已就绪"的 step，按 lane 派发 executor（并发由你判断）        （§6）
+     b. 登记唤醒（`wing run` 默认已开）后干别的，被叫醒就判读结果            （§7）
+     c. 交付达标的 step：验收复核（执行者已自派一轮独立 review）             （§8.1–8.2）
+     d. 复核不合格 → `-r` 补齐（最多 3 轮）→ 收敛，或判定阻塞并跳过下游      （§9）
+     e. 该 lane 空闲 → 派这条 lane 的下一个 step（别的 lane 继续跑）
+     f. 更新 scheduler_log + 向用户播报两行进度                              （§4.3 / §11）
+3. 全部收敛 → 集成到单一分支 → 全量验收 → 派一轮整体 review                  （§10）
+4. 整体 review 的 B/S 修完 → push / 开 PR → 写 summary.md → 汇报结论         （§10 / §11）
 ```
 
-三个必须同时守住的不变量：**在飞 ≤3**、**一个 worktree 一个 executor**、**每个 session 都登记**。
+两个必须同时守住的不变量：**一个 worktree 一个 executor**、**每个 session 都登记**（你派发的当场记；执行者自派的 reviewer 靠它的回执补记，见铁律 10）。
 
 ## 0. 适用与不适用
 
@@ -51,9 +50,9 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 
 | 角色 | 是谁 | 工具集（写死） | 权限边界 |
 |---|---|---|---|
-| **scheduler** | 你，当前会话 | Bash / Read / Write / Edit / Glob / Grep（+ AskUserQuestion） | 唯一与用户对话；唯一能 push / 建 PR；负责任务文档、派发、审查组织、集成、收口 |
-| **executor** | `wing run` 起的 headless session | `Bash,Read,Write,Edit,Grep,Glob` | 只在自己被分配的 worktree 内改代码；**必须清晰 commit**；禁止 push / 切分支 / rebase / 动别的 worktree |
-| **reviewer** | `wing run` 起的 headless session | `Bash,Read,Glob,Grep,Write,Edit` | 只读被审 worktree（可跑测试）；唯一允许的写入是任务目录下的 review 报告（Write 起草、Edit 增量改） |
+| **scheduler** | 你，当前会话 | Bash / Read / Write / Edit / Glob / Grep（+ AskUserQuestion） | 唯一与用户对话；唯一能 push / 建 PR；负责任务文档、派发、**验收复核**、**整体 review**、集成、收口 |
+| **executor** | `wing run` 起的 headless session | `Bash,Read,Write,Edit,Grep,Glob` | 只在自己被分配的 worktree 内改代码；**必须清晰 commit**；**交付前自己派发一轮独立 review**；禁止 push / 切分支 / rebase / 动别的 worktree |
+| **reviewer** | `wing run` 起的 headless session | `Bash,Read,Glob,Grep,Write,Edit` | 只读被审 worktree（可跑测试）；唯一允许的写入是任务目录下的 review 报告（Write 起草、Edit 增量改）；**不得再派发任何子 agent**、不得改代码 |
 
 子 agent **一无所知**：不知道用户是谁、不知道任务背景、不知道别的步骤在做什么、不知道你的计划。它们的全部上下文 = 你写的 prompt + 你指给它的文件。**信息缺口是编排失败的第一大原因**。
 
@@ -65,24 +64,25 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 
 - **自己**：`wing tag $WING_SESSION_ID scheduler task=<task_name>`——`$WING_SESSION_ID` 是 Bash 工具注入的环境变量 = 你所在会话的 id（开工时先 `echo $WING_SESSION_ID` 确认非空；为空说明运行环境尚未支持该注入，打标需人工确认 sid）；
 - **executor / reviewer**：派发的 `wing run` 直接带 `--tag executor --tag task=<task_name>`（reviewer 用 `--tag reviewer`）——创建即打标、一条命令原子完成，没有"派发了但没标上"的窗口；`-r` 续跑同样接受 `--tag`（幂等追加）；
-- **巡检 / 找回**：`wing ps --tag task=<task_name>` 看任务全家（多个 `--tag` 为 AND；`--tag` 隐含包含 inactive，归档会话也查得到）；
+- **巡检 / 找回**：`wing ps --tag task=<task_name>` 看任务全家（多个 `--tag` 为 AND；`--tag` 隐含包含 inactive）；**归档区的会话不在 `wing ps` 里**（冷存储，用 `wing archive --list` 查）；
 - 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词，任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。
 
 ## 2. 铁律（违反任意一条，编排都会崩坏）
 
-1. **并发 ≤ 3**：executor + reviewer 加起来，同一时刻最多 3 个在飞（你自己不算）。TPM 限流是硬约束，不是建议。
+1. **并发由你判断，不设固定上限**：同一时刻能同时在飞多少 executor / reviewer，取决于任务粒度、机器资源与你在等什么——自己拿主意，并在 `scheduler_log.md` 里写清当前在飞哪些。真正不能破的是下一条（worktree 独占）。
 2. **同一个 worktree，同一时刻只能有一个 executor**：想并行 → 开多个 worktree（一条 lane 一个）。绝不让两个 executor 在同一目录里写代码。
 3. **不设 `--max-turns`**：现代 agent 需要的 ReAct 轮数很高，设了会让任务中途夭折。
-4. **不改模型与 effort**：用模板默认（不加 `-m` / `--provider` / `--effort`）。模型选择带来的收益远小于版本漂移与不可复现的风险。
+4. **不改模型与 effort**：用模板默认（不加 `-m` / `--effort`）。模型选择带来的收益远小于版本漂移与不可复现的风险。
 5. **工具集写死**（见上表）：不要给子 agent 加 `TodoWrite` / `AskUserQuestion`。
 6. **子 agent 不问问题**：没有人类在线（`AskUserQuestion` 不在工具集里；即使问了也没人答，会白挂 100 分钟）。契约里必须明确「遇到不确定自己决策，并把假设写进 design.md 与最终消息」。
 7. **push / 建 PR 只能你做**：executor 只 commit（commit message 要写清楚，reviewer 靠它取信息）。
 8. **任务文档一律放 `$WING_HOME/tasks/<task>/`，用绝对路径引用**：绝不写进 worktree（会污染 diff 与 review 范围）。任务目录在 worktree 之外是刻意设计。
 9. **先记录 base commit，再派发**：没有 base 就没有 review 范围（`<base>..HEAD`）。
-10. **每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。任务一大，不记就失忆。
+10. **你派发的每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。执行者**自派**的 reviewer 不经过你——契约要求在最终消息里报出它的 sid / 角色 / 结论（§6.2 第 8 条），你在验收复核时把这几行**补进台账**（reviewer 都带 `--tag task=<task_name>`，可用 `wing ps --tag task=<task_name>` 交叉核对）。任务一大，不记就失忆。
 11. **失败优先 `-r` 续跑**：`wing run -r <sid> -p "..."` 保留原上下文。开新 session 只在原上下文彻底跑偏时才考虑（不推荐）。
-12. **`wing wait` 的 Bash timeout 必须放大**：Bash 工具默认 30s 会把 `wing wait` 进程杀掉（会话本身不受影响，但白等一轮）。`timeout = wait --timeout + 100` 起步。
+12. **等待窗口给足**：执行者自派一轮 review 之后，单步实测 30–40 分钟。`wing wait --timeout` 与 Bash 工具的 timeout 都要同步放大（`--timeout 3600`、Bash timeout 3700 起步）；Bash 默认 30s 会把 `wing wait` 进程杀掉（会话本身不受影响，只是白等一轮）。更省的做法是根本不 wait：`wing run` 默认登记「子会话收口 / 提问 → 唤醒我」（§7.1）。
 13. **别相信自己的记忆，相信日志**：你自己的上下文会被自动压缩，跑到后面会忘掉前面。关键状态（sid、base sha、决策、结论）一律**当场**写进 `scheduler_log.md`，需要时读回来。
+14. **每步的 review 归执行者**：你不写 `review_request.md`、不派每步的 reviewer——交付前自派一轮独立 review 是执行者契约的一部分（§6.2）。你的审查活只有两件：**验收复核**（报告在、结论通过、工作区干净）与**收口后的整体 review**（§8）。
 
 ## 3. 目录与产物（标准布局）
 
@@ -95,13 +95,13 @@ $WING_HOME/tasks/<task_name>/
 │   ├── proposal.md              # 步骤任务书（scheduler 写）
 │   ├── design.md                # 实现设计（executor 写，动手前写）
 │   ├── task.md                  # 勾选清单（executor 写，随做随勾）
-│   ├── review_request.md        # 审查要求（scheduler 写）
+│   ├── review_request.md        # 审查要求（executor 写，交付前派 review 时用）
 │   └── review_r<N>.md           # 审查报告 B/S/N 分级（reviewer 写，r1/r2/r3 不覆盖）
 └── ...
 ```
 
 - `<task_name>` 用 **kebab-case**（会出现在命令行与 prompt 里，避免空格与中文）；`<NN>` 是两位编号（01、02…），体现拓扑顺序；依赖关系写在步骤 proposal 里。
-- **产物 owner 唯一，不许互相覆盖**：scheduler 只写 proposal / review_request / scheduler_log / summary；executor 只写 design / task + 代码；reviewer 只写 review 报告。
+- **产物 owner 唯一，不许互相覆盖**：scheduler 只写 proposal / scheduler_log / summary（+ 整体 review 的 review_request）；executor 只写 design / task / review_request + 代码；reviewer 只写 review 报告。
 
 ## 4. 阶段 1 — 需求澄清与任务书（唯一需要人类介入的阶段）
 
@@ -131,13 +131,13 @@ $WING_HOME/tasks/<task_name>/
 
 ### 4.3 初始化调度日志
 
-在任务目录建 `scheduler_log.md`（模板见附录 F），先写元信息：任务目录、仓库绝对路径、基线分支与 commit、lane 规划、并发上限、交付终态。
+在任务目录建 `scheduler_log.md`（模板见附录 F），先写元信息：任务目录、仓库绝对路径、基线分支与 commit、lane 规划、并发策略、交付终态。
 
 ## 5. 阶段 2 — 拆分、lane 规划与 worktree
 
 ### 5.1 拆分准则
 
-- **一个 step = 一次能交付的完整可验证单元**：能在一次 1800s 等待窗口内产出「代码 + 验证 + commit + 总结」。超了就再拆——宁可多一个步骤，也不要一个巨型步骤。
+- **一个 step = 一次能交付的完整可验证单元**：能在一次等待窗口内产出「代码 + 验证 + commit + 总结」，窗口给到 1 小时（执行者还要自己派一轮 review，实测 30–40 分钟/步）；只是判断依据，不是硬闸——超了就再拆，宁可多一个步骤，也不要一个巨型步骤。
 - **按接口切，不按文件切**：步骤之间只通过明确的接口 / 文件 / 数据结构交互，这些接口写进步骤 proposal 的 Dependencies。
 - **验证自包含**：每个 step 都能独立跑通自己的验证命令（跑不起全量测试说明粒度不对）。
 - **可并行、可独立 review、可独立回滚**。
@@ -186,7 +186,7 @@ git -C "$WT" rev-parse HEAD                             # ← 记进 scheduler_l
 
 ### 5.5 更新 scheduler_log
 
-写下本波步骤清单、依赖、lane 归属、并发计划。
+写下本波步骤清单、依赖、lane 归属、并发计划（当前派了谁、在等谁）。
 
 ## 6. 阶段 3 — 派发 executor
 
@@ -195,7 +195,9 @@ git -C "$WT" rev-parse HEAD                             # ← 记进 scheduler_l
 | 命令 | 语义 | 用途 |
 |---|---|---|
 | `wing -p "<prompt>"` | stdio 模式：**阻塞**到本轮结束，输出最终结果（Claude Code 兼容 NDJSON） | 要一次性结果、同步串行执行 |
-| `wing run -p "<prompt>" --json` | **非阻塞**：建会话 + 发消息后**立即返回 session id** | **调度就用这个**（拿 sid → wait） |
+| `wing run -p "<prompt>" --json` | **非阻塞**：建会话 + 发消息后**立即返回 session id** | **调度就用这个**（拿 sid → 干别的 / wait） |
+
+`wing run` **默认登记「子会话收口或提问 → 唤醒我」**（目标 = `WING_SESSION_ID`，即你自己的会话）：派完就可以去干别的，被叫醒再判读，不必显式 `wing watch`、更不必干等。`--no-notify` 关掉，`--notify-to <sid>` 换个目标，`--notify-on done,ask` / `--notify-prompt TEXT` 调载荷；不在 agent 的 shell 里（没有 `WING_SESSION_ID`）时它会静默关闭，文本输出里是 `notify: off (no parent session)`。**回答 ask（带 `--tool-call-id`）时不登记**——派发时那条订阅仍在武装，本来就够；文本输出 `notify: off (answering an ask: the dispatch-time trigger is still armed)`。
 
 ```bash
 cd "$WT" && wing run --json \
@@ -214,6 +216,19 @@ EOF
 - 用 `<<'EOF'`（**带引号**）确保 prompt 里的反引号、`$VAR`、引号原样传入（已实测）；
 - 想留痕可先把同一段 prompt 落盘到 `<step_dir>/prompt_executor.md`，再 `-p "$(cat ...)"`（可选，便于事后复盘）。
 
+**上下文难以用 prompt 交代时：fork 一个自己。**
+
+```bash
+CLONE=$(wing fork "$WING_SESSION_ID" --at current --json | jq -r .session_id)
+wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）的任务背景你已经在上下文里。现在去做 X……"
+```
+
+`wing fork <SID> --at current` 克隆整条链（也可以先 `wing branches <SID>` 挑一个节点，`--at <uuid>`），得到的新会话继承完整上下文——做过什么、改过哪些文件、踩过哪些坑——比写一篇长 prompt 可靠得多。
+
+- 适用：任务要求「接着我现在的位置继续做」，而你一屏 prompt 写不全前因后果（典型：调试到一半、已验证的探索路径要复用）；
+- 代价：克隆是**独立会话**，整条链都会进它的上下文——上下文更大、每轮 token 更贵；它继承的是**那一刻**的链，父会话后续的改动不会同步过去；
+- 克隆仍然一无所知的是 **fork 之后才发生的事**，要靠 prompt 补：本步任务书、lane / worktree、验收命令、纪律，以及哪些决定是你 fork 之后才做的。
+
 ### 6.2 执行者契约（原样内联，每次派发都要带）
 
 ```
@@ -230,40 +245,51 @@ EOF
 4. 实施中真实执行验证（测试 / 构建 / lint / 脚本）；失败就修到通过，或如实说明为什么无法验证。
 5. 交付前把 task.md 全部勾完；清掉一次性脚本、临时文件、调试产物；不留半成品。
 6. 提交：`git add <你改的文件>`（精确 add，禁止 `git add -A`）+ `git commit -m "<type>(<scope>): <中文描述>"`。禁止 push、禁止切换/新建分支、禁止 rebase、禁止动其它 worktree。
-7. 最终消息（调度者会读，务必完整）：
+7. **交付前自己派发一轮独立 review**（契约的一部分，不是可选）：写 <.../<NN>_<step>/review_request.md>（审查对象 / 范围 `<base_sha>..HEAD` / 验收标准 / 你的最终总结），用调度者给你的「审查者契约」文本派发：
+   `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag task=<task_name> -p "<审查者契约 + review_request.md 绝对路径>"`
+   （`--no-notify` 是必须的：你反正要阻塞等它，别让它的收口再往你这里投一条唤醒消息。）
+   然后 `wing wait <reviewer_sid> --timeout 3600 --json`（Bash 工具 timeout 给 3700——铁律 12 的同一套数字；wait 幂等，超时了重等即可）。读报告：**[B] 与 [S] 必修、[N] 你判断**；同一 step 最多 3 轮，复审写 review_r2.md / review_r3.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
+8. 最终消息（调度者会读，务必完整）：
    - 做了什么（对应 task.md 哪些项）
    - 关键文件清单
    - 验证命令与真实结果（贴关键输出摘要）
+   - 独立 review 的**回执**：reviewer 的 sid / 轮次 / B-S-N 各几条 / 逐条怎么处理 / 报告路径（调度者要靠这几行把它补进台账）
    - 风险 / 未完成项 / 需要下游注意的接口约定
    - commit sha 列表
 
 【红线】
-- 只改本 worktree 与你自己的 design.md / task.md，其它任务文档只读。
+- 只改本 worktree 与你自己的 design / task / review_request，其它任务文档只读。
 - 不许为了让测试通过而弱化测试、跳过失败、删断言。
 - 不许留后台进程或长驻服务。
+- **不许把自己的任务外包**：除上面那一轮 review，不得再用 `wing` 派发任何子 agent（不许「派个 agent 把活干了我抄结果」）。活是你自己的。
 ```
 
 ### 6.3 派发后立刻做三件事
 
 1. 把 `session_id` 写进 `scheduler_log.md`（角色 / step / lane / 时间 / prompt 摘要）；
 2. 核对上下文：`wing info <sid> --json | jq '{status, workdir, tools}'` —— `workdir` 必须是预期的 worktree，`tools` 必须与契约一致（这一步能兜住"忘了 cd"）；
-3. 记账在飞数量（executor + reviewer，**不含你自己**）：以 `scheduler_log.md` 的台账为准；巡检时用 `wing ps --json` 交叉核对——注意你自己的会话也会显示成 `working`，别把自己算进去。
+3. 台账登记：以 `scheduler_log.md` 为准记下这个 sid 属于哪个 step / lane、在等什么；巡检时用 `wing ps --tag task=<task_name>` 交叉核对（你自己的会话也会显示成 `working`，别把自己算进去）。
 
 ## 7. 阶段 4 — 等待、巡检与交付判定
 
 ### 7.1 等待
 
+**默认姿势：不 wait。** `wing run` 已经替你登记了「子会话收口 / 提问 → 唤醒我」（§6.1）：派完就去派下一个、写文档、做集成，被叫醒时你的会话会收到一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，或提问内容 + 回答用的 `tool_call_id`）。醒来的第一件事是判读（§7.2 — 7.3），不是接着睡。
+
+想显式补登一条订阅（比如 `--no-notify` 派发的、或要盯多次收口）：`wing watch <sid> [--times 3] [--on done,ask]`。同一 `(source, target, on_events)` 再登记一次是**刷新**那一条订阅（不是新增）：保留 id 与次数计数，`--times` / `-p` 不给就保持原值——所以重复 `wing watch` 不会让同一个收口投两次，`wing run -r` 的隐式登记也不会把 `--times 3` 的剩余配额降成 1。
+
+**要阻塞时**（你就是要等到结果再往下走）：
+
 ```bash
-wing wait <sid1> <sid2> --timeout 1800 --json
+wing wait <sid1> <sid2> --timeout 3600 --json
 ```
 
-- **Bash 工具必须显式设 timeout**（如 `timeout: 2000`）——见铁律 12；
-- `--timeout` 是上限不是固定时长：全部会话 idle 就立即返回；
-- 复杂任务给更长（1800s 起步，重活 3600s+，你判断）；
+- **Bash 工具必须显式设更大的 timeout**（如 `timeout: 3700`）——见铁律 12；默认 30s 会把 `wing wait` 杀掉；
+- `--timeout` 是上限不是固定时长：全部会话 idle 就立即返回；自派 review 之后单步 30–40 分钟是常态，`--timeout 3600` 起步（重活 5400+）；
 - wait 是**幂等**的：已 idle 的会话立即返回结果，所以可以反复 wait、分批 wait。
 
 ```bash
-wing wait <sid> --timeout 1800 --json | jq '.results[] | {session_id, status, subtype, is_error, result: (.result[0:200])}'
+wing wait <sid> --timeout 3600 --json | jq '.results[] | {session_id, status, subtype, is_error, result: (.result[0:200])}'
 ```
 
 ### 7.2 结果判读
@@ -280,6 +306,8 @@ wing wait <sid> --timeout 1800 --json | jq '.results[] | {session_id, status, su
 
 ### 7.3 交付判定（executor 说"做完了"之后，你自己核对）
 
+执行者交回来的东西应当已经包含一轮自派独立 review（§6.2 第 7 条）。核对：
+
 ```bash
 WT=${WING_HOME:-$HOME/.wing}/worktrees/<repo>-<task>-l1
 STEP=$WING_HOME/tasks/<task>/01_<step_name>
@@ -287,9 +315,10 @@ grep -n '^- \[ \]' "$STEP/task.md"          # 应为空：所有项都勾了
 git -C "$WT" log --oneline <base_sha>..HEAD # 应有清晰的 commit
 git -C "$WT" status --porcelain             # 应干净
 ls "$STEP"/design.md "$STEP"/task.md        # 必须存在
+ls "$STEP"/review_r*.md                     # 必须存在：执行者自派的那轮报告
 ```
 
-四项缺任一 → **不进入 review**，按 §9.3 让 executor 用 `-r` 补齐。
+再打开**最后一轮**报告末尾，确认结论是「通过」（存在任何 B 或 S 都应是「需返修」，那就还得再来一轮）。缺任一 → 按 §9.3 让 executor 用 `-r` 补齐。
 
 ### 7.4 巡检与逃生舱
 
@@ -299,40 +328,51 @@ ls "$STEP"/design.md "$STEP"/task.md        # 必须存在
 - **卡死逃生舱**（长时间 `working` 却无新增消息，或状态是 `waiting`）：
 
 ```bash
-curl -s -X POST http://127.0.0.1:32523/api/session/interrupt \
-  -H 'Content-Type: application/json' -d '{"session_id":"<sid>"}'
-# → {"ok":true}；会话回到 idle，已生成的半成品会保留在上下文里
+wing interrupt <sid>
+# 文本输出 `interrupted session <sid>`；会话回到 idle，已生成的半成品会保留在上下文里
 ```
 
-网关地址默认 `127.0.0.1:32523`（以 `$WING_HOME/core/config.yaml` 的 `gateway.host/port` 为准）。中断后用 `-r` 说明卡点、让它换思路继续。
+中断后用 `-r` 说明卡点、让它换思路继续。没有 `wing` CLI 时同一个动作走 HTTP：
+`POST /api/session/interrupt`（body `{"session_id":"<sid>"}`，默认地址 `127.0.0.1:32523`，以
+`$WING_HOME/core/config.yaml` 的 `gateway.host/port` 为准）。
 
-## 8. 阶段 5 — 独立审查
+## 8. 阶段 5 — 独立审查（谁审什么）
 
-### 8.1 什么时候审（你判断）
+审查分两层，**每步的活不是你的**：
 
-| 场景 | 建议 |
-|---|---|
-| lane 之间独立（不同 worktree、不同模块） | **逐 lane 完成即审**：某条 lane 交付后就派 reviewer，它的空闲期正好落在别的 lane 还在跑时，槽位利用率最高 |
-| 一波内强耦合（共享接口 / 约定，要一起看才看得出问题） | **整波一起审**：全部 wait 完成、统一写 review 要求再派 |
-| 只有一条 lane | 交付即审 |
+| 审什么 | 谁派 | 什么时候 | 你做什么 |
+|---|---|---|---|
+| **每步的独立 review** | 执行者自己（契约第 7 条） | 交付前，按它自己的节奏 | **验收复核**（§8.2） |
+| **整体 review** | 你 | 全部步骤收敛、集成 + 全量验收通过之后（§10.3） | 读报告 → 派执行者修 B/S |
 
-reviewer 与别的 worktree 上的 executor 可以同时跑（不同目录互不影响），只要在飞总数 ≤3。
+### 8.1 每步的 review 由执行者自派
 
-### 8.2 写 `review_request.md`（模板见附录 C）
+派发 prompt 里已经写死（§6.2 第 7 条）：执行者写 `review_request.md`、按 §8.3 的「审查者契约」派一个只读 reviewer、读报告修 B/S、最多 3 轮。它在自己 lane 的 worktree 里做这件事，与其它 lane 上的 executor 并行互不影响。
 
-必须包含：
+你只要做两件事：
 
-- **审查范围**：worktree 绝对路径 + `<base_sha>..HEAD`（含未提交改动要显式说明）+ 本步骤拥有的文件清单；
-- **验收标准**：从步骤 proposal 的 Verification 抄过来（reviewer 要照此复现）；
-- **上下文**：总任务书 / 步骤任务书 / design.md / task.md 的绝对路径 + executor 的最终总结（贴进去）；
-- **审查重点**：本步骤的风险点（边界、兼容、并发、安全、性能、测试充分性）；
-- **纪律**：只读（可跑测试），不得改 worktree；唯一允许写入 = 报告路径；
-- **输出格式**：B/S/N 分级 + 结论 + 已验证清单（附录 D）。
+1. **把审查者契约连进执行者 prompt**（§8.3 的文本原样贴过去——子 agent 读不到这份 skill）；
+2. **验收复核**（§8.2）。
 
-### 8.3 派发 reviewer
+### 8.2 验收复核（不合格就退回，不要自己上手改）
 
 ```bash
-cd <worktree> && wing run --json --tools "Bash,Read,Glob,Grep,Write,Edit" \
+WT=<worktree 绝对路径>; STEP=$WING_HOME/tasks/<task>/<NN>_<step>
+git -C "$WT" status --porcelain      # 干净
+ls "$STEP"/review_r*.md              # 报告在（至少 r1）
+grep -n '^- \[ \]' "$STEP/task.md"   # 空：全部勾完
+```
+
+再确认最后一轮报告的结论是「通过」，并**抽查 1–2 条 B/S 的处理**（报告说修了 ≠ 修了：看 `git log -p` 或对应测试）。任一项不过 → §9.3 用 `-r` 退回；"报告结论是需返修、执行者却没再走一轮"也是退回。
+
+复核通过时顺手把**执行者自派的 reviewer 那几行**补进 `scheduler_log.md`（sid / 角色 / step / 结论，取自它的最终消息；`wing ps --tag task=<task_name>` 可交叉核对）——铁律 10 对自派 session 的登记就落在这里。
+
+### 8.3 审查者契约（执行者派每步 review 用它；整体 review 你派的时候也用这一份）
+
+派发（workspace 用被审 worktree）：
+
+```bash
+cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" \
   --tag reviewer --tag task=<task_name> \
   -p "$(cat <<'EOF'
 <审查者契约 + 审查要求文件绝对路径>
@@ -340,13 +380,17 @@ EOF
 )"
 ```
 
-审查者契约（内联）：
+（`--no-notify`：reviewer 的收口不需要叫醒任何人——派发方自己会 `wing wait` 它。）
+
+契约文本（内联）：
 
 ```
 【角色】你是独立审查者（reviewer）。你的立场与执行者相反：默认它做得不对，用证据说话。没有人类在线，不要提问。
-【审查对象】worktree：<绝对路径>；范围：<base_sha>..HEAD；本步骤文件清单：<...>
-【审查要求】先读 <.../<NN>_<step>/review_request.md>（含验收标准与上下文）
-【必读】① 总任务书 <...> ② 步骤任务书 <...> ③ design.md <...> ④ task.md <...>
+【审查对象】worktree：<绝对路径>；范围：<base_sha>..HEAD；文件清单：<...>
+【审查要求】先读 <review_request.md 绝对路径>（含验收标准与上下文）
+【必读】<按 review 类型填一处，删掉另一处>
+  · 每步 review：① 总任务书 <...> ② 步骤任务书 <...> ③ design.md <...> ④ task.md <...>
+  · 整体 review：① 总任务书 <...> ② 各 step 的 proposal 清单 <...> ③ 各 step 的 review 报告清单 <...>
 
 【你要做的】
 1. 读 commit（`git log -p <base>..HEAD`、`git show`）与相关代码，判断是否正确、完整、符合验收标准。
@@ -358,23 +402,28 @@ EOF
 【红线】
 - 不得修改 worktree 里任何文件（不许"顺手修一下"，不许留调试文件；测试产生的临时文件必须清掉）。
 - 不得 git commit / checkout / stash 等任何写操作。
-- 唯一允许的写入：把报告写到 <.../<NN>_<step>/review_r1.md>（任务目录内绝对路径；用 Write 起草、用 Edit 增量追加/修订）。Write 与 Edit 除了这个报告文件之外没有任何合法用途——不允许对 worktree、代码、任务目录里其它文件做任何修改。
+- 唯一允许的写入：把报告写到 <报告绝对路径>（每步 review = `<step_dir>/review_r<N>.md`；整体 review = `<task_dir>/review_overall_r<N>.md`；用 Write 起草、用 Edit 增量追加/修订）。Write 与 Edit 除了这个报告文件之外没有任何合法用途——不允许对 worktree、代码、任务目录里其它文件做任何修改。
+- **不得再派发任何子 agent**：审查不能外包（不许用 `wing run` / `wing -p` 找别人来看）。审查是你一个人的活。
 - 跑测试可以；长驻服务、会改数据库 / 远端状态、要下载大依赖的命令不要跑；跑完确保 `git status` 干净。
 ```
 
-### 8.4 审查结束后你必须核对
+`review_request.md`（执行者写，模板见附录 C）必须包含：**审查范围**（worktree 绝对路径 + `<base_sha>..HEAD` + 本步骤拥有的文件清单 + 是否含未提交改动）、**验收标准**（从步骤 proposal 的 Verification 抄，reviewer 照此复现）、**上下文**（任务书 / design / task 的绝对路径 + 执行者的最终总结）、**审查重点**（边界、兼容、并发、安全、性能、测试充分性）、**纪律 + 输出格式**（附录 D 的 B/S/N + 结论 + 已验证清单）。
+
+### 8.4 审查结束后核对
 
 ```bash
 git -C <worktree> status --porcelain    # 必须干净：reviewer 没碰过工作区
 ```
 
-不干净 → 审查视为无效：`git checkout -- <paths>` 恢复（或 `git stash`），记一笔，必要时换个 reviewer 重审。
+不干净 → 该轮审查视为无效：`git checkout -- <paths>` 恢复（或 `git stash`），记一笔，必要时换个 reviewer 重审。
 
 ### 8.5 读报告并分类
 
-`Read <step_dir>/review_r<N>.md`，把 B/S/N 摘进 `scheduler_log.md`（含编号与结论），据此决定返修范围（§9）。
+`Read <step_dir>/review_r<N>.md`，把 B/S/N 摘进 `scheduler_log.md`（编号 + 结论 + 是否已处理）。每步的报告在验收复核时读；整体 review 的报告按 §9 走返修。
 
 ## 9. 阶段 6 — 返修闭环
+
+**每步的 review 返修在执行者手里**（它自己读报告、自己修、最多 3 轮）；你的返修派发发生在两处：**验收复核不通过**（§8.2）与**整体 review 有 B/S**（§10.3）。
 
 ### 9.1 红线
 
@@ -388,7 +437,7 @@ git -C <worktree> status --porcelain    # 必须干净：reviewer 没碰过工�
 ```bash
 cd <worktree> && wing run --json -r <原 executor sid> \
   -p "$(cat <<'EOF'
-【返修任务】审查报告在 <.../<NN>_<step>/review_r1.md>。请：
+【返修任务】审查报告在 <报告绝对路径>。请：
 1. 逐条处理其中的 [B*] 与 [S*]：修复并说明每条的修复方式；确实不该改的，给出理由与证据（不许沉默跳过）。
 2. [N*] 由你判断是否顺手修复。
 3. 重新跑通 <验证命令>，并跑一遍受影响的回归。
@@ -401,8 +450,9 @@ EOF
 ```
 
 - 返修**必须用 `-r` 原 session**（它知道自己改过什么；新 session 会丢掉全部实现上下文。只在原上下文彻底跑偏时才开新 session，并在 log 里写明理由）；
-- `-r` 会忽略 `--tools` / `-m`（工具集与模型沿用原 session），不要重复传；
-- 复审新写 `review_r2.md`，**不要覆盖 r1**（审查链是交付证据）。
+- `-r` 会忽略 `--tools` / `-m` / `--agent`（工具集、模型与模板沿用原 session；要换模板用 `wing update <sid> --agent <name>`），不要重复传；
+- 复审新写 `review_r2.md`，**不要覆盖 r1**（审查链是交付证据）；
+- 整体 review 的 B/S 若跨多个 step：挑**一个**最相关的 executor 用 `-r` 修（它带着实现上下文），不要让两个 executor 同时改同一批文件（铁律 2）。
 
 ### 9.3 交付不达标（未 commit / 未勾选 / 跑不起来）的处理
 
@@ -440,7 +490,17 @@ cd "$REPO" && <proposal 里写的构建 / 测试 / 验证命令>
 
 任何一条不过 → 回 §9 修（对应 lane 的 executor 用 `-r`），**不要带病交付**。
 
-### 10.3 push 与 PR（按阶段 1 与用户约定的终态）
+### 10.3 整体 review（收口前最后一道审查）
+
+每步的 review 只看自己那一步——它会漏掉**跨 step** 的问题。所以全部合进集成分支、全量验收通过之后，**你再派一轮 reviewer** 看整体：
+
+- **审查对象**：集成分支上的整体 diff（`<base_sha>..HEAD`，跨全部 lane）+ 集成后的全量验证；
+- **看什么**（写进 review_request.md）：跨 step 的一致性（同一件事是否两套实现 / 两个名字）、重复实现、文档与代码是否自相矛盾、接口接缝处（上游产物被下游误用）、集成面的回归（全量测试 / 构建）、以及任务书 Out of Scope 是否被越界；
+- **派发**：用 §8.3 的同一份审查者契约（`--tools "Bash,Read,Glob,Grep,Write,Edit"`、`--tag reviewer --tag task=<task_name>`），报告写 `$WING_HOME/tasks/<task>/review_overall_r<N>.md`；`wing wait` 照 §7.1 放大 timeout；
+- **处理**：B/S 一律派执行者用 `-r` 修（§9.2，挑最相关的那个），修完复审写 `review_overall_r2.md`；N 自行取舍；
+- 这一轮同样是**最多 3 轮**，超限就把阻塞点写进 summary 报给用户。
+
+### 10.4 push 与 PR（按阶段 1 与用户约定的终态）
 
 - 约定是「本地分支就绪」→ 到此为止，把分支名、commit 清单、验证方式写进 summary；
 - 约定是「push + PR」→ 由你执行：
@@ -472,26 +532,38 @@ git push -u origin <task>/integration
 
 ## 12. 命令速查
 
+命令全集、分组表与编排脚本见 [wing-cli](../wing-cli/SKILL.md)；下表只列调度循环里常用的那些。
+
 | 目的 | 命令 | 备注 |
 |---|---|---|
 | 网关状态 | `wing status` / `wing start` | `wing run` 会自动拉起网关 |
-| 派发（非阻塞） | `wing run --json --tools "..." -p "$(...)"` | **必须先 `cd <worktree>`** |
-| 续跑同一 session | `wing run -r <sid> -p "..."` | 忽略 `--tools` / `-m` |
-| 等待（阻塞） | `wing wait <sid...> --timeout 1800 --json` | Bash 工具 timeout 要更大 |
-| 会话列表 | `wing ps --json` | 默认过滤 `inactive`（被 pin 的除外） |
+| 派发（非阻塞） | `wing run --json --tools "..." --tag executor --tag task=<task> -p "$(...)"` | **必须先 `cd <worktree>`**；默认登记「收口/提问 → 唤醒我」 |
+| 派发时关掉 / 改投唤醒 | `wing run --no-notify` / `--notify-to <sid>` / `--notify-on done,ask` | 目标是 `WING_SESSION_ID`；不在 agent shell 里则静默 off |
+| 续跑同一 session | `wing run -r <sid> -p "..."` | 忽略 `--tools` / `-m` / `--agent` |
+| 等待（阻塞，显式选择） | `wing wait <sid...> --timeout 3600 --json` | Bash 工具 timeout 要更大（≥3700） |
+| 订阅收口 / 提问（显式补登） | `wing watch <sid> [--times N] [--on done,ask]` | 默认配额 1（叫一次就结束）；`ask` 不消耗配额；重复登记 = 刷新同一条订阅（不新增） |
+| 看待唤醒 / 取消 | `wing watch --list [--all]` / `wing watch --cancel <id>` | 列出 / 取消**全部**触发器（`KIND` 列区分 session / timer；`wing wake --list/--cancel` 完全等价） |
+| 定时自唤醒（心跳） | `wing wake --in 30m -p "..."` / `--every 30m` / `--daily 07:00 --times 7` | 改时间/改 prompt = 取消旧的再建一条 |
+| 克隆自己（继承上下文） | `wing fork $WING_SESSION_ID --at current --json` → `wing run -r <克隆 sid> -p "..."` | `wing branches <sid>` 挑节点；克隆是独立会话、更贵 |
+| 回答在挂的 Ask | `wing asks <sid> --wait 600 --json` → `wing run -r <sid> --tool-call-id <id> -p "<answer>"` | 在挂 Ask 的 tool_call 不在链上，`tail` 看不到 |
+| 会话列表 | `wing ps --json` | 默认过滤 `inactive`（被 pin 的除外）；`--tree` 看血缘树 |
 | 打标 / 读标 / 清标 | `wing tag <sid> scheduler task=<task>` / `wing tag <sid> --remove <tag>` / `wing tag <sid>` | 幂等；不唤醒逐出会话；`--json` 可解析 |
 | 标签清点 | `wing tag --list` | 全局标签 + 计数（含 inactive） |
 | 按标签找会话 | `wing ps --tag <tag> [--tag <tag2>]` | 多个 `--tag` 为 AND；隐含包含 `inactive` |
+| 按血缘找会话 | `wing ps --parent <sid>` | 直接子；隐含 `--all` |
 | 自己的 session id | `echo $WING_SESSION_ID` | Bash 工具注入的环境变量 = 当前会话 id |
 | 单会话状态 | `wing info <sid> --json` | status / workdir / tools / tokens |
 | 看消息 | `wing tail <sid> -n 20 -t <type>` | type: all / user / assistant / tool_call / tool_result / reasoning / content |
 | 看开头 | `wing head <sid> -n 5 -t user` | 复核你派发时给的 prompt |
-| 中断卡死会话 | `curl -s -X POST http://127.0.0.1:32523/api/session/interrupt -H 'Content-Type: application/json' -d '{"session_id":"<sid>"}'` | 返回 `{"ok":true}`；会话回 idle |
+| 中断卡死会话 | `wing interrupt <sid>`（别名 `wing int`） | 会话回 idle；半成品保留在上下文里 |
+| 缓存账本（查为什么没命中） | `wing cache <sid>` | 分叉归因 / 可避免性 |
+| 回收内存 / 归档 | `wing release <sid...>` / `wing archive <sid...>` | 忙碌会话 409；归档是纯移动 |
 | 模型 / 工具 / 模板 | `wing models` / `wing tools` / `wing agents` | 排查工具名写错 |
+| 配置 | `wing config get/set/list/doctor` | 网关降级（setup mode）时也能用 |
 
 ## 13. 陷阱与反模式
 
-1. **Bash timeout 忘了放大** → `wing wait` 被 30s 默认超时杀掉。会话没事，重新 wait 即可，但白费一轮。
+1. **Bash timeout 忘了放大** → `wing wait` 被 30s 默认超时杀掉。会话没事，重新 wait 即可，但白费一轮。自派 review 之后单步 30–40 分钟是常态，`--timeout 3600` + Bash timeout 3700 起步。
 2. **忘了 `cd` 到 worktree** → 子 agent 在错误目录里改代码。用 `wing info <sid>` 的 `workdir` 兜底核对。
 3. **同一 worktree 派两个 executor** → 互相覆盖、git index 冲突、review 范围不可分。并行必须多 worktree。
 4. **把设计写死** → 步骤 proposal 里写"怎么做"，executor 就只会照抄、遇到现实立刻卡住。proposal 管「做什么 / 怎么算完成」，design 管「怎么做」。
@@ -504,8 +576,9 @@ git push -u origin <task>/integration
 11. **让 executor push** → 明确禁止；push / 建 PR 是 scheduler 的专属权限。
 12. **任务文档写进 worktree** → 污染 diff 与 review 范围。任务目录永远在 `$WING_HOME/tasks/`。
 13. **设 `--max-turns`** → 任务中途夭折。不设。
-14. **用 sleep 轮询代替 `wing wait`** → 又慢又费 token；wait 是幂等的，直接 wait。
+14. **用 sleep 轮询代替 `wing wait` / 唤醒** → 又慢又费 token；要等就 `wing wait`（幂等），不想等就用 `wing watch` / `wing run` 的 notify，让会话自己被叫醒。
 15. **交付前不查 `git status`** → 临时脚本、调试文件混进交付物。
+16. **让子 agent 再派子 agent（外包）** → 执行者只剩一轮 review 的派发权，reviewer 一次都没有：审查不能外包，活也不能外包。契约里写死，验收时看 `wing ps --parent <sid>` 有没有多出来的孙会话。
 
 ## 14. 附录（模板）
 
@@ -572,7 +645,7 @@ git push -u origin <task>/integration
 （期望交付物：改动文件、commit、task.md 全勾、最终消息要点）
 ```
 
-### 附录 C — `review_request.md`（审查要求）
+### 附录 C — `review_request.md`（审查要求，执行者写）
 
 ```markdown
 # <NN> <step_name> — 审查要求（第 <N> 轮）
@@ -685,22 +758,23 @@ git push -u origin <task>/integration
 - 任务目录：`$WING_HOME/tasks/<task_name>/`
 - 仓库：`<repo 绝对路径>`；基线分支：`<base>`；基线 commit：`<sha>`
 - lane 规划：L1 = `<worktree 绝对路径>`（分支 `<task>/l1`，base `<sha>`）；L2 = …
-- 并发上限：3（executor + reviewer）
+- 并发策略：按任务与资源自定（不设固定上限；当前在飞：…）
 - 交付终态：<与用户约定>
 
 ## Session 台账
 | sid | 角色 | step | lane | 派发时间 | 状态 | 结论 / 备注 |
 |---|---|---|---|---|---|---|
-| 2026… | executor | 01_xxx | l1 | 09-17 15:02 | idle | 交付 3 commit，见 review_r1 |
+| 2026… | executor | 01_xxx | l1 | 09-17 15:02 | idle | 交付 3 commit + 自派 review（review_r1/r2） |
+| 2026… | reviewer（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，B2/S1 已修，见 review_r2.md |
 
 ## 时间线
 | 时间 | 事件 | 对象 | 详情 |
 |---|---|---|---|
 | 09-17 15:02 | dispatch | 01_xxx / l1 | sid=2026…；prompt 摘要：… |
-| 09-17 15:41 | wait | 01_xxx / l1 | status=idle，commit `abc1234` |
-| 09-17 15:45 | review | 01_xxx r1 | sid=2026…；结论：需返修（B1、S2） |
-| 09-17 16:10 | fix | 01_xxx r1 | sid=2026…（resume）；B1/S2 已修，commit `def5678` |
+| 09-17 16:12 | wake | 01_xxx / l1 | 收到 [wing] finished（subtype=success，41 轮，3900s） |
+| 09-17 16:15 | accept | 01_xxx / l1 | 交付复核通过；自派 review 结论=通过（r2，B2/S1 已修） |
 | 09-17 16:20 | merge | L1 → integration | `merge: <task> l1` |
+| 09-17 17:02 | review | overall r1 | sid=2026…；结论：需返修（S2） |
 
 ## 决策记录
 - （为什么这么拆、为什么串行 / 并行、为什么不修某个 S、为什么开新 session…）
