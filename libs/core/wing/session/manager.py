@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
+from wing.context.cache_store import CacheStore
 from wing.common.logger import log, log_excerpt
 from wing.common.utils import (
     InvalidInputError,
@@ -548,6 +549,13 @@ class SessionManager:
         # 会话尚未注册、磁盘零痕迹）
         if tags:
             session.apply_tag_ops(add=tags)
+
+        # 同一个 id 的**上一个化身**在库里可能还有缓存账本行（会话目录被手工删掉后
+        # 重建 / memory 后端重启后用同一 id 重建）。旧实现把账本放在会话目录里，目录
+        # 没了账本就没了；账本搬进进程级库之后要在这一步显式做同一件事，否则新会话的
+        # 第一轮会被旧窗口判成 prefix_broken / hit。收养路径在上面早退，不会清掉
+        # 活会话的账本。
+        CacheStore(sid).clear()
 
         self._register(session)
 

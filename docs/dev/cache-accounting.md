@@ -61,7 +61,10 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 - **探针不可关**：`WingAgent.request_options()` 无条件挂一个 `CacheProbe()`。传 `None` 的
   调用点（不观察的路径）让 provider 一个段都不算——请求体因此逐字节不变。
 
-指纹 `fp = sha256("|".join(f"{label}:{sha}"))[:16]`，只用于去重存储，不参与判定。
+指纹 `fp = sha256("|".join(f"{label}:{sha}"))[:16]`：段列表相同 ⇒ 指纹相同。两处用途——
+段落表按它去重（同一份段列表在一个会话里只存一遍），以及找参照调用时判「这条历史调用的
+段列表是不是本次的前缀」（它的指纹等于本次前 n 段的指纹；64-bit 截断，几条到几百条候选
+之间碰撞的概率可忽略）。它不参与 verdict 的任何算术。
 
 ### 账本
 
@@ -126,9 +129,12 @@ provider_debt_rate = Σ max(0, expected - cached)
 
 ### 参照调用怎么找
 
-倒序扫描账本，取最近一条满足「段列表是本次的**严格前缀**、且 `prompt > 0`」的调用；段列表
-与本次完全相同（重试 / 重放）也认作参照。找不到 → 无参照（`cold` / `prefix_broken`）。
-参照与本调用时间差 > 72 小时（`CACHE_TTL_HOURS`，模块常量）→ `cold_expired`。
+倒序扫描本会话的调用行（新→旧），取最近一条满足「段列表是本次的**严格前缀**、且
+`prompt > 0`」的调用；段列表与本次完全相同（重试 / 重放）也认作参照。判「是不是前缀」用
+指纹：候选的段数 `n` 记在 `cache_call.segment_count` 上，`fp == 本次前 n 段的指纹` 即命中
+——不读任何段落表，段数比本次长的候选连指纹都不算。找不到 → 无参照（`cold` /
+`prefix_broken`）。参照与本调用时间差 > 72 小时（`CACHE_TTL_HOURS`，模块常量）→
+`cold_expired`。
 
 ## 2. 判据
 
@@ -199,10 +205,10 @@ provider_debt_rate = Σ max(0, expected - cached)
 | 旧网关 / 未计算 | `llm_call_metrics` 没有 `cache_*` 字段；`cache_verdict` 为空串 | 退回今天的单一命中率（TUI 显示 `67% cache`，而不是 `67% / 理论 88%`） |
 | 无理论水位 | `cache_expected_tokens` 为 `null` 时**整个键不下发**（wire 出口剥 null） | 读到缺省即「无参照」，不显示理论值（不要当 0%） |
 | 会话还没调用过 / 库里没有行 / 会话不存在 / 会话已归档 | 端点 200 + 空 `forks` / `calls` + `summary` 计数 0、三 rate `null` | 显示「还没数据」（`—`），**不要**显示 0%，也不要当错误处理 |
-| 账本行读不出来（库打不开 / 降级） | 当空账本 + WARNING（`grep 'cache ledger' <wing_*.log>`） | 不用管；库恢复后下一次调用会重建 |
+| 库打不开 / 降级（`ready=False`） | 查询返回空列表 → 端点 200 + 空账本；日志里是打开失败那一条 ERROR（`grep 'wing.db' <wing_*.log>`） | 不用管；库恢复后下一次调用会重建 |
 | 记账没落库（写失败 / 库降级） | 只 WARNING，本轮 LLM 调用照常返回（无 `cache_*` 字段） | 不用管；磁盘 / 权限 / 库文件问题在日志里 |
 | 旧版本写下的 `<session-dir>/cache_ledger.json` | 不再读、也不删（文件留在原地，内容停在升级那一刻） | 想清掉就自己删；它已经与当前账本无关 |
-| `memory` 后端（建会话时 `backend: memory`，不是配置字段） | 账本仍写进程级 `wing.db`（与审计行同口径），只是会话本身不落盘 | 跨重启能读到，别惊讶 |
+| `memory` 后端（建会话时 `backend: memory`，不是配置字段） | 账本行仍写进程级 `wing.db`（与审计行同口径），只是会话本身不落盘；**端点**仍要能解析到会话才读得到（进程重启后 memory 会话不在内存里 → 空报告），直接查库能看到行 | 想跨重启读就用 `sqlite3` 查库，别指望端点 |
 | 端点 404 | 运行中的网关**没有这个路由**（旧二进制 / 另一个 gateway 可执行文件） | 换当前 checkout 的网关；`wing cache` 的 404 只有这一个含义 |
 
 ## 4. 排错手册
@@ -279,5 +285,12 @@ sqlite3 ~/.wing/core/wing.db "SELECT (SELECT COUNT(*) FROM cache_call WHERE sess
 
 整笔改动只观察、不改写请求：回滚 = revert 相关提交。旧的边车文件由旧版本代码读写，
 新版本既不读也不删它（`cache_ledger.json` 与当前账本无关，留着删掉都行）；`history.jsonl`
-一个字节都没动。库里的 `cache_call` / `cache_segment` 两张表不回填旧账本：回滚之后的旧
-代码继续读写自己的 JSON，两份数据互不干扰（也不会互相"对账"）。
+一个字节都没动。库里的 `cache_call` / `cache_segment` 两张表不回填旧账本。
+
+**回退二进制前要处理库文件**：迁移 v3 把 `user_version` 推到 3，而只认识 v2 的旧代码
+遇到「版本比我知道的新」会**整库降级**（`SchemaVersionTooNew` → `ready=False`）——不只是
+缓存账本，审计行与唤醒触发器也会一起变成静默 no-op。所以回退二进制的做法是二选一：
+
+- 先移走 / 删掉 `$WING_HOME/core/wing.db*`（代价：审计与唤醒数据一起丢，两者都是可以
+  重建的旁路事实）；
+- 或者保留新二进制（账本之外的三个功能都不受这次改动影响，没有非回退不可的理由）。

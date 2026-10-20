@@ -483,10 +483,10 @@ class CacheLedger:
         if not segments:
             return None
         try:
-            with self._store.transaction() as live:
-                if not live:
+            with self._store.transaction() as txn:
+                if not txn.live:
                     return None
-                return self._record(
+                observation = self._record(
                     segments,
                     purpose=purpose,
                     model=model,
@@ -495,6 +495,16 @@ class CacheLedger:
                     cached=cached,
                     now=now,
                 )
+            if observation is None:
+                return None
+            if not txn.committed:
+                # 语句都返回成功、事务却回滚了（后面的语句失败 / COMMIT 失败）：
+                # 账本里没有这条记录，就别回一个「有」的归因（contract §5）。
+                log.warning(
+                    f"cache ledger record rolled back (session={self._session_id})"
+                )
+                return None
+            return observation
         except Exception as e:
             log.warning(f"cache ledger record failed (session={self._session_id}): {e}")
             return None

@@ -662,14 +662,14 @@ async def session_cache(
 ) -> SessionCacheResponse:
     """缓存账本报告（contract §6）。
 
-    只读观察面：账本由 LLM 调用路径 best-effort 写入，本端点**不水合**会话（纯解析 +
-    读一份边车 JSON）。会话不存在 / 无账本 → 200 + 空 forks/calls + 全 0 summary
-    （**不 404**——前端与 CLI 都按同一条路径渲染"还没数据"）。鉴权与其他 session
-    端点一致（由 app 级中间件统一处理）。
+    只读观察面：账本由 LLM 调用路径 best-effort 写进进程级 `wing.db`，本端点**不水
+    合**会话（解析一次会话真名 + 按会话键查库）。会话不存在 / 已归档 / 没有行 →
+    200 + 空 forks/calls + 全 0 summary（**不 404**——前端与 CLI 都按同一条路径渲染
+    "还没数据"）。鉴权与其他 session 端点一致（由 app 级中间件统一处理）。
     """
     server = _get_server(request)
-    # 读 + 规整 + 投影（MB 级 JSON 解析）留在循环线程上会让所有会话的流式帧排队——
-    # 与写路径（`observe_cache_call`）同理，整笔工作进线程池。
+    # 读 + 投影（最多几百行调用 + 若干个段落点查）留在循环线程上会让所有会话的流式帧
+    # 排队——与写路径（`observe_cache_call`）同理，整笔工作进线程池。
     return await asyncio.to_thread(
         _cache_report_response, server, session_id, limit=limit
     )

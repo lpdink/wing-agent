@@ -87,7 +87,8 @@ def sha16(obj: Any) -> str:
 def fingerprint(segments: Sequence["CachePart"]) -> str:
     """指纹（契约 §2）：`sha256("|".join(f"{label}:{sha}"))[:16]`。
 
-    段列表相同 ⇒ 指纹相同。指纹只用于去重存储，不参与任何业务判断。
+    段列表相同 ⇒ 指纹相同。用途只有两处：段落表按它去重，以及「这条历史调用的段列表
+    是不是本次的前缀」的判定（它的指纹 == 本次前 n 段的指纹）。不参与任何算术。
     """
     return _sha_of("|".join(f"{segment.label}:{segment.sha}" for segment in segments))
 

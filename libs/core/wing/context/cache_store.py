@@ -26,8 +26,10 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from typing import Any
 
 from wing.db import Database, get_database
+from wing.db.database import Transaction
 from wing.schema import CacheCall, CacheFork, CachePart, CacheSource
 
 _COLUMNS = (
@@ -94,6 +96,9 @@ _DELETE_ORPHAN_SEGMENTS = (
     "AND NOT EXISTS (SELECT 1 FROM cache_call WHERE session_id = ?1 AND fp = ?2)"
 )
 
+_DELETE_CALLS = "DELETE FROM cache_call WHERE session_id = ?"
+_DELETE_SEGMENTS = "DELETE FROM cache_segment WHERE session_id = ?"
+
 
 def _part(row: sqlite3.Row) -> CachePart:
     path = row["src_path"]
@@ -106,34 +111,68 @@ def _part(row: sqlite3.Row) -> CachePart:
 
 
 def _fork(row: sqlite3.Row) -> CacheFork | None:
-    kind = row["fork_kind"]
-    if kind is None:
+    kind, label = row["fork_kind"], row["fork_label"]
+    index, affected = _int(row["fork_index"]), _int(row["fork_segments_affected"])
+    if not isinstance(kind, str) or not isinstance(label, str):
+        return None
+    if index is None or affected is None:
         return None
     return CacheFork(
         kind=kind,
-        index=row["fork_index"],
-        label=row["fork_label"],
-        segments_affected=row["fork_segments_affected"],
-        tokens_lost=row["fork_tokens_lost"],
+        index=index,
+        label=label,
+        segments_affected=affected,
+        tokens_lost=_int(row["fork_tokens_lost"]),
     )
 
 
-def _call(row: sqlite3.Row) -> CacheCall:
+def _is_int(value: Any) -> bool:
+    """真整数才算计数：`bool` 是 `int` 的子类，不该被当成 1。"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _int(value: Any) -> int | None:
+    return value if _is_int(value) else None
+
+
+def _call(row: sqlite3.Row) -> CacheCall | None:
+    """一行 → 领域事实；字段类型错位的行返回 None（= 丢弃）。
+
+    SQLite 是**弱类型**：INTEGER 列里可以是 TEXT（外部写入 / 手工 sqlite3 / 未来版本
+    改过列）。类型错位的行若被当成正常事实，一次减法就能让端点 500，或者让参照比较
+    永远抛错、把这个会话的记账永久卡死。口径与旧实现逐字段归一同一套：坏行丢弃，
+    不升级成整份失败。
+    """
+    ts, fp, verdict = row["ts"], row["fp"], row["verdict"]
+    prompt, cached = _int(row["prompt"]), _int(row["cached"])
+    if (
+        not isinstance(ts, str)
+        or not isinstance(fp, str)
+        or not isinstance(verdict, str)
+        or prompt is None
+        or cached is None
+    ):
+        return None
+    segment_count = _int(row["segment_count"])
     return CacheCall(
-        ts=row["ts"],
-        fp=row["fp"],
-        purpose=row["purpose"],
-        model=row["model"],
-        provider=row["provider"],
-        prompt=row["prompt"],
-        cached=row["cached"],
-        verdict=row["verdict"],
-        segment_count=row["segment_count"],
-        ts_ms=row["ts_ms"],
-        expected=row["expected"],
-        ref_fp=row["ref_fp"],
+        ts=ts,
+        fp=fp,
+        purpose=_text(row["purpose"]),
+        model=_text(row["model"]),
+        provider=_text(row["provider"]),
+        prompt=prompt,
+        cached=cached,
+        verdict=verdict,
+        segment_count=segment_count if segment_count is not None else 0,
+        ts_ms=_int(row["ts_ms"]),
+        expected=_int(row["expected"]),
+        ref_fp=row["ref_fp"] if isinstance(row["ref_fp"], str) else None,
         fork=_fork(row),
     )
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
 
 
 class CacheStore:
@@ -141,13 +180,16 @@ class CacheStore:
 
     def __init__(self, session_id: str, database: Database | None = None) -> None:
         self._session_id = session_id
-        self._database = database
+        # 连接在构造时**钉住**：一条账本操作（尤其是一笔事务）必须始终落在同一条连接
+        # 上。每次现取 `get_database()` 的话，一次 `close_database()`（测试隔离 /
+        # 进程收尾）会把后半段语句甩到另一条新连接上，事务直接裂开。
+        self._database = database if database is not None else get_database()
 
     def database(self) -> Database:
-        """进程级库单例（`database` 参数只给测试 / 显式装配用）。"""
-        return self._database if self._database is not None else get_database()
+        """本账本句柄钉住的那条连接（`database` 参数只给测试 / 显式装配用）。"""
+        return self._database
 
-    def transaction(self) -> AbstractContextManager[bool]:
+    def transaction(self) -> AbstractContextManager[Transaction]:
         """把一次「读—改—写」放进同一个 `BEGIN IMMEDIATE`（见 `Database.transaction`）。"""
         return self.database().transaction()
 
@@ -161,7 +203,7 @@ class CacheStore:
         所以「整份读」在这个设计里最多几百行小表数据。
         """
         rows = self.database().query(_RECENT, (self._session_id, limit))
-        return [_call(row) for row in rows]
+        return [call for call in map(_call, rows) if call is not None]
 
     def segment_at(self, fp: str | None, index: int) -> CachePart | None:
         """某个指纹的第 `index` 段（越界 / 指纹不存在 → None）。
@@ -176,14 +218,14 @@ class CacheStore:
     def segments(self, fp: str) -> list[CachePart]:
         """整份段列表（按段序）。只在算「与上一次调用的最长公共前缀」时才需要。"""
         rows = self.database().query(_SEGMENTS, (self._session_id, fp))
-        return [_part(row) for row in rows]
+        return [part for part in map(_part, rows) if part is not None]
 
     def char_sums(self, fp: str, index: int) -> tuple[int, int]:
         """（段列表总字符数，前 `index` 段的字符数）——`tokens_lost` 的估算依据。"""
         rows = self.database().query(_CHAR_SUMS, (index, self._session_id, fp))
         if not rows:
             return 0, 0
-        return int(rows[0]["total"]), int(rows[0]["before"])
+        return int(_int(rows[0]["total"]) or 0), int(_int(rows[0]["before"]) or 0)
 
     # ── 写 ───────────────────────────────────────
 
@@ -239,23 +281,46 @@ class CacheStore:
     def trim(self, keep: int) -> bool:
         """环形上界：只留本会话最新的 `keep` 条调用，并回收失去引用的段落行。
 
-        批量淘汰一次做完（一条 DELETE），不逐条：淘汰与回收都在**同一个事务**里，
-        中途崩掉不会留下「调用没了、段落还在」的状态（反过来：段落比调用多活一会儿
-        也无害——下次裁剪会再收一次）。
+        淘汰与回收整体是一笔事务（嵌套进 `record` 的外层事务）：中途失败不会留下
+        「调用没了、段落还在」的状态，也不会只删了一半段落行——丢一个孤儿的回收机会
+        就没法再收集它了（下次裁剪按「即将消失的调用的 fp」算 victims，那些行已经不在
+        调用表里）。
 
         Returns:
-            写是否真的落库（`Database.execute` 的返回值）。没有需要淘汰的调用时也返回
-            ``True``：那不是失败。
+            本方法发出的语句是否都成功。没有需要淘汰的调用时也返回 ``True``：那不是
+            失败。（是否**提交**由最外层事务说了算——嵌套时句柄还不是最终结果。）
         """
-        victims = [
-            row["fp"]
-            for row in self.database().query(_RING_VICTIMS, (self._session_id, keep))
-        ]
-        if not victims:
-            return True
-        if not self.database().execute(_DELETE_RING, (self._session_id, keep)):
-            return False
-        for fp in victims:
-            # `?1` / `?2` 复用：显式编号的占位符只按最大序号取参数
-            self.database().execute(_DELETE_ORPHAN_SEGMENTS, (self._session_id, fp))
+        with self.transaction() as txn:
+            if not txn.live:
+                return False
+            victims = [
+                row["fp"]
+                for row in self.database().query(
+                    _RING_VICTIMS, (self._session_id, keep)
+                )
+            ]
+            if victims:
+                ok = self.database().execute(_DELETE_RING, (self._session_id, keep))
+                for fp in victims:
+                    # `?1` / `?2` 复用：显式编号的占位符只按最大序号取参数
+                    ok = (
+                        self.database().execute(
+                            _DELETE_ORPHAN_SEGMENTS, (self._session_id, fp)
+                        )
+                        and ok
+                    )
+                return ok
         return True
+
+    def clear(self) -> bool:
+        """删掉本会话在库里的全部行（同一个 id 被新会话接管时用）。
+
+        Returns:
+            写是否真的落库（库降级 / 回滚 → ``False``，但调用方不必为此报错）。
+        """
+        with self.transaction() as txn:
+            if not txn.live:
+                return False
+            ok = self.database().execute(_DELETE_CALLS, (self._session_id,))
+            ok = self.database().execute(_DELETE_SEGMENTS, (self._session_id,)) and ok
+        return ok and txn.committed

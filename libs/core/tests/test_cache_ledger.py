@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -974,6 +975,21 @@ class _ExplodingDatabase:
         return _degraded()
 
 
+class _FailingDelete:
+    """`DELETE FROM cache_segment` 抛 IO 错的连接代理（模拟磁盘满）。"""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if sql.lstrip().startswith("DELETE FROM cache_segment"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+
 class TestBestEffort:
     def test_write_failure_returns_none_and_warns(self):
         ledger = CacheLedger("boom", database=_ExplodingDatabase())  # ty: ignore[invalid-argument-type]
@@ -1010,6 +1026,51 @@ class TestBestEffort:
             )
         assert any("cache ledger record lost" in message for message in wing_warnings)
         assert recorded_calls("rejected") == []
+
+    def test_a_rolled_back_record_never_returns_an_observation(
+        self, wing_warnings: list[str]
+    ):
+        """语句都返回了、事务最后回滚 → 不得回一个「账本里有」的归因。
+
+        构造的是「环形裁剪的孤儿回收失败」：它在一次记录的最后一笔写，插入与段落表
+        都已经成功——只看那两条的返回值会以为记上了。归因若照旧返回，直播字段就会
+        展示一条库里根本不存在的记录（contract §5 要求账本与直播同源）。
+        """
+        database = get_database()
+        ledger = CacheLedger("rolled-back")
+        for index in range(MAX_CALLS):
+            assert (
+                ledger.record(
+                    parts("system:base", f"history:{index}:user"),
+                    purpose="main",
+                    model="m",
+                    provider="p",
+                    prompt=100 + index,
+                    cached=0,
+                )
+                is not None
+            )
+        # 第 201 条触发环形裁剪：让孤儿段落的 DELETE 抛 IO 错（磁盘满的样子）
+        conn = database._conn
+        assert conn is not None
+        database._conn = _FailingDelete(conn)  # ty: ignore[invalid-assignment]
+        try:
+            observation = ledger.record(
+                parts("system:base", f"history:{MAX_CALLS}:user"),
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=100 + MAX_CALLS,
+                cached=0,
+            )
+        finally:
+            database._conn = conn
+        assert observation is None, "回滚的那次记录不许返回归因"
+        assert any("cache ledger record lost" in m for m in wing_warnings)
+        # 事务整体回滚：既没有多出一行，也没有把本该被裁掉的调用删掉
+        stored = recorded_calls("rolled-back")
+        assert len(stored) == MAX_CALLS
+        assert stored[0]["prompt"] == 100 + MAX_CALLS - 1
 
     @pytest.mark.asyncio
     async def test_llm_call_survives_ledger_failure(self, tmp_path: Path):
@@ -1062,6 +1123,83 @@ class TestBestEffort:
             event_bus._routing.clear()
 
 
+class TestWeakTyping:
+    """SQLite 是弱类型：INTEGER 列里可以是 TEXT（外部写入 / 手工 sqlite3）。
+
+    旧实现有 `normalize_ledger` 逐字段归一；换成表之后这份防线要落在读行这一层，
+    否则一条类型错位的行就能让端点 500，或者把这个会话的记账永久卡死。
+    """
+
+    def _insert_bad_row(
+        self, session_id: str, column: str, value: Any, **overrides: Any
+    ) -> None:
+        row = {
+            "session_id": session_id,
+            "ts": "2026-10-18T15:41:02.123",
+            "ts_ms": 1,
+            "fp": "bad",
+            "purpose": "main",
+            "model": "m",
+            "provider": "p",
+            "prompt": 100,
+            "cached": 0,
+            "expected": None,
+            "ref_fp": None,
+            "verdict": "cold",
+            "segment_count": 1,
+        }
+        row.update(overrides)
+        row[column] = value  # 坏值最后写：overrides 不该盖掉它
+        assert get_database().execute(
+            f"INSERT INTO cache_call ({', '.join(row)}) "
+            f"VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+
+    def test_text_in_an_integer_column_does_not_break_the_report(self):
+        """`expected` 是 TEXT → 当「没有理论水位」收下，不参与汇总里的减法。"""
+        self._insert_bad_row("weak-report", "expected", "abc")
+        report = CacheLedger("weak-report").report()
+        assert [call["expected"] for call in report["calls"]] == [None]
+        assert report["summary"]["calls"] == 1
+        assert report["summary"]["expected_tokens"] == 0
+        assert report["summary"]["provider_debt_rate"] == 0.0
+
+    def test_text_in_an_integer_column_does_not_wedge_recording(self):
+        """坏行留在窗口里也不能让后续记账永久失败（参照比较会拿它的段数）。"""
+        self._insert_bad_row("weak-record", "segment_count", "abc")
+        ledger = CacheLedger("weak-record")
+        for index in range(3):
+            observation = ledger.record(
+                parts("system:base", f"history:{index}:user"),
+                purpose="main",
+                model="m",
+                provider="p",
+                prompt=100 + index,
+                cached=0,
+            )
+            assert observation is not None, f"第 {index} 轮被坏行卡住了"
+        # 坏行仍是「一行调用」（它的段数按 0 处理、不参与前缀比较），三笔新记录照常落库
+        assert len(ledger.report()["calls"]) == 4
+
+    def test_a_non_integer_fork_index_is_dropped_not_fatal(self):
+        """分叉位点不是整数 → 当成「没有分叉」，但这一行调用仍然算数。
+
+        （TEXT 列有 TEXT 亲和性，写进去的整数会被转成字符串，所以这里能构造出
+        类型错位的只有 INTEGER 亲和性的列。）
+        """
+        fork = {
+            "fork_kind": "modify",
+            "fork_index": 1,
+            "fork_label": "rules:/r.md",
+            "fork_segments_affected": 2,
+        }
+        self._insert_bad_row("weak-fork", "fork_index", "abc", **fork)
+        report = CacheLedger("weak-fork").report()
+        assert report["forks"] == []
+        assert len(report["calls"]) == 1
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. 会话后端不再影响账本：写入的是进程级库，与会话日志解耦
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1103,6 +1241,20 @@ class TestStorageIsDecoupledFromTheSessionLog:
         )
         assert observation is not None and observation.verdict == "cold"
         assert ledger.report()["calls"][0]["verdict"] == "cold"
+
+    def test_a_ledger_handle_keeps_its_connection(self):
+        """一条账本操作只认一条连接：单例被换掉（测试隔离 / 收尾）也不换连接。"""
+        from wing.context.cache_store import CacheStore
+        from wing.db import get_database, reset_database
+
+        store = CacheStore("pinned")
+        database = store.database()
+        assert database is get_database()
+        reset_database()
+        try:
+            assert store.database() is database, "中途换连接会把事务劈成两半"
+        finally:
+            reset_database()
 
     def test_concurrent_records_do_not_lose_rows(self):
         """多线程同刻记账（主调用 + 后台增量压缩在真并行）：一行都不丢。"""
@@ -1355,6 +1507,49 @@ class TestCacheEndpoint:
         assert archived["archived"] is True, archived
         body = client.get(f"/api/session/cache?session_id={session_id}").json()
         assert body["calls"] == [] and body["summary"]["calls"] == 0
+
+    def test_a_recreated_session_starts_from_an_empty_ledger(self, real_client):
+        """同一个 id 被新会话接管（目录被手工删掉后重建）→ 账本从空开始。
+
+        账本搬进进程级库之后，"会话目录没了账本就没了" 不再自动成立：不清一次的话，
+        新会话的第一轮会拿旧化身的窗口当参照（判成 prefix_broken / hit）。
+        """
+        import shutil
+
+        client, sessions_root = real_client
+        session_id = "cache-reuse"
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        self._seed_ledger(session_id)
+        assert (
+            client.get(f"/api/session/cache?session_id={session_id}").json()["summary"][
+                "calls"
+            ]
+            == 2
+        )
+
+        # 模拟"手工删掉会话目录"：目录没了、内存里也没了这个会话
+        assert (
+            client.post(
+                "/api/session/release", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        shutil.rmtree(sessions_root / session_id)
+
+        assert (
+            client.post(
+                "/api/session/create", json={"session_id": session_id}
+            ).status_code
+            == 200
+        )
+        body = client.get(f"/api/session/cache?session_id={session_id}").json()
+        assert body["calls"] == [], f"新化身的账本必须从空开始: {body['calls']}"
+        assert body["summary"]["calls"] == 0
 
     def test_report_echoes_the_requested_id(self, real_client):
         """回显请求里的 id（别名归一不改对外读到的键）。"""

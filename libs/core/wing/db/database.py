@@ -19,6 +19,10 @@
 ``last_insert_rowid()`` 这类「写入 + 读回」必须走 :meth:`Database.insert`，多条语句的
 原子性走 :meth:`Database.transaction`。
 
+代价要记住：写是**同步**的，持锁期间别的线程（包括事件循环线程上的审计写入）会等。
+单条语句微秒级；事务块的时长由调用方负责（账本一次记录是一小串读写 + 一次提交），
+所以调用方只在必要处开事务，且不在事务里做慢操作。
+
 写入一律同步 + 自动提交（``isolation_level=None``），单条 INSERT 微秒级，不引入写
 线程、不做批处理。
 """
@@ -51,6 +55,21 @@ _BUSY_TIMEOUT_MS = 5000
 
 class SchemaVersionTooNew(RuntimeError):
     """磁盘上的 ``user_version`` 高于本代码认识的版本——不猜、不降级写。"""
+
+
+class Transaction:
+    """一次事务的句柄（:meth:`Database.transaction` 的产物）。
+
+    ``live``：事务真的开着（``False`` = 库降级 / 开不了事务，块内不必再发语句）。
+    ``committed``：块退出后为 ``True`` 才算落库——块内任一条语句失败、或 ``COMMIT``
+    本身失败都会回滚。嵌套块拿到的是同一个句柄，提交结果因此只由最外层决定。
+    """
+
+    __slots__ = ("live", "committed")
+
+    def __init__(self, *, live: bool) -> None:
+        self.live = live
+        self.committed = False
 
 
 def _user_version(conn: sqlite3.Connection) -> int:
@@ -95,7 +114,7 @@ class Database:
         # 跨线程共享单连接（见模块文档）：所有入口都在这把可重入锁内。可重入是必须的
         # ——`transaction()` 持锁跑完整个 with 块，块内的 execute / query 还要再进来。
         self._lock = threading.RLock()
-        self._txn_depth = 0
+        self._txn: Transaction | None = None
         self._txn_failed = False
         self._open()
 
@@ -268,52 +287,57 @@ class Database:
                 return []
 
     @contextmanager
-    def transaction(self) -> Iterator[bool]:
+    def transaction(self) -> Iterator[Transaction]:
         """把 with 块里的一切放进一个 ``BEGIN IMMEDIATE`` 事务（全有或全无）。
 
-        yield ``False`` = 库不可用或开不了事务：块内不必再发语句（``execute`` 会
-        直接返回 ``False``、``query`` 是空列表）。块内任何一次写失败都让事务**回滚**
-        而不是提交半截；块内抛异常 → 回滚并把异常原样抛出（由调用方决定怎么兜）。
+        yield 的是事务句柄：``live=False`` 表示库不可用或开不了事务（块内不必再发
+        语句——``execute`` 会直接返回 ``False``、``query`` 是空列表）；块退出后读
+        ``committed`` 才知道它**真的提交了**（块内任何一次写失败都会回滚，提交本身
+        也可能失败）。只把语句的返回值当结论会漏掉这两种回滚。
+
+        块内抛异常 → 回滚并把异常原样抛出（由调用方决定怎么兜）。
 
         事务期间持锁：同一进程内的其他线程会等到提交/回滚，这正是「读—改—写」需要
-        的临界区（跨进程则由 SQLite 的写锁负责）。嵌套调用**并入外层事务**——SQLite
-        没有嵌套事务，而分层（编排 → 存储）会让两端自然地各要一个原子块。
+        的临界区（跨进程则由 SQLite 的写锁负责）。嵌套调用**并入外层事务**（拿到的
+        是同一个句柄）——SQLite 没有嵌套事务，而分层（编排 → 存储）会让两端自然地
+        各要一个原子块。
         """
         with self._lock:
             conn = self._conn
             if not self._ready or conn is None:
-                yield False
+                yield Transaction(live=False)
                 return
-            if self._txn_depth:
-                self._txn_depth += 1
-                try:
-                    yield True
-                finally:
-                    self._txn_depth -= 1
+            open_txn = self._txn
+            if open_txn is not None:
+                yield open_txn  # 并入外层事务（SQLite 没有嵌套 BEGIN）
                 return
             try:
                 conn.execute("BEGIN IMMEDIATE")
             except Exception as exc:
                 self._warn_write_error(exc)
-                yield False
+                yield Transaction(live=False)
                 return
-            self._txn_depth = 1
+            handle = Transaction(live=True)
+            self._txn = handle
             self._txn_failed = False
             try:
-                yield True
+                yield handle
             except BaseException:
-                self._txn_depth = 0
+                self._txn = None
                 self._rollback()
                 raise
-            self._txn_depth = 0
-            if self._txn_failed:
-                self._rollback()
-                return
-            try:
-                conn.execute("COMMIT")
-            except Exception as exc:
-                self._rollback()
-                self._warn_write_error(exc)
+            else:
+                self._txn = None
+                if self._txn_failed:
+                    self._rollback()
+                    return
+                try:
+                    conn.execute("COMMIT")
+                except Exception as exc:
+                    self._rollback()
+                    self._warn_write_error(exc)
+                    return
+                handle.committed = True
 
     def close(self) -> None:
         """关闭连接（幂等；降级过的对象是 no-op）。"""
@@ -331,7 +355,7 @@ class Database:
 
     def _fail(self, exc: BaseException) -> None:
         """一条语句失败：标记事务不可提交 + 首次留一条 WARNING。"""
-        if self._txn_depth:
+        if self._txn is not None:
             self._txn_failed = True
         self._warn_write_error(exc)
 

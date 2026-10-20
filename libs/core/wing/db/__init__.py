@@ -37,7 +37,12 @@ def get_database() -> Database:
 
 
 def close_database() -> None:
-    """关闭并丢弃单例（幂等；进程收尾调用）。"""
+    """关闭并丢弃单例（幂等；进程收尾调用）。
+
+    先换单例、再关旧连接（`Database.close()` 自己会等它的在途事务结束）：关的过程
+    不持生命周期锁——否则「事务里取单例」与「关闭方等事务」会互等成死锁。多语句的
+    原子性不依赖单例是否还在：一次操作在构造时就把连接钉住了（见 `CacheStore`）。
+    """
     global _database
     with _lifecycle_lock:
         database, _database = _database, None
