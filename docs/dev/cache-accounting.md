@@ -7,12 +7,13 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 所以它只回答一个问题——「这一轮的缓存为什么这样」——并让每个结论落到三个动作之一：
 **我能避免 / 我该报 bug / 我什么都不用做**。
 
-事实来源：机制 `libs/core/wing/schema/cache.py`（段 label 与 hash 的唯一声明处）+
-`libs/core/wing/context/cache_ledger.py`（账本与归因）+ `libs/core/wing/context/manager.py`
-（system 侧分段）+ `libs/core/wing/provider/`（wire 侧分段）；端口径
-`libs/core/wing/gateway/routes/session.py`（`GET /api/session/cache`）；人类视图
+事实来源：机制 `libs/core/wing/schema/cache.py`（段 label / hash / `CacheCall` 的唯一声明处）+
+`libs/core/wing/context/cache_ledger.py`（账本与归因）+ `libs/core/wing/context/cache_store.py`
+（账本的唯一 SQL 处：`cache_call` / `cache_segment`）+ `libs/core/wing/db/migrations.py`（v3 建表）
++ `libs/core/wing/context/manager.py`（system 侧分段）+ `libs/core/wing/provider/`（wire 侧分段）；
+端口径 `libs/core/wing/gateway/routes/session.py`（`GET /api/session/cache`）；人类视图
 `crates/wing/src/cmd/cache.rs`；整机证据 `libs/wing-probe/scenarios/test_cache_ledger.py`
-（A–F 六条红线）与 `libs/core/tests/test_cache_ledger.py`（单元口径）。
+（A–H 八条红线）与 `libs/core/tests/test_cache_ledger.py`（单元口径）。
 本文只讲 *why* 与判据，逐字段契约以代码与 `contract.md` 为准。
 
 ## 1. 口径
@@ -64,28 +65,46 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 
 ### 账本
 
-`<session-dir>/cache_ledger.json`（会话 aux kv，key = `cache_ledger`；`file` 后端 tmp +
-fsync + rename 原子写，`memory` 后端留在进程内字典）。形状见 `contract.md` §3。
+进程级 `wing.db`（`$WING_HOME/core/wing.db`）的两张表：`cache_call`（一次调用一行 +
+它的分叉事实）与 `cache_segment`（该调用前缀被切成的有序段）。建表见
+`libs/core/wing/db/migrations.py` 的 v3；读写全在 `context/cache_store.py`。
 
-- **有界**：三档，全部由代码里的常量决定，没有配置面。
-  - `calls` 只留最近 200 条（`MAX_CALLS`）；
-  - `fingerprints` 只留被存活 calls 引用到的条目（写盘时 GC）；
-  - **落盘字节预算 512 KiB**（`MAX_LEDGER_BYTES`）：超出即按「最旧调用先淘汰」裁剪，
-    连带 GC 失去引用的指纹，**永远保留最近一条调用**。量级两档：常规 40 轮会话
-    **≈160 KB**，200 条 × 上百段的极端形态在裁剪前能到**数 MB**——所以预算是账本的真上界。
-    两处例外：预算只在**记账时**生效（旧版本写下的超大账本要等下一次调用才被裁）；单条调用
-    自己的段落表就超预算时保留它（丢了它就没有「最近一条」可利用了）。
-    （`contract.md` §3 的「~60 KB/会话」按「多条调用共享同一份段落表」估算；真实会话里消息
-    每轮增长、每条调用都有独立段落表。契约的字段与公式没变，只有量级口径以这里为准。）
+为什么从「会话目录里的 `cache_ledger.json` 边车」搬进来：审计行（`audit_*`）与唤醒触发器
+（`wake_trigger`）已经住在这个库里，账本没有理由继续做一份「整份读 → 改 → 整份写」的
+JSON 文件——一次记录要为几十 KB 的段落表付全量序列化 + 全量回写的代价，查询还要解析
+整份文件才能回答「最近 20 条」。现在是按索引取几行、按会话键聚合，写只追加自己那一行。
+
+- **两张表的分工**：`cache_call` 是事实行（谁、何时、多少 token、判定、分叉点），
+  `cache_segment` 是那一次调用前缀的分段表。段落表按指纹 `fp` 内容寻址——同一份段列表
+  在一个会话里只存一遍（多条调用共享它，比如重试）。主键是
+  `(session_id, fp, idx)`：**会话维度归属**让裁剪、孤儿回收、会话隔离都缩成「一条带
+  session_id 的 DELETE / SELECT」，不需要跨会话引用计数。
+- **有界**：只剩一条——每个会话留最近 **200** 条调用（`MAX_CALLS`），更旧的调用连同
+  失去引用的段落行一起回收（同一条 DELETE + `NOT EXISTS` 探针）。原先的 512 KiB 落盘
+  字节预算**取消**：它存在的原因是整份文件读写（越界的代价在「读整份 + 写整份」），
+  而按行存取没有这个代价；留下的上界是「200 条 × 该会话的段数」，与旁边只追加、
+  永不裁的审计表同量级。量级参考（实测，含 SQLite 页开销）：40 轮会话（2040 段行）
+  ≈285 KB，200 轮极端形态（42200 段行）≈3.5 MB。
+- **一次记录是一笔事务**：`BEGIN IMMEDIATE` 里做「读最近几条 → 判参照 / 分叉 → 插一行
+  → 存段落表（首次见到该指纹才写）→ 环形裁剪」，三笔写一起提交或一起回滚。进程内的
+  那把记录锁因此去掉了——SQLite 的写锁连跨进程也管（旧实现只有进程内互斥）。
 - **永不抛**：读、算、写全在 try/except 内，失败只 WARNING——记账坏了绝不影响 LLM 调用。
-- **前向容忍**：读不到 / 版本不认识 / 解析失败 / 单条记录类型错 → 当空账本（坏记录丢弃，
-  不升级成整份失败，端点因此不会 500）。
-- **不碰 `history.jsonl`**：`Message` / `usage` 一个字段都不加；账本是边车文件。
-- 记账是「整份读 → 改 → 整份原子写」，跑在线程池里（同步写会挡住整个网关的流式帧），
-  进程级一把锁覆盖 read-modify-write（主调用与后台增量压缩可能真并行）。
-- 端点的**读**路径同样跑在线程池里（`asyncio.to_thread`）：读盘 + 全量 JSON 规整 + 投影在
-  最坏形态是 MB 级、数十毫秒，留在事件循环上会让所有会话的流式帧一起排队。
-- 每次记录都重新读盘、不缓存内存态：`switch_template` 会重建 CM，内存态会留两个残影。
+  库打不开 / 降级时记账静默 no-op，本轮 `llm_call_metrics` 的 `cache_*` 字段随之为空。
+- **前向容忍**：没有行就是空账本（会话从没调用过模型 / 库被换掉 / 会话不存在）；
+  形状层面的坏数据进不来（`NOT NULL`、分叉四列的 all-or-nothing `CHECK`），而**语义**
+  上不认识的 `verdict` / 缺失 `ts_ms` 照旧容忍：未知 verdict 不进 provider 欠账，
+  没有时间戳就不判过期（端点因此不会 500）。
+- **不碰 `history.jsonl`**：`Message` / `usage` 一个字段都不加；账本是旁路数据。
+- **读路径也只取要用的行**：端点投影（`build_report`）用一条 `WHERE session_id=? ORDER BY
+  id DESC LIMIT ?` 取本会话的调用行（上界 `MAX_CALLS`），分叉证据只按
+  `(session_id, fp, fork.index)` 点查**那一段**，不读整份段落表。
+- 记账跑在线程池里（`asyncio.to_thread`）：`BEGIN IMMEDIATE` 可能要等写锁（`busy_timeout`
+  是秒级），那点等待不该挂在事件循环上——同一条流上还有别的会话的帧要发。
+- 端点的**读**路径同样跑在线程池里：一次查询最坏也要读几百行调用 + 若干段落点查，
+  留在循环上会让所有会话的流式帧一起排队。
+- 每次记录都现读库、不缓存内存态：`switch_template` 会重建 CM，内存态会留两个残影。
+- **库是进程级单例、跨线程共享**（`check_same_thread=False` + 一把可重入锁）：审计行在
+  事件循环线程上写，账本在工作线程里读写，首次打开也可能发生在任一工作线程。
 
 ### 三档 rate（`GET /api/session/cache` 的 `summary`）
 
@@ -179,10 +198,11 @@ provider_debt_rate = Σ max(0, expected - cached)
 |---|---|---|
 | 旧网关 / 未计算 | `llm_call_metrics` 没有 `cache_*` 字段；`cache_verdict` 为空串 | 退回今天的单一命中率（TUI 显示 `67% cache`，而不是 `67% / 理论 88%`） |
 | 无理论水位 | `cache_expected_tokens` 为 `null` 时**整个键不下发**（wire 出口剥 null） | 读到缺省即「无参照」，不显示理论值（不要当 0%） |
-| 会话还没调用过 / 无账本 / 会话不存在 | 端点 200 + 空 `forks` / `calls` + `summary` 计数 0、三 rate `null` | 显示「还没数据」（`—`），**不要**显示 0%，也不要当错误处理 |
-| 账本损坏 / 读失败 | 当空账本 + WARNING（`grep 'cache ledger' <wing_*.log>`） | 不用管；下一次调用会重建 |
-| 记账写盘失败 | 只 WARNING，本轮 LLM 调用照常返回（无 `cache_*` 字段） | 不用管；磁盘 / 权限问题在日志里 |
-| `memory` 后端（建会话时 `backend: memory`，不是配置字段） | 账本仅在进程内，重启即丢 | 跨重启比对时不要期待它 |
+| 会话还没调用过 / 库里没有行 / 会话不存在 / 会话已归档 | 端点 200 + 空 `forks` / `calls` + `summary` 计数 0、三 rate `null` | 显示「还没数据」（`—`），**不要**显示 0%，也不要当错误处理 |
+| 账本行读不出来（库打不开 / 降级） | 当空账本 + WARNING（`grep 'cache ledger' <wing_*.log>`） | 不用管；库恢复后下一次调用会重建 |
+| 记账没落库（写失败 / 库降级） | 只 WARNING，本轮 LLM 调用照常返回（无 `cache_*` 字段） | 不用管；磁盘 / 权限 / 库文件问题在日志里 |
+| 旧版本写下的 `<session-dir>/cache_ledger.json` | 不再读、也不删（文件留在原地，内容停在升级那一刻） | 想清掉就自己删；它已经与当前账本无关 |
+| `memory` 后端（建会话时 `backend: memory`，不是配置字段） | 账本仍写进程级 `wing.db`（与审计行同口径），只是会话本身不落盘 | 跨重启能读到，别惊讶 |
 | 端点 404 | 运行中的网关**没有这个路由**（旧二进制 / 另一个 gateway 可执行文件） | 换当前 checkout 的网关；`wing cache` 的 404 只有这一个含义 |
 
 ## 4. 排错手册
@@ -196,10 +216,10 @@ provider_debt_rate = Σ max(0, expected - cached)
 | `history:…` 分叉但没压缩 | 链拓扑变了（rewind / fork / steer）——回看那一轮的会话操作 |
 | 理论值远高于实际，且 `provider_debt_rate` 大 | 报 bug：provider 没兑现我们这侧完整的前缀。附 `--json` 原始响应 |
 | 端点 200 但 `calls` 空 | 会话真的没跑过模型调用；或 `WING_SESSIONS_PATH` 指到了别的目录（读的是另一个会话树） |
-| 账本里只剩最近几十条调用，更早的不见了 | 字节预算（512 KiB）按「最旧先淘汰」裁过——不是丢数据；被裁掉的旧行会失去 `ref_ts`，跨裁剪的 `compact` 归因也会退化成 `composition`，最新一行不受影响 |
-| 账本文件不存在而调用在跑 | `memory` 后端；或记账 WARNING（`grep 'cache ledger'`） |
+| 账本里只剩最近 200 条调用，更早的不见了 | 环形上界（`MAX_CALLS`）按「最旧先淘汰」裁过——不是丢数据；被裁掉的旧行会失去 `ref_ts`，跨裁剪的 `compact` 归因也会退化成 `composition`，最新一行不受影响 |
+| 库里查不到某个会话的行，但调用在跑 | 记账 WARNING（`grep 'cache ledger'`）；或 `WING_HOME` 指到了别的目录（读的是另一个 `wing.db`） |
 | 前端数字与 `wing cache` 不一致 | 两边都可能只取了部分行：`summary` 覆盖整本账本，`calls` 默认 20 条——端点 `limit=200` / `wing cache --limit 200` 取全量再对账 |
-| 想知道某条结论怎么复现 | `make test-probe` 的 `scenarios/test_cache_ledger.py`（A–F 六条红线，假 Provider 剧本驱动） |
+| 想知道某条结论怎么复现 | `make test-probe` 的 `scenarios/test_cache_ledger.py`（A–H 八条红线，假 Provider 剧本驱动） |
 
 常用命令：
 
@@ -209,9 +229,23 @@ wing cache <sid> --limit 50           # 更多调用行
 wing cache <sid> --why 1              # 展开第一条分叉：index/总段数、label、sha 对照、src、≈代价
 wing cache <sid> --json               # 端点原始响应 + resolved_session_id
 curl -s "http://127.0.0.1:<port>/api/session/cache?session_id=<sid>&limit=200" | jq .summary
-# 账本文件是原始账本（version / session_id / fingerprints / calls）——汇总不在文件里，
-# 它是端点现算的投影；文件里值得看的只有指纹表与最近几行调用。
-jq '.calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
+```
+
+账本在 `$WING_HOME/core/wing.db`，直接查比读端点更细（汇总不在表里，它是端点现算的投影）：
+
+```bash
+sqlite3 ~/.wing/core/wing.db "SELECT id, ts, prompt, cached, expected, verdict FROM cache_call
+                               WHERE session_id='<sid>' ORDER BY id DESC LIMIT 5"
+# 分叉行（没有分叉的调用 fork_kind 为 NULL）
+sqlite3 ~/.wing/core/wing.db "SELECT ts, fork_kind, fork_index, fork_label, fork_segments_affected,
+                                      fork_tokens_lost FROM cache_call
+                               WHERE session_id='<sid>' AND fork_kind IS NOT NULL ORDER BY id DESC"
+# 某次调用的段列表（fp 从上一句取）
+sqlite3 ~/.wing/core/wing.db "SELECT idx, label, chars, src_path FROM cache_segment
+                               WHERE session_id='<sid>' AND fp='<fp>' ORDER BY idx"
+# 会话占用（行数 / 段落行数）
+sqlite3 ~/.wing/core/wing.db "SELECT (SELECT COUNT(*) FROM cache_call WHERE session_id='<sid>') AS calls,
+                                      (SELECT COUNT(*) FROM cache_segment WHERE session_id='<sid>') AS segments"
 ```
 
 ## 5. 已知边界
@@ -221,9 +255,15 @@ jq '.calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
   并排放，**无法解释** provider 内部为什么没兑现——这正是 `provider_underdelivered` 需要
   报 bug 而不是自行修复的原因。
 - **估算值**：`tokens_lost` 按字符比例估算（展示带 `≈`）；`chars` 是字符数不是 token 数。
-- **常量而非配置**：环形上界 200（`MAX_CALLS`）、字节预算 512 KiB（`MAX_LEDGER_BYTES`）、
-  `cache_ttl_hours=72`、`tol` 的 256 / 2% 都是 `context/cache_ledger.py` 的模块常量。本功能
-  只观察，不新增配置面。
+- **常量而非配置**：环形上界 200（`MAX_CALLS`）、`cache_ttl_hours=72`、`tol` 的 256 / 2%
+  都是 `context/cache_ledger.py` 的模块常量。本功能只观察，不新增配置面。
+- **落盘量**：账本行与会话目录里的文件**一起**算，只是搬了位置。上界是「每会话 200 条
+  调用 × 该会话的段数」：40 轮会话约 285 KB（2040 段行，旧边车是 179 KB），200 轮极端
+  形态约 3.5 MB（42200 段行，旧实现只保留 16 条调用 / 510 KB）。旧的字节预算（512 KiB）
+  已经取消——它防的是「整份文件读写」，而按行存取没有那个代价；代价变成**字节多一点、
+  历史长得多**。需要腾空间就等环形裁剪（或归档 / 换库）。
+- **进程级共享**：所有会话的账本在同一个 `wing.db` 里。会话之间由 `session_id` 隔离
+  （探针场景 G 钉住）；**删库 = 所有会话一起丢账本**（下一次调用重建）。
 - **只记事实不存副本**：`src` 只有 path / mtime / size，没有文件内容——能点名「哪个文件变了」，
   不能告诉你「变了什么」。
 - **粒度**：`history:*` 每条消息一段 → 任何消息内容变化只碎它之后的前缀；压缩 / rewind /
@@ -237,5 +277,7 @@ jq '.calls[-3:]' ~/.wing/core/sessions/<sid>/cache_ledger.json
 
 ## 6. 回滚
 
-整笔改动只观察、不改写请求：回滚 = revert 相关提交。账本是边车文件，旧版本代码完全忽略它
-（`cache_ledger.json` 可安全删除，下一次调用重建；`history.jsonl` 一个字节都没动）。
+整笔改动只观察、不改写请求：回滚 = revert 相关提交。旧的边车文件由旧版本代码读写，
+新版本既不读也不删它（`cache_ledger.json` 与当前账本无关，留着删掉都行）；`history.jsonl`
+一个字节都没动。库里的 `cache_call` / `cache_segment` 两张表不回填旧账本：回滚之后的旧
+代码继续读写自己的 JSON，两份数据互不干扰（也不会互相"对账"）。

@@ -60,6 +60,8 @@ class TestMigrations:
             "audit_tool_call",
             "audit_compaction",
             "wake_trigger",
+            "cache_call",
+            "cache_segment",
         }
         assert {
             "idx_audit_llm_call_ts",
@@ -67,6 +69,7 @@ class TestMigrations:
             "idx_audit_tool_call_ts",
             "idx_audit_tool_call_session",
             "idx_audit_compaction_session",
+            "idx_cache_call_session",
         } <= _indexes(db)
         assert db.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
         db.close()
@@ -493,6 +496,77 @@ class TestExecuteAndQuery:
 
         assert db.query("SELECT * FROM no_such_table") == []
 
+        db.close()
+
+
+class TestCacheSchema:
+    """缓存账本的两张表：结构约束承担「坏行进不来」的一部分（口径见 contract §4）。"""
+
+    def test_half_filled_fork_is_rejected(self, tmp_path: Path) -> None:
+        """分叉事实与调用同生共死：四列要么都有值、要么全空。"""
+        db = Database(tmp_path / "wing.db")
+        assert (
+            db.execute(
+                "INSERT INTO cache_call (session_id, ts, fp, purpose, model, provider, "
+                "prompt, cached, verdict, segment_count, fork_kind, fork_index, "
+                "fork_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "s",
+                    "t",
+                    "fp",
+                    "main",
+                    "m",
+                    "p",
+                    1,
+                    0,
+                    "prefix_broken",
+                    3,
+                    "modify",
+                    1,
+                    None,
+                ),
+            )
+            is False
+        )
+        assert db.execute(
+            "INSERT INTO cache_call (session_id, ts, fp, purpose, model, provider, "
+            "prompt, cached, verdict, segment_count, fork_kind, fork_index, "
+            "fork_label, fork_segments_affected) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "s",
+                "t",
+                "fp",
+                "main",
+                "m",
+                "p",
+                1,
+                0,
+                "prefix_broken",
+                3,
+                "modify",
+                1,
+                "rules:/r.md",
+                2,
+            ),
+        )
+        db.close()
+
+    def test_session_scoped_segments_allow_the_same_fp_per_session(
+        self, tmp_path: Path
+    ) -> None:
+        """段落表按 (session_id, fp, idx) 聚簇：同一份段列表在两个会话里各存一份，互不覆盖。"""
+        db = Database(tmp_path / "wing.db")
+        for session in ("a", "b"):
+            assert db.execute(
+                "INSERT INTO cache_segment (session_id, fp, idx, label, sha, chars) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session, "fp1", 0, "system:base", "0123456789abcdef", 5),
+            )
+        assert [
+            row["session_id"]
+            for row in db.query("SELECT session_id FROM cache_segment ORDER BY 1")
+        ] == ["a", "b"]
         db.close()
 
 

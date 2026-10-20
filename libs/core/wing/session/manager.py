@@ -605,22 +605,17 @@ class SessionManager:
             return canonical, store
         return None
 
-    def read_session_aux(self, session_id: str, key: str) -> dict | None:
-        """按 id 读取会话的 aux kv（**纯解析，不水合**）；不存在 / 不可读 → None。
+    def resolve_session_id(self, session_id: str) -> str | None:
+        """按 id 解析出存储里的**真实键**（纯解析，不水合）；不存在 / 不合规 → None。
 
-        读的是「与消息日志同生命周期的边车数据」（如缓存账本）：查询类端点不该为了
-        读一份账本把会话换入内存。解析走 :meth:`_resolve_with_store`（同一套闸门与
-        别名归一），因此读写键与账本落点必然一致。
+        大小写 / Unicode 归一化不敏感的文件系统上，两个不同写法指向同一个会话目录
+        （见 :meth:`_resolve_with_store`）。进程级库里按会话键存的数据（如缓存账本）
+        写的是真名，读路径因此必须先归一——否则 `Team-A` 读不到 `team-a` 的行。
+
+        归档区不参与（冻结语义，与 `_resolve_with_store` 同口径）：归档会话按"不存在"处理。
         """
         resolved = self._resolve_with_store(session_id)
-        if resolved is None:
-            return None
-        canonical, store = resolved
-        try:
-            return store.open_log(canonical).read_aux(key)
-        except Exception as e:
-            log.warning(f"Failed to read aux '{key}' for session '{canonical}': {e}")
-            return None
+        return resolved[0] if resolved is not None else None
 
     def _archived_store(self, session_id: str) -> SessionStore | None:
         """该 id 落在（任一后端的）归档区时返回其 store；否则 None。

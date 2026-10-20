@@ -89,8 +89,7 @@ def fingerprint(segments: Sequence["CachePart"]) -> str:
 
     段列表相同 ⇒ 指纹相同。指纹只用于去重存储，不参与任何业务判断。
     """
-    joined = "|".join(f"{segment.label}:{segment.sha}" for segment in segments)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    return _sha_of("|".join(f"{segment.label}:{segment.sha}" for segment in segments))
 
 
 # ── 段落 ──────────────────────────────────────────────────────────────────
@@ -170,22 +169,30 @@ class CacheFork:
             "tokens_lost": self.tokens_lost,
         }
 
-    @classmethod
-    def from_wire(cls, raw: Any) -> "CacheFork | None":
-        if not isinstance(raw, dict):
-            return None
-        kind, label, index = raw.get("kind"), raw.get("label"), raw.get("index")
-        if not isinstance(kind, str) or not isinstance(label, str):
-            return None
-        affected = raw.get("segments_affected")
-        lost = raw.get("tokens_lost")
-        return cls(
-            kind=kind,
-            index=index if isinstance(index, int) else 0,
-            label=label,
-            segments_affected=affected if isinstance(affected, int) else 0,
-            tokens_lost=lost if isinstance(lost, int) else None,
-        )
+
+@dataclass(frozen=True)
+class CacheCall:
+    """账本里的一次调用（`cache_call` 一行的内存形态）。
+
+    `ts` 是本地 naive ISO（对外展示与 `forks[].detail.ref_ts` 都用它）；`ts_ms` 只用于
+    判「参照调用是否过期」，缺失 / 不可解析时为 None。`segment_count` 是这次调用前缀的
+    段数（前缀比较的边界）；`expected is None` = 这一轮没有理论水位（cold / 分叉 /
+    过期）；`fork` 非空 = 前缀没能延续（契约 §4）。
+    """
+
+    ts: str
+    fp: str
+    purpose: str
+    model: str
+    provider: str
+    prompt: int
+    cached: int
+    verdict: str
+    segment_count: int = 0
+    ts_ms: int | None = None
+    expected: int | None = None
+    ref_fp: str | None = None
+    fork: CacheFork | None = None
 
 
 @dataclass(frozen=True)

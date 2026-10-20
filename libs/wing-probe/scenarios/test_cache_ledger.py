@@ -3,7 +3,7 @@
 账本是「这次请求的前缀指纹」与「provider 报的实际命中」同放一张表：`GET
 /api/session/cache` 给出 `summary`（三档命中率）、`calls`（每次调用一行）与 `forks`
 （每次前缀破碎一行）。它只有观察面，没有护栏——所以口径一旦漂了，用户会看到一堆
-似是而非的数字而无法行动。本文件把六条性质钉死（A–F，括号里是失败时被破坏的性质）：
+似是而非的数字而无法行动。本文件把八条性质钉死（A–H，括号里是失败时被破坏的性质）：
 
 - **A｜首调用 `cold`**：没有参照 → `expected` 为 null、`forks` 为空；`theory_rate`
   是 `0.0` 而不是 null（分母 Σprompt 非 0，null 只属于空账本，见 F）。
@@ -19,6 +19,10 @@
   落 `prefix_broken`（`expected` 为 null）。
 - **F｜无数据不报错**：新建未跑轮的会话（以及不存在的会话）→ 200 + 空 `forks` /
   `calls` + 全 null summary，**不是 404**。
+- **G｜会话隔离**：账本住进程级 `wing.db`，两个会话各自只看得到自己的调用与
+  汇总（隔离性不再由会话目录免费提供，每个查询都必须按会话键收口）。
+- **H｜重启后仍在**：网关重启后账本逐字段不变，且新进程能拿旧行当参照继续判
+  `hit`（行 / 段落表 / 指纹三样都还在库里的最强判据）。
 
 数值纪律：usage 由剧本给定（假 Provider 是唯一数值来源），断言只写**相对关系**
 （`expected == 参照调用的 prompt`、`theory_rate == Σexpected / Σprompt` …），不硬编码
@@ -595,3 +599,104 @@ async def test_session_without_calls_reports_empty_ledger(probe: Probe) -> None:
         f"不存在的会话 summary 必须全 0 / 全 null: {ghost_report['summary']}"
     )
     _assert_rates_are_consistent(ghost_report, context="F 不存在的会话")
+
+
+# ── G｜会话隔离（账本住进程级库）──────────────────────────────────────────
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_ledgers_are_isolated_per_session(probe: Probe) -> None:
+    """G｜两个会话共用一个库，各自只看得到自己的调用。
+
+    WHY：账本从「会话目录里的边车文件」搬进了进程级 `wing.db`，隔离性于是不再由
+    文件系统免费提供——每个查询都必须按会话键收口。漏一条 `WHERE session_id`
+    的表现是：别的会话的调用混进 summary（理论命中率、欠账率一起说谎），而
+    `calls` 也可能点名别人的分叉。这里让两个会话跑不同的 token 数，混不起来。
+    """
+    probe.register(
+        MODEL,
+        _turn("a-one", 1000),
+        _turn("a-two", 1200, cached=1000),
+        _turn("b-one", 2000),
+        _turn("b-two", 2400, cached=2000),
+    )
+    first = await probe.session(model=MODEL)
+    await first.chat("alpha")
+    await first.chat("beta")
+    second = await probe.session(model=MODEL)
+    await second.chat("gamma")
+    await second.chat("delta")
+
+    a = await _cache_report(probe, first.session_id)
+    b = await _cache_report(probe, second.session_id)
+
+    assert [call["prompt"] for call in a["calls"]] == [1200, 1000], (
+        f"先建的会话只该有自己两次调用（新→旧）: {a['calls']}"
+    )
+    assert [call["prompt"] for call in b["calls"]] == [2400, 2000], (
+        f"后建的会话只该有自己两次调用: {b['calls']}"
+    )
+    assert a["summary"]["prompt_tokens"] == 2200, (
+        f"summary 覆盖的必须是本会话的行: {a['summary']}"
+    )
+    assert b["summary"]["prompt_tokens"] == 4400, (
+        f"另一个会话的 token 不许混进 summary: {b['summary']}"
+    )
+    assert [call["verdict"] for call in b["calls"]] == ["hit", "cold"], (
+        f"后建的会话自己成链（首调用 cold、第二轮 hit）: {b['calls']}"
+    )
+    _assert_rates_are_consistent(a, context="G 会话 A")
+    _assert_rates_are_consistent(b, context="G 会话 B")
+
+
+# ── H｜重启后账本仍在，且能继续当参照 ────────────────────────────────────
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_ledger_survives_a_gateway_restart(probe: Probe) -> None:
+    """H｜进程重启后账本一个字都没少，且新进程能拿它当参照（前缀继续兑现）。
+
+    WHY：搬家前账本是会话目录里的文件，进程重启天然无损；搬进 `wing.db` 之后
+    「读得到」变成了一条要钉的性质——库路径算错（相对 cwd）、打开失败被降级、
+    写入没进事务，都会让重启后的账本变成空表。最有力的判据不是"还能读出旧行"，
+    而是"新进程按旧行继续判 hit"：那要求行、段落表、指纹三样都在。
+    """
+    probe.register(
+        MODEL,
+        _turn("r-one", 1000),
+        _turn("r-two", 1200, cached=1000),
+        # 重启之后：provider 报「上一轮的 prompt 全部命中」——参照必须来自旧进程。
+        _turn("r-three", 1500, cached=1200),
+    )
+    session = await probe.session(model=MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    before = await _cache_report(probe, session.session_id)
+    assert before["summary"]["calls"] == 2, before["summary"]
+
+    await probe.restart_gateway()
+
+    after = await _cache_report(probe, session.session_id)
+    assert after["summary"] == before["summary"], (
+        f"重启后 summary 必须逐字段不变: {after['summary']!r} vs {before['summary']!r}"
+    )
+    assert [call["prompt"] for call in after["calls"]] == [
+        call["prompt"] for call in before["calls"]
+    ], f"重启后调用行必须一模一样: {after['calls']}"
+
+    resumed = await probe.resume(session.session_id)
+    await resumed.chat("gamma")
+    continued = await _cache_report(probe, session.session_id)
+    latest = continued["calls"][0]
+    assert latest["verdict"] == "hit", (
+        "重启后的下一步必须还能拿旧行当参照（前缀延续 → hit）:"
+        f" {latest} / {continued['calls']}"
+    )
+    assert latest["expected"] == 1200, (
+        f"理论水位 = 上一轮（重启前那一轮）的 prompt: {latest}"
+    )
+    _assert_rates_are_consistent(continued, context="H 重启后")
