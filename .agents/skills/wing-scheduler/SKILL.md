@@ -9,7 +9,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 
 一句话：**你（scheduler）负责想清楚、拆、派、验收复核、集成、收口；子 agent 负责执行与自审。**
 
-本 skill 只依赖 `wing` CLI（`wing run` / `wait` / `watch` / `wake` / `fork` / `ps` / `info` / `tag` / `tail` / `head`）与普通 shell / git 命令，不需要额外脚本或编排框架。`wing` 的形态、命令全集与常见坑见 [docs/dev/cli.md](../../../docs/dev/cli.md)。
+本 skill 只依赖 `wing` CLI（`wing run` / `wait` / `watch` / `wake` / `fork` / `ps` / `info` / `tag` / `tail` / `head`）与普通 shell / git 命令，不需要额外脚本或编排框架。`wing` 的形态、命令全集与常见坑见 [wing-cli](../wing-cli/SKILL.md)。
 
 本文用 `$WING_HOME` 指 wing 的状态目录（默认 `~/.wing`，可用同名环境变量覆盖）：任务文档与 worktree 都放在它下面，与目标仓库解耦。
 
@@ -528,7 +528,7 @@ git push -u origin <task>/integration
 
 ## 12. 命令速查
 
-命令全集、分组表与编排脚本见 [docs/dev/cli.md](../../../docs/dev/cli.md)；下表只列调度循环里常用的那些。
+命令全集、分组表与编排脚本见 [wing-cli](../wing-cli/SKILL.md)；下表只列调度循环里常用的那些。
 
 | 目的 | 命令 | 备注 |
 |---|---|---|

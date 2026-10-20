@@ -57,7 +57,7 @@ cd <能看见全部 worktree 的父目录> && wing run --json --no-notify \
 ```
 
 - `cd` 决定 session 的 workspace——选 worktree 的**集散目录**（审查员要靠绝对路径进各 worktree）；
-- **`--no-notify`**：你反正要阻塞等它，别让它的收口再往你这里投一条唤醒消息（notify 语义见 `docs/dev/cli.md` 的 `wing run` 一节）；
+- **`--no-notify`**：你反正要阻塞等它，别让它的收口再往你这里投一条唤醒消息（notify 语义见 [wing-cli](../wing-cli/SKILL.md) 的 `wing run` 一节）；
 - 派发后核对：`wing info <sid> --json` 看 `workdir` / `tools` 是否符合预期；
 - `wing run` 创建的 session 强制 yolo（无人值守），不要也不该附加额外工具。
 
