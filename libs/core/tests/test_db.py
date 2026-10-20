@@ -54,7 +54,12 @@ class TestMigrations:
     def test_fresh_open_creates_schema_and_sets_version(self, tmp_path: Path) -> None:
         db = Database(tmp_path / "wing.db")
         assert db.ready
-        assert _tables(db) == {"audit_llm_call", "audit_tool_call", "audit_compaction"}
+        assert _tables(db) == {
+            "audit_llm_call",
+            "audit_tool_call",
+            "audit_compaction",
+            "wake_trigger",
+        }
         assert {
             "idx_audit_llm_call_ts",
             "idx_audit_llm_call_session",
@@ -80,6 +85,53 @@ class TestMigrations:
         assert second.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
         assert len(second.query("SELECT * FROM audit_llm_call")) == 1
         second.close()
+
+    def test_v1_database_upgrades_in_place(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """已发布的 v1 库（只有三张审计表 + 已写入的行）在**原位**升到当前版本。
+
+        这是跨分支唯一的数据路径：#242 已把 v1 发出去，#243 在末尾追加了 v2
+        （``wake_trigger``）。升级必须满足三件事——版本号推进、新表建成、旧行原样还在
+        （追加迁移不许重写既有数据，也不许让老库重新走一遍 v1）。
+        """
+        import wing.db.database as db_mod
+
+        path = tmp_path / "wing.db"
+
+        # ① 用「只到 v1」的迁移表建库（模拟 #242 时期的进程），并写两行审计事实。
+        monkeypatch.setattr(db_mod, "MIGRATIONS", MIGRATIONS[:1])
+        monkeypatch.setattr(db_mod, "SCHEMA_VERSION", MIGRATIONS[0][0])
+        v1 = Database(path)
+        assert v1.ready
+        assert v1.query("PRAGMA user_version")[0][0] == 1
+        assert "wake_trigger" not in _tables(v1)
+        for row in ((1, "2024-01-01T00:00:00", "m1"), (2, "2024-01-01T00:00:01", "m2")):
+            assert v1.execute(
+                "INSERT INTO audit_llm_call (ts_ms, ts, model) VALUES (?, ?, ?)", row
+            )
+        v1.close()
+
+        # ② 用当前代码（完整 MIGRATIONS）打开同一个库：v2 追加、v1 的数据不动。
+        monkeypatch.undo()
+        upgraded = Database(path)
+        assert upgraded.ready
+        assert upgraded.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
+        assert "wake_trigger" in _tables(upgraded)
+        rows = upgraded.query(
+            "SELECT ts_ms, ts, model FROM audit_llm_call ORDER BY ts_ms"
+        )
+        assert [tuple(row) for row in rows] == [
+            (1, "2024-01-01T00:00:00", "m1"),
+            (2, "2024-01-01T00:00:01", "m2"),
+        ]
+        # 升级后的库能写新表（唤醒行），也能继续写老表
+        assert upgraded.execute(
+            "INSERT INTO wake_trigger (kind, target_session_id, on_events,"
+            " state, created_at_ms) VALUES ('session', 'p', 'done,ask', 'active', 1)"
+        )
+        assert len(upgraded.query("SELECT * FROM wake_trigger")) == 1
+        upgraded.close()
 
     def test_migration_list_is_appendable_shape(self) -> None:
         """契约：MIGRATIONS 是递增的 (version, sql) tuple（03_wake 会在末尾追加）。"""
@@ -113,14 +165,17 @@ class TestMigrationRollback:
         import wing.db.database as db_mod
 
         path = tmp_path / "wing.db"
-        monkeypatch.setattr(db_mod, "MIGRATIONS", MIGRATIONS + ((2, _BAD_V2),))
-        monkeypatch.setattr(db_mod, "SCHEMA_VERSION", 2)
+        next_version = SCHEMA_VERSION + 1
+        monkeypatch.setattr(
+            db_mod, "MIGRATIONS", MIGRATIONS + ((next_version, _BAD_V2),)
+        )
+        monkeypatch.setattr(db_mod, "SCHEMA_VERSION", next_version)
 
         broken = Database(path)
         assert not broken.ready
         conn = sqlite3.connect(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         finally:
             conn.close()
@@ -128,10 +183,12 @@ class TestMigrationRollback:
         assert {"audit_llm_call", "audit_tool_call", "audit_compaction"} <= names
 
         # 修好后同一个库能继续迁移（说明上面那次不是「半个 v2」）
-        monkeypatch.setattr(db_mod, "MIGRATIONS", MIGRATIONS + ((2, _GOOD_V2),))
+        monkeypatch.setattr(
+            db_mod, "MIGRATIONS", MIGRATIONS + ((next_version, _GOOD_V2),)
+        )
         fixed = Database(path)
         assert fixed.ready
-        assert fixed.query("PRAGMA user_version")[0][0] == 2
+        assert fixed.query("PRAGMA user_version")[0][0] == next_version
         assert "t2" in _tables(fixed)
         fixed.close()
 
@@ -172,9 +229,10 @@ def test_too_new_version_is_caught_inside_the_transaction(
     import wing.db.database as db_mod
 
     path = tmp_path / "wing.db"
+    too_new = SCHEMA_VERSION + 1
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("CREATE TABLE marker (x INTEGER)")
-    conn.execute("PRAGMA user_version = 2")
+    conn.execute(f"PRAGMA user_version = {too_new}")
     conn.close()
 
     real = db_mod._user_version
@@ -192,7 +250,8 @@ def test_too_new_version_is_caught_inside_the_transaction(
     assert len(reads) == 2  # 外层一次 + 事务内一次
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2  # 不猜、不降级写
+        # 不猜、不降级写
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == too_new
     finally:
         conn.close()
 

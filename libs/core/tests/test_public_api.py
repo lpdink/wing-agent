@@ -60,7 +60,7 @@ print("ok")
 # load_config → WingRuntime()），断言两件事在构造后成立：
 #   1. 这份配置声明的工具（9 个）能被解析出来 —— 即工具注册确实在
 #      SessionManager/AgentTemplateManager 构造之前完成；
-#   2. 审计订阅恰为 1（仅审计；SessionReaper 的订阅在 gateway attach）。
+#   2. 事件订阅恰为 2（审计 + 唤醒；SessionReaper 的订阅在 gateway attach）。
 # 只钉「WingRuntime() 会安装」这一侧：这侧在同进程内不可断言（conftest 已装）。
 # 配置文本是显式写下的（不再用首启模板——模板现在是「providers/agents 空」的天然 problem，
 # 由 setup 向导消费，不是一份能直接跑的配置）。
@@ -103,10 +103,10 @@ with tempfile.TemporaryDirectory(prefix="wing-runtime-probe-") as tmp:
 
     runtime = WingRuntime()
 
-    # 构造之后：工具已注册（模板工具 9/9 解析）且审计订阅恰一次
+    # 构造之后：工具已注册（模板工具 9/9 解析）、审计与唤醒各订阅一次
     tools = runtime.template_manager.default.resolved_tools
     assert len(tools) == 9, sorted(t.name for t in tools)
-    assert event_bus.subscriber_count == 1, event_bus.subscriber_count
+    assert event_bus.subscriber_count == 2, event_bus.subscriber_count
 
 print("ok")
 """

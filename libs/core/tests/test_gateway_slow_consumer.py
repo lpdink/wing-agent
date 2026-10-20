@@ -57,7 +57,10 @@ def _make_server() -> GatewayServer:
         patch("wing.gateway.server.WingRuntime") as MockRuntime,
         patch("wing.gateway.server.load_config") as mock_load_config,
     ):
-        MockRuntime.return_value = MagicMock()
+        runtime = MagicMock()
+        # lifespan shutdown 会 await 唤醒调度循环的收尾
+        runtime.wake.stop = AsyncMock()
+        MockRuntime.return_value = runtime
         mock_load_config.return_value = _mock_config()
         from wing.gateway.server import GatewayServer
 

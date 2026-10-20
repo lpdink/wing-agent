@@ -63,4 +63,29 @@ pub struct RunArgs {
     /// session. Invalid tags fail the launch (nothing is sent).
     #[arg(long = "tag", value_delimiter = ',')]
     pub tag: Vec<String>,
+
+    /// Do not register a wake-up on the new session (the implicit default is on).
+    ///
+    /// Without this flag `wing run` asks the gateway to wake MY session
+    /// (`WING_SESSION_ID`, or `--notify-to`) when the spawned one finishes or
+    /// asks a question. Inside an agent's shell that notification is the
+    /// non-blocking replacement for `wing wait`; outside one there is no target
+    /// and the registration is silently off either way.
+    #[arg(long = "no-notify")]
+    pub no_notify: bool,
+
+    /// Deliver the wake-up to this session instead of `WING_SESSION_ID`.
+    ///
+    /// The gateway refuses a target equal to the newly created session (400);
+    /// that error is reported verbatim but never fails the launch.
+    #[arg(long = "notify-to", value_name = "SID")]
+    pub notify_to: Option<String>,
+
+    /// Which events wake the target: `done`, `ask`, or both (default: `done,ask`).
+    #[arg(long = "notify-on", value_name = "EVENTS")]
+    pub notify_on: Option<String>,
+
+    /// Send this text verbatim instead of the built-in wake envelope.
+    #[arg(long = "notify-prompt", value_name = "TEXT")]
+    pub notify_prompt: Option<String>,
 }

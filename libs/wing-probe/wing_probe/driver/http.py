@@ -231,6 +231,43 @@ class DriverHttp(GatewayClient):
         """
         return await self._get("/api/tools")
 
+    async def create_wake(
+        self,
+        *,
+        kind: str,
+        target_session_id: str,
+        source_session_id: str | None = None,
+        on_events: str | None = None,
+        spec: str | None = None,
+        prompt: str | None = None,
+        times: int | None = None,
+    ) -> dict:
+        """``POST /api/wake/create``（注册唤醒触发器；响应 ``{wake: …}``）。
+
+        只发非 ``None`` 的字段：wire 上「缺席」与「null」的语义不同（缺省值由网关补齐）。
+        校验失败（400）/ 会话不存在（404）由 ``DriverHttpError`` 带出。
+        """
+        body: dict[str, Any] = {"kind": kind, "target_session_id": target_session_id}
+        optional = {
+            "source_session_id": source_session_id,
+            "on_events": on_events,
+            "spec": spec,
+            "prompt": prompt,
+            "times": times,
+        }
+        body.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
+        return await self._post("/api/wake/create", body)
+
+    async def list_wakes(self, *, all: bool = False) -> dict:
+        """``GET /api/wake/list``（缺省只看 ``active``；``all`` 含已终结）。"""
+        return await self._get("/api/wake/list", {"all": "true"} if all else None)
+
+    async def cancel_wake(self, wake_id: int) -> dict:
+        """``POST /api/wake/cancel``（幂等；id 不存在 → 404 → ``DriverHttpError``）。"""
+        return await self._post("/api/wake/cancel", {"id": wake_id})
+
     async def upload_media(
         self, session_id: str, data: bytes, *, name: str | None = None
     ) -> dict:

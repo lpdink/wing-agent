@@ -162,6 +162,23 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
   且配置坏掉的部署**无法远程修复**，是刻意的安全姿态。中间件顺序（`app.py`）：
   `AuthMiddleware` 在外层，非 loopback 在 setup mode 下任何路径都先吃 403（而不是 503）。
 
+### Wake（`routes/wake.py`，3 个）
+
+会话唤醒：登记「什么事实 / 什么时刻 → 叫醒哪个会话」。产品语义、时间语义、错过补偿、信封
+形状见 [wake.md](wake.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/wake/create` | 注册触发器。body：`kind`（`session` \| `timer`）、`target_session_id`（叫醒谁）、`source_session_id?`（订阅谁的事件，`kind=session` 必填且不得等于 target）、`on_events?`（`done,ask` 的逗号列表，缺省两者）、`spec?`（`kind=timer` 必填：`in:30m` \| `at:<local iso>` \| `every:30m` \| `daily:07:00`）、`prompt?`（`timer` 必填；`session` 给定时替换内置信封、原样发送）、`times?`（`session` = done 配额缺省 1；`timer` = 触发次数缺省无限，只对周期型合法）。响应 `{wake: WakeInfo, created}`（`created=false` = 命中同源 `active` 订阅，本次只是刷新：id 不变、配额与 `prompt` 按本次请求更新；会话型订阅的身份是 `(source, target, on_events)`）。**错误**：会话不存在/已归档 → 404（`detail` 里点名是哪个字段）、参数非法或自指 → 400 |
+| GET | `/api/wake/list` | 列出触发器（缺省只看 `active`；`?all=true` 含 `done` / `canceled` / `failed`），新的在前。响应 `{wakes: [WakeInfo]}` |
+| POST | `/api/wake/cancel` | body `{id}`；响应 `{ok, canceled}`。`canceled=false` = 触发器早已终结（**幂等 no-op**，不是错误）；id 不存在 → 404 |
+
+`WakeInfo` 字段：`id, kind, target_session_id, source_session_id, on_events, spec, prompt,
+state, fire_count, last_fire_at, last_error, created_at, next_fire_at`（`last_fire_at` /
+`created_at` / `next_fire_at` 三个是网关本地 naive ISO 字符串，`null` = 该 kind 不适用或已终结）。`state ∈ active / done / canceled /
+failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_at` 恒为 `null`）。`wing.db` 不可用时创建回 **503**
+（`service_unavailable`：唤醒整体未武装），列表为空。
+
 ### Health（`routes/health.py`，1 个）
 
 | 方法 | 路径 | 说明 |

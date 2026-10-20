@@ -21,6 +21,14 @@
 与 `forked_from` 是**两个正交维度**：`forked_from` 记录内容血统（fork 的源会话），
 `parent_session_id` 记录创建动作（谁启动了它）。fork 不写 parent（v1）。
 
+## 1.1 与唤醒的关系
+
+唤醒（`wing watch` / `wing wake` / `wing run --notify*`）的**默认目标**就是这个环境变量：
+「谁叫醒我」缺省 = `WING_SESSION_ID`（我自己的会话），于是「我派出去的会话做完了回来告诉我」
+在 agent 的 shell 里不需要任何参数。血缘与唤醒是**两个独立机制**（血缘记「谁创建了我」，
+唤醒记「什么事实叫醒谁」），唯一的交点是这个环境变量——两者都不校验对方的存在性，都是软机制。
+详见 [wake.md](wake.md)。
+
 ## 2. 数据模型与协议
 
 - **持久**：`SessionMetadata.parent_session_id: str | None`（metadata.json）。创建时

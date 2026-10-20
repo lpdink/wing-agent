@@ -40,6 +40,8 @@ mod status;
 mod stop;
 pub mod tag;
 pub mod wait;
+pub mod wake;
+pub mod watch;
 
 /// wing — AI agent CLI
 #[derive(Parser, Debug)]
@@ -447,6 +449,32 @@ pub enum Command {
         list: bool,
     },
 
+    /// Wake me when a session finishes or asks a question (register / list / cancel).
+    ///
+    /// `wing watch <SID>` subscribes to that session: on its next completion (any
+    /// subtype) or question, MY session receives one ordinary user message — the
+    /// built-in envelope carries the subtype, turn count, duration and the last
+    /// reply (or the question plus the `tool_call_id` to answer with). It is the
+    /// non-blocking alternative to `wing wait`.
+    ///
+    /// The target defaults to `WING_SESSION_ID` (present in an agent's shell);
+    /// outside one, pass `--to <sid>`. One `done` delivery consumes one unit of
+    /// the quota (default 1 — the trigger then finishes); `ask` deliveries never
+    /// do. Archiving the source or target cancels the trigger.
+    Watch(watch::WatchArgs),
+
+    /// Schedule a wake-up (heartbeat): deliver a message at `--in/--at/--every/--daily`.
+    ///
+    /// ```sh
+    /// wing wake --in 30m -p "check the build"
+    /// wing wake --every 30m -p "poll the queue"
+    /// wing wake --daily 07:00 --times 7 -p "morning triage"
+    /// ```
+    ///
+    /// `--times` only applies to the recurring specs (`--every` / `--daily`).
+    /// The target defaults to `WING_SESSION_ID`; outside one, pass `--to <sid>`.
+    Wake(wake::WakeArgs),
+
     /// Read and change the gateway configuration (Setting API).
     ///
     /// Works while the gateway is degraded (setup mode), which is exactly when
@@ -836,6 +864,8 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 restore,
                 list,
             } => crate::cmd::archive::run(&session_ids, restore, list, cli.json).await,
+            Command::Watch(args) => crate::cmd::watch::run(args, cli.json).await,
+            Command::Wake(args) => crate::cmd::wake::run(args, cli.json).await,
             Command::Config { command } => crate::cmd::config::run(command, cli.json).await,
             Command::Tail {
                 session_id,

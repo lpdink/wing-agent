@@ -97,6 +97,9 @@ def mock_runtime():
 
     runtime.post = mock_post
 
+    # 唤醒调度循环的收尾（lifespan shutdown 会 await）——MagicMock 不是 awaitable
+    runtime.wake.stop = AsyncMock()
+
     return runtime
 
 

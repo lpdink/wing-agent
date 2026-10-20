@@ -19,6 +19,8 @@ from collections.abc import Sequence
 
 from wing.config import ConfigProblem, SettingGroup, SettingNode
 from wing.config.document import SecretState as SecretStateDomain
+from datetime import datetime
+
 from wing.event.query_response import BranchTargetInfo
 from wing.gateway.protocol import (
     BranchesResponse,
@@ -33,10 +35,12 @@ from wing.gateway.protocol import (
     SettingProblem,
     SettingsSchemaResponse,
     SettingsSetResponse,
+    WakeInfo,
 )
 from wing.runtime import SettingsApplyResult
 from wing.session import Session
 from wing.system import ReloadResult
+from wing.wake import WakeTrigger
 
 
 def build_session_info(session: Session) -> SessionInfoResponse:
@@ -204,3 +208,33 @@ def build_settings_apply_response(result: SettingsApplyResult) -> SettingsSetRes
         setup_mode_exited=result.setup_mode_exited,
         backup_path=result.backup_path,
     )
+
+
+def build_wake_info(trigger: WakeTrigger) -> WakeInfo:
+    """``WakeTrigger`` → wire 形状（时间从 epoch 毫秒投影成本地 naive ISO）。
+
+    与 ``last_turn_end`` / 链记录的 ``ts`` 同一口径：人可读、无时区后缀（就是网关宿主的本地
+    时间）；库里的毫秒值是唯一事实，投影每次现算。
+    """
+    return WakeInfo(
+        id=trigger.id,
+        kind=trigger.kind,
+        target_session_id=trigger.target_session_id,
+        source_session_id=trigger.source_session_id,
+        on_events=trigger.on_events,
+        spec=trigger.spec,
+        prompt=trigger.prompt,
+        state=trigger.state,
+        fire_count=trigger.fire_count,
+        last_fire_at=_iso(trigger.last_fire_at_ms),
+        last_error=trigger.last_error,
+        created_at=_iso(trigger.created_at_ms),
+        next_fire_at=_iso(trigger.next_fire_at_ms),
+    )
+
+
+def _iso(ms: int | None) -> str | None:
+    """epoch 毫秒 → 本地 naive ISO（``None`` 原样透传）。"""
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000).isoformat()

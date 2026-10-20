@@ -13,14 +13,14 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 │ stdio（wing -p）· NDJSON    │             │ · routes/session(22)    │               │ ├ SessionManager        │
 │ acp（wing acp）· ACP v1     │             │ · routes/system(6)      │               │ ├ SessionStore          │
 │ 编排 CLI · run/wait/ps/…    │◄── 事件 ────│ · routes/settings(4)    │◄──────────────│ ├ ContextManager        │
-│ 网关生命周期 · start/stop   │             │ · tools/health · ws     │               │ ├ EventBus              │
+│ 网关生命周期 · start/stop   │             │ · wake(3) · tools/…     │               │ ├ EventBus              │
 │ GatewayClient(WS)+ApiClient │             │ auth（opt-in）          │               │ └ provider/（LLM 调用） │
 │ HTTP 建会话 → WS 订阅       │             │                         │               │                         │
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
 ```
 
-- **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（38 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header/query · WS header/query），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
+- **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing watch/wake` 会话唤醒，`wing start/stop/status` 网关生命周期）。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（41 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header/query · WS header/query），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知；provider 实例无状态、归全进程共享池（`provider/pool.py`），会话级参数（session id 缓存亲和 / media / thinking）经 `RequestOptions` 每次调用注入。
 
@@ -116,9 +116,17 @@ libs/core/wing/
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级；与 store/ 的会话持久化正交）
 │   ├── database.py                  Database（WAL / user_version 迁移 / 打开失败即降级，读写作 no-op）
-│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表）+ SCHEMA_VERSION
+│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger）+ SCHEMA_VERSION
 ├── audit/                           审计：事件 → wing.db 的 audit_* 追加行（EventBus 订阅；install() 由组合根显式调用）
 │   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩各一条 INSERT
+├── wake/                            会话唤醒（wake_trigger 表 + 事件/时间驱动 + 内置信封；投递经注入的 WakePorts）
+│   ├── spec.py                      spec 语法与时间推进（in/at/every/daily；纯函数）
+│   ├── model.py                     WakeTrigger + 状态/事件常量 + on_events 解析
+│   ├── store.py                     WakeStore — wake_trigger 的唯一 SQL 处
+│   ├── envelope.py                  内置信封渲染（done / ask / timer；纯函数）
+│   ├── scheduler.py                 WakeScheduler — 单 asyncio task + 可注入时钟 + notify()
+│   ├── ports.py                     WakePorts Protocol（session_exists / is_archived / deliver）
+│   └── service.py                   WakeService — 校验 / 生命周期 / 事件分发 / 投递 / 重启恢复
 ├── common/
 │   ├── logger.py                    日志初始化（按本地日期切分 + 轮转 / prune）
 │   ├── fs.py                        原子写（tmp + fsync + rename）/ JSON 读写
@@ -139,7 +147,7 @@ libs/core/wing/
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(22) · system(6) · settings(4) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(22) · system(6) · settings(4) · wake(3) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
@@ -169,6 +177,8 @@ crates/wing/src/
 │   ├── archive.rs                   `wing archive` 归档 / 恢复 / 列出归档区（一个子命令三形态）
 │   ├── reload.rs                    `wing reload` 系统热重载（逐项结果按契约名字序）
 │   ├── messages.rs                  `wing tail` / `wing head`（消息过滤，类 Unix head/tail）
+│   ├── watch.rs                     `wing watch`（会话型唤醒：订阅收口 / 提问 → 叫醒我的会话）
+│   ├── wake.rs                      `wing wake`（定时唤醒：in/at/every/daily + 时长与 spec 纯函数）
 │   ├── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
 │   ├── config.rs                    `wing config` 子命令族（doctor/list/get/set/unset/add/remove/move/path）
 │   └── setup.rs                     首次运行向导（无 session 的 setup 循环 + 三前端共用的配置预检）
@@ -273,6 +283,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 标签）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、**用户消息里的图**（媒体对象：形状来自引用、按视口抓字节、字节 LRU、失败即状态）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
+| [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |

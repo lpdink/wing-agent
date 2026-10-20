@@ -68,6 +68,33 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX idx_audit_compaction_session ON audit_compaction(session_id, ts_ms);
         """,
     ),
+    (
+        2,
+        """
+        -- 唤醒触发器（03_wake）：一条行 = 一个「什么事实/时刻该叫醒谁」的登记。
+        -- kind='session' 由事件驱动（source_session_id 是订阅对象），kind='timer' 由
+        -- next_fire_at_ms 驱动；remaining_done 对前者是 done 配额、对后者是剩余触发数。
+        CREATE TABLE wake_trigger (
+            id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('session','timer')),
+            target_session_id TEXT NOT NULL,
+            source_session_id TEXT,
+            on_events TEXT NOT NULL DEFAULT 'done,ask',
+            spec TEXT,
+            next_fire_at_ms INTEGER,
+            remaining_done INTEGER,
+            prompt TEXT,
+            state TEXT NOT NULL DEFAULT 'active',
+            fire_count INTEGER NOT NULL DEFAULT 0,
+            last_fire_at_ms INTEGER,
+            last_error TEXT,
+            created_at_ms INTEGER NOT NULL,
+            created_by TEXT
+        );
+        CREATE INDEX idx_wake_source ON wake_trigger(source_session_id, state);
+        CREATE INDEX idx_wake_next ON wake_trigger(state, next_fire_at_ms);
+        """,
+    ),
 )
 
 #: 代码认识的最高 schema 版本（= 最后一个迁移的目标版本）。
