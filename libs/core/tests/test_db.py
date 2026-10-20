@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -493,6 +494,225 @@ class TestExecuteAndQuery:
         assert db.query("SELECT * FROM no_such_table") == []
 
         db.close()
+
+
+class TestInsert:
+    def test_insert_returns_the_new_rowid(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "wing.db")
+        first = db.insert(
+            "INSERT INTO audit_llm_call (ts_ms, ts, model) VALUES (?, ?, ?)",
+            (1, "t", "m"),
+        )
+        second = db.insert(
+            "INSERT INTO audit_llm_call (ts_ms, ts, model) VALUES (?, ?, ?)",
+            (2, "t", "m"),
+        )
+        assert first == 1 and second == 2
+        db.close()
+
+    def test_insert_error_returns_none(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "wing.db")
+        assert db.insert("INSERT INTO no_such_table (x) VALUES (?)", (1,)) is None
+        db.close()
+
+    def test_insert_and_rowid_survive_another_thread(self, tmp_path: Path) -> None:
+        """写入 + 取回 rowid 跨线程互不串台（`last_insert_rowid` 是连接级状态）。"""
+        db = Database(tmp_path / "wing.db")
+        results: list[int | None] = []
+        barrier = threading.Barrier(4)
+
+        def write() -> None:
+            barrier.wait()
+            for _ in range(20):
+                results.append(
+                    db.insert(
+                        "INSERT INTO audit_llm_call (ts_ms, ts, model) "
+                        "VALUES (?, ?, ?)",
+                        (1, "t", "m"),
+                    )
+                )
+
+        threads = [threading.Thread(target=write) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        # 每个线程拿到的 id 各不相同，恰好覆盖全表（没有一次抄到别人的 rowid）
+        assert sorted(cast("list[int]", results)) == list(range(1, 81))
+        db.close()
+
+
+class TestTransactions:
+    def test_commit_persists_every_statement(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "wing.db")
+        with db.transaction() as live:
+            assert live is True
+            assert db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (1, "t", "s"),
+            )
+            assert db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (2, "t", "s"),
+            )
+        assert len(db.query("SELECT * FROM audit_compaction")) == 2
+        db.close()
+
+    def test_a_failed_statement_rolls_the_whole_block_back(
+        self, tmp_path: Path
+    ) -> None:
+        """块内一次写失败 ⇒ 整块回滚（不提交半截），且不回抛。"""
+        db = Database(tmp_path / "wing.db")
+        with db.transaction():
+            assert db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (1, "t", "s"),
+            )
+            assert db.execute("INSERT INTO no_such_table (x) VALUES (?)", (1,)) is False
+        assert db.query("SELECT * FROM audit_compaction") == []
+        # 回滚之后仍可正常写（事务状态没有粘住）
+        assert db.execute(
+            "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+            (3, "t", "s"),
+        )
+        assert len(db.query("SELECT * FROM audit_compaction")) == 1
+        db.close()
+
+    def test_an_exception_rolls_back_and_propagates(self, tmp_path: Path) -> None:
+        db = Database(tmp_path / "wing.db")
+        with pytest.raises(RuntimeError):
+            with db.transaction():
+                db.execute(
+                    "INSERT INTO audit_compaction (ts_ms, ts, session_id) "
+                    "VALUES (?, ?, ?)",
+                    (1, "t", "s"),
+                )
+                raise RuntimeError("boom")
+        assert db.query("SELECT * FROM audit_compaction") == []
+        db.close()
+
+    def test_nested_blocks_join_the_outer_transaction(self, tmp_path: Path) -> None:
+        """嵌套不另起 BEGIN（SQLite 不支持）：内层看到的是同一笔事务。"""
+        db = Database(tmp_path / "wing.db")
+        with db.transaction():
+            db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (1, "t", "s"),
+            )
+            with db.transaction() as inner:
+                assert inner is True
+                db.execute(
+                    "INSERT INTO audit_compaction (ts_ms, ts, session_id) "
+                    "VALUES (?, ?, ?)",
+                    (2, "t", "s"),
+                )
+        assert len(db.query("SELECT * FROM audit_compaction")) == 2
+        db.close()
+
+    def test_degraded_database_yields_false(self, tmp_path: Path) -> None:
+        """库打不开时事务块 yield False（调用方据此跳过整段工作）。"""
+        blocker = tmp_path / "wing.db"
+        blocker.mkdir()
+        db = Database(blocker)
+        assert not db.ready
+        with db.transaction() as live:
+            assert live is False
+        db.close()
+
+    def test_reads_inside_the_block_see_uncommitted_writes(
+        self, tmp_path: Path
+    ) -> None:
+        """读—改—写要在同一笔事务里：块内的 SELECT 看得到块内刚写的行。"""
+        db = Database(tmp_path / "wing.db")
+        with db.transaction():
+            db.execute(
+                "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+                (1, "t", "s"),
+            )
+            assert len(db.query("SELECT * FROM audit_compaction")) == 1
+        db.close()
+
+
+class TestCrossThreadUse:
+    def test_queries_from_a_worker_thread(self, tmp_path: Path) -> None:
+        """连接跨线程共享（`check_same_thread=False`）：工作线程能读也能写。"""
+        db = Database(tmp_path / "wing.db")
+        assert db.execute(
+            "INSERT INTO audit_compaction (ts_ms, ts, session_id) VALUES (?, ?, ?)",
+            (1, "t", "main"),
+        )
+        seen: list[Any] = []
+
+        def worker() -> None:
+            seen.append(len(db.query("SELECT * FROM audit_compaction")))
+            seen.append(
+                db.execute(
+                    "INSERT INTO audit_compaction (ts_ms, ts, session_id) "
+                    "VALUES (?, ?, ?)",
+                    (2, "t", "worker"),
+                )
+            )
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        assert seen == [1, True]
+        assert len(db.query("SELECT * FROM audit_compaction")) == 2
+        db.close()
+
+    def test_concurrent_transactions_do_not_interleave(self, tmp_path: Path) -> None:
+        """两个线程各自的「读—改—写」不能交叉：簿记结果必须精确。"""
+        db = Database(tmp_path / "wing.db")
+        db.execute(
+            "INSERT INTO audit_compaction (ts_ms, ts, session_id, original_tokens) "
+            "VALUES (?, ?, ?, ?)",
+            (1, "t", "s", 0),
+        )
+        barrier = threading.Barrier(8)
+
+        def bump() -> None:
+            barrier.wait()
+            for _ in range(10):
+                with db.transaction():
+                    row = db.query("SELECT original_tokens AS n FROM audit_compaction")[
+                        0
+                    ]
+                    db.execute(
+                        "UPDATE audit_compaction SET original_tokens = ?",
+                        (int(row["n"]) + 1,),
+                    )
+
+        threads = [threading.Thread(target=bump) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert (
+            db.query("SELECT original_tokens AS n FROM audit_compaction")[0]["n"] == 80
+        )
+        db.close()
+
+    def test_singleton_is_created_once_under_contention(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """首次访问可能来自任一工作线程：并发 `get_database()` 只能开出一份连接。"""
+        monkeypatch.setenv("WING_HOME", str(tmp_path / "home"))
+        reset_database()
+        created: list[Any] = []
+        barrier = threading.Barrier(6)
+
+        def grab() -> None:
+            barrier.wait()
+            created.append(get_database())
+
+        threads = [threading.Thread(target=grab) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len({id(database) for database in created}) == 1
+        assert all(database.ready for database in created)
+        reset_database()
 
 
 class TestSchemaTooNew:

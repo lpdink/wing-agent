@@ -1,13 +1,15 @@
 """wing/db — 进程级 SQLite 门面（``$WING_HOME/core/wing.db``）。
 
 与会话持久化正交：``wing/store/`` 管会话文件（metadata / history / aux），这里只管
-进程级旁路数据（审计行、唤醒触发器）。**打开失败即降级**（``ready=False``），读写作
-no-op——DB 坏了不能把网关带崩。
+进程级旁路数据（审计行、唤醒触发器、缓存账本）。**打开失败即降级**（``ready=False``），
+读写作 no-op——DB 坏了不能把网关带崩。
 
 生命周期：进程单例、懒打开；组合根收尾时 ``close_database()``（幂等）。
 """
 
 from __future__ import annotations
+
+import threading
 
 from wing.config import get_wing_home
 from wing.db.database import Database
@@ -19,19 +21,26 @@ DB_FILENAME = "wing.db"
 
 _database: Database | None = None
 
+#: 单例的构造锁。首次访问可能来自任一工作线程（缓存账本在 ``asyncio.to_thread``
+#: 里记账）——两个线程同时发现「还没有库」就会各自打开一份连接，输家撞
+#: ``database is locked`` 并把这次记账丢掉。
+_lifecycle_lock = threading.Lock()
+
 
 def get_database() -> Database:
     """进程单例（首次调用时打开；打开失败也返回同一个降级对象）。"""
     global _database
-    if _database is None:
-        _database = Database(get_wing_home() / DB_FILENAME)
-    return _database
+    with _lifecycle_lock:
+        if _database is None:
+            _database = Database(get_wing_home() / DB_FILENAME)
+        return _database
 
 
 def close_database() -> None:
     """关闭并丢弃单例（幂等；进程收尾调用）。"""
     global _database
-    database, _database = _database, None
+    with _lifecycle_lock:
+        database, _database = _database, None
     if database is not None:
         database.close()
 
