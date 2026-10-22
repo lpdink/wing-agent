@@ -62,6 +62,9 @@ impl ColorPreset {
     /// designed hex in both presets, because a background tint has to sit under
     /// syntax colours and cannot adapt per-theme.
     fn base(self) -> ThemePalette {
+        // The structure hue is one value across the slots that carry it (a
+        // formula is structure like a heading), so it is named once.
+        let violet = Color::Rgb(0xb4, 0x9a, 0xf0);
         let diff_add_bg = Color::Rgb(0x16, 0x38, 0x1f);
         let diff_del_bg = Color::Rgb(0x47, 0x24, 0x2c);
         let diff_add_bg_strong = Color::Rgb(0x1f, 0x52, 0x30);
@@ -76,9 +79,9 @@ impl ColorPreset {
                 success: Color::Rgb(0x4e, 0xc2, 0x8b),
                 warning: Color::Rgb(0xe4, 0xb0, 0x4e),
                 danger: Color::Rgb(0xe5, 0x64, 0x6e),
-                math: Color::Rgb(0xb4, 0x9a, 0xf0),
-                heading: Color::Rgb(0xb4, 0x9a, 0xf0),
-                heading_bright: stretch(Color::Rgb(0xb4, 0x9a, 0xf0), false),
+                math: violet,
+                heading: violet,
+                heading_bright: stretch(violet, false),
                 inline_code: Color::Rgb(0xe5, 0x78, 0x7f),
                 marker: Color::Rgb(0x6f, 0x7d, 0xb4),
                 quote: Color::Rgb(0x8f, 0x93, 0xc4),
