@@ -299,9 +299,9 @@ impl ThinkingBlock {
         }
         let mut spans = self.shine_spans(&head, palette, label_style);
         // 静止部分跟措辞同一色系：进行中措辞是逐列 Rgb 混色的（见
-        // `shine_spans`），秒数与提示就用 dim 的 Rgb 解析值 —— 命名色与
+        // `shine_spans`），秒数与提示就用 `thinking_label` 的 Rgb 解析值 —— 命名色与
         // Rgb 混用会在命名色主题 + 非 truecolor 终端上各走各的色。
-        // 定格后整行回到命名 dim，与旧行为一致。
+        // 定格后整行回到命名的 `thinking_label`。
         let static_style = if self.is_active() {
             let base = to_rgb(palette.thinking_label);
             Style::default().fg(Color::Rgb(base.0, base.1, base.2))

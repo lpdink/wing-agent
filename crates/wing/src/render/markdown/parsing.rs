@@ -382,7 +382,7 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
             ctx.push_style(style);
         }
         Tag::Strong => {
-            let style = ctx.theme.strong(ctx.current_style());
+            let style = ctx.theme.emphasized(ctx.current_style());
             ctx.push_style(style);
         }
         Tag::Strikethrough => {

@@ -193,8 +193,8 @@ pub struct MarkdownTheme {
     pub h4: Style,
     pub h5: Style,
     pub h6: Style,
-    /// Emphasis (`**bold**`): the lifted `strong` foreground plus weight, when
-    /// the enclosing voice is plain prose — see [`MarkdownTheme::strong`].
+    /// Emphasis (`**bold**`): the `strong` hue plus weight, applied to plain
+    /// prose only — see [`MarkdownTheme::emphasized`].
     pub strong: Style,
     pub italic: Style,
     pub strikethrough: Style,
@@ -276,10 +276,10 @@ impl MarkdownTheme {
 
     /// The `**bold**` patch, resolved against the enclosing style.
     ///
-    /// Weight everywhere; the lifted `strong` foreground only where the voice
-    /// is plain prose. A heading, a link or inline code keeps its own hue —
-    /// emphasis inside a role must not repaint that role.
-    pub fn strong(&self, current: Style) -> Style {
+    /// Weight everywhere; the `strong` hue only where the voice is plain
+    /// prose. A heading, a link or inline code keeps its own hue — emphasis
+    /// inside a role must not repaint that role.
+    pub fn emphasized(&self, current: Style) -> Style {
         let prose = current.fg.is_none() || current.fg == self.base.fg;
         current.patch(if prose {
             self.strong
@@ -593,19 +593,19 @@ mod tests {
         let theme = MarkdownTheme::from_palette(&palette);
         // Prose (base fg, or no fg at all) takes the lifted colour.
         for current in [theme.base, Style::new()] {
-            let strong = theme.strong(current);
+            let strong = theme.emphasized(current);
             assert_eq!(strong.fg, Some(palette.strong), "{current:?}");
             assert!(strong.add_modifier.contains(Modifier::BOLD));
         }
         // A heading / link / inline code keeps its own hue, only the weight is
         // added.
         for current in [theme.h2, theme.link, theme.code] {
-            let strong = theme.strong(current);
+            let strong = theme.emphasized(current);
             assert_eq!(strong.fg, current.fg, "{current:?}");
             assert!(strong.add_modifier.contains(Modifier::BOLD));
         }
         // Italic composes with bold (`***x***`).
-        let bold_italic = theme.strong(theme.italic);
+        let bold_italic = theme.emphasized(theme.italic);
         assert!(bold_italic.add_modifier.contains(Modifier::BOLD));
         assert!(bold_italic.add_modifier.contains(Modifier::ITALIC));
     }

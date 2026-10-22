@@ -78,7 +78,7 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // 槽位表：名字 × 覆盖值 × 解析后的颜色 —— 抬头与图例共用一份，别再手抄两遍。
-    let slots: [(&str, &Option<String>, Color); 20] = [
+    let slots: [(&str, &Option<String>, Color); 21] = [
         ("accent", &config.colors.accent, palette.accent),
         ("text", &config.colors.text, palette.text),
         ("thinking", &config.colors.thinking, palette.thinking),
@@ -98,6 +98,7 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
         ("danger", &config.colors.danger, palette.danger),
         ("math", &config.colors.math, palette.math),
         ("heading", &config.colors.heading, palette.heading),
+        ("heading_bright", &None, palette.heading_bright),
         (
             "inline_code",
             &config.colors.inline_code,
@@ -105,7 +106,7 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
         ),
         ("marker", &config.colors.marker, palette.marker),
         ("quote", &config.colors.quote, palette.quote),
-        ("strong", &None, palette.strong),
+        ("strong", &config.colors.strong, palette.strong),
         ("surface", &config.colors.surface, palette.surface),
         (
             "diff_add_bg",
