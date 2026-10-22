@@ -466,7 +466,7 @@ impl App {
         // files that changed on disk: re-read them rather than trusting the memo.
         self.images.set_structure_epoch(self.chat.structure_epoch());
         let candidates = self.chat.image_candidates();
-        let changed = self.images.sync(&candidates);
+        let changed = self.images.sync(candidates);
         // Media pictures: what the frame asked for and the lane does not have becomes one
         // background fetch (the intent is drained after this draw). Media objects are
         // immutable and session-scoped, so a batch that is still in flight is simply not

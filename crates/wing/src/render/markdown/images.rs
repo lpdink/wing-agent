@@ -46,6 +46,8 @@
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use ratatui::layout::Size;
 
@@ -148,8 +150,16 @@ impl ImageEntry {
 /// render call and has to notice input changes: a late-arriving probe or a cell size changes the
 /// row count, which must force a rebuild. Structural equality is how that change is detected —
 /// the cell rides the same channel as a shape.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ImageOpts {
+///
+/// The value is shared behind an [`Arc`]: one set per frame is handed to every cell, so the
+/// per-frame "did anything change" test (`CachedCell`) would otherwise walk the whole metadata
+/// table once per cell twice per frame. Equality is still *structural* — the pointer test is only
+/// a fast path for the overwhelmingly common "same value" case.
+#[derive(Clone, Debug)]
+pub struct ImageOpts(Arc<ImageOptsInner>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct ImageOptsInner {
     mode: ImageMode,
     workspace: Option<PathBuf>,
     shapes: Vec<ImageEntry>,
@@ -160,19 +170,36 @@ pub struct ImageOpts {
     cell: CellPixels,
 }
 
+impl PartialEq for ImageOpts {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl Eq for ImageOpts {}
+
+impl Default for ImageOpts {
+    fn default() -> Self {
+        Self(Arc::new(ImageOptsInner {
+            mode: ImageMode::Off,
+            workspace: None,
+            shapes: Vec::new(),
+            cell: CellPixels::new(0, 0),
+        }))
+    }
+}
+
 /// The shared "images are off" options — what [`super::RenderOpts::new`]
 /// borrows, so a render with default options pays nothing for images.
-static NO_IMAGES: ImageOpts = ImageOpts {
-    mode: ImageMode::Off,
-    workspace: None,
-    shapes: Vec::new(),
-    cell: CellPixels::new(0, 0),
-};
+static NO_IMAGES: OnceLock<ImageOpts> = OnceLock::new();
 
 impl ImageOpts {
     /// The shared `Off` options (no anchors, no metadata lookups).
+    ///
+    /// One value for the whole process: every caller gets the same [`Arc`], so the fast path
+    /// above answers the "unchanged" question without touching the (empty) table.
     pub fn off() -> &'static ImageOpts {
-        &NO_IMAGES
+        NO_IMAGES.get_or_init(ImageOpts::default)
     }
 
     /// `Anchor` options over `shapes`, resolving relative paths against `workspace` and sizing
@@ -198,27 +225,27 @@ impl ImageOpts {
         if !cell.is_valid() {
             return Self::off().clone();
         }
-        Self {
+        Self(Arc::new(ImageOptsInner {
             mode: ImageMode::Anchor,
             workspace,
             shapes,
             cell,
-        }
+        }))
     }
 
     /// The active mode.
     pub fn mode(&self) -> ImageMode {
-        self.mode
+        self.0.mode
     }
 
     /// The workspace root used to resolve relative paths.
     pub fn workspace(&self) -> Option<&Path> {
-        self.workspace.as_deref()
+        self.0.workspace.as_deref()
     }
 
     /// The metadata table.
     pub fn shapes(&self) -> &[ImageEntry] {
-        &self.shapes
+        &self.0.shapes
     }
 
     /// The character cell every row count is computed against.
@@ -227,12 +254,12 @@ impl ImageOpts {
     /// one that owns the terminal capability, so the layout and the encoder are
     /// handed the same numbers by construction.
     pub fn cell_pixels(&self) -> CellPixels {
-        self.cell
+        self.0.cell
     }
 
     /// Whether anchors are enabled at all.
     pub fn is_enabled(&self) -> bool {
-        self.mode == ImageMode::Anchor
+        self.0.mode == ImageMode::Anchor
     }
 
     /// The shape recorded for `path` (an exact match of the resolved form).
@@ -242,7 +269,8 @@ impl ImageOpts {
     /// per image per *block* (with the streaming engine). Duplicate rows answer with the first
     /// one (see [`anchor`](Self::anchor)).
     pub fn shape_for(&self, path: &Path) -> Option<ImageShape> {
-        self.shapes
+        self.0
+            .shapes
             .iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.shape)
@@ -705,6 +733,65 @@ mod tests {
     /// The terminal every row count here is laid out for: a 10×20 pixel cell
     /// (an 8×16 font, the fixture the whole module's docs use).
     const CELL: CellPixels = CellPixels::new(10, 20);
+
+    /// 同一份选项被整帧共享：克隆只加引用计数（相等判定由此走指针快路径），
+    /// 而值相等仍按结构比较（快路径不许掩盖真变化）。
+    #[test]
+    fn a_clone_shares_the_arc_and_equality_stays_structural() {
+        let opts = ImageOpts::anchor(
+            Some(PathBuf::from("/ws")),
+            vec![ImageEntry::new("/ws/a.png", ImageShape::new(10, 10))],
+            CELL,
+        );
+        let copy = opts.clone();
+        assert_eq!(
+            Arc::strong_count(&opts.0),
+            2,
+            "克隆只加一次引用计数，不深拷形状表"
+        );
+        assert_eq!(opts, copy);
+        // 另一份**内容相同**但独立构造的选项仍然相等（深比较兜底，语义不变）。
+        let rebuilt = ImageOpts::anchor(
+            Some(PathBuf::from("/ws")),
+            vec![ImageEntry::new("/ws/a.png", ImageShape::new(10, 10))],
+            CELL,
+        );
+        assert!(!Arc::ptr_eq(&opts.0, &rebuilt.0));
+        assert_eq!(opts, rebuilt, "结构相等仍是相等的定义");
+    }
+
+    /// 任何字段不同都不相等（形状表逐项比较仍然生效 —— 快路径不许掩盖真变化）。
+    #[test]
+    fn options_that_differ_in_any_field_are_not_equal() {
+        let base = ImageOpts::anchor(
+            Some(PathBuf::from("/ws")),
+            vec![ImageEntry::new("/ws/a.png", ImageShape::new(10, 10))],
+            CELL,
+        );
+        let other_shape = ImageOpts::anchor(
+            Some(PathBuf::from("/ws")),
+            vec![ImageEntry::new("/ws/a.png", ImageShape::new(10, 11))],
+            CELL,
+        );
+        let other_workspace = ImageOpts::anchor(
+            Some(PathBuf::from("/other")),
+            vec![ImageEntry::new("/ws/a.png", ImageShape::new(10, 10))],
+            CELL,
+        );
+        let other_cell = ImageOpts::anchor(
+            Some(PathBuf::from("/ws")),
+            vec![ImageEntry::new("/ws/a.png", ImageShape::new(10, 10))],
+            CellPixels::new(8, 16),
+        );
+        for (name, other) in [
+            ("shape", other_shape),
+            ("workspace", other_workspace),
+            ("cell", other_cell),
+        ] {
+            assert_ne!(base, other, "{name} 变了就不相等");
+        }
+        assert_ne!(base, ImageOpts::off().clone(), "Off 与 Anchor 不等");
+    }
 
     /// The step's acceptance table, asserted row by row: the layout reserves
     /// the rows the encoder draws — no more (no blank band), no less.

@@ -161,23 +161,13 @@ fn clamp(row: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::line_width;
+    use crate::render::test_support::text_of;
     use ratatui::style::Modifier;
     use unicode_width::UnicodeWidthStr;
 
     fn palette() -> ThemePalette {
         ThemePalette::default()
-    }
-
-    fn text_of(lines: &[Line<'static>]) -> String {
-        lines
-            .iter()
-            .map(|l| l.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn line_width(line: &Line<'_>) -> usize {
-        line.spans.iter().map(|s| s.content.width()).sum()
     }
 
     // ── 形态 ────────────────────────────────────────────────

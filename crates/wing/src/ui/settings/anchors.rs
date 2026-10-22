@@ -11,7 +11,7 @@
 //!   Interface
 //! ```
 //!
-//! 锚点的**内容**全部来自 07 的 [`AnchorView`]（后端 `groups[]` + Interface 的本地声明），
+//! 锚点的**内容**全部来自 [`AnchorView`]（后端 `groups[]` + Interface 的本地声明），
 //! 这里只负责排版：一行一个锚点，光标在左栏时画 `❯`，右端画徽标。
 //! 徽标的优先级：搜索命中数 > 问题数 > 脏标记（搜索态下命中数最有用；问题比脏更要紧）。
 
@@ -41,15 +41,11 @@ pub(crate) fn anchor_lines(
     if height == 0 || width == 0 {
         return Vec::new();
     }
-    let views = panel.anchor_views();
-    if views.is_empty() {
-        return Vec::new();
-    }
     let focused = panel.focus() == Focus::Groups;
-    let range = panel.anchors_visible_range(height);
-    range
-        .filter_map(|index| views.get(index))
-        .map(|view| anchor_line(view, focused, palette, width))
+    panel
+        .anchors_visible_range(height)
+        .filter_map(|index| panel.anchor_view(index))
+        .map(|view| anchor_line(&view, focused, palette, width))
         .take(height)
         .collect()
 }

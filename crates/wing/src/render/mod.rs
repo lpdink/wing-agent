@@ -2,11 +2,11 @@
 
 pub mod diff_highlight;
 pub mod fit;
-pub mod line_utils;
 pub mod markdown;
 pub mod picture;
 pub mod renderable;
 pub mod syntax;
 pub mod table;
 
-pub use renderable::Renderable;
+#[cfg(test)]
+pub(crate) mod test_support;

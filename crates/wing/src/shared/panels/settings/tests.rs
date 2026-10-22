@@ -1,7 +1,7 @@
 //! 面板级测试：键位、模态性、Esc 阶梯、动作产出、回流（`apply_save` / `apply_snapshot`）。
 //!
 //! 每一条都用「手工目录 + 手工文档」构造状态机，断言的是**状态与产出的动作**，
-//! 不看渲染（那是 08 的 `TestBackend` 帧测试）。
+//! 不看渲染（那是 `ui/settings` 的 `TestBackend` 帧测试）。
 
 use std::collections::HashMap;
 
@@ -1837,7 +1837,7 @@ fn reload_when_clean_emits_reload_and_when_dirty_asks_first() {
 
 #[test]
 fn ctrl_r_is_accepted_only_when_a_restart_is_pending() {
-    // AD1：没有待重启的变更 → 无操作（键位栏也不显示这个键）。
+    // 没有待重启的变更 → 无操作（键位栏也不显示这个键）。
     let mut panel = panel();
     assert_eq!(press(&mut panel, ctrl('r')), SettingsAction::None);
     assert!(!panel.footer_hint().contains("Ctrl+R"));
@@ -2454,7 +2454,7 @@ fn problems_and_add_are_consistent_for_a_zero_item_list() {
     );
 }
 
-// ── 返修 r1：B1 密文 null 红线 / S1 问题清单键位 / AD3 编辑器无操作 / N5 setup 标记 ──
+// ── 密文 null 红线 / 问题清单键位 / 编辑器无操作 / setup 标记 ──
 
 /// `get` 快照：`api_key` 为 `null`（密文「保留」态）+ secrets 表说磁盘上它是 set。
 fn state_with_secret_set() -> SettingsGetResponse {
@@ -2471,7 +2471,7 @@ fn state_with_secret_set() -> SettingsGetResponse {
 
 #[test]
 fn unedited_secret_null_is_echoed_back_in_the_save_document() {
-    // design.md §7.5 的契约红线：`null` = 保留磁盘现值，保存时必须**原样回传**。
+    // 契约红线：`null` = 保留磁盘现值，保存时必须**原样回传**。
     // 丢掉这个键 = 清空密钥 = 用户下一次调用 401。
     let mut panel = SettingsPanel::new(&schema(), state_with_secret_set(), None, View::Tree);
     goto(&mut panel, "providers");
@@ -2603,7 +2603,7 @@ fn problems_view_r_reloads_and_ctrl_r_restarts_like_the_tree() {
 
 #[test]
 fn submitting_the_untouched_buffer_is_a_no_op() {
-    // AD3：打开 → 不改 → Enter 必须什么都不做（不写入、不标脏）。
+    // 打开 → 不改 → Enter 必须什么都不做（不写入、不标脏）。
     let mut panel = panel();
     goto(&mut panel, "gateway");
     press_code(&mut panel, KeyCode::Right);
@@ -2639,7 +2639,7 @@ fn submitting_the_default_prefill_does_not_pin_it() {
 
 #[test]
 fn editing_the_buffer_really_does_write() {
-    // AD3 的反面：真的改了就必须写（免得把 no-op 误扩成「永不写入」）。
+    // 反面：真的改了就必须写（免得把 no-op 误扩成「永不写入」）。
     let mut panel = panel_with(json!({}));
     goto(&mut panel, "gateway");
     press_code(&mut panel, KeyCode::Right);

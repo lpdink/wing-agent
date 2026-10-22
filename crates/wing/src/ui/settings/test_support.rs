@@ -1,9 +1,10 @@
 //! 帧测试夹具：手工构造的 catalog / 文档 / 面板，加一组按键驱动辅助。
 //!
 //! 构造器只填测试真正读的字段，其余走 [`node`] 的合理缺省 —— 每条用例都能一眼看清
-//! 「这个目录长什么样」。**这些夹具是 ui/settings 自己的**（07 的 `test_support` 是
-//! settings 包私有的），刻意多带了渲染要断言的东西：`notes` / `example` / 约束 /
-//! 一条超长 `doc` / 一个 `value_hint = "color"` 的颜色字段。
+//! 「这个目录长什么样」。节点构造器与面板那份（`shared/panels/settings/test_support`）共用
+//! 一份；只有 `root` / `sample_catalog` / `interface_catalog` 是 ui/settings 自己的，因为它们
+//! 刻意多带了渲染要断言的东西：`notes` / `example` / 约束 / 一条超长 `doc` /
+//! 一个 `value_hint = "color"` 的颜色字段。
 
 use std::collections::HashMap;
 
@@ -15,7 +16,6 @@ use serde_json::json;
 use wing_api_client::models::ApplyScope;
 use wing_api_client::models::SecretPresence;
 use wing_api_client::models::SecretState;
-use wing_api_client::models::SettingChoice;
 use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
@@ -28,160 +28,18 @@ use crate::shared::panels::settings::RowMarkers;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
 
-/// 路径拼接（`join_path` 在 07 里是包私有的，夹具自带一份）。
-fn join_path(prefix: &str, key: &str) -> String {
-    if prefix.is_empty() {
-        key.to_string()
-    } else {
-        format!("{prefix}.{key}")
-    }
-}
-
 pub(crate) fn palette() -> ThemePalette {
     ThemePalette::default()
 }
 
 // ── 目录节点 ────────────────────────────────────────────────
 
-/// 合理缺省：editable、hot、无约束、无默认。
-pub(crate) fn node(key: &str, kind: SettingKind) -> SettingNode {
-    SettingNode {
-        key: key.into(),
-        path: key.into(),
-        title: key.into(),
-        doc: format!("{key} 的说明"),
-        notes: vec![],
-        example: None,
-        order: 0,
-        kind,
-        required: false,
-        nullable: false,
-        default: None,
-        has_default: false,
-        min: None,
-        max: None,
-        exclusive_min: false,
-        exclusive_max: false,
-        min_length: None,
-        pattern: None,
-        choices: vec![],
-        min_items: None,
-        max_items: None,
-        secret: false,
-        apply: ApplyScope::Hot,
-        editable: true,
-        deprecated: None,
-        section: None,
-        section_doc: None,
-        children: vec![],
-        element: None,
-        variants: None,
-        summary_fields: vec![],
-        value_hint: None,
-    }
-}
-
-pub(crate) fn object(key: &str, children: Vec<SettingNode>) -> SettingNode {
-    let mut node = node(key, SettingKind::Object);
-    node.children = children;
-    node
-}
-
-pub(crate) fn list(key: &str, element: SettingNode) -> SettingNode {
-    let mut node = node(key, SettingKind::List);
-    node.element = Some(Box::new(element));
-    node
-}
-
-pub(crate) fn list_of(key: &str, variants: Vec<SettingNode>) -> SettingNode {
-    let mut node = node(key, SettingKind::List);
-    node.variants = Some(variants);
-    node
-}
-
-pub(crate) fn element(inner: SettingNode) -> SettingNode {
-    SettingNode {
-        key: "[]".into(),
-        ..inner
-    }
-}
-
-pub(crate) fn str_field(key: &str) -> SettingNode {
-    node(key, SettingKind::Str)
-}
-
-pub(crate) fn required_str(key: &str) -> SettingNode {
-    let mut node = node(key, SettingKind::Str);
-    node.required = true;
-    node
-}
-
-pub(crate) fn int_field(key: &str, min: Option<f64>, max: Option<f64>) -> SettingNode {
-    let mut node = node(key, SettingKind::Int);
-    node.min = min;
-    node.max = max;
-    node.has_default = true;
-    node.default = Some(json!(0));
-    node
-}
-
-pub(crate) fn float_field(key: &str, default: f64) -> SettingNode {
-    let mut node = node(key, SettingKind::Float);
-    node.has_default = true;
-    node.default = Some(json!(default));
-    node
-}
-
-pub(crate) fn bool_field(key: &str, default: bool) -> SettingNode {
-    let mut node = node(key, SettingKind::Bool);
-    node.has_default = true;
-    node.default = Some(json!(default));
-    node
-}
-
-pub(crate) fn secret_field(key: &str) -> SettingNode {
-    let mut node = node(key, SettingKind::Secret);
-    node.secret = true;
-    node
-}
-
-pub(crate) fn enum_field(key: &str, values: &[(&str, &str)]) -> SettingNode {
-    let mut node = node(key, SettingKind::Enum);
-    node.choices = values
-        .iter()
-        .map(|(value, doc)| SettingChoice {
-            value: (*value).into(),
-            doc: Some((*doc).into()),
-        })
-        .collect();
-    node
-}
-
-pub(crate) fn map_field(key: &str) -> SettingNode {
-    let mut node = node(key, SettingKind::Map);
-    node.has_default = true;
-    node.default = Some(json!({}));
-    node
-}
-
-/// 递归重算全部 path（`[]` = 元素模板）。
-pub(crate) fn with_paths(mut node: SettingNode, prefix: &str) -> SettingNode {
-    node.path = if node.key == "[]" {
-        format!("{prefix}[]")
-    } else {
-        join_path(prefix, &node.key)
-    };
-    let path = node.path.clone();
-    if let Some(child) = node.element.take() {
-        node.element = Some(Box::new(with_paths(*child, &path)));
-    }
-    if let Some(variants) = node.variants.take() {
-        node.variants = Some(variants.into_iter().map(|v| with_paths(v, &path)).collect());
-    }
-    let children = std::mem::take(&mut node.children);
-    node.children = children.into_iter().map(|c| with_paths(c, &path)).collect();
-    node
-}
+/// 与面板那份是**同一批**构造器（`shared/panels/settings/test_support`）：一份实现，
+/// 两个面板共用（`SettingNode` 加字段时不会只改一处）。
+pub(crate) use crate::shared::panels::settings::test_support::{
+    bool_field, element, enum_field, float_field, int_field, list, list_of, map_field, node,
+    object, required_str, secret_field, str_field, with_paths,
+};
 
 pub(crate) fn root(children: Vec<SettingNode>) -> SettingNode {
     let mut node = node("config", SettingKind::Object);

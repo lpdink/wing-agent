@@ -1,8 +1,8 @@
 //! 设置面板的浮层 overlay（v2：VS Code 式的居中卡片 + 双栏）。
 //!
 //! 渲染层**零状态**：这里只有 `&SettingsPanel`、`&SettingNode` 与 `&ThemePalette` ——
-//! 不持有面板、不调用它的任何 `&mut self` 方法、不发请求、不读盘。10 步骤负责
-//! 算出卡片矩形（[`card_area`]）、渲染本 widget、把按键喂给 07 的状态机。
+//! 不持有面板、不调用它的任何 `&mut self` 方法、不发请求、不读盘。本层负责
+//! 算出卡片矩形（[`card_area`]）与渲染本 widget；按键喂给状态机是调用方的事。
 //!
 //! ```text
 //!        ┌─ ⚙ Settings ── ~/.wing/core/config.yaml ── 2 unsaved ─ valid ─┐
@@ -29,7 +29,7 @@
 //! 3. **左栏**宽度 = `clamp(内容宽 × 22%, 14, 22)`，且保证右栏至少 24 列。
 //! 4. **右栏** ≥ 78 列时再竖切出详情栏（58% / 42%）；否则末行留给当前行的 doc 提示。
 //!
-//! # 接线契约（10 步骤照这份签名接）
+//! # 接线契约（调用方照这份签名接）
 //!
 //! ```ignore
 //! if let Some(panel) = &self.settings_panel {
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! - `catalogs` 必须与构造 `SettingsPanel` 用的是**同一份**（详情栏 / 色块预览要目录元信息，
-//!   07 没有「行 → `SettingNode`」的访问器；见 08 design.md D11）。
+//!   而面板没有「行 → `SettingNode`」的访问器）。
 //! - 任意 `Rect` 都能画；widget 自带 `Clear`（只清自己那块），渲染进子区域也不会写到区域外。
 //! - 颜色只取 `palette` 的槽位，不设背景（`terminal` 预设下一样成立）。
 
@@ -125,9 +125,9 @@ pub fn card_area(terminal: Rect) -> Rect {
 /// 渲染设置面板需要的目录视图。
 ///
 /// 与 `SettingsPanel` 内部持有的 catalog 是同一份：`gateway` = `SettingsSchemaResponse.root`，
-/// `interface` = 09 的 `interface_catalog()`（没注入 Interface 根时传 `None`）。
+/// `interface` = TUI 侧的 `interface_catalog()`（没注入 Interface 根时传 `None`）。
 /// 它不是新数据源 —— 详情栏的 `doc` / `notes` / `example` / `choices` / 约束与色块预览的
-/// `value_hint` 都住在目录节点上，而 07 的只读访问器里没有「行 → 节点」（design D11）。
+/// `value_hint` 都住在目录节点上，而面板的只读访问器里没有「行 → 节点」。
 #[derive(Clone, Copy)]
 pub struct SettingsCatalogs<'a> {
     /// Gateway 根的目录（`config.yaml`）。
@@ -162,7 +162,7 @@ impl<'a> SettingsCatalogs<'a> {
         catalog.node_at(path)
     }
 
-    /// 这一行的值是不是「颜色」（`value_hint == "color"`，design §20 D25）。
+    /// 这一行的值是不是「颜色」（`value_hint == "color"`）。
     pub(crate) fn hint_for(&self, root: Root, path: &str) -> bool {
         self.node_for(root, path)
             .and_then(|node| node.value_hint.as_deref())
@@ -320,25 +320,22 @@ impl<'a> SettingsOverlay<'a> {
         )
     }
 
-    /// 键位栏要几行（1 或 2）：与 [`Self::hint_lines`] 同一份装箱数学，先算行数再切区域。
-    fn hint_rows(&self, width: usize) -> u16 {
-        let rows = pack_segments(
-            &self.panel.footer_hint(),
-            width.saturating_sub(1),
-            HINT_ROWS_MAX as usize,
-        )
-        .len();
-        (rows as u16).clamp(1, HINT_ROWS_MAX)
-    }
-
-    /// 键位栏的行（07 的 `footer_hint()` 是交互语义的唯一出处，这里只排版）。
+    /// 键位栏的行（`footer_hint()` 是交互语义的唯一出处，这里只排版）。
     ///
     /// 按 ` · ` 整段装箱而不是逐字符折行：一个 CJK 断点就能把「Esc 关闭」挤到第 3 行、
     /// 然后被两行上限截掉 —— 而那是这个面板最重要的一个键。
-    fn hint_lines(&self, rows: usize, width: usize) -> Vec<Line<'static>> {
+    ///
+    /// `packed` 是 [`packed_hints`] 的结果（调用方为了算区域已经装过一次）。行预算被矮卡片
+    /// 压小时按新预算重装：`pack_segments` 的「尾巴优先」规则依赖 `max_rows`，直接截断会
+    /// 丢掉 `… Esc 关闭`。
+    fn hint_lines(&self, packed: &[String], rows: usize, width: usize) -> Vec<Line<'static>> {
         let dim = Style::default().fg(self.palette.dim);
-        pack_segments(&self.panel.footer_hint(), width.saturating_sub(1), rows)
-            .into_iter()
+        let rows = if rows == packed.len() {
+            packed.to_vec()
+        } else {
+            pack_segments(&self.panel.footer_hint(), width.saturating_sub(1), rows)
+        };
+        rows.into_iter()
             .map(|row| clamp_line(Line::from(Span::styled(format!(" {row}"), dim)), width))
             .collect()
     }
@@ -496,7 +493,10 @@ impl Widget for SettingsOverlay<'_> {
                 self.palette.dim
             }))
             .title(self.title_line(area.width as usize));
-        let hint_rows = self.hint_rows(area.width.saturating_sub(2) as usize);
+        // 键位栏：这一次 render 只装一次（行数定区域、同一份结果画行）。
+        // `regions_for`（翻页步长等查询）各自装自己那一次 —— 它们不经过 render。
+        let hints = packed_hints(self.panel, area.width as usize);
+        let hint_rows = hint_row_count(&hints);
         let columns = !self.panel.anchors().is_empty();
         let Some(regions) = Regions::new(
             area,
@@ -536,10 +536,13 @@ impl Widget for SettingsOverlay<'_> {
             }
         }
 
-        // 键位栏（07 的 footer_hint 折行；最多两行）。
+        // 键位栏（footer_hint 折行；最多两行）。
         if regions.hints.height > 0 {
-            let lines =
-                self.hint_lines(regions.hints.height as usize, regions.hints.width as usize);
+            let lines = self.hint_lines(
+                &hints,
+                regions.hints.height as usize,
+                regions.hints.width as usize,
+            );
             draw_lines(buf, regions.hints, &lines);
         }
 
@@ -577,18 +580,25 @@ pub fn has_anchor_column(panel: &SettingsPanel, area: Rect) -> bool {
         .is_some()
 }
 
+/// 键位栏的装箱结果 —— 行数与画行用的是**同一份**装箱（` · ` 整段、最多 [`HINT_ROWS_MAX`] 行）。
+///
+/// `card_width` 是**卡片**宽度：装箱可用宽 = 卡片宽 − 左右边框 − 行首那一个空格。
+fn packed_hints(panel: &SettingsPanel, card_width: usize) -> Vec<String> {
+    pack_segments(
+        &panel.footer_hint(),
+        card_width.saturating_sub(3),
+        HINT_ROWS_MAX as usize,
+    )
+}
+
+/// 键位栏占几行（装出来的行数，钳在 `1..=HINT_ROWS_MAX`）。
+fn hint_row_count(packed: &[String]) -> u16 {
+    (packed.len() as u16).clamp(1, HINT_ROWS_MAX)
+}
+
 /// 与 [`SettingsOverlay::render`] 同一份区域切分（翻页步长必须与实际画出来的行数一致）。
 fn regions_for(panel: &SettingsPanel, area: Rect) -> Option<Regions> {
-    let hint_rows = {
-        let width = area.width.saturating_sub(2) as usize;
-        let rows = pack_segments(
-            &panel.footer_hint(),
-            width.saturating_sub(1),
-            HINT_ROWS_MAX as usize,
-        )
-        .len();
-        (rows as u16).clamp(1, HINT_ROWS_MAX)
-    };
+    let hint_rows = hint_row_count(&packed_hints(panel, area.width as usize));
     Regions::new(
         area,
         panel.view(),

@@ -322,6 +322,16 @@ fn highlight_matches(name: &str, filter: &str, accent: Color) -> Vec<Span<'stati
     spans
 }
 
+/// 一次行渲染的上下文：同一帧内跨行不变的色板（强调 / 暗淡）与逐行变化的选中态
+/// （它同时决定底色）。打包成一个参数是为了不再给两个行渲染函数各挂九个位置参数。
+#[derive(Clone, Copy)]
+struct RowStyle {
+    base: Style,
+    accent: Color,
+    dim: Color,
+    selected: bool,
+}
+
 /// Render a selection popup widget.
 pub struct SelectionPopup<'a> {
     rows: &'a [SelectionRow],
@@ -355,19 +365,21 @@ impl<'a> SelectionPopup<'a> {
     }
 
     /// Render a plain single-line row: `<name>  <description>`.
-    #[allow(clippy::too_many_arguments)]
     fn render_plain_row(
         &self,
         row: &SelectionRow,
         y: u16,
         area: Rect,
-        base_style: Style,
-        accent: Color,
-        dim_color: Color,
-        is_selected: bool,
+        style: RowStyle,
         name_width: usize,
         buf: &mut Buffer,
     ) {
+        let RowStyle {
+            base: base_style,
+            accent,
+            dim: dim_color,
+            selected: is_selected,
+        } = style;
         Self::clear_line(buf, area, y, base_style);
 
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -412,18 +424,20 @@ impl<'a> SelectionPopup<'a> {
     /// workspace 只做展示（#145 删掉的是「按 workspace 排序」，不是这段显示）：
     /// 行 1 的容量先让给时间标签与星标，再让给树前缀（放不下时截前缀，保尾部
     /// 连接符），剩下的才画 workspace（超长截断）。
-    #[allow(clippy::too_many_arguments)]
     fn render_rich_row(
         &self,
         rich: &RichSessionRow,
         y: u16,
         area: Rect,
-        base_style: Style,
-        accent: Color,
-        dim_color: Color,
-        is_selected: bool,
+        style: RowStyle,
         buf: &mut Buffer,
     ) {
+        let RowStyle {
+            base: base_style,
+            accent,
+            dim: dim_color,
+            selected: is_selected,
+        } = style;
         let width = area.width as usize;
 
         // ── Line 1: [tree prefix] + status icon + workspace + [last_active] + [★] ──
@@ -576,35 +590,21 @@ impl Widget for SelectionPopup<'_> {
             let row = &self.rows[idx];
             let is_selected = idx == selected;
             let bg = if is_selected { dim_color } else { Color::Reset };
-            let base_style = Style::default().bg(bg);
+            let style = RowStyle {
+                base: Style::default().bg(bg),
+                accent,
+                dim: dim_color,
+                selected: is_selected,
+            };
 
             if let Some(rich) = &row.rich {
                 if y + 1 >= bottom {
                     break;
                 }
-                self.render_rich_row(
-                    rich,
-                    y,
-                    area,
-                    base_style,
-                    accent,
-                    dim_color,
-                    is_selected,
-                    buf,
-                );
+                self.render_rich_row(rich, y, area, style, buf);
                 y += 2;
             } else {
-                self.render_plain_row(
-                    row,
-                    y,
-                    area,
-                    base_style,
-                    accent,
-                    dim_color,
-                    is_selected,
-                    name_width,
-                    buf,
-                );
+                self.render_plain_row(row, y, area, style, name_width, buf);
                 y += 1;
             }
         }

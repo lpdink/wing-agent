@@ -13,18 +13,12 @@
 //! sent-but-not-yet-accepted user message, i.e. another content state, not a
 //! viewport concern.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use ratatui::widgets::Paragraph;
-use ratatui::widgets::Widget;
-use ratatui::widgets::Wrap;
 
 use crate::config::ThemePalette;
-use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
 use crate::render::markdown::ImageOpts;
 use crate::render::markdown::Profile;
@@ -98,6 +92,15 @@ pub enum ChatCell {
 }
 
 impl ChatCell {
+    /// 用户消息气泡（正常 / 排队 / 被丢弃）：文本画在带内缩的文本区里、背景整块填充，
+    /// 因此不走 blit 快路（理由见 [`CachedCell::is_prewrapped`]）。
+    pub(crate) fn is_user_bubble(&self) -> bool {
+        matches!(
+            self,
+            Self::UserMessage(_) | Self::PendingUserMessage(_) | Self::DiscardedUserMessage(_)
+        )
+    }
+
     /// Render this cell to lines **plus their markdown link spans**.
     ///
     /// Cells without markdown links (everything but assistant messages and
@@ -234,32 +237,6 @@ fn assistant_message_lines(
     composed
 }
 
-impl Renderable for ChatCell {
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &CellContext<'_>) {
-        Paragraph::new(self.to_lines(area.width, ctx))
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
-    }
-
-    /// Wrap-aware line count — the single source of truth for cell height.
-    fn desired_height(&self, width: u16, ctx: &CellContext<'_>) -> usize {
-        // UserMessage: text rendered in inset area (2 left, 1 top, 1 bottom padding)
-        if matches!(
-            self,
-            Self::UserMessage(_) | Self::PendingUserMessage(_) | Self::DiscardedUserMessage(_)
-        ) {
-            let text_width = width.saturating_sub(media::TEXT_WIDTH_SUB);
-            return Paragraph::new(self.to_lines(width, ctx))
-                .wrap(Wrap { trim: false })
-                .line_count(text_width)
-                + 2; // top + bottom padding
-        }
-        Paragraph::new(self.to_lines(width, ctx))
-            .wrap(Wrap { trim: false })
-            .line_count(width)
-    }
-}
-
 /// A user message that has been sent but not yet accepted by the model.
 ///
 /// Rendered in the pending area below all committed cells ("stuck at the
@@ -333,11 +310,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_renderable_desired_height() {
+    fn test_user_message_height() {
         let cell = ChatCell::UserMessage("hello".into());
         let (p, l) = test_ctx();
         let ctx = make_ctx(&p, &l);
-        let h = cell.desired_height(80, &ctx);
+        let mut cached = crate::ui::cached_cell::CachedCell::new(cell);
+        let h = cached.compute_height(80, &ctx);
         assert!(h > 0);
         // " hello \n\n" = 2 lines at any reasonable width
         assert!(h >= 2);

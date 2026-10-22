@@ -1832,7 +1832,7 @@ mod tests {
         }
     }
 
-    /// [S2] 上一次读被放弃后，终端仍会把剩下的包补发完。唯一 id 让这些残留落不到下一次
+    /// 上一次读被放弃后，终端仍会把剩下的包补发完。唯一 id 让这些残留落不到下一次
     /// 读上（同 id 时无法区分：同 mime、同 pw）——否则新读会被旧的 DONE 提前终结，投出
     /// 上一次的内容。
     #[test]
@@ -1897,7 +1897,7 @@ mod tests {
         );
     }
 
-    /// [N1] event 侧的孪生 S2：旧事件（被放弃）迟到的 listing / DONE 带的是**旧 pw**，
+    /// event 侧的孪生规则：旧事件（被放弃）迟到的 listing / DONE 带的是**旧 pw**，
     /// 必须当噪声 —— 否则新事件会被旧 listing 定死 mime、被旧 DONE 提前终结。
     #[test]
     fn stale_event_packets_with_another_password_are_ignored() {

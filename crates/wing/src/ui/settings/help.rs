@@ -1,4 +1,4 @@
-//! 帮助浮层（`?`）的内容：design §12.3 的四列全表转成终端排版。
+//! 帮助浮层（`?`）的内容：键盘全表转成终端排版。
 //!
 //! 四列（树 / 编辑器 / 问题清单 / 选择项）在 76 列的浮层里放不下，因此按**用途分组**
 //! 重排 —— 键位一个不少，只是同一行的归属从「列」变成「节」。
@@ -30,7 +30,7 @@ enum HelpRow {
     Key(&'static str, &'static str),
 }
 
-/// 键位表（design §12.3 的全表；顺序 = 使用频率）。
+/// 键位表（顺序 = 使用频率）。
 const TABLE: &[HelpRow] = &[
     HelpRow::Section("两栏"),
     HelpRow::Key("Tab", "切栏（左栏分组 ↔ 右栏设置项）"),
@@ -44,7 +44,7 @@ const TABLE: &[HelpRow] = &[
     HelpRow::Key("/", "搜索（跨分组；Enter 保留 · Esc 恢复）"),
     HelpRow::Key("p", "问题清单（再按一次返回树）"),
     HelpRow::Key("R", "重新载入（丢弃本地改动）"),
-    // AD1：Ctrl+R 只在有待重启的变更时（`restart_required` 非空）生效并出现在键位栏。
+    // Ctrl+R 只在有待重启的变更时（`restart_required` 非空）生效并出现在键位栏。
     HelpRow::Key("Ctrl+R", "立即重启网关（有待重启的变更时）"),
     HelpRow::Key("PgUp PgDn", "翻页；Home End 跳首尾"),
     HelpRow::Key("?", "帮助（再按 ? 或 Esc 关闭）"),

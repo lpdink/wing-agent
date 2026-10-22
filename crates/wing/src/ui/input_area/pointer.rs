@@ -9,8 +9,7 @@
 //!
 //! Why not the chat band's "snapshot the rendered buffer" approach: the chat's
 //! wrapping happens inside ratatui's `Paragraph`, so the rendered buffer is the
-//! only authority; the composer's wrapping is ours, so the model is. See the
-//! change design (`tui-composer-pointer`) for the full rationale.
+//! only authority; the composer's wrapping is ours, so the model is.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

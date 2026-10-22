@@ -256,11 +256,11 @@ impl MarkdownContext<'_> {
     /// Try to turn the image that just closed into an anchor.
     ///
     /// Every gate here is a *degradation*, not an error: the line keeps the
-    /// link rendering it already has (see the design doc, "standalone images
-    /// only"). Called after the link state's `Link` kind was popped (so
-    /// `current_kind()` is the enclosing element) and after the image's own
-    /// destination segments were appended (so the recorded segment count is
-    /// the line's final one for a standalone image).
+    /// link rendering it already has. Only an image standing alone on its line
+    /// may become an anchor. Called after the link state's `Link` kind was
+    /// popped (so `current_kind()` is the enclosing element) and after the
+    /// image's own destination segments were appended (so the recorded segment
+    /// count is the line's final one for a standalone image).
     fn try_image_anchor(
         &mut self,
         destination: &str,

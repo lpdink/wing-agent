@@ -1,12 +1,12 @@
 //! 问题清单：本地生成 + 与后端 problems 合并去重 + 严重度排序。
 //!
-//! 问题有两个来源（design §14.1）：**本地**按 catalog 约束生成（列表长度、必填缺席），
-//! **后端**由 `GET /api/settings/get` / `POST set` 带回（`kind` 是字符串，未知种类必须容忍，
-//! 见 protocol_addendum P6）。两者按 `(根, 路径, kind)` 去重（**AD4**）：`message` 取**后端**的
-//! （后端是唯一校验器），`hint` 取**非空的那个**（后端优先、本地兜底）。
+//! 问题有两个来源：**本地**按 catalog 约束生成（列表长度、必填缺席），
+//! **后端**由 `GET /api/settings/get` / `POST set` 带回（`kind` 是字符串，未知种类必须容忍）。
+//! 两者按 `(根, 路径, kind)` 去重：`message` 取**后端**的（后端是唯一校验器），`hint` 取
+//! **非空的那个**（后端优先、本地兜底）。
 //!
 //! 本地生成**只覆盖两条约束**：`min_items` / `max_items` 与必填叶子缺席。值级约束
-//! （范围 / pattern）不重复校验已存的值：编辑器在提交时挡，后端 `set` 是权威（design D9）。
+//! （范围 / pattern）不重复校验已存的值：编辑器在提交时挡，后端 `set` 是权威。
 
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
@@ -138,7 +138,7 @@ pub(crate) fn problem(
     }
 }
 
-/// 合并本地与后端问题（**AD4**）：同 `(根, 路径, kind)` 视为同一条 ——
+/// 合并本地与后端问题：同 `(根, 路径, kind)` 视为同一条 ——
 /// `message` 取**后端**的（后端是唯一校验器，文案权威在它），`hint` 取**非空的那个**
 /// （后端优先、本地兜底，绝不因为去重把可操作建议丢掉）。合并后按严重度 + 路径排序。
 pub(crate) fn merge(local: Vec<Problem>, backend: &[SettingProblem]) -> Vec<Problem> {
@@ -179,7 +179,7 @@ pub(crate) fn merge(local: Vec<Problem>, backend: &[SettingProblem]) -> Vec<Prob
     out
 }
 
-/// 严重度序（design §14.1；未知种类最后，`conflict` 与未知同档）。
+/// 严重度序（未知种类最后，`conflict` 与未知同档）。
 fn severity_rank(kind: &str) -> u8 {
     match kind {
         "missing_required" => 0,
@@ -342,11 +342,11 @@ mod tests {
             .iter()
             .find(|p| p.path.as_deref() == Some("providers[0].name"))
             .unwrap();
-        assert_eq!(name.message, "后端文案", "AD4：message 权威在后端");
+        assert_eq!(name.message, "后端文案", "message 权威在后端");
         assert_eq!(
             name.hint.as_deref(),
             Some("本地提示"),
-            "AD4：后端没带 hint → 本地兜底，去重不许把建议丢掉"
+            "后端没带 hint → 本地兜底，去重不许把建议丢掉"
         );
     }
 

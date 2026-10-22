@@ -226,7 +226,7 @@ fn build_grid(
     if rows.is_empty() {
         return Err(Reject::Empty);
     }
-    // 早拒绝：行/列数已经超预算时不必再排版（S2：把预算闸前移）
+    // 早拒绝：行/列数已经超预算时不必再排版。
     if rows.len() > guard::MAX_HEIGHT {
         return Err(Reject::TooTall);
     }
@@ -306,7 +306,7 @@ fn build_grid(
 /// 返回：
 /// - `Ok(None)`：格子是空的（仍然占列宽，但不贡献高度）；
 /// - `Ok(Some(block))`：渲染成功；
-/// - `Err(Reject)`：**渲染失败** —— 必须整条上抛，绝不能用空格占位（B1）。
+/// - `Err(Reject)`：**渲染失败** —— 必须整条上抛，绝不能用空格占位。
 fn render_cell(src: &str, depth: usize) -> Result<Option<RenderedBlock>, Reject> {
     let src = src.trim();
     if src.is_empty() {

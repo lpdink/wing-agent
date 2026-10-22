@@ -37,7 +37,7 @@ pub(crate) const MAX_BRACE_DEPTH: usize = 47;
 pub(crate) const MAX_HEIGHT: usize = 256;
 
 /// 行分隔符（`\\`）数量上限。每个顶层 `\\` 至少产生一行，超过它结果必然超 [`MAX_HEIGHT`]，
-/// 所以在源码扫描阶段就能拒绝，不必先排版（S2：把预算闸前移）。
+/// 所以在源码扫描阶段就能拒绝，不必先排版。
 pub(crate) const MAX_ROW_SEPARATORS: usize = MAX_HEIGHT;
 
 /// 列分隔符（`&`）数量上限。同上，超过它结果必然超宽。

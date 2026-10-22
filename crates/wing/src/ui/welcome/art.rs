@@ -314,3 +314,58 @@ pub const WORDMARK: &[&str] = &[
 ];
 /// [`WORDMARK`] 的列数。
 pub const WORDMARK_COLS: usize = 23;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每帧的尺寸声明必须与像素数据一致：常量不给编译期校验，改画时不跟着改
+    /// 也不会红 —— 这条测试就是那把锁。
+    #[test]
+    fn frames_match_their_declared_size() {
+        let frames: [(&[&str], usize, usize, &str); 11] = [
+            (
+                PERCHED_IDLE,
+                PERCHED_IDLE_COLS,
+                PERCHED_IDLE_ROWS,
+                "PERCHED_IDLE",
+            ),
+            (
+                PERCHED_BLINK,
+                PERCHED_BLINK_COLS,
+                PERCHED_BLINK_ROWS,
+                "PERCHED_BLINK",
+            ),
+            (
+                PERCHED_FLUTTER1,
+                PERCHED_FLUTTER1_COLS,
+                PERCHED_FLUTTER1_ROWS,
+                "PERCHED_FLUTTER1",
+            ),
+            (
+                PERCHED_FLUTTER2,
+                PERCHED_FLUTTER2_COLS,
+                PERCHED_FLUTTER2_ROWS,
+                "PERCHED_FLUTTER2",
+            ),
+            (FLY_0, FLY_0_COLS, FLY_0_ROWS, "FLY_0"),
+            (FLY_1, FLY_1_COLS, FLY_1_ROWS, "FLY_1"),
+            (FLY_2, FLY_2_COLS, FLY_2_ROWS, "FLY_2"),
+            (FLY_3, FLY_3_COLS, FLY_3_ROWS, "FLY_3"),
+            (FLY_4, FLY_4_COLS, FLY_4_ROWS, "FLY_4"),
+            (FLY_5, FLY_5_COLS, FLY_5_ROWS, "FLY_5"),
+            // 名牌没有行常量：行数在这里用字面量钉住（像素大字的版面契约）。
+            (WORDMARK, WORDMARK_COLS, 5, "WORDMARK"),
+        ];
+        for (frame, cols, rows, name) in frames {
+            assert_eq!(frame.len(), rows, "{name}: 像素行数");
+            for (index, row) in frame.iter().enumerate() {
+                assert_eq!(
+                    row.chars().count(),
+                    cols,
+                    "{name} 第 {index} 行的列数：{row:?}"
+                );
+            }
+        }
+    }
+}

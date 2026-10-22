@@ -1,4 +1,4 @@
-//! 内联编辑器：单行缓冲 + 本地校验（**模态**，见 design §20 D20）。
+//! 内联编辑器：单行缓冲 + 本地校验（**模态**）。
 //!
 //! 编辑器激活时只有字符 / `Backspace` / `Delete` / `←` `→` / `Home` `End` / `Ctrl+U` /
 //! `Enter` / `Esc` 有效，`↑`/`↓`/`Tab` 与其余一切**忽略** —— 值有类型与约束，不允许
@@ -6,11 +6,11 @@
 //!
 //! **密文缓冲没有任何公开出口**：`EditState` 的字段全私有，对外只有
 //! [`EditState::visible_buffer`]（密文 = `•` × 长度）与 [`EditState::buffer_len`]。
-//! 「缓冲区永不明文渲染」（design §13.2）由类型系统保证，而不是纪律。
+//! 「缓冲区永不明文渲染」由类型系统保证，而不是纪律。
 //!
-//! 本地校验是**提交前的 UX 糖**，权威永远是后端 `set` 的 `problems`（§7.3）：因此
+//! 本地校验是**提交前的 UX 糖**，权威永远是后端 `set` 的 `problems`：因此
 //! pattern 只做尽力而为的子集匹配（仓库没有 regex 依赖，不为这一步加依赖），
-//! 不支持的构造**跳过**而不是误报（design D12）。
+//! 不支持的构造**跳过**而不是误报。
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -20,6 +20,8 @@ use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 
 use super::doc::Root;
+use crate::shared::text_edit;
+use crate::shared::text_edit::EditOp;
 
 /// 编辑器认得的标量类型（bool 没有编辑器，enum 走内联选择项）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +30,7 @@ pub enum ScalarKind {
     Int,
     Float,
     Secret,
-    /// freeform map（`extra_body`，单行 JSON 编辑器；design §13.5）。
+    /// freeform map（`extra_body`，单行 JSON 编辑器）。
     Json,
 }
 
@@ -82,12 +84,12 @@ pub struct EditState {
     error: Option<String>,
     required: bool,
     constraints: Constraints,
-    /// 打开编辑器时缓冲所代表的值（校验通过才有）——AD3 的「无操作」判据。
+    /// 打开编辑器时缓冲所代表的值（校验通过才有）——「无操作」判据。
     initial_value: Option<Value>,
 }
 
 impl EditState {
-    /// 打开编辑器。密文的初值恒为空（design §13.2：缓冲区从空开始）。
+    /// 打开编辑器。密文的初值恒为空（缓冲区从空开始）。
     pub(crate) fn open(
         root: Root,
         path: String,
@@ -102,7 +104,7 @@ impl EditState {
             initial
         };
         let cursor = buffer.chars().count();
-        // AD3：记住「打开时展示的值」。提交值与之相同 ⇒ 无操作（不写入、不标脏），
+        // 记住「打开时展示的值」。提交值与之相同 ⇒ 无操作（不写入、不标脏），
         // 于是「打开 → 不改 → Enter」不会把声明默认值物化成显式覆盖。
         let initial_value = validate_buffer(kind, &buffer, required, &constraints).ok();
         Self {
@@ -118,12 +120,12 @@ impl EditState {
         }
     }
 
-    /// AD3：这次提交与「打开时展示的值」等价吗（等价 = 该次提交视为无操作）。
+    /// 这次提交与「打开时展示的值」等价吗（等价 = 该次提交视为无操作）。
     pub(crate) fn commits_unchanged(&self, committed: &Value) -> bool {
         self.initial_value.as_ref() == Some(committed)
     }
 
-    // ── 只读访问器（08 渲染） ─────────────────────────────────
+    // ── 只读访问器（渲染层用） ────────────────────────────────
 
     pub fn root(&self) -> Root {
         self.root
@@ -200,7 +202,7 @@ impl EditState {
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.buffer.chars().count(),
             KeyCode::Enter => {
-                // 密文的空提交 = 保留原值不变（§13.2），不是错误也不是编辑。
+                // 密文的空提交 = 保留原值不变，不是错误也不是编辑。
                 if self.is_secret() && self.buffer.is_empty() {
                     return EditEvent::Cancel;
                 }
@@ -213,39 +215,25 @@ impl EditState {
         EditEvent::None
     }
 
-    /// 记录一次提交失败的本地原因（08 渲染在行下方）。
+    /// 记录一次提交失败的本地原因（渲染层画在行下方）。
     pub(crate) fn set_error(&mut self, message: String) {
         self.error = Some(message);
     }
 
     fn insert(&mut self, c: char) {
-        let byte = char_to_byte(&self.buffer, self.cursor);
-        self.buffer.insert(byte, c);
-        self.cursor += 1;
+        text_edit::apply(&mut self.buffer, &mut self.cursor, EditOp::Insert(c));
     }
 
     fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let from = char_to_byte(&self.buffer, self.cursor - 1);
-        let to = char_to_byte(&self.buffer, self.cursor);
-        self.buffer.replace_range(from..to, "");
-        self.cursor -= 1;
+        text_edit::apply(&mut self.buffer, &mut self.cursor, EditOp::Backspace);
     }
 
     fn delete(&mut self) {
-        if self.cursor >= self.buffer.chars().count() {
-            return;
-        }
-        let from = char_to_byte(&self.buffer, self.cursor);
-        let to = char_to_byte(&self.buffer, self.cursor + 1);
-        self.buffer.replace_range(from..to, "");
+        text_edit::apply(&mut self.buffer, &mut self.cursor, EditOp::Delete);
     }
 
     fn move_cursor(&mut self, delta: isize) {
-        let len = self.buffer.chars().count();
-        self.cursor = (self.cursor as isize + delta).clamp(0, len as isize) as usize;
+        text_edit::apply(&mut self.buffer, &mut self.cursor, EditOp::Move(delta));
     }
 
     // ── 校验 ──────────────────────────────────────────────────
@@ -387,14 +375,6 @@ pub(crate) fn fmt_f64(value: f64) -> String {
     } else {
         format!("{value}")
     }
-}
-
-/// 第 `char_idx` 个字符的字节偏移（越界钳到字符串末尾）。
-fn char_to_byte(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len())
 }
 
 // ── 迷你 pattern 匹配（正则子集） ────────────────────────────

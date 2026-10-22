@@ -7,7 +7,7 @@
 //! 索引重排不在这里 —— 删除 / 移动之后要重排 `dirty` / `expanded` / 选择项里的下标，
 //! 那是 [`super::SettingsPanel`] 的编排（用 `doc_edit::remap_index`），因为集合不在本模块手里。
 //!
-//! **已知限制（design A2）**：协议不携带列表的声明默认值（`object`/`list` 的 `default` 为
+//! **已知限制**：协议不携带列表的声明默认值（`object`/`list` 的 `default` 为
 //! `null`），所以「键缺席 = 跟随默认」的列表在面板里显示为空；一旦新增一项，这份列表就被
 //! 物化并钉住（稀疏文档模型的固有语义）。
 
@@ -26,7 +26,7 @@ use crate::shared::doc_edit::Policy;
 ///
 /// 列表行 / `(+ 新增一项)` 行（路径 `<列表>[]`）/ 列表项行 / 项内任意字段行都能定位；
 /// 根头行等没有列表祖先的路径返回 `None`。`variants` 列表在元素处停下（形态未知，
-/// 见 design A14）—— 那正是我们要的「最近的列表」。
+/// 见模块文档的「已知限制」）—— 那正是我们要的「最近的列表」。
 pub(crate) fn nearest_list(catalog: &SettingNode, path: &str) -> Option<String> {
     let steps = parse_path(path)?;
     let mut node = catalog;

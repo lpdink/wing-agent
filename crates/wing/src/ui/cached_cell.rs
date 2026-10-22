@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::render::Renderable;
 use crate::render::markdown::ComposedLines;
 use crate::render::markdown::ImageOpts;
 use crate::render::markdown::ImageSpan;
@@ -48,10 +47,11 @@ pub struct CachedCell {
     /// re-render through `to_lines` clears it, so stale pre-wrapped lines
     /// are never blitted (they would truncate instead of wrapping).
     ///
-    /// Only the streaming renderer sets it: a cell may wrap inside its own
-    /// `to_lines` (DiffView hangs over-wide rows under the gutter), but its
-    /// output is not the *uniformly* wrapped text the blit path expects, so
-    /// it renders through `Paragraph` like every other frozen cell.
+    /// Only the streaming renderer (and the turn-end reconcile) writes it. A
+    /// frozen cell does not need it: whether *its* lines can be blitted is read
+    /// off the line set itself (`CachedLines::fits`) — a cell may wrap inside
+    /// its own `to_lines` (DiffView hangs over-wide rows under the gutter)
+    /// without being uniformly pre-wrapped.
     prewrapped_width: Option<u16>,
     /// Turn-end reconcile requested: the next `compute_lines` /
     /// `compute_height` installs the full reference render.
@@ -65,6 +65,15 @@ pub struct CachedCell {
     /// [`CachedCell::image_candidates`]. Rebuilt with the lines, never with
     /// per-frame work.
     image_candidates: Vec<PathBuf>,
+    /// Bumped whenever [`Self::image_candidates`] is rebuilt. The view folds
+    /// these into one signature to decide whether its concatenated buffer is
+    /// stale — a line rebuild happens inside the cell, so the view cannot know
+    /// about it by itself.
+    ///
+    /// The fold (`ChatView::image_candidates`) relies on `epoch == 0` meaning
+    /// "never projected, so the list is empty": a removed cell whose epoch is
+    /// still 0 therefore leaves nothing behind in the view's buffer.
+    candidates_epoch: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -84,13 +93,42 @@ struct CachedLines {
     /// Whether each line maps to exactly one screen row, i.e. whether the link
     /// spans' row arithmetic holds (see where it is computed for the one case
     /// that breaks it). Always meaningful for link-bearing lines; `true` for
-    /// line sets without links (nothing to place).
+    /// line sets without links (nothing to place) — which is why it is not the
+    /// blit gate. For a line set that carries a side channel it is exactly
+    /// [`Self::fits`].
     rows_exact: bool,
     /// Wrapped screen row of each anchored line, for cells whose lines do not
     /// map one row each — the picture placement's own arithmetic, which is
     /// per-anchor rather than per-cell (see [`image_rows_in_wrapped_rows`]).
     /// Empty when the line index *is* the row index.
     image_rows: Vec<(usize, usize)>,
+    /// Screen rows the line set occupies at the width it was built for — the
+    /// cell's height before the user-bubble padding (see `compute_height`).
+    /// Cached because the height is asked for every cell every frame, while the
+    /// line set only changes when the caches are invalidated.
+    ///
+    /// Every line contributes at least one row, so "every line fits" implies
+    /// `rows == the line count` — but not the other way round (see [`Self::fits`]).
+    rows: usize,
+    /// Whether every line fits the width its renderer wraps at — the blit
+    /// path's precondition (see [`CachedCell::is_prewrapped`]).
+    ///
+    /// Measured at `content_width` (the cell width minus a user bubble's text
+    /// inset; see where it is computed), while the `width` above is the cell's
+    /// box. The two differ only for bubbles, and a bubble never reads this:
+    /// `is_prewrapped` short-circuits on the bubble first.
+    ///
+    /// **Not** derivable from `rows == composed.lines().len()`: the wrapper's
+    /// break test is a column accumulation, so a line that is over-wide by
+    /// exactly the second half of a wide grapheme (`"a" * 79 + "你"` at width
+    /// 80) still counts as one row. Such a line must not be blitted — `Line`
+    /// skips a grapheme that does not fit, `Paragraph` writes it into the last
+    /// cell. See `one_row_does_not_imply_the_line_fits`.
+    ///
+    /// At `content_width == 0` the width test is false for any non-empty line
+    /// (`rows_are_exact`), which is the conservative direction; the render path
+    /// never asks.
+    fits: bool,
 }
 
 /// The wrapped screen row of every anchored line, for a cell whose lines do not
@@ -124,12 +162,13 @@ fn image_rows_in_wrapped_rows(
 
 /// The screen rows one line occupies inside the widget's wrapping `Paragraph`.
 ///
-/// A line that fits is one row (that is the whole point of `rows_exact`); an
-/// over-wide one is measured by `Paragraph` itself — the very same call
-/// [`CachedCell::lines_height`] uses for the cell's height, so the row index the
-/// picture is placed at is the row the line is really rendered at. No
-/// re-implementation of the wrapper, and no cross-line state to reproduce
-/// (`WordWrapper` resets per input line).
+/// A line that fits is one row — which is what makes [`row_count`] (the sum)
+/// equal the line count whenever every line fits; the converse does not hold
+/// (see `CachedLines::fits`). An over-wide one is measured by `Paragraph` itself,
+/// so the row index the picture is placed at — and the cell's height — are the
+/// rows the line is really rendered at. No re-implementation of the wrapper, and
+/// no cross-line state to reproduce (`WordWrapper` resets per input line). The
+/// clone is paid per over-wide line, at cache-build time only.
 fn wrapped_rows(line: &Line<'static>, width: u16) -> usize {
     if width == 0 || line.width() <= usize::from(width) {
         return 1;
@@ -137,6 +176,23 @@ fn wrapped_rows(line: &Line<'static>, width: u16) -> usize {
     Paragraph::new(vec![line.clone()])
         .wrap(Wrap { trim: false })
         .line_count(width)
+}
+
+/// Screen rows a whole line set occupies at `width`.
+///
+/// The sum of the per-line measure below: `WordWrapper` resets its state per
+/// input line, so the composer's total is exactly the sum of the lines' own
+/// row counts (`cached_rows_match_the_paragraph_line_count` pins it against
+/// `Paragraph::line_count`).
+///
+/// A zero width is degenerate and unreachable from the render path (a band of
+/// width 0 never lays cells out); it answers 0 because `WordWrapper` yields no
+/// line at all in that case — the same thing `Paragraph::line_count(0)` says.
+fn row_count(lines: &[Line<'static>], width: u16) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    lines.iter().map(|line| wrapped_rows(line, width)).sum()
 }
 
 /// What the chat view needs to render a cell: its lines, their link spans and
@@ -262,6 +318,7 @@ impl CachedCell {
             pending_finalize: false,
             image_opts: ImageOpts::default(),
             image_candidates: Vec::new(),
+            candidates_epoch: 0,
         }
     }
 
@@ -324,6 +381,11 @@ impl CachedCell {
         &self.image_candidates
     }
 
+    /// See [`Self::candidates_epoch`].
+    pub(crate) fn candidates_epoch(&self) -> u64 {
+        self.candidates_epoch
+    }
+
     /// Access the inner cell.
     pub fn cell(&self) -> &ChatCell {
         &self.cell
@@ -378,17 +440,6 @@ impl CachedCell {
     #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
         self.generation
-    }
-
-    /// Replace the inner cell entirely and bump generation (invalidates all caches).
-    pub fn replace(&mut self, cell: ChatCell) {
-        self.cell = cell;
-        self.generation += 1;
-        self.cached_height = None;
-        self.cached_lines = None;
-        self.stream = None;
-        self.prewrapped_width = None;
-        self.pending_finalize = false;
     }
 
     /// Append a streaming delta to this cell (Thinking / AssistantMessage).
@@ -538,11 +589,30 @@ impl CachedCell {
     /// the render loop blits these directly instead of going through
     /// `Paragraph`. Width- and generation-aware: a resize or a re-render
     /// through `to_lines` invalidates it.
+    ///
+    /// 冻结 cell 走同一条快路的条件是「每行都装得下」（`CachedLines::fits`）：
+    /// 那时行号就是屏幕行号，逐行 blit 与 `Paragraph` 的 wrap + scroll 逐格等价
+    /// （`ui::chat_view::viewport` 的 `a_fitting_line_set_blits_identically_to_a_paragraph`）。
+    ///
+    /// 用户气泡**不**走这条快路，尽管它的行也可能装得下：气泡先整块填背景再画文本，
+    /// 而 blit 用的 `Line::render` 会把宽字素的隐藏格 `reset()`（`Cell::reset` = `EMPTY`，
+    /// 连背景一起清掉），`Paragraph` 的 `render_line` 只写首格、隐藏格保留预填背景。
+    /// CJK 文本下两者逐格不同。
     pub fn is_prewrapped(&self, width: u16, ctx: &CellContext<'_>) -> bool {
         if self.stream_render_active(ctx) {
             return true;
         }
-        self.prewrapped_width == Some(width)
+        if self.prewrapped_width == Some(width) {
+            return true;
+        }
+        !self.cell.is_user_bubble() && self.lines_fit(width)
+    }
+
+    /// 缓存的行集在 `width` 下每行都装得下吗（从而可以逐行 blit）。
+    fn lines_fit(&self, width: u16) -> bool {
+        self.cached_lines
+            .as_ref()
+            .is_some_and(|c| c.width == width && c.generation == self.generation && c.fits)
     }
 
     /// Request the turn-end reconcile: the next render call installs the
@@ -578,13 +648,19 @@ impl CachedCell {
                 rendered.images.to_vec(),
             );
             let height = composed.lines().len();
+            // The stream hard-wraps every line to `width`, so this is normally
+            // true; it is measured rather than asserted, because a width that
+            // cannot hold one grapheme (1 column) yields wider lines, and a
+            // lying flag would be a trap for the next reader.
+            let fits = composed.rows_are_exact(width);
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
                 composed,
-                // A finalized stream renders pre-wrapped lines (every line was
-                // hard-wrapped to the width), so the row maths is exact.
+                // A finalized stream renders one line per row (see above).
                 rows_exact: true,
+                rows: height,
+                fits,
                 // …and it is rendered line by line (the blit path), so an
                 // anchor's row *is* its line index — no wrapped-row walk.
                 image_rows: Vec::new(),
@@ -650,6 +726,7 @@ impl CachedCell {
             let rendered = stream.composed(width, ctx.palette);
             self.image_candidates =
                 image_candidates_of(rendered.links, rendered.images, ctx.images);
+            self.candidates_epoch += 1;
             // Streaming lines are hard-wrapped to the width by construction, and
             // blitted line by line: the line index *is* the screen row.
             return CellFrame {
@@ -670,13 +747,10 @@ impl CachedCell {
             // `width` is the cell's box; a user message renders its text in an inset area
             // (2 left, 1 right), so the row walk and the "does every line fit" test below
             // must measure against the width its lines actually wrap at.
-            let content_width = match &self.cell {
-                ChatCell::UserMessage(_)
-                | ChatCell::PendingUserMessage(_)
-                | ChatCell::DiscardedUserMessage(_) => {
-                    width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB)
-                }
-                _ => width,
+            let content_width = if self.cell.is_user_bubble() {
+                width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB)
+            } else {
+                width
             };
             // The row arithmetic is what the link hit boxes and the image
             // anchors depend on: a line wider than the render area is wrapped
@@ -686,7 +760,9 @@ impl CachedCell {
             // (`wrap::is_prose_line`), so an over-wide code line in the same
             // cell really does break the mapping — measure and refuse rather
             // than point a click or a picture at the wrong rows.
-            let rows_exact = !composed.has_spans() || composed.rows_are_exact(content_width);
+            let fits = composed.rows_are_exact(content_width);
+            let rows_exact = !composed.has_spans() || fits;
+            let rows = row_count(composed.lines(), content_width);
             // The pictures' own row arithmetic: an over-wide line above an
             // anchor wraps into extra rows and pushes it down, and the widget's
             // `Paragraph` scroll counts rows — so the anchor's screen row is the
@@ -704,15 +780,19 @@ impl CachedCell {
             // are being built (the harvest rides the same invalidation).
             self.image_candidates =
                 image_candidates_of(composed.links(), composed.images(), ctx.images);
+            self.candidates_epoch += 1;
             self.cached_lines = Some(CachedLines {
                 width,
                 generation: self.generation,
                 composed,
                 rows_exact,
                 image_rows,
+                rows,
+                fits,
             });
-            // A cell's own `to_lines` output is not the streaming renderer's
-            // uniformly pre-wrapped text — never blit it.
+            // `prewrapped_width` is the streaming engine's flag, and this line
+            // set came from the cell's own `to_lines`: drop it. Whether *these*
+            // lines may be blitted is `CachedLines::fits`, decided per line set.
             self.prewrapped_width = None;
         }
 
@@ -728,13 +808,8 @@ impl CachedCell {
 
     /// Width-aware height, using cache when possible.
     ///
-    /// Reuses cached lines from `compute_lines` to compute height, avoiding a
-    /// second markdown render that `Cell::desired_height()` would incur.
-    /// Cell-specific layout (UserMessage padding) is handled by `lines_height`.
-    ///
-    /// Note: we clone the cached lines (to_vec) to release the internal borrow
-    /// before the mutable `cached_height` assignment.  The clone is cheap
-    /// (~50–100µs at 124 KB) relative to the saved markdown re‑render.
+    /// The height is the cached line set's own row count ([`CachedLines::rows`]) —
+    /// never a second markdown render, and never a copy of the lines.
     pub fn compute_height(&mut self, width: u16, ctx: &CellContext<'_>) -> usize {
         // Frame boundary — see `compute_cell_lines`. Heights for a
         // streaming tool cell depend on the parsed args (command line,
@@ -770,51 +845,36 @@ impl CachedCell {
         {
             return c.height;
         }
-        // Compute lines first (caches them), then derive height from rendered
-        // lines instead of calling cell.desired_height() which re‑renders.
-        let height = {
-            let li = self.compute_lines(width, ctx).to_vec();
-            Self::lines_height(&self.cell, &li, width)
+        // The line set is built (and its row count measured) here at most once;
+        // the height then reads that number instead of re-measuring the text.
+        if !self
+            .cached_lines
+            .as_ref()
+            .is_some_and(|c| c.width == width && c.generation == self.generation)
+        {
+            self.compute_cell_frame(width, ctx);
+        }
+        // Take the cache out to read it: the borrow it hands out would collide
+        // with the `cached_height` assignment below (the old shape cloned the
+        // whole line set to release it).
+        let cached = self
+            .cached_lines
+            .take()
+            .expect("compute_cell_frame just built the lines");
+        // A user bubble renders its text in the inset area (the row count was
+        // measured at that narrower width) plus one padding row above and below.
+        let height = if self.cell.is_user_bubble() {
+            cached.rows + 2
+        } else {
+            cached.rows
         };
+        self.cached_lines = Some(cached);
         self.cached_height = Some(CachedHeight {
             width,
             generation: self.generation,
             height,
         });
         height
-    }
-
-    /// Compute height from already-rendered lines — no markdown re-render.
-    ///
-    /// Mirrors the cell-type-specific layout logic from `ChatCell::desired_height`
-    /// (UserMessage inset padding vs. full-width wrapping) but works on the
-    /// cached lines, avoiding a second call to `to_lines`.
-    fn lines_height(cell: &ChatCell, lines: &[Line<'static>], width: u16) -> usize {
-        match cell {
-            ChatCell::UserMessage(_)
-            | ChatCell::PendingUserMessage(_)
-            | ChatCell::DiscardedUserMessage(_) => {
-                let text_width = width.saturating_sub(crate::ui::chat_view::media::TEXT_WIDTH_SUB);
-                Paragraph::new(lines.to_vec())
-                    .wrap(Wrap { trim: false })
-                    .line_count(text_width)
-                    + 2
-            }
-            _ => Paragraph::new(lines.to_vec())
-                .wrap(Wrap { trim: false })
-                .line_count(width),
-        }
-    }
-
-    /// Width-aware height, read-only (no caching side-effect on lines).
-    pub fn desired_height(&self, width: u16, ctx: &CellContext<'_>) -> usize {
-        if let Some(c) = self.cached_height
-            && c.width == width
-            && c.generation == self.generation
-        {
-            return c.height;
-        }
-        self.cell.desired_height(width, ctx)
     }
 }
 
@@ -828,6 +888,195 @@ mod tests {
 
     /// The terminal cell the anchor fixtures are laid out for.
     const LAYOUT_CELL: CellPixels = CellPixels::new(10, 20);
+
+    /// `rows == 行数` **不**等价于「每行都装得下」：包装器的换行判据是列累加，
+    /// 一行比宽度多出的那一列若属于最后一个宽字素的第二半，它不折行 —— 于是这行算
+    /// 一行（`rows`）却比宽度宽。
+    ///
+    /// 本用例只钉上游度量（同一行上 `wrapped_rows` 与 `rows_are_exact` 分歧），不碰
+    /// 生产代码；字段那一侧由 `a_line_over_wide_by_half_a_wide_grapheme_is_never_blittable`
+    /// 钉住。
+    #[test]
+    fn one_row_does_not_imply_the_line_fits() {
+        let line = Line::from(format!("{}{}", "a".repeat(79), "你"));
+        assert_eq!(line.width(), 81);
+        assert_eq!(wrapped_rows(&line, 80), 1, "包装器不折这一行");
+        assert!(
+            !ComposedLines::plain(vec![line]).rows_are_exact(80),
+            "但它确实装不下"
+        );
+    }
+
+    /// 宽一列、且那一列属于最后一个宽字素的第二半：包装器**不折**这一行，于是
+    /// 「行数 == 行数之和」成立，而这一行**装不下**。`fits` 因此不能由 `rows` 推
+    /// 出来 —— 反例若被 blit，最后一列会少画一个字素（`Line` 整字素跳过，`Paragraph`
+    /// 写进最后一格）。
+    ///
+    /// 这条钉的是**字段本身**（`fits` 为假 + 前提成立）；只钉上游度量的那条是
+    /// `one_row_does_not_imply_the_line_fits`。
+    #[test]
+    fn a_line_over_wide_by_half_a_wide_grapheme_is_never_blittable() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        // 代码行不折行；代码块的 2 列前缀 + 边框让这一行 = 81 列，比 80 宽一列。
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage(format!(
+            "```\n{}你\n```",
+            "a".repeat(75)
+        )));
+        let _ = cell.compute_cell_frame(80, &ctx);
+        let cached = cell.cached_lines.as_ref().expect("just built");
+        assert!(
+            cached.composed.lines().iter().any(|line| line.width() > 80),
+            "前提：有一行超出 80 列"
+        );
+        assert_eq!(
+            cached.rows,
+            cached.composed.lines().len(),
+            "前提：这一行仍只算一行（所以「行数 == 行数之和」不能当作判据）"
+        );
+        assert!(!cached.fits, "比宽度宽的行集不许被宣告为「装得下」");
+        assert!(!cell.is_prewrapped(80, &ctx), "因此不许走 blit 快路");
+    }
+
+    /// 超宽行（代码行不折行）让整个 cell 留在 `Paragraph` 路径上。
+    #[test]
+    fn a_wider_than_band_line_keeps_the_cell_on_the_paragraph_path() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let mut cell = CachedCell::new(ChatCell::AssistantMessage(
+            "```\nlet x = \"一个很长很长很长很长很长很长的字符串\";\n```".to_string(),
+        ));
+        let _ = cell.compute_cell_frame(20, &ctx);
+        assert!(
+            !cell.is_prewrapped(20, &ctx),
+            "代码行装不下 20 列时不许走 blit 快路"
+        );
+    }
+
+    /// 负控：**预填了背景**之后两种画法逐格不同 —— 这就是气泡被排除的机制本身。
+    ///
+    /// 它锁的是两个上游原语的分歧（本用例不碰生产代码）；生产侧的排除由
+    /// `a_user_bubble_never_takes_the_blit_path` 钉住。
+    #[test]
+    fn a_prefilled_background_separates_the_two_primitives() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+        use ratatui::style::Style;
+        use ratatui::widgets::Widget;
+
+        let area = Rect::new(0, 0, 12, 1);
+        let lines = vec![Line::from("你好世界")];
+        let background = Style::default().bg(Color::Red);
+        let prefill = |buf: &mut Buffer| {
+            for x in area.x..area.right() {
+                buf[(x, area.y)].set_style(background);
+            }
+        };
+
+        let mut paragraph = Buffer::empty(area);
+        prefill(&mut paragraph);
+        Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .render(area, &mut paragraph);
+
+        let mut blitted = Buffer::empty(area);
+        prefill(&mut blitted);
+        for (row, line) in lines.iter().enumerate() {
+            line.render(
+                Rect::new(area.x, area.y + row as u16, area.width, 1),
+                &mut blitted,
+            );
+        }
+
+        assert_eq!(
+            paragraph[(1, area.y)].bg,
+            Color::Red,
+            "Paragraph 保留隐藏格的背景"
+        );
+        assert_eq!(
+            blitted[(1, area.y)].bg,
+            Color::Reset,
+            "blit 把宽字素的隐藏格 reset 掉了"
+        );
+    }
+
+    /// 等号那一侧：最宽行恰好等于 cell 宽度时仍算「装得下」（`<=`），快路照走；
+    /// 少一列就不算。夹具用代码块（它的行不折行，宽度可预测）。
+    #[test]
+    fn a_line_exactly_as_wide_as_the_box_still_blits() {
+        let palette = ThemePalette::default();
+        let layout = LayoutConfig::default();
+        let ctx = test_ctx(&palette, &layout);
+        let text = "```\nfn main() {}\n```".to_string();
+
+        let mut probe = CachedCell::new(ChatCell::AssistantMessage(text.clone()));
+        let widest = probe
+            .compute_cell_frame(60, &ctx)
+            .lines
+            .iter()
+            .map(Line::width)
+            .max()
+            .expect("the fixture renders at least one line");
+
+        for (width, expected) in [(widest, true), (widest - 1, false)] {
+            let mut cell = CachedCell::new(ChatCell::AssistantMessage(text.clone()));
+            let _ = cell.compute_cell_frame(width as u16, &ctx);
+            assert_eq!(
+                cell.is_prewrapped(width as u16, &ctx),
+                expected,
+                "width = {width}（最宽行 {widest} 列）"
+            );
+        }
+    }
+
+    /// 缓存的 `rows` 必须与 `Paragraph::line_count` 逐宽度相等 —— 高度现在读它，
+    /// 而布局的另一半（图片锚点的行号）仍由 `Paragraph` 的度量给出。
+    ///
+    /// 语料覆盖空行 / 超宽行 / CJK / 尾随空行 / 零宽。
+    #[test]
+    fn cached_rows_match_the_paragraph_line_count() {
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+
+        let lines: Vec<Line<'static>> = vec![
+            Line::from(""),
+            Line::from("fits easily"),
+            Line::from("x".repeat(40)),
+            Line::from("中文宽度按两列算的一行"),
+            Line::from(vec![
+                Span::styled("styled", Style::default()),
+                Span::raw(" tail"),
+            ]),
+            Line::from(""),
+            Line::from("y".repeat(7)),
+        ];
+        for width in 0..=48u16 {
+            let want = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width);
+            assert_eq!(row_count(&lines, width), want, "width = {width}");
+        }
+    }
+
+    /// 用户气泡即使每行都装得下也不走 blit 快路（理由见 [`CachedCell::is_prewrapped`]）。
+    /// 同样的行集长在普通 cell 上则走快路 —— 两条一起钉住「排除的是气泡，不是短行」。
+    #[test]
+    fn a_user_bubble_never_takes_the_blit_path() {
+        let (_p, l) = (ThemePalette::default(), LayoutConfig::default());
+        let palette = ThemePalette::default();
+        let ctx = test_ctx(&palette, &l);
+
+        let mut bubble = CachedCell::new(ChatCell::UserMessage("short".into()));
+        let _ = bubble.compute_cell_frame(40, &ctx);
+        assert!(!bubble.is_prewrapped(40, &ctx));
+
+        let mut plain = CachedCell::new(ChatCell::AssistantMessage("short".into()));
+        let _ = plain.compute_cell_frame(40, &ctx);
+        assert!(plain.is_prewrapped(40, &ctx));
+    }
 
     fn test_ctx<'a>(palette: &'a ThemePalette, layout: &'a LayoutConfig) -> CellContext<'a> {
         CellContext {

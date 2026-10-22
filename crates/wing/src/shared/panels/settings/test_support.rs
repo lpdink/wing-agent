@@ -1,4 +1,4 @@
-//! 测试夹具：手工构造的 catalog（06 的 `SettingNode`）与稀疏文档（`serde_json::Value`）。
+//! 测试夹具：手工构造的 catalog（`SettingNode`）与稀疏文档（`serde_json::Value`）。
 //!
 //! 只在 `cfg(test)` 下编译。构造器只填测试真正读的字段，其余走 [`node`] 的合理缺省，
 //! 让每条用例都能一眼看清「这个目录长什么样」。

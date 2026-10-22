@@ -49,6 +49,8 @@ pub use media::UserMessageBody;
 pub use viewport::ChatGeometry;
 pub use viewport::ChatViewWidget;
 
+use std::path::PathBuf;
+
 use ratatui::text::Line;
 
 use crate::ui::cached_cell::CachedCell;
@@ -119,6 +121,16 @@ pub struct ChatView {
     /// on every render, like [`ChatView::frame_links`]: a picture the frame did
     /// not lay out must not be painted.
     frame_images: Vec<FrameImage>,
+    /// Left padding (columns) of every row of the last rendered frame, in row
+    /// order — empty for rows the frame did not draw (the copy reads those as
+    /// "no padding"). Rebuilt on every render like the two tables above: what a
+    /// row's padding is belongs to the walk that drew it.
+    frame_insets: Vec<u16>,
+    /// The cells' image paths, concatenated — see [`ChatView::image_candidates`].
+    candidates: Vec<PathBuf>,
+    /// What `candidates` was built from — `(cell count, Σ CachedCell::candidates_epoch)`
+    /// (`None` = never built). See [`ChatView::image_candidates`].
+    candidates_signature: Option<(usize, u64)>,
     /// Graphemes of the visible chat rows as of the last *drag* frame — the
     /// copy-on-select source (see [`FrameSnapshot`]).
     ///
@@ -154,6 +166,9 @@ impl ChatView {
             geometry: ChatGeometry::default(),
             frame_links: LinkTable::new(),
             frame_images: Vec::new(),
+            frame_insets: Vec::new(),
+            candidates: Vec::new(),
+            candidates_signature: None,
             snapshot: FrameSnapshot::default(),
         }
     }

@@ -367,6 +367,7 @@ impl ChatView {
         self.cell_heights.clear();
         self.pending.clear();
         self.pending_heights.clear();
+        self.forget_candidates();
         self.scroll_offset = 0;
         self.auto_scroll = true;
         self.follow_frozen = false;
@@ -676,15 +677,6 @@ impl ChatView {
                     }
                 });
             }
-        }
-    }
-
-    /// Replace a cell at the given index with a new cell (e.g., ToolCallBlock → TodoMessage).
-    ///
-    /// Used during replay when a tool result requires a different cell type.
-    pub fn replace_cell(&mut self, index: usize, cell: ChatCell) {
-        if let Some(cached) = self.cells.get_mut(index) {
-            cached.replace(cell);
         }
     }
 

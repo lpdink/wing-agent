@@ -1,13 +1,12 @@
 //! 文档模型：两个根的稀疏文档 + 密文表 + 脏标记。
 //!
-//! **稀疏文档**（design.md §7.1 / D14）：只有用户显式写下的键，缺席 = 跟随声明默认值。
+//! **稀疏文档**：只有用户显式写下的键，缺席 = 跟随声明默认值。
 //! 面板持有的两份文档（Gateway 的 config.yaml 与 Interface 的 TUI 配置）形状完全相同，
 //! 用 [`Root`] 区分；**服务端不缓存**，每次打开 / 重载都是一次快照。
 //!
 //! 这个模块只装事实（值 / baseline / dirty / 密文 / 指纹），不装策略：问题、行、编辑器都在
-//! 别的模块。`dirty` 是**按具体路径累积**的集合（改动即脏，见 design D8），列表增删移之后
-//! 必须用 [`crate::shared::doc_edit::remap_index`] 把下标重排 —— 否则脏标记会漂到别的项上
-//! （design D6）。
+//! 别的模块。`dirty` 是**按具体路径累积**的集合（改动即脏），列表增删移之后
+//! 必须用 [`crate::shared::doc_edit::remap_index`] 把下标重排 —— 否则脏标记会漂到别的项上。
 //!
 //! 路径代数与文档编辑原语是 [`crate::shared::doc_edit`] 的**唯一实现**（`wing config` 与
 //! 面板共用）；这里只把它包成「按根寻址 + 脏标记 + 密文」的这一层，并固定
@@ -24,10 +23,10 @@ use wing_api_client::models::parse_path;
 use crate::shared::doc_edit;
 use crate::shared::doc_edit::Policy;
 
-/// 面板的两个顶层根（design.md §11.4）。
+/// 面板的两个顶层根。
 ///
 /// 一棵树、两个根：Gateway 是后端 `config.yaml`（catalog 来自 `GET /api/settings/schema`），
-/// Interface 是 TUI 自己的 `~/.wing/tui/config.yaml`（catalog 由 Rust 侧声明，09 步骤提供）。
+/// Interface 是 TUI 自己的 `~/.wing/tui/config.yaml`（catalog 由 Rust 侧声明）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Root {
     Gateway,
@@ -46,7 +45,7 @@ impl Root {
 
 /// 稀疏文档 + 打开时的快照（baseline）+ 脏标记 + 密文表 + 指纹。
 ///
-/// 值的寻址一律走 §5.2 的规范路径（具体下标，`providers[0].api_key`）。
+/// 值的寻址一律走规范路径（具体下标，`providers[0].api_key`）。
 /// [`Self::value`] 只读；写入口 = [`Self::set_value`] / [`Self::remove_value`]（单条路径）
 /// 与 [`Self::root_doc_mut`] + `shared::doc_edit` 的列表增删移（整项操作，`list.rs` 用）。
 #[derive(Debug, Clone)]
@@ -61,7 +60,7 @@ pub struct SettingsDoc {
 }
 
 impl SettingsDoc {
-    /// 从 `get` 响应（或 09 的 `read_interface_doc`）建立文档：当前值同时成为 baseline
+    /// 从 `get` 响应（或 `read_interface_doc`）建立文档：当前值同时成为 baseline
     /// （打开面板这一刻就是「未改动」的参照）。
     ///
     /// 非 object 的顶层值一律规范化为 `{}`（协议保证是 object；这里是防御，免得后续
@@ -193,7 +192,7 @@ impl SettingsDoc {
 
     // ── 脏标记 ────────────────────────────────────────────────
 
-    /// 改动即脏（不因「改回原值」自动清除，见 design D8）。
+    /// 改动即脏（不因「改回原值」自动清除）。
     pub(crate) fn mark_dirty(&mut self, root: Root, path: &str) {
         self.dirty.insert((root, path.to_string()));
     }
@@ -220,7 +219,7 @@ impl SettingsDoc {
         self.dirty.len()
     }
 
-    /// 重排某个根里、落在 `list_path` 之下的脏路径下标（design D6）。
+    /// 重排某个根里、落在 `list_path` 之下的脏路径下标。
     pub(crate) fn remap_dirty(
         &mut self,
         root: Root,

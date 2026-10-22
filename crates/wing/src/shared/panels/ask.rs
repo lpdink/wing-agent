@@ -47,6 +47,8 @@ use super::PageKind;
 use super::SelectionPanel;
 use super::wrap_index;
 use crate::protocol::AskQuestion;
+use crate::shared::text_edit;
+use crate::shared::text_edit::EditOp;
 
 /// Content sent to the backend when the user cancels from the confirm page.
 /// The AskUserQuestion tool translates it into a normal "user cancelled"
@@ -452,36 +454,22 @@ impl AskPanel {
 
     fn edit_insert_char(&mut self, c: char) {
         let st = &mut self.states[self.current];
-        let byte = char_to_byte(&st.draft, st.edit_cursor);
-        st.draft.insert(byte, c);
-        st.edit_cursor += 1;
+        text_edit::apply(&mut st.draft, &mut st.edit_cursor, EditOp::Insert(c));
     }
 
     fn edit_backspace(&mut self) {
         let st = &mut self.states[self.current];
-        if st.edit_cursor == 0 {
-            return;
-        }
-        let from = char_to_byte(&st.draft, st.edit_cursor - 1);
-        let to = char_to_byte(&st.draft, st.edit_cursor);
-        st.draft.replace_range(from..to, "");
-        st.edit_cursor -= 1;
+        text_edit::apply(&mut st.draft, &mut st.edit_cursor, EditOp::Backspace);
     }
 
     fn edit_delete(&mut self) {
         let st = &mut self.states[self.current];
-        if st.edit_cursor >= st.draft.chars().count() {
-            return;
-        }
-        let from = char_to_byte(&st.draft, st.edit_cursor);
-        let to = char_to_byte(&st.draft, st.edit_cursor + 1);
-        st.draft.replace_range(from..to, "");
+        text_edit::apply(&mut st.draft, &mut st.edit_cursor, EditOp::Delete);
     }
 
     fn edit_move(&mut self, delta: isize) {
         let st = &mut self.states[self.current];
-        let len = st.draft.chars().count();
-        st.edit_cursor = (st.edit_cursor as isize + delta).clamp(0, len as isize) as usize;
+        text_edit::apply(&mut st.draft, &mut st.edit_cursor, EditOp::Move(delta));
     }
 
     /// Insert pasted text into the editor (starts the editor on the free-form
@@ -711,14 +699,6 @@ fn normalize_question(mut q: AskQuestion) -> AskQuestion {
         q.choices.clear();
     }
     q
-}
-
-/// Byte offset of the `char_idx`-th char in `s` (clamped to s.len()).
-fn char_to_byte(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len())
 }
 
 #[cfg(test)]
