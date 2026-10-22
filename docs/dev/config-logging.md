@@ -104,7 +104,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
-`colors`（`preset` = `wing` | `terminal` 选底色：`wing` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（默认），`terminal` 跟随终端自己的 ANSI 色；其余每个槽位键**覆盖该槽**：`accent` / `text` / `thinking` / `tool_result` / `dim` / `success` / `warning` / `danger` / `math` / `surface` 与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`api_key`（网关鉴权，空则不发送；**密文**——面板只写不回显、`--dump-config` 默认掩码，见下）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
+`colors`（`preset` = `wing` | `terminal` 选底色：`wing` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（默认），`terminal` 跟随终端自己的 ANSI 色；其余每个槽位键**覆盖该槽**：灰阶 `text` / `thinking` / `thinking_label`（思考块标题行）/ `tool_result` / `dim`，品牌与交互 `accent`，状态 `success` / `warning` / `danger`，markdown 角色 `heading`（标题）/ `strong`（加粗）/ `inline_code`（行内代码与未高亮代码块）/ `marker`（列表符、表头文字）/ `quote`（引文）/ `math`（公式），`surface`（用户消息底）与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位；`heading_bright` 是唯一的**派生值**——跟着 `heading` 提亮（亮底终端反向压深），不是 YAML 键）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`api_key`（网关鉴权，空则不发送；**密文**——面板只写不回显、`--dump-config` 默认掩码，见下）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
 
 `rendering` 的键：
 

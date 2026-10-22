@@ -61,48 +61,33 @@ const COLORS_NOTES: [&str; 2] = [
 
 const PRESET_DOC: &str = "Base palette (see `ColorPreset`).";
 
-/// 槽位说明 = 该槽位在 UI 里管什么（逐字照抄 `config/mod.rs` 的字段文档）。
-const SLOT_DOCS: [(&str, &str); 14] = [
-    (
-        "accent",
-        "Brand color: logo, commands, links, code, popups.",
-    ),
-    ("text", "Primary text: messages, model name, input."),
-    (
-        "thinking",
-        "Thinking: agent reasoning content (more prominent than dim).",
-    ),
-    (
-        "tool_result",
-        "Tool result: tool call output (secondary data).",
-    ),
-    (
-        "dim",
-        "Quiet register: bullets, borders, gutters, separators — and \
-         tool-call args / timers (secondary metadata).",
-    ),
-    ("success", "Success: diff+, blockquote, token low."),
-    ("warning", "Warning: pending, token mid."),
-    ("danger", "Danger: diff-, error, token high."),
-    (
-        "math",
-        "Math: rendered formulas (character grids) and their literal fallback.",
-    ),
-    ("surface", "Surface: user message background."),
-    (
-        "diff_add_bg",
-        "Background tint for diff additions (text keeps syntax colors).",
-    ),
-    ("diff_del_bg", "Background tint for diff deletions."),
-    (
-        "diff_add_bg_strong",
-        "Background tint for changed words inside an added line.",
-    ),
-    (
-        "diff_del_bg_strong",
-        "Background tint for changed words inside a deleted line.",
-    ),
-];
+/// 槽位说明 = 该槽位在 UI 里管什么。**单一来源**：`config::slot_doc`，设置面板 /
+/// `wing config` 与 `ColorsConfig` 的字段文档读的是同一张表（不会各写一份）。
+fn slot_docs() -> Vec<(&'static str, &'static str)> {
+    use crate::config::slot_doc as d;
+    vec![
+        ("accent", d::ACCENT),
+        ("text", d::TEXT),
+        ("thinking", d::THINKING),
+        ("thinking_label", d::THINKING_LABEL),
+        ("tool_result", d::TOOL_RESULT),
+        ("dim", d::DIM),
+        ("success", d::SUCCESS),
+        ("warning", d::WARNING),
+        ("danger", d::DANGER),
+        ("math", d::MATH),
+        ("heading", d::HEADING),
+        ("strong", d::STRONG),
+        ("inline_code", d::INLINE_CODE),
+        ("marker", d::MARKER),
+        ("quote", d::QUOTE),
+        ("surface", d::SURFACE),
+        ("diff_add_bg", d::DIFF_ADD_BG),
+        ("diff_del_bg", d::DIFF_DEL_BG),
+        ("diff_add_bg_strong", d::DIFF_ADD_BG_STRONG),
+        ("diff_del_bg_strong", d::DIFF_DEL_BG_STRONG),
+    ]
+}
 
 const SLOT_NOTE: &str = "缺席 = 跟随 `preset`。";
 
@@ -144,6 +129,7 @@ const API_KEY_EXAMPLE: &str = "sk-xxx";
 pub fn interface_catalog() -> SettingNode {
     let palette = ThemePalette::default();
 
+    let slot_docs = slot_docs();
     let mut colors = node(
         "colors",
         "colors",
@@ -155,7 +141,7 @@ pub fn interface_catalog() -> SettingNode {
     );
     colors.notes = COLORS_NOTES.iter().map(|n| (*n).to_owned()).collect();
     colors.children.push(preset_node());
-    for (index, (key, doc)) in SLOT_DOCS.iter().enumerate() {
+    for (index, (key, doc)) in slot_docs.iter().enumerate() {
         colors.children.push(slot_node(
             key,
             doc,
@@ -515,12 +501,18 @@ fn slot_color(palette: &ThemePalette, key: &str) -> Color {
         "accent" => palette.accent,
         "text" => palette.text,
         "thinking" => palette.thinking,
+        "thinking_label" => palette.thinking_label,
         "tool_result" => palette.tool_result,
         "dim" => palette.dim,
         "success" => palette.success,
         "warning" => palette.warning,
         "danger" => palette.danger,
         "math" => palette.math,
+        "heading" => palette.heading,
+        "inline_code" => palette.inline_code,
+        "strong" => palette.strong,
+        "marker" => palette.marker,
+        "quote" => palette.quote,
         "surface" => palette.surface,
         "diff_add_bg" => palette.diff_add_bg,
         "diff_del_bg" => palette.diff_del_bg,
@@ -1113,12 +1105,18 @@ mod tests {
                 accent: Some("#ff00ff".into()),
                 text: Some("#ffffff".into()),
                 thinking: Some("gray".into()),
+                thinking_label: Some("yellow".into()),
                 tool_result: Some("dark_gray".into()),
                 dim: Some("#101010".into()),
                 success: Some("green".into()),
                 warning: Some("yellow".into()),
                 danger: Some("red".into()),
                 math: Some("magenta".into()),
+                heading: Some("#b49af0".into()),
+                strong: Some("#e5c07b".into()),
+                inline_code: Some("#dcae70".into()),
+                marker: Some("#7d8bb0".into()),
+                quote: Some("#8f93c4".into()),
                 surface: Some("#343541".into()),
                 diff_add_bg: Some("#113311".into()),
                 diff_del_bg: Some("#331111".into()),
@@ -1222,7 +1220,7 @@ mod tests {
             .iter()
             .filter(|path| path.starts_with("colors."))
             .count();
-        assert_eq!(slots, 15, "colors 段应覆盖 preset + 14 槽：{leaves:?}");
+        assert_eq!(slots, 21, "colors 段应覆盖 preset + 20 槽：{leaves:?}");
     }
 
     /// 每个声明都必须对应真实 serde 键。声明了不存在的键 → 红。
@@ -1285,8 +1283,8 @@ mod tests {
     fn every_color_slot_is_declared_with_a_color_hint() {
         let catalog = interface_catalog();
         let palette = ThemePalette::default();
-        assert_eq!(SLOT_DOCS.len(), 14, "颜色槽的清单被改过？");
-        for (key, _) in SLOT_DOCS {
+        assert_eq!(slot_docs().len(), 20, "颜色槽的清单被改过？");
+        for (key, _) in slot_docs() {
             let path = format!("colors.{key}");
             let node = catalog
                 .node_at(&path)
@@ -1413,7 +1411,7 @@ mod tests {
         let catalog = interface_catalog();
         let leaves: Vec<&SettingNode> = catalog.leaves().collect();
         let paths: Vec<&str> = leaves.iter().map(|node| node.path.as_str()).collect();
-        assert_eq!(leaves.len(), 25, "{paths:?}");
+        assert_eq!(leaves.len(), 31, "{paths:?}");
         fn count(leaves: &[&SettingNode], predicate: impl Fn(&SettingNode) -> bool) -> usize {
             leaves.iter().filter(|node| predicate(node)).count()
         }
@@ -1421,11 +1419,11 @@ mod tests {
         assert_eq!(count(&leaves, |node| node.secret), 1);
         assert_eq!(
             count(&leaves, |node| node.value_hint.as_deref() == Some("color")),
-            14
+            20
         );
         assert_eq!(count(&leaves, |node| node.required), 0);
         assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Restart), 1);
-        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 24);
+        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 30);
         assert!(leaves.iter().all(|node| node.editable));
     }
 
@@ -1808,35 +1806,20 @@ mod tests {
             parsed.layout.tool_output_max,
             LayoutConfig::default().tool_output_max
         );
-        // 14 个槽位全部钉住 → 解析出的调色板必须与默认调色板逐槽相等。
+        // 每个槽位都被注释掉的默认值钉住 → 解析出的调色板必须与默认调色板逐槽相等。
+        // 槽位清单来自 `slot_docs()`（与面板、`--dump-config` 同一份），新槽不会漏。
         let got = ThemePalette::from_config(&parsed.colors);
         let want = ThemePalette::default();
-        for (name, got, want) in [
-            ("accent", got.accent, want.accent),
-            ("text", got.text, want.text),
-            ("thinking", got.thinking, want.thinking),
-            ("tool_result", got.tool_result, want.tool_result),
-            ("dim", got.dim, want.dim),
-            ("success", got.success, want.success),
-            ("warning", got.warning, want.warning),
-            ("danger", got.danger, want.danger),
-            ("math", got.math, want.math),
-            ("surface", got.surface, want.surface),
-            ("diff_add_bg", got.diff_add_bg, want.diff_add_bg),
-            ("diff_del_bg", got.diff_del_bg, want.diff_del_bg),
-            (
-                "diff_add_bg_strong",
-                got.diff_add_bg_strong,
-                want.diff_add_bg_strong,
-            ),
-            (
-                "diff_del_bg_strong",
-                got.diff_del_bg_strong,
-                want.diff_del_bg_strong,
-            ),
-        ] {
-            assert_eq!(got, want, "{name}");
+        for (key, _) in slot_docs() {
+            assert_eq!(
+                slot_color(&got, key),
+                slot_color(&want, key),
+                "槽位 {key} 的默认值没有被取消注释这一步还原"
+            );
         }
+        // 派生值同样跟着回来：H1 的档位与 emphasis 的色相都不是 YAML 键。
+        assert_eq!(got.heading_bright, want.heading_bright);
+        assert_eq!(got.strong, want.strong);
     }
 
     /// 未知键（今天的 `--dump-config` 一直如此）与 `null` 值都不写出文件。

@@ -78,10 +78,15 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // 槽位表：名字 × 覆盖值 × 解析后的颜色 —— 抬头与图例共用一份，别再手抄两遍。
-    let slots: [(&str, &Option<String>, Color); 14] = [
+    let slots: [(&str, &Option<String>, Color); 21] = [
         ("accent", &config.colors.accent, palette.accent),
         ("text", &config.colors.text, palette.text),
         ("thinking", &config.colors.thinking, palette.thinking),
+        (
+            "thinking_label",
+            &config.colors.thinking_label,
+            palette.thinking_label,
+        ),
         (
             "tool_result",
             &config.colors.tool_result,
@@ -92,6 +97,16 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
         ("warning", &config.colors.warning, palette.warning),
         ("danger", &config.colors.danger, palette.danger),
         ("math", &config.colors.math, palette.math),
+        ("heading", &config.colors.heading, palette.heading),
+        ("heading_bright", &None, palette.heading_bright),
+        (
+            "inline_code",
+            &config.colors.inline_code,
+            palette.inline_code,
+        ),
+        ("marker", &config.colors.marker, palette.marker),
+        ("quote", &config.colors.quote, palette.quote),
+        ("strong", &config.colors.strong, palette.strong),
         ("surface", &config.colors.surface, palette.surface),
         (
             "diff_add_bg",
@@ -504,7 +519,7 @@ fn status_bar_lines(width: u16, p: &ThemePalette) -> Vec<Line<'static>> {
 /// 引用 / 代码块 / 表格 / 公式。
 const SAMPLE_MD: &str = r#"# 调色板自检
 
-正文一句话：**加粗**、*斜体*、`行内代码` 和 [一个链接](https://example.com/wing)。行内代码与链接同色 —— 一个色相一个含义。
+正文一句话：**加粗**、*斜体*、`行内代码` 和 [一个链接](https://example.com/wing)。行内代码与链接刻意不同色 —— 一个色相一个含义。
 
 ## 灰阶
 

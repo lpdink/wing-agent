@@ -4,6 +4,7 @@
 //! produced by the parser. They are converted to `ratatui::text::Line` for
 //! actual terminal rendering.
 
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -43,6 +44,8 @@ pub enum SegmentKind {
     Link,
     /// List bullet, ordered-list number, or task-list marker.
     Marker,
+    /// Blockquote content: the quoted voice (the bar is chrome, [`Self::Border`]).
+    Quote,
     /// Decorative chrome: code block frames, table rules, horizontal rules,
     /// blockquote bars.
     Border,
@@ -190,10 +193,13 @@ pub struct MarkdownTheme {
     pub h4: Style,
     pub h5: Style,
     pub h6: Style,
-    pub bold: Style,
+    /// Emphasis (`**bold**`): the `strong` hue plus weight, applied to plain
+    /// prose only — see [`MarkdownTheme::emphasized`].
+    pub strong: Style,
     pub italic: Style,
-    pub bold_italic: Style,
     pub strikethrough: Style,
+    /// Inline code (`` `code` ``) — and the plain text of an unhighlighted
+    /// code block, so "literal things" read as one family.
     pub code: Style,
     pub code_block: Style,
     pub code_block_gutter: Style,
@@ -201,11 +207,15 @@ pub struct MarkdownTheme {
     /// [`crate::render::markdown::math`]).
     pub math: Style,
     pub link: Style,
+    /// Blockquote: the quoted voice and its bar.
     pub blockquote: Style,
+    /// The blockquote's leading `│` bar (a quieter take on `blockquote`).
+    pub quote_bar: Style,
+    /// List marks: bullets, ordered numbers, task boxes.
+    pub marker: Style,
     pub border: Style,
     pub base: Style,
     pub dimmed: Style,
-    pub heading_prefix: Style,
     /// Diff addition lines (+): marker color.
     pub diff_add: Style,
     /// Diff deletion lines (-): marker color.
@@ -227,34 +237,55 @@ impl Default for MarkdownTheme {
 
 impl MarkdownTheme {
     /// Build a theme from the semantic palette.
+    ///
+    /// Every element takes its hue from a palette slot (structure violet,
+    /// literals rose, interaction cyan, state green/amber/red); hierarchy
+    /// *inside* a role comes from weight (see the heading ladder).
     pub fn from_palette(p: &ThemePalette) -> Self {
+        let heading = Style::new().fg(p.heading);
         Self {
-            h1: Style::new().bold().underlined(),
-            h2: Style::new().bold(),
-            h3: Style::new().bold().italic(),
-            h4: Style::new().italic(),
-            h5: Style::new().italic(),
-            h6: Style::new().italic(),
-            bold: Style::new().bold(),
+            // Level 1 takes the top of the ladder (lifted heading hue) — an
+            // underline would read as a link, so the ramp is colour + weight.
+            h1: Style::new().fg(p.heading_bright).bold(),
+            h2: heading.bold(),
+            h3: heading.bold().italic(),
+            h4: heading.italic(),
+            h5: heading.italic(),
+            h6: heading.italic(),
+            strong: Style::new().fg(p.strong).bold(),
             italic: Style::new().italic(),
-            bold_italic: Style::new().bold().italic(),
             strikethrough: Style::new().crossed_out(),
-            code: Style::new().fg(p.accent),
-            code_block: Style::new().fg(p.accent),
+            code: Style::new().fg(p.inline_code),
+            code_block: Style::new().fg(p.inline_code),
             code_block_gutter: Style::new().fg(p.dim),
             math: Style::new().fg(p.math),
             link: Style::new().fg(p.accent).underlined(),
-            blockquote: Style::new().fg(p.success),
+            blockquote: Style::new().fg(p.quote),
+            quote_bar: Style::new().fg(p.quote).add_modifier(Modifier::DIM),
+            marker: Style::new().fg(p.marker),
             border: Style::new().fg(p.dim),
             base: Style::new().fg(p.text),
             dimmed: Style::new().dim(),
-            heading_prefix: Style::new().fg(p.dim),
             diff_add: Style::new().fg(p.success),
             diff_del: Style::new().fg(p.danger),
             diff_hunk: Style::new().fg(p.accent).bold(),
             diff_add_bg: Style::new().bg(p.diff_add_bg),
             diff_del_bg: Style::new().bg(p.diff_del_bg),
         }
+    }
+
+    /// The `**bold**` patch, resolved against the enclosing style.
+    ///
+    /// Weight everywhere; the `strong` hue only where the voice is plain
+    /// prose. A heading, a link or inline code keeps its own hue — emphasis
+    /// inside a role must not repaint that role.
+    pub fn emphasized(&self, current: Style) -> Style {
+        let prose = current.fg.is_none() || current.fg == self.base.fg;
+        current.patch(if prose {
+            self.strong
+        } else {
+            Style::new().bold()
+        })
     }
 }
 
@@ -286,10 +317,11 @@ impl<'a> From<&'a MarkdownLine> for Line<'a> {
 
 /// Map a markdown segment's style into the thinking block's visual layer.
 ///
-/// Code-like and decorative elements keep their theme colors so inline code
-/// and code blocks stay distinguishable inside reasoning content; prose
-/// elements inherit the thinking foreground while everything else (bold,
-/// italic, dim, background, underline color) is preserved untouched.
+/// Elements that carry a *role hue* keep their theme colours, so structure and
+/// literals stay distinguishable inside reasoning content: code, links,
+/// headings, quotes, math, list marks and chrome. Only plain prose inherits the
+/// thinking foreground; weight, style, background and underline are preserved
+/// untouched either way.
 ///
 /// Math is structural like code — a rendered formula (and its source
 /// fallback) keeps the math color in both profiles.
@@ -304,8 +336,11 @@ pub fn thinking_segment_style(kind: SegmentKind, original: Style, thinking_style
         | SegmentKind::Border
         | SegmentKind::Gutter
         | SegmentKind::Math
+        | SegmentKind::Heading
+        | SegmentKind::Quote
+        | SegmentKind::Marker
         | SegmentKind::Image => original,
-        SegmentKind::Text | SegmentKind::Heading | SegmentKind::Marker => Style {
+        SegmentKind::Text => Style {
             fg: thinking_style.fg,
             ..original
         },
@@ -503,14 +538,76 @@ mod tests {
         let palette = ThemePalette::default();
         // Spot check a few key styles: the theme is palette-derived, not
         // hardcoded (a slot value change flows through).
-        assert_eq!(theme.code.fg, Some(palette.accent));
+        assert_eq!(theme.code.fg, Some(palette.inline_code));
+        assert_eq!(theme.code_block.fg, Some(palette.inline_code));
         assert_eq!(theme.math.fg, Some(palette.math));
+        assert_eq!(theme.h1.fg, Some(palette.heading_bright));
+        assert_eq!(theme.h2.fg, Some(palette.heading));
+        assert_eq!(theme.marker.fg, Some(palette.marker));
+        assert_eq!(theme.blockquote.fg, Some(palette.quote));
         assert!(
             theme
                 .h1
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
+        // The heading ladder is weight-only past level 1: an underline would
+        // read as a link.
+        assert!(
+            !theme
+                .h1
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        );
+    }
+
+    /// Every role hue is one palette slot apart — the point of the redesign is
+    /// that a document is not one colour (code ≠ link ≠ heading).
+    #[test]
+    fn the_theme_roles_stay_apart() {
+        let theme = MarkdownTheme::default();
+        let fgs = [
+            theme.base.fg,
+            theme.code.fg,
+            theme.link.fg,
+            theme.h2.fg,
+            theme.marker.fg,
+            theme.blockquote.fg,
+        ];
+        for (i, a) in fgs.iter().enumerate() {
+            for b in fgs.iter().skip(i + 1) {
+                assert_ne!(a, b, "two roles collapsed onto {a:?}: {fgs:?}");
+            }
+        }
+    }
+
+    /// Emphasis lifts plain prose but never repaints a role: `**bold**` inside
+    /// a heading or a link keeps that element's hue.
+    #[test]
+    fn emphasis_lifts_prose_and_keeps_role_hues() {
+        let palette = ThemePalette {
+            text: Color::Rgb(0x80, 0x80, 0x80),
+            strong: Color::Rgb(0xf0, 0xf0, 0xf0),
+            ..ThemePalette::default()
+        };
+        let theme = MarkdownTheme::from_palette(&palette);
+        // Prose (base fg, or no fg at all) takes the lifted colour.
+        for current in [theme.base, Style::new()] {
+            let strong = theme.emphasized(current);
+            assert_eq!(strong.fg, Some(palette.strong), "{current:?}");
+            assert!(strong.add_modifier.contains(Modifier::BOLD));
+        }
+        // A heading / link / inline code keeps its own hue, only the weight is
+        // added.
+        for current in [theme.h2, theme.link, theme.code] {
+            let strong = theme.emphasized(current);
+            assert_eq!(strong.fg, current.fg, "{current:?}");
+            assert!(strong.add_modifier.contains(Modifier::BOLD));
+        }
+        // Italic composes with bold (`***x***`).
+        let bold_italic = theme.emphasized(theme.italic);
+        assert!(bold_italic.add_modifier.contains(Modifier::BOLD));
+        assert!(bold_italic.add_modifier.contains(Modifier::ITALIC));
     }
 
     /// The math slot follows the palette (it is a real theme color, not a
@@ -520,7 +617,7 @@ mod tests {
     fn theme_math_follows_palette_and_survives_thinking_recolor() {
         let palette = ThemePalette {
             math: Color::Magenta,
-            accent: Color::Blue,
+            inline_code: Color::Blue,
             ..ThemePalette::default()
         };
         let theme = MarkdownTheme::from_palette(&palette);
@@ -536,5 +633,25 @@ mod tests {
             thinking_segment_style(SegmentKind::Text, theme.base, Style::new().fg(Color::Gray)).fg,
             Some(Color::Gray)
         );
+    }
+
+    /// Structure keeps its hue inside reasoning: a heading, a quote and a list
+    /// mark are still recognisable there (only prose goes grey).
+    #[test]
+    fn thinking_keeps_the_structural_hues() {
+        let theme = MarkdownTheme::default();
+        let thinking = Style::new().fg(Color::Gray);
+        for style in [theme.h2, theme.blockquote, theme.marker] {
+            let recolored = thinking_segment_style(SegmentKind::Heading, style, thinking);
+            assert_eq!(recolored.fg, style.fg);
+        }
+        // Quote and marker are their own kinds — same answer.
+        for (kind, style) in [
+            (SegmentKind::Quote, theme.blockquote),
+            (SegmentKind::Marker, theme.marker),
+        ] {
+            let recolored = thinking_segment_style(kind, style, thinking);
+            assert_eq!(recolored.fg, style.fg, "{kind:?}");
+        }
     }
 }

@@ -13,8 +13,8 @@
 //! Two views: **composed** (default) — `full_lines` / `StreamingRender` output, exactly what the chat
 //! cell shows (prefix, thinking recolor, hard wrap); **`--kinds`** — the markdown IR before
 //! composition, one line per segment run annotated with its [`SegmentKind`] (`T` prose, `H` heading,
-//! `i` inline code, `C` code block, `L` link, `M` marker, `B` border, `G` gutter, `$` math, `I`
-//! image), the view that answers "why is this line rendered as code?".
+//! `Q` quote, `i` inline code, `C` code block, `L` link, `M` marker, `B` border, `G` gutter,
+//! `$` math, `I` image), the view that answers "why is this line rendered as code?".
 //!
 //! `--chunk` drives the incremental `StreamingRender` (the production streaming path) instead of the
 //! one-shot full render, and `--check` reconciles the two — the invariant the TUI depends on at turn
@@ -551,6 +551,7 @@ fn kind_letter(kind: SegmentKind) -> char {
         SegmentKind::CodeBlock => 'C',
         SegmentKind::Link => 'L',
         SegmentKind::Marker => 'M',
+        SegmentKind::Quote => 'Q',
         SegmentKind::Border => 'B',
         SegmentKind::Gutter => 'G',
         SegmentKind::Math => '$',

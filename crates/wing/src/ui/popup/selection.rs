@@ -38,13 +38,16 @@ impl SessionStatus {
         }
     }
 
-    /// 状态图标颜色。
-    pub fn color(self) -> Color {
+    /// 状态图标颜色（走调色板槽位，不引命名 ANSI 色：主题改一次，这里跟着变）。
+    ///
+    /// Working = `warning`（忙），Waiting = `accent`（轮到你了），Idle = `text`，
+    /// Inactive = `dim`（被逐出内存的会话）。
+    pub fn color(self, palette: &ThemePalette) -> Color {
         match self {
-            Self::Working => Color::Yellow,
-            Self::Waiting => Color::Magenta,
-            Self::Idle => Color::White,
-            Self::Inactive => Color::DarkGray,
+            Self::Working => palette.warning,
+            Self::Waiting => palette.accent,
+            Self::Idle => palette.text,
+            Self::Inactive => palette.dim,
         }
     }
 }
@@ -482,7 +485,9 @@ impl<'a> SelectionPopup<'a> {
         line1.push(Span::styled(" ", base_style));
         line1.push(Span::styled(
             rich.status.icon(),
-            Style::default().fg(rich.status.color()).patch(base_style),
+            Style::default()
+                .fg(rich.status.color(self.palette))
+                .patch(base_style),
         ));
         line1.push(Span::styled(" ", base_style));
 
@@ -519,7 +524,7 @@ impl<'a> SelectionPopup<'a> {
             // 这一个字形，行宽不因 pin 变化而抖动。
             line1.push(Span::styled(
                 " ★",
-                Style::default().fg(Color::Yellow).patch(base_style),
+                Style::default().fg(self.palette.warning).patch(base_style),
             ));
         }
 

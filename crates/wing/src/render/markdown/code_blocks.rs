@@ -8,7 +8,7 @@ use ratatui::style::Style;
 use super::RenderOpts;
 use super::images::ImageOpts;
 use super::parsing::{flush_current_line, prefix_prose_lines, push_blank_line};
-use super::types::{MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind};
+use super::types::{MarkdownLine, MarkdownTheme, SegmentKind};
 use crate::render::diff_highlight::DiffHighlighters;
 use crate::render::diff_highlight::DiffSide;
 use crate::render::syntax::highlight_code_lines;
@@ -93,7 +93,7 @@ fn finalize_code_block(
         env.blockquote_depth,
         env.list_continuation_prefix,
         env.pending_list_prefix,
-        env.base_style,
+        env.theme,
     );
     if let Some(state) = code_block.take() {
         // The prose branch re-parses the block per nesting level, so it runs
@@ -138,7 +138,7 @@ fn render_prose_block(text: &str, env: &mut CodeBlockRenderEnv<'_>) -> Vec<Markd
         env.blockquote_depth,
         env.list_continuation_prefix,
         env.pending_list_prefix,
-        env.base_style,
+        env.theme,
     )
 }
 
@@ -160,14 +160,12 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
     } else {
         "┌────────".to_string()
     };
-    lines.push(MarkdownLine {
-        segments: vec![MarkdownSegment::new(
-            SegmentKind::Border,
-            border_style,
-            label,
-        )],
-        ..Default::default()
-    });
+    // The frame carries the enclosing block's prefix too: a quoted code block
+    // whose bar stops at the frame reads as a broken quote (the content lines
+    // do carry it — see `build_prefix`).
+    let mut top = build_prefix(env);
+    top.push_segment(SegmentKind::Border, border_style, &label);
+    lines.push(top);
 
     // Determine if this is a diff block.
     let is_diff = state
@@ -298,15 +296,10 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
         }
     }
 
-    // Bottom border.
-    lines.push(MarkdownLine {
-        segments: vec![MarkdownSegment::new(
-            SegmentKind::Border,
-            border_style,
-            "└────────",
-        )],
-        ..Default::default()
-    });
+    // Bottom border (same prefix as the top one).
+    let mut bottom = build_prefix(env);
+    bottom.push_segment(SegmentKind::Border, border_style, "└────────");
+    lines.push(bottom);
 
     lines
 }
@@ -482,15 +475,19 @@ fn pad_to_width(line: &mut MarkdownLine, width: usize, tint: Style) {
 }
 
 /// Build the prefix segments for a code block line (blockquote + list prefix).
+///
+/// Same two styles as the prose path (`parsing::block_prefix_segments`): a
+/// quote's code lines must carry the same bar ink as its text lines, or one
+/// vertical line comes out in two colours.
 fn build_prefix(env: &CodeBlockRenderEnv<'_>) -> MarkdownLine {
     let mut line = MarkdownLine::default();
     for _ in 0..env.blockquote_depth {
-        line.push_segment(SegmentKind::Border, env.base_style.dim().italic(), "│ ");
+        line.push_segment(SegmentKind::Border, env.theme.quote_bar, "│ ");
     }
     if !env.list_continuation_prefix.is_empty() {
         line.push_segment(
             SegmentKind::Marker,
-            env.base_style,
+            env.theme.marker,
             env.list_continuation_prefix,
         );
     }

@@ -873,7 +873,7 @@ impl StreamingRender {
                 "fence insertion below the splitter cursor would shift its offsets"
             );
             let at_line_start =
-                at == 0 || bytes[at - 1] == b'\n' || super::fence_prefix_is_blank(bytes, at);
+                at == 0 || bytes[at - 1] == b'\n' || super::fence_is_at_block_start(bytes, at);
             let after = &bytes[(at + 3).min(bytes.len())..];
             let looks_like_fence =
                 after.is_empty() || after[0] == b'\n' || after[0].is_ascii_alphanumeric();

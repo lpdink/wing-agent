@@ -190,7 +190,7 @@ impl MarkdownContext<'_> {
             *self.blockquote_depth,
             self.list_continuation_prefix,
             self.pending_list_prefix,
-            self.base_style,
+            self.theme,
         );
     }
 
@@ -216,7 +216,7 @@ impl MarkdownContext<'_> {
             *self.blockquote_depth,
             self.list_continuation_prefix,
             self.pending_list_prefix,
-            self.base_style,
+            self.theme,
         );
     }
 
@@ -328,6 +328,11 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
         }
         Tag::BlockQuote(_) => {
             *ctx.blockquote_depth += 1;
+            // The quoted voice: its own hue, so a quote is distinguishable from
+            // the surrounding prose even when the bar is off-screen.
+            let style = ctx.base_style.patch(ctx.theme.blockquote);
+            ctx.push_style(style);
+            ctx.push_kind(SegmentKind::Quote);
         }
         Tag::List(start) => {
             // Flush accumulated text before entering nested list.
@@ -372,9 +377,18 @@ pub(crate) fn handle_start_tag(tag: &Tag<'_>, ctx: &mut MarkdownContext<'_>) {
                 ctx.refresh_list_continuation_prefix();
             }
         }
-        Tag::Emphasis => ctx.push_style(ctx.current_style().italic()),
-        Tag::Strong => ctx.push_style(ctx.current_style().bold()),
-        Tag::Strikethrough => ctx.push_style(ctx.current_style().crossed_out()),
+        Tag::Emphasis => {
+            let style = ctx.current_style().patch(ctx.theme.italic);
+            ctx.push_style(style);
+        }
+        Tag::Strong => {
+            let style = ctx.theme.emphasized(ctx.current_style());
+            ctx.push_style(style);
+        }
+        Tag::Strikethrough => {
+            let style = ctx.current_style().patch(ctx.theme.strikethrough);
+            ctx.push_style(style);
+        }
         Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
             let show_destination = links::should_render_link_destination(dest_url);
             let label_start_segment_idx = ctx.current_line.segments.len();
@@ -454,6 +468,8 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
         TagEnd::BlockQuote(_) => {
             ctx.flush_line();
             *ctx.blockquote_depth = ctx.blockquote_depth.saturating_sub(1);
+            ctx.pop_style();
+            ctx.pop_kind();
         }
         TagEnd::List(_) => {
             // Only flush if there's actual content; otherwise flush_line creates
@@ -567,10 +583,14 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 if !table.current_row.is_empty() {
                     table.rows.push(std::mem::take(&mut table.current_row));
                 }
+                // The cell ink is the **enclosing voice** (a quoted table's
+                // cells are quote-coloured, like the prose around them), so the
+                // header band's prose test compares against that, not the body.
                 let rendered = render_table(
                     &table,
                     ctx.theme.border,
-                    ctx.base_style,
+                    ctx.current_style(),
+                    ctx.theme.marker,
                     ctx.available_width,
                 );
                 ctx.lines.extend(rendered);
@@ -662,7 +682,7 @@ pub(crate) fn flush_current_line(
     blockquote_depth: usize,
     list_continuation_prefix: &str,
     pending_list_prefix: &mut Option<String>,
-    base_style: Style,
+    theme: &MarkdownTheme,
 ) {
     if current_line.segments.is_empty() && pending_list_prefix.is_some() {
         ensure_prefix(
@@ -670,7 +690,7 @@ pub(crate) fn flush_current_line(
             blockquote_depth,
             list_continuation_prefix,
             pending_list_prefix,
-            base_style,
+            theme,
         );
     }
 
@@ -705,7 +725,7 @@ fn ensure_prefix(
     blockquote_depth: usize,
     list_continuation_prefix: &str,
     pending_list_prefix: &mut Option<String>,
-    base_style: Style,
+    theme: &MarkdownTheme,
 ) {
     if !current_line.segments.is_empty() {
         return;
@@ -714,7 +734,7 @@ fn ensure_prefix(
         blockquote_depth,
         list_continuation_prefix,
         pending_list_prefix,
-        base_style,
+        theme,
     );
 }
 
@@ -725,26 +745,26 @@ fn block_prefix_segments(
     blockquote_depth: usize,
     list_continuation_prefix: &str,
     pending_list_prefix: &mut Option<String>,
-    base_style: Style,
+    theme: &MarkdownTheme,
 ) -> Vec<MarkdownSegment> {
     let mut segments = Vec::new();
     for _ in 0..blockquote_depth {
         segments.push(MarkdownSegment::new(
             SegmentKind::Border,
-            base_style.dim().italic(),
+            theme.quote_bar,
             "│ ",
         ));
     }
     if let Some(prefix) = pending_list_prefix.take() {
         segments.push(MarkdownSegment::new(
             SegmentKind::Marker,
-            base_style,
+            theme.marker,
             &prefix,
         ));
     } else if !list_continuation_prefix.is_empty() {
         segments.push(MarkdownSegment::new(
             SegmentKind::Marker,
-            base_style,
+            theme.marker,
             list_continuation_prefix,
         ));
     }
@@ -762,7 +782,7 @@ pub(crate) fn prefix_prose_lines(
     blockquote_depth: usize,
     list_continuation_prefix: &str,
     pending_list_prefix: &mut Option<String>,
-    base_style: Style,
+    theme: &MarkdownTheme,
 ) -> Vec<MarkdownLine> {
     lines
         .into_iter()
@@ -772,7 +792,7 @@ pub(crate) fn prefix_prose_lines(
                     blockquote_depth,
                     list_continuation_prefix,
                     pending_list_prefix,
-                    base_style,
+                    theme,
                 );
                 segments.append(&mut line.segments);
                 line.segments = segments;

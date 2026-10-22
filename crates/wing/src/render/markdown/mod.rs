@@ -263,7 +263,7 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
 
     for (i, _) in text.match_indices("```") {
         // Already at line start (blank prefix included) — nothing to do.
-        if i == 0 || bytes[i - 1] == b'\n' || fence_prefix_is_blank(bytes, i) {
+        if i == 0 || bytes[i - 1] == b'\n' || fence_is_at_block_start(bytes, i) {
             continue;
         }
 
@@ -293,18 +293,27 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// Whether everything before byte offset `at` on that line is blank — the
-/// fence there is already a line-start fence (≤3 spaces of indent are legal)
-/// or an indented code block, so it must not be normalized.
-pub(crate) fn fence_prefix_is_blank(bytes: &[u8], at: usize) -> bool {
+/// Whether the fence at `at` already starts its **block**: the prefix on that
+/// line is only indentation or blockquote markers (`>`).
+///
+/// Such a fence must not be normalized. Inserting a newline before it would
+/// tear it out of the quote — `> ```rust` becomes a quote line holding a bare
+/// fence, so the quote ends there and every following line keeps a literal
+/// `> `. (Indentation is included for the same reason: an indented fence is an
+/// indented code block, not a stray inline one.)
+///
+/// List markers are **not** included: `- ```` inside prose is ambiguous in a
+/// way a quote marker is not, and moving it to its own line routinely changes
+/// how the rest of the document parses (a fence that stays in the item can
+/// swallow the paragraphs after it).
+pub(crate) fn fence_is_at_block_start(bytes: &[u8], at: usize) -> bool {
     let line_start = bytes[..at]
         .iter()
         .rposition(|&b| b == b'\n')
         .map(|pos| pos + 1)
         .unwrap_or(0);
-    bytes[line_start..at]
-        .iter()
-        .all(|&b| b == b' ' || b == b'\t')
+    let prefix = &bytes[line_start..at];
+    prefix.iter().all(|b| matches!(b, b' ' | b'\t' | b'>'))
 }
 
 /// Render plain text (no markdown parsing) to lines.
@@ -428,7 +437,7 @@ fn render_markdown_to_lines(
                 ctx.ensure_prefix();
                 ctx.current_line.push_segment(
                     SegmentKind::Marker,
-                    base_style,
+                    theme.marker,
                     if checked { "[x] " } else { "[ ] " },
                 );
             }
@@ -468,6 +477,8 @@ fn render_markdown_to_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+    use ratatui::style::Modifier;
 
     fn dp() -> ThemePalette {
         ThemePalette::default()
@@ -709,7 +720,179 @@ mod tests {
     fn segment_kinds_blockquote_bar() {
         let pairs = segment_pairs("> quoted");
         assert_eq!(find_segment(&pairs, "│"), SegmentKind::Border);
-        assert_eq!(find_segment(&pairs, "quoted"), SegmentKind::Text);
+        // 引文是独立的一层声音（自己的色相），不是普通正文。
+        assert_eq!(find_segment(&pairs, "quoted"), SegmentKind::Quote);
+    }
+
+    // ============================================================
+    // Colour roles (the parser must wire them, not just the theme)
+    // ============================================================
+
+    /// A document is not one colour: each role reaches its own palette slot.
+    #[test]
+    fn every_markdown_role_takes_its_own_palette_slot() {
+        let palette = dp();
+        let styles: Vec<(SegmentKind, Style)> = render_markdown_lines(
+            "# Title\n\n## Section\n\nprose **bold** `code` [link](https://example.com)\n\n\
+             - item\n\n> quoted\n\n| A | B |\n|---|---|\n| 1 | 2 |\n",
+            None,
+            &palette,
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.kind, seg.style))
+        .collect();
+        let fg = |kind: SegmentKind| -> Color {
+            styles
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .map(|(_, style)| style.fg.expect("role segment carries a colour"))
+                .unwrap_or_else(|| panic!("no {kind:?} segment: {styles:?}"))
+        };
+        assert_eq!(fg(SegmentKind::Heading), palette.heading_bright);
+        assert_eq!(fg(SegmentKind::InlineCode), palette.inline_code);
+        assert_eq!(fg(SegmentKind::Link), palette.accent);
+        assert_eq!(fg(SegmentKind::Marker), palette.marker);
+        assert_eq!(fg(SegmentKind::Quote), palette.quote);
+        // Prose rides `text`, and emphasis is lifted above it.
+        assert_eq!(fg(SegmentKind::Text), palette.text);
+        let bold = styles
+            .iter()
+            .find(|(kind, style)| {
+                *kind == SegmentKind::Text && style.add_modifier.contains(Modifier::BOLD)
+            })
+            .map(|(_, style)| style.fg)
+            .expect("bold prose segment");
+        assert_eq!(bold, Some(palette.strong));
+    }
+
+    /// The heading ladder: level 1 is the lifted rung, deeper levels are the
+    /// heading hue with weight/italic — never the body colour.
+    #[test]
+    fn heading_levels_form_a_ladder_on_one_hue() {
+        let palette = dp();
+        let theme = MarkdownTheme::from_palette(&palette);
+        let fg = |level: &str| -> Color {
+            render_markdown_lines(level, None, &palette)
+                .into_iter()
+                .flat_map(|line| line.segments)
+                .find(|seg| seg.kind == SegmentKind::Heading)
+                .and_then(|seg| seg.style.fg)
+                .unwrap_or_else(|| panic!("no heading segment in {level:?}"))
+        };
+        assert_eq!(fg("# one"), palette.heading_bright);
+        assert_eq!(fg("## two"), palette.heading);
+        assert_eq!(fg("### three"), palette.heading);
+        // …and the ladder really differs (level 1 is brighter).
+        assert_ne!(palette.heading_bright, palette.heading);
+        assert!(theme.h1.add_modifier.contains(Modifier::BOLD));
+        assert!(!theme.h1.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    /// Emphasis inside a role keeps the role's hue (a heading stays violet).
+    #[test]
+    fn bold_inside_a_heading_keeps_the_heading_hue() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> =
+            render_markdown_lines("## a **bold** b", None, &palette)
+                .into_iter()
+                .flat_map(|line| line.segments)
+                .map(|seg| (seg.text, seg.style))
+                .collect();
+        let bold = segments
+            .iter()
+            .find(|(text, _)| text.contains("bold"))
+            .expect("bold segment");
+        assert_eq!(bold.1.fg, Some(palette.heading));
+        assert!(bold.1.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Table tiers: the header band takes the structural tint (and weight),
+    /// the body keeps the body colour — the table reads as data, not chrome.
+    #[test]
+    fn the_table_header_band_is_tinted_apart_from_the_body() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> = render_markdown_lines(
+            "| Slot | Role |\n|---|---|\n| text | prose |\n",
+            None,
+            &palette,
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.text, seg.style))
+        .collect();
+        // Cells merge their padding into the content segment (same kind and
+        // style), so match on the trimmed text.
+        let header = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "Slot")
+            .expect("header cell");
+        assert_eq!(header.1.fg, Some(palette.marker));
+        assert!(header.1.add_modifier.contains(Modifier::BOLD));
+        let body = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "text")
+            .expect("body cell");
+        assert_eq!(body.1.fg, Some(palette.text));
+    }
+
+    /// A table inside a quote is quoted all the way through: its cells take the
+    /// quote hue (like the prose around it) and the header band still finds them
+    /// to be prose — it inks the **enclosing voice**, not the body colour.
+    #[test]
+    fn a_quoted_table_is_quoted_through_its_cells() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> = render_markdown_lines(
+            "> text\n>\n> | Slot | Role |\n> |---|---|\n> | a | b |\n",
+            None,
+            &palette,
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.text, seg.style))
+        .collect();
+        let header = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "Slot")
+            .expect("header cell");
+        assert_eq!(
+            header.1.fg,
+            Some(palette.marker),
+            "the band still inks a quoted table's header"
+        );
+        let body = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "a")
+            .expect("body cell");
+        assert_eq!(
+            body.1.fg,
+            Some(palette.quote),
+            "body cells read as the quoted voice"
+        );
+    }
+
+    /// A role inside a header cell keeps its hue (only the weight is added) —
+    /// the band inks prose, not literals.
+    #[test]
+    fn a_role_inside_a_table_header_keeps_its_hue() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> =
+            render_markdown_lines("| `code` | plain |\n|---|---|\n| a | b |\n", None, &palette)
+                .into_iter()
+                .flat_map(|line| line.segments)
+                .map(|seg| (seg.text, seg.style))
+                .collect();
+        let code = segments
+            .iter()
+            .find(|(text, _)| text.contains("code"))
+            .expect("header code cell");
+        assert_eq!(code.1.fg, Some(palette.inline_code), "role hue survives");
+        assert!(code.1.add_modifier.contains(Modifier::BOLD), "weight added");
+        let prose = segments
+            .iter()
+            .find(|(text, _)| text.contains("plain"))
+            .expect("header prose cell");
+        assert_eq!(prose.1.fg, Some(palette.marker), "prose takes the band");
     }
 
     #[test]
@@ -1350,6 +1533,28 @@ mod tests {
         let input = "just plain text without any code";
         let output = ensure_fences_on_own_line(input);
         assert!(matches!(output, Cow::Borrowed(_)));
+    }
+
+    /// A fence that belongs to a container (quote / list) is already at its
+    /// block's start: normalizing it would cut the container in half and leave
+    /// a literal `> ` on every following line.
+    #[test]
+    fn a_fence_inside_a_container_is_left_alone() {
+        for input in [
+            "> ```rust\n> let x = 1;\n> ```",
+            "> > ```rust\n> > let x = 1;\n> > ```",
+            ">  ```rust\n>  let x = 1;\n>  ```",
+            "  ```rust\n  let x = 1;\n  ```",
+        ] {
+            let output = ensure_fences_on_own_line(input);
+            assert!(matches!(output, Cow::Borrowed(_)), "normalized: {input:?}");
+        }
+        // Prose that merely *ends* with a marker-ish prefix still normalizes.
+        let output = ensure_fences_on_own_line("a list - ```rust\ncode");
+        assert!(
+            matches!(output, Cow::Owned(ref text) if text.contains("\n```rust")),
+            "a fence inside prose must still move to its own line: {output:?}"
+        );
     }
 
     #[test]

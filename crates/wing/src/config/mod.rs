@@ -55,11 +55,16 @@ impl ColorPreset {
     ///
     /// `Wing` assumes a dark terminal background — a cool neutral ramp
     /// (text → thinking → tool_result → dim) around a cyan accent, with the
-    /// status colours pulled toward the brand's navy/amber family. `Terminal`
-    /// leaves the named ANSI colours in so the terminal theme decides; the
-    /// diff tints stay designed hex in both presets, because a background
-    /// tint has to sit under syntax colours and cannot adapt per-theme.
+    /// status colours pulled toward the brand's navy/amber family. Hues carry
+    /// markdown roles as well (violet structure, rose code, slate list marks),
+    /// so a document reads as more than one colour. `Terminal` leaves the
+    /// named ANSI colours in so the terminal theme decides; the diff tints stay
+    /// designed hex in both presets, because a background tint has to sit under
+    /// syntax colours and cannot adapt per-theme.
     fn base(self) -> ThemePalette {
+        // The structure hue is one value across the slots that carry it (a
+        // formula is structure like a heading), so it is named once.
+        let violet = Color::Rgb(0xb4, 0x9a, 0xf0);
         let diff_add_bg = Color::Rgb(0x16, 0x38, 0x1f);
         let diff_del_bg = Color::Rgb(0x47, 0x24, 0x2c);
         let diff_add_bg_strong = Color::Rgb(0x1f, 0x52, 0x30);
@@ -74,7 +79,14 @@ impl ColorPreset {
                 success: Color::Rgb(0x4e, 0xc2, 0x8b),
                 warning: Color::Rgb(0xe4, 0xb0, 0x4e),
                 danger: Color::Rgb(0xe5, 0x64, 0x6e),
-                math: Color::Rgb(0x3a, 0xc6, 0xe0),
+                math: violet,
+                heading: violet,
+                heading_bright: stretch(violet, false),
+                inline_code: Color::Rgb(0xe5, 0x78, 0x7f),
+                marker: Color::Rgb(0x6f, 0x7d, 0xb4),
+                quote: Color::Rgb(0x8f, 0x93, 0xc4),
+                thinking_label: Color::Rgb(0xc9, 0x9a, 0x5e),
+                strong: Color::Rgb(0xe5, 0xc0, 0x7b),
                 surface: Color::Rgb(0x23, 0x2d, 0x42),
                 diff_add_bg,
                 diff_del_bg,
@@ -91,7 +103,16 @@ impl ColorPreset {
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::Red,
-                math: Color::Cyan,
+                math: Color::LightCyan,
+                // A real ladder: level 1 brighter than level 2 (the Wing preset
+                // splits them by luminance; named colours cannot be stretched).
+                heading: Color::Magenta,
+                heading_bright: Color::LightMagenta,
+                strong: Color::LightGreen,
+                inline_code: Color::LightRed,
+                marker: Color::Blue,
+                quote: Color::LightBlue,
+                thinking_label: Color::LightYellow,
                 surface: Color::Rgb(52, 53, 65),
                 diff_add_bg,
                 diff_del_bg,
@@ -103,57 +124,93 @@ impl ColorPreset {
     }
 }
 
+/// What one color slot governs — written **once**, here. The settings panel and
+/// `wing config` render this table; [`ColorsConfig`]'s fields deliberately do
+/// not repeat the copy, so there is no second version to drift.
+pub(crate) mod slot_doc {
+    pub(crate) const ACCENT: &str = "Brand color: logo, commands, links, popups.";
+    pub(crate) const TEXT: &str = "Primary text: messages, model name, input.";
+    pub(crate) const THINKING: &str =
+        "Thinking: agent reasoning content (more prominent than dim).";
+    pub(crate) const THINKING_LABEL: &str =
+        "Thinking label: the `⦁ 深度思考中 4s` summary line (and its sweep base).";
+    pub(crate) const TOOL_RESULT: &str = "Tool result: tool call output (secondary data).";
+    pub(crate) const DIM: &str = "Quiet register: borders, gutters, separators — and tool-call \
+                                  args / timers (secondary metadata).";
+    pub(crate) const SUCCESS: &str = "Success: diff+, token low.";
+    pub(crate) const WARNING: &str = "Warning: pending, token mid.";
+    pub(crate) const DANGER: &str = "Danger: diff-, error, token high.";
+    pub(crate) const MATH: &str =
+        "Math: rendered formulas (character grids) and their literal fallback.";
+    pub(crate) const HEADING: &str =
+        "Markdown headings (levels 2+; level 1 takes the derived `heading_bright`).";
+    pub(crate) const STRONG: &str = "Emphasis (`**bold**`) in plain prose.";
+    pub(crate) const INLINE_CODE: &str = "Inline code spans and unhighlighted code-block text.";
+    pub(crate) const MARKER: &str =
+        "List marks: bullets, ordered numbers, task boxes — and the table header band.";
+    pub(crate) const QUOTE: &str = "Blockquote: the bar and the quoted voice.";
+    pub(crate) const SURFACE: &str = "Surface: user message background.";
+    pub(crate) const DIFF_ADD_BG: &str =
+        "Background tint for diff additions (text keeps syntax colors).";
+    pub(crate) const DIFF_DEL_BG: &str = "Background tint for diff deletions.";
+    pub(crate) const DIFF_ADD_BG_STRONG: &str =
+        "Background tint for changed words inside an added line.";
+    pub(crate) const DIFF_DEL_BG_STRONG: &str =
+        "Background tint for changed words inside a deleted line.";
+}
+
 /// Semantic color palette — one slot per UI role.
 ///
 /// [`Self::preset`] picks the base palette; every other key overrides that
 /// one slot (absent = follow the preset). `--dump-config` writes only the
 /// preset and the overrides.
+///
+/// What each slot governs is written once, in [`slot_doc`] — the settings
+/// panel and `wing config` render that same table, so the copy users read
+/// cannot drift from the source.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorsConfig {
     /// Base palette (see [`ColorPreset`]).
     pub preset: ColorPreset,
-    /// Brand color: logo, commands, links, code, popups.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
-    /// Primary text: messages, model name, input.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Thinking: agent reasoning content (more prominent than dim).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
-    /// Tool result: tool call output (secondary data).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<String>,
-    /// Quiet register: bullets, borders, gutters, separators — and
-    /// tool-call args / timers (secondary metadata).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dim: Option<String>,
-    /// Success: diff+, blockquote, token low.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub success: Option<String>,
-    /// Warning: pending, token mid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
-    /// Danger: diff-, error, token high.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub danger: Option<String>,
-    /// Math: rendered formulas (character grids) and their literal fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub math: Option<String>,
-    /// Surface: user message background.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strong: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface: Option<String>,
-    /// Background tint for diff additions (text keeps syntax colors).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_add_bg: Option<String>,
-    /// Background tint for diff deletions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_del_bg: Option<String>,
-    /// Background tint for changed words inside an added line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_add_bg_strong: Option<String>,
-    /// Background tint for changed words inside a deleted line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_del_bg_strong: Option<String>,
     /// Math rendering mode, resolved from `rendering.math` by
@@ -331,6 +388,9 @@ pub struct ThemePalette {
     pub accent: Color,
     pub text: Color,
     pub thinking: Color,
+    /// The `⦁ 深度思考中 4s` summary line and the base of its shimmer sweep
+    /// (the sweep peaks toward white).
+    pub thinking_label: Color,
     pub tool_result: Color,
     pub dim: Color,
     pub success: Color,
@@ -347,6 +407,21 @@ pub struct ThemePalette {
     pub diff_del_bg_strong: Color,
     /// Math: rendered formulas and their literal fallback.
     pub math: Color,
+    /// Markdown headings (levels 2+; `heading_bright` is level 1).
+    pub heading: Color,
+    /// **Derived, not a config key**: the level-1 heading foreground — the top
+    /// of the heading ladder, lifted from `heading` toward white.
+    pub heading_bright: Color,
+    /// Inline code spans and unhighlighted code-block text.
+    pub inline_code: Color,
+    /// List marks: bullets, ordered numbers, task boxes.
+    pub marker: Color,
+    /// Blockquote bar and quoted voice.
+    pub quote: Color,
+    /// Emphasis (`**bold**`) in plain prose: a 24-bit bold span does not
+    /// brighten by itself (SGR 1 only changes the glyph weight), so emphasis
+    /// carries a hue.
+    pub strong: Color,
     /// Math rendering mode (see [`MathMode`]).
     pub math_mode: MathMode,
 }
@@ -364,10 +439,23 @@ impl ThemePalette {
     /// that slot — never fails the load.
     pub fn from_config(cfg: &ColorsConfig) -> Self {
         let base = cfg.preset.base();
+        let text = resolve(cfg.text.as_deref(), base.text);
+        let heading = resolve(cfg.heading.as_deref(), base.heading);
+        // The level-1 rung follows the **resolved** heading and the **body's**
+        // direction, so overriding only `text` (the usual light-terminal move)
+        // still deepens H1 instead of paling it. A named heading cannot be
+        // stretched: the preset's own rung stands, unless the user replaced the
+        // heading colour itself.
+        let heading_bright = match heading {
+            Color::Rgb(_, _, _) => stretch(heading, is_light_theme(text)),
+            named if named == base.heading => base.heading_bright,
+            named => named,
+        };
         Self {
             accent: resolve(cfg.accent.as_deref(), base.accent),
-            text: resolve(cfg.text.as_deref(), base.text),
+            text,
             thinking: resolve(cfg.thinking.as_deref(), base.thinking),
+            thinking_label: resolve(cfg.thinking_label.as_deref(), base.thinking_label),
             tool_result: resolve(cfg.tool_result.as_deref(), base.tool_result),
             dim: resolve(cfg.dim.as_deref(), base.dim),
             success: resolve(cfg.success.as_deref(), base.success),
@@ -379,8 +467,46 @@ impl ThemePalette {
             diff_add_bg_strong: resolve(cfg.diff_add_bg_strong.as_deref(), base.diff_add_bg_strong),
             diff_del_bg_strong: resolve(cfg.diff_del_bg_strong.as_deref(), base.diff_del_bg_strong),
             math: resolve(cfg.math.as_deref(), base.math),
+            heading,
+            heading_bright,
+            inline_code: resolve(cfg.inline_code.as_deref(), base.inline_code),
+            marker: resolve(cfg.marker.as_deref(), base.marker),
+            quote: resolve(cfg.quote.as_deref(), base.quote),
+            strong: resolve(cfg.strong.as_deref(), base.strong),
             math_mode: cfg.math_mode,
         }
+    }
+}
+
+/// Push an RGB colour 30% of the way toward the extreme that carries contrast:
+/// white on a dark terminal, black on a light one. The derived step behind
+/// `heading_bright` (the level-1 rung).
+///
+/// `light_theme` comes from the **body** colour, not from the colour being
+/// stretched: a light terminal whose body text is dark must get a *deeper*
+/// level-1 heading, never a paler one.
+///
+/// Named colours are returned unchanged: they follow the terminal theme, which
+/// already owns what "brighter" means, and there is no RGB to push.
+fn stretch(color: Color, light_theme: bool) -> Color {
+    const STEP: f32 = 0.30;
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let target = if light_theme { 0.0 } else { 255.0 };
+    let push = |c: u8| -> u8 { (f32::from(c) + (target - f32::from(c)) * STEP).round() as u8 };
+    Color::Rgb(push(r), push(g), push(b))
+}
+
+/// Whether the palette describes a **light terminal**: its body colour is dark.
+/// Same rule as `ui::shimmer::is_light_theme`; the config layer cannot reach up
+/// into `ui`, so the one-line luminance test lives here too (255 = white).
+fn is_light_theme(text: Color) -> bool {
+    match text {
+        Color::Rgb(r, g, b) => {
+            (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.0 < 0.5
+        }
+        other => matches!(other, Color::Black | Color::DarkGray),
     }
 }
 
@@ -436,6 +562,19 @@ mod tests {
         assert_eq!(p.success, Color::Green);
         assert_eq!(p.warning, Color::Yellow);
         assert_eq!(p.danger, Color::Red);
+        assert_eq!(p.heading, Color::Magenta);
+        assert_eq!(p.heading_bright, Color::LightMagenta);
+        assert_eq!(p.strong, Color::LightGreen);
+        assert_eq!(p.inline_code, Color::LightRed);
+        assert_eq!(p.thinking_label, Color::LightYellow);
+        assert_eq!(p.marker, Color::Blue);
+        assert_eq!(p.quote, Color::LightBlue);
+        assert_eq!(p.math, Color::LightCyan);
+        assert!(
+            p.heading_bright != p.heading,
+            "H1 must stay a rung above H2"
+        );
+        assert_ne!(p.marker, p.dim, "list marks must not read as chrome");
         assert_eq!(p.surface, Color::Rgb(52, 53, 65));
     }
 
@@ -525,6 +664,150 @@ mod tests {
         assert_eq!(p.accent, Color::Cyan);
         assert_eq!(p.danger, Color::Red);
         assert_eq!(p.diff_add_bg, ColorPreset::Wing.base().diff_add_bg);
+    }
+
+    /// The markdown role slots are real YAML keys: each overrides exactly its
+    /// own slot, and the derived values follow the slot they are derived from.
+    #[test]
+    fn test_markdown_role_slots_override_and_drive_their_derived_partner() {
+        let cfg: ColorsConfig = serde_yaml::from_str(
+            "heading: \"#00ff00\"\ninline_code: yellow\nmarker: gray\nquote: \"#123456\"\n",
+        )
+        .unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.heading, Color::Rgb(0, 255, 0));
+        assert_eq!(p.inline_code, Color::Yellow);
+        assert_eq!(p.marker, Color::Gray);
+        assert_eq!(p.quote, Color::Rgb(0x12, 0x34, 0x56));
+        // `heading_bright` is the level-1 rung: it follows `heading`, and an
+        // override moves it with it (a named colour cannot be lifted, so it
+        // stays the same value).
+        assert_ne!(p.heading_bright, p.heading, "hex heading must be lifted");
+        let cfg: ColorsConfig = serde_yaml::from_str("heading: green\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.heading_bright, Color::Green);
+    }
+
+    /// `strong` is a slot of its own (emphasis needs a hue: a 24-bit bold span
+    /// does not brighten by itself), and it is never the body colour.
+    #[test]
+    fn test_strong_is_its_own_slot() {
+        let cfg: ColorsConfig = serde_yaml::from_str("strong: \"#00ff00\"\n").unwrap();
+        assert_eq!(
+            ThemePalette::from_config(&cfg).strong,
+            Color::Rgb(0, 255, 0)
+        );
+        // Default: a warm gold, distinct from the body colour it emphasises.
+        let p = ThemePalette::default();
+        assert_ne!(p.strong, p.text);
+        assert_ne!(p.strong, p.inline_code);
+        assert_ne!(p.strong, p.heading);
+    }
+
+    /// `heading_bright` is derived from the **resolved** heading, and its
+    /// direction follows the **body colour**: on a dark terminal (light body
+    /// text) the level-1 heading is lifted toward white, on a light terminal
+    /// (dark body text) it is pushed toward black — never the other way round,
+    /// which would make H1 the least readable rung.
+    #[test]
+    fn test_heading_bright_follows_heading_and_the_terminal_direction() {
+        let luma = |c: Color| -> u16 {
+            match c {
+                Color::Rgb(r, g, b) => u16::from(r) + u16::from(g) + u16::from(b),
+                other => panic!("expected hex, got {other:?}"),
+            }
+        };
+        let dark = ThemePalette::default();
+        assert!(luma(dark.heading_bright) > luma(dark.heading), "dark: lift");
+
+        // Overriding only `text` is the usual light-terminal move: the heading
+        // slot is untouched, so the direction has to come from the body colour
+        // alone (the regression this test pins).
+        let cfg: ColorsConfig = serde_yaml::from_str("text: \"#202020\"\n").unwrap();
+        let light = ThemePalette::from_config(&cfg);
+        assert_eq!(light.heading, dark.heading, "heading stays the preset's");
+        assert!(
+            luma(light.heading_bright) < luma(light.heading),
+            "a dark body must deepen H1, not pale it"
+        );
+
+        // A named heading cannot be stretched: the preset's rung stands (so the
+        // terminal preset keeps H1 ≠ H2), and an explicit override falls back to
+        // itself.
+        let cfg: ColorsConfig = serde_yaml::from_str("preset: terminal\n").unwrap();
+        let terminal = ThemePalette::from_config(&cfg);
+        assert_eq!(terminal.heading, Color::Magenta);
+        assert_eq!(terminal.heading_bright, Color::LightMagenta);
+        let cfg: ColorsConfig = serde_yaml::from_str("heading: green\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.heading, Color::Green);
+        assert_eq!(p.heading_bright, Color::Green);
+        // An invalid value falls back to the preset slot, rung included.
+        let cfg: ColorsConfig = serde_yaml::from_str("heading: neon_pink\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.heading, dark.heading);
+        assert_eq!(p.heading_bright, dark.heading_bright);
+    }
+
+    /// Every role is a distinct hue, and distinct *perceptually*: roles that
+    /// sit on top of each other defeat the point of splitting them.
+    ///
+    /// One exemption is deliberate and documented
+    /// (`docs/dev/tui-rendering.md` 二·八): inline code sits next to `danger`,
+    /// because the choice of a rose for literals is the product decision — the
+    /// two are told apart by context (prose vs a railed notice line), not by
+    /// the swatch.
+    #[test]
+    fn test_the_default_roles_are_distinct_hues() {
+        let p = ThemePalette::default();
+        let roles = [
+            ("text", p.text),
+            ("heading", p.heading),
+            ("strong", p.strong),
+            ("inline_code", p.inline_code),
+            ("accent", p.accent),
+            ("marker", p.marker),
+            ("quote", p.quote),
+            ("tool_result", p.tool_result),
+            ("dim", p.dim),
+            ("thinking", p.thinking),
+            ("thinking_label", p.thinking_label),
+            ("success", p.success),
+            ("warning", p.warning),
+            ("danger", p.danger),
+        ];
+        // Manhattan distance in RGB — coarse, but it catches "same swatch".
+        let distance = |a: Color, b: Color| -> u32 {
+            match (a, b) {
+                (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+                    u32::from(r1.abs_diff(r2))
+                        + u32::from(g1.abs_diff(g2))
+                        + u32::from(b1.abs_diff(b2))
+                }
+                _ => 0,
+            }
+        };
+        for (i, (name_a, a)) in roles.iter().enumerate() {
+            for (name_b, b) in roles.iter().skip(i + 1) {
+                assert_ne!(a, b, "{name_a} and {name_b} are the same colour");
+                let exempt = matches!(
+                    (*name_a, *name_b),
+                    ("inline_code", "danger") | ("danger", "inline_code")
+                );
+                if !exempt {
+                    assert!(
+                        distance(*a, *b) >= 30,
+                        "{name_a} and {name_b} are too close ({a:?} vs {b:?})"
+                    );
+                }
+            }
+        }
+        // Code and links ("one hue, one meaning") must not collapse; headings
+        // and quotes are one family at different rungs; math rides the
+        // heading rung.
+        assert_ne!(p.inline_code, p.accent);
+        assert_ne!(p.heading, p.quote);
+        assert_eq!(p.math, p.heading);
     }
 
     /// An invalid colour string warns and keeps the preset value for that

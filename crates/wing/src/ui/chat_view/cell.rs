@@ -220,7 +220,9 @@ fn assistant_message_lines(
             .with_math(palette.math_mode)
             .with_images(images),
     );
-    let bullet_style = Style::default().fg(palette.text);
+    // The agent's voice marker: the brand hue, so a turn's start is findable
+    // in a scrollback of neutral text.
+    let bullet_style = Style::default().fg(palette.accent);
     let mut composed = compose_lines(
         &md_lines,
         CELL_PREFIX_WIDTH,

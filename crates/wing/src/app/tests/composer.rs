@@ -192,9 +192,9 @@ fn test_the_card_keeps_the_terminal_background() {
         );
     }
 
-    // The *prompt glyph* is the one accent the card carries, in both states:
-    // it is the glyph that says "you can type here", and on an empty session it
-    // is the composer's only accent (the workdir rail carries the other).
+    // The *prompt glyph* is accent while there is a draft to point at; an empty
+    // draft keeps it dim, like the placeholder it sits next to (the empty
+    // session's accent budget belongs to the workdir rail).
     let (text_x, text_y, _) = composer_text(&app);
     assert_eq!(
         buf[(text_x - 2, text_y)].fg,
@@ -207,7 +207,7 @@ fn test_the_card_keeps_the_terminal_background() {
     let (text_x, text_y, _) = composer_text(&app);
     assert_eq!(
         buf[(text_x - 2, text_y)].fg,
-        palette.accent,
+        palette.dim,
         "❯ on an empty draft"
     );
 }
