@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wing.config import Config, resolve_model_display_name
+from wing.config import Config, ProviderConfig, resolve_model_display_name
 from wing.store import SessionMetadata
 
 from .template import AgentTemplate
@@ -64,7 +64,7 @@ def resolve_model_binding(
     if (
         metadata.model_name is not None
         and metadata.provider_name is not None
-        and _has_provider(config, metadata.provider_name)
+        and _provider_cfg(config, metadata.provider_name) is not None
     ):
         return _binding(
             config.identify(metadata.provider_name, metadata.model_name),
@@ -76,17 +76,12 @@ def resolve_model_binding(
     return _binding(template.model_id, template.model, template.provider_name, config)
 
 
-def display_name_of(provider_name: str, model_name: str, config: Config) -> str | None:
-    """``(provider, 调用名)`` → 声明里的展示名；未声明 / provider 不可解析 = None。
-
-    展示名的解析规则只有一份（配置侧 :func:`resolve_model_display_name`：按调用名
-    查声明、空串即无、不做名字启发式），这里只负责把 provider 名解析成声明块。
-    """
+def _provider_cfg(config: Config, name: str) -> ProviderConfig | None:
+    """provider 名 → 声明块；不可解析返回 None（不是失败面）。"""
     try:
-        provider_cfg = config.get_provider(provider_name)
+        return config.get_provider(name)
     except ValueError:
         return None
-    return resolve_model_display_name(provider_cfg, model_name)
 
 
 def _binding(
@@ -99,13 +94,7 @@ def _binding(
         model_id=model_id,
         model_name=model_name,
         provider_name=provider_name,
-        model_display_name=display_name_of(provider_name, model_name, config),
+        model_display_name=resolve_model_display_name(
+            _provider_cfg(config, provider_name), model_name
+        ),
     )
-
-
-def _has_provider(config: Config, name: str) -> bool:
-    try:
-        config.get_provider(name)
-    except ValueError:
-        return False
-    return True

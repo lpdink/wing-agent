@@ -28,6 +28,7 @@ from wing.common.logger import log
 from wing.schema import CacheFork, CacheObservation, CachePart, fingerprint
 from wing.schema.cache import (
     HISTORY_PREFIX,
+    is_count,
     PURPOSE_COMPACT,
     RULES_PREFIX,
     SKILLS_PREFIX,
@@ -117,11 +118,6 @@ def normalize_ledger(raw: Any, session_id: str) -> dict[str, Any]:
 _CALL_TEXT_FIELDS = ("ts", "fp", "purpose", "model", "provider", "verdict")
 
 
-def _is_int(value: Any) -> bool:
-    """真整数才算计数：`bool` 是 `int` 的子类，手改账本写成 `true` 不能当 1 收下。"""
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 def _normalize_call(entry: Any) -> dict[str, Any] | None:
     """单条调用记录的类型归一（坏记录返回 None = 丢弃）。"""
     if not isinstance(entry, dict):
@@ -134,7 +130,7 @@ def _normalize_call(entry: Any) -> dict[str, Any] | None:
         call[field] = value
     for field in ("prompt", "cached", "expected"):
         value = entry.get(field)
-        call[field] = value if _is_int(value) else None
+        call[field] = value if is_count(value) else None
     if call["prompt"] is None or call["cached"] is None:
         return None
     ref_fp = entry.get("ref_fp")
@@ -145,18 +141,9 @@ def _normalize_call(entry: Any) -> dict[str, Any] | None:
 
 
 def _normalize_fork(raw: dict[str, Any]) -> dict[str, Any] | None:
-    kind, label = raw.get("kind"), raw.get("label")
-    index, affected = raw.get("index"), raw.get("segments_affected")
-    lost = raw.get("tokens_lost")
-    if not isinstance(kind, str) or not isinstance(label, str):
-        return None
-    return {
-        "kind": kind,
-        "index": index if _is_int(index) else 0,
-        "label": label,
-        "segments_affected": affected if _is_int(affected) else 0,
-        "tokens_lost": lost if _is_int(lost) else None,
-    }
+    """分叉记录的归一：形状与容错规则归 ``CacheFork``（唯一守门人）。"""
+    fork = CacheFork.from_wire(raw)
+    return None if fork is None else fork.to_wire()
 
 
 def _segments_of(fingerprints: dict[str, Any], fp: Any) -> list[dict[str, Any]]:

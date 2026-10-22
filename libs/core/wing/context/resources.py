@@ -64,6 +64,9 @@ def load_rules(
     文件不存在或读取失败时 log.warning 并跳过。
 
     文件路径列表供 AgentInfo 下发，前端展示加载概览。
+
+    **仅供测试的便捷包装**：生产路径直接用 ``load_rule_files`` + ``rules_prompt``
+    两步（ContextManager 同时需要文件路径与内容）。
     """
     files = load_rule_files(rules_patterns, workspace)
     return rules_prompt(files)

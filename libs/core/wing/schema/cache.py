@@ -79,11 +79,6 @@ def _sha_of(canonical: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def sha16(obj: Any) -> str:
-    """规范形的 sha256 前 16 位（契约 §1 的 `sha`）。"""
-    return _sha_of(canonical_json(obj))
-
-
 def fingerprint(segments: Sequence["CachePart"]) -> str:
     """指纹（契约 §2）：`sha256("|".join(f"{label}:{sha}"))[:16]`。
 
@@ -151,6 +146,15 @@ class CachePart:
 # ── 分叉与归因结果 ────────────────────────────────────────────────────────
 
 
+def is_count(value: object) -> bool:
+    """计数位 / 估算位的判据：**真整数**才算。
+
+    ``bool`` 是 ``int`` 的子类：手改账本里的 ``true`` 不能当 1 收下（否则分叉下标
+    会被静默改成 1）。
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 @dataclass(frozen=True)
 class CacheFork:
     """前缀分叉事实（契约 §4 的 `fork`）；`tokens_lost` 是**估算值**。"""
@@ -172,6 +176,11 @@ class CacheFork:
 
     @classmethod
     def from_wire(cls, raw: Any) -> "CacheFork | None":
+        """落盘 wire → 分叉事实；形状不合规返回 None（前向容忍，不抛）。
+
+        分叉的 wire 形状（`kind / index / label / segments_affected /
+        tokens_lost`）只由本类解释。
+        """
         if not isinstance(raw, dict):
             return None
         kind, label, index = raw.get("kind"), raw.get("label"), raw.get("index")
@@ -181,10 +190,10 @@ class CacheFork:
         lost = raw.get("tokens_lost")
         return cls(
             kind=kind,
-            index=index if isinstance(index, int) else 0,
+            index=index if is_count(index) else 0,
             label=label,
-            segments_affected=affected if isinstance(affected, int) else 0,
-            tokens_lost=lost if isinstance(lost, int) else None,
+            segments_affected=affected if is_count(affected) else 0,
+            tokens_lost=lost if is_count(lost) else None,
         )
 
 

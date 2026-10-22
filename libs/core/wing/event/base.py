@@ -20,7 +20,7 @@ from wing.schema import ChainNode
 # 线格式刻意复用持久 schema 的记录类型：tag_meta 的"值对象"在存储与协议里是
 # 同一个事实（改它 = 同时改 metadata.json 与 HTTP 响应），复制一份只会漂移。
 # 分层允许（L2 同层），且 store 不认识事件层，无环。
-from wing.store.base import TagMeta
+from wing.store import TagMeta
 
 
 # ============================================================

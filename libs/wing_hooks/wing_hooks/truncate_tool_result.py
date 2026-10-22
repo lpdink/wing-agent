@@ -1,7 +1,7 @@
 """truncate_tool_result hook — 截断过长的 tool result。
 
-超过 MAX_TRUNCATE_LENGTH (20000) 时，前后各保留 KEEP_HEAD_LENGTH (2000)
-和 KEEP_TAIL_LENGTH (2000) 字符，中间截断标记包含原始长度和临时文件路径。
+超过 MAX_TRUNCATE_LENGTH (50000) 时，前后各保留 KEEP_HEAD_LENGTH (100)
+和 KEEP_TAIL_LENGTH (100) 字符，中间截断标记包含原始长度和临时文件路径。
 原始完整结果写入持久化临时文件，agent 可通过 Read 工具查看。
 
 对所有 tool_name 都生效（不限于 Bash）。
@@ -51,8 +51,9 @@ def truncate_tool_result(result: str | None, **ctx) -> str | None:
     """截断过长的 tool result。
 
     None 或空字符串 → 返回 None（不修改）
-    20000 字符以内 → 返回 None（不修改）
-    超过阈值 → 前后各保留 2000 字符，截断标记包含原始长度和临时文件路径
+    MAX_TRUNCATE_LENGTH 字符以内 → 返回 None（不修改）
+    超过阈值 → 前后各保留 KEEP_HEAD_LENGTH / KEEP_TAIL_LENGTH 字符，截断标记包含
+    原始长度和临时文件路径
     """
     if not result or len(result) <= MAX_TRUNCATE_LENGTH:
         return None

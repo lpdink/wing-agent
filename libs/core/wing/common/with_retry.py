@@ -70,6 +70,30 @@ def _resolve_retry_params(
     )
 
 
+def _should_retry(exc: Exception, retry_on: tuple[type[Exception], ...] | None) -> bool:
+    """本次失败是否值得重试：``retry_on`` 为 None 时重试全部 ``Exception``。"""
+    return retry_on is None or isinstance(exc, retry_on)
+
+
+async def _await_backoff(
+    attempt: int,
+    *,
+    max_retries: int,
+    subject: str,
+    exc: Exception,
+    base_delay: float,
+    max_delay: float,
+) -> None:
+    """一次失败后的退避阶梯（日志 → 前端通知 → 睡眠），协程与生成器两条路径共用。"""
+    log.error(
+        f"call {subject} failed (attempt {attempt + 1}): "
+        f"{type(exc).__name__}: {exc}, retrying..."
+    )
+    delay = min(base_delay * (2**attempt), max_delay)
+    _emit_retry_event(attempt, max_retries, subject, exc, delay)
+    await asyncio.sleep(delay)
+
+
 def with_retry(
     max_retries: int | None = None,
     base_delay: float = 3.0,
@@ -107,17 +131,19 @@ def with_retry(
                     try:
                         return await func(*args, **kwargs)
                     except Exception as e:
-                        if retry_on is not None and not isinstance(e, retry_on):
+                        if not _should_retry(e, retry_on):
                             raise
                         last_exc = e
                         if attempt == resolved_retries:
                             raise last_exc
-                        log.error(
-                            f"call {subject} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
+                        await _await_backoff(
+                            attempt,
+                            max_retries=resolved_retries,
+                            subject=subject,
+                            exc=e,
+                            base_delay=base_delay,
+                            max_delay=resolved_max_delay,
                         )
-                        delay = min(base_delay * (2**attempt), resolved_max_delay)
-                        _emit_retry_event(attempt, resolved_retries, subject, e, delay)
-                        await asyncio.sleep(delay)
                 raise last_exc  # ty: ignore # unreachable
 
             return wrapper
@@ -136,17 +162,19 @@ def with_retry(
                         yield item
                     return
                 except Exception as e:
-                    if retry_on is not None and not isinstance(e, retry_on):
+                    if not _should_retry(e, retry_on):
                         raise
                     last_exc = e
                     if attempt == resolved_retries:
                         raise last_exc
-                    log.error(
-                        f"call {subject} failed (attempt {attempt + 1}): {type(e).__name__}: {e}, retrying..."
+                    await _await_backoff(
+                        attempt,
+                        max_retries=resolved_retries,
+                        subject=subject,
+                        exc=e,
+                        base_delay=base_delay,
+                        max_delay=resolved_max_delay,
                     )
-                    delay = min(base_delay * (2**attempt), resolved_max_delay)
-                    _emit_retry_event(attempt, resolved_retries, subject, e, delay)
-                    await asyncio.sleep(delay)
 
         return async_gen_wrapper
 

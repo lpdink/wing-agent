@@ -1015,15 +1015,12 @@ class WingRuntime:
         """发射 ContextStatsEvent。"""
         cm = session.agent.context_manager
         count, tokens = cm.get_context_stats()
-        ctx_window = 0
-        if cm.compactor:
-            ctx_window = cm.compactor.context_window_tokens
         self._emit_session_event(
             ContextStatsEvent(
                 session_id=session.session_id,
                 message_count=count,
                 total_tokens=tokens,
-                context_window_tokens=ctx_window,
+                context_window_tokens=cm.context_window_tokens,
             )
         )
 
@@ -1085,15 +1082,12 @@ class WingRuntime:
         )
 
         count, tokens = cm.get_context_stats()
-        ctx_window = 0
-        if cm.compactor:
-            ctx_window = cm.compactor.context_window_tokens
         event_bus.emit(
             ContextStatsEvent(
                 session_id=session.session_id,
                 message_count=count,
                 total_tokens=tokens,
-                context_window_tokens=ctx_window,
+                context_window_tokens=cm.context_window_tokens,
                 target=client_target,
             )
         )

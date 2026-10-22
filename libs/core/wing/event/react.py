@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 from pydantic import Field
 
+from wing.schema import usage_wire
+
 from .base import WingEvent
 
 if TYPE_CHECKING:
@@ -170,10 +172,10 @@ class DoneEvent(WingEvent):
 
 
 class TurnStartedEvent(WingEvent):
-    """Agent turn 开始处理。在 agent._process_turn() 入口 emit。
+    """Agent turn 开始处理。在 ReActLoop.run_turn 入口 emit。
 
     与 DeliveredEvent 的区别：Delivered 是 transport ack（消息到达后端），
-    TurnStarted 是语义信号（agent 开始处理该消息）。魔术命令不触发此事件。
+    TurnStarted 是语义信号（agent 开始处理该消息）。
     """
 
     type: Literal["turn_started"] = "turn_started"
@@ -206,15 +208,15 @@ class DiffContentEvent(WingEvent):
 
     tool_call_id 关联产生此 diff 的工具调用（Write/Edit）。
     并发工具调用场景下事件乱序到达，前端据此把 diff 锚定到对应
-    ToolCall cell 之后，而非追加到聊天尾部。取自 agent.py 的
-    current_tool_call_id()（exec_tool_calls 为每个 gather task 设置）。
+    ToolCall cell 之后，而非追加到聊天尾部。取自
+    agent/tool_executor.current_tool_call_id()（ToolExecutor.execute() 为
+    每个 gather task 设置）。
 
     **载荷是窗口**：Edit 的 old_text/new_text 只携带变更区域
-    ± 上下文行（``tools/diff_window.py`` 的 ``DIFF_CONTEXT_LINES``），而非
-    整份文件；``replace_all`` 每个匹配位置一条事件（同一 tool_call_id）。
-    窗口首行在各自修订版中的 1 起绝对行号见 old_start_line/new_start_line
-    ——前端据此渲染 gutter 行号与 ``@@`` 头（见
-    openspec/changes/diff-payload-window）。
+    ± 上下文行（``tools/internal/diff_window.py`` 的 ``DIFF_CONTEXT_LINES``），
+    而非整份文件；``replace_all`` 每个匹配位置一条事件（同一 tool_call_id）。
+    old_start_line / new_start_line 是窗口首行在各自修订版中的 1 起**绝对行号**
+    ——前端据此渲染 gutter 行号与 ``@@`` 头。
 
     Write / 新建文件保持全量：``old_text=None`` 表示新文件（全绿），此时
     old 侧无行号，old_start_line 无意义（留 1）。
@@ -273,7 +275,7 @@ def _claude_stop_reason(msg: Message) -> str:
 class AssistantTurnEvent(WingEvent):
     """Turn 级别的 assistant 完整消息（对应 Claude SDKAssistantMessage）。
 
-    在 _call_llm() 返回完整 assistant 消息后、exec_tool_calls() 之前 emit。
+    在 _call_llm() 返回完整 assistant 消息后、ToolExecutor.execute() 之前 emit。
     content_blocks 格式:
       [{"type": "text", "text": "..."},
        {"type": "tool_use", "id": "call_xxx", "name": "Bash", "input": {...}},
@@ -308,20 +310,12 @@ class AssistantTurnEvent(WingEvent):
                 }
             )
 
-        usage_dict = None
-        if msg.usage:
-            usage_dict = {
-                "input_tokens": msg.usage.prompt_tokens,
-                "output_tokens": msg.usage.completion_tokens,
-                "cached_tokens": msg.usage.cached_tokens,
-            }
-
         return cls(
             session_id=session_id,
             content_blocks=content_blocks,
             model=model,
             stop_reason=_claude_stop_reason(msg),
-            usage=usage_dict,
+            usage=usage_wire(msg.usage),
         )
 
 
