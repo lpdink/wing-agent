@@ -109,11 +109,13 @@ impl Widget for ComposerWidget<'_> {
             // The prompt glyph opens the draft — first visual row of the first
             // logical line only; every other row keeps the text alignment.
             //
-            // 常态 accent：它是"这里可以打字"的那个字形，也是空会话里 composer 唯一的
-            // accent（另一处在 workdir rail）。但**键盘被别的层接管**时整张卡都不能
-            // 编辑（正文已被画成 dim），光标还亮着就是在说反话。
+            // accent = "there is a draft here"; an **empty** composer keeps it
+            // dim, like the placeholder it sits next to (the empty session's
+            // accent budget belongs to the workdir rail, not a caret with
+            // nothing to point at). Same when another layer owns the keyboard:
+            // the draft is drawn dim there, so a lit caret would contradict it.
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let ink = if self.keyboard_held {
+                let ink = if self.keyboard_held || self.input.is_empty() {
                     self.palette.dim
                 } else {
                     self.palette.accent
@@ -181,4 +183,39 @@ impl Widget for ComposerWidget<'_> {
 /// Returns `(x, y)` absolute coordinates.
 pub fn cursor_screen_pos(input: &InputArea, area: &Rect) -> (u16, u16) {
     input.cursor_screen_pos(area)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    use super::*;
+    use crate::ui::status_bar::TurnUsage;
+
+    /// Render one composer card and return the prompt glyph's foreground.
+    fn prompt_ink(draft: &str) -> Option<Color> {
+        let palette = ThemePalette::default();
+        let mut input = InputArea::new("ask anything");
+        input.set_text(draft);
+        let usage = TurnUsage::default();
+        let area = Rect::new(0, 0, 60, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerWidget::new(&mut input, &palette, None, MetaRail::bare(&usage))
+            .render(area, &mut buf);
+        // The prompt opens the first draft row, right of the card's border.
+        let x = area.x + chrome::PROMPT_X;
+        let y = area.y + Chrome::of(area).top_row();
+        buf[(x, y)].style().fg
+    }
+
+    /// An empty composer keeps the caret dim (it sits next to a dim
+    /// placeholder); a draft lights it with the accent.
+    #[test]
+    fn the_caret_follows_whether_a_draft_exists() {
+        let palette = ThemePalette::default();
+        assert_eq!(prompt_ink(""), Some(palette.dim), "empty: dim");
+        assert_eq!(prompt_ink("hello"), Some(palette.accent), "draft: accent");
+    }
 }
