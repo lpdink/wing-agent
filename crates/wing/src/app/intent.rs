@@ -202,16 +202,7 @@ pub enum AppIntent {
 
     /// Update session state (model id, agent, title, thinking, reasoning_effort,
     /// yolo, workspace) via HTTP API.
-    UpdateSession {
-        /// 模型引用词（model_id）——唯一的模型变更入口。
-        model_id: Option<String>,
-        agent: Option<String>,
-        title: Option<String>,
-        thinking: Option<bool>,
-        reasoning_effort: Option<String>,
-        yolo: Option<bool>,
-        workspace: Option<String>,
-    },
+    UpdateSession(SessionUpdate),
 
     /// Set the terminal title via OSC 0 escape sequence.
     SetTitle(String),
@@ -244,7 +235,7 @@ pub enum AppIntent {
     /// Fetch and display skills info via HTTP API.
     ShowSkillsInfo,
 
-    // ---- 设置面板（design §12.4） ----
+    // ---- 设置面板 ----
     /// `GET /api/settings/schema` + `GET /api/settings/get`（并发），产出
     /// [`FetchPayload::Settings`]。打开面板的 cache-first 刷新与首次拉取共用它。
     FetchSettings,
@@ -266,83 +257,73 @@ pub enum AppIntent {
     },
 
     /// `Ctrl+R`：立即重启网关（shutdown → 等不可达 → 重新拉起 → 重连 → 会话恢复）。
-    /// 轮次进行中由 App 在分派点拒绝（design §12.5）。
+    /// 轮次进行中由 App 在分派点拒绝。
     RestartGateway,
 }
 
-impl AppIntent {
-    /// Build an `UpdateSession` intent with all fields `None`.
-    fn update_session(f: impl FnOnce(&mut Self)) -> Self {
-        let mut intent = Self::UpdateSession {
-            model_id: None,
-            agent: None,
-            title: None,
-            thinking: None,
-            reasoning_effort: None,
-            yolo: None,
-            workspace: None,
-        };
-        f(&mut intent);
-        intent
-    }
+/// [`AppIntent::UpdateSession`] 的字段：全部 `Option`，`None` = 这一项不动。
+///
+/// 具名字段而不是 7 个位置参数：形参表与请求映射都只写一份（`SessionUpdate`），
+/// 构造点各一行。
+#[derive(Debug, Clone, Default)]
+pub struct SessionUpdate {
+    /// 模型引用词（model_id）——唯一的模型变更入口。
+    pub model_id: Option<String>,
+    pub agent: Option<String>,
+    pub title: Option<String>,
+    pub thinking: Option<bool>,
+    pub reasoning_effort: Option<String>,
+    pub yolo: Option<bool>,
+    pub workspace: Option<String>,
+}
 
+impl AppIntent {
     /// Update the session model by its reference word (`model_id`).
     pub fn set_model(model_id: String) -> Self {
-        Self::update_session(|i| {
-            if let Self::UpdateSession { model_id: m, .. } = i {
-                *m = Some(model_id);
-            }
+        Self::UpdateSession(SessionUpdate {
+            model_id: Some(model_id),
+            ..Default::default()
         })
     }
 
     /// Update the session agent template.
     pub fn set_agent(agent: String) -> Self {
-        Self::update_session(|i| {
-            if let Self::UpdateSession { agent: a, .. } = i {
-                *a = Some(agent);
-            }
+        Self::UpdateSession(SessionUpdate {
+            agent: Some(agent),
+            ..Default::default()
         })
     }
 
     /// Update the session title.
     pub fn set_title(title: String) -> Self {
-        Self::update_session(|i| {
-            if let Self::UpdateSession { title: t, .. } = i {
-                *t = Some(title);
-            }
+        Self::UpdateSession(SessionUpdate {
+            title: Some(title),
+            ..Default::default()
         })
     }
 
     /// Update the thinking mode (and optionally reasoning effort).
     pub fn set_thinking(enabled: bool, effort: Option<String>) -> Self {
-        Self::update_session(|i| {
-            if let Self::UpdateSession {
-                thinking,
-                reasoning_effort,
-                ..
-            } = i
-            {
-                *thinking = Some(enabled);
-                *reasoning_effort = effort;
-            }
+        Self::UpdateSession(SessionUpdate {
+            thinking: Some(enabled),
+            reasoning_effort: effort,
+            ..Default::default()
         })
     }
 
     /// Update the YOLO mode (auto-approve tool calls).
     pub fn set_yolo(enabled: bool) -> Self {
-        Self::update_session(|i| {
-            if let Self::UpdateSession { yolo, .. } = i {
-                *yolo = Some(enabled);
-            }
+        Self::UpdateSession(SessionUpdate {
+            yolo: Some(enabled),
+            ..Default::default()
         })
     }
 
     /// Update the session working directory.
     pub fn set_workdir(path: String) -> Self {
-        Self::update_session(|i| {
-            if let Self::UpdateSession { workspace, .. } = i {
-                *workspace = Some(path);
-            }
+        Self::UpdateSession(SessionUpdate {
+            workspace: Some(path),
+            ..Default::default()
         })
     }
 }

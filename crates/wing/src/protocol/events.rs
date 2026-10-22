@@ -43,15 +43,6 @@ pub(crate) fn first_line() -> usize {
     1
 }
 
-/// Routing target injected by EventBus — the TUI can ignore this but must
-/// tolerate it in the JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventTarget {
-    pub scope: String,
-    #[serde(default)]
-    pub client_ids: Vec<String>,
-}
-
 /// Session runtime status — mirror of `wing/event/base.py::SessionStatus`.
 ///
 /// The *authoritative* answer to "is a turn in flight" — carried by the
@@ -179,17 +170,6 @@ pub struct CommandInfo {
     pub params: String,
 }
 
-/// Session summary info.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub name: Option<String>,
-    pub created_at: Option<String>,
-    pub template_name: Option<String>,
-    pub workspace: Option<String>,
-    pub last_interaction: Option<String>,
-}
-
 /// Branch target for /rewind and /fork.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchTargetInfo {
@@ -203,33 +183,15 @@ fn default_role() -> String {
     "user".into()
 }
 
-/// `tool_media` 的宽容解码，两层：
+/// `tool_media` 走共享的宽容解码（见 [`super::media::tolerant_media_array`]）。
 ///
-/// - `null` / 缺席 / 非数组形状 → 空表（旧网关只发缺键；中间代理可能发 null）；
-/// - 数组里单条畸形（缺字段 / 类型不符）→ **只跳过该条**，保留其余合法条目
-///   与整帧事件——一条坏数据不应让 `tool_call_result` 整帧消失（卡片会永远
-///   停在 Pending、结果行不出现）。
-///
-/// 条目类型是 [`MediaRef`]（见 `wing_api_client::models`）：`name` 缺键或 `null` 都退化
-/// 为 `None`。
+/// 旧网关只发缺键、中间代理可能发 `null`：两种都与空表同价，一个真·非数组值静默忽略
+/// （坏条目只丢该条，`tool_call_result` 整帧必须活下来——否则卡片永远停在 Pending）。
 fn deserialize_tool_media<'de, D>(deserializer: D) -> Result<Vec<MediaRef>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
-    let Some(serde_json::Value::Array(items)) = raw else {
-        return Ok(Vec::new());
-    };
-    Ok(items
-        .into_iter()
-        .filter_map(|item| match serde_json::from_value::<MediaRef>(item) {
-            Ok(media) => Some(media),
-            Err(err) => {
-                tracing::warn!(error = %err, "skipping malformed tool_media entry");
-                None
-            }
-        })
-        .collect())
+    super::media::tolerant_media_array(deserializer, "tool_media", false)
 }
 
 // ============================================================
@@ -548,7 +510,7 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
-    /// 配置变更广播（网关的 `SettingsChangedEvent`，design.md §7.6）。
+    /// 配置变更广播（网关的 `SettingsChangedEvent`）。
     ///
     /// `target = EventTarget(scope="global")`：所有客户端都收得到，包括**另一个客户端**
     /// 的保存。面板据此做指纹比对（相同 = 自己刚保存的那一次，不警告；不同 = 别人改了，
@@ -730,15 +692,29 @@ impl WingEvent {
     /// [`WingEvent::Unknown`]; a known `type` whose payload is otherwise
     /// malformed is an error (the caller skips that node).
     pub fn from_history_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        /// 要补的键：缺席与显式 null 同价。
+        fn missing(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+            obj.get(key).is_none_or(serde_json::Value::is_null)
+        }
+        const BACKFILLED: [&str; 3] = ["created_at", "request_id", "tool_call_id"];
+
+        // 常态零拷贝：`wire_dump` 保证三个键在场，只有手写夹具（payload-only 记录）
+        // 才需要补——补的时候才复制整棵树。
+        let needs_backfill = value
+            .as_object()
+            .is_some_and(|obj| BACKFILLED.iter().any(|key| missing(obj, key)));
+        if !needs_backfill {
+            return WingEvent::deserialize(value);
+        }
         let mut value = value.clone();
         if let Some(obj) = value.as_object_mut() {
-            for key in ["created_at", "request_id", "tool_call_id"] {
-                if obj.get(key).is_none_or(serde_json::Value::is_null) {
+            for key in BACKFILLED {
+                if missing(obj, key) {
                     obj.insert(key.to_string(), serde_json::Value::String(String::new()));
                 }
             }
         }
-        serde_json::from_value(value)
+        WingEvent::deserialize(&value)
     }
 
     /// Returns the `type` discriminator string for this event.
@@ -1974,7 +1950,7 @@ mod tests {
         assert!(WingEvent::from_history_value(&serde_json::json!({"type": 5})).is_err());
     }
 
-    /// `settings_changed`（design §7.6）：全字段解码，且**缺字段也能解码**
+    /// `settings_changed`：全字段解码，且**缺字段也能解码**
     /// （旧网关 / 全局事件不带 session_id）——面板只按指纹比对。
     #[test]
     fn deserialize_settings_changed_event() {

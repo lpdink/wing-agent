@@ -558,7 +558,7 @@ impl App {
         } else {
             self.chat.scroll_down(1, self.geometry.chat_height());
         }
-        // The drag keeps the follow state frozen, even when this step landed
+        // The drag keeps the follow state frozen, even when the drag landed
         // exactly on the bottom edge (that judgement happens on release).
         self.chat.unfollow();
         if self.chat.scroll_position() == before {

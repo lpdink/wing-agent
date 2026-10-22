@@ -418,22 +418,6 @@ impl GatewayClient {
         }
     }
 
-    /// Send a request with a specific session_id.
-    pub async fn send_to_session(&self, content: &str, session_id: &str) -> Result<()> {
-        let req = ClientRequest {
-            request_id: crate::protocol::generate_request_id(),
-            session_id: session_id.to_string(),
-            content: content.to_string(),
-            tool_call_id: None,
-            media: None,
-        };
-        self.tx
-            .send(req)
-            .await
-            .context("gateway write channel closed")?;
-        Ok(())
-    }
-
     /// Receive the next event from the gateway.
     ///
     /// Returns `None` if the connection is closed.

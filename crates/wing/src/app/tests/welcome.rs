@@ -168,7 +168,7 @@ fn the_splash_puts_the_composer_under_the_nameplate() {
     );
 }
 
-/// 敲 `/` 不会让开屏整块挪位（S1）：弹层在开屏里是浮层，挂在输入卡下面。
+/// 敲 `/` 不会让开屏整块挪位：弹层在开屏里是浮层，挂在输入卡下面。
 #[test]
 fn a_popup_does_not_move_the_splash() {
     let hero_top = |app: &mut App| -> u16 {

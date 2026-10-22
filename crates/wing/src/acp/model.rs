@@ -27,7 +27,7 @@
 //! 其它前端（TUI / 编排 CLI）改模型时网关广播 `session_state_changed{model_id}`；本模块重新取权威
 //! 状态构造全量 options，以 `config_option_update` 推给客户端。**触发点在
 //! [`super::session::SessionHub::dispatch`] 而不是 prompt 轮次的事件循环**：该事件与「有没有在途
-//! prompt」无关，空闲时会话事件通道没有消费者（分流即丢弃），写在轮次里几乎永不触发（design D7）。
+//! prompt」无关，空闲时会话事件通道没有消费者（分流即丢弃），写在轮次里几乎永不触发。
 
 use std::sync::Arc;
 
@@ -89,7 +89,7 @@ impl SessionModel {
 
 /// `GET /api/models` 的目录 + 会话当前状态 → `model` option（空 vec = 没有可广告的值）。
 ///
-/// 规则（design D1）：
+/// 规则：
 ///
 /// - 每个 provider 一组（`group` = 组名 = provider 名，目录顺序）；provider 名空 / 模型表空
 ///   的组丢掉；组内空白 id 与重复值 id 丢掉；

@@ -11,7 +11,7 @@
 //! | `session/list` | request | `GET /api/session/list` → 过滤 / 分页 / 映射（[`list_page`]） |
 //! | `session/load` | request | resume 校验 → 挂载（arm + subscribe）→ 回放 `sync_session` 快照 → 标题/用量/命令 → 响应（[`restore_session`]） |
 //! | `session/resume` | request | 同 load，不回放 |
-//! | `session/close` | request | 在途轮次按 cancel 处理 → 回收 hub 条目（N6）→ unsubscribe + release（幂等成功） |
+//! | `session/close` | request | 在途轮次按 cancel 处理 → 回收 hub 条目 → unsubscribe + release（幂等成功） |
 //! | `session/set_config_option` | request | 只认 `model`（值 = 纯 model_id）→ `POST /api/session/update {model_id}` → 回**全量** options（见 [`super::model`]） |
 //!
 //! `session/new` / `session/load` / `session/resume` 的响应都带 `configOptions`
@@ -19,7 +19,7 @@
 //! `session_state_changed` 时，中继在 hub 的分流路径上（见 `super::session::SessionHub::dispatch`），
 //! 不在这里。
 //!
-//! （03 的 Ask 映射不注册新方法：它在 `session/prompt` 的轮次循环里分流，见 [`super::ask`]。）
+//! （Ask 映射不注册新方法：它在 `session/prompt` 的轮次循环里分流，见 [`super::ask`]。）
 //!
 //! 纪律：SDK 的 handler 在 dispatch loop 内执行并阻塞后续消息，因此**任何会等外部
 //! 事件的活都必须 `cx.spawn(...)` 出去**（`session/new` 的 HTTP 往返、整轮 prompt、
@@ -227,7 +227,7 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
                     .await;
                     match result {
                         Ok(()) => {
-                            // 04：模型 options 与标题 / 用量 / 命令同批，在响应之前。
+                            // 模型 options 与标题 / 用量 / 命令同批，在响应之前。
                             let options = model_options(&hub, &session_key).await;
                             responder
                                 .respond(LoadSessionResponse::new().config_options(options))?;
@@ -264,7 +264,7 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
                     .await;
                     match result {
                         Ok(()) => {
-                            // 04：模型 options 与标题 / 用量 / 命令同批，在响应之前。
+                            // 模型 options 与标题 / 用量 / 命令同批，在响应之前。
                             let options = model_options(&hub, &session_key).await;
                             responder
                                 .respond(ResumeSessionResponse::new().config_options(options))?;
@@ -317,7 +317,7 @@ pub async fn serve(hub: Arc<SessionHub>, args: AcpArgs) -> Result<(), Error> {
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(Stdio::new(), async move |cx| {
-            // 04：把连接句柄留给 hub——模型变更中继从事件分流路径发 `config_option_update`
+            // 把连接句柄留给 hub——模型变更中继从事件分流路径发 `config_option_update`
             // （那条路径没有 handler 的 `cx`）。
             hub.register_client_connection(cx.clone());
             // 客户端关连接时通知 hub：WS 断开的收尾窗口据此尽早退出
@@ -385,7 +385,7 @@ fn agent_version() -> String {
     )
 }
 
-/// agent 能力广告（05 步：会话生命周期落地后升级）。
+/// agent 能力广告。
 ///
 /// - `loadSession: true`：支持 `session/load`（回放历史为 update 序列）；
 /// - `sessionCapabilities { list, resume, close }`：三种会话生命周期方法（`{}` = 支持）；
@@ -430,7 +430,7 @@ async fn create_session(
         .map_err(hub_error)?;
 
     tracing::info!(session_id = %session_id, "acp: session created");
-    // 04：模型 config options（id=model / category=model / select，值 = 纯 model_id）。
+    // 模型 config options（id=model / category=model / select，值 = 纯 model_id）。
     let options = model_options(hub, &session_id).await;
     let session_id = SessionId::new(session_id);
     Ok((
@@ -439,7 +439,7 @@ async fn create_session(
     ))
 }
 
-/// 会话的模型 config options（04）：取不到 / 空表都**不广告**（返回 None），只记日志。
+/// 会话的模型 config options：取不到 / 空表都**不广告**（返回 None），只记日志。
 ///
 /// 建会话 / 打开线程是主目的：模型目录或会话状态的一次失败不该把整个会话打掉。缺了
 /// options 的客户端只是没有模型下拉，下一次 `session/load` 或外部变更的中继都会重新构造。
@@ -821,7 +821,7 @@ async fn run_turn(
         // Ask 事件：按形态分流到 permission / elicitation / 回退三径（见 `ask` 模块），
         // 答案经 WS `ClientRequest{content, tool_call_id}` 定向 resolve feedback waiter。
         //
-        // 就地 await（见 `ask` 模块与 design D5）：同一会话至多一个在途 agent→client
+        // 就地 await（见 `ask` 模块）：同一会话至多一个在途 agent→client
         // 请求，后续 ask 留在会话事件缓冲里排队（与 TUI 的 ask 面板 FIFO 同语义）。
         // 等待期间后端轮次被 feedback waiter 阻塞，不会有事件堆积。
         //
@@ -888,7 +888,7 @@ async fn run_turn(
 
         // 终态之后、把 gate 还回去之前，先把**本轮尾帧**消化掉：后端的异常帧序是
         // `turn_result → error → done`，只消费第一个终态的话，那条 `error` 会被下一个
-        // 排队 prompt 当成自己的终态（见 `Turn::drain_trailing` 与 design 的 S3）。
+        // 排队 prompt 当成自己的终态（见 `Turn::drain_trailing`）。
         for trailing in turn.drain_trailing().await {
             for update in turn.updates_for(&trailing) {
                 cx.send_notification(SessionNotification::new(session_id.clone(), update))
@@ -929,7 +929,7 @@ mod tests {
     use agent_client_protocol::schema::v1::SessionConfigSelectOptions;
     use serde_json::json;
 
-    /// 04：`configOptions` 缺席 = 不广告（不是空数组）；有值时是我们在 `model` 模块里
+    /// `configOptions` 缺席 = 不广告（不是空数组）；有值时是我们在 `model` 模块里
     /// 构造的那份（`session/new` / `load` / `resume` 三个响应共用同一形状）。
     #[test]
     fn session_responses_carry_the_model_option_only_when_advertised() {

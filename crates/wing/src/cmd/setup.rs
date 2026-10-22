@@ -1,4 +1,4 @@
-//! Setup TUI —— 首次运行 / 配置损坏时的修复循环（design §16，D22）。
+//! Setup TUI —— 首次运行 / 配置损坏时的修复循环。
 //!
 //! 它是**在 `App` 之前的一个更小的东西**：没有 session、没有 WS、没有意图队列，绝不进 `run_app`
 //! （`App.session_id` 是 `String` 非 `Option`，处处假定有会话，硬套会污染几十处）。终端生命周期
@@ -19,7 +19,7 @@
 //!
 //! 背板复用 [`crate::ui::welcome`] 的**帧数据与绘制原语**（`art` 的字母网格、`sprite` 的半格渲染、
 //! `wordmark` 的渐变大字），**不复用** `Welcome` 结构体——它绑定 chat header 的宽度阶梯与可见性门控。
-//! 前景就是同一个 [`SettingsPanel`] + [`SettingsOverlay`]，首屏 = 问题清单（D11）。
+//! 前景就是同一个 [`SettingsPanel`] + [`SettingsOverlay`]，首屏 = 问题清单。
 //!
 //! 三个前端共用这里的预检（[`preflight_config`] / [`preflight_or_report`]）。**stdout 一个字节都不
 //! 写**（stdio / ACP 的协议帧通道就是这条 stdout 的语义）：本模块唯一的打印点是降级报告的 `eprint!`。
@@ -50,12 +50,12 @@ use wing_api_client::ApiClientError;
 use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::SettingProblem;
-use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetRequest;
 use wing_api_client::models::SettingsSetResponse;
 use wing_api_client::models::SettingsStatusResponse;
 
+use super::settings_api::SettingsApi;
 use crate::app::transport::GatewayEndpoint;
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
@@ -78,8 +78,9 @@ use crate::ui::shimmer::to_rgb;
 use crate::ui::welcome::art;
 use crate::ui::welcome::sprite;
 use crate::ui::welcome::wordmark;
+use crate::ui::welcome::{ART_GAP, ART_TERM_ROWS, PERCHED_TOP_PAD};
 
-/// `sysexits.h` 的 `EX_CONFIG`：让编排器判别"这是配置问题不是网络问题"（D27 / §16.4）。
+/// `sysexits.h` 的 `EX_CONFIG`：让编排器判别"这是配置问题不是网络问题"。
 pub(crate) const EX_CONFIG: u8 = 78;
 
 /// `s` 成功后停留多久再交还启动链（让用户看见 `✓ 配置就绪，正在启动…`）。
@@ -87,16 +88,6 @@ const READY_DWELL: Duration = Duration::from_millis(800);
 
 /// 双击 `Ctrl+C` 的窗口（与 `App::handle_quit_key` 同口径）。
 const QUIT_DOUBLE_PRESS: Duration = Duration::from_millis(500);
-
-/// 海鸥在背板里占的终端行数——与 `ui::welcome` 的私有常量 `ART_TERM_ROWS` 同值
-/// （两个姿态对齐到同一高度；这里只用到站姿，`PERCHED_IDLE` = 23 像素行 = 13 终端行）。
-const ART_TERM_ROWS: usize = 13;
-
-/// 站姿网格顶部的透明余量（`ui::welcome` 的 `PERCHED_TOP_PAD` 同值：抬升不裁头冠）。
-const PERCHED_TOP_PAD: usize = 2;
-
-/// 海鸥与 wordmark 之间的空列数（`ui::welcome` 的 `ART_GAP` 同值）。
-const ART_GAP: usize = 3;
 
 /// 背板高度：海鸥 13 行 + 说明行 1 行。
 const BACKPLATE_ROWS: u16 = ART_TERM_ROWS as u16 + 1;
@@ -113,7 +104,7 @@ const BACKPLATE_MIN_WIDTH: u16 = 40;
 
 /// 预检结论（[`classify_preflight`] 的产物）。
 pub(crate) enum Preflight {
-    /// 配置可用：照常启动（含"网关早于 Setting API"的 404 兼容路径，见 design A2）。
+    /// 配置可用：照常启动（含"网关早于 Setting API"的 404 兼容路径）。
     Ready,
     /// 网关降级（`valid=false`，或 503 `setup_mode`）：TUI 开 setup 循环、
     /// stdio / ACP 报 problems + `EX_CONFIG`。
@@ -127,7 +118,7 @@ pub(crate) async fn preflight_config(http: &GatewayApiClient) -> Preflight {
     classify_preflight(http.settings_status().await)
 }
 
-/// 三种情况的分派（纯函数：单测直接喂六种输入，见 design D1 的表）。
+/// 三种情况的分派（纯函数：单测直接喂六种输入）。
 fn classify_preflight(result: Result<SettingsStatusResponse, ApiClientError>) -> Preflight {
     match result {
         Ok(status) if status.valid => Preflight::Ready,
@@ -139,7 +130,7 @@ fn classify_preflight(result: Result<SettingsStatusResponse, ApiClientError>) ->
         // 本来能用的网关挡在门外。
         //
         // 404 = 端点不存在：网关早于 Setting API。老网关在配置非法时**根本不会起进程**，
-        // 所以"它活着"⇒ 配置可用（design A2；升级 CLI 后网关还没重启的窗口）。
+        // 所以"它活着"⇒ 配置可用（升级 CLI 后网关还没重启的窗口）。
         Err(e) if e.is_not_found() => Preflight::Ready,
         // 200 但 body 不是 status 的形状（代理 / 测试假网关 / 别的实现）：同上。
         // `reqwest` 把响应体解码失败包成 Transport（`is_decode()`），与"真的不可达"
@@ -169,7 +160,7 @@ pub(crate) fn preflight_failure_message(http_base: &str, error: &ApiClientError)
     }
 }
 
-/// stdio / ACP 的降级（D27）：配置不可用 → problems 到 **stderr** + `EX_CONFIG`。
+/// stdio / ACP 的降级：配置不可用 → problems 到 **stderr** + `EX_CONFIG`。
 ///
 /// `None` = 配置可用（或老网关兼容路径），调用方照常启动。
 pub(crate) async fn preflight_or_report(
@@ -218,7 +209,7 @@ fn unusable_report(problems: &[SettingProblem], config_path: Option<&str>) -> St
     out
 }
 
-/// `Quit` 之后打印的一行出路（终端恢复后由调用方打印，§16.2）。
+/// `Quit` 之后打印的一行出路（终端恢复后由调用方打印）。
 pub(crate) fn quit_note(config_path: Option<&str>) -> String {
     match config_path {
         Some(path) => {
@@ -279,12 +270,12 @@ where
         )
     })?;
 
-    // 2. Interface 根（09 的本地读写；读失败 = 树里没有这个根，不拿默认值冒充）。
+    // 2. Interface 根（本地读写；读失败 = 树里没有这个根，不拿默认值冒充）。
     let interface = http.read_interface();
     let mut interface_catalog: Option<SettingNode> =
         interface.as_ref().map(|source| source.catalog.clone());
 
-    // 3. 面板：首屏 = 问题清单（D11；同一个组件服务 setup / 保存失败 / 随时查看）。
+    // 3. 面板：首屏 = 问题清单（同一个组件服务 setup / 保存失败 / 随时查看）。
     let mut panel = SettingsPanel::new(&schema, state, interface, View::Problems);
     let mut schema = schema;
 
@@ -330,7 +321,7 @@ where
         match panel.handle_key(key) {
             SettingsAction::None => {}
             SettingsAction::PreviewInterface(doc) => {
-                // 实时预览：背板的调色板每帧从 `config` 现算，下一帧就是新颜色（§15.3）。
+                // 实时预览：背板的调色板每帧从 `config` 现算，下一帧就是新颜色。
                 *config = crate::config::store::appconfig_from_doc(&doc);
             }
             SettingsAction::Save {
@@ -368,11 +359,11 @@ where
             }
             // setup 里没有可重启的会话/连接，网关此刻正服务着这条修复请求；忽略——
             // 但键位栏（`restart_required` 非空时 07 会挂出"Ctrl+R 立即重启"）会让人以为
-            // 按下去有反应，所以给一句回执（N4）：重启要等进了正常 TUI 再做。
+            // 按下去有反应，所以给一句回执：重启要等进了正常 TUI 再做。
             SettingsAction::RestartGateway => {
                 note = Note::hint("重启网关：进入 TUI 后按 Ctrl+R（setup 里不改网关进程）");
             }
-            // 面板是 setup 唯一的 UI：关掉它 = 退出（design A5）。
+            // 面板是 setup 唯一的 UI：关掉它 = 退出。
             SettingsAction::Close { .. } => return Ok(SetupOutcome::Quit),
             SettingsAction::Reload => {
                 let (new_schema, new_state) = tokio::join!(http.schema(), http.get());
@@ -446,8 +437,8 @@ fn q_is_quit(panel: &SettingsPanel, key: &KeyEvent) -> bool {
 
 /// 一次 `s`：两半各自执行 + 合并回执；返回 `(状态行, 是否就绪)`。
 ///
-/// 回执是**一行**（D5），但两半的结论谁都不能被谁盖掉：TUI 写入失败、Gateway 失败 /
-/// 未就绪 / 后端 warnings（AD13）都进同一个 `parts`，按发生顺序拼起来。
+/// 回执是**一行**，但两半的结论谁都不能被谁盖掉：TUI 写入失败、Gateway 失败 /
+/// 未就绪 / 后端 warnings 都进同一个 `parts`，按发生顺序拼起来。
 async fn save_once<H: SetupBackend>(
     http: &H,
     panel: &mut SettingsPanel,
@@ -461,7 +452,7 @@ async fn save_once<H: SetupBackend>(
     const MAX_PARTS: usize = 3;
     let mut parts: Vec<String> = Vec::new();
 
-    // Interface 半边（本地原子写；一键保存两边，D10——两边各自成败）。
+    // Interface 半边（本地原子写；一键保存两边——两边各自成败）。
     let mut interface_ok: Option<bool> = None;
     if interface_dirty {
         match http.write_interface(&interface) {
@@ -484,7 +475,7 @@ async fn save_once<H: SetupBackend>(
         match http.set(&request).await {
             Ok(response) => {
                 // 就绪判定：回执的 `setup_mode_exited` 是规范路径，`status.valid` 是兜底
-                // （04 的语义：保存成功 ⇒ 网关就地转入正常模式）。
+                // （保存成功 ⇒ 网关就地转入正常模式）。
                 ready = response.ok
                     && (response.setup_mode_exited
                         || matches!(http.status().await, Ok(status) if status.valid));
@@ -497,12 +488,12 @@ async fn save_once<H: SetupBackend>(
                     // 文件写了但网关没就绪（A12）：绝不放行到"没有会话能力"的启动链。
                     parts.push("保存成功，但网关仍未就绪 — 修完问题再按 s".into());
                 }
-                // 后端的非致命说明（AD13："旧密钥没有保留"之类）必须让用户看见 ——
+                // 后端的非致命说明（"旧密钥没有保留"之类）必须让用户看见 ——
                 // 回执就一行，但它是这一屏唯一的出口。
                 for warning in &response.warnings {
                     parts.push(format!("⚠ {warning}"));
                 }
-                // 要重启才生效的键（AD1 的 Ctrl+R 在 setup 里是 no-op）：告诉用户去哪儿按。
+                // 要重启才生效的键（Ctrl+R 在 setup 里是 no-op）：告诉用户去哪儿按。
                 if !response.restart_required.is_empty() {
                     // 动作在前（一行会被 CJK 宽度裁掉尾巴）：先在 setup 里说清"去哪儿按"。
                     parts.push(format!(
@@ -517,7 +508,7 @@ async fn save_once<H: SetupBackend>(
     }
 
     if gateway_saved.is_some() || interface_ok.is_some() {
-        // 一次合并两半：`ok=false` 时面板自己会切到问题清单视图（07 的 apply_save）。
+        // 一次合并两半：`ok=false` 时面板自己会切到问题清单视图（apply_save）。
         panel.apply_save(SaveOutcome {
             gateway: gateway_saved,
             interface_ok,
@@ -532,7 +523,7 @@ async fn save_once<H: SetupBackend>(
     };
 
     if ready {
-        // 就绪 + 有要交代的事：把交代缀在就绪句后面（绝不静默吞掉 —— N4）。
+        // 就绪 + 有要交代的事：把交代缀在就绪句后面（绝不静默吞掉）。
         let text = if caveats.is_empty() {
             "✓ 配置就绪，正在启动…".to_string()
         } else {
@@ -547,38 +538,18 @@ async fn save_once<H: SetupBackend>(
 }
 
 // ===========================================================================
-// 可注入的依赖面（私有：单测喂假实现，生产走真网关 / 09 的本地读写）
+// 可注入的依赖面（私有：单测喂假实现，生产走真网关 / 本地读写）
 // ===========================================================================
 
-/// 设置循环的全部 I/O：网关的 4 个 Setting API 操作 + Interface 根的本地读写。
-trait SetupBackend {
-    async fn schema(&self) -> Result<SettingsSchemaResponse, ApiClientError>;
-    async fn get(&self) -> Result<SettingsGetResponse, ApiClientError>;
-    async fn status(&self) -> Result<SettingsStatusResponse, ApiClientError>;
-    async fn set(&self, req: &SettingsSetRequest) -> Result<SettingsSetResponse, ApiClientError>;
+/// 设置循环的全部 I/O：网关的 4 个 Setting API 操作（[`SettingsApi`]）+ Interface 根的本地读写。
+trait SetupBackend: SettingsApi {
     /// Interface 根的本地读取；读失败 → `None`（树里没有这个根）。
     fn read_interface(&self) -> Option<InterfaceSource>;
-    /// Interface 根的本地写盘（09 的原子写 + `.bak`）。
+    /// Interface 根的本地写盘（原子写 + `.bak`）。
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError>;
 }
 
 impl SetupBackend for GatewayApiClient {
-    async fn schema(&self) -> Result<SettingsSchemaResponse, ApiClientError> {
-        self.settings_schema().await
-    }
-
-    async fn get(&self) -> Result<SettingsGetResponse, ApiClientError> {
-        self.settings_get().await
-    }
-
-    async fn status(&self) -> Result<SettingsStatusResponse, ApiClientError> {
-        self.settings_status().await
-    }
-
-    async fn set(&self, req: &SettingsSetRequest) -> Result<SettingsSetResponse, ApiClientError> {
-        self.settings_set(req).await
-    }
-
     fn read_interface(&self) -> Option<InterfaceSource> {
         crate::config::store::read_interface_doc()
             .ok()
@@ -617,7 +588,7 @@ impl SetupEvents for TerminalEvents {
                         Ok(crossterm::event::Event::Resize(width, height)) => {
                             return Some(TermEvent::Resize(width, height));
                         }
-                        // 鼠标 / 粘贴 / focus：setup 不消费，继续等（不做鼠标，design Non-Goals）。
+                        // 鼠标 / 粘贴 / focus：setup 不消费，继续等（不做鼠标）。
                         Ok(_) => continue,
                         Err(e) => {
                             tracing::error!("crossterm read error: {e}");
@@ -652,7 +623,7 @@ fn draw_setup_frame<B: Backend>(
     note: &Note,
     panel_open: bool,
 ) -> Result<()> {
-    // 调色板每帧现算：Interface 根的实时预览因此一按键就可见（§15.3 的同一条路径）。
+    // 调色板每帧现算：Interface 根的实时预览因此一按键就可见。
     let palette = ThemePalette::from_config(&config.colors);
     // `crate::tui::draw_frame`（而不是 `terminal.draw`）：向导是同一块终端上的第二个
     // 绘制面，它画出的设置值同样可能带上 VS16 表情符号（见 `crate::ui::emoji_width`）。
@@ -665,8 +636,7 @@ fn draw_setup_frame<B: Backend>(
         // 小终端里也不该整条消失。
         draw_note(frame, note_area, &palette, note);
         if panel_open {
-            // 08 的契约：每帧同步两栏各自的可见行数与左栏可见性，再 Clear + 整块 render
-            // （同 10 的落点）。
+            // 契约：每帧同步两栏各自的可见行数与左栏可见性，再 Clear + 整块 render。
             panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
             panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
             panel.set_anchors_visible(has_anchor_column(panel, panel_area));
@@ -845,7 +815,7 @@ impl Note {
 }
 
 /// 首屏状态行（纯函数）：`reason` 不在 wire 上，用 problems 的形状分辨"首次运行"
-/// 与"配置损坏"（design A1——两者只差一行措辞）。
+/// 与"配置损坏"（两者只差一行措辞）。
 fn baseline_note(problems: &[Problem]) -> Note {
     if problems.is_empty() {
         return Note::ok("配置就绪");
@@ -863,11 +833,11 @@ fn baseline_note(problems: &[Problem]) -> Note {
 
 #[cfg(test)]
 mod tests {
-    //! setup 循环与预检的测试（design.md 的测试策略表 ①–⑩）。
+    //! setup 循环与预检的测试。
     //!
-    //! 夹具自带（07 / 08 的 `test_support` 是各自包私有的）：一棵"gateway 下一个
+    //! 夹具自带（`settings` 与 `ui::settings` 的 `test_support` 是各自包私有的）：一棵"gateway 下一个
     //! bool"的极小目录 + 一份 Interface 的 `colors.preset` 枚举；后端与事件源都是
-    //! 可注入的假实现（12 在 `cmd/config.rs` 的同一套做法），**不碰磁盘**。
+    //! 可注入的假实现（与 `cmd/config.rs` 同一套做法），**不碰磁盘**。
 
     use std::cell::Cell;
     use std::cell::RefCell;
@@ -895,6 +865,7 @@ mod tests {
     use wing_api_client::models::SettingChoice;
     use wing_api_client::models::SettingGroup;
     use wing_api_client::models::SettingKind;
+    use wing_api_client::models::SettingsGetResponse;
     use wing_api_client::models::SettingsSetResponse;
 
     use super::*;
@@ -1034,7 +1005,7 @@ mod tests {
                 problem("providers", "empty_list", "providers list cannot be empty"),
                 problem("agents", "empty_list", "agents list cannot be empty"),
             ],
-            // 与真后端一致：04 的 get/status 里这个字段本期恒 false（design A1）。
+            // 与真后端一致：get/status 里这个字段本期恒 false。
             setup_mode: false,
             config_path: "/home/u/.wing/core/config.yaml".into(),
         }
@@ -1077,7 +1048,7 @@ mod tests {
         status: SettingsStatusResponse,
         set: FakeSet,
         interface: Option<InterfaceSource>,
-        /// 让 Interface 半边的原子写失败（N4 的两半独立性测试）。
+        /// 让 Interface 半边的原子写失败（两半独立性测试）。
         interface_write_fails: bool,
         sets: RefCell<Vec<SettingsSetRequest>>,
         written_interface: RefCell<Vec<Value>>,
@@ -1111,7 +1082,7 @@ mod tests {
         }
     }
 
-    impl SetupBackend for FakeBackend {
+    impl SettingsApi for FakeBackend {
         async fn schema(&self) -> Result<SettingsSchemaResponse, ApiClientError> {
             Ok(self.schema.clone())
         }
@@ -1138,7 +1109,9 @@ mod tests {
                 }),
             }
         }
+    }
 
+    impl SetupBackend for FakeBackend {
         fn read_interface(&self) -> Option<InterfaceSource> {
             self.interface.clone()
         }
@@ -1523,7 +1496,7 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Quit));
     }
 
-    /// N1：编辑中的 `q` 必须是**输入字符**，不是退出。
+    /// 编辑中的 `q` 必须是**输入字符**，不是退出。
     ///
     /// 判据落在"保存请求里有没有 `q`"上：守卫若丢了，`q` 会当场把循环关掉，
     /// 后面的事件一个都消费不了、接口半边也永远不会写盘。
@@ -1553,7 +1526,7 @@ mod tests {
         );
     }
 
-    /// N1：枚举选择项视图开着时 `q` 也不该关向导（它属"面板开着的东西"）。
+    /// 枚举选择项视图开着时 `q` 也不该关向导（它属"面板开着的东西"）。
     #[tokio::test]
     async fn q_with_choices_open_is_not_quit() {
         let mut backend = FakeBackend::first_run();
@@ -1579,7 +1552,7 @@ mod tests {
         assert_eq!(written[0]["colors"]["preset"], "terminal");
     }
 
-    /// N1：帮助页开着时 `q` 也不该关向导（`?` 打开 → `q` → Esc 返回 → 照常编辑保存）。
+    /// 帮助页开着时 `q` 也不该关向导（`?` 打开 → `q` → Esc 返回 → 照常编辑保存）。
     #[tokio::test]
     async fn q_with_help_open_is_not_quit() {
         let mut backend = FakeBackend::first_run();
@@ -1610,14 +1583,14 @@ mod tests {
         assert_eq!(written[0]["colors"]["accent"], "x");
     }
 
-    /// N4：就绪的那次保存带着"TUI 配置没写进去"的交代 —— 不能被就绪句吞掉。
+    /// 就绪的那次保存带着"TUI 配置没写进去"的交代 —— 不能被就绪句吞掉。
     #[tokio::test]
     async fn a_ready_save_keeps_the_interface_failure_in_the_receipt() {
         let mut backend = FakeBackend::first_run();
         backend.interface = Some(interface_source("wing"));
         backend.interface_write_fails = true;
         // 两边都弄脏：Interface 半边写盘会失败，Gateway 半边成功且就绪 —— 就绪句
-        // 必须把失败带上（N4.2）。
+        // 必须把失败带上。
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("preset"));
         events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
@@ -1637,7 +1610,7 @@ mod tests {
         );
     }
 
-    /// N4 + AD13：后端的 warnings 与"需重启才生效"都进回执（一行里拼得下）。
+    /// 后端的 warnings 与"需重启才生效"都进回执（一行里拼得下）。
     #[tokio::test]
     async fn a_save_receipt_carries_the_backend_warnings() {
         let mut backend = FakeBackend::first_run();
@@ -1652,12 +1625,12 @@ mod tests {
         let screen = screen(&terminal);
         assert!(
             screen.contains("密钥无法保留"),
-            "AD13 的警告要看得见：\n{screen}"
+            "后端警告要看得见：\n{screen}"
         );
         assert!(screen.contains("Ctrl+R"), "重启去向要说清楚：\n{screen}");
     }
 
-    /// N4.1：两半**同时**失败时，两句话都不许被对方盖掉（一行里拼起来）。
+    /// 两半**同时**失败时，两句话都不许被对方盖掉（一行里拼起来）。
     #[tokio::test]
     async fn a_double_failure_keeps_both_halves_in_the_receipt() {
         let mut backend = FakeBackend::first_run();
@@ -1709,7 +1682,7 @@ mod tests {
         let (outcome, _) = run(&backend, &mut config, events).await;
 
         assert!(matches!(outcome, SetupOutcome::Quit));
-        // enum 右切：`wing` → `terminal`，预览直接写进调用方的 config（§15.3 的同一路径）。
+        // enum 右切：`wing` → `terminal`，预览直接写进调用方的 config。
         assert_eq!(config.colors.preset, ColorPreset::Terminal);
     }
 
@@ -1944,7 +1917,7 @@ mod tests {
         // 状态行是背板的最后一行。
         assert_eq!(note, Rect::new(0, BACKPLATE_ROWS - 1, 120, 1));
 
-        // 24 行终端：背板让位，面板拿掉一行留给状态行（**状态行不消失** —— N3）。
+        // 24 行终端：背板让位，面板拿掉一行留给状态行（**状态行不消失**）。
         let (backplate, panel, note) = split_setup_areas(Rect::new(0, 0, 80, 24));
         assert!(backplate.is_none());
         assert_eq!(note, Rect::new(0, 23, 80, 1));
@@ -1963,7 +1936,7 @@ mod tests {
         assert_eq!((panel.height, note.height), (0, 0));
     }
 
-    /// S1：`Resize` 必须被当成"重排 + 重画"，不是退出 —— 用户在 setup 阶段拉窗口
+    /// `Resize` 必须被当成"重排 + 重画"，不是退出 —— 用户在 setup 阶段拉窗口
     /// 不能把向导连同未保存的编辑一起丢掉。
     ///
     /// 三个断言：(a) 循环没退出（最后的 `s` 还被执行了、结果是 `Ready`）；
@@ -2019,7 +1992,7 @@ mod tests {
         assert!(screen.contains("✓ 配置就绪"), "状态行要看得见：\n{screen}");
     }
 
-    /// S1 的最小复现：`[Resize, ctrl_c]` —— Resize 之后按键仍被处理，
+    /// 最小复现：`[Resize, ctrl_c]` —— Resize 之后按键仍被处理，
     /// 所以第一击 Ctrl+C 的提示必须出现在终帧上。
     #[tokio::test]
     async fn a_resize_event_does_not_swallow_the_next_key() {

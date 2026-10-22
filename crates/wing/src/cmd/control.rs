@@ -57,16 +57,12 @@ pub async fn run_interrupt(session_id: &str, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing interrupt error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("interrupt", e),
     }
 }
 
 async fn interrupt_inner(session_id: &str) -> Result<InterruptOutput> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     // 刻意不做 404→resume：中断的语义对象是"在飞的任务"，而在飞的任务只存在于
     // 已加载的会话里——把已逐出的会话重新水合只为中断一个不存在的过程，是假动作。
     http.interrupt_session(session_id).await.map_err(|e| {
@@ -114,19 +110,18 @@ pub async fn run_compact(session_id: &str, instruction: Option<&str>, json: bool
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing compact error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("compact", e),
     }
 }
 
 async fn compact_inner(session_id: &str, instruction: Option<&str>) -> Result<CompactOutput> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
-    let resp = common::hydrate_on_404(&http, session_id, || {
-        http.compact_session(session_id, instruction)
-    })
+    let http = common::connect().await?;
+    let resp = common::hydrate_on_404(
+        &http,
+        session_id,
+        || http.compact_session(session_id, instruction),
+        |e| common::session_failed(session_id, &e),
+    )
     .await?;
     Ok(CompactOutput {
         ok: resp.ok,
@@ -268,19 +263,21 @@ pub async fn run_update(args: UpdateArgs, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing update error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("update", e),
     }
 }
 
 async fn update_inner(args: &UpdateArgs) -> Result<UpdateOutput> {
     let (request, applied) = build_update(args)?;
 
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
-    common::hydrate_on_404(&http, &args.session_id, || http.update_session(&request)).await?;
+    let http = common::connect().await?;
+    common::hydrate_on_404(
+        &http,
+        &args.session_id,
+        || http.update_session(&request),
+        |e| common::session_failed(&args.session_id, &e),
+    )
+    .await?;
 
     let notes: Vec<String> = agent_switch_note(args).into_iter().collect();
     Ok(UpdateOutput {

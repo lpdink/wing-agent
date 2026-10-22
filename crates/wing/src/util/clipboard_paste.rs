@@ -914,7 +914,7 @@ mod tests {
         let _ = std::fs::remove_file(&b);
     }
 
-    /// 路径预占（N4 加固）：候选名已被占用（预置的符号链接 / 上次残留）时换下一个，
+    /// 路径预占：候选名已被占用（预置的符号链接 / 上次残留）时换下一个，
     /// 不把已有路径交给 osascript 覆写。
     #[test]
     fn a_taken_temp_name_is_skipped_instead_of_reused() {
@@ -1310,7 +1310,7 @@ mod tests {
     }
 
     /// 真实错误（这里是读取器起不来：PermissionDenied）**不是**「没有内容」：
-    /// 收场必须是错误（N6）—— 否则用户看到的是误导性的「剪贴板没有文本或图片」。
+    /// 收场必须是错误 —— 否则用户看到的是误导性的「剪贴板没有文本或图片」。
     #[test]
     fn a_real_reader_failure_is_not_masked_as_an_empty_clipboard() {
         let runner = FakeRunner::new(|spec| match spec.program {
@@ -1329,7 +1329,7 @@ mod tests {
         }
     }
 
-    /// 文本也受 64 MiB 上限（S2）：超限字节**在返回 / 插入之前**被拒绝，文案与
+    /// 文本也受 64 MiB 上限：超限字节**在返回 / 插入之前**被拒绝，文案与
     /// OSC 5522 通道逐字一致 —— 两条通道对同一份内容给同一种结果。
     ///
     /// 两条防线都钉住：读取器（或任何实现）给出超限的 `Ok(bytes)`；以及 runner 用
@@ -1364,7 +1364,7 @@ mod tests {
     }
 
     /// 真进程（unix）：成功路径拿回 stdout；普通超时在**有界时间内**返回 TimedOut
-    /// 且把进程收干净（S1）。
+    /// 且把进程收干净。
     #[test]
     #[cfg(unix)]
     fn the_real_runner_returns_stdout_and_times_out_a_plain_sleeper() {
@@ -1392,7 +1392,7 @@ mod tests {
 
     /// 真进程（unix）：直接子进程退出后**孙进程**还持有 stdout 写端时，读侧的 EOF
     /// 不会来 —— 但「每条命令的超时」仍是硬上界：到点杀**进程组**、返回 TimedOut，
-    /// 而不是卡在 reader.join 上（`wl-paste` fork 的 `cat` 就是这种形态，S1）。
+    /// 而不是卡在 reader.join 上（`wl-paste` fork 的 `cat` 就是这种形态）。
     /// 孙进程的 pid 由脚本写进文件：断言它在超时后真的不存在（整组被杀，不是只杀
     /// 直接子进程），测试不留活进程。
     #[test]

@@ -34,16 +34,12 @@ pub async fn run_models(json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing models error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("models", e),
     }
 }
 
 async fn fetch_models() -> Result<ModelsResponse> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     Ok(http.get_models().await?)
 }
 
@@ -118,16 +114,12 @@ pub async fn run_tools(json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing tools error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("tools", e),
     }
 }
 
 async fn fetch_tools() -> Result<ToolsListResponse> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     Ok(http.list_tools().await?)
 }
 
@@ -198,16 +190,12 @@ pub async fn run_agents(json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing agents error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("agents", e),
     }
 }
 
 async fn fetch_agents() -> Result<AgentsResponse> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     Ok(http.get_agents().await?)
 }
 

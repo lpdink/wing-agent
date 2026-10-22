@@ -39,8 +39,31 @@ use crate::util::program_status::State;
 use crate::util::title::AttentionKind;
 use wing_api_client::models::SessionUsage;
 
+/// `SyncSession` 快照的借用视图——重放的输入。
+///
+/// 具名字段而不是 11 个位置参数：`draft` 与 `name` 同为 `Option<String>`，
+/// `messages` 与 `events` 同为 `&[Value]`，位置一错就是静默的语义错误。
+struct SyncSnapshot<'a> {
+    session_id: String,
+    messages: &'a [serde_json::Value],
+    uncommitted: Option<&'a serde_json::Value>,
+    uncommitted_tools: &'a [serde_json::Value],
+    events: &'a [serde_json::Value],
+    status: SessionStatus,
+    turn_started_at: Option<&'a str>,
+    draft: Option<String>,
+    name: Option<String>,
+    agent: Option<Box<AgentInfo>>,
+    usage: Option<SessionUsage>,
+}
+
 impl App {
     /// Handle a gateway event.
+    ///
+    /// Events are routed through three family handlers in a fixed order; each
+    /// returns `Some(event)` for "not my family" and the chain stops at the
+    /// first consumer. The trailing `_ =>` fallback lives in [`Self::handle_state`]
+    /// and logs at debug level.
     pub(super) fn handle_event(&mut self, event: WingEvent) {
         // Defense-in-depth: skip events from other sessions.
         // Protects against backend events emitted without scope="session".
@@ -62,6 +85,19 @@ impl App {
 
         tracing::debug!(event_type = %event.event_type(), "handling event");
 
+        let Some(event) = self.handle_lifecycle(event) else {
+            return;
+        };
+        let Some(event) = self.handle_react(event) else {
+            return;
+        };
+        self.handle_state(event);
+    }
+
+    /// 生命周期族：连接 / 轮次边界 / 通知 / 错误。
+    ///
+    /// `Some(event)` = 这一族不消费，原样传给下一族。
+    fn handle_lifecycle(&mut self, event: WingEvent) -> Option<WingEvent> {
         match event {
             // ---- Lifecycle events ----
             WingEvent::Delivered { .. } => {
@@ -75,7 +111,7 @@ impl App {
                 // (Ask answers may trigger a second turn within the same logical flow).
                 tracing::debug!("turn started, was_working={}", self.turn.working);
                 self.turn.start();
-                self.turn.last_result = None;
+                self.turn.last_result = false;
                 // Set title to working state with initial spinner frame.
                 let working_title = title::title_working(
                     self.turn.spinner.frame_str(),
@@ -111,7 +147,7 @@ impl App {
                 // Restore idle title — but if the user is not focused and a
                 // TurnResult just set an attention title (✓/⚠), preserve it
                 // until the user refocuses (Focus handler restores idle).
-                let had_result = self.turn.last_result.take().is_some();
+                let had_result = std::mem::take(&mut self.turn.last_result);
                 if self.focused || !had_result {
                     self.push_intent(AppIntent::SetTitle(title::title_idle(
                         self.dir_label().as_deref(),
@@ -179,7 +215,7 @@ impl App {
             }
 
             WingEvent::Error { message, meta, .. } => {
-                // 被拒的 `ClientRequest` 帧带回客户端的 `request_id`（02 的帧关联）：
+                // 被拒的 `ClientRequest` 帧带回客户端的 `request_id`（帧关联）：
                 // 命中的那条消息根本没进模型（闸门在 Delivered 之前），所以把产物从
                 // pending 队列取回、还给草稿——否则随后 `done` 的 `promote_all_pending`
                 // 会把它当「已发送」晋升。**无关联的 error**（request_id 是新 uuid 的
@@ -203,7 +239,16 @@ impl App {
                     ));
                 }
             }
+            other => return Some(other),
+        }
+        None
+    }
 
+    /// ReAct 族：流式内容 / 工具调用 / diff / 指标 / Ask。
+    ///
+    /// `Some(event)` = 这一族不消费，原样传给下一族。
+    fn handle_react(&mut self, event: WingEvent) -> Option<WingEvent> {
+        match event {
             // ---- Reasoning events ----
             WingEvent::Reasoning { content, .. } => {
                 self.chat.append_to_last_thinking(&content);
@@ -391,7 +436,18 @@ impl App {
                 // understands why Up/Down now navigate the panel.
                 self.chat.jump_bottom();
             }
+            other => return Some(other),
+        }
+        None
+    }
 
+    /// 状态族：候选列表 / 上下文统计 / 会话状态 / 设置变更 / 快照 / 轮次结果。
+    ///
+    /// 兜底的 `_ =>` 在这里：新增事件类型时编译器不会提醒。四个 TUI 不消费的变体
+    /// 走这一条——`AssistantTurn` / `ToolResultTurn` / `SessionInit` 是 stdio 的词汇，
+    /// `CompactDone` 的数据 TUI 从 `/compact` 的 HTTP 回执拿（事件只服务 audit）。
+    fn handle_state(&mut self, event: WingEvent) {
+        match event {
             // ---- Candidate list events (for popup) ----
             // Note: CommandList, ModelList, AgentList, SessionList removed — now via HTTP.
             // BranchTargets is still emitted by /rewind <uuid> after execution.
@@ -487,19 +543,19 @@ impl App {
                 usage,
                 ..
             } => {
-                self.apply_sync_session(
+                self.apply_sync_session(SyncSnapshot {
                     session_id,
-                    &messages,
-                    uncommitted.as_ref(),
-                    &uncommitted_tools,
-                    &events,
+                    messages: &messages,
+                    uncommitted: uncommitted.as_ref(),
+                    uncommitted_tools: &uncommitted_tools,
+                    events: &events,
                     status,
-                    turn_started_at.as_deref(),
+                    turn_started_at: turn_started_at.as_deref(),
                     draft,
                     name,
                     agent,
                     usage,
-                );
+                });
             }
             // ---- Turn result (rich completion data) ----
             WingEvent::TurnResult {
@@ -520,14 +576,7 @@ impl App {
                 });
 
                 // Store turn result for Done handler consumption.
-                self.turn.last_result = Some(turn_state::TurnResultSummary {
-                    subtype: subtype.clone(),
-                    is_error,
-                    duration_ms,
-                    num_turns,
-                    result: result.clone(),
-                    total_tokens,
-                });
+                self.turn.last_result = true;
                 tracing::debug!(
                     subtype = %subtype,
                     is_error,
@@ -575,21 +624,20 @@ impl App {
     /// once-only live event, not replayed), and an empty uncommitted projection
     /// does not mean idle: between rounds, or while the first LLM call is still
     /// in flight, a turn runs with nothing finalized to project.
-    #[allow(clippy::too_many_arguments)]
-    fn apply_sync_session(
-        &mut self,
-        session_id: String,
-        messages: &[serde_json::Value],
-        uncommitted: Option<&serde_json::Value>,
-        uncommitted_tools: &[serde_json::Value],
-        events: &[serde_json::Value],
-        status: SessionStatus,
-        turn_started_at: Option<&str>,
-        draft: Option<String>,
-        name: Option<String>,
-        agent: Option<Box<AgentInfo>>,
-        usage: Option<SessionUsage>,
-    ) {
+    fn apply_sync_session(&mut self, snapshot: SyncSnapshot<'_>) {
+        let SyncSnapshot {
+            session_id,
+            messages,
+            uncommitted,
+            uncommitted_tools,
+            events,
+            status,
+            turn_started_at,
+            draft,
+            name,
+            agent,
+            usage,
+        } = snapshot;
         // Update session_id to the new session (Phase 3c).
         //
         // 快照不带会话的标签（pin 星标的数据源）：换会话时补一次

@@ -33,7 +33,8 @@ use clap::Args;
 use serde::Serialize;
 use wing_api_client::models::{WakeCreateRequest, WakeInfo};
 
-use crate::config::{AppConfig, ThemePalette};
+use super::wake_common::{WakeCall, WakeMode};
+use crate::config::ThemePalette;
 use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 
@@ -363,63 +364,30 @@ fn has_schedule(args: &WakeArgs) -> bool {
 pub async fn run(args: WakeArgs, json: bool) -> ExitCode {
     match run_inner(args, json).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("wing wake error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("wake", e),
     }
 }
 
 async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
     // 校验全部前置：纯参数错误不该先把网关拉起来（`ensure_gateway` 会启守护进程）。
     let mode = validate_mode(&args)?;
-    let create = match mode {
-        Mode::Create => Some(create_plan(&args)?),
-        Mode::List | Mode::Cancel(_) => None,
+    let call = match mode {
+        WakeMode::Create => {
+            let plan = create_plan(&args)?;
+            WakeCall::Create {
+                request: timer_request(&plan.spec, &plan.prompt, plan.times, &plan.target),
+                json,
+            }
+        }
+        WakeMode::List => WakeCall::List {
+            all: args.all,
+            json,
+        },
+        WakeMode::Cancel(id) => WakeCall::Cancel { id, json },
     };
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
-    match mode {
-        Mode::Cancel(id) => {
-            let resp = http.cancel_wake(id).await?;
-            if json {
-                common::print_json_compact(&WakeCancelOutput {
-                    id,
-                    canceled: resp.canceled,
-                });
-            } else if resp.canceled {
-                println!("canceled {id}");
-            } else {
-                println!("{id} was already finished (nothing to cancel)");
-            }
-        }
-        Mode::List => {
-            let resp = http.list_wakes(args.all).await?;
-            if json {
-                common::print_json_compact(&resp.wakes);
-            } else {
-                print!("{}", render_wakes(&resp.wakes, args.all));
-            }
-        }
-        Mode::Create => {
-            let plan = create.expect("Mode::Create 已经在起网关之前算好了计划");
-            let resp = http
-                .create_wake(&timer_request(
-                    &plan.spec,
-                    &plan.prompt,
-                    plan.times,
-                    &plan.target,
-                ))
-                .await?;
-            if json {
-                common::print_json_compact(&WakeOutput { wake: resp.wake });
-            } else {
-                print!("{}", render_wake(&resp.wake));
-            }
-        }
-    }
-    Ok(())
+    super::wake_common::dispatch(&http, call).await
 }
 
 /// 创建路径的**纯**计划（spec / prompt / 目标 / 次数），全部可在起网关之前算完。
@@ -448,19 +416,11 @@ pub(crate) fn create_plan(args: &WakeArgs) -> Result<CreatePlan> {
     })
 }
 
-/// 本次调用是哪一种形态（三种形态的参数集合互斥）。
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
-    Create,
-    List,
-    Cancel(i64),
-}
-
 /// 判定形态并拒绝**放错位置的**参数。
 ///
 /// 静默吃掉一个参数等于把这次调用变成另一次调用（用户以为 schedule 生效了，
 /// 实际只打印了一张表）——与仓库对"放错位置的 flag"的既有口径一致：响亮报错。
-pub(crate) fn validate_mode(args: &WakeArgs) -> Result<Mode> {
+pub(crate) fn validate_mode(args: &WakeArgs) -> Result<WakeMode> {
     if let Some(id) = args.cancel {
         if args.list {
             bail!("--cancel cannot be combined with --list");
@@ -471,7 +431,7 @@ pub(crate) fn validate_mode(args: &WakeArgs) -> Result<Mode> {
         if args.times.is_some() || args.prompt.is_some() || args.to.is_some() || args.all {
             bail!("--cancel only takes --json");
         }
-        return Ok(Mode::Cancel(id));
+        return Ok(WakeMode::Cancel(id));
     }
     if args.list {
         if has_schedule(args) || args.times.is_some() || args.prompt.is_some() {
@@ -483,7 +443,7 @@ pub(crate) fn validate_mode(args: &WakeArgs) -> Result<Mode> {
         if args.to.is_some() {
             bail!("--list does not take --to");
         }
-        return Ok(Mode::List);
+        return Ok(WakeMode::List);
     }
     if args.all {
         bail!("--all only applies to --list");
@@ -494,22 +454,12 @@ pub(crate) fn validate_mode(args: &WakeArgs) -> Result<Mode> {
              or --list / --cancel <ID>"
         );
     }
-    Ok(Mode::Create)
+    Ok(WakeMode::Create)
 }
 
 // ============================================================
 // 输出（纯函数：palette / 输出环境注入，可单测）
 // ============================================================
-
-fn render_wakes(wakes: &[WakeInfo], all: bool) -> String {
-    let palette = ThemePalette::from_config(&AppConfig::load().colors);
-    let out = TableOutput::detect();
-    format_wakes(wakes, all, &palette, &out)
-}
-
-fn render_wake(wake: &WakeInfo) -> String {
-    format_wake_detail(wake)
-}
 
 /// 一条触发器的详情（`key: value` 竖排，与 `wing run` 的输出同款）。
 pub(crate) fn format_wake_detail(wake: &WakeInfo) -> String {
@@ -617,6 +567,7 @@ pub(crate) fn short_timestamp(value: Option<&str>) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
 
     // ── 时长 ──────────────────────────────────────────────
 
@@ -838,7 +789,7 @@ mod tests {
     fn validate_mode_rejects_misplaced_flags() {
         let mut args = base_args();
         args.cancel = Some(7);
-        assert_eq!(validate_mode(&args).unwrap(), Mode::Cancel(7));
+        assert_eq!(validate_mode(&args).unwrap(), WakeMode::Cancel(7));
 
         // --cancel 只吃 id
         for mutate in [
@@ -860,7 +811,7 @@ mod tests {
         let mut args = base_args();
         args.list = true;
         args.all = true;
-        assert_eq!(validate_mode(&args).unwrap(), Mode::List);
+        assert_eq!(validate_mode(&args).unwrap(), WakeMode::List);
         for mutate in [
             |a: &mut WakeArgs| a.in_ = Some("5m".into()),
             |a: &mut WakeArgs| a.times = Some(2),
@@ -882,7 +833,7 @@ mod tests {
         args.every = Some("30m".into());
         args.prompt = Some("ping".into());
         args.to = Some("sid".into());
-        assert_eq!(validate_mode(&args).unwrap(), Mode::Create);
+        assert_eq!(validate_mode(&args).unwrap(), WakeMode::Create);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 use super::support::*;
 use crate::app::commands;
+use crate::app::intent::SessionUpdate;
 use crate::app::*;
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
@@ -195,7 +196,7 @@ fn test_model_command_opens_panel_instead_of_direct_switch() {
     assert!(
         !intents
             .iter()
-            .any(|i| matches!(i, AppIntent::UpdateSession { .. })),
+            .any(|i| matches!(i, AppIntent::UpdateSession(_))),
         "no direct switch request: {intents:?}"
     );
     assert!(intents.iter().any(|i| matches!(i, AppIntent::FetchModels)));
@@ -272,7 +273,7 @@ fn test_model_panel_applies_the_id_of_the_selected_page() {
     assert!(
         intents.iter().any(|i| matches!(
             i,
-            AppIntent::UpdateSession { model_id: Some(m), .. } if m == "shared-b"
+            AppIntent::UpdateSession(SessionUpdate { model_id: Some(m), .. }) if m == "shared-b"
         )),
         "the selected row's id is required, got {intents:?}"
     );
@@ -325,7 +326,7 @@ fn test_title_set_produces_intent() {
     app.try_frontend_command("/title my project");
     let intents = app.drain_intents();
     assert!(intents.iter().any(
-        |i| matches!(i, AppIntent::UpdateSession { title: Some(t), .. } if t == "my project")
+        |i| matches!(i, AppIntent::UpdateSession(SessionUpdate { title: Some(t), .. }) if t == "my project")
     ));
 }
 

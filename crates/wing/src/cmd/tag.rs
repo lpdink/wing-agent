@@ -41,10 +41,7 @@ pub async fn run_tag(
 ) -> ExitCode {
     match run_tag_inner(session_id, tags, remove, list, json).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("wing tag error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("tag", e),
     }
 }
 
@@ -59,8 +56,7 @@ async fn run_tag_inner(
         if session_id.is_some() || !tags.is_empty() || !remove.is_empty() {
             anyhow::bail!("--list cannot be combined with a session id or tags");
         }
-        let (host, port) = common::ensure_gateway().await?;
-        let http = common::create_api_client(&host, port)?;
+        let http = common::connect().await?;
         let resp = http.list_sessions().await?;
         let entries = collect_tag_counts(&resp.sessions);
         if json {
@@ -75,8 +71,7 @@ async fn run_tag_inner(
         anyhow::bail!("provide a session id, or --list for the global tag inventory");
     };
 
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     // Both None = pure read; both given = one atomic mutation.
     let resp = http
         .tag_session(

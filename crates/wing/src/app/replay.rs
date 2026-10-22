@@ -118,7 +118,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
         // Decoded through the shared SessionMessage mirror: missing optional
         // fields default, null optional fields count as absent, and a payload
         // that is not a Message projection is skipped (forward tolerant).
-        let mut msg = match SessionMessage::from_json(msg_val) {
+        let msg = match SessionMessage::from_json(msg_val) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("Failed to decode replay message: {e}");
@@ -126,12 +126,24 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
             }
         };
 
-        match msg.role.as_str() {
+        // 按值拆开：正文 / 图片 / 工具调用都直接移动进 cell，重放没有第二个读者
+        // （切会话时这条路径要把整份历史投影一遍）。
+        let SessionMessage {
+            role,
+            content,
+            media,
+            reasoning_content,
+            tool_calls,
+            tool_call_id,
+            ..
+        } = msg;
+
+        match role.as_str() {
             "user" => {
                 // 正文 + 图片引用一起进 cell（`chat_view::media`）：图片画成图块还是标签行
                 // 由渲染期的图片能力决定，与 pending / promote 同一条路径。纯图消息
                 // （正文为空、media 非空）因此也进历史——它是一条合法的消息。
-                let body = media::UserMessageBody::new(msg.content.clone(), msg.media.clone());
+                let body = media::UserMessageBody::new(content, media);
                 if !body.is_empty() {
                     chat.push(ChatCell::UserMessage(body));
                 }
@@ -152,7 +164,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 // projection can still express.
 
                 // Reasoning content (thinking).
-                if let Some(reasoning) = &msg.reasoning_content
+                if let Some(reasoning) = &reasoning_content
                     && !reasoning.is_empty()
                 {
                     let mut block = ThinkingBlock::new();
@@ -160,18 +172,17 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                     chat.push(ChatCell::Thinking(block));
                 }
 
-                // Assistant text content (`mem::take`: the calls are still
-                // borrowed from `msg` below).
-                if !msg.content.is_empty() {
-                    chat.push(ChatCell::AssistantMessage(std::mem::take(&mut msg.content)));
+                // Assistant text content.
+                if !content.is_empty() {
+                    chat.push(ChatCell::AssistantMessage(content));
                 }
 
                 // Tool calls.
-                for tc in msg.tool_calls() {
+                for tc in tool_calls.unwrap_or_default() {
                     let block = ToolCallBlock::new(
-                        tc.name.clone(),
-                        tc.arguments.clone().unwrap_or(serde_json::Value::Null),
-                        tc.id.clone(),
+                        tc.name,
+                        tc.arguments.unwrap_or(serde_json::Value::Null),
+                        tc.id,
                     );
                     chat.push(ChatCell::ToolCall(block));
                 }
@@ -180,14 +191,13 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 // Match tool result to its call, addressed by id — tool
                 // messages are persisted in completion order (concurrent
                 // execution), so positional pairing is not possible.
-                let Some(tool_call_id) = msg.tool_call_id else {
+                let Some(tool_call_id) = tool_call_id else {
                     continue;
                 };
                 let Some(idx) = chat.tool_call_index(&tool_call_id) else {
                     // Orphan tool result — render as system message.
                     chat.push(ChatCell::SystemMessage(format!(
-                        "Tool result (orphan): {}",
-                        msg.content
+                        "Tool result (orphan): {content}"
                     )));
                     continue;
                 };
@@ -210,7 +220,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 // replayed result always renders as success — a failed call
                 // that was resumed loses its red state. Honest fix: the
                 // projection carries the fact (same for the VSCode lane).
-                chat.set_tool_result_by_index(idx, msg.content, true);
+                chat.set_tool_result_by_index(idx, content, true);
 
                 if let Some(cell) = todo_cell {
                     // Cannot fail — the ToolCall cell was located above.
@@ -218,7 +228,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 }
             }
             _ => {
-                tracing::debug!("Unknown role in replay: {}", msg.role);
+                tracing::debug!("Unknown role in replay: {role}");
             }
         }
     }

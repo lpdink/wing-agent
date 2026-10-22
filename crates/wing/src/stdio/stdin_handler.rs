@@ -821,7 +821,7 @@ mod tests {
             let fail = self.fail;
             Box::pin(async move {
                 if fail {
-                    // 网关 400 的形状（C7 文案）：原文要经 control_response.error 回编排方。
+                    // 网关 400 的形状：原文要经 control_response.error 回编排方。
                     Err(anyhow::anyhow!(
                         "API error (400): unknown model id 'nope'; available ids: ds-flash, ds-pro; \
                          note: 'nope' is the call name of model id 'ds-flash' (provider 'local')"
@@ -1405,7 +1405,7 @@ mod tests {
         pump.finish().await;
     }
 
-    // ---- 畸形 control_request（N2）：仍要有出口 ----
+    // ---- 畸形 control_request：仍要有出口 ----
 
     #[test]
     fn parse_malformed_control_request_keeps_the_request_id() {
@@ -1853,7 +1853,7 @@ mod tests {
         );
     }
 
-    /// 网关 400（未知 id，C7 文案）→ 错误原文带回编排方。
+    /// 网关 400（未知 id）→ 错误原文带回编排方。
     #[tokio::test]
     async fn gateway_model_switcher_keeps_the_gateway_error_verbatim() {
         let (base, recorded) = spawn_http_recorder(

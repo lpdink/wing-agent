@@ -25,7 +25,7 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 use super::backend_config::read_backend_gateway_config;
-use super::{start, stop};
+use super::{common, start, stop};
 
 /// Output of `wing restart` (also used with `--json`).
 #[derive(Serialize)]
@@ -50,10 +50,7 @@ pub async fn run(host: Option<String>, port: Option<u16>, json: bool) -> ExitCod
 
     let stop_outcome = match stop::stop_gateway_quiet(&host, port).await {
         Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("wing restart error: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return common::fail("restart", e),
     };
     let stop_label = match stop_outcome {
         stop::StopOutcome::Stopped => "stopped",
@@ -62,8 +59,7 @@ pub async fn run(host: Option<String>, port: Option<u16>, json: bool) -> ExitCod
     };
 
     if let Err(e) = start::start_gateway(&host, port).await {
-        eprintln!("wing restart error: {e}");
-        return ExitCode::FAILURE;
+        return common::fail("restart", e);
     }
 
     let output = RestartOutput {

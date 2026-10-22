@@ -31,7 +31,8 @@ use clap::Args;
 use wing_api_client::models::WakeCreateRequest;
 
 use super::common;
-use super::wake::{WakeCancelOutput, WakeOutput, format_wakes, parse_on_events, resolve_target};
+use super::wake::{parse_on_events, resolve_target};
+use super::wake_common::{WakeCall, WakeMode};
 
 /// `wing watch` 的参数。
 #[derive(Args, Debug, Clone)]
@@ -107,72 +108,31 @@ impl WatchArgs {
 pub async fn run(args: WatchArgs, json: bool) -> ExitCode {
     match run_inner(args, json).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("wing watch error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("watch", e),
     }
 }
 
 async fn run_inner(args: WatchArgs, json: bool) -> Result<()> {
     // 校验全部前置：纯参数错误（含"没有目标会话"）不该先把网关拉起来。
     let mode = validate_mode(&args)?;
-    let request = match mode {
-        WatchMode::Create => Some(args.request(&resolve_target(args.to.as_deref())?)?),
-        WatchMode::List | WatchMode::Cancel(_) => None,
+    let call = match mode {
+        WakeMode::Create => WakeCall::Create {
+            request: args.request(&resolve_target(args.to.as_deref())?)?,
+            json,
+        },
+        WakeMode::List => WakeCall::List {
+            all: args.all,
+            json,
+        },
+        WakeMode::Cancel(id) => WakeCall::Cancel { id, json },
     };
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
-    match mode {
-        WatchMode::Cancel(id) => {
-            let resp = http.cancel_wake(id).await?;
-            if json {
-                common::print_json_compact(&WakeCancelOutput {
-                    id,
-                    canceled: resp.canceled,
-                });
-            } else if resp.canceled {
-                println!("canceled {id}");
-            } else {
-                println!("{id} was already finished (nothing to cancel)");
-            }
-        }
-        WatchMode::List => {
-            let resp = http.list_wakes(args.all).await?;
-            if json {
-                common::print_json_compact(&resp.wakes);
-            } else {
-                let palette = crate::config::ThemePalette::from_config(
-                    &crate::config::AppConfig::load().colors,
-                );
-                let out = common::TableOutput::detect();
-                print!("{}", format_wakes(&resp.wakes, args.all, &palette, &out));
-            }
-        }
-        WatchMode::Create => {
-            let request = request.expect("WatchMode::Create 已经在起网关之前组装好请求");
-            let resp = http.create_wake(&request).await?;
-            if json {
-                common::print_json_compact(&WakeOutput { wake: resp.wake });
-            } else {
-                print!("{}", super::wake::format_wake_detail(&resp.wake));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// 本次调用是哪一种形态（三种形态的参数集合互斥）。
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum WatchMode {
-    Create,
-    List,
-    Cancel(i64),
+    super::wake_common::dispatch(&http, call).await
 }
 
 /// 判定形态并拒绝**放错位置的**参数（静默吞掉参数 = 把这次调用变成另一次调用）。
-pub(crate) fn validate_mode(args: &WatchArgs) -> Result<WatchMode> {
+pub(crate) fn validate_mode(args: &WatchArgs) -> Result<WakeMode> {
     let misplaced =
         args.to.is_some() || args.on.is_some() || args.times.is_some() || args.prompt.is_some();
     if let Some(id) = args.cancel {
@@ -185,7 +145,7 @@ pub(crate) fn validate_mode(args: &WatchArgs) -> Result<WatchMode> {
         if misplaced || args.all {
             bail!("--cancel only takes --json");
         }
-        return Ok(WatchMode::Cancel(id));
+        return Ok(WakeMode::Cancel(id));
     }
     if args.list {
         if args.session_id.is_some() {
@@ -200,7 +160,7 @@ pub(crate) fn validate_mode(args: &WatchArgs) -> Result<WatchMode> {
                  (to create one: wing watch <SID>)"
             );
         }
-        return Ok(WatchMode::List);
+        return Ok(WakeMode::List);
     }
     if args.all {
         bail!("--all only applies to --list");
@@ -208,7 +168,7 @@ pub(crate) fn validate_mode(args: &WatchArgs) -> Result<WatchMode> {
     if args.session_id.is_none() {
         bail!("nothing to do: pass a SESSION_ID to watch, or --list / --cancel <ID>");
     }
-    Ok(WatchMode::Create)
+    Ok(WakeMode::Create)
 }
 
 #[cfg(test)]
@@ -232,12 +192,12 @@ mod tests {
     #[test]
     fn validate_mode_rejects_misplaced_flags() {
         let watch = args(Some("child"));
-        assert_eq!(validate_mode(&watch).unwrap(), WatchMode::Create);
+        assert_eq!(validate_mode(&watch).unwrap(), WakeMode::Create);
 
         // --cancel 只吃 id + --json
         let mut cancel = args(None);
         cancel.cancel = Some(3);
-        assert_eq!(validate_mode(&cancel).unwrap(), WatchMode::Cancel(3));
+        assert_eq!(validate_mode(&cancel).unwrap(), WakeMode::Cancel(3));
         for mutate in [
             |a: &mut WatchArgs| a.list = true,
             |a: &mut WatchArgs| a.session_id = Some("child".into()),
@@ -257,7 +217,7 @@ mod tests {
         let mut list = args(None);
         list.list = true;
         list.all = true;
-        assert_eq!(validate_mode(&list).unwrap(), WatchMode::List);
+        assert_eq!(validate_mode(&list).unwrap(), WakeMode::List);
         for mutate in [
             |a: &mut WatchArgs| a.session_id = Some("child".into()),
             |a: &mut WatchArgs| a.on = Some("done".into()),

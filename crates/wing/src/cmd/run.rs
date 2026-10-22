@@ -135,17 +135,13 @@ pub async fn run(args: RunArgs, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing run error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("run", e),
     }
 }
 
 async fn run_inner(args: RunArgs) -> Result<RunOutput> {
     // 1. Ensure gateway is running.
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
     // 2. Create session (with agent override).
     let workspace = std::env::current_dir()

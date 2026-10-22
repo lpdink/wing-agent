@@ -6,6 +6,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::IsTerminal;
+use std::process::ExitCode;
 
 use anyhow::Result;
 use wing_api_client::ApiClientError;
@@ -271,28 +272,31 @@ pub async fn ensure_tags_applied(
 ///
 /// A 404 from a session endpoint means "not loaded **right now**" (evicted, or
 /// never hydrated since the gateway started) — not "does not exist": eviction
-/// only reclaims memory, the disk state is kept. `wing tail` / `head` / `info`
-/// already hydrate on 404, and the control-plane commands follow the same
-/// rule so an operator never has to know whether a session was evicted before
-/// running `wing branches|fork|rewind|compact|update`.
+/// only reclaims memory, the disk state is kept. Every command that reads a
+/// session follows the same rule, so an operator never has to know whether a
+/// session was evicted before running `wing tail|head|info|branches|fork|
+/// rewind|compact|update`.
 ///
 /// The retry happens **once**: if the resumed call 404s again, or the resume
 /// itself 404s (the session is not on disk either), that error is the honest
-/// answer. The returned error is already the user-facing one
-/// ([`session_error`]), so callers just `?` it.
+/// answer.
 ///
-/// `wing tail` / `head` predate this helper and keep their own inline version
-/// (`cmd::messages::fetch_messages`, which sniffs "404" / "not found" out of
-/// the error text); folding them in would change an existing command's
-/// behavior, so that is left as a follow-up.
-pub async fn hydrate_on_404<T, F, Fut>(
+/// `map_call_error` renders a failure of `call` itself — the first attempt when
+/// it is not a 404, and the single retry. The resume failure always goes
+/// through [`session_error`] (that is the "evicted ≠ missing" case, and the
+/// archived hint). Commands differ only in this mapping: the control plane
+/// wants `session <id>: <detail>` everywhere ([`session_failed`]), while
+/// `wing tail` / `head` / `info` print the gateway error verbatim.
+pub async fn hydrate_on_404<T, F, Fut, M>(
     http: &GatewayApiClient,
     session_id: &str,
     call: F,
+    map_call_error: M,
 ) -> Result<T>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = std::result::Result<T, ApiClientError>>,
+    M: Fn(ApiClientError) -> anyhow::Error,
 {
     match call().await {
         Ok(value) => Ok(value),
@@ -302,12 +306,31 @@ where
                 .await
                 .map_err(|e| session_error(session_id, &e))?;
             // 重试：会话此时已知在内存，再来 404 是**另一个 404**（fork / rewind
-            // 的 uuid 未命中就是这一种）——网关的 detail 才是答案，原样带出，
-            // 不再改写成"会话不存在"。
-            call().await.map_err(|e| session_failed(session_id, &e))
+            // 的 uuid 未命中就是这一种）——网关的 detail 才是答案，交给调用方的
+            // 映射原样带出，不在这里改写成"会话不存在"。
+            call().await.map_err(map_call_error)
         }
-        Err(e) => Err(session_error(session_id, &e)),
+        Err(e) => Err(map_call_error(e)),
     }
+}
+
+/// 连上本机网关的 HTTP client（[`ensure_gateway`] 按需拉起守护进程，再建客户端）。
+///
+/// 编排子命令的开场白。不在这里返回端点：`wait` / `asks` 要自己拼 `ws://host:port/ws`，
+/// `reload` 要在拉起前后各探活一次（`was_running`），三者仍分开取端点——端点解析只有
+/// 一份，两条路都走 [`ensure_gateway`]。
+pub async fn connect() -> Result<GatewayApiClient> {
+    let (host, port) = ensure_gateway().await?;
+    create_api_client(&host, port)
+}
+
+/// 一条子命令失败的统一出口：`wing <cmd> error: <e>` + 退出码 1。
+///
+/// `cmd` 是用户敲的那个名字（`ps` / `info` / `interrupt` / `compact` …）——与
+/// clap 的子命令名一致，`wing <cmd> error:` 是各命令既有的文案形状。
+pub fn fail(cmd: &str, error: impl std::fmt::Display) -> ExitCode {
+    eprintln!("wing {cmd} error: {error}");
+    ExitCode::FAILURE
 }
 
 /// `session <id>: <gateway error>` — status code and detail verbatim.

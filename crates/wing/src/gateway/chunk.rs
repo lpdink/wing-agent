@@ -30,6 +30,9 @@ use crate::protocol::WingEvent;
 /// 传输层保留的分片信封 `type`；应用事件 MUST NOT 使用 `_` 前缀。
 pub const CHUNK_TYPE: &str = "_chunk";
 
+/// 信封帧的固定开头（网关写出的第一个键就是 `type`）。
+const CHUNK_PREFIX: &str = r#"{"type":"_chunk""#;
+
 /// 单个事件的帧数上限（防御畸形 `count`：不预分配、不无界累积）。
 pub const MAX_CHUNKS: usize = 1024;
 
@@ -186,6 +189,17 @@ impl Reassembler {
                 Ok(()) => Outcome::Pending,
                 Err(detail) => Outcome::Fail(detail),
             };
+        }
+
+        // 分片信封靠一处廉价前缀判定进入信封解码：`WingEvent` 是内部标签枚举，
+        // 解析一帧 8 MiB 分片要先缓冲整棵 `Content` 树再丢掉。信封的 head 由网关
+        // 唯一决定（`frames.py::_head`：`type` 是第一个键、值恒为 `_chunk`），
+        // 普通事件不可能以该前缀开头；未命中时逻辑不变（未知类型仍会再试一次信封），
+        // 所以非规范顺序写出的信封也照旧能重组。
+        if text.starts_with(CHUNK_PREFIX)
+            && let Some(env) = ChunkEnvelope::parse(text)
+        {
+            return self.start(env);
         }
 
         match serde_json::from_str::<WingEvent>(text) {
@@ -476,6 +490,48 @@ mod tests {
         assert_eq!(events.len(), 1, "应用层只见一个完整事件");
         assert_eq!(sync_content(&events[0]), Some("x".repeat(64).as_str()));
         assert!(!r.is_assembling());
+    }
+
+    /// 前缀判定只是"少解析一次"的捷径，判定本身不许改变结果：规范 head（网关
+    /// 写出的形状）与非规范键序（`type` 不在首位）必须重组出同一个事件。
+    #[test]
+    fn a_non_canonical_envelope_key_order_still_reassembles() {
+        let payload = sync_payload(32);
+        let (first, _last) = split_payload(&payload, "c-order");
+        // 键序倒过来：`type` 不在首位 → 不命中前缀，退回"先解析成 Unknown 再试信封"。
+        let reordered = |frame: &str| {
+            let value: serde_json::Value = serde_json::from_str(frame).unwrap();
+            let mut out = String::from("{");
+            let mut first_key = true;
+            for (key, value) in value.as_object().unwrap() {
+                if key == "type" {
+                    continue;
+                }
+                if !first_key {
+                    out.push(',');
+                }
+                first_key = false;
+                out.push_str(&serde_json::to_string(key).unwrap());
+                out.push(':');
+                out.push_str(&serde_json::to_string(value).unwrap());
+            }
+            out.push(',');
+            out.push_str(&format!("\"type\":\"{CHUNK_TYPE}\""));
+            out.push('}');
+            out
+        };
+        let first = reordered(&first);
+        assert!(
+            !first.starts_with(CHUNK_PREFIX),
+            "前提：这个帧不命中廉价前缀"
+        );
+        let (_, last) = split_payload(&payload, "c-order");
+
+        let mut r = Reassembler::default();
+        assert!(is_pending(&r.on_text(&first)));
+        let events = delivered(r.on_text(&reordered(&last)));
+        assert_eq!(events.len(), 1);
+        assert_eq!(sync_content(&events[0]), Some("x".repeat(32).as_str()));
     }
 
     #[test]

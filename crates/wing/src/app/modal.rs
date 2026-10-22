@@ -44,7 +44,7 @@ use crate::ui::toast::Toast;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModalOwner {
     /// 设置面板（`/settings`）：**最高优先级**，且是唯一一个连应用保留键
-    /// （`Esc` / `PageUp` / `PageDown` / `Ctrl+O`）也接管的层（AD2）。`Ctrl+C`
+    /// （`Esc` / `PageUp` / `PageDown` / `Ctrl+O`）也接管的层。`Ctrl+C`
     /// 永远归应用。面板关闭的动作由 App 执行（面板只产出 `SettingsAction`）。
     Settings,
     /// Ask panel (queue front): swallows every key except the ones the app
@@ -87,7 +87,7 @@ pub(super) enum KeyRoute {
     /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_local_image`
     /// （不受挡板，与 OSC 5522 通道同一条既定取舍）。
     PasteClipboard,
-    /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它，AD2；
+    /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它；
     /// `Ctrl+C` 在它之前就被应用截走）。
     Settings,
     /// The ask panel owns the key.
@@ -225,7 +225,7 @@ impl App {
         if is_quit_key(key) {
             return KeyRoute::Quit;
         }
-        // 设置面板：最高优先级，且是**唯一接管应用保留键**的层（AD2）——
+        // 设置面板：最高优先级，且是**唯一接管应用保留键**的层——
         // `Esc` 走面板自己的 Esc 阶梯、`PageUp`/`PageDown` 翻面板的树、
         // `Ctrl+O` 交给面板（面板忽略它，比让它穿透去改看不见的聊天状态安全）。
         // 必须排在 `app_reserved_key` 与 Ctrl+O 的分支之前。
@@ -502,9 +502,9 @@ impl App {
         }
     }
 
-    /// 设置面板：模态，最高优先级（AD2）。
+    /// 设置面板：模态，最高优先级。
     ///
-    /// 07 的状态机吃下按键并回一个 [`SettingsAction`]；这里只做"喂 + 分派"
+    /// 设置面板的状态机吃下按键并回一个 [`SettingsAction`]；这里只做"喂 + 分派"
     /// —— 全部分派逻辑（预览 / 保存 / 重启 / 重载 / 关闭）在 `app::settings`。
     /// `Ctrl+C` 永远到不了这里（[`App::route_key`] 先放行给应用）。
     fn handle_settings_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -684,8 +684,8 @@ impl App {
     /// editor when one is up (panel is modal); the modal model panel and the
     /// settings overlay drop it; otherwise it goes to the composer.
     ///
-    /// **顺序**（N4）：设置面板的挡板排在最前 —— 面板是模态浮层、拿走全部按键的层，
-    /// 而队列里可能正躺着一条**看不见**的 ask（AD2：面板开着时到达的 ask 入队不弹）。
+    /// **顺序**：设置面板的挡板排在最前 —— 面板是模态浮层、拿走全部按键的层，
+    /// 而队列里可能正躺着一条**看不见**的 ask（面板开着时到达的 ask 入队不弹）。
     /// 先问 ask 的话，`Ctrl+V` 会写进那条 ask 的内联编辑器（用户看不见自己改了什么）。
     pub(super) fn handle_paste(&mut self, text: &str) {
         // 设置面板：内联编辑器只吃按键事件，草稿在面板底下不可见 —— 粘贴进
