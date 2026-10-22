@@ -89,7 +89,7 @@ class RuleFile:
     """一个实际读到的 rules 文件（内容 + 加载时刻的文件事实）。
 
     `mtime` / `size` 在**读取的同一趟**采集：缓存账本的 `src` 元信息只能在这里拿一次，
-    热路径（每次 LLM 调用）不得再去 stat（见 contract §1 的 `src` 约定）。
+    热路径（每次 LLM 调用）不得再去 stat（见 `src` 约定）。
     """
 
     path: str
@@ -133,7 +133,7 @@ def collect_skill_sources(
 ) -> dict[str, CacheSource]:
     """每个 skill 的来源事实（`src`），供缓存账本点名叫「哪份 SKILL.md 变了」。
 
-    `path` 取 `AgentSkill.dir`（contract §1 规定），`mtime` / `size` 取该目录下的
+    `path` 取 `AgentSkill.dir`（缓存账本口径 规定），`mtime` / `size` 取该目录下的
     `SKILL.md`——决定这段提示词内容的就是它；文件缺失时退回目录自身的事实。
 
     只在**加载路径**调用一次（构造 / `reload_skills_and_rules`），每次调用都 stat 一遍

@@ -3,7 +3,7 @@
 账本是「这次请求的前缀指纹」与「provider 报的实际命中」同放一张表：`GET
 /api/session/cache` 给出 `summary`（三档命中率）、`calls`（每次调用一行）与 `forks`
 （每次前缀破碎一行）。它只有观察面，没有护栏——所以口径一旦漂了，用户会看到一堆
-似是而非的数字而无法行动。本文件把六条性质钉死（A–F，括号里是失败时被破坏的性质）：
+似是而非的数字而无法行动。本文件把八条性质钉死（A–H，括号里是失败时被破坏的性质）：
 
 - **A｜首调用 `cold`**：没有参照 → `expected` 为 null、`forks` 为空；`theory_rate`
   是 `0.0` 而不是 null（分母 Σprompt 非 0，null 只属于空账本，见 F）。
@@ -19,6 +19,10 @@
   落 `prefix_broken`（`expected` 为 null）。
 - **F｜无数据不报错**：新建未跑轮的会话（以及不存在的会话）→ 200 + 空 `forks` /
   `calls` + 全 null summary，**不是 404**。
+- **G｜会话隔离**：账本住进程级 `wing.db`，两个会话各自只看得到自己的调用与
+  汇总（隔离性不再由会话目录免费提供，每个查询都必须按会话键收口）。
+- **H｜重启后仍在**：网关重启后账本逐字段不变，且新进程能拿旧行当参照继续判
+  `hit`（行 / 段落表 / 指纹三样都还在库里的最强判据）。
 
 数值纪律：usage 由剧本给定（假 Provider 是唯一数值来源），断言只写**相对关系**
 （`expected == 参照调用的 prompt`、`theory_rate == Σexpected / Σprompt` …），不硬编码
@@ -53,7 +57,7 @@ RULE_FILE = "team.md"
 #: 「端点拿不全」的形式变红。
 FULL_LIMIT = 200
 
-#: 空账本 summary 的精确形状（contract §6：无数据 = 计数 0 + 三档 rate 全 null）。
+#: 空账本 summary 的精确形状（无数据 = 计数 0 + 三档 rate 全 null）。
 EMPTY_SUMMARY = {
     "calls": 0,
     "prompt_tokens": 0,
@@ -91,7 +95,7 @@ async def _cache_report(probe: Probe, session_id: str) -> dict[str, Any]:
 async def _cache_report_expecting_200(
     probe: Probe, session_id: str, *, context: str
 ) -> dict[str, Any]:
-    """`_cache_report` 的「必须 200」版本：404 折成可读的判据失败（contract §6）。
+    """`_cache_report` 的「必须 200」版本：404 折成可读的判据失败。
 
     驱动对非 2xx 一律抛 `DriverHttpError`——不折的话「回了 404」只会以一条裸 HTTP
     报错出现在报告里，读的人得自己去翻契约才知道破坏了什么。
@@ -100,13 +104,12 @@ async def _cache_report_expecting_200(
         return await _cache_report(probe, session_id)
     except DriverHttpError as exc:
         pytest.fail(
-            f"{context}: 必须回 200 + 空账本（contract §6：不要 404），"
-            f"实际 HTTP {exc.status}"
+            f"{context}: 必须回 200 + 空账本（不要 404），实际 HTTP {exc.status}"
         )
 
 
 def _assert_rates_are_consistent(report: dict[str, Any], *, context: str) -> None:
-    """三档 rate 与 `calls` 逐项对账（contract §6 的公式）。
+    """三档 rate 与 `calls` 逐项对账（公式）。
 
     `theory_rate = Σexpected（仅非 null）/ Σprompt`、`actual_rate = Σcached /
     Σprompt`、`provider_debt_rate = Σmax(0, expected - cached)（仅 verdict ∈
@@ -164,7 +167,7 @@ def _assert_rates_are_consistent(report: dict[str, Any], *, context: str) -> Non
 
 
 def _last_metrics(session: Session) -> dict[str, Any]:
-    """最近一条 `llm_call_metrics` 的载荷（直播字段的观测面，contract §5）。"""
+    """最近一条 `llm_call_metrics` 的载荷（直播字段的观测面，缓存账本口径）。"""
     events = session.watch.events("llm_call_metrics")
     assert events, "本轮必须发出 llm_call_metrics 事件（用量与缓存归因的直播面）"
     return events[-1].data
@@ -202,7 +205,7 @@ async def test_first_call_is_cold_without_theoretical_watermark(probe: Probe) ->
     assert report["forks"] == [], "首调用不产生分叉行"
 
     # 分母是 Σprompt（非 0）→ 理论命中率是 0.0，**不是 null**：null 只属于空账本
-    # （contract §6「分母为 0 时三个 rate 均为 null」，空账本由 F 覆盖）。
+    # （缓存账本口径「分母为 0 时三个 rate 均为 null」，空账本由 F 覆盖）。
     assert report["summary"]["expected_tokens"] == 0, (
         "cold 的 expected 不进 Σexpected（null 不按 0 计入）:"
         f" {report['summary']['expected_tokens']!r}"
@@ -225,7 +228,7 @@ async def test_continued_prefix_reports_hit_and_matches_live_metrics(
     """B｜第二轮沿用第一轮的前缀 → `hit`，理论水位 == 参照调用的 prompt。
 
     WHY：这是账本存在的意义——「provider 兑现了整段前缀」必须显示成 100% 命中，
-    而不是一个含糊的小数。直播字段与账本同源同刻（contract §5），所以两边必须
+    而不是一个含糊的小数。直播字段与账本同源同刻，所以两边必须
     给出同一个 verdict。
     """
     probe.register(
@@ -257,9 +260,7 @@ async def test_continued_prefix_reports_hit_and_matches_live_metrics(
     assert report["forks"] == [], "前缀延续就不是分叉"
 
     live = _last_metrics(session)
-    assert live["cache_verdict"] == "hit", (
-        f"直播字段必须与账本同源（contract §5）: {live}"
-    )
+    assert live["cache_verdict"] == "hit", f"直播字段必须与账本同源: {live}"
     assert live["cache_expected_tokens"] == reference["prompt"], live
     assert live["cache_diverged"] == "", f"没有分叉 → cache_diverged 为空串: {live}"
     _assert_rates_are_consistent(report, context="B 前缀延续")
@@ -379,8 +380,8 @@ async def test_underdelivery_is_provider_debt_and_not_a_fork(probe: Probe) -> No
     逐段与上一轮一致）而 provider 一个 token 都没兑现——责任在 provider 侧，
     它只进 `summary.provider_debt_rate`，`forks`（前缀破碎）必须干净。
 
-    `forks` 只收 `fork != null` 的调用（contract §6），而 `fork` 只在「前缀没能延续」
-    时产生、`prefix_broken` 又优先于其余 verdict（contract §4）——所以欠兑现永远
+    `forks` 只收 `fork != null` 的调用，而 `fork` 只在「前缀没能延续」
+    时产生、`prefix_broken` 又优先于其余 verdict——所以欠兑现永远
     进不了 `forks`。同一性质在 `calls`（账本）与 `llm_call_metrics`（直播）两侧钉住。
     """
     probe.register(
@@ -419,7 +420,7 @@ async def test_underdelivery_is_provider_debt_and_not_a_fork(probe: Probe) -> No
 
     live = _last_metrics(session)
     assert live["cache_verdict"] == "provider_underdelivered", (
-        f"直播字段必须与账本同源（contract §5）: {live}"
+        f"直播字段必须与账本同源: {live}"
     )
     assert live["cache_diverged"] == "", (
         f"没有分叉 → cache_diverged 必须是空串（不是 provider 之类）: {live}"
@@ -471,7 +472,7 @@ async def test_rules_change_is_an_external_avoidable_fork(probe: Probe) -> None:
     `avoidable=true`。判成 `composition` 或只说「前缀碎了」都不可行动。
 
     rules 段在 `system:base` 之后（本场景无 `append_system_prompt`），故 fork 点
-    `index == 1`；label 在两侧都存在而 sha 变了，依 contract §4 的 kind 判定是
+    `index == 1`；label 在两侧都存在而 sha 变了，依 kind 判定是
     `modify`。有 fork ⇒ `prefix_broken` 且 `expected` 为 null（优先级）。
     """
     rule_path = _write_rule(probe, "RULE: answer in English.")
@@ -536,15 +537,13 @@ async def test_rules_change_is_an_external_avoidable_fork(probe: Probe) -> None:
     )
 
     live = _last_metrics(session)
-    assert live["cache_verdict"] == "prefix_broken", (
-        f"直播字段必须与账本同源（contract §5）: {live}"
-    )
+    assert live["cache_verdict"] == "prefix_broken", f"直播字段必须与账本同源: {live}"
     assert live["cache_diverged"] == fork["label"], (
-        "cache_diverged 就是分叉处的段 label（contract §5）:"
+        "cache_diverged 就是分叉处的段 label:"
         f" {live['cache_diverged']!r} vs {fork['label']!r}"
     )
     # wire 出口剥除值为 null 的字段（`event.wire_dump`）：没有理论水位时该键
-    # **完全不出现**，与「旧网关没有这个字段」是同一形态（contract §5「缺省/旧网关
+    # **完全不出现**，与「旧网关没有这个字段」是同一形态（缓存账本口径「缺省/旧网关
     # = 无」）。`is None` 不够——它对「键缺席」与「键在、值为 null」都成立，而下发
     # null 会让按「键是否存在」判定的消费方走错分支。
     assert "cache_expected_tokens" not in live, (
@@ -595,3 +594,104 @@ async def test_session_without_calls_reports_empty_ledger(probe: Probe) -> None:
         f"不存在的会话 summary 必须全 0 / 全 null: {ghost_report['summary']}"
     )
     _assert_rates_are_consistent(ghost_report, context="F 不存在的会话")
+
+
+# ── G｜会话隔离（账本住进程级库）──────────────────────────────────────────
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_ledgers_are_isolated_per_session(probe: Probe) -> None:
+    """G｜两个会话共用一个库，各自只看得到自己的调用。
+
+    WHY：账本从「会话目录里的边车文件」搬进了进程级 `wing.db`，隔离性于是不再由
+    文件系统免费提供——每个查询都必须按会话键收口。漏一条 `WHERE session_id`
+    的表现是：别的会话的调用混进 summary（理论命中率、欠账率一起说谎），而
+    `calls` 也可能点名别人的分叉。这里让两个会话跑不同的 token 数，混不起来。
+    """
+    probe.register(
+        MODEL,
+        _turn("a-one", 1000),
+        _turn("a-two", 1200, cached=1000),
+        _turn("b-one", 2000),
+        _turn("b-two", 2400, cached=2000),
+    )
+    first = await probe.session(model=MODEL)
+    await first.chat("alpha")
+    await first.chat("beta")
+    second = await probe.session(model=MODEL)
+    await second.chat("gamma")
+    await second.chat("delta")
+
+    a = await _cache_report(probe, first.session_id)
+    b = await _cache_report(probe, second.session_id)
+
+    assert [call["prompt"] for call in a["calls"]] == [1200, 1000], (
+        f"先建的会话只该有自己两次调用（新→旧）: {a['calls']}"
+    )
+    assert [call["prompt"] for call in b["calls"]] == [2400, 2000], (
+        f"后建的会话只该有自己两次调用: {b['calls']}"
+    )
+    assert a["summary"]["prompt_tokens"] == 2200, (
+        f"summary 覆盖的必须是本会话的行: {a['summary']}"
+    )
+    assert b["summary"]["prompt_tokens"] == 4400, (
+        f"另一个会话的 token 不许混进 summary: {b['summary']}"
+    )
+    assert [call["verdict"] for call in b["calls"]] == ["hit", "cold"], (
+        f"后建的会话自己成链（首调用 cold、第二轮 hit）: {b['calls']}"
+    )
+    _assert_rates_are_consistent(a, context="G 会话 A")
+    _assert_rates_are_consistent(b, context="G 会话 B")
+
+
+# ── H｜重启后账本仍在，且能继续当参照 ────────────────────────────────────
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_ledger_survives_a_gateway_restart(probe: Probe) -> None:
+    """H｜进程重启后账本一个字都没少，且新进程能拿它当参照（前缀继续兑现）。
+
+    WHY：搬家前账本是会话目录里的文件，进程重启天然无损；搬进 `wing.db` 之后
+    「读得到」变成了一条要钉的性质——库路径算错（相对 cwd）、打开失败被降级、
+    写入没进事务，都会让重启后的账本变成空表。最有力的判据不是"还能读出旧行"，
+    而是"新进程按旧行继续判 hit"：那要求行、段落表、指纹三样都在。
+    """
+    probe.register(
+        MODEL,
+        _turn("r-one", 1000),
+        _turn("r-two", 1200, cached=1000),
+        # 重启之后：provider 报「上一轮的 prompt 全部命中」——参照必须来自旧进程。
+        _turn("r-three", 1500, cached=1200),
+    )
+    session = await probe.session(model=MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    before = await _cache_report(probe, session.session_id)
+    assert before["summary"]["calls"] == 2, before["summary"]
+
+    await probe.restart_gateway()
+
+    after = await _cache_report(probe, session.session_id)
+    assert after["summary"] == before["summary"], (
+        f"重启后 summary 必须逐字段不变: {after['summary']!r} vs {before['summary']!r}"
+    )
+    assert [call["prompt"] for call in after["calls"]] == [
+        call["prompt"] for call in before["calls"]
+    ], f"重启后调用行必须一模一样: {after['calls']}"
+
+    resumed = await probe.resume(session.session_id)
+    await resumed.chat("gamma")
+    continued = await _cache_report(probe, session.session_id)
+    latest = continued["calls"][0]
+    assert latest["verdict"] == "hit", (
+        "重启后的下一步必须还能拿旧行当参照（前缀延续 → hit）:"
+        f" {latest} / {continued['calls']}"
+    )
+    assert latest["expected"] == 1200, (
+        f"理论水位 = 上一轮（重启前那一轮）的 prompt: {latest}"
+    )
+    _assert_rates_are_consistent(continued, context="H 重启后")

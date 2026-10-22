@@ -82,10 +82,10 @@ def _sha_of(canonical: str) -> str:
 def fingerprint(segments: Sequence["CachePart"]) -> str:
     """指纹（契约 §2）：`sha256("|".join(f"{label}:{sha}"))[:16]`。
 
-    段列表相同 ⇒ 指纹相同。指纹只用于去重存储，不参与任何业务判断。
+    段列表相同 ⇒ 指纹相同。用途只有两处：段落表按它去重，以及「这条历史调用的段列表
+    是不是本次的前缀」的判定（它的指纹 == 本次前 n 段的指纹）。不参与任何算术。
     """
-    joined = "|".join(f"{segment.label}:{segment.sha}" for segment in segments)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    return _sha_of("|".join(f"{segment.label}:{segment.sha}" for segment in segments))
 
 
 # ── 段落 ──────────────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ def fingerprint(segments: Sequence["CachePart"]) -> str:
 
 @dataclass(frozen=True)
 class CacheSource:
-    """段的来源文件事实（contract §1 的 `src`）。
+    """段的来源文件事实（`src`）。
 
     只在 `rules:*` / `skills:*` 段上携带，**加载时采集一次**（热路径不扫目录、不 stat）。
     `mtime` 是本地 naive ISO（与 `metadata.json` 同一时间口径）。
@@ -146,18 +146,9 @@ class CachePart:
 # ── 分叉与归因结果 ────────────────────────────────────────────────────────
 
 
-def is_count(value: object) -> bool:
-    """计数位 / 估算位的判据：**真整数**才算。
-
-    ``bool`` 是 ``int`` 的子类：手改账本里的 ``true`` 不能当 1 收下（否则分叉下标
-    会被静默改成 1）。
-    """
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 @dataclass(frozen=True)
 class CacheFork:
-    """前缀分叉事实（契约 §4 的 `fork`）；`tokens_lost` 是**估算值**。"""
+    """前缀分叉事实；`tokens_lost` 是**估算值**。"""
 
     kind: str
     index: int
@@ -165,36 +156,30 @@ class CacheFork:
     segments_affected: int
     tokens_lost: int | None = None
 
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "index": self.index,
-            "label": self.label,
-            "segments_affected": self.segments_affected,
-            "tokens_lost": self.tokens_lost,
-        }
 
-    @classmethod
-    def from_wire(cls, raw: Any) -> "CacheFork | None":
-        """落盘 wire → 分叉事实；形状不合规返回 None（前向容忍，不抛）。
+@dataclass(frozen=True)
+class CacheCall:
+    """账本里的一次调用（`cache_call` 一行的内存形态）。
 
-        分叉的 wire 形状（`kind / index / label / segments_affected /
-        tokens_lost`）只由本类解释。
-        """
-        if not isinstance(raw, dict):
-            return None
-        kind, label, index = raw.get("kind"), raw.get("label"), raw.get("index")
-        if not isinstance(kind, str) or not isinstance(label, str):
-            return None
-        affected = raw.get("segments_affected")
-        lost = raw.get("tokens_lost")
-        return cls(
-            kind=kind,
-            index=index if is_count(index) else 0,
-            label=label,
-            segments_affected=affected if is_count(affected) else 0,
-            tokens_lost=lost if is_count(lost) else None,
-        )
+    `ts` 是本地 naive ISO（对外展示与 `forks[].detail.ref_ts` 都用它）；`ts_ms` 只用于
+    判「参照调用是否过期」，缺失 / 不可解析时为 None。`segment_count` 是这次调用前缀的
+    段数（前缀比较的边界）；`expected is None` = 这一轮没有理论水位（cold / 分叉 /
+    过期）；`fork` 非空 = 前缀没能延续（契约 §4）。
+    """
+
+    ts: str
+    fp: str
+    purpose: str
+    model: str
+    provider: str
+    prompt: int
+    cached: int
+    verdict: str
+    segment_count: int = 0
+    ts_ms: int | None = None
+    expected: int | None = None
+    ref_fp: str | None = None
+    fork: CacheFork | None = None
 
 
 @dataclass(frozen=True)

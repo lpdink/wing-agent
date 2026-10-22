@@ -1,34 +1,36 @@
 # wing/context/cache_ledger.py
 """会话级 KV 缓存账本：每次 LLM 调用的分段指纹 + provider 报的实际命中 + 归因。
 
-落点 `<session-dir>/cache_ledger.json`——经 `MessageLog` 的 aux kv 通道写入（file 后端原子写
-= tmp + fsync + rename，memory 后端留在进程内字典）。**不新增存储接口**，也绝不碰
-`history.jsonl`。
+落点 `wing.db` 的两张表（`cache_call` / `cache_segment`，见 `cache_store.py`）：一次调用
+一行、它的前缀分段按指纹存一份。旧版本的边车文件 `<session-dir>/cache_ledger.json`
+**不再读也不再写**——它留在原地（不删任何文件），新账本从一个空窗口开始。
 
 三条不变量：
 
-- **永不抛**：读、算、写全在 try/except 内，失败只 `log.warning`——记账坏了绝不影响 LLM 调用
-  （contract §8.2）；
-- **有界**：`calls` 只留最近 `MAX_CALLS` 条，`fingerprints` 只留被这些 calls 引用到的条目
-  （写盘时 GC，contract §8.4）；
-- **前向容忍**：读不到 / 版本不认识 / 解析失败一律当空账本（contract §3 末条）。
+- **永不抛**：读、算、写全在 try/except 内，失败只 `log.warning`——记账坏了绝不影响
+  LLM 调用；
+- **有界**：只留本会话最近 `MAX_CALLS` 条调用，段落行随失去引用的指纹回收
+  ；
+- **前向容忍**：读不到 / 版本不认识 / 单条记录坏掉一律当空账本（缓存账本口径 末条）——
+  库里没有行就是空账本，形状错的行在 SQL 层已被列约束挡住。
 
-归因口径的唯一来源是 contract §4；本模块只是它的可执行表达（`record_call`）。
+归因口径的唯一来源是 缓存账本口径；本模块是它的可执行表达（`record`）与投影
+（`build_report`），SQL 全在 `context/cache_store.py`。
 """
 
 from __future__ import annotations
 
-import json
 import math
-import threading
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any
 
 from wing.common.logger import log
-from wing.schema import CacheFork, CacheObservation, CachePart, fingerprint
+from wing.db import Database
+from wing.schema import CacheCall, CacheFork, CacheObservation, CachePart, fingerprint
 from wing.schema.cache import (
     HISTORY_PREFIX,
-    is_count,
     PURPOSE_COMPACT,
     RULES_PREFIX,
     SKILLS_PREFIX,
@@ -44,127 +46,67 @@ from wing.schema.cache import (
     VERDICT_PROVIDER_UNDERDELIVERED,
 )
 
-CACHE_LEDGER_KEY = "cache_ledger"
-"""aux kv 的 key：file 后端因此落 `<session-dir>/cache_ledger.json`。"""
-
-LEDGER_VERSION = 1
+from .cache_store import CacheStore
 
 MAX_CALLS = 200
-"""环形上界（contract §3）：`calls` 只留最近 200 条。"""
+"""环形上界：每个会话只留最近 200 条调用。
+
+刻意是模块常量而不是配置项：本功能只观察不干预，不新增配置面。
+"""
 
 CACHE_TTL_HOURS = 72
-"""超过这个时长的参照调用判 `cold_expired`（contract §4 的 `cache_ttl_hours` 默认值）。
+"""超过这个时长的参照调用判 `cold_expired`（`cache_ttl_hours` 默认值）。
 
 刻意是模块常量而不是配置项：本功能只观察不干预，不新增配置面。
 """
 
 MIN_TOL_TOKENS = 256
 TOL_RATIO = 0.02
-"""块粒度容差 `tol = max(256, ceil(0.02 * ref.prompt))`（contract §4）。"""
+"""块粒度容差 `tol = max(256, ceil(0.02 * ref.prompt))`。"""
 
-MAX_LEDGER_BYTES = 512 * 1024
-"""账本落盘的字节预算（`json.dumps(..., ensure_ascii=False)` 的 UTF-8 长度，与
-`MessageLog.write_aux` 同一序列化口径）。
-
-段落表按调用冗余存储：常规 40 轮会话约 160 KB，200 条 × 上百段的极端形态能到数 MB
-（contract §3 的「~60KB/会话」按「多条调用共享同一份段落表」估，见 docs/dev）。超出预算
-就从**最旧调用**开始淘汰（连带 GC 失去引用的指纹），永远保留最近一条调用。
-"""
+SegmentLookup = Callable[[str | None, int], CachePart | None]
+"""按（指纹, 段序）取一段事实的口径——端点投影只要分叉位点那一段。"""
 
 
-# ── 账本形状 ──────────────────────────────────────────────────────────────
+class _PrefixFingerprints:
+    """按需计算「本次段列表前 n 段」的指纹（同一个 n 只算一次）。
 
-
-def empty_ledger(session_id: str) -> dict[str, Any]:
-    """空账本（version 1）。读不到 / 解析失败 / 首调用前的唯一形态。"""
-    return {
-        "version": LEDGER_VERSION,
-        "session_id": session_id,
-        "fingerprints": {},
-        "calls": [],
-    }
-
-
-def normalize_ledger(raw: Any, session_id: str) -> dict[str, Any]:
-    """把盘上的原始数据规整成账本（永不抛；不认识的一律降级为空账本）。
-
-    逐字段归一是**边界契约**：账本是可被手改 / 被新版本写过的边车文件，而端点
-    用强类型响应模型序列化它——一条类型错位的记录不该让查询 500（契约 §3「读不到 /
-    解析失败 ⇒ 当作空账本」的精神：单条坏记录丢弃，不升级成整份失败）。
+    `_find_ref` 的判据是「历史调用的段列表是本次的前缀」，等价于「它的指纹等于本次前
+    n 段的指纹」（n = 它的段数）。一次性把 N 个前缀指纹全算出来是 O(N²) 字节的哈希
+    ——400 段的会话每次记账要烧掉约 1ms，而实际命中的几乎总是最近那条。所以按候选的
+    n 惰性算：稳态（前缀延续）只算两次（全量一次 + 最近一条的段数一次，后者通常就是
+    前者的补集里最长的那一个）。
     """
-    if not isinstance(raw, dict) or raw.get("version") != LEDGER_VERSION:
-        return empty_ledger(session_id)
-    fingerprints_raw = raw.get("fingerprints")
-    calls_raw = raw.get("calls")
-    calls = (
-        [
-            call
-            for call in (_normalize_call(entry) for entry in calls_raw)
-            if call is not None
-        ]
-        if isinstance(calls_raw, list)
-        else []
-    )
-    return {
-        "version": LEDGER_VERSION,
-        "session_id": raw.get("session_id")
-        if isinstance(raw.get("session_id"), str)
-        else session_id,
-        "fingerprints": fingerprints_raw if isinstance(fingerprints_raw, dict) else {},
-        "calls": calls,
-    }
+
+    __slots__ = ("_segments", "_cache")
+
+    def __init__(self, segments: Sequence[CachePart], full: str) -> None:
+        self._segments = list(segments)
+        self._cache: dict[int, str] = {len(self._segments): full}
+
+    @property
+    def size(self) -> int:
+        """本次段列表的段数（候选比它更长时不可能是前缀）。"""
+        return len(self._segments)
+
+    def at(self, length: int) -> str:
+        """`fingerprint(segments[:length])`（`length` == 全部时为完整指纹）。"""
+        cached = self._cache.get(length)
+        if cached is None:
+            cached = fingerprint(self._segments[:length])
+            self._cache[length] = cached
+        return cached
 
 
-_CALL_TEXT_FIELDS = ("ts", "fp", "purpose", "model", "provider", "verdict")
+# ── 段落工具 ──────────────────────────────────────────────────────────────
 
 
-def _normalize_call(entry: Any) -> dict[str, Any] | None:
-    """单条调用记录的类型归一（坏记录返回 None = 丢弃）。"""
-    if not isinstance(entry, dict):
-        return None
-    call: dict[str, Any] = {}
-    for field in _CALL_TEXT_FIELDS:
-        value = entry.get(field)
-        if not isinstance(value, str):
-            return None
-        call[field] = value
-    for field in ("prompt", "cached", "expected"):
-        value = entry.get(field)
-        call[field] = value if is_count(value) else None
-    if call["prompt"] is None or call["cached"] is None:
-        return None
-    ref_fp = entry.get("ref_fp")
-    call["ref_fp"] = ref_fp if isinstance(ref_fp, str) else None
-    fork = entry.get("fork")
-    call["fork"] = _normalize_fork(fork) if isinstance(fork, dict) else None
-    return call
-
-
-def _normalize_fork(raw: dict[str, Any]) -> dict[str, Any] | None:
-    """分叉记录的归一：形状与容错规则归 ``CacheFork``（唯一守门人）。"""
-    fork = CacheFork.from_wire(raw)
-    return None if fork is None else fork.to_wire()
-
-
-def _segments_of(fingerprints: dict[str, Any], fp: Any) -> list[dict[str, Any]]:
-    """取某个指纹对应的段落列表（缺失 / 形状不对 → 空列表）。"""
-    if not isinstance(fp, str):
-        return []
-    entry = fingerprints.get(fp)
-    if not isinstance(entry, dict):
-        return []
-    segments = entry.get("segments")
-    if not isinstance(segments, list):
-        return []
-    return [segment for segment in segments if isinstance(segment, dict)]
-
-
-def _pairs(segments: Sequence[dict[str, Any]]) -> list[tuple[Any, Any]]:
+def _pairs(segments: Sequence[CachePart]) -> list[tuple[str, str]]:
     """段落列表的 `(label, sha)` 投影——前缀比较的唯一口径。"""
-    return [(segment.get("label"), segment.get("sha")) for segment in segments]
+    return [(segment.label, segment.sha) for segment in segments]
 
 
-def _common_prefix(left: Sequence[dict], right: Sequence[dict]) -> int:
+def _common_prefix(left: Sequence[CachePart], right: Sequence[CachePart]) -> int:
     """两个段落列表的最长公共前缀长度。"""
     left_pairs, right_pairs = _pairs(left), _pairs(right)
     limit = min(len(left_pairs), len(right_pairs))
@@ -174,56 +116,53 @@ def _common_prefix(left: Sequence[dict], right: Sequence[dict]) -> int:
     return index
 
 
-# ── 参照 / 分叉 / 判定（contract §4）──────────────────────────────────────
+# ── 参照 / 分叉 / 判定──────────────────────────────────────
 
 
 def _find_ref(
-    calls: Sequence[dict[str, Any]],
-    fingerprints: dict[str, Any],
-    segments: Sequence[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """倒序找参照调用：最近的、段列表是本次**严格前缀**且 prompt > 0 的调用。
+    calls: Sequence[CacheCall], prefixes: _PrefixFingerprints
+) -> CacheCall | None:
+    """段列表是本次前缀、且有 prompt 的**最近一条**调用（参照调用）。
+
+    倒序扫描（`calls` 已是新→旧）：候选的段列表是本次的前缀 ⟺ 它的指纹等于本次前 n 段
+    的指纹（`n` = 它的段数）。段数比本次长的候选直接跳过——连指纹都不必算。
 
     末尾补一条 twin 回退：段列表与本次**完全相等**的最近调用也算参照（契约只给了严格
-    前缀的格子；重试 / 重放这类"没有新增段"的调用否则既无参照也无 fork，判定表落空
-    ——否则「重试 / 重放」这类没有新增段的调用既无参照也无 fork，判定表落空）。
+    前缀的格子；重试 / 重放这类"没有新增段"的调用否则既无参照也无 fork，判定表落空）。
+    完全相等时 `n == size`，`at()` 直接给出全量指纹，与严格前缀走同一条判据。
     """
-    for index in range(len(calls) - 1, -1, -1):
-        call = calls[index]
-        prompt = call.get("prompt")
-        if not isinstance(prompt, int) or prompt <= 0:
+    for call in calls:
+        if call.prompt <= 0:
             continue
-        candidate = _segments_of(fingerprints, call.get("fp"))
-        if not candidate or len(candidate) > len(segments):
+        if call.segment_count > prefixes.size:
             continue
-        if _pairs(candidate) != _pairs(segments[: len(candidate)]):
-            continue
-        return call, candidate
-    return None, []
+        if call.fp == prefixes.at(call.segment_count):
+            return call
+    return None
 
 
 def _compute_fork(
-    latest: Sequence[dict[str, Any]],
-    segments: Sequence[dict[str, Any]],
-    ref: dict[str, Any] | None,
-    ref_segments: Sequence[dict[str, Any]],
+    latest: Sequence[CachePart],
+    segments: Sequence[CachePart],
+    ref_length: int | None,
 ) -> CacheFork | None:
-    """与「最近一条调用」的分叉事实（contract §4 的 `fork`）。
+    """与「最近一条调用」的分叉事实（`fork`）。
 
-    `k` = 最近一条调用与本次的最长公共前缀长度；仅当 `k < 参照段列表长度` 时才产生分叉
-    （无参照时以最近一条自身的长度为准——首调用没有历史，直接返回 None）。
+    `index` = 最近一条调用与本次的最长公共前缀长度；仅当 `index < 参照段列表长度`
+    （`ref_length`，无参照时取最近一条自身的长度）时才产生分叉——首调用没有历史，
+    直接返回 None。`tokens_lost` 由 caller 用参照的字符量补上（要一次聚合查询）。
     """
     if not latest:
         return None
-    limit = len(ref_segments) if ref is not None else len(latest)
+    limit = ref_length if ref_length is not None else len(latest)
     index = _common_prefix(latest, segments)
     if index >= limit:
         return None
 
-    new_label = segments[index].get("label") if index < len(segments) else None
-    old_label = latest[index].get("label") if index < len(latest) else None
-    new_labels = {segment.get("label") for segment in segments[index:]}
-    old_labels = {segment.get("label") for segment in latest[index:]}
+    new_label = segments[index].label if index < len(segments) else None
+    old_label = latest[index].label if index < len(latest) else None
+    new_labels = {segment.label for segment in segments[index:]}
+    old_labels = {segment.label for segment in latest[index:]}
 
     if new_label is None:
         # 本次到尽头（回退 / 压缩后的短链）：参照侧尾部被移除
@@ -238,64 +177,44 @@ def _compute_fork(
         kind, label = "modify", new_label
 
     return CacheFork(
-        kind=str(kind),
+        kind=kind,
         index=index,
-        label=str(label or ""),
+        label=label or "",
         segments_affected=len(latest) - index,
-        tokens_lost=_tokens_lost(ref, ref_segments, index),
+        tokens_lost=None,
     )
 
 
-def _tokens_lost(
-    ref: dict[str, Any] | None,
-    ref_segments: Sequence[dict[str, Any]],
-    index: int,
-) -> int | None:
-    """`round(ref.prompt * (1 - chars_before / ref_total_chars))`（估算，展示带 `≈`）。"""
-    if ref is None:
-        return None
-    prompt = ref.get("prompt")
-    if not isinstance(prompt, int):
-        return None
-    total = sum(_chars(segment) for segment in ref_segments)
-    if total <= 0:
+def _tokens_lost(prompt: int, total_chars: int, before_chars: int) -> int:
+    """`round(prompt * (1 - chars_before / total_chars))`（估算，展示带 `≈`）。"""
+    if total_chars <= 0:
         return 0
-    before = sum(_chars(segment) for segment in ref_segments[:index])
-    return round(prompt * (1 - before / total))
+    return round(prompt * (1 - before_chars / total_chars))
 
 
-def _chars(segment: dict[str, Any]) -> int:
-    chars = segment.get("chars")
-    return chars if isinstance(chars, int) and chars > 0 else 0
-
-
-def _age_hours(ts: Any, now: datetime) -> float | None:
-    """参照调用的年龄（小时）；时间戳缺失 / 不可解析 → None（不判过期）。"""
-    if not isinstance(ts, str):
+def _age_hours(ts_ms: int | None, now: datetime) -> float | None:
+    """参照调用的年龄（小时）；时间戳缺失 / 坏掉 → None（不判过期）。"""
+    if not isinstance(ts_ms, int):
         return None
-    try:
-        return (now - datetime.fromisoformat(ts)).total_seconds() / 3600
-    except ValueError:
-        return None
+    return (now.timestamp() * 1000 - ts_ms) / 3_600_000
 
 
 def _decide(
-    ref: dict[str, Any] | None,
+    ref: CacheCall | None,
     fork: CacheFork | None,
     *,
     cached: int,
     has_history: bool,
     now: datetime,
 ) -> tuple[str, int | None]:
-    """verdict + 理论命中（contract §4 的判定表与优先级）。
+    """verdict + 理论命中（判定表与优先级）。
 
     优先级：`cold_expired` > `prefix_broken` > 其余。有 fork（前缀没能延续）一律
     `prefix_broken` 且 `expected = null`。
     """
     if ref is not None:
-        prompt = ref.get("prompt")
-        prompt = prompt if isinstance(prompt, int) else 0
-        age = _age_hours(ref.get("ts"), now)
+        prompt = ref.prompt
+        age = _age_hours(ref.ts_ms, now)
         if age is not None and age > CACHE_TTL_HOURS:
             return VERDICT_COLD_EXPIRED, None
         if fork is not None:
@@ -312,143 +231,67 @@ def _decide(
     return VERDICT_COLD, None
 
 
-# ── 记一次调用 ────────────────────────────────────────────────────────────
+# ── 端点投影────────────────────────────────────────────────
 
 
-def record_call(
-    data: dict[str, Any],
-    segments: Sequence[CachePart],
-    *,
-    purpose: str,
-    model: str,
-    provider: str,
-    prompt: int,
-    cached: int,
-    now: datetime | None = None,
-) -> tuple[dict[str, Any], CacheObservation]:
-    """把一次调用记进账本，返回（新账本, 归因）。纯函数——I/O 归 `CacheLedger`。"""
-    stamp = now or datetime.now()
-    ts = stamp.isoformat(timespec="milliseconds")
-    wire = [segment.to_wire() for segment in segments]
-    fp = fingerprint(segments)
-
-    calls = list(data.get("calls") or [])
-    fingerprints = dict(data.get("fingerprints") or {})
-
-    ref, ref_segments = _find_ref(calls, fingerprints, wire)
-    latest = _segments_of(fingerprints, calls[-1].get("fp")) if calls else []
-    fork = _compute_fork(latest, wire, ref, ref_segments)
-    verdict, expected = _decide(
-        ref, fork, cached=cached, has_history=bool(calls), now=stamp
-    )
-
-    calls.append(
-        {
-            "ts": ts,
-            "fp": fp,
-            "purpose": purpose,
-            "model": model,
-            "provider": provider,
-            "prompt": prompt,
-            "cached": cached,
-            "expected": expected,
-            "ref_fp": ref.get("fp") if ref is not None else None,
-            "verdict": verdict,
-            "fork": fork.to_wire() if fork is not None else None,
-        }
-    )
-    trimmed = calls[-MAX_CALLS:]
-    fingerprints[fp] = {"segments": wire}
-    # GC：只留被存活的 calls 引用到的指纹（否则 200 条的环会长出孤儿段落表）
-    alive = {call.get("fp") for call in trimmed}
-    fingerprints = {key: value for key, value in fingerprints.items() if key in alive}
-
-    return (
-        _fit_budget({**data, "calls": trimmed, "fingerprints": fingerprints}),
-        CacheObservation(
-            expected=expected,
-            verdict=verdict,
-            diverged=fork.label if fork is not None else "",
-        ),
-    )
-
-
-def _ledger_bytes(data: dict[str, Any]) -> int:
-    return len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-
-
-def _fit_budget(data: dict[str, Any]) -> dict[str, Any]:
-    """把账本压进 `MAX_LEDGER_BYTES`：最旧调用先淘汰，至少留最近一条。
-
-    批量淘汰（一次丢最旧的 1/8）而不是逐条：大账本上逐条全量序列化是 O(n²)。裁剪后同步
-    回收失去引用的指纹——孤儿段落表比 calls 本身更占地方。
-    """
-    calls = list(data.get("calls") or [])
-    fingerprints = dict(data.get("fingerprints") or {})
-    if _ledger_bytes(data) <= MAX_LEDGER_BYTES:
-        return data
-    while len(calls) > 1:
-        calls = calls[max(1, len(calls) // 8) :]
-        alive = {call.get("fp") for call in calls}
-        fingerprints = {
-            key: value for key, value in fingerprints.items() if key in alive
-        }
-        fitted = {**data, "calls": calls, "fingerprints": fingerprints}
-        if _ledger_bytes(fitted) <= MAX_LEDGER_BYTES:
-            return fitted
-    return {**data, "calls": calls, "fingerprints": fingerprints}
-
-
-# ── 端点投影（contract §6）────────────────────────────────────────────────
+def empty_report(session_id: str) -> dict[str, Any]:
+    """空账本的投影（无数据 / 会话不存在）：计数 0 + 三档 rate 全 null。"""
+    return build_report(session_id, [], limit=0, segment_at=lambda _fp, _i: None)
 
 
 def build_report(
-    data: dict[str, Any], *, session_id: str, limit: int
+    session_id: str,
+    calls: Sequence[CacheCall],
+    *,
+    limit: int,
+    segment_at: SegmentLookup,
 ) -> dict[str, Any]:
-    """账本 → `GET /api/session/cache` 的响应体（新→旧，forks 只含有分叉的调用）。"""
-    calls = list(data.get("calls") or [])
-    fingerprints = data.get("fingerprints") or {}
-    recent = list(reversed(calls))
+    """账本 → `GET /api/session/cache` 的响应体。
 
+    `calls` 是**整本账本**（新→旧，调用方保证已按 id 倒序），只有前 `limit` 条进响应体；
+    汇总覆盖整本账本，分叉归因还要看窗口外的邻座与参照，因此不接受「只给前 limit 条」。
+    """
     calls_out = [
         {
-            "ts": call.get("ts") or "",
-            "model": call.get("model") or "",
-            "purpose": call.get("purpose") or "",
-            "prompt": call.get("prompt") if isinstance(call.get("prompt"), int) else 0,
-            "cached": call.get("cached") if isinstance(call.get("cached"), int) else 0,
-            "expected": call.get("expected"),
-            "verdict": call.get("verdict") or "",
-            "fp": call.get("fp") or "",
+            "ts": call.ts,
+            "model": call.model,
+            "purpose": call.purpose,
+            "prompt": call.prompt,
+            "cached": call.cached,
+            "expected": call.expected,
+            "verdict": call.verdict,
+            "fp": call.fp,
         }
-        for call in recent[:limit]
+        for call in calls[:limit]
     ]
 
     forks_out: list[dict[str, Any]] = []
-    for position, call in enumerate(recent):
+    for position, call in enumerate(calls):
         if len(forks_out) >= limit:
             break
-        fork = CacheFork.from_wire(call.get("fork"))
+        fork = call.fork
         if fork is None:
             continue
-        new_segments = _segments_of(fingerprints, call.get("fp"))
-        sha_after = _segment_sha(new_segments, fork.index)
+        new_segment = segment_at(call.fp, fork.index)
+        sha_after = new_segment.sha if new_segment is not None else None
         # 分叉的「另一侧」= 「改前」那一版：记录时分叉相对的那条调用（见 `_baseline`）。
         baseline, ref_ts = _baseline(
-            recent,
+            calls,
             position,
             call,
-            fingerprints,
             index=fork.index,
             sha_after=sha_after,
+            segment_at=segment_at,
         )
-        source = _segment_source(new_segments, fork.index) or _segment_source(
-            baseline, fork.index
+        source = (
+            new_segment.src
+            if new_segment is not None and new_segment.src is not None
+            else (baseline.src if baseline is not None else None)
         )
-        blame, avoidable = _blame(call, fork, recent, position)
+        blame, avoidable = _blame(call, fork, calls, position)
         forks_out.append(
             {
-                "ts": call.get("ts") or "",
+                "ts": call.ts,
                 "index": fork.index,
                 "label": fork.label,
                 "kind": fork.kind,
@@ -456,13 +299,13 @@ def build_report(
                 "avoidable": avoidable,
                 "tokens_lost": fork.tokens_lost,
                 "segments_affected": fork.segments_affected,
-                "verdict": call.get("verdict") or "",
+                "verdict": call.verdict,
                 "detail": {
-                    "path": source.get("path") if source else None,
-                    "mtime": source.get("mtime") if source else None,
-                    "size": source.get("size") if source else None,
+                    "path": source.path if source is not None else None,
+                    "mtime": source.mtime if source is not None else None,
+                    "size": source.size if source is not None else None,
                     "ref_ts": ref_ts,
-                    "sha_before": _segment_sha(baseline, fork.index),
+                    "sha_before": baseline.sha if baseline is not None else None,
                     "sha_after": sha_after,
                 },
             }
@@ -476,92 +319,63 @@ def build_report(
     }
 
 
-def _segment_source(
-    segments: Sequence[dict[str, Any]], index: int
-) -> dict[str, Any] | None:
-    if index >= len(segments):
-        return None
-    source = segments[index].get("src")
-    return source if isinstance(source, dict) else None
-
-
-def _segment_sha(segments: Sequence[dict[str, Any]], index: int) -> str | None:
-    if index >= len(segments):
-        return None
-    sha = segments[index].get("sha")
-    return sha if isinstance(sha, str) else None
-
-
 def _baseline(
-    recent: Sequence[dict[str, Any]],
+    calls: Sequence[CacheCall],
     position: int,
-    call: dict[str, Any],
-    fingerprints: dict[str, Any],
+    call: CacheCall,
     *,
     index: int,
     sha_after: str | None,
-) -> tuple[list[dict[str, Any]], str | None]:
-    """分叉的对照侧（段列表 + 它的时刻）——「改前」那一版是谁、什么时候。
+    segment_at: SegmentLookup,
+) -> tuple[CachePart | None, str | None]:
+    """分叉的对照侧（该位点的那一段 + 它的时刻）——「改前」那一版是谁、什么时候。
 
-    `_find_ref` 只接受本次段列表的**前缀**（或完全相同）作参照，因此参照在自身长度范围内
-    与本次逐段同值：`index < len(ref)` 时它的 sha 恒等于 `sha_after`（拿它当 `sha_before`
-    只会重复 `sha_after`，解释不了「这里变了」），`index >= len(ref)` 时它在该位点上没有段。
-    能解释这一行的是记录时分叉真正相对的那条调用（`recent[position + 1]`）；参照只在邻座
+    参照调用接受的是本次段列表的**前缀**（或完全相同），因此它在自身长度范围内与本次
+    逐段同值：`index < len(ref)` 时它的 sha 恒等于 `sha_after`（拿它当 `sha_before` 只会
+    重复 `sha_after`，解释不了「这里变了」），`index >= len(ref)` 时它在该位点上没有段。
+    能解释这一行的是记录时分叉真正相对的那条调用（`calls[position + 1]`）；参照只在邻座
     已经滚出账本、或邻座在该位点没有段时兜底。
 
-    时刻与被选中的**那一侧**同源：`sha_before` 与 `ref_ts` 永远指向同一条调用，否则 `--why`
-    的 sha 行与 ref 行会各说各话。两侧都定位不到（对照侧已经滚出环形账本）时给空段列表 +
-    `None`——不拿邻居的 ts 冒充。
+    时刻与被选中的**那一侧**同源：`sha_before` 与 `ref_ts` 永远指向同一条调用，否则
+    `--why` 的 sha 行与 ref 行会各说各话。两侧都定位不到（对照侧已经滚出环形账本）时给
+    `(None, None)`——不拿邻居的 ts 冒充。
     """
-    neighbour = position + 1 if position + 1 < len(recent) else None
-    latest = (
-        _segments_of(fingerprints, recent[neighbour].get("fp"))
-        if neighbour is not None
-        else []
-    )
-    latest_ts = _ts_of(recent[neighbour]) if neighbour is not None else None
-    ref_fp = call.get("ref_fp")
-    reference = _segments_of(fingerprints, ref_fp)
+    neighbour = calls[position + 1] if position + 1 < len(calls) else None
+    latest = segment_at(neighbour.fp, index) if neighbour is not None else None
+    latest_ts = neighbour.ts if neighbour is not None else None
+    reference = segment_at(call.ref_fp, index)
 
     def reference_ts() -> str | None:
         """参照自己的时刻；`ref_fp` 那条调用已经滚出账本 → `None`。"""
-        if not isinstance(ref_fp, str):
+        if not call.ref_fp:
             return None
-        for older in recent[position + 1 :]:
-            if older.get("fp") == ref_fp:
-                return _ts_of(older)
+        for older in calls[position + 1 :]:
+            if older.fp == call.ref_fp:
+                return older.ts
         return None
 
-    if _explains(latest, index, sha_after):
+    if _explains(latest, sha_after):
         return latest, latest_ts
-    if _explains(reference, index, sha_after):
+    if _explains(reference, sha_after):
         return reference, reference_ts()
-    if latest:
+    if neighbour is not None:
         return latest, latest_ts
     return reference, reference_ts()
 
 
-def _explains(
-    segments: Sequence[dict[str, Any]], index: int, sha_after: str | None
-) -> bool:
+def _explains(segment: CachePart | None, sha_after: str | None) -> bool:
     """这一侧在该位点上有段、且与本次不同（能当「改前」的证据）。"""
-    sha = _segment_sha(segments, index)
-    return sha is not None and sha != sha_after
-
-
-def _ts_of(call: dict[str, Any]) -> str | None:
-    ts = call.get("ts")
-    return ts if isinstance(ts, str) else None
+    return segment is not None and segment.sha != sha_after
 
 
 def _blame(
-    call: dict[str, Any],
+    call: CacheCall,
     fork: CacheFork,
-    recent: Sequence[dict[str, Any]],
+    calls: Sequence[CacheCall],
     position: int,
 ) -> tuple[str | None, bool | None]:
-    """派生归因（contract §4 的 blame 表；不落盘，读取侧现算）。"""
-    verdict = call.get("verdict") or ""
+    """派生归因（blame 表；不落盘，读取侧现算）。"""
+    verdict = call.verdict
     if verdict == VERDICT_PROVIDER_UNDERDELIVERED:
         return "provider", None
     if verdict in (VERDICT_COLD, VERDICT_COLD_EXPIRED):
@@ -575,46 +389,45 @@ def _blame(
     if label.startswith((SYSTEM_BASE, SYSTEM_APPEND, SYSTEM_WIRE)):
         return "composition", False
     if label.startswith(HISTORY_PREFIX):
-        if _compact_between(recent, position, call.get("ref_fp")):
+        if _compact_between(calls, position, call.ref_fp):
             return "compact", False
         return "composition", False
     return "composition", False
 
 
 def _compact_between(
-    recent: Sequence[dict[str, Any]], position: int, ref_fp: Any
+    calls: Sequence[CacheCall], position: int, ref_fp: str | None
 ) -> bool:
-    """参照调用与本次调用之间是否有过压缩调用（contract §4 的 compact 归因判据）。"""
-    if not isinstance(ref_fp, str):
+    """参照调用与本次调用之间是否有过压缩调用（compact 归因判据）。"""
+    if not ref_fp:
         return False
     ref_position = None
-    for index in range(position + 1, len(recent)):
-        if recent[index].get("fp") == ref_fp:
+    for index in range(position + 1, len(calls)):
+        if calls[index].fp == ref_fp:
             ref_position = index
             break
     if ref_position is None:
         return False
     return any(
-        recent[index].get("purpose") == PURPOSE_COMPACT
+        calls[index].purpose == PURPOSE_COMPACT
         for index in range(position + 1, ref_position)
     )
 
 
-def _summary(calls: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """汇总（contract §6）：三个 rate 的分母都是 Σ prompt；分母为 0 时全 None。"""
-    prompt_total = sum(_int(call.get("prompt")) for call in calls)
-    cached_total = sum(_int(call.get("cached")) for call in calls)
-    expected_total = sum(
-        _int(call.get("expected"))
-        for call in calls
-        if isinstance(call.get("expected"), int)
-    )
+def _int(value: int | None) -> int:
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _summary(calls: Sequence[CacheCall]) -> dict[str, Any]:
+    """汇总：三个 rate 的分母都是 Σ prompt；分母为 0 时全 None。"""
+    prompt_total = sum(_int(call.prompt) for call in calls)
+    cached_total = sum(_int(call.cached) for call in calls)
+    expected_total = sum(_int(call.expected) for call in calls)
     debt_total = sum(
-        max(0, call["expected"] - _int(call.get("cached")))
+        max(0, call.expected - _int(call.cached))
         for call in calls
-        if isinstance(call.get("expected"), int)
-        and call.get("verdict")
-        in (VERDICT_PROVIDER_UNDERDELIVERED, VERDICT_BLOCK_GRANULARITY)
+        if call.expected is not None
+        and call.verdict in (VERDICT_PROVIDER_UNDERDELIVERED, VERDICT_BLOCK_GRANULARITY)
     )
     if prompt_total <= 0:
         return {
@@ -637,54 +450,23 @@ def _summary(calls: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _int(value: Any) -> int:
-    return value if isinstance(value, int) and value > 0 else 0
-
-
-def build_cache_report(
-    session_id: str, data: Any, *, limit: int = 20
-) -> dict[str, Any]:
-    """端点入口：盘上的原始账本 → 响应体（`data=None` / 损坏 / 会话不存在按空账本投影）。
-
-    与 `build_report` 的分工：本函数负责「原始数据 → 账本」的容错规整，调用方
-    （路由）因此不需要知道账本版本与损坏语义——空账本照样是 200 的形状。
-    """
-    return build_report(
-        normalize_ledger(data, session_id), session_id=session_id, limit=limit
-    )
-
-
 # ── 读写口 ────────────────────────────────────────────────────────────────
 
 
-_RECORD_LOCK = threading.Lock()
-"""记账的 read-modify-write 临界区。
-
-记账跑在线程池里（`ContextManager.observe_cache_call`），同一会话的两路调用（主调用与
-后台增量压缩）可能真并行——没有这把锁就会双双读到同一份账本再互相覆盖（静默丢记录）。
-进程级单锁即可：记账是低频动作（每次模型调用一次），跨会话争用可忽略。
-"""
-
-
 class CacheLedger:
-    """一个会话的账本读写口。
+    """一个会话的账本读写口（进程级 `wing.db`；`session_id` 是存储里的真名）。
 
-    每次记录都重新读盘（不缓存内存态）：`switch_template` 会重建 `ContextManager`，内存态
-    会出现两个残影；一次调用读写几十 KB JSON 的代价远小于一次模型调用。
+    无内存态：每次记录都现读库。`switch_template` 会重建 `ContextManager`，缓存内存态
+    会留下两个残影；而一次记录只碰几十行索引与一份段列表，代价远小于一次模型调用。
     """
 
-    def __init__(self, aux: Any, session_id: str) -> None:
-        self._aux = aux
+    def __init__(self, session_id: str, database: Database | None = None) -> None:
         self._session_id = session_id
+        self._store = CacheStore(session_id, database)
 
-    def load(self) -> dict[str, Any]:
-        """当前账本（读失败 = 空账本，绝不抛）。"""
-        try:
-            raw = self._aux.read_aux(CACHE_LEDGER_KEY)
-        except Exception as e:
-            log.warning(f"cache ledger unreadable (session={self._session_id}): {e}")
-            return empty_ledger(self._session_id)
-        return normalize_ledger(raw, self._session_id)
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     def record(
         self,
@@ -695,27 +477,136 @@ class CacheLedger:
         provider: str,
         prompt: int,
         cached: int,
+        now: datetime | None = None,
     ) -> CacheObservation | None:
         """记一次调用（best-effort：任何失败只 WARN，返回 None）。"""
         if not segments:
             return None
         try:
-            with _RECORD_LOCK:
-                data, observation = record_call(
-                    self.load(),
+            with self._store.transaction() as txn:
+                if not txn.live:
+                    return None
+                observation = self._record(
                     segments,
                     purpose=purpose,
                     model=model,
                     provider=provider,
                     prompt=prompt,
                     cached=cached,
+                    now=now,
                 )
-                self._aux.write_aux(CACHE_LEDGER_KEY, data)
+            if observation is None:
+                return None
+            if not txn.committed:
+                # 语句都返回成功、事务却回滚了（后面的语句失败 / COMMIT 失败）：
+                # 账本里没有这条记录，就别回一个「有」的归因。
+                log.warning(
+                    f"cache ledger record rolled back (session={self._session_id})"
+                )
+                return None
             return observation
         except Exception as e:
             log.warning(f"cache ledger record failed (session={self._session_id}): {e}")
             return None
 
-    def report(self, limit: int = 20) -> dict[str, Any]:
-        """端点投影（永不抛）。"""
-        return build_report(self.load(), session_id=self._session_id, limit=limit)
+    def report(
+        self, limit: int = 20, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """端点投影（永不抛）。`session_id` 只用于回显调用方请求的 id。"""
+        try:
+            calls = self._store.recent(MAX_CALLS)
+        except Exception as e:
+            log.warning(f"cache ledger unreadable (session={self._session_id}): {e}")
+            calls = []
+        return build_report(
+            session_id or self._session_id,
+            calls,
+            limit=limit,
+            segment_at=self._store.segment_at,
+        )
+
+    # ── 一次记录的全过程（已在事务里）───────────────
+
+    def _record(
+        self,
+        segments: Sequence[CachePart],
+        *,
+        purpose: str,
+        model: str,
+        provider: str,
+        prompt: int,
+        cached: int,
+        now: datetime | None,
+    ) -> CacheObservation | None:
+        stamp = now or datetime.now()
+        wire = list(segments)
+        fp = fingerprint(wire)
+        prefixes = _PrefixFingerprints(wire, fp)
+
+        calls = self._store.recent(MAX_CALLS)
+        latest = calls[0] if calls else None
+        ref = _find_ref(calls, prefixes)
+        fork = self._fork(wire, prefixes, ref, latest)
+        verdict, expected = _decide(
+            ref, fork, cached=cached, has_history=latest is not None, now=stamp
+        )
+        if fork is not None and ref is not None:
+            total, before = self._store.char_sums(ref.fp, fork.index)
+            fork = replace(fork, tokens_lost=_tokens_lost(ref.prompt, total, before))
+
+        # 三笔写要么一起落库、要么一起回滚（同一个事务）：没落库就别回一个「账本里
+        # 有」的归因——直播字段与账本必须同源。
+        landed = (
+            self._store.insert_call(
+                CacheCall(
+                    ts=stamp.isoformat(timespec="milliseconds"),
+                    fp=fp,
+                    purpose=purpose,
+                    model=model,
+                    provider=provider,
+                    prompt=prompt,
+                    cached=cached,
+                    verdict=verdict,
+                    segment_count=len(wire),
+                    ts_ms=int(stamp.timestamp() * 1000),
+                    expected=expected,
+                    ref_fp=ref.fp if ref is not None else None,
+                    fork=fork,
+                )
+            )
+            and self._store.save_segments(fp, wire)
+            and self._store.trim(MAX_CALLS)
+        )
+        if not landed:
+            log.warning(
+                f"cache ledger record lost (session={self._session_id}, fp={fp})"
+            )
+            return None
+        return CacheObservation(
+            expected=expected,
+            verdict=verdict,
+            diverged=fork.label if fork is not None else "",
+        )
+
+    def _fork(
+        self,
+        segments: Sequence[CachePart],
+        prefixes: _PrefixFingerprints,
+        ref: CacheCall | None,
+        latest: CacheCall | None,
+    ) -> CacheFork | None:
+        """与最近一条调用的分叉事实（前缀延续时一次段列表都不读）。
+
+        「最新一条调用的段列表就是本次的前缀」⟺ 它的指纹等于本次前 n 段的指纹
+        （n = 它的段数）——一次哈希（惰性、多数情况早已算过）就能定案，不必把它的
+        段落表读出来逐段比对。前缀破碎才是慢路径（读那一份段列表）。
+        """
+        if latest is None:
+            return None
+        ref_length = ref.segment_count if ref is not None else None
+        if latest.fp == prefixes.at(latest.segment_count) and (
+            ref_length is None or latest.segment_count >= ref_length
+        ):
+            # 前缀延续（或是同一条请求的重放）：没有分叉
+            return None
+        return _compute_fork(self._store.segments(latest.fp), segments, ref_length)

@@ -72,12 +72,12 @@
 | `request_context.py` | L2 | 每请求上下文（request_id / session_id / client_id，单 ContextVar） |
 | `tool_registry.py` | L2 | 工具注册表：命名空间感知注册 + ToolRef 解析 |
 | `config/`（spec / models / problems / catalog / groups / emit / document / boot / loader / user_agent） | L3 | 声明层（`S(...)` / `SettingMeta` / `ApplyScope`：字段元信息唯一来源）+ 设置目录树（catalog）+ 业务分组表（groups：界面分类的唯一声明处）+ 规范形 YAML emitter（模板与保存共用）+ 稀疏文档 / 启动读取（`boot_config()` 永不抛）+ WING_HOME 解析与配置单例 |
-| `context/` | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 |
+| `context/`（manager / compaction / resources / cache_ledger / cache_store） | L3 | 上下文窗口跟踪 + 压缩（LLM 摘要）+ rewind + skills/rules 文件加载 + 缓存账本（口径在 `cache_ledger`，SQL 在 `cache_store`；数据住 `wing.db`） |
 | `session/`（session / manager / reaper / template / model_binding / override） | L3 | 会话生命周期：Session 状态、多会话与 fork/resume、空闲逐出、agent 模板、生效模型绑定（resume 链的只读投影）、创建期参数覆盖 |
 | `agent/` | L3 | WingAgent 运行时：ReAct 主循环、工具并发执行、事件发射、打断收口阶梯、未提交投影 |
 | `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、无状态 provider 与全进程共享池（`pool.py`） |
-| `db/`（database / migrations） | L3 | 进程级 SQLite 门面：`$WING_HOME/core/wing.db`、WAL + `user_version` 迁移、**打开失败即降级**（读写作 no-op）；与会话持久化（`store/`）正交 |
+| `db/`（database / migrations） | L3 | 进程级 SQLite 门面：`$WING_HOME/core/wing.db`、WAL + `user_version` 迁移、**打开失败即降级**（读写作 no-op）、跨线程单连接（一把可重入锁 + `transaction()`）；与会话持久化（`store/`）正交 |
 | `audit/`（recorder；原 `metrics_registry/`） | L3 | 审计：EventBus 订阅 → `wing.db` 的三张 `audit_*` 表各追加一行（LLM 调用 / 工具调用 / 压缩；`install()` 由组合根显式调用） |
 | `wake/`（spec / model / store / envelope / scheduler / ports / service） | L3 | 会话唤醒：`wake_trigger` 表的触发器（事件驱动 + 定时驱动）+ 内置信封投递；投递能力由组合根经窄 `WakePorts` 注入（不 import `runtime` / `gateway`），语义见 [wake.md](wake.md) |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |

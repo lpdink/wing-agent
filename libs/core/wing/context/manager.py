@@ -369,13 +369,14 @@ class ContextManager:
         返回本次调用的归因（理论命中 / verdict / 分叉点），供 `llm_call_metrics`
         直播字段直接透传——账本记录与直播字段因此永远同源。
 
-        落盘走线程池：账本是「整份读 → 改 → 整份原子写」，最坏形态（200 段 ×
-        200 条调用）实测数十毫秒，同步执行会把整个网关（所有会话的流式帧）挡住。
+        走线程池：记账是「查参照 → 判定 → 插一行 + 存一份段列表 → 环形裁剪」的一小串
+        SQL，都在同一个写事务里；但不该让任何一次 SQLite 等锁（`busy_timeout` 是秒级）
+        挂在事件循环上——同一条流上还有别的会话的帧要发。
         """
         if probe is None or not probe.segments:
             return None
         return await asyncio.to_thread(
-            CacheLedger(self._messages, self._session_id).record,
+            CacheLedger(self._session_id).record,
             probe.segments,
             purpose=purpose,
             model=model,
@@ -392,7 +393,7 @@ class ContextManager:
         model: str,
         provider: str,
     ) -> None:
-        """压缩调用同样进账本（`purpose="compact"`，contract §8.8）。
+        """压缩调用同样进账本（`purpose="compact"`，缓存账本口径）。
 
         无 usage 的压缩响应（服务端没回带内 usage）不记——账本不发明 token 数。
         """

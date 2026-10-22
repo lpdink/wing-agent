@@ -3,9 +3,8 @@
 走进程级 ``wing.db``（``get_database()``）：DB 降级时 ``Database`` 的读写作 no-op，这里的每个方法
 因此天然是「空操作或空结果」——**本层不重复判断 ready**，降级语义只在一个地方（``wing.db``）。
 
-id 由 SQLite 分配（``INTEGER PRIMARY KEY`` = rowid）；取回用同一条连接上的
-``last_insert_rowid()``——连接单条、只在事件循环线程使用（``Database`` 的契约），插入与取回之间
-不可能被别的写插入。不改 ``Database`` 的公共面。
+id 由 SQLite 分配（``INTEGER PRIMARY KEY`` = rowid）；取回走 ``Database.insert``——插入与
+读回 rowid 在同一把锁内完成，多线程共用一条连接时也不会抄到别人的 id。
 """
 
 from __future__ import annotations
@@ -75,7 +74,7 @@ class WakeStore:
     ) -> WakeTrigger | None:
         """插入一条 ``active`` 触发器并读回；DB 不可用返回 ``None``。"""
         db = self.database()
-        ok = db.execute(
+        rowid = db.insert(
             _INSERT,
             (
                 kind,
@@ -94,12 +93,9 @@ class WakeStore:
                 created_by,
             ),
         )
-        if not ok:
+        if rowid is None:
             return None
-        rows = db.query("SELECT last_insert_rowid() AS id")
-        if not rows:
-            return None
-        return self.get(int(rows[0]["id"]))
+        return self.get(rowid)
 
     def find_active_session(
         self,

@@ -494,7 +494,7 @@ class ReActLoop:
                     last_usage = chunk.usage
                     # 缓存账本：第一个非零 usage 帧记账一次（标准协议一次调用只
                     # 有一条），归因直接进本次 metrics 的三个直播字段——账本与
-                    # 直播因此同源同刻（contract §5）。
+                    # 直播因此同源同刻。
                     observation = None
                     probe = options.cache_probe if options is not None else None
                     if probe is not None and not observed:
