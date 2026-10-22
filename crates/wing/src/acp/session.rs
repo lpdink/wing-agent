@@ -1820,7 +1820,7 @@ mod tests {
         assert!(entry.is_armed(), "挂载期间 armed：同会话 prompt 排队等挂载");
         assert!(
             !entry.has_turn_in_flight(),
-            "挂载不是在途轮次（N3：close/cancel 不该据此发 interrupt）"
+            "挂载不是在途轮次（close/cancel 不该据此发 interrupt）"
         );
         assert!(entry.deliver(event("s1")), "armed：事件投递到挂载句柄");
 

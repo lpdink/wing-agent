@@ -48,6 +48,7 @@ libs/core/wing/
 ├── session/                         会话生命周期包（公共 API 经 __init__ re-export）
 │   ├── session.py                   Session — messages + state + metadata（经 SessionStore）
 │   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
+│   ├── fork.py                      fork 的数据搬迁：记录切片 / 拓扑重映射 / 媒体复制（纯函数，无 self）
 │   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
 │   ├── archiver.py                  SessionArchiver — 过期会话自动归档（读配置 + 一次扫描）
 │   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
@@ -93,6 +94,7 @@ libs/core/wing/
 │   ├── tool_executor.py             工具并发分发（asyncio.gather）+ 中断拆卸
 │   ├── event_sink.py                AgentEventSink — 唯一事件发射出口 + persist 分流
 │   ├── inbox.py                     消息队列（drain-and-merge）+ feedback waiters
+│   ├── diagnostics.py               worker 协程栈内省（`_report_undead_worker` 的取证工具，纯 stdlib）
 │   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
 ├── provider/                        模型调用层（协议隔离）
 │   ├── base.py                      ModelProvider ABC + StreamAccumulator + parse_tool_args（容错，永不抛）
@@ -104,7 +106,10 @@ libs/core/wing/
 │   ├── anthropic/                   Anthropic 协议子包（provider / serialize / stream）
 │   └── __init__.py                  ModelProvider + create_provider（稳定入口）
 ├── store/                           SessionStore — 会话持久状态唯一所有者（含归档区：archive / unarchive / list_archived）
-│   ├── base.py                      SessionStore / MessageLog ABC + SessionMetadata
+│   ├── base.py                      SessionStore / MessageLog 两个 ABC（只留抽象，无实现）
+│   ├── models.py                    落盘模型（FileRef / SessionUsage / SessionMetadata / TagMeta / SessionSummary / ArchivedSession）
+│   ├── names.py                     路径组件闸门（媒体 id / 文件名 / 内容寻址校验）
+│   ├── records.py                   raw record 规范形（canonical_record）+ 标题回退
 │   ├── file.py                      File 后端（history.jsonl 混合日志，零迁移）
 │   └── memory.py                    Memory 后端（进程内，不落盘）
 ├── event/                           事件类型 + 注册表 + 序列化边界
@@ -113,7 +118,7 @@ libs/core/wing/
 │   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
 ├── tools/                           内置工具（__init__ 显式导入 = 注册）
 │   ├── builtin/                     一工具一文件：bash · read/write/edit · glob/grep · read_image · ask_user · todo
-│   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety · write_target（就地写 vs 原子替换的唯一判定）
+│   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety · io_errors（文件类工具的错误包装）· feedback（等人回答的超时） · write_target（就地写 vs 原子替换的唯一判定）
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级；与 store/ 的会话持久化正交）
 │   ├── database.py                  Database（WAL / user_version 迁移 / 打开失败即降级，读写作 no-op）
@@ -148,7 +153,7 @@ libs/core/wing/
     ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · wake · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(22) · system(6) · settings(4) · wake(3) · tools(1) · health(1) · ws（事件传输 + 上行帧）
+    └── routes/                      session(22) · system(6) · settings(4) · wake(3) · tools(1) · health(1) · ws（事件传输 + 上行帧）· _common（取 server / 客户端 id / 会话存在性 / 上传预检的机械样板）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + ACP + 编排 CLI）
@@ -182,7 +187,9 @@ crates/wing/src/
 │   ├── watch.rs                     `wing watch`（会话型唤醒：订阅收口 / 提问 → 叫醒我的会话）
 │   ├── wake.rs                      `wing wake`（定时唤醒：in/at/every/daily + 时长与 spec 纯函数）
 │   ├── query.rs                     `wing models` / `tools` / `agents`（查询端点，表格 / JSON）
-│   ├── config.rs                    `wing config` 子命令族（doctor/list/get/set/unset/add/remove/move/path）
+│   ├── settings_api.rs              Setting API 的可注入门面（`SettingsApi`，config / setup 共用）
+│   ├── wake_common.rs               `watch` / `wake` 共用的三形态分发（create / list / cancel）
+│   ├── config/                      `wing config` 子命令族（mod / doctor / read / write / render / error / catalog / path / testkit）
 │   └── setup.rs                     首次运行向导（无 session 的 setup 循环 + 三前端共用的配置预检）
 ├── acp/                             ACP 前端（wing acp，stdio 上的 Agent Client Protocol 服务端）
 │   ├── mod.rs                       入口（ensure gateway → WS 连接 → HTTP client → 服务循环）+ CLI 参数
@@ -213,6 +220,7 @@ crates/wing/src/
 │   ├── panels/settings/             设置面板状态机（左栏分组锚点 · 右栏树扁平化 · 双栏焦点 · 内联编辑器 · 列表增删移 · 搜索 · 问题清单 · 键位与 Esc 阶梯）
 │   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端仅在自动归档豁免处感知 `pin`）
 │   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
+│   ├── text_edit.rs                 单行文本编辑原语（char↔byte 换算 + `EditOp`；设置/ask 面板与 composer 共用）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
 │   ├── session_tree.rs              会话血缘森林：扁平会话行 → 树序 + 连接前缀（`wing ps --tree` 与 TUI 面板共用）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
@@ -252,14 +260,15 @@ crates/wing/src/
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）
-│   └── line_utils.rs / renderable.rs
+│   ├── test_support.rs              测试共用的行/链接断言助手（`#[cfg(test)]` 之外的轻量工具）
+│   └── renderable.rs                CellContext（每帧渲染上下文：调色板 / thinking 模式 / 布局 / 图片选项）
 ├── tui/                             终端生命周期与终端通道（唯一出帧口 draw_frame）
 │   ├── mod.rs                       init/restore、crossterm 事件流、draw_frame
 │   ├── clipboard_protocol.rs        OSC 52 读写协议（唯一 id 让被放弃的读不落到下一次）
 │   ├── cursor.rs                    光标形状 / 可见性
 │   └── stdin_proxy.rs               stdin 接驳（在 crossterm 之前安装的读代理；session_guard 的靶子）
 ├── config/                          TUI 配置（mod / colors / rendering / paste=粘贴图片压缩参数 / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
+└── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ base64（RFC 4648 编解码，OSC 与剪贴板协议共用）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
 配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（40 个测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。

@@ -464,7 +464,7 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 | 关注点 | 位置 |
 |---|---|
 | 链接区间（IR → 行内显示列）/ OSC8 纯函数 / `ComposedLines` | `crates/wing/src/render/markdown/links.rs` |
-| 流式渲染同步维护链接（`compose_into` / `lines_and_links`） | `crates/wing/src/render/markdown/stream.rs` |
+| 流式渲染同步维护链接（`compose_into`；`composed()` 是唯一返回形状） | `crates/wing/src/render/markdown/stream.rs` |
 | 行缓存携带链接 + 行号是否精确 | `crates/wing/src/ui/cached_cell.rs` |
 | 本帧链接快照 / OSC8 注入 / 命中查询 | `crates/wing/src/ui/chat_view/link.rs` |
 | 目标解析 / argv / 进程启动 | `crates/wing/src/util/open.rs` + `app/runner.rs`（`AppIntent::OpenLink`） |

@@ -1,4 +1,4 @@
-//! 预算闸测试（`design.md → D8`；闸门在排版前）。
+//! 预算闸测试（闸门在排版前）。
 //!
 //! 引擎对畸形/超大输入必须有界：源码长度、花括号嵌套深度、行/列分隔符数量、结果高度、
 //! 结果面积，任一超限都返回 `None`（上层降级为字面量），绝不 OOM / 栈溢出。
@@ -137,7 +137,7 @@ fn result_height_budget() {
 
 #[test]
 fn row_and_column_separator_budgets_reject_before_laying_out() {
-    // 1000 行的 align：必须在排版之前就被拒（S2：把预算闸前移）
+    // 1000 行的 align：必须在排版之前就被拒（预算闸在排版前）
     let many_rows = format!(
         r"\begin{{align}} {} \end{{align}}",
         vec!["a &= b"; MAX_ROW_SEPARATORS + 100].join(r" \\ ")

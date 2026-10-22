@@ -2649,7 +2649,7 @@ class TestRealRuntimeGates:
         assert resp.status_code == 400, resp.text
         assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
 
-    # ── N1：覆盖 / 文本字段的非 UTF-8 输入（400 而非 500，零残留、无幽灵） ──
+    # ── 覆盖 / 文本字段的非 UTF-8 输入（400 而非 500，零残留、无幽灵） ──
 
     def test_surrogate_in_override_is_400_not_500(self, real_client):
         """agent 覆盖里的孤立代理字符 → 400；**零残留**（连目录都不建）。"""
@@ -2957,7 +2957,7 @@ class TestRealRuntimeGates:
 class TestSendRouteErrorMapping:
     """`send` 路由的错误映射口径：**只有输入非法**才回 400。
 
-    终轮复审 N1：把 `runtime.post` 抛出的任何 `ValueError` 都映射成 400 太宽——
+    把 `runtime.post` 抛出的任何 `ValueError` 都映射成 400 太宽——
     链上将来出现的内部 `ValueError`（队列关闭、prompt 命令语义错误）会被报成
     "客户端的错"。现在只认 `InvalidInputError`（文本闸门专用类型），其它
     `ValueError` 走 500（带着栈进日志）。

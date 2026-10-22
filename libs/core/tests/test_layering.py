@@ -1,6 +1,7 @@
 """分层守门 —— AST 解析 ``libs/core/wing/**`` 的 import 关系，锁定目标分层。
 
-规则、分层图与迁移映射见 ``docs/dev/backend-layout.md``。本文件是"可执行的那一份"。
+规则、分层图与迁移映射见 ``docs/dev/backend-layout.md``。本文件是"可执行的那一份"：
+测试名里的 ``R<n>`` 对应文档中的规则 ``R<n>``。
 
 设计要点
 --------
@@ -778,13 +779,13 @@ def test_import_normalization_shapes() -> None:
 def test_bypass_shapes_are_detected() -> None:
     """绕过形态必须命中对应规则（合成片段级回归）。"""
     cases: list[tuple[str, str, set[str]]] = [
-        # S1：包属性形态（修复前：R1/R2/R4 完全漏判、R5 错报成 → wing）
+        # 包属性形态：`from wing import store` 必须按子模块命中对应规则，而不是包根
         ("from wing import store\n", "wing/tools/probe.py", {"R2"}),
         ("from wing import store as s\n", "wing/tools/probe.py", {"R2"}),
         ("from wing import gateway\n", "wing/agent/probe.py", {"R1"}),
         ("from wing import session\n", "wing/store/probe.py", {"R4"}),
         ("from wing import tools\n", "wing/common/probe.py", {"R5"}),
-        # S2：WingAgent 等包根越层符号必须命中；窄接口符号不命中
+        # 包根越层符号（WingAgent 等）必须命中；窄接口符号不命中
         ("from wing.agent import WingAgent\n", "wing/tools/probe.py", {"R2"}),
         ("from wing.agent import Inbound\n", "wing/tools/probe.py", {"R2"}),
         ("from wing.agent import *\n", "wing/tools/probe.py", {"R2"}),

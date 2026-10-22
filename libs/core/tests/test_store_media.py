@@ -19,7 +19,7 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
-from wing.store.base import validate_media_content, validate_media_id
+from wing.store.names import validate_media_content, validate_media_id
 
 _GOOD_ID = "ab" * 32  # 64 位小写 hex（合法格式，未必是任何内容的 sha256）
 

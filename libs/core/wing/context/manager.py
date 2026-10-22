@@ -143,7 +143,9 @@ class ContextManager:
     def context_window_tokens(self) -> int:
         """当前模型的上下文窗口上限（token）；无 compactor = 0。
 
-        0 是对外语义：前端据此判断是否显示占比。
+        0 是对外语义（前端据此判断是否显示占比），所以没有 compactor 时不给
+        一个编造的默认值。`runtime` 的两处 `ContextStatsEvent`、本轮统计与
+        `get_status` 都读它。
         """
         return self.compactor.context_window_tokens if self.compactor else 0
 
@@ -808,16 +810,6 @@ class ContextManager:
                     continue
             result.append(e)
         return result
-
-    @property
-    def context_window_tokens(self) -> int:
-        """本会话的上下文窗口（token）；没有 compactor 时为 0。
-
-        「0 = 不知道窗口多大」是对外语义（前端据此决定是否显示占比），所以
-        没有 compactor 时不给一个编造的默认值。``runtime`` 的两处
-        ``ContextStatsEvent`` 都读它。
-        """
-        return self.compactor.context_window_tokens if self.compactor else 0
 
     def get_context_stats(self) -> tuple[int, int]:
         """获取上下文统计信息：消息数量和 token 数（事件节点不计）。

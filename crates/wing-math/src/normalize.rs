@@ -264,7 +264,7 @@ fn rewrite(chars: &[char], start: usize, end: usize, out: &mut String) {
         };
 
         match name.as_str() {
-            // N9：连同 `{...}` 参数一起删除
+            // 连同 `{...}` 参数一起删除
             n if DROP_WITH_ARG.contains(&n) => {
                 i = skip_optional_brace_arg(chars, after, end);
             }
@@ -292,7 +292,7 @@ fn rewrite(chars: &[char], start: usize, end: usize, out: &mut String) {
                 out.push(ch);
                 i = after;
             }
-            // N6：`\left` / `\right` 后面接定界符
+            // `\left` / `\right` 后面接定界符
             "left" | "right" => {
                 let (text, next) = rewrite_delimiter(chars, after, end);
                 out.push('\\');
@@ -300,7 +300,7 @@ fn rewrite(chars: &[char], start: usize, end: usize, out: &mut String) {
                 out.push_str(&text);
                 i = next;
             }
-            // N7：`\operatorname{X}` → `\text{X}`
+            // `\operatorname{X}` → `\text{X}`
             "operatorname" => match brace_arg(chars, skip_star(chars, after, end)) {
                 Some((content, next)) => {
                     out.push_str("\\text{");

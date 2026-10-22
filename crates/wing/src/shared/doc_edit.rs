@@ -970,7 +970,7 @@ mod tests {
         assert_eq!(index.unwrap(), 0);
         assert_eq!(lenient, json!({"tools": ["read"]}));
 
-        // 值不是数组：宽容策略从空列表开始（严格策略是用法错误，见 `cmd/config.rs` 的用例）。
+        // 值不是数组：宽容策略从空列表开始（严格策略是用法错误，见 `cmd/config/` 的用例）。
         let mut lenient = json!({"tools": "oops"});
         let index = append_item(
             &mut lenient,

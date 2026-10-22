@@ -195,7 +195,7 @@ def derive_flat_fields(record: Mapping[str, Any]) -> dict[str, Any]:
     """assistant 记录的派生扁平字段（镜像实现：``content_blocks`` 是唯一真相）。
 
     落盘只存事实：assistant 记录不再携带 ``content`` / ``reasoning_content`` /
-    ``tool_calls``（见 ``store/base.canonical_record``），读出来的值由实现按块
+    ``tool_calls``（见 ``store/records.py`` 的 ``canonical_record``），读出来的值由实现按块
     数组现算。断言口径必须同构——否则同一份上下文在"存量旧形态（带扁平字段）"
     与"新记录（只带 blocks）"之间会呈现成两种语义。
 

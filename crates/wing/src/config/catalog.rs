@@ -761,7 +761,7 @@ fn emit_leaf(
 
 /// [`DumpMode::Masked`] 下密文叶的掩码注释；`None` = 这个值不需要掩（缺席 / `null` / 空串）。
 ///
-/// 视觉语言与 `wing config get`（`cmd/config.rs::render_secret`）和设置面板的值列
+/// 视觉语言与 `wing config get`（`cmd/config/::render_secret`）和设置面板的值列
 /// （`shared/panels/settings/tree.rs::display_value` 生产 `ValueText::Masked`，`ui/settings/tree.rs` 画）
 /// **同一套**：`•••••••• <末 4 位>`。
 /// 短密钥（< 8）不给 hint——比例过高等于泄露（后端 `document.py::_state_of` 同一条规则）。

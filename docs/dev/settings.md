@@ -524,7 +524,7 @@ stdio（`wing -p`）与 ACP（`wing acp`）不能开面板：同一个预检失�
 ## 11. `wing config`（headless CLI）
 
 设置面板只服务 TUI；`wing config` 是 stdio / ACP / CI / 编排器的入口，也是**配置坏掉时唯一还能用的**
-诊断入口（setup mode 下照常工作）。全部读写走 Setting API，`cmd/config.rs` **零业务逻辑**
+诊断入口（setup mode 下照常工作）。全部读写走 Setting API，`cmd/config/` **零业务逻辑**
 （参数解析 + 值强制转换 + 调用共享文档原语 + 输出格式化；稀疏文档上的结构编辑——
 路径行走 / stub / 列表增删移——的唯一实现在 `shared/doc_edit.rs`，与设置面板共用），
 gateway 不可达时**不自动拉起网关**（它常常正是在网关起不来时用的；自动拉起会掩盖问题）。

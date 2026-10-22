@@ -837,7 +837,7 @@ mod tests {
     //!
     //! 夹具自带（`settings` 与 `ui::settings` 的 `test_support` 是各自包私有的）：一棵"gateway 下一个
     //! bool"的极小目录 + 一份 Interface 的 `colors.preset` 枚举；后端与事件源都是
-    //! 可注入的假实现（与 `cmd/config.rs` 同一套做法），**不碰磁盘**。
+    //! 可注入的假实现（与 `cmd/config/` 同一套做法），**不碰磁盘**。
 
     use std::cell::Cell;
     use std::cell::RefCell;

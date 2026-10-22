@@ -62,6 +62,10 @@ class _FakeCM:
     def __init__(self) -> None:
         self.added: list[list[Message]] = []
 
+    @property
+    def context_window_tokens(self) -> int:
+        return 0
+
     async def get_messages_for_llm(self, **_: Any) -> SimpleNamespace:
         return SimpleNamespace(messages=[], tools=[], cache_parts=())
 

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from wing.common.logger import log
 from wing.config import get_config, get_wing_home
+from wing.common.truncate import head_tail_marker
 from wing.hooks import hooks
 from wing.schema import MediaRef, Message, Tool, ToolCall, ToolError, ToolOutput
 
@@ -295,7 +296,4 @@ def _maybe_truncate(result: str) -> str:
         log.warning("Failed to save truncated tool result to temp file")
         file_note = "full result could not be saved to disk."
 
-    head = result[:keep]
-    tail = result[-keep:] if keep > 0 else ""
-    marker = f"... [truncated, original length: {len(result)} chars, {file_note}]"
-    return f"{head}\n{marker}\n{tail}"
+    return head_tail_marker(result, keep_head=keep, keep_tail=keep, note=file_note)

@@ -242,7 +242,7 @@ cell 是：
 
 拒绝不是错误：该图片走链接路径。
 
-**侧信道**：`ImageSpan { line, column, cols, rows, path, alt, px_w, px_h }`，与 `LinkSpan` 同构——逐行平行的 `Vec<Vec<ImageSpan>>`，`column` 与 `LinkSpan::start` 同一坐标系（行内显示列，含 2 列 cell 前缀）。它随 `ComposedLines`（缓存态）与 `StreamingRender`（流式态）一路带到 `ui/cached_cell.rs` 的 `CellFrame`（`compute_cell_frame`，`CellLines` 的超集）；`rows_exact == false`（同一 cell 里存在超宽行，见 `tui-link-open` 的同一判据）时行号算术不成立，**不要**按锚点画图。锚点几何 = `Rect(column, line, cols, rows)`，`line` 是 cell 行数组下标，屏幕行号由调用方加 cell 的 y 偏移。
+**侧信道**：`ImageSpan { line, column, cols, rows, source, alt, px_w, px_h }`（`source: PictureSource`，见 `render/picture.rs`），与 `LinkSpan` 同构——逐行平行的 `Vec<Vec<ImageSpan>>`，`column` 与 `LinkSpan::start` 同一坐标系（行内显示列，含 2 列 cell 前缀）。它随 `ComposedLines`（缓存态）与 `StreamingRender`（流式态）一路带到 `ui/cached_cell.rs` 的 `CellFrame`（`compute_cell_frame`，`CellLines` 的超集）；`rows_exact == false`（同一 cell 里存在超宽行，见 `tui-link-open` 的同一判据）时行号算术不成立，**不要**按锚点画图。锚点几何 = `Rect(column, line, cols, rows)`，`line` 是 cell 行数组下标，屏幕行号由调用方加 cell 的 y 偏移。
 
 **只在「独占一行的顶层图片」产锚点**——宁可降级也不产出错位的锚点：行内（前后还有文字）、一行多张、列表项/引用块/表格单元格里、标题里、链接里、代码围栏里、HTML `<img>`、缩进（thinking）块里、**alt 跨行**（`![l1\nl2](a.png)`：软换行会先把标签所在行 flush 掉，锚点会落到 alt 的最后一行），全部走链接路径。缩进块是「嵌套重解析 + 二次加前缀」，列坐标会整体偏移，因此嵌套渲染显式关了锚点（见 `code_blocks.rs` 的 `ImageOpts::off()`）。
 

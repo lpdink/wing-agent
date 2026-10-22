@@ -14,46 +14,26 @@ wing/store/base.py — 持久化层抽象。
 使 SQLite/PG/Supabase/Redis 后端可以极小成本实现。
 
 模型 / 闸门 / 记录规范形分别在 ``store.models`` / ``store.names`` / ``store.records``；
-本模块只留两个 ABC，外加一节兼容再导出（消费方改走包根后即可删除）。
+本模块只留两个 ABC（消费方走包根 ``wing.store`` 或对应子模块）。
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
-from wing.store.models import (
-    ArchivedSession,
-    FileRef,
-    SessionMetadata,
-    SessionSummary,
-)
-
-# 兼容再导出：定义已迁到 ``store.names`` / ``store.records``，而
-# `wing.gateway.routes.session` 与既有测试仍按 ``wing.store.base`` 取用。
-from wing.store.names import (
-    FILE_NAME_MAX_BYTES,
-    is_valid_file_name,
-    validate_file_name,
-    validate_media_content,
-    validate_media_id,
-)
-from wing.store.records import IMAGE_ONLY_TITLE
+if TYPE_CHECKING:
+    from wing.store.models import (
+        ArchivedSession,
+        FileRef,
+        SessionMetadata,
+        SessionSummary,
+    )
 
 __all__ = [
-    "ArchivedSession",
-    "FILE_NAME_MAX_BYTES",
-    "FileRef",
-    "IMAGE_ONLY_TITLE",
     "MessageLog",
-    "SessionMetadata",
     "SessionStore",
-    "SessionSummary",
-    "is_valid_file_name",
-    "validate_file_name",
-    "validate_media_content",
-    "validate_media_id",
 ]
 
 

@@ -4,7 +4,7 @@
 //! 都是网关契约在客户端的镜像：
 //!
 //! * [`is_media_id`] —— id 的合法形态（64 位小写 hex）。与网关
-//!   `wing.store.base.validate_media_id` 同一口径，是「这条引用能不能去取字节」的第一道闸门。
+//!   `wing.store.names.validate_media_id` 同一口径，是「这条引用能不能去取字节」的第一道闸门。
 //! * [`predicted_ref`] —— 一份**本机已持有字节**的图片在上传之后会得到的引用。上传端点按
 //!   `id = sha256(bytes)` 落盘（内容寻址），所以本机算出的 id 与响应里的 id **逐字节相同**：
 //!   pending 气泡因此能在上传往返之前就画出图（字节就在手里，见 `ui/chat_view/media.rs`）。

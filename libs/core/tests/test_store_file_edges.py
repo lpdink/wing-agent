@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from wing.store.base import IMAGE_ONLY_TITLE
+from wing.store.records import IMAGE_ONLY_TITLE
 from wing.store.file import FileMessageLog, FileSessionStore, _is_same_entry
 
 

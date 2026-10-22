@@ -309,9 +309,7 @@ class ReActLoop:
         self._current_acc = None
 
         count, tokens = self._cm.get_context_stats()
-        ctx_window = 0
-        if self._cm.compactor:
-            ctx_window = self._cm.compactor.context_window_tokens
+        ctx_window = self._cm.context_window_tokens
         self._sink.context_stats(count, tokens, ctx_window)
 
         if interrupted_exc is not None:

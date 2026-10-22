@@ -27,7 +27,7 @@ from wing.common.utils import InvalidInputError
 from wing.config import get_config
 from wing.runtime import WingRuntime
 from wing.schema import Message
-from wing.store.base import FILE_NAME_MAX_BYTES
+from wing.store.names import FILE_NAME_MAX_BYTES
 
 SID = "files-upload-session"
 

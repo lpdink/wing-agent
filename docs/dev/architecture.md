@@ -327,7 +327,7 @@ MessageLog  = 追加式混合记录 + aux kv（pending compaction 存于此）�
 
 **存量 session 零迁移**：老日志无事件记录 → `TrackedList.load` 按 role 分发（事件走 `EVENT_TYPES` 注册表，未知 type 跳过——前向容忍），事件重放为空即回退纯消息重放。不承诺老版本代码读新格式日志（新 session 由新代码产生，该场景不存在）。
 
-**历史记录的规范形**（`store/base.canonical_record`，落盘前必过；`_to_record` 与 fork 的复制前缀共用）：
+**历史记录的规范形**（`store/records.py` 的 `canonical_record`，落盘前必过；`_to_record` 与 fork 的复制前缀共用）：
 
 - **null 不写**——缺席即默认。`model_dump(exclude_none=True)` 覆盖 model 字段（含嵌套：
   `thinking.signature` / `tool_use.input_error` / `usage.stop_reason` …），wrap 序列化器

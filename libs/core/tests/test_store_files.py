@@ -22,7 +22,7 @@ import pytest
 from wing.common.utils import InvalidInputError
 from wing.store import FileRef, FileSessionStore, MemorySessionStore
 from wing.media import file_too_large_message
-from wing.store.base import (
+from wing.store.names import (
     FILE_NAME_MAX_BYTES,
     is_valid_file_name,
     validate_file_name,

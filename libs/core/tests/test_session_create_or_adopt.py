@@ -625,7 +625,7 @@ class TestIgnoredOverrideWarnings:
 
 
 class TestAdoptIgnoresCreateParams:
-    """收养路径忽略创建参数（N5：同一请求体因 id 是否存在回报不同类别结果）。"""
+    """收养路径忽略创建参数（同一请求体因 id 是否存在回报不同类别结果）。"""
 
     @pytest.mark.asyncio
     async def test_existing_id_skips_create_param_validation(self, sm: SessionManager):

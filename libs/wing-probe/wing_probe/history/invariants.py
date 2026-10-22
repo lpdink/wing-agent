@@ -492,7 +492,7 @@ def assert_no_transient_records(
 
 
 #: assistant 记录的派生扁平字段：``content_blocks`` 的派生物，落盘恒不写
-#: （``store/base.canonical_record``；读取侧 blocks 优先，存量旧形态照旧加载）。
+#: （``store/records.py`` 的 ``canonical_record``；读取侧 blocks 优先，存量旧形态照旧加载）。
 DERIVED_FLAT_FIELDS: frozenset[str] = frozenset(
     {"content", "reasoning_content", "tool_calls"}
 )
