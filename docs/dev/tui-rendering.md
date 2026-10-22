@@ -23,7 +23,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 |---|---|
 | `--profile thinking\|content` | reasoning 视角 / 助手正文视角（渲染规则见第二节） |
 | `-w <N>` / `--range A:B` | 渲染宽度 / 只看输出的某几行 |
-| `-k` / `--kinds` | 打印 compose 之前的 IR：每行标出 `T` 正文、`C` 代码块、`B` 边框、`G` 行号、`M` 列表符、`i` 行内代码、`$` 公式、`I` 图片锚点 caption——**「这行为什么是代码」看这个视图** |
+| `-k` / `--kinds` | 打印 compose 之前的 IR：每行标出 `T` 正文、`H` 标题、`Q` 引文、`C` 代码块、`B` 边框、`G` 行号、`M` 列表符、`i` 行内代码、`$` 公式、`L` 链接、`I` 图片锚点 caption——**「这行为什么是代码」看这个视图** |
 | `--math text\|off` | `off` = 不做数学解析（今天的行为：LaTeX 源码原样显示），用来对照公式渲染 |
 | `--images` | 打开图片锚点（默认走链接路径，见第五节） |
 | `--workspace <DIR>` | 相对图片路径的解析根（默认当前目录） |
@@ -45,7 +45,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 第三条是两个 profile **共享**的，之所以仍然登记在 `Profile` 上，是因为它和前两条同源：都是**解析前的源文本改写**（`math.rs`），必须能被流式引擎逐切片复用。公式不因写在 reasoning 里就换一种形态；规则只在「一个完整、且不含代码/`$` 数学的 span」上触发生效，未闭合或跨空行的 `\(` 一律保持字面量，所以它也不会误吞正文。
 
-其余一律共享：**围栏代码块在两个 profile 下渲染完全相同**（syntect 高亮 + 行号 + 边框 + diff 底色）；正文颜色的差异发生在 cell compose（`thinking_segment_style` 只换正文前景色；公式是结构元素，同代码一样保留自己的颜色）。
+其余一律共享：**围栏代码块在两个 profile 下渲染完全相同**（syntect 高亮 + 行号 + 边框 + diff 底色）；颜色的差异发生在 cell compose：`thinking_segment_style` 只把**纯正文**换成 thinking 前景，带角色的元素（标题、引文、列表符、代码、链接、公式、图片 caption）保留自己的色相（见二·八）。
 
 ## 二·五、公式（数学）渲染
 
@@ -121,7 +121,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
   先看渲染管线的入口，再一步步拆折叠行的状态机。
 ```
 
-* **刷光**：与开屏 wordmark 同一份数学（`ui/shimmer.rs` 的 `sweep_intensity` + `mix`）；跨度 = 措辞宽 + 8 列余量（扫出去停一拍再回来），周期 1.6s，帧间隔 40ms（≈25fps）。亮底主题方向翻转（朝深压），否则白光看不见 —— 判据同 wordmark（`is_light_theme`）；
+* **刷光**：与开屏 wordmark 同一份数学（`ui/shimmer.rs` 的 `sweep_intensity` + `mix`）；**基色是 `thinking_label` 槽**（默认琥珀 `#c99a5e`，秒数与提示同色、不参与刷光），高光朝白。跨度 = 措辞宽 + 8 列余量（扫出去停一拍再回来），周期 1.6s，帧间隔 40ms（≈25fps）。亮底主题方向翻转（朝深压），否则白光看不见 —— 判据同 wordmark（`is_light_theme`）；
 * **Ctrl+O 提示**：只出现在**进行中**的行上、且这次会话**还没按过** `Ctrl+O`（`CellContext::thinking_expanded` 仍是 `None`）—— 按过一次即退场（模式已全局翻转、切换效果自证），冻结的历史行保持安静。文案指向**按下去会发生什么**：展开中 `· Ctrl+O 折叠`、折叠中 `· Ctrl+O 展开`。静态、dim、不进刷光跨度（动效只留给「进行中」这一个信号）；让位序排在**最前**：装不下就整个不显示，措辞 / 秒数不为它让位（见 `ThinkingBlock::label_line`）；
 * **帧驱动**：绝对截止时刻（网格锚在块的起点上，`ThinkingBlock::next_frame`），滚动 / 流式事件不会把它推后；没有活跃块、或块**不在视口**时定时臂 park（看不见的动画不花钱）——与欢迎屏扫光的契约相同（[welcome-mascot.md](welcome-mascot.md) 的「重绘成本契约」）；
 * **计时口径**：块内首个 reasoning 事件 → 该块被冻结（下一条正文 / 工具调用事件，或回合结束）。中断（Esc）、错误同样就地冻结。中途重连（sync 重放半截 reasoning）会少算一点；
@@ -149,6 +149,33 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 * **预览**：`cargo run -p wing --example theme_preview`（assistant markdown 一节就是表格实景）；任意输入用 `render_probe`；欢迎屏那张用 `cargo run -p wing --example welcome_preview`。
 
 已知边界：表格不带外层前缀、单元格内不注入前缀（见第四节登记）。
+
+## 二·八、配色：一个元素一个角色（`MarkdownTheme::from_palette`）
+
+markdown 的每个元素**归属一个角色**，角色决定色相；同一角色内部的层级靠**字重 / 斜体**，不靠再开一个色相。主题只有一个入口 `MarkdownTheme::from_palette(palette)`（`render/markdown/types.rs`），色值全部来自 `ThemePalette` 的槽位（用户可逐个覆盖，见 `docs/dev/config-logging.md`）：
+
+| 元素 | 角色 | 槽位（`wing` 预设） | 备注 |
+|---|---|---|---|
+| 正文 | 阅读 | `text` `#e6eaf2` | 最亮的一档 |
+| 思考块标题行 `⦁ 深度思考中 4s` | 元信息 | `thinking_label` `#c99a5e` | 刷光基色即此槽（高光朝白）；与正文色相区分，见二·六 |
+| `**加粗**` | 强调 | `strong`（派生：`text` 提亮 35%） | 只对**纯正文**提亮；标题 / 链接 / 行内代码里的加粗只加字重（`MarkdownTheme::strong`） |
+| `*斜体*` / `~~删除~~` | 强调 | —（只加修饰符） | 不换色 |
+| 标题 H1…H6 | 结构 | `heading` `#b49af0`（H1 用派生的 `heading_bright`） | 阶梯：H1 亮紫粗、H2 紫粗、H3 紫粗斜、H4–H6 紫斜。**不用下划线**（那是链接的词汇） |
+| 行内代码 / 未高亮的代码块正文 | 字面量 | `inline_code` `#e5787f` | 与链接刻意区分：一个色相一个含义（与 `danger` 同族，靠上下文区分：代码在正文里、错误在带栏杆的 notice 行上） |
+| 链接 | 交互 | `accent` `#3ac6e0` + 下划线 | 品牌色 |
+| 列表符 / 有序序号 / 任务框 | 结构（quiet） | `marker` `#7d8bb0` | 比正文暗、比 `dim` 亮 |
+| 引用（`>`） | 结构（安静） | `quote` `#8f93c4`；竖线同色 + `DIM` | `SegmentKind::Quote` —— 与正文分层，reasoning 里也保留 |
+| 公式 | 结构 | `math` `#b49af0` | 渲染网格与降级源码同色 |
+| 表格表头文字 | 结构（quiet） | `marker`（`render_table` 的 `header_style`）+ 粗 | 表体不受影响 |
+| 边框 / 行号 / 表格线 / 分隔线 | chrome | `dim` `#5b6478` | 永远比内容安静 |
+| diff 行 | 状态 | `success` / `danger` + `diff_*_bg` | 见 `render/markdown/code_blocks.rs` |
+
+两条硬规则：
+
+1. **reasoning 不吃掉角色**：`thinking_segment_style` 只把 `SegmentKind::Text` 换成 `thinking` 前景；标题 / 引文 / 列表符 / 代码 / 链接 / 公式 / 图片 caption 保留自己的色相（否则 reasoning 里的结构信息全糊成一片灰）。
+2. **强调不许重绘角色**：`theme.strong(current)` 在「当前前景 == `base`（或没有前景）」时给提亮色，否则只加 `BOLD` —— 标题里的 `**加粗**` 仍是紫色。
+
+调色 / 对色**不用起 TUI**：`cargo run -p wing --example theme_preview -- --html /tmp/theme.html`（整条 transcript 的真 cell 画廊，含 markdown 全要素），浏览器里看或截图；`--preset terminal` 对照跟随终端 ANSI 色的形态。新增元素时先回答「它是哪个角色」，再决定是否真要开新槽位——槽位是用户可覆盖的 API，不是调色试验田。
 
 ## 三、不变量：流式静息态 == 参考全量渲染
 

@@ -111,7 +111,9 @@ struct LabelKey {
     expanded: bool,
     /// 是否显示 `Ctrl+O` 提示。
     hint: bool,
-    dim: Color,
+    /// 标题行的基色（`thinking_label`）—— 正文没被读，不进键。
+    label: Color,
+    /// 前景亮暗只用来判高光方向（亮底主题朝深压）。
     text: Color,
 }
 
@@ -248,7 +250,7 @@ impl ThinkingBlock {
             timed: self.started_at.is_some(),
             expanded: mode.expanded(explicit),
             hint: self.is_active() && explicit.is_none(),
-            dim: palette.dim,
+            label: palette.thinking_label,
             text: palette.text,
         };
         if let Some((cached_key, line)) = self.label_cache.borrow().as_ref()
@@ -269,7 +271,7 @@ impl ThinkingBlock {
         mode: ThinkingMode,
         explicit: Option<bool>,
     ) -> Line<'static> {
-        let dim = Style::default().fg(palette.dim);
+        let label_style = Style::default().fg(palette.thinking_label);
         let (mut head, mut tail) = self.label_texts();
         let budget = width as usize;
         // 提示：静态、不进刷光跨度（刷光只扫措辞，见 `shine_spans`）。
@@ -295,16 +297,16 @@ impl ThinkingBlock {
             tail.clear();
             head = truncate_to_display_width(&head, budget);
         }
-        let mut spans = self.shine_spans(&head, palette, dim);
+        let mut spans = self.shine_spans(&head, palette, label_style);
         // 静止部分跟措辞同一色系：进行中措辞是逐列 Rgb 混色的（见
         // `shine_spans`），秒数与提示就用 dim 的 Rgb 解析值 —— 命名色与
         // Rgb 混用会在命名色主题 + 非 truecolor 终端上各走各的色。
         // 定格后整行回到命名 dim，与旧行为一致。
         let static_style = if self.is_active() {
-            let base = to_rgb(palette.dim);
+            let base = to_rgb(palette.thinking_label);
             Style::default().fg(Color::Rgb(base.0, base.1, base.2))
         } else {
-            dim
+            label_style
         };
         if !tail.is_empty() {
             spans.push(Span::styled(tail, static_style));
@@ -316,11 +318,16 @@ impl ThinkingBlock {
     }
 
     /// 措辞的逐列刷光：进行中按 `sweep_phase` 混高光色；否则整段静态。
-    fn shine_spans(&self, text: &str, palette: &ThemePalette, dim: Style) -> Vec<Span<'static>> {
+    fn shine_spans(
+        &self,
+        text: &str,
+        palette: &ThemePalette,
+        label_style: Style,
+    ) -> Vec<Span<'static>> {
         if !self.is_active() {
-            return vec![Span::styled(text.to_string(), dim)];
+            return vec![Span::styled(text.to_string(), label_style)];
         }
-        let base = to_rgb(palette.dim);
+        let base = to_rgb(palette.thinking_label);
         let peak = if is_light_theme(to_rgb(palette.text)) {
             LIGHT_THEME_HIGHLIGHT
         } else {
@@ -563,7 +570,7 @@ mod tests {
         assert_ne!(default_line, text_line, "高光档位变了（亮底主题）");
 
         let mut other_base = darker_text;
-        other_base.dim = ratatui::style::Color::Magenta;
+        other_base.thinking_label = ratatui::style::Color::Magenta;
         assert_ne!(
             text_line,
             block.label_line(&other_base, 80, ThinkingMode::Visible, None),
@@ -632,13 +639,13 @@ mod tests {
         block.start(start);
         block.tick(start + Duration::from_secs(4));
 
-        // 提示是静态 dim：不参与刷光（单色 span，不是逐列混光的那些）。
+        // 提示是静态的标题色：不参与刷光（单色 span，不是逐列混光的那些）。
         let pairs =
             span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
         let (_, hint_style) = find_span(&pairs, "Ctrl+O");
         assert_eq!(
             to_rgb(hint_style.fg.expect("提示有颜色")),
-            to_rgb(p().dim),
+            to_rgb(p().thinking_label),
             "提示是静止的 affordance，不该跟着刷光：{hint_style:?}"
         );
 
@@ -727,7 +734,7 @@ mod tests {
         // 4s = 2.5 个周期 → 相位 0.5（光带在措辞中部），秒数也已显示。
         block.tick(start + Duration::from_secs(4));
 
-        let base = to_rgb(p().dim);
+        let base = to_rgb(p().thinking_label);
         let sum = |rgb: Rgb| rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32;
         let pairs =
             span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
@@ -747,7 +754,7 @@ mod tests {
             sum(brightest) > sum(base),
             "进行中应有一段比底色亮（灰→白）：{brightest:?} vs {base:?}"
         );
-        // 秒数保持静态 dim：它不在刷光带里。
+        // 秒数保持静态（标题色）：它不在刷光带里。
         let (_, secs_color) = colors
             .iter()
             .find(|(text, _)| text.contains('s'))
@@ -764,7 +771,7 @@ mod tests {
         block.finish(start + Duration::from_secs(5));
         let pairs =
             span_pairs(&block.to_lines(&p(), ThinkingMode::Hidden, None, 80, ImageOpts::off()));
-        let base = to_rgb(p().dim);
+        let base = to_rgb(p().thinking_label);
         for (text, style) in &pairs {
             if let Some(color) = style.fg {
                 assert_eq!(to_rgb(color), base, "定格后不该有高光（{text}）");
@@ -1049,9 +1056,14 @@ mod tests {
         block.append("run `cargo build` now");
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
-        // Inline code keeps the accent color.
+        // Inline code keeps its own hue (the literal family), not the prose
+        // grey and not the link/accent colour.
         let (_, code_style) = find_span(&pairs, "cargo build");
-        assert_eq!(code_style.fg, Some(p().accent), "code fg: {code_style:?}");
+        assert_eq!(
+            code_style.fg,
+            Some(p().inline_code),
+            "code fg: {code_style:?}"
+        );
         // Surrounding prose is recolored to the thinking color.
         let (_, prose_style) = find_span(&pairs, "run ");
         assert_eq!(
@@ -1146,9 +1158,9 @@ mod tests {
         block.append("like this:\n```\nlet x = 1;\n```");
         let lines = block.to_lines(&p(), ThinkingMode::Visible, None, 80, ImageOpts::off());
         let pairs = span_pairs(&lines);
-        // Code block content keeps the accent color, not thinking gray.
+        // Code block content keeps the code hue, not thinking gray.
         let (_, style) = find_span(&pairs, "let x = 1;");
-        assert_eq!(style.fg, Some(p().accent), "code block fg: {style:?}");
+        assert_eq!(style.fg, Some(p().inline_code), "code block fg: {style:?}");
     }
 
     /// The alignment contract: a fenced code block renders exactly like the
@@ -1227,7 +1239,11 @@ mod tests {
             "bold keeps its modifier under the thinking fg: {bold:?}"
         );
         let (_, inline) = find_span(&pairs, "code");
-        assert_eq!(inline.fg, Some(p().accent), "inline code fg: {inline:?}");
+        assert_eq!(
+            inline.fg,
+            Some(p().inline_code),
+            "inline code fg: {inline:?}"
+        );
     }
 
     #[test]

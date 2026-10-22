@@ -551,6 +551,7 @@ fn kind_letter(kind: SegmentKind) -> char {
         SegmentKind::CodeBlock => 'C',
         SegmentKind::Link => 'L',
         SegmentKind::Marker => 'M',
+        SegmentKind::Quote => 'Q',
         SegmentKind::Border => 'B',
         SegmentKind::Gutter => 'G',
         SegmentKind::Math => '$',

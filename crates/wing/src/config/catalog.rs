@@ -62,7 +62,7 @@ const COLORS_NOTES: [&str; 2] = [
 const PRESET_DOC: &str = "Base palette (see `ColorPreset`).";
 
 /// 槽位说明 = 该槽位在 UI 里管什么（逐字照抄 `config/mod.rs` 的字段文档）。
-const SLOT_DOCS: [(&str, &str); 14] = [
+const SLOT_DOCS: [(&str, &str); 19] = [
     (
         "accent",
         "Brand color: logo, commands, links, code, popups.",
@@ -71,6 +71,10 @@ const SLOT_DOCS: [(&str, &str); 14] = [
     (
         "thinking",
         "Thinking: agent reasoning content (more prominent than dim).",
+    ),
+    (
+        "thinking_label",
+        "Thinking label: the `⦁ 深度思考中 4s` summary line (and its sweep base).",
     ),
     (
         "tool_result",
@@ -88,6 +92,19 @@ const SLOT_DOCS: [(&str, &str); 14] = [
         "math",
         "Math: rendered formulas (character grids) and their literal fallback.",
     ),
+    (
+        "heading",
+        "Markdown headings (all levels; the ladder is weight/underline).",
+    ),
+    (
+        "inline_code",
+        "Inline code spans and unhighlighted code-block text.",
+    ),
+    (
+        "marker",
+        "List marks: bullets, ordered numbers, task boxes.",
+    ),
+    ("quote", "Blockquote: the bar and the quoted voice."),
     ("surface", "Surface: user message background."),
     (
         "diff_add_bg",
@@ -515,12 +532,17 @@ fn slot_color(palette: &ThemePalette, key: &str) -> Color {
         "accent" => palette.accent,
         "text" => palette.text,
         "thinking" => palette.thinking,
+        "thinking_label" => palette.thinking_label,
         "tool_result" => palette.tool_result,
         "dim" => palette.dim,
         "success" => palette.success,
         "warning" => palette.warning,
         "danger" => palette.danger,
         "math" => palette.math,
+        "heading" => palette.heading,
+        "inline_code" => palette.inline_code,
+        "marker" => palette.marker,
+        "quote" => palette.quote,
         "surface" => palette.surface,
         "diff_add_bg" => palette.diff_add_bg,
         "diff_del_bg" => palette.diff_del_bg,
@@ -1113,12 +1135,17 @@ mod tests {
                 accent: Some("#ff00ff".into()),
                 text: Some("#ffffff".into()),
                 thinking: Some("gray".into()),
+                thinking_label: Some("yellow".into()),
                 tool_result: Some("dark_gray".into()),
                 dim: Some("#101010".into()),
                 success: Some("green".into()),
                 warning: Some("yellow".into()),
                 danger: Some("red".into()),
                 math: Some("magenta".into()),
+                heading: Some("#b49af0".into()),
+                inline_code: Some("#dcae70".into()),
+                marker: Some("#7d8bb0".into()),
+                quote: Some("#8f93c4".into()),
                 surface: Some("#343541".into()),
                 diff_add_bg: Some("#113311".into()),
                 diff_del_bg: Some("#331111".into()),
@@ -1222,7 +1249,7 @@ mod tests {
             .iter()
             .filter(|path| path.starts_with("colors."))
             .count();
-        assert_eq!(slots, 15, "colors 段应覆盖 preset + 14 槽：{leaves:?}");
+        assert_eq!(slots, 20, "colors 段应覆盖 preset + 19 槽：{leaves:?}");
     }
 
     /// 每个声明都必须对应真实 serde 键。声明了不存在的键 → 红。
@@ -1285,7 +1312,7 @@ mod tests {
     fn every_color_slot_is_declared_with_a_color_hint() {
         let catalog = interface_catalog();
         let palette = ThemePalette::default();
-        assert_eq!(SLOT_DOCS.len(), 14, "颜色槽的清单被改过？");
+        assert_eq!(SLOT_DOCS.len(), 19, "颜色槽的清单被改过？");
         for (key, _) in SLOT_DOCS {
             let path = format!("colors.{key}");
             let node = catalog
@@ -1413,7 +1440,7 @@ mod tests {
         let catalog = interface_catalog();
         let leaves: Vec<&SettingNode> = catalog.leaves().collect();
         let paths: Vec<&str> = leaves.iter().map(|node| node.path.as_str()).collect();
-        assert_eq!(leaves.len(), 25, "{paths:?}");
+        assert_eq!(leaves.len(), 30, "{paths:?}");
         fn count(leaves: &[&SettingNode], predicate: impl Fn(&SettingNode) -> bool) -> usize {
             leaves.iter().filter(|node| predicate(node)).count()
         }
@@ -1421,11 +1448,11 @@ mod tests {
         assert_eq!(count(&leaves, |node| node.secret), 1);
         assert_eq!(
             count(&leaves, |node| node.value_hint.as_deref() == Some("color")),
-            14
+            19
         );
         assert_eq!(count(&leaves, |node| node.required), 0);
         assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Restart), 1);
-        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 24);
+        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 29);
         assert!(leaves.iter().all(|node| node.editable));
     }
 

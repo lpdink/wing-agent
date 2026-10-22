@@ -428,7 +428,7 @@ fn render_markdown_to_lines(
                 ctx.ensure_prefix();
                 ctx.current_line.push_segment(
                     SegmentKind::Marker,
-                    base_style,
+                    theme.marker,
                     if checked { "[x] " } else { "[ ] " },
                 );
             }
@@ -468,6 +468,8 @@ fn render_markdown_to_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+    use ratatui::style::Modifier;
 
     fn dp() -> ThemePalette {
         ThemePalette::default()
@@ -709,7 +711,120 @@ mod tests {
     fn segment_kinds_blockquote_bar() {
         let pairs = segment_pairs("> quoted");
         assert_eq!(find_segment(&pairs, "│"), SegmentKind::Border);
-        assert_eq!(find_segment(&pairs, "quoted"), SegmentKind::Text);
+        // 引文是独立的一层声音（自己的色相），不是普通正文。
+        assert_eq!(find_segment(&pairs, "quoted"), SegmentKind::Quote);
+    }
+
+    // ============================================================
+    // Colour roles (the parser must wire them, not just the theme)
+    // ============================================================
+
+    /// A document is not one colour: each role reaches its own palette slot.
+    #[test]
+    fn every_markdown_role_takes_its_own_palette_slot() {
+        let palette = dp();
+        let styles: Vec<(SegmentKind, Style)> = render_markdown_lines(
+            "# Title\n\n## Section\n\nprose **bold** `code` [link](https://example.com)\n\n\
+             - item\n\n> quoted\n\n| A | B |\n|---|---|\n| 1 | 2 |\n",
+            None,
+            &palette,
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.kind, seg.style))
+        .collect();
+        let fg = |kind: SegmentKind| -> Color {
+            styles
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .map(|(_, style)| style.fg.expect("role segment carries a colour"))
+                .unwrap_or_else(|| panic!("no {kind:?} segment: {styles:?}"))
+        };
+        assert_eq!(fg(SegmentKind::Heading), palette.heading_bright);
+        assert_eq!(fg(SegmentKind::InlineCode), palette.inline_code);
+        assert_eq!(fg(SegmentKind::Link), palette.accent);
+        assert_eq!(fg(SegmentKind::Marker), palette.marker);
+        assert_eq!(fg(SegmentKind::Quote), palette.quote);
+        // Prose rides `text`, and emphasis is lifted above it.
+        assert_eq!(fg(SegmentKind::Text), palette.text);
+        let bold = styles
+            .iter()
+            .find(|(kind, style)| {
+                *kind == SegmentKind::Text && style.add_modifier.contains(Modifier::BOLD)
+            })
+            .map(|(_, style)| style.fg)
+            .expect("bold prose segment");
+        assert_eq!(bold, Some(palette.strong));
+    }
+
+    /// The heading ladder: level 1 is the lifted rung, deeper levels are the
+    /// heading hue with weight/italic — never the body colour.
+    #[test]
+    fn heading_levels_form_a_ladder_on_one_hue() {
+        let palette = dp();
+        let theme = MarkdownTheme::from_palette(&palette);
+        let fg = |level: &str| -> Color {
+            render_markdown_lines(level, None, &palette)
+                .into_iter()
+                .flat_map(|line| line.segments)
+                .find(|seg| seg.kind == SegmentKind::Heading)
+                .and_then(|seg| seg.style.fg)
+                .unwrap_or_else(|| panic!("no heading segment in {level:?}"))
+        };
+        assert_eq!(fg("# one"), palette.heading_bright);
+        assert_eq!(fg("## two"), palette.heading);
+        assert_eq!(fg("### three"), palette.heading);
+        // …and the ladder really differs (level 1 is brighter).
+        assert_ne!(palette.heading_bright, palette.heading);
+        assert!(theme.h1.add_modifier.contains(Modifier::BOLD));
+        assert!(!theme.h1.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    /// Emphasis inside a role keeps the role's hue (a heading stays violet).
+    #[test]
+    fn bold_inside_a_heading_keeps_the_heading_hue() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> =
+            render_markdown_lines("## a **bold** b", None, &palette)
+                .into_iter()
+                .flat_map(|line| line.segments)
+                .map(|seg| (seg.text, seg.style))
+                .collect();
+        let bold = segments
+            .iter()
+            .find(|(text, _)| text.contains("bold"))
+            .expect("bold segment");
+        assert_eq!(bold.1.fg, Some(palette.heading));
+        assert!(bold.1.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Table tiers: the header band takes the structural tint (and weight),
+    /// the body keeps the body colour — the table reads as data, not chrome.
+    #[test]
+    fn the_table_header_band_is_tinted_apart_from_the_body() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> = render_markdown_lines(
+            "| Slot | Role |\n|---|---|\n| text | prose |\n",
+            None,
+            &palette,
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.text, seg.style))
+        .collect();
+        // Cells merge their padding into the content segment (same kind and
+        // style), so match on the trimmed text.
+        let header = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "Slot")
+            .expect("header cell");
+        assert_eq!(header.1.fg, Some(palette.marker));
+        assert!(header.1.add_modifier.contains(Modifier::BOLD));
+        let body = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "text")
+            .expect("body cell");
+        assert_eq!(body.1.fg, Some(palette.text));
     }
 
     #[test]

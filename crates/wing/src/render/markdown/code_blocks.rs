@@ -93,7 +93,7 @@ fn finalize_code_block(
         env.blockquote_depth,
         env.list_continuation_prefix,
         env.pending_list_prefix,
-        env.base_style,
+        env.theme,
     );
     if let Some(state) = code_block.take() {
         // The prose branch re-parses the block per nesting level, so it runs
@@ -138,7 +138,7 @@ fn render_prose_block(text: &str, env: &mut CodeBlockRenderEnv<'_>) -> Vec<Markd
         env.blockquote_depth,
         env.list_continuation_prefix,
         env.pending_list_prefix,
-        env.base_style,
+        env.theme,
     )
 }
 

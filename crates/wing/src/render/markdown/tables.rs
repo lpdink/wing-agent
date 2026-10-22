@@ -60,6 +60,7 @@ pub(crate) fn render_table(
     table: &TableBuffer,
     frame_style: Style,
     base_style: Style,
+    header_style: Style,
     available_width: Option<u16>,
 ) -> Vec<MarkdownLine> {
     let mut lines = Vec::new();
@@ -103,7 +104,7 @@ pub(crate) fn render_table(
                 frame_style,
                 outer_v: skin.outer_v,
                 divider: skin.header_v,
-                bold: true,
+                text_style: header_style.bold(),
             },
         ));
         lines.push(rule_line(&skin.header_sep, &col_widths, frame_style));
@@ -120,7 +121,7 @@ pub(crate) fn render_table(
                 frame_style,
                 outer_v: skin.outer_v,
                 divider: skin.inner_v,
-                bold: false,
+                text_style: Style::new(),
             },
         ));
         if row_idx + 1 < table.rows.len() {
@@ -234,7 +235,9 @@ struct RowEnv<'a> {
     frame_style: Style,
     outer_v: char,
     divider: char,
-    bold: bool,
+    /// Ink for the cells' text — the header band's hue + weight, empty for the
+    /// body (which keeps each cell's own styles).
+    text_style: Style,
 }
 
 /// Render a single table row (possibly multi-line after wrapping) as one or
@@ -283,11 +286,7 @@ fn render_row(row: &[MarkdownLine], env: &RowEnv<'_>) -> Vec<MarkdownLine> {
                 line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(left_pad));
             }
             for seg in &segments {
-                let style = if env.bold {
-                    seg.style.bold()
-                } else {
-                    seg.style
-                };
+                let style = seg.style.patch(env.text_style);
                 line.push_segment(seg.kind, style, &seg.text);
             }
             if right_pad > 0 {
@@ -458,7 +457,13 @@ mod tests {
             ],
             ..Default::default()
         };
-        let md_lines = plain_lines(&render_table(&table, Style::new(), Style::new(), Some(60)));
+        let md_lines = plain_lines(&render_table(
+            &table,
+            Style::new(),
+            Style::new(),
+            Style::new(),
+            Some(60),
+        ));
 
         let plain_table = PlainTable {
             columns: vec![
@@ -488,6 +493,7 @@ mod tests {
         for budget in [24usize, 12] {
             let md: Vec<String> = plain_lines(&render_table(
                 &table,
+                Style::new(),
                 Style::new(),
                 Style::new(),
                 Some(budget as u16),
@@ -575,7 +581,7 @@ mod tests {
             ..Default::default()
         };
         // 2 columns à 1 content column + chrome ≈ the degenerate share.
-        let lines = render_table(&table, Style::new(), Style::new(), Some(12));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(12));
         assert!(!lines.is_empty());
     }
 
@@ -625,7 +631,7 @@ mod tests {
             rows: vec![vec![make_line("1"), make_line("2")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Style::new(), Some(80));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(80));
         let expected = [
             "┏━━━━━┳━━━━━┓",
             "┃ A   ┃ B   ┃",
@@ -654,7 +660,13 @@ mod tests {
             ..Default::default()
         };
         for avail in [24u16, 40, 80] {
-            let lines = render_table(&table, Style::new(), Style::new(), Some(avail));
+            let lines = render_table(
+                &table,
+                Style::new(),
+                Style::new(),
+                Style::new(),
+                Some(avail),
+            );
             let widths: Vec<usize> = lines.iter().map(|l| l.width()).collect();
             assert!(
                 widths.iter().all(|w| *w == widths[0]),
@@ -671,7 +683,7 @@ mod tests {
             rows: vec![vec![make_line("a")], vec![make_line("b")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(40));
         let text = plain_lines(&lines).join("\n");
         // The heavy header separator and the light body rule between the two
         // body rows, each with its own junction glyphs.
@@ -706,7 +718,13 @@ mod tests {
             ..Default::default()
         };
         for avail in [40u16, 60, 80, 120] {
-            let lines = render_table(&table, Style::new(), Style::new(), Some(avail));
+            let lines = render_table(
+                &table,
+                Style::new(),
+                Style::new(),
+                Style::new(),
+                Some(avail),
+            );
             for line in &lines {
                 assert!(
                     line.width() <= avail as usize,
@@ -729,7 +747,7 @@ mod tests {
             ]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Style::new(), Some(30));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(30));
         // The wrapped row should produce multiple lines.
         assert!(
             lines.len() >= 4,
@@ -749,7 +767,7 @@ mod tests {
         let long_text = "This very long text must not be truncated under any circumstances";
         table.headers = vec![make_line("Col")];
         table.rows = vec![vec![make_line(long_text)]];
-        let lines = render_table(&table, Style::new(), Style::new(), Some(20));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(20));
         let text = plain_lines(&lines).join("\n");
         // All words must be preserved (they'll be on separate lines due to wrapping).
         for word in long_text.split_whitespace() {
@@ -767,7 +785,7 @@ mod tests {
             rows: vec![vec![make_line("你好"), make_line("1")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(40));
         let text = plain_lines(&lines).join("\n");
         assert!(text.contains("你好"), "CJK content missing: {text}");
     }
@@ -780,7 +798,7 @@ mod tests {
             alignments: vec![Alignment::Left, Alignment::Right],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(40));
         // The right-aligned "5" should be preceded by padding spaces within
         // its column (i.e. appear with leading spaces before the column gap/end).
         let data_line = plain_lines(&lines)
@@ -800,7 +818,7 @@ mod tests {
             rows: vec![vec![make_line(""), make_line("x")]],
             ..Default::default()
         };
-        let lines = render_table(&table, Style::new(), Style::new(), Some(40));
+        let lines = render_table(&table, Style::new(), Style::new(), Style::new(), Some(40));
         assert!(!lines.is_empty());
     }
 }
