@@ -263,7 +263,7 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
 
     for (i, _) in text.match_indices("```") {
         // Already at line start (blank prefix included) — nothing to do.
-        if i == 0 || bytes[i - 1] == b'\n' || fence_prefix_is_blank(bytes, i) {
+        if i == 0 || bytes[i - 1] == b'\n' || fence_is_at_block_start(bytes, i) {
             continue;
         }
 
@@ -293,18 +293,27 @@ fn ensure_fences_on_own_line(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// Whether everything before byte offset `at` on that line is blank — the
-/// fence there is already a line-start fence (≤3 spaces of indent are legal)
-/// or an indented code block, so it must not be normalized.
-pub(crate) fn fence_prefix_is_blank(bytes: &[u8], at: usize) -> bool {
+/// Whether the fence at `at` already starts its **block**: the prefix on that
+/// line is only indentation or blockquote markers (`>`).
+///
+/// Such a fence must not be normalized. Inserting a newline before it would
+/// tear it out of the quote — `> ```rust` becomes a quote line holding a bare
+/// fence, so the quote ends there and every following line keeps a literal
+/// `> `. (Indentation is included for the same reason: an indented fence is an
+/// indented code block, not a stray inline one.)
+///
+/// List markers are **not** included: `- ```` inside prose is ambiguous in a
+/// way a quote marker is not, and moving it to its own line routinely changes
+/// how the rest of the document parses (a fence that stays in the item can
+/// swallow the paragraphs after it).
+pub(crate) fn fence_is_at_block_start(bytes: &[u8], at: usize) -> bool {
     let line_start = bytes[..at]
         .iter()
         .rposition(|&b| b == b'\n')
         .map(|pos| pos + 1)
         .unwrap_or(0);
-    bytes[line_start..at]
-        .iter()
-        .all(|&b| b == b' ' || b == b'\t')
+    let prefix = &bytes[line_start..at];
+    prefix.iter().all(|b| matches!(b, b' ' | b'\t' | b'>'))
 }
 
 /// Render plain text (no markdown parsing) to lines.
@@ -825,6 +834,30 @@ mod tests {
             .find(|(text, _)| text.trim() == "text")
             .expect("body cell");
         assert_eq!(body.1.fg, Some(palette.text));
+    }
+
+    /// A role inside a header cell keeps its hue (only the weight is added) —
+    /// the band inks prose, not literals.
+    #[test]
+    fn a_role_inside_a_table_header_keeps_its_hue() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> =
+            render_markdown_lines("| `code` | plain |\n|---|---|\n| a | b |\n", None, &palette)
+                .into_iter()
+                .flat_map(|line| line.segments)
+                .map(|seg| (seg.text, seg.style))
+                .collect();
+        let code = segments
+            .iter()
+            .find(|(text, _)| text.contains("code"))
+            .expect("header code cell");
+        assert_eq!(code.1.fg, Some(palette.inline_code), "role hue survives");
+        assert!(code.1.add_modifier.contains(Modifier::BOLD), "weight added");
+        let prose = segments
+            .iter()
+            .find(|(text, _)| text.contains("plain"))
+            .expect("header prose cell");
+        assert_eq!(prose.1.fg, Some(palette.marker), "prose takes the band");
     }
 
     #[test]
@@ -1465,6 +1498,28 @@ mod tests {
         let input = "just plain text without any code";
         let output = ensure_fences_on_own_line(input);
         assert!(matches!(output, Cow::Borrowed(_)));
+    }
+
+    /// A fence that belongs to a container (quote / list) is already at its
+    /// block's start: normalizing it would cut the container in half and leave
+    /// a literal `> ` on every following line.
+    #[test]
+    fn a_fence_inside_a_container_is_left_alone() {
+        for input in [
+            "> ```rust\n> let x = 1;\n> ```",
+            "> > ```rust\n> > let x = 1;\n> > ```",
+            ">  ```rust\n>  let x = 1;\n>  ```",
+            "  ```rust\n  let x = 1;\n  ```",
+        ] {
+            let output = ensure_fences_on_own_line(input);
+            assert!(matches!(output, Cow::Borrowed(_)), "normalized: {input:?}");
+        }
+        // Prose that merely *ends* with a marker-ish prefix still normalizes.
+        let output = ensure_fences_on_own_line("a list - ```rust\ncode");
+        assert!(
+            matches!(output, Cow::Owned(ref text) if text.contains("\n```rust")),
+            "a fence inside prose must still move to its own line: {output:?}"
+        );
     }
 
     #[test]

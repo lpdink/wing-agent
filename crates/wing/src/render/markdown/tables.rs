@@ -104,7 +104,7 @@ pub(crate) fn render_table(
                 frame_style,
                 outer_v: skin.outer_v,
                 divider: skin.header_v,
-                text_style: header_style.bold(),
+                text_style: Some(header_style.bold()),
             },
         ));
         lines.push(rule_line(&skin.header_sep, &col_widths, frame_style));
@@ -121,7 +121,7 @@ pub(crate) fn render_table(
                 frame_style,
                 outer_v: skin.outer_v,
                 divider: skin.inner_v,
-                text_style: Style::new(),
+                text_style: None,
             },
         ));
         if row_idx + 1 < table.rows.len() {
@@ -235,9 +235,13 @@ struct RowEnv<'a> {
     frame_style: Style,
     outer_v: char,
     divider: char,
-    /// Ink for the cells' text — the header band's hue + weight, empty for the
-    /// body (which keeps each cell's own styles).
-    text_style: Style,
+    /// Ink for the header band's prose (`Some`), `None` for body rows.
+    ///
+    /// The band inks *prose*; a role inside a cell (inline code, a link) keeps
+    /// its own hue and only takes the weight — the same rule emphasis follows
+    /// (see `MarkdownTheme::emphasized`). Otherwise a header `| `code` |` would
+    /// repaint the literal family in the header's tint.
+    text_style: Option<Style>,
 }
 
 /// Render a single table row (possibly multi-line after wrapping) as one or
@@ -286,7 +290,17 @@ fn render_row(row: &[MarkdownLine], env: &RowEnv<'_>) -> Vec<MarkdownLine> {
                 line.push_segment(SegmentKind::Text, env.base_style, &" ".repeat(left_pad));
             }
             for seg in &segments {
-                let style = seg.style.patch(env.text_style);
+                let style = match env.text_style {
+                    None => seg.style,
+                    Some(ink) => {
+                        let prose = seg.style.fg.is_none() || seg.style.fg == env.base_style.fg;
+                        if prose {
+                            seg.style.patch(ink)
+                        } else {
+                            seg.style.bold()
+                        }
+                    }
+                };
                 line.push_segment(seg.kind, style, &seg.text);
             }
             if right_pad > 0 {

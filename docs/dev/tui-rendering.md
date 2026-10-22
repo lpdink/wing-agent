@@ -122,7 +122,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 ```
 
 * **刷光**：与开屏 wordmark 同一份数学（`ui/shimmer.rs` 的 `sweep_intensity` + `mix`）；**基色是 `thinking_label` 槽**（默认琥珀 `#c99a5e`，秒数与提示同色、不参与刷光），高光朝白。跨度 = 措辞宽 + 8 列余量（扫出去停一拍再回来），周期 1.6s，帧间隔 40ms（≈25fps）。亮底主题方向翻转（朝深压），否则白光看不见 —— 判据同 wordmark（`is_light_theme`）；
-* **Ctrl+O 提示**：只出现在**进行中**的行上、且这次会话**还没按过** `Ctrl+O`（`CellContext::thinking_expanded` 仍是 `None`）—— 按过一次即退场（模式已全局翻转、切换效果自证），冻结的历史行保持安静。文案指向**按下去会发生什么**：展开中 `· Ctrl+O 折叠`、折叠中 `· Ctrl+O 展开`。静态、dim、不进刷光跨度（动效只留给「进行中」这一个信号）；让位序排在**最前**：装不下就整个不显示，措辞 / 秒数不为它让位（见 `ThinkingBlock::label_line`）；
+* **Ctrl+O 提示**：只出现在**进行中**的行上、且这次会话**还没按过** `Ctrl+O`（`CellContext::thinking_expanded` 仍是 `None`）—— 按过一次即退场（模式已全局翻转、切换效果自证），冻结的历史行保持安静。文案指向**按下去会发生什么**：展开中 `· Ctrl+O 折叠`、折叠中 `· Ctrl+O 展开`。静态、`thinking_label` 色、不进刷光跨度（动效只留给「进行中」这一个信号）；让位序排在**最前**：装不下就整个不显示，措辞 / 秒数不为它让位（见 `ThinkingBlock::label_line`）；
 * **帧驱动**：绝对截止时刻（网格锚在块的起点上，`ThinkingBlock::next_frame`），滚动 / 流式事件不会把它推后；没有活跃块、或块**不在视口**时定时臂 park（看不见的动画不花钱）——与欢迎屏扫光的契约相同（[welcome-mascot.md](welcome-mascot.md) 的「重绘成本契约」）；
 * **计时口径**：块内首个 reasoning 事件 → 该块被冻结（下一条正文 / 工具调用事件，或回合结束）。中断（Esc）、错误同样就地冻结。中途重连（sync 重放半截 reasoning）会少算一点；
 * **标题行在流式路径里的位置**：展开的思考块，标题由 `StreamingRender` 当作行集的第 0 行（`set_header`）——正文因此拿两列续行缩进，链接 / 图片锚点的「行号 == 索引」不变（插 / 摘标题行时锚点的**绝对行号**随之 ±1 平移，见 `images.rs` 的 `shift_anchors_after_insert/remove`；漏平移会让绘制侧按错行找 caption、拒绘，图片静默消失）。后设的标题会**接管**正文首行的 `⦁ `（原件暂存，收起时原样归还）。`sync_stream_header` 对**每个**思考块都设标题：折叠时也设，只是整条流不参与渲染（展开 / 折叠切换的那一帧行集已经就位）；
@@ -158,22 +158,24 @@ markdown 的每个元素**归属一个角色**，角色决定色相；同一角�
 |---|---|---|---|
 | 正文 | 阅读 | `text` `#e6eaf2` | 最亮的一档 |
 | 思考块标题行 `⦁ 深度思考中 4s` | 元信息 | `thinking_label` `#c99a5e` | 刷光基色即此槽（高光朝白）；与正文色相区分，见二·六 |
-| `**加粗**` | 强调 | `strong`（派生：`text` 提亮 35%） | 只对**纯正文**提亮；标题 / 链接 / 行内代码里的加粗只加字重（`MarkdownTheme::strong`） |
+| `**加粗**` | 强调 | `strong` `#e5c07b` | 24-bit 的粗体不会自己变亮（SGR 1 只改字重），所以强调必须带一个色相。只染**纯正文**；标题 / 链接 / 行内代码里的加粗只加字重（`MarkdownTheme::emphasized`） |
 | `*斜体*` / `~~删除~~` | 强调 | —（只加修饰符） | 不换色 |
-| 标题 H1…H6 | 结构 | `heading` `#b49af0`（H1 用派生的 `heading_bright`） | 阶梯：H1 亮紫粗、H2 紫粗、H3 紫粗斜、H4–H6 紫斜。**不用下划线**（那是链接的词汇） |
+| 标题 H1…H6 | 结构 | `heading` `#b49af0`（H1 用派生的 `heading_bright`） | 阶梯：H1 亮紫粗、H2 紫粗、H3 紫粗斜、H4–H6 紫斜。**不用下划线**（那是链接的词汇）。`heading_bright` 的提亮方向跟**终端方向**走：暗底终端提亮，亮底终端压深（否则 H1 会成为最不可读的一级） |
 | 行内代码 / 未高亮的代码块正文 | 字面量 | `inline_code` `#e5787f` | 与链接刻意区分：一个色相一个含义（与 `danger` 同族，靠上下文区分：代码在正文里、错误在带栏杆的 notice 行上） |
 | 链接 | 交互 | `accent` `#3ac6e0` + 下划线 | 品牌色 |
-| 列表符 / 有序序号 / 任务框 | 结构（quiet） | `marker` `#7d8bb0` | 比正文暗、比 `dim` 亮 |
+| 列表符 / 有序序号 / 任务框 | 结构（quiet） | `marker` `#6f7db4` | 比正文暗、比 `dim` 亮；刻意离 `tool_result` 的灰蓝远一档 |
 | 引用（`>`） | 结构（安静） | `quote` `#8f93c4`；竖线同色 + `DIM` | `SegmentKind::Quote` —— 与正文分层，reasoning 里也保留 |
 | 公式 | 结构 | `math` `#b49af0` | 渲染网格与降级源码同色 |
-| 表格表头文字 | 结构（quiet） | `marker`（`render_table` 的 `header_style`）+ 粗 | 表体不受影响 |
+| 表格表头文字 | 结构（quiet） | `marker`（`render_table` 的 `header_style`）+ 粗 | 只染**表头带的正文**：格内的角色（`` `code` `` / 链接）保留自己的色相，只加字重。表体不受影响 |
 | 边框 / 行号 / 表格线 / 分隔线 | chrome | `dim` `#5b6478` | 永远比内容安静 |
 | diff 行 | 状态 | `success` / `danger` + `diff_*_bg` | 见 `render/markdown/code_blocks.rs` |
 
 两条硬规则：
 
 1. **reasoning 不吃掉角色**：`thinking_segment_style` 只把 `SegmentKind::Text` 换成 `thinking` 前景；标题 / 引文 / 列表符 / 代码 / 链接 / 公式 / 图片 caption 保留自己的色相（否则 reasoning 里的结构信息全糊成一片灰）。
-2. **强调不许重绘角色**：`theme.strong(current)` 在「当前前景 == `base`（或没有前景）」时给提亮色，否则只加 `BOLD` —— 标题里的 `**加粗**` 仍是紫色。
+2. **强调不许重绘角色**：`theme.emphasized(current)` 在「当前前景 == `base`（或没有前景）」时给 `strong` 色相，否则只加 `BOLD` —— 标题里的 `**加粗**` 仍是紫色，表头里的 `` `code` `` 仍是玫瑰色。
+
+槽位一共 20 个（`config::slot_doc` 是**唯一**的说明来源：设置面板、`wing config` 与字段文档共用它），`heading_bright` 是唯一仍是派生值的槽。
 
 调色 / 对色**不用起 TUI**：`cargo run -p wing --example theme_preview -- --html /tmp/theme.html`（整条 transcript 的真 cell 画廊，含 markdown 全要素），浏览器里看或截图；`--preset terminal` 对照跟随终端 ANSI 色的形态。新增元素时先回答「它是哪个角色」，再决定是否真要开新槽位——槽位是用户可覆盖的 API，不是调色试验田。
 
