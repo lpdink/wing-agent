@@ -61,10 +61,7 @@ pub async fn run(session_ids: &[String], json: bool) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Err(e) => {
-            eprintln!("wing release error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("release", e),
     }
 }
 
@@ -73,8 +70,7 @@ async fn release_inner(session_ids: &[String]) -> Result<ReleaseOutput> {
         anyhow::bail!("no session IDs provided");
     }
 
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
     let mut results: Vec<ReleaseResult> = Vec::with_capacity(session_ids.len());
     for sid in session_ids {

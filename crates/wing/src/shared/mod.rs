@@ -22,6 +22,11 @@
 //!   and `wing config`, with their two UX policies spelled out per entry
 //!   point).
 //!
+//! `text_edit` (single-line editing: char ↔ byte plus insert / backspace /
+//! delete / move) sits here for the same neutral-layer reason: the Ask panel,
+//! the settings editor and the composer all need it, and `shared` cannot reach
+//! up into the UI.
+//!
 //! **Admission rule.** Only state or vocabulary that *both* sides need, that is
 //! free of I/O and that knows neither the App nor the UI may live here; anything
 //! with a single consumer stays on the side that consumes it (`app/popup_state.rs`
@@ -33,4 +38,5 @@ pub mod doc_edit;
 pub mod panels;
 pub mod pinning;
 pub mod session_tree;
+pub(crate) mod text_edit;
 pub mod tips;

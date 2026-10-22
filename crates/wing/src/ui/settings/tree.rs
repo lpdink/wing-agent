@@ -1,4 +1,4 @@
-//! 树行渲染：把 07 的 [`Row`] 画成一行。
+//! 树行渲染：把 [`Row`] 画成一行。
 //!
 //! 行的形状（每段都可能缺席）：
 //!
@@ -6,7 +6,7 @@
 //! [cursor 2][indent 2*depth][dirty 2][arrow 2][■ 色块][label][pad → 值列][value][ !][ apply 短标记]
 //! ```
 //!
-//! 三条来自 07 的约定（`shared/panels/settings/tree.rs` 的模块文档）在这里落地：
+//! 三条来自状态机的约定（`shared/panels/settings/tree.rs` 的模块文档）在这里落地：
 //!
 //! 1. **列表项行的主文本在 `label`**（标量项 = 值本身；对象项 = `name · protocol · …`），
 //!    `value` 恒为 `ValueText::None` —— 所以值列只在 `value` 非 `None` 时画；
@@ -44,7 +44,7 @@ use super::text::clamp_line;
 /// 值列上限：区域宽的 60%（剩下的留给值本身）。
 const VALUE_COLUMN_RATIO: usize = 6;
 
-/// 整棵树的行列表（窗口已经按 07 的 `visible_range` 选好）。
+/// 整棵树的行列表（窗口已经按 `visible_range` 选好）。
 ///
 /// `height` 是主体可用行数；编辑器带错误时少要一行给 `↳ <error>`。
 pub(crate) fn tree_lines(
@@ -110,7 +110,7 @@ pub(crate) fn tree_lines(
     lines
 }
 
-/// 结构行是否展开：07 的 `Row` 没有 `expanded` 字段（见 design.md A2），
+/// 结构行是否展开：`Row` 没有 `expanded` 字段，
 /// 用「下一行的 depth 更大」推断 —— 展开的子树一定紧跟自己的孩子。
 fn is_expanded(rows: &[Row], index: usize) -> bool {
     rows.get(index + 1)
@@ -138,7 +138,7 @@ fn label_swatch(row: &Row, hit: bool) -> bool {
     hit && matches!(&row.action, RowAction::Choose { value: Some(_), .. })
 }
 
-/// 这一行是否命中 `value_hint == "color"`（07 的字段在目录节点上，不在 `Row` 上）。
+/// 这一行是否命中 `value_hint == "color"`（字段在目录节点上，不在 `Row` 上）。
 fn row_hint(catalogs: &SettingsCatalogs<'_>, row: &Row) -> bool {
     !row.path.is_empty() && catalogs.hint_for(row.root, &row.path)
 }
@@ -328,7 +328,7 @@ fn value_spans(row: &Row, color_hint: bool, palette: &ThemePalette) -> Vec<Span<
     }
 }
 
-/// 色块预览（design §20 D25 / protocol_addendum P1）：值可解析成颜色时画一个该色的 `■`。
+/// 色块预览：值可解析成颜色时画一个该色的 `■`。
 ///
 /// 解析失败、`reset`（画出来是透明格，等于没画）一律不画 —— 宁可不画，不可画错。
 fn color_swatch(text: &str, color_hint: bool) -> Vec<Span<'static>> {

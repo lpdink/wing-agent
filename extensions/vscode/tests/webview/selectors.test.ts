@@ -15,7 +15,7 @@ import {
 } from '../../src/webview/app/selectors';
 
 /**
- * The shell's display projections (step 05).
+ * The shell's display projections.
  *
  * They must be *pure lookups over host data* — these tests pin the exact wording and
  * the two thresholds, which is what keeps the status area honest.

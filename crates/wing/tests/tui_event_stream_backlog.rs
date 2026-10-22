@@ -24,6 +24,10 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use wing::tui::TermEvent;
 
+mod common;
+
+use common::pty::{make_raw, openpty_pair, write_all};
+
 /// 事件通道容量（`spawn_event_stream` 里的 `mpsc::channel(128)`）。
 const CHANNEL_CAPACITY: usize = 128;
 /// 灌进的事件条数：> 容量（每条 SGR 鼠标 9 字节，200 条 = 1800 字节），留足富余。
@@ -38,37 +42,6 @@ const NUDGE_INTERVAL: Duration = Duration::from_millis(5);
 const PARK_SETTLE: Duration = Duration::from_millis(50);
 
 const MOUSE: &[u8] = b"\x1b[<0;1;1M";
-
-fn openpty_pair() -> (RawFd, RawFd) {
-    let mut master: RawFd = -1;
-    let mut slave: RawFd = -1;
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-    (master, slave)
-}
-
-fn make_raw(fd: RawFd) {
-    unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        assert_eq!(libc::tcgetattr(fd, &mut term), 0);
-        libc::cfmakeraw(&mut term);
-        assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &term), 0);
-    }
-}
-
-fn write_all(fd: RawFd, bytes: &[u8]) {
-    let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-    assert_eq!(n as usize, bytes.len(), "pty write");
-}
-
 /// 有界等待「通道容量归零」（= 任务的下一次 send 必挂）：每轮补一条 9B 事件触发新边沿
 /// （见文件头），超时即判流水线没在推进。
 fn wait_until_full(outer_master: RawFd, rx: &mpsc::Receiver<TermEvent>, what: &str) {

@@ -4,20 +4,23 @@
 
 | 文档 | 内容 |
 |------|------|
-| [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / 编排 CLI 三种前端形态、会话生命周期、持久化与压缩 |
-| [backend-layout.md](backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射表、分层守门测试（`test_layering.py`）与白名单 |
+| [architecture.md](architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、会话生命周期、持久化与压缩 |
+| [backend-layout.md](backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射表、分层守门测试（`test_layering.py`）与白名单；Rust 侧对应 `crates/wing/tests/layer_guard.rs` |
 | [http-api.md](http-api.md) | 完整 HTTP 端点表、WebSocket 事件协议、Gateway 鉴权 |
 | [wake.md](wake.md) | 会话唤醒：语义表（收口 / 提问 / 失败 / 归档联动）、同一订阅重复登记 = 刷新、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
+| [session-lineage.md](session-lineage.md) | 会话血缘：父子关联字段语义、采集机制（CLI / TUI / 外部前端）、树序与 pin 规则的产品语义参照点 |
 | [glossary.md](glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [config-logging.md](config-logging.md) | WING_HOME 布局、config.yaml 顶层键、TUI 配置、日志轮转与查询、环境变量 |
 | [settings.md](settings.md) | 设置面：声明层（`S(...)` → 目录 / 模板 / 校验）、稀疏文档与「缺席即默认」、Setting API 与保存事务、密文语义、生效域全表、setup mode、TUI 全屏面板（键位表）、首次运行向导、`wing config` CLI |
 | [media-images.md](media-images.md) | 媒体与图片（read-image）：ReadImage 工具、内容寻址媒体池、模型能力声明、请求期图片投影（高水位 + 量子批量驱逐）与 KV/前缀 cache |
+| [cache-accounting.md](cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、理论命中率定义、verdict / blame / avoidable 全表、降级与排错手册 |
 | [tui-rendering.md](tui-rendering.md) | Markdown 渲染的调试入口（`render_probe`）、`Content`/`Thinking` 两个 profile 的差异、流式==终态的不变量与对账、已知边界清单 |
 | [tui-images.md](tui-images.md) | 终端图片能力的两档阶梯、探测与配置、三态、资源上限与压力验证、新鲜度（重写同一路径 ≤1s 换图）、**用户消息里的图（网关媒体对象：形状来自引用、按视口抓字节、字节 LRU）**、失效触发点、性能数字、真机验收清单 |
 | [tui-input.md](tui-input.md) | TUI 输入通道：键盘/鼠标/滚轮的上报模式（DECSET）与生命周期对称、选择与滚动的指针语义、粘贴通道（OSC 5522：stdin 接驳 + 协议机 + 文本/图片入口） |
 | [tui-signals.md](tui-signals.md) | TUI 终端状态信号（OSC 0 标题 / OSC 9 通知 / OSC 7501 程序状态）：读者分工、状态映射、盲发与去重决策、已知边界 |
 | [vscode-extension.md](vscode-extension.md) | VSCode 扩展：四层分层与数据流、桥协议与归约（重放==直播）、会话时序与多 Tab、连接自愈、构建/测试/smoke、打包与安装 |
 | [probe-testing.md](probe-testing.md) | wing-probe 确定性集成测试：跑法（`make test-probe`）、新增场景、断言原语、红线清单与口径、逃生舱 |
+| [perf-testing.md](perf-testing.md) | PR 级性能回归测量（perf-ci）：merge-base 交错 A/B 方法论、四个套件与指标表、本地跑法与产物、加套件的约定、阈值与校准口径、排查手册 |
 | [coverage.md](coverage.md) | 覆盖率：增量（patch）门禁的口径与阈值来源、cargo-llvm-cov 工具链的坑、PR 覆盖率评论（sticky `<!-- wing-coverage -->`）的数据流与读法 |
 | [welcome-mascot.md](welcome-mascot.md) | 开屏海鸥：字母网格帧与品牌调色板、待机/干活两姿态、可见性门控的重绘成本契约、改画工作流 |
 

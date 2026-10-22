@@ -15,7 +15,7 @@
 6. AST：字段赋值后不紧跟字符串表达式（无残留字段 docstring）。
 7. 声明层**不携带**分组（``section`` / ``section_doc`` 已移出 ``SettingMeta``；
    分组表见 ``config/groups.py`` 与 ``test_config_groups.py``）。
-8. 容器节点的 ``apply`` = 子树**最粗**的一档（总设计只给了叶子，容器约定见 design.md D7）。
+8. 容器节点的 ``apply`` = 子树**最粗**的一档（声明层只给了叶子，容器约定见 `config/spec.py`）。
 9. 任务书点名的声明（secret / min_items / summary_fields / choices）逐条钉住。
 """
 
@@ -302,7 +302,7 @@ def _subtree_apply(model: type[BaseModel]) -> ApplyScope:
 
 @pytest.mark.parametrize("path", _FIELD_IDS)
 def test_container_apply_is_coarsest_of_subtree(path: str) -> None:
-    """容器节点的 ``apply`` = 子树最粗的一档（design.md D7）。"""
+    """容器节点的 ``apply`` = 子树最粗的一档。"""
     field = _FIELD_BY_PATH[path]
     children = _child_models(field.annotation)
     if not children:

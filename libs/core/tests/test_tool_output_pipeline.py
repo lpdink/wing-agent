@@ -16,13 +16,14 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
+from _support import make_tool
 from wing.common.token_counter import TokenCounter
 from wing.chain import TrackedList
 from wing.event import ToolCallResultEvent
 from wing.event_bus import event_bus
 from wing.hooks import hooks
 from wing.media import MediaAccess, estimate_image_tokens
-from wing.schema import ChainNode, MediaRef, Message, Tool, ToolCall, ToolOutput
+from wing.schema import ChainNode, MediaRef, Message, ToolCall, ToolOutput
 from wing.session import serialize_message
 from wing.store import FileSessionStore
 from wing.store.memory import MemoryMessageLog
@@ -35,15 +36,6 @@ _REF = MediaRef(
     height=480,
     name="shot.png",
 )
-
-
-def _make_tool(name: str, fn: Any) -> Tool:
-    return Tool(
-        name=name,
-        description=f"Test tool: {name}",
-        params=[],
-        function=fn,
-    )
 
 
 def _make_tool_call(tool_id: str = "call-1", name: str = "T") -> ToolCall:
@@ -83,7 +75,7 @@ class TestExecutorPipeline:
         async def image_tool() -> ToolOutput:
             return ToolOutput(content="[image: /tmp/a.png | png 640x480]", media=[_REF])
 
-        agent._executor._tools = {"T": _make_tool("T", image_tool)}
+        agent._executor._tools = {"T": make_tool("T", image_tool, params=[])}
         results = await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert len(results) == 1
@@ -100,7 +92,7 @@ class TestExecutorPipeline:
         async def plain_tool() -> str:
             return "plain result"
 
-        agent._executor._tools = {"T": _make_tool("T", plain_tool)}
+        agent._executor._tools = {"T": make_tool("T", plain_tool, params=[])}
         results = await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert results[0].content == "plain result"
@@ -111,7 +103,7 @@ class TestExecutorPipeline:
         async def empty_tool() -> ToolOutput:
             return ToolOutput(content="text only")
 
-        agent._executor._tools = {"T": _make_tool("T", empty_tool)}
+        agent._executor._tools = {"T": make_tool("T", empty_tool, params=[])}
         results = await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert results[0].content == "text only"
@@ -124,7 +116,7 @@ class TestExecutorPipeline:
         async def image_tool() -> ToolOutput:
             return ToolOutput(content="raw", media=[_REF])
 
-        agent._executor._tools = {"T": _make_tool("T", image_tool)}
+        agent._executor._tools = {"T": make_tool("T", image_tool, params=[])}
         results = await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert results[0].content == "[hooked] raw"
@@ -134,19 +126,19 @@ class TestExecutorPipeline:
     async def test_truncation_applies_to_content_only(
         self,
         agent: Any,
-        _mock_config: Any,
+        _isolate_config: Any,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ):
         # 截断会把全文写进 WING_HOME/tmp——重定向到临时目录，别碰用户目录。
         monkeypatch.setenv("WING_HOME", str(tmp_path / "wing-home"))
-        _mock_config.tool_result_truncate.max_length = 50
-        _mock_config.tool_result_truncate.keep_chars = 5
+        _isolate_config.tool_result_truncate.max_length = 50
+        _isolate_config.tool_result_truncate.keep_chars = 5
 
         async def long_tool() -> ToolOutput:
             return ToolOutput(content="X" * 500, media=[_REF])
 
-        agent._executor._tools = {"T": _make_tool("T", long_tool)}
+        agent._executor._tools = {"T": make_tool("T", long_tool, params=[])}
         results = await agent._executor.execute([_make_tool_call()], agent.model)
 
         msg = results[0]
@@ -161,7 +153,7 @@ class TestExecutorPipeline:
         async def failing_tool() -> ToolOutput:
             raise ToolError("nope")
 
-        agent._executor._tools = {"T": _make_tool("T", failing_tool)}
+        agent._executor._tools = {"T": make_tool("T", failing_tool, params=[])}
         results = await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert results[0].content == "nope"
@@ -185,7 +177,7 @@ class TestToolEvent:
         async def image_tool() -> ToolOutput:
             return ToolOutput(content="envelope", media=[_REF])
 
-        agent._executor._tools = {"T": _make_tool("T", image_tool)}
+        agent._executor._tools = {"T": make_tool("T", image_tool, params=[])}
         await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert len(events) == 1
@@ -205,7 +197,7 @@ class TestToolEvent:
         async def plain_tool() -> str:
             return "ok"
 
-        agent._executor._tools = {"T": _make_tool("T", plain_tool)}
+        agent._executor._tools = {"T": make_tool("T", plain_tool, params=[])}
         await agent._executor.execute([_make_tool_call()], agent.model)
 
         assert events[0].tool_media == []

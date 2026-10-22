@@ -5,6 +5,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use serde::Deserialize as _;
+
 use crate::protocol::WingEvent;
 use crate::stdio::OutputFormat;
 use crate::stdio::ndjson::{
@@ -70,7 +72,7 @@ fn error_texts(is_error: bool, errors: &[String]) -> Vec<String> {
 /// 被打断轮次的错误文案（`SDKResultError.errors`）。
 ///
 /// 参考 CLI 在转写里写 "[Request interrupted by user]"；这里用同一句意的短句
-/// 作为 errors 文本（真 CLI 的 `errors` 取值没有可观测样本，见 design「R1 返修」）。
+/// 作为 errors 文本（真 CLI 的 `errors` 取值没有可观测样本）。
 const INTERRUPTED_BY_USER: &str = "Interrupted by user";
 
 /// 后端中断收口时给未完成工具调用合成的结果文本
@@ -83,7 +85,73 @@ const INTERRUPTED_BY_USER: &str = "Interrupted by user";
 /// 由 `tests::interrupted_marker_matches_backend` 钉住。
 const INTERRUPTED_TOOL_RESULT: &str = "Tool call interrupted by user.";
 
+/// 事件不带 `usage` 时的占位（三个 `result` 发出点同形）。
+fn zero_usage() -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0
+    })
+}
+
+/// 一条 `result` 终态帧里**随发出点不同**的字段。
+///
+/// `msg_type` / `total_cost_usd` / 本次运行已耗时 / 零用量占位 / session_id 兜底
+/// 由 [`StdioRenderer::result_frame`] 统一派生——它们对三个发出点（json 轮结果、
+/// stream-json 轮结果、打断合成帧）逐字相同。
+struct ResultFrameArgs {
+    subtype: String,
+    is_error: bool,
+    /// `None` = 不带 `result` 字段（`SDKResultError` 没有该字段）。
+    result: Option<String>,
+    duration_api_ms: i64,
+    num_turns: i64,
+    usage: serde_json::Value,
+    terminal_reason: Option<String>,
+    errors: Vec<String>,
+    /// `None` = 用本进程的 session id。
+    session_id: Option<String>,
+}
+
+impl Default for ResultFrameArgs {
+    fn default() -> Self {
+        Self {
+            subtype: String::new(),
+            is_error: false,
+            result: None,
+            duration_api_ms: 0,
+            num_turns: 0,
+            usage: zero_usage(),
+            terminal_reason: None,
+            errors: Vec::new(),
+            session_id: None,
+        }
+    }
+}
+
 impl StdioRenderer {
+    /// 组装一条 `result` 终态帧（见 [`ResultFrameArgs`]）。
+    ///
+    /// `uuid` 是帧级去重/关联 id，必须由调用方给（不放进 `ResultFrameArgs` 的
+    /// `Default`：那会让漏填静默变成一条 `"uuid": ""` 的帧）。
+    fn result_frame(&self, uuid: String, args: ResultFrameArgs) -> ResultMessage {
+        ResultMessage {
+            msg_type: "result".into(),
+            subtype: args.subtype,
+            is_error: args.is_error,
+            result: args.result,
+            duration_ms: self.start_time.elapsed().as_millis() as i64,
+            duration_api_ms: args.duration_api_ms,
+            num_turns: args.num_turns,
+            total_cost_usd: 0.0,
+            usage: args.usage,
+            terminal_reason: args.terminal_reason,
+            errors: args.errors,
+            session_id: args.session_id.unwrap_or_else(|| self.session_id.clone()),
+            uuid,
+        }
+    }
+
     pub fn new(
         format: OutputFormat,
         start_time: Instant,
@@ -149,10 +217,10 @@ impl StdioRenderer {
             return false;
         }
         // 被打断的轮次后端**不发** `turn_result`（半截内容作为 partial
-        // assistant 提交进链，见 design D10）：前端在这里补一条终态帧，否则
+        // assistant 提交进链）：前端在这里补一条终态帧，否则
         // 编排器永远等不到终态——SDK 的 `streamInput` 在 canUseTool/hooks 存在时
         // 以「首个 result」门住 `endInput()`，缺了这条帧 stdin 永不关闭、
-        // CLI 进程与 WS 订阅一起滞留（R1 B1）。
+        // CLI 进程与 WS 订阅一起滞留。
         if matches!(event, WingEvent::Interrupted { .. }) {
             return self.handle_interrupted(event);
         }
@@ -212,28 +280,20 @@ impl StdioRenderer {
                 usage,
                 ..
             } => {
-                let msg = ResultMessage {
-                    msg_type: "result".into(),
-                    subtype: subtype.clone(),
-                    is_error: *is_error,
-                    // 一条规则：错误帧不带 `result`（`SDKResultError` 没有该字段）。
-                    result: (!*is_error).then(|| result.clone().unwrap_or_default()),
-                    duration_ms: self.start_time.elapsed().as_millis() as i64,
-                    duration_api_ms: *duration_ms,
-                    num_turns: *num_turns,
-                    total_cost_usd: 0.0,
-                    usage: usage.clone().unwrap_or_else(|| {
-                        serde_json::json!({
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "cached_tokens": 0
-                        })
-                    }),
-                    terminal_reason: None,
-                    errors: error_texts(*is_error, errors),
-                    session_id: self.session_id.clone(),
-                    uuid: uuid.clone(),
-                };
+                let msg = self.result_frame(
+                    uuid.clone(),
+                    ResultFrameArgs {
+                        subtype: subtype.clone(),
+                        is_error: *is_error,
+                        // 一条规则：错误帧不带 `result`（`SDKResultError` 没有该字段）。
+                        result: (!*is_error).then(|| result.clone().unwrap_or_default()),
+                        duration_api_ms: *duration_ms,
+                        num_turns: *num_turns,
+                        usage: usage.clone().unwrap_or_else(zero_usage),
+                        errors: error_texts(*is_error, errors),
+                        ..Default::default()
+                    },
+                );
                 if let Ok(json) = serde_json::to_string(&msg) {
                     self.out_line(&json);
                 }
@@ -328,7 +388,7 @@ impl StdioRenderer {
                     .map(|block| {
                         // Pass through the content block as-is (it's already
                         // in Anthropic Messages API format from the backend)
-                        serde_json::from_value(block.clone())
+                        MessageContent::deserialize(block)
                             .unwrap_or(MessageContent::Raw { raw: block.clone() })
                     })
                     .collect();
@@ -452,28 +512,20 @@ impl StdioRenderer {
                 let stream_close = self.stream.close_message(None, None);
                 self.emit_stream_events(stream_close);
 
-                let msg = ResultMessage {
-                    msg_type: "result".into(),
-                    subtype: subtype.clone(),
-                    is_error: *is_error,
-                    // 一条规则：错误帧不带 `result`（`SDKResultError` 没有该字段）。
-                    result: (!*is_error).then(|| result.clone().unwrap_or_default()),
-                    duration_ms: self.start_time.elapsed().as_millis() as i64,
-                    duration_api_ms: *duration_ms,
-                    num_turns: *num_turns,
-                    total_cost_usd: 0.0,
-                    usage: usage.clone().unwrap_or_else(|| {
-                        serde_json::json!({
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "cached_tokens": 0
-                        })
-                    }),
-                    terminal_reason: None,
-                    errors: error_texts(*is_error, errors),
-                    session_id: self.session_id.clone(),
-                    uuid: uuid.clone(),
-                };
+                let msg = self.result_frame(
+                    uuid.clone(),
+                    ResultFrameArgs {
+                        subtype: subtype.clone(),
+                        is_error: *is_error,
+                        // 一条规则：错误帧不带 `result`（`SDKResultError` 没有该字段）。
+                        result: (!*is_error).then(|| result.clone().unwrap_or_default()),
+                        duration_api_ms: *duration_ms,
+                        num_turns: *num_turns,
+                        usage: usage.clone().unwrap_or_else(zero_usage),
+                        errors: error_texts(*is_error, errors),
+                        ..Default::default()
+                    },
+                );
                 self.emit_ndjson(&msg);
 
                 // 退出码 = 最后一轮结果：每个终态帧**覆盖**（不累积）——常驻多轮
@@ -547,30 +599,19 @@ impl StdioRenderer {
         // text 模式没有"最终文本"可打；中止不是错误，stdout 保持干净（与
         // 错误轮的 text 行为一致：错误文本走 stderr）。
         if !matches!(self.format, OutputFormat::Text) {
-            let msg = ResultMessage {
-                msg_type: "result".into(),
-                subtype: "error_during_execution".into(),
-                is_error: true,
-                result: None,
-                duration_ms: self.start_time.elapsed().as_millis() as i64,
-                duration_api_ms: 0,
-                num_turns: 0,
-                total_cost_usd: 0.0,
-                usage: serde_json::json!({
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cached_tokens": 0
-                }),
-                terminal_reason: Some(terminal_reason.to_string()),
-                errors: vec![INTERRUPTED_BY_USER.to_string()],
-                session_id: meta
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| self.session_id.clone()),
-                // 打断事件不带链 uuid（它不是链上事实）：这里造一个稳定可追溯的
-                // 帧 id，供消费方去重/关联。
-                uuid: crate::protocol::generate_request_id(),
-            };
+            // 打断事件不带链 uuid（它不是链上事实）：这里造一个稳定可追溯的帧 id，
+            // 供消费方去重/关联。
+            let msg = self.result_frame(
+                crate::protocol::generate_request_id(),
+                ResultFrameArgs {
+                    subtype: "error_during_execution".into(),
+                    is_error: true,
+                    terminal_reason: Some(terminal_reason.to_string()),
+                    errors: vec![INTERRUPTED_BY_USER.to_string()],
+                    session_id: meta.session_id.clone(),
+                    ..Default::default()
+                },
+            );
             self.emit_ndjson(&msg);
         }
         self.exit_code = std::process::ExitCode::SUCCESS;
@@ -745,7 +786,7 @@ mod tests {
         assert_eq!(buf.text(), "", "streaming deltas are not protocol frames");
     }
 
-    // ---- interrupted: 被打断轮次的终态帧（R1 B1） ----
+    // ---- interrupted: 被打断轮次的终态帧 ----
 
     /// 被打断事件（后端对被打断轮次不发 turn_result，只发这个）。
     fn interrupted() -> WingEvent {
@@ -783,7 +824,7 @@ mod tests {
         }))
     }
 
-    /// B1 的核心：被打断的轮次必须有**终态帧**，否则 SDK 的 endInput 门
+    /// 被打断的轮次必须有**终态帧**，否则 SDK 的 endInput 门
     /// （canUseTool/hooks 存在时以首个 result 为条件）永不满足，CLI 滞留。
     /// 形状按 `SDKResultError` + `TerminalReason`（sdk.d.ts）钉死。
     #[test]
@@ -1509,7 +1550,7 @@ mod tests {
         assert_eq!(second_start["event"]["message"]["model"], "test-model");
     }
 
-    // ---- S1: 错误轮的 errors 透传（SDK 无条件读它，缺字段会抛 TypeError） ----
+    // ---- 错误轮的 errors 透传（SDK 无条件读它，缺字段会抛 TypeError） ----
 
     fn turn_error(errors: Vec<&str>, sub: &str) -> WingEvent {
         decode(json!({

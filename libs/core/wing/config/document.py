@@ -3,14 +3,14 @@
 
 为什么单独成模块：
 
-- 01 的声明层与 02 的 catalog 回答「配置长什么样」，本模块回答「**盘上那份文件长什么样**」：
+- 声明层与 catalog 回答「配置长什么样」，本模块回答「**盘上那份文件长什么样**」：
   稀疏文档（只有用户显式写下的键）、sha256 指纹（乐观并发的唯一凭据）、schema 之外的未知键
   （前向兼容，原样写回）、密文三态（只写不回显）、pydantic 校验错误 → 带精确路径的问题列表。
-- **服务端不缓存文档**（总设计 §20 D18）：每次 `read_document()` 现读磁盘，永远与文件一致，
-  没有失效问题（config.yaml 只有几 KB）。
+- **服务端不缓存文档**：每次 `read_document()` 现读磁盘，永远与文件一致，没有失效问题
+  （config.yaml 只有几 KB）。
 - 本模块是**唯一新增的文件 I/O 点**（读 `config.yaml`；写盘在 `emit` + `common/fs` 的原子写，
   由 `runtime.apply_settings` 编排）。纯逻辑 + 一次读文件，不 import gateway / runtime / event_bus。
-- 路径文法复用 02 的 ``parse_path`` / ``PathStep``（``Key`` / ``Index`` / ``Element``）——
+- 路径文法复用 catalog 的 ``parse_path`` / ``PathStep``（``Key`` / ``Index`` / ``Element``）——
   不写第二个地址解析器；``node_at_path`` 是 Rust 侧 ``SettingNode::node_at`` 的 Python 对偶。
 
 三个消费方（都在 L4）：``GET /api/settings/get``（掩码 + 状态 + problems）、
@@ -32,12 +32,18 @@ from .catalog import (
     SettingKind,
     SettingNode,
     build_catalog,
+    child_path,
+    item_template,
     parse_path,
 )
-from .emit import _item_template
 from .loader import get_config_path
 from .models import Config
-from .problems import ConfigProblem, ProblemKind, model_name_message
+from .problems import (
+    ConfigProblem,
+    ProblemKind,
+    cross_field_problems,
+    model_name_message,
+)
 from .spec import ApplyScope
 
 ABSENT_FINGERPRINT = "absent"
@@ -46,7 +52,7 @@ ABSENT_FINGERPRINT = "absent"
 UNPARSEABLE_CONFIG_HINT = (
     "配置文件无法解析；请手工检查语法或备份后删除该文件让 wing 重新生成"
 )
-"""「连字段级校验都做不出来」的问题的建议（AD12 的兜底文案，boot 与设置端点共用）。"""
+"""「连字段级校验都做不出来」的问题的建议（boot 与设置端点共用同一份文案）。"""
 
 _MISSING = object()
 """「键缺席」（与显式 ``None`` 区分：``null`` 是用户写下的值）。"""
@@ -63,7 +69,7 @@ class ExtraKey(NamedTuple):
     父前缀在递归遍历时拼接、**键名不参与任何字符串切分**——键名本身含点（``foo.bar``）、
     就是 ``.``、或以点开头结尾时仍能精确归位。靠 ``rpartition(".")``
     事后反推边界，会把 ``gateway.foo.bar`` 误判成父 ``gateway.foo`` 下的 ``bar``，
-    保存一次即把键挪到错误的名字 / 位置（违反 D17 的前向兼容承诺）。
+    保存一次即把键挪到错误的名字 / 位置（违反前向兼容承诺）。
     """
 
     parent: str
@@ -89,7 +95,7 @@ class SparseDocument:
 
 @dataclass(frozen=True)
 class PositionalSecret:
-    """(b) 分支**按位置保留**的密文叶子（AD18 第 2 点：歧义关不掉，就不许静默）。
+    """(b) 分支**按位置保留**的密文叶子（歧义关不掉，就不许静默）。
 
     位置配对在结构上与「重命名」不可区分（整表替换尤其是）——保留下来的值可能是这一项
     自己的（重命名），也可能是别的项（替换）的。回执把两种读法一并说清，用户自己判断。
@@ -108,7 +114,7 @@ class SecretResolution:
     """``resolve_secrets`` 的产物：解析后的稀疏文档 + 两类「用户必须知道」的密文路径。
 
     显式建模（不是全局状态、不是异常）：丢弃与按位置保留都是**正常结果**——列表结构变了
-    又没法按身份配对时，宁可让用户重填一次，也不把 A 的密钥猜给 B（总设计 §7.5）；
+    又没法按身份配对时，宁可让用户重填一次，也不把 A 的密钥猜给 B；
     而位置配对保留下来的值必须**出声**，因为它与「重命名」不可区分。
     两类路径都由回执变成用户可见的 ``warnings``（``runtime.apply_settings``）。
     """
@@ -162,8 +168,14 @@ class ConfigDocumentError(ValueError):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def read_document() -> tuple[SparseDocument, ConfigFingerprint]:
+def read_document(
+    *, catalog: SettingNode | None = None
+) -> tuple[SparseDocument, ConfigFingerprint]:
     """现读磁盘 → ``(稀疏文档, 指纹)``。
+
+    Args:
+        catalog: 已有的目录树（一次请求要连做掩码 / 问题清单时传同一棵，
+            省掉重复的 ``build_catalog()``）。``None`` ⇒ 现建。
 
     Raises:
         ConfigDocumentError: 文件存在但不是合法 YAML / 顶层不是映射（带指纹）。
@@ -191,7 +203,7 @@ def read_document() -> tuple[SparseDocument, ConfigFingerprint]:
         )
 
     extra: list[ExtraKey] = []
-    data = _split_known(build_catalog(), parsed, "", extra)
+    data = _split_known(catalog or build_catalog(), parsed, "", extra)
     return SparseDocument(data=data, extra=extra), fingerprint
 
 
@@ -200,12 +212,12 @@ def _split_known(
 ) -> Any:
     """递归把 schema 之外的键收进 ``extra``（freeform map 的内部键不算未知键）。
 
-    未知键**不丢**（总设计 D17）：记录 ``(父容器前缀, 原始键名, 值)`` 三元组（:class:`ExtraKey`）
+    未知键**不丢**：记录 ``(父容器前缀, 原始键名, 值)`` 三元组（:class:`ExtraKey`）
     ——前缀在这里拼接，**键名不参与任何切分**，emitter 据此在父容器末尾原样写回。
 
     **非字符串键在记录时就转成字符串**（YAML 的裸数字 / bool / 日期会被解析成对应类型）：
     这不是保真度的退让，而是修复路径的前提——`Config(**raw)` 只接受字符串关键字
-    （`TypeError: keywords must be strings`，AD12 的显式守卫），把一个 int 键原样写回文件
+    （`TypeError: keywords must be strings`，显式守卫），把一个 int 键原样写回文件
     会让「面板保存修好配置」这条路径永远修不好（probe 场景
     ``test_numeric_top_level_key_boots_degraded_and_repairs`` 钉住）。字符串键一个字符都不变。
     """
@@ -222,7 +234,7 @@ def _split_known(
     if node.kind is SettingKind.LIST and isinstance(value, list):
         out_list: list[Any] = []
         for index, item in enumerate(value):
-            template = _item_template(node, item)
+            template = item_template(node, item)
             item_path = f"{path}[{index}]"
             if template is None:
                 out_list.append(item)
@@ -233,8 +245,8 @@ def _split_known(
 
 
 def _join(path: str, key: Any) -> str:
-    """子路径：root 的子树不带根前缀（与 catalog 的路径生成同一条规则）。"""
-    return f"{path}.{key}" if path else str(key)
+    """子路径（键先转字符串：``_split_known`` 会传非字符串键）。"""
+    return child_path(path, str(key))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,7 +277,7 @@ def _merge(node: SettingNode, value: Any) -> Any:
     if node.kind is SettingKind.LIST and isinstance(value, list):
         out_list: list[Any] = []
         for item in value:
-            template = _item_template(node, item)
+            template = item_template(node, item)
             out_list.append(_merge(template, item) if template is not None else item)
         return out_list
     return value
@@ -294,7 +306,7 @@ def _materialize_default(node: SettingNode) -> Any:
 def resolve_secrets(
     incoming: SparseDocument, current: SparseDocument, catalog: SettingNode
 ) -> SecretResolution:
-    """密文三态回填（总设计 §7.5）：``null`` → 取 current 的对应值；字符串 → 保留；缺席 → 不覆盖。
+    """密文三态回填：``null`` → 取 current 的对应值；字符串 → 保留；缺席 → 不覆盖。
 
     - ``null`` 是「保留磁盘现值」的哨兵（前端从 ``get`` 拿到的就是它，必须原样回传）。
       **对应值按身份配对**（列表节点声明的 ``identity_field``，见 :func:`_resolve`）——
@@ -370,7 +382,7 @@ def _resolve_list(
     (b) **安全的下标回落**：**仅当** ``len(incoming) == len(current)`` 且该下标**未被 (a)
         认领**（``consumed`` 守卫）时，对 (a) 没配上的项按下标配对——覆盖「重命名」
         （身份变了但结构没变）；一旦真的按位置保留了密文，就把叶子记进 ``positional``，
-        由回执**出声**（AD18 第 2 点：歧义关不掉，就不许静默）；
+        由回执**出声**（歧义关不掉，就不许静默）；
     (c) **不猜**：其余情况该子树以「无现值」解析（``null`` 哨兵被移除，必填字段随之成为
         problem），并记录真实损失（:func:`_sentinel_leaves` 的影子口径）。
 
@@ -394,7 +406,7 @@ def _resolve_list(
 
     out_list: list[Any] = []
     for index, item in enumerate(value):
-        template = _item_template(node, item)
+        template = item_template(node, item)
         if template is None:
             out_list.append(item)
             continue
@@ -480,7 +492,7 @@ def _record_positional(
     path: str,
     out: list[PositionalSecret],
 ) -> None:
-    """(b) 分支的「按位置保留」记录（AD18 第 2 点）：**不许静默**。
+    """(b) 分支的「按位置保留」记录：**不许静默**。
 
     位置配对在结构上与「重命名」不可区分——整表替换（全删全加、长度相等）靠 consumed 守卫
     也关不掉，只能出声。只记**真的保留了值**的叶子（``null`` 哨兵 + 候选有非空值）：
@@ -504,7 +516,7 @@ def _shadow(index: int, current_list: list[Any]) -> Any:
     只用于回答「是不是真有值被丢」（:func:`_sentinel_leaves`）——**绝不**当成配对来源
     （那正是 A1 的原始 bug）。被别的项按身份配走也照算：新项带着哨兵落在那个槽位上时，
     用户看到的是「哪一个密钥被移除了、请重填」，而不是我们替他留下一个来路不明的值
-    （AD18 第 3 点的断言）。
+    （「按位置保留的值必须出声」的断言）。
     """
     return current_list[index] if index < len(current_list) else _MISSING
 
@@ -548,7 +560,7 @@ def _collect_sentinels(
     elif template.kind is SettingKind.LIST and isinstance(item, list):
         candidate_list = candidate if isinstance(candidate, list) else []
         for index, child_item in enumerate(item):
-            child_template = _item_template(template, child_item)
+            child_template = item_template(template, child_item)
             if child_template is None:
                 continue
             child_candidate = (
@@ -599,7 +611,7 @@ def _secret_leaves(
             )
     elif node.kind is SettingKind.LIST and isinstance(value, list):
         for index, item in enumerate(value):
-            template = _item_template(node, item)
+            template = item_template(node, item)
             if template is not None:
                 yield from _secret_leaves(template, item, f"{path}[{index}]")
 
@@ -617,7 +629,7 @@ def _mask(node: SettingNode, value: Any) -> Any:
     if node.kind is SettingKind.LIST and isinstance(value, list):
         out_list: list[Any] = []
         for item in value:
-            template = _item_template(node, item)
+            template = item_template(node, item)
             out_list.append(_mask(template, item) if template is not None else item)
         return out_list
     return value
@@ -640,6 +652,19 @@ def _state_of(value: Any) -> SecretState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def problems_of(
+    doc: SparseDocument, *, catalog: SettingNode | None = None
+) -> list[ConfigProblem]:
+    """一份稀疏文档 → 全部问题（字段级 + 跨字段）——启动读取与设置读端点同一口径。
+
+    ``Config.model_construct`` 是宽容视图：字段级错误存在时 ``Config(**raw)``
+    根本构造不出来，而跨字段检查恰好要在这种状态下给全量问题（见 ``problems.py``）。
+    """
+    tree = catalog or build_catalog()
+    raw = merge_with_defaults(doc, tree)
+    return locate_problems(raw) + cross_field_problems(Config.model_construct(**raw))
+
+
 def locate_problems(raw: dict[str, Any]) -> list[ConfigProblem]:
     """``Config(**raw)`` → ``ValidationError`` → 带规范路径的问题列表（**不抛异常**）。
 
@@ -649,7 +674,7 @@ def locate_problems(raw: dict[str, Any]) -> list[ConfigProblem]:
     形态错误（顶层键不是字符串 / 值不是映射等，pydantic 抛 ``TypeError``）同样不抛：
     报一条 ``path=None`` 的文档级问题。这是**公开面**——启动读取（``boot_config``）与
     设置端点的三个读路径都直接调它，任何输入形态都必须能产出「问题清单」而不是 500 / 崩溃
-    （AD12）。
+    （「永不让 TypeError 冒到用户面前」）。
     """
     try:
         Config(**raw)
@@ -783,7 +808,7 @@ def _collect_models(annotation: Any, out: list[type[BaseModel]]) -> None:
 def _rehome_bare_model_name(
     loc: tuple[Any, ...], message: str, raw: dict[str, Any]
 ) -> str | None:
-    """增补 P9：裸字符串形态的调用名非法时，pydantic 把 ``loc`` 记成 ``providers[i].name``。
+    """裸字符串形态的调用名非法时，pydantic 把 ``loc`` 记成 ``providers[i].name``。
 
     归到 **``providers[i].models``（列表级）**——pydantic 没给出下标，猜下标会指错行。
     用文案精确区分「provider 名非法」与「模型名非法」：两者共享同一个 loc，
@@ -860,7 +885,7 @@ def _diff(
         for index in range(max(len(old_list), len(new_list))):
             old_item = old_list[index] if index < len(old_list) else _MISSING
             new_item = new_list[index] if index < len(new_list) else _MISSING
-            template = _item_template(
+            template = item_template(
                 node, new_item if new_item is not _MISSING else old_item
             )
             item_path = f"{path}[{index}]"
@@ -892,7 +917,7 @@ def node_at_path(catalog: SettingNode, path: str) -> SettingNode | None:
     - 根节点的 ``key`` 是**可选**前缀（``config.gateway.port`` 与 ``gateway.port`` 等价）；
     - 下标**不查界**（catalog 是模板，不知道文档有多长）；
     - 列表声明的是 ``variants``（union 元素）时返回 ``None``——元素形态只有文档里的
-      实际值才能判定（调用方改用 ``_item_template`` 口径）；路径非法同样 ``None``。
+      实际值才能判定（调用方改用 :func:`wing.config.catalog.item_template`）；路径非法同样 ``None``。
     """
     steps = parse_path(path)
     if steps is None:
@@ -914,9 +939,9 @@ def node_at_path(catalog: SettingNode, path: str) -> SettingNode | None:
 
 
 def restart_required_paths(changed: list[str], catalog: SettingNode) -> list[str]:
-    """变更里 apply == ``restart`` 的路径（增补 P13：**只读叶子**的节点）。
+    """变更里 apply == ``restart`` 的路径（**只读叶子**的节点）。
 
-    容器节点的 apply 是子树最粗的一档（01 的约定），用它判定会误报/漏报；
+    容器节点的 apply 是子树最粗的一档，用它判定会误报/漏报；
     解析不出的路径（``variants`` 上的下标等）直接跳过——宁可漏报也不误报。
     """
     out: list[str] = []
@@ -943,6 +968,7 @@ __all__ = [
     "mask_secrets",
     "merge_with_defaults",
     "node_at_path",
+    "problems_of",
     "read_document",
     "resolve_secrets",
     "restart_required_paths",

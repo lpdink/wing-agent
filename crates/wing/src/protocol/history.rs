@@ -1,6 +1,6 @@
 //! Session-history record types — the typed mirror of the Message projection.
 //!
-//! Mirrors `wing/session.py::serialize_message`: the per-message dict the
+//! Mirrors `wing/session/session.py::serialize_message`: the per-message dict the
 //! backend sends as `SyncSessionEvent.messages` / `SyncSessionEvent.uncommitted`
 //! and as `GET /api/session/get` → `messages`. Fact-event nodes are not
 //! records — they decode through [`crate::protocol::WingEvent`]
@@ -81,35 +81,20 @@ pub struct SessionMessage {
     pub media: Vec<MediaRef>,
 }
 
-/// Decode the `media` field **without ever failing the record**.
+/// Decode the `media` field **without ever failing the record**
+/// (see [`super::media::tolerant_media_array`]).
 ///
 /// The pictures are a rendering adornment: a malformed entry must cost one
 /// label line, not the whole message (the backend's model layer is tolerant
 /// for the same reason — a corrupt history record must not break the load).
-/// Absent (never reaches here — `#[serde(default)]`), `null` and a non-array
-/// value all mean "no pictures"; a bad entry inside the array is skipped with
-/// a warning, the rest are kept.
+/// Absent (`#[serde(default)]`), `null` and a non-array value all mean "no
+/// pictures"; a bad entry inside the array is skipped with a warning, the rest
+/// are kept. Unlike `tool_media`, a non-array value is itself worth a warning.
 fn media_refs<'de, D>(deserializer: D) -> Result<Vec<MediaRef>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    let serde_json::Value::Array(entries) = value else {
-        if !value.is_null() {
-            tracing::warn!(value = %value, "history media is not an array, ignoring");
-        }
-        return Ok(Vec::new());
-    };
-    Ok(entries
-        .into_iter()
-        .filter_map(|entry| match serde_json::from_value::<MediaRef>(entry) {
-            Ok(media) => Some(media),
-            Err(err) => {
-                tracing::warn!(error = %err, "skipping malformed history media entry");
-                None
-            }
-        })
-        .collect())
+    super::media::tolerant_media_array(deserializer, "history media", true)
 }
 
 impl SessionMessage {
@@ -124,7 +109,7 @@ impl SessionMessage {
                 "history payload is not a JSON object",
             ));
         }
-        serde_json::from_value(value.clone())
+        SessionMessage::deserialize(value)
     }
 
     /// Tool calls as a slice; absent / `null` / empty list → `&[]`.

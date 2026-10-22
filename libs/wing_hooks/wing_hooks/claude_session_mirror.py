@@ -53,7 +53,7 @@ CloudCLI（siteboon/claudecodeui）的**会话列表**来自递归扫描
 ``WING_CLAUDE_MIRROR_HOME`` / ``CLAUDE_CONFIG_DIR``，或先 ``uninstall()`` 再显式
 安装（测试即这么做）。
 
-cwd 来源优先级（决定文件落点，见任务 design.md D3）：``before_session_start``
+cwd 来源优先级（决定文件落点）：``before_session_start``
 （创建 / fork）→ ``session_init`` 事件（订阅时下发）→ ``sync_session`` 事件的
 ``agent.workspace`` → file 后端 ``metadata.json`` 的 ``workspace`` 兜底（resume
 路径没有前两类来源）；全部未知时该会话的行**挂起**（有上限），宁可不写也不写错目录。

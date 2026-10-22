@@ -310,7 +310,7 @@ impl ToolCards {
         if card.diffs.len() >= MAX_DIFFS_PER_CARD {
             // 到顶即冻结：列表没变化，不发 update（也不重发列表）。
             //
-            // warn **一次**（N-r2-2）：只在首次跨过阈值时报，此后每条被丢弃的 diff
+            // warn **一次**：只在首次跨过阈值时报，此后每条被丢弃的 diff
             // 都是同一件事的重复（曾按帧刷屏，1000 条 diff 出 ≈936 行 warn）。
             if !card.cap_warned {
                 card.cap_warned = true;
@@ -382,7 +382,7 @@ fn stateless_updates(event: &WingEvent) -> Vec<SessionUpdate> {
             // `session_state_changed{model}` **不在这里**映射：它是会话级事实，与「有没有
             // 在途 prompt」无关，而本函数只在轮次里被调用（空闲时事件根本到不了这里）。
             // 模型变更的中继在 `super::model::relay_model_change`，触发点见
-            // `SessionHub::dispatch`（design D7）。
+            // `SessionHub::dispatch`。
             tracing::debug!(event_type = other.event_type(), "acp: event not mapped");
             Vec::new()
         }
@@ -448,7 +448,8 @@ pub enum TurnEnd {
     EndTurn,
     /// `interrupted`（`session/cancel` 的结果）→ `stopReason: "cancelled"`。
     Cancelled,
-    /// `error` → JSON-RPC error（与 stdio 前端「error 终结轮次」同语义）。
+    /// `error` → JSON-RPC error：JSON-RPC 请求必须有应答，所以这里收口（stdio 不在此列
+    /// ——它只把 `error` 渲染成一行错误，不终结轮次）。
     Failed(String),
 }
 
@@ -473,7 +474,7 @@ pub fn turn_end(event: &WingEvent) -> Option<TurnEnd> {
 
 /// 把 ACP 的 `prompt: Vec<ContentBlock>` 拍平成给模型的纯文本。
 ///
-/// 规则（01 步任务书）：
+/// 规则：
 ///
 /// - `Text` 原样拼接（**不**插分隔符：Zed 会把一段输入按 mention 切成多个块，硬插
 ///   换行会改变原文）；
@@ -979,7 +980,7 @@ mod tests {
         );
     }
 
-    // ---- N5：空 tool_call_id 的丢弃分支 ----
+    // ---- 空 tool_call_id 的丢弃分支 ----
 
     #[test]
     fn events_without_tool_call_id_are_dropped() {
@@ -1329,9 +1330,9 @@ mod tests {
         let extra = cards.apply(&diff_event("tc1", "a.rs", None, "overflow"));
         assert!(extra.is_empty(), "超出上限的 diff 必须被丢弃且不产帧");
 
-        // 「到顶」只记一次（N-r2-2）：warn 一次化靠 `cap_warned` 保证——记的是
+        // 「到顶」只记一次：warn 一次化靠 `cap_warned` 保证——记的是
         // 「本条卡片已经报过到顶」，后续被丢弃的 diff 不再刷屏。
-        // 这里只钉标志位；可观测的 warn 次数由 `diff_cap_warns_exactly_once` 断言（N1）。
+        // 这里只钉标志位；可观测的 warn 次数由 `diff_cap_warns_exactly_once` 断言。
         let card = cards.cards.get("tc1").expect("卡片仍在");
         assert!(
             card.cap_warned,
@@ -1376,8 +1377,8 @@ mod tests {
         }
     }
 
-    /// 06 r1 N1：`cap_warned` 只是「别重复刷屏」的实现手段，断言要落在**可观测的
-    /// warn 次数**上——只查标志位的旧断言放过了「每次都 warn」的回归（变异 M9）。
+    /// `cap_warned` 只是「别重复刷屏」的实现手段，断言要落在**可观测的
+    /// warn 次数**上——只查标志位的旧断言放过了「每次都 warn」的回归。
     #[test]
     fn diff_cap_warns_exactly_once() {
         use std::sync::Arc;

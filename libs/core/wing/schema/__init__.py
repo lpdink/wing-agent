@@ -25,9 +25,15 @@ from .cache import (
     CacheSource,
     canonical_json,
     fingerprint,
-    sha16,
 )
-from .llm import LLMResponse, LLMUsage, PendingCall, ToolCall, ToolCallDelta
+from .llm import (
+    LLMResponse,
+    LLMUsage,
+    PendingCall,
+    ToolCall,
+    ToolCallDelta,
+    usage_wire,
+)
 from .message import (
     MEDIA_NAME_MAX_LENGTH,
     ChainNode,
@@ -65,7 +71,7 @@ __all__ = [
     "ToolOutput",
     "ToolParam",
     "ToolUseBlock",
+    "usage_wire",
     "canonical_json",
     "fingerprint",
-    "sha16",
 ]

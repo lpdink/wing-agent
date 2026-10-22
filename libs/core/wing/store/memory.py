@@ -11,18 +11,15 @@ import threading
 from typing import Any, Iterator
 
 from wing.common.utils import validate_session_id
-from wing.store.base import (
-    FileRef,
-    MessageLog,
-    SessionMetadata,
-    SessionStore,
-    SessionSummary,
+from wing.store.base import MessageLog, SessionStore
+from wing.store.models import FileRef, SessionMetadata, SessionSummary
+from wing.store.names import (
     disambiguated_file_name,
-    first_user_title,
     validate_file_name,
     validate_media_content,
     validate_media_id,
 )
+from wing.store.records import first_user_title
 
 
 class MemoryMessageLog(MessageLog):

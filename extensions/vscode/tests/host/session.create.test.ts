@@ -83,7 +83,7 @@ describe('new session timing', () => {
       toasts.map((message) => (message.action.kind === 'toast' ? message.action.message : '')),
     ).toContain('Not sent — the gateway is not connected.');
 
-    // …and the text comes back for the composer (review #109 [P2-5]): the
+    // …and the text comes back for the composer: the
     // webview clears optimistically, so a refused send must restore it.
     const state = harness.ofType('state').at(-1);
     expect(state?.state.draft).toBe('too early');

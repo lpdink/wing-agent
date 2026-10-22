@@ -12,7 +12,7 @@ import { makeFixtureSession, makeTab } from './fixtures';
  * A scripted host for the webview: the preview harness and the component tests
  * drive the real controller through this transport.
  *
- * It mirrors the protocol parts of `src/host/*` that step 03 will implement for
+ * It mirrors the protocol parts of `src/host/*` that the host implements for
  * real: answer `ready` with `tabs` + `hydrate`, answer `ping` with `pong`, answer
  * `resync` with a fresh `hydrate`, and answer `resolveImages` with a synthetic
  * mapping (there is no workspace and no `asWebviewUri` here). Everything else is

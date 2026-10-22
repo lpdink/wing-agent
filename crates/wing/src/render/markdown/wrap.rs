@@ -32,8 +32,6 @@ struct FlatSeg {
 
 /// Whether a line is prose that should be width-wrapped.
 ///
-/// Whether a line is prose that should be width-wrapped.
-///
 /// Code blocks (`CodeBlock`/`Gutter`), decorative chrome (`Border`) and image
 /// anchors (`Image`) are laid out by their own renderers and must not be
 /// re-wrapped; everything else (`Text`/`Heading`/`InlineCode`/`Link`/`Marker`)

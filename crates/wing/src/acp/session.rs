@@ -62,7 +62,7 @@ use super::translate::ToolCards;
 /// 情况下通道几乎是空的；满 = 消费端异常，丢弃并记 warn 比阻塞事件泵安全。
 const EVENT_BUFFER: usize = 256;
 
-/// 出站命令队列容量（prompt / Ask 应答 / 03 步的模型切换共用）。
+/// 出站命令队列容量（prompt / Ask 应答 / 模型切换共用）。
 const OUTBOUND_BUFFER: usize = 64;
 
 /// 终态之后的**尾帧消化**窗口（有界、写死）。
@@ -183,7 +183,7 @@ struct EntryState {
     /// `close` 已决定回收本条目（仍有在途轮次时还会在表里等它收口）。
     /// 决定先于等待落地：**之后**拿到 gate 的排队者（prompt / 挂载）一律拒绝。
     closing: bool,
-    /// 模型变更中继在途（04）：同一会话同时只有一次在中继（见 [`SessionEntry::claim_model_relay`]）。
+    /// 模型变更中继在途：同一会话同时只有一次在中继（见 [`SessionEntry::claim_model_relay`]）。
     model_relay_in_flight: bool,
     /// 中继在途期间又收到模型变更（收尾时再跑一次，合并成「以最新状态为准」）。
     model_relay_dirty: bool,
@@ -314,7 +314,7 @@ impl SessionEntry {
         }
     }
 
-    /// 模型变更中继的去重/合并协议（04，见 `model::relay_model_change`）：
+    /// 模型变更中继的去重/合并协议（见 `model::relay_model_change`）：
     /// 返回 true = 现在没有在途中继，调用方**负责跑一次**；false = 已有在途，
     /// 本次变更被记成「积压」（收尾时由 [`SessionEntry::finish_model_relay`] 再跑一次）。
     fn claim_model_relay(&self) -> bool {
@@ -362,14 +362,14 @@ impl SessionEntry {
 
 /// 会话表 + 出站队列 + WS 事件泵的持有者。
 ///
-/// 公开面（03/04/05 的接入点）：
+/// 公开面，按用途分组：
 ///
-/// | 步骤 | 用到的入口 |
+/// | 用途 | 用到的入口 |
 /// |------|-----------|
-/// | 03 | [`SessionHub::elicitation_form_supported`] / [`SessionHub::downgrade_elicitation`]（Ask 能力门控）；应答经 `Turn::answer_ask`（三径见 `ask.rs`） |
-/// | 04 | [`SessionHub::register_client_connection`] / [`SessionHub::client_connection`]（中继的出站）、[`SessionHub::finish_model_relay`]（中继收尾）；模型切换本身走 `http.update_session`，触发点在 [`SessionHub::dispatch`]（**不**经 `Turn::updates_for`，见 design D7） |
-/// | 05 | [`SessionHub::attach_and_subscribe`] / [`SessionHub::close_session`]（load/resume 挂载 + 回收） |
-/// | 05+ | [`SessionHub::knows`]（会话查询；列表走 `http.list_sessions`） |
+/// | Ask 能力门控 | [`SessionHub::elicitation_form_supported`] / [`SessionHub::downgrade_elicitation`]；应答经 `Turn::answer_ask`（三径见 `ask.rs`） |
+/// | 模型变更中继 | [`SessionHub::register_client_connection`] / [`SessionHub::client_connection`]（中继的出站）、[`SessionHub::finish_model_relay`]（中继收尾）；模型切换本身走 `http.update_session`，触发点在 [`SessionHub::dispatch`]（**不**经 `Turn::updates_for`） |
+/// | load/resume 挂载 + 回收 | [`SessionHub::attach_and_subscribe`] / [`SessionHub::close_session`] |
+/// | 会话查询 | [`SessionHub::knows`]（列表走 `http.list_sessions`） |
 pub struct SessionHub {
     /// 网关 HTTP 客户端（建会话 / 订阅 / interrupt；update/list/load 也用它）。
     pub(crate) http: GatewayApiClient,
@@ -392,9 +392,9 @@ pub struct SessionHub {
     stream_dead_notify: Notify,
     /// ACP 客户端连接句柄（`agent::serve` 的 `connect_with` 注册）。
     ///
-    /// 04 的模型变更中继从**事件分流**路径发 `config_option_update`——那条路径没有 handler
+    /// 模型变更中继从**事件分流**路径发 `config_option_update`——那条路径没有 handler
     /// 的 `cx`，所以连接得在 hub 里留一份。一个进程只服务一个 ACP 连接（stdio 传输性质），
-    /// 一份就够（同前提见 03 的能力门控）。
+    /// 一份就够（同一前提）。
     client: Mutex<Option<ConnectionTo<Client>>>,
     state: Mutex<HubState>,
 }
@@ -402,7 +402,7 @@ pub struct SessionHub {
 #[derive(Default)]
 struct HubState {
     sessions: HashMap<String, Arc<SessionEntry>>,
-    /// `initialize` 声明的客户端能力（03 步的 elicitation / fs / terminal 门控）。
+    /// `initialize` 声明的客户端能力（elicitation / fs / terminal 的门控）。
     client_capabilities: ClientCapabilities,
     /// `elicitation/create` 被客户端回 `-32601`（粘性）：本进程内不再发 elicitation
     /// （见 [`SessionHub::downgrade_elicitation`]）。
@@ -447,7 +447,7 @@ impl SessionHub {
         (hub, outbound_rx)
     }
 
-    /// 记录 `initialize` 的客户端能力与身份（03 步据此决定 elicitation 走不走）。
+    /// 记录 `initialize` 的客户端能力与身份（据此决定 elicitation 走不走）。
     pub fn register_client(&self, capabilities: ClientCapabilities, info: Option<Implementation>) {
         let mut state = self.state.lock().expect("hub mutex poisoned");
         tracing::debug!(
@@ -469,7 +469,7 @@ impl SessionHub {
 
     /// 注册 ACP 客户端连接（`agent::serve` 在 `connect_with` 里调用；重复注册覆盖）。
     ///
-    /// 只在**事件分流**路径里用：04 的模型变更中继要从 `dispatch` 发
+    /// 只在**事件分流**路径里用：模型变更中继要从 `dispatch` 发
     /// `config_option_update`，而那里没有 handler 的 `cx`（见 [`SessionHub::client_connection`]）。
     pub fn register_client_connection(&self, client: ConnectionTo<Client>) {
         *self.client.lock().expect("hub mutex poisoned") = Some(client);
@@ -483,7 +483,7 @@ impl SessionHub {
         self.client.lock().expect("hub mutex poisoned").clone()
     }
 
-    /// 客户端是否可用 `elicitation/create`（form 模式）—— 03 步 Ask 的门控。
+    /// 客户端是否可用 `elicitation/create`（form 模式）—— Ask 的门控。
     ///
     /// 判据 = `initialize` 声明了 `clientCapabilities.elicitation.form`，且本进程尚未
     /// 因 `-32601` 降级（[`SessionHub::downgrade_elicitation`]）。
@@ -522,7 +522,7 @@ impl SessionHub {
         let request = CreateSessionRequest {
             template_name: params.template,
             workspace: Some(params.workspace.to_string_lossy().to_string()),
-            // 明确不设 yolo：危险操作要在 ACP 客户端里可见（03 步映射为权限询问）。
+            // 明确不设 yolo：危险操作要在 ACP 客户端里可见（映射为权限询问）。
             agent: Some(AgentOverride {
                 model_id: params.model,
                 ..Default::default()
@@ -709,8 +709,8 @@ impl SessionHub {
 
     /// 挂载的第一段：入表 + gate + arm（见 [`SessionHub::attach_and_subscribe`]）。
     ///
-    /// 返回 `(attached, created)`：`created` = 条目是否是**本次新建**的（回滚判据，
-    /// N1）——第二道死流复查命中时也据此回滚（N3）。
+    /// 返回 `(attached, created)`：`created` = 条目是否是**本次新建**的（回滚判据）
+    /// ——第二道死流复查命中时也据此回滚。
     async fn attach_session(&self, session_id: &str) -> Result<(Attached, bool), HubError> {
         // 事件流已死 = 递不出任何事件（快照也不会来）：不挂一个注定失败的会话。
         if self.stream_dead.load(Ordering::SeqCst) {
@@ -879,9 +879,9 @@ impl SessionHub {
 
     /// 事件分流（WS 泵调用）：按 `meta.session_id` 投递到对应会话。
     ///
-    /// 另外挂 04 的**模型变更中继**：`session_state_changed{model}` 是会话级事实，
+    /// 另外挂**模型变更中继**：`session_state_changed{model}` 是会话级事实，
     /// 与「有没有在途 prompt」无关（空闲时下面 `deliver` 会把它丢掉），所以触发点在这里
-    /// 而不是 prompt 轮次的事件循环里（design D7）。中继经 `claim_model_relay` 合并：
+    /// 而不是 prompt 轮次的事件循环里。中继经 `claim_model_relay` 合并：
     /// 同一会话同时只有一次在途，期间的变更合到下一次。
     fn dispatch(self: &Arc<Self>, event: WingEvent) {
         let Some(session_id) = event.session_id().map(str::to_string) else {
@@ -1640,7 +1640,7 @@ mod tests {
         assert!(entry.updates_for(&stream).is_empty());
     }
 
-    /// N5：事件通道满 → 丢弃（绝不阻塞事件泵）。
+    /// 事件通道满 → 丢弃（绝不阻塞事件泵）。
     #[test]
     fn a_full_event_channel_drops_instead_of_blocking() {
         let entry = SessionEntry::new("s1");
@@ -1680,7 +1680,7 @@ mod tests {
             .expect("已死是粘性状态");
     }
 
-    /// S1：事件流已死时，新一轮 prompt 立刻失败——绝不 arm 一个「没人投递」的 turn。
+    /// 事件流已死时，新一轮 prompt 立刻失败——绝不 arm 一个「没人投递」的 turn。
     #[tokio::test]
     async fn turn_on_a_dead_stream_fails_fast() {
         let (hub, _outbound_rx) = test_hub();
@@ -1720,7 +1720,7 @@ mod tests {
         assert_eq!(err, HubError::Disconnected);
     }
 
-    /// S3：终态之后的尾帧必须被本轮消化掉，不能留给下一个排队 prompt。
+    /// 终态之后的尾帧必须被本轮消化掉，不能留给下一个排队 prompt。
     #[tokio::test]
     async fn trailing_terminal_frames_are_drained_before_the_gate_opens() {
         let (hub, _outbound_rx) = test_hub();
@@ -1763,7 +1763,7 @@ mod tests {
         );
     }
 
-    /// S3：没有尾帧时（如 cancel 路径）窗口有界——不能无限等。
+    /// 没有尾帧时（如 cancel 路径）窗口有界——不能无限等。
     #[tokio::test]
     async fn drain_trailing_is_bounded_when_nothing_follows() {
         let (hub, _outbound_rx) = test_hub();
@@ -1820,7 +1820,7 @@ mod tests {
         assert!(entry.is_armed(), "挂载期间 armed：同会话 prompt 排队等挂载");
         assert!(
             !entry.has_turn_in_flight(),
-            "挂载不是在途轮次（N3：close/cancel 不该据此发 interrupt）"
+            "挂载不是在途轮次（close/cancel 不该据此发 interrupt）"
         );
         assert!(entry.deliver(event("s1")), "armed：事件投递到挂载句柄");
 

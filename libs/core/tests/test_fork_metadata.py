@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from _support import seed_messages
 from wing.schema import Message
 from wing.session import SessionManager
 from wing.store import FileSessionStore, MemorySessionStore
@@ -22,13 +23,6 @@ def file_sm(tmp_path: Path):
     return SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
 
 
-def _seed(session, *contents: str) -> None:
-    """向 session 的上下文写入消息（不经 LLM）。"""
-    for i, content in enumerate(contents):
-        role = "user" if i % 2 == 0 else "assistant"
-        session.context_manager.add_message(Message(role=role, content=content))
-
-
 class TestForkCarriesEvents:
     @pytest.mark.asyncio
     async def test_fork_copies_chain_events_with_prefix(self, file_sm):
@@ -37,7 +31,7 @@ class TestForkCarriesEvents:
 
         source = file_sm.create_session()
         cm = source.context_manager
-        _seed(source, "hello", "hi")
+        seed_messages(source, "hello", "hi")
         # 在 fork 点之前落盘事件节点（模拟工具执行期间的 diff）
         source.agent.sink.emit(
             DiffContentEvent(path="f.txt", new_text="content", tool_call_id="tc-1")
@@ -73,7 +67,7 @@ class TestForkMetadata:
         ws = tmp_path / "ws"
         ws.mkdir()
         source = file_sm.create_session(workspace=str(ws))
-        _seed(source, "hello", "hi", "question")
+        seed_messages(source, "hello", "hi", "question")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, draft = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
@@ -94,7 +88,7 @@ class TestForkMetadata:
         ws = tmp_path / "ws"
         ws.mkdir()
         source = file_sm.create_session(workspace=str(ws))
-        _seed(source, "hello", "hi")
+        seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
@@ -119,7 +113,7 @@ class TestForkMetadata:
         ws = tmp_path / "ws"
         ws.mkdir()
         source = file_sm.create_session(workspace=str(ws))
-        _seed(source, "hello", "hi")
+        seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
@@ -141,7 +135,7 @@ class TestForkMetadata:
     ):
         """fork 不污染源 session：uuid 不变，链状态完好，可再次 fork。"""
         source = file_sm.create_session()
-        _seed(source, "hello", "hi", "world")
+        seed_messages(source, "hello", "hi", "world")
 
         uuids_before = [m.uuid for m in source.context_manager.get_context_window()]
         target = uuids_before[-1]
@@ -161,7 +155,7 @@ class TestForkMetadata:
         """memory session fork 出 memory session。"""
         sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
         source = sm.create_session()
-        _seed(source, "hello", "hi")
+        seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, _ = sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
@@ -182,7 +176,7 @@ class TestResumeTemplate:
         sm._template_manager._templates["coder"] = coder
 
         session = sm.create_session(template_name="coder")
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         session.touch_last_interaction()  # 触发 metadata 持久化（正常流程由 post 触发）
         sid = session.session_id
 
@@ -201,7 +195,7 @@ class TestResumeTemplate:
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
         session = sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
 
         with pytest.raises(TypeError):
             sm.resume_session(
@@ -215,7 +209,7 @@ class TestResumeTemplate:
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
         session = sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         session.touch_last_interaction()
         # 抹掉 template_name 模拟老数据
         meta = store.load_metadata(session.session_id)

@@ -77,7 +77,7 @@ I/O），所以由 app lane 检查：
 | 参数 | 值 | 理由 |
 |---|---|---|
 | 触发点 | 事件循环的 select 臂（`image_freshness_tick`） | **不在 draw / 不在 paint**：渲染路径零 I/O 是硬约束；帧率与新鲜度无关 |
-| 节流 | `FRESHNESS_INTERVAL` = **1 s**（`app/images.rs`） | 任务书给的界；够快（重写后最多 1 s，通常下一帧）、够省（≤ N 次 stat/秒） |
+| 节流 | `FRESHNESS_INTERVAL` = **1 s**（`app/images/mod.rs`） | 任务书给的界；够快（重写后最多 1 s，通常下一帧）、够省（≤ N 次 stat/秒） |
 | 目标集 | **当前可见的锚点**（去重后 ≤ band 行数，实测个位数） | 有界：会话里有一千张图也只 stat 屏幕上那几张；滚回视口时下一次窗口就会读 |
 | 时钟 | `Instant` 由调用方注入 | 生产传 `Instant::now()`，测试传合成时间 → 节流无需 sleep 即可断言 |
 | 空闲成本 | 无可见锚点时 `freshness_deadline` 返回 `None` → 臂停车 | 没有图的会话这个 lane 一次都不唤醒 |
@@ -110,14 +110,14 @@ I/O），所以由 app lane 检查：
 | 锚点行数 | `MAX_ANCHOR_ROWS`（`render/markdown/images.rs`） | 36 | **装填盒子的高度**：`rows = fit_cells(形状, (cols, 36), cell).height`（`render/fit.rs`，与编码器同一份数学）→ 盒子就是图的实际格数，小图不留白；只有长图会顶到 36 行，此时图比盒子窄，首行右侧由 `clear_uncovered_caption` 清空 |
 | app 元数据表（`Images::known`） | 无上限（随会话引用过的**不同图片数**增长） | — | 一代内容内**只增不减**（见 [`tui-rendering.md`](tui-rendering.md) 第五节：缩表会让锚点在链接/锚点之间振荡）；内容重建（`structure_epoch`）整表清空。实测 120 张 = 120 条（`a_hundred_pictures_stay_within_the_cache_budget` 的断言） |
 
-**上限在读取处也成立**（review #135 [S1]）：`probe` 与真正解码之间隔着一个渲染周期，正是「模型重写同一
+**上限在读取处也成立**：`probe` 与真正解码之间隔着一个渲染周期，正是「模型重写同一
 路径」的高发窗口，所以 `ui/image/encode.rs::decode` 在**同一个 fd** 上复核两道预算——超过 `file_bytes`
 时一个字节都不读、超过像素预算时一个解码缓冲都不分配，失败给出与探测相同的 `TooLarge` /
 `TooManyPixels` → 链接路径。**不是图**的仍然报 `NotAnImage`：头被截断到解码器构造期就失败的（只有
 IHDR 的 30000×30000 PNG 实测如此，33 B / 1.6 ms）走的也是这条，同样不读像素、不分配（测试：
 `encode.rs` 的两条复核 + `store.rs::a_file_swapped_after_the_probe_still_hits_the_limits`）。
 
-**扩展名 ↔ codec 必须逐项对齐**（review #135 [S2]）：`IMAGE_EXTENSIONS`（`png jpg jpeg gif webp bmp`）
+**扩展名 ↔ codec 必须逐项对齐**：`IMAGE_EXTENSIONS`（`png jpg jpeg gif webp bmp`）
 与根 `Cargo.toml` 的 `image` feature 集是同一份能力声明的两半——只开 `png`+`jpeg` 时，`.gif/.webp/.bmp`
 会被路径策略放行但文件头永远解析不了，静默退回链接、不给任何提示。实测代价（release 冷构建，禁用
 sccache）：**+0.9 s 构建时间、二进制 +450 KiB（13.14 → 13.60 MiB，+3.5%）**，因此选择把三个纯 Rust

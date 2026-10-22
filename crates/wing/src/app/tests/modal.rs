@@ -4,6 +4,7 @@
 //! root: the assertions are unchanged, only their file changed.
 
 use super::support::*;
+use crate::app::intent::SessionUpdate;
 use crate::app::modal::ChatScrollAction;
 use crate::app::modal::KeyRoute;
 use crate::app::modal::ModalOwner;
@@ -272,7 +273,7 @@ fn test_model_panel_esc_closes_without_interrupt_or_request() {
     assert!(
         !intents
             .iter()
-            .any(|i| matches!(i, AppIntent::UpdateSession { .. })),
+            .any(|i| matches!(i, AppIntent::UpdateSession(_))),
         "closing sends no model request"
     );
 }
@@ -313,7 +314,7 @@ fn test_model_panel_apply_toast_shows_display_name_and_raw_id_on_its_own_line() 
     assert_eq!(toast.message, "Model: DeepSeek-Flash (qoder)\n↳ dfmodel");
     // The intent carries the model id — display never leaks into the identity layer.
     let requested = app.drain_intents().into_iter().find_map(|i| match i {
-        AppIntent::UpdateSession { model_id, .. } => model_id,
+        AppIntent::UpdateSession(SessionUpdate { model_id, .. }) => model_id,
         _ => None,
     });
     assert_eq!(requested.as_deref(), Some("dfmodel"));

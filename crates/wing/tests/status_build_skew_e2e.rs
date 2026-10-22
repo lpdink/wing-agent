@@ -15,10 +15,13 @@
 //! `wing status` reaches for.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+
+mod common;
+
+use common::e2e::{read_head, run_wing, start_fake_gateway};
 
 /// The commit the binary under test was built from.
 const CLI_COMMIT: &str = env!("WING_COMMIT_HASH");
@@ -40,16 +43,6 @@ enum Build {
 // ============================================================
 // Fake gateway: minimal HTTP/1.1, `/api/health` only
 // ============================================================
-
-async fn serve(listener: TcpListener, build: Build) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        tokio::spawn(handle_conn(stream, build));
-    }
-}
-
 async fn handle_conn(mut stream: TcpStream, build: Build) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -89,78 +82,18 @@ async fn handle_conn(mut stream: TcpStream, build: Build) {
         }
     }
 }
-
-/// Read one HTTP request head (`GET`, no body); the rest stays buffered.
-async fn read_head(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<String> {
-    loop {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-            buf.drain(..pos + 4);
-            return Some(head);
-        }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-}
-
 // ============================================================
 // Fixtures
 // ============================================================
-
-fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-status-skew-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
-}
-
-/// Start the fake gateway and point a fresh `$WING_HOME` at it (the CLI reads
-/// its endpoint from `$WING_HOME/core/config.yaml`).
-async fn start_gateway(build: Build, tag: &str) -> PathBuf {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(serve(listener, build));
-
-    let home = scratch_home(tag);
-    std::fs::write(
-        home.join("core").join("config.yaml"),
-        format!("gateway:\n  host: 127.0.0.1\n  port: {port}\n"),
-    )
-    .unwrap();
-    home
-}
-
-/// Run the real binary and collect (exit code, stdout, stderr).
-async fn run_wing(args: &[&str], home: &PathBuf) -> (i32, String, String) {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
-    command
-        .args(args)
-        .env("WING_HOME", home)
-        .env_remove("RUST_LOG")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().unwrap();
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
-        Ok(result) => result.unwrap(),
-        Err(_) => panic!("`wing {args:?}` did not exit in 30s"),
-    };
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
-
 // ============================================================
 // Tests
 // ============================================================
+
+/// Bind a port, publish it in a scratch `WING_HOME`, report `build` there.
+async fn start_gateway(build: Build, tag: &str) -> PathBuf {
+    let (home, _port) = start_fake_gateway("wing-status-skew", tag, build, handle_conn).await;
+    home
+}
 
 /// A skew earns exactly one warning line, on stderr, naming both builds — the
 /// report on stdout has none.

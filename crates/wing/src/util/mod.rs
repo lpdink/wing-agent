@@ -1,5 +1,6 @@
 //! Utilities.
 
+pub mod base64;
 pub mod clipboard;
 pub mod clipboard_paste;
 pub mod format;

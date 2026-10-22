@@ -17,39 +17,11 @@
 //!
 //! 单独一个集成测试文件 = 单独一个进程（fd 0 与事件源都是进程级全局）。
 
-use std::os::fd::RawFd;
 use std::time::Duration;
 use std::time::Instant;
+mod common;
 
-fn openpty_pair() -> (RawFd, RawFd) {
-    let mut master: RawFd = -1;
-    let mut slave: RawFd = -1;
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-    (master, slave)
-}
-
-fn make_raw(fd: RawFd) {
-    unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        assert_eq!(libc::tcgetattr(fd, &mut term), 0);
-        libc::cfmakeraw(&mut term);
-        assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &term), 0);
-    }
-}
-
-fn write_all(fd: RawFd, bytes: &[u8]) {
-    let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-    assert_eq!(n as usize, bytes.len(), "pty write");
-}
+use common::pty::{make_raw, openpty_pair, write_all};
 
 fn drain_events(ms: u64) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_millis(ms);

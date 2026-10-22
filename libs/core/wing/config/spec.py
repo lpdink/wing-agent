@@ -6,8 +6,8 @@
 - 元信息曾是两份人读文本（``models.py`` 的字段 docstring 与手写 YAML 模板，靠 ``# SYNC`` 注释
   维系）——机器读不到，设置界面就长不出来。声明层把它变成结构化数据，挂在
   ``FieldInfo.json_schema_extra[WING_META_KEY]`` 上（进 JSON Schema / OpenAPI，下游
-  catalog（02）与设置面板（03/06）从这里读）。
-- **声明取代 docstring**：迁移时字段 docstring 整段搬进 ``doc`` / ``notes``，两边都留就是新的 SYNC。
+  catalog 与设置面板从这里读）。
+- **声明取代 docstring**：字段说明整段搬进 ``doc`` / ``notes``，两边都留就是新的 SYNC。
 - 本模块是纯数据（无 I/O、不 import 其它 wing 包）；``S()`` 只把参数规整成一次 ``Field(...)`` 调用，
   真正的字段级约束（``default`` / ``gt`` / ``pattern`` / ...）原样透传给 pydantic。
 """
@@ -45,7 +45,7 @@ class SettingMeta(BaseModel):
     doc: str
     """一行摘要（面板行内提示 / 详情栏标题）。"""
     notes: str | None = None
-    """多行详解（面板详情栏）；02 按 ``\\n`` 切行。"""
+    """多行详解（面板详情栏）；catalog 按 ``\\n`` 切行。"""
     title: str | None = None
     """人类标签；缺省 = 字段名。"""
     apply: ApplyScope = ApplyScope.HOT
@@ -89,7 +89,7 @@ def setting_meta(field: FieldInfo) -> SettingMeta | None:
     """从任意 ``FieldInfo`` 取声明元信息；未声明（或形态不符）返回 ``None``。
 
     返回 ``None`` 就是「这个字段没有声明」——声明门禁（``tests/test_config_spec.py``）
-    与 02 的 catalog builder 共用这一个读取口。
+    与 catalog builder 共用这一个读取口。
     """
     extra: Any = field.json_schema_extra
     if not isinstance(extra, dict):

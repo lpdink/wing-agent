@@ -351,7 +351,7 @@ export class GatewayHttpClient {
    * `POST /api/tools/register` (needs `X-Client-Id`).
    *
    * Only a tool host calls this; the extension is not one. Mirrored so the
-   * protocol lives in one place (see design D1).
+   * protocol lives in one place.
    */
   async registerTools(clientId: string, tools: readonly RemoteToolSpec[]): Promise<RegisterToolsResponse> {
     return this.request({

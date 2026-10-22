@@ -1905,9 +1905,7 @@ mod tests {
 
     #[test]
     fn cross_line_alt_keeps_the_baseline_rendering() {
-        // Pinned segment by segment (this is what
-        // `origin/develop` renders for it — verified against the baseline
-        // binary, see the step's design.md):
+        // Pinned segment by segment:
         //   line 1: `foo ` · inline code `bar` · ` ` · link label `l1`
         //   line 2: the label's last line, `l2`, with its (shown) destination
         let lines = render_with(

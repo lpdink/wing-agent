@@ -21,10 +21,10 @@ import {
 } from './harness';
 
 /**
- * The composer (step 05).
+ * The composer.
  *
  * Every assertion is about *what the user typed* and *which intent left the
- * webview* — the composer is not allowed to do anything else (design.md D3/D6).
+ * webview* — the composer is not allowed to do anything else.
  */
 
 afterEach(() => {
@@ -631,7 +631,7 @@ describe('submission routing', () => {
     expect(inputOf(accepted.container).value).toBe('/init ');
 
     // After Escape the list is gone, so `/` is just text — never a command with an
-    // empty name (review r1, `快速连按` probe).
+    // empty name (`快速连按` probe).
     const mounted = mountWebview([makeShellSession()]);
     const input = inputOf(mounted.container);
     fireEvent.change(input, { target: { value: '/' } });

@@ -3,13 +3,9 @@
 /// Maximum number of lines the input area supports.
 pub const MAX_INPUT_LINES: usize = 10;
 
-/// Convert a char-based column index to a byte offset within `line`.
-pub fn char_to_byte(line: &str, col: usize) -> usize {
-    line.char_indices()
-        .nth(col)
-        .map(|(i, _)| i)
-        .unwrap_or(line.len())
-}
+// 字符列 → 字节偏移：唯一实现在 `shared::text_edit`（与设置面板 / Ask 编辑器同一份），
+// 这里转发是为了让 composer 侧的导入路径保持不变。
+pub(crate) use crate::shared::text_edit::char_to_byte;
 
 /// Convert a byte offset to a char-based column index within `line`.
 #[cfg(test)]

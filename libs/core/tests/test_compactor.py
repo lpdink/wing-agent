@@ -1,4 +1,4 @@
-"""Tests for Compactor — 重命名后的字段、阈值判断、切割点计算。"""
+"""Compactor 单测：字段与阈值、切割点计算、do_compact、以及 ContextManager 的接线。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from typing import AsyncIterator
 
 import pytest
 
+from _support import default_compactor, make_cm
 from wing.context import Compactor
 from wing.schema import LLMResponse, Message, ToolCall
 
@@ -116,6 +117,15 @@ class TestCompactorInit:
         assert original.keep_recent_tokens == 20_000
         assert clone.compact_window_tokens == 600
 
+    def test_no_model_attr(self):
+        assert not hasattr(
+            Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000), "model"
+        )
+        assert not hasattr(
+            Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000),
+            "model_provider",
+        )
+
 
 # ===================================================================
 # 2. Threshold Methods
@@ -166,7 +176,6 @@ class TestThresholdMethods:
 class TestCalcCutIdx:
     def test_basic_cut(self):
         c = Compactor(context_window_tokens=100_000, keep_recent_tokens=80_000)
-        # compact_window_tokens = 20_000
         msgs = [
             Message(role="user", content="short"),
             Message(role="assistant", content="x" * 80_000),  # ~20K tokens
@@ -319,3 +328,217 @@ class TestDoCompact:
         prov, state = _capturing_provider()
         await c.do_compact([], DEFAULT_MODEL, prov)
         assert len(state["messages"]) == 1  # only COMPACT_PROMPT
+
+    @pytest.mark.asyncio
+    async def test_appends_compact_prompt_after_full_history(self):
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [
+            Message(role="system", content="You are helpful."),
+            Message(role="user", content="hello"),
+            Message(role="assistant", content="hi"),
+        ]
+        prov, state = _capturing_provider()
+        resp = await h.do_compact(full, DEFAULT_MODEL, prov)
+        msgs = state["messages"]
+        assert len(msgs) == len(full) + 1
+        assert msgs[-1].role == "user"
+        assert "Write a continuation summary" in (msgs[-1].content or "")
+        assert "DO NOT call any tools" in (msgs[-1].content or "")
+        assert resp.content == "[Compact] ok"
+        assert msgs[0].content == "You are helpful."
+        assert msgs[1].content == "hello"
+        assert msgs[2].content == "hi"
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_ignored_and_summary_extracted_from_surrounding_text(self):
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="You are helpful.")]
+        prov = _mock_provider(
+            LLMResponse(
+                content="prefix<summary>real summary</summary>suffix",
+                tool_calls=[ToolCall(id="x", name="Bash", arguments={"x": "y"})],
+            )
+        )
+        resp = await h.do_compact(full, DEFAULT_MODEL, prov)
+        assert resp.content == "[Compact] real summary"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_content_preserved(self):
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="You are helpful.")]
+        prov = _mock_provider(
+            LLMResponse(content="<summary>x</summary>", reasoning_content="think...")
+        )
+        resp = await h.do_compact(full, DEFAULT_MODEL, prov)
+        assert resp.reasoning_content == "think..."
+
+    @pytest.mark.asyncio
+    async def test_model_passed_through(self):
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="You are helpful.")]
+        prov, state = _capturing_provider()
+        await h.do_compact(full, "my-main-model", prov)
+        assert state["model"] == "my-main-model"
+
+    @pytest.mark.asyncio
+    async def test_tools_passed_through(self):
+        """tools 参数被透传给 provider.generate。"""
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="You are helpful.")]
+        prov, state = _capturing_provider()
+        my_tools = ["Bash", "Read"]
+        await h.do_compact(full, "m", prov, tools=my_tools)
+        assert state["tools"] == my_tools
+
+    @pytest.mark.asyncio
+    async def test_tools_defaults_to_none(self):
+        """不传 tools 时透传 None（与主 agent 调用不一致时不命中缓存，但兼容）。"""
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        full = [Message(role="system", content="You are helpful.")]
+        prov, state = _capturing_provider()
+        await h.do_compact(full, "m", prov)
+        assert state["tools"] is None
+
+    @pytest.mark.asyncio
+    async def test_empty_full_messages(self):
+        h = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        prov, state = _capturing_provider()
+        await h.do_compact([], DEFAULT_MODEL, prov)
+        assert len(state["messages"]) == 1
+        assert state["messages"][0].role == "user"
+
+
+# ===================================================================
+# 5. ContextManager 接线（get_messages_for_llm 的压缩触发 / 应用路径）
+# ===================================================================
+
+
+class TestGetMessagesForLlm:
+    @pytest.mark.asyncio
+    async def test_accepts_model_and_provider(self, tmp_dir):
+        cm = make_cm(tmp_dir, compactor=default_compactor())
+        cm.add_message(Message(role="user", content="hello"))
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model=DEFAULT_MODEL,
+                model_provider=_mock_provider(
+                    LLMResponse(content="<summary>t</summary>")
+                ),
+                current_tools=lambda: [],
+            )
+        ).messages
+        assert len(llm_msgs) == 2
+        assert llm_msgs[1].content == "hello"
+
+    @pytest.mark.asyncio
+    async def test_no_compact_path(self, tmp_dir):
+        cm = make_cm(tmp_dir, compactor=default_compactor())
+        cm.add_message(Message(role="user", content="hello"))
+        cm.add_message(Message(role="assistant", content="hi"))
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model=DEFAULT_MODEL,
+                model_provider=_mock_provider(
+                    LLMResponse(content="<summary>t</summary>")
+                ),
+                current_tools=lambda: [],
+            )
+        ).messages
+        assert len(llm_msgs) == 3
+
+    @pytest.mark.asyncio
+    async def test_compact_uses_main_model(self, tmp_dir):
+        """Background compact passes the main model to the provider."""
+        low_threshold = Compactor(context_window_tokens=50, keep_recent_tokens=10)
+        cm = make_cm(tmp_dir, compactor=low_threshold)
+        cm.add_message(Message(role="user", content="x" * 200))
+        cm.add_message(Message(role="assistant", content="y" * 200))
+        cm.add_message(Message(role="user", content="z" * 50))
+        prov, state = _capturing_provider()
+        await cm.get_messages_for_llm(
+            model="main-model", model_provider=prov, current_tools=lambda: []
+        )
+        if cm._pending_compact_task:
+            await cm._pending_compact_task
+        assert state.get("model") == "main-model"
+
+    @pytest.mark.asyncio
+    async def test_compact_failure_no_result(self, tmp_dir):
+        """Background compact failure → result stays None, original messages returned."""
+        low_threshold = Compactor(context_window_tokens=50, keep_recent_tokens=10)
+        cm = make_cm(tmp_dir, compactor=low_threshold)
+        cm.add_messages(
+            [
+                Message(role="user", content="x" * 500),
+                Message(role="assistant", content="y" * 500),
+                Message(role="user", content="z" * 500),
+            ]
+        )
+        prov = _mock_provider(LLMResponse(content="no summary tags"))
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model="m", model_provider=prov, current_tools=lambda: []
+            )
+        ).messages
+        if cm._pending_compact_task:
+            await cm._pending_compact_task
+        assert cm._pending_compact_result is None
+        assert len(llm_msgs) == 4  # system + 3 original messages
+
+
+class TestCompactIntegration:
+    @pytest.mark.asyncio
+    async def test_compact_then_continue(self, tmp_dir):
+        """Full async compact flow: early trigger → background → apply → continue."""
+        low_threshold = Compactor(context_window_tokens=50, keep_recent_tokens=10)
+        cm = make_cm(tmp_dir, compactor=low_threshold)
+        cm.add_messages(
+            [
+                Message(role="user", content="old1"),
+                Message(role="assistant", content="old2 is a long message " * 8),
+                Message(role="user", content="old3"),
+            ]
+        )
+
+        async def _gen(
+            self,
+            messages: list[Message],
+            model: str,
+            tools: list | None = None,
+            stream: bool = False,
+            options: object = None,
+        ) -> AsyncIterator[LLMResponse]:
+            yield LLMResponse(content="<summary>compressed old1 and old2</summary>")
+
+        prov = type("MockProvider", (), {"generate": _gen})()
+
+        await cm.get_messages_for_llm(
+            model="main-model",
+            model_provider=prov,  # ty: ignore[invalid-argument-type]
+            current_tools=lambda: [],
+        )
+
+        # Wait for background task
+        if cm._pending_compact_task:
+            await cm._pending_compact_task
+
+        cm.add_message(Message(role="assistant", content="resp " * 20))
+        cm.add_message(Message(role="user", content="more " * 20))
+
+        llm_msgs = (
+            await cm.get_messages_for_llm(
+                model="main-model",
+                model_provider=prov,  # ty: ignore[invalid-argument-type]
+                current_tools=lambda: [],
+            )
+        ).messages
+
+        assert len(llm_msgs) >= 2
+        compact_found = any("[Compact]" in (m.content or "") for m in llm_msgs)
+        if not compact_found:
+            assert cm._pending_compact_result is not None  # still pending
+
+        cm.add_message(Message(role="user", content="new question"))
+        window = cm.get_context_window()
+        assert len(window) >= 2
+        assert "new question" in (window[-1].content or "")

@@ -218,7 +218,7 @@ export interface BranchPickerModel {
 }
 
 /**
- * Overlay data for the active session (frozen in `interfaces.md`).
+ * Overlay data for the active session (frozen by the bridge contract).
  *
  * Two kinds of member live here, and the difference matters:
  *

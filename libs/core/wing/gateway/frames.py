@@ -13,7 +13,7 @@
 - `build_frames(payload, of_type) -> list[Frame]`：载荷 → 帧列表。
 - `Frame.size` 是**精确**的 UTF-8 字节数（构造期算好，发送侧不再重复 encode）。
 
-不变量（由本模块保证，spec `ws-frame-chunking`）：
+不变量（由本模块保证）：
 
 1. 每帧 ≤ `SOFT_LIMIT_BYTES`（含信封与 JSON 转义开销）；
 2. 所有帧 `data` 顺序拼接后与原始载荷逐字节相等；
@@ -92,7 +92,8 @@ def _fast_measure(raw: bytes) -> Callable[[int, int], int]:
 
     def exact_measure(start: int, end: int) -> int:
         piece = raw[start:end].decode("utf-8")
-        return len(json.dumps(piece, ensure_ascii=False).encode("utf-8"))
+        # 去掉 json.dumps 加的首尾引号：与快路径同口径（只数转义后的内容字节）。
+        return len(json.dumps(piece, ensure_ascii=False).encode("utf-8")) - 2
 
     return exact_measure
 
@@ -145,14 +146,18 @@ def _head(chunk_id: str, of_type: str, count: int, index: int) -> str:
     )
 
 
-def _frame(chunk_id: str, of_type: str, count: int, index: int, piece: bytes) -> Frame:
-    """把一段原始载荷包成信封帧（`size` 精确到字节）。"""
+def _frame(
+    chunk_id: str, of_type: str, count: int, index: int, piece: bytes, escaped_len: int
+) -> Frame:
+    """把一段原始载荷包成信封帧（`size` 精确到字节）。
+
+    ``escaped_len`` 是这段载荷 JSON 转义后的字节数（不含引号），由切分时用的
+    ``measure`` 给出——因此这里不必再整片 ``encode`` 一遍（大载荷下那是一份多余的
+    memcpy）。``text`` 与 ``size`` 的关系仍是 ``len(text.encode())``。
+    """
     dumped = json.dumps(piece.decode("utf-8"), ensure_ascii=False)
     head = _head(chunk_id, of_type, count, index)
-    return Frame(
-        text=head + dumped + "}",
-        size=len(head) + len(dumped.encode("utf-8")) + 1,
-    )
+    return Frame(text=head + dumped + "}", size=len(head) + escaped_len + _FRAME_TAIL)
 
 
 def build_frames(payload: str, of_type: str) -> list[Frame]:
@@ -184,11 +189,19 @@ def build_frames(payload: str, of_type: str) -> list[Frame]:
     for _ in range(4):
         pieces = _split_raw(raw, max(SOFT_LIMIT_BYTES - reserve, 2), measure)
         count = len(pieces)
-        frames = [
-            _frame(chunk_id, of_type, count, index, piece)
-            for index, piece in enumerate(pieces)
-        ]
-        # 用真实帧数重算信封预留：预算成立即返回（首轮必然成立——count ≤ hint）。
+        # 每轮重新装帧：重试意味着信封预留变了，上一轮的帧全部作废。
+        frames = []
+        # 各片首尾相接铺满 `raw`：偏移由累积长度还原（`_split_raw` 只回片不回头）。
+        start = 0
+        for index, piece in enumerate(pieces):
+            end = start + len(piece)
+            frames.append(
+                _frame(chunk_id, of_type, count, index, piece, measure(start, end))
+            )
+            start = end
+        # 用真实帧数重算信封预留：预算成立即返回。**重试是真实路径**——`count_hint`
+        # 按原始字节估、真实 `count` 按**转义后**长度切，转义密集时 count 的位数可能
+        # 超过 hint 的（引号/反斜杠各膨胀 1 字节），信封因此变宽、必须重切一轮。
         worst = overhead(count)
         if worst <= reserve and all(f.size <= SOFT_LIMIT_BYTES for f in frames):
             return frames

@@ -1,7 +1,7 @@
 # tests/test_config_catalog.py
 """catalog（``config/catalog.py``）的单测 —— 类型推导全表 / 路径 / 约束 / 分组 / 解析器。
 
-覆盖面（对应 02 design.md 的 D1–D6）：
+覆盖面：
 
 1. 类型推导规则表逐行（含 ``bool`` 早于 ``int``、``Literal`` → enum、``choices`` 非空 ⇒ enum
    （增补 P10）、union → variants、``X | None`` → nullable、``dict`` → map、``BaseModel`` → object）；
@@ -524,7 +524,7 @@ def test_parse_path_accepts_grammar(text: str, expected: list[object]) -> None:
         "a-b",
         "a b",
         "a[99999999999999999999]",  # > 2**64-1（溢出）
-        "a[+1]",  # AD6：文法是「非负整数」，没有符号位（Rust 侧同此口径）
+        "a[+1]",  # 文法是「非负整数」，没有符号位（Rust 侧同此口径）
         "a[1_0]",
     ],
 )

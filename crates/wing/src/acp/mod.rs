@@ -87,7 +87,7 @@ async fn run_acp_inner(args: AcpArgs) -> Result<ExitCode> {
     let http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
         .context("failed to create HTTP client")?;
 
-    // 4. 配置预检（D27）：不可用 → problems 走 **stderr** + EX_CONFIG（78）。
+    // 4. 配置预检：不可用 → problems 走 **stderr** + EX_CONFIG（78）。
     //    stdout 此刻还没交给 ACP 传输，且这条路径只写 stderr —— 协议帧通道零污染。
     if let Some(code) = crate::cmd::setup::preflight_or_report(&http, &http_base).await {
         return Ok(code);

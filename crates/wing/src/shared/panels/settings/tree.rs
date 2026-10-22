@@ -2,9 +2,9 @@
 //!
 //! 两者都是**纯函数**：不读面板状态、不改任何东西，输入是（目录, 文档, 展开集, 问题, 搜索, 选择项），
 //! 输出是「一行可见节点」的向量。每次状态变化后整树重算（≤ 几百节点，微秒级），
-//! 因此「可见行」永远与状态一致，不存在增量维护的漂移（design §11.2）。
+//! 因此「可见行」永远与状态一致，不存在增量维护的漂移。
 //!
-//! 三个约定（08 渲染前必须知道）：
+//! 三个约定（渲染前必须知道）：
 //!
 //! 1. **列表项行的主文本在 `label`**（标量项 = 值本身；对象项 = `name · protocol · …` 摘要行），
 //!    `value` 恒为 `ValueText::None`；字段行相反：`label` = 名字、`value` = 值。
@@ -40,7 +40,7 @@ use crate::shared::doc_edit::index_path;
 use crate::shared::doc_edit::join_path;
 use crate::shared::doc_edit::path_is_within;
 
-/// 一行可见的树节点（设计 §11.2）。
+/// 一行可见的树节点（树的扁平化结果，见模块文档）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     /// 这一行属于哪个根。
@@ -62,7 +62,7 @@ pub struct Row {
     pub(crate) tpath: String,
 }
 
-/// 值的展示形态（`display_value` 的输出，design §11.3）。
+/// 值的展示形态（`display_value` 的输出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueText {
     /// 标量的展示文本。
@@ -209,7 +209,7 @@ struct Place<'a> {
     depth: usize,
     /// 搜索态下被「命中的父级」连带展示（只发这一行，除非它自己也是祖先链的一员）。
     forced: bool,
-    /// 当这一行是列表项时，它所属的**列表节点**（`summary_fields` 声明在列表上，§13.4）。
+    /// 当这一行是列表项时，它所属的**列表节点**（`summary_fields` 声明在列表上）。
     owner: Option<&'a SettingNode>,
 }
 
@@ -376,7 +376,7 @@ fn add_variants(node: &SettingNode) -> usize {
 }
 
 fn emit_leaf(ctx: &Ctx, rows: &mut Vec<Row>, node: &SettingNode, place: Place<'_>, as_item: bool) {
-    // 标量列表项的主文本是**值本身**（design §13.4 的 `Bash` / `Read` 行）。
+    // 标量列表项的主文本是**值本身**（`Bash` / `Read` 行）。
     let label = if as_item {
         ctx.doc
             .value(ctx.root, &place.path)
@@ -396,7 +396,7 @@ fn emit_leaf(ctx: &Ctx, rows: &mut Vec<Row>, node: &SettingNode, place: Place<'_
         match_spans: ctx.spans(node.display_label()),
         tpath: place.tpath.clone(),
     });
-    // enum 的内联选择项（design §20 D19）：只在树里插子行，不是独立视图。
+    // enum 的内联选择项：只在树里插子行，不是独立视图。
     if node.kind == SettingKind::Enum
         && let Some(state) = ctx
             .choices
@@ -477,7 +477,8 @@ fn leaf_action(node: &SettingNode) -> RowAction {
     }
 }
 
-/// 有效项数：文档里有数组就用它，缺席时回落到声明默认里的数组（见 design A2 的说明），
+/// 有效项数：文档里有数组就用它，缺席时回落到声明默认里的数组（协议不携带它，
+/// 因此那个回落恒为空，见 `list` 模块的「已知限制」）。
 /// 其余情况 = 0。
 fn effective_len(doc: &SettingsDoc, root: Root, path: &str, node: &SettingNode) -> usize {
     match doc.value(root, path) {
@@ -491,7 +492,7 @@ fn effective_len(doc: &SettingsDoc, root: Root, path: &str, node: &SettingNode) 
     }
 }
 
-/// 唯一取值口径（design §11.3 的伪码 + 密文三态）。
+/// 唯一取值口径（含密文三态）。
 pub fn display_value(doc: &SettingsDoc, root: Root, node: &SettingNode, path: &str) -> ValueText {
     // 结构节点没有「值」这一列（列表项行的文本走 label）。
     if node.kind == SettingKind::Object || node.kind == SettingKind::List {
@@ -591,7 +592,7 @@ pub(crate) fn concrete_node<'a>(
     Some(node)
 }
 
-/// 列表项的摘要行（design §13.4）：`summary_fields` 指定的字段（声明在**列表节点**上），
+/// 列表项的摘要行：`summary_fields` 指定的字段（声明在**列表节点**上），
 /// 缺省回落第一个标量子字段。
 pub(crate) fn summary_line(
     doc: &SettingsDoc,

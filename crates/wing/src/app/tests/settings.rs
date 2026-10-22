@@ -1,11 +1,11 @@
-//! 设置面板的 App 接线测试（10 步骤）。
+//! 设置面板的 App 接线测试。
 //!
-//! 覆盖：模态优先级（AD2）· ask 排队 · overlay 的绘制落点与三者处置
-//! （design §20 风险 13 的 `needs_full_redraw` / `images.invalidate()` 配对）·
+//! 覆盖：模态优先级 · ask 排队 · overlay 的绘制落点与三者处置
+//! （`needs_full_redraw` / `images.invalidate()` 的配对）·
 //! 实时预览与快照 · 一键保存两边的四种组合 · 轮次中拒绝重启 ·
 //! `settings_changed` 的指纹比对 · 命令表别名。
 //!
-//! 夹具是自带的（07 / 08 的 `test_support` 是各自包私有的）：一棵小目录 + 一份稀疏文档，
+//! 夹具是自带的（`settings` 与 `ui::settings` 的 `test_support` 是各自包私有的）：一棵小目录 + 一份稀疏文档，
 //! 够走完「搜索定位 → 编辑提交 → 预览 / 保存」的真实按键路径。
 
 use std::collections::HashMap;
@@ -372,7 +372,7 @@ fn settings_response(
     }
 }
 
-// ── 1. 模态优先级（AD2） ───────────────────────────────────
+// ── 1. 模态优先级 ─────────────────────────────────────────
 
 #[test]
 fn settings_owns_the_app_reserved_keys_and_ctrl_o() {
@@ -392,7 +392,7 @@ fn settings_owns_the_app_reserved_keys_and_ctrl_o() {
         assert_eq!(
             app.route_key(&key),
             KeyRoute::Settings,
-            "{code:?} 归面板（AD2）"
+            "{code:?} 归面板（模态最高优先级）"
         );
     }
     // Ctrl+C 永远归应用（双击退出）。
@@ -460,8 +460,8 @@ fn paste_while_the_panel_is_open_does_not_reach_the_draft() {
     assert_eq!(app.input.text(), "hello");
 }
 
-/// N4：设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
-/// ask（AD2：面板开着时到达的 ask 入队但不弹）。顺序反过来的话，`Ctrl+V` 会写进
+/// 设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
+/// ask（面板开着时到达的 ask 入队但不弹）。顺序反过来的话，`Ctrl+V` 会写进
 /// 那条**看不见**的 ask 内联编辑器里。
 #[test]
 fn paste_is_dropped_before_it_can_reach_a_queued_ask() {
@@ -562,7 +562,7 @@ fn an_ask_arriving_while_the_panel_is_open_waits_in_the_queue() {
     assert_eq!(sent, Some(("y".to_string(), Some("ask-9".into()))));
 }
 
-// ── 3. overlay 的绘制落点 + 三者处置（§20 风险 13） ────────
+// ── 3. overlay 的绘制落点 + 三者处置 ────────────────────
 
 #[test]
 fn the_open_panel_floats_over_the_chat_and_leaves_the_background_visible() {
@@ -649,10 +649,10 @@ fn the_open_panel_suppresses_pictures_and_closing_invalidates_them() {
         "卡片挡住的图片这一帧不画（打开面板时还整屏擦过一次）"
     );
 
-    // 关闭：整屏重画 + 图片句柄失效（design §20 风险 13 的配对）。
+    // 关闭：整屏重画 + 图片句柄失效（两者的配对）。
     app.close_settings_panel(false);
     assert!(app.needs_full_redraw, "关闭后面板要求整屏重画");
-    // N2：`invalidate` 在**关闭那一刻**就已经生效（不是靠下一次 draw 的兜底）——
+    // `invalidate` 在**关闭那一刻**就已经生效（不是靠下一次 draw 的兜底）——
     // 下一帧的 `needs_full_redraw` 分支会把它再做一遍，只有在这里读才分得清。
     assert_eq!(
         app.images.stats().expect("lane").cached,
@@ -686,7 +686,7 @@ fn opening_the_panel_cancels_an_in_flight_selection() {
     assert!(!app.selection.is_press_active(), "打开面板取消选区");
 }
 
-// ── 3b. 滚动条在 overlay 期间的交接（§20 风险 13 的第三件） ────
+// ── 3b. 滚动条在 overlay 期间的交接 ─────────────────────────
 
 /// 滚动条独有的字形：强调态（悬停 / 拖拽）的 thumb 是 `█`，其余是 `┃`；
 /// `│` 与所有边框共享，不能当判据。面板自己只画 `│` / `─` / `❯` / `■`（U+25A0，
@@ -702,7 +702,7 @@ fn has_bar_glyph(buf: &ratatui::buffer::Buffer) -> bool {
     false
 }
 
-/// S2：overlay 期间**不绘制**滚动条，且 hover / drag 态在打开那一刻
+/// overlay 期间**不绘制**滚动条，且 hover / drag 态在打开那一刻
 /// 就交出去 —— 不交出去的话关掉面板后拖拽态会复活（强调字形重新出现）。
 #[test]
 fn the_open_panel_hands_the_scrollbar_over_and_gives_it_back_on_close() {
@@ -752,9 +752,9 @@ fn the_open_panel_hands_the_scrollbar_over_and_gives_it_back_on_close() {
     );
 }
 
-// ── 4. 实时预览（§15.3） ───────────────────────────────────
+// ── 4. 实时预览 ────────────────────────────────────────────
 
-/// 06 落地的 `paste.image.*` 在**真实 catalog** 的面板里可见、可改（本步骤只验证，
+/// `paste.image.*` 在**真实 catalog** 的面板里可见、可改（这里只验证面板一侧，
 /// 不重复添加条目——声明由 06 完成，重复声明会触 phantom-key 门禁）。
 ///
 /// 走的是与用户完全相同的按键路径：Tab 到 Interface 锚点 → 搜索定位 → Enter 打开
@@ -806,7 +806,7 @@ fn editing_an_interface_color_through_the_real_key_path_previews_it() {
     press(&mut app, KeyCode::Enter); // 打开编辑器（预填 magenta）
     press_event(&mut app, ctrl(KeyCode::Char('u'))); // 清空缓冲
     type_text(&mut app, "cyan");
-    // S1：先把 `App::with_images` 的初始值消费掉 —— 否则下面那条断言恒真
+    // 先把 `App::with_images` 的初始值消费掉 —— 否则下面那条断言恒真
     //（构造即 `true`，而这条测试从不 draw）。提交之后的 `true` 必须由这次预览给出。
     app.needs_full_redraw = false;
     press(&mut app, KeyCode::Enter); // 提交
@@ -820,7 +820,7 @@ fn editing_an_interface_color_through_the_real_key_path_previews_it() {
     assert!(app.needs_full_redraw, "调色板变了要整屏重画");
 }
 
-/// S1 的专门守卫：`apply_palette` 必须**主动**
+/// 专门守卫：`apply_palette` 必须**主动**
 /// 置 `needs_full_redraw` —— 调色板不在 ratatui 的 diff 键里，不整屏重画就会留残影。
 #[test]
 fn a_preview_asks_for_a_full_redraw() {
@@ -877,7 +877,7 @@ fn closing_with_discard_restores_the_config_snapshot() {
     let before = app.config.colors.accent.clone();
     app.apply_settings_preview(&json!({"colors": {"accent": "cyan"}}));
     assert_eq!(app.config.colors.accent.as_deref(), Some("cyan"));
-    // S1：消费初始值，让下面那条断言由"这次关闭"负责（不是构造时的 true）。
+    // 消费初始值，让下面那条断言由"这次关闭"负责（不是构造时的 true）。
     app.needs_full_redraw = false;
 
     app.close_settings_panel(true);
@@ -909,7 +909,7 @@ fn a_successful_interface_save_updates_the_snapshot() {
     assert_eq!(app.config.colors.accent.as_deref(), Some("cyan"));
 }
 
-// ── 5. 一键保存两边（§15.4）＋ 四种组合的 notice ────────────
+// ── 5. 一键保存两边 ＋ 四种组合的 notice ───────────────────
 
 #[test]
 fn a_full_save_reports_both_sides_in_one_notice() {
@@ -948,11 +948,11 @@ fn a_full_save_reports_both_sides_in_one_notice() {
     );
     assert!(
         text.contains("⚠ gateway.port 需重启网关才生效 — Ctrl+R 立即重启"),
-        "AD1 的文案：{text}"
+        "重启提示的文案：{text}"
     );
     assert!(
         !text.contains("按 r "),
-        "不许出现 design §12.4 的旧文案：{text}"
+        "不许出现旧文案（Ctrl+R 之外的重启提示）：{text}"
     );
     assert_eq!(app.toast.as_ref().map(|t| t.kind), Some(ToastKind::Info));
 }
@@ -1089,7 +1089,7 @@ fn an_interface_only_save_closes_the_receipt_without_a_gateway_line() {
     assert!(save_notice_ok(&interface, &GatewaySaveReport::Skipped));
 }
 
-/// AD13：后端带回 `warnings`（坏文件被修复、密文无从回填）时，回执**逐条**显示 ——
+/// 后端带回 `warnings`（坏文件被修复、密文无从回填）时，回执**逐条**显示 ——
 /// 它是"用户必须知道"的话，不是日志；且不改变成败等级（保存是成功的）。
 #[test]
 fn a_save_that_lost_secrets_reports_the_backend_warnings() {
@@ -1105,7 +1105,7 @@ fn a_save_that_lost_secrets_reports_the_backend_warnings() {
     assert!(text.starts_with("设置已保存"), "{text}");
     assert!(
         text.contains("⚠ 原配置文件无法解析，其中的密钥无法保留，请重新填写"),
-        "AD13 的说明要在回执里：{text}"
+        "后端的非致命说明要在回执里：{text}"
     );
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
@@ -1127,7 +1127,7 @@ fn a_save_that_lost_secrets_reports_the_backend_warnings() {
     );
 }
 
-// ── 6. 轮次中拒绝重启（§12.5） ─────────────────────────────
+// ── 6. 轮次中拒绝重启 ─────────────────────────────────────
 
 #[test]
 fn restart_is_refused_while_a_turn_is_running() {
@@ -1152,7 +1152,7 @@ fn restart_is_refused_while_a_turn_is_running() {
     );
 }
 
-// ── 7. settings_changed 的指纹比对（§7.6） ─────────────────
+// ── 7. settings_changed 的指纹比对 ────────────────────────
 
 #[test]
 fn our_own_save_does_not_raise_the_stale_banner() {
@@ -1438,7 +1438,7 @@ fn a_failed_gateway_save_keeps_the_cached_values() {
 
 #[test]
 fn the_panel_contract_used_by_the_app_is_stable() {
-    // 这些调用就是 App 侧用到的全部面板 API（07 Rework r1 的清单，逐条）。
+    // 这些调用就是 App 侧用到的全部面板 API（逐条）。
     let mut panel = SettingsPanel::new(
         &gateway_schema(),
         gateway_state(sample_values(), "fp-1"),
@@ -1463,9 +1463,9 @@ fn the_panel_contract_used_by_the_app_is_stable() {
     assert_eq!(panel.dirty_count(), 0);
 }
 
-// ── 8b. 重启路径的早退分支（N6） ───────────────────────────
+// ── 8b. 重启路径的早退分支 ─────────────────────────────────
 
-/// N6：`restart_gateway` 连"没有 transport"这条早退都没有测试。
+/// `restart_gateway` 连"没有 transport"这条早退都没有测试。
 /// 它不需要真网关：没有连接时直接 toast + return，**不产出任何副作用**。
 #[tokio::test]
 async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {

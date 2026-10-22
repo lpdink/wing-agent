@@ -1,6 +1,6 @@
 //! 模态提示浮层（删除确认 / 清空确认 / 形态选择 / 放弃改动）。
 //!
-//! 07 的 [`PromptView`] 是纯数据（`kind` / `title` / `lines` / `options` / `cursor`），
+//! [`PromptView`] 是纯数据（`kind` / `title` / `lines` / `options` / `cursor`），
 //! 这里把它画成一个居中浮层：
 //!
 //! ```text

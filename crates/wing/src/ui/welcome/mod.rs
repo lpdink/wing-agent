@@ -80,14 +80,16 @@ pub const SWEEP_MS: u64 = 2_400;
 const FRAME_MS: u64 = 40;
 
 /// 海鸥在 header 里占的终端行数（两个姿态对齐到同一高度，切换不跳版）。
-const ART_TERM_ROWS: usize = 13;
+///
+/// `pub(crate)`：首次运行向导的背板（`cmd::setup`）按同一份几何排版。
+pub(crate) const ART_TERM_ROWS: usize = 13;
 
 /// 站姿在盒子里默认下移的像素行 —— 头顶余量：抬升（呼吸 / 跳）把整帧上移，
 /// 没有余量就会裁掉头冠的像素行，读起来像被压扁而不是跳起来。
-const PERCHED_TOP_PAD: usize = 2;
+pub(crate) const PERCHED_TOP_PAD: usize = 2;
 
 /// 海鸥与右侧文字列之间的空列数。
-const ART_GAP: usize = 3;
+pub(crate) const ART_GAP: usize = 3;
 
 /// 海鸥的最宽列数（两个姿态取大）。
 const ART_COLS: usize = if PERCHED_IDLE_COLS > FLY_0_COLS {

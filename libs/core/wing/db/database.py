@@ -367,14 +367,7 @@ class Database:
     def close(self) -> None:
         """关闭连接（幂等；降级过的对象是 no-op）。"""
         with self._lock:
-            self._ready = False
-            conn, self._conn = self._conn, None
-            if conn is None:
-                return
-            try:
-                conn.close()
-            except Exception:
-                pass
+            self._release_connection()
 
     # ── 内部 ─────────────────────────────────────
 

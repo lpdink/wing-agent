@@ -67,21 +67,48 @@ impl ChatView {
 
     /// Every local image path the view's cells reference, for header probing.
     ///
-    /// Collected from the cells' memoised candidate lists (rebuilt with their
-    /// lines — see `CachedCell::image_candidates`), so this is a walk over the
-    /// cells and their (short) path lists, not a re-render. Duplicates across
-    /// cells are kept: the caller looks every path up in its own table anyway,
-    /// which is both the dedupe and the "already probed" check.
+    /// Read off the cells' memoised candidate lists (rebuilt with their lines —
+    /// see `CachedCell::image_candidates`), so this is a concatenation, not a
+    /// re-render. Duplicates across cells are kept: the caller looks every path
+    /// up in its own table anyway, which is both the dedupe and the "already
+    /// probed" check.
+    ///
+    /// The concatenation is buffered and only rebuilt when the cell set or some
+    /// cell's list changed — the frame asks for it twice, and a re-collection
+    /// copies every path of the whole view. The signature folds both halves
+    /// (cell count and the epochs' sum): the sum alone is not monotone (removing
+    /// a projected cell lowers it), so counting the cells with it keeps a
+    /// removal from cancelling a rebuild.
     ///
     /// User messages are not walked for *media* either: their pictures are gateway objects,
     /// not files, so there is no header to probe (`media::render_body` gets the shape from
     /// the ref itself). This walk is about local files only.
-    pub fn image_candidates(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for cell in &self.cells {
-            out.extend_from_slice(cell.image_candidates());
+    pub fn image_candidates(&mut self) -> &[PathBuf] {
+        let signature = self.candidates_signature_now();
+        if self.candidates_signature != Some(signature) {
+            self.candidates.clear();
+            for cell in &self.cells {
+                self.candidates.extend_from_slice(cell.image_candidates());
+            }
+            self.candidates_signature = Some(signature);
         }
-        out
+        &self.candidates
+    }
+
+    /// Drop the candidate buffer (the cells are gone).
+    pub(super) fn forget_candidates(&mut self) {
+        self.candidates.clear();
+        self.candidates_signature = None;
+    }
+
+    /// What the candidate buffer was built from: the cell count and the sum of
+    /// their `candidates_epoch`s.
+    fn candidates_signature_now(&self) -> (usize, u64) {
+        let epochs = self
+            .cells
+            .iter()
+            .fold(0u64, |acc, cell| acc.wrapping_add(cell.candidates_epoch()));
+        (self.cells.len(), epochs)
     }
 }
 

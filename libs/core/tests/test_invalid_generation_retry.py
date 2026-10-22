@@ -38,14 +38,7 @@ from wing.schema import (
 #: 10 次、3s 起步指数退避、封顶 180s（见 ReActLoop._config 注释）。
 _NO_WAIT = SimpleNamespace(max_retries=2, max_retry_delay=0.0)
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 class _Ctx:
@@ -68,6 +61,10 @@ class _FakeCM:
 
     def __init__(self) -> None:
         self.added: list[list[Message]] = []
+
+    @property
+    def context_window_tokens(self) -> int:
+        return 0
 
     async def get_messages_for_llm(self, **_: Any) -> SimpleNamespace:
         return SimpleNamespace(messages=[], tools=[], cache_parts=())

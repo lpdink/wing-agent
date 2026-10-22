@@ -82,7 +82,7 @@ const define = {
  * resolution, no dynamic chunk fetch and no `connect-src` allowance for the
  * webview origin. Everything the renderer needs (syntax highlighting grammars,
  * themes, icons) must therefore be bundled at build time — runtime `fetch` from
- * the webview is forbidden by design (design.md D4).
+ * the webview is forbidden by design.
  *
  * The file names are part of the host contract: `src/host/chatViewProvider.ts`
  * references exactly these two paths.

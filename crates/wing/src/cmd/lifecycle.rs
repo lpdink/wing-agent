@@ -77,16 +77,12 @@ pub async fn run_new(args: NewArgs, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing new error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("new", e),
     }
 }
 
 async fn new_inner(args: &NewArgs) -> Result<NewOutput> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
     // 与其它创建路径同口径：没给 --workspace 就用本进程的 cwd（"会话在我在的
     // 地方干活"），给了就照给。
@@ -181,16 +177,12 @@ pub async fn run_resume(session_id: &str, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing resume error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("resume", e),
     }
 }
 
 async fn resume_inner(session_id: &str) -> Result<ResumeOutput> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     let resp = http
         .resume_session(session_id)
         .await

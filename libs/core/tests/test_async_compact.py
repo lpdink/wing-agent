@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-import tempfile
 from pathlib import Path
 from typing import AsyncIterator
 
 import pytest
 
+from _support import default_compactor, make_cm
 from wing.context import Compactor, ContextManager, PendingCompact
-from wing.chain import TrackedList
-from wing.store.file import FileMessageLog
-from wing.schema import ChainNode, LLMResponse, LLMUsage, MediaRef, Message
+from wing.schema import LLMResponse, LLMUsage, MediaRef, Message
 
 
 # ---------------------------------------------------------------------------
@@ -21,29 +18,15 @@ from wing.schema import ChainNode, LLMResponse, LLMUsage, MediaRef, Message
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def tmp_dir():
-    d = tempfile.mkdtemp()
-    yield Path(d)
-    shutil.rmtree(d)
-
-
 def _make_cm(
     tmp_dir: Path,
     compactor: Compactor | None = None,
     session_id: str = "test-async",
 ) -> ContextManager:
-    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / session_id))
-    if compactor is None:
-        compactor = Compactor(
-            context_window_tokens=100_000,
-            keep_recent_tokens=20_000,
-        )
-    return ContextManager(
+    return make_cm(
+        tmp_dir,
         session_id=session_id,
-        messages=messages,
-        system_prompt="You are a helpful assistant.",
-        compactor=compactor,
+        compactor=compactor or default_compactor(),
     )
 
 

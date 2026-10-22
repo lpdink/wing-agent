@@ -38,11 +38,9 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from .catalog import SettingKind, SettingNode
+from .catalog import SettingKind, SettingNode, child_path, item_template
 
 if TYPE_CHECKING:
-    # 只在类型层需要（运行时只用属性访问）：document 依赖 emit 的 _item_template，
-    # 这里是反向引用，必须避免循环 import。
     from .document import ExtraKey
 
 _MISSING = object()
@@ -59,10 +57,10 @@ _UNKNOWN_KEY_NOTE = "unknown key (not recognized by this wing version)"
 
 
 def default_document() -> dict[str, Any]:
-    """首次运行的稀疏文档：两个空列表 = **天然的 problem**（04 的 setup 向导据此指路）。
+    """首次运行的稀疏文档：两个空列表 = **天然的 problem**（设置向导据此指路）。
 
     其余键全部缺席 → emitter 把它们的默认值写成注释掉的行使文件可发现；没有 ``ChangeHere``
-    这种"假值"，也不需要一套特殊的占位符语义（总设计 §20 D24）。
+    这种"假值"，也不需要一套特殊的占位符语义。
     """
     return {"providers": [], "agents": []}
 
@@ -204,7 +202,7 @@ def _emit_children(
             out,
             extras,
             child,
-            _child_path(prefix, child.key),
+            child_path(prefix, child.key),
             raw,
             indent,
             commented=commented,
@@ -243,7 +241,7 @@ def _emit_sections(
                 body,
                 extras,
                 child,
-                _child_path(prefix, child.key),
+                child_path(prefix, child.key),
                 raw,
                 0,
                 commented=False,
@@ -394,7 +392,7 @@ def _emit_keyed_raw(
     （`true` / `{}` / `[]`）。非空容器的单行 dump（`a: 1` / `- 1`）是**块结构的首行**，
     直接拼在 `key: ` 后会产出非法 YAML（`key: a: 1` / `key: - 1`，`yaml.safe_load` 直接
     ScannerError）——这类载荷一律走缩进块。前向兼容承诺「原样写回」，写出一份解析不了的文件
-    等于把它弄丢了（B1 回归，见 02 design.md「Rework r1」）。
+    等于把它弄丢了。
     """
     text = _raw_yaml(value)
     lines = text.split("\n")
@@ -427,7 +425,7 @@ def _emit_list_item(
     allow_defaults: bool,
 ) -> None:
     """一个列表项：对象形态走 ``- key: value`` 合并，标量一项一行，其余原样。"""
-    template = _item_template(node, item)
+    template = item_template(node, item)
     if (
         template is not None
         and template.kind is SettingKind.OBJECT
@@ -447,33 +445,6 @@ def _emit_list_item(
         _emit_raw_item(out, item, indent, commented)
     else:
         _line(out, indent, f"- {_scalar_text(item)}", commented)
-
-
-def _item_template(node: SettingNode, item: Any) -> SettingNode | None:
-    """按文档实际值的 JSON 形状选元素形态（与 Rust 侧 ``select_variant`` 同口径）。"""
-    if node.element is not None:
-        return node.element
-    for variant in node.variants or []:
-        if _accepts_shape(variant.kind, item):
-            return variant
-    return None
-
-
-def _accepts_shape(kind: SettingKind, value: Any) -> bool:
-    """``kind`` 与 JSON 形状是否相符（未知 kind 一律不符——形态未知就选不出编辑器）。"""
-    if kind in (SettingKind.STR, SettingKind.ENUM, SettingKind.SECRET):
-        return isinstance(value, str)
-    if kind is SettingKind.INT:
-        return isinstance(value, int) and not isinstance(value, bool)
-    if kind is SettingKind.FLOAT:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if kind is SettingKind.BOOL:
-        return isinstance(value, bool)
-    if kind in (SettingKind.MAP, SettingKind.OBJECT):
-        return isinstance(value, dict)
-    if kind is SettingKind.LIST:
-        return isinstance(value, list)
-    return False
 
 
 def _emit_object_item(
@@ -520,7 +491,7 @@ def _emit_object_item(
 def _emit_raw_item(out: list[str], item: Any, indent: int, commented: bool) -> None:
     """没有元素声明（或形状对不上）的列表项：原样写出。
 
-    与 ``_emit_keyed_raw`` 不同，这里把载荷首行并进 ``- `` 是**正确**的（不是同一条 B1 缺陷）：
+    与 ``_emit_keyed_raw`` 不同，这里把载荷首行并进 ``- `` 是**正确**的：
     嵌套序列的紧凑形态 ``- - 1`` 就是 ``[[1]]`` 的合法写法——``yaml.safe_dump([[1]])``
     自己也这么写（实测变异验证：改成分行缩进，解析结果不变）。
     """
@@ -597,8 +568,3 @@ def _empty_value(node: SettingNode) -> Any:
     if node.kind is SettingKind.FLOAT:
         return 0.0
     return ""
-
-
-def _child_path(prefix: str, key: str) -> str:
-    """子路径：root 的子树**不带根前缀**（与 catalog 的路径生成同一条规则）。"""
-    return f"{prefix}.{key}" if prefix else key

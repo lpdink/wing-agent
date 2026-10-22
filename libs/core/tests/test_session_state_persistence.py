@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from _support import seed_messages
 from wing.hooks import hooks
 from wing.schema import Message
 from wing.session import AgentTemplate, AgentOverride, SessionManager
@@ -46,13 +47,6 @@ def sm(root: Path) -> SessionManager:
 def _restart(root: Path) -> SessionManager:
     """在同一存储根目录上新建 SessionManager——模拟 Gateway 重启。"""
     return SessionManager({"file": FileSessionStore(root)})
-
-
-def _seed(session, *contents: str) -> None:
-    """向 session 的上下文写入消息（不经 LLM）。"""
-    for i, content in enumerate(contents):
-        role = "user" if i % 2 == 0 else "assistant"
-        session.context_manager.add_message(Message(role=role, content=content))
 
 
 def _raw_metadata(root: Path, sid: str) -> dict:
@@ -178,7 +172,6 @@ class TestProviderResetKeepsSessionSwitches:
     @pytest.mark.asyncio
     async def test_pool_reset_keeps_recorded_switches(self, sm):
         from wing.provider.pool import reset_providers
-        from wing.schema import Message
 
         session = sm.create_session()
         await session.update_state(thinking=False, reasoning_effort="low")
@@ -350,7 +343,7 @@ class TestForkSnapshot:
             )
         )
         await source.update_state(thinking=False)
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
         child, _ = sm.fork_session(source.session_id, target)
@@ -384,7 +377,7 @@ class TestForkSnapshot:
         会让子会话请求体带上源会话没有的显式配置——前缀身份被破坏。
         """
         source = sm.create_session()
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
         child, _ = sm.fork_session(source.session_id, target)
@@ -401,7 +394,7 @@ class TestForkSnapshot:
         """显式动作切换过的开关：记录原样进子会话（fork 快照的一部分）。"""
         source = sm.create_session()
         await source.update_state(thinking=False, reasoning_effort="low")
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
         child, _ = sm.fork_session(source.session_id, target)
@@ -423,7 +416,7 @@ class TestForkSnapshot:
         source.context_manager.append_to_system_prompt(
             "<current_directory>/x</current_directory>"
         )
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
         child, _ = sm.fork_session(source.session_id, target)

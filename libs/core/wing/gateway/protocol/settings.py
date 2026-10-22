@@ -2,16 +2,16 @@
 
 """Setting API 的 wire 模型（4 端点：``schema`` / ``get`` / ``status`` / ``set``）。
 
-字段名与可空性即协议（design.md §9 冻结 + protocol_addendum 的 P1 修正 / P5 / P6）——
-Rust 侧镜像在 ``crates/wing-api-client/src/models.rs``，**消费方已落地**：改这里等于改协议。
-几条写死的约定：
+字段名与可空性即协议——Rust 侧镜像在 ``crates/wing-api-client/src/models.rs``，
+**消费方已落地**：改这里等于改协议。几条写死的约定：
 
-- ``summary_fields`` 是**数组不是可空**（P1 修正）：Rust 是 ``Vec<String>``，
+- ``summary_fields`` 是**数组不是可空**：Rust 是 ``Vec<String>``，
   发 ``null`` 会让反序列化失败（``#[serde(default)]`` 只处理缺键，不处理显式 null）。
-- ``base: str | None = None``（P5）：显式 ``null`` 与缺键都表示「跳过指纹检查」（CLI ``--force``）。
-- ``SettingProblem.kind`` 是**字符串**（P6）：``ProblemKind`` 序列化为它的 value；未知种类
+- ``base: str | None = None``：显式 ``null`` 与缺键都表示「跳过指纹检查」（CLI ``--force``）。
+- ``SettingProblem.kind`` 是**字符串**：``ProblemKind`` 序列化为它的 value；未知种类
   前端必须容忍（它只用于展示与排序），所以这里不做枚举。
-- ``setup_mode`` 字段本期恒为 ``False``（网关只在配置合法时才活着）；04 才让它变成真的。
+- ``setup_mode`` 是**真值**：网关是否正以降级态运行（配置不可用时也活着，只服务设置端点）。
+  因此 ``valid`` 的口径是 ``valid == (not setup_mode and 无 problem)``——降级态恒 false。
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ class SettingChoice(BaseModel):
 class SettingNodeProto(BaseModel):
     """设置目录树的一个节点（领域 ``SettingNode`` 的 wire 投影）。
 
-    ``path`` 是规范地址（§5.2 文法）：catalog 里用 ``[]`` 表示元素模板
-    （``providers[].models[].id``），文档 / problems / changed 里用具体下标
-    （``providers[0].models[2].id``）。根节点的 ``key`` / ``path`` 恒为 ``"config"``（P2）。
+    ``path`` 是规范地址（路径文法见 ``config.catalog.parse_path``）：catalog 里用 ``[]``
+    表示元素模板（``providers[].models[].id``），文档 / problems / changed 里用具体下标
+    （``providers[0].models[2].id``）。根节点的 ``key`` / ``path`` 恒为 ``"config"``。
     """
 
     # ── 身份 ──
@@ -160,8 +160,8 @@ class SettingsSchemaResponse(BaseModel):
 class SettingProblem(BaseModel):
     """一条配置问题（领域 ``ConfigProblem`` 的 wire 投影）。
 
-    ``kind`` 是 ``ProblemKind`` 的 value 字符串（P6）；未知种类必须容忍——种类只用于
-    展示与排序（严重度见 design.md §14.1），前端不得因未知值而失败。
+    ``kind`` 是 ``ProblemKind`` 的 value 字符串；未知种类必须容忍——种类只用于
+    展示与排序，前端不得因未知值而失败。
     """
 
     path: str | None = Field(
@@ -231,7 +231,7 @@ class SettingsStatusResponse(BaseModel):
 class SettingsSetRequest(BaseModel):
     """POST /api/settings/set 请求——全文档替换 + 乐观并发指纹。
 
-    密文三态（§7.5）：``null`` = 保留现值 / 字符串 = 设为该值（``""`` = 显式清空）/
+    密文三态：``null`` = 保留现值 / 字符串 = 设为该值（``""`` = 显式清空）/
     键缺席 = 该项不被覆盖（从文件移除）。
     """
 
@@ -246,7 +246,7 @@ class SettingsSetResponse(BaseModel):
     """POST /api/settings/set 响应——保存回执。
 
     **校验失败不是 HTTP 4xx**：请求本身合法，是用户填的内容不合法，所以走
-    ``HTTP 200 + ok=false + problems``（总设计 D16，用户已批准）。HTTP 错误码只留给
+    ``HTTP 200 + ok=false + problems``。HTTP 错误码只留给
     协议级失败（409 指纹不匹配 / 401·403 鉴权 / 500 写盘失败）。
     """
 
@@ -265,17 +265,17 @@ class SettingsSetResponse(BaseModel):
         default=None, description="热重载逐项结果（复用 /api/system/reload 的形状）"
     )
     setup_mode_exited: bool = Field(
-        default=False, description="这次保存是否让网关从 setup mode 转入正常模式（04）"
+        default=False, description="这次保存是否让网关从 setup mode 转入正常模式"
     )
     backup_path: str | None = Field(
         default=None, description="备份文件路径；没有旧文件时为 null"
     )
     warnings: list[str] = Field(
         default_factory=list,
-        description="非致命告知：如「原配置文件无法解析，其中的密钥无法保留，请重新填写」"
-        "（04/AD13），或「密钥已被丢弃 / 按位置保留」（审查 A1 / B1）。"
+        description="非致命告知：如「原配置文件无法解析，其中的密钥无法保留，请重新填写」，"
+        "或「密钥已被丢弃 / 按位置保留」。"
         "与 problems 的区别：problems 让保存失败，warnings 只是提醒；"
-        "旧前端忽略该字段即可（Rust 镜像由集成时统一补）",
+        "旧前端忽略该字段即可",
     )
 
 

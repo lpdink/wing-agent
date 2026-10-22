@@ -7,7 +7,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 /**
- * Layer guard — mechanism #3 of three (see design.md D2), and the authoritative one.
+ * Layer guard — mechanism #3 of three, and the authoritative one.
  *
  * ESLint catches the common violations while typing and the split tsconfigs stop
  * DOM/node globals from leaking across layers, but neither can express the full
@@ -55,7 +55,7 @@ const RULES: Record<Layer, LayerRule> = {
  *
  * Omit `extensions` to list **every** file (used by the coverage assertions, so a
  * stray `.js`/`.json` cannot slip past them — the matrix enumerates files, not
- * "the files we happen to parse"; review r2 [N-R2-2]).
+ * "the files we happen to parse").
  */
 function listFiles(dir: string, extensions?: readonly string[]): string[] {
   if (!existsSync(dir)) {
@@ -434,8 +434,8 @@ const COLOR_TAKING_PROPERTY = /^(?:border|outline|box-shadow|text-shadow|backgro
  *
  * `var()` **property names** are blanked out first — `--vscode-charts-orange`
  * contains the keyword `orange`, and VS Code ships exactly six such variables
- * (charts.blue/green/orange/purple/red/yellow), which were false positives before
- * (review r1/r2 [S-R2]). Only the name is removed: a literal *fallback*
+ * (charts.blue/green/orange/purple/red/yellow), and reading those names as literals
+ * was a false positive. Only the name is removed: a literal *fallback*
  * (`var(--x, red)` / `var(--x, #ff0000)`) must still be rejected.
  */
 function colorLiteralIn(value: string): string | null {
@@ -522,7 +522,7 @@ interface CssModuleUsage {
  *
  * `vite/client` types CSS modules as `Record<string, string>`, so a typo yields
  * `undefined` at runtime and passes typecheck — this is the only thing that
- * catches it (see review r1: four dangling `system-*` class names).
+ * catches it (four dangling `system-*` class names shipped at one point).
  */
 function collectCssModuleUsages(file: string): CssModuleUsage[] {
   const source = ts.createSourceFile(
@@ -601,7 +601,7 @@ describe('color literals', () => {
   it('accepts theme variables, including the six chart colors', () => {
     // `--vscode-charts-{blue,green,orange,purple,red,yellow}` are real VS Code
     // theme ids whose *names* contain a CSS color keyword — they must not be read
-    // as literals (review r2 [S-R2]).
+    // as literals.
     const themeDriven = [
       'var(--vscode-charts-blue)',
       'var(--vscode-charts-green)',
@@ -641,6 +641,33 @@ describe('layering', () => {
 
   it('finds source files to check', () => {
     expect(sourceFiles.length).toBeGreaterThan(5);
+  });
+
+  it('specifier extraction is not vacuous', () => {
+    // Without this control the matrix below passes the day the extractor stops
+    // seeing anything (a TypeScript API change, a missed node kind): an empty
+    // specifier list produces an empty violation list — the shape of success.
+    const extensionHost = path.join(SRC, 'host', 'extension.ts');
+    const specifiers = collectModuleSpecifiers(extensionHost);
+    expect(specifiers).toContain('vscode');
+    expect(specifiers.some((specifier) => specifier.startsWith('./'))).toBe(true);
+    // Every form the extractor claims to handle must be reachable from *some* file.
+    const all = sourceFiles.flatMap((file) => collectModuleSpecifiers(file));
+    expect(all.some((specifier) => NODE_BUILTINS.has(specifier))).toBe(true);
+    expect(all.some((specifier) => specifier === 'vscode')).toBe(true);
+  });
+
+  it('reports a reverse import instead of accepting it', () => {
+    // Negative control for the matrix: the same `checkSpecifier` that accepts
+    // every real import must reject a direction the layers forbid. `shared` is
+    // dependency-free, so importing the host from it is the sharpest case.
+    const violations: Violation[] = [];
+    checkSpecifier(path.join(SRC, 'shared', 'cells.ts'), '../host/wingHost', violations);
+    expect(violations.map((violation) => violation.specifier)).toEqual(['../host/wingHost']);
+
+    const builtin: Violation[] = [];
+    checkSpecifier(path.join(SRC, 'shared', 'cells.ts'), 'node:fs', builtin);
+    expect(builtin.length).toBe(1);
   });
 
   it('each layer directory exists (so the matrix has a target)', () => {

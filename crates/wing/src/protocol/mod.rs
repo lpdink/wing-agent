@@ -4,7 +4,7 @@
 //! derive for JSON (de)serialization. The `type` field acts as the
 //! discriminator via `#[serde(tag = "type")]`.
 //!
-//! Session-history records (the Message projection from `wing/session.py`)
+//! Session-history records (the Message projection from `wing/session/session.py`)
 //! live in [`history`] and decode through `SessionMessage::from_json`.
 
 mod client_request;

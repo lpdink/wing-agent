@@ -1,6 +1,6 @@
 """用户贴图（user 消息携带媒体引用）probe 场景（02 message_chain）。
 
-被守的语义（总任务书 D5/D6/D7，服务端侧）：
+被守的语义（服务端侧）：
 
 - **端到端**：预置媒体对象 → 发一条携带 refs 的 user 消息 → 请求体里 user 消息的
   content 数组 = [原文本 part, image part]，data URL 解码**逐字节 == 对象字节**；

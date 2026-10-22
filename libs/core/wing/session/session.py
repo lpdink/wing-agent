@@ -34,8 +34,13 @@ from wing.event import (
 from wing.event_bus import event_bus
 from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
 from wing.schema import ChainNode, MediaRef, Message, Tool
-from wing.store import SessionMetadata, SessionStore, SessionUsage, TagMeta
-from wing.store.base import validate_media_id
+from wing.store import (
+    SessionMetadata,
+    SessionStore,
+    SessionUsage,
+    TagMeta,
+    validate_media_id,
+)
 from wing.tool_registry import ToolRef
 
 from .model_binding import ModelBinding
@@ -141,6 +146,47 @@ def bind_media(store: SessionStore, session_id: str) -> MediaAccess:
         write=lambda media_id, data: store.write_media(session_id, media_id, data),
         path=lambda media_id: store.media_path(session_id, media_id),
     )
+
+
+def _build_runtime(
+    template: "AgentTemplate",
+    session_id: str,
+    messages: TrackedList[ChainNode],
+    store: SessionStore,
+    workspace: str | None,
+) -> tuple[ContextManager, "WingAgent"]:
+    """按模板装配一对 (ContextManager, WingAgent)。
+
+    构造顺序是契约：CM → provider 校验（不可解析 = 模板/配置错误，创建即失败）
+    → 会话媒体窄接口 → WingAgent。``from_template`` 与 ``switch_template`` 共用。
+    """
+    from wing.agent import WingAgent
+
+    context_manager = ContextManager(
+        session_id=session_id,
+        messages=messages,
+        system_prompt=template.system_prompt,
+        compactor=template.compactor,
+        skills_patterns=template.skills_patterns,
+        rules_patterns=template.rules_patterns,
+        workspace=workspace,
+    )
+    # provider name 先校验（不可解析 = 模板/配置错误，创建即失败）；
+    # 实例经共享池解析（无状态化，见 wing.provider.pool）。
+    get_config().get_provider(template.provider_name)
+    # 会话媒体读写：窄接口经闭包绑定本会话的存储根（工具与序列化零感知）。
+    media = bind_media(store, session_id)
+    agent = WingAgent(
+        model=template.model,
+        provider_name=template.provider_name,
+        stream=True,
+        context_manager=context_manager,
+        tools=template.resolved_tools,
+        max_turns=template.max_turns,
+        yolo=template.yolo,
+        media=media,
+    )
+    return context_manager, agent
 
 
 def validate_media_refs(
@@ -267,32 +313,8 @@ class Session:
             store: 该 session 所属的 SessionStore
             workspace: 工作目录
         """
-        from wing.agent import WingAgent
-
-        context_manager = ContextManager(
-            session_id=session_id,
-            messages=messages,
-            system_prompt=template.system_prompt,
-            compactor=template.compactor,
-            skills_patterns=template.skills_patterns,
-            rules_patterns=template.rules_patterns,
-            workspace=workspace,
-        )
-
-        # provider name 先校验（不可解析 = 模板/配置错误，创建即失败）；
-        # 实例经共享池解析（无状态化，见 wing.provider.pool）。
-        get_config().get_provider(template.provider_name)
-        # 会话媒体读写：窄接口经闭包绑定本会话的存储根（工具与序列化零感知）。
-        media = bind_media(store, session_id)
-        agent = WingAgent(
-            model=template.model,
-            provider_name=template.provider_name,
-            stream=True,
-            context_manager=context_manager,
-            tools=template.resolved_tools,
-            max_turns=template.max_turns,
-            yolo=template.yolo,
-            media=media,
+        context_manager, agent = _build_runtime(
+            template, session_id, messages, store, workspace
         )
 
         session = cls(
@@ -317,21 +339,17 @@ class Session:
 
         不产生 session 切换事件，SM 和 TUI 不感知 session 变化。
         """
-        from wing.agent import WingAgent
-
         # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
         # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
         old_agent = self._agent
         await old_agent.shutdown()
 
-        self._context_manager = ContextManager(
-            session_id=self._session_id,
-            messages=self._messages,
-            system_prompt=template.system_prompt,
-            compactor=template.compactor,
-            skills_patterns=template.skills_patterns,
-            rules_patterns=template.rules_patterns,
-            workspace=self._metadata.workspace,
+        self._context_manager, self._agent = _build_runtime(
+            template,
+            self._session_id,
+            self._messages,
+            self._store,
+            self._metadata.workspace,
         )
         # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），
         # 与模板无关：新 CM 上重新挂载持久化值（否则重启/切换后丢失）。
@@ -339,19 +357,6 @@ class Session:
             self._context_manager.append_system_prompt = (
                 self._metadata.append_system_prompt
             )
-
-        get_config().get_provider(template.provider_name)
-        media = bind_media(self._store, self._session_id)
-        self._agent = WingAgent(
-            model=template.model,
-            provider_name=template.provider_name,
-            stream=True,
-            context_manager=self._context_manager,
-            tools=template.resolved_tools,
-            max_turns=template.max_turns,
-            yolo=template.yolo,
-            media=media,
-        )
 
         cwd = (
             str(Path(self._metadata.workspace).resolve())

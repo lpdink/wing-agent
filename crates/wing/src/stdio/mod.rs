@@ -15,6 +15,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// `--input-format` 的 stdio 触发值。
+///
+/// 两处 stdio 判定（clap 之前的原始 argv 扫描 [`is_stdio_mode`] 与解析之后的
+/// `Cli::is_stdio_mode`）共用这一个字面量——它们的取值域必须逐字相同。
+pub const STDIO_INPUT_FORMAT: &str = "stream-json";
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -119,7 +125,7 @@ impl StdioArgs {
     /// 常驻（多轮）判定：输入 stream-json（stdin 是持久消息通道）且输出
     /// stream-json（每轮有独立终态帧，「轮」才有消费方）。
     ///
-    /// text/json 输出与非 stream-json 输入都保持一次性语义（见 design.md D1）：
+    /// text/json 输出与非 stream-json 输入都保持一次性语义：
     /// 前者没有逐轮帧可对账（json 的契约是「单个 result 对象」），后者的 stdin
     /// 根本不是消息通道。
     pub fn is_resident(&self) -> bool {
@@ -407,10 +413,13 @@ impl KnownFlags {
 /// Check if stdio mode should be triggered based on raw args.
 ///
 /// This runs **before** clap parsing to decide whether to filter unknown
-/// arguments. Must stay in sync with `Cli::is_stdio_mode()` in `cmd/mod.rs`
-/// which runs **after** parsing to decide dispatch. Both check for the same
-/// triggers: `-p`/`--prompt` presence or `--input-format stream-json`.
+/// arguments. `Cli::is_stdio_mode()` in `cmd/mod.rs` runs **after** parsing to
+/// decide dispatch; both check the same two triggers (`-p`/`--prompt` presence
+/// or `--input-format stream-json`), and the `--input-format` value comes from
+/// [`STDIO_INPUT_FORMAT`] on both sides. An argv-equivalence test
+/// (`cmd::tests`) pins the two answers together.
 pub fn is_stdio_mode(args: &[String]) -> bool {
+    const INPUT_FORMAT_FLAG: &str = "--input-format=";
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -420,10 +429,12 @@ pub fn is_stdio_mode(args: &[String]) -> bool {
         if arg.starts_with("--prompt=") || arg.starts_with("-p=") {
             return true;
         }
-        if arg == "--input-format" && i + 1 < args.len() && args[i + 1] == "stream-json" {
+        if arg == "--input-format" && i + 1 < args.len() && args[i + 1] == STDIO_INPUT_FORMAT {
             return true;
         }
-        if arg.starts_with("--input-format=stream-json") {
+        if arg.starts_with(INPUT_FORMAT_FLAG)
+            && arg[INPUT_FORMAT_FLAG.len()..].starts_with(STDIO_INPUT_FORMAT)
+        {
             return true;
         }
         i += 1;
@@ -591,8 +602,8 @@ fn message_delivery(resident: bool, prompt_from_cli: bool) -> stdin_handler::Mes
 /// - EOF + 有在途轮 → 等该轮终态后退出；
 /// - 轮间/轮中收到 `user` 消息 → 转发（网关 inbox 决定 steer / 排队）。该消息
 ///   驱动的轮（无论起没起）在下一次终态前都被观察到——**除了**「在轮中被排队、
-///   当前轮结束才轮到它」的那条：EOF 后不等它。裁定见 design.md D5：消费方关
-///   stdin 即表示不再关心后续输出。
+///   当前轮结束才轮到它」的那条：EOF 后不等它——消费方关 stdin 即表示不再关心
+///   后续输出。
 #[derive(Debug, Clone, Copy)]
 struct ExitPolicy {
     /// 有在途轮，或刚转发、尚未见到终态帧的消息。
@@ -747,7 +758,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
     let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
-    // 3. 配置预检（D27）：不可用 → problems 走 **stderr** + EX_CONFIG（78），
+    // 3. 配置预检：不可用 → problems 走 **stderr** + EX_CONFIG（78），
     //    stdout 一个字节都不写（它只承载协议帧）。
     if let Some(code) = crate::cmd::setup::preflight_or_report(&http, &http_base).await {
         return Ok(code);
@@ -1593,7 +1604,7 @@ mod tests {
     }
 
     /// 轮中投递的第二条消息（steer / 排队）：EOF 后仍在**当前轮**的终态帧上
-    /// 收尾——不额外等它自己那一轮（design.md D5 的裁定：排队的那一轮不等）。
+    /// 收尾——不额外等它自己那一轮（排队的那一轮不等）。
     #[test]
     fn eof_settles_on_the_current_turns_terminal_frame() {
         let mut policy = ExitPolicy::new(false);

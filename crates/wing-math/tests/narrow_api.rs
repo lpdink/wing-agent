@@ -1,4 +1,4 @@
-//! 窄接口语义测试：把 `design.md → D2` 的 `None` 表格逐行钉住。
+//! 窄接口语义测试：把公开文档里那张 `None` 语义表逐行钉住。
 //!
 //! 这些测试只用公开 API（`render_inline` / `render_display` / `render_block`）。任何一条
 //! `None` 都是"上层应降级为源码字面量"的契约；任何一条 `Some` 都必须满足
@@ -162,7 +162,7 @@ fn none_for_trailing_backslash() {
 
 #[test]
 fn normalization_is_visible_through_the_api() {
-    // N1：多余的外壳
+    // 多余的外壳
     assert_eq!(render_inline("$$x^2$$").as_deref(), Some("x²"));
     // N2/N3/N4
     assert_eq!(render_inline(r"\displaystyle x").as_deref(), Some("x"));
@@ -256,7 +256,7 @@ fn some_results_keep_the_intended_symbols() {
 
 #[test]
 fn none_when_a_cell_fails_to_render() {
-    // B1：单元格渲染失败绝不能退化成空格（内容静默丢失），必须整条降级
+    // 单元格渲染失败绝不能退化成空格（内容静默丢失），必须整条降级
     for src in [
         r"\begin{align} a &= \ce{2H2O} \\ c &= d \end{align}",
         r"\begin{align} \unknowncmd{1} &= b \end{align}",
@@ -271,7 +271,7 @@ fn none_when_a_cell_fails_to_render() {
 
 #[test]
 fn none_when_prefix_or_suffix_fails_to_render() {
-    // B1：前后缀渲染失败同样必须整条降级（之前会静默丢掉前缀）
+    // 前后缀渲染失败同样必须整条降级（否则前缀被静默丢掉）
     for src in [
         r"\ce{2H2O} \begin{aligned} a &= b \end{aligned}",
         r"\begin{aligned} a &= b \end{aligned} \unknowncmd{x}",
@@ -300,7 +300,7 @@ fn none_when_environment_nesting_exceeds_the_budget() {
 
 #[test]
 fn control_characters_never_break_the_row_contract() {
-    // B3：`\n` / `\t` 归一化成空格；单行与网格行契约必须成立
+    // `\n` / `\t` 归一化成空格；单行与网格行契约必须成立
     assert_eq!(render_inline("a\nb").as_deref(), Some("a b"));
     assert_eq!(render_inline("x + \tb").as_deref(), Some("x + b"));
     assert_eq!(render_inline("a\r\nb").as_deref(), Some("a b"));
@@ -353,7 +353,7 @@ fn control_characters_never_break_the_row_contract() {
 
 #[test]
 fn hat_geometry_is_not_mistaken_for_a_leak() {
-    // S1：`\hat` 一族画出来的反斜杠字形不能被泄漏自检误伤
+    // `\hat` 一族画出来的反斜杠字形不能被泄漏自检误伤
     for (src, needle) in [
         (r"\hat{a}", "^"),
         (r"\hat{ab}", "/\\"),
@@ -373,7 +373,7 @@ fn hat_geometry_is_not_mistaken_for_a_leak() {
 
 #[test]
 fn none_for_blank_results() {
-    // N3：渲染出来只有空白等于没渲染
+    // 渲染出来只有空白等于没渲染
     for src in [r"\sqrt{}", r"\,", r"\!", r"\ ", r"{}"] {
         assert_eq!(render_display(src, 80), None, "should degrade: {src}");
     }
@@ -381,7 +381,7 @@ fn none_for_blank_results() {
 
 #[test]
 fn named_operators_keep_the_space_before_their_argument() {
-    // S3：`\log p` 不能粘成 `logp`
+    // `\log p` 不能粘成 `logp`
     for (src, expected) in [
         (r"\log p(x)", "log p(x)"),
         (r"\sin x", "sin x"),
@@ -406,11 +406,11 @@ fn named_operators_keep_the_space_before_their_argument() {
 
 #[test]
 fn binom_is_rendered_as_a_stacked_pair_inside_the_parentheses() {
-    // S4：`\binom{n}{k}` 的括号要与内容同行
+    // `\binom{n}{k}` 的括号要与内容同行
     let m = render_display(r"\binom{n}{k}", 80).unwrap();
     assert_eq!(m.lines(), ["⎛n⎞", "⎝k⎠"]);
 
-    // B2：空参数不得 panic，也不得画出错位形状
+    // 空参数不得 panic，也不得画出错位形状
     assert_eq!(render_display(r"\binom{}{}", 80), None);
     assert!(render_display(r"\binom{}{b}", 80).is_some());
     assert!(render_display(r"\binom{a}{}", 80).is_some());
@@ -419,7 +419,7 @@ fn binom_is_rendered_as_a_stacked_pair_inside_the_parentheses() {
 
 #[test]
 fn wide_characters_in_scripts_do_not_break_column_alignment() {
-    // N2：CJK 宽字符 + 上下标时，环境里各行的列要对齐
+    // CJK 宽字符 + 上下标时，环境里各行的列要对齐
     let m = render_display(r"\begin{align} x^{中} &= b \\ c &= d \end{align}", 200).unwrap();
     let eq_columns: Vec<usize> = m.lines().iter().filter_map(|l| l.find('=')).collect();
     assert_eq!(eq_columns.len(), 2, "{}", m.to_plain_text());

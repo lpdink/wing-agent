@@ -79,6 +79,19 @@ def _for_summary(message: Message) -> Message:
     )
 
 
+def resolve_context_tokens(
+    messages: list[Message], server_tokens: int | None = None
+) -> int:
+    """当前上下文的 token 数：服务端回传的 prompt_tokens（非零）优先，否则本地估算。
+
+    这是**唯一**口径：压缩阈值与 `context_stats` 的显示数字共用它，否则会出现
+    "面板显示没超、却触发了压缩"。
+    """
+    if server_tokens is not None and server_tokens > 0:
+        return server_tokens
+    return sum(m.estimate_tokens() for m in messages)
+
+
 class Compactor:
     """上下文压缩引擎。
 
@@ -160,20 +173,7 @@ class Compactor:
         """独立副本——每个会话持有自己的阈值（换模型只改本会话）。"""
         return Compactor(self.context_window_tokens, self.keep_recent_tokens)
 
-    # ── Token 估算 ──────────────────────────────
-
-    def _estimate_tokens(self, messages: list[Message]) -> int:
-        return sum(m.estimate_tokens() for m in messages)
-
     # ── 阈值判断 ────────────────────────────────
-
-    def _resolve_tokens(
-        self, messages: list[Message], server_tokens: int | None = None
-    ) -> int:
-        """优先使用服务端回传的 prompt_tokens，fallback 到本地估算。"""
-        if server_tokens is not None and server_tokens > 0:
-            return server_tokens
-        return self._estimate_tokens(messages)
 
     def need_early_trigger(
         self, messages: list[Message], server_tokens: int | None = None
@@ -183,7 +183,8 @@ class Compactor:
         当 tokens >= compact_window_tokens 时触发。
         """
         return (
-            self._resolve_tokens(messages, server_tokens) >= self.compact_window_tokens
+            resolve_context_tokens(messages, server_tokens)
+            >= self.compact_window_tokens
         )
 
     def need_apply_compact(
@@ -194,7 +195,8 @@ class Compactor:
         当 tokens >= context_window_tokens 时触发。
         """
         return (
-            self._resolve_tokens(messages, server_tokens) >= self.context_window_tokens
+            resolve_context_tokens(messages, server_tokens)
+            >= self.context_window_tokens
         )
 
     # ── 压缩执行 ────────────────────────────────

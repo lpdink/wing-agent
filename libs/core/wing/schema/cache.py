@@ -79,11 +79,6 @@ def _sha_of(canonical: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def sha16(obj: Any) -> str:
-    """规范形的 sha256 前 16 位（契约 §1 的 `sha`）。"""
-    return _sha_of(canonical_json(obj))
-
-
 def fingerprint(segments: Sequence["CachePart"]) -> str:
     """指纹（契约 §2）：`sha256("|".join(f"{label}:{sha}"))[:16]`。
 
@@ -98,7 +93,7 @@ def fingerprint(segments: Sequence["CachePart"]) -> str:
 
 @dataclass(frozen=True)
 class CacheSource:
-    """段的来源文件事实（contract §1 的 `src`）。
+    """段的来源文件事实（`src`）。
 
     只在 `rules:*` / `skills:*` 段上携带，**加载时采集一次**（热路径不扫目录、不 stat）。
     `mtime` 是本地 naive ISO（与 `metadata.json` 同一时间口径）。
@@ -153,22 +148,13 @@ class CachePart:
 
 @dataclass(frozen=True)
 class CacheFork:
-    """前缀分叉事实（契约 §4 的 `fork`）；`tokens_lost` 是**估算值**。"""
+    """前缀分叉事实；`tokens_lost` 是**估算值**。"""
 
     kind: str
     index: int
     label: str
     segments_affected: int
     tokens_lost: int | None = None
-
-    def to_wire(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "index": self.index,
-            "label": self.label,
-            "segments_affected": self.segments_affected,
-            "tokens_lost": self.tokens_lost,
-        }
 
 
 @dataclass(frozen=True)

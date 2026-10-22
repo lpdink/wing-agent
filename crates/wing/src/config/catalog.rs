@@ -607,7 +607,7 @@ pub const SHOW_SECRETS_HINT: &str = "wing tui --dump-config --show-secrets";
 /// 它仍是 `(doc, catalog, mode)` 的**纯函数**：不读 env、不写时间戳、不含主机信息——
 /// `mode` 是参数不是环境，round-trip 与幂等照样可以被单测机械证明。
 ///
-/// **与后端的差异**（见 `09_interface_catalog/design.md` 的差异清单）：未知键丢弃（既有
+/// **与后端的差异**：未知键丢弃（既有
 /// `--dump-config` 行为）、没有必填字段、`null` 与缺席等价；**list 的缺席默认值**后端写
 /// `# key: []`（catalog 里 list 的 default 恒为 `None`、展示形态是空列表），这里没有同形
 /// 分支——Interface 根今天没有 list 字段，真加一个时要补上同一条规则；以及——
@@ -761,7 +761,7 @@ fn emit_leaf(
 
 /// [`DumpMode::Masked`] 下密文叶的掩码注释；`None` = 这个值不需要掩（缺席 / `null` / 空串）。
 ///
-/// 视觉语言与 `wing config get`（`cmd/config.rs::render_secret`）和设置面板的值列
+/// 视觉语言与 `wing config get`（`cmd/config/::render_secret`）和设置面板的值列
 /// （`shared/panels/settings/tree.rs::display_value` 生产 `ValueText::Masked`，`ui/settings/tree.rs` 画）
 /// **同一套**：`•••••••• <末 4 位>`。
 /// 短密钥（< 8）不给 hint——比例过高等于泄露（后端 `document.py::_state_of` 同一条规则）。
@@ -1268,7 +1268,7 @@ mod tests {
             .map(|child| child.key.as_str())
             .collect();
         assert_eq!(keys, ["colors", "layout", "rendering", "paste", "api_key"]);
-        // 带 / 不带根名前缀两种寻址都命中（与 06 的 node_at 口径对齐）
+        // 带 / 不带根名前缀两种寻址都命中（与 `node_at` 口径对齐）
         assert!(catalog.node_at("colors.accent").is_some());
         assert!(catalog.node_at("interface.colors.accent").is_some());
         for child in &catalog.children {

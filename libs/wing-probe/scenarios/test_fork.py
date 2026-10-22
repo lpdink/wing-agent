@@ -1,4 +1,4 @@
-"""fork 红线场景（tasks 6.13–6.15，spec probe-scenarios「Requirement: fork 红线场景」）。
+"""fork 红线场景。
 
 覆盖的断言点：
 

@@ -475,7 +475,7 @@ def test_single_line_mapping_unknown_key_stays_valid_yaml(
 # B1 回归（Rework r1）：容器载荷不许被当成标量内联
 #
 # `safe_dump` 给出单行的**非空容器**（`a: 1` / `- 1`）是块结构的首行，不是标量；
-# 拼在 `key: ` 后面会产出 `key: a: 1` 这种解析不了的文件（数据损坏级，AD7）。
+# 拼在 `key: ` 后面会产出 `key: a: 1` 这种解析不了的文件（数据损坏级）。
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -764,7 +764,7 @@ def test_every_list_declaration_defaults_to_empty() -> None:
 def test_element_template_fields_are_rendered_when_items_exist(
     catalog: SettingNode,
 ) -> None:
-    """S2：元素模板字段只有列表非空时才出现在文件里——它们必须真的被渲染过。
+    """元素模板字段只有列表非空时才出现在文件里——它们必须真的被渲染过。
 
     `image_delivery` / `image_max_bytes`（provider 层）与 `vision`（对象形态模型的
     capabilities）是旧模板点名要可见的三个字段，空模板不展开元素，所以单独看一眼。

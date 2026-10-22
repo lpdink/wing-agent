@@ -2,11 +2,11 @@
 
 两条都是"声明了但没人守"的装配前提，用**假对象**在进程内压住（不起网关）：
 
-1. ``GatewayWS`` 的读任务（tasks 4.2）：假连接按脚本吐帧，断言
+1. ``GatewayWS`` 的读任务：假连接按脚本吐帧，断言
    - ``_chunk`` 信封合并后的 ``Delivery.text`` == 原始载荷、``Event.frames > 1``
-     （spec「大事件帧可重组」在本层的可测面；Rust 侧同样是 16 MiB 软上限切分）；
+     （大事件帧可重组在本层的可测面；Rust 侧同样是 16 MiB 软上限切分）；
    - 畸形帧走 ``invalid_frame`` 合成类型（不静默丢帧），``close_reason`` 可读；
-2. ``DriverHttp`` 的留档缝（tasks 4.1）：桩网关 + **公开** ``GatewayClient``
+2. ``DriverHttp`` 的留档缝：桩网关 + **公开** ``GatewayClient``
    方法，断言"首个调用必须被留档"——上游若不再调用 ``_post`` / ``_get``，
    留档会静默全空，这条测试先红。
 """

@@ -47,7 +47,7 @@
 
 ## 自动跟随契约
 
-「底部跟随新内容 / 滚动离开底部后不被拉回 / 回到最底部重新武装跟随」由 `ChatView` 的滚动方法统一承载，所有滚动入口（滚轮、键盘、`jump_*`）共用同一状态，细节与 Scenario 见 openspec change `revert-alternate-scroll` 的 `tui-scroll-follow` spec。
+「底部跟随新内容 / 滚动离开底部后不被拉回 / 回到最底部重新武装跟随」由 `ChatView` 的滚动方法（`ui/chat_view/viewport.rs`）统一承载，所有滚动入口（滚轮、键盘、`jump_*`）共用同一状态；三条规则各有一组 `ui/chat_view/viewport.rs` 的模块内单测钉住。
 
 ## 应用内文本选择（`tui-text-selection`）
 
@@ -464,7 +464,7 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 | 关注点 | 位置 |
 |---|---|
 | 链接区间（IR → 行内显示列）/ OSC8 纯函数 / `ComposedLines` | `crates/wing/src/render/markdown/links.rs` |
-| 流式渲染同步维护链接（`compose_into` / `lines_and_links`） | `crates/wing/src/render/markdown/stream.rs` |
+| 流式渲染同步维护链接（`compose_into`；`composed()` 是唯一返回形状） | `crates/wing/src/render/markdown/stream.rs` |
 | 行缓存携带链接 + 行号是否精确 | `crates/wing/src/ui/cached_cell.rs` |
 | 本帧链接快照 / OSC8 注入 / 命中查询 | `crates/wing/src/ui/chat_view/link.rs` |
 | 目标解析 / argv / 进程启动 | `crates/wing/src/util/open.rs` + `app/runner.rs`（`AppIntent::OpenLink`） |

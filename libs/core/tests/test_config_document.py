@@ -2,7 +2,7 @@
 
 覆盖两条设计红线：
 
-- **密文三态**（总设计 §7.5）：`null` = 保留现值 / 字符串 = 设置 / 缺席 = 不覆盖；
+- **密文三态**：`null` = 保留现值 / 字符串 = 设置 / 缺席 = 不覆盖；
   hint 只给末 4 位且长度 ≥ 8 才给。
 - **P9**（协议增补）：裸字符串形态的调用名非法时，pydantic 的 loc 记成
   ``providers[i].name``——``locate_problems`` 必须归到 ``providers[i].models``（列表级，
@@ -440,7 +440,7 @@ class TestSecretIdentityPairing:
     def test_rename_with_equal_length_keeps_the_key(self):
         """(b) 安全的下标回落：身份变了但结构没变（重命名）——密钥必须保留。
 
-        AD18 第 2 点：这次回落**必须出声**（它和「替换成新项」在文档里不可区分）。
+        这次回落**必须出声**（它和「替换成新项」在文档里不可区分）。
         """
         masked = _masked()
         renamed = {**masked[1], "name": P2_RENAMED}
@@ -456,7 +456,7 @@ class TestSecretIdentityPairing:
         assert secret.identity_value == P2_RENAMED
 
     def test_delete_and_append_a_null_item_does_not_inherit_a_key(self):
-        """AD18 第 3 点：删一项 + 同一次保存里加一项（长度相等）。
+        """删一项 + 同一次保存里加一项（长度相等）。
 
         旧 (b) 不看 consumed：新项（``api_key: null``）会抄走**在位项**的密钥。现在那个槽位
         已被 (a) 认领 ⇒ 落 (c)：新项没有密钥、路径进 ``dropped_secrets``、没有任何位置保留。
@@ -469,7 +469,7 @@ class TestSecretIdentityPairing:
         assert resolved.positional_secrets == []
 
     def test_replacing_the_whole_list_warns_about_every_positional_key(self):
-        """AD18 第 3 点（N1 的残余）：整表替换长度相等 ⇒ consumed 守卫关不掉 → 出声。"""
+        """整表替换长度相等 ⇒ consumed 守卫关不掉 → 出声。"""
         masked = _masked()
         resolved = self._resolve(
             [{**masked[0], "name": "p3"}, {**masked[1], "name": "p4"}]
@@ -520,7 +520,7 @@ class TestSecretIdentityPairing:
         assert resolved.positional_secrets == []
 
     def test_new_item_inserted_in_front_records_the_dropped_path(self):
-        """新项（带哨兵）前插、长度变长：路径进 dropped（影子的 AD18 口径）。
+        """新项（带哨兵）前插、长度变长：路径进 dropped（按位置配对的影子口径）。
 
         影子不再排除「被 (a) 认领的槽位」——新项带着 ``null`` 落在那个槽位上时，
         用户看到的是「哪一个密钥被移除了、请重填」，而不是我们替他留下一个来路不明的值。
@@ -685,7 +685,7 @@ class TestSecretListsWithoutIdentity:
         keys = resolved.document.data["gateway"]["auth"]["keys"]
         assert [entry["key"] for entry in keys] == ["AUTH-K1", "AUTH-K2"]
         assert resolved.dropped_secrets == []
-        # 无身份字段 ⇒ 每次等长保存都会出声（AD18 第 2 点；AD19 说这条边界「现在会出声」）。
+        # 无身份字段 ⇒ 每次等长保存都会出声。
         assert [secret.path for secret in resolved.positional_secrets] == [
             "gateway.auth.keys[0].key",
             "gateway.auth.keys[1].key",

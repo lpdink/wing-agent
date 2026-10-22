@@ -66,29 +66,29 @@ const INLINE_DEGRADED_SAMPLES: &[(&str, &str)] = &[
 ];
 
 /// 已修缺陷的形态一览（人肉对照用）。
-const REVIEW_FIXES: &[(&str, &str)] = &[
-    // B1：单元格 / 前后缀渲染失败 → 整条降级（不允许空格占位）
+const REGRESSION_SAMPLES: &[(&str, &str)] = &[
+    // 单元格 / 前后缀渲染失败时整条降级（不允许空格占位）
     (
         r"\begin{align} a &= \ce{2H2O} \\ c &= d \end{align}",
-        "B1 单元格失败",
+        "单元格失败",
     ),
     (
         r"\ce{2H2O} \begin{aligned} a &= b \end{aligned}",
-        "B1 前缀失败",
+        "前缀失败",
     ),
-    // B2/S4：\binom 不再 panic，形状正确
-    (r"\binom{n}{k}", "B2/S4 形状"),
-    (r"\binom{}{b}", "B2 空参数"),
-    // B3：控制字符被归零
-    ("x = \\frac{-b \\pm \\sqrt{b^2-4ac}}\n{2a}", "B3 换行折行"),
-    ("a\nb", "B3 行内换行"),
-    // S1：\hat 的字形不再被当成泄漏
-    (r"\hat{ab}", "S1 双字符 hat"),
-    (r"\hat{abc}", "S1 三字符 hat"),
-    // S3：命名算子与运算符间距
-    (r"\log p(x) = \sin x \cdot \det A", "S3 算子间距"),
-    // N3：只渲染出空白 → 降级
-    (r"\sqrt{}", "N3 空白结果"),
+    // \binom 不 panic，形状正确
+    (r"\binom{n}{k}", "binom 形状"),
+    (r"\binom{}{b}", "binom 空参数"),
+    // 控制字符被归零
+    ("x = \\frac{-b \\pm \\sqrt{b^2-4ac}}\n{2a}", "换行折行"),
+    ("a\nb", "行内换行"),
+    // \hat 的字形不被当成泄漏
+    (r"\hat{ab}", "双字符 hat"),
+    (r"\hat{abc}", "三字符 hat"),
+    // 命名算子与运算符间距
+    (r"\log p(x) = \sin x \cdot \det A", "算子间距"),
+    // 只渲染出空白时降级
+    (r"\sqrt{}", "空白结果"),
 ];
 
 fn main() {
@@ -137,8 +137,8 @@ fn main() {
     }
 
     println!();
-    println!("=== review r1 修复项（B1/B2/B3/S1/S3/S4 + N3）===");
-    for (src, why) in REVIEW_FIXES {
+    println!("=== 回归样例 ===");
+    for (src, why) in REGRESSION_SAMPLES {
         println!("  ── {why}: {src}");
         match render_display(src, 100) {
             Some(m) => {

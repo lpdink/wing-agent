@@ -1,6 +1,6 @@
-//! Ask 映射（03 步）：wing 的两类 `ask` 事件 → ACP 的正式交互面。
+//! Ask 映射：wing 的两类 `ask` 事件 → ACP 的正式交互面。
 //!
-//! 三径分流（形态判据 = `Ask` 事件的字段，沿用 01 的占位实现）：
+//! 三径分流（形态判据 = `Ask` 事件的字段，沿用占位实现）：
 //!
 //! | 形态 | 出路 |
 //! |------|------|
@@ -16,7 +16,7 @@
 //! - Bash 形态：**裸 token**（`y` / `n` / `yolo`）——后端 `_parse_feedback` 只认这三个，
 //!   取消哨兵会被判成无效选项并**反复追问**（等价于把轮次挂到 6000s 超时）。
 //!
-//! 并发语义（design D5）：ask 处理**就地 await** 在轮次事件循环里——同一会话至多一个在途
+//! 并发语义：ask 处理**就地 await** 在轮次事件循环里——同一会话至多一个在途
 //! agent→client 请求，后续 ask 留在会话事件缓冲里排队（与 TUI `ask_panels` 的 FIFO 队列
 //! 同语义）。因此答案永远在轮次内回写，不需要 detached 任务的簿记，也不存在「终态之后才到
 //! 的答案」竞态。等待时同时等 `SessionHub::stream_dead()`：WS 一断就用
@@ -268,7 +268,7 @@ async fn resolve_with(
         }
         AskView::Unclassified => {
             // 当前后端不会产生这种形态（只有 bash.py / ask_user.py 两个 ask 生产者）：
-            // 记 warn 并按「用户取消」收口，与 01 的占位同口径——绝不悬挂轮次。
+            // 记 warn 并按「用户取消」收口，与占位同口径——绝不悬挂轮次。
             tracing::warn!(
                 tool_call_id,
                 "acp: ask without questions nor required choices; answering as cancelled"

@@ -120,15 +120,9 @@ pub(crate) fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-/// Format token count in compact notation.
+/// Format token count in compact notation (记法本身见 [`crate::util::format::tokens`]).
 fn fmt_tokens_compact(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M tokens", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k tokens", n as f64 / 1_000.0)
-    } else {
-        format!("{n} tokens")
-    }
+    format!("{} tokens", crate::util::format::tokens(n))
 }
 
 #[cfg(test)]

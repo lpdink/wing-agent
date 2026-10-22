@@ -14,7 +14,7 @@
 //!
 //! Before optimization the baseline engine FAILS by design — run it with
 //!   WING_ENGINE=baseline cargo test --release --test stream_render_throughput -- --ignored --nocapture
-//! and the measured numbers are recorded in tasks.md §6. The default
+//! and the measured numbers live in the perf docs. The default
 //! engine is the incremental one; the assertions document the target.
 
 mod common;

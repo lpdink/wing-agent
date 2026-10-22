@@ -14,7 +14,7 @@
   - 入站帧按 call_id 分流：含 call_id 的是工具调用结果（→ RemoteToolManager，
     带归属校验），其余按 ClientRequest 处理（向后兼容）。
   - 断连时 fail_client：在途调用立即失败 + 注销该 client 的远程工具。
-  - setup mode（04）：**accept 之前**直接以 1013 关闭——配置不可用时 WS 没有任何
+  - setup mode：**accept 之前**直接以 1013 关闭——配置不可用时 WS 没有任何
     可用功能，客户端看到的是握手失败而不是连上就断。
 """
 
@@ -49,7 +49,7 @@ async def handle_ws(ws: WebSocket) -> None:
     # 0. setup mode：握手即拒（**accept 之前** close ⇒ 客户端看到的是握手失败，
     #    而不是「连上了又被断」）。setup mode 下 WS 没有任何可用功能——修复全在
     #    HTTP 设置端点上（守门白名单），loopback 与非 loopback 一视同仁；
-    #    真正的来源策略由 HTTP 面的 AuthMiddleware 承担（§8.4）。
+    #    真正的来源策略由 HTTP 面的 AuthMiddleware 承担。
     if server.in_setup_mode:
         await ws.close(code=1013, reason="setup_mode")
         return

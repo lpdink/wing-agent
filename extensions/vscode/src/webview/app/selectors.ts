@@ -3,7 +3,7 @@
  *
  * Everything in here is a **pure function of what the host already sent** — no
  * business rule is re-derived, no state is invented. That is the line the shell
- * must not cross (01 D7): the host decides *what* a queue is, the webview decides
+ * must not cross: the host decides *what* a queue is, the webview decides
  * *where it is drawn*.
  *
  * Used by the status area (context ring, token totals, TTFT) and the composer

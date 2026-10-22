@@ -11,7 +11,7 @@ import { cellElement, disposeMounted, mountWebview, pushPatch, pushState, pushTa
  * whole shell (tab bar, status area, transcript, composer).
  *
  * This is the closest thing to the VS Code view that runs headless. The shell
- * assertions (formerly against step 01's header/footer placeholders) live here too:
+ * assertions (formerly against the original header/footer placeholders) live here too:
  * everything a user can see about the *session* has a stable anchor.
  */
 

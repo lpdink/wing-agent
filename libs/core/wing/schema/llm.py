@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import overload
 
 from pydantic import BaseModel
 
@@ -98,6 +99,29 @@ class LLMResponse(BaseModel):
     tool_calls: list[ToolCall] | None = None
     tool_call_deltas: list[ToolCallDelta] | None = None
     usage: LLMUsage = LLMUsage()
+
+
+@overload
+def usage_wire(usage: LLMUsage) -> dict[str, int]: ...
+
+
+@overload
+def usage_wire(usage: None) -> None: ...
+
+
+def usage_wire(usage: LLMUsage | None) -> dict[str, int] | None:
+    """``LLMUsage`` → 协议 wire dict（``TurnResultEvent.usage`` / ``AssistantTurnEvent.usage``）。
+
+    这三个键是**对外字段名**（stdio / SDK 消费），因此形状只在这里定义：加字段时
+    两个事件的来源不会各改一半。
+    """
+    if usage is None:
+        return None
+    return {
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "cached_tokens": usage.cached_tokens,
+    }
 
 
 class PendingCall(BaseModel):

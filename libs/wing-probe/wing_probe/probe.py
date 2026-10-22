@@ -1,4 +1,4 @@
-"""``Probe`` —— 场景门面（tasks 4.7 / 6.1）。
+"""``Probe`` —— 场景门面。
 
 ``Probe`` 把前面几轮的积木（``ProbeEnv`` 环境自举、``Driver`` 会话驱动、
 ``Watcher`` 事件断言、``HistoryView`` 落盘视图、``FileAssertions`` 文件断言、
@@ -11,15 +11,15 @@
     probe.files.assert_content("out.txt", contains="done")
     probe.history(session).assert_chain_invariants()
 
-设计取舍（design D1/D5/D8）：
+设计取舍：
 
 - **Probe 与 ProbeEnv 分离**：``Probe`` 只做"给人用"的门面，环境生命周期仍是
   ``ProbeEnv`` 的职责——将来把 env 提升到 session 级共享时只需改 fixture 作用域；
 - **不变量不可静默关闭**：``without_invariants(reason=...)`` 必须给理由，理由
-  写进现场转储与失败报告（spec「内置不变量自动运行」）；
+  写进现场转储与失败报告；
 - **``dump()`` 是现场快照**：时间线全帧 + 原始帧 + HTTP 留档 + 假 Provider 请求
   留档 + 各 session 落盘拷贝 + 网关日志，写进 ``<env.root>/artifacts/``，
-  失败报告引用该路径（spec「失败报告与现场转储」）。
+  失败报告引用该路径。
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ DUMP_LOG_LIMIT = 2 * 1024 * 1024
 def invariant_checks(
     *, allow_arguments_error: bool = False
 ) -> tuple[tuple[str, Callable[[HistoryView], None]], ...]:
-    """内置不变量检查：名字（进失败报告，spec 要求"具体不变量名"）+ 断言函数。
+    """内置不变量检查：名字（进失败报告，失败报告要求"具体不变量名"）+ 断言函数。
 
     ``allow_arguments_error`` 只放开 **tool 配对**里的"参数解析失败"口径（见
     ``assert_tool_pairing``）——"模型吐出坏参数"是合法场景（短路回灌自纠），
@@ -382,7 +382,7 @@ class Probe:
         """逃生舱：关闭 teardown 的内置不变量检查——**必须**给出理由。
 
         理由字符串会写进现场转储（``dump.txt``）与失败报告；空理由直接报错
-        （spec「逃生舱必须说明理由」）。
+        。
 
         Raises:
             ProbeError: ``reason`` 为空 / 全空白 / 非字符串。
@@ -470,7 +470,7 @@ class Probe:
     async def dump(self, path: str | Path | None = None) -> Path:
         """把现场写入 ``<env.root>/artifacts/``（或给定目录），返回该目录。
 
-        内容（spec「失败报告与现场转储」）：
+        内容：
 
         - ``timeline.jsonl``：全部时间线（含 driver 级）的每个事件——type / data /
           相对时间 / 原始载荷（"全帧"的可读投影）；

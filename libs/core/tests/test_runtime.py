@@ -27,18 +27,7 @@ from wing.request_context import (
     set_request_context,
 )
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus，避免测试间干扰。
-
-    EventBus 是全局单例，测试必须清理 subscribers 和 routing table。
-    """
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture

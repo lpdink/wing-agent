@@ -16,7 +16,7 @@
   ``from importlib import import_module as im; im("wing…")``、
   ``import builtins as b; b.__import__("wing…")``。
 
-**明确接受的残余风险**（design D2 口径）：运行时才能定名的形态——``"".join([...])``、
+**明确接受的残余风险**：运行时才能定名的形态——``"".join([...])``、
 f-string、变量、``*args`` 展开、``getattr(importlib, "import_module")``、
 以及赋值重绑定（``f = importlib.import_module; f("wing…")``）。这些需要真正的
 执行或数据流分析，静态门禁不猜；它们是刻意绕过，review 可发现。

@@ -512,7 +512,7 @@ class TestExecuteAndQuery:
 
 
 class TestCacheSchema:
-    """缓存账本的两张表：结构约束承担「坏行进不来」的一部分（口径见 contract §4）。"""
+    """缓存账本的两张表：结构约束承担「坏行进不来」的一部分（口径见 缓存账本口径）。"""
 
     def test_half_filled_fork_is_rejected(self, tmp_path: Path) -> None:
         """分叉事实与调用同生共死：四列要么都有值、要么全空。"""

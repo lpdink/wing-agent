@@ -11,7 +11,7 @@
 //! **id 一致性（硬要求）**：`message_start` 的 `message.id` 必须与同一消息
 //! 最终快照帧的 `message.id` 一致（消费方以它做流式/快照去重）。跨帧关联在
 //! 本模块内完成：首个增量铸 id，快照帧（`assistant_turn`）收口时把它交给
-//! 渲染器复用（方案理由见 `03_streaming/design.md` D1）。
+//! 渲染器复用。
 //!
 //! **顺序不变量**（由 ReAct 循环保证）：同一消息的 delta 全部先于它的
 //! `assistant_turn`（快照），两者之间不会插入另一条消息的 delta；一轮可含

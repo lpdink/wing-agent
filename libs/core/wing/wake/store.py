@@ -14,6 +14,8 @@ from typing import Any
 
 from wing.db import Database, get_database
 from wing.wake.model import (
+    KIND_SESSION,
+    KIND_TIMER,
     STATE_ACTIVE,
     STATE_CANCELED,
     STATE_DONE,
@@ -107,9 +109,11 @@ class WakeStore:
         「谁该被叫醒」是**状态**不是队列：同一条 active 订阅只该存在一行（见
         ``WakeService.create`` 的 upsert）。
         """
+        # kind / state 是值域封闭的模块常量（不来自用户输入），因此插值进 SQL 是安全的；
+        # 参数化只用在来自调用方的值上。
         rows = self.database().query(
             f"SELECT {_COLUMNS} FROM wake_trigger "
-            "WHERE state = ? AND kind = 'session' "
+            f"WHERE state = ? AND kind = '{KIND_SESSION}' "
             "AND source_session_id = ? AND target_session_id = ? AND on_events = ? "
             "ORDER BY id DESC LIMIT 1",
             (STATE_ACTIVE, source_session_id, target_session_id, on_events),
@@ -197,7 +201,7 @@ class WakeStore:
             写是否真的落库。
         """
         return self.database().execute(
-            """
+            f"""
             UPDATE wake_trigger
                SET fire_count = fire_count + 1,
                    last_fire_at_ms = ?,
@@ -209,8 +213,8 @@ class WakeStore:
                        THEN NULL ELSE ? END,
                    state = CASE
                        WHEN remaining_done IS NOT NULL AND remaining_done - ? <= 0
-                       THEN 'done' ELSE 'active' END
-             WHERE id = ? AND state = 'active'
+                       THEN '{STATE_DONE}' ELSE '{STATE_ACTIVE}' END
+             WHERE id = ? AND state = '{STATE_ACTIVE}'
             """,
             (
                 fired_at_ms,
@@ -320,7 +324,7 @@ class WakeStore:
         """
         sql = (
             f"SELECT {_COLUMNS} FROM wake_trigger "
-            "WHERE state = ? AND kind = 'timer' "
+            f"WHERE state = ? AND kind = '{KIND_TIMER}' "
             "AND next_fire_at_ms IS NOT NULL AND next_fire_at_ms <= ?"
         )
         params: list[Any] = [STATE_ACTIVE, now_ms]
@@ -334,7 +338,7 @@ class WakeStore:
         """最近一条 ``active`` timer 的排期（无则 ``None``——调度器据此无限等）。"""
         sql = (
             "SELECT MIN(next_fire_at_ms) AS next FROM wake_trigger "
-            "WHERE state = ? AND kind = 'timer' AND next_fire_at_ms IS NOT NULL"
+            f"WHERE state = ? AND kind = '{KIND_TIMER}' AND next_fire_at_ms IS NOT NULL"
         )
         params: list[Any] = [STATE_ACTIVE]
         if exclude:
@@ -353,12 +357,8 @@ class WakeStore:
         return self._database if self._database is not None else get_database()
 
 
-#: 状态常量再导出（service 用同一套字面量，避免全包散落字符串）。
+#: 状态常量的家是 ``wing.wake.model``（本模块只 import 使用）。
 __all__ = [
-    "STATE_ACTIVE",
-    "STATE_CANCELED",
-    "STATE_DONE",
-    "STATE_FAILED",
     "WakeStore",
     "WakeWriteLost",
 ]

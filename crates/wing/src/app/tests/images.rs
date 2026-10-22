@@ -2174,7 +2174,7 @@ fn a_submitted_picture_draws_before_the_upload_lands() {
     assert!(has_placeholder(&buf), "promote 不打断已画出来的图");
 }
 
-/// 滚动回归（评审 [B]1）：气泡的文本比 cell 顶早一行（1 行上内边距 + `Paragraph::scroll(skip-1)`），
+/// 滚动回归：气泡的文本比 cell 顶早一行（1 行上内边距 + `Paragraph::scroll(skip-1)`），
 /// 图块必须用同一对数字定位。任何一级滚动后图都应落在 caption 行上——之前 `img_skip` 少减了那一行，
 /// 图会整体上移一行、被 caption 闸门整张拒掉（只剩空盒子）。
 #[test]
@@ -2223,7 +2223,7 @@ fn a_scrolled_user_picture_stays_on_its_caption_row() {
     }
 }
 
-/// 回执 → 落账 → 编码 → 画出来：这是抓取链路的最后一段（评审 [S]2 指出的接缝）。
+/// 回执 → 落账 → 编码 → 画出来：这是抓取链路的最后一段。
 #[test]
 fn a_media_receipt_turns_into_a_picture() {
     let bytes = png_bytes(200, 150);
@@ -2370,7 +2370,7 @@ async fn the_media_fetch_asks_the_gateway_and_reports_the_bytes_back() {
     ));
 }
 
-/// 换会话期间回来的抓取回执不能被会话守卫丢掉（评审 [B]1）：字节是内容寻址的，而 lane 的
+/// 换会话期间回来的抓取回执不能被会话守卫丢掉：字节是内容寻址的，而 lane 的
 /// 「在飞」只在回执里按 id 撤销——丢一次就永久漏一张，切回原会话也只有空盒子。
 #[test]
 fn a_media_receipt_survives_a_session_switch() {

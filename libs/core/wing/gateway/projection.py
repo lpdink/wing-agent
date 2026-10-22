@@ -7,7 +7,7 @@
 这里，路由只做「参数校验 → 调 runtime → 构造响应」，不再穿透 ``session.agent.*``。
 投影是纯读——不修改 session 状态。
 
-Setting API 的部分同理（03 追加）：``config.SettingNode`` → ``SettingNodeProto``、
+Setting API 的部分同理：``config.SettingNode`` → ``SettingNodeProto``、
 ``config.ConfigProblem`` → ``SettingProblem``、``document.SecretState`` → 协议
 ``SecretState``、``runtime.SettingsApplyResult`` → ``SettingsSetResponse``。
 领域类型住 L3、wire 类型住 L4，**这里是唯一的转换点**（照 ``_model_detail`` 的既有模式）。
@@ -47,6 +47,9 @@ def build_session_info(session: Session) -> SessionInfoResponse:
     """GET /api/session/info 响应——session 运行时状态快照。"""
     status = session.agent.get_status()
     cm = session.agent.context_manager
+    # `get_status()` 内部也算过一次 context stats，但 `context_stats` 是独立的线字段
+    # （message_count / total_tokens 允许与 `status` 的展示口径不同）——这里按协议
+    # 语义单独取一次，不从 `status` 复用。
     msg_count, total_tok = cm.get_context_stats()
     return SessionInfoResponse(
         model=status["model"],
@@ -86,7 +89,7 @@ def build_session_branches(session: Session) -> BranchesResponse:
 
 
 # ============================================================
-# Setting API（03）
+# Setting API
 # ============================================================
 
 
@@ -160,7 +163,7 @@ def build_settings_schema(
 
 
 def build_settings_problem(problem: ConfigProblem) -> SettingProblem:
-    """``ConfigProblem`` → wire 问题（``kind`` 序列化为 enum 的 value 字符串，增补 P6）。"""
+    """``ConfigProblem`` → wire 问题（``kind`` 序列化为 enum 的 value 字符串）。"""
     return SettingProblem(
         path=problem.path,
         kind=problem.kind.value,
@@ -180,10 +183,9 @@ def build_settings_secret_states(
 
 
 def build_reload_response(result: ReloadResult) -> ReloadResponse:
-    """``ReloadResult`` → wire 形状（复用 ``/api/system/reload`` 的既有形状）。
+    """``ReloadResult`` → wire 形状（``/api/system/reload`` 与保存回执共用的唯一投影）。
 
-    既有 reload handler 内联构造同形响应；这里提供给新的调用点（保存回执），
-    形状由 protocol 冻结，两处不会有语义漂移。
+    形状由 protocol 冻结：加一个回执字段只改这里。
     """
     return ReloadResponse(
         ok=result.ok,
@@ -207,6 +209,7 @@ def build_settings_apply_response(result: SettingsApplyResult) -> SettingsSetRes
         ),
         setup_mode_exited=result.setup_mode_exited,
         backup_path=result.backup_path,
+        warnings=list(result.warnings),
     )
 
 

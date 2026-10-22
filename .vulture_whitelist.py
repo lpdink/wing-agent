@@ -22,9 +22,6 @@ workdir
 skills_info
 service
 default_agent
-# Setting API 的 setup_mode（get / status 两个响应模型的字段）：本期恒 False
-# （网关只在配置合法时才活着），消费方是序列化之后的前端；04 让它变真。
-setup_mode
 
 # 链上事件与工具 schema 字段
 created_at

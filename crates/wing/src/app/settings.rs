@@ -1,15 +1,15 @@
 //! 设置面板的 App 侧接线（`/settings`）。
 //!
-//! 07 的状态机（`shared/panels/settings`）产出 [`SettingsAction`]，08 的 overlay
+//! `shared/panels/settings` 的状态机产出 [`SettingsAction`]，overlay
 //! （`ui/settings`）把它画出来；这一层负责**它周围的一切**：
 //!
 //! * **生命周期**——打开（cache-first + 后台刷新）、关闭（预览回退 + 整屏重画 +
-//!   图片失效，design §20 风险 13）、`R` 重载、`Ctrl+R` 重启；
-//! * **实时预览**（design §15.3）——Interface 根的任何提交立刻换掉 `self.config` /
+//!   图片失效）、`R` 重载、`Ctrl+R` 重启；
+//! * **实时预览**——Interface 根的任何提交立刻换掉 `self.config` /
 //!   `self.palette` 并整屏重画；打开时记快照，`Esc` 放弃 / `R` 重载都回到它；
-//! * **一键保存两边**（design §15.4）——Interface 半边本地原子写、Gateway 半边异步
+//! * **一键保存两边**——Interface 半边本地原子写、Gateway 半边异步
 //!   POST，两边各自成败、合并成一条回执 notice；
-//! * **`settings_changed` 的消费**（design §7.6）——指纹比对，绝不"猜是不是自己"。
+//! * **`settings_changed` 的消费**——指纹比对，绝不"猜是不是自己"。
 //!
 //! 这里是 `app/**` 里唯一允许写设置面板细节的地方：`modal.rs` 只做"喂按键 + 分派"，
 //! `runner.rs` 只做 I/O 的形状，`commands.rs` 只做路由。
@@ -109,7 +109,7 @@ impl App {
     ///
     /// cache-first（照 `/model` 的模式）：有上一次成功拉取就立刻开面板、同时推一次
     /// 后台刷新；没有再推一次拉取，结果到达时自动打开（[`App::handle_settings_fetch`]）。
-    /// **允许在轮次进行中打开**（design §12.5）。
+    /// **允许在轮次进行中打开**。
     pub(super) fn open_settings_panel(&mut self) {
         if self.settings_panel.is_some() {
             return;
@@ -128,7 +128,7 @@ impl App {
 
     /// 面板真的出现的时刻：构造 + 注入 Interface 根 + 取消选区。
     ///
-    /// Interface 根的读失败**不**用默认值冒充（09 的口径：读失败 ≠ 默认值）——
+    /// Interface 根的读失败**不**用默认值冒充（读失败 ≠ 默认值）——
     /// 树里就没有 Interface 根，`s` 也不会去写那个文件（`interface_dirty` 恒 false）。
     fn present_settings_panel(
         &mut self,
@@ -169,7 +169,7 @@ impl App {
     /// 关闭面板（`discard=true` = 用户确认放弃未保存改动 → 预览回退）。
     ///
     /// **无论哪条路径**都要整屏重画 + 让图片句柄失效：overlay 的 `Clear` 抹过终端，
-    /// ratatui 的 diff 面对"曾经被 Clear 过"的屏幕会留下残影（design §20 风险 13），
+    /// ratatui 的 diff 面对"曾经被 Clear 过"的屏幕会留下残影，
     /// 而图片协议的内容在 Clear 之后终端已不再持有。
     pub(super) fn close_settings_panel(&mut self, discard: bool) {
         self.settings_panel = None;
@@ -232,7 +232,7 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
-    // 实时预览（design §15.3）
+    // 实时预览
     // -----------------------------------------------------------------------
 
     /// Interface 根的任何提交：候选文档 → `self.config` + 调色板 + 整屏重画。
@@ -263,10 +263,10 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
-    // 动作分派（07 → App）
+    // 动作分派（状态机 → App）
     // -----------------------------------------------------------------------
 
-    /// 把状态机的一个 [`SettingsAction`] 落成 App 的动作（design §12.4 的分派表）。
+    /// 把状态机的一个 [`SettingsAction`] 落成 App 的动作。
     pub(super) fn handle_settings_action(&mut self, action: SettingsAction) {
         match action {
             SettingsAction::None => {}
@@ -287,7 +287,7 @@ impl App {
                 });
             }
             SettingsAction::RestartGateway => {
-                // §12.5：只有"立即重启网关"在轮次进行中被拒绝（面板只产出意图）。
+                // 只有"立即重启网关"在轮次进行中被拒绝（面板只产出意图）。
                 if self.turn.working {
                     self.show_toast(Toast::warning(
                         "正在运行中，无法重启网关",
@@ -340,7 +340,7 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
-    // 保存的两半（design §15.4）
+    // 保存的两半
     // -----------------------------------------------------------------------
 
     /// Interface 半边的结论落地：成功 → 面板清脏 / 记基线 + **快照更新**
@@ -386,7 +386,7 @@ impl App {
         match &gateway {
             GatewaySaveReport::Saved(response) => {
                 if let Some(panel) = self.settings_panel.as_mut() {
-                    // `ok=false` 时面板自己会切到问题清单视图（07 的 apply_save）。
+                    // `ok=false` 时面板自己会切到问题清单视图（apply_save）。
                     panel.apply_save(SaveOutcome {
                         gateway: Some(response.clone()),
                         interface_ok: None,
@@ -445,7 +445,7 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
-    // settings_changed 的消费（design §7.6）
+    // settings_changed 的消费
     // -----------------------------------------------------------------------
 
     /// `settings_changed` 事件：面板开着 → 指纹比对（相同 = 自己刚保存的那一次，
@@ -482,7 +482,7 @@ pub(super) fn save_notice_text(
     if let Some(line) = gateway_line(gateway) {
         lines.push(line);
     }
-    // 需重启的提示：AD1 的文案（`Ctrl+R`，不是 `r`），只在 Gateway 真的保存成功时出现。
+    // 需重启的提示：文案是 `Ctrl+R`（不是 `r`），只在 Gateway 真的保存成功时出现。
     if let GatewaySaveReport::Saved(response) = gateway
         && response.ok
         && !response.restart_required.is_empty()
@@ -492,7 +492,7 @@ pub(super) fn save_notice_text(
             response.restart_required.join("、")
         ));
     }
-    // 后端的非致命说明（AD13）：当前文件不可解析时，密文无从回填 —— 必须**逐条**
+    // 后端的非致命说明：当前文件不可解析时，密文无从回填 —— 必须**逐条**
     // 让用户看见（"其中旧密钥没有保留，请重新填写"）。它不影响成败等级。
     if let GatewaySaveReport::Saved(response) = gateway {
         for warning in &response.warnings {
@@ -588,7 +588,7 @@ fn gateway_success_summary(response: &SettingsSetResponse) -> String {
 /// 摘要 toast：面板还没关，回执在它底下看不见 —— "保存到底成没成"要立刻可见。
 fn save_notice_toast(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> String {
     if save_notice_ok(interface, gateway) {
-        // 有后端 warnings 时不能只说"已保存"：那些话（AD13 的"旧密钥没有保留"）
+        // 有后端 warnings 时不能只说"已保存"：那些话（"旧密钥没有保留"）
         // 是用户必须知道的，而回执此刻正压在面板下面。
         if let GatewaySaveReport::Saved(response) = gateway
             && !response.warnings.is_empty()

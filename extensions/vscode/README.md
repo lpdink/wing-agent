@@ -211,7 +211,7 @@ authoritative one because it resolves the actual import graph instead of pattern
 - The tab bar follows VS Code's editor tabs (`multiEditorTabsControl.ts:186,893` for the
   `tablist`/`tab` roles, `multieditortabscontrol.css` for the geometry) at sidebar density: status dot,
   close button, and a dot that replaces the close icon while a background turn is waiting to be seen.
-- The composer routes a submission to exactly one intent (design.md D6 of step 05). `/` opens the
+- The composer routes a submission to exactly one intent. `/` opens the
   command candidates, which merge the host's catalog with `FRONTEND_COMMANDS` (`src/shared/commands.ts`,
   a mirror of the TUI's table); an exactly typed command runs, anything else completes first.
 - The status row is Copilot's secondary toolbar: model / thinking / YOLO / workspace chips, the context
@@ -233,7 +233,7 @@ pnpm run test:watch        # watch mode
   testable headless — no VS Code window, ever.
 - `tests/webview` runs in **jsdom** with `@testing-library/react`; components are mounted through the
   real `mountApp` against the scripted host in `src/testing/mockBridge.ts`.
-- `src/testing/fixtures.ts` has one fixture per cell kind plus the step 04 scenarios (streaming turn,
+- `src/testing/fixtures.ts` has one fixture per cell kind plus the transcript scenarios (streaming turn,
   failed tool call, approval) that both tests and the preview harness use.
 - `tests/artifact/webviewBundle.test.ts` is the build-artifact gate (see above).
 - The preview harness (`preview/main.tsx`) exposes a toolbar to switch fixtures, stream a turn, break

@@ -1,16 +1,16 @@
 /**
- * The webview root: the shell around step 04's transcript.
+ * The webview root: the shell around the transcript.
  *
  * Layout (top to bottom): tab bar · transcript (or welcome / waiting state) ·
  * banners · toasts · status row · composer. Panels float above the shell, anchored to
  * the composer — but every one of them is **host-opened**: the panels render exactly
- * while `panels.{modelPicker,sessionPicker,branchPicker}` is non-null (`interfaces.md`),
+ * while `panels.{modelPicker,sessionPicker,branchPicker}` is non-null,
  * and the webview keeps no local open/close state for them.
  *
  * What lives *here* and nowhere else is the app's local interaction state — the drafts
  * (one per session, so switching tabs does not lose them) and the focus token handed to
  * the composer. None of it is part of the bridge contract: the host cannot see a draft,
- * and it must not have to (see `05_webview_shell/design.md` D1 for the authority table).
+ * and it must not have to.
  *
  * The host's `ui` actions are honoured through `uiSignals` (counters, not booleans, so
  * two consecutive actions are two events). The one effect that matters beyond focus is

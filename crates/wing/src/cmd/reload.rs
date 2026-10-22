@@ -41,10 +41,7 @@ pub async fn run_reload(json: bool) -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Err(e) => {
-            eprintln!("wing reload error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("reload", e),
     }
 }
 

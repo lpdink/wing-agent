@@ -50,20 +50,6 @@ pub struct BackendGatewayConfig {
     pub port: u16,
 }
 
-impl BackendGatewayConfig {
-    /// WebSocket URL: `ws://{host}:{port}/ws`.
-    #[allow(dead_code)]
-    pub fn ws_url(&self) -> String {
-        format!("ws://{}:{}/ws", self.host, self.port)
-    }
-
-    /// HTTP base URL: `http://{host}:{port}`.
-    #[allow(dead_code)]
-    pub fn http_base(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
-    }
-}
-
 /// Path to the wing root directory: `~/.wing/`.
 ///
 /// Used for shared resources (e.g. venv, core config).
@@ -128,24 +114,6 @@ pub fn read_backend_gateway_config() -> BackendGatewayConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_ws_url() {
-        let cfg = BackendGatewayConfig {
-            host: "127.0.0.1".into(),
-            port: 32523,
-        };
-        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:32523/ws");
-    }
-
-    #[test]
-    fn test_http_base() {
-        let cfg = BackendGatewayConfig {
-            host: "127.0.0.1".into(),
-            port: 32523,
-        };
-        assert_eq!(cfg.http_base(), "http://127.0.0.1:32523");
-    }
 
     #[test]
     fn test_parse_partial_yaml() {

@@ -105,26 +105,26 @@ async def test_unknown_arguments_are_filtered_for_normal_tools():
 # ── 截断开关 ──────────────────────────────────────────────────
 
 
-async def test_truncation_disabled_keeps_full_result(_mock_config):
+async def test_truncation_disabled_keeps_full_result(_isolate_config):
     from wing.agent.tool_executor import _maybe_truncate
 
-    _mock_config.tool_result_truncate.max_length = None
+    _isolate_config.tool_result_truncate.max_length = None
     payload = "X" * 500
 
     assert _maybe_truncate(payload) == payload
 
-    _mock_config.tool_result_truncate.max_length = -1
+    _isolate_config.tool_result_truncate.max_length = -1
     assert _maybe_truncate(payload) == payload
 
 
 async def test_truncation_saves_full_result_to_wing_home(
-    _mock_config, tmp_path, monkeypatch
+    _isolate_config, tmp_path, monkeypatch
 ):
     from wing.agent.tool_executor import _maybe_truncate
 
     monkeypatch.setenv("WING_HOME", str(tmp_path / "wing-home"))
-    _mock_config.tool_result_truncate.max_length = 50
-    _mock_config.tool_result_truncate.keep_chars = 5
+    _isolate_config.tool_result_truncate.max_length = 50
+    _isolate_config.tool_result_truncate.keep_chars = 5
 
     truncated = _maybe_truncate("HEAD" + "X" * 500 + "TAIL")
 
@@ -134,13 +134,13 @@ async def test_truncation_saves_full_result_to_wing_home(
     assert saved[0].read_text(encoding="utf-8").startswith("HEAD")
 
 
-async def test_truncation_survives_unwritable_temp(_mock_config, monkeypatch):
+async def test_truncation_survives_unwritable_temp(_isolate_config, monkeypatch):
     """落盘失败只降级为提示：截断后的结果照常回给模型。"""
     import wing.agent.tool_executor as executor_mod
 
     monkeypatch.setenv("WING_HOME", "/nonexistent-wing-home")
-    _mock_config.tool_result_truncate.max_length = 50
-    _mock_config.tool_result_truncate.keep_chars = 5
+    _isolate_config.tool_result_truncate.max_length = 50
+    _isolate_config.tool_result_truncate.keep_chars = 5
 
     def _boom(*args: Any, **kwargs: Any):
         raise OSError("read-only file system")

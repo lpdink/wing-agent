@@ -2,6 +2,7 @@
 
 import pytest
 
+from _support import make_tool
 from wing.tool_registry import DEFAULT_NAMESPACE, ToolRef, ToolRegistry
 
 
@@ -235,17 +236,11 @@ class TestToolValidation:
 
 
 def _make_tool(name: str, namespace: str = "client-a"):
-    from wing.schema import Tool
-
     async def fn(**kwargs: object) -> str:
         return "ok"
 
-    return Tool(
-        name=name,
-        namespace=namespace,
-        description="remote tool",
-        params=[],
-        function=fn,
+    return make_tool(
+        name, fn, description="remote tool", params=[], namespace=namespace
     )
 
 

@@ -315,7 +315,7 @@ fn empty_environment_body_degrades() {
 
 #[test]
 fn wide_characters_align_columns_in_environments() {
-    // N2：宽字符 + 上下标时列要对齐
+    // 宽字符 + 上下标时列要对齐
     let src = r"\begin{align} x^{中} &= b \\ c &= d \end{align}";
     let out = lines(src);
     let eq_columns: Vec<usize> = out.iter().filter_map(|l| l.find('=')).collect();

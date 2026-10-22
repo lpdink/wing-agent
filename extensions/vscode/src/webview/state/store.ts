@@ -72,8 +72,8 @@ export interface BridgeStatusModel {
  * consecutive `focusComposer` actions must both be observable, and a component
  * reacts with `useEffect` on the number.
  *
- * Step 05 owns the effects. `scrollToBottom` is carried for completeness; the
- * transcript already pins itself (step 04), so nothing consumes it today.
+ * the shell owns the effects. `scrollToBottom` is carried for completeness; the
+ * transcript already pins itself, so nothing consumes it today.
  */
 export interface UiSignalsModel {
   readonly closeOverlays: number;
@@ -229,7 +229,7 @@ export function createAppStore(): AppStoreApi {
         case 'focusComposer':
         case 'scrollToBottom':
         case 'closeOverlays': {
-          // Interaction-only actions: step 05 owns the effects (composer focus,
+          // Interaction-only actions: the shell owns the effects (composer focus,
           // scroll pinning, overlay teardown). The model does not change — that is
           // exactly why they are not part of `SessionStateModel` — but each action
           // is recorded as a counter so a mounted component can react to it.

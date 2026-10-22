@@ -6,9 +6,9 @@
 //! text and the frame geometry for the pointer mapping / highlight; nothing here decides anything
 //! about scrolling.
 //!
-//! The only place this module looks into the content model is [`ChatView::visible_row_insets`]: the
-//! per-row padding is a property of the *layout* the render walk produced, and that walk lives in
-//! `super::viewport` — the two must stay in sync.
+//! The per-row padding a copy skips is a property of the layout, so it comes from the render walk
+//! itself (`ChatView::frame_insets`, recorded while drawing) rather than from a second derivation
+//! of the layout here.
 //!
 //! The buffer walk ([`buffer_row_graphemes`]) is deliberately the *only* way rendered rows are
 //! observed: the frame is the authority on what the user saw (links ride inside the cell symbols,
@@ -30,7 +30,6 @@ use crate::ui::selection::extract_text;
 use crate::ui::selection::grapheme_width;
 use crate::ui::selection::row_span;
 
-use super::ChatCell;
 use super::ChatView;
 
 /// Snapshot of the chat band as one frame drew it — the copy-on-select source.
@@ -59,7 +58,7 @@ impl FrameSnapshot {
     /// Capture the chat band out of the frame's buffer.
     ///
     /// `insets[i]` is the left padding (in columns) of the i-th band row, in
-    /// row order (see [`ChatView::visible_row_insets`]); a missing entry means
+    /// row order (see [`ChatView::frame_insets`]); a missing entry means
     /// "no padding".
     fn capture(buf: &Buffer, area: Rect, scroll_offset: usize, insets: &[u16]) -> Self {
         Self {
@@ -128,29 +127,6 @@ pub(super) fn buffer_row_graphemes(buf: &Buffer, row: u16, area: Rect) -> Vec<Gr
         x += width;
     }
     graphemes
-}
-
-/// Columns a user-message cell fills with background before its text starts — the padding the
-/// copy skips. One declaration (`super::media::LEFT_INSET`), read by the render path too.
-const USER_MESSAGE_INSET: u16 = super::media::LEFT_INSET;
-
-/// Append the padding inset of `height` content rows to `out`, clipped to the
-/// visible range `[top, bottom)`; `vrow` advances past them.
-fn push_row_insets(
-    out: &mut Vec<u16>,
-    vrow: &mut usize,
-    height: usize,
-    inset: u16,
-    top: usize,
-    bottom: usize,
-) {
-    let end = *vrow + height;
-    let first = (*vrow).max(top);
-    let last = end.min(bottom);
-    if last > first {
-        out.resize(out.len() + (last - first), inset);
-    }
-    *vrow = end;
 }
 
 impl ChatView {
@@ -303,60 +279,8 @@ impl ChatView {
             self.snapshot = FrameSnapshot::default();
             return;
         }
-        let insets = self.visible_row_insets(area.height);
-        self.snapshot = FrameSnapshot::capture(buf, area, self.geometry.scroll_offset, &insets);
-    }
-
-    /// Left padding (in columns) of every visible band row, in row order.
-    ///
-    /// Only the user-message cells inset their text (`cell_area.x + 2`); every other cell starts at
-    /// the band's left edge. The rows are walked exactly like the render walks them (header → cells
-    /// → pending), so a row's inset belongs to whichever entry drew it. Rows of an entry scrolled out
-    /// of the band contribute nothing, which the caller reads as "no padding".
-    ///
-    /// MIRRORS the render walk in `super::viewport`'s widget (same order, same cached heights, same
-    /// user-message inset): a layout change there must be mirrored here, and
-    /// `snapshot_row_insets_match_the_rendered_rows` is the test that turns red when the two drift.
-    fn visible_row_insets(&self, visible: u16) -> Vec<u16> {
-        let top = self.geometry.scroll_offset;
-        let bottom = top + visible as usize;
-        let mut insets = Vec::with_capacity(visible as usize);
-        let mut vrow = top;
-        push_row_insets(
-            &mut insets,
-            &mut vrow,
-            self.header_lines.len(),
-            0,
-            top,
-            bottom,
-        );
-        for (index, cached) in self.cells.iter().enumerate() {
-            let height = self.cell_heights.get(index).copied().unwrap_or(0);
-            let inset = if matches!(
-                cached.cell(),
-                ChatCell::UserMessage(_)
-                    | ChatCell::PendingUserMessage(_)
-                    | ChatCell::DiscardedUserMessage(_)
-            ) {
-                USER_MESSAGE_INSET
-            } else {
-                0
-            };
-            push_row_insets(&mut insets, &mut vrow, height, inset, top, bottom);
-        }
-        for index in 0..self.pending.len() {
-            let height = self.pending_heights.get(index).copied().unwrap_or(0);
-            push_row_insets(
-                &mut insets,
-                &mut vrow,
-                height,
-                USER_MESSAGE_INSET,
-                top,
-                bottom,
-            );
-        }
-        insets.truncate(visible as usize);
-        insets
+        self.snapshot =
+            FrameSnapshot::capture(buf, area, self.geometry.scroll_offset, &self.frame_insets);
     }
 
     /// Text of the selected content range, taken from the last snapshot.
@@ -377,6 +301,10 @@ impl ChatView {
 mod tests {
     use super::*;
     use ratatui::text::Line;
+
+    use super::super::ChatCell;
+    // 用户气泡的左边距（`super::super::media::LEFT_INSET`）：夹具拿它跟记账比对。
+    use super::super::media::LEFT_INSET as USER_MESSAGE_INSET;
 
     use crate::ui::selection::Selection;
     use crate::ui::selection::SelectionPoint;
@@ -718,9 +646,9 @@ mod tests {
 
     #[test]
     fn snapshot_rows_below_the_content_default_to_inset_zero() {
-        // `visible_row_insets` only reports the rows that carry content, so the
-        // blank rows below a short conversation have no entry at all — they
-        // must fall back to "no padding", not to the last cell's inset.
+        // `frame_insets` only covers the rows this frame drew, so the blank
+        // rows below a short conversation have no entry at all — they must fall
+        // back to "no padding", not to the last cell's inset.
         let mut view = ChatView::new();
         view.push(ChatCell::UserMessage("hi".into()));
         let band = Rect::new(0, 0, 20, 6);
@@ -760,10 +688,10 @@ mod tests {
 
     #[test]
     fn snapshot_row_insets_match_the_rendered_rows() {
-        // The inset table is derived by replaying the render walk
-        // (`visible_row_insets` ↔ `ChatViewWidget::render`); this pins the two
-        // together: if a layout change moves a cell's text start without
-        // updating the table, the recorded inset and the buffer disagree here.
+        // The inset table is recorded by the render walk itself
+        // (`ChatView::frame_insets` ← `ChatViewWidget::render`); this compares it
+        // against the columns actually written into the buffer, so a row whose
+        // text starts somewhere other than its recorded inset turns red here.
         let mut view = ChatView::new();
         view.set_header(vec![Line::from("wing header")]);
         view.push(ChatCell::UserMessage("first question".into()));
@@ -796,7 +724,7 @@ mod tests {
         }
         assert!(
             padded_rows > 0 && flush_rows > 0,
-            "the fixture must cover both a padded and an unpadded row              (padded={padded_rows}, flush={flush_rows})"
+            "the fixture must cover both a padded and an unpadded row (padded={padded_rows}, flush={flush_rows})"
         );
     }
 

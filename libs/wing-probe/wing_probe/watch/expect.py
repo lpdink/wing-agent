@@ -1,4 +1,4 @@
-"""断言原语 —— 游标模型（design D4，spec「事件时间线断言原语」）。
+"""断言原语 —— 游标模型。
 
 | API | 语义 | 游标 |
 |---|---|---|
@@ -41,7 +41,7 @@ from wing_probe.watch.timeline import (
     normalize_types,
 )
 
-#: 默认等待上限（design D4：``expect`` / ``expect_none`` 必须显式或默认带 ``within``）。
+#: 默认等待上限（``expect`` / ``expect_none`` 必须显式或默认带 ``within``）。
 DEFAULT_WITHIN = 5.0
 
 

@@ -12,7 +12,7 @@ import {
 import { disposeMounted, mountWebview, pushPanels, pushState, pushTabs, pushUi, twoTabs } from './harness';
 
 /**
- * Tab bar and status area (step 05) — the two places where the shell has to answer
+ * Tab bar and status area — the two places where the shell has to answer
  * "what is going on?" without the user asking.
  */
 
@@ -79,7 +79,7 @@ describe('tab bar', () => {
     fireEvent.click(within(mounted.container).getByTestId('history-button'));
 
     // The history entry point is the `/ss` command; the host answers with
-    // `sessionPicker` (interfaces.md) — the webview never opens it itself.
+    // `sessionPicker` — the webview never opens it itself.
     expect(mounted.bridge.sentOfType('runPromptCommand')).toEqual([
       { type: 'runPromptCommand', sessionId: 'session-a', name: '/ss', argsText: '' },
     ]);

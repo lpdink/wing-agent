@@ -1,6 +1,6 @@
 //! 粘贴图片的压缩：任意支持格式的字节 → 白底 JPEG（目标 ≤ `max_bytes`）。
 //!
-//! 流程（每一步都只因需求存在；触发通道与 chip 见 05/07 的交付）：
+//! 流程（每一步都只因需求存在；触发通道与 chip 见粘贴通道）：
 //!
 //! ```text
 //! decode          png/jpeg/gif/webp/bmp/tiff（`image` 已开的 codec；GIF 取首帧）

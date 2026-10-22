@@ -27,7 +27,7 @@ export type CellOverrides = Partial<CellModel>;
 /** Deterministic epoch base so snapshots/asserts stay stable. */
 export const FIXTURE_EPOCH = Date.UTC(2026, 0, 1, 0, 0, 0);
 
-/** One cell per kind — the renderer's completeness fixture (step 04 / 05). */
+/** One cell per kind — the renderer's completeness fixture. */
 export function makeAllCells(): readonly CellModel[] {
   return [
     { kind: 'separator', id: 'sep-1', createdAt: FIXTURE_EPOCH, label: 'Turn 1' },
@@ -261,7 +261,7 @@ export function makeCustomAnswerAskCell(id = 'ask-custom', multiSelect = false):
   };
 }
 
-// ── scenarios (step 04) ───────────────────────────────────────────────
+// ── scenarios: a streaming turn, tool calls, an ask ────────────────────
 
 /** A tool call that failed — the case that must open by itself. */
 export function makeFailedToolCell(id = 'tool-failed'): CellModel {
@@ -368,7 +368,7 @@ export function makeLongSession(turns = 25): SessionViewModel {
   });
 }
 
-// ── scenarios (step 05: the shell) ────────────────────────────────────
+// ── scenarios: the shell (panels, overlays, tabs) ─────────────────────
 
 /** A command catalog as the host forwards it: gateway prompt commands + local ones. */
 export function makeCommandCatalog(): CommandCatalogModel {

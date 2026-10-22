@@ -39,14 +39,7 @@ from wing.schema import (
     ToolUseBlock,
 )
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture

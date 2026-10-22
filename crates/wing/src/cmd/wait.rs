@@ -68,10 +68,7 @@ pub async fn run_wait(session_ids: &[String], timeout_secs: u64, json: bool) -> 
                 ExitCode::SUCCESS
             }
         }
-        Err(e) => {
-            eprintln!("wing wait error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("wait", e),
     }
 }
 

@@ -28,24 +28,26 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
+from collections.abc import Collection
 from typing import Any, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
 from wing.common.utils import is_valid_session_id, validate_session_id
-from wing.store.base import (
+from wing.store.base import MessageLog, SessionStore
+from wing.store.models import (
     ArchivedSession,
     FileRef,
-    MessageLog,
     SessionMetadata,
-    SessionStore,
     SessionSummary,
+)
+from wing.store.names import (
     disambiguated_file_name,
-    first_user_title,
     validate_file_name,
     validate_media_content,
     validate_media_id,
 )
+from wing.store.records import first_user_title
 
 
 def _is_same_entry(candidate: Path, target: Path) -> bool:
@@ -748,25 +750,7 @@ class FileSessionStore(SessionStore):
 
     def _adopt_untracked_entries(self, known: set[str]) -> list[ArchivedSession]:
         """（内部）收编归档区里索引未登记的目录（按已知真名去重；只读）。"""
-        root = self._archive_root()
-        if not root.is_dir():
-            return []
-        adopted: list[ArchivedSession] = []
-        for session_dir in root.iterdir():
-            if not session_dir.is_dir() or not is_valid_session_id(session_dir.name):
-                continue
-            if session_dir.name in known:
-                continue
-            metadata = self._load_metadata_at(session_dir, session_dir.name)
-            if not self._looks_like_session(session_dir, metadata):
-                continue
-            log.info(f"Archive index: adopting untracked dir '{session_dir.name}'")
-            adopted.append(
-                self._archive_entry_at(
-                    session_dir.name, session_dir, archived_at=None, metadata=metadata
-                )
-            )
-        return adopted
+        return self._scan_archive_entries(skip=known, adopt=True)
 
     def _looks_like_session(
         self, session_dir: Path, metadata: SessionMetadata | None
@@ -838,8 +822,14 @@ class FileSessionStore(SessionStore):
         if len(pruned) != len(current):
             self._write_archive_index(pruned)
 
-    def _scan_archive_entries(self) -> list[ArchivedSession]:
-        """从归档目录反推条目（重建素材；只读，不写索引）。
+    def _scan_archive_entries(
+        self, *, skip: Collection[str] = (), adopt: bool = False
+    ) -> list[ArchivedSession]:
+        """从归档目录反推条目（重建素材 / 收编未登记目录；只读，不写索引）。
+
+        ``skip`` 是已由索引登记的真名集合（收编路径跳过它们）；``adopt=True`` 时
+        为每条新收编的目录多打一行日志。两条路径必须共用同一套"目录 → 条目"判据
+        （含 ``_looks_like_session``）：判据不同就是同一个盘上"两次列表结果不一样"。
 
         ``archived_at`` 留空：重建不知道当时的归档时刻，不回填、不发明数字。
         """
@@ -850,9 +840,13 @@ class FileSessionStore(SessionStore):
         for session_dir in root.iterdir():
             if not session_dir.is_dir() or not is_valid_session_id(session_dir.name):
                 continue
+            if session_dir.name in skip:
+                continue
             metadata = self._load_metadata_at(session_dir, session_dir.name)
             if not self._looks_like_session(session_dir, metadata):
                 continue
+            if adopt:
+                log.info(f"Archive index: adopting untracked dir '{session_dir.name}'")
             entries.append(
                 self._archive_entry_at(
                     session_dir.name, session_dir, archived_at=None, metadata=metadata

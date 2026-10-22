@@ -16,11 +16,19 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence, cast
 
 from wing.common.logger import log
-from wing.schema import CachePart, CacheProbe, LLMResponse, Message, Tool
+from wing.schema import (
+    CachePart,
+    CacheProbe,
+    LLMResponse,
+    Message,
+    PendingCall,
+    Tool,
+)
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
@@ -39,8 +47,8 @@ class RequestOptions:
     - ``media``：会话媒体读接口——序列化图片时按 id 读字节；
     - ``thinking`` / ``reasoning_effort``：会话级开关覆盖；None = 跟随
       provider 配置（extra_body / config.reasoning_effort）的默认；
-    - ``cache_parts``：ContextManager 产出的 system 侧分段（缓存账本的探针输入，
-      契约 §1）。空元组 = 没有 system 侧段落；
+    - ``cache_parts``：ContextManager 产出的 system 侧分段（缓存账本的探针输入）。
+      空元组 = 没有 system 侧段落；
     - ``cache_probe``：本次调用的分段累积器。provider 在构建 body 的同一处把
       ``[*cache_parts, *wire 侧段落]`` 写进去。**None = 探针关闭**（一个分段都
       不算）——这正是「开/关探针时请求体逐字节相同」可被测试钉住的开关。
@@ -76,6 +84,54 @@ class PendingToolView:
     tool_call_id: str
     tool_name: str
     args_fragment: str
+
+
+def mark_last_cache_control(
+    messages: list[dict], *, image_types: frozenset[str]
+) -> None:
+    """给最后一条消息的最后一个**非图片** content 块打 ``cache_control`` 标记。
+
+    两个协议同构：cache_control 是附加字段，不改写块内容、不影响 thinking 签名；
+    落点恒为「最后一个 part；仅当它是图片时回退到其前面最后一个非图片 part」
+    ——因此从尾部反向扫描（cache_control 不落在图片上；正向扫描会把标记提前，
+    缓存前缀变短）。整条消息没有任何非图片 part（纯图消息）时跳过本次标记。
+
+    ``image_types`` 是唯一的协议知识（OpenAI 兼容用 ``image_url``、Anthropic 用
+    ``image``），由各协议的序列化模块传入；``content`` 是字符串的形态（OpenAI 的
+    历史写法）由调用方先归一成块数组——Anthropic 侧没有这个形态，不在这里凭空支持。
+    """
+    if not messages:
+        return
+    content = messages[-1].get("content")
+    if not isinstance(content, list) or not content:
+        return
+    for part in reversed(cast("list[dict]", content)):
+        if part.get("type") in image_types:
+            continue
+        part["cache_control"] = {"type": "ephemeral"}
+        return
+
+
+def pending_views(pending: Mapping[int, PendingCall]) -> list[PendingToolView]:
+    """未终结 tool 调用的渲染投影（两协议共用：args 原文搬运，后端不解析）。
+
+    ``pending`` 是各协议流状态的 per-index 累积表（OpenAI 的 ``state.pending`` /
+    Anthropic 的 ``state.pending_tools``）；按 index 定序，无 id 的半截调用跳过
+    （投影不出来，截断检测走 ``unfinished_tool_calls`` 的计数口径）。
+    """
+    views: list[PendingToolView] = []
+    for idx in sorted(pending):
+        call = pending[idx]
+        if not call.id:
+            continue
+        views.append(
+            PendingToolView(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                args_fragment=call.args_buffer,
+            )
+        )
+    return views
 
 
 def parse_tool_args(raw: str) -> tuple[dict, str | None]:
@@ -307,7 +363,7 @@ class ModelProvider(ABC):
 
         协议实现在**构建 body 之后**调用：`segments` 必须已经包含 system 侧
         段落（`options.cache_parts`，由 CM 产出）与 wire 侧段落，顺序即 tokenize
-        顺序（contract §1）。写入是覆盖式的——重试重放同一请求不会翻倍。
+        顺序。写入是覆盖式的——重试重放同一请求不会翻倍。
         """
         if options is None or options.cache_probe is None:
             return

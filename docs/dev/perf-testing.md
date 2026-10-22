@@ -4,12 +4,15 @@
 交错 A/B**，结果贴成 PR 上的一条 sticky comment（`<!-- wing-perf -->`）。**不做门禁**：
 job 只在基础设施故障时红（构建/测量失败、报告渲染失败），性能回归只用评论表达。
 
-- 代码：`scripts/perf/`（`ab.py` 编排 · `common.py` 契约 · `report.py` 渲染 ·
+- 代码：`scripts/perf/`（`ab.py` 编排 · `common.py` 形状与判定 · `report.py` 渲染 ·
   `suite_{rust,tui,gateway}.py` 三个套件 · `thresholds.json`；sticky 评论的 upsert 用
   `scripts/ci/sticky_comment.py`，与覆盖率评论共用）
 - CI：`.github/workflows/perf.yml`（PR 触发 + 手工 dispatch）；评论正文也喂给
   `.github/workflows/wing-review.yml` 的 AI 审查者（它把与改动相关的回归点并入结论）
 - 速查表：`scripts/perf/README.md`
+
+> 文中与 `scripts/perf/**` 注释里的「契约 §N」指 `scripts/perf/README.md` 的
+> 「§1–§8 对照表」——那份独立契约文档已随设计文档一并删除，**§ 编号与本页的章节号无关**。
 
 ## 1. 方法论
 

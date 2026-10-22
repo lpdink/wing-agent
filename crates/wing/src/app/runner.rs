@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use crate::app::intent::{AppIntent, FetchPayload, FetchResult};
+use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SessionUpdate};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
 use crate::app::settings::PendingSettingsSave;
@@ -220,27 +220,16 @@ pub async fn execute_intent(
             });
         }
         AppIntent::FetchInfo => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                let sid = session_id.clone();
-                tokio::spawn(async move {
-                    match http.get_session_info(&session_id).await {
-                        Ok(info) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id: sid,
-                                    payload: FetchPayload::Info(Box::new(info)),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("get session info failed: {e}");
-                        }
-                    }
-                });
-            }
+            let session_id = app.session_id.clone();
+            let request_sid = session_id.clone();
+            spawn_fetch(
+                transport.as_ref(),
+                session_id,
+                fetch_tx,
+                "get session info",
+                move |http| async move { http.get_session_info(&request_sid).await },
+                |info| FetchPayload::Info(Box::new(info)),
+            );
         }
         AppIntent::LoadMedia {
             session_id,
@@ -253,129 +242,59 @@ pub async fn execute_intent(
                 fetch_tx.clone(),
             );
         }
-        AppIntent::FetchCommands => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                tokio::spawn(async move {
-                    match http.get_commands().await {
-                        Ok(resp) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id,
-                                    payload: FetchPayload::Commands(resp),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("get commands failed: {e}");
-                        }
-                    }
-                });
-            }
-        }
-        AppIntent::FetchModels => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                tokio::spawn(async move {
-                    match http.get_models().await {
-                        Ok(resp) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id,
-                                    payload: FetchPayload::Models(resp),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("get models failed: {e}");
-                        }
-                    }
-                });
-            }
-        }
+        AppIntent::FetchCommands => spawn_fetch(
+            transport.as_ref(),
+            app.session_id.clone(),
+            fetch_tx,
+            "get commands",
+            |http| async move { http.get_commands().await },
+            FetchPayload::Commands,
+        ),
+        AppIntent::FetchModels => spawn_fetch(
+            transport.as_ref(),
+            app.session_id.clone(),
+            fetch_tx,
+            "get models",
+            |http| async move { http.get_models().await },
+            FetchPayload::Models,
+        ),
         AppIntent::FetchBranches => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                let sid = session_id.clone();
-                tokio::spawn(async move {
-                    match http.get_branches(&session_id).await {
-                        Ok(resp) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id: sid,
-                                    payload: FetchPayload::Branches(resp),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("get branches failed: {e}");
-                        }
-                    }
-                });
-            }
+            let session_id = app.session_id.clone();
+            let request_sid = session_id.clone();
+            spawn_fetch(
+                transport.as_ref(),
+                session_id,
+                fetch_tx,
+                "get branches",
+                move |http| async move { http.get_branches(&request_sid).await },
+                FetchPayload::Branches,
+            );
         }
-        AppIntent::FetchAgents => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                tokio::spawn(async move {
-                    match http.get_agents().await {
-                        Ok(resp) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id,
-                                    payload: FetchPayload::Agents(resp),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("get agents failed: {e}");
-                        }
-                    }
-                });
-            }
-        }
-        AppIntent::UpdateSession {
-            model_id,
-            agent,
-            title,
-            thinking,
-            reasoning_effort,
-            yolo,
-            workspace,
-        } => {
+        AppIntent::FetchAgents => spawn_fetch(
+            transport.as_ref(),
+            app.session_id.clone(),
+            fetch_tx,
+            "get agents",
+            |http| async move { http.get_agents().await },
+            FetchPayload::Agents,
+        ),
+        AppIntent::UpdateSession(update) => {
             if let Some(t) = transport {
                 let req = wing_api_client::models::UpdateSessionRequest {
                     session_id: app.session_id.clone(),
-                    model_id: model_id.clone(),
-                    agent: agent.clone(),
-                    title: title.clone(),
-                    thinking,
-                    reasoning_effort: reasoning_effort.clone(),
-                    yolo,
-                    workspace: workspace.clone(),
+                    model_id: update.model_id.clone(),
+                    agent: update.agent.clone(),
+                    title: update.title.clone(),
+                    thinking: update.thinking,
+                    reasoning_effort: update.reasoning_effort.clone(),
+                    yolo: update.yolo,
+                    workspace: update.workspace.clone(),
                     // TUI 没有工具集编辑器：工具集切换只由 `wing update --tools`
                     // 从 CLI 驱动（同端点，键缺席 = 不动）。
                     tools: None,
                 };
                 match t.http.update_session(&req).await {
-                    Ok(_) => apply_update_session(
-                        app,
-                        model_id,
-                        agent,
-                        title,
-                        thinking,
-                        reasoning_effort,
-                        yolo,
-                        workspace,
-                    ),
+                    Ok(_) => apply_update_session(app, update),
                     Err(e) => {
                         app.chat
                             .push(crate::ui::chat_view::ChatCell::ErrorMessage(format!(
@@ -398,17 +317,10 @@ pub async fn execute_intent(
                 };
                 match t.http.create_session(&req).await {
                     Ok(resp) => {
-                        let new_sid = resp.session_id.clone();
-                        t.switch_session(&old_session_id, &new_sid).await;
-                        app.invalidate_session_cache();
-                        tracing::info!(old = old_session_id, new = new_sid, "session created");
+                        adopt_new_session(app, t, old_session_id, resp.session_id, Switch::Create)
+                            .await
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Create failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
+                    Err(e) => report_switch_failure(app, Switch::Create, e),
                 }
             }
         }
@@ -419,17 +331,10 @@ pub async fn execute_intent(
                 let old_session_id = app.session_id.clone();
                 match t.http.resume_session(&target_id).await {
                     Ok(resp) => {
-                        let new_sid = resp.session_id.clone();
-                        t.switch_session(&old_session_id, &new_sid).await;
-                        app.invalidate_session_cache();
-                        tracing::info!(old = old_session_id, new = new_sid, "session resumed");
+                        adopt_new_session(app, t, old_session_id, resp.session_id, Switch::Resume)
+                            .await
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Resume failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
+                    Err(e) => report_switch_failure(app, Switch::Resume, e),
                 }
             }
         }
@@ -438,42 +343,21 @@ pub async fn execute_intent(
                 let old_session_id = app.session_id.clone();
                 match t.http.fork_session(&old_session_id, &target_uuid).await {
                     Ok(resp) => {
-                        let new_sid = resp.session_id.clone();
-                        t.switch_session(&old_session_id, &new_sid).await;
-                        app.invalidate_session_cache();
-                        tracing::info!(old = old_session_id, new = new_sid, "session forked");
+                        adopt_new_session(app, t, old_session_id, resp.session_id, Switch::Fork)
+                            .await
                     }
-                    Err(e) => {
-                        app.show_toast(Toast::error(
-                            format!("Fork failed: {e}"),
-                            std::time::Duration::from_secs(3),
-                        ));
-                    }
+                    Err(e) => report_switch_failure(app, Switch::Fork, e),
                 }
             }
         }
-        AppIntent::FetchSessionList => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                tokio::spawn(async move {
-                    match http.list_sessions().await {
-                        Ok(resp) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id,
-                                    payload: FetchPayload::SessionList(resp),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("list sessions failed: {e}");
-                        }
-                    }
-                });
-            }
-        }
+        AppIntent::FetchSessionList => spawn_fetch(
+            transport.as_ref(),
+            app.session_id.clone(),
+            fetch_tx,
+            "list sessions",
+            |http| async move { http.list_sessions().await },
+            FetchPayload::SessionList,
+        ),
         AppIntent::CompactSession { instruction } => {
             if let Some(t) = transport {
                 let http = t.http.clone();
@@ -834,6 +718,96 @@ pub(super) struct OutgoingMessage {
     pub(super) images: Vec<CompressedImage>,
 }
 
+/// 一个"取一次、投回事件循环"的后台请求——六个 fetch 意图共用的模板。
+///
+/// 模板只负责"拿 http → spawn → 把结果（或失败日志）投回去"；`label` 是失败日志的
+/// 动作名（`<label> failed: <e>`），`wrap` 把响应收进 [`FetchPayload`]。
+fn spawn_fetch<T, F, Fut>(
+    transport: Option<&Transport>,
+    session_id: String,
+    fetch_tx: &mpsc::Sender<FetchResult>,
+    label: &'static str,
+    call: F,
+    wrap: fn(T) -> FetchPayload,
+) where
+    T: Send + 'static,
+    F: FnOnce(wing_api_client::GatewayClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, wing_api_client::ApiClientError>> + Send + 'static,
+{
+    let Some(t) = transport else {
+        return;
+    };
+    let http = t.http.clone();
+    let tx = fetch_tx.clone();
+    tokio::spawn(async move {
+        match call(http).await {
+            Ok(value) => {
+                let _ = tx
+                    .send(FetchResult {
+                        session_id,
+                        payload: wrap(value),
+                    })
+                    .await;
+            }
+            Err(e) => tracing::warn!("{label} failed: {e}"),
+        }
+    });
+}
+
+/// 三个「换会话」意图（新建 / 恢复 / fork）的差别只在文案。
+#[derive(Clone, Copy)]
+enum Switch {
+    Create,
+    Resume,
+    Fork,
+}
+
+impl Switch {
+    /// 日志里"发生过什么"（`session created`）。
+    fn log_message(self) -> &'static str {
+        match self {
+            Self::Create => "session created",
+            Self::Resume => "session resumed",
+            Self::Fork => "session forked",
+        }
+    }
+
+    /// 失败 toast 里"哪个动作失败了"（`Create failed: …`）。
+    fn action(self) -> &'static str {
+        match self {
+            Self::Create => "Create",
+            Self::Resume => "Resume",
+            Self::Fork => "Fork",
+        }
+    }
+}
+
+/// 换会话成功后的统一收尾：先切订阅，再作废会话缓存（顺序即契约）。
+async fn adopt_new_session(
+    app: &mut App,
+    t: &mut Transport,
+    old_session_id: String,
+    new_sid: String,
+    switch: Switch,
+) {
+    t.switch_session(&old_session_id, &new_sid).await;
+    app.invalidate_session_cache();
+    tracing::info!(
+        old = old_session_id,
+        new = new_sid,
+        "{}",
+        switch.log_message()
+    );
+}
+
+/// 换会话失败：一条 3s 错误 toast（文案与三个意图各自的一致）。
+fn report_switch_failure(app: &mut App, switch: Switch, error: impl std::fmt::Display) {
+    app.show_toast(Toast::error(
+        format!("{} failed: {error}", switch.action()),
+        std::time::Duration::from_secs(3),
+    ));
+}
+
 /// `AppIntent::LoadMedia` 的落地：每张媒体图一个后台任务。
 ///
 /// 一张一个任务（lane 已经把并发压在 `MAX_INFLIGHT` 以内）：慢链路上一张慢图不拖住同屏的
@@ -972,17 +946,16 @@ async fn upload_images(
 /// Apply optimistic local status update after a successful UpdateSession HTTP call.
 ///
 /// Updates `app.status` fields and shows a summary toast.
-#[allow(clippy::too_many_arguments)]
-fn apply_update_session(
-    app: &mut App,
-    model_id: Option<String>,
-    agent: Option<String>,
-    title: Option<String>,
-    thinking: Option<bool>,
-    reasoning_effort: Option<String>,
-    yolo: Option<bool>,
-    workspace: Option<String>,
-) {
+fn apply_update_session(app: &mut App, update: SessionUpdate) {
+    let SessionUpdate {
+        model_id,
+        agent,
+        title,
+        thinking,
+        reasoning_effort,
+        yolo,
+        workspace,
+    } = update;
     let on_off = |b: bool| if b { "on" } else { "off" };
 
     // Optimistic model identity, resolved from the last `/api/models` snapshot
@@ -1073,13 +1046,10 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
-            None,
-            Some("New Title".into()),
-            None,
-            None,
-            None,
-            None,
+            SessionUpdate {
+                title: Some("New Title".into()),
+                ..Default::default()
+            },
         );
         assert!(app.popup.cache.sessions.is_empty());
     }
@@ -1089,13 +1059,10 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("/new/dir".into()),
+            SessionUpdate {
+                workspace: Some("/new/dir".into()),
+                ..Default::default()
+            },
         );
         assert!(app.popup.cache.sessions.is_empty());
     }
@@ -1105,13 +1072,10 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            Some("gpt-4o".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            SessionUpdate {
+                model_id: Some("gpt-4o".into()),
+                ..Default::default()
+            },
         );
         assert!(!app.popup.cache.sessions.is_empty());
     }
@@ -1124,13 +1088,10 @@ mod tests {
         app.model_sources = vec![labeled_sources()];
         apply_update_session(
             &mut app,
-            Some("dfmodel".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            SessionUpdate {
+                model_id: Some("dfmodel".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(app.status.model, "dfmodel");
         assert_eq!(app.status.model_id.as_deref(), Some("dfmodel"));
@@ -1148,13 +1109,10 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            Some("mystery-id".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            SessionUpdate {
+                model_id: Some("mystery-id".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(app.status.model, "mystery-id");
         assert_eq!(app.status.model_id.as_deref(), Some("mystery-id"));
@@ -1167,13 +1125,11 @@ mod tests {
         let mut app = app_with_cached_sessions();
         apply_update_session(
             &mut app,
-            None,
-            None,
-            None,
-            Some(true),
-            Some("high".into()),
-            None,
-            None,
+            SessionUpdate {
+                thinking: Some(true),
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
         );
         assert!(!app.popup.cache.sessions.is_empty());
     }
@@ -1202,13 +1158,10 @@ mod tests {
 
         apply_update_session(
             &mut app,
-            Some("dfmodel".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            SessionUpdate {
+                model_id: Some("dfmodel".into()),
+                ..Default::default()
+            },
         );
 
         let toast = app.toast.as_ref().expect("model switch toast");
@@ -1241,13 +1194,10 @@ mod tests {
 
         apply_update_session(
             &mut app,
-            Some("plain".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            SessionUpdate {
+                model_id: Some("plain".into()),
+                ..Default::default()
+            },
         );
 
         let toast = app.toast.as_ref().expect("model switch toast");

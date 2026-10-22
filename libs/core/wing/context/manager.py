@@ -30,7 +30,12 @@ from wing.schema.cache import (
 )
 
 from .cache_ledger import CacheLedger
-from .compaction import Compactor, LLMMessagesResult, PendingCompact
+from .compaction import (
+    Compactor,
+    LLMMessagesResult,
+    PendingCompact,
+    resolve_context_tokens,
+)
 from .resources import (
     RuleFile,
     build_skills_prompt,
@@ -133,6 +138,16 @@ class ContextManager:
     def workspace(self) -> Path | None:
         """当前工作目录（相对 patterns 的解析基准；None = 未设置）。"""
         return self._workspace
+
+    @property
+    def context_window_tokens(self) -> int:
+        """当前模型的上下文窗口上限（token）；无 compactor = 0。
+
+        0 是对外语义（前端据此判断是否显示占比），所以没有 compactor 时不给
+        一个编造的默认值。`runtime` 的两处 `ContextStatsEvent`、本轮统计与
+        `get_status` 都读它。
+        """
+        return self.compactor.context_window_tokens if self.compactor else 0
 
     def set_workspace(self, workspace: Path | None) -> None:
         """替换工作目录解析基准（唯一入口）。
@@ -378,7 +393,7 @@ class ContextManager:
         model: str,
         provider: str,
     ) -> None:
-        """压缩调用同样进账本（`purpose="compact"`，contract §8.8）。
+        """压缩调用同样进账本（`purpose="compact"`，缓存账本口径）。
 
         无 usage 的压缩响应（服务端没回带内 usage）不记——账本不发明 token 数。
         """
@@ -430,12 +445,16 @@ class ContextManager:
         """
         cache_parts = self._cache_parts_for(options)
 
-        if not self.compactor:
+        def result(window: list[Message]) -> LLMMessagesResult:
+            """本次调用的输入快照（系统提示词 + 窗口 + 声明集 + 分段）——唯一构造点。"""
             return LLMMessagesResult(
-                [self.system_prompt] + self.get_context_window(),
+                [self.system_prompt] + window,
                 tools=list(self._declared_tools),
                 cache_parts=cache_parts,
             )
+
+        if not self.compactor:
+            return result(self.get_context_window())
 
         msgs = self.get_context_window()
         server_tokens = self._last_prompt_tokens()
@@ -455,41 +474,25 @@ class ContextManager:
                         self._apply_pending_compact(msgs, end_idx)
                         # Compact 打破 prefix cache——同步声明集（await 后求值，避免过期快照）
                         self._sync_declared_tools(current_tools())
-                        return LLMMessagesResult(
-                            [self.system_prompt] + self.get_context_window(),
-                            tools=list(self._declared_tools),
-                            cache_parts=cache_parts,
-                        )
+                        return result(self.get_context_window())
                     else:
                         self._discard_pending_compact()
             else:
                 # 未到 apply 阈值：不能走 Step 2/3（避免重复启动 compact task）
-                return LLMMessagesResult(
-                    [self.system_prompt] + msgs,
-                    tools=list(self._declared_tools),
-                    cache_parts=cache_parts,
-                )
+                return result(msgs)
 
         # ── Step 2: task 还在跑？ ──
         if self._pending_compact_task is not None:
             if self._pending_compact_task.done():
                 self._pending_compact_task = None
             else:
-                return LLMMessagesResult(
-                    [self.system_prompt] + msgs,
-                    tools=list(self._declared_tools),
-                    cache_parts=cache_parts,
-                )
+                return result(msgs)
 
         # ── Step 3: 该触发 early compact 了？ ──
         if self.compactor.need_early_trigger(msgs, server_tokens):
             self._start_background_compact(msgs, model, model_provider, options)
 
-        return LLMMessagesResult(
-            [self.system_prompt] + msgs,
-            tools=list(self._declared_tools),
-            cache_parts=cache_parts,
-        )
+        return result(msgs)
 
     # ── 异步 compact 内部方法 ─────────────────────
 
@@ -812,23 +815,19 @@ class ContextManager:
     def get_context_stats(self) -> tuple[int, int]:
         """获取上下文统计信息：消息数量和 token 数（事件节点不计）。
 
-        优先使用服务端 usage（从 _last_prompt_tokens），
-        fallback 到 TokenCounter 估算。
+        token 口径与压缩阈值同源（`resolve_context_tokens`）：服务端 usage
+        （`_last_prompt_tokens`）优先，没有才退回 TokenCounter 估算。
         """
         msgs = self.get_context_window()
         count = len(msgs)
-        server_tokens = self._last_prompt_tokens()
-        if server_tokens is not None:
-            tokens = server_tokens
-        else:
-            tokens = sum(m.estimate_tokens() for m in msgs)
+        tokens = resolve_context_tokens(msgs, self._last_prompt_tokens())
         return count, tokens
 
     def rewind(self, target_uuid: str) -> str | None:
         """回退到 target_uuid 之前的状态。
 
         算法：
-        1. 用 find() 在 JSONL 中定位 target 消息
+        1. 用 find() 在内存 full chain map 中定位 target 消息
         2. 用 find() 定位 target 的 parent
         3. 构造回退行（复制 parent 的内容，新 uuid，parent_uuid = 祖父 uuid）
         4. append_detached + set_tip

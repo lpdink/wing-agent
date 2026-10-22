@@ -1,6 +1,6 @@
 //! 假网关：进程内 HTTP + WS 服务，替代 `wing-gateway` 供真 `wing acp` 进程连接。
 //!
-//! 设计（见 06 design D1/D4）：
+//! 设计：
 //!
 //! - 端口 `127.0.0.1:0` 临时分配，测试把 `host:port` 写进临时 `WING_HOME` 的
 //!   `core/config.yaml`；`wing acp` 的 `ensure_gateway_running` 健康检查打到这里

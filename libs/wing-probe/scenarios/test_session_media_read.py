@@ -1,6 +1,6 @@
 """媒体读取端点（``GET /api/session/media``）probe 场景。
 
-被守的语义（design.md §5 B1 / §4.4 的消费语境）：
+被守的语义（媒体读取 → 请求体里的 image part 的消费语境）：
 
 - **成功四件套**：上传 → 按 id 读回**原始字节**（非 JSON）：body 逐字节相等 +
   ``Content-Type``（由 magic bytes 现读）+ ``ETag: "<id>"`` + ``Cache-Control: private,

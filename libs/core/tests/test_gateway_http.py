@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from _support import gateway_auth_config
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
@@ -30,16 +31,6 @@ from wing.store import ArchivedSession, SessionUsage, TagMeta
 def _raise_package_not_found(name: str) -> str:
     """替身 version()：任何包名都不存在。"""
     raise PackageNotFoundError(name)
-
-
-def _mock_config(auth_enabled: bool = False, auth_keys: list | None = None):
-    """构建 mock Config，仅填充 gateway.auth 字段。"""
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(
-        enabled=auth_enabled,
-        keys=auth_keys or [],
-    )
-    return config
 
 
 @pytest.fixture
@@ -112,7 +103,7 @@ def client(mock_runtime):
         patch("wing.gateway.server.load_config") as mock_load_config,
     ):
         MockRuntime.return_value = mock_runtime
-        mock_load_config.return_value = _mock_config()
+        mock_load_config.return_value = gateway_auth_config()
 
         from wing.gateway.server import GatewayServer
 
@@ -1613,12 +1604,12 @@ class TestModelsCatalogFromConfig:
             ],
             agents=[AgentConfig(name="default", model="dfmodel")],
         )
-        # 单例替换（与 conftest 的 _mock_config 同口径）：runtime 构造与路由都读它。
+        # 单例替换（与 conftest 的 _isolate_config 同口径）：runtime 构造与路由都读它。
         monkeypatch.setattr("wing.config.loader._config", config)
         monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
 
         with patch("wing.gateway.server.load_config") as mock_load_config:
-            mock_load_config.return_value = _mock_config()
+            mock_load_config.return_value = gateway_auth_config()
             server = GatewayServer()
         server.runtime = WingRuntime()
         with TestClient(server._app) as tc:
@@ -1888,9 +1879,9 @@ def auth_client(mock_runtime):
         patch("wing.gateway.server.load_config") as mock_load_config,
     ):
         MockRuntime.return_value = mock_runtime
-        mock_load_config.return_value = _mock_config(
+        mock_load_config.return_value = gateway_auth_config(
             auth_enabled=True,
-            auth_keys=[
+            keys=[
                 ApiKeyEntry(key="test-key-1", role="admin"),
                 ApiKeyEntry(key="test-key-2", role="admin"),
                 ApiKeyEntry(key="test-tool-key", role="tool_runtime"),
@@ -2122,7 +2113,7 @@ class TestAuthHotReload:
 
     def test_reload_toggles_auth(self, mock_runtime):
         """运行时切换 auth.enabled，无需重启即生效。"""
-        mock_cfg = _mock_config(auth_enabled=False)
+        mock_cfg = gateway_auth_config(auth_enabled=False)
         with (
             patch("wing.gateway.server.WingRuntime") as MockRuntime,
             patch("wing.gateway.server.load_config") as mock_load_config,
@@ -2141,9 +2132,9 @@ class TestAuthHotReload:
                 assert resp.status_code == 200
 
                 # 模拟热重载：切换到 auth enabled
-                mock_load_config.return_value = _mock_config(
+                mock_load_config.return_value = gateway_auth_config(
                     auth_enabled=True,
-                    auth_keys=[ApiKeyEntry(key="new-key", role="admin")],
+                    keys=[ApiKeyEntry(key="new-key", role="admin")],
                 )
 
                 # 无 key → 401（立即生效，无需重启）
@@ -2174,9 +2165,9 @@ def rbac_env(mock_runtime):
         patch("wing.gateway.server.load_config") as mock_load_config,
     ):
         MockRuntime.return_value = mock_runtime
-        mock_load_config.return_value = _mock_config(
+        mock_load_config.return_value = gateway_auth_config(
             auth_enabled=True,
-            auth_keys=[
+            keys=[
                 ApiKeyEntry(key="admin-key", role="admin"),
                 ApiKeyEntry(key="tool-key", role="tool_runtime"),
             ],
@@ -2623,7 +2614,7 @@ class TestRealRuntimeGates:
 
         monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
         with patch("wing.gateway.server.load_config") as mock_load_config:
-            mock_load_config.return_value = _mock_config()
+            mock_load_config.return_value = gateway_auth_config()
             server = GatewayServer()
         server.runtime = WingRuntime()
         with TestClient(server._app) as tc:
@@ -2658,7 +2649,7 @@ class TestRealRuntimeGates:
         assert resp.status_code == 400, resp.text
         assert not sessions_root.exists() or list(sessions_root.iterdir()) == []
 
-    # ── N1：覆盖 / 文本字段的非 UTF-8 输入（400 而非 500，零残留、无幽灵） ──
+    # ── 覆盖 / 文本字段的非 UTF-8 输入（400 而非 500，零残留、无幽灵） ──
 
     def test_surrogate_in_override_is_400_not_500(self, real_client):
         """agent 覆盖里的孤立代理字符 → 400；**零残留**（连目录都不建）。"""
@@ -2890,11 +2881,11 @@ class TestRealRuntimeGates:
             ],
         )
         monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-        # 单例替换（与 conftest 的 _mock_config 同口径）：runtime 构造与模板
+        # 单例替换（与 conftest 的 _isolate_config 同口径）：runtime 构造与模板
         # 解析都读它。
         monkeypatch.setattr("wing.config.loader._config", config)
         with patch("wing.gateway.server.load_config") as mock_load_config:
-            mock_load_config.return_value = _mock_config()
+            mock_load_config.return_value = gateway_auth_config()
             server = GatewayServer()
         server.runtime = WingRuntime()
         with TestClient(server._app) as tc:
@@ -2966,7 +2957,7 @@ class TestRealRuntimeGates:
 class TestSendRouteErrorMapping:
     """`send` 路由的错误映射口径：**只有输入非法**才回 400。
 
-    终轮复审 N1：把 `runtime.post` 抛出的任何 `ValueError` 都映射成 400 太宽——
+    把 `runtime.post` 抛出的任何 `ValueError` 都映射成 400 太宽——
     链上将来出现的内部 `ValueError`（队列关闭、prompt 命令语义错误）会被报成
     "客户端的错"。现在只认 `InvalidInputError`（文本闸门专用类型），其它
     `ValueError` 走 500（带着栈进日志）。

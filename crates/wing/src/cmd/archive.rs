@@ -75,10 +75,7 @@ pub(crate) fn validate(session_ids: &[String], restore: bool, list: bool) -> Res
 pub async fn run(session_ids: &[String], restore: bool, list: bool, json: bool) -> ExitCode {
     match run_inner(session_ids, restore, list, json).await {
         Ok(code) => code,
-        Err(e) => {
-            eprintln!("wing archive error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("archive", e),
     }
 }
 
@@ -90,8 +87,7 @@ async fn run_inner(
 ) -> Result<ExitCode> {
     validate(session_ids, restore, list)?;
 
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
     if list {
         let resp = http.list_archived().await?;

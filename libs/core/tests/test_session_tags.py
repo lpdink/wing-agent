@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from wing.schema import Message
+from _support import seed_messages
 from wing.session import SessionManager
 from wing.session.tags import (
     MAX_TAG_LENGTH,
@@ -32,13 +32,6 @@ from wing.store import FileSessionStore, SessionMetadata, TagMeta
 def file_sm(tmp_path: Path) -> SessionManager:
     """文件后端 SessionManager。"""
     return SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-
-
-def _seed(session, *contents: str) -> None:
-    """向 session 的上下文写入消息（不经 LLM）。"""
-    for i, content in enumerate(contents):
-        role = "user" if i % 2 == 0 else "assistant"
-        session.context_manager.add_message(Message(role=role, content=content))
 
 
 class TestValidateTag:
@@ -233,7 +226,7 @@ class TestManagerSetTags:
     @pytest.mark.asyncio
     async def test_set_tags_on_loaded_session_persists(self, file_sm: SessionManager):
         session = file_sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
 
         m = file_sm.set_session_tags(
             session.session_id, add=["favorite", "task=wing-tag"]
@@ -248,7 +241,7 @@ class TestManagerSetTags:
     async def test_tag_times_ride_the_same_save_as_tags(self, file_sm: SessionManager):
         """打标时间与标签同一次落盘：加记时间、移除即消失（磁盘事实对账）。"""
         session = file_sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         sid = session.session_id
 
         m = file_sm.set_session_tags(sid, add=["pin"])
@@ -267,7 +260,7 @@ class TestManagerSetTags:
     ):
         """逐出会话打标：时间记录同样走 store 直写路径，不把会话换入内存。"""
         session = file_sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         sid = session.session_id
         del file_sm._sessions[sid]
 
@@ -285,7 +278,7 @@ class TestManagerSetTags:
     ):
         """逐出会话直接改磁盘 metadata：不水合、不写多余键、标签可读。"""
         session = file_sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         sid = session.session_id
         # 逐出（等价于不在内存；evict 的拆解语义与标签路径无关）
         del file_sm._sessions[sid]
@@ -311,7 +304,7 @@ class TestManagerSetTags:
     ):
         """幂等 no-op（重复添加 / 移除不存在）不产生任何落盘。"""
         session = file_sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         file_sm.set_session_tags(session.session_id, add=["a"])
 
         calls: list[str] = []
@@ -378,7 +371,7 @@ class TestManagerSetTags:
     @pytest.mark.asyncio
     async def test_invalid_tag_raises_before_any_write(self, file_sm: SessionManager):
         session = file_sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         with pytest.raises(ValueError):
             file_sm.set_session_tags(session.session_id, add=["bad tag"])
         meta = session.store.load_metadata(session.session_id)
@@ -445,7 +438,7 @@ class TestCreateAndProjection:
     @pytest.mark.asyncio
     async def test_create_with_tags(self, file_sm: SessionManager):
         session = file_sm.create_session(tags=["scheduler", "task=x"])
-        _seed(session, "hello")  # 列表只收"有标题素材"的会话（既有语义）
+        seed_messages(session, "hello")  # 列表只收"有标题素材"的会话（既有语义）
         assert session.tags == ["scheduler", "task=x"]
 
         infos = {i.id: i for i in file_sm.list_sessions()}
@@ -457,7 +450,7 @@ class TestCreateAndProjection:
     ):
         """创建即打标的时间 = 创建时刻（同一 ``apply_tag_ops`` 路径）。"""
         session = file_sm.create_session(tags=["pin"])
-        _seed(session, "hello")
+        seed_messages(session, "hello")
 
         meta = session.tag_meta
         assert meta["pin"].added_at is not None
@@ -499,7 +492,7 @@ class TestCreateAndProjection:
     @pytest.mark.asyncio
     async def test_tags_survive_restart(self, file_sm: SessionManager, tmp_path: Path):
         session = file_sm.create_session(tags=["favorite"])
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         sid = session.session_id
 
         restarted = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
@@ -514,7 +507,7 @@ class TestForkDoesNotInheritTags:
     @pytest.mark.asyncio
     async def test_fork_child_starts_untagged(self, file_sm: SessionManager):
         source = file_sm.create_session(tags=["favorite", "task=x"])
-        _seed(source, "hello", "hi")
+        seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         child, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]

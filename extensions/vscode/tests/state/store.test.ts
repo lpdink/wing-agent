@@ -283,7 +283,7 @@ describe('applyUi', () => {
   });
 
   it('counts each interaction-only action so components can react to it', () => {
-    // Counters, not booleans: the same action twice is two events (step 05).
+    // Counters, not booleans: the same action twice is two events.
     expect(createInitialState().uiSignals).toEqual({
       closeOverlays: 0,
       focusComposer: 0,

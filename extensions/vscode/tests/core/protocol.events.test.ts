@@ -750,7 +750,7 @@ describe('unknown and malformed payloads never become typed events', () => {
   });
 
   /**
-   * S1 counter-example (review r1): the Python models mark these scalars
+   * Counter-example: the Python models mark these scalars
    * required, so deleting one must degrade the whole payload — a defaulted
    * number would be a fabricated value (`compact_done` used to report
    * "0 → 0 tokens" for a compaction that really freed 90k).

@@ -14,7 +14,7 @@ from wing.store import (
     SessionMetadata,
     SessionStore,
 )
-from wing.store.base import IMAGE_ONLY_TITLE
+from wing.store.records import IMAGE_ONLY_TITLE
 
 
 def _sid(label: str) -> str:

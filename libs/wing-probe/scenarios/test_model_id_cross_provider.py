@@ -98,14 +98,14 @@ async def test_model_id_picks_the_provider_endpoint(probe: Probe) -> None:
 async def test_same_id_across_providers_boots_into_setup_mode(
     tmp_path: Path,
 ) -> None:
-    """同一个 id 声明在两个 provider → 网关**降级启动**并在问题清单里精确报出（AD11）。
+    """同一个 id 声明在两个 provider → 网关**降级启动**并在问题清单里精确报出。
 
     行为变更（04）：「坏配置 ⇒ 进程拒绝启动」已死——配置写坏时网关降级启动（setup mode），
     唯一修复路径是设置端点。所以这条负面用例验的东西从「进程拒绝启动」换成
     「进程降级启动 + 精确告诉用户哪里错了」：后者是更强的产品保证（用户被指路，
     而不是面对 traceback）。
 
-    ``env`` 被持有到 ``finally``（teardown），否则网关子进程会泄漏（AD17）。
+    ``env`` 被持有到 ``finally``（teardown），否则网关子进程会泄漏。
     """
     env = await ProbeEnv.start(
         tmp_path / "duplicate-id",

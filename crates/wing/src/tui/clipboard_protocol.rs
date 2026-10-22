@@ -148,77 +148,10 @@ impl ClipboardFailure {
 }
 
 // ---------------------------------------------------------------------------
-// base64（RFC 4648 标准字母表 + padding；自己实现，不为此引依赖）
+// base64（记法见 [`crate::util::base64`]；线上两条通道共用同一份实现）
 // ---------------------------------------------------------------------------
 
-const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-pub(crate) fn b64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        let n = u32::from_be_bytes([0, a, b, c]);
-        out.push(B64_ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(B64_ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            B64_ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            B64_ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
-fn b64_value(c: u8) -> Option<u8> {
-    match c {
-        b'A'..=b'Z' => Some(c - b'A'),
-        b'a'..=b'z' => Some(c - b'a' + 26),
-        b'0'..=b'9' => Some(c - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-/// 严格解码：只认标准字母表与末尾 padding；非字母字符、`%4 == 1` 的残缺、
-/// padding 数量对不上都判失败（坏数据走降级路径，绝不 panic）。
-pub(crate) fn b64_decode(text: &str) -> Option<Vec<u8>> {
-    let mut body = text.as_bytes();
-    let mut pad = 0usize;
-    while let [head @ .., b'='] = body {
-        body = head;
-        pad += 1;
-        if pad > 2 {
-            return None;
-        }
-    }
-    if body.len() % 4 == 1 {
-        return None;
-    }
-    if pad > 0 && !(body.len() + pad).is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(body.len() / 4 * 3 + 3);
-    for chunk in body.chunks(4) {
-        let mut acc = 0u32;
-        for &c in chunk {
-            acc = (acc << 6) | b64_value(c)? as u32;
-        }
-        // 每组的有效位是 6×字符数；输出第 i 个字节取从高位数起的那一段。
-        let bits = 6 * chunk.len() as u32;
-        for i in 0..chunk.len() - 1 {
-            out.push((acc >> (bits - 8 * (i as u32 + 1))) as u8);
-        }
-    }
-    Some(out)
-}
+use crate::util::base64::{decode as b64_decode, encode as b64_encode};
 
 // ---------------------------------------------------------------------------
 // 包解析
@@ -1899,7 +1832,7 @@ mod tests {
         }
     }
 
-    /// [S2] 上一次读被放弃后，终端仍会把剩下的包补发完。唯一 id 让这些残留落不到下一次
+    /// 上一次读被放弃后，终端仍会把剩下的包补发完。唯一 id 让这些残留落不到下一次
     /// 读上（同 id 时无法区分：同 mime、同 pw）——否则新读会被旧的 DONE 提前终结，投出
     /// 上一次的内容。
     #[test]
@@ -1964,7 +1897,7 @@ mod tests {
         );
     }
 
-    /// [N1] event 侧的孪生 S2：旧事件（被放弃）迟到的 listing / DONE 带的是**旧 pw**，
+    /// event 侧的孪生规则：旧事件（被放弃）迟到的 listing / DONE 带的是**旧 pw**，
     /// 必须当噪声 —— 否则新事件会被旧 listing 定死 mime、被旧 DONE 提前终结。
     #[test]
     fn stale_event_packets_with_another_password_are_ignored() {

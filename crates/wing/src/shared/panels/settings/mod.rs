@@ -1,10 +1,10 @@
-//! SettingsPanel — 设置面板的纯状态机（design.md §11–§14 的全部交互语义）。
+//! SettingsPanel — 设置面板的纯状态机（交互语义全部由本模块定义）。
 //!
-//! 这里没有一行渲染、没有任何 I/O：08 只读访问器把它画出来，10 喂按键、执行
+//! 这里没有一行渲染、没有任何 I/O：渲染层只读访问器把它画出来，调用方喂按键、执行
 //! [`SettingsAction`]。与 `/model` picker、AskPanel 同一个模式（`shared/panels/` 是中立层），
 //! 因此整棵树的语义可以被穷尽单测。
 //!
-//! # 交互契约（08 / 10 的唯一说明书）
+//! # 交互契约（状态机的唯一说明书）
 //!
 //! ## 结构（v2：双栏）
 //!
@@ -54,7 +54,7 @@
 //! ## 密文契约（**红线**）
 //!
 //! 密文叶子在 `get` 响应里恒为 `null`（`secrets` 平行表给出 set / empty / absent 三态）：
-//! **`null` = 保留磁盘上的现值，保存时必须原样回传**（design.md §7.5）。
+//! **`null` = 保留磁盘上的现值，保存时必须原样回传**。
 //! 丢掉这个键 = 清空密钥 = 用户下一次调用 401 —— 因此面板从不删除用户没动过的密文键，
 //! 编辑器也只在用户真的输入了值时改写它；这条契约由
 //! `tests::unedited_secret_null_is_echoed_back_in_the_save_document` 钉住。
@@ -62,7 +62,7 @@
 //! ## 模态性
 //!
 //! - **编辑器激活时**只有 `字符 / Backspace / Delete / ← → / Home End / Ctrl+U / Enter / Esc`
-//!   有效；`↑`/`↓`/`Tab` 与其余一切**忽略**（design §20 D20）——值有类型与约束，
+//!   有效；`↑`/`↓`/`Tab` 与其余一切**忽略**——值有类型与约束，
 //!   不允许「半截编辑」的中间态。
 //! - **模态提示**（删除确认 / 清空确认 / 形态选择 / 放弃改动）激活时只有
 //!   `Enter`（确认）/ `Esc`（取消）/ `↑↓`（形态选择）有效。
@@ -114,7 +114,7 @@ mod search;
 mod tree;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -171,7 +171,7 @@ pub enum Focus {
     Items,
 }
 
-/// 面板当前的视图（`Choices` 不是视图：enum 选择项是树的**子行**，见 design §20 D19）。
+/// 面板当前的视图（`Choices` 不是视图：enum 选择项是树的**子行**）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Tree,
@@ -210,7 +210,7 @@ pub enum PromptKind {
     Variants,
 }
 
-/// 模态提示的只读投影（08 渲染；面板不暴露内部状态）。
+/// 模态提示的只读投影（渲染层用；面板不暴露内部状态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptView {
     pub kind: PromptKind,
@@ -227,7 +227,7 @@ pub struct PromptView {
 pub enum SettingsAction {
     /// 键被消费，无事发生（浏览 / 展开折叠 / 进搜索……）。
     None,
-    /// Interface 根的任何提交：整份候选稀疏文档（09 的 `appconfig_from_doc` 直接吃它）。
+    /// Interface 根的任何提交：整份候选稀疏文档（`appconfig_from_doc` 直接吃它）。
     PreviewInterface(Value),
     /// `s`：两边一起保存。`gateway_dirty` / `interface_dirty` 告诉 App 哪边需要真的动作
     /// （跳过空 POST / 无谓的文件重写）。
@@ -323,7 +323,7 @@ pub struct SettingsPanel {
     viewport_rows: usize,
     /// 左栏可见行数（`PageUp` / `PageDown` 在锚点上的步长）。
     anchor_viewport_rows: usize,
-    /// 08 报告：这一帧**有没有画出左栏**（窄卡片放不下时右栏独占，见 08 的 `split_columns`）。
+    /// 这一帧**有没有画出左栏**（窄卡片放不下时右栏独占，见 `split_columns`）。
     /// 不可见 ⇒ 焦点不许停在左栏，`Tab` 无处可去，`Esc` 直接走"放弃改动 / 关闭"两级。
     anchors_visible: bool,
 }
@@ -425,19 +425,30 @@ impl SettingsPanel {
         super::window_range(self.group_cursor, self.anchors.len(), visible_rows)
     }
 
-    /// 左栏的只读投影（含徽标：脏 / 问题数 / 搜索命中数）。
+    /// 左栏的**整表**只读投影（含徽标：脏 / 问题数 / 搜索命中数）。
+    ///
+    /// 渲染路径不用它：面板每帧只画可见的几行，走 [`Self::anchor_view`]。整表投影是给
+    /// 「一次要看全部锚点」的调用方留的（今天只有测试），因为它要为每个组扫一遍问题清单
+    /// 与命中集。
     pub fn anchor_views(&self) -> Vec<AnchorView> {
-        self.anchors
-            .iter()
-            .enumerate()
-            .map(|(index, anchor)| AnchorView {
-                title: anchor.title.clone(),
-                selected: index == self.group_cursor,
-                dirty: self.group_dirty(anchor),
-                problems: self.group_problems(anchor),
-                hits: self.filter.as_ref().map(|f| self.group_hits(anchor, f)),
-            })
+        (0..self.anchors.len())
+            .filter_map(|index| self.anchor_view(index))
             .collect()
+    }
+
+    /// 单个锚点的只读投影（`index` 越界 → `None`）。
+    ///
+    /// 渲染层只画可见的那几行，逐行问比整表投影便宜得多：一次投影要为**每个**组扫一遍
+    /// 问题清单与整个搜索命中集，而 `anchor_views` 只有整表消费者（测试与外部查询）才要。
+    pub fn anchor_view(&self, index: usize) -> Option<AnchorView> {
+        let anchor = self.anchors.get(index)?;
+        Some(AnchorView {
+            title: anchor.title.clone(),
+            selected: index == self.group_cursor,
+            dirty: self.group_dirty(anchor),
+            problems: self.group_problems(anchor),
+            hits: self.filter.as_ref().map(|f| self.group_hits(anchor, f)),
+        })
     }
 
     /// 组内有未保存的改动吗（任一成员的子树下有脏路径）。
@@ -599,7 +610,7 @@ impl SettingsPanel {
     }
 
     /// 保存回执落地：成功 → 清该根脏标记并把当前文档记为基线；`ok=false` → 换 problems、
-    /// 切到问题清单视图（§14.1 场景 2），脏标记保留。
+    /// 切到问题清单视图（保存失败后的入口），脏标记保留。
     pub fn apply_save(&mut self, outcome: SaveOutcome) {
         if let Some(response) = outcome.gateway {
             self.doc.set_fingerprint(response.fingerprint.clone());
@@ -652,7 +663,7 @@ impl SettingsPanel {
         }
     }
 
-    // ── 只读访问器（08 渲染 / 10 判态） ───────────────────────
+    // ── 只读访问器（渲染层与判态用） ──────────────────────────
 
     /// 右栏的全部可见行 = **当前分组**的成员子树（v2：不再有两个根拼成的整棵树）。
     pub fn rows(&self) -> &[Row] {
@@ -830,7 +841,7 @@ impl SettingsPanel {
         });
         parts.push("/ 搜索".into());
         if !self.restart_required.is_empty() {
-            // AD1：只有真的有 restart 类变更时才挂这个键。
+            // 只有真的有 restart 类变更时才挂这个键。
             parts.push("Ctrl+R 立即重启".into());
         }
         parts.push("? 帮助".into());
@@ -869,7 +880,7 @@ impl SettingsPanel {
         self.rows.get(self.cursor)
     }
 
-    /// 当前行的身份（`(根, 具体路径)`）——重算后把光标锚回同一行（design D5）。
+    /// 当前行的身份（`(根, 具体路径)`）——重算后把光标锚回同一行。
     fn row_anchor(&self) -> Option<(Root, String)> {
         self.current_row().map(|row| (row.root, row.path.clone()))
     }
@@ -880,7 +891,7 @@ impl SettingsPanel {
             .position(|row| row.root == root && row.path == path)
     }
 
-    /// 右栏重算（当前分组的行）+ 光标重锚（design D5）：先按身份找回原来那一行，
+    /// 右栏重算（当前分组的行）+ 光标重锚：先按身份找回原来那一行，
     /// 找不到再交给 kernel 钳制。
     fn rebuild(&mut self, anchor: Option<(Root, String)>) {
         self.refresh_problems();
@@ -1082,7 +1093,7 @@ impl SettingsPanel {
         self.search = Some(SearchState::new(&self.expanded, cursor, self.group_cursor));
     }
 
-    /// 过滤重算 + 光标跳到第一个命中（design §14.2）。
+    /// 过滤重算 + 光标跳到第一个命中。
     ///
     /// v2 追加一条：搜索跨**全部分组**求命中，但右栏一次只显示一个组 —— 所以当前组
     /// 没有命中而别的组有时，自动把左栏光标挪到第一个有命中的组（否则用户会以为
@@ -1480,7 +1491,7 @@ impl SettingsPanel {
             }
             RowAction::Toggle => self.toggle_bool(&row),
             RowAction::OpenChoices => {
-                // 已展开（§13.3）：Enter = 选中内项光标所在的选择项（含 `(unset)`）。
+                // 已展开：Enter = 选中内项光标所在的选择项（含 `(unset)`）。
                 let selected = self
                     .choices
                     .as_ref()
@@ -1826,7 +1837,7 @@ impl SettingsPanel {
         let Some(row) = self.current_row().cloned() else {
             return SettingsAction::None;
         };
-        // 复位只对叶子字段有定义：列表项、结构行、只读行都无操作（design D7）。
+        // 复位只对叶子字段有定义：列表项、结构行、只读行都无操作。
         if self.is_list_item(&row)
             || !matches!(
                 row.action,
@@ -1869,7 +1880,7 @@ impl SettingsPanel {
     }
 
     /// `Ctrl+R`：只在**真的有待重启的变更**（上次保存回执的 `restart_required` 非空）时接受。
-    /// 没有 → 无操作 —— 键位栏同样不显示它（AD1），免得教用户按一个没有意义的键。
+    /// 没有 → 无操作 —— 键位栏同样不显示它，免得教用户按一个没有意义的键。
     fn restart_action(&mut self) -> SettingsAction {
         if self.restart_required.is_empty() {
             return SettingsAction::None;
@@ -1913,7 +1924,7 @@ impl SettingsPanel {
                 };
                 match result {
                     Ok(value) => {
-                        // AD3：「打开 → 不改 → Enter」= 无操作（不写入、不标脏）——
+                        // 「打开 → 不改 → Enter」= 无操作（不写入、不标脏）——
                         // 否则在一个「缺席即默认」的字段上连按两次 Enter 会把默认值物化。
                         let unchanged = self
                             .edit
@@ -2186,7 +2197,7 @@ fn enum_cursor(node: &SettingNode, value: Option<&Value>) -> usize {
 }
 
 /// 单页适配器：整棵树就是唯一一页，于是 kernel 的 `move_cursor`（钳制）与
-/// `clamp_after_refresh` **白拿**（design §11.2 末段）。
+/// `clamp_after_refresh` **白拿**。
 impl SelectionPanel for SettingsPanel {
     fn page_count(&self) -> usize {
         1

@@ -11,6 +11,14 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
 
+/// 一行的显示宽度：各 span 内容宽度之和（CJK / 表情按显示列算）。
+pub(crate) fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
 // ============================================================
 // SegmentKind — semantic element origin of a segment
 // ============================================================

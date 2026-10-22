@@ -1,8 +1,8 @@
-//! 内联编辑器渲染（design §13.1–§13.2）。
+//! 内联编辑器渲染。
 //!
 //! 编辑器是**行内**的：`label  [ buffer▏ ]`。缓冲文本的唯一来源是
-//! [`EditState::visible_buffer`]（07 的密文形态返回 `•` × 长度）——渲染层没有任何第二条
-//! 路径能拿到明文，密文红线因此是**类型系统**的，不是纪律的（design §13.2）。
+//! [`EditState::visible_buffer`]（密文形态返回 `•` × 长度）——渲染层没有任何第二条
+//! 路径能拿到明文，密文红线因此是**类型系统**的，不是纪律的。
 //!
 //! 光标是一个**反显空格**（`Modifier::REVERSED`），不是 `▏` 之类的字形：反显块覆盖
 //! 一个格子（CJK / 密文点这类双宽字符也一样），到缓冲末尾时光标仍然可见。
@@ -25,14 +25,14 @@ pub(crate) fn value_spans(state: &EditState, palette: &ThemePalette) -> Vec<Span
     let mut spans = vec![Span::styled("[".to_string(), dim)];
 
     if state.is_secret() && state.buffer_len() == 0 {
-        // 占位提示（design §13.2）：Enter 保留原值不变。
+        // 占位提示：Enter 保留原值不变。
         spans.push(cursor_block(palette));
         spans.push(Span::styled(
             "输入新密钥（Enter 保留原值不变）".to_string(),
             dim,
         ));
     } else {
-        // 光标是**字符索引**（07 的约定），密文缓冲与可见缓冲的字符数一致。
+        // 光标是**字符索引**（状态机的约定），密文缓冲与可见缓冲的字符数一致。
         let visible = state.visible_buffer();
         let chars: Vec<char> = visible.chars().collect();
         let cursor = state.cursor();
@@ -143,7 +143,7 @@ mod tests {
         assert!(out.contains("输入新密钥（Enter 保留原值不变）"), "{out:?}");
     }
 
-    /// 07 的 `visible_buffer()` 是密文的唯一出口 —— 渲染层只看得到 `•`。
+    /// `visible_buffer()` 是密文的唯一出口 —— 渲染层只看得到 `•`。
     #[test]
     fn a_secret_buffer_renders_as_bullets_only() {
         let mut panel = fx::panel();
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn the_editor_appears_on_its_own_row_after_a_commit_error() {
-        // 真实路径：提交非法值 → 编辑器留在原地并带上 error（07 的语义）。
+        // 真实路径：提交非法值 → 编辑器留在原地并带上 error。
         let mut panel = fx::panel();
         fx::goto(&mut panel, "gateway.port");
         fx::press(&mut panel, KeyCode::Enter);

@@ -57,7 +57,7 @@ RULE_FILE = "team.md"
 #: 「端点拿不全」的形式变红。
 FULL_LIMIT = 200
 
-#: 空账本 summary 的精确形状（contract §6：无数据 = 计数 0 + 三档 rate 全 null）。
+#: 空账本 summary 的精确形状（无数据 = 计数 0 + 三档 rate 全 null）。
 EMPTY_SUMMARY = {
     "calls": 0,
     "prompt_tokens": 0,
@@ -95,7 +95,7 @@ async def _cache_report(probe: Probe, session_id: str) -> dict[str, Any]:
 async def _cache_report_expecting_200(
     probe: Probe, session_id: str, *, context: str
 ) -> dict[str, Any]:
-    """`_cache_report` 的「必须 200」版本：404 折成可读的判据失败（contract §6）。
+    """`_cache_report` 的「必须 200」版本：404 折成可读的判据失败。
 
     驱动对非 2xx 一律抛 `DriverHttpError`——不折的话「回了 404」只会以一条裸 HTTP
     报错出现在报告里，读的人得自己去翻契约才知道破坏了什么。
@@ -104,13 +104,12 @@ async def _cache_report_expecting_200(
         return await _cache_report(probe, session_id)
     except DriverHttpError as exc:
         pytest.fail(
-            f"{context}: 必须回 200 + 空账本（contract §6：不要 404），"
-            f"实际 HTTP {exc.status}"
+            f"{context}: 必须回 200 + 空账本（不要 404），实际 HTTP {exc.status}"
         )
 
 
 def _assert_rates_are_consistent(report: dict[str, Any], *, context: str) -> None:
-    """三档 rate 与 `calls` 逐项对账（contract §6 的公式）。
+    """三档 rate 与 `calls` 逐项对账（公式）。
 
     `theory_rate = Σexpected（仅非 null）/ Σprompt`、`actual_rate = Σcached /
     Σprompt`、`provider_debt_rate = Σmax(0, expected - cached)（仅 verdict ∈
@@ -168,7 +167,7 @@ def _assert_rates_are_consistent(report: dict[str, Any], *, context: str) -> Non
 
 
 def _last_metrics(session: Session) -> dict[str, Any]:
-    """最近一条 `llm_call_metrics` 的载荷（直播字段的观测面，contract §5）。"""
+    """最近一条 `llm_call_metrics` 的载荷（直播字段的观测面，缓存账本口径）。"""
     events = session.watch.events("llm_call_metrics")
     assert events, "本轮必须发出 llm_call_metrics 事件（用量与缓存归因的直播面）"
     return events[-1].data
@@ -206,7 +205,7 @@ async def test_first_call_is_cold_without_theoretical_watermark(probe: Probe) ->
     assert report["forks"] == [], "首调用不产生分叉行"
 
     # 分母是 Σprompt（非 0）→ 理论命中率是 0.0，**不是 null**：null 只属于空账本
-    # （contract §6「分母为 0 时三个 rate 均为 null」，空账本由 F 覆盖）。
+    # （缓存账本口径「分母为 0 时三个 rate 均为 null」，空账本由 F 覆盖）。
     assert report["summary"]["expected_tokens"] == 0, (
         "cold 的 expected 不进 Σexpected（null 不按 0 计入）:"
         f" {report['summary']['expected_tokens']!r}"
@@ -229,7 +228,7 @@ async def test_continued_prefix_reports_hit_and_matches_live_metrics(
     """B｜第二轮沿用第一轮的前缀 → `hit`，理论水位 == 参照调用的 prompt。
 
     WHY：这是账本存在的意义——「provider 兑现了整段前缀」必须显示成 100% 命中，
-    而不是一个含糊的小数。直播字段与账本同源同刻（contract §5），所以两边必须
+    而不是一个含糊的小数。直播字段与账本同源同刻，所以两边必须
     给出同一个 verdict。
     """
     probe.register(
@@ -261,9 +260,7 @@ async def test_continued_prefix_reports_hit_and_matches_live_metrics(
     assert report["forks"] == [], "前缀延续就不是分叉"
 
     live = _last_metrics(session)
-    assert live["cache_verdict"] == "hit", (
-        f"直播字段必须与账本同源（contract §5）: {live}"
-    )
+    assert live["cache_verdict"] == "hit", f"直播字段必须与账本同源: {live}"
     assert live["cache_expected_tokens"] == reference["prompt"], live
     assert live["cache_diverged"] == "", f"没有分叉 → cache_diverged 为空串: {live}"
     _assert_rates_are_consistent(report, context="B 前缀延续")
@@ -383,8 +380,8 @@ async def test_underdelivery_is_provider_debt_and_not_a_fork(probe: Probe) -> No
     逐段与上一轮一致）而 provider 一个 token 都没兑现——责任在 provider 侧，
     它只进 `summary.provider_debt_rate`，`forks`（前缀破碎）必须干净。
 
-    `forks` 只收 `fork != null` 的调用（contract §6），而 `fork` 只在「前缀没能延续」
-    时产生、`prefix_broken` 又优先于其余 verdict（contract §4）——所以欠兑现永远
+    `forks` 只收 `fork != null` 的调用，而 `fork` 只在「前缀没能延续」
+    时产生、`prefix_broken` 又优先于其余 verdict——所以欠兑现永远
     进不了 `forks`。同一性质在 `calls`（账本）与 `llm_call_metrics`（直播）两侧钉住。
     """
     probe.register(
@@ -423,7 +420,7 @@ async def test_underdelivery_is_provider_debt_and_not_a_fork(probe: Probe) -> No
 
     live = _last_metrics(session)
     assert live["cache_verdict"] == "provider_underdelivered", (
-        f"直播字段必须与账本同源（contract §5）: {live}"
+        f"直播字段必须与账本同源: {live}"
     )
     assert live["cache_diverged"] == "", (
         f"没有分叉 → cache_diverged 必须是空串（不是 provider 之类）: {live}"
@@ -475,7 +472,7 @@ async def test_rules_change_is_an_external_avoidable_fork(probe: Probe) -> None:
     `avoidable=true`。判成 `composition` 或只说「前缀碎了」都不可行动。
 
     rules 段在 `system:base` 之后（本场景无 `append_system_prompt`），故 fork 点
-    `index == 1`；label 在两侧都存在而 sha 变了，依 contract §4 的 kind 判定是
+    `index == 1`；label 在两侧都存在而 sha 变了，依 kind 判定是
     `modify`。有 fork ⇒ `prefix_broken` 且 `expected` 为 null（优先级）。
     """
     rule_path = _write_rule(probe, "RULE: answer in English.")
@@ -540,15 +537,13 @@ async def test_rules_change_is_an_external_avoidable_fork(probe: Probe) -> None:
     )
 
     live = _last_metrics(session)
-    assert live["cache_verdict"] == "prefix_broken", (
-        f"直播字段必须与账本同源（contract §5）: {live}"
-    )
+    assert live["cache_verdict"] == "prefix_broken", f"直播字段必须与账本同源: {live}"
     assert live["cache_diverged"] == fork["label"], (
-        "cache_diverged 就是分叉处的段 label（contract §5）:"
+        "cache_diverged 就是分叉处的段 label:"
         f" {live['cache_diverged']!r} vs {fork['label']!r}"
     )
     # wire 出口剥除值为 null 的字段（`event.wire_dump`）：没有理论水位时该键
-    # **完全不出现**，与「旧网关没有这个字段」是同一形态（contract §5「缺省/旧网关
+    # **完全不出现**，与「旧网关没有这个字段」是同一形态（缓存账本口径「缺省/旧网关
     # = 无」）。`is None` 不够——它对「键缺席」与「键在、值为 null」都成立，而下发
     # null 会让按「键是否存在」判定的消费方走错分支。
     assert "cache_expected_tokens" not in live, (

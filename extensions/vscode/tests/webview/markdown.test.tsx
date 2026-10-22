@@ -318,7 +318,7 @@ describe('math syntax (parseMarkdown)', () => {
   it('recognizes every environment on the whitelist, one by one', () => {
     // The list is the TUI's `MATH_ENVS` (docs/dev/tui-rendering.md §2.5). It is
     // asserted entry by entry on purpose: a sampled test cannot tell a missing
-    // entry from a working one (review r1 [S4]).
+    // entry from a working one.
     const environments = [
       'align',
       'aligned',
@@ -574,7 +574,7 @@ describe('math syntax (parseMarkdown)', () => {
     // The line is `# <div> …` / `| <div> … |` — a *document* line that does not
     // start with `<`, so there is no HTML block (the TUI's rule, and what this
     // webview did before formulas): the formula in the same line is real. Judging
-    // this on the block's own text instead would hide it (review r1 [S1]).
+    // this on the block's own text instead would hide it.
     const heading = parseMarkdown('# <div> \\(x\\)\n')[0];
     expect(heading).toMatchObject({ kind: 'heading', level: 1 });
     expect(heading?.kind === 'heading' ? heading.children.at(-1) : null).toEqual({
@@ -630,7 +630,7 @@ describe('math syntax (parseMarkdown)', () => {
     // A `$$` / `\[` block walks its lines looking for a line that is exactly the
     // closer, and those walks are charged against the same `MAX_SCAN_WORK` — a
     // document with megabytes of lines between opener and closer is left to the
-    // paragraph rule instead of walking itself once per opener (review r1 [S3]).
+    // paragraph rule instead of walking itself once per opener.
     const filler = 'x'.repeat(9_000);
     const between = (count: number): string => Array.from({ length: count }, () => filler).join('\n');
 
@@ -651,8 +651,8 @@ describe('math syntax (parseMarkdown)', () => {
   it('tracks a fence indented by one to three columns', () => {
     // CommonMark — and the TUI's `fence_open`, which bails at four columns —
     // allows up to three. A fence the scan does not see lets a `<div>` *inside*
-    // it open an HTML block, which then swallows the formulas after the fence
-    // (review r2 [S1]); four columns is an indented code block instead.
+    // it open an HTML block, which then swallows the formulas after the fence;
+    // four columns is an indented code block instead.
     const fenced = (pad: string, info: string, body: string): string =>
       `${pad}\`\`\`${info}\n${body}\n${pad}\`\`\`\n${pad}\\(x\\)\n`;
 
@@ -675,8 +675,8 @@ describe('math syntax (parseMarkdown)', () => {
     // The other half of the same rule: an opener at the margin closed by an
     // indented marker. Missing it leaves the fence open, the following tag line
     // is read as fence body, and the formula that should have been swallowed
-    // gets recognized — the reverse error of the test above (review r2 [S1]:
-    // the two halves have to move together).
+    // gets recognized — the reverse error of the test above: the two halves
+    // have to move together.
     for (const closer of ['  ```', '   ```']) {
       expect(mathNodes(parseMarkdown(`\`\`\`\n<div>\n${closer}\n<div>\n\\(x\\)\n`))).toBe(false);
     }
@@ -686,7 +686,7 @@ describe('math syntax (parseMarkdown)', () => {
     // `tagSpans` looks at most `MAX_MATH_CHARS` past a `<` for its `>`, and the
     // whole scan is charged against `MAX_SCAN_WORK` — both are only visible on a
     // block that is nothing but tags, and both are what keeps a flood of `<a`
-    // from walking the block once per tag (review r2 [N2]).
+    // from walking the block once per tag.
     const beyondWindow = `prose <a ${'x'.repeat(8_300)} \\(y\\)> more\n`;
     expect(mathNodes(parseMarkdown(beyondWindow))).toBe(true);
     // Within the window the tag is a region: nothing inside it is a formula.
@@ -761,7 +761,7 @@ describe('math syntax (parseMarkdown)', () => {
   it('uses the same 8192-character window as the TUI for `\\(…\\)` and `\\[…\\]`', () => {
     // The closer has to fit *inside* the window, not merely start in it — the
     // TUI searches a same-size slice with `find`. One character matters at the
-    // boundary, and the review checked exactly this (r1 [N2]).
+    // boundary: one character short still fits.
     const fits = 'a'.repeat(8190);
     expect(inline(`\\(${fits}\\)`)[0]).toMatchObject({ kind: 'math', tex: fits });
     expect(inline(`\\[${fits}\\]`)[0]).toMatchObject({ kind: 'math', tex: fits });

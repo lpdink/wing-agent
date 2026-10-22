@@ -62,7 +62,7 @@ restore 后内存态与记录不一致才落盘对齐（一次性迁移，非写
 | **混合日志** | history.jsonl 单一事实来源：Message 记录（role ∈ user/assistant/tool/system，进 LLM 上下文）+ 事件记录（`role="event"`，含事件自身字段），共享链拓扑。记录级判别只用 role。 |
 | **未提交投影（uncommitted）** | turn 进行中"已生成未提交"内容的唯一权威 = caller 持有的 provider accumulator（`ReActLoop._current_acc`，一轮生命周期）。两个覆盖互斥的投影按需快照：`snapshot_blocks()`（已终结块——中断补提交与 resume 同源）+ `pending_tool_calls()`（未终结调用原始 args，后端不解析）。取代旧的内存事件缓冲。 |
 | **落盘只存事实** | `persist=true` 事实事件（diff/ask/interrupted/error/compact_done）即时落盘；流式 delta（persist=false）纯广播、不落盘不缓冲（内容由轮提交的 Message 承载）。孪生事件（tool_call_result/llm_call_metrics）停止落盘；turn_result 落盘但 result 字段经 disk_exclude 排除。 |
-| **记录规范形** | `store/base.canonical_record`：落盘前必过。null 不写（缺席即默认，自由载荷里的 null 是数据）；assistant 的 content / reasoning_content / tool_calls 是 `content_blocks` 的派生物，落盘不写第二份（读取侧由 `Message` 访问器 / `_route_flat` 现算，存量扁平格式零迁移）。fork 的复制前缀走同一规范形。 |
+| **记录规范形** | `store/records.py` 的 `canonical_record`：落盘前必过。null 不写（缺席即默认，自由载荷里的 null 是数据）；assistant 的 content / reasoning_content / tool_calls 是 `content_blocks` 的派生物，落盘不写第二份（读取侧由 `Message` 访问器 / `_route_flat` 现算，存量扁平格式零迁移）。fork 的复制前缀走同一规范形。 |
 | **persist 分流** | `WingEvent.persist` 是 `ClassVar[bool]`（非 pydantic 字段——旧 `Field(exclude=True)` 会被子类重声明击穿），基类默认 true。判据：**是事实** 且 **无 Message 孪生**。false 仅限流式 delta、Message 孪生体积事件、可实时重建的协议/查询事件。 |
 | **中断补提交** | 流式期间打断：accumulator 快照部分块（text/thinking 保留、未终结 tool 块剔除）→ partial Message（`stop_reason="interrupted"`）提交 → re-raise，当前 accumulator 置空。用户可放心打断长思考。 |
 | **accumulator 协议** | `generate(..., accumulator=)` caller 注入容器，provider 每次尝试填充新状态；取消后 `snapshot_blocks()` 取已终结块、`pending_tool_calls()` 取未终结调用。 |

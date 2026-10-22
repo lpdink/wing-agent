@@ -1,4 +1,4 @@
-"""剧本 → SSE 字节流对账（tasks 3.6）。
+"""剧本 → SSE 字节流对账。
 
 独立解析器（不 import wing 的 SSE 实现）把字节流解析回结构，逐字段核对：
 帧序、``delta`` 字段名、tool_calls 增量与切断、``finish_reason``、usage 末帧、

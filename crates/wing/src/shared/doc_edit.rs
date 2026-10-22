@@ -26,14 +26,14 @@
 //! | [`set_path`] | 中间层不是 object / array、数组下标越界 → 用法错误 | 形状不符就地换成正确的容器、数组补 `null` |
 //! | [`unset_path`] | 幂等（缺席 → `false`）；只动点名的那条路径 | 额外逐级清理变空的 object / 数组容器（不留残渣） |
 //! | [`move_indexed`] | 目标下标**钳制**到 `[0, len-1]`（位移 0 → `moved == false`） | 越界 = `moved == false`（不钳制；面板只给 ±1，两种口径在 ±1 上重合） |
-//! | [`append_item`] | 列表缺席 / 为 `null` 时用目录的**声明默认值**物化 | 从不物化声明默认值（协议不携带 `list` 的默认值，design A2），缺席 = 空列表 |
+//! | [`append_item`] | 列表缺席 / 为 `null` 时用目录的**声明默认值**物化 | 从不物化声明默认值（协议不携带 `list` 的默认值），缺席 = 空列表 |
 //! | [`empty_value`] | 骨架不发明假值：`{}` / `[]`，标量 → `None` | 标量给 kind 的空值，`object` 写**必填**字段 |
 //!
 //! 路径原语（[`format_path`] / [`join_path`] / [`index_path`] / [`ancestors`] /
 //! [`path_is_within`] / [`get_path`]）与下标重排（[`remap_index`] / [`remove_index_map`] /
 //! [`swap_index_map`]）没有策略：两种语义下它们是同一件事。
 //!
-//! 路径文法在 design.md §5.2 冻结，解析器是 [`parse_path`]（三变体 Key / Index / Element，
+//! 路径文法冻结，解析器是 [`parse_path`]（三变体 Key / Index / Element，
 //! 下标不查界）。本模块只加「用」它的原语，**没有第二份解析**；编辑入口一律收
 //! `&[PathStep]`（已解析的规范路径），字符串入口只留给本来就按字符串存索引的
 //! [`ancestors`] / [`remap_index`]。
@@ -138,7 +138,7 @@ pub fn path_is_within(outer: &str, inner: &str) -> bool {
     }
 }
 
-/// 索引重排（design D6）：`path` 的步骤前缀恰为 `list_path` 时，把**紧随其后的那个
+/// 索引重排：`path` 的步骤前缀恰为 `list_path` 时，把**紧随其后的那个
 /// `[i]`** 按下标映射换成新值；映射返回 `None` = 该项已消失（整条路径丢弃）。
 /// 前缀不匹配 / 后面不是下标 → 原样返回。更深的层级不动。
 pub fn remap_index(
@@ -948,7 +948,7 @@ mod tests {
         let tools = declared_list("tools", node("[]", SettingKind::Str), json!(["bash"]));
 
         // 列表缺席：严格策略用声明默认值物化（否则 "add 到默认值" 无处可落）；
-        // 宽容策略从空列表开始（协议不携带 list 的默认值，design A2）。
+        // 宽容策略从空列表开始（协议不携带 list 的默认值）。
         let mut strict = json!({});
         let index = append_item(
             &mut strict,
@@ -970,7 +970,7 @@ mod tests {
         assert_eq!(index.unwrap(), 0);
         assert_eq!(lenient, json!({"tools": ["read"]}));
 
-        // 值不是数组：宽容策略从空列表开始（严格策略是用法错误，见 `cmd/config.rs` 的用例）。
+        // 值不是数组：宽容策略从空列表开始（严格策略是用法错误，见 `cmd/config/` 的用例）。
         let mut lenient = json!({"tools": "oops"});
         let index = append_item(
             &mut lenient,

@@ -248,7 +248,7 @@ export class GatewayConnection {
     };
   }
 
-  /** Send one `ClientRequest`. Throws when not connected (no queueing — see design D5). */
+  /** Send one `ClientRequest`. Throws when not connected (no queueing). */
   send(frame: ClientRequest): void {
     this.sendText(encodeClientRequest(frame));
   }

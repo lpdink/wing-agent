@@ -52,10 +52,7 @@ const NONE_MARK: &str = "—";
 pub async fn run(session_id: Option<&str>, limit: u32, why: Option<&str>, json: bool) -> ExitCode {
     match run_inner(session_id, limit, why, json).await {
         Ok(code) => code,
-        Err(e) => {
-            eprintln!("wing cache error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("cache", e),
     }
 }
 
@@ -68,8 +65,7 @@ async fn run_inner(
     validate_limit(limit)?;
     validate_why_json(why, json)?;
 
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
 
     // 省略 session：取最近活跃会话，并把解析结果打进表头（不允许静默猜）。
     let resolved = match session_id {

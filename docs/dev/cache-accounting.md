@@ -14,7 +14,7 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 端口径 `libs/core/wing/gateway/routes/session.py`（`GET /api/session/cache`）；人类视图
 `crates/wing/src/cmd/cache.rs`；整机证据 `libs/wing-probe/scenarios/test_cache_ledger.py`
 （A–H 八条红线）与 `libs/core/tests/test_cache_ledger.py`（单元口径）。
-本文只讲 *why* 与判据，逐字段契约以代码与 `contract.md` 为准。
+本文只讲 *why* 与判据，逐字段契约以代码与 `libs/core/tests/test_cache_ledger.py` 的断言为准。
 
 ## 1. 口径
 

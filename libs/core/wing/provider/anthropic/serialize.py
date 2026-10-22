@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from wing.provider.base import mark_last_cache_control
 from wing.provider.media import (
     FOLLOWUP_GUIDE_TEXT,
     group_plans_by_message,
@@ -32,6 +33,9 @@ if TYPE_CHECKING:
     from wing.config import ProviderConfig
     from wing.media import MediaPlan
     from wing.provider.base import RequestOptions
+
+_IMAGE_PART_TYPES: frozenset[str] = frozenset({"image"})
+"""cache_control 不落在图片 block 上——本协议的图片 block 类型名。"""
 
 
 class _SerializeMixin:
@@ -284,19 +288,9 @@ class _SerializeMixin:
     def _apply_cache_control(anthropic_messages: list[dict]) -> None:
         """为最后一条消息的最后一个 content block 打 cache_control。
 
-        与 OpenAI 路径同构：cache_control 是附加字段，不改写 thinking 字节、
-        不影响签名；Anthropic prompt caching 支持 thinking 块携带缓存标记。
-        最后一个 block 是图片时回退到其前面最后一个非图片 block（text /
-        tool_result）——纯图消息（无非图片 block）时跳过本次标记。
+        与 OpenAI 路径同构（规则见 :func:`wing.provider.base.mark_last_cache_control`）；
+        Anthropic prompt caching 支持 thinking 块携带缓存标记，所以这里不改写
+        thinking 字节、也不影响签名。最后一个 block 是图片时回退到其前面最后一个
+        非图片 block（text / tool_result）——纯图消息时跳过本次标记。
         """
-        if not anthropic_messages:
-            return
-        last_msg = anthropic_messages[-1]
-        content = last_msg.get("content")
-        if not isinstance(content, list) or not content:
-            return
-        for block in reversed(cast("list[dict]", content)):
-            if block.get("type") == "image":
-                continue
-            block["cache_control"] = {"type": "ephemeral"}
-            return
+        mark_last_cache_control(anthropic_messages, image_types=_IMAGE_PART_TYPES)

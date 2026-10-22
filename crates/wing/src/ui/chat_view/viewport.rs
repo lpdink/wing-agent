@@ -237,6 +237,7 @@ impl Widget for ChatViewWidget<'_> {
             self.view.geometry = ChatGeometry::default();
             self.view.frame_links = LinkTable::new();
             self.view.frame_images = Vec::new();
+            self.view.frame_insets = Vec::new();
             return;
         }
 
@@ -296,6 +297,12 @@ impl Widget for ChatViewWidget<'_> {
         // by the app *after* every overlay — see `ui::chat_view::image`.
         let mut frame_images: Vec<FrameImage> = Vec::new();
 
+        // Left padding (columns) of every drawn band row, in row order — the
+        // copy path skips it (`frame_insets`). Recorded by the very walk that
+        // draws the row, like the link and picture tables, so the layout has a
+        // single implementation: a row's padding is what its drawer says it is.
+        let mut frame_insets: Vec<u16> = Vec::with_capacity(visible);
+
         // Virtualized rendering: header + cells.
         let view_end = scroll + visible;
 
@@ -319,6 +326,7 @@ impl Widget for ChatViewWidget<'_> {
                 Paragraph::new(self.view.header_lines.clone())
                     .scroll((skip as u16, 0))
                     .render(header_area, buf);
+                frame_insets.resize(frame_insets.len() + cell_visible, 0);
                 render_y += cell_visible as u16;
             }
         }
@@ -328,13 +336,10 @@ impl Widget for ChatViewWidget<'_> {
         // space below all committed cells, so auto-scroll keeps the user's
         // queued submissions in view while the turn streams on above them.
         //
-        // KEEP IN SYNC with `frame::visible_row_insets`: the copy's per-row
-        // inset table is derived by replaying this walk (header → cells →
-        // pending, advanced by the same cached heights), so a layout change
-        // here without the matching change there puts the padding skip on the
-        // wrong columns — the copy-side test
-        // `frame::tests::snapshot_row_insets_match_the_rendered_rows` is what
-        // turns red in that case.
+        // Every row this walk draws also appends its left padding to
+        // `frame_insets`; the copy path reads that table instead of replaying
+        // the layout (the test `frame::tests::snapshot_row_insets_match_the_rendered_rows`
+        // compares the table against the columns actually written).
         let mut accumulated = header_height;
         let cell_count = self.view.cell_heights.len();
         let pending_count = self.view.pending_heights.len();
@@ -386,19 +391,14 @@ impl Widget for ChatViewWidget<'_> {
             // uses** — `cell_area.y + top_pad` and `skip - 1` — or a scrolled bubble places
             // its picture one row above the caption and the paint pass refuses it (the box
             // stays empty).
-            let user_pads = match cached.cell() {
-                ChatCell::UserMessage(_)
-                | ChatCell::PendingUserMessage(_)
-                | ChatCell::DiscardedUserMessage(_) => {
-                    // Padding rows only consume visible height while actually on screen:
-                    // once the cell top is scrolled past (skip > 0) the top padding is gone,
-                    // and the bottom padding only exists when the cell end lies inside the
-                    // window. Reserving both unconditionally clipped the last text row
-                    // whenever the cell top was scrolled off (big-paste / replay bug).
-                    Some((usize::from(skip == 0), usize::from(cell_end <= view_end)))
-                }
-                _ => None,
-            };
+            let user_pads = cached.cell().is_user_bubble().then(|| {
+                // Padding rows only consume visible height while actually on screen:
+                // once the cell top is scrolled past (skip > 0) the top padding is gone,
+                // and the bottom padding only exists when the cell end lies inside the
+                // window. Reserving both unconditionally clipped the last text row
+                // whenever the cell top was scrolled off (big-paste / replay bug).
+                (usize::from(skip == 0), usize::from(cell_end <= view_end))
+            });
             let (img_render_y, img_skip, img_visible) = match user_pads {
                 Some((top, bottom)) => (
                     render_y + top as u16,
@@ -408,6 +408,18 @@ impl Widget for ChatViewWidget<'_> {
                 ),
                 None => (render_y, skip, cell_visible),
             };
+
+            // A user bubble fills its whole box with the surface colour and
+            // starts its text `LEFT_INSET` columns in; every other cell draws
+            // from the band's edge.
+            frame_insets.resize(
+                frame_insets.len() + cell_visible,
+                if user_pads.is_some() {
+                    super::media::LEFT_INSET
+                } else {
+                    0
+                },
+            );
 
             // Pre-wrapped cells (streaming Thinking / AssistantMessage,
             // before and after their turn-end reconcile): every line is
@@ -533,6 +545,9 @@ impl Widget for ChatViewWidget<'_> {
         // them right after this render (`frame_images`), and a frame that did
         // not lay one out must not leave a stale request behind.
         self.view.frame_images = frame_images;
+        // …and the row paddings, same contract: the copy must skip the inset of
+        // the rows *this* frame drew, not of a frame the user is not looking at.
+        self.view.frame_insets = frame_insets;
     }
 }
 
@@ -571,6 +586,114 @@ mod tests {
         buffer_text, make_ctx, render_view, render_view_in, test_ctx,
     };
     use super::*;
+    use ratatui::text::Line;
+
+    /// 快路的**前提**：一批「每行都装得下」的行，逐行 `Line::render` 与
+    /// `Paragraph`（wrap + scroll）画出的缓冲区逐格相同 —— 对每一个滚动偏移都成立。
+    ///
+    /// 语料刻意带上各处分叉面：CJK（宽字素的隐藏格）、空行、多 span 样式、恰好等于宽度的
+    /// 行、带底色的尾随空白。
+    #[test]
+    fn a_fitting_line_set_blits_identically_to_a_paragraph() {
+        use ratatui::style::Color;
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+
+        let lines: Vec<Line<'static>> = vec![
+            Line::from("第一行 CJK 文本两列"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("styled", Style::default().fg(Color::Red)),
+                Span::raw(" plain tail"),
+            ]),
+            // 恰好等于区域宽度：`Paragraph` 在等号处不多折一行（快路的前提）。
+            Line::from("x".repeat(24)),
+            // 行尾空白带上底色才在缓冲区里可见：两种画法对「尾随空格保不保留」
+            // 若有分歧，这里会红（无样式时空格与未写逐字节相同，看不见）。
+            Line::from(vec![Span::styled(
+                "trailing   ",
+                Style::default().bg(Color::Blue),
+            )]),
+            Line::from("中文混排 english 混排"),
+            Line::from(""),
+            Line::from("tail with emoji 👍"),
+        ];
+        let area = Rect::new(0, 0, 24, 3);
+        for skip in 0..=lines.len() + 1 {
+            let mut paragraph = Buffer::empty(area);
+            Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .scroll((skip as u16, 0))
+                .render(area, &mut paragraph);
+
+            let mut blitted = Buffer::empty(area);
+            let skip_lines = skip.min(lines.len());
+            let end = (skip_lines + area.height as usize).min(lines.len());
+            for (row, line) in lines[skip_lines..end].iter().enumerate() {
+                line.render(
+                    Rect::new(area.x, area.y + row as u16, area.width, 1),
+                    &mut blitted,
+                );
+            }
+            assert_eq!(blitted, paragraph, "skip = {skip}");
+        }
+    }
+
+    /// 帧级等价：同一段文本，「流式 cell 走到 finalize」与「普通冻结 cell」画出的整帧逐
+    /// cell 相同 —— 包括把内容滚到中段（快路的 `skip` 映射只在滚动时才被走到）与本应
+    /// 折行的行（长段落）。
+    ///
+    /// 本条锚定的是「两条快路之间」的等价（两边都断言走了 blit）；「快路 == `Paragraph`」
+    /// 由上面的 `a_fitting_line_set_blits_identically_to_a_paragraph` 闭合。
+    #[test]
+    fn a_finalized_stream_and_a_plain_cell_render_the_same_frame() {
+        let text = concat!(
+            "第一段：这是一条足够长的中文正文，用来在 40 列下折成好几行，",
+            "并让整段内容高过一块 8 行的视口。\n\n",
+            "Second paragraph with plain ASCII prose that also wraps at this width, ",
+            "long enough to push the total height past the band.\n\n",
+            "- 列表项一\n",
+            "- 列表项 two\n\n",
+            "最后一段：末尾。"
+        );
+        let cut = text.find("Second").expect("fixture marker");
+        let mut streaming = ChatView::new();
+        streaming.append_to_last_assistant(&text[..cut]);
+        streaming.append_to_last_assistant(&text[cut..]);
+        streaming.finalize_streams();
+        let mut plain = ChatView::new();
+        plain.push(ChatCell::AssistantMessage(text.to_string()));
+        let (palette, layout) = test_ctx();
+        let ctx = make_ctx(&palette, &layout);
+        // Pinned to the bottom of a band that cannot hold the whole message.
+        assert_eq!(
+            render_view(&mut streaming, 40, 8),
+            render_view(&mut plain, 40, 8),
+            "the finalized stream and the plain cell must draw the same frame"
+        );
+        // 两边都真的走了 blit 快路 —— 否则这条用例会退化成「Paragraph 对 Paragraph」。
+        assert!(
+            streaming.cells[0].is_prewrapped(40, &ctx),
+            "the finalized stream blits"
+        );
+        assert!(
+            plain.cells[0].is_prewrapped(40, &ctx),
+            "a frozen cell whose lines all fit blits too"
+        );
+        // …and scrolled into the middle (the fast path's skip mapping).
+        streaming.scroll_up(5);
+        plain.scroll_up(5);
+        assert_eq!(
+            streaming.scroll_position(),
+            plain.scroll_position(),
+            "both views followed the same scroll entry"
+        );
+        assert_eq!(
+            render_view(&mut streaming, 40, 8),
+            render_view(&mut plain, 40, 8),
+            "a scrolled frame must stay identical too"
+        );
+    }
 
     #[test]
     fn test_chat_view_scroll() {

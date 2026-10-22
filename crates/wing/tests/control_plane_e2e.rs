@@ -24,18 +24,23 @@
 //! `working` to `idle`, `update` fields mirror back through `info`).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
+
+mod common;
+
+use common::e2e::{read_request, run_wing, start_fake_gateway};
 
 const SESSION_ID: &str = "20261010-120000-abcdef01";
 /// The one session on disk; every other id is a 404.
@@ -149,26 +154,9 @@ struct Stub {
 
 impl Stub {
     async fn start(tag: &str) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
         let state = Arc::new(Mutex::new(StubState::default()));
-        let server_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    return;
-                };
-                tokio::spawn(handle_conn(stream, server_state.clone()));
-            }
-        });
-
-        let home = scratch_home(tag);
-        std::fs::write(
-            home.join("core").join("config.yaml"),
-            format!("gateway:\n  host: 127.0.0.1\n  port: {port}\n"),
-        )
-        .unwrap();
-
+        let (home, port) =
+            start_fake_gateway("wing-control-plane", tag, state.clone(), handle_conn).await;
         Self { state, home, port }
     }
 
@@ -209,14 +197,6 @@ impl Stub {
             .collect()
     }
 }
-
-fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-control-plane-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
-}
-
 async fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<StubState>>) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -244,6 +224,7 @@ async fn handle_conn(mut stream: TcpStream, state: Arc<Mutex<StubState>>) {
 
         let (status, response_body) = {
             let mut guard = state.lock().unwrap();
+            let body = String::from_utf8_lossy(&body).to_string();
             let (status, response_body) = route(&method, &path, &query, &body, &head, &mut guard);
             guard.requests.push(Recorded {
                 method: method.clone(),
@@ -873,38 +854,6 @@ fn header_value(head: &str, name: &str) -> Option<String> {
             .then(|| value.trim().to_string())
     })
 }
-
-/// Read one HTTP request head (+ the declared body); the rest stays buffered.
-async fn read_request(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<(String, String)> {
-    loop {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-            let content_length = head
-                .lines()
-                .find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())?
-                })
-                .unwrap_or(0);
-            let body_start = pos + 4;
-            if buf.len() >= body_start + content_length {
-                let body = String::from_utf8_lossy(&buf[body_start..body_start + content_length])
-                    .to_string();
-                buf.drain(..body_start + content_length);
-                return Some((head, body));
-            }
-        }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-}
-
 fn status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
@@ -916,39 +865,14 @@ fn status_text(status: u16) -> &'static str {
 // ============================================================
 // Harness
 // ============================================================
-
-/// Run the real binary and collect (exit code, stdout, stderr).
-async fn run_wing(args: &[&str], stub: &Stub) -> (i32, String, String) {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
-    command
-        .args(args)
-        .env("WING_HOME", &stub.home)
-        .env_remove("RUST_LOG")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().unwrap();
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
-        Ok(result) => result.unwrap(),
-        Err(_) => panic!("`wing {args:?}` did not exit in 30s"),
-    };
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
-
 /// Same as [`run_wing`], with extra environment variables (and the inherited
 /// `WING_SESSION_ID` removed first: the parent-session default would otherwise
 /// leak in from whatever started `cargo test`).
-async fn run_wing_env(args: &[&str], stub: &Stub, env: &[(&str, &str)]) -> (i32, String, String) {
+async fn run_wing_env(args: &[&str], home: &Path, env: &[(&str, &str)]) -> (i32, String, String) {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
     command
         .args(args)
-        .env("WING_HOME", &stub.home)
+        .env("WING_HOME", home)
         .env_remove("WING_SESSION_ID")
         .env_remove("RUST_LOG")
         .stdin(std::process::Stdio::null())
@@ -997,7 +921,7 @@ async fn branches_fork_and_rewind_close_the_uuid_loop() {
     let stub = Stub::start("branch-loop").await;
 
     // The human surface lists the uuids in full (they are what gets copied).
-    let (code, stdout, stderr) = run_wing(&["branches", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["branches", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     for uuid in ["u-first", "u-second", "current"] {
         assert!(stdout.contains(uuid), "{uuid} missing:\n{stdout}");
@@ -1009,14 +933,17 @@ async fn branches_fork_and_rewind_close_the_uuid_loop() {
 
     // The machine surface carries the same targets; the uuid is taken from
     // here — no hand-written uuid anywhere in this test.
-    let (code, stdout, stderr) = run_wing(&["branches", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["branches", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let branches = json_of(&stdout);
     let target_uuid = branches["targets"][0]["uuid"].as_str().unwrap().to_string();
     assert_eq!(target_uuid, "u-first");
 
-    let (code, stdout, stderr) =
-        run_wing(&["fork", SESSION_ID, "--at", &target_uuid, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(
+        &["fork", SESSION_ID, "--at", &target_uuid, "--json"],
+        &stub.home,
+    )
+    .await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let fork = json_of(&stdout);
     assert_eq!(fork["session_id"], "forked-by-stub");
@@ -1030,7 +957,7 @@ async fn branches_fork_and_rewind_close_the_uuid_loop() {
     );
 
     let (code, stdout, stderr) =
-        run_wing(&["rewind", SESSION_ID, "--to", &target_uuid], &stub).await;
+        run_wing(&["rewind", SESSION_ID, "--to", &target_uuid], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("draft:"), "{stdout}");
     assert!(stdout.contains("first question"), "{stdout}");
@@ -1049,11 +976,11 @@ async fn interrupt_turns_working_into_idle() {
     let stub = Stub::start("interrupt").await;
     stub.with(|state| state.status = "working".into());
 
-    let (code, stdout, stderr) = run_wing(&["info", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["info", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(json_of(&stdout)["status"], "working");
 
-    let (code, stdout, stderr) = run_wing(&["interrupt", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["interrupt", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains(SESSION_ID), "{stdout}");
     assert_eq!(
@@ -1061,7 +988,7 @@ async fn interrupt_turns_working_into_idle() {
         json!({"session_id": SESSION_ID})
     );
 
-    let (code, stdout, stderr) = run_wing(&["info", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["info", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         json_of(&stdout)["status"],
@@ -1070,7 +997,7 @@ async fn interrupt_turns_working_into_idle() {
     );
 
     // The visible alias is the same command.
-    let (code, stdout, stderr) = run_wing(&["int", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["int", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         json_of(&stdout),
@@ -1091,7 +1018,7 @@ async fn update_sends_only_the_fields_given() {
         &[
             "update", SESSION_ID, "--model", "ds-flash", "--title", "nightly",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1103,21 +1030,22 @@ async fn update_sends_only_the_fields_given() {
     );
 
     // The update landed: the stub mirrors it back through `info`.
-    let (code, stdout, stderr) = run_wing(&["info", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["info", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let info = json_of(&stdout);
     assert_eq!(info["model_id"], "ds-flash");
     assert_eq!(info["session_name"], "nightly");
 
     // Booleans: bare flag = on, `off` = off — and still nothing else rides along.
-    let (code, _, stderr) = run_wing(&["update", SESSION_ID, "--yolo"], &stub).await;
+    let (code, _, stderr) = run_wing(&["update", SESSION_ID, "--yolo"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/update"),
         json!({"session_id": SESSION_ID, "yolo": true})
     );
 
-    let (code, _, stderr) = run_wing(&["update", SESSION_ID, "--thinking", "off"], &stub).await;
+    let (code, _, stderr) =
+        run_wing(&["update", SESSION_ID, "--thinking", "off"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/update"),
@@ -1125,8 +1053,11 @@ async fn update_sends_only_the_fields_given() {
     );
 
     // `--tools` is a full replacement (comma-separated refs → array).
-    let (code, _, stderr) =
-        run_wing(&["update", SESSION_ID, "--tools", "core.Bash, Read"], &stub).await;
+    let (code, _, stderr) = run_wing(
+        &["update", SESSION_ID, "--tools", "core.Bash, Read"],
+        &stub.home,
+    )
+    .await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/update"),
@@ -1135,7 +1066,7 @@ async fn update_sends_only_the_fields_given() {
 
     // No fields at all: refused **before** any request (the endpoint would 400
     // too, but the CLI can say what is missing).
-    let (code, stdout, stderr) = run_wing(&["update", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["update", SESSION_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("no update fields given"), "{stderr}");
@@ -1155,7 +1086,7 @@ async fn update_sends_only_the_fields_given() {
 async fn compact_passes_the_instruction_through() {
     let stub = Stub::start("compact").await;
 
-    let (code, stdout, stderr) = run_wing(&["compact", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["compact", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("12345"), "{stdout}");
     assert!(stdout.contains("2345"), "{stdout}");
@@ -1165,14 +1096,21 @@ async fn compact_passes_the_instruction_through() {
         "无 instruction 时该键必须缺席（默认策略由网关决定）"
     );
 
-    let (code, _stdout, stderr) =
-        run_wing(&["compact", SESSION_ID, "keep the design decisions"], &stub).await;
+    let (code, _stdout, stderr) = run_wing(
+        &["compact", SESSION_ID, "keep the design decisions"],
+        &stub.home,
+    )
+    .await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/compact"),
         json!({"session_id": SESSION_ID, "instruction": "keep the design decisions"})
     );
-    let compacted = json_of(&run_wing(&["compact", SESSION_ID, "--json"], &stub).await.1);
+    let compacted = json_of(
+        &run_wing(&["compact", SESSION_ID, "--json"], &stub.home)
+            .await
+            .1,
+    );
     assert_eq!(
         compacted,
         json!({
@@ -1192,7 +1130,7 @@ async fn compact_passes_the_instruction_through() {
 async fn reload_reports_items_in_contract_order() {
     let stub = Stub::start("reload").await;
 
-    let (code, stdout, stderr) = run_wing(&["reload"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["reload"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let names = [
         "config.yaml",
@@ -1216,7 +1154,7 @@ async fn reload_reports_items_in_contract_order() {
     );
 
     // `--json` is the raw response.
-    let (code, stdout, _) = run_wing(&["reload", "--json"], &stub).await;
+    let (code, stdout, _) = run_wing(&["reload", "--json"], &stub.home).await;
     assert_eq!(code, 0);
     assert_eq!(json_of(&stdout)["ok"], true);
     assert_eq!(json_of(&stdout)["results"][0]["name"], "config.yaml");
@@ -1225,7 +1163,7 @@ async fn reload_reports_items_in_contract_order() {
     stub.with(|state| {
         state.reload_items[3] = ("provider".into(), false, Some("unknown protocol".into()));
     });
-    let (code, stdout, stderr) = run_wing(&["reload"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["reload"], &stub.home).await;
     assert_ne!(code, 0, "a failed reload must exit non-zero");
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("FAIL"), "{stdout}");
@@ -1245,7 +1183,7 @@ async fn new_and_resume_round_trip() {
 
     let (code, stdout, stderr) = run_wing(
         &["new", "--agent", "executor", "--tag", "nightly", "--json"],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1264,7 +1202,7 @@ async fn new_and_resume_round_trip() {
         "没给 --workspace 时用本进程 cwd：{create_body}"
     );
 
-    let (code, stdout, stderr) = run_wing(&["resume", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["resume", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("status:"), "{stdout}");
     assert!(stdout.contains("executor"), "{stdout}");
@@ -1274,7 +1212,7 @@ async fn new_and_resume_round_trip() {
     );
 
     // The summary is the state *after* hydration, not an echo of the request.
-    let (code, stdout, _) = run_wing(&["resume", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, _) = run_wing(&["resume", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0);
     let resumed = json_of(&stdout);
     assert_eq!(resumed["session_id"], SESSION_ID);
@@ -1282,7 +1220,7 @@ async fn new_and_resume_round_trip() {
     assert_eq!(resumed["message_count"], 4);
 
     // Unknown session: 404 → one clear stderr line, non-zero exit.
-    let (code, stdout, stderr) = run_wing(&["resume", UNKNOWN_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["resume", UNKNOWN_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains(UNKNOWN_ID), "{stderr}");
@@ -1300,7 +1238,7 @@ async fn run_carries_the_agent_flag() {
 
     let (code, stdout, stderr) = run_wing(
         &["run", "--agent", "executor", "-p", "just ok", "--json"],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1315,7 +1253,7 @@ async fn run_carries_the_agent_flag() {
 
     // Without --agent the key is absent: the gateway's default template decides.
     let stub = Stub::start("run-default-agent").await;
-    let (code, stdout, stderr) = run_wing(&["run", "-p", "just ok", "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["run", "-p", "just ok", "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let out = json_of(&stdout);
     assert_eq!(out["template_name"], "default");
@@ -1338,7 +1276,7 @@ async fn run_carries_the_agent_flag() {
 async fn stdio_prompt_carries_the_agent_flag() {
     let stub = Stub::start("stdio-agent").await;
 
-    let (code, _stdout, stderr) = run_wing(&["-p", "hi", "--agent", "executor"], &stub).await;
+    let (code, _stdout, stderr) = run_wing(&["-p", "hi", "--agent", "executor"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/create")["template_name"],
@@ -1357,7 +1295,7 @@ async fn stdio_prompt_carries_the_agent_flag() {
             "--agent",
             "executor",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1384,7 +1322,7 @@ async fn ask_answer_carries_the_tool_call_id() {
             "--tool-call-id",
             "call-42",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1399,7 +1337,8 @@ async fn ask_answer_carries_the_tool_call_id() {
     );
 
     // Without the flag the key is absent — the message takes the inbox path.
-    let (code, _, stderr) = run_wing(&["run", "-r", SESSION_ID, "-p", "next task"], &stub).await;
+    let (code, _, stderr) =
+        run_wing(&["run", "-r", SESSION_ID, "-p", "next task"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let sent = body_of(&stub, "/api/session/send");
     assert_eq!(
@@ -1411,7 +1350,8 @@ async fn ask_answer_carries_the_tool_call_id() {
     // Once the ask is committed the call is on the chain, so `wing tail`
     // shows the id too (the *pending* discovery path is `wing asks`, covered
     // by the asks tests).
-    let (code, stdout, stderr) = run_wing(&["tail", SESSION_ID, "-t", "tool_call"], &stub).await;
+    let (code, stdout, stderr) =
+        run_wing(&["tail", SESSION_ID, "-t", "tool_call"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("call-42"), "{stdout}");
     assert!(stdout.contains("ask_user"), "{stdout}");
@@ -1446,7 +1386,7 @@ async fn evicted_sessions_are_hydrated_once_on_404() {
     for (name, args) in commands {
         stub.with(|state| state.loaded = false);
         let before = stub.requests().len();
-        let (code, _, stderr) = run_wing(args, &stub).await;
+        let (code, _, stderr) = run_wing(args, &stub.home).await;
         assert_eq!(code, 0, "{name}: stderr: {stderr}");
 
         let trace = stub.trace()[before..].to_vec();
@@ -1489,7 +1429,7 @@ async fn interrupt_refuses_to_hydrate_a_session_it_cannot_reach() {
     let stub = Stub::start("interrupt-404").await;
     stub.with(|state| state.loaded = false);
 
-    let (code, stdout, stderr) = run_wing(&["interrupt", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["interrupt", SESSION_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains("not loaded"), "{stderr}");
@@ -1520,14 +1460,14 @@ async fn asks_reports_a_pending_ask_and_its_tool_call_id() {
         state.status = "waiting".into();
     });
 
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("tool_call_id: call-42"), "{stdout}");
     assert!(stdout.contains("[verify] Proceed?"), "{stdout}");
     assert!(stdout.contains("yes — go ahead"), "{stdout}");
 
     // The machine surface: the id is right there for the answering command.
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let asks = json_of(&stdout);
     assert_eq!(asks["status"], "waiting");
@@ -1548,7 +1488,7 @@ async fn asks_reports_a_pending_ask_and_its_tool_call_id() {
             "--tool-call-id",
             &tool_call_id,
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1567,19 +1507,19 @@ async fn asks_reports_a_pending_ask_and_its_tool_call_id() {
 async fn asks_with_nothing_pending_reports_and_wait_fails_loudly() {
     let stub = Stub::start("asks-empty").await;
 
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("No pending asks"), "{stdout}");
     assert!(stdout.contains("idle"), "{stdout}");
 
-    let (code, stdout, _) = run_wing(&["asks", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, _) = run_wing(&["asks", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0);
     assert_eq!(
         json_of(&stdout),
         json!({"session_id": SESSION_ID, "status": "idle", "asks": []})
     );
 
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--wait", "1"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--wait", "1"], &stub.home).await;
     assert_ne!(
         code, 0,
         "a wait window that closes with no ask is a failure"
@@ -1600,7 +1540,7 @@ async fn asks_wait_catches_a_live_ask() {
         state.ask_after_subscribe_ms = Some(300);
     });
 
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--wait", "10"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--wait", "10"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("tool_call_id: call-42"), "{stdout}");
     assert!(stdout.contains("Proceed?"), "{stdout}");
@@ -1626,7 +1566,7 @@ async fn stdio_prompt_carries_the_tool_call_id() {
             "--tool-call-id",
             "call-42",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1640,7 +1580,7 @@ async fn stdio_prompt_carries_the_tool_call_id() {
     );
 
     // Without the flag the message is a plain one (no `tool_call_id` key).
-    let (code, _, stderr) = run_wing(&["-p", "next task", "-r", SESSION_ID], &stub).await;
+    let (code, _, stderr) = run_wing(&["-p", "next task", "-r", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let sent = body_of(&stub, "/api/session/send");
     assert!(sent.get("tool_call_id").is_none(), "{sent}");
@@ -1665,7 +1605,7 @@ async fn restart_acts_on_the_endpoint_it_was_given() {
 
     let (code, stdout, stderr) = run_wing(
         &["restart", "--port", &target_stub.port.to_string(), "--json"],
-        &config_stub,
+        &config_stub.home,
     )
     .await;
 
@@ -1705,7 +1645,7 @@ async fn restart_acts_on_the_endpoint_it_was_given() {
 async fn unknown_session_on_a_get_endpoint_is_a_clean_404() {
     let stub = Stub::start("get-404").await;
 
-    let (code, stdout, stderr) = run_wing(&["branches", UNKNOWN_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["branches", UNKNOWN_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stdout.is_empty(), "{stdout}");
     assert!(stderr.contains(UNKNOWN_ID), "{stderr}");
@@ -1725,7 +1665,7 @@ async fn asks_reports_an_ask_that_outran_the_snapshot() {
         state.ask_before_snapshot = true;
     });
 
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let asks = json_of(&stdout);
     assert_eq!(asks["asks"][0]["tool_call_id"], "call-42");
@@ -1757,7 +1697,7 @@ async fn asks_fails_loudly_on_a_drifted_ask_event() {
         }));
     });
 
-    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["asks", SESSION_ID], &stub.home).await;
     assert_ne!(code, 0, "stdout: {stdout}");
     assert!(
         !stdout.contains("No pending asks"),
@@ -1777,7 +1717,7 @@ async fn asks_fails_loudly_on_a_drifted_ask_event() {
 #[tokio::test]
 async fn archive_moves_the_session_and_reports_it() {
     let stub = Stub::start("archive-move").await;
-    let (code, stdout, stderr) = run_wing(&["archive", SESSION_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["archive", SESSION_ID], &stub.home).await;
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/archive"),
@@ -1788,7 +1728,7 @@ async fn archive_moves_the_session_and_reports_it() {
     assert!(stdout.contains(SESSION_ID), "{stdout}");
 
     // --json 与文本同源。
-    let (code, stdout, _) = run_wing(&["archive", SESSION_ID, "--json"], &stub).await;
+    let (code, stdout, _) = run_wing(&["archive", SESSION_ID, "--json"], &stub.home).await;
     assert_eq!(code, 0);
     let parsed = json_of(&stdout);
     assert_eq!(parsed["results"][0]["archived"], json!(true));
@@ -1799,7 +1739,7 @@ async fn archive_moves_the_session_and_reports_it() {
 #[tokio::test]
 async fn archive_restore_direction_and_idempotent_skip() {
     let stub = Stub::start("archive-restore").await;
-    let (code, stdout, stderr) = run_wing(&["archive", "--restore", SETTLED_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["archive", "--restore", SETTLED_ID], &stub.home).await;
     assert_eq!(code, 0, "{stderr}");
     let body = body_of(&stub, "/api/session/archive");
     assert_eq!(
@@ -1815,7 +1755,7 @@ async fn archive_restore_direction_and_idempotent_skip() {
 #[tokio::test]
 async fn archive_conflicts_fail_their_row_only() {
     let stub = Stub::start("archive-conflict").await;
-    let (code, stdout, _) = run_wing(&["archive", BUSY_ID, SESSION_ID], &stub).await;
+    let (code, stdout, _) = run_wing(&["archive", BUSY_ID, SESSION_ID], &stub.home).await;
     assert_ne!(code, 0, "失败行必须让退出码非零");
     assert!(stdout.contains("status=working"), "{stdout}");
     assert!(stdout.contains("archived"), "其余行照常处理：{stdout}");
@@ -1830,7 +1770,7 @@ async fn archive_conflicts_fail_their_row_only() {
 #[tokio::test]
 async fn archive_list_renders_the_index_and_survives_multibyte_timestamps() {
     let stub = Stub::start("archive-list").await;
-    let (code, stdout, stderr) = run_wing(&["archive", "--list"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["archive", "--list"], &stub.home).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("old chat"), "{stdout}");
     assert!(stdout.contains("2026-10-01 10:20"), "{stdout}");
@@ -1838,14 +1778,14 @@ async fn archive_list_renders_the_index_and_survives_multibyte_timestamps() {
     assert!(stdout.contains("favorite"), "{stdout}");
     assert!(stdout.contains("日本語のセッション"), "{stdout}");
 
-    let (code, stdout, _) = run_wing(&["archive", "--list", "--json"], &stub).await;
+    let (code, stdout, _) = run_wing(&["archive", "--list", "--json"], &stub.home).await;
     assert_eq!(code, 0);
     let parsed = json_of(&stdout);
     assert_eq!(parsed[0]["id"], json!(ARCHIVED_ID));
     assert_eq!(parsed[1]["archived_at"], json!("日本語日本語日本語日"));
 
     // 形态互斥是使用错误：网关不可达也拦得住（校验先于 ensure_gateway）。
-    let (code, _, stderr) = run_wing(&["archive", "--list", SESSION_ID], &stub).await;
+    let (code, _, stderr) = run_wing(&["archive", "--list", SESSION_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("--list cannot be combined"), "{stderr}");
 }
@@ -1856,7 +1796,7 @@ async fn archive_list_renders_the_index_and_survives_multibyte_timestamps() {
 async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
     let stub = Stub::start("archive-hint").await;
 
-    let (code, _, stderr) = run_wing(&["info", ARCHIVED_ID], &stub).await;
+    let (code, _, stderr) = run_wing(&["info", ARCHIVED_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("is archived"), "{stderr}");
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
@@ -1865,28 +1805,28 @@ async fn archived_session_gets_the_restore_hint_not_a_plain_404() {
         "归档提示不得退化成普通 404 文案：{stderr}"
     );
 
-    let (code, _, stderr) = run_wing(&["tail", ARCHIVED_ID], &stub).await;
+    let (code, _, stderr) = run_wing(&["tail", ARCHIVED_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
 
-    let (code, _, stderr) = run_wing(&["interrupt", ARCHIVED_ID], &stub).await;
+    let (code, _, stderr) = run_wing(&["interrupt", ARCHIVED_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("is archived"), "{stderr}");
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
 
     // stdio（`-p -r`）同样走统一文案：编排方看到的是可行动的恢复指引。
-    let (code, _, stderr) = run_wing(&["-p", "hi", "-r", ARCHIVED_ID], &stub).await;
+    let (code, _, stderr) = run_wing(&["-p", "hi", "-r", ARCHIVED_ID], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
 
     // `release` 同档（它只逐出内存态，归档会话本来就"不在场"）。
-    let (code, stdout, stderr) = run_wing(&["release", ARCHIVED_ID], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["release", ARCHIVED_ID], &stub.home).await;
     assert_ne!(code, 0);
     let both = format!("{stdout}{stderr}");
     assert!(both.contains("wing archive --restore"), "{both}");
 
     // `run -r` 也走统一文案（编排方拿到的不是裸网关 detail）。
-    let (code, _, stderr) = run_wing(&["run", "-r", ARCHIVED_ID, "-p", "hi"], &stub).await;
+    let (code, _, stderr) = run_wing(&["run", "-r", ARCHIVED_ID, "-p", "hi"], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("wing archive --restore"), "{stderr}");
 
@@ -1915,7 +1855,7 @@ async fn watch_registers_a_session_subscription() {
         &[
             "watch", SESSION_ID, "--to", "parent-1", "--on", "ask,done", "--times", "2",
         ],
-        &stub,
+        &stub.home,
         &[],
     )
     .await;
@@ -1948,7 +1888,7 @@ async fn watch_registers_a_session_subscription() {
     // `--json` 给出同一份事实（脚本消费面）。
     let (code, stdout, stderr) = run_wing_env(
         &["watch", SESSION_ID, "--to", "parent-1", "--json"],
-        &stub,
+        &stub.home,
         &[],
     )
     .await;
@@ -1963,7 +1903,7 @@ async fn watch_registers_a_session_subscription() {
     // 目标缺省取 WING_SESSION_ID（agent 的 shell 里就有）。
     let (code, stdout, stderr) = run_wing_env(
         &["watch", SESSION_ID],
-        &stub,
+        &stub.home,
         &[("WING_SESSION_ID", "env-parent")],
     )
     .await;
@@ -1979,7 +1919,7 @@ async fn watch_registers_a_session_subscription() {
 async fn list_shows_both_kinds_for_watch_and_wake() {
     let stub = Stub::start("wake-list").await;
 
-    let (code, stdout, stderr) = run_wing(&["watch", "--list"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["watch", "--list"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     for expected in ["#1", "#2", "session", "timer", "every:30m", "done,ask"] {
         assert!(stdout.contains(expected), "{expected} missing:\n{stdout}");
@@ -1993,7 +1933,7 @@ async fn list_shows_both_kinds_for_watch_and_wake() {
     );
 
     // `--all` 是同一个端点的 `?all=true`。
-    let (code, stdout, stderr) = run_wing(&["wake", "--list", "--all"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["wake", "--list", "--all"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("every:30m"), "{stdout}");
     let hits = stub.path_hits("/api/wake/list");
@@ -2001,10 +1941,10 @@ async fn list_shows_both_kinds_for_watch_and_wake() {
     assert_eq!(hits[1].query, "all=true");
 
     // 机器面：同一批行，一条不少。
-    let (code, stdout, stderr) = run_wing(&["watch", "--list", "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["watch", "--list", "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(json_of(&stdout).as_array().map(Vec::len), Some(2));
-    let (code, stdout, stderr) = run_wing(&["wake", "--list", "--all", "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["wake", "--list", "--all", "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     let rows = json_of(&stdout);
     assert_eq!(rows.as_array().map(Vec::len), Some(2), "{rows}");
@@ -2014,7 +1954,7 @@ async fn list_shows_both_kinds_for_watch_and_wake() {
 
     // 列表端点失败 ≠ 空列表：退出码非零，错误里带网关的 detail。
     stub.with(|state| state.wake_list_status = 500);
-    let (code, stdout, stderr) = run_wing(&["wake", "--list"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["wake", "--list"], &stub.home).await;
     assert_ne!(code, 0);
     assert!(stderr.contains("wake store unavailable"), "{stderr}");
     assert!(stdout.is_empty(), "失败时不该打印一张空表：{stdout}");
@@ -2028,27 +1968,27 @@ async fn list_shows_both_kinds_for_watch_and_wake() {
 async fn cancel_reports_each_outcome_differently() {
     let stub = Stub::start("wake-cancel").await;
 
-    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "3"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "3"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim(), "canceled 3");
     assert_eq!(body_of(&stub, "/api/wake/cancel"), json!({"id": 3}));
 
     // 幂等的那一半：`canceled=false` 说的是"它本来就完了"，不是失败。
-    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "4"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "4"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("4 was already finished"), "{stdout}");
 
     // `--json` 两种结局都给机器可读的 id + canceled（两条命令同一份事实）。
-    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "4", "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "4", "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(json_of(&stdout), json!({"id": 4, "canceled": false}));
-    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "3", "--json"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "3", "--json"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(json_of(&stdout), json!({"id": 3, "canceled": true}));
-    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "4"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["watch", "--cancel", "4"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("4 was already finished"), "{stdout}");
-    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "3"], &stub).await;
+    let (code, stdout, stderr) = run_wing(&["wake", "--cancel", "3"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim(), "canceled 3");
 
@@ -2058,7 +1998,7 @@ async fn cancel_reports_each_outcome_differently() {
         ("404", "wake #404 not found"),
         ("503", "wing.db write lost"),
     ] {
-        let (code, stdout, stderr) = run_wing(&["wake", "--cancel", id], &stub).await;
+        let (code, stdout, stderr) = run_wing(&["wake", "--cancel", id], &stub.home).await;
         assert_ne!(code, 0, "`--cancel {id}` must fail:\n{stdout}{stderr}");
         assert!(stderr.contains(needle), "{needle} missing:\n{stderr}");
         assert!(
@@ -2105,7 +2045,7 @@ async fn timer_specs_and_prompts_are_passed_through() {
         ),
     ];
     for (args, spec) in cases {
-        let (code, stdout, stderr) = run_wing(args, &stub).await;
+        let (code, stdout, stderr) = run_wing(args, &stub.home).await;
         assert_eq!(code, 0, "`{args:?}` failed: {stderr}");
         assert!(
             stdout.contains(&format!("spec:    {spec}")),
@@ -2129,7 +2069,7 @@ async fn timer_specs_and_prompts_are_passed_through() {
     // `--json` 回执与文本是同一份事实（脚本从这里取 id 去 cancel）。
     let (code, stdout, stderr) = run_wing(
         &["wake", "--in", "45m", "-p", "json", "--to", "p1", "--json"],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -2148,7 +2088,7 @@ async fn timer_specs_and_prompts_are_passed_through() {
         &[
             "wake", "--in", "5m", "--every", "10m", "-p", "x", "--to", "p1",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_ne!(code, 0, "{stdout}{stderr}");
@@ -2160,7 +2100,7 @@ async fn timer_specs_and_prompts_are_passed_through() {
         &[
             "wake", "--every", "30m", "--times", "5", "-p", "x", "--to", "p1",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -2172,7 +2112,7 @@ async fn timer_specs_and_prompts_are_passed_through() {
         &[
             "wake", "--in", "30m", "--times", "3", "-p", "x", "--to", "p1",
         ],
-        &stub,
+        &stub.home,
     )
     .await;
     assert_ne!(code, 0, "{stdout}{stderr}");
@@ -2183,8 +2123,11 @@ async fn timer_specs_and_prompts_are_passed_through() {
     assert_eq!(stub.trace().len(), before, "用法错误不得访问网关");
 
     // 时长语法在本机先过一遍（手误不必等往返）。
-    let (code, _, stderr) =
-        run_wing(&["wake", "--every", "10x", "-p", "x", "--to", "p1"], &stub).await;
+    let (code, _, stderr) = run_wing(
+        &["wake", "--every", "10x", "-p", "x", "--to", "p1"],
+        &stub.home,
+    )
+    .await;
     assert_ne!(code, 0);
     assert!(stderr.contains("invalid duration '10x'"), "{stderr}");
     assert_eq!(stub.trace().len(), before);
@@ -2199,7 +2142,7 @@ async fn wake_without_a_target_says_what_to_do() {
     let stub = Stub::start("wake-no-target").await;
 
     let (code, stdout, stderr) =
-        run_wing_env(&["wake", "--in", "30m", "-p", "x"], &stub, &[]).await;
+        run_wing_env(&["wake", "--in", "30m", "-p", "x"], &stub.home, &[]).await;
     assert_ne!(code, 0, "{stdout}{stderr}");
     assert!(
         stderr.contains("no target session: set WING_SESSION_ID or pass --to <sid>"),
@@ -2212,7 +2155,7 @@ async fn wake_without_a_target_says_what_to_do() {
     );
 
     // 同一条规则对 `watch` 成立（目标缺省来自 env）。
-    let (code, stdout, stderr) = run_wing_env(&["watch", SESSION_ID], &stub, &[]).await;
+    let (code, stdout, stderr) = run_wing_env(&["watch", SESSION_ID], &stub.home, &[]).await;
     assert_ne!(code, 0, "{stdout}{stderr}");
     assert!(stderr.contains("no target session"), "{stderr}");
     assert!(stub.trace().is_empty(), "{:?}", stub.trace());
@@ -2241,7 +2184,7 @@ async fn run_notify_registration_and_its_four_opt_outs() {
             "--tag",
             "dispatched",
         ],
-        &stub,
+        &stub.home,
         &[],
     )
     .await;
@@ -2285,7 +2228,7 @@ async fn run_notify_registration_and_its_four_opt_outs() {
     let before = stub.path_hits("/api/wake/create").len();
     let (code, stdout, stderr) = run_wing_env(
         &["run", "-p", "x", "--no-notify", "--notify-to", "parent-1"],
-        &stub,
+        &stub.home,
         &[],
     )
     .await;
@@ -2307,7 +2250,7 @@ async fn run_notify_registration_and_its_four_opt_outs() {
             "--notify-to",
             "parent-1",
         ],
-        &stub,
+        &stub.home,
         &[],
     )
     .await;
@@ -2325,7 +2268,7 @@ async fn run_notify_registration_and_its_four_opt_outs() {
     );
 
     // 4) 没有父会话也没有 `--to`：静默关闭（不是错误）
-    let (code, stdout, stderr) = run_wing_env(&["run", "-p", "x"], &stub, &[]).await;
+    let (code, stdout, stderr) = run_wing_env(&["run", "-p", "x"], &stub.home, &[]).await;
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
         stdout.contains("notify:      off (no parent session)"),
@@ -2335,8 +2278,12 @@ async fn run_notify_registration_and_its_four_opt_outs() {
 
     // 5) prompt 没发出去：撤回刚登记的触发器（不留一条会叫醒无关会话的订阅）
     stub.with(|state| state.send_status = 500);
-    let (code, stdout, stderr) =
-        run_wing_env(&["run", "-p", "x", "--notify-to", "parent-1"], &stub, &[]).await;
+    let (code, stdout, stderr) = run_wing_env(
+        &["run", "-p", "x", "--notify-to", "parent-1"],
+        &stub.home,
+        &[],
+    )
+    .await;
     assert_ne!(code, 0, "{stdout}{stderr}");
     assert!(stderr.contains("Failed to send prompt"), "{stderr}");
     let cancels = stub.path_hits("/api/wake/cancel");
@@ -2352,8 +2299,12 @@ async fn run_notify_registration_and_its_four_opt_outs() {
     // 设的配额与正文，子会话收口时再也无人被叫醒。
     let cancels_before = stub.path_hits("/api/wake/cancel").len();
     stub.with(|state| state.wake_create_is_refresh = true);
-    let (code, stdout, stderr) =
-        run_wing_env(&["run", "-p", "x", "--notify-to", "parent-1"], &stub, &[]).await;
+    let (code, stdout, stderr) = run_wing_env(
+        &["run", "-p", "x", "--notify-to", "parent-1"],
+        &stub.home,
+        &[],
+    )
+    .await;
     assert_ne!(code, 0, "{stdout}{stderr}");
     assert!(stderr.contains("Failed to send prompt"), "{stderr}");
     assert_eq!(
@@ -2367,8 +2318,12 @@ async fn run_notify_registration_and_its_four_opt_outs() {
     // 连撤回都失败：仍然是"prompt 没发出去"这个错误（不是注册错误），
     // 但告警行必须留下"触发器没撤掉"的痕迹。
     stub.with(|state| state.wake_cancel_status = 500);
-    let (code, stdout, stderr) =
-        run_wing_env(&["run", "-p", "x", "--notify-to", "parent-1"], &stub, &[]).await;
+    let (code, stdout, stderr) = run_wing_env(
+        &["run", "-p", "x", "--notify-to", "parent-1"],
+        &stub.home,
+        &[],
+    )
+    .await;
     assert_ne!(code, 0, "{stdout}{stderr}");
     assert!(stderr.contains("Failed to send prompt"), "{stderr}");
 

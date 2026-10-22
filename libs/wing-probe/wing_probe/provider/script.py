@@ -1,4 +1,4 @@
-"""剧本模型 —— 假 Provider 的确定性输出定义（design D3）。
+"""剧本模型 —— 假 Provider 的确定性输出定义。
 
 一个 ``Script`` = 一串按序消费的 ``Turn``；每个 ``Turn`` 描述这一轮模型
 "吐出什么"：thinking / text / tool_calls / usage / finish_reason，以及

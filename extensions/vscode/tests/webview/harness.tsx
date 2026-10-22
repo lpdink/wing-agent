@@ -24,7 +24,7 @@ import { mountApp } from '../../src/webview/mount';
  *
  * The bridge measures latency itself (`now()` before send, `now()` after the
  * pong), so the test must inject the *controller's* clock too — sampling the real
- * wall clock made the RTT assertion flaky (review r1 [B1] of step 01).
+ * wall clock made the RTT assertion flaky.
  */
 export const FIXED_CLOCK = 1_000;
 

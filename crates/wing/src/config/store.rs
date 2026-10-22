@@ -6,7 +6,7 @@
 //! 1. **稀疏**：`doc` 只有用户显式写下的键（`{}` 表示空文件 / 文件不存在）。缺席 = 跟随默认，
 //!    这正是 `dump_config_yaml` 把默认值写成注释的原因。
 //! 2. **读失败不吞**：文件坏掉时返回 [`StoreError::Parse`]（原文一字不动），不静默回落到默认值
-//!    ——调用方（10 步骤的面板）该展示问题并拒绝保存，否则一次保存就会覆盖掉用户手写的文件。
+//!    ——调用方（设置面板）该展示问题并拒绝保存，否则一次保存就会覆盖掉用户手写的文件。
 //! 3. **指纹**：文件字节的 FNV-1a 64（`fnv1a64:<16 hex>`），文件不存在 = `"absent"`
 //!    （与后端 `config/document.py` 的 sha256 同口径：文件变了指纹就变）。Rust 侧没有 `sha2`
 //!    （不为它加依赖），而乐观并发只需要"变没变"，不需要抗碰撞。
@@ -41,7 +41,7 @@ pub struct InterfaceDoc {
     pub path: PathBuf,
 }
 
-/// 写盘结论（10 步骤用它更新本地指纹 / 写回执）。
+/// 写盘结论（设置面板用它更新本地指纹 / 写回执）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteOutcome {
     pub path: PathBuf,
@@ -149,7 +149,7 @@ pub fn write_interface_doc(doc: &Value) -> Result<WriteOutcome, StoreError> {
 pub(crate) fn write_interface_doc_to(path: &Path, doc: &Value) -> Result<WriteOutcome, StoreError> {
     let backup_path = if path.exists() {
         let backup = backup_path(path)?;
-        // 读旧文件 → 原子写：`fs::copy` 中途被杀会留下截断的备份（B2），这里与后端
+        // 读旧文件 → 原子写：`fs::copy` 中途被杀会留下截断的备份，这里与后端
         // `common/fs.py::atomic_write_bytes` 同语义（`atomic_write` 只有文本版，
         // 按既有口径不改它）。旧文件是配置文本，原样逐字节写回；非 UTF-8 的旧文件根本
         // 进不了配置（`read_interface_doc_from` 同样拒绝），这里直接以 Read 错误拒绝整条保存。
@@ -526,14 +526,14 @@ mod tests {
             "真值仍在文档里，读回来逐值相等"
         );
 
-        // 第二次保存：备份里也是真值（B2 的改动不许把掩码引进备份）。
+        // 第二次保存：备份里也是真值（掩码不许引进备份）。
         let outcome = write_interface_doc_to(&file, &json!({"api_key": "sk-next-9999"})).unwrap();
         let backup = read_text(&outcome.backup_path.expect("第二次写入备份旧文件"));
         assert!(backup.contains(SAVE_SECRET), "备份要写真值：\n{backup}");
         assert!(!backup.contains('•'), "备份里不许有掩码：\n{backup}");
     }
 
-    /// B2：`.bak` 是改前文件的**逐字节**副本，且写它是原子写（读字节 → tmp + rename），
+    /// `.bak` 是改前文件的**逐字节**副本，且写它是原子写（读字节 → tmp + rename），
     /// 不再用 `fs::copy`（拷贝中途被杀会留下截断的备份）。
     #[test]
     fn the_backup_is_the_previous_file_byte_for_byte() {
@@ -562,7 +562,7 @@ mod tests {
         );
     }
 
-    /// B2 不退化：目标不存在时**不产生** `.bak`（今天的行为）。
+    /// 目标不存在时**不产生** `.bak`（今天的行为）。
     #[test]
     fn no_backup_is_created_when_the_target_does_not_exist() {
         let dir = TestDir::new("no-backup");

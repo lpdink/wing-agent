@@ -10,7 +10,7 @@ import type { GatewaySettings } from '../settings';
 /**
  * Gateway liveness + start-up.
  *
- * Policy (design.md D8) — probe first, **never restart a gateway the user is
+ * Policy — probe first, **never restart a gateway the user is
  * using**:
  *
  * 1. `probe()` first. A healthy gateway means `wing start` is never executed

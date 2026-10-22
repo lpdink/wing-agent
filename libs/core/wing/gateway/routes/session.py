@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from typing import TYPE_CHECKING, get_args
 
@@ -52,6 +52,13 @@ from wing.gateway.protocol import (
     UpdateSessionResponse,
 )
 from wing.gateway.projection import build_session_branches, build_session_info
+from wing.gateway.routes._common import (
+    require_client_id,
+    get_server,
+    preflight_body_size,
+    require_session,
+    require_session_state,
+)
 from wing.common.utils import InvalidInputError, validate_session_id
 from wing.common.logger import log
 from wing.config import get_config
@@ -59,7 +66,7 @@ from wing.event import SessionStatus
 from wing.media import file_too_large_message, sniff_image_mime, too_large_message
 from wing.request_context import session_context
 from wing.session.tags import validate_tag
-from wing.store.base import validate_file_name
+from wing.store.names import validate_file_name
 
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
@@ -68,18 +75,8 @@ router = APIRouter(tags=["session"])
 
 
 # ============================================================
-# 依赖注入
+# 依赖注入（``X-Client-Id`` 见 ``routes/_common.py``）
 # ============================================================
-
-
-def _require_client_id(x_client_id: str | None = Header(None)) -> str:
-    if x_client_id is None:
-        raise HTTPException(status_code=400, detail="missing X-Client-Id header")
-    return x_client_id
-
-
-def _get_server(request: Request) -> GatewayServer:
-    return request.app.state.server
 
 
 # ============================================================
@@ -96,7 +93,7 @@ async def create_session(
     body: CreateSessionRequest,
     request: Request,
 ) -> CreateSessionResponse:
-    server = _get_server(request)
+    server = get_server(request)
     try:
         session = server.runtime.create_session(
             template_name=body.template_name,
@@ -131,7 +128,7 @@ async def resume_session(
 
     覆盖的参数校验不过（工具引用无法解析）→ 400；会话不存在 → 404。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         session = server.runtime.resume_session(
             body.session_id, agent_override=body.agent
@@ -156,7 +153,7 @@ async def fork_session(
     body: ForkSessionRequest,
     request: Request,
 ) -> ForkSessionResponse:
-    server = _get_server(request)
+    server = get_server(request)
     try:
         new_session, draft = server.runtime.fork_session(
             source_session_id=body.source_session_id,
@@ -183,9 +180,9 @@ async def fork_session(
 async def subscribe(
     body: SubscribeRequest,
     request: Request,
-    x_client_id: str = Depends(_require_client_id),
+    x_client_id: str = Depends(require_client_id),
 ) -> OkResponse:
-    server = _get_server(request)
+    server = get_server(request)
     if x_client_id not in server.clients:
         raise HTTPException(status_code=400, detail="client not connected")
     try:
@@ -203,9 +200,9 @@ async def subscribe(
 async def unsubscribe(
     body: UnsubscribeRequest,
     request: Request,
-    x_client_id: str = Depends(_require_client_id),
+    x_client_id: str = Depends(require_client_id),
 ) -> OkResponse:
-    server = _get_server(request)
+    server = get_server(request)
     server.runtime.unsubscribe(x_client_id, body.session_id)
     return OkResponse()
 
@@ -224,7 +221,7 @@ async def send_message(
     body: SendMessageRequest,
     request: Request,
 ) -> SendMessageResponse:
-    server = _get_server(request)
+    server = get_server(request)
     request_id = uuid.uuid4().hex
 
     # 被逐出（不在内存）的会话按需水合；磁盘上也没有才 404。
@@ -255,21 +252,6 @@ async def send_message(
 # ============================================================
 
 
-def _declared_content_length(request: Request) -> int | None:
-    """``Content-Length`` 头解析成整数（缺失 / 不可解析 = ``None``）。
-
-    不可解析的值不在这里拒绝：声明值与真实字节不符（缺失 / 说谎的头）一律由字节闸门
-    按**真实字节**兜底。
-    """
-    raw = request.headers.get("content-length")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
 @router.post(
     "/api/session/media",
     response_model=MediaUploadResponse,
@@ -297,7 +279,7 @@ async def upload_session_media(
     → 收包 → 字节闸门」。幽灵会话与声明超限的请求都不必先被吞进内存；声明值与真实
     字节不符（缺头 / 说谎的头）由闸门按真实字节兜底。
     """
-    server = _get_server(request)
+    server = get_server(request)
 
     # 会话存在性先于收包：404 不该以"读完整个 body"为代价（与 send 同序：存在性先于
     # 内容校验，body 合法或非法都回 404）。归档命中的 SessionArchivedError 刻意
@@ -310,11 +292,7 @@ async def upload_session_media(
 
     # Content-Length 预检（收包之前）：超限的声明值不必先读进内存再在闸门里拒绝。
     max_bytes = get_config().images.max_bytes
-    declared = _declared_content_length(request)
-    if declared is not None and declared > max_bytes:
-        raise HTTPException(
-            status_code=400, detail=too_large_message(declared, max_bytes)
-        )
+    preflight_body_size(request, max_bytes, too_large_message)
 
     data = await request.body()
     try:
@@ -354,7 +332,7 @@ async def read_session_media(
     归档命中的 ``SessionArchivedError`` 刻意逃逸（app handler 回 404 +
     ``session_archived``）。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         data = server.runtime.read_media(session_id, media_id)
     except LookupError:
@@ -408,7 +386,7 @@ async def upload_session_file(
     直接 400，不读 body）→ 收包 → 字节闸门（非空 / 真实字节兜底）→ 落盘。
     校验全在落盘之前：失败（400/404）**零存储副作用**（不建目录、不写字节）。
     """
-    server = _get_server(request)
+    server = get_server(request)
 
     # 会话存在性先于一切内容校验（与 send / media 同序）：幽灵会话与归档命中不因
     # 请求体或名字的形态改变结论。归档命中的 SessionArchivedError 刻意逃逸。
@@ -431,11 +409,7 @@ async def upload_session_file(
 
     # Content-Length 预检（收包之前）：口径与字节闸门同一份文案。
     max_bytes = get_config().files.max_bytes
-    declared = _declared_content_length(request)
-    if declared is not None and declared > max_bytes:
-        raise HTTPException(
-            status_code=400, detail=file_too_large_message(declared, max_bytes)
-        )
+    preflight_body_size(request, max_bytes, file_too_large_message)
 
     data = await request.body()
     try:
@@ -566,7 +540,7 @@ async def list_sessions(
     过滤是**子集**语义：结果是全量列表的子序列（同样的行、同样的相对顺序）。
     非法过滤值一律 400（静默忽略会让调用方以为过滤生效了）。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         _reject_repeated_filters(request)
         statuses = _parse_status_filter(status)
@@ -589,26 +563,8 @@ async def get_session(
     request: Request,
     session_id: str = Query(..., description="目标 session ID"),
 ) -> SessionGetResponse:
-    server = _get_server(request)
-    state = server.runtime.get_session_state(session_id)
-    if state is None:
-        raise _missing_session(server, session_id)
-    return SessionGetResponse(**state)
-
-
-def _missing_session(server: GatewayServer, session_id: str) -> Exception:
-    """「内存态查询」找不到会话时的错误：归档命中 → SessionArchivedError
-    （app handler 映射 404 + session_archived，可行动提示），否则普通 404。
-
-    这些端点本来只查内存态（不水合），归档会话对它们同样是"不在场"；区别只在
-    错误的可行动性——裸 API 消费方要看得出"它没消失，只是被归档了"。
-    """
-    from wing.session import SessionArchivedError
-
-    error = server.runtime.missing_session_error(session_id)
-    if isinstance(error, SessionArchivedError):
-        return error
-    return HTTPException(status_code=404, detail="session not found")
+    server = get_server(request)
+    return SessionGetResponse(**require_session_state(server, session_id))
 
 
 # ============================================================
@@ -625,11 +581,7 @@ async def session_info(
     request: Request,
     session_id: str = Query(..., description="目标 session ID"),
 ) -> SessionInfoResponse:
-    server = _get_server(request)
-    session = server.runtime.get_session(session_id)
-    if session is None:
-        raise _missing_session(server, session_id)
-    return build_session_info(session)
+    return build_session_info(require_session(get_server(request), session_id))
 
 
 @router.get(
@@ -641,11 +593,7 @@ async def session_branches(
     request: Request,
     session_id: str = Query(..., description="目标 session ID"),
 ) -> BranchesResponse:
-    server = _get_server(request)
-    session = server.runtime.get_session(session_id)
-    if session is None:
-        raise _missing_session(server, session_id)
-    return build_session_branches(session)
+    return build_session_branches(require_session(get_server(request), session_id))
 
 
 @router.get(
@@ -660,14 +608,14 @@ async def session_cache(
         20, ge=1, le=200, description="forks / calls 各返回多少条（新→旧，1..200）"
     ),
 ) -> SessionCacheResponse:
-    """缓存账本报告（contract §6）。
+    """缓存账本报告（字段语义见 ``docs/dev/cache-accounting.md``）。
 
     只读观察面：账本由 LLM 调用路径 best-effort 写进进程级 `wing.db`，本端点**不水
     合**会话（解析一次会话真名 + 按会话键查库）。会话不存在 / 已归档 / 没有行 →
     200 + 空 forks/calls + 全 0 summary（**不 404**——前端与 CLI 都按同一条路径渲染
     "还没数据"）。鉴权与其他 session 端点一致（由 app 级中间件统一处理）。
     """
-    server = _get_server(request)
+    server = get_server(request)
     # 读 + 投影（最多几百行调用 + 若干个段落点查）留在循环线程上会让所有会话的流式帧
     # 排队——与写路径（`observe_cache_call`）同理，整笔工作进线程池。
     return await asyncio.to_thread(
@@ -696,7 +644,7 @@ async def update_session(
     body: UpdateSessionRequest,
     request: Request,
 ) -> UpdateSessionResponse:
-    server = _get_server(request)
+    server = get_server(request)
 
     if all(
         v is None
@@ -750,7 +698,7 @@ async def tag_session(
     增删在服务端一次原子应用（单进程内：内存态与磁盘态同源；跨进程共享
     同一 file store 时沿用既有 metadata 的"最后写者覆盖"语义）。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         mutation = server.runtime.set_session_tags(
             body.session_id,
@@ -786,7 +734,7 @@ async def compact_session(
     body: CompactRequest,
     request: Request,
 ) -> CompactResponse:
-    server = _get_server(request)
+    server = get_server(request)
     # 压缩是会话级操作：绑定归属，压缩链路的日志（含下面的失败日志）自动
     # 带上 session；缺失该绑定时这些行只能靠 message 文本对号入座。
     with session_context(body.session_id):
@@ -820,7 +768,7 @@ async def interrupt_session(
     request: Request,
 ) -> OkResponse:
     """中断会话；agent 侧收口等待有界（取消阶梯），请求保证返回。"""
-    server = _get_server(request)
+    server = get_server(request)
     try:
         await server.runtime.interrupt_session(body.session_id)
     except LookupError:
@@ -842,7 +790,7 @@ async def release_session(
     忽略空闲时长（不为 TTL 等待），但不忽略钉住条件：忙碌 / 有待处理输入 /
     被订阅 / 非持久后端的会话一律 409 拒绝，附带原因。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         released, detail = server.runtime.release_session(body.session_id)
     except LookupError:
@@ -861,7 +809,7 @@ async def rewind_session(
     body: RewindRequest,
     request: Request,
 ) -> RewindResponse:
-    server = _get_server(request)
+    server = get_server(request)
     try:
         draft = server.runtime.rewind_session(body.session_id, body.target_uuid)
     except LookupError:
@@ -896,7 +844,7 @@ async def archive_session(
     409 拒绝；空闲可收回的会话会先逐出再移动。幂等：归档已归档的会话 /
     恢复未归档的会话返回 200 + ``changed=false``。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         if body.archived:
             changed, detail = server.runtime.archive_session(body.session_id)
@@ -930,5 +878,5 @@ async def list_archived_sessions(request: Request) -> ArchivedSessionsResponse:
     扫全量会话目录；索引缺失 / 损坏时按归档目录重建。模型展示名按当前配置
     现算（与 ``/api/session/list`` 同一口径）。
     """
-    server = _get_server(request)
+    server = get_server(request)
     return ArchivedSessionsResponse(sessions=server.runtime.list_archived_sessions())

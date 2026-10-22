@@ -185,15 +185,8 @@ fn ink_at(rows: &[Vec<bool>], px_col: usize, px_row: usize, factor: usize) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::line_width;
     use crate::ui::shimmer::luminance;
-
-    /// 一行的显示宽度（半格：每格 1 列）。
-    fn line_width(line: &Line<'_>) -> usize {
-        line.spans
-            .iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-            .sum()
-    }
 
     /// 画出来的源像素数（半格渲染里：带背景的格 = 上下两个像素，只带前景 = 1）。
     fn rendered_pixels(lines: &[Line<'_>]) -> usize {

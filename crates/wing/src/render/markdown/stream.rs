@@ -63,7 +63,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use super::images::{
     ImageAnchor, ImageOpts, ImageSpan, cover_span, image_side_channel, row_is_cover_row,
@@ -72,7 +72,7 @@ use super::images::{
 use super::links::{ComposedLines, LinkSpan, compose_lines, line_link_spans};
 use super::profile::Profile;
 use super::types::{
-    MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind, thinking_segment_style,
+    MarkdownLine, MarkdownSegment, MarkdownTheme, SegmentKind, line_width, thinking_segment_style,
 };
 use super::{RenderOpts, render_markdown_lines_with};
 use crate::config::ThemePalette;
@@ -521,10 +521,6 @@ impl StreamingRender {
         }
     }
 
-    pub fn is_finalized(&self) -> bool {
-        self.finalized
-    }
-
     /// Append a streaming delta.
     ///
     /// Fence-normalizes the new bytes (matching the full path's
@@ -552,23 +548,11 @@ impl StreamingRender {
         self.composed(width, palette).lines
     }
 
-    /// [`lines`](Self::lines) plus the link spans of every returned line.
-    ///
-    /// Both slices are index-aligned (`links[i]` belongs to `lines[i]`).
-    pub fn lines_and_links(
-        &mut self,
-        width: u16,
-        palette: &ThemePalette,
-    ) -> (&[Line<'static>], &[Vec<LinkSpan>]) {
-        let rendered = self.composed(width, palette);
-        (rendered.lines, rendered.links)
-    }
-
     /// The cell's composed lines with **both** side channels: link spans and
     /// image anchors, both index-aligned with `lines`.
     ///
-    /// This is the accessor the ui layer wants: [`lines`](Self::lines) and
-    /// [`lines_and_links`](Self::lines_and_links) are narrow views of it.
+    /// This is the accessor the ui layer wants — [`lines`](Self::lines) is its
+    /// line-only view.
     pub fn composed(&mut self, width: u16, palette: &ThemePalette) -> StreamLines<'_> {
         if self.finalized && self.width == Some(width) {
             return self.stream_lines();
@@ -1393,7 +1377,12 @@ pub fn full_render(
     let opts = RenderOpts::new(profile, true)
         .with_math(palette.math_mode)
         .with_images(images);
-    let md = render_markdown_lines_with(text, Some(width.saturating_sub(2)), palette, opts);
+    let md = render_markdown_lines_with(
+        text,
+        Some(width.saturating_sub(PREFIX_WIDTH)),
+        palette,
+        opts,
+    );
     let thinking_style = Style::default().fg(palette.thinking);
     let bullet_style = Style::default().fg(palette.text);
     let limit = width as usize;
@@ -1425,19 +1414,6 @@ pub fn full_render(
     composed
 }
 
-/// [`full_render`] with image anchors off, plus the link spans of every line
-/// (see [`StreamingRender::lines_and_links`]).
-pub fn full_lines_with_links(
-    text: &str,
-    width: u16,
-    profile: Profile,
-    palette: &ThemePalette,
-) -> (Vec<Line<'static>>, Vec<Vec<LinkSpan>>) {
-    let (lines, links, _images) =
-        full_render(text, width, profile, palette, ImageOpts::off()).into_parts();
-    (lines, links)
-}
-
 // ============================================================
 // Rendering helpers
 // ============================================================
@@ -1454,7 +1430,7 @@ fn render_generic(
 ) -> Vec<MarkdownLine> {
     render_markdown_lines_with(
         slice,
-        Some(width.saturating_sub(2)),
+        Some(width.saturating_sub(PREFIX_WIDTH)),
         palette,
         RenderOpts::new(profile, true)
             .with_math(palette.math_mode)
@@ -1476,7 +1452,7 @@ fn render_block(
 ) -> Vec<MarkdownLine> {
     render_markdown_lines_with(
         slice,
-        Some(width.saturating_sub(2)),
+        Some(width.saturating_sub(PREFIX_WIDTH)),
         palette,
         RenderOpts::new(profile, false)
             .with_math(palette.math_mode)
@@ -2381,13 +2357,6 @@ fn hard_wrap_lines_with_links(
     (out, out_links, out_images)
 }
 
-fn line_width(line: &Line<'_>) -> usize {
-    line.spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum()
-}
-
 // ============================================================
 // Tests
 // ============================================================
@@ -2523,8 +2492,8 @@ mod tests {
             assert!(prefixed_fence_open(line).is_none());
             assert!(indent_of(&line[content_start(line)..]) >= 4);
         }
-        // A prefixed fence behind a prefix is still found (that is the r1 S2
-        // fix, which must survive the tab-safety change).
+        // A prefixed fence behind a prefix is still found — the rule the
+        // tab-column handling must not break.
         assert_eq!(
             prefixed_fence_open("> ~~~").map(|t| (t.char, t.len, t.prefixed, t.item_col)),
             Some((b'~', 3, true, None))

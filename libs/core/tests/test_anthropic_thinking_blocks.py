@@ -20,6 +20,7 @@ import json
 
 import pytest
 
+from _support import anthropic_sse, openai_sse
 from wing.config import AgentConfig, Config, ProviderConfig
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.base import RequestOptions
@@ -64,25 +65,6 @@ class _FakeClient:
 
     async def send(self, request: object, stream: bool = False) -> _FakeResponse:
         return _FakeResponse(self._lines)
-
-
-def _anthropic_sse(events: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for ev in events:
-        lines.append(f"event: {ev.get('type', 'unknown')}")
-        lines.append(f"data: {json.dumps(ev)}")
-        lines.append("")
-    return lines
-
-
-def _openai_sse(chunks: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for c in chunks:
-        lines.append(f"data: {json.dumps(c)}")
-        lines.append("")
-    lines.append("data: [DONE]")
-    lines.append("")
-    return lines
 
 
 def _make_anthropic(extra_body: dict | None = None) -> AnthropicProvider:
@@ -436,7 +418,7 @@ class TestAnthropicStreaming:
         ]
         p = _make_anthropic()
         await p._client.aclose()
-        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(anthropic_sse(events))  # ty: ignore[invalid-assignment]
 
         final_blocks = None
         async for chunk in p._generate_stream(body={}, model="claude"):
@@ -503,7 +485,7 @@ class TestStreamPerIndexAndErrors:
         ]
         p = _make_anthropic()
         await p._client.aclose()
-        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(anthropic_sse(events))  # ty: ignore[invalid-assignment]
 
         finals: dict[str, dict] = {}
         blocks = None
@@ -544,7 +526,7 @@ class TestStreamPerIndexAndErrors:
         ]
         p = _make_anthropic()
         await p._client.aclose()
-        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(anthropic_sse(events))  # ty: ignore[invalid-assignment]
 
         final_tc = None
         blocks = None
@@ -585,7 +567,7 @@ class TestStreamPerIndexAndErrors:
         ]
         p = _make_anthropic()
         await p._client.aclose()
-        p._client = _FakeClient(_anthropic_sse(events))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(anthropic_sse(events))  # ty: ignore[invalid-assignment]
 
         with pytest.raises(ProviderStreamError, match="Overloaded"):
             async for _ in p._generate_stream(body={}, model="claude"):
@@ -957,7 +939,7 @@ class TestOpenAICompat:
         ]
         p = self._make()
         await p._client.aclose()
-        p._client = _FakeClient(_openai_sse(chunks))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(openai_sse(chunks))  # ty: ignore[invalid-assignment]
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -1006,7 +988,7 @@ class TestOpenAICompat:
         ]
         p = self._make()
         await p._client.aclose()
-        p._client = _FakeClient(_openai_sse(chunks))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(openai_sse(chunks))  # ty: ignore[invalid-assignment]
 
         blocks = None
         async for chunk in p._generate_stream(body={}, model="gpt-4"):
@@ -1039,7 +1021,7 @@ class TestOpenAICompat:
         ]
         p = self._make()
         await p._client.aclose()
-        p._client = _FakeClient(_openai_sse(chunks))  # ty: ignore[invalid-assignment]
+        p._client = _FakeClient(openai_sse(chunks))  # ty: ignore[invalid-assignment]
 
         nonzero: list = []
         final = None

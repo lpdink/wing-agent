@@ -14,10 +14,17 @@ TokenCounter 仅在以下场景使用：
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wing.schema import Message
+
+# CJK 区间（唯一的分布声明）：Unified Ideographs / Extension A /
+# Compatibility Ideographs / Radicals Supplement。用 C 层扫描数它，别在 Python
+# 里逐字符判——单次估算要走遍整个上下文窗口。计数走 `subn` 而不是 `findall`：
+# 后者为每个命中的字符造一个字符串对象（中文窗口下是几十 MB 的临时列表）。
+_CJK_PATTERN = re.compile("[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u2e80-\u2eff]")
 
 
 class TokenCounter:
@@ -26,26 +33,11 @@ class TokenCounter:
     CJK_RATIO = 0.7  # token / char for CJK
     NON_CJK_RATIO = 0.3  # token / char for non-CJK
 
-    @staticmethod
-    def _is_cjk(ch: str) -> bool:
-        cp = ord(ch)
-        return (
-            0x4E00 <= cp <= 0x9FFF  # CJK Unified Ideographs
-            or 0x3400 <= cp <= 0x4DBF  # CJK Extension A
-            or 0xF900 <= cp <= 0xFAFF  # CJK Compatibility Ideographs
-            or 0x2E80 <= cp <= 0x2EFF  # CJK Radicals Supplement
-        )
-
     @classmethod
     def count(cls, text: str) -> int:
         """估算文本的 token 数量。"""
-        cjk = 0
-        non_cjk = 0
-        for ch in text:
-            if cls._is_cjk(ch):
-                cjk += 1
-            else:
-                non_cjk += 1
+        _, cjk = _CJK_PATTERN.subn("", text)
+        non_cjk = len(text) - cjk
         return int(cjk * cls.CJK_RATIO + non_cjk * cls.NON_CJK_RATIO)
 
     @classmethod

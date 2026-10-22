@@ -2,7 +2,7 @@
  * Transcript cells — the chat view's content unit.
  *
  * Semantics mirror the TUI's `crates/wing/src/ui/chat_view/cell.rs`, with three
- * deliberate differences (agreed with the scheduler, see `design.md` D6):
+ * deliberate differences:
  *
  * 1. The TUI's `UserMessage` / `PendingUserMessage` / `DiscardedUserMessage`
  *    variants collapse into one {@link UserCellModel} with a `state` field, so a

@@ -7,6 +7,7 @@ import stat
 from wing.agent import ToolContext
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
+from wing.tools.internal.io_errors import reason_of
 from wing.tools.internal.utils import resolve_path as _resolve_path
 
 
@@ -41,12 +42,10 @@ async def read_file(
 
     try:
         st = os.stat(path)
-        if stat.S_ISDIR(st.st_mode):
-            raise ToolError(f"read_file: {path}: Is a directory")
-    except FileNotFoundError:
-        raise ToolError(f"read_file: {path}: No such file")
-    except PermissionError:
-        raise ToolError(f"read_file: {path}: Permission denied")
+    except (FileNotFoundError, PermissionError) as exc:
+        raise ToolError(f"read_file: {path}: {reason_of(exc)}")
+    if stat.S_ISDIR(st.st_mode):
+        raise ToolError(f"read_file: {path}: Is a directory")
 
     try:
         with open(path, "rb") as f:

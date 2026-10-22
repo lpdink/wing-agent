@@ -101,13 +101,7 @@ class Inbox:
         告知前端（`InterruptedEvent.dropped_request_ids`）——前端只把这些
         消息标为 discarded，不误伤锁等待期间新到的消息。
         """
-        dropped: list[Inbound] = []
-        while not self._queue.empty():
-            try:
-                dropped.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        return dropped
+        return self.drain()
 
     @property
     def has_pending(self) -> bool:

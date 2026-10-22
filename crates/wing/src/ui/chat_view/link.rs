@@ -660,7 +660,7 @@ mod tests {
         // `Paragraph` wraps the over-wide code line into two screen rows, so
         // screen row != line index from there on: the link later in the same
         // cell would be injected and hit-tested on the *code* rows. The cell
-        // must produce no links at all instead (B1).
+        // must produce no links at all instead.
         let mut view = ChatView::new();
         view.push(ChatCell::AssistantMessage(
             "```rust\nlet some_extremely_long_variable_name_that_exceeds_terminal_width_by_a_lot = 1;\n```\ntail [docs](https://example.com) end".into(),

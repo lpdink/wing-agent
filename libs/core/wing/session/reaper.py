@@ -1,9 +1,9 @@
 # wing/session/reaper.py
 """SessionReaper — 空闲会话逐出。
 
-语义：session 的内存态是**缓存**。逐出只回收运行期资源（worker task +
-provider client），磁盘状态一概不动——被逐出的会话在下一次被需要时按需
-水合（``SessionManager.ensure_loaded`` / resume）。
+语义：session 的内存态是**缓存**。逐出只回收运行期资源（worker task；
+provider 实例归全进程共享池，不随会话回收），磁盘状态一概不动——被逐出的
+会话在下一次被需要时按需水合（``SessionManager.ensure_loaded`` / resume）。
 
 逐出判定（三条全过才逐出，见 ``SessionManager.evict_idle_sessions``）：
 

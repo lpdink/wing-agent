@@ -2,9 +2,8 @@
 """perf harness 的共用工具层：side 描述符（契约 §1）、suite 输出（§3）、
 阈值与判定（§4/§8）、JSON 与子进程。
 
-`suite_<name>.py`（04/05/06 的测量本体）与 `ab.py`（编排）都 import 本模块，
-所以这里的 API 是三个 suite 步骤的共同依赖面：契约见 perf-ci 任务书
-`§Frozen Interfaces`，拆分理由见 01 harness_core 步骤的 `design.md`（D1）。
+`suite_<name>.py`（测量本体）与 `ab.py`（编排）都 import 本模块，所以这里的 API 是
+三个 suite 的共同依赖面——这些形状就是「契约」，编号对照表在 `README.md`（§1–§8）。
 
 只用标准库。
 """

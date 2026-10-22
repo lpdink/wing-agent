@@ -1,8 +1,9 @@
 """缓存账本（探针 + 账本 + 归因 + 端点）测试。
 
 覆盖步骤任务书 `01_backend` 的 12 条必须测试，外加三条实现级契约：直播字段与
-账本记录同源（contract §5）、压缩调用同样进账本（§8.8）、`src` 元信息在加载期
-采集（热路径不扫目录）。口径唯一来源是 `../contract.md`——任何断言都不该比它更宽。
+账本记录与直播同源、压缩调用同样进账本（§8.8）、`src` 元信息在加载期
+采集（热路径不扫目录）。口径唯一来源是代码与 `docs/dev/cache-accounting.md`——
+任何断言都不该比它更宽。
 
 账本落在进程级 `wing.db`（`cache_call` / `cache_segment`）：断言尽量走
 `CacheLedger.report()`（对外口径），只有「存储真的这样落」的那几条才直接读库。
@@ -455,7 +456,7 @@ class TestAttribution:
         assert fork["verdict"] == "prefix_broken"
         # 最近一条调用（分叉的对照侧）fork 点之后的段数：len(C) - k
         assert fork["segments_affected"] == len(first) - 1
-        # 前缀彻底断裂 ⇒ 没有参照 ⇒ tokens_lost 为 null（contract §4，展示为 `—`）
+        # 前缀彻底断裂 ⇒ 没有参照 ⇒ tokens_lost 为 null（展示为 `—`）
         assert fork["tokens_lost"] is None
         # 证据：能直接点名文件与两侧 sha
         assert fork["detail"]["path"] == str(rule_path)
@@ -553,7 +554,7 @@ class TestAttribution:
         assert observation.expected == 10000
         assert observation.diverged == ""
         report = ledger.report()
-        # provider 欠账进汇总（forks 只收有分叉的调用——contract §6）
+        # provider 欠账进汇总（forks 只收有分叉的调用）
         assert report["summary"]["provider_debt_rate"] == round(10000 / 22000, 6)
         assert report["forks"] == []
 
@@ -1033,7 +1034,7 @@ class TestBestEffort:
 
         构造的是「环形裁剪的孤儿回收失败」：它在一次记录的最后一笔写，插入与段落表
         都已经成功——只看那两条的返回值会以为记上了。归因若照旧返回，直播字段就会
-        展示一条库里根本不存在的记录（contract §5 要求账本与直播同源）。
+        展示一条库里根本不存在的记录（账本与直播同源）。
         """
         database = get_database()
         ledger = CacheLedger("rolled-back")

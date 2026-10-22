@@ -13,8 +13,6 @@ route handler 只做「参数校验 → 调 runtime.wake → 投影」。错误�
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from wing.gateway.protocol import (
@@ -25,16 +23,10 @@ from wing.gateway.protocol import (
     WakeListResponse,
 )
 from wing.gateway.projection import build_wake_info
+from wing.gateway.routes._common import get_server
 from wing.wake import WakeUnavailableError
 
-if TYPE_CHECKING:
-    from wing.gateway.server import GatewayServer
-
 router = APIRouter(tags=["wake"])
-
-
-def _get_server(request: Request) -> GatewayServer:
-    return request.app.state.server
 
 
 @router.post(
@@ -48,7 +40,7 @@ async def create_wake(body: WakeCreateRequest, request: Request) -> WakeCreateRe
     创建期校验（不水合任何会话）：source / target 都必须可解析、不得自指，
     ``--in/--at`` 类一次性 spec 不接受 ``times``。
     """
-    server = _get_server(request)
+    server = get_server(request)
     try:
         created = server.runtime.wake.create(
             kind=body.kind,
@@ -81,7 +73,7 @@ async def list_wakes(
     include_finished: bool = Query(False, alias="all"),
 ) -> WakeListResponse:
     """列出触发器（缺省只看 ``active``；``?all=true`` 含已终结的）。"""
-    server = _get_server(request)
+    server = get_server(request)
     return WakeListResponse(
         wakes=[
             build_wake_info(trigger)
@@ -99,7 +91,7 @@ async def list_wakes(
 )
 async def cancel_wake(body: WakeCancelRequest, request: Request) -> WakeCancelResponse:
     """取消触发器：``canceled=false`` 是幂等 no-op（已经终结），id 不存在才是 404。"""
-    server = _get_server(request)
+    server = get_server(request)
     try:
         canceled = server.runtime.wake.cancel(body.id)
     except LookupError as exc:

@@ -4,7 +4,6 @@
 //!
 //! 单独一个集成测试文件 = 单独一个进程（fd 0、crossterm 事件源与 EVENT_* 都是进程级全局）。
 
-use std::os::fd::RawFd;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -13,35 +12,9 @@ use crossterm::event::MouseEventKind;
 use tokio::sync::mpsc;
 use wing::tui::TermEvent;
 
-fn openpty_pair() -> (RawFd, RawFd) {
-    let mut master: RawFd = -1;
-    let mut slave: RawFd = -1;
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-    (master, slave)
-}
+mod common;
 
-fn make_raw(fd: RawFd) {
-    unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        assert_eq!(libc::tcgetattr(fd, &mut term), 0);
-        libc::cfmakeraw(&mut term);
-        assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &term), 0);
-    }
-}
-
-fn write_all(fd: RawFd, bytes: &[u8]) {
-    let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-    assert_eq!(n as usize, bytes.len(), "pty write");
-}
+use common::pty::{make_raw, openpty_pair, write_all};
 
 /// 取下一个满足 `pred` 的事件（跳过期间的空闲 `Tick`）；超时 / 通道断都算失败。
 fn expect_event(

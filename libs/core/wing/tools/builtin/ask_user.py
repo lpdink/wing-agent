@@ -13,9 +13,7 @@ from wing.agent import ToolContext
 from wing.event import AskEvent
 from wing.schema import ToolError, ToolParam
 from wing.tool_registry import tool_registry
-
-# Feedback timeout in seconds
-FEEDBACK_TIMEOUT = 6000
+from wing.tools.internal.feedback import FEEDBACK_TIMEOUT
 
 # 用户在确认页选择 Cancel 时，前端发送的哨兵内容。工具把它翻译成明确的
 # 取消说明（正常 tool result）——哨兵原文不会透传给模型。

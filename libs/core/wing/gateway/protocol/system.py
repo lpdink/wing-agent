@@ -177,6 +177,9 @@ class RemoteToolSpec(BaseModel):
     @field_validator("llm_name")
     @classmethod
     def _llm_name_provider_safe(cls, v: str | None) -> str | None:
+        # 与下面的 model_validator 覆盖不同的输入面，两者都不可少：
+        # 本校验器管「显式给出的 llm_name」（含空串——空串会被 `llm_name or name`
+        # 回落成 name 而放行），文案也是 422 detail 的一部分（app.py 取 errors()[].msg）。
         if v is None:
             return v
         if not _LLM_NAME_RE.match(v):

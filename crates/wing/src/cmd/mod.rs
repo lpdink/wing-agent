@@ -34,6 +34,7 @@ mod release;
 pub mod reload;
 mod restart;
 pub mod run;
+mod settings_api;
 pub(crate) mod setup;
 pub(crate) mod start;
 mod status;
@@ -41,6 +42,7 @@ mod stop;
 pub mod tag;
 pub mod wait;
 pub mod wake;
+mod wake_common;
 pub mod watch;
 
 /// wing — AI agent CLI
@@ -166,10 +168,11 @@ pub struct Cli {
 impl Cli {
     /// Check if this CLI invocation triggers stdio mode.
     ///
-    /// Must stay in sync with `stdio::is_stdio_mode()` in `stdio/mod.rs`.
-    /// See that function's doc comment for the contract.
+    /// The post-parse half of the pair; `stdio::is_stdio_mode()` scans the raw
+    /// argv for the same two triggers. See that function's doc comment for the
+    /// contract.
     pub fn is_stdio_mode(&self) -> bool {
-        self.prompt.is_some() || self.input_format == "stream-json"
+        self.prompt.is_some() || self.input_format == crate::stdio::STDIO_INPUT_FORMAT
     }
 }
 
@@ -544,8 +547,8 @@ pub enum Command {
 ///
 /// Stdio mode (`wing -p --tag ...`) consumes it legitimately; every other
 /// path would silently drop it (clap accepts the flag before the subcommand
-/// but nothing reads it), which recreates the "dispatched but untagged"
-/// gap this feature exists to close. `None` = invocation is fine.
+/// but nothing reads it), which recreates the "dispatched but untagged" gap.
+/// `None` = invocation is fine.
 fn misplaced_global_tag_error(tags: &[String]) -> Option<String> {
     if tags.is_empty() {
         return None;
@@ -562,8 +565,8 @@ fn misplaced_global_tag_error(tags: &[String]) -> Option<String> {
 /// Stdio mode (`wing -p --session-id ...`) is the only consumer. The flag must be
 /// part of the clap definition (otherwise the stdio argument filter would silently
 /// drop it), which means a misplaced use now parses fine and would reach dispatch
-/// with nobody reading it — the "silently ignored" shape this step exists to
-/// remove. Refuse with a pointer instead: exit 1 + this message. (Before the flag
+/// with nobody reading it — the "silently ignored" shape we refuse. Refuse with a
+/// pointer instead: exit 1 + this message. (Before the flag
 /// existed clap rejected it as an unknown argument — also exit ≠ 0, just with no
 /// explanation of the stdio-only intent.)
 /// `None` = invocation is fine.
@@ -601,8 +604,8 @@ fn misplaced_include_partial_messages_error(flag: bool) -> Option<String> {
 /// Stdio mode (`wing -p ... --tool-call-id ...`) is one consumer; the other is
 /// `wing run`'s own `--tool-call-id` (placed **after** the subcommand, where it
 /// binds to `RunArgs`). The flag must live on the top-level `Cli` as well,
-/// otherwise the stdio argument filter would silently drop it — the exact
-/// failure this step exists to remove — which means a misplaced use now parses
+/// otherwise the stdio argument filter would silently drop it — which means a
+/// misplaced use now parses
 /// fine and would reach dispatch with nobody reading it. Refuse with a pointer
 /// instead of silently ignoring. `None` = invocation is fine.
 fn misplaced_tool_call_id_error(tool_call_id: Option<&str>) -> Option<String> {
@@ -620,8 +623,8 @@ fn misplaced_tool_call_id_error(tool_call_id: Option<&str>) -> Option<String> {
 /// new` / `wing acp` carry their own `--agent` (placed **after** the
 /// subcommand, where it binds to the subcommand's args). The flag must live on
 /// the top-level `Cli` as well, otherwise the stdio argument filter would
-/// silently drop it — the exact failure this step exists to remove — which
-/// means a misplaced use now parses fine and would reach dispatch with nobody
+/// silently drop it — which means a misplaced use now parses fine and would
+/// reach dispatch with nobody
 /// reading it. Refuse with a pointer instead of silently ignoring. `None` =
 /// invocation is fine.
 fn misplaced_agent_error(agent: Option<&str>) -> Option<String> {
@@ -693,39 +696,26 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
         return dispatch_stdio(cli).await;
     }
 
-    // 顶层 --tag 只服务 stdio 模式（`wing -p --tag ...`）；子命令各自的 --tag
-    // 定义在 RunArgs / Command::Tag 上。`wing --tag x run ...` 这类放错位置
-    // 的写法会被 clap 静默接受但丢弃标签——显式报错，别让 Agent 以为打上了。
-    if let Some(message) = misplaced_global_tag_error(&cli.tag) {
-        eprintln!("wing error: {message}");
-        return ExitCode::FAILURE;
-    }
-
-    // 同理：顶层 --session-id 只服务 stdio 模式（create-or-adopt）。放错位置时
-    // 被静默丢弃会让编排方以为自己指定的 id 生效了。
-    if let Some(message) = misplaced_session_id_error(cli.session_id.as_deref()) {
-        eprintln!("wing error: {message}");
-        return ExitCode::FAILURE;
-    }
-
-    // 同理：`--include-partial-messages` 只服务 stdio 模式（流式增量帧）。它
-    // 在别的路径上不会有任何反应——静默吃掉等于骗消费方"流开着"。
-    if let Some(message) = misplaced_include_partial_messages_error(cli.include_partial_messages) {
-        eprintln!("wing error: {message}");
-        return ExitCode::FAILURE;
-    }
-
-    // 同理：顶层 --tool-call-id 只服务 stdio 模式（`wing -p --tool-call-id ...`）。
-    // 子命令形态在 `wing run` 上有自己的同名旗标（出现在子命令之后即绑定到它，
-    // 顶层保持 None），所以这条闸门只拦"放在子命令之前"或"没走 stdio"的写法。
-    if let Some(message) = misplaced_tool_call_id_error(cli.tool_call_id.as_deref()) {
-        eprintln!("wing error: {message}");
-        return ExitCode::FAILURE;
-    }
-
-    // 同理：顶层 --agent 只服务 stdio 模式（`wing -p --agent ...`）；`wing run` /
-    // `wing new` 的同名旗标出现在子命令之后即绑定到子命令，顶层保持 None。
-    if let Some(message) = misplaced_agent_error(cli.agent.as_deref()) {
+    // 五条「放错位置的顶层旗标」闸门，**数组顺序即检查顺序**（多条同时放错时报哪一条
+    // 是有语义的，取最靠近用户输入顺序的那条）。
+    //
+    // 这些旗标只服务 stdio 模式，但必须定义在顶层 `Cli` 上——否则 stdio 的参数过滤器
+    // 会静默丢掉它们。代价是：放在子命令之前 clap 照样接受，却没有任何读者。静默忽略
+    // 会让调用方以为自己指定的值生效了（标签没打上、id 没生效、流没开），所以一律
+    // 响亮拒绝（退出码 1）：
+    // - `--tag`：`wing --tag x run ...`（子命令自己的 --tag 在 RunArgs / Command::Tag 上）；
+    // - `--session-id`：只有 stdio 的 create-or-adopt 读它；
+    // - `--include-partial-messages`：只有 stdio 的 stream-json 输出有增量帧；
+    // - `--tool-call-id` / `--agent`：`wing run` / `new` / `acp` 有自己的同名旗标
+    //   （出现在子命令之后即绑定到子命令，顶层保持 None），这条只拦"放在子命令之前"。
+    let misplaced = [
+        misplaced_global_tag_error(&cli.tag),
+        misplaced_session_id_error(cli.session_id.as_deref()),
+        misplaced_include_partial_messages_error(cli.include_partial_messages),
+        misplaced_tool_call_id_error(cli.tool_call_id.as_deref()),
+        misplaced_agent_error(cli.agent.as_deref()),
+    ];
+    if let Some(message) = misplaced.into_iter().flatten().next() {
         eprintln!("wing error: {message}");
         return ExitCode::FAILURE;
     }
@@ -779,18 +769,12 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 let port = port.unwrap_or(gw.port);
                 match start::start_gateway(&host, port).await {
                     Ok(()) => ExitCode::SUCCESS,
-                    Err(e) => {
-                        eprintln!("wing start error: {e}");
-                        ExitCode::FAILURE
-                    }
+                    Err(e) => common::fail("start", e),
                 }
             }
             Command::Stop => match stop::stop_gateway().await {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("wing stop error: {e}");
-                    ExitCode::FAILURE
-                }
+                Err(e) => common::fail("stop", e),
             },
             Command::Restart { host, port } => crate::cmd::restart::run(host, port, cli.json).await,
             Command::Status => {
@@ -980,8 +964,9 @@ fn restore_panic_hook() {
 
 /// Launch TUI: connect to gateway, init terminal, run app.
 ///
-/// 启动前的预检（§16.1）：配置不可用时先跑一个**无 session 的 setup 循环**，
-/// 用户修好并保存后继续走下面与今天逐字相同的启动链。配置可用 ⇒ 一个分支都不进。
+/// 启动前的预检（见 `docs/dev/settings.md` 的 setup mode 一节）：配置不可用时先跑一个
+/// **无 session 的 setup 循环**，用户修好并保存后继续走下面与今天逐字相同的启动链。
+/// 配置可用 ⇒ 一个分支都不进。
 async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize logging (file only, no console output).
     let _log_guard = init_logging();
@@ -1009,7 +994,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    // HTTP client（预检与后面的建会话共用同一个；伪码 §16.1 的构造位置就在预检之前）。
+    // HTTP client（预检与后面的建会话共用同一个；构造位置就在预检之前）。
     let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
@@ -1041,7 +1026,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                     return Err(e);
                 }
                 Ok(setup::SetupOutcome::Quit) => {
-                    // 终端恢复后打印（§16.2）：配置仍不可用时的出路。路径取后端权威值，
+                    // 终端恢复后打印：配置仍不可用时的出路。路径取后端权威值，
                     // 拿不到就省略那半句。会话必须先收尾，否则 raw mode 下的 eprintln 会
                     // 变成阶梯状输出。
                     tui::end_tui_session()?;
@@ -1695,6 +1680,37 @@ mod tests {
         match cli.command {
             Some(Command::Run(args)) => assert!(args.agent.is_none()),
             other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    /// 两处 stdio 判定必须对同一 argv 给出同一答案：clap 之前的原始 argv 扫描
+    /// （`stdio::is_stdio_mode`，决定要不要过滤未知参数）与解析之后的
+    /// `Cli::is_stdio_mode`（决定分发）。判定不一致的后果是"该过滤的没过滤"
+    /// （未知参数被 clap 拒绝）或"参数被静默吃掉"，两类都是静默错误。
+    #[test]
+    fn both_stdio_mode_detections_agree_on_the_same_argv() {
+        for argv in [
+            vec!["wing", "-p", "hi"],
+            vec!["wing", "--prompt", "hi"],
+            vec!["wing", "--prompt=hi"],
+            vec!["wing", "-p=hi"],
+            vec!["wing", "--input-format", "stream-json"],
+            vec!["wing", "--input-format=stream-json"],
+            vec!["wing", "--input-format", "text"],
+            vec!["wing", "-p", "hi", "--output-format", "stream-json"],
+            vec!["wing"],
+            vec!["wing", "ps"],
+            vec!["wing", "--json", "ps"],
+        ] {
+            let parsed = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"))
+                .is_stdio_mode();
+            let raw: Vec<String> = argv[1..].iter().map(|arg| arg.to_string()).collect();
+            assert_eq!(
+                parsed,
+                crate::stdio::is_stdio_mode(&raw),
+                "{argv:?}: 解析后的判定与原始 argv 扫描不一致"
+            );
         }
     }
 

@@ -647,7 +647,7 @@ describe('error surface', () => {
     expect((error as { rawBody: string }).rawBody).toContain('nope');
   });
 
-  it('reports the real status of a malformed success response (review r1 N4)', async () => {
+  it('reports the real status of a malformed success response', async () => {
     const transport = new ScriptedTransport().reply(202, { nope: true });
     const error = await makeClient(transport)
       .health()
@@ -660,7 +660,7 @@ describe('error surface', () => {
     expect(empty).toMatchObject({ kind: 'malformed-response', status: 204 });
   });
 
-  it('does not invent a required collection (review r1 S1 class check)', async () => {
+  it('does not invent a required collection', async () => {
     // Python marks these as required (no `default_factory`), so an absent key is a
     // malformed response — guessing `[]` would hide a protocol break.
     const missingSessions = await makeClient(new ScriptedTransport().reply(200, {}))
@@ -697,7 +697,7 @@ describe('error surface', () => {
     expect(error).toMatchObject({ kind: 'malformed-response' });
   });
 
-  it('wraps a transport failure in a typed error, keeping the cause (review r1 N5)', async () => {
+  it('wraps a transport failure in a typed error, keeping the cause', async () => {
     const transport = new ScriptedTransport();
     const error = await makeClient(transport)
       .health()
@@ -713,7 +713,7 @@ describe('error surface', () => {
     expect(transport.count).toBe(1);
   });
 
-  it('lets a GatewayHttpError from the transport pass through untouched (review r1 N5)', async () => {
+  it('lets a GatewayHttpError from the transport pass through untouched', async () => {
     const timeout = new GatewayHttpError({ kind: 'timeout', message: 'GET /api/health timed out' });
     const transport: HttpTransport = { request: () => Promise.reject(timeout) };
 

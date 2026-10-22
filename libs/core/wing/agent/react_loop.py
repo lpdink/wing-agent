@@ -24,7 +24,7 @@ from wing.common.with_retry import with_retry
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
-from wing.schema import ContentBlock, LLMUsage, Message
+from wing.schema import ContentBlock, LLMUsage, Message, usage_wire
 from wing.schema.cache import PURPOSE_MAIN
 
 from .event_sink import AgentEventSink
@@ -59,16 +59,14 @@ class _TurnAccumulator:
 
     num_turns: int = 0
     last_text: str = ""
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
+    usage: LLMUsage = field(default_factory=LLMUsage)
     start_time: float = field(default_factory=time.time)
 
     def record_usage(self, usage: LLMUsage | None) -> None:
         if usage:
-            self.input_tokens += usage.prompt_tokens
-            self.output_tokens += usage.completion_tokens
-            self.cached_tokens += usage.cached_tokens
+            self.usage.prompt_tokens += usage.prompt_tokens
+            self.usage.completion_tokens += usage.completion_tokens
+            self.usage.cached_tokens += usage.cached_tokens
 
     def record_text(self, text: str | None) -> None:
         if text:
@@ -77,12 +75,8 @@ class _TurnAccumulator:
     def elapsed_ms(self) -> int:
         return int((time.time() - self.start_time) * 1000)
 
-    def usage_dict(self) -> dict:
-        return {
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "cached_tokens": self.cached_tokens,
-        }
+    def usage_dict(self) -> dict[str, int]:
+        return usage_wire(self.usage)
 
 
 class ReActLoop:
@@ -315,9 +309,7 @@ class ReActLoop:
         self._current_acc = None
 
         count, tokens = self._cm.get_context_stats()
-        ctx_window = 0
-        if self._cm.compactor:
-            ctx_window = self._cm.compactor.context_window_tokens
+        ctx_window = self._cm.context_window_tokens
         self._sink.context_stats(count, tokens, ctx_window)
 
         if interrupted_exc is not None:
@@ -502,7 +494,7 @@ class ReActLoop:
                     last_usage = chunk.usage
                     # 缓存账本：第一个非零 usage 帧记账一次（标准协议一次调用只
                     # 有一条），归因直接进本次 metrics 的三个直播字段——账本与
-                    # 直播因此同源同刻（contract §5）。
+                    # 直播因此同源同刻。
                     observation = None
                     probe = options.cache_probe if options is not None else None
                     if probe is not None and not observed:

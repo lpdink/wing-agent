@@ -584,7 +584,7 @@ impl GatewayClient {
 
     /// 保存配置（全文档替换 + 乐观并发指纹）。
     ///
-    /// **校验失败也是 `Ok`**：服务端返回 HTTP 200 + `ok=false` + `problems`（design.md D16），
+    /// **校验失败也是 `Ok`**：服务端返回 HTTP 200 + `ok=false` + `problems`，
     /// 因为"用户填的内容不合法"是业务结果而不是请求非法。`Err` 只对应协议级失败：
     /// 409 指纹不匹配（[`ApiClientError::is_conflict`]）/ 鉴权 / 写盘失败 / 网络。
     pub async fn settings_set(
@@ -1027,7 +1027,7 @@ mod tests {
             })
             .await
             .unwrap();
-        // D16：校验失败是 HTTP 200 + ok=false + problems（不是 4xx）
+        // 校验失败是 HTTP 200 + ok=false + problems（不是 4xx）
         assert!(!set.ok);
         assert_eq!(
             set.problems[0].path.as_deref(),

@@ -23,15 +23,14 @@ import hashlib
 import struct
 import zlib
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from _support import BodyWatcher, gateway_server, media_dir, sessions_root
 from wing.common.utils import InvalidInputError
-from wing.config import AuthConfig, get_config
+from wing.config import get_config
 from wing.media import upload_image_ref
 from wing.runtime import WingRuntime
 from wing.schema import MEDIA_NAME_MAX_LENGTH, MediaRef, Message
@@ -239,73 +238,57 @@ class TestMediaNameCap:
 # ── 2. 会话层用例：SessionManager.upload_media ─────────────────
 
 
-@pytest.fixture
-def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> WingRuntime:
-    """独立 sessions 根上的真实 runtime（不碰共享临时目录）。"""
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    instance = WingRuntime()
-    return instance
-
-
-def sessions_root(runtime: WingRuntime) -> Path:
-    """落点断言的真路径（与 runtime 构造时同一个配置解析口）。"""
-    return get_config().sessions.resolved_path()
-
-
-def media_dir(runtime: WingRuntime, session_id: str) -> Path:
-    return sessions_root(runtime) / session_id / "media"
-
-
 class TestManagerUpload:
     """会话解析（不水合）+ 落盘：幂等 / 零副作用 / 后端差异。"""
 
     @pytest.mark.asyncio
     async def test_upload_writes_object_and_returns_ref(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        session = runtime.create_session()
+        session = isolated_runtime.create_session()
         session.context_manager.add_message(Message(role="user", content="hi"))
         data = png(4, 3, tint=0x11)
 
-        ref = runtime.upload_media(session.session_id, data, name="pasted.png")
+        ref = isolated_runtime.upload_media(session.session_id, data, name="pasted.png")
 
         assert ref.id == sha256(data) and ref.bytes == len(data)
         assert (ref.width, ref.height) == (4, 3)
-        object_path = media_dir(runtime, session.session_id) / ref.id
+        object_path = media_dir(session.session_id) / ref.id
         assert object_path.read_bytes() == data
-        assert runtime.sm._stores["file"].read_media(session.session_id, ref.id) == data
+        assert (
+            isolated_runtime.sm._stores["file"].read_media(session.session_id, ref.id)
+            == data
+        )
 
     @pytest.mark.asyncio
     async def test_second_upload_of_same_bytes_returns_same_id_without_rewrite(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        session = runtime.create_session()
+        session = isolated_runtime.create_session()
         session.context_manager.add_message(Message(role="user", content="hi"))
         data = png(2, 2, tint=0x22)
 
-        first = runtime.upload_media(session.session_id, data, name="one.png")
-        before = (media_dir(runtime, session.session_id) / first.id).stat()
+        first = isolated_runtime.upload_media(session.session_id, data, name="one.png")
+        before = (media_dir(session.session_id) / first.id).stat()
 
-        second = runtime.upload_media(session.session_id, data, name="two.png")
+        second = isolated_runtime.upload_media(session.session_id, data, name="two.png")
 
         assert second.id == first.id
         # name 是"本次调用的展示素材"，不随对象去重：各自回显各自的请求值。
         assert (first.name, second.name) == ("one.png", "two.png")
-        after = (media_dir(runtime, session.session_id) / first.id).stat()
+        after = (media_dir(session.session_id) / first.id).stat()
         assert (after.st_ino, after.st_mtime_ns, after.st_size) == (
             before.st_ino,
             before.st_mtime_ns,
             before.st_size,
         ), "同字节二次上传改写了对象文件（应幂等跳过）"
-        assert [p.name for p in media_dir(runtime, session.session_id).iterdir()] == [
-            first.id
-        ]
+        assert [p.name for p in media_dir(session.session_id).iterdir()] == [first.id]
 
     @pytest.mark.asyncio
     async def test_rejected_uploads_leave_no_trace(
-        self, runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+        self, isolated_runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        session = runtime.create_session()
+        session = isolated_runtime.create_session()
         session.context_manager.add_message(Message(role="user", content="hi"))
         sid = session.session_id
         good = png()
@@ -314,55 +297,57 @@ class TestManagerUpload:
 
         for bad in (b"", b"not an image at all", good, good[:20]):
             with pytest.raises(InvalidInputError):
-                runtime.upload_media(sid, bad)
-            assert not media_dir(runtime, sid).exists(), "拒绝路径在存储上留下了痕迹"
+                isolated_runtime.upload_media(sid, bad)
+            assert not media_dir(sid).exists(), "拒绝路径在存储上留下了痕迹"
 
         # 闸门没有把会话 / 存储搞坏：放宽上限后合法字节照常入库。
         monkeypatch.setattr(get_config().images, "max_bytes", len(good))
-        ref = runtime.upload_media(sid, good)
-        assert (media_dir(runtime, sid) / ref.id).read_bytes() == good
+        ref = isolated_runtime.upload_media(sid, good)
+        assert (media_dir(sid) / ref.id).read_bytes() == good
 
     @pytest.mark.asyncio
     async def test_unknown_session_is_lookup_error_and_creates_nothing(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
         with pytest.raises(LookupError):
-            runtime.upload_media("ghost-session", png())
-        assert not (sessions_root(runtime) / "ghost-session").exists()
+            isolated_runtime.upload_media("ghost-session", png())
+        assert not (sessions_root() / "ghost-session").exists()
 
         # 非法 id（路径穿越）同价：按"不存在"处理，绝不触达 store。
         with pytest.raises(LookupError):
-            runtime.upload_media("../escape", png())
-        assert not (sessions_root(runtime).parent / "escape").exists()
+            isolated_runtime.upload_media("../escape", png())
+        assert not (sessions_root().parent / "escape").exists()
 
     @pytest.mark.asyncio
-    async def test_evicted_session_is_not_hydrated(self, runtime: WingRuntime) -> None:
+    async def test_evicted_session_is_not_hydrated(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
         """上传不水合：被逐出的会话保持 inactive，对象照常落盘。"""
-        session = runtime.create_session()
+        session = isolated_runtime.create_session()
         session.context_manager.add_message(Message(role="user", content="hi"))
         sid = session.session_id
-        assert runtime.sm.evict(sid, reason="test") is True
-        await runtime.sm.wait_teardowns()
-        assert runtime.sm.get_session(sid) is None
+        assert isolated_runtime.sm.evict(sid, reason="test") is True
+        await isolated_runtime.sm.wait_teardowns()
+        assert isolated_runtime.sm.get_session(sid) is None
 
-        ref = runtime.upload_media(sid, png(2, 2, tint=0x33), name="late.png")
+        ref = isolated_runtime.upload_media(sid, png(2, 2, tint=0x33), name="late.png")
 
-        assert runtime.sm.get_session(sid) is None, "上传把已逐出的会话唤醒了"
-        assert (media_dir(runtime, sid) / ref.id).read_bytes() == png(2, 2, tint=0x33)
+        assert isolated_runtime.sm.get_session(sid) is None, "上传把已逐出的会话唤醒了"
+        assert (media_dir(sid) / ref.id).read_bytes() == png(2, 2, tint=0x33)
 
     @pytest.mark.asyncio
     async def test_alias_id_writes_into_the_canonical_session_dir(
-        self, runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+        self, isolated_runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """别名（大小写 / 归一化不敏感 FS）解析成磁盘真名：落真名目录、不另起一份。
 
         大小写敏感的 FS 上真别名不存在，这里照 ``test_session_create_or_adopt.py``
         的做法**造一个**——要钉的是"写目标是解析出的键，不是请求字符串"。
         """
-        session = runtime.create_session()
+        session = isolated_runtime.create_session()
         session.context_manager.add_message(Message(role="user", content="hi"))
         sid = session.session_id
-        store = runtime.sm._stores["file"]
+        store = isolated_runtime.sm._stores["file"]
         original = store.resolve_stored_id
 
         def alias_resolve(session_id: str) -> str | None:
@@ -371,21 +356,21 @@ class TestManagerUpload:
         monkeypatch.setattr(store, "resolve_stored_id", alias_resolve)
         data = png(2, 2, tint=0x88)
 
-        ref = runtime.upload_media("alias-of-session", data)
+        ref = isolated_runtime.upload_media("alias-of-session", data)
 
-        assert (media_dir(runtime, sid) / ref.id).read_bytes() == data
-        assert not (sessions_root(runtime) / "alias-of-session").exists()
+        assert (media_dir(sid) / ref.id).read_bytes() == data
+        assert not (sessions_root() / "alias-of-session").exists()
 
     @pytest.mark.asyncio
     async def test_memory_backend_keeps_object_in_session_bucket(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        session = runtime.create_session(backend="memory")
+        session = isolated_runtime.create_session(backend="memory")
         data = png(3, 3, tint=0x44)
 
-        ref = runtime.upload_media(session.session_id, data)
+        ref = isolated_runtime.upload_media(session.session_id, data)
 
-        store = runtime.sm._stores["memory"]
+        store = isolated_runtime.sm._stores["memory"]
         assert store.read_media(session.session_id, ref.id) == data
         assert store.media_path(session.session_id, ref.id) is None
 
@@ -397,84 +382,43 @@ class TestSessionExists:
     """纯解析（不水合）：判据与 ``upload_media`` 是同一个 ``_resolve_with_store``。"""
 
     @pytest.mark.asyncio
-    async def test_exists_parses_without_hydrating(self, runtime: WingRuntime) -> None:
-        session = runtime.create_session()
+    async def test_exists_parses_without_hydrating(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
+        session = isolated_runtime.create_session()
         session.context_manager.add_message(Message(role="user", content="hi"))
         sid = session.session_id
-        assert runtime.session_exists(sid) is True
+        assert isolated_runtime.session_exists(sid) is True
 
-        assert runtime.sm.evict(sid, reason="test") is True
-        await runtime.sm.wait_teardowns()
-        assert runtime.sm.get_session(sid) is None
-        assert runtime.session_exists(sid) is True, "被逐出的会话仍在磁盘上"
-        assert runtime.sm.get_session(sid) is None, "解析不该把它水合回来"
+        assert isolated_runtime.sm.evict(sid, reason="test") is True
+        await isolated_runtime.sm.wait_teardowns()
+        assert isolated_runtime.sm.get_session(sid) is None
+        assert isolated_runtime.session_exists(sid) is True, "被逐出的会话仍在磁盘上"
+        assert isolated_runtime.sm.get_session(sid) is None, "解析不该把它水合回来"
 
-        assert runtime.session_exists("ghost-session") is False
+        assert isolated_runtime.session_exists("ghost-session") is False
         # 非法 id（路径穿越）与"不存在"同价：绝不触达 store。
-        assert runtime.session_exists("../escape") is False
+        assert isolated_runtime.session_exists("../escape") is False
 
 
 # ── 3. 路由：POST /api/session/media ──────────────────────────
 
 
-def _gateway_config() -> MagicMock:
-    """网关侧配置替身（auth 关闭；其余字段保持 MagicMock 的宽容行为）。"""
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(enabled=False, keys=[])
-    return config
-
-
 @pytest.fixture
 def real_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """真实 WingRuntime + 独立 sessions 根 + TestClient（不起 uvicorn）。"""
-    from wing.gateway.server import GatewayServer
-
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    with patch("wing.gateway.server.load_config") as mock_load_config:
-        mock_load_config.return_value = _gateway_config()
-        server = GatewayServer()
-    server.runtime = WingRuntime()
-    with TestClient(server._app) as client:
-        yield client, tmp_path / "sessions"
-
-
-class _BodyWatcher:
-    """ASGI 包装：记录下游从 ``receive`` 拉走的每一条消息。
-
-    "先校验、后收包"没有别的观测面：请求体是 ASGI 拉的，拉没拉过可数。
-    """
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-        self.messages: list[dict[str, Any]] = []
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        async def counting_receive() -> Any:
-            message = await receive()
-            self.messages.append(message)
-            return message
-
-        await self.app(scope, counting_receive, send)
-
-    def request_bodies(self) -> list[bytes]:
-        return [
-            m.get("body", b"") for m in self.messages if m["type"] == "http.request"
-        ]
+    with gateway_server(tmp_path, monkeypatch) as server:
+        with TestClient(server._app) as client:
+            yield client, sessions_root()
 
 
 @pytest.fixture
 def body_watching_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """同 ``real_client``，但外层包了读包计数器（见 ``_BodyWatcher``）。"""
-    from wing.gateway.server import GatewayServer
-
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    with patch("wing.gateway.server.load_config") as mock_load_config:
-        mock_load_config.return_value = _gateway_config()
-        server = GatewayServer()
-    server.runtime = WingRuntime()
-    watcher = _BodyWatcher(server._app)
-    with TestClient(watcher) as client:
-        yield client, tmp_path / "sessions", watcher
+    """同 ``real_client``，但外层包了读包计数器（见 ``BodyWatcher``）。"""
+    with gateway_server(tmp_path, monkeypatch) as server:
+        watcher = BodyWatcher(server._app)
+        with TestClient(watcher) as client:
+            yield client, sessions_root(), watcher
 
 
 class TestUploadRoute:

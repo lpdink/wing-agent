@@ -1,4 +1,4 @@
-"""工具热切换红线场景（spec「工具热切换」）。
+"""工具热切换红线场景。
 
 被守的语义（`libs/core/wing/context/manager.py` 的 `on_tools_changed` + 注入的
 System Reminder，策略归 CM）：

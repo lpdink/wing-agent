@@ -30,6 +30,7 @@ from wing.config import (
     AuthConfig,
     Config,
     ConfigProblem,
+    GatewayConfig,
     ProblemKind,
     load_config,
 )
@@ -38,18 +39,18 @@ from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.request_context import get_request_context
 from wing.runtime import WingRuntime, WriteEffectResult
-from wing.system import ReloadResult, ReloadResultItem
+from wing.system import ReloadResult, ReloadResultItem, record_step
 
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
 from .remote_tools import RemoteToolManager
 from .setup_guard import SetupModeError
 
-#: 默认监听地址（与 ``GatewayConfig.host`` 的声明默认值同源）。
-#: 配置不可用时 cli 回落它——两边读同一份文件、同一个默认（总设计 §8.6）。
-DEFAULT_HOST = "127.0.0.1"
+#: 默认监听地址 = 声明层 ``GatewayConfig.host`` / ``port`` 的默认值（不抄第二份字面量）。
+#: 配置不可用时 cli 回落它——两边读同一份文件、同一个默认。
+DEFAULT_HOST: str = GatewayConfig.model_fields["host"].default
 
-DEFAULT_PORT = 32523
+DEFAULT_PORT: int = GatewayConfig.model_fields["port"].default
 
 # 单帧写超时（秒）：向一个客户端的单次发送超过它即判为慢/死消费者并回收。
 # 硬编码——对"单帧 ≤8 MiB 的内网投递"极其宽裕（正常是毫秒级），对"永远不读"
@@ -88,7 +89,7 @@ class _SetupRuntime(WingRuntime):
     就是 ``get_config()``），而 ``POST /api/settings/set`` **必须**能用——它是唯一的修复
     路径，且它的实现体是 ``WingRuntime.apply_settings``（唯一写盘路径）。这个替身因此
     不是「第二份事务」，而是**同一个事务 + 不同的第 ⑦ 步效应**
-    （:meth:`WingRuntime.post_write_effect`）：正常模式热重载，这里转入正常模式（§8.5）。
+    （:meth:`WingRuntime.post_write_effect`）：正常模式热重载，这里转入正常模式。
 
     其余一切访问与「runtime 在 setup mode 不可用」同义：守门中间件是业务面的一道闸
     （白名单之外一律 503 ``setup_mode``），替身把**所有**非事务入口（含继承来的方法，
@@ -130,7 +131,7 @@ class GatewayServer:
     持有 runtime、client 映射、FastAPI app。
     负责 start/stop 和 EventBus 事件路由。
 
-    **setup mode（04）**：配置不可用时降级启动——``runtime`` 是只服务保存事务的替身，
+    **setup mode**：配置不可用时降级启动——``runtime`` 是只服务保存事务的替身，
     守门中间件（``setup_guard.py``）只放行设置端点，其余一律 503 ``setup_mode``；
     保存出合法配置后由 ``_enter_operational()`` **就地**转入正常模式（不重启进程）。
     """
@@ -167,7 +168,7 @@ class GatewayServer:
         if self._boot.ok:
             result = self._enter_operational(config=self._boot.config)
             if not result.ok:
-                # AD14：启动路径**必须消费**这个结果——否则「文件合法但运行时装不上」
+                # 启动路径**必须消费**这个结果——否则「文件合法但运行时装不上」
                 # 会静默降级：boot_reason=None、problems 为空、503 说「共 0 条问题」，
                 # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
                 self._record_startup_failure(result)
@@ -198,7 +199,7 @@ class GatewayServer:
 
     @property
     def in_setup_mode(self) -> bool:
-        """是否处于 setup mode（04）：只服务设置端点，其余一律 503。"""
+        """是否处于 setup mode：只服务设置端点，其余一律 503。"""
         return self._in_setup_mode
 
     @property
@@ -245,22 +246,18 @@ class GatewayServer:
         # ② 日志级别（config 已进单例；此后所有日志按新级别走）。
         # context= 必须重传：setup_logger 会 handlers.clear() 后重挂，不传就等于
         # 把 #179 的 session / request 关联段抹掉（cli.py 的正常启动路径同样传它）。
-        try:
+        def _apply_log_level() -> None:
             setup_logger(level=config.log.level, context=get_request_context)
-        except Exception as e:
-            items.append(ReloadResultItem(name="log level", ok=False, detail=str(e)))
+
+        if not record_step(items, "log level", _apply_log_level):
             return ReloadResult(ok=False, items=items)
-        items.append(ReloadResultItem(name="log level", ok=True))
 
         # ③ prompt 命令（配置里的 commands.paths）。
-        try:
+        def _apply_prompt_commands() -> None:
             register_prompt_commands(config.commands.paths)
-        except Exception as e:
-            items.append(
-                ReloadResultItem(name="prompt commands", ok=False, detail=str(e))
-            )
+
+        if not record_step(items, "prompt commands", _apply_prompt_commands):
             return ReloadResult(ok=False, items=items)
-        items.append(ReloadResultItem(name="prompt commands", ok=True))
 
         # ④ runtime（hooks 随之加载；providers 池按需懒建）。
         try:
@@ -272,19 +269,18 @@ class GatewayServer:
         items.append(ReloadResultItem(name="runtime", ok=True))
 
         # ⑤ 逐出 job + 归档 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
-        try:
+        # 这里必须直调 runtime.wake.start()，不能写 self._start_wake()：后者在
+        # setup mode 下**早返回**，而模式标志要到本函数尾部才翻转。
+        def _start_background_jobs() -> None:
             self._install_eviction_job(config, runtime)
             self._install_archive_job(config, runtime)
             if self._background_requested:
                 runtime.reaper.attach()
                 self._background.start()
                 runtime.wake.start()
-        except Exception as e:
-            items.append(
-                ReloadResultItem(name="background jobs", ok=False, detail=str(e))
-            )
+
+        if not record_step(items, "background jobs", _start_background_jobs):
             return ReloadResult(ok=False, items=items)
-        items.append(ReloadResultItem(name="background jobs", ok=True))
 
         # ⑥ auth 锁死警告（读**新**配置——auth_config 在 setup mode 下是安全默认值）。
         detail = self._warn_auth_lockout(config.gateway.auth)
@@ -299,7 +295,7 @@ class GatewayServer:
         return ReloadResult(ok=True, items=items)
 
     def _record_startup_failure(self, result: ReloadResult) -> None:
-        """启动路径转入正常模式失败：**不静默降级**（AD14）。
+        """启动路径转入正常模式失败：**不静默降级**。
 
         做两件事：① ERROR 日志（含逐项明细）；② 把失败写成一条 ``path=None`` 的
         boot 级 problem——于是 ``boot_reason`` 非 None、``setup_problems`` 非空、
@@ -370,7 +366,7 @@ class GatewayServer:
 
         setup mode：配置读不出来 ⇒ 返回安全默认值（auth 关闭、无 key）。真正的
         来源策略不在这里——守门中间件与 ``AuthMiddleware`` 的 loopback-only 才是
-        （§8.4）；这里只保证「任何时序下读 auth 配置都不炸」。
+        （见 ``auth.py`` 的 loopback-only 判定）；这里只保证「任何时序下读 auth 配置都不炸」。
         """
         if self._in_setup_mode:
             return AuthConfig()

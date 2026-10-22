@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from _support import mock_generate
 from wing.event import (
     TextEvent,
     TurnStartedEvent,
@@ -34,15 +35,7 @@ from wing.schema import (
     ToolUseBlock,
 )
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -55,18 +48,6 @@ def runtime():
 
 def _usage() -> LLMUsage:
     return LLMUsage(prompt_tokens=10, completion_tokens=5)
-
-
-async def _mock_generate(*args: Any, **kwargs: Any):
-    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。
-
-    契约合规：最终 chunk 必须携带权威 content_blocks（无效轮次会触发重试）。
-    """
-    yield LLMResponse(
-        content="ok",
-        content_blocks=[TextBlock(text="ok")],
-        usage=_usage(),
-    )
 
 
 async def _stop_worker(agent) -> None:
@@ -104,7 +85,7 @@ class TestTurnStartAcceptance:
         events: list[Any] = []
         event_bus.subscribe(events.append)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         accepted = [e for e in events if isinstance(e, UserMessageAcceptedEvent)]
@@ -126,7 +107,7 @@ class TestTurnStartAcceptance:
         events: list[Any] = []
         event_bus.subscribe(events.append)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         def _kind(e: Any) -> str | None:
@@ -151,7 +132,7 @@ class TestTurnStartAcceptance:
         events: list[Any] = []
         event_bus.subscribe(events.append)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         assert not any(isinstance(e, UserMessageAcceptedEvent) for e in events)

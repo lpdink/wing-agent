@@ -66,7 +66,7 @@ pub fn hit_rate(cached: i64, prompt: i64) -> Option<f64> {
 /// 一张图片的标签：`[Image #N W×H SIZE]`——composer 的图片 chip 与消息里的图片
 /// 标签行共用的记法（两处各写一份必然漂移）。
 ///
-/// `number` 的口径由调用方定：chip 用**草稿内**号码（05 的契约：单调不复用），消息
+/// `number` 的口径由调用方定：chip 用**草稿内**号码（单调不复用），消息
 /// 用**消息内** 1-based 序号（重放只有媒体列表，没有草稿号码）。`W×H` 与 `SIZE`
 /// 取的都是真正发出去的那份产物（压缩后的字节数与尺寸）。
 pub fn image_label(number: usize, width: u32, height: u32, bytes: u64) -> String {

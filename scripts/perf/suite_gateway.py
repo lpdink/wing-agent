@@ -18,9 +18,8 @@
 退出码：0 = 产出有效；2 = 参数 / 环境错误（未启动任何进程）；3 = 场景失败
 （仍落盘 ``ok=false`` 的产物，供 ab 记 ``failures[]`` 与人工取证）。
 
-时间戳口径、CPU 测量方法与"为什么不用 scripts/demo/stream.py 的发射器"见本步骤
-design.md（D2 / D3 / D7）。软异常（帧数 / 请求数对不上、采样不足）一律写
-``meta.notes``，不静默吞。
+时间戳口径与 CPU 测量方法见 ``docs/dev/perf-testing.md`` 的 gateway 一节。软异常
+（帧数 / 请求数对不上、采样不足）一律写 ``meta.notes``，不静默吞。
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
-# harness 代码永远来自 head（rig 恒定，见 01 design D2）：本脚本所在目录给 `common`，
+# harness 代码永远来自 head：本脚本所在目录给 `common`
 # head 仓库的 wing-probe 给 `wing_probe`（不依赖 venv 的 editable 安装）。
 for _entry in (HERE, REPO_ROOT / "libs" / "wing-probe"):
     if str(_entry) not in sys.path:
@@ -70,7 +69,7 @@ CONTEXT_WINDOW_TOKENS = 256_000
 KEEP_RECENT_TOKENS = 50_000
 
 WARMUP_TEXT = "warmup"
-"""warmup 轮的 provider 回复（不计入任何样本；见 design D5）。"""
+"""warmup 轮的 provider 回复。"""
 
 FANOUT_CHUNK_CHARS = 1
 """fanout 每帧的字符数：1 = 一字符一帧，指标量的是**帧数**（1000/3000）而非字节数。"""
@@ -106,7 +105,7 @@ class ScenarioError(RuntimeError):
     """场景级硬失败（超时 / error 事件 / 数据不可用）——套件据此判失败。"""
 
 
-# ── 参数档位（design D8） ─────────────────────────────────────
+# ── 参数档位 ─────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -167,7 +166,7 @@ def percentile(values: Sequence[float], pct: float) -> float:
     return float(ordered[min(rank, len(ordered)) - 1])
 
 
-# ── 网关进程 CPU 采样（design D3） ─────────────────────────────
+# ── 网关进程 CPU 采样 ─────────────────────────────
 
 #: ``proc_pid_rusage`` 的返回缓冲区大小。结构随 flavor 增长（v4 已 >200B），而
 #: **不能**只给结构前缀的大小——内核按 flavor 写入整块结构，缓冲区小了就是越界写。
@@ -643,7 +642,7 @@ async def scenario_resume(
         await driver.http.resume_session(session_id)
         hydrate_ms.append((time.monotonic() - started) * 1000.0)
         # 计时窗口只覆盖「subscribe → sync_session 重放完成」：水合（resume）在窗口之外
-        # 单列进 meta.config（design D2/D11）。
+        # 单列进 meta.config。
         handle = await driver.attach(session_id, subscribe=False)
         client_id = driver.client_id
         t0 = time.monotonic()
@@ -755,7 +754,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         prog="suite_gateway.py",
         description=(
             "perf-ci gateway suite: socket-level measurements of a real "
-            "wing-gateway driven by a fake provider (see 05 design.md)"
+            "wing-gateway driven by a fake provider"
         ),
     )
     parser.add_argument(

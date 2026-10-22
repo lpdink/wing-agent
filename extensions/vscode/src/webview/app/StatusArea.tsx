@@ -154,7 +154,7 @@ function SessionStatus({ session }: { readonly session: SessionViewModel }): Rea
 }
 
 /**
- * Channel diagnostics — the affordance step 01's debug footer had, kept because
+ * Channel diagnostics — the affordance the original debug footer had, kept because
  * "is the host still there?" is the one thing a user cannot otherwise see when a
  * turn never starts. Clicking measures the round-trip (`ping` / `pong`).
  */

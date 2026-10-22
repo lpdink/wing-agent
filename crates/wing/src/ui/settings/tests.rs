@@ -1,6 +1,6 @@
 //! `TestBackend` 帧测试：整套 overlay 的屏幕断言。
 //!
-//! 三条铁律（任务书 §Verification）：
+//! 三条铁律：
 //!
 //! ① **不溢出**：40/60/80/100/110/140/200 列 × 10/24/50 行全覆盖，且渲染进「内缩区域」时
 //!    区域外一格不许被写（用 `X` 哨兵钉住）；
@@ -195,7 +195,7 @@ fn wide_frame_has_title_subheader_two_columns_and_hints() {
     );
     assert_eq!(buf[(119, separator_y)].symbol(), "┤", "分隔线右交点");
 
-    // 键位栏（07 的上下文提示）。
+    // 键位栏（上下文提示）。
     assert!(text.contains("Esc 回左栏"), "右栏焦点的 Esc 语义：{text}");
     assert!(text.contains("Tab/←→ 切栏"), "{text}");
     assert_eq!(buf[(0, 23)].symbol(), "└", "下边框");
@@ -471,7 +471,7 @@ fn problems_view_renders_the_wireframe() {
     }
 }
 
-/// setup 首屏（design §14.1 场景 1）：问题清单是第一个视图，标题栏标 setup mode。
+/// setup 首屏：问题清单是第一个视图，标题栏标 setup mode。
 #[test]
 fn setup_first_screen_lands_on_the_problem_list() {
     let (gateway, panel) = fx::setup_panel();
@@ -1005,7 +1005,7 @@ fn a_narrow_card_drops_the_anchor_column_and_keeps_focus_in_the_tree() {
     assert_eq!(
         panel.focus(),
         Focus::Items,
-        "左栏不存在 ⇒ 焦点不许停在它上面（审查 S3）"
+        "左栏不存在 ⇒ 焦点不许停在它上面"
     );
     let text = render(&panel, catalogs, 40, 24);
     assert!(text.contains("Settings"), "{text}");

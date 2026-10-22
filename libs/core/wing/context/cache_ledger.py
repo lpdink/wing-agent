@@ -8,13 +8,13 @@
 三条不变量：
 
 - **永不抛**：读、算、写全在 try/except 内，失败只 `log.warning`——记账坏了绝不影响
-  LLM 调用（contract §8.2）；
+  LLM 调用；
 - **有界**：只留本会话最近 `MAX_CALLS` 条调用，段落行随失去引用的指纹回收
-  （contract §8.4）；
-- **前向容忍**：读不到 / 版本不认识 / 单条记录坏掉一律当空账本（contract §3 末条）——
+  ；
+- **前向容忍**：读不到 / 版本不认识 / 单条记录坏掉一律当空账本（缓存账本口径 末条）——
   库里没有行就是空账本，形状错的行在 SQL 层已被列约束挡住。
 
-归因口径的唯一来源是 contract §4；本模块是它的可执行表达（`record`）与投影
+归因口径的唯一来源是 缓存账本口径；本模块是它的可执行表达（`record`）与投影
 （`build_report`），SQL 全在 `context/cache_store.py`。
 """
 
@@ -49,20 +49,20 @@ from wing.schema.cache import (
 from .cache_store import CacheStore
 
 MAX_CALLS = 200
-"""环形上界（contract §3）：每个会话只留最近 200 条调用。
+"""环形上界：每个会话只留最近 200 条调用。
 
 刻意是模块常量而不是配置项：本功能只观察不干预，不新增配置面。
 """
 
 CACHE_TTL_HOURS = 72
-"""超过这个时长的参照调用判 `cold_expired`（contract §4 的 `cache_ttl_hours` 默认值）。
+"""超过这个时长的参照调用判 `cold_expired`（`cache_ttl_hours` 默认值）。
 
 刻意是模块常量而不是配置项：本功能只观察不干预，不新增配置面。
 """
 
 MIN_TOL_TOKENS = 256
 TOL_RATIO = 0.02
-"""块粒度容差 `tol = max(256, ceil(0.02 * ref.prompt))`（contract §4）。"""
+"""块粒度容差 `tol = max(256, ceil(0.02 * ref.prompt))`。"""
 
 SegmentLookup = Callable[[str | None, int], CachePart | None]
 """按（指纹, 段序）取一段事实的口径——端点投影只要分叉位点那一段。"""
@@ -116,7 +116,7 @@ def _common_prefix(left: Sequence[CachePart], right: Sequence[CachePart]) -> int
     return index
 
 
-# ── 参照 / 分叉 / 判定（contract §4）──────────────────────────────────────
+# ── 参照 / 分叉 / 判定──────────────────────────────────────
 
 
 def _find_ref(
@@ -146,7 +146,7 @@ def _compute_fork(
     segments: Sequence[CachePart],
     ref_length: int | None,
 ) -> CacheFork | None:
-    """与「最近一条调用」的分叉事实（contract §4 的 `fork`）。
+    """与「最近一条调用」的分叉事实（`fork`）。
 
     `index` = 最近一条调用与本次的最长公共前缀长度；仅当 `index < 参照段列表长度`
     （`ref_length`，无参照时取最近一条自身的长度）时才产生分叉——首调用没有历史，
@@ -207,7 +207,7 @@ def _decide(
     has_history: bool,
     now: datetime,
 ) -> tuple[str, int | None]:
-    """verdict + 理论命中（contract §4 的判定表与优先级）。
+    """verdict + 理论命中（判定表与优先级）。
 
     优先级：`cold_expired` > `prefix_broken` > 其余。有 fork（前缀没能延续）一律
     `prefix_broken` 且 `expected = null`。
@@ -231,7 +231,7 @@ def _decide(
     return VERDICT_COLD, None
 
 
-# ── 端点投影（contract §6）────────────────────────────────────────────────
+# ── 端点投影────────────────────────────────────────────────
 
 
 def empty_report(session_id: str) -> dict[str, Any]:
@@ -374,7 +374,7 @@ def _blame(
     calls: Sequence[CacheCall],
     position: int,
 ) -> tuple[str | None, bool | None]:
-    """派生归因（contract §4 的 blame 表；不落盘，读取侧现算）。"""
+    """派生归因（blame 表；不落盘，读取侧现算）。"""
     verdict = call.verdict
     if verdict == VERDICT_PROVIDER_UNDERDELIVERED:
         return "provider", None
@@ -398,7 +398,7 @@ def _blame(
 def _compact_between(
     calls: Sequence[CacheCall], position: int, ref_fp: str | None
 ) -> bool:
-    """参照调用与本次调用之间是否有过压缩调用（contract §4 的 compact 归因判据）。"""
+    """参照调用与本次调用之间是否有过压缩调用（compact 归因判据）。"""
     if not ref_fp:
         return False
     ref_position = None
@@ -419,7 +419,7 @@ def _int(value: int | None) -> int:
 
 
 def _summary(calls: Sequence[CacheCall]) -> dict[str, Any]:
-    """汇总（contract §6）：三个 rate 的分母都是 Σ prompt；分母为 0 时全 None。"""
+    """汇总：三个 rate 的分母都是 Σ prompt；分母为 0 时全 None。"""
     prompt_total = sum(_int(call.prompt) for call in calls)
     cached_total = sum(_int(call.cached) for call in calls)
     expected_total = sum(_int(call.expected) for call in calls)
@@ -499,7 +499,7 @@ class CacheLedger:
                 return None
             if not txn.committed:
                 # 语句都返回成功、事务却回滚了（后面的语句失败 / COMMIT 失败）：
-                # 账本里没有这条记录，就别回一个「有」的归因（contract §5）。
+                # 账本里没有这条记录，就别回一个「有」的归因。
                 log.warning(
                     f"cache ledger record rolled back (session={self._session_id})"
                 )
@@ -555,7 +555,7 @@ class CacheLedger:
             fork = replace(fork, tokens_lost=_tokens_lost(ref.prompt, total, before))
 
         # 三笔写要么一起落库、要么一起回滚（同一个事务）：没落库就别回一个「账本里
-        # 有」的归因——直播字段与账本必须同源（contract §5）。
+        # 有」的归因——直播字段与账本必须同源。
         landed = (
             self._store.insert_call(
                 CacheCall(

@@ -17,7 +17,7 @@ import pytest
 
 from wing_probe import Probe, Turn, Usage
 
-#: 场景私有 model 名（design D3：剧本按 model 名路由，场景之间不共享）。
+#: 场景私有 model 名（剧本按 model 名路由，场景之间不共享）。
 TTFT_MODEL = "probe/llm-metrics-ttft"
 
 #: 慢轮的首个内容帧等待（秒）——"turn 已开始、首个内容块尚未到达"的窗口。

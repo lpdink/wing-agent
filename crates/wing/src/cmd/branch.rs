@@ -63,17 +63,19 @@ pub async fn run_branches(session_id: &str, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing branches error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("branches", e),
     }
 }
 
 async fn fetch_branches(session_id: &str) -> Result<Vec<BranchTargetInfo>> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
-    let resp = common::hydrate_on_404(&http, session_id, || http.get_branches(session_id)).await?;
+    let http = common::connect().await?;
+    let resp = common::hydrate_on_404(
+        &http,
+        session_id,
+        || http.get_branches(session_id),
+        |e| common::session_failed(session_id, &e),
+    )
+    .await?;
     Ok(resp.targets)
 }
 
@@ -151,19 +153,18 @@ pub async fn run_fork(session_id: &str, at: &str, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing fork error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("fork", e),
     }
 }
 
 async fn fork_inner(session_id: &str, target_uuid: &str) -> Result<ForkOutput> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
-    let resp = common::hydrate_on_404(&http, session_id, || {
-        http.fork_session(session_id, target_uuid)
-    })
+    let http = common::connect().await?;
+    let resp = common::hydrate_on_404(
+        &http,
+        session_id,
+        || http.fork_session(session_id, target_uuid),
+        |e| common::session_failed(session_id, &e),
+    )
     .await?;
     Ok(ForkOutput {
         session_id: resp.session_id,
@@ -205,19 +206,18 @@ pub async fn run_rewind(session_id: &str, to: &str, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing rewind error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("rewind", e),
     }
 }
 
 async fn rewind_inner(session_id: &str, target_uuid: &str) -> Result<RewindOutput> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
-    let resp = common::hydrate_on_404(&http, session_id, || {
-        http.rewind_session(session_id, target_uuid)
-    })
+    let http = common::connect().await?;
+    let resp = common::hydrate_on_404(
+        &http,
+        session_id,
+        || http.rewind_session(session_id, target_uuid),
+        |e| common::session_failed(session_id, &e),
+    )
     .await?;
     Ok(RewindOutput {
         session_id: session_id.to_string(),

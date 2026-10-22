@@ -1362,7 +1362,7 @@ fn test_done_flushes_remaining_pending() {
     );
 }
 
-/// 服务端拒绝（02 的帧关联）：`error` 帧带回**客户端的 `request_id`** 时，命中的
+/// 服务端拒绝：`error` 帧带回**客户端的 `request_id`** 时，命中的
 /// pending 条目从队列取回、内容还给草稿；绝不能被随后 `done` 的兜底晋升成「已发送」。
 #[test]
 fn test_rejected_send_returns_to_the_draft_and_is_never_promoted() {

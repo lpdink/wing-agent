@@ -22,23 +22,18 @@ from wing.gateway.protocol import (
     ModelDetail,
     ModelsResponse,
     ReloadResponse,
-    ReloadResultItem as ReloadResultItemProto,
     ToolInfo,
     ToolsListResponse,
 )
+from wing.gateway.projection import build_reload_response
+from wing.gateway.routes._common import get_server
 from wing.commands import magic_registry
 
 if TYPE_CHECKING:
-    # 注解专用：路由只经 runtime 拿数据，不在运行期 import config（design D6）。
+    # 注解专用：路由只经 runtime 拿数据，不在运行期 import config。
     from wing.config import ModelRef
-    from wing.gateway.server import GatewayServer
 
 router = APIRouter(tags=["system"])
-
-
-def _get_server(request: Request) -> GatewayServer:
-    """从 app.state 获取 GatewayServer 实例。"""
-    return request.app.state.server
 
 
 @router.get(
@@ -91,7 +86,7 @@ async def list_models(request: Request) -> ModelsResponse:
     """
     from wing.gateway.protocol import ProviderModels
 
-    server = _get_server(request)
+    server = get_server(request)
     return ModelsResponse(
         providers=[
             ProviderModels(
@@ -110,7 +105,7 @@ async def list_models(request: Request) -> ModelsResponse:
 )
 async def list_agents(request: Request) -> AgentsResponse:
     """获取所有已配置的 agent 模板名称和默认模板。"""
-    server = _get_server(request)
+    server = get_server(request)
     tm = server.runtime.template_manager
     return AgentsResponse(
         agents=tm.all_names,
@@ -125,15 +120,8 @@ async def list_agents(request: Request) -> AgentsResponse:
 )
 async def reload_system(request: Request) -> ReloadResponse:
     """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules、log level。"""
-    server = _get_server(request)
-    result = await server.runtime.reload_system()
-    return ReloadResponse(
-        ok=result.ok,
-        results=[
-            ReloadResultItemProto(name=item.name, ok=item.ok, detail=item.detail)
-            for item in result.items
-        ],
-    )
+    server = get_server(request)
+    return build_reload_response(await server.runtime.reload_system())
 
 
 @router.post(

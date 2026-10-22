@@ -212,8 +212,8 @@ pub struct App {
         wing_api_client::models::SettingsSchemaResponse,
         wing_api_client::models::SettingsGetResponse,
     )>,
-    /// Interface 根的 catalog（09 的 `interface_catalog()`）；与注入面板的那一份相同，
-    /// 供 overlay 的详情栏 / 色块预览用（07 没有"行 → 节点"的访问器，见 08 D11）。
+    /// Interface 根的 catalog（`interface_catalog()`）；与注入面板的那一份相同，
+    /// 供 overlay 的详情栏 / 色块预览用（07 没有"行 → 节点"的访问器，见 `shared::panels::settings`）。
     interface_catalog: Option<wing_api_client::models::SettingNode>,
     /// 打开面板时的 `config` 快照（实时预览的回退基准；保存成功 / `R` 重载后更新）。
     config_snapshot: Option<AppConfig>,
@@ -466,7 +466,7 @@ impl App {
         // files that changed on disk: re-read them rather than trusting the memo.
         self.images.set_structure_epoch(self.chat.structure_epoch());
         let candidates = self.chat.image_candidates();
-        let changed = self.images.sync(&candidates);
+        let changed = self.images.sync(candidates);
         // Media pictures: what the frame asked for and the lane does not have becomes one
         // background fetch (the intent is drained after this draw). Media objects are
         // immutable and session-scoped, so a batch that is still in flight is simply not
@@ -769,7 +769,7 @@ impl App {
             // effective scroll offset (auto-scroll / clamp included).
             //
             // 设置面板开着时不画：overlay 是最后写入者，画在它下面只是白费；顺手清掉 hover / drag
-            // 态，免得关掉面板后拖拽态复活（§20 风险 13）。
+            // 态，免得关掉面板后拖拽态复活。
             if self.settings_panel.is_some() {
                 self.clear_scrollbar_interaction();
             } else if let Some(geom) = self.scrollbar_geometry() {
@@ -863,7 +863,7 @@ impl App {
             if let Some(panel) = self.settings_panel.as_mut()
                 && let Some(card) = settings_card
             {
-                // 08 的契约：每帧把两栏各自的可见行数告诉面板（翻页步长）。
+                // 契约：每帧把两栏各自的可见行数告诉面板（翻页步长）。
                 panel.set_viewport_rows(
                     crate::ui::settings::tree_viewport_rows(panel, card) as usize
                 );
@@ -919,8 +919,8 @@ impl App {
             let recorded = self.chat.frame_images();
             self.images.observe_visible(recorded);
             // 浮层卡片是"挡一块"而不是"挡全屏"：背景里的图片照常画，被卡片（或 toast）
-            // 压住的那几张由 `paint` 的 masks **整张**跳过（半张覆盖会撕碎图形协议，
-            // §20 风险 13 的同一条理由）。关面板时 `close_settings_panel` 会 invalidate
+            // 压住的那几张由 `paint` 的 masks **整张**跳过（半张覆盖会撕碎图形协议）。
+            // 关面板时 `close_settings_panel` 会 invalidate
             // 一次，编码与句柄在那里作废。
             let mut masks: Vec<Rect> = toast_area.into_iter().collect();
             masks.extend(settings_card);

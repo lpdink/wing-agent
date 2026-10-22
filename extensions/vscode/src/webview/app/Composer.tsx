@@ -20,7 +20,7 @@
  *   catalog merged with the frontend table). `Enter` accepts the highlighted row
  *   unless the typed text is already an exact command — then it runs (the TUI's rule
  *   for non-must-select commands, `popup/command.rs:48`). `Tab` always accepts.
- * - Submission is routed by `design.md` D6 and nothing else: one intent per command,
+ * - Submission is routed to exactly one intent and nothing else: one intent per command,
  *   or `sendMessage` for plain text. The composer never performs an action itself.
  */
 
@@ -370,8 +370,7 @@ const USAGE: Record<string, string> = {
 };
 
 /**
- * Route one submission to exactly one intent (design.md D6, as frozen by
- * `interfaces.md`).
+ * Route one submission to exactly one intent.
  *
  * The panel commands are *not* handled here: bare `/ss`, `/rewind` and `/fork` are
  * forwarded as commands, and the host answers by opening `sessionPicker` /
@@ -394,7 +393,7 @@ export function dispatch(text: string, session: SessionViewModel): DispatchOutco
   const command = matchCommand(parsed.name);
   if (command === null) {
     // A gateway prompt command (`/init`, …): the host resolves it. The leading slash
-    // is part of the wire name (`interfaces.md`).
+    // is part of the wire name.
     return forward(session, normalizeCommandName(parsed.name), parsed.args);
   }
 
@@ -421,7 +420,7 @@ export function dispatch(text: string, session: SessionViewModel): DispatchOutco
     case '/rewind':
     case '/fork':
       // Bare or with an id/uuid: the host opens the picker or executes the command.
-      // The **typed** spelling travels (`/ss` stays `/ss`, `interfaces.md`), because
+      // The **typed** spelling travels (`/ss` stays `/ss`), because
       // the host's table knows the aliases the same way the TUI's does.
       return forward(session, parsed.name, parsed.args);
     case '/think': {

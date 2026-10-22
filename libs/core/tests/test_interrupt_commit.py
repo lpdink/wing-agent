@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 
+from _support import make_tool
+from _support import wait_until_async
 from wing.agent import WingAgent
 from wing.agent.inbox import Inbound
 from wing.agent.tool_executor import INTERRUPTED_RESULT as _INTERRUPTED_RESULT
@@ -41,21 +43,11 @@ from wing.schema import (
     Message,
     TextBlock,
     ThinkingBlock,
-    Tool,
     ToolCall,
-    ToolParam,
     ToolUseBlock,
 )
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -63,15 +55,6 @@ def runtime():
     from wing.runtime import WingRuntime
 
     return WingRuntime()
-
-
-def _make_tool(name: str, fn) -> Tool:
-    return Tool(
-        name=name,
-        description=f"Test tool: {name}",
-        params=[ToolParam(name="input", type="string", description="input")],
-        function=fn,
-    )
 
 
 def _tc(tool_id: str, name: str) -> ToolCall:
@@ -97,16 +80,6 @@ def _final_resp(
 
 def _usage() -> LLMUsage:
     return LLMUsage(prompt_tokens=10, completion_tokens=5)
-
-
-async def _wait_until(pred, timeout: float = 5.0) -> None:
-    """轮询等待 pred() 为真。"""
-
-    async def _inner():
-        while not pred():
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(_inner(), timeout)
 
 
 def _start_turn(agent: WingAgent, content: str = "go") -> None:
@@ -155,8 +128,8 @@ class TestInterruptDuringToolExec:
             return "never"
 
         agent._executor._tools = {
-            "Fast": _make_tool("Fast", fast_tool),
-            "Slow": _make_tool("Slow", slow_tool),
+            "Fast": make_tool("Fast", fast_tool),
+            "Slow": make_tool("Slow", slow_tool),
         }
 
         events: list[Any] = []
@@ -170,12 +143,12 @@ class TestInterruptDuringToolExec:
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
         # 等到 fast 已完成（结果事件已发）、slow 已开跑——打断窗口正中。
-        await _wait_until(
+        await wait_until_async(
             lambda: slow_started.is_set() and _result_emitted(events, "call-fast")
         )
         await agent.interrupt()
         # interrupt() 已 await 旧 worker 完成补提交，结果事件必已发出。
-        await _wait_until(lambda: _result_emitted(events, "call-slow"))
+        await wait_until_async(lambda: _result_emitted(events, "call-slow"))
 
         # ── 上下文：[user, assistant(tool_calls), tool×2] ──
         chain = agent.context_manager.get_context_window()
@@ -225,7 +198,7 @@ class TestInterruptDuringToolExec:
             )
             return "never"
 
-        agent._executor._tools = {"Ask": _make_tool("Ask", asking_tool)}
+        agent._executor._tools = {"Ask": make_tool("Ask", asking_tool)}
 
         events: list[Any] = []
         event_bus.subscribe(events.append)
@@ -235,9 +208,9 @@ class TestInterruptDuringToolExec:
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
-        await _wait_until(lambda: "call-ask" in agent._inbox._feedback_waiters)
+        await wait_until_async(lambda: "call-ask" in agent._inbox._feedback_waiters)
         await agent.interrupt()
-        await _wait_until(lambda: _result_emitted(events, "call-ask"))
+        await wait_until_async(lambda: _result_emitted(events, "call-ask"))
 
         chain = agent.context_manager.get_context_window()
         tools = {m.tool_call_id: m.content for m in chain if m.role == "tool"}
@@ -288,7 +261,7 @@ class TestInterruptDuringStreaming:
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
 
         _start_turn(agent)
-        await _wait_until(streaming.is_set)
+        await wait_until_async(streaming.is_set)
         await runtime.interrupt_session(session.session_id)
 
         chain = agent.context_manager.get_context_window()
@@ -341,7 +314,7 @@ class TestInterruptDuringStreaming:
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: [])
 
         _start_turn(agent)
-        await _wait_until(streaming.is_set)
+        await wait_until_async(streaming.is_set)
         # 阻塞中的流式轮不消费队列（steer 只在工具轮后 drain）——消息留在积压。
         await agent.post("stale queued message", request_id="req-stale")
         await runtime.interrupt_session(session.session_id)
@@ -394,7 +367,7 @@ class TestInterruptDuringStreaming:
         event_bus.subscribe(events.append)
 
         _start_turn(agent)
-        await _wait_until(streaming.is_set)
+        await wait_until_async(streaming.is_set)
         await agent.interrupt()
 
         # ── 上下文：[user, assistant(thinking+tool_use), tool(合成)] ──
@@ -428,7 +401,7 @@ class TestInterruptDuringStreaming:
 
         monkeypatch.setattr(agent.model_provider, "generate", _capture_generate)
         await agent.post("continue")
-        await _wait_until(lambda: len(seen_messages) == 1)
+        await wait_until_async(lambda: len(seen_messages) == 1)
 
         _assert_well_formed(seen_messages[0])
         assert any(
@@ -459,7 +432,7 @@ class TestInterruptDuringStreaming:
         monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: None)
 
         _start_turn(agent)
-        await _wait_until(streaming.is_set)
+        await wait_until_async(streaming.is_set)
         await agent.interrupt()
 
         chain = agent.context_manager.get_context_window()
@@ -489,7 +462,7 @@ class TestInterruptDuringStreaming:
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
 
         _start_turn(agent)
-        await _wait_until(streaming.is_set)
+        await wait_until_async(streaming.is_set)
         await agent.interrupt()
         await agent.shutdown()
 
@@ -524,7 +497,7 @@ class TestInterruptDuringStreaming:
         async def fast_tool(input: str = "") -> str:
             return "fast-result"
 
-        agent._executor._tools = {"Fast": _make_tool("Fast", fast_tool)}
+        agent._executor._tools = {"Fast": make_tool("Fast", fast_tool)}
 
         done = asyncio.Event()
         event_bus.subscribe(lambda e: done.set() if isinstance(e, DoneEvent) else None)
@@ -572,8 +545,8 @@ class TestPostInterruptRecovery:
             return "never"
 
         agent._executor._tools = {
-            "Fast": _make_tool("Fast", fast_tool),
-            "Slow": _make_tool("Slow", slow_tool),
+            "Fast": make_tool("Fast", fast_tool),
+            "Slow": make_tool("Slow", slow_tool),
         }
 
         events: list[Any] = []
@@ -592,15 +565,15 @@ class TestPostInterruptRecovery:
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
-        await _wait_until(
+        await wait_until_async(
             lambda: slow_started.is_set() and _result_emitted(events, "call-fast")
         )
         await agent.interrupt()
-        await _wait_until(lambda: _result_emitted(events, "call-slow"))
+        await wait_until_async(lambda: _result_emitted(events, "call-slow"))
 
         # 打断后继续对话：第二次 LLM 调用必须收到合法历史。
         await agent.post("continue")
-        await _wait_until(lambda: len(seen_messages) == 2)
+        await wait_until_async(lambda: len(seen_messages) == 2)
 
         _assert_well_formed(seen_messages[1])
         # 合成结果对模型可见
@@ -629,8 +602,8 @@ class TestPostInterruptRecovery:
             return "never"
 
         agent._executor._tools = {
-            "Fast": _make_tool("Fast", fast_tool),
-            "Slow": _make_tool("Slow", slow_tool),
+            "Fast": make_tool("Fast", fast_tool),
+            "Slow": make_tool("Slow", slow_tool),
         }
 
         events: list[Any] = []
@@ -643,11 +616,11 @@ class TestPostInterruptRecovery:
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
         _start_turn(agent)
-        await _wait_until(
+        await wait_until_async(
             lambda: slow_started.is_set() and _result_emitted(events, "call-fast")
         )
         await agent.interrupt()
-        await _wait_until(lambda: _result_emitted(events, "call-slow"))
+        await wait_until_async(lambda: _result_emitted(events, "call-slow"))
 
         await agent.shutdown()
 

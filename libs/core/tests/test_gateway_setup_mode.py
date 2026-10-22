@@ -80,7 +80,7 @@ GOOD_DOCUMENT = {
     "agents": [{"name": "default", "model": "m"}],
 }
 
-#: 转入正常模式的六步（与 reload_system 的六项**不是**同一份列表：见 design D3）。
+#: 转入正常模式的六步（与 reload_system 的六项**不是**同一份列表）。
 ENTER_ITEMS = [
     "config.yaml",
     "log level",
@@ -198,7 +198,7 @@ class TestBootConfig:
         """``gateway.port`` 合法但 ``providers`` 非法 ⇒ 网关仍监听文件里写的端口。
 
         Rust 侧 ``cmd/backend_config.rs`` 是 ``#[serde(default)]`` 的部分结构，
-        读的是同一份文件的同一段——两边必须落在同一个 endpoint 上（总设计 §8.6）。
+        读的是同一份文件的同一段——两边必须落在同一个 endpoint 上。
         """
         _wing_home(tmp_path, monkeypatch, INVALID_YAML + "gateway:\n  port: 39987\n")
 
@@ -542,10 +542,10 @@ class TestEnterOperational:
 
 
 # ============================================================
-# AD12 —— 「永不抛」的兜底与坏形态
+# 「永不抛」的兜底与坏形态
 # ============================================================
 
-#: 五种必须降级启动（而不是抛 / 崩溃）的坏形态（AD12 点名；多两种同族）。
+#: 五种必须降级启动（而不是抛 / 崩溃）的坏形态（同族的多两种）。
 MALFORMED_CONFIGS = {
     "top-level numeric key": "1: oops\n",
     "top-level bool key": "on: true\n",
@@ -588,7 +588,7 @@ class TestMalformedConfigs:
     ):
         """顶层非字符串键 ≠ 读不出文件：Rust 侧 serde **跳过**它并照读 ``gateway`` 段
         （实测：`serde-probe` 对 ``1: oops`` + ``gateway.port: 39806`` 给出 port 39806）
-        ——两边必须落在同一个端口上（总设计 §8.6）。"""
+        ——两边必须落在同一个端口上。"""
         _wing_home(tmp_path, monkeypatch, "1: oops\ngateway:\n  port: 39987\n")
 
         boot = boot_config()
@@ -601,7 +601,7 @@ class TestMalformedConfigs:
     def test_status_surfaces_the_boot_reason_when_the_disk_view_is_clean(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """AD12：顶层数字键在磁盘视图里只是「未知键」（D17，不算错误），但网关因它没起来
+        """顶层数字键在磁盘视图里只是「未知键」（不算错误），但网关因它没起来
         ——``status`` 必须把 boot 侧的问题带出来，否则用户看到 ``invalid`` 却一片空白
         （11 的 setup 首屏会是空清单）。"""
         text = "1: oops\n" + VALID_YAML
@@ -644,7 +644,7 @@ class TestMalformedConfigs:
 
 
 # ============================================================
-# AD13 —— 语法错的文件必须能经产品修复
+# 语法错的文件必须能经产品修复
 # ============================================================
 
 
@@ -680,7 +680,7 @@ class TestUnparseableFileRepair:
             body = resp.json()
             assert body["ok"] is True, body
             assert body["setup_mode_exited"] is True, body
-            # 密钥无法保留是必然（文件读不出来）——回执**显式**告知（AD13）。
+            # 密钥无法保留是必然（文件读不出来）——回执**显式**告知。
             assert body["warnings"] == [
                 "原配置文件无法解析，其中的密钥无法保留，请重新填写"
             ], body
@@ -744,7 +744,7 @@ class TestUnparseableFileRepair:
 
 
 # ============================================================
-# AD14 / AD15 —— 不再静默降级；setup_mode / valid 自洽
+# 不再静默降级；setup_mode / valid 自洽
 # ============================================================
 
 
@@ -752,7 +752,7 @@ class TestModeReporting:
     def test_setup_mode_is_reported_truthfully(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """AD15：降级期 ``get`` / ``status`` 的 ``setup_mode`` 都是真值 true。"""
+        """降级期 ``get`` / ``status`` 的 ``setup_mode`` 都是真值 true。"""
         server = _server(INVALID_YAML, tmp_path, monkeypatch)
         with _client(server) as tc:
             assert tc.get("/api/settings/get").json()["setup_mode"] is True
@@ -765,7 +765,7 @@ class TestModeReporting:
     def test_startup_transition_failure_is_not_silent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """AD14：配置合法但运行时装不上 ⇒ 非空 boot_reason + problems + valid=false。"""
+        """配置合法但运行时装不上 ⇒ 非空 boot_reason + problems + valid=false。"""
         _wing_home(tmp_path, monkeypatch, VALID_YAML)
         from wing.gateway.server import GatewayServer
 
@@ -784,7 +784,7 @@ class TestModeReporting:
 
         with _client(server) as tc:
             status = tc.get("/api/settings/status").json()
-            # 自洽铁律：不允许 valid=true 且 setup_mode=true（AD14）。
+            # 自洽铁律：不允许 valid=true 且 setup_mode=true。
             assert not (status["valid"] and status["setup_mode"])
             assert status["valid"] is False
             assert status["setup_mode"] is True
@@ -848,6 +848,6 @@ class TestCliDegradedBanner:
             self._run_main(monkeypatch)
         out = capsys.readouterr().out
         assert out.count("⚠ 配置不可用") == 1
-        assert "（invalid）" in out  # boot_reason 非 None（AD14）
+        assert "（invalid）" in out  # boot_reason 非 None
         assert "配置合法但运行时装配失败" in out
         assert "logs dir is read-only" in out

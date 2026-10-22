@@ -136,10 +136,10 @@ def install_provider() -> Callable[[ModelProvider], ModelProvider]:
 
 
 @pytest.fixture(autouse=True)
-def _mock_config():
-    """自动 mock config，避免加载真实 config.yaml。
+def _isolate_config():
+    """每个测试一枚最小化的 Config 单例，避免加载真实 config.yaml。
 
-    提供一个最小化的测试 Config，使用新的 providers 列表格式。
+    需要改动配置的测试按参数名显式声明它（``_isolate_config``），改动随测试消亡。
     """
     from wing.config import AgentConfig, Config, ProviderConfig, reset_config
 
@@ -184,3 +184,42 @@ def _mock_config():
         yield test_config
 
     reset_config()
+
+
+@pytest.fixture
+def cleanup_event_bus() -> Iterator[None]:
+    """每个测试前后清空全局 EventBus 的订阅者与路由表。
+
+    EventBus 是进程级单例，构造 Session / Runtime 都会往它上面挂订阅。需要隔离的模块用
+    ``pytestmark = pytest.mark.usefixtures("cleanup_event_bus")`` **显式声明**：不设成
+    autouse 是为了让「哪些模块清空总线」留在各文件里可读（``_install_wing`` 的审计订阅
+    同样会被这些模块清掉，改动前后一致）。
+    """
+    from wing.event_bus import event_bus
+
+    event_bus._subscribers.clear()
+    event_bus._routing.clear()
+    yield
+    event_bus._subscribers.clear()
+    event_bus._routing.clear()
+
+
+@pytest.fixture
+def tmp_dir() -> Iterator[Path]:
+    """一个测试独占的临时目录（结束即删）。"""
+    d = tempfile.mkdtemp()
+    yield Path(d)
+    shutil.rmtree(d)
+
+
+@pytest.fixture
+def isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """每测试一枚独立 sessions 根上的真实 `WingRuntime`（不碰共享临时目录）。
+
+    名字写出它唯一特殊的地方：绝大多数文件的 `runtime` fixture 是裸 `WingRuntime()`，
+    共用 session 级的临时 sessions 目录——两者不可互换。
+    """
+    from wing.runtime import WingRuntime
+
+    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+    return WingRuntime()

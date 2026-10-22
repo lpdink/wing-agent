@@ -4,7 +4,7 @@
     <python> scripts/perf/suite_rust.py --side <side.json> --out <out.json> --round <n> [--quick] [--benches a,b]
 
 - quick 档 = CI 子集（每个 bench 一组锚定过滤正则 + `--measurement-time 2`，
-  `tool_args_stream` 3s——µs 级 bench 的轮间漂移实测 ~24%，见 design D8），单侧 ≈ 2–3 分钟；
+  `tool_args_stream` 3s——µs 级 bench 的轮间漂移实测 ~24%），单侧 ≈ 2–3 分钟；
   非 quick 档 = 每个 bench 的全部 case（不加 filter，`--measurement-time 3`）——含 `baseline/*/512`
   这类分钟级 case，本机 45 分钟级/侧，只作本地深潜用、不做预算承诺（`--benches` 可只跑其中几个）。
 - 调档只用 `<filter>` 与 `--measurement-time`：各 bench 在 group 里钉了 `sample_size(10)` /
@@ -22,7 +22,7 @@
   **退出码 0**，其余 bench 照常；编译错误 / 超时 / 坏 JSON → `ok=false` + 退出码 1
   （ab.py 记 infrastructure failure）。
 
-设计与取舍（过滤器表、n/a 语义、预算实测）见 perf-ci 06 步骤的 `design.md`。
+设计与取舍（过滤器表、n/a 语义、预算实测）见 ``docs/dev/perf-testing.md`` 的 rust 一节。
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ class Bench:
     quick_cases: tuple[str, ...]
 
 
-#: 四个 bench 的 quick 子集（契约 §4 的示例集合；完整 case 清单见 02 的 design.md）。
+#: 四个 bench 的 quick 子集（契约 §4 的示例集合；完整清单见 docs/dev/perf-testing.md）。
 #: 生成的过滤正则是锚定精确式（见 filter_for），覆盖与任务书 filter 相同的集合。
 BENCHES: tuple[Bench, ...] = (
     Bench(

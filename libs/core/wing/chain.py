@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Any, Generic, Iterator, List, Type, TypeVar, Union, overload
 
 from wing.schema import ChainNode
-from wing.store.base import MessageLog, canonical_record
+from wing.store import MessageLog, canonical_record
 
 T = TypeVar("T", bound=ChainNode)
 
@@ -62,17 +62,18 @@ class TrackedList(Generic[T]):
 
     # ── 内部：类型与序列化 ────────────────────
 
-    def _ensure_type(self, items: list[T]) -> None:
-        """检查 ChainNode 家族约束，同时填充 uuid/parentUuid。
+    @staticmethod
+    def _require_node(item: object) -> None:
+        """ChainNode 家族约束（Message 与 WingEvent 可任意混排）；违者 TypeError。"""
+        if not isinstance(item, ChainNode):
+            raise TypeError(
+                f"expected ChainNode (Message or WingEvent), got {type(item).__name__}"
+            )
 
-        混合链：Message 与 WingEvent（均继承 ChainNode）可任意混排。
-        """
+    def _ensure_type(self, items: list[T]) -> None:
+        """检查 ChainNode 家族约束，同时填充 uuid/parentUuid。"""
         for it in items:
-            if not isinstance(it, ChainNode):
-                raise TypeError(
-                    f"expected ChainNode (Message or WingEvent), "
-                    f"got {type(it).__name__}"
-                )
+            self._require_node(it)
             if it.uuid is None:
                 it.uuid = str(uuid_mod.uuid4())
             if it.parent_uuid is None:
@@ -83,11 +84,7 @@ class TrackedList(Generic[T]):
     def _check_type(self, items: list[T]) -> None:
         """检查 ChainNode 家族约束（detached 场景，不填充拓扑字段）。"""
         for it in items:
-            if not isinstance(it, ChainNode):
-                raise TypeError(
-                    f"expected ChainNode (Message or WingEvent), "
-                    f"got {type(it).__name__}"
-                )
+            self._require_node(it)
 
     @staticmethod
     def _to_record(item: T) -> dict[str, Any]:
@@ -251,6 +248,15 @@ class TrackedList(Generic[T]):
 
     # ── 查询（从内存读取）─────────────────────
 
+    def _leaf_uuid(self) -> str:
+        """未指定起点时的叶节点：uuid 不在 `_all_parent_uuids` 中的最后一个；没有则取末条。
+
+        这是「活跃链从哪里开始」的唯一规则——`trace_chain` 与 `walk_full_chain`
+        共用（两份就是两个口径）。
+        """
+        leaves = [u for u in self._lines_order if u not in self._all_parent_uuids]
+        return leaves[-1] if leaves else self._lines_order[-1]
+
     def trace_chain(self, from_uuid: str | None = None) -> list[T]:
         """从内存 map 沿 parent_uuid 回溯构建链（倒序遍历）。
 
@@ -266,13 +272,7 @@ class TrackedList(Generic[T]):
         if from_uuid is not None:
             start_uuid = from_uuid
         else:
-            # 叶节点：uuid 不在 _all_parent_uuids 中的消息（最后出现的）
-            leaf_candidates = [
-                u for u in self._lines_order if u not in self._all_parent_uuids
-            ]
-            start_uuid = (
-                leaf_candidates[-1] if leaf_candidates else self._lines_order[-1]
-            )
+            start_uuid = self._leaf_uuid()
 
         chain: list[T] = []
         current_uuid = start_uuid
@@ -309,12 +309,7 @@ class TrackedList(Generic[T]):
         if from_uuid is not None:
             start_uuid = from_uuid
         else:
-            leaf_candidates = [
-                u for u in self._lines_order if u not in self._all_parent_uuids
-            ]
-            start_uuid = (
-                leaf_candidates[-1] if leaf_candidates else self._lines_order[-1]
-            )
+            start_uuid = self._leaf_uuid()
 
         chain: list[T] = []
         current_uuid = start_uuid

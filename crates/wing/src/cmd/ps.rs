@@ -52,10 +52,7 @@ pub async fn run_ps(
             emit_sessions(&filtered, json, tree);
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing ps error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("ps", e),
     }
 }
 
@@ -71,17 +68,11 @@ async fn run_ps_watch(
 ) -> ExitCode {
     let (host, port) = match common::ensure_gateway().await {
         Ok(hp) => hp,
-        Err(e) => {
-            eprintln!("wing ps error: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return common::fail("ps", e),
     };
     let http = match common::create_api_client(&host, port) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("wing ps error: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return common::fail("ps", e),
     };
     let palette = ThemePalette::from_config(&AppConfig::load().colors);
     let out = TableOutput::detect();
@@ -114,10 +105,7 @@ pub async fn run_info(session_id: &str, json: bool) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("wing info error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("info", e),
     }
 }
 
@@ -239,29 +227,21 @@ fn order_sessions(sessions: &mut [SessionInfo]) {
 }
 
 async fn fetch_sessions(parent: Option<&str>) -> Result<Vec<SessionInfo>> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
+    let http = common::connect().await?;
     let resp = http.list_sessions_with_parent(parent).await?;
     Ok(resp.sessions)
 }
 
 async fn fetch_session_info(session_id: &str) -> Result<SessionInfoResponse> {
-    let (host, port) = common::ensure_gateway().await?;
-    let http = common::create_api_client(&host, port)?;
-    // 被逐出（不在内存）的会话 404——先 resume 水合再取，与 `wing tail`
-    // 的 404→resume 是同一条惯例（逐出 ≠ 不存在）。
-    match http.get_session_info(session_id).await {
-        Ok(info) => Ok(info),
-        Err(e) if e.is_not_found() => {
-            // resume 失败（含"已归档"）走统一的会话错误文案：归档会话在这里
-            // 得到"恢复它"的指引，而不是裸的 gateway detail。
-            http.resume_session(session_id)
-                .await
-                .map_err(|e| common::session_error(session_id, &e))?;
-            Ok(http.get_session_info(session_id).await?)
-        }
-        Err(e) => Err(e.into()),
-    }
+    let http = common::connect().await?;
+    // 被逐出（不在内存）的会话 404——先 resume 水合再取（逐出 ≠ 不存在）。
+    common::hydrate_on_404(
+        &http,
+        session_id,
+        || http.get_session_info(session_id),
+        |e| e.into(),
+    )
+    .await
 }
 
 /// Render the sessions table (human surface; `now` is injected so the age

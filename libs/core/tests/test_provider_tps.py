@@ -17,11 +17,10 @@ tool call"（无 text、无 thinking）的轮次 ``tokens_per_sec`` 恒为 0；�
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
-from wing.config import ProviderConfig
+from _support import anthropic_provider, anthropic_sse, openai_provider, openai_sse
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.anthropic.stream import _StreamState
 from wing.provider.openai.provider import OpenAICompatProvider
@@ -57,53 +56,12 @@ class _FakeClient:
         return _FakeResponse(self._lines)
 
 
-def _openai_sse(chunks: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for c in chunks:
-        lines.append(f"data: {json.dumps(c)}")
-        lines.append("")
-    lines.append("data: [DONE]")
-    lines.append("")
-    return lines
-
-
-def _anthropic_sse(events: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for ev in events:
-        lines.append(f"event: {ev.get('type', 'unknown')}")
-        lines.append(f"data: {json.dumps(ev)}")
-        lines.append("")
-    return lines
-
-
 async def _replace_client(
     provider: OpenAICompatProvider | AnthropicProvider, lines: list[str]
 ) -> None:
     """关闭真实 httpx client，替换为伪造流。"""
     await provider._client.aclose()
     provider._client = _FakeClient(lines)  # ty: ignore[invalid-assignment]
-
-
-def _openai_provider() -> OpenAICompatProvider:
-    return OpenAICompatProvider(
-        ProviderConfig(
-            name="test-openai-tps",
-            protocol="openai",
-            base_url="https://api.example.com",
-            api_key="sk-test",
-        )
-    )
-
-
-def _anthropic_provider() -> AnthropicProvider:
-    return AnthropicProvider(
-        ProviderConfig(
-            name="test-anthropic-tps",
-            protocol="anthropic",
-            base_url="https://api.anthropic.com",
-            api_key="sk-test",
-        )
-    )
 
 
 # ─── OpenAI-compat ──────────────────────────────────────────────
@@ -151,8 +109,8 @@ class TestOpenAIDecodeTps:
                 "usage": {"prompt_tokens": 10, "completion_tokens": 12},
             },
         ]
-        p = _openai_provider()
-        await _replace_client(p, _openai_sse(chunks))
+        p = openai_provider("test-openai-tps")
+        await _replace_client(p, openai_sse(chunks))
         acc = p.create_accumulator()
 
         usage_tps: float | None = None
@@ -181,8 +139,8 @@ class TestOpenAIDecodeTps:
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
             {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}},
         ]
-        p = _openai_provider()
-        await _replace_client(p, _openai_sse(chunks))
+        p = openai_provider("test-openai-tps")
+        await _replace_client(p, openai_sse(chunks))
         acc = p.create_accumulator()
 
         usage_tps: float | None = None
@@ -229,8 +187,8 @@ class TestAnthropicDecodeTps:
             },
             {"type": "message_stop"},
         ]
-        p = _anthropic_provider()
-        await _replace_client(p, _anthropic_sse(events))
+        p = anthropic_provider("test-anthropic-tps")
+        await _replace_client(p, anthropic_sse(events))
         acc = p.create_accumulator()
 
         final = None
@@ -263,8 +221,8 @@ class TestAnthropicDecodeTps:
             },
             {"type": "message_stop"},
         ]
-        p = _anthropic_provider()
-        await _replace_client(p, _anthropic_sse(events))
+        p = anthropic_provider("test-anthropic-tps")
+        await _replace_client(p, anthropic_sse(events))
         acc = p.create_accumulator()
 
         final = None
@@ -302,8 +260,8 @@ class TestAnthropicDecodeTps:
             },
             {"type": "message_stop"},
         ]
-        p = _anthropic_provider()
-        await _replace_client(p, _anthropic_sse(events))
+        p = anthropic_provider("test-anthropic-tps")
+        await _replace_client(p, anthropic_sse(events))
         acc = p.create_accumulator()
 
         final = None

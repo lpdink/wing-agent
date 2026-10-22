@@ -91,7 +91,7 @@ describe('remote tool frames', () => {
     expect(decodeToolCallRequest({ type: 'tool_call_request', call_id: 'c1' })).toBeNull();
   });
 
-  it('requires the tool_call_request discriminant (review r1 N2)', () => {
+  it('requires the tool_call_request discriminant', () => {
     // Both ends always write `type`; accepting a typeless frame would hide a
     // protocol break (and the frame shares the socket with event payloads).
     expect(decodeToolCallRequest({ call_id: 'c1', name: 'Bash' })).toBeNull();
@@ -108,7 +108,7 @@ describe('remote tool frames', () => {
     expect(JSON.parse(encodeToolCallResult(frame))).toStrictEqual(frame);
   });
 
-  it('requires the tool_call_result discriminant (review r1 N2)', () => {
+  it('requires the tool_call_result discriminant', () => {
     expect(decodeToolCallResult({ call_id: 'c1', result: 'ok' })).toBeNull();
     expect(decodeToolCallResult({ type: 'tool_call_request', call_id: 'c1' })).toBeNull();
   });

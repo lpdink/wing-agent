@@ -5,6 +5,23 @@ socket 级 gateway / 汇总报告），产物是 PR 上的一条 sticky comment�
 阈值依据与排查手册见 **[docs/dev/perf-testing.md](../../docs/dev/perf-testing.md)**；
 本页只是命令与文件形状。
 
+## 本页即「契约」：§1–§8 对照表
+
+`scripts/perf/**` 与 `docs/dev/perf-testing.md` 的注释里写着「契约 §N」——那份独立的契约文档
+已随设计文档一起删除，**编号的落点就是下表**（注意：本节的 §N 与 `perf-testing.md` 自己的
+章节号无关）。
+
+| § | 是什么 | 形状 / 定义处 |
+|---|---|---|
+| §1 | side 描述符（两侧各自的绝对路径集合） | 本页「side.json」；必填字段见 `common.SIDE_FIELDS` |
+| §2 | suite 的调用形态与已知套件（`rust` / `tui` / `gateway`） | 本页「常用命令」；`ab.SUITE_NAMES` |
+| §3 | suite 单轮输出 JSON（低置信也必须写进 `meta`） | 本页「产物与清理」；`common.SuiteOutput` |
+| §4 | 指标 id 与单位（`<suite>.<area>.<case>.<stat>_<unit>`） | `common.UNIT_SUFFIXES`；各族指标见 `perf-testing.md` 第 2 节 |
+| §5 | A/B 编排与四档判定（flat / improved / watch / regression；`\|Δ\| = regress` 算回归） | `ab.py`；`common.verdict_for` |
+| §6 | `ab.json` 顶层字段、`failures[]` 与退出码 | 本页「产物与清理」；`ab.RunContext` |
+| §7 | 评论渲染（`report.py`）与「逐轮原始值」折叠块 | 本页「评论里有什么」 |
+| §8 | `thresholds.json` 的形状与匹配顺序（未知键忽略） | 本页「thresholds.json」；`perf-testing.md` 第 5 节 |
+
 ## 常用命令
 
 ```bash

@@ -17,10 +17,13 @@
 //! `/api/session/get` (the history) only — no WS, no runtime.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+
+mod common;
+
+use common::e2e::{read_request, run_wing, start_fake_gateway};
 
 const SESSION_ID: &str = "20261010-074437-440e10fb";
 
@@ -56,16 +59,6 @@ fn history() -> serde_json::Value {
 // ============================================================
 // Fake gateway: minimal HTTP/1.1
 // ============================================================
-
-async fn serve(listener: TcpListener) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        tokio::spawn(handle_conn(stream));
-    }
-}
-
 async fn handle_conn(mut stream: TcpStream) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -108,94 +101,22 @@ async fn handle_conn(mut stream: TcpStream) {
         }
     }
 }
-
-/// Read one HTTP request head (+ the declared body); the rest stays buffered.
-async fn read_request(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<(String, Vec<u8>)> {
-    loop {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-            let content_length = head
-                .lines()
-                .find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())?
-                })
-                .unwrap_or(0);
-            let body_start = pos + 4;
-            if buf.len() >= body_start + content_length {
-                let body = buf[body_start..body_start + content_length].to_vec();
-                buf.drain(..body_start + content_length);
-                return Some((head, body));
-            }
-        }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-}
-
 // ============================================================
 // Fixtures
 // ============================================================
-
-fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-tail-filter-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
-}
-
-/// Start the fake gateway and point a fresh `$WING_HOME` at it (the CLI reads
-/// its endpoint from `$WING_HOME/core/config.yaml`).
-async fn start_gateway(tag: &str) -> PathBuf {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(serve(listener));
-
-    let home = scratch_home(tag);
-    std::fs::write(
-        home.join("core").join("config.yaml"),
-        format!("gateway:\n  host: 127.0.0.1\n  port: {port}\n"),
-    )
-    .unwrap();
-    home
-}
-
-/// Run the real binary and collect (exit code, stdout, stderr).
-async fn run_wing(args: &[&str], home: &PathBuf) -> (i32, String, String) {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
-    command
-        .args(args)
-        .env("WING_HOME", home)
-        .env_remove("RUST_LOG")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().unwrap();
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
-        Ok(result) => result.unwrap(),
-        Err(_) => panic!("`wing {args:?}` did not exit in 30s"),
-    };
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    )
-}
-
 /// The reported case: user text + assistant text, nothing else.
 const REPORTED_FILTER: &str = "user,content";
 
 // ============================================================
 // Tests
 // ============================================================
+
+/// Bind a port, publish it in a scratch `WING_HOME`, serve the fixed history.
+async fn start_gateway(tag: &str) -> PathBuf {
+    let handler = |stream, ()| handle_conn(stream);
+    let (home, _port) = start_fake_gateway("wing-tail-filter", tag, (), handler).await;
+    home
+}
 
 /// The reported path, text mode: `--filter user,content` prints the two text
 /// elements and not one byte of reasoning / tool call / tool result.

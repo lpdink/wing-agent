@@ -94,10 +94,7 @@ pub async fn run_asks(session_id: &str, wait_secs: u64, json: bool) -> ExitCode 
                 ExitCode::SUCCESS
             }
         }
-        Err(e) => {
-            eprintln!("wing asks error: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => common::fail("asks", e),
     }
 }
 

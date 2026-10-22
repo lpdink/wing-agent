@@ -54,7 +54,7 @@ export function TabBar({ tabs, activeSessionId }: TabBarProps): ReactElement {
         aria-label="Session history"
         title="Session history"
         // The history entry point is the `/ss` command: the host fetches the list and
-        // opens the picker (`interfaces.md`). The webview never opens it itself, and
+        // opens the picker. The webview never opens it itself, and
         // with no session there is nothing to ask about.
         disabled={activeSessionId === null}
         onClick={() => {

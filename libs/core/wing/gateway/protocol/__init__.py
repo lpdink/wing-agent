@@ -9,7 +9,9 @@
 这些 Pydantic models 同时用于：
   - 请求/响应验证
   - OpenAPI schema 生成
-  - Rust client 代码生成（通过 openapi-generator）
+
+Rust 侧的 ``crates/wing-api-client/src/models.rs`` 是**手写镜像**（没有 codegen 流水线）：
+两侧用同一批用例对齐，改字段时两边一起改。
 
 按端点族分四个子模块：``ws``（WS 帧）· ``session``（``/api/session/*`` 请求与响应）·
 ``system``（系统面：命令 / 模型 / agent / 重载 / 工具 / 健康 / 远程工具注册）·

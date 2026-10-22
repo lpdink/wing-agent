@@ -49,17 +49,11 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Ruff lint
-        run: uv run ruff check libs/
-
-      - name: Ruff format check
-        run: uv run ruff format --check libs/
-
-      - name: Type check (ty)
-        run: uv run ty check libs
-
-      - name: Dead code detection (vulture)
-        run: uv run vulture libs/ --min-confidence 70 --exclude .venv/
+      # 与本地**同一条命令**：ruff 覆盖 libs/ + scripts/、vulture 走 60 档 + 白名单
+      # （判据在 pyproject.toml 与 docs/dev/coverage.md）。分步调用会让两侧口径再次漂移，
+      # 所以这里只调 make；失败定位靠 make 回显的每条 `uv run`。
+      - name: Static checks (ruff / ty / vulture)
+        run: make check-python
 
       # core + SDK 两套单测（总量覆盖率只作参考，见 docs/dev/coverage.md）。
       # 必须走带覆盖率的 target：本地的 `make test-python` 为提速不带 `--cov`，

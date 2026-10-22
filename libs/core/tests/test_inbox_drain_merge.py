@@ -12,18 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
+from _support import mock_generate
 from wing.event_bus import event_bus
-from wing.schema import LLMResponse, LLMUsage, TextBlock
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -32,18 +24,6 @@ def runtime():
     from wing.runtime import WingRuntime
 
     return WingRuntime()
-
-
-async def _mock_generate(*args: Any, **kwargs: Any):
-    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。
-
-    契约合规：最终 chunk 必须携带权威 content_blocks（无效轮次会触发重试）。
-    """
-    yield LLMResponse(
-        content="ok",
-        content_blocks=[TextBlock(text="ok")],
-        usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
-    )
 
 
 class TestDrainAndMerge:
@@ -77,7 +57,7 @@ class TestDrainAndMerge:
         )
 
         # Mock LLM 并手动触发一次 _process_turn
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         # 断言：context 中只有一条 user message，内容为三者拼接
@@ -118,7 +98,7 @@ class TestDrainAndMerge:
 
         event_bus.subscribe(_capture)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         # 所有事件应携带首条消息的 request_id
@@ -144,7 +124,7 @@ class TestDrainAndMerge:
             Inbound(message=Message(role="user", content="solo"), request_id="req-1")
         )
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         messages = agent.context_manager._messages.active_chain

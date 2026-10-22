@@ -1,4 +1,4 @@
-"""history.jsonl 解析与不变量对账（tasks 5.5）。
+"""history.jsonl 解析与不变量对账。
 
 纯单测：手工构造 ``history.jsonl`` / ``metadata.json`` 写入 ``tmp_path``，
 不起网关。覆盖：
@@ -59,7 +59,7 @@ def message(
     """一条 Message 记录。
 
     默认产出**落盘规范形**：assistant 只带 ``content_blocks``（派生扁平字段
-    不落盘，见 ``store/base.canonical_record``）。``legacy=True`` 还原本变更
+    不落盘，见 ``store/records.py`` 的 ``canonical_record``）。``legacy=True`` 还原本变更
     之前的旧形态（同时带扁平字段），用于存量兼容断言。
     """
     record: dict[str, Any] = {

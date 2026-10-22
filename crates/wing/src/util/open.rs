@@ -85,9 +85,7 @@ pub struct OpenPlan {
 /// Plausible editor CLIs that accept a `path:line[:col]` argument.
 ///
 /// The platform *default* program cannot jump to a line, so a suffix can only
-/// be honoured through a known editor. Declared for every platform (not just
-/// the host) so the table is unit-testable wherever the tests run.
-#[allow(dead_code)]
+/// be honoured through a known editor.
 const GUI_EDITORS: &[(&str, &str)] = &[("code", "-g"), ("subl", ""), ("zed", "")];
 
 /// The platform's "open this with the default application" launcher.

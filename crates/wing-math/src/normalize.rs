@@ -4,7 +4,7 @@
 //! 这个模块做一遍**词法级重写**：把科学写作里高频、但语义上不需要渲染细节的写法，改写成
 //! 上游认识的等价形式。每条规则都在注释里给了实测理由，并且都有对应单测。
 //!
-//! 规则编号（`N1`–`N11`，与设计文档 `design.md → D6` 一致）：
+//! 规则编号（`N1`–`N11`）：
 //!
 //! - `N1` 剥掉整体包裹的 `$$…$$` / `$…$` / `\[…\]` / `\(…\)`（防御性，正常路径由上层剥）；
 //! - `N2`/`N3`/`N4` 删掉无渲染语义的命令（`\displaystyle` / `\limits` / `\bigl` …）；
@@ -264,7 +264,7 @@ fn rewrite(chars: &[char], start: usize, end: usize, out: &mut String) {
         };
 
         match name.as_str() {
-            // N9：连同 `{...}` 参数一起删除
+            // 连同 `{...}` 参数一起删除
             n if DROP_WITH_ARG.contains(&n) => {
                 i = skip_optional_brace_arg(chars, after, end);
             }
@@ -292,7 +292,7 @@ fn rewrite(chars: &[char], start: usize, end: usize, out: &mut String) {
                 out.push(ch);
                 i = after;
             }
-            // N6：`\left` / `\right` 后面接定界符
+            // `\left` / `\right` 后面接定界符
             "left" | "right" => {
                 let (text, next) = rewrite_delimiter(chars, after, end);
                 out.push('\\');
@@ -300,7 +300,7 @@ fn rewrite(chars: &[char], start: usize, end: usize, out: &mut String) {
                 out.push_str(&text);
                 i = next;
             }
-            // N7：`\operatorname{X}` → `\text{X}`
+            // `\operatorname{X}` → `\text{X}`
             "operatorname" => match brace_arg(chars, skip_star(chars, after, end)) {
                 Some((content, next)) => {
                     out.push_str("\\text{");

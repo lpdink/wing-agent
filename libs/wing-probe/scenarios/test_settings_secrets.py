@@ -1,6 +1,6 @@
 """密文（api_key）的只写不回显：get 搜不到真值 / hint 是末 4 位 / `null` = 保留。
 
-密文语义（总设计 §7.5）的契约红线：**前端必须原样回传 `null`**——`null` = 保留磁盘
+密文语义的契约红线：**前端必须原样回传 `null`**——`null` = 保留磁盘
 现值，丢键 = 从文件移除（必填字段随即成为 problem）。保存路径上这个分支写错
 （例如把 `null` 当成"空串"或"删除键"）不会有任何直观报错：用户下次调用才 401。
 
@@ -29,7 +29,7 @@ import yaml
 
 from wing_probe import HttpCall, Probe, Turn
 
-#: 场景私有 model 名。
+#: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 SECRETS_MODEL = "probe/settings-secrets"
 
 #: env 生成的初始 provider key（``DEFAULT_PROVIDER_API_KEY``）。

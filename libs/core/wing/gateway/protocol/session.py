@@ -16,6 +16,11 @@ from wing.event.query_response import BranchTargetInfo
 from wing.schema import MediaRef
 from wing.session.override import AgentOverride
 
+#: ``reasoning_effort`` 的取值域文本（只服务本文件那两处 ``description``）。
+#: 另有两处独立声明：``session/override.py`` 的字段描述、``config/models.py`` 的
+#: ``choices``（刻意只有 ``low`` / ``medium`` / ``high`` / ``max``，不含 ``xhigh``）。
+_EFFORT_VALUES = "low|medium|high|xhigh|max"
+
 # 与 `wing.event.SessionInfo.tag_meta` 同一记录类型（线格式 = 持久记录形态，
 # 刻意不另立一份：见 `wing/event/base.py` 的同一说明）。ArchivedSession 同理：
 # 归档条目就是存储层模型（含投影期补全的展示名），不另立一份镜像。
@@ -168,7 +173,7 @@ class UpdateSessionRequest(BaseModel):
     title: str | None = Field(default=None, description="设置 session 名称")
     thinking: bool | None = Field(default=None, description="开关 thinking 模式")
     reasoning_effort: str | None = Field(
-        default=None, description="推理力度: low|medium|high|xhigh|max"
+        default=None, description=f"推理力度: {_EFFORT_VALUES}"
     )
     yolo: bool | None = Field(default=None, description="开关 yolo 模式")
     workspace: str | None = Field(default=None, description="切换工作目录路径")
@@ -358,7 +363,7 @@ class SessionInfoResponse(BaseModel):
     context_window_tokens: int = Field(description="上下文窗口大小")
     thinking: bool = Field(description="thinking 模式是否开启")
     reasoning_effort: str | None = Field(
-        default=None, description="推理力度: low|medium|high|xhigh|max"
+        default=None, description=f"推理力度: {_EFFORT_VALUES}"
     )
     yolo: bool = Field(description="yolo 模式是否开启")
     session_name: str | None = Field(default=None, description="session 名称")
@@ -441,7 +446,7 @@ class UpdateSessionResponse(BaseModel):
 
 
 # ============================================================
-# 缓存账本（GET /api/session/cache）——见 contract §6
+# 缓存账本（GET /api/session/cache）——字段语义见 docs/dev/cache-accounting.md
 # ============================================================
 
 
@@ -479,7 +484,7 @@ class CacheForkDetail(BaseModel):
     """
 
     path: str | None = Field(
-        default=None, description="来源文件路径（contract §1 的 src.path）"
+        default=None, description="来源文件路径（缓存账本的 src.path）"
     )
     mtime: str | None = Field(
         default=None, description="来源文件 mtime（本地 naive ISO）"
@@ -514,9 +519,9 @@ class CacheForkRow(BaseModel):
         default=None, description="≈ 丢失的 prompt token（估算；无参照 → null）"
     )
     segments_affected: int = Field(
-        description="最近一条调用（分叉的对照侧）fork 点之后的段数（contract §4 的 len(C) - k）"
+        description="最近一条调用（分叉的对照侧）fork 点之后的段数（len(C) - k）"
     )
-    verdict: str = Field(description="该次调用的缓存判定（contract §4）")
+    verdict: str = Field(description="该次调用的缓存判定")
     detail: CacheForkDetail = Field(
         default_factory=CacheForkDetail, description="分叉点证据"
     )
@@ -533,7 +538,7 @@ class CacheCallRow(BaseModel):
     expected: int | None = Field(
         default=None, description="理论可命中 token；null = 无参照"
     )
-    verdict: str = Field(default="", description="缓存判定（contract §4）")
+    verdict: str = Field(default="", description="缓存判定")
     fp: str = Field(default="", description="本次调用的前缀指纹")
 
 

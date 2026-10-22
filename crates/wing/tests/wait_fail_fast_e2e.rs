@@ -17,12 +17,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
+
+mod common;
+
+use common::e2e::{read_request, start_fake_gateway};
 
 /// The client's per-frame receive limit (tungstenite default).
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -42,16 +46,6 @@ enum Scenario {
 // ============================================================
 // Fake gateway: minimal HTTP/1.1 + WS upgrade
 // ============================================================
-
-async fn serve(listener: TcpListener, scenario: Scenario) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        tokio::spawn(handle_conn(stream, scenario));
-    }
-}
-
 async fn handle_conn(mut stream: TcpStream, scenario: Scenario) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -138,37 +132,6 @@ async fn drive_ws(mut ws: WebSocketStream<TcpStream>, scenario: Scenario) {
         }
     }
 }
-
-/// Read one HTTP request head (+ body) from `stream`, buffering leftovers.
-async fn read_request(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<(String, Vec<u8>)> {
-    loop {
-        if let Some(pos) = find(buf, b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-            let content_length = header_value(&head, "content-length")
-                .and_then(|v| v.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let body_start = pos + 4;
-            if buf.len() >= body_start + content_length {
-                let body = buf[body_start..body_start + content_length].to_vec();
-                buf.drain(..body_start + content_length);
-                return Some((head, body));
-            }
-        }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 /// Case-insensitive header lookup over the raw request head (header *values*
 /// are case-sensitive — e.g. the base64 `Sec-WebSocket-Key`).
 fn header_value(head: &str, name: &str) -> Option<String> {
@@ -183,28 +146,9 @@ fn header_value(head: &str, name: &str) -> Option<String> {
 // ============================================================
 // Test harness
 // ============================================================
-
-fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-e2e-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
-}
-
-/// Start the fake gateway and point a fresh `$WING_HOME` at it.
+/// Bind a port, publish it in a scratch `WING_HOME`, serve `scenario` there.
 async fn start_gateway(scenario: Scenario, tag: &str) -> (PathBuf, u16) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(serve(listener, scenario));
-
-    // The CLI reads its gateway endpoint from $WING_HOME/core/config.yaml.
-    let home = scratch_home(tag);
-    std::fs::write(
-        home.join("core").join("config.yaml"),
-        format!("gateway:\n  host: 127.0.0.1\n  port: {port}\n"),
-    )
-    .unwrap();
-    (home, port)
+    start_fake_gateway("wing-e2e", tag, scenario, handle_conn).await
 }
 
 #[tokio::test]

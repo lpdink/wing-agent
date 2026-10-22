@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """TUI 端到端显示延迟 suite（perf-ci 04）：复用 ``scripts/demo/latency.py`` 的核心测量。
 
-契约（§2 CLI / §3 输出 JSON）见 perf-ci 任务书；口径（指标映射、档位、环境隔离与清理、
-取舍理由）见 04 步骤的 ``design.md``。一句话：真网关（side 的 wing-gateway）+ 真 TUI
-（side 的 release wing），假 Provider 按 3000 tok/s 灌语料并每 400 帧插一行
+契约（§2 CLI / §3 输出 JSON）见 ``scripts/perf/README.md`` 的 § 对照表；口径（指标映射、
+档位、环境隔离与清理）见 ``docs/dev/perf-testing.md`` 的 tui 一节。一句话：真网关（side 的
+wing-gateway）+ 真 TUI（side 的 release wing），假 Provider 按 3000 tok/s 灌语料并每 400 帧插一行
 ``⟦M#####⟧`` 标记，``lag = 标记出现在 pty 字节流 − Provider 发射``。
 
 指标只取 3000 tok/s 档（``--quick`` 单次 6s；默认档额外跑一次 30000 tok/s，仅信息性、
@@ -60,8 +60,8 @@ FULL_SECONDS = 10.0
 QUICK_REPEATS = 1
 FULL_REPEATS = 3
 MARKER_EVERY = 400
-#: 首击后这么久 provider 还是零帧（emit log 为空）→ 补发同一句 prompt（见 design.md
-#: D7「启动竞态」：TUI 启动期的终端查询阶段会冲掉先到的按键）。守卫是"provider 零帧"这个
+#: 首击后这么久 provider 还是零帧（emit log 为空）→ 补发同一句 prompt（「启动竞态」：
+#: TUI 启动期的终端查询阶段会冲掉先到的按键）。守卫是"provider 零帧"这个
 #: 代理信号，不是"prompt 未被消费"的直接证据——首帧一出来就停止补发（实测"网关开始路由 →
 #: provider 首帧"约 60ms，余量 10x+）。只给本套件开；CLI 的默认行为不变
 #: （`latency.run_rate` 的 `resend_after=None`）。
@@ -72,7 +72,7 @@ LOW_COVERAGE = 0.6
 #: 一次测量的**可用样本**判据：这一轮没有任何有限 lag 值（`min/p50/p99/max` 全 NaN）。
 #: 两种成因都算：provider 没发帧（prompt 没送进去）与 provider 发了帧但 TUI 一个标记都没
 #: 渲染出来（coverage=0）——都是"这一轮没有可用的显示延迟样本"，不是性能信号（pty fork →
-#: 首屏在冷启动时可花 4s+，见 design.md D7）。同一次测量最多尝试 `MAX_ATTEMPTS` 次
+#: 首屏在冷启动时可花 4s+）。同一次测量最多尝试 `MAX_ATTEMPTS` 次
 #: （= 1 次重跑）；仍然没有样本才作废（quick 档没有备用测量 → suite 失败）。
 MAX_ATTEMPTS = 2
 

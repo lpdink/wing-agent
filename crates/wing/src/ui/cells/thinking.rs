@@ -86,6 +86,33 @@ pub struct ThinkingBlock {
     display_elapsed: Duration,
     /// 刷光相位 0..1（tick 写入；渲染只读 —— 所以渲染是纯函数、可测）。
     sweep_phase: f32,
+    /// 上一次构造的标题行与它的输入键（[`LabelKey`]）。
+    ///
+    /// 同一帧里高度投影与帧投影会各要一次标题行，跨帧也常在输入没变时重问；
+    /// 命中时复用上次的行（一次 clone）而不是重跑刷光混色。
+    label_cache: std::cell::RefCell<Option<(LabelKey, Line<'static>)>>,
+}
+
+/// 标题行的输入键 —— [`ThinkingBlock::label_line`] 是纯函数，输出只由这些量决定。
+///
+/// 键里没有 `mode` / `explicit` 本身，只有它们唯一的作用：解析后的展开态（决定提示方向）
+/// 与「是否显示提示」。调色板同理，只取 `label_line` 读的那两个槽位。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LabelKey {
+    width: u16,
+    /// 刷光相位的位模式（`f32` 没有 `Eq`）。
+    sweep_phase: u32,
+    elapsed: Duration,
+    /// 计时中（措辞 + 刷光）。
+    active: bool,
+    /// 有计时数据（`false` = 重放的历史块，不带秒数）。
+    timed: bool,
+    /// 解析后的展开态（提示的方向）。
+    expanded: bool,
+    /// 是否显示 `Ctrl+O` 提示。
+    hint: bool,
+    dim: Color,
+    text: Color,
 }
 
 impl ThinkingBlock {
@@ -97,6 +124,7 @@ impl ThinkingBlock {
             ended_at: None,
             display_elapsed: Duration::ZERO,
             sweep_phase: 0.0,
+            label_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -206,6 +234,35 @@ impl ThinkingBlock {
     /// （由 `mode` + `explicit` 解析出的当前展开态）：展开中 `· Ctrl+O 折叠`、
     /// 折叠中 `· Ctrl+O 展开`。
     pub fn label_line(
+        &self,
+        palette: &ThemePalette,
+        width: u16,
+        mode: ThinkingMode,
+        explicit: Option<bool>,
+    ) -> Line<'static> {
+        let key = LabelKey {
+            width,
+            sweep_phase: self.sweep_phase.to_bits(),
+            elapsed: self.display_elapsed,
+            active: self.is_active(),
+            timed: self.started_at.is_some(),
+            expanded: mode.expanded(explicit),
+            hint: self.is_active() && explicit.is_none(),
+            dim: palette.dim,
+            text: palette.text,
+        };
+        if let Some((cached_key, line)) = self.label_cache.borrow().as_ref()
+            && *cached_key == key
+        {
+            return line.clone();
+        }
+        let line = self.build_label_line(palette, width, mode, explicit);
+        *self.label_cache.borrow_mut() = Some((key, line.clone()));
+        line
+    }
+
+    /// [`label_line`](Self::label_line) 的本体（无缓存）。
+    fn build_label_line(
         &self,
         palette: &ThemePalette,
         width: u16,
@@ -386,6 +443,7 @@ mod tests {
     use super::*;
     use crate::config::rendering::ThinkingMode;
     use crate::render::markdown::SegmentKind;
+    use crate::render::test_support::text_of;
     use ratatui::style::Modifier;
 
     fn p() -> ThemePalette {
@@ -416,11 +474,102 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    fn text_of(lines: &[Line<'static>]) -> String {
-        lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
+    // ── 标题行 ───────────────────────────────────────────────
+
+    /// 标题行的缓存在其**全部**输入上失效：刷光相位、宽度、展开态各改一项，行都要变；
+    /// 改回去必须与原来逐 span 相同（缓存只省重算，不改输出）。
+    #[test]
+    fn the_label_cache_tracks_every_input() {
+        let mut block = ThinkingBlock::new();
+        block.start(Instant::now());
+        block.append("reasoning");
+        block.tick(Instant::now());
+        let palette = p();
+
+        block.set_sweep_phase(0.25);
+        let base = block.label_line(&palette, 80, ThinkingMode::Visible, None);
+
+        block.set_sweep_phase(0.75);
+        let shifted = block.label_line(&palette, 80, ThinkingMode::Visible, None);
+        assert_ne!(base, shifted, "刷光相位变了，混色必须跟着变");
+
+        block.set_sweep_phase(0.25);
+        assert_eq!(
+            block.label_line(&palette, 80, ThinkingMode::Visible, None),
+            base,
+            "相位改回去 → 逐 span 相同"
+        );
+
+        // 窄到只剩措辞：截断由宽度决定。
+        let narrow = block.label_line(&palette, 6, ThinkingMode::Visible, None);
+        assert_ne!(narrow, base, "宽度变了要重新截断");
+        assert!(
+            narrow.width() <= 6,
+            "标题行在任何宽度下都不许溢出：{:?}",
+            narrow.to_string()
+        );
+
+        // 展开态决定 Ctrl+O 提示的方向。
+        let collapsed = block.label_line(&palette, 80, ThinkingMode::Hidden, None);
+        assert_ne!(collapsed, base, "折叠态的提示文案不同");
+        assert!(
+            collapsed.to_string().contains("Ctrl+O 展开"),
+            "折叠态指向展开：{:?}",
+            collapsed.to_string()
+        );
+
+        // 按过一次 Ctrl+O 之后提示退场。
+        let quiet = block.label_line(&palette, 80, ThinkingMode::Visible, Some(true));
+        assert!(
+            !quiet.to_string().contains("Ctrl+O"),
+            "按过 Ctrl+O 之后不再提示：{:?}",
+            quiet.to_string()
+        );
     }
 
-    // ── 标题行 ───────────────────────────────────────────────
+    /// 秒数与调色板也在键里：秒数每秒变一次，漏进键就会「秒数卡住」。
+    #[test]
+    fn the_label_cache_keys_on_the_elapsed_time_and_the_palette() {
+        let palette = p();
+        let start = Instant::now();
+        let mut block = ThinkingBlock::new();
+        block.start(start);
+        block.append("reasoning");
+
+        block.tick(start + Duration::from_millis(1_200));
+        // 相位由 tick 推进，单独钉住它，才能把差异归到秒数上。
+        block.set_sweep_phase(0.5);
+        let first = block.label_line(&palette, 80, ThinkingMode::Visible, None);
+        assert!(first.to_string().contains("1s"), "{:?}", first.to_string());
+
+        block.tick(start + Duration::from_millis(2_400));
+        block.set_sweep_phase(0.5);
+        let second = block.label_line(&palette, 80, ThinkingMode::Visible, None);
+        assert_ne!(first, second, "秒数变了，标题行必须跟着变");
+        assert!(
+            second.to_string().contains("2s"),
+            "{:?}",
+            second.to_string()
+        );
+
+        // 两个槽位各钉一次，而且每次只改一个（否则「重建」本身就够让输出变，改的是哪个
+        // 槽位都看不出来）。`text` 必须挑一个真能翻档位的值：默认与 `White` 同属暗底
+        // 方向，改它不产生差异。
+        let default_line = block.label_line(&palette, 80, ThinkingMode::Visible, None);
+
+        let mut darker_text = palette;
+        darker_text.text = ratatui::style::Color::Black;
+        let text_line = block.label_line(&darker_text, 80, ThinkingMode::Visible, None);
+        assert_ne!(default_line, text_line, "高光档位变了（亮底主题）");
+
+        let mut other_base = darker_text;
+        other_base.dim = ratatui::style::Color::Magenta;
+        assert_ne!(
+            text_line,
+            block.label_line(&other_base, 80, ThinkingMode::Visible, None),
+            "混色基色变了"
+        );
+    }
 
     #[test]
     fn hidden_label_shows_live_seconds() {

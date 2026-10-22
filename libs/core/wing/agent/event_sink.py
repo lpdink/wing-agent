@@ -311,7 +311,7 @@ class AgentEventSink:
         `provider` 是本次调用真正使用的 provider 名（ReAct 层在发声点取值；池 reload
         换新时它可能与"此刻再解析"的结果不同，以实际服务这轮流的那一个为准）。
         `cache_*` 由 ReAct 层在记账的同一次调用里算好传入——账本记录与直播字段
-        因此永远同源（contract §5）；缺省值 = 未计算，旧消费方行为不变。
+        因此永远同源；缺省值 = 未计算，旧消费方行为不变。
         """
         self.emit(
             LLMCallMetricsEvent(

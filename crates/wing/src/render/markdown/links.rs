@@ -302,8 +302,9 @@ impl ComposedLines {
     ///
     /// `Paragraph` with `Wrap { trim: false }` never splits a line that fits,
     /// so when this holds the widget's row arithmetic is exact and link columns
-    /// computed here land on the right cells. It is computed lazily (the
-    /// producer only asks when the cell actually has links).
+    /// computed here land on the right cells. The cell asks unconditionally — the
+    /// same predicate is its blit gate — while the link hit boxes only use the
+    /// answer when the line set carries a span.
     pub fn rows_are_exact(&self, width: u16) -> bool {
         self.lines.iter().all(|line| line.width() <= width as usize)
     }

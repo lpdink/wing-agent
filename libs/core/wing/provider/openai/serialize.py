@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from wing.provider.base import mark_last_cache_control
 from wing.provider.media import (
     FOLLOWUP_GUIDE_TEXT,
     group_plans_by_message,
@@ -23,6 +24,9 @@ from wing.schema.cache import history_label
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
     from wing.provider.base import RequestOptions
+
+_IMAGE_PART_TYPES: frozenset[str] = frozenset({"image_url"})
+"""cache_control 不落在图片 block 上——本协议的图片 part 类型名。"""
 
 
 class _SerializeMixin:
@@ -149,18 +153,14 @@ class _SerializeMixin:
     def _apply_cache_control(openai_messages: list[dict]) -> None:
         """为最后一条消息的最后一个 content block 追加 cache_control 标记。
 
-        落点恒为「最后一个 part；仅当它是图片（``image_url``）时回退到其前面
-        最后一个非图片 part」——因此从尾部反向扫描（cache_control 是 OpenAI
-        兼容网关的非标准扩展字段，不落在图片上；从头部正向扫描会把标记提前到
-        第一个非图片 part，缓存前缀变短）；整条消息没有任何非图片 part（纯图
-        消息）时跳过本次标记。
+        ``content`` 是裸字符串时先归一成单个 text block（OpenAI 兼容网关的既有
+        写法，cache_control 只能挂在块上）；块数组的落点规则见
+        :func:`wing.provider.base.mark_last_cache_control`。
         """
         if not openai_messages:
             return
         last_msg = openai_messages[-1]
         content = last_msg.get("content")
-        if content is None:
-            return
         if isinstance(content, str):
             last_msg["content"] = [
                 {
@@ -169,9 +169,5 @@ class _SerializeMixin:
                     "cache_control": {"type": "ephemeral"},
                 }
             ]
-        elif isinstance(content, list):
-            for part in reversed(cast("list[dict]", content)):
-                if part.get("type") == "image_url":
-                    continue
-                part["cache_control"] = {"type": "ephemeral"}
-                return
+            return
+        mark_last_cache_control(openai_messages, image_types=_IMAGE_PART_TYPES)

@@ -7,6 +7,7 @@ import struct
 
 import pytest
 
+from _support import png_bytes
 from wing.media import (
     BUDGET_PLACEHOLDER,
     NO_VISION_PLACEHOLDER,
@@ -27,17 +28,6 @@ from wing.schema import MediaRef, Message
 
 
 ########## 构造测试用图片头部（纯字节，不解码）
-
-
-def png_bytes(width: int, height: int) -> bytes:
-    # sig(8) + chunk len(4) + "IHDR"(4) + w(4) + h(4) + 其余 IHDR 字段
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + struct.pack(">I", 13)
-        + b"IHDR"
-        + struct.pack(">II", width, height)
-        + b"\x08\x06\x00\x00\x00"
-    )
 
 
 def gif_bytes(width: int, height: int, version: bytes = b"GIF89a") -> bytes:

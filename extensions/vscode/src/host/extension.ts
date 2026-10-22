@@ -51,7 +51,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, chatView, {
       // Keep the DOM (and the composer draft) alive when the user switches away
       // from the sidebar. The bridge does not depend on it: a re-created webview
-      // re-runs `ready` → `hydrate` (design.md D9 in step 01).
+      // re-runs `ready` → `hydrate`.
       webviewOptions: { retainContextWhenHidden: true },
     }),
     ...registerCommands(host),

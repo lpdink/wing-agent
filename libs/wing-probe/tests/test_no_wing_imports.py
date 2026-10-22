@@ -1,6 +1,6 @@
 """门禁自证：``libs/wing-probe/`` 全源码不得 import wing。
 
-覆盖 tasks 1.6 / spec「import 门禁」。每次 `test-probe` 运行都执行——
+覆盖 import 门禁。每次 `test-probe` 运行都执行——
 probe 与产品共享内部结构的退化必须以红灯暴露，而不是静默通过。
 """
 

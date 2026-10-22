@@ -993,7 +993,7 @@ pub struct ToolsListResponse {
 // Settings — GET /api/settings/{schema,get,status} · POST /api/settings/set
 // ============================================================
 //
-// 镜像 Python `wing.gateway.protocol.settings`（design.md §9，已冻结）。两条不变量贯穿本节：
+// 镜像 Python `wing.gateway.protocol.settings`（已冻结）。两条不变量贯穿本节：
 //
 // 1. **前向兼容**：未知 enum 值落 `Unknown(String)`（原样保留拼写，反序列化永不失败）；
 //    多余字段一律忽略（绝不用 `deny_unknown_fields`）；可选字段缺失时按 §9 声明的默认值补齐。
@@ -1206,7 +1206,7 @@ pub struct SettingNode {
     /// 面板可编辑（`false` = 灰显只读）。
     #[serde(default = "default_true")]
     pub editable: bool,
-    /// 预留：废弃说明。本期不消费（design.md 非目标）。
+    /// 预留：废弃说明。本期不消费。
     #[serde(default)]
     pub deprecated: Option<String>,
 
@@ -1272,15 +1272,7 @@ impl SettingNode {
     /// - 空路径 = 自己。
     pub fn node_at(&self, path: &str) -> Option<&SettingNode> {
         let steps = parse_path(path)?;
-        // 根名可选：只有"首段不命中子节点"时才把它当作前缀吃掉。
-        let steps: &[PathStep] = match steps.as_slice() {
-            [PathStep::Key(first), rest @ ..]
-                if !first.is_empty() && first == &self.key && self.child(first).is_none() =>
-            {
-                rest
-            }
-            all => all,
-        };
+        let steps = self.strip_root_prefix(&steps);
         let mut node = self;
         for step in steps {
             node = match step {
@@ -1289,6 +1281,21 @@ impl SettingNode {
             };
         }
         Some(node)
+    }
+
+    /// 根名是可选的路径前缀：首段等于本节点的 `key`、且没有同名子节点时吃掉它。
+    ///
+    /// [`Self::node_at`] 与 `wing config` 的路径规范化共用这一条判据——各判一半会让
+    /// "目录寻址认这个前缀、文档操作不认"重现。
+    pub fn strip_root_prefix<'a>(&self, steps: &'a [PathStep]) -> &'a [PathStep] {
+        match steps {
+            [PathStep::Key(first), rest @ ..]
+                if !first.is_empty() && first == &self.key && self.child(first).is_none() =>
+            {
+                rest
+            }
+            all => all,
+        }
     }
 
     /// `variants`（union 元素）列表按**文档实际值**选形态：取声明序里第一个 JSON 形状与
@@ -1402,8 +1409,8 @@ pub fn parse_path(path: &str) -> Option<Vec<PathStep>> {
             Some("") => steps.push(PathStep::Element),
             Some(raw) => {
                 // §5.2 的下标是**非负十进制整数**，没有符号位：`usize::from_str` 会接受
-                // 前导 `+`（`a[+1]`），而 Python 侧按 `str.isdigit()` 会拒 —— 两边同口径
-                // （AD6）。溢出仍由 `parse` 的 `Err` 兜住。
+                // 前导 `+`（`a[+1]`），而 Python 侧按 `str.isdigit()` 会拒 —— 两边同口径。
+                // 溢出仍由 `parse` 的 `Err` 兜住。
                 if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
                     return None;
                 }
@@ -1465,7 +1472,7 @@ pub struct SettingsSchemaResponse {
 /// 一条配置问题（镜像 Python `ConfigProblem`）。
 ///
 /// `kind` 保持裸字符串（§9 就是 `kind: str`）：种类只用于展示与排序，**未知种类必须容忍**
-/// ——枚举化会多一个 fallback 变体而无消费者。已知种类见 design.md §7.2 的 `ProblemKind`。
+/// ——枚举化会多一个 fallback 变体而无消费者。已知种类见 `ProblemKind`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingProblem {
     /// 规范路径（含具体下标）；`None` = 文档级问题（如 YAML 语法错，无法定位到单个字段）。
@@ -1536,7 +1543,7 @@ pub struct SettingsSetRequest {
 /// POST /api/settings/set 响应——保存回执。
 ///
 /// **校验失败不是 HTTP 4xx**：请求本身合法，是用户填的内容不合法，所以走
-/// `HTTP 200 + ok=false + problems`（design.md D16）。HTTP 错误码只留给协议级失败
+/// `HTTP 200 + ok=false + problems`。HTTP 错误码只留给协议级失败
 /// （409 指纹不匹配 / 401·403 鉴权 / 500 写盘失败）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsSetResponse {
@@ -1560,7 +1567,7 @@ pub struct SettingsSetResponse {
     /// 备份文件路径（保存前复制的 `.bak`）；没有旧文件时为 `None`。
     #[serde(default)]
     pub backup_path: Option<String>,
-    /// 保存过程中**必须告知用户**的非致命说明（AD13：当前文件无法解析时，
+    /// 保存过程中**必须告知用户**的非致命说明（当前文件无法解析时，
     /// 密文无从回填 —— 回执里要说明"旧密钥没有保留，请重新填写"）。
     /// 老网关不带这个字段，所以默认空。
     #[serde(default)]
@@ -2672,7 +2679,7 @@ mod settings_tests {
 
     // ── 响应 / 请求形状 ───────────────────────────────────────
 
-    /// AD13：`warnings` 是**后加字段**，两种响应都要能解码 —— 带它的（新网关
+    /// `warnings` 是**后加字段**，两种响应都要能解码 —— 带它的（新网关
     /// 修好了坏文件）与不带它的（老网关 / 一切正常）在 Rust 侧都是合法形状。
     #[test]
     fn settings_set_response_decodes_with_and_without_warnings() {
@@ -2694,7 +2701,7 @@ mod settings_tests {
         assert_eq!(
             resp.backup_path.as_deref(),
             Some("/home/u/.wing/core/config.yaml.bak"),
-            "坏文件照常备份（AD13）"
+            "坏文件照常备份"
         );
 
         let without = r#"{
@@ -2773,7 +2780,7 @@ mod settings_tests {
         assert!(status.problems.is_empty());
         assert!(status.fingerprint.is_none());
 
-        // 保存失败：HTTP 200 + ok=false + problems（D16）；文档级问题的 path 为 null
+        // 保存失败：HTTP 200 + ok=false + problems；文档级问题的 path 为 null
         let resp: SettingsSetResponse = serde_json::from_str(
             r#"{
                 "ok": false,

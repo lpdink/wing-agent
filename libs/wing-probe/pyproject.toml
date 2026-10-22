@@ -1,7 +1,7 @@
 # wing-probe — 确定性集成测试基础设施（假 Provider + 断言库 + 场景）
 #
 # 独立包，硬约束：不得 import wing（由 wing_probe/guard.py 门禁强制）。
-# 详见 openspec/changes/wing-probe/design.md（D1–D12）。
+# 详见 docs/dev/probe-testing.md。
 
 [project]
 name = "wing-probe"
