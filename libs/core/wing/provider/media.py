@@ -2,7 +2,7 @@
 """请求期媒体投影与序列化原语（OpenAI 兼容 / Anthropic 两个协议共用）。
 
 为什么独立成模块（而不是放进 wing/media.py 或 provider/base.py）：
-- wing/media.py 是「纯函数、不依赖 config」的地基层（step 01 的边界）——
+- wing/media.py 是「纯函数、不依赖 config」的地基层——
   本模块要读 provider 配置与全局 ``Config.images``；
 - provider/base.py 是协议中立的抽象基类——不应引入全局 config 访问与
   媒体编码/降级逻辑；

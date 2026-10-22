@@ -10,10 +10,8 @@ from wing.common.logger import log, utf8_safe
 from wing.common.process import kill_process_group
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
+from wing.tools.internal.feedback import FEEDBACK_TIMEOUT
 from wing.tools.internal.shell_safety import is_dangerous_command
-
-# Feedback timeout in seconds
-FEEDBACK_TIMEOUT = 6000
 
 
 @tool_registry.register(name="Bash", add_description=True)

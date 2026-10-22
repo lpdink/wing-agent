@@ -34,6 +34,23 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 DEFAULT_KEEP_RECENT_TOKENS = 50_000
 """模型未声明时的默认压缩保留区（token）。"""
 
+REASONING_EFFORT_CHOICES: dict[str, str] = {
+    "low": "低推理强度（更快、更省）",
+    "medium": "中等推理强度",
+    "high": "高推理强度",
+    "max": "最高推理强度",
+}
+"""``reasoning_effort`` 在设置面板里提供的取值（值 → 含义）。
+
+**刻意比协议少一项**：``low|medium|high|xhigh|max`` 是后端接受的取值域
+（``gateway/protocol/session.py`` 的 ``_EFFORT_VALUES``），而面板不提供 ``xhigh``
+——加进来是可见变更，另行决定。字段类型是裸 ``str``，手写 ``xhigh`` 仍能加载。
+"""
+
+PROVIDER_NAME_PATTERN = r"^[a-zA-Z0-9_-]+$"
+"""provider 名的文法的唯一声明处：Field ``pattern=``（catalog 的本地校验）、
+加载期校验器的自有文案、以及 422 的 detail 文本都读它。"""
+
 
 class ModelCapabilities(BaseModel):
     """模型能力声明（models 对象形态的 capabilities 字段）。
@@ -198,7 +215,7 @@ class ProviderConfig(BaseModel):
         apply=ApplyScope.NEXT_SESSION,
         # pattern 同时进 Field 元数据（catalog 的面板侧格式校验读它）；
         # 文案仍由下面的校验器给（pydantic 的 string_pattern_mismatch 会改文案）。
-        pattern=r"^[a-zA-Z0-9_-]+$",
+        pattern=PROVIDER_NAME_PATTERN,
     )
     protocol: Literal["openai", "anthropic"] = S(
         doc="协议类型",
@@ -250,15 +267,10 @@ class ProviderConfig(BaseModel):
     )
     reasoning_effort: str | None = S(
         doc="推理强度",
-        notes="low / medium / high / max；null = 交给 provider 决定。",
+        notes=f"{' / '.join(REASONING_EFFORT_CHOICES)}；null = 交给 provider 决定。",
         apply=ApplyScope.HOT,
         default=None,
-        choices={
-            "low": "低推理强度（更快、更省）",
-            "medium": "中等推理强度",
-            "high": "高推理强度",
-            "max": "最高推理强度",
-        },
+        choices=REASONING_EFFORT_CHOICES,
     )
     max_tokens: int = S(
         doc="最大输出 token 数（Anthropic 协议必填）",
@@ -324,8 +336,10 @@ class ProviderConfig(BaseModel):
 
         if not isinstance(v, str):
             return v
-        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
-            raise ValueError(f"provider name must match ^[a-zA-Z0-9_-]+$, got: '{v}'")
+        if not re.match(PROVIDER_NAME_PATTERN, v):
+            raise ValueError(
+                f"provider name must match {PROVIDER_NAME_PATTERN}, got: '{v}'"
+            )
         return v
 
     @field_validator("image_max_bytes")
@@ -872,7 +886,9 @@ class Config(BaseModel):
             "  - id: ds-flash                   # 显式 id（全局唯一引用词）\n"
             "    name: dfmodel-2026             # 实际发给上游的调用名\n"
             "    capabilities: {vision: true}   # 未声明 = 纯文本（ReadImage 不附图）\n"
-            "    context_window_tokens: 128000  # 缺省 256000；keep_recent_tokens 缺省 50000\n"
+            "    context_window_tokens: 128000"
+            f"  # 缺省 {DEFAULT_CONTEXT_WINDOW_TOKENS}"
+            f"；keep_recent_tokens 缺省 {DEFAULT_KEEP_RECENT_TOKENS}\n"
             "Anthropic 协议最小示例（max_tokens 必填；image_delivery 默认 inline）：\n"
             "  - name: claude\n"
             "    protocol: anthropic\n"

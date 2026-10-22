@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 
 from wing.build_info import get_commit, get_version
 from wing.gateway.protocol import HealthResponse
+from wing.gateway.routes._common import get_server
 
 router = APIRouter(tags=["health"])
 
@@ -37,7 +38,7 @@ def _get_version() -> str:
 )
 async def health(request: Request) -> HealthResponse:
     """健康检查——返回服务身份、状态、版本、commit hash 和运行时长。"""
-    server = request.app.state.server
+    server = get_server(request)
     return HealthResponse(
         service="wing-gateway",
         status="ok",

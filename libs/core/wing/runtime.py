@@ -95,7 +95,7 @@ if TYPE_CHECKING:
 
 
 UNPARSEABLE_CONFIG_WARNING = "原配置文件无法解析，其中的密钥无法保留，请重新填写"
-"""当前 ``config.yaml`` 读不出文档时的回执警告（AD13）。
+"""当前 ``config.yaml`` 读不出文档时的回执警告。
 
 语法错意味着我们不知道文件里原本有什么：旧密钥无从回填（``null`` 不再等于「保留」），
 未知键也无从保留。回执必须**显式**说明这一点——用户按面板提示重填密钥，而不是
@@ -132,7 +132,7 @@ POSITIONAL_REASON_MISMATCH = "该项的 {field} 与磁盘上的项不一致"
 
 
 def positional_secret_warning(secret: PositionalSecret) -> str:
-    """(b) 保留的警告文案：路径 + 两种读法 + 怎么办（AD18 的三要素）。
+    """(b) 保留的警告文案：路径 + 两种读法 + 怎么办（三样缺一不可）。
 
     原因子句按可用身份分三种：没有身份字段 / 该项没有身份值 / 身份值与磁盘上的项不一致。
     """
@@ -165,7 +165,7 @@ class SettingsApplyResult:
 
     ``ok=False`` 时 ``fingerprint`` 是**磁盘当前指纹**（文件一个字节都没写）；
     ``setup_mode_exited`` 为真 ⟺ 这次保存把网关从 setup mode 推进了正常模式
-    （04；正常模式下恒 ``False``）。
+    （正常模式下恒 ``False``）。
     """
 
     ok: bool
@@ -177,14 +177,14 @@ class SettingsApplyResult:
     setup_mode_exited: bool = False
     backup_path: str | None = None
     warnings: list[str] = field(default_factory=list)
-    """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」（AD13）、
+    """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」、
     「密钥被丢弃」/「密钥按位置保留」。
     与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
 
 
 @dataclass
 class WriteEffectResult:
-    """保存事务第 ⑦ 步（「生效」）的产物——04 引入的接点形状。
+    """保存事务第 ⑦ 步（「生效」）的产物。
 
     ``reload`` 是逐项结果：
 
@@ -202,11 +202,11 @@ class WriteEffectResult:
 
 
 async def settings_write_effect(sm: SessionManager) -> ReloadResult:
-    """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）的正常模式实现体。
+    """保存写盘后的「生效」步骤（``apply_settings`` 的 ⑦）的正常模式实现体。
 
     热重载（config.yaml → hooks → prompt commands → provider → skills & rules → log level）。
-    唯一调用点：``WingRuntime.post_write_effect()``（04 把这个接点从模块函数上移成
-    实例方法，见那里的说明）。失败**不回滚文件**——配置本身是合法的，回执按
+    唯一调用点：``WingRuntime.post_write_effect()``（接点住实例方法，见那里的说明）。
+    失败**不回滚文件**——配置本身是合法的，回执按
     ``ReloadResult`` 的逐项 ok 如实报告（与 ``/api/system/reload`` 同语义）。
     """
     return await _reload_system(sm)
@@ -436,7 +436,7 @@ class WingRuntime:
 
         不水合会话：账本是会话目录里的边车数据，查询不该把会话换入内存。会话不存在 /
         从没调用过模型 → 空报告（**200，不 404**——前端与 CLI 都按同一条路径渲染
-        "还没数据"，见 contract §6）。
+        "还没数据"，见 ``docs/dev/cache-accounting.md``）。
         """
         data = self.sm.read_session_aux(session_id, CACHE_LEDGER_KEY)
         return build_cache_report(session_id, data, limit=limit)
@@ -700,35 +700,10 @@ class WingRuntime:
         """
         session = self._require_session(session_id)
         cm = session.agent.context_manager
-        agent = session.agent
 
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
-
-        from wing.event import wire_dump
-
-        turn_started_at = (
-            agent.turn_started_at.isoformat() if agent.turn_started_at else None
-        )
-        self._emit_session_event(
-            SyncSessionEvent(
-                session_id=session.session_id,
-                messages=session.serialize_messages(),
-                uncommitted=agent.uncommitted_message(),
-                uncommitted_tools=agent.uncommitted_tools(),
-                events=[
-                    wire_dump(e)
-                    for e in cm.get_active_events(
-                        pending_ask_ids=agent.pending_ask_ids()
-                    )
-                ],
-                status=session.status,
-                turn_started_at=turn_started_at,
-                agent=None,
-                draft=draft,
-                usage=session.usage,
-            )
-        )
+        self._emit_session_event(self._sync_session_event(session, draft=draft))
 
         targets = cm.get_branch_targets()
         self._emit_session_event(
@@ -827,8 +802,8 @@ class WingRuntime:
 
         config 加载失败时立即中止。其余项失败时继续。
 
-        流程本体在 ``wing/system.py``（11 归位：逐字自本方法抽出，步骤顺序与
-        失败语义不变）——本方法只做委托，调用点（gateway 路由）不变。
+        流程本体在 ``wing/system.py``（步骤顺序与失败语义是对外契约）——
+        本方法只做委托，调用点（gateway 路由）不变。
         """
         return await _reload_system(self.sm)
 
@@ -837,16 +812,16 @@ class WingRuntime:
     # ============================================================
 
     async def post_write_effect(self) -> WriteEffectResult:
-        """保存写盘后的「生效」步骤（§7.3 第 ⑦ 步）——**04 的接点**。
+        """保存写盘后的「生效」步骤（``apply_settings`` 的 ⑦）。
 
         唯一调用点是 :meth:`apply_settings` 的第 ⑦ 步。
 
         - 正常模式（本类）：热重载（:func:`settings_write_effect` 的六项逐项结果）。
-        - setup mode（04）：``gateway.server._SetupRuntime`` 覆盖本方法——换成
+        - setup mode：``gateway.server._SetupRuntime`` 覆盖本方法——换成
           「转入正常模式」（``GatewayServer._enter_operational()``），并把
           ``setup_mode_exited`` 置真。
 
-        把接点从模块级函数（03 的 ``settings_write_effect``）上移成**实例方法**，
+        把接点从模块级函数（``settings_write_effect``）上移成**实例方法**，
         是因为「setup mode 下的 runtime」是 ``WingRuntime`` 的替身（见
         ``gateway/server.py`` 的 ``_SetupRuntime``）——覆盖一个方法是替身唯一的
         介入点，而事务本体（①–⑥、⑧–⑩）因此只有一份实现。失败**不回滚文件**：
@@ -857,12 +832,12 @@ class WingRuntime:
     async def apply_settings(
         self, document: dict[str, Any], base: str | None = None
     ) -> SettingsApplyResult:
-        """保存事务（总设计 §7.3 的十步）：校验 → ``.bak`` → 原子写 → 生效 → 事件 → 回执。
+        """保存事务（十步）：校验 → ``.bak`` → 原子写 → 生效 → 事件 → 回执。
 
         ① 现读磁盘（服务端不缓存文档）→ ② 基线指纹不符 → 409（不写盘）→ ③ 密文三态回填
         （``null`` = 保留磁盘现值）→ ④ 字段级 + 跨字段校验（**全有或全无**：有 problem 时一个字节
         都不写）→ ⑤ ``config.yaml.bak``（覆盖式，只留最近一份）→ ⑥ 规范形 YAML + 原子写 → ⑦ 生效
-        （:meth:`post_write_effect`，04 的接点；失败不回滚文件）→ ⑧ ``changed`` /
+        （:meth:`post_write_effect`；失败不回滚文件）→ ⑧ ``changed`` /
         ``restart_required``（只读叶子的 apply）→ ⑨ 广播 ``SettingsChangedEvent``（global）→
         ⑩ 回执。
 
@@ -876,13 +851,13 @@ class WingRuntime:
         """
         catalog = build_catalog()
 
-        # ① 现读磁盘（D18：不缓存）。
+        # ① 现读磁盘（服务端不缓存文档：文件只有几 KB，现读就没有失效问题）。
         warnings: list[str] = []
         try:
             current_doc, current_fp = read_document()
         except ConfigDocumentError as exc:
             # 文件存在但读不出文档（YAML 语法错 / 顶层不是映射）。**事务照常继续**：
-            # 这正是「配置写坏 ⇒ 开设置面板修」（D1）在语法错这条分支上的兑现——
+            # 这正是「配置写坏 ⇒ 开设置面板修」在语法错这条分支上的兑现——
             # 否则面板保存永远 ok=false、用户只剩手改文件一条路。
             # 现文档视为**空**：未知键无从保留、旧密钥无从回填（回执里显式警告）。
             # 指纹仍然算（= 文件字节的 sha256）——乐观并发不因文件坏了而失效。
@@ -898,8 +873,8 @@ class WingRuntime:
         #    列表项按**身份**配对（identity_field）；配不上且长度变化 / 槽位已被认领
         #    → 宁可不猜：该密钥被丢弃（必填 → problem），并且**必须让用户看见**
         #    （静默错配是数据损坏级的——A 的密钥写给 B，回执不报告）。
-        #    等长下标回落（(b)）保留下来的值同样**出声**（AD18 第 2 点：它和「重命名」
-        #    在文档里不可区分）。
+        #    等长下标回落（(b)）保留下来的值同样**出声**（它和「重命名」在文档里
+        #    不可区分）。
         resolution = resolve_secrets(
             SparseDocument(data=document), current_doc, catalog
         )
@@ -928,7 +903,7 @@ class WingRuntime:
 
         # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。原子写（不是 copyfile）：
         # 进程在拷贝中途被杀不会留下截断的 .bak；字节级复制，
-        # 连读不出文档的坏文件也逐字留证（AD13 的价值所在）。
+        # 连读不出文档的坏文件也逐字留证（修复现场的唯一凭据）。
         config_path = get_config_path()
         backup_path: str | None = None
         if config_path.exists():
@@ -936,16 +911,16 @@ class WingRuntime:
             atomic_write_bytes(backup, config_path.read_bytes())
             backup_path = str(backup)
 
-        # ⑥ 规范形 YAML（未知键取自磁盘文档，D17；读不出文档时没有未知键可保留）
+        # ⑥ 规范形 YAML（未知键取自磁盘文档并原样写回；读不出文档时没有未知键可保留）
         #    + 原子写。
         text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
         atomic_write_text(config_path, text)
         _, new_fp = read_document()
 
-        # ⑦ 生效（04 的接点；失败不回滚——配置本身合法，回执逐项报告）。
+        # ⑦ 生效（失败不回滚——配置本身合法，回执逐项报告）。
         effect = await self.post_write_effect()
 
-        # ⑧ 差异 → changed / restart_required（P13：只读叶子路径的 apply）。
+        # ⑧ 差异 → changed / restart_required（只读叶子路径的 apply）。
         changed = changed_paths(current_doc, incoming, catalog)
         restart = restart_required_paths(changed, catalog)
 
@@ -1024,6 +999,46 @@ class WingRuntime:
             )
         )
 
+    def _sync_session_event(
+        self,
+        session: Session,
+        *,
+        draft: str | None = None,
+        target: EventTarget | None = None,
+        include_agent: bool = False,
+    ) -> SyncSessionEvent:
+        """``SyncSessionEvent`` 的唯一装配点（中途订阅与 rewind 共用）。
+
+        四组重放素材（messages → uncommitted → uncommitted_tools → events）的顺序
+        是对外契约：只在这里拼，加第五组素材时订阅快照与 rewind 后的重放不会分叉。
+
+        ``include_agent``：订阅路径额外带 ``agent`` / ``name``——新订阅者拿不到会话
+        元信息，必须随快照下发；rewind 是既有订阅者的增量广播，不带这两项。
+        """
+        from wing.event import wire_dump
+
+        cm = session.context_manager
+        agent = session.agent
+        return SyncSessionEvent(
+            session_id=session.session_id,
+            messages=session.serialize_messages(),
+            uncommitted=agent.uncommitted_message(),
+            uncommitted_tools=agent.uncommitted_tools(),
+            events=[
+                wire_dump(e)
+                for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())
+            ],
+            status=session.status,
+            turn_started_at=(
+                agent.turn_started_at.isoformat() if agent.turn_started_at else None
+            ),
+            agent=session.to_agent_info() if include_agent else None,
+            name=session.session_name if include_agent else None,
+            draft=draft,
+            usage=session.usage,
+            target=target,
+        )
+
     def _push_sync(
         self, client_id: str, session: Session, draft: str | None = None
     ) -> None:
@@ -1040,33 +1055,13 @@ class WingRuntime:
         恰好是它未包含的部分，前端据此累计，不与 HTTP 快照混源）。
         """
         client_target = EventTarget(scope="client", client_ids=[client_id])
-        from wing.event import wire_dump
 
         cm = session.context_manager
         agent = session.agent
 
-        turn_started_at = (
-            agent.turn_started_at.isoformat() if agent.turn_started_at else None
-        )
         event_bus.emit(
-            SyncSessionEvent(
-                session_id=session.session_id,
-                messages=session.serialize_messages(),
-                uncommitted=agent.uncommitted_message(),
-                uncommitted_tools=agent.uncommitted_tools(),
-                events=[
-                    wire_dump(e)
-                    for e in cm.get_active_events(
-                        pending_ask_ids=agent.pending_ask_ids()
-                    )
-                ],
-                status=session.status,
-                turn_started_at=turn_started_at,
-                agent=session.to_agent_info(),
-                name=session.session_name,
-                draft=draft,
-                usage=session.usage,
-                target=client_target,
+            self._sync_session_event(
+                session, draft=draft, target=client_target, include_agent=True
             )
         )
 

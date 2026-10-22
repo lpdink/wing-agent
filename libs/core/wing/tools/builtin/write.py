@@ -9,6 +9,7 @@ from wing.common.fs import atomic_write_text
 from wing.event import DiffContentEvent
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
+from wing.tools.internal.io_errors import reason_of
 from wing.tools.internal.utils import resolve_path as _resolve_path
 from wing.tools.internal.write_target import resolve_write_target
 
@@ -74,10 +75,10 @@ async def write_file(path: str, content: str, ctx: ToolContext) -> str:
         else:
             return f"write: ok (created)\n  {new_lines} lines, {byte_count} bytes"
 
-    except PermissionError:
-        raise ToolError(f"write: cannot write '{path}': Permission denied")
-    except IsADirectoryError:
-        raise ToolError(f"write: cannot write '{path}': Is a directory")
+    except PermissionError as exc:
+        raise ToolError(f"write: cannot write '{path}': {reason_of(exc)}")
+    except IsADirectoryError as exc:
+        raise ToolError(f"write: cannot write '{path}': {reason_of(exc)}")
     except OSError as e:
         raise ToolError(f"write: cannot write '{path}': {e.strerror}")
     except Exception as e:

@@ -3,14 +3,14 @@
 
 为什么单独成模块：
 
-- 01 的声明层回答了「这个字段是什么」，本模块把它变成**一棵树**：路径文法（``providers[].api_key``）、
-  类型推导（注解 → ``SettingKind``）、约束（``gt`` → ``min`` + ``exclusive_min``）、枚举值域、
-  业务分组（``config/groups.py`` 的表盖到 root 直接子节点上）、列表元素形态（``element`` / ``variants``）。
-  Setting API（03）、TUI 面板（07/08）、``wing config`` CLI（12）与自动生成文档共用这一份数据，
-  不允许各自再推一遍类型。
+- 声明层（``config/models.py``）回答了「这个字段是什么」，本模块把它变成**一棵树**：
+  路径文法（``providers[].api_key``）、类型推导（注解 → ``SettingKind``）、约束
+  （``gt`` → ``min`` + ``exclusive_min``）、枚举值域、业务分组（``config/groups.py`` 的表盖到
+  root 直接子节点上）、列表元素形态（``element`` / ``variants``）。Setting API、TUI 面板、
+  ``wing config`` CLI 与自动生成文档共用这一份数据，不允许各自再推一遍类型。
 - 纯逻辑：不读文件、不 import gateway / runtime / event_bus。每次 ``build_catalog()`` 现建，
   **不缓存**——配置量级是几十个节点，缓存只换来失效问题。
-- ``parse_path()`` 是路径文法（总设计 §5.2）的**唯一实现**（Rust 侧 ``wing-api-client`` 有同构的一份，
+- ``parse_path()`` 是路径文法的**唯一实现**（Rust 侧 ``wing-api-client`` 有同构的一份，
   跨语言无法共享代码，两侧用同一批用例各自单测）。
 """
 
@@ -33,7 +33,7 @@ from .spec import ApplyScope, SettingMeta, setting_meta
 
 
 class SettingKind(str, Enum):
-    """配置项的类型（值即 wire 字符串；07 按它选编辑器）。"""
+    """配置项的类型（值即 wire 字符串；前端按它选编辑器）。"""
 
     STR = "str"
     INT = "int"
@@ -56,13 +56,13 @@ class ChoiceSpec(BaseModel):
 class SettingNode(BaseModel):
     """设置目录树的一个节点（**领域类型，不是 wire 模型**）。
 
-    字段名即协议：03 的 ``gateway/protocol/settings.py`` 逐字段投影成 ``SettingNodeProto``
+    字段名即协议：``gateway/protocol/settings.py`` 逐字段投影成 ``SettingNodeProto``
     （与 ``config.ModelRef`` → ``gateway/protocol.ModelDetail`` 的既有惯例一致）——
     唯一的例外是 :attr:`identity_field`（纯后端语义，不投影，见该字段的 docstring）。
 
     三类节点：
 
-    - **声明节点**：来自一个字段（68 个），元信息全部来自 ``SettingMeta``；
+    - **声明节点**：每个配置字段一个，元信息全部来自 ``SettingMeta``；
     - **合成节点**：``root``（key/path = ``config``）、列表元素（``key = "[]"``）与 union 变体
       （key 同为 ``"[]"``，path 同元素模板）——没有字段声明，``title = key``、``doc = ""``；
     - 列表元素是 union（``list[str | ModelSpec]``）时：``element`` 为 ``None``、``variants`` 非空。
@@ -115,7 +115,7 @@ class SettingNode(BaseModel):
     secret: bool = False
     """密文：只写不回显（掩码 + 末 4 位 hint）。"""
     apply: ApplyScope = ApplyScope.HOT
-    """生效域；容器 = 子树最粗的一档，**权威在叶子**（03 算 restart_required 只读叶子）。"""
+    """生效域；容器 = 子树最粗的一档，**权威在叶子**（``restart_required`` 只读叶子）。"""
     editable: bool = True
     deprecated: str | None = None
     """预留：废弃说明（本期不消费）。"""
@@ -152,7 +152,7 @@ class SettingNode(BaseModel):
 
 
 ROOT_KEY = "config"
-"""catalog 根节点的 key 与 path（协议增补 P2；与 Interface 根的 ``"interface"`` 对称）。"""
+"""catalog 根节点的 key 与 path（与 Interface 根的 ``"interface"`` 对称）。"""
 
 ROOT_TITLE = "Wing 配置"
 """根节点的人类标签。"""
@@ -161,11 +161,11 @@ ROOT_DOC = "wing-agent 后端配置（模型 / Agent / 网关 / 日志）"
 """根节点的一行摘要。"""
 
 ELEMENT_KEY = "[]"
-"""列表元素模板 / union 变体的 key（§5.1）。"""
+"""列表元素模板 / union 变体的 key。"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 路径文法（§5.2）
+# 路径文法
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -185,11 +185,11 @@ class Index:
 
 @dataclass(frozen=True, slots=True)
 class Element:
-    """``[]``：列表元素模板。不是「第 0 个」——模板 → 具体是一对多展开（增补 P3）。"""
+    """``[]``：列表元素模板。不是「第 0 个」——模板 → 具体是一对多展开。"""
 
 
 PathStep = Key | Index | Element
-"""规范路径的一段（K·I·E 三变体，见 §5.2 的文法）。"""
+"""规范路径的一段（K·I·E 三变体，文法见 :func:`parse_path`）。"""
 
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INDEX_RE = re.compile(r"[0-9]+")
@@ -208,7 +208,7 @@ def parse_path(path: str) -> list[PathStep] | None:
         idx     := 非负整数（<= 2**64-1）
 
     空串非法（与 Rust 侧 ``parse_path("") == Some([])`` 有意不同——空路径在 Python 侧只可能来自
-    代码 bug，判非法更安全；见 02 design.md Assumptions 3）。下标不查界（增补 P3）。
+    代码 bug，判非法更安全）。下标不查界（catalog 不知道文档有多长）。
     """
     if not path:
         return None
@@ -238,7 +238,7 @@ def parse_path(path: str) -> list[PathStep] | None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 类型推导（§5.3 + 增补 P10）
+# 类型推导
 # ─────────────────────────────────────────────────────────────────────────────
 
 _APPLY_RANK: dict[ApplyScope, int] = {
@@ -297,14 +297,44 @@ def _stamp_groups(node: SettingNode, root: type[BaseModel]) -> None:
 def _children_of(model: type[BaseModel], prefix: str) -> list[SettingNode]:
     """一个模型的全部字段节点（``order`` = ``model_fields`` 插入序）。"""
     return [
-        _field_node(name, field, order, _child_path(prefix, name))
+        _field_node(name, field, order, child_path(prefix, name))
         for order, (name, field) in enumerate(model.model_fields.items())
     ]
 
 
-def _child_path(prefix: str, name: str) -> str:
-    """子路径：root 的子树**不带根前缀**（``gateway.port``，与 Interface 根对称）。"""
-    return f"{prefix}.{name}" if prefix else name
+def child_path(prefix: str, key: str) -> str:
+    """子路径：root 的子树**不带根前缀**（``gateway.port``，与 Interface 根对称）。
+
+    路径文法的拼接规则的唯一实现——catalog 建树、emitter 写盘、document 读盘都走它。
+    """
+    return f"{prefix}.{key}" if prefix else key
+
+
+def item_template(node: SettingNode, item: Any) -> SettingNode | None:
+    """按文档实际值的 JSON 形状选元素形态（与 Rust 侧 ``select_variant`` 同口径）。"""
+    if node.element is not None:
+        return node.element
+    for variant in node.variants or []:
+        if _accepts_shape(variant.kind, item):
+            return variant
+    return None
+
+
+def _accepts_shape(kind: SettingKind, value: Any) -> bool:
+    """``kind`` 与 JSON 形状是否相符（未知 kind 一律不符——形态未知就选不出编辑器）。"""
+    if kind in (SettingKind.STR, SettingKind.ENUM, SettingKind.SECRET):
+        return isinstance(value, str)
+    if kind is SettingKind.INT:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind is SettingKind.FLOAT:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind is SettingKind.BOOL:
+        return isinstance(value, bool)
+    if kind in (SettingKind.MAP, SettingKind.OBJECT):
+        return isinstance(value, dict)
+    if kind is SettingKind.LIST:
+        return isinstance(value, list)
+    return False
 
 
 def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNode:
@@ -406,7 +436,7 @@ def _list_shape(
     """``list[X]`` → ``(element, None)``；``list[A | B]`` → ``(None, [variants])``。
 
     ``list[str | ModelSpec]`` 的 ``get_args`` 只给一个元素（那个 union 本身），所以单元素
-    分支要再剥一层 union——union 的每个成员是一个候选形态（总设计 §5.1 的 ``variants``）。
+    分支要再剥一层 union——union 的每个成员是一个候选形态（``variants``）。
     """
     args = get_args(annotation)
     element_path = f"{path}[]"
@@ -430,8 +460,8 @@ def _kind_of(
 ) -> SettingKind:
     """注解 → ``SettingKind``（判定顺序写死：``bool`` 必须早于 ``int``）。
 
-    ``has_choices`` 非空 ⇒ ``enum``（增补 P10）：值域只写在 ``notes`` 里的 ``str`` 字段
-    也拿到内联选择器（``reasoning_effort`` / ``log.level``）。
+    ``has_choices`` 非空 ⇒ ``enum``：值域只写在 ``notes`` 里的 ``str`` 字段也拿到内联
+    选择器（``reasoning_effort`` / ``log.level``）。
     """
     if annotation is bool:
         return SettingKind.BOOL
@@ -459,7 +489,7 @@ def _choices_of(annotation: Any, meta: SettingMeta) -> list[ChoiceSpec]:
 
     - ``Literal`` 值域为准；声明的 ``choices`` 里多出来的键**忽略**（面板不允许选一个
       pydantic 会拒绝的值）；
-    - 无 ``Literal`` 时（P10 的裸 ``str`` + ``choices``），值域 = 声明的 dict 键序。
+    - 无 ``Literal`` 时（裸 ``str`` + ``choices``），值域 = 声明的 dict 键序。
     """
     declared = meta.choices or {}
     if get_origin(annotation) is Literal:
@@ -545,7 +575,7 @@ def _coarsest_apply(node: SettingNode) -> ApplyScope:
     """子树最粗的生效域（合成节点用；声明节点如实透传 ``SettingMeta.apply``）。
 
     「最粗」= 子树里对用户要求最高的一档（``hot < next_session < restart < readonly``）。
-    权威在叶子：03 计算 ``restart_required`` 只读叶子路径的 ``apply``，结构行上的值只作提示。
+    权威在叶子：``restart_required`` 只读叶子路径的 ``apply``，结构行上的值只作提示。
     """
     worst = node.apply
     for child in node.children:
@@ -574,5 +604,7 @@ __all__ = [
     "SettingKind",
     "SettingNode",
     "build_catalog",
+    "child_path",
+    "item_template",
     "parse_path",
 ]

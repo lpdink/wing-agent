@@ -12,7 +12,7 @@ The payload is windowed instead: ``old_text`` / ``new_text`` carry only the
 line each window starts at. The frontend renders exactly what it is given —
 there is no second collapsing policy on that side.
 
-Contract (see ``openspec/changes/diff-payload-window``):
+Contract:
 
   - windows are line-aligned: the changed region's full lines, ± 3 context
     lines, clipped at the file boundaries (never padded),

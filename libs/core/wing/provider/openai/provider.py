@@ -24,6 +24,7 @@ from wing.provider.base import (
     RequestOptions,
     StreamAccumulator,
     parse_tool_args,
+    pending_views,
 )
 from wing.provider.openai.serialize import _SerializeMixin
 from wing.provider.openai.stream import _OAIStreamState, _StreamMixin
@@ -47,6 +48,20 @@ from wing.schema.cache import SYSTEM_WIRE, tools_label
 
 if TYPE_CHECKING:
     from wing.config import ProviderConfig
+
+
+def _usage_of(usage_data: dict) -> tuple[int, int, int]:
+    """OpenAI usage 载荷 → ``(prompt_tokens, completion_tokens, cached_tokens)``。
+
+    非流式响应与流内 usage chunk 都走这里：同一个解包写两遍时，新增一个 usage
+    维度必然会漏一处。
+    """
+    return (
+        usage_data.get("prompt_tokens", 0),
+        usage_data.get("completion_tokens", 0),
+        (usage_data.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
+        or 0,
+    )
 
 
 class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
@@ -138,25 +153,13 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
 
         与 `snapshot_blocks` 判定互斥：snapshot 只取 `final_tool_calls`
         （finish_reason=tool_calls 时解析入列并 clear pending），仍在 `pending`
-        中的即未终结调用。`args_fragment` 搬运原始 args 文本累积，后端不解析。
+        中的即未终结调用。投影本体见 :func:`wing.provider.base.pending_views`。
         截断检测走 `unfinished_tool_calls()`（不做 id 过滤的计数口径）。
         """
         state = accumulator.state if accumulator is not None else None
         if not isinstance(state, _OAIStreamState):
             return []
-        views: list[PendingToolView] = []
-        for idx in sorted(state.pending):
-            call = state.pending[idx]
-            if not call.id:
-                continue  # 尚无 id 的半截调用无法锚定，跳过
-            views.append(
-                PendingToolView(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    args_fragment=call.args_buffer,
-                )
-            )
-        return views
+        return pending_views(state.pending)
 
     def unfinished_tool_calls(self, accumulator: StreamAccumulator | None) -> int:
         """未终结 tool call 计数——截断检测；含无 id 的半截调用（无盲区）。"""
@@ -303,12 +306,9 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             for args, args_error in [parse_tool_args(tc["function"]["arguments"])]
         ]
 
-        usage_data = data.get("usage") or {}
-        prompt_tokens = usage_data.get("prompt_tokens", 0)
-        completion_tokens = usage_data.get("completion_tokens", 0)
-        cached_tokens = (usage_data.get("prompt_tokens_details", {}) or {}).get(
-            "cached_tokens", 0
-        ) or 0
+        prompt_tokens, completion_tokens, cached_tokens = _usage_of(
+            data.get("usage") or {}
+        )
 
         yield LLMResponse(
             content=message.get("content"),
@@ -394,12 +394,9 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 delta = choice.get("delta", {}) if choice else {}
 
                 # Usage（通常在最后一个 chunk）
-                usage_data = chunk.get("usage") or {}
-                prompt_tokens = usage_data.get("prompt_tokens", 0)
-                completion_tokens = usage_data.get("completion_tokens", 0)
-                cached_tokens = (usage_data.get("prompt_tokens_details", {}) or {}).get(
-                    "cached_tokens", 0
-                ) or 0
+                prompt_tokens, completion_tokens, cached_tokens = _usage_of(
+                    chunk.get("usage") or {}
+                )
 
                 reasoning = delta.get("reasoning_content")
                 content = delta.get("content")

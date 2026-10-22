@@ -349,16 +349,8 @@ class WakeService:
         )
         if not await self._deliver(trigger, content):
             return
-        try:
-            parsed = parse_spec(trigger.spec or "")
-        except SpecError as exc:  # 库里的 spec 坏了：一次性的事故，别让它每 tick 重试
-            # `exc` 在 except 块结束时被删除（Python 语义）：先取出文案再闭包。
-            error = str(exc)
-            self._write(
-                trigger.id,
-                "spec failed",
-                lambda: self._store.set_state(trigger.id, STATE_FAILED, error=error),
-            )
+        parsed = self._stored_spec(trigger)
+        if parsed is None:
             return
         # 一次性 spec 的预算是 1（创建期落库），所以"预算归零即终结"对它与对
         # `--times N` 的周期型是同一条规则——记账在一条 SQL 里原子完成（见 store）。
@@ -386,23 +378,10 @@ class WakeService:
             本次处理的（曾错过的）触发器条数。
         """
         now = self._clock()
-        missed = [
-            trigger
-            for trigger in self._store.due_timers(now)
-            if trigger.id not in self._stalled
-        ]
+        missed = self.due_timers(now)
         for trigger in missed:
-            try:
-                parsed = parse_spec(trigger.spec or "")
-            except SpecError as exc:
-                error = str(exc)
-                self._write(
-                    trigger.id,
-                    "spec failed",
-                    lambda: self._store.set_state(
-                        trigger.id, STATE_FAILED, error=error
-                    ),
-                )
+            parsed = self._stored_spec(trigger)
+            if parsed is None:
                 continue
             if parsed.one_shot:
                 log.info(f"wake: compensating missed one-shot #{trigger.id}")
@@ -572,6 +551,24 @@ class WakeService:
             if self._ports.is_archived(session_id):
                 raise LookupError(f"{field} {session_id!r} is archived")
             raise LookupError(f"{field} {session_id!r} not found")
+
+    def _stored_spec(self, trigger: WakeTrigger) -> WakeSpec | None:
+        """库里的 spec → ``WakeSpec``；坏 spec 在此一次性落 ``failed`` 并返回 ``None``。
+
+        库里的 spec 坏了是**一次性的事故**，不该让它每 tick 重试：落一个终态，
+        之后 ``active`` 查询再也捞不到它。
+        """
+        try:
+            return parse_spec(trigger.spec or "")
+        except SpecError as exc:
+            # `exc` 在 except 块结束时被删除（Python 语义）：先取出文案再闭包。
+            error = str(exc)
+            self._write(
+                trigger.id,
+                "spec failed",
+                lambda: self._store.set_state(trigger.id, STATE_FAILED, error=error),
+            )
+            return None
 
     def _parse_spec(self, spec: str | None) -> WakeSpec:
         if not (spec or "").strip():

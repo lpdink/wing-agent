@@ -31,7 +31,6 @@ from fastapi import WebSocket
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.types import ASGIApp
 
 from wing.gateway.protocol import error_response
 
@@ -147,9 +146,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
     不缓存 AuthConfig——每次 dispatch 从 ``app.state.server.auth_config``
     读取最新配置，热重载后立即生效。
     """
-
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint

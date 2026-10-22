@@ -33,6 +33,7 @@ from wing.media import (
 )
 from wing.schema import MediaRef, ToolError, ToolOutput
 from wing.tool_registry import tool_registry
+from wing.tools.internal.io_errors import reason_of
 from wing.tools.internal.utils import resolve_path as _resolve_path
 
 # 降采样建议的目标长边（Anthropic 视觉推荐上限 1568px；Retina 截图常见
@@ -63,12 +64,8 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
 
     try:
         st = os.stat(resolved)
-    except FileNotFoundError:
-        raise ToolError(f"ReadImage: {resolved}: No such file")
-    except PermissionError:
-        raise ToolError(f"ReadImage: {resolved}: Permission denied")
-    except OSError as e:
-        raise ToolError(f"ReadImage: {resolved}: {e.strerror or e}")
+    except OSError as exc:
+        raise ToolError(f"ReadImage: {resolved}: {reason_of(exc)}")
 
     if stat_module.S_ISDIR(st.st_mode):
         raise ToolError(f"ReadImage: {resolved}: Is a directory")
@@ -83,12 +80,8 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
     try:
         with open(resolved, "rb") as f:
             data = f.read()
-    except FileNotFoundError:
-        raise ToolError(f"ReadImage: {resolved}: No such file")
-    except PermissionError:
-        raise ToolError(f"ReadImage: {resolved}: Permission denied")
-    except OSError as e:
-        raise ToolError(f"ReadImage: {resolved}: {e.strerror or e}")
+    except OSError as exc:
+        raise ToolError(f"ReadImage: {resolved}: {reason_of(exc)}")
 
     # stat 与 read 之间存在窗口（文件被追加写）：以后读到的字节为准再判一次。
     if len(data) > max_bytes:

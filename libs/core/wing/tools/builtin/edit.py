@@ -6,6 +6,7 @@ from wing.common.fs import atomic_write_text
 from wing.schema import ToolError
 from wing.tool_registry import tool_registry
 from wing.tools.internal.diff_window import build_diff_events, find_all
+from wing.tools.internal.io_errors import reason_of
 from wing.tools.internal.utils import resolve_path as _resolve_path
 from wing.tools.internal.write_target import resolve_write_target
 
@@ -34,10 +35,10 @@ async def edit_file(
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-    except FileNotFoundError:
-        raise ToolError(f"edit: {path}: No such file")
-    except (IsADirectoryError, PermissionError) as e:
-        raise ToolError(f"edit: {path}: {e.strerror}")
+    except FileNotFoundError as exc:
+        raise ToolError(f"edit: {path}: {reason_of(exc)}")
+    except (IsADirectoryError, PermissionError) as exc:
+        raise ToolError(f"edit: {path}: {exc.strerror}")
 
     if not old_string:
         raise ToolError("edit: old_string cannot be empty")

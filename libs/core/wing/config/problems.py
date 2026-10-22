@@ -15,7 +15,7 @@
 2. **宽容视图 ``Config.model_construct(**raw)``**（设置面板路径）：跨字段有问题时
    ``Config(**raw)`` 根本构造不出来，面板只能拿不校验的视图。视图里嵌套值可能是原始
    ``dict`` / ``str`` / 任意脏值——凡是**无法判定**的形态一律跳过：字段级校验
-   （03 的 ``document.locate_problems``）负责报它们，这里不重复也不猜。
+   （``document.locate_problems``）负责报它们，这里不重复也不猜。
 
 顺序即「加载期第一个 problem」的优先级，见 :func:`cross_field_problems`。
 """

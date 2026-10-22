@@ -11,26 +11,12 @@ Route handler 只做：参数验证 → 调 RemoteToolManager → 构造响应�
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from wing.gateway.protocol import RegisterToolsRequest, RegisterToolsResponse
-
-if TYPE_CHECKING:
-    from wing.gateway.server import GatewayServer
+from wing.gateway.routes._common import get_server, require_client_id
 
 router = APIRouter(tags=["tools"])
-
-
-def _require_client_id(x_client_id: str | None = Header(None)) -> str:
-    if x_client_id is None:
-        raise HTTPException(status_code=400, detail="missing X-Client-Id header")
-    return x_client_id
-
-
-def _get_server(request: Request) -> GatewayServer:
-    return request.app.state.server
 
 
 @router.post(
@@ -41,9 +27,9 @@ def _get_server(request: Request) -> GatewayServer:
 async def register_tools(
     body: RegisterToolsRequest,
     request: Request,
-    x_client_id: str = Depends(_require_client_id),
+    x_client_id: str = Depends(require_client_id),
 ) -> RegisterToolsResponse:
-    server = _get_server(request)
+    server = get_server(request)
     manager = server.remote_tools
 
     if not manager.is_attached(x_client_id):

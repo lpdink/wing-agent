@@ -11,7 +11,7 @@ Gateway CLI——启动 WebSocket 服务器。
 鉴权（api_key）与守护进程模式分别由 config.yaml 与 Rust 侧 `wing start` 提供
 （TLS 交给反向代理）；本入口只做 host / port 覆盖与进程内启动。
 
-**降级启动（04）**：配置缺失 / 非法不再让进程退出——`boot_config()` 永不抛，
+**降级启动**：配置缺失 / 非法不再让进程退出——`boot_config()` 永不抛，
 配置不可用时打印修复横幅并让网关以 **setup mode** 起来（只服务设置端点，其余 503），
 保存出合法配置后由 `GatewayServer` 就地转入正常模式（不重启进程）。
 """
@@ -70,7 +70,7 @@ def main() -> None:
     # CLI args override config; config provides defaults.
     # 配置语义不合法（但文件能解析）时仍取文件里的 gateway.host/port——
     # Rust 侧 backend_config.rs 读同一份文件的同一段，两边必须落在同一个 endpoint 上
-    # （否则 TUI 连不上降级启动的网关，总设计 §8.6）；取不到才回落默认。
+    # （否则 TUI 连不上降级启动的网关）；取不到才回落默认。
     file_host, file_port = boot.endpoint or (DEFAULT_HOST, DEFAULT_PORT)
     gateway = config.gateway if config is not None else None
     host = (
@@ -88,7 +88,7 @@ def main() -> None:
     if server.in_setup_mode:
         # 降级横幅：**构造之后**按 server 的真实模式打一次，覆盖两条路径——
         # ① boot 失败（配置缺失 / 语法错 / 校验不过）；② 配置合法但运行时装配失败
-        # （``_enter_operational`` 失败 ⇒ ``_record_startup_failure``，AD14 的数据面
+        # （``_enter_operational`` 失败 ⇒ ``_record_startup_failure`` 的数据面
         # 已补齐，这里补上终端这条最显眼的通道）。问题清单复用 server 的快照
         # （② 的那批只存在于 server 上），且只打一次（这里不再有构造前的重复打印）。
         reason = (

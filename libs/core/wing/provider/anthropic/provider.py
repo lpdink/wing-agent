@@ -34,6 +34,7 @@ from wing.provider.base import (
     PendingToolView,
     RequestOptions,
     StreamAccumulator,
+    pending_views,
 )
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
@@ -138,25 +139,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
 
         与 `_ordered_finalized_blocks` 共用同一状态且判定互斥：凡 index 仍在
         `pending_tools` 中的块即未终结（snapshot 跳过它们），这里恰恰取出它们。
-        `args_fragment` 搬运原始 args 文本累积（`args_buffer`），后端不解析。
+        投影本体见 :func:`wing.provider.base.pending_views`（args 原文搬运，后端不解析）。
         截断检测走 `unfinished_tool_calls()`（不做 id 过滤的计数口径）。
         """
         state = accumulator.state if accumulator is not None else None
         if not isinstance(state, _StreamState):
             return []
-        views: list[PendingToolView] = []
-        for idx in sorted(state.pending_tools):
-            call = state.pending_tools[idx]
-            if not call.id:
-                continue  # 尚无 id 的半截调用无法锚定，跳过
-            views.append(
-                PendingToolView(
-                    tool_call_id=call.id,
-                    tool_name=call.name,
-                    args_fragment=call.args_buffer,
-                )
-            )
-        return views
+        return pending_views(state.pending_tools)
 
     def unfinished_tool_calls(self, accumulator: StreamAccumulator | None) -> int:
         """未终结 tool call 计数——截断检测；含无 id 的半截调用（无盲区）。"""

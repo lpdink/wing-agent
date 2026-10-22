@@ -63,7 +63,7 @@ def _register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(SetupModeError)
     async def _on_setup_mode(request: Request, exc: SetupModeError) -> JSONResponse:
-        # 显式覆盖 error 码（P4）：HTTP_ERROR_TYPES[503] 是通用的 service_unavailable。
+        # 显式覆盖 error 码：HTTP_ERROR_TYPES[503] 是通用的 service_unavailable。
         return error_response(
             503, render_setup_detail(exc.problems), error="setup_mode"
         )
@@ -130,7 +130,7 @@ def create_app(server: GatewayServer) -> FastAPI:
     # 中间件顺序（Starlette：``add_middleware`` 是 ``user_middleware.insert(0, …)``，
     # 即**后 add 的在外层**）。AuthMiddleware 必须在最外层（只有 CORS 比它更外）：
     # 修复模式的 loopback 判定要**先**发生——setup mode 下非 loopback 的任何路径都先
-    # 吃 403，loopback 才轮到守门中间件决定「放行 or 503」（总设计 §8.4）。
+    # 吃 403，loopback 才轮到守门中间件决定「放行 or 503」。
     # CORS 最外一层：预检请求不带凭据，必须就地应答（不能被鉴权拦下）；loopback
     # 来源只在网关自身绑 loopback 时默认放通（远端可达的部署要显式写 origins）。
     app.add_middleware(SetupGuardMiddleware)

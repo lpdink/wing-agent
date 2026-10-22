@@ -4,9 +4,9 @@
 
 为什么单独成模块：
 
-- 今天配置非法 ⇒ ``load_config()`` raise ⇒ 网关进程**直接退出**（总设计 §1.2 实测：
-  最需要设置面板的那一刻，后端不存在）。降级启动（setup mode）需要一次永不抛的
-  启动读取，把失败原因翻译成 ``ConfigProblem`` 列表交给设置面板 / CLI。
+- 配置非法时 ``load_config()`` raise ⇒ 网关进程**直接退出**：最需要设置面板的
+  那一刻，后端不存在。降级启动（setup mode）需要一次永不抛的启动读取，把失败原因
+  翻译成 ``ConfigProblem`` 列表交给设置面板 / CLI。
 - ``loader.load_config()`` / ``get_config()`` 的对外行为**一字不改**（仍然抛）——
   现有调用方与测试零改动。``boot_config()`` 只被 ``gateway/cli.py`` 与
   ``GatewayServer`` 使用。
@@ -32,13 +32,12 @@ from . import loader
 from .catalog import build_catalog
 from .document import (
     SparseDocument,
-    locate_problems,
     malformed_document_problem,
-    merge_with_defaults,
+    problems_of,
 )
 from .emit import default_document, emit_config_yaml
 from .models import Config, GatewayConfig
-from .problems import ConfigProblem, ProblemKind, cross_field_problems
+from .problems import ConfigProblem, ProblemKind
 
 
 class BootFailure(str, Enum):
@@ -79,13 +78,13 @@ class BootResult:
     """文件里的 ``gateway.host`` / ``gateway.port``（**只要文件能解析出映射就取**，
     各自类型合法时）。配置语义不合法不影响它——Rust 侧 ``cmd/backend_config.rs`` 也是
     ``#[serde(default)]`` 的部分结构，两边必须读到同一个 endpoint，
-    否则「TUI 连不上降级启动的网关」（总设计 §8.6 末段）。取不到 ⇒ ``None``（回落默认）。"""
+    否则「TUI 连不上降级启动的网关」。取不到 ⇒ ``None``（回落默认）。"""
 
 
 def boot_config() -> BootResult:
     """读 ``config.yaml`` 并返回结局 —— **永不抛**。
 
-    **「永不抛」靠最外层兜底实现**（AD12）：任何没想到的形态（非字符串顶层键、
+    **「永不抛」靠最外层兜底实现**：任何没想到的形态（非字符串顶层键、
     未来 pydantic 的行为变化……）都在 :func:`_read_boot_config` 之外被兜成一条
     可展示的文档级 problem，而不是让网关带 traceback 崩掉——后者正是本步骤要消灭的路径。
 
@@ -138,7 +137,7 @@ def _read_boot_config(path: Path) -> BootResult:
                 endpoint=None,
             )
         # 模板 = providers: [] / agents: []：天然的 problem（设置向导据此指路）。
-        problems = _problems_of(SparseDocument(data=default_document()))
+        problems = problems_of(SparseDocument(data=default_document()))
         return BootResult(
             ok=False,
             config=None,
@@ -169,7 +168,7 @@ def _read_boot_config(path: Path) -> BootResult:
 
     # 顶层键不是字符串（YAML 把裸数字 / bool / 日期解析成对应类型）：`Config(**parsed)`
     # 会抛 `TypeError: keywords must be strings`，而 pydantic 的 ValidationError
-    # 路径根本进不去。先给一条**说得清**的问题，而不是让用户看 TypeError（AD12）。
+    # 路径根本进不去。先给一条**说得清**的问题，而不是让用户看 TypeError。
     # endpoint 照常取——Rust 侧 serde 对结构体的非字符串键是**跳过**（实测：`1: oops`
     # 不影响它读到 `gateway.port`），两边必须落在同一个端口上。
     endpoint = _endpoint_of(parsed)
@@ -192,7 +191,7 @@ def _read_boot_config(path: Path) -> BootResult:
         return BootResult(
             ok=False,
             config=None,
-            problems=_problems_of(SparseDocument(data=parsed)),
+            problems=problems_of(SparseDocument(data=parsed)),
             reason=BootFailure.INVALID,
             path=path,
             endpoint=endpoint,
@@ -207,17 +206,6 @@ def _read_boot_config(path: Path) -> BootResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # 内部
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _problems_of(doc: SparseDocument) -> list[ConfigProblem]:
-    """一份稀疏文档 → 全部问题（字段级 + 跨字段）。
-
-    与 ``GET /api/settings/status`` 同一口径（那边的同名私有函数住
-    ``gateway/routes/settings.py``）：L3 不许 import L4，所以「组合」这一行各写一次，
-    底层实现（``locate_problems`` / ``cross_field_problems``）只有一份。
-    """
-    raw = merge_with_defaults(doc, build_catalog())
-    return locate_problems(raw) + cross_field_problems(Config.model_construct(**raw))
 
 
 def _endpoint_of(parsed: Any) -> tuple[str, int] | None:
@@ -253,7 +241,8 @@ def _endpoint_of(parsed: Any) -> tuple[str, int] | None:
 def _default(field: str, kind: type) -> Any:
     """``GatewayConfig`` 声明的默认值（与 ``DEFAULT_HOST`` / ``DEFAULT_PORT`` 同源）。
 
-    声明层（01/02）是默认值的唯一来源——不在这里抄第三份 ``127.0.0.1`` / ``32523``。
+    声明层（``GatewayConfig``）是默认值的唯一来源——不在这里抄第三份
+    ``127.0.0.1`` / ``32523``。
     """
     value = GatewayConfig.model_fields[field].default
     return value if isinstance(value, kind) else kind()

@@ -5,7 +5,7 @@
 为什么需要它：网关降级启动后 ``server.runtime`` 只是一具「只服务保存事务」的替身
 （见 ``server.py`` 的 ``_SetupRuntime``），任何依赖真 runtime 的端点都无法工作。
 守门把「配置不可用」翻译成**协议级**的 503 + ``error="setup_mode"``（Rust 侧
-``ApiClientError::is_setup_mode()`` 据此判定，见 protocol_addendum **P4**——
+``ApiClientError::is_setup_mode()`` 据此判定——
 ``HTTP_ERROR_TYPES[503]`` 是通用的 ``service_unavailable``，setup 语义**显式覆盖**，
 否则所有 503 都会被看成 setup mode），并给出人类可读的修复指引。
 
@@ -21,7 +21,6 @@ from collections.abc import Sequence
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.types import ASGIApp
 
 from wing.config import ConfigProblem
 
@@ -79,11 +78,8 @@ class SetupGuardMiddleware(BaseHTTPMiddleware):
     """setup mode 的守门：白名单外的路径一律 ``503 error="setup_mode"``。
 
     注册顺序见 ``app.py``：本中间件在 ``AuthMiddleware`` **之内**（先 add ⇒ 更内层）
-    ——修复模式的 loopback 判定必须**先**发生（§8.4）。
+    ——修复模式的 loopback 判定必须**先**发生（见 ``auth.py``）。
     """
-
-    def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
