@@ -1,7 +1,5 @@
 """wing_hooks 三个官方 hook 的单元测试。
 
-TDD：先定义行为，再实现。
-
 三个 hook:
 1. prefix_timestamp: before_user_message — 给用户消息前缀时间戳
 2. truncate_tool_result: after_tool_call — 截断过长的 tool result

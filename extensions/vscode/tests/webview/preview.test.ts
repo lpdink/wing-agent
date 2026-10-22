@@ -25,7 +25,7 @@ describe('preview harness', () => {
     const toolbar = document.getElementById('preview-root');
     const buttons = [...(toolbar?.querySelectorAll('button') ?? [])].map((button) => button.textContent);
     // The toolbar is the harness' interface to the protocol paths: streaming,
-    // resync, toasts, and (step 05) the shell's panels and overlays.
+    // resync, toasts, and the shell's panels and overlays.
     expect(buttons).toEqual([
       'Stream turn',
       'Break stream',

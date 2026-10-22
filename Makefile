@@ -1,4 +1,4 @@
-.PHONY: check test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe format fmt fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
+.PHONY: check check-python check-rust check-ts test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -7,7 +7,7 @@
 # 本地已有 store 时不动网络），再依次跑 eslint / prettier / tsc / vitest。
 # 未接进 `fmt` / `fmt-check`：那两条要在 pre-commit 里保持秒级，而且不该强依赖 node_modules。
 #
-# 工具链缺失时的行为（评审 #109 [P3-7]）：显式探测 node / pnpm，缺哪一个就打印
+# 工具链缺失时的行为：显式探测 node / pnpm，缺哪一个就打印
 # 可操作的提示再退出 1 —— 而不是让 `pnpm: command not found` 混进结论块里，
 # 让只改 Python 的人以为自己弄坏了什么。`SKIP_TS=1` 是本地逃生舱（CI 不设，
 # 门禁照旧强制），collect_output.sh 会把 ts 组标成 skipped。
@@ -147,7 +147,7 @@ fmt-check-python:
 
 # clippy 带 --all-targets：默认目标集不含 benches / examples / 集成测试，
 # 少了它这些目标会无声腐烂（曾经的实例：benches 里 CellContext 缺字段，
-# 编译不过却谁也不知道，见 PR 评审）。代价是这几个目标也在门禁里编译一遍。
+# 编译不过却谁也不知道）。代价是这几个目标也在门禁里编译一遍。
 check-rust:
 	@echo "🔍 Running cargo fmt..."; \
 	cargo fmt --check || { echo "❌ cargo fmt failed"; exit 1; }; \

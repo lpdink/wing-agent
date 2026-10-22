@@ -5,7 +5,7 @@ import { createHostHarness, flushMicrotasks } from './support/harness';
 import type { HostHarness } from './support/harness';
 
 /**
- * Streaming tool arguments — the O(n²) fix (review #109 [P1-2]).
+ * Streaming tool arguments — the O(n²) fix.
  *
  * A provider emits one `tool_call_stream` fragment per SSE chunk; the bridge
  * used to receive the *whole* cell for every fragment (measured: ~100 MB of

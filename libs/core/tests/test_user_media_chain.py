@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import struct
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from _support import mock_generate, png_bytes
 from wing.common.utils import InvalidInputError
 from wing.event import DeliveredEvent, UserMessageAcceptedEvent
 from wing.event_bus import event_bus
@@ -32,15 +32,7 @@ from wing.gateway.protocol import ClientRequest
 from wing.gateway.protocol.session import SendMessageRequest
 from wing.schema import LLMResponse, LLMUsage, MediaRef, TextBlock
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -49,18 +41,6 @@ def runtime():
     from wing.runtime import WingRuntime
 
     return WingRuntime()
-
-
-def png_bytes(tag: bytes = b"") -> bytes:
-    """最小 PNG 前缀（只求字节事实与互异 sha256，不真解码）。"""
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + struct.pack(">I", 13)
-        + b"IHDR"
-        + struct.pack(">II", 4, 4)
-        + b"\x08\x06\x00\x00\x00"
-        + tag
-    )
 
 
 def make_ref(data: bytes, name: str = "a.png") -> MediaRef:
@@ -102,15 +82,6 @@ def _put(agent: Any, content: str, request_id: str | None = None, media=None) ->
     )
 
 
-async def _mock_generate(*args: Any, **kwargs: Any):
-    """Mock LLM generate: 返回一条纯文本响应（无 tool calls），结束 turn。"""
-    yield LLMResponse(
-        content="ok",
-        content_blocks=[TextBlock(text="ok")],
-        usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
-    )
-
-
 class TestUplinkPlumbing:
     """六层透传：media 从 runtime.post 一路进 Inbox 的 Message。"""
 
@@ -118,7 +89,7 @@ class TestUplinkPlumbing:
     async def test_post_carries_media_into_inbox_message(self, runtime: Any):
         session = runtime.create_session()
         await _stop_worker(session.agent)
-        ref = seed(session, png_bytes(b"plumb"))
+        ref = seed(session, png_bytes(payload=b"plumb"))
 
         await runtime.post(
             "look", request_id="req-1", session_id=session.session_id, media=[ref]
@@ -164,7 +135,7 @@ class TestMediaValidation:
         await _stop_worker(session.agent)
         events: list[Any] = []
         event_bus.subscribe(events.append)
-        ghost = make_ref(png_bytes(b"ghost"))  # 格式合法但对象不存在
+        ghost = make_ref(png_bytes(payload=b"ghost"))  # 格式合法但对象不存在
 
         with pytest.raises(InvalidInputError) as excinfo:
             await runtime.post("x", session_id=session.session_id, media=[ghost])
@@ -178,7 +149,9 @@ class TestMediaValidation:
     async def test_malformed_id_is_rejected(self, runtime: Any):
         session = runtime.create_session()
         await _stop_worker(session.agent)
-        bad = make_ref(png_bytes(b"bad")).model_copy(update={"id": "not-a-hash"})
+        bad = make_ref(png_bytes(payload=b"bad")).model_copy(
+            update={"id": "not-a-hash"}
+        )
 
         with pytest.raises(InvalidInputError) as excinfo:
             await runtime.post("x", session_id=session.session_id, media=[bad])
@@ -191,7 +164,7 @@ class TestMediaValidation:
         """mime 不在读图支持列表内：即使对象存在也拒（mime 原样进线格式）。"""
         session = runtime.create_session()
         await _stop_worker(session.agent)
-        ref = seed(session, png_bytes(b"mime")).model_copy(
+        ref = seed(session, png_bytes(payload=b"mime")).model_copy(
             update={"mime": "image/svg+xml"}
         )
 
@@ -202,7 +175,7 @@ class TestMediaValidation:
         assert session.agent._inbox.has_pending is False
 
         # mime 闸门先于存在性查询（ghost id + 非法 mime → 报 mime，不报 not found）
-        both_bad = make_ref(png_bytes(b"both")).model_copy(
+        both_bad = make_ref(png_bytes(payload=b"both")).model_copy(
             update={"id": "c" * 64, "mime": "text/plain"}
         )
         with pytest.raises(InvalidInputError) as excinfo:
@@ -213,7 +186,7 @@ class TestMediaValidation:
     async def test_existing_ref_passes_and_delivers(self, runtime: Any):
         session = runtime.create_session()
         await _stop_worker(session.agent)
-        ref = seed(session, png_bytes(b"ok"))
+        ref = seed(session, png_bytes(payload=b"ok"))
         events: list[Any] = []
         event_bus.subscribe(events.append)
 
@@ -239,13 +212,13 @@ class TestTurnMerge:
         session = runtime.create_session()
         agent = session.agent
         await _stop_worker(agent)
-        r1, r2 = make_ref(png_bytes(b"1")), make_ref(png_bytes(b"2"))
-        r3 = make_ref(png_bytes(b"3"))
+        r1, r2 = make_ref(png_bytes(payload=b"1")), make_ref(png_bytes(payload=b"2"))
+        r3 = make_ref(png_bytes(payload=b"3"))
 
         _put(agent, "A", "req-1", media=[r1, r2])
         _put(agent, "B", "req-2", media=[r3])
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         user_msgs = [
@@ -261,13 +234,13 @@ class TestTurnMerge:
         session = runtime.create_session()
         agent = session.agent
         await _stop_worker(agent)
-        ref = make_ref(png_bytes(b"pure"))
+        ref = make_ref(png_bytes(payload=b"pure"))
 
         _put(agent, "", "req-img", media=[ref])
         events: list[Any] = []
         event_bus.subscribe(events.append)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         user_msgs = [
@@ -293,7 +266,7 @@ class TestTurnMerge:
         events: list[Any] = []
         event_bus.subscribe(events.append)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await agent._loop.run_turn()
 
         assert [
@@ -326,7 +299,7 @@ class TestSteerPartialDrain:
 
     def test_text_prefix_steers_tail_stays(self):
         inbox, _ = self._inbox()
-        ref = make_ref(png_bytes(b"steer"))
+        ref = make_ref(png_bytes(payload=b"steer"))
         self._enqueue(inbox, [("A", None), ("B", [ref]), ("C", None)])
 
         steered = inbox.drain_for_steer()
@@ -347,7 +320,7 @@ class TestSteerPartialDrain:
 
     def test_image_at_head_blocks_everything(self):
         inbox, _ = self._inbox()
-        ref = make_ref(png_bytes(b"head"))
+        ref = make_ref(png_bytes(payload=b"head"))
         self._enqueue(inbox, [("B", [ref]), ("C", None)])
 
         assert inbox.drain_for_steer() == []
@@ -375,7 +348,7 @@ class TestSteerPartialDrain:
         session = runtime.create_session()
         agent = session.agent
         await _stop_worker(agent)
-        ref = make_ref(png_bytes(b"queued"))
+        ref = make_ref(png_bytes(payload=b"queued"))
 
         async def _echo(input: str = "") -> str:
             _put(agent, "steer me", "req-steer")
@@ -487,7 +460,7 @@ class TestProtocolMediaField:
 
     @pytest.mark.parametrize("model", MODELS)
     def test_media_dump_matches_media_ref(self, model: Any):
-        ref = make_ref(png_bytes(b"proto"))
+        ref = make_ref(png_bytes(payload=b"proto"))
         raw = {"session_id": "s", "content": "c", "media": [ref.model_dump()]}
 
         decoded = model.model_validate(raw)
@@ -505,7 +478,7 @@ class TestFirstMessageTitle:
     async def test_pure_image_first_message_leaves_title_unset(self, runtime: Any):
         session = runtime.create_session()
         await _stop_worker(session.agent)
-        ref = seed(session, png_bytes(b"title"))
+        ref = seed(session, png_bytes(payload=b"title"))
 
         await runtime.post(
             "", request_id="req-img", session_id=session.session_id, media=[ref]

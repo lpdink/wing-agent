@@ -4,7 +4,7 @@
 
 1. 挂载即把 session 注册进事件路由表，**并且**把 ``watch.dump_path`` 指向
    ``<env.root>/artifacts``——``expect`` 超时报告末行因此能引用现场转储目录
-   （design D8；转储由 ``probe.dump()`` / fixture teardown 落到同一目录）；
+   （转储由 ``probe.dump`` / fixture teardown 落到同一目录）；
 2. 重复挂载返回同一个句柄（不重建时间线、不丢事件）；
 3. 路由：``_on_event`` 把带 session_id 的事件投进该 session 的时间线，
    未知 session 的事件进 driver 级时间线（诊断用）。

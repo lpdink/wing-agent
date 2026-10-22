@@ -15,7 +15,7 @@ import pytest
 
 from wing_probe import Probe, ToolCall, Turn, Usage
 
-#: 场景私有 model 名（design D3：剧本按 model 名路由，场景之间不共享）。
+#: 场景私有 model 名（剧本按 model 名路由，场景之间不共享）。
 TPS_MODEL = "probe/llm-metrics-tps"
 
 

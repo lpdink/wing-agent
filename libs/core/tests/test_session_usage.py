@@ -18,15 +18,7 @@ from wing.schema import LLMUsage, ToolCall
 from wing.session.usage import UsageTracker
 from wing.store import SessionStore, SessionUsage
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus（Session 构造即订阅）。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 def _usage_of(store: SessionStore, session_id: str) -> SessionUsage | None:

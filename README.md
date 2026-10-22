@@ -99,7 +99,7 @@ wing         # start fresh
 
 ## Configuration
 
-Backend config: `~/.wing/core/config.yaml` — generated on first run, fully annotated (see `wing/config/default_config.py` for the template).
+Backend config: `~/.wing/core/config.yaml` — generated on first run from the declaration layer, fully annotated (see `docs/dev/settings.md`).
 Frontend config: `~/.wing/tui/config.yaml`
 
 ## Built-in Tools

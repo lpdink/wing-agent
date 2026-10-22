@@ -1,4 +1,4 @@
-"""``ProbeEnv.start()`` 的失败路径收尾 —— 已 spawn 的网关不许变成孤儿（AD17）。
+"""``ProbeEnv.start()`` 的失败路径收尾 —— 已 spawn 的网关不许变成孤儿。
 
 背景：``test_model_id_cross_provider`` 的那条旧场景断言"坏配置 ⇒ 网关拒绝启动"，
 setup mode 之后网关**不再拒绝启动**，于是 ``ProbeEnv.start`` 成功返回、env 被丢掉、
@@ -158,7 +158,7 @@ async def test_stop_is_safe_after_start_failure(
 # `_terminate_process()`——于是上面那条用例在"去掉 `start()` 的外层兜底"时仍绿。
 # 下面两条让异常**穿过** `start_gateway`（非 `ProbeEnvError` / `BaseException`），
 # 此时 `start()` 的 `except BaseException: await env.stop()` 是唯一的收尸人：
-# 去掉它，进程就泄漏（AD17 点名的正是这一层）。
+# 去掉它，进程就泄漏（漏的正是这一层）。
 
 
 async def _explode_with(

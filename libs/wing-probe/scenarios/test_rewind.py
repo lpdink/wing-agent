@@ -1,4 +1,4 @@
-"""rewind 红线场景（tasks 6.9–6.12，spec probe-scenarios「Requirement: rewind 红线场景」）。
+"""rewind 红线场景。
 
 覆盖的断言点：
 

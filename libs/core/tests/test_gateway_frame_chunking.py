@@ -23,7 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import WebSocket
 
-from wing.config import ApiKeyEntry, AuthConfig
+from _support import gateway_auth_config
+from wing.config import ApiKeyEntry
 from wing.event import EventTarget, NoticeEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.gateway.frames import (
@@ -40,14 +41,6 @@ def _as_ws(obj: object) -> WebSocket:
     return cast("WebSocket", obj)
 
 
-def _mock_config() -> MagicMock:
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(
-        enabled=False, keys=[ApiKeyEntry(key="k", role="admin")]
-    )
-    return config
-
-
 def _make_server():
     """造一个 GatewayServer（WingRuntime / load_config 都 mock 掉）。"""
     with (
@@ -55,7 +48,9 @@ def _make_server():
         patch("wing.gateway.server.load_config") as mock_load_config,
     ):
         MockRuntime.return_value = MagicMock()
-        mock_load_config.return_value = _mock_config()
+        mock_load_config.return_value = gateway_auth_config(
+            keys=[ApiKeyEntry(key="k", role="admin")]
+        )
         from wing.gateway.server import GatewayServer
 
         return GatewayServer()

@@ -1,8 +1,13 @@
-//! Shared corpus generation + baseline (full-render) frame harness for the
-//! streaming-render benchmarks and tests.
+//! Shared test infrastructure. Two kinds of thing live here:
 //!
-//! All corpora are generated deterministically from fixed seeds — no external
-//! corpus files, benchmark numbers are reproducible from the repo alone.
+//! - **This file**: the streaming-render corpus generator + baseline (full-render)
+//!   frame harness (see below). Corpora are generated deterministically from fixed
+//!   seeds — no external corpus files, benchmark numbers are reproducible from the
+//!   repo alone.
+//! - **`e2e` / `guard` / `pty`**: the scaffolding every integration-test family
+//!   shares (a fake gateway + `WING_HOME`, the source-scanning primitives behind
+//!   the two guards, the pty primitives). Each submodule's header states its own
+//!   contract; none of them is specific to the render tests.
 //!
 //! `BaselineCell::frame()` replicates the CURRENT production per-frame path
 //! for a streaming Thinking / AssistantMessage cell:
@@ -14,6 +19,10 @@
 //! This is the "before" engine every optimization is measured against.
 
 #![allow(dead_code)]
+
+pub mod e2e;
+pub mod guard;
+pub mod pty;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

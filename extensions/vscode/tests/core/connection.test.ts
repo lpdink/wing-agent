@@ -355,7 +355,7 @@ describe('failure handling inside a live connection', () => {
     expect(gateway.last.closedWith).not.toBeNull();
   });
 
-  it('reconnects when a reassembled payload is a malformed known type (review r1 N1)', async () => {
+  it('reconnects when a reassembled payload is a malformed known type', async () => {
     const gateway = new FakeGateway();
     gateway.autoHandshake = false;
     const connection = await connectOk(gateway);

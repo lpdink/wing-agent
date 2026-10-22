@@ -24,7 +24,7 @@ import type { WebviewIntent } from './bridge';
  * every gateway event into {@link SessionManager}. Everything session-shaped
  * lives there; everything connection-shaped lives here.
  *
- * Reconnect policy (design.md D8):
+ * Reconnect policy:
  *
  * - a **first** connect failure is the host's problem: it retries on the same
  *   `min(1s·2ⁿ, 30s)` ladder core uses, because core only supervises *after* a

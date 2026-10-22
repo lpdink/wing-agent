@@ -13,13 +13,13 @@ controller 不做收集** —— 它只为 `args` 调这个函数。所以 `pyte
 `pytest libs/wing-probe/scenarios/`、单文件参数三种形态 controller 都能加载到
 （本层是它们的 args 或 args 的祖先）。`tests/test_conftest_layout.py` 守这条约定。
 
-本文件是 ``scenarios/`` 唯一的公共 fixture 定义处（design D11：场景文件只
+本文件是 ``scenarios/`` 唯一的公共 fixture 定义处（场景文件只
 import ``wing_probe`` 与 pytest）。
 
 ``probe`` fixture（function 级）提供：
 
 1. **自举**：``Probe.start(tmp_path / "probe")`` —— 临时 ``WING_HOME`` + 独立
-   网关子进程 + 进程内假 Provider（design D7/D10，场景之间零共享）；
+   网关子进程 + 进程内假 Provider（场景之间零共享）；
 2. **teardown 自动不变量**：对场景创建／挂载的**全部** session（含 fork 出来的
    子会话）运行四条内置不变量（链拓扑 / tool 配对 / transient 不落盘 / 落盘规范形）。失败即
    抛 :class:`wing_probe.ProbeInvariantError`（场景失败，报告标注来源
@@ -36,7 +36,7 @@ import ``wing_probe`` 与 pytest）。
 - ``never``：从不自动转储（``probe.dump()`` 显式调用仍可用）。
 
 逃生舱 ``probe.without_invariants(reason=...)`` 必须给理由：理由写进
-``artifacts/dump.txt``，并在终端汇总里回显（spec「逃生舱必须说明理由」）。
+``artifacts/dump.txt``，并在终端汇总里回显。
 
 **并行**：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
 可以按核数并行跑（``make test-probe`` 的 ``-n``）。并行下 fixture 跑在 worker
@@ -98,7 +98,7 @@ def pytest_runtest_makereport(
 
 
 def pytest_terminal_summary(terminalreporter: Any) -> None:
-    """失败报告末尾列出各场景的现场转储路径（design D8：CI 收 artifacts）。"""
+    """失败报告末尾列出各场景的现场转储路径（CI 收 artifacts）。"""
     entries = {
         nodeid: item
         for nodeid, item in _REPORTS.items()

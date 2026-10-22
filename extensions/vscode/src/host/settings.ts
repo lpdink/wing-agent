@@ -7,10 +7,9 @@ import { log } from './log';
 /**
  * Gateway connection settings (`wing.*` in `contributes.configuration`).
  *
- * Defaults mirror the backend (`libs/core/wing/default_config.py`: `127.0.0.1:32523`)
+ * Defaults mirror the backend (`libs/core/wing/config/models.py`: `127.0.0.1:32523`)
  * and the TUI's fallback. The extension deliberately does not parse
- * `~/.wing/config.yaml` — a user who changed the port there mirrors it here once
- * (see design.md Assumptions 6).
+ * `~/.wing/config.yaml` — a user who changed the port there mirrors it here once.
  */
 export interface GatewaySettings {
   readonly host: string;
@@ -23,7 +22,7 @@ export interface GatewaySettings {
   readonly autoStart: boolean;
 }
 
-/** Backend default (`default_config.py` → `gateway.port`). */
+/** Backend default (`config/models.py` → `gateway.port`). */
 export const DEFAULT_GATEWAY_HOST = '127.0.0.1';
 export const DEFAULT_GATEWAY_PORT = 32523;
 

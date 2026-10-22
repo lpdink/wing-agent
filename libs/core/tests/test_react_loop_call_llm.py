@@ -16,14 +16,7 @@ from wing.event import LLMCallMetricsEvent
 from wing.event_bus import event_bus
 from wing.schema import LLMResponse, LLMUsage, TextBlock, ThinkingBlock, ToolUseBlock
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 def _make_loop() -> ReActLoop:

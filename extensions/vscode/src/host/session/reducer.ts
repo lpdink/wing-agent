@@ -67,7 +67,7 @@ const TOOL_RESULT_TAIL_CHARS = 4_000;
  * A provider emits one `tool_call_stream` fragment per SSE chunk, so a 200 KB
  * `Write` is ~1000 fragments. Re-parsing the accumulated text and pushing the
  * whole cell over the bridge for *every* fragment is O(n²): measured at
- * ~100 MB of bridge traffic and ~0.5 s of host work (see design.md P1-2). While
+ * ~100 MB of bridge traffic and ~0.5 s of host work. While
  * the model writes the arguments, the title/subject being 100 ms stale is worth
  * nothing; the authoritative arguments arrive parsed with the final `tool_call`.
  */

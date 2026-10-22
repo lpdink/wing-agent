@@ -1,4 +1,4 @@
-"""ReAct 基础场景（tasks 6.2–6.4，spec probe-scenarios「Requirement: ReAct 基础场景」）。
+"""ReAct 基础场景。
 
 覆盖的断言点：
 
@@ -20,7 +20,7 @@ import pytest
 
 from wing_probe import Probe, ToolCall, Turn
 
-#: 场景私有 model 名（design D3：剧本按 model 名路由，场景之间不共享）。
+#: 场景私有 model 名（剧本按 model 名路由，场景之间不共享）。
 TEXT_MODEL = "probe/react-text"
 BASH_MODEL = "probe/react-bash"
 ASK_MODEL = "probe/react-ask"
@@ -74,7 +74,7 @@ async def test_text_turn_event_order_and_persistence(probe: Probe) -> None:
     assert [message["role"] for message in view.messages()] == ["user", "assistant"]
     assert view.messages()[0]["content"] == "hi"
     assert view.messages()[1]["content"] == "hello world"
-    # 红线：流式 delta 类瞬态记录绝不落盘（spec「transient 记录不落盘」）。
+    # 红线：流式 delta 类瞬态记录绝不落盘。
     view.assert_no_transient_records()
     view.assert_chain_invariants()
     view.assert_tool_pairing()

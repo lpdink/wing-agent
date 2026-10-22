@@ -120,7 +120,7 @@ $WING_HOME/tasks/<task_name>/
 
 ### 4.2 写 `proposal.md`（模板见附录 A）
 
-用 openspec 骨架（英文小标题）+ 中文正文。要点：
+用附录 A 的骨架（英文小标题）+ 中文正文。要点：
 
 - **Out of Scope 必须写**：这是防止 executor 自由发挥的第一道闸；
 - **Verification 必须可执行**：一条条命令 / 测试，不能是「功能正常」这种话；

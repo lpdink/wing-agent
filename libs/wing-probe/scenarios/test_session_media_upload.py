@@ -1,6 +1,6 @@
 """上传端点（``POST /api/session/media``）probe 场景（03 upload_endpoint）。
 
-被守的语义（总任务书冻结合同 #2，服务端侧）：
+被守的语义（服务端侧）：
 
 - **成功四件套**：上传 → 响应 ``media`` 各字段 == 文件事实（sha256 id / mime / bytes /
   尺寸 / name）、对象落在 ``<sessions-root>/<sid>/media/<id>`` 且字节全等、目录里只有

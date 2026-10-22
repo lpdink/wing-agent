@@ -37,7 +37,7 @@ export interface FrontendCommand extends CommandInfoModel {
  *
  * Names and aliases carry the **leading slash** (that is what the user types, what
  * `LOCAL_COMMANDS` already uses, and what `runPromptCommand.name` expects on the
- * wire — see `interfaces.md`).
+ * wire — see the bridge contract).
  *
  * Wording is ours; the **names and aliases** are a 1:1 mirror of the TUI's
  * `TUI_ONLY_COMMANDS` (`crates/wing/src/ui/popup/command.rs:59`) —

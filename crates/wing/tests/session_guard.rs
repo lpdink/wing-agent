@@ -29,12 +29,11 @@
 //! 白空格不敏感（`stdin_proxy :: install (` 也算命中，与 `layer_guard` 同一约定）；测试代码
 //! 不算生产源码（文件尾部的 `#[cfg(test)] mod …` 之前的部分才是生产正文）。
 
-use std::fs;
-use std::path::Path;
 use std::path::PathBuf;
 
-/// 包内源码根（`crates/wing/src`）。
-const SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+mod common;
+
+use common::guard::{SRC, Squashed, collect, production_text};
 
 /// 唯一的安装调用点所在文件。
 const SESSION_FILE: &str = "tui/mod.rs";
@@ -60,116 +59,37 @@ struct Hit {
 
 /// 逐文件扫描的产物：`src` 相对路径 + 生产正文（测试模块已切掉）。
 #[derive(Debug)]
-struct Source {
+struct Production {
     path: String,
     production: String,
 }
 
-fn sources() -> Vec<Source> {
+fn sources() -> Vec<Production> {
     let root = PathBuf::from(SRC);
     assert!(root.is_dir(), "源码根不存在：{}", root.display());
-    let mut out = Vec::new();
-    collect(&root, &mut out);
+    let mut raw = Vec::new();
+    collect(&root, &mut raw);
     assert!(
-        out.iter().any(|s| s.path == SESSION_FILE),
+        raw.iter().any(|s| s.path == SESSION_FILE),
         "门禁没有扫到 {SESSION_FILE}（walk 提前停了？）"
     );
-    out
-}
-
-fn collect(dir: &Path, out: &mut Vec<Source>) {
-    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .map(|entry| entry.expect("directory entry").path())
-        .collect();
-    paths.sort();
-    for path in paths {
-        if path.is_dir() {
-            collect(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            let text = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-            let path = path
-                .strip_prefix(SRC)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push(Source {
-                path,
-                production: production_text(&text).to_string(),
-            });
-        }
-    }
-}
-
-/// 文件的生产正文：**文件尾部**的测试模块（`#[cfg(test)]` + 紧随的 `mod …`）之前的部分。
-///
-/// 只切「标记后面跟着模块声明」的那一处：`#[cfg(test)]` 也能标在单个 item 上（测试专用
-/// 访问器），其后仍然是生产代码，切在那里会把生产代码藏起来。
-fn production_text(text: &str) -> &str {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let mut offset = 0;
-    for (index, line) in lines.iter().enumerate() {
-        if line.starts_with("#[cfg(test)]")
-            && lines[index + 1..]
-                .iter()
-                .find(|next| !is_insignificant(next))
-                .is_some_and(|next| opens_a_module(next))
-        {
-            return &text[..offset];
-        }
-        offset += line.len();
-    }
-    text
-}
-
-fn is_insignificant(line: &str) -> bool {
-    let line = line.trim();
-    line.is_empty() || line.starts_with("//") || line.starts_with("#[")
-}
-
-fn opens_a_module(line: &str) -> bool {
-    let line = line.trim();
-    line.starts_with("mod ") || line.starts_with("pub mod ") || line.starts_with("pub(crate) mod ")
-}
-
-/// 把 `text` 里所有白空格去掉，逐字符记录 `(压缩串里的字节偏移, 原始行号)`——源码里有中文
-/// 注释（多字节），命中偏移是**字节**偏移，所以映射必须按字节走（同 `layer_guard` 的做法）。
-fn squashed_lines(text: &str) -> (String, Vec<(usize, usize)>) {
-    let mut squashed = String::with_capacity(text.len());
-    let mut at = Vec::with_capacity(text.len());
-    let mut line = 1;
-    for ch in text.chars() {
-        if ch == '\n' {
-            line += 1;
-            continue;
-        }
-        if ch.is_whitespace() {
-            continue;
-        }
-        at.push((squashed.len(), line));
-        squashed.push(ch);
-    }
-    (squashed, at)
-}
-
-/// 压缩串里字节偏移 `offset` 处的原始行号。
-fn line_of(at: &[(usize, usize)], offset: usize) -> usize {
-    match at.binary_search_by_key(&offset, |(offset, _)| *offset) {
-        Ok(index) => at[index].1,
-        Err(index) => at.get(index.saturating_sub(1)).map_or(1, |(_, line)| *line),
-    }
+    raw.into_iter()
+        .map(|source| Production {
+            path: source.path,
+            production: production_text(&source.text).to_string(),
+        })
+        .collect()
 }
 
 /// `needle` 在 `text` 里的全部命中（白空格不敏感，注释也算 —— 引用也是引用）。
 fn hits(text: &str, needle: &str) -> Vec<Hit> {
-    let (squashed, at) = squashed_lines(text);
+    let squashed = Squashed::new(text);
     let original: Vec<&str> = text.lines().collect();
     let mut out: Vec<Hit> = Vec::new();
     let mut from = 0;
-    while let Some(offset) = squashed[from..].find(needle) {
+    while let Some(offset) = squashed.text[from..].find(needle) {
         let start = from + offset;
-        let line = line_of(&at, start);
+        let line = squashed.origin(start).1;
         if !out.iter().any(|hit| hit.line == line) {
             out.push(Hit {
                 line,

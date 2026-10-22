@@ -1,6 +1,6 @@
 """model_id 贯穿会话运行期：身份三元组 / 恢复链 / 模板与 reload / override。
 
-覆盖（Step 02 的会话侧行为契约）：
+覆盖（the gateway layer 的会话侧行为契约）：
 
 - **身份三元组**：`update_state(model_id)` 切换并一次落盘 `(model_id, provider,
   name)`；新会话从模板反查补全 id（第一帧就有引用词）；
@@ -21,8 +21,8 @@ from typing import Any
 
 import pytest
 
+from _support import seed_messages
 from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
-from wing.schema import Message
 from wing.session import AgentOverride, AgentTemplate, SessionManager
 from wing.store import FileSessionStore, SessionMetadata
 
@@ -52,12 +52,6 @@ def _use_config(monkeypatch: pytest.MonkeyPatch, cfg: Config) -> None:
     import wing.config.loader as loader
 
     monkeypatch.setattr(loader, "_config", cfg)
-
-
-def _seed(session: Any, *contents: str) -> None:
-    for i, content in enumerate(contents):
-        role = "user" if i % 2 == 0 else "assistant"
-        session.context_manager.add_message(Message(role=role, content=content))
 
 
 class _RecordingStore(FileSessionStore):
@@ -466,7 +460,7 @@ class TestForkSnapshot:
         )
         sm = SessionManager({"file": FileSessionStore(root)})
         source = sm.create_session()
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
         assert target is not None
 
@@ -955,7 +949,7 @@ class TestModelWindowFollowsModel:
         )
         sm = SessionManager({"file": FileSessionStore(root)})
         parent = sm.create_session()
-        _seed(parent, "hello")
+        seed_messages(parent, "hello")
         result = sm.fork_session(parent.session_id, "current")
         assert result is not None
         child, _ = result

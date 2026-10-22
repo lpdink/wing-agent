@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 import pytest
 
+from _support import default_compactor, make_cm
 from wing.chain import TrackedList
 from wing.context import Compactor, ContextManager, PendingCompact
 from wing.schema import ChainNode, LLMResponse, LLMUsage, Message
@@ -25,13 +24,6 @@ pytestmark = pytest.mark.asyncio
 
 _SUMMARY = "[Compact] compressed"
 _DEFAULT_COMPACTOR = object()
-
-
-@pytest.fixture
-def tmp_dir():
-    d = tempfile.mkdtemp()
-    yield Path(d)
-    shutil.rmtree(d)
 
 
 def _mock_provider(summary: str = "<summary>compressed</summary>"):
@@ -59,15 +51,9 @@ def _make_cm(
     compactor: Any = _DEFAULT_COMPACTOR,
     session_id: str = "test-manual",
 ) -> ContextManager:
-    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / session_id))
     if compactor is _DEFAULT_COMPACTOR:
-        compactor = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
-    return ContextManager(
-        session_id=session_id,
-        messages=messages,
-        system_prompt="You are a helpful assistant.",
-        compactor=compactor,
-    )
+        compactor = default_compactor()
+    return make_cm(tmp_dir, session_id=session_id, compactor=compactor)
 
 
 def _uuid_of(node: ChainNode) -> str:

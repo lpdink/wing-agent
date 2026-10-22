@@ -18,14 +18,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from _support import BodyWatcher, gateway_server, sessions_root
 from wing.common.utils import InvalidInputError
-from wing.config import AuthConfig, get_config
+from wing.config import get_config
 from wing.runtime import WingRuntime
 from wing.schema import Message
 from wing.store.base import FILE_NAME_MAX_BYTES
@@ -36,23 +35,13 @@ SID = "files-upload-session"
 # ── fixtures（与媒体上传单测同款：真实 runtime，独立 sessions 根） ──
 
 
-@pytest.fixture
-def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> WingRuntime:
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    return WingRuntime()
-
-
-def sessions_root() -> Path:
-    return get_config().sessions.resolved_path()
-
-
 def files_dir(session_id: str) -> Path:
     return sessions_root() / session_id / "files"
 
 
-def _seed_session(runtime: WingRuntime, session_id: str = SID) -> str:
+def _seed_session(isolated_runtime: WingRuntime, session_id: str = SID) -> str:
     """建一个"是会话"的 id（有 metadata / history 才可被解析）。"""
-    session = runtime.create_session(session_id=session_id)
+    session = isolated_runtime.create_session(session_id=session_id)
     session.context_manager.add_message(Message(role="user", content="hi"))
     return session.session_id
 
@@ -63,11 +52,11 @@ def _seed_session(runtime: WingRuntime, session_id: str = SID) -> str:
 class TestManagerUploadFile:
     @pytest.mark.asyncio
     async def test_writes_file_and_returns_absolute_path(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
 
-        ref = runtime.upload_file(sid, b"hello", name="notes.txt")
+        ref = isolated_runtime.upload_file(sid, b"hello", name="notes.txt")
 
         assert ref.name == "notes.txt"
         assert ref.bytes == 5
@@ -77,13 +66,13 @@ class TestManagerUploadFile:
 
     @pytest.mark.asyncio
     async def test_second_upload_of_same_bytes_keeps_the_same_path(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        sid = _seed_session(runtime)
-        first = runtime.upload_file(sid, b"same", name="notes.txt")
+        sid = _seed_session(isolated_runtime)
+        first = isolated_runtime.upload_file(sid, b"same", name="notes.txt")
         before = Path(str(first.path)).stat()
 
-        second = runtime.upload_file(sid, b"same", name="notes.txt")
+        second = isolated_runtime.upload_file(sid, b"same", name="notes.txt")
 
         assert second == first
         after = Path(str(second.path)).stat()
@@ -93,10 +82,12 @@ class TestManagerUploadFile:
         ), "幂等命中重写了文件"
 
     @pytest.mark.asyncio
-    async def test_conflicting_bytes_get_a_suffix(self, runtime: WingRuntime) -> None:
-        sid = _seed_session(runtime)
-        runtime.upload_file(sid, b"one", name="report.pdf")
-        second = runtime.upload_file(sid, b"two", name="report.pdf")
+    async def test_conflicting_bytes_get_a_suffix(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
+        sid = _seed_session(isolated_runtime)
+        isolated_runtime.upload_file(sid, b"one", name="report.pdf")
+        second = isolated_runtime.upload_file(sid, b"two", name="report.pdf")
         assert second.name == "report-2.pdf"
         assert sorted(p.name for p in files_dir(sid).iterdir()) == [
             "report-2.pdf",
@@ -120,94 +111,100 @@ class TestManagerUploadFile:
         ],
     )
     async def test_invalid_names_are_rejected_without_touching_storage(
-        self, runtime: WingRuntime, name: str
+        self, isolated_runtime: WingRuntime, name: str
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
 
         with pytest.raises(InvalidInputError):
-            runtime.upload_file(sid, b"x", name=name)
+            isolated_runtime.upload_file(sid, b"x", name=name)
 
         assert not files_dir(sid).exists(), "400 路径在存储上留下了痕迹"
 
     @pytest.mark.asyncio
     async def test_empty_body_is_rejected_without_touching_storage(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
         with pytest.raises(InvalidInputError):
-            runtime.upload_file(sid, b"", name="notes.txt")
+            isolated_runtime.upload_file(sid, b"", name="notes.txt")
         assert not files_dir(sid).exists()
 
     @pytest.mark.asyncio
     async def test_oversize_body_is_rejected_against_config_limit(
-        self, runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+        self, isolated_runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
         monkeypatch.setattr(get_config().files, "max_bytes", 4)
 
         with pytest.raises(InvalidInputError) as excinfo:
-            runtime.upload_file(sid, b"12345", name="notes.txt")
+            isolated_runtime.upload_file(sid, b"12345", name="notes.txt")
 
         assert "files.max_bytes" in str(excinfo.value)
         assert not files_dir(sid).exists()
 
     @pytest.mark.asyncio
     async def test_exactly_at_the_limit_is_accepted(
-        self, runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+        self, isolated_runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
         monkeypatch.setattr(get_config().files, "max_bytes", 4)
-        assert runtime.upload_file(sid, b"1234", name="notes.txt").bytes == 4
+        assert isolated_runtime.upload_file(sid, b"1234", name="notes.txt").bytes == 4
 
     @pytest.mark.asyncio
-    async def test_ghost_session_is_not_created(self, runtime: WingRuntime) -> None:
+    async def test_ghost_session_is_not_created(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
         with pytest.raises(LookupError):
-            runtime.upload_file("ghost-files-1", b"x", name="notes.txt")
+            isolated_runtime.upload_file("ghost-files-1", b"x", name="notes.txt")
         assert not (sessions_root() / "ghost-files-1").exists()
 
     @pytest.mark.asyncio
     async def test_traversal_session_id_is_not_created(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
         with pytest.raises(LookupError):
-            runtime.upload_file("../escape-files", b"x", name="notes.txt")
+            isolated_runtime.upload_file("../escape-files", b"x", name="notes.txt")
         assert not (sessions_root().parent / "escape-files").exists()
 
     @pytest.mark.asyncio
-    async def test_memory_backend_has_no_path(self, runtime: WingRuntime) -> None:
-        session = runtime.create_session(backend="memory")
+    async def test_memory_backend_has_no_path(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
+        session = isolated_runtime.create_session(backend="memory")
         session.context_manager.add_message(Message(role="user", content="hi"))
 
-        ref = runtime.upload_file(session.session_id, b"data", name="notes.txt")
+        ref = isolated_runtime.upload_file(
+            session.session_id, b"data", name="notes.txt"
+        )
 
         assert ref.path is None
         assert ref.name == "notes.txt" and ref.bytes == 4
 
     @pytest.mark.asyncio
     async def test_upload_does_not_hydrate_an_evicted_session(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
         """上传不水合：被逐出的会话不该因为一次上传被换入内存。"""
-        sid = _seed_session(runtime)
-        released, _ = runtime.release_session(sid)
-        assert released is True and runtime.get_session(sid) is None
+        sid = _seed_session(isolated_runtime)
+        released, _ = isolated_runtime.release_session(sid)
+        assert released is True and isolated_runtime.get_session(sid) is None
 
-        ref = runtime.upload_file(sid, b"bytes", name="notes.txt")
+        ref = isolated_runtime.upload_file(sid, b"bytes", name="notes.txt")
 
         assert Path(str(ref.path)).read_bytes() == b"bytes"
-        assert runtime.get_session(sid) is None, "上传把已逐出的会话唤醒了"
+        assert isolated_runtime.get_session(sid) is None, "上传把已逐出的会话唤醒了"
 
     @pytest.mark.asyncio
     async def test_alias_id_writes_into_the_canonical_session_dir(
-        self, runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+        self, isolated_runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """别名（大小写 / 归一化不敏感 FS）解析成磁盘真名：落真名目录、不另起一份。
 
         大小写敏感的 FS 上真别名不存在，这里照 ``test_session_media_upload.py``
         的做法**造一个**——要钉的是"写目标是解析出的键，不是请求字符串"。
         """
-        sid = _seed_session(runtime)
-        store = runtime.sm._stores["file"]
+        sid = _seed_session(isolated_runtime)
+        store = isolated_runtime.sm._stores["file"]
         original = store.resolve_stored_id
 
         def alias_resolve(session_id: str) -> str | None:
@@ -215,68 +212,34 @@ class TestManagerUploadFile:
 
         monkeypatch.setattr(store, "resolve_stored_id", alias_resolve)
 
-        ref = runtime.upload_file("alias-of-files", b"x", name="notes.txt")
+        ref = isolated_runtime.upload_file("alias-of-files", b"x", name="notes.txt")
 
         assert ref.path == str(files_dir(sid) / "notes.txt")
         assert not (sessions_root() / "alias-of-files").exists()
 
     @pytest.mark.asyncio
     async def test_archived_session_raises_the_active_error(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
         from wing.session import SessionArchivedError
 
-        sid = _seed_session(runtime)
-        assert runtime.archive_session(sid)[0] is True
+        sid = _seed_session(isolated_runtime)
+        assert isolated_runtime.archive_session(sid)[0] is True
 
         with pytest.raises(SessionArchivedError):
-            runtime.upload_file(sid, b"x", name="notes.txt")
+            isolated_runtime.upload_file(sid, b"x", name="notes.txt")
 
 
 # ── 2. 路由层 ──────────────────────────────────────────────────
 
 
-def _gateway_config() -> MagicMock:
-    """网关侧配置替身（auth 关闭；其余字段保持 MagicMock 的宽容行为）。"""
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(enabled=False, keys=[])
-    return config
-
-
-class _BodyWatcher:
-    """ASGI 包装：记录下游从 ``receive`` 拉走的每一条消息（"先校验、后收包"的观测面）。"""
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-        self.messages: list[dict[str, Any]] = []
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        async def counting_receive() -> Any:
-            message = await receive()
-            self.messages.append(message)
-            return message
-
-        await self.app(scope, counting_receive, send)
-
-    def request_bodies(self) -> list[bytes]:
-        return [
-            m.get("body", b"") for m in self.messages if m["type"] == "http.request"
-        ]
-
-
 @pytest.fixture
 def real_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """真实 WingRuntime + 独立 sessions 根 + TestClient（不起 uvicorn）。"""
-    from wing.gateway.server import GatewayServer
-
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    with patch("wing.gateway.server.load_config") as mock_load_config:
-        mock_load_config.return_value = _gateway_config()
-        server = GatewayServer()
-    server.runtime = WingRuntime()
-    watcher = _BodyWatcher(server._app)
-    with TestClient(watcher) as client:
-        yield client, server.runtime, watcher
+    with gateway_server(tmp_path, monkeypatch) as server:
+        watcher = BodyWatcher(server._app)
+        with TestClient(watcher) as client:
+            yield client, server.runtime, watcher
 
 
 class TestUploadFileRoute:

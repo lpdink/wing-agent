@@ -1,4 +1,4 @@
-"""工具执行期中断红线场景（spec「工具执行期中断」）。
+"""工具执行期中断红线场景。
 
 被守的语义（`libs/core/wing/agent/tool_executor.py` + `react_loop.py`）：
 

@@ -1,4 +1,4 @@
-"""ProbeEnv —— 确定性集成环境的自举与停止（spec「环境自举与隔离」）。
+"""ProbeEnv —— 确定性集成环境的自举与停止。
 
 一次 ``ProbeEnv.start(root)`` 得到：
 
@@ -719,7 +719,7 @@ class ProbeEnv:
         self._gateway_bin: Path | None = None
         self._stopped = False
         self.started_at = time.monotonic()
-        """相对单调时钟基准（事件时间线用；见 design D4）。"""
+        """相对单调时钟基准。"""
 
     # ── 启动 ────────────────────────────────────────────────
 
@@ -932,7 +932,7 @@ class ProbeEnv:
         return self._gateway_bin
 
     def env_vars(self) -> dict[str, str]:
-        """网关子进程环境：显式指向 tmp（防外部环境污染，design D7）。
+        """网关子进程环境：显式指向 tmp。
 
         同时把 loopback 并入 ``NO_PROXY``：子进程的 httpx 打假 Provider 时同样
         绕开环境 / 系统代理（见 :data:`LOOPBACK_HOSTS`）。

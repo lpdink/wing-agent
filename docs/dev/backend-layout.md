@@ -173,6 +173,29 @@
 （03–13 期间它是待办清单，逐条注明清除步骤；历史见 §5）——任何时候出现违规都直接打红，
 不存在豁免开关，也没有"过渡期"这一档。
 
+### Rust 侧的分层守门（`crates/wing/tests/layer_guard.rs`）
+
+前端（`crates/wing/src/**`）用的是同一套思路的**文本扫描**版本：每条规则一个 `#[test]`，
+禁止名单是该文件规则区里的常量（`UI_FORBIDDEN_LAYERS` / `SHARED_FORBIDDEN_LAYERS` 等，与
+分层无关的「只有出帧口能画帧」那条规则也在同一文件），失败信息给出的也是「文件:行 +
+命中原文 + 修法」。
+
+- **扫描形态**：源码先去掉全部空白再匹配（`crate :: app` / 跨行的 `crate::{` 与
+  `crate::app` 同命），命中 `crate::NAME` / `crate::{NAME`（嵌套 import 的首个成员）/
+  `super::NAME`；注释也算——反向依赖不许以任何形态存在，过期的文档指针正是下一条反向
+  依赖的写法。
+- **为什么是文本而不是 AST**：规则本身是「某个层里不得出现某个路径」，文本匹配足够且零
+  依赖；代价是**显式声明的覆盖边界**（`use crate::{ui, app}` 里非首成员、宏展开与
+  `include!` 的产物不在扫描面内——那需要真正的 Rust parser），残余风险与本节「已知边界」
+  同性质：由 review 兜底。
+- **与本节的分工**：本页管 **Python 包之间**的依赖方向（AST，按包族判 R1–R6）；
+  `layer_guard.rs` 管 **Rust 模块之间**的依赖方向（文本，按层判禁止名单）。两侧互不覆盖，
+  改任何一侧都不影响另一侧。`extensions/vscode/tests/layers/layers.test.ts` 是第三份
+  （TypeScript 的 `LAYERS` / `RULES` 矩阵，跑在 vitest 里）。
+- 另有 `crates/wing/tests/session_guard.rs` 钉终端的**时序**不变量（不是分层），语义见
+  [`tui-input.md`](tui-input.md)；两者的扫描原语共用
+  `crates/wing/tests/common/guard.rs`。
+
 ## 5. 白名单：从基线 10 条到零（历史记录）
 
 **当前基线 = 零**（`test_layering.py` 的 `KNOWN_VIOLATIONS` 四个规则集全空）。

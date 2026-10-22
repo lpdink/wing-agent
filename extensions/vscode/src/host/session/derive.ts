@@ -20,7 +20,7 @@ import { asArray, asObject } from './partial-json';
  * wire shapes — this module is where those jobs live. Rules are ported from the
  * TUI (`crates/wing/src/ui/cells/tool_call.rs`, `diff_view.rs`,
  * `shared/panels/ask.rs`) so both frontends describe the same event the same
- * way; any deviation is called out in design.md D9.
+ * way.
  */
 
 /** Placeholder the backend accepts for a skipped question (AskUserQuestion). */

@@ -14,13 +14,14 @@ import contextlib
 import hashlib
 from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from wing.config import ApiKeyEntry, AuthConfig, Config, reset_config
+from _support import gateway_auth_config
+from wing.config import ApiKeyEntry, Config, reset_config
 from wing.event import EVENT_TYPES, FACT_EVENTS, SettingsChangedEvent, wire_dump
 from wing.event_bus import event_bus
 
@@ -54,15 +55,6 @@ RELOAD_ITEMS = [
 ]
 
 
-def _mock_config(
-    auth_enabled: bool = False, keys: list[ApiKeyEntry] | None = None
-) -> MagicMock:
-    """只填 ``gateway.auth`` 的 mock Config（``server.auth_config`` 读它）。"""
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(enabled=auth_enabled, keys=keys or [])
-    return config
-
-
 @contextlib.contextmanager
 def _gateway(
     tmp_path: Path,
@@ -83,7 +75,7 @@ def _gateway(
     from wing.gateway.server import GatewayServer
 
     with patch("wing.gateway.server.load_config") as mock_load_config:
-        mock_load_config.return_value = _mock_config(auth_enabled, keys)
+        mock_load_config.return_value = gateway_auth_config(auth_enabled, keys)
         server = GatewayServer()
         with TestClient(server._app) as tc:
             yield tc, config_path, server
@@ -509,7 +501,7 @@ class TestSettingsSet:
         assert resp.json()["error"] == "validation_error"
 
     def test_set_keeps_freeform_map_readable_on_disk(self, gateway):
-        """AD7（B1 回归）：单键平铺 map 落盘后，config.yaml 仍是**能解析、能加载**的文件。
+        """单键平铺 map 落盘后，config.yaml 仍是**能解析、能加载**的文件（回归）。
 
         `extra_body: {top_p: 0.9}` 是自由 map 最常见的形态；emitter 曾把这种「恰好单行的
         容器载荷」当标量内联，写出 `extra_body: top_p: 0.9` 让整个文件解析失败——用户视角
@@ -641,7 +633,7 @@ class TestSettingsSecretPairing:
     def test_whole_list_replacement_reports_the_positional_keys(
         self, two_provider_gateway
     ):
-        """整表替换（长度相等）：consumed 守卫关不掉，回执必须**出声**（AD18 第 2 点）。
+        """整表替换（长度相等）：consumed 守卫关不掉，回执必须**出声**。
 
         两条警告各点名一个路径，并把两种读法（重命名 / 替换成新的）都写出来——
         这既是 N1 残余的处置，也是「保留 (b) 而不是撤掉它」的代价说明。
@@ -694,7 +686,7 @@ class TestSettingsSecretPairing:
 
 
 # ============================================================
-# 鉴权（写端点要求 admin —— 由既有 RBAC 天然满足，见 design.md D9）
+# 鉴权（写端点要求 admin —— 由既有 RBAC 天然满足）
 # ============================================================
 
 

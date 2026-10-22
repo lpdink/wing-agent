@@ -13,7 +13,7 @@ import {
 import { disposeMounted, mountWebview, pushPanels, pushUi } from './harness';
 
 /**
- * The four panels (step 05), as frozen by `interfaces.md`.
+ * The four panels, as frozen by the bridge contract.
  *
  * The rule under test everywhere here: **the host owns the overlays**. A panel is on
  * screen exactly while its `panels.*` member is non-null, and closing one is a request

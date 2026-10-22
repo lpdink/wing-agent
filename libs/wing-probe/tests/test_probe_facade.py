@@ -1,4 +1,4 @@
-"""``Probe`` 门面的纯逻辑自测（tasks 4.7/6.1；不起网关）。
+"""``Probe`` 门面的纯逻辑自测。
 
 覆盖：逃生舱的理由校验与禁用语义、三个内置不变量的聚合（含 session id 与不变量
 名）、失败报告渲染（来源标注 / 转储路径 / 逃生舱理由）、``dump()`` 的产物清单
@@ -54,7 +54,7 @@ def build_probe(tmp_path: Path) -> Probe:
 
 
 def test_without_invariants_requires_reason(tmp_path: Path) -> None:
-    """逃生舱必须说明理由（spec「逃生舱必须说明理由」）。"""
+    """逃生舱必须说明理由。"""
     probe = build_probe(tmp_path)
     assert probe.invariants_enabled is True
 

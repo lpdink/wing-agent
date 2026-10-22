@@ -9,12 +9,11 @@
 """
 
 import json
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
 
+from _support import default_compactor, make_cm
 from wing.context import ContextManager
 from wing.chain import TrackedList
 from wing.store.file import FileMessageLog
@@ -24,13 +23,6 @@ from wing.schema import ChainNode, Message
 def _contents(nodes: list) -> list:
     """提取链节点的 Message content（窄化 ChainNode → Message，事件跳过）。"""
     return [n.content or "" for n in nodes if isinstance(n, Message)]
-
-
-@pytest.fixture
-def tmp_dir():
-    d = tempfile.mkdtemp()
-    yield Path(d)
-    shutil.rmtree(d)
 
 
 def _read_history(path: Path) -> list[dict]:
@@ -48,15 +40,10 @@ def _read_history(path: Path) -> list[dict]:
 
 def _make_cm(tmp_dir: Path, session_id: str | None = None) -> ContextManager:
     """Create a ContextManager for testing under tmp_dir."""
-    from wing.context import Compactor
-
-    sid = session_id or "test-session"
-    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / sid))
-    return ContextManager(
-        session_id=sid,
-        messages=messages,
-        system_prompt="You are a helpful assistant.",
-        compactor=Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000),
+    return make_cm(
+        tmp_dir,
+        session_id=session_id or "test-session",
+        compactor=default_compactor(),
     )
 
 

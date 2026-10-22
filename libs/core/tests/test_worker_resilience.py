@@ -32,9 +32,9 @@ from unittest.mock import patch
 
 import pytest
 
+from _support import mock_generate, wait_until_async
 from wing.event_bus import event_bus
 from wing.agent.react_loop import ReActLoop
-from wing.schema import LLMResponse, LLMUsage, TextBlock
 
 #: 磁盘打满（现场故障：write 返回 ENOSPC）。
 ENOSPC = OSError(errno.ENOSPC, "No space left on device")
@@ -42,15 +42,7 @@ ENOSPC = OSError(errno.ENOSPC, "No space left on device")
 #: 收尾三连（turn_result / error / done）——错误路径的「报告动作」。
 REPORT_TYPES = {"turn_result", "error", "done"}
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -78,15 +70,6 @@ class _BoomStream:
 
     async def __anext__(self) -> Any:
         raise WorkerEscape("escaped the drain loop")
-
-
-async def _mock_generate(*args: Any, **kwargs: Any):
-    """Mock LLM generate：返回一条纯文本响应（无 tool calls），结束 turn。"""
-    yield LLMResponse(
-        content="ok",
-        content_blocks=[TextBlock(text="ok")],
-        usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
-    )
 
 
 def _boom_generate(*args: Any, **kwargs: Any) -> _BoomStream:
@@ -174,14 +157,6 @@ def _fail_append(
     return recover
 
 
-async def _wait_until(pred: Callable[[], bool], timeout: float = 5.0) -> None:
-    async def _inner() -> None:
-        while not pred():
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(_inner(), timeout)
-
-
 async def _settle() -> None:
     """让 done callback / call_soon 队列跑完。"""
     for _ in range(5):
@@ -191,7 +166,9 @@ async def _settle() -> None:
 async def _run_turn(agent: Any, content: str, request_id: str) -> None:
     """投递一条消息并等它被消费、回合收口（status 回 idle）。"""
     await agent.post(content, request_id=request_id)
-    await _wait_until(lambda: agent.status == "idle" and not agent._inbox.has_pending)
+    await wait_until_async(
+        lambda: agent.status == "idle" and not agent._inbox.has_pending
+    )
 
 
 def _types(events: list[Any]) -> list[str]:
@@ -223,7 +200,7 @@ class TestReportPathIsUnfailable:
         event_bus.subscribe(events.append)
         worker = agent._worker
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await _run_turn(agent, "hello", "req-report-1")
 
         # ① 回合以 error 收口：上报动作虽落盘失败，仍必须到达客户端
@@ -251,7 +228,7 @@ class TestReportPathIsUnfailable:
         # ④ 磁盘腾出空隙后，后续投递必须被消费（零僵尸态）。
         recover()
         events.clear()
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await _run_turn(agent, "second", "req-report-2")
 
         results = _turn_results(events)
@@ -272,7 +249,7 @@ class TestReportPathIsUnfailable:
         event_bus.subscribe(events.append)
         worker = agent._worker
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await _run_turn(agent, "first", "req-full-1")
             await _run_turn(agent, "second", "req-full-2")
 
@@ -288,7 +265,7 @@ class TestReportPathIsUnfailable:
         # 磁盘恢复：会话自然继续工作。
         recover()
         events.clear()
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await _run_turn(agent, "third", "req-full-3")
 
         results = _turn_results(events)
@@ -304,7 +281,7 @@ class TestReportPathIsUnfailable:
         agent = session.agent
         _fail_append(_persist_log(agent), monkeypatch, only=None)
 
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await _run_turn(agent, "hello", "req-int-1")
 
         dropped = await asyncio.wait_for(agent.interrupt(), timeout=5.0)
@@ -414,8 +391,8 @@ class TestWorkerRenewal:
 
         with patch.object(agent.model_provider, "generate", _boom_generate):
             await agent.post("trigger", request_id="req-renew-1")
-            await _wait_until(dead.done)
-            await _wait_until(lambda: agent._worker is not dead)
+            await wait_until_async(dead.done)
+            await wait_until_async(lambda: agent._worker is not dead)
 
         assert not agent._worker.done()
         assert any("重建消费者" in m for m in wing_warnings), wing_warnings
@@ -423,7 +400,7 @@ class TestWorkerRenewal:
         # 后续投递仍被消费（重建出的消费者真的在消费）。
         events: list[Any] = []
         event_bus.subscribe(events.append)
-        with patch.object(agent.model_provider, "generate", _mock_generate):
+        with patch.object(agent.model_provider, "generate", mock_generate):
             await _run_turn(agent, "after renewal", "req-renew-2")
 
         results = _turn_results(events)
@@ -497,7 +474,7 @@ class TestWorkerRenewal:
         await asyncio.wait_for(agent.interrupt(), timeout=5.0)
         assert agent._worker is kept  # 先保留（绝不重建第二个）
 
-        await _wait_until(kept.done, timeout=3.0)
+        await wait_until_async(kept.done, timeout=3.0)
         await _settle()
 
         live = [task for task in spawned if not task.done()]
@@ -522,7 +499,7 @@ class TestWorkerRenewal:
             late = agent._spawn_worker()  # 关闭之后才终止的消费者（竞态现场）
             agent._worker = late
             await agent.post("nobody should wake up", request_id="req-closed")
-            await _wait_until(late.done)
+            await wait_until_async(late.done)
             await _settle()
 
         assert agent._worker is late

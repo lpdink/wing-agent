@@ -1,4 +1,4 @@
-"""ContextView —— 入站 LLM 请求的规范化视图与上下文断言（design D3）。
+"""ContextView —— 入站 LLM 请求的规范化视图与上下文断言。
 
 规范化维度：``system`` / ``messages``（role、content 扁平化、结构化 tool_calls、
 tool_call_id）/ ``tool_names``。消息保留**请求体下标**（``MessageView.index``），

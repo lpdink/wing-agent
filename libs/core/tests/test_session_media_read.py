@@ -19,12 +19,11 @@ import struct
 import zlib
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from wing.config import AuthConfig, get_config
+from _support import gateway_server, media_dir, sessions_root
 from wing.runtime import WingRuntime
 from wing.schema import Message
 
@@ -62,22 +61,8 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-@pytest.fixture
-def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> WingRuntime:
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    return WingRuntime()
-
-
-def sessions_root() -> Path:
-    return get_config().sessions.resolved_path()
-
-
-def media_dir(session_id: str) -> Path:
-    return sessions_root() / session_id / "media"
-
-
-def _seed_session(runtime: WingRuntime, *, backend: str | None = None) -> str:
-    session = runtime.create_session(backend=backend)
+def _seed_session(isolated_runtime: WingRuntime, *, backend: str | None = None) -> str:
+    session = isolated_runtime.create_session(backend=backend)
     session.context_manager.add_message(Message(role="user", content="hi"))
     return session.session_id
 
@@ -87,104 +72,102 @@ def _seed_session(runtime: WingRuntime, *, backend: str | None = None) -> str:
 
 class TestManagerReadMedia:
     @pytest.mark.asyncio
-    async def test_reads_uploaded_bytes(self, runtime: WingRuntime) -> None:
-        sid = _seed_session(runtime)
+    async def test_reads_uploaded_bytes(self, isolated_runtime: WingRuntime) -> None:
+        sid = _seed_session(isolated_runtime)
         data = png(3, 2, tint=0x22)
-        ref = runtime.upload_media(sid, data, name="shot.png")
+        ref = isolated_runtime.upload_media(sid, data, name="shot.png")
 
-        assert runtime.read_media(sid, ref.id) == data
+        assert isolated_runtime.read_media(sid, ref.id) == data
 
     @pytest.mark.asyncio
-    async def test_missing_object_is_none(self, runtime: WingRuntime) -> None:
-        sid = _seed_session(runtime)
-        assert runtime.read_media(sid, "0" * 64) is None
+    async def test_missing_object_is_none(self, isolated_runtime: WingRuntime) -> None:
+        sid = _seed_session(isolated_runtime)
+        assert isolated_runtime.read_media(sid, "0" * 64) is None
 
     @pytest.mark.asyncio
     async def test_invalid_media_id_raises_value_error(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
         for bad in ("../etc/passwd", "ABCDEF", "0" * 63, "0" * 65, "z" * 64):
             with pytest.raises(ValueError):
-                runtime.read_media(sid, bad)
+                isolated_runtime.read_media(sid, bad)
 
     @pytest.mark.asyncio
-    async def test_ghost_session_is_lookup_error(self, runtime: WingRuntime) -> None:
+    async def test_ghost_session_is_lookup_error(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
         with pytest.raises(LookupError):
-            runtime.read_media("ghost-read-1", "0" * 64)
+            isolated_runtime.read_media("ghost-read-1", "0" * 64)
 
     @pytest.mark.asyncio
     async def test_read_does_not_hydrate_an_evicted_session(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
         data = png(2, 2, tint=0x33)
-        ref = runtime.upload_media(sid, data)
-        assert runtime.sm.evict(sid, reason="test") is True
-        await runtime.sm.wait_teardowns()
-        assert runtime.sm.get_session(sid) is None
+        ref = isolated_runtime.upload_media(sid, data)
+        assert isolated_runtime.sm.evict(sid, reason="test") is True
+        await isolated_runtime.sm.wait_teardowns()
+        assert isolated_runtime.sm.get_session(sid) is None
 
-        assert runtime.read_media(sid, ref.id) == data
-        assert runtime.sm.get_session(sid) is None, "读一张图把已逐出的会话唤醒了"
+        assert isolated_runtime.read_media(sid, ref.id) == data
+        assert isolated_runtime.sm.get_session(sid) is None, (
+            "读一张图把已逐出的会话唤醒了"
+        )
 
     @pytest.mark.asyncio
-    async def test_memory_backend_reads_its_bucket(self, runtime: WingRuntime) -> None:
+    async def test_memory_backend_reads_its_bucket(
+        self, isolated_runtime: WingRuntime
+    ) -> None:
         """memory 后端天然可读（字节就在进程内桶里）——不是 404 面。"""
-        session = runtime.create_session(backend="memory")
+        session = isolated_runtime.create_session(backend="memory")
         data = png(2, 2, tint=0x44)
-        ref = runtime.upload_media(session.session_id, data)
+        ref = isolated_runtime.upload_media(session.session_id, data)
 
-        assert runtime.read_media(session.session_id, ref.id) == data
-        assert runtime.read_media(session.session_id, "0" * 64) is None
+        assert isolated_runtime.read_media(session.session_id, ref.id) == data
+        assert isolated_runtime.read_media(session.session_id, "0" * 64) is None
 
     @pytest.mark.asyncio
     async def test_legacy_pool_object_is_readable_and_materialized(
-        self, runtime: WingRuntime
+        self, isolated_runtime: WingRuntime
     ) -> None:
         """老共享池里的对象经读路径回退命中并物化进会话目录（既有存储契约）。"""
-        sid = _seed_session(runtime)
+        sid = _seed_session(isolated_runtime)
         data = png(2, 2, tint=0x55)
         object_id = sha256(data)
         legacy = sessions_root() / ".media" / object_id[:2] / object_id
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_bytes(data)
 
-        assert runtime.read_media(sid, object_id) == data
+        assert isolated_runtime.read_media(sid, object_id) == data
         assert (media_dir(sid) / object_id).read_bytes() == data
 
 
 # ── 2. 路由层 ──────────────────────────────────────────────────
 
 
-def _gateway_config() -> MagicMock:
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(enabled=False, keys=[])
-    return config
-
-
 @pytest.fixture
 def real_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """真实 WingRuntime + 独立 sessions 根 + TestClient（不起 uvicorn）。"""
-    from wing.gateway.server import GatewayServer
-
-    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    with patch("wing.gateway.server.load_config") as mock_load_config:
-        mock_load_config.return_value = _gateway_config()
-        server = GatewayServer()
-    server.runtime = WingRuntime()
-    with TestClient(server._app) as client:
-        yield client, server.runtime
+    with gateway_server(tmp_path, monkeypatch) as server:
+        with TestClient(server._app) as client:
+            yield client, server.runtime
 
 
 class TestReadMediaRoute:
     def _create_session(
-        self, client: TestClient, runtime: WingRuntime, *, backend: str | None = None
+        self,
+        client: TestClient,
+        isolated_runtime: WingRuntime,
+        *,
+        backend: str | None = None,
     ) -> str:
         body: dict[str, Any] = {} if backend is None else {"backend": backend}
         response = client.post("/api/session/create", json=body)
         assert response.status_code == 200, response.text
         sid = str(response.json()["session_id"])
-        session = runtime.get_session(sid)
+        session = isolated_runtime.get_session(sid)
         assert session is not None
         session.context_manager.add_message(Message(role="user", content="hi"))
         return sid

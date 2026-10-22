@@ -199,7 +199,7 @@ describe('MathView', () => {
   it('renders a formula inside an HTML block as text, never through KaTeX', () => {
     // The line starts an HTML block: the TUI prints it verbatim and the webview
     // keeps markdown's escaping (`\(x\)` → `(x)`), but no formula is built —
-    // the masked path never reaches KaTeX at all (review r1 [S1]).
+    // the masked path never reaches KaTeX at all.
     const { container } = render(<MarkdownText text={'<div>\n\\(x\\)\n</div>\n'} />);
 
     expect(container.querySelector('[data-testid="md-math"]')).toBeNull();

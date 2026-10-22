@@ -276,7 +276,7 @@
   --wing-stream-ellipsis-duration: 1s;
   --wing-stream-fade-duration: 600ms;
 
-  /* ── Composer / status row (step 05) ─────────────────────────────────
+  /* ── Composer / status row ──────────────────────────────────────────
    * CHAT:875-880 (.chat-input-container { background: input-background;
    *   border: 1px solid input-border; border-radius: cornerRadius-large;
    *   padding: 0 6px 6px 6px })
@@ -305,7 +305,7 @@
   --wing-chevron-opacity: 0.75;
   --wing-submit-size: 22px;
 
-  /* ── Tabs (step 05) ──────────────────────────────────────────────────
+  /* ── Tabs ────────────────────────────────────────────────────────────
    * multieditortabscontrol.css:115-125 (.tab { height: var(--editor-group-tab-height);
    *   padding-left: 10px }) — `--editor-group-tab-height` is 35px in the workbench
    *   (editorTabsControl.ts:564-570) and is deliberately **not** copied: the sidebar
@@ -325,7 +325,7 @@
   --wing-tab-action-padding: 2px;
   --wing-tab-action-hover-bg: var(--vscode-toolbar-hoverBackground, transparent);
 
-  /* ── Floating panels (step 05) ───────────────────────────────────────
+  /* ── Floating panels ─────────────────────────────────────────────────
    * ACTION:6-18 (.action-widget { border: 1px solid editorHoverWidget-border;
    *   border-radius: cornerRadius-large; background: menu-background; color:
    *   menu-foreground; padding: 4px; box-shadow: shadow-lg }) — `--vscode-shadow-lg`
@@ -354,7 +354,7 @@
     var(--vscode-descriptionForeground)
   );
 
-  /* ── Context usage ring (step 05) ────────────────────────────────────
+  /* ── Context usage ring ──────────────────────────────────────────────
    * CONTEXT:6-15 (.chat-context-usage-widget { gap: 4px; padding: 3px;
    *   border-radius: 5px }), :17-24 (.icon-container 14×14), :47-62 (.progress-bg
    *   stroke disabledForeground; .progress-arc stroke icon-foreground, stroke-width 4),
@@ -367,7 +367,7 @@
   --wing-context-chip-radius: 5px;
   --wing-context-ring-width: 4;
 
-  /* ── Welcome view (step 05) ──────────────────────────────────────────
+  /* ── Welcome view ────────────────────────────────────────────────────
    * WELCOME:49-56 (container { padding: 12px }), :59-63 (icon 40px,
    *   margin-bottom 24px), :88-96 (title 13px/600 + margin-top 5px), :98-105
    *   (message 12px, max-width 280px, padding 0 20px, margin 8px auto 0),

@@ -15,7 +15,7 @@ import {
 } from '../../src/shared';
 
 /**
- * The frontend command vocabulary (step 05).
+ * The frontend command vocabulary.
  *
  * These helpers decide two things the whole shell hangs on:
  * 1. "is this draft a command or a message?" (`parseSlashInput` + `matchCommand`);
@@ -167,7 +167,7 @@ describe('filterCommands', () => {
 
   it('ranks an exact alias match above the prefix matches of other commands', () => {
     // `/t` is an exact alias of `/think` *and* a prefix of `/title`: the exact tier
-    // must win (swapping the tiers makes this fail — review r1 N4).
+    // must win (swapping the tiers makes this fail).
     const filtered = filterCommands(commands, 't');
     expect(filtered.map((command) => command.name)).toEqual(['/think', '/title']);
   });

@@ -33,7 +33,7 @@ import pytest
 from wing_probe import Driver, Probe, ToolCall, Turn
 from wing_probe.watch import Event
 
-#: 场景私有 model 名（design D3：剧本按 model 名路由，场景之间不共享）。
+#: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 FIRST_CHUNK_MODEL = "probe/midjoin-first-chunk"
 TOOL_MODEL = "probe/midjoin-tool"
 ASK_MODEL = "probe/midjoin-ask"

@@ -1,4 +1,4 @@
-"""history.jsonl 解析与不变量对账（tasks 5.5）。
+"""history.jsonl 解析与不变量对账。
 
 纯单测：手工构造 ``history.jsonl`` / ``metadata.json`` 写入 ``tmp_path``，
 不起网关。覆盖：

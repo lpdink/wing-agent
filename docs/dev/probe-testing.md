@@ -1,6 +1,5 @@
 # wing-probe：确定性集成测试
 
-> 契约与背景：`openspec/changes/wing-probe/`（`design.md` D1–D12、`specs/probe-scenarios/spec.md`）。
 > 本页是**使用说明**：怎么跑、怎么加场景、断言能用什么、哪些红线被守。
 
 `libs/wing-probe/` 是一个**不调真实模型、不碰用户 `~/.wing`** 的整机测试台：每个场景自举一个临时 `WING_HOME` + 一个真网关子进程 + 一个进程内假 Provider（按 model 名消费剧本），断言锚定在四个面上——**事件时间线**（WS 实时帧）、**LLM 请求上下文**（假 Provider 留档的请求体）、**落盘 history**（`history.jsonl` 独立解析）、**workspace 文件**。
@@ -69,7 +68,7 @@ Setting API / setup mode 的整机证据（都在真网关上跑，断言锚定 
 | `test_settings_invalid.py` | 非法值 → **HTTP 200 + `ok=false`** + 精确 path/kind；文件字节未变；既有会话照常跑完一轮 |
 | `test_settings_conflict.py` | 旧指纹 → 409 `conflict` + 文件未被覆盖；新指纹 → 成功；幂等保存 `changed == []` |
 | `test_settings_secrets.py` | get 不回显真值（响应体里搜不到）+ hint 是末 4 位；set 的 `null` **保留**磁盘现值、字符串覆盖生效、嵌套密文（`gateway.auth.keys[0].key`）同样进表 |
-| `test_settings_setup_mode.py` | 钱场景：坏配置 → 降级启动 → 503 `setup_mode` → `set` 修好 → `setup_mode_exited=true` → 会话跑通；另两个用例覆盖顶层数字键（AD12）与 YAML 语法错（AD13，`.bak` 逐字留坏文件） |
+| `test_settings_setup_mode.py` | 钱场景：坏配置 → 降级启动 → 503 `setup_mode` → `set` 修好 → `setup_mode_exited=true` → 会话跑通；另两个用例覆盖顶层数字键与 YAML 语法错（`.bak` 逐字留坏文件） |
 | `test_settings_list_editing.py` | 新增 provider + 新 model id → `/api/models` 立刻出现且能驱动一轮；删空 `agents` → 精确 `empty_list`、文件未变、恢复后可保存 |
 | `test_settings_restart_required.py` | 改 `gateway.port` → 回执点名 + **旧端口照常、新端口无人监听**（不做假热更） |
 | `test_settings_backup.py` | `.bak` 逐字节等于"每次保存前"的文件（覆盖式只留一份） |
@@ -283,7 +282,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 ## 已知取舍（与二批范围）
 
-- **env 是 function 级**（design D10）：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.5s（`start` 0.18s / `stop` 0.30s），78 个场景串行就是 40s——**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.5s（`start` 0.18s / `stop` 0.30s），78 个场景串行就是 40s——**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
 - **场景里的等待要花在窗口上，不要花在节奏上**：`delay` 逐帧、`first_delay` 只压首个内容帧，两者混用会互相放大（`scenarios/test_midjoin_sync.py` 曾用 `delay=3.0` 撑窗口，白烧 9s）。写场景时先想清楚"我在等的是什么"，再选旋钮；
 - **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
 - 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 走 `/api/shutdown` → `terminate` → `kill`；

@@ -11,7 +11,7 @@
 
 - 保存回执：``ok=true`` / ``changed`` 恰为两条路径 / ``restart_required`` 为空（两者都是
   hot 域）/ ``reload.results`` 名字序 == **六项**（R3：``log level`` 追加在末尾）且逐项 ok；
-- **单键 map 的 `extra_body` 落盘后文件仍可解析**（AD7 的整机层证据：``emit.py`` 曾把
+- **单键 map 的 `extra_body` 落盘后文件仍可解析**（整机层证据：``emit.py`` 曾把
   "恰好单行的容器载荷"内联成 ``key: a: 1`` 这种非法 YAML，保存一次就把配置写坏）；
 - 下一个请求体逐字段对账（marker 出现、``reasoning_effort == "high"``），且该轮照常收尾。
 """
@@ -28,7 +28,7 @@ from wing_probe import Probe, Turn
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 APPLY_MODEL = "probe/settings-apply"
 
-#: 透传键（值刻意是单键 map——AD7 的最小复现形态）。
+#: 透传键（值刻意是单键 map——最小复现形态）。
 MARKER_KEY = "probe_settings_extra_body"
 MARKER_VALUE = "on"
 
@@ -102,7 +102,7 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
     assert receipt["restart_required"] == [], receipt
     assert receipt["setup_mode_exited"] is False, receipt
 
-    # ④ AD7：单键 map 落盘后文件仍可解析（修复前这里是非法 YAML）。
+    # ④ 单键 map 落盘后文件仍可解析（修复前这里是非法 YAML）。
     raw = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
     assert raw["providers"][0]["extra_body"] == {MARKER_KEY: MARKER_VALUE}, raw[
         "providers"

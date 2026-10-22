@@ -17,7 +17,7 @@ import type {
  * is about observable protocol behaviour — call order, frames, delivery — not
  * about internal calls into a class.
  *
- * Fidelity notes (design.md D11):
+ * Fidelity notes:
  *
  * - the WebSocket handshake is sent on a microtask, like a loopback server;
  * - `subscribe` attaches the route **and then** pushes `sync_session`

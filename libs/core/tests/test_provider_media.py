@@ -10,11 +10,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import struct
 from typing import Any
 
 import pytest
 
+from _support import PNG_HEADER_LEN, png_bytes
 from wing.context import Compactor
 from wing.context.compaction import COMPACT_IMAGE_MARKER
 from wing.config import ModelCapabilities, ModelSpec, ProviderConfig
@@ -48,24 +48,9 @@ TEXT_MODEL = "text-model"
 ########## 构造工具
 
 
-def png_bytes(width: int, height: int, payload: bytes = b"") -> bytes:
-    """最小 PNG 前缀（只求 bytes 事实，不真解码）。"""
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + struct.pack(">I", 13)
-        + b"IHDR"
-        + struct.pack(">II", width, height)
-        + b"\x08\x06\x00\x00\x00"
-        + payload
-    )
-
-
-_PNG_HEADER_LEN = len(png_bytes(1, 1))
-
-
 def sized_png(size: int) -> bytes:
     """总长度恰为 ``size`` 字节的 PNG 前缀（字节预算测试需要精确 encoded_len）。"""
-    return png_bytes(4, 4, b"x" * (size - _PNG_HEADER_LEN))
+    return png_bytes(4, 4, b"x" * (size - PNG_HEADER_LEN))
 
 
 def make_ref(

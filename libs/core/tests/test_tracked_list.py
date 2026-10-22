@@ -11,8 +11,6 @@
 """
 
 import json
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,14 +28,6 @@ class Item(ChainNode):
 
     name: str
     value: int = 0
-
-
-@pytest.fixture
-def tmp_dir():
-    """Provide a temporary directory for TrackedList persistence."""
-    d = tempfile.mkdtemp()
-    yield Path(d)
-    shutil.rmtree(d)
 
 
 def _read_history(path: Path) -> list[dict]:

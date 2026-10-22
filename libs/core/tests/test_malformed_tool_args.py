@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from _support import make_tool
 from wing.agent.inbox import Inbound
 from wing.agent.event_sink import AgentEventSink
 from wing.agent.tool_executor import ToolExecutor
@@ -32,21 +33,11 @@ from wing.schema import (
     LLMUsage,
     Message,
     TextBlock,
-    Tool,
     ToolCall,
-    ToolParam,
     ToolUseBlock,
 )
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -54,15 +45,6 @@ def runtime():
     from wing.runtime import WingRuntime
 
     return WingRuntime()
-
-
-def _make_tool(name: str, fn) -> Tool:
-    return Tool(
-        name=name,
-        description=f"Test tool: {name}",
-        params=[ToolParam(name="input", type="string", description="input")],
-        function=fn,
-    )
 
 
 class TestExecutorShortCircuit:
@@ -77,7 +59,7 @@ class TestExecutorShortCircuit:
             return "ok"
 
         executor = ToolExecutor(AgentEventSink(session_id="test"))
-        executor.set_tools({"Echo": _make_tool("Echo", echo)})
+        executor.set_tools({"Echo": make_tool("Echo", echo)})
 
         events: list[Any] = []
         event_bus.subscribe(events.append)
@@ -150,7 +132,7 @@ class TestFullTurnMalformedArgs:
             executed.append({"input": input})
             return "ok"
 
-        agent._executor._tools = {"Echo": _make_tool("Echo", echo)}
+        agent._executor._tools = {"Echo": make_tool("Echo", echo)}
 
         events: list[Any] = []
         event_bus.subscribe(events.append)

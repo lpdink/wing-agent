@@ -23,7 +23,7 @@ _MARKER = "UNIQUE_RULE_MARKER_42"
 
 @pytest.mark.asyncio
 async def test_resume_loads_rules_from_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _mock_config
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolate_config
 ) -> None:
     """resume 后 rules 仍从持久化的 workspace 加载，而非进程 cwd。"""
     # 干净 cwd：缺失 workspace 时相对 pattern 绝无可能误匹配到文件。
@@ -32,7 +32,7 @@ async def test_resume_loads_rules_from_workspace(
     monkeypatch.chdir(cwd)
 
     # 给默认模板一个相对路径 rules pattern——其解析基准正是 workspace。
-    _mock_config.agents[0].rules = ["RULES.md"]
+    _isolate_config.agents[0].rules = ["RULES.md"]
 
     ws = tmp_path / "ws"
     ws.mkdir()

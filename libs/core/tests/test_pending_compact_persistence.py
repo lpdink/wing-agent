@@ -6,23 +6,12 @@ pending compact 经由 MessageLog 的 aux kv 通道持久化（file 后端落
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
 from pathlib import Path
 
-import pytest
 
-from wing.context import Compactor, ContextManager, PendingCompact
-from wing.chain import TrackedList
-from wing.store.file import FileMessageLog
-from wing.schema import ChainNode, LLMUsage
-
-
-@pytest.fixture
-def tmp_dir():
-    d = tempfile.mkdtemp()
-    yield Path(d)
-    shutil.rmtree(d)
+from _support import default_compactor, make_cm
+from wing.context import ContextManager, PendingCompact
+from wing.schema import LLMUsage
 
 
 def _aux_path(tmp_dir: Path, session_id: str = "test-persist") -> Path:
@@ -34,14 +23,7 @@ def _make_cm(
     tmp_dir: Path,
     session_id: str = "test-persist",
 ) -> ContextManager:
-    messages: TrackedList[ChainNode] = TrackedList(FileMessageLog(tmp_dir / session_id))
-    compactor = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
-    return ContextManager(
-        session_id=session_id,
-        messages=messages,
-        system_prompt="You are a helpful assistant.",
-        compactor=compactor,
-    )
+    return make_cm(tmp_dir, session_id=session_id, compactor=default_compactor())
 
 
 # ===================================================================

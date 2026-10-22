@@ -1,5 +1,5 @@
 /**
- * `src/core` — the gateway capability layer (step 02).
+ * `src/core` — the gateway capability layer.
  *
  * Public API for the extension host (03). Nothing below this barrel is a
  * contract: import from `../core` (or `../../src/core`), never from a file
@@ -15,7 +15,7 @@
  * What it deliberately is not: it does not know that sessions exist. It never
  * subscribes, never resubscribes and never buffers business events — after a
  * reconnect it announces the new `clientId` and the host decides what to
- * re-subscribe (see `design.md` D5).
+ * re-subscribe.
  */
 
 export * from './backoff';

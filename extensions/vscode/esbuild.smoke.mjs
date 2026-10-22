@@ -40,7 +40,7 @@ const options = {
       // inside bundled CJS packages (e.g. `ws`, which the socket fallback loads)
       // into a `__require` shim that throws unless a `require` exists in scope.
       // Injecting one through `createRequire` is the standard fix, and
-      // `WING_SMOKE_WS_FALLBACK=1` depends on it (review #109 [P1-3]).
+      // `WING_SMOKE_WS_FALLBACK=1` depends on it.
       "import { createRequire as __wingCreateRequire } from 'node:module';",
       'const require = __wingCreateRequire(import.meta.url);',
     ].join('\n'),

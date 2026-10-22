@@ -13,15 +13,7 @@ import pytest
 from wing.event import SessionInitEvent
 from wing.event_bus import event_bus
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture

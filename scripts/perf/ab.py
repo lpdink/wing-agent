@@ -20,8 +20,8 @@ report JSON（交给 `report.py` 渲染成 PR 评论）。
 （"判定仅供参考"），报告据此渲染逐轮原始值折叠块——**只加透明度，不动判定**。
 rust 的两个质量信号在这里被消费：**载荷指纹**两侧都采到且不一致 → 该 suite 的指标判
 n/a（比的可能不是同一份载荷）；**criterion CI 宽度** > 10% → 加一条提示 note（只提示
-样本抖动，不改判档）。契约（§Frozen Interfaces）见 perf-ci 任务书；设计与取舍见
-01 harness_core 与 08 ci_calibration 步骤的 `design.md`。
+样本抖动，不改判档）。契约（§1–§8）的形状见 ``scripts/perf/README.md`` 的对照表；
+阈值与判定口径见 ``docs/dev/perf-testing.md``。
 """
 
 from __future__ import annotations

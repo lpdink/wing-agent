@@ -11,7 +11,7 @@
 
 事件顺序按**源码事实**：`tool_call_result`（工具收尾事件，`ToolExecutor` 发射）先于
 `user_message_accepted`（steer 发射点在 `execute()` 之后）——任务书写的"工具结果之前"
-与代码不符，这里按代码断言（见 design.md Assumption A2）。
+与代码不符，这里按代码断言。
 
 断言面：事件时间线（顺序 + `origin_request_id`）、下一轮请求体（note 前缀 + 工具输出）、
 落盘链（消息没丢）。
@@ -166,7 +166,7 @@ async def test_steer_note_lands_on_last_tool_result_only(probe: Probe) -> None:
     WHEN 同一轮并发两个调用（先 `Write` 立刻完成、后 `Bash sleep`），工具执行期间发第二条消息
     THEN 该消息的 note 出现在**第二条**（脚本里最后一个调用）tool 消息的头部，第一条
     逐字不带 note；整个请求体里 note 前缀**恰好出现一次**——"注入最后一条"是
-    `react_loop._llm_turn` 的显式契约（design D2），单一工具的用例里"最后一条"与
+    `react_loop._llm_turn` 的显式契约，单一工具的用例里"最后一条"与
     "第一条"重合，抓不住把目标改错方向的回归。
     """
     probe.register(

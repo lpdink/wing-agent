@@ -12,10 +12,13 @@
 //! `Usable` 形态下 `/ws` 回 400（没有 WS 可连 ⇒ 客户端在 WS 握手上失败，进程退出）。
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+
+mod common;
+
+use common::e2e::{read_request, run_wing, start_fake_gateway};
 
 /// 假网关给 `/api/settings/status` 的答案。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,16 +32,6 @@ enum Mode {
 // ============================================================
 // 假网关：最小 HTTP/1.1（不升级 WS）
 // ============================================================
-
-async fn serve(listener: TcpListener, mode: Mode) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        tokio::spawn(handle_conn(stream, mode));
-    }
-}
-
 async fn handle_conn(mut stream: TcpStream, mode: Mode) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -92,89 +85,20 @@ async fn handle_conn(mut stream: TcpStream, mode: Mode) {
         }
     }
 }
-
-/// 读一个 HTTP 请求头（+ 声明过的 body），剩余字节留在 `buf` 里。
-async fn read_request(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<(String, Vec<u8>)> {
-    loop {
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-            let content_length = head
-                .lines()
-                .find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.trim()
-                        .eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())?
-                })
-                .unwrap_or(0);
-            let body_start = pos + 4;
-            if buf.len() >= body_start + content_length {
-                let body = buf[body_start..body_start + content_length].to_vec();
-                buf.drain(..body_start + content_length);
-                return Some((head, body));
-            }
-        }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-}
-
 // ============================================================
 // 夹具
 // ============================================================
-
-fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-setup-e2e-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
-}
-
-/// 起假网关并把一份 `$WING_HOME` 指向它（CLI 的端点来自这个文件）。
-async fn start_gateway(mode: Mode, tag: &str) -> PathBuf {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(serve(listener, mode));
-
-    let home = scratch_home(tag);
-    std::fs::write(
-        home.join("core").join("config.yaml"),
-        format!("gateway:\n  host: 127.0.0.1\n  port: {port}\n"),
-    )
-    .unwrap();
-    home
-}
-
-/// 跑一次真二进制，回收 (退出码, stdout, stderr)。超时/挂死算失败。
-async fn run_wing(args: &[&str], home: &PathBuf) -> (i32, Vec<u8>, String) {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
-    command
-        .args(args)
-        .env("WING_HOME", home)
-        .env_remove("RUST_LOG")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().unwrap();
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
-        Ok(result) => result.unwrap(),
-        Err(_) => panic!("`wing {args:?}` did not exit in 30s"),
-    };
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    (output.status.code().unwrap_or(-1), output.stdout, stderr)
-}
-
 // ============================================================
 // 测试
 // ============================================================
 
-/// N2 的硬守卫：stdio 的降级 = stderr 有清单与出路 + **78** + stdout 零字节。
+/// 绑端口 + 写出指向它的 `WING_HOME`。
+async fn start_gateway(mode: Mode, tag: &str) -> PathBuf {
+    let (home, _port) = start_fake_gateway("wing-setup-e2e", tag, mode, handle_conn).await;
+    home
+}
+
+/// stdio 的降级 = stderr 有清单与出路 + **78** + stdout 零字节。
 #[tokio::test]
 async fn stdio_exits_78_with_the_problem_list_and_an_empty_stdout() {
     let home = start_gateway(Mode::Unusable, "stdio-unusable").await;
@@ -184,7 +108,7 @@ async fn stdio_exits_78_with_the_problem_list_and_an_empty_stdout() {
     assert!(
         stdout.is_empty(),
         "stdout 必须零字节（NDJSON 通道）：{:?}",
-        String::from_utf8_lossy(&stdout)
+        stdout
     );
     assert!(
         stderr.contains("网关配置不可用"),
@@ -212,7 +136,7 @@ async fn acp_exits_78_with_an_empty_stdout() {
     assert!(
         stdout.is_empty(),
         "ACP 的 stdout 必须零字节（JSON-RPC 通道）：{:?}",
-        String::from_utf8_lossy(&stdout)
+        stdout
     );
     assert!(stderr.contains("网关配置不可用"), "{stderr}");
     let _ = std::fs::remove_dir_all(&home);

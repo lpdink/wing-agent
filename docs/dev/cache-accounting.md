@@ -13,7 +13,7 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 `libs/core/wing/gateway/routes/session.py`（`GET /api/session/cache`）；人类视图
 `crates/wing/src/cmd/cache.rs`；整机证据 `libs/wing-probe/scenarios/test_cache_ledger.py`
 （A–F 六条红线）与 `libs/core/tests/test_cache_ledger.py`（单元口径）。
-本文只讲 *why* 与判据，逐字段契约以代码与 `contract.md` 为准。
+本文只讲 *why* 与判据，逐字段契约以代码（`context/cache_ledger.py` / `schema/cache.py`）为准。
 
 ## 1. 口径
 
@@ -65,7 +65,7 @@ provider 满兑现能做到的水位）+ **分叉归因**（第几段、哪个�
 ### 账本
 
 `<session-dir>/cache_ledger.json`（会话 aux kv，key = `cache_ledger`；`file` 后端 tmp +
-fsync + rename 原子写，`memory` 后端留在进程内字典）。形状见 `contract.md` §3。
+fsync + rename 原子写，`memory` 后端留在进程内字典）。形状见 `runtime.cache_report`。
 
 - **有界**：三档，全部由代码里的常量决定，没有配置面。
   - `calls` 只留最近 200 条（`MAX_CALLS`）；
@@ -75,7 +75,7 @@ fsync + rename 原子写，`memory` 后端留在进程内字典）。形状见 `
     **≈160 KB**，200 条 × 上百段的极端形态在裁剪前能到**数 MB**——所以预算是账本的真上界。
     两处例外：预算只在**记账时**生效（旧版本写下的超大账本要等下一次调用才被裁）；单条调用
     自己的段落表就超预算时保留它（丢了它就没有「最近一条」可利用了）。
-    （`contract.md` §3 的「~60 KB/会话」按「多条调用共享同一份段落表」估算；真实会话里消息
+    （「~60 KB/会话」按「多条调用共享同一份段落表」估算；真实会话里消息
     每轮增长、每条调用都有独立段落表。契约的字段与公式没变，只有量级口径以这里为准。）
 - **永不抛**：读、算、写全在 try/except 内，失败只 WARNING——记账坏了绝不影响 LLM 调用。
 - **前向容忍**：读不到 / 版本不认识 / 解析失败 / 单条记录类型错 → 当空账本（坏记录丢弃，

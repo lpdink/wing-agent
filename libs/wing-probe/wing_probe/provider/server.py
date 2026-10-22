@@ -15,7 +15,7 @@ Provider 不再需要应答模型列表。
 未注册 / 剧本耗尽 → 5xx + 可读报告（含模型名与已消费/总 Turn 数）。
 请求一律先留档（``RequestLog``）再路由——连"打错模型"的请求也留档。
 
-刻意不用 uvicorn / FastAPI：假 Provider 是**同进程**对象（design D1），
+刻意不用 uvicorn / FastAPI：假 Provider 是**同进程**对象
 与测试进程共享事件循环，断言可以同步读它的状态。
 """
 

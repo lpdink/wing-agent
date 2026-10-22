@@ -2,14 +2,14 @@
  * The rewind / fork picker.
  *
  * Host-opened: on screen exactly while `panels.branchPicker` is non-null
- * (`interfaces.md`), with the `mode` the host opened it for. The rows are the
+ * with the `mode` the host opened it for. The rows are the
  * gateway's branch targets — every user message plus compaction nodes, and the
  * `current` sentinel that the host normalizes into `current: true`.
  *
  * The sentinel marks **where the conversation is now**: it is displayed (with its
  * badge) but not a target, because there is nothing to rewind to. The highlight
  * therefore starts on the `current` row when the host made it selectable, otherwise
- * on the first row — the frozen rule from `interfaces.md`.
+ * on the first row — the frozen rule.
  *
  * Selecting a row is the TUI's `/rewind <uuid>` / `/fork <uuid>`: one
  * `runPromptCommand`, the host executes it.
@@ -51,7 +51,7 @@ export function branchRows(picker: BranchPickerModel): readonly BranchRow[] {
 /**
  * Index of the row the highlight starts on; `-1` means "the first selectable row"
  * (what `useListNav` does). The sentinel is not selectable, so a picker whose only
- * `current` row is the sentinel starts at the top — the frozen `interfaces.md` rule.
+ * `current` row is the sentinel starts at the top — the frozen rule.
  */
 export function branchInitialIndex(rows: readonly BranchRow[]): number {
   const index = rows.findIndex((row) => row.target.current && !row.sentinel);

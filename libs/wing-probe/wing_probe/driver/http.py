@@ -1,4 +1,4 @@
-"""HTTP 动作封装 —— 复用 ``wing_sdk.GatewayClient`` + 全程留档（tasks 4.1）。
+"""HTTP 动作封装 —— 复用 ``wing_sdk.GatewayClient`` + 全程留档。
 
 driver 只经公开协议驱动网关，因此 HTTP 通道直接用「系统外面」的官方客户端：
 ``DriverHttp`` 继承 ``wing_sdk.GatewayClient``（会话生命周期 / 查询 / 变更全部方法），

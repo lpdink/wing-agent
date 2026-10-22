@@ -2,7 +2,7 @@
  * The session picker (`/ss`, and the tab bar's history button).
  *
  * Host-opened: the panel is on screen exactly while `panels.sessionPicker` is
- * non-null (`interfaces.md`), so data and visibility always arrive together. The
+ * non-null, so data and visibility always arrive together. The
  * rows are the gateway's session list — including sessions that are *not* open as
  * tabs, which is what makes this the way back to an earlier conversation.
  *

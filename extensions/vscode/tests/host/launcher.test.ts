@@ -11,7 +11,7 @@ import { disposeLog } from '../../src/host/log';
 import { mockState } from '../mocks/vscode';
 
 /**
- * Launcher invariants (design.md D8): **probe first, never restart a gateway
+ * Launcher invariants: **probe first, never restart a gateway
  * the user is using**, start at most once, and fail with something actionable.
  */
 

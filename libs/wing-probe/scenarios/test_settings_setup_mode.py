@@ -1,7 +1,7 @@
 """setup mode 的钱场景：坏配置 → 降级启动 → 经 API 就地修好 → 会话真的能跑起来。
 
 这是「首次运行 = 向导，用户永远见不到 YAML」这句话的唯一机器证据，也是整个
-设计的地基（总设计 §1.2：配置非法 ⇒ 网关进程直接崩溃退出，最需要设置面板的
+设计的地基（配置非法 ⇒ 网关进程直接崩溃退出，最需要设置面板的
 那一刻后端不存在）。断言逐条对应 §8：
 
 1. 进程活着且 ``/api/health`` 200（§8.2 降级启动）；
@@ -16,11 +16,11 @@
 9. WS 可连（``connect_driver``）→ 建会话跑一轮成功（假 Provider 收到请求）→
    ``history.jsonl`` 有记录。
 
-``setup_mode`` 字段在降级期是**真值** ``true``（04/AD15），转入正常模式后 ``false``
-——本文件的另两条用例断言它（AD12/AD13 的降级路径）；**主用例的判据**是会话端点的
+``setup_mode`` 字段在降级期是**真值** ``true``，转入正常模式后 ``false``
+——本文件的另两条用例断言它（两条降级路径）；**主用例的判据**是会话端点的
 503 错误码与 WS 拒绝（这两条在"字段说真话"之前就已经是可观测事实）。
 
-本文件另有两个用例覆盖两条「坏到读不出来」的分支（AD12/AD13）：
+本文件另有两个用例覆盖两条「坏到读不出来」的分支：
 顶层数字键（``Config(**parsed)`` 连校验都进不去）与 YAML 语法错（文件读不出文档）
 ——两者都必须降级启动、报得出问题，并且**都能经 ``set`` 修好**（语法错那条的旧文件
 会被备份进 ``config.yaml.bak``）。
@@ -240,7 +240,7 @@ async def test_broken_config_repairs_in_place(probe: Probe) -> None:
 
 #: 顶层数字键：PyYAML 解析成 int 键，`Config(**parsed)` 连字段级校验都进不去
 #: （`TypeError: keywords must be strings`）。providers/agents 本身是合法的——
-#: 唯一的问题就是这个键（AD12）。
+#: 唯一的问题就是这个键。
 NUMERIC_KEY_CONFIG = f"""\
 1: oops
 providers:
@@ -253,7 +253,7 @@ agents:
     model: {SETUP_MODEL}
 """
 
-#: 坏缩进（AD13 的形态）：文件存在但读不出文档。
+#: 坏缩进（语法错的形态）：文件存在但读不出文档。
 SYNTAX_ERROR_CONFIG = "providers: [\n"
 
 
@@ -291,7 +291,7 @@ def _fixed_document(probe: Probe) -> dict:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_numeric_top_level_key_boots_degraded_and_repairs(probe: Probe) -> None:
-    """顶层数字键（AD12）：降级启动 + 指向精确的问题 + ``set`` 修好 → 转正常模式。
+    """顶层数字键：降级启动 + 指向精确的问题 + ``set`` 修好 → 转正常模式。
 
     修这条之前 ``boot_config()`` 自己会抛（`TypeError: keywords must be strings`）——
     网关带 traceback 崩溃，正是 setup mode 要消灭的那条路径。
@@ -334,7 +334,7 @@ async def test_numeric_top_level_key_boots_degraded_and_repairs(probe: Probe) ->
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_syntax_error_file_repairs_through_the_api(probe: Probe) -> None:
-    """YAML 语法错（AD13）：``set`` 是真正的修复路径——写盘 + ``.bak`` 留坏文件 + 转正常模式。
+    """YAML 语法错：``set`` 是真正的修复路径——写盘 + ``.bak`` 留坏文件 + 转正常模式。
 
     修这条之前事务在 ① 步就返回 ``ok=false``，产品内**没有任何**路径能修好语法错的文件
     （面板 / ``wing config set`` 全走这个事务），用户只能手改 YAML——与 D1「用户永远
@@ -359,7 +359,7 @@ async def test_syntax_error_file_repairs_through_the_api(probe: Probe) -> None:
         )
         assert receipt["ok"] is True, receipt
         assert receipt["setup_mode_exited"] is True, receipt
-        # 密钥无法保留是必然（文件读不出来）——回执显式告知（AD13）。
+        # 密钥无法保留是必然（文件读不出来）——回执显式告知。
         assert receipt["warnings"] == [
             "原配置文件无法解析，其中的密钥无法保留，请重新填写"
         ], receipt

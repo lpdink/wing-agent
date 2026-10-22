@@ -50,7 +50,7 @@ describe('gatewayUrls', () => {
     expect(gatewayUrls({ host: '  ', port: 9 }).httpBaseUrl).toBe('http://127.0.0.1:9');
   });
 
-  it('reports a host that carries a port as a configuration error (review r1 N3)', () => {
+  it('reports a host that carries a port as a configuration error', () => {
     // Bracketing anything containing ":" produced `http://[localhost:8080]:32523`,
     // an invalid URL that only failed deep in the WS layer with an opaque message.
     for (const host of ['localhost:8080', '127.0.0.1:32523', 'example.com:', '[::1]:8080']) {

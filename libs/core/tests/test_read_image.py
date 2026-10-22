@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 import yaml
 
+from _support import png_bytes
 from wing.agent import ToolContext
 from wing.config import ModelCapabilities, ModelSpec
 from wing.media import MediaAccess
@@ -29,17 +30,6 @@ from wing.schema import ToolError, ToolOutput
 from wing.tool_registry import tool_registry
 from wing.tools.builtin.read import read_file
 from wing.tools.builtin.read_image import read_image
-
-
-def png_bytes(width: int, height: int) -> bytes:
-    """最小 PNG 头部（sig + IHDR）——ReadImage 只做头部解析，不解码像素。"""
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + struct.pack(">I", 13)
-        + b"IHDR"
-        + struct.pack(">II", width, height)
-        + b"\x08\x06\x00\x00\x00"
-    )
 
 
 def jpeg_bytes(width: int, height: int) -> bytes:
@@ -172,10 +162,10 @@ class TestVisionGate:
 
     @pytest.mark.asyncio
     async def test_message_suggests_vision_sibling_in_same_provider(
-        self, tmp_path: Path, _mock_config
+        self, tmp_path: Path, _isolate_config
     ):
         """恰好一个 provider 声明该模型：写它的名字，点名 vision 兄弟；没有兄弟则省略建议。"""
-        _mock_config.providers[0].models = [
+        _isolate_config.providers[0].models = [
             ModelSpec(name="text-model"),
             ModelSpec(name="vision-model", capabilities=ModelCapabilities(vision=True)),
         ]
@@ -191,18 +181,18 @@ class TestVisionGate:
         assert "Note:" not in msg
 
         # 没有 vision 兄弟 → 不出现建议句
-        _mock_config.providers[0].models = [ModelSpec(name="text-model")]
+        _isolate_config.providers[0].models = [ModelSpec(name="text-model")]
         with pytest.raises(ToolError) as ei2:
             await read_image(str(image), ctx=_ctx(vision=False, model="text-model"))
         assert "Alternatively" not in str(ei2.value)
 
     @pytest.mark.asyncio
     async def test_multi_provider_same_name_omits_attribution(
-        self, tmp_path: Path, _mock_config
+        self, tmp_path: Path, _isolate_config
     ):
         """同名模型挂在多个 provider：不指认归属（无法判定活跃者），示例用中性占位。"""
-        _mock_config.providers[0].models = [ModelSpec(name="shared-model")]
-        _mock_config.providers[1].models = [
+        _isolate_config.providers[0].models = [ModelSpec(name="shared-model")]
+        _isolate_config.providers[1].models = [
             ModelSpec(name="shared-model"),
             ModelSpec(name="alt-vision", capabilities=ModelCapabilities(vision=True)),
         ]
@@ -223,11 +213,11 @@ class TestVisionGate:
 
     @pytest.mark.asyncio
     async def test_gate_is_reachable_without_config_provider_match(
-        self, tmp_path, _mock_config
+        self, tmp_path, _isolate_config
     ):
         """模型不在任何 provider 声明里（如 CLI override）→ 中性占位 + Note，仍拒绝。"""
-        _mock_config.providers[0].models = []
-        _mock_config.providers[1].models = []
+        _isolate_config.providers[0].models = []
+        _isolate_config.providers[1].models = []
         image = tmp_path / "shot.png"
         write_image(image, png_bytes(4, 4))
 
@@ -244,7 +234,7 @@ class TestVisionGate:
 
     @pytest.mark.asyncio
     async def test_example_yaml_survives_metachar_model_names(
-        self, tmp_path: Path, _mock_config
+        self, tmp_path: Path, _isolate_config
     ):
         """模型名含 YAML 元字符（`:` / `#` / 前导 `*`）时示例片段仍可解析（N2）。
 
@@ -345,9 +335,9 @@ class TestSuccess:
 class TestMaxBytes:
     @pytest.mark.asyncio
     async def test_over_limit_rejected_with_downscale_hint(
-        self, tmp_path: Path, _mock_config
+        self, tmp_path: Path, _isolate_config
     ):
-        _mock_config.images.max_bytes = 128
+        _isolate_config.images.max_bytes = 128
         image = tmp_path / "big.png"
         write_image(image, png_bytes(800, 600), total_size=129)
         spy = _SpyMedia()
@@ -363,8 +353,8 @@ class TestMaxBytes:
         assert spy.writes == []
 
     @pytest.mark.asyncio
-    async def test_exactly_at_limit_passes(self, tmp_path: Path, _mock_config):
-        _mock_config.images.max_bytes = 128
+    async def test_exactly_at_limit_passes(self, tmp_path: Path, _isolate_config):
+        _isolate_config.images.max_bytes = 128
         image = tmp_path / "edge.png"
         data = write_image(image, png_bytes(4, 4), total_size=128)
         spy = _SpyMedia()
@@ -375,9 +365,11 @@ class TestMaxBytes:
         assert spy.writes[0][1] == data
 
     @pytest.mark.asyncio
-    async def test_downscale_hint_shell_quotes_path(self, tmp_path: Path, _mock_config):
+    async def test_downscale_hint_shell_quotes_path(
+        self, tmp_path: Path, _isolate_config
+    ):
         """含空格 / CJK 的路径在示例命令里被 shell 引用，可直接复制执行（S1）。"""
-        _mock_config.images.max_bytes = 64
+        _isolate_config.images.max_bytes = 64
         spaced = tmp_path / "工作 目录"
         spaced.mkdir()
         image = spaced / "截图 shot.png"
@@ -400,10 +392,10 @@ class TestMaxBytes:
 
     @pytest.mark.asyncio
     async def test_growth_between_stat_and_read_still_rejected(
-        self, tmp_path: Path, monkeypatch, _mock_config
+        self, tmp_path: Path, monkeypatch, _isolate_config
     ):
         """stat 与 read 之间的追加写窗口：以实际读到的字节复判上限。"""
-        _mock_config.images.max_bytes = 64
+        _isolate_config.images.max_bytes = 64
         image = tmp_path / "grow.png"
         write_image(image, png_bytes(4, 4), total_size=128)
         # 伪造一个"很小"的 stat 结果（st_size=32），模拟 stat 之后文件被追加写
@@ -422,7 +414,7 @@ class TestMaxBytes:
 class TestDefaultMaxBytes:
     """默认 `images.max_bytes` = 4_718_592 的边界：= 上限可读 / +1 拒绝。
 
-    `_mock_config` 不覆盖 `images`，所以这里跑的就是解析出的默认值——两个用例
+    `_isolate_config` 不覆盖 `images`，所以这里跑的就是解析出的默认值——两个用例
     合并把默认值**行为上**钉死：恰好 4_718_592（放宽 → "+1 拒绝"变红；收紧 →
     "= 上限可读"变红）。fixture 字节数与默认值同源，改动必须一起改。
     """
@@ -431,8 +423,10 @@ class TestDefaultMaxBytes:
     DEFAULT_MAX_BYTES = 4_718_592
 
     @pytest.mark.asyncio
-    async def test_exactly_at_default_limit_passes(self, tmp_path: Path, _mock_config):
-        assert _mock_config.images.max_bytes == self.DEFAULT_MAX_BYTES, (
+    async def test_exactly_at_default_limit_passes(
+        self, tmp_path: Path, _isolate_config
+    ):
+        assert _isolate_config.images.max_bytes == self.DEFAULT_MAX_BYTES, (
             "默认上限变了——fixture 字节数必须同步"
         )
         image = tmp_path / "at-limit.png"
@@ -446,9 +440,9 @@ class TestDefaultMaxBytes:
 
     @pytest.mark.asyncio
     async def test_one_byte_over_default_limit_rejected(
-        self, tmp_path: Path, _mock_config
+        self, tmp_path: Path, _isolate_config
     ):
-        assert _mock_config.images.max_bytes == self.DEFAULT_MAX_BYTES, (
+        assert _isolate_config.images.max_bytes == self.DEFAULT_MAX_BYTES, (
             "默认上限变了——fixture 字节数必须同步"
         )
         image = tmp_path / "over-limit.png"
@@ -599,7 +593,7 @@ class TestToolDescription:
 
     失败路径的完整信息由**拒绝发生时的错误文案**给出（`_no_vision_message` /
     `_too_large_error`），静态描述只留成功语义与可行动形态——有意取舍
-    （见 03_media_cap/design.md D3），改动必须让本类变红。
+    （有意取舍），改动必须让本类变红。
     """
 
     @staticmethod
@@ -677,8 +671,8 @@ async def agent():
 
 class TestAgentCapabilities:
     @pytest.mark.asyncio
-    async def test_follows_model_switch(self, agent, _mock_config):
-        _mock_config.providers[0].models = [
+    async def test_follows_model_switch(self, agent, _isolate_config):
+        _isolate_config.providers[0].models = [
             ModelSpec(name="text-model"),
             ModelSpec(name="vision-model", capabilities=ModelCapabilities(vision=True)),
         ]
@@ -804,7 +798,7 @@ class TestFileSystemErrors:
             )
 
     @pytest.mark.asyncio
-    async def test_vision_sibling_skips_plain_string_models(self, _mock_config):
+    async def test_vision_sibling_skips_plain_string_models(self, _isolate_config):
         """provider 声明的 model 可以是裸字符串（无能力声明）——跳过后仍能找到兄弟模型。"""
         from wing.config import ProviderConfig
         from wing.tools.builtin.read_image import _vision_sibling

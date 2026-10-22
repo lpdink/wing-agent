@@ -320,7 +320,7 @@ describe('shared contract', () => {
 
   it('accepts every message of both unions with the runtime guards', () => {
     // Guards are what the transport and the host trust; if a variant is missing
-    // from their tag tables it would be dropped silently (review r1 [S1]).
+    // from their tag tables it would be dropped silently.
     // (`guard` is typed `(value: unknown) => boolean` on purpose: a type predicate
     // would narrow the negation to `never` and hide the very case under test.)
     const rejected = (messages: readonly unknown[], guard: (value: unknown) => boolean): string[] =>
@@ -472,7 +472,7 @@ describe('session view model', () => {
     expect(session.panels.globalNotice).toBeNull();
   });
 
-  it('starts with nothing open and nothing fetched (step 05, interfaces.md)', () => {
+  it('starts with nothing open and nothing fetched', () => {
     // `PanelsModel` after the cross-lane freeze: three overlays the host opens
     // (`modelPicker` / `sessionPicker` / `branchPicker`) and one data-only catalog
     // (`commandCatalog`). `null` is the "closed"/"not fetched yet" state the shell

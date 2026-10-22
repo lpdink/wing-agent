@@ -1,4 +1,4 @@
-"""history —— ``history.jsonl`` 独立解析与上下文红线断言（tasks 5.1–5.3）。
+"""history —— ``history.jsonl`` 独立解析与上下文红线断言。
 
 模块划分：
 

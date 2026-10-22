@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from _support import anthropic_sse, openai_sse, wait_until_async
 from wing.event_bus import event_bus
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.anthropic.stream import _StreamState
@@ -33,15 +34,7 @@ if TYPE_CHECKING:
     from wing.agent import WingAgent
     from wing.runtime import WingRuntime
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -96,23 +89,6 @@ class _FakeClient:
         pass
 
 
-def _anthropic_sse(events: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for ev in events:
-        lines.append(f"event: {ev.get('type', 'unknown')}")
-        lines.append(f"data: {json.dumps(ev)}")
-        lines.append("")
-    return lines
-
-
-def _openai_sse(chunks: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for c in chunks:
-        lines.append(f"data: {json.dumps(c)}")
-        lines.append("")
-    return lines
-
-
 def _make_anthropic() -> AnthropicProvider:
     from wing.config import ProviderConfig
 
@@ -155,14 +131,6 @@ async def _consume(
             on_chunk(chunk)
 
 
-async def _wait_until(pred: Callable[[], bool], timeout: float = 5.0) -> None:
-    async def _inner() -> None:
-        while not pred():
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(_inner(), timeout)
-
-
 async def _cancel(task: asyncio.Task) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -184,7 +152,7 @@ class TestAccumulatorBinding:
         try:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
-                _anthropic_sse(
+                anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -228,7 +196,7 @@ class TestAccumulatorBinding:
         try:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
-                _anthropic_sse(
+                anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -277,7 +245,10 @@ class TestAccumulatorBinding:
         try:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
-                _openai_sse([{"choices": [{"delta": {"content": "partial answer"}}]}])
+                openai_sse(
+                    [{"choices": [{"delta": {"content": "partial answer"}}]}],
+                    done=False,
+                )
             )
             acc = provider.create_accumulator()
             seen = asyncio.Event()
@@ -301,7 +272,7 @@ class TestAccumulatorBinding:
         try:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
-                _anthropic_sse(
+                anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -333,7 +304,7 @@ class TestAccumulatorBinding:
             )
             acc = provider.create_accumulator()
             task = asyncio.create_task(_consume(provider, acc))
-            await _wait_until(
+            await wait_until_async(
                 lambda: bool(
                     provider.pending_tool_calls(acc)
                     and provider.pending_tool_calls(acc)[0].args_fragment
@@ -358,7 +329,7 @@ class TestAccumulatorBinding:
         try:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
-                _openai_sse(
+                openai_sse(
                     [
                         {
                             "choices": [
@@ -394,12 +365,13 @@ class TestAccumulatorBinding:
                                 }
                             ]
                         },
-                    ]
+                    ],
+                    done=False,
                 )
             )
             acc = provider.create_accumulator()
             task = asyncio.create_task(_consume(provider, acc))
-            await _wait_until(
+            await wait_until_async(
                 lambda: bool(
                     provider.pending_tool_calls(acc)
                     and provider.pending_tool_calls(acc)[0].args_fragment
@@ -486,7 +458,7 @@ class TestEmptyThinkingBlockFilter:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
                 hold=False,
-                lines=_anthropic_sse(
+                lines=anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -532,7 +504,7 @@ class TestEmptyThinkingBlockFilter:
             await provider._client.aclose()
             provider._client = _FakeClient(  # ty: ignore[invalid-assignment]
                 hold=False,
-                lines=_anthropic_sse(
+                lines=anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -589,7 +561,7 @@ async def _interrupted_agent(
 
     check = ready or _default_ready
     # 等到 delta 进入真实累积状态（正是打断补提交的数据源）
-    await _wait_until(
+    await wait_until_async(
         lambda: agent._loop.current_acc is not None and check(agent._loop.current_acc)
     )
     await agent.interrupt()
@@ -611,7 +583,7 @@ class TestInterruptCommitEndToEnd:
             agent, client = await _interrupted_agent(
                 runtime,
                 provider,
-                _anthropic_sse(
+                anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -639,7 +611,7 @@ class TestInterruptCommitEndToEnd:
 
             # 继续对话：下一轮 Anthropic 请求携带 thinking 块（保真回放）
             await agent.post("continue")
-            await _wait_until(lambda: len(client.bodies) >= 2)
+            await wait_until_async(lambda: len(client.bodies) >= 2)
             messages = client.bodies[1]["messages"]
             assistant_blocks = next(
                 m["content"] for m in messages if m["role"] == "assistant"
@@ -670,14 +642,15 @@ class TestInterruptCommitEndToEnd:
             agent, client = await _interrupted_agent(
                 runtime,
                 provider,
-                _openai_sse(
+                openai_sse(
                     [
                         {
                             "choices": [
                                 {"delta": {"reasoning_content": "half-done reasoning"}}
                             ]
                         }
-                    ]
+                    ],
+                    done=False,
                 ),
             )
 
@@ -687,7 +660,7 @@ class TestInterruptCommitEndToEnd:
             assert chain[1].reasoning_content == "half-done reasoning"
 
             await agent.post("continue")
-            await _wait_until(lambda: len(client.bodies) >= 2)
+            await wait_until_async(lambda: len(client.bodies) >= 2)
             messages = client.bodies[1]["messages"]
             # 全量请求体不得出现 null content（json 级断言，贴近网关视角）
             assert '"content": null' not in json.dumps(messages, ensure_ascii=False)
@@ -724,7 +697,7 @@ class TestInterruptCommitEndToEnd:
             agent, client = await _interrupted_agent(
                 runtime,
                 provider,
-                _anthropic_sse(
+                anthropic_sse(
                     [
                         {
                             "type": "content_block_start",
@@ -793,7 +766,7 @@ class TestInterruptCommitEndToEnd:
 
             # ── 下一轮请求：tool_use 有配对 tool_result（wire 级）──
             await agent.post("continue")
-            await _wait_until(lambda: len(client.bodies) >= 2)
+            await wait_until_async(lambda: len(client.bodies) >= 2)
             messages = client.bodies[1]["messages"]
             idx, assistant_wire = next(
                 (i, m) for i, m in enumerate(messages) if m["role"] == "assistant"
@@ -825,7 +798,7 @@ class TestInterruptCommitEndToEnd:
             agent, client = await _interrupted_agent(
                 runtime,
                 provider,
-                _openai_sse(
+                openai_sse(
                     [
                         {
                             "choices": [
@@ -851,7 +824,8 @@ class TestInterruptCommitEndToEnd:
                                 }
                             ]
                         },
-                    ]
+                    ],
+                    done=False,
                 ),
                 ready=lambda acc: any(
                     isinstance(b, ToolUseBlock)
@@ -867,7 +841,7 @@ class TestInterruptCommitEndToEnd:
             assert chain[2].content == INTERRUPTED_RESULT
 
             await agent.post("continue")
-            await _wait_until(lambda: len(client.bodies) >= 2)
+            await wait_until_async(lambda: len(client.bodies) >= 2)
             messages = client.bodies[1]["messages"]
             assert '"content": null' not in json.dumps(messages, ensure_ascii=False)
             idx, assistant_wire = next(

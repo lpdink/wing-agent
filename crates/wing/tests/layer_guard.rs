@@ -42,24 +42,16 @@
 //! fix is to reference the neutral layer instead.
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::Path;
 use std::path::PathBuf;
 
-/// Crate source root (`crates/wing/src`).
-const SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+mod common;
+
+use common::guard::{SRC, Source, Squashed, collect, is_insignificant, production_text};
 
 /// One forbidden path occurrence: 1-based line number + the line itself.
 #[derive(Debug, PartialEq, Eq)]
 struct Offense {
     line: usize,
-    text: String,
-}
-
-/// Source file under `src/`: path relative to `src` + its text.
-#[derive(Debug)]
-struct Source {
-    path: String,
     text: String,
 }
 
@@ -80,85 +72,7 @@ fn layer_sources(layer: &str) -> Vec<Source> {
     sources
 }
 
-/// Depth-first walk collecting `*.rs` files (sorted for stable reports).
-fn collect(dir: &Path, out: &mut Vec<Source>) {
-    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .map(|entry| entry.expect("directory entry").path())
-        .collect();
-    paths.sort();
-    for path in paths {
-        if path.is_dir() {
-            collect(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            let text = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-            out.push(Source {
-                path: relative(&path),
-                text,
-            });
-        }
-    }
-}
-
-/// `src`-relative, slash-separated path (e.g. `ui/cells/ask_msg.rs`).
-fn relative(path: &Path) -> String {
-    path.strip_prefix(SRC)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
 // ── The scanner ─────────────────────────────────────────────────
-
-/// The source with every whitespace character dropped, remembering where each
-/// kept character came from. Rust's token stream does not care about whitespace
-/// inside a path (`crate :: app`, or `::app` on the next line), so neither
-/// should the guard — while the report still names a real line of the real
-/// file, and the boundary test still reads the real characters (squashing
-/// merges `use` and `crate`, so it must not judge identifier boundaries).
-struct Squashed {
-    text: String,
-    /// `(squashed byte offset, original byte offset, 1-based line)` per kept
-    /// character.
-    at: Vec<(usize, usize, usize)>,
-}
-
-impl Squashed {
-    fn new(source: &str) -> Self {
-        let mut text = String::with_capacity(source.len());
-        let mut at = Vec::with_capacity(source.len());
-        let mut line = 1;
-        for (offset, ch) in source.char_indices() {
-            if ch == '\n' {
-                line += 1;
-                continue;
-            }
-            if ch.is_whitespace() {
-                continue;
-            }
-            at.push((text.len(), offset, line));
-            text.push(ch);
-        }
-        Self { text, at }
-    }
-
-    /// `(original byte offset, 1-based line)` of the character at squashed byte
-    /// `offset`.
-    fn origin(&self, offset: usize) -> (usize, usize) {
-        match self
-            .at
-            .binary_search_by_key(&offset, |(squashed, _, _)| *squashed)
-        {
-            Ok(i) => (self.at[i].1, self.at[i].2),
-            // A needle always starts (and ends) on kept characters.
-            Err(i) => self
-                .at
-                .get(i.saturating_sub(1))
-                .map_or((0, 1), |&(_, o, l)| (o, l)),
-        }
-    }
-}
 
 /// Do the original characters around `start..end` allow the match to be a whole
 /// path? A needle must not be part of a longer name on the sides where it ends
@@ -354,42 +268,6 @@ const FRAME_ANCHORS: &[(&str, &str)] = &[
         "pub fn push_pending(&mut self, request_id: String",
     ),
 ];
-
-/// The production part of `text`: everything before the file's own test module.
-///
-/// That module is the tail of the file and is written as a top-level
-/// `#[cfg(test)]` with `mod …` under it. The marker this must *not* cut on is
-/// the one `#[cfg(test)]` puts on a single item (a test-only accessor, a
-/// counter field): production code follows those, so cutting there would hide
-/// it instead of skipping test code.
-fn production_text(text: &str) -> &str {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let mut offset = 0;
-    for (index, line) in lines.iter().enumerate() {
-        if line.starts_with("#[cfg(test)]")
-            && lines[index + 1..]
-                .iter()
-                .find(|next| !is_insignificant(next))
-                .is_some_and(|next| opens_a_module(next))
-        {
-            return &text[..offset];
-        }
-        offset += line.len();
-    }
-    text
-}
-
-/// A line a `mod` declaration may sit behind: blank, a comment, an attribute.
-fn is_insignificant(line: &str) -> bool {
-    let line = line.trim();
-    line.is_empty() || line.starts_with("//") || line.starts_with("#[")
-}
-
-/// Whether the line declares a module (`mod tests {`, `pub(crate) mod x;`).
-fn opens_a_module(line: &str) -> bool {
-    let line = line.trim();
-    line.starts_with("mod ") || line.starts_with("pub mod ") || line.starts_with("pub(crate) mod ")
-}
 
 /// Every module `text` declares at its top level, as `(test_only, name)`.
 ///

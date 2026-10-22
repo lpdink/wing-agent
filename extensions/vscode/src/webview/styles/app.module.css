@@ -381,7 +381,7 @@
   overflow-wrap: anywhere;
 }
 
-/* The manual close path (toasts also self-dismiss — review #109 [P2-4]). */
+/* The manual close path (toasts also self-dismiss). */
 .toastClose {
   flex: 0 0 auto;
   padding: 0 2px;

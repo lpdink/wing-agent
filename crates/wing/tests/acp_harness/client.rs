@@ -1,6 +1,6 @@
 //! 官方 ACP 客户端接线：场景运行器 + 记录器 + 脚本化应答。
 //!
-//! 驱动选型见 06 design D2：`agent-client-protocol`（dev-dependency，`features =
+//! 驱动选型：`agent-client-protocol`（dev-dependency，`features =
 //! ["process"]`）作为 client，`AcpAgent` 拉起真 `wing acp` 子进程；三个 handler：
 //!
 //! - `SessionNotification` → [`Recorder`]（update 的**原始 JSON**，顺序即到达顺序）；

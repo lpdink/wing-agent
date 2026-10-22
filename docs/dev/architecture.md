@@ -101,7 +101,7 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 **流式增量**（`--include-partial-messages`）：置位时，每条 assistant 消息的快照帧（`assistant`）之前先逐条输出 `stream_event` 帧（`SDKPartialAssistantMessage` 形状：`{type, event, parent_tool_use_id:null, session_id, uuid}`，`event` 是 Anthropic SSE 的 `RawMessageStreamEvent`）——`message_start`（含 `message.id`）→ 每条块的 `content_block_start` / `content_block_delta`（`text_delta` / `thinking_delta`；tool_use 的 `input_json_delta` 是 provider 侧增量原样透传，`is_final` 收口块）→ `content_block_stop` → `message_delta`（stop_reason / output_tokens 与快照帧同值）→ `message_stop`。要点：
 
-- **id 一致性（硬要求）**：`message_start.message.id` == 同一消息快照帧 `message.id`（消费方的流式/快照去重键）。跨帧关联在渲染器本地完成（`crates/wing/src/stdio/stream.rs`）：首增量铸 `msg_<hex>`、快照帧复用它产出 `message.id`（方案选择见 `03_streaming/design.md` D1——核心事件面无需携带消息 id）；
+- **id 一致性（硬要求）**：`message_start.message.id` == 同一消息快照帧 `message.id`（消费方的流式/快照去重键）。跨帧关联在渲染器本地完成（`crates/wing/src/stdio/stream.rs`）：首增量铸 `msg_<hex>`、快照帧复用它产出 `message.id`（跨帧关联只发生在渲染器本地——核心事件面无需携带消息 id）；
 - **帧序**：流式收口先于快照帧（SDK 契约：最终完整消息仍会作为独立消息到来）；**打断轮与错误轮的终态帧之前也会先收口**（不留悬空 `message_start`，合成 `result` 帧仍是最后一条）；轮边界（`turn_started`）防御性收口，跨轮不泄漏；
 - **多消息/多轮**：一轮可含多条 assistant 消息，各自独立 `message_start…message_stop`（按 deltas→快照帧边界切分）；无增量的消息不伪造流式帧；
 - **零行为变化**：不带 flag 时 delta 不产帧、快照 id 仍是 `msg_{事件 uuid}`（逐字节不变）；该 flag 只在 `--output-format stream-json` 下有意义（其余输出形态记一条 warn 说明），且只服务 stdio 模式（子命令路径显式拒绝，不静默忽略）。

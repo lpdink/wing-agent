@@ -1,4 +1,4 @@
-"""自动（early）压缩 + pending compact 跨重启恢复红线场景（spec「自动压缩」）。
+"""自动（early）压缩 + pending compact 跨重启恢复红线场景。
 
 被守的语义（`libs/core/wing/context/manager.py` + `context/compaction.py`）：
 

@@ -1,6 +1,6 @@
 """门禁扫描器单测：四种违规形态必检出，允许清单不误伤。
 
-覆盖 tasks 1.5。全部为纯单测：扫描源码字符串 / 临时目录，不起任何进程。
+全部为纯单测：扫描源码字符串 / 临时目录，不起任何进程。
 """
 
 from pathlib import Path
@@ -144,7 +144,7 @@ def test_module_alias_tracking_detected() -> None:
 
 
 def test_dynamic_callable_lookup_is_accepted_risk() -> None:
-    """残余风险（design D2 口径）：运行时定名 / 取属性 / 赋值重绑定不在此门禁内。"""
+    """残余风险：运行时定名 / 取属性 / 赋值重绑定不在此门禁内。"""
     assert scan_source("importlib.import_module(''.join(['wi', 'ng.runtime']))\n") == []
     assert scan_source('importlib.import_module(f"wing.{name}")\n') == []
     assert scan_source('getattr(importlib, "import_module")("wing.runtime")\n') == []

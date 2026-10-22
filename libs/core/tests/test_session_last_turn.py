@@ -20,20 +20,11 @@ from pathlib import Path
 
 import pytest
 
-from wing.event_bus import event_bus
 from wing.gateway.projection import build_session_info
 from wing.store import SessionMetadata
 from wing.store.file import FileSessionStore
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus（Session 构造即订阅）。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture

@@ -23,7 +23,7 @@ import type { WebSocketLike } from '../../src/core/transport/socket';
  * proves the *event mapping* and, just as importantly, that every listener is
  * removed on close (a leaked listener on a long-lived extension host is a slow
  * memory leak that no other test would catch). The bundled `ws` fallback gets a
- * real server (review #109 [P1-3]) — a stub would not prove the handshake works.
+ * real server — a stub would not prove the handshake works.
  */
 
 /** Minimal deferred, so the fallback test can await the real socket's `open`. */

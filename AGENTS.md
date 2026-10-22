@@ -53,6 +53,7 @@ libs/core/wing/
 │   ├── template.py                  AgentTemplate — 配置 agents: 的 model/tools/prompt/skills/rules
 │   ├── model_binding.py             生效模型绑定（resume 链的只读投影；会话列表的模型列）
 │   ├── usage.py                     UsageTracker — 会话用量账本（事件驱动累计 + 节流落盘）
+│   ├── tags.py                      会话标签（会话元数据里的 opaque 字符串 + `pin` 标签约定）
 │   └── override.py                  AgentOverride — 创建期参数覆盖（领域类型，住领域层非网关）
 ├── chain.py                         TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 ├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载 / 缓存账本
@@ -112,7 +113,7 @@ libs/core/wing/
 │   └── __init__.py                  EVENT_TYPES / FACT_EVENTS 注册表 + wire_dump（WS 帧规则）
 ├── tools/                           内置工具（__init__ 显式导入 = 注册）
 │   ├── builtin/                     一工具一文件：bash · read/write/edit · glob/grep · read_image · ask_user · todo
-│   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety
+│   └── internal/                    工具基础设施：utils（resolve_path）· rg（_run_rg）· diff_window · shell_safety · write_target（就地写 vs 原子替换的唯一判定）
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级；与 store/ 的会话持久化正交）
 │   ├── database.py                  Database（WAL / user_version 迁移 / 打开失败即降级，读写作 no-op）
@@ -144,13 +145,13 @@ libs/core/wing/
     ├── cors.py                      跨源访问装配（默认放通 loopback 来源；外部来源走 gateway.cors.origins）
     ├── frames.py                    出网帧切分（>8 MiB 载荷按 UTF-8 边界切为 ≤16 MiB 帧）
     ├── projection.py                领域 → 协议响应投影（session info / branches）
-    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · errors
+    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · wake · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
     └── routes/                      session(22) · system(6) · settings(4) · wake(3) · tools(1) · health(1) · ws（事件传输 + 上行帧）
 ```
 
-### 前端：`crates/wing/src/`（Rust，TUI + stdio + 编排 CLI）
+### 前端：`crates/wing/src/`（Rust，TUI + stdio + ACP + 编排 CLI）
 
 ```
 crates/wing/src/
@@ -171,6 +172,7 @@ crates/wing/src/
 │   ├── cache.rs                     `wing cache`（KV 前缀缓存账本：理论/实际命中率 + 分叉归因）
 │   ├── branch.rs                    `wing branches` / `fork` / `rewind`（消息节点导航：uuid 闭环 + draft）
 │   ├── asks.rs                      `wing asks`（在挂 Ask 的 tool_call_id 发现口：WS 快照 + `--wait`）
+│   ├── tag.rs                       `wing tag`（会话标签读写 + 全局清单；幂等、不水合被逐出的会话）
 │   ├── control.rs                   `wing interrupt`（别名 int）/ `compact` / `update`（会话控制面）
 │   ├── lifecycle.rs                 `wing new` / `resume`（建空会话 / 显式水合）
 │   ├── release.rs                   `wing release` 逐出会话内存态（显式 eviction，幂等）
@@ -187,15 +189,19 @@ crates/wing/src/
 │   ├── agent.rs                     ACP handler 注册（initialize / new / prompt / cancel / list / load / resume / close / set_config_option）
 │   ├── model.rs                     模型 config option（值域 / 分组 / currentValue）+ 热切换 + 外部变更中继
 │   ├── session.rs                   SessionHub：会话表 · WS 事件泵与分流 · 挂载（load/resume）与回收（close）· prompt 串行化
-│   └── translate.rs                 WingEvent → ACP session/update 映射（工具卡片状态 + prompt 拍平 + 终态判定）
-│       └── replay.rs                session/load 的历史回放投影（sync_session → update 序列）
+│   ├── ask.rs                       ask 事件 → ACP 正式交互面（request_permission / elicitation 三径分流）
+│   ├── translate.rs                 WingEvent → ACP session/update 映射（工具卡片状态 + prompt 拍平 + 终态判定）
+│   └── translate/replay.rs          session/load 的历史回放投影（sync_session → update 序列）
 ├── stdio/                           headless 前端（wing -p，Claude 协议）
 │   ├── mod.rs                       run_stdio + ensure_gateway_running + 参数过滤
 │   ├── ndjson.rs                    stream-json NDJSON 帧
 │   ├── renderer.rs                  text / json / stream-json 输出渲染
 │   ├── stdout.rs                    stdout 串行化写口（renderer 与 stdin pump 共享）
+│   ├── stream.rs                    `--include-partial-messages`：三路 delta → Anthropic SSE `stream_event`
 │   └── stdin_handler.rs             常驻 stdin pump（initialize / interrupt 应答 + 收尾）
-├── gateway/client.rs                GatewayClient — WS 连接 + 读写任务
+├── gateway/                         WS 客户端与分片重组
+│   ├── client.rs                    GatewayClient — WS 连接 + 读写任务
+│   └── chunk.rs                     `_chunk` 信封在读任务内重组（保序 / 有界 / 安全失败；应用层零感知）
 ├── protocol/                        WingEvent + ClientRequest + ConnectResponse（Python 事件的 Rust 镜像）
 │   ├── events.rs / client_request.rs / connect_response.rs
 │   ├── history.rs                   SessionMessage — 会话历史 Message 投影的 typed 镜像（media 宽容解析）
@@ -208,17 +214,22 @@ crates/wing/src/
 │   ├── pinning.rs                   会话置顶（pin）约定：`pin` 标签 + 「置顶在前、后 pin 更靠前」的唯一排序实现（后端仅在自动归档豁免处感知 `pin`）
 │   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
+│   ├── session_tree.rs              会话血缘森林：扁平会话行 → 树序 + 连接前缀（`wing ps --tree` 与 TUI 面板共用）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环
 │   ├── mod.rs                       run_app() 主循环 + handle_event()
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
 │   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
+│   ├── commands.rs / modal.rs       斜杠命令路由表 / 模态所有权与 Esc 阶梯（谁拥有键盘，唯一声明）
+│   ├── mouse.rs / selection_session.rs   指针所有权与优先级（滚动条 → composer → chat 带 → 状态栏）/ 选择手势生命周期（区域指纹失效 · 按下时的链接）
+│   ├── frame.rs / projection.rs     上一帧几何记录（输入路径共读的契约）/ WingEvent → chat·turn·status 投影（唯一 match 事件变体处）
 │   ├── clipboard.rs                 粘贴通道边界（文本 → composer / 图片 → 单并发压缩流水线 → chip）
 │   ├── images/                     图片 lane：mod（能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟））· media（媒体图的字节侧：屏幕目标集 · 抓取账本 · 字节 LRU）
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
 │   ├── popup_state.rs               Popup + 候选缓存 + 去重
-│   └── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
+│   ├── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
+│   └── tests/                       模块内单测（mod + 18 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / program_status + support）
 ├── ui/                              UI 组件
 │   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染 + pending 条目）· model（内容模型）· media（消息里的图片：正文 + 引用 → 图块 / 标签行）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
@@ -235,20 +246,25 @@ crates/wing/src/
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker / notice）
 ├── render/                          Markdown + 语法高亮
-│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）
+│   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）/ profile（Content vs Thinking 的规则归属）/ stream（StreamingRender：稳定前缀 + 活动尾部）
 │   ├── picture.rs                   PictureSource — 一张图片的身份（本地文件 / 网关媒体对象）
-│   │   └── stream.rs                StreamingRender — 增量渲染（稳定前缀 + 活动尾部；Thinking 跳过 fence 归一化）
 │   ├── table/                       共享表格引擎：列宽分配 / 列分类 / 框线皮肤（markdown 表格与 CLI 共用）+ plain（CLI 纯文本表格渲染，wing ps / tools 用）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
 │   ├── fit.rs                       像素↔字符格共享装填（fit_cells；布局与编码同一份数学）
 │   └── line_utils.rs / renderable.rs
-├── tui/mod.rs                       终端生命周期（init/restore、crossterm 事件流、唯一出帧口 draw_frame）
+├── tui/                             终端生命周期与终端通道（唯一出帧口 draw_frame）
+│   ├── mod.rs                       init/restore、crossterm 事件流、draw_frame
+│   ├── clipboard_protocol.rs        OSC 52 读写协议（唯一 id 让被放弃的读不落到下一次）
+│   ├── cursor.rs                    光标形状 / 可见性
+│   └── stdin_proxy.rs               stdin 接驳（在 crossterm 之前安装的读代理；session_guard 的靶子）
 ├── config/                          TUI 配置（mod / colors / rendering / paste=粘贴图片压缩参数 / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
+└── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（stream_render 对账 / 吞吐、WS 客户端生命周期、argv / WING_HOME 非法字节、layer_guard 分层守门）、`crates/wing/examples/`（reconnect_flow_verify；welcome_preview 开屏预览）。
+配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（40 个测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
+
+源码门禁：`layer_guard.rs` 把 Rust 侧分层规则钉成扫描断言（Python 侧对应 `libs/core/tests/test_layering.py`，两侧规范见 [docs/dev/backend-layout.md](docs/dev/backend-layout.md)）；`session_guard.rs` 钉**编译器管不着的终端时序**（接驳安装点唯一、settle 早于首次 poll 等五条规则，语义见 [docs/dev/tui-input.md](docs/dev/tui-input.md)）。
 
 ### 其他
 
@@ -259,7 +275,7 @@ crates/wing/src/
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files / toolhost）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
 - `scripts/perf/` — PR 级性能回归测量（merge-base 交错 A/B：criterion 子集 / TUI 显示延迟 / gateway socket 套件 → sticky comment；`.github/workflows/perf.yml` 在 PR 上跑并评论，纯报告不做门禁）→ [docs/dev/perf-testing.md](docs/dev/perf-testing.md)。
 - `extensions/vscode/` — VSCode 前端（编辑器内的接入面，与 `wing` 二进制的四种形态并列；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
-- 测试目录：`libs/core/tests/`（后端 pytest，81 个测试文件 + `conftest.py`）、`libs/wing-sdk/tests/`。
+- 测试目录：`libs/core/tests/`（后端 pytest，130+ 个测试文件 + `conftest.py`（fixture）+ `_support.py`（跨文件 helper））、`libs/wing-sdk/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
 
 ## 配置与日志
@@ -284,6 +300,10 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 标签）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、**用户消息里的图**（媒体对象：形状来自引用、按视口抓字节、字节 LRU、失败即状态）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
+| [`docs/dev/session-lineage.md`](docs/dev/session-lineage.md) | 会话血缘：父子关联字段语义、采集机制（CLI / TUI / 外部前端）、树序与 pin 规则的产品语义参照点 |
+| [`docs/dev/tui-input.md`](docs/dev/tui-input.md) | TUI 输入通道：鼠标上报的 DECSET 配对与生命周期对称、滚轮 / 键盘 / 选择的路由（新增鼠标能力前先读） |
+| [`docs/dev/tui-signals.md`](docs/dev/tui-signals.md) | TUI 终端状态信号：OSC 0（标题）/ OSC 9（桌面通知）/ OSC 7501（程序状态）的读者与语义、光标转义的变化语义 |
+| [`docs/dev/coverage.md`](docs/dev/coverage.md) | 覆盖率门禁：增量（patch）覆盖率作为 PR 门禁、sticky 评论形状、不判定区与本地跑法 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |

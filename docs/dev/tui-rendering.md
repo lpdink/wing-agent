@@ -64,7 +64,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 **降级语义**：`None` 不是错误，是「请显示源码」。降级时把定界符一起还原（`$\ce{2H2O}$`、`$$\frac{a}{b}$$`），所以看不出来或渲染不了的公式与 `off` 的表现一致；`\(…\)` 归一化后的降级形式是 `$…$`（定界符已被改写）。
 
-**定界符归一化清单**（步骤 08 的 VSCode 侧要对齐同一组）：
+**定界符归一化清单**（VSCode 侧对齐同一组）：
 
 | 输入 | 处理 |
 |---|---|
@@ -182,7 +182,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 | 行内 `x^{d }`（上标大括号里多打了一个空格）没渲染（显示源码） | 上标字形按**字符**逐个查表，而 `extract_flat_text` 不 trim 尾随空白 → `' '` 查不到字形 → 整条 `None`。不带空格的 `x^{d}` 照常渲染（实测三个版本一致，非本轮的回归） | 引擎契约（`wing-math/src/grid/layout.rs::to_superscript_char`） |
 | `cases` 的值单元格不 trim 首尾空白（`matrix` / `array` / `aligned` 都走 `trim_node`） | 上游 `layout_cases` 不调 `trim_node`：`\begin{cases} a & b \end{cases}` 里 `a` 后面的源空格会留下来（渲染成 `{ a   if  b`，`if` 前 3 个空格），同形的 `matrix` 已 trim 到 6 列。单元格里多打的空隙因此只有 `cases` 会看得到 | 既有（`wing-math/src/grid/layout.rs::layout_cases`） |
 | 符号命令后面的源空格现在会保留（`\pi x` → `π x`、`\pi \alpha` → `π α`），公式因此比"LaTeX 语义宽度"宽（`x = \alpha \beta \gamma \delta \epsilon \zeta`：改前 10 列 → 现在 15 列） | 让符号命令与裸词路径（`pi x`）一致；代价是每个这样的空格 +1 列，**正好顶到行宽**的行内公式会从"渲染"翻转为"回退源码"（`fits_line` 判据，见 `crates/wing/src/render/markdown/math.rs`）。下一位是上下标 / 撇号 `'` / 右定界符（`}` `)` `]` 或 `\right`）/ 环境分隔符（`&` `\\` 或环境结束 `\end`）/ 标点时空格照旧被吃掉（不会变宽） | 引擎契约（`wing-math/src/latex/parser.rs::trailing_space_separates_objects`） |
-| 货币 `$` 与代码跨度里的 `$` 被 pulldown 配成一对（`成本是 $100，用 \`$PATH\` 变量` → `$100` 的 `$` 被吞、代码跨度被拆） | pulldown 0.13 的数学配对是全局扫描：先埋 `$` token 再配对，**代码跨度不参与**，所以「先出现一个未配对 `$`，之后代码跨度里再有 `$`」必然错配。D5 的「代码/围栏内不解析」只对**开**定界符成立；`a946327` 起既有（基线 `94ac0be` 无此问题，因为它不解析数学）。修法需在归一化层保护代码跨度里的 `$`（不能简单加反斜杠：代码跨度内反斜杠是字面量），属独立决策 → 留给后续步骤 | pulldown 配对语义（既有） |
+| 货币 `$` 与代码跨度里的 `$` 被 pulldown 配成一对（`成本是 $100，用 \`$PATH\` 变量` → `$100` 的 `$` 被吞、代码跨度被拆） | pulldown 0.13 的数学配对是全局扫描：先埋 `$` token 再配对，**代码跨度不参与**，所以「先出现一个未配对 `$`，之后代码跨度里再有 `$`」必然错配。「代码/围栏内不解析」只对**开**定界符成立；`a946327` 起既有（基线 `94ac0be` 无此问题，因为它不解析数学）。修法需在归一化层保护代码跨度里的 `$`（不能简单加反斜杠：代码跨度内反斜杠是字面量），属独立决策 → 留给后续步骤 | pulldown 配对语义（既有） |
 | 两个**货币符号**互相配对（`the price is $5-$10 today` → `the price is 5 -10 today`；`$5 and $10` 有空白则不配对） | 同上一行的配对语义，只是这次没有代码跨度参与：两个 `$` 恰好满足行内数学的两条空白规则，与货币意图无关。修法同上（需要一层「哪些 `$` 是货币」的判定），**不阻塞**、不在本 PR 内处理 | pulldown 配对语义（既有） |
 | 容器里的反引号围栏（`> ``` `、`- ``` …`、`  - ``` …`）在**某些 chunk 边界**下静息态 ≠ 参考 | 根因是 `ensure_fences_on_own_line`：`> ` / `- ` 不是空白前缀，行首 `> ``` ` 会被当成「粘在文字后的围栏」而插入换行；插入发生在 `push` 里，**某个切片可能先被 promoted、插入还没落地**，于是切片文本与参考的归一化文本不同。分歧点随 profile / 形状 / chunk 漂移（实测 `> ~~~
 > a
@@ -195,7 +195,7 @@ cargo run -p wing --example render_probe -- --chunk 1 --check /tmp/reasoning.md
 
 ## 五、图片锚点（`Anchor` 模式）
 
-`![alt](path)` 有两档（总任务书 D2 的两档降级），渲染层只负责「留不留位、留几行」：
+`![alt](path)` 有两档（可渲染 / 标签降级），渲染层只负责「留不留位、留几行」：
 
 | 档 | 什么时候 | 渲染成什么 |
 |---|---|---|
@@ -238,7 +238,7 @@ cell 是：
 - 接受：workspace 相对路径（`.`/`..`/重复分隔符折掉）、绝对路径、`file://`（`file://host/…` 除外）；
 - 拒绝：空、控制字符（防转义注入）、超过 512 字符、远程 scheme（`http:` / `https:` / `data:` / `ftp:` …）、`~`（要读环境变量）、没有 workspace 时的相对路径、`..` 越出 workspace、扩展名不在 `png jpg jpeg gif webp bmp`（大小写不敏感）。
 
-**包含判定的大小写规则**（review #135 [N1]）：只在**相对路径**分支上做词法包含检查，而相对路径的前缀就是 workspace 自己的拼写（逐字节相同），所以「根之下的变体拼写」在两种规则下都放行；唯一能看出平台差异的输入是 `..` 折回根的**大小写变体**——大小写不敏感盘上 `../WORKSPACE/a.png` 与 `../workspace/a.png` 是同一个文件，故按平台折叠 **ASCII** 大小写（`images.rs::is_inside`，仍然不 stat、不 canonicalize；绝对路径一律接受，与「链接可打开任意路径」同口径）。
+**包含判定的大小写规则**：只在**相对路径**分支上做词法包含检查，而相对路径的前缀就是 workspace 自己的拼写（逐字节相同），所以「根之下的变体拼写」在两种规则下都放行；唯一能看出平台差异的输入是 `..` 折回根的**大小写变体**——大小写不敏感盘上 `../WORKSPACE/a.png` 与 `../workspace/a.png` 是同一个文件，故按平台折叠 **ASCII** 大小写（`images.rs::is_inside`，仍然不 stat、不 canonicalize；绝对路径一律接受，与「链接可打开任意路径」同口径）。
 
 拒绝不是错误：该图片走链接路径。
 
@@ -275,7 +275,7 @@ cargo run -q -p wing --example render_probe -- --images --workspace . \
 
 ### 绘制契约（谁把图真的画上去）
 
-渲染层只留位；**画**在 chat view 的帧内记录 + app 的绘制通道（`ui/chat_view/image.rs`、`app/images.rs`）。
+渲染层只留位；**画**在 chat view 的帧内记录 + app 的绘制通道（`ui/chat_view/image.rs`、`app/images/mod.rs`）。
 完整契约——能力阶梯、三态、遮挡与选择、失效触发点、**新鲜度**（文件被重写）、资源上限、性能数字与
 真机验收——在 [`tui-images.md`](tui-images.md)。这一页只留两条对**渲染层**有约束的事实：
 
@@ -295,7 +295,7 @@ cargo run -q -p wing --example render_probe -- --images --workspace . \
 **用户消息里的图不走这张表**：形状来自 `MediaRef` 自身（`ui/chat_view/media.rs`），流式引擎不参与，
 字节按视口抓取——见 [`tui-images.md`](tui-images.md) 第九节。
 
-**元数据表怎么前进（06 的接线 + 07 的新鲜度）**：每个 cell 在算出线条时把链接目标过一遍 `resolve_image_path`（与产锚点同一个纯函数）得到候选路径，app 的 lane（`app/images.rs`）对候选调 `ImageStore::meta` 探测头信息并填表。表的生命周期有两条规则：**一个内容代内只增不减**（锚点会吃掉链接 span，缩表会让锚点在链接路径之间振荡）；**内容重建**（会话切换 / 压缩重同步 / rewind / `/clear`，即 `ChatView::structure_epoch` 变化）则整表清空 + `ImageStore::reset()`，下一帧按新内容重新探测——被替换的图按新头信息排版，被删掉的图不再产锚点（重建是重新读盘的**硬重置**；同一会话内的文件重写由 app lane 的**新鲜度检查**覆盖，见 [`tui-images.md`](tui-images.md) 第四节）。`rendering.images = off` / 终端无图形协议 / 探测失败 → 不建 store、不读盘，渲染层拿到的是共享的 `ImageOpts::off()`，逐 cell 等于今天的链接路径。
+**元数据表怎么前进（app lane 的接线 + 新鲜度检查）**：每个 cell 在算出线条时把链接目标过一遍 `resolve_image_path`（与产锚点同一个纯函数）得到候选路径，app 的 lane（`app/images/mod.rs`）对候选调 `ImageStore::meta` 探测头信息并填表。表的生命周期有两条规则：**一个内容代内只增不减**（锚点会吃掉链接 span，缩表会让锚点在链接路径之间振荡）；**内容重建**（会话切换 / 压缩重同步 / rewind / `/clear`，即 `ChatView::structure_epoch` 变化）则整表清空 + `ImageStore::reset()`，下一帧按新内容重新探测——被替换的图按新头信息排版，被删掉的图不再产锚点（重建是重新读盘的**硬重置**；同一会话内的文件重写由 app lane 的**新鲜度检查**覆盖，见 [`tui-images.md`](tui-images.md) 第四节）。`rendering.images = off` / 终端无图形协议 / 探测失败 → 不建 store、不读盘，渲染层拿到的是共享的 `ImageOpts::off()`，逐 cell 等于今天的链接路径。
 
 ### 真机验收（有 TTY 的终端）
 

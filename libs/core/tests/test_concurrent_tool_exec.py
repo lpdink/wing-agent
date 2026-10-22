@@ -15,18 +15,10 @@ from typing import Any
 
 import pytest
 
-from wing.event_bus import event_bus
-from wing.schema import Tool, ToolCall, ToolParam
+from _support import make_tool
+from wing.schema import ToolCall
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """每个测试前后清理全局 EventBus。"""
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -35,16 +27,6 @@ def runtime():
     from wing.runtime import WingRuntime
 
     return WingRuntime()
-
-
-def _make_tool(name: str, fn) -> Tool:
-    """创建一个最小化的 Tool 对象。"""
-    return Tool(
-        name=name,
-        description=f"Test tool: {name}",
-        params=[ToolParam(name="input", type="string", description="input")],
-        function=fn,
-    )
 
 
 def _make_tool_call(tool_id: str, name: str, arguments: dict | None = None) -> ToolCall:
@@ -75,9 +57,9 @@ class TestConcurrentExecution:
             return "result-c"
 
         agent._executor._tools = {
-            "SlowA": _make_tool("SlowA", slow_tool_a),
-            "SlowB": _make_tool("SlowB", slow_tool_b),
-            "SlowC": _make_tool("SlowC", slow_tool_c),
+            "SlowA": make_tool("SlowA", slow_tool_a),
+            "SlowB": make_tool("SlowB", slow_tool_b),
+            "SlowC": make_tool("SlowC", slow_tool_c),
         }
 
         tool_calls = [
@@ -122,8 +104,8 @@ class TestResultOrderPreservation:
             return "fast-result"
 
         agent._executor._tools = {
-            "Slow": _make_tool("Slow", slow_tool),
-            "Fast": _make_tool("Fast", fast_tool),
+            "Slow": make_tool("Slow", slow_tool),
+            "Fast": make_tool("Fast", fast_tool),
         }
 
         # Slow 在前，Fast 在后；Fast 会先完成
@@ -165,8 +147,8 @@ class TestErrorIsolation:
             raise RuntimeError("boom")
 
         agent._executor._tools = {
-            "Good": _make_tool("Good", good_tool),
-            "Bad": _make_tool("Bad", bad_tool),
+            "Good": make_tool("Good", good_tool),
+            "Bad": make_tool("Bad", bad_tool),
         }
 
         tool_calls = [
@@ -200,7 +182,7 @@ class TestErrorIsolation:
             return "good-result"
 
         agent._executor._tools = {
-            "Good": _make_tool("Good", good_tool),
+            "Good": make_tool("Good", good_tool),
         }
 
         tool_calls = [
@@ -233,7 +215,7 @@ class TestSingleToolCall:
             return f"echo: {input}"
 
         agent._executor._tools = {
-            "Simple": _make_tool("Simple", simple_tool),
+            "Simple": make_tool("Simple", simple_tool),
         }
 
         tool_calls = [_make_tool_call("call-1", "Simple", {"input": "hello"})]

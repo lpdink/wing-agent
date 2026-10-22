@@ -24,8 +24,8 @@ def runtime():
 
 
 @pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    """隔离 EventBus——每个测试独立收集事件。"""
+def collect_event_bus():
+    """隔离 EventBus 并收集本测试的事件（与 conftest 的 `cleanup_event_bus` 不同义）。"""
     # 先清理所有之前的订阅
     event_bus._subscribers.clear()
     received: list = []
@@ -68,7 +68,7 @@ class TestRuntimeUpdateSessionEvents:
 
     @pytest.mark.asyncio
     async def test_update_model_emits_event_with_none_for_unchanged_fields(
-        self, runtime, mock_session, cleanup_event_bus
+        self, runtime, mock_session, collect_event_bus
     ):
         """只改 model_id 时，event 中其他字段为 None；三件套与展示名同刻下发。"""
         runtime.sm._sessions["test-session"] = mock_session
@@ -80,7 +80,7 @@ class TestRuntimeUpdateSessionEvents:
         await runtime.update_session("test-session", model_id="gpt-4o-mini")
 
         events = [
-            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+            e for e in collect_event_bus if isinstance(e, SessionStateChangedEvent)
         ]
         assert len(events) == 1
         event = events[0]
@@ -100,7 +100,7 @@ class TestRuntimeUpdateSessionEvents:
 
     @pytest.mark.asyncio
     async def test_update_unchanged_model_fields_do_not_carry_display_name(
-        self, runtime, mock_session, cleanup_event_bus
+        self, runtime, mock_session, collect_event_bus
     ):
         """model 未被触碰时（如只切 thinking）不携带展示名——它与 model 同刻发放。"""
         runtime.sm._sessions["test-session"] = mock_session
@@ -109,7 +109,7 @@ class TestRuntimeUpdateSessionEvents:
         await runtime.update_session("test-session", thinking=True)
 
         events = [
-            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+            e for e in collect_event_bus if isinstance(e, SessionStateChangedEvent)
         ]
         assert len(events) == 1
         assert events[0].model is None
@@ -119,7 +119,7 @@ class TestRuntimeUpdateSessionEvents:
 
     @pytest.mark.asyncio
     async def test_update_without_declared_display_name_sends_none(
-        self, runtime, mock_session, cleanup_event_bus
+        self, runtime, mock_session, collect_event_bus
     ):
         """模型无展示名声明（字符串形态 / 未声明）时下发 None，前端回落调用名。"""
         runtime.sm._sessions["test-session"] = mock_session
@@ -130,7 +130,7 @@ class TestRuntimeUpdateSessionEvents:
         await runtime.update_session("test-session", model_id="plain-model")
 
         events = [
-            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+            e for e in collect_event_bus if isinstance(e, SessionStateChangedEvent)
         ]
         assert len(events) == 1
         assert events[0].model == "plain-model"
@@ -138,7 +138,7 @@ class TestRuntimeUpdateSessionEvents:
 
     @pytest.mark.asyncio
     async def test_update_multi_fields_emits_all_changes(
-        self, runtime, mock_session, cleanup_event_bus
+        self, runtime, mock_session, collect_event_bus
     ):
         """多字段同时更新时 event 携带所有变更字段。"""
         runtime.sm._sessions["test-session"] = mock_session
@@ -165,7 +165,7 @@ class TestRuntimeUpdateSessionEvents:
         )
 
         events = [
-            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+            e for e in collect_event_bus if isinstance(e, SessionStateChangedEvent)
         ]
         assert len(events) == 1
         event = events[0]
@@ -177,7 +177,7 @@ class TestRuntimeUpdateSessionEvents:
 
     @pytest.mark.asyncio
     async def test_update_agent_emits_reset_state_fields(
-        self, runtime, mock_session, cleanup_event_bus
+        self, runtime, mock_session, collect_event_bus
     ):
         """agent 切换后 event 携带 switch_template 重置后的 thinking/reasoning_effort/yolo。
 
@@ -201,7 +201,7 @@ class TestRuntimeUpdateSessionEvents:
         await runtime.update_session("test-session", agent="coder")
 
         events = [
-            e for e in cleanup_event_bus if isinstance(e, SessionStateChangedEvent)
+            e for e in collect_event_bus if isinstance(e, SessionStateChangedEvent)
         ]
         assert len(events) == 1
         event = events[0]
@@ -236,7 +236,7 @@ class TestRuntimeUpdateSessionEvents:
 
     @pytest.mark.asyncio
     async def test_all_events_routed_to_session_subscribers(
-        self, runtime, mock_session, cleanup_event_bus
+        self, runtime, mock_session, collect_event_bus
     ):
         """所有通过 Runtime 发射的事件都经过 EventBus 的 session→client 路由。
 
@@ -247,7 +247,7 @@ class TestRuntimeUpdateSessionEvents:
 
         await runtime.update_session("test-session", model_id="gpt-4o-mini")
 
-        for event in cleanup_event_bus:
+        for event in collect_event_bus:
             if event.target is not None:
                 assert event.target.scope != "global", (
                     f"Event {type(event).__name__} has scope='global' — "

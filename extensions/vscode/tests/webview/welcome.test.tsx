@@ -5,7 +5,7 @@ import { makeEmptySession, makeShellSession, makeWorkingSession } from '../../sr
 import { disposeMounted, mountWebview, pushHydrate, pushState, pushTabs } from './harness';
 
 /**
- * First paint of a new session (step 05).
+ * First paint of a new session.
  *
  * The welcome view is shown for an empty, idle session; the "waiting for the host"
  * line is what a user sees before the first `hydrate`.

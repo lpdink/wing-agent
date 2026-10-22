@@ -26,8 +26,8 @@
 
 硬约束：本包不得 ``import wing``（门禁 ``wing_probe.guard`` 在每次测试运行强制）。
 
-契约：``openspec/changes/wing-probe/design.md``（D1–D12）与
-``specs/probe-harness/spec.md``。
+硬约束之外没有别的进门要求：场景一律经公开 HTTP / WS 观测产品（见
+``docs/dev/probe-testing.md``）。
 """
 
 from wing_probe.driver import (

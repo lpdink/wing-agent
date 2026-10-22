@@ -1,8 +1,8 @@
-"""上下文不变量与红线过渡断言（design D5/D6、spec probe-context-invariants、tasks 5.2/5.3）。
+"""上下文不变量与红线过渡断言。
 
 三层内容：
 
-1. **内置不变量**（每个场景结束由 fixture 自动运行，见 tasks 6.1）：
+1. **内置不变量**：
    :func:`assert_chain_invariants` / :func:`assert_tool_pairing` /
    :func:`assert_no_transient_records`；
 2. **红线过渡断言**（compact / rewind / fork 的前后对账）：
@@ -10,7 +10,7 @@
    :func:`assert_fork_of`；
 3. **metadata 快照**：:func:`fork_metadata`（``metadata.json`` 独立解析 + 必需字段）。
 
-口径（用户决策，design D5）：只保 ``history`` 链上的**上下文事实**——链拓扑、
+口径：只保 ``history`` 链上的**上下文事实**——链拓扑、
 记录配对、瞬态记录不落盘；**不做**"全事件类型 × persist 布尔矩阵"对账（二批）。
 
 比较口径的**事实依据**（读产品源码确认，不在本包 import）：
@@ -88,7 +88,7 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = DELTA_EVENT_TYPES | frozenset(
     }
 )
 
-#: fork 的 metadata 快照必需字段（spec「fork 断言」：缺一项即失败）。
+#: fork 的 metadata 快照必需字段。
 #:
 #: ``model_id`` / ``model_name`` / ``provider_name`` 是模型的**身份三元组**
 #: （引用词 + 运行期事实快照）：fork 快照必须一次写全，resume 才不丢身份。
@@ -155,7 +155,7 @@ def _record_ref(
 
 
 def assert_chain_invariants(view: HistoryView) -> None:
-    """链拓扑不变量（tasks 5.2）。
+    """链拓扑不变量。
 
     断言（全部在**记录集**范围内，不止活跃链）：
 
@@ -333,7 +333,7 @@ def _arguments_problems(
 def assert_tool_pairing(
     view: HistoryView, *, allow_arguments_error: bool = False
 ) -> None:
-    """活跃链上的 tool 配对不变量（tasks 5.2）。
+    """活跃链上的 tool 配对不变量。
 
     断言：每个 ``assistant.tool_calls`` 的 call_id 都被**其后**的 tool 消息配对；
     没有孤儿 tool 消息（``tool_call_id`` 无前序 assistant tool_call）；没有重复
@@ -447,7 +447,7 @@ def assert_tool_pairing(
 def assert_no_transient_records(
     view: HistoryView, *, types: Sequence[str] | None = None
 ) -> None:
-    """流式 delta / 瞬态事件不得出现在 ``history.jsonl``（tasks 5.2）。
+    """流式 delta / 瞬态事件不得出现在 ``history.jsonl``。
 
     ``types`` 默认 :data:`TRANSIENT_EVENT_TYPES`（产品 ``persist=False`` 全集的
     超集，含 spec 最低要求的 ``text`` / ``reasoning`` / ``tool_call_stream``）。
@@ -663,7 +663,7 @@ def assert_compact_transition(
     compact_uuid: str | None = None,
     allow_trailing: bool = False,
 ) -> dict[str, Any]:
-    """compact 前后链形状对账（spec「compact 过渡断言」、tasks 5.3）。
+    """compact 前后链形状对账。
 
     断言（``after`` 须是 compact 完成后、后续演进前的快照）：
 
@@ -954,7 +954,7 @@ def assert_rewind_transition(
     *,
     allow_trailing: bool = False,
 ) -> dict[str, Any]:
-    """rewind 前后链形状对账（spec「rewind 过渡断言」、tasks 5.3）。
+    """rewind 前后链形状对账。
 
     断言（``after`` 须是 rewind 完成后、后续演进前的快照）：
 
@@ -1273,7 +1273,7 @@ def assert_fork_of(
     snapshot_fields: Sequence[str] = FORK_SNAPSHOT_FIELDS,
     allow_trailing: bool = False,
 ) -> dict[str, Any]:
-    """fork 的记录前缀与 metadata 快照对账（spec「fork 断言」、tasks 5.3）。
+    """fork 的记录前缀与 metadata 快照对账。
 
     断言（``child`` 须是 fork 之后、子 session 后续演进之前的快照）：
 

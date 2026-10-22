@@ -9,8 +9,7 @@
  * the `message` event never fires, and the tab keeps an empty transcript until the
  * next client write. A raw Python client and an uncompressed handshake both
  * receive the very same frames immediately, so the payload and the gateway are
- * fine; the stall is in the client's WS stack. See `06_integration/design.md`
- * ("发现的问题" F5) for the measurements.
+ * fine; the stall is in the client's WS stack.
  *
  * The smoke must be deterministic and it drives the real host from Node, so it
  * removes the variable: this relay rewrites the client's upgrade request and drops

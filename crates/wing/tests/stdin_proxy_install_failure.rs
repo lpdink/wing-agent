@@ -12,6 +12,10 @@
 
 use std::os::fd::RawFd;
 
+mod common;
+
+use common::pty::{make_raw, openpty_pair, write_all};
+
 /// 让 `tracing::warn!` 的参数真正求值：没有订阅者时宏连参数都不碰（callsite 的 interest
 /// 缓存会是 never），日志行不会被覆盖到。
 fn warn_args_evaluated() -> tracing::subscriber::DefaultGuard {
@@ -23,37 +27,6 @@ fn warn_args_evaluated() -> tracing::subscriber::DefaultGuard {
     tracing::callsite::rebuild_interest_cache();
     guard
 }
-
-fn openpty_pair() -> (RawFd, RawFd) {
-    let mut master: RawFd = -1;
-    let mut slave: RawFd = -1;
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-    (master, slave)
-}
-
-fn make_raw(fd: RawFd) {
-    unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        assert_eq!(libc::tcgetattr(fd, &mut term), 0);
-        libc::cfmakeraw(&mut term);
-        assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &term), 0);
-    }
-}
-
-fn write_all(fd: RawFd, bytes: &[u8]) {
-    let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
-    assert_eq!(n as usize, bytes.len(), "pty write");
-}
-
 #[test]
 fn install_degrades_and_rolls_back_when_the_fd_table_is_tight() {
     // 这条 warn 的格式参数只有在订阅者启用 WARN 时才会被求值（覆盖也要）。

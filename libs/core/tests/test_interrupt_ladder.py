@@ -33,19 +33,13 @@ from typing import Any
 
 import pytest
 
+from _support import wait_until_async
 from wing.agent import WingAgent
 from wing.agent.core import _INTERRUPT_WAIT_SECONDS, _worker_frames
 from wing.event import NoticeEvent
 from wing.event_bus import event_bus
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus() -> Iterator[None]:
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture()
@@ -70,14 +64,6 @@ def _shrink_ladder(monkeypatch: pytest.MonkeyPatch, *, wait: float = 0.05) -> No
     import wing.agent.core as core
 
     monkeypatch.setattr(core, "_INTERRUPT_WAIT_SECONDS", wait)
-
-
-async def _wait_until(pred: Any, timeout: float = 5.0) -> None:
-    async def _inner() -> None:
-        while not pred():
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(_inner(), timeout)
 
 
 async def _suspended_frames(coro: Any) -> str:
@@ -201,7 +187,7 @@ class TestCancelLadder:
             raise RuntimeError("worker crashed")
 
         dead = await _replace_worker(agent, boom())
-        await _wait_until(dead.done)
+        await wait_until_async(dead.done)
 
         await asyncio.wait_for(agent.interrupt(), timeout=5.0)
 
@@ -289,7 +275,7 @@ class TestCancelLadder:
         await agent.post("stale backlog before interrupt", request_id="req-stale")
         queued = asyncio.create_task(agent.interrupt())
         # 等入口清理真正发生（积压消失）——不赌固定时长，负载下不竞态。
-        await _wait_until(lambda: not agent._inbox.has_pending)
+        await wait_until_async(lambda: not agent._inbox.has_pending)
         await agent.post("correction sent during lock wait", request_id="req-live")
         agent._interrupt_lock.release()
         dropped = await asyncio.wait_for(queued, timeout=5.0)
@@ -386,7 +372,7 @@ class TestCancelLadder:
         await asyncio.wait_for(agent.interrupt(), timeout=5.0)
         assert agent._worker is stubborn  # 先保留（绝不重建第二个）
 
-        await _wait_until(lambda: agent._worker is not stubborn, timeout=3.0)
+        await wait_until_async(lambda: agent._worker is not stubborn, timeout=3.0)
         assert stubborn.done()
         assert not agent._worker.done()
         await agent.shutdown()
@@ -419,7 +405,7 @@ class TestCancelLadder:
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2.0)
 
         assert not worker.done()  # 尚未死：保留 + 续期已登记
-        await _wait_until(lambda: agent._worker is not worker, timeout=3.0)
+        await wait_until_async(lambda: agent._worker is not worker, timeout=3.0)
         assert not agent._worker.done()
         await agent.shutdown()
 

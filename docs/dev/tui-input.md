@@ -47,7 +47,7 @@
 
 ## 自动跟随契约
 
-「底部跟随新内容 / 滚动离开底部后不被拉回 / 回到最底部重新武装跟随」由 `ChatView` 的滚动方法统一承载，所有滚动入口（滚轮、键盘、`jump_*`）共用同一状态，细节与 Scenario 见 openspec change `revert-alternate-scroll` 的 `tui-scroll-follow` spec。
+「底部跟随新内容 / 滚动离开底部后不被拉回 / 回到最底部重新武装跟随」由 `ChatView` 的滚动方法（`ui/chat_view/viewport.rs`）统一承载，所有滚动入口（滚轮、键盘、`jump_*`）共用同一状态；三条规则各有一组 `ui/chat_view/viewport.rs` 的模块内单测钉住。
 
 ## 应用内文本选择（`tui-text-selection`）
 

@@ -1,4 +1,4 @@
-"""会话句柄与 driver（tasks 4.3）——驱动网关的"假用户"。
+"""会话句柄与 driver——驱动网关的"假用户"。
 
 ``Driver`` 是连接 + 会话工厂，``Session`` 是一个会话的操作面：
 
@@ -135,7 +135,7 @@ class Session:
     def history(self) -> HistoryView:
         """本地 history 视图。
 
-        **每次访问都重新解析 ``history.jsonl``**（design D6 的"操作前后两个视图"
+        **每次访问都重新解析 ``history.jsonl``**（"操作前后两个视图"
         就是这么用的：``before = s.history; await op(); after = s.history``）。
         """
         return _load_history_view(self.session_dir)
@@ -444,7 +444,7 @@ class Driver:
             return existing
         session = Session(self, session_id, response=response, workspace=workspace)
         # 失败报告末行引用现场转储路径（转储本身由 ``probe.dump()`` / fixture
-        # teardown 落到同一目录，见 design D8）——断言超时时不必重跑即可取现场。
+        # teardown 落到同一目录）——断言超时时不必重跑即可取现场。
         session.watch.dump_path = str(self.env.artifacts_path)
         # 先注册路由再订阅：subscribe 会触发 sync_session 重放，事件不能丢。
         self._sessions[session_id] = session

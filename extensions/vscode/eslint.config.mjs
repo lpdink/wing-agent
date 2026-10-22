@@ -5,7 +5,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 /**
- * Layering rules — mechanism #2 of three (see design.md D2).
+ * Layering rules — mechanism #2 of three.
  *
  * This catches the common violations while you type. The complete matrix (import
  * graph over every file, dynamic `import()`, `require`, node builtins,

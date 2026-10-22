@@ -1,4 +1,4 @@
-"""WS 错误帧的关联上下文（02 message_chain 返修 S1）。
+"""WS 错误帧的关联上下文。
 
 被守的契约（`gateway/routes/ws.py`）：
 
@@ -21,8 +21,9 @@ import pytest
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from _support import gateway_auth_config
 from wing.common.utils import InvalidInputError
-from wing.config import ApiKeyEntry, AuthConfig
+from wing.config import ApiKeyEntry
 
 SESSION = "20250101-000000-abcdef01"
 REQUEST = "req-correlated"
@@ -37,14 +38,6 @@ GHOST: dict[str, Any] = {
 }
 
 
-def _mock_config() -> MagicMock:
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(
-        enabled=False, keys=[ApiKeyEntry(key="k", role="admin")]
-    )
-    return config
-
-
 def _make_server() -> Any:
     """造一个 GatewayServer（WingRuntime / load_config 都 mock 掉）。"""
     with (
@@ -52,7 +45,9 @@ def _make_server() -> Any:
         patch("wing.gateway.server.load_config") as mock_load_config,
     ):
         MockRuntime.return_value = MagicMock()
-        mock_load_config.return_value = _mock_config()
+        mock_load_config.return_value = gateway_auth_config(
+            keys=[ApiKeyEntry(key="k", role="admin")]
+        )
         from wing.gateway.server import GatewayServer
 
         return GatewayServer()

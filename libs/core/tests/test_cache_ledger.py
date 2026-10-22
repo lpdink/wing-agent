@@ -2,7 +2,8 @@
 
 覆盖步骤任务书 `01_backend` 的 12 条必须测试，外加三条实现级契约：直播字段与
 账本记录同源（contract §5）、压缩调用同样进账本（§8.8）、`src` 元信息在加载期
-采集（热路径不扫目录）。口径唯一来源是 `../contract.md`——任何断言都不该比它更宽。
+采集（热路径不扫目录）。口径唯一来源是代码（`context/cache_ledger.py` + `schema/cache.py`）
+与 `docs/dev/cache-accounting.md`——任何断言都不该比它更宽。
 """
 
 from __future__ import annotations

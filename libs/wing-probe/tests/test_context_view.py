@@ -1,7 +1,7 @@
-"""ContextView 规范化与断言行为（tasks 3.7）。
+"""ContextView 规范化与断言行为。
 
 构造请求体 → 断言规范化结果；断言失败必须能定位（消息下标 + call_id）。
-另覆盖请求留档的按 model / 序号检索（tasks 3.4）。
+另覆盖请求留档的按 model / 序号检索。
 """
 
 import json

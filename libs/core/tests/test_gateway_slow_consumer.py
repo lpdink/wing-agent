@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,7 +23,9 @@ import pytest
 from fastapi import WebSocket
 from fastapi.testclient import TestClient
 
-from wing.config import ApiKeyEntry, AuthConfig
+from _support import wait_until_sync
+from _support import gateway_auth_config
+from wing.config import ApiKeyEntry
 from wing.event import EventTarget, NoticeEvent
 from wing.event_bus import event_bus
 
@@ -42,15 +43,6 @@ def _as_ws(obj: object) -> WebSocket:
     return cast("WebSocket", obj)
 
 
-def _mock_config() -> MagicMock:
-    """接住 `load_config()`：鉴权关闭（与既有 gateway 测试同款）。"""
-    config = MagicMock()
-    config.gateway.auth = AuthConfig(
-        enabled=False, keys=[ApiKeyEntry(key="k", role="admin")]
-    )
-    return config
-
-
 def _make_server() -> GatewayServer:
     """造一个 GatewayServer（WingRuntime / load_config 都 mock 掉）。"""
     with (
@@ -61,7 +53,9 @@ def _make_server() -> GatewayServer:
         # lifespan shutdown 会 await 唤醒调度循环的收尾
         runtime.wake.stop = AsyncMock()
         MockRuntime.return_value = runtime
-        mock_load_config.return_value = _mock_config()
+        mock_load_config.return_value = gateway_auth_config(
+            keys=[ApiKeyEntry(key="k", role="admin")]
+        )
         from wing.gateway.server import GatewayServer
 
         return GatewayServer()
@@ -247,15 +241,6 @@ class TestSlowConsumerRecycle:
 # ============================================================
 
 
-def _wait_until(predicate, timeout: float = 3.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
-
-
 @pytest.fixture
 def ws_server():
     """TestClient + 真实 GatewayServer（含 WS 路由）。"""
@@ -273,7 +258,7 @@ class TestDisconnectStillCleansUp:
             assert client_id in server.clients
             event_bus.route_attach(client_id, SESSION)
         # 上下文退出 = 断连；服务端收尾由 handle_ws 的 finally 完成。
-        assert _wait_until(lambda: client_id not in server.clients), "映射表未清理"
+        assert wait_until_sync(lambda: client_id not in server.clients), "映射表未清理"
         assert client_id not in event_bus.routing_table, "路由表未清理"
         assert all(cid != client_id for cid in server.ws_to_clients.values())
 
@@ -282,7 +267,7 @@ class TestDisconnectStillCleansUp:
         tc, server = ws_server
         with tc.websocket_connect("/ws?client_id=my-host") as ws:
             assert json.loads(ws.receive_text())["client_id"] == "my-host"
-        assert _wait_until(lambda: "my-host" not in server.clients)
+        assert wait_until_sync(lambda: "my-host" not in server.clients)
 
         with tc.websocket_connect("/ws?client_id=my-host") as ws:
             assert json.loads(ws.receive_text())["client_id"] == "my-host"

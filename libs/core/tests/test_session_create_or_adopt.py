@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from _support import seed_messages
 from wing.hooks import hooks
-from wing.schema import Message
 from wing.session import AgentOverride, SessionManager, tool_refs
 from wing.session.override import non_utf8_override_fields
 from wing.session.session import ignored_override_fields
@@ -51,13 +51,6 @@ def _restart(root: Path) -> SessionManager:
     return SessionManager({"file": FileSessionStore(root)})
 
 
-def _seed(session, *contents: str) -> None:
-    """向会话上下文写入消息（不经 LLM）。"""
-    for i, content in enumerate(contents):
-        role = "user" if i % 2 == 0 else "assistant"
-        session.context_manager.add_message(Message(role=role, content=content))
-
-
 def _roles(session) -> list[str]:
     return [m.role for m in session.context_manager.get_context_window()]
 
@@ -82,7 +75,7 @@ class TestCreateWithRequestedId:
     async def test_id_is_exact_and_lands_on_disk(self, sm: SessionManager, root: Path):
         session = sm.create_session(session_id=CUSTOM_ID)
         assert session.session_id == CUSTOM_ID
-        _seed(session, "hello")
+        seed_messages(session, "hello")
         assert (root / CUSTOM_ID / "history.jsonl").exists()
         assert [s.id for s in sm.list_sessions()] == [CUSTOM_ID]
 
@@ -121,7 +114,7 @@ class TestCreateWithRequestedId:
         session = sm.create_session(session_id=CUSTOM_ID, tags=["favorite"])
         assert session.session_id == CUSTOM_ID
         assert session.tags == ["favorite"]
-        _seed(session, "hi")
+        seed_messages(session, "hi")
         assert len(_history_lines(root, CUSTOM_ID)) == 1
 
     @pytest.mark.asyncio
@@ -164,7 +157,7 @@ class TestAdoptExistingSession:
         self, sm: SessionManager, root: Path
     ):
         created = sm.create_session(session_id=CUSTOM_ID)
-        _seed(created, "hello")
+        seed_messages(created, "hello")
 
         adopted = sm.create_session(session_id=CUSTOM_ID)
 
@@ -177,7 +170,7 @@ class TestAdoptExistingSession:
         self, sm: SessionManager, root: Path
     ):
         created = sm.create_session(session_id=CUSTOM_ID)
-        _seed(created, "hello", "world")
+        seed_messages(created, "hello", "world")
 
         restarted = _restart(root)
         adopted = restarted.create_session(session_id=CUSTOM_ID)
@@ -222,7 +215,7 @@ class TestAdoptExistingSession:
     async def test_memory_backend_create_or_adopt(self):
         sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
         created = sm.create_session(session_id=CUSTOM_ID)
-        _seed(created, "hello")
+        seed_messages(created, "hello")
         adopted = sm.create_session(session_id=CUSTOM_ID)
         assert adopted is created
         assert sm.list_sessions()[0].id == CUSTOM_ID
@@ -309,7 +302,7 @@ class TestResumeOverrideSubset:
     @pytest.mark.asyncio
     async def test_applies_to_in_memory_session(self, sm: SessionManager):
         session = sm.create_session()
-        _seed(session, "hello")
+        seed_messages(session, "hello")
 
         resumed = sm.resume_session(
             session.session_id,
@@ -327,7 +320,7 @@ class TestResumeOverrideSubset:
     ):
         session = sm.create_session()
         session_id = session.session_id
-        _seed(session, "hello")
+        seed_messages(session, "hello")
 
         restarted = _restart(root)
         resumed = restarted.resume_session(
@@ -403,7 +396,7 @@ class TestFilesystemAliases:
     @pytest.mark.asyncio
     async def test_case_variant_adopts_the_same_session(self, aliasing: SessionManager):
         created = aliasing.create_session(session_id="Team-A", tags=["x"])
-        _seed(created, "from A")
+        seed_messages(created, "from A")
         adopted = aliasing.create_session(session_id="team-a", tags=["y"])
 
         assert adopted is created
@@ -417,7 +410,7 @@ class TestFilesystemAliases:
         store = _CaseInsensitiveFileStore(tmp_path / "sessions")
         first = SessionManager({"file": store})
         created = first.create_session(session_id="Team-A", tags=["x"])
-        _seed(created, "hello")
+        seed_messages(created, "hello")
 
         restarted = SessionManager({"file": store})
         resumed = restarted.resume_session("team-a")
@@ -434,7 +427,7 @@ class TestFilesystemAliases:
         b = aliasing.create_session(session_id="team-a", tags=["y"])
         c = aliasing.create_session(session_id="TEAM-a", tags=["z"])
         assert a is b is c
-        _seed(a, "only")
+        seed_messages(a, "only")
         assert len(_history_lines(root, "Team-A")) == 1
 
     @pytest.mark.asyncio
@@ -451,7 +444,7 @@ class TestFilesystemAliases:
         b = aliasing.create_session(session_id="team-e")
         assert a is b
         assert list(aliasing._sessions) == ["Team-E"]
-        _seed(a, "single writer")
+        seed_messages(a, "single writer")
         assert len(_history_lines(root, "Team-E")) == 1
 
     @pytest.mark.asyncio
@@ -781,7 +774,7 @@ class TestParentSessionId:
         ] == ("root-a")
 
         # 新进程等价物：同一存储根、内存归零——resume 读回同一个事实。
-        _seed(session, "child work")
+        seed_messages(session, "child work")
         reloaded = _restart(root).resume_session(session.session_id)
         assert reloaded.parent_session_id == "root-a"
 
@@ -814,7 +807,7 @@ class TestParentSessionId:
     ):
         """磁盘收养（真会话、换进程）忽略请求里的 parent：不改写、留 warning。"""
         first = sm.create_session(session_id=CUSTOM_ID)
-        _seed(first, "hello")
+        seed_messages(first, "hello")
 
         adopted = _restart(root).create_session(
             session_id=CUSTOM_ID, parent_session_id="wannabe-parent"
@@ -835,11 +828,11 @@ class TestParentSessionId:
     ):
         """`list_sessions(parent=...)` = 直接子（不含父自己、不含孙辈）。"""
         top = sm.create_session(session_id="root-a")
-        _seed(top, "root")
+        seed_messages(top, "root")
         child = sm.create_session(session_id="child-b", parent_session_id="root-a")
-        _seed(child, "child")
+        seed_messages(child, "child")
         grand = sm.create_session(session_id="grand-c", parent_session_id="child-b")
-        _seed(grand, "grand")
+        seed_messages(grand, "grand")
 
         assert [s.id for s in sm.list_sessions(parent="root-a")] == ["child-b"]
         assert [s.id for s in sm.list_sessions(parent="child-b")] == ["grand-c"]

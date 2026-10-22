@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
+from _support import seed_messages
 from wing.config import ModelCapabilities, ModelSpec
 from wing.event import SessionInitEvent, SessionStateChangedEvent, SyncSessionEvent
 from wing.event_bus import event_bus
-from wing.schema import Message
 from wing.session import AgentTemplate, AgentOverride, SessionManager
 from wing.store import FileSessionStore, SessionMetadata
 
@@ -76,13 +76,6 @@ def _restart(root: Path) -> SessionManager:
     return SessionManager({"file": FileSessionStore(root)})
 
 
-def _seed(session, *contents: str) -> None:
-    """向 session 的上下文写入消息（不经 LLM）。"""
-    for i, content in enumerate(contents):
-        role = "user" if i % 2 == 0 else "assistant"
-        session.context_manager.add_message(Message(role=role, content=content))
-
-
 def _metadata(root: Path, sid: str) -> SessionMetadata:
     loaded = FileSessionStore(root).load_metadata(sid)
     assert loaded is not None, f"metadata not found for {sid}"
@@ -115,12 +108,14 @@ class TestExplicitSwitchPersists:
         assert restored.model_id == "qwen3-max"
 
     @pytest.mark.asyncio
-    async def test_switch_within_provider_keeps_provider(self, sm, root, _mock_config):
+    async def test_switch_within_provider_keeps_provider(
+        self, sm, root, _isolate_config
+    ):
         session = sm.create_session()
         sid = session.session_id
         provider_name = session.agent.model_provider.name
 
-        _mock_config.providers[0].models = ["gpt-4", "gpt-4.1"]
+        _isolate_config.providers[0].models = ["gpt-4", "gpt-4.1"]
         await session.update_state(model_id="gpt-4.1")
 
         meta = _metadata(root, sid)
@@ -192,7 +187,7 @@ class TestForkSnapshot:
     async def test_fork_after_switch_records_source_model(self, sm, root):
         source = sm.create_session()
         await source.update_state(model_id="qwen3-max")
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
         child, _ = sm.fork_session(source.session_id, target)
@@ -212,7 +207,7 @@ class TestForkSnapshot:
     @pytest.mark.asyncio
     async def test_fork_without_switch_snapshots_effective_model(self, sm, root):
         source = sm.create_session()
-        _seed(source, "hello", "question")
+        seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
         child, _ = sm.fork_session(source.session_id, target)
@@ -253,18 +248,19 @@ class TestDegradation:
 
     @pytest.mark.asyncio
     async def test_undeclared_snapshot_restores_with_warning(
-        self, sm, root, wing_logs, _mock_config
+        self, sm, root, wing_logs, _isolate_config
     ):
         """provider 在、快照调用名不在其声明内：仍然还原（反查补不到 id），只打 warning。"""
         # 目录声明必须仍然覆盖模板引用的 model id（否则模板解析就该失败）
-        _mock_config.providers[0].models = ["gpt-4", "only-this-model"]
+        _isolate_config.providers[0].models = ["gpt-4", "only-this-model"]
 
         session = sm.create_session()
         sid = session.session_id
         session.store.save_metadata(
             sid,
             SessionMetadata(
-                model_name="not-in-list", provider_name=_mock_config.providers[0].name
+                model_name="not-in-list",
+                provider_name=_isolate_config.providers[0].name,
             ),
         )
 
@@ -276,10 +272,10 @@ class TestDegradation:
 
     @pytest.mark.asyncio
     async def test_object_declared_model_restores_without_warning(
-        self, sm, root, wing_logs, _mock_config
+        self, sm, root, wing_logs, _isolate_config
     ):
         """对象形态声明（id 缺省 = name）：按 id 切换 → 重启后 id 命中，不告警。"""
-        _mock_config.providers[0].models = [
+        _isolate_config.providers[0].models = [
             ModelSpec(name="gpt-4"),
             ModelSpec(
                 name="obj-model",
@@ -302,10 +298,10 @@ class TestDegradation:
 
     @pytest.mark.asyncio
     async def test_object_declared_model_not_in_list_restores_with_warning(
-        self, sm, root, wing_logs, _mock_config
+        self, sm, root, wing_logs, _isolate_config
     ):
         """对象形态声明被删（id 未命中、快照调用名也不在声明内）：仍只 warning 不阻断。"""
-        _mock_config.providers[0].models = [
+        _isolate_config.providers[0].models = [
             ModelSpec(name="gpt-4"),
             ModelSpec(name="obj-model"),
         ]
@@ -315,7 +311,7 @@ class TestDegradation:
         await session.update_state(model_id="obj-model")
 
         # 模型被移出声明（id 与调用名同时消失）：快照兜底 + warning
-        _mock_config.providers[0].models = [ModelSpec(name="gpt-4")]
+        _isolate_config.providers[0].models = [ModelSpec(name="gpt-4")]
 
         restored = _restart(root).resume_session(sid)
 
@@ -368,7 +364,7 @@ class TestCompatibility:
         template_model = sm.template_manager.default.model
         session = sm.create_session()
         sid = session.session_id
-        _seed(session, "hello")
+        seed_messages(session, "hello")
 
         # 模拟模型字段引入前写下的 metadata
         (root / sid / "metadata.json").write_text(

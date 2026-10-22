@@ -1,4 +1,4 @@
-"""compact 红线场景（tasks 6.5–6.8，spec probe-scenarios「Requirement: compact 红线场景」）。
+"""compact 红线场景。
 
 覆盖的断言点：
 
@@ -42,7 +42,7 @@ INSTRUCTION_MODEL = "probe/compact-with-instruction"
 PLAIN_MODEL = "probe/compact-without-instruction"
 FAILURE_MODEL = "probe/compact-failure"
 
-#: 结构锚点：格式约束段的起点（``<summary>`` 标签契约，spec 也在用它）。
+#: 结构锚点：格式约束段的起点（``<summary>`` 标签契约，格式约束段也依赖它）。
 FORMAT_ANCHOR = "Wrap your summary in <summary></summary> tags."
 #: 结构锚点：格式约束的末位 recency 段。
 CRITICAL_ANCHOR = "## CRITICAL"

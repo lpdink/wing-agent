@@ -218,7 +218,7 @@ describe('chunk reassembly — malformed envelopes fail safe', () => {
     );
   });
 
-  it('rejects a reassembled payload that is a malformed *known* type (review r1 N1)', () => {
+  it('rejects a reassembled payload that is a malformed *known* type', () => {
     // `chunk.rs` parses the joined payload as a WingEvent: a known type whose
     // payload does not decode is an error there, and the correct recovery is a
     // reconnect + resync (a degraded `sync_session` replay would be silently

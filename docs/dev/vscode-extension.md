@@ -86,7 +86,7 @@ extensions/vscode/
 
 ### 2.3 层门禁为什么是「三套机制」
 
-单靠一套都拦不住，这是被 01 的评审逐条确认过的结构：
+单靠一套都拦不住：
 
 1. **分 tsconfig 的 `lib`/`types`**（`tsconfig.node.json` 无 DOM、`tsconfig.webview.json` 无
    node/vscode）——写 `document`/`process` 直接编译错误。它管「用了什么全局」。
@@ -102,7 +102,7 @@ extensions/vscode/
 
 ## 3. 冻结的裁定（改之前先想清楚）
 
-这些是 03（宿主）与 05（外壳）并行开发出冲突后、由调度者写进 `interfaces.md` 并**双方强制遵守**
+这些是宿主与外壳并行开发出冲突后冻结下来、**双方强制遵守**
 的裁定，落到本仓库的代码里。不是风格问题——每一条都对应一类曾经真实出现过的 bug。
 
 ### 3.1 宿主是 UI 模型的唯一权威；重放 == 直播
@@ -112,7 +112,7 @@ extensions/vscode/
   （局部 JSON 解析在宿主 `src/host/session/partial-json.ts`）。
 - 网关的 `sync_session` 重放与 live 事件走**同一条归约路径**（`reducer.ts` 的 `applySync` /
   `applyLive` 共享同一套模型变更），这是「重放路径 vs 活跃路径渲染不一致」一类 bug 的结构性
-  解药（R1 返修记录里叫 S1「重放 ≠ 直播」，缺一个 ReAct separator 就会分叉）。
+  解药是「重放 ≠ 直播」：缺一个 ReAct separator 就会分叉。
 - 「在不在跑」由快照的 `status` 回答（idle / working / waiting），**不由内容反推**：一轮 LLM
   调用在飞行（首帧未到、轮边界）时 uncommitted 投影为空而 turn 仍在 working——按内容推断会把
   它读成 idle（Tab 不转、耗时不计，live 事件却照常渲染）。`status` 必填且严格：CLI 与网关同
@@ -283,23 +283,23 @@ WS 帧
   每次重发整段 transcript。
 - **长文本**：单条 `append_text` 超过上限（`MAX_PATCH_TEXT_CHUNK`）时拆成多条 patch，保证单帧
   不失控。
-- **流式工具参数（评审 #109 [P1-2]）**：provider 每个 SSE chunk 发一片 `tool_call_stream`，一片
+- **流式工具参数**：provider 每个 SSE chunk 发一片 `tool_call_stream`，一片
   一次全量重解析 + 全量回灌是 O(n²)。宿主把累积文本放在 `SessionRecord.toolArgsStream`
   （host-only，不进桥），**渲染预算**内才更新 cell：首片 / `is_final` / 累积 ≤512 字符（普通调用
   行为不变）/ 距上次 ≥100ms / 新增 ≥2048 字符 / 距上次 ≥32 片。跨桥的 `argsText` 另有
   `TOOL_ARGS_MAX_CHARS = 8000` 传输上限——它只是**预览**，权威的完整参数由最终 `tool_call`
   （parsed `args`）给出，展开卡片优先用后者。跳过某片时宿主模型同样不更新（mirror == host 的
   不变量因此仍然成立）。
-- **diff 计算闸（评审 #109 [P1-1]）**：后端对 `Write` 发**全量** old/new 文本，Myers 的 trace 是
+- **diff 计算闸**：后端对 `Write` 发**全量** old/new 文本，Myers 的 trace 是
   `D × 2(N+M)`（3000 行整体重写实测 ~340MB，6000 行 ~1.19GB）。`lineDiff` 在裁剪公共前后缀之后按
   `DIFF_MAX_EDIT_LINES = 4000` 设闸，超限退化为「整块 del + 整块 add」（UI 只展示 800 行，看不出
   区别）；`DIFF_MAX_ROWS = 800` 依旧只管传输窗口——两者独立，别只依赖后者（它的位置在计算之后）。
-- **toast 与会话快照的生命周期（评审 #109 [P2-4]）**：`MAX_TOASTS = 5`，每条按 level 超时自动
+- **toast 与会话快照的生命周期**：`MAX_TOASTS = 5`，每条按 level 超时自动
   `dismissToast`（`TOAST_TIMEOUT_MS`：info 4s / warning 8s / error 20s，另有手动关闭按钮）；
   `applyTabs` 顺手回收不在 tabs 里的 `sessions[id]` 快照（`retainContextWhenHidden` 下这是随窗口
   线性增长的泄漏）。两种到达顺序（`adopt()` 的 hydrate→tabs、`onReady()` 的 tabs→hydrate）都不会
   误裁活着的会话。
-- **草稿的一次性令牌（评审 #109 [P2-5]）**：`state.draft` 的采纳判据是宿主单调递增的 `draftSeq`
+- **草稿的一次性令牌**：`state.draft` 的采纳判据是宿主单调递增的 `draftSeq`
   （不再是「值相等」——同一段文本连续两次发送失败时第二次会被吞掉）。网关未连接时 `sendMessage`
   的早退路径把文本回填（`SessionRecord.setDraft` + `state`），composer 的乐观清空不再是丢输入的
   窗口。`replyAsk` 不需要回填：ask cell 仍是 `awaiting`，用户可以再点一次。
@@ -360,7 +360,7 @@ webview 意图（`src/shared/bridge.ts` 的 `WebviewToHostMessage`，全部有�
 
 | 产物 | 工具 | 特点 |
 |---|---|---|
-| `out/extension.js`（扩展宿主） | esbuild（`esbuild.mjs`） | CJS、`target: node20`（VS Code 1.100 = Electron 34 / Node 20.19）、`external: vscode`、sourcemap、**不 minify**（宿主日志可读性 > 几 KB）。`ws` 作为 devDependency 被 bundle 进来，作为「宿主没有全局 `WebSocket`（Node 20 就是这样）」的回落实现（评审 #109 [P1-3]；`src/core/transport/socket.ts` 的惰性 `require`） |
+| `out/extension.js`（扩展宿主） | esbuild（`esbuild.mjs`） | CJS、`target: node20`（VS Code 1.100 = Electron 34 / Node 20.19）、`external: vscode`、sourcemap、**不 minify**（宿主日志可读性 > 几 KB）。`ws` 作为 devDependency 被 bundle 进来，作为「宿主没有全局 `WebSocket`（Node 20 就是这样）」的回落实现（`src/core/transport/socket.ts` 的惰性 `require`） |
 | `dist/webview/{main.js,main.css}` | Vite lib 模式（`vite.config.mts`） | 单 IIFE、**无动态 chunk**、无第三方 origin、无运行期 `fetch`；`main.js` 文件名是宿主契约的一部分 |
 | `out/smoke/smoke.mjs` | esbuild（`esbuild.smoke.mjs`） | smoke 的开发工具产物（不进 `.vsix`） |
 
@@ -419,7 +419,7 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 - **降级只有一档**：任何一种"不能显示"（被拒绝、还没答复、`<img>` 加载失败）都退回今天的行为——
   指向源地址的链接（alt 兜底、点击交给编辑器），不会有空框。
 - `localResourceRoots` = 扩展根 + `workspaceFolders[0]`（多根窗口也只给第一个，与 `openFile` 的
-  `resolvePath` 同口径）。**运行期新增/移除第一个 workspace 文件夹后它不会重算**（review #135 [N2] 登记）：
+  `resolvePath` 同口径）。**运行期新增/移除第一个 workspace 文件夹后它不会重算**：
   webview 的资源根与 `resolveImages` 用的 `root` 都在 `resolveWebviewView` 时一起定格，此后新根之外的
   图片仍按旧根解析 → 退回链接，直到视图重建（切换容器 / 重载窗口）；重载窗口一次即恢复。
   `webview.options` 是文档级设置，按帧重算等于把 workspace 状态放进渲染路径，故不修。
@@ -432,12 +432,12 @@ TypeScript 与源码，看不到 bundler 实际吐出的字节。这个测试：
 1. **`$…$` 采用 pulldown 口径**（与 TUI 侧一致）：开定界符后不能是空白、闭定界符前不能是空白。
    因此 `$100 and $200` 是正文，但**散文里成对的 `$` 仍可能被当成公式**，例如
    `set $PATH=$HOME` 会渲染出公式 `PATH=`、`Ranges 1..$n and 2..$m` 会渲染出 `n and 2..`。
-   想避免就把 `$` 转义成 `\$`（`\$` 在公式内外都是字面美元号）。必要时也可以整体关掉这条渲染
-   （回退方案见 design.md「变更说明」）。
+   想避免就把 `$` 转义成 `\$`（`\$` 在公式内外都是字面美元号）。扩展侧没有 math 开关
+   （`contributes.configuration` 只有连接相关的 `wing.*`）：要整体关掉只能改渲染器默认值。
 2. **`\(…\)` / `\[…\]` / 裸 AMS 环境会被当作公式**：这两种形态今天分别渲染成 `(x)`（反斜杠被
    markdown 转义吃掉）与 `[x]`；本渲染器把它们当 LaTeX 定界符，**既有文档的显示会变化**。
 
-#### 与 TUI 侧（步骤 02）的识别口径对齐
+#### 与 TUI 侧的识别口径对齐
 
 TUI 的公式接线是**权威口径**：`crates/wing/src/render/markdown/math.rs` +
 `docs/dev/tui-rendering.md` §2.5（含「定界符归一化清单」）。本 lane 已逐条对齐；两条管线只是
@@ -459,7 +459,7 @@ webview 用规则**就地识别、不改输入**（未识别的 span 就是普�
 `\(` / `\[` / 裸环境的候选搜索按**每个 inline 块**计费 1 MiB，块规则的闭合行走按**每个文档**计费
 1 MiB，超预算后新候选不再识别（退回文本，内容不丢）；`\(…\)` / `\[…\]` 的窗口是 8192 个
 code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x` × 20k 与 `\[` 每行 × 10k 这类 04 基线上
-的平方级输入从 1.3–1.4 s 降到 5–8 ms（数字与命令见任务 `08_vscode_alignment/design.md`）。
+的平方级输入从 1.3–1.4 s 降到 5–8 ms。
 
 **裸环境白名单**（与 TUI 的 `MATH_ENVS` 同一张表；每项接受末尾 `*`）：
 `align` `aligned` `alignat` `alignedat` `flalign` `split` `eqnarray` `gather` `multline` `center`
@@ -473,7 +473,7 @@ code unit，闭定界符必须完整落在窗口内。三条都实测过：`\(x`
 | 行内公式宽度 | TUI 有「渲染结果宽于可用宽度就退回源码」的闸（网格需要宽度预算）；webview 交给 CSS 折行，宽度不影响识别 |
 | 降级时的定界符 | TUI 对 `\(x\)` 的降级显示 `$x$`（源已被归一化改写）；webview 显示作者实际写的 `\(x\)` |
 | HTML 块内的其它 markdown | TUI 整块字面量；webview 仍按 markdown 解析（`**bold**` 是粗体，`\(x\)` 经转义显示成 `(x)`），只保证不识别数学——`html: false` 是既有语义（与 VS Code 自带 chat 渲染器同选项），本改动不扩大 |
-| 行内 HTML 里的裸 URL / 散文里的裸 URL | webview 的 `linkify` 会把 `<a href="http://x/">` 里的 URL 变成链接（**既有行为**，本步骤未改）；散文里的裸 URL 更是会被整个吃成链接文本，URL 里写的 `\(…\)` 因此不是公式（例：`see https://example.com/a\(b\) now` → 链接文本含字面 `\(`），而 TUI 的归一化先把 `\(b\)` 改写成 `$b$`、链接被 `$` 截断并渲染出公式 `b`。数学识别两边都不进入 URL/destination，属 linkify 边界差异（review r2 [N4] 登记） |
+| 行内 HTML 里的裸 URL / 散文里的裸 URL | webview 的 `linkify` 会把 `<a href="http://x/">` 里的 URL 变成链接（**既有行为**，本步骤未改）；散文里的裸 URL 更是会被整个吃成链接文本，URL 里写的 `\(…\)` 因此不是公式（例：`see https://example.com/a\(b\) now` → 链接文本含字面 `\(`），而 TUI 的归一化先把 `\(b\)` 改写成 `$b$`、链接被 `$` 截断并渲染出公式 `b`。数学识别两边都不进入 URL/destination，属 linkify 边界差异 |
 | HTML 起始行夹在 `$$…$$` 内部（`$$\n<div>\n$$`） | TUI 的 pulldown 让 HTML 块打断公式（整段字面量）；webview 把该行当公式内容（KaTeX 拒绝 → 逐字显示同样的源码），其后同段落里的公式仍会识别。内容不丢，仅识别范围不同 |
 | 渲染器覆盖面 | 引擎不同（wing_math vs KaTeX）：同一公式可能一边渲染、一边回退源码（例：TUI 引擎不渲染某些 `cases`，KaTeX 不渲染行内 `align`） |
 | 退化 `$` 串 | `$a$$$b$` 这类没有真实用法的输入，pulldown 的分隔符栈与「左到右扫描」可能给出不同切分；两边都不丢内容 |
@@ -534,7 +534,7 @@ Node smoke 进程
   `WING_SMOKE_AUTH_KEY`（生成的 config.yaml 打开 auth 且宿主带 `Authorization: Bearer`——
   12 个场景因此覆盖真实鉴权中间件的 HTTP + WS 两条路径；默认不设＝无鉴权）、
   `WING_SMOKE_WS_FALLBACK`（启动前删掉宿主进程的全局 `WebSocket`，12 个场景全部走 bundle 进来的
-  `ws` 回落实现——复现 VS Code 1.100 / Node 20.19 宿主的唯一现实手段，见评审 #109 [P1-3]）、
+  `ws` 回落实现——复现 VS Code 1.100 / Node 20.19 宿主的唯一现实手段，见 `src/core/transport/socket.ts`）、
   `WING_SMOKE_ROOT`、`WING_SMOKE_GATEWAY_PORT`。
 
 12 个场景：`create-subscribe-send-stream`、`tool-call-diff`、`ask-round-trip`、
@@ -644,7 +644,7 @@ pnpm exec vsce ls       # 核对进包清单
 | 加一种 cell 类型 | `src/shared/cells.ts`（联合）→ 宿主 `reducer.ts`/`derive.ts`（怎么产生）→ `src/webview/chat/Cells.tsx` + `CellView.tsx`（怎么画）→ `applyPatch.ts` 若引入新 op |
 | 加一个 webview 意图 | `src/shared/bridge.ts`（消息联合）→ `src/webview/app/Composer.tsx` 或对应组件（发出）→ `src/host/session/manager.ts`（处理）→ 两侧各自的测试 |
 | 加一个本地命令 | `src/shared/commands.ts`（名字与 kind）+ 宿主 `runPromptCommand` 分支 + `tests/shared/commands.test.ts`（命令表被测试钉死） |
-| 改桥协议 / 面板字段 | `src/shared/bridge.ts`/`session.ts` + `tests/shared/contract.test.ts`，两侧同步——`interfaces.md` 的教训：单侧私改必冲突 |
+| 改桥协议 / 面板字段 | `src/shared/bridge.ts`/`session.ts` + `tests/shared/contract.test.ts`，两侧同步——单侧私改必冲突 |
 | 调视觉 | `src/webview/styles/tokens.css`（先溯源到本机 VS Code 源码再改；硬编码颜色会被门禁拒绝） |
 | 改公式的定界符/语法 | **先读 §8.5 的两张表**（识别口径以 TUI 侧为准）；实现都在 `src/webview/chat/markdown/parse.ts`（`math_inline` / `math_block` 两条规则 + 不透明区守卫），测试在 `tests/webview/{markdown,math}.test.tsx`；权威口径的实现在 TUI 侧 `crates/wing/src/render/markdown/math.rs`（只读参考） |
 | 改图片的可加载范围 | `src/host/images.ts`（策略）+ `src/host/chatViewProvider.ts`（`localResourceRoots`）+ 两侧测试 |

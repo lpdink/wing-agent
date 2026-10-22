@@ -21,12 +21,16 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
+
+mod common;
+
+use common::e2e::{read_request, start_fake_gateway};
 
 const SESSION_ID: &str = "20260101-000000-resident";
 
@@ -111,16 +115,6 @@ impl FakeGateway {
 // ============================================================
 // 假网关：HTTP/1.1 + WS 升级
 // ============================================================
-
-async fn serve(listener: TcpListener, gateway: Arc<FakeGateway>) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        tokio::spawn(handle_conn(stream, Arc::clone(&gateway)));
-    }
-}
-
 async fn handle_conn(mut stream: TcpStream, gateway: Arc<FakeGateway>) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -431,41 +425,6 @@ fn tool_result_turn_event() -> Value {
         "request_id": "fake",
     })
 }
-
-// ============================================================
-// HTTP/1.1 解析（与 wait_fail_fast_e2e 同一实现）
-// ============================================================
-
-/// Read one HTTP request head (+ body) from `stream`, buffering leftovers.
-async fn read_request(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<(String, Vec<u8>)> {
-    loop {
-        if let Some(pos) = find(buf, b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
-            let content_length = header_value(&head, "content-length")
-                .and_then(|v| v.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let body_start = pos + 4;
-            if buf.len() >= body_start + content_length {
-                let body = buf[body_start..body_start + content_length].to_vec();
-                buf.drain(..body_start + content_length);
-                return Some((head, body));
-            }
-        }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 /// Case-insensitive header lookup over the raw request head.
 fn header_value(head: &str, name: &str) -> Option<String> {
     head.lines().skip(1).find_map(|line| {
@@ -479,38 +438,6 @@ fn header_value(head: &str, name: &str) -> Option<String> {
 // ============================================================
 // 测试 harness
 // ============================================================
-
-fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wing-e2e-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("core")).unwrap();
-    dir
-}
-
-/// 起假网关，并把一个全新 `$WING_HOME` 指向它。
-async fn start_gateway(scenario: Scenario, tag: &str) -> (PathBuf, Arc<FakeGateway>, u16) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let (notify_tx, notify_rx) = mpsc::unbounded_channel();
-    let gateway = Arc::new(FakeGateway {
-        scenario,
-        sends: Mutex::new(Vec::new()),
-        interrupts: AtomicUsize::new(0),
-        notify: Mutex::new(Some(notify_tx)),
-        events: Mutex::new(Some(notify_rx)),
-    });
-    tokio::spawn(serve(listener, Arc::clone(&gateway)));
-
-    let home = scratch_home(tag);
-    std::fs::write(
-        home.join("core").join("config.yaml"),
-        format!("gateway:\n  host: 127.0.0.1\n  port: {port}\n"),
-    )
-    .unwrap();
-    (home, gateway, port)
-}
-
 /// 被测进程（真实 `wing` 二进制，常驻 stdio 形态）。
 struct WingProcess {
     child: tokio::process::Child,
@@ -696,7 +623,21 @@ fn cleanup(home: &PathBuf) {
 // 测试
 // ============================================================
 
-/// a) + b) 多轮：两条 result 依次到达、之间进程不退出；EOF 后退出码 = 0。
+/// Bind a port, publish it in a scratch `WING_HOME`, serve `scenario` there.
+async fn start_gateway(scenario: Scenario, tag: &str) -> (PathBuf, Arc<FakeGateway>, u16) {
+    let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+    let gateway = Arc::new(FakeGateway {
+        scenario,
+        sends: Mutex::new(Vec::new()),
+        interrupts: AtomicUsize::new(0),
+        notify: Mutex::new(Some(notify_tx)),
+        events: Mutex::new(Some(notify_rx)),
+    });
+    let (home, port) = start_fake_gateway("wing-e2e", tag, Arc::clone(&gateway), handle_conn).await;
+    (home, gateway, port)
+}
+
+/// 多轮：两条 result 依次到达、之间进程不退出；EOF 后退出码 = 0。
 #[tokio::test]
 async fn resident_serves_multiple_turns_and_exits_on_eof() {
     let (home, gateway, _port) = start_gateway(Scenario::Turns, "resident-turns").await;

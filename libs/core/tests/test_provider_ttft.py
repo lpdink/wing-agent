@@ -23,10 +23,10 @@ import json
 
 import pytest
 
+from _support import anthropic_provider, openai_provider
 import wing.provider.anthropic.provider as anthropic_provider_module
 import wing.provider.anthropic.stream as anthropic_stream_module
 import wing.provider.openai.provider as openai_provider_module
-from wing.config import ProviderConfig
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.openai.provider import OpenAICompatProvider
 
@@ -102,7 +102,10 @@ async def _install(
 
 
 def _openai_sse(chunks: list[tuple[float, dict]]) -> list[tuple[float, str]]:
-    """OpenAI 帧序：(帧前延迟, chunk) → SSE 行。"""
+    """OpenAI 帧序：(帧前延迟, chunk) → SSE 行。
+
+    带帧前延迟，故不复用 `_support.openai_sse`（那里只有纯字符串，没有时刻）。
+    """
     lines: list[tuple[float, str]] = []
     for delay, chunk in chunks:
         lines.append((delay, f"data: {json.dumps(chunk)}"))
@@ -119,28 +122,6 @@ def _anthropic_sse(events: list[tuple[float, dict]]) -> list[tuple[float, str]]:
         lines.append((0.0, f"data: {json.dumps(event)}"))
         lines.append((0.0, ""))
     return lines
-
-
-def _openai_provider() -> OpenAICompatProvider:
-    return OpenAICompatProvider(
-        ProviderConfig(
-            name="test-openai-ttft",
-            protocol="openai",
-            base_url="https://api.example.com",
-            api_key="sk-test",
-        )
-    )
-
-
-def _anthropic_provider() -> AnthropicProvider:
-    return AnthropicProvider(
-        ProviderConfig(
-            name="test-anthropic-ttft",
-            protocol="anthropic",
-            base_url="https://api.anthropic.com",
-            api_key="sk-test",
-        )
-    )
 
 
 # ─── OpenAI-compat ──────────────────────────────────────────────
@@ -161,7 +142,7 @@ class TestOpenAITtft:
                 },
             ),
         ]
-        p = _openai_provider()
+        p = openai_provider("test-openai-ttft")
         await _install(p, _openai_sse(chunks), clock)
         acc = p.create_accumulator()
 
@@ -185,7 +166,7 @@ class TestOpenAITtft:
                 {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 0}},
             ),
         ]
-        p = _openai_provider()
+        p = openai_provider("test-openai-ttft")
         await _install(p, _openai_sse(chunks), clock)
 
         token_usage = None
@@ -235,7 +216,7 @@ class TestAnthropicTtft:
             ),
             (0.0, {"type": "message_stop"}),
         ]
-        p = _anthropic_provider()
+        p = anthropic_provider("test-anthropic-ttft")
         await _install(p, _anthropic_sse(events), clock)
 
         delta_usage = None
@@ -277,7 +258,7 @@ class TestAnthropicTtft:
             ),
             (0.0, {"type": "message_stop"}),
         ]
-        p = _anthropic_provider()
+        p = anthropic_provider("test-anthropic-ttft")
         await _install(p, _anthropic_sse(events), clock)
 
         final_usage = None
@@ -301,7 +282,7 @@ class TestAnthropicTtft:
             ),
             (0.0, {"type": "message_stop"}),
         ]
-        p = _anthropic_provider()
+        p = anthropic_provider("test-anthropic-ttft")
         await _install(p, _anthropic_sse(events), clock)
 
         final_usage = None

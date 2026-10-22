@@ -19,6 +19,9 @@
 
 规则一览（细节与例外见 docs/dev/backend-layout.md）
 ---------------------------------------------------
+
+测试名 ``test_r<n>_…`` 与文档里的规则编号 ``R<n>`` 一一对应。
+
 R1 传输隔离：L0–L3 / root 不得 import ``wing.gateway.*``（runtime/background 例外）。
 R2 工具不越层：``tools`` 不得 import gateway/runtime/background/session/context/store；
    agent 侧只允许 ``wing.agent`` 包根的**窄接口符号**（ToolContext / current_tool_call_id）

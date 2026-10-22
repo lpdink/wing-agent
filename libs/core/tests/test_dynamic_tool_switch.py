@@ -14,18 +14,11 @@ from __future__ import annotations
 
 import pytest
 
-from wing.event_bus import event_bus
-from wing.schema import Message, Tool, ToolParam
+from _support import make_tool
+from wing.schema import Message, Tool
 from wing.tool_registry import tool_registry
 
-
-@pytest.fixture(autouse=True)
-def cleanup_event_bus():
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
-    yield
-    event_bus._subscribers.clear()
-    event_bus._routing.clear()
+pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
 @pytest.fixture
@@ -36,14 +29,8 @@ def runtime():
 
 
 def _make_tool(name: str, namespace: str = "default") -> Tool:
-    """创建最小化 Tool 并注册到 registry。"""
-    return Tool(
-        name=name,
-        namespace=namespace,
-        description=f"Test tool: {name}",
-        params=[ToolParam(name="input", type="string", description="input")],
-        function=lambda _input="": f"{name}-result",
-    )
+    """创建最小化 Tool（function 回显工具名）。"""
+    return make_tool(name, lambda _input="": f"{name}-result", namespace=namespace)
 
 
 @pytest.fixture

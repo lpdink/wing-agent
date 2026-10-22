@@ -1,7 +1,7 @@
-"""history.jsonl 独立解析视图（design D2/D6、tasks 5.1）。
+"""history.jsonl 独立解析视图。
 
 **独立实现**：本模块不 import ``wing`` —— 落盘格式只被当作"外来生产者的产物"
-手写解析（design D2 的独立性判据）。被解析的格式（只读参考：
+手写解析。被解析的格式（只读参考：
 
 ``libs/core/wing/store/file.py`` / ``wing/chain.py``）：
 

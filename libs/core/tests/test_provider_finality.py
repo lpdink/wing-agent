@@ -12,10 +12,10 @@
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
+from _support import openai_sse
 from wing.provider.anthropic.provider import AnthropicProvider
 from wing.provider.anthropic.stream import _StreamState
 from wing.provider.openai.provider import OpenAICompatProvider
@@ -185,21 +185,11 @@ class _FakeStreamClient:
         return _FakeStreamResponse(self._lines)
 
 
-def _openai_sse(chunks: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for chunk in chunks:
-        lines.append(f"data: {json.dumps(chunk)}")
-        lines.append("")
-    lines.append("data: [DONE]")
-    lines.append("")
-    return lines
-
-
 def _openai_stream_provider(chunks: list[dict]) -> OpenAICompatProvider:
     """只装配 `_generate_stream` 需要的属性（不走 __init__：无 config / http）。"""
     provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
     provider.timeout_first_chunk = 30.0
-    provider._client = _FakeStreamClient(_openai_sse(chunks))
+    provider._client = _FakeStreamClient(openai_sse(chunks))
     return provider
 
 

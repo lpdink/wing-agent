@@ -8,7 +8,7 @@ import type { Plugin } from 'vite';
  * `vite.config.mts`). The webview is Chromium, which never fetches the woff or
  * truetype copies — they are ~1.0 MB of the shipped stylesheet. Dropping them
  * leaves the woff2 data URIs (still needed: the CSP's `font-src … data:` exists for
- * exactly that) and cuts `main.css` from 1.5 MB to 414 kB (measured; see `design.md` §Bundle).
+ * exactly that) and cuts `main.css` from 1.5 MB to 414 kB (measured).
  *
  * Runs as a `pre` transform on the stylesheet *source* (`url(fonts/…)` is still
  * unresolved at that point), so the bundler never processes the dead assets at all.

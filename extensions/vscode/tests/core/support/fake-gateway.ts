@@ -82,7 +82,7 @@ export class FakeSocket implements SocketLike {
 export class FakeGateway {
   readonly sockets: FakeSocket[] = [];
   readonly urls: string[] = [];
-  /** Third argument of every `factory` call (handshake headers; review #109 [P3-6]). */
+  /** Third argument of every `factory` call (handshake headers). */
   readonly options: (SocketOpenOptions | undefined)[] = [];
   /** When true (default) every new socket sends its handshake on a microtask. */
   autoHandshake = true;
