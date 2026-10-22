@@ -583,10 +583,13 @@ pub(crate) fn handle_end_tag(tag: TagEnd, ctx: &mut MarkdownContext<'_>) {
                 if !table.current_row.is_empty() {
                     table.rows.push(std::mem::take(&mut table.current_row));
                 }
+                // The cell ink is the **enclosing voice** (a quoted table's
+                // cells are quote-coloured, like the prose around them), so the
+                // header band's prose test compares against that, not the body.
                 let rendered = render_table(
                     &table,
                     ctx.theme.border,
-                    ctx.base_style,
+                    ctx.current_style(),
                     ctx.theme.marker,
                     ctx.available_width,
                 );

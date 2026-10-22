@@ -836,6 +836,41 @@ mod tests {
         assert_eq!(body.1.fg, Some(palette.text));
     }
 
+    /// A table inside a quote is quoted all the way through: its cells take the
+    /// quote hue (like the prose around it) and the header band still finds them
+    /// to be prose — it inks the **enclosing voice**, not the body colour.
+    #[test]
+    fn a_quoted_table_is_quoted_through_its_cells() {
+        let palette = dp();
+        let segments: Vec<(String, Style)> = render_markdown_lines(
+            "> text\n>\n> | Slot | Role |\n> |---|---|\n> | a | b |\n",
+            None,
+            &palette,
+        )
+        .into_iter()
+        .flat_map(|line| line.segments)
+        .map(|seg| (seg.text, seg.style))
+        .collect();
+        let header = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "Slot")
+            .expect("header cell");
+        assert_eq!(
+            header.1.fg,
+            Some(palette.marker),
+            "the band still inks a quoted table's header"
+        );
+        let body = segments
+            .iter()
+            .find(|(text, _)| text.trim() == "a")
+            .expect("body cell");
+        assert_eq!(
+            body.1.fg,
+            Some(palette.quote),
+            "body cells read as the quoted voice"
+        );
+    }
+
     /// A role inside a header cell keeps its hue (only the weight is added) —
     /// the band inks prose, not literals.
     #[test]

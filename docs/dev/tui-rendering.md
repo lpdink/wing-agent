@@ -175,7 +175,9 @@ markdown 的每个元素**归属一个角色**，角色决定色相；同一角�
 1. **reasoning 不吃掉角色**：`thinking_segment_style` 只把 `SegmentKind::Text` 换成 `thinking` 前景；标题 / 引文 / 列表符 / 代码 / 链接 / 公式 / 图片 caption 保留自己的色相（否则 reasoning 里的结构信息全糊成一片灰）。
 2. **强调不许重绘角色**：`theme.emphasized(current)` 在「当前前景 == `base`（或没有前景）」时给 `strong` 色相，否则只加 `BOLD` —— 标题里的 `**加粗**` 仍是紫色，表头里的 `` `code` `` 仍是玫瑰色。
 
-槽位一共 20 个（`config::slot_doc` 是**唯一**的说明来源：设置面板、`wing config` 与字段文档共用它），`heading_bright` 是唯一仍是派生值的槽。
+槽位一共 20 个（`config::slot_doc` 是**唯一**的说明来源：设置面板与 `wing config` 读它，字段本身不再重复一遍文案），`heading_bright` 是唯一仍是派生值的槽（跟着 **resolved** 的 `heading` 走，提亮方向看 `text`）。
+
+引用里的表格（第四节的既有边界：表格不注入外层前缀）单元格取**引文的色相**——它就在引文里；表头带的判定按外层声音比，所以照样生效。
 
 调色 / 对色**不用起 TUI**：`cargo run -p wing --example theme_preview -- --html /tmp/theme.html`（整条 transcript 的真 cell 画廊，含 markdown 全要素），浏览器里看或截图；`--preset terminal` 对照跟随终端 ANSI 色的形态。新增元素时先回答「它是哪个角色」，再决定是否真要开新槽位——槽位是用户可覆盖的 API，不是调色试验田。
 

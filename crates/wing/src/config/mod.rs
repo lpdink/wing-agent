@@ -124,9 +124,9 @@ impl ColorPreset {
     }
 }
 
-/// What one color slot governs — the text the settings panel and `wing config`
-/// show, written once and re-used as the field's doc (`#[doc = ...]`), so the
-/// panel copy cannot drift from the source.
+/// What one color slot governs — written **once**, here. The settings panel and
+/// `wing config` render this table; [`ColorsConfig`]'s fields deliberately do
+/// not repeat the copy, so there is no second version to drift.
 pub(crate) mod slot_doc {
     pub(crate) const ACCENT: &str = "Brand color: logo, commands, links, popups.";
     pub(crate) const TEXT: &str = "Primary text: messages, model name, input.";
@@ -440,6 +440,17 @@ impl ThemePalette {
     pub fn from_config(cfg: &ColorsConfig) -> Self {
         let base = cfg.preset.base();
         let text = resolve(cfg.text.as_deref(), base.text);
+        let heading = resolve(cfg.heading.as_deref(), base.heading);
+        // The level-1 rung follows the **resolved** heading and the **body's**
+        // direction, so overriding only `text` (the usual light-terminal move)
+        // still deepens H1 instead of paling it. A named heading cannot be
+        // stretched: the preset's own rung stands, unless the user replaced the
+        // heading colour itself.
+        let heading_bright = match heading {
+            Color::Rgb(_, _, _) => stretch(heading, is_light_theme(text)),
+            named if named == base.heading => base.heading_bright,
+            named => named,
+        };
         Self {
             accent: resolve(cfg.accent.as_deref(), base.accent),
             text,
@@ -456,17 +467,8 @@ impl ThemePalette {
             diff_add_bg_strong: resolve(cfg.diff_add_bg_strong.as_deref(), base.diff_add_bg_strong),
             diff_del_bg_strong: resolve(cfg.diff_del_bg_strong.as_deref(), base.diff_del_bg_strong),
             math: resolve(cfg.math.as_deref(), base.math),
-            heading: resolve(cfg.heading.as_deref(), base.heading),
-            // Follows `heading`; the direction follows the body colour, so a
-            // light terminal gets a *deeper* level-1 heading instead of a paler
-            // one (see `stretch`).
-            heading_bright: match cfg.heading.as_deref() {
-                Some(value) => stretch(
-                    parse_color(value).unwrap_or(base.heading),
-                    is_light_theme(text),
-                ),
-                None => base.heading_bright,
-            },
+            heading,
+            heading_bright,
             inline_code: resolve(cfg.inline_code.as_deref(), base.inline_code),
             marker: resolve(cfg.marker.as_deref(), base.marker),
             quote: resolve(cfg.quote.as_deref(), base.quote),
@@ -702,35 +704,49 @@ mod tests {
         assert_ne!(p.strong, p.heading);
     }
 
-    /// `heading_bright` is derived from `heading`, and the derivation follows
-    /// the **terminal direction**: on a dark terminal (light body text) the
-    /// level-1 heading is lifted toward white, on a light terminal (dark body
-    /// text) it is pushed toward black — never the other way round, which would
-    /// make H1 the least readable rung.
+    /// `heading_bright` is derived from the **resolved** heading, and its
+    /// direction follows the **body colour**: on a dark terminal (light body
+    /// text) the level-1 heading is lifted toward white, on a light terminal
+    /// (dark body text) it is pushed toward black — never the other way round,
+    /// which would make H1 the least readable rung.
     #[test]
     fn test_heading_bright_follows_heading_and_the_terminal_direction() {
-        let dark = ThemePalette::default();
         let luma = |c: Color| -> u16 {
             match c {
                 Color::Rgb(r, g, b) => u16::from(r) + u16::from(g) + u16::from(b),
                 other => panic!("expected hex, got {other:?}"),
             }
         };
+        let dark = ThemePalette::default();
         assert!(luma(dark.heading_bright) > luma(dark.heading), "dark: lift");
 
-        let cfg: ColorsConfig =
-            serde_yaml::from_str("text: \"#202020\"\nheading: \"#b49af0\"\n").unwrap();
+        // Overriding only `text` is the usual light-terminal move: the heading
+        // slot is untouched, so the direction has to come from the body colour
+        // alone (the regression this test pins).
+        let cfg: ColorsConfig = serde_yaml::from_str("text: \"#202020\"\n").unwrap();
         let light = ThemePalette::from_config(&cfg);
+        assert_eq!(light.heading, dark.heading, "heading stays the preset's");
         assert!(
             luma(light.heading_bright) < luma(light.heading),
-            "light terminal must deepen H1, not pale it"
+            "a dark body must deepen H1, not pale it"
         );
 
-        // A named heading cannot be stretched: H1 keeps the preset's rung.
+        // A named heading cannot be stretched: the preset's rung stands (so the
+        // terminal preset keeps H1 ≠ H2), and an explicit override falls back to
+        // itself.
+        let cfg: ColorsConfig = serde_yaml::from_str("preset: terminal\n").unwrap();
+        let terminal = ThemePalette::from_config(&cfg);
+        assert_eq!(terminal.heading, Color::Magenta);
+        assert_eq!(terminal.heading_bright, Color::LightMagenta);
         let cfg: ColorsConfig = serde_yaml::from_str("heading: green\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.heading, Color::Green);
         assert_eq!(p.heading_bright, Color::Green);
+        // An invalid value falls back to the preset slot, rung included.
+        let cfg: ColorsConfig = serde_yaml::from_str("heading: neon_pink\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.heading, dark.heading);
+        assert_eq!(p.heading_bright, dark.heading_bright);
     }
 
     /// Every role is a distinct hue, and distinct *perceptually*: roles that
