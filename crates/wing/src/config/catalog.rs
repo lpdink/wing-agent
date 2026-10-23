@@ -453,11 +453,8 @@ fn preset_doc(preset: ColorPreset) -> &'static str {
         ColorPreset::Auto => {
             "跟随终端：启动时探测背景明暗，亮底用 light、暗底用 wing，探测不到用 wing（默认）"
         }
-        ColorPreset::Wing => "为暗底终端设计的 hex 灰阶 + cyan accent",
+        ColorPreset::Dark => "为暗底终端设计的 hex 灰阶 + cyan accent",
         ColorPreset::Light => "为亮底终端设计的同一套色相（白底校准）",
-        ColorPreset::Terminal => {
-            "跟随终端自己的 ANSI 色（高级逃生舱；亮底终端请优先用 auto / light）"
-        }
     }
 }
 
@@ -1116,7 +1113,7 @@ mod tests {
     fn full_sample() -> AppConfig {
         AppConfig {
             colors: ColorsConfig {
-                preset: ColorPreset::Terminal,
+                preset: ColorPreset::Light,
                 accent: Some("#ff00ff".into()),
                 text: Some("#ffffff".into()),
                 thinking: Some("gray".into()),
@@ -1400,11 +1397,7 @@ mod tests {
     fn the_enum_choices_are_lowercase_and_contain_their_defaults() {
         let catalog = interface_catalog();
         let cases: [(&str, &[&str], &str); 4] = [
-            (
-                "colors.preset",
-                &["auto", "wing", "light", "terminal"],
-                "auto",
-            ),
+            ("colors.preset", &["auto", "dark", "light"], "auto"),
             ("rendering.thinking", &["visible", "hidden"], "visible"),
             ("rendering.math", &["text", "off"], "text"),
             ("rendering.images", &["auto", "off"], "auto"),
@@ -1740,15 +1733,15 @@ mod tests {
     #[test]
     fn a_document_written_with_the_lowercase_choice_spellings_round_trips() {
         let doc = json!({
-            "colors": {"preset": "terminal", "accent": "#ff00ff"},
+            "colors": {"preset": "light", "accent": "#ff00ff"},
             "layout": {"max_input_lines": 25},
             "rendering": {"thinking": "hidden", "math": "off", "images": "off"},
         });
         let dumped = dump_config_yaml(&doc, DumpMode::Raw);
-        assert!(dumped.contains("preset: terminal"), "{dumped}");
+        assert!(dumped.contains("preset: light"), "{dumped}");
         assert!(dumped.contains("thinking: hidden"), "{dumped}");
         let parsed = appconfig_from_doc(&doc_from_text(&dumped));
-        assert_eq!(parsed.colors.preset, ColorPreset::Terminal);
+        assert_eq!(parsed.colors.preset, ColorPreset::Light);
         assert_eq!(parsed.rendering.thinking, ThinkingMode::Hidden);
         assert_eq!(parsed.rendering.math, MathMode::Off);
         assert_eq!(parsed.rendering.images, ImagesMode::Off);
@@ -1759,16 +1752,23 @@ mod tests {
             "resolve() 折进了载体字段"
         );
 
-        // `Serialize` 的变体名（`Wing` / `Hidden` / `Off` / `Auto`）也读得回来——这是既有行为，
-        // 也正是"文件里已经写下的值原样输出"能 round-trip 的原因。
+        // `Serialize` 的变体名（`Dark` / `Hidden` / `Off` / `Auto`）也读得回来——这是既有行为，
+        // 也正是"文件里已经写下的值原样输出"能 round-trip 的原因。旧名 `wing` / `terminal`
+        // 仍然可读（分别落到 `dark` / `auto`）。
         let parse = |yaml: &str| -> AppConfig { serde_yaml::from_str(yaml).expect("yaml") };
         assert_eq!(
-            parse("colors:\n  preset: Wing\n").colors.preset,
-            ColorPreset::Wing
+            parse("colors:\n  preset: Dark\n").colors.preset,
+            ColorPreset::Dark
+        );
+        assert_eq!(
+            parse("colors:\n  preset: wing\n").colors.preset,
+            ColorPreset::Dark,
+            "旧名 wing = dark"
         );
         assert_eq!(
             parse("colors:\n  preset: terminal\n").colors.preset,
-            ColorPreset::Terminal
+            ColorPreset::Auto,
+            "已移除的 terminal 回落到 auto"
         );
         assert_eq!(
             parse("rendering:\n  thinking: Visible\n")

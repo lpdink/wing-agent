@@ -36,13 +36,6 @@ impl ToastKind {
     /// appearance: a dark tint on a light terminal would be the one opaque
     /// block on the screen (and its default foreground would vanish into it).
     fn bg_color(self, palette: &ThemePalette) -> Color {
-        // `terminal` hands the background to the terminal; painting a fixed
-        // dark slab would put the terminal's own (dark, on a light scheme)
-        // foreground on it. The preset says so explicitly — not inferred from
-        // a colour slot (a user override must not flip this).
-        if !palette.owns_background {
-            return Color::Reset;
-        }
         match (palette.appearance, self) {
             (crate::config::Appearance::Dark, Self::Info) => Color::Rgb(20, 40, 45),
             (crate::config::Appearance::Dark, Self::Warning) => Color::Rgb(50, 45, 20),
@@ -257,20 +250,6 @@ mod tests {
         assert_eq!(ToastKind::Info.bg_color(&p()), Color::Rgb(20, 40, 45));
         assert_eq!(ToastKind::Warning.bg_color(&p()), Color::Rgb(50, 45, 20));
         assert_eq!(ToastKind::Error.bg_color(&p()), Color::Rgb(50, 20, 20));
-
-        // `terminal` leaves the background to the terminal (Reset), so the
-        // body foreground it inherits is always the readable one.
-        let terminal = crate::config::ThemePalette::from_config_with_appearance(
-            &crate::config::ColorsConfig {
-                preset: crate::config::ColorPreset::Terminal,
-                ..Default::default()
-            },
-            None,
-        );
-        assert!(!terminal.owns_background);
-        for kind in [ToastKind::Info, ToastKind::Warning, ToastKind::Error] {
-            assert_eq!(kind.bg_color(&terminal), Color::Reset);
-        }
 
         // The light palette swaps in light tints (and `text` flips to a dark
         // foreground, so the copy stays readable on them).

@@ -963,16 +963,20 @@ mod tests {
         let mut preset = node("preset", SettingKind::Enum);
         preset.choices = vec![
             SettingChoice {
-                value: "wing".into(),
+                value: "auto".into(),
+                doc: Some("跟随终端".into()),
+            },
+            SettingChoice {
+                value: "dark".into(),
                 doc: Some("品牌配色".into()),
             },
             SettingChoice {
-                value: "terminal".into(),
-                doc: Some("跟随终端".into()),
+                value: "light".into(),
+                doc: Some("亮底配色".into()),
             },
         ];
         preset.has_default = true;
-        preset.default = Some(json!("wing"));
+        preset.default = Some(json!("auto"));
         // 一个可自由输入的自由文本字段（`accent`）：`q` 守卫的测试要一个真编辑器。
         let mut accent = node("accent", SettingKind::Str);
         accent.nullable = true;
@@ -1512,7 +1516,7 @@ mod tests {
     #[tokio::test]
     async fn q_in_an_open_editor_is_typed_not_quit() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("dark"));
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("accent"));
         // 搜索命中 → 回车开编辑器 → 敲 `q` → 回车提交。
@@ -1539,7 +1543,7 @@ mod tests {
     #[tokio::test]
     async fn q_with_choices_open_is_not_quit() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("auto"));
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("preset"));
         // 命中 → 回车退出搜索 → 回车展开选择项 → `q`（不该退出）→ 下移一格选
@@ -1558,14 +1562,14 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Quit), "脚本耗尽 ⇒ 退出");
         let written = backend.written_interface();
         assert_eq!(written.len(), 1, "接口半边写盘了：\n{}", screen(&terminal));
-        assert_eq!(written[0]["colors"]["preset"], "terminal");
+        assert_eq!(written[0]["colors"]["preset"], "dark");
     }
 
     /// 帮助页开着时 `q` 也不该关向导（`?` 打开 → `q` → Esc 返回 → 照常编辑保存）。
     #[tokio::test]
     async fn q_with_help_open_is_not_quit() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("auto"));
         let mut events = vec![key(KeyCode::Char('?'))];
         events.push(key(KeyCode::Char('q')));
         events.push(key(KeyCode::Esc));
@@ -1596,7 +1600,7 @@ mod tests {
     #[tokio::test]
     async fn a_ready_save_keeps_the_interface_failure_in_the_receipt() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("auto"));
         backend.interface_write_fails = true;
         // 两边都弄脏：Interface 半边写盘会失败，Gateway 半边成功且就绪 —— 就绪句
         // 必须把失败带上。
@@ -1643,7 +1647,7 @@ mod tests {
     #[tokio::test]
     async fn a_double_failure_keeps_both_halves_in_the_receipt() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("auto"));
         backend.interface_write_fails = true;
         backend.set = FakeSet::Failed;
         // 先把 Interface 半边弄脏（enum 右切），再把 Gateway 半边弄脏（bool 切换）。
@@ -1683,7 +1687,7 @@ mod tests {
     #[tokio::test]
     async fn interface_preview_applies_during_setup() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("auto"));
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("preset"));
         events.extend([key(KeyCode::Enter), key(KeyCode::Right), ctrl_c(), ctrl_c()]);
@@ -1691,14 +1695,14 @@ mod tests {
         let (outcome, _) = run(&backend, &mut config, events).await;
 
         assert!(matches!(outcome, SetupOutcome::Quit));
-        // enum 右切：`wing` → `terminal`，预览直接写进调用方的 config。
-        assert_eq!(config.colors.preset, ColorPreset::Terminal);
+        // enum 右切：`auto` → `dark`，预览直接写进调用方的 config。
+        assert_eq!(config.colors.preset, ColorPreset::Dark);
     }
 
     #[tokio::test]
     async fn interface_only_save_writes_the_local_file_and_stays() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("wing"));
+        backend.interface = Some(interface_source("auto"));
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("preset"));
         events.extend([
@@ -1717,7 +1721,7 @@ mod tests {
         assert!(screen(&terminal).contains("设置已保存"));
         let written = backend.written_interface();
         assert_eq!(written.len(), 1);
-        assert_eq!(written[0], json!({"colors": {"preset": "terminal"}}));
+        assert_eq!(written[0], json!({"colors": {"preset": "dark"}}));
     }
 
     // ── ⑦ 预检的三种情况分派 ────────────────────────────────────

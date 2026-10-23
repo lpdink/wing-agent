@@ -664,9 +664,9 @@ mod tests {
         );
         // 大小写不敏感 + resolve()
         let cfg = appconfig_from_doc(
-            &json!({"colors": {"preset": "Terminal"}, "rendering": {"math": "Off"}}),
+            &json!({"colors": {"preset": "Dark"}, "rendering": {"math": "Off"}}),
         );
-        assert_eq!(cfg.colors.preset, ColorPreset::Terminal);
+        assert_eq!(cfg.colors.preset, ColorPreset::Dark);
         assert_eq!(
             cfg.colors.math_mode,
             MathMode::Off,

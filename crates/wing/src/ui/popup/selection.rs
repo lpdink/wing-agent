@@ -1193,11 +1193,9 @@ mod tests {
         assert_eq!(buf[(1, 1)].bg, Color::Reset, "未选中行不刷底");
     }
 
-    /// 选中带在另外两套调色板下的语义：`light` 用浅灰卡底（命令名 accent
-    /// 不被抹平）；`terminal` 把背景交给终端（`surface == Reset`）时回退到
-    /// `dim`，否则选中行与未选中行完全一样。
+    /// 选中带在 light 调色板下仍是卡底，命令名 accent 不被抹平。
     #[test]
-    fn the_selected_band_survives_light_and_terminal_palettes() {
+    fn the_selected_band_survives_the_light_palette() {
         let rows = vec![plain_row("alpha", "first")];
         let state = SelectionState::new(rows.len());
         let area = Rect::new(0, 0, 40, 1);
@@ -1215,11 +1213,6 @@ mod tests {
         let (buf, _, _) = render_frame_with(&rows, &state, area, light);
         assert_eq!(buf[(1, 0)].fg, light.accent);
         assert_eq!(buf[(1, 0)].bg, light.surface);
-
-        let terminal = palette_for(crate::config::ColorPreset::Terminal);
-        let (buf, _, _) = render_frame_with(&rows, &state, area, terminal);
-        assert_eq!(buf[(1, 0)].bg, terminal.dim, "terminal: 回退到 dim 带");
-        assert_ne!(buf[(1, 0)].bg, Color::Reset);
     }
 
     /// 一帧里**被选中**（背景 = palette.dim）的那些行文本。
