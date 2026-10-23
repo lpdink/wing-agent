@@ -325,6 +325,7 @@ fn color_code(color: Color, background: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::strip_ansi;
 
     fn opts(width: usize, color: bool) -> PlainOpts {
         PlainOpts {
@@ -485,23 +486,5 @@ mod tests {
     fn no_columns_renders_nothing() {
         let t = table(vec![], vec![]);
         assert!(render(&t, &opts(80, false)).is_empty());
-    }
-
-    /// Strip ANSI SGR sequences (tests only).
-    fn strip_ansi(s: &str) -> String {
-        let mut out = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                out.push(ch);
-            }
-        }
-        out
     }
 }

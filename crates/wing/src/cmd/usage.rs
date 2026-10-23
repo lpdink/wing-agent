@@ -46,19 +46,21 @@ use crate::render::table::plain::PlainTable;
 use crate::shared::session_tree::TreeRow;
 use crate::shared::session_tree::build_forest;
 use crate::util::format;
+use crate::util::format::{NONE_MARK, count, work_time};
 
 use super::common;
 use super::common::TableOutput;
 
 /// `--limit` 的默认值（与端点默认一致）。
-pub const DEFAULT_LIMIT: u32 = 20;
+pub(crate) const DEFAULT_LIMIT: u32 = 20;
 /// `--limit` 的上界（端点契约：1..=200）。
-pub const MAX_LIMIT: u32 = 200;
+pub(crate) const MAX_LIMIT: u32 = 200;
 
-/// 「没有读数」的唯一记号（不写 0：0 是一个读数，`—` 是"没有读数"）。
-pub(crate) const NONE_MARK: &str = "—";
 /// 仪表盘 MODEL 表取前几行（「谁最贵」只需要榜首几名）。
 const DASHBOARD_MODEL_ROWS: u32 = 5;
+/// `--since` / `--until` 的取值域（报错文案与 `--help` 共用同一份说法）。
+const WHEN_FORMS: &str = "all | today | yesterday | <N>d | <N>w | <N>m | <N>y | YYYY-MM-DD";
+
 /// `-w` 的刷新间隔（与 `wing ps -w` 一致）。
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// 仪表盘与表格正文的左侧缩进（热力图/散行文字用；表格自带画框不缩进）。
@@ -93,12 +95,12 @@ async fn run_inner(opts: UsageOpts, json: bool, watch: bool) -> Result<ExitCode>
     let out = TableOutput::detect();
 
     loop {
+        // 每轮先清屏再画（与 `wing ps -w` 同形）：反过来会把刚画出来的帧立刻抹掉。
+        if watch {
+            print!("\x1b[2J\x1b[H");
+        }
         match emit_once(&http, &plan, &palette, &out, json).await {
-            Ok(()) => {
-                if watch {
-                    print!("\x1b[2J\x1b[H");
-                }
-            }
+            Ok(()) => {}
             Err(e) if watch => eprintln!("wing usage error: {e}"),
             Err(e) => return Err(e),
         }
@@ -412,9 +414,7 @@ fn parse_when(raw: &str, today: NaiveDate, field: &str) -> Result<When> {
     let text = raw.trim();
     let lower = text.to_ascii_lowercase();
     let when = match lower.as_str() {
-        "" => anyhow::bail!(
-            "--{field} needs a value: all | today | yesterday | 7d | 4w | 3m | 1y | YYYY-MM-DD"
-        ),
+        "" => anyhow::bail!("--{field} needs a value: {}", WHEN_FORMS),
         "all" => When::All,
         "today" => When::Day(today),
         "yesterday" => When::Day(today - ChronoDuration::days(1)),
@@ -422,10 +422,7 @@ fn parse_when(raw: &str, today: NaiveDate, field: &str) -> Result<When> {
             Ok(day) => When::Day(day),
             Err(_) => match parse_span(&lower) {
                 Some(days) => When::Day(today - ChronoDuration::days(days)),
-                None => anyhow::bail!(
-                    "invalid --{field}: {raw:?} (expect all | today | yesterday | \
-                     7d | 4w | 3m | 1y | YYYY-MM-DD)"
-                ),
+                None => anyhow::bail!("invalid --{field}: {raw:?} (expect {WHEN_FORMS})"),
             },
         },
     };
@@ -460,18 +457,29 @@ async fn render_dashboard(
     palette: &ThemePalette,
     out: &TableOutput,
 ) -> Result<String> {
-    // 三次并发请求：热力图（day）/ 我 vs 我的 AI（origin）/ 谁最贵（model）。
+    // 三次并发请求：热力图（day）/ 我 vs 我的 AI（origin）/ 谁最贵（model，固定前几行）。
     let (day, origin, model) = tokio::join!(
-        fetch(http, plan, Some(Dim::Day), None),
-        fetch(http, plan, Some(Dim::Origin), None),
-        fetch(
-            http,
-            plan,
-            Some(Dim::Model),
-            Some(DASHBOARD_MODEL_ROWS.min(plan.limit.max(DASHBOARD_MODEL_ROWS)))
-        ),
+        query(http, plan, Some(Dim::Day), None),
+        query(http, plan, Some(Dim::Origin), None),
+        query(http, plan, Some(Dim::Model), Some(DASHBOARD_MODEL_ROWS)),
     );
-    format_dashboard(&day?, &origin?, &model?, plan.metric, palette, out)
+    // 三条都失败时只诊断**第一条**：诊断会发一次探测请求，三条各诊断一次没有意义。
+    let mut reports = Vec::with_capacity(3);
+    for (dim, result) in [(Dim::Day, day), (Dim::Origin, origin), (Dim::Model, model)] {
+        let limit = matches!(dim, Dim::Model).then_some(DASHBOARD_MODEL_ROWS);
+        match result {
+            Ok(report) => reports.push(report),
+            Err(error) => return Err(diagnose(http, plan, Some(dim), limit, *error).await),
+        }
+    }
+    format_dashboard(
+        &reports[0],
+        &reports[1],
+        &reports[2],
+        plan.metric,
+        palette,
+        out,
+    )
 }
 
 fn format_dashboard(
@@ -503,17 +511,15 @@ fn format_dashboard(
         ink: out.color.then_some(palette),
     }
     .render();
-    let weeks = heat
-        .columns
-        .max(((until - since).num_days() + 1 + 6) as usize / 7);
 
     let mut out_text = String::new();
+    // 周数说窗口横跨多少周，裁掉时再补一句实际画了几列（两个数字相同就不补）。
     let range_text = format!(
         "{} → {} · {}{}",
         since.format("%Y-%m-%d"),
         until.format("%Y-%m-%d"),
-        weeks_text(heat.columns),
-        if heat.columns < weeks {
+        weeks_text(heat.total),
+        if heat.truncated() {
             format!(" (last {} shown)", heat.columns)
         } else {
             String::new()
@@ -714,14 +720,14 @@ async fn render_detail(
         Dim::Session => http.list_sessions().await.ok(),
         _ => None,
     };
-    format_detail(
+    Ok(format_detail(
         &report,
         dim,
         plan,
         sessions.as_ref().map(|list| list.sessions.as_slice()),
         palette,
         out,
-    )
+    ))
 }
 
 fn format_detail(
@@ -731,58 +737,35 @@ fn format_detail(
     sessions: Option<&[SessionInfo]>,
     palette: &ThemePalette,
     out: &TableOutput,
-) -> Result<String> {
+) -> String {
     let mut text = String::new();
     if let Some(note) = empty_note(report) {
         text.push_str(note);
         text.push('\n');
-        return Ok(text);
+        return text;
     }
 
     let columns = detail_columns(dim);
-    let titles: Vec<Option<&SessionInfo>> = match dim {
-        Dim::Session => ordered_rows(report, plan.tree)
-            .into_iter()
-            .map(|(index, _)| {
-                sessions.and_then(|list| list.iter().find(|s| s.id == report.rows[index].key))
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-    let prefixes: Vec<String> = match dim {
-        Dim::Session => ordered_rows(report, plan.tree)
-            .into_iter()
-            .map(|(_, prefix)| prefix)
-            .collect(),
-        _ => (0..report.rows.len()).map(|_| String::new()).collect(),
-    };
-    let indices: Vec<usize> = match dim {
-        Dim::Session => ordered_rows(report, plan.tree)
-            .into_iter()
-            .map(|(index, _)| index)
-            .collect(),
-        _ => (0..report.rows.len()).collect(),
-    };
-
-    let mut rows: Vec<Vec<PlainCell>> = Vec::with_capacity(indices.len() + 1);
-    for (position, index) in indices.iter().enumerate() {
+    // 行序（`--tree` 时是血缘树序）+ 每行的渲染前缀，只算一次。
+    let order = ordered_rows(report, plan.tree);
+    let mut rows: Vec<Vec<PlainCell>> = Vec::with_capacity(order.len() + 1);
+    for (index, prefix) in &order {
         let row = &report.rows[*index];
-        rows.push(detail_row(
-            dim,
-            row,
-            &prefixes[position],
-            titles.get(position).copied().flatten(),
-            palette,
-        ));
+        let joined = sessions.and_then(|list| list.iter().find(|info| info.id == row.key));
+        rows.push(detail_row(dim, row, prefix, joined, palette));
     }
     rows.push(detail_total(dim, report, palette));
+    debug_assert!(
+        rows.iter().all(|row| row.len() == columns.len()),
+        "每行的格子数必须等于列数（TOTAL 行与数据行同一套列）"
+    );
 
     let table = PlainTable { columns, rows };
     text.push_str(&common::render_table(&table, palette, out));
     if report.truncated {
         text.push_str(&format!("… more {} (raise --limit)\n", dim.as_str()));
     }
-    Ok(text)
+    text
 }
 
 /// 一行明细：键列 + 该维度的独有列 + 三列 token 度量。
@@ -954,11 +937,9 @@ fn detail_columns(dim: Dim) -> Vec<PlainColumn> {
         .iter()
         .enumerate()
         .map(|(index, header)| {
-            let kind = match (*header, index == 0) {
-                (_, false) => ColumnKind::Compact,
-                ("SESSION", true) => ColumnKind::TokenHeavy,
-                ("WORKSPACE", true) | ("AGENT", true) => ColumnKind::TokenHeavy,
-                ("TITLE", true) => ColumnKind::Narrative,
+            let kind = match *header {
+                "TITLE" => ColumnKind::Narrative,
+                "WORKSPACE" => ColumnKind::TokenHeavy,
                 _ => ColumnKind::Compact,
             };
             if index == 0 && dim == Dim::Session {
@@ -999,20 +980,6 @@ fn ordered_rows(report: &UsageResponse, tree: bool) -> Vec<(usize, String)> {
 // 数字记法
 // ============================================================
 
-/// 千分位（`1,181`）：计数列的可扫读性全靠它（`wing info` 的用量块共用）。
-pub(crate) fn count(n: i64) -> String {
-    let negative = n < 0;
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    if negative { format!("-{out}") } else { out }
-}
-
 /// 命中率（`cached / prompt`）整数百分比；没有输入 → `—`（不写 `0%`）。
 fn cache_text(measures: &UsageMeasures) -> String {
     match format::hit_rate(measures.cached_tokens, measures.prompt_tokens) {
@@ -1021,20 +988,9 @@ fn cache_text(measures: &UsageMeasures) -> String {
     }
 }
 
-/// 工时：`20h 00m` / `34m` / `12s`（毫秒进、人类记法出；`wing info` 的用量块共用）。
-pub(crate) fn work_time(ms: i64) -> String {
-    let secs = ms.max(0) / 1_000;
-    let (hours, minutes) = (secs / 3_600, (secs % 3_600) / 60);
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m")
-    } else {
-        format!("{secs}s")
-    }
-}
-
-/// 一次调用的平均耗时：`840ms` / `1.2s` / `2m 05s`；没有调用 → `—`。
+/// 一次调用的平均耗时：`840ms` / `6.8s` / `2m 05s`；没有调用 → `—`。
+///
+/// 秒档保留一位小数：整数除法会把 6.8s 印成 `6s`，而「平均耗时」正是要比较的量。
 fn avg_time(total_ms: i64, calls: i64) -> String {
     if calls <= 0 {
         return NONE_MARK.to_string();
@@ -1042,6 +998,8 @@ fn avg_time(total_ms: i64, calls: i64) -> String {
     let average = total_ms.max(0) / calls;
     if average < 1_000 {
         format!("{average}ms")
+    } else if average < 60_000 {
+        format!("{:.1}s", average as f64 / 1_000.0)
     } else {
         work_time(average)
     }
@@ -1098,6 +1056,14 @@ fn streak_stats(days: &[(NaiveDate, bool)], today: NaiveDate) -> (usize, usize, 
         } else {
             run = 0;
         }
+    }
+    // 窗口没延伸到「昨天」→ 这是一段历史窗口，不存在「当前连续」（否则会把早已中断的
+    // 一段旧连续报成正在进行中）。
+    let historical = days
+        .last()
+        .is_some_and(|(day, _)| (today - *day).num_days() > 1);
+    if historical {
+        return (active_days, 0, longest);
     }
     // 连续活跃：从今天往回数；今天还没干活就从昨天起（今天的格子没填是常态）。
     let mut streak = 0usize;
@@ -1392,22 +1358,15 @@ mod tests {
 
     // ---- 数字记法 ----
 
+    /// 记法本身（千分位 / 工时）在 `util::format` 的单测里；这里只钉用量视图的两处派生值。
     #[test]
-    fn counts_get_thousands_separators_and_dashes_mean_no_reading() {
-        assert_eq!(count(0), "0");
-        assert_eq!(count(999), "999");
-        assert_eq!(count(1_181), "1,181");
-        assert_eq!(count(7_516), "7,516");
-        assert_eq!(count(1_234_567), "1,234,567");
-        assert_eq!(count(-4_200), "-4,200");
+    fn derived_readings_use_a_dash_instead_of_zero() {
         assert_eq!(cache_text(&measures(1_000, 10, 990)), "99%");
         assert_eq!(cache_text(&UsageMeasures::default()), NONE_MARK);
-        assert_eq!(work_time(72_000_000), "20h 00m");
-        assert_eq!(work_time(2_040_000), "34m");
-        assert_eq!(work_time(12_000), "12s");
         assert_eq!(avg_time(0, 0), NONE_MARK);
         assert_eq!(avg_time(1_680, 2), "840ms");
-        assert_eq!(avg_time(2_400, 1), "2s");
+        assert_eq!(avg_time(6_800, 1), "6.8s", "秒档保留一位，不截成 6s");
+        assert_eq!(avg_time(130_000, 1), "2m");
     }
 
     // ---- 连续与活跃 ----
@@ -1638,7 +1597,6 @@ mod tests {
             &ThemePalette::default(),
             &out(),
         )
-        .unwrap()
     }
 
     #[test]
@@ -1745,8 +1703,7 @@ mod tests {
             Some(&sessions),
             &ThemePalette::default(),
             &out(),
-        )
-        .unwrap();
+        );
         assert!(text.contains("the root"), "{text}");
         assert!(text.contains("me"), "{text}");
         assert!(text.contains("agents"), "{text}");
@@ -1761,8 +1718,7 @@ mod tests {
             None,
             &ThemePalette::default(),
             &out(),
-        )
-        .unwrap();
+        );
         assert!(text.contains(NONE_MARK), "{text}");
         assert!(!text.contains("agents"), "{text}");
     }
@@ -1804,8 +1760,7 @@ mod tests {
             None,
             &ThemePalette::default(),
             &out(),
-        )
-        .unwrap();
+        );
         assert!(text.contains("└─ child"), "{text}");
         assert!(
             text.contains("   └─ grandchild"),
@@ -1820,8 +1775,7 @@ mod tests {
             None,
             &ThemePalette::default(),
             &out(),
-        )
-        .unwrap();
+        );
         assert!(!flat.contains("├─"), "{flat}");
     }
 
@@ -1840,8 +1794,7 @@ mod tests {
             None,
             &ThemePalette::default(),
             &out(),
-        )
-        .unwrap();
+        );
         assert!(text.contains("… more model (raise --limit)"), "{text}");
         assert!(!text.contains("0 more"), "不假装知道还剩几行：{text}");
     }

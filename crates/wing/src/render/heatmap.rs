@@ -53,10 +53,19 @@ pub struct Heatmap<'a> {
     pub ink: Option<&'a ThemePalette>,
 }
 
-/// 渲染结果：行 + 实际画出的列数（供调用方注明「只画了最近 N 周」）。
+/// 渲染结果：行 + 画出的列数 + 窗口横跨的列数（后者用来判断有没有裁剪）。
 pub struct HeatmapLines {
     pub lines: Vec<String>,
+    /// 实际画出的列数。
     pub columns: usize,
+    /// 窗口横跨的列数（`columns < total` 即被裁剪）。
+    pub total: usize,
+}
+
+impl HeatmapLines {
+    pub fn truncated(&self) -> bool {
+        self.columns < self.total
+    }
 }
 
 impl Heatmap<'_> {
@@ -106,6 +115,7 @@ impl Heatmap<'_> {
         HeatmapLines {
             lines,
             columns: shown,
+            total,
         }
     }
 
@@ -152,6 +162,9 @@ impl Heatmap<'_> {
         let cells_width = cell_row_width(shown + usize::from(marker));
         let mut row: Vec<char> = vec![' '; self.width.max(GUTTER + cells_width)];
         let mut next_free_slot = 0usize;
+        // 被间距规则挡住的标签**延后**到下一个可用列，而不是丢掉：一个月份的标注机会
+        // 通常只有一次（含它 1 号的那一周），丢掉就等于整月无名。
+        let mut pending: Option<NaiveDate> = None;
         for slot in 0..shown {
             let monday = first_monday + Duration::days(((offset + slot) * 7) as i64);
             // 首列也优先标「这一周里的 1 号」：窗口从月末开始时（`--since 7-31`），
@@ -159,14 +172,22 @@ impl Heatmap<'_> {
             let in_week = (0..7)
                 .map(|day| monday + Duration::days(day))
                 .find(|day| day.day() == 1);
-            let anchor = in_week.or_else(|| (slot == 0).then_some(monday));
-            let Some(anchor) = anchor else { continue };
+            if let Some(anchor) = in_week.or_else(|| (slot == 0).then_some(monday))
+                && pending.is_none()
+            {
+                pending = Some(anchor);
+            }
             if slot < next_free_slot {
                 continue;
             }
+            let Some(anchor) = pending.take() else {
+                continue;
+            };
             let start = GUTTER + cell_offset + slot * 2;
             let label = MONTH_NAMES[anchor.month0() as usize];
             if start + label.chars().count() > row.len() {
+                // 装不下就丢弃（这一列太靠右），但别拖住后面的标签。
+                next_free_slot = slot + 1;
                 continue;
             }
             for (index, ch) in label.chars().enumerate() {
@@ -253,6 +274,9 @@ fn tier_of(value: i64, thresholds: &[i64; 3]) -> usize {
 }
 
 /// 两色之间按 `t`（0..=1）线性混色；任一侧不是 RGB 时退回 `accent`（主题色本身）。
+///
+/// `ui::shimmer::mix` 是同一份线性数学的另一份（依赖方向 `ui → render`，所以那边用不了
+/// 这里）：要合并得把原语下移到 `render`，那之前两处的 doc 互相点名。
 fn mix(surface: Color, accent: Color, t: f64) -> Color {
     let (Some((sr, sg, sb)), Some((ar, ag, ab))) = (rgb(surface), rgb(accent)) else {
         return accent;
@@ -286,6 +310,7 @@ fn join_cells(cells: &[(char, Option<Color>)], color: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::test_support::{strip_ansi, visible_width};
 
     fn date(raw: &str) -> NaiveDate {
         NaiveDate::parse_from_str(raw, "%Y-%m-%d").unwrap()
@@ -358,6 +383,51 @@ mod tests {
         let lines = render("2026-08-03", "2026-10-25", &[(date("2026-08-03"), 1)]);
         assert_eq!(lines.columns, 12);
         assert_eq!(rows(&lines.lines)[0].chars().count(), 12, "周一那行 12 格");
+    }
+
+    /// 月份标被间距规则挡住时要**延后**到下一个可用列，不能整月无名
+    /// （`--since 2026-10-19` 的窗口从十月末开始，十一月那几列必须还有 `Nov`）。
+    #[test]
+    fn a_month_label_blocked_by_the_gap_rule_moves_to_the_next_column() {
+        let lines = render("2026-10-19", "2026-11-30", &[(date("2026-11-03"), 5)]);
+        let month = &lines.lines[0];
+        assert!(month.contains("Oct"), "首列标它所在的月：{month:?}");
+        assert!(month.contains("Nov"), "十一月不能被挤掉：{month:?}");
+        // 两个标签不重叠（起点至少隔两个格子 = 4 列，于是中间至少空一列）。
+        let oct = month.find("Oct").unwrap();
+        let nov = month.find("Nov").unwrap();
+        assert!(nov >= oct + 4, "标签至少隔两个格子：{month:?}");
+    }
+
+    /// 裁剪这件事由渲染结果自己说：`total` 是窗口横跨的列数，`columns` 是画出来的。
+    #[test]
+    fn the_result_reports_both_the_window_span_and_the_drawn_columns() {
+        let long: Vec<(NaiveDate, i64)> = (0..84)
+            .map(|offset| (date("2026-08-03") + Duration::days(offset), 1 + offset % 3))
+            .collect();
+        let narrow = Heatmap {
+            since: date("2026-08-03"),
+            until: date("2026-10-25"),
+            values: &long,
+            width: 27,
+            ink: None,
+        }
+        .render();
+        assert_eq!(narrow.total, 12, "窗口横跨 12 周");
+        assert_eq!(narrow.columns, 10);
+        assert!(narrow.truncated());
+
+        // 宽度够 → 不裁剪。
+        let wide = Heatmap {
+            since: date("2026-08-03"),
+            until: date("2026-10-25"),
+            values: &long,
+            width: 120,
+            ink: None,
+        }
+        .render();
+        assert_eq!(wide.columns, wide.total);
+        assert!(!wide.truncated());
     }
 
     /// 跨年：12 月 29 日那一周跨到 1 月，月份行必须出现两个年份标签而不是一坨。
@@ -460,9 +530,9 @@ mod tests {
         assert!(narrow.lines[1].contains(ELISION), "{:?}", narrow.lines);
         for line in &narrow.lines {
             assert!(
-                unicode_width(line) <= 27,
+                visible_width(line) <= 27,
                 "不越预算: {line:?} ({} > 27)",
-                unicode_width(line)
+                visible_width(line)
             );
         }
     }
@@ -481,7 +551,7 @@ mod tests {
         assert_eq!(lines.columns, 1);
         assert!(!lines.lines[1].contains(ELISION));
         for line in &lines.lines {
-            assert!(unicode_width(line) <= GUTTER + 2, "{line:?}");
+            assert!(visible_width(line) <= GUTTER + 2, "{line:?}");
         }
     }
 
@@ -567,29 +637,5 @@ mod tests {
             mix(Color::Rgb(10, 20, 30), Color::Rgb(10, 20, 30), 1.0),
             Color::Rgb(10, 20, 30)
         );
-    }
-
-    fn unicode_width(text: &str) -> usize {
-        use unicode_width::UnicodeWidthStr;
-        UnicodeWidthStr::width(strip_ansi(text).as_str())
-    }
-
-    /// 去掉 SGR 转义（只用于断言可见宽度与字形）。
-    fn strip_ansi(text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        let mut chars = text.chars();
-        while let Some(ch) = chars.next() {
-            if ch != '\u{1b}' {
-                out.push(ch);
-                continue;
-            }
-            // `\u{1b}[<codes>m`：吞到 `m` 为止。
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
-                }
-            }
-        }
-        out
     }
 }

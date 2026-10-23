@@ -324,10 +324,11 @@ pub enum Command {
     /// the audit flow in `wing.db` (token / call counting starts there — session
     /// counts go further back, and the dashboard says so when that matters).
     Usage {
-        /// Range start: all | today | yesterday | 7d | 4w | 3m | 1y | 2026-10-01.
+        /// Range start: all | today | yesterday | <N>d|<N>w|<N>m|<N>y | 2026-10-01
+        /// (m = 30 days, y = 365 days; relative forms count back from today).
         #[arg(long, value_name = "WHEN", default_value = "12w")]
         since: String,
-        /// Range end, inclusive (same forms as --since).
+        /// Range end, inclusive (same forms as --since, except `all`).
         #[arg(long, value_name = "WHEN", default_value = "today")]
         until: String,
         /// Breakdown dimension: day | model | session | tool | workspace | agent | origin.

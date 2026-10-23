@@ -194,6 +194,11 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 | `origin` 全是 `me` | 子会话创建时没带 `parent_session_id`（软机制，CLI 从 `WING_SESSION_ID` 填）；`SELECT session_id, parent_session_id FROM session_catalog` 里有没有非空 |
 | 端点 404 但会话明明存在 | 404 判据是「目录里没有**且**审计表没有」。本特性之后新建的会话在创建时**同步**写目录行，不会命中这一档；命中的只有**存量**会话里「id 不自带时间戳 + 没有 history + 没有 `last_interaction`」的那批（回填跳过了它们）。`SELECT count(*) FROM session_catalog WHERE session_id = '<id>'` 一看即知 |
 | 与服务端 `info` 的 usage 对不上 | 见 §6 第三行（两条账本，口径不同） |
+| `wing usage` 说 `does not serve /api/usage` | 运行中的网关是本特性之前构建的：`wing stop && wing start` |
+| `wing usage` 的热力图几乎全是 `·`，但明明有会话 | 审计流水从 `wing.db` 建库那天起——看输出的 `token / call audit starts …` 那一行；`--since all` 会拉长窗口但补不出更早的读数 |
+| `wing usage` 的 `TODAY` 行不见了 | 今天在窗口内**且有活动**时才打（全 0 的一天不打一排 0） |
+| `wing usage --by session` 的 TITLE / WHO 是 `—` | 那个会话不在 `/api/session/list` 里（已归档 / 已删除）：id 仍可拷贝，展示素材不猜 |
+| `wing usage --session` 报 `session not found` | 404 = 目录与审计表都没有这个 id；若是老网关（路由都没有），文案会改说 `does not serve /api/usage` |
 
 ## 10. CLI（`wing usage` 与 `wing info` 的用量块）
 
@@ -210,11 +215,14 @@ wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M]
 
 | 参数 | 取值 | 说明 |
 |---|---|---|
-| `--since` | `all` \| `today` \| `yesterday` \| `7d` \| `4w` \| `3m` \| `1y` \| `YYYY-MM-DD` | 缺省 `12w`（= 84 天，与端点缺省窗口同宽） |
-| `--until` | 同上（`all` 非法） | 缺省 `today` |
+| `--since` | `all` \| `today` \| `yesterday` \| `<N>d` \| `<N>w` \| `<N>m` \| `<N>y` \| `YYYY-MM-DD` | 缺省 `12w`（= 84 天，与端点缺省窗口同宽）；`9d` / `12w` / `90d` 之类任意正整数都行 |
+| `--until` | 同上，但 **`all` 非法** | 缺省 `today` |
 | `--by` | `day` \| `model` \| `session` \| `tool` \| `workspace` \| `agent` \| `origin` | 缺省 = 仪表盘 |
-| `--metric` | `tokens` \| `messages` \| `calls` \| `tools` \| `sessions` | 只作用于仪表盘的热力图 |
+| `--metric` | `tokens` \| `messages` \| `calls` \| `tools` \| `sessions` | 只作用于仪表盘的热力图（给了 `--by` 时被忽略，但取值仍校验） |
+| `--session` | 会话 id | 把每个数字收敛到该会话；未知 id → `session not found` + exit 1 |
+| `--tree` | 开关 | 含全部子孙（必须配 `--session`，否则参数闸门 exit 1） |
 | `--limit` | `1..=200` | 只作用于排行类维度（`day` / `origin` 不受影响） |
+| `-w` / `--watch` | 开关 | 每 2s 清屏重绘（与 `wing ps -w` 同形），Ctrl-C 退出；`--json` 照刷 |
 
 **时间的解释方**：时长写法相对**本地今天**往回减（`7d` = 今天往前 7 天），天数换算
 `w=7` / `m=30` / `y=365`；CLI 把人类写法翻成网关本地日期后再发请求，服务端只认
@@ -237,9 +245,11 @@ GitHub 同款思想），0 档在范围内画 `·`、范围外画空格。有颜
 
 **`wing info <sid>`** 的 `usage:` 块与 `wing usage --session <sid>` 同源
 （一次 `since=all&group_by=session&session_id=<sid>&tree=true&limit=200`）：自身行是前四行，
-其余行求和是 `tree:` 行（行数 = 1 时不打印）。取不到端点 → 整块静默省略；流水全 0 →
-一行 `usage:  —  (no audit flow; ledger: …)` 回落到会话账本（`SessionInfoResponse.usage`），
-**不写一排 0**（`0` 是一个读数）。
+`tree:` 行取**响应里的 `totals` 减自身行**（`totals` 不被 `limit` 截断，所以子孙超过 200
+也照样完整；行和不是这个用途）。没有子孙（`totals == 自身行`）时不打印 `tree:`。
+取不到端点 → 整块静默省略；**自身**流水全 0 → 一行
+`usage:  —  (no audit flow; ledger: …)` 回落到会话账本（`SessionInfoResponse.usage`），
+此时若子孙有流水，`tree:` 行照常跟在后面——**不写一排 0**（`0` 是一个读数）。
 
 ### 10.1 与 `wing cache` / 会话账本的读数为什么不同
 
@@ -248,12 +258,3 @@ GitHub 同款思想），0 档在范围内画 `·`、范围外画空格。有颜
 （会话账本 `metadata.usage`）、`wing cache`（每会话最近 ≤200 次调用的滚动窗口 + 理论命中率）
 不同是设计使然。
 
-### 10.2 排错
-
-| 症状 | 先看哪里 |
-|---|---|
-| `wing usage` 说 `does not serve /api/usage` | 运行中的网关是本特性之前构建的：`wing stop && wing start` |
-| 热力图几乎全是 `·`，但明明有会话 | 审计流水从 `wing.db` 建库那天起——看输出的 `token / call audit starts …` 那一行；`--since all` 会拉长窗口但补不出更早的读数 |
-| `TODAY` 那一行不见了 | 今天在窗口内**且有活动**时才打；今天没干活就不打（避免一排 0） |
-| `--by session` 的 TITLE / WHO 是 `—` | 那个会话不在 `/api/session/list` 里（已归档 / 已删除）：id 仍可拷贝，展示素材不猜 |
-| `--session` 报 `session not found` | 404 = 目录与审计表都没有这个 id（见 §9 最后两行） |

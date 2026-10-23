@@ -741,6 +741,26 @@ impl UsageMeasures {
         self.llm_time_ms + self.tool_time_ms
     }
 
+    /// 作用域差：`totals - 自身行` = 子孙的合计（`group_by=session&tree` 的用法）。
+    ///
+    /// `sessions` 在这里也是逐项相减——它只在「作用域 = 自身 ∪ 子孙」时才有意义
+    /// （每个会话要么是自己、要么是子孙），不能当成通用的可减值。
+    pub fn sub(&self, other: &UsageMeasures) -> UsageMeasures {
+        UsageMeasures {
+            sessions: self.sessions - other.sessions,
+            sessions_created: self.sessions_created - other.sessions_created,
+            user_messages: self.user_messages - other.user_messages,
+            llm_calls: self.llm_calls - other.llm_calls,
+            tool_calls: self.tool_calls - other.tool_calls,
+            tool_errors: self.tool_errors - other.tool_errors,
+            prompt_tokens: self.prompt_tokens - other.prompt_tokens,
+            completion_tokens: self.completion_tokens - other.completion_tokens,
+            cached_tokens: self.cached_tokens - other.cached_tokens,
+            llm_time_ms: self.llm_time_ms - other.llm_time_ms,
+            tool_time_ms: self.tool_time_ms - other.tool_time_ms,
+        }
+    }
+
     /// 11 个度量逐项相加（行求和用）。
     pub fn add(&self, other: &UsageMeasures) -> UsageMeasures {
         UsageMeasures {

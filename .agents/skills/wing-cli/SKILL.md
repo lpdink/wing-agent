@@ -113,7 +113,7 @@ tags: [cli, orchestration, reference, wake, headless]
 | `wing ps [--all] [--tag T] [--parent SID] [--tree] [--json]` | 会话列表（默认过滤 inactive，被 `pin` 的除外；`--tag` / `--parent` 隐含 `--all`） |
 | `wing info <sid> [--json]` | 运行时信息：状态 / workdir / 工具 / tokens / 模型 / 用量 |
 | `wing cache [sid] [--limit N] [--why TS\|INDEX] [--json]` | KV 前缀缓存账本：理论 vs 实际命中率 + 分叉归因（省略 sid = 最近活跃的那个，header 里会打印它选中了谁） |
-| `wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M] [--session SID] [--tree] [--limit N] [--json] [-w]` | 我的使用史：默认仪表盘（活动热力图 + 今天 + `me`/`agents` + 模型），`--by day\|model\|session\|tool\|workspace\|agent\|origin` 出明细；`WHEN` = `all\|today\|yesterday\|7d\|4w\|3m\|1y\|YYYY-MM-DD`（缺省 `12w`）。所有数字读审计流水（token / 调用从 `wing.db` 建库起算，`--since all` 也补不出更早的读数） |
+| `wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M] [--session SID] [--tree] [--limit N] [--json] [-w]` | 我的使用史：默认仪表盘（活动热力图 + 今天 + `me`/`agents` + 模型），`--by day\|model\|session\|tool\|workspace\|agent\|origin` 出明细；`WHEN` = `all\|today\|yesterday\|<N>d\|<N>w\|<N>m\|<N>y\|YYYY-MM-DD`（缺省 `12w`；`--until` 不收 `all`）。所有数字读审计流水（token / 调用从 `wing.db` 建库起算，`--since all` 也补不出更早的读数） |
 
 ### 3.4 消息
 

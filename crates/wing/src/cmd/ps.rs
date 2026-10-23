@@ -34,11 +34,11 @@ use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
 use crate::shared::session_tree::{TreeRow, build_forest};
 use crate::util::format;
+use crate::util::format::{NONE_MARK, count, work_time};
 
 use super::common;
 use super::common::TableOutput;
 use super::usage;
-use super::usage::{NONE_MARK, count, work_time};
 
 /// Entry point for `wing ps`.
 pub async fn run_ps(
@@ -126,31 +126,27 @@ pub async fn run_info(session_id: &str, json: bool) -> ExitCode {
     }
 }
 
-/// `wing info` 的用量块：自身那一行 + 子孙行的合计（一次 `group_by=session&tree`）。
+/// `wing info` 的用量块：自身那一行 + 子孙的合计（一次 `group_by=session&tree`）。
 struct InfoUsage {
     own: UsageMeasures,
     /// 子孙（不含自身）：`(会话数, 合计)`；没有子孙时是 `None`。
-    tree: Option<(usize, UsageMeasures)>,
+    tree: Option<(i64, UsageMeasures)>,
 }
 
 impl InfoUsage {
+    /// 子树汇总走 `totals`（**不被 `limit` 截断**的对账基准）减去自身行，
+    /// 而不是把返回的行相加：子孙超过 `limit` 时行是被截断的，加出来的数会静默偏小。
     fn from_report(report: &UsageResponse, session_id: &str) -> InfoUsage {
         let own = report
             .row(session_id)
             .map(|row| row.measures.clone())
             .unwrap_or_default();
-        let mut descendants = report
-            .rows
-            .iter()
-            .filter(|row| row.key != session_id)
-            .map(|row| row.measures.clone());
-        let tree = descendants
-            .next()
-            .map(|first| {
-                let total = descendants.fold(first.clone(), |sum, next| sum.add(&next));
-                (report.rows.len() - 1, total)
-            })
-            .filter(|(count, _)| *count > 0);
+        let totals = &report.totals;
+        let tree = (totals != &own).then(|| {
+            // `sessions` 是去重计数：作用域内除了自身，剩下的都是子孙。
+            let sessions = totals.sessions - i64::from(own.is_active());
+            (sessions, totals.sub(&own))
+        });
         InfoUsage { own, tree }
     }
 }
@@ -494,7 +490,8 @@ fn print_session_info(info: &SessionInfoResponse, usage: Option<&InfoUsage>) {
 /// 账本（`SessionInfoResponse.usage`），否则「没有读数」会被读成「一次都没用过」。
 fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> String {
     let own = &block.own;
-    if *own == UsageMeasures::default() && block.tree.is_none() {
+    if *own == UsageMeasures::default() {
+        // 自身没有流水（老会话 / 审计上线前建的）：写一排 0 会被读成「一次都没用过」。
         let note = ledger
             .filter(|ledger| ledger.turns > 0 || ledger.llm_calls > 0 || ledger.tool_calls > 0)
             .map(|ledger| {
@@ -506,7 +503,11 @@ fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> Strin
                 )
             })
             .unwrap_or_else(|| " (no audit flow)".to_string());
-        return format!("usage:  {NONE_MARK}{note}\n");
+        let mut text = format!("usage:  {NONE_MARK}{note}\n");
+        if let Some((sessions, tree)) = &block.tree {
+            text.push_str(&tree_line(*sessions, tree));
+        }
+        return text;
     }
     let mut text = String::from("usage:\n");
     text.push_str(&format!(
@@ -535,18 +536,23 @@ fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> Strin
         "time:",
         work_time(own.llm_time_ms),
         work_time(own.tool_time_ms),
-        work_time(own.llm_time_ms + own.tool_time_ms)
+        work_time(own.work_time_ms())
     ));
     if let Some((sessions, tree)) = &block.tree {
-        text.push_str(&format!(
-            "  {:<20}{} sessions · ↑ {} · ↓ {}\n",
-            "tree:",
-            count(*sessions as i64),
-            format::tokens(tree.prompt_tokens),
-            format::tokens(tree.completion_tokens)
-        ));
+        text.push_str(&tree_line(*sessions, tree));
     }
     text
+}
+
+/// `tree:` 行：子树（自身之外的会话）的会话数与 token 和。
+fn tree_line(sessions: i64, tree: &UsageMeasures) -> String {
+    format!(
+        "  {:<20}{} sessions · ↑ {} · ↓ {}\n",
+        "tree:",
+        count(sessions),
+        format::tokens(tree.prompt_tokens),
+        format::tokens(tree.completion_tokens)
+    )
 }
 
 #[cfg(test)]
@@ -1285,41 +1291,47 @@ mod tests {
         }
     }
 
-    fn usage_report(rows: Vec<UsageRow>) -> UsageResponse {
+    fn usage_report(rows: Vec<UsageRow>, totals: UsageMeasures) -> UsageResponse {
         UsageResponse {
             rows,
+            totals,
             ..UsageResponse::default()
         }
     }
 
+    fn own_measures() -> UsageMeasures {
+        UsageMeasures {
+            sessions: 1,
+            user_messages: 34,
+            llm_calls: 156,
+            tool_calls: 210,
+            prompt_tokens: 1_200_000,
+            completion_tokens: 45_600,
+            cached_tokens: 936_000,
+            llm_time_ms: 6_000_000,
+            tool_time_ms: 2_040_000,
+            ..UsageMeasures::default()
+        }
+    }
+
+    fn child_measures() -> UsageMeasures {
+        UsageMeasures {
+            sessions: 1,
+            prompt_tokens: 4_600_000,
+            completion_tokens: 180_000,
+            ..UsageMeasures::default()
+        }
+    }
+
     #[test]
-    fn the_usage_block_reads_the_own_row_and_sums_the_descendants() {
-        let report = usage_report(vec![
-            usage_row(
-                "sid",
-                None,
-                UsageMeasures {
-                    user_messages: 34,
-                    llm_calls: 156,
-                    tool_calls: 210,
-                    prompt_tokens: 1_200_000,
-                    completion_tokens: 45_600,
-                    cached_tokens: 936_000,
-                    llm_time_ms: 6_000_000,
-                    tool_time_ms: 2_040_000,
-                    ..UsageMeasures::default()
-                },
-            ),
-            usage_row(
-                "child",
-                Some("sid"),
-                UsageMeasures {
-                    prompt_tokens: 4_600_000,
-                    completion_tokens: 180_000,
-                    ..UsageMeasures::default()
-                },
-            ),
-        ]);
+    fn the_usage_block_reads_the_own_row_and_the_subtree_total() {
+        let report = usage_report(
+            vec![
+                usage_row("sid", None, own_measures()),
+                usage_row("child", Some("sid"), child_measures()),
+            ],
+            own_measures().add(&child_measures()),
+        );
         let block = InfoUsage::from_report(&report, "sid");
         let text = format_usage_block(&block, None);
         assert!(text.starts_with("usage:\n"), "{text}");
@@ -1344,15 +1356,13 @@ mod tests {
 
     #[test]
     fn a_session_without_descendants_omits_the_tree_line() {
-        let report = usage_report(vec![usage_row(
-            "sid",
-            None,
-            UsageMeasures {
-                llm_calls: 1,
-                prompt_tokens: 10,
-                ..UsageMeasures::default()
-            },
-        )]);
+        let own = UsageMeasures {
+            sessions: 1,
+            llm_calls: 1,
+            prompt_tokens: 10,
+            ..UsageMeasures::default()
+        };
+        let report = usage_report(vec![usage_row("sid", None, own.clone())], own);
         let block = InfoUsage::from_report(&report, "sid");
         assert!(block.tree.is_none());
         let text = format_usage_block(&block, None);
@@ -1365,7 +1375,10 @@ mod tests {
 
     #[test]
     fn a_session_without_flow_degrades_to_the_ledger_instead_of_zeros() {
-        let report = usage_report(vec![usage_row("sid", None, UsageMeasures::default())]);
+        let report = usage_report(
+            vec![usage_row("sid", None, UsageMeasures::default())],
+            UsageMeasures::default(),
+        );
         let block = InfoUsage::from_report(&report, "sid");
         let ledger = SessionUsage {
             turns: 12,
@@ -1384,5 +1397,48 @@ mod tests {
             format!("usage:  {NONE_MARK} (no audit flow)\n")
         );
         assert!(!format_usage_block(&block, None).contains('0'));
+    }
+
+    /// 子树汇总取 `totals`（不被 `limit` 截断），不靠把返回的行加起来：
+    /// 子孙超过 200 时「行和」会静默偏小。
+    #[test]
+    fn the_tree_line_survives_a_truncated_row_set() {
+        let report = UsageResponse {
+            rows: vec![
+                usage_row("sid", None, own_measures()),
+                usage_row("child", Some("sid"), child_measures()),
+            ],
+            // 250 个子孙的完整汇总（行只回来了 1 个）。
+            totals: own_measures().add(&UsageMeasures {
+                sessions: 250,
+                prompt_tokens: 4_600_000_000,
+                completion_tokens: 180_000_000,
+                ..UsageMeasures::default()
+            }),
+            truncated: true,
+            ..UsageResponse::default()
+        };
+        let block = InfoUsage::from_report(&report, "sid");
+        let text = format_usage_block(&block, None);
+        assert!(text.contains("250 sessions"), "不靠行数：\n{text}");
+        assert!(text.contains("↑ 4.6G"), "{text}");
+    }
+
+    /// 自身没有流水、但子孙有：自身那一小节写 `—`（不写一排 0），`tree:` 照常。
+    #[test]
+    fn a_quiet_own_row_degrades_alone_while_the_tree_line_stays() {
+        let report = usage_report(
+            vec![
+                usage_row("sid", None, UsageMeasures::default()),
+                usage_row("child", Some("sid"), child_measures()),
+            ],
+            child_measures(),
+        );
+        let block = InfoUsage::from_report(&report, "sid");
+        let text = format_usage_block(&block, None);
+        assert!(text.starts_with(&format!("usage:  {NONE_MARK}")), "{text}");
+        assert!(!text.contains("messages:           0"), "{text}");
+        assert!(text.contains("tree:"), "{text}");
+        assert!(text.contains("1 sessions"), "{text}");
     }
 }

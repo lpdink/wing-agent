@@ -164,11 +164,19 @@ _EARLIEST_DAY = (
 
 #: 「审计流水从哪天起」：只看三张 ``audit_*``（``session_catalog`` 的回填可以早得多，
 #: 而读数在它之前是**不存在**的，不是 0）。无审计行 → NULL。
+#:
+#: 每个子查询走 ``ORDER BY ts_ms LIMIT 1``（``idx_audit_*_ts`` 上的索引扫描）而不是
+#: ``MIN(substr(ts, 1, 10))``：后者是每张表的全扫描，且这条路径**每个** ``/api/usage``
+#: 请求都要走一次（实测 100 万行 44ms vs 0.0ms）。``ts`` 与 ``ts_ms`` 同源同刻，
+#: 取最早一刻的那一行得到的日期就是最早的一天。
 _EARLIEST_AUDIT_DAY = (
     "SELECT MIN(d) AS day FROM ("
-    "SELECT MIN(substr(ts, 1, 10)) AS d FROM audit_llm_call"
-    " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_tool_call"
-    " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message)"
+    "SELECT (SELECT substr(ts, 1, 10) FROM audit_llm_call"
+    " ORDER BY ts_ms LIMIT 1) AS d"
+    " UNION ALL SELECT (SELECT substr(ts, 1, 10) FROM audit_tool_call"
+    " ORDER BY ts_ms LIMIT 1)"
+    " UNION ALL SELECT (SELECT substr(ts, 1, 10) FROM audit_user_message"
+    " ORDER BY ts_ms LIMIT 1))"
 )
 
 #: 会话作用域的 404 判据 = 「这几张表里有没有它的任何一行」。表清单是唯一事实：

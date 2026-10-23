@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 mod common;
@@ -192,7 +192,8 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
         .get("until")
         .cloned()
         .unwrap_or_else(|| "2026-10-23".to_string());
-    let (rows, truncated) = match group_by {
+    // `session` 作用域的 `totals` = 子树合计；这里只有自身一行，所以两者相等。
+    let (rows, truncated, totals) = match group_by {
         "origin" => (
             vec![
                 json!({"key": "me", "label": null, "parent_session_id": null,
@@ -207,9 +208,11 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
                        "cached_tokens": 0, "llm_time_ms": 0, "tool_time_ms": 0}),
             ],
             false,
+            measures(1_700, 15, 4),
         ),
-        "session" => (
-            vec![json!({
+        "session" => {
+            // 自身行与 `totals` 是同一个对象：这个会话没有子孙，`tree:` 行不该出现。
+            let own = json!({
                 "key": params.get("session_id").cloned().unwrap_or_default(),
                 "label": null,
                 "parent_session_id": null,
@@ -217,9 +220,19 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
                 "llm_calls": 3, "tool_calls": 6, "tool_errors": 0,
                 "prompt_tokens": 1200, "completion_tokens": 10,
                 "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 500,
-            })],
-            false,
-        ),
+            });
+            let totals = Value::Object(
+                own.as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| {
+                        !matches!(key.as_str(), "key" | "label" | "parent_session_id")
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            );
+            (vec![own], false, totals)
+        }
         "model" => (
             vec![json!({
                 "key": "gateway/deepseek-flash",
@@ -231,6 +244,7 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
                 "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 0,
             })],
             false,
+            measures(1_700, 15, 4),
         ),
         _ => (
             vec![
@@ -246,12 +260,13 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
                        "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 500}),
             ],
             false,
+            measures(1_700, 15, 4),
         ),
     };
     json!({
         "range": {"since": since, "until": until, "data_since": "2026-10-20"},
         "group_by": group_by,
-        "totals": measures(1_700, 15, 4),
+        "totals": totals,
         "rows": rows,
         "truncated": truncated,
     })
@@ -506,4 +521,59 @@ async fn info_gains_a_usage_block_and_keeps_its_json_shape() {
     assert_eq!(value["session_name"], "usage probe");
     assert_eq!(value["usage"]["turns"], 3);
     assert!(value.get("usage_block").is_none(), "{stdout}");
+}
+
+/// `-w` 的帧序：**先清屏、再画**。反过来（画完立刻清屏）屏幕上基本永远空白——
+/// 这条只有抓真实字节序才看得出来，单测与快照断言都看不见「什么时候清屏」。
+#[tokio::test]
+async fn watch_clears_the_screen_before_drawing_a_frame() {
+    let stub = Stub::start("watch").await;
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"))
+        .args(["usage", "-w"])
+        .env("WING_HOME", &stub.home)
+        .env_remove("RUST_LOG")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut collected: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    // 读够两帧就够判断顺序了（每帧几 KB + 2s 间隔）；超时即收手。
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while collected.len() < 20_000 {
+            match stdout.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => collected.extend_from_slice(&buf[..n]),
+            }
+        }
+    })
+    .await;
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    drop(stdout);
+
+    let text = String::from_utf8_lossy(&collected).to_string();
+    let clear = "\u{1b}[2J\u{1b}[H";
+    let head: String = text.chars().take(80).collect();
+    assert!(
+        text.starts_with(clear),
+        "首帧之前必须先清屏（否则上一屏残影留在最上面）：{head:?}"
+    );
+    let first_title = text.find("WING USAGE").expect("a frame was drawn");
+    let second_clear = text[first_title..]
+        .find(clear)
+        .map(|offset| first_title + offset)
+        .expect("a second frame follows");
+    let second_title = text[second_clear..]
+        .find("WING USAGE")
+        .map(|offset| second_clear + offset)
+        .expect("the second frame is drawn after its clear");
+    assert!(
+        first_title < second_clear && second_clear < second_title,
+        "帧序必须是 [清屏][内容][清屏][内容]"
+    );
 }

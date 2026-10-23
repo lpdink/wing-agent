@@ -623,6 +623,28 @@ class TestDefaultsAndAll:
         assert report["range"]["data_since"] == TODAY.isoformat()
         assert report["range"]["since"] == "2025-01-02"
 
+    def test_data_since_agrees_with_the_text_minimum(self) -> None:
+        """`ORDER BY ts_ms LIMIT 1` 与 `MIN(substr(ts,1,10))` 必须给出同一天。
+
+        这条钉的是两种写法**语义等价**：前者走 `ts_ms` 索引（每个请求都要走），
+        后者是每张表的全扫描。
+        """
+        seed_llm_call("a", local_time(TWO_DAYS_AGO, hour=23), prompt=1)
+        seed_llm_call("b", local_time(YESTERDAY, hour=1), prompt=1)
+        seed_tool_call("a", local_time(TODAY, hour=8))
+        seed_user_message("b", local_time(YESTERDAY, hour=2))
+
+        database = get_database()
+        expected = database.query(
+            "SELECT MIN(d) AS day FROM ("
+            "SELECT MIN(substr(ts, 1, 10)) AS d FROM audit_llm_call"
+            " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_tool_call"
+            " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message)"
+        )[0]["day"]
+
+        assert MetricsStore().earliest_audit_day() == expected
+        assert expected == TWO_DAYS_AGO.isoformat()
+
     def test_since_all_on_an_empty_database_is_one_day(self) -> None:
         report = usage_report(since="all", until=UNTIL)
 

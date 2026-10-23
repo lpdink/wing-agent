@@ -8,6 +8,44 @@
 //! 图片标签同理：composer 的 chip 与消息里的标签行走**同一个** [`image_label`]，
 //! 否则「草稿里看到的」与「发出去/重放出来的」迟早会对不上。
 
+/// 「没有读数」的唯一记号（不写 0：0 是一个读数，`—` 是"没有读数"）。
+///
+/// CLI 与将来的面板（状态栏 / 退出摘要）共用这一处：同一句「没有」写两遍就会有两种字形。
+pub const NONE_MARK: &str = "—";
+
+/// 千分位计数（`1,181` / `7,516`）：计数列的可扫读性全靠它。
+pub fn count(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// 一档比一档大的记法阶梯：`(进率, 后缀)`。
+const SCALES: [(u64, char); 4] = [
+    (1_000, 'k'),
+    (1_000_000, 'M'),
+    (1_000_000_000, 'G'),
+    (1_000_000_000_000, 'T'),
+];
+
+/// 数量落到哪一档：返回 `(档位下标, 该档下的值)`。
+fn scale_of(n: u64) -> (usize, f64) {
+    let mut index = 0;
+    for (i, (unit, _)) in SCALES.iter().enumerate() {
+        if n >= *unit {
+            index = i;
+        }
+    }
+    let (unit, _) = SCALES[index];
+    (index, n as f64 / unit as f64)
+}
+
 /// token 数的紧凑记法：`1.2k` / `3.4M` / `1.4G`（小数量级原样）。
 ///
 /// G 档不是装饰：真实的窗口输入是上下文重发主导的（一台机器 4 天 1.36B prompt），
@@ -16,25 +54,18 @@
 ///
 /// 负数退化成裸数字（调用方要自带符号：`wing cache` 的 `≈-` 就是这么拼的）。
 pub fn tokens(n: i64) -> String {
-    const SCALES: [(i64, char); 3] = [(1_000, 'k'), (1_000_000, 'M'), (1_000_000_000, 'G')];
-    if n < SCALES[0].0 {
+    if n < SCALES[0].0 as i64 {
         return n.to_string();
     }
-    let mut index = 0;
-    for (i, (unit, _)) in SCALES.iter().enumerate() {
-        if n >= *unit {
-            index = i;
-        }
-    }
+    let (mut index, mut value) = scale_of(n as u64);
     loop {
-        let (unit, suffix) = SCALES[index];
-        let value = n as f64 / unit as f64;
         // 一位小数的记法会把 999.96 印成 `1000.0` —— 走一档（`999_960_000` → `1.0G`）。
         if value >= 999.95 && index + 1 < SCALES.len() {
             index += 1;
+            value /= 1_000.0;
             continue;
         }
-        return format!("{value:.1}{suffix}");
+        return format!("{value:.1}{}", SCALES[index].1);
     }
 }
 
@@ -47,29 +78,40 @@ pub fn tokens(n: i64) -> String {
 /// 记法只有一份：model picker 的 ctx 列与状态栏的 `0 / 500k` 都读它，否则同一个
 /// 窗口会在两处显示成两个数。
 pub fn tokens_capacity(n: u64) -> String {
-    const SCALES: [(u64, char); 3] = [(1_000, 'k'), (1_000_000, 'M'), (1_000_000_000, 'G')];
     if n < SCALES[0].0 {
         return n.to_string();
     }
-    let mut index = 0;
-    for (i, (unit, _)) in SCALES.iter().enumerate() {
-        if n >= *unit {
-            index = i;
-        }
-    }
+    let (mut index, mut value) = scale_of(n);
     loop {
-        let (unit, suffix) = SCALES[index];
-        let value = n as f64 / unit as f64;
         // 记法会舍入，差一点到下一档的数会读成 `1000k` —— 走一档（`999_950` → `1M`）。
         if value.round() >= 1_000.0 && index + 1 < SCALES.len() {
             index += 1;
+            value /= 1_000.0;
             continue;
         }
+        let suffix = SCALES[index].1;
         return if (value - value.round()).abs() < 0.05 {
             format!("{:.0}{suffix}", value.round())
         } else {
             format!("{value:.1}{suffix}")
         };
+    }
+}
+
+/// 工作量记法：`20h 00m` / `34m` / `12s`（毫秒进、人类记法出）。
+///
+/// 与两处**墙钟**记法分工不同，别混用：`cmd/exit_summary.rs::fmt_duration`（会话墙钟，
+/// 分钟档带秒）与 `cmd/status.rs`（网关 uptime，小时档不带补齐的 00 分）。工时是账本
+/// 里的累计毫秒，只到分钟。
+pub fn work_time(ms: i64) -> String {
+    let secs = ms.max(0) / 1_000;
+    let (hours, minutes) = (secs / 3_600, (secs % 3_600) / 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -116,6 +158,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn counts_get_thousands_separators() {
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1_181), "1,181");
+        assert_eq!(count(7_516), "7,516");
+        assert_eq!(count(1_234_567), "1,234,567");
+        assert_eq!(count(-4_200), "-4,200");
+    }
+
+    #[test]
+    fn work_time_stops_at_the_minute() {
+        assert_eq!(work_time(72_000_000), "20h 00m");
+        assert_eq!(work_time(2_040_000), "34m");
+        assert_eq!(work_time(12_000), "12s");
+        assert_eq!(work_time(-5), "0s", "负数没有意义，不印负号");
+    }
+
+    #[test]
     fn tokens_use_compact_notation_at_each_scale() {
         assert_eq!(tokens(0), "0");
         assert_eq!(tokens(999), "999");
@@ -129,6 +189,9 @@ mod tests {
         // 舍入不许把读数推进下一位数：差一点到 1G 的报 `1.0G`，不是 `1000.0M`。
         assert_eq!(tokens(999_960_000), "1.0G");
         assert_eq!(tokens(999_949_999), "999.9M");
+        // T 档同理（再往上没有更大的档了，`1000.0T` 是最后一档的形态）。
+        assert_eq!(tokens(1_000_000_000_000), "1.0T");
+        assert_eq!(tokens(999_995_000_000), "1.0T");
         // 负数退化成裸数字（符号由调用方拼）。
         assert_eq!(tokens(-14_200), "-14200");
     }
