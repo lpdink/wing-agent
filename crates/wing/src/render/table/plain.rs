@@ -257,7 +257,10 @@ const RESET: &str = "\u{1b}[0m";
 
 /// ANSI-wrapped `text` when colour is on; the bare text otherwise (or when the
 /// style carries no attributes at all).
-fn paint(style: Style, text: &str, color: bool) -> String {
+///
+/// The CLI's single SGR encoder: plain tables and the usage heatmap both paint
+/// through it (a second copy of the escape maths drifts).
+pub(crate) fn paint(style: Style, text: &str, color: bool) -> String {
     if !color || text.is_empty() {
         return text.to_string();
     }

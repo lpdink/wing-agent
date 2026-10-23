@@ -8,14 +8,33 @@
 //! 图片标签同理：composer 的 chip 与消息里的标签行走**同一个** [`image_label`]，
 //! 否则「草稿里看到的」与「发出去/重放出来的」迟早会对不上。
 
-/// token 数的紧凑记法：`1.2k` / `3.4M`（小数量级原样）。
+/// token 数的紧凑记法：`1.2k` / `3.4M` / `1.4G`（小数量级原样）。
+///
+/// G 档不是装饰：真实的窗口输入是上下文重发主导的（一台机器 4 天 1.36B prompt），
+/// 没有它这一列会印成 `1360.0M`。舍入走档的规则同 [`tokens_capacity`]——差一点到
+/// 下一档的读数不许读成 `1000.0M`。
+///
+/// 负数退化成裸数字（调用方要自带符号：`wing cache` 的 `≈-` 就是这么拼的）。
 pub fn tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        format!("{n}")
+    const SCALES: [(i64, char); 3] = [(1_000, 'k'), (1_000_000, 'M'), (1_000_000_000, 'G')];
+    if n < SCALES[0].0 {
+        return n.to_string();
+    }
+    let mut index = 0;
+    for (i, (unit, _)) in SCALES.iter().enumerate() {
+        if n >= *unit {
+            index = i;
+        }
+    }
+    loop {
+        let (unit, suffix) = SCALES[index];
+        let value = n as f64 / unit as f64;
+        // 一位小数的记法会把 999.96 印成 `1000.0` —— 走一档（`999_960_000` → `1.0G`）。
+        if value >= 999.95 && index + 1 < SCALES.len() {
+            index += 1;
+            continue;
+        }
+        return format!("{value:.1}{suffix}");
     }
 }
 
@@ -103,6 +122,15 @@ mod tests {
         assert_eq!(tokens(1_200), "1.2k");
         assert_eq!(tokens(120_500), "120.5k");
         assert_eq!(tokens(3_400_000), "3.4M");
+        // G 档：窗口输入是「亿」级的（上下文重发主导），`1360.0M` 读不了。
+        assert_eq!(tokens(1_360_000_000), "1.4G");
+        assert_eq!(tokens(1_000_000_000), "1.0G");
+        assert_eq!(tokens(45_600_000_000), "45.6G");
+        // 舍入不许把读数推进下一位数：差一点到 1G 的报 `1.0G`，不是 `1000.0M`。
+        assert_eq!(tokens(999_960_000), "1.0G");
+        assert_eq!(tokens(999_949_999), "999.9M");
+        // 负数退化成裸数字（符号由调用方拼）。
+        assert_eq!(tokens(-14_200), "-14200");
     }
 
     #[test]

@@ -26,6 +26,14 @@ class UsageRange(BaseModel):
 
     since: str = Field(description="窗口起点（含）；`since=all` 时 = 有记录的第一天")
     until: str = Field(description="窗口终点（含）")
+    data_since: str | None = Field(
+        default=None,
+        description=(
+            "审计流水（三张 `audit_*`）最早的一天；没有任何审计行 = null。"
+            "早于它的日子只有会话计数（`session_catalog` 的回填覆盖得更早），"
+            "消费方据此标注「token / 调用统计从这里起」"
+        ),
+    )
 
 
 class UsageMeasures(BaseModel):

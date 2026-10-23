@@ -179,7 +179,8 @@ mod tests {
     fn fmt_tokens_compact_boundaries() {
         assert_eq!(fmt_tokens_compact(999), "999 tokens");
         assert_eq!(fmt_tokens_compact(1000), "1.0k tokens");
-        assert_eq!(fmt_tokens_compact(999_999), "1000.0k tokens");
+        // 差一点到 1M 的时候走一档：`1000.0k` 读起来该是 `1.0M`（记法见 format::tokens）。
+        assert_eq!(fmt_tokens_compact(999_999), "1.0M tokens");
         assert_eq!(fmt_tokens_compact(1_000_000), "1.0M tokens");
     }
 

@@ -2,6 +2,7 @@
 
 pub mod diff_highlight;
 pub mod fit;
+pub mod heatmap;
 pub mod markdown;
 pub mod picture;
 pub mod renderable;

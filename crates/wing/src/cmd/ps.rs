@@ -21,7 +21,11 @@ use chrono::Datelike;
 use chrono::Local;
 use chrono::NaiveDateTime;
 use ratatui::style::Style;
-use wing_api_client::models::{SessionInfo, SessionInfoResponse};
+use wing_api_client::GatewayClient as GatewayApiClient;
+use wing_api_client::UsageQuery;
+use wing_api_client::models::{
+    SessionInfo, SessionInfoResponse, SessionUsage, UsageMeasures, UsageResponse,
+};
 
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
@@ -29,9 +33,12 @@ use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
 use crate::shared::session_tree::{TreeRow, build_forest};
+use crate::util::format;
 
 use super::common;
 use super::common::TableOutput;
+use super::usage;
+use super::usage::{NONE_MARK, count, work_time};
 
 /// Entry point for `wing ps`.
 pub async fn run_ps(
@@ -95,18 +102,71 @@ async fn run_ps_watch(
 }
 
 /// Entry point for `wing info`.
+///
+/// The human view appends a `usage:` block read from the audit flow (one
+/// `/api/usage` request). It is **optional by design**: an old gateway, a failed
+/// request or a session that predates the flow never break the main output —
+/// the block is omitted (or degrades to the ledger line), never a row of zeros.
 pub async fn run_info(session_id: &str, json: bool) -> ExitCode {
-    match fetch_session_info(session_id).await {
+    let http = match common::connect().await {
+        Ok(client) => client,
+        Err(e) => return common::fail("info", e),
+    };
+    match fetch_session_info(&http, session_id).await {
         Ok(info) => {
             if json {
                 common::print_json_compact(&info);
             } else {
-                print_session_info(&info);
+                let usage = fetch_usage_block(&http, session_id).await;
+                print_session_info(&info, usage.as_ref());
             }
             ExitCode::SUCCESS
         }
         Err(e) => common::fail("info", e),
     }
+}
+
+/// `wing info` 的用量块：自身那一行 + 子孙行的合计（一次 `group_by=session&tree`）。
+struct InfoUsage {
+    own: UsageMeasures,
+    /// 子孙（不含自身）：`(会话数, 合计)`；没有子孙时是 `None`。
+    tree: Option<(usize, UsageMeasures)>,
+}
+
+impl InfoUsage {
+    fn from_report(report: &UsageResponse, session_id: &str) -> InfoUsage {
+        let own = report
+            .row(session_id)
+            .map(|row| row.measures.clone())
+            .unwrap_or_default();
+        let mut descendants = report
+            .rows
+            .iter()
+            .filter(|row| row.key != session_id)
+            .map(|row| row.measures.clone());
+        let tree = descendants
+            .next()
+            .map(|first| {
+                let total = descendants.fold(first.clone(), |sum, next| sum.add(&next));
+                (report.rows.len() - 1, total)
+            })
+            .filter(|(count, _)| *count > 0);
+        InfoUsage { own, tree }
+    }
+}
+
+/// 一次 `since=all` 的会话作用域查询；取不到就返回 `None`（整块省略）。
+async fn fetch_usage_block(http: &GatewayApiClient, session_id: &str) -> Option<InfoUsage> {
+    let query = UsageQuery {
+        since: Some("all".to_string()),
+        until: None,
+        group_by: Some("session".to_string()),
+        session_id: Some(session_id.to_string()),
+        tree: true,
+        limit: Some(usage::MAX_LIMIT),
+    };
+    let report = http.get_usage(&query).await.ok()?;
+    Some(InfoUsage::from_report(&report, session_id))
 }
 
 /// Human/JSON output for one session snapshot (`--json` stays the machine
@@ -232,11 +292,13 @@ async fn fetch_sessions(parent: Option<&str>) -> Result<Vec<SessionInfo>> {
     Ok(resp.sessions)
 }
 
-async fn fetch_session_info(session_id: &str) -> Result<SessionInfoResponse> {
-    let http = common::connect().await?;
+async fn fetch_session_info(
+    http: &GatewayApiClient,
+    session_id: &str,
+) -> Result<SessionInfoResponse> {
     // 被逐出（不在内存）的会话 404——先 resume 水合再取（逐出 ≠ 不存在）。
     common::hydrate_on_404(
-        &http,
+        http,
         session_id,
         || http.get_session_info(session_id),
         |e| e.into(),
@@ -394,7 +456,7 @@ fn format_age(at: NaiveDateTime, now: NaiveDateTime) -> String {
     }
 }
 
-fn print_session_info(info: &SessionInfoResponse) {
+fn print_session_info(info: &SessionInfoResponse, usage: Option<&InfoUsage>) {
     println!("model:               {}", info.model);
     println!("api_url:             {}", info.api_url);
     println!("status:              {}", info.status);
@@ -421,11 +483,76 @@ fn print_session_info(info: &SessionInfoResponse) {
     println!("  messages:           {}", info.context_stats.message_count);
     println!("  total_tokens:       {}", info.context_stats.total_tokens);
     println!("  context_window:     {}", info.context_window_tokens);
+    if let Some(block) = usage {
+        print!("{}", format_usage_block(block, info.usage.as_ref()));
+    }
+}
+
+/// `usage:` 块（与 `wing usage --session <sid>` 同源：都是同一个端点的同一份度量）。
+///
+/// 流水全 0 的会话（老会话 / 审计上线前）**不写一排 0**：改写一行 `—` 并回落到会话
+/// 账本（`SessionInfoResponse.usage`），否则「没有读数」会被读成「一次都没用过」。
+fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> String {
+    let own = &block.own;
+    if *own == UsageMeasures::default() && block.tree.is_none() {
+        let note = ledger
+            .filter(|ledger| ledger.turns > 0 || ledger.llm_calls > 0 || ledger.tool_calls > 0)
+            .map(|ledger| {
+                format!(
+                    " (no audit flow; ledger: {} turns · ↑{} ↓{})",
+                    ledger.turns,
+                    format::tokens(ledger.prompt_tokens),
+                    format::tokens(ledger.completion_tokens),
+                )
+            })
+            .unwrap_or_else(|| " (no audit flow)".to_string());
+        return format!("usage:  {NONE_MARK}{note}\n");
+    }
+    let mut text = String::from("usage:\n");
+    text.push_str(&format!(
+        "  {:<20}{}\n",
+        "messages:",
+        count(own.user_messages)
+    ));
+    text.push_str(&format!(
+        "  {:<20}{} llm · {} tools\n",
+        "calls:",
+        count(own.llm_calls),
+        count(own.tool_calls)
+    ));
+    text.push_str(&format!(
+        "  {:<20}↑ {} in{} · ↓ {} out\n",
+        "tokens:",
+        format::tokens(own.prompt_tokens),
+        match format::hit_rate(own.cached_tokens, own.prompt_tokens) {
+            Some(rate) => format!(" ({rate:.0}% cached)"),
+            None => String::new(),
+        },
+        format::tokens(own.completion_tokens)
+    ));
+    text.push_str(&format!(
+        "  {:<20}llm {} · tools {} · work {}\n",
+        "time:",
+        work_time(own.llm_time_ms),
+        work_time(own.tool_time_ms),
+        work_time(own.llm_time_ms + own.tool_time_ms)
+    ));
+    if let Some((sessions, tree)) = &block.tree {
+        text.push_str(&format!(
+            "  {:<20}{} sessions · ↑ {} · ↓ {}\n",
+            "tree:",
+            count(*sessions as i64),
+            format::tokens(tree.prompt_tokens),
+            format::tokens(tree.completion_tokens)
+        ));
+    }
+    text
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wing_api_client::models::UsageRow;
 
     fn session(id: &str, status: &str, tags: &[&str]) -> SessionInfo {
         SessionInfo {
@@ -1145,5 +1272,117 @@ mod tests {
             prefix_width <= crate::shared::session_tree::MAX_INDENT_DEPTH * 3 + 3,
             "prefix not capped: {prefix_width}\n{table}"
         );
+    }
+
+    // ---- `wing info` 的用量块 ----
+
+    fn usage_row(key: &str, parent: Option<&str>, measures: UsageMeasures) -> UsageRow {
+        UsageRow {
+            key: key.into(),
+            label: None,
+            parent_session_id: parent.map(str::to_string),
+            measures,
+        }
+    }
+
+    fn usage_report(rows: Vec<UsageRow>) -> UsageResponse {
+        UsageResponse {
+            rows,
+            ..UsageResponse::default()
+        }
+    }
+
+    #[test]
+    fn the_usage_block_reads_the_own_row_and_sums_the_descendants() {
+        let report = usage_report(vec![
+            usage_row(
+                "sid",
+                None,
+                UsageMeasures {
+                    user_messages: 34,
+                    llm_calls: 156,
+                    tool_calls: 210,
+                    prompt_tokens: 1_200_000,
+                    completion_tokens: 45_600,
+                    cached_tokens: 936_000,
+                    llm_time_ms: 6_000_000,
+                    tool_time_ms: 2_040_000,
+                    ..UsageMeasures::default()
+                },
+            ),
+            usage_row(
+                "child",
+                Some("sid"),
+                UsageMeasures {
+                    prompt_tokens: 4_600_000,
+                    completion_tokens: 180_000,
+                    ..UsageMeasures::default()
+                },
+            ),
+        ]);
+        let block = InfoUsage::from_report(&report, "sid");
+        let text = format_usage_block(&block, None);
+        assert!(text.starts_with("usage:\n"), "{text}");
+        assert!(text.contains("  messages:           34"), "{text}");
+        assert!(
+            text.contains("  calls:              156 llm · 210 tools"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  tokens:             ↑ 1.2M in (78% cached) · ↓ 45.6k out"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  time:               llm 1h 40m · tools 34m · work 2h 14m"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  tree:               1 sessions · ↑ 4.6M · ↓ 180.0k"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_session_without_descendants_omits_the_tree_line() {
+        let report = usage_report(vec![usage_row(
+            "sid",
+            None,
+            UsageMeasures {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                ..UsageMeasures::default()
+            },
+        )]);
+        let block = InfoUsage::from_report(&report, "sid");
+        assert!(block.tree.is_none());
+        let text = format_usage_block(&block, None);
+        assert!(!text.contains("tree:"), "{text}");
+        assert!(
+            text.contains("calls:              1 llm · 0 tools"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_session_without_flow_degrades_to_the_ledger_instead_of_zeros() {
+        let report = usage_report(vec![usage_row("sid", None, UsageMeasures::default())]);
+        let block = InfoUsage::from_report(&report, "sid");
+        let ledger = SessionUsage {
+            turns: 12,
+            llm_calls: 34,
+            prompt_tokens: 1_200_000,
+            completion_tokens: 45_000,
+            ..SessionUsage::default()
+        };
+        assert_eq!(
+            format_usage_block(&block, Some(&ledger)),
+            format!("usage:  {NONE_MARK} (no audit flow; ledger: 12 turns · ↑1.2M ↓45.0k)\n")
+        );
+        // 账本也是空的：只说「没有流水」，不编造账本读数。
+        assert_eq!(
+            format_usage_block(&block, None),
+            format!("usage:  {NONE_MARK} (no audit flow)\n")
+        );
+        assert!(!format_usage_block(&block, None).contains('0'));
     }
 }

@@ -99,7 +99,9 @@ def usage_report(
         metrics.totals(window), sessions_created=metrics.created_total(window)
     )
     return {
-        "range": window.wire(),
+        # ``data_since`` 是「流水从哪天起」——不是窗口的一部分（``Window.wire`` 不动），
+        # 而是随响应一起给出的全局事实，供消费方标注「更早的日子只有会话计数」。
+        "range": {**window.wire(), "data_since": metrics.earliest_audit_day()},
         "group_by": group_by,
         "totals": totals.wire(),
         "rows": [row.wire() for row in rows],

@@ -62,7 +62,12 @@ class TestUsageEndpoint:
 
         body = client.get("/api/usage", params={"since": SINCE, "until": UNTIL}).json()
 
-        assert body["range"] == {"since": SINCE, "until": UNTIL}
+        # 窗口三键：`data_since` = 审计流水最早的一天（本次播种里最早的那条）。
+        assert body["range"] == {
+            "since": SINCE,
+            "until": UNTIL,
+            "data_since": YESTERDAY.isoformat(),
+        }
         assert body["group_by"] == "day"
         assert body["truncated"] is False
         assert set(body["totals"]) == set(MEASURE_FIELDS)
@@ -214,6 +219,7 @@ class TestUsageEndpoint:
 
         assert len(body["rows"]) == 2
         assert all(body["totals"][name] == 0 for name in MEASURE_FIELDS)
+        assert body["range"]["data_since"] is None, "没有审计行 → null（不是空串）"
 
     def test_scoped_request_with_degraded_database_stays_200(
         self,

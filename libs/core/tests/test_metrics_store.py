@@ -20,7 +20,7 @@ import pytest
 
 from wing.config import AgentConfig, Config, ProviderConfig
 from wing.config.models import ModelSpec
-from wing.db import Database
+from wing.db import Database, get_database
 from wing.metrics import (
     MEASURE_FIELDS,
     Measures,
@@ -603,10 +603,34 @@ class TestDefaultsAndAll:
         assert report["range"]["until"] == TODAY.isoformat()
         assert len(report["rows"]) == 1
 
+    def test_data_since_is_the_audit_start_not_the_catalog_start(
+        self, tmp_path: Path
+    ) -> None:
+        """``data_since`` 只看三张 ``audit_*``：目录回填能把会话追溯得更早，读数却不行。"""
+        # 回填把 2025-01-02 的存量会话写进目录，而审计流水只有今天的一条。
+        store = _store(tmp_path)
+        store.save_metadata("20250102-030405-abcdef", SessionMetadata(tags=LISTED))
+        assert backfill_catalog([store], database=get_database()) == 1
+        seed_llm_call("audit-1", local_time(TODAY, hour=9), prompt=10)
+
+        metrics = MetricsStore()
+        assert metrics.earliest_day() == "2025-01-02"
+        assert metrics.earliest_audit_day() == TODAY.isoformat()
+
+        # 端点：`data_since` 说流水从今天起；`since=all` 仍从目录的最早一天起
+        # （计数类指标是完整的，token 类不是）。
+        report = _report(since="all", until=UNTIL)
+        assert report["range"]["data_since"] == TODAY.isoformat()
+        assert report["range"]["since"] == "2025-01-02"
+
     def test_since_all_on_an_empty_database_is_one_day(self) -> None:
         report = usage_report(since="all", until=UNTIL)
 
-        assert report["range"] == {"since": UNTIL, "until": UNTIL}
+        assert report["range"] == {
+            "since": UNTIL,
+            "until": UNTIL,
+            "data_since": None,
+        }
         assert len(report["rows"]) == 1
         assert all(report["rows"][0][name] == 0 for name in MEASURE_FIELDS)
 

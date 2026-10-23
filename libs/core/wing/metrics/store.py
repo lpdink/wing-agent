@@ -162,6 +162,15 @@ _EARLIEST_DAY = (
     " UNION ALL SELECT MIN(substr(created_ts, 1, 10)) FROM session_catalog)"
 )
 
+#: 「审计流水从哪天起」：只看三张 ``audit_*``（``session_catalog`` 的回填可以早得多，
+#: 而读数在它之前是**不存在**的，不是 0）。无审计行 → NULL。
+_EARLIEST_AUDIT_DAY = (
+    "SELECT MIN(d) AS day FROM ("
+    "SELECT MIN(substr(ts, 1, 10)) AS d FROM audit_llm_call"
+    " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_tool_call"
+    " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message)"
+)
+
 #: 会话作用域的 404 判据 = 「这几张表里有没有它的任何一行」。表清单是唯一事实：
 #: 绑定参数的个数由它派生（漏一张表就会静默把所有带会话的请求判成 404）。
 _SCOPE_TABLES: tuple[str, ...] = (
@@ -455,6 +464,16 @@ class MetricsStore:
     def earliest_day(self) -> str | None:
         """有记录的第一天（四张表的 ``MIN``；库为空 → ``None``）。"""
         rows = self._rows(_EARLIEST_DAY, ())
+        return _text(rows[0]["day"]) if rows else None
+
+    def earliest_audit_day(self) -> str | None:
+        """审计流水（三张 ``audit_*``）最早的一天；没有审计行 → ``None``。
+
+        与 :meth:`earliest_day` 的差别就是 ``session_catalog``：回填把存量会话补进目录，
+        于是「建过多少会话」能追溯到安装之前，而 token / 调用计数不行——消费方据这个
+        差值给出「审计从此日起」的诚实提示。
+        """
+        rows = self._rows(_EARLIEST_AUDIT_DAY, ())
         return _text(rows[0]["day"]) if rows else None
 
     def has_usage_record(self, session_id: str) -> bool:
