@@ -291,7 +291,7 @@ fn mix(surface: Color, accent: Color, t: f64) -> Color {
         return accent;
     };
     let lerp = |from: u8, to: u8| (from as f64 + (to as f64 - from as f64) * t).round() as u8;
-    Color::Rgb(lerp(sr, ar).min(ar.max(sr)), lerp(sg, ag), lerp(sb, ab))
+    Color::Rgb(lerp(sr, ar), lerp(sg, ag), lerp(sb, ab))
 }
 
 fn rgb(color: Color) -> Option<(u8, u8, u8)> {
