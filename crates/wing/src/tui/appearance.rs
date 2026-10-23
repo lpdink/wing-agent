@@ -51,7 +51,12 @@ pub fn detect(timeout: Duration) -> Option<Appearance> {
     let mut stdout = std::io::stdout();
     stdout.write_all(QUERY).ok()?;
     stdout.flush().ok()?;
-    collect(&mut tty::read_before, deadline)
+    let answer = collect(&mut tty::read_before, deadline);
+    // 预算耗尽后迟到的应答会留在输入队列里：`wing ps` 退出后它会被 shell 读成
+    // 一条乱码命令（TUI 路径由 stdin_proxy 吞掉）。清掉它——窗口内的键入本来
+    // 就已经被 `read` 走，这是同一个取舍。
+    tty::discard_pending_input();
+    answer
 }
 
 /// 进程级一次：按 `preset` 决定要不要问（显式 preset 零查询、零开销），答案记下来给
@@ -190,9 +195,17 @@ mod tty {
 
     /// 一次查询期间的 fd 0 形态：关掉行缓冲与回显，读立即返回。Drop 原样写回。
     ///
-    /// 只动这两项、留 `ISIG`：探测窗口里的 Ctrl+C 仍然是中断，不会被当成输入吞掉。
+    /// 窗口内还**阻塞 SIGINT/SIGTERM**：`wing ps` 这类没有 raw mode 的路径上，
+    /// Ctrl+C 的默认处置会直接终止进程、绕过 `Drop`，把 tty 留在非规范 / 无回显
+    /// 状态（非 readline 的 shell 得 `stty sane` 才能救回）。阻塞后信号在窗口
+    /// 结束、mask 恢复时才投递，用户仍然退得出去（只是晚 ≤150ms）。
+    ///
+    /// TUI 路径上 `enable_raw_mode` 走 `cfmakeraw`（ISIG 已关），窗口内的按键
+    /// ——包括 Ctrl+C——会被 `read` 走并丢弃；这是启动期 ≤150ms 的既有取舍
+    /// （与图像能力探测同款）。
     pub(super) struct Window {
         saved: libc::termios,
+        saved_mask: libc::sigset_t,
     }
 
     impl Window {
@@ -203,23 +216,38 @@ mod tty {
             }
             let mut window = saved;
             // 只关规范模式与回显：探测需要「读到就有、不等整行」。
-            // 注意 TUI 路径上 `enable_raw_mode()` 已把输入设成 `cfmakeraw`
-            // （ISIG 也是关的），所以窗口内的按键——**包括 Ctrl+C**——会被
-            // 读走并丢弃；这是启动期 ≤150ms 的既有取舍（与图像能力探测同款）。
             window.c_lflag &= !(libc::ICANON | libc::ECHO);
             window.c_cc[libc::VMIN] = 0;
             window.c_cc[libc::VTIME] = 0;
             if unsafe { libc::tcsetattr(0, libc::TCSANOW, &window) } != 0 {
                 return None;
             }
-            Some(Self { saved })
+            // termios 已生效：从这里起必须由 Drop 收尾，所以信号阻塞放在最后，
+            // 失败也不回滚（阻塞失败只是回到「信号可能杀进程」的旧行为）。
+            let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+            let mut saved_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGINT);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut saved_mask);
+            }
+            Some(Self { saved, saved_mask })
         }
     }
 
     impl Drop for Window {
         fn drop(&mut self) {
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.saved) };
+            unsafe {
+                libc::tcsetattr(0, libc::TCSANOW, &self.saved);
+                libc::pthread_sigmask(libc::SIG_SETMASK, &self.saved_mask, std::ptr::null_mut());
+            }
         }
+    }
+
+    /// 丢掉输入队列里仍挂着的字节（超时后迟到的 OSC 11 应答）。
+    pub(super) fn discard_pending_input() {
+        unsafe { libc::tcflush(0, libc::TCIFLUSH) };
     }
 
     /// 等到 `deadline` 之前 fd 0 可读，最多读一个 chunk。`Ok(0)` = 预算内没有字节

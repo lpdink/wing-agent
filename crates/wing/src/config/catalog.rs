@@ -435,34 +435,30 @@ fn preset_node() -> SettingNode {
         "Colors",
         COLORS_SECTION_DOC,
     );
-    // 变体清单只有 `ColorPreset::ALL` 一处；这里只提供每个变体的文案。
-    const DOCS: [(&str, &str); 4] = [
-        (
-            "auto",
-            "跟随终端：启动时探测背景明暗，亮底用 light、暗底用 wing，探测不到用 wing（默认）",
-        ),
-        ("wing", "为暗底终端设计的 hex 灰阶 + cyan accent"),
-        ("light", "为亮底终端设计的同一套色相（白底校准）"),
-        (
-            "terminal",
-            "跟随终端自己的 ANSI 色（高级逃生舱；亮底终端请优先用 auto / light）",
-        ),
-    ];
+    // 变体清单只有 `ColorPreset::ALL` 一处；文案用 exhaustive match 钉住
+    // （新增变体先用编译错误提醒写文案，再进 choices）。
     node.choices = ColorPreset::ALL
         .iter()
-        .map(|preset| {
-            let doc = DOCS
-                .iter()
-                .find(|(value, _)| *value == preset.as_str())
-                .map(|(_, doc)| *doc)
-                .expect("every preset needs a doc");
-            choice(preset.as_str(), doc)
-        })
+        .map(|preset| choice(preset.as_str(), preset_doc(*preset)))
         .collect();
     // 默认值用小写拼写（= choices 的口径）；`Deserialize` 大小写不敏感，两种都能读。
     node.default = Some(Value::from("auto"));
     node.has_default = true;
     node
+}
+
+/// 每个预设的界面文案。`match` 是 exhaustive 的：新增变体会在编译期要求补文案。
+fn preset_doc(preset: ColorPreset) -> &'static str {
+    match preset {
+        ColorPreset::Auto => {
+            "跟随终端：启动时探测背景明暗，亮底用 light、暗底用 wing，探测不到用 wing（默认）"
+        }
+        ColorPreset::Wing => "为暗底终端设计的 hex 灰阶 + cyan accent",
+        ColorPreset::Light => "为亮底终端设计的同一套色相（白底校准）",
+        ColorPreset::Terminal => {
+            "跟随终端自己的 ANSI 色（高级逃生舱；亮底终端请优先用 auto / light）"
+        }
+    }
 }
 
 fn slot_node(key: &str, doc: &str, default: &str, order: i64) -> SettingNode {

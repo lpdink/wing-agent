@@ -36,10 +36,11 @@ impl ToastKind {
     /// appearance: a dark tint on a light terminal would be the one opaque
     /// block on the screen (and its default foreground would vanish into it).
     fn bg_color(self, palette: &ThemePalette) -> Color {
-        // `terminal` hands both foreground and background to the terminal
-        // (`text == Reset`); painting a fixed dark slab would put the
-        // terminal's own (dark, on a light scheme) foreground on it.
-        if palette.text == Color::Reset {
+        // `terminal` hands the background to the terminal; painting a fixed
+        // dark slab would put the terminal's own (dark, on a light scheme)
+        // foreground on it. The preset says so explicitly — not inferred from
+        // a colour slot (a user override must not flip this).
+        if !palette.owns_background {
             return Color::Reset;
         }
         match (palette.appearance, self) {
@@ -266,6 +267,7 @@ mod tests {
             },
             None,
         );
+        assert!(!terminal.owns_background);
         for kind in [ToastKind::Info, ToastKind::Warning, ToastKind::Error] {
             assert_eq!(kind.bg_color(&terminal), Color::Reset);
         }

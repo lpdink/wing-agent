@@ -145,6 +145,11 @@ const PUMP_PENDING_HIGH_WATER: usize = 64 * 1024;
 /// `ESC]5522;`——OSC 5522（kitty clipboard protocol）的前缀。
 const SEQUENCE_PREFIX: &[u8] = b"\x1b]5522;";
 
+/// `ESC]11;`——OSC 11（终端背景色）应答的前缀。启动期探测（`tui::appearance`）之后
+/// 迟到的应答会落进分流器：吞掉它，绝不能透传给 crossterm（`ESC]11;` 会被解析成
+/// `Alt+]` + 字面文字，灌进 composer）。
+const COLOR_QUERY_PREFIX: &[u8] = b"\x1b]11;";
+
 /// `ESC[?`——DECRPM 应答（`CSI ? Pa ; Ps $ y`）的固定开头。
 const REPORT_OPEN: &[u8] = b"\x1b[?";
 
@@ -202,6 +207,9 @@ enum Hold {
         payload: Vec<u8>,
         since: Instant,
         overflow: bool,
+        /// 整条收下后**丢弃**而不是交给协议机：OSC 11 应答不属于 5522，
+        /// 它只是不该落进 crossterm。
+        discard: bool,
     },
     /// bracketed paste 保护区内：`ESC[201~` 之前一律原样透传，尾部最多 6 字节待判。
     Paste { tail: Vec<u8> },
@@ -213,6 +221,8 @@ enum Candidate {
     Partial,
     /// 完整匹配 `ESC]5522;`。
     Sequence,
+    /// 完整匹配 `ESC]11;`（终端背景色应答，丢弃）。
+    ColorQuery,
     /// 完整匹配 `ESC[200~`。
     PasteOpen,
     /// 完整匹配一条 DECRPM 应答（`ESC[?` + 参数 + `$y`）。
@@ -234,6 +244,13 @@ fn classify(buf: &[u8]) -> Candidate {
     if partial(SEQUENCE_PREFIX, buf) {
         return if buf.len() == SEQUENCE_PREFIX.len() {
             Candidate::Sequence
+        } else {
+            Candidate::Partial
+        };
+    }
+    if partial(COLOR_QUERY_PREFIX, buf) {
+        return if buf.len() == COLOR_QUERY_PREFIX.len() {
+            Candidate::ColorQuery
         } else {
             Candidate::Partial
         };
@@ -361,11 +378,12 @@ impl Splitter {
                     *since = now;
                     match classify(bytes) {
                         Candidate::Partial => {}
-                        Candidate::Sequence => {
+                        Candidate::Sequence | Candidate::ColorQuery => {
                             self.hold = Hold::Body {
                                 payload: Vec::new(),
                                 since: now,
                                 overflow: false,
+                                discard: matches!(classify(bytes), Candidate::ColorQuery),
                             };
                         }
                         Candidate::PasteOpen => {
@@ -404,11 +422,12 @@ impl Splitter {
                     payload,
                     since,
                     overflow,
+                    discard,
                 } => {
                     let b = chunk[i];
                     i += 1;
                     if b == BEL {
-                        if *overflow {
+                        if *overflow || *discard {
                             payload.clear(); // 超限包已 warn，这里只把槽位还给下一个候选
                         } else {
                             out.sequences.push(std::mem::take(payload));
@@ -429,7 +448,7 @@ impl Splitter {
                     }
                     // `ends_with` 天然覆盖 ST 被 read 边界切开的情况（base64 负载里不含 ESC）。
                     if payload.ends_with(b"\x1b\\") {
-                        if *overflow {
+                        if *overflow || *discard {
                             payload.clear();
                         } else {
                             payload.truncate(payload.len() - 2);
@@ -1159,6 +1178,53 @@ mod tests {
         out.extend_from_slice(inner.as_bytes());
         out.extend_from_slice(b"\x1b\\");
         out
+    }
+
+    /// OSC 11 应答（启动期探测的迟到回复）整条吞掉：它不属于 5522，也不能
+    /// 透传给 crossterm（`ESC]11;` 会被解析成 `Alt+]` + 字面文字）。
+    #[test]
+    fn a_late_color_query_reply_is_swallowed() {
+        for terminator in [BEL, b'\\'] {
+            let mut raw = COLOR_QUERY_PREFIX.to_vec();
+            raw.extend_from_slice(b"rgb:ffff/ffff/ffff");
+            if terminator == b'\\' {
+                raw.extend_from_slice(b"\x1b\\");
+            } else {
+                raw.push(BEL);
+            }
+            let mut s = local();
+            let out = feed(&mut s, &raw, 0);
+            assert_eq!(out.passthrough, b"", "不能漏进键盘流");
+            assert!(out.sequences.is_empty(), "也不是 5522 负载");
+            // 尾部普通字节照常透传（吞的只是那一条）。
+            let out = feed(&mut s, b"x", 0);
+            assert_eq!(out.passthrough, b"x");
+        }
+    }
+
+    /// 分片到达同样收得拢；OSC 4（调色板查询）不冒充 OSC 11。
+    #[test]
+    fn color_query_handles_fragments_and_does_not_swallow_osc4() {
+        let raw = {
+            let mut v = COLOR_QUERY_PREFIX.to_vec();
+            v.extend_from_slice(b"rgb:0000/0000/0000\x1b\\");
+            v
+        };
+        let mut s = local();
+        let mut passthrough = Vec::new();
+        let mut sequences = Vec::new();
+        for chunk in raw.chunks(3) {
+            let out = feed(&mut s, chunk, 0);
+            passthrough.extend(out.passthrough);
+            sequences.extend(out.sequences);
+        }
+        assert!(passthrough.is_empty(), "{passthrough:?}");
+        assert!(sequences.is_empty());
+
+        // OSC 4 的回复不是 OSC 11：原样透传（crossterm 那边与既有一致）。
+        let mut s = local();
+        let out = feed(&mut s, b"\x1b]4;11;rgb:ffff/ffff/ffff\x07", 0);
+        assert_eq!(out.passthrough, b"\x1b]4;11;rgb:ffff/ffff/ffff\x07");
     }
 
     #[test]

@@ -169,6 +169,7 @@ impl ColorPreset {
                 math_mode: MathMode::Text,
                 appearance: Appearance::Dark,
                 syntax: SyntaxTheme::Dark,
+                owns_background: true,
             },
             Self::Light => ThemePalette {
                 accent: Color::Rgb(0x0e, 0x74, 0x90),
@@ -195,6 +196,7 @@ impl ColorPreset {
                 math_mode: MathMode::Text,
                 appearance: Appearance::Light,
                 syntax: SyntaxTheme::Light,
+                owns_background: true,
             },
             Self::Terminal => ThemePalette {
                 accent: Color::Cyan,
@@ -233,6 +235,7 @@ impl ColorPreset {
                 // hatch. Light-terminal users get `light` / `auto` instead.
                 appearance: Appearance::Dark,
                 syntax: SyntaxTheme::Dark,
+                owns_background: false,
             },
         }
     }
@@ -544,6 +547,11 @@ pub struct ThemePalette {
     pub appearance: Appearance,
     /// Which syntect theme code blocks use, paired with `appearance`.
     pub syntax: SyntaxTheme,
+    /// Whether this palette paints its own background bands (card surface, diff
+    /// tints, toast). `terminal` hands the background to the terminal and sets
+    /// this to `false` — a property of the preset, not something to infer from
+    /// a colour slot.
+    pub owns_background: bool,
 }
 
 impl Default for ThemePalette {
@@ -605,6 +613,7 @@ impl ThemePalette {
             math_mode: cfg.math_mode,
             appearance: base.appearance,
             syntax: base.syntax,
+            owns_background: base.owns_background,
         }
     }
 }
@@ -617,10 +626,10 @@ impl ThemePalette {
     /// selected row indistinguishable from an unselected one — fall back to
     /// the quiet register, which is a real ANSI colour in that preset.
     pub fn selection_band(&self) -> Color {
-        if self.surface == Color::Reset {
-            self.dim
-        } else {
+        if self.owns_background {
             self.surface
+        } else {
+            self.dim
         }
     }
 }

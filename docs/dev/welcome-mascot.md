@@ -22,7 +22,8 @@
 `examples/export_logo.rs` 的 `banner-light.svg` 用亮底那套。
 
 **品牌色固定、不跟主题走**：海鸥之所以是海鸥靠的就是这身颜色；跟主题呼吸的只有
-`A` 和 wordmark 的渐变方向（暗底冰→accent，亮底 accent→深，见 `ui::shimmer::is_light_theme`）。
+`A`、羽色两套（暗底白羽 / 亮底浅蓝灰）与 wordmark 的渐变方向（暗底冰→accent，
+亮底 accent→深，见 `ThemePalette::appearance`）。
 
 渲染是半格：一个终端格装上下两像素，上=前景、下=背景；只画半格的格子只设前景
 （给 `▄` 配背景会把透明的上半填成对面那半的颜色）。见 `sprite::lines`。
