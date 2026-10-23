@@ -11,7 +11,7 @@
 - `is_light_theme` 判据自指：读 `palette.text`（默认 preset 自己就是浅色），默认配置 + 白底永远判「暗底」。wordmark 渐变、thinking 刷光、`heading_bright` 三处亮底分支从未在开箱配置下执行过。
 - `ColorPreset::Terminal`（「跟随终端 ANSI」）不是解：`text: Color::White` 绑死 ANSI 15，在 Solarized Light / Tomorrow / xterm 默认下是 1.08 / 1.00 / 1.00，10~11 个槽不合格；`surface` 与 diff tint 仍是写死的深色。
 
-好消息：视觉权重几乎全部由 `ThemePalette` 的 24 个槽承担（约 450 处消费），硬编码只剩 6 个岛（Wing 预设本体、Terminal 的 surface+diff、4 处 syntect、toast 三色、海鸥品牌色、刷光端点）。
+好消息：视觉权重几乎全部由 `ThemePalette` 的 21 个颜色槽（20 个 YAML 键 + 派生的 `heading_bright`）承担（约 450 处消费），硬编码只剩 6 个岛（Wing 预设本体、Terminal 的 surface+diff、4 处 syntect、toast 三色、海鸥品牌色、刷光端点）。
 
 ## 2. 决策
 
@@ -88,7 +88,7 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 | `text` | `#1f2328` | 15.80 |
 | `thinking` | `#4b5563` | 7.56 |
 | `tool_result` | `#57606a` | 6.39 |
-| `dim` | `#6e7781` | 4.55 |
+| `dim` | `#626a73` | 5.49 |
 | `accent` | `#0e7490` | 5.36 |
 | `success` | `#1a7f37` | 5.08 |
 | `warning` | `#8a5a00` | 5.93 |
@@ -97,10 +97,10 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 | `heading_bright` | `#5b21b6` | 8.98 |
 | `inline_code` | `#a4133c` | 7.67 |
 | `marker` | `#5b6b8c` | 5.35 |
-| `quote` | `#6b7280` | 4.83 |
+| `quote` | `#646b76` | 5.38 |
 | `thinking_label` | `#8a5a00` | 5.93 |
 | `strong` | `#7c4a03` | 7.40 |
-| `surface` | `#f0f3f8` | 底：1.11 / 其上 text 14.20 |
+| `surface` | `#e7ecf3` | 底：1.21 / 其上 text 13.31 |
 | `diff_add_bg` | `#e6f4ea` | 1.14 / 13.91 |
 | `diff_del_bg` | `#fdecec` | 1.14 / 13.83 |
 | `diff_add_bg_strong` | `#c6ead0` | 1.31 / 12.10 |
@@ -120,7 +120,7 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 | `ui/toast.rs` | 三种底按 appearance 选（浅色下浅底），正文显式设 `text` |
 | `ui/popup/selection.rs` | 选中行统一为「`surface` 底 + `text` 前景」；删除 ANSI `Gray` 描述色 |
 | `ui/cells/model_picker.rs` | 选中色带与 selection 同语义（`surface` + `text`） |
-| `ui/welcome/{wordmark,sprite,mod}.rs` | 海鸥按 appearance 出两套羽色（同一像素网格）；渐变方向读 `appearance` |
+| `ui/welcome/{sprite,mod}.rs` | 海鸥按 appearance 出两套羽色（同一像素网格）；wordmark 渐变方向改为读 `appearance`（`light` 参数早已存在） |
 | `ui/cells/thinking.rs` | 刷光峰值方向读 `appearance` |
 | `ui/shimmer.rs` | 删除 `is_light_theme`（自指判据）；混色仍以 `to_rgb` 兜底 |
 | `ui/cells/todo_msg.rs` | 浅色下不再给已安静的槽叠 `Modifier::DIM` |
@@ -137,14 +137,15 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 - `NO_COLOR`：TUI 不参与（现状）；CLI 表格已有 `no-color` 口径 —— 不探测，输出本就没有墨色。
 - 非 tty、`--json`、`--plain`：不探测，不影响输出。
 - 逐槽覆盖跨 preset 生效：用户显式值优先，文档写明。
-- 探测会吞掉启动窗口（≤150 ms）内的按键，与现有图像能力探测（≤500 ms）同款取舍；打字机场景下这仍是唯一可行的时点。
+- 探测会吞掉启动窗口（≤150 ms）内的按键（**包括 Ctrl+C**：TUI 路径的 `enable_raw_mode` 走 `cfmakeraw`，ISIG 已关），与现有图像能力探测（≤500 ms）同款取舍；打字机场景下这仍是唯一可行的时点。
+- `terminal` 预设把背景交给终端：`surface` 与四个 diff tint = `Reset`（不铺底），toast 也不铺底；popup 的选中带回退到 `dim`（否则 `Reset` 带与未选中行无法区分）。
 
 ## 7. 测试判据
 
-- **对比度单测**：light preset 每个前景槽在 `#ffffff` / `#f7f7f7` 上 ≥ 约定阈值；`surface` 与 diff tint 上的 `text` ≥ 4.5。
+- **对比度单测**：light preset 每个前景槽在 `#ffffff` **与 `#f7f7f7`** 上 ≥ 约定阈值（正文/信息 4.5、装饰 3.0）；`text` 在 `surface` 与四个 diff tint 上 ≥ 4.5，`dim` 在 `surface` / `diff_add_bg` / `diff_del_bg` 上 ≥ 4.5。toast 的正文在其浅色底上 ≥ 4.5。
 - **appearance 单测**：`Wing → Dark`、`Light → Light`、`Terminal → Dark`；`Auto` 解析在注入探测结果下的四条分支（亮/暗/None/超时）。
 - **语法主题单测**：`palette.syntax` 切换后关键字/字符串色值随之变化。
-- **渲染回归**：欢迎屏、popup、settings、toast 各一张白底与黑底的文本 + 颜色断言（复用现有 `theme_preview` / 捕获工具）。
+- **渲染回归**：已落地——wordmark 亮底扫光使整行**变暗**（暗底反之）；popup 选中行在 `wing` / `light` / `terminal` 三套调色板下逐 span 校验前景（accent 不被 `Style::patch` 抹平）与选中带；toast 亮底正文对比度。**未落地（留二期）**：settings 全面板与欢迎屏整帧的白底快照。
 - **检测**（`tui/appearance.rs` 单测，不碰真终端）：BEL / ST 两种终止符、1/2/4 位 hex、中灰落暗侧、通道加权（纯绿亮 / 纯红暗）、杂字节包围、畸形应答（缺 / 多通道、非 hex、非 `rgb:`）、应答跨 read 分片、终止前不解析、噪声按 128 字节封顶、答案只问一次。
 - **检测的端到端证据**（`tests/appearance_probe_pty.rs`，pty 级）：白底应答 → `Light`；不答 → `None` 且耗时不越过预算。
 - 更新受影响的既有测试（A 报告 §6 的 12 组：亮度序、`to_rgb → 白`、toast RGB、popup `bg == dim`、海鸥羽白、settings 预览等）。
