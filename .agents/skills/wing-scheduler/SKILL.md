@@ -1,6 +1,6 @@
 ---
 name: wing-scheduler
-description: 超大型任务的无人值守交付编排（scheduler 模式）。把一个大任务拆成步骤与波次，在独立 worktree 上并发派发 headless 子 agent（executor）执行——执行者交付前自派一轮独立审查（B/S/N 分级），全部收口后 scheduler 再派一轮整体审查——最后由 scheduler 集成、push 并产出单一 PR。当用户要求「实施/交付一个大型任务」「拆开并行做掉」「无人值守把这件事做完」「多子 agent 协同开发」，或任务明显需要多波次、多 worktree、跨模块大范围改动时使用。
+description: 超大型任务的无人值守交付编排（scheduler 模式）。把一个大任务拆成步骤与波次，在独立 worktree 上并发派发 headless 子 agent（executor）执行——执行者交付前自派一轮双视角独立审查（正确性 + 架构并发，B/S/N 分级），全部收口后 scheduler 再派一轮整体审查——最后由 scheduler 集成、push 并产出单一 PR。当用户要求「实施/交付一个大型任务」「拆开并行做掉」「无人值守把这件事做完」「多子 agent 协同开发」，或任务明显需要多波次、多 worktree、跨模块大范围改动时使用。
 category: Workflow
 tags: [orchestration, scheduler, multi-agent, delivery, headless]
 ---
@@ -21,15 +21,15 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 2. while 还有未收敛的 step：
      a. 选出"依赖已就绪"的 step，按 lane 派发 executor（并发由你判断）        （§6）
      b. 登记唤醒（`wing run` 默认已开）后干别的，被叫醒就判读结果            （§7）
-     c. 交付达标的 step：验收复核（执行者已自派一轮独立 review）             （§8.1–8.2）
+     c. 交付达标的 step：验收复核（执行者已自派一轮双视角 review）           （§8.1–8.2）
      d. 复核不合格 → `-r` 补齐（最多 3 轮）→ 收敛，或判定阻塞并跳过下游      （§9）
      e. 该 lane 空闲 → 派这条 lane 的下一个 step（别的 lane 继续跑）
      f. 更新 scheduler_log + 向用户播报两行进度                              （§4.3 / §11）
-3. 全部收敛 → 集成到单一分支 → 全量验收 → 派一轮整体 review                  （§10）
+3. 全部收敛 → 集成到单一分支 → 全量验收 → 派一轮整体双视角 review            （§10）
 4. 整体 review 的 B/S 修完 → push / 开 PR → 写 summary.md → 汇报结论         （§10 / §11）
 ```
 
-两个必须同时守住的不变量：**一个 worktree 一个 executor**、**每个 session 都登记**（你派发的当场记；执行者自派的 reviewer 靠它的回执补记，见铁律 10）。
+两个必须同时守住的不变量：**一个 worktree 一个 executor**、**每个 session 都登记**（你派发的当场记；执行者自派的两个 reviewer 靠它的回执补记，见铁律 10）。
 
 ## 0. 适用与不适用
 
@@ -51,8 +51,8 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 | 角色 | 是谁 | 工具集（写死） | 权限边界 |
 |---|---|---|---|
 | **scheduler** | 你，当前会话 | Bash / Read / Write / Edit / Glob / Grep（+ AskUserQuestion） | 唯一与用户对话；唯一能 push / 建 PR；负责任务文档、派发、**验收复核**、**整体 review**、集成、收口 |
-| **executor** | `wing run` 起的 headless session | `Bash,Read,Write,Edit,Grep,Glob` | 只在自己被分配的 worktree 内改代码；**必须清晰 commit**；**交付前自己派发一轮独立 review**；禁止 push / 切分支 / rebase / 动别的 worktree |
-| **reviewer** | `wing run` 起的 headless session | `Bash,Read,Glob,Grep,Write,Edit` | 只读被审 worktree（可跑测试）；唯一允许的写入是任务目录下的 review 报告（Write 起草、Edit 增量改）；**不得再派发任何子 agent**、不得改代码 |
+| **executor** | `wing run` 起的 headless session | `Bash,Read,Write,Edit,Grep,Glob` | 只在自己被分配的 worktree 内改代码；**必须清晰 commit**；**交付前同一轮并发派两个 review（正确性 / 架构）**；禁止 push / 切分支 / rebase / 动别的 worktree |
+| **reviewer ×2** | `wing run` 起的两个 headless session | `Bash,Read,Glob,Grep,Write,Edit` | 只读被审 worktree（可跑测试）；一个审正确性、一个审架构，各自只写自己那份任务目录下的报告（Write 起草、Edit 增量改）；**不得再派发任何子 agent**、不得改代码 |
 
 子 agent **一无所知**：不知道用户是谁、不知道任务背景、不知道别的步骤在做什么、不知道你的计划。它们的全部上下文 = 你写的 prompt + 你指给它的文件。**信息缺口是编排失败的第一大原因**。
 
@@ -63,9 +63,9 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 开工第一件事给自己打标，派发时给每个子 agent 打标——巡检、收口、事后找回都靠它：
 
 - **自己**：`wing tag $WING_SESSION_ID scheduler task=<task_name>`——`$WING_SESSION_ID` 是 Bash 工具注入的环境变量 = 你所在会话的 id（开工时先 `echo $WING_SESSION_ID` 确认非空；为空说明运行环境尚未支持该注入，打标需人工确认 sid）；
-- **executor / reviewer**：派发的 `wing run` 直接带 `--tag executor --tag task=<task_name>`（reviewer 用 `--tag reviewer`）——创建即打标、一条命令原子完成，没有"派发了但没标上"的窗口；`-r` 续跑同样接受 `--tag`（幂等追加）；
+- **executor / reviewer**：派发的 `wing run` 直接带 `--tag executor --tag task=<task_name>`（reviewer 用 `--tag reviewer`，再按视角加 `--tag reviewer-correctness` / `--tag reviewer-arch`）——创建即打标、一条命令原子完成，没有"派发了但没标上"的窗口；`-r` 续跑同样接受 `--tag`（幂等追加）；
 - **巡检 / 找回**：`wing ps --tag task=<task_name>` 看任务全家（多个 `--tag` 为 AND；`--tag` 隐含包含 inactive）；**归档区的会话不在 `wing ps` 里**（冷存储，用 `wing archive --list` 查）；
-- 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词，任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。
+- 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词、视角作后缀（`reviewer-correctness` / `reviewer-arch`），任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。
 
 ## 2. 铁律（违反任意一条，编排都会崩坏）
 
@@ -78,11 +78,11 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 7. **push / 建 PR 只能你做**：executor 只 commit（commit message 要写清楚，reviewer 靠它取信息）。
 8. **任务文档一律放 `$WING_HOME/tasks/<task>/`，用绝对路径引用**：绝不写进 worktree（会污染 diff 与 review 范围）。任务目录在 worktree 之外是刻意设计。
 9. **先记录 base commit，再派发**：没有 base 就没有 review 范围（`<base>..HEAD`）。
-10. **你派发的每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。执行者**自派**的 reviewer 不经过你——契约要求在最终消息里报出它的 sid / 角色 / 结论（§6.2 第 8 条），你在验收复核时把这几行**补进台账**（reviewer 都带 `--tag task=<task_name>`，可用 `wing ps --tag task=<task_name>` 交叉核对）。任务一大，不记就失忆。
+10. **你派发的每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。执行者**自派**的两个 reviewer 不经过你——契约要求在最终消息里各报一行 sid / 视角 / 结论（§6.2 第 8 条），你在验收复核时把这几行**补进台账**（reviewer 都带 `--tag task=<task_name>`，可用 `wing ps --tag task=<task_name>` 交叉核对）。任务一大，不记就失忆。
 11. **失败优先 `-r` 续跑**：`wing run -r <sid> -p "..."` 保留原上下文。开新 session 只在原上下文彻底跑偏时才考虑（不推荐）。
-12. **等待窗口给足**：执行者自派一轮 review 之后，单步实测 30–40 分钟。`wing wait --timeout` 与 Bash 工具的 timeout 都要同步放大（`--timeout 3600`、Bash timeout 3700 起步）；Bash 默认 30s 会把 `wing wait` 进程杀掉（会话本身不受影响，只是白等一轮）。更省的做法是根本不 wait：`wing run` 默认登记「子会话收口 / 提问 → 唤醒我」（§7.1）。
+12. **等待窗口给足**：执行者自派一轮双视角 review 之后，单步实测 30–40 分钟。`wing wait --timeout` 与 Bash 工具的 timeout 都要同步放大（`--timeout 3600`、Bash timeout 3700 起步）；Bash 默认 30s 会把 `wing wait` 进程杀掉（会话本身不受影响，只是白等一轮）。更省的做法是根本不 wait：`wing run` 默认登记「子会话收口 / 提问 → 唤醒我」（§7.1）。
 13. **别相信自己的记忆，相信日志**：你自己的上下文会被自动压缩，跑到后面会忘掉前面。关键状态（sid、base sha、决策、结论）一律**当场**写进 `scheduler_log.md`，需要时读回来。
-14. **每步的 review 归执行者**：你不写 `review_request.md`、不派每步的 reviewer——交付前自派一轮独立 review 是执行者契约的一部分（§6.2）。你的审查活只有两件：**验收复核**（报告在、结论通过、工作区干净）与**收口后的整体 review**（§8）。
+14. **每步的 review 归执行者**：你不写 `review_request.md`、不派每步的 reviewer——交付前并发自派两个视角（正确性 / 架构）的独立 review 是执行者契约的一部分（§6.2）。你的审查活只有两件：**验收复核**（两份报告都在、结论通过、工作区干净）与**收口后的整体 review**（§8）。
 
 ## 3. 目录与产物（标准布局）
 
@@ -96,12 +96,15 @@ $WING_HOME/tasks/<task_name>/
 │   ├── design.md                # 实现设计（executor 写，动手前写）
 │   ├── task.md                  # 勾选清单（executor 写，随做随勾）
 │   ├── review_request.md        # 审查要求（executor 写，交付前派 review 时用）
-│   └── review_r<N>.md           # 审查报告 B/S/N 分级（reviewer 写，r1/r2/r3 不覆盖）
+│   ├── review_r<N>.md           # 正确性审查报告 B/S/N 分级（reviewer 写，r1/r2/r3 不覆盖）
+│   └── review_arch_r<N>.md      # 架构审查报告 B/S/N 分级（reviewer 写，r1/r2/r3 不覆盖）
+├── review_overall_r<N>.md       # 整体审查报告（正确性；scheduler 派，r1/r2/r3 不覆盖）
+├── review_overall_arch_r<N>.md  # 整体审查报告（架构；scheduler 派，r1/r2/r3 不覆盖）
 └── ...
 ```
 
 - `<task_name>` 用 **kebab-case**（会出现在命令行与 prompt 里，避免空格与中文）；`<NN>` 是两位编号（01、02…），体现拓扑顺序；依赖关系写在步骤 proposal 里。
-- **产物 owner 唯一，不许互相覆盖**：scheduler 只写 proposal / scheduler_log / summary（+ 整体 review 的 review_request）；executor 只写 design / task / review_request + 代码；reviewer 只写 review 报告。
+- **产物 owner 唯一，不许互相覆盖**：scheduler 只写 proposal / scheduler_log / summary（+ 整体 review 的 review_request）；executor 只写 design / task / review_request + 代码；reviewer 各写自己那份 review 报告（正确性 `review_r<N>.md` / 架构 `review_arch_r<N>.md`；整体 review 的 `review_overall_r<N>.md` / `review_overall_arch_r<N>.md` 同样归 reviewer）。
 
 ## 4. 阶段 1 — 需求澄清与任务书（唯一需要人类介入的阶段）
 
@@ -137,7 +140,7 @@ $WING_HOME/tasks/<task_name>/
 
 ### 5.1 拆分准则
 
-- **一个 step = 一次能交付的完整可验证单元**：能在一次等待窗口内产出「代码 + 验证 + commit + 总结」，窗口给到 1 小时（执行者还要自己派一轮 review，实测 30–40 分钟/步）；只是判断依据，不是硬闸——超了就再拆，宁可多一个步骤，也不要一个巨型步骤。
+- **一个 step = 一次能交付的完整可验证单元**：能在一次等待窗口内产出「代码 + 验证 + commit + 总结」，窗口给到 1 小时（执行者还要自己并发派两个 review，实测 30–40 分钟/步）；只是判断依据，不是硬闸——超了就再拆，宁可多一个步骤，也不要一个巨型步骤。
 - **按接口切，不按文件切**：步骤之间只通过明确的接口 / 文件 / 数据结构交互，这些接口写进步骤 proposal 的 Dependencies。
 - **验证自包含**：每个 step 都能独立跑通自己的验证命令（跑不起全量测试说明粒度不对）。
 - **可并行、可独立 review、可独立回滚**。
@@ -211,7 +214,7 @@ EOF
 ```
 
 - **`cd <worktree>` 决定 session 的 workspace**（子 agent 所有工具的相对路径基准）——必须 `cd` 到 worktree，不能在自己的目录里派发；
-- **`--tag executor --tag task=<task_name>` 派发即打标**（§1.1，reviewer 用 `--tag reviewer`）——创建时原子写进会话，别事后再补；
+- **`--tag executor --tag task=<task_name>` 派发即打标**（§1.1，reviewer 用 `--tag reviewer` + 视角标签）——创建时原子写进会话，别事后再补；
 - `--json` 给你可解析的 session id：`| jq -r .session_id`；
 - 用 `<<'EOF'`（**带引号**）确保 prompt 里的反引号、`$VAR`、引号原样传入（已实测）；
 - 想留痕可先把同一段 prompt 落盘到 `<step_dir>/prompt_executor.md`，再 `-p "$(cat ...)"`（可选，便于事后复盘）。
@@ -245,15 +248,16 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
 4. 实施中真实执行验证（测试 / 构建 / lint / 脚本）；失败就修到通过，或如实说明为什么无法验证。
 5. 交付前把 task.md 全部勾完；清掉一次性脚本、临时文件、调试产物；不留半成品。
 6. 提交：`git add <你改的文件>`（精确 add，禁止 `git add -A`）+ `git commit -m "<type>(<scope>): <中文描述>"`。禁止 push、禁止切换/新建分支、禁止 rebase、禁止动其它 worktree。
-7. **交付前自己派发一轮独立 review**（契约的一部分，不是可选）：写 <.../<NN>_<step>/review_request.md>（审查对象 / 范围 `<base_sha>..HEAD` / 验收标准 / 你的最终总结），用调度者给你的「审查者契约」文本派发：
-   `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag task=<task_name> -p "<审查者契约 + review_request.md 绝对路径>"`
-   （`--no-notify` 是必须的：你反正要阻塞等它，别让它的收口再往你这里投一条唤醒消息。）
-   然后 `wing wait <reviewer_sid> --timeout 3600 --json`（Bash 工具 timeout 给 3700——铁律 12 的同一套数字；wait 幂等，超时了重等即可）。读报告：**[B] 与 [S] 必修、[N] 你判断**；同一 step 最多 3 轮，复审写 review_r2.md / review_r3.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
+7. **交付前自己派发一轮双视角独立 review**（契约的一部分，不是可选）：写 <.../<NN>_<step>/review_request.md>（审查对象 / 范围 `<base_sha>..HEAD` / 验收标准 / 你的最终总结），用调度者给你的**两份**「审查者契约」文本（正确性 / 架构）**同一轮并发派两个 reviewer**：
+   `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag reviewer-correctness --tag task=<task_name> -p "<正确性契约 + review_request.md 绝对路径>"`
+   `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag reviewer-arch --tag task=<task_name> -p "<架构契约 + review_request.md 绝对路径>"`
+   （`--no-notify` 是必须的：你反正要阻塞等它们，别让它们的收口再往你这里投唤醒消息。）
+   然后一起等：`wing wait <正确性_sid> <架构_sid> --timeout 3600 --json`（Bash 工具 timeout 给 3700——铁律 12 的同一套数字；wait 幂等，超时了重等即可）。读**两份**报告：**[B] 与 [S] 必修、[N] 你判断**；两份冲突时以「用户既定决策 > 正确性 > 架构」为序取舍，写进最终消息。同一 step 最多 3 轮，复审写 review_r2.md / review_arch_r2.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
 8. 最终消息（调度者会读，务必完整）：
    - 做了什么（对应 task.md 哪些项）
    - 关键文件清单
    - 验证命令与真实结果（贴关键输出摘要）
-   - 独立 review 的**回执**：reviewer 的 sid / 轮次 / B-S-N 各几条 / 逐条怎么处理 / 报告路径（调度者要靠这几行把它补进台账）
+   - 双视角 review 的**回执**：两个 reviewer 各一行——视角 / sid / 轮次 / B-S-N 各几条 / 逐条怎么处理 / 报告路径（调度者要靠这几行把它们补进台账）
    - 风险 / 未完成项 / 需要下游注意的接口约定
    - commit sha 列表
 
@@ -261,7 +265,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
 - 只改本 worktree 与你自己的 design / task / review_request，其它任务文档只读。
 - 不许为了让测试通过而弱化测试、跳过失败、删断言。
 - 不许留后台进程或长驻服务。
-- **不许把自己的任务外包**：除上面那一轮 review，不得再用 `wing` 派发任何子 agent（不许「派个 agent 把活干了我抄结果」）。活是你自己的。
+- **不许把自己的任务外包**：除上面那一轮双视角 review，不得再用 `wing` 派发任何子 agent（不许「派个 agent 把活干了我抄结果」）。活是你自己的。
 ```
 
 ### 6.3 派发后立刻做三件事
@@ -306,7 +310,7 @@ wing wait <sid> --timeout 3600 --json | jq '.results[] | {session_id, status, su
 
 ### 7.3 交付判定（executor 说"做完了"之后，你自己核对）
 
-执行者交回来的东西应当已经包含一轮自派独立 review（§6.2 第 7 条）。核对：
+执行者交回来的东西应当已经包含一轮自派双视角 review（§6.2 第 7 条）。核对：
 
 ```bash
 WT=${WING_HOME:-$HOME/.wing}/worktrees/<repo>-<task>-l1
@@ -315,10 +319,10 @@ grep -n '^- \[ \]' "$STEP/task.md"          # 应为空：所有项都勾了
 git -C "$WT" log --oneline <base_sha>..HEAD # 应有清晰的 commit
 git -C "$WT" status --porcelain             # 应干净
 ls "$STEP"/design.md "$STEP"/task.md        # 必须存在
-ls "$STEP"/review_r*.md                     # 必须存在：执行者自派的那轮报告
+ls "$STEP"/review_r*.md "$STEP"/review_arch_r*.md   # 必须存在：执行者自派的两个视角报告
 ```
 
-再打开**最后一轮**报告末尾，确认结论是「通过」（存在任何 B 或 S 都应是「需返修」，那就还得再来一轮）。缺任一 → 按 §9.3 让 executor 用 `-r` 补齐。
+再打开**两份最后一轮**报告的末尾，确认结论都是「通过」（任何一份存在 B 或 S 都应是「需返修」，那就还得再来一轮）。缺任一 → 按 §9.3 让 executor 用 `-r` 补齐。
 
 ### 7.4 巡检与逃生舱
 
@@ -342,16 +346,16 @@ wing interrupt <sid>
 
 | 审什么 | 谁派 | 什么时候 | 你做什么 |
 |---|---|---|---|
-| **每步的独立 review** | 执行者自己（契约第 7 条） | 交付前，按它自己的节奏 | **验收复核**（§8.2） |
-| **整体 review** | 你 | 全部步骤收敛、集成 + 全量验收通过之后（§10.3） | 读报告 → 派执行者修 B/S |
+| **每步的独立 review** | 执行者自己（契约第 7 条；两个视角并发） | 交付前，按它自己的节奏 | **验收复核**（§8.2） |
+| **整体 review** | 你，同样两个视角并发 | 全部步骤收敛、集成 + 全量验收通过之后（§10.3） | 读两份报告 → 派执行者修 B/S |
 
 ### 8.1 每步的 review 由执行者自派
 
-派发 prompt 里已经写死（§6.2 第 7 条）：执行者写 `review_request.md`、按 §8.3 的「审查者契约」派一个只读 reviewer、读报告修 B/S、最多 3 轮。它在自己 lane 的 worktree 里做这件事，与其它 lane 上的 executor 并行互不影响。
+派发 prompt 里已经写死（§6.2 第 7 条）：执行者写 `review_request.md`、按 §8.3 的两份「审查者契约」**同一轮并发派两个**只读 reviewer（正确性 / 架构）、读两份报告修 B/S、最多 3 轮。它在自己 lane 的 worktree 里做这件事，与其它 lane 上的 executor 并行互不影响。
 
 你只要做两件事：
 
-1. **把审查者契约连进执行者 prompt**（§8.3 的文本原样贴过去——子 agent 读不到这份 skill）；
+1. **把两份审查者契约连进执行者 prompt**（按 §8.3 各拼一份：角色 + 对应那段「你要做的」，输出与红线原样；子 agent 读不到这份 skill）；
 2. **验收复核**（§8.2）。
 
 ### 8.2 验收复核（不合格就退回，不要自己上手改）
@@ -359,67 +363,93 @@ wing interrupt <sid>
 ```bash
 WT=<worktree 绝对路径>; STEP=$WING_HOME/tasks/<task>/<NN>_<step>
 git -C "$WT" status --porcelain      # 干净
-ls "$STEP"/review_r*.md              # 报告在（至少 r1）
+ls "$STEP"/review_r*.md "$STEP"/review_arch_r*.md   # 两份都在（至少各 r1）
 grep -n '^- \[ \]' "$STEP/task.md"   # 空：全部勾完
 ```
 
-再确认最后一轮报告的结论是「通过」，并**抽查 1–2 条 B/S 的处理**（报告说修了 ≠ 修了：看 `git log -p` 或对应测试）。任一项不过 → §9.3 用 `-r` 退回；"报告结论是需返修、执行者却没再走一轮"也是退回。
+再确认**两份**最后一轮报告的结论都是「通过」，并从两份里各**抽查 1–2 条 B/S 的处理**（报告说修了 ≠ 修了：看 `git log -p` 或对应测试）。任一项不过 → §9.3 用 `-r` 退回；"报告结论是需返修、执行者却没再走一轮"也是退回。
 
-复核通过时顺手把**执行者自派的 reviewer 那几行**补进 `scheduler_log.md`（sid / 角色 / step / 结论，取自它的最终消息；`wing ps --tag task=<task_name>` 可交叉核对）——铁律 10 对自派 session 的登记就落在这里。
+复核通过时顺手把**执行者自派的两个 reviewer** 补进 `scheduler_log.md`（两个 sid / 视角 / step / 结论，取自它的最终消息；`wing ps --tag task=<task_name>` 可交叉核对）——铁律 10 对自派 session 的登记就落在这里。
 
-### 8.3 审查者契约（执行者派每步 review 用它；整体 review 你派的时候也用这一份）
+### 8.3 审查者契约（执行者派每步 review 用它；整体 review 你派的时候也用这两份）
 
-派发（workspace 用被审 worktree）：
+派发（workspace 用被审 worktree；两个视角同一轮并发派，各拿一个 sid）：
 
 ```bash
 cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" \
-  --tag reviewer --tag task=<task_name> \
+  --tag reviewer --tag reviewer-correctness --tag task=<task_name> \
   -p "$(cat <<'EOF'
-<审查者契约 + 审查要求文件绝对路径>
+<正确性契约 + 审查要求文件绝对路径>
+EOF
+)"
+cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" \
+  --tag reviewer --tag reviewer-arch --tag task=<task_name> \
+  -p "$(cat <<'EOF'
+<架构契约 + 审查要求文件绝对路径>
 EOF
 )"
 ```
 
-（`--no-notify`：reviewer 的收口不需要叫醒任何人——派发方自己会 `wing wait` 它。）
+（`--no-notify`：reviewer 的收口不需要叫醒任何人——派发方自己会 `wing wait` 它们。）
 
-契约文本（内联）：
+契约文本（内联）——两份共用骨架，只有「角色」与「你要做的」按视角不同：
 
 ```
-【角色】你是独立审查者（reviewer）。你的立场与执行者相反：默认它做得不对，用证据说话。没有人类在线，不要提问。
+【角色】你是独立审查者（reviewer），本次只审<正确性|架构>。你的立场与执行者相反：默认它做得不对，用证据说话。没有人类在线，不要提问。
 【审查对象】worktree：<绝对路径>；范围：<base_sha>..HEAD；文件清单：<...>
 【审查要求】先读 <review_request.md 绝对路径>（含验收标准与上下文）
 【必读】<按 review 类型填一处，删掉另一处>
   · 每步 review：① 总任务书 <...> ② 步骤任务书 <...> ③ design.md <...> ④ task.md <...>
   · 整体 review：① 总任务书 <...> ② 各 step 的 proposal 清单 <...> ③ 各 step 的 review 报告清单 <...>
 
-【你要做的】
-1. 读 commit（`git log -p <base>..HEAD`、`git show`）与相关代码，判断是否正确、完整、符合验收标准。
-2. 复现执行者声称的验证：跑它列出的命令，看到真实结果——不是相信它的话。
-3. 独立设计并执行额外验证（边界值、异常路径、回归面、兼容性）；可疑点必须构造实验证伪或证实。
-4. 按 B/S/N 分级写报告：`[B1]` 阻塞（不修不能交付：正确性 / 验收标准 / 安全 / 数据损坏）· `[S1]` 建议（明显更好或潜在风险，应该修）· `[N1]` nit（风格、措辞、可选优化）。每条给出：文件:行 / 问题 / 证据或复现步骤 / 修复建议。
-5. 报告末尾给出：结论（`通过` / `需返修`——存在任何 B 或 S 一律「需返修」）、已验证清单（命令 + 结果）、未验证项与原因、置信度。
+【你要做的】<按视角二选一，见下>
+
+【输出】按 B/S/N 分级写报告：`[B1]` 阻塞（不修不能交付：正确性 / 验收标准 / 安全 / 数据损坏）· `[S1]` 建议（明显更好或潜在风险，应该修）· `[N1]` nit（风格、措辞、可选优化）。每条给出：文件:行 / 问题 / 证据或复现步骤 / 修复建议。报告末尾给出：结论（`通过` / `需返修`——存在任何 B 或 S 一律「需返修」）、已验证清单（命令 + 结果）、未验证项与原因、置信度。
 
 【红线】
 - 不得修改 worktree 里任何文件（不许"顺手修一下"，不许留调试文件；测试产生的临时文件必须清掉）。
 - 不得 git commit / checkout / stash 等任何写操作。
-- 唯一允许的写入：把报告写到 <报告绝对路径>（每步 review = `<step_dir>/review_r<N>.md`；整体 review = `<task_dir>/review_overall_r<N>.md`；用 Write 起草、用 Edit 增量追加/修订）。Write 与 Edit 除了这个报告文件之外没有任何合法用途——不允许对 worktree、代码、任务目录里其它文件做任何修改。
+- 唯一允许的写入：把报告写到 <报告绝对路径>（每步 review 的正确性 = `<step_dir>/review_r<N>.md`、架构 = `<step_dir>/review_arch_r<N>.md`；整体 review = `<task_dir>/review_overall_r<N>.md` / `review_overall_arch_r<N>.md`；用 Write 起草、用 Edit 增量追加/修订）。Write 与 Edit 除了这个报告文件之外没有任何合法用途——不允许对 worktree、代码、任务目录里其它文件做任何修改。
 - **不得再派发任何子 agent**：审查不能外包（不许用 `wing run` / `wing -p` 找别人来看）。审查是你一个人的活。
 - 跑测试可以；长驻服务、会改数据库 / 远端状态、要下载大依赖的命令不要跑；跑完确保 `git status` 干净。
 ```
 
-`review_request.md`（执行者写，模板见附录 C）必须包含：**审查范围**（worktree 绝对路径 + `<base_sha>..HEAD` + 本步骤拥有的文件清单 + 是否含未提交改动）、**验收标准**（从步骤 proposal 的 Verification 抄，reviewer 照此复现）、**上下文**（任务书 / design / task 的绝对路径 + 执行者的最终总结）、**审查重点**（边界、兼容、并发、安全、性能、测试充分性）、**纪律 + 输出格式**（附录 D 的 B/S/N + 结论 + 已验证清单）。
+「你要做的」两选一：
+
+- **正确性**：
+
+  ```
+  1. 读 commit（`git log -p <base>..HEAD`、`git show`）与相关代码，判断是否正确、完整、符合验收标准。
+  2. 复现执行者声称的验证：跑它列出的命令，看到真实结果——不是相信它的话。
+  3. 独立设计并执行额外验证（边界值、异常路径、回归面、兼容性）；可疑点必须构造实验证伪或证实。
+  ```
+
+- **架构**（不重复正确性——功能对不对是另一个人的活，只回答结构 / 取舍 / 整洁度）：
+
+  ```
+  1. 分层与归属：改动落在正确的包 / 层吗？有没有跨层依赖、绕过门面（路由里写 SQL、UI 层做领域决策）？该登记的地方（test_layering.py 的 FAMILIES / FAMILY_RULES、docs/dev/backend-layout.md、layer_guard.rs、AGENTS.md 结构树）登记了吗？
+  2. 最小 diff：逐文件指出「这处改动对目标不是必需的」——顺手重构、重命名、格式化噪声、无关文件、顺手改的注释；能否用更小的改动达成同样目标？
+  3. 重复与模板代码：抄了仓库里已有的实现（该复用 / 抽取），还是写出了第 N 份「看起来一样」的逻辑？不能复用的理由成立吗？
+  4. 抽象是否恰当：过度抽象（为一次性用途造框架 / 配置 / 参数）与抽象不足（同一逻辑散落多处）都要指出；命名是否表达意图。
+  5. 契约与不变量：破坏 AGENTS.md 的不变量或 docs/dev/* 声明的契约（协议形状、事件语义、持久化格式、排序 / 去重口径）了吗？该同步的协议 / 文档同步了吗？
+  6. 仓库整洁度（重点）：注释与文档里有没有不该进开源仓库的东西——计划 / 任务书编号、评审分级代号（`[B1]`）、编排代号（executor / scheduler / reviewer）、辩护式注释（「按评审意见改的」「原来 X 会出问题」）、与代码不符的过期注释、只复述代码的无信息注释；commit message 是否夹带过程信息。
+  7. 一致性与测试面：新代码与周边风格一致吗（错误处理、日志、命名、目录、测试组织）？新增的公共面都有测试吗？文档只更新了该更新的地方吗？
+  ```
+
+`review_request.md`（执行者写，模板见附录 C）必须包含：**审查范围**（worktree 绝对路径 + `<base_sha>..HEAD` + 本步骤拥有的文件清单 + 是否含未提交改动）、**验收标准**（从步骤 proposal 的 Verification 抄，正确性 reviewer 照此复现）、**上下文**（任务书 / design / task 的绝对路径 + 执行者的最终总结）、**审查重点**（正确性：边界、兼容、并发、安全、性能、测试充分性；架构：分层与归属、最小 diff、重复实现、抽象、契约、仓库整洁度、一致性）、**纪律 + 输出格式**（附录 D 的 B/S/N + 结论 + 已验证清单）。
 
 ### 8.4 审查结束后核对
 
 ```bash
-git -C <worktree> status --porcelain    # 必须干净：reviewer 没碰过工作区
+git -C <worktree> status --porcelain    # 必须干净：两个 reviewer 都没碰过工作区
+git -C <worktree> diff --stat           # 有 tracked 改动时，看落到了哪些文件
 ```
 
-不干净 → 该轮审查视为无效：`git checkout -- <paths>` 恢复（或 `git stash`），记一笔，必要时换个 reviewer 重审。
+不干净 → 至少一份审查的现场被污染：`git checkout -- <paths>` 恢复（或 `git stash`），记一笔；能归因就**重派被污染的那个视角**，无法归因就两个都重派（受影响那份报告作废重写）。
 
 ### 8.5 读报告并分类
 
-`Read <step_dir>/review_r<N>.md`，把 B/S/N 摘进 `scheduler_log.md`（编号 + 结论 + 是否已处理）。每步的报告在验收复核时读；整体 review 的报告按 §9 走返修。
+读两份报告（`<step_dir>/review_r<N>.md` 与 `review_arch_r<N>.md`），把两套 B/S/N 摘进 `scheduler_log.md`（视角 + 编号 + 结论 + 是否已处理）。每步的报告在验收复核时读；整体 review 的报告按 §9 走返修。
 
 ## 9. 阶段 6 — 返修闭环
 
@@ -427,9 +457,10 @@ git -C <worktree> status --porcelain    # 必须干净：reviewer 没碰过工�
 
 ### 9.1 红线
 
-- **B 必须修**（不修不能交付）；**S 必须修**（除非你能给出明确理由不修，理由写进 scheduler_log 与 summary）；
+- **B 必须修**（不修不能交付）；**S 必须修**（除非你能给出明确理由不修，理由写进 scheduler_log 与 summary）；两份报告合并处理，任何视角的 B/S 都照此办理；
+- 两份报告冲突时，优先级：**用户既定决策 > 正确性 > 架构**；取舍写进 scheduler_log 与 summary；
 - **N 由你判断**（顺手批量修可以，也可以记录到 summary 交给用户）；
-- **B 修完必须复审**（第二次只看返修点 + 回归面），S 也默认复审；
+- **B 修完必须复审**（两个视角各看自己那份的返修点 + 回归面），S 也默认复审；
 - **同一 step 最多 3 轮（审查 → 返修）**。超限即判定该 step 阻塞：**不要阻塞与它无关的步骤**，把阻塞点写进 summary，最后向用户报告。
 
 ### 9.2 返修派发（resume 原 executor，保留上下文）
@@ -437,7 +468,7 @@ git -C <worktree> status --porcelain    # 必须干净：reviewer 没碰过工�
 ```bash
 cd <worktree> && wing run --json -r <原 executor sid> \
   -p "$(cat <<'EOF'
-【返修任务】审查报告在 <报告绝对路径>。请：
+【返修任务】审查报告在 <正确性报告绝对路径> 与 <架构报告绝对路径>。请：
 1. 逐条处理其中的 [B*] 与 [S*]：修复并说明每条的修复方式；确实不该改的，给出理由与证据（不许沉默跳过）。
 2. [N*] 由你判断是否顺手修复。
 3. 重新跑通 <验证命令>，并跑一遍受影响的回归。
@@ -451,7 +482,7 @@ EOF
 
 - 返修**必须用 `-r` 原 session**（它知道自己改过什么；新 session 会丢掉全部实现上下文。只在原上下文彻底跑偏时才开新 session，并在 log 里写明理由）；
 - `-r` 会忽略 `--tools` / `-m` / `--agent`（工具集、模型与模板沿用原 session；要换模板用 `wing update <sid> --agent <name>`），不要重复传；
-- 复审新写 `review_r2.md`，**不要覆盖 r1**（审查链是交付证据）；
+- 复审各自新写 `review_r2.md` / `review_arch_r2.md`，**不要覆盖 r1**（审查链是交付证据）；
 - 整体 review 的 B/S 若跨多个 step：挑**一个**最相关的 executor 用 `-r` 修（它带着实现上下文），不要让两个 executor 同时改同一批文件（铁律 2）。
 
 ### 9.3 交付不达标（未 commit / 未勾选 / 跑不起来）的处理
@@ -492,12 +523,14 @@ cd "$REPO" && <proposal 里写的构建 / 测试 / 验证命令>
 
 ### 10.3 整体 review（收口前最后一道审查）
 
-每步的 review 只看自己那一步——它会漏掉**跨 step** 的问题。所以全部合进集成分支、全量验收通过之后，**你再派一轮 reviewer** 看整体：
+每步的 review 只看自己那一步——它会漏掉**跨 step** 的问题。所以全部合进集成分支、全量验收通过之后，**你同一轮并发派两个 reviewer**（正确性 + 架构）看整体：
 
 - **审查对象**：集成分支上的整体 diff（`<base_sha>..HEAD`，跨全部 lane）+ 集成后的全量验证；
-- **看什么**（写进 review_request.md）：跨 step 的一致性（同一件事是否两套实现 / 两个名字）、重复实现、文档与代码是否自相矛盾、接口接缝处（上游产物被下游误用）、集成面的回归（全量测试 / 构建）、以及任务书 Out of Scope 是否被越界；
-- **派发**：用 §8.3 的同一份审查者契约（`--tools "Bash,Read,Glob,Grep,Write,Edit"`、`--tag reviewer --tag task=<task_name>`），报告写 `$WING_HOME/tasks/<task>/review_overall_r<N>.md`；`wing wait` 照 §7.1 放大 timeout；
-- **处理**：B/S 一律派执行者用 `-r` 修（§9.2，挑最相关的那个），修完复审写 `review_overall_r2.md`；N 自行取舍；
+- **看什么**（写进 review_request.md）：
+  - 正确性：跨 step 的回归（全量测试 / 构建）、接口接缝处（上游产物被下游误用）、任务书 Out of Scope 是否被越界；
+  - 架构：跨 step 的一致性（同一件事是否两套实现 / 两个名字）、重复实现、分层与归属、文档与代码是否自相矛盾、注释里有没有过程痕迹 / 不该进开源仓库的东西；
+- **派发**：用 §8.3 的两份审查者契约（`--tools "Bash,Read,Glob,Grep,Write,Edit"`、`--tag reviewer` + 视角标签、`--tag task=<task_name>`），报告写 `$WING_HOME/tasks/<task>/review_overall_r<N>.md` / `review_overall_arch_r<N>.md`；`wing wait <sid1> <sid2>` 照 §7.1 放大 timeout；
+- **处理**：两份报告的 B/S 一律派执行者用 `-r` 修（§9.2，挑最相关的那个），修完复审写 `review_overall_r2.md` / `review_overall_arch_r2.md`；N 自行取舍；
 - 这一轮同样是**最多 3 轮**，超限就把阻塞点写进 summary 报给用户。
 
 ### 10.4 push 与 PR（按阶段 1 与用户约定的终态）
@@ -519,7 +552,7 @@ git push -u origin <task>/integration
 写 `$WING_HOME/tasks/<task>/summary.md`（附录 E），然后向用户汇报一段话（**不要复制整个文档**）：
 
 - 交付终态与位置（分支 / PR 链接 / commit 范围）；
-- 变更清单（按步骤，一句话一个）；
+- 变更清单（按步骤，一句话一个；审查结论按两个视角各报一行）；
 - 验证证据（跑了什么命令、结果如何）；
 - **没做的事**（Out of Scope、未修的 S/N、被判定阻塞的步骤）与风险；
 - 需要用户决定的事（合并时机、上线窗口、遗留项）。
@@ -528,7 +561,7 @@ git push -u origin <task>/integration
 
 ### 过程中的进度播报（不阻塞）
 
-全自动 ≠ 全程静默：每次状态跃迁（一波派发完 / 一波 wait 完 / 一轮 review 收敛 / 判定某步阻塞）向用户输出**两行以内**的进度，然后立刻继续干活——**只播报，不等待确认**。这样用户随时回来看都知道跑到哪了。
+全自动 ≠ 全程静默：每次状态跃迁（一波派发完 / 一波 wait 完 / 一轮双视角 review 收敛 / 判定某步阻塞）向用户输出**两行以内**的进度，然后立刻继续干活——**只播报，不等待确认**。这样用户随时回来看都知道跑到哪了。
 
 ## 12. 命令速查
 
@@ -569,7 +602,7 @@ git push -u origin <task>/integration
 4. **把设计写死** → 步骤 proposal 里写"怎么做"，executor 就只会照抄、遇到现实立刻卡住。proposal 管「做什么 / 怎么算完成」，design 管「怎么做」。
 5. **不给绝对路径** → 子 agent 的 workspace 是 worktree，相对路径全部会歪。所有文档引用一律绝对路径。
 6. **不登记 session** → 任务一大就不知道谁是谁、哪条 lane 在跑什么。派发即写 log。
-7. **reviewer 顺手改代码** → 审查失效。每次审查后用 `git status --porcelain` 兜底。
+7. **reviewer 顺手改代码 / 只派一个** → 审查失效或漏掉整个架构视角。每次审查后用 `git status --porcelain` 兜底；同一轮并发派两个、报告分开命名。
 8. **直接相信 executor 的"验证通过"** → reviewer 必须复现命令，你也要抽查（尤其最后一轮全量验收）。
 9. **给每个 lane 开 PR** → 用户要的是单一交付物：先合集成分支，再开一个 PR。
 10. **`git add -A`** → 把无关文件带进 commit。契约里要求精确 add。
@@ -669,18 +702,20 @@ git push -u origin <task>/integration
 <粘贴>
 
 ## 审查重点
-（本步骤的风险点：边界、兼容、并发、安全、性能、测试充分性…）
+（本步骤的风险点。正确性：边界、兼容、并发、安全、性能、测试充分性…；架构：分层与归属、最小 diff、重复实现、抽象、契约、仓库整洁度、一致性…）
 
 ## 纪律
 - 只读；可跑测试；不得修改 worktree 中任何文件
-- 唯一允许的写入：<.../<NN>_<step>/review_r<N>.md>
+- 唯一允许的写入：各自那份报告——正确性 `<.../<NN>_<step>/review_r<N>.md>`、架构 `<.../<NN>_<step>/review_arch_r<N>.md>`
 - 跑完确保 `git status --porcelain` 干净
 
 ## 输出格式
 （见附录 D：B/S/N 分级 + 结论 + 已验证清单）
 ```
 
-### 附录 D — 审查报告 `review_r<N>.md`
+### 附录 D — 审查报告（`review_r<N>.md` / `review_arch_r<N>.md`）
+
+两个视角用同一模板，只有文件名不同：正确性写 `review_r<N>.md`、架构写 `review_arch_r<N>.md`；结论字段都是 `**结论**`，各自只针对自己的维度。
 
 ```markdown
 # <NN> <step_name> — 审查报告（第 <N> 轮）
@@ -729,7 +764,7 @@ git push -u origin <task>/integration
 - PR：<链接 或「未开（约定为本地分支就绪）」>
 
 ## 变更清单
-| 步骤 | 内容 | commit | 审查结论 |
+| 步骤 | 内容 | commit | 审查结论（正确性 / 架构） |
 |---|---|---|---|
 | 01_xxx | … | `abc1234` | 通过（r2） |
 
@@ -764,17 +799,25 @@ git push -u origin <task>/integration
 ## Session 台账
 | sid | 角色 | step | lane | 派发时间 | 状态 | 结论 / 备注 |
 |---|---|---|---|---|---|---|
-| 2026… | executor | 01_xxx | l1 | 09-17 15:02 | idle | 交付 3 commit + 自派 review（review_r1/r2） |
-| 2026… | reviewer（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，B2/S1 已修，见 review_r2.md |
+| 2026… | executor | 01_xxx | l1 | 09-17 15:02 | idle | 交付 3 commit + 自派双视角 review（review_r1 / review_arch_r1） |
+| 2026… | reviewer-correctness（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，B2/S1 已修，见 review_r2.md |
+| 2026… | reviewer-arch（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，S3 已修，见 review_arch_r2.md |
+
+## 审查发现（每轮两份报告各一行摘要）
+
+| 视角 | 编号 | 结论 / 处理 |
+|---|---|---|
+| 正确性 | B2 / S1 | 已修（commit `abc1234`），r2 通过 |
+| 架构 | S3 | 已修，见 review_arch_r2.md |
 
 ## 时间线
 | 时间 | 事件 | 对象 | 详情 |
 |---|---|---|---|
 | 09-17 15:02 | dispatch | 01_xxx / l1 | sid=2026…；prompt 摘要：… |
 | 09-17 16:12 | wake | 01_xxx / l1 | 收到 [wing] finished（subtype=success，41 轮，3900s） |
-| 09-17 16:15 | accept | 01_xxx / l1 | 交付复核通过；自派 review 结论=通过（r2，B2/S1 已修） |
+| 09-17 16:15 | accept | 01_xxx / l1 | 交付复核通过；两份自派 review 结论=通过（r2，B2/S1 已修） |
 | 09-17 16:20 | merge | L1 → integration | `merge: <task> l1` |
-| 09-17 17:02 | review | overall r1 | sid=2026…；结论：需返修（S2） |
+| 09-17 17:02 | review | overall r1（正确性 + 架构） | sid=2026… / 2026…；结论：需返修（S2） |
 
 ## 决策记录
 - （为什么这么拆、为什么串行 / 并行、为什么不修某个 S、为什么开新 session…）
