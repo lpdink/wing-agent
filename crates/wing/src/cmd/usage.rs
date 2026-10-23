@@ -176,6 +176,9 @@ async fn query(
 /// 同一个 404 有两条来源：**这个会话不存在**（0 是一个读数，静默给全 0 会让用户以为
 /// 它没花钱）与**网关还没有这个路由**。带作用域时才需要区分——再发一次**不带作用域**的
 /// 同一查询：它也 404 说明连路由都没有（不嗅探 `detail` 文案，文案会变）。
+///
+/// 「会话不存在」只在**探测自己成功**（200 = 端点可用）时才成立：探测本身失败
+/// （网络 / 5xx / 超时）什么也证明不了，原样报原始错误。
 async fn diagnose(
     http: &GatewayApiClient,
     plan: &Plan,
@@ -196,8 +199,9 @@ async fn diagnose(
         ..plan.clone()
     };
     match query(http, &probe, dim, limit).await {
-        Err(error) if matches!(status_of(&error), Some(404 | 405)) => classify(*error, None),
-        _ => classify(error, Some(session_id)),
+        Ok(_) => classify(error, Some(session_id)),
+        Err(probe_error) if is_missing_route(&probe_error) => classify(*probe_error, None),
+        Err(_) => anyhow::anyhow!("{error}"),
     }
 }
 
@@ -749,7 +753,11 @@ fn format_detail(
     out: &TableOutput,
 ) -> String {
     let mut text = String::new();
-    if let Some(note) = empty_note(report) {
+    // 空态只在窗口里真的一行都没有时成立：后端会把「只建过会话」这类计数算成行，
+    // 吞掉它们既不诚实，`--since all` 也补不出流水。
+    if report.rows.is_empty()
+        && let Some(note) = empty_note(report)
+    {
         text.push_str(note);
         text.push('\n');
         return text;
@@ -774,6 +782,10 @@ fn format_detail(
     text.push_str(&common::render_table(&table, palette, out));
     if report.truncated {
         text.push_str(&format!("… more {} (raise --limit)\n", dim.as_str()));
+    }
+    // 有行、但十个流水度量全 0：说清楚这一窗只有目录事实（换窗口也补不出流水）。
+    if !report.totals.has_flow() {
+        text.push_str("only sessions created in this range (no flow yet)\n");
     }
     text
 }
@@ -1635,6 +1647,65 @@ mod tests {
             &ThemePalette::default(),
             &out(),
         )
+    }
+
+    #[test]
+    fn a_catalog_only_window_draws_its_rows_with_a_footnote() {
+        // 只建过会话、还没有流水：后端给的行照常出表（吞掉它们会让 `--since all`
+        // 变成一句空话——换窗口也补不出流水）。
+        let catalog_only = UsageMeasures {
+            sessions_created: 2,
+            ..UsageMeasures::default()
+        };
+        let text = detail(
+            Dim::Day,
+            vec![row("2026-08-03", catalog_only.clone())],
+            catalog_only,
+        );
+        assert!(!text.contains("No activity in this range"), "{text}");
+        assert!(text.contains("2026-08-03"), "{text}");
+        assert!(text.contains("TOTAL"), "{text}");
+        assert!(
+            text.contains("only sessions created in this range (no flow yet)"),
+            "{text}"
+        );
+
+        // 一行都没有 → 仍是空态文案，且不带那句表尾。
+        assert_eq!(
+            detail(Dim::Session, vec![], UsageMeasures::default()),
+            "No activity in this range (try --since all).\n"
+        );
+
+        // 有流水 → 表尾那句不出现。
+        let busy = detail(
+            Dim::Day,
+            vec![row("2026-08-03", measures(1_000, 10, 990))],
+            measures(1_000, 10, 990),
+        );
+        assert!(!busy.contains("only sessions created"), "{busy}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_is_not_read_as_a_missing_session() {
+        // 探测请求自己失败（指向一个没人监听的回环端口）时什么也证明不了：原样报原始错误。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // 关掉即无人监听（端口刚被内核分配过，不会被别人瞬占）
+        let http = GatewayApiClient::new(format!("http://{addr}"), None).unwrap();
+        let mut opts = opts();
+        opts.session = Some("ghost".into());
+        let plan = Plan::resolve(&opts).unwrap();
+        let not_found = ApiClientError::Api {
+            status: 404,
+            detail: "not found".into(),
+            body: None,
+        };
+
+        let message = diagnose(&http, &plan, None, None, not_found)
+            .await
+            .to_string();
+        assert!(!message.contains("session not found"), "{message}");
+        assert!(message.contains("404"), "{message}");
     }
 
     #[test]
