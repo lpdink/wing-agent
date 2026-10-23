@@ -69,7 +69,12 @@ pub async fn read_ledger(http_base: &str, api_key: Option<&str>, session_id: &st
 pub async fn print_exit_summary(http_base: &str, api_key: Option<&str>, exit: &TuiExit) {
     let ledger = read_ledger(http_base, api_key, &exit.session_id).await;
     let out = TableOutput::detect();
-    let palette = ThemePalette::from_config(&crate::config::AppConfig::load().colors);
+    // 同进程里探测答案还在：TUI 刚退出，摘要不该换回另一套配色（亮底终端上
+    // `Wing.text` 只有 1.21:1，值列会看不见）。
+    let palette = ThemePalette::from_config_with_appearance(
+        &crate::config::AppConfig::load().colors,
+        crate::tui::detected_appearance(),
+    );
     print!("{}", render_exit_summary(exit, ledger, &palette, &out));
 }
 

@@ -2174,7 +2174,7 @@ fn enum_cursor(node: &SettingNode, value: Option<&Value>) -> usize {
         Some(Value::String(text)) => node
             .choices
             .iter()
-            .position(|choice| choice.value == *text)
+            .position(|choice| choice.value.eq_ignore_ascii_case(text))
             .unwrap_or(0),
         Some(Value::Null) if node.nullable => unset,
         Some(_) => 0,

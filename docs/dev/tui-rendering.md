@@ -179,7 +179,7 @@ markdown 的每个元素**归属一个角色**，角色决定色相；同一角�
 
 引用里的表格（第四节的既有边界：表格不注入外层前缀）单元格取**引文的色相**——它就在引文里；表头带的判定按外层声音比，所以照样生效。
 
-调色 / 对色**不用起 TUI**：`cargo run -p wing --example theme_preview -- --html /tmp/theme.html`（整条 transcript 的真 cell 画廊，含 markdown 全要素），浏览器里看或截图；`--preset terminal` 对照跟随终端 ANSI 色的形态。新增元素时先回答「它是哪个角色」，再决定是否真要开新槽位——槽位是用户可覆盖的 API，不是调色试验田。
+调色 / 对色**不用起 TUI**：`cargo run -p wing --example theme_preview -- --html /tmp/theme.html`（整条 transcript 的真 cell 画廊，含 markdown 全要素），浏览器里看或截图；`--preset light` 对照亮底形态（`--preset dark` 是默认设计版）。新增元素时先回答「它是哪个角色」，再决定是否真要开新槽位——槽位是用户可覆盖的 API，不是调色试验田。
 
 ## 三、不变量：流式静息态 == 参考全量渲染
 

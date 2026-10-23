@@ -82,14 +82,14 @@ pub fn render_todo_items(items: &[TodoItem], palette: &ThemePalette) -> Vec<Line
             ),
             "completed" => (
                 "✓",
-                Style::default()
-                    .fg(palette.success)
-                    .add_modifier(Modifier::DIM),
+                palette
+                    .appearance
+                    .quiet(Style::default().fg(palette.success)),
                 palette.success,
             ),
             _ => (
                 "○",
-                Style::default().fg(palette.dim).add_modifier(Modifier::DIM),
+                palette.appearance.quiet(Style::default().fg(palette.dim)),
                 palette.dim,
             ),
         };

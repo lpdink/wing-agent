@@ -604,9 +604,9 @@ impl ChatView {
 
     /// Force the deferred args parse for one cell (`is_final` / authoritative
     /// args). Idempotent — a cell with nothing pending is left untouched.
-    pub fn flush_tool_args_by_index(&mut self, index: usize) {
+    pub fn flush_tool_args_by_index(&mut self, index: usize, syntax: crate::config::SyntaxTheme) {
         if let Some(cached) = self.cells.get_mut(index) {
-            cached.flush_pending_args();
+            cached.flush_pending_args(syntax);
         }
     }
 
@@ -1391,7 +1391,7 @@ mod tests {
         view.append_tool_args_fragment_by_index(idx, r#"{"command":"ls -la"}"#);
         assert_eq!(args_parse_count(&view, idx), 0);
 
-        view.flush_tool_args_by_index(idx);
+        view.flush_tool_args_by_index(idx, crate::config::SyntaxTheme::Dark);
         assert_eq!(args_parse_count(&view, idx), 1);
         if let ChatCell::ToolCall(block) = view.cells[idx].cell() {
             assert_eq!(block.tool_args["command"], "ls -la");
@@ -1400,7 +1400,7 @@ mod tests {
         }
 
         // Idempotent: a cell with nothing pending is left untouched.
-        view.flush_tool_args_by_index(idx);
+        view.flush_tool_args_by_index(idx, crate::config::SyntaxTheme::Dark);
         assert_eq!(args_parse_count(&view, idx), 1);
     }
 

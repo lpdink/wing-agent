@@ -255,7 +255,10 @@ impl App {
     /// 调色板**不在任何一层渲染缓存的键里**（`CellContext` 是呈现参数，与 Ctrl+O
     /// 翻转思考块同一个问题）：不显式作废，聊天区的旧颜色会一直留到内容变化为止。
     fn apply_palette(&mut self) {
-        self.palette = ThemePalette::from_config(&self.config.colors);
+        self.palette = ThemePalette::from_config_with_appearance(
+            &self.config.colors,
+            crate::tui::detected_appearance(),
+        );
         self.input.max_lines = self.config.layout.max_input_lines;
         self.chat.invalidate_cells();
         self.welcome_theme_dirty = true;

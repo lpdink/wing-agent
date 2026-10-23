@@ -25,6 +25,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
+use crate::config::SyntaxTheme;
 use crate::config::ThemePalette;
 use crate::render::markdown::types::MarkdownLine;
 use crate::render::markdown::types::SegmentKind;
@@ -89,6 +90,8 @@ pub struct WriteHighlightCache {
     raw_content: String,
     /// Detected language name (syntect syntax name).
     lang: String,
+    /// Which syntect theme the cached lines were highlighted with.
+    syntax: SyntaxTheme,
     /// Highlighted output lines (one per source line).
     highlighted_lines: Vec<MarkdownLine>,
     /// Raw text of the last line (for O(1) incremental append).
@@ -114,12 +117,19 @@ impl WriteHighlightCache {
         cache: Option<WriteHighlightCache>,
         path: &str,
         content: &str,
+        syntax_theme: SyntaxTheme,
     ) -> Option<WriteHighlightCache> {
         // Empty string → highlight_single_line returns None → plain_line fallback.
         let lang = syntax::detect_syntax_from_path(path).unwrap_or_default();
 
         let mut cache = match cache {
-            Some(c) if c.lang == lang && content.starts_with(&c.raw_content) => c,
+            Some(c)
+                if c.lang == lang
+                    && c.syntax == syntax_theme
+                    && content.starts_with(&c.raw_content) =>
+            {
+                c
+            }
             // Full rebuild: new cache or content doesn't match prefix.
             // Use split('\n') (not .lines()) to preserve trailing empty line
             // from content ending with '\n' — keeps incremental path consistent.
@@ -129,7 +139,7 @@ impl WriteHighlightCache {
                     .iter()
                     .map(|line| {
                         let clean = strip_cr(line);
-                        syntax::highlight_single_line(clean, &lang)
+                        syntax::highlight_single_line(clean, &lang, syntax_theme)
                             .unwrap_or_else(|| plain_line(clean))
                     })
                     .collect();
@@ -140,6 +150,7 @@ impl WriteHighlightCache {
                 return Some(WriteHighlightCache {
                     raw_content: content.to_string(),
                     lang,
+                    syntax: syntax_theme,
                     highlighted_lines: highlighted,
                     last_line_raw,
                 });
@@ -166,14 +177,14 @@ impl WriteHighlightCache {
         let last_idx = cache.highlighted_lines.len() - 1;
         cache.last_line_raw.push_str(strip_cr(segments[0]));
         cache.highlighted_lines[last_idx] =
-            syntax::highlight_single_line(&cache.last_line_raw, &cache.lang)
+            syntax::highlight_single_line(&cache.last_line_raw, &cache.lang, syntax_theme)
                 .unwrap_or_else(|| plain_line(&cache.last_line_raw));
 
         // Remaining segments are new lines
         for (i, segment) in segments[1..].iter().enumerate() {
             let clean = strip_cr(segment);
             cache.highlighted_lines.push(
-                syntax::highlight_single_line(clean, &cache.lang)
+                syntax::highlight_single_line(clean, &cache.lang, syntax_theme)
                     .unwrap_or_else(|| plain_line(clean)),
             );
             // Track last_line_raw for the final segment
@@ -525,7 +536,7 @@ impl ToolCallBlock {
     /// flush and refresh the streaming caches. Returns whether a parse ran
     /// (i.e. the cell's rendered content may have changed) so the caller
     /// can invalidate its render cache exactly once per frame.
-    pub fn flush_pending_args(&mut self) -> bool {
+    pub fn flush_pending_args(&mut self, syntax: SyntaxTheme) -> bool {
         if !self.args_dirty {
             return false;
         }
@@ -536,7 +547,7 @@ impl ToolCallBlock {
             obj @ serde_json::Value::Object(_) => obj,
             _ => serde_json::Value::Object(serde_json::Map::new()),
         };
-        self.apply_args(args);
+        self.apply_args(args, syntax);
         #[cfg(test)]
         {
             self.args_parse_count += 1;
@@ -600,14 +611,18 @@ impl ToolCallBlock {
     }
 
     /// Shared args application: refresh streaming caches, store args.
-    fn apply_args(&mut self, args: serde_json::Value) {
+    fn apply_args(&mut self, args: serde_json::Value, syntax: SyntaxTheme) {
         match self.tool_name.as_str() {
             constants::TOOL_WRITE => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 if !content.is_empty() {
-                    self.stream_highlight =
-                        WriteHighlightCache::update(self.stream_highlight.take(), path, content);
+                    self.stream_highlight = WriteHighlightCache::update(
+                        self.stream_highlight.take(),
+                        path,
+                        content,
+                        syntax,
+                    );
                 }
             }
             constants::TOOL_EDIT => {
@@ -633,8 +648,12 @@ impl ToolCallBlock {
                 // new_string: incremental highlight (shares stream_highlight cache;
                 // Write and Edit are mutually exclusive per block).
                 if !new_string.is_empty() {
-                    self.stream_highlight =
-                        WriteHighlightCache::update(self.stream_highlight.take(), path, new_string);
+                    self.stream_highlight = WriteHighlightCache::update(
+                        self.stream_highlight.take(),
+                        path,
+                        new_string,
+                        syntax,
+                    );
                 }
             }
             constants::TOOL_TODO => {
@@ -1007,7 +1026,7 @@ mod tests {
     /// the two steps separately.
     fn stream_args(block: &mut ToolCallBlock, fragment: &str) {
         block.append_args_fragment(fragment);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
     }
 
     /// The header's three registers, pinned: status-colored bullet, the tool
@@ -1629,7 +1648,7 @@ mod tests {
         // boundary — nothing is visible to readers until the flush.
         block.append_args_fragment(r#"{"command": "ls"#);
         assert!(block.args_dirty);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         assert!(!block.args_dirty);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(
@@ -1638,7 +1657,7 @@ mod tests {
         );
 
         block.append_args_fragment(r#" -la"}"#);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         assert_eq!(block.tool_args["command"], "ls -la");
     }
 
@@ -1654,13 +1673,16 @@ mod tests {
         }
         assert_eq!(block.args_parse_count, 0, "appends must not parse");
 
-        assert!(block.flush_pending_args());
+        assert!(block.flush_pending_args(crate::config::SyntaxTheme::Dark));
         assert_eq!(block.args_parse_count, 1);
-        assert!(!block.flush_pending_args(), "idle flush must be a no-op");
+        assert!(
+            !block.flush_pending_args(crate::config::SyntaxTheme::Dark),
+            "idle flush must be a no-op"
+        );
         assert_eq!(block.args_parse_count, 1);
 
         block.append_args_fragment("y");
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         assert_eq!(block.args_parse_count, 2, "one parse per frame with data");
     }
 
@@ -1684,7 +1706,7 @@ mod tests {
         // Simulate streaming via raw fragments (backend sends unparsed text).
         block.append_args_fragment(r#"{"path": "/tmp/test.py", "content": "def main"#);
         block.append_args_fragment(r#"():\n    print('hello')"}"#);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         let text = lines_text(&block.to_lines(&p(), 30));
         assert!(text.contains("Write"), "missing tool name: {text}");
         assert!(
@@ -1701,14 +1723,19 @@ mod tests {
     #[test]
     fn test_stream_highlight_cache_incremental() {
         // First update: full build
-        let cache = WriteHighlightCache::update(None, "/tmp/test.py", "line1\nline2");
+        let cache =
+            WriteHighlightCache::update(None, "/tmp/test.py", "line1\nline2", SyntaxTheme::Dark);
         assert!(cache.is_some());
         let cache = cache.unwrap();
         assert_eq!(cache.highlighted_lines.len(), 2);
 
         // Incremental update: append a line
-        let cache2 =
-            WriteHighlightCache::update(Some(cache), "/tmp/test.py", "line1\nline2\nline3");
+        let cache2 = WriteHighlightCache::update(
+            Some(cache),
+            "/tmp/test.py",
+            "line1\nline2\nline3",
+            SyntaxTheme::Dark,
+        );
         assert!(cache2.is_some());
         let cache2 = cache2.unwrap();
         assert_eq!(cache2.highlighted_lines.len(), 3);
@@ -1718,6 +1745,7 @@ mod tests {
             Some(cache2.clone()),
             "/tmp/test.py",
             "line1\nline2\nline3",
+            SyntaxTheme::Dark,
         );
         assert!(cache3.is_some());
         assert_eq!(cache3.unwrap().highlighted_lines.len(), 3);
@@ -1726,7 +1754,12 @@ mod tests {
     #[test]
     fn test_stream_highlight_cache_unknown_ext() {
         // Unknown extension → falls back to plain text (lang=""), still renders.
-        let cache = WriteHighlightCache::update(None, "/tmp/file.xyz_unknown", "content");
+        let cache = WriteHighlightCache::update(
+            None,
+            "/tmp/file.xyz_unknown",
+            "content",
+            SyntaxTheme::Dark,
+        );
         assert!(cache.is_some());
         let cache = cache.unwrap();
         assert_eq!(cache.highlighted_lines.len(), 1);
@@ -1736,14 +1769,19 @@ mod tests {
     #[test]
     fn test_stream_highlight_cache_empty_path_fallback() {
         // Empty path (LLM emits content before path) → plain text fallback.
-        let cache = WriteHighlightCache::update(None, "", "line1\nline2");
+        let cache = WriteHighlightCache::update(None, "", "line1\nline2", SyntaxTheme::Dark);
         assert!(cache.is_some());
         let cache = cache.unwrap();
         assert_eq!(cache.highlighted_lines.len(), 2);
         assert_eq!(cache.lang, "");
 
         // When real path arrives, lang mismatch triggers full rebuild.
-        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nline2\nline3");
+        let cache2 = WriteHighlightCache::update(
+            Some(cache),
+            "/tmp/t.py",
+            "line1\nline2\nline3",
+            SyntaxTheme::Dark,
+        );
         assert!(cache2.is_some());
         let cache2 = cache2.unwrap();
         assert_ne!(cache2.lang, ""); // Now has real syntax
@@ -1753,14 +1791,15 @@ mod tests {
     #[test]
     fn test_stream_highlight_cache_trailing_newline() {
         // P0 regression: trailing '\n' must produce an extra empty line
-        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\n");
+        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\n", SyntaxTheme::Dark);
         assert!(cache.is_some());
         let cache = cache.unwrap();
         // "line1\n".split('\n') → ["line1", ""] → 2 lines
         assert_eq!(cache.highlighted_lines.len(), 2);
 
         // Incremental: append after trailing newline
-        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nl");
+        let cache2 =
+            WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\nl", SyntaxTheme::Dark);
         assert!(cache2.is_some());
         let cache2 = cache2.unwrap();
         // Should be ["line1", "l"] — NOT ["line1l"]
@@ -1771,7 +1810,8 @@ mod tests {
     #[test]
     fn test_stream_highlight_cache_crlf() {
         // CRLF content: \r should be stripped
-        let cache = WriteHighlightCache::update(None, "/tmp/t.py", "line1\r\nline2\r\n");
+        let cache =
+            WriteHighlightCache::update(None, "/tmp/t.py", "line1\r\nline2\r\n", SyntaxTheme::Dark);
         assert!(cache.is_some());
         let cache = cache.unwrap();
         // "line1\r\nline2\r\n".split('\n') → ["line1\r", "line2\r", ""] → 3 lines
@@ -1779,7 +1819,12 @@ mod tests {
         assert_eq!(cache.last_line_raw, "");
 
         // Incremental after CRLF
-        let cache2 = WriteHighlightCache::update(Some(cache), "/tmp/t.py", "line1\r\nline2\r\nx");
+        let cache2 = WriteHighlightCache::update(
+            Some(cache),
+            "/tmp/t.py",
+            "line1\r\nline2\r\nx",
+            SyntaxTheme::Dark,
+        );
         assert!(cache2.is_some());
         let cache2 = cache2.unwrap();
         assert_eq!(cache2.highlighted_lines.len(), 3);

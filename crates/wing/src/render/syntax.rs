@@ -24,6 +24,7 @@ use syntect::parsing::SyntaxSet;
 use super::markdown::types::MarkdownLine;
 use super::markdown::types::MarkdownTheme;
 use super::markdown::types::SegmentKind;
+use crate::config::SyntaxTheme;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -54,19 +55,33 @@ pub fn detect_syntax_from_path(path: &str) -> Option<String> {
     detect_syntax(Some(ext))
 }
 
+/// The syntect theme paired with a palette: `InspiredGitHub` is the light-
+/// background theme (base16-ocean.light's strings/keys sit at 2.0~2.8:1 on
+/// white — unreadable), `base16-ocean.dark` the dark one.
+fn theme_for(syntax: SyntaxTheme) -> &'static syntect::highlighting::Theme {
+    let name = match syntax {
+        SyntaxTheme::Dark => "base16-ocean.dark",
+        SyntaxTheme::Light => "InspiredGitHub",
+    };
+    &theme_set().themes[name]
+}
+
 /// Highlight a single line independently (no multi-line context).
 ///
 /// Used for streaming rendering where full context is unavailable.
 /// Returns styled segments for the line, or None if highlighting fails.
-pub fn highlight_single_line(line: &str, lang: &str) -> Option<MarkdownLine> {
+pub fn highlight_single_line(
+    line: &str,
+    lang: &str,
+    syntax_theme: SyntaxTheme,
+) -> Option<MarkdownLine> {
     let ss = syntax_set();
-    let ts = theme_set();
 
     let syntax = ss
         .find_syntax_by_token(lang)
         .or_else(|| ss.find_syntax_by_extension(lang))?;
 
-    let theme = &ts.themes["base16-ocean.dark"];
+    let theme = theme_for(syntax_theme);
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let mut result = MarkdownLine::default();
@@ -82,17 +97,16 @@ pub fn highlight_single_line(line: &str, lang: &str) -> Option<MarkdownLine> {
 pub fn highlight_code_lines(
     code: &str,
     lang: Option<&str>,
-    _theme: &MarkdownTheme,
+    theme: &MarkdownTheme,
 ) -> Option<Vec<MarkdownLine>> {
     let ss = syntax_set();
-    let ts = theme_set();
 
     let language = lang?;
     let syntax = ss
         .find_syntax_by_token(language)
         .or_else(|| ss.find_syntax_by_extension(language))?;
 
-    let theme = &ts.themes["base16-ocean.dark"];
+    let theme = theme_for(theme.syntax);
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     let mut lines = Vec::new();
@@ -115,12 +129,12 @@ pub fn highlight_code_lines(
 /// lines are never recomputed.
 ///
 /// Returns None when the language is unknown (callers fall back to plain).
-pub fn new_highlighter(lang: &str) -> Option<HighlightLines<'static>> {
+pub fn new_highlighter(lang: &str, syntax_theme: SyntaxTheme) -> Option<HighlightLines<'static>> {
     let ss = syntax_set();
     let syntax = ss
         .find_syntax_by_token(lang)
         .or_else(|| ss.find_syntax_by_extension(lang))?;
-    let theme = &theme_set().themes["base16-ocean.dark"];
+    let theme = theme_for(syntax_theme);
     Some(HighlightLines::new(syntax, theme))
 }
 
@@ -134,6 +148,7 @@ pub fn new_highlighter(lang: &str) -> Option<HighlightLines<'static>> {
 pub fn new_highlighter_for_file(
     path: &str,
     first_line: Option<&str>,
+    syntax_theme: SyntaxTheme,
 ) -> Option<HighlightLines<'static>> {
     let ss = syntax_set();
     let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -150,7 +165,7 @@ pub fn new_highlighter_for_file(
             }
         })
         .or_else(|| first_line.and_then(|line| ss.find_syntax_by_first_line(line)))?;
-    let theme = &theme_set().themes["base16-ocean.dark"];
+    let theme = theme_for(syntax_theme);
     Some(HighlightLines::new(syntax, theme))
 }
 
@@ -270,16 +285,22 @@ mod tests {
     /// Extension-less files resolve by file name, then by the first line.
     #[test]
     fn test_highlighter_for_file() {
-        assert!(new_highlighter_for_file("Makefile", None).is_some());
-        assert!(new_highlighter_for_file("docker/Dockerfile", None).is_some());
-        assert!(new_highlighter_for_file("src/main.rs", None).is_some());
+        assert!(new_highlighter_for_file("Makefile", None, SyntaxTheme::Dark).is_some());
+        assert!(new_highlighter_for_file("docker/Dockerfile", None, SyntaxTheme::Dark).is_some());
+        assert!(new_highlighter_for_file("src/main.rs", None, SyntaxTheme::Dark).is_some());
         assert!(
-            new_highlighter_for_file("scripts/zzz-no-language", Some("#!/usr/bin/env python3"))
-                .is_some(),
+            new_highlighter_for_file(
+                "scripts/zzz-no-language",
+                Some("#!/usr/bin/env python3"),
+                SyntaxTheme::Dark
+            )
+            .is_some(),
             "shebang should resolve the language"
         );
-        assert!(new_highlighter_for_file("scripts/zzz-no-language", None).is_none());
-        assert!(new_highlighter_for_file("data.zzzq", None).is_none());
+        assert!(
+            new_highlighter_for_file("scripts/zzz-no-language", None, SyntaxTheme::Dark).is_none()
+        );
+        assert!(new_highlighter_for_file("data.zzzq", None, SyntaxTheme::Dark).is_none());
     }
 
     #[test]
@@ -296,6 +317,38 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// The light palette pairs with a light-background syntect theme: the same
+    /// code must come back with different colours, otherwise a palette switch
+    /// would leave dark-theme syntax on a white background.
+    #[test]
+    fn the_syntax_theme_follows_the_palette() {
+        let dark = MarkdownTheme::default();
+        let light = MarkdownTheme {
+            syntax: SyntaxTheme::Light,
+            ..MarkdownTheme::default()
+        };
+        let code = "fn main() { let s = \"hi\"; // note\n}";
+        let flat = |theme: &MarkdownTheme| -> Vec<(String, Style)> {
+            highlight_code_lines(code, Some("rust"), theme)
+                .expect("rust syntax")
+                .into_iter()
+                .flat_map(|line| line.segments.into_iter().map(|s| (s.text, s.style)))
+                .collect()
+        };
+        let dark_spans = flat(&dark);
+        let light_spans = flat(&light);
+        assert!(!dark_spans.is_empty());
+        assert_ne!(dark_spans, light_spans, "the two themes must differ");
+        // The light theme is the GitHub-inspired one: its string colour is a
+        // deep navy (#183691), not base16-ocean.light's pale green.
+        assert!(
+            light_spans
+                .iter()
+                .any(|(_, style)| style.fg == Some(Color::Rgb(0x18, 0x36, 0x91))),
+            "expected InspiredGitHub's string colour in {light_spans:?}"
+        );
+    }
+
     /// Every caller feeds lines without their terminator (that is what
     /// `str::lines()` and the diff payloads hand over). The syntax definitions
     /// are the "newlines" variant, so a line comment parses `# iflag` against
@@ -304,15 +357,17 @@ mod tests {
     #[test]
     fn test_trailing_line_comment_does_not_leak() {
         let lines = ["a = 0  # iflag", "b = 1", "c = 2  # oflag", "d = 3"];
-        let mut hl = new_highlighter("python").expect("python syntax");
+        let mut hl = new_highlighter("python", SyntaxTheme::Dark).expect("python syntax");
 
         for line in lines {
             let stateful = highlight_line_with(&mut hl, line).expect("highlight");
             // These are independent statements, so a fresh highlighter is the
             // ground truth for each of them.
-            let fresh =
-                highlight_line_with(&mut new_highlighter("python").expect("python syntax"), line)
-                    .expect("highlight");
+            let fresh = highlight_line_with(
+                &mut new_highlighter("python", SyntaxTheme::Dark).expect("python syntax"),
+                line,
+            )
+            .expect("highlight");
             assert_eq!(stateful, fresh, "line {line:?} was parsed out of context");
         }
     }
@@ -330,7 +385,7 @@ mod tests {
         let fresh: Vec<MarkdownLine> = ["a = 0  # iflag", "b = 1"]
             .iter()
             .map(|line| {
-                let mut hl = new_highlighter("python").expect("python syntax");
+                let mut hl = new_highlighter("python", SyntaxTheme::Dark).expect("python syntax");
                 let mut md = MarkdownLine::default();
                 for (style, text) in highlight_line_with(&mut hl, line).expect("highlight") {
                     md.push_segment(SegmentKind::CodeBlock, style, &text);
@@ -361,7 +416,7 @@ mod tests {
     /// bytes back, terminator or not.
     #[test]
     fn test_spans_reproduce_the_line_verbatim() {
-        let mut hl = new_highlighter("rust").expect("rust syntax");
+        let mut hl = new_highlighter("rust", SyntaxTheme::Dark).expect("rust syntax");
         for line in ["let x = 1;", "// note", "    ", "", "let y = 2;\n"] {
             let spans = highlight_line_with(&mut hl, line).expect("highlight");
             let text: String = spans.iter().map(|(_, text)| text.as_str()).collect();

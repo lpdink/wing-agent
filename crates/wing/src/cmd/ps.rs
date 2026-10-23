@@ -28,11 +28,13 @@ use wing_api_client::models::{
 };
 
 use crate::config::AppConfig;
+use crate::config::ColorPreset;
 use crate::config::ThemePalette;
 use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
 use crate::shared::session_tree::{TreeRow, build_forest};
+use crate::tui::appearance;
 use crate::util::format;
 use crate::util::format::{NONE_MARK, count, work_time};
 
@@ -81,8 +83,8 @@ async fn run_ps_watch(
         Ok(c) => c,
         Err(e) => return common::fail("ps", e),
     };
-    let palette = ThemePalette::from_config(&AppConfig::load().colors);
     let out = TableOutput::detect();
+    let palette = terminal_palette(&out, json);
 
     loop {
         match http.list_sessions_with_parent(parent).await {
@@ -171,9 +173,25 @@ async fn fetch_usage_block(http: &GatewayApiClient, session_id: &str) -> Option<
 /// Human/JSON output for one session snapshot (`--json` stays the machine
 /// surface; the table only serves humans).
 fn emit_sessions(sessions: &[SessionInfo], json: bool, tree: bool) {
-    let palette = ThemePalette::from_config(&AppConfig::load().colors);
     let out = TableOutput::detect();
+    let palette = terminal_palette(&out, json);
     emit_sessions_with(sessions, json, tree, &palette, &out);
+}
+
+/// The table's inks, `auto` preset included.
+///
+/// `auto` means "ask the terminal"; that question reads stdin and writes stdout,
+/// so it is asked **only** when the answer can change what reaches the screen —
+/// i.e. when the human table carries colour at all. `--json`, a pipe, `NO_COLOR`
+/// or a `dumb` terminal print no ANSI inks, so `auto` resolves to `Wing` unprobed.
+fn terminal_palette(out: &TableOutput, json: bool) -> ThemePalette {
+    let colors = AppConfig::load().colors;
+    let detected = if out.color && !json && colors.preset == ColorPreset::Auto {
+        appearance::detect(appearance::DETECT_TIMEOUT)
+    } else {
+        None
+    };
+    ThemePalette::from_config_with_appearance(&colors, detected)
 }
 
 fn emit_sessions_with(

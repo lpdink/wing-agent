@@ -272,14 +272,15 @@ crates/wing/src/
 │   └── renderable.rs                CellContext（每帧渲染上下文：调色板 / thinking 模式 / 布局 / 图片选项）
 ├── tui/                             终端生命周期与终端通道（唯一出帧口 draw_frame）
 │   ├── mod.rs                       init/restore、crossterm 事件流、draw_frame
+│   ├── appearance.rs                OSC 11 背景探测（`colors.preset: auto` 的明暗判定；启动期一次、150ms 超时）
 │   ├── clipboard_protocol.rs        OSC 52 读写协议（唯一 id 让被放弃的读不落到下一次）
 │   ├── cursor.rs                    光标形状 / 可见性
 │   └── stdin_proxy.rs               stdin 接驳（在 crossterm 之前安装的读代理；session_guard 的靶子）
-├── config/                          TUI 配置（mod / colors / rendering / paste=粘贴图片压缩参数 / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
+├── config/                          TUI 配置（mod=配置模型 + 调色板 preset/appearance / colors / rendering / paste=粘贴图片压缩参数 / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
 └── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ base64（RFC 4648 编解码，OSC 与剪贴板协议共用）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（41 个测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
+配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
 
 源码门禁：`layer_guard.rs` 把 Rust 侧分层规则钉成扫描断言（Python 侧对应 `libs/core/tests/test_layering.py`，两侧规范见 [docs/dev/backend-layout.md](docs/dev/backend-layout.md)）；`session_guard.rs` 钉**编译器管不着的终端时序**（接驳安装点唯一、settle 早于首次 poll 等五条规则，语义见 [docs/dev/tui-input.md](docs/dev/tui-input.md)）。
 
@@ -315,6 +316,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/settings.md`](docs/dev/settings.md) | 设置面：一份声明生成目录/模板/校验、业务分组（界面分类的唯一声明处）、稀疏文档与「缺席即默认」、Setting API（4 端点 + 保存事务 + 密文语义 + 生效域全表）、setup mode（降级启动 / loopback-only 修复）、TUI 浮层面板（双栏 + 键位表）、首次运行向导、`wing config` CLI |
 | [`docs/dev/media-images.md`](docs/dev/media-images.md) | 媒体与图片（read-image）：ReadImage 工具、内容寻址媒体池、模型能力声明、请求期图片投影（高水位 + 量子批量驱逐）与 KV/前缀 cache、inline/followup 线格式、probe 场景清单 |
 | [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
+| [`docs/dev/tui-theming.md`](docs/dev/tui-theming.md) | TUI 明暗主题：`colors.preset` 三值（auto/dark/light）、显式 `appearance`、light 调色板与 WCAG 判据、OSC 11 探测与降级、浅色下各渲染面的处置（toast/选中行/品牌图形/语法主题） |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 标签）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、**用户消息里的图**（媒体对象：形状来自引用、按视口抓字节、字节 LRU、失败即状态）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |

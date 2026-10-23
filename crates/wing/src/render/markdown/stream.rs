@@ -749,6 +749,13 @@ impl StreamingRender {
         let slice = &self.buf[tail_start..];
 
         let (body_trimmed, has_language) = code_slice_parts(slice, &mut cache);
+        // The opener runs before any palette is in hand (`push`/`append` are
+        // palette-free); the first sync is where the syntax theme is known.
+        if cache.highlighter.is_none()
+            && let Some(lang) = cache.lang.as_deref()
+        {
+            cache.highlighter = new_highlighter(lang, theme.syntax);
+        }
         let (pending, total_lines) = fill_code_cache(&mut cache, body_trimmed, &theme);
 
         let number_width = code_number_width(&cache, total_lines);
@@ -809,7 +816,10 @@ impl StreamingRender {
         // lines that may still be retracted; one instance for the whole run also
         // keeps multi-line constructs closer to their committed colors), then the
         // bottom border.
-        let mut pending_hl = cache.lang.as_deref().and_then(new_highlighter);
+        let mut pending_hl = cache
+            .lang
+            .as_deref()
+            .and_then(|lang| new_highlighter(lang, theme.syntax));
         for (i, line) in pending.iter().enumerate() {
             let number = cache.rendered.len() + i + 1;
             let md =
@@ -1174,9 +1184,10 @@ impl StreamingRender {
         // Both profiles highlight: a code block renders the same in
         // reasoning and assistant content. Only the language-less block
         // (and a language syntect does not know) falls back to plain.
-        let highlighter = lang.as_deref().and_then(new_highlighter);
+        // The highlighter is built by the first `sync_fenced_tail`, where the
+        // palette (and therefore the syntax theme) is available.
         let gutter_width = if lang.is_some() { 3 } else { 0 };
-        self.code_tail = Some(CodeCache::new(lang, highlighter, gutter_width));
+        self.code_tail = Some(CodeCache::new(lang, None, gutter_width));
     }
 }
 
@@ -1547,6 +1558,13 @@ fn code_block_markdown_lines(
     theme: &MarkdownTheme,
 ) -> Vec<MarkdownLine> {
     let (body_trimmed, has_language) = code_slice_parts(slice, cache);
+    // The block may be promoted before its first tail sync ever ran (a fence
+    // closed in the same delta that opened it): build the highlighter here too.
+    if cache.highlighter.is_none()
+        && let Some(lang) = cache.lang.as_deref()
+    {
+        cache.highlighter = new_highlighter(lang, theme.syntax);
+    }
     let (pending, total_lines) = fill_code_cache(cache, body_trimmed, theme);
     let number_width = code_number_width(cache, total_lines);
     if number_width != cache.gutter_width && cache.gutter_width > 0 {

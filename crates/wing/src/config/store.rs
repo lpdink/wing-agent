@@ -647,7 +647,7 @@ mod tests {
             "rendering": {"math": "KATEX", "thinking": "deep"},
             "layout": {"max_input_lines": 33},
         }));
-        assert_eq!(cfg.colors.preset, ColorPreset::Wing, "非法 preset 回落默认");
+        assert_eq!(cfg.colors.preset, ColorPreset::Auto, "非法 preset 回落默认");
         assert_eq!(cfg.rendering.math, MathMode::Text, "非法 math 回落默认");
         assert_eq!(cfg.rendering.thinking, ThinkingMode::Visible);
         // 非法色值原样留在配置里，回落发生在调色板层（既有语义，没被改）
@@ -664,9 +664,9 @@ mod tests {
         );
         // 大小写不敏感 + resolve()
         let cfg = appconfig_from_doc(
-            &json!({"colors": {"preset": "Terminal"}, "rendering": {"math": "Off"}}),
+            &json!({"colors": {"preset": "Dark"}, "rendering": {"math": "Off"}}),
         );
-        assert_eq!(cfg.colors.preset, ColorPreset::Terminal);
+        assert_eq!(cfg.colors.preset, ColorPreset::Dark);
         assert_eq!(
             cfg.colors.math_mode,
             MathMode::Off,
