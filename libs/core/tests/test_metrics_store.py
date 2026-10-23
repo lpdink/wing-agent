@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from dataclasses import fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -769,6 +771,29 @@ class TestCatalogWrites:
 
         record_session_created("s1", database=degraded)  # 不抛
 
+    def test_record_runs_on_the_diagnostic_wait_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """建会话路由在事件循环线程上：这一笔必须用收紧的等锁上限。"""
+        db = Database(tmp_path / "wing.db")
+        assert db.ready
+        timeouts: list[int | None] = []
+        real_execute = db.execute
+
+        def _spy(
+            sql: str, params: Any = (), *, busy_timeout_ms: int | None = None
+        ) -> bool:
+            timeouts.append(busy_timeout_ms)
+            return real_execute(sql, params, busy_timeout_ms=busy_timeout_ms)
+
+        monkeypatch.setattr(db, "execute", _spy)
+
+        record_session_created("s1", database=db)
+
+        assert timeouts == [DIAGNOSTIC_BUSY_TIMEOUT_MS]
+        assert len(db.query("SELECT * FROM session_catalog")) == 1
+        db.close()
+
 
 # ============================================================
 # 回填
@@ -777,6 +802,20 @@ class TestCatalogWrites:
 
 def _store(tmp_path: Path) -> FileSessionStore:
     return FileSessionStore(tmp_path / "sessions")
+
+
+def _break_created_at(monkeypatch: pytest.MonkeyPatch, broken_id: str) -> None:
+    """让某个会话的创建时刻解析直接抛错（模拟一行坏掉）。"""
+    from wing.metrics import catalog as catalog_module
+
+    real = catalog_module._created_at
+
+    def _explode(store: SessionStore, candidate: Any) -> Any:
+        if candidate.session_id == broken_id:
+            raise RuntimeError("boom")
+        return real(store, candidate)
+
+    monkeypatch.setattr(catalog_module, "_created_at", _explode)
 
 
 def _write_history(store: FileSessionStore, session_id: str, timestamp: str) -> None:
@@ -880,31 +919,10 @@ class TestBackfill:
         with pytest.raises(ValueError):
             store.load_archived_metadata("../escape")
 
-    def test_one_bad_session_does_not_stop_the_rest(
+    def test_a_bad_row_is_skipped_and_the_batch_is_one_transaction(
         self, tmp_path: Path, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """单个会话的解析失败只留 WARNING，其它会话照补。"""
-        store = _store(tmp_path)
-        store.save_metadata("20260102-030405-abcdef", SessionMetadata(tags=LISTED))
-        store.save_metadata("custom-broken", SessionMetadata(tags=LISTED))
-
-        from wing.metrics import catalog as catalog_module
-
-        real = catalog_module._created_at
-
-        def _explode(store_: SessionStore, candidate: Any) -> Any:
-            if candidate.session_id == "custom-broken":
-                raise RuntimeError("boom")
-            return real(store_, candidate)
-
-        monkeypatch.setattr(catalog_module, "_created_at", _explode)
-
-        assert backfill_catalog([store], database=db) == 1
-
-    def test_the_batch_is_one_transaction_and_a_bad_row_is_skipped(
-        self, tmp_path: Path, db: Database, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """整批一个事务（诊断档等锁上限）；解析失败的那一行只丢自己。"""
+        """解析失败的那一行只丢自己；其余整批写在一笔事务里（诊断档等锁上限）。"""
         store = _store(tmp_path)
         for session_id in (
             "20260102-030405-abcdef",
@@ -912,31 +930,41 @@ class TestBackfill:
             "custom-broken",
         ):
             store.save_metadata(session_id, SessionMetadata(tags=LISTED))
+        _break_created_at(monkeypatch, "custom-broken")
 
-        from wing.metrics import catalog as catalog_module
-
-        real_created_at = catalog_module._created_at
-
-        def _explode(store_: SessionStore, candidate: Any) -> Any:
-            if candidate.session_id == "custom-broken":
-                raise RuntimeError("boom")
-            return real_created_at(store_, candidate)
-
-        monkeypatch.setattr(catalog_module, "_created_at", _explode)
-
-        spans: list[int | None] = []
+        timeouts: list[int | None] = []
         real_transaction = db.transaction
 
         def _counting(*, busy_timeout_ms: int | None = None) -> Any:
-            spans.append(busy_timeout_ms)
+            timeouts.append(busy_timeout_ms)
             return real_transaction(busy_timeout_ms=busy_timeout_ms)
 
         monkeypatch.setattr(db, "transaction", _counting)
 
         assert backfill_catalog([store], database=db) == 2
-        assert spans == [DIAGNOSTIC_BUSY_TIMEOUT_MS], "整批只开一笔事务"
+        assert timeouts == [DIAGNOSTIC_BUSY_TIMEOUT_MS], "整批只开一笔事务"
         written = {
             row["session_id"]
             for row in db.query("SELECT session_id FROM session_catalog")
         }
         assert written == {"20260102-030405-abcdef", "20260103-030405-abcdef"}
+
+    def test_a_blocked_write_lock_does_not_fall_back_to_autocommit(
+        self, tmp_path: Path, db: Database
+    ) -> None:
+        """拿不到写锁 → 整批一行不落，且只等诊断档（绝不在自动提交里逐条写）。"""
+        store = _store(tmp_path)
+        store.save_metadata("20260102-030405-abcdef", SessionMetadata(tags=LISTED))
+
+        blocker = sqlite3.connect(db.path, isolation_level=None)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
+            assert backfill_catalog([store], database=db) == 0
+            elapsed = time.monotonic() - started
+        finally:
+            blocker.execute("COMMIT")
+            blocker.close()
+        # 稳态的 5000ms 等锁是这条路径要避开的：BEGIN 失败后就不该再发语句。
+        assert elapsed < 2.0, f"等了 {elapsed:.2f}s（退化成稳态等锁了）"
+        assert db.query("SELECT * FROM session_catalog") == []

@@ -23,8 +23,8 @@
 单条语句微秒级；事务块的时长由调用方负责（账本一次记录是一小串读写 + 一次提交），
 所以调用方只在必要处开事务，且不在事务里做慢操作。
 
-写入一律同步 + 自动提交（``isolation_level=None``），单条 INSERT 微秒级，不引入写
-线程、不做批处理。
+写入一律同步 + 自动提交（``isolation_level=None``），单条 INSERT 微秒级：门面不内置
+写队列，多条语句的批处理与原子性都由调用方经 :meth:`Database.transaction` 表达。
 """
 
 from __future__ import annotations
@@ -249,20 +249,18 @@ class Database:
 
         ``busy_timeout_ms`` 的语义与 :meth:`query` 完全一致：只对本次执行收紧等锁
         上限，退出前恢复稳态值（别的线程看不到临时值）；**事务内一律忽略**（块的
-        收紧值归 :meth:`transaction` 管）。写在事件循环线程上的 best-effort 调用点
-        （如用量目录）用它：另一个进程攥着写锁时宁可丢这一笔，也不要冻住循环。
+        收紧值归 :meth:`transaction` 管）。best-effort 的调用点用它：另一个进程攥着
+        写锁时宁可丢这一笔，也不要让本进程的其它 DB 访问跟着排队。
         """
         with self._lock:
             conn = self._conn
             if not self._ready or conn is None:
                 return False
-            narrowed = busy_timeout_ms if self._txn is None else None
-            if narrowed is not None:
-                try:
-                    conn.execute(f"PRAGMA busy_timeout={int(narrowed)}")
-                except Exception as exc:
-                    self._fail(exc)
-                    return False
+            try:
+                narrowed = self._narrow_busy_timeout(conn, busy_timeout_ms)
+            except Exception as exc:
+                self._fail(exc)
+                return False
             try:
                 conn.execute(sql, params)
             except Exception as exc:
@@ -273,7 +271,11 @@ class Database:
             return True
 
     def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> bool:
-        """执行一条写语句（多组参数）；语义同 :meth:`execute`。"""
+        """执行一条写语句（多组参数）；返回是否真正执行；异常同样被吞掉。
+
+        没有 ``busy_timeout_ms``：多条语句的等锁上限归 :meth:`transaction` 管
+        （想收紧就包一层事务）。
+        """
         with self._lock:
             if not self._ready or self._conn is None:
                 return False
@@ -325,13 +327,11 @@ class Database:
             conn = self._conn
             if not self._ready or conn is None:
                 return []
-            narrowed = busy_timeout_ms if self._txn is None else None
-            if narrowed is not None:
-                try:
-                    conn.execute(f"PRAGMA busy_timeout={int(narrowed)}")
-                except Exception as exc:
-                    self._warn_error(exc)
-                    return []
+            try:
+                narrowed = self._narrow_busy_timeout(conn, busy_timeout_ms)
+            except Exception as exc:
+                self._warn_error(exc)
+                return []
             try:
                 return conn.execute(sql, params).fetchall()
             except Exception as exc:
@@ -346,10 +346,12 @@ class Database:
     ) -> Iterator[Transaction]:
         """把 with 块里的一切放进一个 ``BEGIN IMMEDIATE`` 事务（全有或全无）。
 
-        yield 的是事务句柄：``live=False`` 表示库不可用或开不了事务（块内不必再发
-        语句——``execute`` 会直接返回 ``False``、``query`` 是空列表）；块退出后读
-        ``committed`` 才知道它**真的提交了**（块内任何一次写失败都会回滚，提交本身
-        也可能失败）。只把语句的返回值当结论会漏掉这两种回滚。
+        yield 的是事务句柄：``live=False`` 表示库不可用、或 ``BEGIN IMMEDIATE`` 没能
+        开起来（库本身可能健康）。**块内必须先看 ``live`` 再发语句**：库降级时语句是
+        no-op，但「开不了事务」时连接照常可用——语句会退化成逐条自动提交，正是事务想
+        避免的（`BEGIN` 失败后等锁上限也已恢复稳态值）。块退出后读 ``committed`` 才
+        知道它**真的提交了**（块内任何一次写失败都会回滚，提交本身也可能失败）。只把
+        语句的返回值当结论会漏掉这两种回滚。
 
         块内抛异常 → 回滚并把异常原样抛出（由调用方决定怎么兜）。
 
@@ -372,18 +374,17 @@ class Database:
             if open_txn is not None:
                 yield open_txn  # 并入外层事务（SQLite 没有嵌套 BEGIN）
                 return
-            if busy_timeout_ms is not None:
-                try:
-                    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-                except Exception as exc:
-                    self._warn_error(exc)
-                    yield Transaction(live=False)
-                    return
+            try:
+                narrowed = self._narrow_busy_timeout(conn, busy_timeout_ms)
+            except Exception as exc:
+                self._warn_error(exc)
+                yield Transaction(live=False)
+                return
             try:
                 conn.execute("BEGIN IMMEDIATE")
             except Exception as exc:
                 self._warn_error(exc)
-                self._restore_busy_timeout(conn, busy_timeout_ms)
+                self._restore_busy_timeout(conn, narrowed)
                 yield Transaction(live=False)
                 return
             handle = Transaction(live=True)
@@ -424,6 +425,20 @@ class Database:
         if self._txn is not None:
             self._txn_failed = True
         self._warn_error(exc)
+
+    def _narrow_busy_timeout(
+        self, conn: sqlite3.Connection, busy_timeout_ms: int | None
+    ) -> int | None:
+        """把本次的等锁上限收紧到 ``busy_timeout_ms``；返回需要恢复的值。
+
+        **事务内一律返回 ``None``**（不动连接的设置）：块的收紧值归
+        :meth:`transaction` 管，再改一次会把它抹掉。设置失败原样抛给调用方——读 / 写
+        / 事务三条路径各有各的兜法（空结果 / ``False`` / 死句柄）。
+        """
+        narrowed = busy_timeout_ms if self._txn is None else None
+        if narrowed is not None:
+            conn.execute(f"PRAGMA busy_timeout={int(narrowed)}")
+        return narrowed
 
     def _restore_busy_timeout(
         self, conn: sqlite3.Connection, override: int | None

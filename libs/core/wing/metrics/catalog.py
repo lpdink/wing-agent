@@ -13,9 +13,9 @@
 （``history.jsonl`` 首条记录的时刻，毫秒）→ ``meta``（``last_interaction``，兜底）。
 三档都拿不到就**跳过**——不发明时间，这一行留给下一次回填。
 
-写失败绝不影响 agent：``wing.db`` 降级时 ``execute`` / ``executemany`` 返回 ``False``
-（事务拿到 ``live=False``），本层再兜一层 ``try/except``（与 ``audit/recorder.py`` 同一条
-纪律）。
+写失败绝不影响 agent：``wing.db`` 降级时写语句一律返回 ``False``、事务句柄拿到
+``live=False``（写不了就什么都没发生），本层再兜一层 ``try/except``（与
+``audit/recorder.py`` 同一条纪律）。
 """
 
 from __future__ import annotations
@@ -61,8 +61,9 @@ def record_session_created(
     会话、以及 resume，都**不写**——目录行是创建动作的一次性事实（与「血缘只写一次」
     同口径），存量会话由 :func:`backfill_catalog` 补齐。
 
-    等锁上限收紧到诊断档：建会话路由在事件循环线程上调用，另一个进程攥着写锁时
-    宁可丢这一行（下一次回填会补上），也不要把循环冻在稳态的 5 秒上。
+    等锁上限收紧到诊断档：建会话路由在事件循环线程上调用，另一个进程攥着写锁时宁可
+    丢这一行，也不要把事件循环冻在稳态的 5 秒上。丢行不重试——它最迟在下一轮回填时
+    按差集补上（连创建时刻都拿不到的那批会话补不了，见 :func:`_created_at`）。
     """
     ts_ms, ts = _stamp(datetime.now())
     db = database if database is not None else get_database()
@@ -106,8 +107,8 @@ def backfill_catalog(
     """把「磁盘上有、目录里没有」的会话补进 ``session_catalog``。
 
     单个会话失败不影响其它（逐条兜住 + 一行 WARNING）；整批写在**一笔事务**里
-    （一个 ``executemany``），因此存量会话再多也只等一次锁、提交一次。整体跑完留
-    一条 INFO。
+    （一个 ``executemany``），因此存量会话再多也只等一次锁、提交一次。读与写都走
+    诊断档的等锁上限（见 ``_known_ids`` / ``_write_batch``）。整体跑完留一条 INFO。
 
     Returns:
         本次补齐的行数（差集语义：重跑返回 0）。
@@ -119,7 +120,8 @@ def backfill_catalog(
         for candidate in _candidates(store):
             if candidate.session_id in known:
                 continue
-            # 解析（读 metadata / 日志首条）留在事务外：文件 I/O 不该占着进程级的库锁。
+            # 先把整批参数解析完（读 metadata / 日志首条）再开事务：文件 I/O 不该占着
+            # 进程级的库锁。
             try:
                 params = _backfill_params(store, candidate)
             except Exception as exc:  # 一个坏会话不该中断整轮回填
@@ -142,20 +144,31 @@ def backfill_catalog(
 
 
 def _known_ids(db: Database) -> set[str]:
-    return {row[0] for row in db.query(_KNOWN_IDS) if isinstance(row[0], str)}
+    """目录里已有哪些会话（等锁同样取诊断档：差集查询不该把进程锁按住 5 秒）。"""
+    return {
+        row[0]
+        for row in db.query(_KNOWN_IDS, busy_timeout_ms=DIAGNOSTIC_BUSY_TIMEOUT_MS)
+        if isinstance(row[0], str)
+    }
 
 
 def _write_batch(db: Database, batch: list[tuple[Any, ...]]) -> int:
     """整批插入（一笔事务）。提交不了就一行不算——下一轮回填再来。
 
-    等锁上限同样收紧到诊断档：回填跑在 ``BackgroundScheduler`` 的唯一 task 里，也就是
-    事件循环线程上。单行违约束由 ``INSERT OR IGNORE`` 自己跳过（不会拖垮整批）；会
-    失败的是「拿不到写锁 / 磁盘错」这类整批性的问题，那时逐条重试也没有意义。
+    **块内先看 ``live``**：另一个进程攥着写锁时 ``BEGIN IMMEDIATE`` 会失败，连接照常
+    可用——不看就退化成逐条自动提交（既没有原子性，又按稳态的 5 秒等锁）。
+
+    等锁上限收紧到诊断档：回填整笔跑在 ``asyncio.to_thread`` 的工作线程里（不是事件
+    循环），但 ``Database`` 是进程级单连接 + 一把锁——在锁里陪等的那几秒会把别的
+    访问一起挡住，包括事件循环线程上的审计写入。单行违约束由 ``INSERT OR IGNORE``
+    自己跳过（不会拖垮整批）；会失败的是「拿不到写锁 / 磁盘错」这类整批性的问题，
+    那时逐条重试也没有意义。
     """
     if not batch:
         return 0
     with db.transaction(busy_timeout_ms=DIAGNOSTIC_BUSY_TIMEOUT_MS) as txn:
-        db.executemany(_INSERT, batch)
+        if txn.live:
+            db.executemany(_INSERT, batch)
     return len(batch) if txn.committed else 0
 
 
