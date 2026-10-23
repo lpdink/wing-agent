@@ -206,7 +206,7 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 | 今天的格子是 0，但明明跑过对话 | `SELECT * FROM audit_llm_call ORDER BY id DESC LIMIT 5` 有没有今天的行；`wing.db` 是否降级（`core/logs` 里一行 `wing.db disabled`）；`ts` 与 `ts_ms` 是否同一时区口径 |
 | `sessions_created` 全是 0 | `SELECT count(*) FROM session_catalog`：为 0 说明回填没跑（网关启动后第一个 tick）或库降级；`created_source` 缺失档位说明会话目录里没有可用时间 |
 | `origin` 全是 `me` | 子会话创建时没带 `parent_session_id`（软机制，CLI 从 `WING_SESSION_ID` 填）；`SELECT session_id, parent_session_id FROM session_catalog` 里有没有非空 |
-| 端点 404 但会话明明存在 | 404 判据是「目录里没有**且**审计表没有」。本特性之后新建的会话在创建时**同步**写目录行，不会命中这一档；命中的只有**存量**会话里「id 不自带时间戳 + 没有 history + 没有 `last_interaction`」的那批（回填跳过了它们）。`SELECT count(*) FROM session_catalog WHERE session_id = '<id>'` 一看即知 |
+| 端点 404 但会话明明存在 | 404 判据是「目录里没有**且**审计表没有」。本特性之后新建的会话在创建时写目录行，但那是 250ms 的 best-effort（另一个进程攥着写锁时这一行可能丢，要等到下一轮回填 / 重启才补上）；更要紧的是**存量**会话里「id 不自带时间戳 + 没有 history + 没有 `last_interaction`」的那批永远补不出时间（回填跳过它们）。`SELECT count(*) FROM session_catalog WHERE session_id = '<id>'` 一看即知。另注：单次读失败（等锁超时 / 磁盘错）也会让这一判据落到 404 —— 见 §2 |
 | 与服务端 `info` 的 usage 对不上 | 见 §6 第三行（两条账本，口径不同） |
 | `wing usage` 说 `does not serve /api/usage` | 运行中的网关是本特性之前构建的：`wing stop && wing start` |
 | `wing usage` 的热力图几乎全是 `·`，但明明有会话 | 审计流水从 `wing.db` 建库那天起——看输出的 `token / call / message audit starts …` 那一行；`--since all` 会拉长窗口但补不出更早的读数 |
@@ -263,9 +263,13 @@ GitHub 同款思想），0 档画 `·`。有颜色时格子统一 `█`，档位
 没有是 `group_by=day` 那次。不发明本地包封结构。
 
 **明细**（`--by`）= 一次查询 +（`session` 维度）会话列表补标题；行序、截断、TOTAL 全归端点。
-空态文案只在 `rows` 为空时打——窗口里只建过会话时后端仍给行（`sessions_created` 非 0），
-它们照常出表，表尾补一句 `only sessions created in this range (no flow yet)`：换窗口也补不出
-流水，不给 `--since all` 这种没用的建议。
+空态判据是「窗口里一件事实都没有」（十个流水度量全 0 **且** `sessions_created` 为 0）——只看
+`rows` 不够：`day` 稠密、`origin` 恒两行，它们的零行永远非空，首跑会被画成一整窗全零的表。
+仪表盘那边只看流水（`!totals.has_flow()`）：热力图没有流水就没东西可画，两侧判据因此不同。
+窗口里只建过会话时，**会给目录事实出行的维度**（`day` 稠密、`origin` 恒两行、`workspace` / `agent`
+合并「建过会话的桶」、带 `--session` 的锚点行）照常出表（行带着 `sessions_created`），表尾补一句
+`only sessions created in this range (no flow yet)`：换窗口也补不出流水，不给 `--since all`
+这种没用的建议。`model` / `tool` / 不带作用域的 `session` 没有这种行，仍按空态处理。
 
 **`wing info <sid>`** 的 `usage:` 块与 `wing usage --session <sid>` 同源
 （一次 `since=all&group_by=session&session_id=<sid>&tree=true&limit=200`）：自身行是前四行，
