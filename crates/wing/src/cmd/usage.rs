@@ -571,7 +571,7 @@ fn format_dashboard(
         && data_since > since
     {
         out_text.push_str(&format!(
-            "{INDENT}token / call audit starts {}; earlier days only have session counts\n",
+            "{INDENT}token / call / message audit starts {}; earlier days only have session counts\n",
             data_since.format("%Y-%m-%d")
         ));
     }
@@ -1499,7 +1499,7 @@ mod tests {
         .unwrap();
         assert!(
             text.contains(
-                "token / call audit starts 2026-10-20; earlier days only have session counts"
+                "token / call / message audit starts 2026-10-20; earlier days only have session counts"
             ),
             "{text}"
         );

@@ -195,7 +195,7 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 | 端点 404 但会话明明存在 | 404 判据是「目录里没有**且**审计表没有」。本特性之后新建的会话在创建时**同步**写目录行，不会命中这一档；命中的只有**存量**会话里「id 不自带时间戳 + 没有 history + 没有 `last_interaction`」的那批（回填跳过了它们）。`SELECT count(*) FROM session_catalog WHERE session_id = '<id>'` 一看即知 |
 | 与服务端 `info` 的 usage 对不上 | 见 §6 第三行（两条账本，口径不同） |
 | `wing usage` 说 `does not serve /api/usage` | 运行中的网关是本特性之前构建的：`wing stop && wing start` |
-| `wing usage` 的热力图几乎全是 `·`，但明明有会话 | 审计流水从 `wing.db` 建库那天起——看输出的 `token / call audit starts …` 那一行；`--since all` 会拉长窗口但补不出更早的读数 |
+| `wing usage` 的热力图几乎全是 `·`，但明明有会话 | 审计流水从 `wing.db` 建库那天起——看输出的 `token / call / message audit starts …` 那一行；`--since all` 会拉长窗口但补不出更早的读数 |
 | `wing usage` 的 `TODAY` 行不见了 | 今天在窗口内**且有活动**时才打（全 0 的一天不打一排 0） |
 | `wing usage --by session` 的 TITLE / WHO 是 `—` | 那个会话不在 `/api/session/list` 里（已归档 / 已删除）：id 仍可拷贝，展示素材不猜 |
 | `wing usage --session` 报 `session not found` | 404 = 目录与审计表都没有这个 id；若是老网关（路由都没有），文案会改说 `does not serve /api/usage` |
@@ -232,7 +232,7 @@ wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M]
 标题（范围 + 周数）、热力图、`active days · streak · longest`、`TODAY`（仅当今天在窗口内
 **且**今天有活动）、`WHO`（`me` / `agents` + `total`）与 `MODEL` 两张表。
 `range.data_since` 晚于 `range.since` 时打一行
-`token / call audit starts …; earlier days only have session counts`（字段缺席 = 老网关，不打印）。
+`token / call / message audit starts …; earlier days only have session counts`（字段缺席 = 老网关，不打印）。
 
 **热力图**：列 = ISO 周（周一起），行 = 周一..周日；档位取**非零日的四分位**（相对量，
 GitHub 同款思想），0 档画 `·`。有颜色时格子统一 `█`，档位由
