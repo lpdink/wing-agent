@@ -231,7 +231,7 @@ impl Row {
     fn finish(mut self, inner: usize, band: bool, palette: &ThemePalette) -> Line<'static> {
         let border = Style::default().fg(palette.dim);
         let mut spans: Vec<Span<'static>> = if band {
-            let bg = Style::default().bg(palette.surface);
+            let bg = Style::default().bg(palette.surface).fg(palette.text);
             let fill = inner.saturating_sub(self.width);
             let mut painted: Vec<Span<'static>> = std::mem::take(&mut self.spans)
                 .into_iter()

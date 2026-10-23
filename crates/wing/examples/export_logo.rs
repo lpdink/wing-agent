@@ -56,14 +56,17 @@ fn sprite_rects(grid: &[&str], x0: usize, y0: usize) -> Vec<Rect> {
         let chars: Vec<char> = row.chars().collect();
         let mut x = 0;
         while x < chars.len() {
-            let Some(rgb) = sprite::brand(chars[x], ACCENT) else {
+            let Some(rgb) = sprite::brand(chars[x], ACCENT, wing::config::Appearance::Dark) else {
                 x += 1;
                 continue;
             };
             let color = hex(rgb);
             let start = x;
             while x < chars.len()
-                && sprite::brand(chars[x], ACCENT).map(hex).as_deref() == Some(color.as_str())
+                && sprite::brand(chars[x], ACCENT, wing::config::Appearance::Dark)
+                    .map(hex)
+                    .as_deref()
+                    == Some(color.as_str())
             {
                 x += 1;
             }

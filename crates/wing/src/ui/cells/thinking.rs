@@ -41,7 +41,6 @@ use crate::render::markdown::render_markdown_lines_with;
 use crate::render::markdown::truncate_to_display_width;
 use crate::render::markdown::types::thinking_segment_style;
 use crate::ui::shimmer::Rgb;
-use crate::ui::shimmer::is_light_theme;
 use crate::ui::shimmer::mix;
 use crate::ui::shimmer::sweep_intensity;
 use crate::ui::shimmer::to_rgb;
@@ -328,7 +327,7 @@ impl ThinkingBlock {
             return vec![Span::styled(text.to_string(), label_style)];
         }
         let base = to_rgb(palette.thinking_label);
-        let peak = if is_light_theme(to_rgb(palette.text)) {
+        let peak = if palette.appearance == crate::config::Appearance::Light {
             LIGHT_THEME_HIGHLIGHT
         } else {
             DARK_THEME_HIGHLIGHT
@@ -560,16 +559,24 @@ mod tests {
         );
 
         // 两个槽位各钉一次，而且每次只改一个（否则「重建」本身就够让输出变，改的是哪个
-        // 槽位都看不出来）。`text` 必须挑一个真能翻档位的值：默认与 `White` 同属暗底
-        // 方向，改它不产生差异。
+        // 槽位都看不出来）。方向由 `appearance` 决定，不再从 `text` 反推：覆盖 `text`
+        // 不该翻转档位，切到 light 才翻。
         let default_line = block.label_line(&palette, 80, ThinkingMode::Visible, None);
 
-        let mut darker_text = palette;
-        darker_text.text = ratatui::style::Color::Black;
-        let text_line = block.label_line(&darker_text, 80, ThinkingMode::Visible, None);
+        let mut overridden_text = palette;
+        overridden_text.text = ratatui::style::Color::Black;
+        assert_eq!(
+            default_line,
+            block.label_line(&overridden_text, 80, ThinkingMode::Visible, None),
+            "改 text 不该翻转扫光方向"
+        );
+
+        let mut light = palette;
+        light.appearance = crate::config::Appearance::Light;
+        let text_line = block.label_line(&light, 80, ThinkingMode::Visible, None);
         assert_ne!(default_line, text_line, "高光档位变了（亮底主题）");
 
-        let mut other_base = darker_text;
+        let mut other_base = light;
         other_base.thinking_label = ratatui::style::Color::Magenta;
         assert_ne!(
             text_line,

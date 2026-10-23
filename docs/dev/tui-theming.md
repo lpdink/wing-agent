@@ -107,13 +107,13 @@ pub fn detect_appearance(timeout: Duration) -> Option<Appearance>;
 |---|---|
 | `config/mod.rs` | `ColorPreset` 加两变体；`Appearance`；light palettes；`Terminal` 的 `text → Reset` |
 | `render/syntax.rs` | 4 处 `base16-ocean.dark` → 按 `palette.syntax` 选主题 |
-| `ui/toast.rs` | 三种底改为 appearance 感知（浅色下浅底 + 显式深前景） |
+| `ui/toast.rs` | 三种底按 appearance 选（浅色下浅底），正文显式设 `text` |
 | `ui/popup/selection.rs` | 选中行统一为「`surface` 底 + `text` 前景」；删除 ANSI `Gray` 描述色 |
-| `ui/popup/picker` | 与 selection 共用同一选中语义 |
-| `ui/welcome/{wordmark,sprite,mod}.rs` | 按 appearance 选两套色（同一像素网格）；渐变方向读 `appearance` |
-| `ui/cells/thinking.rs` | 刷光峰值方向读 `appearance`；不再把 `Reset` 当白 |
-| `ui/shimmer.rs` | `to_rgb(Reset)` 不再假定白；`is_light_theme` 删除 |
-| `ui/cells/todo_msg.rs`、`render/markdown/types.rs` | 浅色下避免「淡色槽 + DIM」双重淡化 |
+| `ui/cells/model_picker.rs` | 选中色带与 selection 同语义（`surface` + `text`） |
+| `ui/welcome/{wordmark,sprite,mod}.rs` | 海鸥按 appearance 出两套羽色（同一像素网格）；渐变方向读 `appearance` |
+| `ui/cells/thinking.rs` | 刷光峰值方向读 `appearance` |
+| `ui/shimmer.rs` | 删除 `is_light_theme`（自指判据）；混色仍以 `to_rgb` 兜底 |
+| `ui/cells/todo_msg.rs` | 浅色下不再给已安静的槽叠 `Modifier::DIM` |
 | `cmd/setup.rs` + `config/catalog.rs` | preset 枚举加 `auto` / `light` 及文案；设置面板实时预览沿用现有机制 |
 | `examples/theme_preview.rs` | 支持 `--preset light` 与白/浅灰底导出，作为验收工具 |
 

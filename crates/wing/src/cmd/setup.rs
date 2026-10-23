@@ -73,7 +73,6 @@ use crate::ui::settings::SettingsOverlay;
 use crate::ui::settings::anchors_viewport_rows;
 use crate::ui::settings::has_anchor_column;
 use crate::ui::settings::tree_viewport_rows;
-use crate::ui::shimmer::is_light_theme;
 use crate::ui::shimmer::to_rgb;
 use crate::ui::welcome::art;
 use crate::ui::welcome::sprite;
@@ -704,7 +703,7 @@ fn draw_note(frame: &mut Frame, area: Rect, palette: &ThemePalette, note: &Note)
 fn draw_backplate(frame: &mut Frame, area: Rect, palette: &ThemePalette) {
     frame.render_widget(Clear, area);
     let accent = to_rgb(palette.accent);
-    let light = is_light_theme(to_rgb(palette.text));
+    let light = palette.appearance == crate::config::Appearance::Light;
     let art_width = art::PERCHED_IDLE_COLS + ART_GAP + art::WORDMARK_COLS;
 
     if area.width as usize >= art_width {
@@ -718,6 +717,7 @@ fn draw_backplate(frame: &mut Frame, area: Rect, palette: &ThemePalette) {
                 ART_TERM_ROWS as u16,
             ),
             accent,
+            palette.appearance,
         );
         draw_wordmark(
             frame,
@@ -733,10 +733,15 @@ fn draw_backplate(frame: &mut Frame, area: Rect, palette: &ThemePalette) {
 }
 
 /// 海鸥（站姿，定格）：与 `ui::welcome` 的待机帧同一份网格与留白，逐帧重画。
-fn draw_gull(frame: &mut Frame, area: Rect, accent: sprite::Rgb) {
+fn draw_gull(
+    frame: &mut Frame,
+    area: Rect,
+    accent: sprite::Rgb,
+    appearance: crate::config::Appearance,
+) {
     let mut padded: Vec<&str> = vec![""; PERCHED_TOP_PAD];
     padded.extend_from_slice(art::PERCHED_IDLE);
-    let lines = sprite::lines_padded(&padded, accent, 0, 0, ART_TERM_ROWS);
+    let lines = sprite::lines_padded(&padded, accent, 0, 0, ART_TERM_ROWS, appearance);
     frame.render_widget(Paragraph::new(lines), area);
 }
 

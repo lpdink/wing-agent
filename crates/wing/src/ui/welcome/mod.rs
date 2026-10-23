@@ -51,7 +51,6 @@ use crate::config::ThemePalette;
 use crate::render::table::split_str_by_width;
 use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::tips;
-use crate::ui::shimmer::is_light_theme;
 use crate::ui::shimmer::to_rgb;
 use art::FLY_0;
 use art::FLY_0_COLS;
@@ -379,7 +378,7 @@ impl Welcome {
         self.built_facts = facts;
 
         let accent = to_rgb(palette.accent);
-        let light = is_light_theme(to_rgb(palette.text));
+        let light = palette.appearance == crate::config::Appearance::Light;
         let width = view.width;
 
         // 每一档都产出（行, 块宽）：块宽决定水平居中的位移，行自己只管左对齐。
@@ -395,7 +394,7 @@ impl Welcome {
                     self.tip.text,
                     facts,
                 );
-                let art = gull_lines(pose, accent);
+                let art = gull_lines(pose, accent, palette.appearance);
                 // 右列竖直居中：2x 大字（5 + 6 行）正好填满海鸥盒，1x（3 + 6
                 // 行）上下各留一格。
                 let offset = ART_TERM_ROWS.saturating_sub(column.len()) / 2;
@@ -475,7 +474,11 @@ impl Welcome {
 }
 
 /// 这一帧的海鸥：姿态 → 字母网格 + 竖直偏移，统一补到 [`ART_TERM_ROWS`] 行。
-fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
+fn gull_lines(
+    pose: Pose,
+    accent: sprite::Rgb,
+    appearance: crate::config::Appearance,
+) -> Vec<Line<'static>> {
     match pose {
         Pose::Perched { frame, lift } => {
             let grid = match frame {
@@ -495,6 +498,7 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
                 -(lift as i32),
                 ART_TERM_ROWS.saturating_sub(rows),
                 ART_TERM_ROWS,
+                appearance,
             )
         }
         Pose::Flying { frame } => {
@@ -514,6 +518,7 @@ fn gull_lines(pose: Pose, accent: sprite::Rgb) -> Vec<Line<'static>> {
                 0,
                 ART_TERM_ROWS.saturating_sub(rows) / 2,
                 ART_TERM_ROWS,
+                appearance,
             )
         }
     }
@@ -1577,7 +1582,8 @@ mod tests {
             for row in *grid {
                 for ch in row.chars() {
                     assert!(
-                        ch == '.' || sprite::brand(ch, accent).is_some(),
+                        ch == '.'
+                            || sprite::brand(ch, accent, crate::config::Appearance::Dark).is_some(),
                         "帧数据里有调色板不认识的字母 {ch:?}"
                     );
                 }
@@ -1594,13 +1600,19 @@ mod tests {
                     frame: PerchedFrame::Idle,
                     lift: 0
                 },
-                accent
+                accent,
+                crate::config::Appearance::Dark
             )
             .len(),
             ART_TERM_ROWS
         );
         assert_eq!(
-            gull_lines(Pose::Flying { frame: 0 }, accent).len(),
+            gull_lines(
+                Pose::Flying { frame: 0 },
+                accent,
+                crate::config::Appearance::Dark
+            )
+            .len(),
             ART_TERM_ROWS
         );
         assert_eq!(
@@ -1609,7 +1621,8 @@ mod tests {
                     frame: PerchedFrame::Idle,
                     lift: 2
                 },
-                accent
+                accent,
+                crate::config::Appearance::Dark
             )
             .len(),
             ART_TERM_ROWS
@@ -1650,7 +1663,11 @@ mod tests {
             (PerchedFrame::Flutter2, PERCHED_FLUTTER2),
         ];
         for (frame, grid) in perched {
-            let lines = gull_lines(Pose::Perched { frame, lift: 0 }, accent);
+            let lines = gull_lines(
+                Pose::Perched { frame, lift: 0 },
+                accent,
+                crate::config::Appearance::Dark,
+            );
             assert_eq!(
                 rendered_pixels(&lines),
                 source_ink(grid),
@@ -1661,7 +1678,11 @@ mod tests {
             .iter()
             .enumerate()
         {
-            let lines = gull_lines(Pose::Flying { frame }, accent);
+            let lines = gull_lines(
+                Pose::Flying { frame },
+                accent,
+                crate::config::Appearance::Dark,
+            );
             assert_eq!(
                 rendered_pixels(&lines),
                 source_ink(grid),
@@ -1683,6 +1704,7 @@ mod tests {
                     lift,
                 },
                 accent,
+                crate::config::Appearance::Dark,
             )
             .iter()
             .map(|line| {
@@ -1705,11 +1727,14 @@ mod tests {
     #[test]
     fn accent_letter_follows_the_theme() {
         // `A` 是唯一跟主题走的字母：换个 accent 就该换个颜色。
-        assert_eq!(sprite::brand('A', (1, 2, 3)), Some((1, 2, 3)));
         assert_eq!(
-            sprite::brand('W', (1, 2, 3)),
-            sprite::brand('W', (9, 9, 9)),
-            "品牌色不该跟主题变"
+            sprite::brand('A', (1, 2, 3), crate::config::Appearance::Dark),
+            Some((1, 2, 3))
+        );
+        assert_eq!(
+            sprite::brand('W', (1, 2, 3), crate::config::Appearance::Dark),
+            sprite::brand('W', (9, 9, 9), crate::config::Appearance::Dark),
+            "品牌色不该跟 accent 变"
         );
     }
 }

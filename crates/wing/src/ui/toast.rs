@@ -32,12 +32,17 @@ impl ToastKind {
         }
     }
 
-    /// Dark background color for this toast kind.
-    fn bg_color(self) -> Color {
-        match self {
-            Self::Info => Color::Rgb(20, 40, 45),
-            Self::Warning => Color::Rgb(50, 45, 20),
-            Self::Error => Color::Rgb(50, 20, 20),
+    /// Background tint for this toast kind, paired with the palette's
+    /// appearance: a dark tint on a light terminal would be the one opaque
+    /// block on the screen (and its default foreground would vanish into it).
+    fn bg_color(self, palette: &ThemePalette) -> Color {
+        match (palette.appearance, self) {
+            (crate::config::Appearance::Dark, Self::Info) => Color::Rgb(20, 40, 45),
+            (crate::config::Appearance::Dark, Self::Warning) => Color::Rgb(50, 45, 20),
+            (crate::config::Appearance::Dark, Self::Error) => Color::Rgb(50, 20, 20),
+            (crate::config::Appearance::Light, Self::Info) => Color::Rgb(226, 242, 245),
+            (crate::config::Appearance::Light, Self::Warning) => Color::Rgb(250, 243, 215),
+            (crate::config::Appearance::Light, Self::Error) => Color::Rgb(252, 228, 226),
         }
     }
 }
@@ -156,9 +161,10 @@ pub fn render_toast(
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
         .border_style(Style::default().fg(kind.border_color(palette)))
-        .style(Style::default().bg(kind.bg_color()));
+        .style(Style::default().bg(kind.bg_color(palette)));
 
     Paragraph::new(toast.message.as_str())
+        .style(Style::default().fg(palette.text))
         .block(block)
         .render(toast_area, buf);
     Some(toast_area)
@@ -221,9 +227,22 @@ mod tests {
 
     #[test]
     fn test_kind_bg_colors() {
-        assert_eq!(ToastKind::Info.bg_color(), Color::Rgb(20, 40, 45));
-        assert_eq!(ToastKind::Warning.bg_color(), Color::Rgb(50, 45, 20));
-        assert_eq!(ToastKind::Error.bg_color(), Color::Rgb(50, 20, 20));
+        assert_eq!(ToastKind::Info.bg_color(&p()), Color::Rgb(20, 40, 45));
+        assert_eq!(ToastKind::Warning.bg_color(&p()), Color::Rgb(50, 45, 20));
+        assert_eq!(ToastKind::Error.bg_color(&p()), Color::Rgb(50, 20, 20));
+
+        // The light palette swaps in light tints (and `text` flips to a dark
+        // foreground, so the copy stays readable on them).
+        let light = crate::config::ThemePalette::from_config_with_appearance(
+            &crate::config::ColorsConfig {
+                preset: crate::config::ColorPreset::Light,
+                ..Default::default()
+            },
+            None,
+        );
+        for kind in [ToastKind::Info, ToastKind::Warning, ToastKind::Error] {
+            assert_ne!(kind.bg_color(&p()), kind.bg_color(&light));
+        }
     }
 
     #[test]

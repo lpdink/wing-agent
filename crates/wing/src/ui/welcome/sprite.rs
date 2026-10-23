@@ -6,14 +6,16 @@
 //! **只设前景** —— 给 `▄` 配背景会把本该透明的上半整格填成对面那半的颜色。
 //!
 //! 调色板是**固定品牌色**（白羽 / 石板灰 / 深藏青描边 / 琥珀喙），不跟主题走 ——
-//! 海鸥之所以是海鸥，靠的就是这身颜色；唯一跟主题呼吸的是 `A`（accent 点缀），
-//! 以及 wordmark 的渐变（见 [`super::wordmark`]）。亮色终端下深藏青描边替暗底
-//! 干活，剪影照样立得住（创作期画廊验过）。
+//! 海鸥之所以是海鸥，靠的就是这身颜色；唯一跟主题呼吸的是 `A`（accent 点缀）、
+//! 明暗两套羽色（白底上羽白等于透明，换一档浅蓝灰立剪影），以及 wordmark 的
+//! 渐变（见 [`super::wordmark`]）。
 
 use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
+
+use crate::config::Appearance;
 
 pub use crate::ui::shimmer::Rgb;
 
@@ -21,14 +23,22 @@ pub use crate::ui::shimmer::Rgb;
 ///
 /// 未知字母返回 `None`：帧数据写错时画成透明，比 panic 或画成黑块体面；
 /// 帧数据的字母表由单测钉死（见 `mod.rs` 的 `art_letters_are_in_palette`）。
-pub fn brand(letter: char, accent: Rgb) -> Option<Rgb> {
+pub fn brand(letter: char, accent: Rgb, appearance: Appearance) -> Option<Rgb> {
+    // A dark backdrop lets the bird stay white; on white that same fill is
+    // invisible, so the light palette moves the body one step down (the
+    // outline, beak and eye stay put — that is what keeps it the same bird).
+    let light = appearance == Appearance::Light;
     Some(match letter {
         '.' => return None,
-        'O' => (27, 35, 56),    // 描边：深藏青，不是纯黑
-        'W' => (247, 249, 252), // 羽白
-        'G' => (201, 210, 224), // 浅灰（mantle / 折翼）
-        'S' => (142, 155, 176), // 石板灰（翼下缘 / 尾下）
-        'D' => (58, 71, 99),    // 深石板（翼尖 / 尾尖）
+        'O' => (27, 35, 56),             // 描边：深藏青，不是纯黑
+        'W' if light => (201, 211, 226), // 羽白 → 浅蓝灰（白底上留得住轮廓）
+        'W' => (247, 249, 252),          // 羽白
+        'G' if light => (170, 183, 201), // 浅灰（mantle / 折翼）
+        'G' => (201, 210, 224),
+        'S' if light => (127, 142, 168), // 石板灰（翼下缘 / 尾下）
+        'S' => (142, 155, 176),
+        'D' if light => (74, 88, 120), // 深石板（翼尖 / 尾尖）
+        'D' => (58, 71, 99),
         'B' => (245, 169, 60),  // 喙 / 脚：琥珀
         'M' => (199, 126, 34),  // 琥珀暗面
         'E' => (20, 28, 51),    // 眼
@@ -49,9 +59,10 @@ pub fn lines_padded(
     row_shift: i32,
     pad_top: usize,
     term_rows: usize,
+    appearance: Appearance,
 ) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(""); pad_top.min(term_rows)];
-    out.extend(lines(grid, accent, row_shift));
+    out.extend(lines(grid, accent, row_shift, appearance));
     out.resize_with(term_rows, Line::default);
     out
 }
@@ -62,7 +73,12 @@ pub fn lines_padded(
 /// 网格，把标准姿势抬几行就是跳。移出去的行丢弃，空出来的行补透明。
 ///
 /// 行尾透明格截掉、相邻同色格合并成一个 span：与旧版像素 W 同样的两条瘦身。
-pub fn lines(grid: &[&str], accent: Rgb, row_shift: i32) -> Vec<Line<'static>> {
+pub fn lines(
+    grid: &[&str],
+    accent: Rgb,
+    row_shift: i32,
+    appearance: Appearance,
+) -> Vec<Line<'static>> {
     let term_rows = grid.len().div_ceil(2);
     let cols = grid.iter().map(|r| r.chars().count()).max().unwrap_or(0);
     let mut out = Vec::with_capacity(term_rows);
@@ -81,10 +97,12 @@ pub fn lines(grid: &[&str], accent: Rgb, row_shift: i32) -> Vec<Line<'static>> {
             let (glyph, style) = match (pixel(grid, col, up_row), pixel(grid, col, lo_row)) {
                 (Some(u), Some(l)) => (
                     '▀',
-                    Style::default().fg(color(u, accent)).bg(color(l, accent)),
+                    Style::default()
+                        .fg(color(u, accent, appearance))
+                        .bg(color(l, accent, appearance)),
                 ),
-                (Some(u), None) => ('▀', Style::default().fg(color(u, accent))),
-                (None, Some(l)) => ('▄', Style::default().fg(color(l, accent))),
+                (Some(u), None) => ('▀', Style::default().fg(color(u, accent, appearance))),
+                (None, Some(l)) => ('▄', Style::default().fg(color(l, accent, appearance))),
                 (None, None) => (' ', Style::default()),
             };
             match &mut run {
@@ -112,8 +130,8 @@ fn pixel(grid: &[&str], col: usize, row: i32) -> Option<char> {
     (ch != '.').then_some(ch)
 }
 
-fn color(letter: char, accent: Rgb) -> Color {
-    match brand(letter, accent) {
+fn color(letter: char, accent: Rgb, appearance: Appearance) -> Color {
+    match brand(letter, accent, appearance) {
         Some((r, g, b)) => Color::Rgb(r, g, b),
         None => Color::Reset,
     }
@@ -132,7 +150,7 @@ mod tests {
 
     #[test]
     fn full_cell_uses_fg_and_bg() {
-        let lines = lines(TINY, (0, 0, 0), 0);
+        let lines = lines(TINY, (0, 0, 0), 0, Appearance::Dark);
         assert_eq!(lines.len(), 2, "3 像素行 -> 2 终端行");
         let span = lines[0]
             .spans
@@ -147,15 +165,15 @@ mod tests {
     #[test]
     fn half_cell_has_no_background() {
         // 第 2 终端行：上像素 = 描边、下像素透明 -> 只有前景。
-        let span = &lines(TINY, (0, 0, 0), 0)[1].spans[0];
+        let span = &lines(TINY, (0, 0, 0), 0, Appearance::Dark)[1].spans[0];
         assert_eq!(span.content.as_ref(), "▀▀▀▀");
         assert!(span.style.bg.is_none(), "半格不能带背景");
     }
 
     #[test]
     fn row_shift_lifts_the_sprite() {
-        let idle = lines(TINY, (0, 0, 0), 0);
-        let hop = lines(TINY, (0, 0, 0), -2);
+        let idle = lines(TINY, (0, 0, 0), 0, Appearance::Dark);
+        let hop = lines(TINY, (0, 0, 0), -2, Appearance::Dark);
         assert_eq!(idle.len(), hop.len());
         // 上移两像素行：描边行顶到第 0 终端行的下半，末行全空。
         assert!(hop[1].spans.is_empty() || hop[1].spans.iter().all(|s| s.content.is_empty()));
@@ -165,7 +183,7 @@ mod tests {
 
     #[test]
     fn trailing_transparent_is_trimmed() {
-        let lines = lines(&[".W..", "...."], (0, 0, 0), 0);
+        let lines = lines(&[".W..", "...."], (0, 0, 0), 0, Appearance::Dark);
         let width: usize = lines[0]
             .spans
             .iter()
@@ -176,9 +194,14 @@ mod tests {
 
     #[test]
     fn unknown_letters_are_transparent() {
-        assert!(brand('?', (1, 2, 3)).is_none());
-        assert!(brand('.', (1, 2, 3)).is_none());
-        assert!(brand('W', (1, 2, 3)).is_some());
-        assert_eq!(brand('A', (9, 8, 7)), Some((9, 8, 7)));
+        assert!(brand('?', (1, 2, 3), Appearance::Dark).is_none());
+        assert!(brand('.', (1, 2, 3), Appearance::Dark).is_none());
+        assert!(brand('W', (1, 2, 3), Appearance::Dark).is_some());
+        assert_eq!(brand('A', (9, 8, 7), Appearance::Dark), Some((9, 8, 7)));
+        assert_ne!(
+            brand('W', (1, 2, 3), Appearance::Dark),
+            brand('W', (1, 2, 3), Appearance::Light),
+            "the body must switch palettes with the background"
+        );
     }
 }

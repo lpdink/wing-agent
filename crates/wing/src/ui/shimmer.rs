@@ -1,8 +1,9 @@
 //! 扫光 / 混色原语 —— 开屏 wordmark 与聊天里的思考行共用的一份数学。
 //!
 //! 「一道光带扫过文本」= 逐列算强度 + 朝高光色混色。强度曲线（[`sweep_intensity`]）、
-//! 混色（[`mix`]）、主题明暗判断（[`is_light_theme`]）收在这里，两个消费者只提供
-//! 自己的「跨度 / 半径 / 高光色」。各写一份的下场是手感对不上：一边调了另一边不跟。
+//! 混色（[`mix`]）收在这里，两个消费者只提供自己的「跨度 / 半径 / 高光色」。各写一份
+//! 的下场是手感对不上：一边调了另一边不跟。扫光方向读 `ThemePalette::appearance`
+//! （显式属性），不再从正文色的亮度反推。
 
 use ratatui::style::Color;
 
@@ -19,13 +20,6 @@ pub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 /// 相对亮度（0..1 近似）—— 判断主题是亮是暗。
 pub fn luminance(rgb: Rgb) -> f32 {
     (0.2126 * rgb.0 as f32 + 0.7152 * rgb.1 as f32 + 0.0722 * rgb.2 as f32) / 255.0
-}
-
-/// 主题是不是亮底（按 `text` 色亮度判：亮底主题的正文字是深的）。
-///
-/// 扫光方向的唯一判据：暗底朝白提，亮底朝深压 —— 亮底上白光看不见。
-pub fn is_light_theme(text: Rgb) -> bool {
-    luminance(text) < 0.5
 }
 
 /// 扫光在 `col` 列的高光强度（0 = 不在光带里，1 = 正中）。
@@ -102,12 +96,6 @@ mod tests {
     #[test]
     fn zero_radius_is_dark() {
         assert_eq!(sweep_intensity(1.0, 0.5, 10.0, 0.0), 0.0);
-    }
-
-    #[test]
-    fn light_theme_reads_the_text_colour() {
-        assert!(is_light_theme((20, 20, 20)), "深色正文 = 亮底主题");
-        assert!(!is_light_theme((229, 229, 229)), "浅色正文 = 暗底主题");
     }
 
     #[test]

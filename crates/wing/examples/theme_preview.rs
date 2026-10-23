@@ -6,8 +6,8 @@
 //! # 默认：读真实配置（$WING_HOME/tui/config.yaml），ANSI 输出到终端
 //! cargo run -p wing --example theme_preview
 //!
-//! # 换预设对比：wing（设计版，默认）/ terminal（跟随终端 ANSI 色）
-//! cargo run -p wing --example theme_preview -- --preset terminal
+//! # 换预设对比：auto（默认，无探测时按 wing）/ wing / light / terminal
+//! cargo run -p wing --example theme_preview -- --preset light --bg "#ffffff"
 //!
 //! # 导出 HTML（浏览器里对照 / 截图贴 issue）
 //! cargo run -p wing --example theme_preview -- --html /tmp/theme.html
@@ -629,13 +629,13 @@ fn sgr(color: Option<Color>, foreground: bool) -> Option<String> {
     }
 }
 
-fn html(lines: &[Line<'_>], meta: &str) -> String {
+fn html(lines: &[Line<'_>], meta: &str, bg: &str, fg: &str) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n");
     let _ = writeln!(out, "<title>{}</title>", escape(meta));
     out.push_str("<style>\n");
     out.push_str("html,body{margin:0;padding:0}\n");
-    out.push_str("body{background:#0b0f16;color:#c9ced9;padding:26px 30px}\n");
+    let _ = writeln!(out, "body{{background:{bg};color:{fg};padding:26px 30px}}");
     out.push_str(
         "pre{margin:0;font:13px/1.35 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",Consolas,monospace;white-space:pre}\n",
     );
@@ -721,9 +721,13 @@ fn main() {
     let mut config = AppConfig::load();
     match preset_override.as_deref() {
         None => {}
+        Some("auto") => config.colors.preset = ColorPreset::Auto,
         Some("wing") => config.colors.preset = ColorPreset::Wing,
+        Some("light") => config.colors.preset = ColorPreset::Light,
         Some("terminal") => config.colors.preset = ColorPreset::Terminal,
-        Some(other) => fail(&format!("unknown preset '{other}' (wing | terminal)")),
+        Some(other) => fail(&format!(
+            "unknown preset '{other}' (auto | wing | light | terminal)"
+        )),
     }
     config.resolve();
     let palette = ThemePalette::from_config(&config.colors);
@@ -732,10 +736,18 @@ fn main() {
     match html_path {
         Some(path) => {
             let meta = format!(
-                "wing theme preview · preset={:?} · width={width}",
-                config.colors.preset
+                "wing theme preview · preset={:?} · appearance={:?} · width={width}",
+                config.colors.preset, palette.appearance
             );
-            let document = html(&lines, &meta);
+            let bg = value(&args, "--bg").unwrap_or_else(|| match palette.appearance {
+                wing::config::Appearance::Light => "#ffffff".to_string(),
+                wing::config::Appearance::Dark => "#0b0f16".to_string(),
+            });
+            let fg = value(&args, "--fg").unwrap_or_else(|| match palette.appearance {
+                wing::config::Appearance::Light => "#1f2328".to_string(),
+                wing::config::Appearance::Dark => "#c9ced9".to_string(),
+            });
+            let document = html(&lines, &meta, &bg, &fg);
             if let Err(e) = std::fs::write(&path, document) {
                 fail(&format!("cannot write {path}: {e}"));
             }

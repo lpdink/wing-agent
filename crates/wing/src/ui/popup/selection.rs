@@ -332,6 +332,11 @@ struct RowStyle {
     base: Style,
     accent: Color,
     dim: Color,
+    /// Foreground for the row's own text: the palette's `text` on the selected
+    /// row (a selected row carries `surface` as its background, so its copy
+    /// must not fall back to the terminal default — that is the light/dark
+    /// mismatch this replaces), `Reset` (terminal default) elsewhere.
+    fg: Color,
     selected: bool,
 }
 
@@ -381,6 +386,7 @@ impl<'a> SelectionPopup<'a> {
             base: base_style,
             accent,
             dim: dim_color,
+            fg: row_fg,
             selected: is_selected,
         } = style;
         Self::clear_line(buf, area, y, base_style);
@@ -410,7 +416,7 @@ impl<'a> SelectionPopup<'a> {
         } else {
             row.description.clone()
         };
-        let desc_fg = if is_selected { Color::Gray } else { dim_color };
+        let desc_fg = if is_selected { row_fg } else { dim_color };
         spans.push(Span::styled(
             desc,
             Style::default().fg(desc_fg).patch(base_style),
@@ -439,6 +445,7 @@ impl<'a> SelectionPopup<'a> {
             base: base_style,
             accent,
             dim: dim_color,
+            fg: _,
             selected: is_selected,
         } = style;
         let width = area.width as usize;
@@ -594,11 +601,16 @@ impl Widget for SelectionPopup<'_> {
             }
             let row = &self.rows[idx];
             let is_selected = idx == selected;
-            let bg = if is_selected { dim_color } else { Color::Reset };
+            let (bg, fg) = if is_selected {
+                (self.palette.surface, self.palette.text)
+            } else {
+                (Color::Reset, Color::Reset)
+            };
             let style = RowStyle {
-                base: Style::default().bg(bg),
+                base: Style::default().bg(bg).fg(fg),
                 accent,
                 dim: dim_color,
+                fg,
                 selected: is_selected,
             };
 
@@ -1156,7 +1168,7 @@ mod tests {
     fn highlighted_rows(rows: &[SelectionRow], state: &SelectionState, area: Rect) -> Vec<String> {
         let (buf, lines, palette) = render_frame(rows, state, area);
         (area.y..area.bottom())
-            .filter(|&y| (area.x..area.right()).any(|x| buf[(x, y)].bg == palette.dim))
+            .filter(|&y| (area.x..area.right()).any(|x| buf[(x, y)].bg == palette.surface))
             .map(|y| lines[(y - area.y) as usize].clone())
             .collect()
     }
