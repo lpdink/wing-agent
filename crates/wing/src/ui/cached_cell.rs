@@ -510,9 +510,9 @@ impl CachedCell {
     /// Frame boundary for deferred tool-args work: parse once when
     /// fragments arrived since the last flush, then invalidate the render
     /// cache exactly once (the displayed content may have changed).
-    pub fn flush_pending_args(&mut self) -> bool {
+    pub fn flush_pending_args(&mut self, syntax: crate::config::SyntaxTheme) -> bool {
         let parsed = match &mut self.cell {
-            ChatCell::ToolCall(block) => block.flush_pending_args(),
+            ChatCell::ToolCall(block) => block.flush_pending_args(syntax),
             _ => false,
         };
         if parsed {
@@ -708,7 +708,7 @@ impl CachedCell {
         // Frame boundary: settle deferred streaming work (tool-args parse)
         // before the caches are consulted — the generation check below must
         // see the invalidation a flush produces.
-        self.flush_pending_args();
+        self.flush_pending_args(ctx.palette.syntax);
         // One set of image options for both render paths: adopt the frame's
         // before anything is cached or returned (see `sync_image_opts`).
         self.sync_image_opts(ctx.images);
@@ -814,7 +814,7 @@ impl CachedCell {
         // Frame boundary — see `compute_cell_lines`. Heights for a
         // streaming tool cell depend on the parsed args (command line,
         // preview lines), so the flush must run before the cache check.
-        self.flush_pending_args();
+        self.flush_pending_args(ctx.palette.syntax);
         // Heights are what `update_heights` sums into the layout, so they must
         // come from the same image options the frame will be drawn with —
         // an anchor's rows move a whole cell's height (see `sync_image_opts`).

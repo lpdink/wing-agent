@@ -135,7 +135,14 @@ pub(crate) fn interface_catalog() -> SettingNode {
     let mut accent = str_field("accent");
     accent.value_hint = Some("color".into());
     accent.doc = "强调色（命名色或 #RRGGBB）".into();
-    let preset = enum_field("preset", &[("wing", "品牌配色"), ("terminal", "跟随终端")]);
+    let preset = enum_field(
+        "preset",
+        &[
+            ("auto", "跟随终端"),
+            ("dark", "品牌配色"),
+            ("light", "亮底配色"),
+        ],
+    );
     let colors = object("colors", vec![preset, accent]);
     let layout = object(
         "layout",
@@ -412,7 +419,7 @@ pub(crate) fn product_interface() -> InterfaceSource {
     InterfaceSource {
         groups: crate::config::catalog::interface_groups(),
         catalog,
-        doc: json!({"colors": {"accent": "cyan", "preset": "wing"}}),
+        doc: json!({"colors": {"accent": "cyan", "preset": "dark"}}),
     }
 }
 
@@ -525,7 +532,7 @@ pub(crate) fn interface_source(catalog: SettingNode) -> InterfaceSource {
             members: catalog.children.iter().map(|c| c.key.clone()).collect(),
         }],
         catalog,
-        doc: json!({"colors": {"accent": "cyan", "preset": "wing"}}),
+        doc: json!({"colors": {"accent": "cyan", "preset": "dark"}}),
     }
 }
 

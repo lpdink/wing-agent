@@ -253,7 +253,10 @@ impl App {
         launch_workspace: Option<String>,
         images: Images,
     ) -> Self {
-        let palette = ThemePalette::from_config(&config.colors);
+        let palette = ThemePalette::from_config_with_appearance(
+            &config.colors,
+            crate::tui::detected_appearance(),
+        );
         let max_input_lines = config.layout.max_input_lines;
         // 欢迎屏：tip 抽签 + 扫光时钟。这里先按"还没有帧"的宽度建一次，只是
         // 为了让 draw 之前 header 不为空 —— 第一次 draw 一定按真实的内容宽重建
@@ -415,7 +418,10 @@ impl App {
     /// 解析后的主题色板（测试要按同一份色板构建 header）。
     #[cfg(test)]
     pub(crate) fn palette(&self) -> ThemePalette {
-        ThemePalette::from_config(&self.config.colors)
+        ThemePalette::from_config_with_appearance(
+            &self.config.colors,
+            crate::tui::detected_appearance(),
+        )
     }
 
     /// 彻底关掉欢迎屏（连 header 一起清空）。

@@ -136,7 +136,7 @@ fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // 会话（raw + stdin 接驳）随第一个 TUI 段开启，收尾统一走 `end_tui_session`（屏的
     // 离开序列是段级的，raw 与 fd 0 是会话级的）。
-    let mut terminal = init_terminal()?;
+    let mut terminal = init_terminal(wing::config::ColorPreset::Dark)?;
     // Upstream's rule: query the terminal after entering the alternate screen, before the
     // event loop starts reading stdin.
     let support = ImageSupport::detect(DEFAULT_DETECT_TIMEOUT);

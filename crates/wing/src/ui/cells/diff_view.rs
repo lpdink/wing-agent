@@ -26,7 +26,7 @@
 //! one highlighter, lines from the new revision another, in file order, so multi-line constructs —
 //! block comments, template strings, brackets — stay correctly colored.
 
-use std::cell::OnceCell;
+use std::cell::RefCell;
 use std::ops::Range;
 
 use ratatui::style::Color;
@@ -66,14 +66,16 @@ pub struct DiffView {
     pub old_start_line: usize,
     /// 1-based absolute line number of `new_text`'s first line.
     pub new_start_line: usize,
-    /// Width-independent render plan. The window is immutable, so the plan
-    /// is built once and reused for the lifetime of the view.
+    /// Width-independent render plan, keyed by the syntax theme it was
+    /// highlighted under (a palette switch re-plans instead of serving stale
+    /// colours). The window is immutable, so at most one plan per theme is
+    /// built and reused for the lifetime of the view.
     ///
-    /// The `OnceCell` makes `DiffView` `!Sync` (it stays `Send`): cells are
+    /// The `RefCell` makes `DiffView` `!Sync` (it stays `Send`): cells are
     /// built and rendered on the UI thread only. Off-thread rendering
     /// (offscreen capture, parallel layout) would have to move this cache
     /// behind its own lock.
-    plan: OnceCell<Plan>,
+    plan: RefCell<Option<(crate::config::SyntaxTheme, Plan)>>,
 }
 
 /// One styled piece of a row (a syntax span, possibly split by emphasis).
@@ -148,7 +150,7 @@ impl DiffView {
             new_text,
             old_start_line,
             new_start_line,
-            plan: OnceCell::new(),
+            plan: RefCell::new(None),
         }
     }
 
@@ -164,7 +166,7 @@ impl DiffView {
     /// column holds, the tint band runs on unbroken) — see [`row_line`].
     pub fn to_lines(&self, palette: &ThemePalette, width: u16) -> Vec<Line<'static>> {
         let dim = Style::default().fg(palette.dim);
-        let plan = self.plan();
+        let plan = self.plan(palette.syntax);
         let width = width as usize;
         let mut lines = Vec::with_capacity(plan.entries.len() + 1);
 
@@ -183,7 +185,7 @@ impl DiffView {
                     );
                 }
                 Entry::Code(row) => {
-                    lines.extend(render_row(plan, row, palette, width));
+                    lines.extend(render_row(&plan, row, palette, width));
                 }
             }
         }
@@ -194,14 +196,24 @@ impl DiffView {
         lines
     }
 
-    /// The plan, built on first use and reused for the view's lifetime.
-    fn plan(&self) -> &Plan {
-        self.plan.get_or_init(|| self.build_plan())
+    /// The plan for `syntax`, built on first use and reused until the palette
+    /// changes its syntax theme.
+    fn plan(&self, syntax: crate::config::SyntaxTheme) -> std::cell::RefMut<'_, Plan> {
+        let mut slot = self.plan.borrow_mut();
+        if slot.as_ref().map(|(s, _)| *s) != Some(syntax) {
+            *slot = Some((syntax, self.build_plan(syntax)));
+        }
+        std::cell::RefMut::map(
+            slot,
+            |slot: &mut Option<(crate::config::SyntaxTheme, Plan)>| {
+                &mut slot.as_mut().expect("just set").1
+            },
+        )
     }
 
     /// Build the width-independent plan: highlight syntax, mark word-level
     /// emphasis, number every row from the window's absolute start lines.
-    fn build_plan(&self) -> Plan {
+    fn build_plan(&self, syntax: crate::config::SyntaxTheme) -> Plan {
         let mut plan = Plan {
             entries: Vec::new(),
             number_width: 3,
@@ -216,7 +228,7 @@ impl DiffView {
                 .as_deref()
                 .and_then(|text| text.lines().next())
         });
-        let mut hl = DiffHighlighters::for_file(&self.path, first_line);
+        let mut hl = DiffHighlighters::for_file(&self.path, first_line, syntax);
 
         match &self.old_text {
             None => {

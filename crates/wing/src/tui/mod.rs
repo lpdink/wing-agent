@@ -34,10 +34,12 @@ use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
+pub mod appearance;
 pub mod clipboard_protocol;
 pub mod cursor;
 pub mod stdin_proxy;
 
+pub use appearance::detected_appearance;
 pub use clipboard_protocol::ClipboardEvent;
 pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
@@ -256,14 +258,17 @@ pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
 ///
 /// 会话（raw mode + stdin 接驳）由**第一段** TUI 开启、各段共用；进入 / 离开序列是每段
 /// 各写一次。收尾必须走 [`end_tui_session`] —— 会话不是段级资源。
-pub fn init_terminal() -> Result<WingTerminal> {
-    init_terminal_with(enter_sequence)
+pub fn init_terminal(preset: crate::config::ColorPreset) -> Result<WingTerminal> {
+    init_terminal_with(enter_sequence, preset)
 }
 
-fn init_terminal_with(enter: fn(&mut Stdout) -> io::Result<()>) -> Result<WingTerminal> {
+fn init_terminal_with(
+    enter: fn(&mut Stdout) -> io::Result<()>,
+    preset: crate::config::ColorPreset,
+) -> Result<WingTerminal> {
     // 会话幂等：第一段真开（真实 tty 进 raw → 装接驳，顺序见 [`begin_tui_session`]），
     // 后续段原样复用。任何失败都把会话收回去，绝不把终端留在 raw。
-    begin_tui_session()?;
+    begin_tui_session(preset)?;
     let mut stdout = io::stdout();
     let entered = enter(&mut stdout);
     let built =
@@ -292,14 +297,18 @@ pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
 /// 1. 真实 tty 进 raw —— 必须发生在接驳**之前**：crossterm 的 raw 打在 `tty_fd()`（此刻
 ///    是 fd 0 = 真实 tty）上，它把「原始 termios」存成静态、`disable_raw_mode` 时再写回
 ///    fd 0；顺序反过来保存的就是 pty slave 的 termios（收尾会污染真实 tty）。
-/// 2. 装 stdin 接驳（[`stdin_proxy::install`]）：换掉 fd 0 之后本进程**所有** crossterm
+/// 2. 问一次终端底色（[`appearance::probe_once`]，仅 `preset: auto`）：位置被夹在 raw 与
+///    接驳之间——读应答要非规范模式，而接驳之后 fd 0 就不再是真实 tty 了。窗口内键入会丢
+///    （≤150ms，与图像能力探测同款取舍）。
+/// 3. 装 stdin 接驳（[`stdin_proxy::install`]）：换掉 fd 0 之后本进程**所有** crossterm
 ///    输入都走分流层，事件源也只能在此之后创建（注册与读端必须是同一个文件描述，否则
 ///    主 TUI 的键盘会被掐死 —— 反面证据见 `tests/stdin_proxy_stale_event_source.rs`）。
 ///
 /// 失败不致命：接驳装不上只是没有 5522 通道（探针判定在 [`stdin_proxy::settle_paste_channel`]，
 /// 没装上就是阴性——不会被误开）。
-fn begin_tui_session() -> io::Result<()> {
+fn begin_tui_session(preset: crate::config::ColorPreset) -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
+    appearance::probe_once(preset);
     if let Err(e) = stdin_proxy::install() {
         tracing::warn!("stdin proxy unavailable, clipboard paste events disabled: {e}");
     }

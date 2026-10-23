@@ -21,6 +21,8 @@
 
 use ratatui::style::Color;
 use serde_json::Value;
+
+use super::ColorPreset;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 use wing_api_client::models::ApplyScope;
@@ -433,17 +435,27 @@ fn preset_node() -> SettingNode {
         "Colors",
         COLORS_SECTION_DOC,
     );
-    node.choices = vec![
-        choice("wing", "为暗底终端设计的 hex 灰阶 + cyan accent（默认）"),
-        choice(
-            "terminal",
-            "跟随终端自己的 ANSI 色（亮底终端与跟随系统主题的场景）",
-        ),
-    ];
+    // 变体清单只有 `ColorPreset::ALL` 一处；文案用 exhaustive match 钉住
+    // （新增变体先用编译错误提醒写文案，再进 choices）。
+    node.choices = ColorPreset::ALL
+        .iter()
+        .map(|preset| choice(preset.as_str(), preset_doc(*preset)))
+        .collect();
     // 默认值用小写拼写（= choices 的口径）；`Deserialize` 大小写不敏感，两种都能读。
-    node.default = Some(Value::from("wing"));
+    node.default = Some(Value::from("auto"));
     node.has_default = true;
     node
+}
+
+/// 每个预设的界面文案。`match` 是 exhaustive 的：新增变体会在编译期要求补文案。
+fn preset_doc(preset: ColorPreset) -> &'static str {
+    match preset {
+        ColorPreset::Auto => {
+            "跟随终端：启动时探测背景明暗，亮底用 light、暗底用 wing，探测不到用 wing（默认）"
+        }
+        ColorPreset::Dark => "为暗底终端设计的 hex 灰阶 + cyan accent",
+        ColorPreset::Light => "为亮底终端设计的同一套色相（白底校准）",
+    }
 }
 
 fn slot_node(key: &str, doc: &str, default: &str, order: i64) -> SettingNode {
@@ -1101,7 +1113,7 @@ mod tests {
     fn full_sample() -> AppConfig {
         AppConfig {
             colors: ColorsConfig {
-                preset: ColorPreset::Terminal,
+                preset: ColorPreset::Light,
                 accent: Some("#ff00ff".into()),
                 text: Some("#ffffff".into()),
                 thinking: Some("gray".into()),
@@ -1385,7 +1397,7 @@ mod tests {
     fn the_enum_choices_are_lowercase_and_contain_their_defaults() {
         let catalog = interface_catalog();
         let cases: [(&str, &[&str], &str); 4] = [
-            ("colors.preset", &["wing", "terminal"], "wing"),
+            ("colors.preset", &["auto", "dark", "light"], "auto"),
             ("rendering.thinking", &["visible", "hidden"], "visible"),
             ("rendering.math", &["text", "off"], "text"),
             ("rendering.images", &["auto", "off"], "auto"),
@@ -1452,7 +1464,7 @@ mod tests {
         assert_eq!(read_back, json!({}), "全是注释：一个键都不该被写下");
         let parsed = appconfig_from_doc(&read_back);
         assert_eq!(json_of(&parsed), json_of(&AppConfig::default()));
-        assert_eq!(parsed.colors.preset, ColorPreset::Wing);
+        assert_eq!(parsed.colors.preset, ColorPreset::Auto);
     }
 
     /// N-1：文件头与第一个 section 之间**恰有一个**空行。
@@ -1548,7 +1560,7 @@ mod tests {
         assert_eq!(doc_from_text(&dumped), doc);
         assert_eq!(
             appconfig_from_doc(&doc_from_text(&dumped)).colors.preset,
-            ColorPreset::Wing
+            ColorPreset::Auto
         );
     }
 
@@ -1636,7 +1648,7 @@ mod tests {
             );
         }
         // 注释掉的默认值（小写拼写 = choices 口径）；`api_key` 没有默认值 → 不写。
-        assert!(dumped.contains("  # preset: wing"));
+        assert!(dumped.contains("  # preset: auto"));
         assert!(dumped.contains("  # accent: \"#3ac6e0\""));
         assert!(dumped.contains("  # max_input_lines: 10"));
         assert!(dumped.contains("  # thinking: visible"));
@@ -1721,15 +1733,15 @@ mod tests {
     #[test]
     fn a_document_written_with_the_lowercase_choice_spellings_round_trips() {
         let doc = json!({
-            "colors": {"preset": "terminal", "accent": "#ff00ff"},
+            "colors": {"preset": "light", "accent": "#ff00ff"},
             "layout": {"max_input_lines": 25},
             "rendering": {"thinking": "hidden", "math": "off", "images": "off"},
         });
         let dumped = dump_config_yaml(&doc, DumpMode::Raw);
-        assert!(dumped.contains("preset: terminal"), "{dumped}");
+        assert!(dumped.contains("preset: light"), "{dumped}");
         assert!(dumped.contains("thinking: hidden"), "{dumped}");
         let parsed = appconfig_from_doc(&doc_from_text(&dumped));
-        assert_eq!(parsed.colors.preset, ColorPreset::Terminal);
+        assert_eq!(parsed.colors.preset, ColorPreset::Light);
         assert_eq!(parsed.rendering.thinking, ThinkingMode::Hidden);
         assert_eq!(parsed.rendering.math, MathMode::Off);
         assert_eq!(parsed.rendering.images, ImagesMode::Off);
@@ -1740,16 +1752,23 @@ mod tests {
             "resolve() 折进了载体字段"
         );
 
-        // `Serialize` 的变体名（`Wing` / `Hidden` / `Off` / `Auto`）也读得回来——这是既有行为，
-        // 也正是"文件里已经写下的值原样输出"能 round-trip 的原因。
+        // `Serialize` 的变体名（`Dark` / `Hidden` / `Off` / `Auto`）也读得回来——这是既有行为，
+        // 也正是"文件里已经写下的值原样输出"能 round-trip 的原因。旧名 `wing` / `terminal`
+        // 仍然可读（分别落到 `dark` / `auto`）。
         let parse = |yaml: &str| -> AppConfig { serde_yaml::from_str(yaml).expect("yaml") };
         assert_eq!(
-            parse("colors:\n  preset: Wing\n").colors.preset,
-            ColorPreset::Wing
+            parse("colors:\n  preset: Dark\n").colors.preset,
+            ColorPreset::Dark
+        );
+        assert_eq!(
+            parse("colors:\n  preset: wing\n").colors.preset,
+            ColorPreset::Dark,
+            "旧名 wing = dark"
         );
         assert_eq!(
             parse("colors:\n  preset: terminal\n").colors.preset,
-            ColorPreset::Terminal
+            ColorPreset::Auto,
+            "已移除的 terminal 回落到 auto"
         );
         assert_eq!(
             parse("rendering:\n  thinking: Visible\n")
@@ -1786,10 +1805,10 @@ mod tests {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         let uncommented = uncomment(&dumped);
         assert!(uncommented.contains("colors:"), "{uncommented}");
-        assert!(uncommented.contains("preset: wing"), "{uncommented}");
+        assert!(uncommented.contains("preset: auto"), "{uncommented}");
         let parsed = appconfig_from_doc(&doc_from_text(&uncommented));
 
-        assert_eq!(parsed.colors.preset, ColorPreset::Wing);
+        assert_eq!(parsed.colors.preset, ColorPreset::Auto);
         assert_eq!(parsed.rendering.thinking, ThinkingMode::Visible);
         assert_eq!(parsed.rendering.math, MathMode::Text);
         assert_eq!(parsed.rendering.images, ImagesMode::Auto);

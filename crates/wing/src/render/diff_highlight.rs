@@ -28,6 +28,7 @@ use syntect::easy::HighlightLines;
 use super::syntax::advance_line;
 use super::syntax::highlight_line_with;
 use super::syntax::new_highlighter_for_file;
+use crate::config::SyntaxTheme;
 
 /// Which revision(s) a diff line belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,10 +50,10 @@ pub(crate) struct DiffHighlighters {
 impl DiffHighlighters {
     /// Highlighters for `path`'s language, or a pair of `None`s when the
     /// language is unknown (callers then fall back to plain text).
-    pub(crate) fn for_file(path: &str, first_line: Option<&str>) -> Self {
+    pub(crate) fn for_file(path: &str, first_line: Option<&str>, syntax: SyntaxTheme) -> Self {
         Self {
-            old: new_highlighter_for_file(path, first_line),
-            new: new_highlighter_for_file(path, first_line),
+            old: new_highlighter_for_file(path, first_line, syntax),
+            new: new_highlighter_for_file(path, first_line, syntax),
         }
     }
 
@@ -87,7 +88,7 @@ mod tests {
     /// context lines).
     #[test]
     fn context_lines_advance_the_old_revision() {
-        let mut hl = DiffHighlighters::for_file("main.rs", None);
+        let mut hl = DiffHighlighters::for_file("main.rs", None, SyntaxTheme::Dark);
         let context = hl
             .line(DiffSide::Context, "/* note")
             .expect("context highlight");
@@ -107,7 +108,7 @@ mod tests {
     /// later deletes through a closed context line.
     #[test]
     fn delete_state_stays_inside_the_old_revision() {
-        let mut hl = DiffHighlighters::for_file("main.rs", None);
+        let mut hl = DiffHighlighters::for_file("main.rs", None, SyntaxTheme::Dark);
         hl.line(DiffSide::Delete, "let a = \"unterminated");
         hl.line(DiffSide::Context, "let b = 1;");
         let after = hl
@@ -126,7 +127,7 @@ mod tests {
     /// Unknown language → no highlighting at all, and advancing is a no-op.
     #[test]
     fn unknown_language_is_inert() {
-        let mut hl = DiffHighlighters::for_file("data.zzzq", None);
+        let mut hl = DiffHighlighters::for_file("data.zzzq", None, SyntaxTheme::Dark);
         assert!(hl.line(DiffSide::Context, "whatever").is_none());
         assert!(hl.line(DiffSide::Delete, "whatever").is_none());
     }
@@ -136,7 +137,7 @@ mod tests {
     /// comment's `#` only pops its scope on the terminating `\n`.
     #[test]
     fn trailing_comment_does_not_swallow_the_rows_below() {
-        let mut hl = DiffHighlighters::for_file("pty.py", None);
+        let mut hl = DiffHighlighters::for_file("pty.py", None, SyntaxTheme::Dark);
         let comment = hl
             .line(DiffSide::Insert, "    a[0] = 0  # iflag")
             .expect("comment row");
