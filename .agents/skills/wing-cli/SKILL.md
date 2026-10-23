@@ -49,7 +49,7 @@ tags: [cli, orchestration, reference, wake, headless]
 `wing run` / `wing -p` 会把活交给一个**全新的、什么都不知道的**会话。除非用户明确授权：
 
 - **你自己的任务自己做**——不要为了省事把当前任务转手给子 agent 然后等它交作业；
-- **你是执行者时**：可以（且应该）派**一轮**独立 review，reviewer 只读、只交报告（契约见 [wing-scheduler](../wing-scheduler/SKILL.md) §8.3）；
+- **你是执行者时**：可以（且应该）同一轮并发派**两个**独立 review（正确性 + 架构），reviewer 只读、各自只交自己的报告（契约见 [wing-scheduler](../wing-scheduler/SKILL.md) §8.3）；
 - **你是 reviewer 时**：不允许再派发任何子 agent——审查不能外包，报告也不能外包。
 
 命令给的功率很大（子会话一律 `yolo`，危险命令不询问）：工具集、工作区边界、能派谁，都要在 prompt 里写死，不要靠子 agent 自觉。
@@ -113,6 +113,7 @@ tags: [cli, orchestration, reference, wake, headless]
 | `wing ps [--all] [--tag T] [--parent SID] [--tree] [--json]` | 会话列表（默认过滤 inactive，被 `pin` 的除外；`--tag` / `--parent` 隐含 `--all`） |
 | `wing info <sid> [--json]` | 运行时信息：状态 / workdir / 工具 / tokens / 模型 / 用量 |
 | `wing cache [sid] [--limit N] [--why TS\|INDEX] [--json]` | KV 前缀缓存账本：理论 vs 实际命中率 + 分叉归因（省略 sid = 最近活跃的那个，header 里会打印它选中了谁） |
+| `wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M] [--session SID] [--tree] [--limit N] [--json] [-w]` | 我的使用史：默认仪表盘（活动热力图 + 今天 + `me`/`agents` + 模型），`--by day\|model\|session\|tool\|workspace\|agent\|origin` 出明细；`WHEN` = `all\|today\|yesterday\|<N>d\|<N>w\|<N>m\|<N>y\|YYYY-MM-DD`（缺省 `12w`；`--until` 不收 `all`）。所有数字读审计流水（token / 调用从 `wing.db` 建库起算，`--since all` 也补不出更早的读数） |
 
 ### 3.4 消息
 

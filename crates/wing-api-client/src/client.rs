@@ -16,6 +16,50 @@ pub const DEFAULT_PORT: u16 = 32523;
 /// 这张图在客户端降级为「取不到」（captions 留着），而不是把进程的内存交给它。
 pub const MAX_MEDIA_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// `GET /api/usage` 的查询参数：`None` / `false` = 不发这个参数，让网关用自己的缺省。
+///
+/// 顺序固定（`since` → `until` → `group_by` → `session_id` → `tree` → `limit`），
+/// 因为「CLI 到底发了什么」本身就是契约的一半（见 `tests/usage_e2e.rs` 的逐字断言）。
+#[derive(Debug, Clone, Default)]
+pub struct UsageQuery {
+    /// `YYYY-MM-DD` 或字面量 `all`（= 有记录的第一天）。
+    pub since: Option<String>,
+    /// `YYYY-MM-DD`（缺省 = 今天，网关本地时区）。
+    pub until: Option<String>,
+    /// `day` | `model` | `session` | `tool` | `workspace` | `agent` | `origin`。
+    pub group_by: Option<String>,
+    /// 把范围收敛到某会话（`tree` 时再带上全部子孙）。
+    pub session_id: Option<String>,
+    /// 含子孙会话（必须配 `session_id`，否则端点 400）。
+    pub tree: bool,
+    /// 排行类维度的行数上限（1..=200）。
+    pub limit: Option<u32>,
+}
+
+impl UsageQuery {
+    /// 线格式的查询参数（顺序即发出顺序）。
+    pub fn pairs(&self) -> Vec<(&'static str, String)> {
+        let mut pairs: Vec<(&'static str, String)> = Vec::new();
+        for (name, value) in [
+            ("since", self.since.as_ref()),
+            ("until", self.until.as_ref()),
+            ("group_by", self.group_by.as_ref()),
+            ("session_id", self.session_id.as_ref()),
+        ] {
+            if let Some(value) = value {
+                pairs.push((name, value.clone()));
+            }
+        }
+        if self.tree {
+            pairs.push(("tree", "true".to_string()));
+        }
+        if let Some(limit) = self.limit {
+            pairs.push(("limit", limit.to_string()));
+        }
+        pairs
+    }
+}
+
 /// Wing Gateway HTTP API 客户端。
 ///
 /// # Example
@@ -355,6 +399,28 @@ impl GatewayClient {
             .http
             .get(format!("{}{}", self.base_url, "/api/session/cache"))
             .query(&[("session_id", session_id), ("limit", limit.as_str())])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(extract_api_error(resp).await);
+        }
+        Ok(resp.json().await?)
+    }
+
+    // ============================================================
+    // 用量统计（GET /api/usage）
+    // ============================================================
+
+    /// 读取用量聚合报告（`query.group_by` 切维度；`day` 稠密、`origin` 恰两行）。
+    ///
+    /// 整条路径只读库：不水合会话、不发事件。错误语义：语义非法 400、未知会话 404、
+    /// `limit` 越界 422、空数据永远 200。
+    pub async fn get_usage(&self, query: &UsageQuery) -> Result<UsageResponse, ApiClientError> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, "/api/usage"))
+            .query(&query.pairs())
             .send()
             .await?;
 
@@ -1441,6 +1507,131 @@ mod tests {
         assert_eq!(resp.forks[0].avoidable, None);
         assert_eq!(resp.forks[0].tokens_lost, None, "缺键 → None");
         assert_eq!(resp.forks[0].detail.sha_before, None);
+    }
+
+    // ---- 用量聚合（GET /api/usage） ----
+
+    const USAGE_BODY: &str = r#"{
+        "range": {"since": "2026-08-03", "until": "2026-10-23", "data_since": "2026-10-20"},
+        "group_by": "day",
+        "totals": {"sessions": 59, "sessions_created": 734, "user_messages": 1539,
+                   "llm_calls": 7516, "tool_calls": 8316, "tool_errors": 146,
+                   "prompt_tokens": 1360000000, "completion_tokens": 4800000,
+                   "cached_tokens": 1351840000, "llm_time_ms": 72000000,
+                   "tool_time_ms": 2040000},
+        "rows": [{"key": "2026-10-23", "label": null, "parent_session_id": null,
+                  "sessions": 6, "sessions_created": 90, "user_messages": 34,
+                  "llm_calls": 156, "tool_calls": 210, "tool_errors": 2,
+                  "prompt_tokens": 1200000, "completion_tokens": 45600,
+                  "cached_tokens": 936000, "llm_time_ms": 6000000,
+                  "tool_time_ms": 340000}],
+        "truncated": false
+    }"#;
+
+    #[tokio::test]
+    async fn get_usage_sends_the_query_in_a_fixed_order() {
+        let server = MockGateway::start(vec![("/api/usage", 200, USAGE_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), Some("secret-key")).unwrap();
+
+        let resp = client
+            .get_usage(&UsageQuery {
+                since: Some("2026-08-03".into()),
+                until: Some("2026-10-23".into()),
+                group_by: Some("day".into()),
+                session_id: None,
+                tree: false,
+                limit: Some(20),
+            })
+            .await
+            .unwrap();
+
+        // 扁平的 row：`key`/`label`/`parent_session_id` + 11 个度量都在同一层。
+        assert_eq!(resp.group_by, "day");
+        assert_eq!(resp.range.since, "2026-08-03");
+        assert_eq!(resp.range.until, "2026-10-23");
+        assert_eq!(resp.range.data_since.as_deref(), Some("2026-10-20"));
+        assert_eq!(resp.totals.prompt_tokens, 1_360_000_000);
+        assert_eq!(resp.totals.sessions_created, 734);
+        assert_eq!(resp.rows.len(), 1);
+        assert_eq!(resp.rows[0].key, "2026-10-23");
+        assert_eq!(resp.rows[0].label, None);
+        assert_eq!(resp.rows[0].measures.llm_calls, 156);
+        assert_eq!(resp.rows[0].measures.tokens(), 1_245_600);
+        assert!(resp.rows[0].measures.has_flow());
+        assert!(!resp.truncated);
+
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].method, "GET");
+        assert_eq!(
+            recorded[0].path, "/api/usage?since=2026-08-03&until=2026-10-23&group_by=day&limit=20",
+            "缺席的参数不发（网关用自己的缺省）"
+        );
+        assert_eq!(
+            recorded[0].authorization.as_deref(),
+            Some("Bearer secret-key")
+        );
+    }
+
+    /// `tree` 只在为真时发；`session_id` 与它一起构成会话作用域。
+    #[tokio::test]
+    async fn get_usage_sends_tree_only_when_it_is_on() {
+        let server = MockGateway::start(vec![("/api/usage", 200, USAGE_BODY)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        client
+            .get_usage(&UsageQuery {
+                since: Some("all".into()),
+                until: None,
+                group_by: Some("session".into()),
+                session_id: Some("sid-1".into()),
+                tree: true,
+                limit: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            server.recorded()[0].path,
+            "/api/usage?since=all&group_by=session&session_id=sid-1&tree=true"
+        );
+    }
+
+    /// 老网关的形状（`range` 只有两个键、`rows` 空）也必须解析得动：`data_since` 缺席 = None。
+    #[tokio::test]
+    async fn get_usage_tolerates_a_response_without_data_since() {
+        const BARE: &str = r#"{"range":{"since":"2026-08-03","until":"2026-10-23"},
+            "group_by":"day","totals":{},"rows":[]}"#;
+        let server = MockGateway::start(vec![("/api/usage", 200, BARE)]).await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let resp = client.get_usage(&UsageQuery::default()).await.unwrap();
+        assert_eq!(resp.range.data_since, None);
+        assert_eq!(resp.totals, UsageMeasures::default(), "11 个度量缺省全 0");
+        assert!(resp.rows.is_empty());
+        assert!(!resp.truncated);
+        assert_eq!(server.recorded()[0].path, "/api/usage", "空查询不发 ?");
+    }
+
+    /// 404（未知会话）走结构化错误面，调用方据 `--session` 与否决定文案。
+    #[tokio::test]
+    async fn get_usage_surfaces_a_404_for_an_unknown_session() {
+        let server = MockGateway::start(vec![(
+            "/api/usage",
+            404,
+            r#"{"error":"not_found","detail":"session not found: 'ghost'"}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(server.url.clone(), None).unwrap();
+
+        let err = client
+            .get_usage(&UsageQuery {
+                session_id: Some("ghost".into()),
+                ..UsageQuery::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(err.is_not_found(), "{err}");
+        assert!(err.to_string().contains("session not found"), "{err}");
     }
 
     #[tokio::test]

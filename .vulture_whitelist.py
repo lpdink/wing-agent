@@ -30,6 +30,11 @@ tool_args
 system_prompt_parts
 multi_select
 
+# 用量聚合（`GET /api/usage`）的 wire 字段：Python 侧只负责填值（关键字构造 + 求和），
+# 消费方是序列化之后的前端（Rust CLI / TUI / VSCode / SDK）——字段名在 Python 侧无人读。
+tool_errors
+data_since
+
 # 唤醒触发器（`/api/wake/*`）的 wire 字段：Python 侧只负责填值，消费方是序列化之后的前端
 # （Rust CLI / TUI / VSCode / SDK）——字段名在 Python 侧无人读。
 last_fire_at

@@ -698,6 +698,11 @@ class FileSessionStore(SessionStore):
         os.rename(source, target)
         self._remove_from_archive_index(safe_id)
 
+    def load_archived_metadata(self, session_id: str) -> SessionMetadata | None:
+        """归档会话的 metadata（不在归档区 → None；坏文件由读取口降级成空对象）。"""
+        safe_id = validate_session_id(session_id)
+        return self._load_metadata_at(self._archive_root() / safe_id, safe_id)
+
     def list_archived(self) -> list[ArchivedSession]:
         """列出归档条目：读索引 + 与目录**双向对账**。
 

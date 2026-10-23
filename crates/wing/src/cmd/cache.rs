@@ -32,6 +32,7 @@ use crate::config::ThemePalette;
 use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::util::format;
+use crate::util::format::NONE_MARK;
 
 use super::common;
 use super::common::TableOutput;
@@ -45,8 +46,6 @@ pub const MAX_LIMIT: u32 = 200;
 const TS_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.f";
 /// 表格 WHEN 列的形态：`MM-DD HH:MM:SS`（`--why` 接受拷贝这一列）。
 const WHEN_FORMAT: &str = "%m-%d %H:%M:%S";
-/// 「没有值」的唯一记号（不写 0：0 是一个读数，`—` 是"没有读数"）。
-const NONE_MARK: &str = "—";
 
 /// Entry point for `wing cache`.
 pub async fn run(session_id: Option<&str>, limit: u32, why: Option<&str>, json: bool) -> ExitCode {

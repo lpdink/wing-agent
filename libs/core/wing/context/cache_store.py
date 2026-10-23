@@ -28,13 +28,9 @@ from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from typing import Any
 
-from wing.db import Database, get_database
+from wing.db import DIAGNOSTIC_BUSY_TIMEOUT_MS, Database, get_database
 from wing.db.database import Transaction
 from wing.schema import CacheCall, CacheFork, CachePart, CacheSource
-
-#: 记账等写锁的上限：远短于 `Database` 的稳态值（5000）。账本是 best-effort 的诊断
-#: 数据，跨进程写锁竞争时宁可丢这一笔，也不要把本进程的读路径拖成秒级。
-_BUSY_TIMEOUT_MS = 250
 
 _COLUMNS = (
     "id, ts, ts_ms, fp, purpose, model, provider, prompt, cached, "
@@ -196,11 +192,11 @@ class CacheStore:
     def transaction(self) -> AbstractContextManager[Transaction]:
         """把一次「读—改—写」放进同一个 `BEGIN IMMEDIATE`（见 `Database.transaction`）。
 
-        等锁上限取短值（`_BUSY_TIMEOUT_MS`）：记账是 best-effort 的诊断数据，另一个
+        等锁上限取短值（`DIAGNOSTIC_BUSY_TIMEOUT_MS`）：记账是 best-effort 的诊断数据，另一个
         进程攥着写锁时不该陪着等满 5 秒——那段时间本进程的锁是持着的，读路径会一起
         排队。放弃一笔账本记录远好过让所有会话的查询变慢。
         """
-        return self.database().transaction(busy_timeout_ms=_BUSY_TIMEOUT_MS)
+        return self.database().transaction(busy_timeout_ms=DIAGNOSTIC_BUSY_TIMEOUT_MS)
 
     # ── 读 ───────────────────────────────────────
 

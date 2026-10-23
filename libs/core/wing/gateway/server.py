@@ -60,6 +60,9 @@ WRITE_TIMEOUT_SECONDS = 60.0
 # 回收时关闭连接的上界（秒）：对手正是"不读的客户端"，回收路径自己不能挂住。
 CLOSE_TIMEOUT_SECONDS = 5.0
 
+# 用量目录回填的周期（秒）：首轮在启动后第一个 tick，之后每天一次（差集语义，幂等）。
+CATALOG_BACKFILL_INTERVAL_SECONDS = 86400.0
+
 
 def _check_port_available(host: str, port: int) -> bool:
     """检查端口是否可用，不可用时返回 False。
@@ -274,6 +277,7 @@ class GatewayServer:
         def _start_background_jobs() -> None:
             self._install_eviction_job(config, runtime)
             self._install_archive_job(config, runtime)
+            self._install_catalog_job(runtime)
             if self._background_requested:
                 runtime.reaper.attach()
                 self._background.start()
@@ -353,6 +357,22 @@ class GatewayServer:
             config.sessions.archive.sweep_interval_seconds,
             runtime.archive_stale_sessions,
             initial_delay_seconds=config.sessions.archive.startup_delay_seconds,
+        )
+
+    def _install_catalog_job(self, runtime: WingRuntime) -> None:
+        """注册用量目录的回填 job（幂等：remove + add 即 replace）。
+
+        首轮在启动后第一个 tick 跑（``initial_delay_seconds=0``，不阻塞启动），此后
+        每天一轮：回填是差集语义（只补「磁盘上有、目录里没有」的会话），周期跑等同
+        一次自愈——运行期被拷进来的会话目录也能进目录。文件 I/O 在 ``to_thread``
+        里做，不占事件循环。
+        """
+        self._background.remove_job("session-catalog")
+        self._background.add_job(
+            "session-catalog",
+            CATALOG_BACKFILL_INTERVAL_SECONDS,
+            runtime.backfill_session_catalog,
+            initial_delay_seconds=0,
         )
 
     @property

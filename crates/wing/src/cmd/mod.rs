@@ -40,6 +40,7 @@ pub(crate) mod start;
 mod status;
 mod stop;
 pub mod tag;
+pub mod usage;
 pub mod wait;
 pub mod wake;
 mod wake_common;
@@ -314,6 +315,37 @@ pub enum Command {
         /// its timestamp (copy the WHEN column).
         #[arg(long, value_name = "TS|INDEX")]
         why: Option<String>,
+    },
+
+    /// Your own usage history: activity heatmap, tokens, sessions, sub-agents.
+    ///
+    /// Default view is a dashboard (heatmap + today + "me vs my agents" + models);
+    /// `--by <dim>` prints one ranked breakdown instead. Every number comes from
+    /// the audit flow in `wing.db` (token / call counting starts there — session
+    /// counts go further back, and the dashboard says so when that matters).
+    Usage {
+        /// Range start: all | today | yesterday | <N>d|<N>w|<N>m|<N>y | 2026-10-01
+        /// (m = 30 days, y = 365 days; relative forms count back from today).
+        #[arg(long, value_name = "WHEN", default_value = "12w")]
+        since: String,
+        /// Range end, inclusive (same forms as --since, except `all`).
+        #[arg(long, value_name = "WHEN", default_value = "today")]
+        until: String,
+        /// Breakdown dimension: day | model | session | tool | workspace | agent | origin.
+        #[arg(long, value_name = "DIM")]
+        by: Option<String>,
+        /// Heatmap metric: tokens | messages | calls | tools | sessions (dashboard only).
+        #[arg(long, value_name = "METRIC", default_value = "tokens")]
+        metric: String,
+        /// Scope every number to this session (and, with --tree, its descendants).
+        #[arg(long, value_name = "SESSION_ID")]
+        session: Option<String>,
+        /// Include descendant sessions (requires --session).
+        #[arg(long)]
+        tree: bool,
+        /// Rows for a ranked breakdown (1..=200; default 20).
+        #[arg(long, value_name = "N", default_value_t = usage::DEFAULT_LIMIT)]
+        limit: u32,
     },
 
     /// Interrupt the session's current task (the TUI's Esc).
@@ -802,6 +834,26 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 why,
             } => {
                 crate::cmd::cache::run(session_id.as_deref(), limit, why.as_deref(), cli.json).await
+            }
+            Command::Usage {
+                since,
+                until,
+                by,
+                metric,
+                session,
+                tree,
+                limit,
+            } => {
+                let opts = crate::cmd::usage::UsageOpts {
+                    since,
+                    until,
+                    by,
+                    metric,
+                    session,
+                    tree,
+                    limit,
+                };
+                crate::cmd::usage::run(opts, cli.json, cli.watch).await
             }
             Command::Interrupt { session_id } => {
                 crate::cmd::control::run_interrupt(&session_id, cli.json).await

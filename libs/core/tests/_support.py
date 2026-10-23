@@ -12,13 +12,20 @@ import json
 import struct
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from datetime import date, datetime, time as day_time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from wing.audit.recorder import AuditRecorder
 from wing.chain import TrackedList
 from wing.config import ApiKeyEntry, AuthConfig, ProviderConfig
 from wing.context import Compactor, ContextManager
+from wing.event import (
+    LLMCallMetricsEvent,
+    ToolCallResultEvent,
+    UserMessageAcceptedEvent,
+)
 from wing.provider.anthropic import AnthropicProvider
 from wing.provider.openai import OpenAICompatProvider
 from wing.runtime import WingRuntime
@@ -261,3 +268,73 @@ class BodyWatcher:
 def media_dir(session_id: str) -> Path:
     """会话的媒体对象目录（`<sessions-root>/<sid>/media`）。"""
     return sessions_root() / session_id / "media"
+
+
+# ── 审计播种（用量统计类测试共用）────────────────────────────
+#
+# 一律走生产写入路径 `AuditRecorder`：测的是「事件 → 行 → 聚合」这条链，不是 SQLite。
+
+
+def local_time(day: date, hour: int = 12) -> datetime:
+    """某天某点的**本地 naive** 时刻（审计事件的 `created_at`，即事实发生时刻）。"""
+    return datetime.combine(day, day_time(hour, 0))
+
+
+def seed_llm_call(
+    session_id: str,
+    at: datetime,
+    *,
+    model: str = "gpt-4",
+    provider: str = "default",
+    prompt: int = 100,
+    completion: int = 10,
+    cached: int = 40,
+    duration_ms: int = 500,
+) -> None:
+    """写一行 `audit_llm_call`（带使用量的一帧）。"""
+    AuditRecorder().on_event(
+        LLMCallMetricsEvent(
+            session_id=session_id,
+            request_id="req",
+            model=model,
+            provider=provider,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            cached_tokens=cached,
+            first_chunk_rt_ms=12.0,
+            tokens_per_sec=30.0,
+            duration_ms=duration_ms,
+            created_at=at,
+        )
+    )
+
+
+def seed_tool_call(
+    session_id: str,
+    at: datetime,
+    *,
+    tool_name: str = "Bash",
+    success: bool = True,
+    duration_ms: int = 30,
+) -> None:
+    """写一行 `audit_tool_call`（一次真实执行）。"""
+    AuditRecorder().on_event(
+        ToolCallResultEvent(
+            session_id=session_id,
+            request_id="req",
+            tool_name=tool_name,
+            tool_args={},
+            tool_call_id="tc",
+            tool_result="ok",
+            tool_success=success,
+            duration_ms=duration_ms,
+            created_at=at,
+        )
+    )
+
+
+def seed_user_message(session_id: str, at: datetime) -> None:
+    """写一行 `audit_user_message`（一次被接受的用户输入）。"""
+    AuditRecorder().on_event(
+        UserMessageAcceptedEvent(session_id=session_id, content="hi", created_at=at)
+    )

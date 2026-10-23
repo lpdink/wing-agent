@@ -14,3 +14,26 @@ pub(crate) fn text_of(lines: &[ratatui::text::Line<'static>]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// 去掉 SGR 转义（`\u{1b}[…m`）：断言「看得见的字形与宽度」时用。
+pub(crate) fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        for next in chars.by_ref() {
+            if next == 'm' {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 一行纯文本的**可见**宽度（先剥掉 SGR）。
+pub(crate) fn visible_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(strip_ansi(text).as_str())
+}

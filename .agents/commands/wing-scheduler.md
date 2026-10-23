@@ -1,6 +1,6 @@
 ---
 name: wing-scheduler
-description: 超大型任务的无人值守交付编排：把大任务拆成步骤与波次，并发派发 headless 子 agent 执行、独立子 agent 按 B/S/N 分级审查，最后集成收口、push 并产出单一 PR。（用法：/wing-scheduler <任务描述>）
+description: 超大型任务的无人值守交付编排（scheduler 模式）。把一个大任务拆成步骤与波次，在独立 worktree 上并发派发 headless 子 agent（executor）执行——执行者交付前自派一轮双视角独立审查（正确性 + 架构并发，B/S/N 分级），全部收口后 scheduler 再派一轮整体审查——最后由 scheduler 集成、push 并产出单一 PR。当用户要求「实施/交付一个大型任务」「拆开并行做掉」「无人值守把这件事做完」「多子 agent 协同开发」，或任务明显需要多波次、多 worktree、跨模块大范围改动时使用。（用法：/wing-scheduler <任务描述>）
 ---
 
 # Wing Scheduler — 入口

@@ -21,6 +21,7 @@
 - ``history``：``HistoryView``（history.jsonl 独立解析）、四条内置不变量、
   三条红线过渡断言（compact / rewind / fork）、``fork_metadata``；
 - ``files``：``FileAssertions``（workspace 文件断言）；
+- ``sqlite``：``read_only_connect``（直接读 ``wing.db`` 的只读口）；
 - ``provider``：剧本模型（``Script`` / ``Turn`` / ``ToolCall`` / ``Usage``）、
   ``FakeProvider``、``ContextView``（请求上下文断言）。
 
@@ -65,6 +66,7 @@ from wing_probe.env import (
     wait_for_health,
     write_config,
 )
+from wing_probe.sqlite import read_only_connect
 from wing_probe.files import (
     ANY,
     FileAssertionError,
@@ -268,6 +270,7 @@ __all__ = [
     "message_semantics",
     "node_semantics",
     "parse_envelope",
+    "read_only_connect",
     "read_log_tail",
     "read_metadata",
     "render_config_yaml",

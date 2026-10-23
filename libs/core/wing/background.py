@@ -10,9 +10,9 @@
   - **生命周期显式**：start/stop 由进程宿主调用（gateway lifespan），
     不 start 就完全不跑——单测与嵌入式使用零副作用。
 
-第一个 job 是 session 逐出（``SessionReaper``），第二个是自动归档
-（``SessionArchiver``）；将来的后台机制（dreaming 等）直接 ``add_job``
-复用同一宿主。
+现有 job：session 逐出（``SessionReaper``）、自动归档（``SessionArchiver``）、
+用量目录回填（``WingRuntime.backfill_session_catalog``）；将来的后台机制
+（dreaming 等）直接 ``add_job`` 复用同一宿主。
 """
 
 from __future__ import annotations

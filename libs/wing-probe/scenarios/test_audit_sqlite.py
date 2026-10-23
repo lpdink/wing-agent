@@ -17,23 +17,13 @@
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
 import pytest
 
-from wing_probe import Probe, ToolCall, Turn, Usage
+from wing_probe import Probe, ToolCall, Turn, Usage, read_only_connect
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间不共享）。
 AUDIT_MODEL = "probe/audit-sqlite"
 DEGRADED_MODEL = "probe/audit-degraded"
-
-
-def _read_only_connect(path: Path) -> sqlite3.Connection:
-    """只读连接（``mode=ro``：库里没有这张表时明确报错，而不是悄悄建个空库）。"""
-    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 @pytest.mark.probe_env(models=[AUDIT_MODEL])
@@ -66,7 +56,7 @@ async def test_audit_rows_land_in_wing_db(probe: Probe) -> None:
 
     db_path = probe.env.wing_home / "core" / "wing.db"
     assert db_path.is_file(), f"wing.db 未创建：{db_path}"
-    conn = _read_only_connect(db_path)
+    conn = read_only_connect(db_path)
     try:
         llm = conn.execute("SELECT * FROM audit_llm_call ORDER BY id").fetchall()
         tools = conn.execute("SELECT * FROM audit_tool_call ORDER BY id").fetchall()

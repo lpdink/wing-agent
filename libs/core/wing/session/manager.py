@@ -29,12 +29,14 @@ from wing.common.utils import (
     InvalidInputError,
     generate_session_id,
     is_valid_session_id,
+    parse_session_id_time,
     require_utf8,
     validate_session_id,
 )
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.media import file_too_large_message, upload_image_ref
+from wing.metrics import backfill_catalog, record_session_created
 from wing.event import (
     DeliveredEvent,
     EventTarget,
@@ -123,12 +125,8 @@ def _session_epoch(session_id: str, last_interaction: str | None) -> float | Non
                 pass
         elif isinstance(ts, (int, float)):
             return float(ts)
-    prefix = session_id[:15] if len(session_id) >= 15 else session_id
-    try:
-        dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
-        return dt.timestamp()
-    except Exception:
-        return None
+    stamped = parse_session_id_time(session_id)
+    return stamped.timestamp() if stamped is not None else None
 
 
 class SessionManager:
@@ -381,6 +379,8 @@ class SessionManager:
         CacheStore(sid).clear()
 
         self._register(session)
+        # 用量目录（派生投影）：新建会话的一次性事实，收养 / resume 不写。
+        self._record_session_catalog(session)
 
         # 触发 before_session_start hook，随后把 hook 注入落盘：resume 重建 CM
         # 时恢复同一系统提示词（前缀身份不因换入内存而漂移）。
@@ -402,6 +402,32 @@ class SessionManager:
         self._sessions[session_id] = session
         session.activate_usage()
         self.touch(session_id)
+
+    def _record_session_catalog(
+        self, session: Session, *, forked_from: str | None = None
+    ) -> None:
+        """把**新建**会话登记进用量目录（`wing.metrics.catalog`，写一次即不再更新）。
+
+        两条分支共用这一个写点：新建（create 的非收养路径）与 fork。收养 / resume
+        不写——目录行是创建动作的一次性事实，存量会话由
+        :meth:`backfill_session_catalog` 补齐。
+        """
+        record_session_created(
+            session.session_id,
+            parent_session_id=session.parent_session_id,
+            forked_from=forked_from,
+            workspace=session.session_workspace,
+            template_name=session.template_name,
+            model_id=session.model_id,
+        )
+
+    def backfill_session_catalog(self) -> int:
+        """把磁盘上的存量会话补进用量目录（网关启动后的后台任务，幂等）。
+
+        Returns:
+            本次补齐的行数（差集语义：重跑返回 0）。
+        """
+        return backfill_catalog(self._stores.values())
 
     # ── resolve ───────────────────────────────
 
@@ -694,6 +720,8 @@ class SessionManager:
         # 先注册 / 刷新计时器再跑 hook（与 create_session 同序）：hook 内 emit 的
         # 事件能命中 SessionReaper 的 touch 订阅，hook 内查 SM 也能看到子会话。
         self._register(new_session)
+        # 用量目录：fork 同样是新建（`forked_from` 是内容血统，父血缘不写——fork 是根）。
+        self._record_session_catalog(new_session, forked_from=session_id)
 
         # fork 也是"创建新 session"（session id 变化）：before_session_start 在子会话
         # 上生效，hook 注入的环境信息属于这个新 session。子会话已继承源的追加内容

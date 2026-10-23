@@ -156,6 +156,40 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         ) WITHOUT ROWID;
         """,
     ),
+    (
+        4,
+        """
+        -- 用户消息流水：一次被接受的用户输入一行（UserMessageAcceptedEvent 驱动）。
+        -- 与 audit_llm_call / audit_tool_call 同一口径：只追加、永不裁，ts 是写盘机
+        -- 本地墙钟的冻结值（按天分桶用 substr(ts,1,10)，不用 ts_ms 换时区）。
+        CREATE TABLE audit_user_message (
+            id INTEGER PRIMARY KEY,
+            ts_ms INTEGER NOT NULL,
+            ts TEXT NOT NULL,
+            session_id TEXT NOT NULL
+        );
+        CREATE INDEX idx_audit_user_message_ts ON audit_user_message(ts_ms);
+        CREATE INDEX idx_audit_user_message_session ON audit_user_message(session_id, ts_ms);
+
+        -- 会话目录：磁盘会话元数据的**派生投影**（磁盘是事实源，可随时重建）。
+        -- 只在创建时写一次、之后不再更新——model_id 是创建时刻的绑定，不是当前模型；
+        -- 标题由前端 join（目录不存名字）。created_source 标注创建时刻的精度来源：
+        -- create（实况创建）/ id（id 前缀）/ log（history 首条）/ meta（last_interaction）。
+        CREATE TABLE session_catalog (
+            session_id TEXT PRIMARY KEY,
+            created_at_ms INTEGER NOT NULL,
+            created_ts TEXT NOT NULL,
+            created_source TEXT NOT NULL,
+            parent_session_id TEXT,
+            forked_from TEXT,
+            workspace TEXT,
+            template_name TEXT,
+            model_id TEXT
+        );
+        CREATE INDEX idx_session_catalog_parent ON session_catalog(parent_session_id);
+        CREATE INDEX idx_session_catalog_created ON session_catalog(created_at_ms);
+        """,
+    ),
 )
 
 #: 代码认识的最高 schema 版本（= 最后一个迁移的目标版本）。

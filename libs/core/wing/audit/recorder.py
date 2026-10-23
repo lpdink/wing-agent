@@ -7,8 +7,8 @@
   - ``ToolCallResultEvent.duration_ms is None`` = 未真实执行（中断合成 / 参数非法 /
     未知工具短路），**不写行**——与会话用量账本 ``UsageTracker.record_tool_call``
     同口径：那不是一次执行。
-  - 无 ``session_id`` 的压缩事件不写行（``audit_compaction.session_id`` 是 NOT NULL，
-    压缩必属于某个会话）。
+  - 无 ``session_id`` 的压缩 / 用户消息事件不写行（两列都是 NOT NULL，且会话无关的
+    事实无法归因）。
   - 任何异常都在本层兜住（``wing.db`` 已降级 + 这里第二道网）：审计失败绝不影响 agent。
 """
 
@@ -22,6 +22,7 @@ from wing.event import (
     CompactDoneEvent,
     LLMCallMetricsEvent,
     ToolCallResultEvent,
+    UserMessageAcceptedEvent,
     WingEvent,
 )
 
@@ -43,6 +44,10 @@ _INSERT_COMPACTION = """
 INSERT INTO audit_compaction (
     ts_ms, ts, session_id, model, original_tokens, compressed_tokens
 ) VALUES (?, ?, ?, ?, ?, ?)
+"""
+
+_INSERT_USER_MESSAGE = """
+INSERT INTO audit_user_message (ts_ms, ts, session_id) VALUES (?, ?, ?)
 """
 
 
@@ -74,6 +79,8 @@ class AuditRecorder:
                 self._record_tool_call(event)
             elif isinstance(event, CompactDoneEvent):
                 self._record_compaction(event)
+            elif isinstance(event, UserMessageAcceptedEvent):
+                self._record_user_message(event)
         except Exception as exc:  # 兜底：审计失败不影响 agent
             log.error(f"audit: failed to record {type(event).__name__}: {exc!r}")
 
@@ -133,6 +140,12 @@ class AuditRecorder:
                 event.compressed_tokens,
             ),
         )
+
+    def _record_user_message(self, event: UserMessageAcceptedEvent) -> None:
+        if not event.session_id:
+            return
+        ts_ms, ts = _stamp(event)
+        self._db().execute(_INSERT_USER_MESSAGE, (ts_ms, ts, event.session_id))
 
     # ── 内部 ─────────────────────────────────────
 

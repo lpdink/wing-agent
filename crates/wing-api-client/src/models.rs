@@ -668,6 +668,152 @@ pub struct CacheReportResponse {
 }
 
 // ============================================================
+// 用量统计（GET /api/usage）
+// ============================================================
+
+/// 统计窗口（闭区间，`YYYY-MM-DD`；「一天」= 网关本地时区的 00:00–24:00）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageRange {
+    /// 窗口起点（含）；`since=all` 时是网关算出的「有记录的第一天」。
+    #[serde(default)]
+    pub since: String,
+    #[serde(default)]
+    pub until: String,
+    /// 审计流水（`audit_*` 三张表）最早的一天；没有任何审计行 → `None`。
+    ///
+    /// `None` 与「键缺席」同义：老网关不返回这个字段。它只描述**流水**的起点
+    /// （会话计数类指标另有更早的历史），正是「token / 调用统计从这里起」那句提示的依据。
+    #[serde(default)]
+    pub data_since: Option<String>,
+}
+
+/// 11 个计数：全零填充、永不省略、**不含派生值**（命中率 / 工时由消费方算）。
+///
+/// 某一维度上不可归因的度量也填 0（例如 `group_by=model` 的 `tool_calls`——工具行
+/// 没有 model 列）：「0」在这里的含义是「不可归因」，不是「测得 0」。可归因性表见
+/// `docs/dev/usage.md`；`totals` 永远由独立的全量查询给出，是唯一对账基准。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageMeasures {
+    /// 桶内有 ≥1 条审计事实（LLM / 工具 / 用户消息）的不同会话数。
+    #[serde(default)]
+    pub sessions: i64,
+    /// 桶内创建的会话数（含回填的历史会话）。
+    #[serde(default)]
+    pub sessions_created: i64,
+    /// `user_message_accepted` 事件数（含编排方投递与唤醒信封）。
+    #[serde(default)]
+    pub user_messages: i64,
+    #[serde(default)]
+    pub llm_calls: i64,
+    /// 真实执行的工具调用次数。
+    #[serde(default)]
+    pub tool_calls: i64,
+    /// 工具抛错 / 超时的次数（`Bash` 非零退出码也算）。
+    #[serde(default)]
+    pub tool_errors: i64,
+    /// 输入 token（含缓存命中部分）。
+    #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
+    pub completion_tokens: i64,
+    /// 输入里命中缓存的部分。
+    #[serde(default)]
+    pub cached_tokens: i64,
+    #[serde(default)]
+    pub llm_time_ms: i64,
+    #[serde(default)]
+    pub tool_time_ms: i64,
+}
+
+impl UsageMeasures {
+    /// 这个桶有**审计流水**吗（十个流水度量任一非零）。
+    ///
+    /// `sessions_created` **不参与**：它来自 `session_catalog`（派生投影 + 启动回填），是
+    /// 目录事实而不是流水读数。任何新建会话都会让它非零，因此拿整结构比较「是否全零」会把
+    /// 「只建过会话、还没说过话」误判成「有读数」（`wing info` 的 `—` 降级、仪表盘 TODAY
+    /// 的零行抑制、首次运行空态、`tree:` 行的存在性都吃这一条）。
+    pub fn has_flow(&self) -> bool {
+        UsageMeasures {
+            sessions_created: 0,
+            ..*self
+        } != UsageMeasures::default()
+    }
+
+    /// 这个桶消耗的 token（`prompt + completion`，含缓存重发）——排序与热力图的口径。
+    pub fn tokens(&self) -> i64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+
+    /// 工时（`llm_time_ms + tool_time_ms`）：并行工具会重叠，是上界内的估算。
+    pub fn work_time_ms(&self) -> i64 {
+        self.llm_time_ms + self.tool_time_ms
+    }
+
+    /// 作用域差：`totals - 自身行` = 子孙的合计（`group_by=session&tree` 的用法）。
+    ///
+    /// `sessions` 在这里也是逐项相减——它只在「作用域 = 自身 ∪ 子孙」时才有意义
+    /// （每个会话要么是自己、要么是子孙），不能当成通用的可减值。
+    pub fn sub(&self, other: &UsageMeasures) -> UsageMeasures {
+        UsageMeasures {
+            sessions: self.sessions - other.sessions,
+            sessions_created: self.sessions_created - other.sessions_created,
+            user_messages: self.user_messages - other.user_messages,
+            llm_calls: self.llm_calls - other.llm_calls,
+            tool_calls: self.tool_calls - other.tool_calls,
+            tool_errors: self.tool_errors - other.tool_errors,
+            prompt_tokens: self.prompt_tokens - other.prompt_tokens,
+            completion_tokens: self.completion_tokens - other.completion_tokens,
+            cached_tokens: self.cached_tokens - other.cached_tokens,
+            llm_time_ms: self.llm_time_ms - other.llm_time_ms,
+            tool_time_ms: self.tool_time_ms - other.tool_time_ms,
+        }
+    }
+}
+
+/// 聚合结果的一行：桶的键 + 可选展示素材 + **扁平**的 11 个度量。
+///
+/// `key` 的语义随维度变（日期 / `provider/model` / session id / 工具名 / workspace /
+/// 模板名 / `me`|`agents`）；`label` 只有 `model` 维度会填（配置里的展示名）；
+/// `parent_session_id` 只有 `session` 维度会填（画血缘树用）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageRow {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(flatten)]
+    pub measures: UsageMeasures,
+}
+
+/// `GET /api/usage` 的响应体。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageResponse {
+    #[serde(default)]
+    pub range: UsageRange,
+    /// 本次的维度（回显请求值）。
+    #[serde(default)]
+    pub group_by: String,
+    /// 整个窗口的总量（独立查询，不随 `limit` 截断；对账基准）。
+    #[serde(default)]
+    pub totals: UsageMeasures,
+    /// 按维度的行（`day` 稠密；`origin` 恰两行）。
+    #[serde(default)]
+    pub rows: Vec<UsageRow>,
+    /// 行被 `limit` 截断了吗（只对排行类维度有意义）。
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl UsageResponse {
+    /// 键为 `key` 的那一行（`group_by=session` 时用来取「自身」那一行）。
+    pub fn row(&self, key: &str) -> Option<&UsageRow> {
+        self.rows.iter().find(|row| row.key == key)
+    }
+}
+
+// ============================================================
 // Session 更新端点 Request / Response
 // ============================================================
 
@@ -2848,6 +2994,64 @@ mod settings_tests {
         assert_eq!(
             serde_json::to_string(&forced).unwrap(),
             r#"{"base":null,"document":{}}"#
+        );
+    }
+
+    /// `rows[]` 是**扁平**行：`key` / `label` / `parent_session_id` 与 11 个度量同层。
+    /// 反过来序列化也必须还原成同一个扁平对象（`--json` 是端点响应的原样转发）。
+    #[test]
+    fn usage_row_is_flat_on_the_wire_and_round_trips() {
+        let wire = serde_json::json!({
+            "key": "2026-10-23",
+            "label": null,
+            "parent_session_id": null,
+            "sessions": 6,
+            "sessions_created": 90,
+            "user_messages": 34,
+            "llm_calls": 156,
+            "tool_calls": 210,
+            "tool_errors": 2,
+            "prompt_tokens": 1_200_000,
+            "completion_tokens": 45_600,
+            "cached_tokens": 936_000,
+            "llm_time_ms": 6_000_000,
+            "tool_time_ms": 340_000
+        });
+        let row: UsageRow = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(row.key, "2026-10-23");
+        assert_eq!(row.measures.tool_errors, 2);
+        assert_eq!(row.measures.cached_tokens, 936_000);
+        assert_eq!(row.measures.work_time_ms(), 6_340_000);
+        assert_eq!(serde_json::to_value(&row).unwrap(), wire, "扁平来、扁平去");
+    }
+
+    /// 缺席的度量键 = 0（老网关 / 部分维度）；`data_since` 缺席 = None。
+    #[test]
+    fn usage_measures_default_to_zero_and_data_since_is_optional() {
+        let resp: UsageResponse =
+            serde_json::from_str(r#"{"range":{"since":"2026-08-03","until":"2026-10-23"}}"#)
+                .unwrap();
+        assert_eq!(resp.totals, UsageMeasures::default());
+        assert_eq!(resp.range.data_since, None);
+        assert!(resp.rows.is_empty());
+        assert!(!resp.truncated);
+
+        let busy = UsageMeasures {
+            prompt_tokens: 10,
+            completion_tokens: 6,
+            ..UsageMeasures::default()
+        };
+        assert_eq!(busy.tokens(), 16);
+        assert!(busy.has_flow());
+        assert!(!UsageMeasures::default().has_flow(), "全零 = 没有流水");
+        // `sessions_created` 是目录事实：只有它非零时不算「有流水」。
+        assert!(
+            !UsageMeasures {
+                sessions_created: 1,
+                ..UsageMeasures::default()
+            }
+            .has_flow(),
+            "只建过会话不算读过数"
         );
     }
 }

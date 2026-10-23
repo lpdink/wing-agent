@@ -1,7 +1,7 @@
 """wing/audit — 审计：事件 → ``wing.db`` 的 ``audit_*`` 追加行。
 
 订阅 EventBus（``install()``，幂等、由组合根显式调用），按事件类型分发到
-``AuditRecorder`` 的三条 INSERT。事件是**事实**，审计是它的旁路投影：不拦截、不修改、
+``AuditRecorder`` 的四条 INSERT（LLM 调用 / 工具调用 / 压缩 / 用户消息）。事件是**事实**，审计是它的旁路投影：不拦截、不修改、
 不阻塞（同步写一行，微秒级）。
 
 刻意删掉的旧实现（``MetricsRegistry`` + ``metrics.json`` 读整份 / 聚合 / 原子重写）：

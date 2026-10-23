@@ -19,8 +19,8 @@ Monorepo：Python agent runtime（`libs/core/wing/`，pip 包 `wing-gateway`）+
 └─────────────────────────────┘             └─────────────────────────┘               └─────────────────────────┘
 ```
 
-- **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/tail/head/release` 后台任务，`wing watch/wake` 会话唤醒，`wing start/stop/status` 网关生命周期）。
-- **协议**：HTTP 承载生命周期 / 查询 / 变更（41 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header/query · WS header/query），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
+- **四种前端形态，同一个二进制**：TUI（默认，human-in-the-loop）；stdio（`wing -p`，headless，Claude Code 兼容 NDJSON——把 `wing` alias 为 `claude` 即可接入外部编排器）；ACP（`wing acp`，stdio 上的 Agent Client Protocol v1 agent 服务端，桥接本机网关供 Zed / omnigent 等驱动）；编排 CLI（`wing run/wait/ps/info/usage/tail/head/release` 后台任务，`wing watch/wake` 会话唤醒，`wing start/stop/status` 网关生命周期）。
+- **协议**：HTTP 承载生命周期 / 查询 / 变更（42 个 RPC 端点）；WebSocket（`/ws`）只承载实时 ReAct 事件流 + 客户端上行帧（message / Ask 回答 / tool_call_result）。会话创建与 WS 握手解耦：先 HTTP 建会话，再订阅事件。API key 鉴权在网关 opt-in（HTTP header/query · WS header/query），TLS 交给反向代理。CORS 默认放通 loopback 来源（外部来源走 `gateway.cors.origins`；推荐同源部署）。
 - **持久化**：`SessionStore` 是会话全部持久状态（metadata、混合 message/event 日志、aux）的唯一所有者；后端 `file`（默认，`~/.wing/core/sessions/`）与 `memory`（进程内）。`TrackedList` 是纯内存链拓扑引擎（uuid/parentUuid），I/O 全部委托 `MessageLog`；SQL 后端是增量实现，非架构改动。
 - **模型调用**：`provider/` 隔离协议差异（OpenAI 兼容 / Anthropic），ReAct 循环对协议无感知；provider 实例无状态、归全进程共享池（`provider/pool.py`），会话级参数（session id 缓存亲和 / media / thinking）经 `RequestOptions` 每次调用注入。
 
@@ -63,7 +63,12 @@ libs/core/wing/
 │   ├── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关；加载期采 src 事实）
 │   ├── cache_ledger.py              缓存账本 — 分段指纹 / 理论命中率 / 分叉归因 / 端点投影（best-effort 记账）
 │   └── cache_store.py               账本的唯一 SQL 处：cache_call / cache_segment（进程级 wing.db）
-├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
+├── metrics/                         用量统计包（L3）：审计流水 + 会话目录的聚合（`store` 读、`catalog` 写）
+│   ├── store.py                     唯一 SQL 处：audit_* / session_catalog 的聚合（窗口 + 各维度）
+│   ├── measures.py                  度量词表（11 个整数）+ 行 / 窗口值类型（纯函数）
+│   ├── report.py                    查询编排：窗口 → 各维度的行 → wire 投影
+│   └── catalog.py                   session_catalog 的写入与启动回填（派生投影）
+├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 自动归档 / 会话目录回填）
 ├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
 │   ├── spec.py                      声明层：S(...) / SettingMeta / ApplyScope（字段元信息唯一来源）
@@ -123,9 +128,9 @@ libs/core/wing/
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级 + 跨线程事务；与 store/ 的会话持久化正交）
 │   ├── database.py                  Database（WAL / user_version 迁移 / 跨线程单连接 + 事务 / 打开失败即降级）
-│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger，v3 = 缓存账本）+ SCHEMA_VERSION
-├── audit/                           审计：事件 → wing.db 的 audit_* 追加行（EventBus 订阅；install() 由组合根显式调用）
-│   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩各一条 INSERT
+│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger，v3 = 缓存账本，v4 = audit_user_message + session_catalog）+ SCHEMA_VERSION
+├── audit/                           审计：事件 → wing.db 的 audit_* 追加行（LLM 调用 / 工具调用 / 压缩 / 用户消息；EventBus 订阅，install() 由组合根显式调用）
+│   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩 / 用户消息各一条 INSERT
 ├── wake/                            会话唤醒（wake_trigger 表 + 事件/时间驱动 + 内置信封；投递经注入的 WakePorts）
 │   ├── spec.py                      spec 语法与时间推进（in/at/every/daily；纯函数）
 │   ├── model.py                     WakeTrigger + 状态/事件常量 + on_events 解析
@@ -151,10 +156,10 @@ libs/core/wing/
     ├── cors.py                      跨源访问装配（默认放通 loopback 来源；外部来源走 gateway.cors.origins）
     ├── frames.py                    出网帧切分（>8 MiB 载荷按 UTF-8 边界切为 ≤16 MiB 帧）
     ├── projection.py                领域 → 协议响应投影（session info / branches）
-    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · wake · errors
+    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · wake · usage · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
-    └── routes/                      session(22) · system(6) · settings(4) · wake(3) · tools(1) · health(1) · ws（事件传输 + 上行帧）· _common（取 server / 客户端 id / 会话存在性 / 上传预检的机械样板）
+    └── routes/                      session(22) · system(6) · settings(4) · wake(3) · usage(1) · tools(1) · health(1) · ws（事件传输 + 上行帧）· _common（取 server / 客户端 id / 会话存在性 / 上传预检的机械样板）
 ```
 
 ### 前端：`crates/wing/src/`（Rust，TUI + stdio + ACP + 编排 CLI）
@@ -176,6 +181,7 @@ crates/wing/src/
 │   ├── wait.rs                      `wing wait` 阻塞至会话 idle（HTTP 轮询 + WS TurnResult）
 │   ├── ps.rs                        `wing ps` / `wing info`（会话列表 / 单会话运行时信息）
 │   ├── cache.rs                     `wing cache`（KV 前缀缓存账本：理论/实际命中率 + 分叉归因）
+│   ├── usage.rs                     `wing usage`（我的使用史：活动热力图 + 7 个 `--by` 维度 + `--json` / `-w`）
 │   ├── branch.rs                    `wing branches` / `fork` / `rewind`（消息节点导航：uuid 闭环 + draft）
 │   ├── asks.rs                      `wing asks`（在挂 Ask 的 tool_call_id 发现口：WS 快照 + `--wait`）
 │   ├── tag.rs                       `wing tag`（会话标签读写 + 全局清单；幂等、不水合被逐出的会话）
@@ -257,6 +263,7 @@ crates/wing/src/
 ├── render/                          Markdown + 语法高亮
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）/ profile（Content vs Thinking 的规则归属）/ stream（StreamingRender：稳定前缀 + 活动尾部）
 │   ├── picture.rs                   PictureSource — 一张图片的身份（本地文件 / 网关媒体对象）
+│   ├── heatmap.rs                   日历热力图（7 行 × ISO 周的格子网格：四分位分档 / 月份标 / 宽度裁剪）
 │   ├── table/                       共享表格引擎：列宽分配 / 列分类 / 框线皮肤（markdown 表格与 CLI 共用）+ plain（CLI 纯文本表格渲染，wing ps / tools 用）
 │   ├── syntax.rs                    syntect 高亮（two-face 主题）
 │   ├── diff_highlight.rs            diff 双修订版高亮（old/new 两路状态机：删除行→old，其余→new，context 行两路都要推进）
@@ -273,7 +280,7 @@ crates/wing/src/
 └── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ base64（RFC 4648 编解码，OSC 与剪贴板协议共用）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
+配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
 
 源码门禁：`layer_guard.rs` 把 Rust 侧分层规则钉成扫描断言（Python 侧对应 `libs/core/tests/test_layering.py`，两侧规范见 [docs/dev/backend-layout.md](docs/dev/backend-layout.md)）；`session_guard.rs` 钉**编译器管不着的终端时序**（接驳安装点唯一、settle 早于首次 poll 等五条规则，语义见 [docs/dev/tui-input.md](docs/dev/tui-input.md)）。
 
@@ -302,6 +309,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
 | [`docs/dev/backend-layout.md`](docs/dev/backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射（历史记录）、分层守门测试（`test_layering.py`） |
 | [`docs/dev/cache-accounting.md`](docs/dev/cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、账本位置与上界、理论命中率定义、verdict / blame / avoidable 全表（每条结论落到「我能避免 / 该报 bug / 什么都不用做」）、降级与排错手册、回滚 |
+| [`docs/dev/usage.md`](docs/dev/usage.md) | 用量统计：数据来源（`audit_*` + `session_catalog`）、`GET /api/usage` 契约与各维度、11 个度量的口径与可归因性、一天与时区、根/子会话软机制、`wing usage` 命令面（热力图分档 / 7 个 `--by` / 仪表盘五段）与 `wing info` 的用量块、与 `wing cache` / 会话账本的口径差异、回填与历史起点、增长与保留、已知缺口、排错 |
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |
