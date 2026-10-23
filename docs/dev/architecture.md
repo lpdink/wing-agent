@@ -380,12 +380,13 @@ draft（`_record_draft`）、`render_probe --jsonl`（调试工具）、probe �
 
 审计是**进程级旁路遥测**，与会话持久化（`SessionStore` / `metadata.json`）正交：
 `wing/db/` 提供进程级 SQLite（`$WING_HOME/core/wing.db`，WAL + `user_version` 迁移，
-打开失败即降级），`wing/audit/` 订阅 EventBus 后把三类事实各追加一行——
+打开失败即降级），`wing/audit/` 订阅 EventBus 后把四类事实各追加一行——
 `LLMCallMetricsEvent` → `audit_llm_call`、`ToolCallResultEvent` → `audit_tool_call`
 （`duration_ms is None` 的中断合成结果不写，那不是一次执行）、`CompactDoneEvent` →
-`audit_compaction`。写路径是「一条事件一条 INSERT」（同步、自动提交），没有聚合计账、
-没有全量 JSON 重写；本期只写不读。目录布局 / 降级语义见
-[config-logging.md](config-logging.md)，表结构事实见 `wing/db/migrations.py`。
+`audit_compaction`、`UserMessageAcceptedEvent` → `audit_user_message`。写路径是「一条
+事件一条 INSERT」（同步、自动提交），没有聚合计账、没有全量 JSON 重写。读路径只有一处：
+`GET /api/usage`（`wing/metrics/` 读时聚合，口径见 [usage.md](usage.md)）。目录布局 /
+降级语义见 [config-logging.md](config-logging.md)，表结构事实见 `wing/db/migrations.py`。
 
 ## 压缩与缓存哲学
 

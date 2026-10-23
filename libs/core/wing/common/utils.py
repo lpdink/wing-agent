@@ -104,6 +104,13 @@ def validate_session_id(session_id: str, *, field: str = "session id") -> str:
     return session_id
 
 
+#: 默认 id 里时间前缀的形态（生成与解析同处一份规则）。
+SESSION_ID_TIME_FORMAT = "%Y%m%d-%H%M%S"
+
+#: 时间前缀的长度（上面那串的 ``strftime`` 产物恒为 15 字符）。
+SESSION_ID_TIME_CHARS = 15
+
+
 def generate_session_id() -> str:
     """生成唯一 session id：{YYYYMMDD-HHMMSS}-{8位uuid}。
 
@@ -111,9 +118,23 @@ def generate_session_id() -> str:
     id（见 ``is_valid_session_id``）。产出一律通过校验（生成与校验同处一份
     规则定义）。
     """
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime(SESSION_ID_TIME_FORMAT)
     short_uuid = str(uuid.uuid4()).replace("-", "")[:8]
     return f"{timestamp}-{short_uuid}"
+
+
+def parse_session_id_time(session_id: str) -> datetime | None:
+    """id 的**时间前缀**（本地 naive 时间）；不自带时间戳的 id 返回 None。
+
+    只是「这个 id 是哪一刻生成的」这一条线索的解析口，不是创建时刻的权威来源：
+    编排方可以自带任意 id（UUID / ``S-1``），默认形态之外的一律解析不出来。
+    """
+    try:
+        return datetime.strptime(
+            session_id[:SESSION_ID_TIME_CHARS], SESSION_ID_TIME_FORMAT
+        )
+    except ValueError:
+        return None
 
 
 # ============================================================

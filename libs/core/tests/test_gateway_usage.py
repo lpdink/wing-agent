@@ -10,22 +10,24 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from collections.abc import Iterator
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Iterator
-from unittest.mock import MagicMock, patch
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from wing.audit.recorder import AuditRecorder
 from wing.db import get_database
-from wing.event import (
-    LLMCallMetricsEvent,
-    ToolCallResultEvent,
-    UserMessageAcceptedEvent,
-)
 from wing.metrics import MEASURE_FIELDS
+
+from _support import (
+    gateway_server,
+    local_time,
+    seed_llm_call,
+    seed_tool_call,
+    seed_user_message,
+)
 
 TODAY = date.today()
 YESTERDAY = TODAY - timedelta(days=1)
@@ -36,68 +38,15 @@ UNTIL = TODAY.isoformat()
 ROW_EXTRA_KEYS = {"key", "label", "parent_session_id"}
 
 
-def _at(day: date, hour: int = 12) -> datetime:
-    return datetime.combine(day, time(hour, 0))
-
-
-def _llm(
-    session_id: str, at: datetime, *, prompt: int = 100, completion: int = 10
-) -> None:
-    AuditRecorder().on_event(
-        LLMCallMetricsEvent(
-            session_id=session_id,
-            request_id="req",
-            model="gpt-4",
-            provider="default",
-            prompt_tokens=prompt,
-            completion_tokens=completion,
-            cached_tokens=0,
-            first_chunk_rt_ms=12.0,
-            tokens_per_sec=30.0,
-            duration_ms=400,
-            created_at=at,
-        )
-    )
-
-
-def _tool(session_id: str, at: datetime) -> None:
-    AuditRecorder().on_event(
-        ToolCallResultEvent(
-            session_id=session_id,
-            request_id="req",
-            tool_name="Bash",
-            tool_args={},
-            tool_call_id="tc",
-            tool_result="ok",
-            tool_success=True,
-            duration_ms=25,
-            created_at=at,
-        )
-    )
-
-
-def _user_message(session_id: str, at: datetime) -> None:
-    AuditRecorder().on_event(
-        UserMessageAcceptedEvent(session_id=session_id, content="hi", created_at=at)
-    )
-
-
 class TestUsageEndpoint:
     @pytest.fixture
     def client(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> Iterator[TestClient]:
         """真实 app + 真实 runtime（鉴权关闭；sessions 根独立）。"""
-        from wing.gateway.server import GatewayServer
-        from wing.runtime import WingRuntime
-
-        monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-        with patch("wing.gateway.server.load_config") as mock_load_config:
-            mock_load_config.return_value = MagicMock()
-            server = GatewayServer()
-        server.runtime = WingRuntime()
-        with TestClient(server._app) as test_client:
-            yield test_client
+        with gateway_server(tmp_path, monkeypatch) as server:
+            with TestClient(server._app) as test_client:
+                yield test_client
 
     def _create(self, client: TestClient, **body: Any) -> dict[str, Any]:
         response = client.post("/api/session/create", json=body)
@@ -107,9 +56,9 @@ class TestUsageEndpoint:
     def test_response_shape(self, client: TestClient) -> None:
         """200 的形状：range / group_by / totals / rows / truncated，度量一个不少。"""
         self._create(client, session_id="shape-1")
-        _llm("shape-1", _at(YESTERDAY))
-        _tool("shape-1", _at(YESTERDAY))
-        _user_message("shape-1", _at(TODAY))
+        seed_llm_call("shape-1", local_time(YESTERDAY))
+        seed_tool_call("shape-1", local_time(YESTERDAY))
+        seed_user_message("shape-1", local_time(TODAY))
 
         body = client.get("/api/usage", params={"since": SINCE, "until": UNTIL}).json()
 
@@ -133,8 +82,8 @@ class TestUsageEndpoint:
     def test_origin_rows_are_fixed_and_grouped(self, client: TestClient) -> None:
         self._create(client, session_id="root-1")
         self._create(client, session_id="child-1", parent_session_id="root-1")
-        _llm("root-1", _at(YESTERDAY), prompt=10)
-        _llm("child-1", _at(YESTERDAY), prompt=90)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=90)
 
         body = client.get(
             "/api/usage",
@@ -149,8 +98,8 @@ class TestUsageEndpoint:
     def test_session_scope_with_tree(self, client: TestClient) -> None:
         self._create(client, session_id="root-1")
         self._create(client, session_id="child-1", parent_session_id="root-1")
-        _llm("root-1", _at(YESTERDAY), prompt=10)
-        _llm("child-1", _at(YESTERDAY), prompt=90)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=90)
 
         alone = client.get(
             "/api/usage",
@@ -224,7 +173,7 @@ class TestUsageEndpoint:
     def test_since_all_spans_the_whole_history(self, client: TestClient) -> None:
         early = TODAY - timedelta(days=30)
         self._create(client, session_id="old-1")
-        _llm("old-1", _at(early))
+        seed_llm_call("old-1", local_time(early))
 
         body = client.get(
             "/api/usage", params={"since": "all", "until": UNTIL, "group_by": "session"}
@@ -239,7 +188,7 @@ class TestUsageEndpoint:
         for index in range(3):
             session_id = f"trunc-{index}"
             self._create(client, session_id=session_id)
-            _llm(session_id, _at(YESTERDAY), prompt=10 * (index + 1))
+            seed_llm_call(session_id, local_time(YESTERDAY), prompt=10 * (index + 1))
 
         body = client.get(
             "/api/usage",
@@ -265,6 +214,28 @@ class TestUsageEndpoint:
 
         assert len(body["rows"]) == 2
         assert all(body["totals"][name] == 0 for name in MEASURE_FIELDS)
+
+    def test_scoped_request_with_degraded_database_stays_200(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """库降级：带 `session_id` 也照常 200（读不到 ≠ 不存在）。"""
+        from wing.db import Database
+
+        blocked = tmp_path / "degraded.db"
+        blocked.mkdir()
+        degraded = Database(blocked)
+        assert not degraded.ready
+        monkeypatch.setattr("wing.metrics.store.get_database", lambda: degraded)
+
+        response = client.get(
+            "/api/usage", params={"session_id": "shape-1", "group_by": "session"}
+        )
+
+        assert response.status_code == 200
+        assert [row["key"] for row in response.json()["rows"]] == ["shape-1"]
 
     def test_create_writes_the_session_catalog(self, client: TestClient) -> None:
         """建会话 → 目录行（创建时刻 / workspace / 模板 / 模型引用词）。"""
@@ -297,7 +268,7 @@ class TestUsageEndpoint:
     def test_fork_writes_a_catalog_row(self, client: TestClient) -> None:
         """fork 也是新建会话：写一行（``forked_from`` 是内容血统，父血缘不写）。"""
         self._create(client, session_id="src-1")
-        _llm("src-1", _at(YESTERDAY))
+        seed_llm_call("src-1", local_time(YESTERDAY))
         branches = client.get("/api/session/branches", params={"session_id": "src-1"})
         assert branches.status_code == 200
         uuid = branches.json()["targets"][0]["uuid"]
@@ -319,7 +290,7 @@ class TestUsageEndpoint:
     def test_usage_does_not_hydrate_the_session(self, client: TestClient) -> None:
         """只读库：调端点不把已逐出的会话读回内存（``release`` 之后仍 inactive）。"""
         self._create(client, session_id="cold-1", tags=["usage-probe"])
-        _llm("cold-1", _at(YESTERDAY))
+        seed_llm_call("cold-1", local_time(YESTERDAY))
         assert (
             client.post(
                 "/api/session/release", json={"session_id": "cold-1"}

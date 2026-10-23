@@ -52,6 +52,11 @@ _OPEN_BUSY_TIMEOUT_MS = 200
 #: 稳态写等锁上限（契约值：5000）。
 _BUSY_TIMEOUT_MS = 5000
 
+#: 诊断 / best-effort 数据（缓存账本、用量统计）的等锁上限：远短于稳态值。
+#: 那些读写都是旁路观测——另一个进程攥着写锁时宁可放弃这一笔，也不要把本进程的
+#: 门面锁按住秒级（进程内所有 DB 访问都会一起排队）。
+DIAGNOSTIC_BUSY_TIMEOUT_MS = 250
+
 
 class SchemaVersionTooNew(RuntimeError):
     """磁盘上的 ``user_version`` 高于本代码认识的版本——不猜、不降级写。"""
@@ -285,29 +290,33 @@ class Database:
     ) -> list[sqlite3.Row]:
         """执行查询。降级 / 出错一律返回空列表（不抛、不刷日志）。
 
-        ``busy_timeout_ms`` 给定时本次等待写锁的上限收紧（快照读遇上跨进程写锁 /
-        checkpoint 时，本方法持着进程级的锁在等——诊断类读路径宁可丢掉这次读数，
-        也不要把这把锁按住秒级）。只在本方法持锁期间生效，退出前恢复稳态值，
-        因此别的线程看不到这个临时值。
+        ``busy_timeout_ms`` 给定时本次等锁的上限收紧（诊断类读路径用
+        ``DIAGNOSTIC_BUSY_TIMEOUT_MS``），退出前恢复稳态值，因此别的线程看不到这个
+        临时值。**事务内一律忽略**：块的收紧值归 :meth:`transaction` 管，再改一次会把
+        它抹掉（嵌套读原样沿用外层设置）。
 
         **在事务里失败会连累整笔事务**：空结果与「读失败」看起来一样，而事务块拿读
         结果决定写什么——写失败会回滚，读失败却照写就会落下一份错的、而且是"自洽"
         的数据（比如把「读不到历史」记成 `cold`）。所以读失败同样让事务不可提交。
         """
         with self._lock:
-            if not self._ready or self._conn is None:
+            conn = self._conn
+            if not self._ready or conn is None:
                 return []
-            try:
-                if busy_timeout_ms is not None:
-                    self._conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+            narrowed = busy_timeout_ms if self._txn is None else None
+            if narrowed is not None:
                 try:
-                    return self._conn.execute(sql, params).fetchall()
-                finally:
-                    if busy_timeout_ms is not None:
-                        self._conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+                    conn.execute(f"PRAGMA busy_timeout={int(narrowed)}")
+                except Exception as exc:
+                    self._warn_error(exc)
+                    return []
+            try:
+                return conn.execute(sql, params).fetchall()
             except Exception as exc:
                 self._fail(exc)
                 return []
+            finally:
+                self._restore_busy_timeout(conn, narrowed)
 
     @contextmanager
     def transaction(

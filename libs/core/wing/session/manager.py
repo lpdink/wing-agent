@@ -29,6 +29,7 @@ from wing.common.utils import (
     InvalidInputError,
     generate_session_id,
     is_valid_session_id,
+    parse_session_id_time,
     require_utf8,
     validate_session_id,
 )
@@ -124,12 +125,8 @@ def _session_epoch(session_id: str, last_interaction: str | None) -> float | Non
                 pass
         elif isinstance(ts, (int, float)):
             return float(ts)
-    prefix = session_id[:15] if len(session_id) >= 15 else session_id
-    try:
-        dt = datetime.strptime(prefix, "%Y%m%d-%H%M%S")
-        return dt.timestamp()
-    except Exception:
-        return None
+    stamped = parse_session_id_time(session_id)
+    return stamped.timestamp() if stamped is not None else None
 
 
 class SessionManager:

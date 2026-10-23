@@ -20,9 +20,10 @@
 │   │                   ├── <sid>/files/   会话私有用户文件（按名寻址；同名异字节带 -N 后缀）
 │   │                   ├── .media/        遗留共享媒体池（只读：老会话引用回退读取 + 物化；不删不写）
 │   │                   └── .archive/      归档区（index.json 索引 + 被归档会话目录；纯 rename，字节不变）
-│   ├── wing.db         进程级 SQLite（WAL）：审计行 audit_llm_call / audit_tool_call / audit_compaction
-│   │                   + 唤醒触发器 wake_trigger（+ wing.db-wal / -shm 运行时旁文件；
-│   │                   表结构与降级语义见下）
+│   ├── wing.db         进程级 SQLite（WAL）：审计行 audit_llm_call / audit_tool_call /
+│   │                   audit_compaction / audit_user_message + 会话目录 session_catalog
+│   │                   + 唤醒触发器 wake_trigger + 缓存账本 cache_call / cache_segment
+│   │                   （+ wing.db-wal / -shm 运行时旁文件；表结构与降级语义见下）
 │   └── metrics.json    **【废止】** 旧指标聚合（历史文件不再读也不再写，可自行删除）
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）
@@ -59,7 +60,9 @@
 
 因此**非 setup mode 的网关启动就会创建 `wing.db`**（配置不可用时没有 `WingRuntime`，也就没有
 唤醒，库不会被碰）。审计本身仍然是懒的：库建好了，但一轮没有任何可审计事实的对话不会新增任何
-行。本期审计**只写不读**（没有观测端点、没有保留期策略），需要看数据时直接用 `sqlite3` 读。
+行。审计与用量统计的读路径只有 `GET /api/usage`（口径见 [usage.md](usage.md)），没有保留期
+策略；要查落盘原文时直接用 `sqlite3` 读库文件（注意 WAL：先 `PRAGMA wal_checkpoint(TRUNCATE)`
+或把 `wing.db*` 三件套一起拷）。
 
 `metrics.json`（全局 / 会话两份）是**废止**的旧实现：每条事件读整份 JSON → 聚合 →
 tmp+fsync+rename 重写，给流式输出加延迟。历史文件保留在盘上（不主动删用户文件），但不再

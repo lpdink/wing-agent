@@ -12,9 +12,15 @@ from __future__ import annotations
 import threading
 
 from wing.config import get_wing_home
-from wing.db.database import Database
+from wing.db.database import DIAGNOSTIC_BUSY_TIMEOUT_MS, Database
 
-__all__ = ["Database", "close_database", "get_database", "reset_database"]
+__all__ = [
+    "DIAGNOSTIC_BUSY_TIMEOUT_MS",
+    "Database",
+    "close_database",
+    "get_database",
+    "reset_database",
+]
 
 #: 库文件名（落在 ``get_wing_home()`` 里，即 ``$WING_HOME/core/wing.db``）。
 DB_FILENAME = "wing.db"

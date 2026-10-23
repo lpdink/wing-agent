@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from wing.gateway.protocol import UsageResponse
-from wing.metrics import GROUP_BY_VALUES
+from wing.metrics import GROUP_BY_VALUES, MAX_LIMIT
 
 from ._common import get_server
 
@@ -55,7 +55,7 @@ async def usage(
     limit: int = Query(
         20,
         ge=1,
-        le=200,
+        le=MAX_LIMIT,
         description="排行类维度（model / session / tool / workspace / agent）的行数上限",
     ),
 ) -> UsageResponse:

@@ -1,9 +1,9 @@
-"""tests/test_metrics_store.py — 用量聚合：度量口径、八个维度、树递归、目录回填。
+"""tests/test_metrics_store.py — 用量聚合：度量口径、各维度、树递归、目录回填。
 
-播种一律走**生产写入路径**：审计行经 ``AuditRecorder.on_event``（事件带显式
-``created_at``——时间维度是这些用例的主角），目录行经
-``metrics.catalog.record_session_created``。测试不手写 INSERT 造数：那样测的是
-SQLite，不是采集链路。
+播种一律走**生产写入路径**：审计行经 ``_support.seed_*``（内部走
+``AuditRecorder.on_event``，事件带显式 ``created_at``——时间维度是这些用例的主角），
+目录行经 ``metrics.catalog.record_session_created``。测试不手写 INSERT 造数：那样
+测的是 SQLite，不是采集链路。
 
 窗口一律相对「今天」取（目录行的创建时刻是 ``datetime.now()``，只有落在窗口里
 才谈得上 ``sessions_created``）。
@@ -11,21 +11,16 @@ SQLite，不是采集链路。
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from dataclasses import fields
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from wing.audit.recorder import AuditRecorder
 from wing.config import AgentConfig, Config, ProviderConfig
 from wing.config.models import ModelSpec
 from wing.db import Database
-from wing.event import (
-    LLMCallMetricsEvent,
-    ToolCallResultEvent,
-    UserMessageAcceptedEvent,
-)
 from wing.metrics import (
     MEASURE_FIELDS,
     Measures,
@@ -34,11 +29,13 @@ from wing.metrics import (
     Window,
     backfill_catalog,
     record_session_created,
-    total,
+    sum_measures,
     usage_report,
 )
 from wing.store import SessionMetadata, SessionStore
 from wing.store.file import FileSessionStore
+
+from _support import local_time, seed_llm_call, seed_tool_call, seed_user_message
 
 #: 相对今天的三个日子（目录行创建于「现在」，窗口必须覆盖今天）。
 TODAY = date.today()
@@ -51,67 +48,6 @@ UNTIL = TODAY.isoformat()
 
 #: 只写 metadata 的测试会话靠这个标签进 `list_summaries`（无 history 也无标签的目录不算会话）。
 LISTED = ["probe"]
-
-
-def _at(day: date, hour: int = 12) -> datetime:
-    return datetime.combine(day, time(hour, 0))
-
-
-def _llm(
-    session_id: str,
-    at: datetime,
-    *,
-    model: str = "gpt-4",
-    provider: str = "default",
-    prompt: int = 100,
-    completion: int = 10,
-    cached: int = 40,
-    duration_ms: int = 500,
-) -> None:
-    AuditRecorder().on_event(
-        LLMCallMetricsEvent(
-            session_id=session_id,
-            request_id="req",
-            model=model,
-            provider=provider,
-            prompt_tokens=prompt,
-            completion_tokens=completion,
-            cached_tokens=cached,
-            first_chunk_rt_ms=12.0,
-            tokens_per_sec=30.0,
-            duration_ms=duration_ms,
-            created_at=at,
-        )
-    )
-
-
-def _tool(
-    session_id: str,
-    at: datetime,
-    *,
-    tool_name: str = "Bash",
-    success: bool = True,
-    duration_ms: int = 30,
-) -> None:
-    AuditRecorder().on_event(
-        ToolCallResultEvent(
-            session_id=session_id,
-            request_id="req",
-            tool_name=tool_name,
-            tool_args={},
-            tool_call_id="tc",
-            tool_result="ok",
-            tool_success=success,
-            duration_ms=duration_ms,
-            created_at=at,
-        )
-    )
-
-
-def _user_message(session_id: str, at: datetime) -> None:
-    AuditRecorder().on_event(
-        UserMessageAcceptedEvent(session_id=session_id, content="hi", created_at=at)
-    )
 
 
 def _window(**kwargs: Any) -> Window:
@@ -152,8 +88,12 @@ class TestMeasures:
         left = Measures(llm_calls=2, prompt_tokens=100)
         right = Measures(llm_calls=3, tool_calls=1, prompt_tokens=50)
         assert left + right == Measures(llm_calls=5, tool_calls=1, prompt_tokens=150)
-        assert total([]) == Measures()
-        assert total([left, right]) == left + right
+        assert sum_measures([]) == Measures()
+        assert sum_measures([left, right]) == left + right
+
+    def test_field_order_matches_the_vocabulary(self) -> None:
+        """``astuple()`` 按词表取值、``Measures(*…)`` 按字段声明序构造——两者必须同序。"""
+        assert tuple(f.name for f in fields(Measures)) == MEASURE_FIELDS
 
     def test_row_wire_is_flat(self) -> None:
         row = Row(
@@ -187,10 +127,12 @@ class TestMeasures:
 class TestDayDimension:
     def test_dense_rows_and_bucket_totals(self) -> None:
         """稠密：窗口内每天都有一行；同一个桶里的三张表分别入账，sessions 跨表去重。"""
-        _llm("s1", _at(YESTERDAY, 9))
-        _llm("s1", _at(YESTERDAY, 10), prompt=50, completion=5, cached=10)
-        _tool("s1", _at(YESTERDAY, 11))
-        _user_message("s1", _at(YESTERDAY, 11))
+        seed_llm_call("s1", local_time(YESTERDAY, 9))
+        seed_llm_call(
+            "s1", local_time(YESTERDAY, 10), prompt=50, completion=5, cached=10
+        )
+        seed_tool_call("s1", local_time(YESTERDAY, 11))
+        seed_user_message("s1", local_time(YESTERDAY, 11))
 
         report = _report()
 
@@ -218,10 +160,10 @@ class TestDayDimension:
         ``sessions`` 是去重计数：同一个会话在两天都有活动时，两天各算 1、合计仍算 1
         ——它天生不可加，是 day 维度唯一的例外。
         """
-        _llm("s1", _at(YESTERDAY), prompt=10)
-        _llm("s2", _at(TWO_DAYS_AGO), prompt=20)
-        _tool("s2", _at(TWO_DAYS_AGO))
-        _user_message("s1", _at(TODAY))
+        seed_llm_call("s1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("s2", local_time(TWO_DAYS_AGO), prompt=20)
+        seed_tool_call("s2", local_time(TWO_DAYS_AGO))
+        seed_user_message("s1", local_time(TODAY))
 
         report = _report()
 
@@ -236,8 +178,8 @@ class TestDayDimension:
         assert report["totals"]["sessions"] == 2
 
     def test_out_of_window_rows_are_excluded(self) -> None:
-        _llm("s1", _at(TODAY - timedelta(days=10)))
-        _llm("s1", _at(TODAY))
+        seed_llm_call("s1", local_time(TODAY - timedelta(days=10)))
+        seed_llm_call("s1", local_time(TODAY))
 
         report = _report()
 
@@ -265,10 +207,10 @@ class TestOriginDimension:
         """根会话算 me、有父的算 agents；顺序固定（me 在前）。"""
         record_session_created("root-1", workspace="/w")
         record_session_created("child-1", parent_session_id="root-1", workspace="/w")
-        _llm("root-1", _at(YESTERDAY), prompt=10)
-        _tool("root-1", _at(YESTERDAY))
-        _llm("child-1", _at(YESTERDAY), prompt=90)
-        _user_message("child-1", _at(YESTERDAY))
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
+        seed_tool_call("root-1", local_time(YESTERDAY))
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=90)
+        seed_user_message("child-1", local_time(YESTERDAY))
 
         report = _report(group_by="origin")
 
@@ -286,7 +228,7 @@ class TestOriginDimension:
 
     def test_unknown_session_counts_as_me(self) -> None:
         """目录里没有的会话（旧数据 / 手工清理）按「我」计——不知道就当是自己开的。"""
-        _llm("ghost", _at(YESTERDAY), prompt=7)
+        seed_llm_call("ghost", local_time(YESTERDAY), prompt=7)
 
         report = _report(group_by="origin")
 
@@ -297,8 +239,8 @@ class TestOriginDimension:
     def test_rows_sum_to_totals(self) -> None:
         record_session_created("root-1")
         record_session_created("child-1", parent_session_id="root-1")
-        _llm("root-1", _at(YESTERDAY), prompt=10)
-        _llm("child-1", _at(YESTERDAY), prompt=20)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=20)
 
         report = _report(group_by="origin")
 
@@ -316,8 +258,12 @@ class TestOriginDimension:
 class TestModelDimension:
     def test_same_name_across_providers_stays_separate(self) -> None:
         """key 是 ``provider/model`` 复合键：同名跨 provider 不合并。"""
-        _llm("s1", _at(YESTERDAY), model="flash", provider="alpha", prompt=10)
-        _llm("s1", _at(YESTERDAY), model="flash", provider="beta", prompt=20)
+        seed_llm_call(
+            "s1", local_time(YESTERDAY), model="flash", provider="alpha", prompt=10
+        )
+        seed_llm_call(
+            "s1", local_time(YESTERDAY), model="flash", provider="beta", prompt=20
+        )
 
         report = _report(group_by="model")
 
@@ -345,9 +291,9 @@ class TestModelDimension:
             agents=[AgentConfig(name="default", model="flash")],
         )
         monkeypatch.setattr("wing.metrics.report.get_config", lambda: config)
-        _llm("s1", _at(YESTERDAY), model="flash", provider="alpha")
-        _llm("s1", _at(YESTERDAY), model="flash", provider="undeclared")
-        _llm("s1", _at(YESTERDAY), model="other", provider="alpha")
+        seed_llm_call("s1", local_time(YESTERDAY), model="flash", provider="alpha")
+        seed_llm_call("s1", local_time(YESTERDAY), model="flash", provider="undeclared")
+        seed_llm_call("s1", local_time(YESTERDAY), model="other", provider="alpha")
 
         report = _report(group_by="model")
 
@@ -358,9 +304,9 @@ class TestModelDimension:
 
     def test_tool_and_user_measures_are_not_attributable(self) -> None:
         """工具行没有 model 列、用户消息行也没有——这两侧的度量恒为 0。"""
-        _llm("s1", _at(YESTERDAY), model="m", provider="p")
-        _tool("s1", _at(YESTERDAY))
-        _user_message("s1", _at(YESTERDAY))
+        seed_llm_call("s1", local_time(YESTERDAY), model="m", provider="p")
+        seed_tool_call("s1", local_time(YESTERDAY))
+        seed_user_message("s1", local_time(YESTERDAY))
 
         row = _report(group_by="model")["rows"][0]
 
@@ -372,9 +318,30 @@ class TestModelDimension:
         assert row["sessions_created"] == 0
 
     def test_token_ranking_and_key_tiebreak(self) -> None:
-        _llm("s1", _at(YESTERDAY), model="b", provider="p", prompt=10, completion=0)
-        _llm("s1", _at(YESTERDAY), model="a", provider="p", prompt=10, completion=0)
-        _llm("s1", _at(YESTERDAY), model="c", provider="p", prompt=50, completion=0)
+        seed_llm_call(
+            "s1",
+            local_time(YESTERDAY),
+            model="b",
+            provider="p",
+            prompt=10,
+            completion=0,
+        )
+        seed_llm_call(
+            "s1",
+            local_time(YESTERDAY),
+            model="a",
+            provider="p",
+            prompt=10,
+            completion=0,
+        )
+        seed_llm_call(
+            "s1",
+            local_time(YESTERDAY),
+            model="c",
+            provider="p",
+            prompt=50,
+            completion=0,
+        )
 
         rows = _report(group_by="model")["rows"]
 
@@ -384,11 +351,11 @@ class TestModelDimension:
 
 class TestToolDimension:
     def test_ranking_errors_and_key_tiebreak(self) -> None:
-        _tool("s1", _at(YESTERDAY), tool_name="Bash")
-        _tool("s1", _at(YESTERDAY), tool_name="Bash", success=False)
-        _tool("s2", _at(YESTERDAY), tool_name="Edit")
-        _tool("s2", _at(YESTERDAY), tool_name="Grep")
-        _llm("s1", _at(YESTERDAY))
+        seed_tool_call("s1", local_time(YESTERDAY), tool_name="Bash")
+        seed_tool_call("s1", local_time(YESTERDAY), tool_name="Bash", success=False)
+        seed_tool_call("s2", local_time(YESTERDAY), tool_name="Edit")
+        seed_tool_call("s2", local_time(YESTERDAY), tool_name="Grep")
+        seed_llm_call("s1", local_time(YESTERDAY))
 
         report = _report(group_by="tool")
 
@@ -404,7 +371,7 @@ class TestToolDimension:
 
     def test_totals_stay_whole_event_when_rows_are_limited(self) -> None:
         for name in ("Bash", "Edit", "Grep", "Read"):
-            _tool("s1", _at(YESTERDAY), tool_name=name)
+            seed_tool_call("s1", local_time(YESTERDAY), tool_name=name)
 
         report = _report(group_by="tool", limit=2)
 
@@ -422,8 +389,8 @@ class TestSessionDimension:
     def test_rows_carry_parent_and_rank_by_tokens(self) -> None:
         record_session_created("root-1")
         record_session_created("child-1", parent_session_id="root-1")
-        _llm("root-1", _at(YESTERDAY), prompt=10, completion=0)
-        _llm("child-1", _at(YESTERDAY), prompt=90, completion=0)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=10, completion=0)
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=90, completion=0)
 
         report = _report(group_by="session")
 
@@ -435,8 +402,8 @@ class TestSessionDimension:
     def test_scope_without_tree_is_the_session_alone(self) -> None:
         record_session_created("root-1")
         record_session_created("child-1", parent_session_id="root-1")
-        _llm("root-1", _at(YESTERDAY), prompt=10)
-        _llm("child-1", _at(YESTERDAY), prompt=90)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=90)
 
         report = _report(group_by="session", session_id="root-1")
 
@@ -449,10 +416,10 @@ class TestSessionDimension:
         record_session_created("child-1", parent_session_id="root-1")
         record_session_created("grand-1", parent_session_id="child-1")
         record_session_created("other-1")
-        _llm("root-1", _at(YESTERDAY), prompt=1)
-        _llm("child-1", _at(YESTERDAY), prompt=2)
-        _llm("grand-1", _at(YESTERDAY), prompt=4)
-        _llm("other-1", _at(YESTERDAY), prompt=8)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=1)
+        seed_llm_call("child-1", local_time(YESTERDAY), prompt=2)
+        seed_llm_call("grand-1", local_time(YESTERDAY), prompt=4)
+        seed_llm_call("other-1", local_time(YESTERDAY), prompt=8)
 
         report = _report(group_by="session", session_id="root-1", tree=True)
 
@@ -467,8 +434,8 @@ class TestSessionDimension:
         """血缘里出现环（手改 metadata）时递归必须终止（``UNION`` 而非 ``UNION ALL``）。"""
         record_session_created("a", parent_session_id="b")
         record_session_created("b", parent_session_id="a")
-        _llm("a", _at(YESTERDAY), prompt=1)
-        _llm("b", _at(YESTERDAY), prompt=2)
+        seed_llm_call("a", local_time(YESTERDAY), prompt=1)
+        seed_llm_call("b", local_time(YESTERDAY), prompt=2)
 
         report = _report(group_by="session", session_id="a", tree=True)
 
@@ -492,11 +459,11 @@ class TestSessionDimension:
     def test_self_row_survives_limit(self) -> None:
         """自身行是 scope 的锚点：被排行挤出 `limit` 后仍出现在结果里。"""
         record_session_created("root-1")
-        _llm("root-1", _at(YESTERDAY), prompt=1)
+        seed_llm_call("root-1", local_time(YESTERDAY), prompt=1)
         for index in range(3):
             child = f"child-{index}"
             record_session_created(child, parent_session_id="root-1")
-            _llm(child, _at(YESTERDAY), prompt=100 + index)
+            seed_llm_call(child, local_time(YESTERDAY), prompt=100 + index)
 
         report = _report(group_by="session", session_id="root-1", tree=True, limit=2)
 
@@ -507,7 +474,7 @@ class TestSessionDimension:
 
     def test_active_session_without_catalog_row_appears(self) -> None:
         """目录里没有但有审计行（旧数据）：行照样出，parent 为 null。"""
-        _llm("legacy-1", _at(YESTERDAY))
+        seed_llm_call("legacy-1", local_time(YESTERDAY))
 
         report = _report(group_by="session")
 
@@ -525,8 +492,8 @@ class TestWorkspaceAndAgent:
         record_session_created("w1", workspace="/proj/a")
         record_session_created("w2", workspace="/proj/a")
         record_session_created("w3", workspace="/proj/b")
-        _llm("w1", _at(YESTERDAY), prompt=10)
-        _llm("w3", _at(YESTERDAY), prompt=90)
+        seed_llm_call("w1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("w3", local_time(YESTERDAY), prompt=90)
 
         report = _report(group_by="workspace")
 
@@ -548,8 +515,8 @@ class TestWorkspaceAndAgent:
     def test_agent_rows_use_template_name_and_empty_key(self) -> None:
         record_session_created("t1", template_name="coder")
         record_session_created("t2")
-        _llm("t1", _at(YESTERDAY), prompt=10)
-        _llm("t2", _at(YESTERDAY), prompt=90)
+        seed_llm_call("t1", local_time(YESTERDAY), prompt=10)
+        seed_llm_call("t2", local_time(YESTERDAY), prompt=90)
 
         report = _report(group_by="agent")
 
@@ -599,7 +566,7 @@ class TestValidation:
 
     def test_session_with_audit_rows_only_is_not_unknown(self) -> None:
         """404 判据 = 目录里没有**且**审计表也没有——有行就算存在。"""
-        _llm("legacy-1", _at(YESTERDAY))
+        seed_llm_call("legacy-1", local_time(YESTERDAY))
 
         report = usage_report(group_by="session", session_id="legacy-1")
 
@@ -616,14 +583,25 @@ class TestDefaultsAndAll:
 
     def test_since_all_starts_at_the_earliest_record(self) -> None:
         early = date(2026, 1, 5)
-        _llm("s1", _at(early))
-        _llm("s1", _at(YESTERDAY))
+        seed_llm_call("s1", local_time(early))
+        seed_llm_call("s1", local_time(YESTERDAY))
 
         report = usage_report(since="all", until=UNTIL)
 
         assert report["range"]["since"] == early.isoformat()
         assert report["rows"][0]["key"] == early.isoformat()
         assert report["totals"]["llm_calls"] == 2
+
+    def test_since_all_survives_records_after_until(self) -> None:
+        """时钟回拨 / 向西跨时区会留下「晚于今天」的行：逃生路径不能因此变 400。"""
+        future = date.today() + timedelta(days=10)
+        seed_llm_call("s1", local_time(future))
+
+        report = usage_report(since="all")
+
+        assert report["range"]["since"] == TODAY.isoformat()
+        assert report["range"]["until"] == TODAY.isoformat()
+        assert len(report["rows"]) == 1
 
     def test_since_all_on_an_empty_database_is_one_day(self) -> None:
         report = usage_report(since="all", until=UNTIL)
@@ -649,13 +627,30 @@ class TestDegradedDatabase:
         assert [row["key"] for row in report["rows"]] == ["me", "agents"]
         assert all(report["totals"][name] == 0 for name in MEASURE_FIELDS)
 
+    def test_scoped_request_stays_200_when_degraded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """库降级时不把「读不到」翻译成「不存在」：带 session_id 仍是 200 + 全零。"""
+        blocked = tmp_path / "wing.db"
+        blocked.mkdir()
+        degraded = Database(blocked)
+        assert not degraded.ready
+        monkeypatch.setattr("wing.metrics.store.get_database", lambda: degraded)
+
+        report = usage_report(
+            since=SINCE, until=UNTIL, group_by="session", session_id="real-session"
+        )
+
+        assert [row["key"] for row in report["rows"]] == ["real-session"]
+        assert all(report["totals"][name] == 0 for name in MEASURE_FIELDS)
+
     def test_store_reads_are_empty_when_degraded(self, tmp_path: Path) -> None:
         blocked = tmp_path / "wing.db"
         blocked.mkdir()
         store = MetricsStore(Database(blocked))
 
         assert store.earliest_day() is None
-        assert store.session_exists("anything") is False
+        assert store.has_usage_record("anything") is False
         assert store.by_day(_window()) == {}
         assert store.by_session(_window()) == []
         assert store.created_total(_window()) == 0

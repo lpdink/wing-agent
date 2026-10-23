@@ -801,6 +801,28 @@ class TestTransactions:
         assert db.query("PRAGMA busy_timeout")[0][0] == 5000
         db.close()
 
+    def test_query_busy_timeout_override_is_restored(self, tmp_path: Path) -> None:
+        """读路径的短等锁上限只对这一条查询生效（正常 / 出错两条路径都恢复）。"""
+        db = Database(tmp_path / "wing.db")
+        assert db.query("SELECT 1", busy_timeout_ms=250)[0][0] == 1
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        # 出错路径：语句失败也要恢复（且不抛、不刷日志）
+        assert db.query("SELECT * FROM no_such_table", busy_timeout_ms=250) == []
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        db.close()
+
+    def test_query_inside_a_transaction_keeps_the_transaction_override(
+        self, tmp_path: Path
+    ) -> None:
+        """事务内的读不改等锁上限：块的收紧值归 `transaction()` 管，不能被抹掉。"""
+        db = Database(tmp_path / "wing.db")
+        with db.transaction(busy_timeout_ms=50) as txn:
+            assert txn.live is True
+            db.query("SELECT 1", busy_timeout_ms=250)
+            assert db.query("PRAGMA busy_timeout")[0][0] == 50
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        db.close()
+
     def test_reads_inside_the_block_see_uncommitted_writes(
         self, tmp_path: Path
     ) -> None:

@@ -13,10 +13,11 @@
 Rust 侧的 ``crates/wing-api-client/src/models.rs`` 是**手写镜像**（没有 codegen 流水线）：
 两侧用同一批用例对齐，改字段时两边一起改。
 
-按端点族分四个子模块：``ws``（WS 帧）· ``session``（``/api/session/*`` 请求与响应）·
+按端点族分子模块：``ws``（WS 帧）· ``session``（``/api/session/*`` 请求与响应）·
 ``system``（系统面：命令 / 模型 / agent / 重载 / 工具 / 健康 / 远程工具注册）·
 ``settings``（Setting API：``/api/settings/*`` 请求与响应）·
-``usage``（用量聚合：``GET /api/usage``）· ``errors``（统一错误形状）。本 __init__ 是唯一公共入口——消费方 import 保持包根形态。"""
+``usage``（用量聚合：``GET /api/usage``）· ``errors``（统一错误形状）。
+本 __init__ 是唯一公共入口——消费方 import 保持包根形态。"""
 
 from __future__ import annotations
 from .errors import HTTP_ERROR_TYPES, ErrorResponse, error_response
@@ -87,7 +88,12 @@ from .system import (
     ToolInfo,
     ToolsListResponse,
 )
-from .usage import UsageMeasures, UsageRange, UsageResponse, UsageRow
+from .usage import (
+    UsageMeasures,
+    UsageRange,
+    UsageResponse,
+    UsageRow,
+)
 from .wake import (
     WakeCancelRequest,
     WakeCancelResponse,

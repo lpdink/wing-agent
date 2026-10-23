@@ -64,7 +64,7 @@ libs/core/wing/
 │   ├── cache_ledger.py              缓存账本 — 分段指纹 / 理论命中率 / 分叉归因 / 端点投影（best-effort 记账）
 │   └── cache_store.py               账本的唯一 SQL 处：cache_call / cache_segment（进程级 wing.db）
 ├── metrics/                         用量统计包（L3）：审计流水 + 会话目录的只读聚合
-│   ├── store.py                     唯一 SQL 处：audit_* / session_catalog 的聚合（窗口 + 8 个维度）
+│   ├── store.py                     唯一 SQL 处：audit_* / session_catalog 的聚合（窗口 + 各维度）
 │   ├── measures.py                  度量词表（11 个整数）+ 行 / 窗口值类型（纯函数）
 │   ├── report.py                    查询编排：窗口 → 各维度的行 → wire 投影
 │   └── catalog.py                   session_catalog 的写入与启动回填（派生投影）
@@ -128,9 +128,9 @@ libs/core/wing/
 ├── commands.py                      prompt 命令：元数据注册表 + $ARGUMENTS 展开（无分发）
 ├── db/                              进程级 SQLite 门面（$WING_HOME/core/wing.db：迁移 + 降级 + 跨线程事务；与 store/ 的会话持久化正交）
 │   ├── database.py                  Database（WAL / user_version 迁移 / 跨线程单连接 + 事务 / 打开失败即降级）
-│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger，v3 = 缓存账本）+ SCHEMA_VERSION
+│   └── migrations.py                MIGRATIONS 可追加 tuple（v1 = 审计三张表，v2 = wake_trigger，v3 = 缓存账本，v4 = audit_user_message + session_catalog）+ SCHEMA_VERSION
 ├── audit/                           审计：事件 → wing.db 的 audit_* 追加行（LLM 调用 / 工具调用 / 压缩 / 用户消息；EventBus 订阅，install() 由组合根显式调用）
-│   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩各一条 INSERT
+│   └── recorder.py                  AuditRecorder — LLM 调用 / 工具调用 / 压缩 / 用户消息各一条 INSERT
 ├── wake/                            会话唤醒（wake_trigger 表 + 事件/时间驱动 + 内置信封；投递经注入的 WakePorts）
 │   ├── spec.py                      spec 语法与时间推进（in/at/every/daily；纯函数）
 │   ├── model.py                     WakeTrigger + 状态/事件常量 + on_events 解析
@@ -156,7 +156,7 @@ libs/core/wing/
     ├── cors.py                      跨源访问装配（默认放通 loopback 来源；外部来源走 gateway.cors.origins）
     ├── frames.py                    出网帧切分（>8 MiB 载荷按 UTF-8 边界切为 ≤16 MiB 帧）
     ├── projection.py                领域 → 协议响应投影（session info / branches）
-    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · wake · errors
+    ├── protocol/                    协议模型包（消费方从包根 import）：ws · session · system · settings · wake · usage · errors
     ├── openapi.py                   OpenAPI 元数据
     ├── workspace/                   只读工作区文件浏览（自含子包，拆 Gateway 可带走）：service · protocol · routes（4 个端点）
     └── routes/                      session(22) · system(6) · settings(4) · wake(3) · usage(1) · tools(1) · health(1) · ws（事件传输 + 上行帧）· _common（取 server / 客户端 id / 会话存在性 / 上传预检的机械样板）
@@ -306,7 +306,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
 | [`docs/dev/backend-layout.md`](docs/dev/backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射（历史记录）、分层守门测试（`test_layering.py`） |
 | [`docs/dev/cache-accounting.md`](docs/dev/cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、账本位置与上界、理论命中率定义、verdict / blame / avoidable 全表（每条结论落到「我能避免 / 该报 bug / 什么都不用做」）、降级与排错手册、回滚 |
-| [`docs/dev/usage.md`](docs/dev/usage.md) | 用量统计：数据来源（`audit_*` + `session_catalog`）、`GET /api/usage` 契约与 8 个维度、11 个度量的口径与可归因性、一天与时区、根/子会话软机制、与 `wing cache` / 会话账本的口径差异、回填与历史起点、增长与保留、已知缺口、排错 |
+| [`docs/dev/usage.md`](docs/dev/usage.md) | 用量统计：数据来源（`audit_*` + `session_catalog`）、`GET /api/usage` 契约与各维度、11 个度量的口径与可归因性、一天与时区、根/子会话软机制、与 `wing cache` / 会话账本的口径差异、回填与历史起点、增长与保留、已知缺口、排错 |
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |

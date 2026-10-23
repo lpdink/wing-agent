@@ -17,6 +17,8 @@ wing/runtime.py — WingRuntime：service 层协调者
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import asyncio
+
 from wing.agent.event_sink import emit_best_effort
 from wing.event import (
     BranchTargetInfo,
@@ -35,7 +37,7 @@ from wing.event import (
 from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
 from wing.context import CacheLedger, empty_report
-from wing.metrics import usage_report
+from wing.metrics import usage_report as build_usage_report
 from wing.event_bus import event_bus
 from wing.config import (
     Config,
@@ -463,7 +465,7 @@ class WingRuntime:
         :meth:`cache_report` 同一条纪律）。异常按 service 层惯例：``ValueError``
         = 输入语义非法，``LookupError`` = 会话在库里没有任何痕迹。
         """
-        return usage_report(
+        return build_usage_report(
             since=since,
             until=until,
             group_by=group_by,
@@ -471,6 +473,14 @@ class WingRuntime:
             tree=tree,
             limit=limit,
         )
+
+    async def backfill_session_catalog(self) -> int:
+        """把磁盘上的存量会话补进用量目录（网关启动后的后台 job 入口）。
+
+        扫会话目录是文件 I/O，整笔在 ``to_thread`` 里跑（与逐出 / 归档 job 同一条
+        纪律：job 体是 runtime 的 async 方法，不是 gateway 直接穿透到 SessionManager）。
+        """
+        return await asyncio.to_thread(self.sm.backfill_session_catalog)
 
     def is_archived(self, session_id: str) -> bool:
         """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""

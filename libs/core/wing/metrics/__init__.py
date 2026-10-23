@@ -20,12 +20,18 @@
 from __future__ import annotations
 
 from wing.metrics.catalog import backfill_catalog, record_session_created
-from wing.metrics.measures import MEASURE_FIELDS, Measures, Row, total
-from wing.metrics.report import GROUP_BY_VALUES, ORIGIN_VALUES, usage_report
-from wing.metrics.store import MetricsStore, Window
+from wing.metrics.measures import MEASURE_FIELDS, Measures, Row, Window, sum_measures
+from wing.metrics.report import (
+    GROUP_BY_VALUES,
+    MAX_LIMIT,
+    ORIGIN_VALUES,
+    usage_report,
+)
+from wing.metrics.store import MetricsStore
 
 __all__ = [
     "GROUP_BY_VALUES",
+    "MAX_LIMIT",
     "MEASURE_FIELDS",
     "ORIGIN_VALUES",
     "Measures",
@@ -34,6 +40,6 @@ __all__ = [
     "Window",
     "backfill_catalog",
     "record_session_created",
-    "total",
+    "sum_measures",
     "usage_report",
 ]

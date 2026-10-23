@@ -23,16 +23,12 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 
-from wing.db import Database, get_database
+from wing.db import DIAGNOSTIC_BUSY_TIMEOUT_MS, Database, get_database
 
-from .measures import Measures
-
-#: 聚合等锁的上限：远短于 ``Database`` 的稳态值（5000）。统计是诊断数据，
-#: 跨进程写锁竞争时宁可丢掉这次读数，也不要让持有进程级锁的时长变成秒级。
-_BUSY_TIMEOUT_MS = 250
+from .measures import MEASURE_FIELDS, Measures, Window
 
 #: ``ts_ms`` 包络相对本地日期边界放宽的天数。上下界各放宽一次，覆盖读写两端
 #: 时区相差（含 DST）的全部合法情况；只影响扫描范围，归属仍由 ``ts`` 判定。
@@ -48,19 +44,35 @@ _SCOPE_TREE = (
     "JOIN tree ON c.parent_session_id = tree.sid) SELECT sid FROM tree)"
 )
 
-#: 每个维度都需要的通用列（``sessions`` 由聚合时的 ``COUNT(DISTINCT)`` 给出）。
-_MEASURE_COLUMNS = (
-    "COUNT(DISTINCT session_id) AS sessions,"
-    " SUM(llm_calls) AS llm_calls,"
-    " SUM(tool_calls) AS tool_calls,"
-    " SUM(tool_errors) AS tool_errors,"
-    " SUM(user_messages) AS user_messages,"
-    " SUM(prompt_tokens) AS prompt_tokens,"
-    " SUM(completion_tokens) AS completion_tokens,"
-    " SUM(cached_tokens) AS cached_tokens,"
-    " SUM(llm_time_ms) AS llm_time_ms,"
-    " SUM(tool_time_ms) AS tool_time_ms"
+#: 摊平流里的**可加列**：度量词表去掉 ``sessions``（去重计数）与
+#: ``sessions_created``（来自会话目录，不在审计流里）。
+_ADDITIVE_COLUMNS: tuple[str, ...] = tuple(
+    name for name in MEASURE_FIELDS if name not in ("sessions", "sessions_created")
 )
+
+
+def _measure_columns(*, not_attributable: tuple[str, ...] = ()) -> str:
+    """聚合列清单（列名 == 度量名）：``sessions`` 去重计数，其余求和。
+
+    ``not_attributable`` 点名的度量在该维度没有事实来源（工具行没有 model 列、
+    模型行没有工具名列），一律 ``0 AS <name>`` —— 0 在这里的含义是「不可归因」，
+    不是「测得 0」。词表只有 :data:`MEASURE_FIELDS` 一处声明，维度差异只在这里
+    以声明的方式出现（可归因性表见 docs/dev/usage.md）。
+    """
+    parts = [
+        "0 AS sessions"
+        if "sessions" in not_attributable
+        else "COUNT(DISTINCT session_id) AS sessions"
+    ]
+    for name in _ADDITIVE_COLUMNS:
+        parts.append(
+            f"0 AS {name}" if name in not_attributable else f"SUM({name}) AS {name}"
+        )
+    return ", ".join(parts)
+
+
+#: 三张审计表摊平后的**全部**度量都可归因（会话 / 天 / 归属 / workspace / 模板）。
+_MEASURE_COLUMNS = _measure_columns()
 
 #: 整段窗口的总量：在摊平流上直接聚合（无 GROUP BY）。
 _TOTALS = f"SELECT {_MEASURE_COLUMNS} FROM ({{contributions}})"
@@ -68,56 +80,52 @@ _TOTALS = f"SELECT {_MEASURE_COLUMNS} FROM ({{contributions}})"
 #: 按天：``day`` 来自摊平流，稠密化由 ``report`` 负责（SQL 只出有数据的天）。
 _BY_DAY = f"SELECT day, {_MEASURE_COLUMNS} FROM ({{contributions}}) GROUP BY day"
 
-#: 按会话：一次拿到 8 个维度里 4 个（session / origin / workspace / agent）的全部素材。
+#: 按会话：一次拿到 7 个维度里 4 个（session / origin / workspace / agent）的全部素材。
 _BY_SESSION = f"""
-SELECT b.session_id AS session_id,
-       cat.parent_session_id AS parent_session_id,
-       cat.workspace AS workspace,
-       cat.template_name AS template_name,
-       b.sessions AS sessions,
-       b.llm_calls AS llm_calls, b.tool_calls AS tool_calls,
-       b.tool_errors AS tool_errors, b.user_messages AS user_messages,
-       b.prompt_tokens AS prompt_tokens, b.completion_tokens AS completion_tokens,
-       b.cached_tokens AS cached_tokens, b.llm_time_ms AS llm_time_ms,
-       b.tool_time_ms AS tool_time_ms
+SELECT b.*, cat.parent_session_id AS parent_session_id,
+       cat.workspace AS workspace, cat.template_name AS template_name
 FROM (SELECT session_id, {_MEASURE_COLUMNS} FROM ({{contributions}}) GROUP BY session_id) b
 LEFT JOIN session_catalog cat ON cat.session_id = b.session_id
 """
 
-#: 按模型：``audit_tool_call`` / ``audit_user_message`` 没有 model 列，工具与用户
-#: 消息侧的度量因此恒为 0（可归因性表见 docs/dev/usage.md）。
-_BY_MODEL = """
-SELECT COALESCE(provider, '') AS provider,
-       model AS model,
-       COUNT(DISTINCT session_id) AS sessions,
-       COUNT(*) AS llm_calls,
-       0 AS tool_calls,
-       0 AS tool_errors,
-       0 AS user_messages,
-       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-       COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
-       COALESCE(SUM(duration_ms), 0) AS llm_time_ms,
-       0 AS tool_time_ms
+#: 模型维度的**单行贡献**：只有 LLM 侧列（工具与用户消息行没有 model 列）。
+_MODEL_CONTRIBUTIONS = """
+SELECT COALESCE(provider, '') AS provider, model AS model,
+       session_id AS session_id, 1 AS llm_calls,
+       prompt_tokens AS prompt_tokens, completion_tokens AS completion_tokens,
+       cached_tokens AS cached_tokens, COALESCE(duration_ms, 0) AS llm_time_ms
 FROM audit_llm_call WHERE {audit}
-GROUP BY provider, model
 """
 
-#: 按工具：反向同理（模型侧的度量恒为 0）。
-_BY_TOOL = """
-SELECT tool_name AS tool_name,
-       COUNT(DISTINCT session_id) AS sessions,
-       0 AS llm_calls,
-       COUNT(*) AS tool_calls,
-       SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS tool_errors,
-       0 AS user_messages,
-       0 AS prompt_tokens,
-       0 AS completion_tokens,
-       0 AS cached_tokens,
-       0 AS llm_time_ms,
-       COALESCE(SUM(duration_ms), 0) AS tool_time_ms
+#: 工具维度的**单行贡献**：只有工具侧列。
+_TOOL_CONTRIBUTIONS = """
+SELECT tool_name AS tool_name, session_id AS session_id, 1 AS tool_calls,
+       CASE WHEN success = 0 THEN 1 ELSE 0 END AS tool_errors,
+       COALESCE(duration_ms, 0) AS tool_time_ms
 FROM audit_tool_call WHERE {audit}
-GROUP BY tool_name
+"""
+
+#: 不可归因的度量：工具 / 用户消息行没有 model 列，模型行没有工具名列。
+_NOT_LLM_MEASURES = ("tool_calls", "tool_errors", "tool_time_ms", "user_messages")
+_NOT_TOOL_MEASURES = (
+    "llm_calls",
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_tokens",
+    "llm_time_ms",
+    "user_messages",
+)
+
+_BY_MODEL = f"""
+SELECT provider, model,
+       {_measure_columns(not_attributable=_NOT_LLM_MEASURES)}
+FROM ({_MODEL_CONTRIBUTIONS}) GROUP BY provider, model
+"""
+
+_BY_TOOL = f"""
+SELECT tool_name,
+       {_measure_columns(not_attributable=_NOT_TOOL_MEASURES)}
+FROM ({_TOOL_CONTRIBUTIONS}) GROUP BY tool_name
 """
 
 _CREATED_BY_DAY = (
@@ -139,13 +147,9 @@ _CREATED_BY_SESSION = (
     "FROM session_catalog WHERE {created} GROUP BY session_id"
 )
 
-_CREATED_BY_WORKSPACE = (
-    "SELECT COALESCE(workspace, '') AS key, COUNT(*) AS created "
-    "FROM session_catalog WHERE {created} GROUP BY key"
-)
-
-_CREATED_BY_TEMPLATE = (
-    "SELECT COALESCE(template_name, '') AS key, COUNT(*) AS created "
+#: 按列分组的会话数（列名来自调用方的封闭取值，不外泄到 SQL 之外）。
+_CREATED_BY_COLUMN = (
+    "SELECT COALESCE({column}, '') AS key, COUNT(*) AS created "
     "FROM session_catalog WHERE {created} GROUP BY key"
 )
 
@@ -158,39 +162,20 @@ _EARLIEST_DAY = (
     " UNION ALL SELECT MIN(substr(created_ts, 1, 10)) FROM session_catalog)"
 )
 
-#: 会话作用域的 404 判据：目录里没有该行**且**审计三表也没有它的任何行。
-_SCOPE_EXISTS = (
-    "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_id = ?)"
-    " OR EXISTS(SELECT 1 FROM audit_llm_call WHERE session_id = ?)"
-    " OR EXISTS(SELECT 1 FROM audit_tool_call WHERE session_id = ?)"
-    " OR EXISTS(SELECT 1 FROM audit_user_message WHERE session_id = ?)"
+#: 会话作用域的 404 判据 = 「这几张表里有没有它的任何一行」。表清单是唯一事实：
+#: 绑定参数的个数由它派生（漏一张表就会静默把所有带会话的请求判成 404）。
+_SCOPE_TABLES: tuple[str, ...] = (
+    "session_catalog",
+    "audit_llm_call",
+    "audit_tool_call",
+    "audit_user_message",
 )
 
-
-@dataclass(frozen=True, slots=True)
-class Window:
-    """一次聚合的时间窗口与作用域（SQL 谓词的唯一素材来源）。"""
-
-    since: date
-    until: date
-    session_id: str | None = None
-    tree: bool = False
-
-    def day_strings(self) -> tuple[str, str]:
-        """``(since, until)`` 的 ``YYYY-MM-DD`` 形式（SQL 谓词与 wire 共用）。"""
-        return self.since.isoformat(), self.until.isoformat()
-
-    def days(self) -> list[str]:
-        """区间内每一天的 ``YYYY-MM-DD``（升序、含首尾；稠密化与行键共用）。"""
-        span = (self.until - self.since).days
-        return [
-            (self.since + timedelta(days=offset)).isoformat()
-            for offset in range(span + 1)
-        ]
-
-    def wire(self) -> dict[str, str]:
-        since, until = self.day_strings()
-        return {"since": since, "until": until}
+_SCOPE_EXISTS = "SELECT 1 FROM ({}) LIMIT 1".format(
+    " UNION ALL ".join(
+        f"SELECT 1 FROM {table} WHERE session_id = ?" for table in _SCOPE_TABLES
+    )
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +207,12 @@ class ToolBucket:
 
 
 def _count(value: Any) -> int:
-    """``COUNT`` / ``SUM`` 的取值：真数值才算数（``bool`` 不是计数，NULL / 怪类型按 0）。"""
+    """``COUNT`` / ``SUM`` 的取值：真数值才算数（``bool`` 不是计数，NULL / 怪类型按 0）。
+
+    与 ``cache_store._is_int`` 的差别只在 ``float``：那边读的是**存储列**（整数列里
+    混进 REAL 就是坏行），这里读的是 ``SUM()`` 的结果——弱类型列里藏一个 REAL 会让
+    整桶求和多出小数位，按 0 丢掉整桶比丢掉那个小数位更糟。
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
     return int(value)
@@ -337,7 +327,9 @@ class MetricsStore:
         return self._database
 
     def _rows(self, sql: str, params: list[Any] | tuple[Any, ...]) -> list[sqlite3.Row]:
-        return self.database().query(sql, params, busy_timeout_ms=_BUSY_TIMEOUT_MS)
+        return self.database().query(
+            sql, params, busy_timeout_ms=DIAGNOSTIC_BUSY_TIMEOUT_MS
+        )
 
     # ── 读 ───────────────────────────────────────
 
@@ -441,15 +433,19 @@ class MetricsStore:
             result[session_id] = result.get(session_id, 0) + _count(row["created"])
         return result
 
-    def created_by_key(self, window: Window, *, dimension: str) -> dict[str, int]:
-        """按 ``workspace`` / ``template_name`` 的新建会话数（空值 → 空串键）。"""
-        template = {
-            "workspace": _CREATED_BY_WORKSPACE,
-            "agent": _CREATED_BY_TEMPLATE,
-        }[dimension]
+    def created_by_workspace(self, window: Window) -> dict[str, int]:
+        """按 workspace 的新建会话数（空值 → 空串键）。"""
+        return self._created_by_column(window, "workspace")
+
+    def created_by_template(self, window: Window) -> dict[str, int]:
+        """按 agent 模板的新建会话数（无模板 → 空串键）。"""
+        return self._created_by_column(window, "template_name")
+
+    def _created_by_column(self, window: Window, column: str) -> dict[str, int]:
         where, params = _created_predicate(window)
+        sql = _CREATED_BY_COLUMN.format(column=column, created=where)
         result: dict[str, int] = {}
-        for row in self._rows(template.format(created=where), params):
+        for row in self._rows(sql, params):
             key = _text(row["key"])
             if key is None:
                 continue
@@ -461,7 +457,12 @@ class MetricsStore:
         rows = self._rows(_EARLIEST_DAY, ())
         return _text(rows[0]["day"]) if rows else None
 
-    def session_exists(self, session_id: str) -> bool:
-        """该 id 是否有任何痕迹（目录行**或**审计行）—— 404 判据，不水合会话。"""
-        rows = self._rows(_SCOPE_EXISTS, (session_id,) * 4)
-        return bool(rows) and _count(rows[0][0]) == 1
+    def has_usage_record(self, session_id: str) -> bool:
+        """该 id 在统计口径上是否有任何痕迹（目录行**或**审计行）—— 404 判据。
+
+        与 ``SessionManager.session_exists`` **不是同一个判据**：那边回答「这个会话
+        现在能不能用」（内存 + 各 store + id 形状），这里回答「统计认识这个 id 吗」
+        （只读库、不水合）。两边在归档会话与刚建的空会话上故意给出不同答案。
+        """
+        rows = self._rows(_SCOPE_EXISTS, (session_id,) * len(_SCOPE_TABLES))
+        return bool(rows)

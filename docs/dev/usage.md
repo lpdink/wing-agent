@@ -54,13 +54,20 @@ GET /api/usage
 ```
 
 - `since=all` = **有记录的第一天**（四张表的 `MIN`）；库完全为空时收敛到 `until`（仍是稠密的一行）。
+`since=all` 取 `min(最早一天, until)`：时钟回拨 / 向西跨时区留下的「记录时刻晚于今天」的行
+不会把这条逃生路径变成 400。显式 `since` 与缺省窗口按请求原样收敛（`day` 的行数 = 跨度天数）。
 - **`day` 是稠密的**：窗口内每天都有一行，空天全 0——热力图直接画，客户端不做日历数学。
 - **`origin` 恰好两行**，顺序固定 `me`（根会话）、`agents`（有父的会话）。
 - **`totals` 永远由独立的全量查询算出**（不依赖被 `limit` 截断的行），是唯一的对账基准；
-  行和 ≠ totals 只发生在「不可归因」（见 §3 表）与「被截断」两种情形。
+  行和 ≠ totals 只发生在「不可归因」（见 §3 表）、「被截断」与 `day` 的 `sessions`（去重计数不可加）
+  三种情形。
+- **同一响应内的两次查询不是同一个快照**：`rows` 与 `totals` 分别读库（只读路径不开事务），
+  两次之间恰好有一笔真实调用落库时，TOTAL 会比明细多/少 1。
 - 给了 `session_id` 时**自身那一行恒存在**（没活动就全 0，且不参与 `limit` 截断——它是
   作用域的锚点）；子孙行只出有活动的。
 - **不水合会话**：整条路径只读库，不 resume、不建会话、不发事件。
+- **库降级**（`wing.db` 打不开）：聚合全零、行仍稠密、端点照常 200；带 `session_id` 也**不**判
+  404——「读不到」不是「不存在」。
 - 状态码：语义非法（未知 `group_by` / 日期格式 / `since > until` / `tree` 没配 `session_id` /
   会话 id 词法非法）→ **400**；未知会话（目录里没有**且**审计表也没有它的任何行）→ **404**；
   `limit` 越界 → **422**（FastAPI 约束）；空数据永远 **200**。
@@ -87,7 +94,11 @@ GET /api/usage
 |---|---|---|
 | `model` | `tool_calls` / `tool_errors` / `tool_time_ms` / `user_messages` / `sessions_created` | `audit_tool_call` 与 `audit_user_message` 没有 model 列 |
 | `tool` | `llm_calls` / `prompt_tokens` / `completion_tokens` / `cached_tokens` / `llm_time_ms` / `sessions_created` | `audit_llm_call` 没有工具名列 |
-| 其余 6 个维度 | — | 全部 11 个都可归因（`day` / `session` / `origin` / `workspace` / `agent`） |
+| 其余 5 个维度 | — | 全部 11 个都可归因（`day` / `session` / `origin` / `workspace` / `agent`） |
+
+边界：**没有会话归属的审计行只进 `totals`**（`audit_llm_call.session_id` 允许 NULL）。两条发射点
+都强制带会话，因此今天只可能是手改库造成的；那时 `origin` / `session` / `workspace` / `agent`
+的行和会比 `totals` 少这几行。
 
 `model` 的 key 是 **`<provider>/<model>` 复合键**（provider 名不含 `/`）：同名跨 provider 真实
 存在（同一个调用名被两个 provider 声明），只按调用名合并会算错。`label` = 配置里的展示名
@@ -139,10 +150,11 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 | `log` | `history.jsonl` 首条记录的 `ts` | 毫秒 | 有历史、id 不自带时间的会话 |
 | `meta` | `metadata.last_interaction` | 微秒，但语义是「最后一次互动」 | 兜底 |
 
-三档都拿不到就**跳过**（不发明时间，下一次回填再试）。回填是差集语义（只补「磁盘上有、
-目录里没有」的会话），因此在 `BackgroundScheduler` 上首轮启动即跑、此后每天一轮——周期跑
-等于一次自愈（运行期被拷进来的会话目录也能进目录）。归档区也扫，父 / fork 源从归档目录自己的
-`metadata.json` 读（归档索引不存这两列）。
+三档都拿不到就**跳过**（不发明时间，下一次回填再试）。**写**是差集语义（只补「磁盘上有、
+目录里没有」的会话），**读**却是全目录扫描（每个会话一次 `metadata.json`；本机 1000 会话
+≈ 40ms）——因此在 `BackgroundScheduler` 上首轮启动即跑、此后每天一轮：周期跑等于一次自愈
+（运行期被拷进来的会话目录也能进目录），代价是每天几十毫秒的后台线程工作。归档区也扫，
+父 / fork 源从归档目录自己的 `metadata.json` 读（归档索引不存这两列）。
 
 ## 6. 与其它账本的口径差异（**不是 bug**）
 
@@ -177,5 +189,5 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 | 今天的格子是 0，但明明跑过对话 | `SELECT * FROM audit_llm_call ORDER BY id DESC LIMIT 5` 有没有今天的行；`wing.db` 是否降级（`core/logs` 里一行 `wing.db disabled`）；`ts` 与 `ts_ms` 是否同一时区口径 |
 | `sessions_created` 全是 0 | `SELECT count(*) FROM session_catalog`：为 0 说明回填没跑（网关启动后第一个 tick）或库降级；`created_source` 缺失档位说明会话目录里没有可用时间 |
 | `origin` 全是 `me` | 子会话创建时没带 `parent_session_id`（软机制，CLI 从 `WING_SESSION_ID` 填）；`SELECT session_id, parent_session_id FROM session_catalog` 里有没有非空 |
-| 端点 404 但会话明明存在 | 404 判据是「目录里没有**且**审计表没有」——刚建的空会话在第一轮回填前可能两边都没有；等一个 tick 或看 `session_catalog` |
+| 端点 404 但会话明明存在 | 404 判据是「目录里没有**且**审计表没有」。本特性之后新建的会话在创建时**同步**写目录行，不会命中这一档；命中的只有**存量**会话里「id 不自带时间戳 + 没有 history + 没有 `last_interaction`」的那批（回填跳过了它们）。`SELECT count(*) FROM session_catalog WHERE session_id = '<id>'` 一看即知 |
 | 与服务端 `info` 的 usage 对不上 | 见 §6 第三行（两条账本，口径不同） |

@@ -17,7 +17,6 @@ import json
 import socket
 import sys
 from datetime import datetime, timezone
-from functools import partial
 from typing import Any
 
 from fastapi import WebSocket
@@ -372,13 +371,9 @@ class GatewayServer:
         self._background.add_job(
             "session-catalog",
             CATALOG_BACKFILL_INTERVAL_SECONDS,
-            partial(self._run_catalog_backfill, runtime),
+            runtime.backfill_session_catalog,
             initial_delay_seconds=0,
         )
-
-    async def _run_catalog_backfill(self, runtime: WingRuntime) -> None:
-        """job 体：回填在 ``to_thread`` 里跑（扫会话目录是文件 I/O，不占事件循环）。"""
-        await asyncio.to_thread(runtime.sm.backfill_session_catalog)
 
     @property
     def uptime(self) -> int:

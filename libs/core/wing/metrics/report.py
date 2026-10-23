@@ -1,7 +1,7 @@
 # wing/metrics/report.py — 用量聚合的查询编排（时间窗口 + 维度 → wire dict）
 """``/api/usage`` 的唯一编排层：**校验 → 取数 → 投影**（不写 SQL、不碰传输层）。
 
-八个维度是同一组度量的不同切法，因此共用一条「先摊平、再分桶」的骨架
+各个维度是同一组度量的不同切法，因此共用一条「先摊平、再分桶」的骨架
 （见 :mod:`wing.metrics.store`）：
 
 - ``day``：稠密（窗口内每天都有一行，空天全 0）——热力图直接画，消费方不做日历数学；
@@ -19,14 +19,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from wing.common.utils import validate_session_id
-from wing.config import Config, get_config
-from wing.config.models import resolve_model_display_name
+from wing.config import Config, get_config, resolve_model_display_name
 
-from .measures import Measures, Row, total
-from .store import MetricsStore, Window
+from .measures import Measures, Row, Window, sum_measures
+from .store import MetricsStore
 
 #: ``group_by`` 的取值域（顺序即文档与报错文案的顺序）。
 GROUP_BY_VALUES: tuple[str, ...] = (
@@ -85,9 +84,14 @@ def usage_report(
     scope = validate_session_id(session_id) if session_id is not None else None
 
     metrics = MetricsStore()
-    window = _resolve_window(since, until, scope, tree, metrics)
-    if scope is not None and not metrics.session_exists(scope):
+    window = _resolve_window(since, until, scope=scope, tree=tree, metrics=metrics)
+    if (
+        scope is not None
+        and metrics.database().ready
+        and not metrics.has_usage_record(scope)
+    ):
         # 0 是一个读数，「打错了 id」不是——静默给全 0 会让调用方以为这个会话没花钱。
+        # 库降级时不判：读不到 ≠ 不存在（端点照常 200 + 全零）。
         raise LookupError(f"session not found: {scope!r}")
 
     rows, truncated = _rows(metrics, window, group_by, limit)
@@ -109,17 +113,26 @@ def usage_report(
 def _resolve_window(
     since: str | None,
     until: str | None,
+    *,
     scope: str | None,
     tree: bool,
     metrics: MetricsStore,
 ) -> Window:
-    """把两个日期字符串解析成闭区间（``since=all`` 取库里最早的那一天）。"""
+    """把两个日期字符串解析成闭区间。
+
+    ``since=all`` 取库里最早的一天（= 稠密行从有数据处开始）。时钟回拨 / 向西跨时区
+    会留下「记录时刻晚于读端今天」的行，所以 ``all`` 取 ``min(最早一天, until)``：
+    这条逃生路径（「范围内没活动 → try --since all」）绝不变成 400。
+
+    显式 ``since`` 与缺省窗口都按请求原样收敛：``day`` 的行数 = 跨度天数，是消费方
+    （热力图要固定格子）的语义，不因数据少而缩短。
+    """
     end = _parse_day(until, field="until") if until is not None else date.today()
     if since is None:
         start = end - timedelta(days=DEFAULT_RANGE_DAYS)
     elif since.strip().lower() == "all":
         earliest = metrics.earliest_day()
-        start = _parse_day(earliest, field="since") if earliest is not None else end
+        start = min(_parse_day(earliest, field="since"), end) if earliest else end
     else:
         start = _parse_day(since, field="since")
     if start > end:
@@ -178,11 +191,16 @@ def _origin_rows(metrics: MetricsStore, window: Window) -> list[Row]:
     """恰两行、顺序固定：``me``（根会话）在前、``agents``（有父的会话）在后。"""
     buckets = metrics.by_session(window)
     created_me, created_agents = metrics.created_by_origin(window)
-    me = total([b.measures for b in buckets if b.parent_session_id is None])
-    agents = total([b.measures for b in buckets if b.parent_session_id is not None])
+    me = sum_measures([b.measures for b in buckets if b.parent_session_id is None])
+    agents = sum_measures(
+        [b.measures for b in buckets if b.parent_session_id is not None]
+    )
     return [
-        Row(key="me", measures=replace(me, sessions_created=created_me)),
-        Row(key="agents", measures=replace(agents, sessions_created=created_agents)),
+        Row(key=ORIGIN_VALUES[0], measures=replace(me, sessions_created=created_me)),
+        Row(
+            key=ORIGIN_VALUES[1],
+            measures=replace(agents, sessions_created=created_agents),
+        ),
     ]
 
 
@@ -215,14 +233,20 @@ def _session_rows(
     return kept, truncated
 
 
-def _key_rows(metrics: MetricsStore, window: Window, dimension: str) -> list[Row]:
+def _key_rows(
+    metrics: MetricsStore, window: Window, dimension: Literal["workspace", "agent"]
+) -> list[Row]:
     """按 ``workspace`` / ``agent`` 分桶（空值 → 空串键）。
 
     行 = 「有审计活动的会话所在的桶」∪「窗口内建过会话的桶」：只在窗口内新建、
     还没有任何活动的会话也占一行（只有 ``sessions_created``），否则
     ``--by workspace`` 会在「刚建的会话」上静默少一行。
     """
-    created = metrics.created_by_key(window, dimension=dimension)
+    created = (
+        metrics.created_by_workspace(window)
+        if dimension == "workspace"
+        else metrics.created_by_template(window)
+    )
     groups: dict[str, list[Measures]] = {}
     for bucket in metrics.by_session(window):
         key = (
@@ -233,7 +257,7 @@ def _key_rows(metrics: MetricsStore, window: Window, dimension: str) -> list[Row
         Row(
             key=key,
             measures=replace(
-                total(groups.get(key, [])), sessions_created=created.get(key, 0)
+                sum_measures(groups.get(key, [])), sessions_created=created.get(key, 0)
             ),
         )
         for key in groups.keys() | created.keys()

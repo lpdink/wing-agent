@@ -1,5 +1,6 @@
 # wing/metrics/measures.py — 用量聚合的领域值类型（无 I/O、无 SQL）
-"""聚合结果的两个值类型：:class:`Measures`（一行度量）与 :class:`Row`（一个桶）。
+"""聚合结果的三个值类型：:class:`Measures`（一行度量）、:class:`Row`（一个桶）、
+:class:`Window`（时间窗口 + 会话作用域）。
 
 ``Measures`` 是**唯一的度量词表**：11 个整数、缺省 0、永不省略。“缺省 0”不是
 “测量得 0”的同义词——某一维度上不可归因的度量也填 0（例如工具行没有 model 列，
@@ -13,6 +14,7 @@ tool_time_ms`` 一律由消费方算（与全仓既有口径一致——线格�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 #: 度量的字段名（顺序即 wire 上 ``Measures`` 的声明顺序；测试据此对账协议模型）。
 MEASURE_FIELDS: tuple[str, ...] = (
@@ -68,7 +70,7 @@ class Measures:
         return dict(zip(MEASURE_FIELDS, self.astuple()))
 
 
-def total(measures: list[Measures]) -> Measures:
+def sum_measures(measures: list[Measures]) -> Measures:
     """一组度量的和（空列表 → 全零）。"""
     out = Measures()
     for item in measures:
@@ -99,3 +101,29 @@ class Row:
             "parent_session_id": self.parent_session_id,
             **self.measures.wire(),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class Window:
+    """一次聚合的时间窗口与作用域（SQL 谓词与稠密化的共同素材）。"""
+
+    since: date
+    until: date
+    session_id: str | None = None
+    tree: bool = False
+
+    def day_strings(self) -> tuple[str, str]:
+        """``(since, until)`` 的 ``YYYY-MM-DD`` 形式（SQL 谓词与 wire 共用）。"""
+        return self.since.isoformat(), self.until.isoformat()
+
+    def days(self) -> list[str]:
+        """区间内每一天的 ``YYYY-MM-DD``（升序、含首尾；稠密化与行键共用）。"""
+        span = (self.until - self.since).days
+        return [
+            (self.since + timedelta(days=offset)).isoformat()
+            for offset in range(span + 1)
+        ]
+
+    def wire(self) -> dict[str, str]:
+        since, until = self.day_strings()
+        return {"since": since, "until": until}

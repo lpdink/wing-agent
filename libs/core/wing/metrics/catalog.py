@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from wing.common.logger import log
+from wing.common.utils import parse_session_id_time
 from wing.db import Database, get_database
 from wing.store import SessionStore
 
@@ -35,10 +36,6 @@ INSERT OR IGNORE INTO session_catalog (
 """
 
 _KNOWN_IDS = "SELECT session_id FROM session_catalog"
-
-#: id 前缀的时间形态（与 ``common.utils.generate_session_id`` 的默认形态同源）。
-_ID_TIME_FORMAT = "%Y%m%d-%H%M%S"
-_ID_TIME_CHARS = 15
 
 
 def _stamp(moment: datetime) -> tuple[int, str]:
@@ -161,7 +158,7 @@ def _created_at(
     store: SessionStore, candidate: _Candidate
 ) -> tuple[tuple[int, str], str] | None:
     """创建时刻 + 它的精度来源（``id`` / ``log`` / ``meta``）；都没有 → ``None``。"""
-    from_id = _parse_id_time(candidate.session_id)
+    from_id = parse_session_id_time(candidate.session_id)
     if from_id is not None:
         return _stamp(from_id), "id"
     if candidate.live:
@@ -176,14 +173,6 @@ def _created_at(
         if from_meta is not None:
             return _stamp(from_meta), "meta"
     return None
-
-
-def _parse_id_time(session_id: str) -> datetime | None:
-    """id 前缀 ``YYYYMMDD-HHMMSS`` → 本地 naive 时间；不自带时间戳的 id → None。"""
-    try:
-        return datetime.strptime(session_id[:_ID_TIME_CHARS], _ID_TIME_FORMAT)
-    except ValueError:
-        return None
 
 
 def _log_start(store: SessionStore, session_id: str) -> datetime | None:
