@@ -6,7 +6,7 @@
 
 - :mod:`wing.metrics.store` 是**唯一**握有这两组表 SQL 的地方（常量 SQL + 位置绑定 +
   坏行丢弃）；
-- :mod:`wing.metrics.measures` 是度量的唯一词表（11 个整数 + 两个值类型，纯函数）；
+- :mod:`wing.metrics.measures` 是度量的唯一词表（11 个整数 + 三个值类型，纯函数）；
 - :mod:`wing.metrics.report` 是查询编排（窗口 → 各维度的行 → 线格式），不写 SQL、
   不 import ``gateway``；
 - :mod:`wing.metrics.catalog` 是**写侧**：会话目录行的采集与启动回填（目录是派生投影，

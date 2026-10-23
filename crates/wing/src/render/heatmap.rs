@@ -34,6 +34,8 @@ const TIER_MIX: [f64; 4] = [0.25, 0.5, 0.75, 1.0];
 /// 相邻月份标签的起点至少隔 2 个格子（= 4 个显示列）：标签宽 3 列，于是两标签之间
 /// 永远至少空 1 列，不会挤成一坨。
 const MONTH_SLOT_GAP: usize = 2;
+/// 图例的可见宽度：`gutter + "less " + 5 格 + 4 个分隔 + " more"`（每个字形都是 1 个显示列）。
+const LEGEND_WIDTH: usize = GUTTER + 5 + 5 + 4 + 5;
 /// 裁掉左侧格子时占位的那一列。
 const ELISION: char = '…';
 const MONTH_NAMES: [&str; 12] = [
@@ -205,9 +207,7 @@ impl Heatmap<'_> {
     ///
     /// 固定宽度的一句话：窄到装不下就整行不画（半截图例比没有更误导）。
     fn legend_line(&self, shown: usize, marker: bool) -> String {
-        /// `less ` + 5 格 + 4 个分隔 + ` more`（每个字形都是 1 个显示列）。
-        const PLAIN_WIDTH: usize = GUTTER + 5 + 5 + 4 + 5;
-        if self.width < PLAIN_WIDTH {
+        if self.width < LEGEND_WIDTH {
             return String::new();
         }
         let cells: Vec<(char, Option<Color>)> = (0..5)
@@ -230,12 +230,10 @@ impl Heatmap<'_> {
             " ".repeat(GUTTER),
             join_cells(&cells, self.ink.is_some())
         );
-        // 与格子行同宽（等宽是本模块的契约；尾部空格在终端上看不见）。
+        // 与格子行同宽（等宽是本模块的契约；尾部空格在终端上看不见）。宽度按**可见**列算：
+        // 有色态下 `text` 里混着 SGR 序列，字符数会比显示列多。
         let grid = grid_width(shown, marker);
-        format!(
-            "{text}{}",
-            " ".repeat(grid.saturating_sub(visible_chars(&text)))
-        )
+        format!("{text}{}", " ".repeat(grid.saturating_sub(LEGEND_WIDTH)))
     }
 }
 
@@ -257,11 +255,6 @@ fn cell_row_width(slots: usize) -> usize {
 /// 整块热力图的显示宽度（gutter + 格子区）。
 fn grid_width(slots: usize, marker: bool) -> usize {
     GUTTER + cell_row_width(slots + usize::from(marker))
-}
-
-/// 一串纯文本的显示列数（这里只有 ASCII 与单列字形，字符数即列数）。
-fn visible_chars(text: &str) -> usize {
-    text.chars().count()
 }
 
 /// 行标签（`Mon` / `Wed` / `Fri` / `Sun`），其余行留空。
@@ -293,9 +286,6 @@ fn tier_of(value: i64, thresholds: &[i64; 3]) -> usize {
 }
 
 /// 两色之间按 `t`（0..=1）线性混色；任一侧不是 RGB 时退回 `accent`（主题色本身）。
-///
-/// `ui::shimmer::mix` 是同一份线性数学的另一份（依赖方向 `ui → render`，所以那边用不了
-/// 这里）：要合并得把原语下移到 `render`，那之前两处的 doc 互相点名。
 fn mix(surface: Color, accent: Color, t: f64) -> Color {
     let (Some((sr, sg, sb)), Some((ar, ag, ab))) = (rgb(surface), rgb(accent)) else {
         return accent;
@@ -381,18 +371,20 @@ mod tests {
         assert!(lines.lines[7].starts_with("  Sun"));
     }
 
-    /// 范围外 = 空格；范围内没活动 = `·`。两者不能同形。
+    /// 窗口外与窗口内的安静日同为 0 档 `·`（区别读标题里的范围，格子必须占满自己的槽位）。
     #[test]
     fn quiet_days_and_days_outside_the_window_share_the_lightest_cell() {
-        let lines = render("2026-10-19", "2026-10-25", &[(date("2026-10-20"), 7)]);
+        // 窗口从周三起：周一、周二是**窗口外**，周三有读数，其余安静。
+        let lines = render("2026-10-21", "2026-10-25", &[(date("2026-10-21"), 7)]);
         assert_eq!(lines.columns, 1);
         let rows = rows(&lines.lines);
-        assert_eq!(rows[1], "░", "周二有活动：{rows:?}");
-        // 周三..周日：窗口内、没活动。
-        assert_eq!(rows[2], "·", "{rows:?}");
-        assert_eq!(rows[6], "·", "{rows:?}");
-        // 周一在窗口内、同样没活动。
+        assert_eq!(rows[2], "░", "周三有活动：{rows:?}");
+        // 窗口外（周一 / 周二）也是 `·`，不是空格——空格会让行首缩进、整张图错位。
         assert_eq!(rows[0], "·", "{rows:?}");
+        assert_eq!(rows[1], "·", "{rows:?}");
+        // 窗口内、没活动。
+        assert_eq!(rows[3], "·", "{rows:?}");
+        assert_eq!(rows[6], "·", "{rows:?}");
     }
 
     /// 布局契约（渲染契约，不是视觉偏好）：**每一行共用同一个 gutter 与同一套格子槽位**。

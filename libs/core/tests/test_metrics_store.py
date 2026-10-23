@@ -365,9 +365,12 @@ class TestToolDimension:
         assert bash["tool_errors"] == 1
         assert bash["sessions"] == 1
         assert bash["tool_time_ms"] == 60
-        # 模型侧的度量不可归因
+        # 模型侧与用户消息侧都不可归因（工具行没有 model 列、也没有用户消息列）
         assert bash["llm_calls"] == 0
         assert bash["prompt_tokens"] == 0
+        assert bash["user_messages"] == 0
+        # 目录事实不在 `_measure_columns` 里：只有 5 个维度由 report 注入，tool 维恒 0
+        assert bash["sessions_created"] == 0
 
     def test_totals_stay_whole_event_when_rows_are_limited(self) -> None:
         for name in ("Bash", "Edit", "Grep", "Read"):
@@ -622,6 +625,27 @@ class TestDefaultsAndAll:
         report = _report(since="all", until=UNTIL)
         assert report["range"]["data_since"] == TODAY.isoformat()
         assert report["range"]["since"] == "2025-01-02"
+
+    def test_the_earliest_day_agrees_with_the_text_minimum(self) -> None:
+        """`since=all` 的起点与 `MIN(substr(ts,1,10))` 同值（索引友好写法不改口径）。
+
+        反向也钉住：`session_catalog` 的回填可以比流水早得多，`earliest_day` 要把它算进来。
+        """
+        seed_llm_call("a", local_time(TWO_DAYS_AGO, hour=23), prompt=1)
+        seed_user_message("b", local_time(YESTERDAY, hour=1))
+        record_session_created("catalog-only")
+
+        database = get_database()
+        expected = database.query(
+            "SELECT MIN(d) AS day FROM ("
+            "SELECT MIN(substr(ts, 1, 10)) AS d FROM audit_llm_call"
+            " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_tool_call"
+            " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message"
+            " UNION ALL SELECT MIN(substr(created_ts, 1, 10)) FROM session_catalog)"
+        )[0]["day"]
+
+        assert MetricsStore().earliest_day() == expected
+        assert expected == TWO_DAYS_AGO.isoformat()
 
     def test_data_since_agrees_with_the_text_minimum(self) -> None:
         """`ORDER BY ts_ms LIMIT 1` 与 `MIN(substr(ts,1,10))` 必须给出同一天。

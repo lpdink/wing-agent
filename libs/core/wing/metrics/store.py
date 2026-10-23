@@ -154,12 +154,21 @@ _CREATED_BY_COLUMN = (
 )
 
 #: 「有记录的第一天」：四张表各自的最早日，取最小（无数据 → NULL）。
+#:
+#: 与 :data:`_EARLIEST_AUDIT_DAY` 同一形状：每张表 ``ORDER BY <ms 列> LIMIT 1`` 走索引，
+#: 而不是 ``MIN(substr(ts, 1, 10))`` 的全扫描——``since=all`` 是 ``wing info`` 每次请求都
+#: 走的路径。时钟回拨留下的「``ts`` 更早但 ``ts_ms`` 更晚」的行上两种写法可能差一天，这里
+#: 取 ``ts_ms``（写入时刻）：它是索引列，也与 ``audit_*`` 的其它窗口过滤同源。
 _EARLIEST_DAY = (
     "SELECT MIN(d) AS day FROM ("
-    "SELECT MIN(substr(ts, 1, 10)) AS d FROM audit_llm_call"
-    " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_tool_call"
-    " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message"
-    " UNION ALL SELECT MIN(substr(created_ts, 1, 10)) FROM session_catalog)"
+    "SELECT (SELECT substr(ts, 1, 10) FROM audit_llm_call"
+    " ORDER BY ts_ms LIMIT 1) AS d"
+    " UNION ALL SELECT (SELECT substr(ts, 1, 10) FROM audit_tool_call"
+    " ORDER BY ts_ms LIMIT 1)"
+    " UNION ALL SELECT (SELECT substr(ts, 1, 10) FROM audit_user_message"
+    " ORDER BY ts_ms LIMIT 1)"
+    " UNION ALL SELECT (SELECT substr(created_ts, 1, 10) FROM session_catalog"
+    " ORDER BY created_at_ms LIMIT 1))"
 )
 
 #: 「审计流水从哪天起」：只看三张 ``audit_*``（``session_catalog`` 的回填可以早得多，
@@ -240,20 +249,15 @@ def _text(value: Any) -> str | None:
 
 
 def _measures(row: sqlite3.Row, *, sessions_created: int = 0) -> Measures:
-    """一行聚合 → :class:`Measures`（列名即字段名，见 ``_MEASURE_COLUMNS``）。"""
-    return Measures(
-        sessions=_count(row["sessions"]),
-        sessions_created=sessions_created,
-        user_messages=_count(row["user_messages"]),
-        llm_calls=_count(row["llm_calls"]),
-        tool_calls=_count(row["tool_calls"]),
-        tool_errors=_count(row["tool_errors"]),
-        prompt_tokens=_count(row["prompt_tokens"]),
-        completion_tokens=_count(row["completion_tokens"]),
-        cached_tokens=_count(row["cached_tokens"]),
-        llm_time_ms=_count(row["llm_time_ms"]),
-        tool_time_ms=_count(row["tool_time_ms"]),
-    )
+    """一行聚合 → :class:`Measures`（列名即字段名，见 ``_MEASURE_COLUMNS``）。
+
+    键集取自 :data:`MEASURE_FIELDS`（加一个度量只改词表）；``sessions_created`` 是唯一
+    不由聚合列给出的字段（它来自会话目录）。
+    """
+    values: dict[str, int] = {
+        name: _count(row[name]) for name in MEASURE_FIELDS if name != "sessions_created"
+    }
+    return Measures(sessions_created=sessions_created, **values)
 
 
 def _ms_envelope(window: Window) -> tuple[int, int]:
@@ -342,6 +346,13 @@ class MetricsStore:
     def database(self) -> Database:
         """本仓储读的那条连接（``database`` 参数只给测试 / 显式装配用）。"""
         return self._database
+
+    def is_available(self) -> bool:
+        """库可用吗（``wing.db`` 打不开时整条读路径降级为全零）。
+
+        404 判据要用它：库降级时「读不到」不等于「不存在」，不能据此回 ``not_found``。
+        """
+        return self._database.ready
 
     def _rows(self, sql: str, params: list[Any] | tuple[Any, ...]) -> list[sqlite3.Row]:
         return self.database().query(

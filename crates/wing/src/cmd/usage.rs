@@ -58,7 +58,9 @@ pub(crate) const MAX_LIMIT: u32 = 200;
 
 /// 仪表盘 MODEL 表取前几行（「谁最贵」只需要榜首几名）。
 const DASHBOARD_MODEL_ROWS: u32 = 5;
-/// `--since` / `--until` 的取值域（报错文案与 `--help` 共用同一份说法）。
+/// `--since` / `--until` 的取值域，用于参数闸门的报错文案。
+///
+/// `--help` 里有一份独立副本（clap 的 doc 注释），改取值域时两处都要改。
 const WHEN_FORMS: &str = "all | today | yesterday | <N>d | <N>w | <N>m | <N>y | YYYY-MM-DD";
 
 /// `-w` 的刷新间隔（与 `wing ps -w` 一致）。
@@ -517,18 +519,23 @@ fn format_dashboard(
 
     let mut out_text = String::new();
     // 周数说窗口横跨多少周，裁掉时再补一句实际画了几列（两个数字相同就不补）。
-    let range_text = format!(
-        "{} → {} · {}{}",
-        since.format("%Y-%m-%d"),
-        until.format("%Y-%m-%d"),
-        weeks_text(heat.total),
-        if heat.truncated() {
-            format!(" (last {} shown)", heat.columns)
-        } else {
-            String::new()
-        },
-    );
-    out_text.push_str(&title_line("WING USAGE", &range_text, width));
+    let shown = if heat.truncated() {
+        format!(" (last {} shown)", heat.columns)
+    } else {
+        String::new()
+    };
+    let weeks = weeks_text(heat.total);
+    // 窄终端从宽到窄逐级退让：整段范围 → 只留终点 → 只留周数，保证标题不折行。
+    let rights = [
+        format!(
+            "{} → {} · {weeks}{shown}",
+            since.format("%Y-%m-%d"),
+            until.format("%Y-%m-%d")
+        ),
+        format!("→ {} · {weeks}{shown}", until.format("%Y-%m-%d")),
+        format!("{weeks}{shown}"),
+    ];
+    out_text.push_str(&title_line("WING USAGE", &rights, width));
     out_text.push('\n');
 
     if let Some(note) = empty_note(day) {
@@ -552,7 +559,7 @@ fn format_dashboard(
         .iter()
         .filter_map(|row| {
             let date = parse_day(&row.key).ok()?;
-            Some((date, row.measures.is_active()))
+            Some((date, row.measures.has_flow()))
         })
         .collect();
     flags.sort_by_key(|(date, _)| *date);
@@ -581,7 +588,7 @@ fn format_dashboard(
     if today >= since
         && today <= until
         && let Some(row) = day.row(&today.format("%Y-%m-%d").to_string())
-        && row.measures != UsageMeasures::default()
+        && row.measures.has_flow()
     {
         out_text.push('\n');
         out_text.push_str(&format!(
@@ -598,7 +605,7 @@ fn format_dashboard(
     Ok(out_text)
 }
 
-/// `TODAY   34 messages · 6 sessions · ↑ 1.36B in (99% cached) · ↓ 4.8M out · work 20h 00m`
+/// `TODAY   34 messages · 6 sessions · ↑ 1.4G in (99% cached) · ↓ 4.8M out · work 20h 00m`
 fn today_text(measures: &UsageMeasures) -> String {
     format!(
         "{} {} · {} {} · ↑ {} in{} · ↓ {} out · work {}",
@@ -991,7 +998,7 @@ fn cache_text(measures: &UsageMeasures) -> String {
     }
 }
 
-/// 一次调用的平均耗时：`840ms` / `6.8s` / `2m 05s`；没有调用 → `—`。
+/// 一次调用的平均耗时：`840ms` / `6.8s` / `2m`；没有调用 → `—`。
 ///
 /// 秒档保留一位小数：整数除法会把 6.8s 印成 `6s`，而「平均耗时」正是要比较的量。
 fn avg_time(total_ms: i64, calls: i64) -> String {
@@ -1091,7 +1098,8 @@ fn streak_stats(days: &[(NaiveDate, bool)], today: NaiveDate) -> (usize, usize, 
 
 /// 空态的一句话：完全没有数据 vs 窗口内没活动，是两种不同的结论。
 fn empty_note(report: &UsageResponse) -> Option<&'static str> {
-    if report.totals != UsageMeasures::default() {
+    // 只看流水：窗口内建过会话（`sessions_created`）不算「有数据」。
+    if report.totals.has_flow() {
         return None;
     }
     Some(if report.range.data_since.is_some() {
@@ -1108,12 +1116,19 @@ fn parse_day(raw: &str) -> Result<NaiveDate> {
 }
 
 /// 标题行：左标题、右范围（宽度够就右对齐，不够就一个空格隔开）。
-fn title_line(left: &str, right: &str, width: usize) -> String {
-    let used = left.chars().count() + right.chars().count();
-    match width.checked_sub(used) {
-        Some(pad) if pad >= 2 => format!("{left}{}{right}", " ".repeat(pad)),
-        _ => format!("{left}  {right}"),
+fn title_line(left: &str, rights: &[String], width: usize) -> String {
+    for right in rights {
+        let used = left.chars().count() + right.chars().count();
+        if let Some(pad) = width.checked_sub(used)
+            && pad >= 2
+        {
+            return format!("{left}{}{right}", " ".repeat(pad));
+        }
     }
+    // 一种都装不下：留左标题 + 最短的那种，裁到预算内（绝不越过终端宽度）。
+    let right = rights.last().map(String::as_str).unwrap_or_default();
+    let budget = width.saturating_sub(left.chars().count() + 2);
+    format!("{left}  {}", right.chars().take(budget).collect::<String>())
 }
 
 fn text_cell(text: String, color: ratatui::style::Color) -> PlainCell {
@@ -1533,6 +1548,20 @@ mod tests {
         let busy = report("day", vec![], measures(1, 1, 0));
         assert_eq!(empty_note(&busy), None);
 
+        // 只有目录事实（窗口内建过会话、没有流水）→ 仍然是「没有数据」。
+        let catalog_only = report(
+            "day",
+            vec![],
+            UsageMeasures {
+                sessions_created: 3,
+                ..UsageMeasures::default()
+            },
+        );
+        assert!(
+            empty_note(&catalog_only).is_some(),
+            "`sessions_created` 是目录事实，不是读数"
+        );
+
         // 空态只打标题 + 一句话，不打空表。
         let text = format_dashboard(
             &virgin,
@@ -1573,8 +1602,14 @@ mod tests {
         assert!(text.contains("2 messages"), "{text}");
         assert!(text.contains("(99% cached)"), "{text}");
 
-        // 今天在窗口内但一笔流水都没有 → 不打印这一行。
-        day.rows = vec![row(&key, UsageMeasures::default())];
+        // 今天在窗口内但只建过会话（`sessions_created`）→ 不打印这一行。
+        day.rows = vec![row(
+            &key,
+            UsageMeasures {
+                sessions_created: 2,
+                ..UsageMeasures::default()
+            },
+        )];
         day.totals = measures(1_000, 10, 990);
         let text = format_dashboard(
             &day,
@@ -1604,54 +1639,80 @@ mod tests {
 
     #[test]
     fn every_dimension_shows_its_own_columns_and_a_total_row() {
-        for (dim, headers) in [
-            (
-                Dim::Day,
-                vec![
-                    "DATE", "ACTIVE", "MSGS", "LLM", "TOOLS", "IN", "CACHE", "OUT", "TIME",
-                ],
-            ),
-            (
-                Dim::Model,
-                vec!["MODEL", "PROVIDER", "CALLS", "IN", "CACHE", "OUT"],
-            ),
-            (
-                Dim::Session,
-                vec![
-                    "SESSION", "TITLE", "WHO", "MSGS", "CALLS", "IN", "CACHE", "OUT",
-                ],
-            ),
-            (Dim::Tool, vec!["TOOL", "CALLS", "ERR", "AVG"]),
-            (
-                Dim::Workspace,
-                vec!["WORKSPACE", "SESSIONS", "CALLS", "IN", "OUT"],
-            ),
-            (Dim::Agent, vec!["AGENT", "SESSIONS", "CALLS", "IN", "OUT"]),
-            (
-                Dim::Origin,
-                vec![
-                    "WHO",
-                    "CREATED",
-                    "ACTIVE",
-                    "MSGS",
-                    "LLM CALLS",
-                    "TOOL CALLS",
-                    "IN",
-                    "CACHE",
-                    "OUT",
-                ],
-            ),
-        ] {
-            let text = detail(
-                dim,
+        // 表头唯一来源是 `detail_columns`：加一列只改生产代码，测试跟着走。
+        for dim in Dim::ALL {
+            let columns = detail_columns(dim);
+            let headers: Vec<&str> = columns.iter().map(|c| c.header.as_str()).collect();
+            assert!(!headers.is_empty(), "{dim:?} 没有列");
+
+            let report = report(
+                dim.as_str(),
                 vec![row("k", measures(1_000, 10, 990))],
                 measures(1_000, 10, 990),
             );
-            for header in headers {
+            let plan = Plan::resolve(&opts()).unwrap();
+            let text = format_detail(&report, dim, &plan, None, &ThemePalette::default(), &out());
+            for header in &headers {
                 assert!(text.contains(header), "{dim:?} 缺列 {header}：\n{text}");
             }
             assert!(text.contains("TOTAL"), "{dim:?} 缺 TOTAL：\n{text}");
+
+            // 数据行与 TOTAL 行的格子数必须等于列数（`debug_assert` 只在 debug 生效）。
+            let mut cells = detail_row(dim, &report.rows[0], "", None, &ThemePalette::default());
+            assert_eq!(cells.len(), columns.len(), "{dim:?} 数据行");
+            cells = detail_total(dim, &report, &ThemePalette::default());
+            assert_eq!(cells.len(), columns.len(), "{dim:?} TOTAL 行");
         }
+    }
+
+    /// 窄终端裁列时标题必须自己说清楚画了几列（`total` 已加、除法已删，这条钉文案）。
+    #[test]
+    fn a_narrow_dashboard_says_how_many_weeks_are_shown() {
+        // 42 周窗口 + 60 列：热力图装不下，标题退到「→ until · N weeks (last N shown)」。
+        let mut day = report(
+            "day",
+            vec![row("2026-01-05", measures(1_100_000, 40_000, 1_000_000))],
+            measures(1_100_000, 40_000, 1_000_000),
+        );
+        day.range.since = "2026-01-05".into();
+        day.range.until = "2026-10-25".into();
+        day.range.data_since = None;
+        let origin = report("origin", vec![], measures(1_100_000, 40_000, 1_000_000));
+        let model = report("model", vec![], measures(1_100_000, 40_000, 1_000_000));
+        let narrow = TableOutput {
+            width: 60,
+            color: false,
+        };
+        let text = format_dashboard(
+            &day,
+            &origin,
+            &model,
+            Metric::Tokens,
+            &ThemePalette::default(),
+            &narrow,
+        )
+        .unwrap();
+        let title = text.lines().next().unwrap();
+        assert!(title.chars().count() <= 60, "标题不越宽度：{title:?}");
+        assert!(title.contains("42 weeks"), "窗口跨 42 周：{title}");
+        let shown: usize = title
+            .split("(last ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or_else(|| panic!("缺 (last N shown)：{title:?}"));
+        // 与真正画出来的格子数对账（第一行格子：去掉 gutter 后的非空格字符数）。
+        let first_grid_row = text
+            .lines()
+            .find(|line| line.starts_with("  ") && line.contains(['·', '░', '▒', '▓', '█']))
+            .expect("a grid row");
+        // 只数档位字形：裁剪时最左那一格是 `…` 标记，不是一列。
+        let cells = first_grid_row
+            .chars()
+            .skip(INDENT.len() + 6)
+            .filter(|ch| matches!(ch, '·' | '░' | '▒' | '▓' | '█'))
+            .count();
+        assert_eq!(shown, cells, "标题里的列数必须等于画出来的列数：{title:?}");
     }
 
     #[test]
@@ -1837,10 +1898,15 @@ mod tests {
     }
 
     #[test]
-    fn the_title_line_right_aligns_and_degrades_on_a_narrow_terminal() {
-        assert_eq!(title_line("A", "B", 10), "A        B");
-        assert_eq!(title_line("A", "B", 3), "A  B");
-        assert_eq!(title_line("A", "B", 0), "A  B");
+    fn the_title_line_right_aligns_and_falls_back_to_a_shorter_variant() {
+        let rights = ["AAAA BBBB".to_string(), "BBBB".to_string()];
+        assert_eq!(title_line("A", &rights, 12), "A  AAAA BBBB");
+        // 装不下时退到下一级，仍然右对齐。
+        assert_eq!(title_line("A", &rights, 8), "A   BBBB");
+        // 一种都装不下：裁到宽度内，绝不越界。
+        let narrow = title_line("A", &rights, 4);
+        assert_eq!(narrow, "A  B");
+        assert!(narrow.chars().count() <= 4, "{narrow:?}");
     }
 
     #[test]

@@ -1557,7 +1557,7 @@ mod tests {
         assert_eq!(resp.rows[0].label, None);
         assert_eq!(resp.rows[0].measures.llm_calls, 156);
         assert_eq!(resp.rows[0].measures.tokens(), 1_245_600);
-        assert!(resp.rows[0].measures.is_active());
+        assert!(resp.rows[0].measures.has_flow());
         assert!(!resp.truncated);
 
         let recorded = server.recorded();

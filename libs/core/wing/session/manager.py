@@ -36,7 +36,7 @@ from wing.common.utils import (
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.media import file_too_large_message, upload_image_ref
-from wing.metrics.catalog import backfill_catalog, record_session_created
+from wing.metrics import backfill_catalog, record_session_created
 from wing.event import (
     DeliveredEvent,
     EventTarget,

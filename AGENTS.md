@@ -63,12 +63,12 @@ libs/core/wing/
 │   ├── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关；加载期采 src 事实）
 │   ├── cache_ledger.py              缓存账本 — 分段指纹 / 理论命中率 / 分叉归因 / 端点投影（best-effort 记账）
 │   └── cache_store.py               账本的唯一 SQL 处：cache_call / cache_segment（进程级 wing.db）
-├── metrics/                         用量统计包（L3）：审计流水 + 会话目录的只读聚合
+├── metrics/                         用量统计包（L3）：审计流水 + 会话目录的聚合（`store` 读、`catalog` 写）
 │   ├── store.py                     唯一 SQL 处：audit_* / session_catalog 的聚合（窗口 + 各维度）
 │   ├── measures.py                  度量词表（11 个整数）+ 行 / 窗口值类型（纯函数）
 │   ├── report.py                    查询编排：窗口 → 各维度的行 → wire 投影
 │   └── catalog.py                   session_catalog 的写入与启动回填（派生投影）
-├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 未来 dreaming 等）
+├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 自动归档 / 会话目录回填）
 ├── config/                          配置包：Config 模型 + WING_HOME 解析（公共 API 经 __init__ re-export）
 │   ├── models.py                    配置模型 + resolve_model_capabilities / resolve_model_display_name
 │   ├── spec.py                      声明层：S(...) / SettingMeta / ApplyScope（字段元信息唯一来源）

@@ -726,9 +726,17 @@ pub struct UsageMeasures {
 }
 
 impl UsageMeasures {
-    /// 一个桶上「有活动」吗（任一审计事实非零）。
-    pub fn is_active(&self) -> bool {
-        self.sessions > 0 || self.user_messages > 0 || self.llm_calls > 0 || self.tool_calls > 0
+    /// 这个桶有**审计流水**吗（十个流水度量任一非零）。
+    ///
+    /// `sessions_created` **不参与**：它来自 `session_catalog`（派生投影 + 启动回填），是
+    /// 目录事实而不是流水读数。任何新建会话都会让它非零，因此拿整结构比较「是否全零」会把
+    /// 「只建过会话、还没说过话」误判成「有读数」（`wing info` 的 `—` 降级、仪表盘 TODAY
+    /// 的零行抑制、首次运行空态、`tree:` 行的存在性都吃这一条）。
+    pub fn has_flow(&self) -> bool {
+        UsageMeasures {
+            sessions_created: 0,
+            ..*self
+        } != UsageMeasures::default()
     }
 
     /// 这个桶消耗的 token（`prompt + completion`，含缓存重发）——排序与热力图的口径。
@@ -758,23 +766,6 @@ impl UsageMeasures {
             cached_tokens: self.cached_tokens - other.cached_tokens,
             llm_time_ms: self.llm_time_ms - other.llm_time_ms,
             tool_time_ms: self.tool_time_ms - other.tool_time_ms,
-        }
-    }
-
-    /// 11 个度量逐项相加（行求和用）。
-    pub fn add(&self, other: &UsageMeasures) -> UsageMeasures {
-        UsageMeasures {
-            sessions: self.sessions + other.sessions,
-            sessions_created: self.sessions_created + other.sessions_created,
-            user_messages: self.user_messages + other.user_messages,
-            llm_calls: self.llm_calls + other.llm_calls,
-            tool_calls: self.tool_calls + other.tool_calls,
-            tool_errors: self.tool_errors + other.tool_errors,
-            prompt_tokens: self.prompt_tokens + other.prompt_tokens,
-            completion_tokens: self.completion_tokens + other.completion_tokens,
-            cached_tokens: self.cached_tokens + other.cached_tokens,
-            llm_time_ms: self.llm_time_ms + other.llm_time_ms,
-            tool_time_ms: self.tool_time_ms + other.tool_time_ms,
         }
     }
 }
@@ -3045,23 +3036,22 @@ mod settings_tests {
         assert!(resp.rows.is_empty());
         assert!(!resp.truncated);
 
-        let sums = UsageMeasures {
-            sessions: 1,
-            llm_calls: 2,
+        let busy = UsageMeasures {
             prompt_tokens: 10,
+            completion_tokens: 6,
             ..UsageMeasures::default()
-        }
-        .add(&UsageMeasures {
-            sessions: 3,
-            llm_calls: 4,
-            prompt_tokens: 5,
-            completion_tokens: 1,
-            ..UsageMeasures::default()
-        });
-        assert_eq!(sums.sessions, 4);
-        assert_eq!(sums.llm_calls, 6);
-        assert_eq!(sums.tokens(), 16);
-        assert!(sums.is_active());
-        assert!(!UsageMeasures::default().is_active(), "全零 = 没活动");
+        };
+        assert_eq!(busy.tokens(), 16);
+        assert!(busy.has_flow());
+        assert!(!UsageMeasures::default().has_flow(), "全零 = 没有流水");
+        // `sessions_created` 是目录事实：只有它非零时不算「有流水」。
+        assert!(
+            !UsageMeasures {
+                sessions_created: 1,
+                ..UsageMeasures::default()
+            }
+            .has_flow(),
+            "只建过会话不算读过数"
+        );
     }
 }

@@ -25,7 +25,7 @@ from ._common import get_server
 if TYPE_CHECKING:
     from wing.gateway.server import GatewayServer
 
-router = APIRouter()
+router = APIRouter(tags=["usage"])
 
 _GROUP_BY_TEXT = ", ".join(GROUP_BY_VALUES)
 

@@ -100,9 +100,10 @@ pub fn tokens_capacity(n: u64) -> String {
 
 /// 工作量记法：`20h 00m` / `34m` / `12s`（毫秒进、人类记法出）。
 ///
-/// 与两处**墙钟**记法分工不同，别混用：`cmd/exit_summary.rs::fmt_duration`（会话墙钟，
-/// 分钟档带秒）与 `cmd/status.rs`（网关 uptime，小时档不带补齐的 00 分）。工时是账本
-/// 里的累计毫秒，只到分钟。
+/// 与几处更紧凑的时长记法分工不同，别混用：`cmd/exit_summary.rs::fmt_duration`（会话
+/// 墙钟，分钟档带秒）、`cmd/status.rs`（网关 uptime，小时档不带补齐的 00 分）、
+/// `util/osc9.rs::fmt_duration`（桌面通知，`{m}m{s:02}s`，没有小时档）。工时是账本里的
+/// 累计毫秒，只到分钟。
 pub fn work_time(ms: i64) -> String {
     let secs = ms.max(0) / 1_000;
     let (hours, minutes) = (secs / 3_600, (secs % 3_600) / 60);

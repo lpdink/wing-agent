@@ -81,7 +81,7 @@ GET /api/usage
 |---|---|---|
 | `sessions` | 桶内有 ≥1 条审计事实（LLM / 工具 / 用户消息）的**不同**会话数 | 空会话不计（TUI 启动即建的空会话不是「用过」）；**跨天不可加**（同一会话两天各算 1，合计仍算 1） |
 | `sessions_created` | `session_catalog.created_at` 落在桶内的会话数 | 含回填的历史会话（精度见 §5） |
-| `user_messages` | `user_message_accepted` 事件数 | 含编排方投递与唤醒信封——**不是**「我亲手打的字」；比 `role=user` 消息多（steer 注入 / 一轮合并输入逐条计） |
+| `user_messages` | `user_message_accepted` 事件数 | 含编排方投递与唤醒信封——**不是**「我亲手打的字」；比 `role=user` 消息多（steer 注入 / 一轮合并输入逐条计）。`wing info` 的 `messages:` 是**账本优先**的两源合并口径（§10），与 `--by` 的 `MSGS` 列不是同一个数 |
 | `llm_calls` | `audit_llm_call` 行数 | 一次「带 usage 帧的调用」；重试重放会多算（与账本同口径） |
 | `tool_calls` | `audit_tool_call` 行数 | 只含**真实执行**：中断合成结果 / 参数非法 / 未知工具两条短路**不落行** |
 | `tool_errors` | `success = 0` 的行数 | 只覆盖工具抛错 / 超时；`Bash` 非零退出码也算（success = 退出码 0），所以 `grep` 无匹配也算失败 |
@@ -96,8 +96,12 @@ GET /api/usage
 | group_by | 不可归因（恒 0） | 原因 |
 |---|---|---|
 | `model` | `tool_calls` / `tool_errors` / `tool_time_ms` / `user_messages` / `sessions_created` | `audit_tool_call` 与 `audit_user_message` 没有 model 列 |
-| `tool` | `llm_calls` / `prompt_tokens` / `completion_tokens` / `cached_tokens` / `llm_time_ms` / `sessions_created` | `audit_llm_call` 没有工具名列 |
+| `tool` | `llm_calls` / `prompt_tokens` / `completion_tokens` / `cached_tokens` / `llm_time_ms` / `user_messages` / `sessions_created` | `audit_llm_call` 没有工具名列；`audit_user_message` 也没有 |
 | 其余 5 个维度 | — | 全部 11 个都可归因（`day` / `session` / `origin` / `workspace` / `agent`） |
+
+> `sessions_created` 不属于上面这套「不可归因」机制：它根本不由 `_measure_columns` 生成
+> （那是审计流的列），只有 `day` / `session` / `origin` / `workspace` / `agent` 五个维度在
+> `report` 里按会话目录注入；`model` / `tool` 两维恒 0。
 
 边界：**没有会话归属的审计行只进 `totals`**（`audit_llm_call.session_id` 允许 NULL）。两条发射点
 都强制带会话，因此今天只可能是手改库造成的；那时 `origin` / `session` / `workspace` / `agent`
@@ -143,6 +147,12 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 
 - **token / 调用统计从审计上线（`wing.db` v1 建库）起算**：本期**不回填**历史 token 流水
   （旧的 `metrics.json` / `history.jsonl` 导入是一条可选项，不在本期）。
+- **消息流水比 token 流水更晚**：`audit_user_message` 是迁移 v4 才有的表，升级的库在升级时刻
+  之前没有任何用户消息行；仪表盘那句「audit starts …」取三张 `audit_*` 里最早的一天，因此在
+  消息这条轴上偏乐观——`wing info` 的 `messages:` 走账本正是为了兜住这一段。
+- **`since=all` 的起点按 `ts_ms` 判最早**（每张表 `ORDER BY ts_ms LIMIT 1`，走 `idx_*_ts`
+  索引）：时钟回拨会留下「`ts` 更早但 `ts_ms` 更晚」的行，两种写法在这种乱序上可能差一天；
+  这里取 `ts_ms`（写入时刻），因为它是索引列、且与 `audit_*` 的其它窗口过滤同源。
 - **计数类指标从第一天就是完整的**：`session_catalog` 的启动回填补齐磁盘上的存量会话。
   创建时刻按可靠性三档标注 `created_source`：
 
@@ -251,21 +261,26 @@ GitHub 同款思想），0 档画 `·`。有颜色时格子统一 `█`，档位
 **`wing info <sid>`** 的 `usage:` 块与 `wing usage --session <sid>` 同源
 （一次 `since=all&group_by=session&session_id=<sid>&tree=true&limit=200`）：自身行是前四行，
 `tree:` 行取**响应里的 `totals` 减自身行**（`totals` 不被 `limit` 截断，所以子孙超过 200
-也照样完整；行和不是这个用途）。没有子孙（`totals == 自身行`）时不打印 `tree:`。
-取不到端点 → 整块静默省略；**自身**流水全 0 → 一行
+也照样完整；行和不是这个用途）。子孙**没有流水**时不打印 `tree:`——判定用「流水度量」（`sessions_created`
+不算，见 §3 的那个注：只建过会话的子孙不是读数）。
+取不到端点 → 整块静默省略；**自身没有流水**（十个流水度量全 0；`sessions_created` 不算）→ 一行
 `usage:  —  (no audit flow; ledger: …)` 回落到会话账本（`SessionInfoResponse.usage`），
 此时若子孙有流水，`tree:` 行照常跟在后面——**不写一排 0**（`0` 是一个读数）。
 
 `messages:` 这一行**优先读会话账本**（同一份 `info` 响应里的 `usage.user_messages`），
 账本没有 / 为 0 才回退到审计流水，两者都没有写 `—`。原因：`audit_user_message` 是随用量
 统计新加的表，存量会话的流水是 0，而账本从第一天就在记——只读流水会把「说过 7 条消息」
-显示成 0。其余三行（`calls` / `tokens` / `time`）仍只读流水：它们没有等价的账本口径
-（账本的 `llm_calls` 只覆盖 ReAct 循环内调用、不含旁路）。
+显示成 0。其余三行（`calls` / `tokens` / `time`）仍只读流水——不是因为账本口径更窄（账本与
+审计消费**同一条** `LLMCallMetricsEvent`），而是因为账本会**丢读数**：它 10s 节流落盘（非优雅
+退出丢最后一个窗口）、memory 后端根本不落盘、建账前的历史不在里面。账本的用途是「单会话账本
++ 退出摘要」，流水的用途是「历史事实」，两处各读各的源才不会互相污染。
 
 ### 10.1 与 `wing cache` / 会话账本的读数为什么不同
 
 同一份数据、三种窗口，见 §6。`wing usage` 与 `wing info` 的用量块读的都是**审计流水**
-（lifetime、全库口径），所以这两处数字永远一致；它们与 TUI 状态栏 / 退出摘要
+（lifetime、全库口径），因此**除 `messages` 一行外**两处数字永远一致；`messages` 是刻意的
+例外：`wing info` 那一行账本优先（§10 的解释），而 `wing usage --by session` 的 `MSGS` 列只读
+流水。它们与 TUI 状态栏 / 退出摘要
 （会话账本 `metadata.usage`）、`wing cache`（每会话最近 ≤200 次调用的滚动窗口 + 理论命中率）
 不同是设计使然。
 

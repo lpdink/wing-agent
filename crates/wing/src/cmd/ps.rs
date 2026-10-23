@@ -142,10 +142,13 @@ impl InfoUsage {
             .map(|row| row.measures.clone())
             .unwrap_or_default();
         let totals = &report.totals;
-        let tree = (totals != &own).then(|| {
+        // 子孙有流水才有 `tree:` 行：`totals - 自身行` 里 `sessions_created` 只会来自
+        // 目录（回填的存量会话 / 新建的空会话），那不算读数。
+        let rest = totals.sub(&own);
+        let tree = rest.has_flow().then(|| {
             // `sessions` 是去重计数：作用域内除了自身，剩下的都是子孙。
-            let sessions = totals.sessions - i64::from(own.is_active());
-            (sessions, totals.sub(&own))
+            let sessions = totals.sessions - i64::from(own.has_flow());
+            (sessions, rest)
         });
         InfoUsage { own, tree }
     }
@@ -490,7 +493,7 @@ fn print_session_info(info: &SessionInfoResponse, usage: Option<&InfoUsage>) {
 /// 账本（`SessionInfoResponse.usage`），否则「没有读数」会被读成「一次都没用过」。
 fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> String {
     let own = &block.own;
-    if *own == UsageMeasures::default() {
+    if !own.has_flow() {
         // 自身没有流水（老会话 / 审计上线前建的）：写一排 0 会被读成「一次都没用过」。
         let note = ledger
             .filter(|ledger| ledger.turns > 0 || ledger.llm_calls > 0 || ledger.tool_calls > 0)
@@ -1340,6 +1343,22 @@ mod tests {
         }
     }
 
+    /// `own + child` 的合计（端点的 `totals` 就是这个形状；生产侧从不由行相加得出）。
+    fn subtree_measures() -> UsageMeasures {
+        UsageMeasures {
+            sessions: 2,
+            user_messages: 34,
+            llm_calls: 156,
+            tool_calls: 210,
+            prompt_tokens: 5_800_000,
+            completion_tokens: 225_600,
+            cached_tokens: 936_000,
+            llm_time_ms: 6_000_000,
+            tool_time_ms: 2_040_000,
+            ..UsageMeasures::default()
+        }
+    }
+
     #[test]
     fn the_usage_block_reads_the_own_row_and_the_subtree_total() {
         let report = usage_report(
@@ -1347,7 +1366,7 @@ mod tests {
                 usage_row("sid", None, own_measures()),
                 usage_row("child", Some("sid"), child_measures()),
             ],
-            own_measures().add(&child_measures()),
+            subtree_measures(),
         );
         let block = InfoUsage::from_report(&report, "sid");
         let text = format_usage_block(&block, None);
@@ -1468,6 +1487,36 @@ mod tests {
         );
     }
 
+    /// 只有目录事实（`sessions_created`）的会话不是「有读数」：`—` 降级必须可达，
+    /// 子树的 `tree:` 行也不能因为「目录里多了一行」就冒出来。
+    #[test]
+    fn a_catalog_only_row_is_not_a_reading() {
+        let catalog_only = UsageMeasures {
+            sessions_created: 1,
+            ..UsageMeasures::default()
+        };
+        let ledger = SessionUsage {
+            turns: 12,
+            user_messages: 7,
+            prompt_tokens: 1_200_000,
+            completion_tokens: 45_000,
+            ..SessionUsage::default()
+        };
+        let report = usage_report(
+            vec![usage_row("sid", None, catalog_only.clone())],
+            catalog_only,
+        );
+        let block = InfoUsage::from_report(&report, "sid");
+        assert!(block.tree.is_none(), "目录行不是子孙流水");
+        let text = format_usage_block(&block, Some(&ledger));
+        assert!(
+            text.starts_with(&format!("usage:  {NONE_MARK}")),
+            "只建过会话 → 走 `—` 降级：\n{text}"
+        );
+        assert!(!text.contains("calls:"), "不打一排 0：\n{text}");
+        assert!(text.contains("ledger: 12 turns"), "回落到账本：\n{text}");
+    }
+
     /// 子树汇总取 `totals`（不被 `limit` 截断），不靠把返回的行加起来：
     /// 子孙超过 200 时「行和」会静默偏小。
     #[test]
@@ -1478,12 +1527,18 @@ mod tests {
                 usage_row("child", Some("sid"), child_measures()),
             ],
             // 250 个子孙的完整汇总（行只回来了 1 个）。
-            totals: own_measures().add(&UsageMeasures {
-                sessions: 250,
-                prompt_tokens: 4_600_000_000,
-                completion_tokens: 180_000_000,
+            totals: UsageMeasures {
+                sessions: 251,
+                user_messages: 34,
+                llm_calls: 156,
+                tool_calls: 210,
+                prompt_tokens: 4_601_200_000,
+                completion_tokens: 180_045_600,
+                cached_tokens: 936_000,
+                llm_time_ms: 6_000_000,
+                tool_time_ms: 2_040_000,
                 ..UsageMeasures::default()
-            }),
+            },
             truncated: true,
             ..UsageResponse::default()
         };

@@ -87,7 +87,7 @@ def usage_report(
     window = _resolve_window(since, until, scope=scope, tree=tree, metrics=metrics)
     if (
         scope is not None
-        and metrics.database().ready
+        and metrics.is_available()
         and not metrics.has_usage_record(scope)
     ):
         # 0 是一个读数，「打错了 id」不是——静默给全 0 会让调用方以为这个会话没花钱。
@@ -169,9 +169,15 @@ def _rows(
         return _cut(_rank(_tool_rows(metrics, window), by_tokens=False), limit)
     if group_by == "session":
         return _session_rows(metrics, window, limit)
-    dimension = "workspace" if group_by == "workspace" else "agent"
-    rows = _key_rows(metrics, window, dimension)
-    return _cut(_rank(rows, by_tokens=True), limit)
+    if group_by in ("workspace", "agent"):
+        dimension: Literal["workspace", "agent"] = (
+            "workspace" if group_by == "workspace" else "agent"
+        )
+        rows = _key_rows(metrics, window, dimension)
+        return _cut(_rank(rows, by_tokens=True), limit)
+    # `group_by` 已在 `usage_report` 里对 `GROUP_BY_VALUES` 校验过；走到这里说明有人加了
+    # 维度却忘了在这里分支——明确炸掉，而不是静默当成 `agent`。
+    raise AssertionError(f"unhandled group_by: {group_by!r}")
 
 
 def _day_rows(metrics: MetricsStore, window: Window) -> list[Row]:
