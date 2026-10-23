@@ -177,8 +177,10 @@ async fn query(
 /// 它没花钱）与**网关还没有这个路由**。带作用域时才需要区分——再发一次**不带作用域**的
 /// 同一查询：它也 404 说明连路由都没有（不嗅探 `detail` 文案，文案会变）。
 ///
-/// 「会话不存在」只在**探测自己成功**（200 = 端点可用）时才成立：探测本身失败
-/// （网络 / 5xx / 超时）什么也证明不了，原样报原始错误。
+/// 「会话不存在」只在**探测自己回答 200**（端点确实可用）时才给：探测本身失败
+/// （网络 / 5xx / 超时）什么也证明不了，原样报原始错误。残余误判仍有一条：作用域那次
+/// 查询在服务端读库失败（等锁超时 / 磁盘错）也会落到 404，而 CLI 分辨不了——见
+/// `docs/dev/usage.md` §2 的降级口径。
 async fn diagnose(
     http: &GatewayApiClient,
     plan: &Plan,
@@ -201,7 +203,7 @@ async fn diagnose(
     match query(http, &probe, dim, limit).await {
         Ok(_) => classify(error, Some(session_id)),
         Err(probe_error) if is_missing_route(&probe_error) => classify(*probe_error, None),
-        Err(_) => anyhow::anyhow!("{error}"),
+        Err(_) => error.into(),
     }
 }
 
@@ -753,9 +755,11 @@ fn format_detail(
     out: &TableOutput,
 ) -> String {
     let mut text = String::new();
-    // 空态只在窗口里真的一行都没有时成立：后端会把「只建过会话」这类计数算成行，
-    // 吞掉它们既不诚实，`--since all` 也补不出流水。
-    if report.rows.is_empty()
+    // 空态 = 窗口里一件事实都没有：排行类维度靠 `rows` 就能看出来，稠密维度（`day`
+    // 每天一行、`origin` 恒两行）的零行永远非空——只看 `rows` 会把首跑打成一整窗
+    // 全零的表，还附一句「建过会话」的假话。
+    let nothing = !report.totals.has_flow() && report.totals.sessions_created == 0;
+    if (report.rows.is_empty() || nothing)
         && let Some(note) = empty_note(report)
     {
         text.push_str(note);
@@ -783,8 +787,8 @@ fn format_detail(
     if report.truncated {
         text.push_str(&format!("… more {} (raise --limit)\n", dim.as_str()));
     }
-    // 有行、但十个流水度量全 0：说清楚这一窗只有目录事实（换窗口也补不出流水）。
-    if !report.totals.has_flow() {
+    // 有行、但十个流水度量全 0：这一窗只有目录事实（换窗口也补不出流水）。
+    if !report.totals.has_flow() && report.totals.sessions_created > 0 {
         text.push_str("only sessions created in this range (no flow yet)\n");
     }
     text
@@ -1676,6 +1680,22 @@ mod tests {
             "No activity in this range (try --since all).\n"
         );
 
+        // 稠密维度的零行不是「有数据」（`day` 每天一行、`origin` 恒两行）：
+        // 首跑不该被画成一整窗全零的表，更不该附「建过会话」那句话。
+        let zero = row("2026-08-03", UsageMeasures::default());
+        assert_eq!(
+            detail(Dim::Day, vec![zero.clone()], UsageMeasures::default()),
+            "No activity in this range (try --since all).\n"
+        );
+        assert_eq!(
+            detail(
+                Dim::Origin,
+                vec![zero.clone(), zero],
+                UsageMeasures::default()
+            ),
+            "No activity in this range (try --since all).\n"
+        );
+
         // 有流水 → 表尾那句不出现。
         let busy = detail(
             Dim::Day,
@@ -1683,29 +1703,6 @@ mod tests {
             measures(1_000, 10, 990),
         );
         assert!(!busy.contains("only sessions created"), "{busy}");
-    }
-
-    #[tokio::test]
-    async fn a_failed_probe_is_not_read_as_a_missing_session() {
-        // 探测请求自己失败（指向一个没人监听的回环端口）时什么也证明不了：原样报原始错误。
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener); // 关掉即无人监听（端口刚被内核分配过，不会被别人瞬占）
-        let http = GatewayApiClient::new(format!("http://{addr}"), None).unwrap();
-        let mut opts = opts();
-        opts.session = Some("ghost".into());
-        let plan = Plan::resolve(&opts).unwrap();
-        let not_found = ApiClientError::Api {
-            status: 404,
-            detail: "not found".into(),
-            body: None,
-        };
-
-        let message = diagnose(&http, &plan, None, None, not_found)
-            .await
-            .to_string();
-        assert!(!message.contains("session not found"), "{message}");
-        assert!(message.contains("404"), "{message}");
     }
 
     #[test]
@@ -2015,5 +2012,49 @@ mod tests {
         )
         .to_string();
         assert!(boom.contains("boom"), "{boom}");
+    }
+
+    /// 一个只回 500 的最小 HTTP 桩（探测请求自己失败的一种），返回它的 base URL。
+    ///
+    /// 用桩而不是「bind 后 drop」：后者靠端口不会被别人瞬占，是概率性假设。
+    fn spawn_500_stub() -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\
+                      Connection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_is_not_read_as_a_missing_session() {
+        // 探测请求自己失败（这里是 5xx）什么也证明不了：原样报原始错误，
+        // 不能反过来断言「这个会话不存在」。
+        let http = GatewayApiClient::new(spawn_500_stub(), None).unwrap();
+        let mut opts = opts();
+        opts.session = Some("ghost".into());
+        let plan = Plan::resolve(&opts).unwrap();
+        let not_found = ApiClientError::Api {
+            status: 404,
+            detail: "Not Found".into(),
+            body: None,
+        };
+
+        let message = diagnose(&http, &plan, None, None, not_found)
+            .await
+            .to_string();
+        // 原样带出端点的错误（探测失败之后什么也不能断言）。
+        assert!(message.starts_with("API error (404)"), "{message}");
+        assert!(!message.contains("session not found"), "{message}");
     }
 }
