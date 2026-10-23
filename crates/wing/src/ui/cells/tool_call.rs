@@ -17,7 +17,6 @@
 //!   Truncated — head/tail with ellipsis (Bash, ReadImage, fallback)
 //!   Failed    — always truncated to 50 chars
 
-use std::cell::Cell;
 use std::time::Instant;
 
 use ratatui::style::Color;
@@ -403,11 +402,6 @@ pub struct ToolCallBlock {
     /// Write: file content preview. Edit: new_string preview.
     /// Mutually exclusive per tool — a block is never both Write and Edit.
     pub stream_highlight: Option<WriteHighlightCache>,
-    /// The syntax theme the last render used. `apply_args` runs without a
-    /// `CellContext` (args stream in before the frame), so it highlights with
-    /// the theme the previous frame saw — the palette can only change between
-    /// frames, and the next delta rebuilds the cache under the new theme.
-    syntax: Cell<SyntaxTheme>,
     /// Edit streaming: old_string lines (rendered red, no highlight).
     edit_old_lines: Vec<String>,
     /// TodoWrite streaming: partial todo list parsed from streaming args.
@@ -444,7 +438,6 @@ impl ToolCallBlock {
             timer_anchor: TimerAnchor::Execution,
             timer_frozen_secs: None,
             stream_highlight: None,
-            syntax: Cell::new(SyntaxTheme::Dark),
             edit_old_lines: Vec::new(),
             todo_stream: None,
             args_buffer: String::new(),
@@ -468,7 +461,6 @@ impl ToolCallBlock {
             timer_anchor: TimerAnchor::Execution,
             timer_frozen_secs: None,
             stream_highlight: None,
-            syntax: Cell::new(SyntaxTheme::Dark),
             edit_old_lines: Vec::new(),
             todo_stream: None,
             args_buffer: String::new(),
@@ -544,7 +536,7 @@ impl ToolCallBlock {
     /// flush and refresh the streaming caches. Returns whether a parse ran
     /// (i.e. the cell's rendered content may have changed) so the caller
     /// can invalidate its render cache exactly once per frame.
-    pub fn flush_pending_args(&mut self) -> bool {
+    pub fn flush_pending_args(&mut self, syntax: SyntaxTheme) -> bool {
         if !self.args_dirty {
             return false;
         }
@@ -555,7 +547,7 @@ impl ToolCallBlock {
             obj @ serde_json::Value::Object(_) => obj,
             _ => serde_json::Value::Object(serde_json::Map::new()),
         };
-        self.apply_args(args);
+        self.apply_args(args, syntax);
         #[cfg(test)]
         {
             self.args_parse_count += 1;
@@ -619,7 +611,7 @@ impl ToolCallBlock {
     }
 
     /// Shared args application: refresh streaming caches, store args.
-    fn apply_args(&mut self, args: serde_json::Value) {
+    fn apply_args(&mut self, args: serde_json::Value, syntax: SyntaxTheme) {
         match self.tool_name.as_str() {
             constants::TOOL_WRITE => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -629,7 +621,7 @@ impl ToolCallBlock {
                         self.stream_highlight.take(),
                         path,
                         content,
-                        self.syntax.get(),
+                        syntax,
                     );
                 }
             }
@@ -660,7 +652,7 @@ impl ToolCallBlock {
                         self.stream_highlight.take(),
                         path,
                         new_string,
-                        self.syntax.get(),
+                        syntax,
                     );
                 }
             }
@@ -674,7 +666,6 @@ impl ToolCallBlock {
 
     /// Render to lines.
     pub fn to_lines(&self, palette: &ThemePalette, max_output: usize) -> Vec<Line<'static>> {
-        self.syntax.set(palette.syntax);
         let renderer = ToolRenderer::from_name(&self.tool_name);
         let status = self.status;
         // Three registers on the header line: the bullet carries the status
@@ -1035,7 +1026,7 @@ mod tests {
     /// the two steps separately.
     fn stream_args(block: &mut ToolCallBlock, fragment: &str) {
         block.append_args_fragment(fragment);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
     }
 
     /// The header's three registers, pinned: status-colored bullet, the tool
@@ -1657,7 +1648,7 @@ mod tests {
         // boundary — nothing is visible to readers until the flush.
         block.append_args_fragment(r#"{"command": "ls"#);
         assert!(block.args_dirty);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         assert!(!block.args_dirty);
         let text = lines_text(&block.to_lines(&p(), 10));
         assert!(
@@ -1666,7 +1657,7 @@ mod tests {
         );
 
         block.append_args_fragment(r#" -la"}"#);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         assert_eq!(block.tool_args["command"], "ls -la");
     }
 
@@ -1682,13 +1673,16 @@ mod tests {
         }
         assert_eq!(block.args_parse_count, 0, "appends must not parse");
 
-        assert!(block.flush_pending_args());
+        assert!(block.flush_pending_args(crate::config::SyntaxTheme::Dark));
         assert_eq!(block.args_parse_count, 1);
-        assert!(!block.flush_pending_args(), "idle flush must be a no-op");
+        assert!(
+            !block.flush_pending_args(crate::config::SyntaxTheme::Dark),
+            "idle flush must be a no-op"
+        );
         assert_eq!(block.args_parse_count, 1);
 
         block.append_args_fragment("y");
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         assert_eq!(block.args_parse_count, 2, "one parse per frame with data");
     }
 
@@ -1712,7 +1706,7 @@ mod tests {
         // Simulate streaming via raw fragments (backend sends unparsed text).
         block.append_args_fragment(r#"{"path": "/tmp/test.py", "content": "def main"#);
         block.append_args_fragment(r#"():\n    print('hello')"}"#);
-        block.flush_pending_args();
+        block.flush_pending_args(crate::config::SyntaxTheme::Dark);
         let text = lines_text(&block.to_lines(&p(), 30));
         assert!(text.contains("Write"), "missing tool name: {text}");
         assert!(

@@ -4,7 +4,6 @@
 //! produced by the parser. They are converted to `ratatui::text::Line` for
 //! actual terminal rendering.
 
-use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -265,11 +264,11 @@ impl MarkdownTheme {
             math: Style::new().fg(p.math),
             link: Style::new().fg(p.accent).underlined(),
             blockquote: Style::new().fg(p.quote),
-            quote_bar: Style::new().fg(p.quote).add_modifier(Modifier::DIM),
+            quote_bar: p.appearance.quiet(Style::new().fg(p.quote)),
             marker: Style::new().fg(p.marker),
             border: Style::new().fg(p.dim),
             base: Style::new().fg(p.text),
-            dimmed: Style::new().dim(),
+            dimmed: p.appearance.quiet(Style::new()),
             diff_add: Style::new().fg(p.success),
             diff_del: Style::new().fg(p.danger),
             diff_hunk: Style::new().fg(p.accent).bold(),
@@ -600,19 +599,27 @@ mod tests {
         for current in [theme.base, Style::new()] {
             let strong = theme.emphasized(current);
             assert_eq!(strong.fg, Some(palette.strong), "{current:?}");
-            assert!(strong.add_modifier.contains(Modifier::BOLD));
+            assert!(strong.add_modifier.contains(ratatui::style::Modifier::BOLD));
         }
         // A heading / link / inline code keeps its own hue, only the weight is
         // added.
         for current in [theme.h2, theme.link, theme.code] {
             let strong = theme.emphasized(current);
             assert_eq!(strong.fg, current.fg, "{current:?}");
-            assert!(strong.add_modifier.contains(Modifier::BOLD));
+            assert!(strong.add_modifier.contains(ratatui::style::Modifier::BOLD));
         }
         // Italic composes with bold (`***x***`).
         let bold_italic = theme.emphasized(theme.italic);
-        assert!(bold_italic.add_modifier.contains(Modifier::BOLD));
-        assert!(bold_italic.add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            bold_italic
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            bold_italic
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC)
+        );
     }
 
     /// The math slot follows the palette (it is a real theme color, not a

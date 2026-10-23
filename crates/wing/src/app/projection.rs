@@ -284,7 +284,7 @@ impl App {
                     self.chat
                         .append_tool_args_fragment_by_index(idx, &args_fragment);
                     if is_final {
-                        self.chat.flush_tool_args_by_index(idx);
+                        self.chat.flush_tool_args_by_index(idx, self.palette.syntax);
                         self.chat.set_tool_status_by_index(idx, ToolStatus::Pending);
                     }
                 } else {
@@ -292,7 +292,7 @@ impl App {
                     let mut block = ToolCallBlock::new_streaming(tool_name, tool_call_id.clone());
                     block.append_args_fragment(&args_fragment);
                     if is_final {
-                        block.flush_pending_args();
+                        block.flush_pending_args(self.palette.syntax);
                         block.status = ToolStatus::Pending;
                     }
                     self.chat.push(ChatCell::ToolCall(block));

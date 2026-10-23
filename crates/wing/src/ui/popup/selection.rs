@@ -329,13 +329,15 @@ fn highlight_matches(name: &str, filter: &str, accent: Color) -> Vec<Span<'stati
 /// （它同时决定底色）。打包成一个参数是为了不再给两个行渲染函数各挂九个位置参数。
 #[derive(Clone, Copy)]
 struct RowStyle {
+    /// Background only — **never** a foreground: spans carry their own hues and
+    /// are combined with `Style::patch`, whose `other.fg.or(self.fg)` would let
+    /// a colour here flatten every span (a selected row's band is `surface`;
+    /// the copy on it is handled by the per-span `fg` decisions instead).
     base: Style,
     accent: Color,
     dim: Color,
-    /// Foreground for the row's own text: the palette's `text` on the selected
-    /// row (a selected row carries `surface` as its background, so its copy
-    /// must not fall back to the terminal default — that is the light/dark
-    /// mismatch this replaces), `Reset` (terminal default) elsewhere.
+    /// Foreground for the row's quiet description on the selected band
+    /// (`surface` under the terminal default would be a light/dark mismatch).
     fg: Color,
     selected: bool,
 }
@@ -602,12 +604,12 @@ impl Widget for SelectionPopup<'_> {
             let row = &self.rows[idx];
             let is_selected = idx == selected;
             let (bg, fg) = if is_selected {
-                (self.palette.surface, self.palette.text)
+                (self.palette.selection_band(), self.palette.text)
             } else {
                 (Color::Reset, Color::Reset)
             };
             let style = RowStyle {
-                base: Style::default().bg(bg).fg(fg),
+                base: Style::default().bg(bg),
                 accent,
                 dim: dim_color,
                 fg,
@@ -1144,12 +1146,12 @@ mod tests {
     }
 
     /// 渲染一帧，返回 (缓冲区, 行文本)。
-    fn render_frame(
+    fn render_frame_with(
         rows: &[SelectionRow],
         state: &SelectionState,
         area: Rect,
+        palette: ThemePalette,
     ) -> (Buffer, Vec<String>, ThemePalette) {
-        let palette = ThemePalette::default();
         let mut buf = Buffer::empty(area);
         SelectionPopup::new(rows, state, "", &palette).render(area, &mut buf);
         let lines = (area.y..area.bottom())
@@ -1162,6 +1164,62 @@ mod tests {
             })
             .collect();
         (buf, lines, palette)
+    }
+
+    fn render_frame(
+        rows: &[SelectionRow],
+        state: &SelectionState,
+        area: Rect,
+    ) -> (Buffer, Vec<String>, ThemePalette) {
+        render_frame_with(rows, state, area, ThemePalette::default())
+    }
+
+    /// 选中带只换背景：每行自己的前景色（命令名 accent、描述 dim/text）必须
+    /// 原样保留。`Style::patch` 是 `other.fg.or(self.fg)`，把前景塞进 `base`
+    /// 会在 `patch` 时盖掉 span 自己的颜色 —— 整个弹窗被压成单色（两套
+    /// palette 下都发生，且截图里只表现为"变素了"，很难肉眼发现）。
+    #[test]
+    fn row_colours_survive_the_selected_band() {
+        let rows = vec![plain_row("alpha", "first"), plain_row("beta", "second")];
+        let state = SelectionState::new(rows.len()); // 行 0 选中
+        let area = Rect::new(0, 0, 40, 2);
+
+        let (buf, _, palette) = render_frame(&rows, &state, area);
+        assert_eq!(buf[(1, 0)].fg, palette.accent, "选中行的命令名");
+        assert_eq!(buf[(8, 0)].fg, palette.text, "选中行的描述");
+        assert_eq!(buf[(1, 0)].bg, palette.surface, "选中行的底");
+        assert_eq!(buf[(1, 1)].fg, palette.accent, "未选中行的命令名");
+        assert_eq!(buf[(8, 1)].fg, palette.dim, "未选中行的描述");
+        assert_eq!(buf[(1, 1)].bg, Color::Reset, "未选中行不刷底");
+    }
+
+    /// 选中带在另外两套调色板下的语义：`light` 用浅灰卡底（命令名 accent
+    /// 不被抹平）；`terminal` 把背景交给终端（`surface == Reset`）时回退到
+    /// `dim`，否则选中行与未选中行完全一样。
+    #[test]
+    fn the_selected_band_survives_light_and_terminal_palettes() {
+        let rows = vec![plain_row("alpha", "first")];
+        let state = SelectionState::new(rows.len());
+        let area = Rect::new(0, 0, 40, 1);
+        let palette_for = |preset| {
+            ThemePalette::from_config_with_appearance(
+                &crate::config::ColorsConfig {
+                    preset,
+                    ..Default::default()
+                },
+                None,
+            )
+        };
+
+        let light = palette_for(crate::config::ColorPreset::Light);
+        let (buf, _, _) = render_frame_with(&rows, &state, area, light);
+        assert_eq!(buf[(1, 0)].fg, light.accent);
+        assert_eq!(buf[(1, 0)].bg, light.surface);
+
+        let terminal = palette_for(crate::config::ColorPreset::Terminal);
+        let (buf, _, _) = render_frame_with(&rows, &state, area, terminal);
+        assert_eq!(buf[(1, 0)].bg, terminal.dim, "terminal: 回退到 dim 带");
+        assert_ne!(buf[(1, 0)].bg, Color::Reset);
     }
 
     /// 一帧里**被选中**（背景 = palette.dim）的那些行文本。

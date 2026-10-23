@@ -391,7 +391,7 @@ fn tools(lines: &mut Vec<Line<'static>>, ctx: &CellContext<'_>, width: u16, now:
     stream.append_args_fragment(
         r#"{"command": "cargo run --example theme_preview -- --html /tmp/wing"#,
     );
-    stream.flush_pending_args();
+    stream.flush_pending_args(ctx.palette.syntax);
     lines.extend(ChatCell::ToolCall(stream).to_lines(width, ctx));
 
     // Write：内容流式预览（语法高亮 + 行首缩进 gutter）。
@@ -399,7 +399,7 @@ fn tools(lines: &mut Vec<Line<'static>>, ctx: &CellContext<'_>, width: u16, now:
     write.append_args_fragment(
         r#"{"path": "crates/wing/src/ui/shimmer.rs", "content": "/// 两个颜色按 t 线性混合。\npub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {\n    let t = t.clamp(0.0, 1.0);\n    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))\n}\n"}"#,
     );
-    write.flush_pending_args();
+    write.flush_pending_args(ctx.palette.syntax);
     lines.extend(ChatCell::ToolCall(write).to_lines(width, ctx));
 
     // Edit：实时 diff 预览（旧行删除底、新行新增底、语法高亮）。
@@ -407,7 +407,7 @@ fn tools(lines: &mut Vec<Line<'static>>, ctx: &CellContext<'_>, width: u16, now:
     edit.append_args_fragment(
         r#"{"path": "crates/wing/src/ui/cells/tool_call.rs", "old_string": "let bold = Style::default().add_modifier(Modifier::BOLD);\nlet dim = Style::default().fg(palette.dim);", "new_string": "let name_style = Style::default().fg(palette.text).add_modifier(Modifier::BOLD);\nlet args_style = Style::default().fg(palette.dim);"}"#,
     );
-    edit.flush_pending_args();
+    edit.flush_pending_args(ctx.palette.syntax);
     lines.extend(ChatCell::ToolCall(edit).to_lines(width, ctx));
 }
 
@@ -719,15 +719,11 @@ fn main() {
     let preset_override = value(&args, "--preset").map(|v| v.to_ascii_lowercase());
 
     let mut config = AppConfig::load();
-    match preset_override.as_deref() {
-        None => {}
-        Some("auto") => config.colors.preset = ColorPreset::Auto,
-        Some("wing") => config.colors.preset = ColorPreset::Wing,
-        Some("light") => config.colors.preset = ColorPreset::Light,
-        Some("terminal") => config.colors.preset = ColorPreset::Terminal,
-        Some(other) => fail(&format!(
-            "unknown preset '{other}' (auto | wing | light | terminal)"
-        )),
+    if let Some(name) = preset_override.as_deref() {
+        match ColorPreset::parse(name) {
+            Some(preset) => config.colors.preset = preset,
+            None => fail(&format!("unknown preset '{name}'")),
+        }
     }
     config.resolve();
     let palette = ThemePalette::from_config(&config.colors);

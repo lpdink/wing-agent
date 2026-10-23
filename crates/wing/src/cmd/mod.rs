@@ -1013,7 +1013,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
             // 只有这一次机会，见 `stdin_proxy::settle_paste_channel`）。
             // 判定同步阻塞当前 worker（静默终端等到预算上限：本地 150ms / SSH 600ms）——
             // 与 `ImageSupport::detect` 的既有阻塞形态同款：一次性、有界，且只发生在启动期。
-            let mut terminal = tui::init_terminal()?;
+            let mut terminal = tui::init_terminal(config.colors.preset)?;
             tui::stdin_proxy::settle_paste_channel();
             install_panic_hook();
             let outcome = setup::run_setup_tui(&mut terminal, &http, &mut config, &endpoint).await;
@@ -1084,7 +1084,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     tracing::info!("subscribed to session, entering TUI");
 
     // Initialize terminal（会话已在向导段开启；这里是第二段，只写进入序列）。
-    let mut terminal = tui::init_terminal()?;
+    let mut terminal = tui::init_terminal(config.colors.preset)?;
 
     // Set up panic hook to restore terminal on panic (see `install_panic_hook`).
     install_panic_hook();

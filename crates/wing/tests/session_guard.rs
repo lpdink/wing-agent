@@ -12,7 +12,7 @@
 //!
 //! 所以这里用与 `tests/layer_guard.rs` **同构**的做法：扫描真实 `src/**`，文本匹配、零豁免。
 //!
-//! 五条规则：
+//! 六条规则：
 //!
 //! 1. `stdin_proxy::install(` 在生产源码里**恰好一次**，且位于 `begin_tui_session`
 //!    （安装点唯一 = 时序不可被挪走）；`begin_tui_session()` 的调用点恰好一次，位于
@@ -25,6 +25,9 @@
 //!    位于 `run_setup_tui(`（向导第一次 poll）之前。
 //! 5. `spawn_event_stream` 里 mode 5522 与协议机都门控在探针 verdict 上（`paste_channel()`
 //!    在前，`?5522h` 与 `clipboard_protocol::spawn(` 在后）；`\x1b[?5522h` 全生产只有这一处。
+//! 6. `appearance::probe_once(` **恰好一处**，位于 `begin_tui_session` 内、`enable_raw_mode()`
+//!    之后、`stdin_proxy::install(` 之前：读应答要非规范模式（raw 之后），而接驳之后 fd 0
+//!    不再是真实 tty（探测会与分流泵抢键，全量测试照样绿、端到端吃键）。
 //!
 //! 白空格不敏感（`stdin_proxy :: install (` 也算命中，与 `layer_guard` 同一约定）；测试代码
 //! 不算生产源码（文件尾部的 `#[cfg(test)] mod …` 之前的部分才是生产正文）。
@@ -40,7 +43,10 @@ const SESSION_FILE: &str = "tui/mod.rs";
 
 const INSTALL_CALL: &str = "stdin_proxy::install(";
 const RESTORE_CALL: &str = "stdin_proxy::restore(";
-const BEGIN_CALL: &str = "begin_tui_session()";
+const BEGIN_CALL: &str = "begin_tui_session(";
+const BEGIN_DEF: &str = "fn begin_tui_session(";
+const PROBE_CALL: &str = "appearance::probe_once(";
+const RAW_MODE_CALL: &str = "enable_raw_mode()";
 const END_CALL: &str = "end_tui_session()";
 const SETTLE_CALL: &str = "stdin_proxy::settle_paste_channel(";
 const VERDICT_READ: &str = "stdin_proxy::paste_channel()";
@@ -194,6 +200,7 @@ fn the_splice_is_installed_once_by_begin_tui_session() {
     let begins: Vec<(String, Hit)> = hits_in_sources(BEGIN_CALL)
         .into_iter()
         .filter(|(path, _)| path == SESSION_FILE)
+        .filter(|(_, hit)| !hit.text.contains(BEGIN_DEF))
         .filter(|(_, hit)| {
             enclosing_fn(&source.production, hit.line).as_deref() != Some("begin_tui_session")
         })
@@ -208,6 +215,48 @@ fn the_splice_is_installed_once_by_begin_tui_session() {
         enclosing_fn(&source.production, begins[0].1.line).as_deref(),
         Some("init_terminal_with"),
         "`begin_tui_session()` 只能由第一段 `init_terminal*` 调用"
+    );
+}
+
+/// 规则 6：底色探测唯一，且夹在 raw mode 与接驳安装之间。
+///
+/// 接驳之后 fd 0 是 pty slave —— `is_terminal()` 仍为真、`tcsetattr`/`read` 仍成功，
+/// 所以挪错位置不会有任何编译/测试信号，只会在端到端与分流泵抢键。
+#[test]
+fn the_background_probe_stays_between_raw_mode_and_the_splice() {
+    let probes = hits_in_sources(PROBE_CALL);
+    assert_eq!(
+        probes.len(),
+        1,
+        "`{PROBE_CALL}` 必须恰好一处（探测不能有第二个入口）：{}",
+        describe(&probes)
+    );
+    let (path, hit) = &probes[0];
+    assert_eq!(path, SESSION_FILE, "探测点必须在 {SESSION_FILE}");
+    let source = sources()
+        .into_iter()
+        .find(|s| s.path == SESSION_FILE)
+        .expect("session file");
+    assert_eq!(
+        enclosing_fn(&source.production, hit.line).as_deref(),
+        Some("begin_tui_session"),
+        "探测必须位于 `begin_tui_session`"
+    );
+    let raw = hits_in_sources(RAW_MODE_CALL)
+        .into_iter()
+        .find(|(path, _)| path == SESSION_FILE)
+        .expect("raw mode call");
+    assert!(
+        raw.1.line < hit.line,
+        "探测必须在 `enable_raw_mode()` 之后（读应答需要非规范模式）"
+    );
+    let install = hits_in_sources(INSTALL_CALL)
+        .into_iter()
+        .find(|(path, _)| path == SESSION_FILE)
+        .expect("install call");
+    assert!(
+        hit.line < install.1.line,
+        "探测必须在 `stdin_proxy::install(` 之前（之后 fd 0 不再是真实 tty）"
     );
 }
 

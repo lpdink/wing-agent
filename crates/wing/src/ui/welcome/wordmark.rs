@@ -25,8 +25,12 @@ use crate::ui::shimmer::sweep_intensity;
 /// 扫光光带半宽（列，源像素口径）。
 pub const SWEEP_RADIUS: f32 = 6.0;
 
-/// 高光混白强度（光带正中）。
-const SWEEP_WHITE: f32 = 0.65;
+/// 高光混合强度（光带正中）。
+const SWEEP_BLEND: f32 = 0.65;
+
+/// 高光端点：暗底朝白提，亮底朝深压 —— 亮底上白光看不见（峰值会低于 2:1）。
+const DARK_THEME_SWEEP: Rgb = (255, 255, 255);
+const LIGHT_THEME_SWEEP: Rgb = (10, 14, 24);
 
 /// 暗底渐变的亮端：accent 往白里提这么多。
 const DARK_THEME_LIGHT_BLEND: f32 = 0.75;
@@ -145,7 +149,12 @@ pub fn lines(scale: Scale, phase: Option<f32>, accent: Rgb, light: bool) -> Vec<
             if let Some(phase) = phase {
                 let s = sweep_at(col, phase, scale);
                 if s > 0.0 {
-                    rgb = mix(rgb, (255, 255, 255), SWEEP_WHITE * s);
+                    let peak = if light {
+                        LIGHT_THEME_SWEEP
+                    } else {
+                        DARK_THEME_SWEEP
+                    };
+                    rgb = mix(rgb, peak, SWEEP_BLEND * s);
                 }
             }
             let fg = Color::Rgb(rgb.0, rgb.1, rgb.2);
@@ -289,6 +298,41 @@ mod tests {
                 assert!(
                     total(&swept[row]) > total(&settled[row]),
                     "{scale:?} 第 {row} 行：光带扫过时整行应当更亮（{} vs {}）",
+                    total(&swept[row]),
+                    total(&settled[row])
+                );
+            }
+        }
+    }
+
+    /// 亮底的扫光必须**压暗**整行：与暗底同一份强度曲线，只换混色端点。
+    /// （设计 §3.2「刷光峰值方向读 appearance」；wordmark 是 thinking 之外
+    /// 唯一还在自己混色的地方。）
+    #[test]
+    fn sweep_darkens_the_band_on_a_light_palette() {
+        for scale in [Scale::X1, Scale::X2] {
+            let accent = (14, 116, 144);
+            let settled = lines(scale, None, accent, true);
+            let swept = lines(scale, Some(0.5), accent, true);
+            // 按**列**加权（span 的文本长度）：光带会让相邻列颜色不同，合并
+            // 后的 span 数量随之变化，直接对 span 求和会把"变暗"读成"变亮"。
+            let total = |line: &Line<'_>| -> u64 {
+                line.spans
+                    .iter()
+                    .map(|s| {
+                        let cols = s.content.chars().count() as u64;
+                        let luma = match s.style.fg {
+                            Some(Color::Rgb(r, g, b)) => u64::from(r) + u64::from(g) + u64::from(b),
+                            _ => 0,
+                        };
+                        luma * cols
+                    })
+                    .sum()
+            };
+            for row in 0..settled.len() {
+                assert!(
+                    total(&swept[row]) < total(&settled[row]),
+                    "{scale:?} 第 {row} 行：亮底光带应当更暗（{} vs {}）",
                     total(&swept[row]),
                     total(&settled[row])
                 );

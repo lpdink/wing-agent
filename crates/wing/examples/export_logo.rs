@@ -49,21 +49,27 @@ fn hex(rgb: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)
 }
 
-/// 字母网格 → rect：行内合并同名同色的连续段。
-fn sprite_rects(grid: &[&str], x0: usize, y0: usize) -> Vec<Rect> {
+/// 字母网格 → rect：行内合并同名同色的连续段。`appearance` 决定海鸥的
+/// 羽色（亮底页头用浅蓝灰那套，否则白羽在浅色背景上是空心的）。
+fn sprite_rects(
+    grid: &[&str],
+    x0: usize,
+    y0: usize,
+    appearance: wing::config::Appearance,
+) -> Vec<Rect> {
     let mut out = Vec::new();
     for (y, row) in grid.iter().enumerate() {
         let chars: Vec<char> = row.chars().collect();
         let mut x = 0;
         while x < chars.len() {
-            let Some(rgb) = sprite::brand(chars[x], ACCENT, wing::config::Appearance::Dark) else {
+            let Some(rgb) = sprite::brand(chars[x], ACCENT, appearance) else {
                 x += 1;
                 continue;
             };
             let color = hex(rgb);
             let start = x;
             while x < chars.len()
-                && sprite::brand(chars[x], ACCENT, wing::config::Appearance::Dark)
+                && sprite::brand(chars[x], ACCENT, appearance)
                     .map(hex)
                     .as_deref()
                     == Some(color.as_str())
@@ -138,7 +144,12 @@ fn banner(light: bool) -> (String, usize, usize) {
     let gull_h = gull.len();
     let (wm, wm_w, wm_h) = wordmark_rects(light, 0, 0);
     let height = gull_h.max(wm_h) + PAD * 2;
-    let mut rects = sprite_rects(gull, PAD, (height - gull_h) / 2);
+    let appearance = if light {
+        wing::config::Appearance::Light
+    } else {
+        wing::config::Appearance::Dark
+    };
+    let mut rects = sprite_rects(gull, PAD, (height - gull_h) / 2, appearance);
     let wm_x = PAD + gull_w + GAP;
     let wm_y = (height - wm_h) / 2;
     rects.extend(
@@ -185,7 +196,7 @@ fn main() {
     write(
         "gull.svg",
         svg(
-            &sprite_rects(perched, 0, 0),
+            &sprite_rects(perched, 0, 0, wing::config::Appearance::Dark),
             w,
             perched.len(),
             "wing mascot",

@@ -36,6 +36,12 @@ impl ToastKind {
     /// appearance: a dark tint on a light terminal would be the one opaque
     /// block on the screen (and its default foreground would vanish into it).
     fn bg_color(self, palette: &ThemePalette) -> Color {
+        // `terminal` hands both foreground and background to the terminal
+        // (`text == Reset`); painting a fixed dark slab would put the
+        // terminal's own (dark, on a light scheme) foreground on it.
+        if palette.text == Color::Reset {
+            return Color::Reset;
+        }
         match (palette.appearance, self) {
             (crate::config::Appearance::Dark, Self::Info) => Color::Rgb(20, 40, 45),
             (crate::config::Appearance::Dark, Self::Warning) => Color::Rgb(50, 45, 20),
@@ -179,6 +185,26 @@ mod tests {
         ThemePalette::default()
     }
 
+    /// WCAG contrast ratio between two `Color::Rgb`s.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let luma = |c: Color| -> f32 {
+            let Color::Rgb(r, g, b) = c else {
+                panic!("expected hex, got {c:?}");
+            };
+            let ch = |v: u8| {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        };
+        let (la, lb) = (luma(a), luma(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
     #[test]
     fn test_toast_info_constructor() {
         let toast = Toast::info("hello", Duration::from_secs(3));
@@ -231,6 +257,19 @@ mod tests {
         assert_eq!(ToastKind::Warning.bg_color(&p()), Color::Rgb(50, 45, 20));
         assert_eq!(ToastKind::Error.bg_color(&p()), Color::Rgb(50, 20, 20));
 
+        // `terminal` leaves the background to the terminal (Reset), so the
+        // body foreground it inherits is always the readable one.
+        let terminal = crate::config::ThemePalette::from_config_with_appearance(
+            &crate::config::ColorsConfig {
+                preset: crate::config::ColorPreset::Terminal,
+                ..Default::default()
+            },
+            None,
+        );
+        for kind in [ToastKind::Info, ToastKind::Warning, ToastKind::Error] {
+            assert_eq!(kind.bg_color(&terminal), Color::Reset);
+        }
+
         // The light palette swaps in light tints (and `text` flips to a dark
         // foreground, so the copy stays readable on them).
         let light = crate::config::ThemePalette::from_config_with_appearance(
@@ -242,6 +281,12 @@ mod tests {
         );
         for kind in [ToastKind::Info, ToastKind::Warning, ToastKind::Error] {
             assert_ne!(kind.bg_color(&p()), kind.bg_color(&light));
+            // The body copy sits on the tint: it must clear WCAG 4.5.
+            let bg = kind.bg_color(&light);
+            assert!(
+                contrast(light.text, bg) >= 4.5,
+                "{kind:?} toast copy must be readable on its light tint"
+            );
         }
     }
 

@@ -82,25 +82,14 @@ pub fn render_todo_items(items: &[TodoItem], palette: &ThemePalette) -> Vec<Line
             ),
             "completed" => (
                 "✓",
-                // A dim modifier pushes the glyph toward the background: on a
-                // dark palette that is a quiet step down from `success`, on a
-                // light one it washes a already-secondary hue out.
-                if palette.appearance == crate::config::Appearance::Light {
-                    Style::default().fg(palette.success)
-                } else {
-                    Style::default()
-                        .fg(palette.success)
-                        .add_modifier(Modifier::DIM)
-                },
+                palette
+                    .appearance
+                    .quiet(Style::default().fg(palette.success)),
                 palette.success,
             ),
             _ => (
                 "○",
-                if palette.appearance == crate::config::Appearance::Light {
-                    Style::default().fg(palette.dim)
-                } else {
-                    Style::default().fg(palette.dim).add_modifier(Modifier::DIM)
-                },
+                palette.appearance.quiet(Style::default().fg(palette.dim)),
                 palette.dim,
             ),
         };

@@ -258,14 +258,17 @@ pub fn leave_sequence(w: &mut impl io::Write) -> io::Result<()> {
 ///
 /// 会话（raw mode + stdin 接驳）由**第一段** TUI 开启、各段共用；进入 / 离开序列是每段
 /// 各写一次。收尾必须走 [`end_tui_session`] —— 会话不是段级资源。
-pub fn init_terminal() -> Result<WingTerminal> {
-    init_terminal_with(enter_sequence)
+pub fn init_terminal(preset: crate::config::ColorPreset) -> Result<WingTerminal> {
+    init_terminal_with(enter_sequence, preset)
 }
 
-fn init_terminal_with(enter: fn(&mut Stdout) -> io::Result<()>) -> Result<WingTerminal> {
+fn init_terminal_with(
+    enter: fn(&mut Stdout) -> io::Result<()>,
+    preset: crate::config::ColorPreset,
+) -> Result<WingTerminal> {
     // 会话幂等：第一段真开（真实 tty 进 raw → 装接驳，顺序见 [`begin_tui_session`]），
     // 后续段原样复用。任何失败都把会话收回去，绝不把终端留在 raw。
-    begin_tui_session()?;
+    begin_tui_session(preset)?;
     let mut stdout = io::stdout();
     let entered = enter(&mut stdout);
     let built =
@@ -303,9 +306,9 @@ pub fn restore_terminal(terminal: &mut WingTerminal) -> Result<()> {
 ///
 /// 失败不致命：接驳装不上只是没有 5522 通道（探针判定在 [`stdin_proxy::settle_paste_channel`]，
 /// 没装上就是阴性——不会被误开）。
-fn begin_tui_session() -> io::Result<()> {
+fn begin_tui_session(preset: crate::config::ColorPreset) -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
-    appearance::probe_once(crate::config::AppConfig::load().colors.preset);
+    appearance::probe_once(preset);
     if let Err(e) = stdin_proxy::install() {
         tracing::warn!("stdin proxy unavailable, clipboard paste events disabled: {e}");
     }

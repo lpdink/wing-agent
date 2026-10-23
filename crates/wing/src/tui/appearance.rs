@@ -202,6 +202,10 @@ mod tty {
                 return None;
             }
             let mut window = saved;
+            // 只关规范模式与回显：探测需要「读到就有、不等整行」。
+            // 注意 TUI 路径上 `enable_raw_mode()` 已把输入设成 `cfmakeraw`
+            // （ISIG 也是关的），所以窗口内的按键——**包括 Ctrl+C**——会被
+            // 读走并丢弃；这是启动期 ≤150ms 的既有取舍（与图像能力探测同款）。
             window.c_lflag &= !(libc::ICANON | libc::ECHO);
             window.c_cc[libc::VMIN] = 0;
             window.c_cc[libc::VTIME] = 0;

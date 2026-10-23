@@ -11,6 +11,8 @@ pub mod store;
 use std::path::Path;
 
 use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -46,15 +48,41 @@ impl<'de> Deserialize<'de> for ColorPreset {
     /// of failing the whole config parse.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        match s.to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "wing" => Ok(Self::Wing),
-            "light" => Ok(Self::Light),
-            "terminal" => Ok(Self::Terminal),
-            other => {
-                tracing::warn!("invalid color preset '{other}', falling back to 'auto'");
+        match Self::parse(&s) {
+            Some(preset) => Ok(preset),
+            None => {
+                tracing::warn!("invalid color preset '{s}', falling back to 'auto'");
                 Ok(Self::Auto)
             }
+        }
+    }
+}
+
+impl ColorPreset {
+    /// Every preset, in the order the settings panel lists them. The single
+    /// source the catalog choices, `theme_preview --preset` and the tests
+    /// derive from — adding a variant here forces the other tables to notice.
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Wing, Self::Light, Self::Terminal];
+
+    /// The lowercase spelling used by the config file, the setting choices and
+    /// the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Wing => "wing",
+            Self::Light => "light",
+            Self::Terminal => "terminal",
+        }
+    }
+
+    /// Case-insensitive parse; `None` for an unknown spelling.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "wing" => Some(Self::Wing),
+            "light" => Some(Self::Light),
+            "terminal" => Some(Self::Terminal),
+            _ => None,
         }
     }
 }
@@ -66,6 +94,23 @@ impl<'de> Deserialize<'de> for ColorPreset {
 pub enum Appearance {
     Dark,
     Light,
+}
+
+impl Appearance {
+    /// Express "quieter than the surrounding text" for this palette.
+    ///
+    /// `Modifier::DIM` pushes the glyph toward the background: on a dark
+    /// palette that is a step down; on a light one it washes an already-quiet
+    /// hue out (and the terminal's own dimming may also shift the hue). So the
+    /// intent is applied on dark and left to the slot's own colour on light —
+    /// the single rule every "secondary" style (todo marks, quote bar, image
+    /// captions) goes through.
+    pub fn quiet(self, style: Style) -> Style {
+        match self {
+            Self::Dark => style.add_modifier(Modifier::DIM),
+            Self::Light => style,
+        }
+    }
 }
 
 /// Which syntect theme code blocks use. Paired with [`Appearance`] by the
@@ -130,7 +175,7 @@ impl ColorPreset {
                 text: Color::Rgb(0x1f, 0x23, 0x28),
                 thinking: Color::Rgb(0x4b, 0x55, 0x63),
                 tool_result: Color::Rgb(0x57, 0x60, 0x6a),
-                dim: Color::Rgb(0x6e, 0x77, 0x81),
+                dim: Color::Rgb(0x62, 0x6a, 0x73),
                 success: Color::Rgb(0x1a, 0x7f, 0x37),
                 warning: Color::Rgb(0x8a, 0x5a, 0x00),
                 danger: Color::Rgb(0xb4, 0x23, 0x18),
@@ -139,10 +184,10 @@ impl ColorPreset {
                 heading_bright: Color::Rgb(0x5b, 0x21, 0xb6),
                 inline_code: Color::Rgb(0xa4, 0x13, 0x3c),
                 marker: Color::Rgb(0x5b, 0x6b, 0x8c),
-                quote: Color::Rgb(0x6b, 0x72, 0x80),
+                quote: Color::Rgb(0x64, 0x6b, 0x76),
                 thinking_label: Color::Rgb(0x8a, 0x5a, 0x00),
                 strong: Color::Rgb(0x7c, 0x4a, 0x03),
-                surface: Color::Rgb(0xf0, 0xf3, 0xf8),
+                surface: Color::Rgb(0xe7, 0xec, 0xf3),
                 diff_add_bg: Color::Rgb(0xe6, 0xf4, 0xea),
                 diff_del_bg: Color::Rgb(0xfd, 0xec, 0xec),
                 diff_add_bg_strong: Color::Rgb(0xc6, 0xea, 0xd0),
@@ -564,6 +609,22 @@ impl ThemePalette {
     }
 }
 
+impl ThemePalette {
+    /// Background band for a selected row.
+    ///
+    /// Normally the card surface. The `terminal` preset hands the background
+    /// to the terminal (`surface == Reset`), and a `Reset` band would make a
+    /// selected row indistinguishable from an unselected one — fall back to
+    /// the quiet register, which is a real ANSI colour in that preset.
+    pub fn selection_band(&self) -> Color {
+        if self.surface == Color::Reset {
+            self.dim
+        } else {
+            self.surface
+        }
+    }
+}
+
 impl ColorsConfig {
     /// The concrete preset the palette is built from: `Auto` folds the probe
     /// result into `Wing`/`Light`, everything else passes through.
@@ -635,10 +696,6 @@ mod tests {
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 
-    fn contrast_white(c: Color) -> f32 {
-        contrast_pair(c, Color::Rgb(255, 255, 255))
-    }
-
     /// The default preset is `Auto`; with no probe result it resolves to
     /// `Wing`, whose neutral ramp is strictly ordered — text > thinking >
     /// tool_result > dim, with `dim` and `tool_result` distinct values (the
@@ -682,8 +739,9 @@ mod tests {
         assert!(text < thinking, "text is the darkest rung");
         assert!(thinking < tool_result, "thinking < tool_result");
         assert!(tool_result < dim, "tool_result < dim");
-        // Body and every information slot clear 4.5:1 on white; quiet slots
-        // clear 3.0 (the large/secondary line).
+        // Body and every information slot clear 4.5:1 on white **and on a
+        // common light-grey terminal background** (#f7f7f7); quiet slots clear
+        // 3.0 (the large/secondary line).
         for (name, color, line) in [
             ("text", p.text, 4.5),
             ("thinking", p.thinking, 4.5),
@@ -702,10 +760,25 @@ mod tests {
             ("thinking_label", p.thinking_label, 4.5),
             ("strong", p.strong, 4.5),
         ] {
-            let ratio = contrast_white(color);
+            for bg in [Color::Rgb(255, 255, 255), Color::Rgb(0xf7, 0xf7, 0xf7)] {
+                let ratio = contrast_pair(color, bg);
+                assert!(
+                    ratio >= line,
+                    "{name} must clear {line}:1 on {bg:?}, got {ratio:.2}"
+                );
+            }
+        }
+        // The quiet register also has to survive on the card band (it is the
+        // one slot that appears *inside* the surface and the diff tints).
+        for (name, bg) in [
+            ("surface", p.surface),
+            ("diff_add_bg", p.diff_add_bg),
+            ("diff_del_bg", p.diff_del_bg),
+        ] {
+            let ratio = contrast_pair(p.dim, bg);
             assert!(
-                ratio >= line,
-                "{name} must clear {line}:1 on white, got {ratio:.2}"
+                ratio >= 4.5,
+                "dim on {name} must clear 4.5:1, got {ratio:.2}"
             );
         }
         // The card and diff tints stay quiet (they sit under body text), and
@@ -722,6 +795,22 @@ mod tests {
                 ratio >= 4.5,
                 "text on {name} must clear 4.5:1, got {ratio:.2}"
             );
+        }
+    }
+
+    /// `syntax` is currently a pure function of `appearance` (four presets,
+    /// one pairing). Pin it: a preset that pairs a light palette with the dark
+    /// syntax theme would be a silent, hard-to-see regression (dark code
+    /// colours on white).
+    #[test]
+    fn every_preset_pairs_its_syntax_theme_with_its_appearance() {
+        for preset in ColorPreset::ALL {
+            let p = preset.base();
+            let expected = match p.appearance {
+                Appearance::Light => SyntaxTheme::Light,
+                Appearance::Dark => SyntaxTheme::Dark,
+            };
+            assert_eq!(p.syntax, expected, "{preset:?}");
         }
     }
 
