@@ -24,30 +24,56 @@ use self::rendering::RenderingConfig;
 /// overrides just that slot (see [`ColorsConfig`]).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ColorPreset {
-    /// The designed palette for dark terminals (the default).
+    /// Detect the terminal's background at startup and pick [`Self::Wing`] or
+    /// [`Self::Light`]. No answer (tmux, screen, some SSH paths) falls back to
+    /// `Wing` — the status quo, never a guess. Default.
     #[default]
+    Auto,
+    /// The designed palette for dark terminals.
     Wing,
-    /// Inherit the terminal's own ANSI colours — the pre-preset behaviour,
-    /// for light terminals and setups that follow the terminal theme.
+    /// The designed palette for light terminals: the same hue families as
+    /// `Wing`, re-solved against a white background.
+    Light,
+    /// Inherit the terminal's own ANSI colours — the pre-preset behaviour, for
+    /// setups that follow an explicit terminal theme.
     Terminal,
 }
 
 impl<'de> Deserialize<'de> for ColorPreset {
     /// Case-insensitive, mirroring the other mode keys: `--dump-config`
-    /// writes the variant names (`Wing` / `Terminal`) and must round-trip.
-    /// An unknown value warns and keeps the default instead of failing the
-    /// whole config parse.
+    /// writes the variant names (`Auto` / `Wing` / `Light` / `Terminal`) and
+    /// must round-trip. An unknown value warns and keeps the default instead
+    /// of failing the whole config parse.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
             "wing" => Ok(Self::Wing),
+            "light" => Ok(Self::Light),
             "terminal" => Ok(Self::Terminal),
             other => {
-                tracing::warn!("invalid color preset '{other}', falling back to 'wing'");
-                Ok(Self::Wing)
+                tracing::warn!("invalid color preset '{other}', falling back to 'auto'");
+                Ok(Self::Auto)
             }
         }
     }
+}
+
+/// The palette's own light/dark property — **explicit**, never inferred from
+/// a slot. Shimmer sweep direction, the wordmark gradient, and the derived
+/// heading rung all read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    Dark,
+    Light,
+}
+
+/// Which syntect theme code blocks use. Paired with [`Appearance`] by the
+/// preset: a light-background syntax theme has to ship with a light palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntaxTheme {
+    Dark,
+    Light,
 }
 
 impl ColorPreset {
@@ -55,12 +81,14 @@ impl ColorPreset {
     ///
     /// `Wing` assumes a dark terminal background — a cool neutral ramp
     /// (text → thinking → tool_result → dim) around a cyan accent, with the
-    /// status colours pulled toward the brand's navy/amber family. Hues carry
-    /// markdown roles as well (violet structure, rose code, slate list marks),
-    /// so a document reads as more than one colour. `Terminal` leaves the
-    /// named ANSI colours in so the terminal theme decides; the diff tints stay
-    /// designed hex in both presets, because a background tint has to sit under
-    /// syntax colours and cannot adapt per-theme.
+    /// status colours pulled toward the brand's navy/amber family. `Light` is
+    /// the same hue families re-solved against a white background (body text
+    /// keeps a wide margin above WCAG 4.5, so the ramp survives anti-aliasing
+    /// and non-sRGB displays). `Terminal` leaves the named ANSI colours in so
+    /// the terminal theme decides — its body text is `Reset` (the terminal's
+    /// default foreground), because ANSI `White` is the *background-adjacent*
+    /// colour on many light schemes. `Auto` never reaches here: it is resolved
+    /// to `Wing`/`Light` by [`ColorsConfig::resolved_preset`] first.
     fn base(self) -> ThemePalette {
         // The structure hue is one value across the slots that carry it (a
         // formula is structure like a heading), so it is named once.
@@ -70,7 +98,8 @@ impl ColorPreset {
         let diff_add_bg_strong = Color::Rgb(0x1f, 0x52, 0x30);
         let diff_del_bg_strong = Color::Rgb(0x66, 0x32, 0x3c);
         match self {
-            Self::Wing => ThemePalette {
+            // Defensive: `Auto` is resolved before `base` is called.
+            Self::Auto | Self::Wing => ThemePalette {
                 accent: Color::Rgb(0x3a, 0xc6, 0xe0),
                 text: Color::Rgb(0xe6, 0xea, 0xf2),
                 thinking: Color::Rgb(0xa5, 0xae, 0xc1),
@@ -81,7 +110,7 @@ impl ColorPreset {
                 danger: Color::Rgb(0xe5, 0x64, 0x6e),
                 math: violet,
                 heading: violet,
-                heading_bright: stretch(violet, false),
+                heading_bright: stretch(violet, Appearance::Dark),
                 inline_code: Color::Rgb(0xe5, 0x78, 0x7f),
                 marker: Color::Rgb(0x6f, 0x7d, 0xb4),
                 quote: Color::Rgb(0x8f, 0x93, 0xc4),
@@ -93,10 +122,41 @@ impl ColorPreset {
                 diff_add_bg_strong,
                 diff_del_bg_strong,
                 math_mode: MathMode::Text,
+                appearance: Appearance::Dark,
+                syntax: SyntaxTheme::Dark,
+            },
+            Self::Light => ThemePalette {
+                accent: Color::Rgb(0x0e, 0x74, 0x90),
+                text: Color::Rgb(0x1f, 0x23, 0x28),
+                thinking: Color::Rgb(0x4b, 0x55, 0x63),
+                tool_result: Color::Rgb(0x57, 0x60, 0x6a),
+                dim: Color::Rgb(0x6e, 0x77, 0x81),
+                success: Color::Rgb(0x1a, 0x7f, 0x37),
+                warning: Color::Rgb(0x8a, 0x5a, 0x00),
+                danger: Color::Rgb(0xb4, 0x23, 0x18),
+                math: Color::Rgb(0x6d, 0x28, 0xd9),
+                heading: Color::Rgb(0x6d, 0x28, 0xd9),
+                heading_bright: Color::Rgb(0x5b, 0x21, 0xb6),
+                inline_code: Color::Rgb(0xa4, 0x13, 0x3c),
+                marker: Color::Rgb(0x5b, 0x6b, 0x8c),
+                quote: Color::Rgb(0x6b, 0x72, 0x80),
+                thinking_label: Color::Rgb(0x8a, 0x5a, 0x00),
+                strong: Color::Rgb(0x7c, 0x4a, 0x03),
+                surface: Color::Rgb(0xf0, 0xf3, 0xf8),
+                diff_add_bg: Color::Rgb(0xe6, 0xf4, 0xea),
+                diff_del_bg: Color::Rgb(0xfd, 0xec, 0xec),
+                diff_add_bg_strong: Color::Rgb(0xc6, 0xea, 0xd0),
+                diff_del_bg_strong: Color::Rgb(0xf9, 0xc9, 0xc9),
+                math_mode: MathMode::Text,
+                appearance: Appearance::Light,
+                syntax: SyntaxTheme::Light,
             },
             Self::Terminal => ThemePalette {
                 accent: Color::Cyan,
-                text: Color::White,
+                // ANSI 15 ("bright white") is the *background-adjacent* colour
+                // on light schemes (Solarized Light #fdf6e3, Tomorrow #ffffff):
+                // body text must be the terminal's default foreground instead.
+                text: Color::Reset,
                 thinking: Color::Gray,
                 tool_result: Color::DarkGray,
                 dim: Color::DarkGray,
@@ -119,6 +179,11 @@ impl ColorPreset {
                 diff_add_bg_strong,
                 diff_del_bg_strong,
                 math_mode: MathMode::Text,
+                // The terminal owns the actual appearance; `Dark` keeps the
+                // pre-existing behaviour (sweep toward white) for this escape
+                // hatch. Light-terminal users get `light` / `auto` instead.
+                appearance: Appearance::Dark,
+                syntax: SyntaxTheme::Dark,
             },
         }
     }
@@ -424,6 +489,12 @@ pub struct ThemePalette {
     pub strong: Color,
     /// Math rendering mode (see [`MathMode`]).
     pub math_mode: MathMode,
+    /// The palette's own light/dark property. Rendering code that needs a
+    /// direction (sweep peaks, brand gradients, derived rungs) reads this —
+    /// never a colour slot, which a user override can flip.
+    pub appearance: Appearance,
+    /// Which syntect theme code blocks use, paired with `appearance`.
+    pub syntax: SyntaxTheme,
 }
 
 impl Default for ThemePalette {
@@ -435,21 +506,30 @@ impl Default for ThemePalette {
 impl ThemePalette {
     /// Build palette from config: the preset's base, with per-slot overrides.
     ///
+    /// `Auto` resolves against "no detection result" (→ `Wing`); callers that
+    /// have probed the terminal use [`Self::from_config_with_appearance`].
+    ///
     /// An invalid colour string warns and falls back to the preset value for
     /// that slot — never fails the load.
     pub fn from_config(cfg: &ColorsConfig) -> Self {
-        let base = cfg.preset.base();
+        Self::from_config_with_appearance(cfg, None)
+    }
+
+    /// [`Self::from_config`] with the result of the terminal probe (only read
+    /// when `preset == Auto`).
+    pub fn from_config_with_appearance(cfg: &ColorsConfig, detected: Option<Appearance>) -> Self {
+        let base = cfg.resolved_preset(detected).base();
         let text = resolve(cfg.text.as_deref(), base.text);
         let heading = resolve(cfg.heading.as_deref(), base.heading);
-        // The level-1 rung follows the **resolved** heading and the **body's**
-        // direction, so overriding only `text` (the usual light-terminal move)
-        // still deepens H1 instead of paling it. A named heading cannot be
-        // stretched: the preset's own rung stands, unless the user replaced the
-        // heading colour itself.
-        let heading_bright = match heading {
-            Color::Rgb(_, _, _) => stretch(heading, is_light_theme(text)),
-            named if named == base.heading => base.heading_bright,
-            named => named,
+        // The level-1 rung is a preset value, unless the user replaced
+        // `heading` itself: then it is derived from the new hue, pushed along
+        // the palette's own direction (a light palette deepens, a dark one
+        // brightens). Reading the direction from `appearance` — not from a
+        // colour slot — keeps a user override of `text` from flipping it.
+        let heading_bright = match (cfg.heading.is_some(), heading) {
+            (false, _) => base.heading_bright,
+            (true, Color::Rgb(_, _, _)) => stretch(heading, base.appearance),
+            (true, named) => named,
         };
         Self {
             accent: resolve(cfg.accent.as_deref(), base.accent),
@@ -474,40 +554,46 @@ impl ThemePalette {
             quote: resolve(cfg.quote.as_deref(), base.quote),
             strong: resolve(cfg.strong.as_deref(), base.strong),
             math_mode: cfg.math_mode,
+            appearance: base.appearance,
+            syntax: base.syntax,
+        }
+    }
+}
+
+impl ColorsConfig {
+    /// The concrete preset the palette is built from: `Auto` folds the probe
+    /// result into `Wing`/`Light`, everything else passes through.
+    ///
+    /// `None` (no answer: tmux, screen, some SSH paths, a probe that never
+    /// ran) keeps the status quo — `Wing`. Never guess a light background.
+    pub fn resolved_preset(&self, detected: Option<Appearance>) -> ColorPreset {
+        match self.preset {
+            ColorPreset::Auto => match detected {
+                Some(Appearance::Light) => ColorPreset::Light,
+                _ => ColorPreset::Wing,
+            },
+            preset => preset,
         }
     }
 }
 
 /// Push an RGB colour 30% of the way toward the extreme that carries contrast:
-/// white on a dark terminal, black on a light one. The derived step behind
+/// white on a dark palette, black on a light one. The derived step behind
 /// `heading_bright` (the level-1 rung).
-///
-/// `light_theme` comes from the **body** colour, not from the colour being
-/// stretched: a light terminal whose body text is dark must get a *deeper*
-/// level-1 heading, never a paler one.
 ///
 /// Named colours are returned unchanged: they follow the terminal theme, which
 /// already owns what "brighter" means, and there is no RGB to push.
-fn stretch(color: Color, light_theme: bool) -> Color {
+fn stretch(color: Color, appearance: Appearance) -> Color {
     const STEP: f32 = 0.30;
     let Color::Rgb(r, g, b) = color else {
         return color;
     };
-    let target = if light_theme { 0.0 } else { 255.0 };
+    let target = match appearance {
+        Appearance::Light => 0.0,
+        Appearance::Dark => 255.0,
+    };
     let push = |c: u8| -> u8 { (f32::from(c) + (target - f32::from(c)) * STEP).round() as u8 };
     Color::Rgb(push(r), push(g), push(b))
-}
-
-/// Whether the palette describes a **light terminal**: its body colour is dark.
-/// Same rule as `ui::shimmer::is_light_theme`; the config layer cannot reach up
-/// into `ui`, so the one-line luminance test lives here too (255 = white).
-fn is_light_theme(text: Color) -> bool {
-    match text {
-        Color::Rgb(r, g, b) => {
-            (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.0 < 0.5
-        }
-        other => matches!(other, Color::Black | Color::DarkGray),
-    }
 }
 
 fn resolve(value: Option<&str>, fallback: Color) -> Color {
@@ -524,14 +610,40 @@ fn resolve(value: Option<&str>, fallback: Color) -> Color {
 mod tests {
     use super::*;
 
-    /// The default preset is `Wing`, and its neutral ramp is strictly
-    /// ordered — text > thinking > tool_result > dim, with `dim` and
-    /// `tool_result` distinct values (the pre-preset default had one gray
-    /// doing both jobs).
+    /// WCAG relative luminance (0 = black, 1 = white).
+    fn wcag_luma(c: Color) -> f32 {
+        let Color::Rgb(r, g, b) = c else {
+            panic!("expected hex, got {c:?}");
+        };
+        let channel = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast_pair(a: Color, b: Color) -> f32 {
+        let (la, lb) = (wcag_luma(a), wcag_luma(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    fn contrast_white(c: Color) -> f32 {
+        contrast_pair(c, Color::Rgb(255, 255, 255))
+    }
+
+    /// The default preset is `Auto`; with no probe result it resolves to
+    /// `Wing`, whose neutral ramp is strictly ordered — text > thinking >
+    /// tool_result > dim, with `dim` and `tool_result` distinct values (the
+    /// pre-preset default had one gray doing both jobs).
     #[test]
     fn test_default_palette_is_the_wing_preset_with_an_ordered_ramp() {
-        assert_eq!(ColorsConfig::default().preset, ColorPreset::Wing);
+        assert_eq!(ColorsConfig::default().preset, ColorPreset::Auto);
         let p = ThemePalette::default();
+        assert_eq!(p.appearance, Appearance::Dark);
         let luma = |c: Color| -> f32 {
             match c {
                 Color::Rgb(r, g, b) => 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32,
@@ -546,16 +658,101 @@ mod tests {
         assert!(luma(p.tool_result) > luma(p.dim), "tool_result > dim");
         assert_ne!(p.dim, p.tool_result, "the two grays must differ");
         assert_eq!(p.math_mode, MathMode::Text);
+        assert_eq!(p.syntax, SyntaxTheme::Dark);
+    }
+
+    /// The light preset is the same ramp mirrored around a white background:
+    /// darker = louder, so the ordering inverts and every body/info slot keeps
+    /// a comfortable margin over WCAG 4.5:1.
+    #[test]
+    fn test_light_preset_is_readable_on_white() {
+        let cfg: ColorsConfig = serde_yaml::from_str("preset: light\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.appearance, Appearance::Light);
+        assert_eq!(p.syntax, SyntaxTheme::Light);
+        // text < thinking < tool_result < dim: quieter slots are lighter.
+        let text = wcag_luma(p.text);
+        let thinking = wcag_luma(p.thinking);
+        let tool_result = wcag_luma(p.tool_result);
+        let dim = wcag_luma(p.dim);
+        assert!(text < thinking, "text is the darkest rung");
+        assert!(thinking < tool_result, "thinking < tool_result");
+        assert!(tool_result < dim, "tool_result < dim");
+        // Body and every information slot clear 4.5:1 on white; quiet slots
+        // clear 3.0 (the large/secondary line).
+        for (name, color, line) in [
+            ("text", p.text, 4.5),
+            ("thinking", p.thinking, 4.5),
+            ("tool_result", p.tool_result, 4.5),
+            ("dim", p.dim, 4.5),
+            ("accent", p.accent, 4.5),
+            ("success", p.success, 4.5),
+            ("warning", p.warning, 4.5),
+            ("danger", p.danger, 4.5),
+            ("math", p.math, 4.5),
+            ("heading", p.heading, 4.5),
+            ("heading_bright", p.heading_bright, 4.5),
+            ("inline_code", p.inline_code, 4.5),
+            ("quote", p.quote, 3.0),
+            ("marker", p.marker, 3.0),
+            ("thinking_label", p.thinking_label, 4.5),
+            ("strong", p.strong, 4.5),
+        ] {
+            let ratio = contrast_white(color);
+            assert!(
+                ratio >= line,
+                "{name} must clear {line}:1 on white, got {ratio:.2}"
+            );
+        }
+        // The card and diff tints stay quiet (they sit under body text), and
+        // the text on them stays readable.
+        for (name, bg) in [
+            ("surface", p.surface),
+            ("diff_add_bg", p.diff_add_bg),
+            ("diff_del_bg", p.diff_del_bg),
+            ("diff_add_bg_strong", p.diff_add_bg_strong),
+            ("diff_del_bg_strong", p.diff_del_bg_strong),
+        ] {
+            let ratio = contrast_pair(p.text, bg);
+            assert!(
+                ratio >= 4.5,
+                "text on {name} must clear 4.5:1, got {ratio:.2}"
+            );
+        }
+    }
+
+    /// `Auto` folds the probe result into a concrete preset: light → `Light`,
+    /// dark/unknown → `Wing` (never a guess).
+    #[test]
+    fn test_auto_preset_resolves_from_the_probe() {
+        let cfg = ColorsConfig::default();
+        assert_eq!(
+            cfg.resolved_preset(Some(Appearance::Light)),
+            ColorPreset::Light
+        );
+        assert_eq!(
+            cfg.resolved_preset(Some(Appearance::Dark)),
+            ColorPreset::Wing
+        );
+        assert_eq!(cfg.resolved_preset(None), ColorPreset::Wing);
+        // An explicit preset ignores the probe.
+        let cfg: ColorsConfig = serde_yaml::from_str("preset: light\n").unwrap();
+        assert_eq!(
+            cfg.resolved_preset(Some(Appearance::Dark)),
+            ColorPreset::Light
+        );
     }
 
     /// `terminal` keeps the terminal's own ANSI colours — the pre-preset
-    /// behaviour, slot for slot.
+    /// behaviour, slot for slot. Body text is the terminal's default
+    /// foreground (`Reset`), not ANSI 15: on light schemes "bright white" is
+    /// the background-adjacent colour.
     #[test]
     fn test_terminal_preset_keeps_the_named_ansi_colours() {
         let cfg: AppConfig = serde_yaml::from_str("colors:\n  preset: terminal\n").unwrap();
         let p = ThemePalette::from_config(&cfg.colors);
         assert_eq!(p.accent, Color::Cyan);
-        assert_eq!(p.text, Color::White);
+        assert_eq!(p.text, Color::Reset);
         assert_eq!(p.thinking, Color::Gray);
         assert_eq!(p.tool_result, Color::DarkGray);
         assert_eq!(p.dim, Color::DarkGray);
@@ -581,9 +778,9 @@ mod tests {
     /// An unknown preset warns and keeps the default instead of failing the
     /// parse (same policy as the rendering modes).
     #[test]
-    fn test_unknown_preset_falls_back_to_wing() {
+    fn test_unknown_preset_falls_back_to_auto() {
         let cfg: AppConfig = serde_yaml::from_str("colors:\n  preset: neon\n").unwrap();
-        assert_eq!(cfg.colors.preset, ColorPreset::Wing);
+        assert_eq!(cfg.colors.preset, ColorPreset::Auto);
     }
 
     /// A slot key overrides exactly that slot; everything else follows the
@@ -659,7 +856,7 @@ mod tests {
     fn test_legacy_config_without_preset_or_diff_tints() {
         let yaml = "colors:\n  accent: cyan\n  danger: red\n";
         let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.colors.preset, ColorPreset::Wing);
+        assert_eq!(cfg.colors.preset, ColorPreset::Auto);
         let p = ThemePalette::from_config(&cfg.colors);
         assert_eq!(p.accent, Color::Cyan);
         assert_eq!(p.danger, Color::Red);
@@ -704,13 +901,13 @@ mod tests {
         assert_ne!(p.strong, p.heading);
     }
 
-    /// `heading_bright` is derived from the **resolved** heading, and its
-    /// direction follows the **body colour**: on a dark terminal (light body
-    /// text) the level-1 heading is lifted toward white, on a light terminal
-    /// (dark body text) it is pushed toward black — never the other way round,
-    /// which would make H1 the least readable rung.
+    /// `heading_bright` is the level-1 rung: a preset supplies it, and when the
+    /// user replaces `heading` itself it is derived from the new hue along the
+    /// **palette's** direction (`appearance`) — lift on a dark palette, deepen
+    /// on a light one. Overriding `text` must not flip it: the direction is a
+    /// palette property, not a colour-slot guess.
     #[test]
-    fn test_heading_bright_follows_heading_and_the_terminal_direction() {
+    fn test_heading_bright_follows_heading_and_the_palette_direction() {
         let luma = |c: Color| -> u16 {
             match c {
                 Color::Rgb(r, g, b) => u16::from(r) + u16::from(g) + u16::from(b),
@@ -720,28 +917,40 @@ mod tests {
         let dark = ThemePalette::default();
         assert!(luma(dark.heading_bright) > luma(dark.heading), "dark: lift");
 
-        // Overriding only `text` is the usual light-terminal move: the heading
-        // slot is untouched, so the direction has to come from the body colour
-        // alone (the regression this test pins).
-        let cfg: ColorsConfig = serde_yaml::from_str("text: \"#202020\"\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml::from_str("preset: light\n").unwrap();
         let light = ThemePalette::from_config(&cfg);
-        assert_eq!(light.heading, dark.heading, "heading stays the preset's");
         assert!(
             luma(light.heading_bright) < luma(light.heading),
-            "a dark body must deepen H1, not pale it"
+            "light: deepen in the preset itself"
         );
 
-        // A named heading cannot be stretched: the preset's rung stands (so the
-        // terminal preset keeps H1 ≠ H2), and an explicit override falls back to
-        // itself.
-        let cfg: ColorsConfig = serde_yaml::from_str("preset: terminal\n").unwrap();
-        let terminal = ThemePalette::from_config(&cfg);
-        assert_eq!(terminal.heading, Color::Magenta);
-        assert_eq!(terminal.heading_bright, Color::LightMagenta);
+        // Overriding only `text` stays on the same palette: H1 keeps its rung.
+        let cfg: ColorsConfig = serde_yaml::from_str("text: \"#202020\"\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.appearance, Appearance::Dark);
+        assert_eq!(p.heading_bright, dark.heading_bright);
+
+        // A hex heading override is derived along the preset's direction.
+        let cfg: ColorsConfig = serde_yaml::from_str("heading: \"#808080\"\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert!(luma(p.heading_bright) > luma(p.heading), "dark: lift");
+        let cfg: ColorsConfig =
+            serde_yaml::from_str("preset: light\nheading: \"#808080\"\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert!(luma(p.heading_bright) < luma(p.heading), "light: deepen");
+
+        // A named heading cannot be stretched: the value stands.
         let cfg: ColorsConfig = serde_yaml::from_str("heading: green\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.heading, Color::Green);
         assert_eq!(p.heading_bright, Color::Green);
+
+        // The terminal preset keeps its explicit named ladder (H1 ≠ H2).
+        let cfg: ColorsConfig = serde_yaml::from_str("preset: terminal\n").unwrap();
+        let p = ThemePalette::from_config(&cfg);
+        assert_eq!(p.heading, Color::Magenta);
+        assert_eq!(p.heading_bright, Color::LightMagenta);
+
         // An invalid value falls back to the preset slot, rung included.
         let cfg: ColorsConfig = serde_yaml::from_str("heading: neon_pink\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
@@ -827,7 +1036,7 @@ mod tests {
         let cfg = AppConfig::default();
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         let parsed: AppConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.colors.preset, ColorPreset::Wing);
+        assert_eq!(parsed.colors.preset, ColorPreset::Auto);
         assert_eq!(parsed.colors.accent, None);
         assert_eq!(parsed.layout.max_input_lines, 10);
     }

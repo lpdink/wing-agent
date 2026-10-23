@@ -226,7 +226,11 @@ fn render_code_block(state: &CodeBlockState, env: &CodeBlockRenderEnv<'_>) -> Ve
             // inside a construct that only exists in one revision, and
             // context lines belong to both (so they advance both).
             let mut highlighters = Some({
-                DiffHighlighters::for_file(block.path.as_deref().unwrap_or_default(), None)
+                DiffHighlighters::for_file(
+                    block.path.as_deref().unwrap_or_default(),
+                    None,
+                    env.theme.syntax,
+                )
             });
 
             // Emit diff lines.

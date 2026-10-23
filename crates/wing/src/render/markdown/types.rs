@@ -226,6 +226,10 @@ pub struct MarkdownTheme {
     pub diff_add_bg: Style,
     /// Diff deletion row background.
     pub diff_del_bg: Style,
+    /// Which syntect theme code blocks are tinted with. Carried here (not read
+    /// from a global) so the light and dark palettes can be rendered side by
+    /// side — `theme_preview` does exactly that.
+    pub syntax: crate::config::SyntaxTheme,
 }
 
 impl Default for MarkdownTheme {
@@ -271,6 +275,7 @@ impl MarkdownTheme {
             diff_hunk: Style::new().fg(p.accent).bold(),
             diff_add_bg: Style::new().bg(p.diff_add_bg),
             diff_del_bg: Style::new().bg(p.diff_del_bg),
+            syntax: p.syntax,
         }
     }
 

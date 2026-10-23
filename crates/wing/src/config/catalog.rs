@@ -434,14 +434,19 @@ fn preset_node() -> SettingNode {
         COLORS_SECTION_DOC,
     );
     node.choices = vec![
-        choice("wing", "为暗底终端设计的 hex 灰阶 + cyan accent（默认）"),
+        choice(
+            "auto",
+            "跟随终端：启动时探测背景明暗，亮底用 light、暗底用 wing，探测不到用 wing（默认）",
+        ),
+        choice("wing", "为暗底终端设计的 hex 灰阶 + cyan accent"),
+        choice("light", "为亮底终端设计的同一套色相（白底校准）"),
         choice(
             "terminal",
-            "跟随终端自己的 ANSI 色（亮底终端与跟随系统主题的场景）",
+            "跟随终端自己的 ANSI 色（高级逃生舱；亮底终端请优先用 auto / light）",
         ),
     ];
     // 默认值用小写拼写（= choices 的口径）；`Deserialize` 大小写不敏感，两种都能读。
-    node.default = Some(Value::from("wing"));
+    node.default = Some(Value::from("auto"));
     node.has_default = true;
     node
 }
@@ -1385,7 +1390,11 @@ mod tests {
     fn the_enum_choices_are_lowercase_and_contain_their_defaults() {
         let catalog = interface_catalog();
         let cases: [(&str, &[&str], &str); 4] = [
-            ("colors.preset", &["wing", "terminal"], "wing"),
+            (
+                "colors.preset",
+                &["auto", "wing", "light", "terminal"],
+                "auto",
+            ),
             ("rendering.thinking", &["visible", "hidden"], "visible"),
             ("rendering.math", &["text", "off"], "text"),
             ("rendering.images", &["auto", "off"], "auto"),
@@ -1452,7 +1461,7 @@ mod tests {
         assert_eq!(read_back, json!({}), "全是注释：一个键都不该被写下");
         let parsed = appconfig_from_doc(&read_back);
         assert_eq!(json_of(&parsed), json_of(&AppConfig::default()));
-        assert_eq!(parsed.colors.preset, ColorPreset::Wing);
+        assert_eq!(parsed.colors.preset, ColorPreset::Auto);
     }
 
     /// N-1：文件头与第一个 section 之间**恰有一个**空行。
@@ -1548,7 +1557,7 @@ mod tests {
         assert_eq!(doc_from_text(&dumped), doc);
         assert_eq!(
             appconfig_from_doc(&doc_from_text(&dumped)).colors.preset,
-            ColorPreset::Wing
+            ColorPreset::Auto
         );
     }
 
@@ -1636,7 +1645,7 @@ mod tests {
             );
         }
         // 注释掉的默认值（小写拼写 = choices 口径）；`api_key` 没有默认值 → 不写。
-        assert!(dumped.contains("  # preset: wing"));
+        assert!(dumped.contains("  # preset: auto"));
         assert!(dumped.contains("  # accent: \"#3ac6e0\""));
         assert!(dumped.contains("  # max_input_lines: 10"));
         assert!(dumped.contains("  # thinking: visible"));
@@ -1786,10 +1795,10 @@ mod tests {
         let dumped = dump_config_yaml(&json!({}), DumpMode::Raw);
         let uncommented = uncomment(&dumped);
         assert!(uncommented.contains("colors:"), "{uncommented}");
-        assert!(uncommented.contains("preset: wing"), "{uncommented}");
+        assert!(uncommented.contains("preset: auto"), "{uncommented}");
         let parsed = appconfig_from_doc(&doc_from_text(&uncommented));
 
-        assert_eq!(parsed.colors.preset, ColorPreset::Wing);
+        assert_eq!(parsed.colors.preset, ColorPreset::Auto);
         assert_eq!(parsed.rendering.thinking, ThinkingMode::Visible);
         assert_eq!(parsed.rendering.math, MathMode::Text);
         assert_eq!(parsed.rendering.images, ImagesMode::Auto);
