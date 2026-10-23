@@ -184,7 +184,7 @@ async fn diagnose(
     let Some(session_id) = plan.session.as_deref() else {
         return classify(error, None);
     };
-    if !matches!(error, ApiClientError::Api { status: 404, .. }) {
+    if !error.is_not_found() {
         return classify(error, Some(session_id));
     }
     // `tree` 必须配 `session_id`：探测请求因此不带它。
@@ -212,21 +212,24 @@ fn status_of(error: &ApiClientError) -> Option<u16> {
 /// 带作用域的 404 = 「这个会话不存在」；不带作用域的 404/405 = 「网关太旧」——
 /// 与 `wing cache` 的既有文案同一句。
 fn classify(error: ApiClientError, session: Option<&str>) -> anyhow::Error {
-    match (&error, session) {
-        (ApiClientError::Api { status: 404, .. }, Some(session_id)) => {
+    match session {
+        Some(session_id) if error.is_not_found() => {
             anyhow::anyhow!("session not found: {session_id}")
         }
-        (
-            ApiClientError::Api {
-                status: 404 | 405, ..
-            },
-            None,
-        ) => anyhow::anyhow!(
+        None if is_missing_route(&error) => anyhow::anyhow!(
             "{error} — the running gateway does not serve /api/usage \
              (restart it: wing stop && wing start)"
         ),
         _ => anyhow::anyhow!("{error}"),
     }
+}
+
+/// 「网关根本没有这个路由」：404 / 405。与上面那句文案是同一个判据，住在一起。
+///
+/// 更彻底的解法是让端点给「会话不存在」一个结构化 `error` 码（`gateway/app.py` 的
+/// `session_archived` 就是先例）——那要改端点契约，不在本步骤范围内。
+fn is_missing_route(error: &ApiClientError) -> bool {
+    matches!(status_of(error), Some(404 | 405))
 }
 
 // ============================================================
