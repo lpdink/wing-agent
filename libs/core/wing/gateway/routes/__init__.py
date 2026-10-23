@@ -8,7 +8,7 @@ from fastapi import FastAPI
 
 
 def register_routes(app: FastAPI) -> None:
-    """注册所有路由（session、system、settings、health、tools、wake、workspace、ws）。"""
+    """注册所有路由（session、system、settings、health、tools、wake、usage、workspace、ws）。"""
     from ..workspace import workspace_router
 
     from .health import router as health_router
@@ -16,6 +16,7 @@ def register_routes(app: FastAPI) -> None:
     from .settings import router as settings_router
     from .system import router as system_router
     from .tools import router as tools_router
+    from .usage import router as usage_router
     from .wake import router as wake_router
     from .ws import router as ws_router
 
@@ -25,5 +26,6 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(settings_router)
     app.include_router(tools_router)
     app.include_router(wake_router)
+    app.include_router(usage_router)
     app.include_router(workspace_router)
     app.include_router(ws_router)

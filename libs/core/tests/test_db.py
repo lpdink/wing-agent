@@ -62,6 +62,8 @@ class TestMigrations:
             "wake_trigger",
             "cache_call",
             "cache_segment",
+            "audit_user_message",
+            "session_catalog",
         }
         assert {
             "idx_audit_llm_call_ts",
@@ -70,6 +72,10 @@ class TestMigrations:
             "idx_audit_tool_call_session",
             "idx_audit_compaction_session",
             "idx_cache_call_session",
+            "idx_audit_user_message_ts",
+            "idx_audit_user_message_session",
+            "idx_session_catalog_parent",
+            "idx_session_catalog_created",
         } <= _indexes(db)
         assert db.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
         db.close()

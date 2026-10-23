@@ -20,7 +20,7 @@
 │ L4 编排与传输   runtime · system · background · gateway/*                │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L3 核心域       config · context · session · agent · tools · provider    │
-│                 db · audit · wake · commands                             │
+│                 db · audit · wake · metrics · commands                   │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ L2 领域设施     store/* · event/* · event_bus · hooks/*                  │
 │                 request_context · tool_registry                          │
@@ -37,7 +37,7 @@
 | L0 基础 | `wing.common.*`、`wing.build_info` | 标准库 / L0 | 通用无领域依赖 |
 | L1 领域模型 | `wing.schema.*`、`wing.media.*`、`wing.chain` | L0–L1 | 叶子组，另有 R5 约束 |
 | L2 领域设施 | `wing.store.*`、`wing.event*`、`wing.event_bus`、`wing.hooks`、`wing.request_context`、`wing.tool_registry` | L0–L2 | 可被任意上层复用 |
-| L3 核心域 | `wing.config.*`、`wing.context.*`、`wing.session.*`、`wing.agent.*`、`wing.tools.*`、`wing.provider.*`、`wing.db.*`、`wing.audit.*`、`wing.wake.*`、`wing.commands` | L0–L3 | `tools` / `provider` 另有更严规则（R2/R3）；`db` 不 import `store` / `session` / `audit`（下向依赖，评审口径） |
+| L3 核心域 | `wing.config.*`、`wing.context.*`、`wing.session.*`、`wing.agent.*`、`wing.tools.*`、`wing.provider.*`、`wing.db.*`、`wing.audit.*`、`wing.wake.*`、`wing.metrics.*`、`wing.commands` | L0–L3 | `tools` / `provider` 另有更严规则（R2/R3）；`db` 不 import `store` / `session` / `audit`（下向依赖，评审口径） |
 | L4 编排与传输 | `wing.runtime`、`wing.system`、`wing.background`、`wing.gateway.*` | L0–L4 | 唯一允许依赖 gateway 的位置（R1 豁免 `runtime` / `background`） |
 
 两处与「只向下」看似冲突、实为设计批准的依赖（写在这里以免后人误当违规）：
@@ -78,8 +78,9 @@
 | `tools/`（`builtin/` / `internal/`） | L3 | 内置工具（`builtin/` 一工具一文件）与工具基础设施（`internal/`：resolve_path / ripgrep 封装 / diff 窗口 / 命令安全审查） |
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、无状态 provider 与全进程共享池（`pool.py`） |
 | `db/`（database / migrations） | L3 | 进程级 SQLite 门面：`$WING_HOME/core/wing.db`、WAL + `user_version` 迁移、**打开失败即降级**（读写作 no-op）、跨线程单连接（一把可重入锁 + `transaction()`）；与会话持久化（`store/`）正交 |
-| `audit/`（recorder；原 `metrics_registry/`） | L3 | 审计：EventBus 订阅 → `wing.db` 的三张 `audit_*` 表各追加一行（LLM 调用 / 工具调用 / 压缩；`install()` 由组合根显式调用） |
+| `audit/`（recorder；原 `metrics_registry/`） | L3 | 审计：EventBus 订阅 → `wing.db` 的 `audit_*` 表各追加一行（LLM 调用 / 工具调用 / 压缩 / 用户消息；`install()` 由组合根显式调用） |
 | `wake/`（spec / model / store / envelope / scheduler / ports / service） | L3 | 会话唤醒：`wake_trigger` 表的触发器（事件驱动 + 定时驱动）+ 内置信封投递；投递能力由组合根经窄 `WakePorts` 注入（不 import `runtime` / `gateway`），语义见 [wake.md](wake.md) |
+| `metrics/`（store / measures / report / catalog） | L3 | 用量统计：`audit_*` + `session_catalog` 的只读聚合（唯一 SQL 处在 `store`，`report` 做窗口 → 维度 → wire 的投影，`catalog` 是目录的写入与启动回填），口径见 [usage.md](usage.md) |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |
 | `system.py`（原 `runtime.reload_system`） | L4 | 系统级热重载流程（config → hooks → commands → provider → skills & rules → log level；名字序是对外契约） |

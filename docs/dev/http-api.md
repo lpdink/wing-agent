@@ -22,7 +22,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 ## HTTP 端点
 
-### Session（`routes/session.py`，21 个）
+### Session（`routes/session.py`，22 个）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -179,6 +179,16 @@ state, fire_count, last_fire_at, last_error, created_at, next_fire_at`（`last_f
 `created_at` / `next_fire_at` 三个是网关本地 naive ISO 字符串，`null` = 该 kind 不适用或已终结）。`state ∈ active / done / canceled /
 failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_at` 恒为 `null`）。`wing.db` 不可用时创建回 **503**
 （`service_unavailable`：唤醒整体未武装），列表为空。
+
+### Usage（`routes/usage.py`，1 个）
+
+用量聚合：把审计流水（`audit_*`）+ 会话目录（`session_catalog`）投影成「同一组度量 ×
+一个维度」。口径、可归因性表、时区与「与 `wing cache` / 会话账本差在哪」见
+[usage.md](usage.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/usage` | 用量统计。查询参数：`since`（`YYYY-MM-DD` 或字面量 `all` = 有记录的第一天；缺省 = `until` 往前 84 天）、`until`（`YYYY-MM-DD`；缺省 = 今天，网关本地时区）、`group_by`（`day` \| `model` \| `session` \| `tool` \| `workspace` \| `agent` \| `origin`；缺省 `day`）、`session_id`（范围收敛到该会话）、`tree`（含全部子孙；必须配 `session_id`，否则 400）、`limit`（排行类维度的行数上限，1..200，越界 **422**）。响应 `{range:{since,until}, group_by, totals, rows, truncated}`：`totals` / 每个 `rows[]` 携带**同样的 11 个整数**（`sessions` / `sessions_created` / `user_messages` / `llm_calls` / `tool_calls` / `tool_errors` / `prompt_tokens` / `completion_tokens` / `cached_tokens` / `llm_time_ms` / `tool_time_ms`，全零填充、永不省略、**无派生值**），`rows[]` 另有 `key` / `label`（仅 `model` 维度 = 配置里的展示名）/ `parent_session_id`（仅 `session` 维度）。契约要点：`day` **稠密**（窗口内每天都有一行，空天全 0）；`origin` 恰两行、顺序固定 `me` / `agents`；`model` 的 key 是 `provider/model` 复合键（同名跨 provider 不合并）；给了 `session_id` 时**自身那一行恒存在**（没活动就全 0，且不参与 `limit` 截断）；`totals` 由独立的全量查询给出（不被 `limit` 截断，是唯一对账基准）。**不水合**会话（纯读库）。语义非法（未知 `group_by` / 日期格式 / `since > until` / `tree` 没配 `session_id`）→ 400；未知会话（目录里没有**且**审计表也没有任何行）→ 404；空数据永远 200。setup mode / 鉴权档位与其它 `/api/*` 一致 |
 
 ### Health（`routes/health.py`，1 个）
 

@@ -278,6 +278,16 @@ class SessionStore(ABC):
         """
         raise NotImplementedError(f"{self.name} does not support archiving")
 
+    def load_archived_metadata(self, session_id: str) -> SessionMetadata | None:
+        """归档会话的 metadata（只读投影；不在归档区 / 不支持归档 → None）。
+
+        归档区内的会话是冻结的：这里只读，不建目录、不写任何东西。派生投影
+        （``wing.metrics.catalog`` 的回填）要按会话取血缘 / workspace / 模板，
+        而 :meth:`load_metadata` 只认 live 区——存储路径的拼接归本层独占，
+        调用方不该自己去拼 ``.archive/<sid>/``。
+        """
+        return None
+
     # ── 媒体字节（内容寻址，**session 私有**）──────
     #
     # 媒体对象是会话的私有资产：file 后端落 <root>/<sid>/media/<id>，memory

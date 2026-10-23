@@ -35,6 +35,7 @@ from wing.event import (
 from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
 from wing.context import CacheLedger, empty_report
+from wing.metrics import usage_report
 from wing.event_bus import event_bus
 from wing.config import (
     Config,
@@ -445,6 +446,31 @@ class WingRuntime:
         if canonical is None:
             return empty_report(session_id)
         return CacheLedger(canonical).report(limit=limit, session_id=session_id)
+
+    def usage_report(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        group_by: str = "day",
+        session_id: str | None = None,
+        tree: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """用量聚合报告（`GET /api/usage` 的数据源）——薄转发到 `wing.metrics`。
+
+        整条路径只读 `wing.db`：不水合会话、不发事件、不改状态（与
+        :meth:`cache_report` 同一条纪律）。异常按 service 层惯例：``ValueError``
+        = 输入语义非法，``LookupError`` = 会话在库里没有任何痕迹。
+        """
+        return usage_report(
+            since=since,
+            until=until,
+            group_by=group_by,
+            session_id=session_id,
+            tree=tree,
+            limit=limit,
+        )
 
     def is_archived(self, session_id: str) -> bool:
         """该 id 是否在归档区（归档端点的回执：操作后的真实状态）。"""

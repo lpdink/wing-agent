@@ -1,9 +1,9 @@
-"""tests/test_audit_recorder.py — 审计：事件 → wing.db 的三张表。
+"""tests/test_audit_recorder.py — 审计：事件 → wing.db 的四张表。
 
 覆盖：
-  - 三类事件各写一行，字段逐一断言（含 provider / success / 时间戳口径）；
+  - 四类事件各写一行，字段逐一断言（含 provider / success / 时间戳口径）；
   - `duration_ms is None` 的工具结果不写行（中断合成结果不是一次执行）；
-  - 无 session_id 的压缩不写行；
+  - 无 session_id 的压缩 / 用户消息不写行；
   - DB 降级时 on_event 不抛（审计不能把 agent 带崩）；
   - `install()` 幂等：重复安装不会双写；
   - 全链路：EventBus.emit → recorder → `<WING_HOME>/core/wing.db` 的行。
@@ -23,8 +23,18 @@ from wing.event import (
     LLMCallMetricsEvent,
     TextEvent,
     ToolCallResultEvent,
+    UserMessageAcceptedEvent,
 )
 from wing.event_bus import EventBus, event_bus
+
+
+#: 审计落库的四张表（事件 → 行的一对一投影）。
+_TABLES: tuple[str, ...] = (
+    "audit_llm_call",
+    "audit_tool_call",
+    "audit_compaction",
+    "audit_user_message",
+)
 
 
 def _recorder(tmp_path: Path) -> tuple[AuditRecorder, Database]:
@@ -67,8 +77,18 @@ def _tool_event(**overrides: Any) -> ToolCallResultEvent:
     return ToolCallResultEvent.model_validate(payload)
 
 
+def _user_message_event(**overrides: Any) -> UserMessageAcceptedEvent:
+    payload: dict[str, Any] = {
+        "session_id": "s1",
+        "content": "hello",
+        "origin_request_id": "req-1",
+    }
+    payload.update(overrides)
+    return UserMessageAcceptedEvent.model_validate(payload)
+
+
 # ============================================================
-# 三类行
+# 四类行
 # ============================================================
 
 
@@ -132,6 +152,20 @@ class TestRows:
         assert rows[1]["duration_ms"] == 5
         db.close()
 
+    def test_user_message_row_fields(self, tmp_path: Path) -> None:
+        recorder, db = _recorder(tmp_path)
+        event = _user_message_event()
+
+        recorder.on_event(event)
+
+        rows = db.query("SELECT * FROM audit_user_message")
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == "s1"
+        # 时间戳口径同另外三张表：事件的创建时刻（本地 naive ISO + epoch 毫秒）
+        assert rows[0]["ts"] == event.created_at.isoformat()
+        assert rows[0]["ts_ms"] == int(event.created_at.timestamp() * 1000)
+        db.close()
+
     def test_compaction_row_fields(self, tmp_path: Path) -> None:
         recorder, db = _recorder(tmp_path)
 
@@ -177,12 +211,21 @@ class TestSkippedRows:
         assert db.query("SELECT * FROM audit_compaction") == []
         db.close()
 
+    def test_user_message_without_session_is_not_recorded(self, tmp_path: Path) -> None:
+        """无 session_id 的用户消息无法归因（列也是 NOT NULL）——不写行。"""
+        recorder, db = _recorder(tmp_path)
+
+        recorder.on_event(_user_message_event(session_id=None))
+
+        assert db.query("SELECT * FROM audit_user_message") == []
+        db.close()
+
     def test_other_events_are_ignored(self, tmp_path: Path) -> None:
         recorder, db = _recorder(tmp_path)
 
         recorder.on_event(TextEvent(session_id="s1", content="hi"))
 
-        for table in ("audit_llm_call", "audit_tool_call", "audit_compaction"):
+        for table in _TABLES:
             assert db.query(f"SELECT * FROM {table}") == []
         db.close()
 
@@ -203,6 +246,7 @@ class TestDegradation:
 
         recorder.on_event(_llm_event())
         recorder.on_event(_tool_event())
+        recorder.on_event(_user_message_event())
         recorder.on_event(
             CompactDoneEvent(session_id="s1", original_tokens=1, compressed_tokens=1)
         )
@@ -214,7 +258,7 @@ class TestDegradation:
             )
             is False
         )
-        for table in ("audit_llm_call", "audit_tool_call", "audit_compaction"):
+        for table in _TABLES:
             assert db.query(f"SELECT * FROM {table}") == []
         assert blocked.is_dir()
 

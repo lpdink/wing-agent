@@ -276,8 +276,19 @@ class Database:
                 return None
             return int(cursor.lastrowid)
 
-    def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+    def query(
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
+        *,
+        busy_timeout_ms: int | None = None,
+    ) -> list[sqlite3.Row]:
         """执行查询。降级 / 出错一律返回空列表（不抛、不刷日志）。
+
+        ``busy_timeout_ms`` 给定时本次等待写锁的上限收紧（快照读遇上跨进程写锁 /
+        checkpoint 时，本方法持着进程级的锁在等——诊断类读路径宁可丢掉这次读数，
+        也不要把这把锁按住秒级）。只在本方法持锁期间生效，退出前恢复稳态值，
+        因此别的线程看不到这个临时值。
 
         **在事务里失败会连累整笔事务**：空结果与「读失败」看起来一样，而事务块拿读
         结果决定写什么——写失败会回滚，读失败却照写就会落下一份错的、而且是"自洽"
@@ -287,7 +298,13 @@ class Database:
             if not self._ready or self._conn is None:
                 return []
             try:
-                return self._conn.execute(sql, params).fetchall()
+                if busy_timeout_ms is not None:
+                    self._conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+                try:
+                    return self._conn.execute(sql, params).fetchall()
+                finally:
+                    if busy_timeout_ms is not None:
+                        self._conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
             except Exception as exc:
                 self._fail(exc)
                 return []
