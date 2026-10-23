@@ -235,10 +235,15 @@ wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M]
 `token / call audit starts …; earlier days only have session counts`（字段缺席 = 老网关，不打印）。
 
 **热力图**：列 = ISO 周（周一起），行 = 周一..周日；档位取**非零日的四分位**（相对量，
-GitHub 同款思想），0 档在范围内画 `·`、范围外画空格。有颜色时格子统一 `█`，档位由
+GitHub 同款思想），0 档画 `·`。有颜色时格子统一 `█`，档位由
 `surface → accent` 的 4 档明度表达；无颜色（pipe / `NO_COLOR` / `TERM=dumb`）时退化成
 `·░▒▓█`。宽度不够只画最近 N 周并在标题注明 `(last N shown)`。绝对值永远从
 `--by day` 或 `--json` 读——热力图的格子表达的是「相对忙」。
+
+**格子几何是渲染契约**：所有行共用同一个 6 列 gutter、同一套「2 显示列一格」的槽位、同一个
+总宽度（月份行与图例也补齐到格子行的宽度），所以窗口外的日子也占满自己的槽位（画 0 档 `·`）。
+把窗口外画成空格会让「窗口从周几开始」变成行首缩进、整张图看起来错位——范围边界读标题里的
+`since → until`。
 
 **`--json`** 只输出**一次**端点响应（单行，`print_json_compact`）：有 `--by` 是那一次，
 没有是 `group_by=day` 那次。不发明本地包封结构。
@@ -250,6 +255,12 @@ GitHub 同款思想），0 档在范围内画 `·`、范围外画空格。有颜
 取不到端点 → 整块静默省略；**自身**流水全 0 → 一行
 `usage:  —  (no audit flow; ledger: …)` 回落到会话账本（`SessionInfoResponse.usage`），
 此时若子孙有流水，`tree:` 行照常跟在后面——**不写一排 0**（`0` 是一个读数）。
+
+`messages:` 这一行**优先读会话账本**（同一份 `info` 响应里的 `usage.user_messages`），
+账本没有 / 为 0 才回退到审计流水，两者都没有写 `—`。原因：`audit_user_message` 是随用量
+统计新加的表，存量会话的流水是 0，而账本从第一天就在记——只读流水会把「说过 7 条消息」
+显示成 0。其余三行（`calls` / `tokens` / `time`）仍只读流水：它们没有等价的账本口径
+（账本的 `llm_calls` 只覆盖 ReAct 循环内调用、不含旁路）。
 
 ### 10.1 与 `wing cache` / 会话账本的读数为什么不同
 

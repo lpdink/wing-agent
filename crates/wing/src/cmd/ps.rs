@@ -513,7 +513,7 @@ fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> Strin
     text.push_str(&format!(
         "  {:<20}{}\n",
         "messages:",
-        count(own.user_messages)
+        messages_text(own, ledger)
     ));
     text.push_str(&format!(
         "  {:<20}{} llm · {} tools\n",
@@ -542,6 +542,23 @@ fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> Strin
         text.push_str(&tree_line(*sessions, tree));
     }
     text
+}
+
+/// `messages:` 行：**会话账本优先**，流水回退，两者都没有写 `—`。
+///
+/// 审计的 `audit_user_message` 是后加的表：存量会话的流水是 0，而账本
+/// （`metadata.usage.user_messages`）从第一天就在记。只读流水会让老会话显示成
+/// 「一条消息都没说过」。反过来账本也可能缺（memory 后端 / 建账前的历史），
+/// 所以两者都没有时才写 `—`（不写 0）。
+fn messages_text(own: &UsageMeasures, ledger: Option<&SessionUsage>) -> String {
+    let from_ledger = ledger.map(|ledger| ledger.user_messages).unwrap_or(0);
+    if from_ledger > 0 {
+        return count(from_ledger);
+    }
+    if own.user_messages > 0 {
+        return count(own.user_messages);
+    }
+    NONE_MARK.to_string()
 }
 
 /// `tree:` 行：子树（自身之外的会话）的会话数与 token 和。
@@ -1397,6 +1414,58 @@ mod tests {
             format!("usage:  {NONE_MARK} (no audit flow)\n")
         );
         assert!(!format_usage_block(&block, None).contains('0'));
+    }
+
+    /// `messages:` 行优先读会话账本：审计的 `audit_user_message` 是后加的表，存量会话的
+    /// 流水是 0 而账本有真实值——只读流水会把「说过 7 条」显示成 0。
+    #[test]
+    fn the_messages_line_prefers_the_ledger_over_the_flow() {
+        let own = UsageMeasures {
+            sessions: 1,
+            user_messages: 0,
+            llm_calls: 12,
+            prompt_tokens: 900,
+            ..UsageMeasures::default()
+        };
+        let report = usage_report(vec![usage_row("sid", None, own.clone())], own.clone());
+        let block = InfoUsage::from_report(&report, "sid");
+        let ledger = SessionUsage {
+            user_messages: 7,
+            turns: 3,
+            ..SessionUsage::default()
+        };
+        let text = format_usage_block(&block, Some(&ledger));
+        assert!(text.contains("  messages:           7"), "{text}");
+        assert!(!text.contains("messages:           0"), "{text}");
+
+        // 账本没有（或为 0）且流水也是 0 → `—`（不写 0）。
+        assert!(
+            format_usage_block(&block, None).contains(&format!("messages:           {NONE_MARK}")),
+            "两者都没有读数时不写 0"
+        );
+        let flow = UsageMeasures {
+            user_messages: 5,
+            ..own.clone()
+        };
+        let report = usage_report(vec![usage_row("sid", None, flow.clone())], flow);
+        let block = InfoUsage::from_report(&report, "sid");
+        assert!(
+            format_usage_block(&block, None).contains("  messages:           5"),
+            "回退到流水"
+        );
+
+        // 两者都没有 → `—`（不写 0）。
+        let quiet = UsageMeasures {
+            llm_calls: 1,
+            ..UsageMeasures::default()
+        };
+        let report = usage_report(vec![usage_row("sid", None, quiet.clone())], quiet);
+        let block = InfoUsage::from_report(&report, "sid");
+        let text = format_usage_block(&block, Some(&SessionUsage::default()));
+        assert!(
+            text.contains(&format!("  messages:           {NONE_MARK}")),
+            "{text}"
+        );
     }
 
     /// 子树汇总取 `totals`（不被 `limit` 截断），不靠把返回的行加起来：

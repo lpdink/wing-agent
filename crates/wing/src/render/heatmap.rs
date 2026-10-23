@@ -5,8 +5,9 @@
 //!
 //! - **档位是相对量**（非零日的四分位，GitHub 同款思想）：一天跑了 200 次调用不会把其余
 //!   全部压成最浅一档。绝对值永远可从 `wing usage --by day` / `--json` 读到；
-//! - **范围外与「范围内但没活动」不能同形**：前者是空格（那一天不属于这次查询），后者是
-//!   最浅档 `·`。把两者画成一样会让「我的范围选对了吗」无从判断。
+//! - **每一行的格子槽位严格对齐**：所有行共用同一个 gutter（6 列）、同一套 2 列一格的槽位、
+//!   同一个总宽度。因此窗口外的日子也画成 0 档 `·`——把它画成空格会让「窗口从周几开始」变成
+//!   行首缩进，整张图看起来是错位的。范围边界读标题里的 `since → until`。
 //!
 //! 有颜色时格子仍是 `█`（填满格子），档位由**前景色明度**表达（`surface → accent` 线性
 //! 混色）；无颜色（pipe / `NO_COLOR` / `TERM=dumb`）时退化成 `·░▒▓█` 字形。
@@ -93,22 +94,21 @@ impl Heatmap<'_> {
             for slot in 0..shown {
                 let monday = first_monday + Duration::days(((offset + slot) * 7) as i64);
                 let date = monday + Duration::days(row as i64);
-                let value = (date >= self.since && date <= self.until)
-                    .then(|| by_day.get(&date).copied().unwrap_or(0));
+                // 窗口外的日子走 0 档：格子槽位一律画满，行宽才与其它行相同。
+                let value = if date >= self.since && date <= self.until {
+                    by_day.get(&date).copied().unwrap_or(0)
+                } else {
+                    0
+                };
                 cells.push(self.cell(value, &thresholds));
             }
-            // 行尾空格没有意义（末列落在范围外时尤其明显）：裁掉，行宽仍由格子数决定。
-            lines.push(
-                format!(
-                    "{}{}",
-                    row_label(row),
-                    join_cells(&cells, self.ink.is_some())
-                )
-                .trim_end()
-                .to_string(),
-            );
+            lines.push(format!(
+                "{}{}",
+                row_label(row),
+                join_cells(&cells, self.ink.is_some())
+            ));
         }
-        let legend = self.legend_line();
+        let legend = self.legend_line(shown, marker);
         if !legend.is_empty() {
             lines.push(legend);
         }
@@ -132,10 +132,7 @@ impl Heatmap<'_> {
     }
 
     /// 一个格子的字形与其墨色。
-    fn cell(&self, value: Option<i64>, thresholds: &[i64; 3]) -> (char, Option<Color>) {
-        let Some(value) = value else {
-            return (' ', None);
-        };
+    fn cell(&self, value: i64, thresholds: &[i64; 3]) -> (char, Option<Color>) {
         let tier = tier_of(value, thresholds);
         if tier == 0 {
             return (TIER_GLYPHS[0], self.ink.map(|palette| palette.dim));
@@ -158,9 +155,9 @@ impl Heatmap<'_> {
         cell_offset: usize,
         marker: bool,
     ) -> String {
-        // 月份标签可以长得比格子宽（末列的那一个月就是这种情况），只要不出终端预算。
-        let cells_width = cell_row_width(shown + usize::from(marker));
-        let mut row: Vec<char> = vec![' '; self.width.max(GUTTER + cells_width)];
+        // 与格子行同宽；末列的月份标签可以写到格子区的右邻（只在这一种情形下更宽）。
+        let grid = grid_width(shown, marker);
+        let mut row: Vec<char> = vec![' '; self.width.max(grid)];
         let mut next_free_slot = 0usize;
         // 被间距规则挡住的标签**延后**到下一个可用列，而不是丢掉：一个月份的标注机会
         // 通常只有一次（含它 1 号的那一周），丢掉就等于整月无名。
@@ -195,13 +192,19 @@ impl Heatmap<'_> {
             }
             next_free_slot = slot + MONTH_SLOT_GAP;
         }
-        row.into_iter().collect::<String>().trim_end().to_string()
+        let end = row
+            .iter()
+            .rposition(|ch| *ch != ' ')
+            .map_or(0, |index| index + 1)
+            .max(grid);
+        row.truncate(end);
+        row.into_iter().collect::<String>()
     }
 
     /// 图例行：`less · ░ ▒ ▓ █ more`（有颜色时同样着色）。
     ///
     /// 固定宽度的一句话：窄到装不下就整行不画（半截图例比没有更误导）。
-    fn legend_line(&self) -> String {
+    fn legend_line(&self, shown: usize, marker: bool) -> String {
         /// `less ` + 5 格 + 4 个分隔 + ` more`（每个字形都是 1 个显示列）。
         const PLAIN_WIDTH: usize = GUTTER + 5 + 5 + 4 + 5;
         if self.width < PLAIN_WIDTH {
@@ -222,10 +225,16 @@ impl Heatmap<'_> {
                 }
             })
             .collect();
-        format!(
+        let text = format!(
             "{}less {} more",
             " ".repeat(GUTTER),
             join_cells(&cells, self.ink.is_some())
+        );
+        // 与格子行同宽（等宽是本模块的契约；尾部空格在终端上看不见）。
+        let grid = grid_width(shown, marker);
+        format!(
+            "{text}{}",
+            " ".repeat(grid.saturating_sub(visible_chars(&text)))
         )
     }
 }
@@ -243,6 +252,16 @@ fn max_columns(width: usize) -> usize {
 /// 整行格子的显示宽度（含左侧 `…` 占位，不含 gutter）。
 fn cell_row_width(slots: usize) -> usize {
     slots.saturating_mul(2).saturating_sub(1)
+}
+
+/// 整块热力图的显示宽度（gutter + 格子区）。
+fn grid_width(slots: usize, marker: bool) -> usize {
+    GUTTER + cell_row_width(slots + usize::from(marker))
+}
+
+/// 一串纯文本的显示列数（这里只有 ASCII 与单列字形，字符数即列数）。
+fn visible_chars(text: &str) -> usize {
+    text.chars().count()
 }
 
 /// 行标签（`Mon` / `Wed` / `Fri` / `Sun`），其余行留空。
@@ -351,11 +370,10 @@ mod tests {
         let lines = render("2026-10-21", "2026-10-21", &[(date("2026-10-21"), 5)]);
         assert_eq!(lines.columns, 1);
         let rows = rows(&lines.lines);
-        // 只有周三那一行有格子（其余是范围外的空格）。
-        assert_eq!(rows[0], "", "{rows:?}");
+        // 只有周三那一行有读数；同一周里窗口外的日子照样占一个格子（画 0 档），
+        // 所以每一行的格子数都一样（= 列数），行首不会缩进。
         assert_eq!(rows[2], "░", "周三的格子落在第 3 行：{rows:?}");
-        // 其余行是范围外（空格），不是 `·`。
-        assert!(rows.iter().all(|row| row != "·"), "{rows:?}");
+        assert!(rows.iter().all(|row| row.chars().count() == 1), "{rows:?}");
         // 四行标尺在（整行没有格子时行尾空格被裁掉，所以不锚定分隔空格）。
         assert!(lines.lines[1].starts_with("  Mon"));
         assert!(lines.lines[3].starts_with("  Wed"));
@@ -365,16 +383,65 @@ mod tests {
 
     /// 范围外 = 空格；范围内没活动 = `·`。两者不能同形。
     #[test]
-    fn out_of_range_cells_are_blank_while_quiet_days_are_the_light_dot() {
+    fn quiet_days_and_days_outside_the_window_share_the_lightest_cell() {
         let lines = render("2026-10-19", "2026-10-25", &[(date("2026-10-20"), 7)]);
         assert_eq!(lines.columns, 1);
         let rows = rows(&lines.lines);
         assert_eq!(rows[1], "░", "周二有活动：{rows:?}");
-        // 周三..周日都在范围内但没有活动 → `·`。
+        // 周三..周日：窗口内、没活动。
         assert_eq!(rows[2], "·", "{rows:?}");
         assert_eq!(rows[6], "·", "{rows:?}");
-        // 周一在范围内同样没活动（不是空格）。
+        // 周一在窗口内、同样没活动。
         assert_eq!(rows[0], "·", "{rows:?}");
+    }
+
+    /// 布局契约（渲染契约，不是视觉偏好）：**每一行共用同一个 gutter 与同一套格子槽位**。
+    ///
+    /// 窗口从周中开始时（这里从周五起），首个窗口外的那几天也必须占满自己的槽位——否则
+    /// 行首缩进不同，整张图看起来是错位的（这正是把窗口外画成空格时的样子）。
+    #[test]
+    fn every_row_shares_one_gutter_and_one_cell_geometry() {
+        // 2026-07-31 是周五：首列（周一起）有 4 天在窗口外。
+        let lines = render("2026-07-31", "2026-10-23", &[(date("2026-10-23"), 9)]);
+        assert_eq!(lines.columns, 13);
+        let all: Vec<&str> = lines.lines.iter().map(String::as_str).collect();
+
+        // 7 行格子 + 月份行 + 图例：首字符都从第 0 列起，第一格（或第一段文字）都在 gutter 之后。
+        let first_glyph = |line: &str| -> usize {
+            line.chars()
+                .enumerate()
+                .find(|(_, ch)| !ch.is_whitespace())
+                .map_or_else(|| line.chars().count(), |(column, _)| column)
+        };
+        // 7 行格子的显示宽度完全相等（unicode-width，不是字节数）……
+        let widths: Vec<usize> = all[1..8].iter().map(|line| visible_width(line)).collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "行宽必须一致：{widths:?}\n{all:#?}"
+        );
+        // ……而格子区恒从 gutter 起（行宽 - 格子区宽度 == gutter），与行标签长短无关。
+        let cells_width = cell_row_width(lines.columns);
+        for line in &all[1..8] {
+            assert_eq!(
+                visible_width(line) - cells_width,
+                GUTTER,
+                "第一格起始列必须一致：{line:?}"
+            );
+        }
+        // 月份行与图例也共用同一个 gutter（前导空白不会早于它），并与格子行等宽
+        // （月份标签只在末列月份写到格子区右邻时才更宽）。
+        assert!(first_glyph(all[0]) >= GUTTER, "{:?}", all[0]);
+        assert_eq!(
+            visible_width(all[0]),
+            widths[0],
+            "月份行与格子行等宽：{all:#?}"
+        );
+        assert_eq!(first_glyph(all[8]), GUTTER, "{:?}", all[8]);
+        assert_eq!(
+            visible_width(all[8]),
+            widths[0],
+            "图例与格子行等宽：{all:#?}"
+        );
     }
 
     #[test]
@@ -560,7 +627,11 @@ mod tests {
     fn the_legend_names_the_five_tiers() {
         let lines = render("2026-10-19", "2026-10-25", &[(date("2026-10-20"), 3)]);
         let legend = lines.lines.last().unwrap();
-        assert_eq!(legend, "      less · ░ ▒ ▓ █ more");
+        // 图例是真句话 + 补齐到格子行的宽度（等宽契约）。
+        assert!(
+            legend.starts_with("      less · ░ ▒ ▓ █ more"),
+            "{legend:?}"
+        );
         assert!(lines.lines[0].contains("Oct"), "{:?}", lines.lines[0]);
     }
 

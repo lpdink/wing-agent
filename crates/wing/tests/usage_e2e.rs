@@ -494,7 +494,8 @@ async fn info_gains_a_usage_block_and_keeps_its_json_shape() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("context:"), "{stdout}");
     assert!(stdout.contains("usage:"), "{stdout}");
-    assert!(stdout.contains("messages:           4"), "{stdout}");
+    // 账本（`SessionInfoResponse.usage.user_messages = 3`）优先于流水（4）：两处都在时账本说话。
+    assert!(stdout.contains("messages:           3"), "{stdout}");
     assert!(
         stdout.contains("calls:              3 llm · 6 tools"),
         "{stdout}"
