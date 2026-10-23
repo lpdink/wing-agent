@@ -53,21 +53,31 @@ pub struct ThemePalette {
 
 ### 3.3 检测
 
+落点：`crates/wing/src/tui/appearance.rs`（模块 `tui::appearance`）。
+
 ```rust
-/// OSC 11 背景色查询。仅在 raw mode 下、stdin 接驳安装前调用（fd 0 仍是真实 tty）。
-/// 返回 None = 终端不答/格式不认识/超时 -- 调用方回退 `Wing`。
-pub fn detect_appearance(timeout: Duration) -> Option<Appearance>;
+/// OSC 11 背景色查询。非 tty / 终端不答 / 应答不认识 / 超时 → None（调用方回退 `Wing`）。
+pub fn detect(timeout: Duration) -> Option<Appearance>;
+/// 进程级一次；按 preset 决定要不要问，答案存静态。
+pub fn probe_once(preset: ColorPreset) -> Option<Appearance>;
+/// 已知答案（没探过 / 没答案 = None）。
+pub fn detected_appearance() -> Option<Appearance>;
+pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，可单测
 ```
 
-- 实现位置：`tui::begin_tui_session` 内、`enable_raw_mode()` 之后、`stdin_proxy::install()` 之前。探测结果存进程级 `OnceLock<Option<Appearance>>`，供 `init_terminal` 之后的配置解析读取。
-- 只在 `preset == Auto` 时发查询；其他 preset 零开销。
-- 查询字节 `ESC]11;?\x07`；应答 `ESC]11;rgb:RRRR/GGGG/BBBB`（BEL 或 ST 终止）。用亮度判 `Appearance`（> 0.5 为亮底）。
-- 超时 150 ms。失败不影响任何现有行为。
+- **位置**：`tui::begin_tui_session` 内、`enable_raw_mode()` 之后、`stdin_proxy::install()` 之前 —— 读应答要非规范模式，而接驳之后 fd 0 就不再是真实 tty。探测结果进进程级 `OnceLock`，第二段 TUI（向导 → 主 TUI）与设置面重算都读同一份。
+- **只在 `preset == Auto` 时发查询**：别的 preset 零查询、零开销（`begin_tui_session` 把 `AppConfig::load().colors.preset` 交给 `probe_once`，非 `auto` 一个字节都不发）。设置面板把 preset 改成 `auto` 时，`detected_appearance()` 返回的就是启动时那一份；启动时不是 `auto` 的那次运行里它是 `None`（回退 `Wing`），下次启动才探测。
+- **一问一答**：查询 `ESC]11;?\x07`（写 stdout + flush）；应答 `ESC]11;rgb:RRRR/GGGG/BBBB`，终止符 BEL 或 ST（`ESC \`），每通道 1~4 位 hex（`f` 与 `ffff` 同量程）。应答前后的杂字节（窗口内键入的按键）不影响解析：按 `ESC]11;` 定位。
+- **判据**：WCAG 相对亮度（sRGB 线性化 + `0.2126/0.7152/0.0722` 加权），**> 0.5 判亮底**。注意 `#808080` 这类中灰落在暗侧（亮度 0.216）—— 按通道平均值判会给出相反的结论。
+- **超时 150 ms**（`appearance::DETECT_TIMEOUT`），读侧是 `poll(2)` + 一次 `read`；累积上限 128 字节（超了说明进来的不是应答，放弃）。非 Unix 平台没有这一层（`detect` 直接 `None`）。
+- **窗口内的 termios**：fd 0 临时切到「非规范 + 不回显」（保留 `ISIG`，Ctrl+C 仍是中断），`Drop` 原样写回。窗口内键入的按键会被读走 —— 与图像能力探测（≤500 ms）同款取舍，且这是 fd 0 还没换手的唯一时点。
+- 结果写一行 `tracing::debug!`（`terminal background probe`）：用户报「浅色终端还是暗色」时，看得出是没探到还是探到了暗底。
 
-### 3.4 CLI（`wing ps` 等）
+### 3.4 CLI（`wing ps`）
 
-- `AppConfig::load()` 之后按 preset 解析。`auto` 且 stdout 是 tty 时做一次探测；非 tty / `--json` 不探测，按 `wing` 输出。
-- 与 TUI 共用 `ThemePalette::from_config`，不新增颜色路径。
+- `AppConfig::load()` 之后按 preset 解析。`auto` 且**表格真的带颜色**时做一次探测；`--json` / stdout 非 tty / `NO_COLOR` / `TERM=dumb` 不探测（那些输出没有 ANSI 墨色，探了也不影响画面），按 `wing` 输出。
+- **只覆盖 `wing ps`**（含 `--watch`）：其余表格命令（`branch` / `cache` / `query` / `wake` / 退出摘要）仍走 `from_config`，`auto` 在那里等价于 `Wing` —— 浅色终端下要正确颜色请显式写 `preset: light`，或等后续波次把探测接进同一处 CLI 入口。
+- 与 TUI 共用 `ThemePalette::from_config_with_appearance`，不新增颜色路径。
 
 ## 4. light 调色板
 
@@ -114,14 +124,17 @@ pub fn detect_appearance(timeout: Duration) -> Option<Appearance>;
 | `ui/cells/thinking.rs` | 刷光峰值方向读 `appearance`；不再把 `Reset` 当白 |
 | `ui/shimmer.rs` | `to_rgb(Reset)` 不再假定白；`is_light_theme` 删除 |
 | `ui/cells/todo_msg.rs`、`render/markdown/types.rs` | 浅色下避免「淡色槽 + DIM」双重淡化 |
-| `cmd/setup.rs` + `config/catalog.rs` | preset 枚举加 `auto` / `light` 及文案；设置面板实时预览沿用现有机制 |
+| `cmd/setup.rs` + `config/catalog.rs` | preset 枚举加 `auto` / `light` 及文案（目录驱动：向导与设置面板同一份声明）；向导每帧的预览调色板改走 `from_config_with_appearance`，吃 §3.3 的探测结果 |
 | `examples/theme_preview.rs` | 支持 `--preset light` 与白/浅灰底导出，作为验收工具 |
 
 ## 6. 边界与失败模式
 
 - 终端不答 OSC 11（tmux、screen、部分 SSH、ConPTY）→ 回退 `wing`；浅色 tmux 用户需手动 `preset: light`，二期再评估 passthrough。
 - 应答格式不认识 / 超时 → 同上，不猜。
-- `NO_COLOR`：TUI 不参与（现状）；CLI 表格已有 `no-color` 口径，不动。
+- 非 Unix 平台没有探测原语（`detect` 直接 `None`）→ 回退 `wing`，与「终端不答」同一分支。
+- 启动时 preset **不是** `auto` 的那次运行里没有探测；同一次运行内把设置面板改回 `auto` → 仍按 `wing`（`detected_appearance()` 为 `None`），重启后正确。这是「显式 preset 零开销」的直接代价。
+- 只有 `wing ps` 的表格接入了 CLI 探测（见 §3.4）；其余表格命令的 `auto` 等价于 `wing`。
+- `NO_COLOR`：TUI 不参与（现状）；CLI 表格已有 `no-color` 口径 —— 不探测，输出本就没有墨色。
 - 非 tty、`--json`、`--plain`：不探测，不影响输出。
 - 逐槽覆盖跨 preset 生效：用户显式值优先，文档写明。
 - 探测会吞掉启动窗口（≤150 ms）内的按键，与现有图像能力探测（≤500 ms）同款取舍；打字机场景下这仍是唯一可行的时点。
@@ -132,7 +145,8 @@ pub fn detect_appearance(timeout: Duration) -> Option<Appearance>;
 - **appearance 单测**：`Wing → Dark`、`Light → Light`、`Terminal → Dark`；`Auto` 解析在注入探测结果下的四条分支（亮/暗/None/超时）。
 - **语法主题单测**：`palette.syntax` 切换后关键字/字符串色值随之变化。
 - **渲染回归**：欢迎屏、popup、settings、toast 各一张白底与黑底的文本 + 颜色断言（复用现有 `theme_preview` / 捕获工具）。
-- **检测**：探测函数注入 `Read`/`Write`（不依赖真终端），覆盖 BEL/ST、跨 read 分片、畸形响应、超时。
+- **检测**（`tui/appearance.rs` 单测，不碰真终端）：BEL / ST 两种终止符、1/2/4 位 hex、中灰落暗侧、通道加权（纯绿亮 / 纯红暗）、杂字节包围、畸形应答（缺 / 多通道、非 hex、非 `rgb:`）、应答跨 read 分片、终止前不解析、噪声按 128 字节封顶、答案只问一次。
+- **检测的端到端证据**（`tests/appearance_probe_pty.rs`，pty 级）：白底应答 → `Light`；不答 → `None` 且耗时不越过预算。
 - 更新受影响的既有测试（A 报告 §6 的 12 组：亮度序、`to_rgb → 白`、toast RGB、popup `bg == dim`、海鸥羽白、settings 预览等）。
 
 ## 8. 波次

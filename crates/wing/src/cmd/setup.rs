@@ -623,8 +623,12 @@ fn draw_setup_frame<B: Backend>(
     note: &Note,
     panel_open: bool,
 ) -> Result<()> {
-    // 调色板每帧现算：Interface 根的实时预览因此一按键就可见。
-    let palette = ThemePalette::from_config(&config.colors);
+    // 调色板每帧现算：Interface 根的实时预览因此一按键就可见；`auto` 用启动时探到的
+    // 底色（向导是本进程第一段 TUI，探测已经在 `begin_tui_session` 里发生过）。
+    let palette = ThemePalette::from_config_with_appearance(
+        &config.colors,
+        crate::tui::detected_appearance(),
+    );
     // `crate::tui::draw_frame`（而不是 `terminal.draw`）：向导是同一块终端上的第二个
     // 绘制面，它画出的设置值同样可能带上 VS16 表情符号（见 `crate::ui::emoji_width`）。
     crate::tui::draw_frame(terminal, |frame| {
