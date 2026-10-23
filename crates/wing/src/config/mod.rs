@@ -173,11 +173,15 @@ impl ColorPreset {
                 marker: Color::Blue,
                 quote: Color::LightBlue,
                 thinking_label: Color::LightYellow,
-                surface: Color::Rgb(52, 53, 65),
-                diff_add_bg,
-                diff_del_bg,
-                diff_add_bg_strong,
-                diff_del_bg_strong,
+                // Reset = the terminal's own background: the card and the diff
+                // tint bands merge into it instead of painting a fixed dark
+                // slab on a light scheme. `+`/`-` markers and syntax colours
+                // still carry the change.
+                surface: Color::Reset,
+                diff_add_bg: Color::Reset,
+                diff_del_bg: Color::Reset,
+                diff_add_bg_strong: Color::Reset,
+                diff_del_bg_strong: Color::Reset,
                 math_mode: MathMode::Text,
                 // The terminal owns the actual appearance; `Dark` keeps the
                 // pre-existing behaviour (sweep toward white) for this escape
@@ -772,7 +776,10 @@ mod tests {
             "H1 must stay a rung above H2"
         );
         assert_ne!(p.marker, p.dim, "list marks must not read as chrome");
-        assert_eq!(p.surface, Color::Rgb(52, 53, 65));
+        // Background bands follow the terminal instead of painting a fixed
+        // dark slab (the light-scheme failure this preset used to carry).
+        assert_eq!(p.surface, Color::Reset);
+        assert_eq!(p.diff_add_bg, Color::Reset);
     }
 
     /// An unknown preset warns and keeps the default instead of failing the
