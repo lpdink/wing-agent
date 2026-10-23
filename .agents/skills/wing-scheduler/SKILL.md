@@ -21,11 +21,11 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 2. while 还有未收敛的 step：
      a. 选出"依赖已就绪"的 step，按 lane 派发 executor（并发由你判断）        （§6）
      b. 登记唤醒（`wing run` 默认已开）后干别的，被叫醒就判读结果            （§7）
-     c. 交付达标的 step：验收复核（执行者已自派一轮双视角 review）          （§8.1–8.2）
+     c. 交付达标的 step：验收复核（执行者已自派一轮双视角 review）           （§8.1–8.2）
      d. 复核不合格 → `-r` 补齐（最多 3 轮）→ 收敛，或判定阻塞并跳过下游      （§9）
      e. 该 lane 空闲 → 派这条 lane 的下一个 step（别的 lane 继续跑）
      f. 更新 scheduler_log + 向用户播报两行进度                              （§4.3 / §11）
-3. 全部收敛 → 集成到单一分支 → 全量验收 → 派一轮整体双视角 review         （§10）
+3. 全部收敛 → 集成到单一分支 → 全量验收 → 派一轮整体双视角 review            （§10）
 4. 整体 review 的 B/S 修完 → push / 开 PR → 写 summary.md → 汇报结论         （§10 / §11）
 ```
 
@@ -65,7 +65,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 - **自己**：`wing tag $WING_SESSION_ID scheduler task=<task_name>`——`$WING_SESSION_ID` 是 Bash 工具注入的环境变量 = 你所在会话的 id（开工时先 `echo $WING_SESSION_ID` 确认非空；为空说明运行环境尚未支持该注入，打标需人工确认 sid）；
 - **executor / reviewer**：派发的 `wing run` 直接带 `--tag executor --tag task=<task_name>`（reviewer 用 `--tag reviewer`，再按视角加 `--tag reviewer-correctness` / `--tag reviewer-arch`）——创建即打标、一条命令原子完成，没有"派发了但没标上"的窗口；`-r` 续跑同样接受 `--tag`（幂等追加）；
 - **巡检 / 找回**：`wing ps --tag task=<task_name>` 看任务全家（多个 `--tag` 为 AND；`--tag` 隐含包含 inactive）；**归档区的会话不在 `wing ps` 里**（冷存储，用 `wing archive --list` 查）；
-- 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词，任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。
+- 约定：标签是不透明字符串（建议小写、`k=v` 作命名空间）；角色用裸词、视角作后缀（`reviewer-correctness` / `reviewer-arch`），任务统一 `task=<task_name>`。不确定标过没：`wing tag <sid>` 读、`wing tag --list` 清点全局。
 
 ## 2. 铁律（违反任意一条，编排都会崩坏）
 
@@ -97,12 +97,14 @@ $WING_HOME/tasks/<task_name>/
 │   ├── task.md                  # 勾选清单（executor 写，随做随勾）
 │   ├── review_request.md        # 审查要求（executor 写，交付前派 review 时用）
 │   ├── review_r<N>.md           # 正确性审查报告 B/S/N 分级（reviewer 写，r1/r2/r3 不覆盖）
-│   └── review_arch_r<N>.md      # 架构审查报告 B/S/N 分级（reviewer 写，同一轮、不覆盖）
+│   └── review_arch_r<N>.md      # 架构审查报告 B/S/N 分级（reviewer 写，r1/r2/r3 不覆盖）
+├── review_overall_r<N>.md       # 整体审查报告（正确性；scheduler 派，r1/r2/r3 不覆盖）
+├── review_overall_arch_r<N>.md  # 整体审查报告（架构；scheduler 派，r1/r2/r3 不覆盖）
 └── ...
 ```
 
 - `<task_name>` 用 **kebab-case**（会出现在命令行与 prompt 里，避免空格与中文）；`<NN>` 是两位编号（01、02…），体现拓扑顺序；依赖关系写在步骤 proposal 里。
-- **产物 owner 唯一，不许互相覆盖**：scheduler 只写 proposal / scheduler_log / summary（+ 整体 review 的 review_request）；executor 只写 design / task / review_request + 代码；reviewer 各写自己那份 review 报告（正确性 `review_r<N>.md` / 架构 `review_arch_r<N>.md`）。
+- **产物 owner 唯一，不许互相覆盖**：scheduler 只写 proposal / scheduler_log / summary（+ 整体 review 的 review_request）；executor 只写 design / task / review_request + 代码；reviewer 各写自己那份 review 报告（正确性 `review_r<N>.md` / 架构 `review_arch_r<N>.md`；整体 review 的 `review_overall_r<N>.md` / `review_overall_arch_r<N>.md` 同样归 reviewer）。
 
 ## 4. 阶段 1 — 需求澄清与任务书（唯一需要人类介入的阶段）
 
@@ -344,7 +346,7 @@ wing interrupt <sid>
 
 | 审什么 | 谁派 | 什么时候 | 你做什么 |
 |---|---|---|---|
-| **每步的独立 review** | 执行者自己（契约第 7 条），正确性 + 架构并发两个 | 交付前，按它自己的节奏 | **验收复核**（§8.2） |
+| **每步的独立 review** | 执行者自己（契约第 7 条；两个视角并发） | 交付前，按它自己的节奏 | **验收复核**（§8.2） |
 | **整体 review** | 你，同样两个视角并发 | 全部步骤收敛、集成 + 全量验收通过之后（§10.3） | 读两份报告 → 派执行者修 B/S |
 
 ### 8.1 每步的 review 由执行者自派
@@ -353,7 +355,7 @@ wing interrupt <sid>
 
 你只要做两件事：
 
-1. **把两份审查者契约连进执行者 prompt**（§8.3 的文本原样贴过去——子 agent 读不到这份 skill）；
+1. **把两份审查者契约连进执行者 prompt**（按 §8.3 各拼一份：角色 + 对应那段「你要做的」，输出与红线原样；子 agent 读不到这份 skill）；
 2. **验收复核**（§8.2）。
 
 ### 8.2 验收复核（不合格就退回，不要自己上手改）
@@ -439,10 +441,11 @@ EOF
 ### 8.4 审查结束后核对
 
 ```bash
-git -C <worktree> status --porcelain    # 必须干净：reviewer 没碰过工作区
+git -C <worktree> status --porcelain    # 必须干净：两个 reviewer 都没碰过工作区
+git -C <worktree> diff --stat           # 有 tracked 改动时，看落到了哪些文件
 ```
 
-不干净 → 该轮审查视为无效：`git checkout -- <paths>` 恢复（或 `git stash`），记一笔，必要时换个 reviewer 重审。
+不干净 → 至少一份审查的现场被污染：`git checkout -- <paths>` 恢复（或 `git stash`），记一笔；能归因就**重派被污染的那个视角**，无法归因就两个都重派（受影响那份报告作废重写）。
 
 ### 8.5 读报告并分类
 
@@ -549,7 +552,7 @@ git push -u origin <task>/integration
 写 `$WING_HOME/tasks/<task>/summary.md`（附录 E），然后向用户汇报一段话（**不要复制整个文档**）：
 
 - 交付终态与位置（分支 / PR 链接 / commit 范围）；
-- 变更清单（按步骤，一句话一个）；
+- 变更清单（按步骤，一句话一个；审查结论按两个视角各报一行）；
 - 验证证据（跑了什么命令、结果如何）；
 - **没做的事**（Out of Scope、未修的 S/N、被判定阻塞的步骤）与风险；
 - 需要用户决定的事（合并时机、上线窗口、遗留项）。
@@ -712,7 +715,7 @@ git push -u origin <task>/integration
 
 ### 附录 D — 审查报告（`review_r<N>.md` / `review_arch_r<N>.md`）
 
-两个视角用同一模板，只有文件名与结论口径不同：正确性写 `review_r<N>.md`、结论针对功能与验收；架构写 `review_arch_r<N>.md`、结论只针对结构维度（写「架构结论」）。
+两个视角用同一模板，只有文件名不同：正确性写 `review_r<N>.md`、架构写 `review_arch_r<N>.md`；结论字段都是 `**结论**`，各自只针对自己的维度。
 
 ```markdown
 # <NN> <step_name> — 审查报告（第 <N> 轮）
@@ -761,7 +764,7 @@ git push -u origin <task>/integration
 - PR：<链接 或「未开（约定为本地分支就绪）」>
 
 ## 变更清单
-| 步骤 | 内容 | commit | 审查结论 |
+| 步骤 | 内容 | commit | 审查结论（正确性 / 架构） |
 |---|---|---|---|
 | 01_xxx | … | `abc1234` | 通过（r2） |
 
@@ -799,6 +802,13 @@ git push -u origin <task>/integration
 | 2026… | executor | 01_xxx | l1 | 09-17 15:02 | idle | 交付 3 commit + 自派双视角 review（review_r1 / review_arch_r1） |
 | 2026… | reviewer-correctness（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，B2/S1 已修，见 review_r2.md |
 | 2026… | reviewer-arch（executor 自派） | 01_xxx | l1 | 09-17 16:30 | idle | 执行者回执 → 我补记：r2 通过，S3 已修，见 review_arch_r2.md |
+
+## 审查发现（每轮两份报告各一行摘要）
+
+| 视角 | 编号 | 结论 / 处理 |
+|---|---|---|
+| 正确性 | B2 / S1 | 已修（commit `abc1234`），r2 通过 |
+| 架构 | S3 | 已修，见 review_arch_r2.md |
 
 ## 时间线
 | 时间 | 事件 | 对象 | 详情 |
