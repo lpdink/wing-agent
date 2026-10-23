@@ -13,8 +13,9 @@
 （``history.jsonl`` 首条记录的时刻，毫秒）→ ``meta``（``last_interaction``，兜底）。
 三档都拿不到就**跳过**——不发明时间，这一行留给下一次回填。
 
-写失败绝不影响 agent：``wing.db`` 降级时 ``execute`` 返回 False，本层再兜一层
-``try/except``（与 ``audit/recorder.py`` 同一条纪律）。
+写失败绝不影响 agent：``wing.db`` 降级时 ``execute`` / ``executemany`` 返回 ``False``
+（事务拿到 ``live=False``），本层再兜一层 ``try/except``（与 ``audit/recorder.py`` 同一条
+纪律）。
 """
 
 from __future__ import annotations
@@ -22,10 +23,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from wing.common.logger import log
 from wing.common.utils import parse_session_id_time
-from wing.db import Database, get_database
+from wing.db import DIAGNOSTIC_BUSY_TIMEOUT_MS, Database, get_database
 from wing.store import SessionStore
 
 _INSERT = """
@@ -58,6 +60,9 @@ def record_session_created(
     调用点必须是「创建新会话」的那几条分支（新建 / fork）。create-or-adopt 命中既有
     会话、以及 resume，都**不写**——目录行是创建动作的一次性事实（与「血缘只写一次」
     同口径），存量会话由 :func:`backfill_catalog` 补齐。
+
+    等锁上限收紧到诊断档：建会话路由在事件循环线程上调用，另一个进程攥着写锁时
+    宁可丢这一行（下一次回填会补上），也不要把循环冻在稳态的 5 秒上。
     """
     ts_ms, ts = _stamp(datetime.now())
     db = database if database is not None else get_database()
@@ -75,6 +80,7 @@ def record_session_created(
                 template_name,
                 model_id,
             ),
+            busy_timeout_ms=DIAGNOSTIC_BUSY_TIMEOUT_MS,
         )
     except Exception as exc:  # 兜底：统计失败不影响 agent
         log.error(f"session_catalog: failed to record {session_id!r}: {exc!r}")
@@ -99,27 +105,34 @@ def backfill_catalog(
 ) -> int:
     """把「磁盘上有、目录里没有」的会话补进 ``session_catalog``。
 
-    单个会话失败不影响其它（逐条兜住 + 一行 WARNING）；整体跑完留一条 INFO。
+    单个会话失败不影响其它（逐条兜住 + 一行 WARNING）；整批写在**一笔事务**里
+    （一个 ``executemany``），因此存量会话再多也只等一次锁、提交一次。整体跑完留
+    一条 INFO。
 
     Returns:
         本次补齐的行数（差集语义：重跑返回 0）。
     """
     db = database if database is not None else get_database()
     known = _known_ids(db)
-    added = 0
+    batch: list[tuple[Any, ...]] = []
     for store in stores:
         for candidate in _candidates(store):
             if candidate.session_id in known:
                 continue
+            # 解析（读 metadata / 日志首条）留在事务外：文件 I/O 不该占着进程级的库锁。
             try:
-                if _backfill_one(db, store, candidate):
-                    known.add(candidate.session_id)
-                    added += 1
+                params = _backfill_params(store, candidate)
             except Exception as exc:  # 一个坏会话不该中断整轮回填
                 log.warning(
                     f"session_catalog: cannot backfill {candidate.session_id!r}: "
                     f"{exc!r}"
                 )
+                continue
+            if params is None:
+                continue
+            known.add(candidate.session_id)
+            batch.append(params)
+    added = _write_batch(db, batch)
     if added:
         log.info(f"session_catalog: backfilled {added} session row(s)")
     return added
@@ -132,25 +145,38 @@ def _known_ids(db: Database) -> set[str]:
     return {row[0] for row in db.query(_KNOWN_IDS) if isinstance(row[0], str)}
 
 
-def _backfill_one(db: Database, store: SessionStore, candidate: _Candidate) -> bool:
-    """写一行（创建时刻解析不出来就跳过——不发明时间）。"""
+def _write_batch(db: Database, batch: list[tuple[Any, ...]]) -> int:
+    """整批插入（一笔事务）。提交不了就一行不算——下一轮回填再来。
+
+    等锁上限同样收紧到诊断档：回填跑在 ``BackgroundScheduler`` 的唯一 task 里，也就是
+    事件循环线程上。单行违约束由 ``INSERT OR IGNORE`` 自己跳过（不会拖垮整批）；会
+    失败的是「拿不到写锁 / 磁盘错」这类整批性的问题，那时逐条重试也没有意义。
+    """
+    if not batch:
+        return 0
+    with db.transaction(busy_timeout_ms=DIAGNOSTIC_BUSY_TIMEOUT_MS) as txn:
+        db.executemany(_INSERT, batch)
+    return len(batch) if txn.committed else 0
+
+
+def _backfill_params(
+    store: SessionStore, candidate: _Candidate
+) -> tuple[Any, ...] | None:
+    """一行的参数（创建时刻解析不出来就跳过——不发明时间）。"""
     created = _created_at(store, candidate)
     if created is None:
-        return False
+        return None
     (ts_ms, ts), source = created
-    return db.execute(
-        _INSERT,
-        (
-            candidate.session_id,
-            ts_ms,
-            ts,
-            source,
-            candidate.parent_session_id,
-            candidate.forked_from,
-            candidate.workspace,
-            candidate.template_name,
-            candidate.model_id,
-        ),
+    return (
+        candidate.session_id,
+        ts_ms,
+        ts,
+        source,
+        candidate.parent_session_id,
+        candidate.forked_from,
+        candidate.workspace,
+        candidate.template_name,
+        candidate.model_id,
     )
 
 

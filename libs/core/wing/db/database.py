@@ -238,16 +238,38 @@ class Database:
 
     # ── 读 / 写 ───────────────────────────────────
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> bool:
-        """执行一条写语句。返回是否真正落库；任何异常都被吞掉（返回 ``False``）。"""
+    def execute(
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
+        *,
+        busy_timeout_ms: int | None = None,
+    ) -> bool:
+        """执行一条写语句。返回是否真正落库；任何异常都被吞掉（返回 ``False``）。
+
+        ``busy_timeout_ms`` 的语义与 :meth:`query` 完全一致：只对本次执行收紧等锁
+        上限，退出前恢复稳态值（别的线程看不到临时值）；**事务内一律忽略**（块的
+        收紧值归 :meth:`transaction` 管）。写在事件循环线程上的 best-effort 调用点
+        （如用量目录）用它：另一个进程攥着写锁时宁可丢这一笔，也不要冻住循环。
+        """
         with self._lock:
-            if not self._ready or self._conn is None:
+            conn = self._conn
+            if not self._ready or conn is None:
                 return False
+            narrowed = busy_timeout_ms if self._txn is None else None
+            if narrowed is not None:
+                try:
+                    conn.execute(f"PRAGMA busy_timeout={int(narrowed)}")
+                except Exception as exc:
+                    self._fail(exc)
+                    return False
             try:
-                self._conn.execute(sql, params)
+                conn.execute(sql, params)
             except Exception as exc:
                 self._fail(exc)
                 return False
+            finally:
+                self._restore_busy_timeout(conn, narrowed)
             return True
 
     def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> bool:

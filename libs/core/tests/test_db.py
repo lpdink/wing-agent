@@ -649,6 +649,28 @@ class _CommitFails:
         return self._conn.execute(sql, *args)
 
 
+def _expose_busy_timeout(db: Database) -> None:
+    """装一个 SQL 函数 `busy_timeout_now()`：返回调用那一刻连接的等锁上限。
+
+    写语句的返回值只有 True/False，读不到生效值——把当时的 PRAGMA 当**写入数据**
+    带出来，是这类断言唯一能观察到「本次执行期间确实生效」的角度。
+    """
+    conn = db._conn
+    assert conn is not None
+    conn.create_function(
+        "busy_timeout_now",
+        0,
+        lambda: conn.execute("PRAGMA busy_timeout").fetchone()[0],
+    )
+
+
+#: 把 `busy_timeout_now()` 记进 `ts_ms`（类型无关的落点，读回来就是当时的毫秒数）。
+_BUSY_TIMEOUT_INTO_TS_MS = (
+    "INSERT INTO audit_compaction (ts_ms, ts, session_id) "
+    "VALUES (busy_timeout_now(), 't', 's')"
+)
+
+
 class TestTransactions:
     def test_commit_persists_every_statement(self, tmp_path: Path) -> None:
         db = Database(tmp_path / "wing.db")
@@ -820,6 +842,48 @@ class TestTransactions:
             assert txn.live is True
             db.query("SELECT 1", busy_timeout_ms=250)
             assert db.query("PRAGMA busy_timeout")[0][0] == 50
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        db.close()
+
+    def test_execute_busy_timeout_override_applies_and_is_restored(
+        self, tmp_path: Path
+    ) -> None:
+        """写路径的短等锁上限：本次执行期间生效，结束后恢复稳态值。"""
+        db = Database(tmp_path / "wing.db")
+        _expose_busy_timeout(db)
+        assert db.execute(_BUSY_TIMEOUT_INTO_TS_MS, busy_timeout_ms=250) is True
+        assert [row[0] for row in db.query("SELECT ts_ms FROM audit_compaction")] == [
+            250
+        ]
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        db.close()
+
+    def test_execute_busy_timeout_is_restored_after_a_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """出错路径也恢复（异常仍被吞掉、返回 False）。"""
+        db = Database(tmp_path / "wing.db")
+        assert (
+            db.execute("INSERT INTO no_such_table (x) VALUES (1)", busy_timeout_ms=250)
+            is False
+        )
+        assert db.query("PRAGMA busy_timeout")[0][0] == 5000
+        db.close()
+
+    def test_execute_inside_a_transaction_keeps_the_transaction_override(
+        self, tmp_path: Path
+    ) -> None:
+        """事务内的写不改等锁上限：块的收紧值归 `transaction()` 管。"""
+        db = Database(tmp_path / "wing.db")
+        _expose_busy_timeout(db)
+        with db.transaction(busy_timeout_ms=50) as txn:
+            assert txn.live is True
+            assert db.execute(_BUSY_TIMEOUT_INTO_TS_MS, busy_timeout_ms=250) is True
+            assert db.query("PRAGMA busy_timeout")[0][0] == 50
+        assert txn.committed is True
+        assert [row[0] for row in db.query("SELECT ts_ms FROM audit_compaction")] == [
+            50
+        ]
         assert db.query("PRAGMA busy_timeout")[0][0] == 5000
         db.close()
 

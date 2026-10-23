@@ -20,7 +20,7 @@ import pytest
 
 from wing.config import AgentConfig, Config, ProviderConfig
 from wing.config.models import ModelSpec
-from wing.db import Database, get_database
+from wing.db import DIAGNOSTIC_BUSY_TIMEOUT_MS, Database, get_database
 from wing.metrics import (
     MEASURE_FIELDS,
     Measures,
@@ -900,3 +900,43 @@ class TestBackfill:
         monkeypatch.setattr(catalog_module, "_created_at", _explode)
 
         assert backfill_catalog([store], database=db) == 1
+
+    def test_the_batch_is_one_transaction_and_a_bad_row_is_skipped(
+        self, tmp_path: Path, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """整批一个事务（诊断档等锁上限）；解析失败的那一行只丢自己。"""
+        store = _store(tmp_path)
+        for session_id in (
+            "20260102-030405-abcdef",
+            "20260103-030405-abcdef",
+            "custom-broken",
+        ):
+            store.save_metadata(session_id, SessionMetadata(tags=LISTED))
+
+        from wing.metrics import catalog as catalog_module
+
+        real_created_at = catalog_module._created_at
+
+        def _explode(store_: SessionStore, candidate: Any) -> Any:
+            if candidate.session_id == "custom-broken":
+                raise RuntimeError("boom")
+            return real_created_at(store_, candidate)
+
+        monkeypatch.setattr(catalog_module, "_created_at", _explode)
+
+        spans: list[int | None] = []
+        real_transaction = db.transaction
+
+        def _counting(*, busy_timeout_ms: int | None = None) -> Any:
+            spans.append(busy_timeout_ms)
+            return real_transaction(busy_timeout_ms=busy_timeout_ms)
+
+        monkeypatch.setattr(db, "transaction", _counting)
+
+        assert backfill_catalog([store], database=db) == 2
+        assert spans == [DIAGNOSTIC_BUSY_TIMEOUT_MS], "整批只开一笔事务"
+        written = {
+            row["session_id"]
+            for row in db.query("SELECT session_id FROM session_catalog")
+        }
+        assert written == {"20260102-030405-abcdef", "20260103-030405-abcdef"}
