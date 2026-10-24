@@ -702,9 +702,9 @@ fn tip_line(tip: &str, palette: &ThemePalette, badge: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// 把 `/xxx` 形态的词染成 accent：**命令是唯一可以照着敲的东西**，在整套 UI
-/// 里都是 accent（popup 候选、行内代码、composer 的 workdir），名牌里若是 dim
-/// 就成了看不见的字。
+/// 把 `/xxx` 形态的词染成 accent（palette 的约定：accent = logo / 命令 / 链接；输入卡的
+/// `❯` 与粘贴 / 图片 chip 也用它，品牌图形与 spinner 另算 —— 见 `docs/dev/tui-input.md`）。
+/// 名牌里若是 dim，命令就成了看不见的字。
 fn with_commands(text: &str, base: Style, cmds: Style) -> Vec<Span<'static>> {
     let flush = |out: &mut Vec<Span<'static>>, word: &mut String, is_cmd: bool| {
         if !word.is_empty() {
@@ -1337,8 +1337,8 @@ mod tests {
 
     #[test]
     fn commands_in_the_nameplate_are_accent() {
-        // 命令是唯一可以照着敲的东西 —— 整套 UI 里都是 accent（palette 的约定：
-        // accent = logo / 命令 / 链接）。名牌里若是 dim，它就成了看不见的字。
+        // `/命令` 在整套 UI 里都是 accent（palette 的约定：accent = logo / 命令 / 链接）——
+        // 名牌里若是 dim，它就成了看不见的字。
         let palette = palette();
         for badge in [false, true] {
             let tip = tip_line("输入 /skills 看已装技能", &palette, badge);

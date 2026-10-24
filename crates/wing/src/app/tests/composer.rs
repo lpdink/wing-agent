@@ -224,9 +224,10 @@ fn test_the_card_keeps_the_terminal_background() {
     assert!(after.contains('发'), "the verb follows the key: {after:?}");
 }
 
-/// The outline's register: quiet while the card waits, one notch toward the
-/// accent while a draft waits in it, quiet again when another layer takes the
-/// keys. The exact ink is pinned in `ui::input_area::chrome`.
+/// The outline's register: `tool_result` while the card waits (a box, not a
+/// hairline), one notch toward the accent while a draft waits in it, quiet again
+/// when another layer takes the keys. The exact ink is pinned in
+/// `ui::input_area::chrome`.
 #[test]
 fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
     let palette = crate::config::ThemePalette::default();
@@ -243,23 +244,27 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
         inks
     };
 
-    // Empty: the draft is dim and the card has nothing to point at, so the
-    // boundary stays out of the way too.
+    // Empty: nothing typed yet, so the frame is what says "there is a box to
+    // type into" — and the caret points at the place typing lands.
     let mut app = app_with_draft("");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
-    assert_eq!(caret(&app, &buf), palette.dim, "❯ on an empty draft");
+    assert_eq!(caret(&app, &buf), palette.accent, "❯ on an empty draft");
     for ink in edges(&buf, composer) {
-        assert_eq!(ink, palette.dim, "an empty card's edge is quiet");
+        assert_eq!(ink, palette.tool_result, "an empty card's edge is its box");
     }
 
-    // A draft is waiting: the boundary leaves dim (never as far as the accent —
-    // the meta rail's workdir stays the saturated mark).
+    // A draft is waiting: the boundary turns toward the accent (never as far as
+    // the accent itself — the caret and the commands keep the saturated one).
     let mut app = app_with_draft("hello world");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
     assert_eq!(caret(&app, &buf), palette.accent, "❯ with a draft");
     for ink in edges(&buf, composer) {
         assert_ne!(ink, palette.dim, "a drafted card's edge steps up");
         assert_ne!(ink, palette.accent, "and it is not the full accent");
+        assert_ne!(
+            ink, palette.tool_result,
+            "and it is the hue shift that says so"
+        );
     }
 
     // An ask panel holds the keys: the card ghosts as a whole, boundary included.
@@ -269,6 +274,86 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
     assert!(app.composer_typing_blocked(), "the panel takes the keys");
     for ink in edges(&buf, composer) {
         assert_eq!(ink, palette.dim, "a ghosted card promises nothing");
+    }
+}
+
+/// "You can type here" outranks "you are here": on an empty card the
+/// invitation (the placeholder sentence) is the loudest ink inside the frame,
+/// and the path on the meta rail is far quieter.
+///
+/// Loudness is contrast against the paper the preset paints (`ui::chip`'s gate,
+/// the same one the bands use), so the claim holds on both appearances — a raw
+/// luminance would call the light preset's dark inks "quiet".
+#[test]
+fn test_the_empty_card_invites_loudest() {
+    use crate::config::ColorPreset;
+    use crate::config::colors::parse_color;
+    use crate::ui::chip;
+    use crate::ui::html::page_colors;
+    use crate::ui::shimmer::to_rgb;
+
+    for preset in [ColorPreset::Dark, ColorPreset::Light] {
+        // The palette is resolved once, at construction: the frame has to be
+        // built with the preset, not recoloured after it.
+        let mut config = crate::config::AppConfig::default();
+        config.colors.preset = preset;
+        let mut app = App::new("test-session".into(), config, None);
+        app.clear_welcome();
+        app.status.workdir = Some("/tmp/ws".into());
+        let (buf, composer) = draw_frame(&mut app, 80, 10);
+        let (text_x, text_y, _) = composer_text(&app);
+        let palette = app.palette();
+        let (background, _) = page_colors(&palette);
+        let paper = to_rgb(parse_color(background).expect("the page colour parses"));
+
+        // Contrast of every glyph the card drew.
+        let mut loudest = ('\0', 0u16, 0u16, 0.0f32);
+        for y in composer.y..composer.bottom() {
+            for x in composer.x..composer.right() {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                let level = chip::contrast(to_rgb(cell.fg), paper);
+                if level > loudest.3 {
+                    loudest = (cell.symbol().chars().next().unwrap_or('\0'), x, y, level);
+                }
+            }
+        }
+
+        let (glyph, x, y, loudest) = loudest;
+        assert_eq!(
+            (x, y),
+            (text_x, text_y),
+            "{preset:?}: the loudest glyph in the card is the invitation, not {glyph:?}:\n{}",
+            frame_text(&buf)
+        );
+        assert_eq!(
+            buf[(text_x, text_y)].fg,
+            palette.text,
+            "{preset:?}: the placeholder wears the body ink"
+        );
+
+        // The meta rail's leading item is the path: the first character on
+        // the bottom row that is not part of the frame. Walk the row's
+        // characters, not byte offsets into it — its box-drawing glyphs are
+        // three bytes each.
+        let bottom = card_row(&buf, composer, composer.bottom() - 1);
+        let path_x = bottom
+            .chars()
+            .position(|c| !matches!(c, '╰' | '╯' | '│' | '─' | ' '))
+            .expect("the workdir leads the rail") as u16;
+        assert!(
+            matches!(bottom.chars().nth(path_x as usize), Some('/' | '~')),
+            "{preset:?}: the leading item is the path:\n{bottom}"
+        );
+        let path_ink = buf[(composer.x + path_x, composer.bottom() - 1)].fg;
+        assert_eq!(path_ink, palette.dim, "{preset:?}: the path stays quiet");
+        assert!(
+            chip::contrast(to_rgb(path_ink), paper) < loudest / 2.0,
+            "{preset:?}: the path must not come near the invitation:\n{}",
+            frame_text(&buf)
+        );
     }
 }
 
