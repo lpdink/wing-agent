@@ -191,3 +191,9 @@ README 的 `demo.gif`（以及性能那一节的 `speed-*.gif`）也不是手工
 
 描边只加在**外部**透明像素上（边界 flood-fill）：形状之间 AA 缝隙留下的内部洞
 不描边，否则满身麻点 —— 这是光栅器里最容易回退的一条。
+
+改**整块**（状态栏 + 牌子 + 输入卡，连同光学中心与块宽）用
+`cargo run -p wing --example splash_preview`：它走真 `App::draw`，一条命令给出
+ANSI / `--plain` / `--html` 三种产物，`--preset` 过明暗、`--phase` 停在扫光的某一帧。
+几何回归由 `app::tests::splash_frame` 的整屏指纹兜底（牌子的绝对位置、分节线长度、
+输入卡边框行）—— 故意改版式常量时要一起更新那份断言。

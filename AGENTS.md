@@ -243,8 +243,9 @@ crates/wing/src/
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
 │   ├── popup_state.rs               Popup + 候选缓存 + 去重
+│   ├── preview.rs                   整屏帧取样器（创作期工具的库侧：真 App::draw → Buffer → 文本 / ANSI / HTML）
 │   ├── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
-│   └── tests/                       模块内单测（mod + 18 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / program_status + support）
+│   └── tests/                       模块内单测（mod + 18 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / splash_frame / program_status + support）
 ├── ui/                              UI 组件
 │   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染 + pending 条目）· model（内容模型）· media（消息里的图片：正文 + 引用 → 图块 / 标签行）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
@@ -280,7 +281,7 @@ crates/wing/src/
 └── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ base64（RFC 4648 编解码，OSC 与剪贴板协议共用）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
 ```
 
-配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（7 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
+配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（8 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `splash_preview` 开屏整块（状态栏 + 牌子 + 输入卡）的真帧 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
 
 源码门禁：`layer_guard.rs` 把 Rust 侧分层规则钉成扫描断言（Python 侧对应 `libs/core/tests/test_layering.py`，两侧规范见 [docs/dev/backend-layout.md](docs/dev/backend-layout.md)）；`session_guard.rs` 钉**编译器管不着的终端时序**（接驳安装点唯一、settle 早于首次 poll 等五条规则，语义见 [docs/dev/tui-input.md](docs/dev/tui-input.md)）。
 

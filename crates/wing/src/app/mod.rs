@@ -15,6 +15,7 @@
 
 pub mod intent;
 pub mod popup_state;
+pub mod preview;
 pub mod render_context;
 pub mod replay;
 pub mod runner;
