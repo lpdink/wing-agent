@@ -131,8 +131,10 @@ fn the_splash_block_sits_at_the_optical_centre_at_120x40() {
         (18, 46),
         "分节线：块宽 46 列、从第 57 列起"
     );
+    // 2x 档是键帽档：块与块之间用一列空气分句，不再有 ` · `（1x 档的纯文本
+    // 仍带分隔符，见 `ui::welcome` 的两条键位行）。
     assert!(
-        compact(&rows[19]).contains("Esc中断·Ctrl+J换行·Ctrl+C×2退出"),
+        compact(&rows[19]).contains("Esc中断Ctrl+J换行Ctrl+C×2退出"),
         "键位行整行不折：{:?}",
         rows[19]
     );

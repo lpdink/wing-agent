@@ -731,8 +731,12 @@ mod tests {
             "格子里宽字形后跟一个续格：{raw:.200}"
         );
         assert!(
-            text.contains("中断 · Ctrl+J 换行"),
+            text.contains("中断  Ctrl+J"),
             "文本投影收掉续格：{text:.300}"
+        );
+        assert!(
+            !text.contains("中 断"),
+            "文本投影里不该留着宽字形的续格：{text:.300}"
         );
     }
 
