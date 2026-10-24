@@ -25,7 +25,8 @@ use crate::render::markdown::truncate_to_display_width;
 pub struct ComposerWidget<'a> {
     input: &'a mut InputArea,
     palette: &'a ThemePalette,
-    /// Top rail content: `None` while idle (the border is then a plain rule).
+    /// Top rail content: `None` while no turn is running — the rail then shows
+    /// the frame's own state (the empty card's invite, or a plain rule).
     activity: Option<ActivityRail<'a>>,
     meta: MetaRail<'a>,
     /// Whether another layer owns the keyboard (see [`Self::keyboard_held`]).
@@ -79,8 +80,12 @@ impl Widget for ComposerWidget<'_> {
         // Update vertical scroll.
         self.input.update_vertical_scroll(chrome);
 
+        // The one description of what the card is; every register below reads it,
+        // so the frame, the caret and the chips cannot drift apart.
+        let has_draft = !self.input.is_empty();
+        let focus = Focus::of(self.keyboard_held, has_draft);
+
         // The frame first: the draft is painted into the rows it leaves.
-        let focus = Focus::of(self.keyboard_held, !self.input.is_empty());
         chrome::paint(
             buf,
             area,
@@ -94,7 +99,8 @@ impl Widget for ComposerWidget<'_> {
         // A held draft is not editable right now: it is drawn the way the
         // chat draws text that is not active (dim), so the state is visible
         // without a word of explanation.
-        let draft_style = if self.keyboard_held {
+        let ghosted = matches!(focus, Focus::Ghost);
+        let draft_style = if ghosted {
             Style::default().fg(self.palette.dim)
         } else {
             Style::default().fg(self.palette.text)
@@ -118,10 +124,10 @@ impl Widget for ComposerWidget<'_> {
             // nothing to point at). Same when another layer owns the keyboard:
             // the draft is drawn dim there, so a lit caret would contradict it.
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let ink = if self.keyboard_held || self.input.is_empty() {
-                    self.palette.dim
-                } else {
+                let ink = if matches!(focus, Focus::Draft) {
                     self.palette.accent
+                } else {
+                    self.palette.dim
                 };
                 buf.set_span(
                     area.x + chrome::PROMPT_X,
@@ -134,7 +140,7 @@ impl Widget for ComposerWidget<'_> {
             let text_x = area.x + chrome.text_x;
 
             // Empty first line → show placeholder.
-            if vr.logical_line == 0 && vr.char_start == 0 && self.input.is_empty() {
+            if vr.logical_line == 0 && vr.char_start == 0 && !has_draft {
                 let placeholder_w = self.input.placeholder.width();
                 let placeholder = if placeholder_w > text_area_w {
                     truncate_to_display_width(&self.input.placeholder, text_area_w)
@@ -164,7 +170,7 @@ impl Widget for ComposerWidget<'_> {
             if runs.is_empty() {
                 continue;
             }
-            let chip_style = if self.keyboard_held {
+            let chip_style = if ghosted {
                 draft_style
             } else {
                 Style::default().fg(self.palette.accent)
@@ -198,7 +204,7 @@ mod tests {
     use crate::ui::status_bar::TurnUsage;
 
     /// Render one composer card and return the prompt glyph's foreground.
-    fn prompt_ink(draft: &str) -> Option<Color> {
+    fn prompt_ink(draft: &str, keyboard_held: bool) -> Option<Color> {
         let palette = ThemePalette::default();
         let mut input = InputArea::new("ask anything");
         input.set_text(draft);
@@ -206,6 +212,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 3);
         let mut buf = Buffer::empty(area);
         ComposerWidget::new(&mut input, &palette, None, MetaRail::bare(&usage))
+            .keyboard_held(keyboard_held)
             .render(area, &mut buf);
         // The prompt opens the first draft row, right of the card's border.
         let x = area.x + chrome::PROMPT_X;
@@ -214,11 +221,22 @@ mod tests {
     }
 
     /// An empty composer keeps the caret dim (it sits next to a dim
-    /// placeholder); a draft lights it with the accent.
+    /// placeholder); a draft lights it with the accent; and a card whose keys
+    /// another layer holds keeps it dim even with a draft — the text is drawn
+    /// as inactive there, so a lit caret would contradict it.
     #[test]
     fn the_caret_follows_whether_a_draft_exists() {
         let palette = ThemePalette::default();
-        assert_eq!(prompt_ink(""), Some(palette.dim), "empty: dim");
-        assert_eq!(prompt_ink("hello"), Some(palette.accent), "draft: accent");
+        assert_eq!(prompt_ink("", false), Some(palette.dim), "empty: dim");
+        assert_eq!(
+            prompt_ink("hello", false),
+            Some(palette.accent),
+            "draft: accent"
+        );
+        assert_eq!(
+            prompt_ink("hello", true),
+            Some(palette.dim),
+            "held keys: dim"
+        );
     }
 }

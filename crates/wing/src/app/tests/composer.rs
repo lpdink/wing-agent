@@ -46,7 +46,7 @@ fn test_the_card_frames_the_draft() {
     assert_eq!(
         card_row(&buf, composer, composer.y),
         format!("╭{}╮", "─".repeat(width - 2)),
-        "an idle top rail is a plain rule:\n{}",
+        "a drafted card's top rail is a plain rule:\n{}",
         frame_text(&buf)
     );
     assert_eq!(
@@ -182,39 +182,46 @@ fn test_the_card_keeps_the_terminal_background() {
     }
 
     // The one fill the card may carry is a keycap on a rail — `ui::chip`'s quiet
-    // band under the empty card's invite, on the top border and nowhere else.
+    // band under the empty card's invite, on the top border and nowhere else. The
+    // verb beside the key lies on the terminal's own background: the band is the
+    // *key*, not the sentence. (The float's margins are clear from the loop above.)
     let mut app = app_with_draft("");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
+    // Whatever `ui::chip` picks for the quiet band *is* the band: restating the
+    // slot here would let the two drift, so this only holds it to one face.
+    let mut band: Option<ratatui::style::Color> = None;
     let mut filled: Vec<u16> = Vec::new();
     for y in composer.y..composer.bottom() {
-        for x in composer.x - 1..composer.right() + 1 {
-            if buf[(x, y)].bg == ratatui::style::Color::Reset {
+        for x in composer.x..composer.right() {
+            let bg = buf[(x, y)].bg;
+            if bg == ratatui::style::Color::Reset {
                 continue;
             }
-            assert_eq!(buf[(x, y)].bg, palette.surface, "the quiet band ({x},{y})");
+            assert_ne!(bg, palette.accent, "a keycap, not a badge ({x},{y})");
+            assert_eq!(
+                *band.get_or_insert(bg),
+                bg,
+                "one face for the whole key ({x},{y})"
+            );
             assert_eq!(y, composer.y, "a keycap belongs on the rail ({x},{y})");
             filled.push(x);
         }
     }
     assert!(!filled.is_empty(), "the invite is drawn");
-    // One block, not a dotted run: the only gaps a wide glyph leaves are its own
-    // tail cell (the band is drawn from the head cell; the terminal paints both).
-    assert!(
-        filled.windows(2).all(|pair| pair[1] - pair[0] <= 2),
-        "{filled:?}"
-    );
-    // And the band stops where the pill does: no dash may be inside it.
     let (first, last) = (filled[0], filled[filled.len() - 1]);
-    let band: String = card_row(&buf, composer, composer.y)
-        .chars()
-        .skip(first.into())
-        .take((last - first + 1).into())
-        .collect();
-    assert!(!band.contains('─'), "the band is the pill: {band:?}");
-    assert!(
-        band.contains('发'),
-        "the invite is inside its band: {band:?}"
+    assert_eq!(
+        filled.len() as u16,
+        last - first + 1,
+        "one block, not a dotted run: {filled:?}"
     );
+    // One block, and it stops where the key does: no dash, no verb inside it.
+    let cells: Vec<char> = card_row(&buf, composer, composer.y).chars().collect();
+    let rel = |x: u16| (x - composer.x) as usize;
+    let band: String = cells[rel(first)..=rel(last)].iter().collect();
+    assert!(!band.contains('─'), "the band is the key: {band:?}");
+    assert!(!band.contains('发'), "the verb is not a key: {band:?}");
+    let after: String = cells[rel(last) + 1..].iter().take(6).collect();
+    assert!(after.contains('发'), "the verb follows the key: {after:?}");
 }
 
 /// The outline's register: quiet while the card waits, one notch toward the
