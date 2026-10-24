@@ -15,6 +15,7 @@ use crate::config::Appearance;
 use crate::config::ColorPreset;
 use crate::ui::shimmer::to_rgb;
 use crate::ui::welcome::sprite;
+use ratatui::style::Color;
 
 /// 一帧（固定配置：不读 `$WING_HOME`，明暗由 `preset` 定）。
 fn frame(preset: ColorPreset, width: u16, height: u16) -> preview::Frame {
@@ -89,6 +90,11 @@ fn card(rows: &[String]) -> (usize, usize, usize, usize) {
 
 const SESSION_ID: &str = "20261005-213012-ab12cd34";
 
+/// 版本行里能放下的 commit 前缀（长 SHA 构建时整串放不进块宽，断言只看前 7 位）。
+fn short_commit() -> String {
+    env!("WING_COMMIT_HASH").chars().take(7).collect()
+}
+
 #[test]
 fn the_splash_block_sits_at_the_optical_centre_at_120x40() {
     let rows = frame(ColorPreset::Dark, 120, 40).rows();
@@ -118,10 +124,7 @@ fn the_splash_block_sits_at_the_optical_centre_at_120x40() {
     // （居中位移 17 + 海鸥盒 40）。块宽 86 = 40 + 46（2x 大字）。
     let version = tail(&rows[16], 57);
     assert!(version.starts_with("wing · "), "版本行：{version:?}");
-    assert!(
-        version.contains(env!("WING_COMMIT_HASH")),
-        "带 commit：{version:?}"
-    );
+    assert!(version.contains(&short_commit()), "带 commit：{version:?}");
     assert_eq!(tail(&rows[17], 57).trim_end(), "2 skills · 1 rule");
     assert_eq!(
         rule(&rows, 57),
@@ -196,10 +199,7 @@ fn the_narrow_ladder_keeps_the_block_centred() {
     assert_eq!(first_ink(&rows), 3, "海鸥撤了，1x 大字从第 3 行起");
     let version = tail(&rows[6], 1);
     assert!(version.starts_with("wing · "), "版本行：{version:?}");
-    assert!(
-        version.contains(env!("WING_COMMIT_HASH")),
-        "带 commit：{version:?}"
-    );
+    assert!(version.contains(&short_commit()), "带 commit：{version:?}");
     assert_eq!(rule(&rows, 1), (8, 38), "窄档块宽 38");
     assert!(compact(&rows[9]).contains("Esc中断·Ctrl+J换行·Ctrl+C×2退出"));
     assert_eq!(card(&rows), (14, 16, 1, 38), "输入卡跟着块宽收窄");
@@ -226,10 +226,11 @@ fn the_two_appearances_share_the_geometry_and_change_the_ink() {
             ("light", &light, Appearance::Light),
         ] {
             let accent = to_rgb(frame.palette().accent);
-            let (r, g, b) = sprite::brand('W', accent, appearance).expect("羽色");
+            let feather = sprite::brand('W', accent, appearance).expect("羽色");
+            let feather = Color::Rgb(feather.0, feather.1, feather.2);
             assert!(
-                frame.ansi().contains(&format!("38;2;{r};{g};{b}")),
-                "{width}x{height} {name}：海鸥的羽色 {r},{g},{b} 没画出来"
+                frame.colors().contains(&feather),
+                "{width}x{height} {name}：海鸥的羽色 {feather:?} 没画出来"
             );
         }
     }

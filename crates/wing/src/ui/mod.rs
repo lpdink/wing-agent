@@ -4,6 +4,7 @@ pub mod cached_cell;
 pub mod cells;
 pub mod chat_view;
 pub mod emoji_width;
+pub mod html;
 pub mod image;
 pub mod input_area;
 pub mod panel;

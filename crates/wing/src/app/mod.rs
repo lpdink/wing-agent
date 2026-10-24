@@ -15,6 +15,8 @@
 
 pub mod intent;
 pub mod popup_state;
+/// 创作期取样器（`examples/splash_preview.rs` 的库侧），不是运行期 API。
+#[doc(hidden)]
 pub mod preview;
 pub mod render_context;
 pub mod replay;
@@ -638,7 +640,7 @@ impl App {
 
     /// Draw the UI.
     ///
-    /// Generic over the backend so tests can drive it with a
+    /// Generic over the backend so tests and [`preview`] can drive it with a
     /// `ratatui::backend::TestBackend` and assert on the very frame the user
     /// would see. The selection highlight, its text snapshot and the
     /// scrollbar's clipping / place in the overlay order are all frame-level

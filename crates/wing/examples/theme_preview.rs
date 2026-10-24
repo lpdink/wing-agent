@@ -58,7 +58,7 @@ use wing::ui::cells::todo_msg::TodoItem;
 use wing::ui::cells::todo_msg::TodoMessage;
 use wing::ui::cells::tool_call::ToolCallBlock;
 use wing::ui::chat_view::ChatCell;
-use wing::ui::shimmer::to_rgb;
+use wing::ui::html;
 use wing::ui::status_bar::StatusBar;
 use wing::ui::status_bar::StatusData;
 
@@ -551,29 +551,6 @@ $$
 
 // ── 输出：ANSI 到终端 / HTML 到文件 ─────────────────────────────
 
-/// 命名色的 ANSI 索引（16 色表）。
-fn ansi_index(color: Color) -> u8 {
-    match color {
-        Color::Black => 0,
-        Color::Red => 1,
-        Color::Green => 2,
-        Color::Yellow => 3,
-        Color::Blue => 4,
-        Color::Magenta => 5,
-        Color::Cyan => 6,
-        Color::Gray => 7,
-        Color::DarkGray => 8,
-        Color::LightRed => 9,
-        Color::LightGreen => 10,
-        Color::LightYellow => 11,
-        Color::LightBlue => 12,
-        Color::LightMagenta => 13,
-        Color::LightCyan => 14,
-        Color::White => 15,
-        _ => 7,
-    }
-}
-
 fn ansi(lines: &[Line<'_>], plain: bool) -> String {
     let mut out = String::new();
     for line in lines {
@@ -581,58 +558,21 @@ fn ansi(lines: &[Line<'_>], plain: bool) -> String {
             for span in &line.spans {
                 out.push_str(&span.content);
             }
-            out.push('\n');
-            continue;
+        } else {
+            for span in &line.spans {
+                // 每段自闭合（`render::ansi` 是 crate 里唯一的转义实现）。
+                out.push_str(&wing::render::ansi::paint(span.style, &span.content));
+            }
         }
-        for span in &line.spans {
-            out.push_str("\x1b[0m");
-            let m = span.style.add_modifier;
-            if m.contains(Modifier::BOLD) {
-                out.push_str("\x1b[1m");
-            }
-            if m.contains(Modifier::DIM) {
-                out.push_str("\x1b[2m");
-            }
-            if m.contains(Modifier::ITALIC) {
-                out.push_str("\x1b[3m");
-            }
-            if m.contains(Modifier::UNDERLINED) {
-                out.push_str("\x1b[4m");
-            }
-            if m.contains(Modifier::REVERSED) {
-                out.push_str("\x1b[7m");
-            }
-            if m.contains(Modifier::CROSSED_OUT) {
-                out.push_str("\x1b[9m");
-            }
-            if let Some(code) = sgr(span.style.fg, true) {
-                out.push_str(&code);
-            }
-            if let Some(code) = sgr(span.style.bg, false) {
-                out.push_str(&code);
-            }
-            out.push_str(&span.content);
-        }
-        out.push_str("\x1b[0m\n");
+        out.push('\n');
     }
     out
-}
-
-fn sgr(color: Option<Color>, foreground: bool) -> Option<String> {
-    let layer = if foreground { 38 } else { 48 };
-    match color? {
-        Color::Reset => None,
-        Color::Rgb(r, g, b) => Some(format!("\x1b[{layer};2;{r};{g};{b}m")),
-        // 256 色索引原样下发；命名色查 16 色表。
-        Color::Indexed(i) => Some(format!("\x1b[{layer};5;{i}m")),
-        other => Some(format!("\x1b[{layer};5;{}m", ansi_index(other))),
-    }
 }
 
 fn html(lines: &[Line<'_>], meta: &str, bg: &str, fg: &str) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n");
-    let _ = writeln!(out, "<title>{}</title>", escape(meta));
+    let _ = writeln!(out, "<title>{}</title>", html::escape(meta));
     out.push_str("<style>\n");
     out.push_str("html,body{margin:0;padding:0}\n");
     let _ = writeln!(out, "body{{background:{bg};color:{fg};padding:26px 30px}}");
@@ -643,8 +583,8 @@ fn html(lines: &[Line<'_>], meta: &str, bg: &str, fg: &str) -> String {
     out.push_str("<pre>\n");
     for line in lines {
         for span in &line.spans {
-            let css = span_css(&span.style);
-            let text = escape(&span.content);
+            let css = html::css(span.style);
+            let text = html::escape(&span.content);
             if css.is_empty() {
                 out.push_str(&text);
             } else {
@@ -655,51 +595,6 @@ fn html(lines: &[Line<'_>], meta: &str, bg: &str, fg: &str) -> String {
     }
     out.push_str("</pre>\n</body></html>\n");
     out
-}
-
-fn span_css(style: &Style) -> String {
-    let mut decls: Vec<String> = Vec::new();
-    let reversed = style.add_modifier.contains(Modifier::REVERSED);
-    let fg = style.fg.filter(|c| *c != Color::Reset);
-    let bg = style.bg.filter(|c| *c != Color::Reset);
-    let (fg, bg) = if reversed { (bg, fg) } else { (fg, bg) };
-    if let Some(c) = fg {
-        decls.push(format!("color:{}", hex(c)));
-    }
-    if let Some(c) = bg {
-        decls.push(format!("background-color:{}", hex(c)));
-    }
-    if style.add_modifier.contains(Modifier::BOLD) {
-        decls.push("font-weight:700".into());
-    }
-    if style.add_modifier.contains(Modifier::ITALIC) {
-        decls.push("font-style:italic".into());
-    }
-    let mut deco: Vec<&str> = Vec::new();
-    if style.add_modifier.contains(Modifier::UNDERLINED) {
-        deco.push("underline");
-    }
-    if style.add_modifier.contains(Modifier::CROSSED_OUT) {
-        deco.push("line-through");
-    }
-    if !deco.is_empty() {
-        decls.push(format!("text-decoration:{}", deco.join(" ")));
-    }
-    if style.add_modifier.contains(Modifier::DIM) {
-        decls.push("opacity:.62".into());
-    }
-    decls.join(";")
-}
-
-fn hex(color: Color) -> String {
-    let (r, g, b) = to_rgb(color);
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 // ── CLI ─────────────────────────────────────────────────────────
@@ -735,14 +630,9 @@ fn main() {
                 "wing theme preview · preset={:?} · appearance={:?} · width={width}",
                 config.colors.preset, palette.appearance
             );
-            let bg = value(&args, "--bg").unwrap_or_else(|| match palette.appearance {
-                wing::config::Appearance::Light => "#ffffff".to_string(),
-                wing::config::Appearance::Dark => "#0b0f16".to_string(),
-            });
-            let fg = value(&args, "--fg").unwrap_or_else(|| match palette.appearance {
-                wing::config::Appearance::Light => "#1f2328".to_string(),
-                wing::config::Appearance::Dark => "#c9ced9".to_string(),
-            });
+            let (default_bg, default_fg) = wing::ui::html::page_colors(&palette);
+            let bg = value(&args, "--bg").unwrap_or_else(|| default_bg.to_string());
+            let fg = value(&args, "--fg").unwrap_or_else(|| default_fg.to_string());
             let document = html(&lines, &meta, &bg, &fg);
             if let Err(e) = std::fs::write(&path, document) {
                 fail(&format!("cannot write {path}: {e}"));

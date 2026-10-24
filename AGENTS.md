@@ -252,6 +252,7 @@ crates/wing/src/
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
 │   ├── emoji_width.rs               出帧前的宽度归一化（VS16 表情格子钉 ForcedWidth；每帧必跑，出帧口 tui::draw_frame 调用）
+│   ├── html.rs                      Style → CSS / HTML 转义 / 页面底色（HTML 导出的唯一实现：theme_preview 与 splash_preview 共用）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）
 │   ├── panel.rs                     选择面板共享渲染（窗口数学取自 shared/panels 内核）
 │   ├── settings/                    设置面板浮层 overlay（卡片几何 / 左栏锚点 / 树 / 详情栏 / 编辑器 / 问题清单 / 帮助 / 提示，只读渲染）
@@ -262,6 +263,7 @@ crates/wing/src/
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker / notice）
 ├── render/                          Markdown + 语法高亮
+│   ├── ansi.rs                      Style → SGR 的唯一实现（CLI 表格 / 热力图 / 整屏预览共用；每段自闭合）
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）/ profile（Content vs Thinking 的规则归属）/ stream（StreamingRender：稳定前缀 + 活动尾部）
 │   ├── picture.rs                   PictureSource — 一张图片的身份（本地文件 / 网关媒体对象）
 │   ├── heatmap.rs                   日历热力图（7 行 × ISO 周的格子网格：四分位分档 / 月份标 / 宽度裁剪）

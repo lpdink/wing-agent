@@ -11,7 +11,8 @@
 //! 画出的格子，「预览好看、真机不一样」因此不可能发生。
 //!
 //! 时间只在一处被拨动：欢迎屏的时钟（扫光相位 / 动作帧）。tip 用固定种子 ——
-//! 同一份代码两次运行逐字节相同，视觉改动才 diff 得出来。
+//! 同一份代码两次运行逐字节相同，视觉改动才 diff 得出来。唯一的例外是 `working`
+//! 帧里活动栏的秒数（它读墙钟，跨整数秒边界会变一位）。
 //!
 //! **取样面**：开屏整块。弹层 / 设置面板 / toast / 图片不在 fixture 里，画不出来。
 
@@ -23,20 +24,18 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
-use ratatui::style::Modifier;
 use ratatui::style::Style;
 use wing_api_client::models::SessionUsage;
 
 use super::App;
 use crate::config::AppConfig;
-use crate::config::Appearance;
 use crate::config::ColorPreset;
 use crate::config::ThemePalette;
 use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
 use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
-use crate::ui::shimmer::to_rgb;
+use crate::ui::html;
 use crate::ui::welcome::SWEEP_MS;
 use crate::ui::welcome::SessionFacts;
 use crate::ui::welcome::Welcome;
@@ -77,8 +76,9 @@ pub struct Spec {
     pub draft: Option<String>,
     /// agent 在干活：活动栏 + 飞行姿态的海鸥。
     pub working: bool,
-    /// 名牌右列的会话事实；`None` = 这一行留空（老网关 / 什么都没加载）。
-    pub facts: Option<SessionFacts>,
+    /// 名牌右列的会话事实（skills / rules 计数）；`0,0` = 这一行留空
+    /// （什么都没加载，槽位仍在 —— 名牌高度因此不随它变）。
+    pub facts: SessionFacts,
     /// 扫光相位 `0.0..=1.0`；`None` = 已定格（默认，稳态那一帧）。
     pub phase: Option<f32>,
 }
@@ -92,10 +92,10 @@ impl Default for Spec {
             draft: None,
             working: false,
             // 与 `welcome_preview --facts` 的默认同一份样例：名牌右列不是半空的。
-            facts: Some(SessionFacts {
+            facts: SessionFacts {
                 skills: 2,
                 rules: 1,
-            }),
+            },
             phase: None,
         }
     }
@@ -111,6 +111,22 @@ impl Frame {
     /// 画这一帧用的 palette（明暗档 / 页面底色由它决定）。
     pub fn palette(&self) -> &ThemePalette {
         &self.palette
+    }
+
+    /// 帧里出现过的颜色（前景与背景，去重；默认色不算）：颜色断言用它，
+    /// 不必去解析某种输出记号。
+    pub fn colors(&self) -> Vec<Color> {
+        let mut out: Vec<Color> = Vec::new();
+        for y in self.buffer.area.y..self.buffer.area.bottom() {
+            for (_, cell) in self.glyphs(y) {
+                for color in [cell.fg, cell.bg] {
+                    if color != Color::Reset && !out.contains(&color) {
+                        out.push(color);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// 每行按**格子**取原文，行尾的默认样式空白裁掉。
@@ -153,11 +169,14 @@ impl Frame {
     }
 
     /// 真彩 ANSI（一行一条，行尾复位）：直接贴到终端里就是真机上那一帧。
+    ///
+    /// 每段都由 [`crate::render::ansi::paint`] 自闭合交出 —— 默认样式的段是裸文本，
+    /// 但它前面那段已经复位，空白格不会继承墨迹的颜色。
     pub fn ansi(&self) -> String {
         let mut out = String::new();
         for y in self.buffer.area.y..self.buffer.area.bottom() {
             for (style, text) in self.runs(y) {
-                push_ansi(&mut out, style, &text);
+                out.push_str(&crate::render::ansi::paint(style, &text));
             }
             out.push_str("\x1b[0m\n");
         }
@@ -172,7 +191,7 @@ impl Frame {
     pub fn html(&self, caption: &str, background: &str, foreground: &str) -> String {
         let mut out = String::new();
         out.push_str("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n");
-        let _ = writeln!(out, "<title>{}</title>", escape(caption));
+        let _ = writeln!(out, "<title>{}</title>", html::escape(caption));
         out.push_str("<style>\nhtml,body{margin:0;padding:0}\n");
         let _ = writeln!(
             out,
@@ -181,11 +200,16 @@ impl Frame {
         out.push_str(".cap{font:12px/1.4 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",monospace;opacity:.55;margin:0 0 10px}\n");
         out.push_str("pre{margin:0;font:14px/1 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",Consolas,monospace;white-space:pre}\n");
         out.push_str("</style></head><body>\n");
-        let _ = writeln!(out, "<div class=\"cap\">{}</div>", escape(caption));
+        let _ = writeln!(out, "<div class=\"cap\">{}</div>", html::escape(caption));
         out.push_str("<pre>\n");
         for y in self.buffer.area.y..self.buffer.area.bottom() {
             for (style, text) in self.runs(y) {
-                push_html(&mut out, style, &text);
+                let css = html::css(style);
+                if css.is_empty() {
+                    out.push_str(&html::escape(&text));
+                } else {
+                    let _ = write!(out, "<span style=\"{css}\">{}</span>", html::escape(&text));
+                }
             }
             out.push('\n');
         }
@@ -240,14 +264,6 @@ impl Frame {
     }
 }
 
-/// HTML 页面的默认底色 / 前景 —— 与这套 palette 配对的墙面颜色。
-pub fn page_colors(palette: &ThemePalette) -> (&'static str, &'static str) {
-    match palette.appearance {
-        Appearance::Dark => ("#0b0f16", "#c9ced9"),
-        Appearance::Light => ("#ffffff", "#1f2328"),
-    }
-}
-
 /// 取样一帧：调色板读真实配置（用户覆盖的颜色跟真机走，与 `theme_preview` 一致）。
 pub fn sample(spec: &Spec) -> Frame {
     sample_with(AppConfig::load(), spec)
@@ -298,9 +314,7 @@ fn meta() -> EventMeta {
 
 /// 会话快照：模型段 / 工作目录 / 事实行 / 草稿 / turn 在飞都从这一条进 App。
 fn sync_event(spec: &Spec) -> WingEvent {
-    let (skills, rules) = spec
-        .facts
-        .map_or((0, 0), |facts| (facts.skills, facts.rules));
+    let (skills, rules) = (spec.facts.skills, spec.facts.rules);
     WingEvent::SyncSession {
         session_id: SESSION_ID.into(),
         messages: Vec::new(),
@@ -387,11 +401,17 @@ fn state_changed() -> WingEvent {
     }
 }
 
+/// 一格的样式（默认色不写进 `Style`：写进去会让「无样式」与「显式复位」分成两段，
+/// 白白多出一串 `0` 码）。
 fn cell_style(cell: &ratatui::buffer::Cell) -> Style {
-    Style::default()
-        .fg(cell.fg)
-        .bg(cell.bg)
-        .add_modifier(cell.modifier)
+    let mut style = Style::default().add_modifier(cell.modifier);
+    if cell.fg != Color::Reset {
+        style = style.fg(cell.fg);
+    }
+    if cell.bg != Color::Reset {
+        style = style.bg(cell.bg);
+    }
+    style
 }
 
 /// `--plain` 的一个格子：带背景色的半格还原成实心块，其余原样（见 [`Frame::plain`]）。
@@ -403,137 +423,10 @@ fn plain_symbol(cell: &ratatui::buffer::Cell) -> &str {
     }
 }
 
-fn ansi_index(color: Color) -> u8 {
-    match color {
-        Color::Black => 0,
-        Color::Red => 1,
-        Color::Green => 2,
-        Color::Yellow => 3,
-        Color::Blue => 4,
-        Color::Magenta => 5,
-        Color::Cyan => 6,
-        Color::Gray => 7,
-        Color::DarkGray => 8,
-        Color::LightRed => 9,
-        Color::LightGreen => 10,
-        Color::LightYellow => 11,
-        Color::LightBlue => 12,
-        Color::LightMagenta => 13,
-        Color::LightCyan => 14,
-        Color::White => 15,
-        _ => 7,
-    }
-}
-
-/// 一段文本的 SGR 序列（`Style::default()` → 空串）。
-fn sgr(style: Style) -> String {
-    let mut codes: Vec<String> = Vec::new();
-    let modifier = style.add_modifier;
-    for (flag, code) in [
-        (Modifier::BOLD, "1"),
-        (Modifier::DIM, "2"),
-        (Modifier::ITALIC, "3"),
-        (Modifier::UNDERLINED, "4"),
-        (Modifier::REVERSED, "7"),
-        (Modifier::CROSSED_OUT, "9"),
-    ] {
-        if modifier.contains(flag) {
-            codes.push(code.to_string());
-        }
-    }
-    if let Some(code) = sgr_color(style.fg, 38) {
-        codes.push(code);
-    }
-    if let Some(code) = sgr_color(style.bg, 48) {
-        codes.push(code);
-    }
-    if codes.is_empty() {
-        return String::new();
-    }
-    format!("\x1b[{}m", codes.join(";"))
-}
-
-fn sgr_color(color: Option<Color>, layer: u8) -> Option<String> {
-    match color? {
-        Color::Reset => None,
-        Color::Rgb(r, g, b) => Some(format!("{layer};2;{r};{g};{b}")),
-        Color::Indexed(i) => Some(format!("{layer};5;{i}")),
-        named => Some(format!("{layer};5;{}", ansi_index(named))),
-    }
-}
-
-fn push_ansi(out: &mut String, style: Style, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    let sgr = sgr(style);
-    if !sgr.is_empty() {
-        out.push_str("\x1b[0m");
-        out.push_str(&sgr);
-    }
-    out.push_str(text);
-}
-
-fn push_html(out: &mut String, style: Style, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    let css = css(style);
-    if css.is_empty() {
-        out.push_str(&escape(text));
-    } else {
-        let _ = write!(out, "<span style=\"{css}\">{}</span>", escape(text));
-    }
-}
-
-fn css(style: Style) -> String {
-    let mut decls: Vec<String> = Vec::new();
-    let reversed = style.add_modifier.contains(Modifier::REVERSED);
-    let fg = style.fg.filter(|color| *color != Color::Reset);
-    let bg = style.bg.filter(|color| *color != Color::Reset);
-    let (fg, bg) = if reversed { (bg, fg) } else { (fg, bg) };
-    if let Some(color) = fg {
-        decls.push(format!("color:{}", hex(color)));
-    }
-    if let Some(color) = bg {
-        decls.push(format!("background-color:{}", hex(color)));
-    }
-    if style.add_modifier.contains(Modifier::BOLD) {
-        decls.push("font-weight:700".into());
-    }
-    if style.add_modifier.contains(Modifier::ITALIC) {
-        decls.push("font-style:italic".into());
-    }
-    let mut decoration: Vec<&str> = Vec::new();
-    if style.add_modifier.contains(Modifier::UNDERLINED) {
-        decoration.push("underline");
-    }
-    if style.add_modifier.contains(Modifier::CROSSED_OUT) {
-        decoration.push("line-through");
-    }
-    if !decoration.is_empty() {
-        decls.push(format!("text-decoration:{}", decoration.join(" ")));
-    }
-    if style.add_modifier.contains(Modifier::DIM) {
-        decls.push("opacity:.62".into());
-    }
-    decls.join(";")
-}
-
-fn hex(color: Color) -> String {
-    let (r, g, b) = to_rgb(color);
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Appearance;
 
     fn spec() -> Spec {
         Spec {
@@ -549,29 +442,16 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_is_as_big_as_the_spec_says() {
+    fn any_size_renders_a_frame_of_that_size() {
+        // 极小的尺寸也得活着（工具会被随手试到 1×1 / 20×3）；整屏的"不溢出"
+        // 由 `app::tests::splash_frame` 钉在拼装后的帧上。
         for (width, height) in [(120u16, 40u16), (80, 24), (40, 12), (1, 1), (20, 3)] {
             let frame = render(&Spec {
                 width,
                 height,
                 ..spec()
             });
-            let rows = frame.rows();
-            assert_eq!(rows.len(), height as usize);
-            // 格子投影：一个格子一个字符（宽字形的续格单独算一格），所以数**字符**。
-            for row in &rows {
-                assert!(
-                    row.chars().count() <= width as usize,
-                    "{width}x{height} 的格子行超出宽度：{row:?}"
-                );
-            }
-            // 文本投影：宽字形真的占两列，所以按显示宽度量。
-            for line in frame.plain().lines() {
-                assert!(
-                    unicode_width::UnicodeWidthStr::width(line) <= width as usize,
-                    "{width}x{height} 的文本行超出宽度：{line:?}"
-                );
-            }
+            assert_eq!(frame.rows().len(), height as usize);
         }
     }
 
@@ -603,8 +483,11 @@ mod tests {
         assert_eq!(dark.rows(), light.rows(), "明暗只换颜色，不换排版");
         assert_eq!(dark.palette().appearance, Appearance::Dark);
         assert_eq!(light.palette().appearance, Appearance::Light);
-        assert_ne!(dark.ansi(), light.ansi());
-        assert_ne!(page_colors(dark.palette()), page_colors(light.palette()));
+        assert_ne!(dark.colors(), light.colors());
+        assert_ne!(
+            html::page_colors(dark.palette()),
+            html::page_colors(light.palette())
+        );
     }
 
     #[test]
@@ -642,19 +525,90 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ansi_carries_colour_and_ends_each_row_with_a_reset() {
-        let frame = render(&spec());
-        let ansi = frame.ansi();
-        assert!(ansi.contains("38;2;"), "真彩前景在：{ansi:.200}");
-        assert!(
-            ansi.contains("48;2;"),
-            "真彩背景在（半格像素）：{ansi:.200}"
-        );
-        for line in ansi.lines() {
-            assert!(line.ends_with("\x1b[0m"), "每行都以复位收尾：{line:?}");
+    /// 把 `Frame::ansi()` 的样式解回「每格的有效前景 / 背景」。
+    ///
+    /// 只认本帧会出现的记号：复位、六个修饰位、`38;2;r;g;b` / `48;2;r;g;b`（调色板
+    /// 全是真彩）。解不出来就直接失败 —— 那说明编码器长出了测试没跟上的记法。
+    fn parsed_styles(frame: &Frame) -> Vec<Vec<(Color, Color)>> {
+        let mut rows = Vec::new();
+        for line in frame.ansi().lines() {
+            let mut row: Vec<(Color, Color)> = Vec::new();
+            let (mut fg, mut bg) = (Color::Reset, Color::Reset);
+            let mut rest = line;
+            while let Some(at) = rest.find('\x1b') {
+                let (text, tail) = rest.split_at(at);
+                row.extend(std::iter::repeat_n((fg, bg), text.chars().count()));
+                let end = tail.find('m').expect("SGR 以 m 结尾");
+                let codes: Vec<&str> = tail[2..end].split(';').collect();
+                let mut code = 0;
+                while code < codes.len() {
+                    match codes[code] {
+                        "0" => {
+                            fg = Color::Reset;
+                            bg = Color::Reset;
+                            code += 1;
+                        }
+                        layer @ ("38" | "48") => {
+                            let rgb = match codes.get(code + 1) {
+                                Some(&"2") => Color::Rgb(
+                                    codes[code + 2].parse().expect("r"),
+                                    codes[code + 3].parse().expect("g"),
+                                    codes[code + 4].parse().expect("b"),
+                                ),
+                                other => panic!("测试帧里只有真彩，得到 {layer};{other:?}"),
+                            };
+                            if layer == "38" {
+                                fg = rgb;
+                            } else {
+                                bg = rgb;
+                            }
+                            code += 5;
+                        }
+                        "1" | "2" | "3" | "4" | "7" | "9" => code += 1,
+                        unknown => panic!("编码器产出了测试没跟上的 SGR 参数 {unknown}"),
+                    }
+                }
+                rest = &tail[end + 1..];
+            }
+            row.extend(std::iter::repeat_n((fg, bg), rest.chars().count()));
+            rows.push(row);
         }
-        assert_eq!(ansi.lines().count(), spec().height as usize);
+        rows
+    }
+
+    /// 这一帧每个字形的（前景, 背景），与 [`parsed_styles`] 同口径。
+    fn expected_styles(frame: &Frame) -> Vec<Vec<(Color, Color)>> {
+        (frame.buffer.area.y..frame.buffer.area.bottom())
+            .map(|y| {
+                frame
+                    .glyphs(y)
+                    .into_iter()
+                    .flat_map(|(_, cell)| {
+                        std::iter::repeat_n((cell.fg, cell.bg), cell.symbol().chars().count())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_ansi_output_is_the_frame_and_nothing_else() {
+        // 逐格还原：终端上看到的每个格子 == Buffer 里的那一格。默认样式的段不复位
+        // （空白格继承上一段的底色）就会在这里红。
+        for spec in [
+            spec(),
+            Spec {
+                width: 80,
+                height: 24,
+                ..spec()
+            },
+        ] {
+            let frame = render(&spec);
+            assert_eq!(parsed_styles(&frame), expected_styles(&frame));
+            for line in frame.ansi().lines() {
+                assert!(line.ends_with("\x1b[0m"), "每行以复位收尾：{line:?}");
+            }
+        }
     }
 
     #[test]
@@ -664,11 +618,13 @@ mod tests {
         assert!(document.starts_with("<!doctype html>"), "{document:.80}");
         assert!(document.contains("background:#0b0f16"), "页面底色要补上");
         assert!(document.contains("<span style=\"color:#"), "每段带真彩");
-        assert!(document.contains("line-height") || document.contains("/1 Menlo"));
         // 行高必须正好一格（半格像素拼实心），不能是 1.35 那种。
+        assert!(
+            document.contains("font:14px/1 Menlo"),
+            "行高 1：{document:.400}"
+        );
         assert!(!document.contains("1.35"), "半格像素的行高必须是 1");
         assert!(document.contains("120×40 · dark"), "标题与说明都带 caption");
-        assert_eq!(escape("<a & b>"), "&lt;a &amp; b&gt;");
     }
 
     #[test]
@@ -706,15 +662,19 @@ mod tests {
     }
 
     #[test]
-    fn facts_are_optional() {
+    fn facts_leave_a_blank_slot_when_nothing_was_loaded() {
         let none = render(&Spec {
-            facts: None,
+            facts: SessionFacts {
+                skills: 0,
+                rules: 0,
+            },
             ..spec()
         });
         let some = render(&spec());
         assert!(some.rows().join("\n").contains("2 skills · 1 rule"));
         assert!(!none.rows().join("\n").contains("skills"));
-        // 槽位恒在：有无事实，帧高与输入卡位置都不变。
+        assert!(!none.rows().join("\n").contains("rule"));
+        // 槽位恒在：名牌高度不随事实变（下方内容不跳行）。
         assert_eq!(none.rows().len(), some.rows().len());
     }
 }
