@@ -162,8 +162,8 @@ impl Chrome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
     /// Nothing in the draft yet — the card is asking for the first keystroke:
-    /// the outline leaves `dim` (a box, not a hairline) and the top rail says
-    /// what one would do ([`SEND_KEY`] + [`SEND_VERB`]).
+    /// the outline wears the box ink (a box, not a hairline) and the top rail
+    /// says what one would do ([`SEND_KEY`] + [`SEND_VERB`]).
     Empty,
     /// A draft is waiting in the card: the outline turns toward the accent, so
     /// "this is where typing goes" is visible without reading a word.
@@ -187,13 +187,14 @@ impl Focus {
 /// The outline's ink: one register per face (see [`Focus`]).
 ///
 /// * `Empty` — the card is a box on the screen before anything is typed in it,
-///   so the outline wears `tool_result`, the ink a keycap's label wears. It is
-///   what makes the card read as a box at all: `dim` next to the nameplate's
-///   rule is a hairline.
+///   so the outline wears `tool_result`, the ink a keycap's label wears. That is
+///   what makes the card read as a box: `dim` next to the nameplate's rule is a
+///   hairline.
 /// * `Draft` — a *washed* accent (a mix: there is no "muted accent" slot), so
 ///   the frame says "waiting on your keys" by **hue**, not by weight — on both
 ///   presets it lands in the same band as the empty frame (dark 5.35 vs 6.07
-///   against the paper, light 5.56 vs 6.39).
+///   against the paper, light 5.56 vs 6.39; pinned in
+///   `the_outline_faces_keep_their_ladder`).
 /// * `Ghost` — `dim`: another layer owns the keys, the card promises nothing.
 ///
 /// Named colours are not frozen into RGB (they follow the terminal's theme —
@@ -229,7 +230,8 @@ pub struct MetaRail<'a> {
     /// Session workdir (the row's leading item).
     ///
     /// A fact about the environment, not something you can type: it keeps the
-    /// quiet ink, and the outline around it is the row's one lit thing.
+    /// quiet ink, and while the card is lit the outline around it is the row's
+    /// one bright thing.
     pub workdir: Option<&'a str>,
     /// Per-turn token usage.
     pub usage: &'a TurnUsage,
@@ -1025,6 +1027,57 @@ mod tests {
             assert_ne!(
                 frame_ink(Focus::Empty, &palette),
                 frame_ink(Focus::Draft, &palette)
+            );
+        }
+    }
+
+    /// The ladder the three faces sit on, measured the way a reader sees it —
+    /// contrast against the paper the preset actually paints
+    /// (`ui::html::page_colors`, the same page `splash_preview --html` exports,
+    /// so these numbers match the measurements in `docs/dev/tui-input.md`). The
+    /// gate itself is `chip::contrast`, the one the bands use.
+    ///
+    /// Pinned rather than left in prose: an empty card is the strongest face (a
+    /// box), a drafted card sits in the same band (hue tells it apart), a
+    /// ghosted one trails.
+    #[test]
+    fn the_outline_faces_keep_their_ladder() {
+        use crate::config::colors::parse_color;
+        use crate::ui::chip;
+        use crate::ui::html::page_colors;
+
+        let page = |palette: &ThemePalette| {
+            let (background, _) = page_colors(palette);
+            to_rgb(parse_color(background).expect("the page colour parses"))
+        };
+
+        for (palette, expected) in [
+            // (empty, draft, ghost) — dark paper first.
+            (palette(), (6.07, 5.35, 3.23)),
+            (light(), (6.39, 5.56, 5.49)),
+        ] {
+            let ink = |focus| chip::contrast(to_rgb(frame_ink(focus, &palette)), page(&palette));
+            let (empty, draft, ghost) = (ink(Focus::Empty), ink(Focus::Draft), ink(Focus::Ghost));
+            for (got, want, face) in [
+                (empty, expected.0, "empty"),
+                (draft, expected.1, "draft"),
+                (ghost, expected.2, "ghost"),
+            ] {
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "{:?} {face}: recorded {want}, measured {got}",
+                    palette.appearance
+                );
+            }
+            // The box leads, the ghost trails, and the two live faces share a
+            // band (they are told apart by hue, not by weight).
+            assert!(empty > draft, "{:?}", palette.appearance);
+            assert!(empty > ghost, "{:?}", palette.appearance);
+            assert!(draft >= ghost, "{:?}", palette.appearance);
+            assert!(
+                (empty - draft) / empty < 0.2,
+                "{:?}: the two live faces drifted apart ({empty} vs {draft})",
+                palette.appearance
             );
         }
     }

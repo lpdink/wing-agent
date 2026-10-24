@@ -702,9 +702,9 @@ fn tip_line(tip: &str, palette: &ThemePalette, badge: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// 把 `/xxx` 形态的词染成 accent：**命令是唯一可以照着敲的东西**，在整套 UI
-/// 里都是 accent（popup 候选、行内代码、输入卡的 `❯` 与粘贴 / 图片 chip），名牌里
-/// 若是 dim 就成了看不见的字。
+/// 把 `/xxx` 形态的词染成 accent。accent 标的是**能敲 / 能点的东西**（命令、链接、
+/// popup 候选、输入卡的 `❯` 与粘贴 / 图片 chip —— 见 `docs/dev/tui-input.md`），
+/// 名牌里若是 dim 就成了看不见的字。
 fn with_commands(text: &str, base: Style, cmds: Style) -> Vec<Span<'static>> {
     let flush = |out: &mut Vec<Span<'static>>, word: &mut String, is_cmd: bool| {
         if !word.is_empty() {

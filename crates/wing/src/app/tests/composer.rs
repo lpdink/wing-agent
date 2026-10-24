@@ -281,47 +281,72 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
 /// placeholder sentence) is the loudest ink inside the frame, and the path on
 /// the meta rail is one of the quietest — "you can type here" outranks "you are
 /// here", which is the whole point of the splash.
+///
+/// Loudness is contrast against the paper the preset paints (`ui::chip`'s gate,
+/// the same one the bands use), so the claim holds on both appearances — a raw
+/// luminance would call the light preset's dark inks "quiet".
 #[test]
 fn test_the_empty_card_invites_loudest() {
-    use crate::ui::shimmer::luminance;
+    use crate::config::ColorPreset;
+    use crate::config::colors::parse_color;
+    use crate::ui::chip;
+    use crate::ui::html::page_colors;
     use crate::ui::shimmer::to_rgb;
 
-    let palette = crate::config::ThemePalette::default();
-    let mut app = app_with_draft("");
-    app.status.workdir = Some("/tmp/ws".into());
-    let (buf, composer) = draw_frame(&mut app, 80, 10);
-    let (text_x, text_y, _) = composer_text(&app);
+    for preset in [ColorPreset::Dark, ColorPreset::Light] {
+        // The palette is resolved once, at construction: the frame has to be
+        // built with the preset, not recoloured after it.
+        let mut config = crate::config::AppConfig::default();
+        config.colors.preset = preset;
+        let mut app = App::new("test-session".into(), config, None);
+        app.clear_welcome();
+        app.status.workdir = Some("/tmp/ws".into());
+        let (buf, composer) = draw_frame(&mut app, 80, 10);
+        let (text_x, text_y, _) = composer_text(&app);
+        let palette = app.palette();
+        let (background, _) = page_colors(&palette);
+        let paper = to_rgb(parse_color(background).expect("the page colour parses"));
 
-    // Per-cell brightness of every glyph the card drew.
-    let mut brightest = ('\0', 0u16, 0u16, 0.0f32);
-    let workdir_x = composer.x + 3;
-    for y in composer.y..composer.bottom() {
-        for x in composer.x..composer.right() {
-            let cell = &buf[(x, y)];
-            if cell.symbol() == " " {
-                continue;
-            }
-            let level = luminance(to_rgb(cell.fg));
-            if level > brightest.3 {
-                brightest = (cell.symbol().chars().next().unwrap_or('\0'), x, y, level);
+        // Contrast of every glyph the card drew.
+        let mut loudest = ('\0', 0u16, 0u16, 0.0f32);
+        for y in composer.y..composer.bottom() {
+            for x in composer.x..composer.right() {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                let level = chip::contrast(to_rgb(cell.fg), paper);
+                if level > loudest.3 {
+                    loudest = (cell.symbol().chars().next().unwrap_or('\0'), x, y, level);
+                }
             }
         }
-    }
 
-    let (glyph, x, y, _) = brightest;
-    assert_eq!(
-        (x, y),
-        (text_x, text_y),
-        "the brightest glyph in the card is the invitation, not {glyph:?}:\n{}",
-        frame_text(&buf)
-    );
-    assert_eq!(buf[(text_x, text_y)].fg, palette.text, "the placeholder");
-    assert_eq!(
-        buf[(workdir_x, composer.bottom() - 1)].fg,
-        palette.dim,
-        "the path is a fact, not the loudest thing in the card:\n{}",
-        frame_text(&buf)
-    );
+        let (glyph, x, y, loudest) = loudest;
+        assert_eq!(
+            (x, y),
+            (text_x, text_y),
+            "{preset:?}: the loudest glyph in the card is the invitation, not {glyph:?}:\n{}",
+            frame_text(&buf)
+        );
+        assert_eq!(
+            buf[(text_x, text_y)].fg,
+            palette.text,
+            "{preset:?}: the placeholder wears the body ink"
+        );
+
+        // The meta rail's leading item is the path; the card's bottom row holds
+        // it (the row is ASCII, so a char offset is a screen column).
+        let bottom = card_row(&buf, composer, composer.bottom() - 1);
+        let path_x = bottom.find("/tmp/ws").expect("the workdir leads the rail");
+        let path_ink = buf[(composer.x + path_x as u16, composer.bottom() - 1)].fg;
+        assert_eq!(path_ink, palette.dim, "{preset:?}: the path stays quiet");
+        assert!(
+            chip::contrast(to_rgb(path_ink), paper) < loudest / 2.0,
+            "{preset:?}: the path must not come near the invitation:\n{}",
+            frame_text(&buf)
+        );
+    }
 }
 
 #[test]
