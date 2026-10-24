@@ -15,7 +15,7 @@
 //! # 不带颜色（贴 issue / 对比字形）
 //! cargo run -p wing --example welcome_preview -- --plain
 //!
-//! # 会话事实行的两种样子：`2 skills · 1 rule`（默认）/ 什么都没加载
+//! # 身份行的两种样子：`wing · dev · <commit> · 2 skills · 1 rule`（默认）/ 什么都没加载
 //! cargo run -p wing --example welcome_preview -- --facts 2,1
 //! cargo run -p wing --example welcome_preview -- --facts 0,0
 //!
@@ -203,8 +203,8 @@ fn argument(name: &str) -> Option<String> {
 }
 
 /// `--facts 2,1` —— 会话事实（skills,rules）。没给、或给了但解析不出来（这是
-/// 调试入口，不为参数报错）→ 默认 `2,1`；`0,0` 是"什么都没加载"：名牌上那一行
-/// 是空白占位（槽位恒在）。
+/// 调试入口，不为参数报错）→ 默认 `2,1`；`0,0` 是"什么都没加载"：身份行只剩
+/// 品牌 + 版本（行数不变）。
 fn facts_argument() -> Option<SessionFacts> {
     const DEFAULT: Option<SessionFacts> = Some(SessionFacts {
         skills: 2,
@@ -262,7 +262,7 @@ fn main() {
             // 两个姿态各来一张：待机标准姿势 / 干活飞行。
             draw(96, height, empty, None, false, 0, plain, facts, &mut out);
             draw(96, height, empty, None, true, 0, plain, facts, &mut out);
-            // 事实行缺席的样子（0/0 或老网关）。
+            // 会话事实缺席的样子（0/0 或老网关）。
             draw(96, height, empty, None, false, 0, plain, None, &mut out);
             // 开屏版面：同一块，空会话（居中）vs 有消息（顶对齐）。
             if height == 0 {

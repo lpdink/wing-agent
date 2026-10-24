@@ -79,8 +79,8 @@ pub struct Spec {
     pub draft: Option<String>,
     /// agent 在干活：活动栏 + 飞行姿态的海鸥。
     pub working: bool,
-    /// 名牌右列的会话事实（skills / rules 计数）；`0,0` = 这一行留空
-    /// （什么都没加载，槽位仍在 —— 名牌高度因此不随它变）。
+    /// 名牌右列的会话事实（skills / rules 计数）；`0,0` = 什么都没加载，身份行只剩
+    /// 品牌 + 版本（行数不变 —— 名牌高度因此不随它变）。
     pub facts: SessionFacts,
     /// 扫光相位 `0.0..=1.0`；`None` = 已定格（默认，稳态那一帧）。
     pub phase: Option<f32>,
@@ -313,7 +313,7 @@ fn meta() -> EventMeta {
     }
 }
 
-/// 会话快照：模型段 / 工作目录 / 事实行 / 草稿 / turn 在飞都从这一条进 App。
+/// 会话快照：模型段 / 工作目录 / 会话事实 / 草稿 / turn 在飞都从这一条进 App。
 fn sync_event(spec: &Spec) -> WingEvent {
     let (skills, rules) = (spec.facts.skills, spec.facts.rules);
     WingEvent::SyncSession {
@@ -439,7 +439,7 @@ OPTIONS:
     --preset <NAME>     auto | dark | light（默认沿用配置）
     --draft <TEXT>      输入卡里放一段草稿（默认空：显示占位文案）
     --working           agent 在干活：活动栏 + 飞行姿态 + 这一轮的用量
-    --facts <S,R>       名牌右列的会话事实（默认 2,1；0,0 = 这一行留空；上限 999）
+    --facts <S,R>       名牌右列的会话事实（默认 2,1；0,0 = 身份行只剩品牌 + 版本；上限 999）
     --phase <0..1>      开屏扫光的相位（默认已定格；1 = 已扫完，同定格）
     --plain             无颜色输出（半格像素还原成实心块）
     --html <PATH>       写出 HTML（浏览器里对照 / 截图），与 --plain 互斥
@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn facts_leave_a_blank_slot_when_nothing_was_loaded() {
+    fn facts_ride_the_identity_row_and_never_change_the_header_height() {
         let none = render(&Spec {
             facts: SessionFacts {
                 skills: 0,
@@ -1018,10 +1018,33 @@ mod tests {
             ..spec()
         });
         let some = render(&spec());
-        assert!(some.rows().join("\n").contains("2 skills · 1 rule"));
-        assert!(!none.rows().join("\n").contains("skills"));
-        assert!(!none.rows().join("\n").contains("rule"));
-        // 槽位恒在：名牌高度不随事实变（下方内容不跳行）。
-        assert_eq!(none.rows().len(), some.rows().len());
+        // 身份行（那一行 `wing · …`）：有事实时更长；0/0 时只剩品牌 + 版本。
+        let identity = |frame: &Frame| {
+            frame
+                .rows()
+                .into_iter()
+                .find(|row| row.contains("wing · "))
+                .unwrap_or_default()
+        };
+        assert!(
+            identity(&some).len() > identity(&none).len(),
+            "事实挂在身份行上：{:?} vs {:?}",
+            identity(&some),
+            identity(&none)
+        );
+        assert!(!identity(&none).contains("rule"), "0/0 时没有事实段");
+        // 名牌高度不随事实变：两帧**除身份行外逐行相同** —— 下方内容一行都不跳。
+        // （比行数没有意义：`rows()` 的长度恒等于视口高。）
+        let (none_rows, some_rows) = (none.rows(), some.rows());
+        assert_eq!(none_rows.len(), some_rows.len());
+        let differing: Vec<usize> = (0..none_rows.len())
+            .filter(|&y| none_rows[y] != some_rows[y])
+            .collect();
+        assert_eq!(differing.len(), 1, "只有身份行不同：{differing:?}");
+        assert!(
+            some_rows[differing[0]].contains("wing · "),
+            "变的那一行就是身份行：{:?}",
+            some_rows[differing[0]]
+        );
     }
 }
