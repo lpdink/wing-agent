@@ -164,13 +164,13 @@ fn test_the_meta_rail_carries_the_session_read_out() {
 
 #[test]
 fn test_the_card_keeps_the_terminal_background() {
-    let mut app = app_with_draft("hello world");
-    let (buf, composer) = draw_frame(&mut app, 40, 10);
     let palette = crate::config::ThemePalette::default();
 
-    // No fill anywhere: the card is a boundary, not a surface. Every cell of
-    // it — frame, rails and the draft between them — stays on whatever
-    // background the terminal has (the float's margins included).
+    // The card owns no surface: with a draft, frame, rails and the draft between
+    // them all stay on whatever background the terminal has (the float's margins
+    // included).
+    let mut app = app_with_draft("hello world");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
     for y in composer.y..composer.bottom() {
         for x in composer.x - 1..composer.right() + 1 {
             assert_eq!(
@@ -181,35 +181,88 @@ fn test_the_card_keeps_the_terminal_background() {
         }
     }
 
-    // The frame and its rules are one quiet gray — no accent on the edges,
-    // with or without a draft.
+    // The one fill the card may carry is a keycap on a rail — `ui::chip`'s quiet
+    // band under the empty card's invite, on the top border and nowhere else.
+    let mut app = app_with_draft("");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    let mut filled: Vec<u16> = Vec::new();
     for y in composer.y..composer.bottom() {
-        assert_eq!(buf[(composer.x, y)].fg, palette.dim, "left edge at {y}");
-        assert_eq!(
-            buf[(composer.right() - 1, y)].fg,
-            palette.dim,
-            "right edge at {y}"
-        );
+        for x in composer.x - 1..composer.right() + 1 {
+            if buf[(x, y)].bg == ratatui::style::Color::Reset {
+                continue;
+            }
+            assert_eq!(buf[(x, y)].bg, palette.surface, "the quiet band ({x},{y})");
+            assert_eq!(y, composer.y, "a keycap belongs on the rail ({x},{y})");
+            filled.push(x);
+        }
+    }
+    assert!(!filled.is_empty(), "the invite is drawn");
+    // One block, not a dotted run: the only gaps a wide glyph leaves are its own
+    // tail cell (the band is drawn from the head cell; the terminal paints both).
+    assert!(
+        filled.windows(2).all(|pair| pair[1] - pair[0] <= 2),
+        "{filled:?}"
+    );
+    // And the band stops where the pill does: no dash may be inside it.
+    let (first, last) = (filled[0], filled[filled.len() - 1]);
+    let band: String = card_row(&buf, composer, composer.y)
+        .chars()
+        .skip(first.into())
+        .take((last - first + 1).into())
+        .collect();
+    assert!(!band.contains('─'), "the band is the pill: {band:?}");
+    assert!(
+        band.contains('发'),
+        "the invite is inside its band: {band:?}"
+    );
+}
+
+/// The outline's register: quiet while the card waits, one notch toward the
+/// accent while a draft waits in it, quiet again when another layer takes the
+/// keys. The exact ink is pinned in `ui::input_area::chrome`.
+#[test]
+fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
+    let palette = crate::config::ThemePalette::default();
+    let caret = |app: &App, buf: &ratatui::buffer::Buffer| {
+        let (text_x, text_y, _) = composer_text(app);
+        buf[(text_x - 2, text_y)].fg
+    };
+    let edges = |buf: &ratatui::buffer::Buffer, composer: ratatui::layout::Rect| {
+        let mut inks = Vec::new();
+        for y in composer.y..composer.bottom() {
+            inks.push(buf[(composer.x, y)].fg);
+            inks.push(buf[(composer.right() - 1, y)].fg);
+        }
+        inks
+    };
+
+    // Empty: the workdir's accent and the `❯` are the only brand colour on the
+    // card, so the boundary stays out of the way.
+    let mut app = app_with_draft("");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    assert_eq!(caret(&app, &buf), palette.dim, "❯ on an empty draft");
+    for ink in edges(&buf, composer) {
+        assert_eq!(ink, palette.dim, "an empty card's edge is quiet");
     }
 
-    // The *prompt glyph* is accent while there is a draft to point at; an empty
-    // draft keeps it dim, like the placeholder it sits next to (the empty
-    // session's accent budget belongs to the workdir rail).
-    let (text_x, text_y, _) = composer_text(&app);
-    assert_eq!(
-        buf[(text_x - 2, text_y)].fg,
-        palette.accent,
-        "❯ with a draft"
-    );
+    // A draft is waiting: the boundary leaves dim (never as far as the accent —
+    // the meta rail's workdir stays the saturated mark).
+    let mut app = app_with_draft("hello world");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    assert_eq!(caret(&app, &buf), palette.accent, "❯ with a draft");
+    for ink in edges(&buf, composer) {
+        assert_ne!(ink, palette.dim, "a drafted card's edge steps up");
+        assert_ne!(ink, palette.accent, "and it is not the full accent");
+    }
 
-    let mut app = app_with_draft("");
-    let (buf, _) = draw_frame(&mut app, 40, 10);
-    let (text_x, text_y, _) = composer_text(&app);
-    assert_eq!(
-        buf[(text_x - 2, text_y)].fg,
-        palette.dim,
-        "❯ on an empty draft"
-    );
+    // An ask panel holds the keys: the card ghosts as a whole, boundary included.
+    app.ask_panels
+        .push_back(required_choice_panel("call-1", &["y", "n"]));
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    assert!(app.composer_typing_blocked(), "the panel takes the keys");
+    for ink in edges(&buf, composer) {
+        assert_eq!(ink, palette.dim, "a ghosted card promises nothing");
+    }
 }
 
 #[test]

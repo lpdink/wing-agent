@@ -88,7 +88,12 @@
 
 **卡片外框**（`tui-composer-card`）：composer 渲染为一张**悬浮卡片**——左右各留 1 列边距（`chrome::card_area` 是唯一的「悬浮」发生地：布局按卡片宽度要高度、记录卡片矩形、把 widget 渲染进它），卡身**不填底色**（与终端背景浑然一体，边界靠边框 / 提示符 / 两条轨道划出，见下），上边框是**活动栏**（spinner / 耗时 / 中断提示）、下边框是**元信息栏**（workdir / 本轮用量 / 滚动位置）。几何由 `ui/input_area/chrome.rs` 的 `Chrome` **单一描述**（文字区左起 4 列、右留 2 列、上下各 1 行边框），widget、换行宽度、光标落点、指针映射全部读它——指针不可能描述出渲染没画过的一帧；**编辑器读的是渲染出来的那个 chrome**（`InputArea::chrome()`，无帧时回落到 `chrome::UNFRAMED_WIDTH`），所以终端把 composer 压扁时（`Chrome::of` 降级成无框）换行宽度也跟着降级，不会去用一条屏幕上不存在的宽度。原来独立的「working 行 + info separator 行」都折进边框里，所以一轮运行中**不占任何额外行**。
 
-**边框与横线恒为 dim 静色**（不做强调）：品牌色只落在**提示符 `❯`** 与元信息栏的 workdir 上。`❯` 常态 accent —— 它是「这里可以打字」的那个字形，也是空会话里 composer 唯一的 accent（开屏时输入卡上移、下面没有任何强调色，这一格就是落点）；**键盘被接管**（ask 面板 / `/model` 面板真的在吞键，命令候选 popup 只吞导航键、不算）时整个卡片转「幽灵」——草稿**与提示符**一起按 dim 绘制，"这里现在不收键盘"在你按下第一个键之前就看得见（光标亮着而正文是灰的，就是在说反话）。判定谓词是 `App::composer_typing_blocked()`（**不是** `composer_pointer_blocked()`，后者的阈值含可见 popup）。
+**三种帧态，一个来源**（`chrome::Focus`，`Focus::of(keyboard_held, has_draft)`）：`Idle`（空草稿）/ `Draft`（有草稿）/ `Ghost`（键盘被接管）。
+
+* **轮廓**：`Idle` 与 `Ghost` 是 `dim` 静色；`Draft` 时整条轮廓（四边 + 两条轨道行的框线）离开 `dim`、朝 `accent` 走 45%（`mix`，混出来的弱 accent）。它是**洗过的**品牌色：色相朝 accent、彩度低于 workdir 的满 accent —— accent 预算次序是**命令 > workdir > 焦点轮廓 > 其他**，所以轮廓永远不会比底栏的 workdir 更响；暗色终端上它还比 `dim` 亮一档（对纸面 3.5 → 5.9:1，仍远低于正文 17.4 与 accent 10.3），亮色终端上它与 `dim` 的对比度几乎相同（5.5 对 5.6），靠彩度分家。两个槽有一处不是 RGB（用户写的是命名色 / `reset`）就不混、保持 `dim` —— 命名色跟终端主题走不固化，与 `chip::quiet_band` 同一条规矩。
+* **可发现性**：`Idle` 且没有活动栏时，顶栏右端一枚 `⏎ 发送` **键帽**（`ui::chip` 的安静档：`surface` 底 + `tool_result` 墨），走 `RailLine::right` 的既有右槽 —— 不新增几何、不折行，放不下（卡宽 < 16）整项丢弃。干活时顶栏是活动栏的地盘（spinner 拿 accent），`Ghost` 时卡不承诺任何键：两者都不画。
+* **`❯` 仍管自己那一格**：`Draft` 时 accent、空草稿与 `Ghost` 时 `dim`（它是「文字从这里开始」的落点，空会话里 composer 唯一的 accent）。两个寄存器分工：`❯` 指文字，轮廓说「这张卡在等你的按键」。**键盘被接管**（ask 面板 / `/model` 面板真的在吞键，命令候选 popup 只吞导航键、不算）时整张卡转「幽灵」——草稿、提示符与轮廓一起按 `dim` 绘制，"这里现在不收键盘"在你按下第一个键之前就看得见（光标亮着而正文是灰的，就是在说反话）。判定谓词是 `App::composer_typing_blocked()`（**不是** `composer_pointer_blocked()`，后者的阈值含可见 popup）。
+* **没有动画**：帧态只随输入翻转（输入变化本来就重绘），输入卡不新增定时器、不参与 idle 循环（重绘成本契约见 [welcome-mascot.md](welcome-mascot.md)）。
 
 | 关注点 | 位置 |
 |---|---|

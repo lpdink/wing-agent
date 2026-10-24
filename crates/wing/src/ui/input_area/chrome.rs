@@ -12,15 +12,20 @@
 //! │ ❯ explain the event flow of the gateway                   │
 //! │   and where the resume path hooks in                      │
 //! ╰─ ~/ws/wing · 1.2k in · 340 out · 42.5 t/s ──────── 87% ───╯
+//!
+//! ╭──────────────────────────────────────────────── ⏎ 发送 ─╮   ← nothing typed: the invite
+//! │ ❯ ask anything                                          │
+//! ╰─ ~/ws/wing ─────────────────────────────────────────────╯
 //! ```
 //!
 //! The card **floats**: it keeps [`CARD_MARGIN`] columns of air on each side (the layout turns the
 //! composer block into [`card_area`] before anything else looks at it) and its body stays on the
 //! terminal's own background — the boundary is the frame, and nothing else.
 //!
-//! The one state the frame does carry is the keyboard's: while a panel is swallowing the composer's
-//! keys, the draft is ghosted (drawn as inactive text), so "typing will not land here" is visible
-//! before a key is pressed.
+//! The states the frame does carry are about the keyboard — see [`Focus`]: a waiting draft lifts the
+//! outline one notch toward the accent, an empty card invites with a `⏎ 发送` keycap on the top rail,
+//! and a panel that is swallowing the composer's keys ghosts the whole thing (the draft is drawn as
+//! inactive text) so "typing will not land here" is visible before a key is pressed.
 //!
 //! **One geometry, one writer.** [`Chrome`] is the single description of where the card's columns are;
 //! the widget, the wrap width, the cursor placement and the pointer mapping all read it, so a pointer
@@ -30,11 +35,15 @@ use std::time::Instant;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 
 use crate::config::ThemePalette;
+use crate::ui::chip;
+use crate::ui::shimmer::mix;
+use crate::ui::shimmer::to_rgb;
 use crate::ui::spinner::SpinnerState;
 use crate::ui::status_bar::TurnUsage;
 
@@ -63,6 +72,14 @@ pub const CARD_MARGIN: u16 = 1;
 /// `app::frame::UNFRAMED_WIDTH`, which points here), so "no frame yet" behaves
 /// the same on both sides.
 pub const UNFRAMED_WIDTH: u16 = 80;
+
+/// What Enter does, said once, on the empty card's top rail.
+const SEND_HINT: &str = "⏎ 发送";
+/// How far the focus ink leans from `dim` toward `accent` (0 = dim, 1 = accent).
+///
+/// A little under half: enough to leave `dim`, not enough to reach the saturated
+/// accent the workdir owns (the accent budget, see `docs/dev/tui-input.md`).
+const FOCUS_LEAN: f32 = 0.45;
 
 /// The card's rect inside the composer block the layout allocated.
 ///
@@ -132,6 +149,50 @@ impl Chrome {
     }
 }
 
+/// The card's three faces: what the keyboard is doing with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// Nothing in the draft yet — the card is asking for the first keystroke, so
+    /// the top rail says what one would do ([`SEND_HINT`]).
+    Idle,
+    /// A draft is waiting in the card: the outline steps one notch toward the
+    /// accent, so "this is where typing goes" is visible without reading a word.
+    Draft,
+    /// Another layer owns the keyboard (see `ComposerWidget::keyboard_held`):
+    /// the card promises nothing — quiet outline, no invite.
+    Ghost,
+}
+
+impl Focus {
+    /// Which face the widget is drawing.
+    pub fn of(keyboard_held: bool, has_draft: bool) -> Self {
+        match (keyboard_held, has_draft) {
+            (true, _) => Self::Ghost,
+            (false, false) => Self::Idle,
+            (false, true) => Self::Draft,
+        }
+    }
+}
+
+/// The outline's ink: `dim` at rest, one notch toward `accent` while a draft waits.
+///
+/// A mix rather than a palette slot: there is no "muted accent" slot, and the
+/// accent budget wants this to be a *washed* accent — the workdir on the meta
+/// rail keeps the saturated one (see `docs/dev/tui-input.md`). Named colours are
+/// not frozen into RGB (they follow the terminal's theme, the same rule as
+/// `chip::quiet_band`), so such a palette keeps the plain `dim` frame.
+fn frame_ink(focus: Focus, palette: &ThemePalette) -> Color {
+    let rgb_inks = matches!(
+        (palette.dim, palette.accent),
+        (Color::Rgb(..), Color::Rgb(..))
+    );
+    if focus != Focus::Draft || !rgb_inks {
+        return palette.dim;
+    }
+    let (r, g, b) = mix(to_rgb(palette.dim), to_rgb(palette.accent), FOCUS_LEAN);
+    Color::Rgb(r, g, b)
+}
+
 /// The card's top-border content: what the agent is doing right now.
 #[derive(Debug, Clone, Copy)]
 pub struct ActivityRail<'a> {
@@ -180,25 +241,32 @@ pub(super) fn paint(
     chrome: Chrome,
     activity: Option<&ActivityRail<'_>>,
     meta: &MetaRail<'_>,
+    focus: Focus,
     palette: &ThemePalette,
 ) {
     if !chrome.card {
         return;
     }
-    let dim = Style::default().fg(palette.dim);
+    let outline = Style::default().fg(frame_ink(focus, palette));
     let top_y = area.y;
     let bottom_y = area.bottom() - 1;
 
     // Vertical borders, every text row.
     for y in (top_y + 1)..bottom_y {
-        buf.set_span(area.x, y, &Span::styled("│", dim), 1);
-        buf.set_span(area.right() - 1, y, &Span::styled("│", dim), 1);
+        buf.set_span(area.x, y, &Span::styled("│", outline), 1);
+        buf.set_span(area.right() - 1, y, &Span::styled("│", outline), 1);
     }
 
-    // Top border: the activity rail (or a plain rule while idle).
+    // Top border: the activity rail, or — while idle — the invite that says what
+    // Enter would do. One subject per rail: the spinner's turn takes the row.
     let activity_items: Vec<Vec<Span<'static>>> = activity
         .map(|a| vec![activity_spans(a, palette)])
         .unwrap_or_default();
+    let invite: Vec<Span<'static>> = if matches!(focus, Focus::Idle) && activity.is_none() {
+        vec![chip::Chip::key(SEND_HINT).span(palette, chip::Pad::One)]
+    } else {
+        Vec::new()
+    };
     rail(
         buf,
         area,
@@ -207,9 +275,9 @@ pub(super) fn paint(
             left_corner: '╭',
             right_corner: '╮',
             items: activity_items,
-            right: Vec::new(),
+            right: invite,
+            ink: outline,
         },
-        palette,
     );
 
     // Bottom border: the meta rail — where we are, what it cost, where in the
@@ -224,8 +292,8 @@ pub(super) fn paint(
             right_corner: '╯',
             items,
             right,
+            ink: outline,
         },
-        palette,
     );
 }
 
@@ -237,6 +305,9 @@ struct RailLine {
     items: Vec<Vec<Span<'static>>>,
     /// Trailing read-out, kept whole (it is short and it is reserved first).
     right: Vec<Span<'static>>,
+    /// The frame's own ink — corners, rule and the air around the content.
+    /// The items carry their own styles: only the boundary follows the focus.
+    ink: Style,
 }
 
 /// Render one border row: `╭─ <items> ───── <right> ─╮`.
@@ -247,14 +318,14 @@ struct RailLine {
 /// fit is dropped whole, so a narrow border loses its least useful number
 /// instead of showing half of it. Only a single item that overflows on its own
 /// (a long workdir) is clipped.
-fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePalette) {
+fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine) {
     let RailLine {
         left_corner,
         right_corner,
         items,
         right,
+        ink,
     } = line;
-    let dim = Style::default().fg(palette.dim);
     // Inner width, minus the two corners. Saturating throughout: the caller
     // draws rails only for a card (>= MIN_CARD_WIDTH), and a squeezed one must
     // still stay inside its own row rather than underflow.
@@ -263,7 +334,7 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
     const FRAME: usize = 3;
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(items.len() * 2 + right.len() + 4);
-    spans.push(Span::styled(left_corner.to_string(), dim));
+    spans.push(Span::styled(left_corner.to_string(), ink));
 
     // The right block first: it is short, and losing it would lose the scroll
     // read-out that is the whole point of reporting the position here.
@@ -280,7 +351,7 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
         let sep = if laid.is_empty() { 0 } else { 3 };
         if used + sep + item_w <= room {
             if sep > 0 {
-                laid.push(Span::styled(" · ", dim));
+                laid.push(Span::styled(" · ", ink));
             }
             used += sep + item_w;
             laid.extend(item);
@@ -295,21 +366,21 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine, palette: &ThemePal
         break;
     }
     if !laid.is_empty() {
-        spans.push(Span::styled("─ ", dim));
+        spans.push(Span::styled("─ ", ink));
         spans.extend(laid);
-        spans.push(Span::styled(" ", dim));
+        spans.push(Span::styled(" ", ink));
         used += FRAME;
     }
 
     let dashes = inner.saturating_sub(used).saturating_sub(reserved);
-    spans.push(Span::styled("─".repeat(dashes), dim));
+    spans.push(Span::styled("─".repeat(dashes), ink));
 
     if keep_right {
-        spans.push(Span::styled(" ", dim));
+        spans.push(Span::styled(" ", ink));
         spans.extend(right);
-        spans.push(Span::styled(" ─", dim));
+        spans.push(Span::styled(" ─", ink));
     }
-    spans.push(Span::styled(right_corner.to_string(), dim));
+    spans.push(Span::styled(right_corner.to_string(), ink));
 
     let mut x = area.x;
     for span in spans {
@@ -511,13 +582,21 @@ mod tests {
             visible_height: 0,
             scroll_offset: 0,
         };
-        paint(&mut buf, area, Chrome::of(area), None, &meta, &palette());
+        paint(
+            &mut buf,
+            area,
+            Chrome::of(area),
+            None,
+            &meta,
+            Focus::Draft,
+            &palette(),
+        );
 
         let top = row_text(&buf, 0);
         assert_eq!(
             top,
             format!("╭{}╮", "─".repeat(38)),
-            "idle top rail is bare"
+            "nothing on the left: a plain rule"
         );
         let bottom = row_text(&buf, 2);
         assert!(bottom.starts_with("╰─ /tmp/ws "), "bottom rail: {bottom}");
@@ -567,6 +646,7 @@ mod tests {
             Chrome::of(area),
             Some(&activity),
             &bare(&usage),
+            Focus::Idle,
             &palette(),
         );
         let top = row_text(&buf, 0);
@@ -592,6 +672,7 @@ mod tests {
             Chrome::of(area),
             Some(&activity),
             &bare(&usage),
+            Focus::Idle,
             &palette(),
         );
         for y in 0..3 {
@@ -629,7 +710,15 @@ mod tests {
     fn meta_row(width: u16, meta: &MetaRail<'_>) -> String {
         let area = Rect::new(0, 0, width, 3);
         let mut buf = Buffer::empty(area);
-        paint(&mut buf, area, Chrome::of(area), None, meta, &palette());
+        paint(
+            &mut buf,
+            area,
+            Chrome::of(area),
+            None,
+            meta,
+            Focus::Draft,
+            &palette(),
+        );
         row_text(&buf, 2)
     }
 
@@ -711,9 +800,233 @@ mod tests {
             Chrome::of(area),
             None,
             &bare(&usage),
+            Focus::Idle,
             &palette(),
         );
         let top = row_text(&buf, 0);
         assert_eq!(top, format!("╭{}╮", "─".repeat(10)));
+    }
+
+    // ── focus state / invite ──────────────────────────────────────
+
+    fn light() -> ThemePalette {
+        ThemePalette::from_config(&crate::config::ColorsConfig {
+            preset: crate::config::ColorPreset::Light,
+            ..crate::config::ColorsConfig::default()
+        })
+    }
+
+    /// Render a card and hand back its buffer, for tests that read cells.
+    fn card_buf(
+        width: u16,
+        focus: Focus,
+        activity: Option<&ActivityRail<'_>>,
+        palette: &ThemePalette,
+    ) -> Buffer {
+        let area = Rect::new(0, 0, width, 3);
+        let mut buf = Buffer::empty(area);
+        let usage = TurnUsage::default();
+        paint(
+            &mut buf,
+            area,
+            Chrome::of(area),
+            activity,
+            &bare(&usage),
+            focus,
+            palette,
+        );
+        buf
+    }
+
+    /// The top border as text.
+    fn top_row(width: u16, focus: Focus, activity: Option<&ActivityRail<'_>>) -> String {
+        row_text(&card_buf(width, focus, activity, &palette()), 0)
+    }
+
+    /// `row_text` gives one char per cell, so a CJK glyph leaves a filler cell
+    /// between it and the next: comparisons against the copy drop whitespace.
+    fn compact(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn the_faces_follow_the_keyboard_and_the_draft() {
+        assert_eq!(Focus::of(false, false), Focus::Idle);
+        assert_eq!(Focus::of(false, true), Focus::Draft);
+        assert_eq!(Focus::of(true, true), Focus::Ghost);
+        assert_eq!(
+            Focus::of(true, false),
+            Focus::Ghost,
+            "a held keyboard outranks an empty draft"
+        );
+    }
+
+    /// While nothing is typed, the top rail says what one keystroke would do —
+    /// as a keycap (a face, not a brighter glyph), and without widening the row.
+    #[test]
+    fn the_empty_card_says_what_enter_does() {
+        let palette = palette();
+        let buf = card_buf(60, Focus::Idle, None, &palette);
+        let top = row_text(&buf, 0);
+        assert_eq!(
+            top.chars().count(),
+            60,
+            "the invite does not widen the rail"
+        );
+        assert!(
+            compact(&top).contains(&compact(SEND_HINT)),
+            "the invite is on the rail: {top}"
+        );
+        assert!(
+            top.ends_with(" ─╮"),
+            "it sits against the right corner: {top}"
+        );
+
+        // The chips are `ui::chip`'s: a band covers the padding too.
+        let x = top.chars().position(|c| c == '⏎').expect("invite glyph") as u16;
+        assert_eq!(buf[(x, 0)].bg, palette.surface, "a keycap is a small face");
+        assert_eq!(buf[(x, 0)].fg, palette.tool_result, "quiet ink");
+
+        // The rule still reaches the left corner: the pill only eats its own width.
+        assert!(top.starts_with("╭───"), "{top}");
+    }
+
+    #[test]
+    fn the_invite_never_shares_the_rail() {
+        let spinner = SpinnerState::new();
+        let activity = ActivityRail {
+            spinner: &spinner,
+            started_at: Instant::now(),
+        };
+        let working = top_row(60, Focus::Idle, Some(&activity));
+        assert!(
+            !compact(&working).contains("发送"),
+            "the spinner's turn owns the rail: {working}"
+        );
+        let drafted = top_row(60, Focus::Draft, None);
+        assert!(
+            !compact(&drafted).contains("发送"),
+            "a draft is its own invitation: {drafted}"
+        );
+        let ghosted = top_row(60, Focus::Ghost, None);
+        assert!(
+            !compact(&ghosted).contains("发送"),
+            "a card that will not take the key promises nothing: {ghosted}"
+        );
+    }
+
+    #[test]
+    fn the_invite_drops_whole_when_the_border_runs_out() {
+        // 8 columns of pill + the rail's two 3-cell framings need 16 columns of card.
+        assert!(
+            compact(&top_row(16, Focus::Idle, None)).contains(&compact(SEND_HINT)),
+            "16 columns is exactly enough"
+        );
+        // One column short: the whole invite goes, and the rule closes over it.
+        assert_eq!(
+            top_row(15, Focus::Idle, None),
+            format!("╭{}╮", "─".repeat(13)),
+            "no half a keycap"
+        );
+    }
+
+    /// The outline leaves `dim` for a washed accent while a draft waits, and
+    /// only then: the frames of `Idle` / `Ghost` are the plain quiet rule.
+    #[test]
+    fn the_outline_takes_the_focus_ink_only_while_a_draft_waits() {
+        for palette in [palette(), light()] {
+            let ink = frame_ink(Focus::Draft, &palette);
+            assert_ne!(ink, palette.dim, "the focus state has to be visible");
+            assert_ne!(ink, palette.accent, "and it is not the full accent");
+            for focus in [Focus::Idle, Focus::Draft, Focus::Ghost] {
+                let buf = card_buf(40, focus, None, &palette);
+                let expected = if focus == Focus::Draft {
+                    ink
+                } else {
+                    palette.dim
+                };
+                // Both rails, both sides and all four corners are one outline.
+                for (x, y) in [
+                    (0u16, 0u16),
+                    (39, 0),
+                    (0, 2),
+                    (39, 2),
+                    (5, 0),
+                    (0, 1),
+                    (39, 1),
+                    (5, 2),
+                ] {
+                    assert_eq!(
+                        buf[(x, y)].fg,
+                        expected,
+                        "{:?} {focus:?} at ({x},{y})",
+                        palette.appearance
+                    );
+                }
+            }
+        }
+    }
+
+    /// The focus ink is a *washed* accent: its hue leans toward `accent` while
+    /// its chroma stays under it (the workdir is the saturated one).
+    #[test]
+    fn the_focus_ink_is_a_washed_accent() {
+        fn chroma((r, g, b): crate::ui::shimmer::Rgb) -> f32 {
+            let max = r.max(g).max(b) as f32;
+            let min = r.min(g).min(b) as f32;
+            if max == 0.0 { 0.0 } else { (max - min) / max }
+        }
+        for palette in [palette(), light()] {
+            let ink = to_rgb(frame_ink(Focus::Draft, &palette));
+            assert!(
+                chroma(ink) > chroma(to_rgb(palette.dim)),
+                "{:?}：比 dim 更有色相",
+                palette.appearance
+            );
+            assert!(
+                chroma(ink) < chroma(to_rgb(palette.accent)),
+                "{:?}：比 workdir 的满 accent 弱一档",
+                palette.appearance
+            );
+        }
+    }
+
+    /// The lean is a fixed look, not a knob: both presets land where they were
+    /// tuned (`docs/dev/tui-input.md`), so changing `FOCUS_LEAN` has to be a
+    /// decision someone re-took — not a quiet drift.
+    #[test]
+    fn the_focus_lean_is_the_recorded_one() {
+        assert_eq!(
+            frame_ink(Focus::Draft, &palette()),
+            Color::Rgb(76, 144, 167)
+        );
+        assert_eq!(frame_ink(Focus::Draft, &light()), Color::Rgb(60, 111, 128));
+    }
+
+    #[test]
+    fn a_named_ink_keeps_the_plain_frame() {
+        // 命名色跟终端主题走，不冻成 RGB（与 `chip::quiet_band` 同一条规矩）。
+        for palette in [
+            ThemePalette {
+                dim: Color::Gray,
+                ..ThemePalette::default()
+            },
+            ThemePalette {
+                accent: Color::Cyan,
+                ..ThemePalette::default()
+            },
+            ThemePalette {
+                dim: Color::Reset,
+                ..ThemePalette::default()
+            },
+        ] {
+            assert_eq!(
+                frame_ink(Focus::Draft, &palette),
+                palette.dim,
+                "{:?} / {:?} 不该被算成一个假颜色",
+                palette.dim,
+                palette.accent
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ use super::InputArea;
 use super::chrome;
 use super::chrome::ActivityRail;
 use super::chrome::Chrome;
+use super::chrome::Focus;
 use super::chrome::MetaRail;
 use super::model;
 use super::wrap;
@@ -48,9 +49,9 @@ impl<'a> ComposerWidget<'a> {
     }
 
     /// A panel (ask / model picker) owns the keyboard: the draft is frozen
-    /// behind it, so the card *ghosts* — the text goes quiet, nothing promises
-    /// that typing lands here — instead of looking ready for a keystroke it
-    /// will never get.
+    /// behind it, so the card *ghosts* — the text and the outline go quiet,
+    /// nothing promises that typing lands here — instead of looking ready for a
+    /// keystroke it will never get.
     pub fn keyboard_held(mut self, held: bool) -> Self {
         self.keyboard_held = held;
         self
@@ -79,12 +80,14 @@ impl Widget for ComposerWidget<'_> {
         self.input.update_vertical_scroll(chrome);
 
         // The frame first: the draft is painted into the rows it leaves.
+        let focus = Focus::of(self.keyboard_held, !self.input.is_empty());
         chrome::paint(
             buf,
             area,
             chrome,
             self.activity.as_ref(),
             &self.meta,
+            focus,
             self.palette,
         );
 
