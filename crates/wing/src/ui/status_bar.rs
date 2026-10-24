@@ -2,13 +2,13 @@
 //!
 //! ## Registers — the left chain reads as a sentence
 //!
-//! `Wing · <session id> ★ · ▮<model>▮ · think:<effort> · <provider>`, then the
-//! instruments flush right. Each segment owns exactly one register:
+//! `Wing · <session id> ▮✦▮ · ▮<model>▮ · think:<effort> · <provider>`, then
+//! the instruments flush right. Each segment owns exactly one register:
 //!
 //! | segment | what it says | ink |
 //! |---|---|---|
 //! | brand | "me" | `text` — the row's only bold |
-//! | identity | "this session" | `dim` (`warning` once pinned) |
+//! | identity | "this session" | `dim` for the id; the pin is a face of its own (below) |
 //! | model | "who I'm talking to" | [`Chip::key`] — a `surface` band, not a brighter gray |
 //! | mode | "how it thinks" | `accent` — the row's only accent |
 //! | provider | "where the model comes from" | `dim` |
@@ -21,10 +21,27 @@
 //! longer an accent — the provider is the most ambient fact here (`wing info`
 //! and the `/model` picker carry the whole byline).
 //!
-//! The session id and the pin star are separate segments so the copyable id
+//! The session id and the pin are separate segments so the copyable id
 //! outlives the star on a very narrow row — the id is the only visible handle
 //! for "click to copy". The star never stands alone: a tail without an
 //! identity says nothing.
+//!
+//! ## The pin slot is a face, not a glyph
+//!
+//! The pin is a fixed three-column band ([`Chip::key`] with one cell of air on
+//! each side) holding a **one-column** star: what you see is what you can
+//! click, in both states, at any terminal. Two decisions make that true —
+//!
+//! * the glyph (`✦` pinned / `✧` unpinned) is East-Asian *Neutral*, so its
+//!   width is one column by specification and the terminal has no say in it.
+//!   The old `★` / `☆` are *Ambiguous*: a terminal may legally draw them one
+//!   *or* two columns wide, which is how a region recorded as one column ended
+//!   up left of the glyph the pointer was aiming at (and how the star looked
+//!   twice the size on the same machine);
+//! * the state rides the glyph and the ink, never the geometry: filled
+//!   `warning` when pinned, hollow in the keycap's own `tool_result` when not.
+//!   The band, its padding and the three columns the region covers are
+//!   identical either way.
 //!
 //! A segment stays put while the ones after it come and go; the one exception
 //! is the model's own rung, which follows the room the right cluster leaves
@@ -32,18 +49,18 @@
 //! after it shift two columns). Nothing else in the chain moves on its own.
 //!
 //! The bar declares the frame's only top-row pointer targets: the session id
-//! (click = copy) and the pin star (click = toggle). Their hit regions are
+//! (click = copy) and the pin slot (click = toggle). Their hit regions are
 //! recorded while drawing (see [`StatusBarRegions`]) and measured the way the
 //! layout measures everything else — `unicode-width`, which resolves the
-//! East-Asian *Ambiguous* glyphs (`…` `☆` `★` `·` …) to one column.
+//! East-Asian *Ambiguous* glyphs (`…` `·` `●` `─` `█`) to one column.
 //!
 //! **Known boundary**: a terminal configured to render ambiguous-width
 //! characters as two columns would draw those glyphs one column wider than we
 //! account for, so a pointer would land one cell right of the recorded region
 //! (the whole frame is misaligned there — every box-drawing border in the TUI
-//! has the same assumption). We keep the region equal to the drawn glyph
-//! rather than padding it, so the contract stays "a region covers exactly the
-//! cells it was drawn in".
+//! has the same assumption). The pin slot is the one target that is out of
+//! that bargain: it draws no ambiguous glyph at all, so its three columns hold
+//! wherever the rest of the row lands.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -57,6 +74,12 @@ use crate::config::ThemePalette;
 use crate::ui::chip::Chip;
 use crate::ui::chip::Pad;
 use crate::util::format;
+
+/// pin 星标的两态字形。两个都是 East-Asian **Neutral**：宽度由规范钉死在 1 列，
+/// 终端没有"模糊宽度"这条自由度可拨。旧的 `★` / `☆` 是 Ambiguous —— 终端可以合法地
+/// 画成 2 列，那就是"命中区落在字形左边一格、星星时大时小"的来源。
+const PIN_ON: &str = "✦";
+const PIN_OFF: &str = "✧";
 
 /// 模型身份四元组——一个会话表面上「当前模型」的完整陈述。
 ///
@@ -211,7 +234,8 @@ impl StatusData {
 pub struct StatusBarRegions {
     /// 会话 ID 段（点击 = 复制完整 ID）。
     pub session_id: Option<Rect>,
-    /// pin 星标（点击 = 切换 pin）。
+    /// pin 那整块（点击 = 切换 pin）。宽度是那块面的列数（含左右两格气口），
+    /// 置顶与否相同 —— 见模块文档「The pin slot is a face, not a glyph」。
     pub star: Option<Rect>,
 }
 
@@ -314,22 +338,14 @@ impl<'a> StatusBar<'a> {
             } else {
                 compact_session_id(self.session_id)
             };
-            let (star_glyph, star_style) = if d.pinned {
-                ("★", Style::default().fg(self.palette.warning))
-            } else {
-                ("☆", dim)
-            };
             // ID 与星标各成一段：星标是 unpin 的唯一入口，但 ID 是复制目标的唯一
-            // 可见载体 —— 窄到差一两列时先让星标（它自己的分隔符是一格空格，让出
-            // 之后不会留下悬空的 `·`）。
+            // 可见载体 —— 窄到差一两列时先让星标（那一块自己是完整的，让出之后
+            // 不会留下悬空的 `·`）。
             segments.push(Segment(vec![
                 (Span::styled(" · ", dim), None),
                 (Span::styled(id_text, dim), Some(Slot::SessionId)),
             ]));
-            segments.push(Segment(vec![
-                (Span::styled(" ", dim), None),
-                (Span::styled(star_glyph, star_style), Some(Slot::Star)),
-            ]));
+            segments.push(Segment(vec![(self.pin_span(), Some(Slot::Star))]));
         }
 
         // 模型 =「正在跟谁说话」：一块安静的底（`Chip::key`），先量前面已经用掉
@@ -365,6 +381,23 @@ impl<'a> StatusBar<'a> {
         }
 
         segments
+    }
+
+    /// pin 星标：一块**固定三列的面**（`ui::chip` 的安静档 + 左右各一格气口），
+    /// 里面放一个必然一列的星形。
+    ///
+    /// 两件事因此不必再猜：**看得见的那块就是能点的那块**（命中区 = 这三列，
+    /// 含气口），且这块的宽度与终端怎么画字形无关。状态只换字形与墨（实心
+    /// `warning` / 空心键帽墨），面、气口、列数一个都不动 —— 置顶 / 未置顶不
+    /// 改变行几何（墨的闸门在 `ui::chip` 里，压不出对比度就退回键帽墨）。
+    fn pin_span(&self) -> Span<'static> {
+        let chip = Chip::key(if self.data.pinned { PIN_ON } else { PIN_OFF });
+        let chip = if self.data.pinned {
+            chip.ink(self.palette.warning)
+        } else {
+            chip
+        };
+        chip.span(self.palette, Pad::One)
     }
 
     /// 模型段：` · ` 与模型内容一起进出，先扣掉分隔符再挑块的档位。
@@ -617,6 +650,13 @@ impl TurnUsage {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    use crate::ui::shimmer::to_rgb;
+
+    /// 墨压在底上的对比度 —— 判据是 `ui::chip` 那一份实现，测试不另抄公式。
+    fn ink_on(ink: Color, face: Color) -> f32 {
+        crate::ui::chip::contrast(to_rgb(ink), to_rgb(face))
+    }
 
     #[test]
     fn test_compact_token_notation() {
@@ -1014,14 +1054,87 @@ mod tests {
         );
     }
 
+    /// The pin slot: a fixed face in both states, with the state in the glyph and
+    /// the ink. Three things are pinned here — the columns you can click are the
+    /// columns that were drawn, the width does not move between states, and the
+    /// glyph is one column by construction (no East-Asian *Ambiguous*
+    /// character, which a terminal may draw two columns wide).
+    #[test]
+    fn the_pin_slot_is_one_face_of_constant_width() {
+        let palette = ThemePalette::default();
+        let mut widths = Vec::new();
+        for pinned in [false, true] {
+            let data = StatusData {
+                pinned,
+                ..StatusData::default()
+            };
+            let cells = cells_with(&palette, &data, SID, 200);
+            let (_, regions) = render_buffer_with(&palette, &data, SID, 200);
+            let star = regions.star.expect("pin region recorded");
+            let drawn = span_text(&cells, (star.x as usize, (star.x + star.width) as usize));
+            let glyph = if pinned { PIN_ON } else { PIN_OFF };
+
+            assert_eq!(drawn, format!(" {glyph} "), "the face covers its own air");
+            assert_eq!(drawn.trim(), glyph);
+            assert_eq!(
+                Chip::key(glyph).width(Pad::Zero),
+                1,
+                "the star is one column wide"
+            );
+            assert_eq!(star.width, 3, "the region is the drawn face");
+            // The band runs the whole region, so the visible target and the hit
+            // region are the same three cells.
+            let face = Chip::key(glyph)
+                .span(&palette, Pad::One)
+                .style
+                .bg
+                .expect("the face is drawn");
+            for x in star.x..star.x + star.width {
+                assert_eq!(
+                    cells[x as usize].bg, face,
+                    "the face covers the region ({x})"
+                );
+            }
+            // State: the glyph, and the ink on that face.
+            let ink = cells[(star.x + 1) as usize].fg;
+            assert_eq!(
+                ink,
+                if pinned {
+                    palette.warning
+                } else {
+                    palette.tool_result
+                }
+            );
+            assert!(
+                ink_on(ink, face) >= 3.0,
+                "the star stays readable on its face"
+            );
+            widths.push(star.width);
+        }
+        assert_eq!(widths[0], widths[1], "pinning does not reflow the row");
+
+        // The glyphs this slot may not use again: *Ambiguous* width, so a
+        // terminal may draw them one or two columns wide.
+        for ambiguous in ["★", "☆", "⭐"] {
+            assert!(
+                ![PIN_ON, PIN_OFF].contains(&ambiguous),
+                "{ambiguous} is an ambiguous-width glyph"
+            );
+        }
+    }
+
     #[test]
     fn test_status_bar_star_reflects_pin_state() {
         let (text, regions) = render_bar(&StatusData::default(), SID, 120);
         let star = regions.star.expect("star region recorded");
-        assert_eq!(slice(&text, star), "☆", "unpinned is a hollow star");
+        assert_eq!(
+            slice(&text, star).trim(),
+            PIN_OFF,
+            "unpinned is a hollow star"
+        );
         assert!(
             star.x > regions.session_id.unwrap().x,
-            "the star sits right after the id"
+            "the pin sits right after the id"
         );
 
         let pinned = StatusData {
@@ -1030,15 +1143,14 @@ mod tests {
         };
         let (text, regions) = render_bar(&pinned, SID, 120);
         let star = regions.star.unwrap();
-        assert_eq!(slice(&text, star), "★", "pinned is a filled star");
-        assert!(!text.contains(&"☆".to_string()));
+        assert_eq!(slice(&text, star).trim(), PIN_ON, "pinned is a filled star");
+        assert!(!text.contains(&PIN_OFF.to_string()));
     }
 
     #[test]
-    fn the_model_sits_on_the_rows_only_band() {
-        // 模型段用**一块底**说「正在跟谁说话」：底色只出现在这一块，从文首前一格
-        // 铺到文末后一格（`Chip::key` 的一格气口），墨是共享件挑的那一档 —— 宽度、
-        // 降级、明暗全在 `ui::chip`，这里钉的是"真的用了它"，不是另一份算式。
+    fn the_two_faces_are_the_pin_and_the_model() {
+        // 行里有两块面，都是 `Chip::key` 的安静档：pin 那三列（命中区）与模型段。
+        // 宽度、降级、明暗全在 `ui::chip`，这里钉的是"真的用了它"，不是另一份算式。
         // （fixture 是 ASCII：宽字形的尾格在 Buffer 里是 reset 格，CJK 模型名会让
         // `runs` 在每个字形后各切一刀 —— 那是投影的记账方式，不是真机上的缝。）
         for palette in [ThemePalette::default(), light()] {
@@ -1046,19 +1158,25 @@ mod tests {
             let bands = runs(&cells, |cell| cell.bg != Color::Reset);
             assert_eq!(
                 bands.len(),
-                1,
-                "{:?}: 整行只有模型那一块有底：{bands:?}",
+                2,
+                "{:?}: pin 与模型两块面：{bands:?}",
+                palette.appearance
+            );
+            assert_eq!(
+                span_text(&cells, bands[0]),
+                Chip::key(PIN_OFF).span(&palette, Pad::One).content.as_ref(),
+                "{:?}: 第一块是 pin",
                 palette.appearance
             );
             let expected = Chip::key("DeepSeek-Flash").span(&palette, Pad::One);
             assert_eq!(
-                span_text(&cells, bands[0]),
+                span_text(&cells, bands[1]),
                 expected.content.as_ref(),
                 "{:?}: 底色铺满内边距",
                 palette.appearance
             );
-            assert_eq!(cells[bands[0].0].bg, expected.style.bg.expect("底"));
-            assert_eq!(cells[bands[0].0].fg, expected.style.fg.expect("墨"));
+            assert_eq!(cells[bands[1].0].bg, expected.style.bg.expect("底"));
+            assert_eq!(cells[bands[1].0].fg, expected.style.fg.expect("墨"));
         }
     }
 
@@ -1111,6 +1229,22 @@ mod tests {
         }
     }
 
+    /// 模型段的底色块（pin 那三列不算：它是行里的另一块面）。
+    ///
+    /// 模型段是不降级段之后的第一个可降级段，所以"pin 之后的第一块底"就是它；
+    /// pin 让出（极窄）时行里只剩模型这一块。
+    fn model_bands(cells: &[ratatui::buffer::Cell], pin: Option<Rect>) -> Vec<(usize, usize)> {
+        runs(cells, |cell| cell.bg != Color::Reset)
+            .into_iter()
+            .filter(|(start, end)| match pin {
+                Some(rect) => {
+                    !(*start >= rect.x as usize && *end <= (rect.x + rect.width) as usize)
+                }
+                None => true,
+            })
+            .collect()
+    }
+
     #[test]
     fn the_model_band_yields_by_the_ladder() {
         // 宽度谱：模型段只有三种结局 —— 有一格气口的块 / 没有气口的块 / 整段不画。
@@ -1128,8 +1262,9 @@ mod tests {
                 ..busy()
             };
             let cells = cells_with(&palette, &data, SID, width);
+            let (_, regions) = render_buffer_with(&palette, &data, SID, width);
             let text: String = cells.iter().map(|cell| cell.symbol()).collect();
-            match runs(&cells, |cell| cell.bg != Color::Reset).as_slice() {
+            match model_bands(&cells, regions.star).as_slice() {
                 // 一段都放不下：整段不画（不是切成半块，也不是留下半截名字）。
                 [] => assert!(
                     !text.contains(&head),
@@ -1148,7 +1283,7 @@ mod tests {
                     );
                     seen.push(band);
                 }
-                other => panic!("width {width}: 底色不止一块 {other:?}"),
+                other => panic!("width {width}: 模型段不止一块底 {other:?}"),
             }
         }
         assert!(
@@ -1163,12 +1298,14 @@ mod tests {
 
     #[test]
     fn narrow_bars_keep_the_plain_model_span() {
-        // 窄档（`wide == false`）不画块：模型是裸字，墨是 `text`、不参与块的宽度数学。
+        // 窄档（`wide == false`）模型不画块：裸字，墨是 `text`、不参与块的宽度数学。
+        // （pin 那块面与宽窄无关 —— 它是命中区，不是模型段的降级档。）
         let palette = ThemePalette::default();
         let cells = cells_with(&palette, &busy(), SID, 80);
+        let (_, regions) = render_buffer_with(&palette, &busy(), SID, 80);
         assert!(
-            runs(&cells, |cell| cell.bg != Color::Reset).is_empty(),
-            "窄终端不画块"
+            model_bands(&cells, regions.star).is_empty(),
+            "窄终端模型不画块"
         );
         let text: String = cells.iter().map(|cell| cell.symbol()).collect();
         let at = text.find("DeepSeek-Flash").expect("模型");
@@ -1331,7 +1468,7 @@ mod tests {
         let id = regions.session_id.expect("id drawn");
         let star = regions.star.expect("star drawn");
         assert_eq!(slice(&text, id), "…ab12cd34");
-        assert_eq!(slice(&text, star), "☆");
+        assert_eq!(slice(&text, star).trim(), PIN_OFF);
         assert!(
             !text.join("").contains("a-very-long-model-name"),
             "the model is what got dropped: {text:?}"
@@ -1347,7 +1484,7 @@ mod tests {
             let joined = text.join("");
             assert_eq!(
                 regions.star.is_some(),
-                joined.contains('☆'),
+                joined.contains(PIN_OFF),
                 "width {width}: {joined:?}"
             );
             match regions.session_id {
@@ -1370,7 +1507,10 @@ mod tests {
     fn test_status_bar_without_a_session_id_has_no_identity_tail() {
         // 空 id = 不知道身份 → 整段不渲染（而不是画一个光秃秃的星标）。
         let (text, regions) = render_bar(&StatusData::default(), "", 120);
-        assert!(!text.iter().any(|c| c == "☆" || c == "★"), "{text:?}");
+        assert!(
+            !text.iter().any(|c| c == PIN_OFF || c == PIN_ON),
+            "{text:?}"
+        );
         assert_eq!(regions, StatusBarRegions::default());
         assert!(
             single_spaced(&text.join("")).contains("Wing · unknown"),

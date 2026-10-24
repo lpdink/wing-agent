@@ -22,7 +22,7 @@
 //! ```
 //!
 //! **刻意只有一条交互路径**：pin / unpin 都只能对「你所在的会话」做——状态栏
-//! 的星标（`☆` 点亮 / `★` 熄灭）。给别的会话打 pin 走通用的
+//! 那块星标（`✧` 点亮 / `✦` 熄灭）。给别的会话打 pin 走通用的
 //! `wing tag <sid> pin`（幂等同理）；面板里的星标是**只读**的展示。这样一次
 //! 误点永远不会摘掉别人（或你不在场的会话）的 pin——不是遗漏，是设计。
 //!
@@ -145,12 +145,12 @@ mod tests {
         assert_eq!(
             pin_tag_ops(true),
             (Some(vec!["pin".to_string()]), None),
-            "点 ☆ 要的是 add"
+            "点 ✧ 要的是 add"
         );
         assert_eq!(
             pin_tag_ops(false),
             (None, Some(vec!["pin".to_string()])),
-            "点 ★ 要的是 remove"
+            "点 ✦ 要的是 remove"
         );
     }
 

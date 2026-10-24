@@ -1233,15 +1233,19 @@ fn test_clicking_the_star_toggles_pin_both_ways() {
     draw(&mut app, &mut terminal);
     let (_, star) = status_cells(&app);
 
-    // 未 pin → 点一下请求 pin。
-    assert_eq!(
-        app.handle_mouse(press((star.x, star.y))),
-        MouseOutcome::Ignored
-    );
-    match app.drain_intents().as_slice() {
-        // intent 携带的是**目标状态**：未 pin 的会话点一下 = 请求 pin。
-        [AppIntent::SetSessionPin { pinned }] => assert!(*pinned, "not pinned yet"),
-        other => panic!("expected a pin intent, got {other:?}"),
+    // 整块都是目标：从左气口到右气口，按哪一列都算"点了星标"。
+    for offset in 0..star.width {
+        assert_eq!(
+            app.handle_mouse(press((star.x + offset, star.y))),
+            MouseOutcome::Ignored,
+            "column {} of the pin face",
+            star.x + offset
+        );
+        match app.drain_intents().as_slice() {
+            // intent 携带的是**目标状态**：未 pin 的会话点一下 = 请求 pin。
+            [AppIntent::SetSessionPin { pinned }] => assert!(*pinned, "not pinned yet"),
+            other => panic!("expected a pin intent at +{offset}, got {other:?}"),
+        }
     }
 
     // 服务端回读把它们置为已 pin（`FetchPayload::Info` 的同一路径）——这里
@@ -1250,7 +1254,7 @@ fn test_clicking_the_star_toggles_pin_both_ways() {
     draw(&mut app, &mut terminal);
     let (_, star) = status_cells(&app);
     assert_eq!(
-        app.handle_mouse(press((star.x, star.y))),
+        app.handle_mouse(press((star.x + 1, star.y))),
         MouseOutcome::Ignored
     );
     match app.drain_intents().as_slice() {
@@ -1278,9 +1282,9 @@ fn test_the_rest_of_the_status_bar_claims_no_pointer() {
         app.drain_intents().is_empty(),
         "no intent may come out of an inert cell"
     );
-    // 星标之后的空白（模型区）同样不认领。
+    // pin 那块之后（分隔符 / 模型区）同样不认领。
     assert_eq!(
-        app.handle_mouse(press((star.x + 1, 0))),
+        app.handle_mouse(press((star.x + star.width, 0))),
         MouseOutcome::Ignored
     );
     assert!(app.drain_intents().is_empty());

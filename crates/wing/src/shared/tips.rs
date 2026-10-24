@@ -67,7 +67,7 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
-        text: "点击状态栏 ☆ 置顶会话，再点取消",
+        text: "点击状态栏 ✧ 置顶会话，再点取消",
     },
     Tip {
         group: TipGroup::Keys,

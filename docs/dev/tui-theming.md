@@ -130,7 +130,7 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 | `ui/cells/model_picker.rs` | 选中色带与 selection 同语义（`surface` + `text`） |
 | `ui/welcome/{sprite,mod}.rs` | 海鸥按 appearance 出两套羽色（同一像素网格）；wordmark 渐变方向改为读 `appearance`（`light` 参数早已存在） |
 | `ui/chip.rs` | 带底色的小块（键帽 / 徽章）：底取 `surface` / `accent`，亮色终端的安静档再压深 8%（见 §4）；`Reset` 或底/纸面不到 1.2:1 时不画底、墨/底不到 3:1 时换墨（都不改宽度） |
-| `ui/status_bar.rs` | 左链的寄存器：模型段是 `surface` 底的小块（`ui/chip` 的键帽档 —— 行紧了让出气口、窄终端退回纯文本，宽度永远由 `ui::chip` 算）；`think[:effort]` 是全行唯一的 `accent` 墨；provider 排在模式之后（截断先走它） |
+| `ui/status_bar.rs` | 左链的寄存器：两块 `surface` 底的小块 —— pin 星标（固定三列，`warning` 墨说已置顶，命中区就是这三列）与模型段（`ui/chip` 的键帽档 —— 行紧了让出气口、窄终端退回纯文本，宽度永远由 `ui::chip` 算）；`think[:effort]` 是全行唯一的 `accent` 墨；provider 排在模式之后（截断先走它） |
 | `ui/cells/thinking.rs` | 刷光峰值方向读 `appearance` |
 | `ui/shimmer.rs` | 删除 `is_light_theme`（自指判据）；混色仍以 `to_rgb` 兜底 |
 | `ui/cells/todo_msg.rs` | 浅色下不再给已安静的槽叠 `Modifier::DIM` |
