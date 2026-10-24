@@ -1,5 +1,6 @@
 //! Rendering utilities.
 
+pub mod ansi;
 pub mod diff_highlight;
 pub mod fit;
 pub mod heatmap;
