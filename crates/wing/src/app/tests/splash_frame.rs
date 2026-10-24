@@ -137,18 +137,19 @@ fn the_splash_block_sits_at_the_optical_centre_at_120x40() {
         rows[19]
     );
 
-    // 输入卡：与牌子同宽（86）同列（17..=102），紧贴牌子下方一格（中间一行呼吸 +
-    // 牌子自己的收尾空行）。
-    assert_eq!(card(&rows), (25, 27, 17, 102), "输入卡的位置与宽度");
+    // 输入卡：与牌子同宽（86）同列（17..=102），紧贴牌子下方。中间两行空白各有出处：
+    // 第 23 行是牌子自己的收尾空行，第 24 行是「牌子与输入卡之间一格呼吸」。
+    let (top, bottom, left, right) = card(&rows);
+    assert_eq!(
+        (top, bottom, left, right),
+        (25, 27, 17, 102),
+        "输入卡的位置与宽度"
+    );
     assert!(
         rows[23].is_empty() && rows[24].is_empty(),
-        "牌子下面留一格呼吸"
+        "牌子收尾 + 一格呼吸"
     );
-    assert_eq!(
-        card(&rows).3 - card(&rows).2 + 1,
-        86,
-        "输入卡与牌子同宽（整块 86 列）"
-    );
+    assert_eq!(right - left + 1, 86, "输入卡与牌子同宽（整块 86 列）");
     // 下面的空气留给弹层与草稿长大：至少三行。
     assert!(
         40 - 1 - card(&rows).1 >= 3,

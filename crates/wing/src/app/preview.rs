@@ -1,4 +1,5 @@
-//! 整屏取样器 —— 创作期视觉工具的库侧（命令行在 `examples/splash_preview.rs`）。
+//! 整屏取样器 + 命令行输入 —— 创作期视觉工具的库侧（`examples/splash_preview.rs`
+//! 只剩输出接线）。
 //!
 //! 一帧「状态栏 + 开屏牌子 + 输入卡」只有一条真路径：`App::draw` —— 它读 App 的
 //! 私有状态（欢迎屏时钟、turn、版式探针缓存），把三块画进同一块 `Buffer`。
@@ -134,8 +135,10 @@ impl Frame {
     /// 每行按**格子**取原文，行尾的默认样式空白裁掉。
     ///
     /// 一个格子一条：宽字形（CJK）的续格在 `Buffer` 里是一个空格，所以字符串下标
-    /// 就是**屏幕列号**（几何断言用它）。要"看起来像终端"的文本，用 [`Frame::plain`]
-    /// / [`Frame::ansi`]：那里续格被收掉。
+    /// 就是**屏幕列号**（几何断言用它）。多字符字形（VS16 / ZWJ 组合）会占不止一个
+    /// `char`，那时下标只按字形数走 —— 本仓库把这类格子钉成单字宽（见 `ui::emoji_width`），
+    /// 所以帧里不会出现。要"看起来像终端"的文本，用 [`Frame::plain`] / [`Frame::ansi`]：
+    /// 那里续格被收掉。
     ///
     /// 裁剪只发生在「空格 + 前景/背景都是默认色 + 没有修饰」的格子上：有背景色的
     /// 空格是**画的**（铺底），留着它才看得见卡的边缘。
@@ -436,7 +439,7 @@ OPTIONS:
     --preset <NAME>     auto | dark | light（默认沿用配置）
     --draft <TEXT>      输入卡里放一段草稿（默认空：显示占位文案）
     --working           agent 在干活：活动栏 + 飞行姿态 + 这一轮的用量
-    --facts <S,R>       名牌右列的会话事实（默认 2,1；0,0 = 这一行留空）
+    --facts <S,R>       名牌右列的会话事实（默认 2,1；0,0 = 这一行留空；上限 999）
     --phase <0..1>      开屏扫光的相位（默认已定格；1 = 已扫完，同定格）
     --plain             无颜色输出（半格像素还原成实心块）
     --html <PATH>       写出 HTML（浏览器里对照 / 截图），与 --plain 互斥
@@ -444,7 +447,9 @@ OPTIONS:
     --fg <#RRGGBB>      HTML 页面前景色
     -h, --help          这一页
 
+NOTE:
     `--flag=value` 是等号形态：值本身以 `--` 开头时（例如草稿里带 `--`）用它。
+    开关类旗标（--plain / --working / --help）不接受值。
 ";
 
 /// 命令行输入：取样参数 + 输出后端。
@@ -471,6 +476,13 @@ impl Options {
     /// 「把 `--other` 当值」（那会静默写出一个名叫 `--plain` 的文件）；值本身真以 `--`
     /// 开头时用等号形态。错误消息是给人看的，所以由单测钉住。
     pub fn parse(args: &[String]) -> Result<Self, String> {
+        // `--help` 优先级最高：后面跟着写错的旗标时也该先看到帮助，而不是一条报错。
+        if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+            return Ok(Self {
+                help: true,
+                ..Self::default()
+            });
+        }
         let mut options = Self::default();
         let mut index = 0;
         while index < args.len() {
@@ -495,10 +507,22 @@ impl Options {
                     None => Err(format!("{flag} needs a value")),
                 }
             };
+            // 开关类旗标不吃值：`--working=false` 静默当成 `--working` 会骗人。
+            let switch = |name: &str| -> Result<(), String> {
+                match inline.as_deref() {
+                    Some(value) => Err(format!("{name} takes no value, got '{value}'")),
+                    None => Ok(()),
+                }
+            };
             match flag {
-                "--help" | "-h" => options.help = true,
-                "--plain" => options.plain = true,
-                "--working" => options.spec.working = true,
+                "--plain" => {
+                    switch(flag)?;
+                    options.plain = true;
+                }
+                "--working" => {
+                    switch(flag)?;
+                    options.spec.working = true;
+                }
                 "--width" => options.spec.width = number(&value(&mut index)?, flag)?,
                 "--height" => options.spec.height = number(&value(&mut index)?, flag)?,
                 "--preset" => {
@@ -566,7 +590,12 @@ impl Options {
             },
             format!("facts {},{}", self.spec.facts.skills, self.spec.facts.rules),
         ];
-        if self.spec.draft.is_some() {
+        if self
+            .spec
+            .draft
+            .as_deref()
+            .is_some_and(|draft| !draft.is_empty())
+        {
             parts.push("draft".to_string());
         }
         if self.spec.working {
@@ -652,7 +681,7 @@ mod tests {
             ..spec()
         });
         assert_eq!(settled.rows(), sweeping.rows(), "扫光只动颜色，不动字形");
-        assert_ne!(settled.ansi(), sweeping.ansi(), "扫光得真的出现在帧里");
+        assert_ne!(settled.colors(), sweeping.colors(), "扫光得真的出现在帧里");
     }
 
     #[test]
@@ -665,7 +694,7 @@ mod tests {
         assert_eq!(dark.rows(), light.rows(), "明暗只换颜色，不换排版");
         assert_eq!(dark.palette().appearance, Appearance::Dark);
         assert_eq!(light.palette().appearance, Appearance::Light);
-        assert_ne!(dark.colors(), light.colors());
+        assert_ne!(dark.colors(), light.colors(), "两套 palette 得真的画出来");
         assert_ne!(
             html::page_colors(dark.palette()),
             html::page_colors(light.palette())
@@ -816,6 +845,12 @@ mod tests {
         );
         assert!(!document.contains("1.35"), "半格像素的行高必须是 1");
         assert!(document.contains("120×40 · dark"), "标题与说明都带 caption");
+        // caption 里的标记字符也得转义（它是 `<title>` 与 `.cap` 的正文）。
+        assert!(
+            frame
+                .html("a <b> & c", "#0b0f16", "#c9ced9")
+                .contains("a &lt;b&gt; &amp; c")
+        );
     }
 
     #[test]
@@ -898,6 +933,12 @@ mod tests {
         assert_eq!(options.spec.phase, None);
         assert!(!options.plain && options.html.is_none() && !options.help);
         assert!(Options::parse(&["-h".to_string()]).expect("valid").help);
+        // `--help` 优先于其它参数（后面的旗标写错了也先给帮助）。
+        assert!(
+            Options::parse(&["--help".into(), "--widht".into()])
+                .expect("valid")
+                .help
+        );
     }
 
     #[test]
@@ -919,6 +960,8 @@ mod tests {
             (vec!["--widht", "120"], "unknown flag"),
             (vec!["stray"], "unexpected argument"),
             (vec!["--draft", "--plain"], "needs a value"),
+            (vec!["--working=false"], "takes no value"),
+            (vec!["--plain=1"], "takes no value"),
         ] {
             let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
             let error = Options::parse(&args).expect_err(&format!("{args:?} 应当报错"));

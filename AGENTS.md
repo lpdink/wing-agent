@@ -263,7 +263,7 @@ crates/wing/src/
 │   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker / notice）
 ├── render/                          Markdown + 语法高亮
-│   ├── ansi.rs                      Style → SGR 的唯一实现（CLI 表格 / 热力图 / 整屏预览共用；每段自闭合）
+│   ├── ansi.rs                      Style → SGR 的库里唯一实现（CLI 表格 / 热力图 / 主题画廊 / 渲染探针 / 整屏预览共用；每段自闭合）
 │   ├── markdown/                    types / parsing / code_blocks / tables / links / wrap（CJK UAX#14）/ images（图片锚点）/ math（公式渲染）/ profile（Content vs Thinking 的规则归属）/ stream（StreamingRender：稳定前缀 + 活动尾部）
 │   ├── picture.rs                   PictureSource — 一张图片的身份（本地文件 / 网关媒体对象）
 │   ├── heatmap.rs                   日历热力图（7 行 × ISO 周的格子网格：四分位分档 / 月份标 / 宽度裁剪）

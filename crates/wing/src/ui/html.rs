@@ -23,7 +23,9 @@ use crate::ui::shimmer::to_rgb;
 
 /// 一段样式的 CSS 声明（空串 = 无样式）。
 ///
-/// `REVERSED` 按终端语义处理：前景与背景互换（浏览器里没有「反显」）。
+/// `REVERSED` 按终端语义处理：前景与背景互换（浏览器里没有「反显」）。已知边界：反显
+/// 但前景 / 背景都是默认色的格子（终端里画成"底色当字色"）在 CSS 里没有对应物 —— 导出
+/// 的帧不含这种格子（它是选区高亮用的，静态帧里没有选区）。
 pub fn css(style: Style) -> String {
     let mut decls: Vec<String> = Vec::new();
     let reversed = style.add_modifier.contains(Modifier::REVERSED);
