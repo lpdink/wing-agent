@@ -334,14 +334,14 @@ fn test_the_empty_card_invites_loudest() {
             "{preset:?}: the placeholder wears the body ink"
         );
 
-        // The meta rail's leading item is the path: the first glyph on the
-        // bottom row that is not part of the frame (`╰`, the rule, the air
-        // beside it). Walk cells, not byte offsets into the row — the frame's
-        // box-drawing glyphs are three bytes each.
+        // The meta rail's leading item is the path: the first character on
+        // the bottom row that is not part of the frame. Walk the row's
+        // characters, not byte offsets into it — its box-drawing glyphs are
+        // three bytes each.
         let bottom = card_row(&buf, composer, composer.bottom() - 1);
         let path_x = bottom
             .chars()
-            .position(|c| !matches!(c, '╰' | '─' | ' '))
+            .position(|c| !matches!(c, '╰' | '╯' | '│' | '─' | ' '))
             .expect("the workdir leads the rail") as u16;
         assert!(
             matches!(bottom.chars().nth(path_x as usize), Some('/' | '~')),

@@ -702,9 +702,9 @@ fn tip_line(tip: &str, palette: &ThemePalette, badge: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// 把 `/xxx` 形态的词染成 accent。accent 的第一层含义是能敲 / 能点的东西（命令、链接、
-/// popup 候选、输入卡的 `❯` 与粘贴 / 图片 chip —— 见 `docs/dev/tui-input.md`）；品牌图形
-/// 与 spinner 另算。名牌里若是 dim，命令就成了看不见的字。
+/// 把 `/xxx` 形态的词染成 accent（palette 的约定：accent = logo / 命令 / 链接；输入卡的
+/// `❯` 与粘贴 / 图片 chip 也用它，品牌图形与 spinner 另算 —— 见 `docs/dev/tui-input.md`）。
+/// 名牌里若是 dim，命令就成了看不见的字。
 fn with_commands(text: &str, base: Style, cmds: Style) -> Vec<Span<'static>> {
     let flush = |out: &mut Vec<Span<'static>>, word: &mut String, is_cmd: bool| {
         if !word.is_empty() {

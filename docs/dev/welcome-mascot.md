@@ -71,9 +71,8 @@
 * **寄存器**（谁亮谁暗）：版本 / 事实 / 入口 = `dim`；按键 = `tool_result`（比 dim
   亮一档，先看见敲什么）；tip 正文 = `text`（名牌上唯一可照着办的一条；空卡的邀请句与它
   同墨，但那是输入卡的寄存器，见 [tui-input.md](tui-input.md)）；
-  `/命令` = `accent`（accent 的第一层含义是能敲 / 能点的东西：命令、链接、popup 候选，
-  以及输入卡的 `❯` 与粘贴 / 图片 chip —— 品牌图形与 spinner 另算；见
-  [tui-input.md](tui-input.md) 的 composer 一节）。
+  `/命令` = `accent`（palette 的约定：accent = logo / 命令 / 链接；输入卡的 `❯` 与粘贴 /
+  图片 chip 也用它，品牌图形与 spinner 另算 —— 见 [tui-input.md](tui-input.md) 的 composer 一节）。
 * **键帽与徽章只在 2x 档**：键位行的每个键是一块键帽（`surface` 底 + `tool_result`
   墨，左右各一格内边距），`Tip` 是一块实心徽章（`accent` 底 + 纸色 `surface` 墨）——
   「可敲」从此是**形状**，不再只靠亮度差一档。文字行里只有徽章把 accent 当填充用

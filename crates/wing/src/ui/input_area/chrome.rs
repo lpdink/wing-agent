@@ -199,7 +199,7 @@ impl Focus {
 ///
 /// Named colours are not frozen into RGB (they follow the terminal's theme —
 /// the same rule as `chip::quiet_band`), so a palette whose `dim` or `accent`
-/// is not a concrete RGB keeps the plain `dim` outline for a draft too.
+/// is not a concrete RGB keeps the plain `dim` outline while a draft waits.
 fn frame_ink(focus: Focus, palette: &ThemePalette) -> Color {
     match focus {
         Focus::Empty => palette.tool_result,
@@ -1108,7 +1108,7 @@ mod tests {
                 palette.dim,
                 "{focus:?}: the workdir stays quiet"
             );
-            let after_item = 3 + "/tmp/ws".len() as u16;
+            let after_item = 3 + "/tmp/ws".chars().count() as u16;
             assert_eq!(buf[(after_item, 2)].fg, ink, "{focus:?}: the air after it");
         }
     }
