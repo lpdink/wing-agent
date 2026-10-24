@@ -570,31 +570,29 @@ fn ansi(lines: &[Line<'_>], plain: bool) -> String {
 }
 
 fn html(lines: &[Line<'_>], meta: &str, bg: &str, fg: &str) -> String {
-    let mut out = String::new();
-    out.push_str("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n");
-    let _ = writeln!(out, "<title>{}</title>", html::escape(meta));
-    out.push_str("<style>\n");
-    out.push_str("html,body{margin:0;padding:0}\n");
-    let _ = writeln!(out, "body{{background:{bg};color:{fg};padding:26px 30px}}");
-    out.push_str(
-        "pre{margin:0;font:13px/1.35 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",Consolas,monospace;white-space:pre}\n",
-    );
-    out.push_str("</style></head><body>\n");
-    out.push_str("<pre>\n");
+    let mut body = String::new();
     for line in lines {
         for span in &line.spans {
             let css = html::css(span.style);
             let text = html::escape(&span.content);
             if css.is_empty() {
-                out.push_str(&text);
+                body.push_str(&text);
             } else {
-                let _ = write!(out, "<span style=\"{css}\">{text}</span>");
+                let _ = write!(body, "<span style=\"{css}\">{text}</span>");
             }
         }
-        out.push('\n');
+        body.push('\n');
     }
-    out.push_str("</pre>\n</body></html>\n");
-    out
+    // 行高 1.35 是散文的排版（这里没有半格像素要拼实心）。
+    html::document(&html::Page {
+        title: meta,
+        caption: None,
+        background: bg,
+        foreground: fg,
+        padding: "26px 30px",
+        font: "font:13px/1.35 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",Consolas,monospace",
+        body: &body,
+    })
 }
 
 // ── CLI ─────────────────────────────────────────────────────────

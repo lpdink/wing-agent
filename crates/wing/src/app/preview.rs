@@ -1,6 +1,6 @@
 //! 整屏取样器 —— 创作期视觉工具的库侧（命令行在 `examples/splash_preview.rs`）。
 //!
-//! 一帧「状态栏 + 开屏牌子 + 输入卡」只有一条真路径：[`App::draw`] —— 它读 App 的
+//! 一帧「状态栏 + 开屏牌子 + 输入卡」只有一条真路径：`App::draw` —— 它读 App 的
 //! 私有状态（欢迎屏时钟、turn、版式探针缓存），把三块画进同一块 `Buffer`。
 //! example 是独立 crate、只见公共 API：够不着 `draw`，也够不着 `handle_event`。
 //! 把两者变 `pub` 等于把「一帧怎么画」和「事件入口」一起变成公共契约；取样器留在
@@ -17,6 +17,7 @@
 //! **取样面**：开屏整块。弹层 / 设置面板 / toast / 图片不在 fixture 里，画不出来。
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -29,6 +30,7 @@ use wing_api_client::models::SessionUsage;
 
 use super::App;
 use crate::config::AppConfig;
+use crate::config::Appearance;
 use crate::config::ColorPreset;
 use crate::config::ThemePalette;
 use crate::protocol::AgentInfo;
@@ -168,17 +170,18 @@ impl Frame {
         out
     }
 
-    /// 真彩 ANSI（一行一条，行尾复位）：直接贴到终端里就是真机上那一帧。
+    /// 真彩 ANSI（一行一条）：直接贴到终端里就是真机上那一帧。
     ///
     /// 每段都由 [`crate::render::ansi::paint`] 自闭合交出 —— 默认样式的段是裸文本，
-    /// 但它前面那段已经复位，空白格不会继承墨迹的颜色。
+    /// 但它前面那段已经复位，空白格不会继承墨迹的颜色。行尾不再补一次复位（每一段
+    /// 已经关干净了）。
     pub fn ansi(&self) -> String {
         let mut out = String::new();
         for y in self.buffer.area.y..self.buffer.area.bottom() {
             for (style, text) in self.runs(y) {
                 out.push_str(&crate::render::ansi::paint(style, &text));
             }
-            out.push_str("\x1b[0m\n");
+            out.push('\n');
         }
         out
     }
@@ -186,35 +189,30 @@ impl Frame {
     /// 独立 HTML 文档：`<pre>` 里逐段 span，页面底色由调用方给。
     ///
     /// App 不画终端背景（那是终端自己的事），所以页面必须自己补底色：深色 palette
-    /// 落在浏览器默认白底上，截图就成了「全白」。行高是 1 —— 半格像素靠上下两半
-    /// 拼实心，行高一多就会出现横缝。
+    /// 落在浏览器默认白底上，截图就成了「全白」。行高是 1 —— 半格像素靠上下两半拼
+    /// 实心，行高一多就会出现横缝。
     pub fn html(&self, caption: &str, background: &str, foreground: &str) -> String {
-        let mut out = String::new();
-        out.push_str("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n");
-        let _ = writeln!(out, "<title>{}</title>", html::escape(caption));
-        out.push_str("<style>\nhtml,body{margin:0;padding:0}\n");
-        let _ = writeln!(
-            out,
-            "body{{background:{background};color:{foreground};padding:22px 26px}}"
-        );
-        out.push_str(".cap{font:12px/1.4 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",monospace;opacity:.55;margin:0 0 10px}\n");
-        out.push_str("pre{margin:0;font:14px/1 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",Consolas,monospace;white-space:pre}\n");
-        out.push_str("</style></head><body>\n");
-        let _ = writeln!(out, "<div class=\"cap\">{}</div>", html::escape(caption));
-        out.push_str("<pre>\n");
+        let mut body = String::new();
         for y in self.buffer.area.y..self.buffer.area.bottom() {
             for (style, text) in self.runs(y) {
                 let css = html::css(style);
                 if css.is_empty() {
-                    out.push_str(&html::escape(&text));
+                    body.push_str(&html::escape(&text));
                 } else {
-                    let _ = write!(out, "<span style=\"{css}\">{}</span>", html::escape(&text));
+                    let _ = write!(body, "<span style=\"{css}\">{}</span>", html::escape(&text));
                 }
             }
-            out.push('\n');
+            body.push('\n');
         }
-        out.push_str("</pre></body></html>\n");
-        out
+        html::document(&html::Page {
+            title: caption,
+            caption: Some(caption),
+            background,
+            foreground,
+            padding: "22px 26px",
+            font: "font:14px/1 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",Consolas,monospace",
+            body: &body,
+        })
     }
 
     /// 一行里真正承载字形的格子（宽字形的续格被跳过），到行尾的可见列为上。
@@ -423,6 +421,190 @@ fn plain_symbol(cell: &ratatui::buffer::Cell) -> &str {
     }
 }
 
+// ── 命令行输入（example 只剩输出） ──────────────────────────────
+
+/// `splash_preview` 的帮助文本。
+pub const USAGE: &str = "\
+splash_preview — 开屏整块的真帧（状态栏 + 牌子 + 输入卡）
+
+USAGE:
+    cargo run -p wing --example splash_preview [OPTIONS]
+
+OPTIONS:
+    --width <N>         终端列数（默认 100，上限 1000）
+    --height <N>        终端行数（默认 30，上限 1000）—— 开屏的竖直位置由它决定
+    --preset <NAME>     auto | dark | light（默认沿用配置）
+    --draft <TEXT>      输入卡里放一段草稿（默认空：显示占位文案）
+    --working           agent 在干活：活动栏 + 飞行姿态 + 这一轮的用量
+    --facts <S,R>       名牌右列的会话事实（默认 2,1；0,0 = 这一行留空）
+    --phase <0..1>      开屏扫光的相位（默认已定格；1 = 已扫完，同定格）
+    --plain             无颜色输出（半格像素还原成实心块）
+    --html <PATH>       写出 HTML（浏览器里对照 / 截图），与 --plain 互斥
+    --bg <#RRGGBB>      HTML 页面底色（默认按明暗档）
+    --fg <#RRGGBB>      HTML 页面前景色
+    -h, --help          这一页
+
+    `--flag=value` 是等号形态：值本身以 `--` 开头时（例如草稿里带 `--`）用它。
+";
+
+/// 命令行输入：取样参数 + 输出后端。
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// 取样参数。
+    pub spec: Spec,
+    /// 无颜色输出。
+    pub plain: bool,
+    /// HTML 输出路径（与 [`Options::plain`] 互斥）。
+    pub html: Option<PathBuf>,
+    /// HTML 页面底色（`None` = 按明暗档）。
+    pub background: Option<String>,
+    /// HTML 页面前景色（`None` = 按明暗档）。
+    pub foreground: Option<String>,
+    /// 只打帮助。
+    pub help: bool,
+}
+
+impl Options {
+    /// 解析 `args`（不含程序名）。
+    ///
+    /// `--flag value` 与 `--flag=value` 两种形态。`--flag --other` 是**用法错误**而不是
+    /// 「把 `--other` 当值」（那会静默写出一个名叫 `--plain` 的文件）；值本身真以 `--`
+    /// 开头时用等号形态。错误消息是给人看的，所以由单测钉住。
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self::default();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            let (flag, inline) = match arg.split_once('=') {
+                Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+                _ => (arg, None),
+            };
+            let value = |index: &mut usize| -> Result<String, String> {
+                if let Some(value) = inline.clone() {
+                    return Ok(value);
+                }
+                match args.get(*index + 1) {
+                    Some(next) if !next.starts_with("--") => {
+                        *index += 1;
+                        Ok(next.clone())
+                    }
+                    Some(next) => Err(format!(
+                        "{flag} needs a value, got the flag '{next}' (write {flag}=<value> \
+                         when the value itself starts with --)"
+                    )),
+                    None => Err(format!("{flag} needs a value")),
+                }
+            };
+            match flag {
+                "--help" | "-h" => options.help = true,
+                "--plain" => options.plain = true,
+                "--working" => options.spec.working = true,
+                "--width" => options.spec.width = number(&value(&mut index)?, flag)?,
+                "--height" => options.spec.height = number(&value(&mut index)?, flag)?,
+                "--preset" => {
+                    let raw = value(&mut index)?;
+                    options.spec.preset = Some(ColorPreset::parse(&raw).ok_or_else(|| {
+                        format!(
+                            "unknown preset '{raw}' (known: {})",
+                            ColorPreset::ALL
+                                .iter()
+                                .map(|preset| preset.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?);
+                }
+                "--draft" => options.spec.draft = Some(value(&mut index)?),
+                "--facts" => options.spec.facts = facts(&value(&mut index)?)?,
+                "--phase" => {
+                    let raw = value(&mut index)?;
+                    let phase = raw
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|phase| (0.0..=1.0).contains(phase))
+                        .ok_or_else(|| format!("--phase expects a number in 0..=1, got '{raw}'"))?;
+                    options.spec.phase = Some(phase);
+                }
+                "--html" => options.html = Some(PathBuf::from(value(&mut index)?)),
+                "--bg" => options.background = Some(value(&mut index)?),
+                "--fg" => options.foreground = Some(value(&mut index)?),
+                other if other.starts_with('-') => {
+                    return Err(format!("unknown flag '{other}' (see --help)"));
+                }
+                other => return Err(format!("unexpected argument '{other}' (see --help)")),
+            }
+            index += 1;
+        }
+
+        if options.plain && options.html.is_some() {
+            return Err(
+                "--plain and --html are different outputs: write the frame to stdout or to a \
+                 styled HTML file, not both"
+                    .into(),
+            );
+        }
+        if (options.background.is_some() || options.foreground.is_some()) && options.html.is_none()
+        {
+            return Err("--bg / --fg only apply to --html".into());
+        }
+        Ok(options)
+    }
+
+    /// 一帧的说明行：尺寸 / 明暗 / 相位 / 状态（终端 stderr 与 HTML 标题共用）。
+    pub fn caption(&self, frame: &Frame) -> String {
+        let appearance = match frame.palette().appearance {
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        };
+        let mut parts = vec![
+            format!("{}×{}", self.spec.width, self.spec.height),
+            appearance.to_string(),
+            // `phase = 1` 与定格是同一帧（扫光窗口已经走完），说明行不该说"100%"。
+            match self.spec.phase {
+                Some(phase) if phase < 1.0 => format!("sweep {:.0}%", phase * 100.0),
+                _ => "settled".to_string(),
+            },
+            format!("facts {},{}", self.spec.facts.skills, self.spec.facts.rules),
+        ];
+        if self.spec.draft.is_some() {
+            parts.push("draft".to_string());
+        }
+        if self.spec.working {
+            parts.push("working".to_string());
+        }
+        parts.join(" · ")
+    }
+}
+
+/// 正整数的列 / 行数。上界是防呆：`--width 65535 --height 65535` 会让取样器去分配
+/// 四十亿个格子（卡死或 OOM），而不是报错。
+fn number(raw: &str, flag: &str) -> Result<u16, String> {
+    raw.parse::<u16>()
+        .ok()
+        .filter(|value| (1..=1000).contains(value))
+        .ok_or_else(|| format!("{flag} expects a positive integer (max 1000), got '{raw}'"))
+}
+
+/// `--facts 2,1` → 会话事实（skills,rules）。上界同 [`number`]：计数只出现在名牌上。
+fn facts(raw: &str) -> Result<SessionFacts, String> {
+    let (skills, rules) = raw
+        .split_once(',')
+        .ok_or_else(|| format!("--facts expects '<skills>,<rules>', got '{raw}'"))?;
+    let parse = |text: &str, name: &str| -> Result<usize, String> {
+        let value = text
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("--facts: {name} expects a count, got '{text}'"))?;
+        (value <= 999)
+            .then_some(value)
+            .ok_or_else(|| format!("--facts: {name} must be <= 999, got {value}"))
+    };
+    Ok(SessionFacts {
+        skills: parse(skills, "skills")?,
+        rules: parse(rules, "rules")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,8 +787,17 @@ mod tests {
         ] {
             let frame = render(&spec);
             assert_eq!(parsed_styles(&frame), expected_styles(&frame));
-            for line in frame.ansi().lines() {
-                assert!(line.ends_with("\x1b[0m"), "每行以复位收尾：{line:?}");
+            assert!(
+                !frame.ansi().contains("\x1b[0m\x1b[0m"),
+                "每段自闭合即可，行尾不该再补一次复位"
+            );
+            // 两个后端同一帧：ANSI 里出现过的每个颜色，HTML 页面里也得有。
+            let document = frame.html("reconcile", "#0b0f16", "#c9ced9");
+            for color in frame.colors() {
+                assert!(
+                    document.contains(&html::hex(color)),
+                    "HTML 少了颜色 {color:?}"
+                );
             }
         }
     }
@@ -658,6 +849,115 @@ mod tests {
         assert!(
             frame.rows().join("\n").contains("refactor the splash"),
             "草稿在卡里"
+        );
+    }
+
+    #[test]
+    fn the_cli_reads_its_flags() {
+        let args: Vec<String> = "--width 80 --height 24 --preset light --draft hi --working \
+             --facts 0,3 --phase 0.4 --plain"
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let options = Options::parse(&args).expect("valid");
+        assert_eq!(options.spec.width, 80);
+        assert_eq!(options.spec.height, 24);
+        assert_eq!(options.spec.preset, Some(ColorPreset::Light));
+        assert_eq!(options.spec.draft.as_deref(), Some("hi"));
+        assert!(options.spec.working);
+        assert_eq!(
+            options.spec.facts,
+            SessionFacts {
+                skills: 0,
+                rules: 3
+            }
+        );
+        assert_eq!(options.spec.phase, Some(0.4));
+        assert!(options.plain);
+        assert!(options.html.is_none());
+        assert!(!options.help);
+
+        // 等号形态：值本身以 `--` 开头。
+        let options = Options::parse(&["--draft=--not-a-flag".to_string()]).expect("valid");
+        assert_eq!(options.spec.draft.as_deref(), Some("--not-a-flag"));
+    }
+
+    #[test]
+    fn the_cli_defaults_match_the_spec() {
+        let options = Options::parse(&[]).expect("valid");
+        assert_eq!(options.spec.width, 100);
+        assert_eq!(options.spec.height, 30);
+        assert_eq!(options.spec.preset, None);
+        assert_eq!(
+            options.spec.facts,
+            SessionFacts {
+                skills: 2,
+                rules: 1
+            }
+        );
+        assert_eq!(options.spec.phase, None);
+        assert!(!options.plain && options.html.is_none() && !options.help);
+        assert!(Options::parse(&["-h".to_string()]).expect("valid").help);
+    }
+
+    #[test]
+    fn the_cli_refuses_ambiguous_or_broken_input() {
+        for (args, expected) in [
+            (
+                vec!["--plain", "--html", "/tmp/x.html"],
+                "different outputs",
+            ),
+            (vec!["--html", "--plain"], "needs a value"),
+            (vec!["--width", "abc"], "positive integer"),
+            (vec!["--width", "0"], "positive integer"),
+            (vec!["--width", "2000"], "max 1000"),
+            (vec!["--facts", "2"], "'<skills>,<rules>'"),
+            (vec!["--facts", "1000,0"], "<= 999"),
+            (vec!["--phase", "1.5"], "0..=1"),
+            (vec!["--preset", "neon"], "unknown preset"),
+            (vec!["--bg", "#000000"], "only apply to --html"),
+            (vec!["--widht", "120"], "unknown flag"),
+            (vec!["stray"], "unexpected argument"),
+            (vec!["--draft", "--plain"], "needs a value"),
+        ] {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+            let error = Options::parse(&args).expect_err(&format!("{args:?} 应当报错"));
+            assert!(
+                error.contains(expected),
+                "{args:?} 的报错应当提到 `{expected}`，实际：{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_caption_says_what_the_frame_shows() {
+        let options = Options::parse(&[]).expect("valid");
+        let frame = render(&options.spec);
+        assert_eq!(
+            options.caption(&frame),
+            "100×30 · dark · settled · facts 2,1"
+        );
+
+        let options = Options::parse(
+            &"--phase 0.4 --working --draft hi --facts 0,0 --preset light"
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
+        .expect("valid");
+        let frame = render(&options.spec);
+        assert_eq!(
+            options.caption(&frame),
+            "100×30 · light · sweep 40% · facts 0,0 · draft · working"
+        );
+
+        // `phase = 1` 已经扫完，与定格同一帧 —— 说明行不能说 "sweep 100%"。
+        let options = Options::parse(&["--phase=1".to_string()]).expect("valid");
+        let frame = render(&options.spec);
+        assert!(
+            options.caption(&frame).contains("settled"),
+            "{}",
+            options.caption(&frame)
         );
     }
 

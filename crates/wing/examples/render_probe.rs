@@ -43,7 +43,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
 
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use wing::config::ThemePalette;
 use wing::config::rendering::MathMode;
@@ -365,7 +364,11 @@ fn print_lines(
             if plain {
                 text.push_str(&span.content);
             } else {
-                let _ = write!(text, "{}{}{}", sgr(span.style), span.content, RESET);
+                let _ = write!(
+                    text,
+                    "{}",
+                    wing::render::ansi::paint(span.style, &span.content)
+                );
             }
         }
         writeln!(out, "{n:>gutter$} | {text}")?;
@@ -391,7 +394,7 @@ fn print_ir(
             if plain {
                 text.push_str(&seg.text);
             } else {
-                let _ = write!(text, "{}{}{}", sgr(seg.style), seg.text, RESET);
+                let _ = write!(text, "{}", wing::render::ansi::paint(seg.style, &seg.text));
             }
         }
         writeln!(out, "{:>4} [{kinds}] {text}", i + 1)?;
@@ -654,61 +657,4 @@ fn next_value(
     flag: &str,
 ) -> Result<String, String> {
     args.next().ok_or_else(|| format!("{flag} needs a value"))
-}
-
-const RESET: &str = "\u{1b}[0m";
-
-/// ratatui `Style` → SGR escape sequence.
-fn sgr(style: Style) -> String {
-    let mut codes: Vec<String> = Vec::new();
-    if let Some(fg) = style.fg {
-        codes.push(color_code(fg, false));
-    }
-    if let Some(bg) = style.bg {
-        codes.push(color_code(bg, true));
-    }
-    let m = style.add_modifier;
-    for (flag, code) in [
-        (Modifier::BOLD, 1),
-        (Modifier::DIM, 2),
-        (Modifier::ITALIC, 3),
-        (Modifier::UNDERLINED, 4),
-        (Modifier::REVERSED, 7),
-        (Modifier::CROSSED_OUT, 9),
-    ] {
-        if m.contains(flag) {
-            codes.push(code.to_string());
-        }
-    }
-    if codes.is_empty() {
-        String::new()
-    } else {
-        format!("\u{1b}[{}m", codes.join(";"))
-    }
-}
-
-fn color_code(color: Color, background: bool) -> String {
-    let base = if background { 40 } else { 30 };
-    let bright = if background { 100 } else { 90 };
-    match color {
-        Color::Reset => "0".to_string(),
-        Color::Black => base.to_string(),
-        Color::Red => (base + 1).to_string(),
-        Color::Green => (base + 2).to_string(),
-        Color::Yellow => (base + 3).to_string(),
-        Color::Blue => (base + 4).to_string(),
-        Color::Magenta => (base + 5).to_string(),
-        Color::Cyan => (base + 6).to_string(),
-        Color::Gray => (base + 7).to_string(),
-        Color::DarkGray => bright.to_string(),
-        Color::LightRed => (bright + 1).to_string(),
-        Color::LightGreen => (bright + 2).to_string(),
-        Color::LightYellow => (bright + 3).to_string(),
-        Color::LightBlue => (bright + 4).to_string(),
-        Color::LightMagenta => (bright + 5).to_string(),
-        Color::LightCyan => (bright + 6).to_string(),
-        Color::White => (bright + 7).to_string(),
-        Color::Indexed(i) => format!("{};5;{i}", if background { 48 } else { 38 }),
-        Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", if background { 48 } else { 38 }),
-    }
 }

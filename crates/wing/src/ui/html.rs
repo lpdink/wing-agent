@@ -4,8 +4,14 @@
 //! 消费者（`theme_preview` 的主题画廊、`splash_preview` 的整屏帧）共用这份定义 ——
 //! 各写一份的话，颜色表、转义顺序、`REVERSED`（前景/背景互换）迟早各错一遍。
 //!
-//! 页面底色（[`page_colors`]）也在这里：App 只画格子、不画终端背景，导出 HTML 时必须
-//! 由页面补上 —— 深色 palette 落在浏览器默认白底上，截图就成了「全白」。
+//! 页面底色（[`page_colors`]）与文档外壳（[`document`]）也在这里：App 只画格子、不画
+//! 终端背景，导出 HTML 时必须由页面补上 —— 深色 palette 落在浏览器默认白底上，截图就
+//! 成了「全白」。
+//!
+//! 住在 `ui` 而不是 `render`：颜色 → `#rrggbb` 要走命名色的近似表（`ui::shimmer::to_rgb`），
+//! 而 `render` 在分层里位于 `ui` 之下（markdown 渲染被 ui 消费），不能反向依赖它。
+
+use std::fmt::Write as _;
 
 use ratatui::style::Color;
 use ratatui::style::Modifier;
@@ -74,6 +80,51 @@ pub fn page_colors(palette: &ThemePalette) -> (&'static str, &'static str) {
     }
 }
 
+/// 一份 HTML 文档的外壳：文档头 + 页面底色 + `<pre>` 里已经编码好的正文。
+///
+/// 两个导出工具的差别只在排版参数（字号 / 行高 / 边距 / 说明行），壳子是同一份 ——
+/// 各写一遍的话 `<!doctype>`、字符集、`white-space:pre` 迟早各错一处。
+pub struct Page<'a> {
+    /// `<title>`。
+    pub title: &'a str,
+    /// `<pre>` 上方的说明行（`None` = 不画）。
+    pub caption: Option<&'a str>,
+    /// 页面底色 / 前景色。
+    pub background: &'a str,
+    pub foreground: &'a str,
+    /// `body` 的内边距。
+    pub padding: &'a str,
+    /// `<pre>` 的字体声明。行高要显式写：半格像素靠上下两半拼实心，行高一多就有横缝。
+    pub font: &'a str,
+    /// `<pre>` 里已经编码好的正文（换行自己带）。
+    pub body: &'a str,
+}
+
+/// 把 [`Page`] 拼成一份可以双击打开的 HTML。
+pub fn document(page: &Page<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("<!doctype html>\n<html><head><meta charset=\"utf-8\">\n");
+    let _ = writeln!(out, "<title>{}</title>", escape(page.title));
+    out.push_str("<style>\nhtml,body{margin:0;padding:0}\n");
+    let _ = writeln!(
+        out,
+        "body{{background:{};color:{};padding:{}}}",
+        page.background, page.foreground, page.padding
+    );
+    if page.caption.is_some() {
+        out.push_str(".cap{font:12px/1.4 Menlo,\"SF Mono\",\"DejaVu Sans Mono\",monospace;opacity:.55;margin:0 0 10px}\n");
+    }
+    let _ = writeln!(out, "pre{{margin:0;{};white-space:pre}}", page.font);
+    out.push_str("</style></head><body>\n");
+    if let Some(caption) = page.caption {
+        let _ = writeln!(out, "<div class=\"cap\">{}</div>", escape(caption));
+    }
+    out.push_str("<pre>\n");
+    out.push_str(page.body);
+    out.push_str("</pre>\n</body></html>\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,8 +158,51 @@ mod tests {
     }
 
     #[test]
+    fn dim_and_strikethrough_reach_the_page() {
+        assert_eq!(
+            css(Style::default().add_modifier(Modifier::DIM)),
+            "opacity:.62"
+        );
+        assert_eq!(
+            css(Style::default()
+                .fg(Color::Rgb(1, 2, 3))
+                .add_modifier(Modifier::CROSSED_OUT)),
+            "color:#010203;text-decoration:line-through"
+        );
+    }
+
+    #[test]
+    fn named_colours_become_hex() {
+        assert_eq!(hex(Color::Red), "#cd3131");
+        assert_eq!(hex(Color::Rgb(0x0b, 0x0f, 0x16)), "#0b0f16");
+    }
+
+    #[test]
     fn escaping_covers_the_three_markup_characters() {
         assert_eq!(escape("<a & b>"), "&lt;a &amp; b&gt;");
+    }
+
+    #[test]
+    fn a_page_shell_carries_the_caption_only_when_asked() {
+        let page = |caption| Page {
+            title: "t <1>",
+            caption,
+            background: "#000000",
+            foreground: "#ffffff",
+            padding: "1px 2px",
+            font: "font:14px/1 Menlo,monospace",
+            body: "x\n",
+        };
+        let with = document(&page(Some("cap & <x>")));
+        assert!(with.starts_with("<!doctype html>"));
+        assert!(with.contains("<title>t &lt;1&gt;</title>"));
+        assert!(with.contains("background:#000000;color:#ffffff;padding:1px 2px"));
+        assert!(with.contains(".cap{"));
+        assert!(with.contains("<div class=\"cap\">cap &amp; &lt;x&gt;</div>"));
+        assert!(with.contains("<pre>\nx\n</pre>\n</body></html>"));
+        let without = document(&page(None));
+        assert!(!without.contains(".cap{"), "没有说明行就不该有它的样式");
+        assert!(!without.contains("<div"), "{without:.200}");
     }
 
     #[test]
