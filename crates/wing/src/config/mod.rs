@@ -202,7 +202,8 @@ impl ColorPreset {
 /// `wing config` render this table; [`ColorsConfig`]'s fields deliberately do
 /// not repeat the copy, so there is no second version to drift.
 pub(crate) mod slot_doc {
-    pub(crate) const ACCENT: &str = "Brand color: logo, commands, links, popups.";
+    pub(crate) const ACCENT: &str =
+        "Brand color: logo, commands, links, popups — and the badge fill.";
     pub(crate) const TEXT: &str = "Primary text: messages, model name, input.";
     pub(crate) const THINKING: &str =
         "Thinking: agent reasoning content (more prominent than dim).";
@@ -223,7 +224,7 @@ pub(crate) mod slot_doc {
     pub(crate) const MARKER: &str =
         "List marks: bullets, ordered numbers, task boxes — and the table header band.";
     pub(crate) const QUOTE: &str = "Blockquote: the bar and the quoted voice.";
-    pub(crate) const SURFACE: &str = "Surface: user message background.";
+    pub(crate) const SURFACE: &str = "Surface: user message background, keycap fill, badge ink.";
     pub(crate) const DIFF_ADD_BG: &str =
         "Background tint for diff additions (text keeps syntax colors).";
     pub(crate) const DIFF_DEL_BG: &str = "Background tint for diff deletions.";

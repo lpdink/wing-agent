@@ -51,6 +51,7 @@ use crate::config::ThemePalette;
 use crate::render::table::split_str_by_width;
 use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::tips;
+use crate::ui::chip;
 use crate::ui::shimmer::to_rgb;
 use art::FLY_0;
 use art::FLY_0_COLS;
@@ -545,7 +546,11 @@ fn text_column(
     let scale = wordmark::scale_for(width);
     let mut out = wordmark::lines(scale, sweep, accent, light);
 
-    let rows = info_rows(palette, tip, facts);
+    // 键帽 / 徽章是 2x 档的排面：那一档的块宽被大字钉死在 46，行宽长了也不动几何。
+    // 1x 档（信息列 34–45）的块宽由内容决定，加宽的键位行（40 列）在那里比 80 列
+    // 终端的信息列（38）还宽 —— 那一档继续用纯文本（见 `docs/dev/welcome-mascot.md`）。
+    let chip_room = (scale == wordmark::Scale::X2).then(|| scale.columns());
+    let rows = info_rows(palette, tip, facts, chip_room);
     let widest = rows.iter().map(width_of).max().unwrap_or(0);
     let block = widest.max(scale.columns()).min(width);
 
@@ -574,11 +579,17 @@ fn rule_line(block: usize, style: Style) -> Line<'static> {
 /// 事实槽位**恒在**：缺席（0/0 / 老网关）时留一行空白 —— 右列行数因此在两个
 /// 布局档里都固定。Full 档本来就骑在海鸥的 13 行盒子里（高度由画盒定），
 /// Compact 档文字列**就是**整块 header，多一行会让下方内容跳一行。
-fn info_rows(palette: &ThemePalette, tip: &str, facts: Option<SessionFacts>) -> Vec<Line<'static>> {
+///
+/// `chip_room` 是键帽 / 徽章的**行预算**（`None` = 这一档不画色块）：它只会是
+/// `Scale::X2.columns()`（2x 档的块宽 = 46），带色块的行在预算内先宽后窄地降级；
+/// 一档都放不下就退回纯文本 —— 那是**样子**的退路，宽度再超就交给 `fit_line`。
+fn info_rows(
+    palette: &ThemePalette,
+    tip: &str,
+    facts: Option<SessionFacts>,
+    chip_room: Option<usize>,
+) -> Vec<Line<'static>> {
     let dim = Style::default().fg(palette.dim);
-    let text = Style::default().fg(palette.text);
-    let key = Style::default().fg(palette.tool_result);
-    let cmd = Style::default().fg(palette.accent);
     let facts = match facts.and_then(SessionFacts::line) {
         Some(line) => Line::from(Span::styled(line, dim)),
         None => Line::from(""),
@@ -586,9 +597,9 @@ fn info_rows(palette: &ThemePalette, tip: &str, facts: Option<SessionFacts>) -> 
     vec![
         Line::from(Span::styled(format!("wing · {}", version_label()), dim)),
         facts,
-        keys_line(key, dim),
-        tip_line(tip, dim, text, cmd),
-        hints_line(dim, cmd),
+        keys_line(palette, chip_room),
+        tip_line(tip, palette, chip_room.is_some()),
+        hints_line(palette),
     ]
 }
 
@@ -600,7 +611,45 @@ fn info_rows(palette: &ThemePalette, tip: &str, facts: Option<SessionFacts>) -> 
 /// 任何终端都成立的键。
 const KEYS: &[(&str, &str)] = &[("Esc", "中断"), ("Ctrl+J", "换行"), ("Ctrl+C×2", "退出")];
 
-fn keys_line(key: Style, dim: Style) -> Line<'static> {
+/// 键位行。`chip_room` 是行预算：`Some(room)` 画键帽（内边距逐档降级，见
+/// [`keycap_line`]），`None` 是纯文本档。
+///
+/// 纯文本档比"收掉内边距的键帽"还宽（38 > 34），所以退回纯文本时仍可能超预算 ——
+/// 那一步交给 [`fit_line`] 的省略，这里保证的只是"色块不会以半块出现"。
+fn keys_line(palette: &ThemePalette, chip_room: Option<usize>) -> Line<'static> {
+    if let Some(room) = chip_room {
+        for pad in chip::Pad::LADDER {
+            let line = keycap_line(palette, pad);
+            if width_of(&line) <= room {
+                return line;
+            }
+        }
+    }
+    plain_keys_line(palette)
+}
+
+/// 键帽档：` Esc  中断 Ctrl+J  换行 …`。
+///
+/// 键帽之间**不放 `·`**：块自己就是分隔，色块 + 符号是双重分隔。两处 ` · ` 换成
+/// 一格空格省下四列，抵掉六个内边距列，整行 40 列（纯文本档 38）—— 离 46 还有
+/// 六列余量，把 `Ctrl+J` 换成更宽的键名不至于立刻撑破块宽。
+fn keycap_line(palette: &ThemePalette, pad: chip::Pad) -> Line<'static> {
+    let dim = Style::default().fg(palette.dim);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(KEYS.len() * 3 + 2);
+    for (index, (keys, verb)) in KEYS.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", dim));
+        }
+        spans.push(chip::Chip::key(keys).span(palette, pad));
+        spans.push(Span::styled(format!(" {verb}"), dim));
+    }
+    Line::from(spans)
+}
+
+/// 纯文本档：今天的样子（1x 档的全部宽度、以及键帽放不下时的退路）。
+fn plain_keys_line(palette: &ThemePalette) -> Line<'static> {
+    let key = Style::default().fg(palette.tool_result);
+    let dim = Style::default().fg(palette.dim);
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(KEYS.len() * 3);
     for (index, (keys, verb)) in KEYS.iter().enumerate() {
         if index > 0 {
@@ -616,7 +665,9 @@ fn keys_line(key: Style, dim: Style) -> Line<'static> {
 ///
 /// `/tips` 从常量拼，命令改名时这一行跟着走；「输入 / 看命令」不带命令名 ——
 /// 命令表来自网关（用户自己的 prompt 命令），写死某一个名字迟早会是假的。
-fn hints_line(dim: Style, cmd: Style) -> Line<'static> {
+fn hints_line(palette: &ThemePalette) -> Line<'static> {
+    let dim = Style::default().fg(palette.dim);
+    let cmd = Style::default().fg(palette.accent);
     Line::from(vec![
         Span::styled(TIPS_COMMAND, cmd),
         Span::styled(" 全部提示", dim),
@@ -629,10 +680,24 @@ fn hints_line(dim: Style, cmd: Style) -> Line<'static> {
 
 /// `Tip  <正文>` —— 标签暗、正文正常色、正文里的 `/命令` verbatim 成 accent。
 ///
+/// `badge` 时标签变成一块实心品牌色（2x 档）：文字行里只有它把 accent 当**填充**
+/// 用（品牌图形另算：大字的尾列、海鸥的点缀字母也是 accent），所以读起来是
+/// 「标签」而不是「键」；后面多一格气口把块与正文分开。
+///
 /// 不再按宽度预截断：调用方按块宽统一省略（[`fit_line`]），截断只发生一次
 /// （两处各截一次就会多丢几个字）。
-fn tip_line(tip: &str, dim: Style, text: Style, cmd: Style) -> Line<'static> {
-    let mut spans = vec![Span::styled("Tip  ", dim)];
+fn tip_line(tip: &str, palette: &ThemePalette, badge: bool) -> Line<'static> {
+    let dim = Style::default().fg(palette.dim);
+    let text = Style::default().fg(palette.text);
+    let cmd = Style::default().fg(palette.accent);
+    let mut spans = if badge {
+        vec![
+            chip::Chip::tag("Tip").span(palette, chip::Pad::One),
+            Span::styled(" ", dim),
+        ]
+    } else {
+        vec![Span::styled("Tip  ", dim)]
+    };
     spans.extend(with_commands(tip, text, cmd));
     Line::from(spans)
 }
@@ -794,6 +859,15 @@ mod tests {
     /// 一行的显示宽度。
     fn line_width(line: &Line<'_>) -> usize {
         line.spans.iter().map(|s| s.content.width()).sum()
+    }
+
+    /// 一行的样式指纹：(前景, 底色, 内容) 逐 span。断言"两行是同一个东西"用它
+    /// —— 只比文字会漏掉底色，只比长度会漏掉一切。
+    fn fingerprint(line: &Line<'_>) -> Vec<(Option<Color>, Option<Color>, String)> {
+        line.spans
+            .iter()
+            .map(|span| (span.style.fg, span.style.bg, span.content.to_string()))
+            .collect()
     }
 
     /// header 的纯文本（断言文案用）。
@@ -966,12 +1040,19 @@ mod tests {
             facts(2, 1),
         );
         let text = text_of(&lines);
-        let version = text.find("dev ·").expect("版本行");
-        let facts = text.find("2 skills").expect("事实行");
+        let row = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.to_string().contains(needle))
+                .unwrap_or_else(|| panic!("找不到「{needle}」行：{text}"))
+        };
+        let version = row("dev ·");
+        let facts = row("2 skills");
         assert!(version < facts, "事实行要在版本行之后：{text}");
+        // 用行序而不是再找一个词：tip 池里就可能有「中断」，词会撞车。
         assert!(
-            text.find("Esc 中断").expect("键位行") > facts,
-            "事实行要在键位行之前（环境簇 → 帮助簇）：{text}"
+            facts < row(RULE.to_string().as_str()),
+            "事实行要在分节线之上（环境簇 → 操作簇）：{text}"
         );
         // 槽位就贴在版本行下面一行（不是"某处出现过"）。
         assert_eq!(facts_slot(&lines), "2 skills · 1 rule");
@@ -1093,11 +1174,17 @@ mod tests {
         // 80 列（多数终端的默认宽）是最常见的档位：内容宽 = 80 - 滚动条 gutter(2)，
         // 减去海鸥与间隔就是文字预算。键位行差 1 列就会在最多人看到的宽度上省略。
         let budget = 80 - 2 - (ART_COLS + ART_GAP);
-        let keys = keys_line(Style::default(), Style::default());
+        let keys = plain_keys_line(&palette());
         assert!(
             width_of(&keys) <= budget,
             "键位行 {} 列 > 80 列终端的预算 {budget} 列",
             width_of(&keys)
+        );
+        // 80 列是 1x 档：键位行走的就是这条纯文本路径（键帽只在 2x 出现）。
+        assert_eq!(
+            fingerprint(&keys_line(&palette(), None)),
+            fingerprint(&keys),
+            "1x 档的键位行就是纯文本档"
         );
     }
 
@@ -1129,16 +1216,11 @@ mod tests {
         // 这条线同时也是产品约束：键位 / 入口行文案变长、事实位数变多，都会在
         // 这里红（逼一次决定：缩文案，还是认了省略）。
         let budget = 80 - 2 - (ART_COLS + ART_GAP);
-        let widest_tip = tips::TIPS
-            .iter()
-            .map(|tip| tip.text)
-            .max_by_key(|text| text.width())
-            .unwrap_or("");
         let facts = Some(SessionFacts {
             skills: 999,
             rules: 999,
         });
-        let rows = info_rows(&palette(), widest_tip, facts);
+        let rows = info_rows(&palette(), widest_tip(), facts, None);
         // **每一行**都过一遍（入口行也不例外：`TIPS_COMMAND` 改名、入口文案加列
         // 都会把这一行顶出预算）。唯一的例外是最宽的那条 tip —— 它由 `/tips`
         // 兜底，放不下只丢尾巴。
@@ -1162,6 +1244,43 @@ mod tests {
                 .is_some_and(|s| s.content.ends_with('…')),
             "丢的是尾巴，且有省略号：「{fitted}」"
         );
+    }
+
+    #[test]
+    fn the_two_x_nameplate_fits_the_block_whole() {
+        // 2x 档反过来：块宽被大字钉死在 `Scale::X2.columns()`（46），键帽行（40 列）
+        // 与最宽的 tip（徽章 5 + 气口 1 + 池子上限 36 = 42）都整行放得下 ——
+        // 那一档没有一条需要省略。
+        // 这条线也是徽章的预算来源：tip 前缀从 `Tip  `（5）长到 `<Tip 徽章> `（6），
+        // 46 − 42 = 4 列余量，再长 5 列就会把 tip 推进省略。
+        let facts = Some(SessionFacts {
+            skills: 999,
+            rules: 999,
+        });
+        let rows = info_rows(
+            &palette(),
+            widest_tip(),
+            facts,
+            Some(wordmark::Scale::X2.columns()),
+        );
+        for (index, row) in rows.iter().enumerate() {
+            // `fit_line` 只在超宽时动手：它原样返回 ⟺ 这行整行放得下。
+            assert_eq!(
+                width_of(&fit_line(row, wordmark::Scale::X2.columns())),
+                width_of(row),
+                "行 {index} 不该被省略：「{row}」{} 列",
+                width_of(row)
+            );
+        }
+    }
+
+    /// 池子里最宽的那条 tip（`MAX_TIP_WIDTH` 是它的上界）。
+    fn widest_tip() -> &'static str {
+        tips::TIPS
+            .iter()
+            .map(|tip| tip.text)
+            .max_by_key(|text| text.width())
+            .unwrap_or("")
     }
 
     /// 信息列里的 wordmark 宽度：前 `rows` 行是字形（行尾透明格已裁，取最宽的
@@ -1220,44 +1339,142 @@ mod tests {
     fn commands_in_the_nameplate_are_accent() {
         // 命令是唯一可以照着敲的东西 —— 整套 UI 里都是 accent（palette 的约定：
         // accent = logo / 命令 / 链接）。名牌里若是 dim，它就成了看不见的字。
-        let accent = Style::default().fg(Color::Red);
-        let tip = tip_line(
-            "输入 /skills 看已装技能",
-            Style::default(),
-            Style::default(),
-            accent,
-        );
-        assert!(
-            tip.spans
-                .iter()
-                .any(|s| s.content.as_ref() == "/skills" && s.style.fg == Some(Color::Red)),
-            "tip 里的命令要染成 accent：{tip:?}"
-        );
-        let hints = hints_line(Style::default(), accent);
+        let palette = palette();
+        for badge in [false, true] {
+            let tip = tip_line("输入 /skills 看已装技能", &palette, badge);
+            assert!(
+                tip.spans
+                    .iter()
+                    .any(|s| s.content.as_ref() == "/skills" && s.style.fg == Some(palette.accent)),
+                "tip 里的命令要染成 accent（badge={badge}）：{tip:?}"
+            );
+        }
+        let hints = hints_line(&palette);
         assert_eq!(hints.spans[0].content.as_ref(), TIPS_COMMAND);
         assert_eq!(
             hints.spans[0].style.fg,
-            Some(Color::Red),
+            Some(palette.accent),
             "入口行的命令名是 accent：{hints:?}"
         );
     }
 
     #[test]
     fn keys_split_into_keys_and_verbs() {
-        // 一行里先看见敲什么，再读它做什么：按键比动作亮一档。
-        let key = Style::default().fg(Color::Red);
-        let dim = Style::default().fg(Color::Blue);
-        let line = keys_line(key, dim);
-        let keys: Vec<&str> = line
-            .spans
-            .iter()
-            .filter(|s| s.style.fg == Some(Color::Red))
-            .map(|s| s.content.as_ref())
-            .collect();
+        // 一行里先看见敲什么，再读它做什么：按键比动作亮一档。两档都是这个寄存器，
+        // 只是 2x 档的键多了一圈内边距与一块底（`Some(46)`）。
+        let palette = palette();
+        for (chip_room, keys) in [
+            (None, ["Esc", "Ctrl+J", "Ctrl+C×2"]),
+            (
+                Some(wordmark::Scale::X2.columns()),
+                [" Esc ", " Ctrl+J ", " Ctrl+C×2 "],
+            ),
+        ] {
+            let line = keys_line(&palette, chip_room);
+            let found: Vec<&str> = line
+                .spans
+                .iter()
+                .filter(|s| s.style.fg == Some(palette.tool_result))
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert_eq!(
+                found, keys,
+                "三个键各自成 span（chip_room={chip_room:?}）：{line:?}"
+            );
+            let verbs: Vec<&str> = line
+                .spans
+                .iter()
+                .filter(|s| s.style.fg == Some(palette.dim))
+                .map(|s| s.content.trim())
+                .filter(|s| !s.is_empty() && *s != "·")
+                .collect();
+            assert_eq!(verbs, ["中断", "换行", "退出"], "动作在 dim 寄存器");
+        }
+    }
+
+    #[test]
+    fn the_key_row_ladder_drops_padding_then_the_chips() {
+        // 三档顺序：常规内边距（40）→ 收掉内边距（34）→ 纯文本（38）。前两档本步的
+        // 2x 档碰不到（40 ≤ 46），但降级这件事本身得被钉住 —— 下一波消费者是变量
+        // 宽度的状态栏。纯文本比"收掉内边距"还宽，所以第三档是**样子**的退路
+        // （回到今天的排版），宽度兜底交给 `fit_line`。
+        let palette = palette();
+        let roomy = keys_line(&palette, Some(wordmark::Scale::X2.columns()));
+        assert!(
+            roomy
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == " Esc " && span.style.bg.is_some()),
+            "常规档：键帽带内边距：{roomy:?}"
+        );
+
+        let tight = keys_line(&palette, Some(38));
+        assert_eq!(width_of(&tight), 34, "收掉内边距：40 − 6");
+        assert!(
+            tight
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "Esc" && span.style.bg.is_some()),
+            "第二档只掉内边距，不掉字：{tight:?}"
+        );
+
+        let plain = keys_line(&palette, Some(33));
+        assert!(
+            plain.spans.iter().all(|span| span.style.bg.is_none()),
+            "一档都放不下 → 纯文本（省略交给 fit_line）：{plain:?}"
+        );
+        assert_eq!(fingerprint(&plain), fingerprint(&plain_keys_line(&palette)));
+    }
+
+    #[test]
+    fn keycaps_and_the_badge_only_exist_in_the_two_x_tier() {
+        // 两档哲学：1x 档（80 列终端的信息列 38）保持纯文本，2x 档（46 列）才有
+        // 带底色的键帽与徽章。判据是字号档，不是"还塞得下就塞"。
+        let palette = palette();
+        let row = |column: usize, needle: &str| -> Line<'static> {
+            let (lines, _) =
+                text_column(&palette, column, None, (34, 211, 238), false, "tip", None);
+            lines
+                .into_iter()
+                .find(|line| line.to_string().contains(needle))
+                .unwrap_or_else(|| panic!("{needle} 那一行在（信息列 {column}）"))
+        };
+
+        let plain_keys = row(38, "Ctrl+J");
+        assert!(
+            plain_keys.spans.iter().all(|span| span.style.bg.is_none()),
+            "1x 档的键位行是纯文本：{plain_keys:?}"
+        );
+        // 纯文本档就是今天的样子（`Esc 中断 · Ctrl+J 换行 · Ctrl+C×2 退出` = 38 列，
+        // 正好用满 80 列终端的信息列 —— 加宽后的 40 列在那里放不下，这是两档的分界）。
+        assert_eq!(width_of(&plain_keys), 38, "纯文本档的键位行宽度不变");
+
+        let two_x = wordmark::Scale::X2.columns();
+        let capped = row(two_x, "Ctrl+J");
         assert_eq!(
-            keys,
-            ["Esc", "Ctrl+J", "Ctrl+C×2"],
-            "三个键各自成 span：{line:?}"
+            capped
+                .spans
+                .iter()
+                .filter(|span| span.style.bg.is_some())
+                .count(),
+            3,
+            "2x 档三个键各是一块：{capped:?}"
+        );
+        // 键帽行 = 纯文本 38 + 六个内边距列 − 省下的四个分隔列 = 40 列。
+        assert_eq!(width_of(&capped), 40, "键帽行的宽度");
+        assert!(
+            width_of(&capped) <= two_x,
+            "键帽行装进块宽（{two_x} 列）：{}",
+            width_of(&capped)
+        );
+
+        let plain_tip = row(38, "Tip");
+        assert!(plain_tip.spans.iter().all(|span| span.style.bg.is_none()));
+        let badged = row(two_x, "Tip");
+        assert_eq!(
+            badged.spans.first().and_then(|span| span.style.bg),
+            Some(palette.accent),
+            "2x 档的 `Tip` 是实心徽章：{badged:?}"
         );
     }
 
