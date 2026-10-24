@@ -22,10 +22,11 @@
 //! composer block into [`card_area`] before anything else looks at it) and its body stays on the
 //! terminal's own background — the boundary is the frame, and nothing else.
 //!
-//! The states the frame does carry are about the keyboard — see [`Focus`]: a waiting draft lifts the
-//! whole outline one notch toward the accent, an empty card invites with an `Enter` key on the top
-//! rail, and a panel that is swallowing the composer's keys ghosts the whole thing (the draft is
-//! drawn as inactive text) so "typing will not land here" is visible before a key is pressed.
+//! The states the frame does carry are about the keyboard — see [`Focus`]: an empty card draws its
+//! outline in the box ink (`tool_result`) so the card reads as something to type into, then invites
+//! with an `Enter` key on the top rail; a waiting draft turns that same outline toward the accent
+//! (hue, not weight); and a panel that is swallowing the composer's keys ghosts the whole thing (the
+//! draft is drawn as inactive text) so "typing will not land here" is visible before a key is pressed.
 //!
 //! **One geometry, one writer.** [`Chrome`] is the single description of where the card's columns are;
 //! the widget, the wrap width, the cursor placement and the pointer mapping all read it, so a pointer
@@ -82,8 +83,9 @@ const SEND_KEY: &str = "Enter";
 const SEND_VERB: &str = "发送";
 /// How far the focus ink leans from `dim` toward `accent` (0 = dim, 1 = accent).
 ///
-/// A little under half: enough to leave `dim`, not enough to reach the saturated
-/// accent the workdir owns (the accent budget, see `docs/dev/tui-input.md`).
+/// A little under half: enough for the hue to read as "this card is waiting on
+/// you", not enough to reach the accent the caret and the commands use (the
+/// accent budget, see `docs/dev/tui-input.md`).
 const FOCUS_LEAN: f32 = 0.45;
 
 /// The card's rect inside the composer block the layout allocated.
@@ -159,11 +161,12 @@ impl Chrome {
 /// `Empty` while the agent is busy (the rail then belongs to the spinner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
-    /// Nothing in the draft yet — the card is asking for the first keystroke, so
-    /// the top rail says what one would do ([`SEND_KEY`] + [`SEND_VERB`]).
+    /// Nothing in the draft yet — the card is asking for the first keystroke:
+    /// the outline leaves `dim` (a box, not a hairline) and the top rail says
+    /// what one would do ([`SEND_KEY`] + [`SEND_VERB`]).
     Empty,
-    /// A draft is waiting in the card: the outline steps one notch toward the
-    /// accent, so "this is where typing goes" is visible without reading a word.
+    /// A draft is waiting in the card: the outline turns toward the accent, so
+    /// "this is where typing goes" is visible without reading a word.
     Draft,
     /// Another layer owns the keyboard (see `ComposerWidget::keyboard_held`):
     /// the card promises nothing — quiet outline, no invite.
@@ -181,23 +184,33 @@ impl Focus {
     }
 }
 
-/// The outline's ink: `dim` at rest, one notch toward `accent` while a draft waits.
+/// The outline's ink: one register per face (see [`Focus`]).
 ///
-/// A mix rather than a palette slot: there is no "muted accent" slot, and the
-/// accent budget wants this to be a *washed* accent — the workdir on the meta
-/// rail keeps the saturated one (see `docs/dev/tui-input.md`). Named colours are
-/// not frozen into RGB (they follow the terminal's theme, the same rule as
-/// `chip::quiet_band`), so such a palette keeps the plain `dim` frame.
+/// * `Empty` — the card is a box on the screen before anything is typed in it,
+///   so the outline wears `tool_result`, the ink a keycap's label wears. It is
+///   what makes the card read as a box at all: `dim` next to the nameplate's
+///   rule is a hairline.
+/// * `Draft` — a *washed* accent (a mix: there is no "muted accent" slot), so
+///   the frame says "waiting on your keys" by **hue**, not by weight — on both
+///   presets it lands in the same band as the empty frame (dark 5.35 vs 6.07
+///   against the paper, light 5.56 vs 6.39).
+/// * `Ghost` — `dim`: another layer owns the keys, the card promises nothing.
+///
+/// Named colours are not frozen into RGB (they follow the terminal's theme —
+/// the same rule as `chip::quiet_band`), so a palette whose `dim` or `accent`
+/// is not a concrete RGB keeps the plain `dim` outline for a draft too.
 fn frame_ink(focus: Focus, palette: &ThemePalette) -> Color {
-    let rgb_inks = matches!(
-        (palette.dim, palette.accent),
-        (Color::Rgb(..), Color::Rgb(..))
-    );
-    if focus != Focus::Draft || !rgb_inks {
-        return palette.dim;
+    match focus {
+        Focus::Empty => palette.tool_result,
+        Focus::Ghost => palette.dim,
+        Focus::Draft => match (palette.dim, palette.accent) {
+            (Color::Rgb(..), Color::Rgb(..)) => {
+                let (r, g, b) = mix(to_rgb(palette.dim), to_rgb(palette.accent), FOCUS_LEAN);
+                Color::Rgb(r, g, b)
+            }
+            _ => palette.dim,
+        },
     }
-    let (r, g, b) = mix(to_rgb(palette.dim), to_rgb(palette.accent), FOCUS_LEAN);
-    Color::Rgb(r, g, b)
 }
 
 /// The card's top-border content: what the agent is doing right now.
@@ -213,7 +226,10 @@ pub struct ActivityRail<'a> {
 /// conversation has grown.
 #[derive(Debug, Clone, Copy)]
 pub struct MetaRail<'a> {
-    /// Session workdir (the row's leading, accented item).
+    /// Session workdir (the row's leading item).
+    ///
+    /// A fact about the environment, not something you can type: it keeps the
+    /// quiet ink, and the outline around it is the row's one lit thing.
     pub workdir: Option<&'a str>,
     /// Per-turn token usage.
     pub usage: &'a TurnUsage,
@@ -488,10 +504,7 @@ fn meta_spans(
     let mut items: Vec<Vec<Span<'static>>> = Vec::new();
 
     if let Some(wd) = meta.workdir {
-        items.push(vec![Span::styled(
-            collapse_home(wd),
-            Style::default().fg(palette.accent),
-        )]);
+        items.push(vec![Span::styled(collapse_home(wd), dim)]);
     }
     items.extend(meta.usage.items(palette));
     if meta.total_lines > 0 && meta.visible_height < meta.total_lines {
@@ -966,22 +979,24 @@ mod tests {
         );
     }
 
-    /// The outline leaves `dim` for a washed accent while a draft waits, and
-    /// only then: the frames of `Empty` / `Ghost` are the plain quiet rule.
+    /// The outline carries the face: `tool_result` while the card waits (a box,
+    /// not a hairline), a washed accent while a draft waits (the same band, a
+    /// teal hue — the focus signal is colour, not weight), and the plain quiet
+    /// rule when another layer holds the keys.
     #[test]
-    fn the_outline_takes_the_focus_ink_only_while_a_draft_waits() {
+    fn the_outline_carries_the_face() {
         for palette in [palette(), light()] {
-            let ink = frame_ink(Focus::Draft, &palette);
-            assert_ne!(ink, palette.dim, "the focus state has to be visible");
-            assert_ne!(ink, palette.accent, "and it is not the full accent");
+            let washed = frame_ink(Focus::Draft, &palette);
+            assert_ne!(washed, palette.dim, "the focus state has to be visible");
+            assert_ne!(washed, palette.accent, "and it is not the full accent");
+            let expected = [
+                (Focus::Empty, palette.tool_result),
+                (Focus::Draft, washed),
+                (Focus::Ghost, palette.dim),
+            ];
             let usage = TurnUsage::default();
-            for focus in [Focus::Empty, Focus::Draft, Focus::Ghost] {
+            for (focus, ink) in expected {
                 let buf = card_buf(40, focus, None, &bare(&usage), &palette);
-                let expected = if focus == Focus::Draft {
-                    ink
-                } else {
-                    palette.dim
-                };
                 // Both rails, both sides and all four corners are one outline.
                 for (x, y) in [
                     (0u16, 0u16),
@@ -995,18 +1010,29 @@ mod tests {
                 ] {
                     assert_eq!(
                         buf[(x, y)].fg,
-                        expected,
+                        ink,
                         "{:?} {focus:?} at ({x},{y})",
                         palette.appearance
                     );
                 }
             }
+            // The three faces are three inks: an empty card is not a ghosted
+            // one, and a drafted card is not an empty one.
+            assert_ne!(
+                frame_ink(Focus::Empty, &palette),
+                frame_ink(Focus::Ghost, &palette)
+            );
+            assert_ne!(
+                frame_ink(Focus::Empty, &palette),
+                frame_ink(Focus::Draft, &palette)
+            );
         }
     }
 
     /// The air the rail puts around its items belongs to the frame, not to the
-    /// items: on a lit frame the framing cells are lit and the workdir keeps the
-    /// saturated accent it always had.
+    /// items: on a lit frame the framing cells are lit while the workdir keeps
+    /// the quiet ink — a path is a fact about the environment, not something you
+    /// can type, so it never takes the accent.
     #[test]
     fn the_frame_lights_the_air_around_an_item_not_the_item() {
         let palette = palette();
@@ -1018,18 +1044,20 @@ mod tests {
             visible_height: 0,
             scroll_offset: 0,
         };
-        let buf = card_buf(60, Focus::Draft, None, &meta, &palette);
-        let ink = frame_ink(Focus::Draft, &palette);
-        // `╰─ <workdir> ────╯`: the `─ ` before the item and the ` ` after it.
-        assert_eq!(buf[(1, 2)].fg, ink, "the framing dash");
-        assert_eq!(buf[(2, 2)].fg, ink, "the air before the item");
-        assert_eq!(
-            buf[(3, 2)].fg,
-            palette.accent,
-            "the workdir keeps its accent"
-        );
-        let after_item = 3 + "/tmp/ws".len() as u16;
-        assert_eq!(buf[(after_item, 2)].fg, ink, "the air after the item");
+        for focus in [Focus::Empty, Focus::Draft] {
+            let buf = card_buf(60, focus, None, &meta, &palette);
+            let ink = frame_ink(focus, &palette);
+            // `╰─ <workdir> ────╯`: the `─ ` before the item and the ` ` after it.
+            assert_eq!(buf[(1, 2)].fg, ink, "{focus:?}: the framing dash");
+            assert_eq!(buf[(2, 2)].fg, ink, "{focus:?}: the air before the item");
+            assert_eq!(
+                buf[(3, 2)].fg,
+                palette.dim,
+                "{focus:?}: the workdir stays quiet"
+            );
+            let after_item = 3 + "/tmp/ws".len() as u16;
+            assert_eq!(buf[(after_item, 2)].fg, ink, "{focus:?}: the air after it");
+        }
     }
 
     /// The frame follows the focus; the punctuation between two items does not.
@@ -1071,7 +1099,8 @@ mod tests {
     }
 
     /// The focus ink is a *washed* accent: its hue leans toward `accent` while
-    /// its chroma stays under it (the workdir is the saturated one).
+    /// its chroma stays under it (the caret and the commands are the saturated
+    /// ones).
     #[test]
     fn the_focus_ink_is_a_washed_accent() {
         fn chroma((r, g, b): crate::ui::shimmer::Rgb) -> f32 {
@@ -1088,7 +1117,7 @@ mod tests {
             );
             assert!(
                 chroma(ink) < chroma(to_rgb(palette.accent)),
-                "{:?}: a notch under the workdir's saturated accent",
+                "{:?}: a notch under the saturated accent",
                 palette.appearance
             );
         }

@@ -224,9 +224,10 @@ fn test_the_card_keeps_the_terminal_background() {
     assert!(after.contains('发'), "the verb follows the key: {after:?}");
 }
 
-/// The outline's register: quiet while the card waits, one notch toward the
-/// accent while a draft waits in it, quiet again when another layer takes the
-/// keys. The exact ink is pinned in `ui::input_area::chrome`.
+/// The outline's register: `tool_result` while the card waits (a box, not a
+/// hairline), one notch toward the accent while a draft waits in it, quiet again
+/// when another layer takes the keys. The exact ink is pinned in
+/// `ui::input_area::chrome`.
 #[test]
 fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
     let palette = crate::config::ThemePalette::default();
@@ -243,23 +244,27 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
         inks
     };
 
-    // Empty: the draft is dim and the card has nothing to point at, so the
-    // boundary stays out of the way too.
+    // Empty: nothing typed yet, so the frame is what says "there is a box to
+    // type into" — and the caret points at the place typing lands.
     let mut app = app_with_draft("");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
-    assert_eq!(caret(&app, &buf), palette.dim, "❯ on an empty draft");
+    assert_eq!(caret(&app, &buf), palette.accent, "❯ on an empty draft");
     for ink in edges(&buf, composer) {
-        assert_eq!(ink, palette.dim, "an empty card's edge is quiet");
+        assert_eq!(ink, palette.tool_result, "an empty card's edge is its box");
     }
 
-    // A draft is waiting: the boundary leaves dim (never as far as the accent —
-    // the meta rail's workdir stays the saturated mark).
+    // A draft is waiting: the boundary turns toward the accent (never as far as
+    // the accent itself — the caret and the commands keep the saturated one).
     let mut app = app_with_draft("hello world");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
     assert_eq!(caret(&app, &buf), palette.accent, "❯ with a draft");
     for ink in edges(&buf, composer) {
         assert_ne!(ink, palette.dim, "a drafted card's edge steps up");
         assert_ne!(ink, palette.accent, "and it is not the full accent");
+        assert_ne!(
+            ink, palette.tool_result,
+            "and it is the hue shift that says so"
+        );
     }
 
     // An ask panel holds the keys: the card ghosts as a whole, boundary included.
@@ -270,6 +275,53 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
     for ink in edges(&buf, composer) {
         assert_eq!(ink, palette.dim, "a ghosted card promises nothing");
     }
+}
+
+/// The card's registers, in one place: on an empty card the invitation (the
+/// placeholder sentence) is the loudest ink inside the frame, and the path on
+/// the meta rail is one of the quietest — "you can type here" outranks "you are
+/// here", which is the whole point of the splash.
+#[test]
+fn test_the_empty_card_invites_loudest() {
+    use crate::ui::shimmer::luminance;
+    use crate::ui::shimmer::to_rgb;
+
+    let palette = crate::config::ThemePalette::default();
+    let mut app = app_with_draft("");
+    app.status.workdir = Some("/tmp/ws".into());
+    let (buf, composer) = draw_frame(&mut app, 80, 10);
+    let (text_x, text_y, _) = composer_text(&app);
+
+    // Per-cell brightness of every glyph the card drew.
+    let mut brightest = ('\0', 0u16, 0u16, 0.0f32);
+    let workdir_x = composer.x + 3;
+    for y in composer.y..composer.bottom() {
+        for x in composer.x..composer.right() {
+            let cell = &buf[(x, y)];
+            if cell.symbol() == " " {
+                continue;
+            }
+            let level = luminance(to_rgb(cell.fg));
+            if level > brightest.3 {
+                brightest = (cell.symbol().chars().next().unwrap_or('\0'), x, y, level);
+            }
+        }
+    }
+
+    let (glyph, x, y, _) = brightest;
+    assert_eq!(
+        (x, y),
+        (text_x, text_y),
+        "the brightest glyph in the card is the invitation, not {glyph:?}:\n{}",
+        frame_text(&buf)
+    );
+    assert_eq!(buf[(text_x, text_y)].fg, palette.text, "the placeholder");
+    assert_eq!(
+        buf[(workdir_x, composer.bottom() - 1)].fg,
+        palette.dim,
+        "the path is a fact, not the loudest thing in the card:\n{}",
+        frame_text(&buf)
+    );
 }
 
 #[test]

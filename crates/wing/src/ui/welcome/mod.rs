@@ -703,8 +703,8 @@ fn tip_line(tip: &str, palette: &ThemePalette, badge: bool) -> Line<'static> {
 }
 
 /// 把 `/xxx` 形态的词染成 accent：**命令是唯一可以照着敲的东西**，在整套 UI
-/// 里都是 accent（popup 候选、行内代码、composer 的 workdir），名牌里若是 dim
-/// 就成了看不见的字。
+/// 里都是 accent（popup 候选、行内代码、输入卡的 `❯` 与粘贴 / 图片 chip），名牌里
+/// 若是 dim 就成了看不见的字。
 fn with_commands(text: &str, base: Style, cmds: Style) -> Vec<Span<'static>> {
     let flush = |out: &mut Vec<Span<'static>>, word: &mut String, is_cmd: bool| {
         if !word.is_empty() {
