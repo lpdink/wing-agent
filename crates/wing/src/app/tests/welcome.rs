@@ -569,44 +569,6 @@ fn scrolling_the_welcome_out_of_view_parks_the_clock() {
     assert_ne!(hidden, header_text(&app), "回到视口要立刻重绘");
 }
 
-/// 名牌右列的**事实槽位**：版本行的下一行（`2 skills · 1 rule`，缺席时空白）。
-///
-/// 框退役之后没有边线可切了：那一行前面是海鸥的字形（半格 `▀`/`▄`）与间隔，
-/// 版本行之后的部分才是名牌。按"版本行里 `wing · ` 的列"定位，取同一列起的
-/// 尾部文本。
-///
-/// 帧级断言刻意不写成"整帧不含某个词"：tip 是按**时间种子**抽的
-/// （`tips::seed_now()`），池子里有 `/skills 看已装技能…` —— 任何对整帧做
-/// 子串扫描的断言都会随进程抖动。槽位是确定性的：它只由事实本身决定。
-fn facts_slot(app: &App) -> String {
-    let lines = app.chat.header_lines();
-    let version = lines
-        .iter()
-        .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
-        .expect("版本行在名牌右列");
-    let version_text: String = lines[version]
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    // `find` 是字节偏移（半格字形 `▀` 是 3 字节），下面按字符跳。
-    let byte = version_text.find("wing · ").expect("版本行带 brand");
-    let column = version_text[..byte].chars().count();
-    let line: String = lines[version + 1]
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect();
-    if line.chars().count() <= column {
-        return String::new();
-    }
-    line.chars()
-        .skip(column)
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
 /// 开屏 = 名牌 + 输入卡：会话事实（skills / rules）挂在名牌右列，
 /// transcript 里既没有 system 消息，也没有别的 cell。
 #[test]
@@ -642,23 +604,33 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
     });
 
     let body = frame_body(&mut app, 100, 30);
-    assert_eq!(
-        facts_slot(&app),
-        "2 skills · 1 rule",
-        "事实行在名牌右列：\n{body}"
+    let row = crate::ui::welcome::identity_text(app.chat.header_lines());
+    // 事实整段并进身份行（一行能放几段由块宽与品牌段宽度决定 —— 品牌段跟着版本号走）。
+    let full = format!(
+        "wing · {} · 2 skills · 1 rule",
+        crate::ui::welcome::version_label()
     );
     assert!(
-        compact(&body).contains("2skills·1rule"),
-        "事实行真的画在帧上（不是只存在于 header 行里）：\n{body}"
+        full.starts_with(&row) && row.starts_with("wing · "),
+        "会话事实整段并进身份行：{row:?}\n{body}"
+    );
+    assert!(
+        compact(&body).contains(&compact(&row)),
+        "身份行真的画在帧上（不是只存在于 header 行里）：\n{body}"
     );
     // 事实不是 chat cell：transcript 里什么都没有（旧版在顶部推一条
     // `loaded 2 skills, 1 rules · /skills for details`）。
     assert!(app.chat.cells.is_empty(), "transcript 里不该有任何 cell");
+    let height = app.chat.header_lines().len();
 
-    // 老网关（没有 agent 快照）：槽位留空，名牌高度不变。
+    // 老网关（没有 agent 快照）：身份行退成品牌 + 版本，名牌高度不变。
     let mut app = test_app();
     app.handle_event(sync_event(vec![], None, vec![], vec![], None));
     let body = frame_body(&mut app, 100, 30);
-    assert_eq!(facts_slot(&app), "", "没有会话事实时槽位是空白：\n{body}");
-    assert!(app.chat.cells.is_empty());
+    let row = crate::ui::welcome::identity_text(app.chat.header_lines());
+    assert!(
+        !row.contains("skills") && !row.contains("rule"),
+        "没有会话事实时身份行没有尾巴：{row:?}\n{body}"
+    );
+    assert_eq!(app.chat.header_lines().len(), height, "名牌高度不变");
 }

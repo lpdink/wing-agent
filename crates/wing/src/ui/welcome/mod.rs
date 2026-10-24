@@ -6,11 +6,12 @@
 //!   agent 干活时切成飞行扇翅 —— "它在飞" = "它在干活"；
 //! * **wordmark**（[`wordmark`]）：手绘 5 行像素大字 `WING`，开屏一道扫光扫过；
 //!   按信息列宽度 1x / 2x 两档（半格像素只能整数倍放大，见 [`wordmark::Scale`]）；
-//! * **名牌右列**：版本 / 会话事实 / **一条分节线** / 键位 / 轮换 tip / 入口。
+//! * **名牌右列**：身份（版本 + commit + 会话事实，一行）/ **一条分节线** / 键位 /
+//!   轮换 tip / 入口 —— 词标下与分节线上各留一格空气，线下面紧贴键位（表头）。
 //!   没有框 —— 这是信笺（logo 下面是文字），不是一张表：框把两簇内容圈成了
 //!   "一张有六个格子的表"，还让分隔用的空行看起来像"数据缺了一行"；
 //! * **会话事实**：[`SessionFacts`]（`2 skills · 1 rule`）—— 这个会话加载了什么，
-//!   随 SyncSession 到达；0/0 时槽位留空（行数因此恒定，见 [`info_rows`]）；
+//!   随 SyncSession 到达，并进身份行（0/0 时整段消失，行数仍恒定，见 [`identity_cluster`]）；
 //! * **动作规划器**（[`motion`]）：纯 deadline 状态机，眨眼 / 抖翅 / 跳各管各的。
 //!
 //! **内容只放"永远是事实"的东西**：版本号、commit、会话的加载事实、键位、tips
@@ -115,11 +116,6 @@ const COMPACT_MIN: u16 = 40;
 /// 一屏里重的东西（图标、标题）稍稍上移比正中摆着更稳（老印刷排版的老规矩）。
 const HERO_CENTER_PCT: u16 = 45;
 
-/// 名牌右列里分节线的位置：版本 / 会话事实之后（0 起的行号 + 1）。
-///
-/// 线上是"这是什么"（身份），线下是"你能做什么"（键位 + tip + 入口）。
-const RULE_AFTER_ROW: usize = 2;
-
 /// 分节线的字形（细横线；重框退役了，见模块文档）。
 const RULE: char = '─';
 
@@ -166,12 +162,13 @@ pub fn splash_pad(screen_h: u16, block_h: u16, reserved: u16) -> u16 {
 
 /// 会话事实 —— 这个会话加载了多少 skills / rules。
 ///
-/// 名牌右列的**环境事实**行（`2 skills · 1 rule`）：它随每次 SyncSession 到达，
+/// 名牌右列的**环境事实**（`2 skills · 1 rule`）：它随每次 SyncSession 到达，
 /// 曾经是一条渲染在 transcript 顶部的 system 消息（`⦁ system` + 日志式英文），
 /// 开屏时紧贴在像素名牌下面 —— 那里没有它的位置。
 ///
-/// 0/0（或老网关）时这一行是**空白占位**、不是缺席：槽位恒在，名牌高度才不随
-/// sync 变化（见 [`text_column`]）。
+/// 现在它是**身份行的一段**（[`identity_line`]）：它和版本 / commit 同为「这个会话
+/// 是什么」，所以同在一行。什么都没加载（0/0、老网关）时它整段消失，身份行退成
+/// `wing · dev · <commit>` —— 行数不变，名牌高度因此仍不随 sync 变化。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionFacts {
     /// 已加载的 skill 数（`AgentInfo.skills`）。
@@ -181,11 +178,14 @@ pub struct SessionFacts {
 }
 
 impl SessionFacts {
-    /// 事实行文案（`2 skills · 1 rule`）；什么都没加载时为 `None`。
+    /// 事实的各段文案（`["2 skills", "1 rule"]`）；什么都没加载时为空。
+    ///
+    /// 分段而不是拼好一整句：身份行在窄档要**按段**丢尾巴（先 `1 rule`、再
+    /// `2 skills`，见 [`identity_line`]），切整句只会切出 `2 skil…`。
     ///
     /// 复数按英语习惯走（`1 rule`，不是 `1 rules` —— 旧 banner 的复数错就错在
     /// 数字在前、名词固定复数）。
-    fn line(self) -> Option<String> {
+    fn parts(self) -> Vec<String> {
         let mut parts = Vec::new();
         if self.skills > 0 {
             parts.push(format!("{} skill{}", self.skills, plural(self.skills)));
@@ -193,10 +193,7 @@ impl SessionFacts {
         if self.rules > 0 {
             parts.push(format!("{} rule{}", self.rules, plural(self.rules)));
         }
-        if parts.is_empty() {
-            return None;
-        }
-        Some(parts.join(" · "))
+        parts
     }
 }
 
@@ -396,9 +393,11 @@ impl Welcome {
                     facts,
                 );
                 let art = gull_lines(pose, accent, palette.appearance);
-                // 右列竖直居中：2x 大字（5 + 6 行）正好填满海鸥盒，1x（3 + 6
-                // 行）上下各留一格。
-                let offset = ART_TERM_ROWS.saturating_sub(column.len()) / 2;
+                // 右列竖直居中：2x 大字（5 + 7 行 = 12）比盒子矮 1 行，1x（3 + 7 = 10）矮 3 行。
+                // 余数行给**上方**（向上取整）：两档的大字首行因此留在**原位**（2x 盒内第 1 行、
+                // 1x 第 2 行 —— 与名牌加空气之前取整到的地方相同），品牌锁合不动；向下取整会
+                // 把整列上移一行。代价是名牌末行与海鸥的脚共用盒底那一行。
+                let offset = ART_TERM_ROWS.saturating_sub(column.len()).div_ceil(2);
                 let mut lines = Vec::with_capacity(ART_TERM_ROWS);
                 for (row, art_line) in art.into_iter().enumerate() {
                     let mut spans: Vec<Span<'static>> = art_line.spans;
@@ -525,15 +524,15 @@ fn gull_lines(
     }
 }
 
-/// 右侧文字列：wordmark（1x 3 行 / 2x 5 行）+ 名牌（版本 / 事实 / 分节线 / 键位 /
-/// tip / 入口）。
+/// 右侧文字列：wordmark（1x 3 行 / 2x 5 行）+ 名牌（身份 / 分节线 / 键位 / tip /
+/// 入口）。
 ///
-/// 返回（行, 块宽）：块宽 = `max(大字宽, 最宽的一行)`，不超过可用列数。分节线按
-/// 块宽画满 —— 它就是这块文字右缘的定义，没有框之后，线是唯一的收边。
+/// 返回（行, 块宽）：块宽 = `max(大字宽, 操作簇里最宽的一行)`，不超过可用列数。
+/// 分节线按块宽画满 —— 它就是这块文字右缘的定义，没有框之后，线是唯一的收边。
 ///
-/// 事实只在这个会话真的有加载物时出现；它是**环境事实**，所以和版本行同簇、
-/// 同 dim 寄存器 —— 曾经它是 transcript 顶部的 system 消息，开屏时贴在像素名牌
-/// 下面，读起来像一行日志。
+/// 块宽**不含身份行**：合并后的身份行（40 列）比键位行（38 列）宽，若准它参与，
+/// 80 列终端上的块会从 78 撑到 80（输入卡跟着变宽，那是几何改动）。它按段丢到
+/// 放得下为止（[`identity_line`]）。
 fn text_column(
     palette: &ThemePalette,
     width: usize,
@@ -546,22 +545,23 @@ fn text_column(
     let scale = wordmark::scale_for(width);
     let mut out = wordmark::lines(scale, sweep, accent, light);
 
-    // 键帽 / 徽章是 2x 档的排面：那一档的块宽被大字钉死在 46，行宽长了也不动几何。
+    // 色块的**行预算**只属于 2x 档：那一档的块宽被大字钉死在 46，行宽长了也不动几何。
     // 1x 档（信息列 34–45）的块宽由内容决定，加宽的键位行（40 列）在那里比 80 列
     // 终端的信息列（38）还宽 —— 那一档继续用纯文本（见 `docs/dev/welcome-mascot.md`）。
-    let chip_room = (scale == wordmark::Scale::X2).then(|| scale.columns());
-    let rows = info_rows(palette, tip, facts, chip_room);
-    let widest = rows.iter().map(width_of).max().unwrap_or(0);
+    let two_x = scale == wordmark::Scale::X2;
+    let chip_room = two_x.then(|| scale.columns());
+    let actions = action_rows(palette, tip, chip_room);
+    let widest = actions.iter().map(width_of).max().unwrap_or(0);
     let block = widest.max(scale.columns()).min(width);
 
     let dim = Style::default().fg(palette.dim);
-    let mut body: Vec<Line<'static>> = Vec::with_capacity(rows.len() + 1);
-    for (index, row) in rows.iter().enumerate() {
-        if index == RULE_AFTER_ROW {
-            body.push(rule_line(block, dim));
-        }
-        body.push(fit_line(row, block));
-    }
+    let identity = identity_cluster(palette, facts, block);
+    let mut body: Vec<Line<'static>> = Vec::with_capacity(identity.len() + actions.len() + 1);
+    // 线上是「这是什么」，线下是「你能做什么」：分节线就是这两簇之间的那条缝，
+    // 它上面一格空气、下面紧贴键位（表头）。
+    body.extend(identity.iter().map(|row| fit_line(row, block)));
+    body.push(rule_line(block, dim));
+    body.extend(actions.iter().map(|row| fit_line(row, block)));
     out.extend(body);
     (out, block)
 }
@@ -571,36 +571,72 @@ fn rule_line(block: usize, style: Style) -> Line<'static> {
     Line::from(Span::styled(RULE.to_string().repeat(block), style))
 }
 
-/// 名牌的行：版本 / 会话事实 / 键位 / tip / 入口（分节线在 [`RULE_AFTER_ROW`] 处插入）。
+/// 分节线上面那一簇：空气 / 身份 / 空气。
 ///
-/// 像素大字是品牌形，但终端里还得有**文本**形态的 brand（grep / 读屏 / 测试
-/// 都读像素）—— 版本行带上它：`wing · dev · <commit>`。
+/// 纵向节奏是这里的全部内容：**空气在块内**。词标下面一格把身份从大字上脱开，
+/// 身份下面一格把分节线从字里救出来。块外的空气不动 —— 省下的行来自合并的身份行
+/// （版本 + 事实 → 一行），不来自屏幕。`block` 是这一行必须装进去的块宽（见
+/// [`text_column`]：块宽不含身份行，所以这里得先知道它）。
+fn identity_cluster(
+    palette: &ThemePalette,
+    facts: Option<SessionFacts>,
+    block: usize,
+) -> [Line<'static>; 3] {
+    [
+        Line::from(""),
+        identity_line(palette, facts, block),
+        Line::from(""),
+    ]
+}
+
+/// 分节线下面那三行：键位 / tip / 入口。1x 档的块宽由它们定（键位行的纯文本形态
+/// 是最宽的一行），所以它们的行预算就是可用列数。
 ///
-/// 事实槽位**恒在**：缺席（0/0 / 老网关）时留一行空白 —— 右列行数因此在两个
-/// 布局档里都固定。Full 档本来就骑在海鸥的 13 行盒子里（高度由画盒定），
-/// Compact 档文字列**就是**整块 header，多一行会让下方内容跳一行。
-///
-/// `chip_room` 是键帽 / 徽章的**行预算**（`None` = 这一档不画色块）：它只会是
+/// `chip_room` 是键帽 / `Tip` 的**行预算**（`None` = 这一档不画色块）：它只会是
 /// `Scale::X2.columns()`（2x 档的块宽 = 46），带色块的行在预算内先宽后窄地降级；
 /// 一档都放不下就退回纯文本 —— 那是**样子**的退路，宽度再超就交给 `fit_line`。
-fn info_rows(
-    palette: &ThemePalette,
-    tip: &str,
-    facts: Option<SessionFacts>,
-    chip_room: Option<usize>,
-) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(palette.dim);
-    let facts = match facts.and_then(SessionFacts::line) {
-        Some(line) => Line::from(Span::styled(line, dim)),
-        None => Line::from(""),
-    };
-    vec![
-        Line::from(Span::styled(format!("wing · {}", version_label()), dim)),
-        facts,
+fn action_rows(palette: &ThemePalette, tip: &str, chip_room: Option<usize>) -> [Line<'static>; 3] {
+    [
         keys_line(palette, chip_room),
         tip_line(tip, palette, chip_room.is_some()),
         hints_line(palette),
     ]
+}
+
+/// 身份行：`wing · dev · <commit> · 2 skills · 1 rule`。
+///
+/// 三段都是**环境事实**、同一个 `dim` 寄存器（「这是哪个 wing、装了什么」），所以
+/// 同行 —— 分成两行只剩下一件事：把名牌读成一堵墙。像素大字是品牌形，但终端里
+/// 还得有**文本**形态的 brand（grep / 读屏 / 测试都读像素），它就在这一行的开头。
+///
+/// 窄档从**尾巴整段**丢（先 `1 rule`、再 `2 skills`）：丢一段仍是完整的身份，拦腰
+/// 切一刀只会得到 `2 skil…`。两段都丢完还放不下（只有超长 commit 会）才交给
+/// `fit_line` 的省略。
+fn identity_line(
+    palette: &ThemePalette,
+    facts: Option<SessionFacts>,
+    block: usize,
+) -> Line<'static> {
+    const SEP: &str = " · ";
+    let dim = Style::default().fg(palette.dim);
+    let brand = format!("wing · {}", version_label());
+    let mut facts = facts.map(SessionFacts::parts).unwrap_or_default();
+    let width = |facts: &[String]| {
+        brand.width()
+            + facts
+                .iter()
+                .map(|part| SEP.width() + part.width())
+                .sum::<usize>()
+    };
+    while !facts.is_empty() && width(&facts) > block {
+        facts.pop();
+    }
+    let mut text = brand;
+    for part in &facts {
+        text.push_str(SEP);
+        text.push_str(part);
+    }
+    Line::from(Span::styled(text, dim))
 }
 
 /// 键位提示（一行）：**按键亮、动作暗** —— 先看见敲什么，再读它做什么。
@@ -678,21 +714,22 @@ fn hints_line(palette: &ThemePalette) -> Line<'static> {
     ])
 }
 
-/// `Tip  <正文>` —— 标签暗、正文正常色、正文里的 `/命令` verbatim 成 accent。
+/// `Tip  <正文>` —— 标签是一块与键帽同档的色块（`banded` 时），正文 `tool_result`，
+/// 正文里的 `/命令` verbatim 成 accent。
 ///
-/// `badge` 时标签变成一块实心品牌色（2x 档）：文字行里只有它把 accent 当**填充**
-/// 用（品牌图形另算：大字的尾列、海鸥的点缀字母也是 accent），所以读起来是
-/// 「标签」而不是「键」；后面多一格气口把块与正文分开。
+/// 提示是**读的**、不是敲的：所以它走安静档（`surface` 底 + `tool_result` 墨，和键帽
+/// 同一套归 `ui::chip` 管），而不是实心品牌色。名牌里 `accent` 只属于能照着敲的命令
+/// （`/tips`、`/`）—— 形状 = 可敲，一次启动随机换的一条提示拿不走那个形状。
 ///
-/// 不再按宽度预截断：调用方按块宽统一省略（[`fit_line`]），截断只发生一次
-/// （两处各截一次就会多丢几个字）。
-fn tip_line(tip: &str, palette: &ThemePalette, badge: bool) -> Line<'static> {
+/// 色块后面多一格气口把块与正文分开。不再按宽度预截断：调用方按块宽统一省略
+/// （[`fit_line`]），截断只发生一次（两处各截一次就会多丢几个字）。
+fn tip_line(tip: &str, palette: &ThemePalette, banded: bool) -> Line<'static> {
     let dim = Style::default().fg(palette.dim);
-    let text = Style::default().fg(palette.text);
+    let text = Style::default().fg(palette.tool_result);
     let cmd = Style::default().fg(palette.accent);
-    let mut spans = if badge {
+    let mut spans = if banded {
         vec![
-            chip::Chip::tag("Tip").span(palette, chip::Pad::One),
+            chip::Chip::key("Tip").span(palette, chip::Pad::One),
             Span::styled(" ", dim),
         ]
     } else {
@@ -768,6 +805,25 @@ fn width_of_spans(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| span.content.width()).sum()
 }
 
+/// 名牌**身份行**的文本（从 `wing · ` 起到行尾）—— 测试助手，`ui::welcome` 与
+/// `app::tests::welcome` 两侧共用。
+///
+/// 断言走这一行而不是整块文本：tip 是按时间种子抽的（`tips::seed_now()`），池子里有
+/// `/skills 看已装技能…` —— 任何对整帧做子串扫描的断言都会随进程抖动。这一行是确定性
+/// 的：它只由版本与会话事实决定。
+#[cfg(test)]
+pub(crate) fn identity_text(lines: &[Line<'_>]) -> String {
+    let row = lines
+        .iter()
+        .find(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
+        .expect("身份行在名牌右列");
+    let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+    // 身份行左边还有海鸥的字形（半格 `▀` 一个 3 字节），从品牌起切到行尾。
+    text[text.find("wing · ").expect("身份行带 brand")..]
+        .trim_end()
+        .to_string()
+}
+
 /// 把一行按显示宽度装进 `max` 列，切了就补 `…`。
 ///
 /// 整 span 先过；第一个越界的 span 按**字符边界**切（CJK 记 2 列）。每次切都
@@ -828,10 +884,13 @@ fn elide(text: &str, max: usize) -> String {
     out
 }
 
-/// 版本行尾巴：`dev · <commit>` —— workspace 的占位版本 0.0.0 是开发构建
+/// 身份行的中段：`dev · <commit>` —— workspace 的占位版本 0.0.0 是开发构建
 /// （发版时由 `scripts/sync_version.py` 换成真版本号），展示成 `dev`；
 /// `v0.0.0` 只会让人以为装错了包。
-fn version_label() -> String {
+///
+/// `pub(crate)`：整屏指纹（`app::tests::splash_frame`）要按同一份标签拼期望值 ——
+/// 它的宽度跟着构建走，写死会让发版构建上的断言红。
+pub(crate) fn version_label() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let commit = env!("WING_COMMIT_HASH");
     if version == "0.0.0" {
@@ -879,43 +938,8 @@ mod tests {
             .join("\n")
     }
 
-    /// 名牌里 tip 那一行的下标（分节线在 `RULE_AFTER_ROW` 处插入，行序见 `info_rows`）。
-    const TIP_ROW: usize = 3;
-
     fn facts(skills: usize, rules: usize) -> Option<SessionFacts> {
         Some(SessionFacts { skills, rules })
-    }
-
-    /// 名牌右列的一行：取版本行 `wing · ` 的起始列之后的尾部（框已退役，
-    /// 没有边线可切；那一行左边是海鸥的字形）。
-    fn nameplate_tail(line: &Line<'_>, column: usize) -> String {
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        text.chars()
-            .skip(column)
-            .collect::<String>()
-            .trim()
-            .to_string()
-    }
-
-    /// 名牌右列的**事实槽位**：版本行的下一行（槽位缺席时空白）。
-    ///
-    /// 断言走槽位而不是整块文本：tip 是抽签来的（池子里有 `/skills 看已装技能`
-    /// 这类含 "skill" 的句子），对整块文本做"不含某词"的断言迟早会随池子改动
-    /// 变红。
-    fn facts_slot(lines: &[Line<'static>]) -> String {
-        let version = lines
-            .iter()
-            .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
-            .expect("版本行在名牌右列");
-        let text: String = lines[version]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        // `find` 给的是字节偏移（`▀` 是 3 字节），`nameplate_tail` 按字符跳。
-        let byte = text.find("wing · ").expect("版本行带 brand");
-        let column = text[..byte].chars().count();
-        nameplate_tail(&lines[version + 1], column)
     }
 
     #[test]
@@ -958,10 +982,25 @@ mod tests {
     }
 
     #[test]
-    fn facts_line_carries_the_counts_with_correct_plurals() {
+    fn facts_render_their_counts_with_correct_plurals() {
+        // 复数按英语习惯走（`1 rule`，不是 `1 rules`）。钉在分段上而不是整行上：
+        // 一行能装下几段由块宽与版本号宽度决定（见下面那条测试）。
+        let parts =
+            |facts: Option<SessionFacts>| facts.map(SessionFacts::parts).unwrap_or_default();
+        assert_eq!(parts(facts(2, 1)), ["2 skills", "1 rule"]);
+        assert_eq!(parts(facts(1, 1)), ["1 skill", "1 rule"]);
+        // 只有一类加载物时另一类不出现。
+        assert_eq!(parts(facts(0, 3)), ["3 rules"]);
+        assert_eq!(parts(facts(3, 1)), ["3 skills", "1 rule"]);
+        assert!(parts(None).is_empty(), "老网关：没有段");
+        assert!(parts(facts(0, 0)).is_empty(), "0/0：没有段");
+    }
+
+    #[test]
+    fn the_identity_row_is_the_brand_plus_whole_facts_segments() {
         let mut w = welcome();
-        let line = |w: &mut Welcome, facts| {
-            facts_slot(&w.build(
+        let row = |w: &mut Welcome, facts| {
+            identity_text(&w.build(
                 &palette(),
                 Viewport::width_only(120),
                 Instant::now(),
@@ -970,92 +1009,112 @@ mod tests {
                 facts,
             ))
         };
-        assert_eq!(line(&mut w, facts(2, 1)), "2 skills · 1 rule");
-        assert_eq!(line(&mut w, facts(1, 1)), "1 skill · 1 rule");
-        // 只有一类加载物时另一类不出现。
-        assert_eq!(line(&mut w, facts(0, 3)), "3 rules");
-        assert_eq!(line(&mut w, facts(3, 1)), "3 skills · 1 rule");
+        let brand = format!("wing · {}", version_label());
+        // 2x 档的块宽被大字钉死在 46：放得下的段都在，且用 ` · ` 连着。
+        for facts in [facts(2, 1), facts(1, 1), facts(0, 3), facts(3, 1)] {
+            let got = row(&mut w, facts);
+            let full = format!("{brand} · {}", facts.unwrap().parts().join(" · "));
+            assert!(full.starts_with(&got), "整段拼接：{got}");
+            assert!(got.starts_with(&brand), "以品牌开头：{got}");
+            assert!(!got.contains('…'), "不许切词：{got}");
+        }
+        // 没有事实：身份行就是品牌 + 版本，尾巴上不留一个孤零零的 ` · `。
+        assert_eq!(row(&mut w, None), brand, "无事实时不留分隔符");
+        assert_eq!(row(&mut w, facts(0, 0)), brand, "0/0 时不留分隔符");
     }
 
     #[test]
-    fn facts_line_is_absent_when_nothing_is_loaded() {
-        let mut w = welcome();
-        let now = Instant::now();
-        let none = w.build(
-            &palette(),
-            Viewport::width_only(120),
-            now,
-            false,
-            true,
+    fn the_identity_row_never_widens_the_block() {
+        // 合并后的身份行（40 列）比键位行（38 列）宽 —— 它若参与块宽，80 列终端上的
+        // 块会从 78 撑到 80，输入卡跟着变宽（那是几何改动）。所以块宽只由**操作簇**
+        // 与大字决定，身份行按段丢到放得下为止。
+        let palette = palette();
+        let brand = format!("wing · {}", version_label());
+        let full = format!("{brand} · 2 skills · 1 rule");
+        for (column, block) in [(34usize, 34usize), (39, 38), (40, 38), (45, 38), (60, 46)] {
+            let (rows, got) = text_column(
+                &palette,
+                column,
+                None,
+                (34, 211, 238),
+                false,
+                "tip",
+                facts(2, 1),
+            );
+            assert_eq!(got, block, "信息列 {column} 的块宽");
+            let identity = identity_text(&rows);
+            // 品牌段自己就超块宽时（超长版本号 / commit），退路是 `fit_line` 的省略 ——
+            // 那条路上不保证整段，只保证不溢出（下面那条）。
+            if brand.width() <= block {
+                assert!(
+                    full.starts_with(&identity),
+                    "丢的是整段尾巴（信息列 {column}）：{identity}"
+                );
+                assert!(!identity.contains('…'), "不许切词：{identity}");
+            }
+            let row = rows
+                .iter()
+                .find(|row| row.to_string().contains("wing · "))
+                .expect("身份行");
+            assert!(
+                width_of(row) <= block,
+                "身份行 {} 列 > 块宽 {block}",
+                width_of(row)
+            );
+        }
+        // 窄档（上面 39 列那一档）丢到只剩品牌也成立 —— 留下的永远是整句的前缀，
+        // 「整段丢、不切词」已经由循环里的两条断言钉住。
+        // 宽到装得下就整句都在 —— 丢尾巴不是默认行为（品牌段的宽度跟版本号走，
+        // 所以判据用整句自己的宽度，不写死品牌宽度）。
+        let (rows, block) = text_column(
+            &palette,
+            78,
             None,
-        );
-        let zero = w.build(
-            &palette(),
-            Viewport::width_only(120),
-            now,
+            (34, 211, 238),
             false,
-            true,
-            facts(0, 0),
+            "tip",
+            facts(2, 1),
         );
-        assert_eq!(facts_slot(&none), "", "无事实（老网关）时槽位留空");
-        assert_eq!(facts_slot(&zero), "", "0/0 时槽位留空");
-        // 槽位恒在：事实缺席时那一行是空白 —— header 的**高度**在任何宽度
-        // 档里都不随事实变化（Full 档由海鸥的画盒定，Compact 档由占位行定），
-        // 所以 sync 到达时下方内容不会跳一行。
-        assert_eq!(none.len(), zero.len());
-        for width in [120u16, 96, 80, 70, 60, 40] {
-            let without = w
-                .build(
-                    &palette(),
-                    Viewport::width_only(width),
-                    now,
-                    false,
-                    true,
-                    None,
-                )
-                .len();
-            let with = w
-                .build(
-                    &palette(),
-                    Viewport::width_only(width),
-                    now,
-                    false,
-                    true,
-                    facts(2, 1),
-                )
-                .len();
-            assert_eq!(without, with, "width={width}：事实行改变了 header 高度");
+        if full.width() <= block {
+            assert_eq!(identity_text(&rows), full, "放得下就得整句");
         }
     }
 
     #[test]
-    fn facts_sit_right_after_the_version_line() {
+    fn nothing_loaded_keeps_the_header_height() {
+        // 事实缺席（0/0 / 老网关）时身份行退成 `wing · dev · <commit>`：**行数不变**，
+        // header 的高度因此在任何宽度档里都不随 sync 变化（Full 档由海鸥的画盒定，
+        // Compact 档由文字列定），sync 到达时下方内容不会跳一行。
         let mut w = welcome();
-        let lines = w.build(
-            &palette(),
-            Viewport::width_only(120),
-            Instant::now(),
-            false,
-            true,
-            facts(2, 1),
-        );
-        let text = text_of(&lines);
-        let row = |needle: &str| {
-            lines
-                .iter()
-                .position(|line| line.to_string().contains(needle))
-                .unwrap_or_else(|| panic!("找不到「{needle}」行：{text}"))
-        };
-        let version = row("dev ·");
-        let facts = row("2 skills");
-        assert!(version < facts, "事实行要在版本行之后：{text}");
-        // 用行序而不是再找一个词：tip 池里就可能有「中断」，词会撞车。
-        assert!(
-            facts < row(RULE.to_string().as_str()),
-            "事实行要在分节线之上（环境簇 → 操作簇）：{text}"
-        );
-        // 槽位就贴在版本行下面一行（不是"某处出现过"）。
-        assert_eq!(facts_slot(&lines), "2 skills · 1 rule");
+        let now = Instant::now();
+        for width in [120u16, 96, 80, 70, 60, 40] {
+            let without = w.build(
+                &palette(),
+                Viewport::width_only(width),
+                now,
+                false,
+                true,
+                None,
+            );
+            let with = w.build(
+                &palette(),
+                Viewport::width_only(width),
+                now,
+                false,
+                true,
+                facts(2, 1),
+            );
+            assert_eq!(
+                without.len(),
+                with.len(),
+                "width={width}：事实改变了 header 高度"
+            );
+            assert_eq!(
+                identity_text(&without),
+                format!("wing · {}", version_label()),
+                "width={width}"
+            );
+        }
     }
 
     #[test]
@@ -1116,7 +1175,7 @@ mod tests {
         );
         assert!(
             joined.contains("dev ·") || joined.contains("v0."),
-            "版本行得在"
+            "身份行得在"
         );
     }
 
@@ -1193,7 +1252,7 @@ mod tests {
     #[test]
     fn the_info_column_never_overflows_the_art_box() {
         // Full 档右列骑在海鸥的 13 行盒子里：列比盒子高时多出来的行会被静默丢掉
-        // （不是截断，是整行消失）。2x 大字 5 行 + 名牌 6 行 = 11 是当前天花板 ——
+        // （不是截断，是整行消失）。2x 大字 5 行 + 名牌 7 行 = 12 是当前天花板 ——
         // 名牌加行、大字加档都会撞到它，所以钉在每一个宽度上。
         let palette = palette();
         for width in 0..200usize {
@@ -1210,32 +1269,25 @@ mod tests {
     #[test]
     fn the_nameplate_degrades_by_losing_the_tip_tail_never_by_wrapping() {
         // 名牌是一行一条的：折行会把下面的东西全推下去（版面契约）。80 列终端
-        // （信息列 38 列）里，除 tip 之外的每一条**整行**都放得下；最宽的 tip
-        // （池子上限 36 + `Tip  ` 5 = 41）丢尾巴 —— 它由 `/tips` 兜底。
+        // （信息列 38 列）里，键位行与入口行整行放得下；最宽的 tip（池子上限 36 +
+        // `Tip  ` 5 = 41）丢尾巴 —— 它由 `/tips` 兜底。
         //
-        // 这条线同时也是产品约束：键位 / 入口行文案变长、事实位数变多，都会在
-        // 这里红（逼一次决定：缩文案，还是认了省略）。
+        // 这条线同时也是产品约束：键位 / 入口行文案变长会在这里红（逼一次决定：
+        // 缩文案，还是认了省略）。身份行不在这条线上 —— 它按**段**丢，见
+        // `the_identity_row_never_widens_the_block`。
         let budget = 80 - 2 - (ART_COLS + ART_GAP);
-        let facts = Some(SessionFacts {
-            skills: 999,
-            rules: 999,
-        });
-        let rows = info_rows(&palette(), widest_tip(), facts, None);
-        // **每一行**都过一遍（入口行也不例外：`TIPS_COMMAND` 改名、入口文案加列
-        // 都会把这一行顶出预算）。唯一的例外是最宽的那条 tip —— 它由 `/tips`
-        // 兜底，放不下只丢尾巴。
-        for (index, row) in rows.iter().enumerate() {
-            if index == TIP_ROW {
-                continue;
-            }
+        let [keys, tip, hints] = action_rows(&palette(), widest_tip(), None);
+        // 除 tip 之外每条都过一遍（入口行也不例外：`TIPS_COMMAND` 改名、入口文案加列
+        // 都会把这一行顶出预算）。
+        for row in [keys, hints] {
             assert!(
-                width_of(row) <= budget,
+                width_of(&row) <= budget,
                 "80 列终端放得下整行：「{row}」{} 列 > {budget} 列",
-                width_of(row)
+                width_of(&row)
             );
         }
         // tip：放不下就丢尾巴（一次性），永远不长出第二行。
-        let fitted = fit_line(&rows[TIP_ROW], budget);
+        let fitted = fit_line(&tip, budget);
         assert_eq!(width_of(&fitted), budget, "tip 吃到满宽就停");
         assert!(
             fitted
@@ -1247,29 +1299,39 @@ mod tests {
     }
 
     #[test]
-    fn the_two_x_nameplate_fits_the_block_whole() {
-        // 2x 档反过来：块宽被大字钉死在 `Scale::X2.columns()`（46），键帽行（40 列）
-        // 与最宽的 tip（徽章 5 + 气口 1 + 池子上限 36 = 42）都整行放得下 ——
-        // 那一档没有一条需要省略。
-        // 这条线也是徽章的预算来源：tip 前缀从 `Tip  `（5）长到 `<Tip 徽章> `（6），
-        // 46 − 42 = 4 列余量，再长 5 列就会把 tip 推进省略。
+    fn the_two_x_nameplate_needs_no_elision() {
+        // 2x 档反过来：块宽被大字钉死在 `Scale::X2.columns()`（46），键帽行（40 列）与
+        // 最宽的 tip（`Tip` 色块 5 + 气口 1 + 池子上限 36 = 42）整行放得下 —— 操作簇
+        // 那几条不会省略。身份行是另一回事：它由**品牌段 + 整段事实**拼出来，品牌段的
+        // 宽度跟着版本号走（`dev` 20 列 / 发版更长），所以「整句都在」只在放得下时成立。
+        let block = wordmark::Scale::X2.columns();
         let facts = Some(SessionFacts {
             skills: 999,
             rules: 999,
         });
-        let rows = info_rows(
-            &palette(),
-            widest_tip(),
-            facts,
-            Some(wordmark::Scale::X2.columns()),
+        let [_, identity, _] = identity_cluster(&palette(), facts, block);
+        let identity = identity.to_string();
+        // 身份行是**整段**丢的：留着的必须是整句的前缀，且不许出现省略号。
+        let full = format!("wing · {} · 999 skills · 999 rules", version_label());
+        assert!(
+            full.starts_with(&identity),
+            "身份行是整句的整段前缀：「{identity}」"
         );
-        for (index, row) in rows.iter().enumerate() {
-            // `fit_line` 只在超宽时动手：它原样返回 ⟺ 这行整行放得下。
+        assert!(!identity.contains('…'), "不许切词：「{identity}」");
+        // 品牌段的宽度跟着版本号走（`dev` / `v0.x.y`；发布构建更长），所以「整句都在」
+        // 只在整句真的放得下时成立 —— 判据用整句自己的宽度，不写死品牌宽度。
+        if full.width() <= block {
+            assert_eq!(identity, full, "放得下就得整句都在");
+        }
+        let [keys, tip, hints] = action_rows(&palette(), widest_tip(), Some(block));
+        // 身份行已被 `identity_cluster` 按段排进块宽（上面三条断言），这里剩下的是
+        // 操作簇：`fit_line` 只在超宽时动手，原样返回 ⟺ 这行整行放得下。
+        for row in [keys, tip, hints] {
             assert_eq!(
-                width_of(&fit_line(row, wordmark::Scale::X2.columns())),
-                width_of(row),
-                "行 {index} 不该被省略：「{row}」{} 列",
-                width_of(row)
+                width_of(&fit_line(&row, block)),
+                width_of(&row),
+                "不该被省略：「{row}」{} 列",
+                width_of(&row)
             );
         }
     }
@@ -1291,7 +1353,7 @@ mod tests {
 
     #[test]
     fn the_nameplate_is_a_letterhead_not_a_table() {
-        // 框退役了：没有 `┏┓┃`，只有一条分节线。线夹在版本 / 事实之后、键位之前
+        // 框退役了：没有 `┏┓┃`，只有一条分节线。线夹在身份行之后、键位之前
         // —— 上是"这是什么"，下是"你能做什么"。
         let mut w = welcome();
         let lines = w.build(
@@ -1313,7 +1375,7 @@ mod tests {
         let version = lines
             .iter()
             .position(|line| line.spans.iter().any(|s| s.content.contains("wing · ")))
-            .expect("版本行");
+            .expect("身份行");
         let keys = lines
             .iter()
             .position(|line| line.spans.iter().any(|s| s.content.contains("Esc")))
@@ -1340,13 +1402,13 @@ mod tests {
         // `/命令` 在整套 UI 里都是 accent（palette 的约定：accent = logo / 命令 / 链接）——
         // 名牌里若是 dim，它就成了看不见的字。
         let palette = palette();
-        for badge in [false, true] {
-            let tip = tip_line("输入 /skills 看已装技能", &palette, badge);
+        for chip in [false, true] {
+            let tip = tip_line("输入 /skills 看已装技能", &palette, chip);
             assert!(
                 tip.spans
                     .iter()
                     .any(|s| s.content.as_ref() == "/skills" && s.style.fg == Some(palette.accent)),
-                "tip 里的命令要染成 accent（badge={badge}）：{tip:?}"
+                "tip 里的命令要染成 accent（chip={chip}）：{tip:?}"
             );
         }
         let hints = hints_line(&palette);
@@ -1394,8 +1456,8 @@ mod tests {
 
     #[test]
     fn the_key_row_ladder_drops_padding_then_the_chips() {
-        // 三档顺序：常规内边距（40）→ 收掉内边距（34）→ 纯文本（38）。前两档本步的
-        // 2x 档碰不到（40 ≤ 46），但降级这件事本身得被钉住 —— 下一波消费者是变量
+        // 三档顺序：常规内边距（40）→ 收掉内边距（34）→ 纯文本（38）。2x 档碰不到
+        // 前两档（40 ≤ 46），但降级这件事本身得被钉住 —— 下一个消费者是变量
         // 宽度的状态栏。纯文本比"收掉内边距"还宽，所以第三档是**样子**的退路
         // （回到今天的排版），宽度兜底交给 `fit_line`。
         let palette = palette();
@@ -1427,9 +1489,9 @@ mod tests {
     }
 
     #[test]
-    fn keycaps_and_the_badge_only_exist_in_the_two_x_tier() {
+    fn keycaps_only_exist_in_the_two_x_tier() {
         // 两档哲学：1x 档（80 列终端的信息列 38）保持纯文本，2x 档（46 列）才有
-        // 带底色的键帽与徽章。判据是字号档，不是"还塞得下就塞"。
+        // 带底色的键帽。判据是字号档，不是"还塞得下就塞"。
         let palette = palette();
         let row = |column: usize, needle: &str| -> Line<'static> {
             let (lines, _) =
@@ -1468,14 +1530,117 @@ mod tests {
             width_of(&capped)
         );
 
+        // `Tip` 的标签与键帽**同一套**（`Chip::key` 的安静档）：形状 = 「一块」。
+        // 1x 档没有色块，标签退回纯文本。
         let plain_tip = row(38, "Tip");
         assert!(plain_tip.spans.iter().all(|span| span.style.bg.is_none()));
-        let badged = row(two_x, "Tip");
+        let labelled = row(two_x, "Tip");
         assert_eq!(
-            badged.spans.first().and_then(|span| span.style.bg),
-            Some(palette.accent),
-            "2x 档的 `Tip` 是实心徽章：{badged:?}"
+            fingerprint(&Line::from(vec![labelled.spans[0].clone()])),
+            fingerprint(&Line::from(vec![
+                chip::Chip::key("Tip").span(&palette, chip::Pad::One)
+            ])),
+            "`Tip` 与键帽是同一块：{labelled:?}"
         );
+    }
+
+    #[test]
+    fn the_tip_label_takes_the_same_room_in_both_tiers() {
+        // 1x 档的标签是纯文本 `Tip  `、2x 档是 ` Tip ` 色块 + 一格气口：标签本身占同样宽
+        // 的格子，换档时 tip 正文的起点只差"色块自带的那格气口"。标签变宽变窄会让同一条
+        // tip 在两档断在不同位置（读起来像文案在两档不一样）。
+        let palette = palette();
+        let plain = tip_line("正文", &palette, false);
+        let banded = tip_line("正文", &palette, true);
+        assert_eq!(plain.spans[0].content.as_ref(), "Tip  ");
+        assert_eq!(banded.spans[0].content.as_ref(), " Tip ");
+        assert_eq!(
+            width_of_spans(&plain.spans[..1]),
+            width_of_spans(&banded.spans[..1]),
+            "标签在两档占同样宽的格子"
+        );
+    }
+
+    #[test]
+    fn the_nameplate_spends_accent_only_on_commands() {
+        // 名牌里的**形状**语法：能照着敲的东西 = `accent` 墨（`/tips`、`/`），没有一块
+        // `accent` 的底。一条每次启动随机换的提示不该拿走整块最响的形状。
+        let palette = palette();
+        for column in [38usize, 46, 60] {
+            let (lines, _) = text_column(
+                &palette,
+                column,
+                None,
+                (34, 211, 238),
+                false,
+                "输入 /skills 看已装技能",
+                facts(2, 1),
+            );
+            let glyphs = wordmark::scale_for(column).rows();
+            let nameplate: Vec<&Line<'static>> = lines[glyphs.min(lines.len())..].iter().collect();
+            assert!(!nameplate.is_empty(), "信息列 {column}：名牌得有行");
+            for line in &nameplate {
+                for span in &line.spans {
+                    assert_ne!(
+                        span.style.bg,
+                        Some(palette.accent),
+                        "名牌里没有 accent 底色（信息列 {column}）：{line:?}"
+                    );
+                    if span.style.fg == Some(palette.accent) {
+                        assert!(
+                            span.content.starts_with('/'),
+                            "accent 只给命令（信息列 {column}）：「{}」",
+                            span.content
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_nameplate_has_its_air_inside() {
+        // 名牌的纵向节奏：词标下面一格空把身份从大字上脱开，身份下面一格空把分节线
+        // 从字里救出来，线下面紧贴键位。块高不变 —— 空气来自合并的身份行，不来自屏幕。
+        let palette = palette();
+        for (column, scale, height) in [
+            (60usize, wordmark::Scale::X2, 12usize),
+            (38, wordmark::Scale::X1, 10),
+        ] {
+            let (lines, _) = text_column(
+                &palette,
+                column,
+                None,
+                (34, 211, 238),
+                false,
+                "tip",
+                facts(2, 1),
+            );
+            assert_eq!(lines.len(), height, "信息列 {column}：名牌的行数");
+            assert_eq!(
+                wordmark_width(&lines, scale.rows()),
+                scale.columns(),
+                "信息列 {column}：大字档"
+            );
+            let glyphs = scale.rows();
+            assert_eq!(width_of(&lines[glyphs]), 0, "词标下面那一格是空的");
+            assert!(
+                lines[glyphs + 1].to_string().contains("wing · "),
+                "身份行紧跟那格空气：{:?}",
+                lines[glyphs + 1]
+            );
+            assert_eq!(width_of(&lines[glyphs + 2]), 0, "身份与分节线之间一格空");
+            let rule = lines[glyphs + 3].to_string();
+            assert!(
+                !rule.is_empty() && rule.chars().all(|c| c == RULE),
+                "分节线在身份下面那格空气之后：{rule:?}"
+            );
+            assert!(
+                lines[glyphs + 4].to_string().contains("Esc"),
+                "键位紧贴分节线下面：{:?}",
+                lines[glyphs + 4]
+            );
+        }
     }
 
     // ── 版面：居中与档位 ──────────────────────────────────
@@ -1650,10 +1815,11 @@ mod tests {
         assert_eq!(shape(FULL_MIN + 11), (false, true), "内容 85：1x");
         assert_eq!(shape(FULL_MIN + 12), (true, true), "内容 86：2x");
 
-        // 高度：1x 3 + 6 行 = 9；2x 5 + 6 行 = 11。
-        assert_eq!(height(40), 9);
-        assert_eq!(height(46), 9);
-        assert_eq!(height(120), 11);
+        // 高度：1x 3 + 7 行 = 10；2x 5 + 7 行 = 12（名牌 = 空气 / 身份 / 空气 /
+        // 分节线 / 键位 / tip / 入口）。
+        assert_eq!(height(40), 10);
+        assert_eq!(height(46), 10);
+        assert_eq!(height(120), 12);
     }
 
     #[test]

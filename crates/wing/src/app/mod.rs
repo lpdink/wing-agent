@@ -186,7 +186,7 @@ pub struct App {
     /// Markdown pictures: capability, store, metadata table, drawing pass —
     /// see [`images`](self::images).
     images: Images,
-    /// 这个会话加载的 skills / rules 数量 —— 名牌右列的事实行。
+    /// 这个会话加载的 skills / rules 数量 —— 名牌右列身份行的一段。
     ///
     /// 由 SyncSession 的 agent 快照写入（`None` = 老网关 / 还没同步到），
     /// 读它的只有 [`App::sync_welcome`]：它曾是 transcript 顶部一条 system

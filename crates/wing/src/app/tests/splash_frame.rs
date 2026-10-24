@@ -90,7 +90,7 @@ fn card(rows: &[String]) -> (usize, usize, usize, usize) {
 
 const SESSION_ID: &str = "20261005-213012-ab12cd34";
 
-/// 版本行里能放下的 commit 前缀（长 SHA 构建时整串放不进块宽，断言只看前 7 位）。
+/// 身份行里能放下的 commit 前缀（长 SHA 构建时整串放不进块宽，断言只看前 7 位）。
 fn short_commit() -> String {
     env!("WING_COMMIT_HASH").chars().take(7).collect()
 }
@@ -120,23 +120,49 @@ fn the_splash_block_sits_at_the_optical_centre_at_120x40() {
     // （盒顶那一行是透明像素行）。这个数字是 `splash_pad` 的 45% 光学中心。
     assert_eq!(first_ink(&rows), 11, "开屏的空气量变了");
 
-    // 名牌右列：版本 / 事实 / 分节线 / 键位 / tip / 入口，全部从第 57 列起
+    // 名牌右列：身份 / 分节线 / 键位 / tip / 入口，全部从第 57 列起
     // （居中位移 17 + 海鸥盒 40）。块宽 86 = 40 + 46（2x 大字）。
-    let version = tail(&rows[16], 57);
-    assert!(version.starts_with("wing · "), "版本行：{version:?}");
-    assert!(version.contains(&short_commit()), "带 commit：{version:?}");
-    assert_eq!(tail(&rows[17], 57).trim_end(), "2 skills · 1 rule");
+    //
+    // 空气在块内：词标末行（15）与身份行之间一格空、身份行与分节线之间一格空，
+    // 线下面紧贴键位。块高没变（盒子 13 + 尾部一格）—— 多出来的那一行是合并身份
+    // 行省下的，不是从屏上挪的。
+    assert!(
+        tail(&rows[16], 57).trim().is_empty(),
+        "词标与身份行之间一格空气：{:?}",
+        tail(&rows[16], 57)
+    );
+    let identity = tail(&rows[17], 57);
+    assert!(identity.starts_with("wing · "), "身份行：{identity:?}");
+    assert!(
+        identity.contains(&short_commit()),
+        "带 commit：{identity:?}"
+    );
+    // 事实的**段**并进身份行（一行里放得下几段由块宽 46 与品牌段宽度决定；品牌段跟着
+    // 版本号走，所以只断「以整段接在后面」，不写死能放几段）。
+    let full = format!(
+        "wing · {} · 2 skills · 1 rule",
+        crate::ui::welcome::version_label()
+    );
+    assert!(
+        full.starts_with(identity.trim_end()),
+        "会话事实整段并进身份行：{identity:?}"
+    );
+    assert!(
+        tail(&rows[18], 57).trim().is_empty(),
+        "身份行与分节线之间一格空气：{:?}",
+        tail(&rows[18], 57)
+    );
     assert_eq!(
         rule(&rows, 57),
-        (18, 46),
+        (19, 46),
         "分节线：块宽 46 列、从第 57 列起"
     );
     // 2x 档是键帽档：块与块之间用一列空气分句，不再有 ` · `（1x 档的纯文本
     // 仍带分隔符，见 `ui::welcome` 的两条键位行）。
     assert!(
-        compact(&rows[19]).contains("Esc中断Ctrl+J换行Ctrl+C×2退出"),
+        compact(&rows[20]).contains("Esc中断Ctrl+J换行Ctrl+C×2退出"),
         "键位行整行不折：{:?}",
-        rows[19]
+        rows[20]
     );
 
     // 输入卡：与牌子同宽（86）同列（17..=102），紧贴牌子下方。中间两行空白各有出处：
@@ -179,14 +205,41 @@ fn the_splash_block_sits_at_the_optical_centre_at_80x24() {
     // 空气 (24 - 1 - 14 - 4) * 45% = 2 行，盒顶一行透明 → 首格墨迹在第 4 行。
     assert_eq!(first_ink(&rows), 4, "开屏的空气量变了");
 
-    let version = tail(&rows[8], 41);
-    assert!(version.starts_with("wing · "), "版本行：{version:?}");
-    assert_eq!(tail(&rows[9], 41).trim_end(), "2 skills · 1 rule");
-    assert_eq!(rule(&rows, 41), (10, 38), "1x 档的块宽 = 38 列");
+    // 1x 档也在块内开窗（词标 5–7 / 空 8 / 身份 9 / 空 10 / 分节线 11 / 键位 12 …）。
     assert!(
-        compact(&rows[11]).contains("Esc中断·Ctrl+J换行·Ctrl+C×2退出"),
+        tail(&rows[8], 41).trim().is_empty(),
+        "词标与身份行之间一格空气：{:?}",
+        tail(&rows[8], 41)
+    );
+    let identity = tail(&rows[9], 41);
+    // 不拼整句：`WING_COMMIT_HASH` 是构建期注入的（`build.rs`），`dev` / `v0.x.y` 也跟着
+    // 版本走 —— 期望值只由**稳定性**构成：品牌 + 当前 commit + 「整段丢尾巴」的那一节。
+    assert!(identity.starts_with("wing · "), "身份行：{identity:?}");
+    assert!(
+        identity.contains(&short_commit()),
+        "带 commit：{identity:?}"
+    );
+    // 80 列的信息列只有 40 列，整句身份会被它自己的块宽（38）挤出去 —— 丢的是**整段**
+    // 尾巴（先 `· 1 rule`、再 `· 2 skills`），不是切一半。
+    let full = format!(
+        "wing · {} · 2 skills · 1 rule",
+        crate::ui::welcome::version_label()
+    );
+    assert!(
+        full.starts_with(identity.trim_end()),
+        "留下的必须是整句的整段前缀：{identity:?}"
+    );
+    assert!(!identity.contains('…'), "丢的是整段，不切词：{identity:?}");
+    assert!(
+        tail(&rows[10], 41).trim().is_empty(),
+        "身份行与分节线之间一格空气：{:?}",
+        tail(&rows[10], 41)
+    );
+    assert_eq!(rule(&rows, 41), (11, 38), "1x 档的块宽 = 38 列");
+    assert!(
+        compact(&rows[12]).contains("Esc中断·Ctrl+J换行·Ctrl+C×2退出"),
         "80 列键位行整行放得下：{:?}",
-        rows[11]
+        rows[12]
     );
 
     assert_eq!(card(&rows), (18, 20, 1, 78), "输入卡与牌子同宽（78）同列");
@@ -199,10 +252,17 @@ fn the_narrow_ladder_keeps_the_block_centred() {
     // 40 列：掉到 Compact（撤海鸥、1x 大字 + 名牌），块宽 38、居中位移 1。
     let rows = frame(ColorPreset::Dark, 40, 20).rows();
     assert_eq!(rows.len(), 20);
-    assert_eq!(first_ink(&rows), 3, "海鸥撤了，1x 大字从第 3 行起");
-    let version = tail(&rows[6], 1);
-    assert!(version.starts_with("wing · "), "版本行：{version:?}");
-    assert!(version.contains(&short_commit()), "带 commit：{version:?}");
+    // Compact 档没有海鸥盒可以吃那一行（盒子只在 Full 档），名牌多出来的那一格空
+    // 让 header 高了一行 → `splash_pad` 的余量少一行，整块上移一行；输入卡不动。
+    assert_eq!(first_ink(&rows), 2, "海鸥撤了，1x 大字从第 2 行起");
+    assert!(rows[5].is_empty(), "词标与身份行之间一格空气");
+    let identity = tail(&rows[6], 1);
+    assert!(identity.starts_with("wing · "), "身份行：{identity:?}");
+    assert!(
+        identity.contains(&short_commit()),
+        "带 commit：{identity:?}"
+    );
+    assert!(rows[7].is_empty(), "身份行与分节线之间一格空气");
     assert_eq!(rule(&rows, 1), (8, 38), "窄档块宽 38");
     assert!(compact(&rows[9]).contains("Esc中断·Ctrl+J换行·Ctrl+C×2退出"));
     assert_eq!(card(&rows), (14, 16, 1, 38), "输入卡跟着块宽收窄");
