@@ -17,9 +17,10 @@
 //! cargo run -p wing --example splash_preview -- --width 120 --height 40 \
 //!     --html /tmp/splash.html
 //!
-//! # 会话状态：输入卡里有草稿 / agent 在干活（活动栏 + 飞行姿态）/ 扫光停在 40%
+//! # 会话状态：输入卡里有草稿 / agent 在干活（活动栏 + 飞行姿态）/ 会话已置顶 / 扫光停在 40%
 //! cargo run -p wing --example splash_preview -- --draft "把状态栏的断句改一下"
 //! cargo run -p wing --example splash_preview -- --working
+//! cargo run -p wing --example splash_preview -- --pinned
 //! cargo run -p wing --example splash_preview -- --phase 0.4
 //! ```
 //!

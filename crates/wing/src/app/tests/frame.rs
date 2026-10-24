@@ -313,8 +313,8 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         app.pointer_owner(composer.x + 1, composer.y),
         Some(PointerOwner::Composer)
     );
-    // 4. The status bar's own row: its two hot cells (the session id and the
-    //    pin star) are the bar's; every other cell up there is nobody's.
+    // 4. The status bar's own row: its two hot targets (the session id and the
+    //    pin face) are the bar's; every other cell up there is nobody's.
     assert_eq!(
         app.pointer_owner(band.x, 0),
         None,
@@ -322,13 +322,13 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
     );
     let regions = app.geometry.status_regions();
     let id = regions.session_id.expect("the id cell was drawn");
-    let star = regions.star.expect("the star cell was drawn");
+    let pin = regions.pin.expect("the pin face was drawn");
     assert_eq!(id.y, 0, "the id lives in the status bar row");
-    assert_eq!(star.y, 0);
+    assert_eq!(pin.y, 0);
     assert_eq!(app.pointer_owner(id.x, 0), Some(PointerOwner::StatusBar));
-    assert_eq!(app.pointer_owner(star.x, 0), Some(PointerOwner::StatusBar));
+    assert_eq!(app.pointer_owner(pin.x, 0), Some(PointerOwner::StatusBar));
     assert_eq!(
-        app.pointer_chain(star.x, 0).collect::<Vec<_>>(),
+        app.pointer_chain(pin.x, 0).collect::<Vec<_>>(),
         vec![PointerOwner::StatusBar],
         "and nothing else claims it"
     );

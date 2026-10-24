@@ -2,10 +2,10 @@
 //!
 //! 开屏名牌用它把「可敲」画成一个色块：键帽（[`Chip::key`]）安静，`Tip` 那枚标签
 //! 也是这一档（提示是用来读的，不是按钮）。消费方：开屏名牌的键帽与 `Tip` 标签、
-//! 状态栏的模型段、输入卡空草稿时顶栏右端那枚 `Enter` 键帽 —— 各写一份的下场是
-//! 宽度与降级规则对不上（一边 5 列收边距、另一边 4 列才收）。另一档
-//! [`Chip::tag`]（`accent` 底）当前没有生产消费者，它的降级与兜底规则由自己的
-//! 单测守着。
+//! 状态栏的 pin 星标（自带状态墨）与模型段、输入卡空草稿时顶栏右端那枚 `Enter`
+//! 键帽 —— 各写一份的下场是宽度与降级规则对不上（一边 5 列收边距、另一边 4 列才
+//! 收）。另一档 [`Chip::tag`]（`accent` 底）当前没有生产消费者，它的降级与兜底
+//! 规则由自己的单测守着。
 //!
 //! 与输入卡的 `chip`（`input_area` 的粘贴 / 图片原子，无底色）不是一回事：
 //! 这里的 `Chip` 是**面**，它存在的意义就是那块底。
@@ -38,10 +38,15 @@
 //! **纸面本身**，那种底被第一道闸门拦掉。两者都不当成"白"。`surface: reset`
 //! 同时是"没有纸色可画"和"没有纸色可作墨"：徽章退回正文色（有意的降级）。
 //!
-//! **墨**随后按「它压在哪里」挑（[`Tint::ink`]）：有底时强调档的纸色墨要过
+//! **墨**随后按「它压在哪里」挑（[`Tint::default_ink`]）：有底时强调档的纸色墨要过
 //! [`MIN_INK_CONTRAST`]，过不了就换正文色（面留着、字换掉）；没有底时纸色墨等于
 //! 写在纸面上，直接退正文色。最后 [`Chip::span`] 再兜一次：挑中的墨压在挑中的面上
 //! 仍然读不出，就连底一起不要 —— 落到纸面上用正文色。
+//!
+//! 调用方可以给一块换**状态墨**（[`Chip::ink`]）：状态栏的 pin 要在同一块面上说
+//! 开 / 关，而面不能跟着状态变宽变窄。状态墨仍然过同一道闸门 —— 压在面上读不出就
+//! 退回本档自己的墨，没有面时干脆不用它（那时墨落在纸面上，是纸面的账）。开放的
+//! 是墨，不是底：底一旦能被调用方挑，明暗对账就散回每个调用点了。
 //!
 //! 无论走哪条退路，内边距与宽度都不变（见上一节）：退路只换颜色，不换几何。
 
@@ -64,7 +69,10 @@ const LIGHT_BAND_DEEPEN: f32 = 0.08;
 /// 不取正文线 4.5：暗色预设的键帽墨（`tool_result` on `surface`）只有 4.35，
 /// 而它是有意的取舍 —— 键帽是控件标签，可读性由「面」承担；换成 `text` 能到
 /// 11.4，但那会把「键」提到与正文同亮，三层寄存器退化成两层。
-const MIN_INK_CONTRAST: f32 = 3.0;
+///
+/// `pub(crate)` 是给渲染侧的断言用的（状态栏 pin 面的两态墨）：判据与阈值都只有
+/// 这一份，测试不另抄一个 3.0。
+pub(crate) const MIN_INK_CONTRAST: f32 = 3.0;
 
 /// 底浮在纸面上的最小对比度。这不是可读性标准，只要求「看得出是一块」——
 /// 亮色预设的 `surface`（1.19）过不了，压深之后（1.38）才过。
@@ -140,10 +148,12 @@ impl Pad {
     }
 }
 
-/// 底色档位。私有：外部只有「键帽 / 徽章」两个意图，没有第三个旋钮可拧。
+/// 底色档位。私有：外部只有「键帽 / 徽章」两个意图。
 ///
-/// 将来状态栏需要第三档（比如 `warning` 底）时加一个构造器 + 一个变体，而不是
-/// 把（底, 墨）开放成参数 —— 那会把明暗对账散回每个调用点。
+/// **底不可由调用方挑** —— 那会把明暗对账散回每个调用点；将来真需要第三档（比如
+/// `warning` 底）时加一个构造器 + 一个变体。能让调用方换的只有**墨**
+/// （[`Chip::ink`]），而且它仍然过 [`MIN_INK_CONTRAST`] 这道闸门，所以"开墨不开底"
+/// 不是一句口号：可读性判据只有这一份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tint {
     /// `surface` 底 + `tool_result` 墨。
@@ -159,7 +169,7 @@ impl Tint {
     /// 所以「落在纸面上」那一支不需要在这里挑。强调档两处都不是无条件成立的：
     /// 纸色墨只在「字压在品牌色上」时成立，无底时它落在纸面上等于消失 ——
     /// 于是退回正文色（预设保证它在纸面上可读）。
-    fn ink(self, palette: &ThemePalette, band: Option<Color>) -> Color {
+    fn default_ink(self, palette: &ThemePalette, band: Option<Color>) -> Color {
         match (self, band) {
             (Self::Quiet, _) => palette.tool_result,
             (Self::Strong, Some(face))
@@ -209,7 +219,7 @@ fn quiet_band(palette: &ThemePalette) -> Color {
     Color::Rgb(deepened.0, deepened.1, deepened.2)
 }
 
-/// 一块：文字 + 底色档位。
+/// 一块：文字 + 底色档位 + （可选的）状态墨。
 ///
 /// 用法是「先量后画」，量的是行自己的预算，不是 chip 的（伪代码，真身见
 /// `ui::welcome` 的 `keys_line`）：
@@ -225,6 +235,8 @@ fn quiet_band(palette: &ThemePalette) -> Color {
 pub struct Chip<'a> {
     text: &'a str,
     tint: Tint,
+    /// 调用方要的状态墨（见 [`Chip::ink`]）；`None` = 本档自己的墨。
+    state_ink: Option<Color>,
 }
 
 impl<'a> Chip<'a> {
@@ -233,6 +245,7 @@ impl<'a> Chip<'a> {
         Self {
             text,
             tint: Tint::Quiet,
+            state_ink: None,
         }
     }
 
@@ -241,7 +254,19 @@ impl<'a> Chip<'a> {
         Self {
             text,
             tint: Tint::Strong,
+            state_ink: None,
         }
+    }
+
+    /// 换一档**状态墨**：同一块面、不同语义（状态栏的 pin：置顶 `warning` /
+    /// 未置顶留本档的墨）。
+    ///
+    /// 墨换了，闸门不换：压在面上不到 [`MIN_INK_CONTRAST`] 就退回本档自己的墨；
+    /// 底被闸门拿掉时也不用它 —— 状态墨落到纸面上是纸面的账，不是这块的。
+    #[must_use]
+    pub fn ink(mut self, ink: Color) -> Self {
+        self.state_ink = Some(ink);
+        self
     }
 
     /// 显示宽度（CJK 记 2 列），含内边距。**不看调色板**：底色不可用时宽度不变。
@@ -253,20 +278,32 @@ impl<'a> Chip<'a> {
     pub fn span(&self, palette: &ThemePalette, pad: Pad) -> Span<'static> {
         let air = " ".repeat(pad.columns());
         let mut band = self.tint.band(palette);
-        let mut ink = self.tint.ink(palette, band);
+        let mut ink = self.resolved_ink(palette, band);
         // 墨压在这块上仍然读不出（用户挑了两个亮度贴近的槽）：宁可不要这块面，
         // 落到纸面上用正文色 —— 比留一块读不出字的色块诚实。
         if let Some(face) = band
             && contrast(ink_rgb(ink, palette.appearance), to_rgb(face)) < MIN_INK_CONTRAST
         {
             band = None;
-            ink = self.tint.ink(palette, None);
+            ink = self.resolved_ink(palette, None);
         }
         let mut style = Style::default().fg(ink);
         if let Some(band) = band {
             style = style.bg(band);
         }
         Span::styled(format!("{air}{}{air}", self.text), style)
+    }
+
+    /// 墨：状态墨（有面且读得出才用）→ 否则本档自己的墨。
+    fn resolved_ink(&self, palette: &ThemePalette, band: Option<Color>) -> Color {
+        match (self.state_ink, band) {
+            (Some(ink), Some(face))
+                if contrast(ink_rgb(ink, palette.appearance), to_rgb(face)) >= MIN_INK_CONTRAST =>
+            {
+                ink
+            }
+            _ => self.tint.default_ink(palette, band),
+        }
     }
 }
 
@@ -527,6 +564,53 @@ mod tests {
     }
 
     #[test]
+    fn a_state_ink_rides_the_same_face_and_the_same_gate() {
+        // 状态墨在本档自己的墨之外换一档，但面、内边距、宽度都不动。
+        for palette in [dark(), light()] {
+            let chip = Chip::key("Esc");
+            let plain = chip.span(&palette, Pad::One);
+            let marked = chip.ink(palette.warning).span(&palette, Pad::One);
+            assert_eq!(marked.style.fg, Some(palette.warning));
+            assert_eq!(marked.style.bg, plain.style.bg, "同一块面");
+            assert_eq!(marked.content, plain.content, "同样的字与气口");
+            assert_eq!(marked.content.width(), chip.width(Pad::One));
+            assert!(
+                contrast(to_rgb(palette.warning), to_rgb(plain.style.bg.expect("面")))
+                    >= MIN_INK_CONTRAST,
+                "{:?}: 状态墨压在面上读得出",
+                palette.appearance
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_ink_that_sinks_into_the_face_is_not_used() {
+        // 用户把状态槽调到与 `surface` 同一档灰：那一档读不出，退回键帽自己的墨
+        // —— 面留着、字换掉，不退化成"看不见的状态"。
+        let palette = preset_with(ColorPreset::Dark, |cfg| {
+            cfg.warning = Some("#2b3548".to_string()); // ≈ surface
+        });
+        let span = Chip::key("Esc")
+            .ink(palette.warning)
+            .span(&palette, Pad::One);
+        assert_eq!(span.style.fg, Some(palette.tool_result), "退回本档的墨");
+        assert_eq!(span.style.bg, Some(palette.surface), "面还在");
+        assert_eq!(span.content.as_ref(), " Esc ", "几何不变");
+    }
+
+    #[test]
+    fn a_state_ink_never_lands_on_the_paper() {
+        // 面被闸门拿掉时状态墨不接管：此时墨压在纸面上，那是本档墨的账。否则
+        // `surface: reset` 的终端上会冒出一块没有任何底气支撑的状态色。
+        let palette = palette_with(Color::Reset);
+        let span = Chip::key("Esc")
+            .ink(palette.warning)
+            .span(&palette, Pad::One);
+        assert_eq!(span.style.bg, None);
+        assert_eq!(span.style.fg, Some(palette.tool_result));
+    }
+
+    #[test]
     fn the_badge_keeps_its_fill_at_any_padding() {
         // 徽章也会被降级到 `Pad::Zero`（状态栏那种宽度急的时候）：形状与底照旧，
         // 只少气口。
@@ -579,7 +663,7 @@ mod tests {
     fn the_deepen_is_a_bounded_step_the_ink_allows() {
         // 「8% 留了余量」得自己被钉住：8% 时墨还在 4.5 以上，12% 已破。
         let palette = light();
-        let ink = Tint::Quiet.ink(&palette, None);
+        let ink = Tint::Quiet.default_ink(&palette, None);
         let band = quiet_band(&palette);
         assert!(
             contrast(to_rgb(ink), to_rgb(band)) >= 4.5,
@@ -605,11 +689,11 @@ mod tests {
             let quiet = Tint::Quiet.band(&palette).expect("安静档的底可用");
             let strong = Tint::Strong.band(&palette).expect("强调档的底可用");
             let key = contrast(
-                to_rgb(Tint::Quiet.ink(&palette, Some(quiet))),
+                to_rgb(Tint::Quiet.default_ink(&palette, Some(quiet))),
                 to_rgb(quiet),
             );
             let badge = contrast(
-                to_rgb(Tint::Strong.ink(&palette, Some(strong))),
+                to_rgb(Tint::Strong.default_ink(&palette, Some(strong))),
                 to_rgb(strong),
             );
             assert!(
@@ -634,7 +718,7 @@ mod tests {
                 (Tint::Quiet, palette.tool_result),
                 (Tint::Strong, palette.text),
             ] {
-                let ink = tint.ink(&palette, None);
+                let ink = tint.default_ink(&palette, None);
                 assert_eq!(ink, expected);
                 assert!(
                     contrast(to_rgb(ink), paper_of(&palette)) >= 4.5,

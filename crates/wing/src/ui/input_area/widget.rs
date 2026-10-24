@@ -100,8 +100,10 @@ impl Widget for ComposerWidget<'_> {
         // chat draws text that is not active (dim), so the state is visible
         // without a word of explanation.
         let ghosted = matches!(focus, Focus::Ghost);
-        // The body ink of the row: a draft and the placeholder share it; a
-        // ghosted card drops both to `dim` with everything else in it.
+        // The body ink of a *draft*. An empty card has no body: its invitation
+        // is a hint, so it wears the card's own ink (the frame's, see
+        // `chrome::card_ink`) — the same brightness as a draft's text is what
+        // made an empty card read as "there is already something here".
         let body_ink = if ghosted {
             self.palette.dim
         } else {
@@ -121,17 +123,19 @@ impl Widget for ComposerWidget<'_> {
             // The prompt glyph opens the draft — first visual row of the first
             // logical line only; every other row keeps the text alignment.
             //
-            // It is the pointer at the place typing lands, so it carries the
-            // accent whenever the card would take a key at all — an *empty*
-            // card most of all (that is the screen asking for the first
-            // keystroke). The one exception is a card whose keys another layer
-            // holds: everything there is drawn dim, and a lit caret would
-            // contradict the ghosted text beside it.
+            // It is the pointer at the place typing lands, so it follows the
+            // draft: `accent` while something actually waits there (the caret
+            // and the pasted chips are the row's saturated inks), the card's
+            // own ink while the card is still empty — an empty card carries
+            // one register, and the point of it is that the invitation must
+            // not look like content. A card whose keys another layer holds
+            // keeps the ghost's `dim` (which is what the card's ink is then).
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let ink = if ghosted {
-                    self.palette.dim
-                } else {
-                    self.palette.accent
+                let ink = match focus {
+                    Focus::Draft => self.palette.accent,
+                    // 空卡与幽灵态都穿卡自己的墨（`tool_result` / `dim`）：一个来源，
+                    // 见 `chrome::card_ink`。
+                    quiet => chrome::card_ink(quiet, self.palette),
                 };
                 buf.set_span(
                     area.x + chrome::PROMPT_X,
@@ -143,10 +147,10 @@ impl Widget for ComposerWidget<'_> {
 
             let text_x = area.x + chrome.text_x;
 
-            // Empty first line → show placeholder, in the body ink: it is the
-            // sentence that asks for the first keystroke, so it reads like
-            // content rather than like an annotation. A ghosted card drops it to
-            // `dim` with its draft — the card promises nothing right now.
+            // Empty first line → show the placeholder, in the card's own ink: it
+            // is a sentence that tells you what could go here, not something you
+            // wrote, so it stays one notch under the body. A ghosted card drops
+            // it to `dim` with its draft — the card promises nothing right now.
             if vr.logical_line == 0 && vr.char_start == 0 && !has_draft {
                 let placeholder_w = self.input.placeholder.width();
                 let placeholder = if placeholder_w > text_area_w {
@@ -157,7 +161,10 @@ impl Widget for ComposerWidget<'_> {
                 buf.set_line(
                     text_x,
                     y,
-                    &Line::from(Span::styled(placeholder, Style::default().fg(body_ink))),
+                    &Line::from(Span::styled(
+                        placeholder,
+                        Style::default().fg(chrome::card_ink(focus, self.palette)),
+                    )),
                     chrome.text_width,
                 );
                 continue;
@@ -236,17 +243,17 @@ mod tests {
         }
     }
 
-    /// The caret is the pointer at the place typing lands, so it takes the
-    /// accent whenever the card would take a key — an *empty* card most of all.
-    /// A card whose keys another layer holds keeps it dim: the draft beside it
-    /// is drawn as inactive text, so a lit caret would contradict it.
+    /// The caret is the pointer at the place typing lands, so it follows the
+    /// draft: `accent` while a draft waits in the card, the frame's own
+    /// `tool_result` while the card is still empty (one register for a card
+    /// that has nothing in it), and `dim` when another layer holds the keys.
     #[test]
-    fn the_caret_follows_whether_the_card_takes_keys() {
+    fn the_caret_follows_the_draft() {
         let palette = ThemePalette::default();
         assert_eq!(
             first_row("", false).caret,
-            Some(palette.accent),
-            "empty: the card is asking for the first keystroke"
+            Some(palette.tool_result),
+            "empty: the caret belongs to the card, not to a draft"
         );
         assert_eq!(
             first_row("hello", false).caret,
@@ -262,16 +269,27 @@ mod tests {
         }
     }
 
-    /// The placeholder is the invitation, so it wears the body ink — the same
-    /// ink a draft has (what tells them apart is the card, not the sentence:
-    /// see `Focus`). A ghosted card drops it to `dim` with everything else.
+    /// The placeholder is a hint, so it wears the hint ink (`tool_result`) —
+    /// clearly under the body a draft is written in. That the two differ is the
+    /// whole point: an invitation drawn at body brightness reads as content. A
+    /// ghosted card drops it to `dim` with everything else.
     #[test]
-    fn the_placeholder_wears_the_body_ink() {
+    fn the_placeholder_is_a_hint_not_the_body() {
         let palette = ThemePalette::default();
         assert_eq!(
             first_row("", false).text,
+            Some(palette.tool_result),
+            "empty: the invitation is one notch under the body"
+        );
+        assert_ne!(
+            first_row("hello", false).text,
+            first_row("", false).text,
+            "a draft and the invitation are not the same ink"
+        );
+        assert_eq!(
+            first_row("hello", false).text,
             Some(palette.text),
-            "empty: the invitation is body text"
+            "a draft is the body"
         );
         assert_eq!(
             first_row("", true).text,

@@ -67,7 +67,7 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         group: TipGroup::Keys,
-        text: "点击状态栏 ☆ 置顶会话，再点取消",
+        text: "点击状态栏 ✧ 置顶会话，再点取消",
     },
     Tip {
         group: TipGroup::Keys,
@@ -179,6 +179,25 @@ mod tests {
     #[test]
     fn pool_is_not_empty() {
         assert!(TIPS.len() >= 12, "池子太小，/tips 清单会很寒酸");
+    }
+
+    /// 池子里讲置顶的那条必须点名状态栏真正画的字形（未置顶那一档）：换字形时
+    /// 两处一起换，否则这条提示会指着一个屏幕上不存在的记号（词表在
+    /// `shared::pinning`）。
+    #[test]
+    fn the_pin_tip_names_the_glyph_the_status_bar_draws() {
+        let off = crate::shared::pinning::PIN_OFF;
+        let mentioning: Vec<&str> = TIPS
+            .iter()
+            .filter(|tip| tip.text.contains(off))
+            .map(|tip| tip.text)
+            .collect();
+        assert_eq!(mentioning.len(), 1, "一条提示点名 {off:?}：{mentioning:?}");
+        assert!(
+            mentioning[0].contains("置顶"),
+            "点名它的那条讲的是 pin：{:?}",
+            mentioning[0]
+        );
     }
 
     #[test]
