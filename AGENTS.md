@@ -251,7 +251,7 @@ crates/wing/src/
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
-│   ├── chip.rs                      带底色的小色块（键帽 / 徽章）：宽度（CJK 记 2 列）· 内边距降级 · 明暗两套底色与退路（开屏名牌消费，状态栏 / 输入卡待接）
+│   ├── chip.rs                      带底色的小色块（键帽 / 徽章）：宽度（CJK 记 2 列）· 内边距降级 · 明暗两套底色与退路（开屏名牌 + 状态栏模型段消费，输入卡待接）
 │   ├── emoji_width.rs               出帧前的宽度归一化（VS16 表情格子钉 ForcedWidth；每帧必跑，出帧口 tui::draw_frame 调用）
 │   ├── html.rs                      Style → CSS / HTML 转义 / 页面底色（HTML 导出的唯一实现：theme_preview 与 splash_preview 共用）
 │   ├── image/                       终端图形（唯一 door to ratatui-image/image）：probe（能力探测·可注入）· store（worker+LRU+epoch + 上限：文件/像素/缓存张数与字节/memo）· place（paint 原语）

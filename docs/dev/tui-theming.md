@@ -107,8 +107,8 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 | `diff_del_bg_strong` | `#f9c9c9` | 1.48 / 10.70 |
 
 `surface` 那一行有两种用法，差别是**面积**：整行铺开（popup 选中行、用户消息卡）
-用原值 1.19:1；几列宽的小色块（`ui/chip.rs` 的键帽是 5 / 8 / 10 列）在亮色终端再压深
-8% 到 1.38:1 ——
+用原值 1.19:1；小色块（`ui/chip.rs` 的键帽 5 / 8 / 10 列、状态栏的模型段 14~16 列 ——
+后者是 fixture 的 `DeepSeek-Flash`，展示名更长就更宽）在亮色终端再压深 8% 到 1.38:1 ——
 小块要更强的反差才读得出是「一块」，而 1.19 连「底要离纸面 ≥ 1.2」那道闸门都过不了。
 压深的深度由墨兜底：再深一点，块上的墨（`tool_result`）就跌破 4.5:1（0% 时 5.38、
 8% 时 4.64、12% 时 4.29 —— 交界在 9.6% 附近，取 8% 留余量）。暗色侧不动：`surface`
@@ -130,6 +130,7 @@ pub(crate) fn parse_osc11(bytes: &[u8]) -> Option<Appearance>;   // 纯解析，
 | `ui/cells/model_picker.rs` | 选中色带与 selection 同语义（`surface` + `text`） |
 | `ui/welcome/{sprite,mod}.rs` | 海鸥按 appearance 出两套羽色（同一像素网格）；wordmark 渐变方向改为读 `appearance`（`light` 参数早已存在） |
 | `ui/chip.rs` | 带底色的小块（键帽 / 徽章）：底取 `surface` / `accent`，亮色终端的安静档再压深 8%（见 §4）；`Reset` 或底/纸面不到 1.2:1 时不画底、墨/底不到 3:1 时换墨（都不改宽度） |
+| `ui/status_bar.rs` | 左链的寄存器：模型段是 `surface` 底的小块（`ui/chip` 的键帽档 —— 行紧了让出气口、窄终端退回纯文本，宽度永远由 `ui::chip` 算）；`think[:effort]` 是全行唯一的 `accent` 墨；provider 排在模式之后（截断先走它） |
 | `ui/cells/thinking.rs` | 刷光峰值方向读 `appearance` |
 | `ui/shimmer.rs` | 删除 `is_light_theme`（自指判据）；混色仍以 `to_rgb` 兜底 |
 | `ui/cells/todo_msg.rs` | 浅色下不再给已安静的槽叠 `Modifier::DIM` |
