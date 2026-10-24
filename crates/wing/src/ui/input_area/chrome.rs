@@ -191,10 +191,10 @@ impl Focus {
 ///   what makes the card read as a box: `dim` next to the nameplate's rule is a
 ///   hairline.
 /// * `Draft` — a *washed* accent (a mix: there is no "muted accent" slot), so
-///   the frame says "waiting on your keys" by **hue**, not by weight — on both
-///   presets it lands in the same band as the empty frame (dark 5.35 vs 6.07
-///   against the paper, light 5.56 vs 6.39; pinned in
-///   `the_outline_faces_keep_their_ladder`).
+///   the frame says "waiting on your keys" by **hue**, not by weight: on both
+///   presets it lands in the same contrast band as the empty frame (the numbers
+///   are pinned in `the_outline_faces_keep_their_ladder`, recorded in
+///   `docs/dev/tui-input.md`).
 /// * `Ghost` — `dim`: another layer owns the keys, the card promises nothing.
 ///
 /// Named colours are not frozen into RGB (they follow the terminal's theme —

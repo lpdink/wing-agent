@@ -100,10 +100,8 @@ impl Widget for ComposerWidget<'_> {
         // chat draws text that is not active (dim), so the state is visible
         // without a word of explanation.
         let ghosted = matches!(focus, Focus::Ghost);
-        // The body ink: what a draft is drawn in, and what the placeholder is
-        // drawn in while there is none — the invitation is the sentence the
-        // splash is built around, not an annotation (a ghosted card has no
-        // invitation: it drops to `dim` with everything else in it).
+        // The body ink of the row: a draft and the placeholder share it; a
+        // ghosted card drops both to `dim` with everything else in it.
         let body_ink = if ghosted {
             self.palette.dim
         } else {

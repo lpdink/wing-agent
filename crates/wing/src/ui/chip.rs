@@ -83,11 +83,11 @@ fn ink_rgb(color: Color, appearance: Appearance) -> Rgb {
     }
 }
 
-/// 纸面：两套预设各自的校准基准（亮色按白、暗色按黑，与 light preset 的
-/// 对比度单测同一口径）。用户把终端背景改成别的颜色时它是个近似值。
-///
-/// `pub(crate)`：与 [`contrast`] 一起给渲染侧的寄存器断言用（同一校准，不另抄）。
-pub(crate) fn paper(appearance: Appearance) -> Rgb {
+/// 纸面：两套预设各自的**校准基准**（亮色按白、暗色按黑，与 light preset 的对比度单测
+/// 同一口径）。它只服务本文件的闸门 —— 用户把终端背景改成别的颜色时它是个近似值；
+/// 想知道"这一屏实际画在什么色上"用 `ui::html::page_colors`（`#0b0f16` / `#ffffff`），
+/// 两个数不是一回事（同一个 `tool_result` 对纯黑 6.64、对 `#0b0f16` 6.07）。
+fn paper(appearance: Appearance) -> Rgb {
     match appearance {
         Appearance::Dark => (0, 0, 0),
         Appearance::Light => (255, 255, 255),
@@ -101,6 +101,8 @@ pub(crate) fn paper(appearance: Appearance) -> Rgb {
 ///
 /// `pub(crate)` 是给渲染侧的寄存器断言用的（`ui::input_area::chrome` 的三档轮廓、
 /// `app::tests::composer` 的"卡内最响的是谁"）—— 判据只有这一份，测试不另抄。
+/// 注意它们的纸面取 `ui::html::page_colors`（那一屏实际画在什么色上），不是本文件的
+/// [`paper`]（闸门的黑白校准）。
 pub(crate) fn contrast(a: Rgb, b: Rgb) -> f32 {
     fn channel(v: u8) -> f32 {
         let v = f32::from(v) / 255.0;

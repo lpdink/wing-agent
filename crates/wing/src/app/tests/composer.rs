@@ -277,10 +277,9 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
     }
 }
 
-/// The card's registers, in one place: on an empty card the invitation (the
-/// placeholder sentence) is the loudest ink inside the frame, and the path on
-/// the meta rail is one of the quietest — "you can type here" outranks "you are
-/// here", which is the whole point of the splash.
+/// "You can type here" outranks "you are here": on an empty card the
+/// invitation (the placeholder sentence) is the loudest ink inside the frame,
+/// and the path on the meta rail is far quieter.
 ///
 /// Loudness is contrast against the paper the preset paints (`ui::chip`'s gate,
 /// the same one the bands use), so the claim holds on both appearances — a raw
@@ -335,11 +334,20 @@ fn test_the_empty_card_invites_loudest() {
             "{preset:?}: the placeholder wears the body ink"
         );
 
-        // The meta rail's leading item is the path; the card's bottom row holds
-        // it (the row is ASCII, so a char offset is a screen column).
+        // The meta rail's leading item is the path: the first glyph on the
+        // bottom row that is not part of the frame (`╰`, the rule, the air
+        // beside it). Walk cells, not byte offsets into the row — the frame's
+        // box-drawing glyphs are three bytes each.
         let bottom = card_row(&buf, composer, composer.bottom() - 1);
-        let path_x = bottom.find("/tmp/ws").expect("the workdir leads the rail");
-        let path_ink = buf[(composer.x + path_x as u16, composer.bottom() - 1)].fg;
+        let path_x = bottom
+            .chars()
+            .position(|c| !matches!(c, '╰' | '─' | ' '))
+            .expect("the workdir leads the rail") as u16;
+        assert!(
+            matches!(bottom.chars().nth(path_x as usize), Some('/' | '~')),
+            "{preset:?}: the leading item is the path:\n{bottom}"
+        );
+        let path_ink = buf[(composer.x + path_x, composer.bottom() - 1)].fg;
         assert_eq!(path_ink, palette.dim, "{preset:?}: the path stays quiet");
         assert!(
             chip::contrast(to_rgb(path_ink), paper) < loudest / 2.0,
