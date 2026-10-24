@@ -184,12 +184,17 @@ impl Focus {
     }
 }
 
-/// The outline's ink: one register per face (see [`Focus`]).
+/// The card's own ink for a face: on an empty card the outline, the `❯` and the
+/// placeholder all read it — "an empty card carries one register" has one
+/// source. (With a draft the caret switches to `accent`; the ink below is the
+/// frame's.) One register per face (see [`Focus`]):
 ///
 /// * `Empty` — the card is a box on the screen before anything is typed in it,
-///   so the outline wears `tool_result`, the ink a keycap's label wears. That is
+///   so the frame wears `tool_result`, the ink a keycap's label wears. That is
 ///   what makes the card read as a box: `dim` next to the nameplate's rule is a
-///   hairline.
+///   hairline. The invitation stays on that same ink: it is a hint, not
+///   content (a hint drawn at body brightness makes an empty card look typed
+///   in).
 /// * `Draft` — a *washed* accent (a mix: there is no "muted accent" slot), so
 ///   the frame says "waiting on your keys" by **hue**, not by weight: on both
 ///   presets it lands in the same contrast band as the empty frame (the numbers
@@ -200,7 +205,7 @@ impl Focus {
 /// Named colours are not frozen into RGB (they follow the terminal's theme —
 /// the same rule as `chip::quiet_band`), so a palette whose `dim` or `accent`
 /// is not a concrete RGB keeps the plain `dim` outline while a draft waits.
-fn frame_ink(focus: Focus, palette: &ThemePalette) -> Color {
+pub(super) fn card_ink(focus: Focus, palette: &ThemePalette) -> Color {
     match focus {
         Focus::Empty => palette.tool_result,
         Focus::Ghost => palette.dim,
@@ -273,7 +278,7 @@ pub(super) fn paint(
         return;
     }
     let dim = Style::default().fg(palette.dim);
-    let outline = Style::default().fg(frame_ink(focus, palette));
+    let outline = Style::default().fg(card_ink(focus, palette));
     let top_y = area.y;
     let bottom_y = area.bottom() - 1;
 
@@ -988,7 +993,7 @@ mod tests {
     #[test]
     fn the_outline_carries_the_face() {
         for palette in [palette(), light()] {
-            let washed = frame_ink(Focus::Draft, &palette);
+            let washed = card_ink(Focus::Draft, &palette);
             assert_ne!(washed, palette.dim, "the focus state has to be visible");
             assert_ne!(washed, palette.accent, "and it is not the full accent");
             let expected = [
@@ -1021,12 +1026,12 @@ mod tests {
             // The three faces are three inks: an empty card is not a ghosted
             // one, and a drafted card is not an empty one.
             assert_ne!(
-                frame_ink(Focus::Empty, &palette),
-                frame_ink(Focus::Ghost, &palette)
+                card_ink(Focus::Empty, &palette),
+                card_ink(Focus::Ghost, &palette)
             );
             assert_ne!(
-                frame_ink(Focus::Empty, &palette),
-                frame_ink(Focus::Draft, &palette)
+                card_ink(Focus::Empty, &palette),
+                card_ink(Focus::Draft, &palette)
             );
         }
     }
@@ -1056,7 +1061,7 @@ mod tests {
             (palette(), (6.07, 5.35, 3.23)),
             (light(), (6.39, 5.56, 5.49)),
         ] {
-            let ink = |focus| chip::contrast(to_rgb(frame_ink(focus, &palette)), page(&palette));
+            let ink = |focus| chip::contrast(to_rgb(card_ink(focus, &palette)), page(&palette));
             let (empty, draft, ghost) = (ink(Focus::Empty), ink(Focus::Draft), ink(Focus::Ghost));
             for (got, want, face) in [
                 (empty, expected.0, "empty"),
@@ -1099,7 +1104,7 @@ mod tests {
         };
         for focus in [Focus::Empty, Focus::Draft] {
             let buf = card_buf(60, focus, None, &meta, &palette);
-            let ink = frame_ink(focus, &palette);
+            let ink = card_ink(focus, &palette);
             // `╰─ <workdir> ────╯`: the `─ ` before the item and the ` ` after it.
             assert_eq!(buf[(1, 2)].fg, ink, "{focus:?}: the framing dash");
             assert_eq!(buf[(2, 2)].fg, ink, "{focus:?}: the air before the item");
@@ -1133,7 +1138,7 @@ mod tests {
         };
         let buf = card_buf(80, Focus::Draft, None, &meta, &palette);
         let row = row_text(&buf, 2);
-        let ink = frame_ink(Focus::Draft, &palette);
+        let ink = card_ink(Focus::Draft, &palette);
         assert_ne!(ink, palette.dim, "the frame is lit in this state");
 
         let dots = column_of(&row, " · ");
@@ -1162,7 +1167,7 @@ mod tests {
             if max == 0.0 { 0.0 } else { (max - min) / max }
         }
         for palette in [palette(), light()] {
-            let ink = to_rgb(frame_ink(Focus::Draft, &palette));
+            let ink = to_rgb(card_ink(Focus::Draft, &palette));
             assert!(
                 chroma(ink) > chroma(to_rgb(palette.dim)),
                 "{:?}: more hue than dim",
@@ -1181,11 +1186,8 @@ mod tests {
     /// decision someone re-took — not a quiet drift.
     #[test]
     fn the_focus_lean_is_the_recorded_one() {
-        assert_eq!(
-            frame_ink(Focus::Draft, &palette()),
-            Color::Rgb(76, 144, 167)
-        );
-        assert_eq!(frame_ink(Focus::Draft, &light()), Color::Rgb(60, 111, 128));
+        assert_eq!(card_ink(Focus::Draft, &palette()), Color::Rgb(76, 144, 167));
+        assert_eq!(card_ink(Focus::Draft, &light()), Color::Rgb(60, 111, 128));
     }
 
     #[test]
@@ -1207,7 +1209,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                frame_ink(Focus::Draft, &palette),
+                card_ink(Focus::Draft, &palette),
                 palette.dim,
                 "{:?} / {:?} must not be turned into a made-up RGB",
                 palette.dim,

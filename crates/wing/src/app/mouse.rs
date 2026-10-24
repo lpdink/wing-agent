@@ -12,8 +12,8 @@
 //! * a drag / release does **not** re-pick an owner: it goes back to the region the press started in
 //!   (see [`super::selection_session`]), so a pointer that wanders out of the region keeps producing
 //!   coordinates in the space the gesture began in;
-//! * the status bar owns two cells of its own row — the session id (click = copy the full id) and the
-//!   pin star (click = toggle the session's pin tag). Both are claims on the *last frame's* recorded
+//! * the status bar owns two targets of its own row — the session id (click = copy the full id) and
+//!   the pin face (click = toggle the session's pin tag). Both are claims on the *last frame's* recorded
 //!   regions ([`crate::ui::status_bar::StatusBarRegions`]), so a click always lands on what was drawn.
 //!
 //! Call directions: the run loop calls [`App::handle_mouse`] and turns the [`MouseOutcome`] into a
@@ -58,8 +58,8 @@ pub(super) enum PointerOwner {
     Composer,
     /// The chat band: it keeps its drag-to-copy contract and the link click.
     Chat,
-    /// 状态栏：只认领会话 ID 段与 pin 星标两格（这一行其余位置——品牌 /
-    /// 模型 / 用量 / 连接点——不认领指针）。
+    /// 状态栏：只认领会话 ID 段与 pin 那一块（这一行其余位置——品牌 / 模型 /
+    /// 用量 / 连接点——不认领指针）。
     StatusBar,
 }
 
@@ -105,13 +105,13 @@ impl PointerOwner {
     }
 }
 
-/// 状态栏上认领指针的两格。
+/// 状态栏上认领指针的两处。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StatusBarHit {
     /// 会话 ID 段（点击 = 复制完整 ID）。
     SessionId,
-    /// pin 星标（点击 = 切换 pin）。
-    Star,
+    /// pin 那整块（点击 = 切换 pin；宽度 = 那块面的列数，见 `ui::status_bar`）。
+    Pin,
 }
 
 impl App {
@@ -289,14 +289,14 @@ impl App {
         };
         if within(regions.session_id) {
             Some(StatusBarHit::SessionId)
-        } else if within(regions.star) {
-            Some(StatusBarHit::Star)
+        } else if within(regions.pin) {
+            Some(StatusBarHit::Pin)
         } else {
             None
         }
     }
 
-    /// 状态栏按下的动作：ID = 复制完整 ID；星标 = 切换 pin。
+    /// 状态栏按下的动作：ID = 复制完整 ID；pin 那整块 = 切换 pin。
     ///
     /// 点击本身不改变画面（复制会亮一条 toast、pin 以服务端回读的标签为准），
     /// 所以两条路径都只**投递 intent**、不要求立即重绘——intent 执行后的
@@ -309,7 +309,7 @@ impl App {
                     self.push_intent(super::AppIntent::CopyToClipboard(self.session_id.clone()));
                 }
             }
-            Some(StatusBarHit::Star) => {
+            Some(StatusBarHit::Pin) => {
                 self.push_intent(super::AppIntent::SetSessionPin {
                     pinned: !self.status.pinned,
                 });

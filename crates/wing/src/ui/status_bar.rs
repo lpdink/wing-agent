@@ -13,6 +13,9 @@
 //! | mode | "how it thinks" | `accent` — the row's only accent |
 //! | provider | "where the model comes from" | `dim` |
 //!
+//! `warning` is the status ink in two places: the pin's face (below) and the
+//! context meter once it passes half full.
+//!
 //! The model is the only segment that degrades to fit (padded block → bare
 //! block; every width comes from `ui::chip`), so the row keeps its model down
 //! to the width where even the bare label no longer fits. Everything else is
@@ -30,7 +33,8 @@
 //!
 //! The pin is a fixed three-column band ([`Chip::key`] with one cell of air on
 //! each side) holding a **one-column** star: what you see is what you can
-//! click, in both states, at any terminal. Two decisions make that true —
+//! click, and those three cells do not move — in either state, whatever the
+//! terminal decides a glyph is worth. Two decisions make that true —
 //!
 //! * the glyph (`✦` pinned / `✧` unpinned) is East-Asian *Neutral*, so its
 //!   width is one column by specification and the terminal has no say in it.
@@ -58,9 +62,27 @@
 //! characters as two columns would draw those glyphs one column wider than we
 //! account for, so a pointer would land one cell right of the recorded region
 //! (the whole frame is misaligned there — every box-drawing border in the TUI
-//! has the same assumption). The pin slot is the one target that is out of
-//! that bargain: it draws no ambiguous glyph at all, so its three columns hold
-//! wherever the rest of the row lands.
+//! has the same assumption). The pin slot is the one target whose *width* is
+//! out of that bargain: it draws no ambiguous glyph at all, so the three
+//! columns it claims are the three columns it covers — its *position* still
+//! rides along with the rest of the row.
+//!
+//! Two consequences worth writing down. The slot is three columns instead of
+//! the old `" " + star` two, so the row's widths move by one column: the pin
+//! itself now appears from 46 columns on (it fit at 45), and the segments after
+//! the identity step right — so the width at which the model loses its padding,
+//! and the widths at which the mode / provider are dropped, are each one column
+//! smaller than before (the truncation *order* is untouched). And when the palette
+//! cannot draw a face at all (`surface: reset`, or a surface too close to the
+//! paper — see [`Chip`]), the three cells keep swallowing pointer events while
+//! only the glyph is visible: a target that is two cells too wide is the lesser
+//! evil against one that changes width with the palette.
+//!
+//! One more residual risk, the same shape as the width one: a font stack
+//! without the Dingbats block renders both glyphs as tofu — the width stays one
+//! column (nothing shifts) and the ink still says on / off, but "一眼可辨" then
+//! rests on the ink alone. There is no font-coverage query to gate on, so this
+//! is recorded rather than defended.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -71,15 +93,11 @@ use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
 use crate::config::ThemePalette;
+use crate::shared::pinning::PIN_OFF;
+use crate::shared::pinning::PIN_ON;
 use crate::ui::chip::Chip;
 use crate::ui::chip::Pad;
 use crate::util::format;
-
-/// pin 星标的两态字形。两个都是 East-Asian **Neutral**：宽度由规范钉死在 1 列，
-/// 终端没有"模糊宽度"这条自由度可拨。旧的 `★` / `☆` 是 Ambiguous —— 终端可以合法地
-/// 画成 2 列，那就是"命中区落在字形左边一格、星星时大时小"的来源。
-const PIN_ON: &str = "✦";
-const PIN_OFF: &str = "✧";
 
 /// 模型身份四元组——一个会话表面上「当前模型」的完整陈述。
 ///
@@ -236,14 +254,14 @@ pub struct StatusBarRegions {
     pub session_id: Option<Rect>,
     /// pin 那整块（点击 = 切换 pin）。宽度是那块面的列数（含左右两格气口），
     /// 置顶与否相同 —— 见模块文档「The pin slot is a face, not a glyph」。
-    pub star: Option<Rect>,
+    pub pin: Option<Rect>,
 }
 
 /// 身份段里认领指针的格子（其余 span 不认领）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
     SessionId,
-    Star,
+    Pin,
 }
 
 /// 左链上的一段：分隔符与内容一起进出。
@@ -345,11 +363,11 @@ impl<'a> StatusBar<'a> {
                 (Span::styled(" · ", dim), None),
                 (Span::styled(id_text, dim), Some(Slot::SessionId)),
             ]));
-            segments.push(Segment(vec![(self.pin_span(), Some(Slot::Star))]));
+            segments.push(Segment(vec![(self.pin_span(), Some(Slot::Pin))]));
         }
 
         // 模型 =「正在跟谁说话」：一块安静的底（`Chip::key`），先量前面已经用掉
-        // 多少列，再决定这一块要哪一档。星标那 2 列无条件计入 —— 它让出时链条已经
+        // 多少列，再决定这一块要哪一档。pin 那整块无条件计入 —— 它让出时链条已经
         // 在那里中断（后面的段一个都不画），所以不存在"回收"这件事。
         let used: u16 = segments.iter().map(Segment::width).sum();
         segments.push(self.model_segment(room.saturating_sub(used)));
@@ -383,13 +401,16 @@ impl<'a> StatusBar<'a> {
         segments
     }
 
-    /// pin 星标：一块**固定三列的面**（`ui::chip` 的安静档 + 左右各一格气口），
+    /// pin 那一块：**固定三列的面**（`ui::chip` 的安静档 + 左右各一格气口），
     /// 里面放一个必然一列的星形。
     ///
     /// 两件事因此不必再猜：**看得见的那块就是能点的那块**（命中区 = 这三列，
     /// 含气口），且这块的宽度与终端怎么画字形无关。状态只换字形与墨（实心
     /// `warning` / 空心键帽墨），面、气口、列数一个都不动 —— 置顶 / 未置顶不
     /// 改变行几何（墨的闸门在 `ui::chip` 里，压不出对比度就退回键帽墨）。
+    ///
+    /// 调色板画不出面时（`surface: reset` / 面浮不出纸面）底会消失，但命中区
+    /// 仍是这三列：宁可多两格可点，也不让目标随配色忽宽忽窄（见模块文档）。
     fn pin_span(&self) -> Span<'static> {
         let chip = Chip::key(if self.data.pinned { PIN_ON } else { PIN_OFF });
         let chip = if self.data.pinned {
@@ -548,8 +569,8 @@ impl Widget for StatusBar<'_> {
                     Some(Slot::SessionId) => {
                         self.regions.session_id = Some(Rect::new(x, line_y, w, 1));
                     }
-                    Some(Slot::Star) => {
-                        self.regions.star = Some(Rect::new(x, line_y, w, 1));
+                    Some(Slot::Pin) => {
+                        self.regions.pin = Some(Rect::new(x, line_y, w, 1));
                     }
                     None => {}
                 }
@@ -652,11 +673,6 @@ mod tests {
     use ratatui::style::Color;
 
     use crate::ui::shimmer::to_rgb;
-
-    /// 墨压在底上的对比度 —— 判据是 `ui::chip` 那一份实现，测试不另抄公式。
-    fn ink_on(ink: Color, face: Color) -> f32 {
-        crate::ui::chip::contrast(to_rgb(ink), to_rgb(face))
-    }
 
     #[test]
     fn test_compact_token_notation() {
@@ -1057,83 +1073,118 @@ mod tests {
     /// The pin slot: a fixed face in both states, with the state in the glyph and
     /// the ink. Three things are pinned here — the columns you can click are the
     /// columns that were drawn, the width does not move between states, and the
-    /// glyph is one column by construction (no East-Asian *Ambiguous*
-    /// character, which a terminal may draw two columns wide).
+    /// glyph is one column by construction.
+    ///
+    /// The glyph choice is pinned as a *literal* (`✦` / `✧` are East-Asian
+    /// Neutral; `★` / `☆` are Ambiguous, which a terminal may draw two columns
+    /// wide). That last assertion cannot test what a terminal does — it only
+    /// keeps the choice from being quietly undone.
     #[test]
     fn the_pin_slot_is_one_face_of_constant_width() {
-        let palette = ThemePalette::default();
-        let mut widths = Vec::new();
-        for pinned in [false, true] {
-            let data = StatusData {
-                pinned,
-                ..StatusData::default()
-            };
-            let cells = cells_with(&palette, &data, SID, 200);
-            let (_, regions) = render_buffer_with(&palette, &data, SID, 200);
-            let star = regions.star.expect("pin region recorded");
-            let drawn = span_text(&cells, (star.x as usize, (star.x + star.width) as usize));
-            let glyph = if pinned { PIN_ON } else { PIN_OFF };
+        for palette in [ThemePalette::default(), light()] {
+            let mut widths: Vec<(u16, u16)> = Vec::new();
+            for pinned in [false, true] {
+                let data = StatusData {
+                    pinned,
+                    ..StatusData::default()
+                };
+                let cells = cells_with(&palette, &data, SID, 200);
+                let (_, regions) = render_buffer_with(&palette, &data, SID, 200);
+                let pin = regions.pin.expect("pin region recorded");
+                let drawn = span_text(&cells, (pin.x as usize, (pin.x + pin.width) as usize));
+                let glyph = if pinned { PIN_ON } else { PIN_OFF };
 
-            assert_eq!(drawn, format!(" {glyph} "), "the face covers its own air");
-            assert_eq!(drawn.trim(), glyph);
-            assert_eq!(
-                Chip::key(glyph).width(Pad::Zero),
-                1,
-                "the star is one column wide"
-            );
-            assert_eq!(star.width, 3, "the region is the drawn face");
-            // The band runs the whole region, so the visible target and the hit
-            // region are the same three cells.
-            let face = Chip::key(glyph)
-                .span(&palette, Pad::One)
-                .style
-                .bg
-                .expect("the face is drawn");
-            for x in star.x..star.x + star.width {
+                assert_eq!(drawn, format!(" {glyph} "), "the face covers its own air");
                 assert_eq!(
-                    cells[x as usize].bg, face,
-                    "the face covers the region ({x})"
+                    Chip::key(glyph).width(Pad::Zero),
+                    1,
+                    "{:?}: the star is one column wide",
+                    palette.appearance
                 );
-            }
-            // State: the glyph, and the ink on that face.
-            let ink = cells[(star.x + 1) as usize].fg;
-            assert_eq!(
-                ink,
-                if pinned {
-                    palette.warning
-                } else {
-                    palette.tool_result
+                assert_eq!(
+                    pin.width, 3,
+                    "{:?} pinned={pinned}: the region is the drawn face",
+                    palette.appearance
+                );
+                // The band runs the whole region, so the visible target and the
+                // hit region are the same three cells.
+                let face = Chip::key(glyph)
+                    .span(&palette, Pad::One)
+                    .style
+                    .bg
+                    .expect("the face is drawn");
+                for x in pin.x..pin.x + pin.width {
+                    assert_eq!(cells[x as usize].bg, face, "the face covers ({x})");
                 }
+                // State: the glyph, and the ink on that face.
+                let ink = cells[(pin.x + 1) as usize].fg;
+                assert_eq!(
+                    ink,
+                    if pinned {
+                        palette.warning
+                    } else {
+                        palette.tool_result
+                    },
+                    "{:?}",
+                    palette.appearance
+                );
+                assert!(
+                    crate::ui::chip::contrast(to_rgb(ink), to_rgb(face))
+                        >= crate::ui::chip::MIN_INK_CONTRAST,
+                    "{:?}: the star stays readable on its face",
+                    palette.appearance
+                );
+                widths.push((pin.x, pin.width));
+            }
+            assert_eq!(
+                widths[0], widths[1],
+                "{:?}: pinning does not reflow the row",
+                palette.appearance
             );
-            assert!(
-                ink_on(ink, face) >= 3.0,
-                "the star stays readable on its face"
-            );
-            widths.push(star.width);
         }
-        assert_eq!(widths[0], widths[1], "pinning does not reflow the row");
 
-        // The glyphs this slot may not use again: *Ambiguous* width, so a
-        // terminal may draw them one or two columns wide.
-        for ambiguous in ["★", "☆", "⭐"] {
+        // The glyphs this slot may not use again: `★` / `☆` are *Ambiguous* (a
+        // terminal may draw them one or two columns wide), `⭐` is *Wide* (always
+        // two) with no hollow twin — either way the slot stops being one face.
+        for rejected in ["★", "☆", "⭐"] {
             assert!(
-                ![PIN_ON, PIN_OFF].contains(&ambiguous),
-                "{ambiguous} is an ambiguous-width glyph"
+                ![PIN_ON, PIN_OFF].contains(&rejected),
+                "{rejected} cannot keep a one-column face"
             );
         }
     }
 
+    /// A palette that cannot draw the face keeps the three columns: the target
+    /// must not change width with the colours (two cells too wide beats a target
+    /// that moves under the pointer).
     #[test]
-    fn test_status_bar_star_reflects_pin_state() {
+    fn the_pin_target_survives_a_palette_without_a_face() {
+        let palette = ThemePalette {
+            surface: Color::Reset,
+            ..ThemePalette::default()
+        };
+        let data = StatusData::default();
+        let (buf, regions) = render_buffer_with(&palette, &data, SID, 200);
+        let pin = regions.pin.expect("pin region recorded");
+        assert_eq!(pin.width, 3, "the region is the face's width");
+        for x in pin.x..pin.x + pin.width {
+            assert_eq!(buf[(x, 0)].bg, Color::Reset, "no face is drawn ({x})");
+        }
+        // 未置顶的字形还在中间那一列（命中区比可见目标宽，是写下来的取舍）。
+        assert_eq!(buf[(pin.x + 1, 0)].symbol(), PIN_OFF);
+    }
+
+    #[test]
+    fn test_the_pin_glyph_reflects_pin_state() {
         let (text, regions) = render_bar(&StatusData::default(), SID, 120);
-        let star = regions.star.expect("star region recorded");
+        let pin = regions.pin.expect("pin region recorded");
         assert_eq!(
-            slice(&text, star).trim(),
+            slice(&text, pin).trim(),
             PIN_OFF,
             "unpinned is a hollow star"
         );
         assert!(
-            star.x > regions.session_id.unwrap().x,
+            pin.x > regions.session_id.unwrap().x,
             "the pin sits right after the id"
         );
 
@@ -1142,8 +1193,8 @@ mod tests {
             ..StatusData::default()
         };
         let (text, regions) = render_bar(&pinned, SID, 120);
-        let star = regions.star.unwrap();
-        assert_eq!(slice(&text, star).trim(), PIN_ON, "pinned is a filled star");
+        let pin = regions.pin.unwrap();
+        assert_eq!(slice(&text, pin).trim(), PIN_ON, "pinned is a filled star");
         assert!(!text.contains(&PIN_OFF.to_string()));
     }
 
@@ -1264,7 +1315,7 @@ mod tests {
             let cells = cells_with(&palette, &data, SID, width);
             let (_, regions) = render_buffer_with(&palette, &data, SID, width);
             let text: String = cells.iter().map(|cell| cell.symbol()).collect();
-            match model_bands(&cells, regions.star).as_slice() {
+            match model_bands(&cells, regions.pin).as_slice() {
                 // 一段都放不下：整段不画（不是切成半块，也不是留下半截名字）。
                 [] => assert!(
                     !text.contains(&head),
@@ -1304,7 +1355,7 @@ mod tests {
         let cells = cells_with(&palette, &busy(), SID, 80);
         let (_, regions) = render_buffer_with(&palette, &busy(), SID, 80);
         assert!(
-            model_bands(&cells, regions.star).is_empty(),
+            model_bands(&cells, regions.pin).is_empty(),
             "窄终端模型不画块"
         );
         let text: String = cells.iter().map(|cell| cell.symbol()).collect();
@@ -1354,13 +1405,13 @@ mod tests {
         let mut held = Vec::new();
         for width in 20..=200 {
             let (text, regions) = render_bar(&busy(), SID, width);
-            if regions.star.is_some() {
+            if regions.pin.is_some() {
                 assert!(
                     regions.session_id.is_some(),
                     "width {width}: 星标不能单独活着：{text:?}"
                 );
             }
-            if regions.session_id.is_some() && regions.star.is_none() {
+            if regions.session_id.is_some() && regions.pin.is_none() {
                 held.push(width);
             }
         }
@@ -1466,9 +1517,9 @@ mod tests {
         };
         let (text, regions) = render_bar(&data, SID, 80);
         let id = regions.session_id.expect("id drawn");
-        let star = regions.star.expect("star drawn");
+        let pin = regions.pin.expect("pin drawn");
         assert_eq!(slice(&text, id), "…ab12cd34");
-        assert_eq!(slice(&text, star).trim(), PIN_OFF);
+        assert_eq!(slice(&text, pin).trim(), PIN_OFF);
         assert!(
             !text.join("").contains("a-very-long-model-name"),
             "the model is what got dropped: {text:?}"
@@ -1483,7 +1534,7 @@ mod tests {
             let (text, regions) = render_bar(&StatusData::default(), SID, width);
             let joined = text.join("");
             assert_eq!(
-                regions.star.is_some(),
+                regions.pin.is_some(),
                 joined.contains(PIN_OFF),
                 "width {width}: {joined:?}"
             );

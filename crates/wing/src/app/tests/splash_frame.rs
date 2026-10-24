@@ -30,6 +30,20 @@ fn frame(preset: ColorPreset, width: u16, height: u16) -> preview::Frame {
     )
 }
 
+/// 同一帧，会话已置顶（pin 那一块换字形与墨）。
+fn pinned_frame(preset: ColorPreset, width: u16, height: u16) -> preview::Frame {
+    preview::sample_with(
+        AppConfig::default(),
+        &Spec {
+            width,
+            height,
+            preset: Some(preset),
+            pinned: true,
+            ..Spec::default()
+        },
+    )
+}
+
 /// 一行里从第 `column` 列起的文本。
 ///
 /// `rows()` 是**格子**投影（一个格子一个字符，字符串下标 = 屏幕列号），所以这里按
@@ -266,6 +280,45 @@ fn the_narrow_ladder_keeps_the_block_centred() {
     assert_eq!(rule(&rows, 1), (8, 38), "窄档块宽 38");
     assert!(compact(&rows[9]).contains("Esc中断·Ctrl+J换行·Ctrl+C×2退出"));
     assert_eq!(card(&rows), (14, 16, 1, 38), "输入卡跟着块宽收窄");
+}
+
+/// 置顶只改状态栏那一行的那一块：把字形换回去之后整屏逐字节相同。命中区的宽度
+/// 由 `ui::status_bar` 的单测钉住（这里看不出来 —— 行宽被右端仪表钉着）。
+#[test]
+fn the_pin_state_changes_the_bar_and_nothing_else() {
+    for preset in [ColorPreset::Dark, ColorPreset::Light] {
+        let plain = frame(preset, 120, 40);
+        let pinned = pinned_frame(preset, 120, 40);
+        let (left, right) = (plain.rows(), pinned.rows());
+        assert_eq!(left.len(), right.len());
+        assert_eq!(
+            left[0].chars().count(),
+            120,
+            "置顶态的整行走满：{:?}",
+            right[0]
+        );
+        assert!(
+            right[0].contains(crate::shared::pinning::PIN_ON),
+            "{preset:?}: 已置顶画实心星：{:?}",
+            right[0]
+        );
+        assert!(
+            left[0].contains(crate::shared::pinning::PIN_OFF),
+            "{preset:?}: 未置顶画空心星：{:?}",
+            left[0]
+        );
+        assert_eq!(
+            left[0].replace(
+                crate::shared::pinning::PIN_OFF,
+                crate::shared::pinning::PIN_ON
+            ),
+            right[0],
+            "{preset:?}: 状态栏那一行只差字形"
+        );
+        for (y, (a, b)) in left.iter().zip(&right).enumerate().skip(1) {
+            assert_eq!(a, b, "{preset:?}: 第 {y} 行不该被 pin 改动");
+        }
+    }
 }
 
 #[test]

@@ -38,7 +38,7 @@
 //! **纸面本身**，那种底被第一道闸门拦掉。两者都不当成"白"。`surface: reset`
 //! 同时是"没有纸色可画"和"没有纸色可作墨"：徽章退回正文色（有意的降级）。
 //!
-//! **墨**随后按「它压在哪里」挑（[`Tint::ink`]）：有底时强调档的纸色墨要过
+//! **墨**随后按「它压在哪里」挑（[`Tint::default_ink`]）：有底时强调档的纸色墨要过
 //! [`MIN_INK_CONTRAST`]，过不了就换正文色（面留着、字换掉）；没有底时纸色墨等于
 //! 写在纸面上，直接退正文色。最后 [`Chip::span`] 再兜一次：挑中的墨压在挑中的面上
 //! 仍然读不出，就连底一起不要 —— 落到纸面上用正文色。
@@ -69,7 +69,10 @@ const LIGHT_BAND_DEEPEN: f32 = 0.08;
 /// 不取正文线 4.5：暗色预设的键帽墨（`tool_result` on `surface`）只有 4.35，
 /// 而它是有意的取舍 —— 键帽是控件标签，可读性由「面」承担；换成 `text` 能到
 /// 11.4，但那会把「键」提到与正文同亮，三层寄存器退化成两层。
-const MIN_INK_CONTRAST: f32 = 3.0;
+///
+/// `pub(crate)` 是给渲染侧的断言用的（状态栏 pin 面的两态墨）：判据与阈值都只有
+/// 这一份，测试不另抄一个 3.0。
+pub(crate) const MIN_INK_CONTRAST: f32 = 3.0;
 
 /// 底浮在纸面上的最小对比度。这不是可读性标准，只要求「看得出是一块」——
 /// 亮色预设的 `surface`（1.19）过不了，压深之后（1.38）才过。
@@ -145,10 +148,12 @@ impl Pad {
     }
 }
 
-/// 底色档位。私有：外部只有「键帽 / 徽章」两个意图，没有第三个旋钮可拧。
+/// 底色档位。私有：外部只有「键帽 / 徽章」两个意图。
 ///
-/// 将来状态栏需要第三档（比如 `warning` 底）时加一个构造器 + 一个变体，而不是
-/// 把（底, 墨）开放成参数 —— 那会把明暗对账散回每个调用点。
+/// **底不可由调用方挑** —— 那会把明暗对账散回每个调用点；将来真需要第三档（比如
+/// `warning` 底）时加一个构造器 + 一个变体。能让调用方换的只有**墨**
+/// （[`Chip::ink`]），而且它仍然过 [`MIN_INK_CONTRAST`] 这道闸门，所以"开墨不开底"
+/// 不是一句口号：可读性判据只有这一份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tint {
     /// `surface` 底 + `tool_result` 墨。
@@ -164,7 +169,7 @@ impl Tint {
     /// 所以「落在纸面上」那一支不需要在这里挑。强调档两处都不是无条件成立的：
     /// 纸色墨只在「字压在品牌色上」时成立，无底时它落在纸面上等于消失 ——
     /// 于是退回正文色（预设保证它在纸面上可读）。
-    fn ink(self, palette: &ThemePalette, band: Option<Color>) -> Color {
+    fn default_ink(self, palette: &ThemePalette, band: Option<Color>) -> Color {
         match (self, band) {
             (Self::Quiet, _) => palette.tool_result,
             (Self::Strong, Some(face))
@@ -258,6 +263,7 @@ impl<'a> Chip<'a> {
     ///
     /// 墨换了，闸门不换：压在面上不到 [`MIN_INK_CONTRAST`] 就退回本档自己的墨；
     /// 底被闸门拿掉时也不用它 —— 状态墨落到纸面上是纸面的账，不是这块的。
+    #[must_use]
     pub fn ink(mut self, ink: Color) -> Self {
         self.state_ink = Some(ink);
         self
@@ -296,7 +302,7 @@ impl<'a> Chip<'a> {
             {
                 ink
             }
-            _ => self.tint.ink(palette, band),
+            _ => self.tint.default_ink(palette, band),
         }
     }
 }
@@ -657,7 +663,7 @@ mod tests {
     fn the_deepen_is_a_bounded_step_the_ink_allows() {
         // 「8% 留了余量」得自己被钉住：8% 时墨还在 4.5 以上，12% 已破。
         let palette = light();
-        let ink = Tint::Quiet.ink(&palette, None);
+        let ink = Tint::Quiet.default_ink(&palette, None);
         let band = quiet_band(&palette);
         assert!(
             contrast(to_rgb(ink), to_rgb(band)) >= 4.5,
@@ -683,11 +689,11 @@ mod tests {
             let quiet = Tint::Quiet.band(&palette).expect("安静档的底可用");
             let strong = Tint::Strong.band(&palette).expect("强调档的底可用");
             let key = contrast(
-                to_rgb(Tint::Quiet.ink(&palette, Some(quiet))),
+                to_rgb(Tint::Quiet.default_ink(&palette, Some(quiet))),
                 to_rgb(quiet),
             );
             let badge = contrast(
-                to_rgb(Tint::Strong.ink(&palette, Some(strong))),
+                to_rgb(Tint::Strong.default_ink(&palette, Some(strong))),
                 to_rgb(strong),
             );
             assert!(
@@ -712,7 +718,7 @@ mod tests {
                 (Tint::Quiet, palette.tool_result),
                 (Tint::Strong, palette.text),
             ] {
-                let ink = tint.ink(&palette, None);
+                let ink = tint.default_ink(&palette, None);
                 assert_eq!(ink, expected);
                 assert!(
                     contrast(to_rgb(ink), paper_of(&palette)) >= 4.5,

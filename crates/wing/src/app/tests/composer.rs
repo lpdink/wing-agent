@@ -298,8 +298,16 @@ fn the_empty_card_is_quiet_and_a_draft_is_loud() {
     use crate::ui::shimmer::to_rgb;
     use ratatui::style::Color;
 
-    /// 卡内最亮的一格：(对纸面的对比度, 它的墨)。
-    fn loudest(preset: ColorPreset, draft: &str) -> (f32, Color, crate::config::ThemePalette) {
+    /// 一张卡（给定 preset 与草稿）：帧、卡片矩形、文字区原点、调色板。
+    fn card(
+        preset: ColorPreset,
+        draft: &str,
+    ) -> (
+        ratatui::buffer::Buffer,
+        ratatui::layout::Rect,
+        (u16, u16),
+        crate::config::ThemePalette,
+    ) {
         // The palette is resolved once, at construction: the frame has to be
         // built with the preset, not recoloured after it.
         let mut config = crate::config::AppConfig::default();
@@ -309,9 +317,23 @@ fn the_empty_card_is_quiet_and_a_draft_is_loud() {
         app.status.workdir = Some("/tmp/ws".into());
         app.input.set_text(draft);
         let (buf, composer) = draw_frame(&mut app, 80, 10);
+        let (text_x, text_y, _) = composer_text(&app);
         let palette = app.palette();
-        let (background, _) = page_colors(&palette);
-        let paper = to_rgb(parse_color(background).expect("the page colour parses"));
+        (buf, composer, (text_x, text_y), palette)
+    }
+
+    fn paper(palette: &crate::config::ThemePalette) -> crate::ui::shimmer::Rgb {
+        let (background, _) = page_colors(palette);
+        to_rgb(parse_color(background).expect("the page colour parses"))
+    }
+
+    /// 卡内最亮的一格：(对纸面的对比度, 它的墨)。
+    fn loudest(
+        buf: &ratatui::buffer::Buffer,
+        composer: ratatui::layout::Rect,
+        palette: &crate::config::ThemePalette,
+    ) -> (f32, Color) {
+        let paper = paper(palette);
         let mut loudest = (0.0f32, Color::Reset);
         for y in composer.y..composer.bottom() {
             for x in composer.x..composer.right() {
@@ -325,33 +347,31 @@ fn the_empty_card_is_quiet_and_a_draft_is_loud() {
                 }
             }
         }
-        (loudest.0, loudest.1, palette)
+        loudest
     }
 
     for preset in [ColorPreset::Dark, ColorPreset::Light] {
-        let (quiet, quiet_ink, palette) = loudest(preset, "");
-        let (lit, lit_ink, _) = loudest(preset, "hello world");
+        let (empty, card_rect, (text_x, text_y), palette) = card(preset, "");
+        let (quiet, quiet_ink) = loudest(&empty, card_rect, &palette);
+        let (drafted, drafted_rect, _, _) = card(preset, "hello world");
+        let (lit, lit_ink) = loudest(&drafted, drafted_rect, &palette);
+
         assert_eq!(
             quiet_ink, palette.tool_result,
             "{preset:?}: 空卡最亮的字是提示那一档"
         );
         assert_eq!(lit_ink, palette.text, "{preset:?}: 有草稿时最亮的是正文");
-        // 数值：暗色 6.07 对 15.92、亮色 6.39 对 15.80 —— 空卡安静一半以上。
+        // 数值：暗色 6.07 对 15.92（2.6×）、亮色 6.39 对 15.80（2.5×）。卡 2 倍：
+        // 比这更松的判据会放过「占位挪到 `thinking`（暗色 8.61）」那一类回归。
         assert!(
-            quiet * 1.5 < lit,
+            quiet * 2.0 < lit,
             "{preset:?}: 空卡 {quiet:.2}:1 与草稿 {lit:.2}:1 必须分得开"
         );
 
         // 逐格：空卡里没有一格是正文墨或强调墨。
-        let mut config = crate::config::AppConfig::default();
-        config.colors.preset = preset;
-        let mut app = App::new("test-session".into(), config, None);
-        app.clear_welcome();
-        let (buf, composer) = draw_frame(&mut app, 80, 10);
-        let (text_x, text_y, _) = composer_text(&app);
-        for y in composer.y..composer.bottom() {
-            for x in composer.x..composer.right() {
-                let cell = &buf[(x, y)];
+        for y in card_rect.y..card_rect.bottom() {
+            for x in card_rect.x..card_rect.right() {
+                let cell = &empty[(x, y)];
                 if cell.symbol() == " " {
                     continue;
                 }
@@ -366,12 +386,12 @@ fn the_empty_card_is_quiet_and_a_draft_is_loud() {
             }
         }
         assert_eq!(
-            buf[(text_x, text_y)].fg,
+            empty[(text_x, text_y)].fg,
             palette.tool_result,
             "{preset:?}: 占位句是提示"
         );
         assert_eq!(
-            buf[(text_x - 2, text_y)].fg,
+            empty[(text_x - 2, text_y)].fg,
             palette.tool_result,
             "{preset:?}: `❯` 与占位同档"
         );
@@ -379,8 +399,14 @@ fn the_empty_card_is_quiet_and_a_draft_is_loud() {
 }
 
 /// "You can type here" outranks "you are here": the meta rail's path stays in
-/// the quiet slot, well under the card's own ink — an environment fact is not
+/// the quiet slot, under the card's own ink — an environment fact is not
 /// something you can type.
+///
+/// The margin is not the same on both appearances: today `dim` sits at 3.23 vs
+/// `tool_result` 6.07 on the dark page (1.9×) and 5.49 vs 6.39 on the light one
+/// (1.16× — on a light paper `dim` is right under `tool_result`; that is the
+/// palette's doing, not this card's). The assertions hold the floors (1.5× /
+/// 1.1×); a palette change that eats the recorded ratio has to redraw this line.
 #[test]
 fn test_the_path_stays_under_the_cards_ink() {
     use crate::config::ColorPreset;
@@ -417,9 +443,13 @@ fn test_the_path_stays_under_the_cards_ink() {
         assert_eq!(path_ink, palette.dim, "{preset:?}: the path stays quiet");
         let path = chip::contrast(to_rgb(path_ink), paper);
         let frame = chip::contrast(to_rgb(palette.tool_result), paper);
+        let margin = match preset {
+            ColorPreset::Light => 1.1,
+            _ => 1.5,
+        };
         assert!(
-            path < frame,
-            "{preset:?}: the path ({path:.2}:1) sits under the card's own ink ({frame:.2}:1)"
+            path * margin < frame,
+            "{preset:?}: the path ({path:.2}:1) must stay under the card's own ink ({frame:.2}:1) by {margin}×"
         );
     }
 }

@@ -1200,14 +1200,14 @@ fn test_composer_edit_aborts_the_selection() {
     }
 }
 
-// ── The status bar's two hot cells (id → copy, star → pin) ──
+// ── The status bar's two hot targets (id → copy, pin → toggle) ──
 
 /// The regions the last frame really drew (the click target contract).
 fn status_cells(app: &App) -> (ratatui::layout::Rect, ratatui::layout::Rect) {
     let regions = app.geometry.status_regions();
     (
-        regions.session_id.expect("the session id cell was drawn"),
-        regions.star.expect("the star cell was drawn"),
+        regions.session_id.expect("the session id region was drawn"),
+        regions.pin.expect("the pin face was drawn"),
     )
 }
 
@@ -1227,19 +1227,19 @@ fn test_clicking_the_session_id_copies_it() {
 }
 
 #[test]
-fn test_clicking_the_star_toggles_pin_both_ways() {
+fn test_clicking_the_pin_face_toggles_pin_both_ways() {
     let mut app = app_with_message();
     let mut terminal = test_terminal(120, 12);
     draw(&mut app, &mut terminal);
-    let (_, star) = status_cells(&app);
+    let (_, pin) = status_cells(&app);
 
     // 整块都是目标：从左气口到右气口，按哪一列都算"点了星标"。
-    for offset in 0..star.width {
+    for offset in 0..pin.width {
         assert_eq!(
-            app.handle_mouse(press((star.x + offset, star.y))),
+            app.handle_mouse(press((pin.x + offset, pin.y))),
             MouseOutcome::Ignored,
             "column {} of the pin face",
-            star.x + offset
+            pin.x + offset
         );
         match app.drain_intents().as_slice() {
             // intent 携带的是**目标状态**：未 pin 的会话点一下 = 请求 pin。
@@ -1252,9 +1252,9 @@ fn test_clicking_the_star_toggles_pin_both_ways() {
     // 直接翻状态，再点一下必须请求 unpin。
     app.status.pinned = true;
     draw(&mut app, &mut terminal);
-    let (_, star) = status_cells(&app);
+    let (_, pin) = status_cells(&app);
     assert_eq!(
-        app.handle_mouse(press((star.x + 1, star.y))),
+        app.handle_mouse(press((pin.x + 1, pin.y))),
         MouseOutcome::Ignored
     );
     match app.drain_intents().as_slice() {
@@ -1268,7 +1268,7 @@ fn test_the_rest_of_the_status_bar_claims_no_pointer() {
     let mut app = app_with_message();
     let mut terminal = test_terminal(120, 12);
     draw(&mut app, &mut terminal);
-    let (id, star) = status_cells(&app);
+    let (id, pin) = status_cells(&app);
 
     // 品牌 / 模型格：点了什么都不发生（不收事件、不发 intent）。
     for column in [0u16, id.x.saturating_sub(1)] {
@@ -1284,7 +1284,7 @@ fn test_the_rest_of_the_status_bar_claims_no_pointer() {
     );
     // pin 那块之后（分隔符 / 模型区）同样不认领。
     assert_eq!(
-        app.handle_mouse(press((star.x + star.width, 0))),
+        app.handle_mouse(press((pin.x + pin.width, 0))),
         MouseOutcome::Ignored
     );
     assert!(app.drain_intents().is_empty());

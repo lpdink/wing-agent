@@ -101,18 +101,13 @@ impl Widget for ComposerWidget<'_> {
         // without a word of explanation.
         let ghosted = matches!(focus, Focus::Ghost);
         // The body ink of a *draft*. An empty card has no body: its invitation
-        // is a hint, so it sits one notch below (`tool_result`, the ink the
-        // frame and the keycap wear) — the same brightness as a draft's text is
-        // what made an empty card read as "there is already something here".
+        // is a hint, so it wears the card's own ink (the frame's, see
+        // `chrome::card_ink`) — the same brightness as a draft's text is what
+        // made an empty card read as "there is already something here".
         let body_ink = if ghosted {
             self.palette.dim
         } else {
             self.palette.text
-        };
-        let hint_ink = if ghosted {
-            self.palette.dim
-        } else {
-            self.palette.tool_result
         };
         let draft_style = Style::default().fg(body_ink);
 
@@ -130,19 +125,17 @@ impl Widget for ComposerWidget<'_> {
             //
             // It is the pointer at the place typing lands, so it follows the
             // draft: `accent` while something actually waits there (the caret
-            // and the pasted chips are the row's saturated inks), the frame's
-            // own `tool_result` while the card is still asking for the first
-            // keystroke — an empty card carries one register, and the point of
-            // it is that the invitation must not look like content. A card
-            // whose keys another layer holds draws it `dim` with the rest of
-            // the ghost.
+            // and the pasted chips are the row's saturated inks), the card's
+            // own ink while the card is still empty — an empty card carries
+            // one register, and the point of it is that the invitation must
+            // not look like content. A card whose keys another layer holds
+            // keeps the ghost's `dim` (which is what the card's ink is then).
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let ink = if ghosted {
-                    self.palette.dim
-                } else if has_draft {
-                    self.palette.accent
-                } else {
-                    self.palette.tool_result
+                let ink = match focus {
+                    Focus::Draft => self.palette.accent,
+                    // 空卡与幽灵态都穿卡自己的墨（`tool_result` / `dim`）：一个来源，
+                    // 见 `chrome::card_ink`。
+                    quiet => chrome::card_ink(quiet, self.palette),
                 };
                 buf.set_span(
                     area.x + chrome::PROMPT_X,
@@ -154,8 +147,8 @@ impl Widget for ComposerWidget<'_> {
 
             let text_x = area.x + chrome.text_x;
 
-            // Empty first line → show the placeholder, in the hint ink: it is a
-            // sentence that tells you what could go here, not something you
+            // Empty first line → show the placeholder, in the card's own ink: it
+            // is a sentence that tells you what could go here, not something you
             // wrote, so it stays one notch under the body. A ghosted card drops
             // it to `dim` with its draft — the card promises nothing right now.
             if vr.logical_line == 0 && vr.char_start == 0 && !has_draft {
@@ -168,7 +161,10 @@ impl Widget for ComposerWidget<'_> {
                 buf.set_line(
                     text_x,
                     y,
-                    &Line::from(Span::styled(placeholder, Style::default().fg(hint_ink))),
+                    &Line::from(Span::styled(
+                        placeholder,
+                        Style::default().fg(chrome::card_ink(focus, self.palette)),
+                    )),
                     chrome.text_width,
                 );
                 continue;

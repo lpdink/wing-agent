@@ -15,6 +15,10 @@
 //! 同一份代码两次运行逐字节相同，视觉改动才 diff 得出来。唯一的例外是 `working`
 //! 帧里活动栏的秒数（它读墙钟，跨整数秒边界会变一位）。
 //!
+//! 两处状态**不走事件**、直接写在 App 上：欢迎屏（`Welcome` 的构造：时钟与 tip 种子
+//! 没有事件入口）与置顶标记（`status.pinned`；pin 是前端约定，服务端回读只是它的
+//! 一条来路）。其余状态一律经 `SyncSession` 等真事件投影。
+//!
 //! **取样面**：开屏整块。弹层 / 设置面板 / toast / 图片不在 fixture 里，画不出来。
 
 use std::fmt::Write as _;
@@ -79,6 +83,9 @@ pub struct Spec {
     pub draft: Option<String>,
     /// agent 在干活：活动栏 + 飞行姿态的海鸥。
     pub working: bool,
+    /// 这个会话被置顶：状态栏 pin 那一块画成"已置顶"（`✦` + `warning`）。
+    /// 置顶是标签面的事实，与"谁在说话"正交 —— 默认不置顶。
+    pub pinned: bool,
     /// 名牌右列的会话事实（skills / rules 计数）；`0,0` = 什么都没加载，身份行只剩
     /// 品牌 + 版本（行数不变 —— 名牌高度因此不随它变）。
     pub facts: SessionFacts,
@@ -94,6 +101,7 @@ impl Default for Spec {
             preset: None,
             draft: None,
             working: false,
+            pinned: false,
             // 与 `welcome_preview --facts` 的默认同一份样例：名牌右列不是半空的。
             facts: SessionFacts {
                 skills: 2,
@@ -293,6 +301,11 @@ pub fn sample_with(mut config: AppConfig, spec: &Spec) -> Frame {
     if spec.working {
         app.handle_event(call_metrics());
     }
+    if spec.pinned {
+        // pin 是前端约定（`shared::pinning`）：服务端的标签回读就是这条路径的
+        // 结果，取样器直接翻这一位，与 `FetchPayload::Info` 落到同一格状态。
+        app.status.pinned = true;
+    }
     app.handle_event(context_stats());
     app.handle_event(state_changed());
 
@@ -439,6 +452,7 @@ OPTIONS:
     --preset <NAME>     auto | dark | light（默认沿用配置）
     --draft <TEXT>      输入卡里放一段草稿（默认空：显示占位文案）
     --working           agent 在干活：活动栏 + 飞行姿态 + 这一轮的用量
+    --pinned            这个会话被置顶：状态栏 pin 那一块画成已置顶（✦ + warning）
     --facts <S,R>       名牌右列的会话事实（默认 2,1；0,0 = 身份行只剩品牌 + 版本；上限 999）
     --phase <0..1>      开屏扫光的相位（默认已定格；1 = 已扫完，同定格）
     --plain             无颜色输出（半格像素还原成实心块）
@@ -449,7 +463,7 @@ OPTIONS:
 
 NOTE:
     `--flag=value` 是等号形态：值本身以 `--` 开头时（例如草稿里带 `--`）用它。
-    开关类旗标（--plain / --working / --help）不接受值。
+    开关类旗标（--plain / --working / --pinned / --help）不接受值。
 ";
 
 /// 命令行输入：取样参数 + 输出后端。
@@ -522,6 +536,10 @@ impl Options {
                 "--working" => {
                     switch(flag)?;
                     options.spec.working = true;
+                }
+                "--pinned" => {
+                    switch(flag)?;
+                    options.spec.pinned = true;
                 }
                 "--width" => options.spec.width = number(&value(&mut index)?, flag)?,
                 "--height" => options.spec.height = number(&value(&mut index)?, flag)?,
@@ -600,6 +618,9 @@ impl Options {
         }
         if self.spec.working {
             parts.push("working".to_string());
+        }
+        if self.spec.pinned {
+            parts.push("pinned".to_string());
         }
         parts.join(" · ")
     }
@@ -893,17 +914,19 @@ mod tests {
 
     #[test]
     fn the_cli_reads_its_flags() {
-        let args: Vec<String> = "--width 80 --height 24 --preset light --draft hi --working \
+        let args: Vec<String> =
+            "--width 80 --height 24 --preset light --draft hi --working --pinned \
              --facts 0,3 --phase 0.4 --plain"
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
         let options = Options::parse(&args).expect("valid");
         assert_eq!(options.spec.width, 80);
         assert_eq!(options.spec.height, 24);
         assert_eq!(options.spec.preset, Some(ColorPreset::Light));
         assert_eq!(options.spec.draft.as_deref(), Some("hi"));
         assert!(options.spec.working);
+        assert!(options.spec.pinned);
         assert_eq!(
             options.spec.facts,
             SessionFacts {
@@ -965,6 +988,7 @@ mod tests {
             (vec!["stray"], "unexpected argument"),
             (vec!["--draft", "--plain"], "needs a value"),
             (vec!["--working=false"], "takes no value"),
+            (vec!["--pinned=1"], "takes no value"),
             (vec!["--plain=1"], "takes no value"),
         ] {
             let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
