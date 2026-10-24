@@ -13,8 +13,6 @@
 //! when the caller asks for it (the caller decides TTY / `NO_COLOR`), and the
 //! escapes never count towards the measured width.
 
-use ratatui::style::Color;
-use ratatui::style::Modifier;
 use ratatui::style::Style;
 use unicode_width::UnicodeWidthStr;
 
@@ -253,68 +251,13 @@ fn fit_truncate(text: &str, width: usize) -> String {
     format!("{head}…")
 }
 
-const RESET: &str = "\u{1b}[0m";
-
-/// ANSI-wrapped `text` when colour is on; the bare text otherwise (or when the
-/// style carries no attributes at all).
-///
-/// The CLI's single SGR encoder: plain tables and the usage heatmap both paint
-/// through it (a second copy of the escape maths drifts).
+/// ANSI-wrapped `text` when colour is on, the bare text otherwise. The escape
+/// maths itself lives in [`crate::render::ansi`] (the crate's single encoder).
 pub(crate) fn paint(style: Style, text: &str, color: bool) -> String {
-    if !color || text.is_empty() {
-        return text.to_string();
-    }
-    let prefix = sgr(style);
-    if prefix.is_empty() {
+    if color {
+        crate::render::ansi::paint(style, text)
+    } else {
         text.to_string()
-    } else {
-        format!("{prefix}{text}{RESET}")
-    }
-}
-
-/// ratatui [`Style`] → SGR prefix for what plain tables use: foreground colour
-/// plus the bold / dim modifiers. Empty when the style carries nothing.
-fn sgr(style: Style) -> String {
-    let mut codes: Vec<String> = Vec::new();
-    if let Some(fg) = style.fg {
-        codes.push(color_code(fg, false));
-    }
-    if style.add_modifier.contains(Modifier::BOLD) {
-        codes.push("1".to_string());
-    }
-    if style.add_modifier.contains(Modifier::DIM) {
-        codes.push("2".to_string());
-    }
-    if codes.is_empty() {
-        String::new()
-    } else {
-        format!("\u{1b}[{}m", codes.join(";"))
-    }
-}
-
-fn color_code(color: Color, background: bool) -> String {
-    let base = if background { 40 } else { 30 };
-    let bright = if background { 100 } else { 90 };
-    match color {
-        Color::Reset => "0".to_string(),
-        Color::Black => base.to_string(),
-        Color::Red => (base + 1).to_string(),
-        Color::Green => (base + 2).to_string(),
-        Color::Yellow => (base + 3).to_string(),
-        Color::Blue => (base + 4).to_string(),
-        Color::Magenta => (base + 5).to_string(),
-        Color::Cyan => (base + 6).to_string(),
-        Color::Gray => (base + 7).to_string(),
-        Color::DarkGray => bright.to_string(),
-        Color::LightRed => (bright + 1).to_string(),
-        Color::LightGreen => (bright + 2).to_string(),
-        Color::LightYellow => (bright + 3).to_string(),
-        Color::LightBlue => (bright + 4).to_string(),
-        Color::LightMagenta => (bright + 5).to_string(),
-        Color::LightCyan => (bright + 6).to_string(),
-        Color::White => (bright + 7).to_string(),
-        Color::Indexed(i) => format!("{};5;{i}", if background { 48 } else { 38 }),
-        Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", if background { 48 } else { 38 }),
     }
 }
 
@@ -326,6 +269,7 @@ fn color_code(color: Color, background: bool) -> String {
 mod tests {
     use super::*;
     use crate::render::test_support::strip_ansi;
+    use ratatui::style::Color;
 
     fn opts(width: usize, color: bool) -> PlainOpts {
         PlainOpts {

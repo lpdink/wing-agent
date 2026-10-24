@@ -22,7 +22,7 @@
 //! ```
 //!
 //! **刻意只有一条交互路径**：pin / unpin 都只能对「你所在的会话」做——状态栏
-//! 的星标（`☆` 点亮 / `★` 熄灭）。给别的会话打 pin 走通用的
+//! 那块星标（`✧` 点亮 / `✦` 熄灭）。给别的会话打 pin 走通用的
 //! `wing tag <sid> pin`（幂等同理）；面板里的星标是**只读**的展示。这样一次
 //! 误点永远不会摘掉别人（或你不在场的会话）的 pin——不是遗漏，是设计。
 //!
@@ -38,6 +38,16 @@ use wing_api_client::models::TagMeta;
 
 /// 置顶标签名（裸 tag：不携带时间，时间在通用标签记录里）。
 pub const PIN_TAG: &str = "pin";
+
+/// pin 状态的**字形词表**：实心 = 已置顶，空心 = 未置顶。
+///
+/// 两个都是 East-Asian **Neutral**：宽度由规范钉死在 1 列，终端没有"模糊宽度"
+/// 这条自由度可拨（旧字形 `★` / `☆` 是 *Ambiguous*，会被画成 1 列或 2 列 —— 命中区
+/// 落在字形外、字形时大时小，都是它引起的）。词表放这里而不是渲染层，是因为
+/// **两处**要用同一份：状态栏画它，开屏提示**指着**它（`shared::tips` 有测试把两者
+/// 绑住）；换字形时两处一起换。
+pub const PIN_ON: &str = "✦";
+pub const PIN_OFF: &str = "✧";
 
 /// 该会话是否被置顶。
 pub fn is_pinned(tags: &[String]) -> bool {
@@ -145,12 +155,12 @@ mod tests {
         assert_eq!(
             pin_tag_ops(true),
             (Some(vec!["pin".to_string()]), None),
-            "点 ☆ 要的是 add"
+            "点 ✧ 要的是 add"
         );
         assert_eq!(
             pin_tag_ops(false),
             (None, Some(vec!["pin".to_string()])),
-            "点 ★ 要的是 remove"
+            "点 ✦ 要的是 remove"
         );
     }
 

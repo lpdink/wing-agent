@@ -1,18 +1,88 @@
 //! Status bar widget — top row showing model, tokens, usage, session identity.
 //!
+//! ## Registers — the left chain reads as a sentence
+//!
+//! `Wing · <session id> ▮✦▮ · ▮<model>▮ · think:<effort> · <provider>`, then
+//! the instruments flush right. Each segment owns exactly one register:
+//!
+//! | segment | what it says | ink |
+//! |---|---|---|
+//! | brand | "me" | `text` — the row's only bold |
+//! | identity | "this session" | `dim` for the id; the pin is a face of its own (below) |
+//! | model | "who I'm talking to" | [`Chip::key`] — a `surface` band, not a brighter gray |
+//! | mode | "how it thinks" | `accent` — the row's only accent |
+//! | provider | "where the model comes from" | `dim` |
+//!
+//! `warning` is the status ink in two places: the pin's face (below) and the
+//! context meter once it passes half full.
+//!
+//! The model is the only segment that degrades to fit (padded block → bare
+//! block; every width comes from `ui::chip`), so the row keeps its model down
+//! to the width where even the bare label no longer fits. Everything else is
+//! all-or-nothing: a half-drawn block reads worse than no block. The mode
+//! sits *before* the provider because an accent that truncation can eat is no
+//! longer an accent — the provider is the most ambient fact here (`wing info`
+//! and the `/model` picker carry the whole byline).
+//!
+//! The session id and the pin are separate segments so the copyable id
+//! outlives the star on a very narrow row — the id is the only visible handle
+//! for "click to copy". The star never stands alone: a tail without an
+//! identity says nothing.
+//!
+//! ## The pin slot is a face, not a glyph
+//!
+//! The pin is a fixed three-column band ([`Chip::key`] with one cell of air on
+//! each side) holding a **one-column** star: what you see is what you can
+//! click, and those three cells do not move — in either state, whatever the
+//! terminal decides a glyph is worth. Two decisions make that true —
+//!
+//! * the glyph (`✦` pinned / `✧` unpinned) is East-Asian *Neutral*, so its
+//!   width is one column by specification and the terminal has no say in it.
+//!   The old `★` / `☆` are *Ambiguous*: a terminal may legally draw them one
+//!   *or* two columns wide, which is how a region recorded as one column ended
+//!   up left of the glyph the pointer was aiming at (and how the star looked
+//!   twice the size on the same machine);
+//! * the state rides the glyph and the ink, never the geometry: filled
+//!   `warning` when pinned, hollow in the keycap's own `tool_result` when not.
+//!   The band, its padding and the three columns the region covers are
+//!   identical either way.
+//!
+//! A segment stays put while the ones after it come and go; the one exception
+//! is the model's own rung, which follows the room the right cluster leaves
+//! (a wider read-out can cost the block its padding, and then the segments
+//! after it shift two columns). Nothing else in the chain moves on its own.
+//!
 //! The bar declares the frame's only top-row pointer targets: the session id
-//! (click = copy) and the pin star (click = toggle). Their hit regions are
+//! (click = copy) and the pin slot (click = toggle). Their hit regions are
 //! recorded while drawing (see [`StatusBarRegions`]) and measured the way the
 //! layout measures everything else — `unicode-width`, which resolves the
-//! East-Asian *Ambiguous* glyphs (`…` `☆` `★` `·` …) to one column.
+//! East-Asian *Ambiguous* glyphs (`…` `·` `●` `─` `█`) to one column.
 //!
 //! **Known boundary**: a terminal configured to render ambiguous-width
 //! characters as two columns would draw those glyphs one column wider than we
 //! account for, so a pointer would land one cell right of the recorded region
 //! (the whole frame is misaligned there — every box-drawing border in the TUI
-//! has the same assumption). We keep the region equal to the drawn glyph
-//! rather than padding it, so the contract stays "a region covers exactly the
-//! cells it was drawn in".
+//! has the same assumption). The pin slot is the one target whose *width* is
+//! out of that bargain: it draws no ambiguous glyph at all, so the three
+//! columns it claims are the three columns it covers — its *position* still
+//! rides along with the rest of the row.
+//!
+//! Two consequences worth writing down. The slot is three columns instead of
+//! the old `" " + star` two, so the row's widths move by one column: the pin
+//! itself now appears from 46 columns on (it fit at 45), and the segments after
+//! the identity step right — so the width at which the model loses its padding,
+//! and the widths at which the mode / provider are dropped, are each one column
+//! smaller than before (the truncation *order* is untouched). And when the palette
+//! cannot draw a face at all (`surface: reset`, or a surface too close to the
+//! paper — see [`Chip`]), the three cells keep swallowing pointer events while
+//! only the glyph is visible: a target that is two cells too wide is the lesser
+//! evil against one that changes width with the palette.
+//!
+//! One more residual risk, the same shape as the width one: a font stack
+//! without the Dingbats block renders both glyphs as tofu — the width stays one
+//! column (nothing shifts) and the ink still says on / off, but "一眼可辨" then
+//! rests on the ink alone. There is no font-coverage query to gate on, so this
+//! is recorded rather than defended.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -23,6 +93,10 @@ use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
 use crate::config::ThemePalette;
+use crate::shared::pinning::PIN_OFF;
+use crate::shared::pinning::PIN_ON;
+use crate::ui::chip::Chip;
+use crate::ui::chip::Pad;
 use crate::util::format;
 
 /// 模型身份四元组——一个会话表面上「当前模型」的完整陈述。
@@ -178,15 +252,34 @@ impl StatusData {
 pub struct StatusBarRegions {
     /// 会话 ID 段（点击 = 复制完整 ID）。
     pub session_id: Option<Rect>,
-    /// pin 星标（点击 = 切换 pin）。
-    pub star: Option<Rect>,
+    /// pin 那整块（点击 = 切换 pin）。宽度是那块面的列数（含左右两格气口），
+    /// 置顶与否相同 —— 见模块文档「The pin slot is a face, not a glyph」。
+    pub pin: Option<Rect>,
 }
 
 /// 身份段里认领指针的格子（其余 span 不认领）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
     SessionId,
-    Star,
+    Pin,
+}
+
+/// 左链上的一段：分隔符与内容一起进出。
+///
+/// 截断发生在段边界（放不下的段整段不画），所以不会留下「只有一个中间点、后面
+/// 没有东西」的悬空分隔符 —— 那比少一条事实更难看。段内的 span 各自带样式，
+/// 有的还声明命中区（见 [`Slot`]）。
+///
+/// 同类规则的另一个实现是输入卡的 `rail`（`ui::input_area::chrome`）：右边读数先
+/// 预留、左边条目整条丢。两处都不必抽公共引擎（那边是带角字符的边框行，这边要
+/// 回填命中区并逐段挑档位），但别再长出第三份。
+struct Segment(Vec<(Span<'static>, Option<Slot>)>);
+
+impl Segment {
+    /// 这一段占多少列（宽度只看 span，不看样式）。
+    fn width(&self) -> u16 {
+        self.0.iter().map(|(span, _)| span.width() as u16).sum()
+    }
 }
 
 /// 窄终端的会话 ID 退化形态：尾部 8 位（唯一的那段 hex）+ 省略号前缀。
@@ -206,7 +299,8 @@ pub struct StatusBar<'a> {
     data: &'a StatusData,
     /// 当前会话 ID（空串 = 未知：身份段整段不渲染）。
     session_id: &'a str,
-    /// If true, render the full usage line. If false, omit cumulative details.
+    /// 宽终端开关（`app::WIDE_THRESHOLD`）：完整会话 ID / 累计用量那一栏 /
+    /// 模型段画不画底，三处都读它。
     wide: bool,
     palette: &'a ThemePalette,
     /// 命中区回填：绘制时写入本帧的真实位置（见 [`StatusBarRegions`]）。
@@ -229,6 +323,140 @@ impl<'a> StatusBar<'a> {
             regions,
         }
     }
+
+    /// 左链：品牌 → 会话身份 → 模型 → 状态（模式 / provider），按重要性排队。
+    ///
+    /// `room` 是右端仪表让出后剩下的列数（右端优先，见模块文档）。**只有模型段**
+    /// 会为了塞进去降级（见 [`Self::model_segment`]），其余段整段在或整段不在 ——
+    /// 截断在段边界发生，画一半的色块比没有更难读。
+    ///
+    /// 两个命中区（id / 星标）在绘制时回填，本函数只声明哪几段认领指针；`Slot`
+    /// 出现的先后就是屏幕上的先后。
+    fn left_chain(&self, room: u16) -> Vec<Segment> {
+        let d = self.data;
+        let dim = Style::default().fg(self.palette.dim);
+        let mut segments: Vec<Segment> = Vec::new();
+
+        // 品牌 =「我」：全行唯一加粗的一处。
+        segments.push(Segment(vec![(
+            Span::styled(
+                " Wing",
+                Style::default()
+                    .fg(self.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            None,
+        )]));
+
+        // 身份 =「这次会话」：引用材料，安静的一档。
+        if !self.session_id.is_empty() {
+            // 宽终端画完整 ID，窄终端退化尾 8 位（点击复制的永远是完整 ID）。
+            let id_text = if self.wide {
+                self.session_id.to_string()
+            } else {
+                compact_session_id(self.session_id)
+            };
+            // ID 与星标各成一段：星标是 unpin 的唯一入口，但 ID 是复制目标的唯一
+            // 可见载体 —— 窄到差一两列时先让星标（那一块自己是完整的，让出之后
+            // 不会留下悬空的 `·`）。
+            segments.push(Segment(vec![
+                (Span::styled(" · ", dim), None),
+                (Span::styled(id_text, dim), Some(Slot::SessionId)),
+            ]));
+            segments.push(Segment(vec![(self.pin_span(), Some(Slot::Pin))]));
+        }
+
+        // 模型 =「正在跟谁说话」：一块安静的底（`Chip::key`），先量前面已经用掉
+        // 多少列，再决定这一块要哪一档。pin 那整块无条件计入 —— 它让出时链条已经
+        // 在那里中断（后面的段一个都不画），所以不存在"回收"这件事。
+        let used: u16 = segments.iter().map(Segment::width).sum();
+        segments.push(self.model_segment(room.saturating_sub(used)));
+
+        // 模式 = 全行唯一的强调点（`accent` 墨）。文字与拼接规则不变：`think` /
+        // `think:high`。
+        if d.thinking {
+            let label = match &d.reasoning_effort {
+                Some(effort) => format!("think:{effort}"),
+                None => "think".to_string(),
+            };
+            segments.push(Segment(vec![
+                (Span::styled(" · ", dim), None),
+                (
+                    Span::styled(label, Style::default().fg(self.palette.accent)),
+                    None,
+                ),
+            ]));
+        }
+
+        // Provider 在模式之后：它是这条链上最"环境"的一条事实 —— 模式是被强调的
+        // 状态（被截断吃掉的强调点就不成其为强调点），provider 是这模型从哪来
+        // （`wing info` 与 `/model` 面板里都有整份），所以先让出。
+        if let Some(provider) = d.provider.as_deref().filter(|p| !p.is_empty()) {
+            segments.push(Segment(vec![
+                (Span::styled(" · ", dim), None),
+                (Span::styled(provider.to_string(), dim), None),
+            ]));
+        }
+
+        segments
+    }
+
+    /// pin 那一块：**固定三列的面**（`ui::chip` 的安静档 + 左右各一格气口），
+    /// 里面放一个必然一列的星形。
+    ///
+    /// 两件事因此不必再猜：**看得见的那块就是能点的那块**（命中区 = 这三列，
+    /// 含气口），且这块的宽度与终端怎么画字形无关。状态只换字形与墨（实心
+    /// `warning` / 空心键帽墨），面、气口、列数一个都不动 —— 置顶 / 未置顶不
+    /// 改变行几何（墨的闸门在 `ui::chip` 里，压不出对比度就退回键帽墨）。
+    ///
+    /// 调色板画不出面时（`surface: reset` / 面浮不出纸面）底会消失，但命中区
+    /// 仍是这三列：宁可多两格可点，也不让目标随配色忽宽忽窄（见模块文档）。
+    fn pin_span(&self) -> Span<'static> {
+        let chip = Chip::key(if self.data.pinned { PIN_ON } else { PIN_OFF });
+        let chip = if self.data.pinned {
+            chip.ink(self.palette.warning)
+        } else {
+            chip
+        };
+        chip.span(self.palette, Pad::One)
+    }
+
+    /// 模型段：` · ` 与模型内容一起进出，先扣掉分隔符再挑块的档位。
+    ///
+    /// 宽度、底色、墨全在 `ui::chip` 里，这里只挑第一个塞得进 `room` 的档：
+    ///
+    /// 1. 有一格气口的块（`Pad::One`）：宽终端上的常规形态；
+    /// 2. 没有气口的块（`Pad::Zero`）：行紧了先让气口，字一个不少。
+    ///
+    /// 块一档都放不下时就是**纯文本**（`wide == false` 的形态，墨是 `text`、
+    /// 不参与块的宽度数学）。无气口的块与它同宽，所以宽终端上这一档只是几何等价：
+    /// 塞不下时绘制循环整段不画 —— 模型宁可缺席，也不切字。
+    ///
+    /// 只量自己的宽度、不改别段的内容；挑到哪一档会改变后面几段的起点（见模块文档）。
+    fn model_segment(&self, room: u16) -> Segment {
+        let sep = Span::styled(" · ", Style::default().fg(self.palette.dim));
+        let room = room.saturating_sub(sep.width() as u16);
+        let label = self.data.model_label();
+        let plain = || Span::styled(label.to_string(), Style::default().fg(self.palette.text));
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if self.wide {
+            let chip = Chip::key(label);
+            for pad in Pad::LADDER {
+                if chip.width(pad) as u16 <= room {
+                    spans.push(chip.span(self.palette, pad));
+                    break;
+                }
+            }
+        }
+        if spans.is_empty() {
+            spans.push(plain());
+        }
+
+        let mut segment = Segment(vec![(sep, None)]);
+        segment.0.extend(spans.into_iter().map(|span| (span, None)));
+        segment
+    }
 }
 
 impl Widget for StatusBar<'_> {
@@ -240,67 +468,6 @@ impl Widget for StatusBar<'_> {
         let d = self.data;
         let dim = Style::default().fg(self.palette.dim);
         let line_y = area.y;
-
-        // Build the left chain: " Wing · <session id> ☆ · model [· provider] [think]".
-        //
-        // 会话身份（ID + pin 星标）紧跟在品牌之后、模型之前：星标是 unpin 的
-        // **唯一入口**，不能被"模型名太长"这类内容挤掉——链条从左到右在容量
-        // 用尽处截断，越靠前的越先保住。身份段是 dim 的引用材料；模型仍是第
-        // 一个亮色内容。
-        let mut spans: Vec<(Span<'static>, Option<Slot>)> = vec![
-            (
-                Span::styled(
-                    " Wing",
-                    Style::default()
-                        .fg(self.palette.text)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                None,
-            ),
-            (Span::styled(" · ", dim), None),
-        ];
-        if !self.session_id.is_empty() {
-            // 宽终端画完整 ID，窄终端退化尾 8 位（点击复制的永远是完整 ID）。
-            let id_text = if self.wide {
-                self.session_id.to_string()
-            } else {
-                compact_session_id(self.session_id)
-            };
-            let (star_glyph, star_style) = if d.pinned {
-                ("★", Style::default().fg(self.palette.warning))
-            } else {
-                ("☆", dim)
-            };
-            spans.push((Span::styled(id_text, dim), Some(Slot::SessionId)));
-            spans.push((Span::styled(" ", dim), None));
-            spans.push((Span::styled(star_glyph, star_style), Some(Slot::Star)));
-            spans.push((Span::styled(" · ", dim), None));
-        }
-        // The model slot renders the declared display label (falling back to
-        // the call name) — the raw id is never the first thing the user sees.
-        spans.push((
-            Span::styled(
-                d.model_label().to_string(),
-                Style::default().fg(self.palette.text),
-            ),
-            None,
-        ));
-
-        // Provider name next to the model — hidden when unknown (old gateway).
-        if let Some(provider) = d.provider.as_deref().filter(|p| !p.is_empty()) {
-            spans.push((Span::styled(" · ", dim), None));
-            spans.push((Span::styled(provider.to_string(), dim), None));
-        }
-
-        if d.thinking {
-            // `· think[:effort]` —— 中间点与左侧链条同一套分隔符；不留分隔符的话
-            // `DeepSeek-Flash MacMachine think` 读起来像三个连写的词。
-            let think_label = match &d.reasoning_effort {
-                Some(effort) => format!(" · think:{effort}"),
-                None => " · think".to_string(),
-            };
-            spans.push((Span::styled(think_label, dim), None));
-        }
 
         // Build right spans.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
@@ -385,26 +552,30 @@ impl Widget for StatusBar<'_> {
         *self.regions = StatusBarRegions::default();
 
         // Render the left chain — capacity runs out at the right edge of the
-        // band the right cluster leaves; the first span that does not fit ends
-        // the chain (positions stay stable, nothing jumps around).
+        // band the right cluster leaves; the first segment that does not fit
+        // ends the chain (positions stay stable, nothing jumps around). 左链先
+        // 拿到剩余列数：模型段要在自己那一格里先降级（见 `left_chain`）。
         let limit = area.right().saturating_sub(right_width + 1);
+        let segments = self.left_chain(limit.saturating_sub(area.x));
         let mut x = area.x;
-        for (span, slot) in &spans {
-            let w = span.width() as u16;
-            if x + w > limit {
+        for segment in &segments {
+            if x + segment.width() > limit {
                 break;
             }
-            buf.set_line(x, line_y, &Line::from(span.clone()), w);
-            match slot {
-                Some(Slot::SessionId) => {
-                    self.regions.session_id = Some(Rect::new(x, line_y, w, 1));
+            for (span, slot) in &segment.0 {
+                let w = span.width() as u16;
+                buf.set_line(x, line_y, &Line::from(span.clone()), w);
+                match slot {
+                    Some(Slot::SessionId) => {
+                        self.regions.session_id = Some(Rect::new(x, line_y, w, 1));
+                    }
+                    Some(Slot::Pin) => {
+                        self.regions.pin = Some(Rect::new(x, line_y, w, 1));
+                    }
+                    None => {}
                 }
-                Some(Slot::Star) => {
-                    self.regions.star = Some(Rect::new(x, line_y, w, 1));
-                }
-                None => {}
+                x += w;
             }
-            x += w;
         }
 
         // Render right spans right-aligned.
@@ -499,6 +670,9 @@ impl TurnUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    use crate::ui::shimmer::to_rgb;
 
     #[test]
     fn test_compact_token_notation() {
@@ -695,6 +869,49 @@ mod tests {
     /// The full 24-char session id the fixtures use.
     const SID: &str = "20261005-213012-ab12cd34";
 
+    /// 亮色预设（明暗两套要各断言一次的地方用它）。
+    fn light() -> ThemePalette {
+        ThemePalette::from_config(&crate::config::ColorsConfig {
+            preset: crate::config::ColorPreset::Light,
+            ..crate::config::ColorsConfig::default()
+        })
+    }
+
+    /// 一条"满配"的状态栏数据：24 字符 id + 水位 + 累计用量 + 模式 + provider ——
+    /// 右端仪表最肥的一档，优先级与宽度阶梯都在这上面量。
+    fn busy() -> StatusData {
+        StatusData {
+            model: "DeepSeek-Flash".into(),
+            provider: Some("dashscope".into()),
+            total_tokens: 45_200,
+            context_window_tokens: 200_000,
+            thinking: true,
+            reasoning_effort: Some("medium".into()),
+            session_prompt_tokens: 132_400,
+            session_completion_tokens: 24_800,
+            session_cached_tokens: 98_100,
+            ..StatusData::default()
+        }
+    }
+
+    /// 宽档门槛 = `App::is_wide` 的那条线（终端 ≥ 100 列）。`ui` 不许命名 `app`
+    /// 层（`layer_guard`），所以这个数只能在这里重复一份 —— 改门槛时跟着改。
+    const WIDE: u16 = 100;
+
+    fn render_buffer_with(
+        palette: &ThemePalette,
+        data: &StatusData,
+        session_id: &str,
+        width: u16,
+    ) -> (Buffer, StatusBarRegions) {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        let mut regions = StatusBarRegions::default();
+        let wide = width >= WIDE;
+        StatusBar::new(data, session_id, wide, palette, &mut regions).render(area, &mut buf);
+        (buf, regions)
+    }
+
     /// Render the status bar into a buffer and return (one entry per column,
     /// hit regions). Every glyph the bar uses is single-width, so a region's
     /// `x..x+width` slices the very characters it covers.
@@ -703,21 +920,52 @@ mod tests {
         session_id: &str,
         width: u16,
     ) -> (Vec<String>, StatusBarRegions) {
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        let mut regions = StatusBarRegions::default();
-        StatusBar::new(
-            data,
-            session_id,
-            width >= 100,
-            &ThemePalette::default(),
-            &mut regions,
-        )
-        .render(area, &mut buf);
-        let text = (0..area.width)
+        let (buf, regions) = render_buffer_with(&ThemePalette::default(), data, session_id, width);
+        let text = (0..width)
             .map(|x| buf[(x, 0)].symbol().to_string())
             .collect::<Vec<_>>();
         (text, regions)
+    }
+
+    /// 一行的格子（符号 / 墨 / 底）：寄存器断言（谁有底、谁是 accent）在文本投影上
+    /// 看不出来。
+    fn cells_with(
+        palette: &ThemePalette,
+        data: &StatusData,
+        session_id: &str,
+        width: u16,
+    ) -> Vec<ratatui::buffer::Cell> {
+        let (buf, _) = render_buffer_with(palette, data, session_id, width);
+        (0..width).map(|x| buf[(x, 0)].clone()).collect()
+    }
+
+    /// 命中的列区间（连续的算一段）：`pick` 决定一格算不算。
+    fn runs(
+        cells: &[ratatui::buffer::Cell],
+        pick: impl Fn(&ratatui::buffer::Cell) -> bool,
+    ) -> Vec<(usize, usize)> {
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for (x, cell) in cells.iter().enumerate() {
+            if !pick(cell) {
+                continue;
+            }
+            match runs.last_mut() {
+                Some((_, end)) if *end == x => *end = x + 1,
+                _ => runs.push((x, x + 1)),
+            }
+        }
+        runs
+    }
+
+    /// 一个列区间的文本。
+    fn span_text(cells: &[ratatui::buffer::Cell], (start, end): (usize, usize)) -> String {
+        cells[start..end].iter().map(|c| c.symbol()).collect()
+    }
+
+    /// 文案断言用：连续空格收成一格。块的内边距是**几何**事实（宽度由下面的
+    /// 寄存器测试管），比"某段挨着某段"时不该被它绊住。
+    fn single_spaced(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// The characters a region covers, joined.
@@ -739,7 +987,7 @@ mod tests {
         };
         let out = render_text(&data);
         assert!(
-            out.contains("deepseek-v4-flash-0731 · dashscope-openai"),
+            single_spaced(&out).contains("deepseek-v4-flash-0731 · dashscope-openai"),
             "provider must render next to the model, got: {out}"
         );
     }
@@ -753,7 +1001,7 @@ mod tests {
         let out = render_text(&data);
         assert!(out.contains("gpt-4"), "got: {out}");
         assert!(
-            !out.contains("gpt-4 · "),
+            !single_spaced(&out).contains("gpt-4 ·"),
             "no provider → no dangling separator, got: {out}"
         );
     }
@@ -770,7 +1018,7 @@ mod tests {
         };
         let out = render_text(&data);
         assert!(
-            out.contains("DeepSeek-Flash · qoder"),
+            single_spaced(&out).contains("DeepSeek-Flash · qoder"),
             "display name must take the model slot, got: {out}"
         );
         assert!(
@@ -822,14 +1070,122 @@ mod tests {
         );
     }
 
+    /// The pin slot: a fixed face in both states, with the state in the glyph and
+    /// the ink. Three things are pinned here — the columns you can click are the
+    /// columns that were drawn, the width does not move between states, and the
+    /// glyph is one column by construction.
+    ///
+    /// The glyph choice is pinned as a *literal* (`✦` / `✧` are East-Asian
+    /// Neutral; `★` / `☆` are Ambiguous, which a terminal may draw two columns
+    /// wide). That last assertion cannot test what a terminal does — it only
+    /// keeps the choice from being quietly undone.
     #[test]
-    fn test_status_bar_star_reflects_pin_state() {
+    fn the_pin_slot_is_one_face_of_constant_width() {
+        for palette in [ThemePalette::default(), light()] {
+            let mut widths: Vec<(u16, u16)> = Vec::new();
+            for pinned in [false, true] {
+                let data = StatusData {
+                    pinned,
+                    ..StatusData::default()
+                };
+                let cells = cells_with(&palette, &data, SID, 200);
+                let (_, regions) = render_buffer_with(&palette, &data, SID, 200);
+                let pin = regions.pin.expect("pin region recorded");
+                let drawn = span_text(&cells, (pin.x as usize, (pin.x + pin.width) as usize));
+                let glyph = if pinned { PIN_ON } else { PIN_OFF };
+
+                assert_eq!(drawn, format!(" {glyph} "), "the face covers its own air");
+                assert_eq!(
+                    Chip::key(glyph).width(Pad::Zero),
+                    1,
+                    "{:?}: the star is one column wide",
+                    palette.appearance
+                );
+                assert_eq!(
+                    pin.width, 3,
+                    "{:?} pinned={pinned}: the region is the drawn face",
+                    palette.appearance
+                );
+                // The band runs the whole region, so the visible target and the
+                // hit region are the same three cells.
+                let face = Chip::key(glyph)
+                    .span(&palette, Pad::One)
+                    .style
+                    .bg
+                    .expect("the face is drawn");
+                for x in pin.x..pin.x + pin.width {
+                    assert_eq!(cells[x as usize].bg, face, "the face covers ({x})");
+                }
+                // State: the glyph, and the ink on that face.
+                let ink = cells[(pin.x + 1) as usize].fg;
+                assert_eq!(
+                    ink,
+                    if pinned {
+                        palette.warning
+                    } else {
+                        palette.tool_result
+                    },
+                    "{:?}",
+                    palette.appearance
+                );
+                assert!(
+                    crate::ui::chip::contrast(to_rgb(ink), to_rgb(face))
+                        >= crate::ui::chip::MIN_INK_CONTRAST,
+                    "{:?}: the star stays readable on its face",
+                    palette.appearance
+                );
+                widths.push((pin.x, pin.width));
+            }
+            assert_eq!(
+                widths[0], widths[1],
+                "{:?}: pinning does not reflow the row",
+                palette.appearance
+            );
+        }
+
+        // The glyphs this slot may not use again: `★` / `☆` are *Ambiguous* (a
+        // terminal may draw them one or two columns wide), `⭐` is *Wide* (always
+        // two) with no hollow twin — either way the slot stops being one face.
+        for rejected in ["★", "☆", "⭐"] {
+            assert!(
+                ![PIN_ON, PIN_OFF].contains(&rejected),
+                "{rejected} cannot keep a one-column face"
+            );
+        }
+    }
+
+    /// A palette that cannot draw the face keeps the three columns: the target
+    /// must not change width with the colours (two cells too wide beats a target
+    /// that moves under the pointer).
+    #[test]
+    fn the_pin_target_survives_a_palette_without_a_face() {
+        let palette = ThemePalette {
+            surface: Color::Reset,
+            ..ThemePalette::default()
+        };
+        let data = StatusData::default();
+        let (buf, regions) = render_buffer_with(&palette, &data, SID, 200);
+        let pin = regions.pin.expect("pin region recorded");
+        assert_eq!(pin.width, 3, "the region is the face's width");
+        for x in pin.x..pin.x + pin.width {
+            assert_eq!(buf[(x, 0)].bg, Color::Reset, "no face is drawn ({x})");
+        }
+        // 未置顶的字形还在中间那一列（命中区比可见目标宽，是写下来的取舍）。
+        assert_eq!(buf[(pin.x + 1, 0)].symbol(), PIN_OFF);
+    }
+
+    #[test]
+    fn test_the_pin_glyph_reflects_pin_state() {
         let (text, regions) = render_bar(&StatusData::default(), SID, 120);
-        let star = regions.star.expect("star region recorded");
-        assert_eq!(slice(&text, star), "☆", "unpinned is a hollow star");
+        let pin = regions.pin.expect("pin region recorded");
+        assert_eq!(
+            slice(&text, pin).trim(),
+            PIN_OFF,
+            "unpinned is a hollow star"
+        );
         assert!(
-            star.x > regions.session_id.unwrap().x,
-            "the star sits right after the id"
+            pin.x > regions.session_id.unwrap().x,
+            "the pin sits right after the id"
         );
 
         let pinned = StatusData {
@@ -837,15 +1193,259 @@ mod tests {
             ..StatusData::default()
         };
         let (text, regions) = render_bar(&pinned, SID, 120);
-        let star = regions.star.unwrap();
-        assert_eq!(slice(&text, star), "★", "pinned is a filled star");
-        assert!(!text.contains(&"☆".to_string()));
+        let pin = regions.pin.unwrap();
+        assert_eq!(slice(&text, pin).trim(), PIN_ON, "pinned is a filled star");
+        assert!(!text.contains(&PIN_OFF.to_string()));
+    }
+
+    #[test]
+    fn the_two_faces_are_the_pin_and_the_model() {
+        // 行里有两块面，都是 `Chip::key` 的安静档：pin 那三列（命中区）与模型段。
+        // 宽度、降级、明暗全在 `ui::chip`，这里钉的是"真的用了它"，不是另一份算式。
+        // （fixture 是 ASCII：宽字形的尾格在 Buffer 里是 reset 格，CJK 模型名会让
+        // `runs` 在每个字形后各切一刀 —— 那是投影的记账方式，不是真机上的缝。）
+        for palette in [ThemePalette::default(), light()] {
+            let cells = cells_with(&palette, &busy(), SID, 200);
+            let bands = runs(&cells, |cell| cell.bg != Color::Reset);
+            assert_eq!(
+                bands.len(),
+                2,
+                "{:?}: pin 与模型两块面：{bands:?}",
+                palette.appearance
+            );
+            assert_eq!(
+                span_text(&cells, bands[0]),
+                Chip::key(PIN_OFF).span(&palette, Pad::One).content.as_ref(),
+                "{:?}: 第一块是 pin",
+                palette.appearance
+            );
+            let expected = Chip::key("DeepSeek-Flash").span(&palette, Pad::One);
+            assert_eq!(
+                span_text(&cells, bands[1]),
+                expected.content.as_ref(),
+                "{:?}: 底色铺满内边距",
+                palette.appearance
+            );
+            assert_eq!(cells[bands[1].0].bg, expected.style.bg.expect("底"));
+            assert_eq!(cells[bands[1].0].fg, expected.style.fg.expect("墨"));
+        }
+    }
+
+    #[test]
+    fn the_mode_is_the_rows_only_accent() {
+        // 模式是整行唯一的强调点：品牌 / 身份 / 模型 / provider / 仪表都不用 accent。
+        // 钉住点：pin 上的星标是 `warning`（不与模式抢），没有思考时全行零 accent。
+        for palette in [ThemePalette::default(), light()] {
+            let cells = cells_with(&palette, &busy(), SID, 200);
+            let accents = runs(&cells, |cell| cell.fg == palette.accent);
+            assert_eq!(accents.len(), 1, "{:?}：一处 accent", palette.appearance);
+            assert_eq!(span_text(&cells, accents[0]), "think:medium");
+
+            let pinned = cells_with(
+                &palette,
+                &StatusData {
+                    pinned: true,
+                    ..busy()
+                },
+                SID,
+                200,
+            );
+            assert_eq!(
+                runs(&pinned, |cell| cell.fg == palette.accent).len(),
+                1,
+                "{:?}: 星标是 warning，不占 accent",
+                palette.appearance
+            );
+            assert_eq!(
+                runs(&pinned, |cell| cell.fg == palette.warning).len(),
+                1,
+                "{:?}: pin 上的星标",
+                palette.appearance
+            );
+
+            let quiet = cells_with(
+                &palette,
+                &StatusData {
+                    thinking: false,
+                    ..busy()
+                },
+                SID,
+                200,
+            );
+            assert!(
+                runs(&quiet, |cell| cell.fg == palette.accent).is_empty(),
+                "{:?}: 没有思考就没有强调点",
+                palette.appearance
+            );
+        }
+    }
+
+    /// 模型段的底色块（pin 那三列不算：它是行里的另一块面）。
+    ///
+    /// 模型段是不降级段之后的第一个可降级段，所以"pin 之后的第一块底"就是它；
+    /// pin 让出（极窄）时行里只剩模型这一块。
+    fn model_bands(cells: &[ratatui::buffer::Cell], pin: Option<Rect>) -> Vec<(usize, usize)> {
+        runs(cells, |cell| cell.bg != Color::Reset)
+            .into_iter()
+            .filter(|(start, end)| match pin {
+                Some(rect) => {
+                    !(*start >= rect.x as usize && *end <= (rect.x + rect.width) as usize)
+                }
+                None => true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_model_band_yields_by_the_ladder() {
+        // 宽度谱：模型段只有三种结局 —— 有一格气口的块 / 没有气口的块 / 整段不画。
+        // 底色宽度永远等于某一档的块（永不半块），模型文字一个不少。标签取得比
+        // fixture 长，好让「让出气口」那一档落在谱中间而不是刚好压在宽档门槛上。
+        let palette = ThemePalette::default();
+        let label = "DeepSeek-Flash-Reasoning";
+        let chip = Chip::key(label);
+        // 标签的头几个字符（按字符切：换成 CJK 标签时按字节切会 panic）。
+        let head: String = label.chars().take(8).collect();
+        let mut seen: Vec<usize> = Vec::new();
+        for width in 100..=200 {
+            let data = StatusData {
+                model: label.into(),
+                ..busy()
+            };
+            let cells = cells_with(&palette, &data, SID, width);
+            let (_, regions) = render_buffer_with(&palette, &data, SID, width);
+            let text: String = cells.iter().map(|cell| cell.symbol()).collect();
+            match model_bands(&cells, regions.pin).as_slice() {
+                // 一段都放不下：整段不画（不是切成半块，也不是留下半截名字）。
+                [] => assert!(
+                    !text.contains(&head),
+                    "width {width}: 没有底就不该有模型文字：{text:?}"
+                ),
+                [(start, end)] => {
+                    let band = end - start;
+                    assert!(
+                        band == chip.width(Pad::One) || band == chip.width(Pad::Zero),
+                        "width {width}: {band} 列宽的块不是任何一档"
+                    );
+                    assert_eq!(
+                        span_text(&cells, (*start, *end)).trim(),
+                        label,
+                        "width {width}: 块里的字一个不少"
+                    );
+                    seen.push(band);
+                }
+                other => panic!("width {width}: 模型段不止一块底 {other:?}"),
+            }
+        }
+        assert!(
+            seen.contains(&chip.width(Pad::One)),
+            "宽档画有一格气口的块：{seen:?}"
+        );
+        assert!(
+            seen.contains(&chip.width(Pad::Zero)),
+            "紧档让出气口、字不丢：{seen:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_bars_keep_the_plain_model_span() {
+        // 窄档（`wide == false`）模型不画块：裸字，墨是 `text`、不参与块的宽度数学。
+        // （pin 那块面与宽窄无关 —— 它是命中区，不是模型段的降级档。）
+        let palette = ThemePalette::default();
+        let cells = cells_with(&palette, &busy(), SID, 80);
+        let (_, regions) = render_buffer_with(&palette, &busy(), SID, 80);
+        assert!(
+            model_bands(&cells, regions.pin).is_empty(),
+            "窄终端模型不画块"
+        );
+        let text: String = cells.iter().map(|cell| cell.symbol()).collect();
+        let at = text.find("DeepSeek-Flash").expect("模型");
+        assert_eq!(cells[at].fg, palette.text, "纯文本档的墨");
+        assert_eq!(cells[at].bg, Color::Reset);
+    }
+
+    #[test]
+    fn the_mode_outlives_the_provider_when_the_row_runs_out() {
+        // 优先级：模型 → 模式 → provider。120 列 + 满配数据（24 字符 id、累计用量
+        // 全满）时 provider 让出、强调点留下；宽到放得下两者时，模式仍然排在
+        // provider 之前。
+        let tight = render_bar(&busy(), SID, 120).0.join("");
+        assert!(tight.contains("think:medium"), "{tight:?}");
+        assert!(!tight.contains("dashscope"), "{tight:?}");
+
+        let roomy = render_bar(&busy(), SID, 200).0.join("");
+        let mode = roomy.find("think:medium").expect("模式");
+        let provider = roomy.find("dashscope").expect("provider");
+        assert!(mode < provider, "模式在 provider 之前：{roomy:?}");
+    }
+
+    #[test]
+    fn a_segment_never_lands_without_its_content() {
+        // 截断发生在段边界：分隔符与内容一起进出，所以链条不会以 `·` 收尾，让出的
+        // 段也不会留下它的分隔符。
+        let forty = render_bar(&busy(), SID, 40).0.join("");
+        assert!(
+            !forty.contains('·'),
+            "身份段整段放不下 → 一个分隔符都不留：{forty:?}"
+        );
+
+        let sixty = render_bar(&busy(), SID, 60).0.join("");
+        assert!(sixty.contains("…ab12cd34"), "身份段在：{sixty:?}");
+        assert_eq!(
+            sixty.matches('·').count(),
+            1,
+            "链条停在星标上，星标之后再没有分隔符：{sixty:?}"
+        );
+    }
+
+    #[test]
+    fn the_copyable_id_outlives_the_pin_star() {
+        // ID 与星标各成一段：窄到差一两列时先让星标、ID 还在 —— ID 是「点一下复制」
+        // 的唯一可见载体。星标也永远不单独出现：没有 ID 的身份段没有意义。
+        let mut held = Vec::new();
+        for width in 20..=200 {
+            let (text, regions) = render_bar(&busy(), SID, width);
+            if regions.pin.is_some() {
+                assert!(
+                    regions.session_id.is_some(),
+                    "width {width}: 星标不能单独活着：{text:?}"
+                );
+            }
+            if regions.session_id.is_some() && regions.pin.is_none() {
+                held.push(width);
+            }
+        }
+        assert!(
+            !held.is_empty(),
+            "必须存在「ID 在、星标让出」的宽度档（先让星标的优先级）"
+        );
+    }
+
+    #[test]
+    fn the_brand_is_the_rows_only_bold() {
+        // 品牌是唯一加粗的一处：其余段（身份 / 模型 / 模式 / provider / 仪表）都靠
+        // 底色或色相分层，不靠字重。
+        for palette in [ThemePalette::default(), light()] {
+            let cells = cells_with(&palette, &busy(), SID, 200);
+            let bold = runs(&cells, |cell| {
+                cell.modifier.contains(ratatui::style::Modifier::BOLD)
+            });
+            assert_eq!(bold.len(), 1, "{:?}: 一处加粗", palette.appearance);
+            assert_eq!(
+                span_text(&cells, bold[0]),
+                " Wing",
+                "{:?}: 加粗的只有品牌",
+                palette.appearance
+            );
+        }
     }
 
     #[test]
     fn test_the_thinking_label_carries_the_effort_when_known() {
         // `· think` / `· think:high` —— 中间点与左侧链条同一套分隔符（不然
-        // `DeepSeek-Flash MacMachine think` 读起来是三个连写的词）。
+        // `DeepSeek-Flash MacMachine think` 读起来是三个连写的词）。模式排在
+        // provider **之前**：它是全行唯一的强调点，被截断吃掉的强调点不成其为强调点
+        // （见 `the_mode_outlives_the_provider_when_the_row_runs_out`）。
         let data = StatusData {
             model: "m".into(),
             provider: Some("p".into()),
@@ -853,16 +1453,16 @@ mod tests {
             ..StatusData::default()
         };
         let (text, _) = render_bar(&data, SID, 120);
-        let joined = text.join("");
-        assert!(joined.contains("m · p · think"), "无档位：{joined:?}");
+        let joined = single_spaced(&text.join(""));
+        assert!(joined.contains("m · think · p"), "无档位：{joined:?}");
 
         let data = StatusData {
             reasoning_effort: Some("high".into()),
             ..data
         };
         let (text, _) = render_bar(&data, SID, 120);
-        let joined = text.join("");
-        assert!(joined.contains("· think:high"), "带档位：{joined:?}");
+        let joined = single_spaced(&text.join(""));
+        assert!(joined.contains("think:high · p"), "带档位：{joined:?}");
     }
 
     #[test]
@@ -917,9 +1517,9 @@ mod tests {
         };
         let (text, regions) = render_bar(&data, SID, 80);
         let id = regions.session_id.expect("id drawn");
-        let star = regions.star.expect("star drawn");
+        let pin = regions.pin.expect("pin drawn");
         assert_eq!(slice(&text, id), "…ab12cd34");
-        assert_eq!(slice(&text, star), "☆");
+        assert_eq!(slice(&text, pin).trim(), PIN_OFF);
         assert!(
             !text.join("").contains("a-very-long-model-name"),
             "the model is what got dropped: {text:?}"
@@ -934,8 +1534,8 @@ mod tests {
             let (text, regions) = render_bar(&StatusData::default(), SID, width);
             let joined = text.join("");
             assert_eq!(
-                regions.star.is_some(),
-                joined.contains('☆'),
+                regions.pin.is_some(),
+                joined.contains(PIN_OFF),
                 "width {width}: {joined:?}"
             );
             match regions.session_id {
@@ -958,9 +1558,15 @@ mod tests {
     fn test_status_bar_without_a_session_id_has_no_identity_tail() {
         // 空 id = 不知道身份 → 整段不渲染（而不是画一个光秃秃的星标）。
         let (text, regions) = render_bar(&StatusData::default(), "", 120);
-        assert!(!text.iter().any(|c| c == "☆" || c == "★"), "{text:?}");
+        assert!(
+            !text.iter().any(|c| c == PIN_OFF || c == PIN_ON),
+            "{text:?}"
+        );
         assert_eq!(regions, StatusBarRegions::default());
-        assert!(text.join("").contains("Wing · unknown"), "{text:?}");
+        assert!(
+            single_spaced(&text.join("")).contains("Wing · unknown"),
+            "{text:?}"
+        );
     }
 
     /// The model identity group (id / call name / provider / label) is applied

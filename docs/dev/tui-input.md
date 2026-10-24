@@ -86,14 +86,23 @@
 
 输入框（composer）与 chat band 共用**同一个**选择状态机，但各自锚定在自己的坐标空间里——一次选择只属于**按下时所在的那个区域**（`SelectionRegion { Chat, Composer }`），跨区域的拖拽一律夹取回原区域的可见带边缘，不做跨区域合并。
 
-**卡片外框**（`tui-composer-card`）：composer 渲染为一张**悬浮卡片**——左右各留 1 列边距（`chrome::card_area` 是唯一的「悬浮」发生地：布局按卡片宽度要高度、记录卡片矩形、把 widget 渲染进它），卡身**不填底色**（与终端背景浑然一体，边界靠边框 / 提示符 / 两条轨道划出，见下），上边框是**活动栏**（spinner / 耗时 / 中断提示）、下边框是**元信息栏**（workdir / 本轮用量 / 滚动位置）。几何由 `ui/input_area/chrome.rs` 的 `Chrome` **单一描述**（文字区左起 4 列、右留 2 列、上下各 1 行边框），widget、换行宽度、光标落点、指针映射全部读它——指针不可能描述出渲染没画过的一帧；**编辑器读的是渲染出来的那个 chrome**（`InputArea::chrome()`，无帧时回落到 `chrome::UNFRAMED_WIDTH`），所以终端把 composer 压扁时（`Chrome::of` 降级成无框）换行宽度也跟着降级，不会去用一条屏幕上不存在的宽度。原来独立的「working 行 + info separator 行」都折进边框里，所以一轮运行中**不占任何额外行**。
+**卡片外框**（`tui-composer-card`）：composer 渲染为一张**悬浮卡片**——左右各留 1 列边距（`chrome::card_area` 是唯一的「悬浮」发生地：布局按卡片宽度要高度、记录卡片矩形、把 widget 渲染进它），卡身**不填底色**（与终端背景浑然一体，边界靠边框 / 提示符 / 两条轨道划出，见下；唯一的填色是轨道上那枚键帽），上边框是**活动栏**（spinner / 耗时 / 中断提示）、下边框是**元信息栏**（workdir / 本轮用量 / 滚动位置）。几何由 `ui/input_area/chrome.rs` 的 `Chrome` **单一描述**（文字区左起 4 列、右留 2 列、上下各 1 行边框），widget、换行宽度、光标落点、指针映射全部读它——指针不可能描述出渲染没画过的一帧；**编辑器读的是渲染出来的那个 chrome**（`InputArea::chrome()`，无帧时回落到 `chrome::UNFRAMED_WIDTH`），所以终端把 composer 压扁时（`Chrome::of` 降级成无框）换行宽度也跟着降级，不会去用一条屏幕上不存在的宽度。原来独立的「working 行 + info separator 行」都折进边框里，所以一轮运行中**不占任何额外行**。
 
-**边框与横线恒为 dim 静色**（不做强调）：品牌色只落在**提示符 `❯`** 与元信息栏的 workdir 上。`❯` 常态 accent —— 它是「这里可以打字」的那个字形，也是空会话里 composer 唯一的 accent（开屏时输入卡上移、下面没有任何强调色，这一格就是落点）；**键盘被接管**（ask 面板 / `/model` 面板真的在吞键，命令候选 popup 只吞导航键、不算）时整个卡片转「幽灵」——草稿**与提示符**一起按 dim 绘制，"这里现在不收键盘"在你按下第一个键之前就看得见（光标亮着而正文是灰的，就是在说反话）。判定谓词是 `App::composer_typing_blocked()`（**不是** `composer_pointer_blocked()`，后者的阈值含可见 popup）。
+**三种帧态，一个来源**（`chrome::Focus`，`Focus::of(keyboard_held, has_draft)`）：`Empty`（空草稿）/ `Draft`（有草稿）/ `Ghost`（键盘被接管）。三者只由这两个事实决定，与「一轮回合在不在跑」正交 —— `--working` + 空草稿就是 `Empty`（那时顶栏归活动栏）。
+
+* **轮廓**（三档各一种墨，只有 `Draft` 是混色）：`Ghost` 是 `dim` 静色；`Empty` 用 `tool_result` —— 还没人打字时，卡先得读成**一个框**（`dim` 挨着名牌的分节线只剩一条发丝的重量，那正是「全屏最安静的物件是唯一能敲的物件」）；`Draft` 时整条轮廓朝 `accent` 走 45%（`mix`，混出来的弱 accent，暗色 `#4C90A7` / 亮色 `#3C6F80`）。染色面是**框线本身**：四边、两条轨道行的框线，以及框线与条目之间的那几格空气；条目（workdir / 数字 / spinner）与条目之间的 ` · ` 各用原来的墨 —— 分隔符属于内容，跟着框线变亮就会比它分隔的数字更响（同一帧顶栏的 ` · ` 一直是 `dim`）。
+  焦点从此是**色相**上的事、不是明度上的事：`Empty` 与 `Draft` 的轮廓落在同一档（对纸面：暗色 6.07 对 5.35、亮色 6.39 对 5.56，`chrome` 的 `the_outline_faces_keep_their_ladder` 逐位钉住），中性冷灰转成青绿；`Ghost` 是这条带之下的一档（3.23 / 5.49）。草稿态的「我更响」由正文（`text`）与已有内容承担，轮廓只负责说「哪张卡在等键」。色相**只是冗余线索之一**（红绿色盲下两档可能并成一色），另两条是「有没有正文」与「顶栏有没有键帽」——见下一节。
+  `Draft` 那一档是**洗过的**品牌色（色相朝 accent、**彩度**低于满 accent，只有它是混色），
+  accent 预算次序是**命令 > 草稿态的 `❯` 与粘贴 / 图片 chip > 焦点轮廓 > 其他**（空卡的 `❯` 不在这条预算上，见下）。workdir 退出这条预算：路径是环境事实、不是可敲的东西，底轨的四类内容（workdir / 数字 / 位置 / 滚动百分比）统一在 `dim`，卡亮着的时候框是那条轨上唯一的亮面（`Ghost` 时整条轨全 `dim`）。两个槽有一处不是 RGB（用户写的是命名色 / `reset`）就不混、`Draft` 保持 `dim` —— 命名色跟终端主题走不固化，与 `chip::quiet_band` 同一条规矩。
+* **邀请句**：空卡那一行（`❯` 后面的占位文案）用 `tool_result` —— 与框、`❯`、`Enter` 键帽同一档（对纸面 6.07 / 6.39，仍高于 AA），**明确低于**草稿正文的 `text`（15.92 / 15.80）：占位是提示，不是内容（真机反馈：与正文同墨时，空卡读起来像「已经有内容了」）。`Ghost` 时随草稿一起降成 `dim`（卡此刻不收键盘，就不该举着一句邀请）。于是空卡的**文字区**只有一个墨档（顶栏的 `发送` 动词与底轨的内容仍在 `dim`），邀请靠**形**说：一张框、一枚键帽、一个起点；正文墨只在有草稿时出现。
+* **可发现性**：`Empty` 且没有活动栏时，顶栏右端是 `Enter 发送` —— `Enter` 是一枚**键帽**（`ui::chip` 的安静档：底在暗色是 `surface`、亮色是压深 8% 的那一档，墨 `tool_result`），`发送` 是键旁那半句 `dim` 动词（与名牌的 `Esc 中断` 同一个切分：块是**键**，动词不是）。空卡的框也用 `tool_result`，于是键帽与框线**同墨**、只靠 `surface` 面（1.4:1）分家 —— 键仍读得成键（一块面 + 五个字母成组），但这是本档的取舍：把键帽提亮就得动 `chip` 的安静档，「实心按钮」那一步留给有产品决定的时候。整块走 `RailLine::right` 的既有右槽 —— 不新增几何、不折行；12 列 + 轨道两侧各 3 列框，放不下（卡宽 < 20）就整项丢弃（不出半枚键帽）。键名写全而不是用 `⏎` 这类字形：模糊宽度的字形落在**边框行**上时，多占的那一列会把 `╮` 顶出卡外（`❯` 在文字区里只是行内错位，量级不同）。干活时顶栏是活动栏的地盘（spinner 拿 accent），`Ghost` 时卡不承诺任何键：两者都不画。
+* **`❯` 跟随草稿**：`Draft` 才是 `accent`，`Empty` 与 `Ghost` 都是安静的（空卡 `tool_result`、被接管 `dim`）—— 它是「文字从这里开始」的落点，而空卡上还没有文字：一根亮着的指针指着一句提示，就是在说反话。轮廓只是洗过的那一档，满 accent 是有草稿时 `❯` 的；粘贴 / 图片 chip 与 spinner 也用满 accent，它们各有各的约定（chip 是「这里的字」，spinner 是「在干活」）。两个寄存器分工：`❯` 指文字，轮廓说「这张卡在等你的按键」。**键盘被接管**（ask 面板 / `/model` 面板真的在吞键，命令候选 popup 只吞导航键、不算）时整张卡转「幽灵」——草稿、提示符、邀请句与轮廓一起按 `dim` 绘制，"这里现在不收键盘"在你按下第一个键之前就看得见（光标亮着而正文是灰的，就是在说反话）。判定谓词是 `App::composer_typing_blocked()`（**不是** `composer_pointer_blocked()`，后者的阈值含可见 popup）。
+* **没有动画**：帧态只随输入翻转（输入变化本来就重绘），输入卡不新增定时器、不参与 idle 循环（重绘成本契约见 [welcome-mascot.md](welcome-mascot.md)）。
 
 | 关注点 | 位置 |
 |---|---|
 | 区域抽象 / 选区状态机（纯逻辑） | `crates/wing/src/ui/selection.rs`（`SelectionRegion` / `SelectionPoint` / `bounds_in`） |
-| 卡片几何 / 两条轨道 | `crates/wing/src/ui/input_area/chrome.rs`（`Chrome` / `ActivityRail` / `MetaRail`） |
+| 卡片几何 / 两条轨道 / 帧态 | `crates/wing/src/ui/input_area/chrome.rs`（`Chrome` / `ActivityRail` / `MetaRail` / `Focus`） |
 | 屏幕 ↔ 逻辑命中、高亮 patch、选区文本 | `crates/wing/src/ui/input_area/pointer.rs` |
 | 视觉行 ↔ 逻辑行列换算原语 | `crates/wing/src/ui/input_area/wrap.rs`（`display_col_to_char` / `char_display_offset`） |
 | 单击定位光标 API | `crates/wing/src/ui/input_area/mod.rs`（`InputArea::set_cursor_from_visual`） |

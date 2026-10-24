@@ -46,7 +46,7 @@ fn test_the_card_frames_the_draft() {
     assert_eq!(
         card_row(&buf, composer, composer.y),
         format!("╭{}╮", "─".repeat(width - 2)),
-        "an idle top rail is a plain rule:\n{}",
+        "a drafted card's top rail is a plain rule:\n{}",
         frame_text(&buf)
     );
     assert_eq!(
@@ -164,13 +164,13 @@ fn test_the_meta_rail_carries_the_session_read_out() {
 
 #[test]
 fn test_the_card_keeps_the_terminal_background() {
-    let mut app = app_with_draft("hello world");
-    let (buf, composer) = draw_frame(&mut app, 40, 10);
     let palette = crate::config::ThemePalette::default();
 
-    // No fill anywhere: the card is a boundary, not a surface. Every cell of
-    // it — frame, rails and the draft between them — stays on whatever
-    // background the terminal has (the float's margins included).
+    // The card owns no surface: with a draft, frame, rails and the draft between
+    // them all stay on whatever background the terminal has (the float's margins
+    // included).
+    let mut app = app_with_draft("hello world");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
     for y in composer.y..composer.bottom() {
         for x in composer.x - 1..composer.right() + 1 {
             assert_eq!(
@@ -181,35 +181,277 @@ fn test_the_card_keeps_the_terminal_background() {
         }
     }
 
-    // The frame and its rules are one quiet gray — no accent on the edges,
-    // with or without a draft.
+    // The one fill the card may carry is a keycap on a rail — `ui::chip`'s quiet
+    // band under the empty card's invite, on the top border and nowhere else. The
+    // verb beside the key lies on the terminal's own background: the band is the
+    // *key*, not the sentence. (The float's margins are clear from the loop above.)
+    let mut app = app_with_draft("");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    // Whatever `ui::chip` picks for the quiet band *is* the band: restating the
+    // slot here would let the two drift, so this only holds it to one face.
+    let mut band: Option<ratatui::style::Color> = None;
+    let mut filled: Vec<u16> = Vec::new();
     for y in composer.y..composer.bottom() {
-        assert_eq!(buf[(composer.x, y)].fg, palette.dim, "left edge at {y}");
-        assert_eq!(
-            buf[(composer.right() - 1, y)].fg,
-            palette.dim,
-            "right edge at {y}"
+        for x in composer.x..composer.right() {
+            let bg = buf[(x, y)].bg;
+            if bg == ratatui::style::Color::Reset {
+                continue;
+            }
+            assert_ne!(bg, palette.accent, "a keycap, not a badge ({x},{y})");
+            assert_eq!(
+                *band.get_or_insert(bg),
+                bg,
+                "one face for the whole key ({x},{y})"
+            );
+            assert_eq!(y, composer.y, "a keycap belongs on the rail ({x},{y})");
+            filled.push(x);
+        }
+    }
+    assert!(!filled.is_empty(), "the invite is drawn");
+    let (first, last) = (filled[0], filled[filled.len() - 1]);
+    assert_eq!(
+        filled.len() as u16,
+        last - first + 1,
+        "one block, not a dotted run: {filled:?}"
+    );
+    // One block, and it stops where the key does: no dash, no verb inside it.
+    let cells: Vec<char> = card_row(&buf, composer, composer.y).chars().collect();
+    let rel = |x: u16| (x - composer.x) as usize;
+    let band: String = cells[rel(first)..=rel(last)].iter().collect();
+    assert!(!band.contains('─'), "the band is the key: {band:?}");
+    assert!(!band.contains('发'), "the verb is not a key: {band:?}");
+    let after: String = cells[rel(last) + 1..].iter().take(6).collect();
+    assert!(after.contains('发'), "the verb follows the key: {after:?}");
+}
+
+/// The outline's register: `tool_result` while the card waits (a box, not a
+/// hairline), one notch toward the accent while a draft waits in it, quiet again
+/// when another layer takes the keys. The exact ink is pinned in
+/// `ui::input_area::chrome`.
+#[test]
+fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
+    let palette = crate::config::ThemePalette::default();
+    let caret = |app: &App, buf: &ratatui::buffer::Buffer| {
+        let (text_x, text_y, _) = composer_text(app);
+        buf[(text_x - 2, text_y)].fg
+    };
+    let edges = |buf: &ratatui::buffer::Buffer, composer: ratatui::layout::Rect| {
+        let mut inks = Vec::new();
+        for y in composer.y..composer.bottom() {
+            inks.push(buf[(composer.x, y)].fg);
+            inks.push(buf[(composer.right() - 1, y)].fg);
+        }
+        inks
+    };
+
+    // Empty: nothing typed yet, so the frame is what says "there is a box to
+    // type into" — and the caret belongs to that box, not to a draft that is
+    // not there (one register for an empty card: the invitation must not read
+    // as content).
+    let mut app = app_with_draft("");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    assert_eq!(
+        caret(&app, &buf),
+        palette.tool_result,
+        "❯ on an empty draft"
+    );
+    for ink in edges(&buf, composer) {
+        assert_eq!(ink, palette.tool_result, "an empty card's edge is its box");
+    }
+
+    // A draft is waiting: the boundary turns toward the accent (never as far as
+    // the accent itself — the caret and the commands keep the saturated one).
+    let mut app = app_with_draft("hello world");
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    assert_eq!(caret(&app, &buf), palette.accent, "❯ with a draft");
+    for ink in edges(&buf, composer) {
+        assert_ne!(ink, palette.dim, "a drafted card's edge steps up");
+        assert_ne!(ink, palette.accent, "and it is not the full accent");
+        assert_ne!(
+            ink, palette.tool_result,
+            "and it is the hue shift that says so"
         );
     }
 
-    // The *prompt glyph* is accent while there is a draft to point at; an empty
-    // draft keeps it dim, like the placeholder it sits next to (the empty
-    // session's accent budget belongs to the workdir rail).
-    let (text_x, text_y, _) = composer_text(&app);
-    assert_eq!(
-        buf[(text_x - 2, text_y)].fg,
-        palette.accent,
-        "❯ with a draft"
-    );
+    // An ask panel holds the keys: the card ghosts as a whole, boundary included.
+    app.ask_panels
+        .push_back(required_choice_panel("call-1", &["y", "n"]));
+    let (buf, composer) = draw_frame(&mut app, 40, 10);
+    assert!(app.composer_typing_blocked(), "the panel takes the keys");
+    for ink in edges(&buf, composer) {
+        assert_eq!(ink, palette.dim, "a ghosted card promises nothing");
+    }
+}
 
-    let mut app = app_with_draft("");
-    let (buf, _) = draw_frame(&mut app, 40, 10);
-    let (text_x, text_y, _) = composer_text(&app);
-    assert_eq!(
-        buf[(text_x - 2, text_y)].fg,
-        palette.dim,
-        "❯ on an empty draft"
-    );
+/// 空卡的墨只有一档：框、`❯`、占位句、`Enter` 键帽都在 `tool_result` —— 邀请靠**形**说
+/// （一张框 + 一枚键帽 + 一个起点），不靠亮度说。正文墨（`text`）只在有草稿的卡上出现，
+/// 于是"空"与"有内容"在**墨**上就分得开（这是真机上"占位像正文"的直接反面）。
+///
+/// 亮度用**对纸面的对比度**量（`ui::chip` 的判据，明暗两套各自校准），所以这条断言
+/// 在两套 preset 上都成立 —— 裸亮度会把亮色预设的深墨当成"安静"。
+#[test]
+fn the_empty_card_is_quiet_and_a_draft_is_loud() {
+    use crate::config::ColorPreset;
+    use crate::config::colors::parse_color;
+    use crate::ui::chip;
+    use crate::ui::html::page_colors;
+    use crate::ui::shimmer::to_rgb;
+    use ratatui::style::Color;
+
+    /// 一张卡（给定 preset 与草稿）：帧、卡片矩形、文字区原点、调色板。
+    fn card(
+        preset: ColorPreset,
+        draft: &str,
+    ) -> (
+        ratatui::buffer::Buffer,
+        ratatui::layout::Rect,
+        (u16, u16),
+        crate::config::ThemePalette,
+    ) {
+        // The palette is resolved once, at construction: the frame has to be
+        // built with the preset, not recoloured after it.
+        let mut config = crate::config::AppConfig::default();
+        config.colors.preset = preset;
+        let mut app = App::new("test-session".into(), config, None);
+        app.clear_welcome();
+        app.status.workdir = Some("/tmp/ws".into());
+        app.input.set_text(draft);
+        let (buf, composer) = draw_frame(&mut app, 80, 10);
+        let (text_x, text_y, _) = composer_text(&app);
+        let palette = app.palette();
+        (buf, composer, (text_x, text_y), palette)
+    }
+
+    fn paper(palette: &crate::config::ThemePalette) -> crate::ui::shimmer::Rgb {
+        let (background, _) = page_colors(palette);
+        to_rgb(parse_color(background).expect("the page colour parses"))
+    }
+
+    /// 卡内最亮的一格：(对纸面的对比度, 它的墨)。
+    fn loudest(
+        buf: &ratatui::buffer::Buffer,
+        composer: ratatui::layout::Rect,
+        palette: &crate::config::ThemePalette,
+    ) -> (f32, Color) {
+        let paper = paper(palette);
+        let mut loudest = (0.0f32, Color::Reset);
+        for y in composer.y..composer.bottom() {
+            for x in composer.x..composer.right() {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                let level = chip::contrast(to_rgb(cell.fg), paper);
+                if level > loudest.0 {
+                    loudest = (level, cell.fg);
+                }
+            }
+        }
+        loudest
+    }
+
+    for preset in [ColorPreset::Dark, ColorPreset::Light] {
+        let (empty, card_rect, (text_x, text_y), palette) = card(preset, "");
+        let (quiet, quiet_ink) = loudest(&empty, card_rect, &palette);
+        let (drafted, drafted_rect, _, _) = card(preset, "hello world");
+        let (lit, lit_ink) = loudest(&drafted, drafted_rect, &palette);
+
+        assert_eq!(
+            quiet_ink, palette.tool_result,
+            "{preset:?}: 空卡最亮的字是提示那一档"
+        );
+        assert_eq!(lit_ink, palette.text, "{preset:?}: 有草稿时最亮的是正文");
+        // 数值：暗色 6.07 对 15.92（2.6×）、亮色 6.39 对 15.80（2.5×）。卡 2 倍：
+        // 比这更松的判据会放过「占位挪到 `thinking`（暗色 8.61）」那一类回归。
+        assert!(
+            quiet * 2.0 < lit,
+            "{preset:?}: 空卡 {quiet:.2}:1 与草稿 {lit:.2}:1 必须分得开"
+        );
+
+        // 逐格：空卡里没有一格是正文墨或强调墨。
+        for y in card_rect.y..card_rect.bottom() {
+            for x in card_rect.x..card_rect.right() {
+                let cell = &empty[(x, y)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                assert_ne!(
+                    cell.fg, palette.text,
+                    "{preset:?}: 空卡不该有正文墨 ({x},{y})"
+                );
+                assert_ne!(
+                    cell.fg, palette.accent,
+                    "{preset:?}: 空卡不该有强调墨 ({x},{y})"
+                );
+            }
+        }
+        assert_eq!(
+            empty[(text_x, text_y)].fg,
+            palette.tool_result,
+            "{preset:?}: 占位句是提示"
+        );
+        assert_eq!(
+            empty[(text_x - 2, text_y)].fg,
+            palette.tool_result,
+            "{preset:?}: `❯` 与占位同档"
+        );
+    }
+}
+
+/// "You can type here" outranks "you are here": the meta rail's path stays in
+/// the quiet slot, under the card's own ink — an environment fact is not
+/// something you can type.
+///
+/// The margin is not the same on both appearances: today `dim` sits at 3.23 vs
+/// `tool_result` 6.07 on the dark page (1.9×) and 5.49 vs 6.39 on the light one
+/// (1.16× — on a light paper `dim` is right under `tool_result`; that is the
+/// palette's doing, not this card's). The assertions hold the floors (1.5× /
+/// 1.1×); a palette change that eats the recorded ratio has to redraw this line.
+#[test]
+fn test_the_path_stays_under_the_cards_ink() {
+    use crate::config::ColorPreset;
+    use crate::config::colors::parse_color;
+    use crate::ui::chip;
+    use crate::ui::html::page_colors;
+    use crate::ui::shimmer::to_rgb;
+
+    for preset in [ColorPreset::Dark, ColorPreset::Light] {
+        let mut config = crate::config::AppConfig::default();
+        config.colors.preset = preset;
+        let mut app = App::new("test-session".into(), config, None);
+        app.clear_welcome();
+        app.status.workdir = Some("/tmp/ws".into());
+        let (buf, composer) = draw_frame(&mut app, 80, 10);
+        let palette = app.palette();
+        let (background, _) = page_colors(&palette);
+        let paper = to_rgb(parse_color(background).expect("the page colour parses"));
+
+        // The meta rail's leading item is the path: the first character on
+        // the bottom row that is not part of the frame. Walk the row's
+        // characters, not byte offsets into it — its box-drawing glyphs are
+        // three bytes each.
+        let bottom = card_row(&buf, composer, composer.bottom() - 1);
+        let path_x = bottom
+            .chars()
+            .position(|c| !matches!(c, '╰' | '╯' | '│' | '─' | ' '))
+            .expect("the workdir leads the rail") as u16;
+        assert!(
+            matches!(bottom.chars().nth(path_x as usize), Some('/' | '~')),
+            "{preset:?}: the leading item is the path:\n{bottom}"
+        );
+        let path_ink = buf[(composer.x + path_x, composer.bottom() - 1)].fg;
+        assert_eq!(path_ink, palette.dim, "{preset:?}: the path stays quiet");
+        let path = chip::contrast(to_rgb(path_ink), paper);
+        let frame = chip::contrast(to_rgb(palette.tool_result), paper);
+        let margin = match preset {
+            ColorPreset::Light => 1.1,
+            _ => 1.5,
+        };
+        assert!(
+            path * margin < frame,
+            "{preset:?}: the path ({path:.2}:1) must stay under the card's own ink ({frame:.2}:1) by {margin}×"
+        );
+    }
 }
 
 #[test]

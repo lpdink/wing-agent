@@ -13,6 +13,7 @@ use super::InputArea;
 use super::chrome;
 use super::chrome::ActivityRail;
 use super::chrome::Chrome;
+use super::chrome::Focus;
 use super::chrome::MetaRail;
 use super::model;
 use super::wrap;
@@ -24,7 +25,8 @@ use crate::render::markdown::truncate_to_display_width;
 pub struct ComposerWidget<'a> {
     input: &'a mut InputArea,
     palette: &'a ThemePalette,
-    /// Top rail content: `None` while idle (the border is then a plain rule).
+    /// Top rail content: `None` while no turn is running — the rail then shows
+    /// the frame's own state (the empty card's invite, or a plain rule).
     activity: Option<ActivityRail<'a>>,
     meta: MetaRail<'a>,
     /// Whether another layer owns the keyboard (see [`Self::keyboard_held`]).
@@ -48,9 +50,9 @@ impl<'a> ComposerWidget<'a> {
     }
 
     /// A panel (ask / model picker) owns the keyboard: the draft is frozen
-    /// behind it, so the card *ghosts* — the text goes quiet, nothing promises
-    /// that typing lands here — instead of looking ready for a keystroke it
-    /// will never get.
+    /// behind it, so the card *ghosts* — the text and the outline go quiet,
+    /// nothing promises that typing lands here — instead of looking ready for a
+    /// keystroke it will never get.
     pub fn keyboard_held(mut self, held: bool) -> Self {
         self.keyboard_held = held;
         self
@@ -78,6 +80,11 @@ impl Widget for ComposerWidget<'_> {
         // Update vertical scroll.
         self.input.update_vertical_scroll(chrome);
 
+        // The one description of what the card is; every register below reads it,
+        // so the frame, the caret and the chips cannot drift apart.
+        let has_draft = !self.input.is_empty();
+        let focus = Focus::of(self.keyboard_held, has_draft);
+
         // The frame first: the draft is painted into the rows it leaves.
         chrome::paint(
             buf,
@@ -85,17 +92,24 @@ impl Widget for ComposerWidget<'_> {
             chrome,
             self.activity.as_ref(),
             &self.meta,
+            focus,
             self.palette,
         );
 
         // A held draft is not editable right now: it is drawn the way the
         // chat draws text that is not active (dim), so the state is visible
         // without a word of explanation.
-        let draft_style = if self.keyboard_held {
-            Style::default().fg(self.palette.dim)
+        let ghosted = matches!(focus, Focus::Ghost);
+        // The body ink of a *draft*. An empty card has no body: its invitation
+        // is a hint, so it wears the card's own ink (the frame's, see
+        // `chrome::card_ink`) — the same brightness as a draft's text is what
+        // made an empty card read as "there is already something here".
+        let body_ink = if ghosted {
+            self.palette.dim
         } else {
-            Style::default().fg(self.palette.text)
+            self.palette.text
         };
+        let draft_style = Style::default().fg(body_ink);
 
         let first_row_y = area.y + chrome.top_row();
         let visible_rows = chrome.text_rows as usize;
@@ -109,16 +123,19 @@ impl Widget for ComposerWidget<'_> {
             // The prompt glyph opens the draft — first visual row of the first
             // logical line only; every other row keeps the text alignment.
             //
-            // accent = "there is a draft here"; an **empty** composer keeps it
-            // dim, like the placeholder it sits next to (the empty session's
-            // accent budget belongs to the workdir rail, not a caret with
-            // nothing to point at). Same when another layer owns the keyboard:
-            // the draft is drawn dim there, so a lit caret would contradict it.
+            // It is the pointer at the place typing lands, so it follows the
+            // draft: `accent` while something actually waits there (the caret
+            // and the pasted chips are the row's saturated inks), the card's
+            // own ink while the card is still empty — an empty card carries
+            // one register, and the point of it is that the invitation must
+            // not look like content. A card whose keys another layer holds
+            // keeps the ghost's `dim` (which is what the card's ink is then).
             if chrome.card && vr.logical_line == 0 && vr.char_start == 0 {
-                let ink = if self.keyboard_held || self.input.is_empty() {
-                    self.palette.dim
-                } else {
-                    self.palette.accent
+                let ink = match focus {
+                    Focus::Draft => self.palette.accent,
+                    // 空卡与幽灵态都穿卡自己的墨（`tool_result` / `dim`）：一个来源，
+                    // 见 `chrome::card_ink`。
+                    quiet => chrome::card_ink(quiet, self.palette),
                 };
                 buf.set_span(
                     area.x + chrome::PROMPT_X,
@@ -130,8 +147,11 @@ impl Widget for ComposerWidget<'_> {
 
             let text_x = area.x + chrome.text_x;
 
-            // Empty first line → show placeholder.
-            if vr.logical_line == 0 && vr.char_start == 0 && self.input.is_empty() {
+            // Empty first line → show the placeholder, in the card's own ink: it
+            // is a sentence that tells you what could go here, not something you
+            // wrote, so it stays one notch under the body. A ghosted card drops
+            // it to `dim` with its draft — the card promises nothing right now.
+            if vr.logical_line == 0 && vr.char_start == 0 && !has_draft {
                 let placeholder_w = self.input.placeholder.width();
                 let placeholder = if placeholder_w > text_area_w {
                     truncate_to_display_width(&self.input.placeholder, text_area_w)
@@ -143,7 +163,7 @@ impl Widget for ComposerWidget<'_> {
                     y,
                     &Line::from(Span::styled(
                         placeholder,
-                        Style::default().fg(self.palette.dim),
+                        Style::default().fg(chrome::card_ink(focus, self.palette)),
                     )),
                     chrome.text_width,
                 );
@@ -161,7 +181,7 @@ impl Widget for ComposerWidget<'_> {
             if runs.is_empty() {
                 continue;
             }
-            let chip_style = if self.keyboard_held {
+            let chip_style = if ghosted {
                 draft_style
             } else {
                 Style::default().fg(self.palette.accent)
@@ -194,8 +214,16 @@ mod tests {
     use super::*;
     use crate::ui::status_bar::TurnUsage;
 
-    /// Render one composer card and return the prompt glyph's foreground.
-    fn prompt_ink(draft: &str) -> Option<Color> {
+    /// The two inks the card's first text row opens with.
+    struct FirstRow {
+        /// The `❯` glyph.
+        caret: Option<Color>,
+        /// The first cell of the text behind it (placeholder or draft).
+        text: Option<Color>,
+    }
+
+    /// Render one 60-column card and read the inks of its first text row.
+    fn first_row(draft: &str, keyboard_held: bool) -> FirstRow {
         let palette = ThemePalette::default();
         let mut input = InputArea::new("ask anything");
         input.set_text(draft);
@@ -203,19 +231,70 @@ mod tests {
         let area = Rect::new(0, 0, 60, 3);
         let mut buf = Buffer::empty(area);
         ComposerWidget::new(&mut input, &palette, None, MetaRail::bare(&usage))
+            .keyboard_held(keyboard_held)
             .render(area, &mut buf);
-        // The prompt opens the first draft row, right of the card's border.
-        let x = area.x + chrome::PROMPT_X;
-        let y = area.y + Chrome::of(area).top_row();
-        buf[(x, y)].style().fg
+        // The prompt opens the first draft row, right of the card's border; the
+        // text starts two cells further right.
+        let chrome = Chrome::of(area);
+        let y = area.y + chrome.top_row();
+        FirstRow {
+            caret: buf[(area.x + chrome::PROMPT_X, y)].style().fg,
+            text: buf[(area.x + chrome.text_x, y)].style().fg,
+        }
     }
 
-    /// An empty composer keeps the caret dim (it sits next to a dim
-    /// placeholder); a draft lights it with the accent.
+    /// The caret is the pointer at the place typing lands, so it follows the
+    /// draft: `accent` while a draft waits in the card, the frame's own
+    /// `tool_result` while the card is still empty (one register for a card
+    /// that has nothing in it), and `dim` when another layer holds the keys.
     #[test]
-    fn the_caret_follows_whether_a_draft_exists() {
+    fn the_caret_follows_the_draft() {
         let palette = ThemePalette::default();
-        assert_eq!(prompt_ink(""), Some(palette.dim), "empty: dim");
-        assert_eq!(prompt_ink("hello"), Some(palette.accent), "draft: accent");
+        assert_eq!(
+            first_row("", false).caret,
+            Some(palette.tool_result),
+            "empty: the caret belongs to the card, not to a draft"
+        );
+        assert_eq!(
+            first_row("hello", false).caret,
+            Some(palette.accent),
+            "draft: accent"
+        );
+        for draft in ["", "hello"] {
+            assert_eq!(
+                first_row(draft, true).caret,
+                Some(palette.dim),
+                "held keys: dim, with or without a draft ({draft:?})"
+            );
+        }
+    }
+
+    /// The placeholder is a hint, so it wears the hint ink (`tool_result`) —
+    /// clearly under the body a draft is written in. That the two differ is the
+    /// whole point: an invitation drawn at body brightness reads as content. A
+    /// ghosted card drops it to `dim` with everything else.
+    #[test]
+    fn the_placeholder_is_a_hint_not_the_body() {
+        let palette = ThemePalette::default();
+        assert_eq!(
+            first_row("", false).text,
+            Some(palette.tool_result),
+            "empty: the invitation is one notch under the body"
+        );
+        assert_ne!(
+            first_row("hello", false).text,
+            first_row("", false).text,
+            "a draft and the invitation are not the same ink"
+        );
+        assert_eq!(
+            first_row("hello", false).text,
+            Some(palette.text),
+            "a draft is the body"
+        );
+        assert_eq!(
+            first_row("", true).text,
+            Some(palette.dim),
+            "held keys: nothing promises this is live"
+        );
     }
 }

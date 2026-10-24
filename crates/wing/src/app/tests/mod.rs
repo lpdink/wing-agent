@@ -18,6 +18,7 @@ mod scrollbar;
 mod selection;
 mod send;
 mod settings;
+mod splash_frame;
 mod support;
 mod usage;
 mod welcome;

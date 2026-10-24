@@ -202,14 +202,16 @@ impl ColorPreset {
 /// `wing config` render this table; [`ColorsConfig`]'s fields deliberately do
 /// not repeat the copy, so there is no second version to drift.
 pub(crate) mod slot_doc {
-    pub(crate) const ACCENT: &str = "Brand color: logo, commands, links, popups.";
+    pub(crate) const ACCENT: &str =
+        "Brand color: logo, commands, links, popups — and the badge fill.";
     pub(crate) const TEXT: &str = "Primary text: messages, model name, input.";
     pub(crate) const THINKING: &str =
         "Thinking: agent reasoning content (more prominent than dim).";
     pub(crate) const THINKING_LABEL: &str =
         "Thinking label: the `⦁ 深度思考中 4s` summary line (and its sweep base).";
-    pub(crate) const TOOL_RESULT: &str = "Tool result: tool call output (secondary data).";
-    pub(crate) const DIM: &str = "Quiet register: borders, gutters, separators — and tool-call \
+    pub(crate) const TOOL_RESULT: &str = "Tool result: tool call output (secondary data), keycap \
+                                          labels, and the empty composer's frame.";
+    pub(crate) const DIM: &str = "Quiet register: rules, gutters, separators — and tool-call \
                                   args / timers (secondary metadata).";
     pub(crate) const SUCCESS: &str = "Success: diff+, token low.";
     pub(crate) const WARNING: &str = "Warning: pending, token mid.";
@@ -223,7 +225,7 @@ pub(crate) mod slot_doc {
     pub(crate) const MARKER: &str =
         "List marks: bullets, ordered numbers, task boxes — and the table header band.";
     pub(crate) const QUOTE: &str = "Blockquote: the bar and the quoted voice.";
-    pub(crate) const SURFACE: &str = "Surface: user message background.";
+    pub(crate) const SURFACE: &str = "Surface: user message background, keycap fill, badge ink.";
     pub(crate) const DIFF_ADD_BG: &str =
         "Background tint for diff additions (text keeps syntax colors).";
     pub(crate) const DIFF_DEL_BG: &str = "Background tint for diff deletions.";
