@@ -243,8 +243,8 @@ fn test_the_edge_follows_the_draft_and_the_held_keyboard() {
         inks
     };
 
-    // Empty: the workdir's accent and the `❯` are the only brand colour on the
-    // card, so the boundary stays out of the way.
+    // Empty: the draft is dim and the card has nothing to point at, so the
+    // boundary stays out of the way too.
     let mut app = app_with_draft("");
     let (buf, composer) = draw_frame(&mut app, 40, 10);
     assert_eq!(caret(&app, &buf), palette.dim, "❯ on an empty draft");

@@ -357,9 +357,7 @@ fn rail(buf: &mut Buffer, area: Rect, y: u16, line: RailLine) {
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(items.len() * 2 + right.len() + 4);
     spans.push(Span::styled(left_corner.to_string(), ink));
 
-    // The right block first: it is short and it must not be squeezed out — the
-    // scroll read-out is the whole point of reporting the position there, and
-    // the invite has nowhere else to live.
+    // The right block first — see this function's doc for why it is reserved.
     let right_w: usize = right.iter().map(|s| s.width()).sum();
     let keep_right = right_w > 0 && right_w + FRAME + FRAME <= inner;
     let reserved = if keep_right { right_w + FRAME } else { 0 };
@@ -1004,6 +1002,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The air the rail puts around its items belongs to the frame, not to the
+    /// items: on a lit frame the framing cells are lit and the workdir keeps the
+    /// saturated accent it always had.
+    #[test]
+    fn the_frame_lights_the_air_around_an_item_not_the_item() {
+        let palette = palette();
+        let usage = TurnUsage::default();
+        let meta = MetaRail {
+            workdir: Some("/tmp/ws"),
+            usage: &usage,
+            total_lines: 0,
+            visible_height: 0,
+            scroll_offset: 0,
+        };
+        let buf = card_buf(60, Focus::Draft, None, &meta, &palette);
+        let ink = frame_ink(Focus::Draft, &palette);
+        // `╰─ <workdir> ────╯`: the `─ ` before the item and the ` ` after it.
+        assert_eq!(buf[(1, 2)].fg, ink, "the framing dash");
+        assert_eq!(buf[(2, 2)].fg, ink, "the air before the item");
+        assert_eq!(
+            buf[(3, 2)].fg,
+            palette.accent,
+            "the workdir keeps its accent"
+        );
+        let after_item = 3 + "/tmp/ws".len() as u16;
+        assert_eq!(buf[(after_item, 2)].fg, ink, "the air after the item");
     }
 
     /// The frame follows the focus; the punctuation between two items does not.
