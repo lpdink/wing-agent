@@ -7,9 +7,11 @@ gateway 关闭时会不会挂住或假装正常返回。
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
+from _support import wait_until_async
 from wing.background import BackgroundScheduler
 
 pytestmark = pytest.mark.asyncio
@@ -51,7 +53,9 @@ async def test_job_not_due_is_skipped():
     ran: list[int] = []
     scheduler.add_job("later", 3600, lambda: ran.append(1))
     scheduler.start()
-    await asyncio.sleep(0.05)
+    # 这个 job 3600s 后才到期，循环只会挂起；等 20ms 是给「等待被算错」留的窗口——
+    # 若 `_run` 退化成忙循环（wait ≤ 0），到期判定会在这一窗口里反复执行。
+    await asyncio.sleep(0.02)
 
     await scheduler.stop()
 
@@ -64,10 +68,10 @@ async def test_due_job_runs_and_reschedules():
     scheduler.add_job("tick", 0.02, lambda: ran.append(1))
     scheduler.start()
 
-    await asyncio.sleep(0.12)
+    await wait_until_async(lambda: len(ran) >= 2, timeout=5.0)  # 多轮触发
     await scheduler.stop()
 
-    assert len(ran) >= 2  # 多轮触发：跑完先排下一次，不忙循环
+    assert len(ran) >= 2  # 跑完先排下一次，不忙循环
     assert scheduler.jobs == ["tick"]
 
 
@@ -83,7 +87,10 @@ async def test_failing_job_does_not_kill_loop(wing_warnings):
     scheduler.add_job("ok", 0.02, lambda: healthy.append(1))
     scheduler.start()
 
-    await asyncio.sleep(0.1)
+    await wait_until_async(
+        lambda: bool(healthy) and any("job 'boom' failed" in m for m in wing_warnings),
+        timeout=5.0,
+    )
     await scheduler.stop()
 
     assert healthy  # 健康 job 照常跑
@@ -94,16 +101,24 @@ async def test_stop_waits_for_running_job():
     """stop 等正在执行的 job 跑完（不再触发后续轮次）。"""
     scheduler = BackgroundScheduler()
     finished: list[str] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
     async def slow() -> None:
-        await asyncio.sleep(0.05)
+        entered.set()
+        await release.wait()
         finished.append("done")
 
     scheduler.add_job("slow", 0.01, slow)
     scheduler.start()
-    await asyncio.sleep(0.03)  # 让 slow 开始执行
+    await asyncio.wait_for(entered.wait(), timeout=5.0)  # job 已在执行
 
-    await scheduler.stop()
+    stop_task = asyncio.create_task(scheduler.stop())
+    await asyncio.sleep(0)  # 让 stop 跑到「等循环任务」处
+    assert not stop_task.done(), "job 还在跑，stop 不得返回"
+
+    release.set()
+    await asyncio.wait_for(stop_task, timeout=5.0)
 
     assert finished == ["done"]
 
@@ -173,7 +188,7 @@ async def test_initial_delay_zero_runs_immediately():
     scheduler.add_job("now", 3600, lambda: ran.append(1), initial_delay_seconds=0)
     scheduler.start()
 
-    await asyncio.sleep(0.05)
+    await wait_until_async(lambda: bool(ran), timeout=5.0)
     await scheduler.stop()
 
     assert ran == [1]  # 首轮跑了、周期没到（3600s）
@@ -181,14 +196,18 @@ async def test_initial_delay_zero_runs_immediately():
 
 async def test_initial_delay_defers_first_run():
     """``initial_delay_seconds`` 给定时首轮延后（只改写首轮触发时刻）。"""
+    delay = 0.1
     scheduler = BackgroundScheduler()
     ran: list[int] = []
-    scheduler.add_job("later", 0.02, lambda: ran.append(1), initial_delay_seconds=0.1)
+    scheduler.add_job("later", 0.02, lambda: ran.append(1), initial_delay_seconds=delay)
     scheduler.start()
+    started = time.monotonic()
 
-    await asyncio.sleep(0.05)
-    assert ran == []  # 还没到首轮窗口
-    await asyncio.sleep(0.12)
+    await wait_until_async(lambda: bool(ran), timeout=5.0)
+    elapsed = time.monotonic() - started
     await scheduler.stop()
 
+    # 下界断言：参数被忽略（首轮退化成按 0.02 的 interval 排）或延迟被压小都会立刻红；
+    # 负载只会让它更晚，不会假失败。
+    assert elapsed >= delay, elapsed
     assert ran  # 窗口过后照常跑（并按周期续跑）

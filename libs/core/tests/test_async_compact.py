@@ -101,14 +101,17 @@ class TestEarlyTrigger:
         cm.add_message(Message(role="user", content="x" * 800))
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
-        prov = _mock_provider(delay=0.5)
+        prov = _mock_provider()
         await cm.get_messages_for_llm(
             model="m", model_provider=prov, current_tools=lambda: []
         )
         # Background task should be started
         assert cm._pending_compact_task is not None
-        # Wait for task to complete
-        await asyncio.sleep(0.6)
+        # 调用方不等它：创建 task 之后到返回没有 await，结果必然还没就绪
+        # （改成内联 await 会立刻红）。
+        assert cm._pending_compact_result is None
+        # 等任务本身收敛（不猜时长）。
+        await cm._pending_compact_task
         assert cm._pending_compact_result is not None
 
     @pytest.mark.asyncio
@@ -121,14 +124,14 @@ class TestEarlyTrigger:
         cm.add_message(Message(role="user", content="x" * 800))
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
-        prov = _mock_provider(delay=0.1)
+        prov = _mock_provider()
         await cm.get_messages_for_llm(
             model="m", model_provider=prov, current_tools=lambda: []
         )
 
         # Wait for task to complete → result is set
         if cm._pending_compact_task:
-            await asyncio.sleep(0.3)
+            await cm._pending_compact_task
         assert cm._pending_compact_result is not None
 
         # Second call: result exists, tokens < context_window_tokens
@@ -278,7 +281,7 @@ class TestBackgroundTaskFailure:
         )
 
         if cm._pending_compact_task:
-            await asyncio.sleep(0.2)  # let task fail
+            await cm._pending_compact_task  # 失败在任务内被吞掉（记 warning）
             assert cm._pending_compact_result is None
 
     @pytest.mark.asyncio
@@ -346,14 +349,14 @@ class TestAwaitRunningTask:
         cm.add_message(Message(role="user", content="x" * 800))
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
-        prov = _mock_provider(delay=0.1)
+        prov = _mock_provider(delay=0.05)
         await cm.get_messages_for_llm(
             model="m", model_provider=prov, current_tools=lambda: []
         )
 
         # Wait for task to complete
         if cm._pending_compact_task:
-            await asyncio.sleep(0.3)
+            await cm._pending_compact_task
 
         # Result should be ready
         assert cm._pending_compact_result is not None

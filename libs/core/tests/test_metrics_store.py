@@ -950,11 +950,15 @@ class TestBackfill:
         assert written == {"20260102-030405-abcdef", "20260103-030405-abcdef"}
 
     def test_a_blocked_write_lock_does_not_fall_back_to_autocommit(
-        self, tmp_path: Path, db: Database
+        self, tmp_path: Path, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """拿不到写锁 → 整批一行不落，且只等诊断档（绝不在自动提交里逐条写）。"""
         store = _store(tmp_path)
         store.save_metadata("20260102-030405-abcdef", SessionMetadata(tags=LISTED))
+
+        # 诊断档等锁上限按消费方缩小（与生产同一常量名、同一路径）：真正要抓的
+        # 是「退化成稳态 5000ms 等锁」，那条路径用的不是这个常量，所以照样会被抓。
+        monkeypatch.setattr("wing.metrics.catalog.DIAGNOSTIC_BUSY_TIMEOUT_MS", 50)
 
         blocker = sqlite3.connect(db.path, isolation_level=None)
         try:

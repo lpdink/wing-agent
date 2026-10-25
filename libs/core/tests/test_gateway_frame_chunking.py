@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import WebSocket
 
-from _support import gateway_auth_config
+from _support import gateway_auth_config, wait_until_async
 from wing.config import ApiKeyEntry
 from wing.event import EventTarget, NoticeEvent, wire_dump
 from wing.event_bus import event_bus
@@ -230,7 +230,7 @@ class TestChunkedDelivery:
         event = _notice("x" * 2000)
         payload = json.dumps(wire_dump(event))
         server._on_event(event)
-        await asyncio.sleep(0.05)
+        await wait_until_async(lambda: len(stub.sent) >= 2)
 
         assert len(stub.sent) >= 2, f"超限载荷必须切分：{len(stub.sent)}"
         envelopes = [json.loads(t) for t in stub.sent]
@@ -260,7 +260,9 @@ class TestChunkedDelivery:
                 target=EventTarget(scope="client", client_ids=["client-client"]),
             )
         )
-        await asyncio.sleep(0.05)
+        await wait_until_async(
+            lambda: len(global_stub.sent) >= 2 and len(client_stub.sent) >= 2
+        )
 
         def shape(sent: list[str]) -> list[dict]:
             # `id` 按事件生成，逐事件不同；其余帧形状必须一致。
@@ -291,7 +293,7 @@ class TestChunkedDelivery:
             patch("wing.gateway.server.log") as mock_log,
         ):
             server._on_event(event)
-            await asyncio.sleep(0.05)
+            await wait_until_async(lambda: spy.await_count == len(deliverable))
 
         assert spy.await_count == len(deliverable), "不超限的帧必须照常投递"
         assert mock_log.warning.call_count == len(oversized), "每帧丢弃恰一行 WARN"
@@ -314,8 +316,9 @@ class TestChunkedDelivery:
         _register(server, _as_ws(stub))
 
         server._on_event(_notice("x" * 2000))
-        await asyncio.sleep(0.05)
-        assert len(stub.sent) >= 2
+        await wait_until_async(
+            lambda: len(stub.sent) >= 2, msg="超限载荷必须切分成多帧"
+        )
 
     async def test_send_failure_stops_remaining_frames(self, monkeypatch):
         monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 300)
@@ -326,10 +329,11 @@ class TestChunkedDelivery:
         event_bus.route_attach("dead-client", SESSION)
 
         server._on_event(_notice("x" * 2000))
-        await asyncio.sleep(0.05)
+        await wait_until_async(
+            lambda: "dead-client" not in server.clients, msg="写失败必须回收客户端"
+        )
 
         assert len(stub.sent) == 1, "第 1 帧失败后必须停止剩余帧"
-        assert "dead-client" not in server.clients, "写失败必须回收客户端"
 
     @pytest.mark.timeout(10)
     async def test_write_timeout_stops_remaining_frames(self, monkeypatch):
@@ -341,9 +345,10 @@ class TestChunkedDelivery:
         event_bus.route_attach("slow-client", SESSION)
 
         server._on_event(_notice("x" * 2000))
-        await asyncio.sleep(0.3)
+        await wait_until_async(
+            lambda: "slow-client" not in server.clients, msg="写超时必须回收客户端"
+        )
 
-        assert "slow-client" not in server.clients, "写超时必须回收客户端"
         assert "slow-client" not in event_bus.routing_table
 
     async def test_small_events_keep_the_single_frame_path(self):
@@ -354,9 +359,9 @@ class TestChunkedDelivery:
 
         event = _notice("hello")
         server._on_event(event)
-        await asyncio.sleep(0.05)
+        await wait_until_async(lambda: len(stub.sent) >= 1)
 
-        assert stub.sent == [json.dumps(wire_dump(event))]
+        assert stub.sent == [json.dumps(wire_dump(event))], "小事件必须单帧且逐字节不变"
 
 
 class TestEagerChunking:
