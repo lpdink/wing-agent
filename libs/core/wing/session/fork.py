@@ -79,19 +79,25 @@ def _record_draft(record: dict) -> str:
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
     """复制记录（顺带规范化）并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
-    重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
-    所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
-    重映射后子记录集自洽：不留悬空引用，也不需要清空任何引用——压缩节点的
-    unzip 指向重映射后的区间末记录，子会话的 fork 候选列表与源会话一致。
+    重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` / ``usage_boundary_uuid``
+    四个键。``parent_uuid`` / ``unzip_last_uuid`` 的引用必然指向前缀内部（parent 更早
+    创建、unzip 指向区间末），重映射后子记录集自洽——压缩节点的 unzip 指向重映射后的
+    区间末记录，子会话的 fork 候选列表与源会话一致。
 
-    缺省是防御：万一出现前缀外的引用，宁可让它成为根节点（删键 = 缺席即默认），
-    也不留跨 session 的引用。
+    ``usage_boundary_uuid``（usage 边界）是唯一可能指向前缀之外的键：fork 点
+    落在压缩后被保留的 tail 中间时，边界（换入时刻的链尖）在后头。这种情形**钉到前缀
+    末条记录**（= 子会话的活跃链尖）——语义精确："子会话链上的东西全部早于那次换入"。
+    删键会让读取侧按"没有边界"降级成信任保留区的压缩前 usage，正是 issue #247 要消灭
+    的错口径。
+
+    缺省是防御：``parent_uuid`` / ``unzip_last_uuid`` 万一是前缀外引用，宁可让它成为根
+    节点（删键 = 缺席即默认），也不留跨 session 的引用。
 
     ``canonical_record`` 让**复制也走落盘规范形**：fork 直接复用源记录的原始
     dict（不经 ``TrackedList._to_record``），不过这一道，存量旧形态的冗余字段
     （派生扁平字段 / null）就会被逐字节搬进子会话，越 fork 越多。
 
-    只做**顶层浅拷贝**：重写的三个键都在顶层，而记录（含嵌套值）对读取方
+    只做**顶层浅拷贝**：重写的键都在顶层，而记录（含嵌套值）对读取方
     一律只读（``MessageLog`` 的记录契约：file 后端每次重新解析，memory
     后端直接交出内部结构，两边都没有就地改写记录的路径），深拷贝没有额外
     保护面。
@@ -102,6 +108,15 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
         uuid = clone.get("uuid")
         if isinstance(uuid, str):
             uuid_map[uuid] = str(uuid4())
+    # 前缀末条记录（= 子会话加载后的活跃链尖）：前缀外引用没有更精确的落点。
+    # 末条记录缺 uuid（损坏日志）时退到前缀里**最后一条有 uuid 的记录**——宁可钉在
+    # 次末条，也不删键：删键 = 「链上没有边界」→ 信任整链，正是 #247 消灭的错口径。
+    prefix_tip_uuid: str | None = None
+    for clone in reversed(clones):
+        last_uuid = clone.get("uuid")
+        if isinstance(last_uuid, str):
+            prefix_tip_uuid = uuid_map.get(last_uuid)
+            break
     for clone in clones:
         for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
             value = clone.get(key)
@@ -114,6 +129,16 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
                 clone.pop(key, None)
             else:
                 clone[key] = mapped
+    # usage 边界是另一种策略（前缀外不是删键而是钉住），单独一段：
+    for clone in clones:
+        boundary = clone.get("usage_boundary_uuid")
+        if not isinstance(boundary, str):
+            continue
+        pinned = uuid_map.get(boundary) or prefix_tip_uuid
+        if pinned is None:  # 空前缀（不会发生）：删键 = 缺席
+            clone.pop("usage_boundary_uuid", None)
+        else:
+            clone["usage_boundary_uuid"] = pinned
     return clones
 
 

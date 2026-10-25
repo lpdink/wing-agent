@@ -16,7 +16,10 @@
   内存里的 task / result 全没了）——下一轮请求照样 apply。
 - **relink 只换链坐标**：apply 重链接保留区（tail）时整条复制消息——上下文事实
   与 provider 审计字段（`stop_reason` / `usage`）、媒体引用都随行（手抄字段清单
-  会随 schema 漂移，静默丢字段）。
+  会随 schema 漂移，静默丢字段）。保留区里那份 `usage` 是**审计事实**（那一轮
+  服务端回了什么），不是当前窗口的大小——压缩节点上的 `usage_boundary_uuid`
+  才是 token 口径的锚点（见 `scenarios/test_auto_compact.py::
+  test_applied_compact_does_not_trust_pre_compact_tokens`）。
 
 确定性来源（不是等待运气）：`@pytest.mark.probe_env` 把上下文窗口压到千级，
 剧本用 `usage.prompt_tokens` 精确驱动阈值；"待生效状态已落盘"用**轮询到 aux
@@ -25,13 +28,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 
 import pytest
 
 from wing_probe import (
+    PENDING_KEY,
     LoggedRequest,
     Probe,
     Session,
@@ -39,6 +41,7 @@ from wing_probe import (
     Usage,
     assert_compact_transition,
     message_semantics,
+    wait_pending,
 )
 from wing_probe.history.view import COMPACT_PREFIX, HistoryView
 
@@ -57,13 +60,6 @@ SERVER_TOKENS = 1100
 #: 压缩产物（假 Provider 的压缩调用返回带 ``<summary>`` 的文本）。
 SUMMARY_TEXT = "Task: answer the user. State: two turns done. Next: continue."
 COMPACT_CONTENT = f"{COMPACT_PREFIX} {SUMMARY_TEXT}"
-
-#: aux kv 通道的 key（``ContextManager._PENDING_COMPACT_AUX_KEY``）。
-PENDING_KEY = "pending_compact"
-
-#: 轮询预算：后台压缩是本地一次 HTTP 往返，给足余量即失败可读。
-PENDING_DEADLINE = 20.0
-POLL_INTERVAL = 0.05
 
 #: 主调用与后台压缩**共用**的回复文本：压缩请求与主调用是并发发出的两条
 #: 请求（谁先到假 Provider 由事件循环调度决定），两轮的剧本因此写成同文本，
@@ -101,28 +97,6 @@ def _streamed(probe: Probe, model: str) -> list[LoggedRequest]:
 def _compact_calls(probe: Probe, model: str) -> list[LoggedRequest]:
     """某 model 的非流式留档（压缩调用）。"""
     return [request for request in probe.requests_for(model) if not request.stream]
-
-
-async def _wait_pending(
-    probe: Probe, session: Session, *, deadline: float = PENDING_DEADLINE
-) -> dict:
-    """轮询到 pending compact 已落盘（返回 aux 内容）。
-
-    失败报告带上请求留档：超时意味着"后台 task 没跑成 / 没落盘"，
-    留档能立刻区分"压缩请求压根没发出"与"发出但结果没落盘"。
-    """
-    observed: dict | None = None
-    expires = time.monotonic() + deadline
-    while time.monotonic() < expires:
-        observed = probe.history(session).aux(PENDING_KEY)
-        if observed is not None:
-            return observed
-        await asyncio.sleep(POLL_INTERVAL)
-    raise AssertionError(
-        f"no pending compact under key {PENDING_KEY!r} within {deadline:.0f}s "
-        f"(aux path: {probe.history(session).aux_path(PENDING_KEY)}); "
-        f"requests: {probe.requests.summary()}"
-    )
 
 
 def _assert_early_compact_shape(probe: Probe, model: str, pending: dict) -> None:
@@ -204,7 +178,7 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
 
     # 第二轮：服务端 usage 跨过 early 阈值 → 后台压缩（主调用照常跑完）。
     await session.chat("beta")
-    pending = await _wait_pending(probe, session)
+    pending = await wait_pending(probe, session)
     _assert_early_compact_shape(probe, EARLY_MODEL, pending)
 
     # pending 的内容 = 被压缩区间两端（最后一条 user 消息之前的部分）——尚未生效。
@@ -257,7 +231,7 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
-    pending = await _wait_pending(probe, session)
+    pending = await wait_pending(probe, session)
     _assert_early_compact_shape(probe, RESTART_MODEL, pending)
 
     before_apply = probe.history(session)
@@ -304,6 +278,15 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
 #: 保留区事实场景的私有 model 名。
 TAIL_MODEL = "probe/auto-compact-tail-facts"
 
+#: 「压缩换入后那一轮没有真实 usage」场景的私有 model 名。
+STALE_MODEL = "probe/auto-compact-stale-usage"
+
+#: 同一剧本跨网关重启的私有 model 名。
+BASELINE_RESTART_MODEL = "probe/auto-compact-baseline-restart"
+
+#: 压缩后口径回到服务端值的 prompt_tokens（换入之后的那一轮真实 usage）。
+RECOVERED_TOKENS = 300
+
 
 @pytest.mark.probe_env(
     models=[TAIL_MODEL],
@@ -320,13 +303,17 @@ async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
     THEN 保留区里被重链接的 assistant 记录：上下文事实与 apply 前逐字段等价
     （``message_semantics``，uuid 是新的），且 ``stop_reason`` / ``usage`` 仍在
     ——"重链接"是换链坐标，不是重造消息（截断审计不得因压缩凭空消失）。
+
+    这份 ``usage`` 是**审计事实**（压缩前那一轮服务端回了什么），不参与"当前
+    context 大小"的判定：口径锚在压缩节点的 ``usage_boundary_uuid`` 上，见
+    ``test_applied_compact_does_not_trust_pre_compact_tokens``。
     """
     probe.register(TAIL_MODEL, *_script())
     session = await probe.session(model=TAIL_MODEL)
 
     await session.chat("alpha")
     await session.chat("beta")
-    await _wait_pending(probe, session)
+    await wait_pending(probe, session)
 
     before_apply = probe.history(session)
     retained_before = [
@@ -361,3 +348,163 @@ async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
     assert relinked.get("stop_reason") == "stop", relinked
     assert relinked["usage"]["prompt_tokens"] == SERVER_TOKENS, relinked
     final.assert_chain_invariants()
+
+
+def _no_usage_script() -> tuple[Turn, ...]:
+    """剧本：压缩换入之后那一轮**不带 usage**（模拟不回带 usage 的兼容网关）。
+
+    前四轮与 ``_script`` 同构（主调用 / 后台压缩共用同一段文本，消除到达顺序的
+    竞态）；第 4 轮是换入之后的主调用，``usage`` 缺省 = 全零——落链的 assistant
+    的 ``prompt_tokens`` 为 0，服务端口径里"最后一条有 usage 的 assistant"因此
+    仍是保留区里那条**压缩前**的回复。第 5 轮回到真实 usage（口径自愈）。
+    """
+    full = Usage(prompt_tokens=SERVER_TOKENS)
+    return (
+        Turn.of(text="reply one", usage=full),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=full),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=full),
+        Turn.of(text="post compact reply"),
+        Turn.of(text="delta reply", usage=Usage(prompt_tokens=RECOVERED_TOKENS)),
+    )
+
+
+def _boundary_of(probe: Probe, session: Session) -> tuple[dict, dict | None]:
+    """取活跃链根（压缩节点）与它的 usage 边界记录。"""
+    chain = probe.history(session).active_chain()
+    compact_node = chain[0]
+    boundary = probe.history(session).find(compact_node["usage_boundary_uuid"])
+    return compact_node, boundary
+
+
+@pytest.mark.probe_env(
+    models=[STALE_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -> None:
+    """压缩换入后的 token 口径不得回落到压缩前的大值（issue #247 红线）。
+
+    WHEN 后台压缩换入，而紧接着的那一轮**没有真实 usage**（兼容网关不回带 /
+    中断收场）——链上最后一条带 usage 的 assistant 于是仍是保留区里那条压缩前
+    的回复（``prompt_tokens = 1100``，那个窗口里含已被摘要掉的 head）
+    THEN `/api/session/info` 的 `context_stats.total_tokens` 是**压缩后**窗口的
+    口径（< compact_window），不是 1100；下一轮请求不会因那个陈旧值再起一次压缩
+    （``_compact_calls`` 仍是 1），整条链也不会被下一个摘要换掉；真实 usage 落链
+    后口径回到服务端值。
+
+    压缩节点的 `usage_boundary_uuid` 是这条口径的唯一依据（= 换入时刻的链尖，
+    不是"压缩节点在哪"——保留区在链序上位于压缩节点之后，但它的 usage 同样是
+    压缩前的）。
+    """
+    probe.register(STALE_MODEL, *_no_usage_script())
+    session = await probe.session(model=STALE_MODEL)
+
+    await session.chat("alpha")
+    await session.chat("beta")
+    await wait_pending(probe, session)
+
+    # 换入（gamma 轮）+ 这一轮没有真实 usage。
+    before_apply = probe.history(session)
+    result = await session.chat("gamma")
+    assert result.data["result"] == "post compact reply", result.data
+    _assert_applied(probe, session, before_apply, model=STALE_MODEL)
+
+    # 口径：压缩后窗口的估算，不是压缩前的 1100（两个阈值都不该被跨过）。
+    info = await session.info()
+    total = info["context_stats"]["total_tokens"]
+    assert total < COMPACT_WINDOW, info["context_stats"]
+
+    # 边界 = 换入时刻的链尖：换入那一轮请求的最后一条消息（gamma）。
+    final = probe.history(session)
+    compact_node, boundary = _boundary_of(probe, session)
+    assert compact_node["content"] == COMPACT_CONTENT, compact_node
+    assert boundary is not None, compact_node
+    assert boundary["content"] == "gamma", boundary
+    assert final.messages()[-2]["uuid"] == compact_node["usage_boundary_uuid"]
+
+    # 下一轮：不得再压一次、不得把整条链换成摘要。
+    result = await session.chat("delta")
+    assert result.data["result"] == "delta reply", result.data
+    assert len(_compact_calls(probe, STALE_MODEL)) == 1, probe.requests.summary()
+    assert probe.history(session).aux(PENDING_KEY) is None
+
+    settled = probe.history(session)
+    assert [message["content"] for message in settled.messages()] == [
+        COMPACT_CONTENT,
+        "beta",
+        SUMMARY_LOOKING_TEXT,
+        "gamma",
+        "post compact reply",
+        "delta",
+        "delta reply",
+    ], settled.describe()
+
+    # 真实 usage 落链 → 口径回到服务端值（边界没有把之后的一切一起否掉）。
+    info = await session.info()
+    assert info["context_stats"]["total_tokens"] == RECOVERED_TOKENS, info
+
+
+@pytest.mark.probe_env(
+    models=[BASELINE_RESTART_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_compact_token_baseline_survives_restart(probe: Probe) -> None:
+    """压缩后的 token 口径跨**进程重启**仍成立（红线）。
+
+    WHEN 换入 + 一轮无 usage 之后杀掉网关进程、在同一 ``WING_HOME`` 上重启
+    THEN ``usage_boundary_uuid`` 是链上事实（不是内存态）：resume 之后
+    `context_stats.total_tokens` 仍是压缩后的口径（不是 1100），且下一轮不会
+    因陈旧值再起一次压缩。
+    """
+    probe.register(BASELINE_RESTART_MODEL, *_no_usage_script())
+    session = await probe.session(model=BASELINE_RESTART_MODEL)
+
+    await session.chat("alpha")
+    await session.chat("beta")
+    await wait_pending(probe, session)
+    before_apply = probe.history(session)
+    await session.chat("gamma")
+    _assert_applied(probe, session, before_apply, model=BASELINE_RESTART_MODEL)
+    assert (await session.info())["context_stats"]["total_tokens"] < COMPACT_WINDOW
+
+    compact_before, boundary_before = _boundary_of(probe, session)
+    assert boundary_before is not None, compact_before
+    chain_before = [record["uuid"] for record in probe.history(session).active_chain()]
+
+    await probe.restart_gateway()
+    resumed = await probe.resume(session.session_id)
+
+    # 重启后（新进程、重建 CM）：边界与链一字不差，口径不回落到大值。
+    assert [record["uuid"] for record in probe.history(resumed).active_chain()] == (
+        chain_before
+    )
+    compact_after, boundary_after = _boundary_of(probe, resumed)
+    assert (
+        compact_after["usage_boundary_uuid"] == (compact_before["usage_boundary_uuid"])
+    )
+    assert boundary_after is not None
+    info = await resumed.info()
+    assert info["context_stats"]["total_tokens"] < COMPACT_WINDOW, info["context_stats"]
+
+    result = await resumed.chat("delta")
+    assert result.data["result"] == "delta reply", result.data
+    assert len(_compact_calls(probe, BASELINE_RESTART_MODEL)) == 1, (
+        probe.requests.summary()
+    )
+    settled = probe.history(resumed)
+    assert settled.aux(PENDING_KEY) is None
+    assert [message["content"] for message in settled.messages()] == [
+        COMPACT_CONTENT,
+        "beta",
+        SUMMARY_LOOKING_TEXT,
+        "gamma",
+        "post compact reply",
+        "delta",
+        "delta reply",
+    ], settled.describe()
+    assert (await resumed.info())["context_stats"]["total_tokens"] == (RECOVERED_TOKENS)
