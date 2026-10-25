@@ -33,6 +33,7 @@ import json
 import pytest
 
 from wing_probe import (
+    PENDING_KEY,
     LoggedRequest,
     Probe,
     Session,
@@ -40,8 +41,8 @@ from wing_probe import (
     Usage,
     assert_compact_transition,
     message_semantics,
+    wait_pending,
 )
-from wing_probe.compact import PENDING_KEY, wait_pending
 from wing_probe.history.view import COMPACT_PREFIX, HistoryView
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。

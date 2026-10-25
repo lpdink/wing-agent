@@ -20,6 +20,7 @@
   assert_ordered / events）与 ``ExpectationError``；
 - ``history``：``HistoryView``（history.jsonl 独立解析）、四条内置不变量、
   三条红线过渡断言（compact / rewind / fork）、``fork_metadata``；
+- ``compact``：``wait_pending``（等后台压缩的预计算结果落盘）；
 - ``files``：``FileAssertions``（workspace 文件断言）；
 - ``sqlite``：``read_only_connect``（直接读 ``wing.db`` 的只读口）；
 - ``provider``：剧本模型（``Script`` / ``Turn`` / ``ToolCall`` / ``Usage``）、
@@ -65,6 +66,12 @@ from wing_probe.env import (
     resolve_gateway_bin,
     wait_for_health,
     write_config,
+)
+from wing_probe.compact import (
+    PENDING_DEADLINE,
+    PENDING_KEY,
+    POLL_INTERVAL,
+    wait_pending,
 )
 from wing_probe.sqlite import read_only_connect
 from wing_probe.files import (
@@ -191,7 +198,10 @@ __all__ = [
     "LOOPBACK_HOSTS",
     "METADATA_FILE",
     "MESSAGE_ROLES",
+    "PENDING_DEADLINE",
+    "PENDING_KEY",
     "PKG_ROOT",
+    "POLL_INTERVAL",
     "REWIND_TO_ROOT_CONTENT",
     "SSE_CONTENT_TYPE",
     "TRANSIENT_EVENT_TYPES",
@@ -277,6 +287,7 @@ __all__ = [
     "render_frames",
     "render_report",
     "render_timeline",
+    "wait_pending",
     "repo_root",
     "reserve_port",
     "resolve_gateway_bin",

@@ -32,8 +32,8 @@ from wing_probe import (
     assert_fork_of,
     fork_metadata,
     node_semantics,
+    wait_pending,
 )
-from wing_probe.compact import wait_pending
 
 INTEGRITY_MODEL = "probe/fork-integrity"
 METADATA_MODEL = "probe/fork-metadata"

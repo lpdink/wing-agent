@@ -26,8 +26,8 @@ from wing_probe import (
     Usage,
     assert_rewind_transition,
     is_event,
+    wait_pending,
 )
-from wing_probe.compact import wait_pending
 
 MIDDLE_MODEL = "probe/rewind-middle"
 CONTINUE_MODEL = "probe/rewind-continue"
