@@ -219,8 +219,10 @@ class Probe:
         判据与理由见 :meth:`ProbeEnv.stop` 与 ``docs/dev/probe-testing.md``
         「停机：快路径与优雅路径」。幂等、不抛（失败场景的 teardown 也要安全）。
         """
-        await self._close_driver()
-        await self.env.stop()
+        try:
+            await self._close_driver()
+        finally:
+            await self.env.stop()
 
     async def shutdown(self) -> None:
         """**优雅**收尾：关 driver，再 ``/api/shutdown`` 让网关跑完 lifespan。
@@ -231,8 +233,10 @@ class Probe:
         留档（``timeline`` / ``frames`` / ``http``）为空——磁盘部分（不变量、sessions
         拷贝、网关日志）照旧。
         """
-        await self._close_driver()
-        await self.env.shutdown()
+        try:
+            await self._close_driver()
+        finally:
+            await self.env.shutdown()
 
     async def _close_driver(self) -> None:
         """关掉 driver 并置空（幂等；``stop`` / ``shutdown`` / ``restart_gateway`` 共用）。"""

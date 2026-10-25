@@ -1,8 +1,9 @@
 """``Probe`` 门面的纯逻辑自测。
 
 覆盖：逃生舱的理由校验与禁用语义、三个内置不变量的聚合（含 session id 与不变量
-名）、失败报告渲染（来源标注 / 转储路径 / 逃生舱理由）、``dump()`` 的产物清单
-（时间线全帧 / 原始帧 / HTTP 留档 / 请求留档 / 落盘拷贝 / 网关日志 / 摘要）。
+名）、不变量在 driver 关掉之后按磁盘兜底、失败报告渲染（来源标注 / 转储路径 /
+逃生舱理由）、``dump()`` 的产物清单（时间线全帧 / 原始帧 / HTTP 留档 / 请求留档 /
+落盘拷贝 / 网关日志 / 摘要）、两条收尾路径的调用次序与选路。
 
 整机路径（自举 env + 真网关）由 ``scenarios/`` 覆盖；这里只压门面自己的逻辑——
 dump 与不变量不依赖网关活着，收尾顺序则用「假 env + 假 driver」把调用次序钉死。
@@ -194,6 +195,25 @@ def test_check_invariants_falls_back_to_disk_after_the_driver_is_gone(
     assert problems, "无 driver 时必须按磁盘兜底，而不是静默返回空清单"
     assert problems[0].startswith("[no_transient_records]"), problems
     assert SESSION_ID in problems[0]
+
+
+def test_check_invariants_disk_fallback_skips_store_namespaces(tmp_path: Path) -> None:
+    """磁盘兜底只查会话目录：``.media`` / ``.archive`` 是存储保留的点命名空间。
+
+    它们与 session 目录同级（``store/file.py``），混进来会让报告里的 session 清单多出
+    假条目（``.archive`` 里还有归档会话的目录层级）。这里放一个点目录干扰项，确认
+    「被检查的 session id」里没有它。
+    """
+    probe = build_probe(tmp_path)
+    write_history(
+        probe.env.sessions_path / SESSION_ID,
+        [{"uuid": "u1", "role": "user", "content": "hi"}],
+    )
+    (probe.env.sessions_path / ".media" / "ab").mkdir(parents=True)
+    (probe.env.sessions_path / ".archive" / "old-session").mkdir(parents=True)
+
+    assert probe.check_invariants() == []
+    assert probe._checked_session_ids == [SESSION_ID]
 
 
 # ── 两条收尾路径（门面层的 driver 顺序） ──────────────────────
