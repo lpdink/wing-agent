@@ -150,15 +150,17 @@ class Message(ChainNode):
     审计元数据——不进入 LLM 请求体（to_openai 不导出）。extra="ignore"
     容忍存量记录缺失。"""
     usage_boundary_uuid: str | None = None
-    """服务端 usage 的信任边界（链拓扑字段，只写在**压缩节点**上）。
+    """服务端 usage 的信任起点声明（链拓扑字段）：**此后**落链的 usage 才度量在
+    当前窗口上。
 
-    值 = 该次压缩**换入时刻活跃链的链尖**（没有保留区时是压缩节点自己）；活跃链上
-    位于它之后的消息，其 ``usage.prompt_tokens`` 才度量在当前窗口上。保留区在链序
-    上位于压缩节点之后，但它的 usage 同样产生于换入之前（prompt 里含已被摘要掉的
-    区段）——链序不是时间序，所以边界记「链尖」而不是「压缩节点在哪」。
+    值 = 该声明认定"信任从这里恢复"的那个节点的 uuid。三个写入点：自动压缩换入
+    （值 = 换入时刻的链尖：保留区末条，没有保留区时是压缩节点自己——保留区虽然
+    在链序上位于压缩节点之后，其 usage 却产生于换入之前）、手动压缩（值 = 节点
+    自己）、rewind 回退行（值 = 回退行自己）。
 
-    不进入 LLM 请求体。缺失 = 本字段引入之前的存量记录；指针不在活跃链上 = 被
-    rewind 剪断——两者都由读取侧降级，见 ``ContextManager._usage_trust_start``。"""
+    不进入 LLM 请求体。链上没有声明（本字段引入之前的存量记录）→ 按历史口径全链
+    可采信；指针不在链上（被 rewind 剪断 / 日志损坏）→ 一条都不采信。见
+    ``ContextManager._usage_trust_start``。"""
 
     # 扁平存储：仅非 assistant 消息（user/tool/system）使用。assistant 的
     # content / reasoning_content / tool_calls 全部从 content_blocks 实时派生，

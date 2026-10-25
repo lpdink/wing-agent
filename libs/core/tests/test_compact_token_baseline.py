@@ -308,7 +308,25 @@ async def test_legacy_compact_node_keeps_historical_baseline(tmp_dir):
 
 
 def test_dangling_boundary_trusts_no_usage(tmp_dir):
-    """边界被 rewind 剪断 → 一条都不采信（不把残留的陈旧 usage 信回去）。"""
+    """声明的指针不在链上（rewind 剪断 / 日志损坏）→ 一条都不采信。"""
+    cm = _make_cm(tmp_dir)
+    head = Message(role="user", content="alpha")
+    cm.add_message(head)
+    compact = _compact_node(head.uuid, boundary="gone-with-the-rewind")
+    cm._messages.append_detached(compact)
+    cm._messages.set_tip(compact.uuid)  # ty: ignore[invalid-argument-type]
+    cm.add_message(Message(role="user", content="u1"))
+    cm.add_message(_turn_reply("stale reply"))  # 压缩前的窗口（1100）
+
+    assert cm._last_prompt_tokens() is None
+
+
+def test_rewind_into_tail_drops_stale_usage_and_recovers(tmp_dir):
+    """回退进保留区：残留的保留区 usage 不信，回退之后的真实 usage 立刻生效。
+
+    回退行自己声明"信任从这里恢复"——所以不是"永久退回估算"：下一轮真实 usage
+    落链即回到服务端口径（rewind 是用户最常见的动作之一，代价得有界）。
+    """
     cm = _make_cm(tmp_dir)
     head = Message(role="user", content="alpha")
     cm.add_message(head)
@@ -329,18 +347,22 @@ def test_dangling_boundary_trusts_no_usage(tmp_dir):
     # 边界之后的 usage 被采信。
     assert cm._last_prompt_tokens() == 500
 
-    # 回退到边界节点 → 边界记录离开活跃链（新 uuid 的复制行顶替），
+    # 回退到边界节点：边界记录离开活跃链（新 uuid 的复制行顶替），
     # 残留的 stale usage 不得复活。
     cm.rewind(tip.uuid)
     assert cm._last_prompt_tokens() is None
+    # 但回退行声明了新的信任起点 → 之后落链的真实 usage 立刻被采信。
+    cm.add_message(Message(role="user", content="after rewind"))
+    cm.add_message(_turn_reply("recovered reply", prompt_tokens=300))
+    assert cm._last_prompt_tokens() == 300
 
 
 @pytest.mark.asyncio
-async def test_empty_chain_manual_compact_writes_no_boundary(tmp_dir):
-    """空链手动压缩没有可压缩区间（`unzip_last_uuid` 为空）→ 不写边界。
+async def test_empty_chain_manual_compact_declares_resumption(tmp_dir):
+    """空链手动压缩：没有可压缩区间（`unzip_last_uuid` 为空）但仍是新链的起点。
 
-    字段契约是「只写在压缩节点上」，而读取侧识别压缩节点的判据正是
-    `unzip_last_uuid`——给这种节点写边界会让"带边界但不是压缩节点"成为可达状态。
+    写入规则是统一的——任何把窗口重置到该节点的写入都声明"此后 usage 度量在当前
+    窗口上"；读侧不看 `unzip_last_uuid`，所以这里不多一个特例。
     """
     cm = _make_cm(tmp_dir)
     await cm.do_manual_compact("m", _provider(), current_tools=lambda: [])
@@ -348,7 +370,7 @@ async def test_empty_chain_manual_compact_writes_no_boundary(tmp_dir):
     node = cm.get_context_window()[0]
     assert node.content == COMPACT_SUMMARY
     assert node.unzip_last_uuid is None
-    assert node.usage_boundary_uuid is None
+    assert node.usage_boundary_uuid == node.uuid
     assert cm._last_prompt_tokens() is None
     # 之后落链的 usage 是当前窗口的事实（整条链就是这一条消息）。
     cm.add_message(_turn_reply("first reply", prompt_tokens=42))

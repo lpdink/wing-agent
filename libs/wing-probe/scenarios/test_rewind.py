@@ -110,7 +110,12 @@ async def test_middle_rewind_chain_shape_and_draft(probe: Probe) -> None:
     assert "usage" in source and source["usage"]["prompt_tokens"] == 1234, source
     assert "usage" not in copy, copy
     assert "stop_reason" not in copy, copy
-    assert set(copy) <= set(source) - {"usage", "stop_reason"}, sorted(copy)
+    # 唯一允许复制行新增的键是 usage 信任起点声明（链拓扑，不是上下文事实）——
+    # 回退行是新链的 tip，必须声明"此后 usage 度量在当前窗口上"（issue #247）。
+    assert copy.get("usage_boundary_uuid") == copy["uuid"], copy
+    assert set(copy) <= set(source) - {"usage", "stop_reason"} | {
+        "usage_boundary_uuid"
+    }, sorted(copy)
 
     # 目标及其后续被移出活跃链（但仍留在记录集里）。
     after_chain_uuids = [record["uuid"] for record in chain]

@@ -694,11 +694,9 @@ class ContextManager:
             unzip_last_uuid=last_compressed_uuid,
         )
         compact_node.uuid = uuid.uuid4().hex
-        # 链被摘要整段取代：换入之后的一切都是新事实，边界 = 节点自己。空链没有可
-        # 压缩的区间（`unzip_last_uuid` 为空，读取侧也就认不出这是压缩节点）——那时
-        # 不写边界，字段契约「只写在压缩节点上」因此始终成立。
-        if last_compressed_uuid is not None:
-            compact_node.usage_boundary_uuid = compact_node.uuid
+        # 与自动压缩 apply / rewind 同一条规则：窗口重置到这个节点，声明"此后
+        # usage 度量在当前窗口上"（读侧因此不必为每条写入路径特判）。
+        compact_node.usage_boundary_uuid = compact_node.uuid
 
         self._messages.append_detached(compact_node)
         self._messages.set_tip(compact_node.uuid)
@@ -799,32 +797,26 @@ class ContextManager:
         """活跃链上「服务端 usage 可采信」的起点下标（None = 一条都不采信）。
 
         压缩换入会重排窗口：换入之前产生的 usage（**含被重链接的保留区**——它的
-        prompt 里含已被摘要掉的 head）度量的是一个已经不存在的窗口。边界编码在压缩
-        节点（`unzip_last_uuid` 非空，恒为活跃链的根）的 `usage_boundary_uuid` 上：
+        prompt 里含已被摘要掉的 head）度量的是一个已经不存在的窗口。窗口重置的锚点
+        是链上的声明 `usage_boundary_uuid`（"此后 usage 度量在当前窗口上"），
+        写入点：自动压缩 apply / 手动压缩 / rewind 回退行。
 
-        - 链上没有压缩节点 → 整链可采信（这条链从没压缩过）；
-        - 有边界且边界在链上 → 边界之后（不含）；
-        - 有边界但边界不在链上（rewind 剪断了它）→ 一条都不采信（保守：无法证明
-          任何一条 usage 度量在当前窗口上）。下次压缩产出新边界即恢复；
-        - 没有边界（本字段引入之前的存量记录）→ 压缩节点之后，即历史口径。
+        读法：取**最后一条**声明的解析结果（更晚的声明覆盖更早的）——指针指向的
+        节点在链上 → 从它之后开始；指针不在链上（被 rewind 剪断 / 日志损坏）→
+        一条都不采信（保守：无法证明任何一条 usage 度量在当前窗口上）。链上没有
+        任何声明（本字段引入之前的存量记录）→ 整链可采信，即历史口径。
         """
-        compact_node: Message | None = None
-        compact_index = 0
-        for index, node in enumerate(chain):
-            if isinstance(node, Message) and node.unzip_last_uuid is not None:
-                compact_node = node
-                compact_index = index
-        if compact_node is None:
-            return 0
-        boundary = compact_node.usage_boundary_uuid
-        if boundary is None:
-            return compact_index + 1
-        for index, node in enumerate(chain):
-            if node.uuid == boundary:
-                # 边界早于压缩节点 = 日志损坏（正常写入点恒在节点之后）：
-                # 宁可一条都不采信，也不把一段来路不明的 usage 当成当前窗口。
-                return index + 1 if index >= compact_index else None
-        return None
+        positions = {node.uuid: index for index, node in enumerate(chain)}
+        start = 0
+        for node in chain:
+            if not isinstance(node, Message):
+                continue
+            boundary = node.usage_boundary_uuid
+            if boundary is None:
+                continue
+            resolved = positions.get(boundary)
+            start = None if resolved is None else max(start or 0, resolved + 1)
+        return start
 
     def get_context_window(self) -> list[Message]:
         """返回当前上下文窗口——活跃链的 Message 投影（事件节点过滤）。
@@ -939,12 +931,11 @@ class ContextManager:
                 unzip_last_uuid=parent_msg.unzip_last_uuid,
             )
             rewind_msg.uuid = str(uuid.uuid4())
-            if parent_msg.unzip_last_uuid is not None:
-                # parent 是压缩节点 → 回退行自己成了新链的根（`parent_uuid` 为空）：
-                # usage 边界重设为自己（此后落链的 usage 都是新事实，不继承旧边界
-                # ——它指向的节点已被这次回退剪掉，继承只会让口径永久退回估算）。
-                rewind_msg.usage_boundary_uuid = rewind_msg.uuid
 
+        # 回退行是新的链尖：声明"此后落链的 usage 度量在当前窗口上"（与压缩换入
+        # 同一个锚点）。必须写——继承被剪掉的旧指针会让 token 口径永久退回估算，
+        # 不写则链上残留的保留区 usage（压缩前的窗口）会被信回去。
+        rewind_msg.usage_boundary_uuid = rewind_msg.uuid
         self._messages.append_detached(rewind_msg)
         self._messages.set_tip(rewind_msg.uuid)
         return draft

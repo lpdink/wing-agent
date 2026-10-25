@@ -84,11 +84,11 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
     创建、unzip 指向区间末），重映射后子记录集自洽——压缩节点的 unzip 指向重映射后的
     区间末记录，子会话的 fork 候选列表与源会话一致。
 
-    ``usage_boundary_uuid``（压缩节点的 usage 信任边界）是唯一可能指向前缀之外的键：
-    fork 点落在压缩后被保留的 tail 中间时，边界（换入时刻的链尖）在后头。这种情形
-    **钉到前缀末条记录**（= 子会话的活跃链尖）——语义精确："子会话链上的东西全部早于
-    那次换入"。删键会让读取侧按"没有边界"降级成信任保留区的压缩前 usage，正是
-    issue #247 要消灭的错口径。
+    ``usage_boundary_uuid``（usage 信任起点声明）是唯一可能指向前缀之外的键：fork 点
+    落在压缩后被保留的 tail 中间时，边界（换入时刻的链尖）在后头。这种情形**钉到前缀
+    末条记录**（= 子会话的活跃链尖）——语义精确："子会话链上的东西全部早于那次换入"。
+    删键会让读取侧按"没有声明"降级成信任保留区的压缩前 usage，正是 issue #247 要消灭
+    的错口径。
 
     缺省是防御：``parent_uuid`` / ``unzip_last_uuid`` 万一是前缀外引用，宁可让它成为根
     节点（删键 = 缺席即默认），也不留跨 session 的引用。
@@ -115,24 +115,27 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
         if isinstance(last_uuid, str):
             prefix_tip_uuid = uuid_map.get(last_uuid)
     for clone in clones:
-        for key in (
-            "uuid",
-            "parent_uuid",
-            "unzip_last_uuid",
-            "usage_boundary_uuid",
-        ):
+        for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
             value = clone.get(key)
             if not isinstance(value, str):
                 continue
             mapped = uuid_map.get(value)
-            if mapped is not None:
-                clone[key] = mapped
-            elif key == "usage_boundary_uuid" and prefix_tip_uuid is not None:
-                clone[key] = prefix_tip_uuid
-            else:
+            if mapped is None:
                 # 前缀外引用：**删键**而不是写 None（缺席即默认，与 None 对
                 # 加载等价——记录重新成为根节点，且不把 null 带进子会话）。
                 clone.pop(key, None)
+            else:
+                clone[key] = mapped
+    # usage 边界是另一种策略（前缀外不是删键而是钉住），单独一段：
+    for clone in clones:
+        boundary = clone.get("usage_boundary_uuid")
+        if not isinstance(boundary, str):
+            continue
+        pinned = uuid_map.get(boundary) or prefix_tip_uuid
+        if pinned is None:  # 空前缀（不会发生）：删键 = 缺席
+            clone.pop("usage_boundary_uuid", None)
+        else:
+            clone["usage_boundary_uuid"] = pinned
     return clones
 
 
