@@ -78,6 +78,8 @@ tags: [cli, orchestration, reference, wake, headless]
 | `wing wake (--in 30m \| --at "2026-03-01 09:00" \| --every 30m \| --daily 07:00) -p TEXT [--times N] [--to SID]` | 定时（心跳）唤醒 |
 | `wing wake --list [--all]` / `wing wake --cancel <id>` | 同 `wing watch --list` / `--cancel`：**全部**触发器，两个子命令等价 |
 
+**等子会话只有两条路：停下等通知（`wing run` 默认登记唤醒，派完结束本轮即可），或 `wing wait`；禁止 `sleep` 轮询**——`sleep 600; wing ps …` 把唤醒消息压在工具结果边界里，睡多久就白等多久。阻塞时 Bash 工具 timeout 要放大到 `--timeout` 之上（如 `--timeout 3600` + 工具 3700），默认 30s 会把 wait 进程杀掉。
+
 `wing watch` 的缺省语义是**叫一次就结束**：一条 `done` 信封送达后触发器终结（配额 1）；`ask` 唤醒**不消耗**配额，所以只盯提问时等于常驻订阅。要盯多次收口用 `--times N`。
 
 同一 `(source, target, on_events)` 再登记一次是**刷新**那一条订阅（不新增、不产生第二条投递路径）：`--times` / `-p` 不给就保持原值——所以 `wing run -r` 的隐式登记既不会把 `--times 3` 剩下的配额降成 1，也不会清掉自定义正文（细节见 [`docs/dev/wake.md`](../../../docs/dev/wake.md) §1）。
@@ -216,7 +218,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 
 ## 5. 常见坑
 
-1. **Bash 工具的 30s 默认 timeout 会杀掉 `wing wait`**：会话不受影响，但你白等一轮。显式给 `--timeout` 与工具 timeout 同一量级（如 `--timeout 3600` + 工具 3700）。更省的办法是别 wait：用 `wing run` 的 notify 或 `wing watch`。
+1. **Bash 工具的 30s 默认 timeout 会杀掉 `wing wait`**：会话不受影响，但你白等一轮。显式给 `--timeout` 与工具 timeout 同一量级（如 `--timeout 3600` + 工具 3700）。更省的办法是别 wait：用 `wing run` 的 notify 或 `wing watch`。**但不要 `sleep` 轮询**——唤醒被压在工具结果边界里，睡多久就白等多久。
 2. **忘了 `cd`**：session 的 workspace 就是 `wing run` 进程的 cwd。派发前 `cd <目标目录>`，事后用 `wing info <sid> --json | jq .workdir` 兜底核对。
 3. **`-r` 忽略创建期旗标**：`--tools` / `-m` / `--agent` / `--effort` / `--system-prompt` / `--append-system-prompt` / `--max-turns` 在 resume 路径上都不生效（工具集、模型、模板沿用原会话）。换模板要 `wing update <sid> --agent <name>`。
 4. **`wing resume` ≠ `wing run -r`**：前者只是把逐出会话读回内存，不发消息；续跑用后者。

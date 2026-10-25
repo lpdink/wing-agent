@@ -93,6 +93,7 @@ wing wait <sid1> <sid2> --timeout 3600 --json > /tmp/review_wait.json
 ```
 
 - `wing wait` 接受多个 sid，全部 idle 才返回；**Bash 工具的 timeout 必须更大**（如 `--timeout 3600` + 工具 3700）——默认 30s 会把 wait 进程杀掉；会话不受影响，wait 幂等可重等；
+- **不要用 `sleep` 轮询补等**（`sleep 300; wing ps …`）：唤醒消息被压在工具结果边界里，睡多久白等多久；wait 超时就重 wait，或者干脆结束本轮等审查者自己的收口唤醒（不写 `--no-notify` 时它们会叫醒你）；
 - 结果按 `session_id` 对上是哪个视角；报告在各目的文件里（`results[].result` 是收口消息，应指向报告路径）；异常（`is_error` / `subtype`）先 `wing tail <sid> -t tool_call` 看现场。
 
 ## 读报告与处置
