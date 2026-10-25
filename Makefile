@@ -18,7 +18,10 @@ VSCODE_DIR := extensions/vscode
 # `TS_ARGS` 是直接透传给 vitest 的逃生舱（`make test-ts TS_ARGS="--reporter=verbose"`）。
 # 注意**不要**写成 `pnpm run test -- $(TS_ARGS)`：pnpm 会把 `--` 连同后面的实参一起吞掉，
 # vitest 一个都收不到（静默失效）。`pnpm run test <args>` 才是透传。
-TS_WORKERS ?= $(if $(WING_TEST_BUDGET_TS),--maxWorkers=$(WING_TEST_BUDGET_TS))
+# 串行逃生舱优先于预算（与 PYTEST_WORKERS / rust 的口径一致）：`WING_TEST_SERIAL`
+# 非空且非 0 时，一切并行度旋钮都不生效。
+NOT_SERIAL = $(if $(WING_TEST_SERIAL),$(filter 0,$(WING_TEST_SERIAL)),1)
+TS_WORKERS ?= $(if $(and $(NOT_SERIAL),$(WING_TEST_BUDGET_TS)),--maxWorkers=$(WING_TEST_BUDGET_TS))
 TS_ARGS ?= $(TS_WORKERS)
 
 # Node/pnpm 探测 + 提示（单行，避免 make ↔ shell 的续行转义；见 docs/dev/vscode-extension.md §9.3）。
@@ -100,7 +103,7 @@ gateway:
 # 四组各自按"我独占整机"来配并行度时，机器被压到三倍以上超订，**每一组都变慢**；
 # 份额的算法与实测都在那一处（全仓唯一），这里只消费。不导出时按独占算——单独跑
 # 一组的人仍然拿满。
-PYTEST_WORKERS ?= $(or $(WING_TEST_BUDGET_PYTEST),$(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi))
+PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ -n "$(WING_TEST_BUDGET_PYTEST)" ]; then echo $(WING_TEST_BUDGET_PYTEST); elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
 PYTEST_WORKER_ARGS = $(if $(filter 1,$(PYTEST_WORKERS)),,--dist loadfile -n $(PYTEST_WORKERS))
 
 # 本地日常：不带覆盖率（`--cov` 让同一套用例多花 ~10s）。覆盖率数据只有 CI 的
@@ -152,7 +155,7 @@ test-probe:
 	uv run pytest libs/wing-probe/ --timeout=120 $(PROBE_WORKER_ARGS)
 
 check-python:
-	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \
+	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; SELFTEST_FAILED=0; \
 	echo "🔍 Running ruff..."; \
 	if ! uv run ruff check libs/ scripts/; then RUFF_FAILED=1; echo "❌ ruff failed"; else echo "✅ ruff passed"; fi; \
 	echo ""; \
@@ -165,7 +168,11 @@ check-python:
 	echo "🔍 Running vulture..."; \
 	if ! uv run vulture; then VULTURE_FAILED=1; echo "❌ vulture failed"; else echo "✅ vulture passed"; fi; \
 	echo ""; \
-	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ]; then \
+	echo "🔍 Running script selftests..."; \
+	if ! uv run python scripts/test_rust_parallel.py --selftest; then SELFTEST_FAILED=1; echo "❌ rust pool selftest failed"; else echo "✅ rust pool selftest passed"; fi; \
+	if ! uv run python scripts/bench_tests.py --selftest; then SELFTEST_FAILED=1; echo "❌ bench selftest failed"; else echo "✅ bench selftest passed"; fi; \
+	echo ""; \
+	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ] || [ $$SELFTEST_FAILED -eq 1 ]; then \
 		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
 		echo "❌ Python check failed"; \
 		exit 1; \

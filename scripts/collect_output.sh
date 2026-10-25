@@ -11,7 +11,7 @@
 # 这样即使 tail 给得很短，也能直接看到「过没过」，不需要重跑。
 # 排查并发干扰时用 WING_TEST_SERIAL=1 退回串行。
 #
-# 用法：scripts/collect_output.sh [test|check]
+# 用法：scripts/collect_output.sh [test|check|--budget]
 set -uo pipefail
 
 MODE="${1:-test}"
@@ -27,8 +27,13 @@ case "$MODE" in
     LABELS=("python" "rust" "ts")
     CMDS=("make check-python" "make check-rust" "make check-ts")
     ;;
+  --budget)
+    # 只回答"这一处算出来的份额是多少"，见下面的 `--budget` 出口。
+    LABELS=()
+    CMDS=()
+    ;;
   *)
-    echo "usage: $0 [test|check]" >&2
+    echo "usage: $0 [test|check|--budget]" >&2
     exit 2
     ;;
 esac
@@ -93,6 +98,13 @@ if [ "$SERIAL" != "1" ]; then
   export WING_TEST_BUDGET_PYTEST=$SHARE
   export WING_TEST_BUDGET_RUST=$SHARE
   export WING_TEST_BUDGET_TS=$SHARE
+fi
+
+# `--budget`：把这一处算出来的份额打出来就退出（供 `scripts/bench_tests.py --selftest`
+# 钉住公式；否则"全仓唯一的计算处"本身没有断言）。
+if [ "$MODE" = "--budget" ]; then
+  if [ "$SERIAL" = "1" ]; then echo "(serial: no budget)"; else echo "$SHARE"; fi
+  exit 0
 fi
 
 # 亚秒级计时只给机器读的报告用（`WING_TEST_REPORT=<path>`，见 scripts/bench_tests.py）：

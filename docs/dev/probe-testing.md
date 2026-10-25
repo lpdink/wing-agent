@@ -311,7 +311,11 @@ docstring：`/api/shutdown` 自己的延迟 + uvicorn 收尾里的两次固定 `
 一条边界必须知道：快路径 SIGKILL 的是网关的**进程组**，而 Bash 工具的子进程为了能自己
 killpg 也 `start_new_session=True`（自成会话），所以**不在**那个组里。场景因此不该在回合
 还在飞的时候结束——优雅路径会等回合收尾，快路径不会，正在跑的工具子进程会被留成孤儿
-（长命令能活几个小时，`pgrep` 也扫不回来）。两条路径的差别由 `scenarios/test_stop_paths.py` 钉在外部可观察量上——
+（`pgrep` 也扫不回来）。
+
+这条边界默认不可见，但可以查：`WING_PROBE_ORPHAN_SCAN=1` 会在每次收尾前扫一遍进程表，
+把"会活下来的后代"（不同进程组的）连同命令行记进网关日志的
+`--- probe: survivors … ---` 标记里。代价是每次收尾一次 `ps`（~10ms），所以默认关。两条路径的差别由 `scenarios/test_stop_paths.py` 钉在外部可观察量上——
 快路径的退出码是 SIGKILL 且 `core/wing.db-wal` 留在盘上（`close_database()` 没跑），
 优雅路径的 WAL 被收掉。`kill_gateway` 与 `stop` 共用同一份 SIGKILL 实现，
 `restart_gateway` 与 `shutdown` 共用同一份优雅收尾。

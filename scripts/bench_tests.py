@@ -271,11 +271,14 @@ def selftest() -> int:
 
 
 def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
-    """四组 × {独占, 预算} 是否真的变成了**命令行实参**。
+    """预算与旋钮是否真的落到了命令行上。
 
     这条链断过一次（`pnpm run test -- <args>` 的实参被 pnpm 吞掉，共享档与逃生舱双双
-    静默失效，而测试全绿）——两边各自"能解析"不等于"传到了"。所以这里直接问 make：
-    它展开出来的命令行长什么样。
+    静默失效，而测试全绿）——两边各自"能解析"不等于"传到了"。所以这里直接问：
+    `collect_output.sh --budget` 交出份额、`make -n` 交出展开后的命令行。
+
+    覆盖的是**python 与 ts**两条（它们各自在 Makefile 里展开）；rust 的核数由
+    `scripts/test_rust_parallel.py --selftest` 钉住，probe 不收预算。
     """
     root = Path(__file__).resolve().parents[1]
     if not (root / "Makefile").is_file():  # pragma: no cover - 单独拷脚本出去时
@@ -307,6 +310,24 @@ def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
     check("knobs python budget reaches argv", "--dist loadfile -n 4" in py_budget, True)
     py_serial = dry_run("test-python", WING_TEST_SERIAL="1")
     check("knobs python serial drops xdist", "-n " in py_serial, False)
+
+    cores = os.cpu_count() or 4
+    want = max(2, min(4, cores // 3))
+    budget_out = subprocess.run(
+        ["bash", "scripts/collect_output.sh", "--budget"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    check(f"knobs share formula ({cores} cores)", budget_out, str(want))
+    serial_out = subprocess.run(
+        ["bash", "scripts/collect_output.sh", "--budget"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "WING_TEST_SERIAL": "1"},
+    ).stdout.strip()
+    check("knobs serial has no share", serial_out.startswith("(serial"), True)
 
     ts_budget = dry_run("test-ts", WING_TEST_BUDGET_TS="4")
     check(

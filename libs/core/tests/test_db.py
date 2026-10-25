@@ -389,9 +389,10 @@ class TestFirstOpenLockRetry:
 
         monkeypatch.setattr(db_mod, "_OPEN_BUSY_TIMEOUT_MS", 20)
         monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0.01)
-        # 两次尝试的真实成本 ≈ 20(等锁) + 10(退避) + 20 ≈ 50ms；时限留 3 倍，
-        # 一次调度停顿不会把「重试过」压成「只试了一次」。
-        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0.15)
+        # 两次尝试的真实成本 ≈ 20(等锁) + 10(退避) + 20 ≈ 50ms；时限留 4 倍——
+        # 本套用例本身就与另外三组并行跑，一次调度停顿不该把「重试过」压成
+        # 「只试了一次」（省这 50ms 换不来任何东西）。
+        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0.2)
         attempts = _counting_open(monkeypatch)
 
         path = tmp_path / "wing.db"

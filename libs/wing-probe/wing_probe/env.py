@@ -98,6 +98,12 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 DEFAULT_KEEP_RECENT_TOKENS = 50_000
 
 
+def orphan_scan_enabled() -> bool:
+    """``WING_PROBE_ORPHAN_SCAN=1``：收尾前扫进程表，把会活下来的后代记进日志。"""
+    value = os.environ.get("WING_PROBE_ORPHAN_SCAN", "").strip().lower()
+    return value not in ("", "0", "false", "no")
+
+
 def conflicting_config_knobs(**values: Any) -> list[str]:
     """``config_text`` 与「生成配置」旋钮互斥的判定（返回显式偏离默认值的旋钮名）。
 
@@ -1107,11 +1113,14 @@ class ProbeEnv:
 
         **边界**：Bash 工具的子进程为了能 killpg 自己也 ``start_new_session=True``，
         所以它们不在网关的会话里——快停机收不到正在跑的工具子进程。场景因此不该在
-        回合在飞的时候结束（优雅路径会等回合收尾，快路径不会）；这条边界写在
-        ``docs/dev/probe-testing.md`` 的停机一节。
+        回合在飞的时候结束（优雅路径会等回合收尾，快路径不会）。这条边界默认不可见，
+        把 ``WING_PROBE_ORPHAN_SCAN=1`` 打开会在收尾前扫一次进程表，把"会活下来的后代"
+        记进网关日志（每次收尾一次 ``ps``，~10ms，所以默认关）。
         """
         process = self._process
         if process is not None and process.poll() is None:
+            if orphan_scan_enabled():
+                self._log_marker(f"--- probe: survivors {self._orphan_report()} ---")
             self._log_marker("--- probe: kill -9 gateway (process group) ---")
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -1120,7 +1129,9 @@ class ProbeEnv:
             try:
                 await asyncio.to_thread(process.wait, timeout=DEFAULT_SHUTDOWN_WAIT)
             except subprocess.TimeoutExpired:  # pragma: no cover - 不可杀进程
-                # 留引用：`stop()` 是单向闸门，但 `shutdown()` 还能再兜一次。
+                # 单向闸门已经落下了（`stop()` 进来就置位），没有第二次机会：这里只
+                # 保留引用并留下 ERROR，别把"还能重试"写进注释——那是不存在的路径。
+                self._log_marker("--- probe: gateway survived SIGKILL ---")
                 _log.error("gateway process survived SIGKILL (pid=%s)", process.pid)
                 return
         if process is not None:
@@ -1155,6 +1166,40 @@ class ProbeEnv:
                 await client.post(url, json={}, headers=headers)
         except httpx.HTTPError as exc:
             _log.debug("probe shutdown request failed (%s): %s", url, exc)
+
+    def _orphan_report(self) -> str:
+        """收尾前会活下来的后代（自查用；``ps`` 一次，默认关）。"""
+        process = self._process
+        if process is None:
+            return "(no gateway)"
+        try:
+            own_group = os.getpgid(process.pid)
+        except ProcessLookupError:  # pragma: no cover - 竞态
+            return "(gateway gone)"
+        dumped = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,command="],
+            capture_output=True,
+            text=True,
+        ).stdout
+        children: dict[int, list[tuple[int, int, str]]] = {}
+        for line in dumped.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            try:
+                pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:  # pragma: no cover - ps 的表头 / 异常行
+                continue
+            children.setdefault(ppid, []).append((pid, pgid, parts[3]))
+        survivors: list[str] = []
+        stack = [process.pid]
+        while stack:
+            for pid, pgid, command in children.get(stack.pop(), []):
+                stack.append(pid)
+                # 同组的会随 killpg 一起走；不同组 = 自己 setsid 的，会活下来。
+                if pgid != own_group:
+                    survivors.append(f"{pid} {command}")
+        return "; ".join(survivors) if survivors else "(none)"
 
     async def _terminate_process(self) -> None:
         process = self._process
