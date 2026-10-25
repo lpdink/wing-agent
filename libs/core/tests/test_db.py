@@ -335,18 +335,35 @@ class TestFirstOpenLockRetry:
         assert not db.ready
         assert len(attempts) > 1
 
+    # 假时钟让这个用例的真实耗时只取决于尝试次数：退避被改成 0（无限重试）时，
+    # 没有这条守护会一直转到整个 worker 被杀而不是失败。
+    @pytest.mark.timeout(10)
     def test_loser_waits_for_a_slow_winner(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """赢家 0.6s 才迁完：输家靠**时间**预算等到它（按次数的预算会在 ~500ms 放弃）。"""
-        attempts = _failing_open_until(monkeypatch, release_after_s=0.6)
-        started = time.monotonic()
+        """赢家要慢慢迁移：输家靠**时间**预算等到它（按次数的预算会先放弃）。
+
+        时钟打替身（`_open` 的重试预算只碰 `time.monotonic` / `time.sleep`）：
+        判据是「预算怎么算」，不是「真等多久」——这样退避序列是确定的，
+        不随调度抖动变松变紧。
+        """
+        import wing.db.database as db_mod
+
+        clock = _FakeClock()
+        monkeypatch.setattr(db_mod, "time", clock)
+        release_after_s = 0.6
+        attempts = _failing_open_until(
+            monkeypatch, release_after_s=release_after_s, clock=clock
+        )
 
         db = Database(tmp_path / "wing.db")
 
         assert db.ready
-        assert len(attempts) >= 5
-        assert time.monotonic() - started >= 0.6
+        # 产品默认退避（0.05·attempt，上限 0.2）：尝试落在假时间的
+        # 0 / 0.05 / 0.15 / 0.30 / 0.50 / 0.70s。按次数的 5 次预算会在 0.50s
+        # 就烧穿，而赢家在 0.60s 才放手 —— 撑过去只可能因为预算按时间算。
+        assert len(attempts) == 6
+        assert clock.now >= release_after_s
         db.close()
 
     def test_deadline_exhausted_degrades_immediately(
@@ -372,7 +389,9 @@ class TestFirstOpenLockRetry:
 
         monkeypatch.setattr(db_mod, "_OPEN_BUSY_TIMEOUT_MS", 20)
         monkeypatch.setattr(db_mod, "_OPEN_RETRY_DELAY_S", 0.01)
-        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0.2)
+        # 两次尝试的真实成本 ≈ 20(等锁) + 10(退避) + 20 ≈ 50ms；时限留 3 倍，
+        # 一次调度停顿不会把「重试过」压成「只试了一次」。
+        monkeypatch.setattr(db_mod, "_OPEN_DEADLINE_S", 0.15)
         attempts = _counting_open(monkeypatch)
 
         path = tmp_path / "wing.db"
@@ -415,22 +434,44 @@ class TestFirstOpenLockRetry:
         assert len(attempts) == 1
 
 
+class _FakeClock:
+    """假时钟：`sleep(d)` 只把表拨快 d，不真的等。
+
+    替身只注入 `wing.db.database` 的 `time`（`_open` 的重试预算唯一的时钟来源），
+    因此退避序列与总时限都由它决定，与机器快慢无关。
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def _failing_open_until(
-    monkeypatch: pytest.MonkeyPatch, *, release_after_s: float
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    release_after_s: float,
+    clock: _FakeClock,
 ) -> list[int]:
-    """``_open_once`` 在 ``release_after_s`` 秒内一直抛锁错误，之后转发真实实现。
+    """``_open_once`` 在 ``release_after_s``（假时钟秒数）内一直抛锁错误，之后转发真实实现。
 
     模拟「赢家在慢慢迁移」：输家能不能撑过去，取决于预算怎么算（时间 vs 次数）。
+    释放时刻跟随 `clock`——与 `_open` 的重试预算同一个时间源，判据才可比。
     """
     import wing.db.database as db_mod
 
     real = db_mod.Database._open_once
-    started = time.monotonic()
+    monotonic = clock.monotonic
+    started = monotonic()
     attempts: list[int] = []
 
     def flaky(self: Database) -> None:
         attempts.append(len(attempts) + 1)
-        if time.monotonic() - started < release_after_s:
+        if monotonic() - started < release_after_s:
             raise sqlite3.OperationalError("database is locked")
         real(self)
 
