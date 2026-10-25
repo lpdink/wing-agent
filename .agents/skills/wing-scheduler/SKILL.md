@@ -80,7 +80,7 @@ tags: [orchestration, scheduler, multi-agent, delivery, headless]
 9. **先记录 base commit，再派发**：没有 base 就没有 review 范围（`<base>..HEAD`）。
 10. **你派发的每个 session 都要登记并打标**：派发即写进 `scheduler_log.md`（sid / 角色 / step / lane）并落标签（`--tag`，见 §1.1）；自己也随手可被 `wing ps --tag scheduler` 找回。执行者**自派**的两个 reviewer 不经过你——契约要求在最终消息里各报一行 sid / 视角 / 结论（§6.2 第 8 条），你在验收复核时把这几行**补进台账**（reviewer 都带 `--tag task=<task_name>`，可用 `wing ps --tag task=<task_name>` 交叉核对）。任务一大，不记就失忆。
 11. **失败优先 `-r` 续跑**：`wing run -r <sid> -p "..."` 保留原上下文。开新 session 只在原上下文彻底跑偏时才考虑（不推荐）。
-12. **等子会话只有两种合法姿势：停下，或 `wing wait`；禁止 `sleep`**。`wing run` 默认已登记「子会话收口 / 提问 → 唤醒我」（§6.1），所以派完直接结束本轮即可，通知会把你叫醒；要原地拿结果就 `wing wait <sid...> --timeout 3600 --json`（执行者自派一轮 review 之后单步实测 30–40 分钟，`--timeout` 3600 起步、重活 5400+），Bash 工具 timeout 同步给到 3700 起步——默认 30s 会把 wait 进程杀掉（会话不受影响，白等一轮）。`sleep 600; wing ps …` 的轮询一律不写：唤醒只落在工具结果边界上，长 sleep 会把它压到睡醒才送达，白等的分钟数就等于睡眠粒度。
+12. **等子会话只有两条路：停下等唤醒，或 `wing wait`；禁止用 `sleep` 等会话**。`wing run` 默认已登记「子会话收口 / 提问 → 唤醒我」（§6.1），派完直接结束本轮即可。两条路各有前提：**停下**要求 notify 确实在武装（派发输出里的 `notify` 字段；不在 agent 的 shell 里时要 `--notify-to`，否则没人叫你）；**`wing wait`** 要求派发时带 `--no-notify`（否则等完还会被收口信封再叫醒一次），而且它**不放行提问中的会话**——只认 `idle` / `inactive`，子会话提问停在 `waiting`。超时怎么给见 §7.1。`sleep` 只用于等墙钟（限速、退避），不用于等会话。
 13. **别相信自己的记忆，相信日志**：你自己的上下文会被自动压缩，跑到后面会忘掉前面。关键状态（sid、base sha、决策、结论）一律**当场**写进 `scheduler_log.md`，需要时读回来。
 14. **每步的 review 归执行者**：你不写 `review_request.md`、不派每步的 reviewer——交付前并发自派两个视角（正确性 / 架构）的独立 review 是执行者契约的一部分（§6.2）。你的审查活只有两件：**验收复核**（两份报告都在、结论通过、工作区干净）与**收口后的整体 review**（§8）。
 
@@ -252,7 +252,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
    `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag reviewer-correctness --tag task=<task_name> -p "<正确性契约 + review_request.md 绝对路径>"`
    `cd <worktree> && wing run --json --no-notify --tools "Bash,Read,Glob,Grep,Write,Edit" --tag reviewer --tag reviewer-arch --tag task=<task_name> -p "<架构契约 + review_request.md 绝对路径>"`
    （`--no-notify` 是必须的：你反正要阻塞等它们，别让它们的收口再往你这里投唤醒消息。）
-   然后一起等：`wing wait <正确性_sid> <架构_sid> --timeout 3600 --json`（Bash 工具 timeout 给 3700——铁律 12 的同一套数字；wait 幂等，超时了重等即可；**不要 `sleep` 轮询**：它只会把唤醒压到睡醒才送进来）。读**两份**报告：**[B] 与 [S] 必修、[N] 你判断**；两份冲突时以「用户既定决策 > 正确性 > 架构」为序取舍，写进最终消息。同一 step 最多 3 轮，复审写 review_r2.md / review_arch_r2.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
+   然后一起等：`wing wait <正确性_sid> <架构_sid> --timeout 3600 --json`（Bash 工具 timeout 给 3700——铁律 12 的同一套数字；wait 幂等，超时了重等即可；**不要用 `sleep` 等它们**：唤醒会被压到睡醒才送进来）。读**两份**报告：**[B] 与 [S] 必修、[N] 你判断**；两份冲突时以「用户既定决策 > 正确性 > 架构」为序取舍，写进最终消息。同一 step 最多 3 轮，复审写 review_r2.md / review_arch_r2.md（不覆盖上一轮），并用 `git -C <worktree> status --porcelain` 确认 reviewer 没弄脏工作区。
 8. 最终消息（调度者会读，务必完整）：
    - 做了什么（对应 task.md 哪些项）
    - 关键文件清单
@@ -278,12 +278,12 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
 
 ### 7.1 等待
 
-**两条合法姿势，选一条；`sleep` 不在其中。**
+**两条合法姿势，各有前提；`sleep` 不在其中。**
 
-1. **停下**（默认）：`wing run` 已经替你登记了「子会话收口 / 提问 → 唤醒我」（§6.1）：派完就结束本轮——被叫醒时你的会话会收到一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，或提问内容 + 回答用的 `tool_call_id`），醒来的第一件事是判读（§7.2 — 7.3）。期间可以顺手派下一个、写文档、做集成。
-2. **原地等**：`wing wait`（见下）。
+1. **停下**（默认，最省墙钟）：`wing run` 已经替你登记了「子会话收口 / 提问 → 唤醒我」（§6.1）——派完去做下一件事、写文档、做集成，或者直接结束本轮；被叫醒时会话里会出现一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，或提问内容 + 回答用的 `tool_call_id`），第一件事是判读（§7.2 — 7.3）。前提：notify 确实在武装（派发输出里的 `notify` 字段非空；不在 agent 的 shell 里时静默 `off (no parent session)`，要 `--notify-to <sid>` 或显式 `wing watch`，否则没人叫醒你）。
+2. **原地等**：`wing wait`（代码块见下）。前提两条：派发时带 `--no-notify`（结果反正由 wait 交给你，收口信封再投一条只会白起一轮），以及知道它**只认 `idle` / `inactive`**——子会话提问时状态是 `waiting`（优先级高于 `working`），wait 不会因此返回，ask 唤醒撞上「目标忙碌」也只进 inbox。
 
-**禁止 `sleep` 轮询**（`sleep 600; wing ps …` / `sleep 900; git log …`）：唤醒只落在**工具结果边界**上，长 sleep 会把它压到睡醒才送达——交接点白等的分钟数就等于睡眠粒度。`sleep` 只留给「等墙钟」（限速、退避），不用于等会话。
+**禁止用 `sleep` 等会话**（`sleep 600; wing ps …` / `sleep 900; git log …`）：唤醒只落在**工具结果边界**上，长 sleep 会把它压到睡醒才送达——白等的分钟数就等于睡眠粒度。`sleep` 只留给「等墙钟」（限速、退避）。
 
 想显式补登一条订阅（比如 `--no-notify` 派发的、或要盯多次收口）：`wing watch <sid> [--times 3] [--on done,ask]`。同一 `(source, target, on_events)` 再登记一次是**刷新**那一条订阅（不是新增）：保留 id 与次数计数，`--times` / `-p` 不给就保持原值——所以重复 `wing watch` 不会让同一个收口投两次，`wing run -r` 的隐式登记也不会把 `--times 3` 的剩余配额降成 1。
 
@@ -294,7 +294,8 @@ wing wait <sid1> <sid2> --timeout 3600 --json
 ```
 
 - **Bash 工具必须显式设更大的 timeout**（如 `timeout: 3700`）——见铁律 12；默认 30s 会把 `wing wait` 杀掉；
-- `--timeout` 是上限不是固定时长：全部会话 idle 就立即返回；自派 review 之后单步 30–40 分钟是常态，`--timeout 3600` 起步（重活 5400+）；
+- `--timeout` 是上限不是固定时长：全部会话 idle 就立即返回；自派 review 之后单步 30–40 分钟是常态，`--timeout 3600` 起步，重活继续往上抬（工具 timeout 始终比它大）；
+- **超时后先看提问**：`--timeout` 同时是「盲等」的上限——子会话停在 `waiting` 时 wait 不会返回。超时后先 `wing asks`（或 `wing ps --tag task=<task_name>` 看状态）确认有没有在挂的提问，再决定重 wait 还是回答；
 - wait 是**幂等**的：已 idle 的会话立即返回结果，所以可以反复 wait、分批 wait。
 
 ```bash
@@ -614,7 +615,7 @@ git push -u origin <task>/integration
 11. **让 executor push** → 明确禁止；push / 建 PR 是 scheduler 的专属权限。
 12. **任务文档写进 worktree** → 污染 diff 与 review 范围。任务目录永远在 `$WING_HOME/tasks/`。
 13. **设 `--max-turns`** → 任务中途夭折。不设。
-14. **用 `sleep` 轮询等子会话（禁止）** → 唤醒压在工具结果边界里，睡多久白等多久；停下等通知（`wing run` 默认登记）或 `wing wait`（幂等，超时了重等），二选一。
+14. **用 `sleep` 等会话（禁止）** → 唤醒压在工具结果边界里，睡多久白等多久；停下等通知（`wing run` 默认登记）或 `wing wait`（幂等，超时了重等），二选一。
 15. **交付前不查 `git status`** → 临时脚本、调试文件混进交付物。
 16. **让子 agent 再派子 agent（外包）** → 执行者只剩一轮 review 的派发权，reviewer 一次都没有：审查不能外包，活也不能外包。契约里写死，验收时看 `wing ps --parent <sid>` 有没有多出来的孙会话。
 

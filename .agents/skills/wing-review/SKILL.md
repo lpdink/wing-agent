@@ -82,7 +82,7 @@ SID2=$(wing run --json --no-notify \
 
 - `cd` 决定 session 的 workspace——选 worktree 的**集散目录**（审查员要靠绝对路径进各 worktree）；
 - 两条命令紧挨着发，第二条不会等第一条——这就是「同一轮并发」；`--tag reviewer-correctness` / `--tag reviewer-arch` 用于事后按视角找回；
-- **`--no-notify`**：你反正要阻塞等它们，别让它们的收口再往你这里投一条唤醒消息（notify 语义见 [wing-cli](../wing-cli/SKILL.md) 的 `wing run` 一节）；
+- **`--no-notify` 按等法二选一**：阻塞等（`wing wait`）就必须带——wait 已经把结果交给你，收口信封再投一条只会白起一轮；打算派完直接停下、让它们叫醒你，就**不要**带（带了没有任何人会叫你）。notify 语义见 [wing-cli](../wing-cli/SKILL.md) 的 `wing run` 一节；
 - 派发后核对：`wing info <sid> --json` 看 `workdir` / `tools` 是否符合预期（两个都核）；
 - `wing run` 创建的 session 强制 yolo（无人值守），不要也不该附加额外工具。
 
@@ -93,7 +93,7 @@ wing wait <sid1> <sid2> --timeout 3600 --json > /tmp/review_wait.json
 ```
 
 - `wing wait` 接受多个 sid，全部 idle 才返回；**Bash 工具的 timeout 必须更大**（如 `--timeout 3600` + 工具 3700）——默认 30s 会把 wait 进程杀掉；会话不受影响，wait 幂等可重等；
-- **不要用 `sleep` 轮询补等**（`sleep 300; wing ps …`）：唤醒消息被压在工具结果边界里，睡多久白等多久；wait 超时就重 wait，或者干脆结束本轮等审查者自己的收口唤醒（不写 `--no-notify` 时它们会叫醒你）；
+- **不要用 `sleep` 等它们**（`sleep 300; wing ps …`）：唤醒消息被压在工具结果边界里，睡多久白等多久；wait 超时就重 wait，或者干脆结束本轮等审查者自己的收口唤醒（派发时没写 `--no-notify` 才会叫醒你）；
 - 结果按 `session_id` 对上是哪个视角；报告在各目的文件里（`results[].result` 是收口消息，应指向报告路径）；异常（`is_error` / `subtype`）先 `wing tail <sid> -t tool_call` 看现场。
 
 ## 读报告与处置
