@@ -68,7 +68,7 @@ test-ts:
 	$(TS_TOOLING_CHECK); \
 	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
 	echo "🔍 Running vitest (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run test); then echo "❌ vitest failed"; exit 1; fi; \
+	if ! (cd $(VSCODE_DIR) && pnpm run test $(if $(TS_ARGS),-- $(TS_ARGS))); then echo "❌ vitest failed"; exit 1; fi; \
 	echo "✅ vitest passed"
 
 fmt-ts:

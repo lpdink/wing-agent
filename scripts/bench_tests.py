@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -92,12 +93,27 @@ def run_once(tree: Path, mode: str) -> Round:
     try:
         raw = json.loads(report_path.read_text())
     except (OSError, json.JSONDecodeError):
-        # 报告缺失只可能是脚本本身早退（缺工具链、参数错）：把现场交出去，
-        # 不要用"墙钟跑完了"假装成功。
-        print(proc.stdout, file=sys.stderr)
-        raise SystemExit(f"collect_output.sh 没有写出报告（{tree}），见上方输出")
+        raw = None
     finally:
         report_path.unlink(missing_ok=True)
+
+    if raw is None:
+        # 老 checkout 的 `collect_output.sh` 还不认识 WING_TEST_REPORT（基线侧常常如此）。
+        # 退回解析终端里那几行 `└ <组> 完成，用时 <n>s`：精度只有整秒，但墙钟由这里
+        # 自己测（毫秒），逐组那一列够用来对照。拿不到任何组就说明脚本早退了。
+        groups_s, codes_s = parse_human_output(proc.stdout)
+        if not groups_s:
+            print(proc.stdout, file=sys.stderr)
+            raise SystemExit(
+                f"collect_output.sh 没有写出报告、也没有可解析的组耗时（{tree}）"
+            )
+        return Round(
+            wall_ms=wall_ms,
+            groups=groups_s,
+            codes=codes_s,
+            stats={},
+            load=load_average(),
+        )
 
     groups: dict[str, int] = {}
     codes: dict[str, int] = {}
@@ -113,6 +129,23 @@ def run_once(tree: Path, mode: str) -> Round:
         stats=stats,
         load=load_average(),
     )
+
+
+#: `└ python 完成，用时 16s` / `└ probe  失败（exit=1），用时 33s`——逐组耗时行。
+_HUMAN_PROGRESS = re.compile(
+    r"└\s+(?P<label>\S+)\s+(?P<failed>失败（exit=(?P<code>\d+)）)?.*?用时\s+(?P<secs>\d+)s"
+)
+
+
+def parse_human_output(output: str) -> tuple[dict[str, int], dict[str, int]]:
+    """从终端输出里取逐组（毫秒近似的整秒 | 退出码）。"""
+    groups: dict[str, int] = {}
+    codes: dict[str, int] = {}
+    for match in _HUMAN_PROGRESS.finditer(output):
+        label = match.group("label")
+        groups[label] = int(match.group("secs")) * 1000
+        codes[label] = int(match.group("code") or 0)
+    return groups, codes
 
 
 def median(values: list[int]) -> int:
@@ -175,6 +208,17 @@ def main(argv: list[str]) -> int:
         help=f"1 分钟负载均值上限（默认 {DEFAULT_MAX_LOAD}）",
     )
     parser.add_argument("--allow-load", action="store_true", help="忽略负载门禁")
+    parser.add_argument(
+        "--allow-red",
+        action="store_true",
+        help="某一轮没有全绿时继续（只比时间，失败在结论里逐轮列出）",
+    )
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=5.0,
+        help="两次运行之间空转几秒，让 CPU / 文件缓存回落（默认 5）",
+    )
     args = parser.parse_args(argv)
 
     trees = [Path(path).expanduser().resolve() for path in args.tree]
@@ -200,7 +244,7 @@ def main(argv: list[str]) -> int:
             print(f"🔥 预热 {name}（{tree}）…", flush=True)
             warm = run_once(tree, args.mode)
             print(f"   预热完成 {seconds(warm.wall_ms)}（不计入结果）", flush=True)
-            if not warm.ok:
+            if not warm.ok and not args.allow_red:
                 print(
                     f"❌ 预热就失败了：{name} 的 {args.mode} 没有全绿", file=sys.stderr
                 )
@@ -222,14 +266,27 @@ def main(argv: list[str]) -> int:
                 f"  {status} {seconds(result.wall_ms)}  load={result.load[0]:.2f}",
                 flush=True,
             )
-            if not result.ok:
+            if not result.ok and not args.allow_red:
                 print(f"❌ {name} 的 {args.mode} 没有全绿，基准中止", file=sys.stderr)
                 return 1
+            if args.pause > 0:
+                time.sleep(args.pause)
 
     summary: dict[str, tuple[int, dict[str, int]]] = {}
     for name in labels:
         summary[name] = describe(rounds[name])
         print_table(f"── {name} ──", rounds[name], *summary[name])
+
+    red = [
+        (name, index + 1, sorted(label for label, code in r.codes.items() if code))
+        for name in labels
+        for index, r in enumerate(rounds[name])
+        if not r.ok
+    ]
+    if red:
+        print("\n注意：以下轮次没有全绿（墙钟仍然计入中位数）：")
+        for name, round_no, labels_red in red:
+            print(f"  {name} 第 {round_no} 轮：{', '.join(labels_red)}")
 
     if len(trees) == 2:
         base_wall, base_groups = summary[labels[0]]
