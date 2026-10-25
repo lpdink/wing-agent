@@ -19,6 +19,7 @@ import time
 
 import pytest
 
+from _support import wait_until_async
 from wing.agent.inbox import Inbound
 from wing.background import BackgroundScheduler
 from wing.event import DeliveredEvent
@@ -394,7 +395,7 @@ class TestBackgroundScheduler:
         scheduler = BackgroundScheduler()
         scheduler.add_job("tick", 0.01, job)
         scheduler.start()
-        await asyncio.sleep(0.05)
+        await wait_until_async(lambda: bool(calls), timeout=5.0)
         await scheduler.stop()
         assert len(calls) >= 1
         assert scheduler.jobs == ["tick"]
@@ -409,14 +410,16 @@ class TestBackgroundScheduler:
         超时且**不观察已 set 的停止事件** → 循环永远进不了返回分支，
         `stop()` 里的 `await task` 永久挂住（gateway lifespan shutdown 失效）。
         """
+        job_done = asyncio.Event()
 
         async def slow_job() -> None:
-            await asyncio.sleep(0.05)  # 远大于 interval
+            await asyncio.sleep(0.02)  # 远大于 interval：跑完时 deadline 已过
+            job_done.set()
 
         scheduler = BackgroundScheduler()
         scheduler.add_job("slow", 0.01, slow_job)
         scheduler.start()
-        await asyncio.sleep(0.12)  # 至少越过一轮 deadline
+        await asyncio.wait_for(job_done.wait(), timeout=5.0)  # 至少跑完一轮 job
 
         # 用 asyncio.wait 而非 wait_for 判定：wait_for 超时会**取消** stop()，
         # 而取消会掩盖"循环没停"这一事实（stop 的取消分支吞掉 CancelledError
@@ -445,7 +448,7 @@ class TestBackgroundScheduler:
         scheduler.add_job("boom", 0.01, boom)
         scheduler.add_job("ok", 0.01, ok)
         scheduler.start()
-        await asyncio.sleep(0.05)
+        await wait_until_async(lambda: "boom" in calls and "ok" in calls, timeout=5.0)
         assert scheduler.running is True  # 循环没被 job 异常带崩
         await scheduler.stop()
         assert "boom" in calls and "ok" in calls

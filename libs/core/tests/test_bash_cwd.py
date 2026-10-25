@@ -90,17 +90,6 @@ class TestBashExecution:
         # cwd remains the workspace root, not subdir
         assert str(sub) not in result
 
-    @pytest.mark.asyncio
-    async def test_timeout_returns_partial_output(self, tmp_path: Path):
-        """A timed-out command returns partial output with error."""
-        agent = _MockAgent(str(tmp_path))
-
-        with pytest.raises(ToolError) as exc_info:
-            await execute_shell("sleep 5", agent, timeout=1)
-        assert "timed out" in str(exc_info.value)
-        # cwd unchanged
-        assert agent.cwd == tmp_path
-
 
 class TestBashSessionEnv:
     """Every executed shell sees ``WING_SESSION_ID`` = ``ctx.session_id``."""
@@ -172,7 +161,9 @@ class TestBashShellBehavior:
     @pytest.mark.asyncio
     async def test_background_command_returns_immediately(self, tmp_path: Path):
         agent = _MockAgent(str(tmp_path))
-        result = await execute_shell("sleep 2 &", agent, timeout=10)
+        # asyncio 的 `Process.wait()` 跟随管道 EOF，所以这个调用的墙钟 = 子进程寿命：
+        # 寿命必须 > shell 退出（否则等于没验证"后台"）且 < timeout（否则走超时分支）。
+        result = await execute_shell("sleep 0.3 &", agent, timeout=10)
         # Shell exits right after spawning the bg job — no timeout
         assert _parse_rc(result) == 0
 

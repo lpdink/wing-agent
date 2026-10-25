@@ -12,7 +12,7 @@
 
 | 命令 | 做什么 |
 |------|--------|
-| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n <核数≤12>`） |
+| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 --dist loadfile -n 1.5×核数`） |
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
@@ -25,11 +25,23 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `PROBE_WORKERS` | `min(12, 核数)` | 场景并行度（`make test-probe` 的 `-n`）。10 核实测 8 worker 39s → 12 worker 26s（16 worker 只再快 1s：拐点在核数附近）。CI 的 4 核 runner 取 4。`WING_TEST_SERIAL=1` 同样归串行 |
+| `PROBE_WORKERS` | `1.5×核数` | 场景并行度（`make test-probe` 的 `-n`，派发方式固定为 `--dist loadfile`）。取法见下面「为什么敢并行」：曲线在 1.5× 核数附近拐平，再往上只加 CPU 不加墙钟。要更大/更小用 `PROBE_WORKERS=<n>` 显式给（每 worker 约 0.1~0.2GB）。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
 
-**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。瓶颈是进程启动与 HTTP 握手这类等待而非算力（12 worker 全量 27.7s 的墙钟只花掉 100s CPU，平均约占 3.6 核），所以并行度按核数铺开是安全的。实测全量 39s → 26s（10 核，8 → 12 worker）。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口；并行不改变隔离语义，共享环境才会。（同窗口、本机 12 核、3 轮中位数；窗口内有其它 agent 在跑，绝对值只可同窗口比。）
+
+**① 派发方式：`--dist loadfile`（按文件），不是 xdist 默认的 `load`（按单条用例）。** 这一组是 **straggler 决定的**：worker 之间不偷活，队列在约 9s 就发空，剩下的墙钟等于「最慢那个 worker 手里的用例堆」。`load` 的逐条派发会让同一个 worker 攒到整族慢用例——安静窗口实测：最慢 worker 26 例共 21.1s，其中 `test_wake_restart` 6.3s + `test_wake_timer` 3.8s（两个重尾用例落在同一个 worker），而三个 worker 在 8.4s 就没活了；按文件派发把慢族的累积上限压到「一个文件」（1~3 例），最慢 worker 落到 18.2s。同窗口交错 3 轮中位数：`load` `-n 12 / 20` = 22.8 / 20.2s → `loadfile` 19.2 / 17.3s（`loadscope` 在 `-n 12` 是 18.2s，与 `loadfile` 同侧 ⇒ 起作用的确实是「文件/模块」这一级粒度）。
+
+**机制不是「用例跑得更快」**，三条实测把它排除掉：两种派发下 worker 的忙碌总时间相同（159.5s vs 163.0s）、用例之间的空闲≈0（0.02~0.07s/worker，所以不是逐条派发的往返延迟）、首个用例都在 0.2~0.5s 开跑（所以不是收集阶段），而墙钟在两个模式下都 ≈ 最慢 worker 的忙碌时间 + 0.5s。
+
+**② worker 数 = 1.5×核数。** 快停机之后每例只剩一次网关启动（~0.22s：新解释器把导入图跑一遍，CPU 密集），曲线在 1.5× 附近拐平——同窗口 3 轮中位数：`-n 12/14/16/18/20/24` → **19.2 / 18.3 / 17.7 / 17.4 / 17.3 / 18.0s**，CPU（user+sys）**104 / 114 / 121 / 127 / 129 / 136s**。`-n 18`（1.5×）与 `-n 20` 的墙钟差 0.04s（在噪声内）而 CPU 差 2s，2× 反而回退 0.7s，所以取 1.5×。
+
+**③ 跨文件状态**：`loadfile` 会让同一个 worker **连续**跑多个文件，所以「用例之间零共享」必须真的成立（而不是靠"每条用例都可能落到不同 worker"）。约束是本包的设计本身：每个用例自带 tmp `WING_HOME` + 网关子进程 + 假 Provider，没有任何用例改 `os.environ` / `cwd` / 模块级全局（改了也走 `monkeypatch` 自动还原）。实测两遍：串行 589 例（**一个进程**跑完全部文件）全绿；**逆序文件顺序**（改变所有"前一个文件"的配对）全绿。
+
+**编队内为什么不收**：`make test` 里另外三组按共享档收到约 1/3 核数，probe 保持 1.5× 核数——
+它等的是网关子进程而不是算力，少给 worker 只会更慢。12 核上的合计与取舍见
+[test-speed.md](test-speed.md) §1。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
@@ -162,8 +174,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 # auth + api_key: 打开网关鉴权（gateway.auth 段原文，缺省 {"enabled": False}）。
 # `auth` 进 ProbeEnv（配置），`api_key` 进 Probe.start → Driver（HTTP 与 WS 都带
-# Authorization: Bearer）。auth 打开时 ProbeEnv 关自己的子进程也用 keys 里第一把
-# 非 tool_runtime 的 key（/api/shutdown 同样受鉴权保护）。见 scenarios/test_gateway_auth.py
+# Authorization: Bearer）。auth 打开时 `Probe.shutdown()` 也用 keys 里第一把非
+# tool_runtime 的 key（/api/shutdown 同样受鉴权保护）——teardown 的 stop() 是 SIGKILL，
+# 不走该端点。覆盖在 tests/test_env_config.py::test_shutdown_api_key_prefers_admin_role
+# 与 scenarios/test_stop_paths.py::test_shutdown_uses_an_admin_key_when_auth_is_on。
 @pytest.mark.probe_env(auth={"enabled": True, "keys": [{"key": "k"}]}, api_key="k")
 
 # pre_start_dirs: 网关**启动前**要占住的目录（相对 WING_HOME，元素是路径字符串）。
@@ -273,6 +287,49 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 - 黑名单 `TRANSIENT_EVENT_TYPES` = 产品中 `persist=False` 的**全集**（`text` / `reasoning` / `tool_call_stream` / `tool_call` / `tool_call_result` / `assistant_turn` / `tool_result_turn` / `llm_call_metrics` / `sync_session` / `session_state_changed` / `session_init` / `context_stats` / `branch_targets` / `delivered` / `notice`），是 spec 最低要求（流式 delta 三类）的超集；新增 `persist=False` 事件类型时应同步该集合（`wing_probe/history/invariants.py`）；
 - 事件断言锚定**事件序**，时间只作上限；并行工具用集合语义断言，不依赖完成顺序。
 
+## 停机：快路径与优雅路径
+
+`ProbeEnv` 有两条停机路径，**默认是快的那条**：
+
+| 入口 | 做了什么 | 谁在用 |
+|---|---|---|
+| `Probe.stop()` / `ProbeEnv.stop()` | **SIGKILL**（不跑 lifespan）+ 收假 Provider | fixture teardown、所有失败收尾 |
+| `Probe.shutdown()` / `ProbeEnv.shutdown()` | `POST /api/shutdown` → 等进程自己退（≤5s）→ 兜底 terminate/kill | 需要观察停机语义的场景，在**场景体里**显式调用 |
+| `Probe.restart_gateway()`（内部 `_graceful_stop_process`） | 同上（优雅关掉旧进程），再在同一套隔离目录上起新进程 | 跨重启语义（账本延续 / 待生效状态 / 醒来补发） |
+| `ProbeEnv.kill_gateway()` | 只 SIGKILL 进程、env 继续可用 | 造「停机窗口里该发生的触发没发生」（唤醒错过补发） |
+
+判据只有一条：**这次停机之后还有没有人观察「停机时发生的事」**。teardown 之后没有
+任何断言（内置不变量与现场转储都在 `stop()` 之前完成），而 lifespan 收尾的
+`sm.flush_usage()` / `stop_background()` / `close_providers()` / `close_database()`
+对「跑完就扔」的进程不产生被观察的结果，却固定要 ~0.30s（构成见 `ProbeEnv.stop` 的
+docstring：`/api/shutdown` 自己的延迟 + uvicorn 收尾里的两次固定 `sleep`）——
+那是 probe 里最大的一笔无被测语义开销。
+
+因此：**要观察停机语义的场景必须显式 `await probe.shutdown()`**，不要指望 teardown
+的隐式行为。
+
+一条边界必须知道：快路径 SIGKILL 的是网关的**进程组**，而 Bash 工具的子进程为了能自己
+killpg 也 `start_new_session=True`（自成会话），所以**不在**那个组里。场景因此不该在回合
+还在飞的时候结束——优雅路径会等回合收尾，快路径不会，正在跑的工具子进程会被留成孤儿
+（`pgrep` 也扫不回来）。
+
+这条边界默认不可见，但可以查：`WING_PROBE_ORPHAN_SCAN=1` 会在每次收尾前扫一遍进程表，
+把"会活下来的后代"（不同进程组的）连同命令行记进网关日志的
+`--- probe: survivors … ---` 标记里。代价是每次收尾一次 `ps`（~10ms），所以默认关。两条路径的差别由 `scenarios/test_stop_paths.py` 钉在外部可观察量上——
+快路径的退出码是 SIGKILL 且 `core/wing.db-wal` 留在盘上（`close_database()` 没跑），
+优雅路径的 WAL 被收掉。`kill_gateway` 与 `stop` 共用同一份 SIGKILL 实现，
+`restart_gateway` 与 `shutdown` 共用同一份优雅收尾。
+
+三点边界：
+
+- **进程级原语住 `ProbeEnv`**：`kill_gateway()` 是「杀进程但 env 继续用」，facade 不代理它
+  （场景写 `probe.env.kill_gateway()`）；`stop` / `shutdown` 才是 facade 的门面。
+- **`shutdown()` 之后只剩磁盘面**：它先关 driver，所以现场转储里来自 driver 的三份留档
+  （`timeline` / `frames` / `http`）会为空；内置不变量与 sessions 拷贝、网关日志照旧
+  （不变量在无 driver 时按磁盘兜底，**不会**因此变成零覆盖）。
+- **包外消费者同样受影响**：`scripts/perf/suite_gateway.py` 也调 `probe.stop()`，它测到的
+  每场景 `duration_s` 因此不再包含停机等待（该数字只作展示，不进指标门禁）。
+
 ## 逃生舱
 
 `probe.without_invariants(reason="...")` 关闭本场景的 teardown 不变量——**必须给理由**：理由写进 `artifacts/dump.txt` 并在终端汇总回显，空理由直接报错。用于"场景有意制造非法中间态"（例如断言失败路径的中间产物），不得用于掩盖真实失败。已发生的实例与理由：
@@ -284,10 +341,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 ## 已知取舍（与二批范围）
 
-- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.5s（`start` 0.18s / `stop` 0.30s），78 个场景串行就是 40s——**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.24s（`start` 0.22s + `Driver.connect` 0.013s + `stop` 0.003s——teardown 走快停机，见上一节；`start` 里 200ms 上下是一个新解释器把网关的导入图跑一遍，其中 `fastapi` 一项占一半上下），**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
 - **场景里的等待要花在窗口上，不要花在节奏上**：`delay` 逐帧、`first_delay` 只压首个内容帧，两者混用会互相放大（`scenarios/test_midjoin_sync.py` 曾用 `delay=3.0` 撑窗口，白烧 9s）。写场景时先想清楚"我在等的是什么"，再选旋钮；
 - **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
-- 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 走 `/api/shutdown` → `terminate` → `kill`；
+- 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 被 SIGKILL（快停机，见「停机：快路径与优雅路径」）；`shutdown()` 那条路径另有 wait → `terminate` → `kill` 的阶梯；
 - 网关重试在探测配置里显式打开（`max_retries=2` / `max_retry_delay=1s`，`wing_probe/env.py`）——语义重试场景需要它（`scenarios/test_react_invalid_generation.py`）。计数口径：**一次逻辑调用的剧本消费上界 = 1 + max_retries**，超出即 5xx，仍然可数。
 
 ## 附：变异验证怎么复跑

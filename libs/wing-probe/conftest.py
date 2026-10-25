@@ -29,6 +29,10 @@ import ``wing_probe`` 与 pytest）。
    ``<env.root>/artifacts/``；转储路径进失败报告（``watch.dump_path`` 已指向该
    目录，expect 超时报告末行即引用它）与终端汇总。
 
+teardown 的停止是**快**路径（``Probe.stop`` → ``ProbeEnv.stop``：SIGKILL，不跑
+lifespan；判据与边界见 ``docs/dev/probe-testing.md``「停机：快路径与优雅路径」）。
+要观察停机语义的场景，在**场景体里**显式 ``await probe.shutdown()``。
+
 ``PROBE_DUMP`` 取值：
 
 - ``on-fail``（默认）：场景失败或内置不变量失败时转储；

@@ -449,6 +449,7 @@ class TestWorkerRenewal:
         monkeypatch.setattr(core, "_INTERRUPT_WAIT_SECONDS", 0.02)
 
         started = asyncio.Event()
+        release = asyncio.Event()
 
         async def _swallow_then_die(_loop: Any) -> None:
             started.set()
@@ -457,7 +458,7 @@ class TestWorkerRenewal:
                     await asyncio.sleep(30)
                 except asyncio.CancelledError:
                     pass
-            await asyncio.sleep(0.2)  # 阶梯之外才死：interrupt 已放手并登记续期
+            await release.wait()  # 阶梯之外才死：由测试在 interrupt 放手后放行
             raise WorkerEscape("dies after being kept")
 
         # 在 agent 创建之前打补丁：worker 的第一次 `run_turn` 就是它（否则补丁
@@ -474,6 +475,7 @@ class TestWorkerRenewal:
         await asyncio.wait_for(agent.interrupt(), timeout=5.0)
         assert agent._worker is kept  # 先保留（绝不重建第二个）
 
+        release.set()  # 续期已登记，此刻才让被保留的 worker 死
         await wait_until_async(kept.done, timeout=3.0)
         await _settle()
 

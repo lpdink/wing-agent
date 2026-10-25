@@ -27,6 +27,8 @@ use common::e2e::{read_request, run_wing, start_fake_gateway};
 
 const SESSION_ID: &str = "20261023-101500-abcdef01";
 const UNKNOWN_ID: &str = "ghost-session";
+/// 一帧仪表盘的标题行（`usage -w` 每帧都会画，且每帧只画一次）。
+const FRAME_TITLE: &str = "WING USAGE";
 
 // ============================================================
 // Stub gateway
@@ -543,9 +545,10 @@ async fn watch_clears_the_screen_before_drawing_a_frame() {
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut collected: Vec<u8> = Vec::new();
     let mut buf = [0u8; 8192];
-    // 读够两帧就够判断顺序了（每帧几 KB + 2s 间隔）；超时即收手。
+    // 读到**第二帧的标题**就收手：断言只用两帧的先后（[清屏][内容][清屏][内容]），
+    // 读第三帧只是干等下一个 2s 刷新。超时即收手，缺了什么由下面的断言说。
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while collected.len() < 20_000 {
+        while frames_seen(&collected) < 2 {
             match stdout.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => collected.extend_from_slice(&buf[..n]),
@@ -564,17 +567,25 @@ async fn watch_clears_the_screen_before_drawing_a_frame() {
         text.starts_with(clear),
         "首帧之前必须先清屏（否则上一屏残影留在最上面）：{head:?}"
     );
-    let first_title = text.find("WING USAGE").expect("a frame was drawn");
+    let first_title = text.find(FRAME_TITLE).expect("a frame was drawn");
     let second_clear = text[first_title..]
         .find(clear)
         .map(|offset| first_title + offset)
         .expect("a second frame follows");
     let second_title = text[second_clear..]
-        .find("WING USAGE")
+        .find(FRAME_TITLE)
         .map(|offset| second_clear + offset)
         .expect("the second frame is drawn after its clear");
     assert!(
         first_title < second_clear && second_clear < second_title,
         "帧序必须是 [清屏][内容][清屏][内容]"
     );
+}
+
+/// 已经收到的字节里出现过几次帧标题——即「读到了几帧」。
+fn frames_seen(collected: &[u8]) -> usize {
+    collected
+        .windows(FRAME_TITLE.len())
+        .filter(|window| *window == FRAME_TITLE.as_bytes())
+        .count()
 }

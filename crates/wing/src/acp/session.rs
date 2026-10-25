@@ -1343,6 +1343,10 @@ mod tests {
     use agent_client_protocol::schema::v1::ElicitationFormCapabilities;
     use serde_json::json;
 
+    /// [`await_until`] 让出执行权的次数上限。被等的任务都在同一进程里推进到它的下一个
+    /// await 点，几次就够；给足 10000 次是为了「挂住」不会伪装成「条件不成立」之外的失败。
+    const AWAIT_UNTIL_YIELDS: usize = 10_000;
+
     fn event(session_id: &str) -> WingEvent {
         serde_json::from_value(json!({
             "type": "text",
@@ -1375,6 +1379,22 @@ mod tests {
         SessionHub::new_unstarted(http, "client-test".into())
     }
 
+    /// 轮询一个可观测条件，直到它成立（**零真实时间**：只让出执行权）。
+    ///
+    /// 用来替代「睡一小会儿等某事发生」：条件成立是确定性的同步点，睡眠只是赌。调用方
+    /// 负责保证条件终将成立——本仓库的用例都在同一进程内的状态上等（`yield_now` 足以让
+    /// 被 spawn 的任务推进到它的下一个 await 点）。`what` 是失败文案（条件不成立时说明
+    /// 在等什么）。
+    async fn await_until(mut done: impl FnMut() -> bool, what: &str) {
+        for _ in 0..AWAIT_UNTIL_YIELDS {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("{what}: still not true after {AWAIT_UNTIL_YIELDS} yields");
+    }
+
     /// 测试用 hub，HTTP 指向一个「接受连接后立刻关闭」的本地监听。
     ///
     /// 用于 `close_session` 这类**真的会发 HTTP** 的路径：失败快速且确定（不依赖
@@ -1396,6 +1416,10 @@ mod tests {
 
     /// 测试用 hub，HTTP 指向一个「记录请求行」的极简监听：**订阅一律 500**（触发回滚），
     /// 其余路径 200。用来观察「发不发 HTTP / 发的是哪条路径」。
+    ///
+    /// 桩一条连接只服务一个请求，所以响应必须带 `Connection: close`：不带的话客户端会按
+    /// HTTP/1.1 的默认语义把这条连接放回复用池，下一条请求打在对端已关闭的 socket 上——
+    /// 请求没到桩，`lines` 里就少一行，断言与"产品少发了一条"无法区分。
     ///
     /// 返回的 `Arc<Mutex<Vec<String>>>` 是请求行（`"POST /api/session/… HTTP/1.1"`）。
     async fn hub_with_recording_http() -> (
@@ -1443,11 +1467,13 @@ mod tests {
                         ("200 OK", r#"{"ok":true}"#)
                     };
                     let response = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                     let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
                 });
             }
         });
@@ -1586,14 +1612,11 @@ mod tests {
             tokio::spawn(async move { hub.close_session(&sid).await })
         };
         // 轮次还占着 gate（close 卡在有界等待里）：标记必须已经可见。
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !entry.is_closing() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "close 未在有界等待前落「正在关闭」标记"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        await_until(
+            || entry.is_closing(),
+            "close 未在有界等待前落「正在关闭」标记",
+        )
+        .await;
         drop(turn);
         closing.await.expect("close task joins");
     }
@@ -1984,15 +2007,17 @@ mod tests {
     #[tokio::test]
     async fn close_during_a_mount_window_does_not_interrupt() {
         let (hub, _outbound_rx, lines) = hub_with_recording_http().await;
-        hub.register("s1");
+        let entry = hub.register("s1");
         let (attached, _) = hub.attach_session("s1").await.expect("attach");
 
         let closer = {
             let hub = Arc::clone(&hub);
             tokio::spawn(async move { hub.close_session("s1").await })
         };
-        // 给 close 走到「等 gate」的时间（旧实现在这里发 interrupt）。
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 确定性同步点：`mark_closing` 落在**有界等待之前**，所以「标记可见」== 「close
+        // 已经决定回收、接下来只会排在 gate 上」。等它出现再放掉挂载窗口——用睡眠代替它
+        // 会让这条用例在慢机器上悄悄退化成"close 发生在挂载窗口之后"。
+        await_until(|| entry.is_closing(), "close 未在放掉挂载窗口前决定回收").await;
         drop(attached);
         closer.await.expect("close task");
 

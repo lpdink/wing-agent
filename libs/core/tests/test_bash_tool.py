@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from _support import wait_until_async
 from wing.schema import ToolError
 from wing.tools.builtin.bash import (
     FEEDBACK_TIMEOUT,
@@ -24,6 +26,12 @@ from wing.tools.builtin.bash import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+#: 长睡进程的秒数。`pgrep -f` 看的是**整机**进程表：一台机器上并行开几个 worktree
+#: 跑同一套用例时，固定的 `sleep 3737` 会被别人的用例扫到（假红）。唯一性放进**小数位**
+#: （`120.<pid>`）而不是整数部分：整数成千上万秒意味着任何一次被打断的轮次都会在机器上
+#: 留一个活好几小时的孤儿，而 120 秒的窗口够跑完断言、又不至于攒下来。
+_SLEEP_SECONDS = f"120.{os.getpid()}"
 
 
 class _StubCtx:
@@ -200,13 +208,16 @@ class TestExecuteCommand:
         ctx = _StubCtx(yolo=True, cwd=tmp_path)
 
         with pytest.raises(ToolError) as excinfo:
-            await execute_shell("echo before; sleep 3737", ctx=ctx, timeout=1)
+            await execute_shell(
+                f"echo before; sleep {_SLEEP_SECONDS}", ctx=ctx, timeout=1
+            )
 
         message = str(excinfo.value)
         assert message.startswith("[exit code: -1]")
         assert "Command timed out after" in message
         assert "--- partial stdout ---" in message and "before" in message
-        assert await _pgrep("slee[p] 3737") == []
+        assert await _pgrep(f"slee[p] {_SLEEP_SECONDS}") == []
+        assert ctx.cwd == tmp_path  # 超时不动工作目录
 
     async def test_spawn_failure_wrapped_as_tool_error(self, tmp_path):
         ctx = _StubCtx(yolo=True, cwd=tmp_path / "gone")
@@ -217,14 +228,17 @@ class TestExecuteCommand:
     async def test_cancellation_kills_process_and_propagates(self, tmp_path):
         ctx = _StubCtx(yolo=True, cwd=tmp_path)
 
-        task = asyncio.create_task(execute_shell("sleep 3737", ctx=ctx, timeout=60))
-        await asyncio.sleep(0.3)  # 让子进程起来
+        task = asyncio.create_task(
+            execute_shell(f"sleep {_SLEEP_SECONDS}", ctx=ctx, timeout=60)
+        )
+        # 钩子注册 = 子进程已起、进程组已知（打断清理的前提）。
+        await wait_until_async(lambda: bool(ctx.hooks))
         task.cancel()
 
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert await _pgrep("slee[p] 3737") == []
+        assert await _pgrep(f"slee[p] {_SLEEP_SECONDS}") == []
         assert ctx.hooks == {}
 
 

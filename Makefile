@@ -13,6 +13,17 @@
 # 门禁照旧强制），collect_output.sh 会把 ts 组标成 skipped。
 VSCODE_DIR := extensions/vscode
 
+# vitest worker 上限：独占时交给 vitest 自己定（默认核数-1），与另外三组同时跑时收到
+# `WING_TEST_BUDGET_TS`（数值，由 `scripts/collect_output.sh` 算，见 PYTEST_WORKERS 处）。
+# `TS_ARGS` 是直接透传给 vitest 的逃生舱（`make test-ts TS_ARGS="--reporter=verbose"`）。
+# 注意**不要**写成 `pnpm run test -- $(TS_ARGS)`：pnpm 会把 `--` 连同后面的实参一起吞掉，
+# vitest 一个都收不到（静默失效）。`pnpm run test <args>` 才是透传。
+# 串行逃生舱优先于预算（与 PYTEST_WORKERS / rust 的口径一致）：`WING_TEST_SERIAL`
+# 非空且非 0 时，一切并行度旋钮都不生效。
+NOT_SERIAL = $(if $(WING_TEST_SERIAL),$(filter 0,$(WING_TEST_SERIAL)),1)
+TS_WORKERS ?= $(if $(and $(NOT_SERIAL),$(WING_TEST_BUDGET_TS)),--maxWorkers=$(WING_TEST_BUDGET_TS))
+TS_ARGS ?= $(TS_WORKERS)
+
 # Node/pnpm 探测 + 提示（单行，避免 make ↔ shell 的续行转义；见 docs/dev/vscode-extension.md §9.3）。
 TS_SKIP_NOTE = echo "⏭️  SKIP_TS=$(SKIP_TS) — TypeScript gates (extensions/vscode) skipped on request."; echo "   CI never sets SKIP_TS: the group stays mandatory there."; exit 0
 TS_TOOLING_CHECK = command -v node >/dev/null 2>&1 || { echo "❌ node not found — the TypeScript gates need Node ≥ 22.12 (vitest 5 / vite 8)."; echo "   Install Node 22 LTS, then re-run; or skip this group with: SKIP_TS=1 make check"; exit 1; }; command -v pnpm >/dev/null 2>&1 || { echo "❌ pnpm not found — this package pins pnpm 11 (packageManager in extensions/vscode/package.json)."; echo "   Enable it with: corepack enable   (corepack ships with Node ≥ 16.13; CI does the same)"; echo "   Or skip the TypeScript group: SKIP_TS=1 make check"; exit 1; }
@@ -68,7 +79,7 @@ test-ts:
 	$(TS_TOOLING_CHECK); \
 	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
 	echo "🔍 Running vitest (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run test); then echo "❌ vitest failed"; exit 1; fi; \
+	if ! (cd $(VSCODE_DIR) && pnpm run test $(TS_ARGS)); then echo "❌ vitest failed"; exit 1; fi; \
 	echo "✅ vitest passed"
 
 fmt-ts:
@@ -82,10 +93,17 @@ fmt-check-ts:
 gateway:
 	uv run wing-gateway
 
-# 单测并行度：默认 min(6, 核数)。3720 个用例里一半在等 I/O（asyncio 超时 / 子
-# 进程），实测单进程 33s → 6 进程 11s（10 核）。xdist 每个 worker 是独立进程，
+# 单测并行度：独占时 min(8, 核数)，与另外三组同时跑时降到约 1/3 核数。
+# `--dist loadfile` 把**整文件**派给一个 worker，所以墙钟 ≈ max(总工作量 / n, 最长
+# 单文件)：12 核本机实测全套 ≈14s 工作量、最长单文件 ≈2s——n=8 已贴到「最长单文件」
+# 那条下界，再加 worker 只多付每进程的启动与导入开销。xdist 每个 worker 是独立进程，
 # 只看本文件内的状态；跨文件的时序耦合由 `--dist loadfile` 挡掉。
-PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 6 ]; then echo 6; else echo $$n; fi)
+#
+# `WING_TEST_BUDGET_PYTEST`（数值）由 `scripts/collect_output.sh` 在四组并行时导出：
+# 四组各自按"我独占整机"来配并行度时，机器被压到三倍以上超订，**每一组都变慢**；
+# 份额的算法与实测都在那一处（全仓唯一），这里只消费。不导出时按独占算——单独跑
+# 一组的人仍然拿满。
+PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ -n "$(WING_TEST_BUDGET_PYTEST)" ]; then echo $(WING_TEST_BUDGET_PYTEST); elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
 PYTEST_WORKER_ARGS = $(if $(filter 1,$(PYTEST_WORKERS)),,--dist loadfile -n $(PYTEST_WORKERS))
 
 # 本地日常：不带覆盖率（`--cov` 让同一套用例多花 ~10s）。覆盖率数据只有 CI 的
@@ -105,20 +123,39 @@ test-python-html:
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
 #
-# 并行度：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
-# 按核数铺开是安全的——实测全量 39s → 26s（10 核，worker 8 → 12；再往上到 16 只
-# 剩 1s，拐点在核数附近）。默认 min(12, 核数)：CI 的 4 核 runner 取 4。
-# PROBE_WORKERS 可覆盖；WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——
-# 只关组间并行等于没关。解析成 1 时不传 -n：逃生舱要的是原样的串行，不是
-# "xdist 里只开一个 worker"。
-PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 12 ]; then echo 12; else echo $$n; fi)
-PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,-n $(PROBE_WORKERS))
+# 两件事定在这里，依据见 docs/dev/probe-testing.md「为什么敢并行」：
+#
+# ① `--dist loadfile`（xdist 默认是 `load`＝按**单条用例**派发）。这一组的时长是
+#    straggler 决定的（worker 之间不偷活，队列约 9s 就发空，剩下的墙钟由最慢那个
+#    worker 手里的用例堆决定），而 `load` 的逐条派发会让同一个 worker 攒到整族慢用例
+#    （安静窗口实测：`test_wake_restart` 6.3s + `test_wake_timer` 3.8s 落在同一个
+#    worker 上）。按**文件**派发把慢族的累积上限压到"一个文件"（1~3 例）：
+#    同窗口交错 3 轮中位数  load -n 12/20 = 22.8 / 20.2s → loadfile 19.2 / 17.3s
+#    （`loadscope` 在 n=12 是 18.2s，与 loadfile 同侧 ⇒ 起作用的确实是"模块/文件"
+#    这一级粒度，不是别的）。代价：同一 worker 里会连续跑多个文件，跨文件状态泄漏的
+#    风险因此靠"每个用例自带 tmp WING_HOME + 网关子进程 + 假 Provider"来兜（实测
+#    串行 589 例全绿＝一个进程里跑完所有文件）。
+#
+# ② worker 数 = **1.5×核数**（`n + n/2`）。快停机之后每例只剩一次网关启动
+#    （~0.22s：新解释器把导入图跑一遍，CPU 密集），曲线就在 1.5× 附近拐平：
+#    12 核实测（同窗口 3 轮中位数）n=12/14/16/18/20/24 → 19.2/18.3/17.7/17.4/17.3/18.0s，
+#    CPU 104/114/121/127/129/136s。18 与 20 的墙钟差 0.04s（在噪声内），CPU 差 2s，
+#    所以取 1.5× 而不是 2×——`make test` 里四组共用同一批核，多拿的线程是从别的组
+#    预算里扣的。
+#
+# 上限 32：每 worker 约 0.1~0.2GB（pytest worker ~120MB + 网关 RSS 45~72MB），
+# 不封顶的话 64 核机器上会要 ~16GB 常驻，而且每个 worker 都起一个真网关。要更大/更小
+# 用 PROBE_WORKERS 覆盖。
+# WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——只关组间并行等于没关。
+# 解析成 1 时不传 -n/--dist：逃生舱要的是原样的串行，不是"xdist 里只开一个 worker"。
+PROBE_WORKERS ?= $(shell if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; else n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); w=$$((n + n / 2)); [ "$$w" -gt 32 ] && w=32; echo $$w; fi)
+PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,--dist loadfile -n $(PROBE_WORKERS))
 
 test-probe:
 	uv run pytest libs/wing-probe/ --timeout=120 $(PROBE_WORKER_ARGS)
 
 check-python:
-	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; \
+	@RUFF_FAILED=0; RUFF_FMT_FAILED=0; TY_FAILED=0; VULTURE_FAILED=0; SELFTEST_FAILED=0; \
 	echo "🔍 Running ruff..."; \
 	if ! uv run ruff check libs/ scripts/; then RUFF_FAILED=1; echo "❌ ruff failed"; else echo "✅ ruff passed"; fi; \
 	echo ""; \
@@ -131,7 +168,11 @@ check-python:
 	echo "🔍 Running vulture..."; \
 	if ! uv run vulture; then VULTURE_FAILED=1; echo "❌ vulture failed"; else echo "✅ vulture passed"; fi; \
 	echo ""; \
-	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ]; then \
+	echo "🔍 Running script selftests..."; \
+	if ! uv run python scripts/test_rust_parallel.py --selftest; then SELFTEST_FAILED=1; echo "❌ rust pool selftest failed"; else echo "✅ rust pool selftest passed"; fi; \
+	if ! uv run python scripts/bench_tests.py --selftest; then SELFTEST_FAILED=1; echo "❌ bench selftest failed"; else echo "✅ bench selftest passed"; fi; \
+	echo ""; \
+	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ] || [ $$SELFTEST_FAILED -eq 1 ]; then \
 		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
 		echo "❌ Python check failed"; \
 		exit 1; \
@@ -197,10 +238,13 @@ patch-cov-rust:
 
 # Rust 测试：普通构建。本地默认走这条。
 #
-# 跨二进制并行（`scripts/test_rust_parallel.py`）：cargo 逐个跑测试二进制，53 个
-# 套件的耗时直接相加（本机实测 41s，最长的单个只有 11.5s）——脚本复用
-# `--no-run` 的产物自己按并发上限铺开，顺带把 doctests 丢进同一个池子。
-# RUST_TEST_ARGS 覆盖并行度（`-j <二进制数> -t <每套件线程数>`），排查并发干扰时用。
+# 跨二进制并行（`scripts/test_rust_parallel.py`）：cargo 逐个跑测试二进制（只有套件
+# 内部才多线程），55 个套件的耗时直接相加，而其中一半以上的工作量压在 `wing` 的 lib
+# 单测一个套件里。脚本复用 `--no-run` 的产物自己铺开：套件的 libtest 线程数 = 它的
+# 用例份额 × 核数（下界 2），同时在跑的二进制数 = 核数，最长先跑，doctests 与池子并行。
+# RUST_TEST_ARGS 覆盖"本池子认为自己独占几个核"（`--cores <N>`），排查并发干扰时用
+# （或四组一起退化成串行：WING_TEST_SERIAL=1）。规则的离线自检：
+# `uv run python scripts/test_rust_parallel.py --selftest`。
 #
 # 插桩构建会额外产出一整套 target/llvm-cov-target，并且与普通构建的产物互不通用
 # （见下面 test-rust-cov）——本地日常测试不需要为覆盖率付这个代价，覆盖率交给 CI 跑。

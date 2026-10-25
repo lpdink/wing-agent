@@ -168,14 +168,22 @@ async def mock_generate(*args: Any, **kwargs: Any) -> AsyncIterator[LLMResponse]
 # ── 轮询 ──────────────────────────────────────────────────────
 
 
-async def wait_until_async(pred: Callable[[], bool], timeout: float = 5.0) -> None:
-    """轮询等待 `pred()` 为真（超时抛 `TimeoutError`）。"""
+async def wait_until_async(
+    pred: Callable[[], bool], timeout: float = 5.0, *, msg: str | None = None
+) -> None:
+    """轮询等待 `pred()` 为真（超时抛 `TimeoutError`；`msg` 进异常文案）。
+
+    上限是**秒级**：慢机器只是等得久，不会因为"没睡够"而失败。
+    """
 
     async def _inner() -> None:
         while not pred():
             await asyncio.sleep(0.005)
 
-    await asyncio.wait_for(_inner(), timeout)
+    try:
+        await asyncio.wait_for(_inner(), timeout)
+    except TimeoutError as exc:
+        raise TimeoutError(msg or f"condition not met within {timeout}s") from exc
 
 
 def wait_until_sync(pred: Callable[[], bool], timeout: float = 3.0) -> bool:

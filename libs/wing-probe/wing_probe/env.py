@@ -9,8 +9,10 @@
 - 网关子进程 ``wing-gateway -p <port>``（stdout/stderr 落盘 ``root/gateway.log``），
   启动后轮询 ``/api/health`` 直至就绪。
 
-停止走 ``POST /api/shutdown`` → 等待退出（≤5s）→ ``terminate`` → ``kill``，
-幂等且不抛（场景失败路径也要能安全收尾）。
+停机有**两条显式路径**，默认是快的那条（判据与理由见 :meth:`ProbeEnv.stop` /
+:meth:`ProbeEnv.shutdown`）：``stop()`` 直接 SIGKILL（不跑 lifespan），``shutdown()`` 走
+``POST /api/shutdown`` → 等退出（≤5s）→ ``terminate`` → ``kill``。两条都幂等且不抛
+（场景失败路径也要能安全收尾）。
 
 端口策略：假 Provider 用 ``port=0`` 由 OS 分配后读回真实端口；网关端口
 ``bind(0)`` 预留（关闭 socket 后存在竞态）——启动即退出（典型端口冲突）时
@@ -23,6 +25,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -43,7 +46,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_HEALTH_TIMEOUT = 30.0
 DEFAULT_GATEWAY_ATTEMPTS = 3
 DEFAULT_SHUTDOWN_WAIT = 5.0
-HEALTH_POLL_INTERVAL = 0.05
+#: 健康检查的轮询间隔（秒）——纯延迟，不是节流。网关从 spawn 到监听通常
+#: 200~250ms（解释器 + 导入占大头），50ms 的步长平均白等 25ms/例；10ms 只让每次
+#: 启动多几次 ``connect()``（微秒级）。
+HEALTH_POLL_INTERVAL = 0.01
 HEALTH_REQUEST_TIMEOUT = 2.0
 LOG_TAIL_LINES = 40
 LOG_TAIL_CHARS = 4000
@@ -90,6 +96,12 @@ PROBE_MAX_RETRIES = 2
 #: 在几轮对话内确定性触发。
 DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 DEFAULT_KEEP_RECENT_TOKENS = 50_000
+
+
+def orphan_scan_enabled() -> bool:
+    """``WING_PROBE_ORPHAN_SCAN=1``：收尾前扫进程表，把会活下来的后代记进日志。"""
+    value = os.environ.get("WING_PROBE_ORPHAN_SCAN", "").strip().lower()
+    return value not in ("", "0", "false", "no")
 
 
 def conflicting_config_knobs(**values: Any) -> list[str]:
@@ -781,9 +793,9 @@ class ProbeEnv:
         raise last_error if last_error is not None else ProbeEnvError("gateway failed")
 
     async def kill_gateway(self) -> None:
-        """**硬杀**网关子进程（SIGKILL，不给收尾机会）。
+        """**硬杀**网关子进程（SIGKILL，不给收尾机会），env 本身继续可用。
 
-        与 ``restart_gateway`` 的区别就是「有没有优雅停机」：这里进程拿不到
+        与 :meth:`shutdown` 的区别就是「有没有优雅停机」：这里进程拿不到
         ``/api/shutdown``，lifespan 的收尾一行都跑不了——**停机窗口里该发生的触发
         因此一定没发生**。跨重启的补偿类语义（唤醒的错过补发）只有它能确定性造出来：
         否则触发时机与停机的先后只能靠 sleep 抢时间窗，不可靠。
@@ -791,15 +803,7 @@ class ProbeEnv:
         杀完 ``_process`` 置空，``restart_gateway()`` 会跳过停机直接在同一套隔离目录上
         重新起进程。
         """
-        process = self._process
-        if process is None or process.poll() is not None:
-            return
-        self._log_marker("--- probe: kill -9 gateway ---")
-        process.kill()
-        try:
-            await asyncio.to_thread(process.wait, timeout=DEFAULT_SHUTDOWN_WAIT)
-        finally:
-            self._process = None
+        await self._kill_process()
 
     async def restart_gateway(self) -> None:
         """重启网关子进程（同一套隔离目录，新端口，假 Provider 不重启）。
@@ -809,8 +813,9 @@ class ProbeEnv:
         回事：重启的是**被测进程**，隔离目录与假 Provider（剧本 + 请求留档）都
         要连续——这正是"跨进程重启"语义的观测前提。
 
-        做的事：``POST /api/shutdown`` → 等退出（同 ``stop`` 的收尾纪律）→
-        ``start_gateway()``（换端口 + 健康检查）。失败即抛，不带半死进程返回。
+        做的事：``POST /api/shutdown`` → 等退出（即 ``shutdown()`` 用的那条优雅收尾，
+        跨重启的持久化语义因此照旧）→ ``start_gateway()``（换端口 + 健康检查）。
+        失败即抛，不带半死进程返回。
 
         Raises:
             ProbeEnvError: env 已 stop（单向闸门之外）或新进程起不来。
@@ -820,9 +825,7 @@ class ProbeEnv:
                 "env is stopped (stop() is a one-way gate); create a new "
                 "ProbeEnv instead of restarting a dead one"
             )
-        if self._process is not None and self._process.poll() is None:
-            await self._request_shutdown()
-        await self._terminate_process()
+        await self._graceful_stop_process()
         self._log_marker("--- probe: gateway restart ---")
         await self.start_gateway()
 
@@ -1043,29 +1046,108 @@ class ProbeEnv:
         self.provider.register(model, script)
 
     # ── 停止 ────────────────────────────────────────────────
+    #
+    # 两条路径，判据与理由见 docs/dev/probe-testing.md「停机：快路径与优雅路径」。
+    # 一句话：**这条 lane 之后还有没有人观察「停机时发生的事」**——没有就 stop()。
+    #
+    #   stop()      快：SIGKILL，不跑 lifespan。默认（fixture teardown / 失败收尾）。
+    #   shutdown()  优雅：POST /api/shutdown → 等进程自己退。唯一跑 lifespan 的入口。
+    #
+    # 需要观察停机语义（账本兜底落盘 / 后台任务收尾 / provider 与 SQLite 关闭 /
+    # 跨重启补偿）的场景，必须在场景体里显式调 shutdown()——不要指望 teardown 的
+    # 隐式行为。两条路径共用 _shut() 的收尾序，幂等与单向闸门语义相同。
 
     async def stop(self) -> None:
-        """优雅停止：``/api/shutdown`` → 等待 → ``terminate`` → ``kill``。
+        """**快**收尾：SIGKILL 网关（不跑 lifespan）+ 收假 Provider。
 
-        幂等且不抛——失败场景的 teardown 也必须能安全调用。
+        teardown 的默认路径：``stop()`` 之后不存在任何断言（内置不变量与现场转储都在
+        它之前完成），所以 lifespan 收尾跑与不跑没有观察者，而它固定换来的 0.3s
+        （``/api/shutdown`` 的 ``call_later(0.1)`` + uvicorn ``main_loop`` 与
+        ``shutdown()`` 各一次 ``sleep(0.1)``）没有任何被测语义。
 
-        ``_stopped`` 是**单向闸门**：一旦停止，同一个 env 实例就报废了——
-        ``stop()`` 之后再次 ``stop()`` 直接返回，``start()`` 也不支持在同一实例上
-        重启（``ProbeEnv`` 的端口 / 子进程 / 假 Provider 状态都不是可重置的）。
-        需要新环境就新建一个 ``ProbeEnv`` / ``Probe``（fixture 每场景一个，正是这条
-        约定的用法）。
+        幂等、不抛（失败场景的 teardown 与 ``start()`` 的失败收尾都要能安全调用）。
+        ``_stopped`` 是**单向闸门**：一旦停止，同一个 env 实例就报废了——之后再
+        ``stop()`` / ``shutdown()`` 直接返回，``start()`` 也不支持在同一实例上重启
+        （端口 / 子进程 / 假 Provider 状态都不是可重置的）。需要新环境就新建一个
+        ``ProbeEnv`` / ``Probe``（fixture 每场景一个，正是这条约定的用法）。
         """
+        await self._shut(graceless=True)
+
+    async def shutdown(self) -> None:
+        """**优雅**收尾：``/api/shutdown`` → 等退出（≤5s）→ ``terminate`` → ``kill``。
+
+        唯一会让网关跑 lifespan 收尾的入口：断言「停机后才落盘 / 才收掉的状态」、
+        让唤醒的错过补发真的发生、或验证优雅停机自身的场景用它。
+
+        幂等、不抛；与 :meth:`stop` 共用单向闸门（两个只应有一个先到，后到的是
+        no-op）。网关不理会 ``/api/shutdown``（连接被拒 / 401）时退到 terminate 阶梯，
+        不会挂在等待上。
+        """
+        await self._shut(graceless=False)
+
+    async def _shut(self, *, graceless: bool) -> None:
+        """两条停止路径的唯一收尾序（闸门 → 停进程 → 收假 Provider → 关日志）。"""
         if self._stopped:
             return
         self._stopped = True
         try:
-            if self._process is not None and self._process.poll() is None:
-                await self._request_shutdown()
-            await self._terminate_process()
-            if self.provider.started:
-                await self.provider.stop()
+            if graceless:
+                await self._kill_process()
+            else:
+                await self._graceful_stop_process()
         finally:
-            self._close_log()
+            try:
+                if self.provider.started:
+                    await self.provider.stop()
+            finally:
+                self._close_log()
+
+    async def _kill_process(self) -> None:
+        """SIGKILL 网关的**整个进程组**并收尸（已退出时只清引用，不抛）。
+
+        ``stop()``（快路径）与 ``kill_gateway()``（只杀进程、env 继续用）共用。
+
+        杀进程组而不是只杀 leader：网关是 ``start_new_session=True`` 起的（自成会话 /
+        进程组），组杀能带走任何没有自己 setsid 的后代。``wing/common/process.py`` 的
+        killpg 是同一套语义。
+
+        **边界**：Bash 工具的子进程为了能 killpg 自己也 ``start_new_session=True``，
+        所以它们不在网关的会话里——快停机收不到正在跑的工具子进程。场景因此不该在
+        回合在飞的时候结束（优雅路径会等回合收尾，快路径不会）。这条边界默认不可见，
+        把 ``WING_PROBE_ORPHAN_SCAN=1`` 打开会在收尾前扫一次进程表，把"会活下来的后代"
+        记进网关日志（每次收尾一次 ``ps``，~10ms，所以默认关）。
+        """
+        process = self._process
+        if process is not None and process.poll() is None:
+            if orphan_scan_enabled():
+                self._log_marker(f"--- probe: survivors {self._orphan_report()} ---")
+            self._log_marker("--- probe: kill -9 gateway (process group) ---")
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):  # pragma: no cover - 竞态
+                process.kill()
+            try:
+                await asyncio.to_thread(process.wait, timeout=DEFAULT_SHUTDOWN_WAIT)
+            except subprocess.TimeoutExpired:  # pragma: no cover - 不可杀进程
+                # 单向闸门已经落下了（`stop()` 进来就置位），没有第二次机会：这里只
+                # 保留引用并留下 ERROR，别把"还能重试"写进注释——那是不存在的路径。
+                self._log_marker("--- probe: gateway survived SIGKILL ---")
+                _log.error("gateway process survived SIGKILL (pid=%s)", process.pid)
+                return
+        if process is not None:
+            self._log_marker(
+                f"--- probe: gateway exited (code={process.returncode}) ---"
+            )
+        self._process = None
+
+    async def _graceful_stop_process(self) -> None:
+        """请网关自己退（``/api/shutdown``）再兜底 terminate/kill；env 继续可用。
+
+        ``shutdown()``（收尾）与 ``restart_gateway()``（跨重启语义的观测前提）共用。
+        """
+        if self._process is not None and self._process.poll() is None:
+            await self._request_shutdown()
+        await self._terminate_process()
 
     async def _request_shutdown(self) -> None:
         """POST /api/shutdown（best effort：连接已被回收时静默继续走 terminate）。
@@ -1084,6 +1166,40 @@ class ProbeEnv:
                 await client.post(url, json={}, headers=headers)
         except httpx.HTTPError as exc:
             _log.debug("probe shutdown request failed (%s): %s", url, exc)
+
+    def _orphan_report(self) -> str:
+        """收尾前会活下来的后代（自查用；``ps`` 一次，默认关）。"""
+        process = self._process
+        if process is None:
+            return "(no gateway)"
+        try:
+            own_group = os.getpgid(process.pid)
+        except ProcessLookupError:  # pragma: no cover - 竞态
+            return "(gateway gone)"
+        dumped = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,command="],
+            capture_output=True,
+            text=True,
+        ).stdout
+        children: dict[int, list[tuple[int, int, str]]] = {}
+        for line in dumped.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            try:
+                pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+            except ValueError:  # pragma: no cover - ps 的表头 / 异常行
+                continue
+            children.setdefault(ppid, []).append((pid, pgid, parts[3]))
+        survivors: list[str] = []
+        stack = [process.pid]
+        while stack:
+            for pid, pgid, command in children.get(stack.pop(), []):
+                stack.append(pid)
+                # 同组的会随 killpg 一起走；不同组 = 自己 setsid 的，会活下来。
+                if pgid != own_group:
+                    survivors.append(f"{pid} {command}")
+        return "; ".join(survivors) if survivors else "(none)"
 
     async def _terminate_process(self) -> None:
         process = self._process

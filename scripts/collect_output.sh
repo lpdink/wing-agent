@@ -11,7 +11,7 @@
 # 这样即使 tail 给得很短，也能直接看到「过没过」，不需要重跑。
 # 排查并发干扰时用 WING_TEST_SERIAL=1 退回串行。
 #
-# 用法：scripts/collect_output.sh [test|check]
+# 用法：scripts/collect_output.sh [test|check|--budget]
 set -uo pipefail
 
 MODE="${1:-test}"
@@ -27,8 +27,13 @@ case "$MODE" in
     LABELS=("python" "rust" "ts")
     CMDS=("make check-python" "make check-rust" "make check-ts")
     ;;
+  --budget)
+    # 只回答"这一处算出来的份额是多少"，见下面的 `--budget` 出口。
+    LABELS=()
+    CMDS=()
+    ;;
   *)
-    echo "usage: $0 [test|check]" >&2
+    echo "usage: $0 [test|check|--budget]" >&2
     exit 2
     ;;
 esac
@@ -75,7 +80,44 @@ printf '%s\n' "$ROOT" >"$LOG_DIR/root"
 # 串行执行时总耗时 = 各组之和；三组并行后 ≈ 最慢的一组。
 # 需要排查并发干扰时：WING_TEST_SERIAL=1 make test
 SERIAL="${WING_TEST_SERIAL:-0}"
-rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur
+rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur "$LOG_DIR"/*.ms
+
+# ── 编队预算（唯一的定义处）────────────────────────────────────
+# 四组并行 ⇒ 每组都不独占整机。各自按"我独占"配并行度会把机器压到 2~3 倍超订，
+# **每一组都变慢**（本机 12 核实测：默认 30.5s，后三组各收到 1/3 核数后 26.0s）。
+# 所以这里把份额算成**数值**发给各组（`WING_TEST_BUDGET_*`），各组只消费、不再各算一遍
+# ——同一条公式写三遍必然会分叉。probe 不在这里收：它是延迟受限而不是算力受限，
+# 少给 worker 只会让它更慢（见 docs/dev/test-speed.md §1）。
+# 不设这些变量时（单独跑一组）各组按独占配——一个人跑 `make test-rust` 应该拿满机器。
+# 串行模式（WING_TEST_SERIAL=1）也不设：那时每组本来就独占。
+CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+SHARE=$(( CORES / 3 ))
+[ "$SHARE" -gt 4 ] && SHARE=4
+[ "$SHARE" -lt 2 ] && SHARE=2
+if [ "$SERIAL" != "1" ]; then
+  export WING_TEST_BUDGET_PYTEST=$SHARE
+  export WING_TEST_BUDGET_RUST=$SHARE
+  export WING_TEST_BUDGET_TS=$SHARE
+fi
+
+# `--budget`：把这一处算出来的份额打出来就退出（供 `scripts/bench_tests.py --selftest`
+# 钉住公式；否则"全仓唯一的计算处"本身没有断言）。
+if [ "$MODE" = "--budget" ]; then
+  if [ "$SERIAL" = "1" ]; then echo "(serial: no budget)"; else echo "$SHARE"; fi
+  exit 0
+fi
+
+# 亚秒级计时只给机器读的报告用（`WING_TEST_REPORT=<path>`，见 scripts/bench_tests.py）：
+# bash 3.2 没有 EPOCHREALTIME，一次取时要 fork 一个小工具，日常跑没必要为此付费。
+# 人看的 `用时 Ns` 永远是整秒（`$SECONDS`），与今天的输出逐字一致。
+REPORT="${WING_TEST_REPORT:-}"
+now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+# 取毫秒要 fork 一个小工具；只有一个裸 `uv run python` 的环境里 python3 可能不存在。
+# 与其让 `$(( ))` 报算术错、报告静默缺失，不如显式关掉它（下游会退回整秒解析）。
+if [ -n "$REPORT" ] && ! command -v python3 >/dev/null 2>&1; then
+  echo "⚠ WING_TEST_REPORT 被忽略：找不到 python3（毫秒计时要用它）。" >&2
+  REPORT=""
+fi
 
 START=$SECONDS
 PIDS=()
@@ -86,15 +128,19 @@ for i in "${!LABELS[@]}"; do
   printf '▶ %-6s %s（日志：%s）\n' "$label" "$cmd" "$log"
   if [ "$SERIAL" = "1" ]; then
     t0=$SECONDS
+    [ -n "$REPORT" ] && t0_ms=$(now_ms)
     eval "$cmd" >"$log" 2>&1
     echo "$?" >"$LOG_DIR/${label}.code"
     echo "$((SECONDS - t0))" >"$LOG_DIR/${label}.dur"
+    [ -n "$REPORT" ] && echo "$(( $(now_ms) - t0_ms ))" >"$LOG_DIR/${label}.ms"
   else
     (
       t0=$SECONDS
+      [ -n "$REPORT" ] && t0_ms=$(now_ms)
       eval "$cmd" >"$log" 2>&1
       echo "$?" >"$LOG_DIR/${label}.code"
       echo "$((SECONDS - t0))" >"$LOG_DIR/${label}.dur"
+      [ -n "$REPORT" ] && echo "$(( $(now_ms) - t0_ms ))" >"$LOG_DIR/${label}.ms"
     ) &
     PIDS+=("$!")
   fi
@@ -203,11 +249,34 @@ done
 if [ "$TS_SKIPPED" -eq 1 ]; then
   printf '  ⏭️  %-6s  —     TypeScript 组已按 SKIP_TS=%s 跳过（CI 不设该变量：那边照旧强制）\n' "ts" "$SKIP_TS"
 fi
+
+# 机器读的报告（可选）：逐组的**毫秒**耗时 + 退出码 + 统计行。
+# 消费者只有一个——scripts/bench_tests.py（提速的前后对比），而它只读这几项；
+# 契约就收窄到被读的部分，别让写下不读的字段自成一套规格（`bench_tests.py --selftest`
+# 钉住形状）。终端里那几行给人读、精度只有整秒，正是这份报告存在的理由。
+write_report() {
+  [ -n "$REPORT" ] || return 0
+  {
+    printf '{\n  "groups": [\n'
+    for i in "${!LABELS[@]}"; do
+      label="${LABELS[$i]}"
+      ms=$(cat "$LOG_DIR/${label}.ms" 2>/dev/null || echo 0)
+      stat=$(stats_of "$LOG_DIR/${label}.log" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+      printf '    {"label": "%s", "code": %s, "ms": %s, "stat": "%s"}%s\n' \
+        "$label" "${CODES[$i]}" "$ms" "$stat" \
+        "$([ "$i" -lt "$(( ${#LABELS[@]} - 1 ))" ] && echo ,)"
+    done
+    printf '  ]\n}\n'
+  } >"$REPORT"
+}
+
 if [ "${#FAILED[@]}" -eq 0 ]; then
   echo "✅ 结论：make $MODE 全部通过，无需重跑。"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  write_report
   exit 0
 fi
 echo "❌ 结论：make $MODE 失败于：${FAILED_STR}（详情见上方）——修复后重跑，已通过的组无需单独重跑。"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+write_report
 exit 1

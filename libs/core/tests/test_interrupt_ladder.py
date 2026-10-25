@@ -59,17 +59,24 @@ def runtime():
     return WingRuntime()
 
 
-def _shrink_ladder(monkeypatch: pytest.MonkeyPatch, *, wait: float = 0.05) -> None:
-    """缩小单次阶梯等待，让测试保持毫秒级。"""
+def _shrink_ladder(monkeypatch: pytest.MonkeyPatch, *, wait: float = 0.02) -> None:
+    """缩小单次阶梯等待，让测试保持毫秒级。
+
+    取消的投递只需一个 loop 周转（微秒级），20ms 已是它的三个数量级以上——缩的是
+    白等，不是"能否等到"的判据。
+    """
     import wing.agent.core as core
 
     monkeypatch.setattr(core, "_INTERRUPT_WAIT_SECONDS", wait)
 
 
-async def _suspended_frames(coro: Any) -> str:
-    """跑起协程、等它挂起，返回 `_worker_frames` 文本（随后取消、收尸）。"""
-    task = asyncio.create_task(coro)
-    await asyncio.sleep(0.05)
+async def _suspended_frames(coro_factory: Any, *, ready: asyncio.Event) -> str:
+    """跑起协程、等它挂到目标挂起点，返回 `_worker_frames` 文本（随后取消、收尸）。
+
+    `ready` 由被检查的协程在即将挂起处置位：现场必须已经就位，才谈得上读取暂停点。
+    """
+    task = asyncio.create_task(coro_factory())
+    await asyncio.wait_for(ready.wait(), timeout=5.0)
     text = _worker_frames(task)
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
@@ -246,7 +253,9 @@ class TestCancelLadder:
 
         await agent._interrupt_lock.acquire()
         task = asyncio.create_task(agent.interrupt())
-        await asyncio.sleep(0.05)
+        # 一次事件循环周转：interrupt() 的入口段（清积压 → 等锁）是同步跑完的，
+        # 提前触发的 side effect 会落在同一个同步段里。
+        await asyncio.sleep(0)
         assert fired == []  # 排队中：不提前杀 turn 的前台工具
         agent._interrupt_lock.release()
         await asyncio.wait_for(task, timeout=5.0)
@@ -353,10 +362,11 @@ class TestCancelLadder:
         self, runtime, monkeypatch
     ) -> None:
         """阶梯放手后 worker 迟死：终局续期自动重建消费者（消息不落空）。"""
-        _shrink_ladder(monkeypatch, wait=0.02)
+        _shrink_ladder(monkeypatch)
         agent = runtime.create_session().agent
 
         started = asyncio.Event()
+        release = asyncio.Event()
 
         async def die_late() -> None:
             started.set()
@@ -365,13 +375,14 @@ class TestCancelLadder:
                     await asyncio.sleep(30)
                 except asyncio.CancelledError:
                     pass
-            await asyncio.sleep(0.3)  # 阶梯之外才自然结束
+            await release.wait()  # 阶梯之外才自然结束（由测试放行）
 
         stubborn = await _replace_worker(agent, die_late(), started=started)
 
         await asyncio.wait_for(agent.interrupt(), timeout=5.0)
         assert agent._worker is stubborn  # 先保留（绝不重建第二个）
 
+        release.set()  # 阶梯已放手，此刻才死
         await wait_until_async(lambda: agent._worker is not stubborn, timeout=3.0)
         assert stubborn.done()
         assert not agent._worker.done()
@@ -387,6 +398,7 @@ class TestCancelLadder:
 
         started = asyncio.Event()
         cancelled = asyncio.Event()
+        release = asyncio.Event()
 
         async def slow_death() -> None:
             started.set()
@@ -394,7 +406,7 @@ class TestCancelLadder:
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 cancelled.set()
-                await asyncio.sleep(0.2)  # 收尸很慢
+                await release.wait()  # 收尸很慢：由测试放行
 
         worker = await _replace_worker(agent, slow_death(), started=started)
 
@@ -405,6 +417,7 @@ class TestCancelLadder:
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2.0)
 
         assert not worker.done()  # 尚未死：保留 + 续期已登记
+        release.set()  # 收尸完成 → 死亡
         await wait_until_async(lambda: agent._worker is not worker, timeout=3.0)
         assert not agent._worker.done()
         await agent.shutdown()
@@ -429,7 +442,9 @@ class TestCancelLadder:
         await asyncio.wait_for(agent.shutdown(), timeout=5.0)  # 闸门置位
 
         await _dispose(stubborn, stop)  # 保留的 worker 迟死
-        await asyncio.sleep(0.05)  # 让 done callback 跑完
+        # done callback 经 call_soon 排队：让出两轮，保证它已跑完（不赌时长）。
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
         assert agent._worker is stubborn and stubborn.done()  # 未被复活
 
@@ -444,7 +459,7 @@ class TestCancelLadder:
         await agent._interrupt_lock.acquire()
         first = asyncio.create_task(agent.interrupt())
         second = asyncio.create_task(agent.interrupt())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)  # 同上：入口段同步跑完，副作用若提前就在这里
         assert fired == []  # 排队中：副作用不入场
         agent._interrupt_lock.release()
         await asyncio.wait_for(asyncio.gather(first, second), timeout=5.0)
@@ -496,7 +511,7 @@ class TestCancelLadder:
 
         await agent._interrupt_lock.acquire()
         task = asyncio.create_task(agent.shutdown())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)  # shutdown 的等锁前段同样同步跑完
         assert fired == []
         agent._interrupt_lock.release()
         await asyncio.wait_for(task, timeout=5.0)
@@ -521,7 +536,8 @@ class TestWorkerFrames:
     async def test_idle_worker_shows_the_await_chain(self, runtime) -> None:
         """空闲 worker（等 inbox）：链一路走到队列 get——真实形态的冒烟。"""
         agent = runtime.create_session().agent
-        await asyncio.sleep(0.2)  # 让 worker 真正挂起在 inbox.get 上
+        # 挂起 = 协程的 `cr_await` 已就位（worker 一路走到 inbox.get 那次 await）。
+        await wait_until_async(lambda: agent._worker.get_coro().cr_await is not None)
 
         text = _worker_frames(agent._worker)
 
@@ -531,22 +547,26 @@ class TestWorkerFrames:
     @pytest.mark.asyncio
     async def test_follows_awaited_task_frames(self) -> None:
         """`await <Task>`：`cr_await` 是 FutureIter（无帧），经 referents 下钻。"""
+        ready = asyncio.Event()
 
         async def inner() -> None:
+            ready.set()  # 即将挂起
             await asyncio.sleep(30)
 
         async def outer() -> None:
             await asyncio.ensure_future(inner())
 
-        text = await _suspended_frames(outer())
+        text = await _suspended_frames(outer, ready=ready)
         assert ":outer" in text and ":inner" in text, text
 
     @pytest.mark.asyncio
     async def test_follows_async_generator_frames(self) -> None:
         """`async for`：经 asend 包装器（无帧）下钻到生成器帧。"""
+        ready = asyncio.Event()
 
         async def stream():
             yield 1
+            ready.set()  # 即将挂起
             await asyncio.sleep(30)
             yield 2
 
@@ -554,33 +574,37 @@ class TestWorkerFrames:
             async for _ in stream():
                 pass
 
-        text = await _suspended_frames(consumer())
+        text = await _suspended_frames(consumer, ready=ready)
         assert ":consumer" in text and ":stream" in text, text
 
     @pytest.mark.asyncio
     async def test_descends_single_child_gather(self) -> None:
         """单 child 的 gather：经 `_children` 下钻到 child 的协程帧。"""
+        ready = asyncio.Event()
 
         async def child() -> None:
+            ready.set()  # 即将挂起
             await asyncio.sleep(30)
 
         async def joiner() -> None:
             await asyncio.gather(child())
 
-        text = await _suspended_frames(joiner())
+        text = await _suspended_frames(joiner, ready=ready)
         assert ":joiner" in text and ":child" in text, text
 
     @pytest.mark.asyncio
     async def test_marks_multi_child_gather_without_guessing(self) -> None:
         """多 child 的 gather：只标注 `<gather ×N>`，不猜哪条分支。"""
+        ready = asyncio.Event()
 
         async def child() -> None:
+            ready.set()  # 即将挂起
             await asyncio.sleep(30)
 
         async def joiner() -> None:
             await asyncio.gather(child(), child())
 
-        text = await _suspended_frames(joiner())
+        text = await _suspended_frames(joiner, ready=ready)
         assert "<gather ×2>" in text, text
 
     @pytest.mark.asyncio
@@ -590,20 +614,21 @@ class TestWorkerFrames:
         没有标记时读日志的人分不清"就停在那"与"被截断"——这是排障现场的
         第一类误判。
         """
+        ready = asyncio.Event()
 
         async def leaf() -> None:
+            ready.set()  # 即将挂起
             await asyncio.sleep(30)
 
-        coro = leaf()
+        async def layer(inner: Any) -> None:
+            await inner
+
+        coro: Any = leaf()
         for _ in range(6):
-
-            async def layer(inner: Any = coro) -> None:
-                await inner
-
-            coro = layer()
+            coro = layer(coro)
 
         task = asyncio.create_task(coro)
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=5.0)
         short = _worker_frames(task, limit=8)
         truncated = _worker_frames(task, limit=3)
         task.cancel()

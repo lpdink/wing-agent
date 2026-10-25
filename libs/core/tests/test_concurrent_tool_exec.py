@@ -42,24 +42,31 @@ class TestConcurrentExecution:
         session = runtime.create_session()
         agent = session.agent
 
-        delay = 0.3  # 每个工具 sleep 300ms
+        delay = 0.25  # 每个工具 sleep 250ms（串行总和 = 0.75s）
 
-        async def slow_tool_a(input: str = "") -> str:
-            await asyncio.sleep(delay)
-            return "result-a"
+        # rendezvous：三个 tool 都起来之后才一起返回。串行执行会在这里死锁
+        # （外层 wait_for 超时即失败）——比计时阈值更硬的「确实并发」判据。
+        started: list[str] = []
+        all_started = asyncio.Event()
 
-        async def slow_tool_b(input: str = "") -> str:
-            await asyncio.sleep(delay)
-            return "result-b"
+        def _mark(name: str) -> None:
+            started.append(name)
+            if len(started) == 3:
+                all_started.set()
 
-        async def slow_tool_c(input: str = "") -> str:
-            await asyncio.sleep(delay)
-            return "result-c"
+        def _slow(name: str):
+            async def tool(input: str = "") -> str:
+                _mark(name)
+                await asyncio.wait_for(all_started.wait(), timeout=5.0)
+                await asyncio.sleep(delay)
+                return f"result-{name.lower()}"
+
+            return tool
 
         agent._executor._tools = {
-            "SlowA": make_tool("SlowA", slow_tool_a),
-            "SlowB": make_tool("SlowB", slow_tool_b),
-            "SlowC": make_tool("SlowC", slow_tool_c),
+            "SlowA": make_tool("SlowA", _slow("a")),
+            "SlowB": make_tool("SlowB", _slow("b")),
+            "SlowC": make_tool("SlowC", _slow("c")),
         }
 
         tool_calls = [
@@ -69,11 +76,15 @@ class TestConcurrentExecution:
         ]
 
         start = time.monotonic()
-        results = await agent._executor.execute(tool_calls, agent.model)
+        results = await asyncio.wait_for(
+            agent._executor.execute(tool_calls, agent.model), timeout=10.0
+        )
         elapsed = time.monotonic() - start
 
-        # 串行需要 ~0.9s，并发应 ~0.3s；用 0.6s 作为阈值留足余量
-        assert elapsed < delay * 2, (
+        # 上限取 2.4×delay（0.6s）：串行总和是 3×delay（0.75s），越界；并发时实测
+        # ≈delay，留 0.35s 余量给负载抖动。并发性另由上面的 rendezvous 直接证明
+        # （串行实现在那里死锁），两条判据互补。
+        assert elapsed < delay * 2.4, (
             f"Expected concurrent (~{delay}s), got {elapsed:.2f}s"
         )
         assert len(results) == 3
@@ -95,12 +106,16 @@ class TestResultOrderPreservation:
         session = runtime.create_session()
         agent = session.agent
 
+        completed: list[str] = []
+
         async def slow_tool(input: str = "") -> str:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)
+            completed.append("slow")
             return "slow-result"
 
         async def fast_tool(input: str = "") -> str:
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
+            completed.append("fast")
             return "fast-result"
 
         agent._executor._tools = {
@@ -117,6 +132,8 @@ class TestResultOrderPreservation:
 
         results = await agent._executor.execute(tool_calls, agent.model)
 
+        # 完成顺序确实是「后发先至」（两个 Fast 先于 Slow）——顺序断言才有意义。
+        assert completed == ["fast", "fast", "slow"]
         assert len(results) == 3
         # 顺序必须与输入一致：Slow, Fast, Fast
         assert results[0].tool_call_id == "call-slow"
