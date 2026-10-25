@@ -42,7 +42,7 @@ class TestConcurrentExecution:
         session = runtime.create_session()
         agent = session.agent
 
-        delay = 0.1  # 每个工具 sleep 100ms
+        delay = 0.25  # 每个工具 sleep 250ms（串行总和 = 0.75s）
 
         # rendezvous：三个 tool 都起来之后才一起返回。串行执行会在这里死锁
         # （外层 wait_for 超时即失败）——比计时阈值更硬的「确实并发」判据。
@@ -81,10 +81,10 @@ class TestConcurrentExecution:
         )
         elapsed = time.monotonic() - start
 
-        # 并发性的 witness 是上面的 rendezvous（串行时会死锁，这里的阈值不参与判定）；
-        # 这条计时上限只兜「并发但整体被拖成总和」，余量给到 5 倍——负载下实测抖动
-        # 是百毫秒级，2 倍余量会假红。
-        assert elapsed < delay * 5, (
+        # 上限取 2.4×delay（0.6s）：串行总和是 3×delay（0.75s），越界；并发时实测
+        # ≈delay，留 0.35s 余量给负载抖动。并发性另由上面的 rendezvous 直接证明
+        # （串行实现在那里死锁），两条判据互补。
+        assert elapsed < delay * 2.4, (
             f"Expected concurrent (~{delay}s), got {elapsed:.2f}s"
         )
         assert len(results) == 3

@@ -230,9 +230,7 @@ class TestChunkedDelivery:
         event = _notice("x" * 2000)
         payload = json.dumps(wire_dump(event))
         server._on_event(event)
-        await wait_until_async(lambda: len(stub.sent) >= 2)
-
-        assert len(stub.sent) >= 2, f"超限载荷必须切分：{len(stub.sent)}"
+        await wait_until_async(lambda: len(stub.sent) >= 2, msg="超限载荷必须切分")
         envelopes = [json.loads(t) for t in stub.sent]
         assert [e["index"] for e in envelopes] == list(range(len(envelopes)))
         assert {e["id"] for e in envelopes} == {envelopes[0]["id"]}
@@ -261,7 +259,8 @@ class TestChunkedDelivery:
             )
         )
         await wait_until_async(
-            lambda: len(global_stub.sent) >= 2 and len(client_stub.sent) >= 2
+            lambda: len(global_stub.sent) >= 2 and len(client_stub.sent) >= 2,
+            msg="两条投递路径都必须切分",
         )
 
         def shape(sent: list[str]) -> list[dict]:
@@ -293,9 +292,10 @@ class TestChunkedDelivery:
             patch("wing.gateway.server.log") as mock_log,
         ):
             server._on_event(event)
-            await wait_until_async(lambda: spy.await_count == len(deliverable))
-
-        assert spy.await_count == len(deliverable), "不超限的帧必须照常投递"
+            await wait_until_async(
+                lambda: spy.await_count == len(deliverable),
+                msg="不超限的帧必须照常投递",
+            )
         assert mock_log.warning.call_count == len(oversized), "每帧丢弃恰一行 WARN"
         messages = [c.args[0] for c in mock_log.warning.call_args_list]
         for message in messages:
@@ -359,9 +359,11 @@ class TestChunkedDelivery:
 
         event = _notice("hello")
         server._on_event(event)
-        await wait_until_async(lambda: len(stub.sent) >= 1)
+        await wait_until_async(
+            lambda: len(stub.sent) >= 1, msg="小事件必须单帧且逐字节不变"
+        )
 
-        assert stub.sent == [json.dumps(wire_dump(event))], "小事件必须单帧且逐字节不变"
+        assert stub.sent == [json.dumps(wire_dump(event))]
 
 
 class TestEagerChunking:

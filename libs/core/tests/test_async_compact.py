@@ -349,7 +349,7 @@ class TestAwaitRunningTask:
         cm.add_message(Message(role="user", content="x" * 800))
         cm.add_message(Message(role="assistant", content="y" * 800))
         cm.add_message(Message(role="user", content="z" * 100))
-        prov = _mock_provider(delay=0.05)
+        prov = _mock_provider()
         await cm.get_messages_for_llm(
             model="m", model_provider=prov, current_tools=lambda: []
         )

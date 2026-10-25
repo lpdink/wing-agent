@@ -50,16 +50,17 @@ async def test_empty_scheduler_waits_for_stop():
 
 async def test_job_not_due_is_skipped():
     scheduler = BackgroundScheduler()
-    ran: list[int] = []
-    scheduler.add_job("later", 3600, lambda: ran.append(1))
+    ran: list[str] = []
+    scheduler.add_job("later", 3600, lambda: ran.append("later"))
+    # 同一次到期判定里放一个立即到期的 job：证明循环确实跑到了到期判定，
+    # 而「还没到期」的那个被过滤掉了——否则「没跑」与「跑了但被跳过」分不清。
+    scheduler.add_job("now", 3600, lambda: ran.append("now"), initial_delay_seconds=0)
     scheduler.start()
-    # 这个 job 3600s 后才到期，循环只会挂起；等 20ms 是给「等待被算错」留的窗口——
-    # 若 `_run` 退化成忙循环（wait ≤ 0），到期判定会在这一窗口里反复执行。
-    await asyncio.sleep(0.02)
+    await wait_until_async(lambda: bool(ran), msg="立即到期的 job 必须跑")
 
     await scheduler.stop()
 
-    assert ran == []
+    assert ran == ["now"]
 
 
 async def test_due_job_runs_and_reschedules():
@@ -68,10 +69,11 @@ async def test_due_job_runs_and_reschedules():
     scheduler.add_job("tick", 0.02, lambda: ran.append(1))
     scheduler.start()
 
-    await wait_until_async(lambda: len(ran) >= 2, timeout=5.0)  # 多轮触发
+    await wait_until_async(
+        lambda: len(ran) >= 2, msg="按 interval 多轮触发（跑完先排下一次）"
+    )
     await scheduler.stop()
 
-    assert len(ran) >= 2  # 跑完先排下一次，不忙循环
     assert scheduler.jobs == ["tick"]
 
 
@@ -199,15 +201,14 @@ async def test_initial_delay_defers_first_run():
     delay = 0.1
     scheduler = BackgroundScheduler()
     ran: list[int] = []
+    started = time.monotonic()  # 起点必须在 add_job 之前：截止时刻由 add_job 内部算
     scheduler.add_job("later", 0.02, lambda: ran.append(1), initial_delay_seconds=delay)
     scheduler.start()
-    started = time.monotonic()
 
     await wait_until_async(lambda: bool(ran), timeout=5.0)
     elapsed = time.monotonic() - started
     await scheduler.stop()
 
-    # 下界断言：参数被忽略（首轮退化成按 0.02 的 interval 排）或延迟被压小都会立刻红；
-    # 负载只会让它更晚，不会假失败。
+    # 下界断言：参数被忽略（首轮退化成按 0.02 的 interval 排）或延迟被压小都会立刻红。
     assert elapsed >= delay, elapsed
     assert ran  # 窗口过后照常跑（并按周期续跑）

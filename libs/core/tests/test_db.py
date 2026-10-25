@@ -335,6 +335,9 @@ class TestFirstOpenLockRetry:
         assert not db.ready
         assert len(attempts) > 1
 
+    # 假时钟让这个用例的真实耗时只取决于尝试次数：退避被改成 0（无限重试）时，
+    # 没有这条守护会一直转到整个 worker 被杀而不是失败。
+    @pytest.mark.timeout(10)
     def test_loser_waits_for_a_slow_winner(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -452,17 +455,17 @@ def _failing_open_until(
     monkeypatch: pytest.MonkeyPatch,
     *,
     release_after_s: float,
-    clock: _FakeClock | None = None,
+    clock: _FakeClock,
 ) -> list[int]:
-    """``_open_once`` 在 ``release_after_s`` 秒内一直抛锁错误，之后转发真实实现。
+    """``_open_once`` 在 ``release_after_s``（假时钟秒数）内一直抛锁错误，之后转发真实实现。
 
     模拟「赢家在慢慢迁移」：输家能不能撑过去，取决于预算怎么算（时间 vs 次数）。
-    `clock` 给定时跟随假时钟（与 `_open` 同一个时间源）。
+    释放时刻跟随 `clock`——与 `_open` 的重试预算同一个时间源，判据才可比。
     """
     import wing.db.database as db_mod
 
     real = db_mod.Database._open_once
-    monotonic = clock.monotonic if clock is not None else time.monotonic
+    monotonic = clock.monotonic
     started = monotonic()
     attempts: list[int] = []
 
