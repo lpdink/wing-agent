@@ -82,10 +82,12 @@ fmt-check-ts:
 gateway:
 	uv run wing-gateway
 
-# 单测并行度：默认 min(6, 核数)。3720 个用例里一半在等 I/O（asyncio 超时 / 子
-# 进程），实测单进程 33s → 6 进程 11s（10 核）。xdist 每个 worker 是独立进程，
-# 只看本文件内的状态；跨文件的时序耦合由 `--dist loadfile` 挡掉。
-PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 6 ]; then echo 6; else echo $$n; fi)
+# 单测并行度：默认 min(8, 核数)。`--dist loadfile` 把**整文件**派给一个 worker，
+# 所以墙钟 ≈ max(总工作量 / n, 最长单文件)：12 核本机实测全套 ≈14s 工作量、最长
+# 单文件 ≈2s——n=8 已贴到「最长单文件」那条下界，再加 worker 只多付每进程的启动
+# 与导入开销。xdist 每个 worker 是独立进程，只看本文件内的状态；跨文件的时序
+# 耦合由 `--dist loadfile` 挡掉。
+PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
 PYTEST_WORKER_ARGS = $(if $(filter 1,$(PYTEST_WORKERS)),,--dist loadfile -n $(PYTEST_WORKERS))
 
 # 本地日常：不带覆盖率（`--cov` 让同一套用例多花 ~10s）。覆盖率数据只有 CI 的
