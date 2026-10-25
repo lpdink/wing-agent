@@ -328,7 +328,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-input.md`](docs/dev/tui-input.md) | TUI 输入通道：鼠标上报的 DECSET 配对与生命周期对称、滚轮 / 键盘 / 选择的路由（新增鼠标能力前先读） |
 | [`docs/dev/tui-signals.md`](docs/dev/tui-signals.md) | TUI 终端状态信号：OSC 0（标题）/ OSC 9（桌面通知）/ OSC 7501（程序状态）的读者与语义、光标转义的变化语义 |
 | [`docs/dev/coverage.md`](docs/dev/coverage.md) | 覆盖率门禁：增量（patch）覆盖率作为 PR 门禁、sticky 评论形状、不判定区与本地跑法 |
-| [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 |
+| [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 / 停机两路径（快 `stop()` vs 优雅 `shutdown()`） |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |
 

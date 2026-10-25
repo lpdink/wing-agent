@@ -1,11 +1,13 @@
-"""``ProbeEnv.start()`` 的失败路径收尾 —— 已 spawn 的网关不许变成孤儿。
+"""``ProbeEnv`` 的收尾路径 —— 已 spawn 的网关不许变成孤儿、优雅收尾不许挂住。
 
 背景：``test_model_id_cross_provider`` 的那条旧场景断言"坏配置 ⇒ 网关拒绝启动"，
 setup mode 之后网关**不再拒绝启动**，于是 ``ProbeEnv.start`` 成功返回、env 被丢掉、
 teardown 从不跑 —— 每跑一次漏一个网关子进程。
 
 根因已在场景侧修掉（env 被 ``try/finally`` 持有），这里钉住**基建的第二道**：
-``start()`` 中途失败（进程起了但健康检查不过）时，那个进程必须被收干净。
+``start()`` 中途失败（进程起了但健康检查不过）时，那个进程必须被收干净；
+以及优雅收尾（``shutdown()``）在网关不理会 ``/api/shutdown`` 时退到 terminate 阶梯，
+而不是挂在等待上。
 """
 
 from __future__ import annotations
@@ -192,6 +194,26 @@ async def test_shutdown_falls_back_to_terminate_when_the_gateway_ignores_it(
     assert not _pid_alive(pid), f"gateway {pid} survived shutdown()"
     assert env.process is None
     assert env.log_tail(max_lines=20).count("--- probe: terminate() ---") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_shutdown_is_safe_without_a_running_process(tmp_path: Path) -> None:
+    """从未启动（或网关已自行退出）时 ``shutdown()`` 幂等且不抛。
+
+    ``shutdown()`` 是场景体里会显式调用的入口：env 没起来、或网关自己崩了之后仍可能
+    被调到（场景失败路径）。这时它什么都不该做，也不该报错。
+    """
+    from wing_probe.env import ProbeEnv
+
+    env = ProbeEnv(tmp_path)
+
+    await env.shutdown()
+    await env.shutdown()  # 幂等
+    await env.stop()  # 闸门已落，no-op
+
+    assert env.process is None
+    assert env.provider.started is False
 
 
 # ── 外层兜底是**唯一**防线的两条路径 ────────────────

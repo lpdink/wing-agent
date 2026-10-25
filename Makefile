@@ -105,16 +105,18 @@ test-python-html:
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
 #
-# 并行度：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
-# 铺开是安全的。默认 min(2×核数, 24)，依据见 docs/dev/probe-testing.md
-# 「为什么敢并行」：独占机器的窗口里 12~28 worker 的墙钟互在噪声内（每例 ~0.25s
-# 里主要是新解释器的导入成本，没有多少等待可摊）；与其它三组抢 CPU 时 2× 核数
-# 稳定更快（成对交错 8/8 对，中位数 34.4s → 27.9s）。上限 24 只受内存约束
-# （~0.2GB/worker）。CI 的 4 核 runner 因此取 8。
-# PROBE_WORKERS 可覆盖；WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——
-# 只关组间并行等于没关。解析成 1 时不传 -n：逃生舱要的是原样的串行，不是
-# "xdist 里只开一个 worker"。
-PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$((n * 2))" -gt 24 ]; then echo 24; else echo $$((n * 2)); fi)
+# 并行度：按核数取（`getconf _NPROCESSORS_ONLN`）。场景之间零共享（各自 tmp +
+# 各自网关子进程 + 各自假 Provider），铺开是安全的；但快停机之后每例只剩 ~0.22s
+# 的固定成本（新网关解释器把导入图跑一遍，CPU 密集），latency:CPU ≈ 1.1，超订换
+# 不到墙钟：独占机器的窗口里 `-n 12/16/20/24/28` 的中位数是 22.8/26.1/24.6/25.1/
+# 24.0s（曲线是平的），而自身 CPU 随并行度上升（串行 ~107s → `-n 12` / `-n 20`
+# 各 ~130s，同窗口、负载 20~50）。`make test` 里四组共用同一批核，probe 多拿
+# 线程只是把自己的时间换成别的组的时间——那是全局配平的事，本旋钮只管 probe 单独
+# 跑的最优值（成对交错 `-n 24` vs `-n 12` 在重负载窗口 2 胜 2 负 1 平，不可复算）。
+# 每 worker 约 0.18GB，要更大/更小用 PROBE_WORKERS 覆盖。
+# WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——只关组间并行等于没关。
+# 解析成 1 时不传 -n：逃生舱要的是原样的串行，不是"xdist 里只开一个 worker"。
+PROBE_WORKERS ?= $(shell if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; else getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4; fi)
 PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,-n $(PROBE_WORKERS))
 
 test-probe:

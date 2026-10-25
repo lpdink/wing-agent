@@ -12,7 +12,7 @@
 
 | 命令 | 做什么 |
 |------|--------|
-| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n min(2×核数, 24)`） |
+| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n 核数`） |
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
@@ -25,16 +25,18 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `PROBE_WORKERS` | `min(2×核数, 24)` | 场景并行度（`make test-probe` 的 `-n`）。曲线的形状见下面「为什么敢并行」：独占机器时 12~28 worker 的墙钟互在噪声内，与其它三组抢 CPU 时 2× 核数稳定更快。上限 24 是内存闸门（每个 worker 一个 pytest 进程 + 一个网关子进程，约 0.2GB/worker）。`WING_TEST_SERIAL=1` 同样归串行 |
+| `PROBE_WORKERS` | 核数 | 场景并行度（`make test-probe` 的 `-n`）。取法见下面「为什么敢并行」：快停机之后每例只剩一个解释器的固定成本，曲线在核数上就平了；`make test` 里四组共用同一批核，超订只是把自己的时间换成别的组的时间，所以默认不超订。要更大用 `PROBE_WORKERS=<n>` 显式给（每 worker 约 0.18GB）。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
 
-**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。每例的开销是**进程启动与 HTTP 握手**这类等待与固定解释器成本，而不是算力（全量 ~580 例的墙钟只花掉 ~110s CPU，平均约占 5 核）；并行不改变隔离语义，共享环境才会。所以并行度只管"把等待摊开"，上限由内存与 CPU 竞争决定：
+**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口；并行不改变隔离语义，共享环境才会。但**并行度不超订**，依据（同窗口、本机 12 核、3 轮中位数；窗口内有其它 agent 在跑，绝对值只可同窗口比）：
 
-- 独占机器（12 核）：`-n 12 / 16 / 20 / 24 / 28` 的墙钟中位数是 22.8 / 26.1 / 24.6 / 25.1 / 24.0s——**曲线是平的**，差异落在本机噪声（轮内极差 6~8s）之内。原因：快停机之后每例 ~0.25s 里绝大部分是一个新解释器的导入成本（CPU），latency:CPU ≈ 1.2，已经不剩多少可以靠超订填的等待；
-- 与其它三组抢 CPU（`make test` 的真实情形）：成对交错 8 对，`-n 24` **8 对全胜** `-n 12`（中位数 27.9s vs 34.4s）——可运行线程多时调度器给的机会也多。
+- 快停机之后每例的固定成本只剩「一个新解释器把网关的导入图跑一遍」（CPU 密集，见「已知取舍」），latency:CPU ≈ 1.1——几乎没有可摊的等待；
+- 独占机器的窗口里 `-n 12 / 16 / 20 / 24 / 28` 的墙钟中位数是 22.8 / 26.1 / 24.6 / 25.1 / 24.0s，**曲线是平的**（轮内极差 6~8s 比配置间差异还大）；
+- 自身 CPU 随并行度上升：串行 ~107s → `-n 12` / `-n 20` 各 ~130s（同一窗口测得，含争抢放大）。在 `make test` 里四组共用同一批核，这部分是从 python / rust / ts 的预算里扣的；
+- 重负载窗口里成对交错 `-n 24` vs `-n 12` 是 2 胜 2 负 1 平（不可复算），所以没有把「超订更抗饿」当成结论。
 
-所以默认取 `min(2×核数, 24)`：独占时与 1× 核数无差别，抢 CPU 时更抗饿，上限 24 只受内存约束（~0.2GB/worker）。CI 的 4 核 runner 因此取 8。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+结论：默认取**核数**（`PROBE_WORKERS` 可覆盖）。**残余风险（未单独称量）**：`make test` 那条编队（python 6 + probe 核数 + rust + ts）下的取值没有单独 A/B——若别的组被 probe 饿到，收口侧应显式传 `PROBE_WORKERS`。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
@@ -167,8 +169,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 # auth + api_key: 打开网关鉴权（gateway.auth 段原文，缺省 {"enabled": False}）。
 # `auth` 进 ProbeEnv（配置），`api_key` 进 Probe.start → Driver（HTTP 与 WS 都带
-# Authorization: Bearer）。auth 打开时 ProbeEnv 关自己的子进程也用 keys 里第一把
-# 非 tool_runtime 的 key（/api/shutdown 同样受鉴权保护）。见 scenarios/test_gateway_auth.py
+# Authorization: Bearer）。auth 打开时 `Probe.shutdown()` 也用 keys 里第一把非
+# tool_runtime 的 key（/api/shutdown 同样受鉴权保护）——teardown 的 stop() 是 SIGKILL，
+# 不走该端点。覆盖在 tests/test_env_config.py::test_shutdown_api_key_prefers_admin_role
+# 与 scenarios/test_stop_paths.py::test_shutdown_uses_an_admin_key_when_auth_is_on。
 @pytest.mark.probe_env(auth={"enabled": True, "keys": [{"key": "k"}]}, api_key="k")
 
 # pre_start_dirs: 网关**启动前**要占住的目录（相对 WING_HOME，元素是路径字符串）。
@@ -290,8 +294,8 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 判据只有一条：**这条 lane 之后还有没有人观察「停机时发生的事」**。teardown 之后没有
 任何断言（内置不变量与现场转储都在 `stop()` 之前完成），而 lifespan 收尾的
 `sm.flush_usage()` / `stop_background()` / `close_providers()` / `close_database()`
-对「跑完就扔」的进程不产生被观察的结果，却固定要 ~0.30s（`/api/shutdown` 自己
-`call_later(0.1)`，uvicorn 的 `main_loop` 与 `shutdown()` 各有一次 `sleep(0.1)`）——
+对「跑完就扔」的进程不产生被观察的结果，却固定要 ~0.30s（构成见 `ProbeEnv.stop` 的
+docstring：`/api/shutdown` 自己的延迟 + uvicorn 收尾里的两次固定 `sleep`）——
 那是 probe 里最大的一笔无被测语义开销。
 
 因此：**要观察停机语义的场景必须显式 `await probe.shutdown()`**，不要指望 teardown
@@ -299,6 +303,16 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 快路径的退出码是 SIGKILL 且 `core/wing.db-wal` 留在盘上（`close_database()` 没跑），
 优雅路径的 WAL 被收掉。`kill_gateway` 与 `stop` 共用同一份 SIGKILL 实现，
 `restart_gateway` 与 `shutdown` 共用同一份优雅收尾。
+
+三点边界：
+
+- **进程级原语住 `ProbeEnv`**：`kill_gateway()` 是「杀进程但 env 继续用」，facade 不代理它
+  （场景写 `probe.env.kill_gateway()`）；`stop` / `shutdown` 才是 facade 的门面。
+- **`shutdown()` 之后只剩磁盘面**：它先关 driver，所以现场转储里来自 driver 的三份留档
+  （`timeline` / `frames` / `http`）会为空；内置不变量与 sessions 拷贝、网关日志照旧
+  （不变量在无 driver 时按磁盘兜底，**不会**因此变成零覆盖）。
+- **包外消费者同样受影响**：`scripts/perf/suite_gateway.py` 也调 `probe.stop()`，它测到的
+  每场景 `duration_s` 因此不再包含停机等待（该数字只作展示，不进指标门禁）。
 
 ## 逃生舱
 

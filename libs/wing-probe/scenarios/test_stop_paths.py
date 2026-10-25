@@ -24,6 +24,9 @@ import pytest
 from wing_probe import Probe, ProbeEnv
 
 #: 网关的退出码（子进程视角）：快路径吃 SIGKILL，优雅路径吃 SIGTERM（见文件头）。
+#: 优雅路径的 ``-SIGTERM`` 是 uvicorn 的行为而非产品契约——它捕获取消后会把捕获到的
+#: 信号 re-raise（``Server.capture_signals``），所以"进程自己退干净"在退出码上仍显示
+#: 为被 SIGTERM 终止。主断言是 WAL 与兜底日志标记，退出码只是佐证。
 SIGKILL_EXIT = -signal.SIGKILL
 SIGTERM_EXIT = -signal.SIGTERM
 

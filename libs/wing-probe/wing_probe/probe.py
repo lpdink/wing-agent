@@ -216,30 +216,29 @@ class Probe:
     async def stop(self) -> None:
         """**快**收尾（默认）：关 driver，再 SIGKILL 网关（不跑 lifespan）。
 
-        判据见 :meth:`ProbeEnv.stop`：fixture 的断言（含内置不变量）与现场转储都在
-        它之前做完，lifespan 收尾的落盘 / 后台任务 / 连接与 SQLite 关闭都不可观察，
-        只换来 0.3s 固定等待。幂等、不抛（失败场景的 teardown 也要安全）。
+        判据与理由见 :meth:`ProbeEnv.stop` 与 ``docs/dev/probe-testing.md``
+        「停机：快路径与优雅路径」。幂等、不抛（失败场景的 teardown 也要安全）。
         """
-        await self._shut(graceless=True)
+        await self._close_driver()
+        await self.env.stop()
 
     async def shutdown(self) -> None:
         """**优雅**收尾：关 driver，再 ``/api/shutdown`` 让网关跑完 lifespan。
 
         需要观察停机语义（停机后才落盘 / 才被收掉的状态、跨重启的补偿、优雅停机
         自身）的场景在**场景体里**显式调它；随后 fixture teardown 的 ``stop()``
-        因单向闸门变成 no-op。
+        因单向闸门变成 no-op。代价：关掉 driver 之后，现场转储里来自 driver 的三份
+        留档（``timeline`` / ``frames`` / ``http``）为空——磁盘部分（不变量、sessions
+        拷贝、网关日志）照旧。
         """
-        await self._shut(graceless=False)
+        await self._close_driver()
+        await self.env.shutdown()
 
-    async def _shut(self, *, graceless: bool) -> None:
-        """两条收尾路径的唯一实现（先关 driver，再按路径停网关）。"""
+    async def _close_driver(self) -> None:
+        """关掉 driver 并置空（幂等；``stop`` / ``shutdown`` / ``restart_gateway`` 共用）。"""
         driver, self.driver = self.driver, None
         if driver is not None:
             await driver.close()
-        if graceless:
-            await self.env.stop()
-        else:
-            await self.env.shutdown()
 
     async def __aenter__(self) -> Probe:
         return self
@@ -339,9 +338,7 @@ class Probe:
         对账重启前后的请求）。
         """
         await self.env.restart_gateway()
-        previous, self.driver = self.driver, None
-        if previous is not None:
-            await previous.close()
+        await self._close_driver()
         await self.connect_driver()
 
     # ── 断言面 ────────────────────────────────────────────────
@@ -438,16 +435,26 @@ class Probe:
 
         Args:
             views: 显式指定要检查的视图（默认 = driver 已挂载的全部 session；
-                未连接 driver 时为空清单）。
+                driver 已关（``probe.shutdown()`` / ``probe.stop()`` 之后）或从未连接时
+                回退到磁盘上的全部 session 目录）。
+
+        **driver 缺席不能等于零覆盖**：``shutdown()`` 是「观察停机语义」的推荐写法，
+        它先关 driver 再停网关，此时若直接按「没有 driver ⇒ 没有 session」处理，
+        四条不变量对该场景创建的会话一条都不跑、还不报错——那就成了一个免理由的
+        逃生舱（``without_invariants`` 是唯一该有理由的那个）。因此无 driver 时按
+        磁盘兜底；不变量本来就是纯磁盘视图（``HistoryView``），不需要网关活着。
 
         被检查的 session id 会记下来，供 :meth:`invariant_report` 在 driver 已关闭
         （teardown 之后）时仍能渲染出可读报告。
         """
-        resolved = (
-            list(views)
-            if views is not None
-            else [self.history(session) for session in self._attached_sessions()]
-        )
+        if views is not None:
+            resolved = list(views)
+        elif self.driver is not None:
+            resolved = [self.history(session) for session in self.driver.sessions]
+        else:
+            resolved = [
+                HistoryView(session_dir) for _, session_dir in self._session_dirs()
+            ]
         self._checked_session_ids = [view.session_id for view in resolved]
         return run_invariants(
             resolved, allow_arguments_error=self.arguments_error_reason is not None
@@ -459,7 +466,7 @@ class Probe:
         不依赖 driver 是否已关闭（session 清单取自 :meth:`check_invariants`）。
         """
         session_ids = self._checked_session_ids or [
-            session.session_id for session in self._attached_sessions()
+            session_id for session_id, _ in self._session_dirs()
         ]
         lines = [
             "--- built-in invariants (source: wing_probe fixture teardown) ---",
@@ -483,7 +490,7 @@ class Probe:
         return "\n".join(lines)
 
     def _attached_sessions(self) -> list[Session]:
-        """driver 已挂载的会话（未连接 driver 时为空清单——dump / teardown 用）。"""
+        """driver 已挂载的会话（未连接 / 已关 driver 时为空清单——dump 用）。"""
         return [] if self.driver is None else self.driver.sessions
 
     # ── 现场转储 ──────────────────────────────────────────────

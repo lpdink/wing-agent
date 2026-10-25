@@ -1040,7 +1040,8 @@ class ProbeEnv:
 
     # ── 停止 ────────────────────────────────────────────────
     #
-    # 两条路径，判据只看一件事：**这条 lane 之后还有没有人观察「停机时发生了什么」**。
+    # 两条路径，判据与理由见 docs/dev/probe-testing.md「停机：快路径与优雅路径」。
+    # 一句话：**这条 lane 之后还有没有人观察「停机时发生的事」**——没有就 stop()。
     #
     #   stop()      快：SIGKILL，不跑 lifespan。默认（fixture teardown / 失败收尾）。
     #   shutdown()  优雅：POST /api/shutdown → 等进程自己退。唯一跑 lifespan 的入口。
@@ -1052,18 +1053,16 @@ class ProbeEnv:
     async def stop(self) -> None:
         """**快**收尾：SIGKILL 网关（不跑 lifespan）+ 收假 Provider。
 
-        teardown 的默认路径。绝大多数场景不观察停机时发生的事——lifespan 收尾
-        （``flush_usage`` / ``stop_background`` / ``close_providers`` /
-        ``close_database``）跑在进程退出过程中，而 fixture 的断言（含内置不变量）
-        与现场转储都在 ``stop()`` 之前就做完了；它固定换来的 0.3s（``/api/shutdown``
-        的 ``call_later(0.1)`` + uvicorn ``main_loop`` 与 ``shutdown()`` 各一次
-        ``sleep(0.1)``）没有任何被测语义。
+        teardown 的默认路径：``stop()`` 之后不存在任何断言（内置不变量与现场转储都在
+        它之前完成），所以 lifespan 收尾跑与不跑没有观察者，而它固定换来的 0.3s
+        （``/api/shutdown`` 的 ``call_later(0.1)`` + uvicorn ``main_loop`` 与
+        ``shutdown()`` 各一次 ``sleep(0.1)``）没有任何被测语义。
 
-        ``_stopped`` 是**单向闸门**：一旦停止，同一个 env 实例就报废了——
-        ``stop()`` 之后再次 ``stop()`` / ``shutdown()`` 直接返回，``start()`` 也不支持
-        在同一实例上重启（``ProbeEnv`` 的端口 / 子进程 / 假 Provider 状态都不是可重置
-        的）。需要新环境就新建一个 ``ProbeEnv`` / ``Probe``（fixture 每场景一个，正是
-        这条约定的用法）。
+        幂等、不抛（失败场景的 teardown 与 ``start()`` 的失败收尾都要能安全调用）。
+        ``_stopped`` 是**单向闸门**：一旦停止，同一个 env 实例就报废了——之后再
+        ``stop()`` / ``shutdown()`` 直接返回，``start()`` 也不支持在同一实例上重启
+        （端口 / 子进程 / 假 Provider 状态都不是可重置的）。需要新环境就新建一个
+        ``ProbeEnv`` / ``Probe``（fixture 每场景一个，正是这条约定的用法）。
         """
         await self._shut(graceless=True)
 
@@ -1071,8 +1070,11 @@ class ProbeEnv:
         """**优雅**收尾：``/api/shutdown`` → 等退出（≤5s）→ ``terminate`` → ``kill``。
 
         唯一会让网关跑 lifespan 收尾的入口：断言「停机后才落盘 / 才收掉的状态」、
-        让唤醒的错过补发真的发生、或验证优雅停机自身的场景用它。幂等，与 :meth:`stop`
-        共用单向闸门（两个只应有一个先到，后到的是 no-op）。
+        让唤醒的错过补发真的发生、或验证优雅停机自身的场景用它。
+
+        幂等、不抛；与 :meth:`stop` 共用单向闸门（两个只应有一个先到，后到的是
+        no-op）。网关不理会 ``/api/shutdown``（连接被拒 / 401）时退到 terminate 阶梯，
+        不会挂在等待上。
         """
         await self._shut(graceless=False)
 
@@ -1106,6 +1108,10 @@ class ProbeEnv:
                 await asyncio.to_thread(process.wait, timeout=DEFAULT_SHUTDOWN_WAIT)
             except subprocess.TimeoutExpired:  # pragma: no cover - 不可杀进程
                 _log.warning("gateway process survived SIGKILL")
+        if process is not None:
+            self._log_marker(
+                f"--- probe: gateway exited (code={process.returncode}) ---"
+            )
         self._process = None
 
     async def _graceful_stop_process(self) -> None:
