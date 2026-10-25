@@ -84,10 +84,10 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
     创建、unzip 指向区间末），重映射后子记录集自洽——压缩节点的 unzip 指向重映射后的
     区间末记录，子会话的 fork 候选列表与源会话一致。
 
-    ``usage_boundary_uuid``（usage 信任起点声明）是唯一可能指向前缀之外的键：fork 点
+    ``usage_boundary_uuid``（usage 边界）是唯一可能指向前缀之外的键：fork 点
     落在压缩后被保留的 tail 中间时，边界（换入时刻的链尖）在后头。这种情形**钉到前缀
     末条记录**（= 子会话的活跃链尖）——语义精确："子会话链上的东西全部早于那次换入"。
-    删键会让读取侧按"没有声明"降级成信任保留区的压缩前 usage，正是 issue #247 要消灭
+    删键会让读取侧按"没有边界"降级成信任保留区的压缩前 usage，正是 issue #247 要消灭
     的错口径。
 
     缺省是防御：``parent_uuid`` / ``unzip_last_uuid`` 万一是前缀外引用，宁可让它成为根

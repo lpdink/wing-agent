@@ -163,6 +163,11 @@ def assert_chain_invariants(view: HistoryView) -> None:
     - 每条记录是 Message（role ∈ system/user/assistant/tool）或事件
       （``role="event"`` + 非空 ``type``）——否则读盘时会被跳过，链条静默断裂；
     - 每条记录的 ``parent_uuid`` 要么为空（根），要么在记录集中存在；
+    - **活跃链上最后一条 ``usage_boundary_uuid`` 边界必须解析到活跃链上的节点**：
+      它是"此后 usage 度量在当前窗口上"的边界（issue #247）。更早的边界可以是
+      悬空的（压缩换入边界的链尖会被后来的 rewind 剪掉，回退行随即边界自己），读侧
+      因此只认最后一条能否解析；最后一条悬空 = 复制路径（压缩 relink / fork /
+      rewind）漏了重映射，读侧会一条都不采信、真实 usage 永久失效；
     - 活跃链自 tip 回溯可达根、无环，且逐节点 parent 衔接（链是闭合路径）；
     - 活跃链末端 == tip == 末条记录（写盘语义"末条记录即 tip"自洽）。
 
@@ -213,6 +218,21 @@ def assert_chain_invariants(view: HistoryView) -> None:
 
     tip = view.tip_uuid
     chain = view.active_chain()
+    chain_uuids = {record_uuid(record) for record in chain}
+    last_declaration: tuple[int, Mapping[str, Any], str] | None = None
+    for position, record in enumerate(chain):
+        boundary = record.get("usage_boundary_uuid")
+        if isinstance(boundary, str):
+            last_declaration = (position, record, boundary)
+    if last_declaration is not None:
+        position, record, boundary = last_declaration
+        if boundary not in chain_uuids:
+            problems.append(
+                f"active chain[{position}] "
+                f"({describe_record(record, position=position)}): "
+                f"usage_boundary_uuid={boundary} 不在活跃链上（最后一条边界悬空）—— "
+                "复制 / 重链接路径漏了重映射，读侧会一条都不采信"
+            )
     if tip is None:
         if view.records:
             problems.append(
@@ -1403,7 +1423,7 @@ def assert_fork_of(
         )
     # 链拓扑引用（parent_uuid / unzip_last_uuid / usage_boundary_uuid）必须整体
     # 重映射到子记录集内部：前缀口径下 parent / unzip 的引用都在前缀里，所以既不该
-    # 悬空、也不该出现跨 session 引用。`usage_boundary_uuid`（usage 信任起点声明）
+    # 悬空、也不该出现跨 session 引用。`usage_boundary_uuid`（usage 边界）
     # 是唯一可能指向前缀之外的一个（fork 点落在被保留的 tail 中间时，边界在后头）
     # ——实现把它**钉到前缀末条记录**（= 子会话 fork 时刻的活跃链尖），因此那个键的
     # 期望值是"重映射后的源引用"或"前缀末条记录"，两者都落在子记录集内部。

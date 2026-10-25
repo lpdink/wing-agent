@@ -54,6 +54,7 @@ def message(
     tool_call_id: str | None = None,
     raw_arguments: Any = None,
     unzip: str | None = None,
+    boundary: str | None = None,
     legacy: bool = False,
 ) -> dict[str, Any]:
     """一条 Message 记录。
@@ -70,6 +71,8 @@ def message(
     }
     if unzip is not None:
         record["unzip_last_uuid"] = unzip
+    if boundary is not None:
+        record["usage_boundary_uuid"] = boundary
     if role == "assistant":
         blocks: list[dict[str, Any]] = []
         if reasoning:
@@ -282,6 +285,40 @@ def test_chain_invariants_detect_dangling_parent(tmp_path: Path) -> None:
     assert "parent_uuid=ghost is not in the record set" in text
     assert "line 2" in text
     assert "chain[0]" in text  # 回溯在 a1 处中断（活跃链不可达根）
+
+
+def test_chain_invariants_detect_dangling_usage_boundary(tmp_path: Path) -> None:
+    """活跃链上的窗口声明必须可解析（复制路径漏重映射的形状，issue #247）。"""
+    records = [
+        message("user", uuid="u1", content="hi"),
+        message(
+            "assistant",
+            uuid="c1",
+            content="[Compact] summary",
+            unzip="u1",
+            boundary="gone",  # 指向离链的节点
+        ),
+    ]
+    view = view_of(tmp_path, records)
+    with pytest.raises(HistoryAssertionError) as excinfo:
+        view.assert_chain_invariants()
+    text = str(excinfo.value)
+    assert "usage_boundary_uuid=gone 不在活跃链上" in text
+
+
+def test_chain_invariants_accept_resolvable_usage_boundary(tmp_path: Path) -> None:
+    records = [
+        message("user", uuid="u1", content="hi"),
+        message(
+            "assistant",
+            uuid="c1",
+            content="[Compact] summary",
+            unzip="u1",
+            boundary="t1",
+        ),
+        message("user", uuid="t1", parent="c1", content="tail"),
+    ]
+    view_of(tmp_path, records).assert_chain_invariants()
 
 
 def test_chain_invariants_detect_missing_uuid(tmp_path: Path) -> None:

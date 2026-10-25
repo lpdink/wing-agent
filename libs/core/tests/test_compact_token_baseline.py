@@ -308,7 +308,7 @@ async def test_legacy_compact_node_keeps_historical_baseline(tmp_dir):
 
 
 def test_dangling_boundary_trusts_no_usage(tmp_dir):
-    """声明的指针不在链上（rewind 剪断 / 日志损坏）→ 一条都不采信。"""
+    """边界的指针不在链上（rewind 剪断 / 日志损坏）→ 一条都不采信。"""
     cm = _make_cm(tmp_dir)
     head = Message(role="user", content="alpha")
     cm.add_message(head)
@@ -321,10 +321,84 @@ def test_dangling_boundary_trusts_no_usage(tmp_dir):
     assert cm._last_prompt_tokens() is None
 
 
+@pytest.mark.asyncio
+async def test_relinked_declaration_is_remapped(tmp_dir):
+    """压缩换入重链接保留区时，保留区自带的窗口边界必须跟着换 uuid。
+
+    保留区里有 rewind 回退行（边界"信任从我之后恢复"）时，整条复制会带走那条边界；
+    照抄旧 uuid 就指向离链的节点 → 读侧一条都不采信 → 换入之后落链的真实 usage 全部
+    失效（与"换入后失效一次"的预期完全不同），重新加载也一样。
+    """
+    cm = _make_cm(tmp_dir)
+    cm.add_message(Message(role="user", content="alpha"))
+    # 早期消息够长：这一轮压缩的切点（估算 ≥ compact_window）落在它之后。
+    cm.add_message(Message(role="assistant", content="x" * 3000))
+    cm.add_message(Message(role="user", content="beta"))
+    cm.add_message(_turn_reply("beta reply", prompt_tokens=0))
+
+    # 保留区里来一次回退：回退行（"beta reply" 的副本）边界信任从自己之后恢复。
+    gamma = Message(role="user", content="gamma")
+    cm.add_message(gamma)
+    cm.rewind(gamma.uuid)  # ty: ignore[invalid-argument-type]
+    rewind_row = cm.get_context_window()[-1]
+    assert rewind_row.usage_boundary_uuid == rewind_row.uuid, rewind_row
+
+    # 回退之后的真实 usage + 一条用户消息 → 触发压缩并换入。
+    cm.add_message(_turn_reply("fresh reply", prompt_tokens=PRE_COMPACT_TOKENS))
+    cm.add_message(Message(role="user", content="delta"))
+    await _assemble(cm)
+    assert cm._pending_compact_task is not None, [
+        m.content for m in cm.get_context_window()
+    ]
+    await cm._pending_compact_task
+    await _assemble(cm)
+    assert cm._pending_compact_result is None
+
+    # 保留区被重链接：回退行还在里面，它的边界指向**新的**自己（可解析）。
+    chain = cm.get_context_window()
+    relinked_rows = [m for m in chain[1:] if m.usage_boundary_uuid is not None]
+    assert len(relinked_rows) == 1, [m.content for m in chain]
+    assert relinked_rows[0].content == "beta reply", relinked_rows[0]
+    assert relinked_rows[0].usage_boundary_uuid == relinked_rows[0].uuid
+
+    # 换入之后落链的真实 usage 立刻生效（不是永久估算）——reload 后同样成立。
+    cm.add_message(_turn_reply("post compact reply", prompt_tokens=300))
+    assert cm._last_prompt_tokens() == 300
+    assert _reload(tmp_dir)._last_prompt_tokens() == 300
+
+
+def test_trust_start_takes_the_latest_resolvable_declaration(tmp_dir):
+    """取「所有可解析边界里最靠后的起点」，不是「链序最后一条边界」。
+
+    压缩节点在链序上位于保留区之前：若按链序取最后一条，保留区里那条更早的边界会把
+    信任起点往回拉，复活保留区里压缩前的 usage。
+    """
+    cm = _make_cm(tmp_dir)
+    head = Message(role="user", content="alpha")
+    cm.add_message(head)
+
+    tip = _turn_reply("tip reply", prompt_tokens=900)
+    tip.uuid = uuid.uuid4().hex
+    compact = _compact_node(head.uuid, boundary=tip.uuid)
+    cm._messages.append_detached(compact)
+    cm._messages.set_tip(compact.uuid)  # ty: ignore[invalid-argument-type]
+    cm.add_message(Message(role="user", content="u1"))
+
+    rewind_row = _turn_reply("rewind row", prompt_tokens=0)
+    rewind_row.uuid = uuid.uuid4().hex
+    rewind_row.usage_boundary_uuid = rewind_row.uuid
+    cm.add_message(rewind_row)
+    cm.add_message(_turn_reply("stale reply"))  # 压缩前的窗口（1100）
+    cm.add_message(tip)
+
+    # 压缩节点的边界（= 链尖）比回退行的边界更靠后 → 一条都不采信。
+    assert cm._last_prompt_tokens() is None
+
+
 def test_rewind_into_tail_drops_stale_usage_and_recovers(tmp_dir):
     """回退进保留区：残留的保留区 usage 不信，回退之后的真实 usage 立刻生效。
 
-    回退行自己声明"信任从这里恢复"——所以不是"永久退回估算"：下一轮真实 usage
+    回退行自己边界"信任从这里恢复"——所以不是"永久退回估算"：下一轮真实 usage
     落链即回到服务端口径（rewind 是用户最常见的动作之一，代价得有界）。
     """
     cm = _make_cm(tmp_dir)
@@ -351,7 +425,7 @@ def test_rewind_into_tail_drops_stale_usage_and_recovers(tmp_dir):
     # 残留的 stale usage 不得复活。
     cm.rewind(tip.uuid)
     assert cm._last_prompt_tokens() is None
-    # 但回退行声明了新的信任起点 → 之后落链的真实 usage 立刻被采信。
+    # 但回退行边界了新的信任起点 → 之后落链的真实 usage 立刻被采信。
     cm.add_message(Message(role="user", content="after rewind"))
     cm.add_message(_turn_reply("recovered reply", prompt_tokens=300))
     assert cm._last_prompt_tokens() == 300
@@ -361,7 +435,7 @@ def test_rewind_into_tail_drops_stale_usage_and_recovers(tmp_dir):
 async def test_empty_chain_manual_compact_declares_resumption(tmp_dir):
     """空链手动压缩：没有可压缩区间（`unzip_last_uuid` 为空）但仍是新链的起点。
 
-    写入规则是统一的——任何把窗口重置到该节点的写入都声明"此后 usage 度量在当前
+    写入规则是统一的——任何把窗口重置到该节点的写入都边界"此后 usage 度量在当前
     窗口上"；读侧不看 `unzip_last_uuid`，所以这里不多一个特例。
     """
     cm = _make_cm(tmp_dir)
