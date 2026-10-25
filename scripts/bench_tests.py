@@ -38,6 +38,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 #: `scripts/collect_output.sh` 读这个变量决定是否落机器读的报告。
 REPORT_ENV = "WING_TEST_REPORT"
@@ -115,13 +116,7 @@ def run_once(tree: Path, mode: str) -> Round:
             load=load_average(),
         )
 
-    groups: dict[str, int] = {}
-    codes: dict[str, int] = {}
-    stats: dict[str, str] = {}
-    for entry in raw["groups"]:
-        groups[entry["label"]] = entry["ms"]
-        codes[entry["label"]] = entry["code"]
-        stats[entry["label"]] = entry["stat"]
+    groups, codes, stats = parse_report(raw)
     return Round(
         wall_ms=wall_ms,
         groups=groups,
@@ -129,6 +124,24 @@ def run_once(tree: Path, mode: str) -> Round:
         stats=stats,
         load=load_average(),
     )
+
+
+def parse_report(
+    raw: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, int], dict[str, str]]:
+    """`collect_output.sh` 的报告 → (逐组毫秒, 逐组退出码, 逐组统计行)。
+
+    形状就是 `{"groups": [{label, code, ms, stat}]}`——写方与读方之间只有这一处契约，
+    `--selftest` 用固定样本钉住它（`scripts/test_rust_parallel.py --selftest` 的同一个惯例）。
+    """
+    groups: dict[str, int] = {}
+    codes: dict[str, int] = {}
+    stats: dict[str, str] = {}
+    for entry in raw["groups"]:
+        groups[entry["label"]] = int(entry["ms"])
+        codes[entry["label"]] = int(entry["code"])
+        stats[entry["label"]] = entry["stat"]
+    return groups, codes, stats
 
 
 #: `└ python 完成，用时 16s` / `└ probe  失败（exit=1），用时 33s`——逐组耗时行。
@@ -179,15 +192,67 @@ def print_table(
         )
 
 
+def selftest() -> int:
+    """离线自检解析与聚合（不跑任何测试）。
+
+    这一层唯一会静默出错的地方是"读错数"：报告形状变了、终端文案变了、中位数算法偏了，
+    出来的都是看着正常但错了一个量级的数字——比崩溃危险得多，所以用固定样本钉住。
+    """
+    failures = 0
+
+    def check(name: str, got: object, want: object) -> None:
+        nonlocal failures
+        ok = got == want
+        failures += 0 if ok else 1
+        print(
+            f"[selftest] {'ok  ' if ok else 'FAIL'} {name} = {got!r}{'' if ok else f' (want {want!r})'}"
+        )
+
+    raw = {
+        "groups": [
+            {"label": "python", "code": 0, "ms": 4800, "stat": "4098 passed"},
+            {"label": "probe", "code": 1, "ms": 17000, "stat": "1 failed"},
+        ]
+    }
+    groups, codes, stats = parse_report(raw)
+    check("report groups", groups, {"python": 4800, "probe": 17000})
+    check("report codes", codes, {"python": 0, "probe": 1})
+    check("report stats", stats["probe"], "1 failed")
+
+    human = (
+        "▶ python make test-python（日志：/tmp/x.log）\n"
+        "  └ python 完成，用时 5s\n"
+        "  └ probe  失败（exit=1），用时 17s\n"
+    )
+    check(
+        "human output",
+        parse_human_output(human),
+        ({"python": 5000, "probe": 17000}, {"python": 0, "probe": 1}),
+    )
+    check("human output (走神文本)", parse_human_output("no progress lines"), ({}, {}))
+
+    rounds = [
+        Round(wall_ms=1000, groups={"a": 100}, codes={"a": 0}),
+        Round(wall_ms=3000, groups={"a": 300}, codes={"a": 0}),
+        Round(wall_ms=2000, groups={"a": 200}, codes={"a": 0}),
+    ]
+    check("median wall", describe(rounds), (2000, {"a": 200}))
+    check("seconds", seconds(2500), "2.5s")
+
+    print(f"[selftest] {'ok' if not failures else f'{failures} failure(s)'}")
+    return 0 if not failures else 1
+
+
 def main(argv: list[str]) -> int:
+    if argv == ["--selftest"]:
+        return selftest()
     parser = argparse.ArgumentParser(
         prog="bench_tests.py",
-        description="make test / make check 的交错 A/B 基准",
+        description="make test / make check 的交错 A/B 基准（`--selftest` 只自检解析，不跑测试）",
     )
     parser.add_argument(
         "--tree",
         action="append",
-        required=True,
         metavar="PATH",
         help="一个 checkout 的路径（可重复：第一个是基线，第二个是对照）",
     )
@@ -221,10 +286,15 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    if not args.tree:
+        parser.error("至少要给一个 --tree（`--selftest` 不用跑测试）")
     trees = [Path(path).expanduser().resolve() for path in args.tree]
     labels = args.label or [tree.name for tree in trees]
     if len(labels) != len(trees):
         parser.error("--label 的个数必须与 --tree 相同")
+    if len(set(labels)) != len(labels):
+        # 同名会让两棵树的轮次落进同一个桶，静默输出"1.00×"。
+        parser.error(f"label 必须唯一：{labels}")
     for tree in trees:
         if not (tree / "scripts" / "collect_output.sh").is_file():
             parser.error(f"{tree} 看起来不是 wing-agent 的 checkout")

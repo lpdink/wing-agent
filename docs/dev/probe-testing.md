@@ -39,7 +39,9 @@
 
 **③ 跨文件状态**：`loadfile` 会让同一个 worker **连续**跑多个文件，所以「用例之间零共享」必须真的成立（而不是靠"每条用例都可能落到不同 worker"）。约束是本包的设计本身：每个用例自带 tmp `WING_HOME` + 网关子进程 + 假 Provider，没有任何用例改 `os.environ` / `cwd` / 模块级全局（改了也走 `monkeypatch` 自动还原）。实测两遍：串行 589 例（**一个进程**跑完全部文件）全绿；**逆序文件顺序**（改变所有"前一个文件"的配对）全绿。
 
-**残余风险（未单独称量）**：`make test` 那条编队本身已经是 1.5× 以上超订（python 6 + probe 1.5×核数 + rust + ts 对 12 核），编队内的取值没有单独 A/B——若别的组被 probe 饿到，收口侧应显式传 `PROBE_WORKERS`；正确的一步是全局配平。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+**编队内为什么不收**：`make test` 里另外三组按共享档收到约 1/3 核数，probe 保持 1.5× 核数——
+它等的是网关子进程而不是算力，少给 worker 只会更慢。12 核上的合计与取舍见
+[test-speed.md](test-speed.md) §1。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 

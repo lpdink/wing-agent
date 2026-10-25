@@ -14,9 +14,11 @@
 VSCODE_DIR := extensions/vscode
 
 # vitest worker 上限：独占时交给 vitest 自己定（默认核数-1），与另外三组同时跑时收到
-# 约 1/3 核数（`WING_TEST_SHARED=1`，见 PYTEST_WORKERS 处的说明）。
+# `WING_TEST_BUDGET_TS`（数值，由 `scripts/collect_output.sh` 算，见 PYTEST_WORKERS 处）。
 # `TS_ARGS` 是直接透传给 vitest 的逃生舱（`make test-ts TS_ARGS="--reporter=verbose"`）。
-TS_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SHARED)" ] && [ "$(WING_TEST_SHARED)" != "0" ]; then echo --maxWorkers=$$(( n > 2 ? (n / 3 > 4 ? 4 : n / 3) : 2 )); fi)
+# 注意**不要**写成 `pnpm run test -- $(TS_ARGS)`：pnpm 会把 `--` 连同后面的实参一起吞掉，
+# vitest 一个都收不到（静默失效）。`pnpm run test <args>` 才是透传。
+TS_WORKERS ?= $(if $(WING_TEST_BUDGET_TS),--maxWorkers=$(WING_TEST_BUDGET_TS))
 TS_ARGS ?= $(TS_WORKERS)
 
 # Node/pnpm 探测 + 提示（单行，避免 make ↔ shell 的续行转义；见 docs/dev/vscode-extension.md §9.3）。
@@ -74,7 +76,7 @@ test-ts:
 	$(TS_TOOLING_CHECK); \
 	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
 	echo "🔍 Running vitest (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run test $(if $(TS_ARGS),-- $(TS_ARGS))); then echo "❌ vitest failed"; exit 1; fi; \
+	if ! (cd $(VSCODE_DIR) && pnpm run test $(TS_ARGS)); then echo "❌ vitest failed"; exit 1; fi; \
 	echo "✅ vitest passed"
 
 fmt-ts:
@@ -94,11 +96,11 @@ gateway:
 # 那条下界，再加 worker 只多付每进程的启动与导入开销。xdist 每个 worker 是独立进程，
 # 只看本文件内的状态；跨文件的时序耦合由 `--dist loadfile` 挡掉。
 #
-# `WING_TEST_SHARED=1` 由 `scripts/collect_output.sh` 在四组并行时导出：四组各自按
-# "我独占整机"来配并行度时，机器被压到 2~3 倍超订，**每一组都变慢**（本机实测：四组
-# 同时跑 30.5s，把后三组各自收到 1/3 核数后 26.0s）。独占时不共享——单独跑一组的人
-# 仍然拿满。
-PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ -n "$(WING_TEST_SHARED)" ] && [ "$(WING_TEST_SHARED)" != "0" ]; then echo $$(( n > 2 ? (n / 3 > 4 ? 4 : n / 3) : 2 )); elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
+# `WING_TEST_BUDGET_PYTEST`（数值）由 `scripts/collect_output.sh` 在四组并行时导出：
+# 四组各自按"我独占整机"来配并行度时，机器被压到三倍以上超订，**每一组都变慢**；
+# 份额的算法与实测都在那一处（全仓唯一），这里只消费。不导出时按独占算——单独跑
+# 一组的人仍然拿满。
+PYTEST_WORKERS ?= $(or $(WING_TEST_BUDGET_PYTEST),$(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi))
 PYTEST_WORKER_ARGS = $(if $(filter 1,$(PYTEST_WORKERS)),,--dist loadfile -n $(PYTEST_WORKERS))
 
 # 本地日常：不带覆盖率（`--cov` 让同一套用例多花 ~10s）。覆盖率数据只有 CI 的

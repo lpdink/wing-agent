@@ -8,17 +8,20 @@
 
 | 组 | 跑什么 | 独占时的并行度 | 与另外三组同时跑时 |
 |---|---|---|---|
-| `make test-python` | `libs/core/tests` + `libs/wing-sdk/tests`（xdist，`--dist loadfile`） | `min(8, 核数)`（`PYTEST_WORKERS`） | `min(4, 核数/3)`（`WING_TEST_SHARED=1`） |
+| `make test-python` | `libs/core/tests` + `libs/wing-sdk/tests`（xdist，`--dist loadfile`） | `min(8, 核数)`（`PYTEST_WORKERS`） | `max(2, min(4, 核数/3))`（`WING_TEST_BUDGET_PYTEST`） |
 | `make test-probe` | `libs/wing-probe`（xdist，`--dist loadfile`） | `1.5 × 核数`（`PROBE_WORKERS`） | 同左（见 §2.1，它要的是延迟覆盖不是算力） |
-| `make test-rust` | 55 个测试二进制 + doctests（`scripts/test_rust_parallel.py`） | `--cores 核数` | `--cores max(2, 核数/3)` |
-| `make test-ts` | vitest（两个 project） | vitest 自己定（核数-1） | `--maxWorkers max(2, 核数/3)`（`TS_WORKERS`） |
+| `make test-rust` | 55 个测试二进制 + doctests（`scripts/test_rust_parallel.py`） | `--cores 核数` | `max(2, min(4, 核数/3))`（`WING_TEST_BUDGET_RUST`） |
+| `make test-ts` | vitest（两个 project） | vitest 自己定（核数-1） | `max(2, min(4, 核数/3))`（`WING_TEST_BUDGET_TS` → `TS_WORKERS`） |
 
-`WING_TEST_SHARED=1` 只由 `scripts/collect_output.sh` 在四组并行时导出。**单独跑一组的人拿满机器**——
-"共享档"是四组共处一机时的配平，不是新默认。`WING_TEST_SERIAL=1` 仍然把四组（以及组内并行）一起退化成串行，
+份额由 `scripts/collect_output.sh` 在四组并行时算成**数值**导出（`WING_TEST_BUDGET_PYTEST` /
+`_RUST` / `_TS`）——全仓只有那一处算它，各组只消费；同一条公式写三遍必然分叉。
+**单独跑一组的人拿满机器**："共享档"是四组共处一机时的配平，不是新默认。`WING_TEST_SERIAL=1` 仍然把四组（以及组内并行）一起退化成串行，
 是排查并发干扰的逃生舱。
 
-为什么需要"共享档"：四组各自按"我独占整机"配并行度，机器会被压到 2~3 倍超订，**每一组都变慢**。
-本机 12 核实测：四组默认 → 墙钟 30.5s；把后三组各收到 1/3 核数 → **26.0s**，同样四组全绿。
+为什么需要"共享档"：四组各自按"我独占整机"配并行度时，机器会被压到三倍以上超订，**每一组都变慢**
+（12 核上的实测见 §4 的表格）。12 核上的编队因此是 **python 4 + probe 18 + rust 4 + ts 4**，
+合计 30 条在飞 ≈ 2.5× 核数——仍然超订，但超订的都是"在等 I/O 的线程"，不是"在烧核的线程"。
+probe 是唯一不收的：它等的是网关子进程而不是算力，少给 worker 只会让它更慢（§2.1）。
 
 ## 2. 各组的成本结构
 
@@ -27,7 +30,7 @@
 一次 `ProbeEnv.start()` ≈ 0.24s，其中 **~0.19s 是网关子进程的 Python 导入**（fastapi / pydantic /
 uvicorn / wing 自身的启动图），剩下是解释器启动与健康握手。230 个场景环境 × 0.19s ≈ 45s 的纯 CPU，
 这是 probe 最大的单项成本，也是它的**硬地板**：想更快只能减少环境数量，或者让网关启动变便宜
-（后者被评估过并否决：可达的延迟导入边际只有 1~2ms/次，见 `design.md` 的记录）。
+（后者被评估过并否决：可达的延迟导入边际只有 1~2ms/次，而 fastapi / pydantic 那部分无论如何都要付）。
 
 因此 probe 的时间由两个量决定：
 
@@ -36,7 +39,7 @@ uvicorn / wing 自身的启动图），剩下是解释器启动与健康握手�
   攒到同一个 worker 上（实测：12 核下 `load` 22.4s → `loadfile` 19.2s，而 worker 忙碌总时间两者相同，
   差的只是最后的尾巴摊不摊得平）。
 - **停机不花时间**：`stop()` 是 SIGKILL（不跑 lifespan），`shutdown()` 才是优雅路径。
-  判据只有一条：**这条 lane 之后还有没有人观察"停机时发生了什么"**——没有就用 `stop()`。
+  判据只有一条：**这一次停机之后还有没有人观察"停机时发生了什么"**——没有就用 `stop()`。
   uvicorn 的优雅停机固定 ≥0.2s（`main_loop` 与 `shutdown()` 各一次 `sleep(0.1)`），这笔钱在被测语义里
   一分都不值。要观察停机语义的场景显式 `await probe.shutdown()`。
 

@@ -75,16 +75,24 @@ printf '%s\n' "$ROOT" >"$LOG_DIR/root"
 # 串行执行时总耗时 = 各组之和；三组并行后 ≈ 最慢的一组。
 # 需要排查并发干扰时：WING_TEST_SERIAL=1 make test
 SERIAL="${WING_TEST_SERIAL:-0}"
-rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur
+rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur "$LOG_DIR"/*.ms
 
-# 四组并行 ⇒ 每组都不独占整机：导出这个标记，各组的默认并行度收到"共享"档
-# （见 Makefile 的 PYTEST_WORKERS / TS_WORKERS 与 scripts/test_rust_parallel.py 的
-# `_default_cores`）。不导出时它们各自按独占配——单独跑一组的人应该拿满机器。
-# 串行模式（WING_TEST_SERIAL=1）不导出：那时每组本来就独占。
-SHARED=0
+# ── 编队预算（唯一的定义处）────────────────────────────────────
+# 四组并行 ⇒ 每组都不独占整机。各自按"我独占"配并行度会把机器压到 2~3 倍超订，
+# **每一组都变慢**（本机 12 核实测：默认 30.5s，后三组各收到 1/3 核数后 26.0s）。
+# 所以这里把份额算成**数值**发给各组（`WING_TEST_BUDGET_*`），各组只消费、不再各算一遍
+# ——同一条公式写三遍必然会分叉。probe 不在这里收：它是延迟受限而不是算力受限，
+# 少给 worker 只会让它更慢（见 docs/dev/test-speed.md §1）。
+# 不设这些变量时（单独跑一组）各组按独占配——一个人跑 `make test-rust` 应该拿满机器。
+# 串行模式（WING_TEST_SERIAL=1）也不设：那时每组本来就独占。
+CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+SHARE=$(( CORES / 3 ))
+[ "$SHARE" -gt 4 ] && SHARE=4
+[ "$SHARE" -lt 2 ] && SHARE=2
 if [ "$SERIAL" != "1" ]; then
-  export WING_TEST_SHARED=1
-  SHARED=1
+  export WING_TEST_BUDGET_PYTEST=$SHARE
+  export WING_TEST_BUDGET_RUST=$SHARE
+  export WING_TEST_BUDGET_TS=$SHARE
 fi
 
 # 亚秒级计时只给机器读的报告用（`WING_TEST_REPORT=<path>`，见 scripts/bench_tests.py）：
@@ -92,9 +100,6 @@ fi
 # 人看的 `用时 Ns` 永远是整秒（`$SECONDS`），与今天的输出逐字一致。
 REPORT="${WING_TEST_REPORT:-}"
 now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
-if [ -n "$REPORT" ]; then
-  START_MS=$(now_ms)
-fi
 
 START=$SECONDS
 PIDS=()
@@ -227,18 +232,14 @@ if [ "$TS_SKIPPED" -eq 1 ]; then
   printf '  ⏭️  %-6s  —     TypeScript 组已按 SKIP_TS=%s 跳过（CI 不设该变量：那边照旧强制）\n' "ts" "$SKIP_TS"
 fi
 
-# 机器读的报告（可选）：一次运行的墙钟 + 逐组毫秒耗时 + 统计行。
-# 消费者只有一个——scripts/bench_tests.py（提速的前后对比）；它要的是可解析的
-# 数字，而终端里那几行是给人读的、精度只有整秒。
+# 机器读的报告（可选）：逐组的**毫秒**耗时 + 退出码 + 统计行。
+# 消费者只有一个——scripts/bench_tests.py（提速的前后对比），而它只读这几项；
+# 契约就收窄到被读的部分，别让写下不读的字段自成一套规格（`bench_tests.py --selftest`
+# 钉住形状）。终端里那几行给人读、精度只有整秒，正是这份报告存在的理由。
 write_report() {
   [ -n "$REPORT" ] || return 0
   {
-    printf '{\n  "mode": "%s", "wall_ms": %s, "serial": %s, "shared": %s, "skip_ts": %s,\n' \
-      "$MODE" "$(( $(now_ms) - START_MS ))" \
-      "$([ "$SERIAL" = "1" ] && echo true || echo false)" \
-      "$([ "$SHARED" = "1" ] && echo true || echo false)" \
-      "$([ "$TS_SKIPPED" -eq 1 ] && echo true || echo false)"
-    printf '  "groups": [\n'
+    printf '{\n  "groups": [\n'
     for i in "${!LABELS[@]}"; do
       label="${LABELS[$i]}"
       ms=$(cat "$LOG_DIR/${label}.ms" 2>/dev/null || echo 0)

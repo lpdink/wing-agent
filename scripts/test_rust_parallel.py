@@ -34,6 +34,7 @@ cargo 逐个串行执行测试二进制（只有**单个二进制内部**才多�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -41,14 +42,15 @@ import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 #: 与 ``scripts/collect_output.sh`` 的逃生舱同名：排查并发干扰时四组一起退化成串行。
 SERIAL_ENV = "WING_TEST_SERIAL"
 
-#: 四组并行时的标记（由 `scripts/collect_output.sh` 导出）：并行度按共享整机来配，
-#: 而不是按独占。与 `SERIAL_ENV` 正交——串行逃生舱优先级更高。
-SHARED_ENV = "WING_TEST_SHARED"
+#: 四组并行时这一组分到的核数（由 `scripts/collect_output.sh` 导出）。与 `SERIAL_ENV`
+#: 正交——串行逃生舱优先级更高。
+BUDGET_ENV = "WING_TEST_BUDGET_RUST"
 
 #: 探测用例数时并发起多少个 ``--list``：一次进程启动 + 枚举用例名，16 路足够把整段
 #: 压到 0.1s 量级（再高也快不了，受限于 55 次进程启动的总量）。
@@ -99,16 +101,16 @@ def _serial() -> bool:
 def _default_cores() -> int:
     """这个池子认为自己独占几个核（串行逃生舱下为 1）。``--cores`` 覆盖它。
 
-    ``WING_TEST_SHARED=1``（`scripts/collect_output.sh` 在四组并行时导出）时收到约
-    1/3 核数：四组各自按"我独占整机"配并行度会把机器压到 2~3 倍超订，每一组都变慢
-    （本机 12 核实测：默认 30.5s，后三组各收到 1/3 后 26.0s）。独占时照旧拿满。
+    ``WING_TEST_BUDGET_RUST`` 是 ``scripts/collect_output.sh`` 在四组并行时发的份额
+    （数值，那一处是全仓唯一算它的地方：同一条公式写三遍必然分叉）。没有它就按独占算——
+    单独跑 ``make test-rust`` 的人应该拿满机器。
     """
     if _serial():
         return 1
-    cores = _cpu_count()
-    if os.environ.get(SHARED_ENV, "") not in ("", "0"):
-        return max(2, min(4, cores // 3))
-    return cores
+    budget = os.environ.get(BUDGET_ENV, "").strip()
+    if budget.isdigit() and int(budget) > 0:
+        return int(budget)
+    return _cpu_count()
 
 
 def _threads_for(tests: int, total_tests: int, cores: int) -> int:
@@ -380,6 +382,25 @@ def main(argv: list[str]) -> int:
     return 1
 
 
+@contextlib.contextmanager
+def _env(**values: str | None) -> Iterator[None]:
+    """临时设定 / 清除若干环境变量（`--selftest` 用来把环境变成可控输入）。"""
+    saved = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _run_selftest() -> int:
     """离线自检三条调度规则（与 ``scripts/ci/patch_coverage.py --selftest`` 同一个惯例）。
 
@@ -415,11 +436,32 @@ def _run_selftest() -> int:
         (["--jobs", "8"], None),
         (["--bogus"], None),
     ]:
-        got = _parse_args(argv)
+        # 环境是输入的一部分：把两个开关清掉再断言"没有旋钮时按独占算"，
+        # 否则 `WING_TEST_BUDGET_RUST=4 make test` 里跑 `--selftest` 会假红。
+        with _env(**{SERIAL_ENV: None, BUDGET_ENV: None}):
+            got = _parse_args(argv)
         ok = got == want
         failures += 0 if ok else 1
         print(
             f"[selftest] {'ok  ' if ok else 'FAIL'} parse{argv} = {got}{'' if ok else f' (want {want})'}"
+        )
+
+    for env, want in [
+        ({SERIAL_ENV: "1", BUDGET_ENV: "4"}, 1),
+        ({SERIAL_ENV: None, BUDGET_ENV: "3"}, 3),
+        ({SERIAL_ENV: None, BUDGET_ENV: " 2 "}, 2),
+        ({SERIAL_ENV: None, BUDGET_ENV: ""}, _cpu_count()),
+        ({SERIAL_ENV: None, BUDGET_ENV: "0"}, _cpu_count()),
+        ({SERIAL_ENV: None, BUDGET_ENV: "two"}, _cpu_count()),
+        ({SERIAL_ENV: None, BUDGET_ENV: None}, _cpu_count()),
+    ]:
+        with _env(**env):
+            got = _default_cores()
+        ok = got == want
+        failures += 0 if ok else 1
+        print(
+            f"[selftest] {'ok  ' if ok else 'FAIL'} default_cores({env}) = {got}"
+            f"{'' if ok else f' (want {want})'}"
         )
 
     print(f"[selftest] {'ok' if not failures else f'{failures} failure(s)'}")
