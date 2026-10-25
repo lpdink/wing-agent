@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """``cargo test --workspace`` 的跨二进制并行版本 —— ``make test-rust`` 的实现。
 
-cargo 逐个串行执行测试二进制（只有**单个二进制内部**才多线程），于是 53 个套件的
-耗时直接相加：本机实测 41s 的总和里最长的一个只有 11.5s，其余全是 1~5s 的集成
-测试叠出来的长尾。这里复用 ``cargo test --no-run`` 的构建产物，按并发上限同时跑
-多个二进制，把长尾摊平。
+cargo 逐个串行执行测试二进制（只有**单个二进制内部**才多线程），55 个套件的耗时直接
+相加，而其中一半以上的工作量压在 ``wing`` 的 lib 单测一个套件里。这里复用
+``cargo test --no-run`` 的构建产物，按"这个池子认为自己独占几个核"同时铺开多个二进制，
+把长尾摊平。
 
 **输出契约**（``scripts/collect_output.sh`` 依赖它）：每条 ``test result: …`` 在
 日志里**恰好出现一次**（通过的套件在完成时打印，失败的套件只出现在完整输出里），
 统计行按套件求和。构建失败时 rustc 诊断按 cargo 的渲染形式打印，退出码用 cargo 的。
 
-并行度：``-j/--jobs``（同时几个二进制，默认半个核数）、``-t/--threads``（每个套件
-的 libtest 线程数，默认 4）；``WING_TEST_SERIAL=1`` 与另外两组同义（→ 1/1），显式
-参数优先。
+**并行度**：一个旋钮 ``--cores``（默认 = 核数；``WING_TEST_SERIAL=1`` 与另外两组
+同义 → 1；``--serial`` 同义），分两条规则花掉：
+
+1. 每个二进制的 libtest 线程数 = 它在全局用例数里的**份额** × 核数（下界
+   ``_THIN_FLOOR``、上界核数，见 ``_threads_for``）；
+2. 同时在跑的二进制数 = 核数。
+
+于是**同时在飞的线程数不是 ``--cores``**：``--cores N`` 的线程峰值 ≈ ``N × _THIN_FLOOR``
+再加最重那个套件的余额（12 核上实测 32 条）。这是有意的——集成套件的线程大半时间在等
+子进程 / 端口 / pty，多给它们线程不占 CPU，而 CPU 密集的套件按份额拿线程。
+
+用例数是"这个套件有多重"最便宜的量级代理：55 个二进制并发 ``--list`` 一共 0.14s。
+它的盲区是"条数少但每条重"的套件（会退到下界）——把它们拆成更多用例只在池子给得出
+更多线程时才有用，否则它们就是尾部长。发车顺序取用例数降序（最长先跑）；doctests 是独立的 cargo
+调用，排在第一个提交，不与池子串行。
+
+``--selftest`` 离线自检本脚本的三条规则（不跑测试），``scripts/ci/patch_coverage.py
+--selftest`` 是同一个惯例。
 
 单套件 / 名称过滤请直接用 ``cargo test``：这里只服务"全量跑一遍"。
 """
@@ -26,10 +41,21 @@ import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 #: 与 ``scripts/collect_output.sh`` 的逃生舱同名：排查并发干扰时四组一起退化成串行。
 SERIAL_ENV = "WING_TEST_SERIAL"
+
+#: 探测用例数时并发起多少个 ``--list``：一次进程启动 + 枚举用例名，16 路足够把整段
+#: 压到 0.1s 量级（再高也快不了，受限于 55 次进程启动的总量）。
+_LIST_WORKERS = 16
+
+#: 每个套件至少拿到的 libtest 线程数（见 ``_threads_for``）。
+_THIN_FLOOR = 2
+
+#: ``--list`` 的输出格式：「每条用例一行，已注册的以 ``: test`` 结尾，未注册的以
+#: ``: bench`` 结尾」——只数前者（bench 不参与 ``cargo test`` 的常规运行）。
+_LIST_FORMAT = "terse"
 
 
 @dataclass(frozen=True)
@@ -38,10 +64,13 @@ class Suite:
 
     ``label`` 是日志里的显示名：lib 单测与同名 bin 单测（如 ``wing``）会撞名，
     撞名时补上 target kind，免得失败清单看起来像重复跑了同一套件。
+
+    ``tests`` 是用例数（``--list`` 数出来的）：它同时决定线程数与发车顺序。
     """
 
     label: str
     executable: str
+    tests: int
 
 
 @dataclass(frozen=True)
@@ -50,6 +79,7 @@ class Result:
     code: int
     elapsed: float
     output: str
+    threads: int | None = None
 
 
 def _cpu_count() -> int:
@@ -62,23 +92,61 @@ def _serial() -> bool:
     return bool(value) and value != "0"
 
 
-def _default_jobs() -> int:
-    """同时跑的二进制个数：半个核数（串行逃生舱下为 1）。
+def _default_cores() -> int:
+    """这个池子认为自己独占几个核（串行逃生舱下为 1）。``--cores`` 覆盖它。"""
+    return 1 if _serial() else _cpu_count()
 
-    并行度加在**套件之间**收益最大——套件大多是 e2e（pty / 端口 / 子进程），单个
-    套件内部的测试本来就在等 I/O，多给线程也吃不掉这些等待。
+
+def _threads_for(tests: int, total_tests: int, cores: int) -> int:
+    """这个套件的 libtest 线程数：它在全局用例数里的**份额** × 核数。
+
+    下界 ``_THIN_FLOOR``（核数比它还小时退化为核数），上界核数。在当前用例分布下这个
+    公式实际只产生两档：``wing`` 的 lib 单测（占八成用例、近一半的 CPU）拿到接近满额，
+    其余 54 个套件全部落在下界——"重活按份额拿线程、轻活一两条线程"就是它想表达的东西，
+    不需要一张写死的名单。
+
+    下界为什么是 2 而不是 1：集成套件的一条用例在等子进程/端口/pty 时另一条可以推进，
+    代价是空转（不烧 CPU）。``stream_render_reconcile`` 这种"用例不多但每条重"的套件
+    （11 条用例，1 条线程 8.6s、2 条 5.3s）就靠这条下界活下来。
+
+    为什么不是 ``min(tests, cores)``（"用例数够多就给满线程"）：那样只要用例数 ≥ 核数
+    就给满线程，池子里线程数会到核数的平方量级（12 核上峰值上百条），把机器压实到 3×
+    以上；换来的墙钟收益全被大套件的降速吃掉。
     """
-    return 1 if _serial() else max(2, _cpu_count() // 2)
+    share = cores * tests / max(1, total_tests)
+    return max(min(_THIN_FLOOR, cores), min(cores, round(share)))
 
 
-def _default_threads() -> int:
-    """每个二进制的 libtest 线程数（串行逃生舱下为 1）。
+def _count_tests(suite: Suite) -> int:
+    """``--list --format terse`` 数用例；数不出来（二进制跑不起来）就当 1。
 
-    例外是那个 CPU 大头：`wing` 的 2854 个单测（本机占 41s 总和里的 11.5s 墙钟、
-    ~110s CPU）。给它 2 线程它就独自变成尾部长（实测该套件 31s → 22s、整体
-    36s → 25s，10 核）；空转的小套件不在乎多分线程。
+    探测失败不该让整轮测试挂掉：套件照常跑（用例数按 1 算 → 排到最后、按下界线程），
+    真有问题会在它的输出里现形，而不是在调度阶段变成一条与本套件无关的报错。
     """
-    return 1 if _serial() else 4
+    try:
+        proc = subprocess.run(
+            [suite.executable, "--list", "--format", _LIST_FORMAT],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    if proc.returncode != 0:
+        return 1
+    return max(
+        1, sum(1 for line in proc.stdout.splitlines() if line.endswith(": test"))
+    )
+
+
+def _weigh(suites: list[Suite]) -> list[Suite]:
+    """给每个套件补上用例数（并发 ``--list``，顺序保持）。"""
+    if not suites:
+        return []
+    with ThreadPoolExecutor(max_workers=min(_LIST_WORKERS, len(suites))) as pool:
+        counts = list(pool.map(_count_tests, suites))
+    return [replace(suite, tests=count) for suite, count in zip(suites, counts)]
 
 
 def _label_suites(found: list[tuple[str, str, str]]) -> list[Suite]:
@@ -91,7 +159,7 @@ def _label_suites(found: list[tuple[str, str, str]]) -> list[Suite]:
             continue
         seen.add(executable)
         label = f"{name} ({kind})" if names.count(name) > 1 else name
-        suites.append(Suite(label=label, executable=executable))
+        suites.append(Suite(label=label, executable=executable, tests=0))
     return suites
 
 
@@ -153,6 +221,7 @@ def run_suite(suite: Suite, threads: int) -> Result:
         code=proc.returncode,
         elapsed=time.monotonic() - started,
         output=proc.stdout or "",
+        threads=threads,
     )
 
 
@@ -161,6 +230,10 @@ def run_doctests() -> Result:
 
     只跑**一次**：``cargo test --workspace``（不带 ``--no-run``）本来就会跑 doctests，
     再叠一条 ``--doc`` 等于跑两遍（旧 ``make test-rust`` 的两行命令就是这个形状）。
+
+    它是一条独立的 cargo 调用（自己还要编译 rustdoc 的用例），所以**第一个**提交给
+    池子：它 2~4s，排在 55 个套件后面就是无条件多出来的尾部长。源码有改动时它的编译会
+    与测试池并发（热构建只剩几毫秒），各套件的 elapsed 因此可能含一点编译竞争。
     """
     started = time.monotonic()
     proc = subprocess.run(
@@ -170,7 +243,7 @@ def run_doctests() -> Result:
         text=True,
     )
     return Result(
-        suite=Suite(label="doctests", executable="cargo test --doc"),
+        suite=Suite(label="doctests", executable="cargo test --doc", tests=0),
         code=proc.returncode,
         elapsed=time.monotonic() - started,
         output=proc.stdout or "",
@@ -182,53 +255,58 @@ def _result_lines(output: str) -> list[str]:
     return [line for line in output.splitlines() if line.startswith("test result:")]
 
 
-USAGE = "[--jobs N|--serial] [--threads N]"
+USAGE = "[--cores N|--serial]"
 
 
-def _parse_args(argv: list[str]) -> tuple[int, int] | None:
+def _parse_args(argv: list[str]) -> int | None:
     """解析并行度参数（非法值给 usage，不抛 traceback）。"""
-    jobs = _default_jobs()
-    threads = _default_threads()
+    cores = _default_cores()
     args = list(argv)
     while args:
         head = args.pop(0)
         if head == "--serial":
-            jobs = threads = 1
+            cores = 1
             continue
-        if head in ("--jobs", "-j", "--threads", "-t"):
+        if head == "--cores":
             if not args:
                 return None
             raw = args.pop(0)
             if not raw.isdigit() or int(raw) < 1:
                 return None
-            if head in ("--jobs", "-j"):
-                jobs = int(raw)
-            else:
-                threads = int(raw)
+            cores = int(raw)
             continue
         return None
-    return jobs, threads
+    return cores
 
 
 def main(argv: list[str]) -> int:
-    parsed = _parse_args(argv[1:])
-    if parsed is None:
+    if argv[1:] == ["--selftest"]:
+        return _run_selftest()
+    cores = _parse_args(argv[1:])
+    if cores is None:
         print(f"usage: {argv[0]} {USAGE}", file=sys.stderr)
         return 2
-    jobs, threads = parsed
 
     started = time.monotonic()
     suites, cargo_code = build_suites()
     if cargo_code != 0:
         return cargo_code
+    suites = _weigh(suites)
     build_elapsed = time.monotonic() - started
     if not suites:
         print("no test binaries found", file=sys.stderr)
         return 1
 
+    # 最长先跑：用例数多的套件先发车，短套件填在它的空档里。
+    scheduled = sorted(suites, key=lambda suite: suite.tests, reverse=True)
+    total_tests = sum(suite.tests for suite in scheduled)
+    plan = [
+        (suite, _threads_for(suite.tests, total_tests, cores)) for suite in scheduled
+    ]
+    peak = sum(threads for _, threads in plan[:cores])
     print(
-        f"▶ {len(suites)} test binaries (+doctests), "
-        f"jobs={jobs} threads={threads} (build {build_elapsed:.1f}s)"
+        f"▶ {len(plan)} test binaries (+doctests), {total_tests} listed tests, "
+        f"cores={cores} (≤{peak} threads in flight, build {build_elapsed:.1f}s)"
     )
 
     lock = threading.Lock()
@@ -244,7 +322,7 @@ def main(argv: list[str]) -> int:
                 print(f"❌ suite crashed: {exc}", file=sys.stderr)
                 results.append(
                     Result(
-                        suite=Suite(label="<crashed>", executable=""),
+                        suite=Suite(label="<crashed>", executable="", tests=0),
                         code=1,
                         elapsed=0.0,
                         output=str(exc),
@@ -253,16 +331,21 @@ def main(argv: list[str]) -> int:
                 return
             results.append(result)
             status = "ok" if result.code == 0 else f"FAILED (exit {result.code})"
-            print(f"     Running {result.suite.label} … {result.elapsed:.1f}s {status}")
+            lanes = "cargo" if result.threads is None else f"{result.threads}T"
+            print(
+                f"     Running {result.suite.label} … {result.elapsed:.1f}s "
+                f"[{lanes}] {status}"
+            )
             # 失败套件的汇总行留给下面的完整输出：每条 `test result:` 只能出现一次，
             # 否则 collect_output.sh 的求和会双重计数。
             if result.code == 0:
                 for line in _result_lines(result.output):
                     print(line)
 
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = [pool.submit(run_suite, suite, threads) for suite in suites]
-        futures.append(pool.submit(run_doctests))
+    with ThreadPoolExecutor(max_workers=cores) as pool:
+        # doctests 先发：它是一条独立的 cargo 调用（2~4s），排在队尾就是净多出来的长尾。
+        futures = [pool.submit(run_doctests)]
+        futures += [pool.submit(run_suite, suite, threads) for suite, threads in plan]
         for future in futures:
             future.add_done_callback(report)
 
@@ -281,6 +364,52 @@ def main(argv: list[str]) -> int:
         f"{', '.join(r.suite.label for r in failed)}"
     )
     return 1
+
+
+def _run_selftest() -> int:
+    """离线自检三条调度规则（与 ``scripts/ci/patch_coverage.py --selftest`` 同一个惯例）。
+
+    规则本身是这一层唯一的"逻辑"，而它的效果只能靠跑一整轮真实测试间接观察——预算 1、
+    预算小于下界、``--list`` 失败的二进制都不会在全量跑里现形。
+    """
+    cases = [
+        # (tests, total_tests, cores) -> threads
+        ((1, 3759, 12), 2),
+        ((0, 3759, 12), 2),
+        ((3133, 3759, 12), 10),
+        ((17, 3759, 12), 2),
+        ((3133, 3759, 1), 1),
+        ((3133, 3759, 2), 2),
+        ((1, 0, 12), 12),
+    ]
+    failures = 0
+    for (tests, total_tests, cores), want in cases:
+        got = _threads_for(tests, total_tests, cores)
+        ok = got == want
+        failures += 0 if ok else 1
+        print(
+            f"[selftest] {'ok  ' if ok else 'FAIL'} threads({tests}, {total_tests}, {cores}) = {got}"
+            f"{'' if ok else f' (want {want})'}"
+        )
+
+    for argv, want in [
+        ([], _cpu_count()),
+        (["--serial"], 1),
+        (["--cores", "4"], 4),
+        (["--cores", "0"], None),
+        (["--cores"], None),
+        (["--jobs", "8"], None),
+        (["--bogus"], None),
+    ]:
+        got = _parse_args(argv)
+        ok = got == want
+        failures += 0 if ok else 1
+        print(
+            f"[selftest] {'ok  ' if ok else 'FAIL'} parse{argv} = {got}{'' if ok else f' (want {want})'}"
+        )
+
+    print(f"[selftest] {'ok' if not failures else f'{failures} failure(s)'}")
+    return 0 if not failures else 1
 
 
 if __name__ == "__main__":

@@ -197,10 +197,13 @@ patch-cov-rust:
 
 # Rust 测试：普通构建。本地默认走这条。
 #
-# 跨二进制并行（`scripts/test_rust_parallel.py`）：cargo 逐个跑测试二进制，53 个
-# 套件的耗时直接相加（本机实测 41s，最长的单个只有 11.5s）——脚本复用
-# `--no-run` 的产物自己按并发上限铺开，顺带把 doctests 丢进同一个池子。
-# RUST_TEST_ARGS 覆盖并行度（`-j <二进制数> -t <每套件线程数>`），排查并发干扰时用。
+# 跨二进制并行（`scripts/test_rust_parallel.py`）：cargo 逐个跑测试二进制（只有套件
+# 内部才多线程），55 个套件的耗时直接相加，而其中一半以上的工作量压在 `wing` 的 lib
+# 单测一个套件里。脚本复用 `--no-run` 的产物自己铺开：套件的 libtest 线程数 = 它的
+# 用例份额 × 核数（下界 2），同时在跑的二进制数 = 核数，最长先跑，doctests 与池子并行。
+# RUST_TEST_ARGS 覆盖"本池子认为自己独占几个核"（`--cores <N>`），排查并发干扰时用
+# （或四组一起退化成串行：WING_TEST_SERIAL=1）。规则的离线自检：
+# `uv run python scripts/test_rust_parallel.py --selftest`。
 #
 # 插桩构建会额外产出一整套 target/llvm-cov-target，并且与普通构建的产物互不通用
 # （见下面 test-rust-cov）——本地日常测试不需要为覆盖率付这个代价，覆盖率交给 CI 跑。
