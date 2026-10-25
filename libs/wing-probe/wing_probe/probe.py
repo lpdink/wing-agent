@@ -453,7 +453,7 @@ class Probe:
             resolved = [self.history(session) for session in self.driver.sessions]
         else:
             resolved = [
-                HistoryView(session_dir) for _, session_dir in self._session_dirs()
+                HistoryView(session_dir) for _, session_dir in self._disk_session_dirs()
             ]
         self._checked_session_ids = [view.session_id for view in resolved]
         return run_invariants(
@@ -602,6 +602,19 @@ class Probe:
             target / DUMP_REQUESTS, json.dumps(payload, ensure_ascii=False, indent=2)
         )
         return [DUMP_REQUESTS]
+
+    def _disk_session_dirs(self) -> list[tuple[str, Path]]:
+        """磁盘上的**会话**目录（去掉存储保留的点命名空间：``.media`` / ``.archive``）。
+
+        ``_session_dirs()`` 是「现场真相」（dump 连非会话目录一起收），这里要的是
+        「该跑不变量的会话集」：点前缀是存储的保留命名空间（``store/file.py``），
+        不是会话 id。
+        """
+        return [
+            (session_id, session_dir)
+            for session_id, session_dir in self._session_dirs()
+            if not session_id.startswith(".")
+        ]
 
     def _session_dirs(self) -> list[tuple[str, Path]]:
         """现场里的 session 目录：driver 已挂载的 + 磁盘上存在的（合并去重）。

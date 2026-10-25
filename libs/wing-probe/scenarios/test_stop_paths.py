@@ -1,9 +1,9 @@
 """两条停机路径的**可观察差别**（``stop()`` 快 vs ``shutdown()`` 优雅）。
 
-fixture teardown 用的是快路径（``Probe.stop`` → SIGKILL，不跑 lifespan），理由见
-``ProbeEnv.stop``：teardown 之后没有任何断言，而优雅停机固定要 0.3s。代价是
-「停机时发生的事」默认不会被验证——本文件把两条路径的差别钉在**外部可观察量**上，
-而不是钉在 probe 自己的意图上：
+fixture teardown 用的是快路径（``Probe.stop`` → SIGKILL，不跑 lifespan），判据与
+理由见 ``docs/dev/probe-testing.md``「停机：快路径与优雅路径」。代价是「停机时发生
+的事」默认不会被验证——本文件把两条路径的差别钉在**外部可观察量**上，而不是钉在
+probe 自己的意图上：
 
 - 快路径：退出码是 SIGKILL（``-9``），且 ``core/wing.db-wal`` 留在盘上——lifespan 收尾的
   ``close_database()`` 根本没跑（SQLite 没机会 checkpoint + 删除 WAL）；
@@ -58,6 +58,7 @@ async def test_fast_stop_skips_the_lifespan_teardown(probe: Probe) -> None:
     )
     log = probe.env.log_tail(max_lines=200)
     assert "--- probe: kill -9 gateway ---" in log, log
+    assert "--- probe: gateway exited (code=-9) ---" in log, log
     assert "--- probe: terminate() ---" not in log, log
 
 
@@ -77,6 +78,7 @@ async def test_shutdown_runs_the_lifespan_teardown(probe: Probe) -> None:
     assert process.returncode == SIGTERM_EXIT, process.returncode
     log = probe.env.log_tail(max_lines=200)
     # 自己退干净的证据：没有落到 terminate()/kill() 兜底。
+    assert "--- probe: gateway exited (code=-15) ---" in log, log
     assert "--- probe: terminate() ---" not in log, log
     assert "--- probe: kill() ---" not in log, log
 

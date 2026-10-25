@@ -4,8 +4,8 @@
 名）、失败报告渲染（来源标注 / 转储路径 / 逃生舱理由）、``dump()`` 的产物清单
 （时间线全帧 / 原始帧 / HTTP 留档 / 请求留档 / 落盘拷贝 / 网关日志 / 摘要）。
 
-整机路径（自举 env + 真网关）由 ``scenarios/`` 覆盖；这里只压门面自己的逻辑，
-因此用"构造的 env + 无 driver"来喂输入——dump 与不变量都不依赖网关活着。
+整机路径（自举 env + 真网关）由 ``scenarios/`` 覆盖；这里只压门面自己的逻辑——
+dump 与不变量不依赖网关活着，收尾顺序则用「假 env + 假 driver」把调用次序钉死。
 """
 
 from __future__ import annotations
@@ -200,7 +200,8 @@ def test_check_invariants_falls_back_to_disk_after_the_driver_is_gone(
 
 
 class _FakeDriver:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
         self.closed = False
         self.sessions: list[Any] = []
         self.timeline = None
@@ -209,48 +210,50 @@ class _FakeDriver:
 
     async def close(self) -> None:
         self.closed = True
+        self._events.append("driver.close")
 
 
 class _FakeEnv:
     """只记「哪个停止入口被调用」的 ``ProbeEnv`` 替身（门面接线用）。"""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, events: list[str]) -> None:
         self.root = root
         self.sessions_path = root / "sessions"
         self.artifacts_path = root / "artifacts"
         self.log_path = root / "gateway.log"
-        self.calls: list[str] = []
+        self._events = events
 
     async def stop(self) -> None:
-        self.calls.append("stop")
+        self._events.append("env.stop")
 
     async def shutdown(self) -> None:
-        self.calls.append("shutdown")
+        self._events.append("env.shutdown")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("entry", "expected"),
-    [("stop", "stop"), ("shutdown", "shutdown")],
+    [("stop", "env.stop"), ("shutdown", "env.shutdown")],
 )
 async def test_facade_stop_and_shutdown_close_the_driver_then_pick_the_env_path(
     tmp_path: Path, entry: str, expected: str
 ) -> None:
-    """``Probe.stop`` / ``Probe.shutdown``：先关 driver，再走对应那条 env 路径。
+    """``Probe.stop`` / ``Probe.shutdown``：**先**关 driver，**再**走对应那条 env 路径。
 
-    顺序是契约：driver 不关就停网关会留下对已死进程的 WS 读任务；路径选错则是
-    「想观察停机语义却拿到 SIGKILL」。两者在整机侧都看不出来（现有场景只断言网关侧
-    可观察量），所以在这里用替身钉死。
+    两件事都是契约、且整机侧都看不出来（场景只断言网关侧可观察量）：路径选错 =
+    「想观察停机语义却拿到 SIGKILL」；顺序颠倒 = 网关停掉时 WS 读任务还挂在一个已死的
+    连接上（收尾噪声，且 driver 的关闭发生在 env 之后）。这里用同一张事件表把
+    「哪个先」也钉住——只断言"两边都被调过"的话，把顺序写反也照样绿。
     """
-    env = _FakeEnv(tmp_path / "probe-root")
-    driver = _FakeDriver()
+    events: list[str] = []
+    env = _FakeEnv(tmp_path / "probe-root", events)
+    driver = _FakeDriver(events)
     probe = Probe(env, driver=driver, workspace=tmp_path / "ws")  # ty: ignore[invalid-argument-type]
 
     await getattr(probe, entry)()
 
-    assert driver.closed is True
+    assert events == ["driver.close", expected], events
     assert probe.driver is None
-    assert env.calls == [expected]
 
 
 def test_probe_invariant_error_is_assertion_error() -> None:

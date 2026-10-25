@@ -25,18 +25,18 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `PROBE_WORKERS` | 核数 | 场景并行度（`make test-probe` 的 `-n`）。取法见下面「为什么敢并行」：快停机之后每例只剩一个解释器的固定成本，曲线在核数上就平了；`make test` 里四组共用同一批核，超订只是把自己的时间换成别的组的时间，所以默认不超订。要更大用 `PROBE_WORKERS=<n>` 显式给（每 worker 约 0.18GB）。`WING_TEST_SERIAL=1` 同样归串行 |
+| `PROBE_WORKERS` | 核数 | 场景并行度（`make test-probe` 的 `-n`）。取法见下面「为什么敢并行」：快停机之后每例只剩一个解释器的固定成本，曲线在核数上就平了；`make test` 里四组共用同一批核，超订只是把自己的时间换成别的组的时间，所以默认不超订。要更大用 `PROBE_WORKERS=<n>` 显式给（每 worker 约 0.1~0.2GB）。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
 
 **为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口；并行不改变隔离语义，共享环境才会。但**并行度不超订**，依据（同窗口、本机 12 核、3 轮中位数；窗口内有其它 agent 在跑，绝对值只可同窗口比）：
 
 - 快停机之后每例的固定成本只剩「一个新解释器把网关的导入图跑一遍」（CPU 密集，见「已知取舍」），latency:CPU ≈ 1.1——几乎没有可摊的等待；
-- 独占机器的窗口里 `-n 12 / 16 / 20 / 24 / 28` 的墙钟中位数是 22.8 / 26.1 / 24.6 / 25.1 / 24.0s，**曲线是平的**（轮内极差 6~8s 比配置间差异还大）；
+- 相对干净的窗口（负载 5→24，仍非独占）里 `-n 12 / 16 / 20 / 24 / 28` 的墙钟中位数是 22.8 / 26.1 / 24.6 / 25.1 / 24.0s：配置间中位数只差 1.8~3.3s，而同一配置的轮内极差是 1.1 / 2.3 / 2.6 / 2.3 / **13.5**s ⇒ **这一档的分辨率不足以排序**，没有哪一档稳定优于核数；
 - 自身 CPU 随并行度上升：串行 ~107s → `-n 12` / `-n 20` 各 ~130s（同一窗口测得，含争抢放大）。在 `make test` 里四组共用同一批核，这部分是从 python / rust / ts 的预算里扣的；
 - 重负载窗口里成对交错 `-n 24` vs `-n 12` 是 2 胜 2 负 1 平（不可复算），所以没有把「超订更抗饿」当成结论。
 
-结论：默认取**核数**（`PROBE_WORKERS` 可覆盖）。**残余风险（未单独称量）**：`make test` 那条编队（python 6 + probe 核数 + rust + ts）下的取值没有单独 A/B——若别的组被 probe 饿到，收口侧应显式传 `PROBE_WORKERS`。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+结论：默认取**核数**（`PROBE_WORKERS` 可覆盖）。**残余风险（未单独称量）**：`make test` 那条编队本身已经是 1.5× 以上超订（python 6 + probe 核数 + rust + ts 对 12 核），编队内的取值没有单独 A/B——若别的组被 probe 饿到，收口侧应显式传 `PROBE_WORKERS`；正确的一步是全局配平，不是让 probe 单独超订。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
@@ -325,7 +325,7 @@ docstring：`/api/shutdown` 自己的延迟 + uvicorn 收尾里的两次固定 `
 
 ## 已知取舍（与二批范围）
 
-- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.25s（`start` 0.22s / `stop` 0.003s——teardown 走快停机，见上一节；`start` 里 200ms 上下是一个新解释器把网关的导入图跑一遍，其中 `fastapi` 一项占一半上下），**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.24s（`start` 0.22s + `Driver.connect` 0.013s + `stop` 0.003s——teardown 走快停机，见上一节；`start` 里 200ms 上下是一个新解释器把网关的导入图跑一遍，其中 `fastapi` 一项占一半上下），**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
 - **场景里的等待要花在窗口上，不要花在节奏上**：`delay` 逐帧、`first_delay` 只压首个内容帧，两者混用会互相放大（`scenarios/test_midjoin_sync.py` 曾用 `delay=3.0` 撑窗口，白烧 9s）。写场景时先想清楚"我在等的是什么"，再选旋钮；
 - **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
 - 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 被 SIGKILL（快停机，见「停机：快路径与优雅路径」）；`shutdown()` 那条路径另有 wait → `terminate` → `kill` 的阶梯；
