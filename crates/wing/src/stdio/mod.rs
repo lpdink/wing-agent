@@ -665,7 +665,7 @@ pub async fn run_stdio(args: StdioArgs) -> ExitCode {
 }
 
 /// 一次性事件循环里「拿到一条事件之后」的全部裁决：`Some(code)` = 现在就退
-/// （本轮的终态已经落到 stdout），`None` = 继续等。
+/// （本轮的终态已经收口——协议帧落到 stdout，text 模式只有 stderr），`None` = 继续等。
 ///
 /// 生产循环的循环体就是它；单测按「轮以哪种形状收口 → 退不退」驱动它（帧的形状
 /// 归渲染层测）。
@@ -679,7 +679,7 @@ fn one_shot_step(renderer: &mut StdioRenderer, event: &WingEvent) -> Option<Exit
 
 /// 一次性事件循环（既有语义）：终态帧结束**进程**。
 async fn run_one_shot_loop(gateway: &mut GatewayClient, renderer: &mut StdioRenderer) -> ExitCode {
-    // 终态由 renderer 判定并落到 stdout（三个来源见 `StdioRenderer::handle_event`）。
+    // 终态由 renderer 判定并收口（三个来源见 `StdioRenderer::handle_event`）。
     // 缺了它们这里会永远等下去：WS 不会因为「这一轮没人再发事件」而关闭。
     loop {
         match gateway.recv_event().await {

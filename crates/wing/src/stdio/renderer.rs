@@ -31,11 +31,11 @@ pub struct StdioRenderer {
     /// 本相位里是否出现过「中断收口合成的工具结果」（见
     /// [`INTERRUPTED_TOOL_RESULT`]）——工具阶段被打断的判据之一。
     tool_phase_aborted: bool,
-    /// 自上一次轮边界（`turn_started`）或上一次轮末（`done`）以来，是否已经出过
-    /// 终态帧（`turn_result` / `interrupted` 合成帧 / `done` 补的失败帧）。
+    /// 自上一次**关轮**以来，是否已经出过终态帧（`turn_result` / `interrupted`
+    /// 合成帧 / `done` 补的失败帧）。关轮点是 `turn_started`、`done` 与 `interrupted`
+    /// ——三者不保证成对出现，写入统一走 [`StdioRenderer::reset_terminal_ledger`]。
     ///
-    /// 唯一的写入点是 [`StdioRenderer::handle_event`]；`done` 据此决定补不补帧
-    /// （见 [`StdioRenderer::handle_done`]）。
+    /// `done` 据此决定补不补帧（见 [`StdioRenderer::handle_done`]）。
     terminal_rendered: bool,
     /// 本轮最近一条后端 `Error` 事件原文（随轮边界与轮末清空）。
     ///
@@ -210,8 +210,9 @@ impl StdioRenderer {
     /// 没有对应的转发动作，而 steer 中途重置又会把当前轮的账本清坏
     /// （`aborted_tools` 判据依赖它）。
     ///
-    /// 常驻模式下这是「renderer 以轮为单位重置」的唯一入口；一次性流程里它只是
-    /// 一次幂等清空（构造时账本为空）。
+    /// 常驻模式下这是 `turn_started` 那条轮边界的重置入口（轮末还有 `done` /
+    /// `interrupted` 两个关轮点，见 [`Self::reset_terminal_ledger`]）；一次性流程里
+    /// 它只是一次幂等清空（构造时账本为空）。
     ///
     /// 同时收口在途的流式消息（`--include-partial-messages`）：正常路径上上一轮的
     /// 终态帧已经把它收口（no-op），这里是"帧序异常时也不给消费方留悬空
@@ -1257,32 +1258,30 @@ mod tests {
         }
     }
 
-    /// 被打断的轮次后端既不发 `turn_result` 也不发 `done`：合成帧即轮末，账本随之
-    /// 清零。于是下一轮即便没有 `turn_started`（后端在轮入口之前就崩了），它的
-    /// `done` 也必须补帧——否则常驻多轮会把那一轮静默咽掉。
+    // 账本（「本轮要不要补终态帧」）有三个关轮点，每个都得清一次——后端不保证它们
+    // 成对出现：兜底路径可能没有 `turn_started`，被打断的轮次没有 `done`。每条用例
+    // 都先把账本弄脏（`turn_result`），否则「清没清」观察不到。
+
+    /// 关轮点 ①：`turn_started`（后端给出的轮边界）。
     #[test]
-    fn an_interrupted_turn_closes_the_ledger_for_the_next_one() {
+    fn turn_started_clears_the_ledger() {
         let (mut renderer, buf) = setup(OutputFormat::StreamJson);
 
-        assert!(renderer.handle_event(&interrupted()), "合成帧即轮末");
-        assert_eq!(renderer.exit_code(), std::process::ExitCode::SUCCESS);
+        // 上一轮的终态帧到了、它的 `done` 丢了（帧丢失），紧接着新的一轮开始。
+        assert!(renderer.handle_event(&turn_result("hi", false, "success")));
+        assert!(!renderer.handle_event(&turn_started()), "轮边界不结束轮次");
 
-        // 下一轮：没有 turn_started、没有 turn_result，只有 done → 必须补帧。
-        assert!(renderer.handle_event(&done()), "新一轮的 done 必须收口");
-
+        // 新的一轮没有终态帧 → 它的 `done` 必须补帧（账本已在轮边界清零）。
+        assert!(renderer.handle_event(&done()));
         let frames = output_frames(&buf);
         assert_eq!(frames.len(), 2, "{}", buf.text());
-        assert_eq!(frames[0]["terminal_reason"], "aborted_streaming");
         assert_eq!(frames[1]["subtype"], "error_during_execution");
-        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
     }
 
-    /// 账本以轮为单位，且 `done` 关轮：上一轮收口过不代表下一轮也收口过。
-    /// 下一轮即便**没有** `turn_started`（后端在轮入口之前就崩了：`_run` 的兜底
-    /// except 只发 `error` + `done`），它的 `done` 也必须重新补帧——否则常驻多轮
-    /// 会静默地把那一轮咽掉。
+    /// 关轮点 ②：`done`（轮末信号）。下一轮即便**没有** `turn_started`（后端在轮入口
+    /// 之前就崩了：`_run` 的兜底 except 只发 `error` + `done`），也要重新补帧。
     #[test]
-    fn the_turn_ledger_resets_at_both_turn_boundaries() {
+    fn done_clears_the_ledger() {
         let (mut renderer, buf) = setup(OutputFormat::StreamJson);
 
         // 第一轮：正常收口 + 轮末 done（这一轮关掉）。
@@ -1294,12 +1293,8 @@ mod tests {
         assert!(!renderer.handle_event(&backend_error("second")));
         assert!(renderer.handle_event(&done()));
 
-        // 第三轮：有 turn_started 的常规形状同样从头记账。
-        assert!(!renderer.handle_event(&turn_started()));
-        assert!(renderer.handle_event(&done()));
-
         let frames = output_frames(&buf);
-        assert_eq!(frames.len(), 3, "{}", buf.text());
+        assert_eq!(frames.len(), 2, "{}", buf.text());
         assert_eq!(frames[0]["subtype"], "success");
         assert_eq!(frames[1]["subtype"], "error_during_execution");
         assert_eq!(
@@ -1307,6 +1302,25 @@ mod tests {
             json!(["second"]),
             "后端错误原文进 errors（不跨轮泄漏）"
         );
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
+    }
+
+    /// 关轮点 ③：`interrupted`（后端对被打断的轮次既不发 `turn_result` 也不发
+    /// `done`，合成帧即轮末）。
+    #[test]
+    fn interrupted_clears_the_ledger() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        // 账本是脏的（本轮已出过终态帧）时被打断：合成帧仍是轮末，账本随之清零。
+        assert!(renderer.handle_event(&turn_result("hi", false, "success")));
+        assert!(renderer.handle_event(&interrupted()), "合成帧即轮末");
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::SUCCESS);
+
+        // 下一轮没有 turn_started、只有 done → 必须补帧。
+        assert!(renderer.handle_event(&done()), "新一轮的 done 必须收口");
+        let frames = output_frames(&buf);
+        assert_eq!(frames.len(), 3, "{}", buf.text());
+        assert_eq!(frames[1]["terminal_reason"], "aborted_streaming");
         assert_eq!(frames[2]["subtype"], "error_during_execution");
         assert!(
             frames[2]["errors"][0]

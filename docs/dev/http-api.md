@@ -282,7 +282,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 **网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），客户端重连后应重新 `GET /api/settings/status`，重放一条旧通知只会误导。消费侧**用指纹比对**判断是不是别人改的（自己的保存会更新本地指纹，相同即忽略；不同则提示"配置已被其它客户端修改"并作废本地缓存）。
 
-> `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（TUI / ACP 据此终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。stdio 前端例外：它把 `error` 只当原因文本，轮末由 `done` 收口（见 [architecture.md](architecture.md) 的 stdio「终态帧」一节）。
+> `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（TUI / ACP 据此终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。stdio 前端例外：它把 `error` 只当原因文本，轮末由 `turn_result` / 合成终态帧 / `done` 收口（见 [architecture.md](architecture.md) 的 stdio「终态帧」一节）。
 
 ## 慢消费者回收（写超时）
 
