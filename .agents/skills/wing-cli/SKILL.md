@@ -78,6 +78,8 @@ tags: [cli, orchestration, reference, wake, headless]
 | `wing wake (--in 30m \| --at "2026-03-01 09:00" \| --every 30m \| --daily 07:00) -p TEXT [--times N] [--to SID]` | 定时（心跳）唤醒 |
 | `wing wake --list [--all]` / `wing wake --cancel <id>` | 同 `wing watch --list` / `--cancel`：**全部**触发器，两个子命令等价 |
 
+**等子会话只有两条路：停下等唤醒（`wing run` 默认登记 notify，派完结束本轮即可），或 `wing wait`；禁止用 `sleep` 等会话**——`sleep 600; wing ps …` 把唤醒消息压在工具结果边界里，睡多久就白等多久。两条路也各有前提（notify 是否在武装 / 派发时要不要 `--no-notify`、`wing wait` 不放行提问中的会话）：见 [wing-scheduler §7.1](../wing-scheduler/SKILL.md)；timeout 怎么给见 §5 坑 1。
+
 `wing watch` 的缺省语义是**叫一次就结束**：一条 `done` 信封送达后触发器终结（配额 1）；`ask` 唤醒**不消耗**配额，所以只盯提问时等于常驻订阅。要盯多次收口用 `--times N`。
 
 同一 `(source, target, on_events)` 再登记一次是**刷新**那一条订阅（不新增、不产生第二条投递路径）：`--times` / `-p` 不给就保持原值——所以 `wing run -r` 的隐式登记既不会把 `--times 3` 剩下的配额降成 1，也不会清掉自定义正文（细节见 [`docs/dev/wake.md`](../../../docs/dev/wake.md) §1）。
@@ -216,7 +218,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 
 ## 5. 常见坑
 
-1. **Bash 工具的 30s 默认 timeout 会杀掉 `wing wait`**：会话不受影响，但你白等一轮。显式给 `--timeout` 与工具 timeout 同一量级（如 `--timeout 3600` + 工具 3700）。更省的办法是别 wait：用 `wing run` 的 notify 或 `wing watch`。
+1. **Bash 工具的 30s 默认 timeout 会杀掉 `wing wait`**：会话不受影响，但你白等一轮。显式给 `--timeout`，并把 Bash 工具 timeout 设得比它大（如 `--timeout 3400` + 工具 3700）。更省的办法是别 wait：用 `wing run` 的 notify 或 `wing watch`。**但不要用 `sleep` 等会话**——唤醒被压在工具结果边界里，睡多久就白等多久。
 2. **忘了 `cd`**：session 的 workspace 就是 `wing run` 进程的 cwd。派发前 `cd <目标目录>`，事后用 `wing info <sid> --json | jq .workdir` 兜底核对。
 3. **`-r` 忽略创建期旗标**：`--tools` / `-m` / `--agent` / `--effort` / `--system-prompt` / `--append-system-prompt` / `--max-turns` 在 resume 路径上都不生效（工具集、模型、模板沿用原会话）。换模板要 `wing update <sid> --agent <name>`。
 4. **`wing resume` ≠ `wing run -r`**：前者只是把逐出会话读回内存，不发消息；续跑用后者。
@@ -227,3 +229,4 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 9. **归档会取消触发器**：source 或 target 进归档区 → 相关触发器 `canceled`；长期订阅别挂在会被自动归档（默认 90 天）的会话上，给它们打 `pin` 标签可豁免自动归档。
 10. **stdio（`wing -p`）没有 notify**：它是阻塞式前端，调用方本来就在等。
 11. **`--list` 不按 kind 过滤**：`wing watch --list` 也会列出 timer 触发器（反之亦然），看 `KIND` 列区分；`--cancel` 同理只认 id。
+12. **`wing wait` 不会因为「子会话提问」而返回**：它只认 `idle` / `inactive`，而提问中的会话状态是 `waiting`（优先级高于 `working`）——长 `--timeout` 会变成盲等，ask 唤醒在目标忙碌时也只进 inbox。超时后先 `wing asks [--wait]` 看有没有在挂的提问，答完再重 wait（wait 幂等）。
