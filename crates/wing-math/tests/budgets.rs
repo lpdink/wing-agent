@@ -201,25 +201,39 @@ fn best_of(samples: usize, mut run: impl FnMut()) -> Duration {
         .expect("at least one sample")
 }
 
+/// 采样 `samples` 次、每次里**背靠背**跑两个输入，返回两者之和最小的那一对。
+///
+/// 比分别 [`best_of`] 更稳：机器的忙碌是成阵的，两次独立采样可能一个落在安静段、
+/// 一个落在忙碌段，于是"大输入比小输入慢几倍"只反映谁赶上了什么。成对之后两个值
+/// 共享同一段时间，最小那一对是**两侧都没被打断**的那次；而各取最小也可能是不同
+/// 时段的两条（这正是本套件的比值断言在并行负载下假红的来源）。
+fn best_pair_of(samples: usize, small: &str, large: &str) -> (Duration, Duration) {
+    (0..samples)
+        .map(|_| {
+            let start = Instant::now();
+            let _ = render_block(small);
+            let middle = Instant::now();
+            let _ = render_block(large);
+            let end = Instant::now();
+            (middle - start, end - middle)
+        })
+        .min_by_key(|(fast, slow)| *fast + *slow)
+        .expect("at least one sample")
+}
+
 #[test]
 fn long_flat_formulas_are_not_quadratic() {
     // `layout_seq` 原来是 O(n²)（2000 项 release 282 ms）。
     // 这里给一个宽松的上界（真实值远低于它），防止二次方路径回归。
     let src = "x + ".repeat(1000) + "y"; // 2001 项，4005 字符
     assert!(render_block(&src).unwrap().width() > 4000);
-    let elapsed = best_of(3, || {
-        let _ = render_block(&src);
-    });
+    let doubled_src = "x + ".repeat(2000) + "y";
+    let (elapsed, doubled) = best_pair_of(7, &src, &doubled_src);
     assert!(
         elapsed < Duration::from_millis(300),
         "2000-term formula took {elapsed:?} (quadratic regression?)"
     );
-
     // 项数翻倍，耗时不应翻两倍以上（二次方会 ~4×）
-    let src2 = "x + ".repeat(2000) + "y";
-    let doubled = best_of(3, || {
-        let _ = render_block(&src2);
-    });
     assert!(
         doubled < elapsed * 4,
         "doubling terms scaled {elapsed:?} -> {doubled:?} (quadratic?)"
