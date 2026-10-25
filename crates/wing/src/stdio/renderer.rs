@@ -219,10 +219,24 @@ impl StdioRenderer {
     pub fn begin_turn(&mut self) {
         self.pending_tools = 0;
         self.tool_phase_aborted = false;
-        self.terminal_rendered = false;
-        self.last_error = None;
+        self.reset_terminal_ledger();
         let leaked = self.stream.close_message(None, None);
         self.emit_stream_events(leaked);
+    }
+
+    /// 终态账本归零（「这一轮要不要补终态帧」的账）：轮边界与轮末共用一份。
+    ///
+    /// 只在**关轮**时清：`turn_started`（后端给出的轮边界）、`done`（轮末信号）、
+    /// `interrupted`（后端对被打断的轮次既不发 `turn_result` 也不发 `done`，合成帧
+    /// 即轮末）。三者都不保证成对出现——兜底路径可能没有 `turn_started`，被打断的
+    /// 轮次没有 `done`——所以每个关轮点都要各自清一次。
+    ///
+    /// `pending_tools` / `tool_phase_aborted` 不在这里：它们是**相位**账（只喂
+    /// `terminal_reason` 的 aborted_tools / aborted_streaming 判据），由 `begin_turn`
+    /// 与每条 assistant 快照各自维护，与「这一轮有没有终态帧」无关。
+    fn reset_terminal_ledger(&mut self) {
+        self.terminal_rendered = false;
+        self.last_error = None;
     }
 
     /// Handle an event.
@@ -248,27 +262,25 @@ impl StdioRenderer {
         // 轮末信号：后端异常收口时本轮可能一个终态帧都没有（见 `handle_done`）。
         if matches!(event, WingEvent::Done { .. }) {
             let ended = self.handle_done(event);
-            // `done` 关掉这一轮：账本随轮清零（后端在 `turn_started` **之前**就
-            // 崩了的路径没有轮边界事件，下一个轮也要能从零记账）。
-            self.terminal_rendered = false;
-            self.last_error = None;
+            self.reset_terminal_ledger();
             return ended;
         }
-        // 被打断的轮次后端**不发** `turn_result`（半截内容作为 partial
-        // assistant 提交进链）：前端在这里补一条终态帧，否则
-        // 编排器永远等不到终态——SDK 的 `streamInput` 在 canUseTool/hooks 存在时
-        // 以「首个 result」门住 `endInput()`，缺了这条帧 stdin 永不关闭、
-        // CLI 进程与 WS 订阅一起滞留。
-        let ended = if matches!(event, WingEvent::Interrupted { .. }) {
-            self.handle_interrupted(event)
-        } else {
-            match &self.format {
-                OutputFormat::Text => self.handle_text(event),
-                OutputFormat::Json => self.handle_json(event),
-                OutputFormat::StreamJson => self.handle_stream_json(event),
-            }
+        // 被打断的轮次后端**不发** `turn_result`、也**不发** `done`（半截内容作为
+        // partial assistant 提交进链）：前端在这里补一条终态帧，否则编排器永远
+        // 等不到终态——SDK 的 `streamInput` 在 canUseTool/hooks 存在时以「首个
+        // result」门住 `endInput()`，缺了这条帧 stdin 永不关闭、CLI 进程与 WS
+        // 订阅一起滞留。合成帧即轮末（后端不会再来一条 `done`）。
+        if matches!(event, WingEvent::Interrupted { .. }) {
+            let ended = self.handle_interrupted(event);
+            self.reset_terminal_ledger();
+            return ended;
+        }
+        let ended = match &self.format {
+            OutputFormat::Text => self.handle_text(event),
+            OutputFormat::Json => self.handle_json(event),
+            OutputFormat::StreamJson => self.handle_stream_json(event),
         };
-        // 终态帧只在这里记账（三格式的 `turn_result` 与打断合成帧都经此处）。
+        // `turn_result`（三格式）的终态帧只在这里记账；它的轮末是紧随其后的 `done`。
         if ended {
             self.terminal_rendered = true;
         }
@@ -643,23 +655,40 @@ impl StdioRenderer {
         // text 模式没有"最终文本"可打；中止不是错误，stdout 保持干净（与
         // 错误轮的 text 行为一致：错误文本走 stderr）。
         if !matches!(self.format, OutputFormat::Text) {
-            // 打断事件不带链 uuid（它不是链上事实）：这里造一个稳定可追溯的帧 id，
-            // 供消费方去重/关联。
-            let msg = self.result_frame(
-                crate::protocol::generate_request_id(),
-                ResultFrameArgs {
-                    subtype: "error_during_execution".into(),
-                    is_error: true,
-                    terminal_reason: Some(terminal_reason.to_string()),
-                    errors: vec![INTERRUPTED_BY_USER.to_string()],
-                    session_id: meta.session_id.clone(),
-                    ..Default::default()
-                },
+            self.emit_synthesized_error(
+                &[INTERRUPTED_BY_USER.to_string()],
+                Some(terminal_reason.to_string()),
+                meta.session_id.clone(),
             );
-            self.emit_ndjson(&msg);
         }
         self.exit_code = std::process::ExitCode::SUCCESS;
         true
+    }
+
+    /// 前端补的终态帧（`SDKResultError` 形状）：打断合成帧与「本轮没有终态帧」的
+    /// 补帧共用这一处——`subtype` / `is_error` / `errors` 非空纪律 / 帧 id 只在这里
+    /// 定义一次。
+    ///
+    /// 事件不带链 uuid（两者都不是链上事实）：帧 id 现铸一个稳定可追溯的值，供
+    /// 消费方去重 / 关联。
+    fn emit_synthesized_error(
+        &mut self,
+        errors: &[String],
+        terminal_reason: Option<String>,
+        session_id: Option<String>,
+    ) {
+        let msg = self.result_frame(
+            crate::protocol::generate_request_id(),
+            ResultFrameArgs {
+                subtype: "error_during_execution".into(),
+                is_error: true,
+                terminal_reason,
+                errors: error_texts(true, errors),
+                session_id,
+                ..Default::default()
+            },
+        );
+        self.emit_ndjson(&msg);
     }
 
     // ============================================================
@@ -705,18 +734,7 @@ impl StdioRenderer {
         if matches!(self.format, OutputFormat::Text) {
             eprintln!("Error: {}", error_line_text(None, &errors));
         } else {
-            // 事件不带链 uuid（它不是链上事实）：造一个稳定可追溯的帧 id。
-            let msg = self.result_frame(
-                crate::protocol::generate_request_id(),
-                ResultFrameArgs {
-                    subtype: "error_during_execution".into(),
-                    is_error: true,
-                    errors,
-                    session_id: meta.session_id.clone(),
-                    ..Default::default()
-                },
-            );
-            self.emit_ndjson(&msg);
+            self.emit_synthesized_error(&errors, None, meta.session_id.clone());
         }
         self.exit_code = std::process::ExitCode::FAILURE;
         true
@@ -1239,17 +1257,24 @@ mod tests {
         }
     }
 
-    /// 被打断的轮次同理：合成终态帧之后的 `done` 只是把这一轮关掉（不再报
-    /// 「本轮结束」），退出码仍是 SUCCESS（中止是编排器的主动动作）。
+    /// 被打断的轮次后端既不发 `turn_result` 也不发 `done`：合成帧即轮末，账本随之
+    /// 清零。于是下一轮即便没有 `turn_started`（后端在轮入口之前就崩了），它的
+    /// `done` 也必须补帧——否则常驻多轮会把那一轮静默咽掉。
     #[test]
-    fn done_after_an_interrupted_turn_closes_without_a_second_terminal() {
+    fn an_interrupted_turn_closes_the_ledger_for_the_next_one() {
         let (mut renderer, buf) = setup(OutputFormat::StreamJson);
 
-        assert!(renderer.handle_event(&interrupted()));
-        let before = buf.text();
-        assert!(!renderer.handle_event(&done()));
-        assert_eq!(buf.text(), before, "不得产出第二条终态帧");
+        assert!(renderer.handle_event(&interrupted()), "合成帧即轮末");
         assert_eq!(renderer.exit_code(), std::process::ExitCode::SUCCESS);
+
+        // 下一轮：没有 turn_started、没有 turn_result，只有 done → 必须补帧。
+        assert!(renderer.handle_event(&done()), "新一轮的 done 必须收口");
+
+        let frames = output_frames(&buf);
+        assert_eq!(frames.len(), 2, "{}", buf.text());
+        assert_eq!(frames[0]["terminal_reason"], "aborted_streaming");
+        assert_eq!(frames[1]["subtype"], "error_during_execution");
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
     }
 
     /// 账本以轮为单位，且 `done` 关轮：上一轮收口过不代表下一轮也收口过。
@@ -1595,6 +1620,53 @@ mod tests {
         let out = output_frames(&buf);
         let last = out.last().unwrap();
         assert_eq!(last["type"], "result", "终态帧仍是最后一条: {last}");
+    }
+
+    /// 兜底轮（`done` 之前一个终态帧都没有）同样可能落在流式中途：补帧之前先
+    /// 收口，消费方不得拿到悬空的 `message_start`。
+    #[test]
+    fn done_closes_an_open_stream_message_first() {
+        let (mut renderer, buf) = setup_streaming();
+
+        assert!(!renderer.handle_event(&backend_error("boom")));
+        assert!(!renderer.handle_event(&text_delta("cut")));
+        assert!(renderer.handle_event(&done()));
+
+        assert_eq!(
+            stream_event_types(&buf),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ],
+            "{}",
+            buf.text()
+        );
+        let out = output_frames(&buf);
+        let last = out.last().unwrap();
+        assert_eq!(last["type"], "result", "终态帧仍是最后一条: {last}");
+        assert_eq!(last["subtype"], "error_during_execution");
+    }
+
+    /// 合成帧的 `session_id` 取事件的 `meta`（与打断合成帧同一口径），不是渲染器
+    /// 自己那份——两者在多会话客户端里可能不同。
+    #[test]
+    fn the_synthesized_frame_carries_the_events_session_id() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        let done_elsewhere = decode(json!({
+            "type": "done",
+            "session_id": "sess-other",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req-1",
+        }));
+        assert!(renderer.handle_event(&done_elsewhere));
+
+        let parsed: serde_json::Value = serde_json::from_str(&buf.text()).unwrap();
+        assert_eq!(parsed["session_id"], "sess-other");
     }
 
     /// 打断落在流式中途：先收口再发合成终态帧（终态帧纪律不变，

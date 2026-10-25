@@ -212,7 +212,8 @@ crates/wing/src/
 │   ├── renderer.rs                  text / json / stream-json 输出渲染
 │   ├── stdout.rs                    stdout 串行化写口（renderer 与 stdin pump 共享）
 │   ├── stream.rs                    `--include-partial-messages`：三路 delta → Anthropic SSE `stream_event`
-│   └── stdin_handler.rs             常驻 stdin pump（initialize / interrupt 应答 + 收尾）
+│   ├── stdin_handler.rs             常驻 stdin pump（initialize / interrupt 应答 + 收尾）
+│   └── test_support.rs              单测共用的事件 fixture 与渲染器装配（`#[cfg(test)]`，两个测试模块共用）
 ├── gateway/                         WS 客户端与分片重组
 │   ├── client.rs                    GatewayClient — WS 连接 + 读写任务
 │   └── chunk.rs                     `_chunk` 信封在读任务内重组（保序 / 有界 / 安全失败；应用层零感知）

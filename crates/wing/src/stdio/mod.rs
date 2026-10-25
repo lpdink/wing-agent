@@ -667,8 +667,8 @@ pub async fn run_stdio(args: StdioArgs) -> ExitCode {
 /// 一次性事件循环里「拿到一条事件之后」的全部裁决：`Some(code)` = 现在就退
 /// （本轮的终态已经落到 stdout），`None` = 继续等。
 ///
-/// 生产循环的循环体就是它；单测直接驱动它——`None`（「继续等」）只有在这一层
-/// 能表达，帧的形状归渲染层测。
+/// 生产循环的循环体就是它；单测按「轮以哪种形状收口 → 退不退」驱动它（帧的形状
+/// 归渲染层测）。
 fn one_shot_step(renderer: &mut StdioRenderer, event: &WingEvent) -> Option<ExitCode> {
     if renderer.handle_event(event) {
         Some(renderer.exit_code())
@@ -1657,8 +1657,58 @@ mod tests {
         events.iter().find_map(|e| one_shot_step(renderer, e))
     }
 
-    /// 本轮没有终态帧就收到 `done`（issue #246 的收口形状）→ 一次性流程必须退出。
-    /// 帧形状归渲染层测（`renderer::tests`），这里只钉驱动侧的裁决。
+    /// 每一种「轮收口」形状 → 一次性流程的裁决。帧的形状与退出码细节归渲染层的
+    /// 用例（`renderer::tests`）；这里只钉「会不会退出」以及「哪一轮收口算了数」。
+    #[test]
+    fn one_shot_terminates_on_every_turn_closing_shape() {
+        let cases: [(&str, Vec<WingEvent>, Option<ExitCode>); 5] = [
+            (
+                "turn_result(success) → done",
+                vec![
+                    turn_started(),
+                    assistant("hi"),
+                    turn_result("hi", false, "success"),
+                    done(),
+                ],
+                Some(ExitCode::SUCCESS),
+            ),
+            (
+                "turn_result(error)",
+                vec![
+                    turn_started(),
+                    turn_result("", true, "error_during_execution"),
+                ],
+                Some(ExitCode::FAILURE),
+            ),
+            (
+                "interrupted（后端不发 turn_result / done）",
+                vec![turn_started(), assistant("hi"), interrupted()],
+                Some(ExitCode::SUCCESS),
+            ),
+            (
+                "error + done（没有 turn_result，issue #246）",
+                vec![turn_started(), backend_error("boom"), done()],
+                Some(ExitCode::FAILURE),
+            ),
+            (
+                "只有 error（没有轮末信号）",
+                vec![turn_started(), backend_error("boom")],
+                None,
+            ),
+        ];
+
+        for (shape, events, expected) in cases {
+            let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
+            assert_eq!(
+                scripted_one_shot(&mut renderer, &events),
+                expected,
+                "{shape}"
+            );
+        }
+    }
+
+    /// issue #246 的形状 × 三个输出格式：`done` 必须收口（text 模式的错误文本走
+    /// stderr，stdout 保持干净）。
     #[test]
     fn one_shot_exits_when_the_turn_ends_with_error_and_done() {
         let events = [turn_started(), backend_error("boom"), done()];
@@ -1668,69 +1718,18 @@ mod tests {
             OutputFormat::Json,
             OutputFormat::StreamJson,
         ] {
-            let (mut renderer, _buf) = build_renderer(format.clone());
+            let (mut renderer, buf) = build_renderer(format.clone());
             assert_eq!(
                 scripted_one_shot(&mut renderer, &events),
                 Some(ExitCode::FAILURE),
                 "{format:?}: 本轮没有终态帧 → done 必须收口"
             );
+            if format == OutputFormat::Text {
+                assert_eq!(buf.text(), "", "text 模式：stdout 保持干净");
+            } else {
+                assert_eq!(buf.text().lines().count(), 1, "{format:?}: {}", buf.text());
+            }
         }
-    }
-
-    /// 成功轮：退出点是 `turn_result`，`done` 根本不会被消费（多出的那条帧就是
-    /// 行为变化）。
-    #[test]
-    fn one_shot_exits_at_turn_result_on_the_success_path() {
-        let (mut renderer, buf) = build_renderer(OutputFormat::StreamJson);
-
-        assert_eq!(
-            scripted_one_shot(
-                &mut renderer,
-                &[
-                    turn_started(),
-                    assistant("hi"),
-                    turn_result("hi", false, "success"),
-                    done(),
-                ],
-            ),
-            Some(ExitCode::SUCCESS)
-        );
-        assert_eq!(
-            buf.text().lines().count(),
-            2,
-            "assistant + result，`done` 不再补帧：{}",
-            buf.text()
-        );
-    }
-
-    /// 被打断的轮：合成终态帧收口，退出码仍是 SUCCESS（中止是编排器的主动动作）。
-    #[test]
-    fn one_shot_exits_at_the_interrupted_frame_with_success() {
-        let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
-
-        assert_eq!(
-            scripted_one_shot(
-                &mut renderer,
-                &[turn_started(), assistant("hi"), interrupted()]
-            ),
-            Some(ExitCode::SUCCESS)
-        );
-    }
-
-    /// `error` 不是轮末信号：只有它（后面没有 `turn_result`、没有 `done`）时流程
-    /// 继续等——这正是「`done` 缺席就永远等下去」的那条边，也只有这一层能表达。
-    #[test]
-    fn one_shot_keeps_waiting_on_an_error_that_does_not_end_the_turn() {
-        let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
-
-        assert_eq!(
-            scripted_one_shot(
-                &mut renderer,
-                &[turn_started(), assistant("hi"), backend_error("boom")],
-            ),
-            None,
-            "事件流耗尽 = 生产上永远等下去"
-        );
     }
 
     /// 常驻循环的退出裁决（`renderer.handle_event` + `ExitPolicy`，就是
