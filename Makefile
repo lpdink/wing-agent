@@ -107,13 +107,20 @@ test-python-html:
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
 #
-# 并行度：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
-# 按核数铺开是安全的——实测全量 39s → 26s（10 核，worker 8 → 12；再往上到 16 只
-# 剩 1s，拐点在核数附近）。默认 min(12, 核数)：CI 的 4 核 runner 取 4。
-# PROBE_WORKERS 可覆盖；WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——
-# 只关组间并行等于没关。解析成 1 时不传 -n：逃生舱要的是原样的串行，不是
-# "xdist 里只开一个 worker"。
-PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 12 ]; then echo 12; else echo $$n; fi)
+# 并行度：按核数取（`getconf _NPROCESSORS_ONLN`）。场景之间零共享（各自 tmp +
+# 各自网关子进程 + 各自假 Provider），铺开是安全的；但快停机之后每例只剩一次网关
+# 启动（~0.22s：新解释器把导入图跑一遍，CPU 密集），latency:CPU ≈ 1.1，超订换
+# 不到多少墙钟：安静窗口（负载 4→13，3 轮）里 `-n 12/20/24` 的墙钟中位数是 22.1/
+# 20.4/20.2s，而 CPU 中位数是 104/123/129s ⇒ 2× 核数只换来 ~8% 墙钟、付 ~20% CPU。
+# `make test` 里四组共用同一批核，probe 多拿线程只是把自己的时间换成别的组的时间
+# （probe 已是尾组），所以默认取 CPU 最省的核数；要那 8% 就显式 `PROBE_WORKERS=20`。
+# 重负载窗口（负载 26→50）里这个差距不可复算（成对交错 2 胜 2 负 1 平），别把超订
+# 当结论。
+# 每 worker 约 0.1~0.2GB（pytest worker ~120MB + 网关 RSS 45~72MB），要更大/更小
+# 用 PROBE_WORKERS 覆盖。
+# WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——只关组间并行等于没关。
+# 解析成 1 时不传 -n：逃生舱要的是原样的串行，不是"xdist 里只开一个 worker"。
+PROBE_WORKERS ?= $(shell if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; else getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4; fi)
 PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,-n $(PROBE_WORKERS))
 
 test-probe:

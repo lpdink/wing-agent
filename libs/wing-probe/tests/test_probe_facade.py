@@ -1,11 +1,12 @@
 """``Probe`` 门面的纯逻辑自测。
 
 覆盖：逃生舱的理由校验与禁用语义、三个内置不变量的聚合（含 session id 与不变量
-名）、失败报告渲染（来源标注 / 转储路径 / 逃生舱理由）、``dump()`` 的产物清单
-（时间线全帧 / 原始帧 / HTTP 留档 / 请求留档 / 落盘拷贝 / 网关日志 / 摘要）。
+名）、不变量在 driver 关掉之后按磁盘兜底、失败报告渲染（来源标注 / 转储路径 /
+逃生舱理由）、``dump()`` 的产物清单（时间线全帧 / 原始帧 / HTTP 留档 / 请求留档 /
+落盘拷贝 / 网关日志 / 摘要）、两条收尾路径的调用次序与选路。
 
-整机路径（自举 env + 真网关）由 ``scenarios/`` 覆盖；这里只压门面自己的逻辑，
-因此用"构造的 env + 无 driver"来喂输入——dump 与不变量都不依赖网关活着。
+整机路径（自举 env + 真网关）由 ``scenarios/`` 覆盖；这里只压门面自己的逻辑——
+dump 与不变量不依赖网关活着，收尾顺序则用「假 env + 假 driver」把调用次序钉死。
 """
 
 from __future__ import annotations
@@ -152,7 +153,7 @@ def test_invariant_report_carries_source_reason_and_dump(tmp_path: Path) -> None
 
 
 def test_check_invariants_without_driver_is_empty(tmp_path: Path) -> None:
-    """未连接 driver 时没有可检查的 session（teardown 之后调用也安全）。"""
+    """磁盘上也没有 session 时无东西可查（teardown 之后调用也安全）。"""
     probe = build_probe(tmp_path)
 
     assert probe.check_invariants() == []
@@ -161,6 +162,118 @@ def test_check_invariants_without_driver_is_empty(tmp_path: Path) -> None:
     )
     with pytest.raises(ProbeError):
         probe.sessions
+
+
+def test_check_invariants_falls_back_to_disk_after_the_driver_is_gone(
+    tmp_path: Path,
+) -> None:
+    """driver 不在（``shutdown()`` / ``stop()`` 之后）⇒ 按磁盘 session 兜底。
+
+    场景体里调 ``probe.shutdown()`` 是观察停机语义的推荐写法，它先关 driver；若此时
+    把「没有 driver」当成「没有 session」，四条不变量对该场景创建的会话一条都不跑、
+    还不报错——那就成了免理由的逃生舱。这里用一条坏 history 证明兜底真的在查。
+    """
+    probe = build_probe(tmp_path)
+    session_dir = probe.env.sessions_path / SESSION_ID
+    write_history(
+        session_dir,
+        [
+            {"uuid": "u1", "role": "user", "content": "hi"},
+            {
+                "uuid": "e1",
+                "parent_uuid": "u1",
+                "role": "event",
+                "type": "text",
+                "content": "delta",
+            },
+        ],
+    )
+
+    problems = probe.check_invariants()
+
+    assert probe.driver is None
+    assert problems, "无 driver 时必须按磁盘兜底，而不是静默返回空清单"
+    assert problems[0].startswith("[no_transient_records]"), problems
+    assert SESSION_ID in problems[0]
+
+
+def test_check_invariants_disk_fallback_skips_store_namespaces(tmp_path: Path) -> None:
+    """磁盘兜底只查会话目录：``.media`` / ``.archive`` 是存储保留的点命名空间。
+
+    它们与 session 目录同级（``store/file.py``），混进来会让报告里的 session 清单多出
+    假条目（``.archive`` 里还有归档会话的目录层级）。这里放一个点目录干扰项，确认
+    「被检查的 session id」里没有它。
+    """
+    probe = build_probe(tmp_path)
+    write_history(
+        probe.env.sessions_path / SESSION_ID,
+        [{"uuid": "u1", "role": "user", "content": "hi"}],
+    )
+    (probe.env.sessions_path / ".media" / "ab").mkdir(parents=True)
+    (probe.env.sessions_path / ".archive" / "old-session").mkdir(parents=True)
+
+    assert probe.check_invariants() == []
+    assert probe._checked_session_ids == [SESSION_ID]
+
+
+# ── 两条收尾路径（门面层的 driver 顺序） ──────────────────────
+
+
+class _FakeDriver:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.closed = False
+        self.sessions: list[Any] = []
+        self.timeline = None
+        self.http = None
+        self.frames = None
+
+    async def close(self) -> None:
+        self.closed = True
+        self._events.append("driver.close")
+
+
+class _FakeEnv:
+    """只记「哪个停止入口被调用」的 ``ProbeEnv`` 替身（门面接线用）。"""
+
+    def __init__(self, root: Path, events: list[str]) -> None:
+        self.root = root
+        self.sessions_path = root / "sessions"
+        self.artifacts_path = root / "artifacts"
+        self.log_path = root / "gateway.log"
+        self._events = events
+
+    async def stop(self) -> None:
+        self._events.append("env.stop")
+
+    async def shutdown(self) -> None:
+        self._events.append("env.shutdown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [("stop", "env.stop"), ("shutdown", "env.shutdown")],
+)
+async def test_facade_stop_and_shutdown_close_the_driver_then_pick_the_env_path(
+    tmp_path: Path, entry: str, expected: str
+) -> None:
+    """``Probe.stop`` / ``Probe.shutdown``：**先**关 driver，**再**走对应那条 env 路径。
+
+    两件事都是契约、且整机侧都看不出来（场景只断言网关侧可观察量）：路径选错 =
+    「想观察停机语义却拿到 SIGKILL」；顺序颠倒 = 网关停掉时 WS 读任务还挂在一个已死的
+    连接上（收尾噪声，且 driver 的关闭发生在 env 之后）。这里用同一张事件表把
+    「哪个先」也钉住——只断言"两边都被调过"的话，把顺序写反也照样绿。
+    """
+    events: list[str] = []
+    env = _FakeEnv(tmp_path / "probe-root", events)
+    driver = _FakeDriver(events)
+    probe = Probe(env, driver=driver, workspace=tmp_path / "ws")  # ty: ignore[invalid-argument-type]
+
+    await getattr(probe, entry)()
+
+    assert events == ["driver.close", expected], events
+    assert probe.driver is None
 
 
 def test_probe_invariant_error_is_assertion_error() -> None:
