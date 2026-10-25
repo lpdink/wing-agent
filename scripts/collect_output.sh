@@ -77,6 +77,15 @@ printf '%s\n' "$ROOT" >"$LOG_DIR/root"
 SERIAL="${WING_TEST_SERIAL:-0}"
 rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur
 
+# 亚秒级计时只给机器读的报告用（`WING_TEST_REPORT=<path>`，见 scripts/bench_tests.py）：
+# bash 3.2 没有 EPOCHREALTIME，一次取时要 fork 一个小工具，日常跑没必要为此付费。
+# 人看的 `用时 Ns` 永远是整秒（`$SECONDS`），与今天的输出逐字一致。
+REPORT="${WING_TEST_REPORT:-}"
+now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+if [ -n "$REPORT" ]; then
+  START_MS=$(now_ms)
+fi
+
 START=$SECONDS
 PIDS=()
 for i in "${!LABELS[@]}"; do
@@ -86,15 +95,19 @@ for i in "${!LABELS[@]}"; do
   printf '▶ %-6s %s（日志：%s）\n' "$label" "$cmd" "$log"
   if [ "$SERIAL" = "1" ]; then
     t0=$SECONDS
+    [ -n "$REPORT" ] && t0_ms=$(now_ms)
     eval "$cmd" >"$log" 2>&1
     echo "$?" >"$LOG_DIR/${label}.code"
     echo "$((SECONDS - t0))" >"$LOG_DIR/${label}.dur"
+    [ -n "$REPORT" ] && echo "$(( $(now_ms) - t0_ms ))" >"$LOG_DIR/${label}.ms"
   else
     (
       t0=$SECONDS
+      [ -n "$REPORT" ] && t0_ms=$(now_ms)
       eval "$cmd" >"$log" 2>&1
       echo "$?" >"$LOG_DIR/${label}.code"
       echo "$((SECONDS - t0))" >"$LOG_DIR/${label}.dur"
+      [ -n "$REPORT" ] && echo "$(( $(now_ms) - t0_ms ))" >"$LOG_DIR/${label}.ms"
     ) &
     PIDS+=("$!")
   fi
@@ -203,11 +216,37 @@ done
 if [ "$TS_SKIPPED" -eq 1 ]; then
   printf '  ⏭️  %-6s  —     TypeScript 组已按 SKIP_TS=%s 跳过（CI 不设该变量：那边照旧强制）\n' "ts" "$SKIP_TS"
 fi
+
+# 机器读的报告（可选）：一次运行的墙钟 + 逐组毫秒耗时 + 统计行。
+# 消费者只有一个——scripts/bench_tests.py（提速的前后对比）；它要的是可解析的
+# 数字，而终端里那几行是给人读的、精度只有整秒。
+write_report() {
+  [ -n "$REPORT" ] || return 0
+  {
+    printf '{\n  "mode": "%s", "wall_ms": %s, "serial": %s, "skip_ts": %s,\n' \
+      "$MODE" "$(( $(now_ms) - START_MS ))" \
+      "$([ "$SERIAL" = "1" ] && echo true || echo false)" \
+      "$([ "$TS_SKIPPED" -eq 1 ] && echo true || echo false)"
+    printf '  "groups": [\n'
+    for i in "${!LABELS[@]}"; do
+      label="${LABELS[$i]}"
+      ms=$(cat "$LOG_DIR/${label}.ms" 2>/dev/null || echo 0)
+      stat=$(stats_of "$LOG_DIR/${label}.log" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+      printf '    {"label": "%s", "code": %s, "ms": %s, "stat": "%s"}%s\n' \
+        "$label" "${CODES[$i]}" "$ms" "$stat" \
+        "$([ "$i" -lt "$(( ${#LABELS[@]} - 1 ))" ] && echo ,)"
+    done
+    printf '  ]\n}\n'
+  } >"$REPORT"
+}
+
 if [ "${#FAILED[@]}" -eq 0 ]; then
   echo "✅ 结论：make $MODE 全部通过，无需重跑。"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  write_report
   exit 0
 fi
 echo "❌ 结论：make $MODE 失败于：${FAILED_STR}（详情见上方）——修复后重跑，已通过的组无需单独重跑。"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+write_report
 exit 1
