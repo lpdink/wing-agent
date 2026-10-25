@@ -296,7 +296,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 | `Probe.restart_gateway()`（内部 `_graceful_stop_process`） | 同上（优雅关掉旧进程），再在同一套隔离目录上起新进程 | 跨重启语义（账本延续 / 待生效状态 / 醒来补发） |
 | `ProbeEnv.kill_gateway()` | 只 SIGKILL 进程、env 继续可用 | 造「停机窗口里该发生的触发没发生」（唤醒错过补发） |
 
-判据只有一条：**这条 lane 之后还有没有人观察「停机时发生的事」**。teardown 之后没有
+判据只有一条：**这次停机之后还有没有人观察「停机时发生的事」**。teardown 之后没有
 任何断言（内置不变量与现场转储都在 `stop()` 之前完成），而 lifespan 收尾的
 `sm.flush_usage()` / `stop_background()` / `close_providers()` / `close_database()`
 对「跑完就扔」的进程不产生被观察的结果，却固定要 ~0.30s（构成见 `ProbeEnv.stop` 的
@@ -304,7 +304,12 @@ docstring：`/api/shutdown` 自己的延迟 + uvicorn 收尾里的两次固定 `
 那是 probe 里最大的一笔无被测语义开销。
 
 因此：**要观察停机语义的场景必须显式 `await probe.shutdown()`**，不要指望 teardown
-的隐式行为。两条路径的差别由 `scenarios/test_stop_paths.py` 钉在外部可观察量上——
+的隐式行为。
+
+一条边界必须知道：快路径 SIGKILL 的是网关的**进程组**，而 Bash 工具的子进程为了能自己
+killpg 也 `start_new_session=True`（自成会话），所以**不在**那个组里。场景因此不该在回合
+还在飞的时候结束——优雅路径会等回合收尾，快路径不会，正在跑的工具子进程会被留成孤儿
+（长命令能活几个小时，`pgrep` 也扫不回来）。两条路径的差别由 `scenarios/test_stop_paths.py` 钉在外部可观察量上——
 快路径的退出码是 SIGKILL 且 `core/wing.db-wal` 留在盘上（`close_database()` 没跑），
 优雅路径的 WAL 被收掉。`kill_gateway` 与 `stop` 共用同一份 SIGKILL 实现，
 `restart_gateway` 与 `shutdown` 共用同一份优雅收尾。

@@ -140,11 +140,12 @@ test-python-html:
 #    所以取 1.5× 而不是 2×——`make test` 里四组共用同一批核，多拿的线程是从别的组
 #    预算里扣的。
 #
-# 每 worker 约 0.1~0.2GB（pytest worker ~120MB + 网关 RSS 45~72MB），要更大/更小
+# 上限 32：每 worker 约 0.1~0.2GB（pytest worker ~120MB + 网关 RSS 45~72MB），
+# 不封顶的话 64 核机器上会要 ~16GB 常驻，而且每个 worker 都起一个真网关。要更大/更小
 # 用 PROBE_WORKERS 覆盖。
 # WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——只关组间并行等于没关。
 # 解析成 1 时不传 -n/--dist：逃生舱要的是原样的串行，不是"xdist 里只开一个 worker"。
-PROBE_WORKERS ?= $(shell if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; else n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); echo $$((n + n / 2)); fi)
+PROBE_WORKERS ?= $(shell if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; else n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); w=$$((n + n / 2)); [ "$$w" -gt 32 ] && w=32; echo $$w; fi)
 PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,--dist loadfile -n $(PROBE_WORKERS))
 
 test-probe:

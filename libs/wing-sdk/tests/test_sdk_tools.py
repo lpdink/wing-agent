@@ -45,9 +45,10 @@ async def test_bash_cwd_is_workspace(tmp_path):
 
 async def test_bash_timeout_kills_process_group(tmp_path):
     # 子进程（sleep 经 shell 派生）应随进程组一起被杀，不留孤儿。
-    # 秒数按本进程 pid 取值：`pgrep -f` 扫的是整机进程表，固定值会让并行跑的
-    # 另一个 worktree 的同款用例互相扫到（假红）。
-    sentinel = 30_000 + os.getpid()
+    # 唯一性放进小数位（`120.<pid>`）：`pgrep -f` 扫的是整机进程表，固定值会让并行跑的
+    # 另一个 worktree 的同款用例互相扫到（假红）；而整数秒取值过大会让被打断的轮次在
+    # 机器上留下活好几小时的孤儿。
+    sentinel = f"120.{os.getpid()}"
     out = await bash(f"sleep {sentinel}", timeout=1, _workspace=str(tmp_path))
     assert "timed out" in out
     # 确认 sleep 不在进程表中（killpg 生效）。

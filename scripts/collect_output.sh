@@ -100,6 +100,12 @@ fi
 # 人看的 `用时 Ns` 永远是整秒（`$SECONDS`），与今天的输出逐字一致。
 REPORT="${WING_TEST_REPORT:-}"
 now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+# 取毫秒要 fork 一个小工具；只有一个裸 `uv run python` 的环境里 python3 可能不存在。
+# 与其让 `$(( ))` 报算术错、报告静默缺失，不如显式关掉它（下游会退回整秒解析）。
+if [ -n "$REPORT" ] && ! command -v python3 >/dev/null 2>&1; then
+  echo "⚠ WING_TEST_REPORT 被忽略：找不到 python3（毫秒计时要用它）。" >&2
+  REPORT=""
+fi
 
 START=$SECONDS
 PIDS=()

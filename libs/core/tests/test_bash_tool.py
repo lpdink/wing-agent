@@ -28,9 +28,10 @@ from wing.tools.builtin.bash import (
 pytestmark = pytest.mark.asyncio
 
 #: 长睡进程的秒数。`pgrep -f` 看的是**整机**进程表：一台机器上并行开几个 worktree
-#: 跑同一套用例时，固定的 `sleep 3737` 会被别人的用例扫到（假红）。按本进程 pid 取值
-#: 保证唯一，同时仍是"睡到超时之外"的数量级。
-_SLEEP_SENTINEL = 30_000 + os.getpid()
+#: 跑同一套用例时，固定的 `sleep 3737` 会被别人的用例扫到（假红）。唯一性放进**小数位**
+#: （`120.<pid>`）而不是整数部分：整数成千上万秒意味着任何一次被打断的轮次都会在机器上
+#: 留一个活好几小时的孤儿，而 120 秒的窗口够跑完断言、又不至于攒下来。
+_SLEEP_SECONDS = f"120.{os.getpid()}"
 
 
 class _StubCtx:
@@ -208,14 +209,14 @@ class TestExecuteCommand:
 
         with pytest.raises(ToolError) as excinfo:
             await execute_shell(
-                f"echo before; sleep {_SLEEP_SENTINEL}", ctx=ctx, timeout=1
+                f"echo before; sleep {_SLEEP_SECONDS}", ctx=ctx, timeout=1
             )
 
         message = str(excinfo.value)
         assert message.startswith("[exit code: -1]")
         assert "Command timed out after" in message
         assert "--- partial stdout ---" in message and "before" in message
-        assert await _pgrep(f"slee[p] {_SLEEP_SENTINEL}") == []
+        assert await _pgrep(f"slee[p] {_SLEEP_SECONDS}") == []
         assert ctx.cwd == tmp_path  # 超时不动工作目录
 
     async def test_spawn_failure_wrapped_as_tool_error(self, tmp_path):
@@ -228,7 +229,7 @@ class TestExecuteCommand:
         ctx = _StubCtx(yolo=True, cwd=tmp_path)
 
         task = asyncio.create_task(
-            execute_shell(f"sleep {_SLEEP_SENTINEL}", ctx=ctx, timeout=60)
+            execute_shell(f"sleep {_SLEEP_SECONDS}", ctx=ctx, timeout=60)
         )
         # 钩子注册 = 子进程已起、进程组已知（打断清理的前提）。
         await wait_until_async(lambda: bool(ctx.hooks))
@@ -237,7 +238,7 @@ class TestExecuteCommand:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert await _pgrep(f"slee[p] {_SLEEP_SENTINEL}") == []
+        assert await _pgrep(f"slee[p] {_SLEEP_SECONDS}") == []
         assert ctx.hooks == {}
 
 

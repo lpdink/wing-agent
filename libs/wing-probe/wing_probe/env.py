@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1096,18 +1097,32 @@ class ProbeEnv:
                 self._close_log()
 
     async def _kill_process(self) -> None:
-        """SIGKILL 网关子进程并收尸（已退出时只清引用，不抛）。
+        """SIGKILL 网关的**整个进程组**并收尸（已退出时只清引用，不抛）。
 
         ``stop()``（快路径）与 ``kill_gateway()``（只杀进程、env 继续用）共用。
+
+        杀进程组而不是只杀 leader：网关是 ``start_new_session=True`` 起的（自成会话 /
+        进程组），组杀能带走任何没有自己 setsid 的后代。``wing/common/process.py`` 的
+        killpg 是同一套语义。
+
+        **边界**：Bash 工具的子进程为了能 killpg 自己也 ``start_new_session=True``，
+        所以它们不在网关的会话里——快停机收不到正在跑的工具子进程。场景因此不该在
+        回合在飞的时候结束（优雅路径会等回合收尾，快路径不会）；这条边界写在
+        ``docs/dev/probe-testing.md`` 的停机一节。
         """
         process = self._process
         if process is not None and process.poll() is None:
-            self._log_marker("--- probe: kill -9 gateway ---")
-            process.kill()
+            self._log_marker("--- probe: kill -9 gateway (process group) ---")
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):  # pragma: no cover - 竞态
+                process.kill()
             try:
                 await asyncio.to_thread(process.wait, timeout=DEFAULT_SHUTDOWN_WAIT)
             except subprocess.TimeoutExpired:  # pragma: no cover - 不可杀进程
-                _log.warning("gateway process survived SIGKILL")
+                # 留引用：`stop()` 是单向闸门，但 `shutdown()` 还能再兜一次。
+                _log.error("gateway process survived SIGKILL (pid=%s)", process.pid)
+                return
         if process is not None:
             self._log_marker(
                 f"--- probe: gateway exited (code={process.returncode}) ---"

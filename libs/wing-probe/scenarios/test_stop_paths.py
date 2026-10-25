@@ -57,7 +57,7 @@ async def test_fast_stop_skips_the_lifespan_teardown(probe: Probe) -> None:
         "fast stop removed the WAL — lifespan teardown ran, so stop() is not fast"
     )
     log = probe.env.log_tail(max_lines=200)
-    assert "--- probe: kill -9 gateway ---" in log, log
+    assert "--- probe: kill -9 gateway" in log, log
     assert "--- probe: gateway exited (code=-9) ---" in log, log
     assert "--- probe: terminate() ---" not in log, log
 

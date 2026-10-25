@@ -21,7 +21,7 @@
 "冷启动"时用）。
 
 前提：机器上不该有别的活。脚本每轮打印 1/5/15 分钟负载均值供贴进 PR；
-高于 `--max-load`（默认 4.0，即"核数的一半"量级）时直接拒绝跑，因为此时
+高于 `--max-load`（默认 4.0：12 核上约 1/3）时直接拒绝跑，因为此时
 任何差异都可能是噪声。确实要在负载下比（比如只想看趋势）用 `--allow-load`。
 """
 
@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,30 @@ def describe(rounds: list[Round]) -> tuple[int, dict[str, int]]:
     }
 
 
+def _passed_counts(rounds: list[Round], label: str) -> int | None:
+    """这一组跑过多少条用例（从统计行里取 `N passed`；取不到就 None）。"""
+    for rnd in reversed(rounds):
+        match = re.search(r"(\d+) passed", rnd.stats.get(label, ""))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _print_counts(labels: list[str], rounds: dict[str, list[Round]]) -> None:
+    """用例数并排印出来：只快不少，可能只是少跑了。
+
+    基线侧常常没有 `WING_TEST_REPORT` 支持（老 checkout），那时统计行是空的——
+    打 `?` 而不是沉默，读的人才不会把"没数"当成"数量一致"。
+    """
+    print("\n── 用例数（各侧最后一轮的统计行）──")
+    for name in labels:
+        counts = [
+            f"{label}: {_passed_counts(rounds[name], label) or '?'}"
+            for label in sorted(rounds[name][-1].stats) or ["?"]
+        ]
+        print(f"  {name}: {'、'.join(counts) if counts else '（无统计行）'}")
+
+
 def seconds(ms: int) -> str:
     return f"{ms / 1000:.1f}s"
 
@@ -239,8 +264,61 @@ def selftest() -> int:
     check("median wall", describe(rounds), (2000, {"a": 200}))
     check("seconds", seconds(2500), "2.5s")
 
+    failures += _knob_selftest(check)
+
     print(f"[selftest] {'ok' if not failures else f'{failures} failure(s)'}")
     return 0 if not failures else 1
+
+
+def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
+    """四组 × {独占, 预算} 是否真的变成了**命令行实参**。
+
+    这条链断过一次（`pnpm run test -- <args>` 的实参被 pnpm 吞掉，共享档与逃生舱双双
+    静默失效，而测试全绿）——两边各自"能解析"不等于"传到了"。所以这里直接问 make：
+    它展开出来的命令行长什么样。
+    """
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "Makefile").is_file():  # pragma: no cover - 单独拷脚本出去时
+        print("[selftest] skip knobs（找不到 Makefile）")
+        return 0
+
+    def dry_run(target: str, **env: str) -> str:
+        merged = {**os.environ, **env}
+        for name in (
+            "WING_TEST_SERIAL",
+            "WING_TEST_BUDGET_PYTEST",
+            "WING_TEST_BUDGET_TS",
+        ):
+            if name not in env:
+                merged.pop(name, None)
+        proc = subprocess.run(
+            ["make", "-n", target],
+            cwd=str(root),
+            env=merged,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return proc.stdout
+
+    py_solo = dry_run("test-python")
+    check("knobs python solo has xdist", "--dist loadfile -n " in py_solo, True)
+    py_budget = dry_run("test-python", WING_TEST_BUDGET_PYTEST="4")
+    check("knobs python budget reaches argv", "--dist loadfile -n 4" in py_budget, True)
+    py_serial = dry_run("test-python", WING_TEST_SERIAL="1")
+    check("knobs python serial drops xdist", "-n " in py_serial, False)
+
+    ts_budget = dry_run("test-ts", WING_TEST_BUDGET_TS="4")
+    check(
+        "knobs ts budget reaches argv",
+        "pnpm run test --maxWorkers=4" in ts_budget,
+        True,
+    )
+    # pnpm 会把 `--` 和它后面的实参一起吞掉（vitest 一个都收不到，且不报错）。
+    check(
+        "knobs ts never uses the swallowed form", "-- --maxWorkers" in ts_budget, False
+    )
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -357,6 +435,8 @@ def main(argv: list[str]) -> int:
         print("\n注意：以下轮次没有全绿（墙钟仍然计入中位数）：")
         for name, round_no, labels_red in red:
             print(f"  {name} 第 {round_no} 轮：{', '.join(labels_red)}")
+
+    _print_counts(labels, rounds)
 
     if len(trees) == 2:
         base_wall, base_groups = summary[labels[0]]
