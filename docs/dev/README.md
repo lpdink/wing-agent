@@ -22,6 +22,7 @@
 | [probe-testing.md](probe-testing.md) | wing-probe 确定性集成测试：跑法（`make test-probe`）、新增场景、断言原语、红线清单与口径、逃生舱、停机两路径 |
 | [perf-testing.md](perf-testing.md) | PR 级性能回归测量（perf-ci）：merge-base 交错 A/B 方法论、四个套件与指标表、本地跑法与产物、加套件的约定、阈值与校准口径、排查手册 |
 | [coverage.md](coverage.md) | 覆盖率：增量（patch）门禁的口径与阈值来源、cargo-llvm-cov 工具链的坑、PR 覆盖率评论（sticky `<!-- wing-coverage -->`）的数据流与读法 |
+| [test-speed.md](test-speed.md) | 测试回环的成本结构：四组并行度旋钮（独占 / 共享档）、各组时间花在哪、改测试的判据、`scripts/bench_tests.py` 的交错 A/B 与负载门禁 |
 | [welcome-mascot.md](welcome-mascot.md) | 开屏海鸥：字母网格帧与品牌调色板、待机/干活两姿态、可见性门控的重绘成本契约、改画工作流 |
 
 > 事实来源优先级：**代码 > 本目录 > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。

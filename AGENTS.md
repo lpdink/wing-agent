@@ -330,6 +330,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/coverage.md`](docs/dev/coverage.md) | 覆盖率门禁：增量（patch）覆盖率作为 PR 门禁、sticky 评论形状、不判定区与本地跑法 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 / 停机两路径（快 `stop()` vs 优雅 `shutdown()`） |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
+| [`docs/dev/test-speed.md`](docs/dev/test-speed.md) | 测试回环的成本结构：四组的并行度旋钮（独占 / 共享档）、各组时间花在哪（probe 的网关启动、python 的真实等待、rust 的份额分线程、ts 的 jsdom）、改测试时的判据、`scripts/bench_tests.py` 的交错 A/B 与负载门禁 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |
 
 事实来源优先级：**代码 > docs/dev > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
@@ -349,7 +350,7 @@ cargo test
 make check-rust                   # cargo fmt --check + clippy
 
 # All
-make test                         # 只跑测试：Python + Rust + TS + probe
+make test                         # 只跑测试：Python + Rust + TS + probe（四组并行，共享档见 docs/dev/test-speed.md）
 make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
 make check                        # 只跑静态检查：Python + Rust + TS（含 extensions/vscode 门禁）
 make fmt                          # 格式化全部

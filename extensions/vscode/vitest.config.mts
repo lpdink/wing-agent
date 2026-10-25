@@ -19,8 +19,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     // vitest 默认 5s。这套测试与 python / probe / rust 三组同时跑，满载时连 jsdom
-    // 环境的创建都能吃掉 5s（实测单文件超时、整组 33s vs 空载 10s）——超时值要按
-    // 「最差并发」定，不按空载定。
+    // 环境的创建都能被拖到秒级（实测单文件超时）——超时值要按「最差并发」定，
+    // 不按空载定（空载这组只有几秒）。
     testTimeout: 15000,
     projects: [
       {
