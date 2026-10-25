@@ -46,6 +46,10 @@ from dataclasses import dataclass, replace
 #: 与 ``scripts/collect_output.sh`` 的逃生舱同名：排查并发干扰时四组一起退化成串行。
 SERIAL_ENV = "WING_TEST_SERIAL"
 
+#: 四组并行时的标记（由 `scripts/collect_output.sh` 导出）：并行度按共享整机来配，
+#: 而不是按独占。与 `SERIAL_ENV` 正交——串行逃生舱优先级更高。
+SHARED_ENV = "WING_TEST_SHARED"
+
 #: 探测用例数时并发起多少个 ``--list``：一次进程启动 + 枚举用例名，16 路足够把整段
 #: 压到 0.1s 量级（再高也快不了，受限于 55 次进程启动的总量）。
 _LIST_WORKERS = 16
@@ -93,8 +97,18 @@ def _serial() -> bool:
 
 
 def _default_cores() -> int:
-    """这个池子认为自己独占几个核（串行逃生舱下为 1）。``--cores`` 覆盖它。"""
-    return 1 if _serial() else _cpu_count()
+    """这个池子认为自己独占几个核（串行逃生舱下为 1）。``--cores`` 覆盖它。
+
+    ``WING_TEST_SHARED=1``（`scripts/collect_output.sh` 在四组并行时导出）时收到约
+    1/3 核数：四组各自按"我独占整机"配并行度会把机器压到 2~3 倍超订，每一组都变慢
+    （本机 12 核实测：默认 30.5s，后三组各收到 1/3 后 26.0s）。独占时照旧拿满。
+    """
+    if _serial():
+        return 1
+    cores = _cpu_count()
+    if os.environ.get(SHARED_ENV, "") not in ("", "0"):
+        return max(2, min(4, cores // 3))
+    return cores
 
 
 def _threads_for(tests: int, total_tests: int, cores: int) -> int:

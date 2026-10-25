@@ -77,6 +77,16 @@ printf '%s\n' "$ROOT" >"$LOG_DIR/root"
 SERIAL="${WING_TEST_SERIAL:-0}"
 rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur
 
+# 四组并行 ⇒ 每组都不独占整机：导出这个标记，各组的默认并行度收到"共享"档
+# （见 Makefile 的 PYTEST_WORKERS / TS_WORKERS 与 scripts/test_rust_parallel.py 的
+# `_default_cores`）。不导出时它们各自按独占配——单独跑一组的人应该拿满机器。
+# 串行模式（WING_TEST_SERIAL=1）不导出：那时每组本来就独占。
+SHARED=0
+if [ "$SERIAL" != "1" ]; then
+  export WING_TEST_SHARED=1
+  SHARED=1
+fi
+
 # 亚秒级计时只给机器读的报告用（`WING_TEST_REPORT=<path>`，见 scripts/bench_tests.py）：
 # bash 3.2 没有 EPOCHREALTIME，一次取时要 fork 一个小工具，日常跑没必要为此付费。
 # 人看的 `用时 Ns` 永远是整秒（`$SECONDS`），与今天的输出逐字一致。
