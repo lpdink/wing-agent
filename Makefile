@@ -106,12 +106,15 @@ test-python-html:
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
 #
 # 并行度：场景之间零共享（各自 tmp + 各自网关子进程 + 各自假 Provider），所以
-# 按核数铺开是安全的——实测全量 39s → 26s（10 核，worker 8 → 12；再往上到 16 只
-# 剩 1s，拐点在核数附近）。默认 min(12, 核数)：CI 的 4 核 runner 取 4。
+# 铺开是安全的。默认 min(2×核数, 24)，依据见 docs/dev/probe-testing.md
+# 「为什么敢并行」：独占机器的窗口里 12~28 worker 的墙钟互在噪声内（每例 ~0.25s
+# 里主要是新解释器的导入成本，没有多少等待可摊）；与其它三组抢 CPU 时 2× 核数
+# 稳定更快（成对交错 8/8 对，中位数 34.4s → 27.9s）。上限 24 只受内存约束
+# （~0.2GB/worker）。CI 的 4 核 runner 因此取 8。
 # PROBE_WORKERS 可覆盖；WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——
 # 只关组间并行等于没关。解析成 1 时不传 -n：逃生舱要的是原样的串行，不是
 # "xdist 里只开一个 worker"。
-PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$n" -gt 12 ]; then echo 12; else echo $$n; fi)
+PROBE_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ "$$((n * 2))" -gt 24 ]; then echo 24; else echo $$((n * 2)); fi)
 PROBE_WORKER_ARGS = $(if $(filter 1,$(PROBE_WORKERS)),,-n $(PROBE_WORKERS))
 
 test-probe:

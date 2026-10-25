@@ -152,6 +152,48 @@ async def test_stop_is_safe_after_start_failure(
     assert not _pid_alive(pid)
 
 
+async def _no_health_check(*_: object, **__: object) -> None:
+    """``wait_for_health`` 的替身：假网关不监听端口，直接把"已就绪"判为真。
+
+    只为把环境带到"进程活着、但没有任何 HTTP 面"的状态——优雅收尾在这种网关上的
+    行为正是要钉的东西（``POST /api/shutdown`` 打空）。
+    """
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_shutdown_falls_back_to_terminate_when_the_gateway_ignores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/api/shutdown`` 打不通（进程不理它）⇒ 兜底 wait → terminate → kill。
+
+    优雅收尾不能退化成"永远等一个不回答的进程"：请求失败（连接被拒 / 401）之后仍走
+    ``_terminate_process`` 的阶梯。auth 打开但给不出 admin key 时就是这条路径。
+    """
+    fake_gateway = tmp_path / "fake-gateway"
+    fake_gateway.write_text(_FAKE_GATEWAY, encoding="utf-8")
+    fake_gateway.chmod(0o755)
+    pid_file = tmp_path / "child.pid"
+    monkeypatch.setattr("wing_probe.env.DEFAULT_SHUTDOWN_WAIT", 0.2)
+    monkeypatch.setattr("wing_probe.env.wait_for_health", _no_health_check)
+
+    from wing_probe.env import ProbeEnv
+
+    env = await ProbeEnv.start(
+        tmp_path / "env",
+        gateway_bin=fake_gateway,
+        env_overrides={"PROBE_PID_FILE": str(pid_file)},
+    )
+    pid = _read_pid(pid_file)
+    assert _pid_alive(pid), "fake gateway never started"
+
+    await env.shutdown()
+
+    assert not _pid_alive(pid), f"gateway {pid} survived shutdown()"
+    assert env.process is None
+    assert env.log_tail(max_lines=20).count("--- probe: terminate() ---") == 1
+
+
 # ── 外层兜底是**唯一**防线的两条路径 ────────────────
 #
 # `start_gateway` 的失败分支只接 `ProbeEnvError`（超时 / 进程早退），自己会

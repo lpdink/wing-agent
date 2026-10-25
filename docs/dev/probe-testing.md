@@ -12,7 +12,7 @@
 
 | 命令 | 做什么 |
 |------|--------|
-| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n <核数≤12>`） |
+| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n min(2×核数, 24)`） |
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
@@ -25,11 +25,16 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `PROBE_WORKERS` | `min(12, 核数)` | 场景并行度（`make test-probe` 的 `-n`）。10 核实测 8 worker 39s → 12 worker 26s（16 worker 只再快 1s：拐点在核数附近）。CI 的 4 核 runner 取 4。`WING_TEST_SERIAL=1` 同样归串行 |
+| `PROBE_WORKERS` | `min(2×核数, 24)` | 场景并行度（`make test-probe` 的 `-n`）。曲线的形状见下面「为什么敢并行」：独占机器时 12~28 worker 的墙钟互在噪声内，与其它三组抢 CPU 时 2× 核数稳定更快。上限 24 是内存闸门（每个 worker 一个 pytest 进程 + 一个网关子进程，约 0.2GB/worker）。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
 
-**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。瓶颈是进程启动与 HTTP 握手这类等待而非算力（12 worker 全量 27.7s 的墙钟只花掉 100s CPU，平均约占 3.6 核），所以并行度按核数铺开是安全的。实测全量 39s → 26s（10 核，8 → 12 worker）。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口。每例的开销是**进程启动与 HTTP 握手**这类等待与固定解释器成本，而不是算力（全量 ~580 例的墙钟只花掉 ~110s CPU，平均约占 5 核）；并行不改变隔离语义，共享环境才会。所以并行度只管"把等待摊开"，上限由内存与 CPU 竞争决定：
+
+- 独占机器（12 核）：`-n 12 / 16 / 20 / 24 / 28` 的墙钟中位数是 22.8 / 26.1 / 24.6 / 25.1 / 24.0s——**曲线是平的**，差异落在本机噪声（轮内极差 6~8s）之内。原因：快停机之后每例 ~0.25s 里绝大部分是一个新解释器的导入成本（CPU），latency:CPU ≈ 1.2，已经不剩多少可以靠超订填的等待；
+- 与其它三组抢 CPU（`make test` 的真实情形）：成对交错 8 对，`-n 24` **8 对全胜** `-n 12`（中位数 27.9s vs 34.4s）——可运行线程多时调度器给的机会也多。
+
+所以默认取 `min(2×核数, 24)`：独占时与 1× 核数无差别，抢 CPU 时更抗饿，上限 24 只受内存约束（~0.2GB/worker）。CI 的 4 核 runner 因此取 8。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
@@ -271,6 +276,30 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 - 黑名单 `TRANSIENT_EVENT_TYPES` = 产品中 `persist=False` 的**全集**（`text` / `reasoning` / `tool_call_stream` / `tool_call` / `tool_call_result` / `assistant_turn` / `tool_result_turn` / `llm_call_metrics` / `sync_session` / `session_state_changed` / `session_init` / `context_stats` / `branch_targets` / `delivered` / `notice`），是 spec 最低要求（流式 delta 三类）的超集；新增 `persist=False` 事件类型时应同步该集合（`wing_probe/history/invariants.py`）；
 - 事件断言锚定**事件序**，时间只作上限；并行工具用集合语义断言，不依赖完成顺序。
 
+## 停机：快路径与优雅路径
+
+`ProbeEnv` 有两条停机路径，**默认是快的那条**：
+
+| 入口 | 做了什么 | 谁在用 |
+|---|---|---|
+| `Probe.stop()` / `ProbeEnv.stop()` | **SIGKILL**（不跑 lifespan）+ 收假 Provider | fixture teardown、所有失败收尾 |
+| `Probe.shutdown()` / `ProbeEnv.shutdown()` | `POST /api/shutdown` → 等进程自己退（≤5s）→ 兜底 terminate/kill | 需要观察停机语义的场景，在**场景体里**显式调用 |
+| `Probe.restart_gateway()`（内部 `_graceful_stop_process`） | 同上（优雅关掉旧进程），再在同一套隔离目录上起新进程 | 跨重启语义（账本延续 / 待生效状态 / 醒来补发） |
+| `ProbeEnv.kill_gateway()` | 只 SIGKILL 进程、env 继续可用 | 造「停机窗口里该发生的触发没发生」（唤醒错过补发） |
+
+判据只有一条：**这条 lane 之后还有没有人观察「停机时发生的事」**。teardown 之后没有
+任何断言（内置不变量与现场转储都在 `stop()` 之前完成），而 lifespan 收尾的
+`sm.flush_usage()` / `stop_background()` / `close_providers()` / `close_database()`
+对「跑完就扔」的进程不产生被观察的结果，却固定要 ~0.30s（`/api/shutdown` 自己
+`call_later(0.1)`，uvicorn 的 `main_loop` 与 `shutdown()` 各有一次 `sleep(0.1)`）——
+那是 probe 里最大的一笔无被测语义开销。
+
+因此：**要观察停机语义的场景必须显式 `await probe.shutdown()`**，不要指望 teardown
+的隐式行为。两条路径的差别由 `scenarios/test_stop_paths.py` 钉在外部可观察量上——
+快路径的退出码是 SIGKILL 且 `core/wing.db-wal` 留在盘上（`close_database()` 没跑），
+优雅路径的 WAL 被收掉。`kill_gateway` 与 `stop` 共用同一份 SIGKILL 实现，
+`restart_gateway` 与 `shutdown` 共用同一份优雅收尾。
+
 ## 逃生舱
 
 `probe.without_invariants(reason="...")` 关闭本场景的 teardown 不变量——**必须给理由**：理由写进 `artifacts/dump.txt` 并在终端汇总回显，空理由直接报错。用于"场景有意制造非法中间态"（例如断言失败路径的中间产物），不得用于掩盖真实失败。已发生的实例与理由：
@@ -282,10 +311,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 ## 已知取舍（与二批范围）
 
-- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.5s（`start` 0.18s / `stop` 0.30s），78 个场景串行就是 40s——**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
+- **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.25s（`start` 0.22s / `stop` 0.003s——teardown 走快停机，见上一节；`start` 里 200ms 上下是一个新解释器把网关的导入图跑一遍，其中 `fastapi` 一项占一半上下），**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
 - **场景里的等待要花在窗口上，不要花在节奏上**：`delay` 逐帧、`first_delay` 只压首个内容帧，两者混用会互相放大（`scenarios/test_midjoin_sync.py` 曾用 `delay=3.0` 撑窗口，白烧 9s）。写场景时先想清楚"我在等的是什么"，再选旋钮；
 - **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
-- 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 走 `/api/shutdown` → `terminate` → `kill`；
+- 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 被 SIGKILL（快停机，见「停机：快路径与优雅路径」）；`shutdown()` 那条路径另有 wait → `terminate` → `kill` 的阶梯；
 - 网关重试在探测配置里显式打开（`max_retries=2` / `max_retry_delay=1s`，`wing_probe/env.py`）——语义重试场景需要它（`scenarios/test_react_invalid_generation.py`）。计数口径：**一次逻辑调用的剧本消费上界 = 1 + max_retries**，超出即 5xx，仍然可数。
 
 ## 附：变异验证怎么复跑

@@ -214,11 +214,32 @@ class Probe:
         return self.driver
 
     async def stop(self) -> None:
-        """关闭 driver 与网关子进程（幂等、不抛——失败场景的 teardown 也要安全）。"""
+        """**快**收尾（默认）：关 driver，再 SIGKILL 网关（不跑 lifespan）。
+
+        判据见 :meth:`ProbeEnv.stop`：fixture 的断言（含内置不变量）与现场转储都在
+        它之前做完，lifespan 收尾的落盘 / 后台任务 / 连接与 SQLite 关闭都不可观察，
+        只换来 0.3s 固定等待。幂等、不抛（失败场景的 teardown 也要安全）。
+        """
+        await self._shut(graceless=True)
+
+    async def shutdown(self) -> None:
+        """**优雅**收尾：关 driver，再 ``/api/shutdown`` 让网关跑完 lifespan。
+
+        需要观察停机语义（停机后才落盘 / 才被收掉的状态、跨重启的补偿、优雅停机
+        自身）的场景在**场景体里**显式调它；随后 fixture teardown 的 ``stop()``
+        因单向闸门变成 no-op。
+        """
+        await self._shut(graceless=False)
+
+    async def _shut(self, *, graceless: bool) -> None:
+        """两条收尾路径的唯一实现（先关 driver，再按路径停网关）。"""
         driver, self.driver = self.driver, None
         if driver is not None:
             await driver.close()
-        await self.env.stop()
+        if graceless:
+            await self.env.stop()
+        else:
+            await self.env.shutdown()
 
     async def __aenter__(self) -> Probe:
         return self
