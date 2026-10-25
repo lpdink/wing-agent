@@ -31,6 +31,17 @@ pub struct StdioRenderer {
     /// 本相位里是否出现过「中断收口合成的工具结果」（见
     /// [`INTERRUPTED_TOOL_RESULT`]）——工具阶段被打断的判据之一。
     tool_phase_aborted: bool,
+    /// 本轮是否已经出过终态帧（`turn_result` / `interrupted` 合成帧）。
+    ///
+    /// 后端轮末信号 `done` 据此决定要不要**补**一条失败终态帧：一轮没有任何
+    /// 终态帧就结束是异常收口（见 [`StdioRenderer::handle_done`]），消费方不能
+    /// 因此拿到一个没有终态的轮。
+    terminal_rendered: bool,
+    /// 本轮最近一条后端 `Error` 事件原文。
+    ///
+    /// `error` 不是轮末信号，但后端异常收口时**真实原因只在它里面**——补终态帧
+    /// 时把它带进 `errors`，否则消费方只知道「这一轮没有结果」。
+    last_error: Option<String>,
     /// `--include-partial-messages`：是否输出 `stream_event` 增量帧。
     /// **假 = 零行为变化**（delta 不产帧，快照帧 id 仍是既有形状）。
     include_partial_messages: bool,
@@ -74,6 +85,13 @@ fn error_texts(is_error: bool, errors: &[String]) -> Vec<String> {
 /// 参考 CLI 在转写里写 "[Request interrupted by user]"；这里用同一句意的短句
 /// 作为 errors 文本（真 CLI 的 `errors` 取值没有可观测样本）。
 const INTERRUPTED_BY_USER: &str = "Interrupted by user";
+
+/// 「本轮没有任何终态帧」时合成帧的兜底错误文案。
+///
+/// 只在后端连 `error` 事件都没给时用得上（有 `error` 时用它的原文——真实原因
+/// 在那里）；两段都写清，编排器一看就知道该去翻网关日志。
+const NO_TERMINAL_FRAME: &str = "turn ended without a terminal frame: the gateway reported \
+                                  done but sent no turn_result (check the gateway log for the cause)";
 
 /// 后端中断收口时给未完成工具调用合成的结果文本
 /// （`INTERRUPTED_RESULT`，`libs/core/wing/agent/tool_executor.py`）。
@@ -167,6 +185,8 @@ impl StdioRenderer {
             out,
             pending_tools: 0,
             tool_phase_aborted: false,
+            terminal_rendered: false,
+            last_error: None,
             include_partial_messages,
             stream: StreamState::new(),
         }
@@ -199,6 +219,8 @@ impl StdioRenderer {
     pub fn begin_turn(&mut self) {
         self.pending_tools = 0;
         self.tool_phase_aborted = false;
+        self.terminal_rendered = false;
+        self.last_error = None;
         let leaked = self.stream.close_message(None, None);
         self.emit_stream_events(leaked);
     }
@@ -206,29 +228,47 @@ impl StdioRenderer {
     /// Handle an event.
     ///
     /// Returns `true` when the **current turn** is done — a `turn_result` frame,
-    /// or the synthesized terminal frame of an interrupted turn (see
-    /// [`Self::handle_interrupted`]). Whether the *process* then exits is the
-    /// driver's call: the one-shot flow exits on it as before; the resident flow
-    /// (`crate::stdio::ExitPolicy`) exits only once stdin is closed.
+    /// the synthesized terminal frame of an interrupted turn (see
+    /// [`Self::handle_interrupted`]), or the synthesized failure frame of a turn
+    /// the backend ended without any terminal frame (see [`Self::handle_done`]).
+    /// Whether the *process* then exits is the driver's call: the one-shot flow
+    /// exits on it as before; the resident flow (`crate::stdio::ExitPolicy`)
+    /// exits only once stdin is closed.
     pub fn handle_event(&mut self, event: &WingEvent) -> bool {
         // 每轮重置：`turn_started` 是后端给出的轮边界（每轮必发一次）。
         if matches!(event, WingEvent::TurnStarted { .. }) {
             self.begin_turn();
             return false;
         }
+        // `error` 不是轮末信号（同轮的终态帧 / 轮末 `done` 才是），但它带着
+        // 本轮真实的失败原因——记下来，供 `handle_done` 补帧时带出。
+        if let WingEvent::Error { message, .. } = event {
+            self.last_error = Some(message.clone());
+        }
+        // 轮末信号：后端异常收口时本轮可能一个终态帧都没有（见 `handle_done`）。
+        if matches!(event, WingEvent::Done { .. }) {
+            return self.handle_done();
+        }
         // 被打断的轮次后端**不发** `turn_result`（半截内容作为 partial
         // assistant 提交进链）：前端在这里补一条终态帧，否则
         // 编排器永远等不到终态——SDK 的 `streamInput` 在 canUseTool/hooks 存在时
         // 以「首个 result」门住 `endInput()`，缺了这条帧 stdin 永不关闭、
         // CLI 进程与 WS 订阅一起滞留。
-        if matches!(event, WingEvent::Interrupted { .. }) {
-            return self.handle_interrupted(event);
+        let ended = if matches!(event, WingEvent::Interrupted { .. }) {
+            self.handle_interrupted(event)
+        } else {
+            match &self.format {
+                OutputFormat::Text => self.handle_text(event),
+                OutputFormat::Json => self.handle_json(event),
+                OutputFormat::StreamJson => self.handle_stream_json(event),
+            }
+        };
+        // 终态帧只在这里记账（三格式的 `turn_result` 与打断合成帧都经此处），
+        // `done` 据此判断本轮是否已经收口。
+        if ended {
+            self.terminal_rendered = true;
         }
-        match &self.format {
-            OutputFormat::Text => self.handle_text(event),
-            OutputFormat::Json => self.handle_json(event),
-            OutputFormat::StreamJson => self.handle_stream_json(event),
-        }
+        ended
     }
 
     // ============================================================
@@ -615,6 +655,64 @@ impl StdioRenderer {
             self.emit_ndjson(&msg);
         }
         self.exit_code = std::process::ExitCode::SUCCESS;
+        true
+    }
+
+    // ============================================================
+    // done — 后端轮末信号的兜底收口
+    // ============================================================
+
+    /// 轮末信号（`done`）：本轮**没有**任何终态帧时补一条失败终态帧。
+    ///
+    /// `done` 是后端唯一覆盖全部收口路径的轮末信号——`run_turn` 的成功 /
+    /// max_turns / 异常三路都在 `turn_result` 之后发它，而 `agent/core.py::_run`
+    /// 的兜底 except 只发 `error` + `done`、**不发 `turn_result`**。一次性流程
+    /// 只认 `turn_result` / `interrupted` 的话，后者会让 `recv_event` 永远等下去
+    /// （`wing -p` 永久挂起）。
+    ///
+    /// 补帧形状同 [`Self::handle_interrupted`]（`SDKResultError`：`is_error=true`、
+    /// `subtype="error_during_execution"`、`errors=[…]`、不带 `result`）——消费方
+    /// 等的是**每轮一条 result**，只让进程退出而不补帧等于把同一个缺口挪个地方。
+    /// `errors` 取本轮后端 `Error` 的原文（真实原因在那里），没有则用
+    /// [`NO_TERMINAL_FRAME`]。
+    ///
+    /// 退出码 **FAILURE**（与 `turn_result(is_error=true)` 同口径：后端确实没能
+    /// 完成这一轮）。text 模式的错误文本走 stderr，stdout 只有协议帧。
+    ///
+    /// 本轮已出过终态帧 → 幂等 no-op：不产第二条帧、不动退出码。常驻模式下正常轮
+    /// 因此会两次表示「本轮结束」（`turn_result` 与 `done`），`ExitPolicy::on_terminal`
+    /// 幂等。
+    fn handle_done(&mut self) -> bool {
+        if self.terminal_rendered {
+            return true;
+        }
+        self.terminal_rendered = true;
+        let errors = vec![
+            self.last_error
+                .clone()
+                .unwrap_or_else(|| NO_TERMINAL_FRAME.to_string()),
+        ];
+        // 错误轮可能落在流式中途（快照帧永远不来）：终态帧之前先收口，消费方
+        // 不得拿到悬空的 `message_start`。
+        let stream_close = self.stream.close_message(None, None);
+        self.emit_stream_events(stream_close);
+
+        if matches!(self.format, OutputFormat::Text) {
+            eprintln!("Error: {}", errors.join("; "));
+        } else {
+            // 事件不带链 uuid（它不是链上事实）：造一个稳定可追溯的帧 id。
+            let msg = self.result_frame(
+                crate::protocol::generate_request_id(),
+                ResultFrameArgs {
+                    subtype: "error_during_execution".into(),
+                    is_error: true,
+                    errors,
+                    ..Default::default()
+                },
+            );
+            self.emit_ndjson(&msg);
+        }
+        self.exit_code = std::process::ExitCode::FAILURE;
         true
     }
 }
@@ -1086,6 +1184,173 @@ mod tests {
         assert_eq!(parsed["subtype"], "error_during_execution");
         assert_eq!(parsed["terminal_reason"], "aborted_streaming");
         assert_eq!(renderer.exit_code(), std::process::ExitCode::SUCCESS);
+    }
+
+    // ---- done：后端轮末信号的兜底收口（issue #246） ----
+
+    /// 后端轮末信号（`react_loop.run_turn` 的每条收口路径末尾都发）。
+    fn done() -> WingEvent {
+        decode(json!({
+            "type": "done",
+            "session_id": "sess-1",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    /// 后端 `error` 事件（`react_loop` 的异常收口与 `_run` 的兜底 except 各一条）。
+    fn backend_error(message: &str) -> WingEvent {
+        decode(json!({
+            "type": "error",
+            "message": message,
+            "session_id": "sess-1",
+            "created_at": "2025-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    /// 本轮没有任何终态帧就收到轮末信号：`done` 必须收口，并补一条失败终态帧
+    /// ——否则驱动侧永远等下一条事件（`recv_event` 不会返回 None），`wing -p`
+    /// 永久挂起。
+    #[test]
+    fn done_without_a_terminal_frame_synthesizes_a_failure_result() {
+        for format in [OutputFormat::Json, OutputFormat::StreamJson] {
+            let (mut renderer, buf) = setup(format.clone());
+
+            assert!(
+                !renderer.handle_event(&backend_error("处理消息失败：异常：boom")),
+                "{format:?}: error 不是轮末信号"
+            );
+            assert!(
+                renderer.handle_event(&done()),
+                "{format:?}: done 必须结束本轮"
+            );
+
+            let out = buf.text();
+            assert_eq!(out.lines().count(), 1, "{format:?}: 恰好一条终态帧: {out}");
+            let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(parsed["type"], "result", "{format:?}");
+            assert_eq!(parsed["subtype"], "error_during_execution", "{format:?}");
+            assert_eq!(parsed["is_error"], true, "{format:?}");
+            assert_eq!(
+                parsed["errors"],
+                json!(["处理消息失败：异常：boom"]),
+                "{format:?}: 后端错误原文必须进 errors: {parsed}"
+            );
+            assert!(
+                parsed.get("result").is_none(),
+                "{format:?}: SDKResultError 没有 result: {parsed}"
+            );
+            assert_eq!(parsed["session_id"], "sess-1", "{format:?}");
+            // 后端确实没能完成这一轮：编排器必须看得见。
+            assert_eq!(
+                renderer.exit_code(),
+                std::process::ExitCode::FAILURE,
+                "{format:?}"
+            );
+        }
+    }
+
+    /// 连 `error` 都没有（`done` 是唯一的收口信号）：仍要补帧，用通用文案兜底。
+    #[test]
+    fn done_without_a_backend_error_carries_the_generic_text() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        assert!(renderer.handle_event(&done()));
+
+        let parsed: serde_json::Value = serde_json::from_str(&buf.text()).unwrap();
+        assert_eq!(parsed["is_error"], true);
+        // 文案要点：说清这一轮没有终态帧（细节全文见 e2e 的 stderr 断言）。
+        let errors = parsed["errors"].as_array().expect("errors array");
+        assert_eq!(errors.len(), 1, "errors 非空是 SDK 的硬要求: {parsed}");
+        assert!(
+            errors[0]
+                .as_str()
+                .is_some_and(|text| text.contains("without a terminal frame")),
+            "兜底文案要说清这一轮没有终态帧: {parsed}"
+        );
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
+    }
+
+    /// text 模式没有结果帧可打：错误文本走 stderr，stdout 保持干净。
+    #[test]
+    fn text_mode_done_without_a_terminal_frame_keeps_stdout_clean() {
+        let (mut renderer, buf) = setup(OutputFormat::Text);
+
+        assert!(!renderer.handle_event(&backend_error("boom")));
+        assert!(renderer.handle_event(&done()));
+        assert_eq!(buf.text(), "", "stdout 是协议通道：错误文本只进 stderr");
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
+    }
+
+    /// 已经出过终态帧再收到 `done` → 幂等 no-op：不产第二条 result 帧、不动退出码。
+    #[test]
+    fn done_after_a_terminal_frame_is_a_no_op() {
+        for format in [
+            OutputFormat::Text,
+            OutputFormat::Json,
+            OutputFormat::StreamJson,
+        ] {
+            let (mut renderer, buf) = setup(format.clone());
+            assert!(renderer.handle_event(&turn_result("hi", false, "success")));
+            let before = buf.text();
+
+            assert!(
+                renderer.handle_event(&done()),
+                "{format:?}: done 仍是「本轮结束」"
+            );
+            assert_eq!(buf.text(), before, "{format:?}: 不得产出第二条帧");
+            assert_eq!(
+                renderer.exit_code(),
+                std::process::ExitCode::SUCCESS,
+                "{format:?}"
+            );
+        }
+    }
+
+    /// 被打断的轮次同理：合成终态帧之后的 `done` 是 no-op，退出码仍是 SUCCESS
+    /// （中止是编排器的主动动作）。
+    #[test]
+    fn done_after_an_interrupted_turn_is_a_no_op() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        assert!(renderer.handle_event(&interrupted()));
+        let before = buf.text();
+        assert!(renderer.handle_event(&done()));
+        assert_eq!(buf.text(), before, "不得产出第二条终态帧");
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::SUCCESS);
+    }
+
+    /// 账本以轮为单位：上一轮收口过，不代表下一轮也收口过（后端在后续轮上
+    /// 异常收口时仍要补帧）。后端错误原文同样按轮清空。
+    #[test]
+    fn turn_started_resets_the_terminal_bookkeeping() {
+        let (mut renderer, buf) = setup(OutputFormat::StreamJson);
+
+        // 第一轮：正常收口 + 轮末 done（幂等）。
+        assert!(!renderer.handle_event(&backend_error("first")));
+        assert!(renderer.handle_event(&turn_result("hi", false, "success")));
+        assert!(renderer.handle_event(&done()));
+
+        // 第二轮：没有 turn_result，只有 done → 必须重新补帧。
+        assert!(
+            !renderer.handle_event(&turn_started()),
+            "turn_started 不结束任何一轮"
+        );
+        assert!(renderer.handle_event(&done()));
+
+        let frames = output_frames(&buf);
+        assert_eq!(frames.len(), 2, "{}", buf.text());
+        assert_eq!(frames[0]["subtype"], "success");
+        assert_eq!(frames[1]["subtype"], "error_during_execution");
+        assert!(
+            frames[1]["errors"][0]
+                .as_str()
+                .is_some_and(|text| text.contains("without a terminal frame")),
+            "上一轮的错误原文不得跨轮泄漏: {}",
+            frames[1]
+        );
+        assert_eq!(renderer.exit_code(), std::process::ExitCode::FAILURE);
     }
 
     // ---- 流式帧（`--include-partial-messages`） ----

@@ -99,6 +99,8 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 `--agent <name>`（名字来自 `wing agents`）选会话的 agent 模板（缺省 = 网关默认，与 `wing run --agent` 同词汇同口径）：只作用于创建路径——resume / 收养既有 `--session-id` 时它不生效（会话保持自己的 agent，日志记一条 warning）。
 
+**终态帧（一轮的收口）**：`result` 是每轮的终止信号，来源有三个——正常 / 失败轮的 `turn_result`；被打断轮次的**合成**终态帧（后端对被打断的轮次不发 `turn_result`）；以及**轮末信号 `done` 之前本轮一个终态帧都没有**时补的失败终态帧（`subtype=error_during_execution`、`errors=[本轮后端 `error` 的原文]`、不带 `result`、退出码非零；text 模式的错误文本走 stderr，stdout 只有协议帧）。第三条是 #246 的收口：`done` 是后端**唯一覆盖全部收口路径**的轮末信号（`agent/core.py::_run` 的兜底 except 只发 `error` + `done`、不发 `turn_result`），只认 `turn_result` 会让一次性流程在 WS 保持打开时永久等下去。已有终态帧之后再收到 `done` 是幂等 no-op（常驻模式下正常轮因此两次表示「本轮结束」），不做任何输出。
+
 **流式增量**（`--include-partial-messages`）：置位时，每条 assistant 消息的快照帧（`assistant`）之前先逐条输出 `stream_event` 帧（`SDKPartialAssistantMessage` 形状：`{type, event, parent_tool_use_id:null, session_id, uuid}`，`event` 是 Anthropic SSE 的 `RawMessageStreamEvent`）——`message_start`（含 `message.id`）→ 每条块的 `content_block_start` / `content_block_delta`（`text_delta` / `thinking_delta`；tool_use 的 `input_json_delta` 是 provider 侧增量原样透传，`is_final` 收口块）→ `content_block_stop` → `message_delta`（stop_reason / output_tokens 与快照帧同值）→ `message_stop`。要点：
 
 - **id 一致性（硬要求）**：`message_start.message.id` == 同一消息快照帧 `message.id`（消费方的流式/快照去重键）。跨帧关联在渲染器本地完成（`crates/wing/src/stdio/stream.rs`）：首增量铸 `msg_<hex>`、快照帧复用它产出 `message.id`（跨帧关联只发生在渲染器本地——核心事件面无需携带消息 id）；

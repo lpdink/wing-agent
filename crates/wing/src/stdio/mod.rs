@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::backend_config;
 use crate::cmd::start;
 use crate::gateway::GatewayClient;
+use crate::protocol::WingEvent;
 use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::{AgentOverride, CreateSessionRequest};
 
@@ -660,16 +661,31 @@ pub async fn run_stdio(args: StdioArgs) -> ExitCode {
     }
 }
 
+/// 一次性事件循环里「拿到一条事件之后」的全部裁决：`Some(code)` = 现在就退
+/// （本轮的终态已经落到 stdout），`None` = 继续等。
+///
+/// 独立成函数只有一个理由：退出裁决必须能脱离真实网关被钉住（`run_one_shot_loop`
+/// 的事件来源是活的 WS，单测注入不了脚本化事件流）。生产循环的循环体就是它。
+fn one_shot_step(renderer: &mut StdioRenderer, event: &WingEvent) -> Option<ExitCode> {
+    if renderer.handle_event(event) {
+        Some(renderer.exit_code())
+    } else {
+        None
+    }
+}
+
 /// 一次性事件循环（既有语义）：终态帧结束**进程**。
 async fn run_one_shot_loop(gateway: &mut GatewayClient, renderer: &mut StdioRenderer) -> ExitCode {
-    // 终态有两个来源，都由 renderer 落到 stdout 并返回 `true`：
-    // `turn_result`（正常/失败收口），以及 `interrupted`（被打断的轮次后端不发
-    // turn_result，前端补一条终态 result 帧——见 `handle_interrupted`）。
+    // 终态由 renderer 判定并落到 stdout：`turn_result`（正常/失败收口）、
+    // `interrupted`（被打断的轮次后端不发 turn_result，前端补一条合成帧）、
+    // 以及「一轮没有任何终态帧就收到 `done`」时补的失败帧（后端异常收口，
+    // 见 `StdioRenderer::handle_done`）。三者缺一都可能让这里永远等下去——
+    // WS 不会因为「这一轮没人再发事件」而关闭。
     loop {
         match gateway.recv_event().await {
             Some(event) => {
-                if renderer.handle_event(&event) {
-                    return renderer.exit_code();
+                if let Some(code) = one_shot_step(renderer, &event) {
+                    return code;
                 }
             }
             None => {
@@ -1624,6 +1640,233 @@ mod tests {
         assert!(
             policy.on_terminal(),
             "合成终态帧同样结束当前轮（EOF 已到 → 退出）"
+        );
+    }
+
+    /// 同一轮里 `turn_result` 与 `done` 都算轮末（后者的兜底见
+    /// `StdioRenderer::handle_done`）：`on_terminal` 因此被调用两次，幂等——
+    /// 常驻模式的既有退出语义不因多出来的那次调用改变。
+    #[test]
+    fn on_terminal_is_idempotent_within_a_turn() {
+        let mut policy = ExitPolicy::new(true);
+        assert!(!policy.on_terminal(), "轮结束而 stdin 还开着 → 继续等");
+        assert!(!policy.on_terminal(), "同一轮的第二次终态不改变结论");
+        assert!(policy.on_eof(), "空闲 + EOF → 立即退出");
+
+        let mut waiting = ExitPolicy::new(true);
+        assert!(!waiting.on_eof(), "首轮在飞：EOF 不能直接退");
+        assert!(waiting.on_terminal(), "首个终态到达 → 可以退");
+        assert!(waiting.on_terminal(), "第二个终态同样回「可以退」");
+    }
+
+    // ---- 一次性流程的退出裁决（`one_shot_step`） ----
+
+    fn event(value: serde_json::Value) -> WingEvent {
+        serde_json::from_value(value).expect("fixture decodes as a WingEvent")
+    }
+
+    fn turn_started_event() -> WingEvent {
+        event(serde_json::json!({
+            "type": "turn_started",
+            "session_id": "sess-1",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    fn assistant_event() -> WingEvent {
+        event(serde_json::json!({
+            "type": "assistant_turn",
+            "uuid": "u-1",
+            "content_blocks": [{"type": "text", "text": "hi"}],
+            "model": "test-model",
+            "stop_reason": "end_turn",
+            "session_id": "sess-1",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    fn turn_result_event(is_error: bool) -> WingEvent {
+        let mut value = serde_json::json!({
+            "type": "turn_result",
+            "uuid": "r-1",
+            "subtype": if is_error { "error_during_execution" } else { "success" },
+            "is_error": is_error,
+            "num_turns": 1,
+            "duration_ms": 5,
+            "session_id": "sess-1",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-1",
+        });
+        if is_error {
+            value["errors"] = serde_json::json!(["boom"]);
+        } else {
+            value["result"] = serde_json::json!("hi");
+        }
+        event(value)
+    }
+
+    fn backend_error_event() -> WingEvent {
+        event(serde_json::json!({
+            "type": "error",
+            "message": "处理消息失败：异常：boom",
+            "session_id": "sess-1",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    fn done_event() -> WingEvent {
+        event(serde_json::json!({
+            "type": "done",
+            "session_id": "sess-1",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    fn interrupted_event() -> WingEvent {
+        event(serde_json::json!({
+            "type": "interrupted",
+            "dropped_request_ids": [],
+            "session_id": "sess-1",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-1",
+        }))
+    }
+
+    fn build_renderer(format: OutputFormat) -> (StdioRenderer, stdout::CaptureSink) {
+        let buf = stdout::CaptureSink::default();
+        let renderer =
+            StdioRenderer::new(format, Instant::now(), "sess-1".into(), buf.sink(), false);
+        (renderer, buf)
+    }
+
+    /// 脚本化一次性流程：逐条把事件交给**生产循环体**（[`one_shot_step`]）。
+    /// `None` = 事件流耗尽仍未退出——生产上等价于永远阻塞在 `recv_event().await`
+    /// （`wing -p` 挂死）。
+    fn scripted_one_shot(renderer: &mut StdioRenderer, events: &[WingEvent]) -> Option<ExitCode> {
+        events.iter().find_map(|e| one_shot_step(renderer, e))
+    }
+
+    /// issue #246：后端只在轮末发 `error` + `done`（`agent/core.py::_run` 的兜底
+    /// except 形状，没有 `turn_result`）时一次性流程必须退出，并且留下一帧失败
+    /// 终态：只退出不补帧的话，消费方（SDK 的 `streamInput`）等的是每轮一条
+    /// result，同一个缺口只是换了位置。
+    #[test]
+    fn one_shot_exits_when_the_turn_ends_with_error_and_done() {
+        let events = [turn_started_event(), backend_error_event(), done_event()];
+
+        for format in [
+            OutputFormat::Text,
+            OutputFormat::Json,
+            OutputFormat::StreamJson,
+        ] {
+            let (mut renderer, buf) = build_renderer(format.clone());
+            assert_eq!(
+                scripted_one_shot(&mut renderer, &events),
+                Some(ExitCode::FAILURE),
+                "{format:?}: 本轮没有终态帧 → done 必须收口"
+            );
+
+            let out = buf.text();
+            if format == OutputFormat::Text {
+                assert_eq!(out, "", "text 模式：错误文本走 stderr，stdout 保持干净");
+                continue;
+            }
+            assert_eq!(out.lines().count(), 1, "{format:?}: 一条终态帧: {out}");
+            let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(parsed["type"], "result", "{format:?}");
+            assert_eq!(parsed["subtype"], "error_during_execution", "{format:?}");
+            assert_eq!(
+                parsed["errors"],
+                serde_json::json!(["处理消息失败：异常：boom"]),
+                "{format:?}: 后端错误原文进 errors"
+            );
+        }
+    }
+
+    /// 成功轮：退出点仍是 `turn_result`，`done` 根本不会被消费——帧序与退出码
+    /// 与今天逐字节一致（多出来的那条 result 就会是行为变化）。
+    #[test]
+    fn one_shot_exits_at_turn_result_on_the_success_path() {
+        let (mut renderer, buf) = build_renderer(OutputFormat::StreamJson);
+
+        assert_eq!(
+            scripted_one_shot(
+                &mut renderer,
+                &[
+                    turn_started_event(),
+                    assistant_event(),
+                    turn_result_event(false),
+                    done_event(),
+                ],
+            ),
+            Some(ExitCode::SUCCESS)
+        );
+
+        let frames: Vec<serde_json::Value> = buf
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 2, "assistant + result：{}", buf.text());
+        assert_eq!(frames[1]["subtype"], "success");
+    }
+
+    /// 被打断的轮：合成终态帧退出，退出码仍是 SUCCESS（中止是编排器的主动动作）。
+    #[test]
+    fn one_shot_exits_at_the_interrupted_frame_with_success() {
+        let (mut renderer, buf) = build_renderer(OutputFormat::StreamJson);
+
+        assert_eq!(
+            scripted_one_shot(
+                &mut renderer,
+                &[turn_started_event(), assistant_event(), interrupted_event()],
+            ),
+            Some(ExitCode::SUCCESS)
+        );
+        let last: serde_json::Value = buf
+            .text()
+            .lines()
+            .last()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .unwrap();
+        assert_eq!(last["terminal_reason"], "aborted_streaming");
+    }
+
+    /// 非终态事件一律继续等：`error` 不是轮末信号（它可能落在活的轮中间）。
+    #[test]
+    fn one_shot_keeps_waiting_on_events_that_do_not_end_the_turn() {
+        let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
+
+        assert_eq!(
+            scripted_one_shot(
+                &mut renderer,
+                &[
+                    turn_started_event(),
+                    assistant_event(),
+                    backend_error_event(),
+                    turn_result_event(true),
+                ],
+            ),
+            Some(ExitCode::FAILURE),
+            "错误轮仍有 turn_result：它才是退出点"
+        );
+
+        let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
+        assert_eq!(
+            scripted_one_shot(
+                &mut renderer,
+                &[
+                    turn_started_event(),
+                    assistant_event(),
+                    backend_error_event()
+                ],
+            ),
+            None,
+            "只有 error：继续等（事件流耗尽 = 生产上永远等下去）"
         );
     }
 }
