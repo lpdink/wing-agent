@@ -28,9 +28,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 
 import pytest
 
@@ -43,6 +41,7 @@ from wing_probe import (
     assert_compact_transition,
     message_semantics,
 )
+from wing_probe.compact import PENDING_KEY, wait_pending
 from wing_probe.history.view import COMPACT_PREFIX, HistoryView
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
@@ -60,13 +59,6 @@ SERVER_TOKENS = 1100
 #: 压缩产物（假 Provider 的压缩调用返回带 ``<summary>`` 的文本）。
 SUMMARY_TEXT = "Task: answer the user. State: two turns done. Next: continue."
 COMPACT_CONTENT = f"{COMPACT_PREFIX} {SUMMARY_TEXT}"
-
-#: aux kv 通道的 key（``ContextManager._PENDING_COMPACT_AUX_KEY``）。
-PENDING_KEY = "pending_compact"
-
-#: 轮询预算：后台压缩是本地一次 HTTP 往返，给足余量即失败可读。
-PENDING_DEADLINE = 20.0
-POLL_INTERVAL = 0.05
 
 #: 主调用与后台压缩**共用**的回复文本：压缩请求与主调用是并发发出的两条
 #: 请求（谁先到假 Provider 由事件循环调度决定），两轮的剧本因此写成同文本，
@@ -104,28 +96,6 @@ def _streamed(probe: Probe, model: str) -> list[LoggedRequest]:
 def _compact_calls(probe: Probe, model: str) -> list[LoggedRequest]:
     """某 model 的非流式留档（压缩调用）。"""
     return [request for request in probe.requests_for(model) if not request.stream]
-
-
-async def _wait_pending(
-    probe: Probe, session: Session, *, deadline: float = PENDING_DEADLINE
-) -> dict:
-    """轮询到 pending compact 已落盘（返回 aux 内容）。
-
-    失败报告带上请求留档：超时意味着"后台 task 没跑成 / 没落盘"，
-    留档能立刻区分"压缩请求压根没发出"与"发出但结果没落盘"。
-    """
-    observed: dict | None = None
-    expires = time.monotonic() + deadline
-    while time.monotonic() < expires:
-        observed = probe.history(session).aux(PENDING_KEY)
-        if observed is not None:
-            return observed
-        await asyncio.sleep(POLL_INTERVAL)
-    raise AssertionError(
-        f"no pending compact under key {PENDING_KEY!r} within {deadline:.0f}s "
-        f"(aux path: {probe.history(session).aux_path(PENDING_KEY)}); "
-        f"requests: {probe.requests.summary()}"
-    )
 
 
 def _assert_early_compact_shape(probe: Probe, model: str, pending: dict) -> None:
@@ -207,7 +177,7 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
 
     # 第二轮：服务端 usage 跨过 early 阈值 → 后台压缩（主调用照常跑完）。
     await session.chat("beta")
-    pending = await _wait_pending(probe, session)
+    pending = await wait_pending(probe, session)
     _assert_early_compact_shape(probe, EARLY_MODEL, pending)
 
     # pending 的内容 = 被压缩区间两端（最后一条 user 消息之前的部分）——尚未生效。
@@ -260,7 +230,7 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
-    pending = await _wait_pending(probe, session)
+    pending = await wait_pending(probe, session)
     _assert_early_compact_shape(probe, RESTART_MODEL, pending)
 
     before_apply = probe.history(session)
@@ -342,7 +312,7 @@ async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
-    await _wait_pending(probe, session)
+    await wait_pending(probe, session)
 
     before_apply = probe.history(session)
     retained_before = [
@@ -432,7 +402,7 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
 
     await session.chat("alpha")
     await session.chat("beta")
-    await _wait_pending(probe, session)
+    await wait_pending(probe, session)
 
     # 换入（gamma 轮）+ 这一轮没有真实 usage。
     before_apply = probe.history(session)
@@ -495,7 +465,7 @@ async def test_compact_token_baseline_survives_restart(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
-    await _wait_pending(probe, session)
+    await wait_pending(probe, session)
     before_apply = probe.history(session)
     await session.chat("gamma")
     _assert_applied(probe, session, before_apply, model=BASELINE_RESTART_MODEL)

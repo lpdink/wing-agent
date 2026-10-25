@@ -106,6 +106,8 @@ class ContextManager:
         self._pending_compact_task: asyncio.Task[None] | None = None
         self._pending_compact_result: PendingCompact | None = None
         self._pending_compact_result = self._load_pending_compact()
+        # 已就「悬空的 usage 边界」告警过的 uuid（同一个边界只报一次日志）。
+        self._usage_trust_warned: str | None = None
 
         # ── 工具声明集（LLM 可见视图）──────────────
         # 由 on_tools_changed() 管理。冻结策略：链非空时不动（保护 KV prefix cache），
@@ -576,6 +578,11 @@ class ContextManager:
 
         摘要节点取代 msgs[:end_idx+1]（区间起点由它的 unzip_last_uuid
         编码），relink msgs[end_idx+1 :]。
+
+        同时维护 usage 边界（见 `_usage_trust_start`）：换入把「压缩前窗口」的
+        usage 留在链上（保留区整条复制、`usage` 随行），所以摘要节点声明本次换入
+        的信任起点（换入时刻的链尖）；保留区自带的边界随 relink 重映射（保留区里的
+        rewind 回退行），指到被压缩区间的清掉——照抄旧 uuid 会指向离链的节点。
         """
         pc = self._pending_compact_result
         if pc is None:
@@ -607,9 +614,10 @@ class ContextManager:
         # 复制行换了 uuid，边界必须跟着重映射——照抄旧值就指向离链的节点，读侧按
         # "边界不可解析"一条都不采信，此后落链的真实 usage 全部失效。指到被压缩
         # 区间（复制行之外）的边界一律清掉（那段窗口已经不存在了）。
-        relinked_uuids: dict[str | None, str | None] = {
-            msg.uuid: copy.uuid for msg, copy in zip(tail, relink_tail)
-        }
+        relinked_uuids: dict[str, str] = {}
+        for msg, copy in zip(tail, relink_tail):
+            if msg.uuid is not None and copy.uuid is not None:
+                relinked_uuids[msg.uuid] = copy.uuid
         for copy in relink_tail:
             boundary = copy.usage_boundary_uuid
             if boundary is not None:
@@ -823,7 +831,7 @@ class ContextManager:
         """
         positions = {node.uuid: index for index, node in enumerate(chain)}
         start = 0
-        unresolved = False
+        dangling: str | None = None
         for node in chain:
             if not isinstance(node, Message):
                 continue
@@ -832,11 +840,24 @@ class ContextManager:
                 continue
             resolved = positions.get(boundary)
             if resolved is None:
-                unresolved = True
+                dangling = boundary
                 continue
-            unresolved = False
+            dangling = None
             start = max(start, resolved + 1)
-        return None if unresolved else start
+        if dangling is not None:
+            # 降级要留痕：此后 token 口径全面退回估算，而 `context_stats` 看起来
+            # 一切正常（数字小一档）——没有这条日志就没有任何线索。同一个悬空
+            # 边界只报一次（本函数每个请求调两次）。
+            if dangling != self._usage_trust_warned:
+                self._usage_trust_warned = dangling
+                log.warning(
+                    "usage 信任边界悬空（活跃链上找不到 %s）：token 口径退回本地估算，"
+                    "直到下一次窗口重置（压缩 / rewind）产出可解析的边界",
+                    dangling,
+                )
+            return None
+        self._usage_trust_warned = None
+        return start
 
     def get_context_window(self) -> list[Message]:
         """返回当前上下文窗口——活跃链的 Message 投影（事件节点过滤）。

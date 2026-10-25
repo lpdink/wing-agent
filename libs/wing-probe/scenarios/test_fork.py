@@ -17,9 +17,7 @@ session id（``forked_from``），而不是"子侧 == 源侧当前值"。
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from datetime import datetime
 
 import pytest
@@ -35,6 +33,7 @@ from wing_probe import (
     fork_metadata,
     node_semantics,
 )
+from wing_probe.compact import wait_pending
 
 INTEGRITY_MODEL = "probe/fork-integrity"
 METADATA_MODEL = "probe/fork-metadata"
@@ -512,11 +511,7 @@ async def test_fork_inside_retained_tail_keeps_token_baseline(probe: Probe) -> N
     await session.chat("alpha")
     await session.chat("beta")
     # 等后台压缩把待生效状态落盘（apply 在下一轮请求里发生）。
-    deadline = 20.0
-    expires = time.monotonic() + deadline
-    while probe.history(session).aux("pending_compact") is None:
-        assert time.monotonic() < expires, probe.requests.summary()
-        await asyncio.sleep(0.05)
+    await wait_pending(probe, session)
 
     await session.chat("gamma")
     source = probe.history(session)

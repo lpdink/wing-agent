@@ -18,6 +18,7 @@ head。`_last_prompt_tokens` 是 `resolve_context_tokens` 的唯一来源（压�
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -308,7 +309,12 @@ async def test_legacy_compact_node_keeps_historical_baseline(tmp_dir):
 
 
 def test_dangling_boundary_trusts_no_usage(tmp_dir):
-    """边界的指针不在链上（rewind 剪断 / 日志损坏）→ 一条都不采信。"""
+    """边界的指针不在链上（rewind 剪断 / 日志损坏）→ 一条都不采信，且留痕。
+
+    降级是静默的风险来源：此后 token 口径全面退回估算，而 `context_stats` 看起来
+    正常（只是数字小一档）。告警只报一次（本函数每个请求调两次，不刷屏）——
+    `wing.common.logger` 不向上传播（`propagate = False`），所以断言打在 logger 上。
+    """
     cm = _make_cm(tmp_dir)
     head = Message(role="user", content="alpha")
     cm.add_message(head)
@@ -318,7 +324,14 @@ def test_dangling_boundary_trusts_no_usage(tmp_dir):
     cm.add_message(Message(role="user", content="u1"))
     cm.add_message(_turn_reply("stale reply"))  # 压缩前的窗口（1100）
 
-    assert cm._last_prompt_tokens() is None
+    with patch("wing.context.manager.log") as mock_log:
+        assert cm._last_prompt_tokens() is None
+        assert cm._last_prompt_tokens() is None
+
+    assert mock_log.warning.call_count == 1, mock_log.warning.call_args_list
+    assert "gone-with-the-rewind" in str(mock_log.warning.call_args), (
+        mock_log.warning.call_args
+    )
 
 
 @pytest.mark.asyncio

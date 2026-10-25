@@ -109,11 +109,14 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
         if isinstance(uuid, str):
             uuid_map[uuid] = str(uuid4())
     # 前缀末条记录（= 子会话加载后的活跃链尖）：前缀外引用没有更精确的落点。
+    # 末条记录缺 uuid（损坏日志）时退到前缀里**最后一条有 uuid 的记录**——宁可钉在
+    # 次末条，也不删键：删键 = 「链上没有边界」→ 信任整链，正是 #247 消灭的错口径。
     prefix_tip_uuid: str | None = None
-    if clones:
-        last_uuid = clones[-1].get("uuid")
+    for clone in reversed(clones):
+        last_uuid = clone.get("uuid")
         if isinstance(last_uuid, str):
             prefix_tip_uuid = uuid_map.get(last_uuid)
+            break
     for clone in clones:
         for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
             value = clone.get(key)

@@ -609,6 +609,28 @@ class TestRemapOutOfPrefixReferences:
         assert compact_clone["usage_boundary_uuid"] == beta_clone["uuid"]
         assert compact_clone["unzip_last_uuid"] == beta_clone["uuid"]
 
+    def test_out_of_prefix_boundary_pins_to_last_uuid_bearing_record(self):
+        """前缀末条记录缺 uuid（损坏日志）→ 钉到前缀里最后一条**有 uuid** 的记录。
+
+        删键会落进「链上没有边界」→ 信任整链（#247 的错口径）。宁可钉在次末条：
+        子会话链上的东西仍然全部早于那次换入。
+        """
+        from wing.session.manager import _remap_record_uuids
+
+        records = [
+            {
+                "role": "assistant",
+                "content": "[Compact] summary",
+                "uuid": "c1",
+                "unzip_last_uuid": "m1",
+                "usage_boundary_uuid": "outside-prefix",
+            },
+            {"role": "user", "uuid": "m1", "content": "beta", "parent_uuid": "c1"},
+            {"role": "user", "content": "corrupt record without uuid"},
+        ]
+        compact_clone, beta_clone, _corrupt = _remap_record_uuids(records)
+        assert compact_clone["usage_boundary_uuid"] == beta_clone["uuid"]
+
     def test_inside_prefix_usage_boundary_is_remapped(self):
         """边界在前缀内 → 与 parent / unzip 同样走重映射（不留源会话 uuid）。"""
         from wing.session.manager import _remap_record_uuids

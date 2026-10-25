@@ -15,9 +15,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 
 import pytest
 
@@ -29,6 +27,7 @@ from wing_probe import (
     assert_rewind_transition,
     is_event,
 )
+from wing_probe.compact import wait_pending
 
 MIDDLE_MODEL = "probe/rewind-middle"
 CONTINUE_MODEL = "probe/rewind-continue"
@@ -448,10 +447,7 @@ async def test_rewind_keeps_token_baseline_recoverable(probe: Probe) -> None:
     session = await probe.session(model=REWIND_TOKENS_MODEL)
     await session.chat("alpha")
     await session.chat("beta")
-    expires = time.monotonic() + 20.0
-    while probe.history(session).aux("pending_compact") is None:
-        assert time.monotonic() < expires, probe.requests.summary()
-        await asyncio.sleep(0.05)
+    await wait_pending(probe, session)
     await session.chat("gamma")  # 换入 + 本轮回复
 
     gamma = next(
