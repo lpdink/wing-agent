@@ -48,7 +48,7 @@ REWIND_TO_ROOT_CONTENT = "[rewind_to_root]"
 
 #: 链拓扑 + 写入噪声字段：语义比较、事件载荷对账时剔除。
 TOPOLOGY_KEYS: frozenset[str] = frozenset(
-    {"uuid", "parent_uuid", "unzip_last_uuid", "ts"}
+    {"uuid", "parent_uuid", "unzip_last_uuid", "usage_boundary_uuid", "ts"}
 )
 
 #: 三种 content block 的字段默认值（缺失时补齐，避免"少一个键"被当成差异；
@@ -292,9 +292,12 @@ def message_semantics(record: Mapping[str, Any]) -> dict[str, Any]:
     ``tool_calls``（id/name/arguments/arguments_error）/ ``tool_call_id`` /
     ``content_blocks``（按 type 补默认字段）。
 
-    不参与比较：``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` / ``ts``
-    （链拓扑与写入噪声）、``usage`` / ``stop_reason``（provider 响应审计，
-    不属于上下文事实，且实现的 rewind 复制行不复制它们）。
+    不参与比较：``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` /
+    ``usage_boundary_uuid`` / ``ts``（链拓扑与写入噪声）、``usage`` /
+    ``stop_reason``（provider 响应审计，不属于上下文事实，且实现的 rewind
+    复制行不复制它们）。``usage_boundary_uuid`` 是 token 口径的锚点而不是
+    上下文事实，它由 ``scenarios/test_auto_compact.py`` 与
+    ``scenarios/test_rewind.py`` 直接对**原始记录**断言。
 
     assistant 的派生扁平字段先按 ``content_blocks`` 补齐（见
     :func:`derive_flat_fields`）：存量旧形态与新的规范形因此呈现同一份事实，

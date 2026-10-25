@@ -101,9 +101,9 @@ class TrackedList(Generic[T]):
           blocks）。两条规则在 canonical_record 里，是因为 fork 的**原始 dict
           复制**也要走同一规范形（那里没有 pydantic 兜着）。
 
-        链拓扑与记录判别字段（role / uuid / parent_uuid / unzip_last_uuid）
-        在非 null 时保留。加载路径对"键缺失"与"值为 null"一视同仁
-        （TrackedList.load 用 record.get，Message._route_flat 用 pop(...,None)）。
+        链拓扑与记录判别字段（role / uuid / parent_uuid / unzip_last_uuid /
+        usage_boundary_uuid）在非 null 时保留。加载路径对"键缺失"与"值为 null"
+        一视同仁（TrackedList.load 用 record.get，Message._route_flat 用 pop(...,None)）。
         """
         entry = item.model_dump(mode="json", exclude_none=True)
         entry.pop("target", None)

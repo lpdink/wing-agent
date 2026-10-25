@@ -59,6 +59,7 @@ def message(
     tool_call_id: str | None = None,
     usage: dict[str, Any] | None = None,
     unzip: str | None = None,
+    boundary: str | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "role": role,
@@ -68,6 +69,8 @@ def message(
     }
     if unzip is not None:
         record["unzip_last_uuid"] = unzip
+    if boundary is not None:
+        record["usage_boundary_uuid"] = boundary
     if role == "assistant":
         blocks: list[dict[str, Any]] = []
         if reasoning:
@@ -1053,6 +1056,40 @@ def test_fork_allows_child_turns_after_the_fork(tmp_path: Path) -> None:
     assert material["chain_length"] == 6  # 子链含 fork 之后的演进
     assert material["trailing_uuids"] == ["cx1", "cx2", "cx3"]
     child.assert_tool_pairing()
+
+
+def test_fork_pins_out_of_prefix_boundary_to_the_prefix_tip(tmp_path: Path) -> None:
+    """边界指向前缀外 → 钉到**前缀末条**记录，而不是子记录集末条。
+
+    子会话 fork 之后继续跑（``allow_trailing=True``）时末尾是它自己的新记录——
+    期望值若取子记录集末条就成了凭空生成的 uuid（假失败）。
+    """
+    source_records = [
+        message("user", uuid="u1", content="alpha"),
+        message("assistant", uuid="a1", parent="u1", content="reply one"),
+        message(
+            "assistant",
+            uuid="c1",
+            content="[Compact] summary",
+            unzip="a1",
+            boundary="t2",  # 换入时刻的链尖 = t2（在 fork 点之后 → 前缀外）
+        ),
+        message("user", uuid="t1", parent="c1", content="beta"),
+        message("user", uuid="t2", parent="t1", content="gamma"),
+    ]
+    write_session(tmp_path, SOURCE_SESSION, source_records, SOURCE_METADATA)
+    # fork at t2：前缀 = [u1, a1, c1, t1]，边界钉到前缀末条（= t1 的重映射 uuid）
+    mapping = {**FORK_UUID_MAP, "c1": "cc1", "t1": "ct1"}
+    child_records = remap(source_records[:4], mapping)
+    child_records[2]["usage_boundary_uuid"] = mapping["t1"]
+    child_records.append(message("user", uuid="cx1", parent="ct1", content="delta"))
+    write_session(tmp_path, "sess-child", child_records, child_metadata())
+
+    source = view_of(tmp_path, SOURCE_SESSION)
+    child = view_of(tmp_path, "sess-child")
+    material = assert_fork_of(source, child, "t2", allow_trailing=True)
+    assert material["prefix_length"] == 4
+    assert material["trailing_record_uuids"] == ["cx1"]
 
 
 def test_fork_snapshot_fields_can_be_narrowed(tmp_path: Path) -> None:

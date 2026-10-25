@@ -26,6 +26,7 @@ from wing_probe import (
     Usage,
     assert_rewind_transition,
     is_event,
+    wait_pending,
 )
 
 MIDDLE_MODEL = "probe/rewind-middle"
@@ -110,7 +111,12 @@ async def test_middle_rewind_chain_shape_and_draft(probe: Probe) -> None:
     assert "usage" in source and source["usage"]["prompt_tokens"] == 1234, source
     assert "usage" not in copy, copy
     assert "stop_reason" not in copy, copy
-    assert set(copy) <= set(source) - {"usage", "stop_reason"}, sorted(copy)
+    # 唯一允许复制行新增的键是 usage 边界（链拓扑，不是上下文事实）——
+    # 回退行是新链的 tip，必须边界"此后 usage 度量在当前窗口上"（issue #247）。
+    assert copy.get("usage_boundary_uuid") == copy["uuid"], copy
+    assert set(copy) <= set(source) - {"usage", "stop_reason"} | {
+        "usage_boundary_uuid"
+    }, sorted(copy)
 
     # 目标及其后续被移出活跃链（但仍留在记录集里）。
     after_chain_uuids = [record["uuid"] for record in chain]
@@ -362,6 +368,9 @@ async def test_rewind_after_compact_keeps_region_reachable(probe: Probe) -> None
     rewind_row = after.by_uuid[material["copy_uuid"]]
     assert rewind_row["content"].startswith("[Compact]"), rewind_row
     assert rewind_row.get("unzip_last_uuid") is not None, rewind_row
+    # usage 边界跟着走：回退行是新链的根，边界重设为自己——继承压缩节点那份旧边界
+    # 会指向已被这次回退剪掉的节点，让 token 口径永久退回估算（issue #247）。
+    assert rewind_row.get("usage_boundary_uuid") == rewind_row["uuid"], rewind_row
 
     # 候选保持完整：压缩前的 User Message 与 [Compact] 标记都还在
     targets_after = [
@@ -385,3 +394,81 @@ async def test_rewind_after_compact_keeps_region_reachable(probe: Probe) -> None
         "restart",
         "restart reply",
     ], probe.history(session).describe()
+
+
+REWIND_TOKENS_MODEL = "probe/rewind-token-baseline"
+REWIND_TOKENS_SUMMARY = "Task: answer the user. State: two turns done."
+
+#: 双阈值（apply = 窗口，early = 窗口 − 保留区 = 600）。
+TOKENS_CONTEXT_WINDOW = 1000
+TOKENS_KEEP_RECENT = 400
+TOKENS_COMPACT_WINDOW = TOKENS_CONTEXT_WINDOW - TOKENS_KEEP_RECENT
+
+#: 压缩前窗口 / 回退之后那一轮的服务端口径。
+PRE_COMPACT_TOKENS = 1100
+POST_REWIND_TOKENS = 300
+
+
+@pytest.mark.probe_env(
+    models=[REWIND_TOKENS_MODEL],
+    context_window_tokens=TOKENS_CONTEXT_WINDOW,
+    keep_recent_tokens=TOKENS_KEEP_RECENT,
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_rewind_keeps_token_baseline_recoverable(probe: Probe) -> None:
+    """压缩后回退：口径不信压缩前的 usage，但下一轮真实 usage 立刻生效（红线）。
+
+    回退是用户最常见的动作之一，它的代价必须有界：回退行边界"信任从我之后恢复"
+    （`usage_boundary_uuid` = 自己），所以
+
+    - 回退当下：链上残留的保留区 usage 是**压缩前**窗口的，`/api/session/info` 的
+      `context_stats.total_tokens` 必须是压缩后窗口的估算（不是 1100）；
+    - 下一轮服务端回带 usage 之后：口径立刻回到服务端值（不是永久停在估算）。
+    """
+    script = (
+        Turn.of(text="reply one", usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS)),
+        Turn.of(
+            text=f"<summary>{REWIND_TOKENS_SUMMARY}</summary>",
+            usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS),
+        ),
+        Turn.of(
+            text=f"<summary>{REWIND_TOKENS_SUMMARY}</summary>",
+            usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS),
+        ),
+        Turn.of(
+            text="post compact reply", usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS)
+        ),
+        Turn.of(
+            text="after rewind reply", usage=Usage(prompt_tokens=POST_REWIND_TOKENS)
+        ),
+    )
+    probe.register(REWIND_TOKENS_MODEL, *script)
+    session = await probe.session(model=REWIND_TOKENS_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    await wait_pending(probe, session)
+    await session.chat("gamma")  # 换入 + 本轮回复
+
+    gamma = next(
+        target
+        for target in (await session.branches())["targets"]
+        if target["content"] == "gamma"
+    )
+    response = await session.rewind(gamma["uuid"])
+    assert response["draft"] == "gamma", response
+    after = probe.history(session)
+    rewind_row = after.active_chain()[-1]
+    assert rewind_row["usage_boundary_uuid"] == rewind_row["uuid"], rewind_row
+
+    info = await session.info()
+    assert info["context_stats"]["total_tokens"] < TOKENS_COMPACT_WINDOW, info[
+        "context_stats"
+    ]
+
+    result = await session.chat("delta")
+    assert result.data["result"] == "after rewind reply", result.data
+    info = await session.info()
+    assert info["context_stats"]["total_tokens"] == POST_REWIND_TOKENS, info[
+        "context_stats"
+    ]

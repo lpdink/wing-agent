@@ -99,6 +99,10 @@ wing -p "列出文件" --output-format stream-json  # 实时 NDJSON 流
 
 `--agent <name>`（名字来自 `wing agents`）选会话的 agent 模板（缺省 = 网关默认，与 `wing run --agent` 同词汇同口径）：只作用于创建路径——resume / 收养既有 `--session-id` 时它不生效（会话保持自己的 agent，日志记一条 warning）。
 
+**终态帧（一轮的收口）**：`result` 是每轮的终止信号，来源有三个——正常 / 失败轮的 `turn_result`；被打断轮次的**合成**终态帧（后端对被打断的轮次不发 `turn_result`）；以及**轮末信号 `done` 之前本轮一个终态帧都没有**时补的失败终态帧（`subtype=error_during_execution`、`errors=[本轮后端 `error` 的原文]`（没有 `error` 时用一句兜底文案说明「这一轮没有终态帧」）、不带 `result`、退出码非零；text 模式的错误文本走 stderr，stdout 只有协议帧）。第三条是 #246 的收口：`done` 覆盖 `run_turn` 的**全部**收口路径（唯一例外是被打断的轮次——取消从 `except Exception` 之外逃出 `run_turn`，那条路径由 `interrupted` 的合成帧收口），而 `agent/core.py::_run` 的兜底 except 只发 `error` + `done`、不发 `turn_result`，只认 `turn_result` 会让一次性流程在 WS 保持打开时永久等下去。账本以轮为单位，在**三个关轮点**各自归零（`turn_started`；`done`；`interrupted`——后端对被打断的轮次既不发 `turn_result` 也不发 `done`）：兜底路径可能在轮边界之前就崩（连 `turn_started` 都没有），被打断的轮次前面可能还有一轮的终态帧没等到 `done`，这两种形状都要能从零记账。本轮已有终态帧之后再收到 `done` 只关轮、**不**再报一次「本轮结束」（否则常驻模式下一条迟到的 `done` 会替下一条消息的轮收口，提前退出并丢掉那一轮的输出）。
+
+**同一族仍会挂起的路径**（都不在 #246 的修复面内，登记在此以免被当成"已经没有了"）：① 空 content 投递——后端 `run_turn` 对空输入直接 return，不发任何事件；② worker 被 `BaseException` 掀翻——见上文 `_on_worker_done` 的已知边界，连 `done` 都没有；③ 网关静默失联——WS 保持打开但不再有事件。另外两条**不是** stdio 的问题，但值得放在一起看：④ 帧级 `error`（`gateway/routes/ws.py` 在 `runtime.post` / 帧校验失败时直发 `ErrorEvent`，两者都没有）只作用于**经 WS 上行**的前端（TUI / ACP 各自把 `error` 当终态），而 stdio 的上行一律走 HTTP（`POST /api/session/send`），失败在那里就响亮返回；⑤ 常驻模式下一次兜底收口（`error` + `done`、无 `turn_started`）会把驱动侧的在飞标记清掉，若此时 stdin 已关闭，进程按失败码收口——要走到"消息还排在 inbox 里却被丢弃"的场景，前提是 `run_turn` 在 `inbox.get()` 之前就抛异常（现实几乎不可达），且此刻的观感是**响亮的失败**（失败终态帧 + 非零退出码），不是静默丢输出。
+
 **流式增量**（`--include-partial-messages`）：置位时，每条 assistant 消息的快照帧（`assistant`）之前先逐条输出 `stream_event` 帧（`SDKPartialAssistantMessage` 形状：`{type, event, parent_tool_use_id:null, session_id, uuid}`，`event` 是 Anthropic SSE 的 `RawMessageStreamEvent`）——`message_start`（含 `message.id`）→ 每条块的 `content_block_start` / `content_block_delta`（`text_delta` / `thinking_delta`；tool_use 的 `input_json_delta` 是 provider 侧增量原样透传，`is_final` 收口块）→ `content_block_stop` → `message_delta`（stop_reason / output_tokens 与快照帧同值）→ `message_stop`。要点：
 
 - **id 一致性（硬要求）**：`message_start.message.id` == 同一消息快照帧 `message.id`（消费方的流式/快照去重键）。跨帧关联在渲染器本地完成（`crates/wing/src/stdio/stream.rs`）：首增量铸 `msg_<hex>`、快照帧复用它产出 `message.id`（跨帧关联只发生在渲染器本地——核心事件面无需携带消息 id）；
@@ -401,8 +405,9 @@ draft（`_record_draft`）、`render_probe --jsonl`（调试工具）、probe �
   - **回得去**：被压缩区间、rewind 留在记录里的分叉都随行走（子会话的 `/fork` 候选与源会话一致，仍能回到压缩前的 User Message）；
   - **不上链**：活跃链由 tip 沿 `parent_uuid` 回溯自然得出——压缩节点是根（`parent_uuid=None` + `unzip_last_uuid` 指向区间末），已摘要内容不复活；选压缩**之前**的节点时压缩节点被切在前缀之外，子会话里压缩仿佛没发生过。
   没有链遍历（`walk_full_chain` / `trace_chain` 都退出 fork 路径）：活跃链是加载语义的**结果**，不是拷贝时要算的东西。
-- **压缩节点的 `unzip_last_uuid` 是唯一编码**：任何复制 / 重链路径都必须把它带上——丢了，被压缩区间（乃至整段历史）就从 `/rewind`、`/fork` 候选里消失。已覆盖的两条路径：fork（记录前缀拷贝 + 全量重映射，见上）与 rewind（回退行复制 parent 时带上，回退到"压缩后第一条消息"不再塌候选）。
+- **压缩节点的 `unzip_last_uuid` 是压缩区间的唯一编码**：任何复制 / 重链路径都必须把它带上——丢了，被压缩区间（乃至整段历史）就从 `/rewind`、`/fork` 候选里消失。已覆盖的两条路径：fork（记录前缀拷贝 + 全量重映射，见上）与 rewind（回退行复制 parent 时带上，回退到"压缩后第一条消息"不再塌候选）。
 - 压缩双阈值（`context_window_tokens` 触发应用、`keep_recent_tokens` 是保留区）是**模型级声明**（`providers[].models[]`，唯一配置来源）：会话构造与换模型时解析进 `Compactor`——生效窗口跟随当前模型，`/api/session/info` 的 `context_window_tokens` 即此刻的生效值；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。换模型只改后续判定：已生成的 pending compact 是链快照的预计算（切点算好、uuid 自校验），换窗口不重算它，apply 只看新窗口。
+- **token 口径锚在链上的 `usage_boundary_uuid` 边界上**（`ContextManager._usage_trust_start`）：压缩换入会把「压缩前窗口」的 `prompt_tokens` 留在链上（保留区整条复制、`usage` 随行），而保留区虽在链序上位于压缩节点之后，它的 usage 同样产生于换入之前（prompt 里含已被摘要掉的区段）。边界记的是**信任从这里恢复的那个节点**：自动压缩写「换入时刻的链尖」（保留区末条，没有保留区时是压缩节点自己）、手动压缩写自己、rewind 回退行写自己（压缩换入重链接保留区时，保留区里的边界随 relink 重映射）。读取侧取**所有可解析边界里最靠后的那个起点**，只采信它之后的服务端 usage；链上没有边界（引入该字段之前的存量记录）→ 全链可采信（历史口径，下一次压缩或 rewind 即带边界）；最后一条边界不可解析（被 rewind 剪断 / 日志损坏）→ 一条都不采信、退回估算。这份 `usage` 本身是**审计事实**（那一轮服务端回了什么），照旧留在记录里，只是不再当作"当前 context 大小"。
 
 **KV cache 的已知边界（有意不处理）**：
 
