@@ -12,7 +12,7 @@
 
 | 命令 | 做什么 |
 |------|--------|
-| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 -n 核数`） |
+| `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 --dist loadfile -n 1.5×核数`） |
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
@@ -25,18 +25,21 @@
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `PROBE_WORKERS` | 核数 | 场景并行度（`make test-probe` 的 `-n`）。取法见下面「为什么敢并行」：快停机之后每例只剩一个解释器的固定成本，曲线在核数上就平了；`make test` 里四组共用同一批核，超订只是把自己的时间换成别的组的时间，所以默认不超订。要更大用 `PROBE_WORKERS=<n>` 显式给（每 worker 约 0.1~0.2GB）。`WING_TEST_SERIAL=1` 同样归串行 |
+| `PROBE_WORKERS` | `1.5×核数` | 场景并行度（`make test-probe` 的 `-n`，派发方式固定为 `--dist loadfile`）。取法见下面「为什么敢并行」：曲线在 1.5× 核数附近拐平，再往上只加 CPU 不加墙钟。要更大/更小用 `PROBE_WORKERS=<n>` 显式给（每 worker 约 0.1~0.2GB）。`WING_TEST_SERIAL=1` 同样归串行 |
 | `WING_GATEWAY_BIN` | 空 | 显式指定网关可执行文件（覆盖解析顺序）；指向不存在的文件直接报错，不静默回落 |
 | `PROBE_DUMP` | `on-fail` | 现场转储策略：`on-fail` / `always` / `never`（非法值报错） |
 
-**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口；并行不改变隔离语义，共享环境才会。默认**按核数、不超订**（理由见本节结论），依据（同窗口、本机 12 核、3 轮中位数；窗口内有其它 agent 在跑，绝对值只可同窗口比）：
+**为什么敢并行**：场景之间零共享——各自的 tmp `WING_HOME`、各自的网关子进程、各自的假 Provider、各自 OS 分配的端口；并行不改变隔离语义，共享环境才会。（同窗口、本机 12 核、3 轮中位数；窗口内有其它 agent 在跑，绝对值只可同窗口比。）
 
-- 快停机之后每例的固定成本只剩「一个新解释器把网关的导入图跑一遍」（CPU 密集，见「已知取舍」），latency:CPU ≈ 1.1——可摊的等待不多；
-- 安静窗口（负载 4→13，3 轮）里 `-n 12 / 20 / 24` 的墙钟中位数是 **22.1 / 20.4 / 20.2s**，CPU（user+sys）中位数是 **104 / 123 / 129s**：超订到 2× 核数换来 ~8% 墙钟、付 ~20% CPU；
-- 同一机器的重负载窗口（负载 5→24 与 26→50 两批）里这个差距被噪声吃掉：`-n 12/16/20/24/28` 那批的中位数是 22.8 / 26.1 / 24.6 / 25.1 / 24.0s，配置间极差 3.3s 而轮内极差 1.1~13.5s，成对交错 `-n 24` vs `-n 12` 我方 8 对全胜、另一路审查者 5 对得 2 胜 2 负 1 平 ⇒ **跨窗口不可复算**；
-- 自身 CPU 随并行度上升：串行一轮 user 90.6s + sys 16.1s（≈107s）→ `-n 12` ≈104~130s → `-n 20` ≈123~135s（各窗口实测，含争抢放大）。
+**① 派发方式：`--dist loadfile`（按文件），不是 xdist 默认的 `load`（按单条用例）。** 这一组是 **straggler 决定的**：worker 之间不偷活，队列在约 9s 就发空，剩下的墙钟等于「最慢那个 worker 手里的用例堆」。`load` 的逐条派发会让同一个 worker 攒到整族慢用例——安静窗口实测：最慢 worker 26 例共 21.1s，其中 `test_wake_restart` 6.3s + `test_wake_timer` 3.8s（两个重尾用例落在同一个 worker），而三个 worker 在 8.4s 就没活了；按文件派发把慢族的累积上限压到「一个文件」（1~3 例），最慢 worker 落到 18.2s。同窗口交错 3 轮中位数：`load` `-n 12 / 20` = 22.8 / 20.2s → `loadfile` 19.2 / 17.3s（`loadscope` 在 `-n 12` 是 18.2s，与 `loadfile` 同侧 ⇒ 起作用的确实是「文件/模块」这一级粒度）。
 
-结论：**默认取核数**——它就是 CPU 最省的那一档，而 20% 的额外 CPU 在 `make test` 里是从 python / rust / ts 的预算里扣的（probe 已经是尾组，抢别人的核只是换位置，不是白赚）。**要那 8% 就显式给 `PROBE_WORKERS=20`（或 24）**——这一档的最优值已被测到（~2× 核数），只是没把它做成默认。**残余风险（未单独称量）**：`make test` 那条编队本身已经是 1.5× 以上超订（python 6 + probe 核数 + rust + ts 对 12 核），编队内的取值没有单独 A/B——若别的组被 probe 饿到，收口侧应显式传 `PROBE_WORKERS`；正确的一步是全局配平，不是让 probe 单独超订。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
+**机制不是「用例跑得更快」**，三条实测把它排除掉：两种派发下 worker 的忙碌总时间相同（159.5s vs 163.0s）、用例之间的空闲≈0（0.02~0.07s/worker，所以不是逐条派发的往返延迟）、首个用例都在 0.2~0.5s 开跑（所以不是收集阶段），而墙钟在两个模式下都 ≈ 最慢 worker 的忙碌时间 + 0.5s。
+
+**② worker 数 = 1.5×核数。** 快停机之后每例只剩一次网关启动（~0.22s：新解释器把导入图跑一遍，CPU 密集），曲线在 1.5× 附近拐平——同窗口 3 轮中位数：`-n 12/14/16/18/20/24` → **19.2 / 18.3 / 17.7 / 17.4 / 17.3 / 18.0s**，CPU（user+sys）**104 / 114 / 121 / 127 / 129 / 136s**。`-n 18`（1.5×）与 `-n 20` 的墙钟差 0.04s（在噪声内）而 CPU 差 2s，2× 反而回退 0.7s，所以取 1.5×。
+
+**③ 跨文件状态**：`loadfile` 会让同一个 worker **连续**跑多个文件，所以「用例之间零共享」必须真的成立（而不是靠"每条用例都可能落到不同 worker"）。约束是本包的设计本身：每个用例自带 tmp `WING_HOME` + 网关子进程 + 假 Provider，没有任何用例改 `os.environ` / `cwd` / 模块级全局（改了也走 `monkeypatch` 自动还原）。实测两遍：串行 589 例（**一个进程**跑完全部文件）全绿；**逆序文件顺序**（改变所有"前一个文件"的配对）全绿。
+
+**残余风险（未单独称量）**：`make test` 那条编队本身已经是 1.5× 以上超订（python 6 + probe 1.5×核数 + rust + ts 对 12 核），编队内的取值没有单独 A/B——若别的组被 probe 饿到，收口侧应显式传 `PROBE_WORKERS`；正确的一步是全局配平。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
