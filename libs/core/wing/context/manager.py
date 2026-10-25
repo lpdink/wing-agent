@@ -603,6 +603,13 @@ class ContextManager:
             relink_tail.append(relinked)
             prev_uuid = relinked.uuid
 
+        # usage 信任边界 = 换入时刻的链尖：这批保留区（以及它们之前的一切）携带的
+        # usage 度量的是**压缩前**窗口（含已被摘要掉的 head），下一轮真实 usage 落链
+        # 之前不得当作当前 context 大小（否则会对着一个不存在的窗口再压一次）。
+        compact_node.usage_boundary_uuid = (
+            relink_tail[-1].uuid if relink_tail else compact_node.uuid
+        )
+
         # TODO(crash-safety): append_detached(compact_node) 和 set_tip 之间存在
         # 崩溃窗口。如果进程在 compact_node 写入后、relink tail set_tip 前被杀，
         # compact_node（parent_uuid=None）会成为新根，trace_chain 从它回溯到
@@ -687,6 +694,9 @@ class ContextManager:
             unzip_last_uuid=last_compressed_uuid,
         )
         compact_node.uuid = uuid.uuid4().hex
+        # 整条链都被摘要取代：换入之后的一切都是新事实，边界 = 节点自己
+        # （与自动压缩同语义：压缩节点的 `usage_boundary_uuid` 是 usage 信任起点）。
+        compact_node.usage_boundary_uuid = compact_node.uuid
 
         self._messages.append_detached(compact_node)
         self._messages.set_tip(compact_node.uuid)
@@ -764,8 +774,16 @@ class ContextManager:
         """从消息列表中查找最后一条有服务端 usage 的 assistant 消息的 prompt_tokens。
 
         这是服务端回传的真实 context 大小——优先使用。事件节点不计。
+
+        只采信**能证明度量在当前窗口上**的 usage（见 `_usage_trust_start`）：压缩
+        换入会把「压缩前窗口」的数值留在链上（保留区整条复制、usage 随行），按它
+        判定 context 大小会让压缩阈值对着一份已经不存在的窗口反复触发。
         """
-        for node in reversed(self._messages.active_chain):
+        chain = self._messages.active_chain
+        start = self._usage_trust_start(chain)
+        if start is None:
+            return None
+        for node in reversed(chain[start:]):
             if (
                 isinstance(node, Message)
                 and node.role == "assistant"
@@ -773,6 +791,35 @@ class ContextManager:
                 and node.usage.prompt_tokens > 0
             ):
                 return node.usage.prompt_tokens
+        return None
+
+    def _usage_trust_start(self, chain: list[ChainNode]) -> int | None:
+        """活跃链上「服务端 usage 可采信」的起点下标（None = 一条都不采信）。
+
+        压缩换入会重排窗口：换入之前产生的 usage（**含被重链接的保留区**——它的
+        prompt 里含已被摘要掉的 head）度量的是一个已经不存在的窗口。边界编码在压缩
+        节点的 `usage_boundary_uuid` 上：
+
+        - 链上没有压缩节点 → 整链可采信（这条链从没压缩过）；
+        - 有边界且边界在链上（位置 ≥ 压缩节点）→ 边界之后（不含）；
+        - 有边界但边界不在链上（rewind / fork 剪断）→ 一条都不采信（保守：无法
+          证明任何一条 usage 度量在当前窗口上）；
+        - 没有边界（本字段引入之前的存量记录）→ 压缩节点之后，即历史口径。
+        """
+        compact_node: Message | None = None
+        compact_index = 0
+        for index, node in enumerate(chain):
+            if isinstance(node, Message) and node.unzip_last_uuid is not None:
+                compact_node = node
+                compact_index = index
+        if compact_node is None:
+            return 0
+        boundary = compact_node.usage_boundary_uuid
+        if boundary is None:
+            return compact_index + 1
+        for index, node in enumerate(chain):
+            if node.uuid == boundary:
+                return index + 1 if index >= compact_index else None
         return None
 
     def get_context_window(self) -> list[Message]:
@@ -872,6 +919,9 @@ class ContextManager:
             # 构造回退行——`unzip_last_uuid` 必须跟着走：parent 是压缩节点时，
             # 它是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段
             # 历史）从 /rewind、/fork 候选里消失（回退到压缩后第一条消息即触发）。
+            # `usage_boundary_uuid` 同理（usage 信任边界）：丢了会把压缩前的
+            # usage 信回去；带上也可能指向已被剪掉的节点，那时读取侧按"无法
+            # 证明"降级（_usage_trust_start），方向保守。
             #
             # 字段清单是**刻意的**（不是压缩 relink 那种"整条复制"）：回退行是
             # 上下文事实行——provider 审计字段（usage / stop_reason）不复制，
@@ -886,6 +936,7 @@ class ContextManager:
                 tool_call_id=parent_msg.tool_call_id,
                 parent_uuid=parent_msg.parent_uuid,
                 unzip_last_uuid=parent_msg.unzip_last_uuid,
+                usage_boundary_uuid=parent_msg.usage_boundary_uuid,
             )
             rewind_msg.uuid = str(uuid.uuid4())
 

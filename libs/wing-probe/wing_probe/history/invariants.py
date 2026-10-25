@@ -1401,11 +1401,14 @@ def assert_fork_of(
             f"child records reuse uuids for distinct source records: {uuid_map} —— "
             "重映射必须是单射"
         )
-    # 链拓扑引用（parent_uuid / unzip_last_uuid）必须整体重映射到子记录集内部：
-    # 前缀口径下所有引用都在前缀里，所以既不该悬空、也不该出现跨 session 引用。
+    # 链拓扑引用（parent_uuid / unzip_last_uuid / usage_boundary_uuid）必须整体
+    # 重映射到子记录集内部：前缀口径下 parent / unzip 的引用都在前缀里，所以既不该
+    # 悬空、也不该出现跨 session 引用；usage_boundary_uuid（压缩节点的 usage 信任
+    # 边界）可以指向前缀之外（fork 点在被保留的 tail 中间）——那种情况必须**删键**
+    # （缺席即历史口径），同样不得留源会话的 uuid。
     for position in range(min(len(expected), len(child_records))):
         want, got = expected[position], child_records[position]
-        for key in ("parent_uuid", "unzip_last_uuid"):
+        for key in ("parent_uuid", "unzip_last_uuid", "usage_boundary_uuid"):
             want_ref = want.get(key)
             got_ref = got.get(key)
             want_mapped = uuid_map.get(want_ref) if isinstance(want_ref, str) else None
@@ -1417,7 +1420,7 @@ def assert_fork_of(
                     "链拓扑引用必须整体重映射（不得留悬空 / 跨 session 引用）"
                 )
     for position, record in enumerate(child_records):
-        for key in ("parent_uuid", "unzip_last_uuid"):
+        for key in ("parent_uuid", "unzip_last_uuid", "usage_boundary_uuid"):
             ref = record.get(key)
             if isinstance(ref, str) and ref not in child_uuids:
                 problems.append(

@@ -149,6 +149,19 @@ class Message(ChainNode):
 
     审计元数据——不进入 LLM 请求体（to_openai 不导出）。extra="ignore"
     容忍存量记录缺失。"""
+    usage_boundary_uuid: str | None = None
+    """服务端 usage 的信任边界（只写在**压缩节点**上）。
+
+    值为该次压缩**换入时刻活跃链的链尖** uuid（没有保留区时是压缩节点自己）。
+    活跃链上位于它之后（不含）的消息，其 ``usage.prompt_tokens`` 才度量在当前窗口
+    上；它之前（含）的消息——包括被重链接的保留区——携带的是**压缩前**窗口的数值
+    （那个窗口里含已被摘要掉的区段），不得当作当前 context 大小
+    （见 ``ContextManager._last_prompt_tokens``）。链序不是时间序：保留区在压缩
+    节点之后，但它的 usage 同样产生于换入之前，所以边界必须指「换入时刻的链尖」，
+    光知道压缩节点在哪不足以判定。
+
+    幂等事实，不进入 LLM 请求体。缺失 = 本字段引入之前的存量记录；指针不在活跃
+    链上 = 链被剪过（rewind / fork）——两者都由读取侧按「无法证明」降级。"""
 
     # 扁平存储：仅非 assistant 消息（user/tool/system）使用。assistant 的
     # content / reasoning_content / tool_calls 全部从 content_blocks 实时派生，
@@ -185,6 +198,7 @@ class Message(ChainNode):
         uuid: str | None = None,
         parent_uuid: str | None = None,
         unzip_last_uuid: str | None = None,
+        usage_boundary_uuid: str | None = None,
         **extra: Any,
     ) -> None:
         """显式签名供类型检查器识别扁平入参；路由逻辑在 `_route_flat`
@@ -203,6 +217,7 @@ class Message(ChainNode):
             "uuid": uuid,
             "parent_uuid": parent_uuid,
             "unzip_last_uuid": unzip_last_uuid,
+            "usage_boundary_uuid": usage_boundary_uuid,
         }
         data.update(extra)
         super().__init__(**data)

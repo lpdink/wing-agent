@@ -79,10 +79,14 @@ def _record_draft(record: dict) -> str:
 def _remap_record_uuids(records: list[dict]) -> list[dict]:
     """复制记录（顺带规范化）并把链拓扑 uuid 全量重映射到子会话的 uuid 空间。
 
-    重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` 三个键。前缀口径下
-    所有引用都指向前缀内部（parent 必然更早创建、unzip 指向区间末），因此
-    重映射后子记录集自洽：不留悬空引用，也不需要清空任何引用——压缩节点的
-    unzip 指向重映射后的区间末记录，子会话的 fork 候选列表与源会话一致。
+    重映射 ``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` / ``usage_boundary_uuid``
+    四个键。前缀口径下前者们的引用都指向前缀内部（parent 必然更早创建、unzip 指向
+    区间末），因此重映射后子记录集自洽：不留悬空引用，也不需要清空任何引用——压缩
+    节点的 unzip 指向重映射后的区间末记录，子会话的 fork 候选列表与源会话一致。
+
+    ``usage_boundary_uuid`` 是唯一可能指向前缀之外的键：fork 点落在压缩后被保留的
+    tail 中间时，边界（换入时刻的链尖）在后头。删键即缺席——读取侧把"没有边界"当作
+    历史口径（信任保留区 usage），方向与压缩前一致，不损坏数据。
 
     缺省是防御：万一出现前缀外的引用，宁可让它成为根节点（删键 = 缺席即默认），
     也不留跨 session 的引用。
@@ -103,7 +107,12 @@ def _remap_record_uuids(records: list[dict]) -> list[dict]:
         if isinstance(uuid, str):
             uuid_map[uuid] = str(uuid4())
     for clone in clones:
-        for key in ("uuid", "parent_uuid", "unzip_last_uuid"):
+        for key in (
+            "uuid",
+            "parent_uuid",
+            "unzip_last_uuid",
+            "usage_boundary_uuid",
+        ):
             value = clone.get(key)
             if not isinstance(value, str):
                 continue
