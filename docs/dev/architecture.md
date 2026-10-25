@@ -404,7 +404,6 @@ draft（`_record_draft`）、`render_probe --jsonl`（调试工具）、probe �
 - **压缩节点的 `unzip_last_uuid` 是压缩区间的唯一编码**：任何复制 / 重链路径都必须把它带上——丢了，被压缩区间（乃至整段历史）就从 `/rewind`、`/fork` 候选里消失。已覆盖的两条路径：fork（记录前缀拷贝 + 全量重映射，见上）与 rewind（回退行复制 parent 时带上，回退到"压缩后第一条消息"不再塌候选）。
 - 压缩双阈值（`context_window_tokens` 触发应用、`keep_recent_tokens` 是保留区）是**模型级声明**（`providers[].models[]`，唯一配置来源）：会话构造与换模型时解析进 `Compactor`——生效窗口跟随当前模型，`/api/session/info` 的 `context_window_tokens` 即此刻的生效值；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。换模型只改后续判定：已生成的 pending compact 是链快照的预计算（切点算好、uuid 自校验），换窗口不重算它，apply 只看新窗口。
 - **token 口径锚在链上的 `usage_boundary_uuid` 边界上**（`ContextManager._usage_trust_start`）：压缩换入会把「压缩前窗口」的 `prompt_tokens` 留在链上（保留区整条复制、`usage` 随行），而保留区虽在链序上位于压缩节点之后，它的 usage 同样产生于换入之前（prompt 里含已被摘要掉的区段）。边界记的是**信任从这里恢复的那个节点**：自动压缩写「换入时刻的链尖」（保留区末条，没有保留区时是压缩节点自己）、手动压缩写自己、rewind 回退行写自己（压缩换入重链接保留区时，保留区里的边界随 relink 重映射）。读取侧取**所有可解析边界里最靠后的那个起点**，只采信它之后的服务端 usage；链上没有边界（引入该字段之前的存量记录）→ 全链可采信（历史口径，下一次压缩或 rewind 即带边界）；最后一条边界不可解析（被 rewind 剪断 / 日志损坏）→ 一条都不采信、退回估算。这份 `usage` 本身是**审计事实**（那一轮服务端回了什么），照旧留在记录里，只是不再当作"当前 context 大小"。
-- **token 口径锚在链上的 `usage_boundary_uuid` 声明上**（`ContextManager._usage_trust_start`）：换入会把「压缩前窗口」的 `prompt_tokens` 留在链上（保留区整条复制、`usage` 随行），而保留区虽在链序上位于压缩节点之后，它的 usage 同样产生于换入之前。声明因此记的是**信任从这里恢复的那个节点**：自动压缩写「换入时刻的链尖」（保留区末条，没有保留区时是压缩节点自己）、手动压缩写自己、rewind 回退行写自己。读取侧只采信最近一条声明之后的服务端 usage；声明缺失（引入该字段之前的存量记录）→ 全链可采信（历史口径，下一次压缩即带声明）；声明的指针不在链上（被 rewind 剪断 / 日志损坏）→ 一条都不采信、退回估算。这份 `usage` 本身是**审计事实**（那一轮服务端回了什么），照旧留在记录里，只是不再当作"当前 context 大小"。
 
 **KV cache 的已知边界（有意不处理）**：
 
