@@ -1,16 +1,14 @@
 //! End-to-end: `wing -p` 一次性 stdio 的收口契约（真二进制 + 假网关）。
 //!
 //! 钉住 issue #246：后端在一轮结尾**只发 `error` + `done`、不发 `turn_result`**
-//! （`libs/core/wing/agent/core.py::_run` 的兜底 except 形状）时，一次性流程必须
-//! 退出（退出码 1）并留下一条失败终态帧——而不是永远等 `recv_event`（进程挂死）。
-//!
-//! 判定细节（三个输出格式的形状）由 `src/stdio/renderer.rs` 与 `src/stdio/mod.rs`
-//! 的单测覆盖；这里只回答一个问题：**进程到底退不退**。
+//! 时，一次性流程必须退出（退出码 1）并留下一条失败终态帧——而不是永远等
+//! `recv_event`（进程挂死）。这里只回答一个问题：**进程到底退不退**；帧的形状由
+//! `src/stdio/` 的单测钉住。
 //!
 //! harness 与 `stdio_resident_e2e.rs` 同一套：真实 `CARGO_BIN_EXE_wing` +
 //! 进程内最小 HTTP/1.1 + WS 假网关 + 假 `$WING_HOME`（不碰任何真实环境）。
-//! 一次性模式只发一条 prompt，所以 WS 帧脚本在握手应答之后**一次推完**，
-//! 不需要 HTTP→WS 的推进信号。
+//! 一次性模式只发一条 prompt，所以帧脚本在握手应答之后**一次推完**——代价是这些
+//! 用例对帧序不敏感（帧序由 `stdio_resident_e2e` 与渲染层单测覆盖）。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -110,9 +108,9 @@ async fn handle_conn(mut stream: TcpStream, script: Script) {
             .to_string();
 
         if path == "/ws"
-            && header(&head, "upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+            && header_value(&head, "upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
         {
-            let key = header(&head, "sec-websocket-key").unwrap_or_default();
+            let key = header_value(&head, "sec-websocket-key").unwrap_or_default();
             let response = format!(
                 "HTTP/1.1 101 Switching Protocols\r\n\
                  Upgrade: websocket\r\n\
@@ -164,7 +162,7 @@ async fn handle_conn(mut stream: TcpStream, script: Script) {
 }
 
 /// 请求头里取一个字段（大小写不敏感）。
-fn header(head: &str, name: &str) -> Option<String> {
+fn header_value(head: &str, name: &str) -> Option<String> {
     head.lines().skip(1).find_map(|line| {
         let (key, value) = line.split_once(':')?;
         key.trim()
@@ -275,7 +273,7 @@ async fn text_reports_the_missing_terminal_frame_when_no_error_preceded_done() {
 /// 成功轮：`turn_result` 收口 → 退出码 0，且 `done` 不再补帧
 /// （json 模式的契约是「单个 result 对象」，多一条就是行为变化）。
 #[tokio::test]
-async fn json_success_exits_at_turn_result_and_ignores_the_trailing_done() {
+async fn json_success_emits_a_single_result_frame_before_the_trailing_done() {
     let (code, stdout, stderr) = run(
         script_success_then_done,
         "success",

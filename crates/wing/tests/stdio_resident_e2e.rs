@@ -221,7 +221,7 @@ async fn drive_ws(
                             emit(&mut ws, turn_started_event()).await;
                             emit(&mut ws, assistant_event("slow")).await;
                             tokio::time::sleep(Duration::from_millis(400)).await;
-                            emit(&mut ws, result_event("turn-1", false)).await;
+                            emit_result(&mut ws, "turn-1", false).await;
                         } else {
                             emit_turn(&mut ws, seq).await;
                         }
@@ -242,20 +242,20 @@ async fn drive_ws(
                             emit(&mut ws, assistant_event("long")).await;
                         } else {
                             // 第二条消息到达 = 第一轮可以收口了。
-                            emit(&mut ws, result_event("turn-1", false)).await;
+                            emit_result(&mut ws, "turn-1", false).await;
                         }
                     }
                     (Scenario::ErrorThenSuccess, HttpEvent::Send { seq }) => {
                         emit(&mut ws, turn_started_event()).await;
                         if seq == 1 {
-                            emit(&mut ws, result_event("", true)).await;
+                            emit_result(&mut ws, "", true).await;
                         } else {
-                            emit(&mut ws, result_event(&format!("turn-{seq}"), false)).await;
+                            emit_result(&mut ws, &format!("turn-{seq}"), false).await;
                         }
                     }
                     (Scenario::ErrorTurn, HttpEvent::Send { .. }) => {
                         emit(&mut ws, turn_started_event()).await;
-                        emit(&mut ws, result_event("", true)).await;
+                        emit_result(&mut ws, "", true).await;
                     }
                     (Scenario::StreamingTurn, HttpEvent::Send { .. }) => {
                         emit_streaming_turn(&mut ws).await;
@@ -277,11 +277,18 @@ async fn emit(ws: &mut WebSocketStream<TcpStream>, event: Value) {
     let _ = ws.send(Message::Text(event.to_string().into())).await;
 }
 
-/// 一轮的完整事件序列（turn_started → assistant → result）。
+/// 一轮的完整事件序列（turn_started → assistant → result → done）。
 async fn emit_turn(ws: &mut WebSocketStream<TcpStream>, seq: usize) {
     emit(ws, turn_started_event()).await;
     emit(ws, assistant_event(&format!("turn-{seq}"))).await;
-    emit(ws, result_event(&format!("turn-{seq}"), false)).await;
+    emit_result(ws, &format!("turn-{seq}"), false).await;
+}
+
+/// 轮末两帧（`turn_result` → `done`）：后端每条收口路径的真实帧序。`done` 是轮末
+/// 信号（前端不得据此多产帧、也不得把它当成新的一轮）。
+async fn emit_result(ws: &mut WebSocketStream<TcpStream>, text: &str, is_error: bool) {
+    emit(ws, result_event(text, is_error)).await;
+    emit(ws, done_event()).await;
 }
 
 /// 流式轮次：reasoning → text → tool_use 增量 → 快照 → 工具结果 → result。
@@ -299,7 +306,7 @@ async fn emit_streaming_turn(ws: &mut WebSocketStream<TcpStream>) {
     emit(ws, tool_delta_event("call_1", "Bash", "", true)).await;
     emit(ws, assistant_with_tool_event()).await;
     emit(ws, tool_result_turn_event()).await;
-    emit(ws, result_event("turn-1", false)).await;
+    emit_result(ws, "turn-1", false).await;
 }
 
 // ============================================================
@@ -346,6 +353,15 @@ fn result_event(text: &str, is_error: bool) -> Value {
         event["result"] = json!(text);
     }
     event
+}
+
+fn done_event() -> Value {
+    json!({
+        "type": "done",
+        "session_id": SESSION_ID,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "request_id": "fake",
+    })
 }
 
 fn interrupted_event() -> Value {
