@@ -233,9 +233,10 @@ fi
 write_report() {
   [ -n "$REPORT" ] || return 0
   {
-    printf '{\n  "mode": "%s", "wall_ms": %s, "serial": %s, "skip_ts": %s,\n' \
+    printf '{\n  "mode": "%s", "wall_ms": %s, "serial": %s, "shared": %s, "skip_ts": %s,\n' \
       "$MODE" "$(( $(now_ms) - START_MS ))" \
       "$([ "$SERIAL" = "1" ] && echo true || echo false)" \
+      "$([ "$SHARED" = "1" ] && echo true || echo false)" \
       "$([ "$TS_SKIPPED" -eq 1 ] && echo true || echo false)"
     printf '  "groups": [\n'
     for i in "${!LABELS[@]}"; do
