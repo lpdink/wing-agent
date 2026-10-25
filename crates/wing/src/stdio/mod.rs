@@ -11,6 +11,9 @@ pub mod stdin_handler;
 pub mod stdout;
 pub mod stream;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::backend_config;
 use crate::cmd::start;
 use crate::gateway::GatewayClient;
+use crate::protocol::WingEvent;
 use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::{AgentOverride, CreateSessionRequest};
 
@@ -660,16 +664,28 @@ pub async fn run_stdio(args: StdioArgs) -> ExitCode {
     }
 }
 
+/// 一次性事件循环里「拿到一条事件之后」的全部裁决：`Some(code)` = 现在就退
+/// （本轮的终态已经收口——协议帧落到 stdout，text 模式只有 stderr），`None` = 继续等。
+///
+/// 生产循环的循环体就是它；单测按「轮以哪种形状收口 → 退不退」驱动它（帧的形状
+/// 归渲染层测）。
+fn one_shot_step(renderer: &mut StdioRenderer, event: &WingEvent) -> Option<ExitCode> {
+    if renderer.handle_event(event) {
+        Some(renderer.exit_code())
+    } else {
+        None
+    }
+}
+
 /// 一次性事件循环（既有语义）：终态帧结束**进程**。
 async fn run_one_shot_loop(gateway: &mut GatewayClient, renderer: &mut StdioRenderer) -> ExitCode {
-    // 终态有两个来源，都由 renderer 落到 stdout 并返回 `true`：
-    // `turn_result`（正常/失败收口），以及 `interrupted`（被打断的轮次后端不发
-    // turn_result，前端补一条终态 result 帧——见 `handle_interrupted`）。
+    // 终态由 renderer 判定并收口（三个来源见 `StdioRenderer::handle_event`）。
+    // 缺了它们这里会永远等下去：WS 不会因为「这一轮没人再发事件」而关闭。
     loop {
         match gateway.recv_event().await {
             Some(event) => {
-                if renderer.handle_event(&event) {
-                    return renderer.exit_code();
+                if let Some(code) = one_shot_step(renderer, &event) {
+                    return code;
                 }
             }
             None => {
@@ -702,7 +718,10 @@ async fn run_resident_loop(
         tokio::select! {
             event = gateway.recv_event() => match event {
                 Some(event) => {
-                    // 终态帧（含 interrupted 合成帧）= 本轮结束。
+                    // 终态帧（`turn_result` / interrupted 合成帧 / `done` 补的失败帧）
+                    // = 本轮结束。兜底帧（`done` 补的那条）在这里就等于「后端把这一轮
+                    // 丢掉了」：stdin 已关闭时按失败码收口（响亮失败，见
+                    // `docs/dev/architecture.md` 的同一族路径 ⑤）。
                     if renderer.handle_event(&event) && policy.on_terminal() {
                         return Ok(renderer.exit_code());
                     }
@@ -959,6 +978,10 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stdio::test_support::{
+        assistant, backend_error, done, interrupted, renderer as build_renderer, turn_result,
+        turn_started,
+    };
 
     // ---- is_stdio_mode ----
 
@@ -1625,5 +1648,117 @@ mod tests {
             policy.on_terminal(),
             "合成终态帧同样结束当前轮（EOF 已到 → 退出）"
         );
+    }
+
+    // ---- 一次性流程的退出裁决（`one_shot_step`） ----
+
+    /// 脚本化一次性流程：逐条把事件交给**生产循环体**（[`one_shot_step`]）。
+    /// `None` = 事件流耗尽仍未退出——生产上等价于永远阻塞在 `recv_event().await`
+    /// （`wing -p` 挂死）。
+    fn scripted_one_shot(renderer: &mut StdioRenderer, events: &[WingEvent]) -> Option<ExitCode> {
+        events.iter().find_map(|e| one_shot_step(renderer, e))
+    }
+
+    /// 每一种「轮收口」形状 → 一次性流程的裁决。帧的形状与退出码细节归渲染层的
+    /// 用例（`renderer::tests`）；这里只钉「会不会退出」以及「哪一轮收口算了数」。
+    #[test]
+    fn one_shot_terminates_on_every_turn_closing_shape() {
+        let cases: [(&str, Vec<WingEvent>, Option<ExitCode>); 5] = [
+            (
+                "turn_result(success) → done",
+                vec![
+                    turn_started(),
+                    assistant("hi"),
+                    turn_result("hi", false, "success"),
+                    done(),
+                ],
+                Some(ExitCode::SUCCESS),
+            ),
+            (
+                "turn_result(error)",
+                vec![
+                    turn_started(),
+                    turn_result("", true, "error_during_execution"),
+                ],
+                Some(ExitCode::FAILURE),
+            ),
+            (
+                "interrupted（后端不发 turn_result / done）",
+                vec![turn_started(), assistant("hi"), interrupted()],
+                Some(ExitCode::SUCCESS),
+            ),
+            (
+                "error + done（没有 turn_result，issue #246）",
+                vec![turn_started(), backend_error("boom"), done()],
+                Some(ExitCode::FAILURE),
+            ),
+            (
+                "只有 error（没有轮末信号）",
+                vec![turn_started(), backend_error("boom")],
+                None,
+            ),
+        ];
+
+        for (shape, events, expected) in cases {
+            let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
+            assert_eq!(
+                scripted_one_shot(&mut renderer, &events),
+                expected,
+                "{shape}"
+            );
+        }
+    }
+
+    /// issue #246 的形状 × 三个输出格式：`done` 必须收口（text 模式的错误文本走
+    /// stderr，stdout 保持干净）。
+    #[test]
+    fn one_shot_exits_when_the_turn_ends_with_error_and_done() {
+        let events = [turn_started(), backend_error("boom"), done()];
+
+        for format in [
+            OutputFormat::Text,
+            OutputFormat::Json,
+            OutputFormat::StreamJson,
+        ] {
+            let (mut renderer, buf) = build_renderer(format.clone());
+            assert_eq!(
+                scripted_one_shot(&mut renderer, &events),
+                Some(ExitCode::FAILURE),
+                "{format:?}: 本轮没有终态帧 → done 必须收口"
+            );
+            if format == OutputFormat::Text {
+                assert_eq!(buf.text(), "", "text 模式：stdout 保持干净");
+            } else {
+                assert_eq!(buf.text().lines().count(), 1, "{format:?}: {}", buf.text());
+            }
+        }
+    }
+
+    /// 常驻循环的退出裁决（`renderer.handle_event` + `ExitPolicy`，就是
+    /// `run_resident_loop` 那一行）：上一轮的 `done` 迟到、落在「新消息已转发 +
+    /// stdin 已关」之后，**不得**替新消息那一轮收口——否则进程提前退出，把那一轮
+    /// 的输出丢掉（`ExitPolicy` 承诺「已转发的消息在它自己的终态前都被观察到」）。
+    #[test]
+    fn a_stale_turn_end_does_not_close_the_next_turn() {
+        let (mut renderer, _buf) = build_renderer(OutputFormat::StreamJson);
+        let mut policy = ExitPolicy::new(true);
+
+        // 轮 A 的终态帧：那一轮结束（EOF 还没到 → 继续等）。
+        assert!(renderer.handle_event(&turn_result("hi", false, "success")));
+        assert!(!policy.on_terminal());
+
+        // 轮 B：新消息已转发，随后 stdin 关闭 → 等 B 自己的终态。
+        policy.on_message();
+        assert!(!policy.on_eof());
+
+        // 轮 A 的 `done` 迟到：它属于上一轮。
+        assert!(
+            !(renderer.handle_event(&done()) && policy.on_terminal()),
+            "迟到的轮末信号不得结束下一轮"
+        );
+
+        // B 的终态才是退出点。
+        assert!(renderer.handle_event(&turn_result("hi there", false, "success")));
+        assert!(policy.on_terminal());
     }
 }
