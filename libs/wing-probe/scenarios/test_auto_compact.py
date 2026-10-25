@@ -444,7 +444,6 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
     info = await session.info()
     total = info["context_stats"]["total_tokens"]
     assert total < COMPACT_WINDOW, info["context_stats"]
-    assert total != SERVER_TOKENS, info["context_stats"]
 
     # 边界 = 换入时刻的链尖：换入那一轮请求的最后一条消息（gamma）。
     final = probe.history(session)

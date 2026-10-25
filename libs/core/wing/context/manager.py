@@ -694,9 +694,11 @@ class ContextManager:
             unzip_last_uuid=last_compressed_uuid,
         )
         compact_node.uuid = uuid.uuid4().hex
-        # 整条链都被摘要取代：换入之后的一切都是新事实，边界 = 节点自己
-        # （与自动压缩同语义：压缩节点的 `usage_boundary_uuid` 是 usage 信任起点）。
-        compact_node.usage_boundary_uuid = compact_node.uuid
+        # 链被摘要整段取代：换入之后的一切都是新事实，边界 = 节点自己。空链没有可
+        # 压缩的区间（`unzip_last_uuid` 为空，读取侧也就认不出这是压缩节点）——那时
+        # 不写边界，字段契约「只写在压缩节点上」因此始终成立。
+        if last_compressed_uuid is not None:
+            compact_node.usage_boundary_uuid = compact_node.uuid
 
         self._messages.append_detached(compact_node)
         self._messages.set_tip(compact_node.uuid)
@@ -798,12 +800,12 @@ class ContextManager:
 
         压缩换入会重排窗口：换入之前产生的 usage（**含被重链接的保留区**——它的
         prompt 里含已被摘要掉的 head）度量的是一个已经不存在的窗口。边界编码在压缩
-        节点的 `usage_boundary_uuid` 上：
+        节点（`unzip_last_uuid` 非空，恒为活跃链的根）的 `usage_boundary_uuid` 上：
 
         - 链上没有压缩节点 → 整链可采信（这条链从没压缩过）；
-        - 有边界且边界在链上（位置 ≥ 压缩节点）→ 边界之后（不含）；
-        - 有边界但边界不在链上（rewind / fork 剪断）→ 一条都不采信（保守：无法
-          证明任何一条 usage 度量在当前窗口上）；
+        - 有边界且边界在链上 → 边界之后（不含）；
+        - 有边界但边界不在链上（rewind 剪断了它）→ 一条都不采信（保守：无法证明
+          任何一条 usage 度量在当前窗口上）。下次压缩产出新边界即恢复；
         - 没有边界（本字段引入之前的存量记录）→ 压缩节点之后，即历史口径。
         """
         compact_node: Message | None = None
@@ -819,6 +821,8 @@ class ContextManager:
             return compact_index + 1
         for index, node in enumerate(chain):
             if node.uuid == boundary:
+                # 边界早于压缩节点 = 日志损坏（正常写入点恒在节点之后）：
+                # 宁可一条都不采信，也不把一段来路不明的 usage 当成当前窗口。
                 return index + 1 if index >= compact_index else None
         return None
 
@@ -919,9 +923,6 @@ class ContextManager:
             # 构造回退行——`unzip_last_uuid` 必须跟着走：parent 是压缩节点时，
             # 它是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段
             # 历史）从 /rewind、/fork 候选里消失（回退到压缩后第一条消息即触发）。
-            # `usage_boundary_uuid` 同理（usage 信任边界）：丢了会把压缩前的
-            # usage 信回去；带上也可能指向已被剪掉的节点，那时读取侧按"无法
-            # 证明"降级（_usage_trust_start），方向保守。
             #
             # 字段清单是**刻意的**（不是压缩 relink 那种"整条复制"）：回退行是
             # 上下文事实行——provider 审计字段（usage / stop_reason）不复制，
@@ -936,9 +937,13 @@ class ContextManager:
                 tool_call_id=parent_msg.tool_call_id,
                 parent_uuid=parent_msg.parent_uuid,
                 unzip_last_uuid=parent_msg.unzip_last_uuid,
-                usage_boundary_uuid=parent_msg.usage_boundary_uuid,
             )
             rewind_msg.uuid = str(uuid.uuid4())
+            if parent_msg.unzip_last_uuid is not None:
+                # parent 是压缩节点 → 回退行自己成了新链的根（`parent_uuid` 为空）：
+                # usage 边界重设为自己（此后落链的 usage 都是新事实，不继承旧边界
+                # ——它指向的节点已被这次回退剪掉，继承只会让口径永久退回估算）。
+                rewind_msg.usage_boundary_uuid = rewind_msg.uuid
 
         self._messages.append_detached(rewind_msg)
         self._messages.set_tip(rewind_msg.uuid)

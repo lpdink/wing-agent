@@ -17,7 +17,9 @@ session id（``forked_from``），而不是"子侧 == 源侧当前值"。
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import datetime
 
 import pytest
@@ -28,6 +30,7 @@ from wing_probe import (
     Probe,
     Session,
     Turn,
+    Usage,
     assert_fork_of,
     fork_metadata,
     node_semantics,
@@ -455,3 +458,111 @@ async def test_fork_at_compact_node_derives_draft_from_blocks(probe: Probe) -> N
     assert child.response["draft"] == compact_node["content"], child.response
     # 目标自身不进前缀：子会话只有压缩之前的记录
     assert_fork_of(source, probe.history(child), compact_node["uuid"])
+
+
+COMPACT_TAIL_FORK_MODEL = "probe/fork-compact-tail-tokens"
+COMPACT_TAIL_FORK_SUMMARY = "Task: answer the user. State: two turns done."
+
+#: 双阈值（apply = 窗口，early = 窗口 − 保留区 = 600）。
+TAIL_CONTEXT_WINDOW = 1000
+TAIL_KEEP_RECENT = 400
+TAIL_COMPACT_WINDOW = TAIL_CONTEXT_WINDOW - TAIL_KEEP_RECENT
+
+#: 压缩前窗口的服务端口径（保留区里那条 assistant 携带它，换入之后不得再被采信）。
+PRE_COMPACT_TOKENS = 1100
+#: 换入之后各轮的真实 usage（口径落到它们身上才说明"信任"恢复了）。
+PARENT_TOKENS = 300
+CHILD_TOKENS = 500
+
+
+@pytest.mark.probe_env(
+    models=[COMPACT_TAIL_FORK_MODEL],
+    context_window_tokens=TAIL_CONTEXT_WINDOW,
+    keep_recent_tokens=TAIL_KEEP_RECENT,
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_fork_inside_retained_tail_keeps_token_baseline(probe: Probe) -> None:
+    """fork 点在压缩后保留的 tail 中间：子会话的 token 口径不回落到压缩前（红线）。
+
+    WHEN 自动压缩换入（压缩节点 + 重链接保留区），随后 fork at 保留区里的 user 消息
+    THEN 子会话 ``/api/session/info`` 的 ``context_stats.total_tokens`` 是压缩后窗口
+    的估算，不是保留区里那条 assistant 携带的**压缩前** ``prompt_tokens``（issue
+    #247 的错口径，在子会话里第一条请求就会命中）；子会话第一轮不因此起压缩，真实
+    usage 落链后口径回到服务端值。
+
+    换入时刻的链尖（边界）落在 fork 点之后 → 指向前缀之外 → 钉到前缀末条记录
+    （= 子会话活跃链尖）→ 一条都不采信。
+    """
+    script = (
+        Turn.of(text="reply one", usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS)),
+        Turn.of(
+            text=f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+            usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS),
+        ),
+        Turn.of(
+            text=f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+            usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS),
+        ),
+        Turn.of(text="post compact reply", usage=Usage(prompt_tokens=PARENT_TOKENS)),
+        Turn.of(text="child reply", usage=Usage(prompt_tokens=CHILD_TOKENS)),
+    )
+    probe.register(COMPACT_TAIL_FORK_MODEL, *script)
+    session = await probe.session(model=COMPACT_TAIL_FORK_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    # 等后台压缩把待生效状态落盘（apply 在下一轮请求里发生）。
+    deadline = 20.0
+    expires = time.monotonic() + deadline
+    while probe.history(session).aux("pending_compact") is None:
+        assert time.monotonic() < expires, probe.requests.summary()
+        await asyncio.sleep(0.05)
+
+    await session.chat("gamma")
+    source = probe.history(session)
+    assert [message["content"] for message in source.messages()] == [
+        f"[Compact] {COMPACT_TAIL_FORK_SUMMARY}",
+        "beta",
+        f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+        "gamma",
+        "post compact reply",
+    ], source.describe()
+
+    # fork 点 = 保留区里的 user 消息（活跃链上的那条，uuid 已重链接）。
+    gamma = next(
+        target
+        for target in (await session.branches())["targets"]
+        if target["content"] == "gamma"
+    )
+    child = await session.fork(gamma["uuid"])
+
+    child_view = probe.history(child)
+    assert [message["content"] for message in child_view.messages()] == [
+        f"[Compact] {COMPACT_TAIL_FORK_SUMMARY}",
+        "beta",
+        f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+    ], child_view.describe()
+    chain = child_view.active_chain()
+    # 边界钉在子会话的链尖上（指向前缀之外时不得删键——删键会退回"信任保留区"）。
+    assert chain[0]["usage_boundary_uuid"] == chain[-1]["uuid"], child_view.describe()
+    # 保留区里那条 assistant 的压缩前 usage 照旧随行（审计事实，不是口径）。
+    assert chain[-1]["usage"]["prompt_tokens"] == PRE_COMPACT_TOKENS, (
+        child_view.describe()
+    )
+
+    info = await child.info()
+    assert info["context_stats"]["total_tokens"] < TAIL_COMPACT_WINDOW, info[
+        "context_stats"
+    ]
+
+    await child.chat("delta")
+    info = await child.info()
+    assert info["context_stats"]["total_tokens"] == CHILD_TOKENS, info["context_stats"]
+    # 全程只该有一次压缩调用（子会话第一轮不得因陈旧口径再压一次）。
+    compact_calls = [
+        request
+        for request in probe.requests_for(COMPACT_TAIL_FORK_MODEL)
+        if not request.stream
+    ]
+    assert len(compact_calls) == 1, probe.requests.summary()
+    assert probe.history(child).aux("pending_compact") is None

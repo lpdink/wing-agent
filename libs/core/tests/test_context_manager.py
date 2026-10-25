@@ -17,7 +17,7 @@ from _support import default_compactor, make_cm
 from wing.context import ContextManager
 from wing.chain import TrackedList
 from wing.store.file import FileMessageLog
-from wing.schema import ChainNode, Message
+from wing.schema import ChainNode, LLMUsage, Message
 
 
 def _contents(nodes: list) -> list:
@@ -252,6 +252,10 @@ class TestRewind:
         回退行复制的是目标的 parent——parent 是压缩节点时，`unzip_last_uuid`
         是"被压缩区间在哪"的唯一编码，丢了会让压缩前区间（乃至整段历史）从
         /rewind、/fork 候选里消失。
+
+        同时回退行自己成了新链的根：usage 边界重设为自己（`usage_boundary_uuid`），
+        此后落链的 usage 都是新事实——继承旧边界会指向被这次回退剪掉的节点，让
+        token 口径永久退回估算。
         """
         cm = _make_cm(tmp_dir)
         msgs = [
@@ -265,6 +269,7 @@ class TestRewind:
         )
         compact_node.uuid = "cu"
         compact_node.unzip_last_uuid = msgs[1].uuid
+        compact_node.usage_boundary_uuid = "cu"
         first = Message(role="user", content="first post compact", parent_uuid="cu")
         first.uuid = "u2"
         cm._messages.append_detached(compact_node)
@@ -283,6 +288,18 @@ class TestRewind:
         rewind_entry = _read_history(tmp_dir / "test-session")[-1]
         assert Message.model_validate(rewind_entry).content == "[Compact] summary"
         assert rewind_entry["unzip_last_uuid"] == msgs[1].uuid
+        # 新链的根：边界重设为自己（不是旧边界 "cu"——它已不在链上）。
+        assert rewind_entry["usage_boundary_uuid"] == rewind_entry["uuid"]
+        assert cm._last_prompt_tokens() is None
+        # 回退之后的真实 usage 是当前窗口的事实，不因旧边界被否掉。
+        cm.add_message(
+            Message(
+                role="assistant",
+                content="post rewind",
+                usage=LLMUsage(prompt_tokens=42, completion_tokens=1),
+            )
+        )
+        assert cm._last_prompt_tokens() == 42
         assert [target["content"] for target in cm.get_branch_targets()] == [
             "old1",
             "[Compact] [Compact] summary",

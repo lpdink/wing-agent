@@ -181,13 +181,19 @@ async def test_no_spurious_compact_when_post_apply_turn_has_no_usage(tmp_dir):
 # ── 边界的降级 / 持久化语义（design D1–D4）──────────────
 
 
-def _compact_node(unzip_uuid: str | None, content: str = COMPACT_SUMMARY) -> Message:
+def _compact_node(
+    unzip_uuid: str | None,
+    *,
+    boundary: str | None = None,
+    content: str = COMPACT_SUMMARY,
+) -> Message:
     """造一个压缩节点（`parent_uuid=None` + `unzip_last_uuid`，活跃链的根）。"""
     node = Message(
         role="assistant",
         content=content,
         parent_uuid=None,
         unzip_last_uuid=unzip_uuid,
+        usage_boundary_uuid=boundary,
     )
     node.uuid = uuid.uuid4().hex
     return node
@@ -306,15 +312,17 @@ def test_dangling_boundary_trusts_no_usage(tmp_dir):
     cm = _make_cm(tmp_dir)
     head = Message(role="user", content="alpha")
     cm.add_message(head)
-    compact = _compact_node(head.uuid)
+
+    # 先把边界节点（apply 时刻的链尖）建出来，压缩节点因此能在**落盘之前**带上它。
+    tip = _turn_reply("tip reply", prompt_tokens=900)
+    tip.uuid = uuid.uuid4().hex
+    compact = _compact_node(head.uuid, boundary=tip.uuid)
     cm._messages.append_detached(compact)
     cm._messages.set_tip(compact.uuid)  # ty: ignore[invalid-argument-type]
     cm.add_message(Message(role="user", content="u1"))
     cm.add_message(_turn_reply("stale reply"))  # 压缩前的窗口（1100）
     cm.add_message(Message(role="user", content="u2"))
-    tip = _turn_reply("tip reply", prompt_tokens=900)
     cm.add_message(tip)
-    compact.usage_boundary_uuid = tip.uuid
     cm.add_message(Message(role="user", content="u3"))
     cm.add_message(_turn_reply("newer reply", prompt_tokens=500))
 
@@ -323,53 +331,25 @@ def test_dangling_boundary_trusts_no_usage(tmp_dir):
 
     # 回退到边界节点 → 边界记录离开活跃链（新 uuid 的复制行顶替），
     # 残留的 stale usage 不得复活。
-    cm.rewind(tip.uuid)  # ty: ignore[invalid-argument-type]
+    cm.rewind(tip.uuid)
     assert cm._last_prompt_tokens() is None
 
 
-class TestForkRemapsBoundary:
-    """fork 的重映射必须覆盖边界指针（否则子会话留下跨会话 uuid 引用）。"""
+@pytest.mark.asyncio
+async def test_empty_chain_manual_compact_writes_no_boundary(tmp_dir):
+    """空链手动压缩没有可压缩区间（`unzip_last_uuid` 为空）→ 不写边界。
 
-    def test_boundary_inside_prefix_is_remapped(self):
-        from wing.session.manager import _remap_record_uuids
+    字段契约是「只写在压缩节点上」，而读取侧识别压缩节点的判据正是
+    `unzip_last_uuid`——给这种节点写边界会让"带边界但不是压缩节点"成为可达状态。
+    """
+    cm = _make_cm(tmp_dir)
+    await cm.do_manual_compact("m", _provider(), current_tools=lambda: [])
 
-        records = [
-            {
-                "role": "assistant",
-                "content": COMPACT_SUMMARY,
-                "uuid": "c1",
-                "unzip_last_uuid": "m1",
-                "usage_boundary_uuid": "m2",
-            },
-            {"role": "user", "content": "beta", "uuid": "m1", "parent_uuid": "c1"},
-            {
-                "role": "assistant",
-                "content": "beta reply",
-                "uuid": "m2",
-                "parent_uuid": "m1",
-            },
-        ]
-        compact_clone, beta_clone, tip_clone = _remap_record_uuids(records)
-
-        assert compact_clone["uuid"] != "c1"
-        assert compact_clone["unzip_last_uuid"] == beta_clone["uuid"]
-        assert compact_clone["usage_boundary_uuid"] == tip_clone["uuid"]
-
-    def test_boundary_outside_prefix_is_dropped(self):
-        """fork 点在被保留的 tail 中间 → 删键（缺席即历史口径），不留悬空引用。"""
-        from wing.session.manager import _remap_record_uuids
-
-        records = [
-            {
-                "role": "assistant",
-                "content": COMPACT_SUMMARY,
-                "uuid": "c1",
-                "unzip_last_uuid": "m1",
-                "usage_boundary_uuid": "outside-prefix",
-            },
-            {"role": "user", "content": "beta", "uuid": "m1", "parent_uuid": "c1"},
-        ]
-        compact_clone, beta_clone = _remap_record_uuids(records)
-
-        assert "usage_boundary_uuid" not in compact_clone
-        assert compact_clone["unzip_last_uuid"] == beta_clone["uuid"]
+    node = cm.get_context_window()[0]
+    assert node.content == COMPACT_SUMMARY
+    assert node.unzip_last_uuid is None
+    assert node.usage_boundary_uuid is None
+    assert cm._last_prompt_tokens() is None
+    # 之后落链的 usage 是当前窗口的事实（整条链就是这一条消息）。
+    cm.add_message(_turn_reply("first reply", prompt_tokens=42))
+    assert cm._last_prompt_tokens() == 42

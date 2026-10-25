@@ -1403,15 +1403,20 @@ def assert_fork_of(
         )
     # 链拓扑引用（parent_uuid / unzip_last_uuid / usage_boundary_uuid）必须整体
     # 重映射到子记录集内部：前缀口径下 parent / unzip 的引用都在前缀里，所以既不该
-    # 悬空、也不该出现跨 session 引用；usage_boundary_uuid（压缩节点的 usage 信任
-    # 边界）可以指向前缀之外（fork 点在被保留的 tail 中间）——那种情况必须**删键**
-    # （缺席即历史口径），同样不得留源会话的 uuid。
+    # 悬空、也不该出现跨 session 引用。`usage_boundary_uuid`（压缩节点的 usage 信任
+    # 边界）是唯一可能指向前缀之外的一个（fork 点落在被保留的 tail 中间时，边界在
+    # 后头）——实现把它**钉到前缀末条记录**（= 子会话的活跃链尖），因此那个键的期望
+    # 值是"重映射后的源引用"或"子链尖"，都落在子记录集内部。
+    prefix_tip_uuid = record_uuid(child_records[-1]) if child_records else None
     for position in range(min(len(expected), len(child_records))):
         want, got = expected[position], child_records[position]
         for key in ("parent_uuid", "unzip_last_uuid", "usage_boundary_uuid"):
             want_ref = want.get(key)
             got_ref = got.get(key)
             want_mapped = uuid_map.get(want_ref) if isinstance(want_ref, str) else None
+            if key == "usage_boundary_uuid" and isinstance(want_ref, str):
+                if want_mapped is None:
+                    want_mapped = prefix_tip_uuid
             if want_mapped != got_ref:
                 problems.append(
                     f"child records[{position}] "

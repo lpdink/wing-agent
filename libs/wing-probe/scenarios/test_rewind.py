@@ -362,6 +362,9 @@ async def test_rewind_after_compact_keeps_region_reachable(probe: Probe) -> None
     rewind_row = after.by_uuid[material["copy_uuid"]]
     assert rewind_row["content"].startswith("[Compact]"), rewind_row
     assert rewind_row.get("unzip_last_uuid") is not None, rewind_row
+    # usage 边界跟着走：回退行是新链的根，边界重设为自己——继承压缩节点那份旧边界
+    # 会指向已被这次回退剪掉的节点，让 token 口径永久退回估算（issue #247）。
+    assert rewind_row.get("usage_boundary_uuid") == rewind_row["uuid"], rewind_row
 
     # 候选保持完整：压缩前的 User Message 与 [Compact] 标记都还在
     targets_after = [

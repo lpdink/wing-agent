@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from wing.schema import Message
+from wing.schema import LLMUsage, Message
 from wing.session import SessionManager
 from wing.store import FileSessionStore
 
@@ -63,6 +63,7 @@ def _seed_compact(session) -> dict[str, str]:
     )
     compact_node.uuid = "cu"
     compact_node.unzip_last_uuid = old2.uuid
+    compact_node.usage_boundary_uuid = "rt"  # 换入时刻的链尖 = tail1
     tail = Message(role="user", content="tail1", parent_uuid="cu")
     tail.uuid = "rt"
     cm._messages.append_detached(compact_node)
@@ -343,7 +344,7 @@ class TestForkReferenceIntegrity:
         child_uuids = {r["uuid"] for r in child_records}
 
         for record in child_records:
-            for key in ("parent_uuid", "unzip_last_uuid"):
+            for key in ("parent_uuid", "unzip_last_uuid", "usage_boundary_uuid"):
                 value = record.get(key)
                 assert value is None or value in child_uuids, (key, record)
         # 与源记录集无交集（全量重映射）
@@ -363,6 +364,95 @@ class TestForkReferenceIntegrity:
             child.session_id
         )
         assert _chain_contents(reloaded.context_manager.get_context_window()) == live
+
+
+# ============================================================
+# token 口径：usage 信任边界（issue #247）
+# ============================================================
+
+#: 「压缩前窗口」的服务端口径（换入之后不得再被当成当前 context 大小）。
+PRE_COMPACT_TOKENS = 1100
+
+
+class TestForkUsageBoundary:
+    """fork 之后 token 口径不得把压缩前的 usage 当成当前窗口的大小。
+
+    压缩换入的重链接保留区里带着**压缩前**窗口的 `prompt_tokens`（审计事实，有意
+    保留）；口径锚在压缩节点的 `usage_boundary_uuid`（换入时刻的链尖）上。fork 点
+    落在被保留的 tail 中间时边界在前缀之外——那时必须"一条都不采信"，而不是退回
+    「没有边界 → 信任保留区 usage」这条历史口径（那正是 issue #247 的错误口径，
+    而且子会话第一条请求就会命中）。
+    """
+
+    @staticmethod
+    def _seed_stale_tail(session) -> None:
+        """压缩换入后、保留区里带压缩前 usage 的链（记录顺序即 append 序）。
+
+        ``old1 → old2 ─┬─ [Compact](cu, unzip=old2, boundary=t2)
+                        └─ tail1(assistant, usage=1100) → tail2(user)``
+        """
+        cm = session.context_manager
+        old1 = Message(role="user", content="old1")
+        old2 = Message(role="assistant", content="old2")
+        cm.add_message(old1)
+        cm.add_message(old2)
+
+        compact = Message(
+            role="assistant", content="[Compact] summary", parent_uuid=None
+        )
+        compact.uuid = "cu"
+        compact.unzip_last_uuid = old2.uuid
+        compact.usage_boundary_uuid = "t2"  # 换入时刻的链尖 = tail2
+        tail1 = Message(
+            role="assistant",
+            content="tail1",
+            parent_uuid="cu",
+            usage=LLMUsage(prompt_tokens=PRE_COMPACT_TOKENS, completion_tokens=1),
+        )
+        tail1.uuid = "t1"
+        tail2 = Message(role="user", content="tail2", parent_uuid="t1")
+        tail2.uuid = "t2"
+        for node in (compact, tail1, tail2):
+            cm._messages.append_detached(node)
+        cm._messages.set_tip("t2")
+        # 源会话：边界就是链尖 → 一条都不采信（压缩后还没落过新 usage）。
+        assert cm._last_prompt_tokens() is None
+
+    @pytest.mark.asyncio
+    async def test_fork_inside_tail_does_not_revive_stale_usage(self, sm, root):
+        """fork 点在保留区中间 → 子会话不信压缩前的 usage（边界钉到子链尖）。"""
+        session = sm.create_session()
+        self._seed_stale_tail(session)
+
+        result = sm.fork_session(session.session_id, "t2")
+        assert result is not None
+        child, _ = result
+        child_records = _records(root, child.session_id)
+        child_uuids = {record["uuid"] for record in child_records}
+
+        compact_record = _record_with_content(child_records, "[Compact] summary")
+        # 边界被钉到前缀末条记录（= 子会话的活跃链尖），不是删键、也不是跨会话 uuid。
+        assert compact_record["usage_boundary_uuid"] == child_records[-1]["uuid"]
+        assert compact_record["usage_boundary_uuid"] in child_uuids
+
+        # 子会话链：压缩节点 + 带压缩前 usage 的 tail1（审计事实照旧随行）。
+        window = child.context_manager.get_context_window()
+        assert _chain_contents(window) == ["[Compact] summary", "tail1"]
+        tail = window[-1]
+        assert tail.usage is not None
+        assert tail.usage.prompt_tokens == PRE_COMPACT_TOKENS
+
+        # 口径：一条都不采信（等价于"链上的东西全部早于那次换入"）。
+        assert child.context_manager._last_prompt_tokens() is None
+        # 之后落链的真实 usage 立即生效（不是永久退回估算）。
+        child.context_manager.add_message(
+            Message(
+                role="assistant",
+                content="post fork",
+                usage=LLMUsage(prompt_tokens=42, completion_tokens=1),
+            )
+        )
+        assert child.context_manager._last_prompt_tokens() == 42
 
 
 # ============================================================
@@ -495,3 +585,50 @@ class TestRemapOutOfPrefixReferences:
         assert clone["uuid"] != "u1"
         # 源记录未被就地改写
         assert records[0]["parent_uuid"] == "outside-prefix"
+
+    def test_out_of_prefix_usage_boundary_is_pinned_to_prefix_tip(self):
+        """usage 边界指向前缀外 → 钉到前缀末条记录（不是删键）。
+
+        删键会让读取侧按「没有边界」降级成**信任**保留区里的压缩前 usage，正是
+        issue #247 的错口径；钉到前缀末条记录等于「子会话链上的东西全部早于那次
+        换入」——一条都不采信。
+        """
+        from wing.session.manager import _remap_record_uuids
+
+        records = [
+            {
+                "role": "assistant",
+                "content": "[Compact] summary",
+                "uuid": "c1",
+                "unzip_last_uuid": "m1",
+                "usage_boundary_uuid": "outside-prefix",
+            },
+            {"role": "user", "uuid": "m1", "content": "beta", "parent_uuid": "c1"},
+        ]
+        compact_clone, beta_clone = _remap_record_uuids(records)
+        assert compact_clone["usage_boundary_uuid"] == beta_clone["uuid"]
+        assert compact_clone["unzip_last_uuid"] == beta_clone["uuid"]
+
+    def test_inside_prefix_usage_boundary_is_remapped(self):
+        """边界在前缀内 → 与 parent / unzip 同样走重映射（不留源会话 uuid）。"""
+        from wing.session.manager import _remap_record_uuids
+
+        records = [
+            {
+                "role": "assistant",
+                "content": "[Compact] summary",
+                "uuid": "c1",
+                "unzip_last_uuid": "m1",
+                "usage_boundary_uuid": "m2",
+            },
+            {"role": "user", "uuid": "m1", "content": "beta", "parent_uuid": "c1"},
+            {
+                "role": "assistant",
+                "uuid": "m2",
+                "content": "beta reply",
+                "parent_uuid": "m1",
+            },
+        ]
+        compact_clone, beta_clone, tip_clone = _remap_record_uuids(records)
+        assert compact_clone["usage_boundary_uuid"] == tip_clone["uuid"]
+        assert compact_clone["unzip_last_uuid"] == beta_clone["uuid"]
