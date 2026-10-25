@@ -719,7 +719,9 @@ async fn run_resident_loop(
             event = gateway.recv_event() => match event {
                 Some(event) => {
                     // 终态帧（`turn_result` / interrupted 合成帧 / `done` 补的失败帧）
-                    // = 本轮结束。
+                    // = 本轮结束。兜底帧（`done` 补的那条）在这里就等于「后端把这一轮
+                    // 丢掉了」：stdin 已关闭时按失败码收口（响亮失败，见
+                    // `docs/dev/architecture.md` 的同一族路径 ⑤）。
                     if renderer.handle_event(&event) && policy.on_terminal() {
                         return Ok(renderer.exit_code());
                     }

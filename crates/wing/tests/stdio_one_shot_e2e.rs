@@ -270,8 +270,12 @@ async fn text_reports_the_missing_terminal_frame_when_no_error_preceded_done() {
 // 正常路径：逐字节不变
 // ============================================================
 
-/// 成功轮：`turn_result` 收口 → 退出码 0，且 `done` 不再补帧
-/// （json 模式的契约是「单个 result 对象」，多一条就是行为变化）。
+/// 成功轮：`turn_result` 收口 → 退出码 0，且只产出一条 `result` 帧。
+///
+/// 脚本里 `turn_result` 之后还有一条 `done`，但它**不会被消费**——一次性流程在
+/// `turn_result` 处就退出了。这条用例因此钉的是「成功轮的退出点与帧数不变」；
+/// 「`done` 不补第二条帧」由渲染层的 `done_after_a_terminal_frame_is_a_no_op` 与
+/// 常驻 e2e 钉住。
 #[tokio::test]
 async fn json_success_emits_a_single_result_frame_before_the_trailing_done() {
     let (code, stdout, stderr) = run(

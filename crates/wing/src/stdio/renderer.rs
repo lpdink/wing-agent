@@ -698,11 +698,13 @@ impl StdioRenderer {
 
     /// 轮末信号（`done`）：本轮**没有**终态帧时补一条失败终态帧。
     ///
-    /// `done` 是后端唯一覆盖全部收口路径的轮末信号——`run_turn` 的成功 /
-    /// max_turns / 异常三路都在 `turn_result` 之后发它，而 `agent/core.py::_run`
-    /// 的兜底 except 只发 `error` + `done`、**不发 `turn_result`**。消费方等的是
-    /// 每轮一条 result，所以缺帧的轮要补上（只让进程退出而不补帧，等于把同一个
-    /// 缺口挪到消费方那边）。
+    /// `done` 覆盖 `run_turn` 的**全部**收口路径——成功 / max_turns / 异常三路都在
+    /// `turn_result` 之后发它，而 `agent/core.py::_run` 的兜底 except 只发
+    /// `error` + `done`、**不发 `turn_result`**。唯一的例外是被打断的轮次：取消从
+    /// `except Exception` 之外逃出 `run_turn`，既没有 `turn_result` 也没有 `done`
+    /// （那条路径由 [`Self::handle_interrupted`] 的合成帧收口）。消费方等的是每轮
+    /// 一条 result，所以缺帧的轮要补上（只让进程退出而不补帧，等于把同一个缺口挪到
+    /// 消费方那边）。
     ///
     /// 两条出口：
     /// - 本轮已有终态帧 → **返回 `false`**：这条 `done` 只是把这一轮关掉，
