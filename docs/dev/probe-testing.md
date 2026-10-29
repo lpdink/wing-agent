@@ -64,7 +64,7 @@ libs/wing-probe/
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
 ├── conftest.py            # 唯一的公共 fixture 定义处（在 args 那一层，不是 scenarios/ 里）
-├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁；跨文件辅助在 _support.py）
+├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁；跨文件辅助在 _fake_provider.py）
 └── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
@@ -240,8 +240,9 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`。这不是断言面，用途只有一个：
 **算投递延迟**（发射时刻 → 客户端到达时刻）——断言类场景用它没有意义。内存内、不落盘、**只增不减**，
-规模由场景的「请求数 × 每轮帧数」决定（两本账合计约 120B / 0.35µs 一条）；要一份干净账本就新建
-provider（probe 的每个场景本来都新建一个）。
+规模由场景的「请求数 × 每轮帧数」决定（含按请求索引合计约百 B / 0.35µs 一条）；要一份干净账本
+就新建 provider（probe 的每个场景本来都新建一个）。`frame_emits` 每次访问复制一份快照——按轮次读，
+别放进帧循环。
 
 | API | 用途 |
 |-----|------|
@@ -252,10 +253,11 @@ provider（probe 的每个场景本来都新建一个）。
 两种形态，后者不计），因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）。两条配对
 约束：`at` 是**绝对**单调时钟（与 `LoggedRequest.at` 同原点，两者相减即「入站 → 发帧」的耗时），
 而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前先换到同一原点；role / finish / usage
-帧不产生客户端流式事件，拿它和 WS 事件配对时先按场景自己的帧序筛出 content / reasoning / tool 帧。
+帧不产生客户端的 delta 事件（usage 帧只经 `llm_call_metrics` 记账，不是文本 / 思考 / tool 增量），
+拿它和 WS 事件配对时先按场景自己的帧序筛出 content / reasoning / tool 帧。
 没有帧的请求——非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；写失败
 （客户端断开）的那帧不进账，所以账本是「传输层接受了的帧」的**上限**（突发写会把内核缓冲填满，
-账本可能记满而客户端只读到几帧）。
+账本可能记满而客户端只读到几帧）；`[DONE]` 也不记账，因此流尾那一帧的等待不在延迟账本里。
 
 账本与请求留档共享「留档表长度发号」这一个号空间：`provider.requests.clear()` 之后新请求从 0
 重新发号，账本里的帧随即无法归因——`emits_for` 因此直接抛 `RuntimeError` 而不是把两轮拼成一张表。

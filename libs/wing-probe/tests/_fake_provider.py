@@ -1,7 +1,8 @@
-"""跨文件共用的测试辅助：进程内假 Provider 的启动/收尾与请求体。
+"""跨文件共用的测试辅助：进程内假 Provider 的装配与离线对账的固定参数。
 
-只放装配：进程内 provider 的生命周期上下文与一次 ``chat/completions`` 的请求体。
-测试自己的语义辅助（帧序、解析、断言）留在各自的文件里。
+只放装配：进程内 provider 的生命周期上下文、一次 ``chat/completions`` 的请求体，以及
+``stream_frames`` 的固定 ``completion_id`` / ``created``。测试自己的语义辅助（帧序、
+解析、断言）留在各自的文件里。
 """
 
 from __future__ import annotations
@@ -11,6 +12,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from wing_probe.provider.server import FakeProvider
+
+COMPLETION_ID = "chatcmpl-probe-0"
+"""离线对账用的固定 completion id（``stream_frames`` 的三个装配参数之一）。"""
+CREATED = 1_700_000_000
+"""同上，固定 ``created`` 时间戳。"""
 
 
 @contextlib.asynccontextmanager

@@ -157,11 +157,7 @@ class RequestLog:
 
     @property
     def generation(self) -> int:
-        """``clear()`` 的次数。
-
-        ``index`` 是「留档表长度」发号的，清空后同名下标会指向另一个请求。与留档共享号
-        空间的账本（如 ``FakeProvider.frame_emits``）靠这个数检测复用。
-        """
+        """``clear()`` 的次数：清空后同名 ``index`` 指向另一个请求，共享号空间的一方靠它检测复用。"""
         return self._generation
 
     def summary(self) -> str:

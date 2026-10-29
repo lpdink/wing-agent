@@ -13,7 +13,12 @@ import time
 
 import httpx
 import pytest
-from _support import request_body, running_provider
+from _fake_provider import (
+    COMPLETION_ID,
+    CREATED,
+    request_body,
+    running_provider,
+)
 from aiohttp import web
 
 from wing_probe.provider.script import Script, ToolCall, Turn, Usage
@@ -21,8 +26,6 @@ from wing_probe.provider.server import FakeProvider, FrameEmit
 from wing_probe.provider.sse import SSEFrame, stream_frames
 
 MODEL = "probe/emits"
-COMPLETION_ID = "chatcmpl-probe-0"
-CREATED = 1_700_000_000
 DONE_LINE = "data: [DONE]"
 
 
@@ -299,6 +302,8 @@ async def test_emits_for_refuses_a_reissued_request_index() -> None:
         await sse_payload_lines(provider)
         with pytest.raises(RuntimeError, match="indices are reissued"):
             provider.emits_for(0)
+        with pytest.raises(RuntimeError, match="indices are reissued"):
+            _ = provider.frame_emits
 
 
 @pytest.mark.asyncio

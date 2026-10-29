@@ -9,7 +9,12 @@ import json
 
 import httpx
 import pytest
-from _support import request_body, running_provider
+from _fake_provider import (
+    COMPLETION_ID,
+    CREATED,
+    request_body,
+    running_provider,
+)
 
 from wing_probe.provider.script import (
     Script,
@@ -31,8 +36,6 @@ from wing_probe.provider.sse import (
 )
 
 MODEL = "probe/unit"
-COMPLETION_ID = "chatcmpl-probe-0"
-CREATED = 1_700_000_000
 
 
 # ── 独立解析器（外来消费者视角） ────────────────────────────────

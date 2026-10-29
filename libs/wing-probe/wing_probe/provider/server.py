@@ -180,9 +180,11 @@ class FakeProvider:
         """流式响应的逐帧发射时刻（只读快照；按**写完**顺序，并发时各请求交错）。
 
         测量器件而非日志：只增不减、不落盘、无上界，规模由场景的「请求数 × 每轮帧数」
-        决定（两本账合计约 120B / 0.35µs 一条）；要一份干净账本就新建 provider——账本
+        决定（含按请求索引约百 B / 0.35µs 一条）；要一份干净账本就新建 provider——账本
         与请求留档共享一个号空间，清掉留档就再也归不了因（见 :meth:`emits_for`）。
+        每次访问复制一份快照：按轮次读，不要放进帧循环。
         """
+        self._require_unreused_indices()
         return tuple(self._frame_emits)
 
     def emits_for(self, request_index: int) -> list[float]:
@@ -193,12 +195,7 @@ class FakeProvider:
         留档的下标抛 ``IndexError``：打错下标会得到一张「好看的空表」，那比报错贵得多。
         返回副本，改它不影响账本。
         """
-        if self._index_space_reused():
-            raise RuntimeError(
-                "the request log was cleared after frames were recorded: request "
-                "indices are reissued from 0, so the ledger's emissions can no longer "
-                "be attributed to a request (build a fresh provider instead)"
-            )
+        self._require_unreused_indices()
         recorded = len(self.requests)
         if request_index < 0 or request_index >= recorded:
             raise IndexError(
@@ -207,12 +204,17 @@ class FakeProvider:
             )
         return list(self._emits_by_request.get(request_index, ()))
 
-    def _index_space_reused(self) -> bool:
-        """留档被清过？（``clear()`` 让序号从 0 重新发号，账本里的帧随即无法归因）"""
-        return (
+    def _require_unreused_indices(self) -> None:
+        """留档被清过就拒绝出账：``clear()`` 让序号从 0 重新发号，账本里的帧随之无法归因。"""
+        if (
             self._emits_generation is not None
             and self.requests.generation != self._emits_generation
-        )
+        ):
+            raise RuntimeError(
+                "the request log was cleared after frames were recorded: request "
+                "indices are reissued from 0, so the ledger's emissions can no longer "
+                "be attributed to a request (build a fresh provider instead)"
+            )
 
     # ── HTTP ───────────────────────────────────────────────
 
@@ -235,6 +237,8 @@ class FakeProvider:
         logged = self.requests.record(
             body, model=model, path=request.path, headers=request.headers
         )
+        if self._emits_generation is None:
+            self._emits_generation = self.requests.generation
         headers = {"x-request-id": f"probe-{logged.index}"}
 
         try:
@@ -316,12 +320,11 @@ class FakeProvider:
         for frame in frames:
             if frame.delay:
                 await asyncio.sleep(frame.delay)
+            payload = frame.encode()
             at = time.monotonic()
-            await response.write(frame.encode())
+            await response.write(payload)
             if frame.data is None:
                 continue
-            if self._emits_generation is None:
-                self._emits_generation = self.requests.generation
             self._frame_emits.append(
                 FrameEmit(request_index=request_index, frame_index=frame_index, at=at)
             )
