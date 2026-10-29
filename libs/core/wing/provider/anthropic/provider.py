@@ -89,13 +89,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         headers = self._make_headers(config.api_key, self._anthropic_version)
 
         limits = make_http_limits(config.max_connections)
-        # 缺省（None）不传 limits——沿用 httpx 默认连接池（见 make_http_limits）。
-        extra: dict[str, Any] = {} if limits is None else {"limits": limits}
+        # 缺省（None）不传 limits——沿用 httpx 默认池（契约见 make_http_limits）。
+        limits_kwargs: dict[str, Any] = {} if limits is None else {"limits": limits}
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
             timeout=make_http_timeout(),
-            **extra,
+            **limits_kwargs,
         )
         log.info(f"AnthropicProvider initialized: {self.base_url}")
 

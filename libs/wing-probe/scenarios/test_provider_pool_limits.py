@@ -16,10 +16,11 @@
    ``time.monotonic()`` 尺度，减去 ``env.started_at`` 与时间线同基准）。
 
 阈值与理由：``HOLD = 2.0s`` 是单轮的流内停顿；串行时第二轮的 ``turn_result`` 要等到
-第一轮整个流结束（≈ ``HOLD``）之后才开始自己的 ``HOLD``，因此两轮间隔的期望值就是 ``HOLD``；
-并行时期望值 ≈ 0。判定线取 ``1.2s``（串行，期望 2.0，留 0.8 余量）与 ``0.8s``（并行，期望
-≈ 0，留 ~0.78 余量）——死区留给并行跑（``make test-probe -n``）时的进程 / 事件循环调度抖动，
-同时不把"差一点点串行"判成通过。
+第一轮整个流结束（≈ ``HOLD``）之后才开始自己的 ``HOLD``，因此两轮间隔的期望值就是
+``HOLD``；并行时期望值 ≈ 0（实测 ~1e-4 s）。判定线取 ``HOLD * SERIAL_GAP_RATIO = 1.2s``
+与 ``HOLD * PARALLEL_GAP_RATIO = 0.8s``：比例式让 ``HOLD`` 保持唯一旋钮（改停顿不用重算
+两个数字），死区（0.8~1.2s）留给并行跑（``make test-probe -n``）时的进程 / 事件循环调度
+抖动，同时不把"差一点点串行"判成通过。
 """
 
 from __future__ import annotations
@@ -37,9 +38,12 @@ PARALLEL_MODEL = "probe/pool-limit-parallel"
 #: 单轮流内首帧停顿（秒）——撑开"连接被占住"的窗口。
 HOLD = 2.0
 
-#: 串行判定下限 / 并行判定上限（秒）。理由见模块 docstring。
-SERIAL_MIN_GAP = 1.2
-PARALLEL_MAX_GAP = 0.8
+#: 串行下限 / 并行上限占 ``HOLD`` 的比例（理由见模块 docstring）。
+SERIAL_GAP_RATIO = 0.6
+PARALLEL_GAP_RATIO = 0.4
+
+SERIAL_MIN_GAP = HOLD * SERIAL_GAP_RATIO
+PARALLEL_MAX_GAP = HOLD * PARALLEL_GAP_RATIO
 
 
 def _register_two_held_turns(probe: Probe, model: str) -> None:

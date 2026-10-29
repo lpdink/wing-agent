@@ -55,8 +55,8 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 模板 = `emit_config_yaml(default_document(), build_catalog())`，`default_document()` = `{"providers": [], "agents": []}`
 （首启模板的空列表是**天然的 problem**——向导据此指路，不再需要 `ChangeHere` 这种假占位符）。
 
-规模（`build_catalog()` 实测）：**76 个声明字段 / 8 个业务分组**（字段计数口径 = 目录树的
-全部字段节点，钉在 `test_config_spec.py::test_field_count_is_sane`；节点 88 / 叶子 71 为
+规模（`build_catalog()` 实测）：**77 个声明字段 / 8 个业务分组**（字段计数口径 = 目录树的
+全部字段节点，钉在 `test_config_spec.py::test_field_count_is_sane`；节点 89 / 叶子 72 为
 含 `element` / `variant` 模板展开的全量口径）；`secret` 2（`providers[].api_key`、
 `gateway.auth.keys[].key`）、`enum` 6、`min_items=1` 3 组。
 

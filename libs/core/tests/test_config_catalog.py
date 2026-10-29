@@ -10,7 +10,7 @@
 4. ``required`` / ``default`` / ``has_default``（含 default_factory 的 object/list 与 map 两种情况）；
 5. section 分组（= ``config/groups.py`` 的表的投影）与 ``order``（= 声明序）、合成节点的元信息；
 6. ``parse_path`` 全用例（合法 5 例 + 非法 12 例，文法与 Rust 侧同批）；
-7. **规模断言**：声明字段总数 = 68（01 报告的迁移字段数），防「某个嵌套模型被漏扫」。
+7. **规模断言**：声明字段总数固定（防「某个嵌套模型被漏扫」）——新增字段时同步该数字。
 """
 
 from __future__ import annotations
@@ -464,8 +464,8 @@ def test_images_defaults_are_pinned() -> None:
 
 
 def test_declared_field_scale_matches_01_report() -> None:
-    """规模断言：声明字段总数 = 77（01 报告的 68 + 后续新增的 gateway.cors 两项 +
-    sessions.archive 四项 + files 两项〔顶层键 + max_bytes〕+ providers.max_connections）；
+    """规模断言：声明字段总数 = 77（网关 CORS 两项 + sessions.archive 四项 +
+    files 两项〔顶层键 + max_bytes〕+ providers[].max_connections 都已计入）；
     路径不重复。"""
     declared = _declared(build_catalog())
     assert len(declared) == 77

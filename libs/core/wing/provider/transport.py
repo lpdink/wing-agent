@@ -1,7 +1,7 @@
 # wing/provider/transport.py
 """provider 层共享的传输管道与错误面（两个协议同构）。
 
-- httpx client 构造（统一超时口径）；
+- httpx client 构造（统一超时与连接池口径）；
 - SSE 行解析与响应体闲置超时（OpenAI / Anthropic 流式共用）；
 - HTTP / 流错误类型与 `raise_with_body`（错误 body 进异常现场）。
 

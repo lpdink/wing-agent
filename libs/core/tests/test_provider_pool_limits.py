@@ -20,13 +20,13 @@ from typing import Any
 import httpx
 import pytest
 
+from _support import anthropic_provider, openai_provider
 from wing.config import ProviderConfig
 from wing.config.document import locate_problems
-from wing.provider.anthropic.provider import AnthropicProvider
-from wing.provider.openai.provider import OpenAICompatProvider
-from wing.provider.transport import make_http_limits
+from wing.provider.transport import make_http_limits, make_http_timeout
 
-PROTOCOLS = ("openai", "anthropic")
+#: 协议 → 构造入口（provider 无状态，只有 ``AsyncClient`` 构造是本次的被测面）。
+FACTORIES = {"openai": openai_provider, "anthropic": anthropic_provider}
 
 #: provider 构造只碰这三个 httpx 关键字——多一个就是行为变化。
 BASE_CLIENT_KWARGS = {"base_url", "headers", "timeout"}
@@ -49,24 +49,13 @@ def client_kwargs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 def make_provider(protocol: str, **overrides: Any) -> None:
     """按协议构造一个 provider（配置走 conftest 的 Config 单例，headers 可解析）。"""
-    cfg = ProviderConfig(
-        name=f"limit-{protocol}",
-        protocol=protocol,  # ty: ignore[invalid-argument-type]
-        base_url="https://api.example.com/v1",
-        api_key="sk-test",
-        models=["m"],
-        **overrides,
-    )
-    if protocol == "openai":
-        OpenAICompatProvider(cfg)
-    else:
-        AnthropicProvider(cfg)
+    FACTORIES[protocol](f"limit-{protocol}", **overrides)
 
 
 # ── 1. 缺省零变化 ──────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("protocol", tuple(FACTORIES))
 def test_default_sends_no_limits_kwarg(
     protocol: str, client_kwargs: list[dict[str, Any]]
 ) -> None:
@@ -77,9 +66,11 @@ def test_default_sends_no_limits_kwarg(
     kwargs = client_kwargs[0]
     assert "limits" not in kwargs, kwargs
     assert set(kwargs) == BASE_CLIENT_KWARGS, sorted(kwargs)
+    # 值也要与「没引入这个旋钮」时相同：timeout 是唯一另一个装配出来的参数。
+    assert kwargs["timeout"] == make_http_timeout(), kwargs["timeout"]
 
 
-@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("protocol", tuple(FACTORIES))
 def test_explicit_none_is_the_same_as_absent(
     protocol: str, client_kwargs: list[dict[str, Any]]
 ) -> None:
@@ -92,7 +83,7 @@ def test_explicit_none_is_the_same_as_absent(
 # ── 2. 声明值 → httpx.Limits ───────────────────────────────────
 
 
-@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("protocol", tuple(FACTORIES))
 def test_declared_limit_reaches_async_client(
     protocol: str, client_kwargs: list[dict[str, Any]]
 ) -> None:
@@ -104,7 +95,7 @@ def test_declared_limit_reaches_async_client(
     )
 
 
-@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("protocol", tuple(FACTORIES))
 def test_keepalive_is_capped_at_twenty(
     protocol: str, client_kwargs: list[dict[str, Any]]
 ) -> None:

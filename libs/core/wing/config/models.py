@@ -251,10 +251,10 @@ class ProviderConfig(BaseModel):
     max_connections: int | None = S(
         doc="单 provider 的并发连接上限",
         notes=(
-            "null = 沿用 httpx 默认连接池（max_connections=100 / keepalive=20）。\n"
+            "null = 沿用 httpx 默认连接池（当前 max_connections=100 / keepalive=20）。\n"
             "设置后 keepalive 上限取 min(该值, 20)。\n"
             "SSE 是长连接：并发调用超过上限时，多出的请求在本地连接池排队，"
-            "表现为首帧延迟（不报错、不触发重试）。"
+            "表现为首帧延迟（排队超过 httpx 的 pool 超时才会失败）。"
         ),
         apply=ApplyScope.HOT,
         default=None,
