@@ -1022,7 +1022,7 @@ def _assemble(
     block["turn.p50_ms"] = _round(turn_spread.get("p50"))
     block["turn.p99_ms"] = _round(turn_spread.get("p99"))
     if payloads and not completed:
-        notes.append(_no_turn_note(record["shape"].get("window_mode")))
+        notes.append(_no_turn_note(record["shape"].get("window_mode"), cfg.scenario))
     _fill_hydration(block, samples, turns, notes)
 
     delivery_available = provider is not None and metrics.has_frame_emits(provider)
@@ -1086,18 +1086,26 @@ def _assemble(
     return record
 
 
-def _no_turn_note(window_mode: str | None) -> str:
+_CYCLING_SCENARIOS = frozenset({"tool_cycle", "mixed"})
+
+
+def _no_turn_note(window_mode: str | None, scenario: str) -> str:
     """「窗口里没有完成的轮次」的原因按形态说（结构性 null ≠ 没测到）。"""
     if window_mode == "hold":
         return (
             "turn.* is null: this shape drives nothing, so no turn can complete inside "
             "the window"
         )
+    if scenario in _CYCLING_SCENARIOS:
+        return (
+            "turn.* is null: no turn completed inside the window — the cycle is longer "
+            "than the window (--cycle-s), the cycling group was empty at this level, or "
+            "the gateway stalled"
+        )
     return (
         "turn.* is null: no turn completed inside the window — the streaming shape "
         "streams one turn per session across warmup + dwell by design (per-turn fixed "
-        "cost is measured by the tool-cycle shape); with the mixed shape this means the "
-        "cycling group was empty at this level"
+        "cost is measured by the tool-cycle shape)"
     )
 
 

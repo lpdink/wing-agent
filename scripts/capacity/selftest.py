@@ -15,7 +15,7 @@
 - ``verdict.criteria``        判据：baseline / degraded / capped / unknown / low_confidence
 - ``verdict.polluted``        被污染的 ``run.json`` 必须被标低置信（负向验证）
 - ``report.render``           合成 ``run.json`` → markdown（缺数据是 ``—``、判据原文唯一）
-- ``e2e.<shape>``             **真网关子进程 + 真分片子进程**跑完迷你一档（五种形态各一次），
+- ``e2e.<case>``              **真网关子进程 + 真分片子进程**跑完迷你一档（各形态各一次 + `--tool bash` 变体），
                                断言该形态的指标非 null 且形状自洽；另用失败档断言
                                「成功档与失败档的键集完全相同」
 
@@ -1431,7 +1431,7 @@ def check_verdict() -> None:
     )
     # 判据原文清单只有一处：报告直接渲染它。
     _check(
-        len(verdict.CRITERIA) == 10,
+        len(verdict.CRITERIA) == 11,
         f"criteria must be one declaration: {len(verdict.CRITERIA)}",
     )
     classified = {key for keys in verdict.CRITERIA_FLAGS.values() for key in keys}
@@ -1452,6 +1452,72 @@ def check_verdict() -> None:
     _check(
         verdict.reason_flag("something else") is None,
         "an unknown reason must not be classified",
+    )
+
+
+def check_report_verdicts() -> None:
+    """报告层回归：低置信 / 判据未评估 / 退化结论三者不能互相吞掉。
+
+    这三条都是「报告说的比数据多/少」的同一族：低置信档不许被结论引用，判据未评估不许
+    被读成「没问题」，而未评估也**不许**把该档真正命中的判据一起从结论里剔掉。
+    """
+    # 基线档没有完成的轮次（mixed 单会话落工具组之前的那种产物形态）+ 更高档投递延迟越界。
+    run = _run(
+        _level(1),
+        _level(10, delivery_p99=800.0, turn_p99=1200.0),
+        scenario="mixed",
+    )
+    run["meta"]["args_replayable"] = ["levels", "rate", "chunk"]
+    text = report.render(run)
+    _check(
+        "体感退化先出现在 N=10" in text,
+        "a level whose turn criterion is unjudged must still contribute its other "
+        "findings to the conclusion",
+    )
+    _check(
+        "判据未评估" in text and "干净的" not in text,
+        "the unjudged banner must not claim the readings are clean",
+    )
+    _check(
+        "照常生效" not in text,
+        "the report must not promise that the remaining criteria fired",
+    )
+    # 同时低置信 + 未评估：两句话不得互相矛盾（一个说可能被污染，一个说干净）。
+    mixed_case = _run(
+        _level(1), _level(10, delivery_p99=800.0, turn_p99=1200.0, provider_cpu=0.95)
+    )
+    mixed_text = report.render(mixed_case)
+    _check(
+        "干净的" not in mixed_text,
+        "a low-confidence level must never be described as clean",
+    )
+    _check(
+        "没有引用它们" in mixed_text,
+        "low-confidence levels must be excluded from the conclusion",
+    )
+    # 投递延迟压根没测到（窗口里没有可配对的帧）→ 这条判据必须被点名为未评估。
+    blind = _run(_level(1), _level(10, delivery_p99=None))
+    blind_text = report.render(blind)
+    _check(
+        verdict.CRITERIA["unjudged.delivery"] in blind_text,
+        f"an unmeasured delivery criterion must be named: {blind_text[:400]}",
+    )
+    _check(
+        "投递延迟未测到" in blind_text,
+        "the conclusion must say the delivery axis was not measured",
+    )
+    # 复现命令只回放生产者声明的键（meta.args 里的计时校准值不是输入参数）。
+    command = report.render(run)
+    line = next(
+        text for text in command.splitlines() if text.startswith("uv run python")
+    )
+    _check(
+        "--frame-delay-ms" not in line and "--frame_delay_ms" not in line,
+        f"timing calibration must not be replayed as a flag: {line}",
+    )
+    _check(
+        "--levels 1,10" in line and "--rate" in line and "--chunk" in line,
+        f"the declared replayable args must be replayed: {line}",
     )
 
 
@@ -2080,6 +2146,7 @@ def checks() -> list[tuple[str, Callable[[], None]]]:
         ("shapes.contract", check_shapes),
         ("verdict.criteria", check_verdict),
         ("verdict.polluted", check_polluted),
+        ("report.verdicts", check_report_verdicts),
         ("report.render", check_report),
         ("run.summary", check_summary),
     ]

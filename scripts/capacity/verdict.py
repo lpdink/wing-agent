@@ -75,6 +75,10 @@ CRITERIA: dict[str, str] = {
     "unjudged.turn": (
         "turn criterion not evaluated: the baseline level completed no turn"
     ),
+    "unjudged.delivery": (
+        "delivery criterion not evaluated: no pairable frame in the window "
+        "(delivery.p99_ms is null)"
+    ),
 }
 
 #: 判档的优先序（同一档命中多条时，报告与该字段都按这个顺序排）。
@@ -212,7 +216,7 @@ def evaluate_level(
             flags.append("degraded")
             reasons.extend(degraded)
 
-    unjudged = _unjudged_criteria(baseline=baseline, scenario=scenario)
+    unjudged = _unjudged_criteria(record, baseline=baseline, scenario=scenario)
 
     provider = _rig(record, "provider_cpu_cores")
     if provider is not None and provider >= LOW_CONF_PROVIDER_CORES:
@@ -282,25 +286,42 @@ def _degraded_reasons(
 
 
 def _unjudged_criteria(
-    *, baseline: Mapping[str, Any] | None, scenario: str | None
+    record: Mapping[str, Any],
+    *,
+    baseline: Mapping[str, Any] | None,
+    scenario: str | None,
 ) -> list[str]:
-    """本条阶梯上**无从评估**的判据（缺数据 ≠ 没退化）。
+    """本档上**无从评估**的判据（缺数据 ≠ 没退化）。
 
-    今天只有一条：多轮形态的轮次尾部判据。它需要一个有完成轮次的基线档；基线档窗口里
-    一个轮次都没收口时（例如 ``mixed`` 的工具组为空），整条阶梯的 ``degraded.turn``
-    都不成立——必须显式说出来，否则报告会写「到最大档都没有触发 degraded」而实际少判了一条。
+    两条：
 
-    与 ``low_confidence`` 分开：这里的读数是干净的，只是判据缺一个比较对象。
+    - 轮次尾部（``degraded.turn``）：多轮形态需要一个有完成轮次的基线档；基线档窗口里
+      一个轮次都没收口时（例如工具组为空），整条阶梯的这条判据都不成立；
+    - 投递延迟（``degraded.delivery``）：本档窗口里没有可配对的帧（``delivery.p99`` 为
+      ``null``，例如轮次周期长于窗口）。结构上不驱动负载的形态（``hold``）不算——
+      那里没有「本该有的样本」。
+
+    与 ``low_confidence`` 分开：这一档的读数**没有被判定为污染**，只是少了一条判据。
+    报告不得把这句话读成「读数是干净的」——那是另一件事，见 README。
     """
-    if scenario not in TURN_SCENARIOS or baseline is None:
-        return []
-    base_turn = _metric(baseline, "turn.p99_ms")
-    if base_turn is not None and base_turn > 0:
-        return []
-    return [
-        f"{CRITERIA['unjudged.turn']} (baseline N={baseline.get('sessions')}: "
-        f"turn.p99={base_turn})"
-    ]
+    out: list[str] = []
+    if scenario in TURN_SCENARIOS and baseline is not None:
+        base_turn = _metric(baseline, "turn.p99_ms")
+        if base_turn is None or base_turn <= 0:
+            out.append(
+                f"{CRITERIA['unjudged.turn']} (baseline N={baseline.get('sessions')}: "
+                f"turn.p99={base_turn})"
+            )
+    if _metric(record, "delivery.p99_ms") is None and _expects_traffic(record):
+        out.append(CRITERIA["unjudged.delivery"])
+    return out
+
+
+def _expects_traffic(record: Mapping[str, Any]) -> bool:
+    """这个形态**本该**在窗口里产生可配对的帧吗（``hold`` 不驱动，没有「本该」）。"""
+    if (record.get("shape") or {}).get("window_mode") == "hold":
+        return False
+    return (record.get("samples") or {}).get("delivery_available") is not False
 
 
 def _metric(record: Mapping[str, Any], key: str) -> float | None:

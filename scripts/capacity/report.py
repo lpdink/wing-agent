@@ -250,8 +250,8 @@ def _banners(run: Mapping[str, Any], verdicts: Sequence[verdict.Verdict]) -> lis
     ]
     if unjudged:
         lines.append(
-            f"> **判据未评估：{unjudged}** —— 这几档的读数是干净的，但少了一条判据"
-            "（多轮形态的轮次尾部需要一个有完成轮次的基线档）。其余判据照常生效。"
+            f"> **判据未评估：{unjudged}** —— 这几档少判了判据（逐条原因见下方「判据」"
+            "一节）。**未评估不等于没有退化**：缺的那条判据这轮没有给结论。"
         )
     unknown = [
         record.get("sessions")
@@ -329,10 +329,8 @@ def _conclusion(
         if usable:
             top, result = max(usable, key=lambda pair: int(pair[0]["sessions"]))
             lines.append(
-                f"- **速度轴**：可用档位里最大的 N={top.get('sessions')} 也没有触发 "
-                f"degraded / capped（delivery p99 "
-                f"{_num((top.get('metrics') or {}).get('delivery.p99_ms'))} ms，"
-                f"网关 {_num((top.get('metrics') or {}).get('gateway.cpu_cores'), 2)} 核）。"
+                f"- **速度轴**：可用档位里最大的 N={top.get('sessions')} 没有命中判据"
+                f"（{_evaluated_axes(top, result)}）。"
             )
         else:
             lines.append(
@@ -371,11 +369,53 @@ def _conclusion(
         if result.unjudged
     ]
     if unjudged:
+        kinds = sorted(
+            {
+                _unjudged_label(reason)
+                for result in verdicts
+                for reason in result.unjudged
+            }
+        )
         lines.append(
-            f"- **判据未评估**：{unjudged} 档少判了一条（轮次尾部）——基线档没有完成"
-            "的轮次，`turn.p99` 无从比较；投递延迟与 capped 判据照常生效。"
+            f"- **判据未评估**：{unjudged} 档少判了判据（{'、'.join(kinds)}）——"
+            "**未评估不等于没有退化**，逐条原因见「判据」一节。"
         )
     return [*lines, ""]
+
+
+#: 未评估判据的中文名（只影响人读文案；判据原文照旧从 ``verdict.CRITERIA`` 取）。
+UNJUDGED_LABELS: dict[str, str] = {
+    "unjudged.turn": "轮次尾部",
+    "unjudged.delivery": "投递延迟",
+}
+
+
+def _unjudged_label(reason: str) -> str:
+    for key, label in UNJUDGED_LABELS.items():
+        if reason.startswith(verdict.CRITERIA[key]):
+            return label
+    return "未评估"
+
+
+def _evaluated_axes(record: Mapping[str, Any], result: verdict.Verdict) -> str:
+    """「这一档实际评估了哪些判据」——只说测到的量，不替缺数据的判据下结论。"""
+    metrics = record.get("metrics") or {}
+    parts: list[str] = []
+    p99 = metrics.get("delivery.p99_ms")
+    parts.append(
+        f"投递延迟 p99 {_num(p99)} ms" if p99 is not None else "投递延迟未测到"
+    )
+    if (record.get("shape") or {}).get("window_mode") == "hold":
+        parts.append("本形态不驱动")
+    else:
+        turn_p99 = metrics.get("turn.p99_ms")
+        parts.append(
+            f"轮次 p99 {_num(turn_p99)} ms" if turn_p99 is not None else "轮次未收口"
+        )
+    parts.append(f"网关 {_num(metrics.get('gateway.cpu_cores'), 2)} 核")
+    parts.append(f"fd 峰值 {_num(metrics.get('gateway.fds_peak'))}")
+    parts.append(f"错误 {_num(metrics.get('errors'))}")
+    return "；".join(parts)
 
 
 def _memory_axis(levels: Sequence[Mapping[str, Any]], host: Mapping[str, Any]) -> str:

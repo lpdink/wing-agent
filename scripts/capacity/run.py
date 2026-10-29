@@ -127,6 +127,7 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
         for record in levels
         if record.get("error")
     ]
+    measurement = cli.measurement_args(cfg)
     meta = {
         "tool": TOOL,
         "schema": SCHEMA,
@@ -134,10 +135,12 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
         "started_at": started_at,
         "duration_s": round(time.monotonic() - started, 1),
         "args": {
-            **cli.measurement_args(cfg),
+            **measurement,
             "frame_delay_ms": round(frame_delay_s * 1000, 3),
             "sleep_overshoot_ms": round(overshoot_s * 1000, 3),
         },
+        # 哪些 args 键是旗标（复现命令据此回放；`meta.args` 里的计时校准值不是输入）。
+        "args_replayable": list(measurement),
         "host": proc.host_info(),
         "gateway": _meta_gateway(levels),
         "session_create": _meta_session_create(levels),
@@ -241,6 +244,7 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
                 "errors": (record.get("metrics") or {}).get("errors"),
                 "verdict": (record.get("verdict") or {}).get("verdict"),
                 "low_confidence": (record.get("verdict") or {}).get("low_confidence"),
+                "unjudged": (record.get("verdict") or {}).get("unjudged"),
                 "error": record.get("error"),
             }
             for record in payload["levels"]

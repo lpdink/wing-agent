@@ -154,6 +154,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
              "shards": 4, "subscribers": "per-session", "backend": "file",
              "tool": "read", "cycle_s": 3.0, "decode_duty": 0.7, "history_tokens": 0,
              "frame_delay_ms": 17.945, "sleep_overshoot_ms": 2.055},
+    "args_replayable": ["levels", "rate", "chunk", "..."],
     "host": {"cpus": 12, "mem_gb": 16.0, "platform": "darwin", "ulimit_n": 4256},
     "gateway": {"pid": 123, "version": "0.7.0", "commit": "a7e7126"},
     "session_create": {"ok": 11, "failed": 0, "total_ms": 25.5, "scope": "sum over levels"},
@@ -191,7 +192,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
     "shape": {"rate": 50.0, "chunk": 1, "backend": "file", "tool": "read",
               "shards": 4, "subscribers": "per-session", "window_mode": "drive"},
     "verdict": {"verdict": "ok", "flags": [], "reasons": [], "low_confidence": false,
-                "low_confidence_reasons": [], "baseline_sessions": 1},
+                "low_confidence_reasons": [], "unjudged": [], "baseline_sessions": 1},
     "notes": ["…"]
   }]
 }
@@ -214,6 +215,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 - `levels[i].shape` 是本档的形态参数（`chunk` / `backend` / `tool` / `window_mode` 都在这里，
   否则 `file` 与 `memory` 两次读数在产物里分不开）；
 - `levels[i].history` 是历史预置的记账（`total_ms` 是**预置花了多久**）；
+- `meta.args_replayable` 是 `meta.args` 里**是旗标**的那些键（其余是本次运行的计时校准值）：
+  报告用它拼复现命令，未知键不会被当成旗标拼出去；
 - `levels[i].verdict` 是判据结果（`verdict.py` 的唯一实现），报告**不用**它、而是自己重算
   一遍（见「判据」）；
 - `levels[i].samples.chars` 是窗口内收到的正文字符数（`chars_per_second` 的分子，
@@ -351,7 +354,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 ### `mixed` — 模型校验
 
 `--decode-duty`（默认 0.7）= **处于纯流式输出中的会话占比**：前 `round(duty × N)` 个会话
-跑 `pure_stream`（一轮覆盖整窗），其余跑 `tool_cycle`。于是「混合档 ≈ 两种纯形态读数的
+跑纯流式（一轮覆盖整窗），其余跑工具循环。两个会话以上时**两组都夹到非空**（否则「混合」
+会退化成纯流式或纯工具，基线档的轮次判据也因此失去比较对象）；`duty` 的 0 / 1 两个端点
+字面有效；单会话无法拆分时落工具组（让基线档产出完成的轮次）。于是「混合档 ≈ 两种纯形态读数的
 线性叠加」是一个可检验的预测；偏差大就说明某个成本项不与会话数线性（cache 抖动、GIL、
 页回收），必须人工解释而不是当噪声。选**会话分组**而不是时间片：时间片下每个会话都在
 两种成本之间来回切，叠加预测不再成立，本形态就失去了唯一的用途。

@@ -45,7 +45,7 @@ CHANNEL_EVENTS: dict[str, str] = {
 #: 客户端事件类型 → 通道标记（分片侧的归档方向）。
 EVENT_CHANNELS: dict[str, str] = {event: kind for kind, event in CHANNEL_EVENTS.items()}
 
-#: 配对丢弃的原因词汇表（**唯一声明处**）：``reason → 是否窗口簿记（不是数据被污染）``。
+#: 配对丢弃的原因词汇表（**唯一声明处**）：``reason → "bookkeeping" | "contamination"``。
 #:
 #: 带 ``:<kind>`` 后缀的原因由前缀匹配（见 :func:`drop_reason_family`）。这张表同时被
 #: 生产者（:func:`pair_delivery`）与消费者（``verdict`` 判低置信丢弃率）使用——两处各写
