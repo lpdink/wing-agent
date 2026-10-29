@@ -53,9 +53,17 @@ class FrameEmit:
 
     ``request_index`` 是 ``RequestLog`` 留档的全局 ``index``（不是 ``model_index``）。
     ``frame_index`` 从 0 起、只数 ``data: {json}`` 载荷帧（``[DONE]`` 不计），等于客户端
-    SSE 解析器读到的第几个事件（0 是 role 空帧）；role / finish / usage 帧没有对应的
-    客户端流式事件。``at`` 是该帧写之前的绝对 ``time.monotonic()``（与
-    ``LoggedRequest.at`` 同原点；``watch`` 的 ``Event.at`` 则是相对 ``env.started_at`` 的）。
+    SSE 解析器读到的第几个事件（0 是 role 空帧）。``at`` 是该帧写之前的绝对
+    ``time.monotonic()``（与 ``LoggedRequest.at`` 同原点；``watch`` 的 ``Event.at`` 则是
+    相对 ``env.started_at`` 的）。
+
+    ``kind`` 是这一帧的**通道标记**（与 :data:`wing_probe.provider.sse.FRAME_KINDS` 同一个
+    词表，取值由 ``sse.stream_frames`` 组装该帧时确定）——按它筛出与客户端事件可配对的帧:
+
+    - ``content``：``delta.content`` 增量 → 客户端 ``text`` 事件（每个内容帧一条）；
+    - ``thinking``：``delta.reasoning_content`` 增量 → 客户端 ``reasoning`` 事件；
+    - ``tool_call``：``delta.tool_calls[]`` 增量 → 客户端 ``tool_call_stream`` 事件；
+    - ``meta``：role 空帧 / finish_reason 帧 / usage 帧——**不产生**任何客户端 delta 事件。
 
     配对口径与账本的生命周期见 ``docs/dev/probe-testing.md``。
     """
@@ -63,6 +71,7 @@ class FrameEmit:
     request_index: int
     frame_index: int
     at: float
+    kind: str
 
 
 def _error_response(status: int, message: str, *, code: str) -> web.Response:
@@ -330,7 +339,12 @@ class FakeProvider:
             if frame.data is None:
                 continue
             self._emits_by_request.setdefault(request_index, []).append(
-                FrameEmit(request_index=request_index, frame_index=frame_index, at=at)
+                FrameEmit(
+                    request_index=request_index,
+                    frame_index=frame_index,
+                    at=at,
+                    kind=frame.kind,
+                )
             )
             frame_index += 1
 

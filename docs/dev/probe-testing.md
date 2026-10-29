@@ -246,19 +246,32 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 | API | 用途 |
 |-----|------|
-| `frame_emits: tuple[FrameEmit, ...]` | 只读快照，**访问时**按 `request_index` 再 `frame_index` 拍平（`FrameEmit` = `(request_index, frame_index, at)`）；每次访问 O(总帧数)，只服务测试与交叉核对 |
+| `frame_emits: tuple[FrameEmit, ...]` | 只读快照，**访问时**按 `request_index` 再 `frame_index` 拍平（`FrameEmit` = `(request_index, frame_index, at, kind)`）；每次访问 O(总帧数)，只服务测试与交叉核对 |
 | `emits_for(request_index)` | 该请求的逐帧时刻（按 `frame_index` 升序，返回副本）；**列表位置即 `frame_index`**。`request_index` 是 `probe.request(...)` 留档的全局 `.index`（不是 `model_index`，也不是 `requests.get(model, index=…)` 的参数），从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
 
 口径：`frame_index` 从 0 起只数 `data: {json}` 载荷帧（`SSEFrame` 只有载荷帧与 `data: [DONE]`
-两种形态，后者不计），因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）。两条配对
-约束：`at` 是**绝对**单调时钟（与 `LoggedRequest.at` 同原点，两者相减即「入站 → 发帧」的耗时），
-而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前先换到同一原点；role / finish / usage
-帧不产生客户端的 delta 事件（usage 帧只经 `llm_call_metrics` 记账，不是文本 / 思考 / tool 增量），
-拿它和 WS 事件配对时先按场景自己的帧序筛出 content / reasoning / tool 帧。
+两种形态，后者不计），因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）。
+
 没有帧的请求——非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；写失败
 （客户端断开）的那帧不进账，所以账本是「传输层接受了的帧」的**上限**（突发写会把内核缓冲填满，
 账本可能记满而客户端只读到几帧）；`[DONE]` 也不记账，因此流尾那一帧的等待不在延迟账本里。
 
+**配对按 `kind` 筛，不要按 `frame_index` 直接对齐**：`kind` 是闭合词表
+（`sse.FRAME_KINDS`），说明这一帧会变成客户端的哪条 delta 通道——
+
+| `kind` | 帧的内容 | 客户端事件 |
+|---|---|---|
+| `content` | `delta.content` | `text` |
+| `thinking` | `delta.reasoning_content` | `reasoning` |
+| `tool_call` | `delta.tool_calls[]` | `tool_call_stream` |
+| `meta` | role 空帧 / finish_reason 帧 / usage 帧 | **无**（usage 只经 `llm_call_metrics` 记账） |
+
+即：一条「`chunk=1`、正文 L 字符」的流式轮次在账本里有 L 条纹 `content` 帧 + 3 条纹 `meta`
+帧，而客户端只有 L 条 `text` 事件——`sum(1 for e in emits if e.kind == "content") == L`
+（`scenarios/test_frame_emit_channels.py` 在真网关上把这条与客户端事件数交叉断言）。
+
+另一条配对约束：`at` 是**绝对**单调时钟（与 `LoggedRequest.at` 同原点，两者相减即「入站 → 发帧」
+的耗时），而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前先换到同一原点。
 账本与请求留档共享「留档表长度发号」这一个号空间：`provider.requests.clear()` 之后新请求从 0
 重新发号，账本里的帧随即无法归因——`emits_for` 因此直接抛 `RuntimeError` 而不是把两轮拼成一张表。
 

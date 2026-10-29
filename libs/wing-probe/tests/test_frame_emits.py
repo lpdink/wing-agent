@@ -23,7 +23,7 @@ from aiohttp import web
 
 from wing_probe.provider.script import Script, ToolCall, Turn, Usage
 from wing_probe.provider.server import FakeProvider, FrameEmit
-from wing_probe.provider.sse import SSEFrame, stream_frames
+from wing_probe.provider.sse import FRAME_KINDS, SSEFrame, stream_frames
 
 MODEL = "probe/emits"
 DONE_LINE = "data: [DONE]"
@@ -127,6 +127,59 @@ async def test_emit_count_matches_the_frames_the_client_reads() -> None:
         )
         # 同一条流内时刻不减。
         assert emits == sorted(emits)
+
+
+@pytest.mark.asyncio
+async def test_emit_kinds_mark_the_delta_channel() -> None:
+    """``kind`` 逐帧标出通道；只有 content / thinking / tool_call 帧能与客户端事件配对。"""
+    turn = Turn.of(
+        thinking="想一想",
+        text="abcd",
+        chunk=2,
+        tool_calls=[ToolCall("Bash", {"command": "ls"}, cut=4)],
+    )
+    async with running_provider() as provider:
+        provider.register(MODEL, Script(turn))
+
+        await sse_payload_lines(provider)
+
+        kinds = [emit.kind for emit in provider.frame_emits]
+        assert kinds == [
+            "meta",  # role 空帧
+            "thinking",
+            "thinking",
+            "content",
+            "content",
+            "tool_call",
+            "tool_call",
+            "meta",  # finish_reason 帧
+            "meta",  # usage 帧
+        ]
+        assert set(kinds) <= FRAME_KINDS
+        # 下游配对前提：content 帧数 == 剧本文本的切片数（chunk=1 时即文本长度）。
+        assert kinds.count("content") == len(turn.content_chunks()) == 2
+
+
+@pytest.mark.asyncio
+async def test_meta_frames_have_no_delta_channel() -> None:
+    """``meta`` 覆盖 role / finish / usage 三类帧：这三种帧的载荷里没有 delta 增量。"""
+    turn = Turn.of(
+        text="ab", chunk=1, usage=Usage(prompt_tokens=5, completion_tokens=2)
+    )
+    async with running_provider() as provider:
+        provider.register(MODEL, Script(turn))
+        await sse_payload_lines(provider)
+
+        meta = [emit for emit in provider.frame_emits if emit.kind == "meta"]
+        assert len(meta) == 3, [emit.kind for emit in provider.frame_emits]
+        payloads = [frame.data for frame in sse_frames(turn) if frame.data is not None]
+        meta_payloads = [payloads[emit.frame_index] for emit in meta]
+        assert meta_payloads[0]["choices"][0]["delta"] == {
+            "role": "assistant",
+            "content": "",
+        }
+        assert meta_payloads[1]["choices"][0]["finish_reason"] == "stop"
+        assert meta_payloads[2]["choices"] == [] and "usage" in meta_payloads[2]
 
 
 @pytest.mark.asyncio
