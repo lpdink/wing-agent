@@ -15,6 +15,10 @@
    **绝不截断对齐、绝不插值、绝不把配不上的样本当 0**。丢弃计数与原因分类的**单位
    都是帧**（``sum(reasons.values()) == dropped``）。
 
+   同一个 prompt 文本命中多个请求时按**通道**消歧：工具轮的两段式（调用轮 + 文本轮）
+   与网关重试都会让一个 prompt 对应两次请求，而某个通道的帧只可能来自发过该通道帧的
+   那一次请求。仍有多条候选（真重试）才整轮丢弃——不猜。
+
 发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）；缺失时
 :func:`build_emit_ledger` 直接抛 :class:`DeliveryUnavailable`，由档位编排
 （``orchestrator``）转成「延迟指标不可用」并三处点名（不写 0、不静默）。
@@ -69,6 +73,10 @@ SHARD_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "closed_before_end",
         "delta_frames",
         "text_frames",
+        "chars",
+        "sync_sessions",
+        "hydration_attempts",
+        "hydration_failed",
         "errors",
         "error_details",
         "window",
@@ -116,12 +124,18 @@ class TurnSample:
     时刻；``result_at`` 是 ``turn_result`` 到达的时刻（``None`` = 窗口结束时这轮仍在飞，
     此时到达时刻只到窗口末为止）；``arrivals`` 是**按通道**的到达时刻（通道标记 →
     按到达序的时刻），不含 ``meta`` 帧对应的东西（它们没有客户端事件）。
+
+    ``hydrate_sent_at`` / ``hydrated_at`` 只在水合形态上有值：订阅请求发出的时刻与
+    ``sync_session`` 到达的时刻（两段之间的差就是「水合」——与「首帧」是两条不同的
+    时间线，见 ``orchestrator._fill_hydration``）。
     """
 
     prompt: str
     sent_at: float
     result_at: float | None
     arrivals: Mapping[str, Sequence[float]]
+    hydrate_sent_at: float | None = None
+    hydrated_at: float | None = None
 
 
 @dataclass
@@ -243,6 +257,10 @@ def pair_delivery(
     失败）。段内对齐取两者较短的长度（前缀配对），余下的按方向记账：发射多于到达
     是「客户端还没收到」，到达多于发射是「客户端多收了」——**不猜、不插值**。
 
+    一个 prompt 命中多个请求时（工具轮的两段式：调用轮发 ``tool_call`` 帧、文本轮发
+    ``content`` 帧；或网关重试）先按通道消歧：**该通道的帧只可能来自发过该通道帧的
+    那次请求**。仍有多个候选才算 ``ambiguous_prompt``（真重试，无法归因）。
+
     给了 ``window`` 时，落点不在窗口内的配对（跨窗口起点的那些）不计入延迟分布，
     单独记 ``outside_window``。
     """
@@ -254,15 +272,27 @@ def pair_delivery(
             result.reasons["unknown_prompt"] += _arrival_count(turn)
             result.dropped += _arrival_count(turn)
             continue
-        if len(matches) > 1:
-            # 同一 prompt 触发多次请求（网关重试）——哪一次对应这批到达无法确定。
-            result.reasons["ambiguous_prompt"] += _arrival_count(turn)
-            result.dropped += _arrival_count(turn)
-            continue
-        kinds = ledger.kinds(matches[0])
-        for kind in sorted(set(kinds) | set(turn.arrivals)):
-            emits = kinds.get(kind, ())
+        kinds = set(turn.arrivals)
+        for request_index in matches:
+            kinds.update(ledger.kinds(request_index))
+        for kind in sorted(kinds):
             arrivals = turn.arrivals.get(kind, ())
+            candidates = [
+                request_index
+                for request_index in matches
+                if kind in ledger.kinds(request_index)
+            ]
+            if not candidates:
+                result.reasons[f"unexpected_events:{kind}"] += len(arrivals)
+                result.dropped += len(arrivals)
+                continue
+            if len(candidates) > 1:
+                # 同一 prompt 触发多次携带该通道的请求（网关重试）——哪一次对应这批
+                # 到达无法确定。发射侧富余同样无法归因，不计数。
+                result.reasons["ambiguous_prompt"] += len(arrivals)
+                result.dropped += len(arrivals)
+                continue
+            emits = ledger.kinds(candidates[0]).get(kind, ())
             paired = min(len(emits), len(arrivals))
             for position in range(paired):
                 delta_ms = (arrivals[position] - emits[position]) * 1000.0

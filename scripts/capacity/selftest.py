@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""离线自测（``run.py --selftest``）：≤60 秒、不联网、不需要 API key、可重复。
+"""离线自测（``run.py --selftest``）：≤120 秒、不联网、不需要 API key、可重复。
 
-十组断言（见 :func:`checks`）+ ``e2e``，对应这个工具必须可信的几件事：
+十三个检查（见 :func:`checks`）+ 五种形态各一次 ``e2e``，对应这个工具必须可信的几件事：
 
 - ``stats.percentile``        百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）
 - ``pairing.last_user_text``  配对键的提取（str / block 列表两种 body 形态）
-- ``pairing.delivery``        按下标配对 + 四类丢弃原因 + 缺接口抛错
+- ``pairing.delivery``        按下标配对 + 丢弃原因 + 同一 prompt 多请求时按通道消歧
 - ``pairing.assemble``        配对结果落到 ``run.json`` 的接线（延迟可用这一支）
-- ``shard.events``            分片的事件处理：失败轮只驱动一轮（网关同时发 turn_result 与 error）
+- ``shard.events``            分片的事件处理：失败轮只驱动一轮、字符实测、水合两段时间线
 - ``proc.sampling``           进程采样与 fd 软限抬升
 - ``run.summary``             ``--json`` 一行摘要的字段与取值投影
-- ``cli.contract``            冻结 CLI 的校验分支与默认值
-- ``shapes.contract``         形态契约与剧本覆盖度、prompt 文本全局唯一
-- ``report.render``           合成 ``run.json`` → markdown（缺数据是 ``—``，不可用有横幅）
-- ``e2e``                     **真网关子进程 + 真分片子进程**跑完迷你一档，断言产物形状；
-                               并用一个失败档断言「成功档与失败档的键集完全相同」
+- ``cli.contract``            冻结 CLI 的校验分支与默认值（含形态专属旋钮的适用范围）
+- ``shapes.contract``         五种形态的 plan 契约：model / 会话归属 / chunk / 窗口模式
+- ``verdict.criteria``        判据：baseline / degraded / capped / unknown / low_confidence
+- ``verdict.polluted``        被污染的 ``run.json`` 必须被标低置信（负向验证）
+- ``report.render``           合成 ``run.json`` → markdown（缺数据是 ``—``、判据原文唯一）
+- ``e2e.<shape>``             **真网关子进程 + 真分片子进程**跑完迷你一档（五种形态各一次），
+                               断言该形态的指标非 null 且形状自洽；另用失败档断言
+                               「成功档与失败档的键集完全相同」
 
 ``e2e`` 通过注入的 ``run_ladder`` 复用正式路径——自测里跑的是产品代码，不是另一份平行
 实现（否则自测绿了也不能说明工具能用）。
@@ -42,10 +45,14 @@ import orchestrator
 import proc
 import report
 import shapes
+import verdict
 from orchestrator import RunConfig, level_skeleton
 
-#: e2e 一档的预算（秒）。自测总预算 ≤60 s，留足余量。
+#: 每个 e2e 档位的预算（秒）。自测总预算 ≤120 s，五种形态各一档也够。
 E2E_BUDGET_S = 45.0
+
+#: e2e 的会话数（两种形态/两组的边界都覆盖得到）。
+E2E_SESSIONS = 2
 
 LadderRunner = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -229,6 +236,44 @@ def check_pairing() -> None:
         f"each channel must pair on its own: {dict(mixed_pairing.channels)}",
     )
 
+    # 工具轮的两段式：同一个 prompt 触发两次请求（调用轮 + 文本轮），按通道消歧。
+    two_requests = _provider(
+        {
+            0: [("tool_call", 100.02)],
+            1: [("meta", 100.5), ("content", 100.52)],
+        }
+    )
+    cycle_turn = metrics.TurnSample(
+        "load:s0:0", 99.9, 100.6, {"tool_call": (100.021,), "content": (100.522,)}
+    )
+    cycle_pairing = metrics.pair_delivery(
+        metrics.build_emit_ledger(two_requests),
+        [_request(0, "load:s0:0"), _request(1, "load:s0:0")],
+        [cycle_turn],
+    )
+    _check(
+        cycle_pairing.paired == 2
+        and dict(cycle_pairing.channels) == {"content": 1, "tool_call": 1},
+        f"two requests per prompt must disambiguate per channel: "
+        f"{dict(cycle_pairing.channels)} reasons={dict(cycle_pairing.reasons)}",
+    )
+    _check(
+        not cycle_pairing.reasons,
+        f"a clean two-request cycle must drop nothing: {dict(cycle_pairing.reasons)}",
+    )
+    # 两个请求都发过同一通道的帧 = 真重试，无法归因 → 丢弃。
+    retried = metrics.pair_delivery(
+        metrics.build_emit_ledger(
+            _provider({0: [("content", 100.02)], 1: [("content", 100.5)]})
+        ),
+        [_request(0, "load:s0:0"), _request(1, "load:s0:0")],
+        [metrics.TurnSample("load:s0:0", 99.9, 100.6, {"content": (100.52,)})],
+    )
+    _check(
+        retried.paired == 0 and retried.reasons.get("ambiguous_prompt") == 1,
+        f"a real retry must stay ambiguous: {dict(retried.reasons)}",
+    )
+
     # 窗口末仍在飞的那一轮：发射端多出的帧记 in_flight_tail（预期），不吞不猜。
     in_flight = metrics.pair_delivery(
         ledger,
@@ -340,6 +385,10 @@ def _sample_payload(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "shard": 0,
         "text_frames": 3,
+        "chars": 3,
+        "sync_sessions": 0,
+        "hydration_attempts": 0,
+        "hydration_failed": 0,
         "delta_frames": {"content": 3, "thinking": 0, "tool_call": 0},
         "turns_in_flight": 0,
         "errors": 0,
@@ -352,12 +401,30 @@ def _sample_payload(**overrides: Any) -> dict[str, Any]:
                 "prompt": "load:s0:0",
                 "sent_us": 1000,
                 "result_us": 2001000,
+                "hydrate_sent_us": None,
+                "sync_us": None,
                 "arrivals_us": {"content": [16000, 27000, 38000]},
             }
         ],
     }
     base.update(overrides)
     return base
+
+
+def _assemble_cfg(**overrides: Any) -> RunConfig:
+    base: dict[str, Any] = {
+        "scenario": "pure_stream",
+        "levels": (1,),
+        "rate": 50.0,
+        "dwell": 5.0,
+        "warmup": 0.0,
+        "shards": 1,
+        "subscribers": "per-shard",
+        "history_tokens": 0,
+        "out": Path("/tmp/capacity-selftest-assemble"),
+    }
+    base.update(overrides)
+    return RunConfig(**base)
 
 
 def check_assemble() -> None:
@@ -390,17 +457,7 @@ def check_assemble() -> None:
         )
     )
     provider.requests = requests
-    cfg = RunConfig(
-        scenario="pure_stream",
-        levels=(1,),
-        rate=50.0,
-        dwell=5.0,
-        warmup=0.0,
-        shards=1,
-        subscribers="per-shard",
-        history_tokens=0,
-        out=Path("/tmp/capacity-selftest-assemble"),
-    )
+    cfg = _assemble_cfg()
     notes: list[str] = []
     record = orchestrator._assemble(
         level_skeleton(1),
@@ -436,6 +493,19 @@ def check_assemble() -> None:
         f" / {record['metrics']['events_per_second_actual']}",
     )
     _check(
+        record["metrics"]["chars_per_second"] == 0.6,
+        f"chars are measured, not derived: {record['metrics']['chars_per_second']}",
+    )
+    _check(
+        record["metrics"]["turns_per_second"] == 0.2,
+        f"one completed turn / 5 s: {record['metrics']['turns_per_second']}",
+    )
+    _check(
+        metrics_block["hydration.p50_ms"] is None
+        and metrics_block["first_frame.p50_ms"] is None,
+        f"no hydration happened, so those keys stay null: {metrics_block}",
+    )
+    _check(
         set(metrics_block) == set(orchestrator.METRIC_KEYS),
         f"assemble must not add or drop metric keys: "
         f"{sorted(set(metrics_block) ^ set(orchestrator.METRIC_KEYS))}",
@@ -453,6 +523,8 @@ def check_assemble() -> None:
                 "prompt": "load:s0:0",
                 "sent_us": 1000,
                 "result_us": None,
+                "hydrate_sent_us": None,
+                "sync_us": None,
                 "arrivals_us": {"content": [16000, 27000]},
             }
         ],
@@ -531,6 +603,8 @@ def check_assemble() -> None:
                         "prompt": "load:zzz:0",
                         "sent_us": 1000,
                         "result_us": 2001000,
+                        "hydrate_sent_us": None,
+                        "sync_us": None,
                         "arrivals_us": {"content": [16000, 27000, 38000]},
                     }
                 ]
@@ -551,9 +625,47 @@ def check_assemble() -> None:
         f"drop reason must be classified: {nothing['samples']['dropped_reasons']}",
     )
 
+    # 水合两段时间线：订阅发出 → sync 到达（水合），prompt 发出 → 首帧（驱动）。
+    hydrated_payload = _sample_payload(
+        sync_sessions=1,
+        hydration_attempts=1,
+        turns=[
+            {
+                "prompt": "load:s0:0",
+                "sent_us": 300000,
+                "result_us": 2001000,
+                "hydrate_sent_us": 0,
+                "sync_us": 120000,
+                "arrivals_us": {"content": [360000, 470000, 580000]},
+            }
+        ],
+    )
+    hydrated = orchestrator._assemble(
+        level_skeleton(1),
+        cfg=_assemble_cfg(scenario="hydration"),
+        sessions=1,
+        provider=provider,
+        sampling=_sampling(),
+        payloads=[hydrated_payload],
+        notes=[],
+    )
+    _check(
+        hydrated["metrics"]["hydration.p50_ms"] == 120.0,
+        f"hydration = sync arrival - subscribe: {hydrated['metrics']}",
+    )
+    _check(
+        hydrated["metrics"]["first_frame.p50_ms"] == 60.0,
+        f"first frame = first content arrival - prompt: {hydrated['metrics']}",
+    )
+    _check(
+        hydrated["samples"]["sync_sessions"] == 1
+        and hydrated["samples"]["hydration_attempts"] == 1,
+        f"hydration counters must land on samples: {hydrated['samples']}",
+    )
+
 
 def check_shard_events() -> None:
-    """分片的事件处理：一轮只驱动一轮、失败只计一次、窗口外不计。
+    """分片的事件处理：一轮只驱动一轮、失败只计一次、窗口外不计、字符实测、水合两段。
 
     失败轮上网关**同时**发 ``turn_result(is_error)`` 与 ``error``；两者都当轮次边界会把
     同一轮驱动成两轮（并覆盖在飞轮次的起算点），两个都计数会把一次失败算成两次。
@@ -568,7 +680,7 @@ def check_shard_events() -> None:
         out=Path("/tmp/capacity-selftest-shard.json"),
     )
     shard = driver_shard.Shard(config, shape)
-    connection = SimpleNamespace(closed=False)
+    connection = SimpleNamespace(closed=False, client_id="c0", frames_received=0)
     shard.states["s0"] = driver_shard._SessionState(session_id="s0", ws=connection)
     shard.open_window(100.0, 110.0)
     shard.start_cpu_accounting()
@@ -578,7 +690,7 @@ def check_shard_events() -> None:
     state.prompt = "load:s0:0"
     state.sent_at = 101.0
 
-    shard._on_event("s0", "text", {"content": "x"}, SimpleNamespace(at=101.5))
+    shard._on_event("s0", "text", {"content": "xyz"}, SimpleNamespace(at=101.5))
     shard._on_event("s0", "reasoning", {"content": "y"}, SimpleNamespace(at=101.6))
     shard._on_event("s0", "turn_result", {"is_error": True}, SimpleNamespace(at=103.0))
     shard._on_event("s0", "error", {"message": "boom"}, SimpleNamespace(at=103.0))
@@ -592,6 +704,10 @@ def check_shard_events() -> None:
     _check(
         shard.window_events["content"] == 1 and shard.window_events["thinking"] == 1,
         f"in-window events must be counted per channel: {shard.window_events}",
+    )
+    _check(
+        shard.window_chars == 3,
+        f"chars must be measured from the text payload, got {shard.window_chars}",
     )
     _check(
         shard._pending.qsize() == 1,
@@ -633,42 +749,49 @@ def check_shard_events() -> None:
         payload["delta_frames"]["content"] == 1,
         f"in-window delta events must be per channel: {payload['delta_frames']}",
     )
+    metrics.check_shard_payload(payload)
 
-
-def check_summary() -> None:
-    """``--json`` 的一行摘要：字段名是下游脚本的契约，不能悄悄改。"""
-    import run as run_module  # 函数级导入：run.py 只在自测分支里依赖本模块
-
-    payload = _synthetic_run()
-    payload["meta"]["out"] = "/tmp/capacity-summary"
-    summary = run_module._summary(payload)
-    for key in ("ok", "out", "run_json", "report", "levels", "failures"):
-        _check(key in summary, f"--json summary is missing {key!r}")
-    _check(
-        summary["run_json"] == "/tmp/capacity-summary/run.json"
-        and summary["report"] == "/tmp/capacity-summary/report.md",
-        f"summary paths must be derived from meta.out: {summary}",
+    # 水合形态：sync 到达才算水合完成，之后才驱动一轮，且不再补发。
+    hydrate_config = driver_shard.ShardConfig(
+        shard=0,
+        gateway_url="http://127.0.0.1:1",
+        sessions=("s0",),
+        subscribers="per-shard",
+        shape="hydration",
+        out=Path("/tmp/capacity-selftest-shard-hydrate.json"),
+        mode="hydrate",
     )
-    first = summary["levels"][0]
-    for key in (
-        "sessions",
-        "gateway_cpu_cores",
-        "delivery_p99_ms",
-        "tokens_per_second_actual",
-        "events_per_second_actual",
-        "errors",
-        "error",
-    ):
-        _check(key in first, f"--json level projection is missing {key!r}")
+    hydrate = driver_shard.Shard(hydrate_config, shapes.resolve("hydration"))
+    hydrate.states["s0"] = driver_shard._SessionState(session_id="s0", ws=connection)
+    hydrate.open_window(200.0, 210.0)
     _check(
-        first["gateway_cpu_cores"]
-        == payload["levels"][0]["metrics"]["gateway.cpu_cores"],
-        "the projection must carry the metric value through",
+        hydrate._pending.empty(),
+        "hydrate mode must not queue prompts at window open (they follow sync_session)",
     )
-    _check(summary["ok"] is True and summary["failures"] == [], "healthy run summary")
-
-
-# ── proc ──────────────────────────────────────────────────────
+    state = hydrate.states["s0"]
+    state.hydrate_sent_at = 200.1
+    hydrate._on_event("s0", "sync_session", {}, SimpleNamespace(at=200.9))
+    _check(
+        state.hydrated_at == 200.9 and hydrate.sync_sessions == 1,
+        f"sync_session must close the hydration interval: {state.hydrated_at}",
+    )
+    _check(
+        hydrate._pending.qsize() == 1,
+        "the prompt must be queued only after sync_session arrives",
+    )
+    hydrate._pending.get_nowait()  # 轮次泵取走它并发出（这里直接模拟已发出）
+    state.prompt = "load:s0:0"
+    state.sent_at = 201.0
+    hydrate._on_event("s0", "text", {"content": "x"}, SimpleNamespace(at=201.2))
+    hydrate._on_event("s0", "turn_result", {}, SimpleNamespace(at=201.3))
+    _check(
+        len(hydrate.turns) == 1 and hydrate.turns[0].hydrated_at == 200.9,
+        f"the hydration interval must ride along with the turn sample: {hydrate.turns}",
+    )
+    _check(
+        hydrate._pending.empty(),
+        "hydrate mode drives exactly one turn per session (no re-queue)",
+    )
 
 
 def check_proc() -> None:
@@ -717,6 +840,8 @@ def check_cli() -> None:
                 "1,10",
                 "--rate",
                 "30",
+                "--chunk",
+                "4",
                 "--dwell",
                 "2",
                 "--warmup",
@@ -725,6 +850,8 @@ def check_cli() -> None:
                 "2",
                 "--subscribers",
                 "per-shard",
+                "--backend",
+                "memory",
                 "--out",
                 "/tmp/capacity-cli-check",
             ]
@@ -734,6 +861,8 @@ def check_cli() -> None:
         good.levels == (1, 10) and good.rate == 30.0, "explicit args must be honoured"
     )
     _check(good.subscribers == "per-shard", "subscribers must round-trip")
+    _check(good.chunk == 4, "--chunk must round-trip")
+    _check(good.backend == "memory", "--backend must round-trip")
     _check(good.shards_for(1) == 1 and good.shards_for(10) == 2, "shard clamping")
 
     _check(
@@ -748,26 +877,42 @@ def check_cli() -> None:
     _check(
         defaults.levels == cli.parse_levels(cli.DEFAULT_LEVELS)
         and defaults.rate == cli.DEFAULT_RATE
-        and defaults.dwell == cli.DEFAULT_DWELL,
-        "documented defaults must come from cli",
+        and defaults.dwell == cli.DEFAULT_DWELL
+        and defaults.chunk == shapes.DEFAULT_CHUNK == 1
+        and defaults.backend == "file"
+        and defaults.tool == shapes.DEFAULT_TOOL
+        and defaults.cycle_s == shapes.DEFAULT_CYCLE_S
+        and defaults.decode_duty == shapes.DEFAULT_DECODE_DUTY,
+        "documented defaults must come from cli / shapes",
     )
 
     for argv in (
-        ["--history-tokens", "100"],
         ["--shards", "0"],
         ["--rate", "0"],
+        ["--chunk", "0"],
         ["--dwell", "0"],
         ["--warmup", "-1"],
         ["--levels", "10,1"],
         ["--levels", "0"],
+        ["--history-tokens", "-1"],
+        ["--cycle-s", "-0.5"],
+        ["--decode-duty", "1.5"],
+        # 形态不消费的旋钮不许显式给非默认值（静默忽略会让人以为测了那个变量）。
+        ["--history-tokens", "100"],
+        ["--tool", "bash"],
+        ["--cycle-s", "1"],
+        # 水合形态与内存后端互斥（进程内会话不过重启）。
+        ["--scenario", "hydration", "--backend", "memory"],
+        # 形态自己的参数校验也要在起进程之前变成退出码 2。
+        ["--scenario", "tool_cycle", "--tool", "nope"],
     ):
         try:
-            cli.build_config(cli.parse_args(argv))
+            cli.build_config(cli.parse_args(["--out", "/tmp/x", *argv]))
         except cli.UsageError:
             continue
         raise SelftestFailure(f"build_config({argv}) must raise UsageError")
     try:
-        cli.build_config(cli.parse_args(["--scenario", "nope"]))
+        cli.build_config(cli.parse_args(["--scenario", "nope", "--out", "/tmp/x"]))
     except shapes.ShapeError as exc:
         _check("pure_stream" in str(exc), f"unknown scenario must list choices: {exc}")
     else:  # pragma: no cover - 注册表回归
@@ -777,33 +922,156 @@ def check_cli() -> None:
 # ── shapes ────────────────────────────────────────────────────
 
 
+def _shape_args(name: str, **overrides: Any) -> shapes.ShapeArgs:
+    base: dict[str, Any] = {
+        "scenario": name,
+        "sessions": 3,
+        "rate": 20.0,
+        "span_s": 6.0,
+        "chunk": 1,
+        "cycle_s": shapes.DEFAULT_CYCLE_S,
+        "decode_duty": shapes.DEFAULT_DECODE_DUTY,
+        "tool": shapes.DEFAULT_TOOL,
+        "history_tokens": 0,
+        "workspace": Path("/tmp/capacity-selftest-workspace"),
+        "frame_delay_s": 0.017,
+    }
+    base.update(overrides)
+    return shapes.ShapeArgs(**base)
+
+
 def check_shapes() -> None:
-    """形态契约：注册表能解析，剧本覆盖整档所需轮次，prompt 文本全局唯一。"""
-    shape = shapes.resolve("pure_stream")
-    sessions, rate, span = 3, 20.0, 6.0
-    tokens = shape.turn_tokens(rate, span)
+    """五种形态的 plan 契约：注册表能解析、会话 model 归属自洽、chunk 与窗口模式生效。"""
+    for name in shapes.names():
+        shape = shapes.resolve(name)
+        plan = shapes.build_plan(_shape_args(name))
+        _check(
+            len(plan.session_models) == 3,
+            f"{name}: session_models must cover every session",
+        )
+        declared = {model_id for model_id, _ in plan.models}
+        _check(
+            set(plan.session_models) <= declared,
+            f"{name}: session models must be declared ({plan.session_models})",
+        )
+        _check(plan.tools, f"{name}: a shape must declare its tool set")
+        first = shape.prompt_text("sess-a", 0)
+        _check(
+            first != shape.prompt_text("sess-a", 1), f"{name}: prompt varies by turn"
+        )
+        _check(
+            first != shape.prompt_text("sess-b", 0), f"{name}: prompt varies by session"
+        )
+        _check(
+            first != shapes.seed_key("sess-a", 0),
+            f"{name}: seed prompts must never collide with driving prompts",
+        )
+
+    # pure_stream：一轮覆盖整窗、帧大小 = chunk。
+    args = _shape_args("pure_stream", chunk=4)
+    plan = shapes.build_plan(args)
+    script = plan.models[0][1]
+    turn = script.turns[0]
     _check(
-        tokens >= rate * span,
-        f"one turn must cover the whole span: {tokens} token(s) < {rate * span}",
+        turn.chunk == 4 and len(turn.text or "") == args.chars_for(6.0 + 1.0),
+        f"pure_stream: one turn must cover the span at --chunk chars per event: "
+        f"chunk={turn.chunk} chars={len(turn.text or '')}",
     )
     _check(
-        shape.turn_tokens(rate, span) > shape.turn_tokens(rate, span / 2),
-        "turn length must follow the span",
+        len(script) >= 3,
+        f"pure_stream: the script must hold at least one turn per session: {len(script)}",
     )
-    script = shape.script(sessions=sessions, rate=rate, span_s=span)
+
+    # tool_cycle：每会话一个 model（工具轮两段式不能共享游标）、循环剧本、workspace 文件。
+    read_plan = shapes.build_plan(_shape_args("tool_cycle"))
     _check(
-        len(script) >= sessions,
-        f"script must hold at least one turn per session, got {len(script)}",
+        len(set(read_plan.session_models)) == 3,
+        f"tool_cycle: every session needs its own script cursor: "
+        f"{read_plan.session_models}",
     )
     _check(
-        script.turns[0].text is not None
-        and len(script.turns[0].text) == tokens
-        and script.turns[0].chunk == 1,
-        "the turn must stream 1 token per frame over the whole span",
+        "note.txt" in read_plan.workspace_files,
+        "tool_cycle(read): the Read target must exist in the workspace",
     )
-    first = shape.prompt_text("sess-a", 0)
-    _check(first != shape.prompt_text("sess-a", 1), "prompt text must vary by turn")
-    _check(first != shape.prompt_text("sess-b", 0), "prompt text must vary by session")
+    cycle = dict(read_plan.models)[read_plan.session_models[0]]
+    patterns = [cycle.consume()[0].describe() for _ in range(3)]
+    _check(
+        "Read" in patterns[0]
+        and "tool_calls" in patterns[0]
+        and "Read" not in patterns[1],
+        f"tool_cycle: the cycle must alternate call / reply turns: {patterns}",
+    )
+    bash_plan = shapes.build_plan(_shape_args("tool_cycle", tool="bash"))
+    _check(
+        bash_plan.tools == ("Bash",),
+        f"tool_cycle(bash): the tool set must follow --tool: {bash_plan.tools}",
+    )
+    _check(
+        bash_plan.agent.get("yolo") is True,
+        "tool_cycle(bash): headless runs have nobody to approve the command (yolo)",
+    )
+
+    # idle：不订阅（否则逐出永远不触发）、把逐出阈值压进窗口、声明逐出探针。
+    idle_plan = shapes.build_plan(_shape_args("idle"))
+    _check(
+        idle_plan.window_mode == "hold" and not idle_plan.subscribe,
+        f"idle: hold mode must not subscribe: {idle_plan.window_mode}",
+    )
+    eviction = (idle_plan.env_sessions or {}).get("eviction") or {}
+    _check(
+        eviction.get("idle_ttl_seconds", 1e9) <= 6.0,
+        f"idle: the eviction TTL must fit inside the window: {eviction}",
+    )
+    _check(idle_plan.measure_eviction, "idle: eviction must be probed after the window")
+
+    # hydration：订阅发生在窗口里、采样更密。
+    hydration_plan = shapes.build_plan(_shape_args("hydration"))
+    _check(
+        hydration_plan.window_mode == "hydrate" and hydration_plan.subscribe,
+        f"hydration: hydrate mode needs subscriptions in the window: "
+        f"{hydration_plan.window_mode}",
+    )
+    _check(
+        hydration_plan.sample_interval_s < 1.0,
+        f"hydration: the sampling interval must be finer than 1 s: "
+        f"{hydration_plan.sample_interval_s}",
+    )
+
+    # mixed：按 decode-duty 分组，两组 model 不同。
+    mixed_plan = shapes.build_plan(_shape_args("mixed", decode_duty=0.5))
+    _check(
+        len(set(mixed_plan.session_models)) == 2,
+        f"mixed: 3 sessions at duty 0.5 must split into two model groups: "
+        f"{mixed_plan.session_models}",
+    )
+    all_stream = shapes.build_plan(_shape_args("mixed", decode_duty=1.0))
+    _check(
+        len(set(all_stream.session_models)) == 1,
+        f"mixed: duty 1.0 is all streaming: {all_stream.session_models}",
+    )
+
+    # 历史预置：只有声明了 --history-tokens 的形态接得住它，且剧本是循环的（会话数决定轮数）。
+    seeded = shapes.build_plan(_shape_args("hydration", history_tokens=2000))
+    _check(
+        seeded.seed is not None and seeded.seed.chars_per_session >= 2000 / 0.3,
+        f"seed: chars must cover the requested tokens: {seeded.seed}",
+    )
+    _check(
+        shapes.SEED_MODEL in shapes.model_ids(seeded),
+        "seed: the seed model must be declared alongside the shape models",
+    )
+    first_turn = seeded.seed.script.consume()[0]
+    second_turn = seeded.seed.script.consume()[0]
+    _check(
+        first_turn is second_turn and first_turn.chunk <= shapes.SEED_FRAME_CHARS,
+        "seed: the seed script must cycle (session count, not script length, bounds it)",
+    )
+    try:
+        shapes.build_plan(_shape_args("pure_stream", history_tokens=10))
+    except shapes.ShapeError as exc:
+        _check("history-tokens" in str(exc), f"error must name the knob: {exc}")
+    else:  # pragma: no cover - 旋钮闸门回归
+        raise SelftestFailure("a shape that ignores --history-tokens must reject it")
     try:
         shapes.resolve("no-such-shape")
     except shapes.ShapeError as exc:
@@ -812,84 +1080,356 @@ def check_shapes() -> None:
         raise SelftestFailure("unknown scenario must raise ShapeError")
 
 
+# ── verdict ───────────────────────────────────────────────────
+
+
+def _level(
+    sessions: int,
+    *,
+    delivery_p99: float | None = 2.0,
+    turn_p99: float | None = None,
+    cpu: float = 0.1,
+    errors: int = 0,
+    fds: int = 40,
+    provider_cpu: float = 0.1,
+    shard_cpu: Sequence[float] = (0.1,),
+    count: int | None = 100,
+    dropped: int | None = 0,
+    dropped_reasons: Mapping[str, int] | None = None,
+    create_failed: int = 0,
+    error: str | None = None,
+) -> dict[str, Any]:
+    record = level_skeleton(sessions)
+    if error is None:
+        record["wall_s"] = 5.0
+        record["metrics"].update(
+            {
+                "gateway.cpu_cores": cpu,
+                "gateway.fds_peak": fds,
+                "delivery.p99_ms": delivery_p99,
+                "turn.p99_ms": turn_p99,
+                "errors": errors,
+            }
+        )
+        record["rig"].update(
+            {"provider_cpu_cores": provider_cpu, "shard_cpu_cores": list(shard_cpu)}
+        )
+        record["samples"].update(
+            {
+                "count": count,
+                "dropped": dropped,
+                "dropped_reasons": None
+                if dropped_reasons is None
+                else dict(dropped_reasons),
+            }
+        )
+        record["session_create"].update(
+            {"ok": sessions, "failed": create_failed, "total_ms": 1.0}
+        )
+    else:
+        record["error"] = error
+    return record
+
+
+def _run(*levels: dict[str, Any], scenario: str = "pure_stream") -> dict[str, Any]:
+    return {
+        "meta": {
+            "tool": "capacity",
+            "schema": 1,
+            "scenario": scenario,
+            "started_at": "2026-01-01T00:00:00Z",
+            "duration_s": 10.0,
+            "args": {
+                "levels": [record["sessions"] for record in levels],
+                "rate": 50.0,
+                "chunk": 1,
+                "dwell": 5.0,
+                "warmup": 1.0,
+                "shards": 1,
+                "subscribers": "per-session",
+                "backend": "file",
+                "tool": "read",
+                "cycle_s": 3.0,
+                "decode_duty": 0.7,
+                "history_tokens": 0,
+            },
+            "host": {"cpus": 12, "mem_gb": 16.0, "platform": "test", "ulimit_n": 4096},
+            "gateway": {"pid": 1, "version": "test", "commit": "abcdef0"},
+            "session_create": {"ok": 1, "failed": 0, "total_ms": 1.0},
+            "notes": [],
+            "failures": [
+                f"level {r['sessions']}: {r['error']}" for r in levels if r.get("error")
+            ],
+        },
+        "levels": list(levels),
+    }
+
+
+def check_verdict() -> None:
+    """判据：baseline / degraded / capped / unknown / low_confidence，阈值只有一处声明。"""
+    # 干净阶梯：基线最小 N，无命中。
+    clean = verdict.evaluate_run(_run(_level(1), _level(10)))
+    _check(
+        [result.verdict for result in clean] == ["ok", "ok"],
+        f"a clean ladder must be ok: {[r.verdict for r in clean]}",
+    )
+    _check(
+        all(result.low_confidence is False for result in clean),
+        "a clean ladder must not be low confidence",
+    )
+    _check(
+        all(result.baseline_sessions == 1 for result in clean),
+        f"baseline must be the smallest N: {[r.baseline_sessions for r in clean]}",
+    )
+
+    # delivery 退化：> max(3 × 基线, 50 ms)。地板优先（基线 2 ms → 50 ms 才是界）。
+    floor = verdict.evaluate_run(_run(_level(1), _level(10, delivery_p99=40.0)))
+    _check(
+        floor[1].verdict == "ok",
+        f"40 ms with a 50 ms floor must not degrade: {floor[1].reasons}",
+    )
+    over = verdict.evaluate_run(_run(_level(1), _level(10, delivery_p99=60.0)))
+    _check(over[1].verdict == "degraded", f"60 ms must degrade: {over[1].reasons}")
+    _check(
+        over[1].reasons and verdict.CRITERIA["degraded.delivery"] in over[1].reasons[0],
+        f"reasons must quote the frozen criterion: {over[1].reasons}",
+    )
+    # 基线本身不与自己比。
+    _check(over[0].verdict == "ok", "the baseline level cannot degrade against itself")
+
+    # turn 判据只在多轮形态判。
+    turn = _run(_level(1, turn_p99=100.0), _level(10, turn_p99=200.0))
+    _check(
+        verdict.evaluate_run(turn)[1].verdict == "ok",
+        "turn p99 must be ignored for single-turn shapes",
+    )
+    _check(
+        verdict.evaluate_run(
+            {**turn, "meta": {**turn["meta"], "scenario": "tool_cycle"}}
+        )[1].verdict
+        == "degraded",
+        "turn p99 must be judged for tool_cycle",
+    )
+
+    # capped：cpu / errors / fd 任一条，优先于 degraded。
+    capped_cpu = verdict.evaluate_run(_run(_level(1), _level(10, cpu=0.95)))
+    _check(capped_cpu[1].verdict == "capped", f"{capped_cpu[1].reasons}")
+    capped_err = verdict.evaluate_run(_run(_level(1), _level(10, errors=2)))
+    _check(
+        capped_err[1].verdict == "capped" and "errors" in capped_err[1].reasons[0],
+        f"any turn error is capped: {capped_err[1].reasons}",
+    )
+    capped_fd = verdict.evaluate_run(_run(_level(1), _level(10, fds=3700)))
+    _check(capped_fd[1].verdict == "capped", f"{capped_fd[1].reasons}")
+    both = verdict.evaluate_run(
+        _run(_level(1), _level(10, cpu=0.95, delivery_p99=500.0))
+    )
+    _check(
+        both[1].verdict == "capped" and both[1].flags == ("degraded", "capped"),
+        f"capped outranks degraded but both are flagged: {both[1]}",
+    )
+
+    # low_confidence：与 reasons 分开，且不进判档。
+    low = verdict.evaluate_run(
+        _run(_level(1), _level(10, provider_cpu=0.85, dropped=50, count=1000))
+    )
+    _check(
+        low[1].verdict == "ok" and low[1].low_confidence is True,
+        f"a saturated rig must not change the verdict, only the confidence: {low[1]}",
+    )
+    _check(
+        any(
+            verdict.CRITERIA["low_confidence.provider"] in reason
+            for reason in low[1].low_confidence_reasons
+        )
+        and any(
+            verdict.CRITERIA["low_confidence.drops"] in reason
+            for reason in low[1].low_confidence_reasons
+        ),
+        f"both rig signals must be named: {low[1].low_confidence_reasons}",
+    )
+    _check(not low[1].reasons, f"low confidence must not leak into reasons: {low[1]}")
+    # 结构性丢弃（预热段 / 窗口末在飞）不是污染：pure_stream 的每一档都有它们，
+    # 按总数算会把「正常」标成「低置信」。
+    structural = verdict.evaluate_run(
+        _run(
+            _level(1),
+            _level(
+                10,
+                count=2500,
+                dropped=1100,
+                dropped_reasons={"outside_window": 1050, "in_flight_tail:content": 50},
+            ),
+        )
+    )
+    _check(
+        structural[1].low_confidence is False,
+        f"window bookkeeping must not be read as contamination: "
+        f"{structural[1].low_confidence_reasons}",
+    )
+    # 不预期的丢弃（客户端少收 / 多收）才是污染信号。
+    missing = verdict.evaluate_run(
+        _run(
+            _level(1),
+            _level(
+                10,
+                count=1000,
+                dropped=1050,
+                dropped_reasons={"outside_window": 1000, "missing_events:content": 50},
+            ),
+        )
+    )
+    _check(
+        missing[1].low_confidence is True,
+        "a completed turn missing events is contamination",
+    )
+    shard_low = verdict.evaluate_run(_run(_level(1), _level(10, shard_cpu=(0.2, 0.95))))
+    _check(
+        shard_low[1].low_confidence is True,
+        "a saturated shard must be low confidence",
+    )
+    create_low = verdict.evaluate_run(_run(_level(1), _level(10, create_failed=1)))
+    _check(
+        create_low[1].low_confidence is True,
+        "failed session creates must be low confidence",
+    )
+
+    # 基线档没跑完 → unknown（不是 ok），失败的档位全 null。
+    broken = verdict.evaluate_run(_run(_level(1, error="gateway died"), _level(10)))
+    _check(
+        broken[0].verdict is None and broken[0].low_confidence is None,
+        f"a failed level has no verdict: {broken[0]}",
+    )
+    _check(
+        broken[1].verdict == "unknown",
+        f"without a baseline the degraded criteria cannot be evaluated: {broken[1]}",
+    )
+    _check(
+        "verdict" in verdict.block(broken[1])
+        and set(verdict.block(broken[1])) == set(verdict.VERDICT_KEYS),
+        "the JSON block keys must match VERDICT_KEYS",
+    )
+    # 判据原文清单只有一处：报告直接渲染它。
+    _check(
+        len(verdict.CRITERIA) == 9,
+        f"criteria must be one declaration: {len(verdict.CRITERIA)}",
+    )
+    classified = {key for keys in verdict.CRITERIA_FLAGS.values() for key in keys}
+    _check(
+        classified
+        == {key for key in verdict.CRITERIA if not key.startswith("low_confidence")},
+        f"every verdict criterion must be classified for the report: {classified}",
+    )
+    for key in classified:
+        _check(
+            verdict.reason_flag(verdict.CRITERIA[key]) is not None,
+            f"{key} must be recognisable from its own text",
+        )
+    _check(
+        verdict.reason_flag("something else") is None,
+        "an unknown reason must not be classified",
+    )
+
+
+def check_polluted() -> None:
+    """负向验证：被污染的 ``run.json`` 必须被标低置信，而不是当成有效结论。
+
+    污染有两种现实来源：采样期间 rig 自己饱和（provider / shard CPU 超标）与
+    配对大面积丢弃（dropped 比例超限）。这里把一份**手写的** ``run.json`` 落到临时
+    目录再读回来渲染——报告不能因为文件里没有 ``verdict`` 字段就当作一切正常。
+    """
+    polluted = _run(
+        _level(1),
+        _level(
+            10,
+            delivery_p99=9.0,
+            cpu=0.55,
+            provider_cpu=0.92,
+            shard_cpu=(0.3, 0.95),
+            count=1000,
+            dropped=1190,
+            dropped_reasons={
+                "outside_window": 1050,
+                "in_flight_tail:content": 20,
+                "missing_events:content": 120,
+            },
+        ),
+    )
+    with tempfile.TemporaryDirectory(prefix="capacity-selftest-") as tmp:
+        path = Path(tmp) / "run.json"
+        path.write_text(json.dumps(polluted), encoding="utf-8")
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    text = report.render(loaded)
+    _check(
+        "低置信" in text,
+        "the report must call out low-confidence levels up front",
+    )
+    _check(
+        "ok (low conf)" in text,
+        "the polluted level's verdict cell must carry the low-confidence marker",
+    )
+    _check(
+        "结论不作数" in text,
+        "the conclusion must refuse to draw a conclusion from polluted data",
+    )
+    _check(
+        verdict.CRITERIA["low_confidence.drops"] in text,
+        "the criterion that fired must be quoted verbatim",
+    )
+    clean_text = report.render(_run(_level(1), _level(10)))
+    _check(
+        "低置信" not in clean_text,
+        "a clean run must not be marked low confidence",
+    )
+
+
 # ── report ────────────────────────────────────────────────────
 
 
 def _synthetic_run() -> dict[str, Any]:
-    """两档合成产物：一档齐备、一档延迟不可用（两者键集相同）。"""
-    meta = {
-        "tool": "capacity",
-        "schema": 1,
-        "scenario": "pure_stream",
-        "started_at": "2026-01-01T00:00:00Z",
-        "duration_s": 12.0,
-        "args": {
-            "levels": [1, 10],
-            "rate": 50.0,
-            "dwell": 5.0,
-            "warmup": 2.0,
-            "shards": 1,
-            "subscribers": "per-shard",
-            "history_tokens": 0,
-        },
-        "host": {"cpus": 12, "mem_gb": 16.0, "platform": "darwin", "ulimit_n": 4096},
-        "gateway": {"pid": 1, "version": "test", "commit": "abcdef0"},
-        "session_create": {"ok": 11, "failed": 0, "total_ms": 12.0},
-        "notes": [],
-        "failures": [],
-    }
-    first = level_skeleton(1)
-    first["wall_s"] = 5.0
+    """三档合成产物：齐备 / 延迟不可用 / 水合形态（键集相同）。"""
+    first = _level(1, turn_p99=5000.0)
     first["metrics"].update(
         {
-            "gateway.cpu_cores": 0.1,
             "gateway.rss_mb_peak": 100.0,
             "gateway.rss_mb_end": 101.0,
-            "gateway.fds_peak": 30,
             "delivery.p50_ms": 1.0,
-            "delivery.p99_ms": 2.0,
             "delivery.p999_ms": 3.0,
-            "turn.p50_ms": 5000.0,
-            "turn.p99_ms": 5100.0,
             "tokens_per_second_actual": 50.0,
-            "errors": 0,
+            "events_per_second_actual": 50.0,
+            "chars_per_second": 50.0,
+            "turns_per_second": 0.2,
             "slow_client_recycles": 0,
-        }
-    )
-    first["rig"].update(
-        {
-            "provider_cpu_cores": 0.2,
-            "shard_cpu_cores": [0.1],
-            "host_loadavg": [1.0, 1.0, 1.0],
         }
     )
     first["samples"].update(
         {
-            "count": 250,
-            "dropped": 0,
             "dropped_reasons": {},
+            "delta_frames": {"content": 250, "thinking": 0, "tool_call": 0},
             "text_frames": 250,
+            "chars": 250,
             "turns": 1,
+            "turns_in_flight": 0,
             "delivery_available": True,
+            "sync_sessions": 0,
+            "hydration_attempts": 0,
+            "hydration_failed": 0,
+            "evicted_in_window": None,
+            "loaded_after_window": None,
         }
     )
     first["session_create"].update({"ok": 1, "failed": 0, "total_ms": 4.0})
-    second = level_skeleton(10)
-    second["wall_s"] = 5.0
+    second = _level(10, delivery_p99=None, cpu=1.0, errors=2)
     second["metrics"].update(
         {
-            "gateway.cpu_cores": 1.0,
             "gateway.rss_mb_peak": 200.0,
             "gateway.rss_mb_end": 202.0,
-            "gateway.fds_peak": 300,
             "tokens_per_second_actual": 500.0,
-            "errors": 2,
             "slow_client_recycles": 1,
         }
     )
-    second["rig"].update(
-        {"provider_cpu_cores": 0.5, "shard_cpu_cores": [0.4, 0.3], "host_loadavg": None}
-    )
+    second["rig"].update({"provider_cpu_cores": 0.5, "shard_cpu_cores": [0.4, 0.3]})
+    second["rig"]["host_loadavg"] = None
     second["samples"].update(
         {
             "count": None,
@@ -900,123 +1440,262 @@ def _synthetic_run() -> dict[str, Any]:
         }
     )
     second["session_create"].update({"ok": 10, "failed": 0, "total_ms": 8.0})
-    return {"meta": meta, "levels": [first, second]}
+    third = _level(100, cpu=2.5, delivery_p99=6.0)
+    third["metrics"].update(
+        {
+            "hydration.p50_ms": 120.0,
+            "hydration.p99_ms": 300.0,
+            "hydration.p999_ms": 400.0,
+            "first_frame.p50_ms": 70.0,
+            "first_frame.p99_ms": 210.0,
+        }
+    )
+    third["gateway"].update({"restart_ms": 640.0})
+    third["shape"].update({"window_mode": "hydrate"})
+    third["samples"].update({"sync_sessions": 100, "hydration_attempts": 100})
+    third["history"].update(
+        {"tokens_per_session": 2000, "chars_per_session": 6667, "turns_per_session": 1}
+    )
+    run = _run(first, second, third, scenario="hydration")
+    run["meta"]["gateway"] = {"pid": 9, "version": "0.7.0", "commit": "abcdef0"}
+    return run
 
 
 def check_report() -> None:
-    """合成 run.json → markdown：列数自洽、缺数据占位、不可用横幅、多行 note 折行。"""
+    """合成 run.json → markdown：结论、判据原文、缺数据占位、复现命令、表格列数。"""
     run = _synthetic_run()
-    run["levels"][1]["notes"] = ["multi\nline\ndetail"]
+    run["levels"][2]["notes"] = ["multi\nline\ndetail"]
     text = report.render(run)
     _check(
-        text.startswith("# capacity — pure_stream"), "report must start with its title"
+        text.startswith("# capacity — hydration"), "report must start with its title"
     )
-    _check("| 1 |" in text and "| 10 |" in text, "each level must get a row")
+    _check("## 结论" in text, "the report must state a conclusion")
+    _check("速度轴" in text and "内存轴" in text, "both axes must be stated")
+    _check(
+        "| 1 |" in text and "| 10 |" in text and "| 100 |" in text,
+        "each level must get a row",
+    )
     _check("| 0.10 |" in text, "gateway cpu must be rendered with two decimals")
     _check("投递延迟不可用" in text, "unavailable delivery must be called out up front")
-    _check("— / —" in text, "missing turn metrics must render as an em dash, not 0")
+    _check("— / —" in text, "missing metrics must render as an em dash, not 0")
     _check("nearest-rank" in text, "report must state the percentile basis")
     _check("0.40, 0.30" in text, "per-shard CPU must be listed (rig quality signal)")
-    for line in text.splitlines():
-        if line.startswith("| N |"):
-            header = len(line.split("|")) - 2
-        elif line.startswith("|---") and "N" in text:
-            separator = len(line.split("|")) - 2
-            _check(
-                separator == header,
-                f"table separator has {separator} cells but the header has {header} "
-                "(GFM drops mismatched tables)",
-            )
+    _check("capped" in text, "a capped level must be visible in the table")
+    _check("## 判据" in text, "the report must print the frozen criteria")
+    for criterion in verdict.CRITERIA.values():
+        _check(
+            criterion in text,
+            f"every criterion must be rendered from verdict.CRITERIA: {criterion}",
+        )
     _check(
-        "- N=10: multi line detail" in text,
+        "uv run python scripts/capacity/run.py --scenario hydration" in text,
+        "the reproduce command must round-trip the args",
+    )
+    _check(
+        "| subscribe → sync p50 / p99 / p999 ms |" in text,
+        "a hydrate run must get the hydration table",
+    )
+    header = separator = None
+    for line in text.splitlines():
+        if line.startswith("| N |") and header is None:
+            header = len(line.split("|")) - 2
+        elif header is not None and separator is None and line.startswith("|---"):
+            separator = len(line.split("|")) - 2
+    _check(
+        header is not None and separator == header,
+        f"table separator has {separator} cells but the header has {header} "
+        "(GFM drops mismatched tables)",
+    )
+    _check(
+        "- N=100: multi line detail" in text,
         "multi-line notes must fold onto one line inside the list item",
     )
     line = report.summary_line(run["levels"][0])
     _check("N=1:" in line and "gw_cpu=" in line, "summary line must name the level")
 
 
-# ── e2e ───────────────────────────────────────────────────────
+def check_summary() -> None:
+    """``--json`` 的一行摘要：字段名是下游脚本的契约，不能悄悄改。"""
+    import run as run_module  # 函数级导入：run.py 只在自测分支里依赖本模块
 
-
-def _e2e_config(out: Path) -> RunConfig:
-    return RunConfig(
-        scenario="pure_stream",
-        levels=(2,),
-        rate=20.0,
-        dwell=3.0,
-        warmup=1.0,
-        shards=1,
-        subscribers="per-shard",
-        history_tokens=0,
-        out=out,
+    payload = _synthetic_run()
+    payload["meta"]["out"] = "/tmp/capacity-summary"
+    run_module._fill_verdicts(payload["levels"], payload["meta"])
+    summary = run_module._summary(payload)
+    for key in ("ok", "out", "run_json", "report", "levels", "failures"):
+        _check(key in summary, f"--json summary is missing {key!r}")
+    _check(
+        summary["run_json"] == "/tmp/capacity-summary/run.json"
+        and summary["report"] == "/tmp/capacity-summary/report.md",
+        f"summary paths must be derived from meta.out: {summary}",
+    )
+    first = summary["levels"][0]
+    for key in (
+        "sessions",
+        "gateway_cpu_cores",
+        "delivery_p99_ms",
+        "tokens_per_second_actual",
+        "events_per_second_actual",
+        "chars_per_second",
+        "turns_per_second",
+        "errors",
+        "verdict",
+        "low_confidence",
+        "error",
+    ):
+        _check(key in first, f"--json level projection is missing {key!r}")
+    _check(
+        first["gateway_cpu_cores"]
+        == payload["levels"][0]["metrics"]["gateway.cpu_cores"],
+        "the projection must carry the metric value through",
+    )
+    _check(
+        payload["levels"][0]["verdict"]["verdict"] is not None,
+        "_fill_verdicts must fill the level block",
+    )
+    _check(
+        set(payload["levels"][0]["verdict"]) == set(verdict.VERDICT_KEYS),
+        "the verdict block keys must match VERDICT_KEYS",
+    )
+    _check(
+        summary["ok"] is True and summary["failures"] == [],
+        "healthy run summary (errors > 0 is not a failed level)",
     )
 
 
-def check_e2e(run_ladder: LadderRunner) -> None:
-    """迷你一档走真实路径：真网关子进程 + 真分片子进程 + 真产物 + 失败档形状。"""
-    proc.raise_nofile(proc.nofile_target(2))  # 2 条会话 + 网关自己的 fd，别撞软限
-    with tempfile.TemporaryDirectory(prefix="capacity-selftest-") as tmp:
+# ── e2e ───────────────────────────────────────────────────────
+
+
+def _e2e_config(scenario: str, out: Path, **overrides: Any) -> RunConfig:
+    base: dict[str, Any] = {
+        "scenario": scenario,
+        "levels": (E2E_SESSIONS,),
+        "rate": 20.0,
+        "dwell": 2.0,
+        "warmup": 0.5,
+        "shards": 1,
+        "subscribers": "per-shard",
+        "history_tokens": 0,
+        "out": out,
+    }
+    base.update(overrides)
+    return RunConfig(**base)
+
+
+E2E_CASES: dict[str, dict[str, Any]] = {
+    "pure_stream": {},
+    # 有节奏的轮次（``--cycle-s`` 是本工具推荐的用法）：不 pacing 时两个会话就能把一个
+    # 核烧到 0.9（每轮固定成本 ~9 ms CPU × 100 轮/s），那一档本来就会被判成 capped。
+    "tool_cycle": {"rate": 10.0, "cycle_s": 0.2},
+    # 逐出要时间：TTL = dwell/2 = 2 s，扫描 1 s → 窗口里必然扫到一次越限。
+    "idle": {"warmup": 0.0, "dwell": 4.0},
+    "hydration": {"dwell": 3.0, "history_tokens": 200},
+    "mixed": {"rate": 10.0, "cycle_s": 0.2, "decode_duty": 0.5},
+}
+
+
+def check_e2e_shape(run_ladder: LadderRunner, scenario: str) -> None:
+    """迷你一档走真实路径：真网关子进程 + 真分片子进程 + 真产物 + 该形态的断言。"""
+    proc.raise_nofile(proc.nofile_target(E2E_SESSIONS))
+    with tempfile.TemporaryDirectory(prefix=f"capacity-selftest-{scenario}-") as tmp:
         out = Path(tmp) / "run"
-        cfg = _e2e_config(out)
+        cfg = _e2e_config(scenario, out, **E2E_CASES[scenario])
         started = time.monotonic()
         payload = asyncio.run(run_ladder(cfg, selftest_run=True))
         elapsed = time.monotonic() - started
         _check(
             elapsed < E2E_BUDGET_S,
-            f"e2e level took {elapsed:.1f}s, budget {E2E_BUDGET_S:.0f}s",
+            f"{scenario} e2e took {elapsed:.1f}s, budget {E2E_BUDGET_S:.0f}s",
         )
+        level = _assert_common(payload, out, scenario)
+        _assert_shape_metrics(scenario, level)
+        if scenario == "pure_stream":
+            check_relative_out(run_ladder, Path(tmp))
+            check_failure_shape(run_ladder, Path(tmp) / "failed", level)
 
-        meta = payload["meta"]
-        _check(meta["tool"] == "capacity" and meta["schema"] == 1, "meta identity")
-        _check(meta.get("selftest") is True, "meta.selftest must mark a self-check run")
-        _check(int(meta["host"]["ulimit_n"]) > 0, "meta.host.ulimit_n must be recorded")
-        _check(meta["failures"] == [], f"e2e run must not fail: {meta['failures']}")
-        levels = payload["levels"]
-        _check(len(levels) == 1, "one level requested, one level reported")
-        level = levels[0]
-        _check(level.get("error") is None, f"level failed: {level.get('error')}")
 
-        _check(level["sessions"] == 2, "level must report the requested N")
-        _check(level["session_create"]["ok"] == 2, "both sessions must be created")
-        metrics_block = level["metrics"]
-        for key in orchestrator.METRIC_KEYS:
-            _check(key in metrics_block, f"missing frozen metric key {key!r}")
-        for key in orchestrator.SAMPLE_KEYS:
-            _check(key in level["samples"], f"missing sample key {key!r}")
-        _check(
-            metrics_block["gateway.cpu_cores"] is not None
-            and metrics_block["gateway.cpu_cores"] >= 0.0,
-            "gateway cpu must be sampled",
-        )
-        _check(
-            metrics_block["gateway.fds_peak"] is not None
-            and metrics_block["gateway.fds_peak"] >= 3,
-            "gateway fd peak must be sampled",
-        )
-        _check(
-            metrics_block["tokens_per_second_actual"] is not None
-            and metrics_block["tokens_per_second_actual"] > 0.0,
-            "token rate must be non-zero for a streaming load",
-        )
-        _check(
-            metrics_block["errors"] == 0,
-            f"no errors expected: {metrics_block['errors']}",
-        )
-        samples = level["samples"]
-        _check(samples["text_frames"] > 0, "text frames must be counted")
-        _check(
-            samples["delta_frames"]["content"] > 0,
-            f"delta frames must be counted per channel: {samples['delta_frames']}",
-        )
-        # 单轮形态：轮长覆盖 warmup+dwell，所以窗口内没有完成的轮次，但那一轮仍在飞
-        # 且它的到达时刻必须被交出来（否则投递延迟无从配对）。
+def _assert_common(
+    payload: Mapping[str, Any], out: Path, scenario: str
+) -> Mapping[str, Any]:
+    """每个形态都一样的那部分：身份、键集、产物形状、会话数、rig 采样。"""
+    meta = payload["meta"]
+    _check(meta["tool"] == "capacity" and meta["schema"] == 1, "meta identity")
+    _check(meta.get("selftest") is True, "meta.selftest must mark a self-check run")
+    _check(int(meta["host"]["ulimit_n"]) > 0, "meta.host.ulimit_n must be recorded")
+    _check(meta["failures"] == [], f"{scenario} run must not fail: {meta['failures']}")
+    for key in ("chunk", "backend", "tool", "cycle_s", "decode_duty"):
+        _check(key in meta["args"], f"meta.args must record {key} for an A/B rerun")
+    levels = payload["levels"]
+    _check(len(levels) == 1, "one level requested, one level reported")
+    level = levels[0]
+    _check(level.get("error") is None, f"level failed: {level.get('error')}")
+    _check(level["sessions"] == E2E_SESSIONS, "level must report the requested N")
+    _check(
+        level["session_create"]["ok"] == E2E_SESSIONS, "all sessions must be created"
+    )
+    _check(
+        level["verdict"]["verdict"] == "ok",
+        f"a healthy single level must be judged ok: {level['verdict']}",
+    )
+    metrics_block = level["metrics"]
+    for key in orchestrator.METRIC_KEYS:
+        _check(key in metrics_block, f"missing frozen metric key {key!r}")
+    for key in orchestrator.SAMPLE_KEYS:
+        _check(key in level["samples"], f"missing sample key {key!r}")
+    for key in orchestrator.HISTORY_KEYS:
+        _check(key in level["history"], f"missing history key {key!r}")
+    _check(
+        metrics_block["gateway.cpu_cores"] is not None
+        and metrics_block["gateway.cpu_cores"] >= 0.0,
+        "gateway cpu must be sampled",
+    )
+    _check(
+        metrics_block["gateway.fds_peak"] is not None
+        and metrics_block["gateway.fds_peak"] >= 3,
+        "gateway fd peak must be sampled",
+    )
+    _check(
+        metrics_block["slow_client_recycles"] == 0,
+        "a healthy window must not count the driver's own teardown as a recycle: "
+        f"{metrics_block['slow_client_recycles']}",
+    )
+    _check(level["rig"]["shard_cpu_cores"], "shard CPU must be reported (rig signal)")
+    span_note = [note for note in level["notes"] if "CPU window" in note]
+    _check(not span_note, f"shard CPU window must match the sample window: {span_note}")
+    run_json = out / "run.json"
+    report_md = out / "report.md"
+    shard_file = out / "raw" / str(E2E_SESSIONS) / "shard-0.samples.json"
+    _check(run_json.is_file(), f"run.json must exist ({run_json})")
+    _check(report_md.is_file(), f"report.md must exist ({report_md})")
+    _check(shard_file.is_file(), f"raw shard samples must exist ({shard_file})")
+    on_disk = json.loads(run_json.read_text(encoding="utf-8"))
+    _check(
+        on_disk["levels"][0]["sessions"] == E2E_SESSIONS,
+        "run.json must round-trip the level",
+    )
+    _check(
+        f"# capacity — {scenario}" in report_md.read_text(encoding="utf-8"),
+        "report.md must be rendered markdown",
+    )
+    _check(
+        not (out / "raw" / str(E2E_SESSIONS) / "workspace").exists(),
+        "a completed level must not leave its scratch workspace behind",
+    )
+    return level
+
+
+def _assert_shape_metrics(scenario: str, level: Mapping[str, Any]) -> None:
+    """每种形态自己的判据（结构性的 null 与真实的读数必须分得清）。"""
+    block = level["metrics"]
+    samples = level["samples"]
+    if scenario == "pure_stream":
         _check(
             samples["turns"] == 0 and samples["turns_in_flight"] >= 1,
             f"pure_stream is single-turn: {samples['turns']} completed, "
             f"{samples['turns_in_flight']} in flight",
         )
         _check(
-            metrics_block["turn.p50_ms"] is None,
+            block["turn.p50_ms"] is None,
             "no completed turn must leave turn.* null (never 0)",
         )
         _check(
@@ -1026,33 +1705,14 @@ def check_e2e(run_ladder: LadderRunner) -> None:
             f"the single-turn shape must explain the null turn metric: {level['notes']}",
         )
         _check(
-            level["rig"]["shard_cpu_cores"],
-            "shard CPU must be reported (rig quality signal)",
-        )
-        _check(
-            metrics_block["slow_client_recycles"] == 0,
-            "a healthy window must not count the driver's own teardown as a recycle: "
-            f"{metrics_block['slow_client_recycles']}",
-        )
-        span_note = [note for note in level["notes"] if "CPU window" in note]
-        _check(
-            not span_note,
-            f"shard CPU window must match the sample window: {span_note}",
-        )
-
-        # 投递延迟：上游接口在这个树上就位，所以必须**有值**，而且每个窗口内的内容
-        # 增量事件都要配上（配对是按通道、按下标的，条数必须闭合）。
-        _check(
             samples["delivery_available"] is True,
-            f"the emitter clock is part of the tree, delivery must be available: "
-            f"{samples['delivery_available']}",
+            f"the emitter clock is part of the tree: {samples['delivery_available']}",
         )
-        p50 = metrics_block["delivery.p50_ms"]
-        p99 = metrics_block["delivery.p99_ms"]
         _check(
-            p50 is not None and p99 is not None, "available delivery must have values"
+            block["delivery.p50_ms"] is not None
+            and 0.0 <= block["delivery.p50_ms"] <= block["delivery.p99_ms"],
+            f"available delivery must have ordered values: {block['delivery.p99_ms']}",
         )
-        _check(0.0 <= p50 <= p99, f"latency order violated: p50={p50} p99={p99}")
         _check(
             samples["count"] == samples["delta_frames"]["content"],
             f"every in-window content event must pair: paired={samples['count']} "
@@ -1064,41 +1724,114 @@ def check_e2e(run_ladder: LadderRunner) -> None:
             for reason, count in (samples["dropped_reasons"] or {}).items()
             if reason.startswith(("missing_events", "unexpected_events", "negative"))
         }
+        _check(not unexpected, f"channel pairing must close: {unexpected}")
         _check(
-            not unexpected,
-            f"channel pairing must close on this shape: {unexpected}",
+            samples["chars"] >= samples["delta_frames"]["content"],
+            f"chars must be measured per event (>= one char each): {samples['chars']}",
         )
-
-        # 产物形状：run.json / report.md / raw/<N>/ 分片样本
-        run_json = out / "run.json"
-        report_md = out / "report.md"
-        shard_file = out / "raw" / "2" / "shard-0.samples.json"
-        _check(run_json.is_file(), f"run.json must exist ({run_json})")
-        _check(report_md.is_file(), f"report.md must exist ({report_md})")
-        _check(shard_file.is_file(), f"raw shard samples must exist ({shard_file})")
-        on_disk = json.loads(run_json.read_text(encoding="utf-8"))
+    elif scenario == "tool_cycle":
         _check(
-            on_disk["levels"][0]["sessions"] == 2, "run.json must round-trip the level"
+            samples["turns"] > 0,
+            f"tool_cycle must complete turns inside the window: {samples['turns']}",
         )
         _check(
-            "# capacity — pure_stream" in report_md.read_text(encoding="utf-8"),
-            "report.md must be rendered markdown",
+            block["turn.p50_ms"] is not None and block["turn.p99_ms"] is not None,
+            f"completed turns must yield turn latencies: {block['turn.p50_ms']}",
         )
         _check(
-            not (out / "raw" / "2" / "workspace").exists(),
-            "a completed level must not leave its scratch workspace behind",
+            block["turns_per_second"] > 0,
+            f"turns/s is the per-turn fixed cost divisor: {block['turns_per_second']}",
         )
-        shard = json.loads(shard_file.read_text(encoding="utf-8"))
-        _check(shard["shard"] == 0, "shard sample file must name its shard")
         _check(
-            isinstance(shard["window"], dict)
-            and shard["window"]["end"] > shard["window"]["start"],
-            "shard sample file must carry a window",
+            samples["delta_frames"]["tool_call"] > 0,
+            f"the tool call must stream args: {samples['delta_frames']}",
         )
-        _check(len(shard["turns"]) >= 1, "shard must report at least one turn sample")
-
-        check_relative_out(run_ladder, Path(tmp))
-        check_failure_shape(run_ladder, Path(tmp) / "failed", level)
+        _check(block["errors"] == 0, f"no turn may fail: {block['errors']}")
+        _check(
+            level["shape"]["tool"] == "read",
+            f"the tool variant must be recorded per level: {level['shape']}",
+        )
+    elif scenario == "idle":
+        _check(
+            samples["delta_frames"]["content"] == 0 and samples["chars"] == 0,
+            f"idle drives nothing: {samples['delta_frames']}",
+        )
+        _check(
+            block["events_per_second_actual"] is None,
+            f"no events means null, not 0: {block['events_per_second_actual']}",
+        )
+        _check(
+            any("no delta event arrived" in note for note in level["notes"]),
+            f"the null rate must be explained: {level['notes']}",
+        )
+        evicted = samples["evicted_in_window"]
+        loaded = samples["loaded_after_window"]
+        _check(
+            isinstance(evicted, int) and isinstance(loaded, int),
+            f"the eviction probe must report counts: {evicted} / {loaded}",
+        )
+        _check(
+            evicted + loaded == E2E_SESSIONS,
+            f"every session must be accounted for: {evicted} + {loaded}",
+        )
+        _check(
+            evicted == E2E_SESSIONS,
+            f"the reaper must have evicted the idle sessions inside the window: "
+            f"{evicted} of {E2E_SESSIONS}",
+        )
+        _check(
+            (level["gateway"] or {}).get("restart_ms") is None,
+            "idle must not restart the gateway",
+        )
+    elif scenario == "hydration":
+        _check(
+            (level["gateway"] or {}).get("restart_ms") is not None,
+            "hydration must restart the gateway",
+        )
+        _check(
+            level["shape"]["window_mode"] == "hydrate",
+            f"hydration must report its window mode: {level['shape']}",
+        )
+        _check(
+            samples["hydration_attempts"] == E2E_SESSIONS
+            and samples["hydration_failed"] == 0,
+            f"every subscribe must succeed: {samples['hydration_attempts']} / "
+            f"{samples['hydration_failed']}",
+        )
+        _check(
+            samples["sync_sessions"] >= E2E_SESSIONS,
+            f"every session must hydrate inside the window: {samples['sync_sessions']}",
+        )
+        _check(
+            block["hydration.p50_ms"] is not None
+            and block["hydration.p99_ms"] is not None,
+            f"hydration latency must be measured: {block['hydration.p50_ms']}",
+        )
+        _check(
+            block["first_frame.p50_ms"] is not None,
+            f"first frame after hydration must be measured: {block['first_frame.p50_ms']}",
+        )
+        _check(
+            samples["turns"] >= 1,
+            f"hydration drives one turn per session: {samples['turns']}",
+        )
+        _check(
+            level["history"]["tokens_per_session"] == 200
+            and level["history"]["total_ms"] is not None,
+            f"seeded history must be recorded: {level['history']}",
+        )
+    elif scenario == "mixed":
+        _check(
+            samples["delta_frames"]["content"] > 0
+            and samples["delta_frames"]["tool_call"] > 0,
+            f"mixed must show both groups: {samples['delta_frames']}",
+        )
+        _check(
+            samples["turns"] >= 1,
+            f"the cycling group must finish turns: {samples['turns']}",
+        )
+    else:  # pragma: no cover - 注册表与用例表的一致性
+        raise SelftestFailure(f"no assertions for scenario {scenario!r}")
 
 
 def check_relative_out(run_ladder: LadderRunner, tmp: Path) -> None:
@@ -1106,7 +1839,7 @@ def check_relative_out(run_ladder: LadderRunner, tmp: Path) -> None:
     previous = Path.cwd()
     os.chdir(tmp)
     try:
-        cfg = _e2e_config(Path("relative-run"))
+        cfg = _e2e_config("pure_stream", Path("relative-run"))
         payload = asyncio.run(run_ladder(cfg, selftest_run=True))
     finally:
         os.chdir(previous)
@@ -1131,7 +1864,9 @@ def check_failure_shape(
     previous = os.environ.get("WING_GATEWAY_BIN")
     os.environ["WING_GATEWAY_BIN"] = str(out / "no-such-gateway")
     try:
-        payload = asyncio.run(run_ladder(_e2e_config(out), selftest_run=True))
+        payload = asyncio.run(
+            run_ladder(_e2e_config("pure_stream", out), selftest_run=True)
+        )
     finally:
         if previous is None:
             os.environ.pop("WING_GATEWAY_BIN", None)
@@ -1144,7 +1879,16 @@ def check_failure_shape(
         set(bad) == set(good),
         f"failed level keys differ from a good one: {sorted(set(bad) ^ set(good))}",
     )
-    for block in ("metrics", "samples", "gateway", "rig", "session_create", "shape"):
+    for block in (
+        "metrics",
+        "samples",
+        "history",
+        "gateway",
+        "rig",
+        "session_create",
+        "shape",
+        "verdict",
+    ):
         _check(
             set(bad[block]) == set(good[block]),
             f"failed level {block} keys differ: "
@@ -1153,6 +1897,10 @@ def check_failure_shape(
     _check(
         all(value is None for value in bad["metrics"].values()),
         "failed level metrics must be null, not 0",
+    )
+    _check(
+        bad["verdict"]["verdict"] is None,
+        "a failed level must not get a verdict (not even ok)",
     )
     _check(
         payload["meta"]["session_create"]["ok"] is None,
@@ -1171,10 +1919,12 @@ def checks() -> list[tuple[str, Callable[[], None]]]:
         ("pairing.assemble", check_assemble),
         ("shard.events", check_shard_events),
         ("proc.sampling", check_proc),
-        ("run.summary", check_summary),
         ("cli.contract", check_cli),
         ("shapes.contract", check_shapes),
+        ("verdict.criteria", check_verdict),
+        ("verdict.polluted", check_polluted),
         ("report.render", check_report),
+        ("run.summary", check_summary),
     ]
 
 
@@ -1192,14 +1942,16 @@ def main(*, run_ladder: LadderRunner) -> int:
             continue
         passed += 1
         print(f"[selftest] ok   {name}")
-    try:
-        check_e2e(run_ladder)
-    except Exception as exc:  # noqa: BLE001 - 同上
-        failures.append(f"e2e: {type(exc).__name__}: {exc}")
-        print(f"[selftest] FAIL e2e: {exc}", file=sys.stderr)
-    else:
+    for scenario in E2E_CASES:
+        name = f"e2e.{scenario}"
+        try:
+            check_e2e_shape(run_ladder, scenario)
+        except Exception as exc:  # noqa: BLE001 - 同上
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+            print(f"[selftest] FAIL {name}: {exc}", file=sys.stderr)
+            continue
         passed += 1
-        print("[selftest] ok   e2e")
+        print(f"[selftest] ok   {name}")
     elapsed = time.monotonic() - started
     print(f"[selftest] {passed} passed · {len(failures)} failed · {elapsed:.1f}s")
     if failures:

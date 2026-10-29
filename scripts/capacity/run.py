@@ -27,6 +27,7 @@ import orchestrator
 import proc
 import report
 import shapes
+import verdict
 from cli import UsageError
 from orchestrator import DELIVERY_UNAVAILABLE, RunConfig
 
@@ -70,6 +71,17 @@ def _fill_slope(levels: list[dict[str, Any]]) -> None:
         current["metrics"]["gateway.rss_mb_slope_per_session"] = round(
             (rss_now - rss_previous) / delta_sessions, 3
         )
+
+
+def _fill_verdicts(levels: list[dict[str, Any]], meta: dict[str, Any]) -> None:
+    """把判据结果写进每档（``verdict.py`` 是唯一实现，报告会自己再算一遍）。
+
+    跨档比较（baseline = 最小 N 档）只能在阶梯跑完之后做，所以放在这里而不是
+    ``orchestrator.run_level``（单档看不到别的档）。失败的档位保持全 ``null``。
+    """
+    results = verdict.evaluate_run({"meta": meta, "levels": levels})
+    for record, result in zip(levels, results):
+        record["verdict"] = verdict.block(result)
 
 
 async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str, Any]:
@@ -124,10 +136,15 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
         "args": {
             "levels": list(cfg.levels),
             "rate": cfg.rate,
+            "chunk": cfg.chunk,
             "dwell": cfg.dwell,
             "warmup": cfg.warmup,
             "shards": cfg.shards,
             "subscribers": cfg.subscribers,
+            "backend": cfg.backend,
+            "tool": cfg.tool,
+            "cycle_s": cfg.cycle_s,
+            "decode_duty": cfg.decode_duty,
             "history_tokens": cfg.history_tokens,
             "frame_delay_ms": round(frame_delay_s * 1000, 3),
             "sleep_overshoot_ms": round(overshoot_s * 1000, 3),
@@ -141,6 +158,7 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
     }
     if selftest_run:
         meta["selftest"] = True
+    _fill_verdicts(levels, meta)
     payload = {"meta": meta, "levels": levels}
     write_json(cfg.out / "run.json", payload)
     (cfg.out / "report.md").write_text(report.render(payload), encoding="utf-8")
@@ -225,7 +243,15 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
                 "events_per_second_actual": (record.get("metrics") or {}).get(
                     "events_per_second_actual"
                 ),
+                "chars_per_second": (record.get("metrics") or {}).get(
+                    "chars_per_second"
+                ),
+                "turns_per_second": (record.get("metrics") or {}).get(
+                    "turns_per_second"
+                ),
                 "errors": (record.get("metrics") or {}).get("errors"),
+                "verdict": (record.get("verdict") or {}).get("verdict"),
+                "low_confidence": (record.get("verdict") or {}).get("low_confidence"),
                 "error": record.get("error"),
             }
             for record in payload["levels"]

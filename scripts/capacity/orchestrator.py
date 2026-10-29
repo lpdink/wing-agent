@@ -8,9 +8,10 @@
     ├── 网关：独立子进程（``wing_probe.env.ProbeEnv``，fresh WING_HOME + OS 分配端口）
     └── driver 分片 ×K：独立子进程（``driver_shard.py``）
 
-一档的生命周期：起环境 → 注册剧本 → coordinator 经 HTTP 建全部会话 → spawn 分片并
-等全部就绪 → 下发窗口（``window_start/end`` 是绝对 ``time.monotonic()``）→ 窗口内
-采样 → 收分片样本 → 拆环境（异常路径同样收干净）。建会话由 coordinator 统一做：
+一档的生命周期：起环境 → 注册剧本 → coordinator 经 HTTP 建全部会话 →（``--history-tokens``
+时先预置历史）→（水合形态重启网关）→ spawn 分片并等全部就绪 → 下发窗口
+（``window_start/end`` 是绝对 ``time.monotonic()``）→ 窗口内采样 →（逐出形态确认逐出）
+→ 收分片样本 → 拆环境（异常路径同样收干净）。建会话由 coordinator 统一做：
 「建 N 个会话要多久」本身是一个被测数字，且分片不重复写。
 
 失败时**保留已经拿到的证据**：采样挂了也照收分片样本（它们已在窗口末落盘），
@@ -26,6 +27,7 @@ import shutil
 import sys
 import time
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
@@ -38,25 +40,23 @@ import proc
 import shapes
 from metrics import TurnSample
 
-#: 采样间隔（秒）：RSS / fd 的峰值分辨率。CPU 不走周期采样（见 ``proc``）。
-SAMPLE_INTERVAL = 1.0
-
 #: 分片就绪 / 退出的等待上限（秒）。
 SHARD_READY_TIMEOUT = 180.0
 SHARD_EXIT_TIMEOUT = 60.0
 
-#: 建会话的并发上限（低于 httpx 默认连接池，避免把「建会话」自己变成瓶颈）。
+#: 建会话 / 切模型 / 逐出探针的并发上限（低于 httpx 默认连接池，避免把「建会话」自己变成瓶颈）。
 CREATE_CONCURRENCY = 32
 
 #: 网关健康检查上限（秒）：本档要建 N 个会话，冷启动慢机器也够。
 GATEWAY_HEALTH_TIMEOUT = 120.0
 
-#: 会话工具集：固定且最小——工具 schema 的体积会摊进每轮请求，属被测变量之外的噪声。
-TOOLS: tuple[str, ...] = ("Read",)
+#: 历史预置的等待上限（秒）：20000 token × 1000 会话是分钟级的活。
+SEED_TIMEOUT = 900.0
 
 SYSTEM_PROMPT = "You are wing's capacity probe agent. Answer briefly."
 
 WORKSPACE_DIRNAME = "workspace"
+SEED_DIRNAME = "seed"
 SHARD_SCRIPT = Path(__file__).with_name("driver_shard.py")
 
 #: ``run.json`` 的指标键（顺序即报告列序）。取不到的一律 ``None`` → JSON ``null``。
@@ -71,8 +71,16 @@ METRIC_KEYS: tuple[str, ...] = (
     "delivery.p999_ms",
     "turn.p50_ms",
     "turn.p99_ms",
+    "hydration.p50_ms",
+    "hydration.p99_ms",
+    "hydration.p999_ms",
+    "first_frame.p50_ms",
+    "first_frame.p99_ms",
+    "first_frame.p999_ms",
     "tokens_per_second_actual",
     "events_per_second_actual",
+    "turns_per_second",
+    "chars_per_second",
     "errors",
     "slow_client_recycles",
 )
@@ -84,9 +92,34 @@ SAMPLE_KEYS: tuple[str, ...] = (
     "dropped_reasons",
     "delta_frames",
     "text_frames",
+    "chars",
     "turns",
     "turns_in_flight",
     "delivery_available",
+    "sync_sessions",
+    "hydration_attempts",
+    "hydration_failed",
+    "evicted_in_window",
+    "loaded_after_window",
+)
+
+#: 历史预置的记账键（没预置时全 ``None``，不是 0）。
+HISTORY_KEYS: tuple[str, ...] = (
+    "tokens_per_session",
+    "chars_per_session",
+    "turns_per_session",
+    "total_ms",
+    "failed",
+)
+
+#: 判据结果的键（由 ``verdict`` 模块填充；见 ``run._fill_verdicts``）。
+VERDICT_KEYS: tuple[str, ...] = (
+    "verdict",
+    "flags",
+    "reasons",
+    "low_confidence",
+    "low_confidence_reasons",
+    "baseline_sessions",
 )
 
 DELIVERY_UNAVAILABLE = (
@@ -115,6 +148,11 @@ class RunConfig:
     subscribers: str
     history_tokens: int
     out: Path
+    chunk: int = shapes.DEFAULT_CHUNK
+    backend: str = "file"
+    tool: str = shapes.DEFAULT_TOOL
+    cycle_s: float = shapes.DEFAULT_CYCLE_S
+    decode_duty: float = shapes.DEFAULT_DECODE_DUTY
 
     def __post_init__(self) -> None:
         # 产物目录必须绝对：分片以 ``cwd=<档位目录>`` 起、拿到的配置路径由它派生，
@@ -129,6 +167,29 @@ class RunConfig:
     def shards_for(self, sessions: int) -> int:
         """本档实际分片数（分片多于会话是纯浪费）。"""
         return max(1, min(self.shards, sessions))
+
+
+def level_args(
+    cfg: RunConfig,
+    sessions: int,
+    *,
+    workspace: Path | None = None,
+    frame_delay_s: float | None = None,
+) -> shapes.ShapeArgs:
+    """``RunConfig`` + 档位信息 → 形态参数（CLI 校验与本模块装配共用一处拼装）。"""
+    return shapes.ShapeArgs(
+        scenario=cfg.scenario,
+        sessions=sessions,
+        rate=cfg.rate,
+        span_s=cfg.span_s,
+        chunk=cfg.chunk,
+        cycle_s=cfg.cycle_s,
+        decode_duty=cfg.decode_duty,
+        tool=cfg.tool,
+        history_tokens=cfg.history_tokens,
+        workspace=Path(workspace) if workspace is not None else Path("."),
+        frame_delay_s=frame_delay_s,
+    )
 
 
 @dataclass
@@ -186,9 +247,25 @@ def level_skeleton(sessions: int) -> dict[str, Any]:
             "host_loadavg": None,
         },
         "samples": dict.fromkeys(SAMPLE_KEYS),
+        "history": dict.fromkeys(HISTORY_KEYS),
         "session_create": {"ok": None, "failed": None, "total_ms": None},
-        "gateway": {"pid": None, "url": None, "version": None, "commit": None},
-        "shape": {"rate": None, "shards": None, "subscribers": None},
+        "gateway": {
+            "pid": None,
+            "url": None,
+            "version": None,
+            "commit": None,
+            "restart_ms": None,
+        },
+        "shape": {
+            "rate": None,
+            "chunk": None,
+            "backend": None,
+            "tool": None,
+            "shards": None,
+            "subscribers": None,
+            "window_mode": None,
+        },
+        "verdict": dict.fromkeys(VERDICT_KEYS),
         "error": None,
         "error_detail": None,
     }
@@ -210,15 +287,37 @@ async def run_level(
     shards: list[_ShardHandle] = []
     sampling = _Sampling()
     payloads: list[dict[str, Any]] = []
+    plan: shapes.ShapePlan | None = None
+    session_ids: list[str] = []
     shutil.rmtree(level_dir, ignore_errors=True)
     level_dir.mkdir(parents=True, exist_ok=True)
     try:
-        env = await _start_env(cfg, sessions, level_dir, frame_delay_s)
+        plan = shapes.build_plan(
+            level_args(
+                cfg,
+                sessions,
+                workspace=level_dir / WORKSPACE_DIRNAME,
+                frame_delay_s=frame_delay_s,
+            )
+        )
+        record["shape"].update(
+            {
+                "rate": cfg.rate,
+                "chunk": cfg.chunk,
+                "backend": cfg.backend,
+                "tool": cfg.tool,
+                "subscribers": cfg.subscribers,
+                "window_mode": plan.window_mode,
+            }
+        )
+        env = await _start_env(cfg, level_dir, plan)
         identity = await _gateway_identity(env)
         record["gateway"].update(
             {"pid": _process_pid(env), "url": env.gateway_url, **identity}
         )
-        created = await _create_sessions(env, sessions, level_dir)
+        _write_workspace_files(level_dir / WORKSPACE_DIRNAME, plan)
+        created = await _create_sessions(env, sessions, level_dir, plan, cfg)
+        session_ids = list(created["session_ids"])
         record["session_create"].update(
             {key: created[key] for key in ("ok", "failed", "total_ms")}
         )
@@ -227,23 +326,34 @@ async def run_level(
                 f"created only {created['ok']} of {sessions} sessions "
                 f"({created['failed']} failed; first failures: {created['failures'][:3]})"
             )
-        await _spawn_shards(
-            cfg, sessions, created["session_ids"], env, level_dir, notes, shards
-        )
-        record["shape"].update(
-            {"rate": cfg.rate, "shards": len(shards), "subscribers": cfg.subscribers}
-        )
+        if plan.seed is not None:
+            await _seed_history(cfg, env, session_ids, level_dir, plan, record)
+            await _switch_models(env, session_ids, plan)
+        if plan.window_mode == "hydrate":
+            started = time.monotonic()
+            await env.restart_gateway()
+            record["gateway"]["restart_ms"] = round(
+                (time.monotonic() - started) * 1000.0, 1
+            )
+            identity = await _gateway_identity(env)
+            record["gateway"].update(
+                {"pid": _process_pid(env), "url": env.gateway_url, **identity}
+            )
+        await _spawn_shards(cfg, session_ids, env, level_dir, notes, shards, plan)
+        record["shape"]["shards"] = len(shards)
         window_start, window_end = await _await_ready(shards, cfg)
         sampling.window_start = window_start
         sampling.window_end = window_end
         try:
-            await _sample_window(env, sampling)
+            await _sample_window(env, sampling, plan.sample_interval_s)
         except Exception as exc:  # noqa: BLE001 - 采样失败不阻断收样本
             failures.append(f"sampling: {type(exc).__name__}: {exc}")
             if tracebacks:
                 traceback.print_exc()
         payloads, shard_problems = await _collect(shards)
         failures.extend(shard_problems)
+        if plan.measure_eviction:
+            await _probe_eviction(env, session_ids, record, notes)
     except Exception as exc:  # noqa: BLE001 - 单档失败不该吞掉其余档
         failures.append(f"{type(exc).__name__}: {exc}")
         if tracebacks:
@@ -276,8 +386,8 @@ async def run_level(
         record["error_detail"] = failures
     record["notes"] = notes
     if not failures:
-        shutil.rmtree(level_dir / "env", ignore_errors=True)
-        shutil.rmtree(level_dir / WORKSPACE_DIRNAME, ignore_errors=True)
+        for scratch in ("env", WORKSPACE_DIRNAME, SEED_DIRNAME):
+            shutil.rmtree(level_dir / scratch, ignore_errors=True)
     return record
 
 
@@ -307,7 +417,7 @@ async def measure_pacing(rate: float) -> float:
 
     Provider 的注入节奏是「睡 ``delay`` 再写一帧」，而 ``asyncio.sleep`` 在这里（以及
     多数平台）会稳定地多睡一点——本机约 2.1 ms、与 ``delay`` 无关。不补偿的话
-    ``--rate`` 只是**注入参数**而不是实际速率（50 tok/s 会跑成 45.6）。这里在档位开始
+    ``--rate`` 只是**注入参数**而不是实际速率（50 事件/s 会跑成 45.6）。这里在档位开始
     前空载测一次，把中位数作为补偿量交给形态；实际达到的速率仍以 ``events_per_second_*``
     为准（补偿的残差在报告里看得见）。
     """
@@ -323,7 +433,7 @@ async def measure_pacing(rate: float) -> float:
 
 
 async def _start_env(
-    cfg: RunConfig, sessions: int, level_dir: Path, frame_delay_s: float | None
+    cfg: RunConfig, level_dir: Path, plan: shapes.ShapePlan
 ) -> ProbeEnv:
     """起隔离环境（fresh WING_HOME + 假 Provider + 网关子进程）并注册剧本。"""
     shape = shapes.resolve(cfg.scenario)
@@ -331,26 +441,35 @@ async def _start_env(
         level_dir / "env",
         gateway_bin=resolve_gateway_bin(),
         model=shape.MODEL,
-        tools=TOOLS,
+        models=shapes.model_ids(plan),
+        tools=plan.tools,
         system_prompt=SYSTEM_PROMPT,
+        sessions=plan.env_sessions,
         health_timeout=GATEWAY_HEALTH_TIMEOUT,
     )
-    env.register(
-        shape.MODEL,
-        shape.script(
-            sessions=sessions,
-            rate=cfg.rate,
-            span_s=cfg.span_s,
-            frame_delay_s=frame_delay_s,
-        ),
-    )
+    shapes.register(env, plan)
     return env
 
 
+def _write_workspace_files(workspace: Path, plan: shapes.ShapePlan) -> None:
+    """会话 workspace 里的预置文件（工具形态的 ``Read`` 参数指向它们）。"""
+    workspace.mkdir(parents=True, exist_ok=True)
+    for name, content in plan.workspace_files.items():
+        (workspace / name).write_text(content, encoding="utf-8")
+
+
 async def _create_sessions(
-    env: ProbeEnv, sessions: int, level_dir: Path
+    env: ProbeEnv,
+    sessions: int,
+    level_dir: Path,
+    plan: shapes.ShapePlan,
+    cfg: RunConfig,
 ) -> dict[str, Any]:
-    """coordinator 经公开 HTTP 建全部会话（记 ok / failed / 耗时）。"""
+    """coordinator 经公开 HTTP 建全部会话（记 ok / failed / 耗时）。
+
+    请求体带上 ``backend``（file / memory 的 A/B 靠它区分）与 create 期的 agent 覆盖
+    （形态的 ``yolo``，以及「先挂到预置 model 上」的 ``model_id``）。
+    """
     workspace = level_dir / WORKSPACE_DIRNAME
     workspace.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
@@ -366,10 +485,19 @@ async def _create_sessions(
 
         async def one(index: int) -> None:
             async with gate:
+                agent = dict(plan.agent)
+                agent["model_id"] = (
+                    plan.seed.model
+                    if plan.seed is not None
+                    else plan.session_models[index]
+                )
+                body: dict[str, Any] = {
+                    "workspace": str(workspace),
+                    "backend": cfg.backend,
+                    "agent": agent,
+                }
                 try:
-                    response = await client.post(
-                        "/api/session/create", json={"workspace": str(workspace)}
-                    )
+                    response = await client.post("/api/session/create", json=body)
                 except httpx.HTTPError as exc:
                     failures.append(f"#{index}: {exc!r}")
                     return
@@ -395,69 +523,261 @@ async def _create_sessions(
     }
 
 
+async def _seed_history(
+    cfg: RunConfig,
+    env: ProbeEnv,
+    session_ids: Sequence[str],
+    level_dir: Path,
+    plan: shapes.ShapePlan,
+    record: dict[str, Any],
+) -> None:
+    """预置历史：一个 seed 分片驱动每会话一轮大输出（``send`` → ``turn_result``）。
+
+    走公开路径（订阅 + WS 驱动），落盘的因此是产品自己的规范形。预置耗时是被测事实
+    （``--history-tokens 20000`` × 1000 会话是分钟级的），照实记进 ``levels[i].history``。
+    """
+    seed = plan.seed
+    assert seed is not None  # 调用点由 plan.seed 判定
+    started = time.monotonic()
+    handle = await _spawn_shard(
+        index=0,
+        sessions=tuple(session_ids),
+        mode="seed",
+        seed_turns=1,
+        env=env,
+        level_dir=level_dir / SEED_DIRNAME,
+        subscribers="per-shard",
+        shape=cfg.scenario,
+    )
+    failures: list[str] = []
+    payload: dict[str, Any] | None = None
+    try:
+        await _read_event(handle, expect="ready", timeout=SHARD_READY_TIMEOUT)
+        message = (
+            json.dumps(
+                {
+                    "window_start": time.monotonic(),
+                    "window_end": time.monotonic() + SEED_TIMEOUT,
+                }
+            )
+            + "\n"
+        ).encode()
+        stdin = handle.process.stdin
+        if stdin is None:  # pragma: no cover - create_subprocess_exec 给了 PIPE
+            raise OrchestratorError("seed shard has no stdin pipe")
+        stdin.write(message)
+        await stdin.drain()
+        await _read_event(handle, expect="done", timeout=SEED_TIMEOUT)
+        payload = json.loads(handle.out_path.read_text(encoding="utf-8"))
+        metrics.check_shard_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - 预置失败即本档失败（历史是形态的前提）
+        failures.append(f"history seed: {type(exc).__name__}: {exc}")
+    finally:
+        await handle.stop()
+    if failures:
+        raise OrchestratorError(" | ".join(failures))
+    record["history"].update(
+        {
+            "tokens_per_session": seed.tokens_per_session,
+            "chars_per_session": seed.chars_per_session,
+            "turns_per_session": 1,
+            "total_ms": round((time.monotonic() - started) * 1000.0, 1),
+            "failed": int(payload["errors"]) if payload is not None else None,
+        }
+    )
+
+
+async def _switch_models(
+    env: ProbeEnv, session_ids: Sequence[str], plan: shapes.ShapePlan
+) -> None:
+    """预置完把每个会话切回形态自己的 model（预置轮与测量轮各有独立剧本游标）。"""
+    limits = httpx.Limits(
+        max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
+    )
+    problems: list[str] = []
+    async with httpx.AsyncClient(
+        base_url=env.gateway_url, timeout=60.0, trust_env=False, limits=limits
+    ) as client:
+        gate = asyncio.Semaphore(CREATE_CONCURRENCY)
+
+        async def one(session_id: str, model_id: str) -> None:
+            async with gate:
+                try:
+                    response = await client.post(
+                        "/api/session/update",
+                        json={"session_id": session_id, "model_id": model_id},
+                    )
+                except httpx.HTTPError as exc:
+                    problems.append(f"{session_id}: {exc!r}")
+                    return
+                if response.status_code != 200:
+                    problems.append(
+                        f"{session_id}: {response.status_code} {response.text[:120]}"
+                    )
+
+        await asyncio.gather(
+            *(
+                one(session_id, plan.session_models[index])
+                for index, session_id in enumerate(session_ids)
+            )
+        )
+    if problems:
+        # 切不回去 = 测量轮会落到预置剧本上（一轮巨大输出），读数彻底失真。
+        raise OrchestratorError(
+            f"cannot switch {len(problems)} session(s) to their measuring model: "
+            f"{problems[:3]}"
+        )
+
+
+async def _probe_eviction(
+    env: ProbeEnv,
+    session_ids: Sequence[str],
+    record: dict[str, Any],
+    notes: list[str],
+) -> None:
+    """窗口结束后确认 reaper 是否真的回收了会话（逐出形态的唯一直接证据）。
+
+    ``POST /api/session/release`` 是公开路径且幂等：``released=false``
+    （detail=``not loaded``）意味着会话早已不在内存——即 reaper 在窗口里把它收走了。
+    非持久后端会被 409 拒（产品禁止销毁内存会话），此时整组写 ``null`` 并点名，不写 0。
+    """
+    evicted = 0
+    loaded = 0
+    problems: list[str] = []
+    limits = httpx.Limits(
+        max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
+    )
+    async with httpx.AsyncClient(
+        base_url=env.gateway_url, timeout=60.0, trust_env=False, limits=limits
+    ) as client:
+        gate = asyncio.Semaphore(CREATE_CONCURRENCY)
+
+        async def one(session_id: str) -> None:
+            nonlocal evicted, loaded
+            async with gate:
+                try:
+                    response = await client.post(
+                        "/api/session/release", json={"session_id": session_id}
+                    )
+                except httpx.HTTPError as exc:
+                    problems.append(f"{session_id}: {exc!r}")
+                    return
+                if response.status_code != 200:
+                    problems.append(
+                        f"{session_id}: {response.status_code} {response.text[:120]}"
+                    )
+                    return
+                if response.json().get("released"):
+                    loaded += 1
+                else:
+                    evicted += 1
+
+        await asyncio.gather(*(one(session_id) for session_id in session_ids))
+    if problems:
+        notes.append(
+            f"eviction is not observable here ({len(problems)} of "
+            f"{len(session_ids)} release calls failed; first: {problems[0]}) — "
+            "evicted_in_window / loaded_after_window are null, not 0"
+        )
+        return
+    record["samples"]["evicted_in_window"] = evicted
+    record["samples"]["loaded_after_window"] = loaded
+    notes.append(
+        f"eviction probe: {evicted} session(s) were already out of memory at the "
+        f"window end (reaped), {loaded} were still loaded and got released by the probe"
+    )
+
+
 async def _spawn_shards(
     cfg: RunConfig,
-    sessions: int,
-    session_ids: list[str],
+    session_ids: Sequence[str],
     env: ProbeEnv,
     level_dir: Path,
     notes: list[str],
     handles: list[_ShardHandle],
+    plan: shapes.ShapePlan,
 ) -> None:
     """轮转切分会话并 spawn 分片子进程（配置 / 样本 / 日志各一份文件）。
 
     ``handles`` 由调用方持有：spawn 中途失败时已起的分片仍在它的 ``finally`` 里，
     不会留下孤儿进程。
     """
-    count = cfg.shards_for(sessions)
+    count = cfg.shards_for(len(session_ids))
     if count != cfg.shards:
         notes.append(
-            f"shards clamped from {cfg.shards} to {count} (sessions={sessions})"
+            f"shards clamped from {cfg.shards} to {count} (sessions={len(session_ids)})"
         )
     for index in range(count):
-        config_path = level_dir / f"shard-{index}.json"
-        out_path = level_dir / f"shard-{index}.samples.json"
-        log_path = level_dir / f"shard-{index}.log"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "shard": index,
-                    "gateway_url": env.gateway_url,
-                    "sessions": session_ids[index::count],
-                    "subscribers": cfg.subscribers,
-                    "shape": cfg.scenario,
-                    "out": str(out_path),
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        log_handle = open(log_path, "wb")
-        try:
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                str(SHARD_SCRIPT),
-                "--config",
-                str(config_path),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=log_handle,
-                cwd=str(level_dir),
-            )
-        except OSError:
-            log_handle.close()
-            raise
         handles.append(
-            _ShardHandle(
+            await _spawn_shard(
                 index=index,
-                process=process,
-                config_path=config_path,
-                out_path=out_path,
-                log_path=log_path,
-                log_handle=log_handle,
+                sessions=tuple(session_ids[index::count]),
+                mode=plan.window_mode,
+                seed_turns=0,
+                env=env,
+                level_dir=level_dir,
+                subscribers=cfg.subscribers,
+                shape=cfg.scenario,
             )
         )
     return None
+
+
+async def _spawn_shard(
+    *,
+    index: int,
+    sessions: tuple[str, ...],
+    mode: str,
+    seed_turns: int,
+    env: ProbeEnv,
+    level_dir: Path,
+    subscribers: str,
+    shape: str,
+) -> _ShardHandle:
+    """写分片配置并 spawn 一个分片子进程。"""
+    level_dir.mkdir(parents=True, exist_ok=True)
+    config_path = level_dir / f"shard-{index}.json"
+    out_path = level_dir / f"shard-{index}.samples.json"
+    log_path = level_dir / f"shard-{index}.log"
+    config_path.write_text(
+        json.dumps(
+            {
+                "shard": index,
+                "gateway_url": env.gateway_url,
+                "sessions": list(sessions),
+                "subscribers": subscribers,
+                "shape": shape,
+                "out": str(out_path),
+                "mode": mode,
+                "seed_turns": seed_turns,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    log_handle = open(log_path, "wb")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(SHARD_SCRIPT),
+            "--config",
+            str(config_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=log_handle,
+            cwd=str(level_dir),
+        )
+    except OSError:
+        log_handle.close()
+        raise
+    return _ShardHandle(
+        index=index,
+        process=process,
+        config_path=config_path,
+        out_path=out_path,
+        log_path=log_path,
+        log_handle=log_handle,
+    )
 
 
 async def _await_ready(
@@ -526,7 +846,7 @@ async def _read_event(
     return payload
 
 
-async def _sample_window(env: ProbeEnv, sampling: _Sampling) -> None:
+async def _sample_window(env: ProbeEnv, sampling: _Sampling, interval: float) -> None:
     """窗口内采样：CPU 首尾累计差 + RSS/fd 周期峰值。
 
     采样原地写进 ``sampling``：中途失败时已采到的点仍留在产物里（崩机现场是容量测量
@@ -555,7 +875,7 @@ async def _sample_window(env: ProbeEnv, sampling: _Sampling) -> None:
         remaining = sampling.window_end - time.monotonic()
         if remaining <= 0:
             break
-        await asyncio.sleep(min(SAMPLE_INTERVAL, remaining))
+        await asyncio.sleep(min(interval, remaining))
     sampling.wall_s = time.monotonic() - started
     sampling.gateway_cpu_seconds = proc.process_cpu_seconds(gateway_pid) - gateway_cpu0
     sampling.provider_cpu_seconds = proc.self_cpu_seconds() - provider_cpu0
@@ -614,6 +934,33 @@ async def _collect(
 # ── 指标装配 ──────────────────────────────────────────────────
 
 
+def _turns_from_payloads(
+    payloads: Sequence[dict[str, Any]], window_start: float
+) -> list[TurnSample]:
+    """分片样本 → 客户端侧事实（时间戳从「相对窗口的微秒」还原成绝对单调时刻）。"""
+    return [
+        TurnSample(
+            prompt=str(entry["prompt"]),
+            sent_at=window_start + int(entry["sent_us"]) / 1e6,
+            result_at=None
+            if entry.get("result_us") is None
+            else window_start + int(entry["result_us"]) / 1e6,
+            arrivals={
+                kind: tuple(window_start + int(value) / 1e6 for value in values)
+                for kind, values in (entry.get("arrivals_us") or {}).items()
+            },
+            hydrate_sent_at=None
+            if entry.get("hydrate_sent_us") is None
+            else window_start + int(entry["hydrate_sent_us"]) / 1e6,
+            hydrated_at=None
+            if entry.get("sync_us") is None
+            else window_start + int(entry["sync_us"]) / 1e6,
+        )
+        for payload in payloads
+        for entry in payload["turns"]
+    ]
+
+
 def _assemble(
     record: dict[str, Any],
     *,
@@ -626,21 +973,7 @@ def _assemble(
 ) -> dict[str, Any]:
     """把采样与分片样本折进 ``record``（键集在 :func:`level_skeleton` 就定好了）。"""
     window_start = sampling.window_start
-    turns = [
-        TurnSample(
-            prompt=str(entry["prompt"]),
-            sent_at=window_start + int(entry["sent_us"]) / 1e6,
-            result_at=None
-            if entry.get("result_us") is None
-            else window_start + int(entry["result_us"]) / 1e6,
-            arrivals={
-                kind: tuple(window_start + int(value) / 1e6 for value in values)
-                for kind, values in (entry.get("arrivals_us") or {}).items()
-            },
-        )
-        for payload in payloads
-        for entry in payload["turns"]
-    ]
+    turns = _turns_from_payloads(payloads, window_start)
     delta_frames = {
         kind: sum(
             int((payload["delta_frames"] or {}).get(kind, 0)) for payload in payloads
@@ -649,6 +982,7 @@ def _assemble(
     }
     content_frames = delta_frames["content"]
     all_events = sum(delta_frames.values())
+    window_chars = sum(int(payload["chars"]) for payload in payloads)
     errors = sum(int(payload["errors"]) for payload in payloads)
     completed = [turn for turn in turns if turn.result_at is not None]
     wall = sampling.wall_s
@@ -657,8 +991,18 @@ def _assemble(
     if payloads:
         samples["delta_frames"] = delta_frames
         samples["text_frames"] = content_frames
+        samples["chars"] = window_chars
         samples["turns"] = len(completed)
         samples["turns_in_flight"] = len(turns) - len(completed)
+        samples["sync_sessions"] = sum(
+            int(payload["sync_sessions"]) for payload in payloads
+        )
+        samples["hydration_attempts"] = sum(
+            int(payload["hydration_attempts"]) for payload in payloads
+        )
+        samples["hydration_failed"] = sum(
+            int(payload["hydration_failed"]) for payload in payloads
+        )
     record["wall_s"] = round(wall, 3) if wall > 0 else None
 
     block["gateway.cpu_cores"] = _ratio(sampling.gateway_cpu_seconds, wall)
@@ -680,6 +1024,8 @@ def _assemble(
                 block["tokens_per_second_actual"] = round(content_frames / wall, 1)
             if all_events:
                 block["events_per_second_actual"] = round(all_events / wall, 1)
+            block["turns_per_second"] = round(len(completed) / wall, 3)
+            block["chars_per_second"] = round(window_chars / wall, 1)
         if not all_events:
             notes.append(
                 "tokens_per_second_actual is null: no delta event arrived in the window"
@@ -697,6 +1043,7 @@ def _assemble(
             "one turn per session across warmup + dwell by design, so the window holds "
             "no per-turn fixed cost (that cost is measured by other shapes)"
         )
+    _fill_hydration(block, samples, turns, notes)
 
     delivery_available = provider is not None and metrics.has_frame_emits(provider)
     samples["delivery_available"] = None if provider is None else delivery_available
@@ -754,15 +1101,41 @@ def _assemble(
         notes.append(
             f"only {len(payloads)} of {expected_shards} shard(s) reported samples"
         )
-    if record["shape"]["subscribers"] is None:
-        record["shape"].update(
-            {
-                "rate": cfg.rate,
-                "shards": len(payloads) or None,
-                "subscribers": cfg.subscribers,
-            }
-        )
+    if record["shape"]["shards"] is None:
+        record["shape"]["shards"] = len(payloads) or None
     return record
+
+
+def _fill_hydration(
+    block: dict[str, Any],
+    samples: dict[str, Any],
+    turns: Sequence[TurnSample],
+    notes: list[str],
+) -> None:
+    """水合与首帧：两段**不同的**时间线，各自成指标（不混成一个「启动耗时」）。
+
+    ``hydration.*`` = 订阅请求发出 → ``sync_session`` 到达（读 history + 拼快照 + 过 wire）；
+    ``first_frame.*`` = 驱动 prompt 发出 → 首个正文增量。只有水合形态会有它们；
+    其余形态两者都留 ``null``（结构上没有订阅发生在窗口里）。
+    """
+    hydrated = [
+        (turn.hydrated_at - turn.hydrate_sent_at) * 1000.0
+        for turn in turns
+        if turn.hydrated_at is not None and turn.hydrate_sent_at is not None
+    ]
+    first_frames = [
+        (turn.arrivals["content"][0] - turn.sent_at) * 1000.0
+        for turn in turns
+        if turn.arrivals.get("content")
+        and turn.hydrated_at is not None
+        and turn.arrivals["content"][0] >= turn.sent_at
+    ]
+    for label, value in metrics.spread(hydrated).items():
+        block[f"hydration.{label}_ms"] = _round(value)
+    for label, value in metrics.spread(first_frames).items():
+        block[f"first_frame.{label}_ms"] = _round(value)
+    if not hydrated and samples.get("hydration_attempts"):
+        notes.append("hydration.* is null: no subscription completed inside the window")
 
 
 def _shard_cpu_cores(

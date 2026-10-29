@@ -6,6 +6,14 @@
 见 ``README.md``「进程拓扑」：分片与假 Provider 同进程会互相抢事件循环，让客户端
 饱和被误读成网关退化。
 
+窗口里做什么由 ``mode`` 决定（``shapes.WINDOW_MODES`` + 预置专用的 ``seed``）：
+
+- ``drive``：连接时就订阅，窗口前把全部会话排进轮次泵（01 的行为）；
+- ``hold``：不建任何连接、什么都不做（纯内存基线）；
+- ``hydrate``：只连 WS 不订阅，窗口起点并发订阅并记下「订阅 → ``sync_session`` 到达」，
+  ``sync_session`` 到达后才发第一条 prompt（只驱动一轮）；
+- ``seed``：预置历史，每会话驱动 ``seed_turns`` 轮、逐轮等收口，不进入采样。
+
 握手是 stdout / stdin 上的 JSON 行（窗口起点由 coordinator 在**所有分片都就绪后**
 计算，避免慢机器上「窗口已开始但分片还没连上」）：
 
@@ -46,7 +54,16 @@ FRAME_TAIL = 64
 #: 建立 WS 连接 + 订阅的并发上限（1000 条连接串行握手会把就绪时间拉成秒级）。
 CONNECT_CONCURRENCY = 16
 
+#: 预置历史时同时在飞的轮次数（预置耗时本身也被记录，所以要有确定的并发上界）。
+SEED_CONCURRENCY = 64
+
 SUBSCRIBE_TIMEOUT = 30.0
+
+#: 预置历史的单轮等待上限（秒）：一轮就是几帧，慢只可能慢在网关排队。
+SEED_TURN_TIMEOUT = 120.0
+
+#: 分片模式（``shapes.WINDOW_MODES`` + 预置专用 ``seed``）。
+MODES: tuple[str, ...] = (*shapes.WINDOW_MODES, "seed")
 
 
 class ShardError(RuntimeError):
@@ -63,6 +80,8 @@ class ShardConfig:
     subscribers: str
     shape: str
     out: Path
+    mode: str = "drive"
+    seed_turns: int = 0
 
     @classmethod
     def load(cls, path: str | Path) -> ShardConfig:
@@ -78,6 +97,9 @@ class ShardConfig:
                 f"shard config subscribers must be per-session or per-shard, "
                 f"got {subscribers!r}"
             )
+        mode = raw.get("mode", "drive")
+        if mode not in MODES:
+            raise ShardError(f"shard config mode must be one of {MODES}, got {mode!r}")
         return cls(
             shard=int(raw["shard"]),
             gateway_url=str(raw["gateway_url"]),
@@ -85,6 +107,8 @@ class ShardConfig:
             subscribers=str(subscribers),
             shape=str(raw["shape"]),
             out=Path(str(raw["out"])),
+            mode=str(mode),
+            seed_turns=int(raw.get("seed_turns") or 0),
         )
 
 
@@ -104,6 +128,12 @@ class _SessionState:
     sent_at: float | None = None
     arrivals: dict[str, list[float]] = field(default_factory=_empty_arrivals)
     """本轮**全部**到达时刻（按通道）：不按窗口裁剪，配对要按下标对齐整轮。"""
+    hydrate_sent_at: float | None = None
+    """订阅请求发出的时刻（只有水合形态有值）。"""
+    hydrated_at: float | None = None
+    """``sync_session`` 到达的时刻（= 水合完成）。"""
+    done: asyncio.Future[None] | None = None
+    """预置模式下的「这一轮收口了」信号（事件回调里置位）。"""
 
 
 class Shard:
@@ -119,6 +149,12 @@ class Shard:
             kind: 0 for kind in metrics.CHANNEL_EVENTS
         }
         """窗口内收到的 delta 事件数（按通道）——速率指标的唯一来源。"""
+        self.window_chars = 0
+        """窗口内收到的正文增量字符数（实测；``chars_per_second`` 的分子）。"""
+        self.sync_sessions = 0
+        """窗口内到达的 ``sync_session`` 数（水合形态的完成计数）。"""
+        self.hydration_attempts = 0
+        self.hydration_failed = 0
         self.errors = 0
         self.error_details: list[str] = []
         self._pending: asyncio.Queue[str] = asyncio.Queue()
@@ -134,33 +170,28 @@ class Shard:
     # ── 连接 ────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """建 WS 连接并订阅本片的全部会话（``per-session`` 一会话一条连接）。"""
+        """建 WS 连接；``drive`` / ``seed`` 在这里订阅，``hydrate`` 留到窗口起点。"""
+        if self.config.mode == "hold":
+            return
+        subscribe_now = self.config.mode != "hydrate"
         service = httpx.AsyncClient(
             base_url=self.config.gateway_url, timeout=SUBSCRIBE_TIMEOUT, trust_env=False
         )
         gate = asyncio.Semaphore(CONNECT_CONCURRENCY)
 
         async def attach(session_id: str, ws: GatewayWS) -> None:
-            async with gate:
-                response = await service.post(
-                    "/api/session/subscribe",
-                    json={"session_id": session_id},
-                    headers={"X-Client-Id": ws.client_id},
-                )
-            if response.status_code != 200:
-                raise ShardError(
-                    f"subscribe {session_id} returned {response.status_code}: "
-                    f"{response.text[:200]}"
-                )
             self.states[session_id] = _SessionState(session_id=session_id, ws=ws)
+            if not subscribe_now:
+                return
+            async with gate:
+                await self._subscribe(service, session_id, ws.client_id)
 
         try:
             if self.config.subscribers == "per-shard":
                 ws = await self._open()
                 self.connections.append(ws)
-                await asyncio.gather(
-                    *(attach(session_id, ws) for session_id in self.config.sessions)
-                )
+                for session_id in self.config.sessions:
+                    await attach(session_id, ws)
             else:
 
                 async def one(session_id: str) -> None:
@@ -172,6 +203,20 @@ class Shard:
                 await asyncio.gather(*(one(sid) for sid in self.config.sessions))
         finally:
             await service.aclose()
+
+    async def _subscribe(
+        self, service: httpx.AsyncClient, session_id: str, client_id: str
+    ) -> None:
+        response = await service.post(
+            "/api/session/subscribe",
+            json={"session_id": session_id},
+            headers={"X-Client-Id": client_id},
+        )
+        if response.status_code != 200:
+            raise ShardError(
+                f"subscribe {session_id} returned {response.status_code}: "
+                f"{response.text[:200]}"
+            )
 
     async def _open(self) -> GatewayWS:
         """开一条订阅连接（``started_at=0.0``：``Delivery.at`` 即绝对单调时刻）。"""
@@ -189,11 +234,12 @@ class Shard:
     # ── 窗口 ────────────────────────────────────────────────
 
     def open_window(self, window_start: float, window_end: float) -> None:
-        """接收窗口边界并立刻开始驱动（warmup 从这一刻起算，样本只记窗口内）。"""
+        """接收窗口边界（``drive`` 形态在这里把全部会话排进轮次泵）。"""
         self._window_start = window_start
         self._window_end = window_end
-        for session_id in self.states:
-            self._pending.put_nowait(session_id)
+        if self.config.mode == "drive":
+            for session_id in self.states:
+                self._pending.put_nowait(session_id)
 
     def start_cpu_accounting(self) -> None:
         """CPU 记账起点（coordinator 在 ``window_start`` 时刻调，与网关采样对齐）。
@@ -230,8 +276,85 @@ class Shard:
                         for kind, values in arrivals.items()
                         if values
                     },
+                    hydrate_sent_at=state.hydrate_sent_at,
+                    hydrated_at=state.hydrated_at,
                 )
             )
+
+    # ── 水合（hydrate）─────────────────────────────────────
+
+    async def hydrate(self) -> None:
+        """窗口起点：并发订阅全部会话，记下「订阅 → sync_session」这一段。
+
+        不设并发闸：**尖峰本身就是被测对象**，串行订阅会把一条平滑的曲线测成人工的低谷。
+        prompt 在 ``sync_session`` 到达后才发（见 :meth:`_on_event`），所以「首帧」是
+        水合之后第一次真实调用的成本，而不是与水合挤在一起的一段。
+        """
+        limits = httpx.Limits(
+            max_connections=max(8, len(self.states)),
+            max_keepalive_connections=max(8, len(self.states)),
+        )
+        service = httpx.AsyncClient(
+            base_url=self.config.gateway_url,
+            timeout=SUBSCRIBE_TIMEOUT,
+            trust_env=False,
+            limits=limits,
+        )
+
+        async def one(state: _SessionState) -> None:
+            self.hydration_attempts += 1
+            state.hydrate_sent_at = time.monotonic()
+            try:
+                await self._subscribe(service, state.session_id, state.ws.client_id)
+            except (httpx.HTTPError, ShardError) as exc:
+                self.hydration_failed += 1
+                self._note(f"hydrate failed for {state.session_id}: {exc}")
+
+        try:
+            await asyncio.gather(*(one(state) for state in self.states.values()))
+        finally:
+            await service.aclose()
+
+    # ── 预置（seed）─────────────────────────────────────────
+
+    async def seed(self) -> None:
+        """每会话驱动 ``seed_turns`` 轮（逐轮等收口），用于预置历史体量。"""
+        gate = asyncio.Semaphore(SEED_CONCURRENCY)
+        await asyncio.gather(
+            *(self._seed_session(state, gate) for state in self.states.values())
+        )
+
+    async def _seed_session(
+        self, state: _SessionState, gate: asyncio.Semaphore
+    ) -> None:
+        async with gate:
+            for seq in range(self.config.seed_turns):
+                if time.monotonic() >= self._window_end:
+                    self._note(
+                        f"seed deadline hit for {state.session_id} at turn {seq}"
+                    )
+                    return
+                state.done = asyncio.get_running_loop().create_future()
+                prompt = shapes.seed_key(state.session_id, seq)
+                try:
+                    await state.ws.send_request(state.session_id, prompt)
+                    await asyncio.wait_for(state.done, SEED_TURN_TIMEOUT)
+                except TimeoutError:
+                    self._note(f"seed turn {seq} timed out for {state.session_id}")
+                    return
+                except Exception as exc:  # noqa: BLE001 - 单会话失败不该拖死整片
+                    self._note(
+                        f"seed turn {seq} failed for {state.session_id}: {exc!r}"
+                    )
+                    return
+                finally:
+                    state.done = None
+
+    # ── 事件 ────────────────────────────────────────────────
+
+    def _note(self, text: str) -> None:
+        if len(self.error_details) < 8:
+            self.error_details.append(text[:200])
 
     def _on_event(
         self,
@@ -245,21 +368,41 @@ class Shard:
         if state is None:
             return
         now = delivery.at
+        in_window = self._window_start <= now <= self._window_end
         kind = metrics.EVENT_CHANNELS.get(event_type)
         if kind is not None:
             if state.sent_at is not None:
                 state.arrivals[kind].append(now)
-                if self._window_start <= now <= self._window_end:
+                if in_window:
                     self.window_events[kind] += 1
+                    if kind == "content":
+                        self.window_chars += len(str(data.get("content") or ""))
             return
-        in_window = self._window_start <= now <= self._window_end
+        if event_type == "sync_session":
+            first = state.hydrate_sent_at is not None and state.hydrated_at is None
+            if first:
+                state.hydrated_at = now
+            if in_window:
+                self.sync_sessions += 1
+            if self.config.mode == "hydrate" and first and not self._closing:
+                # 水合完成才驱动第一条 prompt：两段时间线因此互不重叠。
+                self._pending.put_nowait(state.session_id)
+            return
         if event_type == "error":
             # 只留诊断、不计数、也不是轮次边界：失败轮上网关**同时**发
             # turn_result(is_error) 与 error，两者都记会重复计一次失败。
-            if in_window and len(self.error_details) < 8:
-                self.error_details.append(f"error: {str(data)[:200]}")
+            if in_window and self.config.mode != "seed":
+                self._note(f"error: {str(data)[:200]}")
             return
         if event_type != "turn_result":
+            return
+        if self.config.mode == "seed":
+            if data.get("is_error"):
+                self.errors += 1
+                self._note(f"seed turn failed: {str(data)[:200]}")
+            done, state.done = state.done, None
+            if done is not None and not done.done():
+                done.set_result(None)
             return
         sent_at, state.sent_at = state.sent_at, None
         if sent_at is None:
@@ -268,8 +411,7 @@ class Shard:
         if in_window and data.get("is_error"):
             # 失败数只认 turn_result.is_error（每个失败轮恰好一个），见 README 口径表。
             self.errors += 1
-            if len(self.error_details) < 8:
-                self.error_details.append(f"error turn: {str(data)[:200]}")
+            self._note(f"error turn: {str(data)[:200]}")
         arrivals, state.arrivals = state.arrivals, _empty_arrivals()
         if now >= self._window_start and sent_at < self._window_end:
             # 这轮碰到了采样窗口（单轮形态下就是跨越整个窗口的那一轮）。
@@ -283,9 +425,11 @@ class Shard:
                         for kind, values in arrivals.items()
                         if values
                     },
+                    hydrate_sent_at=state.hydrate_sent_at,
+                    hydrated_at=state.hydrated_at,
                 )
             )
-        if not self._closing and now < self._window_end:
+        if self.config.mode == "drive" and not self._closing and now < self._window_end:
             self._pending.put_nowait(state.session_id)
 
     async def pump(self) -> None:
@@ -305,22 +449,22 @@ class Shard:
                 if self._window_start <= time.monotonic() <= self._window_end:
                     self.errors += 1
                 state.sent_at = None
-                if len(self.error_details) < 8:
-                    self.error_details.append(f"send failed for {session_id}: {exc!r}")
+                self._note(f"send failed for {session_id}: {exc!r}")
 
     # ── 产物 ────────────────────────────────────────────────
 
     def payload(self) -> dict[str, Any]:
         start = self._window_start
 
-        def us(moment: float) -> int:
-            return int(round((moment - start) * 1e6))
+        def us(moment: float | None) -> int | None:
+            return None if moment is None else int(round((moment - start) * 1e6))
 
         return {
             "shard": self.config.shard,
             "gateway_url": self.config.gateway_url,
             "subscribers": self.config.subscribers,
             "shape": self.config.shape,
+            "mode": self.config.mode,
             "ws_connections": len(self.connections),
             "sessions": list(self.config.sessions),
             "frames_received": sum(ws.frames_received for ws in self.connections),
@@ -332,6 +476,10 @@ class Shard:
             else round(self._cpu_end_at - self._cpu_start_at, 3),
             "closed_before_end": self._closed_before_end,
             "text_frames": self.window_events["content"],
+            "chars": self.window_chars,
+            "sync_sessions": self.sync_sessions,
+            "hydration_attempts": self.hydration_attempts,
+            "hydration_failed": self.hydration_failed,
             "delta_frames": dict(self.window_events),
             "turns_in_flight": sum(1 for turn in self.turns if turn.result_at is None),
             "errors": self.errors,
@@ -341,7 +489,9 @@ class Shard:
                 {
                     "prompt": turn.prompt,
                     "sent_us": us(turn.sent_at),
-                    "result_us": None if turn.result_at is None else us(turn.result_at),
+                    "result_us": us(turn.result_at),
+                    "hydrate_sent_us": us(turn.hydrate_sent_at),
+                    "sync_us": us(turn.hydrated_at),
                     "arrivals_us": {
                         kind: [us(moment) for moment in values]
                         for kind, values in turn.arrivals.items()
@@ -376,6 +526,12 @@ def read_window() -> tuple[float, float]:
     return float(raw["window_start"]), float(raw["window_end"])
 
 
+async def _sleep_until(moment: float) -> None:
+    delay = moment - time.monotonic()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 async def run(config_path: Path) -> int:
     config = ShardConfig.load(config_path)
     shape = shapes.resolve(config.shape)
@@ -401,9 +557,16 @@ async def run(config_path: Path) -> int:
     shard.open_window(window_start, window_end)
     pump = asyncio.create_task(shard.pump())
     try:
-        await asyncio.sleep(max(0.0, window_start - time.monotonic()))
+        await _sleep_until(window_start)
         shard.start_cpu_accounting()
-        await asyncio.sleep(max(0.0, window_end - time.monotonic()))
+        if config.mode == "hydrate":
+            await shard.hydrate()
+            await _sleep_until(window_end)
+        elif config.mode == "seed":
+            # 预置没有采样窗口：``window_end`` 只是截止时刻，跑完即收。
+            await shard.seed()
+        else:
+            await _sleep_until(window_end)
     finally:
         shard.close_window()
         pump.cancel()
