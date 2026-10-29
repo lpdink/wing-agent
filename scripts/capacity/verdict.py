@@ -13,11 +13,14 @@
   ``gateway.fds_peak >= 0.9 × meta.host.ulimit_n``；
 - ``low_confidence``（**不进判档**，但报告必须点名）：``rig.provider_cpu_cores >= 0.8``、
   任一 ``rig.shard_cpu_cores >= 0.9``、**不预期**的配对丢弃比例 > 1%（窗口簿记不算）、
-  ``session_create.failed > 0``——这四条都意味着「这一档的读数可能是 rig 自己造成的」，
-  所以报告**不引用**这些档位的结论；
-- ``unjudged``（第四种状态，也不进判档）：某条判据**无从评估**——今天只有一条，
-  多轮形态的 ``turn.p99`` 没有可比的基线（基线档没有完成的轮次）。它与 ``low_confidence``
-  分开：**读数本身是干净的**，只是少了一条判据，报告照常用其余的判据下结论。
+  ``session_create.failed > 0``、``sessions > provider max_connections``——最后一条是
+  **网络层天花板**：SSE 是长连接，超出的会话在本地连接池里排队，窗口测到的是池而不是
+  网关容量。它们都意味着「这一档的读数不能回答容量问题」，所以报告**不引用**这些档位
+  的结论；
+- ``unjudged``（第四种状态，也不进判档）：某条判据**无从评估**——多轮形态的
+  ``turn.p99`` 没有可比的基线（基线档没有完成的轮次），或 ``delivery.p99`` 在窗口里没有
+  可配对的帧。它与 ``low_confidence`` 分开：这**不涉及污染判定**（也不代表读数就干净），
+  只是少了一条判据，报告只说自己实际评估了什么。
 
 ``verdict`` 取值 ``ok`` / ``degraded`` / ``capped`` / ``unknown``：``capped`` 优先于
 ``degraded``（同一档两者都命中时，天花板是更强的结论）；``unknown`` 不是第五个阈值，
@@ -46,6 +49,14 @@ LOW_CONF_PROVIDER_CORES = 0.8
 LOW_CONF_SHARD_CORES = 0.9
 LOW_CONF_DROPPED_RATIO = 0.01
 
+DEFAULT_POOL_CAP = 100
+"""``--provider-max-connections`` 未设置时的有效上限 = httpx 的连接池默认值。
+
+声明而非 ``import httpx``：``verdict`` 被纯投影层 ``report`` 导入，为了一个默认值把
+HTTP 客户端拖进来不划算。``--selftest`` 从 ``httpx.AsyncClient`` 的 ``limits`` 形参默认值交叉校验
+（产品侧不传 ``limits=`` 时落到的正是它），httpx 改默认值会当场变红。
+"""
+
 #: 只有「每轮都会收口」的形态才评 ``turn.p99``（其余形态的窗口里没有轮次边界）。
 TURN_SCENARIOS: frozenset[str] = frozenset({"tool_cycle", "mixed"})
 
@@ -72,6 +83,11 @@ CRITERIA: dict[str, str] = {
         "contamination)"
     ),
     "low_confidence.create": "session_create.failed > 0",
+    "low_confidence.pool": (
+        "sessions > provider max_connections: the excess sessions cannot hold an "
+        "upstream stream, so the window measures the connection pool rather than the "
+        "gateway"
+    ),
     "unjudged.turn": (
         "turn criterion not evaluated: the baseline level completed no turn"
     ),
@@ -165,9 +181,18 @@ def evaluate_run(run: Mapping[str, Any]) -> list[Verdict]:
             baseline=baseline,
             scenario=str(scenario) if scenario is not None else None,
             ulimit_n=ulimit_n if isinstance(ulimit_n, (int, float)) else None,
+            pool_cap=effective_pool_cap(meta),
         )
         for record in levels
     ]
+
+
+def effective_pool_cap(meta: Mapping[str, Any]) -> int:
+    """本次运行的有效连接池上限：旗标值，未设置时是 httpx 的默认值。"""
+    value = (meta.get("args") or {}).get("provider_max_connections")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_POOL_CAP
 
 
 def baseline_level(levels: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
@@ -184,6 +209,7 @@ def evaluate_level(
     baseline: Mapping[str, Any] | None,
     scenario: str | None,
     ulimit_n: float | None,
+    pool_cap: int = DEFAULT_POOL_CAP,
 ) -> Verdict:
     """单档判据（``baseline`` 为 ``None`` 时退化判据不评估 → ``unknown``）。"""
     if record.get("error"):
@@ -232,6 +258,13 @@ def evaluate_level(
     create_failed = (record.get("session_create") or {}).get("failed")
     if create_failed:
         low.append(f"{CRITERIA['low_confidence.create']} — measured {create_failed}")
+    sessions = int(record.get("sessions") or 0)
+    if sessions > pool_cap:
+        low.append(
+            f"{CRITERIA['low_confidence.pool']} — measured sessions={sessions} vs "
+            f"provider max_connections={pool_cap} "
+            f"({sessions - pool_cap} sessions cannot hold an upstream stream)"
+        )
 
     ordered = tuple(flag for flag in FLAG_ORDER if flag in flags)
     if "capped" in ordered:
@@ -371,6 +404,7 @@ __all__ = [
     "DEGRADED_DELIVERY_FACTOR",
     "DEGRADED_DELIVERY_FLOOR_MS",
     "DEGRADED_TURN_FACTOR",
+    "DEFAULT_POOL_CAP",
     "FLAG_ORDER",
     "LOW_CONF_DROPPED_RATIO",
     "LOW_CONF_PROVIDER_CORES",
@@ -380,6 +414,7 @@ __all__ = [
     "Verdict",
     "baseline_level",
     "block",
+    "effective_pool_cap",
     "evaluate_level",
     "evaluate_run",
     "first_reason",

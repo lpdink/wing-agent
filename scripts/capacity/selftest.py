@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -37,6 +38,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 from wing_probe.provider.request_log import RequestLog
 
 import cli
@@ -55,6 +57,9 @@ E2E_BUDGET_S = 45.0
 
 #: e2e 的会话数（两种形态/两组的边界都覆盖得到）。
 E2E_SESSIONS = 2
+
+#: e2e 用的池上限（不为限制任何东西，只为证明旗标真的落进了生成配置）。
+E2E_POOL_CAP = 7
 
 LadderRunner = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -866,6 +871,18 @@ def check_cli() -> None:
     _check(good.chunk == 4, "--chunk must round-trip")
     _check(good.backend == "memory", "--backend must round-trip")
     _check(good.shards_for(1) == 1 and good.shards_for(10) == 2, "shard clamping")
+    _check(
+        good.provider_max_connections is None,
+        "the provider pool cap must stay unset unless asked (generated config is "
+        "byte-identical by default)",
+    )
+    _check(
+        cli.build_config(
+            cli.parse_args(["--provider-max-connections", "2000", "--out", "/tmp/x"])
+        ).provider_max_connections
+        == 2000,
+        "--provider-max-connections must reach the config",
+    )
 
     _check(
         cli.build_config(cli.parse_args([])).out.is_absolute(),
@@ -884,7 +901,8 @@ def check_cli() -> None:
         and defaults.backend == "file"
         and defaults.tool == shapes.DEFAULT_TOOL
         and defaults.cycle_s == shapes.DEFAULT_CYCLE_S
-        and defaults.decode_duty == shapes.DEFAULT_DECODE_DUTY,
+        and defaults.decode_duty == shapes.DEFAULT_DECODE_DUTY
+        and defaults.provider_max_connections is None,
         "documented defaults must come from cli / shapes",
     )
 
@@ -905,6 +923,9 @@ def check_cli() -> None:
         ["--cycle-s", "1"],
         # 水合形态与内存后端互斥（进程内会话不过重启）。
         ["--scenario", "hydration", "--backend", "memory"],
+        # 池上限必须正整数：0 / 负数都不是「无上限」的合法写法。
+        ["--provider-max-connections", "0"],
+        ["--provider-max-connections", "-5"],
         # 形态自己的参数校验也要在起进程之前变成退出码 2。
         ["--scenario", "tool_cycle", "--tool", "nope"],
     ):
@@ -1001,6 +1022,8 @@ def _reproduce_argv(cfg: RunConfig) -> list[str]:
         if spec.mode or not spec.echo or spec.dest == "scenario":
             continue
         value = getattr(cfg, spec.dest)
+        if value is None:
+            continue  # 与 report._reproduce 同口径：未设置的旗标不写进命令
         if spec.dest == "levels":
             value = ",".join(str(level) for level in value)
         argv.extend([spec.flag, str(value)])
@@ -1248,6 +1271,7 @@ def _run(*levels: dict[str, Any], scenario: str = "pure_stream") -> dict[str, An
                 "cycle_s": 3.0,
                 "decode_duty": 0.7,
                 "history_tokens": 0,
+                "provider_max_connections": None,
             },
             "host": {"cpus": 12, "mem_gb": 16.0, "platform": "test", "ulimit_n": 4096},
             "gateway": {"pid": 1, "version": "test", "commit": "abcdef0"},
@@ -1276,6 +1300,51 @@ def check_verdict() -> None:
     _check(
         all(result.baseline_sessions == 1 for result in clean),
         f"baseline must be the smallest N: {[r.baseline_sessions for r in clean]}",
+    )
+
+    # 连接池上限：SSE 长连接下 sessions > 上限 ⇒ 超出的会话排队，读数不作数。
+    # 未设旗标时有效上限 = httpx 的默认值（声明在 verdict，这里交叉校验产品事实）。
+    # 产品侧 ``make_http_limits(None)`` 不传 ``limits=``，落到 ``AsyncClient`` 的默认形参
+    # —— 从签名里读它，httpx 改默认值这条断言就红。
+    client_default = (
+        inspect.signature(httpx.AsyncClient.__init__).parameters["limits"].default
+    )
+    _check(
+        client_default.max_connections == verdict.DEFAULT_POOL_CAP,
+        f"the declared default pool cap must match the httpx client default: "
+        f"{verdict.DEFAULT_POOL_CAP} != {client_default.max_connections}",
+    )
+    default_cap = verdict.effective_pool_cap(
+        {"args": {"provider_max_connections": None}}
+    )
+    _check(
+        default_cap == verdict.DEFAULT_POOL_CAP,
+        f"an unset flag must fall back to the gateway default: {default_cap}",
+    )
+    over_pool = verdict.evaluate_run(_run(_level(1), _level(1000)))
+    _check(
+        over_pool[1].low_confidence is True
+        and any(
+            reason.startswith(verdict.CRITERIA["low_confidence.pool"])
+            for reason in over_pool[1].low_confidence_reasons
+        ),
+        f"1000 sessions against the default pool must be low confidence: {over_pool[1]}",
+    )
+    _check(
+        over_pool[1].verdict == "ok",
+        f"the pool cap must not turn a level into degraded: {over_pool[1]}",
+    )
+    wide = _run(_level(1), _level(1000))
+    wide["meta"]["args"]["provider_max_connections"] = 2000
+    wide_result = verdict.evaluate_run(wide)
+    _check(
+        wide_result[1].low_confidence is False,
+        f"a pool wide enough for the level must not be flagged: {wide_result[1]}",
+    )
+    exact = verdict.evaluate_run(_run(_level(1), _level(100)))
+    _check(
+        exact[1].low_confidence is False,
+        "sessions == cap is fine: every session still holds a connection",
     )
 
     # delivery 退化：> max(3 × 基线, 50 ms)。地板优先（基线 2 ms → 50 ms 才是界）。
@@ -1431,7 +1500,7 @@ def check_verdict() -> None:
     )
     # 判据原文清单只有一处：报告直接渲染它。
     _check(
-        len(verdict.CRITERIA) == 11,
+        len(verdict.CRITERIA) == 12,
         f"criteria must be one declaration: {len(verdict.CRITERIA)}",
     )
     classified = {key for keys in verdict.CRITERIA_FLAGS.values() for key in keys}
@@ -1505,6 +1574,25 @@ def check_report_verdicts() -> None:
     _check(
         "投递延迟未测到" in blind_text,
         "the conclusion must say the delivery axis was not measured",
+    )
+    # 连接池上限：横幅必须点名「哪档超出多少」，且不替这一档说「其余判据照常」。
+    pooled = _run(_level(1), _level(1000, delivery_p99=800.0))
+    pooled_text = report.render(pooled)
+    _check(
+        "连接池上限" in pooled_text and "N=1000 > 100" in pooled_text,
+        f"the pool banner must name the level and the cap: {pooled_text[:400]}",
+    )
+    _check(
+        "测的是**池**" in pooled_text,
+        "the pool banner must say the window measured the pool, not the gateway",
+    )
+    # 池够宽（旗标 2000）时既没有横幅，也没有低置信。
+    wide_run = _run(_level(1), _level(1000))
+    wide_run["meta"]["args"]["provider_max_connections"] = 2000
+    wide_text = report.render(wide_run)
+    _check(
+        "连接池上限" not in wide_text,
+        "a pool wide enough for the ladder must not raise the banner",
     )
     # 复现命令只回放生产者声明的键（meta.args 里的计时校准值不是输入参数）。
     command = report.render(run)
@@ -1787,7 +1875,9 @@ class E2ECase:
 
 
 E2E_CASES: tuple[E2ECase, ...] = (
-    E2ECase("pure_stream", "pure_stream"),
+    # 这一档同时验证 `--provider-max-connections` 真的落进生成配置（见
+    # `check_e2e_case`）：`ProviderConfig` 是 `extra="ignore"`，键名写错会静默消失。
+    E2ECase("pure_stream", "pure_stream", {"provider_max_connections": E2E_POOL_CAP}),
     # 有节奏的轮次（``--cycle-s`` 是本工具推荐的用法）：不 pacing 时两个会话就能把一个
     # 核烧到 0.9（每轮固定成本 ~9 ms CPU × 100 轮/s），那一档本来就会被判成 capped。
     E2ECase("tool_cycle", "tool_cycle", {"rate": 10.0, "cycle_s": 0.2}),
@@ -1826,6 +1916,129 @@ def check_e2e_case(run_ladder: LadderRunner, case: E2ECase) -> None:
         if case.name == "pure_stream":
             check_relative_out(run_ladder, Path(tmp))
             check_failure_shape(run_ladder, Path(tmp) / "failed", level)
+
+
+def check_shard_recovery() -> None:
+    """分片握手落空时：样本已在盘上就必须收回来，没写成才算失败。
+
+    饱和档（池打开 + 长阶梯）的真实形态：窗口末仍有一大批帧堵在 socket 里，分片收尾
+    可能比 60 s 的握手窗口久。为一行握手丢掉完整样本会把整档变成 ``error``——恰好是
+    最需要「网关已经到顶」这个结论的时候。
+    """
+    payload = {
+        "shard": 0,
+        "window": {"start": 0.0, "end": 1.0},
+        "cpu_user_s": 0.0,
+        "cpu_sys_s": 0.0,
+        "rss_kb": 1,
+        "fds": 3,
+        "turns": [],
+        "events": {"content": 0},
+        "chars": {"content": 0},
+        "errors": 0,
+        "dropped_reasons": {},
+        "hydration": None,
+        "sync_sessions": 0,
+        "hydration_attempts": 0,
+        "hydration_failed": 0,
+        "slow_client_recycles": 0,
+    }
+
+    with tempfile.TemporaryDirectory(prefix="capacity-selftest-recovery-") as tmp:
+        out = Path(tmp) / "shard-0.samples.json"
+        handle = orchestrator._ShardHandle(
+            index=0,
+            process=SimpleNamespace(returncode=None),
+            config_path=Path(tmp) / "shard-0.json",
+            out_path=out,
+            log_path=Path(tmp) / "shard-0.log",
+            log_handle=None,
+        )
+
+        async def recover() -> dict[str, Any]:
+            return await orchestrator._await_samples(handle)
+
+        # 文件先落盘（分片写完样本、还没报 done）→ 必须收回来。
+        out.write_text(json.dumps(payload), encoding="utf-8")
+        _check(
+            asyncio.run(recover())["shard"] == 0,
+            "a written sample file must be recovered without the handshake",
+        )
+
+        # 半截 JSON 不是完整样本：等不到就失败，不许把残文件当读数。
+        out.write_text('{"shard": 0, "turns"', encoding="utf-8")
+        deadline = orchestrator.SHARD_DRAIN_TIMEOUT
+        orchestrator.SHARD_DRAIN_TIMEOUT = 0.3
+        try:
+            try:
+                asyncio.run(recover())
+            except orchestrator.OrchestratorError as exc:
+                _check(
+                    "no usable samples" in str(exc),
+                    f"a truncated sample file must not be accepted: {exc}",
+                )
+            else:
+                raise SelftestFailure("a truncated sample file must not be accepted")
+        finally:
+            orchestrator.SHARD_DRAIN_TIMEOUT = deadline
+
+        # 没有样本文件 → 分片失败（不能静默当成 0 样本）。
+        out.unlink()
+        orchestrator.SHARD_DRAIN_TIMEOUT = 0.3
+        try:
+            try:
+                asyncio.run(recover())
+            except orchestrator.OrchestratorError:
+                pass
+            else:
+                raise SelftestFailure("a missing sample file must fail the shard")
+        finally:
+            orchestrator.SHARD_DRAIN_TIMEOUT = deadline
+
+
+def check_pool_passthrough() -> None:
+    """``--provider-max-connections`` 必须落进**网关读到的配置**，不传时逐字不写。
+
+    ``ProviderConfig`` 是 ``extra="ignore"``：键名写错不会报错，只会静默用上默认池——
+    那样整条阶梯又会测出「100 个会话满速 + 其余排队」的假曲线。所以这条检查读真配置。
+    """
+    with tempfile.TemporaryDirectory(prefix="capacity-selftest-pool-") as tmp:
+        root = Path(tmp)
+
+        def rendered(**overrides: Any) -> str:
+            cfg = _e2e_config("pure_stream", root / "run", **overrides)
+            plan = shapes.build_plan(orchestrator.level_args(cfg, E2E_SESSIONS))
+
+            async def run() -> str:
+                env = await orchestrator._start_env(cfg, root / "env", plan)
+                try:
+                    return env.config_path.read_text(encoding="utf-8")
+                finally:
+                    await env.stop()
+
+            return asyncio.run(run())
+
+        written = rendered(provider_max_connections=E2E_POOL_CAP)
+        _check(
+            f"max_connections: {E2E_POOL_CAP}" in written,
+            "an explicit --provider-max-connections must reach the config the gateway "
+            f"reads; providers block: {_provider_block(written)}",
+        )
+        default = rendered()
+        _check(
+            "max_connections" not in default,
+            "without the flag the generated config must not gain the key (the default "
+            f"run stays byte-identical): {_provider_block(default)}",
+        )
+
+
+def _provider_block(config_text: str) -> str:
+    """配置里 provider 段的前几行（失败文案用）。"""
+    lines = config_text.splitlines()
+    start = next(
+        (index for index, line in enumerate(lines) if line.startswith("providers:")), 0
+    )
+    return " / ".join(line.strip() for line in lines[start : start + 8])
 
 
 def _assert_common(
@@ -2147,6 +2360,8 @@ def checks() -> list[tuple[str, Callable[[], None]]]:
         ("verdict.criteria", check_verdict),
         ("verdict.polluted", check_polluted),
         ("report.verdicts", check_report_verdicts),
+        ("pool.passthrough", check_pool_passthrough),
+        ("shard.recovery", check_shard_recovery),
         ("report.render", check_report),
         ("run.summary", check_summary),
     ]

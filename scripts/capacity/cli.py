@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import shapes
+import verdict
 
 if TYPE_CHECKING:  # 只用于类型：``orchestrator`` 会拖进 httpx 与 probe 的运行时依赖
     from orchestrator import RunConfig
@@ -158,6 +159,17 @@ ARG_SPECS: tuple[ArgSpec, ...] = (
         f"{shapes.DEFAULT_DECODE_DUTY:g})",
     ),
     ArgSpec(
+        "--provider-max-connections",
+        "int",
+        None,
+        "provider connection-pool cap passed through to the generated config "
+        "(default: unset = the gateway's own default, today httpx's "
+        f"{verdict.DEFAULT_POOL_CAP}; streaming shapes hold one upstream connection "
+        "per session, "
+        "so sessions above the cap queue for a connection and the window measures "
+        "the pool instead of the gateway)",
+    ),
+    ArgSpec(
         "--out",
         "str",
         None,
@@ -273,6 +285,12 @@ def build_config(args: argparse.Namespace) -> RunConfig:
         raise UsageError(f"--history-tokens must be >= 0, got {args.history_tokens}")
     if args.cycle_s < 0:
         raise UsageError(f"--cycle-s must be >= 0, got {args.cycle_s}")
+    if args.provider_max_connections is not None and args.provider_max_connections <= 0:
+        # 产品侧声明是 ``gt=0``：0 / 负数会让网关的配置校验失败，这里提前退 2。
+        raise UsageError(
+            "--provider-max-connections must be >= 1 (omit it to keep the gateway "
+            f"default), got {args.provider_max_connections}"
+        )
     if not 0.0 <= args.decode_duty <= 1.0:
         raise UsageError(f"--decode-duty must be within [0, 1], got {args.decode_duty}")
     # 必须绝对：分片以 ``cwd=<档位目录>`` 起，相对路径会让它找不到自己的配置文件。
@@ -296,6 +314,11 @@ def build_config(args: argparse.Namespace) -> RunConfig:
         tool=str(args.tool),
         cycle_s=float(args.cycle_s),
         decode_duty=float(args.decode_duty),
+        provider_max_connections=(
+            None
+            if args.provider_max_connections is None
+            else int(args.provider_max_connections)
+        ),
     )
     # 形态级的校验（旋钮适用范围 / 契约 / 逐会话 model）在起任何子进程之前跑一遍：
     # 用最小档位干跑一次 plan()，非法组合在这里变成退出码 2。

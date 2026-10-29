@@ -44,6 +44,13 @@ from verdict import VERDICT_KEYS
 #: 分片就绪 / 退出的等待上限（秒）。
 SHARD_READY_TIMEOUT = 180.0
 SHARD_EXIT_TIMEOUT = 60.0
+SHARD_DRAIN_TIMEOUT = 300.0
+"""``done`` 握手落空后继续等样本文件的上限（秒）。
+
+分片是**先写样本、再报 done**；一档把网关压到饱和时（池打开 + 长阶梯），窗口之后仍有
+几十万帧堵在 socket 里，分片收尾可能比 60 s 的握手窗口更久。样本已在盘上就是完整读数，
+为一行握手把它丢掉（连带整档变成 ``error``）是本末倒置。
+"""
 
 #: 建会话 / 切模型 / 逐出探针的并发上限（低于 httpx 默认连接池，避免把「建会话」自己变成瓶颈）。
 CREATE_CONCURRENCY = 32
@@ -126,6 +133,10 @@ class OrchestratorError(RuntimeError):
     """一档无法继续（网关起不来 / 分片崩溃 / 会话建不全）——本档记失败并继续。"""
 
 
+class HandshakeTimeout(OrchestratorError):
+    """分片没在期限内报 ``done``（样本可能仍在盘上，见 ``_await_samples``）。"""
+
+
 @dataclass(frozen=True)
 class RunConfig:
     """一次运行的参数（CLI 冻结后的完整输入）。"""
@@ -144,6 +155,8 @@ class RunConfig:
     tool: str = shapes.DEFAULT_TOOL
     cycle_s: float = shapes.DEFAULT_CYCLE_S
     decode_duty: float = shapes.DEFAULT_DECODE_DUTY
+    provider_max_connections: int | None = None
+    """``--provider-max-connections``：``None`` = 不写该键（用网关自己的默认值）。"""
 
     def __post_init__(self) -> None:
         # 产物目录必须绝对：分片以 ``cwd=<档位目录>`` 起、拿到的配置路径由它派生，
@@ -417,6 +430,11 @@ async def _start_env(
 ) -> ProbeEnv:
     """起隔离环境（fresh WING_HOME + 假 Provider + 网关子进程）并注册剧本。"""
     shape = shapes.resolve(cfg.scenario)
+    provider_extra = (
+        None
+        if cfg.provider_max_connections is None
+        else {"max_connections": cfg.provider_max_connections}
+    )
     env = await ProbeEnv.start(
         level_dir / "env",
         gateway_bin=resolve_gateway_bin(),
@@ -426,6 +444,7 @@ async def _start_env(
         system_prompt=SYSTEM_PROMPT,
         sessions=plan.env_sessions,
         health_timeout=GATEWAY_HEALTH_TIMEOUT,
+        provider_extra=provider_extra,
     )
     shapes.register(env, plan)
     return env
@@ -795,7 +814,7 @@ async def _read_event(
     try:
         line = await asyncio.wait_for(stdout.readline(), timeout)
     except TimeoutError as exc:
-        raise OrchestratorError(
+        raise HandshakeTimeout(
             f"shard {handle.index} did not report {expect!r} within {timeout:.0f}s\n"
             f"{read_log_tail(handle.log_path)}"
         ) from exc
@@ -892,24 +911,61 @@ async def _collect(
     problems: list[str] = []
     for handle in handles:
         try:
-            await _read_event(handle, expect="done", timeout=SHARD_EXIT_TIMEOUT)
-            code = await asyncio.wait_for(handle.process.wait(), SHARD_EXIT_TIMEOUT)
-            if code != 0:
-                raise OrchestratorError(
-                    f"shard {handle.index} exited with code {code}\n"
-                    f"{read_log_tail(handle.log_path)}"
-                )
-            payload = json.loads(handle.out_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise OrchestratorError(
-                    f"shard {handle.index} sample file is not a JSON object"
-                )
+            try:
+                await _read_event(handle, expect="done", timeout=SHARD_EXIT_TIMEOUT)
+                code = await asyncio.wait_for(handle.process.wait(), SHARD_EXIT_TIMEOUT)
+                if code != 0:
+                    raise OrchestratorError(
+                        f"shard {handle.index} exited with code {code}\n"
+                        f"{read_log_tail(handle.log_path)}"
+                    )
+                payload = _read_samples(handle)
+            except HandshakeTimeout:
+                # 握手落空 ≠ 没测到：分片先写样本再报 done，正忙时握手会被积压拖住。
+                payload = await _await_samples(handle)
             metrics.check_shard_payload(payload)
         except Exception as exc:  # noqa: BLE001 - 单分片失败只记账，不丢其余样本
             problems.append(f"shard {handle.index}: {type(exc).__name__}: {exc}")
             continue
         payloads.append(payload)
     return payloads, problems
+
+
+async def _await_samples(handle: _ShardHandle) -> dict[str, Any]:
+    """握手落空后等样本文件落全：分片一次性写出整份，能解析成 JSON 就是写完了。"""
+    deadline = time.monotonic() + SHARD_DRAIN_TIMEOUT
+    while True:
+        try:
+            return _read_samples(handle)
+        except OrchestratorError as exc:
+            last = exc
+        if time.monotonic() >= deadline:
+            raise OrchestratorError(
+                f"shard {handle.index} wrote no usable samples within "
+                f"{SHARD_DRAIN_TIMEOUT:.0f}s of missing its 'done' handshake "
+                f"(code {handle.process.returncode}): {last}\n"
+                f"{read_log_tail(handle.log_path)}"
+            ) from last
+        await asyncio.sleep(0.5)
+
+
+def _read_samples(handle: _ShardHandle) -> dict[str, Any]:
+    """读样本文件（半截 JSON / 非对象都算该分片失败，不污染其余分片）。"""
+    try:
+        payload = json.loads(handle.out_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise OrchestratorError(
+            f"shard {handle.index} wrote no sample file ({handle.out_path})"
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise OrchestratorError(
+            f"shard {handle.index} samples are unreadable: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise OrchestratorError(
+            f"shard {handle.index} sample file is not a JSON object"
+        )
+    return payload
 
 
 # ── 指标装配 ──────────────────────────────────────────────────

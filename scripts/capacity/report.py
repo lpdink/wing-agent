@@ -230,6 +230,22 @@ def _banners(run: Mapping[str, Any], verdicts: Sequence[verdict.Verdict]) -> lis
             "假 Provider 不提供逐帧发射时刻（`frame_emits`），无法把客户端到达时刻"
             "配到发射时钟上。其余指标不受影响。"
         )
+    cap = verdict.effective_pool_cap(meta)
+    pool = [
+        record.get("sessions")
+        for record, result in zip(run.get("levels") or [], verdicts)
+        if any(
+            reason.startswith(verdict.CRITERIA["low_confidence.pool"])
+            for reason in result.low_confidence_reasons
+        )
+    ]
+    if pool:
+        pairs = ", ".join(f"N={sessions} > {cap}" for sessions in pool)
+        lines.append(
+            f"> **连接池上限：{pairs}** —— SSE 是长连接，超出的会话在本地连接池里排队等"
+            "连接：这一档的窗口测的是**池**，不是网关能扛多少。要看网关容量，用更大的 "
+            "`--provider-max-connections` 重跑（不传该旗标时用的是网关默认值）。"
+        )
     low = [
         (record.get("sessions"), result.low_confidence_reasons)
         for record, result in zip(run.get("levels") or [], verdicts)
@@ -240,8 +256,8 @@ def _banners(run: Mapping[str, Any], verdicts: Sequence[verdict.Verdict]) -> lis
             f"N={sessions}（{len(reasons)} 条）" for sessions, reasons in low
         )
         lines.append(
-            f"> **低置信：{named}** —— rig 自身可能已饱和（或数据被采样过程污染），"
-            "这几档的结论**不作数**，只能当参考。逐条原因见下方「判据」一节。"
+            f"> **低置信：{named}** —— 这几档的读数**不能回答容量问题**，结论**不作数**，"
+            "只能当参考。逐条原因见下方「判据」一节。"
         )
     unjudged = [
         record.get("sessions")
@@ -360,7 +376,7 @@ def _conclusion(
         lines.append(
             "- **低置信**："
             + "、".join(f"N={sessions}" for sessions, _ in low)
-            + " 的读数可能被 rig 自身饱和（或数据被采集过程污染），"
+            + " 的读数**不能回答容量问题**（原因见顶部横幅与「判据」一节），"
             "上面这句结论**没有引用它们**。"
         )
     unjudged = [

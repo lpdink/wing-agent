@@ -66,10 +66,11 @@ CLI（旗标名是下游脚本的契约，只允许追加）：
 | `--tool` | `read` | 工具循环用的工具：`read`（Read 一个 workspace 小文件，无子进程）/ `bash`（`Bash echo`，带子进程）。只有 `tool_cycle` 消费它 |
 | `--cycle-s` | `3` | 工具循环的**周期下限**（秒）：`0` = 不 pacing，压到机器能吃下的最大轮次频率。只有 `tool_cycle` / `mixed` 消费它 |
 | `--decode-duty` | `0.7` | 混合形态里处于纯流式输出中的会话占比。只有 `mixed` 消费它 |
+| `--provider-max-connections` | 不传（= 网关默认） | 透传给主 provider 的**连接池上限**（`providers[0].max_connections`）。不传时生成配置逐字不变，有效上限是网关自己的默认值（今天 = httpx 的 **100**）。见「并发上限有两个数」 |
 | `--out` | `target/capacity/<UTC 时间戳>` | 产物目录 |
 | `--criteria` | — | 打印判据原文（`verdict.CRITERIA`）后退出——阈值只在代码里，这个旗标是它的读取口 |
 | `--selftest` | — | 离线自测 |
-| `--json` | — | stdout 只输出一行 JSON 摘要（`ok` / `out` / `run_json` / `report` / `levels[]` / `failures`）；`levels[]` 每项是 `sessions` + `gateway_cpu_cores` / `delivery_p99_ms` / `tokens_per_second_actual` / `events_per_second_actual` / `chars_per_second` / `turns_per_second` / `errors` / `verdict` / `low_confidence` / `error` 的投影 |
+| `--json` | — | stdout 只输出一行 JSON 摘要（`ok` / `out` / `run_json` / `report` / `levels[]` / `failures`）；`levels[]` 每项是 `sessions` + `gateway_cpu_cores` / `delivery_p99_ms` / `tokens_per_second_actual` / `events_per_second_actual` / `chars_per_second` / `turns_per_second` / `errors` / `verdict` / `low_confidence` / `unjudged` / `error` 的投影 |
 
 退出码：`0` 全部档位完成；`2` 参数 / 环境错误（未启动任何进程）；`3` 有档位失败
 （仍落盘产物，供取证）。`EMFILE` 之类「跑到一半才炸」的失败不会产出漂亮空表：
@@ -224,6 +225,26 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   `evicted_by_reaper` / `released_by_probe` 是**窗口末时刻**的逐出探针结论（只在 `idle`
   形态非 `null`：前者 = 探针到达时已经不在内存，后者 = 还在内存、被探针放掉）；
 - `levels[i].error_detail`：该档失败的完整诊断（网关日志尾部等）。一句话版本在 `error`。
+
+## 并发上限有两个数（默认池 / 打开池之后）
+
+SSE 是**长连接**：一个会话在整轮里占住一条上游连接。所以「同时能有多少会话在真的产出」
+先受 provider 连接池限制，而不是网关 CPU：
+
+| | 上限 | 怎么来的 |
+|---|---|---|
+| 出厂默认 | **100** | `providers[].max_connections` 缺省为 `null` ⇒ 网关不传 `limits=` ⇒ httpx 客户端的默认池（`AsyncClient` 的 `limits` 形参默认值，今天 `max_connections=100`）。`verdict.DEFAULT_POOL_CAP` 声明这个数，`--selftest` 从 httpx 的签名交叉校验 |
+| 打开池之后 | `--provider-max-connections N` | 键值合进 `providers[0]`（probe 的 `provider_extra` 透传），网关按它建池 |
+
+池没打开时 N > 100 的读数**只**描述「100 个会话满速 + 其余排队」：实测 1000 会话、
+`--rate 50`、20 s 窗口拿到 99 503 帧 ≈ 4975 ev/s（≈ 99.5 个会话的满速），而
+`rig.provider_cpu_cores` 只有 0.049——rig 与网关都没饱和。**这不是网关退化**，所以
+`verdict.py` 把它列为 `low_confidence`（`sessions > provider max_connections`），
+报告顶部单独一条「连接池上限」横幅点名；该档结论不作数。
+
+要回答「网关能扛多少会话」就重跑一次带上 `--provider-max-connections`（并让它的值
+**大于最大档的 N**）；要回答「默认配置能扛多少」，就保持不传——报告里的
+`meta.args.provider_max_connections` 是 `null` vs 具体数字，两次读数因此可区分。
 
 ## 口径
 
@@ -399,8 +420,9 @@ uv run python scripts/capacity/run.py --criteria
   轮次判据**只在 `tool_cycle` / `mixed` 判**（其余形态的窗口里没有轮次边界）。
 - `capped`：网关 CPU 打满 / 出现轮次错误 / fd 接近 `meta.host.ulimit_n`。
 - `low_confidence`（**不进判档**，但报告必须点名）：rig 自身饱和（provider 或某个分片
-  吃满核）、**不预期**的配对丢弃比例越界、建会话失败。这四条都意味着「这一档的读数可能
-  是 rig 自己造成的」，所以报告的结论句**不引用**这些档位。
+  吃满核）、**不预期**的配对丢弃比例越界、建会话失败、`sessions > provider
+  max_connections`（连接池天花板，见上一节）。它们都意味着「这一档的读数不能回答容量
+  问题」，所以报告的结论句**不引用**这些档位。
 - `unjudged`（第四种状态，也不进判档）：某条判据**无从评估**——今天有两条：多轮形态的
   `turn.p99` 没有可比的基线（基线档没有完成的轮次），以及 `delivery.p99` 在窗口里没有可配对
   的帧（轮次周期长于窗口）。它与 `low_confidence` 分开：这**不涉及污染判定**（也不代表读数
@@ -417,7 +439,7 @@ uv run python scripts/capacity/run.py --criteria
 
 ## 报告（`report.md`）
 
-依次是：横幅（失败档 / 投递延迟不可用 / **低置信** / 无法判定）→ 元信息（args / host /
+依次是：横幅（失败档 / 投递延迟不可用 / **连接池上限** / **低置信** / 判据未评估 / 无法判定）→ 元信息（args / host /
 gateway）→ **结论**（速度轴 = 判据命中的第一档；内存轴 = RSS 斜率 × 1000 会话的线性外推，
 只做投影、不判档）→ 阶梯表（含 `verdict` 列）→ 水合与首帧表（有数据时）→ rig 健康 →
 notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
@@ -466,7 +488,7 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 
 ## 自测（`--selftest`）
 
-≤120 秒（当前约 32 s）、不联网、不需要 API key、可重复。它起真网关子进程，因此和
+≤120 秒（当前约 34 s）、不联网、不需要 API key、可重复。它起真网关子进程，因此和
 `scripts/perf/ab.py --selftest` 一样**不进** `make check`（那一条只跑静态检查）——
 改完这个工具先手动跑 `make capacity-selftest`：
 
@@ -482,6 +504,9 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | `shapes.contract` | 五种形态的 plan 契约：会话 model 归属、chunk、窗口模式、workspace 文件、预置剧本循环 |
 | `verdict.criteria` | 判据：baseline / degraded / capped / unknown / low_confidence 与「结构性丢弃不算污染」 |
 | `verdict.polluted` | **负向验证**：被污染的 `run.json`（rig 饱和 / 不预期丢弃）必须被标低置信 |
+| `report.verdicts` | 报告层回归：低置信 / 判据未评估 / 退化结论三者不互相吞掉；连接池横幅点名档位与上限 |
+| `pool.passthrough` | 真起一次网关读回 `config.yaml`：`--provider-max-connections` 必须落进 `providers[0]`，不传时该键逐字不出现（`ProviderConfig` 是 `extra="ignore"`，键名写错会静默丢失） |
+| `shard.recovery` | 握手落空时按盘上样本恢复（写全了才收、半截 JSON 与缺文件都算失败） |
 | `report.render` | 合成 `run.json` → markdown（判据原文唯一、缺数据是 `—`、复现命令、表格列数） |
 | `run.summary` | `--json` 一行摘要的字段名与取值投影（下游脚本的契约） |
 | `e2e.<case>` | **真网关子进程 + 真分片子进程**跑完迷你一档（六个用例：五种形态 + `--tool bash` 变体）：断言该形态的指标非 null 且形状自洽（`pure_stream` 无轮次边界、`tool_cycle` 有完成的轮次与 tool_call 帧、`idle` 无事件且 reaper 逐出全部会话、`hydration` 有三段时间线、`mixed` 两个通道都有帧），并断言真实 `dropped_reasons` 全部落在 `metrics.DROP_REASONS` 词汇表里；再用一个失败档断言「失败档键集 == 成功档键集」、一个相对 `--out` 档断言默认形态能跑 |
@@ -537,7 +562,9 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | 某档指标全 `null` | `levels[i].error`；`raw/<N>/gateway.log`、`raw/<N>/shard-*.log` |
 | `delivery.*` 全 `null` | `samples.delivery_available`、`meta.notes`（上游发射时刻是否就位） |
 | `samples.dropped` 很大 | `samples.dropped_reasons`：`outside_window` = 跨窗口起点的预热段（正常）；`in_flight_tail:<kind>` = 窗口末仍在传输（正常）；`missing_events:<kind>` = 客户端少收了事件（异常）；`unexpected_events` = 客户端多收（异常）；`ambiguous_prompt` = 网关重试 |
-| 报告说「低置信」 | 该档 `verdict.low_confidence_reasons`：provider / 分片 CPU 吃满 ⇒ 加大 `--shards` 或降 `--rate`；不预期丢弃 ⇒ 看 `dropped_reasons` |
+| 报告说「低置信」 | 该档 `verdict.low_confidence_reasons`：provider / 分片 CPU 吃满 ⇒ 加大 `--shards` 或降 `--rate`；不预期丢弃 ⇒ 看 `dropped_reasons`；`sessions > provider max_connections` ⇒ 加 `--provider-max-connections` 重跑（或把最大档降到上限以下） |
+| 报告顶部有「连接池上限」横幅 | 该档 N 超过本次运行的池上限，读数只反映「上限个会话满速 + 其余排队」——不是网关能力 |
+| 长阶梯跑很久才收口 | 池打开后所有会话都在真的产出：窗口之后仍有大批帧堵在 socket 里，分片收尾会慢。样本是**先写盘后握手**，握手落空时按盘上的样本恢复（`SHARD_DRAIN_TIMEOUT`），不会因此把整档变成失败 |
 | `events_per_second_actual` 明显低于 `--rate` | `meta.args.sleep_overshoot_ms` 是否接近帧间隔（补偿失效）；`in_flight_tail` 是否偏大（网关消费不过来） |
 | `turn.*` 是 `—` | 形态决定：`pure_stream` / `idle` 结构性为 null；`tool_cycle` / `mixed` 为 null 说明窗口内没有轮次收口（`--cycle-s` 太长或网关卡住） |
 | `hydration.*` 是 `—` | `samples.hydration_attempts` / `hydration_failed`；分片是否在窗口起点才订阅（`shape.window_mode == "hydrate"`） |
