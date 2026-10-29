@@ -463,10 +463,9 @@ def test_images_defaults_are_pinned() -> None:
     assert _by_path(catalog, "images.evict_quantum_bytes").default == 18_874_368
 
 
-def test_declared_field_scale_matches_01_report() -> None:
-    """规模断言：声明字段总数 = 77（网关 CORS 两项 + sessions.archive 四项 +
-    files 两项〔顶层键 + max_bytes〕+ providers[].max_connections 都已计入）；
-    路径不重复。"""
+def test_declared_field_scale_is_pinned() -> None:
+    """规模断言：声明字段总数固定（增删一个 ``S(...)`` 字段必须同步这里与
+    ``test_config_spec.py::test_field_count_is_sane``）；路径不重复。"""
     declared = _declared(build_catalog())
     assert len(declared) == 77
     paths = [node.path for node in declared]
