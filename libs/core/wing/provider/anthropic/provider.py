@@ -17,7 +17,7 @@ import copy
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
 
@@ -40,6 +40,7 @@ from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
     ProviderStreamError,
     lines_with_idle_timeout,
+    make_http_limits,
     make_http_timeout,
     parse_json_event,
     parse_sse_stream,
@@ -87,10 +88,14 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
 
         headers = self._make_headers(config.api_key, self._anthropic_version)
 
+        limits = make_http_limits(config.max_connections)
+        # 缺省（None）不传 limits——沿用 httpx 默认连接池（见 make_http_limits）。
+        extra: dict[str, Any] = {} if limits is None else {"limits": limits}
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
             timeout=make_http_timeout(),
+            **extra,
         )
         log.info(f"AnthropicProvider initialized: {self.base_url}")
 
