@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """离线自测（``run.py --selftest``）：≤120 秒、不联网、不需要 API key、可重复。
 
-十三个检查（见 :func:`checks`）+ 五种形态各一次 ``e2e``，对应这个工具必须可信的几件事：
+十二个检查（见 :func:`checks`）+ 负载形态各一次 ``e2e``，对应这个工具必须可信的几件事：
 
 - ``stats.percentile``        百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）
 - ``pairing.last_user_text``  配对键的提取（str / block 列表两种 body 形态）
@@ -32,6 +32,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,6 +45,7 @@ import metrics
 import orchestrator
 import proc
 import report
+import shape_mixed
 import shapes
 import verdict
 from orchestrator import RunConfig, level_skeleton
@@ -928,6 +930,7 @@ def _shape_args(name: str, **overrides: Any) -> shapes.ShapeArgs:
         "sessions": 3,
         "rate": 20.0,
         "span_s": 6.0,
+        "dwell_s": 4.0,
         "chunk": 1,
         "cycle_s": shapes.DEFAULT_CYCLE_S,
         "decode_duty": shapes.DEFAULT_DECODE_DUTY,
@@ -955,13 +958,10 @@ def check_shapes() -> None:
             f"{name}: session models must be declared ({plan.session_models})",
         )
         _check(plan.tools, f"{name}: a shape must declare its tool set")
-        first = shape.prompt_text("sess-a", 0)
-        _check(
-            first != shape.prompt_text("sess-a", 1), f"{name}: prompt varies by turn"
-        )
-        _check(
-            first != shape.prompt_text("sess-b", 0), f"{name}: prompt varies by session"
-        )
+        prompt_text = shapes.prompt_text_of(shape)
+        first = prompt_text("sess-a", 0)
+        _check(first != prompt_text("sess-a", 1), f"{name}: prompt varies by turn")
+        _check(first != prompt_text("sess-b", 0), f"{name}: prompt varies by session")
         _check(
             first != shapes.seed_key("sess-a", 0),
             f"{name}: seed prompts must never collide with driving prompts",
@@ -1017,11 +1017,25 @@ def check_shapes() -> None:
         idle_plan.window_mode == "hold" and not idle_plan.subscribe,
         f"idle: hold mode must not subscribe: {idle_plan.window_mode}",
     )
-    eviction = (idle_plan.env_sessions or {}).get("eviction") or {}
-    _check(
-        eviction.get("idle_ttl_seconds", 1e9) <= 6.0,
-        f"idle: the eviction TTL must fit inside the window: {eviction}",
-    )
+    # 空闲计时从建会话起算 ⇒ 「窗口内逐出」要求 warmup < ttl ≤ warmup + dwell。
+    for span, dwell in ((4.0, 4.0), (600.0, 4.0), (3.0, 2.0)):
+        ttl = float(
+            (
+                (
+                    shapes.build_plan(
+                        _shape_args("idle", span_s=span, dwell_s=dwell)
+                    ).env_sessions
+                    or {}
+                ).get("eviction")
+                or {}
+            ).get("idle_ttl_seconds", 0)
+        )
+        warmup = span - dwell
+        _check(
+            warmup < ttl <= warmup + dwell,
+            f"idle: the eviction TTL must land inside the window "
+            f"(warmup={warmup}, dwell={dwell}, ttl={ttl})",
+        )
     _check(idle_plan.measure_eviction, "idle: eviction must be probed after the window")
 
     # hydration：订阅发生在窗口里、采样更密。
@@ -1048,6 +1062,23 @@ def check_shapes() -> None:
     _check(
         len(set(all_stream.session_models)) == 1,
         f"mixed: duty 1.0 is all streaming: {all_stream.session_models}",
+    )
+    for sessions in (2, 3, 10, 100):
+        streaming = shape_mixed.streaming_sessions(sessions, 0.7)
+        _check(
+            0 < streaming < sessions,
+            f"mixed: {sessions} sessions must split into two non-empty groups, "
+            f"got {streaming}",
+        )
+    _check(
+        shape_mixed.streaming_sessions(1, 0.7) == 0,
+        "mixed: a single session must land in the tool group (the turn baseline "
+        "needs a completed turn)",
+    )
+    _check(
+        shape_mixed.streaming_sessions(4, 0.0) == 0
+        and shape_mixed.streaming_sessions(4, 1.0) == 4,
+        "mixed: duty 0 / 1 must keep their literal meaning (all tool / all streaming)",
     )
 
     # 历史预置：只有声明了 --history-tokens 的形态接得住它，且剧本是循环的（会话数决定轮数）。
@@ -1288,6 +1319,33 @@ def check_verdict() -> None:
         shard_low[1].low_confidence is True,
         "a saturated shard must be low confidence",
     )
+    # 多轮形态的轮次判据无从评估（基线档没有完成的轮次）必须点名，不能读成「没退化」。
+    no_baseline_turn = verdict.evaluate_run(
+        _run(_level(1), _level(10, turn_p99=900.0), scenario="mixed")
+    )
+    _check(
+        any(
+            reason.startswith(verdict.CRITERIA["low_confidence.turn"])
+            for reason in no_baseline_turn[1].low_confidence_reasons
+        ),
+        f"an unevaluable turn criterion must be named: {no_baseline_turn[1]}",
+    )
+    _check(
+        no_baseline_turn[1].verdict == "ok",
+        f"an unevaluable criterion must not turn the level into degraded: "
+        f"{no_baseline_turn[1]}",
+    )
+    # 基线档自己有轮次时不点名。
+    judged = verdict.evaluate_run(
+        _run(_level(1, turn_p99=100.0), _level(10, turn_p99=110.0), scenario="mixed")
+    )
+    _check(
+        not any(
+            reason.startswith(verdict.CRITERIA["low_confidence.turn"])
+            for reason in judged[1].low_confidence_reasons
+        ),
+        f"a judgeable turn criterion must not be flagged: {judged[1]}",
+    )
     create_low = verdict.evaluate_run(_run(_level(1), _level(10, create_failed=1)))
     _check(
         create_low[1].low_confidence is True,
@@ -1311,7 +1369,7 @@ def check_verdict() -> None:
     )
     # 判据原文清单只有一处：报告直接渲染它。
     _check(
-        len(verdict.CRITERIA) == 9,
+        len(verdict.CRITERIA) == 10,
         f"criteria must be one declaration: {len(verdict.CRITERIA)}",
     )
     classified = {key for keys in verdict.CRITERIA_FLAGS.values() for key in keys}
@@ -1369,8 +1427,13 @@ def check_polluted() -> None:
         "the polluted level's verdict cell must carry the low-confidence marker",
     )
     _check(
-        "结论不作数" in text,
-        "the conclusion must refuse to draw a conclusion from polluted data",
+        "没有引用它们" in text,
+        "the conclusion must say it did not cite the low-confidence levels",
+    )
+    _check(
+        "可用档位里最大的 N=1" in text,
+        "the conclusion must fall back to the largest *usable* level, not the "
+        "polluted one",
     )
     _check(
         verdict.CRITERIA["low_confidence.drops"] in text,
@@ -1414,8 +1477,8 @@ def _synthetic_run() -> dict[str, Any]:
             "sync_sessions": 0,
             "hydration_attempts": 0,
             "hydration_failed": 0,
-            "evicted_in_window": None,
-            "loaded_after_window": None,
+            "evicted_by_reaper": None,
+            "released_by_probe": None,
         }
     )
     first["session_create"].update({"ok": 1, "failed": 0, "total_ms": 4.0})
@@ -1582,34 +1645,53 @@ def _e2e_config(scenario: str, out: Path, **overrides: Any) -> RunConfig:
     return RunConfig(**base)
 
 
-E2E_CASES: dict[str, dict[str, Any]] = {
-    "pure_stream": {},
+@dataclass(frozen=True)
+class E2ECase:
+    """一次 e2e：用例名 / 形态 / 该档参数（断言按形态取，见 :func:`_assert_shape_metrics`）。"""
+
+    name: str
+    scenario: str
+    overrides: Mapping[str, Any] = field(default_factory=dict)
+
+
+E2E_CASES: tuple[E2ECase, ...] = (
+    E2ECase("pure_stream", "pure_stream"),
     # 有节奏的轮次（``--cycle-s`` 是本工具推荐的用法）：不 pacing 时两个会话就能把一个
     # 核烧到 0.9（每轮固定成本 ~9 ms CPU × 100 轮/s），那一档本来就会被判成 capped。
-    "tool_cycle": {"rate": 10.0, "cycle_s": 0.2},
+    E2ECase("tool_cycle", "tool_cycle", {"rate": 10.0, "cycle_s": 0.2}),
+    # 带子进程的变体：yolo 失效会让 Bash 落到「等人确认」上，轮次从此永不收口。
+    E2ECase(
+        "tool_cycle_bash", "tool_cycle", {"rate": 10.0, "cycle_s": 0.5, "tool": "bash"}
+    ),
     # 逐出要时间：TTL = dwell/2 = 2 s，扫描 1 s → 窗口里必然扫到一次越限。
-    "idle": {"warmup": 0.0, "dwell": 4.0},
-    "hydration": {"dwell": 3.0, "history_tokens": 200},
-    "mixed": {"rate": 10.0, "cycle_s": 0.2, "decode_duty": 0.5},
-}
+    E2ECase("idle", "idle", {"warmup": 0.0, "dwell": 4.0}),
+    E2ECase("hydration", "hydration", {"dwell": 3.0, "history_tokens": 200}),
+    E2ECase("mixed", "mixed", {"rate": 10.0, "cycle_s": 0.2, "decode_duty": 0.5}),
+)
 
 
-def check_e2e_shape(run_ladder: LadderRunner, scenario: str) -> None:
+def check_e2e_case(run_ladder: LadderRunner, case: E2ECase) -> None:
     """迷你一档走真实路径：真网关子进程 + 真分片子进程 + 真产物 + 该形态的断言。"""
     proc.raise_nofile(proc.nofile_target(E2E_SESSIONS))
-    with tempfile.TemporaryDirectory(prefix=f"capacity-selftest-{scenario}-") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f"capacity-selftest-{case.name}-") as tmp:
         out = Path(tmp) / "run"
-        cfg = _e2e_config(scenario, out, **E2E_CASES[scenario])
+        cfg = _e2e_config(case.scenario, out, **case.overrides)
         started = time.monotonic()
         payload = asyncio.run(run_ladder(cfg, selftest_run=True))
         elapsed = time.monotonic() - started
         _check(
             elapsed < E2E_BUDGET_S,
-            f"{scenario} e2e took {elapsed:.1f}s, budget {E2E_BUDGET_S:.0f}s",
+            f"{case.name} e2e took {elapsed:.1f}s, budget {E2E_BUDGET_S:.0f}s",
         )
-        level = _assert_common(payload, out, scenario)
-        _assert_shape_metrics(scenario, level)
-        if scenario == "pure_stream":
+        level = _assert_common(payload, out, case.scenario)
+        _assert_shape_metrics(case.scenario, level)
+        if case.scenario == "tool_cycle":
+            _check(
+                (level["shape"] or {}).get("tool")
+                == case.overrides.get("tool", "read"),
+                f"the tool variant must be recorded per level: {level['shape']}",
+            )
+        if case.name == "pure_stream":
             check_relative_out(run_ladder, Path(tmp))
             check_failure_shape(run_ladder, Path(tmp) / "failed", level)
 
@@ -1660,6 +1742,17 @@ def _assert_common(
         f"{metrics_block['slow_client_recycles']}",
     )
     _check(level["rig"]["shard_cpu_cores"], "shard CPU must be reported (rig signal)")
+    unknown_reasons = [
+        reason
+        for reason in (level["samples"].get("dropped_reasons") or {})
+        if metrics.drop_reason_family(reason) is None
+    ]
+    _check(
+        not unknown_reasons,
+        f"every dropped-frame reason must be in metrics.DROP_REASONS "
+        f"(otherwise the verdict cannot tell bookkeeping from contamination): "
+        f"{unknown_reasons}",
+    )
     span_note = [note for note in level["notes"] if "CPU window" in note]
     _check(not span_note, f"shard CPU window must match the sample window: {span_note}")
     run_json = out / "run.json"
@@ -1747,25 +1840,23 @@ def _assert_shape_metrics(scenario: str, level: Mapping[str, Any]) -> None:
             f"the tool call must stream args: {samples['delta_frames']}",
         )
         _check(block["errors"] == 0, f"no turn may fail: {block['errors']}")
-        _check(
-            level["shape"]["tool"] == "read",
-            f"the tool variant must be recorded per level: {level['shape']}",
-        )
     elif scenario == "idle":
         _check(
             samples["delta_frames"]["content"] == 0 and samples["chars"] == 0,
             f"idle drives nothing: {samples['delta_frames']}",
         )
         _check(
-            block["events_per_second_actual"] is None,
-            f"no events means null, not 0: {block['events_per_second_actual']}",
+            block["events_per_second_actual"] is None
+            and block["chars_per_second"] is None,
+            f"no events means null, not 0: {block['events_per_second_actual']} / "
+            f"{block['chars_per_second']}",
         )
         _check(
             any("no delta event arrived" in note for note in level["notes"]),
             f"the null rate must be explained: {level['notes']}",
         )
-        evicted = samples["evicted_in_window"]
-        loaded = samples["loaded_after_window"]
+        evicted = samples["evicted_by_reaper"]
+        loaded = samples["released_by_probe"]
         _check(
             isinstance(evicted, int) and isinstance(loaded, int),
             f"the eviction probe must report counts: {evicted} / {loaded}",
@@ -1942,10 +2033,10 @@ def main(*, run_ladder: LadderRunner) -> int:
             continue
         passed += 1
         print(f"[selftest] ok   {name}")
-    for scenario in E2E_CASES:
-        name = f"e2e.{scenario}"
+    for case in E2E_CASES:
+        name = f"e2e.{case.name}"
         try:
-            check_e2e_shape(run_ladder, scenario)
+            check_e2e_case(run_ladder, case)
         except Exception as exc:  # noqa: BLE001 - 同上
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
             print(f"[selftest] FAIL {name}: {exc}", file=sys.stderr)

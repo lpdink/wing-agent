@@ -45,6 +45,37 @@ CHANNEL_EVENTS: dict[str, str] = {
 #: 客户端事件类型 → 通道标记（分片侧的归档方向）。
 EVENT_CHANNELS: dict[str, str] = {event: kind for kind, event in CHANNEL_EVENTS.items()}
 
+#: 配对丢弃的原因词汇表（**唯一声明处**）：``reason → 是否窗口簿记（不是数据被污染）``。
+#:
+#: 带 ``:<kind>`` 后缀的原因由前缀匹配（见 :func:`drop_reason_family`）。这张表同时被
+#: 生产者（:func:`pair_delivery`）与消费者（``verdict`` 判低置信丢弃率）使用——两处各写
+#: 一份字面量的话，改一个名字只会让真实运行里每一档突然「低置信」，编译器与本目录自测
+#: 都不会响。
+DROP_REASONS: dict[str, str] = {
+    "outside_window": "bookkeeping",
+    "in_flight_tail": "bookkeeping",
+    "missing_events": "contamination",
+    "unexpected_events": "contamination",
+    "negative_latency": "contamination",
+    "unknown_prompt": "contamination",
+    "ambiguous_prompt": "contamination",
+}
+
+#: 判据侧关心的那一类：簿记原因（跨窗口起点的预热段 / 窗口末仍在传输）。
+BOOKKEEPING_DROP_REASONS: tuple[str, ...] = tuple(
+    reason for reason, kind in DROP_REASONS.items() if kind == "bookkeeping"
+)
+
+
+def drop_reason_family(reason: str) -> str | None:
+    """原因名（可带 ``:<kind>`` 后缀）→ 词汇表里的名字；不认识的返回 ``None``。
+
+    不认识的原因名一律按污染处理（保守），并在报告里原样出现——它就是诊断信息。
+    """
+    base = str(reason).split(":", 1)[0]
+    return base if base in DROP_REASONS else None
+
+
 #: 报告呈现的三个分位（label, 百分位）。
 SPREAD_PERCENTILES: tuple[tuple[str, float], ...] = (
     ("p50", 50.0),
@@ -263,6 +294,9 @@ def pair_delivery(
 
     给了 ``window`` 时，落点不在窗口内的配对（跨窗口起点的那些）不计入延迟分布，
     单独记 ``outside_window``。
+
+    原因名一律取自 :data:`DROP_REASONS`（唯一声明处）——判据侧按同一张表判断哪类
+    丢弃是污染、哪类只是窗口簿记。
     """
     result = Pairing()
     index = prompt_index(requests)

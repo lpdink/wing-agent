@@ -17,24 +17,18 @@
 
 from __future__ import annotations
 
-from shapes import ShapeArgs, ShapePlan, prompt_key
+from shapes import ShapeArgs, ShapePlan
 from wing_probe.provider.script import Script, Turn
 
 NAME = "hydration"
 MODEL = f"capacity/{NAME}"
 KNOBS: frozenset[str] = frozenset({"history_tokens"})
-WINDOW_MODE = "hydrate"
 
 #: 尖峰形态的采样间隔（秒）：1 s 的峰值分辨率会把水合尖峰整个错过。
 SAMPLE_INTERVAL_S = 0.25
 
 #: 每会话留给驱动轮的剧本份额（水合后只驱动一轮，余量给重试）。
 SCRIPT_TURNS_PER_SESSION = 2
-
-
-def prompt_text(session_id: str, seq: int) -> str:
-    """第 ``seq`` 轮的用户正文（全局唯一：配对靠它在 ``RequestLog`` 里定位请求）。"""
-    return prompt_key(session_id, seq)
 
 
 def plan(args: ShapeArgs) -> ShapePlan:
@@ -49,6 +43,6 @@ def plan(args: ShapeArgs) -> ShapePlan:
         models=((MODEL, script),),
         session_models=tuple([MODEL] * args.sessions),
         tools=("Read",),
-        window_mode=WINDOW_MODE,
+        window_mode="hydrate",
         sample_interval_s=SAMPLE_INTERVAL_S,
     )

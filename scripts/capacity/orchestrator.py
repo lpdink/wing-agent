@@ -39,6 +39,7 @@ import metrics
 import proc
 import shapes
 from metrics import TurnSample
+from verdict import VERDICT_KEYS
 
 #: 分片就绪 / 退出的等待上限（秒）。
 SHARD_READY_TIMEOUT = 180.0
@@ -99,8 +100,8 @@ SAMPLE_KEYS: tuple[str, ...] = (
     "sync_sessions",
     "hydration_attempts",
     "hydration_failed",
-    "evicted_in_window",
-    "loaded_after_window",
+    "evicted_by_reaper",
+    "released_by_probe",
 )
 
 #: 历史预置的记账键（没预置时全 ``None``，不是 0）。
@@ -110,16 +111,6 @@ HISTORY_KEYS: tuple[str, ...] = (
     "turns_per_session",
     "total_ms",
     "failed",
-)
-
-#: 判据结果的键（由 ``verdict`` 模块填充；见 ``run._fill_verdicts``）。
-VERDICT_KEYS: tuple[str, ...] = (
-    "verdict",
-    "flags",
-    "reasons",
-    "low_confidence",
-    "low_confidence_reasons",
-    "baseline_sessions",
 )
 
 DELIVERY_UNAVAILABLE = (
@@ -182,6 +173,7 @@ def level_args(
         sessions=sessions,
         rate=cfg.rate,
         span_s=cfg.span_s,
+        dwell_s=cfg.dwell,
         chunk=cfg.chunk,
         cycle_s=cfg.cycle_s,
         decode_duty=cfg.decode_duty,
@@ -458,6 +450,39 @@ def _write_workspace_files(workspace: Path, plan: shapes.ShapePlan) -> None:
         (workspace / name).write_text(content, encoding="utf-8")
 
 
+async def _post_many(
+    env: ProbeEnv,
+    path: str,
+    payloads: Sequence[dict[str, Any]],
+    *,
+    timeout: float = 60.0,
+) -> list[Any]:
+    """对 ``payloads`` 逐个 POST ``path``（限并发），返回与输入等长的结果列表。
+
+    每项是 ``httpx.Response`` 或一条失败描述字符串（``Err``）——调用方只负责解释
+    它自己那个端点的响应。三段调用（建会话 / 切模型 / 逐出探针）原本各写一份同样的
+    连接池 + 信号量 + 错误收集脚手架，那是本目录最容易漂的一类复制。
+    """
+    limits = httpx.Limits(
+        max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
+    )
+    gate = asyncio.Semaphore(CREATE_CONCURRENCY)
+    results: list[Any] = [None] * len(payloads)
+    async with httpx.AsyncClient(
+        base_url=env.gateway_url, timeout=timeout, trust_env=False, limits=limits
+    ) as client:
+
+        async def one(index: int) -> None:
+            async with gate:
+                try:
+                    results[index] = await client.post(path, json=payloads[index])
+                except httpx.HTTPError as exc:
+                    results[index] = f"#{index}: {exc!r}"
+
+        await asyncio.gather(*(one(index) for index in range(len(payloads))))
+    return results
+
+
 async def _create_sessions(
     env: ProbeEnv,
     sessions: int,
@@ -472,47 +497,36 @@ async def _create_sessions(
     """
     workspace = level_dir / WORKSPACE_DIRNAME
     workspace.mkdir(parents=True, exist_ok=True)
+    payloads: list[dict[str, Any]] = []
+    for index in range(sessions):
+        agent = dict(plan.agent)
+        agent["model_id"] = (
+            plan.seed.model if plan.seed is not None else plan.session_models[index]
+        )
+        payloads.append(
+            {
+                "workspace": str(workspace),
+                "backend": cfg.backend,
+                "agent": agent,
+            }
+        )
+    started = time.monotonic()
     created: list[str] = []
     failures: list[str] = []
-    started = time.monotonic()
-    limits = httpx.Limits(
-        max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
-    )
-    async with httpx.AsyncClient(
-        base_url=env.gateway_url, timeout=60.0, trust_env=False, limits=limits
-    ) as client:
-        gate = asyncio.Semaphore(CREATE_CONCURRENCY)
-
-        async def one(index: int) -> None:
-            async with gate:
-                agent = dict(plan.agent)
-                agent["model_id"] = (
-                    plan.seed.model
-                    if plan.seed is not None
-                    else plan.session_models[index]
-                )
-                body: dict[str, Any] = {
-                    "workspace": str(workspace),
-                    "backend": cfg.backend,
-                    "agent": agent,
-                }
-                try:
-                    response = await client.post("/api/session/create", json=body)
-                except httpx.HTTPError as exc:
-                    failures.append(f"#{index}: {exc!r}")
-                    return
-                if response.status_code != 200:
-                    failures.append(
-                        f"#{index}: {response.status_code} {response.text[:120]}"
-                    )
-                    return
-                session_id = response.json().get("session_id")
-                if not isinstance(session_id, str) or not session_id:
-                    failures.append(f"#{index}: response has no session_id")
-                    return
-                created.append(session_id)
-
-        await asyncio.gather(*(one(index) for index in range(sessions)))
+    for index, result in enumerate(
+        await _post_many(env, "/api/session/create", payloads)
+    ):
+        if isinstance(result, str):
+            failures.append(result)
+            continue
+        if result.status_code != 200:
+            failures.append(f"#{index}: {result.status_code} {result.text[:120]}")
+            continue
+        session_id = result.json().get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            failures.append(f"#{index}: response has no session_id")
+            continue
+        created.append(session_id)
     total_ms = (time.monotonic() - started) * 1000.0
     return {
         "ok": len(created),
@@ -591,36 +605,22 @@ async def _switch_models(
     env: ProbeEnv, session_ids: Sequence[str], plan: shapes.ShapePlan
 ) -> None:
     """预置完把每个会话切回形态自己的 model（预置轮与测量轮各有独立剧本游标）。"""
-    limits = httpx.Limits(
-        max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
-    )
+    payloads = [
+        {"session_id": session_id, "model_id": plan.session_models[index]}
+        for index, session_id in enumerate(session_ids)
+    ]
     problems: list[str] = []
-    async with httpx.AsyncClient(
-        base_url=env.gateway_url, timeout=60.0, trust_env=False, limits=limits
-    ) as client:
-        gate = asyncio.Semaphore(CREATE_CONCURRENCY)
-
-        async def one(session_id: str, model_id: str) -> None:
-            async with gate:
-                try:
-                    response = await client.post(
-                        "/api/session/update",
-                        json={"session_id": session_id, "model_id": model_id},
-                    )
-                except httpx.HTTPError as exc:
-                    problems.append(f"{session_id}: {exc!r}")
-                    return
-                if response.status_code != 200:
-                    problems.append(
-                        f"{session_id}: {response.status_code} {response.text[:120]}"
-                    )
-
-        await asyncio.gather(
-            *(
-                one(session_id, plan.session_models[index])
-                for index, session_id in enumerate(session_ids)
+    for index, result in enumerate(
+        await _post_many(env, "/api/session/update", payloads)
+    ):
+        if isinstance(result, str):
+            problems.append(result)
+            continue
+        if result.status_code != 200:
+            problems.append(
+                f"{payloads[index]['session_id']}: {result.status_code} "
+                f"{result.text[:120]}"
             )
-        )
     if problems:
         # 切不回去 = 测量轮会落到预置剧本上（一轮巨大输出），读数彻底失真。
         raise OrchestratorError(
@@ -640,51 +640,43 @@ async def _probe_eviction(
     ``POST /api/session/release`` 是公开路径且幂等：``released=false``
     （detail=``not loaded``）意味着会话早已不在内存——即 reaper 在窗口里把它收走了。
     非持久后端会被 409 拒（产品禁止销毁内存会话），此时整组写 ``null`` 并点名，不写 0。
+
+    两个计数是**窗口末的时刻**（探针紧接着采样窗口跑），不含逐出发生的时刻；
+    RSS 落差**不是**逐出的证据——进程被清空后分配器一般不还页，``peak == end``
+    既可能是没逐出、也可能是逐出了。
     """
-    evicted = 0
-    loaded = 0
+    payloads = [{"session_id": session_id} for session_id in session_ids]
+    results = await _post_many(env, "/api/session/release", payloads)
+    reaped = 0
+    still_loaded = 0
     problems: list[str] = []
-    limits = httpx.Limits(
-        max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
-    )
-    async with httpx.AsyncClient(
-        base_url=env.gateway_url, timeout=60.0, trust_env=False, limits=limits
-    ) as client:
-        gate = asyncio.Semaphore(CREATE_CONCURRENCY)
-
-        async def one(session_id: str) -> None:
-            nonlocal evicted, loaded
-            async with gate:
-                try:
-                    response = await client.post(
-                        "/api/session/release", json={"session_id": session_id}
-                    )
-                except httpx.HTTPError as exc:
-                    problems.append(f"{session_id}: {exc!r}")
-                    return
-                if response.status_code != 200:
-                    problems.append(
-                        f"{session_id}: {response.status_code} {response.text[:120]}"
-                    )
-                    return
-                if response.json().get("released"):
-                    loaded += 1
-                else:
-                    evicted += 1
-
-        await asyncio.gather(*(one(session_id) for session_id in session_ids))
+    for index, result in enumerate(results):
+        if isinstance(result, str):
+            problems.append(result)
+            continue
+        if result.status_code != 200:
+            problems.append(
+                f"{payloads[index]['session_id']}: {result.status_code} "
+                f"{result.text[:120]}"
+            )
+            continue
+        if result.json().get("released"):
+            still_loaded += 1
+        else:
+            reaped += 1
     if problems:
         notes.append(
             f"eviction is not observable here ({len(problems)} of "
             f"{len(session_ids)} release calls failed; first: {problems[0]}) — "
-            "evicted_in_window / loaded_after_window are null, not 0"
+            "evicted_by_reaper / released_by_probe are null, not 0"
         )
         return
-    record["samples"]["evicted_in_window"] = evicted
-    record["samples"]["loaded_after_window"] = loaded
+    record["samples"]["evicted_by_reaper"] = reaped
+    record["samples"]["released_by_probe"] = still_loaded
     notes.append(
-        f"eviction probe: {evicted} session(s) were already out of memory at the "
-        f"window end (reaped), {loaded} were still loaded and got released by the probe"
+        f"eviction probe: {reaped} session(s) were already out of memory when the "
+        f"window ended (reaped), {still_loaded} were still loaded and got released by "
+        "the probe"
     )
 
 
@@ -1024,13 +1016,16 @@ def _assemble(
                 block["tokens_per_second_actual"] = round(content_frames / wall, 1)
             if all_events:
                 block["events_per_second_actual"] = round(all_events / wall, 1)
+                block["chars_per_second"] = round(window_chars / wall, 1)
+            # 完成的轮次数是可以真实为 0 的计数（单轮形态窗口里没有轮次边界）。
             block["turns_per_second"] = round(len(completed) / wall, 3)
-            block["chars_per_second"] = round(window_chars / wall, 1)
         if not all_events:
             notes.append(
-                "tokens_per_second_actual is null: no delta event arrived in the window"
+                "tokens_per_second_actual / chars_per_second are null: no delta event "
+                "arrived in the window"
                 if wall > 0
-                else "tokens_per_second_actual is null: the sample window did not complete"
+                else "tokens_per_second_actual / chars_per_second are null: the sample "
+                "window did not complete"
             )
     turn_spread = metrics.spread(
         [(turn.result_at - turn.sent_at) * 1000.0 for turn in completed]
@@ -1038,11 +1033,7 @@ def _assemble(
     block["turn.p50_ms"] = _round(turn_spread.get("p50"))
     block["turn.p99_ms"] = _round(turn_spread.get("p99"))
     if payloads and not completed:
-        notes.append(
-            "turn.* is null: no turn completed inside the window — this shape streams "
-            "one turn per session across warmup + dwell by design, so the window holds "
-            "no per-turn fixed cost (that cost is measured by other shapes)"
-        )
+        notes.append(_no_turn_note(record["shape"].get("window_mode")))
     _fill_hydration(block, samples, turns, notes)
 
     delivery_available = provider is not None and metrics.has_frame_emits(provider)
@@ -1104,6 +1095,21 @@ def _assemble(
     if record["shape"]["shards"] is None:
         record["shape"]["shards"] = len(payloads) or None
     return record
+
+
+def _no_turn_note(window_mode: str | None) -> str:
+    """「窗口里没有完成的轮次」的原因按形态说（结构性 null ≠ 没测到）。"""
+    if window_mode == "hold":
+        return (
+            "turn.* is null: this shape drives nothing, so no turn can complete inside "
+            "the window"
+        )
+    return (
+        "turn.* is null: no turn completed inside the window — the streaming shape "
+        "streams one turn per session across warmup + dwell by design (per-turn fixed "
+        "cost is measured by the tool-cycle shape); with the mixed shape this means the "
+        "cycling group was empty at this level"
+    )
 
 
 def _fill_hydration(

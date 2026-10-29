@@ -27,6 +27,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import metrics
+
 # ── 阈值（唯一声明处：报告文案也不许另写一份）──────────────────
 
 DEGRADED_DELIVERY_FACTOR = 3.0
@@ -43,10 +45,11 @@ LOW_CONF_DROPPED_RATIO = 0.01
 #: 只有「每轮都会收口」的形态才评 ``turn.p99``（其余形态的窗口里没有轮次边界）。
 TURN_SCENARIOS: frozenset[str] = frozenset({"tool_cycle", "mixed"})
 
-#: **结构性**丢弃（不是数据被污染）：跨窗口起点的预热段、窗口末仍在传输的帧。
-#: ``samples.dropped`` 包含它们，而 ``pure_stream`` 的整轮本来就从 warmup 起跑——
-#: 拿总数当污染信号会让每个档都「低置信」，那是把口径当成了噪声。
-STRUCTURAL_DROP_REASONS: tuple[str, ...] = ("outside_window", "in_flight_tail:")
+#: **结构性**丢弃（不是数据被污染）的原因名，直接取自生产者侧的词汇表（
+#: ``metrics.DROP_REASONS`` 标成 ``bookkeeping`` 的那些）：跨窗口起点的预热段、
+#: 窗口末仍在传输的帧。``samples.dropped`` 包含它们，而 ``pure_stream`` 的整轮本来
+#: 就从 warmup 起跑——拿总数当污染信号会让每个档都「低置信」，那是把口径当成了噪声。
+STRUCTURAL_DROP_REASONS: tuple[str, ...] = metrics.BOOKKEEPING_DROP_REASONS
 
 #: 判据原文（报告与 ``reasons[]`` 都从这里取，不许就地拼阈值）。
 CRITERIA: dict[str, str] = {
@@ -71,6 +74,9 @@ CRITERIA: dict[str, str] = {
         "contamination)"
     ),
     "low_confidence.create": "session_create.failed > 0",
+    "low_confidence.turn": (
+        "turn criterion not evaluated: the baseline level completed no turn"
+    ),
 }
 
 #: 判档的优先序（同一档命中多条时，报告与该字段都按这个顺序排）。
@@ -197,6 +203,10 @@ def evaluate_level(
             flags.append("degraded")
             reasons.extend(degraded)
 
+    untested_turn = _turn_criterion_unavailable(record, baseline, scenario)
+    if untested_turn is not None:
+        low.append(untested_turn)
+
     provider = _rig(record, "provider_cpu_cores")
     if provider is not None and provider >= LOW_CONF_PROVIDER_CORES:
         low.append(f"{CRITERIA['low_confidence.provider']} — measured {provider:g}")
@@ -263,6 +273,32 @@ def _degraded_reasons(
     return reasons
 
 
+def _turn_criterion_unavailable(
+    record: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    scenario: str | None,
+) -> str | None:
+    """多轮形态的轮次判据**无从评估**时点名（缺数据 ≠ 没退化）。
+
+    典型来源：``mixed`` 在最小档只有一个会话——那个会话被分进流式组，窗口里没有完成的
+    轮次，于是基线的 ``turn.p99`` 是 ``null``，整条阶梯的轮次判据都不成立。这必须显式
+    说出来，否则报告会写「到最大档都没有触发 degraded」而实际什么都没判。
+    """
+    if scenario not in TURN_SCENARIOS or baseline is None:
+        return None
+    if _metric(record, "turn.p99_ms") is None:
+        return None
+    if int(record.get("sessions") or 0) == int(baseline.get("sessions") or 0):
+        return None
+    base_turn = _metric(baseline, "turn.p99_ms")
+    if base_turn is not None and base_turn > 0:
+        return None
+    return (
+        f"{CRITERIA['low_confidence.turn']} (baseline N={baseline.get('sessions')}: "
+        f"turn.p99={base_turn})"
+    )
+
+
 def _metric(record: Mapping[str, Any], key: str) -> float | None:
     value = (record.get("metrics") or {}).get(key)
     return float(value) if isinstance(value, (int, float)) else None
@@ -278,9 +314,8 @@ def _unexpected_drop_ratio(record: Mapping[str, Any]) -> float | None:
     ``samples.dropped`` 含 ``outside_window``（跨窗口起点的预热段）与
     ``in_flight_tail:*``（窗口末仍在传输）——两者都是采样窗口的簿记，不是数据被污染
     （``pure_stream`` 的整轮本来就跨进窗口起点，按总数算会让每一档都「低置信」）。
-    只数那之外的原因：``missing_events`` / ``unexpected_events`` / ``negative_latency``
-    / ``unknown_prompt`` / ``ambiguous_prompt``。``dropped_reasons`` 缺失（手写产物）时
-    无法归类，按「全部不预期」处理——宁可保守地标低置信。
+    只数那之外的原因（词汇表见 ``metrics.DROP_REASONS``）。``dropped_reasons`` 缺失
+    （手写产物）时无法归类，按「全部不预期」处理——宁可保守地标低置信。
     """
     samples = record.get("samples") or {}
     count = samples.get("count")
@@ -296,7 +331,7 @@ def _unexpected_drop_ratio(record: Mapping[str, Any]) -> float | None:
         unexpected = sum(
             int(value)
             for reason, value in reasons.items()
-            if not str(reason).startswith(STRUCTURAL_DROP_REASONS)
+            if metrics.drop_reason_family(reason) not in STRUCTURAL_DROP_REASONS
         )
     if count == 0:
         return 1.0 if unexpected else 0.0

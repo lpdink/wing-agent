@@ -134,18 +134,7 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
         "started_at": started_at,
         "duration_s": round(time.monotonic() - started, 1),
         "args": {
-            "levels": list(cfg.levels),
-            "rate": cfg.rate,
-            "chunk": cfg.chunk,
-            "dwell": cfg.dwell,
-            "warmup": cfg.warmup,
-            "shards": cfg.shards,
-            "subscribers": cfg.subscribers,
-            "backend": cfg.backend,
-            "tool": cfg.tool,
-            "cycle_s": cfg.cycle_s,
-            "decode_duty": cfg.decode_duty,
-            "history_tokens": cfg.history_tokens,
+            **cli.measurement_args(cfg),
             "frame_delay_ms": round(frame_delay_s * 1000, 3),
             "sleep_overshoot_ms": round(overshoot_s * 1000, 3),
         },
@@ -267,6 +256,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (UsageError, shapes.ShapeError) as exc:
         print(f"[capacity] error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    if args.criteria:
+        for key, text in verdict.CRITERIA.items():
+            print(f"{key}: {text}")
+        return EXIT_OK
     if args.selftest:
         import selftest  # 只在这条路径上依赖自测代码
 

@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from shapes import ShapeArgs, ShapePlan, covering_turn, prompt_key
+from shapes import ShapeArgs, ShapePlan, covering_turn
 from wing_probe.provider.script import Script
 
 NAME = "pure_stream"
@@ -27,11 +27,6 @@ TURN_SLACK_SECONDS = 1.0
 #: 每会话的剧本份额（轮数）。单轮形态下每会话只用掉 1 轮，留一倍余量给「轮次提前
 #: 结束再发一轮」与网关重试——份额不够会让 Provider 5xx（剧本耗尽），那是假错误。
 SCRIPT_TURNS_PER_SESSION = 2
-
-
-def prompt_text(session_id: str, seq: int) -> str:
-    """第 ``seq`` 轮的用户正文（全局唯一：配对靠它在 ``RequestLog`` 里定位请求）。"""
-    return prompt_key(session_id, seq)
 
 
 def plan(args: ShapeArgs) -> ShapePlan:

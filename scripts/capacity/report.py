@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import cli
 import verdict
 
 MISSING = "—"
@@ -89,10 +90,14 @@ def _triple(record: Mapping[str, Any], prefix: str) -> str:
 
 
 def _duo(record: Mapping[str, Any], first: str, second: str) -> str:
-    """``a (b)``：两个同量纲指标并排（相同则只写一个）。"""
+    """``a (b)``：两个同量纲指标并排。
+
+    相同也照样写两个：速率的三个口径（事件 / 字符 / 轮次）必须并排可见，
+    「恰好相等」不是省略的理由（``--chunk=1`` 时事件数与字符数恒等）。
+    """
     metrics = record.get("metrics") or {}
     left, right = _num(metrics.get(first)), _num(metrics.get(second))
-    if left == right or right == MISSING:
+    if right == MISSING:
         return left
     return f"{left} ({right})"
 
@@ -142,11 +147,9 @@ def _level_rows(
     return rows
 
 
-def _hydration_rows(
-    levels: Sequence[Mapping[str, Any]], verdicts: Sequence[verdict.Verdict]
-) -> list[list[str]]:
+def _hydration_rows(levels: Sequence[Mapping[str, Any]]) -> list[list[str]]:
     rows: list[list[str]] = []
-    for record, result in zip(levels, verdicts):
+    for record in levels:
         samples = record.get("samples") or {}
         history = record.get("history") or {}
         rows.append(
@@ -170,8 +173,7 @@ def _has_hydration(levels: Sequence[Mapping[str, Any]]) -> bool:
             return True
         if (record.get("gateway") or {}).get("restart_ms") is not None:
             return True
-        metrics = record.get("metrics") or {}
-        if any(metrics.get(key) is not None for key in ("hydration.p50_ms",)):
+        if (record.get("metrics") or {}).get("hydration.p50_ms") is not None:
             return True
     return False
 
@@ -284,9 +286,13 @@ def _first_flag(
     verdicts: Sequence[verdict.Verdict],
     flag: str,
 ) -> tuple[Mapping[str, Any], verdict.Verdict] | None:
-    """第一个命中某 flag 的档位（阶梯按 N 升序给出）。"""
+    """第一个命中某 flag 的**可用**档位（阶梯按 N 升序给出）。
+
+    低置信档位不算：它的用途是给出「第一处退化」，而报告同时把那一档标成「结论不作数」
+    ——同一段结论里既引用它又否认它，读的人只能两句话都不信。
+    """
     for record, result in zip(levels, verdicts):
-        if flag in result.flags:
+        if flag in result.flags and not result.low_confidence:
             return record, result
     return None
 
@@ -309,18 +315,20 @@ def _conclusion(
         usable = [
             (record, result)
             for record, result in zip(levels, verdicts)
-            if result.verdict == "ok"
+            if result.verdict == "ok" and not result.low_confidence
         ]
         if usable:
             top, result = max(usable, key=lambda pair: int(pair[0]["sessions"]))
             lines.append(
-                f"- **速度轴**：到最大档 N={top.get('sessions')} 都没有触发 "
+                f"- **速度轴**：可用档位里最大的 N={top.get('sessions')} 也没有触发 "
                 f"degraded / capped（delivery p99 "
                 f"{_num((top.get('metrics') or {}).get('delivery.p99_ms'))} ms，"
                 f"网关 {_num((top.get('metrics') or {}).get('gateway.cpu_cores'), 2)} 核）。"
             )
         else:
-            lines.append("- **速度轴**：无法判定（没有可用的基线档，退化判据未评估）。")
+            lines.append(
+                "- **速度轴**：没有可用档位（全部低置信或未跑完），判据结论不作数。"
+            )
     else:
         parts: list[str] = []
         if degraded is not None:
@@ -345,7 +353,21 @@ def _conclusion(
         lines.append(
             "- **低置信**："
             + "、".join(f"N={sessions}" for sessions, _ in low)
-            + " 的读数可能被 rig 自身饱和污染，结论不作数。"
+            + " 的读数可能被 rig 自身饱和（或数据被采集过程污染），"
+            "上面这句结论**没有引用它们**。"
+        )
+    untested_turn = [
+        record.get("sessions")
+        for record, result in zip(levels, verdicts)
+        if any(
+            reason.startswith(verdict.CRITERIA["low_confidence.turn"])
+            for reason in result.low_confidence_reasons
+        )
+    ]
+    if untested_turn:
+        lines.append(
+            f"- **轮次判据未评估**：{untested_turn} 档只有投递延迟判据生效——"
+            "基线档没有完成的轮次，`turn.p99` 无从比较。"
         )
     return [*lines, ""]
 
@@ -402,33 +424,8 @@ def _criteria_section(
 
 
 def _reproduce(meta: Mapping[str, Any]) -> list[str]:
-    """复现命令：把 ``meta.args`` 原样拼回去（含默认值，保证复制即可复现）。"""
-    args = meta.get("args") or {}
-    parts = ["uv run python scripts/capacity/run.py"]
-    scenario = meta.get("scenario")
-    if scenario is not None:
-        parts.append(f"--scenario {scenario}")
-    levels = args.get("levels") or []
-    if levels:
-        parts.append("--levels " + ",".join(str(level) for level in levels))
-    for flag, key in (
-        ("--rate", "rate"),
-        ("--chunk", "chunk"),
-        ("--dwell", "dwell"),
-        ("--warmup", "warmup"),
-        ("--shards", "shards"),
-        ("--subscribers", "subscribers"),
-        ("--backend", "backend"),
-        ("--tool", "tool"),
-        ("--cycle-s", "cycle_s"),
-        ("--decode-duty", "decode_duty"),
-        ("--history-tokens", "history_tokens"),
-    ):
-        value = args.get(key)
-        if value is None:
-            continue
-        parts.append(f"{flag} {value}")
-    return ["## 复现", "", "```bash", " ".join(parts), "```", ""]
+    """复现命令（旗标名与顺序归 ``cli.ARG_SPECS``，这里只负责排版）。"""
+    return ["## 复现", "", "```bash", cli.reproduce_command(meta), "```", ""]
 
 
 def render(run: Mapping[str, Any]) -> str:
@@ -477,7 +474,7 @@ def render(run: Mapping[str, Any]) -> str:
                 "* `subscribe → sync` = 订阅请求发出 → `sync_session` 到达（读历史 + 拼快照 + 过 wire）；",
                 "  `first frame` = 驱动 prompt 发出 → 首个正文增量。两段是**不同的**时间线，不合成一个「启动耗时」。",
                 "",
-                *_table(HYDRATION_COLUMNS, _hydration_rows(levels, verdicts)),
+                *_table(HYDRATION_COLUMNS, _hydration_rows(levels)),
                 "",
             ]
         )

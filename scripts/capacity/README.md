@@ -49,13 +49,13 @@ uv run python scripts/capacity/run.py --scenario mixed --levels 1000 \
 make capacity CAPACITY_ARGS="--levels 1,10,50 --dwell 20 --json"
 ```
 
-CLI（01 的冻结名字不可改；本版只**新增**）：
+CLI（旗标名是下游脚本的契约，只允许追加）：
 
 | 参数 | 默认 | 含义 |
 |---|---|---|
 | `--scenario` | `pure_stream` | 负载形态（见「负载形态」） |
 | `--levels` | `1,10,50,100` | 逗号分隔的会话数阶梯（严格升序） |
-| `--rate` | `50` | **每会话**注入速率，单位是**事件/s**（一个事件 = 上游 SSE 一个 delta 帧）。它是**注入参数**：Provider 睡够再写一帧，本机 `asyncio.sleep` 稳定多睡约 2 ms，所以运行前会空载实测这个超时并从帧间隔里扣掉；实际达到的速率以 `events_per_second_actual` / `chars_per_second` 为准 |
+| `--rate` | `50` | **每会话**注入速率，单位是**事件/s**（一个事件 = 上游 SSE 一个 delta 帧）。它是**注入参数**：Provider 睡够再写一帧，本机 `asyncio.sleep` 稳定多睡约 2 ms，所以运行前会空载实测这个超时并从帧间隔里扣掉；实际达到的速率以 `events_per_second_actual` / `chars_per_second` 为准。只有流式形态（`pure_stream` / `mixed` 的流式组）消费它：`tool_cycle` / `idle` / `hydration` 不按帧率驱动，给了也不生效 |
 | `--chunk` | `1` | **每个事件携带的字符数**（`1` = 最坏情况；见「口径锚点」） |
 | `--dwell` | `20` | 每档采样窗口（秒） |
 | `--warmup` | `5` | 每档预热（秒，丢弃） |
@@ -67,6 +67,7 @@ CLI（01 的冻结名字不可改；本版只**新增**）：
 | `--cycle-s` | `3` | 工具循环的**周期下限**（秒）：`0` = 不 pacing，压到机器能吃下的最大轮次频率。只有 `tool_cycle` / `mixed` 消费它 |
 | `--decode-duty` | `0.7` | 混合形态里处于纯流式输出中的会话占比。只有 `mixed` 消费它 |
 | `--out` | `target/capacity/<UTC 时间戳>` | 产物目录 |
+| `--criteria` | — | 打印判据原文（`verdict.CRITERIA`）后退出——阈值只在代码里，这个旗标是它的读取口 |
 | `--selftest` | — | 离线自测 |
 | `--json` | — | stdout 只输出一行 JSON 摘要（`ok` / `out` / `run_json` / `report` / `levels[]` / `failures`）；`levels[]` 每项是 `sessions` + `gateway_cpu_cores` / `delivery_p99_ms` / `tokens_per_second_actual` / `events_per_second_actual` / `chars_per_second` / `turns_per_second` / `errors` / `verdict` / `low_confidence` / `error` 的投影 |
 
@@ -181,7 +182,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
                 "turns": 0, "turns_in_flight": 10,
                 "delivery_available": true,
                 "sync_sessions": 0, "hydration_attempts": 0, "hydration_failed": 0,
-                "evicted_in_window": null, "loaded_after_window": null},
+                "evicted_by_reaper": null, "released_by_probe": null},
     "history": {"tokens_per_session": null, "chars_per_session": null,
                 "turns_per_session": null, "total_ms": null, "failed": null},
     "session_create": {"ok": 10, "failed": 0, "total_ms": 13.9},
@@ -217,7 +218,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   一遍（见「判据」）；
 - `levels[i].samples.chars` 是窗口内收到的正文字符数（`chars_per_second` 的分子，
   实测值）；`sync_sessions` / `hydration_attempts` / `hydration_failed` 是水合的三个计数；
-  `evicted_in_window` / `loaded_after_window` 是逐出探针的结论（只在 `idle` 形态非 `null`）；
+  `evicted_by_reaper` / `released_by_probe` 是**窗口末时刻**的逐出探针结论（只在 `idle`
+  形态非 `null`：前者 = 探针到达时已经不在内存，后者 = 还在内存、被探针放掉）；
 - `levels[i].error_detail`：该档失败的完整诊断（网关日志尾部等）。一句话版本在 `error`。
 
 ## 口径
@@ -232,9 +234,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `turn.*_ms` | 发 prompt → 收到 `turn_result`（只取窗口内完成的轮次）。`error` 事件不是轮次边界——它是失败轮的伴随事件 |
 | `hydration.*_ms` | 订阅请求发出 → `sync_session` 到达（读 history + 拼快照 + 过 wire）。只有水合形态有值 |
 | `first_frame.*_ms` | 驱动 prompt 发出 → 首个正文增量（水合之后第一次真实调用）。只有水合形态有值 |
-| `tokens_per_second_actual` | 窗口内收到的 `content` delta **事件**数 / 窗口秒。**只有 `--chunk=1` 时它才等于 token/s** |
-| `events_per_second_actual` | 窗口内收到的**全部通道** delta 事件数 / 窗口秒 |
-| `chars_per_second` | 窗口内收到的正文字符数 / 窗口秒（实测；`--chunk` 的直接体现） |
+| `tokens_per_second_actual` | 窗口内收到的 `content` delta **事件**数 / 窗口秒（冻结的历史名字，**不是 token**）。字符口径看 `chars_per_second`；token 只能按产品估算器从字符反算 |
+| `events_per_second_actual` | 窗口内收到的**全部通道** delta 事件数 / 窗口秒。窗口里一个事件都没收到时是 `null`（未测到），不是 0 |
+| `chars_per_second` | 窗口内收到的正文字符数 / 窗口秒（实测；`--chunk` 的直接体现）。与 `events_per_second_actual` 同口径：没有事件时是 `null` |
 | `turns_per_second` | 窗口内**完成**的轮次数 / 窗口秒。`cpu_cores / turns_per_second` = 每轮固定成本。`pure_stream` 结构性为 0（窗口里没有轮次边界） |
 | `errors` | 窗口内（事件到达时刻在 `[window_start, window_end]` 内）的 `turn_result.is_error` 数 + 分片发送失败数。失败轮上网关会**同时**发 `turn_result(is_error)` 与 `error` 事件，只记前者的原因见 :mod:`driver_shard` |
 | `slow_client_recycles` | 窗口结束前就被网关回收的客户端连接数（分片在 `window_end` 时刻数一遍自己的连接：此刻还没关连接，`closed` 的都是网关先断的）。不扫网关日志 |
@@ -306,7 +308,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   feedback 等待上）。
 - `--cycle-s` 通过「调用轮首个内容帧之前的 `first_delay`」把周期撑到**不短于**它：
   周期 = `cycle_s` + 该轮的真实成本，所以 pacer 不污染每轮成本的读数；`--cycle-s 0` =
-  不 pacing。**不 pacing 时两个会话就能把一个核烧到 0.9**（每轮 ~9 ms CPU × 100 轮/s），
+  不 pacing。**不 pacing 时两个会话就能把一个核吃满**（每轮 ~9 ms CPU × 100 轮/s），
   那一档按判据就是 `capped`——测「最大轮次频率」时这是预期结果，不是 bug。
 - **每会话一个 model id**（`capacity/tool_cycle/s<k>`）：假 Provider 的剧本游标按 model
   走，而「调用轮 → 文本轮」两段的类型不同；共享游标时会话之间一旦漂移一个请求，某个会话
@@ -318,15 +320,18 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 `--history-tokens` 就是内存轴的另一端。两个刻意的选择：
 
 - **不建任何客户端连接**（`window_mode=hold`）：订阅会钉住会话（产品的逐出条件之一），
-  那 reaper 就永远不会动手，「窗口内 RSS 是否回落」也就无从观察；
+  那 reaper 就永远不会动手，窗口里也就观察不到逐出；
 - **把逐出阈值压进窗口**：产品默认 `sessions.eviction.idle_ttl_seconds` 1800 s / 扫描
-  300 s，秒级窗口里什么都看不到（等于没测）。本形态写 `dwell/2` 与 1 s，于是窗口里
-  应当发生一次批量逐出；
+  300 s，秒级窗口里什么都看不到（等于没测）。本形态按 `--dwell/2` 与 1 s 扫描推导
+  （**只看 dwell，不含 warmup**——否则 `--warmup` 一调大，会话会在窗口开始前就被收走），
+  于是窗口里应当发生一次批量逐出；
 - 「逐出到底发生了没有」不靠 RSS 猜：窗口结束后对每个会话调
   `POST /api/session/release`（公开路径、幂等），`released=false`（`not loaded`）就是
-  「reaper 已经回收了」。两个计数进 `samples.evicted_in_window` / `loaded_after_window`；
-  `memory` 后端的会话不允许逐出（产品禁止销毁非持久数据，409），此时两个计数写 `null`
-  + note，不写 0。
+  「reaper 已经回收了」。两个计数进 `samples.evicted_by_reaper` / `released_by_probe`
+  （**窗口末时刻**的快照，不含逐出发生的时刻）；`memory` 后端的会话不允许逐出（产品
+  禁止销毁非持久数据，409），此时两个计数写 `null` + note，不写 0。
+- **RSS 落差不是逐出的证据**：进程被清空后分配器一般不还页，实测「50 个会话全被逐出」
+  时 `rss_mb_peak == rss_mb_end`。要不要相信逐出，只看 `/release` 探针。
 
 ### `hydration` — 网关重启后的水合尖峰
 
@@ -342,16 +347,16 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 
 `--decode-duty`（默认 0.7）= **处于纯流式输出中的会话占比**：前 `round(duty × N)` 个会话
 跑 `pure_stream`（一轮覆盖整窗），其余跑 `tool_cycle`。于是「混合档 ≈ 两种纯形态读数的
-线性叠加」是一个可检验的预测——偏差超过 30% 就说明某个成本项不与会话数线性（cache 抖动、
-GIL、页回收），必须在文档里说清为什么。选**会话分组**而不是时间片：时间片下每个会话都在
+线性叠加」是一个可检验的预测；偏差大就说明某个成本项不与会话数线性（cache 抖动、GIL、
+页回收），必须人工解释而不是当噪声。选**会话分组**而不是时间片：时间片下每个会话都在
 两种成本之间来回切，叠加预测不再成立，本形态就失去了唯一的用途。
 
 ### 历史预置（`--history-tokens`）
 
 只对 `idle` / `hydration` 有效。每会话发一条 prompt，假 Provider 一次吐出
-`history_tokens × chars_per_token` 字符（`chars_per_token = 1/0.3`，产品估算器
-`TokenCounter` 对非 CJK 的比值是 0.3 token/char），按 4000 字符/帧分帧——**一轮、一条
-assistant 记录**。
+`history_tokens × chars_per_token` 字符（`chars_per_token = 1 / TokenCounter.NON_CJK_RATIO`，
+直接引用产品估算器的比例，不复制数值），按 4000 字符/帧分帧——**一轮、一条 assistant
+记录**。
 
 - 为什么不是「多轮小输出」：轮数是**每轮固定成本**的乘数，多轮会把「预置历史」变成
   「预热一遍每轮固定成本」，几十倍放大预置耗时；而水合成本主要由字节数决定。
@@ -371,8 +376,7 @@ assistant 记录**。
 第二份事实来源。要看原文：
 
 ```bash
-uv run python -c "import sys; sys.path.insert(0, 'scripts/capacity'); import verdict; \
-print('\n'.join(f'{k}: {v}' for k, v in verdict.CRITERIA.items()))"
+uv run python scripts/capacity/run.py --criteria
 ```
 
 口径要点（数字见上）：
@@ -385,12 +389,15 @@ print('\n'.join(f'{k}: {v}' for k, v in verdict.CRITERIA.items()))"
   轮次判据**只在 `tool_cycle` / `mixed` 判**（其余形态的窗口里没有轮次边界）。
 - `capped`：网关 CPU 打满 / 出现轮次错误 / fd 接近 `meta.host.ulimit_n`。
 - `low_confidence`（**不进判档**，但报告必须点名）：rig 自身饱和（provider 或某个分片
-  吃满核）、**不预期**的配对丢弃比例越界、建会话失败。报告用它与 `reasons[]` **分开的**
-  字段呈现，两者不混。
+  吃满核）、**不预期**的配对丢弃比例越界、建会话失败、以及**多轮形态的轮次判据无从评估**
+  （基线档没有完成的轮次——没有可比的基线，判据就不成立）。报告用它与 `reasons[]`
+  **分开的**字段呈现，两者不混；结论句也**不引用**低置信档位。
 - 丢弃比例只数**不预期**的原因：`samples.dropped` 含 `outside_window`（跨窗口起点的预热段）
   与 `in_flight_tail:*`（窗口末仍在传输）——两者都是采样窗口的簿记，不是数据被污染。
   `pure_stream` 的整轮本来就跨进窗口起点，按总数算会让**每一档**都「低置信」，那等于
-  没有信号。`dropped_reasons` 缺失（手写产物）时无法归类，按全部不预期处理（保守）。
+  没有信号。哪些原因算簿记由 `metrics.DROP_REASONS` 一张表声明（生产者与判据共用，
+  改一个名字只有一处要改）；`dropped_reasons` 缺失（手写产物）时无法归类，按全部不预期
+  处理（保守）。
 - 报告**重算**判据（`verdict.evaluate_run`），不读 `levels[i].verdict`：那份投影是给机器
   读的，而报告还要能处理手写的 / 被污染的 `run.json`——没有 `verdict` 字段的输入同样必须
   被标低置信。
@@ -446,7 +453,7 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 
 ## 自测（`--selftest`）
 
-≤120 秒（当前约 28 s）、不联网、不需要 API key、可重复。它起真网关子进程，因此和
+≤120 秒（当前约 32 s）、不联网、不需要 API key、可重复。它起真网关子进程，因此和
 `scripts/perf/ab.py --selftest` 一样**不进** `make check`（那一条只跑静态检查）——
 改完这个工具先手动跑 `make capacity-selftest`：
 
@@ -464,7 +471,10 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | `verdict.polluted` | **负向验证**：被污染的 `run.json`（rig 饱和 / 不预期丢弃）必须被标低置信 |
 | `report.render` | 合成 `run.json` → markdown（判据原文唯一、缺数据是 `—`、复现命令、表格列数） |
 | `run.summary` | `--json` 一行摘要的字段名与取值投影（下游脚本的契约） |
-| `e2e.<shape>` | **真网关子进程 + 真分片子进程**跑完迷你一档（五种形态各一次）：断言该形态的指标非 null 且形状自洽（`pure_stream` 无轮次边界、`tool_cycle` 有完成的轮次与 tool_call 帧、`idle` 无事件且 reaper 逐出全部会话、`hydration` 有三段时间线、`mixed` 两个通道都有帧）；再用一个失败档断言「失败档键集 == 成功档键集」、一个相对 `--out` 档断言默认形态能跑 |
+| `e2e.<case>` | **真网关子进程 + 真分片子进程**跑完迷你一档（六个用例：五种形态 + `--tool bash` 变体）：断言该形态的指标非 null 且形状自洽（`pure_stream` 无轮次边界、`tool_cycle` 有完成的轮次与 tool_call 帧、`idle` 无事件且 reaper 逐出全部会话、`hydration` 有三段时间线、`mixed` 两个通道都有帧），并断言真实 `dropped_reasons` 全部落在 `metrics.DROP_REASONS` 词汇表里；再用一个失败档断言「失败档键集 == 成功档键集」、一个相对 `--out` 档断言默认形态能跑 |
+
+`--tool bash` 那条值得单独存在：`yolo` 一旦失效，`Bash` 会落到「等人确认」上（headless
+测量里没有人回答），轮次从此永不收口——这条回归只有真跑一次才看得见。
 
 `e2e` 走的是产品代码同一路径（注入 `run_ladder`），不是平行实现。
 
@@ -489,11 +499,12 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
   因此「每轮固定成本」可以由「多轮形态 − 单轮形态」或 `cpu_cores / turns_per_second` 得到。
 - **`idle` 的逐出是「压进窗口」的**：它的读数回答「N 个空闲会话的常驻内存 + reaper 会不会
   在窗口里回收」，**不是**产品默认阈值（1800 s）下的行为。默认阈值下窗口里不会有逐出，
-  `rss_mb_end == rss_mb_peak` 只说明「这段时间没回收」。
+  `rss_mb_end == rss_mb_peak` 既可能是「没逐出」也可能是「逐出了但没还页」——
+  逐出与否只看 `/release` 探针的计数。
 - **`mixed` 的线性叠加是近似**：两组会话共享同一个网关进程（事件循环、内存分配器、
-  socket 缓冲都共享），偏差超过 30% 就要在文档里解释而不是当噪声。
-- **`--history-tokens` 的 token 是估算值**（产品估算器 0.3 token/char），真实字节数看
-  `history.chars_per_session`。
+  socket 缓冲都共享），偏差大就要人工解释而不是当噪声。
+- **`--history-tokens` 的 token 是估算值**（产品估算器 `TokenCounter.NON_CJK_RATIO`），
+  真实字节数看 `history.chars_per_session`。
 - 订阅模式不同，单会话成本不同：`per-session` 是 N 条 WS（贴近真实，开销更大），
   `per-shard` 是 K 条（轻量档，仅用于自测 / 极限档）。两者读数不可直接对比。
 - 一档内所有会话共用一个 workspace 目录（工作目录不影响被测变量）；成功档收档时删掉，
@@ -517,7 +528,7 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | `events_per_second_actual` 明显低于 `--rate` | `meta.args.sleep_overshoot_ms` 是否接近帧间隔（补偿失效）；`in_flight_tail` 是否偏大（网关消费不过来） |
 | `turn.*` 是 `—` | 形态决定：`pure_stream` / `idle` 结构性为 null；`tool_cycle` / `mixed` 为 null 说明窗口内没有轮次收口（`--cycle-s` 太长或网关卡住） |
 | `hydration.*` 是 `—` | `samples.hydration_attempts` / `hydration_failed`；分片是否在窗口起点才订阅（`shape.window_mode == "hydrate"`） |
-| `evicted_in_window` 是 `null` | 逐出探针被拒（`memory` 后端 409 / 会话被钉住）；note 里有首条失败原因 |
+| `evicted_by_reaper` 是 `null` | 逐出探针被拒（`memory` 后端 409 / 会话被钉住）；note 里有首条失败原因 |
 | `verdict` 是 `unknown` | 基线档（最小 N）没跑完，退化判据无从评估 |
 | 网关 CPU 高但 rig 也高 | 加大 `--shards`；看 `rig.shard_cpu_cores` 是否有个别分片吃满 |
 | `EMFILE` / `Too many open files` | `meta.host.ulimit_n` 是否达到 `4 × N + 256`；见「fd 上限」 |

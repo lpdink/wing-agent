@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from shapes import CyclicScript, ShapeArgs, ShapePlan, prompt_key
+from shapes import CyclicScript, ShapeArgs, ShapePlan
 from wing_probe.provider.script import ToolCall, Turn
 
 NAME = "tool_cycle"
@@ -51,24 +51,27 @@ TOOLS: Mapping[str, Mapping[str, Any]] = {
 REPLY_CHARS = 1
 
 
-def prompt_text(session_id: str, seq: int) -> str:
-    """第 ``seq`` 轮的用户正文（全局唯一：配对靠它在 ``RequestLog`` 里定位请求）。"""
-    return prompt_key(session_id, seq)
+def cycle_turns(args: ShapeArgs, tool: str) -> tuple[Turn, Turn]:
+    """一轮的两段：调用轮（首帧前按 ``--cycle-s`` pacing）+ 一行正文。
+
+    混合形态复用同一份装配，两个形态的轮次语义因此不会分叉。
+    """
+    if tool not in TOOLS:
+        raise ValueError(
+            f"unknown --tool {tool!r}; available: {', '.join(sorted(TOOLS))}"
+        )
+    variant = TOOLS[tool]
+    call_turn = Turn.of(
+        tool_calls=[ToolCall(variant["tool"], dict(variant["arguments"]))],
+        first_delay=args.cycle_s if args.cycle_s > 0 else None,
+    )
+    reply_turn = Turn.of(text="." * REPLY_CHARS * args.chunk, chunk=args.chunk)
+    return call_turn, reply_turn
 
 
 def plan(args: ShapeArgs) -> ShapePlan:
-    if args.tool not in TOOLS:
-        raise ValueError(
-            f"tool_cycle does not know --tool {args.tool!r}; "
-            f"available: {', '.join(sorted(TOOLS))}"
-        )
+    call_turn, reply_turn = cycle_turns(args, args.tool)
     variant = TOOLS[args.tool]
-    first_delay = args.cycle_s if args.cycle_s > 0 else None
-    call_turn = Turn.of(
-        tool_calls=[ToolCall(variant["tool"], dict(variant["arguments"]))],
-        first_delay=first_delay,
-    )
-    reply_turn = Turn.of(text="." * REPLY_CHARS * args.chunk, chunk=args.chunk)
     models: list[tuple[str, Any]] = []
     session_models: list[str] = []
     for index in range(args.sessions):

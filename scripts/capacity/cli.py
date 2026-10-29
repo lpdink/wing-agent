@@ -5,6 +5,10 @@
 （``run.py`` 只负责编排与产物）。所有非法组合都在**起任何子进程之前**变成可行动的
 错误（退出码 2），而不是跑到一半才炸。
 
+旗标名只声明一次（:data:`ARG_SPECS`）：argparse 由它生成，``run.json`` 的 ``meta.args``
+与报告里的复现命令都由它取值——否则一次加旗标要在四个地方同步，漏掉一处就会产出一条
+「看起来正常但跑不回来」的复现命令。
+
 形态专属旋钮（``--tool`` / ``--cycle-s`` / ``--decode-duty`` / ``--history-tokens``）
 的适用范围由形态自己声明（``shapes.KNOBS``）：给了某个形态不消费的旋钮就报错，不静默
 忽略——静默忽略会让人以为「那个变量已经测过了」。
@@ -13,13 +17,16 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import shapes
-import orchestrator
-from orchestrator import RunConfig
+
+if TYPE_CHECKING:  # 只用于类型：``orchestrator`` 会拖进 httpx 与 probe 的运行时依赖
+    from orchestrator import RunConfig
 
 DEFAULT_SCENARIO = "pure_stream"
 DEFAULT_LEVELS = "1,10,50,100"
@@ -34,10 +41,165 @@ DEFAULT_OUT_ROOT = Path("target/capacity")
 """默认产物根（相对仓库根；``build_config`` 会解析成绝对路径）。"""
 
 BACKENDS: tuple[str, ...] = ("file", "memory")
+SUBSCRIBER_MODES: tuple[str, ...] = ("per-session", "per-shard")
 
 
 class UsageError(ValueError):
     """命令行参数不可用（可行动的错误文案；退出码 2）。"""
+
+
+@dataclass(frozen=True)
+class ArgSpec:
+    """一个旗标：名字 / 取值类型 / 默认值 / 是否进复现命令。"""
+
+    flag: str
+    kind: str  # str | int | float | flag | choice
+    default: Any
+    help: str
+    choices: tuple[str, ...] = ()
+    mode: bool = False
+    """``True`` = 运行模式（``--selftest`` / ``--json`` / ``--criteria``），不进复现命令。"""
+    echo: bool = True
+    """``True`` = 复现命令里原样回放（默认回放，``--out`` 这种现场参数除外）。"""
+
+    @property
+    def dest(self) -> str:
+        return self.flag.lstrip("-").replace("-", "_")
+
+
+ARG_SPECS: tuple[ArgSpec, ...] = (
+    ArgSpec(
+        "--scenario",
+        "str",
+        DEFAULT_SCENARIO,
+        f"load shape (available: {', '.join(shapes.names())})",
+        echo=False,
+    ),
+    ArgSpec(
+        "--levels",
+        "str",
+        DEFAULT_LEVELS,
+        f"ascending comma-separated session counts (default: {DEFAULT_LEVELS})",
+    ),
+    ArgSpec(
+        "--rate",
+        "float",
+        DEFAULT_RATE,
+        "events/s per session — one event is one upstream SSE delta frame "
+        f"(default: {DEFAULT_RATE:g}); streaming shapes only",
+    ),
+    ArgSpec(
+        "--chunk",
+        "int",
+        shapes.DEFAULT_CHUNK,
+        "characters carried by one event "
+        f"(default: {shapes.DEFAULT_CHUNK}); 1 is the worst case, real providers "
+        "usually frame 1~20 characters per delta",
+    ),
+    ArgSpec(
+        "--dwell",
+        "float",
+        DEFAULT_DWELL,
+        f"sample window per level (s, default: {DEFAULT_DWELL:g})",
+    ),
+    ArgSpec(
+        "--warmup",
+        "float",
+        DEFAULT_WARMUP,
+        f"warmup before the window (s, dropped; default: {DEFAULT_WARMUP:g})",
+    ),
+    ArgSpec(
+        "--shards",
+        "int",
+        DEFAULT_SHARDS,
+        f"driver shard subprocesses (default: {DEFAULT_SHARDS})",
+    ),
+    ArgSpec(
+        "--subscribers",
+        "choice",
+        DEFAULT_SUBSCRIBERS,
+        f"WS subscriber topology (default: {DEFAULT_SUBSCRIBERS})",
+        choices=SUBSCRIBER_MODES,
+    ),
+    ArgSpec(
+        "--backend",
+        "choice",
+        DEFAULT_BACKEND,
+        "session storage backend passed to /api/session/create (default: "
+        f"{DEFAULT_BACKEND}); memory = in-process, no history.jsonl, no fsync — the "
+        "file/memory A/B attributes the per-turn fixed cost",
+        choices=BACKENDS,
+    ),
+    ArgSpec(
+        "--history-tokens",
+        "int",
+        DEFAULT_HISTORY_TOKENS,
+        "pre-seeded history per session (tokens, estimated)",
+    ),
+    ArgSpec(
+        "--tool",
+        "str",
+        shapes.DEFAULT_TOOL,
+        f"tool used by tool cycles (default: {shapes.DEFAULT_TOOL}); "
+        "read = Read a small workspace file, bash = Bash echo (subprocess)",
+    ),
+    ArgSpec(
+        "--cycle-s",
+        "float",
+        shapes.DEFAULT_CYCLE_S,
+        "target cycle duration for tool cycles (s, default: "
+        f"{shapes.DEFAULT_CYCLE_S:g}); 0 = no pacing",
+    ),
+    ArgSpec(
+        "--decode-duty",
+        "float",
+        shapes.DEFAULT_DECODE_DUTY,
+        "fraction of sessions streaming in the mixed shape (default: "
+        f"{shapes.DEFAULT_DECODE_DUTY:g})",
+    ),
+    ArgSpec(
+        "--out",
+        "str",
+        None,
+        f"output dir (default: {DEFAULT_OUT_ROOT}/<utc timestamp>)",
+        echo=False,
+    ),
+    ArgSpec(
+        "--selftest",
+        "flag",
+        False,
+        "offline self-check (no network, short window)",
+        mode=True,
+    ),
+    ArgSpec(
+        "--criteria",
+        "flag",
+        False,
+        "print the degradation criteria and exit",
+        mode=True,
+    ),
+    ArgSpec(
+        "--json",
+        "flag",
+        False,
+        "print a single JSON summary line on stdout",
+        mode=True,
+    ),
+)
+"""旗标名、默认值、以及「哪些进复现命令」的**唯一**声明处。"""
+
+
+def _add_argument(parser: argparse.ArgumentParser, spec: ArgSpec) -> None:
+    kwargs: dict[str, Any] = {"help": spec.help}
+    if spec.kind == "flag":
+        parser.add_argument(spec.flag, action="store_true", **kwargs)
+        return
+    kwargs["default"] = spec.default
+    if spec.kind == "choice":
+        kwargs["choices"] = spec.choices
+    elif spec.kind in ("int", "float"):
+        kwargs["type"] = int if spec.kind == "int" else float
+    parser.add_argument(spec.flag, **kwargs)
 
 
 def parse_levels(raw: str) -> tuple[int, ...]:
@@ -63,7 +225,7 @@ def parse_levels(raw: str) -> tuple[int, ...]:
     return tuple(levels)
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="capacity",
         description=(
@@ -71,133 +233,53 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "sampled for CPU / RSS / fds / delivery latency"
         ),
     )
-    parser.add_argument(
-        "--scenario",
-        default=DEFAULT_SCENARIO,
-        help=f"load shape (available: {', '.join(shapes.names())})",
-    )
-    parser.add_argument(
-        "--levels",
-        default=DEFAULT_LEVELS,
-        help=f"ascending comma-separated session counts (default: {DEFAULT_LEVELS})",
-    )
-    parser.add_argument(
-        "--rate",
-        type=float,
-        default=DEFAULT_RATE,
-        help=(
-            "events/s per session — one event is one upstream SSE delta frame "
-            f"(default: {DEFAULT_RATE:g})"
-        ),
-    )
-    parser.add_argument(
-        "--chunk",
-        type=int,
-        default=shapes.DEFAULT_CHUNK,
-        help=(
-            "characters carried by one event (default: "
-            f"{shapes.DEFAULT_CHUNK}); 1 is the worst case, real providers usually "
-            "frame 1~20 characters per delta"
-        ),
-    )
-    parser.add_argument(
-        "--dwell",
-        type=float,
-        default=DEFAULT_DWELL,
-        help=f"sample window per level (s, default: {DEFAULT_DWELL:g})",
-    )
-    parser.add_argument(
-        "--warmup",
-        type=float,
-        default=DEFAULT_WARMUP,
-        help=f"warmup before the window (s, dropped; default: {DEFAULT_WARMUP:g})",
-    )
-    parser.add_argument(
-        "--shards",
-        type=int,
-        default=DEFAULT_SHARDS,
-        help=f"driver shard subprocesses (default: {DEFAULT_SHARDS})",
-    )
-    parser.add_argument(
-        "--subscribers",
-        choices=("per-session", "per-shard"),
-        default=DEFAULT_SUBSCRIBERS,
-        help=f"WS subscriber topology (default: {DEFAULT_SUBSCRIBERS})",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=BACKENDS,
-        default=DEFAULT_BACKEND,
-        help=(
-            "session storage backend passed to /api/session/create (default: "
-            f"{DEFAULT_BACKEND}); memory = in-process, no history.jsonl, no fsync — "
-            "the file/memory A/B attributes the per-turn fixed cost"
-        ),
-    )
-    parser.add_argument(
-        "--history-tokens",
-        dest="history_tokens",
-        type=int,
-        default=DEFAULT_HISTORY_TOKENS,
-        help=(
-            "pre-seeded history per session (tokens, estimated); implemented for: "
-            + ", ".join(name for name in shapes.names() if _supports_history(name))
-        ),
-    )
-    parser.add_argument(
-        "--tool",
-        default=shapes.DEFAULT_TOOL,
-        help=(
-            f"tool used by tool cycles (default: {shapes.DEFAULT_TOOL}); "
-            "read = Read a small workspace file, bash = Bash echo (subprocess)"
-        ),
-    )
-    parser.add_argument(
-        "--cycle-s",
-        dest="cycle_s",
-        type=float,
-        default=shapes.DEFAULT_CYCLE_S,
-        help=(
-            "target cycle duration for tool cycles (s, default: "
-            f"{shapes.DEFAULT_CYCLE_S:g}); 0 = no pacing"
-        ),
-    )
-    parser.add_argument(
-        "--decode-duty",
-        dest="decode_duty",
-        type=float,
-        default=shapes.DEFAULT_DECODE_DUTY,
-        help=(
-            "fraction of sessions streaming in the mixed shape (default: "
-            f"{shapes.DEFAULT_DECODE_DUTY:g})"
-        ),
-    )
-    parser.add_argument(
-        "--out",
-        help=f"output dir (default: {DEFAULT_OUT_ROOT}/<utc timestamp>)",
-    )
-    parser.add_argument(
-        "--selftest",
-        action="store_true",
-        help="offline self-check (small N, short window, no network)",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="print a single JSON summary line on stdout",
-    )
-    return parser.parse_args(argv)
+    for spec in ARG_SPECS:
+        _add_argument(parser, spec)
+    return parser
 
 
-def _supports_history(name: str) -> bool:
-    try:
-        return "history_tokens" in frozenset(getattr(shapes.resolve(name), "KNOBS", ()))
-    except shapes.ShapeError:  # pragma: no cover - 注册表与模块的一致性由自测覆盖
-        return False
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
+
+
+def measurement_args(cfg: RunConfig) -> dict[str, Any]:
+    """``meta.args``：把回放用的旗标取值投影成 JSON 友好的字典。"""
+    args: dict[str, Any] = {}
+    for spec in ARG_SPECS:
+        if spec.mode or not spec.echo:
+            continue
+        value = getattr(cfg, spec.dest)
+        args[spec.dest] = list(value) if isinstance(value, tuple) else value
+    return args
+
+
+def reproduce_command(meta: Mapping[str, Any]) -> str:
+    """复现命令：``meta.args`` + ``meta.scenario`` 原样拼回去（含默认值）。
+
+    旗标名与顺序来自 :data:`ARG_SPECS`，所以加旗标只有一处要改；``meta.args`` 缺键时
+    跳过它（手写产物也不会拼出一条带 ``None`` 的命令）。
+    """
+    args = meta.get("args") or {}
+    parts = ["uv run python scripts/capacity/run.py"]
+    scenario = meta.get("scenario")
+    if scenario is not None:
+        parts.append(f"--scenario {scenario}")
+    for spec in ARG_SPECS:
+        if spec.mode or not spec.echo:
+            continue
+        value = args.get(spec.dest)
+        if value is None:
+            continue
+        if spec.dest == "levels":
+            value = ",".join(str(level) for level in value)
+        parts.append(f"{spec.flag} {value}")
+    return " ".join(parts)
 
 
 def build_config(args: argparse.Namespace) -> RunConfig:
     """参数 → :class:`RunConfig`（所有非法组合在这里变成可行动的错误）。"""
+    from orchestrator import RunConfig, level_args
+
     shapes.resolve(args.scenario)  # 未知名这里就抛（附可选项）
     levels = parse_levels(args.levels)
     if args.rate <= 0:
@@ -241,7 +323,7 @@ def build_config(args: argparse.Namespace) -> RunConfig:
     # 形态级的校验（旋钮适用范围 / 契约 / 逐会话 model）在起任何子进程之前跑一遍：
     # 用最小档位干跑一次 plan()，非法组合在这里变成退出码 2。
     try:
-        plan = shapes.build_plan(orchestrator.level_args(cfg, 1))
+        plan = shapes.build_plan(level_args(cfg, 1))
     except ValueError as exc:  # 含 ShapeError 与形态自己的参数校验
         raise UsageError(str(exc)) from exc
     if plan.window_mode == "hydrate" and cfg.backend == "memory":

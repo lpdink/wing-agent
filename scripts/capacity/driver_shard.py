@@ -8,7 +8,7 @@
 
 窗口里做什么由 ``mode`` 决定（``shapes.WINDOW_MODES`` + 预置专用的 ``seed``）：
 
-- ``drive``：连接时就订阅，窗口前把全部会话排进轮次泵（01 的行为）；
+- ``drive``：连接时就订阅，窗口前把全部会话排进轮次泵（默认行为）；
 - ``hold``：不建任何连接、什么都不做（纯内存基线）；
 - ``hydrate``：只连 WS 不订阅，窗口起点并发订阅并记下「订阅 → ``sync_session`` 到达」，
   ``sync_session`` 到达后才发第一条 prompt（只驱动一轮）；
@@ -190,8 +190,9 @@ class Shard:
             if self.config.subscribers == "per-shard":
                 ws = await self._open()
                 self.connections.append(ws)
-                for session_id in self.config.sessions:
-                    await attach(session_id, ws)
+                await asyncio.gather(
+                    *(attach(session_id, ws) for session_id in self.config.sessions)
+                )
             else:
 
                 async def one(session_id: str) -> None:
@@ -439,7 +440,7 @@ class Shard:
             state = self.states[session_id]
             if time.monotonic() >= self._window_end:
                 continue
-            state.prompt = self.shape.prompt_text(session_id, state.seq)
+            state.prompt = shapes.prompt_text_of(self.shape)(session_id, state.seq)
             state.seq += 1
             state.arrivals = _empty_arrivals()
             state.sent_at = time.monotonic()

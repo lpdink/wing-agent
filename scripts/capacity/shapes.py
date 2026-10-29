@@ -5,19 +5,20 @@
 :func:`resolve` 拿同一个模块对象，因此形态的「剧本」与「prompt 文本」只有一处定义
 ——否则配对键会在两侧漂移，延迟样本会静默变成全 ``dropped``。
 
-形态契约（每个形态模块都要满足，:func:`resolve` 校验前四项）：
+形态契约（每个形态模块都要满足，:func:`resolve` 校验前三项）：
 
 - ``NAME``：``--scenario`` 的取值；
 - ``MODEL``：形态的基础 model id（``providers[].models`` 里的 id）；
 - ``plan(args) -> ShapePlan``：本档要注册的 model / 剧本、每会话挂哪个 model、
   工具集、workspace 里的预置文件、窗口模式……形态的全部语义都在这一个返回值里
-  （见 :class:`ShapePlan`）；
-- ``prompt_text(session_id, seq) -> str``：驱动轮的**全局唯一** prompt 文本（配对键）。
+  （见 :class:`ShapePlan`）。
 
 可选声明（缺省即「这个形态不用它」）：
 
 - ``KNOBS``：形态消费的可选旋钮（``tool`` / ``cycle_s`` / ``decode_duty`` /
-  ``history_tokens``）；显式给非默认值的旋钮而形态不消费它 → 报错，不静默忽略。
+  ``history_tokens``）；显式给非默认值的旋钮而形态不消费它 → 报错，不静默忽略；
+- ``prompt_text(session_id, seq) -> str``：驱动轮的**全局唯一** prompt 文本（配对键）。
+  缺省即 :func:`prompt_key`（所有形态目前都用它），形态需要别的前缀时才声明。
 
 第三种「形态没有自己的剧本」的情况不存在：``idle`` 不驱动也不写剧本，但仍要给假
 Provider 一个合法的 model（会话创建时要求 model 落在 id 空间里）。
@@ -27,12 +28,13 @@ from __future__ import annotations
 
 import importlib
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from wing.common.token_counter import TokenCounter
 from wing_probe.provider.script import Script, Turn
 
 SHAPES: dict[str, str] = {
@@ -62,11 +64,12 @@ SEED_MODEL = "capacity/seed"
 #: 预置历史的每帧字符数（大文本一轮吐出，帧数太少会让「分帧」变成单帧）。
 SEED_FRAME_CHARS = 4000
 
-#: 产品估算器（``wing.common.token_counter.TokenCounter``）对非 CJK 的比例：
-#: 0.3 token / char，因此反过来算 1 char ≈ 1/0.3 token。
-HISTORY_CHARS_PER_TOKEN = 1 / 0.3
+#: 每 token 对应的字符数：产品估算器的非 CJK 比例是**唯一**事实来源
+#: （``TokenCounter.NON_CJK_RATIO``）——`--history-tokens` 的语义完全依赖它，
+#: 抄一份字面量会让产品调整估算后这里的"token 数"静默变味。
+HISTORY_CHARS_PER_TOKEN = 1 / TokenCounter.NON_CJK_RATIO
 
-_REQUIRED = ("NAME", "MODEL", "plan", "prompt_text")
+_REQUIRED = ("NAME", "MODEL", "plan")
 
 
 class ShapeError(ValueError):
@@ -112,6 +115,11 @@ def seed_key(session_id: str, seq: int) -> str:
     return f"seed:{session_id}:{seq}"
 
 
+def prompt_text_of(shape: ModuleType) -> Callable[[str, int], str]:
+    """形态的驱动轮 prompt 构造器（未声明即 :func:`prompt_key`）。"""
+    return getattr(shape, "prompt_text", prompt_key)
+
+
 # ── 形态输入 ───────────────────────────────────────────────────
 
 
@@ -125,6 +133,8 @@ class ShapeArgs:
     """每会话**事件**/s（一个事件 = 上游 SSE 一个 delta 帧 = 网关一次 emit）。"""
     span_s: float
     """档位时长（warmup + dwell）。"""
+    dwell_s: float
+    """采样窗口长度（``--dwell``）：逐出阈值之类"必须在窗口内发生"的量按它推。"""
     chunk: int
     """每个事件的字符数（``--chunk``）。"""
     cycle_s: float
@@ -358,6 +368,7 @@ __all__ = [
     "model_ids",
     "names",
     "prompt_key",
+    "prompt_text_of",
     "register",
     "resolve",
     "seed_key",
