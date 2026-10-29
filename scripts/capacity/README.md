@@ -33,7 +33,7 @@ CLI（冻结；下游脚本依赖这些名字）：
 |---|---|---|
 | `--scenario` | `pure_stream` | 负载形态（见「负载形态」） |
 | `--levels` | `1,10,50,100` | 逗号分隔的会话数阶梯（严格升序） |
-| `--rate` | `50` | **每会话** token/s（帧大小 1 token、帧间隔 `1/rate` 秒） |
+| `--rate` | `50` | **每会话**注入速率（token/s，帧大小 1 token）。它是**注入参数**：Provider 睡够再写一帧，本机 `asyncio.sleep` 稳定多睡约 2 ms，所以运行前会空载实测这个超时并从帧间隔里扣掉；实际达到的速率以 `tokens_per_second_actual` / `events_per_second_actual` 为准 |
 | `--dwell` | `20` | 每档采样窗口（秒） |
 | `--warmup` | `5` | 每档预热（秒，丢弃） |
 | `--shards` | `4` | driver 分片子进程数（钳到 `min(shards, sessions)`） |
@@ -41,7 +41,7 @@ CLI（冻结；下游脚本依赖这些名字）：
 | `--history-tokens` | `0` | 预置历史体量；只接受 `0`（其余形态待补） |
 | `--out` | `target/capacity/<UTC 时间戳>` | 产物目录 |
 | `--selftest` | — | 离线自测 |
-| `--json` | — | stdout 只输出一行 JSON 摘要（`ok` / `out` / `run_json` / `report` / `levels[]` / `failures`）；`levels[]` 每项是 `sessions` + `gateway_cpu_cores` / `delivery_p99_ms` / `tokens_per_second_actual` / `errors` / `error` 的投影，人读路径用同一份数据 |
+| `--json` | — | stdout 只输出一行 JSON 摘要（`ok` / `out` / `run_json` / `report` / `levels[]` / `failures`）；`levels[]` 每项是 `sessions` + `gateway_cpu_cores` / `delivery_p99_ms` / `tokens_per_second_actual` / `events_per_second_actual` / `errors` / `error` 的投影，人读路径用同一份数据 |
 
 退出码：`0` 全部档位完成；`2` 参数 / 环境错误（未启动任何进程）；`3` 有档位失败
 （仍落盘产物，供取证）。`EMFILE` 之类「跑到一半才炸」的失败不会产出漂亮空表：
@@ -101,7 +101,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
     "tool": "capacity", "schema": 1, "scenario": "pure_stream",
     "started_at": "<ISO8601Z>", "duration_s": 123.4,
     "args": {"levels": [1,10], "rate": 50.0, "dwell": 20.0, "warmup": 5.0,
-             "shards": 4, "subscribers": "per-session", "history_tokens": 0},
+             "shards": 4, "subscribers": "per-session", "history_tokens": 0,
+             "frame_delay_ms": 17.945, "sleep_overshoot_ms": 2.055},
     "host": {"cpus": 12, "mem_gb": 16.0, "platform": "darwin", "ulimit_n": 4256},
     "gateway": {"pid": 123, "version": "0.7.0", "commit": "a7e7126"},
     "session_create": {"ok": 11, "failed": 0, "total_ms": 25.5, "scope": "sum over levels"},
@@ -110,17 +111,21 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   "levels": [{
     "sessions": 10, "wall_s": 5.08,
     "metrics": {
-      "gateway.cpu_cores": 0.12, "gateway.rss_mb_peak": 73.2,
+      "gateway.cpu_cores": 0.117, "gateway.rss_mb_peak": 73.2,
       "gateway.rss_mb_end": 73.2, "gateway.rss_mb_slope_per_session": 0.3,
       "gateway.fds_peak": 47,
-      "delivery.p50_ms": null, "delivery.p99_ms": null, "delivery.p999_ms": null,
-      "turn.p50_ms": 1680.5, "turn.p99_ms": 1741.5,
-      "tokens_per_second_actual": 395.5, "errors": 0, "slow_client_recycles": 0
+      "delivery.p50_ms": 2.432, "delivery.p99_ms": 3.117, "delivery.p999_ms": 3.357,
+      "turn.p50_ms": null, "turn.p99_ms": null,
+      "tokens_per_second_actual": 490.2, "events_per_second_actual": 490.2,
+      "errors": 0, "slow_client_recycles": 0
     },
     "rig": {"provider_cpu_cores": 0.029, "shard_cpu_cores": [0.018, 0.015, 0.012, 0.013],
             "host_loadavg": [4.32, 5.26, 4.74]},
-    "samples": {"count": null, "dropped": null, "dropped_reasons": null,
-                "text_frames": 2010, "turns": 20, "delivery_available": false},
+    "samples": {"count": 2491, "dropped": 1039,
+                "dropped_reasons": {"outside_window": 995, "in_flight_tail:content": 44},
+                "delta_frames": {"content": 2491, "thinking": 0, "tool_call": 0},
+                "text_frames": 2491, "turns": 0, "turns_in_flight": 10,
+                "delivery_available": true},
     "session_create": {"ok": 10, "failed": 0, "total_ms": 13.9},
     "gateway": {"pid": 456, "url": "http://127.0.0.1:63665",
                 "version": "0.7.0", "commit": "a7e7126"},
@@ -137,6 +142,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 
 - `meta.notes` / `meta.failures` / `meta.out` / `meta.selftest`：全局说明、失败摘要、
   产物目录、自测标记；
+- `meta.args.frame_delay_ms` / `sleep_overshoot_ms`：本次运行实测的 `asyncio.sleep` 超时
+  与其补偿结果（`--rate` 是注入参数，见「已知边界」）；
 - `meta.session_create` 是**全档汇总**（`scope: "sum over levels"`）——逐档数字在
   `levels[i].session_create`（「建 N 个会话要多久」本身就是被测数字）；有档位没拿到
   数字（环境都没起来）时整组写 `null` + `scope` 说明，不按 0 求和；
@@ -145,6 +152,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   `delivery_available`、`dropped_reasons`（配对丢弃的分类计数）；
 - `levels[i].metrics.gateway.rss_mb_end`：窗口末次 RSS（`rss_mb_slope_per_session` 与报告
   的 `peak / end` 列都用它）；
+- `levels[i].samples.delta_frames`：窗口内收到的 delta 事件数（按通道）；
+  `turns` = 窗口内**完成**的轮次数，`turns_in_flight` = 窗口末仍在飞、被强制收尾的轮次数
+  （`pure_stream` 恒为 `sessions`，它证明窗口内没有轮次边界）；
 - `levels[i].rig.host_loadavg`：**窗口起点**采一次（三档数值不同说明机器状态在变）；
 - `levels[i].shape`：本档的 rate / 实际分片数 / 订阅模式；
 - `levels[i].error`：该档失败时的一句话诊断；完整诊断（含网关日志尾部）在
@@ -158,9 +168,10 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `gateway.rss_mb_peak` / `rss_mb_end` | 窗口内每 `1 s` 采样一次的峰值 / 末次值（Linux `/proc/<pid>/statm`，macOS `ps -o rss=`） |
 | `gateway.fds_peak` | 同上频率采样的 fd 数峰值（Linux `/proc/<pid>/fd`，macOS `lsof -p`）——峰值分辨率 = 采样间隔 |
 | `gateway.rss_mb_slope_per_session` | 与**上一档**末次 RSS 的相邻差斜率；最小档无上一档 → `null` |
-| `delivery.*_ms` | 客户端收到第 i 帧 `text` 的时刻 − 假 Provider 发射第 i 帧的时刻（同机 `time.monotonic()`） |
-| `turn.*_ms` | 发 prompt → 收到 `turn_result`（只取窗口内发起**且**窗口内完成的轮次）。`error` 事件不是轮次边界——它是失败轮的伴随事件 |
-| `tokens_per_second_actual` | 窗口内收到的 `text` 事件数 / 窗口秒（`pure_stream` 里 1 帧 = 1 token） |
+| `delivery.*_ms` | 客户端收到第 i 帧的时刻 − 假 Provider 发射第 i 帧的时刻（同机 `time.monotonic()`）。**按通道**配对：`content`→`text`、`thinking`→`reasoning`、`tool_call`→`tool_call_stream`（见「投递延迟的配对」） |
+| `turn.*_ms` | 发 prompt → 收到 `turn_result`（只取窗口内完成的轮次）。`error` 事件不是轮次边界——它是失败轮的伴随事件。`pure_stream` 是单轮形态，这里恒为 `null` |
+| `tokens_per_second_actual` | 窗口内收到的 `content` delta 事件数 / 窗口秒（1 帧 = 1 token）。**报告的唯一速率口径**之一 |
+| `events_per_second_actual` | 窗口内收到的**全部通道** delta 事件数 / 窗口秒（只有 `content` 时与上者相同） |
 | `errors` | 窗口内（事件到达时刻在 `[window_start, window_end]` 内）的 `turn_result.is_error` 数 + 分片发送失败数。失败轮上网关会**同时**发 `turn_result(is_error)` 与 `error` 事件，只记前者的原因见 :mod:`driver_shard` |
 | `slow_client_recycles` | 窗口结束前就被网关回收的客户端连接数（分片在 `window_end` 时刻数一遍自己的连接：此刻还没关连接，`closed` 的都是网关先断的）。不扫网关日志——那会把窗口末驱动自己的正常收尾也算进去 |
 | `rig.provider_cpu_cores` | coordinator 进程（= Provider 宿主 + 采样器）在窗口内的 CPU 秒 / 窗口秒；上界，不是纯 Provider |
@@ -169,26 +180,52 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 百分位是 **nearest-rank**（p99 = 升序第 `ceil(0.99·n)` 个值，不插值），与
 `scripts/perf/suite_gateway.py` 一致；实现只在 `metrics.percentile()` 一处。
 
-### 投递延迟的配对（严格，不猜）
+### 投递延迟的配对（按通道，严格，不猜）
 
 1. driver 每次发的 prompt 文本全局唯一（`load:<session>:<seq>`）；
 2. coordinator 在假 Provider 的 `RequestLog` 里按「**最后一条 user 消息正文** == 该文本」
    定位 `request_index`（`content` 可能是 block 列表，取其中的 `text` 块拼接）；
-3. 用该请求的发射时刻列表与客户端按序到达的 `text` 事件**按下标配对**：
-   - 长度不等 → 整轮丢弃（不截断、不偏移对齐）；
-   - 同一 prompt 命中多条请求（网关重试）→ 整轮丢弃（无法确定是哪一次）；
-   - 负延迟 → 视为错位，丢弃该帧。
+3. 上游给每帧一个**通道标记**（`FrameEmit.kind`，闭合词表 `sse.FRAME_KINDS`）。配对逐
+   通道进行，通道之间互不影响：
+
+   | 通道 | 客户端事件 | 说明 |
+   |---|---|---|
+   | `content` | `text` | 正文增量（1 帧 = 1 token） |
+   | `thinking` | `reasoning` | 推理增量 |
+   | `tool_call` | `tool_call_stream` | 工具参数增量 |
+   | `meta` | —（**不配对**） | role 空帧 / finish 帧 / usage 帧 / `[DONE]` |
+
+   一次 8 字正文的请求因此是「11 帧（`meta` + 8×`content` + 2×`meta`）↔ 8 条 `text`
+   事件」——按整帧序 1:1 对齐必然长度不齐，按通道才是可配对的。
+
+4. 同一通道内按下标对齐（第 i 帧 ↔ 第 i 个事件），取两者较短的长度做前缀；余下的按方向
+   记账，绝不猜：已完成轮次的发射侧富余 → `missing_events:<kind>`（客户端少收，异常）、
+   窗口末仍在飞的轮次 → `in_flight_tail:<kind>`（预期）、到达侧富余 →
+   `unexpected_events:<kind>`（客户端多收）。落点不在采样窗口内的配对（跨窗口起点的预热段）
+   记 `outside_window`；负延迟记 `negative_latency`；prompt 未命中 / 命中多条（重试）
+   分别记 `unknown_prompt` / `ambiguous_prompt`。
 
 丢弃的帧按原因计数进 `levels[i].samples.dropped_reasons`（**单位是帧**，
-`sum(reasons) == dropped`），并写进 `notes`。`delivery_available` 在失败档是 `null`
-（未知），不是 `false`。
+`sum(reasons) == dropped`），并写进 `notes`；`samples.count` 是进入延迟分布的帧数，
+`paired + dropped` 与「客户端收到的窗口内 delta 事件数 + 发射侧富余」闭合。
+`delivery_available` 在失败档是 `null`（未知），不是 `false`。
 
 ## 负载形态
 
-当前只有 `pure_stream`（`shape_pure_stream.py`）：每会话一条持续的长流式回复，帧大小
-1 token、帧间隔 `1/rate`，一轮结束立刻发下一条 prompt。它把「网关的每帧成本 × 会话数」
-直接顶出来，是探并发边界的主负载。单轮时长由档位驱动时长反推（默认目标 5 s，窗口更短
-时按 `span/5` 缩短），保证窗口内能完成的轮次数量级稳定。
+当前只有 `pure_stream`（`shape_pure_stream.py`）：**每会话一轮、轮长覆盖 warmup+dwell**
+（`Turn.text` 长度 = `rate × (warmup + dwell) + 1 s` 余量，帧大小 1 token、帧间隔
+`1/rate`）。于是采样窗口里每个会话都在同一轮之内：
+
+- 窗口内**没有轮次边界** ⇒ `gateway.cpu_cores` 只含「每事件成本」（逐帧序列化 + 一次
+  task/帧 + socket 写），可以按会话数扫出这个常数；
+- 每轮固定成本（上下文装配 / 落盘 / 审计 INSERT / 轮次事件）**不在**这个形态的读数里，
+  要看多轮形态；`levels[i].samples.turns`（窗口内完成的轮次数）对 `pure_stream` 恒为 0、
+  `turns_in_flight` 等于会话数——这就是「窗口内没有轮次边界」的证据；
+- 代价：`turn.p50_ms` / `turn.p99_ms` 对 `pure_stream` 结构性地是 `null`（没有完成的轮次），
+  报告里有一行 note 说明，不是没测到。
+- 代价二（内存）：Provider 会为**每个在飞请求**物化整条帧序列（`sse.stream_frames`），
+  内存与 `sessions × rate × span` 同阶——1000 会话 × 50 tok/s × 25 s 约 10^6 帧，
+  跑大档前先确认机器吃得下。
 
 新增形态：写一个满足 `NAME` / `MODEL` / `script(*, sessions, rate, span_s)` /
 `prompt_text(session_id, seq)` 契约的模块，在 `shapes.SHAPES` 登记一行
@@ -247,17 +284,27 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `cli.contract` | 冻结 CLI 的默认值与全部校验分支（非法 levels / rate / dwell / warmup / shards / history-tokens / scenario） |
 | `shapes.contract` | 形态契约与剧本覆盖度、prompt 文本全局唯一 |
 | `report.render` | 合成 `run.json` → markdown（表格列数自洽、缺数据是 `—` 不是 0、不可用有横幅、多行 note 折行） |
-| `e2e` | **真网关子进程 + 真分片子进程**跑完迷你一档：断言 `run.json` / `report.md` / `raw/<N>/` 的形状、分片 CPU 窗口与采样窗口一致、健康档 `slow_client_recycles == 0`；再跑一次**相对 `--out`**（默认形态）；并用一个失败档断言「失败档键集 == 成功档键集」 |
+| `e2e` | **真网关子进程 + 真分片子进程**跑完迷你一档：断言 `run.json` / `report.md` / `raw/<N>/` 的形状、分片 CPU 窗口与采样窗口一致、健康档 `slow_client_recycles == 0`、**投递延迟有值且按通道闭合**（`samples.count == delta_frames.content`、无 `missing_events` / `unexpected_events` / 负延迟）；再跑一次**相对 `--out`**（默认形态）；并用一个失败档断言「失败档键集 == 成功档键集」 |
 
 `e2e` 走的是产品代码同一路径（注入 `run_ladder`），不是平行实现。
 
 ## 已知边界
 
-- **投递延迟依赖上游接口**：`FakeProvider.frame_emits` / `emits_for`（逐帧发射时刻）。
+- **投递延迟依赖上游接口**：`FakeProvider.frame_emits`（逐帧发射时刻 + 通道标记）。
   接口缺席时 `delivery.*` 与 `samples.count/dropped` 都是 `null`，`samples.delivery_available=false`，
   且 `meta.notes` / `levels[i].notes` / `report.md` 顶部三处点名——**不写 0、不估计**。
-  其余指标（CPU / RSS / fd / 轮次 / 帧速率）照常可用。配对假设发射时刻列表与客户端
-  `text` 事件一一对应（含首帧、不含 role / finish / usage 帧）；长度不等即判丢弃。
+  其余指标（CPU / RSS / fd / 帧速率）照常可用。
+- **速率的两段误差**（`--rate` 只是注入参数）：
+  1. Provider 的节奏是「睡够再写一帧」，本机 `asyncio.sleep(20ms)` 实测稳定多睡约
+     2.1 ms（与 delay 无关）⇒ 不补偿时 50 tok/s 只能跑到约 45.6。运行前空载实测这个
+     超时并从句间隔里扣掉（`meta.args.sleep_overshoot_ms` / `frame_delay_ms`），补偿后
+     同一档实测 49.6 / 490.2（标称 50 / 500）。
+  2. 残余误差与机器负载、网关消费速度有关，仍以实测的 `tokens_per_second_actual` /
+     `events_per_second_actual` 为准；`delivery` 的 `in_flight_tail` 会告诉你「发射了但
+     窗口末还没到客户端」的那几帧。
+- **`turn.*` 对 `pure_stream` 是 `null`**（单轮形态的结构性结果，见「负载形态」）；
+  想看轮次耗时用多轮形态。窗口内轮次数照样上报（`samples.turns` / `turns_in_flight`），
+  因此「每轮固定成本」可以由「多轮形态 − 单轮形态」相减得到，不必靠猜。
 - `--history-tokens` 只接受 0（预置历史体量的形态待补）。
 - 订阅模式不同，单会话成本不同：`per-session` 是 N 条 WS（贴近真实，开销更大），
   `per-shard` 是 K 条（轻量档，仅用于自测 / 极限档）。两者读数不可直接对比。
@@ -265,8 +312,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   失败档保留（`raw/<N>/workspace`）以便复盘。
 - 会话工具集固定为 `Read` 一个（`orchestrator.TOOLS`）：真实部署的工具 schema 与 system
   prompt 更大、会摊进每轮请求，因此这里量到的是**最小工具集下的上界**（会把容量报高）。
-- 单轮之间有网关的提交 + 下一次请求组装开销，占空比因此低于 100%
-  （`tokens_per_second_actual` 是真实值；小档位实测约 80~85%）。
+- 单轮形态下 `gateway.cpu_cores` 只含每事件成本；多轮形态（其他负载）会额外含每轮
+  固定成本（网关提交 + 下一次请求组装，本机实测约 165~260 ms/轮）。两者不可直接比。
 - fd 峰值与 RSS 峰值的分辨率是 1 s 采样间隔，短尖峰可能采不到。
 - 一档的全部分片样本会一次性读进 coordinator 内存再配对（1000 会话、每会话数轮、
   每轮数百帧的量级约几十 MB）——这是「配对要跨进程读两边」的代价，不是可省的开销。
@@ -280,7 +327,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 |---|---|
 | 某档指标全 `null` | `levels[i].error`；`raw/<N>/gateway.log`、`raw/<N>/shard-*.log` |
 | `delivery.*` 全 `null` | `samples.delivery_available`、`meta.notes`（上游发射时刻是否就位） |
-| `samples.dropped` 很大 | `samples.dropped_reasons`：`length_mismatch` = 帧序对不上；`ambiguous_prompt` = 网关重试 |
+| `samples.dropped` 很大 | `samples.dropped_reasons`：`outside_window` = 跨窗口起点的预热段（正常）；`in_flight_tail:<kind>` = 窗口末仍在传输（正常，条数≈帧率×传输延迟）；`missing_events:<kind>` = 客户端少收了事件（异常）；`unexpected_events` = 客户端多收（异常）；`ambiguous_prompt` = 网关重试 |
+| `tokens_per_second_actual` 明显低于 `--rate` | `meta.args.sleep_overshoot_ms` 是否接近帧间隔（补偿失效）；`in_flight_tail` 是否偏大（网关消费不过来） |
 | 网关 CPU 高但 rig 也高 | 加大 `--shards`；看 `rig.shard_cpu_cores` 是否有个别分片吃满 |
 | `EMFILE` / `Too many open files` | `meta.host.ulimit_n` 是否达到 `4 × N + 256`；见「fd 上限」 |
 | 读数在两档之间抖动 | `rig.host_loadavg`（机器是否被别的任务占用）；容量测量必须串行跑 |

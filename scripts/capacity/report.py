@@ -24,7 +24,7 @@ LEVEL_COLUMNS: tuple[str, ...] = (
     "gw fds",
     "delivery p50 / p99 / p999 ms",
     "turn p50 / p99 ms",
-    "tok/s",
+    "tok/s (ev/s)",
     "errors",
     "recycles",
 )
@@ -34,7 +34,7 @@ RIG_COLUMNS: tuple[str, ...] = (
     "provider cpu",
     "shard cpu (per shard)",
     "loadavg",
-    "samples (paired / dropped / frames)",
+    "paired / dropped / content frames / turns (done + in flight)",
 )
 
 
@@ -69,6 +69,15 @@ def _triple(record: Mapping[str, Any], prefix: str) -> str:
     return MISSING if all(part == MISSING for part in parts) else " / ".join(parts)
 
 
+def _duo(record: Mapping[str, Any], first: str, second: str) -> str:
+    """``a (b)``：两个同量纲指标并排（相同则只写一个）。"""
+    metrics = record.get("metrics") or {}
+    left, right = _num(metrics.get(first)), _num(metrics.get(second))
+    if left == right or right == MISSING:
+        return left
+    return f"{left} ({right})"
+
+
 def _pair(record: Mapping[str, Any], first: str, second: str) -> str:
     metrics = record.get("metrics") or {}
     left, right = _num(metrics.get(first)), _num(metrics.get(second))
@@ -94,7 +103,7 @@ def _level_rows(levels: Sequence[Mapping[str, Any]]) -> list[list[str]]:
                 _num(metrics.get("gateway.fds_peak")),
                 _triple(record, "delivery"),
                 _pair(record, "turn.p50_ms", "turn.p99_ms"),
-                _num(metrics.get("tokens_per_second_actual")),
+                _duo(record, "tokens_per_second_actual", "events_per_second_actual"),
                 _num(metrics.get("errors")),
                 _num(metrics.get("slow_client_recycles")),
             ]
@@ -117,9 +126,14 @@ def _rig_rows(levels: Sequence[Mapping[str, Any]]) -> list[list[str]]:
                 if isinstance(loadavg, list)
                 else MISSING,
                 " / ".join(
-                    _num(samples.get(key))
-                    for key in ("count", "dropped", "text_frames")
-                ),
+                    [
+                        _num(samples.get("count")),
+                        _num(samples.get("dropped")),
+                        _num((samples.get("delta_frames") or {}).get("content")),
+                        _num(samples.get("turns")),
+                    ]
+                )
+                + f" + {_num(samples.get('turns_in_flight'))}",
             ]
         )
     return rows
@@ -219,9 +233,19 @@ def render(run: Mapping[str, Any]) -> str:
             "",
             "- `gw cpu` = 采样窗口内网关进程 CPU 秒 / 窗口秒（首尾累计差）。",
             "- `delivery` = 客户端收到第 i 帧 − 假 Provider 发射第 i 帧（同机单调时钟）；"
-            "按帧下标严格配对，配不上的样本记 `dropped`。",
-            "- `turn` = 发 prompt → `turn_result`（只取窗口内发起且完成的轮次）。",
-            "- `tok/s` = 窗口内收到的 `text` 事件数 / 窗口秒（1 帧 = 1 token 是本形态的约定）。",
+            "**按通道**（`content`→`text`、`thinking`→`reasoning`、"
+            "`tool_call`→`tool_call_stream`）再按下标配对，`meta` 帧不参与；"
+            "配不上的帧记 `dropped` 并在 `levels[i].samples.dropped_reasons` 分类。",
+            "- `turn` = 发 prompt → `turn_result`（只取窗口内完成的轮次；"
+            "窗口末仍在飞的那一轮只出投递延迟、不出轮次耗时）。",
+            "- `tok/s` = 窗口内收到的 `content` delta 事件数 / 窗口秒（1 帧 = 1 token）；"
+            "`ev/s` = 全部通道的 delta 事件数 / 窗口秒。**标称 `--rate` 只是注入参数**，"
+            "结论一律以这两个实测值为准（报告里两者相同说明这个形态只有 content 通道）。",
+            "- `turn` 为 `—` 说明窗口内没有完成的轮次：`pure_stream` 每会话一轮、轮长覆盖"
+            " warmup+dwell，所以窗口里只含每事件成本，不含每轮固定成本。",
+            "- `paired / dropped` 是投递延迟配对的帧数：`dropped` 由 "
+            "`levels[i].samples.dropped_reasons` 分类（`outside_window` = 跨窗口起点的"
+            "预热段、`in_flight_tail` = 窗口末仍在传输的帧）。",
             "- 百分位为 nearest-rank（p99 = 升序第 `ceil(0.99·n)` 个值）；"
             "完整口径与判读方法见 `scripts/capacity/README.md`。",
             "- `—` / `null` = 没有样本，**不是 0**。",

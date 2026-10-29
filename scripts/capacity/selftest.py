@@ -93,17 +93,14 @@ def check_stats() -> None:
 # ── pairing ───────────────────────────────────────────────────
 
 
-def _provider(emits: Mapping[int, Sequence[float]], *, with_getter: bool = True) -> Any:
-    """合成 Provider：满足上游冻结接口的最小形态（值可控）。"""
-    frame_emits = [
-        SimpleNamespace(request_index=index, frame_index=frame, at=at)
-        for index, values in emits.items()
-        for frame, at in enumerate(values)
+def _provider(frames: Mapping[int, Sequence[tuple[str, float]]]) -> Any:
+    """合成 Provider：``{request_index: [(kind, at), …]}``，与上游 ``FrameEmit`` 同形。"""
+    emits = [
+        SimpleNamespace(request_index=index, frame_index=position, at=at, kind=kind)
+        for index, values in frames.items()
+        for position, (kind, at) in enumerate(values)
     ]
-    fields: dict[str, Any] = {"frame_emits": frame_emits}
-    if with_getter:
-        fields["emits_for"] = lambda request_index: list(emits[request_index])
-    return SimpleNamespace(**fields)
+    return SimpleNamespace(frame_emits=tuple(emits))
 
 
 def _request(index: int, prompt: str) -> Any:
@@ -146,52 +143,143 @@ def check_last_user_text() -> None:
 
 
 def check_pairing() -> None:
-    """按下标配对 + 四类丢弃原因 + 缺接口抛错。"""
-    emits = {0: [100.0, 100.02, 100.04], 1: [200.0, 200.02]}
-    provider = _provider(emits)
+    """按通道、按下标配对 + 各类丢弃原因 + 缺接口抛错。"""
+    # 真实形态：meta 帧夹在内容帧之间（role 帧、finish 帧、usage 帧）。
+    frames = {
+        0: [
+            ("meta", 100.0),
+            ("content", 100.02),
+            ("content", 100.04),
+            ("content", 100.06),
+            ("meta", 100.08),
+        ],
+        1: [("meta", 200.0), ("content", 200.02), ("content", 200.04)],
+    }
+    provider = _provider(frames)
+    ledger = metrics.build_emit_ledger(provider)
+    _check(
+        ledger.kinds(0)["content"] == (100.02, 100.04, 100.06),
+        f"meta frames must be excluded from the ledger: {ledger.kinds(0)}",
+    )
     requests = [_request(0, "load:s0:0"), _request(1, "load:s1:0")]
     turns = [
         metrics.TurnSample(
             prompt="load:s0:0",
             sent_at=99.9,
             result_at=100.1,
-            arrivals=(100.001, 100.023, 100.044),
+            arrivals={"content": (100.021, 100.043, 100.064)},
         ),
         metrics.TurnSample(
-            prompt="load:s1:0", sent_at=199.9, result_at=200.1, arrivals=(200.002,)
+            prompt="load:s1:0",
+            sent_at=199.9,
+            result_at=200.1,
+            arrivals={"content": (200.022,)},
         ),
     ]
-    pairing = metrics.pair_delivery(provider, requests, turns)
-    _check(pairing.paired == 3, f"expected 3 paired frames, got {pairing.paired}")
-    _check(pairing.dropped == 1, f"expected 1 dropped frame, got {pairing.dropped}")
+    pairing = metrics.pair_delivery(ledger, requests, turns)
+    _check(pairing.paired == 4, f"expected 4 paired frames, got {pairing.paired}")
     _check(
-        pairing.reasons.get("length_mismatch") == 1,
-        f"length mismatch must be classified, got {dict(pairing.reasons)}",
+        pairing.channels == {"content": 4},
+        f"pairs must be attributed to their channel: {dict(pairing.channels)}",
     )
     _check(
-        sorted(round(value, 3) for value in pairing.latencies_ms) == [1.0, 3.0, 4.0],
+        sorted(round(value, 3) for value in pairing.latencies_ms)
+        == [1.0, 2.0, 3.0, 4.0],
         f"latency must be arrival - emit, got {pairing.latencies_ms}",
+    )
+    # 第 1 轮的第二个内容帧客户端没收到，但这轮是「完成」的 → 真丢事件，必须点名。
+    _check(
+        pairing.reasons.get("missing_events:content") == 1,
+        f"a completed turn missing an event must be classified: {dict(pairing.reasons)}",
+    )
+    _check(
+        sum(pairing.reasons.values()) == pairing.dropped,
+        "drop reasons must add up to the dropped frame count",
+    )
+
+    # 通道各归各：thinking → reasoning、tool_call → tool_call_stream，互不干扰。
+    mixed = _provider(
+        {
+            0: [
+                ("meta", 100.0),
+                ("thinking", 100.02),
+                ("content", 100.04),
+                ("tool_call", 100.06),
+                ("meta", 100.08),
+            ]
+        }
+    )
+    mixed_turn = metrics.TurnSample(
+        "p",
+        99.0,
+        101.0,
+        {
+            "thinking": (100.021,),
+            "content": (100.043,),
+            "tool_call": (100.062,),
+        },
+    )
+    mixed_pairing = metrics.pair_delivery(
+        metrics.build_emit_ledger(mixed), [_request(0, "p")], [mixed_turn]
+    )
+    _check(
+        mixed_pairing.paired == 3
+        and dict(mixed_pairing.channels)
+        == {"content": 1, "thinking": 1, "tool_call": 1},
+        f"each channel must pair on its own: {dict(mixed_pairing.channels)}",
+    )
+
+    # 窗口末仍在飞的那一轮：发射端多出的帧记 in_flight_tail（预期），不吞不猜。
+    in_flight = metrics.pair_delivery(
+        ledger,
+        requests,
+        [metrics.TurnSample("load:s1:0", 199.9, None, {"content": (200.022,)})],
+    )
+    _check(
+        in_flight.paired == 1 and in_flight.reasons.get("in_flight_tail:content") == 1,
+        f"an in-flight turn must report its tail: {dict(in_flight.reasons)}",
+    )
+    # 客户端多收了事件：同样按帧记账。
+    unexpected = metrics.pair_delivery(
+        ledger,
+        requests,
+        [
+            metrics.TurnSample(
+                "load:s1:0", 199.9, 200.1, {"content": (200.022, 200.044, 200.05)}
+            )
+        ],
+    )
+    _check(
+        unexpected.reasons.get("unexpected_events:content") == 1,
+        f"extra arrivals must be classified: {dict(unexpected.reasons)}",
+    )
+    # 窗口过滤：窗口外的配对不计入分布。
+    windowed = metrics.pair_delivery(ledger, requests, turns, window=(100.03, 100.07))
+    _check(
+        windowed.reasons.get("outside_window") == 2 and windowed.paired == 2,
+        f"pairs outside the window must be excluded: {dict(windowed.reasons)} "
+        f"paired={windowed.paired}",
     )
 
     # 未知 prompt / 同一 prompt 命中多条（重试）→ 整轮丢弃，不猜。
     unknown = metrics.pair_delivery(
-        provider,
+        ledger,
         requests,
-        [metrics.TurnSample("load:zzz:0", 1.0, 2.0, (100.0, 100.1))],
+        [metrics.TurnSample("load:zzz:0", 1.0, 2.0, {"content": (100.0, 100.1)})],
     )
     _check(unknown.paired == 0 and unknown.dropped == 2, "unknown prompt must drop")
     _check(
         unknown.reasons.get("unknown_prompt") == 2,
         "unknown prompt must be classified (frame counts)",
     )
-    _check(
-        sum(unknown.reasons.values()) == unknown.dropped,
-        "drop reasons must add up to the dropped frame count",
-    )
     ambiguous = metrics.pair_delivery(
-        provider,
+        ledger,
         [_request(0, "load:s0:0"), _request(1, "load:s0:0")],
-        [metrics.TurnSample("load:s0:0", 0.0, 1.0, (100.0, 100.02, 100.04))],
+        [
+            metrics.TurnSample(
+                "load:s0:0", 0.0, 1.0, {"content": (100.0, 100.02, 100.04)}
+            )
+        ],
     )
     _check(
         ambiguous.paired == 0 and ambiguous.dropped == 3, "ambiguous prompt must drop"
@@ -203,9 +291,11 @@ def check_pairing() -> None:
 
     # 负延迟 = 错位，不写进样本。
     negative = metrics.pair_delivery(
-        _provider({0: [100.0, 100.02]}),
+        metrics.build_emit_ledger(
+            _provider({0: [("content", 100.0), ("content", 100.02)]})
+        ),
         [_request(0, "p")],
-        [metrics.TurnSample("p", 0.0, 1.0, (99.9, 100.03))],
+        [metrics.TurnSample("p", 0.0, 1.0, {"content": (99.9, 100.03)})],
     )
     _check(
         negative.paired == 1 and negative.dropped == 1,
@@ -216,34 +306,18 @@ def check_pairing() -> None:
         "negative latency must be classified",
     )
 
-    # 没有 emits_for 时退到 frame_emits（按 frame_index 排序）。
-    fallback = _provider({0: [100.0, 100.02]}, with_getter=False)
-    _check(
-        metrics.frame_emits_for(fallback, 0) == [100.0, 100.02],
-        "frame_emits fallback must keep frame order",
-    )
-
-    # 缺接口必须显式失败（而不是返回空列表 → 静默「无延迟数据」）。
-    missing = _provider({}, with_getter=False)
-    del missing.frame_emits
+    # 缺接口必须显式失败（而不是返回空表 → 静默「无延迟数据」）。
+    missing = SimpleNamespace()
     _check(not metrics.has_frame_emits(missing), "capability probe must report absence")
-    for call in (
-        lambda: metrics.frame_emits_for(missing, 0),
-        lambda: metrics.pair_delivery(
-            missing,
-            [_request(0, "p")],
-            [metrics.TurnSample("p", 0.0, 1.0, (1.0,))],
-        ),
-    ):
-        try:
-            call()
-        except metrics.DeliveryUnavailable as exc:
-            _check(
-                "frame_emits not available" in str(exc),
-                f"error text must be greppable: {exc}",
-            )
-        else:  # pragma: no cover - 红线回归
-            raise SelftestFailure("missing frame_emits must raise DeliveryUnavailable")
+    try:
+        metrics.build_emit_ledger(missing)
+    except metrics.DeliveryUnavailable as exc:
+        _check(
+            "frame_emits not available" in str(exc),
+            f"error text must be greppable: {exc}",
+        )
+    else:  # pragma: no cover - 红线回归
+        raise SelftestFailure("missing frame_emits must raise DeliveryUnavailable")
 
 
 def _sampling(**overrides: Any) -> orchestrator._Sampling:
@@ -266,6 +340,8 @@ def _sample_payload(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "shard": 0,
         "text_frames": 3,
+        "delta_frames": {"content": 3, "thinking": 0, "tool_call": 0},
+        "turns_in_flight": 0,
         "errors": 0,
         "cpu_seconds": 0.5,
         "cpu_span_s": 5.0,
@@ -276,7 +352,7 @@ def _sample_payload(**overrides: Any) -> dict[str, Any]:
                 "prompt": "load:s0:0",
                 "sent_us": 1000,
                 "result_us": 2001000,
-                "arrivals_us": [10000, 20000, 30000],
+                "arrivals_us": {"content": [16000, 27000, 38000]},
             }
         ],
     }
@@ -292,7 +368,27 @@ def check_assemble() -> None:
     )
     requests = RequestLog()
     requests.record({"messages": [{"role": "user", "content": "load:s0:0"}]}, model="m")
-    provider = _provider({0: [100.005, 100.015, 100.025]})
+    provider = SimpleNamespace(
+        frame_emits=tuple(
+            [
+                SimpleNamespace(
+                    request_index=0, frame_index=0, at=100.005, kind="meta"
+                ),
+                SimpleNamespace(
+                    request_index=0, frame_index=1, at=100.015, kind="content"
+                ),
+                SimpleNamespace(
+                    request_index=0, frame_index=2, at=100.025, kind="content"
+                ),
+                SimpleNamespace(
+                    request_index=0, frame_index=3, at=100.035, kind="content"
+                ),
+                SimpleNamespace(
+                    request_index=0, frame_index=4, at=100.045, kind="meta"
+                ),
+            ]
+        )
+    )
     provider.requests = requests
     cfg = RunConfig(
         scenario="pure_stream",
@@ -321,8 +417,8 @@ def check_assemble() -> None:
     _check(samples["count"] == 3, f"expected 3 paired frames, got {samples['count']}")
     _check(samples["dropped"] == 0, f"expected 0 dropped, got {samples['dropped']}")
     _check(
-        metrics_block["delivery.p50_ms"] == 5.0
-        and metrics_block["delivery.p999_ms"] == 5.0,
+        metrics_block["delivery.p50_ms"] == 2.0
+        and metrics_block["delivery.p999_ms"] == 3.0,
         f"latency must land on the metric keys: {metrics_block}",
     )
     _check(
@@ -334,10 +430,11 @@ def check_assemble() -> None:
         f"shard cpu = 0.5s / 5s: {record['rig']['shard_cpu_cores']}",
     )
     _check(
-        record["metrics"]["tokens_per_second_actual"] == 0.6,
-        f"3 frames / 5 s: {record['metrics']['tokens_per_second_actual']}",
+        record["metrics"]["tokens_per_second_actual"] == 0.6
+        and record["metrics"]["events_per_second_actual"] == 0.6,
+        f"3 content frames / 5 s: {record['metrics']['tokens_per_second_actual']}"
+        f" / {record['metrics']['events_per_second_actual']}",
     )
-
     _check(
         set(metrics_block) == set(orchestrator.METRIC_KEYS),
         f"assemble must not add or drop metric keys: "
@@ -347,19 +444,40 @@ def check_assemble() -> None:
         record["metrics"]["slow_client_recycles"] == 0,
         "no closed client must be reported as a recycle",
     )
-    closed_early = orchestrator._assemble(
+
+    # 窗口末仍在飞的一轮：样本照样交出来（result_at 为 null），尾部记 in_flight_tail。
+    in_flight_payload = _sample_payload(
+        turns_in_flight=1,
+        turns=[
+            {
+                "prompt": "load:s0:0",
+                "sent_us": 1000,
+                "result_us": None,
+                "arrivals_us": {"content": [16000, 27000]},
+            }
+        ],
+    )
+    in_flight = orchestrator._assemble(
         level_skeleton(1),
         cfg=cfg,
         sessions=1,
         provider=provider,
         sampling=_sampling(),
-        payloads=[_sample_payload(closed_before_end=2)],
+        payloads=[in_flight_payload],
         notes=[],
     )
     _check(
-        closed_early["metrics"]["slow_client_recycles"] == 2,
-        "clients the gateway dropped before window end must be counted: "
-        f"{closed_early['metrics']['slow_client_recycles']}",
+        in_flight["samples"]["turns"] == 0
+        and in_flight["samples"]["turns_in_flight"] == 1,
+        f"an in-flight turn must be counted as such: {in_flight['samples']}",
+    )
+    _check(
+        in_flight["samples"]["count"] == 2,
+        f"an in-flight turn still yields deliveries: {in_flight['samples']['count']}",
+    )
+    _check(
+        in_flight["metrics"]["turn.p50_ms"] is None,
+        "no completed turn → turn.* is null (never 0)",
     )
 
     # 分片的记账区间与采样窗口不一致 → 必须留一条 note（而不是把两个窗口混着算）。
@@ -378,31 +496,59 @@ def check_assemble() -> None:
         f"a mismatched shard CPU window must be called out: {mismatched}",
     )
 
-    # 全部配不上 → 延迟仍是 null，count 是真实的 0（不是「没有数据」）。
-    dropped: list[str] = []
-    short = _provider({0: [100.005, 100.015]})
+    # 客户端多收了一个事件：能配的照配，多出的按帧记账。
+    short = _provider({0: [("content", 100.015), ("content", 100.025)]})
     short.requests = requests
-    bad = orchestrator._assemble(
+    extra = orchestrator._assemble(
         level_skeleton(1),
         cfg=cfg,
         sessions=1,
         provider=short,
         sampling=_sampling(),
         payloads=[_sample_payload()],
-        notes=dropped,
+        notes=[],
     )
     _check(
-        bad["metrics"]["delivery.p50_ms"] is None,
+        extra["samples"]["count"] == 2 and extra["samples"]["dropped"] == 1,
+        f"pairable frames must pair, the surplus must be dropped: {extra['samples']}",
+    )
+    _check(
+        extra["samples"]["dropped_reasons"].get("unexpected_events:content") == 1,
+        f"drop reason must be classified: {extra['samples']['dropped_reasons']}",
+    )
+
+    # 一个都配不上（prompt 不在请求留档里）→ 延迟是 null、count 是真实的 0。
+    nothing = orchestrator._assemble(
+        level_skeleton(1),
+        cfg=cfg,
+        sessions=1,
+        provider=provider,
+        sampling=_sampling(),
+        payloads=[
+            _sample_payload(
+                turns=[
+                    {
+                        "prompt": "load:zzz:0",
+                        "sent_us": 1000,
+                        "result_us": 2001000,
+                        "arrivals_us": {"content": [16000, 27000, 38000]},
+                    }
+                ]
+            )
+        ],
+        notes=[],
+    )
+    _check(
+        nothing["metrics"]["delivery.p50_ms"] is None,
         "no pairable frame must leave delivery null (never 0)",
     )
     _check(
-        bad["samples"]["count"] == 0 and bad["samples"]["dropped"] == 3,
-        f"unpaired frames must be counted as dropped: {bad['samples']}",
+        nothing["samples"]["count"] == 0 and nothing["samples"]["dropped"] == 3,
+        f"unpairable arrivals must be counted: {nothing['samples']}",
     )
     _check(
-        bad["samples"]["dropped_reasons"].get("length_mismatch") == 3,
-        f"drop reason must be classified (frame counts): "
-        f"{bad['samples']['dropped_reasons']}",
+        nothing["samples"]["dropped_reasons"].get("unknown_prompt") == 3,
+        f"drop reason must be classified: {nothing['samples']['dropped_reasons']}",
     )
 
 
@@ -433,14 +579,19 @@ def check_shard_events() -> None:
     state.sent_at = 101.0
 
     shard._on_event("s0", "text", {"content": "x"}, SimpleNamespace(at=101.5))
+    shard._on_event("s0", "reasoning", {"content": "y"}, SimpleNamespace(at=101.6))
     shard._on_event("s0", "turn_result", {"is_error": True}, SimpleNamespace(at=103.0))
     shard._on_event("s0", "error", {"message": "boom"}, SimpleNamespace(at=103.0))
     shard._on_event("s0", "turn_result", {"is_error": True}, SimpleNamespace(at=103.0))
     _check(shard.errors == 1, f"one failed turn must count once, got {shard.errors}")
     _check(len(shard.turns) == 1, f"one turn sample expected, got {len(shard.turns)}")
     _check(
-        shard.turns[0].arrivals == (101.5,),
-        f"in-window arrivals must be kept: {shard.turns[0].arrivals}",
+        shard.turns[0].arrivals == {"content": (101.5,), "thinking": (101.6,)},
+        f"arrivals must be filed per channel: {dict(shard.turns[0].arrivals)}",
+    )
+    _check(
+        shard.window_events["content"] == 1 and shard.window_events["thinking"] == 1,
+        f"in-window events must be counted per channel: {shard.window_events}",
     )
     _check(
         shard._pending.qsize() == 1,
@@ -453,14 +604,34 @@ def check_shard_events() -> None:
     _check(
         shard._pending.qsize() == 1, "a turn ending after the window must not requeue"
     )
+    # 窗口末仍在飞的一轮也必须交出来（单轮形态下这是唯一的一轮）。
+    state.sent_at = 104.0
+    state.arrivals["content"] = [104.5]
     shard.close_window()
     _check(
-        shard.payload()["closed_before_end"] == 0,
+        len(shard.turns) == 2 and shard.turns[1].result_at is None,
+        f"the in-flight turn must be flushed at window end: {shard.turns}",
+    )
+    _check(
+        shard.turns[1].arrivals == {"content": (104.5,)},
+        f"in-flight arrivals must be kept: {dict(shard.turns[1].arrivals)}",
+    )
+    payload = shard.payload()
+    _check(
+        payload["closed_before_end"] == 0,
         "an open connection must not count as a recycle",
     )
     _check(
-        shard.payload()["cpu_span_s"] is not None,
+        payload["cpu_span_s"] is not None,
         "CPU accounting must record its own window length",
+    )
+    _check(
+        payload["turns_in_flight"] == 1,
+        f"in-flight turns must be reported: {payload['turns_in_flight']}",
+    )
+    _check(
+        payload["delta_frames"]["content"] == 1,
+        f"in-window delta events must be per channel: {payload['delta_frames']}",
     )
 
 
@@ -484,6 +655,7 @@ def check_summary() -> None:
         "gateway_cpu_cores",
         "delivery_p99_ms",
         "tokens_per_second_actual",
+        "events_per_second_actual",
         "errors",
         "error",
     ):
@@ -609,11 +781,25 @@ def check_shapes() -> None:
     """形态契约：注册表能解析，剧本覆盖整档所需轮次，prompt 文本全局唯一。"""
     shape = shapes.resolve("pure_stream")
     sessions, rate, span = 3, 20.0, 6.0
-    script = shape.script(sessions=sessions, rate=rate, span_s=span)
-    per_session = int(span / shape.turn_seconds(span)) + 2  # 上限的下界（floor）
+    tokens = shape.turn_tokens(rate, span)
     _check(
-        len(script) >= sessions * per_session,
-        f"script must hold at least {sessions * per_session} turns, got {len(script)}",
+        tokens >= rate * span,
+        f"one turn must cover the whole span: {tokens} token(s) < {rate * span}",
+    )
+    _check(
+        shape.turn_tokens(rate, span) > shape.turn_tokens(rate, span / 2),
+        "turn length must follow the span",
+    )
+    script = shape.script(sessions=sessions, rate=rate, span_s=span)
+    _check(
+        len(script) >= sessions,
+        f"script must hold at least one turn per session, got {len(script)}",
+    )
+    _check(
+        script.turns[0].text is not None
+        and len(script.turns[0].text) == tokens
+        and script.turns[0].chunk == 1,
+        "the turn must stream 1 token per frame over the whole span",
     )
     first = shape.prompt_text("sess-a", 0)
     _check(first != shape.prompt_text("sess-a", 1), "prompt text must vary by turn")
@@ -816,10 +1002,28 @@ def check_e2e(run_ladder: LadderRunner) -> None:
             metrics_block["errors"] == 0,
             f"no errors expected: {metrics_block['errors']}",
         )
-        _check(level["samples"]["text_frames"] > 0, "text frames must be counted")
+        samples = level["samples"]
+        _check(samples["text_frames"] > 0, "text frames must be counted")
         _check(
-            level["samples"]["turns"] >= 1,
-            "at least one turn must complete inside the window",
+            samples["delta_frames"]["content"] > 0,
+            f"delta frames must be counted per channel: {samples['delta_frames']}",
+        )
+        # 单轮形态：轮长覆盖 warmup+dwell，所以窗口内没有完成的轮次，但那一轮仍在飞
+        # 且它的到达时刻必须被交出来（否则投递延迟无从配对）。
+        _check(
+            samples["turns"] == 0 and samples["turns_in_flight"] >= 1,
+            f"pure_stream is single-turn: {samples['turns']} completed, "
+            f"{samples['turns_in_flight']} in flight",
+        )
+        _check(
+            metrics_block["turn.p50_ms"] is None,
+            "no completed turn must leave turn.* null (never 0)",
+        )
+        _check(
+            any(
+                "no turn completed inside the window" in note for note in level["notes"]
+            ),
+            f"the single-turn shape must explain the null turn metric: {level['notes']}",
         )
         _check(
             level["rig"]["shard_cpu_cores"],
@@ -836,33 +1040,34 @@ def check_e2e(run_ladder: LadderRunner) -> None:
             f"shard CPU window must match the sample window: {span_note}",
         )
 
-        samples = level["samples"]
-        if samples["delivery_available"]:
-            p50 = metrics_block["delivery.p50_ms"]
-            p99 = metrics_block["delivery.p99_ms"]
-            _check(
-                p50 is not None and p99 is not None,
-                "available delivery must have values",
-            )
-            _check(0.0 <= p50 <= p99, f"latency order violated: p50={p50} p99={p99}")
-            _check(
-                samples["count"] is not None and samples["count"] > 0,
-                "available delivery must pair at least one frame",
-            )
-        else:  # 上游接口未就位的形态：必须是「显式不可用」，不能写 0
-            _check(
-                metrics_block["delivery.p50_ms"] is None,
-                "unavailable delivery must be null, not 0",
-            )
-            _check(
-                samples["count"] is None and samples["dropped"] is None,
-                "unavailable delivery must not fake sample counts",
-            )
-            notes = list(meta["notes"]) + list(level.get("notes") or [])
-            _check(
-                any("frame_emits not available" in note for note in notes),
-                "unavailable delivery must be explained in meta.notes / level notes",
-            )
+        # 投递延迟：上游接口在这个树上就位，所以必须**有值**，而且每个窗口内的内容
+        # 增量事件都要配上（配对是按通道、按下标的，条数必须闭合）。
+        _check(
+            samples["delivery_available"] is True,
+            f"the emitter clock is part of the tree, delivery must be available: "
+            f"{samples['delivery_available']}",
+        )
+        p50 = metrics_block["delivery.p50_ms"]
+        p99 = metrics_block["delivery.p99_ms"]
+        _check(
+            p50 is not None and p99 is not None, "available delivery must have values"
+        )
+        _check(0.0 <= p50 <= p99, f"latency order violated: p50={p50} p99={p99}")
+        _check(
+            samples["count"] == samples["delta_frames"]["content"],
+            f"every in-window content event must pair: paired={samples['count']} "
+            f"content frames={samples['delta_frames']['content']} "
+            f"reasons={samples['dropped_reasons']}",
+        )
+        unexpected = {
+            reason: count
+            for reason, count in (samples["dropped_reasons"] or {}).items()
+            if reason.startswith(("missing_events", "unexpected_events", "negative"))
+        }
+        _check(
+            not unexpected,
+            f"channel pairing must close on this shape: {unexpected}",
+        )
 
         # 产物形状：run.json / report.md / raw/<N>/ 分片样本
         run_json = out / "run.json"

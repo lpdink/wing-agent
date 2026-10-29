@@ -72,6 +72,7 @@ METRIC_KEYS: tuple[str, ...] = (
     "turn.p50_ms",
     "turn.p99_ms",
     "tokens_per_second_actual",
+    "events_per_second_actual",
     "errors",
     "slow_client_recycles",
 )
@@ -81,8 +82,10 @@ SAMPLE_KEYS: tuple[str, ...] = (
     "count",
     "dropped",
     "dropped_reasons",
+    "delta_frames",
     "text_frames",
     "turns",
+    "turns_in_flight",
     "delivery_available",
 )
 
@@ -196,6 +199,7 @@ async def run_level(
     sessions: int,
     level_dir: Path,
     *,
+    frame_delay_s: float | None = None,
     tracebacks: bool = True,
 ) -> dict[str, Any]:
     """跑一档并返回 ``run.json`` 的 ``levels[i]`` 记录（失败也返回，带 ``error``）。"""
@@ -209,7 +213,7 @@ async def run_level(
     shutil.rmtree(level_dir, ignore_errors=True)
     level_dir.mkdir(parents=True, exist_ok=True)
     try:
-        env = await _start_env(cfg, sessions, level_dir)
+        env = await _start_env(cfg, sessions, level_dir, frame_delay_s)
         identity = await _gateway_identity(env)
         record["gateway"].update(
             {"pid": _process_pid(env), "url": env.gateway_url, **identity}
@@ -298,7 +302,29 @@ async def _gateway_identity(env: ProbeEnv) -> dict[str, Any]:
     }
 
 
-async def _start_env(cfg: RunConfig, sessions: int, level_dir: Path) -> ProbeEnv:
+async def measure_pacing(rate: float) -> float:
+    """实测本机 ``asyncio.sleep`` 在帧间隔上的系统性超时（秒）。
+
+    Provider 的注入节奏是「睡 ``delay`` 再写一帧」，而 ``asyncio.sleep`` 在这里（以及
+    多数平台）会稳定地多睡一点——本机约 2.1 ms、与 ``delay`` 无关。不补偿的话
+    ``--rate`` 只是**注入参数**而不是实际速率（50 tok/s 会跑成 45.6）。这里在档位开始
+    前空载测一次，把中位数作为补偿量交给形态；实际达到的速率仍以 ``events_per_second_*``
+    为准（补偿的残差在报告里看得见）。
+    """
+    interval = 1.0 / rate
+    samples = max(10, min(40, int(1.0 / interval)))
+    overshoot: list[float] = []
+    for _ in range(samples):
+        started = time.monotonic()
+        await asyncio.sleep(interval)
+        overshoot.append((time.monotonic() - started) - interval)
+    overshoot.sort()
+    return overshoot[len(overshoot) // 2]
+
+
+async def _start_env(
+    cfg: RunConfig, sessions: int, level_dir: Path, frame_delay_s: float | None
+) -> ProbeEnv:
     """起隔离环境（fresh WING_HOME + 假 Provider + 网关子进程）并注册剧本。"""
     shape = shapes.resolve(cfg.scenario)
     env = await ProbeEnv.start(
@@ -311,7 +337,12 @@ async def _start_env(cfg: RunConfig, sessions: int, level_dir: Path) -> ProbeEnv
     )
     env.register(
         shape.MODEL,
-        shape.script(sessions=sessions, rate=cfg.rate, span_s=cfg.span_s),
+        shape.script(
+            sessions=sessions,
+            rate=cfg.rate,
+            span_s=cfg.span_s,
+            frame_delay_s=frame_delay_s,
+        ),
     )
     return env
 
@@ -597,24 +628,37 @@ def _assemble(
     window_start = sampling.window_start
     turns = [
         TurnSample(
-            prompt=str(entry.get("prompt", "")),
+            prompt=str(entry["prompt"]),
             sent_at=window_start + int(entry["sent_us"]) / 1e6,
-            result_at=window_start + int(entry["result_us"]) / 1e6,
-            arrivals=tuple(
-                window_start + int(value) / 1e6
-                for value in entry.get("arrivals_us", ())
-            ),
+            result_at=None
+            if entry.get("result_us") is None
+            else window_start + int(entry["result_us"]) / 1e6,
+            arrivals={
+                kind: tuple(window_start + int(value) / 1e6 for value in values)
+                for kind, values in (entry.get("arrivals_us") or {}).items()
+            },
         )
         for payload in payloads
-        for entry in payload.get("turns", ())
+        for entry in payload["turns"]
     ]
-    text_frames = sum(int(payload.get("text_frames", 0)) for payload in payloads)
-    errors = sum(int(payload.get("errors", 0)) for payload in payloads)
+    delta_frames = {
+        kind: sum(
+            int((payload["delta_frames"] or {}).get(kind, 0)) for payload in payloads
+        )
+        for kind in metrics.CHANNEL_EVENTS
+    }
+    content_frames = delta_frames["content"]
+    all_events = sum(delta_frames.values())
+    errors = sum(int(payload["errors"]) for payload in payloads)
+    completed = [turn for turn in turns if turn.result_at is not None]
     wall = sampling.wall_s
     block = record["metrics"]
     samples = record["samples"]
-    samples["text_frames"] = text_frames if payloads else None
-    samples["turns"] = len(turns) if payloads else None
+    if payloads:
+        samples["delta_frames"] = delta_frames
+        samples["text_frames"] = content_frames
+        samples["turns"] = len(completed)
+        samples["turns_in_flight"] = len(turns) - len(completed)
     record["wall_s"] = round(wall, 3) if wall > 0 else None
 
     block["gateway.cpu_cores"] = _ratio(sampling.gateway_cpu_seconds, wall)
@@ -624,58 +668,70 @@ def _assemble(
     if sampling.fds:
         block["gateway.fds_peak"] = max(sampling.fds)
     block["slow_client_recycles"] = (
-        sum(int(payload.get("closed_before_end", 0)) for payload in payloads)
+        sum(int(payload["closed_before_end"]) for payload in payloads)
         if payloads
         else None
     )
 
     if payloads:
         block["errors"] = errors
-        if text_frames > 0 and wall > 0:
-            block["tokens_per_second_actual"] = round(text_frames / wall, 1)
-        elif text_frames > 0:
+        if wall > 0:
+            if content_frames:
+                block["tokens_per_second_actual"] = round(content_frames / wall, 1)
+            if all_events:
+                block["events_per_second_actual"] = round(all_events / wall, 1)
+        if not all_events:
             notes.append(
-                "tokens_per_second_actual is null: the sample window did not "
-                f"complete ({text_frames} text frame(s) were received)"
-            )
-        else:
-            notes.append(
-                "tokens_per_second_actual is null: no text frame arrived in the window"
+                "tokens_per_second_actual is null: no delta event arrived in the window"
+                if wall > 0
+                else "tokens_per_second_actual is null: the sample window did not complete"
             )
     turn_spread = metrics.spread(
-        [(turn.result_at - turn.sent_at) * 1000.0 for turn in turns]
+        [(turn.result_at - turn.sent_at) * 1000.0 for turn in completed]
     )
     block["turn.p50_ms"] = _round(turn_spread.get("p50"))
     block["turn.p99_ms"] = _round(turn_spread.get("p99"))
+    if payloads and not completed:
+        notes.append(
+            "turn.* is null: no turn completed inside the window — this shape streams "
+            "one turn per session across warmup + dwell by design, so the window holds "
+            "no per-turn fixed cost (that cost is measured by other shapes)"
+        )
 
     delivery_available = provider is not None and metrics.has_frame_emits(provider)
     samples["delivery_available"] = None if provider is None else delivery_available
     if delivery_available and turns:
-        pairing = metrics.pair_delivery(provider, provider.requests.all(), turns)
+        pairing = metrics.pair_delivery(
+            metrics.build_emit_ledger(provider),
+            provider.requests.all(),
+            turns,
+            window=(sampling.window_start, sampling.window_end),
+        )
         for label, value in metrics.spread(pairing.latencies_ms).items():
             block[f"delivery.{label}_ms"] = _round(value)
         samples["count"] = pairing.paired
         samples["dropped"] = pairing.dropped
         samples["dropped_reasons"] = dict(pairing.reasons)
-        if pairing.reasons:
-            notes.append(
-                f"delivery pairing dropped {pairing.dropped} sample(s): "
-                f"{dict(pairing.reasons)}"
-                + (
-                    " — the emitter clock must cover content frames only"
-                    " (one emit per client `text` event)"
-                    if "length_mismatch" in pairing.reasons
-                    else ""
-                )
-            )
-        notes.append(
-            "delivery percentile basis: nearest-rank over "
-            f"{pairing.paired} paired frame(s)"
+        channels = ", ".join(
+            f"{kind}={count}" for kind, count in sorted(pairing.channels.items())
         )
+        notes.append(
+            "delivery pairing is per channel ("
+            + ", ".join(
+                f"{kind}→{event}" for kind, event in metrics.CHANNEL_EVENTS.items()
+            )
+            + "), meta frames excluded; paired "
+            + (channels or "nothing")
+        )
+        if pairing.dropped:
+            notes.append(
+                f"delivery pairing dropped {pairing.dropped} frame(s): "
+                f"{dict(pairing.reasons)}"
+            )
     elif provider is not None and not delivery_available:
         notes.append(DELIVERY_UNAVAILABLE)
     elif delivery_available:
-        notes.append("delivery.* is null: no turn completed inside the sample window")
+        notes.append("delivery.* is null: no turn sample was collected in the window")
 
     shard_cpu: list[float | None] = []
     for payload in payloads:

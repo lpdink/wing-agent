@@ -84,6 +84,14 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
         file=sys.stderr,
         flush=True,
     )
+    overshoot_s = await orchestrator.measure_pacing(cfg.rate)
+    frame_delay_s = max(0.0, 1.0 / cfg.rate - overshoot_s)
+    print(
+        f"[capacity] pacing: asyncio.sleep overshoot {overshoot_s * 1000:.2f} ms → "
+        f"frame delay {frame_delay_s * 1000:.2f} ms (nominal {1000 / cfg.rate:.2f} ms)",
+        file=sys.stderr,
+        flush=True,
+    )
     levels: list[dict[str, Any]] = []
     for sessions in cfg.levels:
         print(f"[capacity] level {sessions}: running", file=sys.stderr, flush=True)
@@ -91,6 +99,7 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
             cfg,
             sessions,
             cfg.out / "raw" / str(sessions),
+            frame_delay_s=frame_delay_s,
             tracebacks=not selftest_run,
         )
         levels.append(record)
@@ -120,6 +129,8 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
             "shards": cfg.shards,
             "subscribers": cfg.subscribers,
             "history_tokens": cfg.history_tokens,
+            "frame_delay_ms": round(frame_delay_s * 1000, 3),
+            "sleep_overshoot_ms": round(overshoot_s * 1000, 3),
         },
         "host": proc.host_info(),
         "gateway": _meta_gateway(levels),
@@ -210,6 +221,9 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
                 "delivery_p99_ms": (record.get("metrics") or {}).get("delivery.p99_ms"),
                 "tokens_per_second_actual": (record.get("metrics") or {}).get(
                     "tokens_per_second_actual"
+                ),
+                "events_per_second_actual": (record.get("metrics") or {}).get(
+                    "events_per_second_actual"
                 ),
                 "errors": (record.get("metrics") or {}).get("errors"),
                 "error": record.get("error"),

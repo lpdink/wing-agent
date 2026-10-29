@@ -6,13 +6,17 @@
 1. **百分位是 nearest-rank**（p99 = 升序第 ``ceil(0.99·n)`` 个值，不做线性插值），
    与 ``scripts/perf/suite_gateway.py`` 一致——两处不共享实现（那边住在一个套件
    脚本里，跨工具 import 会把整条 perf 测量链拉进来），但秩定义相同。
-2. **投递延迟按帧下标严格配对**：客户端收到的第 i 个 ``text`` 事件 ↔ 假 Provider
-   该请求发射的第 i 帧。长度不等、prompt 命中多条请求、负延迟 —— 一律记
-   ``dropped`` 并按原因分类，**绝不截断对齐、绝不插值、绝不把配不上的样本当 0**。
-   丢弃计数与原因分类的**单位都是帧**（``sum(reasons.values()) == dropped``）。
+2. **投递延迟按通道、按下标配对**：假 Provider 的每帧带一个通道标记
+   （``FrameEmit.kind``），可配对的三个通道各有自己的客户端事件（见
+   :data:`CHANNEL_EVENTS`）：``content`` ↔ ``text``、``thinking`` ↔ ``reasoning``、
+   ``tool_call`` ↔ ``tool_call_stream``；``meta``（role / finish / usage / ``[DONE]``
+   帧）不产生 delta 事件，**不参与配对**。同一通道内再按下标一一对齐（第 i 帧 ↔ 第 i
+   个事件）。配不上的帧一律记 ``dropped`` 并按原因分类，
+   **绝不截断对齐、绝不插值、绝不把配不上的样本当 0**。丢弃计数与原因分类的**单位
+   都是帧**（``sum(reasons.values()) == dropped``）。
 
-发射时刻来自上游冻结接口（``FakeProvider.frame_emits`` / ``emits_for``）；缺失时
-:func:`frame_emits_for` 直接抛 :class:`DeliveryUnavailable`，由档位编排
+发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）；缺失时
+:func:`build_emit_ledger` 直接抛 :class:`DeliveryUnavailable`，由档位编排
 （``orchestrator``）转成「延迟指标不可用」并三处点名（不写 0、不静默）。
 """
 
@@ -23,6 +27,19 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+#: 通道标记 → 客户端 delta 事件类型（``sse.FRAME_KINDS`` 里可配对的三类）。
+#:
+#: 这一张表是配对口径的唯一声明：分片按它把到达事件归档，配对按它把发射帧归档。
+#: ``meta``（role / finish / usage / ``[DONE]``）**不产生** delta 事件，故不在此表。
+CHANNEL_EVENTS: dict[str, str] = {
+    "content": "text",
+    "thinking": "reasoning",
+    "tool_call": "tool_call_stream",
+}
+
+#: 客户端事件类型 → 通道标记（分片侧的归档方向）。
+EVENT_CHANNELS: dict[str, str] = {event: kind for kind, event in CHANNEL_EVENTS.items()}
 
 #: 报告呈现的三个分位（label, 百分位）。
 SPREAD_PERCENTILES: tuple[tuple[str, float], ...] = (
@@ -50,11 +67,13 @@ SHARD_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "cpu_seconds",
         "cpu_span_s",
         "closed_before_end",
+        "delta_frames",
         "text_frames",
         "errors",
         "error_details",
         "window",
         "turns",
+        "turns_in_flight",
     }
 )
 
@@ -94,51 +113,71 @@ class TurnSample:
     """一轮的客户端侧事实（绝对 ``time.monotonic()`` 秒）。
 
     ``prompt`` 是驱动方发出的**全局唯一**文本（配对键）；``sent_at`` 是发出请求的
-    时刻；``result_at`` 是 ``turn_result`` 到达的时刻；``arrivals`` 是窗口内收到的
-    ``text`` 事件到达时刻，按到达序。
+    时刻；``result_at`` 是 ``turn_result`` 到达的时刻（``None`` = 窗口结束时这轮仍在飞，
+    此时到达时刻只到窗口末为止）；``arrivals`` 是**按通道**的到达时刻（通道标记 →
+    按到达序的时刻），不含 ``meta`` 帧对应的东西（它们没有客户端事件）。
     """
 
     prompt: str
     sent_at: float
-    result_at: float
-    arrivals: tuple[float, ...]
+    result_at: float | None
+    arrivals: Mapping[str, Sequence[float]]
 
 
 @dataclass
 class Pairing:
-    """配对结果：可用延迟样本 + 丢弃计数（按原因）。"""
+    """配对结果：可用延迟样本 + 丢弃计数（按原因、按通道）。"""
 
     latencies_ms: list[float] = field(default_factory=list)
     dropped: int = 0
     reasons: Counter[str] = field(default_factory=Counter)
+    channels: Counter[str] = field(default_factory=Counter)
 
     @property
     def paired(self) -> int:
         return len(self.latencies_ms)
 
 
-def frame_emits_for(provider: Any, request_index: int) -> list[float]:
-    """某次请求的逐帧发射时刻（``time.monotonic()`` 绝对秒，按帧序）。
+@dataclass(frozen=True)
+class EmitLedger:
+    """发射时刻账本：``request_index → {kind → 按 frame_index 升序的时刻}``。
 
-    优先用 ``emits_for(request_index)``；没有该方法时退到 ``frame_emits`` 里按
-    ``request_index`` 过滤、按 ``frame_index`` 排序——两者都是上游冻结接口的一部分。
+    构造一次、配对时 O(1) 查。``meta`` 帧在构造时就被丢弃（它们没有客户端事件），
+    所以账本里每一条都与某个客户端 delta 事件可配对。
     """
+
+    by_request: Mapping[int, Mapping[str, tuple[float, ...]]]
+
+    def kinds(self, request_index: int) -> Mapping[str, tuple[float, ...]]:
+        return self.by_request.get(request_index, {})
+
+
+def build_emit_ledger(provider: Any) -> EmitLedger:
+    """从 ``FakeProvider.frame_emits`` 建按通道分组的账本（缺接口即抛）。"""
     emits = getattr(provider, "frame_emits", None)
     if emits is None:
         raise DeliveryUnavailable(
             "frame_emits not available: the fake provider does not record per-frame "
             "emit times, so delivery latency cannot be paired against the emitter "
-            "clock (needs FakeProvider.frame_emits / emits_for)"
+            "clock (needs FakeProvider.frame_emits)"
         )
-    getter = getattr(provider, "emits_for", None)
-    if callable(getter):
-        return [float(value) for value in getter(request_index)]
-    selected = [
-        (int(entry.frame_index), float(entry.at))
-        for entry in emits
-        if int(entry.request_index) == request_index
-    ]
-    return [at for _, at in sorted(selected)]
+    grouped: dict[int, dict[str, list[tuple[int, float]]]] = {}
+    for entry in emits:
+        kind = getattr(entry, "kind", None)
+        if kind not in CHANNEL_EVENTS:
+            continue  # meta（role / finish / usage / [DONE]）不产生客户端 delta 事件
+        grouped.setdefault(int(entry.request_index), {}).setdefault(kind, []).append(
+            (int(entry.frame_index), float(entry.at))
+        )
+    return EmitLedger(
+        {
+            request_index: {
+                kind: tuple(at for _, at in sorted(pairs))
+                for kind, pairs in kinds.items()
+            }
+            for request_index, kinds in grouped.items()
+        }
+    )
 
 
 def content_text(content: Any) -> str | None:
@@ -187,49 +226,71 @@ def prompt_index(requests: Iterable[Any]) -> dict[str, list[int]]:
     return index
 
 
+def _arrival_count(turn: TurnSample) -> int:
+    return sum(len(values) for values in turn.arrivals.values())
+
+
 def pair_delivery(
-    provider: Any,
+    ledger: EmitLedger,
     requests: Iterable[Any],
     turns: Sequence[TurnSample],
+    *,
+    window: tuple[float, float] | None = None,
 ) -> Pairing:
-    """把客户端到达时刻与 Provider 发射时刻按下标配对成延迟样本（毫秒）。
+    """把客户端到达时刻与 Provider 发射时刻**按通道、按下标**配对成延迟样本（毫秒）。
 
-    只有「prompt 恰好命中一次请求」且「发射帧数 == 到达帧数」且「延迟非负」的轮次
-    才产出样本；其余整轮计入 ``dropped`` 并记原因。
+    同一通道内第 i 帧 ↔ 第 i 个事件；通道之间互不相干（所以 ``meta`` 帧不会让对齐
+    失败）。段内对齐取两者较短的长度（前缀配对），余下的按方向记账：发射多于到达
+    是「客户端还没收到」，到达多于发射是「客户端多收了」——**不猜、不插值**。
+
+    给了 ``window`` 时，落点不在窗口内的配对（跨窗口起点的那些）不计入延迟分布，
+    单独记 ``outside_window``。
     """
     result = Pairing()
     index = prompt_index(requests)
     for turn in turns:
         matches = index.get(turn.prompt, [])
         if not matches:
-            result.reasons["unknown_prompt"] += len(turn.arrivals)
-            result.dropped += len(turn.arrivals)
+            result.reasons["unknown_prompt"] += _arrival_count(turn)
+            result.dropped += _arrival_count(turn)
             continue
         if len(matches) > 1:
             # 同一 prompt 触发多次请求（网关重试）——哪一次对应这批到达无法确定。
-            result.reasons["ambiguous_prompt"] += len(turn.arrivals)
-            result.dropped += len(turn.arrivals)
+            result.reasons["ambiguous_prompt"] += _arrival_count(turn)
+            result.dropped += _arrival_count(turn)
             continue
-        try:
-            emits = frame_emits_for(provider, matches[0])
-        except DeliveryUnavailable:
-            raise
-        except Exception:  # noqa: BLE001 - 单轮的发射记录缺失不该升级成整档不可用
-            result.reasons["missing_emits"] += len(turn.arrivals)
-            result.dropped += len(turn.arrivals)
-            continue
-        if len(emits) != len(turn.arrivals):
-            result.reasons["length_mismatch"] += len(turn.arrivals)
-            result.dropped += len(turn.arrivals)
-            continue
-        for emit_at, arrival_at in zip(emits, turn.arrivals):
-            delta_ms = (arrival_at - emit_at) * 1000.0
-            if delta_ms < 0.0:
-                # 到达早于发射：同机单调时钟上只可能是错位（帧序对不上）。
-                result.reasons["negative_latency"] += 1
-                result.dropped += 1
-                continue
-            result.latencies_ms.append(delta_ms)
+        kinds = ledger.kinds(matches[0])
+        for kind in sorted(set(kinds) | set(turn.arrivals)):
+            emits = kinds.get(kind, ())
+            arrivals = turn.arrivals.get(kind, ())
+            paired = min(len(emits), len(arrivals))
+            for position in range(paired):
+                delta_ms = (arrivals[position] - emits[position]) * 1000.0
+                if delta_ms < 0.0:
+                    # 到达早于发射：同机单调时钟上只可能是错位（帧序对不上）。
+                    result.reasons["negative_latency"] += 1
+                    result.dropped += 1
+                    continue
+                if window is not None and not (
+                    window[0] <= arrivals[position] <= window[1]
+                ):
+                    result.reasons["outside_window"] += 1
+                    result.dropped += 1
+                    continue
+                result.latencies_ms.append(delta_ms)
+                result.channels[kind] += 1
+            if len(emits) > paired:
+                # 窗口结束时仍在飞的那一轮：Provider 已经写出的帧还没到客户端。
+                reason = (
+                    f"missing_events:{kind}"
+                    if turn.result_at is not None
+                    else f"in_flight_tail:{kind}"
+                )
+                result.reasons[reason] += len(emits) - paired
+                result.dropped += len(emits) - paired
+            if len(arrivals) > paired:
+                result.reasons[f"unexpected_events:{kind}"] += len(arrivals) - paired
+                result.dropped += len(arrivals) - paired
     return result
 
 

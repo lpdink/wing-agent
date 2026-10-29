@@ -11,7 +11,7 @@
 
     → {"event": "ready", "shard": 0, "ws_connections": 2, "sessions": 8}
     ← {"window_start": 123.4, "window_end": 143.4}
-    → {"event": "done", "turns": 40, "text_frames": 10000, "errors": 0}
+    → {"event": "done", "turns": 40, "delta_frames": {"content": 10000…}, "errors": 0}
 
 样本走文件（``--config`` 里的 ``out``）：一档最大约 10^6 个到达时刻，走管道会让
 coordinator 与分片在同一个窗口里互相同步。时间戳存「相对 window_start 的微秒」。
@@ -88,6 +88,11 @@ class ShardConfig:
         )
 
 
+def _empty_arrivals() -> dict[str, list[float]]:
+    """按通道的到达时刻（每轮重置）。"""
+    return {kind: [] for kind in metrics.CHANNEL_EVENTS}
+
+
 @dataclass
 class _SessionState:
     """一个会话的驱动状态（同一时刻最多一轮在飞）。"""
@@ -97,7 +102,8 @@ class _SessionState:
     seq: int = 0
     prompt: str = ""
     sent_at: float | None = None
-    arrivals: list[float] = field(default_factory=list)
+    arrivals: dict[str, list[float]] = field(default_factory=_empty_arrivals)
+    """本轮**全部**到达时刻（按通道）：不按窗口裁剪，配对要按下标对齐整轮。"""
 
 
 class Shard:
@@ -109,7 +115,10 @@ class Shard:
         self.states: dict[str, _SessionState] = {}
         self.connections: list[GatewayWS] = []
         self.turns: list[TurnSample] = []
-        self.text_frames = 0
+        self.window_events: dict[str, int] = {
+            kind: 0 for kind in metrics.CHANNEL_EVENTS
+        }
+        """窗口内收到的 delta 事件数（按通道）——速率指标的唯一来源。"""
         self.errors = 0
         self.error_details: list[str] = []
         self._pending: asyncio.Queue[str] = asyncio.Queue()
@@ -206,6 +215,23 @@ class Shard:
         self._cpu_end = proc.self_cpu_seconds()
         self._cpu_end_at = time.monotonic()
         self._closed_before_end = sum(1 for ws in self.connections if ws.closed)
+        for state in self.states.values():
+            sent_at, state.sent_at = state.sent_at, None
+            if sent_at is None:
+                continue
+            arrivals, state.arrivals = state.arrivals, _empty_arrivals()
+            self.turns.append(
+                TurnSample(
+                    state.prompt,
+                    sent_at,
+                    None,
+                    {
+                        kind: tuple(values)
+                        for kind, values in arrivals.items()
+                        if values
+                    },
+                )
+            )
 
     def _on_event(
         self,
@@ -219,13 +245,12 @@ class Shard:
         if state is None:
             return
         now = delivery.at
-        if event_type == "text":
-            if (
-                state.sent_at is not None
-                and self._window_start <= now <= self._window_end
-            ):
-                state.arrivals.append(now)
-                self.text_frames += 1
+        kind = metrics.EVENT_CHANNELS.get(event_type)
+        if kind is not None:
+            if state.sent_at is not None:
+                state.arrivals[kind].append(now)
+                if self._window_start <= now <= self._window_end:
+                    self.window_events[kind] += 1
             return
         in_window = self._window_start <= now <= self._window_end
         if event_type == "error":
@@ -245,9 +270,21 @@ class Shard:
             self.errors += 1
             if len(self.error_details) < 8:
                 self.error_details.append(f"error turn: {str(data)[:200]}")
-        arrivals, state.arrivals = state.arrivals, []
-        if sent_at is not None and in_window and sent_at >= self._window_start:
-            self.turns.append(TurnSample(state.prompt, sent_at, now, tuple(arrivals)))
+        arrivals, state.arrivals = state.arrivals, _empty_arrivals()
+        if now >= self._window_start and sent_at < self._window_end:
+            # 这轮碰到了采样窗口（单轮形态下就是跨越整个窗口的那一轮）。
+            self.turns.append(
+                TurnSample(
+                    state.prompt,
+                    sent_at,
+                    now,
+                    {
+                        kind: tuple(values)
+                        for kind, values in arrivals.items()
+                        if values
+                    },
+                )
+            )
         if not self._closing and now < self._window_end:
             self._pending.put_nowait(state.session_id)
 
@@ -260,7 +297,7 @@ class Shard:
                 continue
             state.prompt = self.shape.prompt_text(session_id, state.seq)
             state.seq += 1
-            state.arrivals = []
+            state.arrivals = _empty_arrivals()
             state.sent_at = time.monotonic()
             try:
                 await state.ws.send_request(session_id, state.prompt)
@@ -294,7 +331,9 @@ class Shard:
             if self._cpu_start_at is None or self._cpu_end_at is None
             else round(self._cpu_end_at - self._cpu_start_at, 3),
             "closed_before_end": self._closed_before_end,
-            "text_frames": self.text_frames,
+            "text_frames": self.window_events["content"],
+            "delta_frames": dict(self.window_events),
+            "turns_in_flight": sum(1 for turn in self.turns if turn.result_at is None),
             "errors": self.errors,
             "error_details": self.error_details,
             "window": {"start": start, "end": self._window_end},
@@ -302,8 +341,11 @@ class Shard:
                 {
                     "prompt": turn.prompt,
                     "sent_us": us(turn.sent_at),
-                    "result_us": us(turn.result_at),
-                    "arrivals_us": [us(moment) for moment in turn.arrivals],
+                    "result_us": None if turn.result_at is None else us(turn.result_at),
+                    "arrivals_us": {
+                        kind: [us(moment) for moment in values]
+                        for kind, values in turn.arrivals.items()
+                    },
                 }
                 for turn in self.turns
             ],
@@ -376,7 +418,7 @@ async def run(config_path: Path) -> int:
         "done",
         shard=config.shard,
         turns=len(shard.turns),
-        text_frames=shard.text_frames,
+        delta_frames=shard.window_events,
         errors=shard.errors,
     )
     return 0
