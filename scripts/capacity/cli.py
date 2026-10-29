@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -251,29 +251,6 @@ def measurement_args(cfg: RunConfig) -> dict[str, Any]:
         value = getattr(cfg, spec.dest)
         args[spec.dest] = list(value) if isinstance(value, tuple) else value
     return args
-
-
-def reproduce_command(meta: Mapping[str, Any]) -> str:
-    """复现命令：``meta.args`` + ``meta.scenario`` 原样拼回去（含默认值）。
-
-    旗标名与顺序来自 :data:`ARG_SPECS`，所以加旗标只有一处要改；``meta.args`` 缺键时
-    跳过它（手写产物也不会拼出一条带 ``None`` 的命令）。
-    """
-    args = meta.get("args") or {}
-    parts = ["uv run python scripts/capacity/run.py"]
-    scenario = meta.get("scenario")
-    if scenario is not None:
-        parts.append(f"--scenario {scenario}")
-    for spec in ARG_SPECS:
-        if spec.mode or not spec.echo:
-            continue
-        value = args.get(spec.dest)
-        if value is None:
-            continue
-        if spec.dest == "levels":
-            value = ",".join(str(level) for level in value)
-        parts.append(f"{spec.flag} {value}")
-    return " ".join(parts)
 
 
 def build_config(args: argparse.Namespace) -> RunConfig:

@@ -42,7 +42,7 @@ demo:
 # 因此只做手工测量；口径、产物与已知边界见 scripts/capacity/README.md。
 # fd 软限先抬（每个会话约 4 个 fd）：抬不动时 run.py 会带可行动的错误退出，
 # 而不是跑到一半 EMFILE 后产出一张好看的空表。
-# 参数默认值只有一处（run.py 的 argparse），旗标一律经 CAPACITY_ARGS 透传，
+# 参数默认值只有一处（cli.py / shapes.py），旗标一律经 CAPACITY_ARGS 透传，
 # 例如 CAPACITY_ARGS="--levels 1,10,50 --dwell 5 --subscribers per-shard --json"。
 CAPACITY_ARGS ?=
 

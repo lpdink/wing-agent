@@ -75,7 +75,7 @@ CLI（旗标名是下游脚本的契约，只允许追加）：
 （仍落盘产物，供取证）。`EMFILE` 之类「跑到一半才炸」的失败不会产出漂亮空表：
 fd 上限在起任何子进程之前就抬好，抬不动直接退出（见「fd 上限」）。
 
-**形态专属旋钮的适用范围由形态自己声明**（`shapes.KNOBS`）：给某个形态一个它不消费的
+**形态专属旋钮的适用范围由形态自己声明**（各形态模块的 `KNOBS`）：给某个形态一个它不消费的
 旋钮（例如 `pure_stream --tool bash`）是**参数错误**，不是静默忽略——静默忽略会让人
 以为「那个变量已经测过了」。
 
@@ -279,9 +279,14 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 
 ## 负载形态
 
-五种形态各回答一类问题。共同契约见 `shapes.py`：`NAME` / `MODEL` / `prompt_text` /
+五种形态各回答一类问题。共同契约见 `shapes.py`：`NAME` / `MODEL` /
 `plan(args) -> ShapePlan`（要注册哪些 model、每会话挂哪个 model、工具集、workspace 预置
-文件、窗口模式……形态的全部语义都在这一个返回值里）。
+文件、窗口模式……形态的全部语义都在这一个返回值里）。`prompt_text` 可选：不声明即用
+`shapes.prompt_key`（`load:<session>:<seq>`）。
+
+形态参数（`ShapeArgs`）里没有「workspace 路径」：工具调用的参数是**相对字面量**
+（`Read` 的 `path` = `note.txt`），由网关按会话的 workspace 解析——形态不需要、也不应该
+自己拼绝对路径。
 
 ### `pure_stream` — 探并发边界的主负载
 
@@ -322,9 +327,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 - **不建任何客户端连接**（`window_mode=hold`）：订阅会钉住会话（产品的逐出条件之一），
   那 reaper 就永远不会动手，窗口里也就观察不到逐出；
 - **把逐出阈值压进窗口**：产品默认 `sessions.eviction.idle_ttl_seconds` 1800 s / 扫描
-  300 s，秒级窗口里什么都看不到（等于没测）。本形态按 `--dwell/2` 与 1 s 扫描推导
-  （**只看 dwell，不含 warmup**——否则 `--warmup` 一调大，会话会在窗口开始前就被收走），
-  于是窗口里应当发生一次批量逐出；
+  300 s，秒级窗口里什么都看不到（等于没测）。会话的空闲计时从**建会话**起算（建会话与
+  历史预置都在窗口之前），所以阈值取 `warmup + dwell/2` 与 1 s 扫描：早于窗口结束
+  （`warmup + dwell`）而晚于窗口起点（`warmup`），于是窗口里应当发生一次批量逐出；
 - 「逐出到底发生了没有」不靠 RSS 猜：窗口结束后对每个会话调
   `POST /api/session/release`（公开路径、幂等），`released=false`（`not loaded`）就是
   「reaper 已经回收了」。两个计数进 `samples.evicted_by_reaper` / `released_by_probe`
@@ -389,9 +394,11 @@ uv run python scripts/capacity/run.py --criteria
   轮次判据**只在 `tool_cycle` / `mixed` 判**（其余形态的窗口里没有轮次边界）。
 - `capped`：网关 CPU 打满 / 出现轮次错误 / fd 接近 `meta.host.ulimit_n`。
 - `low_confidence`（**不进判档**，但报告必须点名）：rig 自身饱和（provider 或某个分片
-  吃满核）、**不预期**的配对丢弃比例越界、建会话失败、以及**多轮形态的轮次判据无从评估**
-  （基线档没有完成的轮次——没有可比的基线，判据就不成立）。报告用它与 `reasons[]`
-  **分开的**字段呈现，两者不混；结论句也**不引用**低置信档位。
+  吃满核）、**不预期**的配对丢弃比例越界、建会话失败。这四条都意味着「这一档的读数可能
+  是 rig 自己造成的」，所以报告的结论句**不引用**这些档位。
+- `unjudged`（第四种状态，也不进判档）：某条判据**无从评估**——今天只有一条，多轮形态的
+  `turn.p99` 没有可比的基线（基线档没有完成的轮次）。它与 `low_confidence` 分开：读数本身
+  是干净的，只是少了一条判据，报告照常用其余判据下结论。
 - 丢弃比例只数**不预期**的原因：`samples.dropped` 含 `outside_window`（跨窗口起点的预热段）
   与 `in_flight_tail:*`（窗口末仍在传输）——两者都是采样窗口的簿记，不是数据被污染。
   `pure_stream` 的整轮本来就跨进窗口起点，按总数算会让**每一档**都「低置信」，那等于
@@ -534,4 +541,4 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | `EMFILE` / `Too many open files` | `meta.host.ulimit_n` 是否达到 `4 × N + 256`；见「fd 上限」 |
 | 读数在两档之间抖动 | `rig.host_loadavg`（机器是否被别的任务占用）；容量测量必须串行跑 |
 | 分片报 `FileNotFoundError: ... shard-0.json` | 产物目录不是绝对路径（`RunConfig` 会规范化；自己构造 `RunConfig` 时别绕过它） |
-| `--history-tokens` 报参数错误 | 只有 `idle` / `hydration` 消费它（`shapes.KNOBS`） |
+| `--history-tokens` 报参数错误 | 只有 `idle` / `hydration` 消费它（形态模块的 `KNOBS`） |

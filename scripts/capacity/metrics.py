@@ -61,11 +61,6 @@ DROP_REASONS: dict[str, str] = {
     "ambiguous_prompt": "contamination",
 }
 
-#: 判据侧关心的那一类：簿记原因（跨窗口起点的预热段 / 窗口末仍在传输）。
-BOOKKEEPING_DROP_REASONS: tuple[str, ...] = tuple(
-    reason for reason, kind in DROP_REASONS.items() if kind == "bookkeeping"
-)
-
 
 def drop_reason_family(reason: str) -> str | None:
     """原因名（可带 ``:<kind>`` 后缀）→ 词汇表里的名字；不认识的返回 ``None``。

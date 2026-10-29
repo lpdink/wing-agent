@@ -12,8 +12,12 @@
 - ``capped``（撞到天花板）：``gateway.cpu_cores >= 0.9`` 或 ``errors > 0`` 或
   ``gateway.fds_peak >= 0.9 × meta.host.ulimit_n``；
 - ``low_confidence``（**不进判档**，但报告必须点名）：``rig.provider_cpu_cores >= 0.8``、
-  任一 ``rig.shard_cpu_cores >= 0.9``、``samples.dropped / samples.count > 1%``、
-  ``session_create.failed > 0``——这四条都意味着「这一档的读数可能是 rig 自己造成的」。
+  任一 ``rig.shard_cpu_cores >= 0.9``、**不预期**的配对丢弃比例 > 1%（窗口簿记不算）、
+  ``session_create.failed > 0``——这四条都意味着「这一档的读数可能是 rig 自己造成的」，
+  所以报告**不引用**这些档位的结论；
+- ``unjudged``（第四种状态，也不进判档）：某条判据**无从评估**——今天只有一条，
+  多轮形态的 ``turn.p99`` 没有可比的基线（基线档没有完成的轮次）。它与 ``low_confidence``
+  分开：**读数本身是干净的**，只是少了一条判据，报告照常用其余的判据下结论。
 
 ``verdict`` 取值 ``ok`` / ``degraded`` / ``capped`` / ``unknown``：``capped`` 优先于
 ``degraded``（同一档两者都命中时，天花板是更强的结论）；``unknown`` 不是第五个阈值，
@@ -45,12 +49,6 @@ LOW_CONF_DROPPED_RATIO = 0.01
 #: 只有「每轮都会收口」的形态才评 ``turn.p99``（其余形态的窗口里没有轮次边界）。
 TURN_SCENARIOS: frozenset[str] = frozenset({"tool_cycle", "mixed"})
 
-#: **结构性**丢弃（不是数据被污染）的原因名，直接取自生产者侧的词汇表（
-#: ``metrics.DROP_REASONS`` 标成 ``bookkeeping`` 的那些）：跨窗口起点的预热段、
-#: 窗口末仍在传输的帧。``samples.dropped`` 包含它们，而 ``pure_stream`` 的整轮本来
-#: 就从 warmup 起跑——拿总数当污染信号会让每个档都「低置信」，那是把口径当成了噪声。
-STRUCTURAL_DROP_REASONS: tuple[str, ...] = metrics.BOOKKEEPING_DROP_REASONS
-
 #: 判据原文（报告与 ``reasons[]`` 都从这里取，不许就地拼阈值）。
 CRITERIA: dict[str, str] = {
     "degraded.delivery": (
@@ -74,7 +72,7 @@ CRITERIA: dict[str, str] = {
         "contamination)"
     ),
     "low_confidence.create": "session_create.failed > 0",
-    "low_confidence.turn": (
+    "unjudged.turn": (
         "turn criterion not evaluated: the baseline level completed no turn"
     ),
 }
@@ -88,6 +86,13 @@ CRITERIA_FLAGS: dict[str, tuple[str, ...]] = {
     "capped": ("capped.cpu", "capped.errors", "capped.fds"),
 }
 
+
+#: **结构性**丢弃（窗口簿记，不是数据被污染）的判定：词表在 ``metrics.DROP_REASONS``。
+def is_bookkeeping_drop(reason: str) -> bool:
+    family = metrics.drop_reason_family(reason)
+    return family is not None and metrics.DROP_REASONS[family] == "bookkeeping"
+
+
 #: 逐档结果的键（``run.json`` 的 ``levels[i].verdict`` 与报告共用）。
 VERDICT_KEYS: tuple[str, ...] = (
     "verdict",
@@ -95,6 +100,7 @@ VERDICT_KEYS: tuple[str, ...] = (
     "reasons",
     "low_confidence",
     "low_confidence_reasons",
+    "unjudged",
     "baseline_sessions",
 )
 
@@ -108,6 +114,8 @@ class Verdict:
     reasons: tuple[str, ...] = ()
     low_confidence: bool | None = None
     low_confidence_reasons: tuple[str, ...] = ()
+    unjudged: tuple[str, ...] = ()
+    """**无从评估**的判据（读数本身干净，只是少了一条判据——与低置信不同类）。"""
     baseline_sessions: int | None = None
 
 
@@ -135,6 +143,7 @@ def block(result: Verdict) -> dict[str, Any]:
         "reasons": list(result.reasons),
         "low_confidence": result.low_confidence,
         "low_confidence_reasons": list(result.low_confidence_reasons),
+        "unjudged": list(result.unjudged),
         "baseline_sessions": result.baseline_sessions,
     }
 
@@ -203,9 +212,7 @@ def evaluate_level(
             flags.append("degraded")
             reasons.extend(degraded)
 
-    untested_turn = _turn_criterion_unavailable(record, baseline, scenario)
-    if untested_turn is not None:
-        low.append(untested_turn)
+    unjudged = _unjudged_criteria(baseline=baseline, scenario=scenario)
 
     provider = _rig(record, "provider_cpu_cores")
     if provider is not None and provider >= LOW_CONF_PROVIDER_CORES:
@@ -237,6 +244,7 @@ def evaluate_level(
         reasons=tuple(reasons),
         low_confidence=bool(low),
         low_confidence_reasons=tuple(low),
+        unjudged=tuple(unjudged),
         baseline_sessions=None
         if baseline is None
         else int(baseline.get("sessions") or 0),
@@ -273,30 +281,26 @@ def _degraded_reasons(
     return reasons
 
 
-def _turn_criterion_unavailable(
-    record: Mapping[str, Any],
-    baseline: Mapping[str, Any] | None,
-    scenario: str | None,
-) -> str | None:
-    """多轮形态的轮次判据**无从评估**时点名（缺数据 ≠ 没退化）。
+def _unjudged_criteria(
+    *, baseline: Mapping[str, Any] | None, scenario: str | None
+) -> list[str]:
+    """本条阶梯上**无从评估**的判据（缺数据 ≠ 没退化）。
 
-    典型来源：``mixed`` 在最小档只有一个会话——那个会话被分进流式组，窗口里没有完成的
-    轮次，于是基线的 ``turn.p99`` 是 ``null``，整条阶梯的轮次判据都不成立。这必须显式
-    说出来，否则报告会写「到最大档都没有触发 degraded」而实际什么都没判。
+    今天只有一条：多轮形态的轮次尾部判据。它需要一个有完成轮次的基线档；基线档窗口里
+    一个轮次都没收口时（例如 ``mixed`` 的工具组为空），整条阶梯的 ``degraded.turn``
+    都不成立——必须显式说出来，否则报告会写「到最大档都没有触发 degraded」而实际少判了一条。
+
+    与 ``low_confidence`` 分开：这里的读数是干净的，只是判据缺一个比较对象。
     """
     if scenario not in TURN_SCENARIOS or baseline is None:
-        return None
-    if _metric(record, "turn.p99_ms") is None:
-        return None
-    if int(record.get("sessions") or 0) == int(baseline.get("sessions") or 0):
-        return None
+        return []
     base_turn = _metric(baseline, "turn.p99_ms")
     if base_turn is not None and base_turn > 0:
-        return None
-    return (
-        f"{CRITERIA['low_confidence.turn']} (baseline N={baseline.get('sessions')}: "
+        return []
+    return [
+        f"{CRITERIA['unjudged.turn']} (baseline N={baseline.get('sessions')}: "
         f"turn.p99={base_turn})"
-    )
+    ]
 
 
 def _metric(record: Mapping[str, Any], key: str) -> float | None:
@@ -331,7 +335,7 @@ def _unexpected_drop_ratio(record: Mapping[str, Any]) -> float | None:
         unexpected = sum(
             int(value)
             for reason, value in reasons.items()
-            if metrics.drop_reason_family(reason) not in STRUCTURAL_DROP_REASONS
+            if not is_bookkeeping_drop(reason)
         )
     if count == 0:
         return 1.0 if unexpected else 0.0
@@ -350,7 +354,6 @@ __all__ = [
     "LOW_CONF_DROPPED_RATIO",
     "LOW_CONF_PROVIDER_CORES",
     "LOW_CONF_SHARD_CORES",
-    "STRUCTURAL_DROP_REASONS",
     "TURN_SCENARIOS",
     "VERDICT_KEYS",
     "Verdict",
@@ -359,5 +362,6 @@ __all__ = [
     "evaluate_level",
     "evaluate_run",
     "first_reason",
+    "is_bookkeeping_drop",
     "reason_flag",
 ]

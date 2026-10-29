@@ -29,8 +29,7 @@ from __future__ import annotations
 import importlib
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field, replace
 from types import ModuleType
 from typing import Any
 
@@ -141,14 +140,21 @@ class ShapeArgs:
     decode_duty: float
     tool: str
     history_tokens: int
-    workspace: Path
-    """会话 workspace（工具形态的 ``Read`` 参数用它拼相对路径）。"""
     frame_delay_s: float | None = None
     """协调者实测后的帧间隔（``1/rate`` 减去本机 ``asyncio.sleep`` 超时）。"""
 
     @property
     def frame_delay(self) -> float:
         return 1.0 / self.rate if self.frame_delay_s is None else self.frame_delay_s
+
+    @property
+    def warmup_s(self) -> float:
+        """窗口之前的预热时长（``--warmup``）。
+
+        需要它的量只有一类：空闲计时之类的窗口内事件阈值——会话的空闲计时从建会话起算，
+        所以阈值必须相对 warmup 偏移。
+        """
+        return self.span_s - self.dwell_s
 
     def events_for(self, seconds: float) -> int:
         """覆盖 ``seconds`` 秒所需的事件数（至少 1）。"""
@@ -321,19 +327,8 @@ def _with_seed(plan: ShapePlan, args: ShapeArgs) -> ShapePlan:
     models: list[tuple[str, Script]] = list(plan.models)
     if all(model_id != SEED_MODEL for model_id, _ in models):
         models.append((SEED_MODEL, seed.script))
-    return ShapePlan(
-        models=tuple(models),
-        session_models=plan.session_models,
-        tools=plan.tools,
-        agent=plan.agent,
-        workspace_files=plan.workspace_files,
-        subscribe=plan.subscribe,
-        window_mode=plan.window_mode,
-        sample_interval_s=plan.sample_interval_s,
-        env_sessions=plan.env_sessions,
-        measure_eviction=plan.measure_eviction,
-        seed=seed,
-    )
+    # 用 replace 而不是逐字段重建：ShapePlan 加字段时这里不会静默丢掉它。
+    return replace(plan, models=tuple(models), seed=seed)
 
 
 def model_ids(plan: ShapePlan) -> list[str]:

@@ -37,7 +37,7 @@ TTL_FRACTION = 0.5
 def plan(args: ShapeArgs) -> ShapePlan:
     # 空闲计时从建会话起算，所以"窗口内逐出"要求 warmup < ttl ≤ warmup + dwell：
     # 只按 dwell 推会在 warmup 大时提前收走（产物却仍写窗口末的快照）。
-    ttl = max(1.0, (args.span_s - args.dwell_s) + args.dwell_s * TTL_FRACTION)
+    ttl = max(1.0, args.warmup_s + args.dwell_s * TTL_FRACTION)
     return ShapePlan(
         # 没有请求会用到这个剧本；model 仍要声明——会话创建要求 model 落在 id 空间里。
         models=((MODEL, Script(Turn.of(text=".", chunk=1))),),

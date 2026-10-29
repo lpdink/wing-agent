@@ -913,6 +913,58 @@ def check_cli() -> None:
         except cli.UsageError:
             continue
         raise SelftestFailure(f"build_config({argv}) must raise UsageError")
+    # 旗标名只有一张表：argparse 的默认值来自它，报告里的复现命令也由它的键派生。
+    specs = {spec.dest: spec for spec in cli.ARG_SPECS}
+    parsed = cli.parse_args([])
+    for dest, spec in specs.items():
+        _check(
+            getattr(parsed, dest) == spec.default,
+            f"the parser default of --{dest} must come from ARG_SPECS: "
+            f"{getattr(parsed, dest)!r} != {spec.default!r}",
+        )
+        _check(
+            spec.dest == spec.flag.lstrip("-").replace("-", "_"),
+            f"a flag's dest must be derivable from its name: {spec.flag}",
+        )
+    cfg = cli.build_config(
+        cli.parse_args(
+            [
+                "--scenario",
+                "mixed",
+                "--levels",
+                "1,10",
+                "--chunk",
+                "4",
+                "--cycle-s",
+                "0.2",
+                "--decode-duty",
+                "0.5",
+                "--backend",
+                "memory",
+                "--out",
+                "/tmp/capacity-repro",
+            ]
+        )
+    )
+    command = report.render(
+        {
+            "meta": {"scenario": cfg.scenario, "args": cli.measurement_args(cfg)},
+            "levels": [],
+        }
+    )
+    line = next(
+        text for text in command.splitlines() if text.startswith("uv run python")
+    )
+    _check(
+        line.split()[4:] == _reproduce_argv(cfg),
+        f"the reproduce command must round-trip the args: {line}",
+    )
+    # ``--out`` 是现场参数（不进 meta.args），所以比的是**测量参数**的往返。
+    _check(
+        cli.measurement_args(cli.build_config(cli.parse_args(line.split()[4:])))
+        == cli.measurement_args(cfg),
+        "the reproduce command must re-build the same measurement args",
+    )
     try:
         cli.build_config(cli.parse_args(["--scenario", "nope", "--out", "/tmp/x"]))
     except shapes.ShapeError as exc:
@@ -936,11 +988,23 @@ def _shape_args(name: str, **overrides: Any) -> shapes.ShapeArgs:
         "decode_duty": shapes.DEFAULT_DECODE_DUTY,
         "tool": shapes.DEFAULT_TOOL,
         "history_tokens": 0,
-        "workspace": Path("/tmp/capacity-selftest-workspace"),
         "frame_delay_s": 0.017,
     }
     base.update(overrides)
     return shapes.ShapeArgs(**base)
+
+
+def _reproduce_argv(cfg: RunConfig) -> list[str]:
+    """复现命令的期望 argv（顺序由 ``cli.ARG_SPECS`` 决定）。"""
+    argv = ["--scenario", cfg.scenario]
+    for spec in cli.ARG_SPECS:
+        if spec.mode or not spec.echo or spec.dest == "scenario":
+            continue
+        value = getattr(cfg, spec.dest)
+        if spec.dest == "levels":
+            value = ",".join(str(level) for level in value)
+        argv.extend([spec.flag, str(value)])
+    return argv
 
 
 def check_shapes() -> None:
@@ -1084,7 +1148,8 @@ def check_shapes() -> None:
     # 历史预置：只有声明了 --history-tokens 的形态接得住它，且剧本是循环的（会话数决定轮数）。
     seeded = shapes.build_plan(_shape_args("hydration", history_tokens=2000))
     _check(
-        seeded.seed is not None and seeded.seed.chars_per_session >= 2000 / 0.3,
+        seeded.seed is not None
+        and seeded.seed.chars_per_session >= 2000 * shapes.HISTORY_CHARS_PER_TOKEN,
         f"seed: chars must cover the requested tokens: {seeded.seed}",
     )
     _check(
@@ -1325,25 +1390,22 @@ def check_verdict() -> None:
     )
     _check(
         any(
-            reason.startswith(verdict.CRITERIA["low_confidence.turn"])
-            for reason in no_baseline_turn[1].low_confidence_reasons
+            reason.startswith(verdict.CRITERIA["unjudged.turn"])
+            for reason in no_baseline_turn[1].unjudged
         ),
         f"an unevaluable turn criterion must be named: {no_baseline_turn[1]}",
     )
     _check(
-        no_baseline_turn[1].verdict == "ok",
-        f"an unevaluable criterion must not turn the level into degraded: "
-        f"{no_baseline_turn[1]}",
+        no_baseline_turn[1].verdict == "ok"
+        and no_baseline_turn[1].low_confidence is False,
+        f"an unevaluable criterion is not contamination: {no_baseline_turn[1]}",
     )
     # 基线档自己有轮次时不点名。
     judged = verdict.evaluate_run(
         _run(_level(1, turn_p99=100.0), _level(10, turn_p99=110.0), scenario="mixed")
     )
     _check(
-        not any(
-            reason.startswith(verdict.CRITERIA["low_confidence.turn"])
-            for reason in judged[1].low_confidence_reasons
-        ),
+        not judged[1].unjudged,
         f"a judgeable turn criterion must not be flagged: {judged[1]}",
     )
     create_low = verdict.evaluate_run(_run(_level(1), _level(10, create_failed=1)))
@@ -1375,7 +1437,11 @@ def check_verdict() -> None:
     classified = {key for keys in verdict.CRITERIA_FLAGS.values() for key in keys}
     _check(
         classified
-        == {key for key in verdict.CRITERIA if not key.startswith("low_confidence")},
+        == {
+            key
+            for key in verdict.CRITERIA
+            if key.split(".")[0] in ("degraded", "capped")
+        },
         f"every verdict criterion must be classified for the report: {classified}",
     )
     for key in classified:
@@ -1663,7 +1729,7 @@ E2E_CASES: tuple[E2ECase, ...] = (
     E2ECase(
         "tool_cycle_bash", "tool_cycle", {"rate": 10.0, "cycle_s": 0.5, "tool": "bash"}
     ),
-    # 逐出要时间：TTL = dwell/2 = 2 s，扫描 1 s → 窗口里必然扫到一次越限。
+    # 逐出要时间：TTL = warmup + dwell/2 = 2 s（这里 warmup 0），扫描 1 s → 窗口内必然越限。
     E2ECase("idle", "idle", {"warmup": 0.0, "dwell": 4.0}),
     E2ECase("hydration", "hydration", {"dwell": 3.0, "history_tokens": 200}),
     E2ECase("mixed", "mixed", {"rate": 10.0, "cycle_s": 0.2, "decode_duty": 0.5}),

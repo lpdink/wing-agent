@@ -161,11 +161,7 @@ class RunConfig:
 
 
 def level_args(
-    cfg: RunConfig,
-    sessions: int,
-    *,
-    workspace: Path | None = None,
-    frame_delay_s: float | None = None,
+    cfg: RunConfig, sessions: int, *, frame_delay_s: float | None = None
 ) -> shapes.ShapeArgs:
     """``RunConfig`` + 档位信息 → 形态参数（CLI 校验与本模块装配共用一处拼装）。"""
     return shapes.ShapeArgs(
@@ -179,7 +175,6 @@ def level_args(
         decode_duty=cfg.decode_duty,
         tool=cfg.tool,
         history_tokens=cfg.history_tokens,
-        workspace=Path(workspace) if workspace is not None else Path("."),
         frame_delay_s=frame_delay_s,
     )
 
@@ -284,14 +279,7 @@ async def run_level(
     shutil.rmtree(level_dir, ignore_errors=True)
     level_dir.mkdir(parents=True, exist_ok=True)
     try:
-        plan = shapes.build_plan(
-            level_args(
-                cfg,
-                sessions,
-                workspace=level_dir / WORKSPACE_DIRNAME,
-                frame_delay_s=frame_delay_s,
-            )
-        )
+        plan = shapes.build_plan(level_args(cfg, sessions, frame_delay_s=frame_delay_s))
         record["shape"].update(
             {
                 "rate": cfg.rate,
@@ -456,18 +444,19 @@ async def _post_many(
     payloads: Sequence[dict[str, Any]],
     *,
     timeout: float = 60.0,
-) -> list[Any]:
-    """对 ``payloads`` 逐个 POST ``path``（限并发），返回与输入等长的结果列表。
+) -> list[httpx.Response | str]:
+    """对 ``payloads`` 逐个 POST ``path``（限并发），返回与输入**等长、同序**的结果。
 
-    每项是 ``httpx.Response`` 或一条失败描述字符串（``Err``）——调用方只负责解释
-    它自己那个端点的响应。三段调用（建会话 / 切模型 / 逐出探针）原本各写一份同样的
-    连接池 + 信号量 + 错误收集脚手架，那是本目录最容易漂的一类复制。
+    每项要么是 ``httpx.Response``，要么是一条失败描述字符串——调用方只解释它自己那个
+    端点的响应语义（建会话要 session_id、切模型只看状态码、逐出看 ``released``）。
+    结果按输入下标落位，所以「第 i 个会话用第 i 个 model / 第 i 个 session_id」这类
+    映射不需要在调用方重建。
     """
     limits = httpx.Limits(
         max_connections=CREATE_CONCURRENCY, max_keepalive_connections=CREATE_CONCURRENCY
     )
     gate = asyncio.Semaphore(CREATE_CONCURRENCY)
-    results: list[Any] = [None] * len(payloads)
+    results: list[Any] = [""] * len(payloads)
     async with httpx.AsyncClient(
         base_url=env.gateway_url, timeout=timeout, trust_env=False, limits=limits
     ) as client:

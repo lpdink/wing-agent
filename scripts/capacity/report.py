@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-import cli
 import verdict
 
 MISSING = "—"
@@ -244,6 +243,16 @@ def _banners(run: Mapping[str, Any], verdicts: Sequence[verdict.Verdict]) -> lis
             f"> **低置信：{named}** —— rig 自身可能已饱和（或数据被采样过程污染），"
             "这几档的结论**不作数**，只能当参考。逐条原因见下方「判据」一节。"
         )
+    unjudged = [
+        record.get("sessions")
+        for record, result in zip(run.get("levels") or [], verdicts)
+        if result.unjudged
+    ]
+    if unjudged:
+        lines.append(
+            f"> **判据未评估：{unjudged}** —— 这几档的读数是干净的，但少了一条判据"
+            "（多轮形态的轮次尾部需要一个有完成轮次的基线档）。其余判据照常生效。"
+        )
     unknown = [
         record.get("sessions")
         for record, result in zip(run.get("levels") or [], verdicts)
@@ -356,18 +365,15 @@ def _conclusion(
             + " 的读数可能被 rig 自身饱和（或数据被采集过程污染），"
             "上面这句结论**没有引用它们**。"
         )
-    untested_turn = [
+    unjudged = [
         record.get("sessions")
         for record, result in zip(levels, verdicts)
-        if any(
-            reason.startswith(verdict.CRITERIA["low_confidence.turn"])
-            for reason in result.low_confidence_reasons
-        )
+        if result.unjudged
     ]
-    if untested_turn:
+    if unjudged:
         lines.append(
-            f"- **轮次判据未评估**：{untested_turn} 档只有投递延迟判据生效——"
-            "基线档没有完成的轮次，`turn.p99` 无从比较。"
+            f"- **判据未评估**：{unjudged} 档少判了一条（轮次尾部）——基线档没有完成"
+            "的轮次，`turn.p99` 无从比较；投递延迟与 capped 判据照常生效。"
         )
     return [*lines, ""]
 
@@ -417,15 +423,36 @@ def _criteria_section(
         bits = [f"- N={record.get('sessions')}：`{_verdict_cell(result)}`"]
         bits.extend(f"  - {reason}" for reason in result.reasons)
         bits.extend(f"  - 低置信：{reason}" for reason in result.low_confidence_reasons)
+        bits.extend(f"  - 判据未评估：{reason}" for reason in result.unjudged)
         hits.append("\n".join(bits))
     lines.extend(hits if hits else ["- 全部档位都没有命中判据。"])
     lines.append("")
     return lines
 
 
+#: ``meta.args`` 里不是旗标的键（本次运行的计时校准值，不是输入参数）。
+NON_FLAG_ARG_KEYS: frozenset[str] = frozenset({"frame_delay_ms", "sleep_overshoot_ms"})
+
+
 def _reproduce(meta: Mapping[str, Any]) -> list[str]:
-    """复现命令（旗标名与顺序归 ``cli.ARG_SPECS``，这里只负责排版）。"""
-    return ["## 复现", "", "```bash", cli.reproduce_command(meta), "```", ""]
+    """复现命令：``meta.scenario`` + ``meta.args`` 里的每个键回放成 ``--<key>``。
+
+    旗标名与 ``meta.args`` 的键同名（``cli`` 侧的 argparse dest 就是这么派生的），
+    所以这里不需要第二张旗标表；``--selftest`` 会把生成的命令喂回 ``cli.build_config``
+    做一次往返比对，名字漂移会当场变成自测失败。
+    """
+    args = meta.get("args") or {}
+    parts = ["uv run python scripts/capacity/run.py"]
+    scenario = meta.get("scenario")
+    if scenario is not None:
+        parts.append(f"--scenario {scenario}")
+    for key, value in args.items():
+        if key in NON_FLAG_ARG_KEYS or value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(item) for item in value)
+        parts.append(f"--{str(key).replace('_', '-')} {value}")
+    return ["## 复现", "", "```bash", " ".join(parts), "```", ""]
 
 
 def render(run: Mapping[str, Any]) -> str:
