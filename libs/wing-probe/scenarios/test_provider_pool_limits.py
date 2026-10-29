@@ -58,7 +58,8 @@ def _register_two_held_turns(probe: Probe, model: str) -> None:
 async def _run_two_turns(probe: Probe, model: str) -> tuple[list[float], list[float]]:
     """两个会话并发各跑一轮；返回（两轮 ``turn_result`` 时刻, 两个上游请求到达时刻）。
 
-    时刻都归一化到 ``env.started_at``（时间线与请求留档因此同基准、可相减）。
+    两组时刻同基准（相对 ``env.started_at``）：时间线本就是相对值，请求留档是绝对单调钟、
+    减去同一原点后与前者可同基准对读。
     """
     first = await probe.session(model=model)
     second = await probe.session(model=model)

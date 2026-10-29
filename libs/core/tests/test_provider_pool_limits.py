@@ -23,6 +23,7 @@ import pytest
 from _support import anthropic_provider, openai_provider
 from wing.config import ProviderConfig
 from wing.config.document import locate_problems
+from wing.provider.base import ModelProvider
 from wing.provider.transport import make_http_limits, make_http_timeout
 
 #: 协议 → 构造入口（provider 无状态，只有 ``AsyncClient`` 构造是本次的被测面）。
@@ -47,9 +48,9 @@ def client_kwargs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return captured
 
 
-def make_provider(protocol: str, **overrides: Any) -> None:
+def make_provider(protocol: str, **overrides: Any) -> ModelProvider:
     """按协议构造一个 provider（配置走 conftest 的 Config 单例，headers 可解析）。"""
-    FACTORIES[protocol](f"limit-{protocol}", **overrides)
+    return FACTORIES[protocol](f"limit-{protocol}", **overrides)
 
 
 # ── 1. 缺省零变化 ──────────────────────────────────────────────

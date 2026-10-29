@@ -253,8 +253,8 @@ class ProviderConfig(BaseModel):
         notes=(
             "null = 沿用 httpx 默认连接池（当前 max_connections=100 / keepalive=20）。\n"
             "设置后 keepalive 上限取 min(该值, 20)。\n"
-            "SSE 是长连接：并发调用超过上限时，多出的请求在本地连接池排队，"
-            "表现为首帧延迟（排队超过 httpx 的 pool 超时才会失败）。"
+            "SSE 是长连接：并发调用超过上限时，多出的请求在本地连接池排队，表现为首帧延迟；"
+            "排队时长计入 timeout_first_chunk（它包住整个响应头请求），超过即按首块超时失败并重试。"
         ),
         apply=ApplyScope.HOT,
         default=None,
