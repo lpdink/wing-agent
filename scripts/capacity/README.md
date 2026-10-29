@@ -231,7 +231,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 
 ## 自测（`--selftest`）
 
-≤60 秒（当前约 9 s）、不联网、不需要 API key、可重复；`make check-python` 会跑它：
+≤60 秒（当前约 9 s）、不联网、不需要 API key、可重复。它起真网关子进程，因此和
+`scripts/perf/ab.py --selftest` 一样**不进** `make check`（那一条只跑静态检查）——
+改完这个工具先手动跑 `make capacity-selftest`：
 
 | 检查 | 证明什么 |
 |---|---|
