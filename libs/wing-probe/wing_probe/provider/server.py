@@ -94,9 +94,8 @@ class FakeProvider:
         """model → Script 路由表。"""
         self.requests = RequestLog()
         """入站请求留档。"""
-        self._frame_emits: list[FrameEmit] = []
-        self._emits_by_request: dict[int, list[float]] = {}
-        """``frame_emits`` 的按请求索引（``emits_for`` 走它，避免扫全表）。"""
+        self._emits_by_request: dict[int, list[FrameEmit]] = {}
+        """唯一的发射时刻账本：``request_index`` → 该请求按 ``frame_index`` 升序的记录。"""
         self._emits_generation: int | None = None
         """写下第一帧时 ``requests`` 的 generation（检测序号复用）。"""
         self._port = port
@@ -177,15 +176,20 @@ class FakeProvider:
 
     @property
     def frame_emits(self) -> tuple[FrameEmit, ...]:
-        """流式响应的逐帧发射时刻（只读快照；按**写完**顺序，并发时各请求交错）。
+        """全部逐帧发射时刻的只读快照（按 ``request_index`` 再 ``frame_index`` 升序）。
 
-        测量器件而非日志：只增不减、不落盘、无上界，规模由场景的「请求数 × 每轮帧数」
-        决定（含按请求索引约百 B / 0.35µs 一条）；要一份干净账本就新建 provider——账本
-        与请求留档共享一个号空间，清掉留档就再也归不了因（见 :meth:`emits_for`）。
-        每次访问复制一份快照：按轮次读，不要放进帧循环。
+        账本按请求组织，这个视图在**访问时**拍平——它服务于测试与交叉核对，每次访问
+        O(总帧数)，不要放进帧循环。测量器件而非日志：只增不减、不落盘、无上界，规模由
+        场景的「请求数 × 每轮帧数」决定（约百 B / 0.35µs 一条）；要一份干净账本就新建
+        provider——账本与请求留档共享一个号空间，清掉留档就再也归不了因（见
+        :meth:`emits_for`）。
         """
         self._require_unreused_indices()
-        return tuple(self._frame_emits)
+        return tuple(
+            emit
+            for request_index in sorted(self._emits_by_request)
+            for emit in self._emits_by_request[request_index]
+        )
 
     def emits_for(self, request_index: int) -> list[float]:
         """某次请求的逐帧发射时刻（按 ``frame_index`` 升序，绝对 ``time.monotonic()``）。
@@ -193,7 +197,7 @@ class FakeProvider:
         ``request_index`` 传 :class:`FrameEmit` 说的那个全局留档序号。没有帧的请求——
         非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；从未
         留档的下标抛 ``IndexError``：打错下标会得到一张「好看的空表」，那比报错贵得多。
-        返回副本，改它不影响账本。
+        直接读该请求的桶（不扫全表），返回副本。
         """
         self._require_unreused_indices()
         recorded = len(self.requests)
@@ -202,7 +206,7 @@ class FakeProvider:
                 f"request #{request_index} out of range "
                 f"({recorded} request(s) recorded)"
             )
-        return list(self._emits_by_request.get(request_index, ()))
+        return [emit.at for emit in self._emits_by_request.get(request_index, ())]
 
     def _require_unreused_indices(self) -> None:
         """留档被清过就拒绝出账：``clear()`` 让序号从 0 重新发号，账本里的帧随之无法归因。"""
@@ -325,10 +329,9 @@ class FakeProvider:
             await response.write(payload)
             if frame.data is None:
                 continue
-            self._frame_emits.append(
+            self._emits_by_request.setdefault(request_index, []).append(
                 FrameEmit(request_index=request_index, frame_index=frame_index, at=at)
             )
-            self._emits_by_request.setdefault(request_index, []).append(at)
             frame_index += 1
 
 

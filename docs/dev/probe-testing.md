@@ -240,13 +240,13 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`。这不是断言面，用途只有一个：
 **算投递延迟**（发射时刻 → 客户端到达时刻）——断言类场景用它没有意义。内存内、不落盘、**只增不减**，
-规模由场景的「请求数 × 每轮帧数」决定（含按请求索引合计约百 B / 0.35µs 一条）；要一份干净账本
-就新建 provider（probe 的每个场景本来都新建一个）。`frame_emits` 每次访问复制一份快照——按轮次读，
-别放进帧循环。
+规模由场景的「请求数 × 每轮帧数」决定（约百 B / 0.35µs 一条）；要一份干净账本就新建 provider
+（probe 的每个场景本来都新建一个）。账本按请求组织：`emits_for` 直接读该请求的桶（与账本规模无关，
+26 万帧下实测 0.2µs），`frame_emits` 才拍平整表——按轮次读，别放进帧循环。
 
 | API | 用途 |
 |-----|------|
-| `frame_emits: tuple[FrameEmit, ...]` | 只读快照。`FrameEmit` = `(request_index, frame_index, at)`；按**写完**顺序（并发时各请求的帧交错，单请求内部始终升序） |
+| `frame_emits: tuple[FrameEmit, ...]` | 只读快照，**访问时**按 `request_index` 再 `frame_index` 拍平（`FrameEmit` = `(request_index, frame_index, at)`）；每次访问 O(总帧数)，只服务测试与交叉核对 |
 | `emits_for(request_index)` | 该请求的逐帧时刻（按 `frame_index` 升序，返回副本）；**列表位置即 `frame_index`**。`request_index` 是 `probe.request(...)` 留档的全局 `.index`（不是 `model_index`，也不是 `requests.get(model, index=…)` 的参数），从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
 
 口径：`frame_index` 从 0 起只数 `data: {json}` 载荷帧（`SSEFrame` 只有载荷帧与 `data: [DONE]`
