@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import FrozenInstanceError
 
 import httpx
 import pytest
@@ -75,10 +74,10 @@ async def sse_payload_lines(
     """流式请求，返回客户端读到的 ``data: {json}`` 行（``[DONE]`` 剔除）。"""
     lines: list[str] = []
     async with httpx.AsyncClient(
-        base_url=provider.url, timeout=10.0, trust_env=False
+        base_url=provider.base_url, timeout=10.0, trust_env=False
     ) as client:
         async with client.stream(
-            "POST", "/v1/chat/completions", json=request_body(model, **overrides)
+            "POST", "/chat/completions", json=request_body(model, **overrides)
         ) as response:
             assert response.status_code == 200, response.status_code
             async for line in response.aiter_lines():
@@ -128,8 +127,8 @@ async def test_emit_count_matches_the_frames_the_client_reads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_done_frame_is_not_recorded() -> None:
-    """``[DONE]`` 不占位：截断轮（无 finish 帧）的账本条数也 = 载荷帧数。"""
+async def test_truncated_turn_counts_only_payload_frames() -> None:
+    """没有 finish 帧的轮（上游截断）同样只数载荷帧，``[DONE]`` 不占位。"""
     async with running_provider() as provider:
         truncated = Turn.of(text="cut off", truncated=True)
         provider.register(MODEL, Script(truncated))
@@ -186,7 +185,8 @@ async def test_client_leaving_early_caps_the_ledger_at_the_transport_buffers() -
 
         recorded = [emit.frame_index for emit in provider.frame_emits]
         assert recorded == list(range(len(recorded))), recorded
-        assert 0 < len(recorded) <= payload_count(turn)
+        assert len(recorded) >= 2, "客户端读到的两帧必须都有时刻"
+        assert len(recorded) <= payload_count(turn)
 
 
 # ── 多请求归属 ──────────────────────────────────────────────
@@ -238,7 +238,7 @@ async def test_non_streaming_request_records_no_frames() -> None:
             assert response.status_code == 200
 
         assert provider.emits_for(0) == []
-        assert provider.frame_emits == []
+        assert provider.frame_emits == ()
 
 
 @pytest.mark.asyncio
@@ -254,7 +254,7 @@ async def test_streaming_request_that_fails_before_any_frame_has_no_frames() -> 
             assert response.status_code == 500
 
         assert provider.emits_for(0) == []
-        assert provider.frame_emits == []
+        assert provider.frame_emits == ()
 
 
 def test_emits_for_rejects_an_unknown_request_index() -> None:
@@ -287,27 +287,43 @@ async def test_emits_for_returns_a_copy_of_the_ledger() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_clears_both_ledgers_so_indices_do_not_get_reused() -> None:
-    """``reset()`` 同时清留档与帧账本：新请求从 0 发号时不会读到上一轮的帧。"""
+async def test_emits_for_refuses_a_reissued_request_index() -> None:
+    """留档被清过 → 序号从 0 重新发号：旧帧与新请求无法区分，宁可报错。"""
     async with running_provider() as provider:
         provider.register(MODEL, Script(Turn.of(text="ab"), Turn.of(text="cd")))
         await sse_payload_lines(provider)
         assert provider.emits_for(0)
 
-        provider.reset()
-
-        assert provider.requests.count() == 0
-        assert provider.frame_emits == []
-        with pytest.raises(IndexError, match="out of range"):
-            provider.emits_for(0)
+        provider.requests.clear()
 
         await sse_payload_lines(provider)
-        assert len(provider.emits_for(0)) == payload_count(Turn.of(text="cd"))
+        with pytest.raises(RuntimeError, match="indices are reissued"):
+            provider.emits_for(0)
 
 
-def test_frame_emit_is_an_immutable_value() -> None:
-    """记录是不可变值（下游拿来相减，不该能被就地改）。"""
-    emit = FrameEmit(request_index=2, frame_index=5, at=1.5)
-    assert (emit.request_index, emit.frame_index, emit.at) == (2, 5, 1.5)
-    with pytest.raises(FrozenInstanceError):
-        setattr(emit, "frame_index", 6)
+@pytest.mark.asyncio
+async def test_frame_emits_is_a_read_only_snapshot() -> None:
+    """``frame_emits`` 是只读快照：就地清 / 追加改不动账本（要干净账本就重建 provider）。"""
+    provider = FakeProvider()
+    await provider._write_frames(
+        RecordingResponse(), sse_frames(Turn.of(text="ab")), request_index=0
+    )
+
+    snapshot = provider.frame_emits
+    assert isinstance(snapshot, tuple)
+    assert len(snapshot) == payload_count(Turn.of(text="ab"))
+    with pytest.raises(AttributeError):
+        snapshot.clear()  # ty: ignore[unresolved-attribute]
+
+    assert len(provider.frame_emits) == len(snapshot)
+
+
+def test_frame_emit_and_facade_exports() -> None:
+    """记录类型经两级门面与模块 ``__all__`` 登记（同一个对象）。"""
+    import wing_probe
+    import wing_probe.provider
+    import wing_probe.provider.server
+
+    assert "FrameEmit" in wing_probe.provider.server.__all__
+    assert wing_probe.FrameEmit is wing_probe.provider.FrameEmit
+    assert wing_probe.FrameEmit is FrameEmit

@@ -1,4 +1,4 @@
-"""假 Provider 子包：剧本模型 / aiohttp 服务 / SSE 编码 / 请求留档 / 上下文视图。"""
+"""假 Provider 子包：剧本模型 / aiohttp 服务 / SSE 编码 / 请求留档 / 发射时刻账本 / 上下文视图。"""
 
 from wing_probe.provider.context import (
     ContextAssertionError,

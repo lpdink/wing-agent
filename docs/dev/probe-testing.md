@@ -202,7 +202,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 待生效状态跨重启）与 `scenarios/test_memory_backend_eviction.py`（memory / file 后端
 重启后的存在性差异）。
 
-## 断言原语速查
+## 观测与断言原语速查
 
 ### 事件时间线：`session.watch`（游标模型）
 
@@ -239,22 +239,26 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 ### 发射时刻（测量器件，非断言）：`probe.provider.frame_emits` / `emits_for(request_index)`
 
 假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`。这不是断言面，用途只有一个：
-**算投递延迟**（发射时刻 → 客户端到达时刻）——断言类场景用它没有意义。内存内、不落盘、无上界，
-规模由场景的「请求数 × 每轮帧数」决定（一条 ≈ 0.3µs / 96B）。
+**算投递延迟**（发射时刻 → 客户端到达时刻）——断言类场景用它没有意义。内存内、不落盘、**只增不减**，
+规模由场景的「请求数 × 每轮帧数」决定（两本账合计约 120B / 0.35µs 一条）；要一份干净账本就新建
+provider（probe 的每个场景本来都新建一个）。
 
 | API | 用途 |
 |-----|------|
-| `frame_emits: list[FrameEmit]` | 全局账本，`FrameEmit` = `(request_index, frame_index, at)`；按**写完**顺序追加（并发时各请求的帧交错，单请求内部始终升序） |
+| `frame_emits: tuple[FrameEmit, ...]` | 只读快照。`FrameEmit` = `(request_index, frame_index, at)`；按**写完**顺序（并发时各请求的帧交错，单请求内部始终升序） |
 | `emits_for(request_index)` | 该请求的逐帧时刻（按 `frame_index` 升序，返回副本）；**列表位置即 `frame_index`**。`request_index` 是 `probe.request(...)` 留档的全局 `.index`（不是 `model_index`，也不是 `requests.get(model, index=…)` 的参数），从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
-| `reset()` | 同时清空请求留档与帧账本（剧本不动）。两本账共用「留档表长度发号」这一个序号空间，只清一本会让新请求从 0 重新发号而旧帧还在 |
 
 口径：`frame_index` 从 0 起只数 `data: {json}` 载荷帧（`SSEFrame` 只有载荷帧与 `data: [DONE]`
 两种形态，后者不计），因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）。两条配对
-约束：`at` 是**绝对**单调时钟，而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前
-先换到同一原点；role / finish / usage 帧不产生客户端流式事件，拿它和 WS 事件配对时先按场景自己
-的帧序筛出 content / reasoning / tool 帧。没有帧的请求——非流式压缩调用，或在产出任何帧之前就
-失败（剧本耗尽 5xx）——返回空列表；写失败（客户端断开）的那帧不进账，所以账本是「传输层接受了
-的帧」的**上限**（突发写会把内核缓冲填满，账本可能记满而客户端只读到几帧）。
+约束：`at` 是**绝对**单调时钟（与 `LoggedRequest.at` 同原点，两者相减即「入站 → 发帧」的耗时），
+而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前先换到同一原点；role / finish / usage
+帧不产生客户端流式事件，拿它和 WS 事件配对时先按场景自己的帧序筛出 content / reasoning / tool 帧。
+没有帧的请求——非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；写失败
+（客户端断开）的那帧不进账，所以账本是「传输层接受了的帧」的**上限**（突发写会把内核缓冲填满，
+账本可能记满而客户端只读到几帧）。
+
+账本与请求留档共享「留档表长度发号」这一个号空间：`provider.requests.clear()` 之后新请求从 0
+重新发号，账本里的帧随即无法归因——`emits_for` 因此直接抛 `RuntimeError` 而不是把两轮拼成一张表。
 
 ### 落盘：`session.history` / `probe.history(session)`
 

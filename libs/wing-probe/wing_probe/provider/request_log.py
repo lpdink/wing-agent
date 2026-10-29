@@ -90,6 +90,7 @@ class RequestLog:
     """请求留档表（按到达顺序）。"""
 
     _requests: list[LoggedRequest] = field(default_factory=list)
+    _generation: int = 0
 
     def record(
         self,
@@ -150,7 +151,18 @@ class RequestLog:
         return len(self.by_model(model))
 
     def clear(self) -> None:
+        """清空留档：序号从 0 重新发号（``generation`` 递增）。"""
         self._requests.clear()
+        self._generation += 1
+
+    @property
+    def generation(self) -> int:
+        """``clear()`` 的次数。
+
+        ``index`` 是「留档表长度」发号的，清空后同名下标会指向另一个请求。与留档共享号
+        空间的账本（如 ``FakeProvider.frame_emits``）靠这个数检测复用。
+        """
+        return self._generation
 
     def summary(self) -> str:
         """按 model 分组的计数概览（失败报告 / 调试用）。"""
