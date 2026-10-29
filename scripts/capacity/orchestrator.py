@@ -12,6 +12,9 @@
 等全部就绪 → 下发窗口（``window_start/end`` 是绝对 ``time.monotonic()``）→ 窗口内
 采样 → 收分片样本 → 拆环境（异常路径同样收干净）。建会话由 coordinator 统一做：
 「建 N 个会话要多久」本身是一个被测数字，且分片不重复写。
+
+失败时**保留已经拿到的证据**：采样挂了也照收分片样本（它们已在窗口末落盘），
+建好的会话数与网关身份照常写进 `run.json`，只有真正没测到的字段才是 ``null``。
 """
 
 from __future__ import annotations
@@ -56,10 +59,11 @@ SYSTEM_PROMPT = "You are wing's capacity probe agent. Answer briefly."
 WORKSPACE_DIRNAME = "workspace"
 SHARD_SCRIPT = Path(__file__).with_name("driver_shard.py")
 
-#: ``run.json`` 的冻结指标名（顺序即报告列序）。取不到的一律 ``None`` → JSON ``null``。
+#: ``run.json`` 的指标键（顺序即报告列序）。取不到的一律 ``None`` → JSON ``null``。
 METRIC_KEYS: tuple[str, ...] = (
     "gateway.cpu_cores",
     "gateway.rss_mb_peak",
+    "gateway.rss_mb_end",
     "gateway.rss_mb_slope_per_session",
     "gateway.fds_peak",
     "delivery.p50_ms",
@@ -72,17 +76,23 @@ METRIC_KEYS: tuple[str, ...] = (
     "slow_client_recycles",
 )
 
-#: 网关 ``_recycle_client`` 的收尾日志判别词（慢 / 死消费者回收）。
-RECYCLE_MARKERS: tuple[str, ...] = (
-    "Client disconnected:",
-    "(write timeout after",
-    "(send failed:",
+#: ``run.json`` 的样本记账键（成功档与失败档键集相同，缺数据是 ``None``）。
+SAMPLE_KEYS: tuple[str, ...] = (
+    "count",
+    "dropped",
+    "dropped_reasons",
+    "text_frames",
+    "turns",
+    "delivery_available",
 )
 
 DELIVERY_UNAVAILABLE = (
     "delivery.* is null: frame_emits not available (the fake provider does not "
     "record per-frame emit times)"
 )
+
+#: 分片自报的 CPU 窗口与 coordinator 的采样窗口允许的相对偏差（超过即记 note）。
+CPU_WINDOW_TOLERANCE = 0.1
 
 
 class OrchestratorError(RuntimeError):
@@ -140,47 +150,61 @@ class _ShardHandle:
 
 @dataclass
 class _Sampling:
-    """窗口内的原始采样结果。"""
+    """窗口内的采样结果（``_sample_window`` 原地填充，失败也保留已采部分）。"""
 
-    window_start: float
-    window_end: float
-    wall_s: float
+    window_start: float = 0.0
+    window_end: float = 0.0
+    wall_s: float = 0.0
     gateway_pid: int | None = None
     gateway_cpu_seconds: float | None = None
     provider_cpu_seconds: float | None = None
     rss_mb: list[float] = field(default_factory=list)
     fds: list[int] = field(default_factory=list)
     loadavg: list[float] | None = None
-    recycles: int | None = None
 
 
 # ── 一档 ──────────────────────────────────────────────────────
 
 
+def level_skeleton(sessions: int) -> dict[str, Any]:
+    """一档记录的空壳（成功与失败共用同一份键集，缺数据是 ``None``）。"""
+    return {
+        "sessions": sessions,
+        "wall_s": None,
+        "metrics": dict.fromkeys(METRIC_KEYS),
+        "rig": {
+            "provider_cpu_cores": None,
+            "shard_cpu_cores": [],
+            "host_loadavg": None,
+        },
+        "samples": dict.fromkeys(SAMPLE_KEYS),
+        "session_create": {"ok": None, "failed": None, "total_ms": None},
+        "gateway": {"pid": None, "url": None, "version": None, "commit": None},
+        "shape": {"rate": None, "shards": None, "subscribers": None},
+    }
+
+
 async def run_level(cfg: RunConfig, sessions: int, level_dir: Path) -> dict[str, Any]:
     """跑一档并返回 ``run.json`` 的 ``levels[i]`` 记录（失败也返回，带 ``error``）。"""
     notes: list[str] = []
-    try:
-        record = await _run_level(cfg, sessions, level_dir, notes)
-    except Exception as exc:  # noqa: BLE001 - 单档失败不该吞掉其余档
-        traceback.print_exc()
-        record = _empty_level(sessions, f"{type(exc).__name__}: {exc}")
-        notes.append(f"level {sessions} failed: {record['error']}")
-    record["notes"] = notes
-    return record
-
-
-async def _run_level(
-    cfg: RunConfig, sessions: int, level_dir: Path, notes: list[str]
-) -> dict[str, Any]:
-    shape = shapes.resolve(cfg.scenario)
+    record = level_skeleton(sessions)
+    failures: list[str] = []
+    env: ProbeEnv | None = None
+    shards: list[_ShardHandle] = []
+    sampling = _Sampling()
+    payloads: list[dict[str, Any]] = []
     shutil.rmtree(level_dir, ignore_errors=True)
     level_dir.mkdir(parents=True, exist_ok=True)
-    env = await _start_env(cfg, shape, sessions, level_dir)
-    identity = await _gateway_identity(env)
-    shards: list[_ShardHandle] = []
     try:
+        env = await _start_env(cfg, sessions, level_dir)
+        identity = await _gateway_identity(env)
+        record["gateway"].update(
+            {"pid": _process_pid(env), "url": env.gateway_url, **identity}
+        )
         created = await _create_sessions(env, sessions, level_dir)
+        record["session_create"].update(
+            {key: created[key] for key in ("ok", "failed", "total_ms")}
+        )
         if created["ok"] != sessions:
             raise OrchestratorError(
                 f"created only {created['ok']} of {sessions} sessions "
@@ -189,18 +213,50 @@ async def _run_level(
         shards = await _spawn_shards(
             cfg, sessions, created["session_ids"], env, level_dir, notes
         )
+        record["shape"].update(
+            {"rate": cfg.rate, "shards": len(shards), "subscribers": cfg.subscribers}
+        )
         window_start, window_end = await _await_ready(shards, cfg)
-        sampling = await _sample_window(env, window_start, window_end)
-        payloads = await _collect(shards, window_start)
+        sampling.window_start = window_start
+        sampling.window_end = window_end
+        try:
+            await _sample_window(env, sampling)
+        except Exception as exc:  # noqa: BLE001 - 采样失败不阻断收样本
+            failures.append(f"sampling: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+        payloads = await _collect(shards)
+    except Exception as exc:  # noqa: BLE001 - 单档失败不该吞掉其余档
+        failures.append(f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
     finally:
         for handle in shards:
             await handle.stop()
-        await env.stop()
-        _keep_log(env, level_dir)
+        if env is not None:
+            await env.stop()
+            _keep_log(env, level_dir)
 
-    record = _assemble(cfg, sessions, env, identity, created, sampling, payloads, notes)
-    shutil.rmtree(level_dir / "env", ignore_errors=True)
+    _assemble(
+        record,
+        cfg=cfg,
+        sessions=sessions,
+        provider=None if env is None else env.provider,
+        sampling=sampling,
+        payloads=payloads,
+        notes=notes,
+    )
+    if failures:
+        record["error"] = " | ".join(failures)
+        notes.append(f"level {sessions} failed: {record['error']}")
+    record["notes"] = notes
+    if not failures:
+        shutil.rmtree(level_dir / "env", ignore_errors=True)
+        shutil.rmtree(level_dir / WORKSPACE_DIRNAME, ignore_errors=True)
     return record
+
+
+def _process_pid(env: ProbeEnv) -> int | None:
+    process = env.process
+    return None if process is None else int(process.pid)
 
 
 async def _gateway_identity(env: ProbeEnv) -> dict[str, Any]:
@@ -219,10 +275,9 @@ async def _gateway_identity(env: ProbeEnv) -> dict[str, Any]:
     }
 
 
-async def _start_env(
-    cfg: RunConfig, shape: Any, sessions: int, level_dir: Path
-) -> ProbeEnv:
+async def _start_env(cfg: RunConfig, sessions: int, level_dir: Path) -> ProbeEnv:
     """起隔离环境（fresh WING_HOME + 假 Provider + 网关子进程）并注册剧本。"""
+    shape = shapes.resolve(cfg.scenario)
     env = await ProbeEnv.start(
         level_dir / "env",
         gateway_bin=resolve_gateway_bin(),
@@ -409,46 +464,60 @@ async def _read_event(
     return payload
 
 
-async def _sample_window(
-    env: ProbeEnv, window_start: float, window_end: float
-) -> _Sampling:
-    """窗口内采样：CPU 首尾累计差 + RSS/fd 周期峰值 + 网关日志的回收行计数。"""
+async def _sample_window(env: ProbeEnv, sampling: _Sampling) -> None:
+    """窗口内采样：CPU 首尾累计差 + RSS/fd 周期峰值 + 网关日志的回收行计数。
+
+    采样原地写进 ``sampling``：中途失败时已采到的点仍留在产物里（崩机现场是容量测量
+    最想留住的那一格）。RSS / fd 走线程——darwin 上它们是 ``ps`` / ``lsof`` 子进程
+    （合计约 17 ms），同步跑会每秒卡住一次正在产出负载的假 Provider。
+    """
     process = env.process
     if process is None:
         raise OrchestratorError("the gateway process is gone before the sample window")
     gateway_pid = int(process.pid)
+    sampling.gateway_pid = gateway_pid
     log_path = env.log_path
-    delay = window_start - time.monotonic()
+    delay = sampling.window_start - time.monotonic()
     if delay > 0:
         await asyncio.sleep(delay)
-    log_offset = _file_size(log_path)
-    sampling = _Sampling(
-        window_start=window_start,
-        window_end=window_end,
-        wall_s=0.0,
-        gateway_pid=gateway_pid,
-    )
-    started = time.monotonic()
+    _require_gateway_alive(process, gateway_pid, log_path)
+    sampling.loadavg = _loadavg()
     gateway_cpu0 = proc.process_cpu_seconds(gateway_pid)
     provider_cpu0 = proc.self_cpu_seconds()
-    sampling.loadavg = _loadavg()
+    started = time.monotonic()
     while True:
-        sampling.rss_mb.append(proc.process_rss_mb(gateway_pid))
-        sampling.fds.append(proc.process_fds(gateway_pid))
-        remaining = window_end - time.monotonic()
+        _require_gateway_alive(process, gateway_pid, log_path)
+        rss_mb, fds = await asyncio.to_thread(_sample_memory, gateway_pid)
+        sampling.rss_mb.append(rss_mb)
+        sampling.fds.append(fds)
+        remaining = sampling.window_end - time.monotonic()
         if remaining <= 0:
             break
         await asyncio.sleep(min(SAMPLE_INTERVAL, remaining))
     sampling.wall_s = time.monotonic() - started
     sampling.gateway_cpu_seconds = proc.process_cpu_seconds(gateway_pid) - gateway_cpu0
     sampling.provider_cpu_seconds = proc.self_cpu_seconds() - provider_cpu0
-    sampling.recycles = _count_recycles(log_path, log_offset)
-    return sampling
 
 
-async def _collect(
-    handles: list[_ShardHandle], window_start: float
-) -> list[dict[str, Any]]:
+def _sample_memory(pid: int) -> tuple[float, int]:
+    """网关的 ``(RSS MB, fd 数)``（阻塞读取，调用方负责放进线程）。"""
+    return proc.process_rss_mb(pid), proc.process_fds(pid)
+
+
+def _require_gateway_alive(
+    process: asyncio.subprocess.Process, pid: int, log_path: Path
+) -> None:
+    """网关必须还活着：死了要留下「网关退出了」这句话，而不是采样器的措辞。"""
+    code = process.poll()
+    if code is None:
+        return
+    raise OrchestratorError(
+        f"gateway exited during the sample window (pid {pid}, code {code})\n"
+        f"{read_log_tail(log_path)}"
+    )
+
+
+async def _collect(handles: list[_ShardHandle]) -> list[dict[str, Any]]:
     """等每个分片报 done / 退出，读回它的样本文件。"""
     payloads: list[dict[str, Any]] = []
     for handle in handles:
@@ -483,16 +552,16 @@ async def _collect(
 
 
 def _assemble(
+    record: dict[str, Any],
+    *,
     cfg: RunConfig,
     sessions: int,
-    env: ProbeEnv,
-    identity: dict[str, Any],
-    created: dict[str, Any],
+    provider: Any,
     sampling: _Sampling,
     payloads: list[dict[str, Any]],
     notes: list[str],
 ) -> dict[str, Any]:
-    """把采样与分片样本折成 ``run.json`` 的一档记录。"""
+    """把采样与分片样本折进 ``record``（键集在 :func:`level_skeleton` 就定好了）。"""
     window_start = sampling.window_start
     turns = [
         TurnSample(
@@ -510,46 +579,48 @@ def _assemble(
     text_frames = sum(int(payload.get("text_frames", 0)) for payload in payloads)
     errors = sum(int(payload.get("errors", 0)) for payload in payloads)
     wall = sampling.wall_s
-    metrics_block: dict[str, Any] = dict.fromkeys(METRIC_KEYS)
+    block = record["metrics"]
+    samples = record["samples"]
+    samples["text_frames"] = text_frames if payloads else None
+    samples["turns"] = len(turns) if payloads else None
+    record["wall_s"] = round(wall, 3) if wall > 0 else None
 
-    metrics_block["gateway.cpu_cores"] = _ratio(sampling.gateway_cpu_seconds, wall)
+    block["gateway.cpu_cores"] = _ratio(sampling.gateway_cpu_seconds, wall)
     if sampling.rss_mb:
-        metrics_block["gateway.rss_mb_peak"] = round(max(sampling.rss_mb), 1)
-        metrics_block["gateway.rss_mb_end"] = round(sampling.rss_mb[-1], 1)
+        block["gateway.rss_mb_peak"] = round(max(sampling.rss_mb), 1)
+        block["gateway.rss_mb_end"] = round(sampling.rss_mb[-1], 1)
     if sampling.fds:
-        metrics_block["gateway.fds_peak"] = max(sampling.fds)
-    metrics_block["tokens_per_second_actual"] = (
-        round(text_frames / wall, 1) if wall > 0 else None
+        block["gateway.fds_peak"] = max(sampling.fds)
+    block["slow_client_recycles"] = (
+        sum(int(payload.get("closed_before_end", 0)) for payload in payloads)
+        if payloads
+        else None
     )
-    metrics_block["errors"] = errors
-    metrics_block["slow_client_recycles"] = sampling.recycles
 
+    if payloads:
+        block["errors"] = errors
+        if text_frames > 0 and wall > 0:
+            block["tokens_per_second_actual"] = round(text_frames / wall, 1)
+        else:
+            notes.append(
+                "tokens_per_second_actual is null: no text frame arrived in the window"
+            )
     turn_spread = metrics.spread(
         [(turn.result_at - turn.sent_at) * 1000.0 for turn in turns]
     )
-    metrics_block["turn.p50_ms"] = _round(turn_spread.get("p50"))
-    metrics_block["turn.p99_ms"] = _round(turn_spread.get("p99"))
+    block["turn.p50_ms"] = _round(turn_spread.get("p50"))
+    block["turn.p99_ms"] = _round(turn_spread.get("p99"))
 
-    delivery_available = metrics.has_frame_emits(env.provider)
-    samples: dict[str, Any] = {
-        "count": None,
-        "dropped": None,
-        "text_frames": text_frames,
-        "turns": len(turns),
-        "delivery_available": delivery_available,
-    }
+    delivery_available = provider is not None and metrics.has_frame_emits(provider)
+    samples["delivery_available"] = None if provider is None else delivery_available
     if delivery_available and turns:
-        pairing = metrics.pair_delivery(
-            env.provider, env.provider.requests.all(), turns
-        )
-        delivery = metrics.spread(pairing.latencies_ms)
-        for label, value in delivery.items():
-            metrics_block[f"delivery.{label}_ms"] = _round(value)
+        pairing = metrics.pair_delivery(provider, provider.requests.all(), turns)
+        for label, value in metrics.spread(pairing.latencies_ms).items():
+            block[f"delivery.{label}_ms"] = _round(value)
         samples["count"] = pairing.paired
         samples["dropped"] = pairing.dropped
-        samples["dropped_reasons"] = {}
+        samples["dropped_reasons"] = dict(pairing.reasons)
         if pairing.reasons:
-            samples["dropped_reasons"] = dict(pairing.reasons)
             notes.append(
                 f"delivery pairing dropped {pairing.dropped} sample(s): "
                 f"{dict(pairing.reasons)}"
@@ -564,76 +635,54 @@ def _assemble(
             "delivery percentile basis: nearest-rank over "
             f"{pairing.paired} paired frame(s)"
         )
-    elif not delivery_available:
+    elif provider is not None and not delivery_available:
         notes.append(DELIVERY_UNAVAILABLE)
-    else:
+    elif provider is not None:
         notes.append("delivery.* is null: no turn completed inside the sample window")
 
-    shard_cpu = [_ratio(payload.get("cpu_seconds"), wall) for payload in payloads]
-    rig = {
-        "provider_cpu_cores": _ratio(sampling.provider_cpu_seconds, wall),
-        "shard_cpu_cores": shard_cpu,
-        "host_loadavg": sampling.loadavg,
-    }
-    if any(payload.get("error_details") for payload in payloads):
-        notes.extend(
-            detail
-            for payload in payloads
-            for detail in payload.get("error_details", ())[:2]
-        )
-    record: dict[str, Any] = {
-        "sessions": sessions,
-        "wall_s": round(wall, 3),
-        "metrics": metrics_block,
-        "rig": rig,
-        "samples": samples,
-        "session_create": {
-            "ok": created["ok"],
-            "failed": created["failed"],
-            "total_ms": created["total_ms"],
-        },
-        "gateway": {
-            "pid": sampling.gateway_pid,
-            "url": env.gateway_url,
-            "version": identity.get("version"),
-            "commit": identity.get("commit"),
-        },
-        "shape": {
-            "rate": cfg.rate,
-            "shards": len(payloads),
-            "subscribers": cfg.subscribers,
-        },
-    }
-    if record["shape"]["shards"] != cfg.shards_for(sessions):
+    shard_cpu: list[float | None] = []
+    for payload in payloads:
+        shard_cpu.append(_shard_cpu_cores(payload, wall, notes))
+        notes.extend((payload.get("error_details") or ())[:2])
+    record["rig"].update(
+        {
+            "provider_cpu_cores": _ratio(sampling.provider_cpu_seconds, wall),
+            "shard_cpu_cores": shard_cpu,
+            "host_loadavg": sampling.loadavg,
+        }
+    )
+    expected_shards = record["shape"]["shards"]
+    if payloads and expected_shards not in (None, len(payloads)):
         notes.append(
-            f"only {record['shape']['shards']} of "
-            f"{cfg.shards_for(sessions)} shard(s) reported samples"
+            f"only {len(payloads)} of {expected_shards} shard(s) reported samples"
+        )
+    if record["shape"]["subscribers"] is None:
+        record["shape"].update(
+            {
+                "rate": cfg.rate,
+                "shards": len(payloads) or None,
+                "subscribers": cfg.subscribers,
+            }
         )
     return record
 
 
-def _empty_level(sessions: int, error: str) -> dict[str, Any]:
-    """失败档的形状：指标全 ``null``（不写 0），错误信息进 ``error``。"""
-    return {
-        "sessions": sessions,
-        "wall_s": None,
-        "metrics": dict.fromkeys(METRIC_KEYS),
-        "rig": {
-            "provider_cpu_cores": None,
-            "shard_cpu_cores": [],
-            "host_loadavg": None,
-        },
-        "samples": {
-            "count": None,
-            "dropped": None,
-            "text_frames": None,
-            "turns": None,
-            "delivery_available": None,
-        },
-        "session_create": {"ok": None, "failed": None, "total_ms": None},
-        "gateway": {"pid": None, "url": None},
-        "error": error,
-    }
+def _shard_cpu_cores(
+    payload: dict[str, Any], wall: float, notes: list[str]
+) -> float | None:
+    """分片自报的窗口内 CPU 秒 → 平均核数（窗口长度用分片自己的记账区间）。"""
+    span = payload.get("cpu_span_s")
+    divisor = float(span) if isinstance(span, (int, float)) and span > 0 else wall
+    if (
+        isinstance(span, (int, float))
+        and wall > 0
+        and abs(span - wall) > CPU_WINDOW_TOLERANCE * wall
+    ):
+        notes.append(
+            f"shard {payload.get('shard')} CPU window {span:.2f}s differs from the "
+            f"sample window {wall:.2f}s (numerator/denominator mismatch)"
+        )
+    return _ratio(payload.get("cpu_seconds"), divisor)
 
 
 # ── 小工具 ────────────────────────────────────────────────────
@@ -657,31 +706,6 @@ def _loadavg() -> list[float] | None:
         return None
 
 
-def _file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
-def _count_recycles(path: Path, offset: int) -> int | None:
-    """窗口内的慢 / 死消费者回收行数（读不到日志 → ``None``）。"""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            text = handle.read().decode("utf-8", "replace")
-    except OSError:
-        return None
-    return sum(1 for line in text.splitlines() if _is_recycle_line(line))
-
-
-def _is_recycle_line(line: str) -> bool:
-    """网关的回收日志形如 ``Client disconnected: <id> (write timeout after 30s)``。"""
-    return RECYCLE_MARKERS[0] in line and any(
-        marker in line for marker in RECYCLE_MARKERS[1:]
-    )
-
-
 def _keep_log(env: ProbeEnv, level_dir: Path) -> None:
     """把网关日志留在档位目录（``env/`` 成功时会被删掉，日志要留作取证）。"""
     try:
@@ -691,9 +715,12 @@ def _keep_log(env: ProbeEnv, level_dir: Path) -> None:
 
 
 __all__ = [
+    "CPU_WINDOW_TOLERANCE",
     "DELIVERY_UNAVAILABLE",
     "METRIC_KEYS",
     "OrchestratorError",
     "RunConfig",
+    "SAMPLE_KEYS",
+    "level_skeleton",
     "run_level",
 ]

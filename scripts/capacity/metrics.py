@@ -11,8 +11,8 @@
    ``dropped`` 并按原因分类，**绝不截断对齐、绝不插值、绝不把配不上的样本当 0**。
 
 发射时刻来自上游冻结接口（``FakeProvider.frame_emits`` / ``emits_for``）；缺失时
-:func:`frame_emits_for` 直接抛 :class:`DeliveryUnavailable`，由档位执行器转成
-「延迟指标不可用」并三处点名（不写 0、不静默）。
+:func:`frame_emits_for` 直接抛 :class:`DeliveryUnavailable`，由档位编排
+（``orchestrator``）转成「延迟指标不可用」并三处点名（不写 0、不静默）。
 """
 
 from __future__ import annotations

@@ -9,7 +9,8 @@ CPU 采样的平台分支照搬 ``scripts/perf/suite_gateway.py`` 的
 
 **为什么不共享**：那份实现住在一个 perf 套件脚本里（不是共用模块），跨工具 import
 会把整条 perf 测量链（side 描述符 / 判定 / 子进程编排）拖进手测工具；而容量测量还
-多要 RSS / fd / rlimit 三个读取口。两份口径若漂移，以本文件为准。
+多要 RSS / fd / rlimit 三个读取口。**origin 是 perf 那一份**（更早、被 CI 覆盖、与
+``docs/dev/perf-testing.md`` 对齐）：改任何一边都要同步另一边，合并时以那边为准。
 
 只用标准库；不引入 psutil。
 """

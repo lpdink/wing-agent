@@ -7,7 +7,7 @@
 
 刻意不含工具调用、不含历史体量、不含并发突刺——那些是别的形态要隔离的变量。
 
-形态契约（``shapes.resolve`` 校验，02 的新形态照此实现）：
+形态契约（``shapes.resolve`` 校验，新增形态照此实现）：
 
 - ``NAME``：``--scenario`` 的取值；
 - ``MODEL``：注册剧本用的 model id（``providers[].models`` 里的 id）；

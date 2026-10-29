@@ -41,7 +41,7 @@ CLI（冻结；下游脚本依赖这些名字）：
 | `--history-tokens` | `0` | 预置历史体量；只接受 `0`（其余形态待补） |
 | `--out` | `target/capacity/<UTC 时间戳>` | 产物目录 |
 | `--selftest` | — | 离线自测 |
-| `--json` | — | stdout 只输出一行 JSON 摘要 |
+| `--json` | — | stdout 只输出一行 JSON 摘要（`ok` / `out` / `run_json` / `report` / `levels[]` / `failures`）；`levels[]` 每项是 `sessions` + `gateway_cpu_cores` / `delivery_p99_ms` / `tokens_per_second_actual` / `errors` / `error` 的投影，人读路径用同一份数据 |
 
 退出码：`0` 全部档位完成；`2` 参数 / 环境错误（未启动任何进程）；`3` 有档位失败
 （仍落盘产物，供取证）。`EMFILE` 之类「跑到一半才炸」的失败不会产出漂亮空表：
@@ -75,6 +75,11 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 判读读数的第一件事：看 `rig.provider_cpu_cores + Σ rig.shard_cpu_cores` 离核数有多远。
 接近核数 ⇒ 这一档测的是 rig，不是网关，读数标注为不可信。
 
+三个 CPU 数字是**同一个窗口口径**（窗口起止的累计 CPU 差 / 窗口秒）：网关由 coordinator
+外部采样，Provider 与分片在各自进程里自记账（起点钉在 `window_start`，收到窗口消息时
+并不起算——那时还在 warmup）。采网关的 RSS / fd 要走 `ps` / `lsof` 子进程（合计约 17 ms），
+所以放在线程里跑：同步跑会每秒卡住一次正在产出负载的 Provider，把抖动记进读数。
+
 ## 产物
 
 ```
@@ -85,7 +90,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
     ├── shard-<k>.samples.json     # 该分片的每次轮次 + 每帧到达时刻（相对窗口的微秒）
     ├── shard-<k>.json             # 分片配置（会话分配 / 订阅模式）
     ├── shard-<k>.log              # 分片 stderr（崩溃取证）
-    └── gateway.log                # 该档网关日志（含慢客户端回收行）
+    └── gateway.log                # 该档网关日志（崩溃 / 断连取证用）
 ```
 
 `run.json` 的冻结字段（**取不到就是 `null`，绝不写 0**）：
@@ -106,36 +111,43 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
     "sessions": 10, "wall_s": 5.08,
     "metrics": {
       "gateway.cpu_cores": 0.12, "gateway.rss_mb_peak": 73.2,
-      "gateway.rss_mb_slope_per_session": 0.3, "gateway.fds_peak": 47,
+      "gateway.rss_mb_end": 73.2, "gateway.rss_mb_slope_per_session": 0.3,
+      "gateway.fds_peak": 47,
       "delivery.p50_ms": null, "delivery.p99_ms": null, "delivery.p999_ms": null,
       "turn.p50_ms": 1680.5, "turn.p99_ms": 1741.5,
-      "tokens_per_second_actual": 395.5, "errors": 0, "slow_client_recycles": 0,
-      "gateway.rss_mb_end": 73.2
+      "tokens_per_second_actual": 395.5, "errors": 0, "slow_client_recycles": 0
     },
     "rig": {"provider_cpu_cores": 0.029, "shard_cpu_cores": [0.018, 0.015, 0.012, 0.013],
             "host_loadavg": [4.32, 5.26, 4.74]},
-    "samples": {"count": null, "dropped": null, "text_frames": 2010, "turns": 20,
-                "delivery_available": false, "dropped_reasons": {}},
+    "samples": {"count": null, "dropped": null, "dropped_reasons": {},
+                "text_frames": 2010, "turns": 20, "delivery_available": false},
     "session_create": {"ok": 10, "failed": 0, "total_ms": 13.9},
     "gateway": {"pid": 456, "url": "http://127.0.0.1:63665",
                 "version": "0.7.0", "commit": "a7e7126"},
+    "shape": {"rate": 50.0, "shards": 4, "subscribers": "per-session"},
     "notes": ["…"]
   }]
 }
 ```
+
+**成功档与失败档的键集完全相同**（同一个 `level_skeleton()`）：失败档只是多一个 `error`
+字符串、值全为 `null`——下游按冻结字段名直取不会 `KeyError`。
 
 追加字段（不改上面任何冻结名，读方可以忽略）：
 
 - `meta.notes` / `meta.failures` / `meta.out` / `meta.selftest`：全局说明、失败摘要、
   产物目录、自测标记；
 - `meta.session_create` 是**全档汇总**（`scope: "sum over levels"`）——逐档数字在
-  `levels[i].session_create`（「建 N 个会话要多久」本身就是被测数字）；
+  `levels[i].session_create`（「建 N 个会话要多久」本身就是被测数字）；有档位没拿到
+  数字（环境都没起来）时整组写 `null` + `scope` 说明，不按 0 求和；
 - `levels[i].gateway` 是本档网关身份（每档都是新进程，`meta.gateway` 放最后一档）；
-- `levels[i].samples` 额外给 `text_frames`（窗口内收到的帧数）、`turns`（窗口内完成的
-  轮次数）、`delivery_available`、`dropped_reasons`（配对丢弃的分类计数）；
-- `levels[i].metrics.gateway.rss_mb_end`：窗口末次 RSS（斜率用它，不用峰值）；
+- `levels[i].samples` 给 `text_frames`（窗口内收到的帧数）、`turns`（窗口内完成的轮次数）、
+  `delivery_available`、`dropped_reasons`（配对丢弃的分类计数）；
+- `levels[i].metrics.gateway.rss_mb_end`：窗口末次 RSS（`rss_mb_slope_per_session` 与报告
+  的 `peak / end` 列都用它）；
+- `levels[i].rig.host_loadavg`：**窗口起点**采一次（三档数值不同说明机器状态在变）；
 - `levels[i].shape`：本档的 rate / 实际分片数 / 订阅模式；
-- `levels[i].error`：该档失败时的诊断（此时指标全 `null`）。
+- `levels[i].error`：该档失败时的诊断（此时该档没测到的指标为 `null`）。
 
 ## 口径
 
@@ -148,9 +160,10 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `delivery.*_ms` | 客户端收到第 i 帧 `text` 的时刻 − 假 Provider 发射第 i 帧的时刻（同机 `time.monotonic()`） |
 | `turn.*_ms` | 发 prompt → 收到 `turn_result`（只取窗口内发起且完成的轮次） |
 | `tokens_per_second_actual` | 窗口内收到的 `text` 事件数 / 窗口秒（`pure_stream` 里 1 帧 = 1 token） |
-| `errors` | 窗口内 `error` 事件数 + `turn_result.is_error` 数 |
-| `slow_client_recycles` | 窗口内网关日志里的慢 / 死消费者回收行数（`Client disconnected: … (write timeout … / send failed …)`，以窗口开始时的日志 offset 为界） |
-| `rig.*` | 同一 CPU 口径，分别量 Provider 宿主进程与每个分片；**质量信号，不进退化判据** |
+| `errors` | 窗口内（事件到达时刻在 `[window_start, window_end]` 内）的 `error` 事件数 + `turn_result.is_error` 数 + 分片发送失败数 |
+| `slow_client_recycles` | 窗口结束前就被网关回收的客户端连接数（分片在 `window_end` 时刻数一遍自己的连接：此刻还没关连接，`closed` 的都是网关先断的）。不扫网关日志——那会把窗口末驱动自己的正常收尾也算进去 |
+| `rig.provider_cpu_cores` | coordinator 进程（= Provider 宿主 + 采样器）在窗口内的 CPU 秒 / 窗口秒；上界，不是纯 Provider |
+| `rig.shard_cpu_cores[]` | 每个分片**自报**的窗口内 CPU 秒 / 分片自己的记账区间（起点钉在 `window_start`，因此与上面两个同口径、可相加）；分片上报的区间与采样窗口差 >10% 时留一条 note |
 
 百分位是 **nearest-rank**（p99 = 升序第 `ceil(0.99·n)` 个值，不插值），与
 `scripts/perf/suite_gateway.py` 一致；实现只在 `metrics.percentile()` 一处。
@@ -197,24 +210,35 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   容量工具驱动 N 个会话做**绝对值**扫描。两者都不改产品、都不碰 CI 门禁。
 - 进程采样（CPU 的 darwin / linux 分支）与百分位秩定义**照搬** perf 的实现与口径，
   但各有各的一份：那边住在一个套件脚本里（不是共用模块），跨工具 import 会把整条
-  perf 测量链拖进来；本任务也明令不改 `scripts/perf/**`。
+  perf 测量链拖进来。**origin 是 perf 那一份**（更早、被 CI 覆盖）——改任何一边都要同步
+  另一边，本目录的实现是派生。
 - `libs/wing-probe/` 是本工具的底座（`ProbeEnv` 起环境、`FakeProvider` 当上游、
-  `GatewayWS` 当传输层参考实现）。分片**不**用 probe 的 `Timeline`：它永久保留每个事件，
-  1000 会话 × 50 帧/秒 会让分片先 OOM。
+  `GatewayWS` 当传输层参考实现）。分片为什么不用 probe 的 `Driver` / `Session`：
+
+  1. `Driver` 用**一条** WS 承载它挂载的全部会话（会话靠事件里的 `session_id` 路由），
+     撑不起 `--subscribers per-session`（每会话一条 WS）这个默认拓扑；
+  2. `Session.chat()` 是「发一条 → 等整轮」的阻塞调用，没有「一轮结束立刻发下一条、
+     直到窗口结束」的泵；
+  3. 会话由 coordinator 统一建（建会话耗时是被测数字），与 `Driver.session()` 的职责冲突。
+
+  也不用 probe 的 `Timeline`：它永久保留每个事件，1000 会话 × 50 帧/秒 会让分片先 OOM
+  （分片的原始帧日志有界保留 64 条，只作诊断）。
 
 ## 自测（`--selftest`）
 
-≤60 秒、不联网、不需要 API key、可重复，七组检查：
+≤60 秒、不联网、不需要 API key、可重复，九组检查：
 
 | 检查 | 证明什么 |
 |---|---|
 | `stats.percentile` | 百分位秩定义的 known answer（含 n=1 / 偶数 / 极值 / 空序列报错） |
 | `pairing.last_user_text` | 两种 body 形态（str / block 列表）都能取到配对键 |
 | `pairing.delivery` | 配对数学（延迟 = 到达 − 发射）+ 四类丢弃原因 + 缺接口抛错 |
+| `pairing.assemble` | 配对结果落到 `run.json` 的接线（延迟可用这一支、全丢弃这一支、窗口不一致的 note） |
 | `proc.sampling` | 自身 CPU 单调、RSS > 0、fd ≥ 3、fd 软限抬升到位 |
-| `report.render` | 合成 `run.json` → markdown（缺数据是 `—` 不是 0；不可用有横幅） |
+| `cli.contract` | 冻结 CLI 的默认值与全部校验分支（非法 levels / rate / dwell / warmup / shards / history-tokens / scenario） |
 | `shapes.contract` | 形态契约与剧本覆盖度、prompt 文本全局唯一 |
-| `e2e` | **真网关子进程 + 真分片子进程**跑完迷你一档，断言 `run.json` / `report.md` / `raw/<N>/` 的形状 |
+| `report.render` | 合成 `run.json` → markdown（表格列数自洽、缺数据是 `—` 不是 0、不可用有横幅、多行 note 折行） |
+| `e2e` | **真网关子进程 + 真分片子进程**跑完迷你一档：断言 `run.json` / `report.md` / `raw/<N>/` 的形状、`errors` 与 `turn` 的口径、以及「失败档键集 == 成功档键集」 |
 
 `e2e` 走的是产品代码同一路径（注入 `run_ladder`），不是平行实现。
 
@@ -228,7 +252,10 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 - `--history-tokens` 只接受 0（预置历史体量的形态待补）。
 - 订阅模式不同，单会话成本不同：`per-session` 是 N 条 WS（贴近真实，开销更大），
   `per-shard` 是 K 条（轻量档，仅用于自测 / 极限档）。两者读数不可直接对比。
-- 一档内所有会话共用一个 workspace 目录（工作目录不影响被测变量）。
+- 一档内所有会话共用一个 workspace 目录（工作目录不影响被测变量）；成功档收档时删掉，
+  失败档保留（`raw/<N>/workspace`）以便复盘。
+- 会话工具集固定为 `Read` 一个（`orchestrator.TOOLS`）：真实部署的工具 schema 与 system
+  prompt 更大、会摊进每轮请求，因此这里量到的是**最小工具集下的上界**（会把容量报高）。
 - 单轮之间有网关的提交 + 下一次请求组装开销，占空比因此低于 100%
   （`tokens_per_second_actual` 是真实值；小档位实测约 80~85%）。
 - fd 峰值与 RSS 峰值的分辨率是 1 s 采样间隔，短尖峰可能采不到。

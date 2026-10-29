@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """离线自测（``run.py --selftest``）：≤60 秒、不联网、不需要 API key、可重复。
 
-五组检查，对应这个工具的四件必须可信的事 + 产物形状：
+十组检查（见 :func:`checks`），对应这个工具必须可信的几件事：
 
-- ``stats``    百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）；
-- ``pairing``  投递延迟配对（合成 Provider：值可控，覆盖长度不等 / 命中多条 /
-               负延迟 / 缺接口抛错 / 无 ``emits_for`` 时的退路）；
-- ``proc``     进程采样（自身 CPU 单调、RSS、fd、fd 软限抬升）；
-- ``e2e``      走**真实**执行路径的迷你一档（真网关子进程 + 真分片子进程），断言
-               ``run.json`` / ``report.md`` / ``raw/<N>/`` 的形状与「缺数据写 null」；
-- ``report``   合成 ``run.json`` → markdown 的渲染。
+- ``stats.percentile``        百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）
+- ``pairing.last_user_text``  配对键的提取（str / block 列表两种 body 形态）
+- ``pairing.delivery``        按下标配对 + 四类丢弃原因 + 缺接口抛错
+- ``pairing.assemble``        配对结果落到 ``run.json`` 的接线（延迟可用这一支）
+- ``proc.sampling``           进程采样与 fd 软限抬升
+- ``cli.contract``            冻结 CLI 的校验分支与默认值
+- ``shapes.contract``         形态契约与剧本覆盖度、prompt 文本全局唯一
+- ``report.render``           合成 ``run.json`` → markdown（缺数据是 ``—``，不可用有横幅）
+- ``e2e``                     **真网关子进程 + 真分片子进程**跑完迷你一档，断言产物形状；
+                               并用一个失败档断言「成功档与失败档的键集完全相同」
 
-``e2e`` 通过注入的 ``run_ladder`` 复用正式路径——自测里跑的是产品代码，不是另一份
-平行实现（否则自测绿了也不能说明工具能用）。
+``e2e`` 通过注入的 ``run_ladder`` 复用正式路径——自测里跑的是产品代码，不是另一份平行
+实现（否则自测绿了也不能说明工具能用）。
 """
 
 from __future__ import annotations
@@ -28,15 +31,28 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from wing_probe.provider.request_log import RequestLog
+
+import cli
 import metrics
 import orchestrator
 import proc
 import report
 import shapes
-from orchestrator import RunConfig
+from orchestrator import RunConfig, level_skeleton
 
-#: 自测里 e2e 一档的预算（秒）。总预算 ≤60 s（任务书硬约束），留足余量。
+#: e2e 一档的预算（秒）。自测总预算 ≤60 s，留足余量。
 E2E_BUDGET_S = 45.0
+
+#: 网关源码里回收日志的出处（``slow_client_recycles`` 的措辞校验用）。
+GATEWAY_SERVER = (
+    Path(__file__).resolve().parents[2]
+    / "libs"
+    / "core"
+    / "wing"
+    / "gateway"
+    / "server.py"
+)
 
 LadderRunner = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -172,7 +188,8 @@ def check_pairing() -> None:
     )
     _check(unknown.paired == 0 and unknown.dropped == 2, "unknown prompt must drop")
     _check(
-        unknown.reasons.get("unknown_prompt") == 1, "unknown prompt must be classified"
+        unknown.reasons.get("unknown_prompt") == 1,
+        "unknown prompt must be classified",
     )
     ambiguous = metrics.pair_delivery(
         provider,
@@ -232,6 +249,156 @@ def check_pairing() -> None:
             raise SelftestFailure("missing frame_emits must raise DeliveryUnavailable")
 
 
+def _sampling(**overrides: Any) -> orchestrator._Sampling:
+    base: dict[str, Any] = {
+        "window_start": 100.0,
+        "window_end": 105.0,
+        "wall_s": 5.0,
+        "gateway_pid": 4242,
+        "gateway_cpu_seconds": 0.5,
+        "provider_cpu_seconds": 0.25,
+        "rss_mb": [100.0, 104.0],
+        "fds": [30, 40],
+        "loadavg": [1.0, 1.0, 1.0],
+    }
+    base.update(overrides)
+    return orchestrator._Sampling(**base)
+
+
+def _sample_payload(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "shard": 0,
+        "text_frames": 3,
+        "errors": 0,
+        "cpu_seconds": 0.5,
+        "cpu_span_s": 5.0,
+        "closed_before_end": 0,
+        "error_details": [],
+        "turns": [
+            {
+                "prompt": "load:s0:0",
+                "sent_us": 1000,
+                "result_us": 2001000,
+                "arrivals_us": [10000, 20000, 30000],
+            }
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def check_assemble() -> None:
+    """配对结果落到 ``run.json`` 的接线（延迟可用这一支，含丢弃与窗口不一致）。"""
+    requests = RequestLog()
+    requests.record({"messages": [{"role": "user", "content": "load:s0:0"}]}, model="m")
+    provider = _provider({0: [100.005, 100.015, 100.025]})
+    provider.requests = requests
+    cfg = RunConfig(
+        scenario="pure_stream",
+        levels=(1,),
+        rate=50.0,
+        dwell=5.0,
+        warmup=0.0,
+        shards=1,
+        subscribers="per-shard",
+        history_tokens=0,
+        out=Path("/tmp/capacity-selftest-assemble"),
+    )
+    notes: list[str] = []
+    record = orchestrator._assemble(
+        level_skeleton(1),
+        cfg=cfg,
+        sessions=1,
+        provider=provider,
+        sampling=_sampling(),
+        payloads=[_sample_payload()],
+        notes=notes,
+    )
+    metrics_block = record["metrics"]
+    samples = record["samples"]
+    _check(samples["delivery_available"] is True, "delivery must be reported available")
+    _check(samples["count"] == 3, f"expected 3 paired frames, got {samples['count']}")
+    _check(samples["dropped"] == 0, f"expected 0 dropped, got {samples['dropped']}")
+    _check(
+        metrics_block["delivery.p50_ms"] == 5.0
+        and metrics_block["delivery.p999_ms"] == 5.0,
+        f"latency must land on the metric keys: {metrics_block}",
+    )
+    _check(
+        record["metrics"]["gateway.cpu_cores"] == 0.1,
+        f"gateway cpu = 0.5s / 5s: {record['metrics']['gateway.cpu_cores']}",
+    )
+    _check(
+        record["rig"]["shard_cpu_cores"] == [0.1],
+        f"shard cpu = 0.5s / 5s: {record['rig']['shard_cpu_cores']}",
+    )
+    _check(
+        record["metrics"]["tokens_per_second_actual"] == 0.6,
+        f"3 frames / 5 s: {record['metrics']['tokens_per_second_actual']}",
+    )
+
+    _check(
+        record["metrics"]["slow_client_recycles"] == 0,
+        "no closed client must be reported as a recycle",
+    )
+    closed_early = orchestrator._assemble(
+        level_skeleton(1),
+        cfg=cfg,
+        sessions=1,
+        provider=provider,
+        sampling=_sampling(),
+        payloads=[_sample_payload(closed_before_end=2)],
+        notes=[],
+    )
+    _check(
+        closed_early["metrics"]["slow_client_recycles"] == 2,
+        "clients the gateway dropped before window end must be counted: "
+        f"{closed_early['metrics']['slow_client_recycles']}",
+    )
+
+    # 分片的记账区间与采样窗口不一致 → 必须留一条 note（而不是把两个窗口混着算）。
+    mismatched: list[str] = []
+    orchestrator._assemble(
+        level_skeleton(1),
+        cfg=cfg,
+        sessions=1,
+        provider=provider,
+        sampling=_sampling(),
+        payloads=[_sample_payload(cpu_span_s=2.0)],
+        notes=mismatched,
+    )
+    _check(
+        any("CPU window" in note for note in mismatched),
+        f"a mismatched shard CPU window must be called out: {mismatched}",
+    )
+
+    # 全部配不上 → 延迟仍是 null，count 是真实的 0（不是「没有数据」）。
+    dropped: list[str] = []
+    short = _provider({0: [100.005, 100.015]})
+    short.requests = requests
+    bad = orchestrator._assemble(
+        level_skeleton(1),
+        cfg=cfg,
+        sessions=1,
+        provider=short,
+        sampling=_sampling(),
+        payloads=[_sample_payload()],
+        notes=dropped,
+    )
+    _check(
+        bad["metrics"]["delivery.p50_ms"] is None,
+        "no pairable frame must leave delivery null (never 0)",
+    )
+    _check(
+        bad["samples"]["count"] == 0 and bad["samples"]["dropped"] == 3,
+        f"unpaired frames must be counted as dropped: {bad['samples']}",
+    )
+    _check(
+        bad["samples"]["dropped_reasons"].get("length_mismatch") == 1,
+        f"drop reason must be classified: {bad['samples']['dropped_reasons']}",
+    )
+
+
 # ── proc ──────────────────────────────────────────────────────
 
 
@@ -258,106 +425,198 @@ def check_proc() -> None:
     _check(float(host["mem_gb"] or 0) > 0.0, "host_info must report memory")
 
 
+# ── cli ───────────────────────────────────────────────────────
+
+
+def check_cli() -> None:
+    """冻结 CLI 的校验分支（下游脚本依赖这些名字与退出语义）。"""
+    _check(
+        cli.parse_levels(" 1, 10 ") == (1, 10),
+        "levels must tolerate surrounding spaces",
+    )
+    for raw in ("10,1", "1,1", "1,x", "1,", "", "0", "-1"):
+        try:
+            cli.parse_levels(raw)
+        except cli.UsageError:
+            continue
+        raise SelftestFailure(f"parse_levels({raw!r}) must raise UsageError")
+
+    good = cli.build_config(
+        cli.parse_args(
+            [
+                "--levels",
+                "1,10",
+                "--rate",
+                "30",
+                "--dwell",
+                "2",
+                "--warmup",
+                "1",
+                "--shards",
+                "2",
+                "--subscribers",
+                "per-shard",
+                "--out",
+                "/tmp/capacity-cli-check",
+            ]
+        )
+    )
+    _check(
+        good.levels == (1, 10) and good.rate == 30.0, "explicit args must be honoured"
+    )
+    _check(good.subscribers == "per-shard", "subscribers must round-trip")
+    _check(good.shards_for(1) == 1 and good.shards_for(10) == 2, "shard clamping")
+
+    defaults = cli.build_config(cli.parse_args(["--out", "/tmp/capacity-cli-default"]))
+    _check(
+        defaults.levels == cli.parse_levels(cli.DEFAULT_LEVELS)
+        and defaults.rate == cli.DEFAULT_RATE
+        and defaults.dwell == cli.DEFAULT_DWELL,
+        "documented defaults must come from cli",
+    )
+
+    for argv in (
+        ["--history-tokens", "100"],
+        ["--shards", "0"],
+        ["--rate", "0"],
+        ["--dwell", "0"],
+        ["--warmup", "-1"],
+        ["--levels", "10,1"],
+        ["--levels", "0"],
+    ):
+        try:
+            cli.build_config(cli.parse_args(argv))
+        except cli.UsageError:
+            continue
+        raise SelftestFailure(f"build_config({argv}) must raise UsageError")
+    try:
+        cli.build_config(cli.parse_args(["--scenario", "nope"]))
+    except shapes.ShapeError as exc:
+        _check("pure_stream" in str(exc), f"unknown scenario must list choices: {exc}")
+    else:  # pragma: no cover - 注册表回归
+        raise SelftestFailure("unknown --scenario must raise ShapeError")
+
+
+# ── shapes ────────────────────────────────────────────────────
+
+
+def check_shapes() -> None:
+    """形态契约：注册表能解析，剧本覆盖整档所需轮次，prompt 文本全局唯一。"""
+    shape = shapes.resolve("pure_stream")
+    sessions, rate, span = 3, 20.0, 6.0
+    script = shape.script(sessions=sessions, rate=rate, span_s=span)
+    per_session = int(span / shape.turn_seconds(span)) + 2  # 上限的下界（floor）
+    _check(
+        len(script) >= sessions * per_session,
+        f"script must hold at least {sessions * per_session} turns, got {len(script)}",
+    )
+    first = shape.prompt_text("sess-a", 0)
+    _check(first != shape.prompt_text("sess-a", 1), "prompt text must vary by turn")
+    _check(first != shape.prompt_text("sess-b", 0), "prompt text must vary by session")
+    try:
+        shapes.resolve("no-such-shape")
+    except shapes.ShapeError as exc:
+        _check("pure_stream" in str(exc), f"unknown shape must list the choices: {exc}")
+    else:  # pragma: no cover - 注册表回归
+        raise SelftestFailure("unknown scenario must raise ShapeError")
+
+
 # ── report ────────────────────────────────────────────────────
 
 
 def _synthetic_run() -> dict[str, Any]:
-    return {
-        "meta": {
-            "tool": "capacity",
-            "schema": 1,
-            "scenario": "pure_stream",
-            "started_at": "2026-01-01T00:00:00Z",
-            "duration_s": 12.0,
-            "args": {
-                "levels": [1, 10],
-                "rate": 50.0,
-                "dwell": 5.0,
-                "warmup": 2.0,
-                "shards": 1,
-                "subscribers": "per-shard",
-                "history_tokens": 0,
-            },
-            "host": {
-                "cpus": 12,
-                "mem_gb": 16.0,
-                "platform": "darwin",
-                "ulimit_n": 4096,
-            },
-            "gateway": {"pid": 1, "version": "test", "commit": "abcdef0"},
-            "session_create": {"ok": 11, "failed": 0, "total_ms": 12.0},
-            "notes": [],
-            "failures": [],
+    """两档合成产物：一档齐备、一档延迟不可用（两者键集相同）。"""
+    meta = {
+        "tool": "capacity",
+        "schema": 1,
+        "scenario": "pure_stream",
+        "started_at": "2026-01-01T00:00:00Z",
+        "duration_s": 12.0,
+        "args": {
+            "levels": [1, 10],
+            "rate": 50.0,
+            "dwell": 5.0,
+            "warmup": 2.0,
+            "shards": 1,
+            "subscribers": "per-shard",
+            "history_tokens": 0,
         },
-        "levels": [
-            {
-                "sessions": 1,
-                "wall_s": 5.0,
-                "metrics": {
-                    **dict.fromkeys(orchestrator.METRIC_KEYS),
-                    "gateway.cpu_cores": 0.1,
-                    "gateway.rss_mb_peak": 100.0,
-                    "gateway.rss_mb_end": 101.0,
-                    "gateway.fds_peak": 30,
-                    "delivery.p50_ms": 1.0,
-                    "delivery.p99_ms": 2.0,
-                    "delivery.p999_ms": 3.0,
-                    "turn.p50_ms": 5000.0,
-                    "turn.p99_ms": 5100.0,
-                    "tokens_per_second_actual": 50.0,
-                    "errors": 0,
-                    "slow_client_recycles": 0,
-                },
-                "rig": {
-                    "provider_cpu_cores": 0.2,
-                    "shard_cpu_cores": [0.1],
-                    "host_loadavg": [1.0, 1.0, 1.0],
-                },
-                "samples": {
-                    "count": 250,
-                    "dropped": 0,
-                    "text_frames": 250,
-                    "turns": 1,
-                    "delivery_available": True,
-                },
-                "session_create": {"ok": 1, "failed": 0, "total_ms": 4.0},
-                "gateway": {"pid": 1, "url": "http://127.0.0.1:1"},
-            },
-            {
-                "sessions": 10,
-                "wall_s": 5.0,
-                "metrics": {
-                    **dict.fromkeys(orchestrator.METRIC_KEYS),
-                    "gateway.cpu_cores": 1.0,
-                    "gateway.rss_mb_peak": 200.0,
-                    "gateway.rss_mb_end": 202.0,
-                    "gateway.fds_peak": 300,
-                    "tokens_per_second_actual": 500.0,
-                    "errors": 2,
-                    "slow_client_recycles": 1,
-                },
-                "rig": {
-                    "provider_cpu_cores": 0.5,
-                    "shard_cpu_cores": [0.4, 0.3],
-                    "host_loadavg": None,
-                },
-                "samples": {
-                    "count": None,
-                    "dropped": None,
-                    "text_frames": 2500,
-                    "turns": 10,
-                    "delivery_available": False,
-                },
-                "session_create": {"ok": 10, "failed": 0, "total_ms": 8.0},
-                "gateway": {"pid": 2, "url": "http://127.0.0.1:2"},
-            },
-        ],
+        "host": {"cpus": 12, "mem_gb": 16.0, "platform": "darwin", "ulimit_n": 4096},
+        "gateway": {"pid": 1, "version": "test", "commit": "abcdef0"},
+        "session_create": {"ok": 11, "failed": 0, "total_ms": 12.0},
+        "notes": [],
+        "failures": [],
     }
+    first = level_skeleton(1)
+    first["wall_s"] = 5.0
+    first["metrics"].update(
+        {
+            "gateway.cpu_cores": 0.1,
+            "gateway.rss_mb_peak": 100.0,
+            "gateway.rss_mb_end": 101.0,
+            "gateway.fds_peak": 30,
+            "delivery.p50_ms": 1.0,
+            "delivery.p99_ms": 2.0,
+            "delivery.p999_ms": 3.0,
+            "turn.p50_ms": 5000.0,
+            "turn.p99_ms": 5100.0,
+            "tokens_per_second_actual": 50.0,
+            "errors": 0,
+            "slow_client_recycles": 0,
+        }
+    )
+    first["rig"].update(
+        {
+            "provider_cpu_cores": 0.2,
+            "shard_cpu_cores": [0.1],
+            "host_loadavg": [1.0, 1.0, 1.0],
+        }
+    )
+    first["samples"].update(
+        {
+            "count": 250,
+            "dropped": 0,
+            "dropped_reasons": {},
+            "text_frames": 250,
+            "turns": 1,
+            "delivery_available": True,
+        }
+    )
+    first["session_create"].update({"ok": 1, "failed": 0, "total_ms": 4.0})
+    second = level_skeleton(10)
+    second["wall_s"] = 5.0
+    second["metrics"].update(
+        {
+            "gateway.cpu_cores": 1.0,
+            "gateway.rss_mb_peak": 200.0,
+            "gateway.rss_mb_end": 202.0,
+            "gateway.fds_peak": 300,
+            "tokens_per_second_actual": 500.0,
+            "errors": 2,
+            "slow_client_recycles": 1,
+        }
+    )
+    second["rig"].update(
+        {"provider_cpu_cores": 0.5, "shard_cpu_cores": [0.4, 0.3], "host_loadavg": None}
+    )
+    second["samples"].update(
+        {
+            "count": None,
+            "dropped": None,
+            "text_frames": 2500,
+            "turns": 10,
+            "delivery_available": False,
+        }
+    )
+    second["session_create"].update({"ok": 10, "failed": 0, "total_ms": 8.0})
+    return {"meta": meta, "levels": [first, second]}
 
 
 def check_report() -> None:
-    """合成 run.json → markdown：行数、缺数据占位、不可用横幅。"""
-    text = report.render(_synthetic_run())
+    """合成 run.json → markdown：列数自洽、缺数据占位、不可用横幅、多行 note 折行。"""
+    run = _synthetic_run()
+    run["levels"][1]["notes"] = ["multi\nline\ndetail"]
+    text = report.render(run)
     _check(
         text.startswith("# capacity — pure_stream"), "report must start with its title"
     )
@@ -366,11 +625,22 @@ def check_report() -> None:
     _check("投递延迟不可用" in text, "unavailable delivery must be called out up front")
     _check("— / —" in text, "missing turn metrics must render as an em dash, not 0")
     _check("nearest-rank" in text, "report must state the percentile basis")
+    _check("0.40, 0.30" in text, "per-shard CPU must be listed (rig quality signal)")
+    for line in text.splitlines():
+        if line.startswith("| N |"):
+            header = len(line.split("|")) - 2
+        elif line.startswith("|---") and "N" in text:
+            separator = len(line.split("|")) - 2
+            _check(
+                separator == header,
+                f"table separator has {separator} cells but the header has {header} "
+                "(GFM drops mismatched tables)",
+            )
     _check(
-        "0.40, 0.30" in text,
-        "per-shard CPU must be listed (rig quality signal)",
+        "- N=10: multi line detail" in text,
+        "multi-line notes must fold onto one line inside the list item",
     )
-    line = report.summary_line(_synthetic_run()["levels"][0])
+    line = report.summary_line(run["levels"][0])
     _check("N=1:" in line and "gw_cpu=" in line, "summary line must name the level")
 
 
@@ -392,7 +662,8 @@ def _e2e_config(out: Path) -> RunConfig:
 
 
 def check_e2e(run_ladder: LadderRunner) -> None:
-    """迷你一档走真实路径：真网关子进程 + 真分片子进程 + 真产物。"""
+    """迷你一档走真实路径：真网关子进程 + 真分片子进程 + 真产物 + 失败档形状。"""
+    proc.raise_nofile(proc.nofile_target(2))  # 2 条会话 + 网关自己的 fd，别撞软限
     with tempfile.TemporaryDirectory(prefix="capacity-selftest-") as tmp:
         out = Path(tmp) / "run"
         cfg = _e2e_config(out)
@@ -419,6 +690,8 @@ def check_e2e(run_ladder: LadderRunner) -> None:
         metrics_block = level["metrics"]
         for key in orchestrator.METRIC_KEYS:
             _check(key in metrics_block, f"missing frozen metric key {key!r}")
+        for key in orchestrator.SAMPLE_KEYS:
+            _check(key in level["samples"], f"missing sample key {key!r}")
         _check(
             metrics_block["gateway.cpu_cores"] is not None
             and metrics_block["gateway.cpu_cores"] >= 0.0,
@@ -442,6 +715,20 @@ def check_e2e(run_ladder: LadderRunner) -> None:
         _check(
             level["samples"]["turns"] >= 1,
             "at least one turn must complete inside the window",
+        )
+        _check(
+            level["rig"]["shard_cpu_cores"],
+            "shard CPU must be reported (rig quality signal)",
+        )
+        _check(
+            metrics_block["slow_client_recycles"] == 0,
+            "a healthy window must not count the driver's own teardown as a recycle: "
+            f"{metrics_block['slow_client_recycles']}",
+        )
+        span_note = [note for note in level["notes"] if "CPU window" in note]
+        _check(
+            not span_note,
+            f"shard CPU window must match the sample window: {span_note}",
         )
 
         samples = level["samples"]
@@ -487,6 +774,10 @@ def check_e2e(run_ladder: LadderRunner) -> None:
             "# capacity — pure_stream" in report_md.read_text(encoding="utf-8"),
             "report.md must be rendered markdown",
         )
+        _check(
+            not (out / "raw" / "2" / "workspace").exists(),
+            "a completed level must not leave its scratch workspace behind",
+        )
         shard = json.loads(shard_file.read_text(encoding="utf-8"))
         _check(shard["shard"] == 0, "shard sample file must name its shard")
         _check(
@@ -495,6 +786,44 @@ def check_e2e(run_ladder: LadderRunner) -> None:
             "shard sample file must carry a window",
         )
         _check(len(shard["turns"]) >= 1, "shard must report at least one turn sample")
+
+        check_failure_shape(run_ladder, Path(tmp) / "failed", level)
+
+
+def check_failure_shape(
+    run_ladder: LadderRunner, out: Path, good: Mapping[str, Any]
+) -> None:
+    """失败档的键集必须与成功档完全相同（缺数据是 ``null``，不是缺键）。"""
+    previous = os.environ.get("WING_GATEWAY_BIN")
+    os.environ["WING_GATEWAY_BIN"] = str(out / "no-such-gateway")
+    try:
+        payload = asyncio.run(run_ladder(_e2e_config(out), selftest_run=True))
+    finally:
+        if previous is None:
+            os.environ.pop("WING_GATEWAY_BIN", None)
+        else:
+            os.environ["WING_GATEWAY_BIN"] = previous
+    _check(payload["meta"]["failures"], "a level that cannot start must be reported")
+    bad = payload["levels"][0]
+    _check("error" in bad, f"failed level must carry an error: {bad}")
+    _check(
+        set(bad) == set(good) | {"error"},
+        f"failed level keys differ from a good one: {sorted(set(bad) ^ set(good))}",
+    )
+    for block in ("metrics", "samples", "gateway", "rig", "session_create", "shape"):
+        _check(
+            set(bad[block]) == set(good[block]),
+            f"failed level {block} keys differ: "
+            f"{sorted(set(bad[block]) ^ set(good[block]))}",
+        )
+    _check(
+        all(value is None for value in bad["metrics"].values()),
+        "failed level metrics must be null, not 0",
+    )
+    _check(
+        payload["meta"]["session_create"]["ok"] is None,
+        "session_create must not sum a failed level's missing counts as 0",
+    )
 
 
 # ── 入口 ──────────────────────────────────────────────────────
@@ -505,31 +834,12 @@ def checks() -> list[tuple[str, Callable[[], None]]]:
         ("stats.percentile", check_stats),
         ("pairing.last_user_text", check_last_user_text),
         ("pairing.delivery", check_pairing),
+        ("pairing.assemble", check_assemble),
         ("proc.sampling", check_proc),
-        ("report.render", check_report),
+        ("cli.contract", check_cli),
         ("shapes.contract", check_shapes),
+        ("report.render", check_report),
     ]
-
-
-def check_shapes() -> None:
-    """形态契约：注册表能解析，剧本覆盖整档所需轮次，prompt 文本全局唯一。"""
-    shape = shapes.resolve("pure_stream")
-    sessions, rate, span = 3, 20.0, 6.0
-    script = shape.script(sessions=sessions, rate=rate, span_s=span)
-    per_session = int(span / shape.turn_seconds(span)) + 2  # 上限的下界（floor）
-    _check(
-        len(script) >= sessions * per_session,
-        f"script must hold at least {sessions * per_session} turns, got {len(script)}",
-    )
-    first = shape.prompt_text("sess-a", 0)
-    _check(first != shape.prompt_text("sess-a", 1), "prompt text must vary by turn")
-    _check(first != shape.prompt_text("sess-b", 0), "prompt text must vary by session")
-    try:
-        shapes.resolve("no-such-shape")
-    except shapes.ShapeError as exc:
-        _check("pure_stream" in str(exc), f"unknown shape must list the choices: {exc}")
-    else:  # pragma: no cover - 注册表回归
-        raise SelftestFailure("unknown scenario must raise ShapeError")
 
 
 def main(*, run_ladder: LadderRunner) -> int:
@@ -566,7 +876,10 @@ def main(*, run_ladder: LadderRunner) -> int:
 __all__ = [
     "E2E_BUDGET_S",
     "SelftestFailure",
+    "check_assemble",
+    "check_cli",
     "check_e2e",
+    "check_failure_shape",
     "check_pairing",
     "check_proc",
     "check_report",

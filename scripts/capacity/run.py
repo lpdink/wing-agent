@@ -5,8 +5,8 @@
         --levels 1,10,50,100 --rate 50 --dwell 20
 
 回答的是「网关能扛住多少个并发**活跃**会话、从哪里开始退化」——不是回归测量
-（那是 ``scripts/perf/``），也不是行为断言（那是 ``libs/wing-probe/``）。进程拓扑、
-口径与产物字段见同目录 ``README.md``；为什么这么分层见 ``docs`` 与 ``design``。
+（那是 ``scripts/perf/``），也不是行为断言（那是 ``libs/wing-probe/``）。
+进程拓扑、口径与产物字段见同目录 ``README.md``（「进程拓扑」一节解释为什么这样分层）。
 """
 
 from __future__ import annotations
@@ -22,148 +22,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import cli
 import orchestrator
 import proc
 import report
-import selftest
 import shapes
+from cli import UsageError
 from orchestrator import DELIVERY_UNAVAILABLE, RunConfig
 
 TOOL = "capacity"
 SCHEMA = 1
-DEFAULT_OUT_ROOT = Path("target/capacity")
-DEFAULT_LEVELS = "1,10,50,100"
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_LEVEL_FAILED = 3
 
 
-class UsageError(ValueError):
-    """命令行参数不可用（可行动的错误文案；退出码 2）。"""
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def parse_levels(raw: str) -> tuple[int, ...]:
-    """``"1,10,100"`` → ``(1, 10, 100)``（正整数、严格升序）。"""
-    levels: list[int] = []
-    for chunk in raw.split(","):
-        text = chunk.strip()
-        if not text:
-            raise UsageError(f"--levels has an empty entry: {raw!r}")
-        try:
-            value = int(text)
-        except ValueError as exc:
-            raise UsageError(f"--levels entry {text!r} is not an integer") from exc
-        if value < 1:
-            raise UsageError(f"--levels entry {value} must be >= 1")
-        levels.append(value)
-    if not levels:
-        raise UsageError("--levels is empty")
-    if sorted(set(levels)) != levels:
-        raise UsageError(
-            f"--levels must be strictly ascending with no duplicates, got {raw!r}"
-        )
-    return tuple(levels)
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return cli.parse_args(argv)
 
 
 def build_config(args: argparse.Namespace) -> RunConfig:
-    """参数 → :class:`RunConfig`（所有非法组合在这里变成可行动的错误）。"""
-    shape = shapes.resolve(args.scenario)  # 未知名这里就抛（附可选项）
-    levels = parse_levels(args.levels)
-    if args.rate <= 0:
-        raise UsageError(f"--rate must be > 0, got {args.rate}")
-    if args.dwell <= 0:
-        raise UsageError(f"--dwell must be > 0, got {args.dwell}")
-    if args.warmup < 0:
-        raise UsageError(f"--warmup must be >= 0, got {args.warmup}")
-    if args.shards < 1:
-        raise UsageError(f"--shards must be >= 1, got {args.shards}")
-    if args.history_tokens != 0:
-        raise UsageError(
-            f"--history-tokens {args.history_tokens} is not supported yet; only 0 "
-            "(no pre-seeded history) is implemented"
-        )
-    out = Path(args.out) if args.out else DEFAULT_OUT_ROOT / _stamp()
-    return RunConfig(
-        scenario=shape.NAME,
-        levels=levels,
-        rate=float(args.rate),
-        dwell=float(args.dwell),
-        warmup=float(args.warmup),
-        shards=int(args.shards),
-        subscribers=str(args.subscribers),
-        history_tokens=int(args.history_tokens),
-        out=out,
-    )
-
-
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="capacity",
-        description=(
-            "capacity sweep: N concurrent gateway sessions driven by a fake provider, "
-            "sampled for CPU / RSS / fds / delivery latency"
-        ),
-    )
-    parser.add_argument(
-        "--scenario",
-        default="pure_stream",
-        help=f"load shape (available: {', '.join(shapes.names())})",
-    )
-    parser.add_argument(
-        "--levels",
-        default=DEFAULT_LEVELS,
-        help=f"ascending comma-separated session counts (default: {DEFAULT_LEVELS})",
-    )
-    parser.add_argument(
-        "--rate", type=float, default=50.0, help="tokens/s per session (default: 50)"
-    )
-    parser.add_argument(
-        "--dwell", type=float, default=20.0, help="sample window per level (s)"
-    )
-    parser.add_argument(
-        "--warmup",
-        type=float,
-        default=5.0,
-        help="warmup before the window (s, dropped)",
-    )
-    parser.add_argument(
-        "--shards", type=int, default=4, help="driver shard subprocesses (default: 4)"
-    )
-    parser.add_argument(
-        "--subscribers",
-        choices=("per-session", "per-shard"),
-        default="per-session",
-        help="WS subscriber topology (default: per-session)",
-    )
-    parser.add_argument(
-        "--history-tokens",
-        dest="history_tokens",
-        type=int,
-        default=0,
-        help="pre-seeded history size (only 0 is implemented)",
-    )
-    parser.add_argument(
-        "--out", help=f"output dir (default: {DEFAULT_OUT_ROOT}/<utc timestamp>)"
-    )
-    parser.add_argument(
-        "--selftest",
-        action="store_true",
-        help="offline self-check (small N, short window, no network)",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="print a single JSON summary line on stdout",
-    )
-    return parser.parse_args(argv)
+    return cli.build_config(args)
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -195,7 +74,7 @@ def _fill_slope(levels: list[dict[str, Any]]) -> None:
 
 async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str, Any]:
     """跑完一条阶梯并落盘 ``run.json`` / ``report.md``，返回 ``run.json`` 的内容。"""
-    started_at = _utc_now()
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     started = time.monotonic()
     cfg.out.mkdir(parents=True, exist_ok=True)
     print(
@@ -268,21 +147,28 @@ def _meta_gateway(levels: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _meta_session_create(levels: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """建会话成本：单调的逐档数字在 ``levels[i].session_create``，这里是全档汇总。"""
+    """建会话成本：逐档数字在 ``levels[i].session_create``，这里是全档汇总。
+
+    有档位根本没拿到数字（环境没起来）时整组写 ``null`` 而不是「按 0 求和」——
+    「11 个成功」被读成「11 个会话都建好了」比缺数据更误导。
+    """
     stats = [record.get("session_create") or {} for record in levels]
-    if all(entry.get("ok") is None for entry in stats):
+    missing = [
+        record["sessions"]
+        for record, entry in zip(levels, stats)
+        if entry.get("ok") is None
+    ]
+    if missing:
         return {
             "ok": None,
             "failed": None,
             "total_ms": None,
-            "scope": "sum over levels",
+            "scope": f"not summed: levels {missing} created no measurable sessions",
         }
     return {
-        "ok": sum(int(entry.get("ok") or 0) for entry in stats),
-        "failed": sum(int(entry.get("failed") or 0) for entry in stats),
-        "total_ms": round(
-            sum(float(entry.get("total_ms") or 0.0) for entry in stats), 1
-        ),
+        "ok": sum(int(entry["ok"]) for entry in stats),
+        "failed": sum(int(entry["failed"] or 0) for entry in stats),
+        "total_ms": round(sum(float(entry["total_ms"] or 0.0) for entry in stats), 1),
         "scope": "sum over levels",
     }
 
@@ -305,7 +191,7 @@ def _meta_notes(levels: Sequence[dict[str, Any]]) -> list[str]:
 
 
 def _summary(payload: dict[str, Any]) -> dict[str, Any]:
-    """``--json`` 的一行摘要（人读路径用同一份数据打成短表）。"""
+    """``--json`` 的一行摘要（字段见 README「常用命令」的表）。"""
     out = Path(str(payload["meta"].get("out", "")))
     return {
         "ok": not payload["meta"]["failures"],
@@ -334,6 +220,8 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.selftest:
+        import selftest  # 只在这条路径上依赖自测代码
+
         return selftest.main(run_ladder=run_ladder)
     try:
         cfg = build_config(args)

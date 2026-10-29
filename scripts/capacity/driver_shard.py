@@ -116,6 +116,9 @@ class Shard:
         self._window_end = 0.0
         self._cpu_start: float | None = None
         self._cpu_end: float | None = None
+        self._cpu_start_at: float | None = None
+        self._cpu_end_at: float | None = None
+        self._closed_before_end = 0
         self._closing = False
 
     # ── 连接 ────────────────────────────────────────────────
@@ -179,14 +182,29 @@ class Shard:
         """接收窗口边界并立刻开始驱动（warmup 从这一刻起算，样本只记窗口内）。"""
         self._window_start = window_start
         self._window_end = window_end
-        self._cpu_start = proc.self_cpu_seconds()
         for session_id in self.states:
             self._pending.put_nowait(session_id)
 
+    def start_cpu_accounting(self) -> None:
+        """CPU 记账起点（coordinator 在 ``window_start`` 时刻调，与网关采样对齐）。
+
+        不能放在 :meth:`open_window`：那比窗口起点早整整一个 warmup，分子会跨
+        ``warmup + dwell`` 而分母只有 ``dwell``（高报 ``1 + warmup/dwell`` 倍）。
+        """
+        self._cpu_start = proc.self_cpu_seconds()
+        self._cpu_start_at = time.monotonic()
+
     def close_window(self) -> None:
-        """窗口收尾：停发新轮次，并把 CPU 记账钉在窗口末（之后的收尾不计入）。"""
+        """窗口收尾：停发新轮次、把 CPU 记账钉在窗口末，并数一遍已断开的连接。
+
+        ``_closed_before_end`` 是「网关在窗口结束前就回收了这个客户端」的精确计数
+        （我们自己的连接就是全部客户端）：此刻 ``close()`` 还没调，所以活着的连接
+        ``closed`` 为 False。它取代「扫网关日志」——后者会把窗口末的正常收尾也算进去。
+        """
         self._closing = True
         self._cpu_end = proc.self_cpu_seconds()
+        self._cpu_end_at = time.monotonic()
+        self._closed_before_end = sum(1 for ws in self.connections if ws.closed)
 
     def _on_event(
         self,
@@ -210,17 +228,14 @@ class Shard:
             return
         if event_type not in ("turn_result", "error"):
             return
-        if event_type == "error" or data.get("is_error"):
+        in_window = self._window_start <= now <= self._window_end
+        if in_window and (event_type == "error" or data.get("is_error")):
             self.errors += 1
             if len(self.error_details) < 8:
                 self.error_details.append(f"{event_type}: {str(data)[:200]}")
         sent_at, state.sent_at = state.sent_at, None
         arrivals, state.arrivals = state.arrivals, []
-        if (
-            sent_at is not None
-            and sent_at >= self._window_start
-            and now <= self._window_end
-        ):
+        if event_type == "turn_result" and sent_at is not None and in_window:
             self.turns.append(TurnSample(state.prompt, sent_at, now, tuple(arrivals)))
         if not self._closing and now < self._window_end:
             self._pending.put_nowait(state.session_id)
@@ -239,7 +254,8 @@ class Shard:
             try:
                 await state.ws.send_request(session_id, state.prompt)
             except Exception as exc:  # noqa: BLE001 - 单条连接坏掉不该拖死整片
-                self.errors += 1
+                if time.monotonic() <= self._window_end:
+                    self.errors += 1
                 state.sent_at = None
                 if len(self.error_details) < 8:
                     self.error_details.append(f"send failed for {session_id}: {exc!r}")
@@ -263,6 +279,10 @@ class Shard:
             "cpu_seconds": None
             if self._cpu_start is None or self._cpu_end is None
             else round(self._cpu_end - self._cpu_start, 6),
+            "cpu_span_s": None
+            if self._cpu_start_at is None or self._cpu_end_at is None
+            else round(self._cpu_end_at - self._cpu_start_at, 3),
+            "closed_before_end": self._closed_before_end,
             "text_frames": self.text_frames,
             "errors": self.errors,
             "error_details": self.error_details,
@@ -326,6 +346,8 @@ async def run(config_path: Path) -> int:
     shard.open_window(window_start, window_end)
     pump = asyncio.create_task(shard.pump())
     try:
+        await asyncio.sleep(max(0.0, window_start - time.monotonic()))
+        shard.start_cpu_accounting()
         await asyncio.sleep(max(0.0, window_end - time.monotonic()))
     finally:
         shard.close_window()

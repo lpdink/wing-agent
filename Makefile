@@ -42,19 +42,24 @@ demo:
 # 因此只做手工测量；口径、产物与已知边界见 scripts/capacity/README.md。
 # fd 软限先抬（每个会话约 4 个 fd）：抬不动时 run.py 会带可行动的错误退出，
 # 而不是跑到一半 EMFILE 后产出一张好看的空表。
-# 其余参数走 CAPACITY_ARGS（如 CAPACITY_ARGS="--subscribers per-shard --json"）。
-CAPACITY_LEVELS ?= 1,10,50,100
-CAPACITY_RATE ?= 50
-CAPACITY_DWELL ?= 20
-CAPACITY_WARMUP ?= 5
-CAPACITY_SHARDS ?= 4
+# 参数默认值只有一处（run.py 的 argparse）：这里的变量给了才透传，其余交给 CLI。
+# 额外旗标走 CAPACITY_ARGS（如 CAPACITY_ARGS="--subscribers per-shard --json"）。
+CAPACITY_LEVELS ?=
+CAPACITY_RATE ?=
+CAPACITY_DWELL ?=
+CAPACITY_WARMUP ?=
+CAPACITY_SHARDS ?=
 CAPACITY_ARGS ?=
+# 只把显式给出的变量翻成旗标（空变量 ⇒ 不传 ⇒ 用 CLI 的默认值）。
+CAPACITY_FLAGS = $(if $(CAPACITY_LEVELS),--levels $(CAPACITY_LEVELS)) \
+	$(if $(CAPACITY_RATE),--rate $(CAPACITY_RATE)) \
+	$(if $(CAPACITY_DWELL),--dwell $(CAPACITY_DWELL)) \
+	$(if $(CAPACITY_WARMUP),--warmup $(CAPACITY_WARMUP)) \
+	$(if $(CAPACITY_SHARDS),--shards $(CAPACITY_SHARDS)) $(CAPACITY_ARGS)
 
 capacity:
 	@ulimit -n $${CAPACITY_NOFILE:-8192} 2>/dev/null || true; \
-	uv run python scripts/capacity/run.py \
-		--levels $(CAPACITY_LEVELS) --rate $(CAPACITY_RATE) --dwell $(CAPACITY_DWELL) \
-		--warmup $(CAPACITY_WARMUP) --shards $(CAPACITY_SHARDS) $(CAPACITY_ARGS)
+	uv run python scripts/capacity/run.py $(CAPACITY_FLAGS)
 
 capacity-selftest:
 	uv run python scripts/capacity/run.py --selftest

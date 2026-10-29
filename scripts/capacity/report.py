@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""人读报告（本步骤只做最小表格；判据 / 拐点 / 完整分析由下一步接手）。
+"""人读报告：档位表格 + rig 质量信号 + 口径脚注（只读 ``run.json``，不重算指标）。
 
-渲染**只读** ``run.json``，不重算任何指标——报告与机器可读产物同源，否则两处
-数字迟早对不上。缺数据一律显示 ``—``（与 JSON 里的 ``null`` 对应，绝不写 0）。
+报告与机器可读产物必须同源，否则两处数字迟早对不上。缺数据一律显示 ``—``
+（与 JSON 里的 ``null`` 对应，绝不写 0）。判据与拐点分析的渲染不在这里。
 """
 
 from __future__ import annotations
@@ -13,6 +13,27 @@ from typing import Any
 MISSING = "—"
 """没有样本的占位符（对应 JSON 的 ``null``）。"""
 
+LEVEL_COLUMNS: tuple[str, ...] = (
+    "N",
+    "wall s",
+    "gw cpu",
+    "gw rss MB peak / end",
+    "gw fds",
+    "delivery p50 / p99 / p999 ms",
+    "turn p50 / p99 ms",
+    "tok/s",
+    "errors",
+    "recycles",
+)
+
+RIG_COLUMNS: tuple[str, ...] = (
+    "N",
+    "provider cpu",
+    "shard cpu (per shard)",
+    "loadavg",
+    "samples (paired / dropped / frames)",
+)
+
 
 def _num(value: Any, digits: int = 1) -> str:
     if value is None or isinstance(value, bool):
@@ -22,6 +43,19 @@ def _num(value: Any, digits: int = 1) -> str:
     if isinstance(value, float):
         return f"{value:.{digits}f}"
     return str(value)
+
+
+def _row(cells: Sequence[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _table(columns: Sequence[str], rows: Sequence[Sequence[str]]) -> list[str]:
+    """表头 / 分隔 / 数据三段由**同一个列数**生成（GFM 要求三者一致）。"""
+    return [
+        _row(columns),
+        "|" + "---|" * len(columns),
+        *(_row(row) for row in rows),
+    ]
 
 
 def _triple(record: Mapping[str, Any], prefix: str) -> str:
@@ -38,64 +72,52 @@ def _pair(record: Mapping[str, Any], first: str, second: str) -> str:
     return MISSING if left == MISSING and right == MISSING else f"{left} / {right}"
 
 
-def _gateway_field(meta: Mapping[str, Any], key: str) -> str:
-    value = (meta.get("gateway") or {}).get(key)
-    return MISSING if value is None else str(value)
-
-
 def _shard_cpu(record: Mapping[str, Any]) -> str:
     values = (record.get("rig") or {}).get("shard_cpu_cores") or []
     rendered = [_num(value, 2) for value in values]
     return ", ".join(rendered) if rendered else MISSING
 
 
-def _level_rows(levels: Sequence[Mapping[str, Any]]) -> list[str]:
-    rows = [
-        "| N | wall s | gw cpu | gw rss MB peak / end | gw fds | delivery p50 / p99 / p999 ms "
-        "| turn p50 / p99 ms | tok/s | errors | recycles |",
-        "|" + "---|" * 11,
-    ]
+def _level_rows(levels: Sequence[Mapping[str, Any]]) -> list[list[str]]:
+    rows: list[list[str]] = []
     for record in levels:
         metrics = record.get("metrics") or {}
         rows.append(
-            "| {n} | {wall} | {cpu} | {rss} | {fds} | {delivery} | {turn} | {tps} | "
-            "{errors} | {recycles} |".format(
-                n=record.get("sessions"),
-                wall=_num(record.get("wall_s")),
-                cpu=_num(metrics.get("gateway.cpu_cores"), 2),
-                rss=_pair(record, "gateway.rss_mb_peak", "gateway.rss_mb_end"),
-                fds=_num(metrics.get("gateway.fds_peak")),
-                delivery=_triple(record, "delivery"),
-                turn=_pair(record, "turn.p50_ms", "turn.p99_ms"),
-                tps=_num(metrics.get("tokens_per_second_actual")),
-                errors=_num(metrics.get("errors")),
-                recycles=_num(metrics.get("slow_client_recycles")),
-            )
+            [
+                str(record.get("sessions", MISSING)),
+                _num(record.get("wall_s")),
+                _num(metrics.get("gateway.cpu_cores"), 2),
+                _pair(record, "gateway.rss_mb_peak", "gateway.rss_mb_end"),
+                _num(metrics.get("gateway.fds_peak")),
+                _triple(record, "delivery"),
+                _pair(record, "turn.p50_ms", "turn.p99_ms"),
+                _num(metrics.get("tokens_per_second_actual")),
+                _num(metrics.get("errors")),
+                _num(metrics.get("slow_client_recycles")),
+            ]
         )
     return rows
 
 
-def _rig_rows(levels: Sequence[Mapping[str, Any]]) -> list[str]:
-    rows = [
-        "| N | provider cpu | shard cpu (per shard) | loadavg | samples (paired / dropped / frames) |",
-        "|---|---|---|---|---|",
-    ]
+def _rig_rows(levels: Sequence[Mapping[str, Any]]) -> list[list[str]]:
+    rows: list[list[str]] = []
     for record in levels:
         rig = record.get("rig") or {}
         samples = record.get("samples") or {}
         loadavg = rig.get("host_loadavg")
         rows.append(
-            "| {n} | {provider} | {shards} | {load} | {paired} / {dropped} / {frames} |".format(
-                n=record.get("sessions"),
-                provider=_num(rig.get("provider_cpu_cores"), 2),
-                shards=_shard_cpu(record),
-                load=", ".join(f"{value:.2f}" for value in loadavg)
+            [
+                str(record.get("sessions", MISSING)),
+                _num(rig.get("provider_cpu_cores"), 2),
+                _shard_cpu(record),
+                ", ".join(f"{value:.2f}" for value in loadavg)
                 if isinstance(loadavg, list)
                 else MISSING,
-                paired=_num(samples.get("count")),
-                dropped=_num(samples.get("dropped")),
-                frames=_num(samples.get("text_frames")),
-            )
+                " / ".join(
+                    _num(samples.get(key))
+                    for key in ("count", "dropped", "text_frames")
+                ),
+            ]
         )
     return rows
 
@@ -125,26 +147,33 @@ def _banners(run: Mapping[str, Any]) -> list[str]:
 def _notes(run: Mapping[str, Any]) -> list[str]:
     """全局说明 + 逐档说明（同一句话只出现一次：全局那条已经说了）。"""
     meta = run.get("meta") or {}
-    global_notes = [str(note) for note in meta.get("notes") or []]
-    lines = [f"- {note}" for note in global_notes]
+    global_notes = {str(note) for note in meta.get("notes") or []}
+    lines = [f"- {_one_line(note)}" for note in sorted(global_notes)]
     for record in run.get("levels") or []:
         for note in record.get("notes") or []:
             if str(note) in global_notes:
                 continue
-            lines.append(f"- N={record.get('sessions')}: {note}")
+            lines.append(f"- N={record.get('sessions')}: {_one_line(note)}")
     return lines
 
 
+def _one_line(text: Any) -> str:
+    """多行诊断折成一行（markdown 列表项不允许裸续行）。"""
+    return " ".join(str(text).split())
+
+
+def _gateway_field(meta: Mapping[str, Any], key: str) -> str:
+    value = (meta.get("gateway") or {}).get(key)
+    return MISSING if value is None else str(value)
+
+
 def render(run: Mapping[str, Any]) -> str:
-    """``run.json`` → markdown（整份报告；本步骤只含表格 + 口径脚注）。"""
+    """``run.json`` → markdown（表格 + 质量信号 + 口径脚注）。"""
     meta = run.get("meta") or {}
     host = meta.get("host") or {}
     args = meta.get("args") or {}
     levels = run.get("levels") or []
-    lines = [
-        f"# capacity — {meta.get('scenario', MISSING)}",
-        "",
-    ]
+    lines = [f"# capacity — {meta.get('scenario', MISSING)}", ""]
     banners = _banners(run)
     lines.extend(banners)
     if banners:
@@ -165,14 +194,14 @@ def render(run: Mapping[str, Any]) -> str:
             "",
             "## 各档读数",
             "",
-            *_level_rows(levels),
+            *_table(LEVEL_COLUMNS, _level_rows(levels)),
             "",
             "## rig（质量信号，不进退化判据）",
             "",
             "客户端 / 发生器饱和时读数不可信：`provider cpu` 与 `shard cpu` 之和接近核数，"
             "说明这一档测的是 rig 而不是网关。",
             "",
-            *_rig_rows(levels),
+            *_table(RIG_COLUMNS, _rig_rows(levels)),
             "",
         ]
     )
@@ -188,7 +217,8 @@ def render(run: Mapping[str, Any]) -> str:
             "按帧下标严格配对，配不上的样本记 `dropped`。",
             "- `turn` = 发 prompt → `turn_result`（只取窗口内发起且完成的轮次）。",
             "- `tok/s` = 窗口内收到的 `text` 事件数 / 窗口秒（1 帧 = 1 token 是本形态的约定）。",
-            "- 百分位为 nearest-rank（p99 = 升序第 `ceil(0.99·n)` 个值）。",
+            "- 百分位为 nearest-rank（p99 = 升序第 `ceil(0.99·n)` 个值）；"
+            "完整口径与判读方法见 `scripts/capacity/README.md`。",
             "- `—` / `null` = 没有样本，**不是 0**。",
             "",
         ]
@@ -210,4 +240,4 @@ def summary_line(record: Mapping[str, Any]) -> str:
     )
 
 
-__all__ = ["MISSING", "render", "summary_line"]
+__all__ = ["LEVEL_COLUMNS", "MISSING", "RIG_COLUMNS", "render", "summary_line"]
