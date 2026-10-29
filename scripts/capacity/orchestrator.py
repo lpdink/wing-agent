@@ -186,10 +186,18 @@ def level_skeleton(sessions: int) -> dict[str, Any]:
         "session_create": {"ok": None, "failed": None, "total_ms": None},
         "gateway": {"pid": None, "url": None, "version": None, "commit": None},
         "shape": {"rate": None, "shards": None, "subscribers": None},
+        "error": None,
+        "error_detail": None,
     }
 
 
-async def run_level(cfg: RunConfig, sessions: int, level_dir: Path) -> dict[str, Any]:
+async def run_level(
+    cfg: RunConfig,
+    sessions: int,
+    level_dir: Path,
+    *,
+    tracebacks: bool = True,
+) -> dict[str, Any]:
     """跑一档并返回 ``run.json`` 的 ``levels[i]`` 记录（失败也返回，带 ``error``）。"""
     notes: list[str] = []
     record = level_skeleton(sessions)
@@ -215,8 +223,8 @@ async def run_level(cfg: RunConfig, sessions: int, level_dir: Path) -> dict[str,
                 f"created only {created['ok']} of {sessions} sessions "
                 f"({created['failed']} failed; first failures: {created['failures'][:3]})"
             )
-        shards = await _spawn_shards(
-            cfg, sessions, created["session_ids"], env, level_dir, notes
+        await _spawn_shards(
+            cfg, sessions, created["session_ids"], env, level_dir, notes, shards
         )
         record["shape"].update(
             {"rate": cfg.rate, "shards": len(shards), "subscribers": cfg.subscribers}
@@ -228,11 +236,14 @@ async def run_level(cfg: RunConfig, sessions: int, level_dir: Path) -> dict[str,
             await _sample_window(env, sampling)
         except Exception as exc:  # noqa: BLE001 - 采样失败不阻断收样本
             failures.append(f"sampling: {type(exc).__name__}: {exc}")
-            traceback.print_exc()
-        payloads = await _collect(shards)
+            if tracebacks:
+                traceback.print_exc()
+        payloads, shard_problems = await _collect(shards)
+        failures.extend(shard_problems)
     except Exception as exc:  # noqa: BLE001 - 单档失败不该吞掉其余档
         failures.append(f"{type(exc).__name__}: {exc}")
-        traceback.print_exc()
+        if tracebacks:
+            traceback.print_exc()
     finally:
         for handle in shards:
             await handle.stop()
@@ -249,14 +260,16 @@ async def run_level(cfg: RunConfig, sessions: int, level_dir: Path) -> dict[str,
             sampling=sampling,
             payloads=payloads,
             notes=notes,
-            failed=bool(failures),
         )
     except Exception as exc:  # noqa: BLE001 - 装配失败也要留下其余档与已有数据
         failures.append(f"assemble: {type(exc).__name__}: {exc}")
-        traceback.print_exc()
+        if tracebacks:
+            traceback.print_exc()
     if failures:
-        record["error"] = " | ".join(failures)
-        notes.append(f"level {sessions} failed: {record['error']}")
+        # 一句话进冻结字段 ``error``（给机器读与报告横幅），完整诊断进 ``error_detail``
+        # （网关日志尾部有几千字符，重复三遍会把 run.json 淹掉）。
+        record["error"] = " | ".join(_first_line(item) for item in failures)[:400]
+        record["error_detail"] = failures
     record["notes"] = notes
     if not failures:
         shutil.rmtree(level_dir / "env", ignore_errors=True)
@@ -358,14 +371,18 @@ async def _spawn_shards(
     env: ProbeEnv,
     level_dir: Path,
     notes: list[str],
-) -> list[_ShardHandle]:
-    """轮转切分会话并 spawn 分片子进程（配置 / 样本 / 日志各一份文件）。"""
+    handles: list[_ShardHandle],
+) -> None:
+    """轮转切分会话并 spawn 分片子进程（配置 / 样本 / 日志各一份文件）。
+
+    ``handles`` 由调用方持有：spawn 中途失败时已起的分片仍在它的 ``finally`` 里，
+    不会留下孤儿进程。
+    """
     count = cfg.shards_for(sessions)
     if count != cfg.shards:
         notes.append(
             f"shards clamped from {cfg.shards} to {count} (sessions={sessions})"
         )
-    handles: list[_ShardHandle] = []
     for index in range(count):
         config_path = level_dir / f"shard-{index}.json"
         out_path = level_dir / f"shard-{index}.samples.json"
@@ -385,16 +402,20 @@ async def _spawn_shards(
             encoding="utf-8",
         )
         log_handle = open(log_path, "wb")
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(SHARD_SCRIPT),
-            "--config",
-            str(config_path),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=log_handle,
-            cwd=str(level_dir),
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(SHARD_SCRIPT),
+                "--config",
+                str(config_path),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=log_handle,
+                cwd=str(level_dir),
+            )
+        except OSError:
+            log_handle.close()
+            raise
         handles.append(
             _ShardHandle(
                 index=index,
@@ -405,7 +426,7 @@ async def _spawn_shards(
                 log_handle=log_handle,
             )
         )
-    return handles
+    return None
 
 
 async def _await_ready(
@@ -527,35 +548,36 @@ def _require_gateway_alive(
     )
 
 
-async def _collect(handles: list[_ShardHandle]) -> list[dict[str, Any]]:
-    """等每个分片报 done / 退出，读回它的样本文件。"""
+async def _collect(
+    handles: list[_ShardHandle],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """等每个分片报 done / 退出，读回样本文件；**逐分片容错**。
+
+    崩掉一个分片不该让同一档里其余分片已经采到的样本变成 ``null``（那一档的网关数字
+    依然是真读数，崩机现场恰恰是最有价值的一格）。失败的分片只贡献一条问题记录。
+    """
     payloads: list[dict[str, Any]] = []
+    problems: list[str] = []
     for handle in handles:
-        await _read_event(handle, expect="done", timeout=SHARD_EXIT_TIMEOUT)
         try:
+            await _read_event(handle, expect="done", timeout=SHARD_EXIT_TIMEOUT)
             code = await asyncio.wait_for(handle.process.wait(), SHARD_EXIT_TIMEOUT)
-        except TimeoutError as exc:
-            raise OrchestratorError(
-                f"shard {handle.index} did not exit within {SHARD_EXIT_TIMEOUT:.0f}s "
-                f"of reporting done\n{read_log_tail(handle.log_path)}"
-            ) from exc
-        if code != 0:
-            raise OrchestratorError(
-                f"shard {handle.index} exited with code {code}\n"
-                f"{read_log_tail(handle.log_path)}"
-            )
-        try:
+            if code != 0:
+                raise OrchestratorError(
+                    f"shard {handle.index} exited with code {code}\n"
+                    f"{read_log_tail(handle.log_path)}"
+                )
             payload = json.loads(handle.out_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise OrchestratorError(
-                f"cannot read samples from shard {handle.index} ({handle.out_path}): {exc}"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise OrchestratorError(
-                f"shard {handle.index} sample file is not a JSON object"
-            )
+            if not isinstance(payload, dict):
+                raise OrchestratorError(
+                    f"shard {handle.index} sample file is not a JSON object"
+                )
+            metrics.check_shard_payload(payload)
+        except Exception as exc:  # noqa: BLE001 - 单分片失败只记账，不丢其余样本
+            problems.append(f"shard {handle.index}: {type(exc).__name__}: {exc}")
+            continue
         payloads.append(payload)
-    return payloads
+    return payloads, problems
 
 
 # ── 指标装配 ──────────────────────────────────────────────────
@@ -570,7 +592,6 @@ def _assemble(
     sampling: _Sampling,
     payloads: list[dict[str, Any]],
     notes: list[str],
-    failed: bool = False,
 ) -> dict[str, Any]:
     """把采样与分片样本折进 ``record``（键集在 :func:`level_skeleton` 就定好了）。"""
     window_start = sampling.window_start
@@ -627,12 +648,8 @@ def _assemble(
     block["turn.p50_ms"] = _round(turn_spread.get("p50"))
     block["turn.p99_ms"] = _round(turn_spread.get("p99"))
 
-    delivery_available = (
-        not failed and provider is not None and metrics.has_frame_emits(provider)
-    )
-    samples["delivery_available"] = (
-        None if (failed or provider is None) else delivery_available
-    )
+    delivery_available = provider is not None and metrics.has_frame_emits(provider)
+    samples["delivery_available"] = None if provider is None else delivery_available
     if delivery_available and turns:
         pairing = metrics.pair_delivery(provider, provider.requests.all(), turns)
         for label, value in metrics.spread(pairing.latencies_ms).items():
@@ -655,7 +672,7 @@ def _assemble(
             "delivery percentile basis: nearest-rank over "
             f"{pairing.paired} paired frame(s)"
         )
-    elif not failed and provider is not None and not delivery_available:
+    elif provider is not None and not delivery_available:
         notes.append(DELIVERY_UNAVAILABLE)
     elif delivery_available:
         notes.append("delivery.* is null: no turn completed inside the sample window")
@@ -711,6 +728,11 @@ def _shard_cpu_cores(
 
 
 # ── 小工具 ────────────────────────────────────────────────────
+
+
+def _first_line(text: str) -> str:
+    """多行诊断的第一行（完整文本在 ``error_detail`` / 日志里）。"""
+    return text.splitlines()[0] if text.splitlines() else text
 
 
 def _ratio(seconds: float | None, wall: float) -> float | None:

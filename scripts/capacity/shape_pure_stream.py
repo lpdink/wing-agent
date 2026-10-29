@@ -52,7 +52,7 @@ def script(*, sessions: int, rate: float, span_s: float) -> Script:
 
     剧本按 model 注册、由所有会话共享，每次请求消费一个 Turn——因此份额必须覆盖
     「所有会话在整个窗口里能发出的最大请求数」。多给两轮是给轮次间隙与重试的余量；
-    一份 Turn 对象被重复引用（frozen dataclass），内存只有一份正文。
+    同一个 Turn 对象被重复引用（Provider 只读它），正文在内存里只有一份。
     """
     if sessions < 1:
         raise ValueError(f"script() needs sessions >= 1, got {sessions}")

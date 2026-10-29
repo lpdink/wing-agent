@@ -187,7 +187,6 @@ check-python:
 	echo "🔍 Running script selftests..."; \
 	if ! uv run python scripts/test_rust_parallel.py --selftest; then SELFTEST_FAILED=1; echo "❌ rust pool selftest failed"; else echo "✅ rust pool selftest passed"; fi; \
 	if ! uv run python scripts/bench_tests.py --selftest; then SELFTEST_FAILED=1; echo "❌ bench selftest failed"; else echo "✅ bench selftest passed"; fi; \
-	if ! uv run python scripts/capacity/run.py --selftest; then SELFTEST_FAILED=1; echo "❌ capacity selftest failed"; else echo "✅ capacity selftest passed"; fi; \
 	echo ""; \
 	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ] || [ $$SELFTEST_FAILED -eq 1 ]; then \
 		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \

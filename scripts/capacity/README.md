@@ -147,7 +147,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   的 `peak / end` 列都用它）；
 - `levels[i].rig.host_loadavg`：**窗口起点**采一次（三档数值不同说明机器状态在变）；
 - `levels[i].shape`：本档的 rate / 实际分片数 / 订阅模式；
-- `levels[i].error`：该档失败时的诊断（此时该档没测到的指标为 `null`）。
+- `levels[i].error`：该档失败时的一句话诊断；完整诊断（含网关日志尾部）在
+  `levels[i].error_detail`——日志动辄数千字符，只留一份，不重复塞进 `error` 与 `notes`。
 
 ## 口径
 
@@ -237,7 +238,8 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `stats.percentile` | 百分位秩定义的 known answer（含 n=1 / 偶数 / 极值 / 空序列报错） |
 | `pairing.last_user_text` | 两种 body 形态（str / block 列表）都能取到配对键 |
 | `pairing.delivery` | 配对数学（延迟 = 到达 − 发射）+ 四类丢弃原因 + 缺接口抛错 |
-| `pairing.assemble` | 配对结果落到 `run.json` 的接线（延迟可用这一支、全丢弃这一支、窗口不一致的 note） |
+| `pairing.assemble` | 配对结果落到 `run.json` 的接线（延迟可用这一支、全丢弃这一支、窗口不一致的 note）、指标键集不变量 |
+| `shard.events` | 分片的事件处理：失败轮只驱动一轮、只计一次、窗口外不计（网关对失败轮同时发 `turn_result(is_error)` 与 `error`） |
 | `proc.sampling` | 自身 CPU 单调、RSS > 0、fd ≥ 3、fd 软限抬升到位 |
 | `run.summary` | `--json` 一行摘要的字段名与取值投影（下游脚本的契约） |
 | `cli.contract` | 冻结 CLI 的默认值与全部校验分支（非法 levels / rate / dwell / warmup / shards / history-tokens / scenario） |
@@ -266,8 +268,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 - fd 峰值与 RSS 峰值的分辨率是 1 s 采样间隔，短尖峰可能采不到。
 - 一档的全部分片样本会一次性读进 coordinator 内存再配对（1000 会话、每会话数轮、
   每轮数百帧的量级约几十 MB）——这是「配对要跨进程读两边」的代价，不是可省的开销。
-- 分片崩溃 / 网关提前退出会让该档记 `error`、指标全 `null`，**其余档继续**跑
-  （退出码 3）。现场（`raw/<N>/gateway.log` 与分片日志）保留。
+- 分片崩溃 / 网关提前退出会让该档记 `error`、**未测到的**指标为 `null`（已经测到的照常
+  输出：一个分片崩掉不影响其余分片与网关侧读数），**其余档继续**跑（退出码 3）。
+  现场（`raw/<N>/gateway.log`、分片日志与分片样本）保留。
 
 ## 排错：症状 → 先看哪里
 

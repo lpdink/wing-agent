@@ -35,6 +35,7 @@ from wing_probe.driver.session import ws_url
 from wing_probe.driver.ws import Delivery, GatewayWS
 from wing_probe.watch.timeline import FrameLog
 
+import metrics
 import proc
 import shapes
 from metrics import TurnSample
@@ -309,8 +310,10 @@ class Shard:
         }
 
     def write(self) -> None:
+        payload = self.payload()
+        metrics.check_shard_payload(payload)
         self.config.out.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(self.payload(), ensure_ascii=False)
+        text = json.dumps(payload, ensure_ascii=False)
         self.config.out.write_text(text, encoding="utf-8")
 
 

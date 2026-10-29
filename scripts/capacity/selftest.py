@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """离线自测（``run.py --selftest``）：≤60 秒、不联网、不需要 API key、可重复。
 
-九组断言（见 :func:`checks`）+ ``e2e``，对应这个工具必须可信的几件事：
+十组断言（见 :func:`checks`）+ ``e2e``，对应这个工具必须可信的几件事：
 
 - ``stats.percentile``        百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）
 - ``pairing.last_user_text``  配对键的提取（str / block 列表两种 body 形态）
@@ -9,6 +9,7 @@
 - ``pairing.assemble``        配对结果落到 ``run.json`` 的接线（延迟可用这一支）
 - ``shard.events``            分片的事件处理：失败轮只驱动一轮（网关同时发 turn_result 与 error）
 - ``proc.sampling``           进程采样与 fd 软限抬升
+- ``run.summary``             ``--json`` 一行摘要的字段与取值投影
 - ``cli.contract``            冻结 CLI 的校验分支与默认值
 - ``shapes.contract``         形态契约与剧本覆盖度、prompt 文本全局唯一
 - ``report.render``           合成 ``run.json`` → markdown（缺数据是 ``—``，不可用有横幅）
@@ -787,7 +788,7 @@ def check_e2e(run_ladder: LadderRunner) -> None:
         levels = payload["levels"]
         _check(len(levels) == 1, "one level requested, one level reported")
         level = levels[0]
-        _check("error" not in level, f"level failed: {level.get('error')}")
+        _check(level.get("error") is None, f"level failed: {level.get('error')}")
 
         _check(level["sessions"] == 2, "level must report the requested N")
         _check(level["session_create"]["ok"] == 2, "both sessions must be created")
@@ -933,9 +934,9 @@ def check_failure_shape(
             os.environ["WING_GATEWAY_BIN"] = previous
     _check(payload["meta"]["failures"], "a level that cannot start must be reported")
     bad = payload["levels"][0]
-    _check("error" in bad, f"failed level must carry an error: {bad}")
+    _check(bad.get("error"), f"failed level must carry an error: {bad.get('error')}")
     _check(
-        set(bad) == set(good) | {"error"},
+        set(bad) == set(good),
         f"failed level keys differ from a good one: {sorted(set(bad) ^ set(good))}",
     )
     for block in ("metrics", "samples", "gateway", "rig", "session_create", "shape"):

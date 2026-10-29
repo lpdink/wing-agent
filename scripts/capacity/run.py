@@ -88,7 +88,10 @@ async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str,
     for sessions in cfg.levels:
         print(f"[capacity] level {sessions}: running", file=sys.stderr, flush=True)
         record = await orchestrator.run_level(
-            cfg, sessions, cfg.out / "raw" / str(sessions)
+            cfg,
+            sessions,
+            cfg.out / "raw" / str(sessions),
+            tracebacks=not selftest_run,
         )
         levels.append(record)
         print(
@@ -184,8 +187,8 @@ def _meta_notes(levels: Sequence[dict[str, Any]]) -> list[str]:
     failed = [record["sessions"] for record in levels if record.get("error")]
     if failed:
         notes.append(
-            f"levels {failed} did not complete; their metrics are null "
-            "(see levels[i].error)"
+            f"levels {failed} did not complete; metrics that were not measured are "
+            "null (see levels[i].error / levels[i].error_detail)"
         )
     return notes
 
@@ -219,15 +222,15 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    try:
+        cfg = build_config(args)  # --selftest 也先过一遍校验：非法参数一律退 2
+    except (UsageError, shapes.ShapeError) as exc:
+        print(f"[capacity] error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     if args.selftest:
         import selftest  # 只在这条路径上依赖自测代码
 
         return selftest.main(run_ladder=run_ladder)
-    try:
-        cfg = build_config(args)
-    except (UsageError, shapes.ShapeError) as exc:
-        print(f"[capacity] error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
     try:
         proc.raise_nofile(proc.nofile_target(max(cfg.levels)))
     except proc.ProcError as exc:

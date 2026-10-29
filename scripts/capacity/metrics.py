@@ -36,6 +36,36 @@ class DeliveryUnavailable(RuntimeError):
     """假 Provider 不提供逐帧发射时刻——投递延迟不可测。"""
 
 
+#: 分片样本文件（跨进程契约）的必填键。两侧都过 :func:`check_shard_payload`：
+#: 协调者按名取值，缺键在那边会静默变成 0——与「缺数据绝不写 0」正好相反。
+SHARD_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "shard",
+        "gateway_url",
+        "subscribers",
+        "shape",
+        "ws_connections",
+        "sessions",
+        "frames_received",
+        "cpu_seconds",
+        "cpu_span_s",
+        "closed_before_end",
+        "text_frames",
+        "errors",
+        "error_details",
+        "window",
+        "turns",
+    }
+)
+
+
+def check_shard_payload(payload: Mapping[str, Any]) -> None:
+    """校验分片样本的必填键（缺键即抛，不做 ``get(key, 0)`` 这类兜底）。"""
+    missing = SHARD_PAYLOAD_KEYS - set(payload)
+    if missing:
+        raise ValueError(f"shard sample payload is missing keys: {sorted(missing)}")
+
+
 def percentile(values: Sequence[float], pct: float) -> float:
     """nearest-rank 百分位（``pct`` ∈ (0, 100]）：升序第 ``ceil(pct/100·n)`` 个值。
 
@@ -180,7 +210,14 @@ def pair_delivery(
             result.reasons["ambiguous_prompt"] += len(turn.arrivals)
             result.dropped += len(turn.arrivals)
             continue
-        emits = frame_emits_for(provider, matches[0])
+        try:
+            emits = frame_emits_for(provider, matches[0])
+        except DeliveryUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 - 单轮的发射记录缺失不该升级成整档不可用
+            result.reasons["missing_emits"] += len(turn.arrivals)
+            result.dropped += len(turn.arrivals)
+            continue
         if len(emits) != len(turn.arrivals):
             result.reasons["length_mismatch"] += len(turn.arrivals)
             result.dropped += len(turn.arrivals)

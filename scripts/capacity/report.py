@@ -130,13 +130,14 @@ def _banners(run: Mapping[str, Any]) -> list[str]:
     lines: list[str] = []
     if meta.get("failures"):
         lines.append(
-            f"> **失败档位**：{len(meta['failures'])} 个档位未完成，"
-            "对应行指标全为 `null`（详见该档 `error`）。"
+            f"> **失败档位**：{len(meta['failures'])} 个档位未跑完——"
+            "**未测到**的指标是 `null`，已经测到的照常显示（详见该档 `error`）。"
         )
     unavailable = [
         record.get("sessions")
         for record in run.get("levels") or []
         if (record.get("samples") or {}).get("delivery_available") is False
+        and not record.get("error")
     ]
     if unavailable:
         lines.append(
