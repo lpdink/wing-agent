@@ -167,6 +167,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 @pytest.mark.probe_env(provider_extra={"image_delivery": "inline"})
 #   → 合进 providers[0]：provider 级透传旋钮（如覆盖图片投递形态 inline/followup）。
+#   原样透传、不设白名单：键名以产品配置声明为准，先用 grep 确认声明存在——
+#   配置层是 extra="ignore"，未声明的键会被静默忽略（不报错、也不生效）。
+#   容量测量用它抬高连接池上限（如 {"max_connections": 2000}），否则默认上限会把
+#   高并发压成「只有一批会话在流」。Probe.start(provider_extra=...) 同一旋钮。
 
 # hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
 # 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
