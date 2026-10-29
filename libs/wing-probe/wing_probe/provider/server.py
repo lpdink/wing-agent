@@ -25,6 +25,7 @@ import asyncio
 import socket
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -38,13 +39,33 @@ from wing_probe.provider.script import (
 )
 from wing_probe.provider.sse import (
     SSE_CONTENT_TYPE,
-    FrameEmit,
     SSEFrame,
     completion_response,
     stream_frames,
 )
 
 CHAT_PATH = "/v1/chat/completions"
+
+
+@dataclass(frozen=True, slots=True)
+class FrameEmit:
+    """一帧被交给传输层之前的时刻（``FakeProvider.frame_emits`` 的条目）。
+
+    ``request_index`` 是 ``RequestLog`` 留档的全局 ``index``（不是 ``model_index``，
+    也不是 ``requests.get(model, index=…)`` 的 ``index`` 参数）。``frame_index`` 从 0
+    起、只数 ``data: {json}`` 载荷帧：``SSEFrame`` 只有载荷帧与 ``data: [DONE]`` 两种
+    形态，后者不计，所以它就是客户端 SSE 解析器读到的第几个事件（一行 data 一个事件、
+    遇 ``[DONE]`` 直接返回），0 是 role 空帧。role / finish / usage 帧不产生客户端流式
+    事件——拿它和 WS 事件配对时，先按场景自己的帧序筛出 content / reasoning / tool 帧。
+
+    ``at`` 是该帧交给传输层写**之前**的 ``time.monotonic()``：度量「生产者最早能把它
+    交出去」的时刻，不含写本身。它是**绝对**单调时钟，``watch`` 的 ``Event.at`` 则是相对
+    ``env.started_at`` 的——相减前要先换到同一原点。
+    """
+
+    request_index: int
+    frame_index: int
+    at: float
 
 
 def _error_response(status: int, message: str, *, code: str) -> web.Response:
@@ -77,12 +98,15 @@ class FakeProvider:
         self.requests = RequestLog()
         """入站请求留档。"""
         self.frame_emits: list[FrameEmit] = []
-        """流式响应的逐帧发射时刻（按实际发射顺序追加，多请求并发时交错）。
+        """流式响应的逐帧发射时刻（全局账本；按**写完**顺序追加，并发时各请求交错）。
 
         测量器件而非日志：不落盘、无上界，规模由场景的「请求数 × 每轮帧数」决定
-        （单条 = 一次 ``time.monotonic()`` + 一次 dataclass 构造 + 一次 append）。
-        按请求取时刻用 :meth:`emits_for`；非流式请求（压缩调用）不产生任何记录。
+        （一条 ≈ 一次 ``time.monotonic()``、一次 dataclass 构造与一次 append）。
+        逐请求取时刻用 :meth:`emits_for`；复位两本账用 :meth:`reset`——只清这一张
+        list 会让它与请求留档的序号脱钩。
         """
+        self._emits_by_request: dict[int, list[float]] = {}
+        """``frame_emits`` 的按请求索引（``emits_for`` 走它，避免扫全表）。"""
         self._port = port
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -157,14 +181,15 @@ class FakeProvider:
     def models(self) -> list[str]:
         return self.scripts.models()
 
-    # ── 发射时刻 ────────────────────────────────────────────
+    # ── 观测账本 ────────────────────────────────────────────
 
     def emits_for(self, request_index: int) -> list[float]:
-        """某次请求的逐帧发射时刻（按 ``frame_index`` 升序，``time.monotonic()``）。
+        """某次请求的逐帧发射时刻（按 ``frame_index`` 升序，绝对 ``time.monotonic()``）。
 
-        ``request_index`` 是 ``RequestLog`` 留档的 ``index``。非流式请求（压缩调用）
-        没有帧 → 空列表；从未留档的下标抛 ``IndexError``——测量时把下标打错会得到
-        一张"好看的空表"，那比报错贵得多。
+        ``request_index`` 传 :class:`FrameEmit` 说的那个全局留档序号。没有帧的请求——
+        非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；从未
+        留档的下标抛 ``IndexError``：打错下标会得到一张「好看的空表」，那比报错贵得多。
+        返回副本，改它不影响账本。
         """
         recorded = len(self.requests)
         if request_index < 0 or request_index >= recorded:
@@ -172,9 +197,17 @@ class FakeProvider:
                 f"request #{request_index} out of range "
                 f"({recorded} request(s) recorded)"
             )
-        return [
-            emit.at for emit in self.frame_emits if emit.request_index == request_index
-        ]
+        return list(self._emits_by_request.get(request_index, ()))
+
+    def reset(self) -> None:
+        """清空观测账本（请求留档 + 发射时刻）；剧本与消费游标不动。
+
+        两本账共用「留档表长度发号」这一个序号空间，必须一起复位：只清一本会让新请求
+        从 0 重新发号，而旧帧还在账本里——``emits_for(0)`` 于是把两轮拼成一张表。
+        """
+        self.requests.clear()
+        self.frame_emits.clear()
+        self._emits_by_request.clear()
 
     # ── HTTP ───────────────────────────────────────────────
 
@@ -273,7 +306,7 @@ class FakeProvider:
         *,
         request_index: int,
     ) -> None:
-        """逐帧等待 + 写；每写成一帧登记一次发射时刻。"""
+        """逐帧等待 + 写；每写成一帧登记一次发射时刻（``[DONE]`` 不登记）。"""
         frame_index = 0
         for frame in frames:
             if frame.delay:
@@ -285,6 +318,7 @@ class FakeProvider:
             self.frame_emits.append(
                 FrameEmit(request_index=request_index, frame_index=frame_index, at=at)
             )
+            self._emits_by_request.setdefault(request_index, []).append(at)
             frame_index += 1
 
 

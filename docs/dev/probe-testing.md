@@ -57,14 +57,14 @@ libs/wing-probe/
 │   ├── env.py             # ProbeEnv：临时 WING_HOME + 端口 + 网关子进程生命周期
 │   ├── probe.py           # Probe 门面：会话工厂 / 视图 / 现场转储 / 逃生舱
 │   ├── driver/            # http（动作封装 + 留档）· ws（订阅 + 信封重组）· session（会话句柄）
-│   ├── provider/          # script（剧本模型）· server（假 Provider）· sse（编码）· request_log · context（ContextView）
+│   ├── provider/          # script（剧本模型）· server（假 Provider + 发射时刻账本）· sse（编码）· request_log · context（ContextView）
 │   ├── watch/             # timeline（事件缓存 + 游标）· expect（五原语）· report（失败报告）
 │   ├── history/           # view（history.jsonl 解析 + 事实视图）· invariants（四条不变量 + 红线过渡断言）
 │   ├── toolhost.py        # 最小 tool host（远程工具探针侧实现；只走公开 HTTP / WS 协议）
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
 ├── conftest.py            # 唯一的公共 fixture 定义处（在 args 那一层，不是 scenarios/ 里）
-├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁）
+├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁；跨文件辅助在 _support.py）
 └── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
@@ -236,20 +236,25 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 请求的 system 段来自生成配置里的默认模板 `system_prompt`（`wing_probe.env.DEFAULT_SYSTEM_PROMPT`，**非空**；可用 `render_config_yaml(system_prompt=…)` / `ProbeEnv(system_prompt=…)` 覆盖，`probe.env.system_prompt` 是场景里的对照值）。"system + 摘要"这类前缀断言因此作用在真实的 system 段上，而不是空串上退化。
 
-### 发射时刻：`probe.provider.frame_emits` / `emits_for(request_index)`
+### 发射时刻（测量器件，非断言）：`probe.provider.frame_emits` / `emits_for(request_index)`
 
-假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`（内存内，不落盘、无上界，
-规模由场景的「请求数 × 每轮帧数」决定）：
+假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`。这不是断言面，用途只有一个：
+**算投递延迟**（发射时刻 → 客户端到达时刻）——断言类场景用它没有意义。内存内、不落盘、无上界，
+规模由场景的「请求数 × 每轮帧数」决定（一条 ≈ 0.3µs / 96B）。
 
 | API | 用途 |
 |-----|------|
-| `frame_emits: list[FrameEmit]` | 全局账本，按实际发射顺序追加（多请求并发时交错）；`FrameEmit` = `(request_index, frame_index, at)` |
-| `emits_for(request_index)` | 某次请求的逐帧时刻（按 `frame_index` 升序）；`request_index` 是 `probe.request(...)` 留档的 `.index`，从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
+| `frame_emits: list[FrameEmit]` | 全局账本，`FrameEmit` = `(request_index, frame_index, at)`；按**写完**顺序追加（并发时各请求的帧交错，单请求内部始终升序） |
+| `emits_for(request_index)` | 该请求的逐帧时刻（按 `frame_index` 升序，返回副本）；**列表位置即 `frame_index`**。`request_index` 是 `probe.request(...)` 留档的全局 `.index`（不是 `model_index`，也不是 `requests.get(model, index=…)` 的参数），从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
+| `reset()` | 同时清空请求留档与帧账本（剧本不动）。两本账共用「留档表长度发号」这一个序号空间，只清一本会让新请求从 0 重新发号而旧帧还在 |
 
-口径：`frame_index` 从 0 起只数 JSON 载荷帧（终止帧 `data: [DONE]` 与心跳 / 注释行不计），
-因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）；写失败（客户端断开）的那帧
-不进账，账本恒为「传输层接受了的帧」的前缀。非流式请求（压缩调用）没有帧 → 空列表。
-用途只有一个：**算投递延迟**（发射时刻 → 客户端到达时刻）；断言类场景用它没有意义。
+口径：`frame_index` 从 0 起只数 `data: {json}` 载荷帧（`SSEFrame` 只有载荷帧与 `data: [DONE]`
+两种形态，后者不计），因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）。两条配对
+约束：`at` 是**绝对**单调时钟，而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前
+先换到同一原点；role / finish / usage 帧不产生客户端流式事件，拿它和 WS 事件配对时先按场景自己
+的帧序筛出 content / reasoning / tool 帧。没有帧的请求——非流式压缩调用，或在产出任何帧之前就
+失败（剧本耗尽 5xx）——返回空列表；写失败（客户端断开）的那帧不进账，所以账本是「传输层接受了
+的帧」的**上限**（突发写会把内核缓冲填满，账本可能记满而客户端只读到几帧）。
 
 ### 落盘：`session.history` / `probe.history(session)`
 

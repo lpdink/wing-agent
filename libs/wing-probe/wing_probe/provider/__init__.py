@@ -18,11 +18,10 @@ from wing_probe.provider.script import (
     UnregisteredModelError,
     Usage,
 )
-from wing_probe.provider.server import FakeProvider
+from wing_probe.provider.server import FakeProvider, FrameEmit
 from wing_probe.provider.sse import (
     DONE_TEXT,
     SSE_CONTENT_TYPE,
-    FrameEmit,
     SSEFrame,
     chunk_payload,
     completion_response,
