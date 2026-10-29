@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""容量测量 CLI：阶梯扫描 N 个并发会话，产出 ``run.json`` + ``report.md`` + 每档原始样本。
+
+    uv run python scripts/capacity/run.py --scenario pure_stream \
+        --levels 1,10,50,100 --rate 50 --dwell 20
+
+回答的是「网关能扛住多少个并发**活跃**会话、从哪里开始退化」——不是回归测量
+（那是 ``scripts/perf/``），也不是行为断言（那是 ``libs/wing-probe/``）。进程拓扑、
+口径与产物字段见同目录 ``README.md``；为什么这么分层见 ``docs`` 与 ``design``。
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import orchestrator
+import proc
+import report
+import selftest
+import shapes
+from orchestrator import DELIVERY_UNAVAILABLE, RunConfig
+
+TOOL = "capacity"
+SCHEMA = 1
+DEFAULT_OUT_ROOT = Path("target/capacity")
+DEFAULT_LEVELS = "1,10,50,100"
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_LEVEL_FAILED = 3
+
+
+class UsageError(ValueError):
+    """命令行参数不可用（可行动的错误文案；退出码 2）。"""
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def parse_levels(raw: str) -> tuple[int, ...]:
+    """``"1,10,100"`` → ``(1, 10, 100)``（正整数、严格升序）。"""
+    levels: list[int] = []
+    for chunk in raw.split(","):
+        text = chunk.strip()
+        if not text:
+            raise UsageError(f"--levels has an empty entry: {raw!r}")
+        try:
+            value = int(text)
+        except ValueError as exc:
+            raise UsageError(f"--levels entry {text!r} is not an integer") from exc
+        if value < 1:
+            raise UsageError(f"--levels entry {value} must be >= 1")
+        levels.append(value)
+    if not levels:
+        raise UsageError("--levels is empty")
+    if sorted(set(levels)) != levels:
+        raise UsageError(
+            f"--levels must be strictly ascending with no duplicates, got {raw!r}"
+        )
+    return tuple(levels)
+
+
+def build_config(args: argparse.Namespace) -> RunConfig:
+    """参数 → :class:`RunConfig`（所有非法组合在这里变成可行动的错误）。"""
+    shape = shapes.resolve(args.scenario)  # 未知名这里就抛（附可选项）
+    levels = parse_levels(args.levels)
+    if args.rate <= 0:
+        raise UsageError(f"--rate must be > 0, got {args.rate}")
+    if args.dwell <= 0:
+        raise UsageError(f"--dwell must be > 0, got {args.dwell}")
+    if args.warmup < 0:
+        raise UsageError(f"--warmup must be >= 0, got {args.warmup}")
+    if args.shards < 1:
+        raise UsageError(f"--shards must be >= 1, got {args.shards}")
+    if args.history_tokens != 0:
+        raise UsageError(
+            f"--history-tokens {args.history_tokens} is not supported yet; only 0 "
+            "(no pre-seeded history) is implemented"
+        )
+    out = Path(args.out) if args.out else DEFAULT_OUT_ROOT / _stamp()
+    return RunConfig(
+        scenario=shape.NAME,
+        levels=levels,
+        rate=float(args.rate),
+        dwell=float(args.dwell),
+        warmup=float(args.warmup),
+        shards=int(args.shards),
+        subscribers=str(args.subscribers),
+        history_tokens=int(args.history_tokens),
+        out=out,
+    )
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="capacity",
+        description=(
+            "capacity sweep: N concurrent gateway sessions driven by a fake provider, "
+            "sampled for CPU / RSS / fds / delivery latency"
+        ),
+    )
+    parser.add_argument(
+        "--scenario",
+        default="pure_stream",
+        help=f"load shape (available: {', '.join(shapes.names())})",
+    )
+    parser.add_argument(
+        "--levels",
+        default=DEFAULT_LEVELS,
+        help=f"ascending comma-separated session counts (default: {DEFAULT_LEVELS})",
+    )
+    parser.add_argument(
+        "--rate", type=float, default=50.0, help="tokens/s per session (default: 50)"
+    )
+    parser.add_argument(
+        "--dwell", type=float, default=20.0, help="sample window per level (s)"
+    )
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=5.0,
+        help="warmup before the window (s, dropped)",
+    )
+    parser.add_argument(
+        "--shards", type=int, default=4, help="driver shard subprocesses (default: 4)"
+    )
+    parser.add_argument(
+        "--subscribers",
+        choices=("per-session", "per-shard"),
+        default="per-session",
+        help="WS subscriber topology (default: per-session)",
+    )
+    parser.add_argument(
+        "--history-tokens",
+        dest="history_tokens",
+        type=int,
+        default=0,
+        help="pre-seeded history size (only 0 is implemented)",
+    )
+    parser.add_argument(
+        "--out", help=f"output dir (default: {DEFAULT_OUT_ROOT}/<utc timestamp>)"
+    )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="offline self-check (small N, short window, no network)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print a single JSON summary line on stdout",
+    )
+    return parser.parse_args(argv)
+
+
+def write_json(path: Path, payload: Any) -> None:
+    """原子写 JSON（tmp + rename）；NaN / Infinity 直接失败（非标准 JSON）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _fill_slope(levels: list[dict[str, Any]]) -> None:
+    """``gateway.rss_mb_slope_per_session`` = 与上一档末次 RSS 的相邻差斜率。
+
+    每档都是新网关进程、窗口末是稳态，所以相邻差即「每多一个会话多占多少内存」。
+    最小档没有上一档 → 保持 ``None``。
+    """
+    for index in range(1, len(levels)):
+        previous, current = levels[index - 1], levels[index]
+        rss_now = (current.get("metrics") or {}).get("gateway.rss_mb_end")
+        rss_previous = (previous.get("metrics") or {}).get("gateway.rss_mb_end")
+        delta_sessions = int(current["sessions"]) - int(previous["sessions"])
+        if rss_now is None or rss_previous is None or delta_sessions <= 0:
+            continue
+        current["metrics"]["gateway.rss_mb_slope_per_session"] = round(
+            (rss_now - rss_previous) / delta_sessions, 3
+        )
+
+
+async def run_ladder(cfg: RunConfig, *, selftest_run: bool = False) -> dict[str, Any]:
+    """跑完一条阶梯并落盘 ``run.json`` / ``report.md``，返回 ``run.json`` 的内容。"""
+    started_at = _utc_now()
+    started = time.monotonic()
+    cfg.out.mkdir(parents=True, exist_ok=True)
+    print(
+        f"[capacity] {cfg.scenario}: levels={list(cfg.levels)} rate={cfg.rate} "
+        f"dwell={cfg.dwell} warmup={cfg.warmup} shards={cfg.shards} "
+        f"subscribers={cfg.subscribers} → {cfg.out}",
+        file=sys.stderr,
+        flush=True,
+    )
+    levels: list[dict[str, Any]] = []
+    for sessions in cfg.levels:
+        print(f"[capacity] level {sessions}: running", file=sys.stderr, flush=True)
+        record = await orchestrator.run_level(
+            cfg, sessions, cfg.out / "raw" / str(sessions)
+        )
+        levels.append(record)
+        print(
+            f"[capacity] level {sessions}: {report.summary_line(record)}",
+            file=sys.stderr,
+            flush=True,
+        )
+    _fill_slope(levels)
+
+    failures = [
+        f"level {record['sessions']}: {record['error']}"
+        for record in levels
+        if record.get("error")
+    ]
+    meta = {
+        "tool": TOOL,
+        "schema": SCHEMA,
+        "scenario": cfg.scenario,
+        "started_at": started_at,
+        "duration_s": round(time.monotonic() - started, 1),
+        "args": {
+            "levels": list(cfg.levels),
+            "rate": cfg.rate,
+            "dwell": cfg.dwell,
+            "warmup": cfg.warmup,
+            "shards": cfg.shards,
+            "subscribers": cfg.subscribers,
+            "history_tokens": cfg.history_tokens,
+        },
+        "host": proc.host_info(),
+        "gateway": _meta_gateway(levels),
+        "session_create": _meta_session_create(levels),
+        "notes": _meta_notes(levels),
+        "failures": failures,
+        "out": str(cfg.out),
+    }
+    if selftest_run:
+        meta["selftest"] = True
+    payload = {"meta": meta, "levels": levels}
+    write_json(cfg.out / "run.json", payload)
+    (cfg.out / "report.md").write_text(report.render(payload), encoding="utf-8")
+    return payload
+
+
+def _meta_gateway(levels: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """网关身份：取**最后一档**进程（每档都是新进程，逐档身份在 ``levels[i].gateway``）。"""
+    for record in reversed(levels):
+        gateway = record.get("gateway") or {}
+        if gateway.get("pid") is not None:
+            return {
+                "pid": gateway.get("pid"),
+                "version": gateway.get("version"),
+                "commit": gateway.get("commit"),
+            }
+    return {"pid": None, "version": None, "commit": None}
+
+
+def _meta_session_create(levels: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """建会话成本：单调的逐档数字在 ``levels[i].session_create``，这里是全档汇总。"""
+    stats = [record.get("session_create") or {} for record in levels]
+    if all(entry.get("ok") is None for entry in stats):
+        return {
+            "ok": None,
+            "failed": None,
+            "total_ms": None,
+            "scope": "sum over levels",
+        }
+    return {
+        "ok": sum(int(entry.get("ok") or 0) for entry in stats),
+        "failed": sum(int(entry.get("failed") or 0) for entry in stats),
+        "total_ms": round(
+            sum(float(entry.get("total_ms") or 0.0) for entry in stats), 1
+        ),
+        "scope": "sum over levels",
+    }
+
+
+def _meta_notes(levels: Sequence[dict[str, Any]]) -> list[str]:
+    """全局说明：投递延迟是否可用、是否有档位失败。"""
+    notes: list[str] = []
+    if any(
+        (record.get("samples") or {}).get("delivery_available") is False
+        for record in levels
+    ):
+        notes.append(DELIVERY_UNAVAILABLE)
+    failed = [record["sessions"] for record in levels if record.get("error")]
+    if failed:
+        notes.append(
+            f"levels {failed} did not complete; their metrics are null "
+            "(see levels[i].error)"
+        )
+    return notes
+
+
+def _summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """``--json`` 的一行摘要（人读路径用同一份数据打成短表）。"""
+    out = Path(str(payload["meta"].get("out", "")))
+    return {
+        "ok": not payload["meta"]["failures"],
+        "out": str(out),
+        "run_json": str(out / "run.json"),
+        "report": str(out / "report.md"),
+        "levels": [
+            {
+                "sessions": record["sessions"],
+                "gateway_cpu_cores": (record.get("metrics") or {}).get(
+                    "gateway.cpu_cores"
+                ),
+                "delivery_p99_ms": (record.get("metrics") or {}).get("delivery.p99_ms"),
+                "tokens_per_second_actual": (record.get("metrics") or {}).get(
+                    "tokens_per_second_actual"
+                ),
+                "errors": (record.get("metrics") or {}).get("errors"),
+                "error": record.get("error"),
+            }
+            for record in payload["levels"]
+        ],
+        "failures": payload["meta"]["failures"],
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.selftest:
+        return selftest.main(run_ladder=run_ladder)
+    try:
+        cfg = build_config(args)
+    except (UsageError, shapes.ShapeError) as exc:
+        print(f"[capacity] error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        proc.raise_nofile(proc.nofile_target(max(cfg.levels)))
+    except proc.ProcError as exc:
+        print(f"[capacity] error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        payload = asyncio.run(run_ladder(cfg))
+    except KeyboardInterrupt:  # pragma: no cover - 人工中断
+        print("[capacity] interrupted", file=sys.stderr)
+        return 130
+    summary = _summary(payload)
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        print(f"[capacity] run.json → {cfg.out / 'run.json'}")
+        print(f"[capacity] report   → {cfg.out / 'report.md'}")
+        for line in payload["meta"]["failures"]:
+            print(f"[capacity] failure: {line}", file=sys.stderr)
+    return EXIT_OK if summary["ok"] else EXIT_LEVEL_FAILED
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
