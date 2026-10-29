@@ -9,6 +9,7 @@
 2. **投递延迟按帧下标严格配对**：客户端收到的第 i 个 ``text`` 事件 ↔ 假 Provider
    该请求发射的第 i 帧。长度不等、prompt 命中多条请求、负延迟 —— 一律记
    ``dropped`` 并按原因分类，**绝不截断对齐、绝不插值、绝不把配不上的样本当 0**。
+   丢弃计数与原因分类的**单位都是帧**（``sum(reasons.values()) == dropped``）。
 
 发射时刻来自上游冻结接口（``FakeProvider.frame_emits`` / ``emits_for``）；缺失时
 :func:`frame_emits_for` 直接抛 :class:`DeliveryUnavailable`，由档位编排
@@ -171,17 +172,17 @@ def pair_delivery(
     for turn in turns:
         matches = index.get(turn.prompt, [])
         if not matches:
-            result.reasons["unknown_prompt"] += 1
+            result.reasons["unknown_prompt"] += len(turn.arrivals)
             result.dropped += len(turn.arrivals)
             continue
         if len(matches) > 1:
             # 同一 prompt 触发多次请求（网关重试）——哪一次对应这批到达无法确定。
-            result.reasons["ambiguous_prompt"] += 1
+            result.reasons["ambiguous_prompt"] += len(turn.arrivals)
             result.dropped += len(turn.arrivals)
             continue
         emits = frame_emits_for(provider, matches[0])
         if len(emits) != len(turn.arrivals):
-            result.reasons["length_mismatch"] += 1
+            result.reasons["length_mismatch"] += len(turn.arrivals)
             result.dropped += len(turn.arrivals)
             continue
         for emit_at, arrival_at in zip(emits, turn.arrivals):
@@ -198,19 +199,3 @@ def pair_delivery(
 def has_frame_emits(provider: Any) -> bool:
     """上游冻结接口是否已就位（档位开始前的一次能力探测）。"""
     return getattr(provider, "frame_emits", None) is not None
-
-
-__all__ = [
-    "DeliveryUnavailable",
-    "Pairing",
-    "SPREAD_PERCENTILES",
-    "TurnSample",
-    "content_text",
-    "frame_emits_for",
-    "has_frame_emits",
-    "last_user_text",
-    "pair_delivery",
-    "percentile",
-    "prompt_index",
-    "spread",
-]

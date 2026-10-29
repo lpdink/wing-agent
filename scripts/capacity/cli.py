@@ -25,6 +25,7 @@ DEFAULT_SHARDS = 4
 DEFAULT_SUBSCRIBERS = "per-session"
 DEFAULT_HISTORY_TOKENS = 0
 DEFAULT_OUT_ROOT = Path("target/capacity")
+"""默认产物根（相对仓库根；``build_config`` 会解析成绝对路径）。"""
 
 
 class UsageError(ValueError):
@@ -143,7 +144,12 @@ def build_config(args: argparse.Namespace) -> RunConfig:
             f"--history-tokens {args.history_tokens} is not supported yet; only 0 "
             "(no pre-seeded history) is implemented"
         )
-    out = Path(args.out) if args.out else DEFAULT_OUT_ROOT / stamp()
+    # 必须绝对：分片以 ``cwd=<档位目录>`` 起，相对路径会让它找不到自己的配置文件。
+    out = (
+        (Path(args.out) if args.out else DEFAULT_OUT_ROOT / stamp())
+        .expanduser()
+        .resolve()
+    )
     return RunConfig(
         scenario=shape.NAME,
         levels=levels,
@@ -160,21 +166,3 @@ def build_config(args: argparse.Namespace) -> RunConfig:
 def stamp() -> str:
     """UTC 时间戳（``--out`` 的默认目录名）。"""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-__all__ = [
-    "DEFAULT_DWELL",
-    "DEFAULT_HISTORY_TOKENS",
-    "DEFAULT_LEVELS",
-    "DEFAULT_OUT_ROOT",
-    "DEFAULT_RATE",
-    "DEFAULT_SCENARIO",
-    "DEFAULT_SHARDS",
-    "DEFAULT_SUBSCRIBERS",
-    "DEFAULT_WARMUP",
-    "UsageError",
-    "build_config",
-    "parse_args",
-    "parse_levels",
-    "stamp",
-]

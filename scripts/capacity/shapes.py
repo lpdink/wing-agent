@@ -50,6 +50,3 @@ def resolve(name: str) -> ModuleType:
             f"module declares NAME={module.NAME!r}"
         )
     return module
-
-
-__all__ = ["SHAPES", "ShapeError", "names", "resolve"]

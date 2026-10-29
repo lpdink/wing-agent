@@ -226,16 +226,26 @@ class Shard:
                 state.arrivals.append(now)
                 self.text_frames += 1
             return
-        if event_type not in ("turn_result", "error"):
-            return
         in_window = self._window_start <= now <= self._window_end
-        if in_window and (event_type == "error" or data.get("is_error")):
+        if event_type == "error":
+            # 只留诊断、不计数、也不是轮次边界：失败轮上网关**同时**发
+            # turn_result(is_error) 与 error，两者都记会重复计一次失败。
+            if in_window and len(self.error_details) < 8:
+                self.error_details.append(f"error: {str(data)[:200]}")
+            return
+        if event_type != "turn_result":
+            return
+        sent_at, state.sent_at = state.sent_at, None
+        if sent_at is None:
+            # 重复 / 迟到的终止事件：同一轮已经结过账（不重复计数、不重复驱动）。
+            return
+        if in_window and data.get("is_error"):
+            # 失败数只认 turn_result.is_error（每个失败轮恰好一个），见 README 口径表。
             self.errors += 1
             if len(self.error_details) < 8:
-                self.error_details.append(f"{event_type}: {str(data)[:200]}")
-        sent_at, state.sent_at = state.sent_at, None
+                self.error_details.append(f"error turn: {str(data)[:200]}")
         arrivals, state.arrivals = state.arrivals, []
-        if event_type == "turn_result" and sent_at is not None and in_window:
+        if sent_at is not None and in_window and sent_at >= self._window_start:
             self.turns.append(TurnSample(state.prompt, sent_at, now, tuple(arrivals)))
         if not self._closing and now < self._window_end:
             self._pending.put_nowait(state.session_id)
@@ -254,7 +264,7 @@ class Shard:
             try:
                 await state.ws.send_request(session_id, state.prompt)
             except Exception as exc:  # noqa: BLE001 - 单条连接坏掉不该拖死整片
-                if time.monotonic() <= self._window_end:
+                if self._window_start <= time.monotonic() <= self._window_end:
                     self.errors += 1
                 state.sent_at = None
                 if len(self.error_details) < 8:

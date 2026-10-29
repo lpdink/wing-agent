@@ -13,6 +13,9 @@ from typing import Any
 MISSING = "—"
 """没有样本的占位符（对应 JSON 的 ``null``）。"""
 
+NOTE_LIMIT = 400
+"""报告里单条说明的字符上限（失败明细的完整文本在 ``levels[i].error``）。"""
+
 LEVEL_COLUMNS: tuple[str, ...] = (
     "N",
     "wall s",
@@ -158,8 +161,9 @@ def _notes(run: Mapping[str, Any]) -> list[str]:
 
 
 def _one_line(text: Any) -> str:
-    """多行诊断折成一行（markdown 列表项不允许裸续行）。"""
-    return " ".join(str(text).split())
+    """多行诊断折成一行并截断（markdown 列表项不允许裸续行，报告也不该被日志淹没）。"""
+    folded = " ".join(str(text).split())
+    return folded if len(folded) <= NOTE_LIMIT else folded[: NOTE_LIMIT - 1] + "…"
 
 
 def _gateway_field(meta: Mapping[str, Any], key: str) -> str:
@@ -238,6 +242,3 @@ def summary_line(record: Mapping[str, Any]) -> str:
         f"tok/s={_num(metrics.get('tokens_per_second_actual'))}, "
         f"errors={_num(metrics.get('errors'))}"
     )
-
-
-__all__ = ["LEVEL_COLUMNS", "MISSING", "RIG_COLUMNS", "render", "summary_line"]

@@ -113,6 +113,11 @@ class RunConfig:
     history_tokens: int
     out: Path
 
+    def __post_init__(self) -> None:
+        # 产物目录必须绝对：分片以 ``cwd=<档位目录>`` 起、拿到的配置路径由它派生，
+        # 相对路径会让子进程找不到自己的配置。规范化放在这里，任何构造路径都安全。
+        object.__setattr__(self, "out", Path(self.out).expanduser().resolve())
+
     @property
     def span_s(self) -> float:
         """每档的驱动时长（warmup + dwell）。"""
@@ -235,15 +240,20 @@ async def run_level(cfg: RunConfig, sessions: int, level_dir: Path) -> dict[str,
             await env.stop()
             _keep_log(env, level_dir)
 
-    _assemble(
-        record,
-        cfg=cfg,
-        sessions=sessions,
-        provider=None if env is None else env.provider,
-        sampling=sampling,
-        payloads=payloads,
-        notes=notes,
-    )
+    try:
+        _assemble(
+            record,
+            cfg=cfg,
+            sessions=sessions,
+            provider=None if env is None else env.provider,
+            sampling=sampling,
+            payloads=payloads,
+            notes=notes,
+            failed=bool(failures),
+        )
+    except Exception as exc:  # noqa: BLE001 - 装配失败也要留下其余档与已有数据
+        failures.append(f"assemble: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
     if failures:
         record["error"] = " | ".join(failures)
         notes.append(f"level {sessions} failed: {record['error']}")
@@ -465,7 +475,7 @@ async def _read_event(
 
 
 async def _sample_window(env: ProbeEnv, sampling: _Sampling) -> None:
-    """窗口内采样：CPU 首尾累计差 + RSS/fd 周期峰值 + 网关日志的回收行计数。
+    """窗口内采样：CPU 首尾累计差 + RSS/fd 周期峰值。
 
     采样原地写进 ``sampling``：中途失败时已采到的点仍留在产物里（崩机现场是容量测量
     最想留住的那一格）。RSS / fd 走线程——darwin 上它们是 ``ps`` / ``lsof`` 子进程
@@ -560,6 +570,7 @@ def _assemble(
     sampling: _Sampling,
     payloads: list[dict[str, Any]],
     notes: list[str],
+    failed: bool = False,
 ) -> dict[str, Any]:
     """把采样与分片样本折进 ``record``（键集在 :func:`level_skeleton` 就定好了）。"""
     window_start = sampling.window_start
@@ -601,6 +612,11 @@ def _assemble(
         block["errors"] = errors
         if text_frames > 0 and wall > 0:
             block["tokens_per_second_actual"] = round(text_frames / wall, 1)
+        elif text_frames > 0:
+            notes.append(
+                "tokens_per_second_actual is null: the sample window did not "
+                f"complete ({text_frames} text frame(s) were received)"
+            )
         else:
             notes.append(
                 "tokens_per_second_actual is null: no text frame arrived in the window"
@@ -611,8 +627,12 @@ def _assemble(
     block["turn.p50_ms"] = _round(turn_spread.get("p50"))
     block["turn.p99_ms"] = _round(turn_spread.get("p99"))
 
-    delivery_available = provider is not None and metrics.has_frame_emits(provider)
-    samples["delivery_available"] = None if provider is None else delivery_available
+    delivery_available = (
+        not failed and provider is not None and metrics.has_frame_emits(provider)
+    )
+    samples["delivery_available"] = (
+        None if (failed or provider is None) else delivery_available
+    )
     if delivery_available and turns:
         pairing = metrics.pair_delivery(provider, provider.requests.all(), turns)
         for label, value in metrics.spread(pairing.latencies_ms).items():
@@ -635,15 +655,20 @@ def _assemble(
             "delivery percentile basis: nearest-rank over "
             f"{pairing.paired} paired frame(s)"
         )
-    elif provider is not None and not delivery_available:
+    elif not failed and provider is not None and not delivery_available:
         notes.append(DELIVERY_UNAVAILABLE)
-    elif provider is not None:
+    elif delivery_available:
         notes.append("delivery.* is null: no turn completed inside the sample window")
 
     shard_cpu: list[float | None] = []
     for payload in payloads:
         shard_cpu.append(_shard_cpu_cores(payload, wall, notes))
         notes.extend((payload.get("error_details") or ())[:2])
+    if set(block) != set(METRIC_KEYS):
+        raise OrchestratorError(
+            f"metrics keys drifted from METRIC_KEYS: "
+            f"{sorted(set(block) ^ set(METRIC_KEYS))}"
+        )
     record["rig"].update(
         {
             "provider_cpu_cores": _ratio(sampling.provider_cpu_seconds, wall),
@@ -712,15 +737,3 @@ def _keep_log(env: ProbeEnv, level_dir: Path) -> None:
         shutil.copyfile(env.log_path, level_dir / "gateway.log")
     except OSError:  # pragma: no cover - 日志没生成
         pass
-
-
-__all__ = [
-    "CPU_WINDOW_TOLERANCE",
-    "DELIVERY_UNAVAILABLE",
-    "METRIC_KEYS",
-    "OrchestratorError",
-    "RunConfig",
-    "SAMPLE_KEYS",
-    "level_skeleton",
-    "run_level",
-]

@@ -23,8 +23,8 @@ uv run python scripts/capacity/run.py --levels 1,10 --dwell 5 --warmup 2
 ulimit -n 8192 && uv run python scripts/capacity/run.py \
     --levels 1,10,50,100,250,500,1000 --rate 50 --dwell 20
 
-# 同一件事经 make（档位 / 速率 / 窗口可覆盖，其余参数走 CAPACITY_ARGS）
-make capacity CAPACITY_LEVELS=1,10,50 CAPACITY_DWELL=20 CAPACITY_ARGS="--json"
+# 同一件事经 make（旗标统一走 CAPACITY_ARGS，默认值只有 run.py 一处）
+make capacity CAPACITY_ARGS="--levels 1,10,50 --dwell 20 --json"
 ```
 
 CLI（冻结；下游脚本依赖这些名字）：
@@ -119,7 +119,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
     },
     "rig": {"provider_cpu_cores": 0.029, "shard_cpu_cores": [0.018, 0.015, 0.012, 0.013],
             "host_loadavg": [4.32, 5.26, 4.74]},
-    "samples": {"count": null, "dropped": null, "dropped_reasons": {},
+    "samples": {"count": null, "dropped": null, "dropped_reasons": null,
                 "text_frames": 2010, "turns": 20, "delivery_available": false},
     "session_create": {"ok": 10, "failed": 0, "total_ms": 13.9},
     "gateway": {"pid": 456, "url": "http://127.0.0.1:63665",
@@ -158,9 +158,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `gateway.fds_peak` | 同上频率采样的 fd 数峰值（Linux `/proc/<pid>/fd`，macOS `lsof -p`）——峰值分辨率 = 采样间隔 |
 | `gateway.rss_mb_slope_per_session` | 与**上一档**末次 RSS 的相邻差斜率；最小档无上一档 → `null` |
 | `delivery.*_ms` | 客户端收到第 i 帧 `text` 的时刻 − 假 Provider 发射第 i 帧的时刻（同机 `time.monotonic()`） |
-| `turn.*_ms` | 发 prompt → 收到 `turn_result`（只取窗口内发起且完成的轮次） |
+| `turn.*_ms` | 发 prompt → 收到 `turn_result`（只取窗口内发起**且**窗口内完成的轮次）。`error` 事件不是轮次边界——它是失败轮的伴随事件 |
 | `tokens_per_second_actual` | 窗口内收到的 `text` 事件数 / 窗口秒（`pure_stream` 里 1 帧 = 1 token） |
-| `errors` | 窗口内（事件到达时刻在 `[window_start, window_end]` 内）的 `error` 事件数 + `turn_result.is_error` 数 + 分片发送失败数 |
+| `errors` | 窗口内（事件到达时刻在 `[window_start, window_end]` 内）的 `turn_result.is_error` 数 + 分片发送失败数。失败轮上网关会**同时**发 `turn_result(is_error)` 与 `error` 事件，只记前者的原因见 :mod:`driver_shard` |
 | `slow_client_recycles` | 窗口结束前就被网关回收的客户端连接数（分片在 `window_end` 时刻数一遍自己的连接：此刻还没关连接，`closed` 的都是网关先断的）。不扫网关日志——那会把窗口末驱动自己的正常收尾也算进去 |
 | `rig.provider_cpu_cores` | coordinator 进程（= Provider 宿主 + 采样器）在窗口内的 CPU 秒 / 窗口秒；上界，不是纯 Provider |
 | `rig.shard_cpu_cores[]` | 每个分片**自报**的窗口内 CPU 秒 / 分片自己的记账区间（起点钉在 `window_start`，因此与上面两个同口径、可相加）；分片上报的区间与采样窗口差 >10% 时留一条 note |
@@ -178,7 +178,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
    - 同一 prompt 命中多条请求（网关重试）→ 整轮丢弃（无法确定是哪一次）；
    - 负延迟 → 视为错位，丢弃该帧。
 
-丢弃的样本按原因计数进 `levels[i].samples.dropped_reasons`，并写进 `notes`。
+丢弃的帧按原因计数进 `levels[i].samples.dropped_reasons`（**单位是帧**，
+`sum(reasons) == dropped`），并写进 `notes`。`delivery_available` 在失败档是 `null`
+（未知），不是 `false`。
 
 ## 负载形态
 
@@ -211,7 +213,9 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 - 进程采样（CPU 的 darwin / linux 分支）与百分位秩定义**照搬** perf 的实现与口径，
   但各有各的一份：那边住在一个套件脚本里（不是共用模块），跨工具 import 会把整条
   perf 测量链拖进来。**origin 是 perf 那一份**（更早、被 CI 覆盖）——改任何一边都要同步
-  另一边，本目录的实现是派生。
+  另一边，本目录的实现是派生。第三处同款是原子写 JSON（`run.write_json` vs
+  `perf/common.write_json`，十行）；把它抽成共用模块需要动 `scripts/perf/**`，
+  那不在本工具的改动范围内。
 - `libs/wing-probe/` 是本工具的底座（`ProbeEnv` 起环境、`FakeProvider` 当上游、
   `GatewayWS` 当传输层参考实现）。分片为什么不用 probe 的 `Driver` / `Session`：
 
@@ -226,7 +230,7 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 
 ## 自测（`--selftest`）
 
-≤60 秒、不联网、不需要 API key、可重复，九组检查：
+≤60 秒（当前约 9 s）、不联网、不需要 API key、可重复；`make check-python` 会跑它：
 
 | 检查 | 证明什么 |
 |---|---|
@@ -235,10 +239,11 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | `pairing.delivery` | 配对数学（延迟 = 到达 − 发射）+ 四类丢弃原因 + 缺接口抛错 |
 | `pairing.assemble` | 配对结果落到 `run.json` 的接线（延迟可用这一支、全丢弃这一支、窗口不一致的 note） |
 | `proc.sampling` | 自身 CPU 单调、RSS > 0、fd ≥ 3、fd 软限抬升到位 |
+| `run.summary` | `--json` 一行摘要的字段名与取值投影（下游脚本的契约） |
 | `cli.contract` | 冻结 CLI 的默认值与全部校验分支（非法 levels / rate / dwell / warmup / shards / history-tokens / scenario） |
 | `shapes.contract` | 形态契约与剧本覆盖度、prompt 文本全局唯一 |
 | `report.render` | 合成 `run.json` → markdown（表格列数自洽、缺数据是 `—` 不是 0、不可用有横幅、多行 note 折行） |
-| `e2e` | **真网关子进程 + 真分片子进程**跑完迷你一档：断言 `run.json` / `report.md` / `raw/<N>/` 的形状、`errors` 与 `turn` 的口径、以及「失败档键集 == 成功档键集」 |
+| `e2e` | **真网关子进程 + 真分片子进程**跑完迷你一档：断言 `run.json` / `report.md` / `raw/<N>/` 的形状、分片 CPU 窗口与采样窗口一致、健康档 `slow_client_recycles == 0`；再跑一次**相对 `--out`**（默认形态）；并用一个失败档断言「失败档键集 == 成功档键集」 |
 
 `e2e` 走的是产品代码同一路径（注入 `run_ladder`），不是平行实现。
 
@@ -274,3 +279,4 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
 | 网关 CPU 高但 rig 也高 | 加大 `--shards`；看 `rig.shard_cpu_cores` 是否有个别分片吃满 |
 | `EMFILE` / `Too many open files` | `meta.host.ulimit_n` 是否达到 `4 × N + 256`；见「fd 上限」 |
 | 读数在两档之间抖动 | `rig.host_loadavg`（机器是否被别的任务占用）；容量测量必须串行跑 |
+| 分片报 `FileNotFoundError: ... shard-0.json` | 产物目录不是绝对路径（`RunConfig` 会规范化；自己构造 `RunConfig` 时别绕过它） |

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """离线自测（``run.py --selftest``）：≤60 秒、不联网、不需要 API key、可重复。
 
-十组检查（见 :func:`checks`），对应这个工具必须可信的几件事：
+九组断言（见 :func:`checks`）+ ``e2e``，对应这个工具必须可信的几件事：
 
 - ``stats.percentile``        百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）
 - ``pairing.last_user_text``  配对键的提取（str / block 列表两种 body 形态）
 - ``pairing.delivery``        按下标配对 + 四类丢弃原因 + 缺接口抛错
 - ``pairing.assemble``        配对结果落到 ``run.json`` 的接线（延迟可用这一支）
+- ``shard.events``            分片的事件处理：失败轮只驱动一轮（网关同时发 turn_result 与 error）
 - ``proc.sampling``           进程采样与 fd 软限抬升
 - ``cli.contract``            冻结 CLI 的校验分支与默认值
 - ``shapes.contract``         形态契约与剧本覆盖度、prompt 文本全局唯一
@@ -34,6 +35,7 @@ from typing import Any
 from wing_probe.provider.request_log import RequestLog
 
 import cli
+import driver_shard
 import metrics
 import orchestrator
 import proc
@@ -43,16 +45,6 @@ from orchestrator import RunConfig, level_skeleton
 
 #: e2e 一档的预算（秒）。自测总预算 ≤60 s，留足余量。
 E2E_BUDGET_S = 45.0
-
-#: 网关源码里回收日志的出处（``slow_client_recycles`` 的措辞校验用）。
-GATEWAY_SERVER = (
-    Path(__file__).resolve().parents[2]
-    / "libs"
-    / "core"
-    / "wing"
-    / "gateway"
-    / "server.py"
-)
 
 LadderRunner = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -188,8 +180,12 @@ def check_pairing() -> None:
     )
     _check(unknown.paired == 0 and unknown.dropped == 2, "unknown prompt must drop")
     _check(
-        unknown.reasons.get("unknown_prompt") == 1,
-        "unknown prompt must be classified",
+        unknown.reasons.get("unknown_prompt") == 2,
+        "unknown prompt must be classified (frame counts)",
+    )
+    _check(
+        sum(unknown.reasons.values()) == unknown.dropped,
+        "drop reasons must add up to the dropped frame count",
     )
     ambiguous = metrics.pair_delivery(
         provider,
@@ -200,8 +196,8 @@ def check_pairing() -> None:
         ambiguous.paired == 0 and ambiguous.dropped == 3, "ambiguous prompt must drop"
     )
     _check(
-        ambiguous.reasons.get("ambiguous_prompt") == 1,
-        "ambiguous prompt must be classified",
+        ambiguous.reasons.get("ambiguous_prompt") == 3,
+        "ambiguous prompt must be classified (frame counts)",
     )
 
     # 负延迟 = 错位，不写进样本。
@@ -289,6 +285,10 @@ def _sample_payload(**overrides: Any) -> dict[str, Any]:
 
 def check_assemble() -> None:
     """配对结果落到 ``run.json`` 的接线（延迟可用这一支，含丢弃与窗口不一致）。"""
+    _check(
+        set(level_skeleton(1)["metrics"]) == set(orchestrator.METRIC_KEYS),
+        "the level skeleton must seed exactly the frozen metric keys",
+    )
     requests = RequestLog()
     requests.record({"messages": [{"role": "user", "content": "load:s0:0"}]}, model="m")
     provider = _provider({0: [100.005, 100.015, 100.025]})
@@ -337,6 +337,11 @@ def check_assemble() -> None:
         f"3 frames / 5 s: {record['metrics']['tokens_per_second_actual']}",
     )
 
+    _check(
+        set(metrics_block) == set(orchestrator.METRIC_KEYS),
+        f"assemble must not add or drop metric keys: "
+        f"{sorted(set(metrics_block) ^ set(orchestrator.METRIC_KEYS))}",
+    )
     _check(
         record["metrics"]["slow_client_recycles"] == 0,
         "no closed client must be reported as a recycle",
@@ -394,9 +399,100 @@ def check_assemble() -> None:
         f"unpaired frames must be counted as dropped: {bad['samples']}",
     )
     _check(
-        bad["samples"]["dropped_reasons"].get("length_mismatch") == 1,
-        f"drop reason must be classified: {bad['samples']['dropped_reasons']}",
+        bad["samples"]["dropped_reasons"].get("length_mismatch") == 3,
+        f"drop reason must be classified (frame counts): "
+        f"{bad['samples']['dropped_reasons']}",
     )
+
+
+def check_shard_events() -> None:
+    """分片的事件处理：一轮只驱动一轮、失败只计一次、窗口外不计。
+
+    失败轮上网关**同时**发 ``turn_result(is_error)`` 与 ``error``；两者都当轮次边界会把
+    同一轮驱动成两轮（并覆盖在飞轮次的起算点），两个都计数会把一次失败算成两次。
+    """
+    shape = shapes.resolve("pure_stream")
+    config = driver_shard.ShardConfig(
+        shard=0,
+        gateway_url="http://127.0.0.1:1",
+        sessions=("s0",),
+        subscribers="per-shard",
+        shape=shape.NAME,
+        out=Path("/tmp/capacity-selftest-shard.json"),
+    )
+    shard = driver_shard.Shard(config, shape)
+    connection = SimpleNamespace(closed=False)
+    shard.states["s0"] = driver_shard._SessionState(session_id="s0", ws=connection)
+    shard.open_window(100.0, 110.0)
+    shard.start_cpu_accounting()
+    while not shard._pending.empty():  # 首轮由 open_window 触发，这里当作 pump 已消费
+        shard._pending.get_nowait()
+    state = shard.states["s0"]
+    state.prompt = "load:s0:0"
+    state.sent_at = 101.0
+
+    shard._on_event("s0", "text", {"content": "x"}, SimpleNamespace(at=101.5))
+    shard._on_event("s0", "turn_result", {"is_error": True}, SimpleNamespace(at=103.0))
+    shard._on_event("s0", "error", {"message": "boom"}, SimpleNamespace(at=103.0))
+    shard._on_event("s0", "turn_result", {"is_error": True}, SimpleNamespace(at=103.0))
+    _check(shard.errors == 1, f"one failed turn must count once, got {shard.errors}")
+    _check(len(shard.turns) == 1, f"one turn sample expected, got {len(shard.turns)}")
+    _check(
+        shard.turns[0].arrivals == (101.5,),
+        f"in-window arrivals must be kept: {shard.turns[0].arrivals}",
+    )
+    _check(
+        shard._pending.qsize() == 1,
+        f"a single turn must queue exactly one next prompt, got {shard._pending.qsize()}",
+    )
+    # 窗口外的事件既不计错误也不排队。
+    state.sent_at = 111.0
+    shard._on_event("s0", "turn_result", {"is_error": True}, SimpleNamespace(at=112.0))
+    _check(shard.errors == 1, "errors must be window-gated")
+    _check(
+        shard._pending.qsize() == 1, "a turn ending after the window must not requeue"
+    )
+    shard.close_window()
+    _check(
+        shard.payload()["closed_before_end"] == 0,
+        "an open connection must not count as a recycle",
+    )
+    _check(
+        shard.payload()["cpu_span_s"] is not None,
+        "CPU accounting must record its own window length",
+    )
+
+
+def check_summary() -> None:
+    """``--json`` 的一行摘要：字段名是下游脚本的契约，不能悄悄改。"""
+    import run as run_module  # 函数级导入：run.py 只在自测分支里依赖本模块
+
+    payload = _synthetic_run()
+    payload["meta"]["out"] = "/tmp/capacity-summary"
+    summary = run_module._summary(payload)
+    for key in ("ok", "out", "run_json", "report", "levels", "failures"):
+        _check(key in summary, f"--json summary is missing {key!r}")
+    _check(
+        summary["run_json"] == "/tmp/capacity-summary/run.json"
+        and summary["report"] == "/tmp/capacity-summary/report.md",
+        f"summary paths must be derived from meta.out: {summary}",
+    )
+    first = summary["levels"][0]
+    for key in (
+        "sessions",
+        "gateway_cpu_cores",
+        "delivery_p99_ms",
+        "tokens_per_second_actual",
+        "errors",
+        "error",
+    ):
+        _check(key in first, f"--json level projection is missing {key!r}")
+    _check(
+        first["gateway_cpu_cores"]
+        == payload["levels"][0]["metrics"]["gateway.cpu_cores"],
+        "the projection must carry the metric value through",
+    )
+    _check(summary["ok"] is True and summary["failures"] == [], "healthy run summary")
 
 
 # ── proc ──────────────────────────────────────────────────────
@@ -467,6 +563,14 @@ def check_cli() -> None:
     _check(good.subscribers == "per-shard", "subscribers must round-trip")
     _check(good.shards_for(1) == 1 and good.shards_for(10) == 2, "shard clamping")
 
+    _check(
+        cli.build_config(cli.parse_args([])).out.is_absolute(),
+        "the default --out must be resolved to an absolute path",
+    )
+    _check(
+        cli.build_config(cli.parse_args(["--out", "target/x"])).out.is_absolute(),
+        "a relative --out must be resolved to an absolute path",
+    )
     defaults = cli.build_config(cli.parse_args(["--out", "/tmp/capacity-cli-default"]))
     _check(
         defaults.levels == cli.parse_levels(cli.DEFAULT_LEVELS)
@@ -787,7 +891,31 @@ def check_e2e(run_ladder: LadderRunner) -> None:
         )
         _check(len(shard["turns"]) >= 1, "shard must report at least one turn sample")
 
+        check_relative_out(run_ladder, Path(tmp))
         check_failure_shape(run_ladder, Path(tmp) / "failed", level)
+
+
+def check_relative_out(run_ladder: LadderRunner, tmp: Path) -> None:
+    """``--out`` 相对路径（也是默认形态）必须能跑完：分片以档位目录为 cwd 起。"""
+    previous = Path.cwd()
+    os.chdir(tmp)
+    try:
+        cfg = _e2e_config(Path("relative-run"))
+        payload = asyncio.run(run_ladder(cfg, selftest_run=True))
+    finally:
+        os.chdir(previous)
+    _check(
+        payload["meta"]["failures"] == [],
+        f"relative --out failed: {payload['meta']['failures']}",
+    )
+    _check(
+        Path(payload["meta"]["out"]).is_absolute(),
+        f"meta.out must be absolute: {payload['meta']['out']}",
+    )
+    _check(
+        (tmp / "relative-run" / "run.json").is_file(),
+        "relative --out must write run.json next to the cwd",
+    )
 
 
 def check_failure_shape(
@@ -835,7 +963,9 @@ def checks() -> list[tuple[str, Callable[[], None]]]:
         ("pairing.last_user_text", check_last_user_text),
         ("pairing.delivery", check_pairing),
         ("pairing.assemble", check_assemble),
+        ("shard.events", check_shard_events),
         ("proc.sampling", check_proc),
+        ("run.summary", check_summary),
         ("cli.contract", check_cli),
         ("shapes.contract", check_shapes),
         ("report.render", check_report),
@@ -871,20 +1001,3 @@ def main(*, run_ladder: LadderRunner) -> int:
             print(f"[selftest] failure: {failure}", file=sys.stderr)
         return 1
     return 0
-
-
-__all__ = [
-    "E2E_BUDGET_S",
-    "SelftestFailure",
-    "check_assemble",
-    "check_cli",
-    "check_e2e",
-    "check_failure_shape",
-    "check_pairing",
-    "check_proc",
-    "check_report",
-    "check_shapes",
-    "check_stats",
-    "checks",
-    "main",
-]

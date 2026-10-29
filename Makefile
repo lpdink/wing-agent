@@ -42,24 +42,13 @@ demo:
 # 因此只做手工测量；口径、产物与已知边界见 scripts/capacity/README.md。
 # fd 软限先抬（每个会话约 4 个 fd）：抬不动时 run.py 会带可行动的错误退出，
 # 而不是跑到一半 EMFILE 后产出一张好看的空表。
-# 参数默认值只有一处（run.py 的 argparse）：这里的变量给了才透传，其余交给 CLI。
-# 额外旗标走 CAPACITY_ARGS（如 CAPACITY_ARGS="--subscribers per-shard --json"）。
-CAPACITY_LEVELS ?=
-CAPACITY_RATE ?=
-CAPACITY_DWELL ?=
-CAPACITY_WARMUP ?=
-CAPACITY_SHARDS ?=
+# 参数默认值只有一处（run.py 的 argparse），旗标一律经 CAPACITY_ARGS 透传，
+# 例如 CAPACITY_ARGS="--levels 1,10,50 --dwell 5 --subscribers per-shard --json"。
 CAPACITY_ARGS ?=
-# 只把显式给出的变量翻成旗标（空变量 ⇒ 不传 ⇒ 用 CLI 的默认值）。
-CAPACITY_FLAGS = $(if $(CAPACITY_LEVELS),--levels $(CAPACITY_LEVELS)) \
-	$(if $(CAPACITY_RATE),--rate $(CAPACITY_RATE)) \
-	$(if $(CAPACITY_DWELL),--dwell $(CAPACITY_DWELL)) \
-	$(if $(CAPACITY_WARMUP),--warmup $(CAPACITY_WARMUP)) \
-	$(if $(CAPACITY_SHARDS),--shards $(CAPACITY_SHARDS)) $(CAPACITY_ARGS)
 
 capacity:
 	@ulimit -n $${CAPACITY_NOFILE:-8192} 2>/dev/null || true; \
-	uv run python scripts/capacity/run.py $(CAPACITY_FLAGS)
+	uv run python scripts/capacity/run.py $(CAPACITY_ARGS)
 
 capacity-selftest:
 	uv run python scripts/capacity/run.py --selftest
@@ -198,6 +187,7 @@ check-python:
 	echo "🔍 Running script selftests..."; \
 	if ! uv run python scripts/test_rust_parallel.py --selftest; then SELFTEST_FAILED=1; echo "❌ rust pool selftest failed"; else echo "✅ rust pool selftest passed"; fi; \
 	if ! uv run python scripts/bench_tests.py --selftest; then SELFTEST_FAILED=1; echo "❌ bench selftest failed"; else echo "✅ bench selftest passed"; fi; \
+	if ! uv run python scripts/capacity/run.py --selftest; then SELFTEST_FAILED=1; echo "❌ capacity selftest failed"; else echo "✅ capacity selftest passed"; fi; \
 	echo ""; \
 	if [ $$RUFF_FAILED -eq 1 ] || [ $$RUFF_FMT_FAILED -eq 1 ] || [ $$TY_FAILED -eq 1 ] || [ $$VULTURE_FAILED -eq 1 ] || [ $$SELFTEST_FAILED -eq 1 ]; then \
 		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \

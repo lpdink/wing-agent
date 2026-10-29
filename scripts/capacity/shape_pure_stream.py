@@ -62,15 +62,3 @@ def script(*, sessions: int, rate: float, span_s: float) -> Script:
     turns_per_session = math.ceil(span_s / turn_seconds(span_s)) + 2
     turn = Turn.of(text="x" * tokens, chunk=1, delay=1.0 / rate)
     return Script(*([turn] * (sessions * turns_per_session)))
-
-
-__all__ = [
-    "MODEL",
-    "NAME",
-    "TURN_TARGET_SECONDS",
-    "TURNS_PER_SPAN",
-    "prompt_text",
-    "script",
-    "turn_seconds",
-    "turn_tokens",
-]
