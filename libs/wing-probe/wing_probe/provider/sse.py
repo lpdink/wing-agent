@@ -24,6 +24,24 @@ DONE_TEXT = "data: [DONE]\n\n"
 
 
 @dataclass(frozen=True)
+class FrameEmit:
+    """一帧被交给传输层之前的时刻（假 Provider 的发射时刻账本）。
+
+    ``request_index`` 与 ``RequestLog`` 留档的 ``index`` 同一个数；``frame_index``
+    从 0 起、只数 ``data: {json}`` 载荷帧——终止帧 ``data: [DONE]`` 与心跳 /
+    注释行不计入，因此它就等于客户端 SSE 解析器读到的第几个事件（0 是 role 空帧）。
+
+    ``at`` 是该帧交给传输层写**之前**的 ``time.monotonic()``：度量的是「生产者最早
+    能把它交出去的时刻」，不含写本身的耗时。总账 ``FakeProvider.frame_emits`` 不落盘、
+    无上界，规模由场景的「请求数 × 每轮帧数」决定。
+    """
+
+    request_index: int
+    frame_index: int
+    at: float
+
+
+@dataclass(frozen=True)
 class SSEFrame:
     """一个 SSE 帧：``data: {json}`` 或终止帧 ``data: [DONE]``。"""
 
@@ -242,6 +260,7 @@ def completion_response(
 
 __all__ = [
     "DONE_TEXT",
+    "FrameEmit",
     "SSE_CONTENT_TYPE",
     "SSEFrame",
     "chunk_payload",

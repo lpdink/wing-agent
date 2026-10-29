@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -37,6 +38,8 @@ from wing_probe.provider.script import (
 )
 from wing_probe.provider.sse import (
     SSE_CONTENT_TYPE,
+    FrameEmit,
+    SSEFrame,
     completion_response,
     stream_frames,
 )
@@ -73,6 +76,13 @@ class FakeProvider:
         """model → Script 路由表。"""
         self.requests = RequestLog()
         """入站请求留档。"""
+        self.frame_emits: list[FrameEmit] = []
+        """流式响应的逐帧发射时刻（按实际发射顺序追加，多请求并发时交错）。
+
+        测量器件而非日志：不落盘、无上界，规模由场景的「请求数 × 每轮帧数」决定
+        （单条 = 一次 ``time.monotonic()`` + 一次 dataclass 构造 + 一次 append）。
+        按请求取时刻用 :meth:`emits_for`；非流式请求（压缩调用）不产生任何记录。
+        """
         self._port = port
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -147,6 +157,25 @@ class FakeProvider:
     def models(self) -> list[str]:
         return self.scripts.models()
 
+    # ── 发射时刻 ────────────────────────────────────────────
+
+    def emits_for(self, request_index: int) -> list[float]:
+        """某次请求的逐帧发射时刻（按 ``frame_index`` 升序，``time.monotonic()``）。
+
+        ``request_index`` 是 ``RequestLog`` 留档的 ``index``。非流式请求（压缩调用）
+        没有帧 → 空列表；从未留档的下标抛 ``IndexError``——测量时把下标打错会得到
+        一张"好看的空表"，那比报错贵得多。
+        """
+        recorded = len(self.requests)
+        if request_index < 0 or request_index >= recorded:
+            raise IndexError(
+                f"request #{request_index} out of range "
+                f"({recorded} request(s) recorded)"
+            )
+        return [
+            emit.at for emit in self.frame_emits if emit.request_index == request_index
+        ]
+
     # ── HTTP ───────────────────────────────────────────────
 
     async def _handle_chat_completions(
@@ -188,6 +217,7 @@ class FakeProvider:
                 completion_id=completion_id,
                 created=created,
                 headers=headers,
+                request_index=logged.index,
             )
         return web.json_response(
             completion_response(
@@ -210,6 +240,7 @@ class FakeProvider:
         completion_id: str,
         created: int,
         headers: dict[str, str],
+        request_index: int,
     ) -> web.StreamResponse:
         response = web.StreamResponse(
             status=200,
@@ -228,15 +259,33 @@ class FakeProvider:
             created=created,
         )
         try:
-            for frame in frames:
-                if frame.delay:
-                    await asyncio.sleep(frame.delay)
-                await response.write(frame.encode())
+            await self._write_frames(response, frames, request_index=request_index)
             await response.write_eof()
         except ConnectionResetError:
             # 客户端中途断开（interrupt 场景的常态）——不是错误。
             return response
         return response
+
+    async def _write_frames(
+        self,
+        response: web.StreamResponse,
+        frames: Sequence[SSEFrame],
+        *,
+        request_index: int,
+    ) -> None:
+        """逐帧等待 + 写；每写成一帧登记一次发射时刻。"""
+        frame_index = 0
+        for frame in frames:
+            if frame.delay:
+                await asyncio.sleep(frame.delay)
+            at = time.monotonic()
+            await response.write(frame.encode())
+            if frame.data is None:
+                continue
+            self.frame_emits.append(
+                FrameEmit(request_index=request_index, frame_index=frame_index, at=at)
+            )
+            frame_index += 1
 
 
 __all__ = ["CHAT_PATH", "FakeProvider"]

@@ -22,6 +22,7 @@ from wing_probe.provider.server import FakeProvider
 from wing_probe.provider.sse import (
     DONE_TEXT,
     SSE_CONTENT_TYPE,
+    FrameEmit,
     SSEFrame,
     chunk_payload,
     completion_response,
@@ -35,6 +36,7 @@ __all__ = [
     "ContextAssertionError",
     "ContextView",
     "FakeProvider",
+    "FrameEmit",
     "LoggedRequest",
     "MessageView",
     "RequestLog",

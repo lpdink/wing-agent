@@ -236,6 +236,21 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 请求的 system 段来自生成配置里的默认模板 `system_prompt`（`wing_probe.env.DEFAULT_SYSTEM_PROMPT`，**非空**；可用 `render_config_yaml(system_prompt=…)` / `ProbeEnv(system_prompt=…)` 覆盖，`probe.env.system_prompt` 是场景里的对照值）。"system + 摘要"这类前缀断言因此作用在真实的 system 段上，而不是空串上退化。
 
+### 发射时刻：`probe.provider.frame_emits` / `emits_for(request_index)`
+
+假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`（内存内，不落盘、无上界，
+规模由场景的「请求数 × 每轮帧数」决定）：
+
+| API | 用途 |
+|-----|------|
+| `frame_emits: list[FrameEmit]` | 全局账本，按实际发射顺序追加（多请求并发时交错）；`FrameEmit` = `(request_index, frame_index, at)` |
+| `emits_for(request_index)` | 某次请求的逐帧时刻（按 `frame_index` 升序）；`request_index` 是 `probe.request(...)` 留档的 `.index`，从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
+
+口径：`frame_index` 从 0 起只数 JSON 载荷帧（终止帧 `data: [DONE]` 与心跳 / 注释行不计），
+因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）；写失败（客户端断开）的那帧
+不进账，账本恒为「传输层接受了的帧」的前缀。非流式请求（压缩调用）没有帧 → 空列表。
+用途只有一个：**算投递延迟**（发射时刻 → 客户端到达时刻）；断言类场景用它没有意义。
+
 ### 落盘：`session.history` / `probe.history(session)`
 
 每次访问都**重新解析** `history.jsonl`，所以"操作前后两个视图"就是 `before = session.history` / `await op()` / `after = session.history`。
