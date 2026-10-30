@@ -5,12 +5,16 @@
 ``data: [DONE]`` 终止；另覆盖非流式响应与剧本路由（未注册 / 耗尽）。
 """
 
-import contextlib
 import json
-from collections.abc import AsyncIterator
 
 import httpx
 import pytest
+from _fake_provider import (
+    COMPLETION_ID,
+    CREATED,
+    request_body,
+    running_provider,
+)
 
 from wing_probe.provider.script import (
     Script,
@@ -32,8 +36,6 @@ from wing_probe.provider.sse import (
 )
 
 MODEL = "probe/unit"
-COMPLETION_ID = "chatcmpl-probe-0"
-CREATED = 1_700_000_000
 
 
 # ── 独立解析器（外来消费者视角） ────────────────────────────────
@@ -493,26 +495,6 @@ def test_turn_describe_mentions_first_delay() -> None:
 # ── HTTP 面（进程内假 Provider，无子进程） ──────────────────────
 
 
-@contextlib.asynccontextmanager
-async def running_provider() -> AsyncIterator[FakeProvider]:
-    provider = FakeProvider()
-    await provider.start()
-    try:
-        yield provider
-    finally:
-        await provider.stop()
-
-
-def request_body(**overrides: object) -> dict:
-    body: dict = {
-        "model": MODEL,
-        "stream": True,
-        "messages": [{"role": "user", "content": "hi"}],
-    }
-    body.update(overrides)
-    return body
-
-
 @pytest.mark.asyncio
 async def test_server_streams_script_over_http() -> None:
     async with running_provider() as provider:
@@ -531,7 +513,7 @@ async def test_server_streams_script_over_http() -> None:
         async with httpx.AsyncClient(
             base_url=provider.base_url, timeout=10.0, trust_env=False
         ) as client:
-            response = await client.post("/chat/completions", json=request_body())
+            response = await client.post("/chat/completions", json=request_body(MODEL))
             assert response.status_code == 200
             assert response.headers["content-type"].startswith("text/event-stream")
             frames = parse_sse(response.content)
@@ -557,7 +539,7 @@ async def test_server_supports_non_streaming_compaction_call() -> None:
             base_url=provider.base_url, timeout=10.0, trust_env=False
         ) as client:
             response = await client.post(
-                "/chat/completions", json=request_body(stream=False)
+                "/chat/completions", json=request_body(MODEL, stream=False)
             )
             assert response.status_code == 200
             payload = response.json()
@@ -575,17 +557,17 @@ async def test_server_error_report_for_unknown_and_exhausted_scripts() -> None:
         async with httpx.AsyncClient(
             base_url=provider.base_url, timeout=10.0, trust_env=False
         ) as client:
-            ok = await client.post("/chat/completions", json=request_body())
+            ok = await client.post("/chat/completions", json=request_body(MODEL))
             assert ok.status_code == 200
 
-            exhausted = await client.post("/chat/completions", json=request_body())
+            exhausted = await client.post("/chat/completions", json=request_body(MODEL))
             assert exhausted.status_code == 500
             report = exhausted.json()["error"]
             assert report["code"] == "script_exhausted"
             assert "consumed 1/1" in report["message"]
 
             unknown = await client.post(
-                "/chat/completions", json=request_body(model="probe/nope")
+                "/chat/completions", json=request_body("probe/nope")
             )
             assert unknown.status_code == 500
             report = unknown.json()["error"]
@@ -621,13 +603,13 @@ async def test_prefixed_route_serves_and_logs_its_path() -> None:
             base_url=provider.url, timeout=10.0, trust_env=False
         ) as client:
             prefixed = await client.post(
-                "/probe2/v1/chat/completions", json=request_body(stream=False)
+                "/probe2/v1/chat/completions", json=request_body(MODEL, stream=False)
             )
             assert prefixed.status_code == 200
             assert prefixed.json()["choices"][0]["message"]["content"] == "from p2"
 
             default = await client.post(
-                "/v1/chat/completions", json=request_body(stream=False)
+                "/v1/chat/completions", json=request_body(MODEL, stream=False)
             )
             assert default.status_code == 500  # 剧本按调用名共享：只够一次
 

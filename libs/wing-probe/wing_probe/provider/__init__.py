@@ -1,4 +1,4 @@
-"""假 Provider 子包：剧本模型 / aiohttp 服务 / SSE 编码 / 请求留档 / 上下文视图。"""
+"""假 Provider 子包：剧本模型 / aiohttp 服务 / SSE 编码 / 请求留档 / 发射时刻账本 / 上下文视图。"""
 
 from wing_probe.provider.context import (
     ContextAssertionError,
@@ -18,7 +18,7 @@ from wing_probe.provider.script import (
     UnregisteredModelError,
     Usage,
 )
-from wing_probe.provider.server import FakeProvider
+from wing_probe.provider.server import FakeProvider, FrameEmit
 from wing_probe.provider.sse import (
     DONE_TEXT,
     SSE_CONTENT_TYPE,
@@ -35,6 +35,7 @@ __all__ = [
     "ContextAssertionError",
     "ContextView",
     "FakeProvider",
+    "FrameEmit",
     "LoggedRequest",
     "MessageView",
     "RequestLog",

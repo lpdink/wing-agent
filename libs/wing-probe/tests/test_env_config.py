@@ -577,6 +577,43 @@ def test_render_config_provider_extra_merges_into_provider() -> None:
         assert configured["providers"][0].get(key) == baseline["providers"][0].get(key)
 
 
+def test_render_config_provider_extra_carries_the_connection_pool_cap() -> None:
+    """容量测量用它抬高连接池上限：键进 ``providers[0]``，既有字段一个不少。
+
+    产品缺省池上限会悄悄把「N 个并发会话」压成「N 个里只有一批在流」，所以这一键必须能
+    原样落进生成的配置；不给时输出的主 provider 段落与既有形态逐字一致（不多一个键）。
+    """
+    baseline = yaml.safe_load(
+        render_config_yaml(provider_base_url="http://127.0.0.1:1/v1", gateway_port=2)
+    )
+    configured = yaml.safe_load(
+        render_config_yaml(
+            provider_base_url="http://127.0.0.1:1/v1",
+            gateway_port=2,
+            provider_extra={"max_connections": 2000},
+        )
+    )
+    base_provider = baseline["providers"][0]
+    provider = configured["providers"][0]
+
+    assert provider["max_connections"] == 2000
+    assert "max_connections" not in base_provider
+    # 合并只增不改：缺省输出的每一个键都还在、值还相同。
+    assert set(provider) == set(base_provider) | {"max_connections"}
+    for key, value in base_provider.items():
+        assert provider[key] == value, key
+
+
+def test_config_text_rejects_provider_extra(tmp_path: Path) -> None:
+    """``provider_extra`` 与 ``config_text`` 互斥（同款报错，不静默失效）。"""
+    with pytest.raises(ProbeEnvError, match="provider_extra"):
+        ProbeEnv(
+            tmp_path,
+            config_text="providers: []\n",
+            provider_extra={"max_connections": 2000},
+        )
+
+
 def test_env_render_config_passes_provider_extra(tmp_path: Path) -> None:
     """ProbeEnv 的 provider_extra 参数进入生成的配置文本（probe_env 标记透传的落点）。"""
     env = ProbeEnv(tmp_path, provider_extra={"image_delivery": "followup"})
