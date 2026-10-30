@@ -44,5 +44,8 @@ def plan(args: ShapeArgs) -> ShapePlan:
         session_models=tuple([MODEL] * args.sessions),
         tools=("Read",),
         window_mode="hydrate",
+        drives_upstream=True,
+        # 每个会话只有一轮（水合后的首个 prompt）：有上游连接，没有轮次边界。
+        turn_boundaries=False,
         sample_interval_s=SAMPLE_INTERVAL_S,
     )

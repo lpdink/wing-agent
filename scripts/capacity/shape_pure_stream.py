@@ -42,4 +42,6 @@ def plan(args: ShapeArgs) -> ShapePlan:
         models=((MODEL, script),),
         session_models=tuple([MODEL] * args.sessions),
         tools=("Read",),
+        drives_upstream=True,
+        turn_boundaries=False,
     )

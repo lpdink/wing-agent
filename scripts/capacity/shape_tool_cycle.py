@@ -79,6 +79,8 @@ def plan(args: ShapeArgs) -> ShapePlan:
         models.append((model_id, CyclicScript(call_turn, reply_turn)))
         session_models.append(model_id)
     return ShapePlan(
+        drives_upstream=True,
+        turn_boundaries=True,
         models=tuple(models),
         session_models=tuple(session_models),
         tools=(str(variant["tool"]),),

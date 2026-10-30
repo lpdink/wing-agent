@@ -57,9 +57,6 @@ HTTP 客户端拖进来不划算。``--selftest`` 从 ``httpx.AsyncClient`` 的 
 （产品侧不传 ``limits=`` 时落到的正是它），httpx 改默认值会当场变红。
 """
 
-#: 只有「每轮都会收口」的形态才评 ``turn.p99``（其余形态的窗口里没有轮次边界）。
-TURN_SCENARIOS: frozenset[str] = frozenset({"tool_cycle", "mixed"})
-
 #: 判据原文（报告与 ``reasons[]`` 都从这里取，不许就地拼阈值）。
 CRITERIA: dict[str, str] = {
     "degraded.delivery": (
@@ -172,14 +169,12 @@ def evaluate_run(run: Mapping[str, Any]) -> list[Verdict]:
     """对 ``run.json`` 的每个档位求判据（纯函数：报告与落盘各调一次，见 README）。"""
     levels = run.get("levels") or []
     meta = run.get("meta") or {}
-    scenario = meta.get("scenario")
     ulimit_n = (meta.get("host") or {}).get("ulimit_n")
     baseline = baseline_level(levels)
     return [
         evaluate_level(
             record,
             baseline=baseline,
-            scenario=str(scenario) if scenario is not None else None,
             ulimit_n=ulimit_n if isinstance(ulimit_n, (int, float)) else None,
             pool_cap=effective_pool_cap(meta),
         )
@@ -207,7 +202,6 @@ def evaluate_level(
     record: Mapping[str, Any],
     *,
     baseline: Mapping[str, Any] | None,
-    scenario: str | None,
     ulimit_n: float | None,
     pool_cap: int = DEFAULT_POOL_CAP,
 ) -> Verdict:
@@ -237,12 +231,12 @@ def evaluate_level(
             )
 
     if baseline is not None:
-        degraded = _degraded_reasons(record, baseline, scenario)
+        degraded = _degraded_reasons(record, baseline)
         if degraded:
             flags.append("degraded")
             reasons.extend(degraded)
 
-    unjudged = _unjudged_criteria(record, baseline=baseline, scenario=scenario)
+    unjudged = _unjudged_criteria(record, baseline=baseline)
 
     provider = _rig(record, "provider_cpu_cores")
     if provider is not None and provider >= LOW_CONF_PROVIDER_CORES:
@@ -259,7 +253,7 @@ def evaluate_level(
     if create_failed:
         low.append(f"{CRITERIA['low_confidence.create']} — measured {create_failed}")
     sessions = int(record.get("sessions") or 0)
-    if sessions > pool_cap:
+    if _drives_upstream(record) and sessions > pool_cap:
         low.append(
             f"{CRITERIA['low_confidence.pool']} — measured sessions={sessions} vs "
             f"provider max_connections={pool_cap} "
@@ -289,7 +283,7 @@ def evaluate_level(
 
 
 def _degraded_reasons(
-    record: Mapping[str, Any], baseline: Mapping[str, Any], scenario: str | None
+    record: Mapping[str, Any], baseline: Mapping[str, Any]
 ) -> list[str]:
     """退化判据（逐条自带实测值，读完就知道差多远）。"""
     if int(record.get("sessions") or 0) == int(baseline.get("sessions") or 0):
@@ -304,7 +298,7 @@ def _degraded_reasons(
                 f"{CRITERIA['degraded.delivery']} — measured {p99:g} ms vs limit "
                 f"{limit:g} ms (baseline N={baseline.get('sessions')}: {base_p99:g} ms)"
             )
-    if scenario in TURN_SCENARIOS:
+    if _turn_boundaries(record, baseline):
         turn_p99 = _metric(record, "turn.p99_ms")
         base_turn = _metric(baseline, "turn.p99_ms")
         if turn_p99 is not None and base_turn is not None and base_turn > 0:
@@ -319,10 +313,7 @@ def _degraded_reasons(
 
 
 def _unjudged_criteria(
-    record: Mapping[str, Any],
-    *,
-    baseline: Mapping[str, Any] | None,
-    scenario: str | None,
+    record: Mapping[str, Any], *, baseline: Mapping[str, Any] | None
 ) -> list[str]:
     """本档上**无从评估**的判据（缺数据 ≠ 没退化）。
 
@@ -338,7 +329,7 @@ def _unjudged_criteria(
     报告不得把这句话读成「读数是干净的」——那是另一件事，见 README。
     """
     out: list[str] = []
-    if scenario in TURN_SCENARIOS and baseline is not None:
+    if baseline is not None and _turn_boundaries(record, baseline):
         base_turn = _metric(baseline, "turn.p99_ms")
         if base_turn is None or base_turn <= 0:
             out.append(
@@ -348,6 +339,29 @@ def _unjudged_criteria(
     if _metric(record, "delivery.p99_ms") is None and _expects_traffic(record):
         out.append(CRITERIA["unjudged.delivery"])
     return out
+
+
+def _drives_upstream(record: Mapping[str, Any]) -> bool:
+    """这个形态的会话在窗口里占不占上游流（形态声明，缺字段时按窗口模式推断）。"""
+    shape = record.get("shape") or {}
+    declared = shape.get("drives_upstream")
+    if declared is not None:
+        return bool(declared)
+    return shape.get("window_mode") != "hold"
+
+
+def _turn_boundaries(
+    record: Mapping[str, Any], baseline: Mapping[str, Any] | None
+) -> bool:
+    """窗口里有没有轮次边界（形态声明）。
+
+    旧产物没有这个字段：只能按数据推断——基线档记到了 ``turn.p99`` 就说明那个形态
+    确实会收口轮次。推断只在读别人的 ``run.json`` 时用到。
+    """
+    declared = (record.get("shape") or {}).get("turn_boundaries")
+    if declared is not None:
+        return bool(declared)
+    return _metric(baseline or record, "turn.p99_ms") is not None
 
 
 def _expects_traffic(record: Mapping[str, Any]) -> bool:
@@ -409,7 +423,6 @@ __all__ = [
     "LOW_CONF_DROPPED_RATIO",
     "LOW_CONF_PROVIDER_CORES",
     "LOW_CONF_SHARD_CORES",
-    "TURN_SCENARIOS",
     "VERDICT_KEYS",
     "Verdict",
     "baseline_level",

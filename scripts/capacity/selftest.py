@@ -1217,8 +1217,18 @@ def _level(
     dropped_reasons: Mapping[str, int] | None = None,
     create_failed: int = 0,
     error: str | None = None,
+    window_mode: str = "drive",
+    drives_upstream: bool = True,
+    turn_boundaries: bool = False,
 ) -> dict[str, Any]:
     record = level_skeleton(sessions)
+    record["shape"].update(
+        {
+            "window_mode": window_mode,
+            "drives_upstream": drives_upstream,
+            "turn_boundaries": turn_boundaries,
+        }
+    )
     if error is None:
         record["wall_s"] = 5.0
         record["metrics"].update(
@@ -1341,6 +1351,21 @@ def check_verdict() -> None:
         wide_result[1].low_confidence is False,
         f"a pool wide enough for the level must not be flagged: {wide_result[1]}",
     )
+    # 池判据按形态声明生效：同一个池上限，驱动上游的形态命中、不驱动的（``hold``）不命中。
+    hold = _run(
+        _level(1, window_mode="hold", drives_upstream=False),
+        _level(1000, window_mode="hold", drives_upstream=False),
+    )
+    hold_result = verdict.evaluate_run(hold)
+    _check(
+        hold_result[1].low_confidence is False,
+        f"a shape that holds no upstream stream cannot be pool-bound: {hold_result[1]}",
+    )
+    driving = verdict.evaluate_run(_run(_level(1), _level(1000)))
+    _check(
+        driving[1].low_confidence is True,
+        "the same pool cap must still flag a shape that does hold upstream streams",
+    )
     exact = verdict.evaluate_run(_run(_level(1), _level(100)))
     _check(
         exact[1].low_confidence is False,
@@ -1362,18 +1387,19 @@ def check_verdict() -> None:
     # 基线本身不与自己比。
     _check(over[0].verdict == "ok", "the baseline level cannot degrade against itself")
 
-    # turn 判据只在多轮形态判。
-    turn = _run(_level(1, turn_p99=100.0), _level(10, turn_p99=200.0))
+    # turn 判据只在声明了「窗口里有轮次边界」的形态上判（形态自己声明，不看名单）。
+    single = _run(_level(1, turn_p99=100.0), _level(10, turn_p99=200.0))
     _check(
-        verdict.evaluate_run(turn)[1].verdict == "ok",
-        "turn p99 must be ignored for single-turn shapes",
+        verdict.evaluate_run(single)[1].verdict == "ok",
+        "turn p99 must be ignored where the shape declares no turn boundaries",
+    )
+    cycling = _run(
+        _level(1, turn_p99=100.0, turn_boundaries=True),
+        _level(10, turn_p99=200.0, turn_boundaries=True),
     )
     _check(
-        verdict.evaluate_run(
-            {**turn, "meta": {**turn["meta"], "scenario": "tool_cycle"}}
-        )[1].verdict
-        == "degraded",
-        "turn p99 must be judged for tool_cycle",
+        verdict.evaluate_run(cycling)[1].verdict == "degraded",
+        "turn p99 must be judged where the shape declares turn boundaries",
     )
 
     # capped：cpu / errors / fd 任一条，优先于 degraded。
@@ -1455,7 +1481,11 @@ def check_verdict() -> None:
     )
     # 多轮形态的轮次判据无从评估（基线档没有完成的轮次）必须点名，不能读成「没退化」。
     no_baseline_turn = verdict.evaluate_run(
-        _run(_level(1), _level(10, turn_p99=900.0), scenario="mixed")
+        _run(
+            _level(1, turn_boundaries=True),
+            _level(10, turn_p99=900.0, turn_boundaries=True),
+            scenario="mixed",
+        )
     )
     _check(
         any(
@@ -1471,7 +1501,11 @@ def check_verdict() -> None:
     )
     # 基线档自己有轮次时不点名。
     judged = verdict.evaluate_run(
-        _run(_level(1, turn_p99=100.0), _level(10, turn_p99=110.0), scenario="mixed")
+        _run(
+            _level(1, turn_p99=100.0, turn_boundaries=True),
+            _level(10, turn_p99=110.0, turn_boundaries=True),
+            scenario="mixed",
+        )
     )
     _check(
         not judged[1].unjudged,
@@ -1532,8 +1566,8 @@ def check_report_verdicts() -> None:
     """
     # 基线档没有完成的轮次（mixed 单会话落工具组之前的那种产物形态）+ 更高档投递延迟越界。
     run = _run(
-        _level(1),
-        _level(10, delivery_p99=800.0, turn_p99=1200.0),
+        _level(1, turn_boundaries=True),
+        _level(10, delivery_p99=800.0, turn_p99=1200.0, turn_boundaries=True),
         scenario="mixed",
     )
     run["meta"]["args_replayable"] = ["levels", "rate", "chunk"]
@@ -1553,7 +1587,14 @@ def check_report_verdicts() -> None:
     )
     # 同时低置信 + 未评估：两句话不得互相矛盾（一个说可能被污染，一个说干净）。
     mixed_case = _run(
-        _level(1), _level(10, delivery_p99=800.0, turn_p99=1200.0, provider_cpu=0.95)
+        _level(1, turn_boundaries=True),
+        _level(
+            10,
+            delivery_p99=800.0,
+            turn_p99=1200.0,
+            provider_cpu=0.95,
+            turn_boundaries=True,
+        ),
     )
     mixed_text = report.render(mixed_case)
     _check(

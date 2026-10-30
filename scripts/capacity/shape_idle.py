@@ -45,6 +45,9 @@ def plan(args: ShapeArgs) -> ShapePlan:
         tools=("Read",),
         subscribe=False,
         window_mode="hold",
+        # 不驱动任何请求 ⇒ 不占上游连接、窗口里也没有轮次边界。
+        drives_upstream=False,
+        turn_boundaries=False,
         env_sessions={
             "eviction": {
                 "idle_ttl_seconds": round(ttl, 3),

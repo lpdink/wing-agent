@@ -71,6 +71,9 @@ def plan(args: ShapeArgs) -> ShapePlan:
         session_models.append(model_id)
     variant = TOOLS[tool]
     return ShapePlan(
+        # 流式组占上游连接、工具组每轮收口；两组都有上游流。
+        drives_upstream=True,
+        turn_boundaries=True,
         models=tuple(models),
         session_models=tuple(session_models),
         tools=(str(variant["tool"]),),

@@ -185,6 +185,20 @@ class ShapePlan:
     """第 i 个会话挂哪个 model id（长度必须等于会话数）。"""
     tools: tuple[str, ...]
     """模板的工具集（工具 schema 会摊进每轮请求，所以只要用到的那几个）。"""
+    drives_upstream: bool
+    """窗口里每个会话是否占住一条上游流。
+
+    ``False`` 只有「不驱动任何请求」的形态（``idle``）：它们不建上游连接，因此连接池
+    上限与它们的读数无关。判据据此决定「``sessions > 池上限``」适不适用。
+
+    必填而非默认：忘记声明就装不进 ``ShapePlan``，不会静默套上别人的事实。
+    """
+    turn_boundaries: bool
+    """窗口里是否存在多个轮次边界（每轮都会收口）⇒ ``turn.p99`` 可评。
+
+    ``False`` = 单轮 / 不驱动：整窗只有一条流（``pure_stream``）或一个水合轮
+    （``hydration``），没有「每轮固定成本」可比。
+    """
     agent: Mapping[str, Any] = field(default_factory=dict)
     """会话 create 期的 agent 覆盖（例如 bash 变体的 ``yolo``）。"""
     workspace_files: Mapping[str, str] = field(default_factory=dict)
@@ -299,6 +313,11 @@ def _validate(shape: ModuleType, plan: Any, args: ShapeArgs) -> None:
         raise ShapeError(
             f"scenario {shape.NAME!r}: window_mode 'hold' must not subscribe "
             "(a subscription pins the session and blocks eviction)"
+        )
+    if plan.window_mode == "hold" and plan.drives_upstream:
+        raise ShapeError(
+            f"scenario {shape.NAME!r}: window_mode 'hold' drives nothing, so it "
+            "cannot declare drives_upstream"
         )
     if plan.window_mode == "hydrate" and not plan.subscribe:
         raise ShapeError(

@@ -264,6 +264,8 @@ def level_skeleton(sessions: int) -> dict[str, Any]:
             "shards": None,
             "subscribers": None,
             "window_mode": None,
+            "drives_upstream": None,
+            "turn_boundaries": None,
         },
         "verdict": dict.fromkeys(VERDICT_KEYS),
         "error": None,
@@ -301,6 +303,8 @@ async def run_level(
                 "tool": cfg.tool,
                 "subscribers": cfg.subscribers,
                 "window_mode": plan.window_mode,
+                "drives_upstream": plan.drives_upstream,
+                "turn_boundaries": plan.turn_boundaries,
             }
         )
         env = await _start_env(cfg, level_dir, plan)
@@ -1142,17 +1146,14 @@ def _assemble(
     return record
 
 
-_CYCLING_SCENARIOS = frozenset({"tool_cycle", "mixed"})
-
-
-def _no_turn_note(window_mode: str | None, scenario: str) -> str:
-    """「窗口里没有完成的轮次」的原因按形态说（结构性 null ≠ 没测到）。"""
+def _no_turn_note(window_mode: str | None, turn_boundaries: bool | None) -> str:
+    """「窗口里没有完成的轮次」的原因按形态声明说（结构性 null ≠ 没测到）。"""
     if window_mode == "hold":
         return (
             "turn.* is null: this shape drives nothing, so no turn can complete inside "
             "the window"
         )
-    if scenario in _CYCLING_SCENARIOS:
+    if turn_boundaries:
         return (
             "turn.* is null: no turn completed inside the window — the cycle is longer "
             "than the window (--cycle-s), the cycling group was empty at this level, or "

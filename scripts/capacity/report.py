@@ -366,12 +366,20 @@ def _conclusion(
             )
         lines.append("- **速度轴**：" + "；".join(parts) + "。")
 
-    lines.append("- **内存轴**：" + _memory_axis(levels, host) + "。")
     low = [
         (record.get("sessions"), result.low_confidence_reasons)
         for record, result in zip(levels, verdicts)
         if result.low_confidence
     ]
+    lines.append(
+        "- **内存轴**："
+        + _memory_axis(
+            levels,
+            host,
+            {int(sessions or 0) for sessions, _ in low},
+        )
+        + "。"
+    )
     if low:
         lines.append(
             "- **低置信**："
@@ -434,8 +442,16 @@ def _evaluated_axes(record: Mapping[str, Any], result: verdict.Verdict) -> str:
     return "；".join(parts)
 
 
-def _memory_axis(levels: Sequence[Mapping[str, Any]], host: Mapping[str, Any]) -> str:
-    """内存轴的**投影**（不给阈值、不判档）：斜率 × 1000 会话是决策者要的形态。"""
+def _memory_axis(
+    levels: Sequence[Mapping[str, Any]],
+    host: Mapping[str, Any],
+    low_confidence: set[int],
+) -> str:
+    """内存轴的**投影**（不给阈值、不判档）：斜率 × 1000 会话是决策者要的形态。
+
+    RSS 由采样器独立采集，不受低置信原因（rig 饱和 / 池排队 / 丢弃）影响，因此照常
+    参与投影；但那一档的速度轴读数不作数，返回的话里要说清这一点。
+    """
     sampled = [
         (int(record.get("sessions") or 0), record.get("metrics") or {})
         for record in levels
@@ -459,6 +475,8 @@ def _memory_axis(levels: Sequence[Mapping[str, Any]], host: Mapping[str, Any]) -
     text += f"；相邻档斜率 {float(slope):.3f} MB/会话 → 1000 会话线性外推约 {projected:.0f} MB"
     if isinstance(mem_gb, (int, float)) and mem_gb > 0:
         text += f"（本机 {mem_gb:g} GB 的 {projected / (mem_gb * 1024) * 100:.0f}%）"
+    if top_n in low_confidence:
+        text += "；这一档的速度轴读数不作数，但 RSS 是独立采样"
     return text
 
 
