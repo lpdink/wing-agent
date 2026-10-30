@@ -1635,18 +1635,32 @@ def check_report_verdicts() -> None:
         "连接池上限" not in wide_text,
         "a pool wide enough for the ladder must not raise the banner",
     )
-    # 复现命令只回放生产者声明的键（meta.args 里的计时校准值不是输入参数）。
-    command = report.render(run)
+    # 复现命令按生产者声明的键回放：把声明缩到 [levels]，命令就必须只剩 --levels。
+    # （这条断言钉住机制本身——旧写法靠「名单恰好覆盖两个计时键」也能过。）
+    narrowed = json.loads(json.dumps(run))
+    narrowed["meta"]["args_replayable"] = ["levels"]
+    command = report.render(narrowed)
     line = next(
         text for text in command.splitlines() if text.startswith("uv run python")
     )
     _check(
-        "--frame-delay-ms" not in line and "--frame_delay_ms" not in line,
-        f"timing calibration must not be replayed as a flag: {line}",
+        line.split()[4:] == ["--scenario", "mixed", "--levels", "1,10"],
+        f"only the declared keys may be replayed: {line}",
+    )
+    # 没有声明字段（手写 / 旧版产物）时退回旧口径：计时校准值仍不许当旗标。
+    undeclared = json.loads(json.dumps(run))
+    undeclared["meta"].pop("args_replayable", None)
+    undeclared["meta"]["args"]["frame_delay_ms"] = 17.9
+    legacy = next(
+        text
+        for text in report.render(undeclared).splitlines()
+        if text.startswith("uv run python")
     )
     _check(
-        "--levels 1,10" in line and "--rate" in line and "--chunk" in line,
-        f"the declared replayable args must be replayed: {line}",
+        "--frame-delay-ms" not in legacy
+        and "--levels 1,10" in legacy
+        and "--rate" in legacy,
+        f"without a declaration the legacy filter still applies: {legacy}",
     )
 
 

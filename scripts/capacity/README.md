@@ -213,11 +213,13 @@ CPU 单独上报为 `rig.provider_cpu_cores`（Provider 宿主 + 采样器，是
   说明，不按 0 求和；
 - `levels[i].gateway` 是本档网关身份（每档都是新进程；水合形态重启后是新 pid / 新端口，
   `restart_ms` 是那次优雅重启的耗时，其余形态为 `null`）；
-- `levels[i].shape` 是本档的形态参数（`chunk` / `backend` / `tool` / `window_mode` 都在这里，
-  否则 `file` 与 `memory` 两次读数在产物里分不开）；
+- `levels[i].shape` 是本档的形态参数与**形态声明**（`chunk` / `backend` / `tool` /
+  `window_mode` / `drives_upstream` / `turn_boundaries`）：前者是为了让 `file` 与 `memory`
+  两次读数在产物里分得开，后者是判据「池上限适不适用」「轮次尾部适不适用」的唯一依据；
 - `levels[i].history` 是历史预置的记账（`total_ms` 是**预置花了多久**）；
 - `meta.args_replayable` 是 `meta.args` 里**是旗标**的那些键（其余是本次运行的计时校准值）：
-  报告用它拼复现命令，未知键不会被当成旗标拼出去；
+  报告按它拼复现命令，未知键不会被当成旗标拼出去。手写 / 旧版产物没有这个字段时，报告退回
+  「除两个计时键以外全回放」的旧口径；
 - `levels[i].verdict` 是判据结果（`verdict.py` 的唯一实现），报告**不用**它、而是自己重算
   一遍（见「判据」）；
 - `levels[i].samples.chars` 是窗口内收到的正文字符数（`chars_per_second` 的分子，

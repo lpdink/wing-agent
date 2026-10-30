@@ -504,12 +504,29 @@ def _criteria_section(
     return lines
 
 
-#: ``meta.args`` 里不是旗标的键（本次运行的计时校准值，不是输入参数）。
+#: ``meta.args`` 里不是旗标的键：只有产物**没有** ``meta.args_replayable`` 时才用得上
+#: （手写 / 旧版 ``run.json``）。工具自己写的产物由生产者声明那份键集，见
+#: :func:`_replay_keys`。
 NON_FLAG_ARG_KEYS: frozenset[str] = frozenset({"frame_delay_ms", "sleep_overshoot_ms"})
 
 
+def _replay_keys(meta: Mapping[str, Any]) -> list[str]:
+    """复现命令要回放哪些 ``meta.args`` 键。
+
+    生产者（``run.py``）把「哪些键是旗标」写进 ``meta.args_replayable``：``meta.args``
+    里还混着本次运行的计时校准值，按「键名像旗标」猜会把它们拼成 argparse 不认的命令。
+    手写 / 旧版产物没有这个字段，退回按 :data:`NON_FLAG_ARG_KEYS` 过滤的旧口径。
+    """
+    declared = meta.get("args_replayable")
+    if isinstance(declared, list):
+        return [str(key) for key in declared]
+    return [
+        str(key) for key in (meta.get("args") or {}) if key not in NON_FLAG_ARG_KEYS
+    ]
+
+
 def _reproduce(meta: Mapping[str, Any]) -> list[str]:
-    """复现命令：``meta.scenario`` + ``meta.args`` 里的每个键回放成 ``--<key>``。
+    """复现命令：``meta.scenario`` + 生产者声明的旗标键回放成 ``--<key>``。
 
     旗标名与 ``meta.args`` 的键同名（``cli`` 侧的 argparse dest 就是这么派生的），
     所以这里不需要第二张旗标表；``--selftest`` 会把生成的命令喂回 ``cli.build_config``
@@ -520,8 +537,9 @@ def _reproduce(meta: Mapping[str, Any]) -> list[str]:
     scenario = meta.get("scenario")
     if scenario is not None:
         parts.append(f"--scenario {scenario}")
-    for key, value in args.items():
-        if key in NON_FLAG_ARG_KEYS or value is None:
+    for key in _replay_keys(meta):
+        value = args.get(key)
+        if value is None:
             continue
         if isinstance(value, (list, tuple)):
             value = ",".join(str(item) for item in value)
