@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
 """离线自测（``run.py --selftest``）：≤120 秒、不联网、不需要 API key、可重复。
 
-十二个检查（见 :func:`checks`）+ 负载形态各一次 ``e2e``，对应这个工具必须可信的几件事：
+每一项都在 :func:`checks` 里登记（名字 + 断言），目录不在这里重复列举——两处清单
+必然会漂成两个事实。分三类：
 
-- ``stats.percentile``        百分位秩定义（known answer，含 n=1 / 偶数 / 极值 / 空序列报错）
-- ``pairing.last_user_text``  配对键的提取（str / block 列表两种 body 形态）
-- ``pairing.delivery``        按下标配对 + 丢弃原因 + 同一 prompt 多请求时按通道消歧
-- ``pairing.assemble``        配对结果落到 ``run.json`` 的接线（延迟可用这一支）
-- ``shard.events``            分片的事件处理：失败轮只驱动一轮、字符实测、水合两段时间线
-- ``proc.sampling``           进程采样与 fd 软限抬升
-- ``run.summary``             ``--json`` 一行摘要的字段与取值投影
-- ``cli.contract``            冻结 CLI 的校验分支与默认值（含形态专属旋钮的适用范围）
-- ``shapes.contract``         五种形态的 plan 契约：model / 会话归属 / chunk / 窗口模式
-- ``verdict.criteria``        判据：baseline / degraded / capped / unknown / low_confidence
-- ``verdict.polluted``        被污染的 ``run.json`` 必须被标低置信（负向验证）
-- ``report.render``           合成 ``run.json`` → markdown（缺数据是 ``—``、判据原文唯一）
-- ``e2e.<case>``              **真网关子进程 + 真分片子进程**跑完迷你一档（各形态各一次 + `--tool bash` 变体），
-                               断言该形态的指标非 null 且形状自洽；另用失败档断言
-                               「成功档与失败档的键集完全相同」
+- **纯逻辑**：百分位秩 / 配对数学与丢弃原因 / 通道词表跨包守卫 / 分片事件处理 /
+  命令行校验 / 形态契约 / 判据 / 池旗标落地；
+- **报告层**：低置信与判据未评估不互相吞掉、连接池横幅、合成 ``run.json`` 的渲染、
+  ``--json`` 摘要的字段投影；
+- **``e2e.<case>``**：真网关子进程 + 真分片子进程跑完迷你一档（各形态各一次 +
+  ``--tool bash`` 变体），断言该形态的指标非 null、形状自洽、真实 ``dropped_reasons``
+  落在 ``metrics.DROP_REASONS`` 词表里；另用失败档断言「成功档与失败档的键集完全相同」，
+  用相对 ``--out`` 档断言默认形态能跑。
 
 ``e2e`` 通过注入的 ``run_ladder`` 复用正式路径——自测里跑的是产品代码，不是另一份平行
 实现（否则自测绿了也不能说明工具能用）。
@@ -39,7 +33,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+from wing_probe.history.invariants import DELTA_EVENT_TYPES
 from wing_probe.provider.request_log import RequestLog
+from wing_probe.provider.sse import FRAME_KINDS
 
 import cli
 import driver_shard
@@ -153,6 +149,25 @@ def check_last_user_text() -> None:
         metrics.last_user_text({"messages": [{"role": "system", "content": "x"}]})
         is None,
         "no user message must yield None",
+    )
+
+
+def check_channel_vocabulary() -> None:
+    """通道词表跨包守卫：假 Provider 的帧种类、客户端的 delta 事件类型、配对表三者一致。
+
+    这三张表分住在三个包里，配对照其中最松的一张做（未知 kind 静默跳过）。任何一处
+    新增 / 改名而其余两处没跟：配对会静默失真（帧被当成 ``meta`` 丢掉），既不少样本
+    也不报错——只有一条跨包断言能当场钉住它。
+    """
+    _check(
+        set(metrics.CHANNEL_EVENTS) | {"meta"} == FRAME_KINDS,
+        "the pairing table must cover exactly the provider frame kinds minus meta: "
+        f"{sorted(metrics.CHANNEL_EVENTS)} vs {sorted(FRAME_KINDS)}",
+    )
+    _check(
+        set(metrics.CHANNEL_EVENTS.values()) == DELTA_EVENT_TYPES,
+        "the pairing table must map onto the client delta event types: "
+        f"{sorted(metrics.CHANNEL_EVENTS.values())} vs {sorted(DELTA_EVENT_TYPES)}",
     )
 
 
@@ -2239,6 +2254,30 @@ def _assert_shape_metrics(scenario: str, level: Mapping[str, Any]) -> None:
             samples["delta_frames"]["tool_call"] > 0,
             f"the tool call must stream args: {samples['delta_frames']}",
         )
+        # 最危险的接缝：Provider 的 ``tool_call`` 帧 ↔ 网关的 ``tool_call_stream`` 事件。
+        # 数量对不上说明两张词表（或网关的事件改名）已经漂移，配对会静默失真。
+        _check(
+            samples["paired_channels"].get("tool_call", 0)
+            == samples["delta_frames"]["tool_call"],
+            f"every tool_call frame must pair with a tool_call_stream event: "
+            f"paired={samples['paired_channels']} "
+            f"events={samples['delta_frames']} "
+            f"reasons={samples['dropped_reasons']}",
+        )
+        _check(
+            samples["paired_channels"].get("content", 0)
+            == samples["delta_frames"]["content"],
+            f"every content frame must pair with a text event: "
+            f"paired={samples['paired_channels']} "
+            f"events={samples['delta_frames']}",
+        )
+        stray = {
+            reason: count
+            for reason, count in (samples["dropped_reasons"] or {}).items()
+            if reason.startswith(("missing_events", "unexpected_events", "negative"))
+            or reason in ("unknown_prompt", "ambiguous_prompt")
+        }
+        _check(not stray, f"tool cycles must not lose frames to the seam: {stray}")
         _check(block["errors"] == 0, f"no turn may fail: {block['errors']}")
     elif scenario == "idle":
         _check(
@@ -2406,6 +2445,7 @@ def checks() -> list[tuple[str, Callable[[], None]]]:
     return [
         ("stats.percentile", check_stats),
         ("pairing.last_user_text", check_last_user_text),
+        ("pairing.channels", check_channel_vocabulary),
         ("pairing.delivery", check_pairing),
         ("pairing.assemble", check_assemble),
         ("shard.events", check_shard_events),

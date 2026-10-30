@@ -99,6 +99,7 @@ SAMPLE_KEYS: tuple[str, ...] = (
     "dropped",
     "dropped_reasons",
     "delta_frames",
+    "paired_channels",
     "text_frames",
     "chars",
     "turns",
@@ -1099,6 +1100,7 @@ def _assemble(
         samples["count"] = pairing.paired
         samples["dropped"] = pairing.dropped
         samples["dropped_reasons"] = dict(pairing.reasons)
+        samples["paired_channels"] = dict(pairing.channels)
         channels = ", ".join(
             f"{kind}={count}" for kind, count in sorted(pairing.channels.items())
         )

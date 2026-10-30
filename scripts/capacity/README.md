@@ -498,6 +498,7 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 |---|---|
 | `stats.percentile` | 百分位秩定义的 known answer（含 n=1 / 偶数 / 极值 / 空序列报错） |
 | `pairing.last_user_text` | 两种 body 形态（str / block 列表）都能取到配对键 |
+| `pairing.channels` | **跨包词表守卫**：`metrics.CHANNEL_EVENTS` 必须覆盖 `sse.FRAME_KINDS` 除 `meta` 之外的全部种类，且正好映射到 `invariants.DELTA_EVENT_TYPES`——任一处新增 / 改名而其余没跟，配对会静默失真 |
 | `pairing.delivery` | 配对数学 + 丢弃原因 + **同一 prompt 多请求时按通道消歧** + 缺接口抛错 |
 | `pairing.assemble` | 配对结果与新增指标（`chars_per_second` / `turns_per_second` / 水合两段时间线）落到 `run.json` 的接线 |
 | `shard.events` | 分片的事件处理：失败轮只驱动一轮、字符实测、水合只在 `sync_session` 之后驱动一轮 |
@@ -511,7 +512,7 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | `shard.recovery` | 握手落空时按盘上样本恢复（写全了才收、半截 JSON 与缺文件都算失败） |
 | `report.render` | 合成 `run.json` → markdown（判据原文唯一、缺数据是 `—`、复现命令、表格列数） |
 | `run.summary` | `--json` 一行摘要的字段名与取值投影（下游脚本的契约） |
-| `e2e.<case>` | **真网关子进程 + 真分片子进程**跑完迷你一档（六个用例：五种形态 + `--tool bash` 变体）：断言该形态的指标非 null 且形状自洽（`pure_stream` 无轮次边界、`tool_cycle` 有完成的轮次与 tool_call 帧、`idle` 无事件且 reaper 逐出全部会话、`hydration` 有三段时间线、`mixed` 两个通道都有帧），并断言真实 `dropped_reasons` 全部落在 `metrics.DROP_REASONS` 词汇表里；再用一个失败档断言「失败档键集 == 成功档键集」、一个相对 `--out` 档断言默认形态能跑 |
+| `e2e.<case>` | **真网关子进程 + 真分片子进程**跑完迷你一档（六个用例：五种形态 + `--tool bash` 变体）：断言该形态的指标非 null 且形状自洽（`pure_stream` 无轮次边界、`tool_cycle` 有完成的轮次与 tool_call 帧、`idle` 无事件且 reaper 逐出全部会话、`hydration` 有三段时间线、`mixed` 两个通道都有帧，`tool_cycle` 还要求 `tool_call` 帧与 `tool_call_stream` 事件逐一配对），并断言真实 `dropped_reasons` 全部落在 `metrics.DROP_REASONS` 词汇表里；再用一个失败档断言「失败档键集 == 成功档键集」、一个相对 `--out` 档断言默认形态能跑 |
 
 `--tool bash` 那条值得单独存在：`yolo` 一旦失效，`Bash` 会落到「等人确认」上（headless
 测量里没有人回答），轮次从此永不收口——这条回归只有真跑一次才看得见。
