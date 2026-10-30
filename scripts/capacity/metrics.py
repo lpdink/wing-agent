@@ -26,7 +26,6 @@
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -122,14 +121,13 @@ def check_shard_payload(payload: Mapping[str, Any]) -> None:
 def percentile(values: Sequence[float], pct: float) -> float:
     """nearest-rank 百分位（``pct`` ∈ (0, 100]）：升序第 ``ceil(pct/100·n)`` 个值。
 
-    空序列抛 ``ValueError``——「没有样本」与「样本为 0」是两件事，调用方据此写
-    ``null`` 而不是 0。
+    实现只有一份，在 :func:`wing_probe.procsample.percentile`（perf 套件用同一份）。
+    这里函数内导入：``report`` 是只读 ``run.json`` 的纯投影层，而本模块被 ``verdict``
+    引进那条链——为一次百分位把 probe 的运行时依赖拖进导入期不划算。
     """
-    if not values:
-        raise ValueError("percentile() of an empty sequence")
-    ordered = sorted(values)
-    rank = max(1, math.ceil(pct / 100.0 * len(ordered)))
-    return float(ordered[min(rank, len(ordered)) - 1])
+    from wing_probe.procsample import percentile as shared
+
+    return shared(values, pct)
 
 
 def spread(values: Sequence[float]) -> dict[str, float]:

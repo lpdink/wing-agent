@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 import time
 from collections.abc import Sequence
@@ -30,6 +29,7 @@ import shapes
 import verdict
 from cli import UsageError
 from orchestrator import DELIVERY_UNAVAILABLE, RunConfig
+from wing_probe.procsample import write_json
 
 TOOL = "capacity"
 SCHEMA = 1
@@ -44,15 +44,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def build_config(args: argparse.Namespace) -> RunConfig:
     return cli.build_config(args)
-
-
-def write_json(path: Path, payload: Any) -> None:
-    """原子写 JSON（tmp + rename）；NaN / Infinity 直接失败（非标准 JSON）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _fill_slope(levels: list[dict[str, Any]]) -> None:

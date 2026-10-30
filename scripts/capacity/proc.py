@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 """进程级采样：累计 CPU 秒 / RSS / 打开的 fd 数 + fd 软限抬升。
 
-CPU 采样的平台分支照搬 ``scripts/perf/suite_gateway.py`` 的
-``_darwin_cpu_seconds`` / ``_linux_cpu_seconds`` / ``process_cpu_seconds``
-（macOS 走 ``libproc.proc_pid_rusage`` + mach timebase，Linux 走
-``/proc/<pid>/stat``；不用 ``ps -o time``——精度 1 s，也不用
-``getrusage(RUSAGE_CHILDREN)``——只能事后读且含解释器启动的 CPU）。
-
-**为什么不共享**：那份实现住在一个 perf 套件脚本里（不是共用模块），跨工具 import
-会把整条 perf 测量链（side 描述符 / 判定 / 子进程编排）拖进手测工具；而容量测量还
-多要 RSS / fd / rlimit 三个读取口。**origin 是 perf 那一份**（更早、被 CI 覆盖、与
-``docs/dev/perf-testing.md`` 对齐）：改任何一边都要同步另一边，合并时以那边为准。
+CPU 采样的平台分支（macOS ``libproc.proc_pid_rusage`` + mach timebase / Linux
+``/proc/<pid>/stat``）住在 :mod:`wing_probe.procsample`——同一份实现也给
+``scripts/perf/suite_gateway.py`` 用：那是平台 FFI，抄两份就会静默错数。
+RSS / fd / rlimit 是本工具自己的读法（``ps`` / ``lsof`` / ``resource``）。
 
 只用标准库；不引入 psutil。
 """
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import os
 import resource
-import struct
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from wing_probe import procsample
 
 #: RSS / fd 采样的子进程超时（秒）——进程卡死时不把测量挂在这里。
 PS_TIMEOUT = 5.0
@@ -42,100 +35,10 @@ class ProcError(RuntimeError):
 
 
 # ── CPU（累计秒）────────────────────────────────────────────────
-
-#: ``proc_pid_rusage`` 的返回缓冲区大小。结构随 flavor 增长（v4 已 >200B），而
-#: **不能**只给结构前缀的大小——内核按 flavor 写入整块结构，缓冲区小了就是越界写。
-_RUSAGE_BUFFER_BYTES = 4096
-
-#: ``ri_user_time`` / ``ri_system_time`` 在 ``rusage_info_v0+`` 结构里的偏移：
-#: ``ri_uuid[16]`` 之后两个 ``uint64``（**mach 绝对时钟 tick**，不是纳秒——
-#: Apple Silicon 的 timebase 是 125/3，直接除 1e9 会少算 41.7 倍）。
-_RUSAGE_TIMES_OFFSET = 16
-
-
-class _MachTimebase(ctypes.Structure):
-    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
-
-
-_LIBPROC: Any = None
-_MACH_TIMEBASE: tuple[int, int] | None = None
-
-
-def _mach_timebase() -> tuple[int, int]:
-    """``mach_absolute_time`` → 纳秒的换算比（numer, denom）。"""
-    global _MACH_TIMEBASE
-    if _MACH_TIMEBASE is None:
-        info = _MachTimebase()
-        rc = int(ctypes.CDLL(None).mach_timebase_info(ctypes.byref(info)))
-        if rc != 0 or info.denom == 0:
-            raise ProcError(
-                f"mach_timebase_info failed (rc={rc}, {info.numer}/{info.denom})"
-            )
-        _MACH_TIMEBASE = (int(info.numer), int(info.denom))
-    return _MACH_TIMEBASE
-
-
-def _libproc() -> Any:
-    """加载 ``libproc``（macOS）；失败即抛，绝不静默降级成错数据。"""
-    global _LIBPROC
-    if _LIBPROC is None:
-        path = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
-        lib = ctypes.CDLL(path)
-        lib.proc_pid_rusage.restype = ctypes.c_int
-        lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-        _LIBPROC = lib
-    return _LIBPROC
-
-
-def _darwin_cpu_seconds(pid: int) -> float:
-    buffer = ctypes.create_string_buffer(_RUSAGE_BUFFER_BYTES)
-    lib = _libproc()
-    rc = -1
-    for flavor in (4, 1, 0):  # RUSAGE_INFO_V4 → V1 → V0（前三个字段布局一致）
-        rc = int(lib.proc_pid_rusage(pid, flavor, ctypes.byref(buffer)))
-        if rc == 0:
-            break
-    if rc != 0:
-        raise ProcError(
-            f"proc_pid_rusage({pid}) failed with rc={rc} (no usable rusage flavor)"
-        )
-    user_ticks, system_ticks = struct.unpack_from(
-        "<QQ", buffer.raw, _RUSAGE_TIMES_OFFSET
-    )
-    numer, denom = _mach_timebase()
-    return (user_ticks + system_ticks) * numer / denom / 1e9
-
-
-def _linux_cpu_seconds(pid: int) -> float:
-    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    # comm 可能含空格 / 括号 → 从**最后一个** ") " 之后切（字段 3 起）。
-    fields = raw.rsplit(") ", 1)[-1].split()
-    utime, stime = int(fields[11]), int(fields[12])
-    ticks = float(os.sysconf("SC_CLK_TCK"))
-    return (utime + stime) / ticks
-
-
-def process_cpu_seconds(pid: int) -> float:
-    """进程累计 CPU（user+sys，秒）。
-
-    采样口径是「窗口首尾两次累计值之差 / 窗口秒数」——不做周期采样：周期读会把
-    ``ps`` / ``lsof`` 自己的开销算进被测进程旁边。
-
-    只用于**别的**进程（被测网关）。自己的进程用 :func:`self_cpu_seconds`：分片与
-    Provider 在窗口结束时自己记账，避免与「读完就退出」的子进程收尸竞态。
-    """
-    if sys.platform == "darwin":
-        return _darwin_cpu_seconds(pid)
-    if sys.platform.startswith("linux"):
-        return _linux_cpu_seconds(pid)
-    raise ProcError(f"no CPU sampling backend for platform {sys.platform!r}")
-
-
-def self_cpu_seconds() -> float:
-    """本进程累计 CPU（user+sys，秒）——``getrusage(RUSAGE_SELF)``，全平台一致。"""
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    return float(usage.ru_utime + usage.ru_stime)
-
+#
+# 平台分支不在这里：见 ``wing_probe.procsample``（与 perf 套件同一份实现）。
+process_cpu_seconds = procsample.process_cpu_seconds
+self_cpu_seconds = procsample.self_cpu_seconds
 
 # ── RSS ────────────────────────────────────────────────────────
 

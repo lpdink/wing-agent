@@ -269,8 +269,9 @@ SSE 是**长连接**：一个会话在整轮里占住一条上游连接。所以
 | `rig.provider_cpu_cores` | coordinator 进程（= Provider 宿主 + 采样器）在窗口内的 CPU 秒 / 窗口秒；上界，不是纯 Provider |
 | `rig.shard_cpu_cores[]` | 每个分片**自报**的窗口内 CPU 秒 / 分片自己的记账区间（起点钉在 `window_start`，因此与上面两个同口径、可相加）；分片上报的区间与采样窗口差 >10% 时留一条 note |
 
-百分位是 **nearest-rank**（p99 = 升序第 `ceil(0.99·n)` 个值，不插值），与
-`scripts/perf/suite_gateway.py` 一致；实现只在 `metrics.percentile()` 一处。
+百分位是 **nearest-rank**（p99 = 升序第 `ceil(0.99·n)` 个值，不插值）。实现只有一份，
+在 `libs/wing-probe/wing_probe/procsample.py`（`scripts/perf/suite_gateway.py` 用同一份：
+这类测量原语——百分位、进程 CPU 采样、原子写 JSON——两个工具共用，各留一份只会静默错数）。
 
 ### 投递延迟的配对（按通道，严格，不猜）
 
@@ -470,12 +471,13 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 
 - `scripts/perf/` 用同一套「真网关 + 假 Provider」驱动**一个**会话做 A/B 回归；
   容量工具驱动 N 个会话做**绝对值**扫描。两者都不改产品、都不碰 CI 门禁。
-- 进程采样（CPU 的 darwin / linux 分支）与百分位秩定义**照搬** perf 的实现与口径，
-  但各有各的一份：那边住在一个套件脚本里（不是共用模块），跨工具 import 会把整条
-  perf 测量链拖进来。**origin 是 perf 那一份**（更早、被 CI 覆盖）——改任何一边都要同步
-  另一边，本目录的实现是派生。第三处同款是原子写 JSON（`run.write_json` vs
-  `perf/common.write_json`，十行）。场景装配（进程拓扑 / 采样窗口 / 分片）是本工具独有，
-  与 perf 的「单会话 A/B」不是同一件事，不复用。
+- 三样测量原语**共用一份**，住 `libs/wing-probe/wing_probe/procsample.py`：
+  进程 CPU 采样（darwin 的 `libproc` + mach timebase / linux 的 `/proc`）、
+  nearest-rank 百分位、原子写 JSON。它们只是叶原语（CPU 采样是平台 FFI，抄错一处就是
+  静默错数），而两个工具都已经依赖 `wing_probe`；`report` 那一侧的导入链仍保持纯
+  stdlib（`metrics.percentile` 在函数内转发）。
+- 场景装配（进程拓扑 / 采样窗口 / 分片）是本工具独有，与 perf 的「单会话 A/B」不是
+  同一件事，不复用。
 - `libs/wing-probe/` 是本工具的底座（`ProbeEnv` 起环境 / `restart_gateway`、`FakeProvider`
   当上游、`GatewayWS` 当传输层参考实现）。分片为什么不用 probe 的 `Driver` / `Session`：
 
