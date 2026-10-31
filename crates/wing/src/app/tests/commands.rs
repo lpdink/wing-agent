@@ -673,14 +673,14 @@ fn test_info_carries_model_id_and_provider_without_a_clearing_hack() {
 // ── Session list: the tree order + the two-layer pin ──
 
 /// `/session`（`/ss`）的候选缓存按**树序**排列（唯一实现
-/// `shared::session_tree::build_forest`，与 `wing ps --tree` 共用）：子会话
-/// 跟在父下面并带连接前缀，pin 的根连同子树整块上浮，子节点的 pin 只在兄弟
-/// 组内说话。行序由每行自足的排序键（pin 时间 / 子树活跃 / id）决定。
+/// `shared::session_tree`，与 `wing ps --tree` 共用）：子会话跟在父下面并带连接
+/// 前缀，pin 的根连同子树整块上浮，子节点的 pin 只在兄弟组内说话。行序由每行
+/// 自足的排序键（pin 时间 / 子树注意力 / 子树活跃 / id）决定。
 ///
-/// 三条旧重排键仍逐一覆盖（它们都不再参与定序）：
+/// 三条旧重排键的**旧语义**都被逐一覆盖（它们都不再定序）：
 /// - **workspace 匹配**：inactive 行的 workspace 正是启动目录，active 行的不是；
-/// - **状态优先级**：payload 里更旧的 `waiting`（旧 rank 0）排在更新的 `idle`
-///   （旧 rank 2）之后——只看 rank 会把它提到最前；
+/// - **状态 rank 表**：`waiting` 确实会提前，但只经子树注意力——同一个 payload 里
+///   更旧的 `working` 行没有这个待遇；
 /// - **后端基准序**（active 优先）也不再是行序的来源。
 mod session_list {
     use crate::app::App;
@@ -778,7 +778,7 @@ mod session_list {
     }
 
     #[test]
-    fn test_flat_list_orders_by_subtree_activity_not_workspace_or_status() {
+    fn test_flat_list_orders_by_attention_then_subtree_activity() {
         let mut app = app();
         feed(
             &mut app,
@@ -792,7 +792,7 @@ mod session_list {
                     "2025-06-01T00:00:00",
                     None,
                 ),
-                // 还在 active 组里但时间更旧：waiting 不享有状态优先级。
+                // 在等人类回答：注意力把它提到最前（时间更旧也一样）。
                 session(
                     "active-old-waiting",
                     "waiting for me",
@@ -810,23 +810,38 @@ mod session_list {
                     "2025-03-01T00:00:00",
                     None,
                 ),
+                // 在跑轮次但不是注意力：时间最旧就排最后。
+                session(
+                    "active-older-working",
+                    "busy, nobody waits",
+                    "/elsewhere/project",
+                    "working",
+                    "2024-01-01T00:00:00",
+                    None,
+                ),
             ],
         );
 
         assert_eq!(
             ids(&app),
-            ["active-new", "inactive-mid", "active-old-waiting"],
-            "无父子关系的列表按「最后交互降序」；workspace / status 都不参与"
+            [
+                "active-old-waiting",
+                "active-new",
+                "inactive-mid",
+                "active-older-working",
+            ],
+            "注意力（自己或后代在等你）压过活跃度，其余按最后交互降序；\
+             workspace 与状态 rank 表都不参与（`waiting` 只经注意力影响行序）"
         );
-        assert_eq!(app.popup.cache.sessions[0].status, "idle");
+        assert_eq!(app.popup.cache.sessions[0].status, "waiting");
         assert_eq!(
-            app.popup.cache.sessions[0].last_interaction,
+            app.popup.cache.sessions[1].last_interaction,
             "2025-06-01T00:00:00"
         );
         // workspace 随候选带下来（展示 + 搜索），但不参与排序。
-        assert_eq!(app.popup.cache.sessions[1].workspace, "/launch/project");
+        assert_eq!(app.popup.cache.sessions[2].workspace, "/launch/project");
         // 全是根 → 全不带前缀（平滑退化：看起来和树形之前一样）。
-        assert_eq!(prefixes(&app), ["", "", ""]);
+        assert_eq!(prefixes(&app), ["", "", "", ""]);
     }
 
     #[test]

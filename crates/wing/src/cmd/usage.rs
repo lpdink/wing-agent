@@ -994,6 +994,9 @@ fn ordered_rows(report: &UsageResponse, tree: bool) -> Vec<(usize, String)> {
             pinned: false,
             pin_added_at: None,
             last_interaction: None,
+            // 用量报告里没有会话状态：`None` = 未知（不参与注意力、不计 working、
+            // 按存活处理）。
+            status: None,
         })
         .collect();
     build_forest(&input)

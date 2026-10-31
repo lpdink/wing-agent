@@ -230,7 +230,7 @@ crates/wing/src/
 │   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
 │   ├── text_edit.rs                 单行文本编辑原语（char↔byte 换算 + `EditOp`；设置/ask 面板与 composer 共用）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
-│   ├── session_tree.rs              会话血缘森林：扁平会话行 → 树序 + 连接前缀（`wing ps --tree` 与 TUI 面板共用）
+│   ├── session_tree.rs              会话血缘森林：扁平会话行 → 树序 + 连接前缀 + crew 聚合 + 层投影（TUI 面板 / `wing ps` / `wing usage --tree` 共用）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环
 │   ├── mod.rs                       run_app() 主循环 + handle_event()

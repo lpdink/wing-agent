@@ -592,6 +592,7 @@ impl App {
                 self.update_popup();
             }
             FetchPayload::SessionList(resp) => {
+                use crate::protocol::SessionStatus;
                 use crate::shared::pinning::{is_pinned, pin_added_at};
                 use crate::shared::session_tree::{TreeRow, build_forest};
                 use crate::ui::popup::command::SessionCandidate;
@@ -600,8 +601,8 @@ impl App {
                 // --tree` 共用同一份实现，见 docs/dev/session-lineage.md §4）：
                 // 有父的会话跟在父下面并带连接前缀，pin 的根连同子树整块上浮，
                 // 子节点的 pin 只在兄弟组内说话。后端下发的基准序不再是面板的
-                // 定序输入——树序的每个排序键都是自足的（pin 时间 / 子树活跃 /
-                // id），workspace 与 status 只做展示与搜索。
+                // 定序输入——树序的每个排序键都是自足的（pin 时间 / 子树注意力 /
+                // 子树活跃 / id），workspace 只做展示与搜索。
                 let anchor = self.popup.active.selected_name().map(str::to_string);
                 // pin 事实（标签 + 时间）算一次喂两处：树的排序键与候选行的星标
                 // 谓词——两者共用同一份投影，不会各算各的。
@@ -620,6 +621,7 @@ impl App {
                         pinned,
                         pin_added_at: pin_at,
                         last_interaction: s.last_interaction.as_deref(),
+                        status: SessionStatus::parse(&s.status),
                     })
                     .collect();
                 let candidates: Vec<SessionCandidate> = build_forest(&rows)

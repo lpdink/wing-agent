@@ -30,6 +30,7 @@ use wing_api_client::models::{
 use crate::config::AppConfig;
 use crate::config::ColorPreset;
 use crate::config::ThemePalette;
+use crate::protocol::SessionStatus;
 use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
@@ -248,6 +249,7 @@ fn tree_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
             pinned: is_pinned(&session.tags),
             pin_added_at: pin_added_at(&session.tag_meta),
             last_interaction: session.last_interaction.as_deref(),
+            status: SessionStatus::parse(&session.status),
         })
         .collect();
     build_forest(&input)
@@ -1227,6 +1229,37 @@ mod tests {
                 .map(|r| r.session.id.as_str())
                 .collect::<Vec<_>>(),
             ["busy", "busy-child", "quiet"]
+        );
+    }
+
+    /// 注意力：子树里有人等你 → 更旧的根上浮。锚定 CLI 侧确实把行状态喂进了
+    /// `TreeRow`（`working` 不享有这个待遇）。
+    #[test]
+    fn tree_rows_rank_roots_by_subtree_attention() {
+        let mut fresh = session("fresh", "idle", &[]);
+        fresh.last_interaction = Some("2026-10-05T00:00:00".into());
+        let mut quiet = session("quiet", "idle", &[]);
+        quiet.last_interaction = Some("2026-10-01T00:00:00".into());
+
+        let asker = child_of(session("asker", "waiting", &[]), "quiet");
+        let input = [fresh.clone(), quiet.clone(), asker];
+        let rows = tree_rows(&input);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["quiet", "asker", "fresh"]
+        );
+
+        let busy = child_of(session("busy", "working", &[]), "quiet");
+        let input = [fresh, quiet, busy];
+        let rows = tree_rows(&input);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["fresh", "quiet", "busy"],
+            "working 不是注意力：顺序回到活跃度降序"
         );
     }
 

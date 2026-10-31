@@ -1,19 +1,44 @@
-//! 会话血缘森林 —— 扁平会话行 → 树序 + 连接前缀。
+//! 会话血缘森林 —— 扁平会话行 → 树序 + 连接前缀 + crew 聚合 + 层投影。
 //!
-//! 输入是一次列表投影（id / 父 id / pin / 最后交互），输出是**全序行**：
-//! 树序遍历的顺序、每行所在深度、以及可直接拼进首列的渲染前缀。两个消费面
-//! 共用这一份实现（`wing ps --tree` 与 TUI 的会话面板）；外部的 web / 桌面
-//! 前端按同一份契约在 TS 侧另实现（见 docs/dev/session-lineage.md）。
+//! 输入是一次列表投影（id / 父 id / pin / 最后交互 / 行自身状态），输出是一份
+//! [`Forest`]：展示全序（树序遍历 + 每行的深度与渲染前缀）、每个节点的后代聚合
+//! （[`Crew`]）、以及「给定 scope 取一层」的投影（[`Forest::level`]）。三个消费面
+//! 共用这一份实现（TUI 的会话面板、`wing ps`（`--tree` 与层视图）、`wing usage
+//! --tree`）；外部的 web / 桌面前端按同一份契约在 TS 侧另实现
+//! （见 docs/dev/session-lineage.md）。
 //!
 //! 排序契约（产品语义的参照点）：
 //!
 //! - **pin 分两层**：根的 pin（parent 不在输入集合里 = 展示为根的节点）让它
 //!   上浮到跨树最前，**子树跟随**；子节点的 pin 只在它所在的兄弟组内排前——
 //!   不提升自己、也不影响父节点（视图区分：置顶区只对根开放）；
-//! - 兄弟组内排序：pin 的在前（pin 时间降序、无时间的次之），其余按
-//!   **子树最后交互时间**降序（最近有动静的任务树浮上来），并列按 id 升序；
+//! - 兄弟组内排序：pin 的在前（pin 时间降序、无时间的次之）→ **子树注意力**
+//!   （自己或任一后代在等人类回答的在前）→ **子树最后交互时间**降序（最近有
+//!   动静的任务树浮上来）→ id 升序（并列定序，跨消费面一致）→ 输入下标兜底
+//!   （同 id 的重复行只可能来自构造错误的输入）；
+//! - 根层与任意子层用同一条比较器。pin 的两层语义来自「置顶区只对根开放」的
+//!   视图事实，注意力则是**子树属性**（有后代在等你 → 整棵树上浮），两者刻意
+//!   不对称；
 //! - parent 不在集合（被过滤 / 幽灵引用）→ 该节点升为根；
 //! - 环（只可能来自手改 metadata）→ 环上节点全部升为根（诚实降级，不挂死）。
+//!
+//! **crew 聚合**（[`Crew`]）：每个节点带后代总数（含 dormant——它回答「这个任务
+//! 有多大」，不是「这一屏有多少行」）、后代里在等人类回答 / 在跑轮次的条数、
+//! 子树 `max(last_interaction)`。一次自底向上算全，与排序用的子树活跃同源。
+//!
+//! **存活闭包与层投影**：`kept(r) = live(r) ∨ pinned(r) ∨ ∃ 子 c: kept(c)`，其中
+//! `live = status != inactive`（状态未知按存活）。闭包是必要的：否则一个 dormant
+//! 的父任务会凭空消失，「层 = 任务」退化成「一堆散点 crew 升格成根」。
+//! [`Forest::level`] 取某 scope 的**直接子** ∩ 保留集（`include_dormant` 时不收），
+//! 顺带给出本层被收起的直接子数。
+//!
+//! 不变量（本模块的测试锚定）：投影是 `(rows, scope, include_dormant)` 的**纯函数**
+//! ——不看时钟、不看随机数、不看输入顺序（同 id 的重复行例外：只可能来自畸形的输入，
+//! 届时按输入序兜底成全序）；投影**不改变任何一行的相对顺序**；保留集里每个节点在它
+//! 所属的那一层**恰好出现一次**（无重复、无孤儿）。
+//!
+//! **下标空间是接口契约**：投影吐出的 `usize` 是 [`Forest::build`] 收到的那个切片的
+//! 坐标，消费面必须按原序留着它（详见 [`Forest`] 的文档）。
 //!
 //! 前缀用 `├─` / `└─` / `│` 三字形，根不带前缀（树与树之间不连线，每棵树
 //! 独立成画）；缩进层数封顶 [`MAX_INDENT_DEPTH`]（人为深链防御，超出的祖先
@@ -23,6 +48,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::protocol::SessionStatus;
 use crate::shared::pinning::parse_timestamp_micros;
 
 /// 渲染前缀的最大缩进层数（更深的部分不再加宽，防止深链把整行推爆）。
@@ -40,12 +66,18 @@ pub struct TreeRow<'a> {
     pub pin_added_at: Option<&'a str>,
     /// 最后一次交互（本地 naive ISO，与后端 `last_interaction` 同口径）。
     pub last_interaction: Option<&'a str>,
+    /// 行自身状态（列表行的 `status`，用 [`SessionStatus::parse`] 填）。它只被问
+    /// 三件事：`waiting` = 注意力、`working` = crew 计数、`inactive` = 存活。
+    /// `None` = 这个消费面没有状态可给（`wing usage --tree`）：按存活处理、不参与
+    /// 注意力、不计 working。
+    pub status: Option<SessionStatus>,
 }
 
 /// 树里被放置的一行（输出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
-    /// 输入行的下标——消费方据此取回自己的整行。
+    /// 输入行的下标——消费方据此取回自己的整行。下标空间是传给 [`Forest::build`]
+    /// 的那个 `rows` 切片，所以消费面必须按原序留着它，别在两次投影之间重排。
     pub index: usize,
     /// 树深（0 = 根）。
     pub depth: usize,
@@ -53,104 +85,251 @@ pub struct TreeEntry {
     pub prefix: String,
 }
 
-/// 把会话行折成森林并排出展示全序。
+/// 一个节点的 crew 聚合。三个计数只数**后代**（含 dormant 后代）；`activity` 是
+/// **含自己**的子树 max。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Crew {
+    /// 后代总数。
+    pub descendants: usize,
+    /// 后代里在等人类回答（`waiting`）的条数。注意它不含自己——「本行有没有注意力」
+    /// 还要看自己的状态（见模块头的注意力定义）。
+    pub waiting: usize,
+    /// 后代里在跑轮次（`working`）的条数。
+    pub working: usize,
+    /// 子树 `max(last_interaction)`（微秒；无时间 / 不可解析 = `None`）。与排序用的
+    /// 子树活跃是同一个值。
+    pub activity: Option<i64>,
+}
+
+/// 层投影的结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Level {
+    /// 本层要显示的行：输入下标，顺序 = 森林全序在该层的限制。
+    pub rows: Vec<usize>,
+    /// 本层被收起的直接子数（`include_dormant` 时恒为 0——一行都没收起）。
+    pub dormant_children: usize,
+}
+
+/// 一次构建的全部派生事实：拓扑（有效父 / 子 / 深度）、crew 聚合、存活闭包、
+/// 展示全序。四个投影（[`Self::tree`] / [`Self::crew`] / [`Self::parent_of`] /
+/// [`Self::level`]）都是它的只读视图——消费面构建一次，之后按需取。
 ///
-/// 输入顺序不参与定序（每一项的排序键都是自足的：pin 时间 / 子树活跃 /
-/// id），因此同一批会话在任何消费面都会得到同一个顺序。
-pub fn build_forest(rows: &[TreeRow<'_>]) -> Vec<TreeEntry> {
-    let n = rows.len();
-    if n == 0 {
-        return Vec::new();
-    }
+/// **下标空间是接口契约**：投影吐出的 `usize` 永远是调用方传给 [`Self::build`] 的
+/// 那个切片的坐标。消费面按原序持有自己的行（不要在两次投影之间 sort / filter 那份
+/// 数组），否则投影会静默指到别的行——不 panic、不报错，只是画错。
+///
+/// **输入是未按存活过滤的行集**：存活闭包、`dormant_children` 与 [`Crew`] 的三个计数都按
+/// **全集**算——消费面若在 [`Self::build`] 之前按存活剪过行，三件事一起失效（一个
+/// dormant 父被剪掉，它的活子就升成假根，crew 也少算那些后代）。过滤是投影的事，
+/// 不能发生在投影之前。
+#[derive(Debug, Default)]
+pub struct Forest {
+    /// id → 输入下标（重 id 取先到者）。
+    index_of: HashMap<String, usize>,
+    /// 有效父（幽灵父 / 环已断开）。
+    parent: Vec<Option<usize>>,
+    /// 每个节点的直接子，已按排序契约排好（层投影只过滤、不重排）。
+    children: Vec<Vec<usize>>,
+    /// 根，已按排序契约排好。
+    roots: Vec<usize>,
+    /// 存活闭包（`include_dormant` 之前的那一版）。
+    kept: Vec<bool>,
+    crew: Vec<Crew>,
+    tree: Vec<TreeEntry>,
+}
 
-    // id → 下标。重 id 取先到者：id 是会话的唯一键，重复只会来自构造错误的
-    // 输入，这里保证不 panic、不挂死即可（与幽灵父同级的降级）。
-    let mut index_of: HashMap<&str, usize> = HashMap::with_capacity(n);
-    for (i, row) in rows.iter().enumerate() {
-        index_of.entry(row.id).or_insert(i);
-    }
-
-    // 直父（在集合内）→ **有效父**：整条链无环才算数。环上节点全部断开
-    // （升根）——这不是「怎么渲染坏数据」的问题，是「怎么不挂死」的问题。
-    let direct: Vec<Option<usize>> = rows
-        .iter()
-        .map(|row| row.parent.and_then(|p| index_of.get(p).copied()))
-        .collect();
-    let parent: Vec<Option<usize>> = (0..n)
-        .map(|i| match direct[i] {
-            Some(p) if chain_is_acyclic(i, p, &direct) => Some(p),
-            _ => None,
-        })
-        .collect();
-
-    // 深度（环已断开，向上走必达根）。
-    let depth_of = |mut i: usize| -> usize {
-        let mut depth = 0;
-        while let Some(p) = parent[i] {
-            depth += 1;
-            i = p;
+impl Forest {
+    /// 把会话行折成森林：拓扑 + 聚合 + 闭包 + 全序，一次算全。
+    ///
+    /// 每一项的排序键都是自足的（pin 时间 / 注意力 / 子树活跃 / id），因此同一批会话
+    /// 在任何消费面都会得到同一个顺序。唯一例外是同 id 的重复行（只可能来自构造错误
+    /// 的输入）：四把键全并列时按输入下标兜底成全序。
+    pub fn build(rows: &[TreeRow<'_>]) -> Self {
+        let n = rows.len();
+        if n == 0 {
+            return Self::default();
         }
-        depth
-    };
 
-    // 子树「最后交互」分数 = 自身与全部后代的最大值：深到浅上浮，一次算全。
-    // 无时间 / 不可解析 = None，排序时垫底（Option 的序天然如此）。
-    let mut score: Vec<Option<i64>> = rows
-        .iter()
-        .map(|row| row.last_interaction.and_then(parse_timestamp_micros))
-        .collect();
-    let mut by_depth: Vec<usize> = (0..n).collect();
-    by_depth.sort_by_key(|&i| std::cmp::Reverse(depth_of(i)));
-    for &i in &by_depth {
-        if let Some(p) = parent[i]
-            && score[i] > score[p]
-        {
-            score[p] = score[i];
+        // id → 下标。重 id 取先到者：id 是会话的唯一键，重复只会来自构造错误的
+        // 输入，这里保证不 panic、不挂死即可（与幽灵父同级的降级）。
+        let mut index_of: HashMap<String, usize> = HashMap::with_capacity(n);
+        for (i, row) in rows.iter().enumerate() {
+            index_of.entry(row.id.to_string()).or_insert(i);
         }
-    }
 
-    // children + roots。
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut roots: Vec<usize> = Vec::new();
-    for (i, slot) in parent.iter().enumerate() {
-        match slot {
-            Some(p) => children[*p].push(i),
-            None => roots.push(i),
-        }
-    }
+        // 直父（在集合内）→ **有效父**：整条链无环才算数。环上节点全部断开
+        // （升根）——这不是「怎么渲染坏数据」的问题，是「怎么不挂死」的问题。
+        let direct: Vec<Option<usize>> = rows
+            .iter()
+            .map(|row| row.parent.and_then(|p| index_of.get(p).copied()))
+            .collect();
+        let parent: Vec<Option<usize>> = (0..n)
+            .map(|i| match direct[i] {
+                Some(p) if chain_is_acyclic(i, p, &direct) => Some(p),
+                _ => None,
+            })
+            .collect();
 
-    // 排序键：pin 在前（时间降序）→ 子树活跃降序 → id 升序（并列定序，也
-    // 保证跨消费面一致）。pin 时间只对 pin 的节点有意义：其余取 None。
-    let pin_micros: Vec<Option<i64>> = rows
-        .iter()
-        .map(|row| {
-            if row.pinned {
-                row.pin_added_at.and_then(parse_timestamp_micros)
-            } else {
-                None
+        // 深度（环已断开，向上走必达根）。
+        let depth_of = |mut i: usize| -> usize {
+            let mut depth = 0;
+            while let Some(p) = parent[i] {
+                depth += 1;
+                i = p;
             }
-        })
-        .collect();
-    let cmp = |a: usize, b: usize| -> Ordering {
-        rows[b]
-            .pinned
-            .cmp(&rows[a].pinned)
-            .then_with(|| pin_micros[b].cmp(&pin_micros[a]))
-            .then_with(|| score[b].cmp(&score[a]))
-            .then_with(|| rows[a].id.cmp(rows[b].id))
-    };
-    roots.sort_by(|&a, &b| cmp(a, b));
-    for group in children.iter_mut() {
-        group.sort_by(|&a, &b| cmp(a, b));
+            depth
+        };
+        let depth: Vec<usize> = (0..n).map(depth_of).collect();
+
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut roots: Vec<usize> = Vec::new();
+        for (i, slot) in parent.iter().enumerate() {
+            match slot {
+                Some(p) => children[*p].push(i),
+                None => roots.push(i),
+            }
+        }
+
+        // 自底向上（深 → 浅，父的深度严格小于子）一遍算全：crew 聚合 + 存活闭包。
+        let mut crew: Vec<Crew> = rows
+            .iter()
+            .map(|row| Crew {
+                activity: row.last_interaction.and_then(parse_timestamp_micros),
+                ..Crew::default()
+            })
+            .collect();
+        let mut kept: Vec<bool> = rows
+            .iter()
+            .map(|row| is_live(row.status) || row.pinned)
+            .collect();
+        let mut by_depth: Vec<usize> = (0..n).collect();
+        by_depth.sort_by_key(|&i| std::cmp::Reverse(depth[i]));
+        for &i in &by_depth {
+            let Some(p) = parent[i] else { continue };
+            crew[p].descendants += crew[i].descendants + 1;
+            crew[p].waiting +=
+                crew[i].waiting + usize::from(rows[i].status == Some(SessionStatus::Waiting));
+            crew[p].working +=
+                crew[i].working + usize::from(rows[i].status == Some(SessionStatus::Working));
+            if crew[i].activity > crew[p].activity {
+                crew[p].activity = crew[i].activity;
+            }
+            kept[p] = kept[p] || kept[i];
+        }
+
+        // 子树注意力：自己或任一后代在等人类回答。
+        let attention: Vec<bool> = (0..n)
+            .map(|i| rows[i].status == Some(SessionStatus::Waiting) || crew[i].waiting > 0)
+            .collect();
+        // pin 时间只对 pin 的节点有意义：其余取 None。
+        let pin_micros: Vec<Option<i64>> = rows
+            .iter()
+            .map(|row| {
+                if row.pinned {
+                    row.pin_added_at.and_then(parse_timestamp_micros)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // pin 在前（时间降序）→ 子树注意力 → 子树活跃降序 → id 升序 → 输入下标
+        // （同 id 的重复行按输入序定，不依赖排序算法的稳定性）。
+        let cmp = |a: usize, b: usize| -> Ordering {
+            rows[b]
+                .pinned
+                .cmp(&rows[a].pinned)
+                .then_with(|| pin_micros[b].cmp(&pin_micros[a]))
+                .then_with(|| attention[b].cmp(&attention[a]))
+                .then_with(|| crew[b].activity.cmp(&crew[a].activity))
+                .then_with(|| rows[a].id.cmp(rows[b].id))
+                .then_with(|| a.cmp(&b))
+        };
+        roots.sort_by(|&a, &b| cmp(a, b));
+        for group in children.iter_mut() {
+            group.sort_by(|&a, &b| cmp(a, b));
+        }
+
+        // DFS 放置；guide 是「祖先层还有没有后续兄弟」的竖线栈（每层画 `│` 与否）。
+        let mut tree: Vec<TreeEntry> = Vec::with_capacity(n);
+        let mut guide: Vec<bool> = Vec::new();
+        for &root in &roots {
+            walk(root, 0, true, &mut guide, &children, &mut tree);
+        }
+
+        Self {
+            index_of,
+            parent,
+            children,
+            roots,
+            kept,
+            crew,
+            tree,
+        }
     }
 
-    // DFS 放置；guide 是「祖先层还有没有后续兄弟」的竖线栈（每层画 `│` 与否）。
-    let mut out: Vec<TreeEntry> = Vec::with_capacity(n);
-    let mut guide: Vec<bool> = Vec::new();
-    for &root in &roots {
-        walk(root, 0, true, &mut guide, &children, &mut out);
+    /// 展示全序：树序遍历的每一行（输入下标 + 深度 + 渲染前缀）。`--tree` 与面板的
+    /// 全量平铺都直接画它。**内核不删任何一行**：画出来的是它**收到的**拓扑，消费面
+    /// 若在 [`Self::build`] 之前剪过行，画的就是剪过的拓扑（前提见 [`Forest`]）；
+    /// 收起到某一层只发生在 [`Self::level`]。
+    pub fn tree(&self) -> &[TreeEntry] {
+        &self.tree
     }
-    out
+
+    /// 该行（[`Self::tree`] / [`Self::level`] 给出的输入下标）的 crew 聚合；越界 = 空
+    /// 聚合（调用方只该传自己拿到的行下标）。
+    pub fn crew(&self, index: usize) -> Crew {
+        self.crew.get(index).copied().unwrap_or_default()
+    }
+
+    /// 有效父（输入下标）：根 / 幽灵父 / 环 = `None`。面包屑按它向上走，不要拿原始
+    /// `parent_session_id` 走——那条链可能带环。
+    pub fn parent_of(&self, index: usize) -> Option<usize> {
+        self.parent.get(index).copied().flatten()
+    }
+
+    /// 层投影：`scope` 的直接子 ∩ 保留集，顺序 = 森林全序在该层的限制。
+    ///
+    /// `None` = 根层；`Some(id)` = 该会话的子层，未知 id（会话已被逐出 / 归档）→ 空层，
+    /// 诚实降级不猜。重复 id 只解析到先到者（后到者的子层取不到，与 `index_of` 同一条
+    /// 降级）。`include_dormant` 由消费面决定：要显示 dormant 行时置 true（一律保留，
+    /// `dormant_children` 归零）。
+    ///
+    /// 输入前提见 [`Forest`] 的文档（未按存活过滤的行集）；否则保留集 ≡ 输入集，
+    /// 闭包与 `dormant_children` 一起退化成 no-op。
+    pub fn level(&self, scope: Option<&str>, include_dormant: bool) -> Level {
+        let children: &[usize] = match scope {
+            None => &self.roots,
+            Some(id) => match self.index_of.get(id) {
+                Some(&index) => &self.children[index],
+                None => return Level::default(),
+            },
+        };
+        let mut level = Level::default();
+        for &index in children {
+            if include_dormant || self.kept[index] {
+                level.rows.push(index);
+            } else {
+                level.dormant_children += 1;
+            }
+        }
+        level
+    }
+}
+
+/// 把会话行折成森林并排出展示全序（只要树、不要聚合 / 层投影的消费面用这个）。
+pub fn build_forest(rows: &[TreeRow<'_>]) -> Vec<TreeEntry> {
+    Forest::build(rows).tree().to_vec()
+}
+
+/// 存活：不在内存（`inactive`）才算 dormant。状态未知（`None`）按存活处理——
+/// 「不知道」不能当成「已逐出」把行藏起来。
+///
+/// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」）。命令行列表在进
+/// 内核之前还有一份只看默认视图的剪裁（不带 `--tag` / `--parent` / `--all` 时删掉
+/// 未 pin 的 inactive 行；表格与 `--json` 都受影响）：那条通路看不到闭包，
+/// `dormant_children` 与 crew 计数也会少算 dormant 后代。
+fn is_live(status: Option<SessionStatus>) -> bool {
+    status != Some(SessionStatus::Inactive)
 }
 
 /// `i` 的直父 `p`：从 `p` 出发能否走到根而不回到 `i`（也不在链上重访）。
@@ -224,6 +403,7 @@ mod tests {
             pinned: false,
             pin_added_at: None,
             last_interaction: None,
+            status: None,
         }
     }
 
@@ -238,6 +418,23 @@ mod tests {
         r
     }
 
+    fn with<'a>(mut r: TreeRow<'a>, status: SessionStatus) -> TreeRow<'a> {
+        r.status = Some(status);
+        r
+    }
+
+    fn waiting(r: TreeRow<'_>) -> TreeRow<'_> {
+        with(r, SessionStatus::Waiting)
+    }
+
+    fn working(r: TreeRow<'_>) -> TreeRow<'_> {
+        with(r, SessionStatus::Working)
+    }
+
+    fn inactive(r: TreeRow<'_>) -> TreeRow<'_> {
+        with(r, SessionStatus::Inactive)
+    }
+
     /// 输出的 (id, depth, prefix) 三元组（用输入下标取回 id）。
     fn shape<'a>(rows: &[TreeRow<'a>], out: &[TreeEntry]) -> Vec<(&'a str, usize, String)> {
         out.iter()
@@ -245,9 +442,58 @@ mod tests {
             .collect()
     }
 
+    /// 树的全序（只看 id）。
+    fn order<'a>(rows: &[TreeRow<'a>], entries: &[TreeEntry]) -> Vec<&'a str> {
+        entries.iter().map(|e| rows[e.index].id).collect()
+    }
+
+    /// 一层的行（只看 id，顺序 = 投影给出的顺序）。
+    fn ids<'a>(rows: &[TreeRow<'a>], level: &Level) -> Vec<&'a str> {
+        level.rows.iter().map(|&i| rows[i].id).collect()
+    }
+
+    fn micros(at: &str) -> i64 {
+        parse_timestamp_micros(at).expect("fixture timestamp parses")
+    }
+
+    /// 从根层起递归收集各层的行（层序拼接 = 全序在保留集上的限制）。
+    fn collect_levels<'a>(rows: &[TreeRow<'a>], forest: &Forest) -> Vec<&'a str> {
+        fn walk<'a>(
+            rows: &[TreeRow<'a>],
+            forest: &Forest,
+            scope: Option<&str>,
+            out: &mut Vec<&'a str>,
+        ) {
+            let level = forest.level(scope, false);
+            for &index in &level.rows {
+                out.push(rows[index].id);
+                walk(rows, forest, Some(rows[index].id), out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(rows, forest, None, &mut out);
+        out
+    }
+
     #[test]
     fn empty_input_places_nothing() {
         assert!(build_forest(&[]).is_empty());
+        let forest = Forest::build(&[]);
+        assert!(forest.tree().is_empty());
+        assert_eq!(forest.level(None, false), Level::default());
+        assert_eq!(forest.level(Some("anything"), true), Level::default());
+        assert_eq!(forest.parent_of(0), None);
+        assert_eq!(forest.crew(0), Crew::default());
+    }
+
+    #[test]
+    fn build_forest_is_the_tree_projection_of_the_forest() {
+        let rows = [
+            row("A", None),
+            row("c", Some("A")),
+            pinned(row("z", None), Some("2026-10-01T09:00:00")),
+        ];
+        assert_eq!(build_forest(&rows), Forest::build(&rows).tree().to_vec());
     }
 
     #[test]
@@ -340,8 +586,7 @@ mod tests {
             pinned(row("new", Some("P")), Some("2026-10-06T09:00:00")),
         ];
         let out = build_forest(&rows);
-        let order: Vec<&str> = shape(&rows, &out).into_iter().map(|(id, ..)| id).collect();
-        assert_eq!(order, ["P", "new", "old"]);
+        assert_eq!(order(&rows, &out), ["P", "new", "old"]);
     }
 
     #[test]
@@ -352,10 +597,9 @@ mod tests {
             pinned(row("garbage", None), Some("not-a-time")),
         ];
         let out = build_forest(&rows);
-        let order: Vec<&str> = shape(&rows, &out).into_iter().map(|(id, ..)| id).collect();
         // 有时间的在前；「未知」与「不可解析」同等垫底，彼此按 id 升序
         // （确定性 tie-break：garbage < unknown）。
-        assert_eq!(order, ["timed", "garbage", "unknown"]);
+        assert_eq!(order(&rows, &out), ["timed", "garbage", "unknown"]);
     }
 
     #[test]
@@ -367,8 +611,7 @@ mod tests {
             active(row("X", Some("P")), "2026-10-03T00:00:00"),
         ];
         let out = build_forest(&rows);
-        let order: Vec<&str> = shape(&rows, &out).into_iter().map(|(id, ..)| id).collect();
-        assert_eq!(order, ["P", "X", "Q"]);
+        assert_eq!(order(&rows, &out), ["P", "X", "Q"]);
     }
 
     #[test]
@@ -379,8 +622,7 @@ mod tests {
             row("c", None),
         ];
         let out = build_forest(&rows);
-        let order: Vec<&str> = shape(&rows, &out).into_iter().map(|(id, ..)| id).collect();
-        assert_eq!(order, ["a", "b", "c"]);
+        assert_eq!(order(&rows, &out), ["a", "b", "c"]);
     }
 
     #[test]
@@ -451,5 +693,328 @@ mod tests {
             deepest.prefix
         );
         assert!(deepest.prefix.ends_with("└─ "));
+    }
+
+    // ── 排序：子树注意力 ──────────────────────────────────────────
+
+    #[test]
+    fn attention_lifts_a_quiet_root_with_a_waiting_grandchild() {
+        // Q 最近更活跃，但 P 的子树里有人等你 —— 祖先照样上浮（注意力是子树
+        // 属性，与 pin 的「只在兄弟组内说话」刻意不同）。
+        let rows = [
+            active(row("P", None), "2026-10-01T00:00:00"),
+            active(row("Q", None), "2026-10-02T00:00:00"),
+            row("X", Some("P")),
+            waiting(active(row("g", Some("X")), "2026-09-30T00:00:00")),
+        ];
+        let out = build_forest(&rows);
+        assert_eq!(order(&rows, &out), ["P", "X", "g", "Q"]);
+    }
+
+    #[test]
+    fn a_row_waiting_itself_has_attention() {
+        let rows = [
+            active(row("busy", None), "2026-10-05T00:00:00"),
+            active(waiting(row("me", None)), "2026-10-01T00:00:00"),
+        ];
+        let out = build_forest(&rows);
+        assert_eq!(order(&rows, &out), ["me", "busy"]);
+    }
+
+    #[test]
+    fn attention_never_outranks_pin() {
+        let rows = [
+            pinned(
+                active(row("pinned", None), "2026-09-01T00:00:00"),
+                Some("2026-09-01T00:00:00"),
+            ),
+            active(row("attended", None), "2026-10-05T00:00:00"),
+            waiting(row("kid", Some("attended"))),
+        ];
+        let out = build_forest(&rows);
+        assert_eq!(order(&rows, &out), ["pinned", "attended", "kid"]);
+    }
+
+    #[test]
+    fn a_waiting_sibling_leads_its_level_only() {
+        // 同一层里：注意力压过活跃度（c-waiting 更旧仍在前）。根层的 A 也因
+        // 子树注意力而领先，但 B 与 A 的兄弟关系不变。
+        let rows = [
+            active(row("A", None), "2026-10-03T00:00:00"),
+            active(row("B", None), "2026-10-01T00:00:00"),
+            active(row("c-quiet", Some("A")), "2026-10-02T00:00:00"),
+            waiting(active(row("c-waiting", Some("A")), "2026-09-01T00:00:00")),
+        ];
+        let out = build_forest(&rows);
+        assert_eq!(order(&rows, &out), ["A", "c-waiting", "c-quiet", "B"]);
+    }
+
+    #[test]
+    fn a_working_row_does_not_buy_attention() {
+        // `working` 进 crew 计数，但不进排序键：一次长轮次不该把行顶到
+        // 「有人等你」前面。
+        let rows = [
+            working(active(row("running", None), "2026-10-01T00:00:00")),
+            active(waiting(row("asking", None)), "2026-09-01T00:00:00"),
+        ];
+        let out = build_forest(&rows);
+        assert_eq!(order(&rows, &out), ["asking", "running"]);
+    }
+
+    #[test]
+    fn duplicate_ids_keep_a_total_order() {
+        // 畸形输入（同一 id 两行）：id 并列后按输入下标兜底，不随排序算法漂移。
+        let rows = [row("dup", None), row("dup", None), row("a", None)];
+        let forest = Forest::build(&rows);
+        let indices: Vec<usize> = forest.tree().iter().map(|e| e.index).collect();
+        assert_eq!(indices, [2, 0, 1]);
+    }
+
+    // ── crew 聚合 ────────────────────────────────────────────────
+
+    #[test]
+    fn crew_counts_every_descendant_including_dormant_ones() {
+        let rows = [
+            row("P", None),
+            working(row("w1", Some("P"))),
+            inactive(row("d1", Some("P"))),
+            waiting(active(row("g", Some("w1")), "2026-10-05T00:00:00")),
+            inactive(row("gd", Some("d1"))),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(
+            forest.crew(0),
+            Crew {
+                descendants: 4,
+                waiting: 1,
+                working: 1,
+                activity: Some(micros("2026-10-05T00:00:00")),
+            }
+        );
+        // 中间节点只数自己的后代。
+        assert_eq!(
+            forest.crew(1),
+            Crew {
+                descendants: 1,
+                waiting: 1,
+                working: 0,
+                activity: Some(micros("2026-10-05T00:00:00")),
+            }
+        );
+        // dormant 分支照样聚合（d1 → gd）。
+        assert_eq!(forest.crew(2).descendants, 1);
+        assert_eq!(forest.crew(2).waiting, 0);
+    }
+
+    #[test]
+    fn crew_of_a_leaf_is_empty_but_still_carries_its_activity() {
+        let rows = [active(row("leaf", None), "2026-10-05T00:00:00")];
+        let forest = Forest::build(&rows);
+        assert_eq!(
+            forest.crew(0),
+            Crew {
+                descendants: 0,
+                waiting: 0,
+                working: 0,
+                activity: Some(micros("2026-10-05T00:00:00")),
+            }
+        );
+        // 越界 = 空聚合（调用方只会传自己拿到的下标）。
+        assert_eq!(forest.crew(9), Crew::default());
+    }
+
+    #[test]
+    fn crew_activity_is_the_sort_key_and_ignores_unparsable_times() {
+        let rows = [
+            row("P", None),
+            active(row("old", Some("P")), "2026-09-01T00:00:00"),
+            active(row("new", Some("P")), "2026-10-01T00:00:00"),
+            active(row("garbage", Some("P")), "not-a-time"),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(forest.crew(0).activity, Some(micros("2026-10-01T00:00:00")));
+    }
+
+    // ── 存活闭包 + 层投影 ────────────────────────────────────────
+
+    #[test]
+    fn a_dormant_parent_stays_kept_for_its_live_child() {
+        // 不闭包的话 P 会凭空消失，活的子 c 就升格成根 —— 「层 = 任务」失效。
+        let rows = [inactive(row("P", None)), row("c", Some("P"))];
+        let forest = Forest::build(&rows);
+        let root = forest.level(None, false);
+        assert_eq!(ids(&rows, &root), ["P"]);
+        assert_eq!(root.dormant_children, 0);
+        assert_eq!(ids(&rows, &forest.level(Some("P"), false)), ["c"]);
+    }
+
+    #[test]
+    fn a_fully_dormant_subtree_is_counted_not_listed() {
+        let rows = [
+            row("live", None),
+            inactive(row("P", None)),
+            inactive(row("c", Some("P"))),
+        ];
+        let forest = Forest::build(&rows);
+        let root = forest.level(None, false);
+        assert_eq!(ids(&rows, &root), ["live"]);
+        assert_eq!(root.dormant_children, 1, "只数直接子（P），不数 P 的子");
+    }
+
+    #[test]
+    fn a_pinned_dormant_root_keeps_its_place_in_the_default_level() {
+        let rows = [
+            active(row("live", None), "2026-10-02T00:00:00"),
+            pinned(inactive(row("parked", None)), None),
+        ];
+        let forest = Forest::build(&rows);
+        let root = forest.level(None, false);
+        assert_eq!(ids(&rows, &root), ["parked", "live"]);
+        assert_eq!(root.dormant_children, 0);
+    }
+
+    #[test]
+    fn include_dormant_lists_everything_and_reports_no_collapse() {
+        let rows = [
+            active(row("r1", None), "2026-10-01T00:00:00"),
+            inactive(row("dormant", None)),
+            active(row("r2", None), "2026-10-02T00:00:00"),
+        ];
+        let forest = Forest::build(&rows);
+        let root = forest.level(None, true);
+        assert_eq!(ids(&rows, &root), ["r2", "r1", "dormant"]);
+        assert_eq!(root.dormant_children, 0);
+        // `include_dormant` 只放开过滤、不改顺序：保留集是全量的**子序列**（不是前缀
+        // ——dormant 行可以夹在中间）。
+        let kept: Vec<&str> = ids(&rows, &forest.level(None, false));
+        let all: Vec<&str> = ids(&rows, &root);
+        assert_eq!(kept, ["r2", "r1"]);
+        let mut rest = all.iter();
+        for id in &kept {
+            assert!(rest.any(|t| t == id), "{id} 不在全量里或相对顺序变了");
+        }
+    }
+
+    #[test]
+    fn a_level_lists_direct_children_only() {
+        let rows = [
+            row("P", None),
+            row("c1", Some("P")),
+            row("c2", Some("P")),
+            row("g", Some("c1")),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(ids(&rows, &forest.level(None, false)), ["P"]);
+        assert_eq!(ids(&rows, &forest.level(Some("P"), false)), ["c1", "c2"]);
+        assert_eq!(ids(&rows, &forest.level(Some("c1"), false)), ["g"]);
+        assert!(forest.level(Some("g"), false).rows.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_scope_is_an_empty_level() {
+        let rows = [row("P", None), row("c", Some("P"))];
+        let forest = Forest::build(&rows);
+        assert_eq!(forest.level(Some("gone"), false), Level::default());
+        assert_eq!(forest.level(Some("gone"), true), Level::default());
+    }
+
+    #[test]
+    fn ghost_parents_and_cycles_are_roots_in_the_level_view() {
+        let rows = [
+            row("x", Some("ghost")),
+            row("a", Some("b")),
+            row("b", Some("a")),
+        ];
+        let forest = Forest::build(&rows);
+        let root = forest.level(None, false);
+        assert_eq!(ids(&rows, &root), ["a", "b", "x"]);
+        assert_eq!(root.dormant_children, 0);
+        // 幽灵父不是 scope（它不在集合里）。
+        assert_eq!(forest.level(Some("ghost"), true), Level::default());
+    }
+
+    #[test]
+    fn parent_of_follows_the_effective_parent_chain() {
+        let rows = [
+            row("P", None),
+            row("c", Some("P")),
+            row("g", Some("c")),
+            row("cyc-a", Some("cyc-b")),
+            row("cyc-b", Some("cyc-a")),
+            row("orphan", Some("ghost")),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(forest.parent_of(0), None);
+        assert_eq!(forest.parent_of(1), Some(0));
+        assert_eq!(forest.parent_of(2), Some(1));
+        // 环断开 → 环上节点是根（面包屑不会绕圈）。
+        assert_eq!(forest.parent_of(3), None);
+        assert_eq!(forest.parent_of(4), None);
+        assert_eq!(forest.parent_of(5), None);
+        assert_eq!(forest.parent_of(99), None);
+    }
+
+    #[test]
+    fn the_levels_partition_the_kept_rows_in_total_order() {
+        let rows = [
+            active(row("root-a", None), "2026-10-01T00:00:00"),
+            inactive(row("parked", None)),
+            working(row("kid-a", Some("root-a"))),
+            inactive(row("kid-dead", Some("root-a"))),
+            waiting(active(row("grand", Some("kid-a")), "2026-10-05T00:00:00")),
+            active(row("root-b", None), "2026-10-09T00:00:00"),
+        ];
+        let forest = Forest::build(&rows);
+        let collected = collect_levels(&rows, &forest);
+        assert_eq!(collected, ["root-a", "kid-a", "grand", "root-b"]);
+        // 无重复、无孤儿。
+        let unique: HashSet<&str> = collected.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            collected.len(),
+            "duplicate rows: {collected:?}"
+        );
+        // 相对顺序 = 全序的限制（collected 是全序的子序列）。
+        let total = order(&rows, forest.tree());
+        let mut rest = total.iter();
+        for id in &collected {
+            assert!(rest.any(|t| t == id), "{id} 不在全序里或相对顺序变了");
+        }
+    }
+
+    #[test]
+    fn the_projection_ignores_the_input_order() {
+        let rows = [
+            active(row("root", None), "2026-10-01T00:00:00"),
+            pinned(inactive(row("parked", None)), Some("2026-10-02T00:00:00")),
+            inactive(row("gone", Some("root"))),
+            waiting(row("ask", Some("root"))),
+            working(row("work", Some("root"))),
+            row("orphan", Some("ghost")),
+        ];
+        let mut reversed = rows.to_vec();
+        reversed.reverse();
+        let forward = Forest::build(&rows);
+        let backward = Forest::build(&reversed);
+
+        let tree_of = |rows: &[TreeRow<'_>], forest: &Forest| -> Vec<(String, String)> {
+            forest
+                .tree()
+                .iter()
+                .map(|e| (rows[e.index].id.to_string(), e.prefix.clone()))
+                .collect()
+        };
+        assert_eq!(tree_of(&rows, &forward), tree_of(&reversed, &backward));
+        assert_eq!(
+            collect_levels(&rows, &forward),
+            collect_levels(&reversed, &backward)
+        );
+        for (i, r) in rows.iter().enumerate() {
+            let j = reversed
+                .iter()
+                .position(|other| other.id == r.id)
+                .expect("fixture ids are unique");
+            assert_eq!(forward.crew(i), backward.crew(j), "crew of {}", r.id);
+        }
     }
 }
