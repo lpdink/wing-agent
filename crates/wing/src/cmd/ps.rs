@@ -410,7 +410,7 @@ fn level_rows<'a>(
 /// 只吃下标谓词：森林的下标空间是传给 [`Forest::build`] 的那个切片，把「另一份
 /// 数组」和森林配在一起是内核最怕的误用（静默画错行），所以由调用方在自己的
 /// 数组上捕获。
-fn in_total_order(forest: &Forest, keep: impl Fn(usize) -> bool) -> Vec<usize> {
+fn in_total_order(forest: &Forest<'_>, keep: impl Fn(usize) -> bool) -> Vec<usize> {
     forest
         .tree()
         .iter()
@@ -420,7 +420,7 @@ fn in_total_order(forest: &Forest, keep: impl Fn(usize) -> bool) -> Vec<usize> {
 }
 
 /// 会话行 → 森林输入（内核要的四件事：拓扑 / pin / 最后交互 / 行状态）。
-fn forest_of(sessions: &[SessionInfo]) -> Forest {
+fn forest_of<'a>(sessions: &'a [SessionInfo]) -> Forest<'a> {
     let input: Vec<TreeRow<'_>> = sessions
         .iter()
         .map(|session| TreeRow {
