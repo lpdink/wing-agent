@@ -64,8 +64,9 @@ pub struct LevelView {
 }
 
 impl LevelView {
-    /// 当前层（`None` = 根层 = 任务层）。
-    pub fn scope(&self) -> Option<&str> {
+    /// 当前层（`None` = 根层 = 任务层）。给 [`Self::query`] 用：层的 `scope` 只喂投影；
+    /// 「在第几层」归 [`Self::depth`]（键位路由与 Esc 阶梯读它）。
+    fn scope(&self) -> Option<&str> {
         self.path.last().map(String::as_str)
     }
 

@@ -83,11 +83,13 @@ const FOOTNOTE_HINT: &str = " · Ctrl+A";
 /// 只有层视图给 `Some`（一次一层的投影）；搜索态没有层级信息，`None` 让整行退回树形
 /// 之前的形状——那个状态下的行是逐字不变的。
 ///
-/// 两个字段都是**事实**，各有渲染之外的读者：`crew.descendants > 0` 就是「这一行能不能
-/// 进去」（`→` 的判据），`current` 决定左槽那个标记。
+/// 两个字段都是**事实**：`crew.descendants > 0` 有渲染之外的读者（「这一行能不能进去」
+/// —— `→` 的判据），`current` 只决定左槽那个标记。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LevelDecor {
-    /// 内核的 crew 聚合：三个计数画徽章（`activity` 由投影折进 LAST 列）。
+    /// 内核的 crew 聚合：三个计数画徽章。`activity` 只给内核排序用——要显示子树活跃，
+    /// 走 [`crate::shared::session_tree::Forest::activity_of`] 取来源行的原文，别把微秒
+    /// 格式化回来。
     pub crew: Crew,
     /// 这一行在当前会话的祖先链上（含自己）。
     pub current: bool,
@@ -460,7 +462,8 @@ fn crew_badges(
     (spans, width)
 }
 
-/// 尾注的两种写法：`⋯ N dormant` / 开关打开时 `⋯ N dormant shown`。
+/// 收起时的尾注要说的是「还有几条没显示」；开关打开后同一行改口说「已经全在这儿」并给出
+/// 关回去的键——否则满屏 dormant 行底下再写一句「N dormant」会自相矛盾。
 fn footnote_text(footnote: DormantFootnote) -> String {
     if footnote.shown {
         format!("⋯ {} dormant shown", footnote.hidden)
