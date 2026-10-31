@@ -324,10 +324,10 @@ pub fn build_forest(rows: &[TreeRow<'_>]) -> Vec<TreeEntry> {
 /// 存活：不在内存（`inactive`）才算 dormant。状态未知（`None`）按存活处理——
 /// 「不知道」不能当成「已逐出」把行藏起来。
 ///
-/// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」）。命令行列表在进
-/// 内核之前还有一份只看默认视图的剪裁（不带 `--tag` / `--parent` / `--all` 时删掉
-/// 未 pin 的 inactive 行；表格与 `--json` 都受影响）：那条通路看不到闭包，
-/// `dormant_children` 与 crew 计数也会少算 dormant 后代。
+/// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」）。`wing ps` 的
+/// `--flat` / `--tree` / `--json` 仍先按存活剪裁再进内核（早先的行集，逐字兼容），
+/// 那条通路看不到闭包：`dormant_children` 恒 0，crew 计数也少算 dormant 后代。
+/// 默认的层视图不走那条路——它在全集上建森林，过滤发生在投影之后。
 fn is_live(status: Option<SessionStatus>) -> bool {
     status != Some(SessionStatus::Inactive)
 }
