@@ -103,6 +103,9 @@ pub(super) enum KeyRoute {
     /// command is refused with a toast, otherwise the popup is dropped and the
     /// key continues to the composer.
     PopupEmpty,
+    /// 会话面板的层视图：`→` 进层 / `←`（含层 ≥ 1 的 `Esc`）退层 / `Ctrl+A` dormant /
+    /// `Ctrl+D`、`Ctrl+U` 翻页。判据见 [`App::route_key`]。
+    SessionLevel(SessionLevelAction),
     /// The chat viewport owns the key.
     ChatScroll(ChatScrollAction),
     /// Everything else — the composer.
@@ -117,6 +120,49 @@ fn app_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
             | crossterm::event::KeyCode::PageUp
             | crossterm::event::KeyCode::PageDown
     )
+}
+
+/// 会话面板层视图接管的键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionLevelAction {
+    /// `→` 进入高亮行的 crew（该行没有子会话 = no-op）。**不是 `Enter` 键**：
+    /// `Enter` 在任何层都是「切到该行会话」。
+    Descend,
+    /// `←`（层 ≥ 1 的 `Esc` 同义）退回上一层；根层 = no-op。
+    Back,
+    /// `Ctrl+A` 翻转「当前层包含 dormant」。
+    ToggleDormant,
+    /// `Ctrl+D` / `Ctrl+U` 光标下 / 上移一屏。
+    PageDown,
+    PageUp,
+}
+
+/// 层视图的键位表。
+///
+/// 参数为空的会话面板是**另一套键位**：`←/→` 在那里是导航（进去 / 出来），不是
+/// composer 的光标位置；`Esc` 在层 ≥ 1 时是「退回上一层」，不是关闭或打断。搜索态
+/// （参数非空）一个键都不接管——`←/→` 得留给 composer，用户正在改搜索词。
+///
+/// 三个 `Ctrl` 组合（`A` / `D` / `U`）在 composer / popup 都没有别的含义（composer 的
+/// Ctrl 只有 `Ctrl+J` / `Ctrl+M` 换行）；带 SHIFT / ALT / SUPER 的组合不接（系统手势，
+/// 与 `is_paste_clipboard_key` 同一条口径）。
+fn session_level_key(key: &crossterm::event::KeyEvent, depth: usize) -> Option<SessionLevelAction> {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    let control = key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::SUPER);
+    match key.code {
+        KeyCode::Right if key.modifiers.is_empty() => Some(SessionLevelAction::Descend),
+        KeyCode::Left if key.modifiers.is_empty() => Some(SessionLevelAction::Back),
+        KeyCode::Esc if depth > 0 => Some(SessionLevelAction::Back),
+        KeyCode::Char('a' | 'A') if control => Some(SessionLevelAction::ToggleDormant),
+        KeyCode::Char('d' | 'D') if control => Some(SessionLevelAction::PageDown),
+        KeyCode::Char('u' | 'U') if control => Some(SessionLevelAction::PageUp),
+        _ => None,
+    }
 }
 
 /// `Ctrl+O` — 展开 / 收起思考块（**全局**：所有轮一起切）。
@@ -265,6 +311,15 @@ impl App {
         // popup's, and the "armed but empty" case gets its own route so its
         // Enter refusal stays explicit. Scroll keys are *not* taken here — the
         // rungs below the popup handle them via `handle_scroll_or_composer_key`.
+        //
+        // 会话面板的层视图先说话：`→/←/Ctrl+A/Ctrl+D/Ctrl+U` 与层 ≥ 1 的 `Esc` 归
+        // 面板。位置有讲究——必须在 Esc rung（否则 Esc 先被阶梯吃掉）与 popup rung
+        // （否则空层会被 PopupEmpty 截走）之前。
+        if self.popup.active.session_level_view()
+            && let Some(action) = session_level_key(key, self.popup.level_view.depth())
+        {
+            return KeyRoute::SessionLevel(action);
+        }
         if key.code == crossterm::event::KeyCode::Esc {
             return KeyRoute::EscLadder;
         }
@@ -382,19 +437,26 @@ impl App {
             KeyRoute::PopupEmpty => {
                 self.reset_quit_counter();
                 // 例外：must-select 命令保持 popup——Enter 给显式"无匹配候选"反馈，
-                // 绝不落到自由文本发送（参数必须来自候选）。
+                // 绝不落到自由文本发送（参数必须来自候选）。层视图的空层不是这个意思
+                // （那里没有参数可改，`←` 才是出口）：Enter 什么都不做，也不劝人改参数。
                 if self.popup.active.is_must_select_empty() {
                     if key.code == crossterm::event::KeyCode::Enter {
-                        self.show_toast(Toast::warning(
-                            "No matching candidates — adjust the argument and select from the popup",
-                            std::time::Duration::from_secs(4),
-                        ));
+                        if !self.popup.active.session_level_view() {
+                            self.show_toast(Toast::warning(
+                                "No matching candidates — adjust the argument and select from the popup",
+                                std::time::Duration::from_secs(4),
+                            ));
+                        }
                         return;
                     }
                 } else {
-                    self.popup.active = ActivePopup::None;
+                    self.popup.close_active();
                 }
                 self.handle_scroll_or_composer_key(key);
+            }
+            KeyRoute::SessionLevel(action) => {
+                self.reset_quit_counter();
+                self.handle_session_level_key(action);
             }
             KeyRoute::ChatScroll(action) => {
                 self.reset_quit_counter();
@@ -523,7 +585,7 @@ impl App {
     /// leave the Ctrl+C gesture alone (pre-lane behaviour, kept verbatim).
     fn handle_escape_key(&mut self) -> bool {
         if self.popup.active.is_active() {
-            self.popup.active = ActivePopup::None;
+            self.popup.close_active();
             return true;
         }
         if !self.input.text().is_empty() {
@@ -584,7 +646,7 @@ impl App {
                     }
                     self.input.clear();
                 }
-                self.popup.active = ActivePopup::None;
+                self.popup.close_active();
                 self.submit_message(payload);
             }
             InputAction::SubmitBlocked => {
@@ -659,7 +721,7 @@ impl App {
                             }
                         }
                     }
-                    self.popup.active = ActivePopup::None;
+                    self.popup.close_active();
                     let text = self.input.expand_and_get_text();
                     let text = text.trim().to_string();
                     if !text.is_empty() {
@@ -678,6 +740,60 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// 层切换是**对已抓取 payload 的重新投影**——零 HTTP 重取：面板已经开着，
+    /// 输入路径的「打开即刷新」边沿（`was_session_panel → is_session_panel`）不会
+    /// 再次触发，走的只是 `ActivePopup` 的重建。
+    fn handle_session_level_key(&mut self, action: SessionLevelAction) {
+        match action {
+            SessionLevelAction::Descend => {
+                let Some(id) = self.popup.active.selected_name().map(str::to_string) else {
+                    return;
+                };
+                // 无子 = no-op（不进空层）。事实来自这次投影（内核的 crew 聚合：后代数
+                // 为 0 ⟺ 没有直接子），不另算一遍拓扑——环 / 幽灵父上两套规则会分叉。
+                let has_crew = self
+                    .popup
+                    .active
+                    .selected_crew()
+                    .is_some_and(|crew| crew.descendants > 0);
+                if !has_crew {
+                    return;
+                }
+                self.popup.level_view.enter(&id);
+                self.reproject_session_panel();
+                // 进入一层：光标落在当前会话那一行（不在本层则停在第一行）。
+                self.popup.active.reselect(&self.session_id);
+            }
+            SessionLevelAction::Back => {
+                let Some(left) = self.popup.level_view.back() else {
+                    return;
+                };
+                self.reproject_session_panel();
+                // 退回一层：光标落回你刚才进来的那一行（往返稳定，不跳顶部）。
+                self.popup.active.reselect(&left);
+            }
+            SessionLevelAction::ToggleDormant => {
+                let anchor = self.popup.active.selected_name().map(str::to_string);
+                let index = self.popup.active.selected_index().unwrap_or(0);
+                self.popup.level_view.toggle_dormant();
+                self.reproject_session_panel();
+                // 行集只会变大（打开）或收窄（关回去）：光标钉回原来那一行；那一行正好
+                // 被收起时就停在它原来的位置上，而不是跳回第一条。
+                let stayed = anchor.is_some_and(|anchor| self.popup.active.reselect(&anchor));
+                if !stayed {
+                    self.popup.active.select_index(index);
+                }
+            }
+            SessionLevelAction::PageDown => self.popup.active.move_page(true),
+            SessionLevelAction::PageUp => self.popup.active.move_page(false),
+        }
+    }
+
+    /// 按当前的层状态重投影行集（不取数据）。
+    fn reproject_session_panel(&mut self) {
+        self.update_popup_from_input();
     }
 
     /// Handle a bracketed paste event: routed to the active ask panel's inline
@@ -810,7 +926,7 @@ impl App {
             let panel = ModelPanel::new(self.model_sources.clone(), self.current_model_id());
             self.present_model_panel(panel);
             // The popup yields to the modal panel (never both at once).
-            self.popup.active = ActivePopup::None;
+            self.popup.close_active();
         } else {
             self.show_toast(Toast::info(
                 "Loading models…",

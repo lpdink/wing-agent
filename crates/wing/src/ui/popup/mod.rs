@@ -3,18 +3,21 @@
 pub mod command;
 pub mod selection;
 
+use crate::shared::session_tree::Crew;
 use command::CandidateCache;
 use command::PopupAction;
+use command::SessionQuery;
 use command::candidate_request_for;
 use command::filter_candidates;
 use command::filter_commands;
-use command::filter_session_candidates;
 use command::is_exact_session_match;
 use command::is_local_candidate_command;
 use command::is_session_command;
 use command::parse_slash_input;
+use command::session_panel;
 use selection::SelectionRow;
 use selection::SelectionState;
+use selection::SessionChrome;
 use selection::popup_height;
 use selection::rich_max_visible;
 
@@ -43,6 +46,8 @@ pub enum ActivePopup {
         rows: Vec<SelectionRow>,
         /// Navigation state.
         state: SelectionState,
+        /// 层视图的 chrome 行（面包屑 / dormant 尾注）；不是候选行，只占高度。
+        chrome: SessionChrome,
     },
 }
 
@@ -71,7 +76,15 @@ impl ActivePopup {
     /// Update popup state based on current input text.
     ///
     /// Returns an optional action to fetch candidates via HTTP.
-    pub fn update_from_input(&mut self, text: &str, cache: &CandidateCache) -> Option<PopupAction> {
+    ///
+    /// `query` 只被会话面板消费（层视图的 scope / dormant 开关 / 当前会话）；
+    /// 其它命令忽略它。
+    pub fn update_from_input(
+        &mut self,
+        text: &str,
+        cache: &CandidateCache,
+        query: SessionQuery<'_>,
+    ) -> Option<PopupAction> {
         let Some((cmd, args)) = parse_slash_input(text) else {
             *self = Self::None;
             return None;
@@ -94,16 +107,18 @@ impl ActivePopup {
                     *self = Self::None;
                     return None;
                 }
-                let rows = filter_session_candidates(candidates, args);
-                let count = rows.len();
+                // 两种行集形状（层视图 / 全量搜索）由 args 定，见 `session_panel`。
+                let panel = session_panel(candidates, args, query);
+                let count = panel.rows.len();
                 let filter = args.to_string();
                 let mut state = SelectionState::with_max_visible(count, rich_max_visible());
-                select_exact_match(&rows, args, &mut state);
+                select_exact_match(&panel.rows, args, &mut state);
                 *self = Self::SubCommand {
                     command: cmd.to_string(),
                     filter,
-                    rows,
+                    rows: panel.rows,
                     state,
+                    chrome: panel.chrome,
                 };
                 return None;
             }
@@ -138,6 +153,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
+                    chrome: SessionChrome::default(),
                 };
                 return None;
             }
@@ -168,6 +184,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
+                    chrome: SessionChrome::default(),
                 };
                 return None;
             }
@@ -210,17 +227,42 @@ impl ActivePopup {
     }
 
     /// Get the popup height (0 if no popup).
+    ///
+    /// chrome 行（面包屑 / dormant 尾注）算在里面：它们占 popup 的上下各一行，
+    /// 排版按这个高度给矩形，渲染侧再从矩形里扣掉。
     pub fn height(&self) -> u16 {
         match self {
             Self::None => 0,
             Self::Command { rows, state, .. } => popup_height(rows, state.max_visible),
-            Self::SubCommand { rows, state, .. } => popup_height(rows, state.max_visible),
+            Self::SubCommand {
+                rows,
+                state,
+                chrome,
+                ..
+            } => popup_height(rows, state.max_visible) + chrome.height(),
         }
     }
 
     /// Whether a popup is active.
     pub fn is_active(&self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// 会话面板的层视图：`/session`、`/ss` 子命令态 + 参数为空 + **画得出来**。
+    ///
+    /// 「参数为空 = 层视图」这个行集形状的判定归投影（
+    /// [`command::session_panel`](crate::ui::popup::command::session_panel)）；这里只回答
+    /// 「这个面板此刻是不是那个形状」。
+    ///
+    /// 第三个条件是键盘接管的门槛（`docs/dev/tui-input.md` 的可见性口径）：一个高度为 0
+    /// 的面板不接管任何键，否则「看起来空闲」的界面按键不响应。
+    pub fn session_level_view(&self) -> bool {
+        match self {
+            Self::SubCommand {
+                command, filter, ..
+            } => is_session_command(command) && filter.is_empty() && self.height() > 0,
+            _ => false,
+        }
     }
 
     /// Whether the popup has any matching items to select from.
@@ -261,6 +303,19 @@ impl ActivePopup {
         }
     }
 
+    /// 光标上 / 下移一屏（`Ctrl+U` / `Ctrl+D`）。钳在两端，不环绕——翻页是「跳到视野
+    /// 的另一头」，绕着环回到刚才那一头只会让人以为自己没按下去。
+    pub fn move_page(&mut self, down: bool) {
+        match self {
+            Self::Command { state, .. } | Self::SubCommand { state, .. } => {
+                let page = state.max_visible;
+                let page = page as isize;
+                state.move_by(if down { page } else { -page });
+            }
+            Self::None => {}
+        }
+    }
+
     /// Get the selected item's name (for completion).
     pub fn selected_name(&self) -> Option<&str> {
         match self {
@@ -269,6 +324,39 @@ impl ActivePopup {
             Self::SubCommand { rows, state, .. } => {
                 rows.get(state.selected).map(|r| r.name.as_str())
             }
+        }
+    }
+
+    /// 高亮行的 crew 聚合（只有层视图的行有；`None` = 没有选中 / 不是层视图的行）。
+    ///
+    /// 「能不能进去」= `descendants > 0`：事实来自这次投影（内核聚合，每个有效子贡献
+    /// 1 + 自己的后代），调用方不用另算一遍拓扑。
+    pub fn selected_crew(&self) -> Option<Crew> {
+        match self {
+            Self::Command { rows, state, .. } | Self::SubCommand { rows, state, .. } => rows
+                .get(state.selected)
+                .and_then(|row| row.rich.as_ref())
+                .and_then(|rich| rich.level)
+                .map(|level| level.crew),
+            Self::None => None,
+        }
+    }
+
+    /// 当前选中行的下标（过界按最后一行算；没有行 = `None`）。
+    pub fn selected_index(&self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::Command { rows, state, .. } | Self::SubCommand { rows, state, .. } => {
+                (!rows.is_empty()).then(|| state.selected.min(rows.len() - 1))
+            }
+        }
+    }
+
+    /// 把光标放到第 `index` 行（clamp）——行集收窄时用它停在「原来那个位置」附近的行上。
+    pub fn select_index(&mut self, index: usize) {
+        match self {
+            Self::Command { state, .. } | Self::SubCommand { state, .. } => state.select(index),
+            Self::None => {}
         }
     }
 
@@ -357,20 +445,31 @@ impl ActivePopup {
     }
 
     /// Access the popup for rendering.
-    pub fn render_data(&self) -> Option<(&[SelectionRow], &SelectionState, &str)> {
+    ///
+    /// 第四个元素是 chrome 行：`None` = 非候选面板（命令列表 / 没有面板）；子命令面板一律
+    /// `Some`，其中**非层视图的**（`/fork` / `/agents` / `/copy`）是空 chrome（高度 0）。
+    pub fn render_data(
+        &self,
+    ) -> Option<(
+        &[SelectionRow],
+        &SelectionState,
+        &str,
+        Option<&SessionChrome>,
+    )> {
         match self {
             Self::None => None,
             Self::Command {
                 rows,
                 state,
                 filter,
-            } => Some((rows, state, filter)),
+            } => Some((rows, state, filter, None)),
             Self::SubCommand {
                 rows,
                 state,
                 filter,
+                chrome,
                 ..
-            } => Some((rows, state, filter)),
+            } => Some((rows, state, filter, Some(chrome))),
         }
     }
 }
@@ -384,12 +483,13 @@ mod tests {
     fn sess(id: &str, title: &str) -> command::SessionCandidate {
         command::SessionCandidate {
             id: id.into(),
+            parent: None,
             title: title.into(),
             workspace: "/tmp/ws".into(),
             status: "idle".into(),
             last_interaction: "2025-07-22T21:41:00".into(),
             pinned: false,
-            tree_prefix: String::new(),
+            pin_added_at: None,
         }
     }
 
@@ -424,7 +524,7 @@ mod tests {
     fn test_active_popup_command_mode() {
         let mut popup = ActivePopup::default();
         let cache = sample_cache();
-        popup.update_from_input("/mo", &cache);
+        popup.update_from_input("/mo", &cache, SessionQuery::default());
         assert!(popup.is_active());
         assert!(popup.height() > 0);
     }
@@ -437,7 +537,7 @@ mod tests {
             ("uuid-1".into(), "first".into()),
             ("uuid-2".into(), "second".into()),
         ];
-        popup.update_from_input("/fork ", &cache);
+        popup.update_from_input("/fork ", &cache, SessionQuery::default());
         assert!(popup.is_active());
         assert!(matches!(popup, ActivePopup::SubCommand { .. }));
     }
@@ -446,7 +546,7 @@ mod tests {
     fn test_active_popup_completion() {
         let mut popup = ActivePopup::default();
         let cache = sample_cache();
-        popup.update_from_input("/he", &cache);
+        popup.update_from_input("/he", &cache, SessionQuery::default());
         let completion = popup.completion_text();
         assert!(completion.is_some());
         assert_eq!(completion.unwrap(), "/help");
@@ -457,7 +557,7 @@ mod tests {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
         cache.branches = vec![("uuid-1".into(), "first".into())];
-        popup.update_from_input("/fork uu", &cache);
+        popup.update_from_input("/fork uu", &cache, SessionQuery::default());
         let completion = popup.completion_text();
         assert!(completion.is_some());
         assert_eq!(completion.unwrap(), "/fork uuid-1");
@@ -467,7 +567,7 @@ mod tests {
     fn test_active_popup_navigation() {
         let mut popup = ActivePopup::default();
         let cache = sample_cache();
-        popup.update_from_input("/", &cache);
+        popup.update_from_input("/", &cache, SessionQuery::default());
         popup.move_down();
         let name1 = popup.selected_name().map(String::from);
         popup.move_down();
@@ -480,15 +580,15 @@ mod tests {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
         // /help exact match → popup hidden (None).
-        popup.update_from_input("/help", &cache);
+        popup.update_from_input("/help", &cache, SessionQuery::default());
         assert!(!popup.is_active());
         // /hel partial match → popup shows, should submit (no candidates).
-        popup.update_from_input("/hel", &cache);
+        popup.update_from_input("/hel", &cache, SessionQuery::default());
         assert!(popup.is_active());
         assert!(popup.should_submit());
         // /for partial match → popup shows, should NOT submit (has candidates).
         cache.branches = vec![("uuid-1".into(), "first".into())];
-        popup.update_from_input("/for", &cache);
+        popup.update_from_input("/for", &cache, SessionQuery::default());
         assert!(popup.is_active());
         assert!(!popup.should_submit());
     }
@@ -498,7 +598,7 @@ mod tests {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
         // 非候选命令精确匹配 → 隐藏 popup（原行为不变）。
-        popup.update_from_input("/clear", &cache);
+        popup.update_from_input("/clear", &cache, SessionQuery::default());
         assert!(!popup.is_active());
         // must-select 命令精确匹配 → popup 保持打开，选中位跟随精确行
         //（Enter = 确认选择，而非自由文本发送）。
@@ -506,7 +606,7 @@ mod tests {
             ("uuid-1".into(), "first".into()),
             ("uuid-2".into(), "second".into()),
         ];
-        popup.update_from_input("/fork uuid-1", &cache);
+        popup.update_from_input("/fork uuid-1", &cache, SessionQuery::default());
         assert!(popup.is_active());
         assert!(popup.should_submit());
         if let ActivePopup::SubCommand { rows, state, .. } = &popup {
@@ -515,7 +615,7 @@ mod tests {
             panic!("expected SubCommand popup");
         }
         // 部分匹配同样显示 popup。
-        popup.update_from_input("/fork uuid", &cache);
+        popup.update_from_input("/fork uuid", &cache, SessionQuery::default());
         assert!(popup.is_active());
     }
 
@@ -525,13 +625,13 @@ mod tests {
         let mut cache = sample_cache();
         cache.agents = vec![("coder".into(), String::new())];
         // 无匹配候选 → must-select 空（Enter 需给显式反馈，不落自由发送）。
-        popup.update_from_input("/agents nonexistent", &cache);
+        popup.update_from_input("/agents nonexistent", &cache, SessionQuery::default());
         assert!(popup.is_must_select_empty());
         // 有匹配候选 → 非空。
-        popup.update_from_input("/agents cod", &cache);
+        popup.update_from_input("/agents cod", &cache, SessionQuery::default());
         assert!(!popup.is_must_select_empty());
         // 非 must-select 命令的空 popup → false。
-        popup.update_from_input("/zzz", &cache);
+        popup.update_from_input("/zzz", &cache, SessionQuery::default());
         assert!(!popup.is_must_select_empty());
     }
 
@@ -540,7 +640,7 @@ mod tests {
         let mut popup = ActivePopup::default();
         let mut cache = sample_cache();
         cache.branches = vec![("uuid-1".into(), "first".into())];
-        popup.update_from_input("/fork ", &cache);
+        popup.update_from_input("/fork ", &cache, SessionQuery::default());
         // Has a selection → should submit.
         assert!(popup.should_submit());
     }
@@ -551,7 +651,7 @@ mod tests {
 
         let mut popup = ActivePopup::default();
         let cache = CandidateCache::default(); // sessions empty
-        let action = popup.update_from_input("/session ", &cache);
+        let action = popup.update_from_input("/session ", &cache, SessionQuery::default());
         assert!(matches!(action, Some(PopupAction::FetchSessionList)));
     }
 
@@ -561,7 +661,7 @@ mod tests {
 
         let mut popup = ActivePopup::default();
         let cache = CandidateCache::default();
-        let action = popup.update_from_input("/ss ", &cache);
+        let action = popup.update_from_input("/ss ", &cache, SessionQuery::default());
         assert!(matches!(action, Some(PopupAction::FetchSessionList)));
     }
 
@@ -573,7 +673,7 @@ mod tests {
             sessions_fetched: true,
             ..CandidateCache::default()
         };
-        let action = popup.update_from_input("/session ", &cache);
+        let action = popup.update_from_input("/session ", &cache, SessionQuery::default());
         assert!(action.is_none()); // No fetch needed
         assert!(popup.is_active());
         assert!(matches!(popup, ActivePopup::SubCommand { .. }));
@@ -587,7 +687,7 @@ mod tests {
             sessions_fetched: true,
             ..CandidateCache::default()
         };
-        let action = popup.update_from_input("/session sess-1", &cache);
+        let action = popup.update_from_input("/session sess-1", &cache, SessionQuery::default());
         assert!(action.is_none());
         // must-select：精确匹配不隐藏 popup，选中位跟随该行。
         assert!(popup.is_active());
@@ -606,7 +706,7 @@ mod tests {
             sessions_fetched: true,
             ..CandidateCache::default()
         };
-        popup.update_from_input("/ss", &cache);
+        popup.update_from_input("/ss", &cache, SessionQuery::default());
         assert_eq!(popup.selected_name(), Some("sess-1"));
 
         // 命中锚点：光标跟到那一行（原地刷新后行序变了也不跳走）。
@@ -631,7 +731,7 @@ mod tests {
             sessions_fetched: true,
             ..CandidateCache::default()
         };
-        popup.update_from_input("/session ", &cache);
+        popup.update_from_input("/session ", &cache, SessionQuery::default());
         if let ActivePopup::SubCommand { rows, state, .. } = &popup {
             assert_eq!(rows.len(), 1);
             assert!(rows[0].rich.is_some());
@@ -648,7 +748,7 @@ mod tests {
 
         let mut popup = ActivePopup::default();
         let cache = CandidateCache::default();
-        let action = popup.update_from_input("/fork ", &cache);
+        let action = popup.update_from_input("/fork ", &cache, SessionQuery::default());
         assert!(matches!(action, Some(PopupAction::FetchBranches)));
     }
 }

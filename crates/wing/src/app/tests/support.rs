@@ -281,7 +281,8 @@ pub(super) fn open_session_popup(app: &mut App, count: usize) {
             status: "idle".into(),
             last_interaction: "2026-01-01T00:00:00".into(),
             pinned: false,
-            tree_prefix: String::new(),
+            parent: None,
+            pin_added_at: None,
         })
         .collect();
     app.popup.cache.sessions_fetched = true;
@@ -298,7 +299,7 @@ pub(super) fn walk_popup_to_the_end(app: &mut App, steps: usize) {
 
 /// 弹层当前选中项应当出现在帧上的那段文本（rich 行是标题，普通行是名字）。
 pub(super) fn popup_selection_label(app: &App) -> String {
-    let (rows, state, _) = app.popup.active.render_data().expect("popup");
+    let (rows, state, ..) = app.popup.active.render_data().expect("popup");
     let row = &rows[state.selected];
     row.rich
         .as_ref()

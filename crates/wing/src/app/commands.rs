@@ -382,7 +382,7 @@ impl App {
         // 面板身份必须在更新**之前**读：进入（上一次不在面板里）才是边沿。
         let was_session_panel = self.popup.active.session_panel_command().is_some();
         let text = self.input.text().to_string();
-        if let Some(action) = self.popup.update_from_input(&text) {
+        if let Some(action) = self.popup.update_from_input(&text, &self.session_id) {
             // 流式守卫**不拦**这一支：`update_from_input` 只在候选缺失时返回
             // action，所以这条 fetch 就是**面板的首帧**（各命令的等待态画不画
             // 得出东西都不一样——`/ss` 的占位列表无行、`/session` 与 `/fork`
@@ -594,15 +594,14 @@ impl App {
             FetchPayload::SessionList(resp) => {
                 use crate::protocol::SessionStatus;
                 use crate::shared::pinning::{is_pinned, pin_added_at};
-                use crate::shared::session_tree::{TreeRow, build_forest};
+                use crate::shared::session_tree::{Forest, TreeRow};
                 use crate::ui::popup::command::SessionCandidate;
 
                 // 面板的展示序 = **树序**（`shared::session_tree`，与 `wing ps
                 // --tree` 共用同一份实现，见 docs/dev/session-lineage.md §4）：
-                // 有父的会话跟在父下面并带连接前缀，pin 的根连同子树整块上浮，
-                // 子节点的 pin 只在兄弟组内说话。后端下发的基准序不再是面板的
-                // 定序输入——树序的每个排序键都是自足的（pin 时间 / 子树注意力 /
-                // 子树活跃 / id），workspace 只做展示与搜索。
+                // pin 的根连同子树整块上浮，子节点的 pin 只在兄弟组内说话。后端下发的
+                // 基准序不再是面板的定序输入——树序的每个排序键都是自足的（pin 时间 /
+                // 子树注意力 / 子树活跃 / id），workspace 只做展示与搜索。
                 let anchor = self.popup.active.selected_name().map(str::to_string);
                 // pin 事实（标签 + 时间）算一次喂两处：树的排序键与候选行的星标
                 // 谓词——两者共用同一份投影，不会各算各的。
@@ -624,21 +623,30 @@ impl App {
                         status: SessionStatus::parse(&s.status),
                     })
                     .collect();
-                let candidates: Vec<SessionCandidate> = build_forest(&rows)
-                    .into_iter()
+                let candidates: Vec<SessionCandidate> = Forest::build(&rows)
+                    .tree()
+                    .iter()
                     .map(|entry| {
                         let s = &resp.sessions[entry.index];
                         SessionCandidate {
                             id: s.id.clone(),
+                            // 层投影按 `parent` 复原森林：树序是排好的结果，拓扑只能
+                            // 从原始字段重建。
+                            parent: s.parent_session_id.clone(),
                             title: s.name.clone().unwrap_or_default(),
                             workspace: s.workspace.clone().unwrap_or_default(),
                             status: s.status.clone(),
                             last_interaction: s.last_interaction.clone().unwrap_or_default(),
                             pinned: pins[entry.index].0,
-                            tree_prefix: entry.prefix,
+                            pin_added_at: pins[entry.index].1.map(str::to_string),
                         }
                     })
                     .collect();
+
+                // 面板开着的层可能刚被归档 / 删除：路径失效即回根层（不报错）。
+                self.popup
+                    .level_view
+                    .retain_existing(|id| candidates.iter().any(|c| c.id == id));
 
                 self.popup.cache.sessions = candidates;
                 self.popup.cache.sessions_fetched = true;

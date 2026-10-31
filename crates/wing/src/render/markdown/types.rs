@@ -378,6 +378,22 @@ pub fn truncate_left_to_display_width(text: &str, max_width: usize) -> String {
     format!("…{}", tail.into_iter().collect::<String>())
 }
 
+/// Truncate from the right **with a trailing ellipsis** — the sibling of
+/// [`truncate_left_to_display_width`] for text whose head is what matters
+/// (a level name, a row of facts).
+///
+/// 省略号占 1 列、计入预算；本身放得下的文本原样返回（可以无条件调用）；预算为 0 时返回
+/// 空串（不写一个孤零零的 `…` —— 它自己也要占 1 列）。
+pub fn elide_to_display_width(text: &str, max_width: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    format!("{}…", truncate_to_display_width(text, max_width - 1))
+}
+
 /// Truncate a string to fit within a given display width (CJK-safe).
 ///
 /// Uses UnicodeWidthChar to measure each character's display width,
@@ -406,6 +422,22 @@ pub fn truncate_to_display_width(text: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::style::Color;
+
+    #[test]
+    fn elide_keeps_the_head_and_counts_the_ellipsis() {
+        // 放得下就原样返回（可以无条件调用）。
+        assert_eq!(elide_to_display_width("the team", 20), "the team");
+        assert_eq!(elide_to_display_width("the team", 8), "the team");
+        // 省略号占 1 列、计入预算。
+        assert_eq!(elide_to_display_width("the team", 6), "the t…");
+        // CJK 安全：宽度按 `UnicodeWidthChar` 记账（一个汉字 2 列），中文尾巴不超宽。
+        assert_eq!(elide_to_display_width("会话层级", 5), "会话…");
+        // 少一列装不下第二个汉字：宁可短一列，不切开一个字（也不超宽）。
+        assert_eq!(elide_to_display_width("会话层级", 4), "会…");
+        // 预算 0 = 空串（不写孤零零的省略号）。
+        assert_eq!(elide_to_display_width("the team", 0), "");
+        assert_eq!(elide_to_display_width("", 0), "");
+    }
 
     #[test]
     fn truncate_left_keeps_the_tail_and_counts_the_ellipsis() {

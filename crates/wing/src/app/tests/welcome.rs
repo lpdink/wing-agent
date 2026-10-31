@@ -236,7 +236,7 @@ fn a_short_splash_popup_keeps_the_selection_visible() {
         "选中的「{label}」要画得出来：\n{body}"
     );
     // 窗口贴住尾部：画出来的是最后几条，最早的几条已经滚出去了。
-    let (rows, _, _) = app.popup.active.render_data().expect("popup");
+    let (rows, ..) = app.popup.active.render_data().expect("popup");
     let first = rows[0].rich.as_ref().expect("rich row").title.clone();
     assert!(!body.contains(&first), "开头那条已经不在了：\n{body}");
 }
