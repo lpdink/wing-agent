@@ -1119,6 +1119,88 @@ mod session_list {
     }
 
     #[test]
+    fn test_typing_in_the_level_view_starts_the_search() {
+        // 层视图的空过滤词 = 「当前层」而不是「搜索态」：一个字符必须进搜索词。
+        // 落回 composer 会把命令名改写成 `/ssk` —— 面板关掉、层位置一起丢。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("alpha", "first", "/ws", "idle", "2025-01-02T00:00:00", None),
+                session("beta", "second", "/ws", "idle", "2025-01-01T00:00:00", None),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_ids(&app), ["alpha", "beta"]);
+
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.input.text(), "/ss b", "字符进了命令的参数区");
+        assert_eq!(
+            app.popup.active.session_panel_command(),
+            Some("/ss"),
+            "面板还在会话子命令态"
+        );
+        let (rows, state, filter, chrome) = app.popup.active.render_data().expect("panel is open");
+        assert_eq!(filter, "b", "面板进入搜索态");
+        assert_eq!(
+            chrome,
+            Some(&SessionChrome::default()),
+            "搜索态没有面包屑 / 尾注"
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["beta"]
+        );
+        assert_eq!(state.selected, 0);
+
+        // Esc 阶梯不受影响：搜索态的那个 Esc 仍然关面板。
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.popup.active.is_active(), "Esc 关面板");
+    }
+
+    #[test]
+    fn test_typing_into_an_existing_filter_word_is_plain_draft_editing() {
+        // 过滤词已有内容 = 用户正在改搜索词：字符与退格都照旧归 composer。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("alpha", "first", "/ws", "idle", "2025-01-02T00:00:00", None),
+                session("beta", "second", "/ws", "idle", "2025-01-01T00:00:00", None),
+            ],
+        );
+        app.input.set_text("/ss b");
+        app.update_popup_from_input();
+        assert!(!app.popup.active.session_level_view(), "前提：搜索态");
+
+        app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(app.input.text(), "/ss be");
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.input.text(), "/ss b");
+        assert_eq!(
+            app.popup.active.session_panel_command(),
+            Some("/ss"),
+            "搜索态自始至终都在同一个面板里"
+        );
+    }
+
+    #[test]
+    fn test_typing_in_another_candidate_panel_still_edits_the_draft() {
+        // 只有会话面板的层视图接管字符：其它候选面板（`/fork`）维持今天的行为 ——
+        // 字符照常进 composer（草稿变成 `/fork x`，面板块照旧由 `update_popup_from_input`
+        // 重新判定）。
+        let mut app = app();
+        app.popup.cache.branches = vec![("uuid-1".into(), "preview".into())];
+        app.input.set_text("/fork ");
+        app.update_popup_from_input();
+        assert!(app.popup.active.is_active(), "前提：候选面板");
+
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.input.text(), "/fork x");
+    }
+
+    #[test]
     fn test_enter_and_back_keep_the_cursor_on_the_row_you_came_from() {
         // 两个根，要进去的那个**排在第二行**：这样「光标回到它」与「光标跳回第一条」
         // 才是可区分的两件事。

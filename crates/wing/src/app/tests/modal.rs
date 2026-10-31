@@ -1010,11 +1010,29 @@ fn test_the_level_view_owns_its_keys_and_leaves_the_others_alone() {
             "{code:?}+{mods:?} 不归层视图"
         );
     }
-    // 导航 / 提交 / 补全 / 打字照旧走 popup 与 composer。
+    // 导航 / 提交 / 补全照旧走 popup；**可打印字符**归面板 —— 它是「开始输入过滤词」，
+    // 落到 composer 会把命令名改写成 `/ssk`。
     assert_eq!(app.route_key(&key(KeyCode::Down)), KeyRoute::PopupNav);
     assert_eq!(app.route_key(&key(KeyCode::Enter)), KeyRoute::PopupNav);
     assert_eq!(app.route_key(&key(KeyCode::Tab)), KeyRoute::PopupNav);
-    assert_eq!(app.route_key(&key(KeyCode::Char('k'))), KeyRoute::PopupNav);
+    assert_eq!(
+        app.route_key(&key(KeyCode::Char('k'))),
+        KeyRoute::SessionFilter('k')
+    );
+    // 带 CONTROL / ALT / SUPER 的字符不是字面输入（系统手势的回传），空白也开不了
+    // 搜索：两者照旧落回 popup / composer。
+    for (code, mods) in [
+        (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        (KeyCode::Char('k'), KeyModifiers::ALT),
+        (KeyCode::Char('k'), KeyModifiers::SUPER),
+    ] {
+        assert_eq!(
+            app.route_key(&crossterm::event::KeyEvent::new(code, mods)),
+            KeyRoute::PopupNav,
+            "{code:?}+{mods:?} 不是过滤词"
+        );
+    }
+    assert_eq!(app.route_key(&key(KeyCode::Char(' '))), KeyRoute::PopupNav);
     // 根层的 Esc 是今天的阶梯；进层后才是「退一层」（且不关面板）。
     assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::EscLadder);
     app.handle_key(key(KeyCode::Right));
@@ -1099,6 +1117,11 @@ fn test_an_empty_level_keeps_its_keys_and_swallows_enter() {
     app.handle_key(key(KeyCode::Enter));
     assert!(app.popup.active.is_active(), "Enter 不清空层");
     assert!(app.popup.level_view.depth() == 1);
+
+    // 空层照样能打字开搜索：crew 全 dormant 的那一屏正是最需要搜索的地方。
+    app.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(app.input.text(), "/ss b");
+    assert!(app.popup.active.is_active(), "搜索态仍在同一个面板里");
 }
 
 #[test]
