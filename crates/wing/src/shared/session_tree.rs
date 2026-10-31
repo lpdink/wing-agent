@@ -124,9 +124,10 @@ pub struct Level {
 /// dormant 父被剪掉，它的活子就升成假根，crew 也少算那些后代）。过滤是投影的事，
 /// 不能发生在投影之前。
 #[derive(Debug, Default)]
-pub struct Forest {
-    /// id → 输入下标（重 id 取先到者）。
-    index_of: HashMap<String, usize>,
+pub struct Forest<'a> {
+    /// id → 输入下标（重 id 取先到者）。键借用输入切片的 id：面板每次输入路径都会
+    /// 重建森林，逐行 clone 一遍 id 只是把分配成本压给每一次按键。
+    index_of: HashMap<&'a str, usize>,
     /// 有效父（幽灵父 / 环已断开）。
     parent: Vec<Option<usize>>,
     /// 每个节点的直接子，已按排序契约排好（层投影只过滤、不重排）。
@@ -141,13 +142,13 @@ pub struct Forest {
     tree: Vec<TreeEntry>,
 }
 
-impl Forest {
+impl<'a> Forest<'a> {
     /// 把会话行折成森林：拓扑 + 聚合 + 闭包 + 全序，一次算全。
     ///
     /// 每一项的排序键都是自足的（pin 时间 / 注意力 / 子树活跃 / id），因此同一批会话
     /// 在任何消费面都会得到同一个顺序。唯一例外是同 id 的重复行（只可能来自构造错误
     /// 的输入）：四把键全并列时按输入下标兜底成全序。
-    pub fn build(rows: &[TreeRow<'_>]) -> Self {
+    pub fn build(rows: &[TreeRow<'a>]) -> Self {
         let n = rows.len();
         if n == 0 {
             return Self::default();
@@ -155,9 +156,9 @@ impl Forest {
 
         // id → 下标。重 id 取先到者：id 是会话的唯一键，重复只会来自构造错误的
         // 输入，这里保证不 panic、不挂死即可（与幽灵父同级的降级）。
-        let mut index_of: HashMap<String, usize> = HashMap::with_capacity(n);
+        let mut index_of: HashMap<&'a str, usize> = HashMap::with_capacity(n);
         for (i, row) in rows.iter().enumerate() {
-            index_of.entry(row.id.to_string()).or_insert(i);
+            index_of.entry(row.id).or_insert(i);
         }
 
         // 直父（在集合内）→ **有效父**：整条链无环才算数。环上节点全部断开

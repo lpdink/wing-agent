@@ -526,3 +526,9 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 * **全局**：整条 transcript（所有轮）一起翻转，不是"只作用于当前回"；模式是 `ChatView` 的一个会话级字段（`thinking_expanded: Option<bool>`），会话内一直有效 —— resume / compaction / sync 重建后保持，新起的块天然跟随；
 * **初始默认**由配置给：`hidden` = 默认折叠（只剩标题行），`visible` = 默认展开（标题行 + 正文）。标题行（刷光 + 读秒）是所有思考块的固有部分；语义细节见 [tui-rendering.md](tui-rendering.md) 的「思考块：标题行与刷光」；
 * **发现**：这次会话还没按过 `Ctrl+O` 时，**进行中**的标题行行尾带一条静态提示 —— 展开中 `· Ctrl+O 折叠`、折叠中 `· Ctrl+O 展开`（不扫光；按过一次即退场；宽度装不下时第一个让位）—— 键位本身也在开屏 tips 池里（`shared/tips.rs`）。
+
+## 键位路由：弹层各占一段（`app/modal.rs` 的 `route_key`）
+
+键盘归属在一处决定（设置面板 → 应用保留键 `Esc`/`Ctrl+O`/`Ctrl+V` → ask 面板 → `/model` picker → **会话面板的层视图** → Esc 阶梯 → 命令 popup → chat 滚动 → composer），每一段只拿自己的键，其余让给下一段。
+
+**会话面板（`/ss`，参数为空时的层视图）** 是其中一段：`→` 进一层 / `←` 与层 ≥ 1 的 `Esc` 退一层 / `Ctrl+A` 当前层含 dormant / `Ctrl+D`、`Ctrl+U` 翻页，**空过滤词时一个可打印字符直接开启搜索**（等价于先敲空格再敲它：草稿 `/ss` → `/ss k`）。口径（含「进 / 退层不重取数据」「打字即搜索」的承诺）写在 [session-lineage.md](session-lineage.md) §4.1——改这一段键位前先读那张表，否则会被相邻的 rung 截走。

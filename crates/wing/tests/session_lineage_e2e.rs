@@ -411,10 +411,10 @@ async fn wing_ps_json_ignores_the_human_modes() {
     );
 }
 
-/// `--parent` = 一层往下：只列直接子；网关回全量（旧网关形态）时每个子带自己的
-/// crew，只回直接子（现代网关）时 crew 列按「没有后代」的规则不出现。
+/// `--parent` = 一层往下：只列直接子；行集是子集，所以既没有行尾汇总、也没有
+/// `CREW` 列（同一条判据：逐行 rollup 会把不在这一层的孙辈也数进来）。
 #[tokio::test(flavor = "multi_thread")]
-async fn wing_ps_parent_lists_children_with_their_crew() {
+async fn wing_ps_parent_lists_children_without_a_rollup() {
     let gateway = FakeGateway::start();
     let home = TempHome::new(gateway.port());
     gateway.set_sessions(vec![
@@ -442,7 +442,8 @@ async fn wing_ps_parent_lists_children_with_their_crew() {
     assert!(stdout.contains("kid"), "{stdout}");
     assert!(!stdout.contains("sched"), "父自己不在子层：{stdout}");
     assert!(!stdout.contains("grandkid"), "孙是第三层：{stdout}");
-    assert!(stdout.contains("1 ?1"), "子自己的 crew：{stdout}");
+    assert!(!stdout.contains("CREW"), "子层不给 rollup：{stdout}");
+    assert!(!stdout.contains("1 ?1"), "不数屏外的孙辈：{stdout}");
     // 子层的行集不是「根层」：crew 汇总行不打（否则数字把屏幕上已有的行也算进去）。
     assert!(!stdout.contains("folded"), "{stdout}");
 
@@ -471,8 +472,9 @@ async fn wing_ps_rejects_flat_with_tree() {
     assert_eq!(gateway.count("/api/session/list"), 0, "不该发列表请求");
 }
 
-/// `--tag` 是标签子集（不是一层）：命中的行逐行列出（任意深度，不折叠），父行的
-/// `CREW` 仍按全集算；行集不是层，所以不打行尾汇总。
+/// `--tag` 是标签子集（不是一层）：命中的行逐行列出（任意深度，不折叠），
+/// **不带 `CREW` 列**（行集是子集，逐行 rollup 会把不在屏上的后代也数进来——与不打
+/// 行尾汇总是同一条判据）。
 #[tokio::test(flavor = "multi_thread")]
 async fn wing_ps_tag_lists_every_match_without_folding() {
     let gateway = FakeGateway::start();
@@ -518,10 +520,9 @@ async fn wing_ps_tag_lists_every_match_without_folding() {
     assert!(stdout.contains("kid-a"), "{stdout}");
     assert!(!stdout.contains("grandkid"), "未打标签的孙不列：{stdout}");
     assert!(!stdout.contains("other"), "{stdout}");
-    // 未打标签的后代照样进父行的 crew：sched 有 kid-a 与 grandkid 两个后代、其中 1 个
-    // 在等；kid-a 只有 grandkid 一个。
-    assert!(stdout.contains("2 ?1"), "sched 的 crew：{stdout}");
-    assert!(stdout.contains("1 ?1"), "kid-a 的 crew：{stdout}");
+    // 收窄视图不给 rollup：否则 sched 数 2、kid-a 数 1（同一个孙被数两遍）会同屏出现。
+    assert!(!stdout.contains("CREW"), "标签子集没有 CREW 列：{stdout}");
+    assert!(!stdout.contains("?1"), "不数屏外的后代：{stdout}");
     // 行集不是一层 → 不打汇总行。
     assert!(!stdout.contains("folded"), "{stdout}");
 }

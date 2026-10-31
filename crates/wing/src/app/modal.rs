@@ -106,6 +106,9 @@ pub(super) enum KeyRoute {
     /// 会话面板的层视图：`→` 进层 / `←`（含层 ≥ 1 的 `Esc`）退层 / `Ctrl+A` dormant /
     /// `Ctrl+D`、`Ctrl+U` 翻页。判据见 [`App::route_key`]。
     SessionLevel(SessionLevelAction),
+    /// 会话面板的层视图里**开始输入过滤词**的那个可打印字符（`/ss` → `/ss k`）。
+    /// 只在这一种状态下有意义：过滤词非空时字符归 composer（用户正在改搜索词）。
+    SessionFilter(char),
     /// The chat viewport owns the key.
     ChatScroll(ChatScrollAction),
     /// Everything else — the composer.
@@ -141,7 +144,9 @@ pub(super) enum SessionLevelAction {
 ///
 /// 参数为空的会话面板是**另一套键位**：`←/→` 在那里是导航（进去 / 出来），不是
 /// composer 的光标位置；`Esc` 在层 ≥ 1 时是「退回上一层」，不是关闭或打断。搜索态
-/// （参数非空）一个键都不接管——`←/→` 得留给 composer，用户正在改搜索词。
+/// （参数非空）一个键都不接管——`←/→` 得留给 composer，用户正在改搜索词。空过滤词
+/// 下的**可打印字符**也不在这张表里：它不进层、不翻页，而是开启搜索态（见
+/// [`filter_start_char`]）。
 ///
 /// 三个 `Ctrl` 组合（`A` / `D` / `U`）在 composer / popup 都没有别的含义（composer 的
 /// Ctrl 只有 `Ctrl+J` / `Ctrl+M` 换行）；带 SHIFT / ALT / SUPER 的组合不接（系统手势，
@@ -161,6 +166,31 @@ fn session_level_key(key: &crossterm::event::KeyEvent, depth: usize) -> Option<S
         KeyCode::Char('a' | 'A') if control => Some(SessionLevelAction::ToggleDormant),
         KeyCode::Char('d' | 'D') if control => Some(SessionLevelAction::PageDown),
         KeyCode::Char('u' | 'U') if control => Some(SessionLevelAction::PageUp),
+        _ => None,
+    }
+}
+
+/// 层视图里「开始输入过滤词」的字符：一个可打印字符，且不带 CONTROL / ALT / SUPER /
+/// META / HYPER（SHIFT 照收——大写字母也是过滤词的第一个字符）。
+///
+/// 空白不接：过滤词是 id / 标题 / workspace 的子串，空格开不了任何搜索，落回 composer
+/// 也只是草稿末尾多一格、视图不变（今天的既有手感）。带修饰键的那几个与 composer 同一条
+/// 口径：它们是终端 / 系统快捷键的回传，不是字面输入。
+fn filter_start_char(key: &crossterm::event::KeyEvent) -> Option<char> {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    if key.modifiers.intersects(
+        KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::META
+            | KeyModifiers::HYPER,
+    ) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) if !c.is_control() && !c.is_whitespace() => Some(c),
         _ => None,
     }
 }
@@ -315,10 +345,17 @@ impl App {
         // 会话面板的层视图先说话：`→/←/Ctrl+A/Ctrl+D/Ctrl+U` 与层 ≥ 1 的 `Esc` 归
         // 面板。位置有讲究——必须在 Esc rung（否则 Esc 先被阶梯吃掉）与 popup rung
         // （否则空层会被 PopupEmpty 截走）之前。
-        if self.popup.active.session_level_view()
-            && let Some(action) = session_level_key(key, self.popup.level_view.depth())
-        {
-            return KeyRoute::SessionLevel(action);
+        if self.popup.active.session_level_view() {
+            let depth = self.popup.level_view.depth();
+            if let Some(action) = session_level_key(key, depth) {
+                return KeyRoute::SessionLevel(action);
+            }
+            // 空过滤词 = 「当前层」而不是「搜索态」：一个可打印字符要开启搜索。落到
+            // composer 会把命令名改写成 `/ssk`——面板与层位置一起丢，「打字即搜索」
+            // 也就不存在了。
+            if let Some(character) = filter_start_char(key) {
+                return KeyRoute::SessionFilter(character);
+            }
         }
         if key.code == crossterm::event::KeyCode::Esc {
             return KeyRoute::EscLadder;
@@ -457,6 +494,10 @@ impl App {
             KeyRoute::SessionLevel(action) => {
                 self.reset_quit_counter();
                 self.handle_session_level_key(action);
+            }
+            KeyRoute::SessionFilter(character) => {
+                self.reset_quit_counter();
+                self.start_session_filter(character);
             }
             KeyRoute::ChatScroll(action) => {
                 self.reset_quit_counter();
@@ -740,6 +781,18 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// 层视图里开始输入过滤词：把字符接到**命令之后**（`/ss` → `/ss k`），再走输入
+    /// 路径重新投影——效果与先敲一个空格、再敲这个字符一样，少一次按键。
+    ///
+    /// 光标先移到草稿末尾：参数区在命令之后，字符插进命令中间会把命令名改坏（面板
+    /// 随即消失）。用 composer 自己的插入原语，草稿里的 chip 原样保留。
+    fn start_session_filter(&mut self, character: char) {
+        self.input.move_draft_end();
+        self.input.insert_char(' ');
+        self.input.insert_char(character);
+        self.update_popup_from_input();
     }
 
     /// 层切换是**对已抓取 payload 的重新投影**——零 HTTP 重取：面板已经开着，
