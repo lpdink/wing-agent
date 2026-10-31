@@ -243,7 +243,7 @@ crates/wing/src/
 │   ├── images/                     图片 lane：mod（能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟））· media（媒体图的字节侧：屏幕目标集 · 抓取账本 · 字节 LRU）
 │   ├── replay.rs                    SyncSession 重放 → ChatCells（messages → events 能力分发）
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
-│   ├── popup_state.rs               Popup + 候选缓存 + 去重
+│   ├── popup_state.rs               Popup + 候选缓存 + 去重 + 层视图状态（当前层的路径 / dormant 开关）
 │   ├── preview.rs                   整屏帧取样器（创作期工具的库侧：真 App::draw → Buffer → 文本 / ANSI / HTML）
 │   ├── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
 │   └── tests/                       模块内单测（mod + 18 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / splash_frame / program_status + support）
@@ -262,7 +262,7 @@ crates/wing/src/
 │   ├── welcome/                     开屏欢迎屏：mod（状态·宽度阶梯·可见性门控）· art（海鸥帧 + 像素大字数据）· sprite（半格渲染 + 品牌调色板）· motion（idle/干活动作规划）· wordmark（渐变 + 扫光）
 │   ├── status_bar.rs / spinner.rs / toast.rs
 │   ├── input_area/                  Composer 悬浮卡片（chrome：悬浮几何·活动栏·元信息栏 / model：段 + chip 引擎（粘贴 chip 与图片 chip 同一套原子语义）· 注册表捆包 Chips / image：图片 chip（载荷 / 号码 / 标签文案 / insert_image）/ widget / editing / movement / wrap / 指针映射与高亮 pointer / paste / helpers）
-│   ├── popup/                       command（斜杠命令 + 候选项）/ selection（通用可选列表）
+│   ├── popup/                       command（斜杠命令 + 候选项 + 会话面板的层投影 / chrome）/ selection（通用可选列表 + 会话富行：crew 徽章 · 层级装饰 · 面包屑与尾注）
 │   └── cells/                       Chat cell 渲染（tool_call / thinking / todo_msg / ask_msg / diff_view / model_picker / notice）
 ├── render/                          Markdown + 语法高亮
 │   ├── ansi.rs                      Style → SGR 的库里唯一实现（CLI 表格 / 热力图 / 主题画廊 / 渲染探针 / 整屏帧共用；每段自闭合。`welcome_preview` / `thinking_preview` 两个 example 各留一份窄编码器，不在此列）
