@@ -97,7 +97,8 @@ pub struct Crew {
     /// 后代里在跑轮次（`working`）的条数。
     pub working: usize,
     /// 子树 `max(last_interaction)`（微秒；无时间 / 不可解析 = `None`）。与排序用的
-    /// 子树活跃是同一个值。
+    /// 子树活跃是同一个值，**只服务排序**：要显示请用 [`Forest::activity_of`] 取来源行的
+    /// 原文，别把微秒格式化回来。
     pub activity: Option<i64>,
 }
 
@@ -111,8 +112,8 @@ pub struct Level {
 }
 
 /// 一次构建的全部派生事实：拓扑（有效父 / 子 / 深度）、crew 聚合、存活闭包、
-/// 展示全序。四个投影（[`Self::tree`] / [`Self::crew`] / [`Self::parent_of`] /
-/// [`Self::level`]）都是它的只读视图——消费面构建一次，之后按需取。
+/// 展示全序。五个投影（[`Self::tree`] / [`Self::crew`] / [`Self::activity_of`] /
+/// [`Self::parent_of`] / [`Self::level`]）都是它的只读视图——消费面构建一次，之后按需取。
 ///
 /// **下标空间是接口契约**：投影吐出的 `usize` 永远是调用方传给 [`Self::build`] 的
 /// 那个切片的坐标。消费面按原序持有自己的行（不要在两次投影之间 sort / filter 那份
@@ -135,6 +136,8 @@ pub struct Forest {
     /// 存活闭包（`include_dormant` 之前的那一版）。
     kept: Vec<bool>,
     crew: Vec<Crew>,
+    /// 子树活跃来自哪一行（输入下标）：`crew` 的 `activity` 与它同源。
+    activity_row: Vec<usize>,
     tree: Vec<TreeEntry>,
 }
 
@@ -198,6 +201,9 @@ impl Forest {
                 ..Crew::default()
             })
             .collect();
+        // 子树活跃的来源行：默认自己（整棵子树都解析不了时消费面据此显示自己的原文，
+        // 而不是把解析失败画成空白），有更大的孩子就跟着孩子走。
+        let mut activity_row: Vec<usize> = (0..n).collect();
         let mut kept: Vec<bool> = rows
             .iter()
             .map(|row| is_live(row.status) || row.pinned)
@@ -213,6 +219,7 @@ impl Forest {
                 crew[i].working + usize::from(rows[i].status == Some(SessionStatus::Working));
             if crew[i].activity > crew[p].activity {
                 crew[p].activity = crew[i].activity;
+                activity_row[p] = activity_row[i];
             }
             kept[p] = kept[p] || kept[i];
         }
@@ -263,6 +270,7 @@ impl Forest {
             roots,
             kept,
             crew,
+            activity_row,
             tree,
         }
     }
@@ -279,6 +287,17 @@ impl Forest {
     /// 聚合（调用方只该传自己拿到的行下标）。
     pub fn crew(&self, index: usize) -> Crew {
         self.crew.get(index).copied().unwrap_or_default()
+    }
+
+    /// 子树活跃**来自哪一行**（输入下标，与投影同一份下标空间）：`crew(index).activity`
+    /// 就是从这一行的 `last_interaction` 解析出来的。
+    ///
+    /// 消费面据此显示子树活跃的**原文**——自己格式化回来会与各自的既有口径分叉（面板是
+    /// `MM-DD HH:MM`、CLI 是年龄词表），而同一时刻的两种书写也不能靠微秒反查（那是有损键）。
+    /// 整棵子树都没有可解析的时间时回落到该行自己（此时 `activity` 为 `None`）：消费面
+    /// 仍能显示自己的原文，而不是把解析失败画成空白。越界 = `None`（同 [`Self::crew`]）。
+    pub fn activity_of(&self, index: usize) -> Option<usize> {
+        self.activity_row.get(index).copied()
     }
 
     /// 有效父（输入下标）：根 / 幽灵父 / 环 = `None`。面包屑按它向上走，不要拿原始
@@ -322,12 +341,14 @@ pub fn build_forest(rows: &[TreeRow<'_>]) -> Vec<TreeEntry> {
 }
 
 /// 存活：不在内存（`inactive`）才算 dormant。状态未知（`None`）按存活处理——
-/// 「不知道」不能当成「已逐出」把行藏起来。
+/// 「不知道」不能当成「已逐出」把行藏起来。（面板另有一条：不认识的状态串按 `inactive`
+/// 画图标 —— 那是「画成什么样」，不是「留不留这一行」，两个问题各管各的。）
 ///
 /// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」）。`wing ps` 的
-/// `--flat` / `--tree` / `--json` 仍先按存活剪裁再进内核（早先的行集，逐字兼容），
-/// 那条通路看不到闭包：`dormant_children` 恒 0，crew 计数也少算 dormant 后代。
-/// 默认的层视图不走那条路——它在全集上建森林，过滤发生在投影之后。
+/// `--flat` / `--tree` / `--json` 走的是早先的行集（逐字兼容）：默认（无 `--all` /
+/// `--tag` / `--parent`）先丢掉 `inactive`，`--tree` 因此是在剪过的集合上建森林——闭包
+/// 不生效，被逐出的父不成行、它的活子升成根；`--flat` / `--json` 干脆不建森林。默认的
+/// 层视图不走那条路：它在全集上建森林，过滤发生在投影之后。
 fn is_live(status: Option<SessionStatus>) -> bool {
     status != Some(SessionStatus::Inactive)
 }
@@ -833,6 +854,58 @@ mod tests {
         ];
         let forest = Forest::build(&rows);
         assert_eq!(forest.crew(0).activity, Some(micros("2026-10-01T00:00:00")));
+    }
+
+    // ── 子树活跃的来源行 ────────────────────────────────────────
+
+    #[test]
+    fn the_activity_source_row_is_the_one_the_subtree_max_came_from() {
+        let rows = [
+            active(row("P", None), "2026-10-01T00:00:00"),
+            active(row("old", Some("P")), "2026-09-01T00:00:00"),
+            row("mid", Some("P")),
+            active(row("new", Some("mid")), "2026-10-05T00:00:00"),
+        ];
+        let forest = Forest::build(&rows);
+        // 叶子 / 自己就是最新动静的那一行 → 自己。
+        assert_eq!(forest.activity_of(1), Some(1));
+        assert_eq!(forest.activity_of(3), Some(3));
+        // 父与中间节点都指向孙那一行（来源行跟着递归走，不是只比直接子）。
+        assert_eq!(forest.activity_of(2), Some(3));
+        assert_eq!(forest.activity_of(0), Some(3));
+        assert_eq!(forest.crew(2).activity, Some(micros("2026-10-05T00:00:00")));
+        assert_eq!(forest.crew(0).activity, Some(micros("2026-10-05T00:00:00")));
+        // 越界 = `None`（同 crew 的空聚合）。
+        assert_eq!(forest.activity_of(99), None);
+    }
+
+    #[test]
+    fn a_subtree_without_a_usable_time_points_at_the_row_itself() {
+        // 整棵子树都解析不了（或没有时间）：消费面仍要显示自己的原文，不能留白。
+        let rows = [
+            active(row("P", None), "not-a-time"),
+            row("child", Some("P")),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(forest.crew(0).activity, None);
+        assert_eq!(forest.activity_of(0), Some(0));
+        assert_eq!(forest.activity_of(1), Some(1));
+    }
+
+    #[test]
+    fn the_activity_source_row_does_not_merge_two_spellings_of_one_instant() {
+        // 同一微秒、两种书写（手改 metadata 才会出现）：来源是**一行**，不是一张按微秒
+        // 反查的表——两个消费面因此拿到同一份原文，也不会互相覆盖。
+        let rows = [
+            row("P", None),
+            active(row("plus-eight", Some("P")), "2026-10-31T16:21:49+08:00"),
+            active(row("utc", Some("P")), "2026-10-31T08:21:49"),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(forest.crew(1).activity, forest.crew(2).activity);
+        // 并列时取先算到的那一行（同深度按输入序兜底）：再构建一次也不漂移。
+        assert_eq!(forest.activity_of(0), Some(1));
+        assert_eq!(Forest::build(&rows).activity_of(0), Some(1));
     }
 
     // ── 存活闭包 + 层投影 ────────────────────────────────────────

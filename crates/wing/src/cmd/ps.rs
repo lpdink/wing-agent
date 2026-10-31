@@ -16,7 +16,7 @@
 //!   descendants folded into a `CREW` column. `--parent <sid>` drills one
 //!   level down, `--tree` draws the whole forest, `--flat` prints the flat
 //!   list this command used to print. `--tag` / `--parent` narrow the row set
-//!   to a tag subset / a child layer (see [`level_rows`]), and only the root
+//!   to a tag subset / a child layer (see `level_rows`), and only the root
 //!   level carries the "N crew folded" footer;
 //! - **flat**: every session on its own row;
 //! - **tree**: the lineage forest with `├─` / `└─` prefixes.
@@ -276,7 +276,7 @@ fn render_view(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableMode {
     /// 默认：一层一个任务 + `CREW` 列。`--tag` / `--parent` 把行集收窄成标签子集 /
-    /// 子层（行尾汇总随之消失，见 [`LevelView::whole_level`]）。
+    /// 子层（行尾汇总随之消失，见 `level_rows`）。
     Level,
     /// `--flat`：一行一个会话，没有 `CREW` 列（本命令改动前的样子）。
     Flat,
@@ -304,6 +304,9 @@ struct SessionRow<'a> {
     prefix: String,
     /// 层视图的行带 crew 聚合（LAST 因此读子树活跃）；平铺与树状模式是 `None`。
     crew: Option<Crew>,
+    /// 层视图里 LAST 读**哪一行的原文**：内核给出的「子树活跃来自哪一行」（叶子 = 自己）。
+    /// 平铺与树状模式不用它（读 `session` 自己的时间）。
+    activity_source: Option<&'a str>,
 }
 
 /// 平铺呈现序（后端基准序 + pin 叠加，由 [`order_sessions`] 定）。
@@ -314,6 +317,7 @@ fn flat_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
             session,
             prefix: String::new(),
             crew: None,
+            activity_source: None,
         })
         .collect()
 }
@@ -329,18 +333,26 @@ fn tree_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
             session: &sessions[entry.index],
             prefix: entry.prefix.clone(),
             crew: None,
+            activity_source: None,
         })
         .collect()
 }
 
-/// 层视图的一次投影：行 + 这份行集是不是**完整的一层**。
-struct LevelView<'a> {
+/// 层视图的一次投影：行 + 这份行集是不是**完整的一层**。（同族的 `flat_rows` /
+/// `tree_rows` 只给行集；这条通路还要那个判据来决定打不打行尾汇总。）
+struct LevelRows<'a> {
     rows: Vec<SessionRow<'a>>,
     /// 根层且没有任何筛（`--all` 不影响这一点）。行尾汇总只描述这里：它是「你看到的
     /// 任务，它们的 crew 折起来了」这句入口提示。`--tag` 的行是标签子集（父与子可能
     /// 同时成行，列之和把屏幕上已有的会话又数一遍）、`--parent` 的行是子层（数字本身
     /// 没错，但那些行是 crew 不是任务，而且用户已经在往下钻）——两者都不打。
     whole_level: bool,
+}
+
+/// 有没有把行集收窄成「子集 / 子层」（`--tag` / `--parent`）。两个消费点共用这一条
+/// 判据：`filter_sessions` 决定走筛选分支，[`level_rows`] 取它的反面当 `whole_level`。
+fn is_narrowed(parent: Option<&str>, tags: &[String]) -> bool {
+    parent.is_some() || !tags.is_empty()
 }
 
 /// 层视图的行集：一行一个任务。
@@ -351,20 +363,15 @@ struct LevelView<'a> {
 /// - 有 `--tag` / `--parent`：标签与血缘是另一类筛（都隐含 `--all`），行集是同时满足
 ///   二者的行（AND），按**森林全序**取——定序契约因此对这两种筛同样成立。
 ///
-/// 两种情形都把森林建在 `sessions`（网关返回的原始列表，未按存活 / 标签过滤）上：
-/// crew 的后代计数要含 dormant 后代，过滤不能发生在建森林之前。
-/// 有没有把行集收窄成「子集 / 子层」（`--tag` / `--parent`）——两个消费点共用这一条
-/// 判据：`filter_sessions` 决定走筛选分支，`level_rows` 取它的反面当 `whole_level`。
-fn is_narrowed(parent: Option<&str>, tags: &[String]) -> bool {
-    parent.is_some() || !tags.is_empty()
-}
-
+/// 两种情形都把森林建在 `sessions`（网关返回的原始列表，**未按存活 / 标签过滤**）上：
+/// crew 的后代计数要含 dormant 后代、存活闭包要看到被逐出的父，过滤不能发生在建森林
+/// 之前（它只决定「哪些行进视图」）。
 fn level_rows<'a>(
     sessions: &'a [SessionInfo],
     all: bool,
     tags: &[String],
     parent: Option<&str>,
-) -> LevelView<'a> {
+) -> LevelRows<'a> {
     let forest = forest_of(sessions);
     let whole_level = !is_narrowed(parent, tags);
     let visible = if whole_level {
@@ -380,9 +387,12 @@ fn level_rows<'a>(
             session: &sessions[index],
             prefix: String::new(),
             crew: Some(forest.crew(index)),
+            activity_source: forest
+                .activity_of(index)
+                .and_then(|source| sessions[source].last_interaction.as_deref()),
         })
         .collect();
-    LevelView { rows, whole_level }
+    LevelRows { rows, whole_level }
 }
 
 /// 满足 `keep` 的行下标，顺序 = 森林全序（树序遍历）在该子集上的限制。
@@ -461,8 +471,9 @@ fn filter_sessions(
 /// 顺序（活跃优先、组内按最后交互时间降序）。
 ///
 /// 只作用于平铺与 `--json` 输出；层视图与 `--tree` 的定序归 [`Forest::build`]
-/// （它不读输入顺序），这里的排序对它们没有意义。`/ss` 面板全量视图同样走树序
-/// ——pin 在那里的语义是「分两层」（见 session_tree）。
+/// （它不读输入顺序），这里的排序对它们没有意义。`/ss` 面板的两条行集同样不读输入序
+/// ——层视图是森林全序在某一层的限制，搜索态是树序的子序列；pin 在那里的语义是
+/// 「分两层」（见 session_tree）。
 fn order_sessions(sessions: &mut [SessionInfo]) {
     sessions.sort_by_cached_key(|s| pin_key(is_pinned(&s.tags), pin_added_at(&s.tag_meta)));
 }
@@ -570,7 +581,7 @@ fn format_sessions_table(
 }
 
 /// 折进 `CREW` 列的后代数（= 该列之和）：列出现与否读这一个数。它能不能被当成
-/// 「被收起的会话数」写进行尾汇总，取决于行集是不是整层（见 [`LevelView::whole_level`]）。
+/// 「被收起的会话数」写进行尾汇总，取决于行集是不是整层（见 [`level_rows`]）。
 fn folded_crew(rows: &[SessionRow<'_>]) -> usize {
     rows.iter()
         .filter_map(|row| row.crew)
@@ -603,25 +614,15 @@ fn crew_text(crew: Crew) -> String {
     text
 }
 
-/// LAST 列：层视图里父行代表整棵任务，用子树最近一次动静（内核聚合，与面板同
-/// 口径）；其余行（叶子 / 平铺 / 树状）用会话自己的时间——与 `--flat` 逐字一致，
-/// 也保住「时间戳解析不了就原样展示」的降级。
+/// LAST 列：层视图的行读内核指出的**来源行**原文（叶子行的来源行就是它自己），其余模式
+/// 读会话自己的时间。两侧都走 [`format_last_interaction`]，所以「原样展示 / naive 当本地
+/// 墙钟 / 缺失给 `-`」这三条降级对父行与叶子行是同一条。
 fn last_text(row: &SessionRow<'_>, now: NaiveDateTime) -> String {
-    match row.crew {
-        Some(crew) if crew.descendants > 0 => format_activity(crew.activity, now),
-        _ => format_last_interaction(row.session.last_interaction.as_deref(), now),
-    }
-}
-
-/// 子树活跃（微秒，[`crate::shared::pinning::parse_timestamp_micros`] 的逆）→ 与
-/// [`format_last_interaction`] 同一个年龄词表。
-fn format_activity(micros: Option<i64>, now: NaiveDateTime) -> String {
-    match micros {
-        Some(micros) => chrono::DateTime::from_timestamp_micros(micros)
-            .map(|at| format_age(at.naive_utc(), now))
-            .unwrap_or_else(|| "-".to_string()),
-        None => "-".to_string(),
-    }
+    let stamp = match row.crew {
+        Some(_) => row.activity_source,
+        None => row.session.last_interaction.as_deref(),
+    };
+    format_last_interaction(stamp, now)
 }
 
 /// The model cell: display name first, then the call name, then the id
@@ -1836,6 +1837,50 @@ mod tests {
             .find(|l| l.contains("old-parent"))
             .expect("row");
         assert_eq!(row_cells(row)[2], "12h", "平铺仍是自己的时间：{flat}");
+    }
+
+    /// 父行的 LAST 与叶子行**同一条降级**（同一个格式化函数：原样展示 / 空串留空 /
+    /// 缺失给 `-`）。
+    #[test]
+    fn level_view_last_degrades_like_a_leaf_row() {
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 120,
+            color: false,
+        };
+        let now = naive("2026-10-15T22:00:00");
+        let last_of = |sessions: &[SessionInfo], id: &str| {
+            let table =
+                format_sessions_table(&level(sessions, false, &[], None), &palette, &out, now);
+            let row = table
+                .lines()
+                .find(|l| l.contains(id))
+                .expect("row")
+                .to_string();
+            (row_cells(&row)[2].clone(), table)
+        };
+
+        // 解析不了：父行的子树活跃只有这一个值 → 原样展示（不是 `-`）。
+        let garbage = vec![
+            last_at(session("garbage-parent", "idle", &[]), "not-a-time"),
+            child_of(session("quiet-kid", "idle", &[]), "garbage-parent"),
+        ];
+        let (cell, table) = last_of(&garbage, "garbage-parent");
+        assert_eq!(cell, "not-a-time", "父行与叶子行同一条降级：{table}");
+
+        // 带时区偏移：原样展示，不再拿「UTC 墙钟 vs 本地 now」算出一个 8h 的年龄。
+        let offset = vec![
+            session("offset-parent", "idle", &[]),
+            child_of(
+                last_at(
+                    session("offset-kid", "idle", &[]),
+                    "2026-10-15T21:59:22+08:00",
+                ),
+                "offset-parent",
+            ),
+        ];
+        let (cell, table) = last_of(&offset, "offset-parent");
+        assert_eq!(cell, "2026-10-15T21:59:22+08:00", "原样展示：{table}");
     }
 
     /// `--flat` / `--tree` 里没有 `CREW` 列：老布局逐字保留（层视图才是新面）。

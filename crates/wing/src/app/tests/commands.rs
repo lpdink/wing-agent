@@ -1643,7 +1643,7 @@ mod session_list {
         );
 
         // 有时间的按时间降序；时间未知 / 不可解析的 pin 排在其后，两者并列
-        // （活跃度同分）时按 id 升序（`build_forest` 的确定性 tie-break）。
+        // （活跃度同分）时按 id 升序（`Forest::build` 的确定性 tie-break）。
         assert_eq!(ids(&app), ["new-pin", "old-pin", "bare-pin", "loose-pin"]);
     }
 

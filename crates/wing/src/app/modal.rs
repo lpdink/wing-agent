@@ -762,7 +762,7 @@ impl App {
                     return;
                 }
                 self.popup.level_view.enter(&id);
-                self.reproject_session_panel();
+                self.update_popup();
                 // 进入一层：光标落在当前会话那一行（不在本层则停在第一行）。
                 self.popup.active.reselect(&self.session_id);
             }
@@ -770,7 +770,7 @@ impl App {
                 let Some(left) = self.popup.level_view.back() else {
                     return;
                 };
-                self.reproject_session_panel();
+                self.update_popup();
                 // 退回一层：光标落回你刚才进来的那一行（往返稳定，不跳顶部）。
                 self.popup.active.reselect(&left);
             }
@@ -778,7 +778,7 @@ impl App {
                 let anchor = self.popup.active.selected_name().map(str::to_string);
                 let index = self.popup.active.selected_index().unwrap_or(0);
                 self.popup.level_view.toggle_dormant();
-                self.reproject_session_panel();
+                self.update_popup();
                 // 行集只会变大（打开）或收窄（关回去）：光标钉回原来那一行；那一行正好
                 // 被收起时就停在它原来的位置上，而不是跳回第一条。
                 let stayed = anchor.is_some_and(|anchor| self.popup.active.reselect(&anchor));
@@ -789,11 +789,6 @@ impl App {
             SessionLevelAction::PageDown => self.popup.active.move_page(true),
             SessionLevelAction::PageUp => self.popup.active.move_page(false),
         }
-    }
-
-    /// 按当前的层状态重投影行集（不取数据）。
-    fn reproject_session_panel(&mut self) {
-        self.update_popup_from_input();
     }
 
     /// Handle a bracketed paste event: routed to the active ask panel's inline

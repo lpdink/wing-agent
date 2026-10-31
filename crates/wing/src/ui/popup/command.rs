@@ -6,7 +6,6 @@
 //! - Prefix matching with sort (exact > prefix)
 //! - Sub-command candidates (model list, session list, etc.)
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -19,7 +18,6 @@ use super::selection::format_last_active;
 use super::selection::plain_row;
 use crate::protocol::CommandInfo;
 use crate::protocol::SessionStatus;
-use crate::shared::pinning::parse_timestamp_micros;
 use crate::shared::session_tree::Forest;
 use crate::shared::session_tree::TreeRow;
 
@@ -344,12 +342,7 @@ fn rich_session_row(
 /// within each match tier (exact > prefix > contains), so the tree order the
 /// candidates were built in survives filtering.
 fn search_session_rows(candidates: &[SessionCandidate], args: &str) -> Vec<SelectionRow> {
-    if args.is_empty() {
-        // 空参数是层视图（见 [`session_panel`]）。release 下万一走到这里，给空行集而不是
-        // 「候选序透传」——后者看起来像一层，实际上谁都不是。
-        debug_assert!(false, "空参数的会话面板走层视图");
-        return Vec::new();
-    }
+    debug_assert!(!args.is_empty(), "空参数的会话面板走层视图");
     let args_lower = args.to_lowercase();
 
     let mut exact = Vec::new();
@@ -391,7 +384,7 @@ pub struct SessionQuery<'a> {
 }
 
 /// 一次投影的产物：候选行 + chrome 行（后者不是候选行）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct SessionPanel {
     pub rows: Vec<SelectionRow>,
     pub chrome: SessionChrome,
@@ -422,6 +415,7 @@ pub fn session_panel(
 ///
 /// 森林在这里重建一次（候选 → `TreeRow`）：层投影、存活闭包、crew 聚合与祖先链都是
 /// `Forest` 的只读视图，自己按 `parent` 过滤会漏掉闭包（dormant 父因活的子而保留）。
+/// [`tree_rows`] 是**保序保长**的一一映射，故森林的下标空间 ≡ `candidates` 的下标。
 fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> SessionPanel {
     let forest = Forest::build(&tree_rows(candidates));
 
@@ -430,15 +424,10 @@ fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> Sess
     let hidden = forest.level(query.scope, false).dormant_children;
     let level = forest.level(query.scope, query.include_dormant);
 
-    // LAST 列 = 子树最大活跃（内核聚合）。内核只给微秒，行 1 要的是与今天同格式的
-    // 文本，所以按候选自己的原文回查——把微秒格式化回来会与 `format_last_active`
-    // 的口径分叉（RFC3339 手改值会显示成 UTC 时钟）。
-    let stamps: HashMap<i64, &str> = candidates
-        .iter()
-        .filter_map(|c| {
-            parse_timestamp_micros(&c.last_interaction).map(|at| (at, c.last_interaction.as_str()))
-        })
-        .collect();
+    // LAST 列 = 子树最大活跃（内核聚合）。行 1 要的是与今天同格式的文本，所以取内核指出
+    // 的**来源行**原文交给同一个格式化函数：把微秒格式化回来会与 `format_last_active` 的
+    // 口径分叉（RFC3339 手改值会显示成 UTC 时钟），按微秒反查原文的键又是有损的（同一
+    // 时刻的两种书写会互相串行）。
     let chain = current_chain(&forest, candidates, query.current);
 
     let rows = level
@@ -447,11 +436,9 @@ fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> Sess
         .map(|&index| {
             let c = &candidates[index];
             let crew = forest.crew(index);
-            let last_active = crew
-                .activity
-                .and_then(|at| stamps.get(&at).copied())
-                .map(format_last_active)
-                .unwrap_or_default();
+            // 越界不会发生：`index` 来自上面那次 `level` 投影。
+            let source = forest.activity_of(index).unwrap_or(index);
+            let last_active = format_last_active(&candidates[source].last_interaction);
             rich_session_row(
                 c,
                 last_active,
@@ -525,7 +512,7 @@ fn level_chrome(
     }
 }
 
-/// 候选 → 内核的输入切片（层投影的唯一入口）。
+/// 候选 → 内核的输入切片（层投影的唯一入口）。保序保长：森林吐出的下标即候选下标。
 fn tree_rows(candidates: &[SessionCandidate]) -> Vec<TreeRow<'_>> {
     candidates
         .iter()
@@ -534,7 +521,7 @@ fn tree_rows(candidates: &[SessionCandidate]) -> Vec<TreeRow<'_>> {
             parent: c.parent.as_deref(),
             pinned: c.pinned,
             pin_added_at: c.pin_added_at.as_deref(),
-            // 空串 = 没有时间（内核与 `format_last_active` 都按不可解析降级）。
+            // 空串 = 没有时间（内核解析不了、`format_last_active` 给空串，同一条降级）。
             last_interaction: Some(c.last_interaction.as_str()),
             status: SessionStatus::parse(&c.status),
         })
@@ -553,8 +540,10 @@ pub fn is_exact_session_match(candidates: &[SessionCandidate], args: &str) -> bo
 /// last active time on line 1, title on line 2) plus the `id` used as the
 /// completion value. `workspace` doubles as a search field.
 ///
-/// 候选取自**全部**会话（子树序，见 `app::commands` 的 fetch 分支），层投影要用
-/// `parent` / `pin_added_at` 把森林复原出来——所以这两个字段是数据，不是装饰。
+/// 候选取自**全部**会话，但抓取序只决定搜索态的行序：层视图每次投影都用下面这些字段
+/// **重建森林**（内核不看输入顺序），所以 `parent` / `pinned` / `pin_added_at` /
+/// `last_interaction` / `status` 都是**数据**，不是装饰——少任何一个，层内的行序与
+/// 子树活跃都会静默偏离[排序契约](crate::shared::session_tree)。
 #[derive(Debug, Clone)]
 pub struct SessionCandidate {
     /// Session id — inserted on completion (not displayed verbatim).
@@ -565,13 +554,15 @@ pub struct SessionCandidate {
     pub title: String,
     /// Session workspace — displayed on line 1 and searched by `args`.
     pub workspace: String,
-    /// Runtime status string from the backend (inactive|idle|working|waiting).
+    /// Runtime status string from the backend (inactive|idle|working|waiting)：
+    /// 行 1 的状态图标，也是层视图重建森林时的输入（注意力 / crew 计数 / 存活）。
     pub status: String,
-    /// Last interaction timestamp (ISO 8601), displayed on line 1.
-    /// 候选序（树序）已经在抓取时定下，这里只留展示与搜索。
+    /// Last interaction timestamp (ISO 8601)：**这一行自己的**最后交互，也是重建森林时的
+    /// 定序输入。层视图里行 1 显示的可能是子树里**来源行**的原文（见 `level_panel`），
+    /// 但本字段始终是它自己的值。
     pub last_interaction: String,
-    /// 是否被 pin（`pin` 标签；前端约定，见 [`crate::shared::pinning`]）。
-    /// 候选序在抓取时已定下，这里只留渲染谓词：行末的星标。
+    /// 是否被 pin（`pin` 标签；前端约定，见 [`crate::shared::pinning`]）：行末的星标
+    /// + 重建森林时的第一把排序键。
     pub pinned: bool,
     /// pin 时间（`tag_meta.pin.added_at`）：层投影重建森林时的排序键之一。
     pub pin_added_at: Option<String>,
@@ -1030,6 +1021,83 @@ mod tests {
             },
         );
         assert_eq!(lasts(&level), ["03-04 05:06"]);
+    }
+
+    #[test]
+    fn the_last_column_is_the_source_row_text_not_a_reformatted_instant() {
+        // 父行的时间来自子树活跃**那一行**的原文，与搜索态的行同一个格式化函数。
+        let candidates = vec![
+            at(session("parent", "p", "/ws", "idle"), "not-a-timestamp"),
+            under(
+                at(
+                    session("kid", "k", "/ws", "idle"),
+                    "2026-03-04T05:06:07+08:00",
+                ),
+                "parent",
+            ),
+        ];
+        let root = session_panel(&candidates, "", root_query());
+        assert_eq!(
+            lasts(&root),
+            [format_last_active("2026-03-04T05:06:07+08:00")],
+            "父行取的是子那一行的原文（带偏移也按原文切，不换算成别的钟点）"
+        );
+
+        // 整棵子树都解析不了 → 内核回落到父行自己：显示它自己的原文，而不是空白。
+        // （这里用一个结构合法、chrono 解析不了的值 —— 渲染得出来，才看得出取的是谁。）
+        let garbage = vec![
+            at(session("parent", "p", "/ws", "idle"), "9999-99-99T99:99:99"),
+            under(at(session("kid", "k", "/ws", "idle"), ""), "parent"),
+        ];
+        let root = session_panel(&garbage, "", root_query());
+        assert_eq!(lasts(&root), ["99-99 99:99"]);
+    }
+
+    #[test]
+    fn two_spellings_of_one_instant_stay_in_their_own_rows() {
+        // 同一微秒的两种书写（手改 metadata）：来源行由内核指出（并列取先算到的那一行），
+        // 渲染读那一行的原文。按微秒反查原文的表会让两行互相串行——父行会显示成另一份
+        // 书写，这里逐层钉住。
+        let candidates = vec![
+            session("parent", "p", "/ws", "idle"),
+            under(
+                at(
+                    session("kid-a", "a", "/ws", "idle"),
+                    "2026-10-31T16:21:49+08:00",
+                ),
+                "parent",
+            ),
+            under(
+                at(
+                    session("kid-b", "b", "/ws", "idle"),
+                    "2026-10-31T08:21:49.000000",
+                ),
+                "parent",
+            ),
+        ];
+        let root = session_panel(&candidates, "", root_query());
+        assert_eq!(
+            lasts(&root),
+            [format_last_active("2026-10-31T16:21:49+08:00")],
+            "父行取的是来源行（kid-a，先算到的那一行）的原文"
+        );
+
+        let level = session_panel(
+            &candidates,
+            "",
+            SessionQuery {
+                scope: Some("parent"),
+                ..SessionQuery::default()
+            },
+        );
+        assert_eq!(
+            lasts(&level),
+            [
+                format_last_active("2026-10-31T16:21:49+08:00"),
+                format_last_active("2026-10-31T08:21:49.000000"),
+            ],
+            "每一行的 LAST 只能是它自己那份原文"
+        );
     }
 
     #[test]
