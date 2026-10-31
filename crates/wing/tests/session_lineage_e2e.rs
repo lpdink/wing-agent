@@ -275,8 +275,270 @@ async fn wing_ps_tree_draws_the_forest() {
     assert!(stdout.contains("┃ sched"), "{stdout}");
 }
 
+/// `wing ps` 的人类默认输出是层视图：一行一个任务、后代折进 `CREW` 列、行尾说明
+/// 两条展开出口。
+#[tokio::test(flavor = "multi_thread")]
+async fn wing_ps_default_folds_the_crew_into_one_row() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+    gateway.set_sessions(vec![
+        row_with(
+            "sched",
+            None,
+            "working",
+            &["pin"],
+            "2026-10-15T21:00:00.000000",
+        ),
+        row_with("quiet", None, "idle", &[], "2026-10-15T20:00:00.000000"),
+        row_with(
+            "kid-asking",
+            Some("sched"),
+            "waiting",
+            &[],
+            "2026-10-15T21:10:00.000000",
+        ),
+        row_with(
+            "kid-working",
+            Some("sched"),
+            "working",
+            &[],
+            "2026-10-15T21:20:00.000000",
+        ),
+    ]);
+
+    let child = spawn_wing(home.path(), &["ps"], None);
+    let output = child.wait_with_output().await.expect("wing ps exits");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(output.status.success(), "{stdout}");
+
+    // 一行一个任务：crew 不逐行枚举。
+    assert!(stdout.contains("sched"), "{stdout}");
+    assert!(stdout.contains("quiet"), "{stdout}");
+    assert!(
+        !stdout.contains("kid-asking"),
+        "默认视图不列 crew：{stdout}"
+    );
+    assert!(!stdout.contains("kid-working"), "{stdout}");
+
+    // CREW：2 个后代，其中 1 个在等、1 个在干活。
+    assert!(stdout.contains("CREW"), "{stdout}");
+    assert!(stdout.contains("2 ?1 ●1"), "{stdout}");
+
+    // 行尾汇总：折起多少、两条出口都在。
+    let summary = stdout.lines().last().expect("summary line");
+    assert!(
+        summary.starts_with("2 tasks · 2 crew folded"),
+        "汇总行：{summary}\n{stdout}"
+    );
+    assert!(
+        summary.contains("--parent") && summary.contains("--tree"),
+        "两条出口：{summary}"
+    );
+    // 汇总行在表格之后（它是最后一行，且不是框线）。
+    assert!(!summary.starts_with('┗'), "{summary}");
+}
+
+/// `--flat` 是本命令改动前的输出：一行一个会话、没有 `CREW` 列、没有汇总行。
+#[tokio::test(flavor = "multi_thread")]
+async fn wing_ps_flat_prints_the_old_flat_table() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+    gateway.set_sessions(vec![
+        row_with(
+            "sched",
+            None,
+            "working",
+            &["pin"],
+            "2026-10-15T21:00:00.000000",
+        ),
+        row_with(
+            "kid-asking",
+            Some("sched"),
+            "waiting",
+            &[],
+            "2026-10-15T21:10:00.000000",
+        ),
+        // 老口径：inactive 且未 pin 的行默认不进列表（`--flat` 沿用）。
+        row("gone", None, "inactive"),
+    ]);
+
+    let child = spawn_wing(home.path(), &["ps", "--flat"], None);
+    let output = child.wait_with_output().await.expect("wing ps exits");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(output.status.success(), "{stdout}");
+
+    assert!(stdout.contains("kid-asking"), "crew 各占一行：{stdout}");
+    assert!(!stdout.contains("gone"), "inactive 仍被默认过滤：{stdout}");
+    assert!(!stdout.contains("CREW"), "{stdout}");
+    assert!(!stdout.contains("folded"), "{stdout}");
+    // 六列：CREW 之外的老表头都还在。
+    for header in ["SESSION ID", "STATUS", "LAST", "NAME", "MODEL", "TAGS"] {
+        assert!(stdout.contains(header), "缺列 {header}：{stdout}");
+    }
+}
+
+/// `--json` 是数据面：`--flat` / `--tree` 都不改变它的行集与字段。
+#[tokio::test(flavor = "multi_thread")]
+async fn wing_ps_json_ignores_the_human_modes() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+    gateway.set_sessions(vec![
+        row("sched", None, "working"),
+        row("kid", Some("sched"), "idle"),
+        row("grandkid", Some("kid"), "waiting"),
+    ]);
+
+    let mut printed: Vec<Vec<serde_json::Value>> = Vec::new();
+    for extra in [&[][..], &["--flat"][..], &["--tree"][..]] {
+        let mut args = vec!["ps", "--json"];
+        args.extend_from_slice(extra);
+        let child = spawn_wing(home.path(), &args, None);
+        let output = child.wait_with_output().await.expect("wing ps exits");
+        assert!(output.status.success(), "{output:?}");
+        printed.push(serde_json::from_slice(&output.stdout).expect("JSON rows"));
+    }
+    assert_eq!(printed[0], printed[1], "--flat 不影响 --json");
+    assert_eq!(printed[0], printed[2], "--tree 不影响 --json");
+    let ids: Vec<&str> = printed[0]
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect();
+    assert_eq!(ids.len(), 3, "行集不变：{ids:?}");
+    assert!(
+        printed[0][0].get("parent_session_id").is_some(),
+        "血缘只加一个键：{:?}",
+        printed[0][0]
+    );
+}
+
+/// `--parent` = 一层往下：只列直接子；网关回全量（旧网关形态）时每个子带自己的
+/// crew，只回直接子（现代网关）时 crew 列按「没有后代」的规则不出现。
+#[tokio::test(flavor = "multi_thread")]
+async fn wing_ps_parent_lists_children_with_their_crew() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+    gateway.set_sessions(vec![
+        row("sched", None, "working"),
+        row_with(
+            "kid",
+            Some("sched"),
+            "working",
+            &[],
+            "2026-10-15T21:00:00.000000",
+        ),
+        row_with(
+            "grandkid",
+            Some("kid"),
+            "waiting",
+            &[],
+            "2026-10-15T21:10:00.000000",
+        ),
+    ]);
+
+    let child = spawn_wing(home.path(), &["ps", "--parent", "sched"], None);
+    let output = child.wait_with_output().await.expect("wing ps exits");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("kid"), "{stdout}");
+    assert!(!stdout.contains("sched"), "父自己不在子层：{stdout}");
+    assert!(!stdout.contains("grandkid"), "孙是第三层：{stdout}");
+    assert!(stdout.contains("1 ?1"), "子自己的 crew：{stdout}");
+    // 子层的行集不是「根层」：crew 汇总行不打（否则数字把屏幕上已有的行也算进去）。
+    assert!(!stdout.contains("folded"), "{stdout}");
+
+    // 现代网关只回直接子（`?parent=` 过滤在网关侧）：行集相同，没有后代可折。
+    gateway.set_sessions(vec![row("kid", Some("sched"), "working")]);
+    let child = spawn_wing(home.path(), &["ps", "--parent", "sched"], None);
+    let output = child.wait_with_output().await.expect("wing ps exits");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("kid"), "{stdout}");
+    assert!(!stdout.contains("CREW"), "没有后代就没有列：{stdout}");
+    assert!(!stdout.contains("folded"), "{stdout}");
+}
+
+/// `--flat` 与 `--tree` 互斥：两种「全量」画法没有叠加语义（clap 直接拒）。
+#[tokio::test(flavor = "multi_thread")]
+async fn wing_ps_rejects_flat_with_tree() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+
+    let child = spawn_wing(home.path(), &["ps", "--flat", "--tree"], None);
+    let output = child.wait_with_output().await.expect("wing ps exits");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert_eq!(gateway.count("/api/session/list"), 0, "不该发列表请求");
+}
+
+/// `--tag` 是标签子集（不是一层）：命中的行逐行列出（任意深度，不折叠），父行的
+/// `CREW` 仍按全集算；行集不是层，所以不打行尾汇总。
+#[tokio::test(flavor = "multi_thread")]
+async fn wing_ps_tag_lists_every_match_without_folding() {
+    let gateway = FakeGateway::start();
+    let home = TempHome::new(gateway.port());
+    gateway.set_sessions(vec![
+        row_with(
+            "sched",
+            None,
+            "working",
+            &["task=a"],
+            "2026-10-15T21:00:00.000000",
+        ),
+        row_with(
+            "kid-a",
+            Some("sched"),
+            "idle",
+            &["task=a"],
+            "2026-10-15T21:05:00.000000",
+        ),
+        row_with(
+            "grandkid",
+            Some("kid-a"),
+            "waiting",
+            &[],
+            "2026-10-15T21:10:00.000000",
+        ),
+        row_with(
+            "other",
+            None,
+            "idle",
+            &["task=b"],
+            "2026-10-15T20:00:00.000000",
+        ),
+    ]);
+
+    let child = spawn_wing(home.path(), &["ps", "--tag", "task=a"], None);
+    let output = child.wait_with_output().await.expect("wing ps exits");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(output.status.success(), "{stdout}");
+
+    // 父与子都被打标 → 两行都列（标签穿过血缘，不折叠）。
+    assert!(stdout.contains("sched"), "{stdout}");
+    assert!(stdout.contains("kid-a"), "{stdout}");
+    assert!(!stdout.contains("grandkid"), "未打标签的孙不列：{stdout}");
+    assert!(!stdout.contains("other"), "{stdout}");
+    // 未打标签的后代照样进父行的 crew：sched 有 kid-a 与 grandkid 两个后代、其中 1 个
+    // 在等；kid-a 只有 grandkid 一个。
+    assert!(stdout.contains("2 ?1"), "sched 的 crew：{stdout}");
+    assert!(stdout.contains("1 ?1"), "kid-a 的 crew：{stdout}");
+    // 行集不是一层 → 不打汇总行。
+    assert!(!stdout.contains("folded"), "{stdout}");
+}
+
 /// 一行 `/api/session/list` 会话（只给血缘相关的字段）。
 fn row(id: &str, parent: Option<&str>, status: &str) -> serde_json::Value {
+    row_with(id, parent, status, &[], "2026-10-15T21:00:00.000000")
+}
+
+/// 同上，带标签与最后交互时间（pin / crew 的素材）。
+fn row_with(
+    id: &str,
+    parent: Option<&str>,
+    status: &str,
+    tags: &[&str],
+    last_interaction: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "name": id,
@@ -284,9 +546,9 @@ fn row(id: &str, parent: Option<&str>, status: &str) -> serde_json::Value {
         "template_name": "default",
         "workspace": null,
         "parent_session_id": parent,
-        "last_interaction": "2026-10-15T21:00:00.000000",
+        "last_interaction": last_interaction,
         "status": status,
-        "tags": [],
+        "tags": tags,
         "tag_meta": {},
         "model_id": null,
         "model_name": null,
