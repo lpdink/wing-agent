@@ -835,7 +835,7 @@ impl App {
             // Pop-down command popup — below the composer and floated with it,
             // so the list hangs off the card instead of the screen edge.
             if let Some(rect) = popup_rect
-                && let Some((rows, state, filter)) = self.popup.active.render_data()
+                && let Some((rows, state, filter, chrome)) = self.popup.active.render_data()
             {
                 // 开屏的 `rect` 已经是卡片矩形（与输入卡同宽同列），再剥一层边距
                 // 会比卡片窄 2 列；会话里的 `rect` 是排版行，才要按惯例留边。
@@ -844,7 +844,12 @@ impl App {
                 } else {
                     crate::ui::input_area::chrome::card_area(rect)
                 };
-                frame.render_widget(SelectionPopup::new(rows, state, filter, &palette), area);
+                let mut popup = SelectionPopup::new(rows, state, filter, &palette);
+                // 层视图的 chrome（面包屑 / dormant 尾注）画在同一个矩形里，占上下各一行。
+                if let Some(chrome) = chrome {
+                    popup = popup.with_chrome(chrome);
+                }
+                frame.render_widget(popup, area);
             }
 
             // Position the input cursor *inside* the render pass so ratatui

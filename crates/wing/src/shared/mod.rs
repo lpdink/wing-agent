@@ -15,8 +15,9 @@
 //!   "pinned" and how pinned sessions sort first — one implementation shared
 //!   by the session panel, the status bar and `wing ps`), the session-lineage
 //!   forest ([`session_tree`]: flat session rows → tree order + drawing
-//!   prefixes — one implementation shared by the session panel and
-//!   `wing ps --tree`), and the sparse settings document primitives
+//!   prefixes + crew rollup + level projection — one implementation shared by
+//!   the session panel, `wing ps` and `wing usage --tree`), and the sparse
+//!   settings document primitives
 //!   ([`doc_edit`]: canonical-path algebra, the stub built from the catalog,
 //!   list add/remove/move — one implementation shared by the settings panel
 //!   and `wing config`, with their two UX policies spelled out per entry

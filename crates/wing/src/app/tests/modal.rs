@@ -8,6 +8,7 @@ use crate::app::intent::SessionUpdate;
 use crate::app::modal::ChatScrollAction;
 use crate::app::modal::KeyRoute;
 use crate::app::modal::ModalOwner;
+use crate::app::modal::SessionLevelAction;
 use crate::app::*;
 use crate::protocol::AskQuestion;
 use crate::shared::panels::ask::ASK_CANCEL_CONTENT;
@@ -601,7 +602,8 @@ fn test_composer_pointer_stays_blocked_by_an_itemless_must_select_popup() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        tree_prefix: String::new(),
+        parent: None,
+        pin_added_at: None,
     }];
     app.popup.cache.sessions_fetched = true;
     app.update_popup();
@@ -927,6 +929,199 @@ fn test_paste_clipboard_key_merges_repeats_while_a_read_is_in_flight() {
     assert_eq!(reads(&mut app), 1, "落地后的新手势重新起链");
 
     release_clipboard_read();
+}
+
+// ── 层视图的键位归属（`/ss` 参数为空时是另一套键位） ──────────
+
+/// 一个 `/ss` 会话候选（`parent` 决定它落在哪一层）。
+fn candidate(id: &str, parent: Option<&str>) -> SessionCandidate {
+    SessionCandidate {
+        id: id.into(),
+        parent: parent.map(str::to_string),
+        title: format!("title {id}"),
+        workspace: "/ws".into(),
+        status: "idle".into(),
+        last_interaction: "2026-01-01T00:00:00".into(),
+        pinned: false,
+        pin_added_at: None,
+    }
+}
+
+/// 打开 `/ss`（层视图：参数为空），候选是 root → kid。
+fn app_with_level_view() -> App {
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![candidate("boss", None), candidate("kid", Some("boss"))];
+    app.popup.cache.sessions_fetched = true;
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert!(app.popup.active.session_level_view(), "前提：层视图");
+    app
+}
+
+fn ctrl(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::CONTROL)
+}
+
+#[test]
+fn test_the_level_view_owns_its_keys_and_leaves_the_others_alone() {
+    use crossterm::event::KeyCode;
+
+    let mut app = app_with_level_view();
+    // 五个键归面板：`→` 进层、`←` 退层、`Ctrl+A` dormant、`Ctrl+D/U` 翻页。
+    assert_eq!(
+        app.route_key(&key(KeyCode::Right)),
+        KeyRoute::SessionLevel(SessionLevelAction::Descend)
+    );
+    assert_eq!(
+        app.route_key(&key(KeyCode::Left)),
+        KeyRoute::SessionLevel(SessionLevelAction::Back)
+    );
+    assert_eq!(
+        app.route_key(&ctrl(KeyCode::Char('a'))),
+        KeyRoute::SessionLevel(SessionLevelAction::ToggleDormant)
+    );
+    assert_eq!(
+        app.route_key(&ctrl(KeyCode::Char('d'))),
+        KeyRoute::SessionLevel(SessionLevelAction::PageDown)
+    );
+    assert_eq!(
+        app.route_key(&ctrl(KeyCode::Char('u'))),
+        KeyRoute::SessionLevel(SessionLevelAction::PageUp)
+    );
+    // 带 SHIFT / ALT / SUPER 的组合不接（系统手势，与 `is_paste_clipboard_key` 同一条口径）。
+    use crossterm::event::KeyModifiers;
+    for (code, mods) in [
+        (
+            KeyCode::Char('A'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        (
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ),
+        (
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL | KeyModifiers::SUPER,
+        ),
+    ] {
+        assert_eq!(
+            app.route_key(&crossterm::event::KeyEvent::new(code, mods)),
+            KeyRoute::PopupNav,
+            "{code:?}+{mods:?} 不归层视图"
+        );
+    }
+    // 导航 / 提交 / 补全照旧走 popup；**可打印字符**归面板 —— 它是「开始输入过滤词」，
+    // 落到 composer 会把命令名改写成 `/ssk`。
+    assert_eq!(app.route_key(&key(KeyCode::Down)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&key(KeyCode::Enter)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&key(KeyCode::Tab)), KeyRoute::PopupNav);
+    assert_eq!(
+        app.route_key(&key(KeyCode::Char('k'))),
+        KeyRoute::SessionFilter('k')
+    );
+    // 带 CONTROL / ALT / SUPER 的字符不是字面输入（系统手势的回传），空白也开不了
+    // 搜索：两者照旧落回 popup / composer。
+    for (code, mods) in [
+        (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        (KeyCode::Char('k'), KeyModifiers::ALT),
+        (KeyCode::Char('k'), KeyModifiers::SUPER),
+    ] {
+        assert_eq!(
+            app.route_key(&crossterm::event::KeyEvent::new(code, mods)),
+            KeyRoute::PopupNav,
+            "{code:?}+{mods:?} 不是过滤词"
+        );
+    }
+    assert_eq!(app.route_key(&key(KeyCode::Char(' '))), KeyRoute::PopupNav);
+    // 根层的 Esc 是今天的阶梯；进层后才是「退一层」（且不关面板）。
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::EscLadder);
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.popup.level_view.depth(), 1);
+    assert_eq!(
+        app.route_key(&key(KeyCode::Esc)),
+        KeyRoute::SessionLevel(SessionLevelAction::Back)
+    );
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.popup.level_view.depth(), 0);
+    assert!(app.popup.active.is_active(), "退层不关面板");
+}
+
+#[test]
+fn test_the_search_state_leaves_the_arrows_to_the_composer() {
+    use crossterm::event::KeyCode;
+
+    // 参数非空 = 全量搜索（跨层）：`←/→` 归 composer —— 用户在那里改搜索词。
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![candidate("boss", None), candidate("kid", Some("boss"))];
+    app.popup.cache.sessions_fetched = true;
+    app.input.set_text("/ss kid");
+    app.update_popup_from_input();
+    assert!(!app.popup.active.session_level_view(), "搜索态不是层视图");
+    assert_eq!(app.route_key(&key(KeyCode::Right)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&key(KeyCode::Left)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&ctrl(KeyCode::Char('a'))), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&key(KeyCode::Esc)), KeyRoute::EscLadder);
+    // 而且 `←` 真的把光标往左挪一列（popup 不吃这个键）。
+    app.input.set_text("/ss kid");
+    let before = app.input.cursor_col;
+    assert!(before > 0, "前提：光标不在行首");
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.input.cursor_col, before - 1, "搜索态的 ← 归 composer");
+}
+
+#[test]
+fn test_other_panels_keep_their_key_routing() {
+    use crossterm::event::KeyCode;
+
+    // 其它候选面板（`/fork` 等）：`→` 不是它们的，也不是层视图的。
+    let mut app = test_app();
+    app.popup.cache.branches = vec![("uuid-1".into(), "preview".into())];
+    app.input.set_text("/fork ");
+    app.update_popup_from_input();
+    assert!(!app.popup.active.session_level_view());
+    assert_eq!(app.route_key(&key(KeyCode::Right)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&key(KeyCode::Left)), KeyRoute::PopupNav);
+    assert_eq!(app.route_key(&ctrl(KeyCode::Char('a'))), KeyRoute::PopupNav);
+
+    // 不可见的会话面板不接管任何键：看起来空闲的界面必须能用。
+    let mut app = test_app();
+    app.popup.cache.sessions_fetched = true; // 抓过，但一条都没有
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    assert_eq!(app.popup.active.height(), 0);
+    assert!(!app.popup.active.session_level_view());
+    assert_eq!(app.route_key(&key(KeyCode::Right)), KeyRoute::PopupEmpty);
+}
+
+#[test]
+fn test_an_empty_level_keeps_its_keys_and_swallows_enter() {
+    use crossterm::event::KeyCode;
+
+    // 空层（crew 全 dormant）：面包屑 + 尾注还在 ⇒ 面板可见 ⇒ 键位照旧归它；
+    // Enter 在这里没有对象，也不劝人「改参数」。
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![
+        candidate("boss", None),
+        SessionCandidate {
+            status: "inactive".into(),
+            ..candidate("parked", Some("boss"))
+        },
+    ];
+    app.popup.cache.sessions_fetched = true;
+    app.input.set_text("/ss");
+    app.update_popup_from_input();
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.popup.level_view.depth(), 1);
+    assert!(app.popup.active.height() > 0, "chrome 撑着面板");
+    assert!(app.route_key(&key(KeyCode::Left)) == KeyRoute::SessionLevel(SessionLevelAction::Back));
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.popup.active.is_active(), "Enter 不清空层");
+    assert!(app.popup.level_view.depth() == 1);
+
+    // 空层照样能打字开搜索：crew 全 dormant 的那一屏正是最需要搜索的地方。
+    app.handle_key(key(KeyCode::Char('b')));
+    assert_eq!(app.input.text(), "/ss b");
+    assert!(app.popup.active.is_active(), "搜索态仍在同一个面板里");
 }
 
 #[test]

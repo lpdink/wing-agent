@@ -255,25 +255,48 @@ pub enum Command {
         timeout: u64,
     },
 
-    /// List sessions (active + pinned by default; use --all for all).
+    /// List sessions, one row per task (descendants fold into a CREW column).
+    ///
+    /// The human default is level 0 of the lineage: one row per task, every
+    /// descendant folded into a `CREW` column (`40 ?1 ●3` = descendants /
+    /// of them waiting for you / of them working). A task stays in that view
+    /// while any of its descendants is still around, so the inactive filter
+    /// never cuts a crew off from the task that spawned it. Expand with
+    /// `--parent <sid>` (that task's crew, one level down) or `--tree` (the
+    /// whole forest); `--flat` prints the flat list this command used to
+    /// print. `--tag` and `--parent` narrow the row set and therefore carry
+    /// neither the CREW column nor the footer (see those flags).
     Ps {
         /// Show all sessions including inactive ones.
         ///
-        /// Pinned sessions are shown even without this flag (pin means
-        /// "keep this one in sight").
+        /// In the default (one row per task) view this widens which tasks
+        /// appear — rows stay folded into their task; use --flat to list
+        /// every session. Pinned sessions are shown even without this flag
+        /// (pin means "keep this one in sight").
         #[arg(long = "all")]
         all: bool,
         /// Filter by tag (repeatable / comma-separated; multiple tags = AND).
         ///
-        /// Implies --all: tags describe long-term taxonomy (favorites /
-        /// task crews are often inactive), so inactive matches are included.
+        /// A tag match is a row of its own (any depth, not folded into a
+        /// task: tags cut across the lineage). Implies --all: tags describe
+        /// long-term taxonomy (favorites / task crews are often inactive),
+        /// so inactive matches are included. The narrowed row set carries no
+        /// CREW column: a per-row rollup would count descendants that are not
+        /// on screen (a tagged task and its tagged child would count the same
+        /// grandchild twice) — same rule as the missing footer. Use --tree for
+        /// structure.
         #[arg(long = "tag", value_delimiter = ',')]
         tag: Vec<String>,
         /// List the sessions created by SESSION_ID (its direct children).
         ///
-        /// Lineage in one question: "who did I spawn?". Implies --all —
-        /// lineage is a long-term fact (same rationale as --tag): a
-        /// scheduler's crew is usually idle or inactive by the time you look.
+        /// Lineage in one question: "who did I spawn?" — one level down, one
+        /// row per child. Implies --all — lineage is a long-term fact (same
+        /// rationale as --tag): a scheduler's crew is usually idle or
+        /// inactive by the time you look. No CREW column here either: these
+        /// rows are the crew, and their rollups would count grandchildren
+        /// outside this layer (a gateway that answers ?parent= with direct
+        /// children only has nothing to count anyway). Drill one level down
+        /// per child, or use --tree.
         #[arg(long = "parent", value_name = "SESSION_ID")]
         parent: Option<String>,
         /// Draw the lineage forest: children nest under the session that
@@ -284,8 +307,15 @@ pub enum Command {
         /// creator is not in the listed set renders as a root (so
         /// `--parent X --tree` shows X's children at depth 0). Human table
         /// only: with --json the machine surface stays the flat list.
-        #[arg(long = "tree")]
+        #[arg(long = "tree", conflicts_with = "flat")]
         tree: bool,
+        /// Print the flat list: one row per session, six columns, no CREW.
+        ///
+        /// The layout `wing ps` printed before the level view — same rows in
+        /// the same order. Scripts that parse the human table should read
+        /// --json instead.
+        #[arg(long = "flat")]
+        flat: bool,
     },
 
     /// Show session runtime info (model, tools, tokens, status).
@@ -823,9 +853,17 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 tag,
                 parent,
                 tree,
+                flat,
             } => {
-                crate::cmd::ps::run_ps(all, &tag, parent.as_deref(), tree, cli.json, cli.watch)
-                    .await
+                crate::cmd::ps::run_ps(
+                    all,
+                    &tag,
+                    parent.as_deref(),
+                    crate::cmd::ps::TableMode::pick(tree, flat),
+                    cli.json,
+                    cli.watch,
+                )
+                .await
             }
             Command::Info { session_id } => crate::cmd::ps::run_info(&session_id, cli.json).await,
             Command::Cache {

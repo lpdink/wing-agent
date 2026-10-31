@@ -1,15 +1,29 @@
 //! `wing ps` — list sessions, and `wing info` — session runtime info.
 //!
-//! `wing ps` lists all sessions (like `docker ps` or `kubectl get pods`).
+//! `wing ps` lists sessions (like `docker ps` or `kubectl get pods`).
 //! `wing info <sid>` shows detailed runtime state for a single session.
 //!
 //! The human-readable session list is rendered through the shared table
 //! engine (`render::table`) with the same skin as TUI markdown tables; every
 //! measurement is display columns (CJK-safe). `--json` is the machine surface:
-//! a flat list in the existing order — `--tree` only shapes the human table
-//! (the lineage feature adds just the `parent_session_id` key to each row).
-//! `--parent <sid>` narrows the list to that session's direct children; `--tree`
-//! draws the lineage forest with the shared algorithm (`shared::session_tree`).
+//! a flat list in the existing order — the three human modes only shape the
+//! table (the lineage feature adds just the `parent_session_id` key to each
+//! row).
+//!
+//! Three human modes ([`TableMode`]), one row set each:
+//!
+//! - **level** (default): one row per task — level 0 of the lineage forest,
+//!   descendants folded into a `CREW` column. `--parent <sid>` drills one
+//!   level down, `--tree` draws the whole forest, `--flat` prints the flat
+//!   list this command used to print. `--tag` / `--parent` narrow the row set
+//!   to a tag subset / a child layer (see `level_rows`), and only the root
+//!   level carries the "N crew folded" footer;
+//! - **flat**: every session on its own row;
+//! - **tree**: the lineage forest with `├─` / `└─` prefixes.
+//!
+//! Ordering, crew rollup and the liveness closure all come from
+//! [`crate::shared::session_tree`] — the CLI consumes them, it does not
+//! reimplement them.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -30,10 +44,11 @@ use wing_api_client::models::{
 use crate::config::AppConfig;
 use crate::config::ColorPreset;
 use crate::config::ThemePalette;
+use crate::protocol::SessionStatus;
 use crate::render::table::ColumnKind;
 use crate::render::table::plain::{PlainCell, PlainColumn, PlainTable};
 use crate::shared::pinning::{is_pinned, pin_added_at, pin_key};
-use crate::shared::session_tree::{TreeRow, build_forest};
+use crate::shared::session_tree::{Crew, Forest, TreeRow};
 use crate::tui::appearance;
 use crate::util::format;
 use crate::util::format::{NONE_MARK, count, work_time};
@@ -47,18 +62,25 @@ pub async fn run_ps(
     all: bool,
     tags: &[String],
     parent: Option<&str>,
-    tree: bool,
+    mode: TableMode,
     json: bool,
     watch: bool,
 ) -> ExitCode {
     if watch {
-        return run_ps_watch(all, tags, parent, tree, json).await;
+        return run_ps_watch(all, tags, parent, mode, json).await;
     }
     match fetch_sessions(parent).await {
         Ok(sessions) => {
-            let mut filtered = filter_sessions(sessions, all, tags, parent);
-            order_sessions(&mut filtered);
-            emit_sessions(&filtered, json, tree);
+            if json {
+                emit_json(sessions, all, tags, parent);
+                return ExitCode::SUCCESS;
+            }
+            let out = TableOutput::detect();
+            let palette = terminal_palette(&out, json);
+            print!(
+                "{}",
+                sessions_table(sessions, mode, all, tags, parent, &palette, &out)
+            );
             ExitCode::SUCCESS
         }
         Err(e) => common::fail("ps", e),
@@ -72,7 +94,7 @@ async fn run_ps_watch(
     all: bool,
     tags: &[String],
     parent: Option<&str>,
-    tree: bool,
+    mode: TableMode,
     json: bool,
 ) -> ExitCode {
     let (host, port) = match common::ensure_gateway().await {
@@ -89,11 +111,15 @@ async fn run_ps_watch(
     loop {
         match http.list_sessions_with_parent(parent).await {
             Ok(resp) => {
-                let mut filtered = filter_sessions(resp.sessions, all, tags, parent);
-                order_sessions(&mut filtered);
                 // Clear screen.
                 print!("\x1b[2J\x1b[H");
-                emit_sessions_with(&filtered, json, tree, &palette, &out);
+                if json {
+                    emit_json(resp.sessions, all, tags, parent);
+                } else {
+                    let table =
+                        sessions_table(resp.sessions, mode, all, tags, parent, &palette, &out);
+                    print!("{table}");
+                }
             }
             Err(e) => {
                 eprintln!("wing ps error: {e}");
@@ -170,14 +196,6 @@ async fn fetch_usage_block(http: &GatewayApiClient, session_id: &str) -> Option<
     Some(InfoUsage::from_report(&report, session_id))
 }
 
-/// Human/JSON output for one session snapshot (`--json` stays the machine
-/// surface; the table only serves humans).
-fn emit_sessions(sessions: &[SessionInfo], json: bool, tree: bool) {
-    let out = TableOutput::detect();
-    let palette = terminal_palette(&out, json);
-    emit_sessions_with(sessions, json, tree, &palette, &out);
-}
-
 /// The table's inks, `auto` preset included.
 ///
 /// `auto` means "ask the terminal"; that question reads stdin and writes stdout,
@@ -194,36 +212,106 @@ fn terminal_palette(out: &TableOutput, json: bool) -> ThemePalette {
     ThemePalette::from_config_with_appearance(&colors, detected)
 }
 
-fn emit_sessions_with(
-    sessions: &[SessionInfo],
-    json: bool,
-    tree: bool,
-    palette: &ThemePalette,
-    out: &TableOutput,
-) {
-    if json {
-        // 机器面：平铺、既有呈现序——`--tree` 只作用于人类表格，行序不受影响
-        // （血缘特性只在每行上新增一个可忽略的 `parent_session_id` 键）。
-        common::print_json_compact(sessions);
-        return;
-    }
-    if sessions.is_empty() {
-        println!("No sessions found.");
-        return;
-    }
-    let now = Local::now().naive_local();
-    let rows = if tree {
-        tree_rows(sessions)
-    } else {
-        flat_rows(sessions)
-    };
-    print!("{}", format_sessions_table(&rows, palette, out, now));
+/// `--json` 的机器面：过滤 + 呈现序 + 紧凑输出。`--tree` / `--flat` 不影响它
+/// （呈现方式是表格的事；血缘特性只在每行上新增一个可忽略的 `parent_session_id` 键）。
+fn emit_json(sessions: Vec<SessionInfo>, all: bool, tags: &[String], parent: Option<&str>) {
+    let mut filtered = filter_sessions(sessions, all, tags, parent);
+    order_sessions(&mut filtered);
+    common::print_json_compact(&filtered);
 }
 
-/// 表格的一行素材：会话本体 + 树前缀（平铺模式恒为空串）。
+/// 一次人类输出的完整文本（表格 + 行尾汇总，或「没有会话」）——三种模式的唯一
+/// 渲染入口，`-w/--watch` 走同一条路。
+fn sessions_table(
+    sessions: Vec<SessionInfo>,
+    mode: TableMode,
+    all: bool,
+    tags: &[String],
+    parent: Option<&str>,
+    palette: &ThemePalette,
+    out: &TableOutput,
+) -> String {
+    let now = Local::now().naive_local();
+    match mode {
+        // 层视图的森林建在**未按存活过滤**的行集上：`filter_sessions` 只决定
+        // 「哪些行进视图」，crew 的三个计数与存活闭包要按全集算。
+        TableMode::Level => {
+            let view = level_rows(&sessions, all, tags, parent);
+            let footer = view.whole_level.then(|| crew_summary(&view.rows)).flatten();
+            render_view(&view.rows, palette, out, now, footer)
+        }
+        TableMode::Flat => {
+            let mut filtered = filter_sessions(sessions, all, tags, parent);
+            order_sessions(&mut filtered);
+            render_view(&flat_rows(&filtered), palette, out, now, None)
+        }
+        TableMode::Tree => {
+            let filtered = filter_sessions(sessions, all, tags, parent);
+            render_view(&tree_rows(&filtered), palette, out, now, None)
+        }
+    }
+}
+
+/// 表格 + 行尾（`footer` 由 [`level_rows`] 的 `whole_level` 决定，别的模式没有）。
+fn render_view(
+    rows: &[SessionRow<'_>],
+    palette: &ThemePalette,
+    out: &TableOutput,
+    now: NaiveDateTime,
+    footer: Option<String>,
+) -> String {
+    if rows.is_empty() {
+        return "No sessions found.\n".to_string();
+    }
+    let mut text = format_sessions_table(rows, palette, out, now);
+    if let Some(footer) = footer {
+        text.push_str(&footer);
+        text.push('\n');
+    }
+    text
+}
+
+/// 人类输出的三种模式（互斥；`--json` 不走这里）。旗标 → 模式的转换只发生在
+/// clap 边界（`cmd::mod` 的 dispatch），别处一律按模式分派。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableMode {
+    /// 默认：一层一个任务 + `CREW` 列。`--tag` / `--parent` 把行集收窄成标签子集 /
+    /// 子层（行尾汇总随之消失，见 `level_rows`）。
+    Level,
+    /// `--flat`：一行一个会话，没有 `CREW` 列（本命令改动前的样子）。
+    Flat,
+    /// `--tree`：整棵森林的缩进画法。
+    Tree,
+}
+
+impl TableMode {
+    /// 两个旗标 → 模式。`--flat` 与 `--tree` 由 clap 声明互斥；`--tree` 优先是这里
+    /// 的兜底（保持函数全域，不产生「两个都给了会怎样」的未定义行为）。
+    pub fn pick(tree: bool, flat: bool) -> Self {
+        if tree {
+            Self::Tree
+        } else if flat {
+            Self::Flat
+        } else {
+            Self::Level
+        }
+    }
+}
+
+/// 表格的一行素材：会话本体 + 树前缀（层视图与平铺模式恒为空串）。
 struct SessionRow<'a> {
     session: &'a SessionInfo,
     prefix: String,
+    /// 层视图的行：LAST 读子树活跃的**来源行**（叶子行的来源行就是它自己）。平铺与
+    /// 树状模式没有这条投影，读会话自己的时间。
+    level: bool,
+    /// 折进 `CREW` 列的聚合：**只在整层视图**给值。收窄视图（`--tag` / `--parent`）
+    /// 的行集是子集，逐行 rollup 会把不在屏上的后代一起数进来（同一批会话可能同屏
+    /// 重复计数）——与行尾汇总同一条判据。平铺 / 树状模式没有这一列。
+    crew: Option<Crew>,
+    /// 层视图里 LAST 读**哪一行的原文**：内核给出的「子树活跃来自哪一行」（叶子 = 自己）。
+    /// 平铺与树状模式不用它（读 `session` 自己的时间）。
+    activity_source: Option<&'a str>,
 }
 
 /// 平铺呈现序（后端基准序 + pin 叠加，由 [`order_sessions`] 定）。
@@ -233,13 +321,106 @@ fn flat_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
         .map(|session| SessionRow {
             session,
             prefix: String::new(),
+            level: false,
+            crew: None,
+            activity_source: None,
         })
         .collect()
 }
 
-/// 树序：交给 [`build_forest`] 定序（输入序不参与），每个节点带回自己的
+/// 树序：交给 [`Forest::build`] 定序（输入序不参与），每个节点带回自己的
 /// 渲染前缀。pin 分两层、孤儿升根、环与深链防御都在算法里。
 fn tree_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
+    let forest = forest_of(sessions);
+    forest
+        .tree()
+        .iter()
+        .map(|entry| SessionRow {
+            session: &sessions[entry.index],
+            prefix: entry.prefix.clone(),
+            level: false,
+            crew: None,
+            activity_source: None,
+        })
+        .collect()
+}
+
+/// 层视图的一次投影：行 + 这份行集是不是**完整的一层**。（同族的 `flat_rows` /
+/// `tree_rows` 只给行集；这条通路还要那个判据来决定打不打行尾汇总与 `CREW` 列。）
+struct LevelRows<'a> {
+    rows: Vec<SessionRow<'a>>,
+    /// 根层且没有任何筛（`--all` 不影响这一点）。行尾汇总与 `CREW` 列只描述这里：它是
+    /// 「你看到的任务，它们的 crew 折起来了」这句入口提示。`--tag` 的行是标签子集（父与
+    /// 子可能同时成行，逐行 rollup 把屏幕上已有的会话又数一遍）、`--parent` 的行是子层
+    /// （数字本身没错，但那些行是 crew 不是任务，而且用户已经在往下钻）——两者都不打
+    /// 汇总、也不给这一列。
+    whole_level: bool,
+}
+
+/// 有没有把行集收窄成「子集 / 子层」（`--tag` / `--parent`）。两个消费点共用这一条
+/// 判据：`filter_sessions` 决定走筛选分支，[`level_rows`] 取它的反面当 `whole_level`。
+fn is_narrowed(parent: Option<&str>, tags: &[String]) -> bool {
+    parent.is_some() || !tags.is_empty()
+}
+
+/// 层视图的行集：一行一个任务。
+///
+/// - 没有 `--tag` / `--parent`（`whole_level`）：`level(None, include_dormant = --all)`
+///   —— 默认口径是「存活（`status != inactive`）或被 pin」**加上祖先闭包**（一个
+///   dormant 的父任务不因为它自己被逐出就消失，否则它的活子会升成假根）。
+/// - 有 `--tag` / `--parent`：标签与血缘是另一类筛（都隐含 `--all`），行集是同时满足
+///   二者的行（AND），按**森林全序**取——定序契约因此对这两种筛同样成立。
+///
+/// 两种情形都把森林建在 `sessions`（网关返回的原始列表，**未按存活 / 标签过滤**）上：
+/// crew 的后代计数要含 dormant 后代、存活闭包要看到被逐出的父，过滤不能发生在建森林
+/// 之前（它只决定「哪些行进视图」）。
+fn level_rows<'a>(
+    sessions: &'a [SessionInfo],
+    all: bool,
+    tags: &[String],
+    parent: Option<&str>,
+) -> LevelRows<'a> {
+    let forest = forest_of(sessions);
+    let whole_level = !is_narrowed(parent, tags);
+    let visible = if whole_level {
+        forest.level(None, all).rows
+    } else {
+        in_total_order(&forest, |index| {
+            passes_flag_filters(&sessions[index], parent, tags)
+        })
+    };
+    let rows = visible
+        .into_iter()
+        .map(|index| SessionRow {
+            session: &sessions[index],
+            prefix: String::new(),
+            level: true,
+            // 收窄视图不给 rollup（行集是子集，逐行计数会重复/越界数）。
+            crew: whole_level.then(|| forest.crew(index)),
+            activity_source: forest
+                .activity_of(index)
+                .and_then(|source| sessions[source].last_interaction.as_deref()),
+        })
+        .collect();
+    LevelRows { rows, whole_level }
+}
+
+/// 满足 `keep` 的行下标，顺序 = 森林全序（树序遍历）在该子集上的限制。
+///
+/// 只吃下标谓词：森林的下标空间是传给 [`Forest::build`] 的那个切片，把「另一份
+/// 数组」和森林配在一起是内核最怕的误用（静默画错行），所以由调用方在自己的
+/// 数组上捕获。
+fn in_total_order(forest: &Forest<'_>, keep: impl Fn(usize) -> bool) -> Vec<usize> {
+    forest
+        .tree()
+        .iter()
+        .map(|entry| entry.index)
+        .filter(|&index| keep(index))
+        .collect()
+}
+
+/// 会话行 → 森林输入（内核要的四件事：拓扑 / pin / 最后交互 / 行状态）。
+fn forest_of<'a>(sessions: &'a [SessionInfo]) -> Forest<'a> {
     let input: Vec<TreeRow<'_>> = sessions
         .iter()
         .map(|session| TreeRow {
@@ -248,31 +429,38 @@ fn tree_rows(sessions: &[SessionInfo]) -> Vec<SessionRow<'_>> {
             pinned: is_pinned(&session.tags),
             pin_added_at: pin_added_at(&session.tag_meta),
             last_interaction: session.last_interaction.as_deref(),
+            status: SessionStatus::parse(&session.status),
         })
         .collect();
-    build_forest(&input)
-        .into_iter()
-        .map(|entry| SessionRow {
-            session: &sessions[entry.index],
-            prefix: entry.prefix,
-        })
-        .collect()
+    Forest::build(&input)
+}
+
+/// `--tag` / `--parent` 的**唯一**判定：`parent` 逐字相等（不给则不筛）∧ 所有
+/// `tags` 命中（AND）。
+///
+/// 两个消费点（平铺 / 树状 / `--json` 的 [`filter_sessions`]，层视图的子集分支）
+/// 必须都走这里：副本漂移是静默的——同一条命令的不同画法会对同一组旗标给出不同
+/// 的行集，编译器和测试都不会说话。
+fn passes_flag_filters(session: &SessionInfo, parent: Option<&str>, tags: &[String]) -> bool {
+    parent.is_none_or(|parent| session.parent_session_id.as_deref() == Some(parent))
+        && tags.iter().all(|tag| session.tags.iter().any(|t| t == tag))
 }
 
 /// Filter sessions by status, tags and lineage parent.
 ///
 /// - With `tags` given: keep sessions carrying ALL tags (AND), **inactive
 ///   included** — tags describe long-term taxonomy (favorites / task crews
-///   are often archived), so the default inactive-drop does not apply.
+///   are often archived), so the inactive-drop does not apply.
 /// - With `parent` given: keep the parent's **direct children**, inactive
 ///   included (same rationale as `tags` — lineage is a long-term fact). The
 ///   gateway already applied `?parent=`; the re-check covers a gateway that
 ///   predates the parameter and answered with the full list (a documented
 ///   superset), so `--parent` means the same thing everywhere.
 /// - Without either: `all=true` keeps everything; otherwise drop `inactive`
-///   — except **pinned** sessions, which the default view keeps on purpose
-///   (pin means "keep this one in sight", and what you pin is usually a
-///   session you stepped away from).
+///   — except **pinned** sessions, which the flat / tree / `--json` row sets
+///   keep on purpose (pin means "keep this one in sight", and what you pin is
+///   usually a session you stepped away from). The level view does not come
+///   through here: its liveness rule is the kernel's closure.
 fn filter_sessions(
     sessions: Vec<SessionInfo>,
     all: bool,
@@ -280,13 +468,9 @@ fn filter_sessions(
     parent: Option<&str>,
 ) -> Vec<SessionInfo> {
     let mut sessions = sessions;
-    if let Some(parent) = parent {
-        sessions.retain(|s| s.parent_session_id.as_deref() == Some(parent));
-    }
-    if !tags.is_empty() {
-        sessions.retain(|s| tags.iter().all(|t| s.tags.iter().any(|st| st == t)));
-    }
-    if tags.is_empty() && parent.is_none() && !all {
+    if is_narrowed(parent, tags) {
+        sessions.retain(|s| passes_flag_filters(s, parent, tags));
+    } else if !all {
         sessions.retain(|s| s.status != "inactive" || is_pinned(&s.tags));
     }
     sessions
@@ -296,9 +480,10 @@ fn filter_sessions(
 /// pin 的更靠前（pin 排序键见 [`crate::shared::pinning`]）；其余保持后端下发的
 /// 顺序（活跃优先、组内按最后交互时间降序）。
 ///
-/// 只作用于平铺与 `--json` 输出；`--tree` 的定序归 [`build_forest`]（它不读
-/// 输入顺序），这里的排序对树是空操作。`/ss` 面板全量视图同样走树序——pin 在
-/// 那里的语义是「分两层」（见 session_tree）。
+/// 只作用于平铺与 `--json` 输出；层视图与 `--tree` 的定序归 [`Forest::build`]
+/// （它不读输入顺序），这里的排序对它们没有意义。`/ss` 面板的两条行集同样不读输入序
+/// ——层视图是森林全序在某一层的限制，搜索态是树序的子序列；pin 在那里的语义是
+/// 「分两层」（见 session_tree）。
 fn order_sessions(sessions: &mut [SessionInfo]) {
     sessions.sort_by_cached_key(|s| pin_key(is_pinned(&s.tags), pin_added_at(&s.tag_meta)));
 }
@@ -330,20 +515,28 @@ async fn fetch_session_info(
 /// SESSION ID the secondary one (copied on demand), LAST stays the faintest —
 /// and STATUS carries the one semantic colour per state.
 ///
-/// The tree prefix (empty in flat mode) is part of the SESSION ID cell: the
-/// column is `keep_natural`, so the widest `prefix + id` sets the column and
-/// the engine keeps every row at the same display width.
+/// The tree prefix (empty in every mode but `--tree`) is part of the SESSION ID
+/// cell: the column is `keep_natural`, so the widest `prefix + id` sets the
+/// column and the engine keeps every row at the same display width.
 ///
 /// MODEL is the model's display name (gateway config) with the call name / id
 /// as fallback; it is a short label rather than prose, so it classifies as
 /// `Compact` (shrinks after NAME/TAGS) and is capped like the other columns.
+///
+/// CREW (whole-level view only) appears last and only when some row actually
+/// has a rollup — a list without a crew is not made wider for a column of
+/// zeros. The narrowed views (`--tag` / `--parent`) carry no rollup at all
+/// (their row set is a subset; see [`level_rows`]), so the column never shows
+/// there. It is `Compact` (a count is one short token) and its width is the
+/// engine's business like every other column.
 fn format_sessions_table(
     rows: &[SessionRow<'_>],
     palette: &ThemePalette,
     out: &TableOutput,
     now: NaiveDateTime,
 ) -> String {
-    let columns = vec![
+    let show_crew = folded_crew(rows) > 0;
+    let mut columns = vec![
         // The id is the copyable handle and only matches exactly — it must
         // never be truncated, even on a narrow terminal (the table overflows
         // instead; NAME/TAGS give up their width first).
@@ -354,11 +547,14 @@ fn format_sessions_table(
         PlainColumn::capped("MODEL", ColumnKind::Compact, 32),
         PlainColumn::capped("TAGS", ColumnKind::Narrative, 40),
     ];
+    if show_crew {
+        columns.push(PlainColumn::new("CREW", ColumnKind::Compact));
+    }
     let table_rows = rows
         .iter()
         .map(|row| {
             let session = row.session;
-            vec![
+            let mut cells = vec![
                 PlainCell::styled(
                     format!("{}{}", row.prefix, session.id),
                     Style::new().fg(palette.tool_result),
@@ -367,10 +563,7 @@ fn format_sessions_table(
                     session.status.clone(),
                     status_style(&session.status, palette),
                 ),
-                PlainCell::styled(
-                    format_last_interaction(session.last_interaction.as_deref(), now),
-                    Style::new().fg(palette.dim),
-                ),
+                PlainCell::styled(last_text(row, now), Style::new().fg(palette.dim)),
                 PlainCell::styled(
                     common::single_line(session.name.as_deref().unwrap_or("-")),
                     Style::new().fg(palette.text),
@@ -380,7 +573,15 @@ fn format_sessions_table(
                     tags_text(&session.tags),
                     Style::new().fg(palette.tool_result),
                 ),
-            ]
+            ];
+            if show_crew {
+                cells.push(PlainCell::styled(
+                    // `None`（这一行没有聚合）留空，`0` 才是「这个任务没有后代」。
+                    row.crew.map(crew_text).unwrap_or_default(),
+                    Style::new().fg(palette.tool_result),
+                ));
+            }
+            cells
         })
         .collect();
 
@@ -389,6 +590,53 @@ fn format_sessions_table(
         rows: table_rows,
     };
     common::render_table(&table, palette, out)
+}
+
+/// 折进 `CREW` 列的后代数（= 该列之和）：列出现与否读这一个数。收窄视图（`--tag` /
+/// `--parent`）的行没有聚合，所以这个数在那里恒为 0 —— 列与行尾汇总同一条判据
+/// （见 [`level_rows`]）。
+fn folded_crew(rows: &[SessionRow<'_>]) -> usize {
+    rows.iter()
+        .filter_map(|row| row.crew)
+        .map(|crew| crew.descendants)
+        .sum()
+}
+
+/// 行尾汇总：说明折了多少 crew、以及两条展开出口。没有 crew 时返回 `None`（不打空话）。
+fn crew_summary(rows: &[SessionRow<'_>]) -> Option<String> {
+    let folded = folded_crew(rows);
+    (folded > 0).then(|| {
+        let tasks = if rows.len() == 1 { "task" } else { "tasks" };
+        format!(
+            "{} {tasks} · {} crew folded — `--parent <sid>` drills in, `--tree` shows all",
+            rows.len(),
+            folded
+        )
+    })
+}
+
+/// `CREW` 列的读法：后代总数，再按非零追加 `?k`（后代在等你）与 `●k`（后代在干活）。
+fn crew_text(crew: Crew) -> String {
+    let mut text = crew.descendants.to_string();
+    if crew.waiting > 0 {
+        text.push_str(&format!(" ?{}", crew.waiting));
+    }
+    if crew.working > 0 {
+        text.push_str(&format!(" ●{}", crew.working));
+    }
+    text
+}
+
+/// LAST 列：层视图的行读内核指出的**来源行**原文（叶子行的来源行就是它自己），其余模式
+/// 读会话自己的时间。两侧都走 [`format_last_interaction`]，所以「原样展示 / naive 当本地
+/// 墙钟 / 缺失给 `-`」这三条降级对父行与叶子行是同一条。
+fn last_text(row: &SessionRow<'_>, now: NaiveDateTime) -> String {
+    let stamp = if row.level {
+        row.activity_source
+    } else {
+        row.session.last_interaction.as_deref()
+    };
+    format_last_interaction(stamp, now)
 }
 
 /// The model cell: display name first, then the call name, then the id
@@ -1230,6 +1478,37 @@ mod tests {
         );
     }
 
+    /// 注意力：子树里有人等你 → 更旧的根上浮。锚定 CLI 侧确实把行状态喂进了
+    /// `TreeRow`（`working` 不享有这个待遇）。
+    #[test]
+    fn tree_rows_rank_roots_by_subtree_attention() {
+        let mut fresh = session("fresh", "idle", &[]);
+        fresh.last_interaction = Some("2026-10-05T00:00:00".into());
+        let mut quiet = session("quiet", "idle", &[]);
+        quiet.last_interaction = Some("2026-10-01T00:00:00".into());
+
+        let asker = child_of(session("asker", "waiting", &[]), "quiet");
+        let input = [fresh.clone(), quiet.clone(), asker];
+        let rows = tree_rows(&input);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["quiet", "asker", "fresh"]
+        );
+
+        let busy = child_of(session("busy", "working", &[]), "quiet");
+        let input = [fresh, quiet, busy];
+        let rows = tree_rows(&input);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["fresh", "quiet", "busy"],
+            "working 不是注意力：顺序回到活跃度降序"
+        );
+    }
+
     /// 树表格：前缀进 SESSION ID 列，行等宽（显示列记账）、不超终端宽；
     /// 无父子关系的会话在树模式下与平铺逐行一致（退化面）。
     #[test]
@@ -1316,6 +1595,499 @@ mod tests {
             prefix_width <= crate::shared::session_tree::MAX_INDENT_DEPTH * 3 + 3,
             "prefix not capped: {prefix_width}\n{table}"
         );
+    }
+
+    // ---- 层视图（默认渲染）：一行一个任务 + CREW ----
+
+    /// 层视图的行（这些用例只看行与 crew；`whole_level` 有自己的用例）。
+    fn level<'a>(
+        sessions: &'a [SessionInfo],
+        all: bool,
+        tags: &[String],
+        parent: Option<&str>,
+    ) -> Vec<SessionRow<'a>> {
+        level_rows(sessions, all, tags, parent).rows
+    }
+
+    /// 一条数据行的各单元格文本（去外框与内边距；表头带的 `┃` 与数据行的 `│`
+    /// 都算分隔符）。
+    fn row_cells(line: &str) -> Vec<String> {
+        line.trim()
+            .trim_start_matches('┃')
+            .trim_end_matches('┃')
+            .split(['│', '┃'])
+            .map(|cell| cell.trim().to_string())
+            .collect()
+    }
+
+    fn row_ids<'a>(rows: &'a [SessionRow<'a>]) -> Vec<&'a str> {
+        rows.iter().map(|row| row.session.id.as_str()).collect()
+    }
+
+    /// 带最后交互时间的会话（层的定序与 LAST 列都要它）。
+    fn last_at(mut info: SessionInfo, ts: &str) -> SessionInfo {
+        info.last_interaction = Some(ts.into());
+        info
+    }
+
+    /// 层视图的完整输出（默认口径：`--all` / `--tag` / `--parent` 都不给 —— 整层，
+    /// 所以带行尾汇总）。
+    fn level_table(sessions: &[SessionInfo], width: usize) -> String {
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width,
+            color: false,
+        };
+        sessions_table(
+            sessions.to_vec(),
+            TableMode::Level,
+            false,
+            &[],
+            None,
+            &palette,
+            &out,
+        )
+    }
+
+    /// 一个 pin 住的调度者 + `kids` 个执行者（状态按 4 取模轮转）+ 一个陌生人。
+    fn crew_fixture(kids: usize) -> Vec<SessionInfo> {
+        let mut sessions = vec![pinned("sched", "working", Some("2026-10-15T20:00:00"))];
+        for i in 0..kids {
+            let status = match i % 4 {
+                0 => "waiting",
+                1 => "working",
+                _ => "idle",
+            };
+            sessions.push(child_of(
+                session(&format!("kid{i:02}"), status, &["executor"]),
+                "sched",
+            ));
+        }
+        sessions.push(session("stranger", "idle", &[]));
+        sessions
+    }
+
+    #[test]
+    fn table_mode_prefers_tree_then_flat() {
+        assert_eq!(TableMode::pick(false, false), TableMode::Level);
+        assert_eq!(TableMode::pick(false, true), TableMode::Flat);
+        assert_eq!(TableMode::pick(true, false), TableMode::Tree);
+        // clap 声明二者互斥；全序兜底让 tree 赢（不产生未定义行为）。
+        assert_eq!(TableMode::pick(true, true), TableMode::Tree);
+    }
+
+    #[test]
+    fn crew_text_counts_then_flags_only_the_nonzero_parts() {
+        let crew = |descendants, waiting, working| Crew {
+            descendants,
+            waiting,
+            working,
+            activity: None,
+        };
+        assert_eq!(crew_text(crew(40, 0, 0)), "40");
+        assert_eq!(crew_text(crew(40, 1, 3)), "40 ?1 ●3");
+        assert_eq!(crew_text(crew(1, 1, 0)), "1 ?1");
+        assert_eq!(crew_text(crew(2, 0, 3)), "2 ●3");
+        assert_eq!(crew_text(Crew::default()), "0");
+    }
+
+    /// 默认视图一行一个任务：40 个执行者只让调度者多一列，不多 40 行。
+    #[test]
+    fn level_view_folds_a_crew_into_one_row_and_one_column() {
+        let sessions = crew_fixture(40);
+        let table = level_table(&sessions, 120);
+        let data: Vec<&str> = table.lines().filter(|l| l.starts_with('┃')).collect();
+        // 表头 + 2 个任务（调度者 / 陌生人）。
+        assert_eq!(data.len(), 3, "{table}");
+        assert!(data[0].contains("CREW"), "{table}");
+        let sched = row_cells(data[1]);
+        assert_eq!(sched[0], "sched");
+        // 40 个后代：i%4==0 的 10 个在等、i%4==1 的 10 个在干活。
+        assert_eq!(sched[6], "40 ?10 ●10", "{table}");
+        // 没有后代的行在列存在时显示 0。
+        assert_eq!(row_cells(data[2])[6], "0");
+        assert!(!table.contains("kid00"), "crew 不逐行枚举：{table}");
+    }
+
+    /// 没有 crew 时不打扰：`CREW` 列与汇总行都不出现。
+    #[test]
+    fn level_view_omits_the_crew_column_without_descendants() {
+        let sessions = vec![session("a", "idle", &[]), session("b", "working", &[])];
+        let table = level_table(&sessions, 120);
+        assert!(!table.contains("CREW"), "{table}");
+        assert!(!table.contains("folded"), "{table}");
+        for line in table.lines().filter(|l| l.starts_with('┃')) {
+            assert_eq!(row_cells(line).len(), 6, "{line}");
+        }
+    }
+
+    /// 存活闭包：dormant 的父任务只要还有活着的子就仍在默认视图里（否则它的活子
+    /// 会升成假根，crew 也数不全）；整棵都 dormant 的任务不列。
+    #[test]
+    fn level_view_keeps_a_dormant_parent_of_a_live_child() {
+        let sessions = vec![
+            session("live", "idle", &[]),
+            session("parked", "inactive", &[]),
+            child_of(
+                last_at(session("parked-kid", "idle", &[]), "2026-10-15T21:00:00"),
+                "parked",
+            ),
+        ];
+        let rows = level(&sessions, false, &[], None);
+        assert_eq!(row_ids(&rows), ["parked", "live"]);
+        assert_eq!(
+            rows[0].crew.map(|crew| crew.descendants),
+            Some(1),
+            "活子是 dormant 父的 crew"
+        );
+
+        let sessions = vec![
+            session("live", "idle", &[]),
+            session("gone", "inactive", &[]),
+            child_of(session("gone-kid", "inactive", &[]), "gone"),
+        ];
+        assert_eq!(row_ids(&level(&sessions, false, &[], None)), ["live"]);
+    }
+
+    /// `--all` 不过滤：彻底 dormant 的任务也在（仍是一层一行）。
+    #[test]
+    fn all_lists_every_root_and_still_folds_the_crew() {
+        let sessions = vec![
+            session("live", "idle", &[]),
+            session("gone", "inactive", &[]),
+            child_of(session("gone-kid", "inactive", &[]), "gone"),
+        ];
+        let rows = level(&sessions, true, &[], None);
+        assert_eq!(row_ids(&rows), ["gone", "live"]);
+        let gone = rows
+            .iter()
+            .find(|row| row.session.id == "gone")
+            .expect("row");
+        assert_eq!(gone.crew.map(|crew| crew.descendants), Some(1));
+    }
+
+    /// `--tag` 不是「一层」而是标签子集：行按森林全序取，**不带 rollup**（行集是子集，
+    /// 逐行计数会把不在屏上的后代也数进来）。
+    #[test]
+    fn tag_view_takes_the_subset_in_forest_order_without_a_rollup() {
+        let sessions = vec![
+            session("tagged-quiet", "idle", &["task=a"]),
+            last_at(
+                session("tagged-busy", "idle", &["task=a"]),
+                "2026-10-15T21:30:00",
+            ),
+            // 未打标签、但在等人类回答的子：不列，但它让父任务有注意力（排在前面）。
+            child_of(session("kid", "waiting", &[]), "tagged-quiet"),
+        ];
+        let rows = level(&sessions, true, &["task=a".to_string()], None);
+        assert_eq!(row_ids(&rows), ["tagged-quiet", "tagged-busy"]);
+        assert!(
+            rows.iter().all(|row| row.crew.is_none()),
+            "收窄视图不给 rollup"
+        );
+        assert!(
+            rows.iter().all(|row| row.level),
+            "但仍是层视图（LAST 读子树活跃）"
+        );
+    }
+
+    /// `--parent` = 一层往下：只列直接子（父自己不在、孙不在），**不带 rollup**。
+    #[test]
+    fn parent_view_lists_the_direct_children_without_a_rollup() {
+        let sessions = vec![
+            session("P", "working", &[]),
+            child_of(session("c1", "idle", &[]), "P"),
+            child_of(session("c2", "idle", &[]), "P"),
+            child_of(session("g", "waiting", &[]), "c1"),
+        ];
+        let rows = level(&sessions, false, &[], Some("P"));
+        assert_eq!(row_ids(&rows), ["c1", "c2"], "注意力让带人的子排在前面");
+        assert!(
+            rows.iter().all(|row| row.crew.is_none()),
+            "子层的行是 crew 不是任务：数字留给 --tree"
+        );
+        // 未知 / 已归档的父：空行集（诚实降级，不猜）。
+        assert!(level(&sessions, false, &[], Some("gone")).is_empty());
+    }
+
+    /// `--tag` 与 `--parent` 是 AND（与平铺模式的 `filter_sessions` 同一条规则）。
+    #[test]
+    fn parent_and_tag_filters_are_anded() {
+        let sessions = vec![
+            child_of(session("s1", "inactive", &["task=a"]), "P"),
+            child_of(session("s2", "inactive", &["task=b"]), "P"),
+            child_of(session("s3", "inactive", &["task=a"]), "Q"),
+        ];
+        let rows = level(&sessions, true, &["task=a".to_string()], Some("P"));
+        assert_eq!(row_ids(&rows), ["s1"]);
+    }
+
+    /// 层视图的 LAST 对父行是子树活跃（与面板同口径）；叶子行仍是自己的时间
+    /// ——与平铺逐字一致。
+    #[test]
+    fn level_view_last_is_the_subtree_activity_for_a_parent() {
+        let sessions = vec![
+            last_at(session("old-parent", "idle", &[]), "2026-10-15T10:00:00"),
+            child_of(
+                last_at(session("fresh-kid", "idle", &[]), "2026-10-15T21:59:22"),
+                "old-parent",
+            ),
+        ];
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 120,
+            color: false,
+        };
+        let now = naive("2026-10-15T22:00:00");
+
+        let level = format_sessions_table(&level(&sessions, false, &[], None), &palette, &out, now);
+        let row = level
+            .lines()
+            .find(|l| l.contains("old-parent"))
+            .expect("row");
+        assert_eq!(row_cells(row)[2], "38s", "父行取子树最近动静：{level}");
+
+        let flat = format_sessions_table(&flat_rows(&sessions[..1]), &palette, &out, now);
+        let row = flat
+            .lines()
+            .find(|l| l.contains("old-parent"))
+            .expect("row");
+        assert_eq!(row_cells(row)[2], "12h", "平铺仍是自己的时间：{flat}");
+    }
+
+    /// 父行的 LAST 与叶子行**同一条降级**（同一个格式化函数：原样展示 / 空串留空 /
+    /// 缺失给 `-`）。
+    #[test]
+    fn level_view_last_degrades_like_a_leaf_row() {
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 120,
+            color: false,
+        };
+        let now = naive("2026-10-15T22:00:00");
+        let last_of = |sessions: &[SessionInfo], id: &str| {
+            let table =
+                format_sessions_table(&level(sessions, false, &[], None), &palette, &out, now);
+            let row = table
+                .lines()
+                .find(|l| l.contains(id))
+                .expect("row")
+                .to_string();
+            (row_cells(&row)[2].clone(), table)
+        };
+
+        // 解析不了：父行的子树活跃只有这一个值 → 原样展示（不是 `-`）。
+        let garbage = vec![
+            last_at(session("garbage-parent", "idle", &[]), "not-a-time"),
+            child_of(session("quiet-kid", "idle", &[]), "garbage-parent"),
+        ];
+        let (cell, table) = last_of(&garbage, "garbage-parent");
+        assert_eq!(cell, "not-a-time", "父行与叶子行同一条降级：{table}");
+
+        // 带时区偏移：原样展示，不再拿「UTC 墙钟 vs 本地 now」算出一个 8h 的年龄。
+        let offset = vec![
+            session("offset-parent", "idle", &[]),
+            child_of(
+                last_at(
+                    session("offset-kid", "idle", &[]),
+                    "2026-10-15T21:59:22+08:00",
+                ),
+                "offset-parent",
+            ),
+        ];
+        let (cell, table) = last_of(&offset, "offset-parent");
+        assert_eq!(cell, "2026-10-15T21:59:22+08:00", "原样展示：{table}");
+    }
+
+    /// `--flat` / `--tree` 里没有 `CREW` 列：老布局逐字保留（层视图才是新面）。
+    #[test]
+    fn flat_and_tree_tables_have_no_crew_column() {
+        let sessions = crew_fixture(4);
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 120,
+            color: false,
+        };
+        let now = naive("2026-10-15T22:00:00");
+        for table in [
+            format_sessions_table(&flat_rows(&sessions), &palette, &out, now),
+            format_sessions_table(&tree_rows(&sessions), &palette, &out, now),
+        ] {
+            assert!(!table.contains("CREW"), "{table}");
+            assert!(!table.contains("folded"), "{table}");
+            for line in table.lines().filter(|l| l.starts_with('┃')) {
+                assert_eq!(row_cells(line).len(), 6, "{line}");
+            }
+        }
+    }
+
+    /// 行尾汇总只在有 crew 被折起时出现，且必须说明两条出口；单数形态不写
+    /// `1 tasks`，整行不超过 80 列（80 列终端是最常见的窄宽）。
+    #[test]
+    fn the_summary_line_names_both_ways_out() {
+        let sessions = crew_fixture(3);
+        let text = level_table(&sessions, 120);
+        let last = text.lines().last().expect("summary line");
+        assert!(last.starts_with("2 tasks · 3 crew folded"), "{text}");
+        assert!(last.contains("`--parent <sid>`"), "{text}");
+        assert!(last.contains("`--tree`"), "{text}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(last) <= 80,
+            "汇总行要能塞进 80 列终端：{last}"
+        );
+
+        let single = crew_summary(&level(&sessions[..4], false, &[], None)).expect("crew");
+        assert!(single.starts_with("1 task · 3 crew folded"), "{single}");
+        // 没有 crew 被折起 → 不打。
+        assert_eq!(crew_summary(&level(&sessions[4..], false, &[], None)), None);
+    }
+
+    /// 行尾汇总只描述**根层**：`--tag`（标签子集）与 `--parent`（子层）不打。这里走
+    /// `sessions_table`（判据本身落在这里），不是给 `render_view` 一个现成的 bool。
+    #[test]
+    fn only_the_root_level_view_carries_the_summary() {
+        let sessions = vec![
+            session("P", "working", &["task=a"]),
+            child_of(session("c1", "idle", &["task=a"]), "P"),
+            child_of(session("c2", "idle", &["task=a"]), "P"),
+            child_of(session("g", "waiting", &[]), "c1"),
+        ];
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 120,
+            color: false,
+        };
+        let table = |tags: &[String], parent: Option<&str>| {
+            sessions_table(
+                sessions.clone(),
+                TableMode::Level,
+                true,
+                tags,
+                parent,
+                &palette,
+                &out,
+            )
+        };
+
+        // 根层（默认）：P 折起 c1 / c2 / g → 有汇总行。
+        let root = table(&[], None);
+        assert!(root.contains("1 task · 3 crew folded"), "{root}");
+        assert!(root.contains("CREW"), "{root}");
+
+        // 子层（`--parent`）：行集是子集 ⇒ 既没有汇总行，也没有 `CREW` 列（同一条判据：
+        // 逐行 rollup 会把不在这一层的孙辈也数进来，同屏重复计数）。
+        let children = table(&[], Some("P"));
+        assert!(!children.contains("CREW"), "{children}");
+        assert!(!children.contains("folded"), "{children}");
+
+        // 标签子集：同上（命中的行逐行列出，行集不是一层）。
+        let tagged = table(&["task=a".to_string()], None);
+        assert!(!tagged.contains("CREW"), "{tagged}");
+        assert!(!tagged.contains("folded"), "{tagged}");
+    }
+
+    /// 收窄视图（`--tag` / `--parent`）没有 `CREW` 列，但 LAST 仍是子树活跃
+    /// ——列消失不改投影口径。
+    #[test]
+    fn narrowed_level_views_carry_no_crew_column_but_keep_the_subtree_last() {
+        let sessions = vec![
+            last_at(
+                session("tagged-parent", "idle", &["task=a"]),
+                "2026-10-15T10:00:00",
+            ),
+            child_of(
+                last_at(
+                    session("tagged-kid", "idle", &["task=a"]),
+                    "2026-10-15T20:00:00",
+                ),
+                "tagged-parent",
+            ),
+            // 未打标签的孙：进父行 / 子行的子树活跃，但不进任何一行。
+            child_of(
+                last_at(session("plain-grand", "idle", &[]), "2026-10-15T21:59:22"),
+                "tagged-kid",
+            ),
+        ];
+        let palette = ThemePalette::default();
+        let out = TableOutput {
+            width: 120,
+            color: false,
+        };
+        let now = naive("2026-10-15T22:00:00");
+        let rows = level(&sessions, true, &["task=a".to_string()], None);
+        let table = format_sessions_table(&rows, &palette, &out, now);
+        assert!(!table.contains("CREW"), "{table}");
+        assert!(!table.contains("▸"), "没有徽章列：{table}");
+        // 六列（老的布局）：CREW 不在其中。
+        for line in table.lines().filter(|l| l.starts_with('┃')) {
+            assert_eq!(row_cells(line).len(), 6, "{line}");
+        }
+        // LAST 依旧取子树活跃的来源行（孙那一行），与整层视图同一条投影。
+        let kid = table
+            .lines()
+            .find(|l| l.contains("tagged-kid"))
+            .expect("row");
+        assert_eq!(row_cells(kid)[2], "38s", "{table}");
+    }
+
+    /// `CREW` 列在窄终端（80 列）下参与同一套让位：7 列都在、行等宽、id 完整；
+    /// `?k` / `●k` 会被截掉（列宽交给引擎，不为它开 `keep_natural` —— 那会让整表
+    /// 溢出终端）。要读注意力标记就加宽终端或看 `--tree`。
+    #[test]
+    fn the_crew_column_yields_with_the_rest_on_a_narrow_terminal() {
+        // 真实形态的宽度：22 列 id + CJK 名字，自然宽度明显超过 80。
+        let mut sessions = vec![pinned(
+            "20261015-211837-sched",
+            "working",
+            Some("2026-10-15T20:00:00"),
+        )];
+        sessions[0].name = Some("调度者：会话列表改版".into());
+        for i in 0..12 {
+            let status = if i % 3 == 0 { "waiting" } else { "working" };
+            let mut kid = child_of(
+                session(
+                    &format!("20261015-2200{i:02}-kid{i:02}"),
+                    status,
+                    &["executor"],
+                ),
+                "20261015-211837-sched",
+            );
+            kid.name = Some(format!("执行者 {i}：表格渲染"));
+            sessions.push(kid);
+        }
+
+        let table = level_table(&sessions, 80);
+        let lines: Vec<&str> = table.lines().filter(|l| l.starts_with('┃')).collect();
+        assert!(lines[0].contains("CREW"), "{table}");
+        for line in &lines {
+            assert_eq!(row_cells(line).len(), 7, "{line}");
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(*line),
+                80,
+                "行宽 = 终端宽：{line}"
+            );
+        }
+        // id 是精确句柄：窄终端下仍完整。
+        assert!(table.contains("20261015-211837-sched"), "{table}");
+        // CREW 的第一段（后代总数）还在；`?k` / `●k` 已让位让掉了（12 个后代里 4 个
+        // 在等、8 个在干活，完整形态是 `12 ?4 ●8`）。
+        let row = lines
+            .iter()
+            .find(|l| l.contains("20261015-211837-sched"))
+            .expect("scheduler row");
+        let crew = &row_cells(row)[6];
+        assert!(crew.starts_with("12"), "CREW：{crew}\n{table}");
+        assert!(
+            !table.contains("12 ?4 ●8"),
+            "80 列下注意力标记应被让位：{table}"
+        );
+    }
+
+    /// 一行都没有（全是 dormant）时与平铺同一个出口。
+    #[test]
+    fn an_empty_level_view_says_there_are_no_sessions() {
+        let sessions = vec![session("gone", "inactive", &[])];
+        assert_eq!(level_table(&sessions, 120), "No sessions found.\n");
     }
 
     // ---- `wing info` 的用量块 ----

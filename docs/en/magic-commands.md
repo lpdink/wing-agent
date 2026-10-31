@@ -22,7 +22,7 @@ Despite the name, there is no backend "magic dispatch" anymore. A slash command 
 | `/copy` | | `[N]` | Copy the last (or Nth) assistant message to clipboard |
 | `/tips` | | | List every startup tip (the welcome block rotates one per launch) |
 | `/new` | | `[name]` | Create a new session |
-| `/session` | `/ss` | `[session_id]` | Switch to a session, or list all sessions |
+| `/session` | `/ss` | `[session_id]` | Switch to a session, or browse sessions one layer at a time (`→` enters a task's crew, `←` goes back, typing searches everything) |
 | `/fork` | | `<uuid>` | Fork a new session from a specific message |
 | `/model` | `/m` | `[name]` | Show or switch the model |
 | `/agents` | | `[name]` | Show or switch the agent template |
@@ -42,7 +42,7 @@ The source of truth for this list is `crates/wing/src/ui/popup/command.rs` (`TUI
 
 ```
 /new my-project        # create a named session
-/ss                    # list all sessions
+/ss                    # browse sessions one layer at a time (→ into a crew, ← back, typing searches all)
 /ss abc123             # switch to session abc123
 /fork a1b2c3d4         # fork from the message with this uuid
 /rewind a1b2c3d4       # rewind to this message (discards everything after)

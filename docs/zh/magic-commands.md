@@ -22,7 +22,7 @@
 | `/copy` | | `[N]` | 复制最近（或第 N 条）assistant 消息到剪贴板 |
 | `/tips` | | | 列出全部开屏提示（欢迎屏每次启动只轮换显示其中一条） |
 | `/new` | | `[name]` | 创建新 session |
-| `/session` | `/ss` | `[session_id]` | 切换 session，或列出所有 session |
+| `/session` | `/ss` | `[session_id]` | 切换 session，或逐层浏览会话（`→` 进入某任务的子会话 / `←` 返回 / 打字搜索全部） |
 | `/fork` | | `<uuid>` | 从指定消息分叉出新 session |
 | `/model` | `/m` | `[name]` | 查看或切换模型 |
 | `/agents` | | `[name]` | 查看或切换 agent 模板 |
@@ -42,7 +42,7 @@
 
 ```
 /new my-project        # 创建命名 session
-/ss                    # 列出所有 session
+/ss                    # 逐层浏览会话（→ 进子会话，← 返回，打字搜索全部）
 /ss abc123             # 切换到 session abc123
 /fork a1b2c3d4         # 从该 uuid 的消息分叉
 /rewind a1b2c3d4       # 回退到该消息（丢弃其后全部内容）

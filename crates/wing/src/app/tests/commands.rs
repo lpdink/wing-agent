@@ -673,25 +673,41 @@ fn test_info_carries_model_id_and_provider_without_a_clearing_hack() {
 // ── Session list: the tree order + the two-layer pin ──
 
 /// `/session`（`/ss`）的候选缓存按**树序**排列（唯一实现
-/// `shared::session_tree::build_forest`，与 `wing ps --tree` 共用）：子会话
-/// 跟在父下面并带连接前缀，pin 的根连同子树整块上浮，子节点的 pin 只在兄弟
-/// 组内说话。行序由每行自足的排序键（pin 时间 / 子树活跃 / id）决定。
+/// `shared::session_tree`，与 `wing ps --tree` 共用）：子会话跟在父下面，pin 的根
+/// 连同子树整块上浮，子节点的 pin 只在兄弟组内说话。行序由每行自足的排序键
+/// （pin 时间 / 子树注意力 / 子树活跃 / id）决定；面板的画法是层视图，见本模块
+/// 下半的用例。
 ///
-/// 三条旧重排键仍逐一覆盖（它们都不再参与定序）：
+/// 三条旧重排键的**旧语义**都被逐一覆盖（它们都不再定序）：
 /// - **workspace 匹配**：inactive 行的 workspace 正是启动目录，active 行的不是；
-/// - **状态优先级**：payload 里更旧的 `waiting`（旧 rank 0）排在更新的 `idle`
-///   （旧 rank 2）之后——只看 rank 会把它提到最前；
+/// - **状态 rank 表**：`waiting` 确实会提前，但只经子树注意力——同一个 payload 里
+///   更旧的 `working` 行没有这个待遇；
 /// - **后端基准序**（active 优先）也不再是行序的来源。
 mod session_list {
     use crate::app::App;
+    use crate::app::intent::AppIntent;
     use crate::app::intent::FetchPayload;
     use crate::app::intent::FetchResult;
+    use crate::app::tests::support::key;
     use crate::config::AppConfig;
+    use crate::config::ThemePalette;
     use crate::shared::pinning::PIN_TAG;
-    use crate::ui::popup::selection::SelectionRow;
+    use crate::ui::popup::selection::SelectionPopup;
+    use crate::ui::popup::selection::SessionChrome;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Widget;
     use wing_api_client::models::SessionInfo;
     use wing_api_client::models::SessionListResponse;
     use wing_api_client::models::TagMeta;
+
+    /// `Ctrl+<letter>`：层视图的 dormant 开关与翻页。
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
 
     /// `pinned_at` 给出时带 `pin` 标签与对应记录。
     fn session(
@@ -762,15 +778,6 @@ mod session_list {
             .collect()
     }
 
-    fn prefixes(app: &App) -> Vec<&str> {
-        app.popup
-            .cache
-            .sessions
-            .iter()
-            .map(|c| c.tree_prefix.as_str())
-            .collect()
-    }
-
     /// 把 `s` 挂到 `parent` 名下（血缘：谁创建了我）。
     fn under(mut s: SessionInfo, parent: &str) -> SessionInfo {
         s.parent_session_id = Some(parent.into());
@@ -778,7 +785,7 @@ mod session_list {
     }
 
     #[test]
-    fn test_flat_list_orders_by_subtree_activity_not_workspace_or_status() {
+    fn test_flat_list_orders_by_attention_then_subtree_activity() {
         let mut app = app();
         feed(
             &mut app,
@@ -792,7 +799,7 @@ mod session_list {
                     "2025-06-01T00:00:00",
                     None,
                 ),
-                // 还在 active 组里但时间更旧：waiting 不享有状态优先级。
+                // 在等人类回答：注意力把它提到最前（时间更旧也一样）。
                 session(
                     "active-old-waiting",
                     "waiting for me",
@@ -810,29 +817,41 @@ mod session_list {
                     "2025-03-01T00:00:00",
                     None,
                 ),
+                // 在跑轮次但不是注意力：时间最旧就排最后。
+                session(
+                    "active-older-working",
+                    "busy, nobody waits",
+                    "/elsewhere/project",
+                    "working",
+                    "2024-01-01T00:00:00",
+                    None,
+                ),
             ],
         );
 
         assert_eq!(
             ids(&app),
-            ["active-new", "inactive-mid", "active-old-waiting"],
-            "无父子关系的列表按「最后交互降序」；workspace / status 都不参与"
+            [
+                "active-old-waiting",
+                "active-new",
+                "inactive-mid",
+                "active-older-working",
+            ],
+            "注意力（自己或后代在等你）压过活跃度，其余按最后交互降序；\
+             workspace 与状态 rank 表都不参与（`waiting` 只经注意力影响行序）"
         );
-        assert_eq!(app.popup.cache.sessions[0].status, "idle");
+        assert_eq!(app.popup.cache.sessions[0].status, "waiting");
         assert_eq!(
-            app.popup.cache.sessions[0].last_interaction,
+            app.popup.cache.sessions[1].last_interaction,
             "2025-06-01T00:00:00"
         );
         // workspace 随候选带下来（展示 + 搜索），但不参与排序。
-        assert_eq!(app.popup.cache.sessions[1].workspace, "/launch/project");
-        // 全是根 → 全不带前缀（平滑退化：看起来和树形之前一样）。
-        assert_eq!(prefixes(&app), ["", "", ""]);
+        assert_eq!(app.popup.cache.sessions[2].workspace, "/launch/project");
     }
 
     #[test]
-    fn test_children_follow_their_parent_with_drawing_prefixes() {
-        // A → B → G，且 B 之后还有兄弟 C：树序 + 连接前缀，
-        // G 的祖先前缀里要保留 B 那一层的 `│` 延续线。
+    fn test_children_follow_their_parent_in_tree_order() {
+        // A → B → G，且 B 之后还有兄弟 C：深度优先的树序（G 夹在 B 与 C 之间）。
         let mut app = app();
         feed(
             &mut app,
@@ -883,7 +902,6 @@ mod session_list {
         );
 
         assert_eq!(ids(&app), ["r2", "A", "B", "G", "C"]);
-        assert_eq!(prefixes(&app), ["", "", "├─ ", "│  └─ ", "└─ "]);
     }
 
     #[test]
@@ -927,7 +945,6 @@ mod session_list {
             ["pinned", "worker", "busy"],
             "pin 的根连同子树整块上浮（置顶区只对根开放）"
         );
-        assert_eq!(prefixes(&app), ["", "└─ ", ""]);
     }
 
     #[test]
@@ -967,7 +984,6 @@ mod session_list {
         );
 
         assert_eq!(ids(&app), ["busy", "parent", "kid-pinned", "kid-newer"]);
-        assert_eq!(prefixes(&app), ["", "", "├─ ", "└─ "]);
     }
 
     #[test]
@@ -1001,63 +1017,536 @@ mod session_list {
         );
 
         assert_eq!(ids(&app), ["orphan", "healthy"]);
-        assert_eq!(prefixes(&app), ["", ""]);
+    }
+
+    // ── 层视图（一次一层） ───────────────────────────────────────
+
+    /// 面板当前的行（id，按渲染顺序）。
+    ///
+    /// **不重投影**：`update_popup_from_input` 会按草稿重建 popup，光标随之回到第一条
+    /// ——读行集的助手不该顺手改掉被测的状态。
+    fn panel_ids(app: &App) -> Vec<String> {
+        let (rows, ..) = app.popup.active.render_data().expect("panel is open");
+        rows.iter().map(|r| r.name.clone()).collect()
+    }
+
+    /// 面板每条行的行 1 文本（宽 60 渲染成一帧）。
+    fn panel_line1s(app: &App) -> Vec<String> {
+        let (rows, state, filter, chrome) = app.popup.active.render_data().expect("panel is open");
+        let count = rows.len();
+        let chrome_h = chrome.map_or(0, SessionChrome::height);
+        let area = Rect::new(0, 0, 60, (count * 2).max(1) as u16 + chrome_h);
+        let mut buf = Buffer::empty(area);
+        let palette = ThemePalette::default();
+        let mut popup = SelectionPopup::new(rows, state, filter, &palette);
+        if let Some(chrome) = chrome {
+            popup = popup.with_chrome(chrome);
+        }
+        popup.render(area, &mut buf);
+        (0..count)
+            .map(|i| {
+                (0..60u16)
+                    .map(|x| buf[(x, (i * 2) as u16)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// 面板的 chrome（面包屑，(被收起的数量, 是否已放出来)）。
+    fn panel_chrome(app: &App) -> (Option<String>, Option<(usize, bool)>) {
+        let (.., Some(chrome)) = app.popup.active.render_data().expect("panel is open") else {
+            panic!("session panel has chrome");
+        };
+        (
+            chrome.breadcrumb.clone(),
+            chrome.footnote.map(|f| (f.hidden, f.shown)),
+        )
+    }
+
+    /// 40 个子会话的 pinned 任务（现场形状）+ 另一个根。
+    fn crew_fixture() -> Vec<SessionInfo> {
+        let mut sessions = vec![
+            session(
+                "boss",
+                "the team",
+                "/ws",
+                "inactive",
+                "2025-01-01T00:00:00",
+                Some("2025-05-01T09:00:00"),
+            ),
+            session(
+                "other",
+                "another task",
+                "/ws",
+                "idle",
+                "2025-02-01T00:00:00",
+                None,
+            ),
+        ];
+        for i in 0..40 {
+            let status = if i == 0 { "waiting" } else { "idle" };
+            sessions.push(under(
+                session(
+                    &format!("kid-{i:02}"),
+                    &format!("worker {i:02}"),
+                    "/ws",
+                    status,
+                    "2025-03-01T00:00:00",
+                    None,
+                ),
+                "boss",
+            ));
+        }
+        sessions
     }
 
     #[test]
-    fn test_the_search_state_flattens_the_rendered_rows() {
-        // 全量（无过滤词）带树前缀；一旦输入过滤词，命中行平铺（前缀清空）——
-        // 命中集合与树不同构，悬空的连接线只会误导。
+    fn test_a_forty_child_task_is_one_row_at_the_root_level() {
+        // 用户按 40 多次 ↓ 才能到下一个关心的事——现在那个任务占 1 行。
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_ids(&app), ["boss", "other"]);
+        let lines = panel_line1s(&app);
+        assert!(
+            lines[0].contains("▸40 ?1"),
+            "后代总数与在等你的条数：{lines:?}"
+        );
+        assert!(!lines[1].contains('▸'), "没有后代的根不带徽章：{lines:?}");
+    }
+
+    #[test]
+    fn test_typing_in_the_level_view_starts_the_search() {
+        // 层视图的空过滤词 = 「当前层」而不是「搜索态」：一个字符必须进搜索词。
+        // 落回 composer 会把命令名改写成 `/ssk` —— 面板关掉、层位置一起丢。
         let mut app = app();
         feed(
             &mut app,
             vec![
-                session("root", "root", "/ws", "idle", "2025-02-01T00:00:00", None),
+                session("alpha", "first", "/ws", "idle", "2025-01-02T00:00:00", None),
+                session("beta", "second", "/ws", "idle", "2025-01-01T00:00:00", None),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_ids(&app), ["alpha", "beta"]);
+
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.input.text(), "/ss b", "字符进了命令的参数区");
+        assert_eq!(
+            app.popup.active.session_panel_command(),
+            Some("/ss"),
+            "面板还在会话子命令态"
+        );
+        let (rows, state, filter, chrome) = app.popup.active.render_data().expect("panel is open");
+        assert_eq!(filter, "b", "面板进入搜索态");
+        assert_eq!(
+            chrome,
+            Some(&SessionChrome::default()),
+            "搜索态没有面包屑 / 尾注"
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["beta"]
+        );
+        assert_eq!(state.selected, 0);
+
+        // Esc 阶梯不受影响：搜索态的那个 Esc 仍然关面板。
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.popup.active.is_active(), "Esc 关面板");
+    }
+
+    #[test]
+    fn test_typing_into_an_existing_filter_word_is_plain_draft_editing() {
+        // 过滤词已有内容 = 用户正在改搜索词：字符与退格都照旧归 composer。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("alpha", "first", "/ws", "idle", "2025-01-02T00:00:00", None),
+                session("beta", "second", "/ws", "idle", "2025-01-01T00:00:00", None),
+            ],
+        );
+        app.input.set_text("/ss b");
+        app.update_popup_from_input();
+        assert!(!app.popup.active.session_level_view(), "前提：搜索态");
+
+        app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(app.input.text(), "/ss be");
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.input.text(), "/ss b");
+        assert_eq!(
+            app.popup.active.session_panel_command(),
+            Some("/ss"),
+            "搜索态自始至终都在同一个面板里"
+        );
+    }
+
+    #[test]
+    fn test_typing_in_another_candidate_panel_still_edits_the_draft() {
+        // 只有会话面板的层视图接管字符：其它候选面板（`/fork`）维持今天的行为 ——
+        // 字符照常进 composer（草稿变成 `/fork x`，面板块照旧由 `update_popup_from_input`
+        // 重新判定）。
+        let mut app = app();
+        app.popup.cache.branches = vec![("uuid-1".into(), "preview".into())];
+        app.input.set_text("/fork ");
+        app.update_popup_from_input();
+        assert!(app.popup.active.is_active(), "前提：候选面板");
+
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.input.text(), "/fork x");
+    }
+
+    #[test]
+    fn test_enter_and_back_keep_the_cursor_on_the_row_you_came_from() {
+        // 两个根，要进去的那个**排在第二行**：这样「光标回到它」与「光标跳回第一条」
+        // 才是可区分的两件事。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("aaa", "newer", "/ws", "idle", "2025-02-01T00:00:00", None),
+                session("zzz", "older", "/ws", "idle", "2025-01-01T00:00:00", None),
+                under(
+                    session("kid", "worker", "/ws", "idle", "2025-01-02T00:00:00", None),
+                    "zzz",
+                ),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_ids(&app), ["aaa", "zzz"], "按子树活跃定序");
+        app.drain_intents();
+
+        // ↓ 到第二行，→ 进入它的 crew。
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(panel_ids(&app), ["kid"], "层里只剩它的直接子");
+        assert_eq!(app.popup.active.selected_name(), Some("kid"));
+        assert!(app.drain_intents().is_empty(), "切层不重取数据");
+
+        // 光标离开顶部再退层：回到你刚才进来的那一行（下标 1，不是第一条）。
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(panel_ids(&app), ["aaa", "zzz"]);
+        assert!(app.drain_intents().is_empty(), "退层不重取数据");
+        let (_, state, ..) = app.popup.active.render_data().expect("panel is open");
+        assert_eq!(state.selected, 1, "光标回到第二行");
+        assert_eq!(app.popup.active.selected_name(), Some("zzz"));
+    }
+
+    #[test]
+    fn test_entering_puts_the_cursor_on_the_current_session_row() {
+        // 当前会话是 boss 的一个子会话：进层后光标应当落在它那一行。
+        let mut app = app();
+        app.session_id = "kid-07".into();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.popup.active.selected_name(), Some("kid-07"));
+    }
+
+    #[test]
+    fn test_the_current_session_marks_its_row_and_its_root_ancestor() {
+        let mut app = app();
+        app.session_id = "kid-07".into();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        let rows = {
+            app.update_popup_from_input();
+            let (rows, ..) = app.popup.active.render_data().expect("panel is open");
+            rows.iter()
+                .map(|r| {
+                    let level = r.rich.as_ref().and_then(|rich| rich.level.as_ref());
+                    (r.name.clone(), level.is_some_and(|l| l.current))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows,
+            vec![("boss".into(), true), ("other".into(), false)],
+            "根层标的是当前会话的根祖先"
+        );
+
+        app.handle_key(key(KeyCode::Right));
+        let (rows, ..) = app.popup.active.render_data().expect("panel is open");
+        let marked: Vec<&str> = rows
+            .iter()
+            .filter(|r| {
+                r.rich
+                    .as_ref()
+                    .and_then(|rich| rich.level.as_ref())
+                    .is_some_and(|level| level.current)
+            })
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(marked, ["kid-07"], "进了根祖先的层，标的换成我自己");
+    }
+
+    #[test]
+    fn test_dormant_children_stay_out_until_ctrl_a() {
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("root", "root", "/ws", "idle", "2025-01-01T00:00:00", None),
+                under(
+                    session("live", "alive", "/ws", "idle", "2025-02-01T00:00:00", None),
+                    "root",
+                ),
                 under(
                     session(
-                        "kid",
-                        "kid worker",
+                        "parked",
+                        "evicted",
                         "/ws",
-                        "idle",
-                        "2025-01-01T00:00:00",
+                        "inactive",
+                        "2025-03-01T00:00:00",
                         None,
                     ),
                     "root",
                 ),
             ],
         );
-
-        let panel_prefixes = |app: &mut App| -> Vec<String> {
-            app.update_popup_from_input();
-            let (rows, ..) = app.popup.active.render_data().expect("panel is open");
-            rich_prefixes(rows)
-        };
         app.input.set_text("/ss");
-        assert_eq!(panel_prefixes(&mut app), ["", "└─ "]);
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(panel_ids(&app), ["live"]);
+        assert_eq!(
+            panel_chrome(&app).1,
+            Some((1, false)),
+            "尾注说出被收起的数量"
+        );
 
-        app.input.set_text("/ss worker");
-        assert_eq!(panel_prefixes(&mut app), [""]);
+        // Ctrl+A：dormant 进层，尾注改口说当前状态；光标钉在原来那一行。
+        app.handle_key(ctrl('a'));
+        assert_eq!(
+            panel_ids(&app),
+            ["parked", "live"],
+            "行集变大、顺序 = 森林全序（更活跃的 parked 在前）"
+        );
+        assert_eq!(
+            panel_chrome(&app).1,
+            Some((1, true)),
+            "打开时尾注说的是当前状态"
+        );
+        assert_eq!(
+            app.popup.active.selected_name(),
+            Some("live"),
+            "光标钉回原来那一行（不在下标 0）"
+        );
+
+        // 开关在面板生命周期内保持（切层不归零）。
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(panel_ids(&app).len(), 2);
+
+        // 面板关闭 → 回根层 + dormant 关。
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            !app.popup.level_view.query("x").include_dormant,
+            "面板关闭复位"
+        );
+        assert_eq!(app.popup.level_view.depth(), 0);
     }
 
-    /// 面板行的树前缀（顺序 = 渲染顺序）。
-    fn rich_prefixes(rows: &[SelectionRow]) -> Vec<String> {
-        rows.iter()
-            .map(|r| {
-                r.rich
-                    .as_ref()
-                    .expect("session rows are rich")
-                    .tree_prefix
-                    .clone()
+    #[test]
+    fn test_closing_the_dormant_view_keeps_the_cursor_near_its_row() {
+        // 关回去时那一行正好被收起：光标停在它原来的位置上，而不是跳回第一条。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("root", "root", "/ws", "idle", "2025-01-01T00:00:00", None),
+                under(
+                    session("live-a", "a", "/ws", "idle", "2025-03-01T00:00:00", None),
+                    "root",
+                ),
+                under(
+                    session(
+                        "parked",
+                        "p",
+                        "/ws",
+                        "inactive",
+                        "2025-02-01T00:00:00",
+                        None,
+                    ),
+                    "root",
+                ),
+                under(
+                    session("live-b", "b", "/ws", "idle", "2025-01-15T00:00:00", None),
+                    "root",
+                ),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(panel_ids(&app), ["live-a", "live-b"], "dormant 默认不列");
+
+        app.handle_key(ctrl('a'));
+        assert_eq!(panel_ids(&app), ["live-a", "parked", "live-b"]);
+        app.handle_key(key(KeyCode::Down)); // 光标到 parked
+        assert_eq!(app.popup.active.selected_name(), Some("parked"));
+
+        app.handle_key(ctrl('a')); // 关回去：parked 消失
+        assert_eq!(panel_ids(&app), ["live-a", "live-b"]);
+        assert_eq!(
+            app.popup.active.selected_name(),
+            Some("live-b"),
+            "光标停在原来的位置（下标 1），不是跳回第一条"
+        );
+    }
+
+    #[test]
+    fn test_the_breadcrumb_names_the_level_and_never_at_the_root() {
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_chrome(&app), (None, None), "根层不占行");
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            panel_chrome(&app).0.as_deref(),
+            Some("the team"),
+            "面包屑命名当前层（标题）"
+        );
+        // 层 ≥1 的 Esc 是退层，不是关闭面板。
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.popup.active.is_active(), "Esc 退层后面板还在");
+        assert_eq!(app.popup.level_view.depth(), 0);
+        // 根层的 Esc 回到今天的阶梯（关面板）。
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.popup.active.is_active());
+    }
+
+    #[test]
+    fn test_a_leaf_has_no_crew_to_enter() {
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.popup.active.move_down(); // 光标到 "other"（没有子会话）
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.popup.level_view.depth(), 0, "无子 = no-op");
+    }
+
+    #[test]
+    fn test_a_cyclic_parent_offers_nothing_to_enter() {
+        // A ↔ B（手改 metadata）：内核把两者升为根、断开那条边 ⇒ 谁都没有 crew。
+        // 面板因此不把「→」变成一次进入空层的旅行。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                under(
+                    session("A", "a", "/ws", "idle", "2025-01-02T00:00:00", None),
+                    "B",
+                ),
+                under(
+                    session("B", "b", "/ws", "idle", "2025-01-01T00:00:00", None),
+                    "A",
+                ),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_ids(&app), ["A", "B"]);
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.popup.level_view.depth(), 0, "两个根都没有 crew");
+        assert!(app.popup.active.is_active(), "面板留着");
+    }
+
+    #[test]
+    fn test_an_archived_scope_falls_back_to_the_root_level() {
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.popup.level_view.depth(), 1);
+
+        // 刷新回来的 payload 里那一层已经不在了（归档 / 删除）。
+        let mut sessions = crew_fixture();
+        sessions.retain(|s| s.id == "other");
+        feed(&mut app, sessions);
+        assert_eq!(app.popup.level_view.depth(), 0, "回落根层，不报错");
+        assert_eq!(panel_ids(&app), ["other"]);
+    }
+
+    #[test]
+    fn test_enter_switches_to_the_session_at_any_level() {
+        // Enter 永远是「切到该行会话」，不是「进层」——进了层也一样。
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Right));
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Down)); // kid-01
+        app.handle_key(key(KeyCode::Enter));
+        let resumed = app
+            .drain_intents()
+            .into_iter()
+            .find_map(|intent| match intent {
+                AppIntent::ResumeSession { session_id } => Some(session_id),
+                _ => None,
+            });
+        assert_eq!(resumed.as_deref(), Some("kid-01"));
+        assert!(!app.popup.active.is_active(), "切走后面板关掉");
+    }
+
+    #[test]
+    fn test_paging_moves_by_a_screen_and_clamps() {
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        app.handle_key(key(KeyCode::Right)); // 40 条子会话
+
+        let selected = |app: &App| app.popup.active.selected_name().map(str::to_string);
+        app.handle_key(ctrl('d'));
+        assert_eq!(selected(&app).as_deref(), Some("kid-06"), "一屏 = 6 条");
+        app.handle_key(ctrl('d'));
+        assert_eq!(selected(&app).as_deref(), Some("kid-12"));
+        app.handle_key(ctrl('u'));
+        assert_eq!(selected(&app).as_deref(), Some("kid-06"));
+        // 两端钳住（不环绕）：连按到顶仍然停在第一条。
+        for _ in 0..10 {
+            app.handle_key(ctrl('u'));
+        }
+        assert_eq!(selected(&app).as_deref(), Some("kid-00"));
+    }
+
+    /// 真正上屏的帧文本（每行一条）。
+    fn frame_lines(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        use crate::app::tests::support::{draw, test_terminal};
+        let mut term = test_terminal(width, height);
+        draw(app, &mut term);
+        let buf = term.backend().buffer();
+        (buf.area.y..buf.area.bottom())
+            .map(|y| {
+                (buf.area.x..buf.area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
             })
             .collect()
     }
 
-    #[test]
-    fn test_the_frame_draws_the_tree_block_with_aligned_second_lines() {
-        // 端到端：把面板画进帧缓冲，读真正上了屏的行——树块成画（`├─` /
-        // `│` / `└─`），行 2 的标题缩进与行 1 的图标列对齐。
-        use super::{draw, test_terminal};
+    /// 帧里含 `needle` 的第一行下标。
+    fn row_of(rows: &[String], needle: &str) -> usize {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("no row contains {needle:?}:\n{}", frame_rows(rows)))
+    }
 
+    #[test]
+    fn test_the_level_view_draws_badges_and_the_breadcrumb_on_screen() {
+        // 端到端：真帧缓冲里的行——任务行带徽章、行 2 与行 1 对齐；进层后面包屑在
+        // 顶部，两个孩子各一行（无前缀、无树块）。
         let mut app = app();
         feed(
             &mut app,
@@ -1076,21 +1565,10 @@ mod session_list {
                 ),
                 under(
                     session(
-                        "G",
-                        "sub-worker",
-                        "/ws",
-                        "idle",
-                        "2025-04-01T00:00:00",
-                        None,
-                    ),
-                    "B",
-                ),
-                under(
-                    session(
                         "C",
                         "worker two",
                         "/ws",
-                        "idle",
+                        "waiting",
                         "2025-03-01T00:00:00",
                         None,
                     ),
@@ -1101,52 +1579,63 @@ mod session_list {
         app.input.set_text("/ss");
         app.update_popup_from_input();
 
-        // 32 行：开屏版式下牌子占 12 行、输入卡 3 行，剩下的空气要放得下整张
-        // 会话列表（`MAX_VISIBLE_ROWS` = 8）。
-        let mut term = test_terminal(60, 32);
-        draw(&mut app, &mut term);
-        let buf = term.backend().buffer();
-        let rows: Vec<String> = (buf.area.y..buf.area.bottom())
-            .map(|y| {
-                (buf.area.x..buf.area.right())
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect()
-            })
-            .collect();
-        let row_of = |needle: &str| {
-            rows.iter()
-                .position(|r| r.contains(needle))
-                .unwrap_or_else(|| panic!("no row contains {needle:?}:\n{}", frame_rows(&rows)))
-        };
+        let rows = frame_lines(&mut app, 60, 32);
+        // 根层：A 一行带 crew 徽章（2 个子，其中 1 个在等你）。行 1 用时间标签定位
+        // （A 的 LAST 是子树最大活跃 = C 的时间；标题在行 2）。
+        let a = row_of(&rows, "[03-01 00:00]");
+        assert!(rows[a].contains("▸2 ?1"), "{}", frame_rows(&rows));
+        // 行 2 的标题缩进 = 行 1 的图标列 + 3（层视图的 gutter 也算在内）。
+        let icon_col = rows[a].chars().take_while(|c| *c != '●').count();
+        let title_col = rows[a + 1].chars().take_while(|c| *c == ' ').count();
+        assert_eq!(title_col, icon_col + 3, "{}", frame_rows(&rows));
 
-        // 树块：父在子上面，孙的祖先前缀里保留 `│` 延续线，C 是最后一个。
-        // 时间标签唯一，用它定位行（前缀 `└─` 是 `│  └─` 的子串，不唯一）。
-        let a = row_of("[01-01 00:00]");
-        let b = row_of("[02-01 00:00]");
-        let g = row_of("[04-01 00:00]");
-        let c = row_of("[03-01 00:00]");
+        // 进层：面包屑在最上面一行，两个孩子各一行。
+        app.handle_key(key(KeyCode::Right));
+        let rows = frame_lines(&mut app, 60, 32);
+        let crumb = row_of(&rows, "· ← back");
         assert!(
-            a < b && b < g && g < c,
-            "tree order:\n{}",
+            rows[crumb].trim_start().starts_with("the team"),
+            "面包屑命名当前层：{}",
             frame_rows(&rows)
         );
-        assert!(rows[a].contains("  ● /ws [01-01 00:00]"), "root: no prefix");
-        assert!(rows[b].contains("├─  ● /ws [02-01 00:00]"));
-        assert!(rows[g].contains("│  └─  ● /ws [04-01 00:00]"));
-        assert!(rows[c].contains("└─  ● /ws [03-01 00:00]"));
+        let b = row_of(&rows, "[02-01 00:00]");
+        let c = row_of(&rows, "[03-01 00:00]");
+        assert!(
+            crumb < c && c < b,
+            "面包屑在最上面，层内按注意力定序（在等你的 C 在 B 之前）：{}",
+            frame_rows(&rows)
+        );
+        assert!(
+            !rows[b].contains('├') && !rows[b].contains('└'),
+            "层视图无前缀：{}",
+            frame_rows(&rows)
+        );
+    }
 
-        // 行 2 的对齐：标题列 = 图标列 + 前缀宽 + 1（根行照旧）。
-        for (icon_row, title) in [(a, "the team"), (b, "worker one"), (g, "sub-worker")] {
-            let icon_col = rows[icon_row].chars().take_while(|c| *c != '●').count();
-            let title_row = row_of(title);
-            let title_col = rows[title_row].chars().take_while(|c| *c == ' ').count();
-            assert_eq!(
-                title_col,
-                icon_col + 3,
-                "line 2 aligns under line 1:\n{}",
-                frame_rows(&rows)
-            );
-        }
+    #[test]
+    fn test_the_search_state_keeps_the_previous_row_shape() {
+        // 搜索态与树形之前逐字一致：无徽章、无标记、无 chrome、两行形状不变。
+        let mut app = app();
+        feed(&mut app, crew_fixture());
+        app.input.set_text("/ss worker");
+        app.update_popup_from_input();
+        assert_eq!(panel_chrome(&app), (None, None), "搜索态没有 chrome");
+        let lines = panel_line1s(&app);
+        assert_eq!(
+            lines[0], " ? /ws [03-01 00:00]",
+            "在等你的那条：状态图标照旧"
+        );
+        assert_eq!(
+            lines[1], " ● /ws [03-01 00:00]",
+            "搜索行 1 的形状与树形之前一致"
+        );
+        assert!(!lines[0].contains('▸'), "{lines:?}");
+        assert!(!lines[0].starts_with('❯'), "{lines:?}");
+
+        // 匹配照旧是跨层全量：所有 kid 都叫 "worker NN"。
+        let ids = panel_ids(&app);
+        assert_eq!(ids.len(), 40);
+        assert_eq!(ids[0], "kid-00");
     }
 
     /// 行文本的调试视图（断言消息用）。
@@ -1236,7 +1725,7 @@ mod session_list {
         );
 
         // 有时间的按时间降序；时间未知 / 不可解析的 pin 排在其后，两者并列
-        // （活跃度同分）时按 id 升序（`build_forest` 的确定性 tie-break）。
+        // （活跃度同分）时按 id 升序（`Forest::build` 的确定性 tie-break）。
         assert_eq!(ids(&app), ["new-pin", "old-pin", "bare-pin", "loose-pin"]);
     }
 
@@ -1296,7 +1785,8 @@ fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        tree_prefix: String::new(),
+        parent: None,
+        pin_added_at: None,
     }];
     app.popup.cache.sessions_fetched = true;
 
@@ -1346,7 +1836,8 @@ fn test_the_refresh_response_does_not_trigger_another_request() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        tree_prefix: String::new(),
+        parent: None,
+        pin_added_at: None,
     }];
     app.popup.cache.sessions_fetched = true;
     app.input.set_text("/ss");
@@ -1460,7 +1951,8 @@ fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
         status: "idle".into(),
         last_interaction: "2025-01-01T00:00:00Z".into(),
         pinned: false,
-        tree_prefix: String::new(),
+        parent: None,
+        pin_added_at: None,
     }];
     app.popup.cache.sessions_fetched = true;
     app.turn.working = true;

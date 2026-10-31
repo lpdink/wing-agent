@@ -112,10 +112,33 @@ tags: [cli, orchestration, reference, wake, headless]
 
 | 命令 | 说明 |
 |---|---|
-| `wing ps [--all] [--tag T] [--parent SID] [--tree] [--json]` | 会话列表（默认过滤 inactive，被 `pin` 的除外；`--tag` / `--parent` 隐含 `--all`） |
+| `wing ps [--all] [--tag T] [--parent SID] [--flat] [--tree] [--json]` | 会话列表。人类默认是**一层一个任务**：后代折进 `CREW` 列（`40 ?1 ●3` = 后代总数 / 其中在等你 / 其中在干活），行尾一行写明折了多少 + 两条展开出口；`--parent SID` 看某个任务的直接 crew，`--tree` 画整棵森林，`--flat` 是旧的全量平铺。默认过滤 inactive（被 `pin` 的除外，其上级同样保留）；`--tag` / `--parent` 隐含 `--all` |
 | `wing info <sid> [--json]` | 运行时信息：状态 / workdir / 工具 / tokens / 模型 / 用量 |
 | `wing cache [sid] [--limit N] [--why TS\|INDEX] [--json]` | KV 前缀缓存账本：理论 vs 实际命中率 + 分叉归因（省略 sid = 最近活跃的那个，header 里会打印它选中了谁） |
 | `wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M] [--session SID] [--tree] [--limit N] [--json] [-w]` | 我的使用史：默认仪表盘（活动热力图 + 今天 + `me`/`agents` + 模型），`--by day\|model\|session\|tool\|workspace\|agent\|origin` 出明细；`WHEN` = `all\|today\|yesterday\|<N>d\|<N>w\|<N>m\|<N>y\|YYYY-MM-DD`（缺省 `12w`；`--until` 不收 `all`）。所有数字读审计流水（token / 调用从 `wing.db` 建库起算，`--since all` 也补不出更早的读数） |
+
+`wing ps` 的默认视图**不逐行枚举子会话**——一个 pin 住的调度者带 40 个执行者也只占 1 行，
+后代折在 `CREW` 列里（`40` = 后代总数，含 dormant；`?k` = 其中 k 个在等你回答；`●k` = 其中
+k 个在干活）。展开走 `--parent <sid>`（它的直接子，逐层往下钻）或 `--tree`（整棵森林）；有
+crew 被折起时行尾会多一行 `N tasks · M crew folded`（M 同样含 dormant 后代），写明这两条出口。
+没有任何任务有后代时 `CREW` 列整列不出现。窄终端下这一列和其它列一样被表格引擎让位截断
+（`?k` / `●k` 会先掉）——要读注意力标记就加宽终端或看 `--tree`。要老的全量平铺（脚本兼容面）
+用 `--flat`，机器面仍然只认 `--json`。
+
+三个筛选旗标各有各的行集口径：`--all` 只放宽**哪些任务**出现（行仍是折起来的）；`--tag` 是
+**不折叠的标签子集**（命中一行列一行，任意深度——标签穿过血缘）；`--parent` 是**一层往下**
+（直接子逐行；网关只回直接子，所以这一层没有孙辈可数，要看孙辈计数再下钻一层或 `--tree`）。
+`--parent` 的「子」是记录里的**逐字父子边**（`parent_session_id` 相等，不过存活），与 TUI 面板
+`/ss` 里 `→` 走的**有效父链 + 存活闭包**不是一件事：边只在手改出来的环 / 幽灵父上才分叉，
+而**存活**日常就会分叉——被逐出且没有活后代的直接子在 `--parent` 里照常成行、在面板里默认收起
+只进尾注（有活后代的由闭包保住，两侧一致）。
+行**顺序**另说：层视图（默认与 `--tag` / `--parent` 的子集分支）一律按森林全序给出
+（pin → 子树注意力 → 子树活跃 → id）；要改动前那套「后端序 + pin 叠加」用 `--flat`。
+`CREW` 列与行尾那行汇总只属于**整层**视图（默认与 `--all`）：`--tag` 的行是标签子集（父与子
+可能同时成行，逐行 rollup 会把同一个后代数两遍），`--parent` 的行是子层（那些行是 crew 不是
+任务，而且你已经在往下钻；网关只回直接子时更没有后代可数）——两者既没有 `CREW` 列，也不打
+汇总。要看结构用 `--tree`。另外 pin 只对**根**开放置顶：被 pin 的子会话仍在父任务的 `CREW` 里，
+不单独出行（`--flat` 照旧按 pin 置顶）。
 
 ### 3.4 消息
 
@@ -230,3 +253,4 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 10. **stdio（`wing -p`）没有 notify**：它是阻塞式前端，调用方本来就在等。
 11. **`--list` 不按 kind 过滤**：`wing watch --list` 也会列出 timer 触发器（反之亦然），看 `KIND` 列区分；`--cancel` 同理只认 id。
 12. **`wing wait` 不会因为「子会话提问」而返回**：它只认 `idle` / `inactive`，而提问中的会话状态是 `waiting`（优先级高于 `working`）——长 `--timeout` 会变成盲等，ask 唤醒在目标忙碌时也只进 inbox。超时后先 `wing asks [--wait]` 看有没有在挂的提问，答完再重 wait（wait 幂等）。
+13. **`wing ps` 默认不再逐行列出子会话**：一行一个任务 + `CREW` 汇总列，三个筛选旗标（`--all` / `--tag` / `--parent`）的行集口径见 §3.3。要逐行看 crew 用 `--parent <sid>`（那一层没有 rollup，一行就是一份 crew）、要整棵树（带前缀，能看出后代落在谁下面）用 `--tree`、要旧的全量平铺用 `--flat`；解析人类表格的脚本改用 `--json`。

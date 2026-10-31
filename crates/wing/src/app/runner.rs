@@ -1036,7 +1036,8 @@ mod tests {
             status: "idle".into(),
             last_interaction: "2025-01-01T00:00:00Z".into(),
             pinned: false,
-            tree_prefix: String::new(),
+            parent: None,
+            pin_added_at: None,
         }];
         app
     }

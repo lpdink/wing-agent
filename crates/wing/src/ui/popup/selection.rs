@@ -4,6 +4,10 @@
 //! - Highlighted selection row
 //! - Filter text highlighting (matching chars bold)
 //! - Scroll window for long lists
+//!
+//! 会话面板另外画两样东西：双行富行（[`RichSessionRow`]，层视图多出 crew 徽章与
+//! 「你在这里」标记）与 chrome 行（[`SessionChrome`]：面包屑 / dormant 尾注）。
+//! chrome **不是候选行**：它只占矩形上下各一行，光标与 `Enter` 都碰不到它。
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -17,8 +21,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::ThemePalette;
 use crate::protocol::SessionStatus;
+use crate::render::markdown::elide_to_display_width;
 use crate::render::markdown::truncate_left_to_display_width;
 use crate::render::markdown::truncate_to_display_width;
+use crate::shared::session_tree::Crew;
 
 /// Maximum rows to show before scrolling (single-line popups).
 const MAX_VISIBLE_ROWS: usize = 8;
@@ -52,12 +58,49 @@ impl SessionStatus {
     }
 }
 
+/// 左槽的「你在这里」标记（当前会话的祖先链，含自己）。
+///
+/// 一个 East-Asian **Neutral** 字形：宽度由规范钉死在 1 列。行里其余的记号
+/// （`▸` / `⋯` / `?`）同样是 Neutral 或窄字符；`●` / `·` / `←` / `★` 是 *Ambiguous*
+/// ——**记账一律走 `unicode-width`**（记 1 列，与状态图标 `●` 的既有取舍同一条），
+/// 配置成「ambiguous = wide」的终端会多画一两列，由 `buf.set_line` 的矩形裁剪兜底。
+///
+/// 词族上它和 composer 的提示符是同一个意思 —— 文本/视线从这里开始。
+const CURRENT_MARK: &str = "❯";
+
+/// 层视图行的左槽宽度（标记 + 一格空气）。**所有**层视图行都留：只有当前会话那一行
+/// 有字形，别的行留白，图标列才不会随「当前会话在不在这一层」抖动。
+const GUTTER_W: usize = 2;
+
+/// 面包屑的键位尾巴（固定词表，见 [`render_chrome_line`]）。
+const BREADCRUMB_HINT: &str = " · ← back";
+
+/// dormant 尾注的键位尾巴。
+const FOOTNOTE_HINT: &str = " · Ctrl+A";
+
+/// 层视图的行事实：这一行的 crew 聚合 + 它是否在当前会话的祖先链上。
+///
+/// 只有层视图给 `Some`（一次一层的投影）；搜索态没有层级信息，`None` 让整行退回树形
+/// 之前的形状——那个状态下的行是逐字不变的。
+///
+/// 两个字段都是**事实**：`crew.descendants > 0` 有渲染之外的读者（「这一行能不能进去」
+/// —— `→` 的判据），`current` 只决定左槽那个标记。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LevelDecor {
+    /// 内核的 crew 聚合：三个计数画徽章。`activity` 只给内核排序用——要显示子树活跃，
+    /// 走 [`crate::shared::session_tree::Forest::activity_of`] 取来源行的原文，别把微秒
+    /// 格式化回来。
+    pub crew: Crew,
+    /// 这一行在当前会话的祖先链上（含自己）。
+    pub current: bool,
+}
+
 /// 双行 session 候选的富渲染数据。
 #[derive(Debug, Clone)]
 pub struct RichSessionRow {
     /// 运行时状态（决定第一行的图标与颜色）。
     pub status: SessionStatus,
-    /// 第一行：最后活跃时间（人类可读）。
+    /// 第一行：最后活跃时间（人类可读；层视图是**子树**最大活跃）。
     pub last_active: String,
     /// 第二行：session 标题。
     pub title: String,
@@ -65,9 +108,37 @@ pub struct RichSessionRow {
     pub workspace: String,
     /// 是否被 pin —— 第一行末尾一个星标（`★`）；未 pin 不占位。
     pub pinned: bool,
-    /// 树形渲染前缀（`shared::session_tree` 的连接符；根 / 搜索态 = 空串）。
-    /// 行 1 从它右边开始画，行 2 的缩进按它的宽度对齐。
-    pub tree_prefix: String,
+    /// 层视图的装饰（`None` = 搜索态）。
+    pub level: Option<LevelDecor>,
+}
+
+/// dormant 尾注的事实：本层被收起的直接子数 + 当前是否已经放出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DormantFootnote {
+    /// 被收起的直接子数。
+    pub hidden: usize,
+    /// 开关当前是「已放出来」的一侧。
+    pub shown: bool,
+}
+
+/// 层视图的 chrome 行：面包屑（顶）与 dormant 尾注（底）。
+///
+/// **不是候选行**：不参与光标、不响应 `Enter`、不计入可见窗口 —— 只占 popup 的高度。
+/// 两边都只装**事实**（层的名字 / 被收起的数目与开关状态），词表与键位提示归渲染侧
+/// （见 [`render_chrome_line`]）：窄面板上先被截断的永远是名字，而不是提示。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionChrome {
+    /// 面包屑：`Some(当前 scope 的标题，缺失回落到 id)` = 层 ≥ 1；根层不占行。
+    pub breadcrumb: Option<String>,
+    /// 尾注：`Some(..)` = 本层有被收起的直接子。
+    pub footnote: Option<DormantFootnote>,
+}
+
+impl SessionChrome {
+    /// 占用的终端行数（0 / 1 / 2）。
+    pub fn height(&self) -> u16 {
+        u16::from(self.breadcrumb.is_some()) + u16::from(self.footnote.is_some())
+    }
 }
 
 /// Format an ISO 8601 timestamp (e.g. `2025-07-22T21:41:28.123`) into a compact
@@ -221,6 +292,18 @@ impl SelectionState {
         self.adjust_scroll();
     }
 
+    /// 按条目移动光标（翻页）：两端**钳住**，不环绕。
+    pub fn move_by(&mut self, delta: isize) {
+        if self.count == 0 {
+            return;
+        }
+        let last = (self.count - 1) as isize;
+        self.selected = (self.selected as isize)
+            .saturating_add(delta)
+            .clamp(0, last) as usize;
+        self.adjust_scroll();
+    }
+
     /// Keep the selected item visible within the scroll window.
     fn adjust_scroll(&mut self) {
         if self.selected < self.scroll {
@@ -342,12 +425,84 @@ struct RowStyle {
     selected: bool,
 }
 
+/// crew 徽章：`▸N`（dim，全部后代）/ `?k`（accent，后代在等你）/ `●k`（warning，后代在
+/// 干活）。三个计数为 0 的标记**不出现**——0 是常态，画出来只会把每一行都塞满。
+///
+/// `budget` 是徽章块可用的列（调用方已扣掉后面那格空气）：极窄面板上按声明序**截尾**
+/// （先丢 `●`、再丢 `?`），绝不把星标或时间标签顶出行外。返回（span 列表，显示宽度）。
+fn crew_badges(
+    crew: Crew,
+    palette: &ThemePalette,
+    base: Style,
+    budget: usize,
+) -> (Vec<Span<'static>>, usize) {
+    let items = [
+        (crew.descendants, "▸", palette.dim),
+        (crew.waiting, "?", palette.accent),
+        (crew.working, "●", palette.warning),
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut width = 0usize;
+    for (count, glyph, ink) in items {
+        if count == 0 {
+            continue;
+        }
+        let text = format!("{glyph}{count}");
+        let item_w = UnicodeWidthStr::width(text.as_str());
+        let sep_w = usize::from(!spans.is_empty());
+        if width + sep_w + item_w > budget {
+            break;
+        }
+        if sep_w == 1 {
+            spans.push(Span::styled(" ", base));
+        }
+        width += sep_w + item_w;
+        spans.push(Span::styled(text, Style::default().fg(ink).patch(base)));
+    }
+    (spans, width)
+}
+
+/// 收起时的尾注要说的是「还有几条没显示」；开关打开后同一行改口说「已经全在这儿」并给出
+/// 关回去的键——否则满屏 dormant 行底下再写一句「N dormant」会自相矛盾。
+fn footnote_text(footnote: DormantFootnote) -> String {
+    if footnote.shown {
+        format!("⋯ {} dormant shown", footnote.hidden)
+    } else {
+        format!("⋯ {} dormant", footnote.hidden)
+    }
+}
+
+/// 一行 chrome：事实在前、键位提示在后，整行 dim（它不是内容，是路标）。
+///
+/// 提示永远不会被名字吃掉：宽度不够时先截事实（补 `…`）；连提示自己都放不下时，
+/// 事实退回整宽、提示整段让位（而不是留一个只有省略号的孤零零的行首）。
+fn render_chrome_line(buf: &mut Buffer, area: Rect, y: u16, fact: &str, hint: &str, dim: Color) {
+    let width = area.width as usize;
+    let hint_w = UnicodeWidthStr::width(hint);
+    let (fact, hint) = if width >= hint_w {
+        (elide_to_display_width(fact, width - hint_w), hint)
+    } else {
+        (elide_to_display_width(fact, width), "")
+    };
+    let line = Line::from(vec![Span::styled(
+        format!("{fact}{hint}"),
+        Style::default().fg(dim),
+    )]);
+    for x in area.x..area.right() {
+        if buf.area().contains(ratatui::layout::Position::new(x, y)) {
+            buf[(x, y)].reset();
+        }
+    }
+    buf.set_line(area.x, y, &line, area.width);
+}
+
 /// Render a selection popup widget.
 pub struct SelectionPopup<'a> {
     rows: &'a [SelectionRow],
     state: &'a SelectionState,
     filter: &'a str,
     palette: &'a ThemePalette,
+    chrome: Option<&'a SessionChrome>,
 }
 
 impl<'a> SelectionPopup<'a> {
@@ -362,7 +517,15 @@ impl<'a> SelectionPopup<'a> {
             state,
             filter,
             palette,
+            chrome: None,
         }
+    }
+
+    /// 带上层视图的 chrome 行（面包屑 / dormant 尾注）。它们占矩形上下各一行，
+    /// 行窗口因此少掉对应的高度（与 `ActivePopup::height()` 的加法同一份账）。
+    pub fn with_chrome(mut self, chrome: &'a SessionChrome) -> Self {
+        self.chrome = Some(chrome);
+        self
     }
 
     /// Clear a single terminal line with the given background style.
@@ -429,12 +592,14 @@ impl<'a> SelectionPopup<'a> {
     }
 
     /// Render a rich two-line session row:
-    /// line 1 = `[<tree prefix>] <icon> <workspace>  [<last_active>]` + ` ★`（仅 pinned）,
-    /// line 2 = `    <title>`（缩进与前缀宽度对齐）。
+    /// line 1 = `[gutter] <icon> [<crew badges> ]<workspace> [<last_active>]` + ` ★`（仅 pinned）,
+    /// line 2 = `<title>`（缩进与行 1 的图标列对齐）。
+    ///
+    /// 层视图（`rich.level` 为 `Some`）多两样东西：左槽的「你在这里」标记与图标后面的
+    /// crew 徽章；搜索态两样都没有——那一态的行与树形之前逐字一致。
     ///
     /// workspace 只做展示（#145 删掉的是「按 workspace 排序」，不是这段显示）：
-    /// 行 1 的容量先让给时间标签与星标，再让给树前缀（放不下时截前缀，保尾部
-    /// 连接符），剩下的才画 workspace（超长截断）。
+    /// 行 1 的容量先让给时间标签与星标，再让给徽章，剩下的才画 workspace（超长截断）。
     fn render_rich_row(
         &self,
         rich: &RichSessionRow,
@@ -452,47 +617,51 @@ impl<'a> SelectionPopup<'a> {
         } = style;
         let width = area.width as usize;
 
-        // ── Line 1: [tree prefix] + status icon + workspace + [last_active] + [★] ──
-        // 让位顺序：星标 / 时间标签 → 前缀 → workspace。深链前缀的头几十列是
-        // 每行都一样的引导槽（信息量最低），但前缀自己也要让位——它不能反过来
-        // 把图标甚至整行挤出面板（裁剪保留尾部：连接符与最近几层缩进）。
+        // ── Line 1: [gutter] + icon + [badges] + workspace + [last_active] + [★] ──
+        // 让位顺序：星标 / 时间标签 → 徽章 → workspace。徽章是这一层的意义所在
+        // （且总宽个位数），workspace 是身份里最长的一段：放不下就左截断，再放不下
+        // 就变空（时间标签与星标不许被它顶出行外）。
         //
-        // 前缀的预算按**行的最宽形态**（星标 + 时间标签）统一扣除，不随本行
-        // 实际有没有它们变化：同深度的行前缀一样长，裁剪宽度若各行不同，带星标
-        // 的那行就会整体左移 2 列——树的引导线在同一屏里各画各的。空闲的列
-        // 归 workspace（它按本行的实际占用算）。
         // `★` 是 East-Asian *Ambiguous*：终端可以画 1 列也可以画 2 列。这里是
         // **只读标记**（没有命中区，不认领指针），画宽一格只会让弹窗的这一行多溢
         // 出一列 —— 与状态栏那个「点不准」的问题不同性质，所以暂不换（状态栏的
         // pin 用了 Neutral 的 `✦` / `✧`，见 `ui::status_bar` 的模块头）。
         const STAR_W: usize = 2; // " ★"
-        // 必须等于 `format_last_active` 的输出宽度（恒 14 列 = 11 字符 + 空格
-        // 与方括号；空串时没有时间标签）：它是记账用的格式常量，不是实测值，
-        // 改格式（例如加秒）必须同时改这里，否则行 1 会超宽。
-        const TIME_TAG_W: usize = 14; // " [MM-DD HH:MM]"
         let time_tag = if rich.last_active.is_empty() {
             String::new()
         } else {
             format!(" [{}]", rich.last_active)
         };
         let star_w = if rich.pinned { STAR_W } else { 0 };
-        let max_prefix_w = width.saturating_sub(3 + STAR_W + TIME_TAG_W).max(3);
-        let prefix = if UnicodeWidthStr::width(rich.tree_prefix.as_str()) > max_prefix_w {
-            truncate_left_to_display_width(&rich.tree_prefix, max_prefix_w)
-        } else {
-            rich.tree_prefix.clone()
+        let gutter_w = if rich.level.is_some() { GUTTER_W } else { 0 };
+        let time_w = UnicodeWidthStr::width(time_tag.as_str());
+        // " <icon> " 占 3 列；星标与时间标签先保，剩下的才分给徽章与 workspace。
+        let spare = width.saturating_sub(gutter_w + 3 + star_w + time_w);
+        let (badges, badges_w) = match &rich.level {
+            // 徽章块还带一格尾随空气：预算先把它扣掉，别让「恰好填满」超出一列
+            // （那会让行尾的星标被裁掉，而星标的优先级更高）。
+            Some(level) => crew_badges(
+                level.crew,
+                self.palette,
+                base_style,
+                spare.saturating_sub(1),
+            ),
+            None => (Vec::new(), 0),
         };
-        let prefix_w = UnicodeWidthStr::width(prefix.as_str());
+        // 徽章后面跟一格空气，把它和 workspace 分开（没有徽章就没有这一格）。
+        let badge_block_w = if badges_w > 0 { badges_w + 1 } else { 0 };
+        let ws_budget = spare.saturating_sub(badge_block_w);
 
         Self::clear_line(buf, area, y, base_style);
         let mut line1: Vec<Span<'static>> = Vec::new();
-        if prefix_w > 0 {
-            // 连接线用暗淡色（选中行染 accent，与时间标签同款）——它是结构，
-            // 不该和会话内容抢注意力。
-            let prefix_fg = if is_selected { accent } else { dim_color };
+        if let Some(level) = &rich.level {
+            // 「你在这里」标记只在当前会话的祖先链上点亮，别的行留白——那一格
+            // 因此永远存在，图标列不随数据抖（墨同时间标签：选中染 accent）。
+            let mark = if level.current { CURRENT_MARK } else { " " };
+            let mark_fg = if is_selected { accent } else { dim_color };
             line1.push(Span::styled(
-                prefix,
-                Style::default().fg(prefix_fg).patch(base_style),
+                format!("{mark} "),
+                Style::default().fg(mark_fg).patch(base_style),
             ));
         }
         line1.push(Span::styled(" ", base_style));
@@ -503,12 +672,13 @@ impl<'a> SelectionPopup<'a> {
                 .patch(base_style),
         ));
         line1.push(Span::styled(" ", base_style));
+        if badges_w > 0 {
+            line1.extend(badges);
+            line1.push(Span::styled(" ", base_style));
+        }
 
-        // "<prefix> ● " prefix occupies prefix_w + 3 columns; the time tag
+        // The "[gutter] <icon> " head occupies gutter + 3 columns; the time tag
         // " [MM-DD HH:MM]" 14; the pin star " ★" 2. The workspace gets what is left.
-        let available = width.saturating_sub(prefix_w + 3 + star_w);
-        let ws_budget = available.saturating_sub(UnicodeWidthStr::width(time_tag.as_str()));
-
         let workspace = if rich.workspace.is_empty() {
             // 占位符同样走预算：它替的是 workspace 这一格，不该反过来把时间
             // 标签顶出行外。
@@ -544,13 +714,13 @@ impl<'a> SelectionPopup<'a> {
         buf.set_line(area.x, y, &Line::from(line1), area.width);
 
         // ── Line 2: indented title ──
-        // 缩进与前缀宽度对齐（`prefix_w + 4`，根行照旧是 4 列）：行 2 的内容
-        // 跟着行 1 挪，两行读起来是同一条目的上下两段，而不是错位的两块。
+        // 缩进跟着行 1 的图标列走（`gutter_w + 4`，无 gutter 时照旧 4 列）：行 2 的
+        // 内容与行 1 对齐，两行读起来是同一条目的上下两段，而不是错位的两块。
         let y2 = y + 1;
         Self::clear_line(buf, area, y2, base_style);
         let mut line2: Vec<Span<'static>> = Vec::new();
-        line2.push(Span::styled(" ".repeat(prefix_w + 4), base_style));
-        let title_w = width.saturating_sub(prefix_w + 5);
+        line2.push(Span::styled(" ".repeat(gutter_w + 4), base_style));
+        let title_w = width.saturating_sub(gutter_w + 5);
         let title = if rich.title.is_empty() {
             "(untitled)".to_string()
         } else if UnicodeWidthStr::width(rich.title.as_str()) > title_w {
@@ -581,6 +751,41 @@ impl Widget for SelectionPopup<'_> {
 
         let accent = self.palette.accent;
         let dim_color = self.palette.dim;
+
+        // chrome 行先占位：面包屑在顶、尾注在底，剩下的矩形才是行窗口 ——
+        // 「要了多高」（`ActivePopup::height`）与「装得下几条」（`visible_window`）
+        // 因此还是同一份数学。chrome 不是候选行：不进 `rows`、不参与光标。
+        let area = match self.chrome {
+            Some(chrome) => {
+                let mut rows = area;
+                if let Some(fact) = chrome.breadcrumb.as_deref()
+                    && rows.height > 0
+                {
+                    render_chrome_line(buf, area, rows.y, fact, BREADCRUMB_HINT, dim_color);
+                    rows.y += 1;
+                    rows.height -= 1;
+                }
+                if let Some(footnote) = chrome.footnote
+                    && rows.height > 0
+                {
+                    render_chrome_line(
+                        buf,
+                        area,
+                        rows.bottom() - 1,
+                        &footnote_text(footnote),
+                        FOOTNOTE_HINT,
+                        dim_color,
+                    );
+                    rows.height -= 1;
+                }
+                rows
+            }
+            None => area,
+        };
+        if area.height == 0 {
+            // 矩形只够 chrome（空层 / 极矮的弹层）：行窗口没有位置，一条不画。
+            return;
+        }
 
         // Column width for plain (single-line) rows.
         let name_width = self
@@ -704,7 +909,7 @@ mod tests {
                     title: format!("title {i}"),
                     workspace: "/ws".into(),
                     pinned: false,
-                    tree_prefix: String::new(),
+                    level: None,
                 }),
             })
             .collect();
@@ -807,6 +1012,25 @@ mod tests {
     }
 
     #[test]
+    fn move_by_clamps_at_both_ends_without_wrapping() {
+        let mut state = SelectionState::with_max_visible(10, 6);
+        state.move_by(-3);
+        assert_eq!(state.selected, 0, "顶部钳住");
+        state.move_by(6);
+        assert_eq!(state.selected, 6);
+        state.move_by(100);
+        assert_eq!(state.selected, 9, "底部钳住（翻页不环绕）");
+        assert!(
+            state.selected >= state.scroll && state.selected < state.scroll + state.max_visible,
+            "选中项仍在窗口里"
+        );
+        // 空列表：什么都不做（不 panic）。
+        let mut empty = SelectionState::new(0);
+        empty.move_by(5);
+        assert_eq!(empty.selected, 0);
+    }
+
+    #[test]
     fn test_visible_window_covers_the_last_item_of_a_short_plain_list() {
         // 单行窗口 8 条，矩形只有 7 行：最后一条不能掉在矩形外面。
         let plain: Vec<SelectionRow> = (0..10).map(|i| plain_row(format!("r{i:02}"), "")).collect();
@@ -850,7 +1074,7 @@ mod tests {
                 title: "t".into(),
                 workspace: String::new(),
                 pinned: false,
-                tree_prefix: String::new(),
+                level: None,
             }),
         };
         assert_eq!(rich.height(), 2);
@@ -897,6 +1121,7 @@ mod tests {
         session_row_at(status, last_active, title, "/ws/wing", false)
     }
 
+    /// 搜索态的行（没有层级装饰）。
     fn session_row_at(
         status: SessionStatus,
         last_active: &str,
@@ -904,17 +1129,17 @@ mod tests {
         workspace: &str,
         pinned: bool,
     ) -> SelectionRow {
-        session_row_tree(status, last_active, title, workspace, pinned, "")
+        session_row_level(status, last_active, title, workspace, pinned, None)
     }
 
-    /// `tree_prefix` 非空 = 树里的子节点（行 1 前缀 + 行 2 缩进都跟着挪）。
-    fn session_row_tree(
+    /// 层视图的行：`decor` 给出徽章计数与「你在这里」标记。
+    fn session_row_level(
         status: SessionStatus,
         last_active: &str,
         title: &str,
         workspace: &str,
         pinned: bool,
-        tree_prefix: &str,
+        decor: Option<LevelDecor>,
     ) -> SelectionRow {
         SelectionRow {
             name: "sess-1".into(),
@@ -925,16 +1150,44 @@ mod tests {
                 title: title.into(),
                 workspace: workspace.into(),
                 pinned,
-                tree_prefix: tree_prefix.into(),
+                level: decor,
             }),
         }
     }
 
+    /// 层视图的行：后代 `descendants` 个，其中 `waiting` 在等人类回答、`working` 在干活。
+    fn crew_row(
+        status: SessionStatus,
+        title: &str,
+        workspace: &str,
+        pinned: bool,
+        descendants: usize,
+        waiting: usize,
+        working: usize,
+    ) -> SelectionRow {
+        let crew = Crew {
+            descendants,
+            waiting,
+            working,
+            activity: None,
+        };
+        session_row_level(
+            status,
+            "07-22 21:41",
+            title,
+            workspace,
+            pinned,
+            Some(LevelDecor {
+                crew,
+                current: false,
+            }),
+        )
+    }
+
     #[test]
     fn test_rich_row_line1_is_icon_workspace_and_time() {
-        // line 1 = 图标 + workspace + 时间标签（workspace 的**展示**回归；
-        // 它不参与排序，只和搜索有关）。根行（前缀为空）就是平滑退化面：
-        // 无父子关系的列表渲染与树形之前**逐字符一致**。
+        // 搜索态的行 1 = 图标 + workspace + 时间标签（workspace 的**展示**回归；
+        // 它不参与排序，只和搜索有关）。没有层级装饰时行 1 与树形之前**逐字符一致**。
         let row = session_row(SessionStatus::Working, "07-22 21:41", "my session");
         let (line1, line2) = rich_lines(&row, "", 40);
         assert_eq!(line1, " ● /ws/wing [07-22 21:41]");
@@ -1008,145 +1261,290 @@ mod tests {
         );
     }
 
+    // ── 层视图：左槽标记 + crew 徽章 ─────────────────────────────
+
     #[test]
-    fn test_rich_row_draws_the_tree_prefix_before_the_icon_and_aligns_line2() {
-        // 子节点：`├─ ` 在最左，图标随前缀右移；行 2 缩进 = 前缀宽 + 4。
-        let row = session_row_tree(
+    fn test_level_row_puts_the_gutter_before_the_icon_and_aligns_line2() {
+        // 层视图行：2 列左槽（标记 + 空气）+ 图标 + 徽章 + workspace + 时间。
+        // 行 2 缩进 = 图标列 + 3（与搜索态同一条公式，只是图标列右移了 gutter）。
+        let row = session_row_level(
             SessionStatus::Idle,
             "07-22 21:41",
-            "a child session",
+            "a crew",
             "/ws",
             false,
-            "├─ ",
+            Some(LevelDecor {
+                crew: Crew {
+                    descendants: 3,
+                    ..Crew::default()
+                },
+                current: true,
+            }),
         );
         let (line1, line2) = rich_lines(&row, "", 40);
-        assert_eq!(line1, "├─  ● /ws [07-22 21:41]");
-        assert_eq!(line2, "       a child session");
-
-        // 孙节点：延续线 `│  ` 跟着前缀一起画（祖先是非末位兄弟）。
-        let grand = session_row_tree(
-            SessionStatus::Idle,
-            "07-22 21:41",
-            "grandchild",
-            "/ws",
-            false,
-            "│  └─ ",
-        );
-        let (line1, line2) = rich_lines(&grand, "", 40);
-        assert_eq!(line1, "│  └─  ● /ws [07-22 21:41]");
-        assert_eq!(line2, "          grandchild");
+        assert_eq!(line1, "❯  ● ▸3 /ws [07-22 21:41]");
+        assert_eq!(line2, "      a crew", "缩进 = 图标列（3）+ 3");
     }
 
     #[test]
-    fn test_rich_row_prefix_takes_its_columns_from_the_workspace_budget() {
-        // 前缀参与行宽记账：窄终端上时间标签与星标照旧先保，workspace 让位；
-        // 行 1 不超宽，行 2 的缩进不与行 1 错位。
-        let row = session_row_tree(
+    fn test_the_gutter_is_reserved_even_without_the_marker() {
+        // 不是当前会话的行留白，但左槽照旧占位：同一屏里两行的图标列必须一样。
+        let current = session_row_level(
             SessionStatus::Idle,
             "07-22 21:41",
+            "here",
+            "/ws",
+            false,
+            Some(LevelDecor {
+                crew: Crew::default(),
+                current: true,
+            }),
+        );
+        let other = session_row_level(
+            SessionStatus::Idle,
+            "07-22 21:41",
+            "elsewhere",
+            "/ws",
+            false,
+            Some(LevelDecor {
+                crew: Crew::default(),
+                current: false,
+            }),
+        );
+        let lines = line1s(&[current, other], 40);
+        assert!(lines[0].starts_with('❯'), "{lines:?}");
+        assert!(lines[1].starts_with("  "), "{lines:?}");
+        let icon_col = |line: &str| line.chars().take_while(|c| *c != '●').count();
+        assert_eq!(icon_col(&lines[0]), icon_col(&lines[1]), "{lines:?}");
+    }
+
+    #[test]
+    fn test_the_current_marker_is_one_column_wide() {
+        // `❯` 是 East-Asian **Neutral**：宽度由规范钉成 1 列，终端的「模糊宽度」
+        // 自由量在它身上不存在（`●` 这类 *Ambiguous* 字形才交给终端决定 1 还是 2 列）。
+        // 这条断言钉住字形选择本身 —— 换成别的字形会先在宽度上露馅。
+        assert_eq!(UnicodeWidthStr::width(CURRENT_MARK), 1);
+        // 字面量那条是**变更探测器**：换字形时先在这里露馅，逼改动方重看宽度类别
+        // （与 `ui::status_bar` 钉 `✦` / `✧` 同一条理由）。
+        assert_eq!(CURRENT_MARK, "❯");
+    }
+
+    #[test]
+    fn test_crew_badges_show_the_three_counts_in_a_fixed_order() {
+        let row = crew_row(SessionStatus::Working, "the team", "/ws", false, 40, 1, 3);
+        let (line1, _) = rich_lines(&row, "", 40);
+        assert!(
+            line1.contains("▸40 ?1 ●3 "),
+            "▸全部后代 / ?在等你 / ●在干活，固定顺序：{line1:?}"
+        );
+
+        // 为 0 的标记不出现：叶子只有图标与内容（`▸0` 只会把每一行都塞满）。
+        let leaf = crew_row(SessionStatus::Idle, "leaf", "/ws", false, 0, 0, 0);
+        let (line1, _) = rich_lines(&leaf, "", 40);
+        assert_eq!(line1, "   ● /ws [07-22 21:41]");
+        assert!(!line1.contains('▸') && !line1.contains('?'), "{line1:?}");
+
+        // 只有注意力：`▸` 照样在最前。
+        let waiting = crew_row(SessionStatus::Idle, "w", "/ws", false, 2, 2, 0);
+        let (line1, _) = rich_lines(&waiting, "", 40);
+        assert!(line1.contains("▸2 ?2 "), "{line1:?}");
+        assert_eq!(
+            line1.matches('●').count(),
+            1,
+            "没有后代在干活 → 没有 `●k` 徽章（`●` 只剩状态图标）：{line1:?}"
+        );
+    }
+
+    #[test]
+    fn test_the_badges_colours_are_three_registers() {
+        // ▸ dim / ? accent / ● warning：三个计数各有各的墨，读的是「谁在等」而不是
+        // 一串同色的数字。
+        let rows = vec![crew_row(SessionStatus::Idle, "t", "/ws", false, 40, 1, 3)];
+        let state = SelectionState::new(1);
+        let area = Rect::new(0, 0, 40, 2);
+        let (buf, lines, palette) = render_frame(&rows, &state, area);
+        let line = &lines[0];
+        // 列（不是字节下标）：行首有 `❯` / `●` 这些多字节字形。
+        let col = |needle: &str| {
+            line[..line.find(needle).expect("badge drawn")]
+                .chars()
+                .count()
+        };
+        assert_eq!(buf[(col("▸40") as u16, 0)].fg, palette.dim);
+        assert_eq!(buf[(col("?1") as u16, 0)].fg, palette.accent);
+        assert_eq!(buf[(col("●3") as u16, 0)].fg, palette.warning);
+    }
+
+    #[test]
+    fn a_badge_block_that_exactly_fills_the_budget_never_overflows_the_row() {
+        // 预算边界：`spare` 恰好等于徽章宽度时，徽章块还带一格尾随空气 —— 那一列
+        // 必须先扣掉，否则行 1 超宽一列、被裁掉的是优先级更高的星标。
+        let row = crew_row(
+            SessionStatus::Idle,
+            "title",
+            "/a/very/long/workspace",
+            true,
+            40,
+            1,
+            0,
+        );
+        let (line1, _) = rich_lines(&row, "", 27);
+        assert_eq!(
+            UnicodeWidthStr::width(line1.as_str()),
+            27,
+            "row 1 must fit exactly: {line1:?}"
+        );
+        assert!(line1.ends_with('★'), "the pin star survives: {line1:?}");
+        assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
+    }
+
+    #[test]
+    fn test_a_narrow_level_row_keeps_the_badges_time_and_star_before_the_workspace() {
+        // 让位顺序：星标 / 时间标签 → 徽章 → workspace。窄面板上 workspace 左截断，
+        // 再窄就变空，但行 1 绝不超宽。
+        let row = crew_row(
+            SessionStatus::Idle,
             "title",
             "/a/very/long/workspace/path",
             true,
-            "│  └─ ",
+            40,
+            1,
+            0,
         );
-        let (line1, line2) = rich_lines(&row, "", 30);
-        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 30, "{line1:?}");
-        assert!(line1.starts_with("│  └─  ● "), "{line1:?}");
-        assert!(line1.ends_with("★"), "the pin star survives: {line1:?}");
+        let (line1, _) = rich_lines(&row, "", 34);
+        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 34, "{line1:?}");
+        assert!(line1.contains("▸40 ?1"), "徽章先保：{line1:?}");
         assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
+        assert!(line1.ends_with('★'), "{line1:?}");
         assert!(
             line1.contains('…') && line1.contains("path"),
-            "the workspace keeps its tail, got: {line1:?}"
+            "workspace 保留尾段：{line1:?}"
         );
-        assert!(line2.starts_with("          title"), "{line2:?}");
+
+        // 极窄：workspace 让完，星标与时间标签仍然在（它们先于 workspace）。
+        let (line1, _) = rich_lines(&row, "", 26);
+        assert!(UnicodeWidthStr::width(line1.as_str()) <= 26, "{line1:?}");
+        assert!(line1.ends_with('★'), "{line1:?}");
+    }
+
+    // ── chrome：面包屑 / dormant 尾注 ────────────────────────────
+
+    /// 渲染带 chrome 的一帧，返回逐行文本。
+    fn chrome_frame(
+        rows: &[SelectionRow],
+        chrome: &SessionChrome,
+        area: Rect,
+    ) -> (Buffer, Vec<String>) {
+        let state = SelectionState::new(rows.len());
+        let mut buf = Buffer::empty(area);
+        SelectionPopup::new(rows, &state, "", &ThemePalette::default())
+            .with_chrome(chrome)
+            .render(area, &mut buf);
+        let lines = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (buf, lines)
     }
 
     #[test]
-    fn test_rich_row_clips_a_deep_prefix_instead_of_losing_the_row() {
-        // 深链（前缀吃到 16 层封顶 = 51 列）+ 窄面板：前缀自己是第一个让位的
-        // 结构元素——它不能让图标 / 时间标签 / 星标跟着整行消失。
-        let deep = format!("{}└─ ", "│  ".repeat(16));
-        assert_eq!(UnicodeWidthStr::width(deep.as_str()), 51);
-        let row = session_row_tree(
-            SessionStatus::Idle,
-            "07-22 21:41",
-            "deep title",
-            "/ws",
-            true,
-            &deep,
-        );
+    fn test_the_chrome_lines_surround_the_rows_and_stay_dim() {
+        let rows = vec![session_row(SessionStatus::Idle, "07-22 21:41", "kid")];
+        let chrome = SessionChrome {
+            breadcrumb: Some("the team".into()),
+            footnote: Some(DormantFootnote {
+                hidden: 3,
+                shown: false,
+            }),
+        };
+        let area = Rect::new(0, 0, 40, 4);
+        let (buf, lines) = chrome_frame(&rows, &chrome, area);
+        assert_eq!(chrome.height(), 2);
+        assert_eq!(lines[0], "the team · ← back");
+        assert_eq!(lines[3], "⋯ 3 dormant · Ctrl+A");
+        // 两行都是 dim：chrome 是路标，不是内容。
+        let dim = ThemePalette::default().dim;
+        assert_eq!(buf[(0, 0)].fg, dim);
+        assert_eq!(buf[(0, 3)].fg, dim);
+        // 行本身还在中间（面包屑下面一行开始）。
+        assert!(lines[1].contains('●'), "{lines:?}");
+    }
 
-        let (line1, line2) = rich_lines(&row, "", 40);
-        assert_eq!(UnicodeWidthStr::width(line1.as_str()), 40, "{line1:?}");
-        assert!(line1.starts_with('…'), "clipped head: {line1:?}");
+    #[test]
+    fn test_a_long_scope_name_never_eats_the_key_hint() {
+        // 名字先被截断，`· ← back` 永远留着：提示被名字吃掉就白写了。
+        let chrome = SessionChrome {
+            breadcrumb: Some("a very long scope title that will not fit".into()),
+            footnote: None,
+        };
+        let area = Rect::new(0, 0, 24, 3);
+        let (_, lines) = chrome_frame(&[], &chrome, area);
+        assert_eq!(lines[0], "a very long sc… · ← back", "截断带省略号");
+        assert_eq!(UnicodeWidthStr::width(lines[0].as_str()), 24);
+    }
+
+    #[test]
+    fn test_the_chrome_hint_gives_way_only_when_it_cannot_fit_whole() {
+        let chrome = SessionChrome {
+            breadcrumb: Some("a long level name".into()),
+            footnote: None,
+        };
+        // 恰好等于提示宽度（` · ← back` 占 9 列）：提示整段留着，事实让到 0 列
+        // （不留孤零零的省略号）。
+        let (_, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 9, 2));
+        assert_eq!(lines[0], " · ← back");
+        // 再宽一列：多出来的那列归事实（只够一个省略号）。
+        let (_, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 10, 2));
+        assert_eq!(lines[0], "… · ← back");
+        // 比提示窄一列：提示整段让位，事实退回整宽。
+        let (_, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 8, 2));
+        assert_eq!(lines[0], "a long …");
+    }
+
+    #[test]
+    fn test_an_empty_level_draws_only_its_chrome() {
+        // 空层（crew 全 dormant）：只有面包屑 + 尾注，不 panic、不留空白无解释。
+        let chrome = SessionChrome {
+            breadcrumb: Some("the team".into()),
+            footnote: Some(DormantFootnote {
+                hidden: 3,
+                shown: false,
+            }),
+        };
+        let area = Rect::new(0, 0, 40, 2);
+        let (_, lines) = chrome_frame(&[], &chrome, area);
+        assert_eq!(lines, ["the team · ← back", "⋯ 3 dormant · Ctrl+A"]);
+
+        // 矩形只够 chrome：行窗口没有位置，一条不画（不 panic、不越界）。
+        let (_buf, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 40, 1));
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_the_rows_window_shrinks_by_the_chrome_height() {
+        // 12 条 rich 行（策略窗口 6 条 = 12 行）+ 2 行 chrome：矩形 14 行装 6 条。
+        let rows = rich_rows(12);
+        let chrome = SessionChrome {
+            breadcrumb: Some("the team".into()),
+            footnote: Some(DormantFootnote {
+                hidden: 1,
+                shown: false,
+            }),
+        };
+        let (_, lines) = chrome_frame(&rows, &chrome, Rect::new(0, 0, 40, 14));
+        assert!(lines[0].starts_with("the team"), "{lines:?}");
+        assert!(lines[13].starts_with('⋯'), "{lines:?}");
+        let body = lines[1..13].join("\n");
         assert!(
-            line1.contains("└─  ●"),
-            "the branch marker survives: {line1:?}"
+            body.contains("title-00") && body.contains("title-05"),
+            "{body}"
         );
-        assert!(line1.contains("[07-22 21:41]"), "{line1:?}");
-        assert!(line1.ends_with("★"), "the pin star survives: {line1:?}");
-        // 行 2 跟着**裁剪后**的前缀走（缩进 = 21 + 4），标题仍有一席之地。
-        assert_eq!(line2.trim_start(), "deep title", "{line2:?}");
-        assert_eq!(line2.chars().take_while(|c| *c == ' ').count(), 25);
-    }
-
-    #[test]
-    fn test_clipped_rows_keep_a_title_even_without_a_time_tag() {
-        // 时间缺失（创建即打标窗口期的会话）时前缀与标题争的是同一段宽度：
-        // 前缀的预算按行的最宽形态扣，标题因此始终留着（≥ 14 列）。
-        let deep = format!("{}└─ ", "│  ".repeat(16));
-        let row = session_row_tree(
-            SessionStatus::Inactive,
-            "",
-            "deep title",
-            "/ws",
-            false,
-            &deep,
-        );
-
-        let (line1, line2) = rich_lines(&row, "", 40);
-        assert!(
-            UnicodeWidthStr::width(line1.as_str()) <= 40,
-            "line 1 must fit: {line1:?}"
-        );
-        assert!(line1.contains("└─  ●"), "{line1:?}");
-        // 没有时间标签占位，省下的列归 workspace。
-        assert!(line1.contains("/ws"), "{line1:?}");
-        assert_eq!(line2.trim_start(), "deep title", "{line2:?}");
-    }
-
-    #[test]
-    fn test_sibling_rows_clip_the_prefix_to_the_same_width() {
-        // 同深度 = 同前缀长；裁剪宽度不随本行有没有星标变化，否则带星标的兄弟
-        // 会整体左移，树的引导线在同一屏里对不上。
-        let deep = format!("{}└─ ", "│  ".repeat(16));
-        let rows = vec![
-            session_row_tree(
-                SessionStatus::Idle,
-                "07-22 21:41",
-                "pinned",
-                "/ws",
-                true,
-                &deep,
-            ),
-            session_row_tree(
-                SessionStatus::Idle,
-                "07-22 21:41",
-                "plain",
-                "/ws",
-                false,
-                &deep,
-            ),
-        ];
-
-        let lines = line1s(&rows, 40);
-        let icon_col = |line: &str| line.chars().take_while(|c| *c != '●').count();
-        assert!(lines.iter().all(|l| l.starts_with('…')), "{lines:?}");
-        assert_eq!(
-            icon_col(&lines[0]),
-            icon_col(&lines[1]),
-            "the branch column must not depend on the star: {lines:?}"
-        );
+        assert!(!body.contains("title-06"), "窗口只装 6 条：{body}");
     }
 
     /// 渲染一帧，返回 (缓冲区, 行文本)。

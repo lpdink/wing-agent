@@ -66,7 +66,7 @@ use wing_api_client::models::ModelDetail;
 use wing_api_client::models::ProviderModels;
 
 use crate::config::ThemePalette;
-use crate::render::markdown::truncate_to_display_width;
+use crate::render::markdown::elide_to_display_width;
 use crate::shared::panels::PANEL_WINDOW;
 use crate::shared::panels::SelectionPanel;
 use crate::shared::panels::picker::ModelPanel;
@@ -146,17 +146,6 @@ fn catalog_metrics(panel: &ModelPanel) -> (usize, usize) {
     (max_label, max_ctx)
 }
 
-/// Clip `text` to `max` columns, marking the cut with `…`.
-fn clip(text: &str, max: usize) -> String {
-    if text.width() <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    format!("{}…", truncate_to_display_width(text, max - 1))
-}
-
 /// `4 models` / `1 model`.
 fn count_text(models: usize) -> String {
     format!("{models} model{}", if models == 1 { "" } else { "s" })
@@ -204,7 +193,7 @@ impl Row {
 
     /// Push `text` inside a fixed-width column.
     fn cell(&mut self, text: &str, style: Style, width: usize, align: Align) {
-        let body = clip(text, width);
+        let body = elide_to_display_width(text, width);
         let fill = width - body.width();
         match align {
             Align::Left => {
@@ -634,7 +623,7 @@ fn row_lines(
     if models.is_empty() {
         let mut row = Row::new();
         row.push(" ".repeat(PAD), Style::default());
-        row.push(clip(EMPTY_STATE, inner - 2 * PAD), dim);
+        row.push(elide_to_display_width(EMPTY_STATE, inner - 2 * PAD), dim);
         return vec![row.finish(inner, false, palette)];
     }
 
@@ -724,7 +713,10 @@ fn detail_line(panel: &ModelPanel, inner: usize, palette: &ThemePalette) -> Line
     }
     let mut row = Row::new();
     row.push(" ".repeat(PAD), Style::default());
-    row.push(clip(&parts.join(" · "), inner - 2 * PAD), dim);
+    row.push(
+        elide_to_display_width(&parts.join(" · "), inner - 2 * PAD),
+        dim,
+    );
     row.finish(inner, false, palette)
 }
 
@@ -789,7 +781,10 @@ fn rail_lines(panel: &ModelPanel, avail: usize, palette: &ThemePalette) -> Vec<L
     } else {
         panel.provider().to_string()
     };
-    head.push(clip(&title, avail), text.add_modifier(Modifier::BOLD));
+    head.push(
+        elide_to_display_width(&title, avail),
+        text.add_modifier(Modifier::BOLD),
+    );
     if head.width + GAP + count.width() <= avail {
         head.fill(avail - count.width());
         head.push(count, dim);
@@ -798,7 +793,7 @@ fn rail_lines(panel: &ModelPanel, avail: usize, palette: &ThemePalette) -> Vec<L
 
     if models.is_empty() {
         lines.push(Line::from(Span::styled(
-            clip("No models declared", avail),
+            elide_to_display_width("No models declared", avail),
             dim,
         )));
     }
@@ -831,7 +826,7 @@ fn rail_lines(panel: &ModelPanel, avail: usize, palette: &ThemePalette) -> Vec<L
             );
         }
         row.push(
-            clip(
+            elide_to_display_width(
                 detail.display_label(),
                 avail.saturating_sub(marker_width + badge_width),
             ),
@@ -843,7 +838,10 @@ fn rail_lines(panel: &ModelPanel, avail: usize, palette: &ThemePalette) -> Vec<L
         }
         lines.push(row.finish_plain(avail));
     }
-    lines.push(Line::from(Span::styled(clip(HINT_MIN, avail), dim)));
+    lines.push(Line::from(Span::styled(
+        elide_to_display_width(HINT_MIN, avail),
+        dim,
+    )));
     lines.push(Line::from(""));
     lines
 }
