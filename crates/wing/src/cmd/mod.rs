@@ -264,7 +264,8 @@ pub enum Command {
     /// never cuts a crew off from the task that spawned it. Expand with
     /// `--parent <sid>` (that task's crew, one level down) or `--tree` (the
     /// whole forest); `--flat` prints the flat list this command used to
-    /// print.
+    /// print. `--tag` and `--parent` narrow the row set and therefore carry
+    /// neither the CREW column nor the footer (see those flags).
     Ps {
         /// Show all sessions including inactive ones.
         ///
@@ -279,7 +280,11 @@ pub enum Command {
         /// A tag match is a row of its own (any depth, not folded into a
         /// task: tags cut across the lineage). Implies --all: tags describe
         /// long-term taxonomy (favorites / task crews are often inactive),
-        /// so inactive matches are included.
+        /// so inactive matches are included. The narrowed row set carries no
+        /// CREW column: a per-row rollup would count descendants that are not
+        /// on screen (a tagged task and its tagged child would count the same
+        /// grandchild twice) — same rule as the missing footer. Use --tree for
+        /// structure.
         #[arg(long = "tag", value_delimiter = ',')]
         tag: Vec<String>,
         /// List the sessions created by SESSION_ID (its direct children).
@@ -287,7 +292,11 @@ pub enum Command {
         /// Lineage in one question: "who did I spawn?" — one level down, one
         /// row per child. Implies --all — lineage is a long-term fact (same
         /// rationale as --tag): a scheduler's crew is usually idle or
-        /// inactive by the time you look.
+        /// inactive by the time you look. No CREW column here either: these
+        /// rows are the crew, and their rollups would count grandchildren
+        /// outside this layer (a gateway that answers ?parent= with direct
+        /// children only has nothing to count anyway). Drill one level down
+        /// per child, or use --tree.
         #[arg(long = "parent", value_name = "SESSION_ID")]
         parent: Option<String>,
         /// Draw the lineage forest: children nest under the session that
