@@ -1100,6 +1100,8 @@ fn test_ctrl_a_falls_back_to_the_composer_and_loses_the_level() {
     // 字符插入）：命令名被改写 ⇒ 层视图与层位置一起丢。钉住它，免得哪天又有人给它发明
     // 一个面板语义。
     let mut app = app_with_level_view();
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.popup.level_view.depth(), 1, "前提：先真的进了一层");
     app.handle_key(ctrl(KeyCode::Char('a')));
     assert_eq!(app.input.text(), "/ssa", "草稿照既有口径被改写");
     assert!(!app.popup.active.session_level_view(), "不再是层视图");

@@ -1031,6 +1031,9 @@ mod session_list {
     }
 
     /// 面板每条行的行 1 文本（宽 60 渲染成一帧）。
+    ///
+    /// 层标题行先占顶上一行，所以第 `i` 条的行 1 在 `header_h + i * 2`（与
+    /// `SelectionPopup::render` 的扣减同一份账）。
     fn panel_line1s(app: &App) -> Vec<String> {
         let (rows, state, filter, header) = app.popup.active.render_data().expect("panel is open");
         let count = rows.len();
@@ -1046,7 +1049,7 @@ mod session_list {
         (0..count)
             .map(|i| {
                 (0..60u16)
-                    .map(|x| buf[(x, (i * 2) as u16)].symbol().to_string())
+                    .map(|x| buf[(x, header_h + (i * 2) as u16)].symbol().to_string())
                     .collect::<String>()
                     .trim_end()
                     .to_string()

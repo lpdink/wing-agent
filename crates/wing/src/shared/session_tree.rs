@@ -271,7 +271,7 @@ impl<'a> Forest<'a> {
     /// 展示全序：树序遍历的每一行（输入下标 + 深度 + 渲染前缀）。`--tree` 与面板的
     /// 全量平铺都直接画它。**内核不删任何一行**：画出来的是它**收到的**拓扑，消费面
     /// 若在 [`Self::build`] 之前剪过行，画的就是剪过的拓扑（前提见 [`Forest`]）；
-    /// 收起到某一层只发生在 [`Self::level`]。
+    /// 收起到某一层只发生在消费面（[`Self::level`] 只做层选择，一行都不删）。
     pub fn tree(&self) -> &[TreeEntry] {
         &self.tree
     }
@@ -477,7 +477,7 @@ mod tests {
         parse_timestamp_micros(at).expect("fixture timestamp parses")
     }
 
-    /// 从根层起递归收集各层的行（层序拼接 = 全序在保留集上的限制）。
+    /// 从根层起递归收集各层的行（层序拼接 = 全序）。
     fn collect_levels<'a>(rows: &[TreeRow<'a>], forest: &Forest) -> Vec<&'a str> {
         fn walk<'a>(
             rows: &[TreeRow<'a>],
