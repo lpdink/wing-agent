@@ -1,4 +1,4 @@
-.PHONY: check check-python check-rust check-ts test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo
+.PHONY: check check-python check-rust check-ts test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo capacity capacity-selftest
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -36,6 +36,22 @@ TS_TOOLING_CHECK = command -v node >/dev/null 2>&1 || { echo "❌ node not found
 # 落在 target/demo/。
 demo:
 	uv run python scripts/demo/record.py --release
+
+# ── 容量测量（手工、单机串行；不进 make test / CI 门禁）─────────
+# 阶梯扫描 N 个并发活跃会话，采网关侧 CPU / RSS / fd / 投递延迟。读数是机器相关的，
+# 因此只做手工测量；口径、产物与已知边界见 scripts/capacity/README.md。
+# fd 软限先抬（每个会话约 4 个 fd）：抬不动时 run.py 会带可行动的错误退出，
+# 而不是跑到一半 EMFILE 后产出一张好看的空表。
+# 参数默认值只有一处（cli.py / shapes.py），旗标一律经 CAPACITY_ARGS 透传，
+# 例如 CAPACITY_ARGS="--levels 1,10,50 --dwell 5 --subscribers per-shard --json"。
+CAPACITY_ARGS ?=
+
+capacity:
+	@ulimit -n $${CAPACITY_NOFILE:-8192} 2>/dev/null || true; \
+	uv run python scripts/capacity/run.py $(CAPACITY_ARGS)
+
+capacity-selftest:
+	uv run python scripts/capacity/run.py --selftest
 
 run:
 	cargo run

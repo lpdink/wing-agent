@@ -248,6 +248,18 @@ class ProviderConfig(BaseModel):
         apply=ApplyScope.HOT,
         default=600.0,
     )
+    max_connections: int | None = S(
+        doc="单 provider 的并发连接上限",
+        notes=(
+            "null = 沿用 httpx 默认连接池（当前 max_connections=100 / keepalive=20）。\n"
+            "设置后 keepalive 上限取 min(该值, 20)。\n"
+            "SSE 是长连接：并发调用超过上限时，多出的请求在本地连接池排队，表现为首帧延迟；"
+            "排队时长计入 timeout_first_chunk（它包住整个响应头请求），超过即按首块超时失败并重试。"
+        ),
+        apply=ApplyScope.HOT,
+        default=None,
+        gt=0,
+    )
     max_retries: int = S(
         doc="LLM 调用失败时的最大重试次数",
         apply=ApplyScope.HOT,

@@ -57,14 +57,14 @@ libs/wing-probe/
 │   ├── env.py             # ProbeEnv：临时 WING_HOME + 端口 + 网关子进程生命周期
 │   ├── probe.py           # Probe 门面：会话工厂 / 视图 / 现场转储 / 逃生舱
 │   ├── driver/            # http（动作封装 + 留档）· ws（订阅 + 信封重组）· session（会话句柄）
-│   ├── provider/          # script（剧本模型）· server（假 Provider）· sse（编码）· request_log · context（ContextView）
+│   ├── provider/          # script（剧本模型）· server（假 Provider + 发射时刻账本）· sse（编码）· request_log · context（ContextView）
 │   ├── watch/             # timeline（事件缓存 + 游标）· expect（五原语）· report（失败报告）
 │   ├── history/           # view（history.jsonl 解析 + 事实视图）· invariants（四条不变量 + 红线过渡断言）
 │   ├── toolhost.py        # 最小 tool host（远程工具探针侧实现；只走公开 HTTP / WS 协议）
 │   ├── files.py           # workspace 文件断言
 │   └── guard.py           # import 门禁（AST）
 ├── conftest.py            # 唯一的公共 fixture 定义处（在 args 那一层，不是 scenarios/ 里）
-├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁）
+├── tests/                 # 基础设施自测（不起网关；含 conftest 位置门禁；跨文件辅助在 _fake_provider.py）
 └── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
@@ -167,6 +167,10 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 @pytest.mark.probe_env(provider_extra={"image_delivery": "inline"})
 #   → 合进 providers[0]：provider 级透传旋钮（如覆盖图片投递形态 inline/followup）。
+#   原样透传、不设白名单：键名以产品配置声明为准，先用 grep 确认声明存在——
+#   配置层是 extra="ignore"，未声明的键会被静默忽略（不报错、也不生效）。
+#   容量测量用它抬高连接池上限（如 {"max_connections": 2000}），否则默认上限会把
+#   高并发压成「只有一批会话在流」。Probe.start(provider_extra=...) 同一旋钮。
 
 # hooks: 透传 config.yaml 的 hooks: glob；相对路径按**网关进程 cwd**（env.root）解析。
 # 惯例：场景在 reload 前把 hook 文件写进 <root>/hooks/，再 POST /api/system/reload
@@ -202,7 +206,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 待生效状态跨重启）与 `scenarios/test_memory_backend_eviction.py`（memory / file 后端
 重启后的存在性差异）。
 
-## 断言原语速查
+## 观测与断言原语速查
 
 ### 事件时间线：`session.watch`（游标模型）
 
@@ -235,6 +239,45 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 消息规格（`MsgSpec`）三种写法：`{"role": "user", "content": "hi"}` / `"user: hi"` / `MessageView` 对象；映射键允许 `role` / `content` / `tool_call_id` / `name` / `reasoning_content` / `has_tool_calls` / `tool_calls`（拼错的键会报错，不静默通过）。
 
 请求的 system 段来自生成配置里的默认模板 `system_prompt`（`wing_probe.env.DEFAULT_SYSTEM_PROMPT`，**非空**；可用 `render_config_yaml(system_prompt=…)` / `ProbeEnv(system_prompt=…)` 覆盖，`probe.env.system_prompt` 是场景里的对照值）。"system + 摘要"这类前缀断言因此作用在真实的 system 段上，而不是空串上退化。
+
+### 发射时刻（测量器件，非断言）：`probe.provider.frame_emits` / `emits_for(request_index)`
+
+假 Provider 在每帧**交给传输层写之前**记一次 `time.monotonic()`。这不是断言面，用途只有一个：
+**算投递延迟**（发射时刻 → 客户端到达时刻）——断言类场景用它没有意义。内存内、不落盘、**只增不减**，
+规模由场景的「请求数 × 每轮帧数」决定（约百 B / 0.35µs 一条）；要一份干净账本就新建 provider
+（probe 的每个场景本来都新建一个）。账本按请求组织：`emits_for` 直接读该请求的桶（与账本规模无关，
+26 万帧下实测 0.2µs），`frame_emits` 才拍平整表——按轮次读，别放进帧循环。
+
+| API | 用途 |
+|-----|------|
+| `frame_emits: tuple[FrameEmit, ...]` | 只读快照，**访问时**按 `request_index` 再 `frame_index` 拍平（`FrameEmit` = `(request_index, frame_index, at, kind)`）；每次访问 O(总帧数)，只服务测试与交叉核对 |
+| `emits_for(request_index)` | 该请求的逐帧时刻（按 `frame_index` 升序，返回副本）；**列表位置即 `frame_index`**。`request_index` 是 `probe.request(...)` 留档的全局 `.index`（不是 `model_index`，也不是 `requests.get(model, index=…)` 的参数），从未留档的下标抛 `IndexError`（打错下标不该得到一张空延迟表） |
+
+口径：`frame_index` 从 0 起只数 `data: {json}` 载荷帧（`SSEFrame` 只有载荷帧与 `data: [DONE]`
+两种形态，后者不计），因此与客户端 SSE 解析器读到的事件序一一对应（0 是 role 空帧）。
+
+没有帧的请求——非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；写失败
+（客户端断开）的那帧不进账，所以账本是「传输层接受了的帧」的**上限**（突发写会把内核缓冲填满，
+账本可能记满而客户端只读到几帧）；`[DONE]` 也不记账，因此流尾那一帧的等待不在延迟账本里。
+
+**配对按 `kind` 筛，不要按 `frame_index` 直接对齐**：`kind` 是闭合词表
+（`sse.FRAME_KINDS`），说明这一帧会变成客户端的哪条 delta 通道——
+
+| `kind` | 帧的内容 | 客户端事件 |
+|---|---|---|
+| `content` | `delta.content` | `text` |
+| `thinking` | `delta.reasoning_content` | `reasoning` |
+| `tool_call` | `delta.tool_calls[]` | `tool_call_stream` |
+| `meta` | role 空帧 / finish_reason 帧 / usage 帧 | **无**（usage 只经 `llm_call_metrics` 记账） |
+
+即：一条「`chunk=1`、正文 L 字符」的流式轮次在账本里有 L 条纹 `content` 帧 + 3 条纹 `meta`
+帧，而客户端只有 L 条 `text` 事件——`sum(1 for e in emits if e.kind == "content") == L`
+（`scenarios/test_frame_emit_channels.py` 在真网关上把这条与客户端事件数交叉断言）。
+
+另一条配对约束：`at` 是**绝对**单调时钟（与 `LoggedRequest.at` 同原点，两者相减即「入站 → 发帧」
+的耗时），而 `event.at` / `frame.at` 是相对 `env.started_at` 的，相减前先换到同一原点。
+账本与请求留档共享「留档表长度发号」这一个号空间：`provider.requests.clear()` 之后新请求从 0
+重新发号，账本里的帧随即无法归因——`emits_for` 因此直接抛 `RuntimeError` 而不是把两轮拼成一张表。
 
 ### 落盘：`session.history` / `probe.history(session)`
 

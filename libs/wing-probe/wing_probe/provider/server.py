@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -37,11 +39,39 @@ from wing_probe.provider.script import (
 )
 from wing_probe.provider.sse import (
     SSE_CONTENT_TYPE,
+    SSEFrame,
     completion_response,
     stream_frames,
 )
 
 CHAT_PATH = "/v1/chat/completions"
+
+
+@dataclass(frozen=True, slots=True)
+class FrameEmit:
+    """一帧被交给传输层之前的时刻（``FakeProvider.frame_emits`` 的条目）。
+
+    ``request_index`` 是 ``RequestLog`` 留档的全局 ``index``（不是 ``model_index``）。
+    ``frame_index`` 从 0 起、只数 ``data: {json}`` 载荷帧（``[DONE]`` 不计），等于客户端
+    SSE 解析器读到的第几个事件（0 是 role 空帧）。``at`` 是该帧写之前的绝对
+    ``time.monotonic()``（与 ``LoggedRequest.at`` 同原点；``watch`` 的 ``Event.at`` 则是
+    相对 ``env.started_at`` 的）。
+
+    ``kind`` 是这一帧的**通道标记**（与 :data:`wing_probe.provider.sse.FRAME_KINDS` 同一个
+    词表，取值由 ``sse.stream_frames`` 组装该帧时确定）——按它筛出与客户端事件可配对的帧:
+
+    - ``content``：``delta.content`` 增量 → 客户端 ``text`` 事件（每个内容帧一条）；
+    - ``thinking``：``delta.reasoning_content`` 增量 → 客户端 ``reasoning`` 事件；
+    - ``tool_call``：``delta.tool_calls[]`` 增量 → 客户端 ``tool_call_stream`` 事件；
+    - ``meta``：role 空帧 / finish_reason 帧 / usage 帧——**不产生**任何客户端 delta 事件。
+
+    配对口径与账本的生命周期见 ``docs/dev/probe-testing.md``。
+    """
+
+    request_index: int
+    frame_index: int
+    at: float
+    kind: str
 
 
 def _error_response(status: int, message: str, *, code: str) -> web.Response:
@@ -73,6 +103,10 @@ class FakeProvider:
         """model → Script 路由表。"""
         self.requests = RequestLog()
         """入站请求留档。"""
+        self._emits_by_request: dict[int, list[FrameEmit]] = {}
+        """唯一的发射时刻账本：``request_index`` → 该请求按 ``frame_index`` 升序的记录。"""
+        self._emits_generation: int | None = None
+        """写下第一帧时 ``requests`` 的 generation（检测序号复用）。"""
         self._port = port
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -147,6 +181,54 @@ class FakeProvider:
     def models(self) -> list[str]:
         return self.scripts.models()
 
+    # ── 发射时刻账本 ────────────────────────────────────────
+
+    @property
+    def frame_emits(self) -> tuple[FrameEmit, ...]:
+        """全部逐帧发射时刻的只读快照（按 ``request_index`` 再 ``frame_index`` 升序）。
+
+        账本按请求组织，这个视图在**访问时**拍平——它服务于测试与交叉核对，每次访问
+        O(总帧数)，不要放进帧循环。测量器件而非日志：只增不减、不落盘、无上界，规模由
+        场景的「请求数 × 每轮帧数」决定（约百 B / 0.35µs 一条）；要一份干净账本就新建
+        provider——账本与请求留档共享一个号空间，清掉留档就再也归不了因（见
+        :meth:`emits_for`）。
+        """
+        self._require_unreused_indices()
+        return tuple(
+            emit
+            for request_index in sorted(self._emits_by_request)
+            for emit in self._emits_by_request[request_index]
+        )
+
+    def emits_for(self, request_index: int) -> list[float]:
+        """某次请求的逐帧发射时刻（按 ``frame_index`` 升序，绝对 ``time.monotonic()``）。
+
+        ``request_index`` 传 :class:`FrameEmit` 说的那个全局留档序号。没有帧的请求——
+        非流式压缩调用，或在产出任何帧之前就失败（剧本耗尽 5xx）——返回空列表；从未
+        留档的下标抛 ``IndexError``：打错下标会得到一张「好看的空表」，那比报错贵得多。
+        直接读该请求的桶（不扫全表），返回副本。
+        """
+        self._require_unreused_indices()
+        recorded = len(self.requests)
+        if request_index < 0 or request_index >= recorded:
+            raise IndexError(
+                f"request #{request_index} out of range "
+                f"({recorded} request(s) recorded)"
+            )
+        return [emit.at for emit in self._emits_by_request.get(request_index, ())]
+
+    def _require_unreused_indices(self) -> None:
+        """留档被清过就拒绝出账：``clear()`` 让序号从 0 重新发号，账本里的帧随之无法归因。"""
+        if (
+            self._emits_generation is not None
+            and self.requests.generation != self._emits_generation
+        ):
+            raise RuntimeError(
+                "the request log was cleared after frames were recorded: request "
+                "indices are reissued from 0, so the ledger's emissions can no longer "
+                "be attributed to a request (build a fresh provider instead)"
+            )
+
     # ── HTTP ───────────────────────────────────────────────
 
     async def _handle_chat_completions(
@@ -168,6 +250,8 @@ class FakeProvider:
         logged = self.requests.record(
             body, model=model, path=request.path, headers=request.headers
         )
+        if self._emits_generation is None:
+            self._emits_generation = self.requests.generation
         headers = {"x-request-id": f"probe-{logged.index}"}
 
         try:
@@ -188,6 +272,7 @@ class FakeProvider:
                 completion_id=completion_id,
                 created=created,
                 headers=headers,
+                request_index=logged.index,
             )
         return web.json_response(
             completion_response(
@@ -210,6 +295,7 @@ class FakeProvider:
         completion_id: str,
         created: int,
         headers: dict[str, str],
+        request_index: int,
     ) -> web.StreamResponse:
         response = web.StreamResponse(
             status=200,
@@ -228,15 +314,39 @@ class FakeProvider:
             created=created,
         )
         try:
-            for frame in frames:
-                if frame.delay:
-                    await asyncio.sleep(frame.delay)
-                await response.write(frame.encode())
+            await self._write_frames(response, frames, request_index=request_index)
             await response.write_eof()
         except ConnectionResetError:
             # 客户端中途断开（interrupt 场景的常态）——不是错误。
             return response
         return response
 
+    async def _write_frames(
+        self,
+        response: web.StreamResponse,
+        frames: Sequence[SSEFrame],
+        *,
+        request_index: int,
+    ) -> None:
+        """逐帧等待 + 写；每写成一帧登记一次发射时刻（``[DONE]`` 不登记）。"""
+        frame_index = 0
+        for frame in frames:
+            if frame.delay:
+                await asyncio.sleep(frame.delay)
+            payload = frame.encode()
+            at = time.monotonic()
+            await response.write(payload)
+            if frame.data is None:
+                continue
+            self._emits_by_request.setdefault(request_index, []).append(
+                FrameEmit(
+                    request_index=request_index,
+                    frame_index=frame_index,
+                    at=at,
+                    kind=frame.kind,
+                )
+            )
+            frame_index += 1
 
-__all__ = ["CHAT_PATH", "FakeProvider"]
+
+__all__ = ["CHAT_PATH", "FakeProvider", "FrameEmit"]

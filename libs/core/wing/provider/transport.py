@@ -1,7 +1,7 @@
 # wing/provider/transport.py
 """provider 层共享的传输管道与错误面（两个协议同构）。
 
-- httpx client 构造（统一超时口径）；
+- httpx client 构造（统一超时与连接池口径）；
 - SSE 行解析与响应体闲置超时（OpenAI / Anthropic 流式共用）；
 - HTTP / 流错误类型与 `raise_with_body`（错误 body 进异常现场）。
 
@@ -27,10 +27,28 @@ from wing.common.logger import log
 _DEFAULT_TIMEOUT = 1200.0
 _CONNECT_TIMEOUT = 5.0
 
+#: 连接池 keepalive 上限的天花板（httpx 默认值）。keepalive 超过连接上限没有意义，
+#: 而调大连接上限不该顺带抬高空闲 socket 的驻留量——装配时取 min(见 make_http_limits)。
+_KEEPALIVE_CAP = 20
+
 
 def make_http_timeout() -> httpx.Timeout:
     """provider httpx client 的统一超时构造。"""
     return httpx.Timeout(_DEFAULT_TIMEOUT, connect=_CONNECT_TIMEOUT)
+
+
+def make_http_limits(max_connections: int | None) -> httpx.Limits | None:
+    """provider httpx client 的连接池上限；``None`` = 不设限，沿用 httpx 默认池。
+
+    返回 ``None`` 时调用方**不得**传 ``limits=``：显式传一个近似默认的 ``Limits()``
+    会把 httpx 的默认口径抄进本仓库，httpx 改默认即失真。
+    """
+    if max_connections is None:
+        return None
+    return httpx.Limits(
+        max_connections=max_connections,
+        max_keepalive_connections=min(max_connections, _KEEPALIVE_CAP),
+    )
 
 
 # ── SSE 行解析 ──────────────────────────────────────────────────

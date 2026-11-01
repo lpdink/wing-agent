@@ -297,6 +297,7 @@ crates/wing/src/
 - `assets/` — 品牌与演示素材（README 页头 banner 明暗两版、站姿 mascot SVG、社交预览 PNG、README 的 demo/速度 GIF）：SVG 由 `examples/export_logo.rs` 从欢迎屏的同一份像素网格导出，README 的 GIF 由 `scripts/demo/`（假 Provider 喂真 TUI，`make demo`）录制后挂在 `readme-assets` rolling release 上（不进 git），性能数字由 `scripts/demo/latency.py` 现量 —— 不会漂移 → [scripts/demo/README.md](scripts/demo/README.md)。
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files / toolhost）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
 - `scripts/perf/` — PR 级性能回归测量（merge-base 交错 A/B：criterion 子集 / TUI 显示延迟 / gateway socket 套件 → sticky comment；`.github/workflows/perf.yml` 在 PR 上跑并评论，纯报告不做门禁）→ [docs/dev/perf-testing.md](docs/dev/perf-testing.md)。
+- `scripts/capacity/` — 容量测量（手工、不进 CI）：N 个并发会话的阶梯扫描 + 网关侧 CPU / RSS / fd / 投递延迟采样，产出 `run.json` + `report.md`；五种负载形态（纯流式 / 工具循环 / 空转 / 水合 / 混合）与四态判据在工具内 → [docs/dev/capacity.md](docs/dev/capacity.md)。
 - `extensions/vscode/` — VSCode 前端（编辑器内的接入面，与 `wing` 二进制的四种形态并列；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
 - 测试目录：`libs/core/tests/`（后端 pytest，130+ 个测试文件 + `conftest.py`（fixture）+ `_support.py`（跨文件 helper））、`libs/wing-sdk/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
@@ -329,8 +330,9 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-input.md`](docs/dev/tui-input.md) | TUI 输入通道：鼠标上报的 DECSET 配对与生命周期对称、滚轮 / 键盘 / 选择的路由（新增鼠标能力前先读） |
 | [`docs/dev/tui-signals.md`](docs/dev/tui-signals.md) | TUI 终端状态信号：OSC 0（标题）/ OSC 9（桌面通知）/ OSC 7501（程序状态）的读者与语义、光标转义的变化语义 |
 | [`docs/dev/coverage.md`](docs/dev/coverage.md) | 覆盖率门禁：增量（patch）覆盖率作为 PR 门禁、sticky 评论形状、不判定区与本地跑法 |
-| [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 / 停机两路径（快 `stop()` vs 优雅 `shutdown()`） |
+| [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 观测与断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 / 停机两路径（快 `stop()` vs 优雅 `shutdown()`） |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
+| [`docs/dev/capacity.md`](docs/dev/capacity.md) | 容量与并发上限：口径（事件/唤醒/轮次三种成本）、三道结构墙（连接池 100 / fd / 单核）、速度轴阶梯与 1000 会话的可持续包络、内存与轮次两轴、过载崩塌的机制、复现命令与已知缺口 |
 | [`docs/dev/test-speed.md`](docs/dev/test-speed.md) | 测试回环的成本结构：四组的并行度旋钮（独占 / 共享档）、各组时间花在哪（probe 的网关启动、python 的真实等待、rust 的份额分线程、ts 的 jsdom）、改测试时的判据、`scripts/bench_tests.py` 的交错 A/B 与负载门禁 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |
 

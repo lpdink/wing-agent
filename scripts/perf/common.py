@@ -5,7 +5,8 @@
 `suite_<name>.py`（测量本体）与 `ab.py`（编排）都 import 本模块，所以这里的 API 是
 三个 suite 的共同依赖面——这些形状就是「契约」，编号对照表在 `README.md`（§1–§8）。
 
-只用标准库。
+只用标准库（``write_json`` 除外：它与容量扫描共用 ``wing_probe.procsample``，
+本模块把 ``libs/wing-probe`` 放进 ``sys.path`` 再取它）。
 """
 
 from __future__ import annotations
@@ -13,15 +14,25 @@ from __future__ import annotations
 import fnmatch
 import json
 import math
-import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parents[1]
+#: harness 代码永远来自 head 树；``wing_probe`` 只在 head 树的同仓目录里（venv 里的
+#: editable 安装指向 head，但 suite 脚本自己也是这么挂的，这里保持一致）。
+_PROBE_ROOT = REPO_ROOT / "libs" / "wing-probe"
+if str(_PROBE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROBE_ROOT))
+
+from wing_probe.procsample import write_json  # noqa: E402  (路径在上一行挂上)
 
 #: side 描述符（契约 §1）的必填字段。
 SIDE_FIELDS: tuple[str, ...] = (
@@ -82,15 +93,6 @@ def read_json(path: Path) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{path}: invalid JSON: {exc}") from exc
-
-
-def write_json(path: Path, payload: Any) -> None:
-    """原子写 JSON（tmp + rename），并拒绝 NaN/Infinity（非标准 JSON）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
 
 
 # ── 数值 ──────────────────────────────────────────────────────

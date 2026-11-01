@@ -55,8 +55,8 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 模板 = `emit_config_yaml(default_document(), build_catalog())`，`default_document()` = `{"providers": [], "agents": []}`
 （首启模板的空列表是**天然的 problem**——向导据此指路，不再需要 `ChangeHere` 这种假占位符）。
 
-规模（`build_catalog()` 实测）：**76 个声明字段 / 8 个业务分组**（字段计数口径 = 目录树的
-全部字段节点，钉在 `test_config_spec.py::test_field_count_is_sane`；节点 88 / 叶子 71 为
+规模（`build_catalog()` 实测）：**77 个声明字段 / 8 个业务分组**（字段计数口径 = 目录树的
+全部字段节点，钉在 `test_config_spec.py::test_field_count_is_sane`；节点 89 / 叶子 72 为
 含 `element` / `variant` 模板展开的全量口径）；`secret` 2（`providers[].api_key`、
 `gateway.auth.keys[].key`）、`enum` 6、`min_items=1` 3 组。
 
@@ -302,7 +302,7 @@ git-tracked 的 `config.yaml` + `.bak`。
 | 路径 | apply | 依据（读取点） |
 |---|---|---|
 | `providers[].name` | `next_session` | 池按 name 懒建实例；改名 = 旧 name 从配置消失、新 name 出现。retire 语义保留已移除 name 的旧实例（钉在它上面的会话不被拆解），旧会话可用到重启，新会话用新 name |
-| `providers[].protocol` / `base_url` / `api_key` / `timeout_first_chunk` / `timeout_total` / `max_retries` / `max_retry_delay` / `explicit_cache_mode` / `reasoning_effort` / `max_tokens` / `extra_body` / `anthropic_version` / `models[]`（窗口字段除外，见下一行）/ `image_delivery` / `image_max_bytes` | `hot` | 热重载第 4 项 `reset_providers()` 重建共享池（先建后换，旧实例在途计数归零后退场） |
+| `providers[].protocol` / `base_url` / `api_key` / `timeout_first_chunk` / `timeout_total` / `max_connections` / `max_retries` / `max_retry_delay` / `explicit_cache_mode` / `reasoning_effort` / `max_tokens` / `extra_body` / `anthropic_version` / `models[]`（窗口字段除外，见下一行）/ `image_delivery` / `image_max_bytes` | `hot` | 热重载第 4 项 `reset_providers()` 重建共享池（先建后换，旧实例在途计数归零后退场） |
 | `providers[].models[].context_window_tokens` / `keep_recent_tokens` | `next_session` | 模型级是压缩双阈值的唯一来源：会话 / 模板构造时读（`AgentTemplate.from_config` → `Compactor`），换模型时按目标模型重绑定（`WingAgent.set_model`）。已在内存的会话在换模型 / 换模板前保持自己的阈值快照——不做运行期热改窗口 |
 | `agents[].*`（`name` / `model` / `default` / `system_prompt` / `tools` / `skills` / `rules` / `max_turns` / `yolo`） | `next_session` | `SessionManager.reload_templates()` 重建模板；已在内存的会话保持自己的 agent。`skills` / `rules` 另外在 `ContextManager` 构造时快照 patterns，热重载时按**会话自己的** patterns 重新 glob |
 | `safe_command_patterns[]` | `hot` | `tools/internal/shell_safety.py` 每调用 `get_config()` |

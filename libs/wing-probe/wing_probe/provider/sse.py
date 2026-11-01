@@ -5,6 +5,9 @@
 携带 ``content`` / ``reasoning_content`` / ``tool_calls[]`` 增量；末帧带
 ``usage``）写死，漂移以"场景全红"暴露。
 
+每帧带一个**通道标记**（``SSEFrame.kind``，闭合词表见 :data:`FRAME_KINDS`）：它说明这一帧
+会变成客户端的哪条 delta 通道，与帧内容一起在组装时确定（不解析载荷反推）。
+
 分片与延迟：``Turn.chunk`` 决定 thinking / text 的分片粒度；``ToolCall.cut``
 决定参数 JSON 的切断点；``Turn.delay`` 是**除首帧外**每帧前的等待秒数
 （由 server 逐帧 sleep）；``Turn.first_delay`` 给定则取代**首个内容帧**上的
@@ -22,6 +25,14 @@ from wing_probe.provider.script import Turn, Usage, resolve_call_id
 SSE_CONTENT_TYPE = "text/event-stream; charset=utf-8"
 DONE_TEXT = "data: [DONE]\n\n"
 
+#: 帧的通道标记（闭合词表）：这一帧会变成客户端的哪条 delta 通道。
+#:
+#: - ``content``：正文增量（``delta.content``）→ 客户端 ``text`` 事件；
+#: - ``thinking``：推理增量（``delta.reasoning_content``）→ 客户端 ``reasoning`` 事件；
+#: - ``tool_call``：工具参数增量（``delta.tool_calls[]``）→ 客户端 ``tool_call_stream`` 事件；
+#: - ``meta``：不携带增量（role 空帧 / finish_reason 帧 / usage 帧 / ``[DONE]``）→ 无 delta 事件。
+FRAME_KINDS = frozenset({"content", "thinking", "tool_call", "meta"})
+
 
 @dataclass(frozen=True)
 class SSEFrame:
@@ -29,6 +40,14 @@ class SSEFrame:
 
     data: dict[str, Any] | None
     delay: float = 0.0
+    kind: str = "meta"
+    """通道标记（:data:`FRAME_KINDS` 之一）。"""
+
+    def __post_init__(self) -> None:
+        if self.kind not in FRAME_KINDS:
+            raise ValueError(
+                f"unknown frame kind {self.kind!r}; expected one of {sorted(FRAME_KINDS)}"
+            )
 
     @property
     def text(self) -> str:
@@ -102,32 +121,42 @@ def stream_frames(
     → finish_reason 帧（``turn.truncated`` 时跳过——流被上游切断，无终结
     信号）→ usage 帧 → ``[DONE]``。
 
-    逐帧等待见 :func:`frame_delay`（``first_delay`` 落在首个内容帧上）。
+    逐帧等待见 :func:`frame_delay`（``first_delay`` 落在首个内容帧上）。每帧的
+    ``kind`` 在这里一并确定（见 :data:`FRAME_KINDS`）。
     """
-    payloads: list[dict[str, Any]] = [
-        chunk_payload(
-            completion_id=completion_id,
-            created=created,
-            model=model,
-            delta={"role": "assistant", "content": ""},
+    payloads: list[tuple[str, dict[str, Any]]] = [
+        (
+            "meta",
+            chunk_payload(
+                completion_id=completion_id,
+                created=created,
+                model=model,
+                delta={"role": "assistant", "content": ""},
+            ),
         )
     ]
     for piece in turn.reasoning_chunks():
         payloads.append(
-            chunk_payload(
-                completion_id=completion_id,
-                created=created,
-                model=model,
-                delta={"reasoning_content": piece},
+            (
+                "thinking",
+                chunk_payload(
+                    completion_id=completion_id,
+                    created=created,
+                    model=model,
+                    delta={"reasoning_content": piece},
+                ),
             )
         )
     for piece in turn.content_chunks():
         payloads.append(
-            chunk_payload(
-                completion_id=completion_id,
-                created=created,
-                model=model,
-                delta={"content": piece},
+            (
+                "content",
+                chunk_payload(
+                    completion_id=completion_id,
+                    created=created,
+                    model=model,
+                    delta={"content": piece},
+                ),
             )
         )
     for call_index, call in enumerate(turn.tool_calls):
@@ -143,35 +172,44 @@ def stream_frames(
                 entry["type"] = "function"
                 entry["function"]["name"] = call.name
             payloads.append(
-                chunk_payload(
-                    completion_id=completion_id,
-                    created=created,
-                    model=model,
-                    delta={"tool_calls": [entry]},
+                (
+                    "tool_call",
+                    chunk_payload(
+                        completion_id=completion_id,
+                        created=created,
+                        model=model,
+                        delta={"tool_calls": [entry]},
+                    ),
                 )
             )
     if not turn.truncated:
         payloads.append(
+            (
+                "meta",
+                chunk_payload(
+                    completion_id=completion_id,
+                    created=created,
+                    model=model,
+                    delta={},
+                    finish_reason=turn.finish_reason,
+                ),
+            )
+        )
+    payloads.append(
+        (
+            "meta",
             chunk_payload(
                 completion_id=completion_id,
                 created=created,
                 model=model,
-                delta={},
-                finish_reason=turn.finish_reason,
-            )
-        )
-    payloads.append(
-        chunk_payload(
-            completion_id=completion_id,
-            created=created,
-            model=model,
-            usage=turn.resolved_usage,
+                usage=turn.resolved_usage,
+            ),
         )
     )
 
     frames = [
-        SSEFrame(data=payload, delay=frame_delay(turn, index))
-        for index, payload in enumerate(payloads)
+        SSEFrame(data=payload, delay=frame_delay(turn, index), kind=kind)
+        for index, (kind, payload) in enumerate(payloads)
     ]
     frames.append(SSEFrame(data=None, delay=turn.delay))
     return frames
@@ -242,6 +280,7 @@ def completion_response(
 
 __all__ = [
     "DONE_TEXT",
+    "FRAME_KINDS",
     "SSE_CONTENT_TYPE",
     "SSEFrame",
     "chunk_payload",

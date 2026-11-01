@@ -11,7 +11,7 @@ import copy
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
 
@@ -31,6 +31,7 @@ from wing.provider.openai.stream import _OAIStreamState, _StreamMixin
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
     lines_with_idle_timeout,
+    make_http_limits,
     make_http_timeout,
     parse_json_event,
     parse_sse_stream,
@@ -91,10 +92,14 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         headers["Authorization"] = f"Bearer {config.api_key}"
         headers["Content-Type"] = "application/json"
 
+        limits = make_http_limits(config.max_connections)
+        # 缺省（None）不传 limits——沿用 httpx 默认池（契约见 make_http_limits）。
+        limits_kwargs: dict[str, Any] = {} if limits is None else {"limits": limits}
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
             timeout=make_http_timeout(),
+            **limits_kwargs,
         )
         log.info(f"OpenAICompatProvider initialized: {self.base_url}")
 
