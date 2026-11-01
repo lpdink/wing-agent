@@ -15,9 +15,9 @@ use command::is_local_candidate_command;
 use command::is_session_command;
 use command::parse_slash_input;
 use command::session_panel;
+use selection::LevelHeader;
 use selection::SelectionRow;
 use selection::SelectionState;
-use selection::SessionChrome;
 use selection::popup_height;
 use selection::rich_max_visible;
 
@@ -46,8 +46,8 @@ pub enum ActivePopup {
         rows: Vec<SelectionRow>,
         /// Navigation state.
         state: SelectionState,
-        /// 层视图的 chrome 行（面包屑 / dormant 尾注）；不是候选行，只占高度。
-        chrome: SessionChrome,
+        /// 层视图的标题行（当前层的名字）；不是候选行，只占高度。
+        header: LevelHeader,
     },
 }
 
@@ -77,7 +77,7 @@ impl ActivePopup {
     ///
     /// Returns an optional action to fetch candidates via HTTP.
     ///
-    /// `query` 只被会话面板消费（层视图的 scope / dormant 开关 / 当前会话）；
+    /// `query` 只被会话面板消费（层视图的 scope / 当前会话）；
     /// 其它命令忽略它。
     pub fn update_from_input(
         &mut self,
@@ -118,7 +118,7 @@ impl ActivePopup {
                     filter,
                     rows: panel.rows,
                     state,
-                    chrome: panel.chrome,
+                    header: panel.header,
                 };
                 return None;
             }
@@ -153,7 +153,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
-                    chrome: SessionChrome::default(),
+                    header: LevelHeader::default(),
                 };
                 return None;
             }
@@ -184,7 +184,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
-                    chrome: SessionChrome::default(),
+                    header: LevelHeader::default(),
                 };
                 return None;
             }
@@ -228,7 +228,7 @@ impl ActivePopup {
 
     /// Get the popup height (0 if no popup).
     ///
-    /// chrome 行（面包屑 / dormant 尾注）算在里面：它们占 popup 的上下各一行，
+    /// 层标题行算在里面：它占 popup 的顶上一行，
     /// 排版按这个高度给矩形，渲染侧再从矩形里扣掉。
     pub fn height(&self) -> u16 {
         match self {
@@ -237,9 +237,9 @@ impl ActivePopup {
             Self::SubCommand {
                 rows,
                 state,
-                chrome,
+                header,
                 ..
-            } => popup_height(rows, state.max_visible) + chrome.height(),
+            } => popup_height(rows, state.max_visible) + header.height(),
         }
     }
 
@@ -342,24 +342,6 @@ impl ActivePopup {
         }
     }
 
-    /// 当前选中行的下标（过界按最后一行算；没有行 = `None`）。
-    pub fn selected_index(&self) -> Option<usize> {
-        match self {
-            Self::None => None,
-            Self::Command { rows, state, .. } | Self::SubCommand { rows, state, .. } => {
-                (!rows.is_empty()).then(|| state.selected.min(rows.len() - 1))
-            }
-        }
-    }
-
-    /// 把光标放到第 `index` 行（clamp）——行集收窄时用它停在「原来那个位置」附近的行上。
-    pub fn select_index(&mut self, index: usize) {
-        match self {
-            Self::Command { state, .. } | Self::SubCommand { state, .. } => state.select(index),
-            Self::None => {}
-        }
-    }
-
     /// 把选中位重新对准某一行（按 `name` 精确匹配；不存在则不动）。
     ///
     /// 用于「原地刷新」：行序可能因 pin / 活跃度变化，光标按 id 回到原来
@@ -446,16 +428,11 @@ impl ActivePopup {
 
     /// Access the popup for rendering.
     ///
-    /// 第四个元素是 chrome 行：`None` = 非候选面板（命令列表 / 没有面板）；子命令面板一律
-    /// `Some`，其中**非层视图的**（`/fork` / `/agents` / `/copy`）是空 chrome（高度 0）。
+    /// 第四个元素是层标题行：`None` = 非候选面板（命令列表 / 没有面板）；子命令面板一律
+    /// `Some`，其中**非层视图的**（`/fork` / `/agents` / `/copy`）是空标题（高度 0）。
     pub fn render_data(
         &self,
-    ) -> Option<(
-        &[SelectionRow],
-        &SelectionState,
-        &str,
-        Option<&SessionChrome>,
-    )> {
+    ) -> Option<(&[SelectionRow], &SelectionState, &str, Option<&LevelHeader>)> {
         match self {
             Self::None => None,
             Self::Command {
@@ -467,9 +444,9 @@ impl ActivePopup {
                 rows,
                 state,
                 filter,
-                chrome,
+                header,
                 ..
-            } => Some((rows, state, filter, Some(chrome))),
+            } => Some((rows, state, filter, Some(header))),
         }
     }
 }

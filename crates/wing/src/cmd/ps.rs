@@ -365,14 +365,15 @@ fn is_narrowed(parent: Option<&str>, tags: &[String]) -> bool {
 
 /// 层视图的行集：一行一个任务。
 ///
-/// - 没有 `--tag` / `--parent`（`whole_level`）：`level(None, include_dormant = --all)`
-///   —— 默认口径是「存活（`status != inactive`）或被 pin」**加上祖先闭包**（一个
-///   dormant 的父任务不因为它自己被逐出就消失，否则它的活子会升成假根）。
+/// - 没有 `--tag` / `--parent`（`whole_level`）：`--all` 取 `level(None)`（一层的全部
+///   直接子），否则取 `level_live(None)`——默认口径是「存活（`status != inactive`）或
+///   被 pin」**加上祖先闭包**（一个已逐出的父任务不因为它自己不在内存就消失，否则它的
+///   活子会升成假根）。
 /// - 有 `--tag` / `--parent`：标签与血缘是另一类筛（都隐含 `--all`），行集是同时满足
 ///   二者的行（AND），按**森林全序**取——定序契约因此对这两种筛同样成立。
 ///
 /// 两种情形都把森林建在 `sessions`（网关返回的原始列表，**未按存活 / 标签过滤**）上：
-/// crew 的后代计数要含 dormant 后代、存活闭包要看到被逐出的父，过滤不能发生在建森林
+/// crew 的后代计数要含未加载的后代、存活闭包要看到被逐出的父，过滤不能发生在建森林
 /// 之前（它只决定「哪些行进视图」）。
 fn level_rows<'a>(
     sessions: &'a [SessionInfo],
@@ -383,7 +384,11 @@ fn level_rows<'a>(
     let forest = forest_of(sessions);
     let whole_level = !is_narrowed(parent, tags);
     let visible = if whole_level {
-        forest.level(None, all).rows
+        if all {
+            forest.level(None).to_vec()
+        } else {
+            forest.level_live(None)
+        }
     } else {
         in_total_order(&forest, |index| {
             passes_flag_filters(&sessions[index], parent, tags)
@@ -1721,10 +1726,10 @@ mod tests {
         }
     }
 
-    /// 存活闭包：dormant 的父任务只要还有活着的子就仍在默认视图里（否则它的活子
-    /// 会升成假根，crew 也数不全）；整棵都 dormant 的任务不列。
+    /// 存活闭包：已逐出的父任务只要还有活着的子就仍在默认视图里（否则它的活子
+    /// 会升成假根，crew 也数不全）；整棵都不在内存的任务不列。
     #[test]
-    fn level_view_keeps_a_dormant_parent_of_a_live_child() {
+    fn level_view_keeps_an_inactive_parent_of_a_live_child() {
         let sessions = vec![
             session("live", "idle", &[]),
             session("parked", "inactive", &[]),
@@ -1738,7 +1743,7 @@ mod tests {
         assert_eq!(
             rows[0].crew.map(|crew| crew.descendants),
             Some(1),
-            "活子是 dormant 父的 crew"
+            "活子是已逐出父的 crew"
         );
 
         let sessions = vec![
@@ -1749,7 +1754,7 @@ mod tests {
         assert_eq!(row_ids(&level(&sessions, false, &[], None)), ["live"]);
     }
 
-    /// `--all` 不过滤：彻底 dormant 的任务也在（仍是一层一行）。
+    /// `--all` 不过滤：整棵都不在内存的任务也在（仍是一层一行）。
     #[test]
     fn all_lists_every_root_and_still_folds_the_crew() {
         let sessions = vec![
@@ -2083,7 +2088,7 @@ mod tests {
         );
     }
 
-    /// 一行都没有（全是 dormant）时与平铺同一个出口。
+    /// 一行都没有（全都不在内存）时与平铺同一个出口。
     #[test]
     fn an_empty_level_view_says_there_are_no_sessions() {
         let sessions = vec![session("gone", "inactive", &[])];

@@ -9,11 +9,10 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use super::selection::DormantFootnote;
 use super::selection::LevelDecor;
+use super::selection::LevelHeader;
 use super::selection::RichSessionRow;
 use super::selection::SelectionRow;
-use super::selection::SessionChrome;
 use super::selection::format_last_active;
 use super::selection::plain_row;
 use crate::protocol::CommandInfo;
@@ -334,7 +333,7 @@ fn rich_session_row(
     }
 }
 
-/// **搜索态**的行集（`args` 非空）：与树形之前的搜索逐字一致——跨层、含 dormant、
+/// **搜索态**的行集（`args` 非空）：与树形之前的搜索逐字一致——跨层、含未加载的会话、
 /// 不带徽章 / 标记（命中集合与树不同构，层级装饰在那个状态下没有意义）。
 ///
 /// Matching is done on id, title, and workspace (case-insensitive; workspace is
@@ -371,32 +370,30 @@ fn search_session_rows(candidates: &[SessionCandidate], args: &str) -> Vec<Selec
     exact
 }
 
-/// 会话面板投影的输入：行集是这三件事的**纯函数**（改它们只换投影，不换数据、
+/// 会话面板投影的输入：行集是这两件事的**纯函数**（改它们只换投影，不换数据、
 /// 不重取）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionQuery<'a> {
     /// 当前层：`None` = 根层（任务层），`Some(id)` = 该会话的直接子那一层。
     pub scope: Option<&'a str>,
-    /// 当前层是否把 dormant（不在内存里的）直接子也列出来。
-    pub include_dormant: bool,
     /// 当前会话 id —— 层视图里它的祖先链（含自己）带「你在这里」标记。
     pub current: Option<&'a str>,
 }
 
-/// 一次投影的产物：候选行 + chrome 行（后者不是候选行）。
+/// 一次投影的产物：候选行 + 层标题行（后者不是候选行）。
 #[derive(Debug, Default)]
 pub struct SessionPanel {
     pub rows: Vec<SelectionRow>,
-    pub chrome: SessionChrome,
+    pub header: LevelHeader,
 }
 
 /// 会话面板的行集 —— **两种形状**，由参数是否为空决定（见
 /// docs/dev/session-lineage.md §4.1）：
 ///
-/// - 参数为空 → **层视图**：`query.scope` 那一层的直接子（存活闭包生效），带 crew
-///   徽章与当前会话标记，面包屑 / dormant 尾注以 chrome 行给出；
+/// - 参数为空 → **层视图**：`query.scope` 那一层的直接子（一行不少，与会话在不在内存
+///   无关），带 crew 徽章与当前会话标记，层名以标题行给出；
 /// - 参数非空 → **全量搜索**：与树形之前的搜索逐字一致（exact > prefix > contains，
-///   跨层、含 dormant、无徽章、无标记、无 chrome）。
+///   跨层、无徽章、无标记、无标题行）。
 pub fn session_panel(
     candidates: &[SessionCandidate],
     args: &str,
@@ -407,22 +404,18 @@ pub fn session_panel(
     }
     SessionPanel {
         rows: search_session_rows(candidates, args),
-        chrome: SessionChrome::default(),
+        header: LevelHeader::default(),
     }
 }
 
 /// 层视图：一次一层的投影，全部事实来自内核（`shared::session_tree`）。
 ///
-/// 森林在这里重建一次（候选 → `TreeRow`）：层投影、存活闭包、crew 聚合与祖先链都是
-/// `Forest` 的只读视图，自己按 `parent` 过滤会漏掉闭包（dormant 父因活的子而保留）。
+/// 森林在这里重建一次（候选 → `TreeRow`）：层投影、crew 聚合与祖先链都是 `Forest`
+/// 的只读视图，自己按 `parent` 过滤会在幽灵父 / 环上与内核分叉。
 /// [`tree_rows`] 是**保序保长**的一一映射，故森林的下标空间 ≡ `candidates` 的下标。
 fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> SessionPanel {
     let forest = Forest::build(&tree_rows(candidates));
-
-    // `include_dormant` 打开时内核的 `dormant_children` 恒为 0（一行都没收起），
-    // 而尾注要说的正是「收起了几条」——所以另取一次关闭态。
-    let hidden = forest.level(query.scope, false).dormant_children;
-    let level = forest.level(query.scope, query.include_dormant);
+    let level = forest.level(query.scope);
 
     // LAST 列 = 子树最大活跃（内核聚合）。行 1 要的是与今天同格式的文本，所以取内核指出
     // 的**来源行**原文交给同一个格式化函数：把微秒格式化回来会与 `format_last_active` 的
@@ -431,7 +424,6 @@ fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> Sess
     let chain = current_chain(&forest, candidates, query.current);
 
     let rows = level
-        .rows
         .iter()
         .map(|&index| {
             let c = &candidates[index];
@@ -452,7 +444,7 @@ fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> Sess
 
     SessionPanel {
         rows,
-        chrome: level_chrome(candidates, query, hidden),
+        header: level_header(candidates, query),
     }
 }
 
@@ -482,13 +474,9 @@ fn current_chain(
     chain
 }
 
-/// 层视图的 chrome 行：面包屑（层 ≥ 1 才有）+ dormant 尾注（有被收起的才有）。
-fn level_chrome(
-    candidates: &[SessionCandidate],
-    query: SessionQuery<'_>,
-    hidden: usize,
-) -> SessionChrome {
-    let breadcrumb = query.scope.map(|scope| {
+/// 层视图的标题行：当前层的名字（层 ≥ 1 才有）。
+fn level_header(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> LevelHeader {
+    let title = query.scope.map(|scope| {
         candidates
             .iter()
             .find(|c| c.id == scope)
@@ -502,14 +490,7 @@ fn level_chrome(
             // scope 不在候选里（payload 刚变、App 还没回落）：名字就用 id。
             .unwrap_or_else(|| scope.to_string())
     });
-    let footnote = (hidden > 0).then_some(DormantFootnote {
-        hidden,
-        shown: query.include_dormant,
-    });
-    SessionChrome {
-        breadcrumb,
-        footnote,
-    }
+    LevelHeader { title }
 }
 
 /// 候选 → 内核的输入切片（层投影的唯一入口）。保序保长：森林吐出的下标即候选下标。
@@ -954,7 +935,7 @@ mod tests {
             [(40, 1, 0)],
             "▸40（全部后代）/ ?1（在等你的）/ ●0（不在跑，所以不出现）"
         );
-        assert!(panel.chrome == SessionChrome::default(), "根层没有 chrome");
+        assert!(panel.header == LevelHeader::default(), "根层不占标题行");
     }
 
     #[test]
@@ -975,13 +956,13 @@ mod tests {
         assert_eq!(ids(&level), ["kid"], "孙不在这一层");
         assert_eq!(badges(&level), [(1, 0, 0)], "kid 自己的 crew 只有 grand");
 
-        // 面包屑按标题命名当前层；根层没有这一行。
-        assert_eq!(level.chrome.breadcrumb.as_deref(), Some("r"));
+        // 层标题行按标题命名当前层；根层没有这一行。
+        assert_eq!(level.header.title.as_deref(), Some("r"));
         assert_eq!(root_query().scope, None);
     }
 
     #[test]
-    fn the_breadcrumb_falls_back_to_the_id_when_the_title_is_missing() {
+    fn the_level_title_falls_back_to_the_id_when_the_title_is_missing() {
         let candidates = vec![
             session("scope-id", "", "/ws", "idle"),
             under(session("kid", "k", "/ws", "idle"), "scope-id"),
@@ -994,7 +975,7 @@ mod tests {
                 ..SessionQuery::default()
             },
         );
-        assert_eq!(level.chrome.breadcrumb.as_deref(), Some("scope-id"));
+        assert_eq!(level.header.title.as_deref(), Some("scope-id"));
     }
 
     #[test]
@@ -1016,7 +997,6 @@ mod tests {
             "",
             SessionQuery {
                 scope: Some("parent"),
-                include_dormant: false,
                 current: None,
             },
         );
@@ -1101,57 +1081,27 @@ mod tests {
     }
 
     #[test]
-    fn dormant_children_are_hidden_counted_and_revealed_by_the_switch() {
+    fn a_level_lists_inactive_children_too() {
+        // 与会话在不在内存无关：这一层的直接子一行不少，徽章数的也是同一批。
         let candidates = vec![
             session("root", "r", "/ws", "idle"),
             under(session("live", "alive", "/ws", "idle"), "root"),
             under(session("parked", "evicted", "/ws", "inactive"), "root"),
         ];
-        let hidden = session_panel(
+        let level = session_panel(
             &candidates,
             "",
             SessionQuery {
                 scope: Some("root"),
-                include_dormant: false,
                 current: None,
             },
         );
-        assert_eq!(ids(&hidden), ["live"]);
-        assert_eq!(
-            hidden.chrome.footnote,
-            Some(DormantFootnote {
-                hidden: 1,
-                shown: false
-            }),
-            "尾注说出被收起的数量"
-        );
-
-        let all = session_panel(
-            &candidates,
-            "",
-            SessionQuery {
-                scope: Some("root"),
-                include_dormant: true,
-                current: None,
-            },
-        );
-        assert_eq!(
-            ids(&all),
-            ["live", "parked"],
-            "开关打开：行集变大、顺序不变"
-        );
-        assert_eq!(
-            all.chrome.footnote,
-            Some(DormantFootnote {
-                hidden: 1,
-                shown: true
-            }),
-            "打开时尾注说的是当前状态"
-        );
+        assert_eq!(ids(&level), ["live", "parked"]);
+        assert_eq!(level.header.title.as_deref(), Some("r"));
     }
 
     #[test]
-    fn a_fully_dormant_crew_is_an_empty_level_with_chrome() {
+    fn a_level_whose_crew_is_all_inactive_is_still_a_full_level() {
         let candidates = vec![
             session("root", "r", "/ws", "idle"),
             under(session("parked", "evicted", "/ws", "inactive"), "root"),
@@ -1161,20 +1111,12 @@ mod tests {
             "",
             SessionQuery {
                 scope: Some("root"),
-                include_dormant: false,
                 current: None,
             },
         );
-        assert!(level.rows.is_empty());
-        assert_eq!(level.chrome.breadcrumb.as_deref(), Some("r"));
-        assert_eq!(
-            level.chrome.footnote,
-            Some(DormantFootnote {
-                hidden: 1,
-                shown: false
-            })
-        );
-        assert_eq!(level.chrome.height(), 2);
+        assert_eq!(ids(&level), ["parked"]);
+        assert_eq!(level.header.title.as_deref(), Some("r"));
+        assert_eq!(level.header.height(), 1);
     }
 
     #[test]
@@ -1188,7 +1130,6 @@ mod tests {
         ];
         let query = |scope| SessionQuery {
             scope,
-            include_dormant: false,
             current: Some("me"),
         };
 
@@ -1211,7 +1152,6 @@ mod tests {
             "",
             SessionQuery {
                 scope: None,
-                include_dormant: false,
                 current: Some("ghost"),
             },
         );
@@ -1240,17 +1180,15 @@ mod tests {
             "",
             SessionQuery {
                 scope: Some("gone"),
-                include_dormant: false,
                 current: None,
             },
         );
         assert!(panel.rows.is_empty());
-        assert_eq!(panel.chrome.breadcrumb.as_deref(), Some("gone"));
-        assert_eq!(panel.chrome.footnote, None);
+        assert_eq!(panel.header.title.as_deref(), Some("gone"));
     }
 
     #[test]
-    fn the_search_state_carries_no_level_decor_and_no_chrome() {
+    fn the_search_state_carries_no_level_decor_and_no_header() {
         let candidates = vec![
             session("root", "rustacean", "/ws", "idle"),
             under(session("kid", "k", "/ws", "idle"), "root"),
@@ -1260,12 +1198,11 @@ mod tests {
             "rust",
             SessionQuery {
                 scope: Some("root"),
-                include_dormant: true,
                 current: Some("kid"),
             },
         );
         assert_eq!(ids(&panel), ["root"]);
-        assert_eq!(panel.chrome, SessionChrome::default());
+        assert_eq!(panel.header, LevelHeader::default());
         assert!(
             panel
                 .rows

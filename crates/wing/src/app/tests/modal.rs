@@ -967,7 +967,7 @@ fn test_the_level_view_owns_its_keys_and_leaves_the_others_alone() {
     use crossterm::event::KeyCode;
 
     let mut app = app_with_level_view();
-    // 五个键归面板：`→` 进层、`←` 退层、`Ctrl+A` dormant、`Ctrl+D/U` 翻页。
+    // 四个键归面板：`→` 进层、`←` 退层、`Ctrl+D/U` 翻页。
     assert_eq!(
         app.route_key(&key(KeyCode::Right)),
         KeyRoute::SessionLevel(SessionLevelAction::Descend)
@@ -976,10 +976,9 @@ fn test_the_level_view_owns_its_keys_and_leaves_the_others_alone() {
         app.route_key(&key(KeyCode::Left)),
         KeyRoute::SessionLevel(SessionLevelAction::Back)
     );
-    assert_eq!(
-        app.route_key(&ctrl(KeyCode::Char('a'))),
-        KeyRoute::SessionLevel(SessionLevelAction::ToggleDormant)
-    );
+    // `Ctrl+A` 不再有层视图语义（逐出与否不是导航要看的东西）：它落回 composer 的既有
+    // 口径——带 CONTROL 的字符当普通字符插入（`Ctrl+E` / `Ctrl+K` 今天就是这样）。
+    assert_eq!(app.route_key(&ctrl(KeyCode::Char('a'))), KeyRoute::PopupNav);
     assert_eq!(
         app.route_key(&ctrl(KeyCode::Char('d'))),
         KeyRoute::SessionLevel(SessionLevelAction::PageDown)
@@ -1094,11 +1093,26 @@ fn test_other_panels_keep_their_key_routing() {
 }
 
 #[test]
-fn test_an_empty_level_keeps_its_keys_and_swallows_enter() {
+fn test_ctrl_a_falls_back_to_the_composer_and_loses_the_level() {
     use crossterm::event::KeyCode;
 
-    // 空层（crew 全 dormant）：面包屑 + 尾注还在 ⇒ 面板可见 ⇒ 键位照旧归它；
-    // Enter 在这里没有对象，也不劝人「改参数」。
+    // 这个键在本面板没有语义之后，去向就是 composer 的既有口径（带 CONTROL 的字符当普通
+    // 字符插入）：命令名被改写 ⇒ 层视图与层位置一起丢。钉住它，免得哪天又有人给它发明
+    // 一个面板语义。
+    let mut app = app_with_level_view();
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.popup.level_view.depth(), 1, "前提：先真的进了一层");
+    app.handle_key(ctrl(KeyCode::Char('a')));
+    assert_eq!(app.input.text(), "/ssa", "草稿照既有口径被改写");
+    assert!(!app.popup.active.session_level_view(), "不再是层视图");
+    assert_eq!(app.popup.level_view.depth(), 0, "层位置一起丢");
+}
+
+#[test]
+fn test_a_crew_of_inactive_sessions_is_a_normal_level() {
+    use crossterm::event::KeyCode;
+
+    // 逐出与否不是导航要看的东西：`→` 进去照样是一层正常的行——inactive 不会把一层变空。
     let mut app = test_app();
     app.popup.cache.sessions = vec![
         candidate("boss", None),
@@ -1112,16 +1126,36 @@ fn test_an_empty_level_keeps_its_keys_and_swallows_enter() {
     app.update_popup_from_input();
     app.handle_key(key(KeyCode::Right));
     assert_eq!(app.popup.level_view.depth(), 1);
-    assert!(app.popup.active.height() > 0, "chrome 撑着面板");
+    assert_eq!(app.popup.active.selected_name(), Some("parked"));
+
+    // 退层仍归面板：退到根层面板还在。
     assert!(app.route_key(&key(KeyCode::Left)) == KeyRoute::SessionLevel(SessionLevelAction::Back));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.popup.level_view.depth(), 0);
+    assert!(app.popup.active.is_active());
+}
+
+#[test]
+fn test_a_level_whose_children_all_vanished_keeps_its_keys() {
+    use crossterm::event::KeyCode;
+
+    // 空层可达：进层之后本层的直接子全被归档 / 删除（`LevelView` 只校验路径上的 id）。
+    // 此时面板只剩标题行 —— 键位仍归它、Enter 什么都不做、`←` 是出口。
+    let mut app = test_app();
+    app.popup.cache.sessions = vec![candidate("boss", None)];
+    app.popup.cache.sessions_fetched = true;
+    app.input.set_text("/ss");
+    app.popup.level_view.enter("boss");
+    app.update_popup_from_input();
+    assert_eq!(app.popup.level_view.depth(), 1);
+    assert!(app.popup.active.height() > 0, "标题行撑着面板");
+
     app.handle_key(key(KeyCode::Enter));
     assert!(app.popup.active.is_active(), "Enter 不清空层");
-    assert!(app.popup.level_view.depth() == 1);
-
-    // 空层照样能打字开搜索：crew 全 dormant 的那一屏正是最需要搜索的地方。
-    app.handle_key(key(KeyCode::Char('b')));
-    assert_eq!(app.input.text(), "/ss b");
-    assert!(app.popup.active.is_active(), "搜索态仍在同一个面板里");
+    assert_eq!(app.popup.level_view.depth(), 1);
+    assert!(app.route_key(&key(KeyCode::Left)) == KeyRoute::SessionLevel(SessionLevelAction::Back));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.popup.level_view.depth(), 0);
 }
 
 #[test]
