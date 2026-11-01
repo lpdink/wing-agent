@@ -6,7 +6,7 @@
 //! - Scroll window for long lists
 //!
 //! 会话面板另外画两样东西：双行富行（[`RichSessionRow`]，层视图多出 crew 徽章与
-//! 「你在这里」标记）与层标题行（[`SessionHeader`]：当前层的名字）。
+//! 「你在这里」标记）与层标题行（[`LevelHeader`]：当前层的名字）。
 //! 标题行**不是候选行**：它只占矩形顶上一行，光标与 `Enter` 都碰不到它。
 
 use ratatui::buffer::Buffer;
@@ -115,12 +115,12 @@ pub struct RichSessionRow {
 /// 只装**事实**（层的名字），词表与键位提示归渲染侧（见 [`render_header_line`]）：窄面板
 /// 上先被截断的永远是名字，而不是提示。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionHeader {
+pub struct LevelHeader {
     /// `Some(当前 scope 的标题，缺失回落到 id)` = 层 ≥ 1；根层不占行。
     pub title: Option<String>,
 }
 
-impl SessionHeader {
+impl LevelHeader {
     /// 占用的终端行数（0 / 1）。
     pub fn height(&self) -> u16 {
         u16::from(self.title.is_some())
@@ -478,7 +478,7 @@ pub struct SelectionPopup<'a> {
     state: &'a SelectionState,
     filter: &'a str,
     palette: &'a ThemePalette,
-    header: Option<&'a SessionHeader>,
+    header: Option<&'a LevelHeader>,
 }
 
 impl<'a> SelectionPopup<'a> {
@@ -499,7 +499,7 @@ impl<'a> SelectionPopup<'a> {
 
     /// 带上层视图的标题行（当前层的名字）。它占矩形顶上一行，行窗口因此少掉对应的高度
     /// （与 `ActivePopup::height()` 的加法同一份账）。
-    pub fn with_header(mut self, header: &'a SessionHeader) -> Self {
+    pub fn with_header(mut self, header: &'a LevelHeader) -> Self {
         self.header = Some(header);
         self
     }
@@ -1395,7 +1395,7 @@ mod tests {
     /// 渲染带层标题行的一帧，返回逐行文本。
     fn header_frame(
         rows: &[SelectionRow],
-        header: &SessionHeader,
+        header: &LevelHeader,
         area: Rect,
     ) -> (Buffer, Vec<String>) {
         let state = SelectionState::new(rows.len());
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn test_the_header_sits_above_the_rows_and_stays_dim() {
         let rows = vec![session_row(SessionStatus::Idle, "07-22 21:41", "kid")];
-        let header = SessionHeader {
+        let header = LevelHeader {
             title: Some("the team".into()),
         };
         let area = Rect::new(0, 0, 40, 3);
@@ -1434,7 +1434,7 @@ mod tests {
     #[test]
     fn test_a_long_level_name_never_eats_the_key_hint() {
         // 名字先被截断，`· ← back` 永远留着：提示被名字吃掉就白写了。
-        let header = SessionHeader {
+        let header = LevelHeader {
             title: Some("a very long level title that will not fit".into()),
         };
         let area = Rect::new(0, 0, 24, 2);
@@ -1445,7 +1445,7 @@ mod tests {
 
     #[test]
     fn test_the_header_hint_gives_way_only_when_it_cannot_fit_whole() {
-        let header = SessionHeader {
+        let header = LevelHeader {
             title: Some("a long level name".into()),
         };
         // 恰好等于提示宽度（` · ← back` 占 9 列）：提示整段留着，事实让到 0 列
@@ -1463,7 +1463,7 @@ mod tests {
     #[test]
     fn test_a_rect_that_only_fits_the_header_draws_no_rows() {
         // 矩形只够标题行：行窗口没有位置，一条不画（不 panic、不越界）。
-        let header = SessionHeader {
+        let header = LevelHeader {
             title: Some("the team".into()),
         };
         let (_, lines) = header_frame(&[], &header, Rect::new(0, 0, 40, 1));
@@ -1474,7 +1474,7 @@ mod tests {
     fn test_the_rows_window_shrinks_by_the_header_height() {
         // 12 条 rich 行（策略窗口 6 条 = 12 行）+ 1 行标题：矩形 13 行装 6 条。
         let rows = rich_rows(12);
-        let header = SessionHeader {
+        let header = LevelHeader {
             title: Some("the team".into()),
         };
         let (_, lines) = header_frame(&rows, &header, Rect::new(0, 0, 40, 13));

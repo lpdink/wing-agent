@@ -293,16 +293,16 @@ impl<'a> Forest<'a> {
         self.activity_row.get(index).copied()
     }
 
-    /// 有效父（输入下标）：根 / 幽灵父 / 环 = `None`。层标题行按它向上走，不要拿原始
-    /// `parent_session_id` 走——那条链可能带环。
+    /// 有效父（输入下标）：根 / 幽灵父 / 环 = `None`。当前会话的祖先链（层视图的 `❯`
+    /// 标记）按它向上走，不要拿原始 `parent_session_id` 走——那条链可能带环。
     pub fn parent_of(&self, index: usize) -> Option<usize> {
         self.parent.get(index).copied().flatten()
     }
 
     /// 层投影：`scope` 的直接子，顺序 = 森林全序在该层的限制。
     ///
-    /// `None` = 根层；`Some(id)` = 该会话的子层，未知 id（会话已被逐出 / 归档）→ 空层，
-    /// 诚实降级不猜。重复 id 只解析到先到者（后到者的子层取不到，与 `index_of` 同一条
+    /// `None` = 根层；`Some(id)` = 该会话的子层，未知 id（已归档 / 不在本轮列表）→
+    /// 空层，诚实降级不猜。重复 id 只解析到先到者（后到者的子层取不到，与 `index_of` 同一条
     /// 降级）。
     ///
     /// **不过滤存活**：一层的行集就是拓扑本身。TUI 的会话面板据此保证「用户自己开的
@@ -322,6 +322,9 @@ impl<'a> Forest<'a> {
 
     /// 层投影的存活视图：[`Self::level`] ∩ 保留集。`wing ps` 的默认口径（`--all` 才用
     /// [`Self::level`]）——那里的问题「今天在跑什么」本来就以存活为答案。
+    ///
+    /// 这里返回拥有型（`level` 借用）：它是 CLI 每次调用算一次的行集，多一次分配无妨；
+    /// 面板那条热路径（每次按键）走 [`Self::level`] 的零分配切片。
     pub fn level_live(&self, scope: Option<&str>) -> Vec<usize> {
         self.level(scope)
             .iter()
@@ -336,9 +339,9 @@ pub fn build_forest(rows: &[TreeRow<'_>]) -> Vec<TreeEntry> {
     Forest::build(rows).tree().to_vec()
 }
 
-/// 存活：不在内存（`inactive`）不算。状态未知（`None`）按存活处理——「不知道」
-/// 不能当成「已逐出」把行藏起来。（面板另有一条：不认识的状态串按 `inactive`
-/// 画图标 —— 那是「画成什么样」，不是「留不留这一行」，两个问题各管各的。）
+/// 存活 = `status != inactive`；状态未知（`None`）按存活处理——「不知道」不能当成
+/// 「已逐出」把行藏起来。（面板的图标另有一条：不认识的状态串按 `inactive` 画——那是
+/// 「画成什么样」，与「留不留这一行」是两个问题。）
 ///
 /// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」），只被
 /// [`Forest::level_live`] 消费。`wing ps` 的 `--flat` / `--tree` / `--json` 走的是

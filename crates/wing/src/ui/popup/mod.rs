@@ -15,9 +15,9 @@ use command::is_local_candidate_command;
 use command::is_session_command;
 use command::parse_slash_input;
 use command::session_panel;
+use selection::LevelHeader;
 use selection::SelectionRow;
 use selection::SelectionState;
-use selection::SessionHeader;
 use selection::popup_height;
 use selection::rich_max_visible;
 
@@ -47,7 +47,7 @@ pub enum ActivePopup {
         /// Navigation state.
         state: SelectionState,
         /// 层视图的标题行（当前层的名字）；不是候选行，只占高度。
-        header: SessionHeader,
+        header: LevelHeader,
     },
 }
 
@@ -153,7 +153,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
-                    header: SessionHeader::default(),
+                    header: LevelHeader::default(),
                 };
                 return None;
             }
@@ -184,7 +184,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
-                    header: SessionHeader::default(),
+                    header: LevelHeader::default(),
                 };
                 return None;
             }
@@ -342,24 +342,6 @@ impl ActivePopup {
         }
     }
 
-    /// 当前选中行的下标（过界按最后一行算；没有行 = `None`）。
-    pub fn selected_index(&self) -> Option<usize> {
-        match self {
-            Self::None => None,
-            Self::Command { rows, state, .. } | Self::SubCommand { rows, state, .. } => {
-                (!rows.is_empty()).then(|| state.selected.min(rows.len() - 1))
-            }
-        }
-    }
-
-    /// 把光标放到第 `index` 行（clamp）——行集收窄时用它停在「原来那个位置」附近的行上。
-    pub fn select_index(&mut self, index: usize) {
-        match self {
-            Self::Command { state, .. } | Self::SubCommand { state, .. } => state.select(index),
-            Self::None => {}
-        }
-    }
-
     /// 把选中位重新对准某一行（按 `name` 精确匹配；不存在则不动）。
     ///
     /// 用于「原地刷新」：行序可能因 pin / 活跃度变化，光标按 id 回到原来
@@ -450,12 +432,7 @@ impl ActivePopup {
     /// `Some`，其中**非层视图的**（`/fork` / `/agents` / `/copy`）是空标题（高度 0）。
     pub fn render_data(
         &self,
-    ) -> Option<(
-        &[SelectionRow],
-        &SelectionState,
-        &str,
-        Option<&SessionHeader>,
-    )> {
+    ) -> Option<(&[SelectionRow], &SelectionState, &str, Option<&LevelHeader>)> {
         match self {
             Self::None => None,
             Self::Command {

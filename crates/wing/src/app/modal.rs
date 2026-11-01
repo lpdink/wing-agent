@@ -146,9 +146,10 @@ pub(super) enum SessionLevelAction {
 /// 下的**可打印字符**也不在这张表里：它不进层、不翻页，而是开启搜索态（见
 /// [`filter_start_char`]）。
 ///
-/// 三个 `Ctrl` 组合（`A` / `D` / `U`）在 composer / popup 都没有别的含义（composer 的
-/// Ctrl 只有 `Ctrl+J` / `Ctrl+M` 换行）；带 SHIFT / ALT / SUPER 的组合不接（系统手势，
-/// 与 `is_paste_clipboard_key` 同一条口径）。
+/// 两个 `Ctrl` 组合（`D` / `U`）。带 CONTROL 的其它字符在这个面板没有语义，会落到
+/// composer 当普通字符插入（它对 `Ctrl+<字母>` 的既有口径，只有 `Ctrl+J` / `Ctrl+M` 换成
+/// 行）；带 SHIFT / ALT / SUPER 的组合不接（系统手势，与 `is_paste_clipboard_key` 同一条
+/// 口径）。
 fn session_level_key(key: &crossterm::event::KeyEvent, depth: usize) -> Option<SessionLevelAction> {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyModifiers;
@@ -348,7 +349,7 @@ impl App {
             }
             // 空过滤词 = 「当前层」而不是「搜索态」：一个可打印字符要开启搜索。落到
             // composer 会把命令名改写成 `/ssk`——面板与层位置一起丢，「打字即搜索」
-            // 也就不存在了。
+            // 也就不存在了。（带 CONTROL 的字符不算「可打印」：它们走上面那条既有口径。）
             if let Some(character) = filter_start_char(key) {
                 return KeyRoute::SessionFilter(character);
             }
@@ -472,6 +473,8 @@ impl App {
                 // 例外：must-select 命令保持 popup——Enter 给显式"无匹配候选"反馈，
                 // 绝不落到自由文本发送（参数必须来自候选）。层视图的空层不是这个意思
                 // （那里没有参数可改，`←` 才是出口）：Enter 什么都不做，也不劝人改参数。
+                // 空层可达：进层之后本层直接子全被归档 / 删除（`LevelView` 只校验路径上的
+                // id 还在不在）。
                 if self.popup.active.is_must_select_empty() {
                     if key.code == crossterm::event::KeyCode::Enter {
                         if !self.popup.active.session_level_view() {

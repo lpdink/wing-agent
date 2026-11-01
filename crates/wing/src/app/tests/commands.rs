@@ -692,8 +692,8 @@ mod session_list {
     use crate::config::AppConfig;
     use crate::config::ThemePalette;
     use crate::shared::pinning::PIN_TAG;
+    use crate::ui::popup::selection::LevelHeader;
     use crate::ui::popup::selection::SelectionPopup;
-    use crate::ui::popup::selection::SessionHeader;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
@@ -1034,7 +1034,7 @@ mod session_list {
     fn panel_line1s(app: &App) -> Vec<String> {
         let (rows, state, filter, header) = app.popup.active.render_data().expect("panel is open");
         let count = rows.len();
-        let header_h = header.map_or(0, SessionHeader::height);
+        let header_h = header.map_or(0, LevelHeader::height);
         let area = Rect::new(0, 0, 60, (count * 2).max(1) as u16 + header_h);
         let mut buf = Buffer::empty(area);
         let palette = ThemePalette::default();
@@ -1140,7 +1140,7 @@ mod session_list {
         );
         let (rows, state, filter, header) = app.popup.active.render_data().expect("panel is open");
         assert_eq!(filter, "b", "面板进入搜索态");
-        assert_eq!(header, Some(&SessionHeader::default()), "搜索态没有标题行");
+        assert_eq!(header, Some(&LevelHeader::default()), "搜索态没有标题行");
         assert_eq!(
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             ["beta"]
@@ -1277,6 +1277,29 @@ mod session_list {
             .map(|r| r.name.as_str())
             .collect();
         assert_eq!(marked, ["kid-07"], "进了根祖先的层，标的换成我自己");
+    }
+
+    #[test]
+    fn test_the_root_level_lists_every_session_the_user_created() {
+        // 根层 = 用户自己开的会话：一行不少，与会话在不在内存无关（逐出只是后端的记账）。
+        let mut app = app();
+        feed(
+            &mut app,
+            vec![
+                session("live", "alive", "/ws", "idle", "2025-02-01T00:00:00", None),
+                session(
+                    "parked",
+                    "evicted",
+                    "/ws",
+                    "inactive",
+                    "2025-01-01T00:00:00",
+                    None,
+                ),
+            ],
+        );
+        app.input.set_text("/ss");
+        app.update_popup_from_input();
+        assert_eq!(panel_ids(&app), ["live", "parked"]);
     }
 
     #[test]
@@ -1510,16 +1533,16 @@ mod session_list {
         // 进层：层标题行在最上面一行，两个孩子各一行。
         app.handle_key(key(KeyCode::Right));
         let rows = frame_lines(&mut app, 60, 32);
-        let crumb = row_of(&rows, "· ← back");
+        let header_row = row_of(&rows, "· ← back");
         assert!(
-            rows[crumb].trim_start().starts_with("the team"),
+            rows[header_row].trim_start().starts_with("the team"),
             "层标题行命名当前层：{}",
             frame_rows(&rows)
         );
         let b = row_of(&rows, "[02-01 00:00]");
         let c = row_of(&rows, "[03-01 00:00]");
         assert!(
-            crumb < c && c < b,
+            header_row < c && c < b,
             "层标题行在最上面，层内按注意力定序（在等你的 C 在 B 之前）：{}",
             frame_rows(&rows)
         );

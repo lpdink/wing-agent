@@ -10,9 +10,9 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use super::selection::LevelDecor;
+use super::selection::LevelHeader;
 use super::selection::RichSessionRow;
 use super::selection::SelectionRow;
-use super::selection::SessionHeader;
 use super::selection::format_last_active;
 use super::selection::plain_row;
 use crate::protocol::CommandInfo;
@@ -384,7 +384,7 @@ pub struct SessionQuery<'a> {
 #[derive(Debug, Default)]
 pub struct SessionPanel {
     pub rows: Vec<SelectionRow>,
-    pub header: SessionHeader,
+    pub header: LevelHeader,
 }
 
 /// 会话面板的行集 —— **两种形状**，由参数是否为空决定（见
@@ -404,7 +404,7 @@ pub fn session_panel(
     }
     SessionPanel {
         rows: search_session_rows(candidates, args),
-        header: SessionHeader::default(),
+        header: LevelHeader::default(),
     }
 }
 
@@ -475,7 +475,7 @@ fn current_chain(
 }
 
 /// 层视图的标题行：当前层的名字（层 ≥ 1 才有）。
-fn level_header(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> SessionHeader {
+fn level_header(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> LevelHeader {
     let title = query.scope.map(|scope| {
         candidates
             .iter()
@@ -490,7 +490,7 @@ fn level_header(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> Ses
             // scope 不在候选里（payload 刚变、App 还没回落）：名字就用 id。
             .unwrap_or_else(|| scope.to_string())
     });
-    SessionHeader { title }
+    LevelHeader { title }
 }
 
 /// 候选 → 内核的输入切片（层投影的唯一入口）。保序保长：森林吐出的下标即候选下标。
@@ -935,7 +935,7 @@ mod tests {
             [(40, 1, 0)],
             "▸40（全部后代）/ ?1（在等你的）/ ●0（不在跑，所以不出现）"
         );
-        assert!(panel.header == SessionHeader::default(), "根层不占标题行");
+        assert!(panel.header == LevelHeader::default(), "根层不占标题行");
     }
 
     #[test]
@@ -1202,7 +1202,7 @@ mod tests {
             },
         );
         assert_eq!(ids(&panel), ["root"]);
-        assert_eq!(panel.header, SessionHeader::default());
+        assert_eq!(panel.header, LevelHeader::default());
         assert!(
             panel
                 .rows
