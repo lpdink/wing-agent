@@ -12,7 +12,7 @@ pub struct PopupState {
     pub active: ActivePopup,
     /// Cached sub-command candidates.
     pub cache: CandidateCache,
-    /// 会话面板的层视图状态（当前层路径 + dormant 开关）。
+    /// 会话面板的层视图状态（从根层逐层进入的路径）。
     pub level_view: LevelView,
 }
 
@@ -49,7 +49,7 @@ impl PopupState {
     }
 }
 
-/// 会话面板的层视图状态：从根层逐层进入的**路径** + 当前层是否含 dormant。
+/// 会话面板的层视图状态：从根层逐层进入的**路径**。
 ///
 /// 住在 App（[`PopupState`]）而不是 `ActivePopup`：popup 每次按键都整体重建，状态得
 /// 活得更久（一个面板生命周期内保持，关闭即归零）。
@@ -60,7 +60,6 @@ impl PopupState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LevelView {
     path: Vec<String>,
-    include_dormant: bool,
 }
 
 impl LevelView {
@@ -85,20 +84,9 @@ impl LevelView {
         self.path.pop()
     }
 
-    /// 翻转 dormant 开关。
-    pub fn toggle_dormant(&mut self) {
-        self.include_dormant = !self.include_dormant;
-    }
-
-    /// 回到根层，dormant 开关保留（它只随面板生命周期复位）。
-    fn back_to_root(&mut self) {
-        self.path.clear();
-    }
-
-    /// 面板关闭：回根层 + dormant 关。
+    /// 回到根层（面板关闭 / 路径上某一层消失）。
     pub fn reset(&mut self) {
-        self.back_to_root();
-        self.include_dormant = false;
+        self.path.clear();
     }
 
     /// payload 变了：路径上任一层不在新列表里（归档 / 删除）→ 整条路径清空回根层。
@@ -107,7 +95,7 @@ impl LevelView {
     /// 中间断掉就等于没有入口。
     pub fn retain_existing(&mut self, mut exists: impl FnMut(&str) -> bool) {
         if !self.path.iter().all(|id| exists(id)) {
-            self.back_to_root();
+            self.reset();
         }
     }
 
@@ -115,7 +103,6 @@ impl LevelView {
     pub fn query<'a>(&'a self, current: &'a str) -> SessionQuery<'a> {
         SessionQuery {
             scope: self.scope(),
-            include_dormant: self.include_dormant,
             current: Some(current),
         }
     }
@@ -145,20 +132,6 @@ mod tests {
     }
 
     #[test]
-    fn the_dormant_switch_outlives_level_changes_but_not_the_panel() {
-        let mut view = LevelView::default();
-        view.toggle_dormant();
-        assert!(view.query("me").include_dormant);
-        view.enter("A");
-        assert!(view.query("me").include_dormant, "切层不清开关");
-        view.back();
-        assert!(view.query("me").include_dormant);
-        view.reset();
-        assert!(!view.query("me").include_dormant, "面板关闭复位");
-        assert_eq!(view.depth(), 0);
-    }
-
-    #[test]
     fn a_vanished_ancestor_sends_the_whole_path_back_to_the_root() {
         let mut view = LevelView::default();
         view.enter("A");
@@ -175,17 +148,13 @@ mod tests {
     }
 
     #[test]
-    fn the_query_carries_the_scope_dormant_switch_and_current_session() {
+    fn the_query_carries_the_scope_and_the_current_session() {
         let mut view = LevelView::default();
         let query = view.query("me");
         assert_eq!(query.scope, None);
-        assert!(!query.include_dormant);
         assert_eq!(query.current, Some("me"));
 
         view.enter("A");
-        view.toggle_dormant();
-        let query = view.query("me");
-        assert_eq!(query.scope, Some("A"));
-        assert!(query.include_dormant);
+        assert_eq!(view.query("me").scope, Some("A"));
     }
 }

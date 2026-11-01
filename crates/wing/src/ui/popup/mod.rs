@@ -17,7 +17,7 @@ use command::parse_slash_input;
 use command::session_panel;
 use selection::SelectionRow;
 use selection::SelectionState;
-use selection::SessionChrome;
+use selection::SessionHeader;
 use selection::popup_height;
 use selection::rich_max_visible;
 
@@ -46,8 +46,8 @@ pub enum ActivePopup {
         rows: Vec<SelectionRow>,
         /// Navigation state.
         state: SelectionState,
-        /// 层视图的 chrome 行（面包屑 / dormant 尾注）；不是候选行，只占高度。
-        chrome: SessionChrome,
+        /// 层视图的标题行（当前层的名字）；不是候选行，只占高度。
+        header: SessionHeader,
     },
 }
 
@@ -77,7 +77,7 @@ impl ActivePopup {
     ///
     /// Returns an optional action to fetch candidates via HTTP.
     ///
-    /// `query` 只被会话面板消费（层视图的 scope / dormant 开关 / 当前会话）；
+    /// `query` 只被会话面板消费（层视图的 scope / 当前会话）；
     /// 其它命令忽略它。
     pub fn update_from_input(
         &mut self,
@@ -118,7 +118,7 @@ impl ActivePopup {
                     filter,
                     rows: panel.rows,
                     state,
-                    chrome: panel.chrome,
+                    header: panel.header,
                 };
                 return None;
             }
@@ -153,7 +153,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
-                    chrome: SessionChrome::default(),
+                    header: SessionHeader::default(),
                 };
                 return None;
             }
@@ -184,7 +184,7 @@ impl ActivePopup {
                     filter,
                     rows,
                     state,
-                    chrome: SessionChrome::default(),
+                    header: SessionHeader::default(),
                 };
                 return None;
             }
@@ -228,7 +228,7 @@ impl ActivePopup {
 
     /// Get the popup height (0 if no popup).
     ///
-    /// chrome 行（面包屑 / dormant 尾注）算在里面：它们占 popup 的上下各一行，
+    /// 层标题行算在里面：它占 popup 的顶上一行，
     /// 排版按这个高度给矩形，渲染侧再从矩形里扣掉。
     pub fn height(&self) -> u16 {
         match self {
@@ -237,9 +237,9 @@ impl ActivePopup {
             Self::SubCommand {
                 rows,
                 state,
-                chrome,
+                header,
                 ..
-            } => popup_height(rows, state.max_visible) + chrome.height(),
+            } => popup_height(rows, state.max_visible) + header.height(),
         }
     }
 
@@ -446,15 +446,15 @@ impl ActivePopup {
 
     /// Access the popup for rendering.
     ///
-    /// 第四个元素是 chrome 行：`None` = 非候选面板（命令列表 / 没有面板）；子命令面板一律
-    /// `Some`，其中**非层视图的**（`/fork` / `/agents` / `/copy`）是空 chrome（高度 0）。
+    /// 第四个元素是层标题行：`None` = 非候选面板（命令列表 / 没有面板）；子命令面板一律
+    /// `Some`，其中**非层视图的**（`/fork` / `/agents` / `/copy`）是空标题（高度 0）。
     pub fn render_data(
         &self,
     ) -> Option<(
         &[SelectionRow],
         &SelectionState,
         &str,
-        Option<&SessionChrome>,
+        Option<&SessionHeader>,
     )> {
         match self {
             Self::None => None,
@@ -467,9 +467,9 @@ impl ActivePopup {
                 rows,
                 state,
                 filter,
-                chrome,
+                header,
                 ..
-            } => Some((rows, state, filter, Some(chrome))),
+            } => Some((rows, state, filter, Some(header))),
         }
     }
 }

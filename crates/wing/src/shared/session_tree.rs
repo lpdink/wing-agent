@@ -22,20 +22,20 @@
 //! - parent 不在集合（被过滤 / 幽灵引用）→ 该节点升为根；
 //! - 环（只可能来自手改 metadata）→ 环上节点全部升为根（诚实降级，不挂死）。
 //!
-//! **crew 聚合**（[`Crew`]）：每个节点带后代总数（含 dormant——它回答「这个任务
-//! 有多大」，不是「这一屏有多少行」）、后代里在等人类回答 / 在跑轮次的条数、
+//! **crew 聚合**（[`Crew`]）：每个节点带后代总数（含未加载的子会话——它回答「这个
+//! 任务有多大」，不是「这一屏有多少行」）、后代里在等人类回答 / 在跑轮次的条数、
 //! 子树 `max(last_interaction)`。一次自底向上算全，与排序用的子树活跃同源。
 //!
-//! **存活闭包与层投影**：`kept(r) = live(r) ∨ pinned(r) ∨ ∃ 子 c: kept(c)`，其中
-//! `live = status != inactive`（状态未知按存活）。闭包是必要的：否则一个 dormant
-//! 的父任务会凭空消失，「层 = 任务」退化成「一堆散点 crew 升格成根」。
-//! [`Forest::level`] 取某 scope 的**直接子** ∩ 保留集（`include_dormant` 时不收），
-//! 顺带给出本层被收起的直接子数。
+//! **层投影**：[`Forest::level`] 取某 scope 的**直接子**，一行不少——一层的行集就是
+//! 拓扑本身，与「会话在不在内存」无关。存活闭包 `kept(r) = live(r) ∨ pinned(r) ∨
+//! ∃ 子 c: kept(c)`（`live = status != inactive`）只服务 [`Forest::level_live`]：
+//! `wing ps` 的默认口径「只列活的、一行一个任务」。闭包在那里是必要的——否则一个已
+//! 逐出的父任务凭空消失，它的活子会升成假根。
 //!
-//! 不变量（本模块的测试锚定）：投影是 `(rows, scope, include_dormant)` 的**纯函数**
-//! ——不看时钟、不看随机数、不看输入顺序（同 id 的重复行例外：只可能来自畸形的输入，
-//! 届时按输入序兜底成全序）；投影**不改变任何一行的相对顺序**；保留集里每个节点在它
-//! 所属的那一层**恰好出现一次**（无重复、无孤儿）。
+//! 不变量（本模块的测试锚定）：投影是 `(rows, scope)` 的**纯函数**——不看时钟、不看
+//! 随机数、不看输入顺序（同 id 的重复行例外：只可能来自畸形的输入，届时按输入序兜底
+//! 成全序）；投影**不改变任何一行的相对顺序**；每个节点在它所属的那一层**恰好出现
+//! 一次**（无重复、无孤儿）。
 //!
 //! **下标空间是接口契约**：投影吐出的 `usize` 是 [`Forest::build`] 收到的那个切片的
 //! 坐标，消费面必须按原序留着它（详见 [`Forest`] 的文档）。
@@ -85,7 +85,7 @@ pub struct TreeEntry {
     pub prefix: String,
 }
 
-/// 一个节点的 crew 聚合。三个计数只数**后代**（含 dormant 后代）；`activity` 是
+/// 一个节点的 crew 聚合。三个计数只数**后代**（含未加载的后代）；`activity` 是
 /// **含自己**的子树 max。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Crew {
@@ -102,27 +102,19 @@ pub struct Crew {
     pub activity: Option<i64>,
 }
 
-/// 层投影的结果。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Level {
-    /// 本层要显示的行：输入下标，顺序 = 森林全序在该层的限制。
-    pub rows: Vec<usize>,
-    /// 本层被收起的直接子数（`include_dormant` 时恒为 0——一行都没收起）。
-    pub dormant_children: usize,
-}
-
 /// 一次构建的全部派生事实：拓扑（有效父 / 子 / 深度）、crew 聚合、存活闭包、
-/// 展示全序。五个投影（[`Self::tree`] / [`Self::crew`] / [`Self::activity_of`] /
-/// [`Self::parent_of`] / [`Self::level`]）都是它的只读视图——消费面构建一次，之后按需取。
+/// 展示全序。投影（[`Self::tree`] / [`Self::crew`] / [`Self::activity_of`] /
+/// [`Self::parent_of`] / [`Self::level`] / [`Self::level_live`]）都是它的只读视图
+/// ——消费面构建一次，之后按需取。
 ///
 /// **下标空间是接口契约**：投影吐出的 `usize` 永远是调用方传给 [`Self::build`] 的
 /// 那个切片的坐标。消费面按原序持有自己的行（不要在两次投影之间 sort / filter 那份
 /// 数组），否则投影会静默指到别的行——不 panic、不报错，只是画错。
 ///
-/// **输入是未按存活过滤的行集**：存活闭包、`dormant_children` 与 [`Crew`] 的三个计数都按
-/// **全集**算——消费面若在 [`Self::build`] 之前按存活剪过行，三件事一起失效（一个
-/// dormant 父被剪掉，它的活子就升成假根，crew 也少算那些后代）。过滤是投影的事，
-/// 不能发生在投影之前。
+/// **输入是未按存活过滤的行集**：存活闭包与 [`Crew`] 的三个计数都按**全集**算——
+/// 消费面若在 [`Self::build`] 之前按存活剪过行，两件事一起失效（一个已逐出的父被
+/// 剪掉，它的活子就升成假根，crew 也少算那些后代）。过滤是投影的事，不能发生在
+/// 投影之前。
 #[derive(Debug, Default)]
 pub struct Forest<'a> {
     /// id → 输入下标（重 id 取先到者）。键借用输入切片的 id：面板每次输入路径都会
@@ -134,7 +126,7 @@ pub struct Forest<'a> {
     children: Vec<Vec<usize>>,
     /// 根，已按排序契约排好。
     roots: Vec<usize>,
-    /// 存活闭包（`include_dormant` 之前的那一版）。
+    /// 存活闭包：`live ∨ pinned ∨ 有 kept 子`（[`Self::level_live`] 的保留集）。
     kept: Vec<bool>,
     crew: Vec<Crew>,
     /// 子树活跃来自哪一行（输入下标）：`crew` 的 `activity` 与它同源。
@@ -301,38 +293,41 @@ impl<'a> Forest<'a> {
         self.activity_row.get(index).copied()
     }
 
-    /// 有效父（输入下标）：根 / 幽灵父 / 环 = `None`。面包屑按它向上走，不要拿原始
+    /// 有效父（输入下标）：根 / 幽灵父 / 环 = `None`。层标题行按它向上走，不要拿原始
     /// `parent_session_id` 走——那条链可能带环。
     pub fn parent_of(&self, index: usize) -> Option<usize> {
         self.parent.get(index).copied().flatten()
     }
 
-    /// 层投影：`scope` 的直接子 ∩ 保留集，顺序 = 森林全序在该层的限制。
+    /// 层投影：`scope` 的直接子，顺序 = 森林全序在该层的限制。
     ///
     /// `None` = 根层；`Some(id)` = 该会话的子层，未知 id（会话已被逐出 / 归档）→ 空层，
     /// 诚实降级不猜。重复 id 只解析到先到者（后到者的子层取不到，与 `index_of` 同一条
-    /// 降级）。`include_dormant` 由消费面决定：要显示 dormant 行时置 true（一律保留，
-    /// `dormant_children` 归零）。
+    /// 降级）。
     ///
-    /// 输入前提见 [`Forest`] 的文档（未按存活过滤的行集）；否则保留集 ≡ 输入集，
-    /// 闭包与 `dormant_children` 一起退化成 no-op。
-    pub fn level(&self, scope: Option<&str>, include_dormant: bool) -> Level {
-        let children: &[usize] = match scope {
+    /// **不过滤存活**：一层的行集就是拓扑本身。TUI 的会话面板据此保证「用户自己开的
+    /// 会话永远在根层」——逐出是后端的记账，不是导航要看的东西。只要活着的行的消费面
+    /// 走 [`Self::level_live`]。
+    ///
+    /// 借用返回（`roots` / `children[i]` 直接给切片）：层投影是每次按键都跑的读取路径。
+    pub fn level(&self, scope: Option<&str>) -> &[usize] {
+        match scope {
             None => &self.roots,
             Some(id) => match self.index_of.get(id) {
                 Some(&index) => &self.children[index],
-                None => return Level::default(),
+                None => &[],
             },
-        };
-        let mut level = Level::default();
-        for &index in children {
-            if include_dormant || self.kept[index] {
-                level.rows.push(index);
-            } else {
-                level.dormant_children += 1;
-            }
         }
-        level
+    }
+
+    /// 层投影的存活视图：[`Self::level`] ∩ 保留集。`wing ps` 的默认口径（`--all` 才用
+    /// [`Self::level`]）——那里的问题「今天在跑什么」本来就以存活为答案。
+    pub fn level_live(&self, scope: Option<&str>) -> Vec<usize> {
+        self.level(scope)
+            .iter()
+            .copied()
+            .filter(|&index| self.kept[index])
+            .collect()
     }
 }
 
@@ -341,15 +336,16 @@ pub fn build_forest(rows: &[TreeRow<'_>]) -> Vec<TreeEntry> {
     Forest::build(rows).tree().to_vec()
 }
 
-/// 存活：不在内存（`inactive`）才算 dormant。状态未知（`None`）按存活处理——
-/// 「不知道」不能当成「已逐出」把行藏起来。（面板另有一条：不认识的状态串按 `inactive`
+/// 存活：不在内存（`inactive`）不算。状态未知（`None`）按存活处理——「不知道」
+/// 不能当成「已逐出」把行藏起来。（面板另有一条：不认识的状态串按 `inactive`
 /// 画图标 —— 那是「画成什么样」，不是「留不留这一行」，两个问题各管各的。）
 ///
-/// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」）。`wing ps` 的
-/// `--flat` / `--tree` / `--json` 走的是早先的行集（逐字兼容）：默认（无 `--all` /
-/// `--tag` / `--parent`）先丢掉 `inactive`，`--tree` 因此是在剪过的集合上建森林——闭包
-/// 不生效，被逐出的父不成行、它的活子升成根；`--flat` / `--json` 干脆不建森林。默认的
-/// 层视图不走那条路：它在全集上建森林，过滤发生在投影之后。
+/// 它是保留集的**种子**（`build` 里再并上 pin 与「有被保留的子」），只被
+/// [`Forest::level_live`] 消费。`wing ps` 的 `--flat` / `--tree` / `--json` 走的是
+/// 早先的行集（逐字兼容）：默认（无 `--all` / `--tag` / `--parent`）先丢掉
+/// `inactive`，`--tree` 因此是在剪过的集合上建森林——闭包不生效，被逐出的父不成行、
+/// 它的活子升成根；`--flat` / `--json` 干脆不建森林。默认的层视图不走那条路：它在
+/// 全集上建森林，过滤发生在投影之后。
 fn is_live(status: Option<SessionStatus>) -> bool {
     status != Some(SessionStatus::Inactive)
 }
@@ -470,8 +466,8 @@ mod tests {
     }
 
     /// 一层的行（只看 id，顺序 = 投影给出的顺序）。
-    fn ids<'a>(rows: &[TreeRow<'a>], level: &Level) -> Vec<&'a str> {
-        level.rows.iter().map(|&i| rows[i].id).collect()
+    fn ids<'a>(rows: &[TreeRow<'a>], level: &[usize]) -> Vec<&'a str> {
+        level.iter().map(|&i| rows[i].id).collect()
     }
 
     fn micros(at: &str) -> i64 {
@@ -486,8 +482,8 @@ mod tests {
             scope: Option<&str>,
             out: &mut Vec<&'a str>,
         ) {
-            let level = forest.level(scope, false);
-            for &index in &level.rows {
+            let level = forest.level(scope);
+            for &index in level {
                 out.push(rows[index].id);
                 walk(rows, forest, Some(rows[index].id), out);
             }
@@ -502,8 +498,8 @@ mod tests {
         assert!(build_forest(&[]).is_empty());
         let forest = Forest::build(&[]);
         assert!(forest.tree().is_empty());
-        assert_eq!(forest.level(None, false), Level::default());
-        assert_eq!(forest.level(Some("anything"), true), Level::default());
+        assert!(forest.level(None).is_empty());
+        assert!(forest.level(Some("anything")).is_empty());
         assert_eq!(forest.parent_of(0), None);
         assert_eq!(forest.crew(0), Crew::default());
     }
@@ -795,7 +791,7 @@ mod tests {
     // ── crew 聚合 ────────────────────────────────────────────────
 
     #[test]
-    fn crew_counts_every_descendant_including_dormant_ones() {
+    fn crew_counts_every_descendant_including_inactive_ones() {
         let rows = [
             row("P", None),
             working(row("w1", Some("P"))),
@@ -823,7 +819,7 @@ mod tests {
                 activity: Some(micros("2026-10-05T00:00:00")),
             }
         );
-        // dormant 分支照样聚合（d1 → gd）。
+        // inactive 分支照样聚合（d1 → gd）。
         assert_eq!(forest.crew(2).descendants, 1);
         assert_eq!(forest.crew(2).waiting, 0);
     }
@@ -909,62 +905,76 @@ mod tests {
         assert_eq!(Forest::build(&rows).activity_of(0), Some(1));
     }
 
-    // ── 存活闭包 + 层投影 ────────────────────────────────────────
+    // ── 层投影 + 存活视图（`wing ps`） ────────────────────────────
 
     #[test]
-    fn a_dormant_parent_stays_kept_for_its_live_child() {
-        // 不闭包的话 P 会凭空消失，活的子 c 就升格成根 —— 「层 = 任务」失效。
-        let rows = [inactive(row("P", None)), row("c", Some("P"))];
+    fn a_level_lists_every_direct_child_regardless_of_liveness() {
+        // 一层的行集是拓扑本身：会话在不在内存，与它出不出现无关。
+        let rows = [
+            active(row("r1", None), "2026-10-01T00:00:00"),
+            inactive(row("parked", None)),
+            active(row("r2", None), "2026-10-02T00:00:00"),
+        ];
         let forest = Forest::build(&rows);
-        let root = forest.level(None, false);
-        assert_eq!(ids(&rows, &root), ["P"]);
-        assert_eq!(root.dormant_children, 0);
-        assert_eq!(ids(&rows, &forest.level(Some("P"), false)), ["c"]);
+        assert_eq!(ids(&rows, forest.level(None)), ["r2", "r1", "parked"]);
     }
 
     #[test]
-    fn a_fully_dormant_subtree_is_counted_not_listed() {
+    fn a_child_level_lists_every_direct_child() {
+        let rows = [
+            row("P", None),
+            row("live", Some("P")),
+            inactive(row("parked", Some("P"))),
+        ];
+        let forest = Forest::build(&rows);
+        assert_eq!(ids(&rows, forest.level(Some("P"))), ["live", "parked"]);
+    }
+
+    #[test]
+    fn the_live_view_keeps_an_inactive_parent_of_a_live_child() {
+        // 不闭包的话 P 会凭空消失，活的子 c 就升格成根 —— 「层 = 任务」失效。
+        let rows = [inactive(row("P", None)), row("c", Some("P"))];
+        let forest = Forest::build(&rows);
+        assert_eq!(ids(&rows, &forest.level_live(None)), ["P"]);
+        assert_eq!(ids(&rows, &forest.level_live(Some("P"))), ["c"]);
+    }
+
+    #[test]
+    fn the_live_view_drops_a_fully_inactive_subtree() {
         let rows = [
             row("live", None),
             inactive(row("P", None)),
             inactive(row("c", Some("P"))),
         ];
         let forest = Forest::build(&rows);
-        let root = forest.level(None, false);
-        assert_eq!(ids(&rows, &root), ["live"]);
-        assert_eq!(root.dormant_children, 1, "只数直接子（P），不数 P 的子");
+        assert_eq!(ids(&rows, &forest.level_live(None)), ["live"]);
     }
 
     #[test]
-    fn a_pinned_dormant_root_keeps_its_place_in_the_default_level() {
+    fn the_live_view_keeps_a_pinned_inactive_root() {
         let rows = [
             active(row("live", None), "2026-10-02T00:00:00"),
             pinned(inactive(row("parked", None)), None),
         ];
         let forest = Forest::build(&rows);
-        let root = forest.level(None, false);
-        assert_eq!(ids(&rows, &root), ["parked", "live"]);
-        assert_eq!(root.dormant_children, 0);
+        assert_eq!(ids(&rows, &forest.level_live(None)), ["parked", "live"]);
     }
 
     #[test]
-    fn include_dormant_lists_everything_and_reports_no_collapse() {
+    fn the_live_view_is_a_subsequence_of_the_level() {
+        // 存活视图只丢行、不动顺序：保留集是全量的**子序列**（不是前缀——被逐出的
+        // 行可以夹在中间）。
         let rows = [
             active(row("r1", None), "2026-10-01T00:00:00"),
-            inactive(row("dormant", None)),
+            inactive(row("parked", None)),
             active(row("r2", None), "2026-10-02T00:00:00"),
         ];
         let forest = Forest::build(&rows);
-        let root = forest.level(None, true);
-        assert_eq!(ids(&rows, &root), ["r2", "r1", "dormant"]);
-        assert_eq!(root.dormant_children, 0);
-        // `include_dormant` 只放开过滤、不改顺序：保留集是全量的**子序列**（不是前缀
-        // ——dormant 行可以夹在中间）。
-        let kept: Vec<&str> = ids(&rows, &forest.level(None, false));
-        let all: Vec<&str> = ids(&rows, &root);
-        assert_eq!(kept, ["r2", "r1"]);
+        let live = ids(&rows, &forest.level_live(None));
+        let all = ids(&rows, forest.level(None));
+        assert_eq!(live, ["r2", "r1"]);
         let mut rest = all.iter();
-        for id in &kept {
+        for id in &live {
             assert!(rest.any(|t| t == id), "{id} 不在全量里或相对顺序变了");
         }
     }
@@ -978,18 +988,18 @@ mod tests {
             row("g", Some("c1")),
         ];
         let forest = Forest::build(&rows);
-        assert_eq!(ids(&rows, &forest.level(None, false)), ["P"]);
-        assert_eq!(ids(&rows, &forest.level(Some("P"), false)), ["c1", "c2"]);
-        assert_eq!(ids(&rows, &forest.level(Some("c1"), false)), ["g"]);
-        assert!(forest.level(Some("g"), false).rows.is_empty());
+        assert_eq!(ids(&rows, forest.level(None)), ["P"]);
+        assert_eq!(ids(&rows, forest.level(Some("P"))), ["c1", "c2"]);
+        assert_eq!(ids(&rows, forest.level(Some("c1"))), ["g"]);
+        assert!(forest.level(Some("g")).is_empty());
     }
 
     #[test]
     fn an_unknown_scope_is_an_empty_level() {
         let rows = [row("P", None), row("c", Some("P"))];
         let forest = Forest::build(&rows);
-        assert_eq!(forest.level(Some("gone"), false), Level::default());
-        assert_eq!(forest.level(Some("gone"), true), Level::default());
+        assert!(forest.level(Some("gone")).is_empty());
+        assert!(forest.level_live(Some("gone")).is_empty());
     }
 
     #[test]
@@ -1000,11 +1010,9 @@ mod tests {
             row("b", Some("a")),
         ];
         let forest = Forest::build(&rows);
-        let root = forest.level(None, false);
-        assert_eq!(ids(&rows, &root), ["a", "b", "x"]);
-        assert_eq!(root.dormant_children, 0);
+        assert_eq!(ids(&rows, forest.level(None)), ["a", "b", "x"]);
         // 幽灵父不是 scope（它不在集合里）。
-        assert_eq!(forest.level(Some("ghost"), true), Level::default());
+        assert!(forest.level(Some("ghost")).is_empty());
     }
 
     #[test]
@@ -1021,7 +1029,7 @@ mod tests {
         assert_eq!(forest.parent_of(0), None);
         assert_eq!(forest.parent_of(1), Some(0));
         assert_eq!(forest.parent_of(2), Some(1));
-        // 环断开 → 环上节点是根（面包屑不会绕圈）。
+        // 环断开 → 环上节点是根（层标题行不会绕圈）。
         assert_eq!(forest.parent_of(3), None);
         assert_eq!(forest.parent_of(4), None);
         assert_eq!(forest.parent_of(5), None);
@@ -1029,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn the_levels_partition_the_kept_rows_in_total_order() {
+    fn the_levels_partition_every_row_in_total_order() {
         let rows = [
             active(row("root-a", None), "2026-10-01T00:00:00"),
             inactive(row("parked", None)),
@@ -1040,7 +1048,10 @@ mod tests {
         ];
         let forest = Forest::build(&rows);
         let collected = collect_levels(&rows, &forest);
-        assert_eq!(collected, ["root-a", "kid-a", "grand", "root-b"]);
+        assert_eq!(
+            collected,
+            ["root-a", "kid-a", "grand", "kid-dead", "root-b", "parked"]
+        );
         // 无重复、无孤儿。
         let unique: HashSet<&str> = collected.iter().copied().collect();
         assert_eq!(

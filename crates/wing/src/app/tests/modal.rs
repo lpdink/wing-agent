@@ -967,7 +967,7 @@ fn test_the_level_view_owns_its_keys_and_leaves_the_others_alone() {
     use crossterm::event::KeyCode;
 
     let mut app = app_with_level_view();
-    // 五个键归面板：`→` 进层、`←` 退层、`Ctrl+A` dormant、`Ctrl+D/U` 翻页。
+    // 四个键归面板：`→` 进层、`←` 退层、`Ctrl+D/U` 翻页。
     assert_eq!(
         app.route_key(&key(KeyCode::Right)),
         KeyRoute::SessionLevel(SessionLevelAction::Descend)
@@ -976,10 +976,8 @@ fn test_the_level_view_owns_its_keys_and_leaves_the_others_alone() {
         app.route_key(&key(KeyCode::Left)),
         KeyRoute::SessionLevel(SessionLevelAction::Back)
     );
-    assert_eq!(
-        app.route_key(&ctrl(KeyCode::Char('a'))),
-        KeyRoute::SessionLevel(SessionLevelAction::ToggleDormant)
-    );
+    // `Ctrl+A` 不归层视图（逐出与否不是导航要看的东西）：它照常落给候选导航。
+    assert_eq!(app.route_key(&ctrl(KeyCode::Char('a'))), KeyRoute::PopupNav);
     assert_eq!(
         app.route_key(&ctrl(KeyCode::Char('d'))),
         KeyRoute::SessionLevel(SessionLevelAction::PageDown)
@@ -1094,11 +1092,10 @@ fn test_other_panels_keep_their_key_routing() {
 }
 
 #[test]
-fn test_an_empty_level_keeps_its_keys_and_swallows_enter() {
+fn test_a_crew_of_inactive_sessions_is_a_normal_level() {
     use crossterm::event::KeyCode;
 
-    // 空层（crew 全 dormant）：面包屑 + 尾注还在 ⇒ 面板可见 ⇒ 键位照旧归它；
-    // Enter 在这里没有对象，也不劝人「改参数」。
+    // 逐出与否不是导航要看的东西：`→` 进去照样是一层正常的行，没有「空层」这一态。
     let mut app = test_app();
     app.popup.cache.sessions = vec![
         candidate("boss", None),
@@ -1112,16 +1109,13 @@ fn test_an_empty_level_keeps_its_keys_and_swallows_enter() {
     app.update_popup_from_input();
     app.handle_key(key(KeyCode::Right));
     assert_eq!(app.popup.level_view.depth(), 1);
-    assert!(app.popup.active.height() > 0, "chrome 撑着面板");
-    assert!(app.route_key(&key(KeyCode::Left)) == KeyRoute::SessionLevel(SessionLevelAction::Back));
-    app.handle_key(key(KeyCode::Enter));
-    assert!(app.popup.active.is_active(), "Enter 不清空层");
-    assert!(app.popup.level_view.depth() == 1);
+    assert_eq!(app.popup.active.selected_name(), Some("parked"));
 
-    // 空层照样能打字开搜索：crew 全 dormant 的那一屏正是最需要搜索的地方。
-    app.handle_key(key(KeyCode::Char('b')));
-    assert_eq!(app.input.text(), "/ss b");
-    assert!(app.popup.active.is_active(), "搜索态仍在同一个面板里");
+    // 退层仍归面板：退到根层面板还在。
+    assert!(app.route_key(&key(KeyCode::Left)) == KeyRoute::SessionLevel(SessionLevelAction::Back));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.popup.level_view.depth(), 0);
+    assert!(app.popup.active.is_active());
 }
 
 #[test]

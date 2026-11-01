@@ -693,7 +693,7 @@ mod session_list {
     use crate::config::ThemePalette;
     use crate::shared::pinning::PIN_TAG;
     use crate::ui::popup::selection::SelectionPopup;
-    use crate::ui::popup::selection::SessionChrome;
+    use crate::ui::popup::selection::SessionHeader;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
@@ -704,7 +704,7 @@ mod session_list {
     use wing_api_client::models::SessionListResponse;
     use wing_api_client::models::TagMeta;
 
-    /// `Ctrl+<letter>`：层视图的 dormant 开关与翻页。
+    /// `Ctrl+<letter>`：层视图的翻页键。
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
@@ -1032,15 +1032,15 @@ mod session_list {
 
     /// 面板每条行的行 1 文本（宽 60 渲染成一帧）。
     fn panel_line1s(app: &App) -> Vec<String> {
-        let (rows, state, filter, chrome) = app.popup.active.render_data().expect("panel is open");
+        let (rows, state, filter, header) = app.popup.active.render_data().expect("panel is open");
         let count = rows.len();
-        let chrome_h = chrome.map_or(0, SessionChrome::height);
-        let area = Rect::new(0, 0, 60, (count * 2).max(1) as u16 + chrome_h);
+        let header_h = header.map_or(0, SessionHeader::height);
+        let area = Rect::new(0, 0, 60, (count * 2).max(1) as u16 + header_h);
         let mut buf = Buffer::empty(area);
         let palette = ThemePalette::default();
         let mut popup = SelectionPopup::new(rows, state, filter, &palette);
-        if let Some(chrome) = chrome {
-            popup = popup.with_chrome(chrome);
+        if let Some(header) = header {
+            popup = popup.with_header(header);
         }
         popup.render(area, &mut buf);
         (0..count)
@@ -1054,15 +1054,12 @@ mod session_list {
             .collect()
     }
 
-    /// 面板的 chrome（面包屑，(被收起的数量, 是否已放出来)）。
-    fn panel_chrome(app: &App) -> (Option<String>, Option<(usize, bool)>) {
-        let (.., Some(chrome)) = app.popup.active.render_data().expect("panel is open") else {
-            panic!("session panel has chrome");
+    /// 面板的层标题（当前层的名字；根层 = `None`）。
+    fn panel_level_title(app: &App) -> Option<String> {
+        let (.., Some(header)) = app.popup.active.render_data().expect("panel is open") else {
+            panic!("session panel has a header");
         };
-        (
-            chrome.breadcrumb.clone(),
-            chrome.footnote.map(|f| (f.hidden, f.shown)),
-        )
+        header.title.clone()
     }
 
     /// 40 个子会话的 pinned 任务（现场形状）+ 另一个根。
@@ -1141,13 +1138,9 @@ mod session_list {
             Some("/ss"),
             "面板还在会话子命令态"
         );
-        let (rows, state, filter, chrome) = app.popup.active.render_data().expect("panel is open");
+        let (rows, state, filter, header) = app.popup.active.render_data().expect("panel is open");
         assert_eq!(filter, "b", "面板进入搜索态");
-        assert_eq!(
-            chrome,
-            Some(&SessionChrome::default()),
-            "搜索态没有面包屑 / 尾注"
-        );
+        assert_eq!(header, Some(&SessionHeader::default()), "搜索态没有标题行");
         assert_eq!(
             rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             ["beta"]
@@ -1287,7 +1280,8 @@ mod session_list {
     }
 
     #[test]
-    fn test_dormant_children_stay_out_until_ctrl_a() {
+    fn test_a_level_lists_its_inactive_children_too() {
+        // 逐出与否是后端的记账：`→` 进去的那一层一行不少（用户不必知道它在不在内存）。
         let mut app = app();
         feed(
             &mut app,
@@ -1313,106 +1307,30 @@ mod session_list {
         app.input.set_text("/ss");
         app.update_popup_from_input();
         app.handle_key(key(KeyCode::Right));
-        assert_eq!(panel_ids(&app), ["live"]);
-        assert_eq!(
-            panel_chrome(&app).1,
-            Some((1, false)),
-            "尾注说出被收起的数量"
-        );
-
-        // Ctrl+A：dormant 进层，尾注改口说当前状态；光标钉在原来那一行。
-        app.handle_key(ctrl('a'));
         assert_eq!(
             panel_ids(&app),
             ["parked", "live"],
-            "行集变大、顺序 = 森林全序（更活跃的 parked 在前）"
+            "顺序 = 森林全序（更活跃的 parked 在前）"
         );
-        assert_eq!(
-            panel_chrome(&app).1,
-            Some((1, true)),
-            "打开时尾注说的是当前状态"
-        );
-        assert_eq!(
-            app.popup.active.selected_name(),
-            Some("live"),
-            "光标钉回原来那一行（不在下标 0）"
-        );
+        assert_eq!(panel_level_title(&app).as_deref(), Some("root"));
 
-        // 开关在面板生命周期内保持（切层不归零）。
+        // 退回去：根层不占标题行。
         app.handle_key(key(KeyCode::Left));
-        app.handle_key(key(KeyCode::Right));
-        assert_eq!(panel_ids(&app).len(), 2);
-
-        // 面板关闭 → 回根层 + dormant 关。
-        app.handle_key(key(KeyCode::Left));
-        app.handle_key(key(KeyCode::Esc));
-        assert!(
-            !app.popup.level_view.query("x").include_dormant,
-            "面板关闭复位"
-        );
-        assert_eq!(app.popup.level_view.depth(), 0);
+        assert_eq!(panel_level_title(&app), None);
     }
 
     #[test]
-    fn test_closing_the_dormant_view_keeps_the_cursor_near_its_row() {
-        // 关回去时那一行正好被收起：光标停在它原来的位置上，而不是跳回第一条。
-        let mut app = app();
-        feed(
-            &mut app,
-            vec![
-                session("root", "root", "/ws", "idle", "2025-01-01T00:00:00", None),
-                under(
-                    session("live-a", "a", "/ws", "idle", "2025-03-01T00:00:00", None),
-                    "root",
-                ),
-                under(
-                    session(
-                        "parked",
-                        "p",
-                        "/ws",
-                        "inactive",
-                        "2025-02-01T00:00:00",
-                        None,
-                    ),
-                    "root",
-                ),
-                under(
-                    session("live-b", "b", "/ws", "idle", "2025-01-15T00:00:00", None),
-                    "root",
-                ),
-            ],
-        );
-        app.input.set_text("/ss");
-        app.update_popup_from_input();
-        app.handle_key(key(KeyCode::Right));
-        assert_eq!(panel_ids(&app), ["live-a", "live-b"], "dormant 默认不列");
-
-        app.handle_key(ctrl('a'));
-        assert_eq!(panel_ids(&app), ["live-a", "parked", "live-b"]);
-        app.handle_key(key(KeyCode::Down)); // 光标到 parked
-        assert_eq!(app.popup.active.selected_name(), Some("parked"));
-
-        app.handle_key(ctrl('a')); // 关回去：parked 消失
-        assert_eq!(panel_ids(&app), ["live-a", "live-b"]);
-        assert_eq!(
-            app.popup.active.selected_name(),
-            Some("live-b"),
-            "光标停在原来的位置（下标 1），不是跳回第一条"
-        );
-    }
-
-    #[test]
-    fn test_the_breadcrumb_names_the_level_and_never_at_the_root() {
+    fn test_the_level_title_names_the_level_and_never_at_the_root() {
         let mut app = app();
         feed(&mut app, crew_fixture());
         app.input.set_text("/ss");
         app.update_popup_from_input();
-        assert_eq!(panel_chrome(&app), (None, None), "根层不占行");
+        assert_eq!(panel_level_title(&app), None, "根层不占行");
         app.handle_key(key(KeyCode::Right));
         assert_eq!(
-            panel_chrome(&app).0.as_deref(),
+            panel_level_title(&app).as_deref(),
             Some("the team"),
-            "面包屑命名当前层（标题）"
+            "标题行命名当前层（标题）"
         );
         // 层 ≥1 的 Esc 是退层，不是关闭面板。
         app.handle_key(key(KeyCode::Esc));
@@ -1544,8 +1462,8 @@ mod session_list {
     }
 
     #[test]
-    fn test_the_level_view_draws_badges_and_the_breadcrumb_on_screen() {
-        // 端到端：真帧缓冲里的行——任务行带徽章、行 2 与行 1 对齐；进层后面包屑在
+    fn test_the_level_view_draws_badges_and_the_level_title_on_screen() {
+        // 端到端：真帧缓冲里的行——任务行带徽章、行 2 与行 1 对齐；进层后层标题行在
         // 顶部，两个孩子各一行（无前缀、无树块）。
         let mut app = app();
         feed(
@@ -1589,20 +1507,20 @@ mod session_list {
         let title_col = rows[a + 1].chars().take_while(|c| *c == ' ').count();
         assert_eq!(title_col, icon_col + 3, "{}", frame_rows(&rows));
 
-        // 进层：面包屑在最上面一行，两个孩子各一行。
+        // 进层：层标题行在最上面一行，两个孩子各一行。
         app.handle_key(key(KeyCode::Right));
         let rows = frame_lines(&mut app, 60, 32);
         let crumb = row_of(&rows, "· ← back");
         assert!(
             rows[crumb].trim_start().starts_with("the team"),
-            "面包屑命名当前层：{}",
+            "层标题行命名当前层：{}",
             frame_rows(&rows)
         );
         let b = row_of(&rows, "[02-01 00:00]");
         let c = row_of(&rows, "[03-01 00:00]");
         assert!(
             crumb < c && c < b,
-            "面包屑在最上面，层内按注意力定序（在等你的 C 在 B 之前）：{}",
+            "层标题行在最上面，层内按注意力定序（在等你的 C 在 B 之前）：{}",
             frame_rows(&rows)
         );
         assert!(
@@ -1614,12 +1532,12 @@ mod session_list {
 
     #[test]
     fn test_the_search_state_keeps_the_previous_row_shape() {
-        // 搜索态与树形之前逐字一致：无徽章、无标记、无 chrome、两行形状不变。
+        // 搜索态与树形之前逐字一致：无徽章、无标记、无标题行、两行形状不变。
         let mut app = app();
         feed(&mut app, crew_fixture());
         app.input.set_text("/ss worker");
         app.update_popup_from_input();
-        assert_eq!(panel_chrome(&app), (None, None), "搜索态没有 chrome");
+        assert_eq!(panel_level_title(&app), None, "搜索态没有标题行");
         let lines = panel_line1s(&app);
         assert_eq!(
             lines[0], " ? /ws [03-01 00:00]",

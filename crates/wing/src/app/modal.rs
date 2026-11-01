@@ -103,8 +103,8 @@ pub(super) enum KeyRoute {
     /// command is refused with a toast, otherwise the popup is dropped and the
     /// key continues to the composer.
     PopupEmpty,
-    /// 会话面板的层视图：`→` 进层 / `←`（含层 ≥ 1 的 `Esc`）退层 / `Ctrl+A` dormant /
-    /// `Ctrl+D`、`Ctrl+U` 翻页。判据见 [`App::route_key`]。
+    /// 会话面板的层视图：`→` 进层 / `←`（含层 ≥ 1 的 `Esc`）退层 / `Ctrl+D`、`Ctrl+U`
+    /// 翻页。判据见 [`App::route_key`]。
     SessionLevel(SessionLevelAction),
     /// 会话面板的层视图里**开始输入过滤词**的那个可打印字符（`/ss` → `/ss k`）。
     /// 只在这一种状态下有意义：过滤词非空时字符归 composer（用户正在改搜索词）。
@@ -133,8 +133,6 @@ pub(super) enum SessionLevelAction {
     Descend,
     /// `←`（层 ≥ 1 的 `Esc` 同义）退回上一层；根层 = no-op。
     Back,
-    /// `Ctrl+A` 翻转「当前层包含 dormant」。
-    ToggleDormant,
     /// `Ctrl+D` / `Ctrl+U` 光标下 / 上移一屏。
     PageDown,
     PageUp,
@@ -163,7 +161,6 @@ fn session_level_key(key: &crossterm::event::KeyEvent, depth: usize) -> Option<S
         KeyCode::Right if key.modifiers.is_empty() => Some(SessionLevelAction::Descend),
         KeyCode::Left if key.modifiers.is_empty() => Some(SessionLevelAction::Back),
         KeyCode::Esc if depth > 0 => Some(SessionLevelAction::Back),
-        KeyCode::Char('a' | 'A') if control => Some(SessionLevelAction::ToggleDormant),
         KeyCode::Char('d' | 'D') if control => Some(SessionLevelAction::PageDown),
         KeyCode::Char('u' | 'U') if control => Some(SessionLevelAction::PageUp),
         _ => None,
@@ -342,9 +339,8 @@ impl App {
         // Enter refusal stays explicit. Scroll keys are *not* taken here — the
         // rungs below the popup handle them via `handle_scroll_or_composer_key`.
         //
-        // 会话面板的层视图先说话：`→/←/Ctrl+A/Ctrl+D/Ctrl+U` 与层 ≥ 1 的 `Esc` 归
-        // 面板。位置有讲究——必须在 Esc rung（否则 Esc 先被阶梯吃掉）与 popup rung
-        // （否则空层会被 PopupEmpty 截走）之前。
+        // 会话面板的层视图先说话：`→/←/Ctrl+D/Ctrl+U` 与层 ≥ 1 的 `Esc` 归面板。位置
+        // 有讲究——必须在 Esc rung（否则 Esc 先被阶梯吃掉）与 popup rung 之前。
         if self.popup.active.session_level_view() {
             let depth = self.popup.level_view.depth();
             if let Some(action) = session_level_key(key, depth) {
@@ -826,18 +822,6 @@ impl App {
                 self.update_popup();
                 // 退回一层：光标落回你刚才进来的那一行（往返稳定，不跳顶部）。
                 self.popup.active.reselect(&left);
-            }
-            SessionLevelAction::ToggleDormant => {
-                let anchor = self.popup.active.selected_name().map(str::to_string);
-                let index = self.popup.active.selected_index().unwrap_or(0);
-                self.popup.level_view.toggle_dormant();
-                self.update_popup();
-                // 行集只会变大（打开）或收窄（关回去）：光标钉回原来那一行；那一行正好
-                // 被收起时就停在它原来的位置上，而不是跳回第一条。
-                let stayed = anchor.is_some_and(|anchor| self.popup.active.reselect(&anchor));
-                if !stayed {
-                    self.popup.active.select_index(index);
-                }
             }
             SessionLevelAction::PageDown => self.popup.active.move_page(true),
             SessionLevelAction::PageUp => self.popup.active.move_page(false),

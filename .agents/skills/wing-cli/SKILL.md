@@ -118,9 +118,9 @@ tags: [cli, orchestration, reference, wake, headless]
 | `wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M] [--session SID] [--tree] [--limit N] [--json] [-w]` | 我的使用史：默认仪表盘（活动热力图 + 今天 + `me`/`agents` + 模型），`--by day\|model\|session\|tool\|workspace\|agent\|origin` 出明细；`WHEN` = `all\|today\|yesterday\|<N>d\|<N>w\|<N>m\|<N>y\|YYYY-MM-DD`（缺省 `12w`；`--until` 不收 `all`）。所有数字读审计流水（token / 调用从 `wing.db` 建库起算，`--since all` 也补不出更早的读数） |
 
 `wing ps` 的默认视图**不逐行枚举子会话**——一个 pin 住的调度者带 40 个执行者也只占 1 行，
-后代折在 `CREW` 列里（`40` = 后代总数，含 dormant；`?k` = 其中 k 个在等你回答；`●k` = 其中
+后代折在 `CREW` 列里（`40` = 后代总数，含不在内存的；`?k` = 其中 k 个在等你回答；`●k` = 其中
 k 个在干活）。展开走 `--parent <sid>`（它的直接子，逐层往下钻）或 `--tree`（整棵森林）；有
-crew 被折起时行尾会多一行 `N tasks · M crew folded`（M 同样含 dormant 后代），写明这两条出口。
+crew 被折起时行尾会多一行 `N tasks · M crew folded`（M 同样含不在内存的后代），写明这两条出口。
 没有任何任务有后代时 `CREW` 列整列不出现。窄终端下这一列和其它列一样被表格引擎让位截断
 （`?k` / `●k` 会先掉）——要读注意力标记就加宽终端或看 `--tree`。要老的全量平铺（脚本兼容面）
 用 `--flat`，机器面仍然只认 `--json`。

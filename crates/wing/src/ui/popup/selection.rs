@@ -6,8 +6,8 @@
 //! - Scroll window for long lists
 //!
 //! 会话面板另外画两样东西：双行富行（[`RichSessionRow`]，层视图多出 crew 徽章与
-//! 「你在这里」标记）与 chrome 行（[`SessionChrome`]：面包屑 / dormant 尾注）。
-//! chrome **不是候选行**：它只占矩形上下各一行，光标与 `Enter` 都碰不到它。
+//! 「你在这里」标记）与层标题行（[`SessionHeader`]：当前层的名字）。
+//! 标题行**不是候选行**：它只占矩形顶上一行，光标与 `Enter` 都碰不到它。
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -72,11 +72,8 @@ const CURRENT_MARK: &str = "❯";
 /// 有字形，别的行留白，图标列才不会随「当前会话在不在这一层」抖动。
 const GUTTER_W: usize = 2;
 
-/// 面包屑的键位尾巴（固定词表，见 [`render_chrome_line`]）。
-const BREADCRUMB_HINT: &str = " · ← back";
-
-/// dormant 尾注的键位尾巴。
-const FOOTNOTE_HINT: &str = " · Ctrl+A";
+/// 层标题行的键位尾巴（固定词表，见 [`render_header_line`]）。
+const BACK_HINT: &str = " · ← back";
 
 /// 层视图的行事实：这一行的 crew 聚合 + 它是否在当前会话的祖先链上。
 ///
@@ -112,32 +109,21 @@ pub struct RichSessionRow {
     pub level: Option<LevelDecor>,
 }
 
-/// dormant 尾注的事实：本层被收起的直接子数 + 当前是否已经放出来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DormantFootnote {
-    /// 被收起的直接子数。
-    pub hidden: usize,
-    /// 开关当前是「已放出来」的一侧。
-    pub shown: bool,
-}
-
-/// 层视图的 chrome 行：面包屑（顶）与 dormant 尾注（底）。
+/// 层视图的标题行：当前层的名字（层 ≥ 1 才有）。
 ///
-/// **不是候选行**：不参与光标、不响应 `Enter`、不计入可见窗口 —— 只占 popup 的高度。
-/// 两边都只装**事实**（层的名字 / 被收起的数目与开关状态），词表与键位提示归渲染侧
-/// （见 [`render_chrome_line`]）：窄面板上先被截断的永远是名字，而不是提示。
+/// **不是候选行**：不参与光标、不响应 `Enter`、不计入可见窗口 —— 只占 popup 的一行。
+/// 只装**事实**（层的名字），词表与键位提示归渲染侧（见 [`render_header_line`]）：窄面板
+/// 上先被截断的永远是名字，而不是提示。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionChrome {
-    /// 面包屑：`Some(当前 scope 的标题，缺失回落到 id)` = 层 ≥ 1；根层不占行。
-    pub breadcrumb: Option<String>,
-    /// 尾注：`Some(..)` = 本层有被收起的直接子。
-    pub footnote: Option<DormantFootnote>,
+pub struct SessionHeader {
+    /// `Some(当前 scope 的标题，缺失回落到 id)` = 层 ≥ 1；根层不占行。
+    pub title: Option<String>,
 }
 
-impl SessionChrome {
-    /// 占用的终端行数（0 / 1 / 2）。
+impl SessionHeader {
+    /// 占用的终端行数（0 / 1）。
     pub fn height(&self) -> u16 {
-        u16::from(self.breadcrumb.is_some()) + u16::from(self.footnote.is_some())
+        u16::from(self.title.is_some())
     }
 }
 
@@ -462,21 +448,11 @@ fn crew_badges(
     (spans, width)
 }
 
-/// 收起时的尾注要说的是「还有几条没显示」；开关打开后同一行改口说「已经全在这儿」并给出
-/// 关回去的键——否则满屏 dormant 行底下再写一句「N dormant」会自相矛盾。
-fn footnote_text(footnote: DormantFootnote) -> String {
-    if footnote.shown {
-        format!("⋯ {} dormant shown", footnote.hidden)
-    } else {
-        format!("⋯ {} dormant", footnote.hidden)
-    }
-}
-
-/// 一行 chrome：事实在前、键位提示在后，整行 dim（它不是内容，是路标）。
+/// 一行标题：事实在前、键位提示在后，整行 dim（它不是内容，是路标）。
 ///
 /// 提示永远不会被名字吃掉：宽度不够时先截事实（补 `…`）；连提示自己都放不下时，
 /// 事实退回整宽、提示整段让位（而不是留一个只有省略号的孤零零的行首）。
-fn render_chrome_line(buf: &mut Buffer, area: Rect, y: u16, fact: &str, hint: &str, dim: Color) {
+fn render_header_line(buf: &mut Buffer, area: Rect, y: u16, fact: &str, hint: &str, dim: Color) {
     let width = area.width as usize;
     let hint_w = UnicodeWidthStr::width(hint);
     let (fact, hint) = if width >= hint_w {
@@ -502,7 +478,7 @@ pub struct SelectionPopup<'a> {
     state: &'a SelectionState,
     filter: &'a str,
     palette: &'a ThemePalette,
-    chrome: Option<&'a SessionChrome>,
+    header: Option<&'a SessionHeader>,
 }
 
 impl<'a> SelectionPopup<'a> {
@@ -517,14 +493,14 @@ impl<'a> SelectionPopup<'a> {
             state,
             filter,
             palette,
-            chrome: None,
+            header: None,
         }
     }
 
-    /// 带上层视图的 chrome 行（面包屑 / dormant 尾注）。它们占矩形上下各一行，
-    /// 行窗口因此少掉对应的高度（与 `ActivePopup::height()` 的加法同一份账）。
-    pub fn with_chrome(mut self, chrome: &'a SessionChrome) -> Self {
-        self.chrome = Some(chrome);
+    /// 带上层视图的标题行（当前层的名字）。它占矩形顶上一行，行窗口因此少掉对应的高度
+    /// （与 `ActivePopup::height()` 的加法同一份账）。
+    pub fn with_header(mut self, header: &'a SessionHeader) -> Self {
+        self.header = Some(header);
         self
     }
 
@@ -752,30 +728,17 @@ impl Widget for SelectionPopup<'_> {
         let accent = self.palette.accent;
         let dim_color = self.palette.dim;
 
-        // chrome 行先占位：面包屑在顶、尾注在底，剩下的矩形才是行窗口 ——
-        // 「要了多高」（`ActivePopup::height`）与「装得下几条」（`visible_window`）
-        // 因此还是同一份数学。chrome 不是候选行：不进 `rows`、不参与光标。
-        let area = match self.chrome {
-            Some(chrome) => {
+        // 标题行先占位：层名在顶，剩下的矩形才是行窗口 ——「要了多高」
+        // （`ActivePopup::height`）与「装得下几条」（`visible_window`）因此还是同一份
+        // 数学。标题行不是候选行：不进 `rows`、不参与光标。
+        let area = match self.header {
+            Some(header) => {
                 let mut rows = area;
-                if let Some(fact) = chrome.breadcrumb.as_deref()
+                if let Some(fact) = header.title.as_deref()
                     && rows.height > 0
                 {
-                    render_chrome_line(buf, area, rows.y, fact, BREADCRUMB_HINT, dim_color);
+                    render_header_line(buf, area, rows.y, fact, BACK_HINT, dim_color);
                     rows.y += 1;
-                    rows.height -= 1;
-                }
-                if let Some(footnote) = chrome.footnote
-                    && rows.height > 0
-                {
-                    render_chrome_line(
-                        buf,
-                        area,
-                        rows.bottom() - 1,
-                        &footnote_text(footnote),
-                        FOOTNOTE_HINT,
-                        dim_color,
-                    );
                     rows.height -= 1;
                 }
                 rows
@@ -783,7 +746,7 @@ impl Widget for SelectionPopup<'_> {
             None => area,
         };
         if area.height == 0 {
-            // 矩形只够 chrome（空层 / 极矮的弹层）：行窗口没有位置，一条不画。
+            // 矩形只够标题行（极矮的弹层）：行窗口没有位置，一条不画。
             return;
         }
 
@@ -1427,18 +1390,18 @@ mod tests {
         assert!(line1.ends_with('★'), "{line1:?}");
     }
 
-    // ── chrome：面包屑 / dormant 尾注 ────────────────────────────
+    // ── 层标题行 ────────────────────────────────────────────────
 
-    /// 渲染带 chrome 的一帧，返回逐行文本。
-    fn chrome_frame(
+    /// 渲染带层标题行的一帧，返回逐行文本。
+    fn header_frame(
         rows: &[SelectionRow],
-        chrome: &SessionChrome,
+        header: &SessionHeader,
         area: Rect,
     ) -> (Buffer, Vec<String>) {
         let state = SelectionState::new(rows.len());
         let mut buf = Buffer::empty(area);
         SelectionPopup::new(rows, &state, "", &ThemePalette::default())
-            .with_chrome(chrome)
+            .with_header(header)
             .render(area, &mut buf);
         let lines = (area.y..area.bottom())
             .map(|y| {
@@ -1453,93 +1416,70 @@ mod tests {
     }
 
     #[test]
-    fn test_the_chrome_lines_surround_the_rows_and_stay_dim() {
+    fn test_the_header_sits_above_the_rows_and_stays_dim() {
         let rows = vec![session_row(SessionStatus::Idle, "07-22 21:41", "kid")];
-        let chrome = SessionChrome {
-            breadcrumb: Some("the team".into()),
-            footnote: Some(DormantFootnote {
-                hidden: 3,
-                shown: false,
-            }),
+        let header = SessionHeader {
+            title: Some("the team".into()),
         };
-        let area = Rect::new(0, 0, 40, 4);
-        let (buf, lines) = chrome_frame(&rows, &chrome, area);
-        assert_eq!(chrome.height(), 2);
+        let area = Rect::new(0, 0, 40, 3);
+        let (buf, lines) = header_frame(&rows, &header, area);
+        assert_eq!(header.height(), 1);
         assert_eq!(lines[0], "the team · ← back");
-        assert_eq!(lines[3], "⋯ 3 dormant · Ctrl+A");
-        // 两行都是 dim：chrome 是路标，不是内容。
-        let dim = ThemePalette::default().dim;
-        assert_eq!(buf[(0, 0)].fg, dim);
-        assert_eq!(buf[(0, 3)].fg, dim);
-        // 行本身还在中间（面包屑下面一行开始）。
+        // 标题行是路标，不是内容：整行 dim。
+        assert_eq!(buf[(0, 0)].fg, ThemePalette::default().dim);
+        // 行本身还在它下面。
         assert!(lines[1].contains('●'), "{lines:?}");
     }
 
     #[test]
-    fn test_a_long_scope_name_never_eats_the_key_hint() {
+    fn test_a_long_level_name_never_eats_the_key_hint() {
         // 名字先被截断，`· ← back` 永远留着：提示被名字吃掉就白写了。
-        let chrome = SessionChrome {
-            breadcrumb: Some("a very long scope title that will not fit".into()),
-            footnote: None,
+        let header = SessionHeader {
+            title: Some("a very long level title that will not fit".into()),
         };
-        let area = Rect::new(0, 0, 24, 3);
-        let (_, lines) = chrome_frame(&[], &chrome, area);
-        assert_eq!(lines[0], "a very long sc… · ← back", "截断带省略号");
+        let area = Rect::new(0, 0, 24, 2);
+        let (_, lines) = header_frame(&[], &header, area);
+        assert_eq!(lines[0], "a very long le… · ← back", "截断带省略号");
         assert_eq!(UnicodeWidthStr::width(lines[0].as_str()), 24);
     }
 
     #[test]
-    fn test_the_chrome_hint_gives_way_only_when_it_cannot_fit_whole() {
-        let chrome = SessionChrome {
-            breadcrumb: Some("a long level name".into()),
-            footnote: None,
+    fn test_the_header_hint_gives_way_only_when_it_cannot_fit_whole() {
+        let header = SessionHeader {
+            title: Some("a long level name".into()),
         };
         // 恰好等于提示宽度（` · ← back` 占 9 列）：提示整段留着，事实让到 0 列
         // （不留孤零零的省略号）。
-        let (_, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 9, 2));
+        let (_, lines) = header_frame(&[], &header, Rect::new(0, 0, 9, 1));
         assert_eq!(lines[0], " · ← back");
         // 再宽一列：多出来的那列归事实（只够一个省略号）。
-        let (_, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 10, 2));
+        let (_, lines) = header_frame(&[], &header, Rect::new(0, 0, 10, 1));
         assert_eq!(lines[0], "… · ← back");
         // 比提示窄一列：提示整段让位，事实退回整宽。
-        let (_, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 8, 2));
+        let (_, lines) = header_frame(&[], &header, Rect::new(0, 0, 8, 1));
         assert_eq!(lines[0], "a long …");
     }
 
     #[test]
-    fn test_an_empty_level_draws_only_its_chrome() {
-        // 空层（crew 全 dormant）：只有面包屑 + 尾注，不 panic、不留空白无解释。
-        let chrome = SessionChrome {
-            breadcrumb: Some("the team".into()),
-            footnote: Some(DormantFootnote {
-                hidden: 3,
-                shown: false,
-            }),
+    fn test_a_rect_that_only_fits_the_header_draws_no_rows() {
+        // 矩形只够标题行：行窗口没有位置，一条不画（不 panic、不越界）。
+        let header = SessionHeader {
+            title: Some("the team".into()),
         };
-        let area = Rect::new(0, 0, 40, 2);
-        let (_, lines) = chrome_frame(&[], &chrome, area);
-        assert_eq!(lines, ["the team · ← back", "⋯ 3 dormant · Ctrl+A"]);
-
-        // 矩形只够 chrome：行窗口没有位置，一条不画（不 panic、不越界）。
-        let (_buf, lines) = chrome_frame(&[], &chrome, Rect::new(0, 0, 40, 1));
-        assert_eq!(lines.len(), 1);
+        let (_, lines) = header_frame(&[], &header, Rect::new(0, 0, 40, 1));
+        assert_eq!(lines, ["the team · ← back"]);
     }
 
     #[test]
-    fn test_the_rows_window_shrinks_by_the_chrome_height() {
-        // 12 条 rich 行（策略窗口 6 条 = 12 行）+ 2 行 chrome：矩形 14 行装 6 条。
+    fn test_the_rows_window_shrinks_by_the_header_height() {
+        // 12 条 rich 行（策略窗口 6 条 = 12 行）+ 1 行标题：矩形 13 行装 6 条。
         let rows = rich_rows(12);
-        let chrome = SessionChrome {
-            breadcrumb: Some("the team".into()),
-            footnote: Some(DormantFootnote {
-                hidden: 1,
-                shown: false,
-            }),
+        let header = SessionHeader {
+            title: Some("the team".into()),
         };
-        let (_, lines) = chrome_frame(&rows, &chrome, Rect::new(0, 0, 40, 14));
+        let (_, lines) = header_frame(&rows, &header, Rect::new(0, 0, 40, 13));
         assert!(lines[0].starts_with("the team"), "{lines:?}");
-        assert!(lines[13].starts_with('⋯'), "{lines:?}");
-        let body = lines[1..13].join("\n");
+        let body = lines[1..].join("\n");
         assert!(
             body.contains("title-00") && body.contains("title-05"),
             "{body}"
