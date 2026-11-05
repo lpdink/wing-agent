@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Callable
 
@@ -514,12 +515,18 @@ class WakeService:
     def _source_will_move_again(self, session_id: str) -> bool:
         """``done`` 的静息判据（语义与边界见 ``wing/wake/quiescence.py``）。
 
-        "本进程已 stalled 的触发器"不进图：它的投递不会再发生，当成"还会动"会把整棵树挂住。
+        图用生成器送进去：source 自己还在跑时判据会提前返回，那次整表查询因此根本不发生
+        （中间层每收口一次就省一次扫）。"本进程已 stalled 的触发器"不进图：它的投递不会
+        再发生，当成"还会动"会把整棵树挂住。
         """
+
+        def edges() -> Iterator[tuple[str, str]]:
+            yield from self._store.active_done_edges(exclude=frozenset(self._stalled))
+
         return will_move_again(
             session_id,
             will_run=self._ports.session_will_run_again,
-            edges=self._store.active_done_edges(exclude=frozenset(self._stalled)),
+            edges=edges(),
         )
 
     # ── 投递 ─────────────────────────────────────

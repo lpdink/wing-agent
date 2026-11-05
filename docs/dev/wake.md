@@ -82,8 +82,9 @@ executor）里两者分叉：中间层派完一波活就结束本轮，那一次
 - **`timer` 不参与**：心跳 / 定时自唤醒是「到点叫醒」的计划，不是「这一层还有活没干完」。
   计进来会让一棵带心跳的树永远不静息，所以一个 `wing wake --in 30m` 的自唤醒**不会**让这
   一层被押住——它照样可能在你还没收尾时收下一条 done。
-- **`ask` 不参与**：提问立即投递、不消耗配额（`--on ask` 的常驻订阅也因此不会把树判成
-  永不静息）。
+- **`ask` 不参与**：`--on ask` 是常驻订阅（提问不消耗配额，一条订阅可能活很久），把它算进
+  "还会动"等于让那棵树在整个订阅期内都不静息。代价是反方向的：只被 ask 连线挂着的中间层，
+  可能在你还没收尾时就送来一条 done（它下一次被叫醒确实来自一个提问，而那条唤醒不在图里）。
 - **没有唤醒线连着的子会话看不见**：`--no-notify` 派发的子会话收口不叫醒任何人，于是
   "这层不会再动"在机制上确实成立——判据如实回答会发生什么，不猜意图。
 - **本进程已 stalled 的连线不进图**（§9 的"记账写失败"）：那条线不会再有投递，当成"还会动"
@@ -95,10 +96,14 @@ executor）里两者分叉：中间层派完一波活就结束本轮，那一次
 上层要等到那棵子树静下来才会被叫。要"派完就报"，就让中间层阻塞在工具调用里等（那时它是
 `working`，压根不产生 `turn_result`），或者由它显式上报终态。
 
-**押住之后不再重判的三种情形**（人手把链拆了，没有"下一次收口"可言）：叫醒它的那条订阅被
-`--cancel`、源头或目标被归档（`cancel_for_session`）、那个子会话被 interrupt（中断不发射
-`turn_result`），或者它卡在一个永远没人回答的提问上。此时被押住的触发器仍是 `active`、配额
-还在，但谁也不会再叫它一次——给它发一条消息（或 `wing run -r <sid> -p "..."`）跑完一轮，
+**押住之后不再重判的情形**——"下一次收口"其实没了：
+
+- **进程重启**：押住是纯内存里的决定（不落库），`start()` 只补偿 timer；重启后那条触发器仍
+  是 `active`、配额还在，但要等 source 下一次收口才会重新判；
+- 叫醒它的那条订阅被 `--cancel`、源头或目标被归档（`cancel_for_session`）、那个子会话被
+  interrupt（中断不发射 `turn_result`），或者它卡在一个永远没人回答的提问上。
+
+这些情形下谁也不会再叫它一次。给它发一条消息（或 `wing run -r <sid> -p "..."`）跑完一轮，
 判据就会重新判一次。这个边界是刻意用「不做超时兜底」换来的（§9）。
 
 ## 2. 时间语义（`kind=timer`）
@@ -236,7 +241,7 @@ store.py       WakeStore —— wake_trigger 的 SQL（唯一 SQL 处；走 wing
 envelope.py    信封渲染（纯函数）
 quiescence.py  done 的静息判据（纯函数：状态 + 唤醒连线 → 还会不会再动）
 scheduler.py   WakeScheduler —— 单 asyncio task + 可注入时钟 + notify()
-ports.py       WakePorts Protocol（session_exists / is_archived / session_status / deliver）
+ports.py       WakePorts Protocol（session_exists / is_archived / session_will_run_again / deliver）
 service.py     WakeService —— 校验 / 生命周期 / 事件分发 / 投递 / 重启恢复
 ```
 
