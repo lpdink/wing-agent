@@ -514,13 +514,19 @@ pub enum Command {
         list: bool,
     },
 
-    /// Wake me when a session finishes or asks a question (register / list / cancel).
+    /// Wake me when a session settles or asks a question (register / list / cancel).
     ///
-    /// `wing watch <SID>` subscribes to that session: on its next completion (any
-    /// subtype) or question, MY session receives one ordinary user message — the
-    /// built-in envelope carries the subtype, turn count, duration and the last
-    /// reply (or the question plus the `tool_call_id` to answer with). It is the
-    /// non-blocking alternative to `wing wait`.
+    /// `wing watch <SID>` subscribes to that session: when it settles (it will not
+    /// run again on its own — see below) or asks a question, MY session receives
+    /// one ordinary user message — the built-in envelope carries the subtype, turn
+    /// count, duration and the last reply (or the question plus the `tool_call_id`
+    /// to answer with). It is the non-blocking alternative to `wing wait`.
+    ///
+    /// A `done` is held while that session still has work of its own: as long as
+    /// sessions it spawned are running (or are themselves owed a wake-up) the
+    /// completion does not fire — it fires on the first settle instead
+    /// (docs/dev/wake.md §1.2). Questions are never held, and never consume the
+    /// quota.
     ///
     /// The target defaults to `WING_SESSION_ID` (present in an agent's shell);
     /// outside one, pass `--to <sid>`. One `done` delivery consumes one unit of

@@ -314,6 +314,33 @@ class WakeStore:
         )
         return [WakeTrigger.from_row(row) for row in rows]
 
+    def active_done_edges(self) -> list[tuple[int, str, str]]:
+        """所有**会送 done** 的 active 会话订阅，投影成 ``(id, source, target)`` 连线。
+
+        这张图是 ``done`` 静息判据的输入（``wing/wake/quiescence.py``）：``source`` 收口会
+        叫醒 ``target``，所以「谁欠谁一次叫醒」是一条持久事实，不必再读会话树。带上 ``id``
+        是给调用方跳过**本进程已 stalled** 的行——那条线不会再有投递，把它当成"还会动"
+        会把整棵树永久挂住。
+
+        ``on_events`` 的值域是 ``parse_on_events`` 的**规范形**（``done`` / ``done,ask``），
+        因此 ``LIKE '%done%'`` 恰好等价于「订阅里有 done」——``ask`` 常驻订阅不进这张图：
+        它不消耗配额，也不代表这层还有活没干完。
+        """
+        rows = self.database().query(
+            "SELECT id, source_session_id, target_session_id FROM wake_trigger "
+            f"WHERE state = ? AND kind = '{KIND_SESSION}' "
+            "AND source_session_id IS NOT NULL AND on_events LIKE '%done%'",
+            (STATE_ACTIVE,),
+        )
+        return [
+            (
+                int(row["id"]),
+                str(row["source_session_id"]),
+                str(row["target_session_id"]),
+            )
+            for row in rows
+        ]
+
     def due_timers(
         self, now_ms: int, *, exclude: frozenset[int] = frozenset()
     ) -> list[WakeTrigger]:

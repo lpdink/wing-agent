@@ -126,6 +126,40 @@ class TestQueries:
         store.set_state(trigger.id, STATE_CANCELED)
         assert store.next_due_ms() is None
 
+    def test_active_done_edges_project_only_done_subscriptions(
+        self, store: WakeStore
+    ) -> None:
+        """静息判据的输入图：只有「会送 done」的 active 会话订阅连成边。
+
+        ``ask`` 常驻订阅（不消耗配额）、timer（心跳）、已终结的行、没有 source 的脏行
+        都不进图——把 ask 或 timer 计进来会让一棵树永不静息。
+        """
+        both = _insert(store, source_session_id="both", target_session_id="parent")
+        done_only = _insert(
+            store,
+            source_session_id="done",
+            target_session_id="parent",
+            on_events="done",
+        )
+        _insert(
+            store, source_session_id="ask", target_session_id="parent", on_events="ask"
+        )
+        _insert_timer(store, 100)
+        finished = _insert(
+            store,
+            source_session_id="finished",
+            target_session_id="parent",
+            on_events="done",
+        )
+        store.set_state(finished.id, STATE_DONE)
+        _insert(store, source_session_id=None, target_session_id="parent")
+
+        assert sorted(store.active_done_edges()) == [
+            (both.id, "both", "parent"),
+            (done_only.id, "done", "parent"),
+        ]
+        assert both.id and done_only.id  # 只是确认它们真的落库了
+
 
 class TestMutations:
     def test_record_fire_increments_and_reschedules(self, store: WakeStore) -> None:

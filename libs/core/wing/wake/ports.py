@@ -1,11 +1,12 @@
 """wing/wake/ports.py — 唤醒服务对外的**窄接口**（组合根注入）。
 
-``wake`` 是 L3：不能 import ``runtime`` / ``gateway``。它需要的三件事全部由这里声明、
+``wake`` 是 L3：不能 import ``runtime`` / ``gateway``。它需要的四件事全部由这里声明、
 由组合根（``WingRuntime``）实现——与远程工具「普通 Tool + 注入的 dispatch 闭包」同款思路：
 
 - ``session_exists``：创建期校验（纯解析，不水合）；
 - ``is_archived``：把「已归档」与「真不存在」的失败文案区分开（两者都是 ``state=failed``）；
-- ``deliver``：把一条普通用户消息投进目标会话（实现体是 ``runtime.post``，带 ``request_id``）。
+- ``deliver``：把一条普通用户消息投进目标会话（实现体是 ``runtime.post``，带 ``request_id``）；
+- ``session_status``：``done`` 静息判据要的运行时状态（``wing/wake/quiescence.py``）。
 
 窄接口的直接收益：全部生命周期 / 投递路径能用假 ports 在 pytest 里确定性覆盖。
 """
@@ -24,6 +25,14 @@ class WakePorts(Protocol):
 
     def is_archived(self, session_id: str) -> bool:
         """该会话是否在归档区（失败文案用：归档是可行动的结论）。"""
+        ...
+
+    def session_status(self, session_id: str) -> str:
+        """该会话当前的运行时状态（``SessionStatus``；未加载 / 已逐出 = ``inactive``）。
+
+        只服务 ``done`` 的静息判据：``working`` / ``waiting`` 会让 source 的那一次收口延后。
+        不水合、不发事件、不建会话——判据读的是既成事实，不会把沉睡的会话弄醒。
+        """
         ...
 
     async def deliver(self, *, session_id: str, content: str, request_id: str) -> None:

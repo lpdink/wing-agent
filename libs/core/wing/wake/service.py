@@ -40,6 +40,7 @@ from wing.wake.model import (
     parse_on_events,
 )
 from wing.wake.ports import WakePorts
+from wing.wake.quiescence import will_move_again
 from wing.wake.scheduler import WakeScheduler
 from wing.wake.spec import (
     SpecError,
@@ -449,6 +450,17 @@ class WakeService:
     ) -> None:
         if not trigger.active:
             return
+        if kind == EVENT_DONE and self._source_will_move_again(
+            trigger.source_session_id
+        ):
+            # 这一层还会自己再动：done 不成立。**不投递、不扣配额、保持武装**——
+            # 它下一次收口会重新判（子会话的收口沿唤醒图把它叫醒），终态因此自底向上收敛，
+            # 一次静息都不需要额外定时器（见 ``wing/wake/quiescence.py``）。
+            log.info(
+                f"wake: held #{trigger.id} (source {trigger.source_session_id} "
+                f"is still moving; it will fire on the next settle)"
+            )
+            return
         if kind == EVENT_DONE:
             assert isinstance(event, TurnResultEvent)
             envelope_text = envelope.done_envelope(
@@ -481,6 +493,29 @@ class WakeService:
                 decrement=1 if kind == EVENT_DONE else 0,
                 next_fire_at_ms=None,
             ),
+        )
+
+    def _source_will_move_again(self, session_id: str | None) -> bool:
+        """``done`` 的静息判据（语义与边界见 ``wing/wake/quiescence.py``）。
+
+        失败一律**当成已静息**（照旧投递）：唤醒这条路径上，宁可多叫一次也不能不叫——
+        ``wing.db`` 降级时 ``active_done_edges`` 本来就是空表，判据自然退化成旧行为。
+
+        本进程已 stalled 的触发器不进图：它的投递不会再发生，当成"还会动"会把整棵树挂住。
+        """
+        if not session_id:
+            return False
+        try:
+            edges = [
+                (source, target)
+                for wake_id, source, target in self._store.active_done_edges()
+                if wake_id not in self._stalled
+            ]
+        except Exception:
+            log.exception("wake: failed to load wake edges; delivering anyway")
+            return False
+        return will_move_again(
+            session_id, status_of=self._ports.session_status, edges=edges
         )
 
     # ── 投递 ─────────────────────────────────────

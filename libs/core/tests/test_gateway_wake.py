@@ -42,6 +42,10 @@ class FakePorts:
     def is_archived(self, session_id: str) -> bool:
         return session_id in self.archived
 
+    def session_status(self, session_id: str) -> str:
+        # 本组测试只看端点形状：所有会话都"静止"，done 的静息判据一律放行。
+        return "inactive"
+
     async def deliver(self, *, session_id: str, content: str, request_id: str) -> None:
         self.delivered.append((session_id, content, request_id))
 

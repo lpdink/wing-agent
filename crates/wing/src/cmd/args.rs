@@ -67,8 +67,11 @@ pub struct RunArgs {
     /// Do not register a wake-up on the new session (the implicit default is on).
     ///
     /// Without this flag `wing run` asks the gateway to wake MY session
-    /// (`WING_SESSION_ID`, or `--notify-to`) when the spawned one finishes or
-    /// asks a question. Inside an agent's shell that notification is the
+    /// (`WING_SESSION_ID`, or `--notify-to`) when the spawned one settles or
+    /// asks a question. "Settles" means the spawned session will not run again
+    /// on its own: a `done` is held while sessions it spawned are still moving,
+    /// so a middle layer that has merely dispatched its crew does not wake you
+    /// (docs/dev/wake.md §1.2). Inside an agent's shell that notification is the
     /// non-blocking replacement for `wing wait`; outside one there is no target
     /// and the registration is silently off either way.
     #[arg(long = "no-notify")]
@@ -82,6 +85,9 @@ pub struct RunArgs {
     pub notify_to: Option<String>,
 
     /// Which events wake the target: `done`, `ask`, or both (default: `done,ask`).
+    ///
+    /// `ask` is always immediate (a question needs a human) and never consumes
+    /// the quota; `done` waits for the spawned subtree to settle.
     #[arg(long = "notify-on", value_name = "EVENTS")]
     pub notify_on: Option<String>,
 

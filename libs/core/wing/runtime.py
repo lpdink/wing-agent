@@ -220,7 +220,7 @@ async def settings_write_effect(sm: SessionManager) -> ReloadResult:
 
 
 class _RuntimeWakePorts:
-    """``wing.wake.ports.WakePorts`` 的实现体：三个方法都只是本 runtime 的窄投影。
+    """``wing.wake.ports.WakePorts`` 的实现体：四个方法都只是本 runtime 的窄投影。
 
     ``wake`` 是 L3、不得 import ``runtime``，所以投递能力只能由组合根注入（与远程工具的
     「注入 dispatch 闭包」同款）；这里是唯一的接线处——换投递语义只改这一个类。
@@ -234,6 +234,12 @@ class _RuntimeWakePorts:
 
     def is_archived(self, session_id: str) -> bool:
         return self._runtime.is_archived(session_id)
+
+    def session_status(self, session_id: str) -> str:
+        # 未加载 = inactive（逐出 / 从未水合）：done 的静息判据据此把它当"不会再动"，
+        # 语义与 `GET /api/session/list` 的状态列同源（都取内存里的 live 状态）。
+        session = self._runtime.sm.get_session(session_id)
+        return session.status if session is not None else "inactive"
 
     async def deliver(self, *, session_id: str, content: str, request_id: str) -> None:
         await self._runtime.post(

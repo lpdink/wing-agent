@@ -136,8 +136,9 @@ libs/core/wing/
 │   ├── model.py                     WakeTrigger + 状态/事件常量 + on_events 解析
 │   ├── store.py                     WakeStore — wake_trigger 的唯一 SQL 处
 │   ├── envelope.py                  内置信封渲染（done / ask / timer；纯函数）
+│   ├── quiescence.py                done 的静息判据（状态 + 唤醒连线 → 还会不会再动；纯函数）
 │   ├── scheduler.py                 WakeScheduler — 单 asyncio task + 可注入时钟 + notify()
-│   ├── ports.py                     WakePorts Protocol（session_exists / is_archived / deliver）
+│   ├── ports.py                     WakePorts Protocol（session_exists / is_archived / session_status / deliver）
 │   └── service.py                   WakeService — 校验 / 生命周期 / 事件分发 / 投递 / 重启恢复
 ├── common/
 │   ├── logger.py                    日志初始化（按本地日期切分 + 轮转 / prune）

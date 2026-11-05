@@ -200,7 +200,7 @@ git -C "$WT" rev-parse HEAD                             # ← 记进 scheduler_l
 | `wing -p "<prompt>"` | stdio 模式：**阻塞**到本轮结束，输出最终结果（Claude Code 兼容 NDJSON） | 要一次性结果、同步串行执行 |
 | `wing run -p "<prompt>" --json` | **非阻塞**：建会话 + 发消息后**立即返回 session id** | **调度就用这个**（拿 sid → 干别的 / wait） |
 
-`wing run` **默认登记「子会话收口或提问 → 唤醒我」**（目标 = `WING_SESSION_ID`，即你自己的会话）：派完就可以去干别的，被叫醒再判读，不必显式 `wing watch`、更不必干等。`--no-notify` 关掉，`--notify-to <sid>` 换个目标，`--notify-on done,ask` / `--notify-prompt TEXT` 调载荷；不在 agent 的 shell 里（没有 `WING_SESSION_ID`）时它会静默关闭，文本输出里是 `notify: off (no parent session)`。**回答 ask（带 `--tool-call-id`）时不登记**——派发时那条订阅仍在武装，本来就够；文本输出 `notify: off (answering an ask: the dispatch-time trigger is still armed)`。
+`wing run` **默认登记「子会话静息或提问 → 唤醒我」**（目标 = `WING_SESSION_ID`，即你自己的会话）：派完就可以去干别的，被叫醒再判读，不必显式 `wing watch`、更不必干等。「静息」= 它下面没有还会自己再动的会话（多级体系里中间层"派完就结束本轮"因此不会提前叫你，见 §7.1）。`--no-notify` 关掉，`--notify-to <sid>` 换个目标，`--notify-on done,ask` / `--notify-prompt TEXT` 调载荷；不在 agent 的 shell 里（没有 `WING_SESSION_ID`）时它会静默关闭，文本输出里是 `notify: off (no parent session)`。**回答 ask（带 `--tool-call-id`）时不登记**——派发时那条订阅仍在武装，本来就够；文本输出 `notify: off (answering an ask: the dispatch-time trigger is still armed)`。
 
 ```bash
 cd "$WT" && wing run --json \
@@ -280,7 +280,8 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：我（父会话）�
 
 **两条合法姿势，各有前提；`sleep` 不在其中。**
 
-1. **停下**（默认，最省墙钟）：`wing run` 已经替你登记了「子会话收口 / 提问 → 唤醒我」（§6.1）——派完去做下一件事、写文档、做集成，或者直接结束本轮；被叫醒时会话里会出现一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，或提问内容 + 回答用的 `tool_call_id`），第一件事是判读（§7.2 — 7.3）。前提：notify 确实在武装（派发输出里的 `notify` 字段非空；不在 agent 的 shell 里时静默 `off (no parent session)`，要 `--notify-to <sid>` 或显式 `wing watch`，否则没人叫醒你）。
+1. **停下**（默认，最省墙钟）：`wing run` 已经替你登记了「子会话静息 / 提问 → 唤醒我」（§6.1）——派完去做下一件事、写文档、做集成，或者直接结束本轮；被叫醒时会话里会出现一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，或提问内容 + 回答用的 `tool_call_id`），第一件事是判读（§7.2 — 7.3）。前提：notify 确实在武装（派发输出里的 `notify` 字段非空；不在 agent 的 shell 里时静默 `off (no parent session)`，要 `--notify-to <sid>` 或显式 `wing watch`，否则没人叫醒你）。
+   **`done` 的含义是「这一支不会再自己动了」**：执行者派完自己的两个 reviewer 就结束本轮时，你**不会**被提前叫醒——它下面还有活，那次收口会被押住（不投递、不扣配额、保持武装），等它真静息才叫你（[wake.md](../../../docs/dev/wake.md) §1.2）。所以「被叫醒」意味着这一支已经停下来等你，不存在「它刚派完就叫醒我」这一次白跑；反过来，自己还挂着 `wing wait` 的执行者仍是 `working`，也照旧不会提前叫醒你。
 2. **原地等**：`wing wait`（代码块见下）。前提两条：派发时带 `--no-notify`（结果反正由 wait 交给你，收口信封再投一条只会白起一轮），以及知道它**只认 `idle` / `inactive`**——子会话提问时状态是 `waiting`（优先级高于 `working`），wait 不会因此返回，ask 唤醒撞上「目标忙碌」也只进 inbox。
 
 **禁止用 `sleep` 等会话**（`sleep 600; wing ps …` / `sleep 900; git log …`）：唤醒只落在**工具结果边界**上，长 sleep 会把它压到睡醒才送达——白等的分钟数就等于睡眠粒度。`sleep` 只留给「等墙钟」（限速、退避）。
