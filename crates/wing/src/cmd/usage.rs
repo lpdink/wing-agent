@@ -1366,9 +1366,15 @@ mod tests {
         })
         .unwrap();
         assert_eq!(plan.since, "all");
+    }
+
+    #[test]
+    fn a_relative_since_is_anchored_to_today() {
+        // `until` 必须是**远期**字面量：区间末端若跟着今天走，等相对 `since` 追上它，
+        // 这个用例就会以"起止颠倒"失败（它曾经写死成 2026-10-25，于是从 11-02 起必红）。
         let plan = Plan::resolve(&UsageOpts {
             since: "7d".into(),
-            until: "2026-10-25".into(),
+            until: "2999-12-31".into(),
             ..opts()
         })
         .unwrap();
@@ -1376,7 +1382,7 @@ mod tests {
             .format("%Y-%m-%d")
             .to_string();
         assert_eq!(plan.since, expected);
-        assert_eq!(plan.until, "2026-10-25");
+        assert_eq!(plan.until, "2999-12-31");
     }
 
     // ---- --metric 映射 ----
