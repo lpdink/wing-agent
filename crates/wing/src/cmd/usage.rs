@@ -351,6 +351,12 @@ struct Plan {
 
 impl Plan {
     fn resolve(opts: &UsageOpts) -> Result<Plan> {
+        Self::resolve_at(opts, Local::now().date_naive())
+    }
+
+    /// `resolve` 的可注入时钟形态：相对写法（`7d` / `today` / `yesterday`）一律相对 `today`。
+    /// 时钟只在 `resolve` 里读一次——测试因此不读墙钟，也就不会跨零点假红。
+    fn resolve_at(opts: &UsageOpts, today: NaiveDate) -> Result<Plan> {
         if !(1..=MAX_LIMIT).contains(&opts.limit) {
             anyhow::bail!(
                 "--limit must be between 1 and {MAX_LIMIT} (got {})",
@@ -377,7 +383,6 @@ impl Plan {
             anyhow::bail!("--tree requires --session (a tree without a root is the whole db)");
         }
 
-        let today = Local::now().date_naive();
         let since = parse_when(&opts.since, today, "since")?;
         let until = parse_when(&opts.until, today, "until")?;
         let until = match until {
@@ -1369,20 +1374,30 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_since_is_anchored_to_today() {
-        // `until` 必须是**远期**字面量：区间末端若跟着今天走，等相对 `since` 追上它，
-        // 这个用例就会以"起止颠倒"失败（它曾经写死成 2026-10-25，于是从 11-02 起必红）。
-        let plan = Plan::resolve(&UsageOpts {
-            since: "7d".into(),
-            until: "2999-12-31".into(),
-            ..opts()
-        })
+    fn a_relative_since_is_anchored_to_the_plan_date() {
+        let plan = Plan::resolve_at(
+            &UsageOpts {
+                since: "7d".into(),
+                ..opts()
+            },
+            date("2026-10-23"),
+        )
         .unwrap();
-        let expected = (Local::now().date_naive() - ChronoDuration::days(7))
-            .format("%Y-%m-%d")
-            .to_string();
-        assert_eq!(plan.since, expected);
-        assert_eq!(plan.until, "2999-12-31");
+        assert_eq!(plan.since, "2026-10-16");
+        assert_eq!(plan.until, "2026-10-23");
+    }
+
+    #[test]
+    fn a_literal_until_is_forwarded_verbatim() {
+        let plan = Plan::resolve_at(
+            &UsageOpts {
+                until: "2026-10-25".into(),
+                ..opts()
+            },
+            date("2026-10-23"),
+        )
+        .unwrap();
+        assert_eq!(plan.until, "2026-10-25");
     }
 
     // ---- --metric 映射 ----
