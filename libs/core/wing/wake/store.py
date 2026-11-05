@@ -314,6 +314,38 @@ class WakeStore:
         )
         return [WakeTrigger.from_row(row) for row in rows]
 
+    def active_done_edges(
+        self, *, exclude: frozenset[int] = frozenset()
+    ) -> list[tuple[str, str]]:
+        """所有**会送 done** 的 active 会话订阅，投影成 ``(source, target)`` 连线。
+
+        这张图是 ``done`` 静息判据的输入（``wing/wake/quiescence.py``）：``source`` 收口会
+        叫醒 ``target``，所以「谁欠谁一次叫醒」是一条持久事实，不必再读会话树。扫描量 =
+        ``state='active'`` 的行数（``wake_trigger`` 只增不删，见 ``docs/dev/wake.md`` §9），
+        挂在每一次 ``turn_result`` 上——行数上千时该考虑保留期或 ``(state, kind)`` 索引。
+
+        ``exclude`` 是本进程**已 stalled** 的 id（与 :meth:`due_timers` 同款）：那条线不会
+        再有投递，把它当成"还会动"会把整棵树永久挂住。
+
+        ``on_events`` 的值域是 ``parse_on_events`` 的**规范形**（``done`` / ``done,ask``），
+        所以这里直接按封闭值域取——``ask`` 常驻订阅不进这张图：它不消耗配额，也不代表这
+        层还有活没干完。
+        """
+        sql = (
+            "SELECT source_session_id, target_session_id FROM wake_trigger "
+            f"WHERE state = ? AND kind = '{KIND_SESSION}' "
+            "AND source_session_id IS NOT NULL AND on_events IN ('done', 'done,ask')"
+        )
+        params: list[Any] = [STATE_ACTIVE]
+        if exclude:
+            sql += f" AND id NOT IN ({_placeholders(len(exclude))})"
+            params.extend(sorted(exclude))
+        sql += " ORDER BY id"
+        return [
+            (str(row["source_session_id"]), str(row["target_session_id"]))
+            for row in self.database().query(sql, params)
+        ]
+
     def due_timers(
         self, now_ms: int, *, exclude: frozenset[int] = frozenset()
     ) -> list[WakeTrigger]:

@@ -6,14 +6,17 @@
 //!
 //! # Wake-up notification (default on)
 //!
-//! The spawned session also registers a wake-up back to MINE when it finishes
+//! The spawned session also registers a wake-up back to MINE when it settles
 //! (or asks a question) — inside an agent's shell (`WING_SESSION_ID`) that is
-//! the non-blocking replacement for `wing wait`:
+//! the non-blocking replacement for `wing wait`. "Settles" = it will not run
+//! again on its own: a completion is held while sessions it spawned are still
+//! running, so a middle layer that has only dispatched its crew does not wake
+//! you (docs/dev/wake.md §1.2):
 //!
 //! ```sh
 //! SID=$(wing run -p "fix the bug" --json | jq -r .session_id)
 //! wing watch "$SID"            # explicit, if you turned the default off
-//! # ... do other work; my session is woken when $SID finishes ...
+//! # ... do other work; my session is woken when $SID settles ...
 //! wing wait "$SID"             # still the "I insist on blocking" option
 //! ```
 //!

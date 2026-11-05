@@ -21,6 +21,7 @@ import asyncio
 
 from wing.agent.event_sink import emit_best_effort
 from wing.event import (
+    BUSY_STATES,
     BranchTargetInfo,
     BranchTargetsEvent,
     CompactDoneEvent,
@@ -220,7 +221,7 @@ async def settings_write_effect(sm: SessionManager) -> ReloadResult:
 
 
 class _RuntimeWakePorts:
-    """``wing.wake.ports.WakePorts`` 的实现体：三个方法都只是本 runtime 的窄投影。
+    """``wing.wake.ports.WakePorts`` 的实现体：四个方法都只是本 runtime 的窄投影。
 
     ``wake`` 是 L3、不得 import ``runtime``，所以投递能力只能由组合根注入（与远程工具的
     「注入 dispatch 闭包」同款）；这里是唯一的接线处——换投递语义只改这一个类。
@@ -234,6 +235,15 @@ class _RuntimeWakePorts:
 
     def is_archived(self, session_id: str) -> bool:
         return self._runtime.is_archived(session_id)
+
+    def session_will_run_again(self, session_id: str) -> bool:
+        # 未加载 = 不会再动（逐出 / 从未水合，与 `GET /api/session/list` 的状态列同源）。
+        # 排队输入必须单独看：消息已入队、worker 还没开始下一轮时 status 仍是 idle，
+        # 而它会接着跑（`SessionManager._blocked_reason` 出于同一个理由也看它）。
+        session = self._runtime.get_session(session_id)
+        if session is None:
+            return False
+        return session.status in BUSY_STATES or session.agent.has_pending_input
 
     async def deliver(self, *, session_id: str, content: str, request_id: str) -> None:
         await self._runtime.post(

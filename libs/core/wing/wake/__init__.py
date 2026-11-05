@@ -3,11 +3,12 @@
 两块驱动、一个出口：
 
 - **事件驱动**：订阅 ``TurnResultEvent``（source 收口）/ ``AskEvent``（source 提问），把一条普通用户
-  消息投回 target 会话（``runtime.post``，带新 ``request_id``）；
+  消息投回 target 会话（``runtime.post``，带新 ``request_id``）；``done`` 只在 source **静息**
+  时投递（它还会自己再动就押住，见 ``quiescence.py``），``ask`` 永远立即投递；
 - **时间驱动**：``WakeScheduler`` 睡到最近的 ``next_fire_at_ms``，到点投 ``timer`` 信封（心跳 / 定时
   唤醒），重启时对错过的排期做一次补偿；
-- **出口**：投递能力由组合根注入（:class:`wing.wake.ports.WakePorts`）——本包不 import
-  ``runtime`` / ``gateway``，也没有任何会话读写。
+- **出口**：投递与那条运行时事实（会话还会不会再跑一轮）都由组合根注入
+  （:class:`wing.wake.ports.WakePorts`）——本包不 import ``runtime`` / ``gateway``，也不持有会话对象。
 
 持久化在进程级 ``wing.db`` 的 ``wake_trigger`` 表（migration v2）；库打不开则整体不武装、网关照常跑。
 

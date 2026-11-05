@@ -21,6 +21,7 @@
 | 情形 | 行为 |
 |---|---|
 | source 收口（`TurnResultEvent`，任意 subtype） | 唤醒 target；done 配额 −1；信封带 subtype / 轮数 / 耗时 / 最后回复 |
+| source 收口，但**这一层还会自己再动**（§1.2） | **押住**：不投递、不扣配额、保持武装；它下一次收口时重新判 |
 | source 提问（`AskEvent`） | 唤醒 target；**不消耗** done 配额；信封带 `tool_call_id` + 问题与选项 |
 | source 被 interrupt | **不触发**（中断不发射 `turn_result`，既有口径） |
 | done 信封送达且配额归零 | 整条触发器立刻终结（`state=done`），不再留 ask 空转 |
@@ -51,8 +52,59 @@ drain-and-merge 缓解（多半并入同一轮）。这是刻意的：把「只�
 起一轮）。同理，`wing run` 在**回答 ask**（带 `--tool-call-id`）时不再登记 notify：派发时那条
 触发器仍在武装，本来就够，输出里会写明 `notify: off (answering an ask: ...)`。
 
-**done 缺省配额是 1**：`wing watch <SID>` 的语义是「它下次收口时叫我」，叫完这条就完成
-了。要盯多次用 `--times N`；只盯提问用 `--on ask`（配额永远不被消耗，等于常驻订阅）。
+**done 缺省配额是 1**：`wing watch <SID>` 的语义是「它下次静息时叫我」，叫完这条就完成
+了。要盯多次用 `--times N`（N 次静息）；只盯提问用 `--on ask`（配额永远不被消耗，等于
+常驻订阅）。「静息」的定义见 §1.2——它不等于「它这一轮说完了」。
+
+## 1.2 done = 「这一层不会再自己动了」
+
+单层编排里「这一轮说完了」与「这层交活了」同义；多级体系（manager → scheduler →
+executor）里两者分叉：中间层派完一波活就结束本轮，那一次收口照旧投递的话，上层只会看到
+"它刚派完"，而真正的终态因为**配额已被消耗**再没有人叫醒它——这不是多一次噪音，是信号
+被偷走。
+
+所以 `done` 的判据是**静息**：这一次收口之后，这一层还会不会被叫起来再跑一轮。
+
+- **判据的输入都是已存事实**：①该会话**自己**还会不会再跑一轮（正在跑 / 卡在一个提问上 /
+  inbox 里已经排好下一次输入）；②「谁欠谁一次叫醒」的连线——active 且订阅里有 `done` 的
+  会话触发器（`wake_trigger` 本来就是这张账本）。它自己会跑就是"还会动"；否则沿连线逆向
+  走一遍，撞见第一个会跑的会话就说明这条链还会把它叫起来。实现在
+  `libs/core/wing/wake/quiescence.py`（纯函数）。
+- **"自己还会跑"包含排队输入**：子会话在它这一轮**结束之前**完成、信封已经排进它的 inbox
+  时，`status` 仍是 `idle`（worker 还没开始下一轮），但那一轮一定会跑——只看状态会把中间轮
+  的 done 投出去，而那正是本节要修的那个坑的另一半。
+- **押住 ≠ 丢弃**：不投递、**不扣配额**、触发器保持武装。它下一次收口会重新判，而"下一次
+  收口"由机制自己保证——只要那条唤醒线还在武装，子会话的收口就会沿图把它叫醒。于是整条链
+  **自底向上收敛**，一次静息都不需要额外定时器（也没有超时兜底：不收敛 = 那棵树本来就有
+  重活，或者说它自己有自己的想法）。押住这件事在 `--list` 里看不出来（行仍是 `active`、
+  `fire_count` 不动）；排查"为什么没被叫醒"看日志
+  `wake: held done for <sid> (it is still moving)`。
+- **`timer` 不参与**：心跳 / 定时自唤醒是「到点叫醒」的计划，不是「这一层还有活没干完」。
+  计进来会让一棵带心跳的树永远不静息，所以一个 `wing wake --in 30m` 的自唤醒**不会**让这
+  一层被押住——它照样可能在你还没收尾时收下一条 done。
+- **`ask` 不参与**：`--on ask` 是常驻订阅（提问不消耗配额，一条订阅可能活很久），把它算进
+  "还会动"等于让那棵树在整个订阅期内都不静息。代价是反方向的：只被 ask 连线挂着的中间层，
+  可能在你还没收尾时就送来一条 done（它下一次被叫醒确实来自一个提问，而那条唤醒不在图里）。
+- **没有唤醒线连着的子会话看不见**：`--no-notify` 派发的子会话收口不叫醒任何人，于是
+  "这层不会再动"在机制上确实成立——判据如实回答会发生什么，不猜意图。
+- **本进程已 stalled 的连线不进图**（§9 的"记账写失败"）：那条线不会再有投递，当成"还会动"
+  会把整棵树挂住。
+- **无防环**（§9）：A 订阅 B、B 订阅 A 时递归由 visited 收敛，绕回来一律按"不会再动"
+  处理（宁可早一次投递，也不要把唤醒永久挂住）。
+
+代价是时间上更晚、语义上更保守：中间层故意留一个长跑子会话、但自己已经交付的情形，
+上层要等到那棵子树静下来才会被叫。要"派完就报"，就让中间层阻塞在工具调用里等（那时它是
+`working`，压根不产生 `turn_result`），或者由它显式上报终态。
+
+**押住之后不再重判的情形**——"下一次收口"其实没了：
+
+- **进程重启**：押住是纯内存里的决定（不落库），`start()` 只补偿 timer；重启后那条触发器仍
+  是 `active`、配额还在，但要等 source 下一次收口才会重新判；
+- 叫醒它的那条订阅被 `--cancel`、源头或目标被归档（`cancel_for_session`）、那个子会话被
+  interrupt（中断不发射 `turn_result`），或者它卡在一个永远没人回答的提问上。
+
+这些情形下谁也不会再叫它一次。给它发一条消息（或 `wing run -r <sid> -p "..."`）跑完一轮，
+判据就会重新判一次。这个边界是刻意用「不做超时兜底」换来的（§9）。
 
 ## 2. 时间语义（`kind=timer`）
 
@@ -183,20 +235,23 @@ wing run -p "..." [--no-notify] [--notify-to <SID>] [--notify-on done,ask] [--no
 ## 7. 后端结构（`libs/core/wing/wake/`，L3）
 
 ```
-spec.py       spec 语法 + 时间推进（纯函数，无 I/O）
-model.py      WakeKind / 状态常量 / on_events 解析 / WakeTrigger（行 ↔ 对象）
-store.py      WakeStore —— wake_trigger 的 SQL（唯一 SQL 处；走 wing.db）
-envelope.py   信封渲染（纯函数）
-scheduler.py  WakeScheduler —— 单 asyncio task + 可注入时钟 + notify()
-ports.py      WakePorts Protocol（session_exists / is_archived / deliver）
-service.py    WakeService —— 校验 / 生命周期 / 事件分发 / 投递 / 重启恢复
+spec.py        spec 语法 + 时间推进（纯函数，无 I/O）
+model.py       WakeKind / 状态常量 / on_events 解析 / WakeTrigger（行 ↔ 对象）
+store.py       WakeStore —— wake_trigger 的 SQL（唯一 SQL 处；走 wing.db）
+envelope.py    信封渲染（纯函数）
+quiescence.py  done 的静息判据（纯函数：状态 + 唤醒连线 → 还会不会再动）
+scheduler.py   WakeScheduler —— 单 asyncio task + 可注入时钟 + notify()
+ports.py       WakePorts Protocol（session_exists / is_archived / session_will_run_again / deliver）
+service.py     WakeService —— 校验 / 生命周期 / 事件分发 / 投递 / 重启恢复
 ```
 
 两条结构性选择：
 
-- **窄 ports 而非直接依赖 runtime**：`wake` 是 L3，投递必须走 `runtime.post`（L4）。组合根
-  （`WingRuntime._RuntimeWakePorts`）把三个方法接上；`wake` 因此不 import `runtime` /
-  `gateway`，也没有任何会话读写——全部生命周期能用假 ports 在 pytest 里确定性覆盖。
+- **窄 ports 而非直接依赖 runtime**：`wake` 是 L3，投递必须走 `runtime.post`（L4）、
+  静息判据要读运行时事实。组合根（`WingRuntime._RuntimeWakePorts`）把这四个方法接上；
+  `wake` 因此不 import `runtime` / `gateway`，也不持有会话对象——它需要的每一条运行时
+  事实与每一个副作用都只有 ports 这一条通道，全部生命周期能用假 ports 在 pytest 里确定性
+  覆盖。
 - **`install()` 与 `start()` 分开**：`install()`（订阅 EventBus、DB 不可用就不武装）由
   `WingRuntime.__init__` 调用（那里没有事件循环）；`start()`（起调度 task，第一棒是重启
   恢复）由 gateway lifespan 调用，与 `BackgroundScheduler` / `SessionReaper` 同层。
@@ -218,7 +273,9 @@ service.py    WakeService —— 校验 / 生命周期 / 事件分发 / 投递 /
 - **DB 不可用 = 唤醒整体不武装**：`wing.db` 打不开时 `install()` 只留一行 ERROR，创建
   回 503，列表为空，网关照常跑（与审计同款降级姿态）；
 - **stdio（`wing -p`）不加 notify**：它是阻塞式前端，调用方本来就在等；
-- **`wing wait` 不变**：作为「我就要阻塞等」的显式选择保留；
+- **`wing wait` 不变**：作为「我就要阻塞等」的显式选择保留，它仍按 `idle` / `inactive`
+  判定（不看子树是否静息）。要"等整棵树"就用唤醒（§1.2 的语义）；`wait` 提前返回是它的
+  既有口径（`cmd/wait.rs` 的模块文档写明了"idle 即完成"）；
 - **一台机器一个网关**：定时触发没有「认领」语义（`due_timers` 是纯读），同一个
   `WING_HOME` 上跑两个网关进程时，两条进程都会投递同一条到点的 timer 触发。部署假设
   与 `AGENTS.md` 的 worktree 纪律一致（本机只应存在一个网关）；

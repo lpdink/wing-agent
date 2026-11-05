@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Callable
 
@@ -40,6 +41,7 @@ from wing.wake.model import (
     parse_on_events,
 )
 from wing.wake.ports import WakePorts
+from wing.wake.quiescence import will_move_again
 from wing.wake.scheduler import WakeScheduler
 from wing.wake.spec import (
     SpecError,
@@ -438,6 +440,12 @@ class WakeService:
         except Exception:
             log.exception(f"wake: failed to load triggers for {session_id}")
             return
+        if not triggers:
+            return
+        # done 的静息判据是**事件**的属性（只依赖事件来自哪个会话），所以在分发前算一次：
+        # 同一 source 的 `done` 与 `done,ask` 是两条订阅，不该各查一遍整张图。
+        if kind == EVENT_DONE and self._held_by_quiescence(session_id, len(triggers)):
+            return
         for trigger in triggers:
             try:
                 await self._dispatch_one(trigger, kind, event)
@@ -481,6 +489,44 @@ class WakeService:
                 decrement=1 if kind == EVENT_DONE else 0,
                 next_fire_at_ms=None,
             ),
+        )
+
+    def _held_by_quiescence(self, session_id: str, trigger_count: int) -> bool:
+        """这一层还会不会再自己动（``True`` = 这一次 done 押住）。
+
+        判据自身出问题一律**当成已静息**（返回 ``False``，照旧投递）：唤醒这条路径上，
+        宁可多叫一次也不能不叫——判据是"少叫一次"的优化，不该成为丢信号的新失败面。
+        """
+        try:
+            if not self._source_will_move_again(session_id):
+                return False
+        except Exception:
+            log.exception("wake: failed to judge quiescence; delivering anyway")
+            return False
+        # 这一层还会自己再动：done 不成立。**不投递、不扣配额、保持武装**——它下一次收口会
+        # 重新判（子会话的收口沿唤醒图把它叫醒），终态因此自底向上收敛，一次静息都不需要
+        # 额外定时器（见 ``wing/wake/quiescence.py``）。
+        log.info(
+            f"wake: held done for {session_id} (it is still moving); "
+            f"the next settle fires {trigger_count} trigger(s)"
+        )
+        return True
+
+    def _source_will_move_again(self, session_id: str) -> bool:
+        """``done`` 的静息判据（语义与边界见 ``wing/wake/quiescence.py``）。
+
+        图用生成器送进去：source 自己还在跑时判据会提前返回，那次整表查询因此根本不发生
+        （中间层每收口一次就省一次扫）。"本进程已 stalled 的触发器"不进图：它的投递不会
+        再发生，当成"还会动"会把整棵树挂住。
+        """
+
+        def edges() -> Iterator[tuple[str, str]]:
+            yield from self._store.active_done_edges(exclude=frozenset(self._stalled))
+
+        return will_move_again(
+            session_id,
+            will_run=self._ports.session_will_run_again,
+            edges=edges(),
         )
 
     # ── 投递 ─────────────────────────────────────
