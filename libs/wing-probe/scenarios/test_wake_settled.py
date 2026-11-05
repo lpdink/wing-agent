@@ -3,16 +3,16 @@
 被守的语义（`docs/dev/wake.md` §1.2 + `wing/wake/quiescence.py`）：
 
 - ``done`` 是「**这一层不会再自己动了**」，不是「这一轮说完了」。中间层（scheduler）派完活
-  就结束本轮时，只要子树里还有会话会动（executor 在跑 / 它自己还被别人欠着一次叫醒），
-  这次收口就**不投递、不扣配额、保持武装**——否则被叫醒的上层只会看到"它刚派完"，
-  而真正的终态因配额已被吃光再没有人叫醒它；
+  就结束本轮时，只要子树里还有会话会动（executor 在跑 / 它自己已经排上下一轮），这次收口
+  就**不投递、不扣配额、保持武装**——否则被叫醒的上层只会看到"它刚派完"，而真正的终态
+  因配额已被吃光再没有人叫醒它；
 - 押住不是丢弃：中间层真的静息之后（executor 收口 → 那条叫醒线被消耗掉），下一次收口
   照常投递并终结。整条链**自底向上收敛**，不需要任何定时兜底；
 - ``ask`` 完全不受判据约束：提问立即投递、不消耗 done 配额。
 
-三个会话都是**真会话**（真跑模型），血缘经 ``POST /api/session/create`` 的
-``parent_session_id`` 落到盘上，唤醒线经 ``POST /api/wake/create`` 登记——与 agent 在
-shell 里派活时 CLI 做的事逐字一致。
+判据走的是**唤醒线**（父子派发时登记的那些订阅），不是血缘树：第一个用例刻意**不写
+``parent_session_id``**，押住与收敛照样成立；第二个用例带上血缘并断言它落库，证明两条
+事实各管各的（[`docs/dev/session-lineage.md`](../../../docs/dev/session-lineage.md) §1.1）。
 """
 
 from __future__ import annotations
@@ -30,10 +30,13 @@ MANAGER_MODEL = "probe/wake-settled-manager"
 SCHEDULER_MODEL = "probe/wake-settled-scheduler"
 EXECUTOR_MODEL = "probe/wake-settled-executor"
 
-#: executor 的长回合（分片 2 字符 + 每片 50ms ≈ 5s）：撑开"中间层收口"那一段观察窗口。
+#: executor 的长回合：286 字符 / 每片 2 字符 × 60ms ≈ 8.6s。观察窗口（1.5s）因此有 7s 以上的
+#: 余量——它是「executor 仍在跑」这条前提的全部余量，别缩短。
 LONG_TEXT = (
     "grinding through the long task one small step at a time so that the middle "
-    "layer finishes its own turn while this one is unmistakably still running"
+    "layer finishes its own turn, and the manager gets a chance to be woken too "
+    "early, while this one is unmistakably still running from the outside and "
+    "will keep running until the script runs out of chunks to stream"
 )
 
 #: scheduler 给人类的那一问（多问题形态；信封里会带上 tool_call_id）。
@@ -48,7 +51,7 @@ ACK = "ack"
 
 
 async def _create(probe: Probe, *, model: str, parent: str | None = None) -> Session:
-    """带血缘建会话并挂上事件流（CLI 在 agent 的 shell 里就是这么建的）。"""
+    """建会话并挂上事件流（``parent`` 给定时带血缘，与 CLI 在 agent 的 shell 里一致）。"""
     body: dict[str, Any] = {
         "agent": {"model_id": model},
         "workspace": str(probe.workspace),
@@ -110,8 +113,18 @@ async def _wait_envelope(
     )
 
 
+async def _expect_no_envelope(probe: Probe, session_id: str, *, within: float) -> None:
+    """在 ``within`` 秒的窗口内一条信封都不该到（到了就带着它失败）。"""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        early = _envelopes(probe, session_id)
+        if early:
+            raise AssertionError(f"{session_id} was woken too early: {early}")
+        await asyncio.sleep(0.05)
+
+
 async def _start_long_turn(executor: Session) -> None:
-    """让 executor 跑起来但不阻塞``（派发方"派完就走"）``。"""
+    """让 executor 跑起来但不阻塞（派发方"派完就走"）。"""
     await executor.send("long task")
     await executor.watch.expect("text", within=20)
 
@@ -125,7 +138,7 @@ async def test_a_middle_layer_with_live_work_does_not_wake_its_parent(
     probe: Probe,
 ) -> None:
     """scheduler 收口时 executor 还在跑：manager 这次不被叫醒，静息后才被叫醒。"""
-    probe.register(EXECUTOR_MODEL, Turn.of(text=LONG_TEXT, chunk=2, delay=0.05))
+    probe.register(EXECUTOR_MODEL, Turn.of(text=LONG_TEXT, chunk=2, delay=0.06))
     probe.register(
         SCHEDULER_MODEL,
         Turn.of(text="dispatched the executor"),
@@ -133,9 +146,10 @@ async def test_a_middle_layer_with_live_work_does_not_wake_its_parent(
     )
     probe.register(MANAGER_MODEL, *[Turn.of(text=ACK) for _ in range(4)])
 
+    # 刻意不写血缘：判据只认唤醒线（血缘是分类与呈现的事实，见模块 docstring）。
     manager = await _create(probe, model=MANAGER_MODEL)
-    scheduler = await _create(probe, model=SCHEDULER_MODEL, parent=manager.session_id)
-    executor = await _create(probe, model=EXECUTOR_MODEL, parent=scheduler.session_id)
+    scheduler = await _create(probe, model=SCHEDULER_MODEL)
+    executor = await _create(probe, model=EXECUTOR_MODEL)
 
     # 两条叫醒线：executor → scheduler（子收口叫醒它）、scheduler → manager（本场景的被测线）
     await _wake(probe, source=executor.session_id, target=scheduler.session_id)
@@ -148,9 +162,8 @@ async def test_a_middle_layer_with_live_work_does_not_wake_its_parent(
 
     # scheduler 只是"派完活就结束本轮"：executor 仍在跑，这一次收口不该叫醒 manager
     assert (await scheduler.chat("dispatch the executor")).data["subtype"] == "success"
-    await asyncio.sleep(1.0)
+    await _expect_no_envelope(probe, manager.session_id, within=1.5)
 
-    assert _envelopes(probe, manager.session_id) == []
     held = await _wake_row(probe, to_manager["id"])
     assert (held["state"], held["fire_count"]) == ("active", 0), held
     # 观察窗口内前提始终成立（不是"executor 恰好已经跑完了"）
@@ -161,7 +174,9 @@ async def test_a_middle_layer_with_live_work_does_not_wake_its_parent(
     envelope = await _wait_envelope(
         probe, manager.session_id, f"[wing] session {scheduler.session_id} finished"
     )
-    assert "subtype=success" in envelope, envelope
+    # 投的是**真正静息的那一轮**，不是被押住的那一轮
+    assert "Last message:\nintegrated the result" in envelope, envelope
+    assert "dispatched the executor" not in envelope, envelope
     settled = await _wake_row(probe, to_manager["id"])
     assert (settled["state"], settled["fire_count"]) == ("done", 1), settled
 
@@ -181,7 +196,7 @@ async def test_ask_is_delivered_while_the_subtree_is_still_running(
     probe: Probe,
 ) -> None:
     """提问不受静息判据约束：子树还在跑，ask 也立刻送达，且不消耗 done 配额。"""
-    probe.register(EXECUTOR_MODEL, Turn.of(text=LONG_TEXT, chunk=2, delay=0.05))
+    probe.register(EXECUTOR_MODEL, Turn.of(text=LONG_TEXT, chunk=2, delay=0.06))
     probe.register(
         SCHEDULER_MODEL,
         Turn.of(tool_calls=[ToolCall("AskUserQuestion", {"questions": [QUESTION]})]),
@@ -191,6 +206,12 @@ async def test_ask_is_delivered_while_the_subtree_is_still_running(
     manager = await _create(probe, model=MANAGER_MODEL)
     scheduler = await _create(probe, model=SCHEDULER_MODEL, parent=manager.session_id)
     executor = await _create(probe, model=EXECUTOR_MODEL, parent=scheduler.session_id)
+
+    # 血缘照常落库（本场景与第一个用例互补：这里要证明三条会话确实是三层树）
+    info = await probe.driver_required.http.request(
+        "GET", "/api/session/info", params={"session_id": scheduler.session_id}
+    )
+    assert info["parent_session_id"] == manager.session_id, info
 
     await _wake(probe, source=executor.session_id, target=scheduler.session_id)
     to_manager = await _wake(

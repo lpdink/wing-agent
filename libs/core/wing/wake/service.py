@@ -439,6 +439,12 @@ class WakeService:
         except Exception:
             log.exception(f"wake: failed to load triggers for {session_id}")
             return
+        if not triggers:
+            return
+        # done 的静息判据是**事件**的属性（只依赖事件来自哪个会话），所以在分发前算一次：
+        # 同一 source 的 `done` 与 `done,ask` 是两条订阅，不该各查一遍整张图。
+        if kind == EVENT_DONE and self._held_by_quiescence(session_id, len(triggers)):
+            return
         for trigger in triggers:
             try:
                 await self._dispatch_one(trigger, kind, event)
@@ -449,17 +455,6 @@ class WakeService:
         self, trigger: WakeTrigger, kind: str, event: WingEvent
     ) -> None:
         if not trigger.active:
-            return
-        if kind == EVENT_DONE and self._source_will_move_again(
-            trigger.source_session_id
-        ):
-            # 这一层还会自己再动：done 不成立。**不投递、不扣配额、保持武装**——
-            # 它下一次收口会重新判（子会话的收口沿唤醒图把它叫醒），终态因此自底向上收敛，
-            # 一次静息都不需要额外定时器（见 ``wing/wake/quiescence.py``）。
-            log.info(
-                f"wake: held #{trigger.id} (source {trigger.source_session_id} "
-                f"is still moving; it will fire on the next settle)"
-            )
             return
         if kind == EVENT_DONE:
             assert isinstance(event, TurnResultEvent)
@@ -495,27 +490,36 @@ class WakeService:
             ),
         )
 
-    def _source_will_move_again(self, session_id: str | None) -> bool:
+    def _held_by_quiescence(self, session_id: str, trigger_count: int) -> bool:
+        """这一层还会不会再自己动（``True`` = 这一次 done 押住）。
+
+        判据自身出问题一律**当成已静息**（返回 ``False``，照旧投递）：唤醒这条路径上，
+        宁可多叫一次也不能不叫——判据是"少叫一次"的优化，不该成为丢信号的新失败面。
+        """
+        try:
+            if not self._source_will_move_again(session_id):
+                return False
+        except Exception:
+            log.exception("wake: failed to judge quiescence; delivering anyway")
+            return False
+        # 这一层还会自己再动：done 不成立。**不投递、不扣配额、保持武装**——它下一次收口会
+        # 重新判（子会话的收口沿唤醒图把它叫醒），终态因此自底向上收敛，一次静息都不需要
+        # 额外定时器（见 ``wing/wake/quiescence.py``）。
+        log.info(
+            f"wake: held done for {session_id} (it is still moving); "
+            f"the next settle fires {trigger_count} trigger(s)"
+        )
+        return True
+
+    def _source_will_move_again(self, session_id: str) -> bool:
         """``done`` 的静息判据（语义与边界见 ``wing/wake/quiescence.py``）。
 
-        失败一律**当成已静息**（照旧投递）：唤醒这条路径上，宁可多叫一次也不能不叫——
-        ``wing.db`` 降级时 ``active_done_edges`` 本来就是空表，判据自然退化成旧行为。
-
-        本进程已 stalled 的触发器不进图：它的投递不会再发生，当成"还会动"会把整棵树挂住。
+        "本进程已 stalled 的触发器"不进图：它的投递不会再发生，当成"还会动"会把整棵树挂住。
         """
-        if not session_id:
-            return False
-        try:
-            edges = [
-                (source, target)
-                for wake_id, source, target in self._store.active_done_edges()
-                if wake_id not in self._stalled
-            ]
-        except Exception:
-            log.exception("wake: failed to load wake edges; delivering anyway")
-            return False
         return will_move_again(
-            session_id, status_of=self._ports.session_status, edges=edges
+            session_id,
+            will_run=self._ports.session_will_run_again,
+            edges=self._store.active_done_edges(exclude=frozenset(self._stalled)),
         )
 
     # ── 投递 ─────────────────────────────────────

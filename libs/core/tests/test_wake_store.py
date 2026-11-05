@@ -131,11 +131,11 @@ class TestQueries:
     ) -> None:
         """静息判据的输入图：只有「会送 done」的 active 会话订阅连成边。
 
-        ``ask`` 常驻订阅（不消耗配额）、timer（心跳）、已终结的行、没有 source 的脏行
-        都不进图——把 ask 或 timer 计进来会让一棵树永不静息。
+        ``ask`` 常驻订阅（不消耗配额）、timer（心跳）、已终结的行、值域外的脏值、
+        没有 source 的脏行都不进图——把 ask 或 timer 计进来会让一棵树永不静息。
         """
-        both = _insert(store, source_session_id="both", target_session_id="parent")
-        done_only = _insert(
+        _insert(store, source_session_id="both", target_session_id="parent")
+        _insert(
             store,
             source_session_id="done",
             target_session_id="parent",
@@ -143,6 +143,12 @@ class TestQueries:
         )
         _insert(
             store, source_session_id="ask", target_session_id="parent", on_events="ask"
+        )
+        _insert(
+            store,
+            source_session_id="bogus",
+            target_session_id="parent",
+            on_events="doneX",
         )
         _insert_timer(store, 100)
         finished = _insert(
@@ -154,11 +160,18 @@ class TestQueries:
         store.set_state(finished.id, STATE_DONE)
         _insert(store, source_session_id=None, target_session_id="parent")
 
-        assert sorted(store.active_done_edges()) == [
-            (both.id, "both", "parent"),
-            (done_only.id, "done", "parent"),
+        assert store.active_done_edges() == [
+            ("both", "parent"),
+            ("done", "parent"),
         ]
-        assert both.id and done_only.id  # 只是确认它们真的落库了
+
+    def test_active_done_edges_can_exclude_stalled_rows(self, store: WakeStore) -> None:
+        """本进程已 stalled 的行可以排除（那条线不会再投递，算"还会动"会挂住整棵树）。"""
+        first = _insert(store, source_session_id="a", target_session_id="parent")
+        _insert(store, source_session_id="b", target_session_id="parent")
+        assert store.active_done_edges(exclude=frozenset({first.id})) == [
+            ("b", "parent")
+        ]
 
 
 class TestMutations:

@@ -52,13 +52,13 @@ class Clock:
 
 
 class FakePorts:
-    """``WakePorts`` 的替身：记录投递、可注入失败与运行时状态。"""
+    """``WakePorts`` 的替身：记录投递、可注入失败与"还会不会再跑一轮"。"""
 
     def __init__(self) -> None:
         self.existing: set[str] = {CHILD, PARENT, OTHER, GRAND, GRAND2}
         self.archived: set[str] = set()
-        self.status: dict[str, str] = {}
-        """运行时状态（不在表里 = ``inactive``，与"未加载"同义）。"""
+        self.running: set[str] = set()
+        """还会再跑一轮的会话（正在跑 / 等回答 / 排队输入；不在表里 = 已静默或未加载）。"""
         self.delivered: list[tuple[str, str, str]] = []
         self.error: BaseException | None = None
 
@@ -68,8 +68,8 @@ class FakePorts:
     def is_archived(self, session_id: str) -> bool:
         return session_id in self.archived
 
-    def session_status(self, session_id: str) -> str:
-        return self.status.get(session_id, "inactive")
+    def session_will_run_again(self, session_id: str) -> bool:
+        return session_id in self.running
 
     async def deliver(self, *, session_id: str, content: str, request_id: str) -> None:
         if self.error is not None:
@@ -596,7 +596,7 @@ class TestSettledDone:
         """scheduler 派完活就结束本轮：executor 还在跑 → 上层这次不叫。"""
         _wake_edge(service, CHILD, PARENT)
         _wake_edge(service, GRAND, CHILD)
-        ports.status[GRAND] = "working"
+        ports.running.add(GRAND)
 
         service._on_event(_done())
         await _drain()
@@ -610,36 +610,49 @@ class TestSettledDone:
         )
 
     @pytest.mark.asyncio
-    async def test_waiting_descendant_also_holds(
+    async def test_its_own_next_turn_holds_the_done(
         self, service: WakeService, ports: FakePorts
     ) -> None:
-        """``waiting``（等人回答）同样是"还会动"：答了它就接着跑。"""
-        _wake_edge(service, CHILD, PARENT)
-        _wake_edge(service, GRAND, CHILD)
-        ports.status[GRAND] = "waiting"
+        """子会话在这期间完成了、信封已排进它的 inbox：下一轮已经排上，这一轮不是终态。
+
+        这是最容易漏的那半个窗口：叫醒它的那条连线已经**消耗掉**，所以它自己身上没有任何
+        caller；只看连线会判静息，把中间轮的 done 投出去、把上级的配额花光。
+        """
+        _session_trigger(service)
+        ports.running.add(CHILD)
 
         service._on_event(_done())
         await _drain()
         assert ports.delivered == []
+
+        # 下一轮跑完、真正静下来 → 这一次收口才叫醒上级
+        ports.running.discard(CHILD)
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
 
     @pytest.mark.asyncio
     async def test_held_done_fires_on_the_next_settle(
         self, service: WakeService, ports: FakePorts
     ) -> None:
-        """押住不是丢弃：后代静下来之后，下一次收口照常投递并扣配额。"""
+        """押住不是丢弃：后代收口（那条连线被消耗）之后，下一次收口照常投递并扣配额。"""
         _wake_edge(service, CHILD, PARENT)
         _wake_edge(service, GRAND, CHILD)
-        ports.status[GRAND] = "working"
+        ports.running.add(GRAND)
         service._on_event(_done())
         await _drain()
         assert ports.delivered == []
 
-        # 后代收口（自己的订阅被消耗）→ 这一层被叫醒 → 再收口时已经静息
-        ports.status.pop(GRAND)
+        # 后代真的收口：它自己先把这一轮跑完（不再 moving），done 送达 → 连线就此消耗
+        ports.running.discard(GRAND)
+        service._on_event(_done(session_id=GRAND))
+        await _drain()
+        assert _trigger_of(service, GRAND).state == STATE_DONE
+
         service._on_event(_done())
         await _drain()
 
-        assert len(ports.delivered) == 1
+        assert [target for target, _, _ in ports.delivered] == [CHILD, PARENT]
         finished = _trigger_of(service, CHILD)
         assert (finished.state, finished.fire_count) == (STATE_DONE, 1)
 
@@ -651,33 +664,19 @@ class TestSettledDone:
         _wake_edge(service, CHILD, PARENT)
         _wake_edge(service, GRAND, CHILD)
         _wake_edge(service, GRAND2, GRAND)
-        ports.status[GRAND] = "idle"
-        ports.status[GRAND2] = "working"
+        ports.running.add(GRAND2)
 
         service._on_event(_done())
         await _drain()
         assert ports.delivered == []
 
     @pytest.mark.asyncio
-    async def test_a_stale_subscription_does_not_hold(
+    async def test_an_idle_caller_chain_is_quiet(
         self, service: WakeService, ports: FakePorts
     ) -> None:
-        """连线的上游自己已经不动（陈旧订阅 / ``--times N`` 剩下的配额）：不算"还会动"。"""
+        """连线还在、但上游谁也不会再动（陈旧的 / 部分消耗的订阅）：不算"还会动"。"""
         _wake_edge(service, CHILD, PARENT)
-        _wake_edge(service, GRAND, CHILD)  # GRAND 已 idle 且不再武装
-
-        service._on_event(_done())
-        await _drain()
-        assert len(ports.delivered) == 1
-
-    @pytest.mark.asyncio
-    async def test_its_own_status_is_not_consulted(
-        self, service: WakeService, ports: FakePorts
-    ) -> None:
-        """判据不看 source 自己的状态：那一刻它是否已落成 idle 取决于 emit 与置空 working
-        的先后，那个顺序不该成为契约（见 ``_source_will_move_again``）。"""
-        _wake_edge(service, CHILD, PARENT)
-        ports.status[CHILD] = "working"
+        _wake_edge(service, GRAND, CHILD)
 
         service._on_event(_done())
         await _drain()
@@ -690,7 +689,7 @@ class TestSettledDone:
         """提问立即投递、不消耗配额——与静息判据完全无关。"""
         _wake_edge(service, CHILD, PARENT)
         _wake_edge(service, GRAND, CHILD)
-        ports.status[GRAND] = "working"
+        ports.running.add(GRAND)
 
         service._on_event(_ask())
         await _drain()
@@ -711,7 +710,7 @@ class TestSettledDone:
         """``--on ask`` 是常驻订阅（不消耗配额），不能让它把整棵树判成永不静息。"""
         _wake_edge(service, CHILD, PARENT)
         _wake_edge(service, GRAND, CHILD, on_events="ask")
-        ports.status[GRAND] = "working"
+        ports.running.add(GRAND)
 
         service._on_event(_done())
         await _drain()
@@ -724,7 +723,7 @@ class TestSettledDone:
         """押住多少次都不扣配额：``--times 3`` 的订阅剩下的仍是 3。"""
         _wake_edge(service, CHILD, PARENT, times=3)
         _wake_edge(service, GRAND, CHILD)
-        ports.status[GRAND] = "working"
+        ports.running.add(GRAND)
 
         for _ in range(3):
             service._on_event(_done())
@@ -756,18 +755,50 @@ class TestSettledDone:
         """记账写失败被 stall 的连线不会再有投递：当成"还会动"会把整棵树永久挂住。"""
         _wake_edge(service, CHILD, PARENT)
         _wake_edge(service, GRAND, CHILD)
-        ports.status[GRAND] = "working"
         monkeypatch.setattr(service._store, "record_fire", lambda *a, **k: False)
 
         # 后代的投递成功但记账丢了 → 那条连线在本进程内被 stall
         service._on_event(_done(session_id=GRAND))
         await _drain()
         assert _trigger_of(service, GRAND).state == STATE_ACTIVE
+        assert [target for target, _, _ in ports.delivered] == [CHILD]
+        # 它其实还在跑下一轮：线上看起来"还欠一次叫醒"，但那一次永远不会来
+        ports.running.add(GRAND)
 
-        # 它已经不欠任何人了：这一层照常收口投递（不被那条死线挂住）
+        # 死线不进图：这一层照常收口投递（不被它挂住）
         service._on_event(_done())
         await _drain()
         assert [target for target, _, _ in ports.delivered] == [CHILD, PARENT]
+
+    @pytest.mark.asyncio
+    async def test_a_failing_judgement_delivers_anyway(
+        self, service: WakeService, ports: FakePorts, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """判据自己出问题 = 已静息：唤醒这条路径上宁可多叫一次，也不能吞掉一次收口。"""
+        _session_trigger(service)
+
+        def boom(session_id: str) -> bool:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(service, "_source_will_move_again", boom)
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_broken_status_port_delivers_anyway(
+        self, service: WakeService, ports: FakePorts, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """端口抛异常同样折成"已静息"（判据的失败面整个包在 try 里）。"""
+        _session_trigger(service)
+
+        def boom(session_id: str) -> bool:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(ports, "session_will_run_again", boom)
+        service._on_event(_done())
+        await _drain()
+        assert len(ports.delivered) == 1
 
 
 # ============================================================

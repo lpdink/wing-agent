@@ -326,7 +326,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-theming.md`](docs/dev/tui-theming.md) | TUI 明暗主题：`colors.preset` 三值（auto/dark/light）、显式 `appearance`、light 调色板与 WCAG 判据、OSC 11 探测与降级、浅色下各渲染面的处置（toast/选中行/品牌图形/语法主题） |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 标签）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、**用户消息里的图**（媒体对象：形状来自引用、按视口抓字节、字节 LRU、失败即状态）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
 | [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
-| [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
+| [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、`done` 的静息判据与「押住」（不投递不扣配额）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
 | [`docs/dev/session-lineage.md`](docs/dev/session-lineage.md) | 会话血缘：父子关联字段语义、采集机制（CLI / TUI / 外部前端）、树序与 pin 规则的产品语义参照点 |
 | [`docs/dev/tui-input.md`](docs/dev/tui-input.md) | TUI 输入通道：鼠标上报的 DECSET 配对与生命周期对称、滚轮 / 键盘 / 选择的路由（新增鼠标能力前先读） |
 | [`docs/dev/tui-signals.md`](docs/dev/tui-signals.md) | TUI 终端状态信号：OSC 0（标题）/ OSC 9（桌面通知）/ OSC 7501（程序状态）的读者与语义、光标转义的变化语义 |

@@ -9,6 +9,7 @@ state_change（会话状态变更）、query_response（查询响应）。
 """
 
 from .base import (
+    BUSY_STATES,
     AgentInfo,
     CommandInfo,
     DeliveredEvent,
@@ -128,6 +129,7 @@ __all__ = [
     "CommandInfo",
     "SessionInfo",
     "SessionStatus",
+    "BUSY_STATES",
     "ErrorEvent",
     "NoticeEvent",
     "DeliveredEvent",

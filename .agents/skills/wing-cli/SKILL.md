@@ -73,16 +73,16 @@ tags: [cli, orchestration, reference, wake, headless]
 |---|---|
 | `wing run -p "<prompt>" [--json]` | **非阻塞**：建会话 + 发 prompt，立即返回 session id |
 | `wing wait <sid...> [--timeout S] [--json]` | **阻塞**直到这些会话 idle / inactive（`--timeout` 上限，默认 600） |
-| `wing watch <sid> [--times N] [--on done,ask] [-p TEXT] [--to SID]` | 登记「它收口 / 提问 → 唤醒我」 |
+| `wing watch <sid> [--times N] [--on done,ask] [-p TEXT] [--to SID]` | 登记「它静息 / 提问 → 唤醒我」 |
 | `wing watch --list [--all]` / `wing watch --cancel <id>` | 列出 / 取消**全部**触发器（`KIND` 列区分 session / timer，不按 kind 过滤） |
 | `wing wake (--in 30m \| --at "2026-03-01 09:00" \| --every 30m \| --daily 07:00) -p TEXT [--times N] [--to SID]` | 定时（心跳）唤醒 |
 | `wing wake --list [--all]` / `wing wake --cancel <id>` | 同 `wing watch --list` / `--cancel`：**全部**触发器，两个子命令等价 |
 
 **等子会话只有两条路：停下等唤醒（`wing run` 默认登记 notify，派完结束本轮即可），或 `wing wait`；禁止用 `sleep` 等会话**——`sleep 600; wing ps …` 把唤醒消息压在工具结果边界里，睡多久就白等多久。两条路也各有前提（notify 是否在武装 / 派发时要不要 `--no-notify`、`wing wait` 不放行提问中的会话）：见 [wing-scheduler §7.1](../wing-scheduler/SKILL.md)；timeout 怎么给见 §5 坑 1。
 
-`wing watch` 的缺省语义是**叫一次就结束**：一条 `done` 信封送达后触发器终结（配额 1）；`ask` 唤醒**不消耗**配额，所以只盯提问时等于常驻订阅。要盯多次收口用 `--times N`。
+`wing watch` 的缺省语义是**叫一次就结束**：一条 `done` 信封送达后触发器终结（配额 1）；`ask` 唤醒**不消耗**配额，所以只盯提问时等于常驻订阅。要盯多次静息用 `--times N`。
 
-`done` 的含义是**「这一层不会再自己动了」**，不是「这一轮说完了」：它派出去的会话还在跑（或还被别人欠着一次叫醒）时，这次收口**押住不投**（不扣配额、保持武装），等第一次静息才叫醒你。所以「派完一波就结束本轮」的中间层不会提前把你叫醒，也不会把配额浪费在一次无意义的收口上（[`docs/dev/wake.md`](../../../docs/dev/wake.md) §1.2）；`ask` 完全不受影响，提问永远立刻送达。
+`done` 的含义是**「这一层不会再自己动了」**，不是「这一轮说完了」：它派出去的会话还在跑、或它自己已经排上了下一轮（子会话的回报刚进它的 inbox）时，这次收口**押住不投**（不扣配额、保持武装），等第一次静息才叫醒你。所以「派完一波就结束本轮」的中间层不会提前把你叫醒，也不会把配额浪费在一次无意义的收口上（[`docs/dev/wake.md`](../../../docs/dev/wake.md) §1.2）；`ask` 完全不受影响，提问永远立刻送达。
 
 同一 `(source, target, on_events)` 再登记一次是**刷新**那一条订阅（不新增、不产生第二条投递路径）：`--times` / `-p` 不给就保持原值——所以 `wing run -r` 的隐式登记既不会把 `--times 3` 剩下的配额降成 1，也不会清掉自定义正文（细节见 [`docs/dev/wake.md`](../../../docs/dev/wake.md) §1）。
 
@@ -249,7 +249,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 5. **`-w/--watch` 不是 `wing watch`**：前者是全局的「每 2 秒刷新」显示旗标（目前只有 `wing ps` 用），后者是唤醒订阅。
 6. **`-p` 会打开参数过滤器（未知旗标被静默丢）**：`wing run --permission-mode bypassPermissions -p …` 照常派发 `run`，但 `--permission-mode` 连同它的值被当成外部 SDK 旗标丢掉——不报错、也不生效。子命令自己的旗标务必写在子命令之后。（顶层的 `-p` 是另一回事：那会走 stdio 并忽略子命令，见 §1。）
 7. **notify 没有目标是正常的**：root shell 里没有 `WING_SESSION_ID` → `off (no parent session)`，需要 `--notify-to <sid>` 或显式 `wing watch`。
-8. **source == target 会被 400 拒**：不能登记「它收口时叫醒它自己」；也**不做防环**（A 订阅 B、B 订阅 A 会互相唤醒，这是使用者的事）。
+8. **source == target 会被 400 拒**：不能登记「它静息时叫醒它自己」；也**不做防环**（A 订阅 B、B 订阅 A 会互相唤醒，这是使用者的事）。
 9. **归档会取消触发器**：source 或 target 进归档区 → 相关触发器 `canceled`；长期订阅别挂在会被自动归档（默认 90 天）的会话上，给它们打 `pin` 标签可豁免自动归档。
 10. **stdio（`wing -p`）没有 notify**：它是阻塞式前端，调用方本来就在等。
 11. **`--list` 不按 kind 过滤**：`wing watch --list` 也会列出 timer 触发器（反之亦然），看 `KIND` 列区分；`--cancel` 同理只认 id。

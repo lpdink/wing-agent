@@ -86,8 +86,8 @@ pub struct RunArgs {
 
     /// Which events wake the target: `done`, `ask`, or both (default: `done,ask`).
     ///
-    /// `ask` is always immediate (a question needs a human) and never consumes
-    /// the quota; `done` waits for the spawned subtree to settle.
+    /// `ask` is always immediate and never consumes the quota (`--no-notify`
+    /// above explains what `done` waits for).
     #[arg(long = "notify-on", value_name = "EVENTS")]
     pub notify_on: Option<String>,
 

@@ -7,19 +7,19 @@
 
 判据只能建立在**已存事实**上，且要回答「未来还会不会有轮次」，而不是「现在有没有人在跑」：
 
+- ``will_run``：该会话**自己**还会不会再跑一轮——正在跑、在等人类回答、或者 inbox 里已经
+  排上了下一轮的输入（``ports.session_will_run_again`` 是它的唯一实现）。``idle`` 且没有
+  排队输入 = 这一轮就是它最后的状态。
 - ``edges``：``(source, target)``——一条 active、且订阅里有 ``done`` 的会话触发器。
-  ``source`` 收口会叫醒 ``target``，于是这张图就是「谁欠谁一次叫醒」的持久账本；
-- ``status_of``：会话运行时状态（``working`` / ``waiting`` = 现在就在动）。
+  ``source`` 收口会叫醒 ``target``，于是这张图就是「谁欠谁一次叫醒」的持久账本。
 
-从 ``session_id`` 出发沿 ``edges`` 逆向（target → 它的 source）走一遍：只要撞见一个现在在动
-的 session，或者一个自己也被别人欠着叫醒的 session（递归成立），它就还会动。
+从 ``session_id`` 出发：**它自己**还会跑 → 还会动；否则沿 ``edges`` 逆向（target → 它的
+source）走一遍，撞见第一个``will_run`` 为真的会话就说明这条链还会把它叫起来。
 
-刻意不进判据的三件事：
+刻意不进判据的两件事：
 
-- **它自己的状态**：调用点在它自己的 ``turn_result`` 之后，那一刻它是否已经落成 ``idle``
-  取决于 emit 与 working 置空的先后——那个顺序不该成为契约（见 service 里的说明）；
-- **timer 订阅**（``kind=timer``：心跳 / 定时自唤醒）：它不表达「这层还有活没干完」，
-  计进来会让一棵带心跳的树永远不静息；
+- **timer 订阅**（``kind=timer``：心跳 / 定时自唤醒）：它是「到点叫醒」的计划，不是「这一层
+  还有活没干完」。计进来会让一棵带心跳的树永远不静息。
 - **没有唤醒线连着的子会话**（例如 ``--no-notify`` 派发的）：它们收口不叫醒任何人，
   于是「这层不会再动」在机制上确实成立——判据如实回答会发生什么，不猜意图。
 
@@ -31,26 +31,26 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-#: 「现在就在动」的运行时状态（``waiting`` = 等人回答，答了就会接着跑）。
-MOVING_STATES = frozenset({"working", "waiting"})
-
 
 def will_move_again(
     session_id: str,
     *,
-    status_of: Callable[[str], str],
+    will_run: Callable[[str], bool],
     edges: Iterable[tuple[str, str]],
 ) -> bool:
-    """``session_id`` 收口之后，还会不会被某条唤醒线叫起来再跑一轮。
+    """``session_id`` 收口之后，还会不会被叫起来再跑一轮。
 
     Args:
-        session_id: 刚收口的会话（它自己的状态不参与判定，见模块说明）。
-        status_of: 会话 id → 运行时状态（未知 / 已逐出按 ``inactive``）。
+        session_id: 刚收口的会话。
+        will_run: 会话 id → 它自己还会不会再跑一轮（未加载 / 已静默的按 ``False``）。
         edges: ``(source, target)`` 的唤醒连线（只含会送 done 的 active 会话订阅）。
 
     Returns:
         ``True`` = 还会动（这一次 done 不成立）；``False`` = 已经静息。
     """
+    if will_run(session_id):
+        return True
+
     callers: dict[str, list[str]] = {}
     for source, target in edges:
         callers.setdefault(target, []).append(source)
@@ -62,10 +62,10 @@ def will_move_again(
         if node in visited:
             continue
         visited.add(node)
-        if status_of(node) in MOVING_STATES:
+        if will_run(node):
             return True
         stack.extend(callers.get(node, ()))
     return False
 
 
-__all__ = ["MOVING_STATES", "will_move_again"]
+__all__ = ["will_move_again"]

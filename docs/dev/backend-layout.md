@@ -79,7 +79,7 @@
 | `provider/` | L3 | 模型调用协议层：OpenAI 兼容 / Anthropic 隔离、SSE 传输、无状态 provider 与全进程共享池（`pool.py`） |
 | `db/`（database / migrations） | L3 | 进程级 SQLite 门面：`$WING_HOME/core/wing.db`、WAL + `user_version` 迁移、**打开失败即降级**（读写作 no-op）、跨线程单连接（一把可重入锁 + `transaction()`）；与会话持久化（`store/`）正交 |
 | `audit/`（recorder；原 `metrics_registry/`） | L3 | 审计：EventBus 订阅 → `wing.db` 的 `audit_*` 表各追加一行（LLM 调用 / 工具调用 / 压缩 / 用户消息；`install()` 由组合根显式调用） |
-| `wake/`（spec / model / store / envelope / scheduler / ports / service） | L3 | 会话唤醒：`wake_trigger` 表的触发器（事件驱动 + 定时驱动）+ 内置信封投递；投递能力由组合根经窄 `WakePorts` 注入（不 import `runtime` / `gateway`），语义见 [wake.md](wake.md) |
+| `wake/`（spec / model / store / envelope / quiescence / scheduler / ports / service） | L3 | 会话唤醒：`wake_trigger` 表的触发器（事件驱动 + 定时驱动）+ 内置信封投递；`done` 按**静息判据**投递（`quiescence`，它还会自己再动就押住不扣配额）；投递与那条运行时事实由组合根经窄 `WakePorts` 注入（不 import `runtime` / `gateway`），语义见 [wake.md](wake.md) |
 | `metrics/`（store / measures / report / catalog） | L3 | 用量统计：`audit_*` + `session_catalog` 的聚合（`store` 读、`catalog` 写；`report` 做窗口 → 维度 → wire 的投影），口径见 [usage.md](usage.md) |
 | `commands.py`（原 `magic_command/`） | L3 | prompt 命令：registry 元数据 + `$ARGUMENTS` 展开 |
 | `runtime.py` | L4 | WingRuntime：service 层协调者，`post()` 唯一入站，路由到 Session / ContextManager |

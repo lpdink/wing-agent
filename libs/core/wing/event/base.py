@@ -58,6 +58,10 @@ class EventTarget(BaseModel):
 #   waiting  — 有工具阻塞在 feedback waiter，等待用户反馈
 SessionStatus = Literal["inactive", "idle", "working", "waiting"]
 
+#: 「还会再产生轮次」的状态（``idle`` 已收口、``inactive`` 不在内存）。
+#: 值域与 ``SessionStatus`` 同处声明：判「它还会不会再动」的地方共用这一份，不各写一份字面量。
+BUSY_STATES: frozenset[SessionStatus] = frozenset({"working", "waiting"})
+
 
 class SessionInfo(BaseModel):
     """用于会话列表/详情中的 session 摘要信息。

@@ -1,14 +1,14 @@
-//! `wing watch` — 订阅一个会话的收口 / 提问，把结果送回我的会话。
+//! `wing watch` — 订阅一个会话的静息 / 提问，把结果送回我的会话。
 //!
 //! `wing run` 派出去的子会话做完就没人知道了：要么 `wing wait` 阻塞，要么人工轮询。
-//! `wing watch` 是第三种姿势——**登记一次，然后干别的**：子会话收口（任意 subtype）或
-//! 提问时，我的会话收到一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，
-//! 或提问内容 + 回答用的 `tool_call_id`）。
+//! `wing watch` 是第三种姿势——**登记一次，然后干别的**：子会话静息或提问时，我的会话收到
+//! 一条普通用户消息（内置信封：subtype / 轮数 / 耗时 / 最后回复，或提问内容 + 回答用的
+//! `tool_call_id`）。
 //!
 //! ```sh
-//! wing watch "$CHILD"                 # 它下次收口时叫我（默认只叫一次）
+//! wing watch "$CHILD"                 # 它下次静息时叫我（默认只叫一次）
 //! wing watch "$CHILD" --on ask        # 只在它提问时叫我（不消耗 done 配额）
-//! wing watch "$CHILD" --times 3       # 盯三次收口
+//! wing watch "$CHILD" --times 3       # 盯三次静息
 //! wing watch "$CHILD" -p "看下结果"   # 用我的话代替内置信封
 //! wing watch --list [--all]
 //! wing watch --cancel 7
@@ -17,8 +17,11 @@
 //! # 语义（与网关同一套，见 `docs/dev/wake.md`）
 //!
 //! - 目标（我被叫醒的会话）缺省 = `WING_SESSION_ID`；不在 agent 的 shell 里就必须 `--to <sid>`；
+//! - **`done` = 这一层不会再自己动了**：它派出去的会话还在跑（或它自己已经排上下一轮）时，
+//!   这次收口会被**押住**——不投递、不扣配额，等第一次静息才叫我。中间层"派完一波就结束
+//!   本轮"因此不会提前叫醒上层（`docs/dev/wake.md` §1.2）；
 //! - `done` 信封送达即消耗一次 done 配额，配额归零 → 整条触发器终结（缺省配额 1）；
-//! - `ask` 唤醒**不**消耗配额（"一直帮我盯着它提问"）；
+//! - `ask` 唤醒**不**消耗配额（"一直帮我盯着它提问"），且永远立即送达；
 //! - 目标或源会话进归档区 → 触发器自动取消；
 //! - 不做防环：source == target 会被网关 400 拦下。
 
@@ -48,7 +51,7 @@ pub struct WatchArgs {
     #[arg(long, value_name = "EVENTS")]
     pub on: Option<String>,
 
-    /// How many completions to deliver (default: 1; asks do not consume it).
+    /// How many settles to deliver (default: 1; asks do not consume it).
     #[arg(long, value_name = "N")]
     pub times: Option<i64>,
 
