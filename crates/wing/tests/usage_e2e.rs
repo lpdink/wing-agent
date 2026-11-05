@@ -322,14 +322,15 @@ async fn usage_json_is_the_endpoint_response_and_the_query_is_fixed() {
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert_eq!(requests[0].method, "GET");
     assert_eq!(requests[0].path, "/api/usage");
-    let since = (today() - chrono::Duration::days(7))
+    let today = today();
+    let since = (today - chrono::Duration::days(7))
         .format("%Y-%m-%d")
         .to_string();
     assert_eq!(
         requests[0].query,
         format!(
             "since={since}&until={}&group_by=day",
-            today().format("%Y-%m-%d")
+            today.format("%Y-%m-%d")
         ),
         "日期由 CLI 翻译成网关本地日期，`--limit` 不出现在仪表盘请求里"
     );

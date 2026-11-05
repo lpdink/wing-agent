@@ -355,7 +355,6 @@ impl Plan {
     }
 
     /// `resolve` 的可注入时钟形态：相对写法（`7d` / `today` / `yesterday`）一律相对 `today`。
-    /// 时钟只在 `resolve` 里读一次——测试因此不读墙钟，也就不会跨零点假红。
     fn resolve_at(opts: &UsageOpts, today: NaiveDate) -> Result<Plan> {
         if !(1..=MAX_LIMIT).contains(&opts.limit) {
             anyhow::bail!(
