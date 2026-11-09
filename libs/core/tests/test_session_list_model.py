@@ -31,6 +31,7 @@ from wing.event import SessionInfo
 from wing.schema import Message
 from wing.session import SessionManager
 from wing.store import FileSessionStore
+from _support import materialize
 
 
 def _sid(label: str) -> str:
@@ -365,7 +366,7 @@ class TestActiveProjection:
         )
         root = tmp_path / "sessions"
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         await session.update_state(model_id="ds-flash")
         # 列表的候选判据是"有 history 或有标"——给一条消息让它在列表里成立。
         session.context_manager.add_message(Message(role="user", content="hello"))
@@ -415,7 +416,7 @@ class TestListSurvivesBrokenConfig:
         )
         root = tmp_path / "sessions"
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         session.context_manager.add_message(Message(role="user", content="hello"))
 
         # 换配置：provider 没了，且共享池里也没有它的实例（会话从未发过请求）。

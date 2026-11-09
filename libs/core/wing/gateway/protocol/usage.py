@@ -11,7 +11,7 @@
 - **标题**：``session`` 维度的 ``label`` 恒为 ``null``（本端点不做文件 I/O 去取名，
   CLI 自己 join ``/api/session/list``）。
 
-``Measures`` 的 11 个整数**永远全在**（全零填充、永不省略）。某个维度上不可归因的
+``Measures`` 的 10 个整数**永远全在**（全零填充、永不省略）。某个维度上不可归因的
 度量也填 0（例如 ``group_by=model`` 的 ``tool_calls``——工具行没有 model 列）：
 可归因性表见 ``docs/dev/usage.md``，``totals`` 永远由独立的全量查询给出。
 """
@@ -30,21 +30,17 @@ class UsageRange(BaseModel):
         default=None,
         description=(
             "审计流水（三张 `audit_*`）最早的一天；没有任何审计行 = null。"
-            "早于它的日子只有会话计数（`session_catalog` 的回填覆盖得更早），"
-            "消费方据此标注「token / 调用统计从这里起」"
+            "早于它的日子没有读数，消费方据此标注「统计从这里起」"
         ),
     )
 
 
 class UsageMeasures(BaseModel):
-    """11 个计数（全零填充、永不省略、无派生值）。"""
+    """10 个计数（全零填充、永不省略、无派生值）。"""
 
     sessions: int = Field(
         default=0,
         description="桶内有 ≥1 条审计事实（LLM 调用 / 工具调用 / 用户消息）的不同会话数",
-    )
-    sessions_created: int = Field(
-        default=0, description="桶内创建的会话数（含回填的历史会话）"
     )
     user_messages: int = Field(
         default=0, description="`user_message_accepted` 事件数（被接受的用户输入）"
@@ -62,7 +58,7 @@ class UsageMeasures(BaseModel):
 
 
 class UsageRow(UsageMeasures):
-    """一个桶（维度的一行）：键 + 可选展示素材 + 11 个度量（扁平）。"""
+    """一个桶（维度的一行）：键 + 可选展示素材 + 10 个度量（扁平）。"""
 
     key: str = Field(
         description="桶的键：日期 / `provider/model` / session id / 工具名 / "

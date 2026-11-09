@@ -762,9 +762,9 @@ mod tests {
         let wide = meta_row(120, &meta);
         for expected in [
             "/Users/someone/ws/wing",
-            "1.2k in",
+            "1.20k in",
             "340 out",
-            "66.7% cache",
+            "66.67% cache",
             "42.5 t/s",
             "320ms ttft",
             "110/200",

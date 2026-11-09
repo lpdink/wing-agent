@@ -17,7 +17,6 @@ TOTAL 行永远可对账；行和 ≠ totals 只发生在「不可归因」与�
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
@@ -95,15 +94,12 @@ def usage_report(
         raise LookupError(f"session not found: {scope!r}")
 
     rows, truncated = _rows(metrics, window, group_by, limit)
-    totals = replace(
-        metrics.totals(window), sessions_created=metrics.created_total(window)
-    )
     return {
         # ``data_since`` 是「流水从哪天起」——不是窗口的一部分（``Window.wire`` 不动），
-        # 而是随响应一起给出的全局事实，供消费方标注「更早的日子只有会话计数」。
-        "range": {**window.wire(), "data_since": metrics.earliest_audit_day()},
+        # 而是随响应一起给出的全局事实，供消费方标注「更早的日子没有读数」。
+        "range": {**window.wire(), "data_since": metrics.earliest_day()},
         "group_by": group_by,
-        "totals": totals.wire(),
+        "totals": metrics.totals(window).wire(),
         "rows": [row.wire() for row in rows],
         "truncated": truncated,
     }
@@ -183,32 +179,21 @@ def _rows(
 def _day_rows(metrics: MetricsStore, window: Window) -> list[Row]:
     """稠密的一天一行（窗口内每一天都在，空天全 0；升序）。"""
     measures = metrics.by_day(window)
-    created = metrics.created_by_day(window)
     return [
-        Row(
-            key=day,
-            measures=replace(
-                measures.get(day, Measures()), sessions_created=created.get(day, 0)
-            ),
-        )
-        for day in window.days()
+        Row(key=day, measures=measures.get(day, Measures())) for day in window.days()
     ]
 
 
 def _origin_rows(metrics: MetricsStore, window: Window) -> list[Row]:
     """恰两行、顺序固定：``me``（根会话）在前、``agents``（有父的会话）在后。"""
     buckets = metrics.by_session(window)
-    created_me, created_agents = metrics.created_by_origin(window)
     me = sum_measures([b.measures for b in buckets if b.parent_session_id is None])
     agents = sum_measures(
         [b.measures for b in buckets if b.parent_session_id is not None]
     )
     return [
-        Row(key=ORIGIN_VALUES[0], measures=replace(me, sessions_created=created_me)),
-        Row(
-            key=ORIGIN_VALUES[1],
-            measures=replace(agents, sessions_created=created_agents),
-        ),
+        Row(key=ORIGIN_VALUES[0], measures=me),
+        Row(key=ORIGIN_VALUES[1], measures=agents),
     ]
 
 
@@ -216,15 +201,11 @@ def _session_rows(
     metrics: MetricsStore, window: Window, limit: int
 ) -> tuple[list[Row], bool]:
     """按会话排行（token 降序）；作用域的自身行**不参与截断**（它是锚点）。"""
-    created = metrics.created_by_session(window)
     rows = [
         Row(
             key=bucket.session_id,
             parent_session_id=bucket.parent_session_id,
-            measures=replace(
-                bucket.measures,
-                sessions_created=created.get(bucket.session_id, 0),
-            ),
+            measures=bucket.measures,
         )
         for bucket in metrics.by_session(window)
     ]
@@ -232,10 +213,7 @@ def _session_rows(
     if window.session_id is not None and all(r.key != window.session_id for r in kept):
         anchor = next(
             (row for row in rows if row.key == window.session_id),
-            Row(
-                key=window.session_id,
-                measures=Measures(sessions_created=created.get(window.session_id, 0)),
-            ),
+            Row(key=window.session_id, measures=Measures()),
         )
         kept.append(anchor)
     return kept, truncated
@@ -246,30 +224,15 @@ def _key_rows(
 ) -> list[Row]:
     """按 ``workspace`` / ``agent`` 分桶（空值 → 空串键）。
 
-    行 = 「有审计活动的会话所在的桶」∪「窗口内建过会话的桶」：只在窗口内新建、
-    还没有任何活动的会话也占一行（只有 ``sessions_created``），否则
-    ``--by workspace`` 会在「刚建的会话」上静默少一行。
+    行 = 有审计活动的会话所在的桶：没有流水的会话不是读数（它的归属无从谈起）。
     """
-    created = (
-        metrics.created_by_workspace(window)
-        if dimension == "workspace"
-        else metrics.created_by_template(window)
-    )
     groups: dict[str, list[Measures]] = {}
     for bucket in metrics.by_session(window):
         key = (
             bucket.workspace if dimension == "workspace" else bucket.template_name
         ) or ""
         groups.setdefault(key, []).append(bucket.measures)
-    return [
-        Row(
-            key=key,
-            measures=replace(
-                sum_measures(groups.get(key, [])), sessions_created=created.get(key, 0)
-            ),
-        )
-        for key in groups.keys() | created.keys()
-    ]
+    return [Row(key=key, measures=sum_measures(items)) for key, items in groups.items()]
 
 
 def _model_rows(metrics: MetricsStore, window: Window) -> list[Row]:

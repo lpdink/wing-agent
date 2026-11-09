@@ -9,8 +9,9 @@ Session 是有行为的对象，在构造器中创建 ContextManager 和 WingAge
   - Session 通过 from_template 类方法创建（统一入口）
   - Session 不反向引用 agent（agent 在 Session 之下）
   - Session 不直接与存储介质打交道——持久状态全部经由 SessionStore
-    （metadata 读写、消息日志均委托 store；TrackedList 在第一条消息
-    到来时经 MessageLog 创建底层存储）
+    （metadata 读写、消息日志均委托 store）
+  - **物化**：新建会话在第一条用户消息到来前只是内存草稿，磁盘上零痕迹
+    （见 `_materialize`；口径见 docs/dev/architecture.md「会话物化」）
 """
 
 from __future__ import annotations
@@ -242,6 +243,7 @@ class Session:
         agent: "WingAgent",
         store: SessionStore,
         workspace: str | None = None,
+        on_materialize: Callable[["Session"], None] | None = None,
     ) -> None:
         """底层构造器——由 from_template 调用，不建议直接使用。"""
         # 摘除标志（见 `detach`）：封住摘除后的 metadata / 账本落盘。构造期就要
@@ -250,6 +252,10 @@ class Session:
         self._session_id = session_id
         self._messages = messages
         self._store = store
+        # 物化闸门（见 `_materialize`）：既有会话（resume / 收养 / fork 的子会话）
+        # 构造时已在盘上，直接放行；新建会话在第一条用户消息到来前零落盘。
+        self._materialized = store.exists(session_id)
+        self._on_materialize = on_materialize
         self._template_name: str | None = None
         # 模型身份三元组的引用词（内存态）：id 是唯一引用词，provider/name 是
         # agent 持有的运行期事实。构造期由 _restore_persisted_model 填充；无
@@ -303,6 +309,7 @@ class Session:
         messages: TrackedList[ChainNode],
         store: SessionStore,
         workspace: str | None = None,
+        on_materialize: Callable[["Session"], None] | None = None,
     ) -> "Session":
         """从模板构建全新 Session。
 
@@ -312,6 +319,8 @@ class Session:
             messages: TrackedList 消息列表
             store: 该 session 所属的 SessionStore
             workspace: 工作目录
+            on_materialize: 会话**物化**（第一条用户消息到来）时的回调；创建路径
+                用它登记用量目录。既有会话构造时已物化，回调永不触发。
         """
         context_manager, agent = _build_runtime(
             template, session_id, messages, store, workspace
@@ -324,6 +333,7 @@ class Session:
             agent=agent,
             store=store,
             workspace=workspace,
+            on_materialize=on_materialize,
         )
         session._template_name = template.name
         session._metadata.template_name = template.name
@@ -567,16 +577,16 @@ class Session:
         return self._metadata.parent_session_id
 
     def record_parent_session_id(self, parent_session_id: str) -> None:
-        """创建路径专用：把创建者（血缘）写进 metadata 并落盘——**唯一**写入点。
+        """创建路径专用：把创建者（血缘）写进 metadata——**唯一**写入点。
 
         由 ``SessionManager.create_session`` 在 Session 构造成功之后调用一次；
         此后没有任何修改路径（血缘是创建时刻的事实，见 docs/dev/session-lineage.md）
         ——本方法没有第二个调用方，也没有端点 / 命令路由到这里。
 
-        写在构造之后是刻意的：构造期失败不该在盘上留下"有 parent 无会话"的记录
-        （那会让同 id 的下一次 create 收养到一个幽灵事实）。而写在这个位置意味着
-        从此刻起内存对象已带上字段——之后每一次 ``_save_metadata``（hook 注入 /
-        打标 / 用量 flush）写的都是同一个对象，不会把它抹掉。
+        写的是内存对象：会话尚未物化时 ``_save_metadata`` 是 no-op，字段随第一条
+        用户消息的那次落盘一并生效（无父创建的零字段语义不变）。写在构造之后是
+        刻意的：构造期失败不该留下"有 parent 无会话"的记录（那会让同 id 的下一次
+        create 收养到一个幽灵事实）。
         """
         self._metadata.parent_session_id = parent_session_id
         self._save_metadata()
@@ -806,12 +816,34 @@ class Session:
 
     # ── metadata 管理 ──────────────────────────────
 
+    def _materialize(self) -> None:
+        """打开落盘闸门——会话**出生**的时刻（幂等）。
+
+        触发点是第一条用户消息（``post``）：在此之前会话只是内存里的草稿，
+        任何 metadata 写（hook 注入的追加系统提示词、创建 override、打标、
+        模型切换……）都留在内存里，第一条消息到来时随整份 metadata 一次落盘。
+        TUI 开了不用就退出的空会话因此零痕迹：不建目录、不写 ``metadata.json``、
+        不写 ``history.jsonl``（历史本来就在首条消息时才追加），也不进用量目录。
+
+        ``on_materialize`` 回调由创建路径挂上（``SessionManager.create_session``
+        用来写 ``session_catalog``）：目录行是**创建动作**的投影，空会话既已不
+        存在，行也不该提前写。
+        """
+        if self._materialized:
+            return
+        self._materialized = True
+        self._save_metadata()
+        if self._on_materialize is not None:
+            self._on_materialize(self)
+
     def _save_metadata(self) -> None:
-        """将当前 metadata 模型保存到 store（摘除后是 no-op，见 detach）。"""
+        """将当前 metadata 模型保存到 store（摘除 / 未物化时是 no-op）。"""
         if self._detached:
             log.warning(
                 f"Session {self._session_id}: metadata write skipped (detached)"
             )
+            return
+        if not self._materialized:
             return
         self._store.save_metadata(self._session_id, self._metadata)
 
@@ -1183,11 +1215,6 @@ class Session:
             )
             self._persist_model()
 
-    def touch_last_interaction(self) -> None:
-        """更新最后互动时间并持久化。"""
-        self._metadata.last_interaction = datetime.now().isoformat()
-        self._save_metadata()
-
     # ── 第一条消息 metadata 写入 ──────────────────
 
     def _check_first_message_metadata(self, content: str) -> None:
@@ -1200,8 +1227,8 @@ class Session:
         空 content（纯图消息：内容全在 media）**不写标题**：空串不是 None 语义
         ——写进去会让 `session_name is not None` 永久挡住后续文本消息的自动标题。
 
-        持久化由 post 流程中紧随其后的 touch_last_interaction 一次性完成，
-        避免首条消息两次连续落盘。
+        持久化由紧随其后的 ``_materialize`` 一次性完成（标题与 last_interaction
+        合并成首条消息的**唯一**一次落盘）。
         """
         if self._metadata.session_name is not None or not content:
             return
@@ -1216,19 +1243,24 @@ class Session:
     ) -> None:
         """投递用户消息。
 
-        先检查并写入第一条消息 metadata，更新最后互动时间，再转发给 agent。
-        标题与 last_interaction 合并为一次 metadata 落盘（touch_last_interaction）。
+        先写入第一条消息 metadata（标题）与最后互动时间，再转发给 agent。
         tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
         media 非空时消息携带媒体引用（字节在会话媒体目录；引用已由
         ``SessionManager._post`` 闸门校验可兑现）。
+
+        第一条消息是会话的**出生**时刻（见 :meth:`_materialize`）：此后 metadata
+        才开始落盘。校验（UTF-8）在任何副作用之前。
 
         Raises:
             ValueError: 正文不可编码为 UTF-8（它在首条消息时会成为标题，也会进
                 LLM 请求体——两处都在 ``encode("utf-8")`` 处炸）
         """
         require_utf8(content, field="message content")
+        # 标题与 last_interaction 都是内存改动，随 `_materialize` 的那一次落盘生效：
+        # 首条消息只写一次 metadata。
         self._check_first_message_metadata(content)
-        self.touch_last_interaction()
+        self._metadata.last_interaction = datetime.now().isoformat()
+        self._materialize()
         await self._agent.post(
             content,
             request_id=request_id,

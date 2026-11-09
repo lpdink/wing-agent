@@ -2811,6 +2811,14 @@ class TestRealRuntimeGates:
         client, sessions_root = real_client
         created = client.post("/api/session/create", json={"session_id": "M-1"})
         assert created.status_code == 200, created.text
+        # 物化（第一条用户消息）之后 metadata 才落盘：本用例断言的是显式动作的
+        # 持久化，所以先把会话推到「存在」。
+        assert (
+            client.post(
+                "/api/session/send", json={"session_id": "M-1", "content": "hi"}
+            ).status_code
+            == 200
+        )
 
         info = client.get("/api/session/info", params={"session_id": "M-1"})
         assert info.status_code == 200, info.text

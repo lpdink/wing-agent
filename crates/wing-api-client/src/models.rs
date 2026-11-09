@@ -687,7 +687,7 @@ pub struct UsageRange {
     pub data_since: Option<String>,
 }
 
-/// 11 个计数：全零填充、永不省略、**不含派生值**（命中率 / 工时由消费方算）。
+/// 10 个计数：全零填充、永不省略、**不含派生值**（命中率 / 工时由消费方算）。
 ///
 /// 某一维度上不可归因的度量也填 0（例如 `group_by=model` 的 `tool_calls`——工具行
 /// 没有 model 列）：「0」在这里的含义是「不可归因」，不是「测得 0」。可归因性表见
@@ -697,9 +697,6 @@ pub struct UsageMeasures {
     /// 桶内有 ≥1 条审计事实（LLM / 工具 / 用户消息）的不同会话数。
     #[serde(default)]
     pub sessions: i64,
-    /// 桶内创建的会话数（含回填的历史会话）。
-    #[serde(default)]
-    pub sessions_created: i64,
     /// `user_message_accepted` 事件数（含编排方投递与唤醒信封）。
     #[serde(default)]
     pub user_messages: i64,
@@ -726,17 +723,12 @@ pub struct UsageMeasures {
 }
 
 impl UsageMeasures {
-    /// 这个桶有**审计流水**吗（十个流水度量任一非零）。
+    /// 这个桶有**审计流水**吗（任一度量非零）。
     ///
-    /// `sessions_created` **不参与**：它来自 `session_catalog`（派生投影 + 启动回填），是
-    /// 目录事实而不是流水读数。任何新建会话都会让它非零，因此拿整结构比较「是否全零」会把
-    /// 「只建过会话、还没说过话」误判成「有读数」（`wing info` 的 `—` 降级、仪表盘 TODAY
-    /// 的零行抑制、首次运行空态、`tree:` 行的存在性都吃这一条）。
+    /// 空态判据全仓只有这一处：`wing info` 的 `—` 降级、仪表盘 TODAY 的零行抑制、
+    /// 首次运行空态、`tree:` 行的存在性都吃它——「0」是一个读数，不画画像。
     pub fn has_flow(&self) -> bool {
-        UsageMeasures {
-            sessions_created: 0,
-            ..*self
-        } != UsageMeasures::default()
+        *self != UsageMeasures::default()
     }
 
     /// 这个桶消耗的 token（`prompt + completion`，含缓存重发）——排序与热力图的口径。
@@ -756,7 +748,6 @@ impl UsageMeasures {
     pub fn sub(&self, other: &UsageMeasures) -> UsageMeasures {
         UsageMeasures {
             sessions: self.sessions - other.sessions,
-            sessions_created: self.sessions_created - other.sessions_created,
             user_messages: self.user_messages - other.user_messages,
             llm_calls: self.llm_calls - other.llm_calls,
             tool_calls: self.tool_calls - other.tool_calls,
@@ -770,7 +761,7 @@ impl UsageMeasures {
     }
 }
 
-/// 聚合结果的一行：桶的键 + 可选展示素材 + **扁平**的 11 个度量。
+/// 聚合结果的一行：桶的键 + 可选展示素材 + **扁平**的 10 个度量。
 ///
 /// `key` 的语义随维度变（日期 / `provider/model` / session id / 工具名 / workspace /
 /// 模板名 / `me`|`agents`）；`label` 只有 `model` 维度会填（配置里的展示名）；
@@ -2997,7 +2988,7 @@ mod settings_tests {
         );
     }
 
-    /// `rows[]` 是**扁平**行：`key` / `label` / `parent_session_id` 与 11 个度量同层。
+    /// `rows[]` 是**扁平**行：`key` / `label` / `parent_session_id` 与 10 个度量同层。
     /// 反过来序列化也必须还原成同一个扁平对象（`--json` 是端点响应的原样转发）。
     #[test]
     fn usage_row_is_flat_on_the_wire_and_round_trips() {
@@ -3006,7 +2997,6 @@ mod settings_tests {
             "label": null,
             "parent_session_id": null,
             "sessions": 6,
-            "sessions_created": 90,
             "user_messages": 34,
             "llm_calls": 156,
             "tool_calls": 210,
@@ -3044,14 +3034,5 @@ mod settings_tests {
         assert_eq!(busy.tokens(), 16);
         assert!(busy.has_flow());
         assert!(!UsageMeasures::default().has_flow(), "全零 = 没有流水");
-        // `sessions_created` 是目录事实：只有它非零时不算「有流水」。
-        assert!(
-            !UsageMeasures {
-                sessions_created: 1,
-                ..UsageMeasures::default()
-            }
-            .has_flow(),
-            "只建过会话不算读过数"
-        );
     }
 }

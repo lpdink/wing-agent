@@ -525,10 +525,9 @@ impl Widget for StatusBar<'_> {
                 && let Some(rate) =
                     format::hit_rate(d.session_cached_tokens, d.session_prompt_tokens)
             {
-                // 状态栏要短：整数百分比（摘要有余量，留一位小数）。
-                let cache_pct = rate as u32;
+                // 两位小数：整数百分比会把 99.4% 与 99.9% 印成同一个「99」。
                 right_spans.push(Span::styled(
-                    format!(" ◎{cache_pct}%"),
+                    format!(" ◎{rate:.2}%"),
                     Style::default().fg(self.palette.dim),
                 ));
             }
@@ -646,21 +645,21 @@ impl TurnUsage {
         items
     }
 
-    /// 命中率一格：理论水位已知时成对显示 `67% / 理论 88% cache`，否则**就是今天那
-    /// 一个数字**（`66.7% cache`，一位小数）——旧网关上的输出与改动前逐字节一致。
+    /// 命中率一格：理论水位已知时成对显示 `66.67% / 理论 88.00% cache`，否则**就是
+    /// 今天那一个数字**（`66.67% cache`）。两位小数与 `wing usage` / 退出摘要同一精度：
+    /// 整数百分比会把 99.4% 与 99.9% 印成同一个「99」。
     ///
-    /// 状态栏要短，成对形态取整数百分比（摘要有余量，留一位小数）。两个读数都 clamp
-    /// 到 `prompt` 以内：超发的手指不该读出 100% 以上。
+    /// 两个读数都 clamp 到 `prompt` 以内：超发的手指不该读出 100% 以上。
     fn cache_text(&self) -> String {
         let actual_ratio =
             self.cached_tokens.clamp(0, self.prompt_tokens) as f64 / self.prompt_tokens as f64;
         if self.cache_expected_tokens <= 0 {
-            return format!("{:.1}% cache", actual_ratio * 100.0);
+            return format!("{:.2}% cache", actual_ratio * 100.0);
         }
         let theory_ratio =
             self.cache_expected_tokens.min(self.prompt_tokens) as f64 / self.prompt_tokens as f64;
         format!(
-            "{:.0}% / 理论 {:.0}% cache",
+            "{:.2}% / 理论 {:.2}% cache",
             actual_ratio * 100.0,
             theory_ratio * 100.0
         )
@@ -678,9 +677,9 @@ mod tests {
     fn test_compact_token_notation() {
         assert_eq!(format::tokens(0), "0");
         assert_eq!(format::tokens(999), "999");
-        assert_eq!(format::tokens(1000), "1.0k");
-        assert_eq!(format::tokens(12345), "12.3k");
-        assert_eq!(format::tokens(1_500_000), "1.5M");
+        assert_eq!(format::tokens(1000), "1.00k");
+        assert_eq!(format::tokens(12345), "12.35k");
+        assert_eq!(format::tokens(1_500_000), "1.50M");
     }
 
     #[test]
@@ -712,10 +711,10 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                "1.2k in",
+                "1.20k in",
                 "340 out",
                 // 800/1200 = 66.67%
-                "66.7% cache",
+                "66.67% cache",
                 "42.5 t/s",
                 "320ms ttft",
             ]
@@ -738,7 +737,7 @@ mod tests {
     }
 
     /// 理论水位未知（`cache_expected_tokens == 0`：旧网关 / 无参照）时，命中率那一格
-    /// **与改动前逐字节一致**——一位小数、单一数字。这是旧网关上"行为不变"的证据。
+    /// 只有一个数字（两位小数，与审计面同一精度）。
     #[test]
     fn test_turn_usage_cache_cell_is_unchanged_when_the_theory_is_unknown() {
         let usage = TurnUsage {
@@ -752,10 +751,10 @@ mod tests {
             .iter()
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        assert_eq!(items, vec!["1.2k in", "340 out", "66.7% cache"]);
+        assert_eq!(items, vec!["1.20k in", "340 out", "66.67% cache"]);
     }
 
-    /// 理论水位已知 → 实际 / 理论成对（整数百分比，状态栏要短）。
+    /// 理论水位已知 → 实际 / 理论成对（两位小数，与审计面同一精度）。
     #[test]
     fn test_turn_usage_pairs_actual_with_the_theory_when_known() {
         let usage = TurnUsage {
@@ -770,8 +769,11 @@ mod tests {
             .iter()
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        // 800/1200 = 66.67% → 67%；1056/1200 = 88% （与契约样列的 88.1% 同量级）。
-        assert_eq!(items, vec!["1.2k in", "340 out", "67% / 理论 88% cache"]);
+        // 800/1200 = 66.67%；1056/1200 = 88.00%。
+        assert_eq!(
+            items,
+            vec!["1.20k in", "340 out", "66.67% / 理论 88.00% cache"]
+        );
     }
 
     /// 理论值超过输入（provider/探针口径差异）不许读出 100% 以上的命中率。
@@ -784,10 +786,10 @@ mod tests {
             cache_expected_tokens: 5000,
             ..TurnUsage::default()
         };
-        assert_eq!(usage.cache_text(), "100% / 理论 100% cache");
+        assert_eq!(usage.cache_text(), "100.00% / 理论 100.00% cache");
     }
 
-    /// 实际为零但理论已知：**必须**显示（`0% / 理论 99%`）——前缀碎裂、整段重算
+    /// 实际为零但理论已知：**必须**显示（`0.00% / 理论 99.30%`）——前缀碎裂、整段重算
     /// 正是这个读数最该在场的一刻；旧行为（`cached == 0` 就不出数）在这里是缺席。
     #[test]
     fn test_turn_usage_shows_a_zero_actual_when_the_theory_is_known() {
@@ -803,7 +805,10 @@ mod tests {
             .iter()
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        assert_eq!(items, vec!["14.2k in", "300 out", "0% / 理论 99% cache"]);
+        assert_eq!(
+            items,
+            vec!["14.20k in", "300 out", "0.00% / 理论 98.59% cache"]
+        );
     }
 
     /// 没有理论水位时 `cached == 0` 仍然不出那一格（与改动前完全一致）。
@@ -820,7 +825,7 @@ mod tests {
             .iter()
             .map(|item| item.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        assert_eq!(items, vec!["14.2k in", "300 out"]);
+        assert_eq!(items, vec!["14.20k in", "300 out"]);
     }
 
     #[test]
@@ -842,7 +847,7 @@ mod tests {
         };
         let out = render_text(&data);
         // 80_000 / 120_500 = 66.4% → 状态栏取整为 66%。
-        assert!(out.contains("↑120.5k ↓4.2k ◎66%"), "got: {out}");
+        assert!(out.contains("↑120.50k ↓4.20k ◎66.39%"), "got: {out}");
     }
 
     /// 窄模式让出这栏；没有输入（prompt 为 0）时不发明命中率。
@@ -1366,10 +1371,10 @@ mod tests {
 
     #[test]
     fn the_mode_outlives_the_provider_when_the_row_runs_out() {
-        // 优先级：模型 → 模式 → provider。120 列 + 满配数据（24 字符 id、累计用量
+        // 优先级：模型 → 模式 → provider。132 列 + 满配数据（24 字符 id、累计用量
         // 全满）时 provider 让出、强调点留下；宽到放得下两者时，模式仍然排在
         // provider 之前。
-        let tight = render_bar(&busy(), SID, 120).0.join("");
+        let tight = render_bar(&busy(), SID, 132).0.join("");
         assert!(tight.contains("think:medium"), "{tight:?}");
         assert!(!tight.contains("dashscope"), "{tight:?}");
 

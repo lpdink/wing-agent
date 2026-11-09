@@ -352,13 +352,14 @@ class SessionManager:
             messages=messages,
             store=store,
             workspace=workspace,
+            # 用量目录（派生投影）跟着**物化**走：空会话不写。收养 / resume 的
+            # 既有会话在构造时已物化，回调不触发。
+            on_materialize=self._record_session_catalog,
         )
 
-        # 血缘落盘：创建时刻的一次性事实（此后没有修改路径），写在**构造成功
-        # 之后**——构造期失败（provider 解析等）因此不会留下"有 parent 无会话"的
-        # 记录（那种残骸会让同 id 的下一次 create 收养到一个幽灵事实）。此后任何
-        # 一次 _save_metadata（hook 注入 / 打标 / 用量落盘）写的都是这个已带上字段
-        # 的内存对象，不会被抹掉；无 parent 时不写（零字段、零写盘，存量不变）。
+        # 血缘：创建时刻的一次性事实（此后没有修改路径）。先只写进内存对象——
+        # 会话尚未物化（第一条消息还没来）时，``_save_metadata`` 是 no-op；
+        # 物化时随整份 metadata 一次落盘。无 parent 时零字段、零写盘。
         if parent_session_id is not None:
             session.record_parent_session_id(parent_session_id)
 
@@ -367,7 +368,7 @@ class SessionManager:
             session.apply_agent_override(agent_override)
 
         # 创建即打标（原子语义：校验在写盘前完成，非法标签此刻 raise——
-        # 会话尚未注册、磁盘零痕迹）
+        # 会话尚未注册、磁盘零痕迹）。未物化时只改内存对象，随首条消息落盘。
         if tags:
             session.apply_tag_ops(add=tags)
 
@@ -379,8 +380,6 @@ class SessionManager:
         CacheStore(sid).clear()
 
         self._register(session)
-        # 用量目录（派生投影）：新建会话的一次性事实，收养 / resume 不写。
-        self._record_session_catalog(session)
 
         # 触发 before_session_start hook，随后把 hook 注入落盘：resume 重建 CM
         # 时恢复同一系统提示词（前缀身份不因换入内存而漂移）。
@@ -408,9 +407,10 @@ class SessionManager:
     ) -> None:
         """把**新建**会话登记进用量目录（`wing.metrics.catalog`，写一次即不再更新）。
 
-        两条分支共用这一个写点：新建（create 的非收养路径）与 fork。收养 / resume
-        不写——目录行是创建动作的一次性事实，存量会话由
-        :meth:`backfill_session_catalog` 补齐。
+        两个写点：新建会话的**物化**（第一条用户消息到来，经 ``from_template`` 的
+        ``on_materialize`` 回调）与 fork（子会话生来就带着历史）。收养 / resume 不写
+        ——目录行是创建动作的一次性事实，存量会话由
+        :meth:`backfill_session_catalog` 补齐。只开不用的空会话不写：它不是会话。
         """
         record_session_created(
             session.session_id,

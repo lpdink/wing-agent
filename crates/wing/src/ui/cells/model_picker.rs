@@ -1128,7 +1128,7 @@ mod tests {
         // Rounding must not push a reading into the next scale's digits.
         assert_eq!(tokens_capacity(999_950), "1M");
         assert_eq!(tokens_capacity(999_999), "1M");
-        assert_eq!(tokens_capacity(999_999_999), "1G");
+        assert_eq!(tokens_capacity(999_999_999), "1B");
         assert_eq!(tokens_capacity(999), "999");
     }
 

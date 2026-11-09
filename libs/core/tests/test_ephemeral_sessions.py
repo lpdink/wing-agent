@@ -11,6 +11,7 @@ import pytest
 from wing.schema import Message
 from wing.session import SessionManager
 from wing.store import MemorySessionStore
+from _support import materialize
 
 
 @pytest.fixture
@@ -67,7 +68,7 @@ class TestMemorySessionNoDisk:
 
         # metadata 写入路径（正常流程由 post 触发）
         session._check_first_message_metadata("hello")
-        session.touch_last_interaction()
+        materialize(session)
 
         # fork（复制 target 之前的子链）
         last_uuid = cm.get_context_window()[-1].uuid

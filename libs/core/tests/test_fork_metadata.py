@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from _support import seed_messages
+from _support import materialize, seed_messages
 from wing.schema import Message
 from wing.session import SessionManager
 from wing.store import FileSessionStore, MemorySessionStore
@@ -29,7 +29,7 @@ class TestForkCarriesEvents:
         """fork 拷贝混合链前缀：事件节点随链拷贝，重放视图在新 session 可见。"""
         from wing.event import DiffContentEvent
 
-        source = file_sm.create_session()
+        source = materialize(file_sm.create_session())
         cm = source.context_manager
         seed_messages(source, "hello", "hi")
         # 在 fork 点之前落盘事件节点（模拟工具执行期间的 diff）
@@ -66,7 +66,7 @@ class TestForkMetadata:
         """fork 一次性持久化 workspace/forked_from/template_name/last_interaction。"""
         ws = tmp_path / "ws"
         ws.mkdir()
-        source = file_sm.create_session(workspace=str(ws))
+        source = materialize(file_sm.create_session(workspace=str(ws)))
         seed_messages(source, "hello", "hi", "question")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
@@ -87,7 +87,7 @@ class TestForkMetadata:
         """模拟重启（新 SM 实例）后 resume forked session，workspace 与模板恢复。"""
         ws = tmp_path / "ws"
         ws.mkdir()
-        source = file_sm.create_session(workspace=str(ws))
+        source = materialize(file_sm.create_session(workspace=str(ws)))
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
@@ -112,16 +112,15 @@ class TestForkMetadata:
         """forked session 首条消息获得标题，forked_from/workspace 不被覆盖。"""
         ws = tmp_path / "ws"
         ws.mkdir()
-        source = file_sm.create_session(workspace=str(ws))
+        source = materialize(file_sm.create_session(workspace=str(ws)))
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
 
-        # 首条消息标题逻辑（post 的前置步骤，不经 LLM）：
-        # _check 变更模型，touch 一次性落盘
+        # 首条消息的 metadata 半步（不经 LLM）：标题是内存改动，落盘走一次保存。
         new_session._check_first_message_metadata("my new question")
-        new_session.touch_last_interaction()
+        new_session._save_metadata()
 
         meta = source.store.load_metadata(new_session.session_id)
         assert meta is not None
@@ -134,7 +133,7 @@ class TestForkMetadata:
         self, file_sm: SessionManager, tmp_path: Path
     ):
         """fork 不污染源 session：uuid 不变，链状态完好，可再次 fork。"""
-        source = file_sm.create_session()
+        source = materialize(file_sm.create_session())
         seed_messages(source, "hello", "hi", "world")
 
         uuids_before = [m.uuid for m in source.context_manager.get_context_window()]
@@ -154,7 +153,7 @@ class TestForkMetadata:
     async def test_fork_inherits_memory_backend(self):
         """memory session fork 出 memory session。"""
         sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
@@ -175,9 +174,9 @@ class TestResumeTemplate:
         coder = AgentTemplate(name="coder", model="gpt-4", provider_name="default")
         sm._template_manager._templates["coder"] = coder
 
-        session = sm.create_session(template_name="coder")
+        session = materialize(sm.create_session(template_name="coder"))
         seed_messages(session, "hello")
-        session.touch_last_interaction()  # 触发 metadata 持久化（正常流程由 post 触发）
+        materialize(session)  # 触发 metadata 持久化（正常流程由 post 触发）
         sid = session.session_id
 
         # 模拟重启
@@ -194,7 +193,7 @@ class TestResumeTemplate:
         """
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         seed_messages(session, "hello")
 
         with pytest.raises(TypeError):
@@ -208,9 +207,9 @@ class TestResumeTemplate:
         """老 metadata（无 template_name）回退默认模板。"""
         store = FileSessionStore(tmp_path / "sessions")
         sm = SessionManager({"file": store})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         seed_messages(session, "hello")
-        session.touch_last_interaction()
+        materialize(session)
         # 抹掉 template_name 模拟老数据
         meta = store.load_metadata(session.session_id)
         assert meta is not None

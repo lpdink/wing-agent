@@ -89,7 +89,7 @@ pub fn render_exit_summary(
     let value_ink = Style::new().fg(palette.text);
 
     let mut rows: Vec<Vec<PlainCell>> = vec![row(
-        "WALL CLOCK",
+        "wall clock",
         fmt_duration(exit.wall),
         label_ink,
         value_ink,
@@ -99,46 +99,46 @@ pub fn render_exit_summary(
         Ledger::Reported(usage) => {
             let work = usage.llm_time_ms + usage.tool_time_ms;
             rows.push(row(
-                "LLM TIME",
+                "llm time",
                 fmt_millis(usage.llm_time_ms),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
-                "TOOL TIME",
+                "tool time",
                 fmt_millis(usage.tool_time_ms),
                 label_ink,
                 value_ink,
             ));
-            rows.push(row("WORK TIME", fmt_millis(work), label_ink, value_ink));
+            rows.push(row("work time", fmt_millis(work), label_ink, value_ink));
             rows.push(row(
-                "USER MSGS",
+                "user msgs",
                 usage.user_messages.to_string(),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
-                "LLM CALLS",
+                "llm calls",
                 usage.llm_calls.to_string(),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
-                "TOOL CALLS",
+                "tool calls",
                 usage.tool_calls.to_string(),
                 label_ink,
                 value_ink,
             ));
-            rows.push(row("TURNS", usage.turns.to_string(), label_ink, value_ink));
-            rows.push(row("CACHE HIT", fmt_hit_rate(&usage), label_ink, value_ink));
+            rows.push(row("turns", usage.turns.to_string(), label_ink, value_ink));
+            rows.push(row("cache hit", fmt_hit_rate(&usage), label_ink, value_ink));
             rows.push(row(
-                "INPUT TOKENS",
+                "input tokens",
                 format::tokens(usage.prompt_tokens),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
-                "OUTPUT TOKENS",
+                "output tokens",
                 format::tokens(usage.completion_tokens),
                 label_ink,
                 value_ink,
@@ -148,19 +148,19 @@ pub fn render_exit_summary(
         other => {
             // 降级：只报本地能证实的数字（状态栏累计 = 快照基线 + live 增量）。
             rows.push(row(
-                "CACHE HIT",
+                "cache hit",
                 fmt_hit_rate_from(exit.cached_tokens, exit.prompt_tokens),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
-                "INPUT TOKENS",
+                "input tokens",
                 format::tokens(exit.prompt_tokens),
                 label_ink,
                 value_ink,
             ));
             rows.push(row(
-                "OUTPUT TOKENS",
+                "output tokens",
                 format::tokens(exit.completion_tokens),
                 label_ink,
                 value_ink,
@@ -175,8 +175,8 @@ pub fn render_exit_summary(
     };
 
     let columns = vec![
-        PlainColumn::new("SESSION", ColumnKind::Compact),
-        PlainColumn::new("TOTAL", ColumnKind::Compact),
+        PlainColumn::new("session", ColumnKind::Compact),
+        PlainColumn::new("total", ColumnKind::Compact),
     ];
     let table = PlainTable { columns, rows };
     let mut rendered = String::new();
@@ -228,14 +228,14 @@ fn fmt_millis(ms: i64) -> String {
     }
 }
 
-/// 命中率 = cached / prompt（一位小数；无输入 = `-`）。
+/// 命中率 = cached / prompt（两位小数；无输入 = `-`）。
 fn fmt_hit_rate(usage: &SessionUsage) -> String {
     fmt_hit_rate_from(usage.cached_tokens, usage.prompt_tokens)
 }
 
 fn fmt_hit_rate_from(cached: i64, prompt: i64) -> String {
     match format::hit_rate(cached, prompt) {
-        Some(rate) => format!("{rate:.1}%"),
+        Some(rate) => format!("{rate:.2}%"),
         None => "-".to_string(),
     }
 }
@@ -305,24 +305,24 @@ mod tests {
         assert!(text.contains("20261019-210702-217d85f2"), "{text}");
         assert!(text.contains("DeepSeek-Flash"), "{text}");
         assert!(
-            label_line(&text, "WALL CLOCK").contains("12m 34s"),
+            label_line(&text, "wall clock").contains("12m 34s"),
             "{text}"
         );
-        assert!(label_line(&text, "LLM TIME").contains("6m 40s"), "{text}");
-        assert!(label_line(&text, "TOOL TIME").contains("1m 22s"), "{text}");
+        assert!(label_line(&text, "llm time").contains("6m 40s"), "{text}");
+        assert!(label_line(&text, "tool time").contains("1m 22s"), "{text}");
         // 工作时长 = llm + tool（客户端推导，可断言）。
-        assert!(label_line(&text, "WORK TIME").contains("8m 02s"), "{text}");
-        assert!(label_line(&text, "USER MSGS").contains('4'), "{text}");
-        assert!(label_line(&text, "LLM CALLS").contains('9'), "{text}");
-        assert!(label_line(&text, "TOOL CALLS").contains('7'), "{text}");
-        assert!(label_line(&text, "TURNS").contains('3'), "{text}");
-        assert!(label_line(&text, "CACHE HIT").contains("66.4%"), "{text}");
+        assert!(label_line(&text, "work time").contains("8m 02s"), "{text}");
+        assert!(label_line(&text, "user msgs").contains('4'), "{text}");
+        assert!(label_line(&text, "llm calls").contains('9'), "{text}");
+        assert!(label_line(&text, "tool calls").contains('7'), "{text}");
+        assert!(label_line(&text, "turns").contains('3'), "{text}");
+        assert!(label_line(&text, "cache hit").contains("66.39%"), "{text}");
         assert!(
-            label_line(&text, "INPUT TOKENS").contains("120.5k"),
+            label_line(&text, "input tokens").contains("120.50k"),
             "{text}"
         );
         assert!(
-            label_line(&text, "OUTPUT TOKENS").contains("4.2k"),
+            label_line(&text, "output tokens").contains("4.20k"),
             "{text}"
         );
         // 时间轴说明常在；降级注记只在降级时出现。
@@ -339,18 +339,18 @@ mod tests {
             let text = render_exit_summary(&exit(), ledger, &palette(), &out());
 
             assert!(
-                label_line(&text, "WALL CLOCK").contains("12m 34s"),
+                label_line(&text, "wall clock").contains("12m 34s"),
                 "{text}"
             );
             assert!(
-                label_line(&text, "INPUT TOKENS").contains("120.5k"),
+                label_line(&text, "input tokens").contains("120.50k"),
                 "{text}"
             );
-            assert!(label_line(&text, "CACHE HIT").contains("66.4%"), "{text}");
+            assert!(label_line(&text, "cache hit").contains("66.39%"), "{text}");
             assert!(text.contains(expected), "{text}");
             // 只有在线的累计：没有服务端账本就不报时长 / 计数。
-            assert!(!text.contains("LLM TIME"), "{text}");
-            assert!(!text.contains("TURNS"), "{text}");
+            assert!(!text.contains("llm time"), "{text}");
+            assert!(!text.contains("turns"), "{text}");
         }
     }
 
@@ -366,9 +366,9 @@ mod tests {
 
     #[test]
     fn hit_rate_is_derived_and_never_divides_by_zero() {
-        assert_eq!(fmt_hit_rate(&sample_usage()), "66.4%");
+        assert_eq!(fmt_hit_rate(&sample_usage()), "66.39%");
         assert_eq!(fmt_hit_rate_from(0, 0), "-");
-        assert_eq!(fmt_hit_rate_from(5, 10), "50.0%");
+        assert_eq!(fmt_hit_rate_from(5, 10), "50.00%");
     }
 
     /// 最小 HTTP 桩：对每个请求回一段固定 JSON。返回 base URL。

@@ -309,7 +309,9 @@ async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
     覆盖的会话**列不出来**——不带标的话，这条断言在敏感 FS 上会误红（CI 的
     ubuntu-latest 正是敏感 FS）。
     """
-    probe.register(CREATED_MODEL, Turn.of(text="variant reply"))
+    probe.register(
+        CREATED_MODEL, Turn.of(text="variant reply"), Turn.of(text="variant pong")
+    )
     aliases = _fs_is_case_insensitive(probe.env.root)
 
     created = await _create(
@@ -333,17 +335,22 @@ async def test_case_variant_ids_never_share_one_directory(probe: Probe) -> None:
     for session_id in expected:
         assert (probe.env.sessions_path / session_id).is_dir(), session_id
 
-    # 不变量 2：列表与回报的 id 集合一致（两个都带标 → 两种 FS 上都列得出）。
-    listed = await _listed_ids(probe)
-    assert sorted(listed) == sorted(expected), listed
-
-    # 不变量 3：绝不共享一份 history.jsonl——只写一次，只有那一个会话落链。
+    # 不变量 2：物化（第一条用户消息）之后，列表与回报的 id 集合一致。
     session = await _driver(probe).attach(
         created["session_id"], workspace=probe.workspace
     )
     result = await session.chat("variant ping")
     assert result.data["subtype"] == "success", result.data
+    if not aliases:
+        other = await _driver(probe).attach(
+            variant["session_id"], workspace=probe.workspace
+        )
+        assert (await other.chat("variant pong")).data["subtype"] == "success"
+    listed = await _listed_ids(probe)
+    assert sorted(listed) == sorted(expected), listed
+
+    # 不变量 3：绝不共享一份 history.jsonl——各自只写自己那条链。
     histories = sorted(
         entry.parent.name for entry in probe.env.sessions_path.glob("*/history.jsonl")
     )
-    assert histories == [created["session_id"]], histories
+    assert histories == sorted(expected), histories

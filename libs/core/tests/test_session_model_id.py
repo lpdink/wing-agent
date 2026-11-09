@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from _support import seed_messages
+from _support import materialize, seed_messages
 from wing.config import AgentConfig, Config, ModelSpec, ProviderConfig
 from wing.session import AgentOverride, AgentTemplate, SessionManager
 from wing.store import FileSessionStore, SessionMetadata
@@ -81,7 +81,7 @@ class TestIdentityTriple:
         root = tmp_path / "sessions"
         sm = SessionManager({"file": FileSessionStore(root)})
 
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         assert session.model_id == "gpt-id"
         assert session.agent.model == "gpt-4"
@@ -108,7 +108,7 @@ class TestIdentityTriple:
         )
         root = tmp_path / "sessions"
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
 
         await session.update_state(model_id="ds-flash")
@@ -138,7 +138,7 @@ class TestIdentityTriple:
         _use_config(monkeypatch, cfg)
         root = tmp_path / "sessions"
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
 
         with pytest.raises(ValueError) as failure:
@@ -165,7 +165,7 @@ class TestIdentityTriple:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         with pytest.raises(ValueError) as failure:
             await session.update_state(model_id="deepseek-flash")
@@ -189,7 +189,7 @@ class TestRestoreChain:
             _config([ModelSpec(id="shared", name="old-name")], agent_model="shared"),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="shared")
         assert session.agent.model == "old-name"
@@ -228,7 +228,7 @@ class TestRestoreChain:
             _config([ModelSpec(id="old-id", name="m")], agent_model="old-id"),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="old-id")
 
@@ -257,7 +257,7 @@ class TestRestoreChain:
             _config([ModelSpec(id="old-id", name="m")], agent_model="old-id"),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="old-id")
 
@@ -292,7 +292,7 @@ class TestRestoreChain:
             _config([ModelSpec(id="old-id", name="m")], agent_model="old-id"),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="old-id")
 
@@ -328,7 +328,7 @@ class TestRestoreChain:
             _config([ModelSpec(id="the-id", name="m")], agent_model="the-id"),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         # 模拟 id 字段引入前写下的记录
         session.store.save_metadata(
@@ -361,7 +361,7 @@ class TestRestoreChain:
             _config([ModelSpec(id="the-id", name="m")], agent_model="the-id"),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="the-id")
 
@@ -389,7 +389,7 @@ class TestTemplateModelId:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
 
         template = AgentTemplate(name="coder", model="tpl-name", provider_name="p")
@@ -412,7 +412,7 @@ class TestTemplateModelId:
             _config([ModelSpec(id="tpl-id", name="tpl-name")], agent_model="tpl-id"),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         template = AgentTemplate(
             name="coder",
@@ -434,7 +434,7 @@ class TestTemplateModelId:
             _config([ModelSpec(id="src-id", name="src-name")], agent_model="src-id"),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         assert (
             AgentTemplate.from_agent(session.agent, model_id="src-id").model_id
@@ -459,7 +459,7 @@ class TestForkSnapshot:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
         assert target is not None
@@ -497,7 +497,7 @@ class TestReloadTemplates:
             _config([ModelSpec(id="shared", name="old-name")], agent_model="shared"),
         )
         runtime = WingRuntime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
         await session.update_state(model_id="shared")
         assert session.agent.model == "old-name"
@@ -511,7 +511,7 @@ class TestReloadTemplates:
         assert result.ok, [i.name for i in result.items if not i.ok]
 
         # 新会话：模板来自新配置
-        fresh = runtime.create_session()
+        fresh = materialize(runtime.create_session())
         assert fresh.agent.model == "new-name"
         assert fresh.model_id == "shared"
 
@@ -542,7 +542,9 @@ class TestOverrideModelId:
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
 
-        session = sm.create_session(agent_override=AgentOverride(model_id="ds-flash"))
+        session = materialize(
+            sm.create_session(agent_override=AgentOverride(model_id="ds-flash"))
+        )
 
         assert session.model_id == "ds-flash"
         assert session.agent.model == "deepseek-flash"
@@ -562,7 +564,7 @@ class TestOverrideModelId:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         resumed = sm.resume_session(
             session.session_id, agent_override=AgentOverride(model_id="ds-flash")
@@ -590,7 +592,7 @@ class TestOverrideModelId:
         )
         assert override.model_id is None
 
-        session = sm.create_session(agent_override=override)
+        session = materialize(sm.create_session(agent_override=override))
         assert session.model_id == "ds-flash"  # 模板默认，未被旧字段影响
 
 
@@ -625,7 +627,7 @@ class TestNoPartialApplication:
         )
         _use_config(monkeypatch, cfg)
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         agent_before = session.agent
 
@@ -634,17 +636,15 @@ class TestNoPartialApplication:
         with pytest.raises(ValueError, match="unknown model id 'nope'"):
             await session.update_state(template=coder, model_id="nope")
 
-        # 模板未切换、agent 未重建、三元组未变、磁盘零记录
+        # 模板未切换、agent 未重建、三元组未变、磁盘零残留（模板记录仍是物化时的原值）
         assert session.agent is agent_before
         assert session.template_name == "default"
         assert session.model_id == "a-id"
         assert session.agent.model == "a-name"
         meta = FileSessionStore(root).load_metadata(sid)
-        assert meta is None or (
-            meta.template_name is None
-            and meta.model_id is None
-            and meta.model_name is None
-        )
+        assert meta is not None
+        assert meta.template_name == "default"
+        assert meta.model_id is None and meta.model_name is None
 
     @pytest.mark.asyncio
     async def test_valid_model_id_and_template_apply_together(
@@ -673,7 +673,7 @@ class TestNoPartialApplication:
         )
         _use_config(monkeypatch, cfg)
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
 
         coder = sm.template_manager.get("coder")
@@ -717,12 +717,14 @@ class TestModelWindowFollowsModel:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         assert self._window(session) == (64_000, 8_000)
         assert session.agent.get_status()["context_window_tokens"] == 64_000
 
-        awaited = sm.create_session(agent_override=AgentOverride(model_id="m-default"))
+        awaited = materialize(
+            sm.create_session(agent_override=AgentOverride(model_id="m-default"))
+        )
         assert self._window(awaited) == (256_000, 50_000)
         # override 只影响该会话：模板（以及之后建出的会话）仍是声明默认。
         template = sm.template_manager.get("default")
@@ -731,7 +733,7 @@ class TestModelWindowFollowsModel:
             template.compactor.context_window_tokens,
             template.compactor.keep_recent_tokens,
         ) == (64_000, 8_000)
-        plain = sm.create_session()
+        plain = materialize(sm.create_session())
         assert self._window(plain) == (64_000, 8_000)
 
     @pytest.mark.asyncio
@@ -760,7 +762,7 @@ class TestModelWindowFollowsModel:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         assert self._window(session) == (64_000, 8_000)
 
         await session.update_state(model_id="large")
@@ -805,7 +807,7 @@ class TestModelWindowFollowsModel:
         )
         _use_config(monkeypatch, cfg)
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         assert self._window(session) == (64_000, 8_000)
 
         coder = sm.template_manager.get("coder")
@@ -838,7 +840,7 @@ class TestModelWindowFollowsModel:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
 
         session.agent.set_model("m-gone", "p")
         assert session.agent.model == "m-gone"
@@ -870,8 +872,8 @@ class TestModelWindowFollowsModel:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        first = sm.create_session()
-        second = sm.create_session()
+        first = materialize(sm.create_session())
+        second = materialize(sm.create_session())
         assert first.context_manager.compactor is not second.context_manager.compactor
 
         await first.update_state(model_id="large")
@@ -912,7 +914,7 @@ class TestModelWindowFollowsModel:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="large")
 
@@ -948,7 +950,7 @@ class TestModelWindowFollowsModel:
             ),
         )
         sm = SessionManager({"file": FileSessionStore(root)})
-        parent = sm.create_session()
+        parent = materialize(sm.create_session())
         seed_messages(parent, "hello")
         result = sm.fork_session(parent.session_id, "current")
         assert result is not None

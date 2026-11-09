@@ -1,7 +1,7 @@
 //! `wing usage` — 我的使用史：活动热力图、token、会话、子智能体。
 //!
 //! 一条命令回答「我最近干得怎么样」：默认出仪表盘（热力图 + 今天 + 我/我的 AI + 模型），
-//! `--by <维度>` 出明细表。所有数字都来自 `GET /api/usage` 的 11 个整数度量——派生值
+//! `--by <维度>` 出明细表。所有数字都来自 `GET /api/usage` 的 10 个整数度量——派生值
 //! （命中率、工时）在这里算，端点不含派生值。
 //!
 //! ```sh
@@ -16,7 +16,7 @@
 //!
 //! - **参数闸门在连网关之前**（非法值不拉起守护进程）；
 //! - **没有读数写 `—`，不写 `0`**（`0` 是一个读数）；
-//! - 行序、截断、`totals` 全归端点：CLI 不重排、不重算，TOTAL 行永远可对账。
+//! - 行序、截断、`totals` 全归端点：CLI 不重排、不重算，total 行永远可对账。
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -545,7 +545,7 @@ fn format_dashboard(
         format!("→ {} · {weeks}{shown}", until.format("%Y-%m-%d")),
         format!("{weeks}{shown}"),
     ];
-    out_text.push_str(&title_line("WING USAGE", &rights, width));
+    out_text.push_str(&title_line("wing usage", &rights, width));
     out_text.push('\n');
 
     if let Some(note) = empty_note(day) {
@@ -588,12 +588,12 @@ fn format_dashboard(
         && data_since > since
     {
         out_text.push_str(&format!(
-            "{INDENT}token / call / message audit starts {}; earlier days only have session counts\n",
+            "{INDENT}token / call / message audit starts {}; earlier days have no readings\n",
             data_since.format("%Y-%m-%d")
         ));
     }
 
-    // TODAY：只打今天真的干活了的那一天（全 0 的一天不打一排 0）。
+    // today：只打今天真的干活了的那一天（全 0 的一天不打一排 0）。
     let today = Local::now().date_naive();
     if today >= since
         && today <= until
@@ -603,7 +603,7 @@ fn format_dashboard(
         out_text.push('\n');
         out_text.push_str(&format!(
             "{INDENT}{:<8}{}\n",
-            "TODAY",
+            "today",
             today_text(&row.measures)
         ));
     }
@@ -615,7 +615,7 @@ fn format_dashboard(
     Ok(out_text)
 }
 
-/// `TODAY   34 messages · 6 sessions · ↑ 1.4G in (99% cached) · ↓ 4.8M out · work 20h 00m`
+/// `today   34 messages · 6 sessions · ↑ 1.36B in (99.42% cached) · ↓ 4.80M out · work 20h 00m`
 fn today_text(measures: &UsageMeasures) -> String {
     format!(
         "{} {} · {} {} · ↑ {} in{} · ↓ {} out · work {}",
@@ -633,7 +633,7 @@ fn today_text(measures: &UsageMeasures) -> String {
         },
         format::tokens(measures.prompt_tokens),
         match format::hit_rate(measures.cached_tokens, measures.prompt_tokens) {
-            Some(rate) => format!(" ({rate:.0}% cached)"),
+            Some(rate) => format!(" ({rate:.2}% cached)"),
             None => String::new(),
         },
         format::tokens(measures.completion_tokens),
@@ -644,15 +644,14 @@ fn today_text(measures: &UsageMeasures) -> String {
 /// 我 vs 我的 AI：`origin` 的两行 + 一行合计（`totals` 是端点给的对账基准）。
 fn format_who_table(origin: &UsageResponse, palette: &ThemePalette, out: &TableOutput) -> String {
     let columns = vec![
-        PlainColumn::new("WHO", ColumnKind::Compact),
-        PlainColumn::new("CREATED", ColumnKind::Compact),
-        PlainColumn::new("ACTIVE", ColumnKind::Compact),
-        PlainColumn::new("MSGS", ColumnKind::Compact),
-        PlainColumn::new("LLM CALLS", ColumnKind::Compact),
-        PlainColumn::new("TOOL CALLS", ColumnKind::Compact),
-        PlainColumn::new("IN", ColumnKind::Compact),
-        PlainColumn::new("CACHE", ColumnKind::Compact),
-        PlainColumn::new("OUT", ColumnKind::Compact),
+        PlainColumn::new("who", ColumnKind::Compact),
+        PlainColumn::new("sessions", ColumnKind::Compact),
+        PlainColumn::new("msgs", ColumnKind::Compact),
+        PlainColumn::new("llm calls", ColumnKind::Compact),
+        PlainColumn::new("tool calls", ColumnKind::Compact),
+        PlainColumn::new("in", ColumnKind::Compact),
+        PlainColumn::new("cache", ColumnKind::Compact),
+        PlainColumn::new("out", ColumnKind::Compact),
     ];
     let mut rows: Vec<Vec<PlainCell>> = origin
         .rows
@@ -683,10 +682,9 @@ fn format_who_table(origin: &UsageResponse, palette: &ThemePalette, out: &TableO
     common::render_table(&table, palette, out)
 }
 
-/// `origin` 两行与合计共用的度量列（`CREATED` 起的 8 格）。
+/// `origin` 两行与合计共用的度量列（`sessions` 起的 7 格）。
 fn origin_cells(measures: &UsageMeasures) -> Vec<PlainCell> {
     vec![
-        PlainCell::plain(count(measures.sessions_created)),
         PlainCell::plain(count(measures.sessions)),
         PlainCell::plain(count(measures.user_messages)),
         PlainCell::plain(count(measures.llm_calls)),
@@ -699,11 +697,11 @@ fn origin_cells(measures: &UsageMeasures) -> Vec<PlainCell> {
 
 fn format_model_table(model: &UsageResponse, palette: &ThemePalette, out: &TableOutput) -> String {
     let columns = vec![
-        PlainColumn::capped("MODEL", ColumnKind::Narrative, 48),
-        PlainColumn::new("CALLS", ColumnKind::Compact),
-        PlainColumn::new("IN", ColumnKind::Compact),
-        PlainColumn::new("CACHE", ColumnKind::Compact),
-        PlainColumn::new("OUT", ColumnKind::Compact),
+        PlainColumn::capped("model", ColumnKind::Narrative, 48),
+        PlainColumn::new("calls", ColumnKind::Compact),
+        PlainColumn::new("in", ColumnKind::Compact),
+        PlainColumn::new("cache", ColumnKind::Compact),
+        PlainColumn::new("out", ColumnKind::Compact),
     ];
     let rows = model
         .rows
@@ -761,8 +759,8 @@ fn format_detail(
     let mut text = String::new();
     // 空态 = 窗口里一件事实都没有：排行类维度靠 `rows` 就能看出来，稠密维度（`day`
     // 每天一行、`origin` 恒两行）的零行永远非空——只看 `rows` 会把首跑打成一整窗
-    // 全零的表，还附一句「建过会话」的假话。
-    let nothing = !report.totals.has_flow() && report.totals.sessions_created == 0;
+    // 全零的表。
+    let nothing = !report.totals.has_flow();
     if (report.rows.is_empty() || nothing)
         && let Some(note) = empty_note(report)
     {
@@ -783,17 +781,13 @@ fn format_detail(
     rows.push(detail_total(dim, report, palette));
     debug_assert!(
         rows.iter().all(|row| row.len() == columns.len()),
-        "每行的格子数必须等于列数（TOTAL 行与数据行同一套列）"
+        "每行的格子数必须等于列数（total 行与数据行同一套列）"
     );
 
     let table = PlainTable { columns, rows };
     text.push_str(&common::render_table(&table, palette, out));
     if report.truncated {
         text.push_str(&format!("… more {} (raise --limit)\n", dim.as_str()));
-    }
-    // 有行、但十个流水度量全 0：这一窗只有目录事实（换窗口也补不出流水）。
-    if !report.totals.has_flow() && report.totals.sessions_created > 0 {
-        text.push_str("only sessions created in this range (no flow yet)\n");
     }
     text
 }
@@ -883,7 +877,7 @@ fn detail_row(
     }
 }
 
-/// 表尾 TOTAL 行（= 端点 `totals`；永远可对账）。
+/// 表尾 total 行（= 端点 `totals`；永远可对账）。
 fn detail_total(dim: Dim, report: &UsageResponse, palette: &ThemePalette) -> Vec<PlainCell> {
     let m = &report.totals;
     let cells = match dim {
@@ -928,7 +922,7 @@ fn detail_total(dim: Dim, report: &UsageResponse, palette: &ThemePalette) -> Vec
         Dim::Origin => Vec::new(),
     };
     let ink = Style::new().fg(palette.accent);
-    let mut row = vec![PlainCell::styled("TOTAL".to_string(), ink)];
+    let mut row = vec![PlainCell::styled("total".to_string(), ink)];
     row.extend(cells.into_iter().map(|text| PlainCell::styled(text, ink)));
     if dim == Dim::Origin {
         row.extend(origin_cells(m).into_iter().map(|cell| PlainCell {
@@ -942,25 +936,24 @@ fn detail_total(dim: Dim, report: &UsageResponse, palette: &ThemePalette) -> Vec
 fn detail_columns(dim: Dim) -> Vec<PlainColumn> {
     let headers: &[&str] = match dim {
         Dim::Day => &[
-            "DATE", "ACTIVE", "MSGS", "LLM", "TOOLS", "IN", "CACHE", "OUT", "TIME",
+            "date", "sessions", "msgs", "llm", "tools", "in", "cache", "out", "time",
         ],
-        Dim::Model => &["MODEL", "PROVIDER", "CALLS", "IN", "CACHE", "OUT"],
+        Dim::Model => &["model", "provider", "calls", "in", "cache", "out"],
         Dim::Session => &[
-            "SESSION", "TITLE", "WHO", "MSGS", "CALLS", "IN", "CACHE", "OUT",
+            "session", "title", "who", "msgs", "calls", "in", "cache", "out",
         ],
-        Dim::Tool => &["TOOL", "CALLS", "ERR", "AVG"],
-        Dim::Workspace => &["WORKSPACE", "SESSIONS", "CALLS", "IN", "OUT"],
-        Dim::Agent => &["AGENT", "SESSIONS", "CALLS", "IN", "OUT"],
+        Dim::Tool => &["tool", "calls", "err", "avg"],
+        Dim::Workspace => &["workspace", "sessions", "calls", "in", "out"],
+        Dim::Agent => &["agent", "sessions", "calls", "in", "out"],
         Dim::Origin => &[
-            "WHO",
-            "CREATED",
-            "ACTIVE",
-            "MSGS",
-            "LLM CALLS",
-            "TOOL CALLS",
-            "IN",
-            "CACHE",
-            "OUT",
+            "who",
+            "sessions",
+            "msgs",
+            "llm calls",
+            "tool calls",
+            "in",
+            "cache",
+            "out",
         ],
     };
     headers
@@ -968,8 +961,8 @@ fn detail_columns(dim: Dim) -> Vec<PlainColumn> {
         .enumerate()
         .map(|(index, header)| {
             let kind = match *header {
-                "TITLE" => ColumnKind::Narrative,
-                "WORKSPACE" => ColumnKind::TokenHeavy,
+                "title" => ColumnKind::Narrative,
+                "workspace" => ColumnKind::TokenHeavy,
                 _ => ColumnKind::Compact,
             };
             if index == 0 && dim == Dim::Session {
@@ -1013,10 +1006,13 @@ fn ordered_rows(report: &UsageResponse, tree: bool) -> Vec<(usize, String)> {
 // 数字记法
 // ============================================================
 
-/// 命中率（`cached / prompt`）整数百分比；没有输入 → `—`（不写 `0%`）。
+/// 命中率（`cached / prompt`）两位小数百分比；没有输入 → `—`（不写 `0%`）。
+///
+/// 两位小数是审计面的最小分辨率：整数百分比会把 99.4% 与 99.9% 印成同一个「99」，
+/// 缓存命中这件事就看不出来了。
 fn cache_text(measures: &UsageMeasures) -> String {
     match format::hit_rate(measures.cached_tokens, measures.prompt_tokens) {
-        Some(rate) => format!("{rate:.0}%"),
+        Some(rate) => format!("{rate:.2}%"),
         None => NONE_MARK.to_string(),
     }
 }
@@ -1121,7 +1117,6 @@ fn streak_stats(days: &[(NaiveDate, bool)], today: NaiveDate) -> (usize, usize, 
 
 /// 空态的一句话：完全没有数据 vs 窗口内没活动，是两种不同的结论。
 fn empty_note(report: &UsageResponse) -> Option<&'static str> {
-    // 只看流水：窗口内建过会话（`sessions_created`）不算「有数据」。
     if report.totals.has_flow() {
         return None;
     }
@@ -1418,7 +1413,7 @@ mod tests {
     /// 记法本身（千分位 / 工时）在 `util::format` 的单测里；这里只钉用量视图的两处派生值。
     #[test]
     fn derived_readings_use_a_dash_instead_of_zero() {
-        assert_eq!(cache_text(&measures(1_000, 10, 990)), "99%");
+        assert_eq!(cache_text(&measures(1_000, 10, 990)), "99.00%");
         assert_eq!(cache_text(&UsageMeasures::default()), NONE_MARK);
         assert_eq!(avg_time(0, 0), NONE_MARK);
         assert_eq!(avg_time(1_680, 2), "840ms");
@@ -1511,7 +1506,7 @@ mod tests {
         let text = dashboard();
         // 1) 标题行 + 范围 + 周数（右对齐到 120 列）。
         let title = text.lines().next().unwrap();
-        assert!(title.starts_with("WING USAGE"), "{title}");
+        assert!(title.starts_with("wing usage"), "{title}");
         assert!(title.contains("2026-08-03 → 2026-10-25"), "{title}");
         assert!(title.ends_with("12 weeks"), "{title}");
         assert_eq!(title.chars().count(), common::PIPE_WIDTH, "右对齐");
@@ -1520,20 +1515,13 @@ mod tests {
         assert!(text.contains("2 active days · streak"), "{text}");
         // 4) 审计起点提示（data_since == since → 不打印）。
         assert!(!text.contains("audit starts"), "{text}");
-        // 5) 两张表：WHO 有 total 行，MODEL 用展示名。
-        for header in [
-            "WHO",
-            "CREATED",
-            "ACTIVE",
-            "MSGS",
-            "LLM CALLS",
-            "TOOL CALLS",
-        ] {
+        // 5) 两张表：who 有 total 行，model 用展示名（表头一律小写）。
+        for header in ["who", "sessions", "msgs", "llm calls", "tool calls"] {
             assert!(text.contains(header), "缺列 {header}：\n{text}");
         }
         assert!(text.contains("total"), "{text}");
         assert!(text.contains("DeepSeek-Flash"), "{text}");
-        assert!(text.contains("2.3M"), "tokens 用紧凑记法：\n{text}");
+        assert!(text.contains("2.30M"), "tokens 用紧凑记法：\n{text}");
     }
 
     #[test]
@@ -1553,7 +1541,7 @@ mod tests {
         .unwrap();
         assert!(
             text.contains(
-                "token / call / message audit starts 2026-10-20; earlier days only have session counts"
+                "token / call / message audit starts 2026-10-20; earlier days have no readings"
             ),
             "{text}"
         );
@@ -1587,20 +1575,6 @@ mod tests {
         let busy = report("day", vec![], measures(1, 1, 0));
         assert_eq!(empty_note(&busy), None);
 
-        // 只有目录事实（窗口内建过会话、没有流水）→ 仍然是「没有数据」。
-        let catalog_only = report(
-            "day",
-            vec![],
-            UsageMeasures {
-                sessions_created: 3,
-                ..UsageMeasures::default()
-            },
-        );
-        assert!(
-            empty_note(&catalog_only).is_some(),
-            "`sessions_created` 是目录事实，不是读数"
-        );
-
         // 空态只打标题 + 一句话，不打空表。
         let text = format_dashboard(
             &virgin,
@@ -1612,7 +1586,7 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("No usage data yet"), "{text}");
-        assert!(!text.contains("WHO"), "空态不打表：\n{text}");
+        assert!(!text.contains("who"), "空态不打表：\n{text}");
     }
 
     #[test]
@@ -1637,18 +1611,12 @@ mod tests {
             &out(),
         )
         .unwrap();
-        assert!(text.contains("TODAY"), "{text}");
+        assert!(text.contains("today"), "{text}");
         assert!(text.contains("2 messages"), "{text}");
-        assert!(text.contains("(99% cached)"), "{text}");
+        assert!(text.contains("(99.00% cached)"), "{text}");
 
-        // 今天在窗口内但只建过会话（`sessions_created`）→ 不打印这一行。
-        day.rows = vec![row(
-            &key,
-            UsageMeasures {
-                sessions_created: 2,
-                ..UsageMeasures::default()
-            },
-        )];
+        // 今天在窗口内但一行流水都没有 → 不打印这一行。
+        day.rows = vec![row(&key, UsageMeasures::default())];
         day.totals = measures(1_000, 10, 990);
         let text = format_dashboard(
             &day,
@@ -1659,7 +1627,7 @@ mod tests {
             &out(),
         )
         .unwrap();
-        assert!(!text.contains("TODAY"), "{text}");
+        assert!(!text.contains("today"), "{text}");
     }
 
     // ---- 明细 ----
@@ -1677,34 +1645,15 @@ mod tests {
     }
 
     #[test]
-    fn a_catalog_only_window_draws_its_rows_with_a_footnote() {
-        // 只建过会话、还没有流水：后端给的行照常出表（吞掉它们会让 `--since all`
-        // 变成一句空话——换窗口也补不出流水）。
-        let catalog_only = UsageMeasures {
-            sessions_created: 2,
-            ..UsageMeasures::default()
-        };
-        let text = detail(
-            Dim::Day,
-            vec![row("2026-08-03", catalog_only.clone())],
-            catalog_only,
-        );
-        assert!(!text.contains("No activity in this range"), "{text}");
-        assert!(text.contains("2026-08-03"), "{text}");
-        assert!(text.contains("TOTAL"), "{text}");
-        assert!(
-            text.contains("only sessions created in this range (no flow yet)"),
-            "{text}"
-        );
-
-        // 一行都没有 → 仍是空态文案，且不带那句表尾。
+    fn a_zero_window_is_the_empty_state_for_every_dimension() {
+        // 一行都没有 → 空态文案。
         assert_eq!(
             detail(Dim::Session, vec![], UsageMeasures::default()),
             "No activity in this range (try --since all).\n"
         );
 
         // 稠密维度的零行不是「有数据」（`day` 每天一行、`origin` 恒两行）：
-        // 首跑不该被画成一整窗全零的表，更不该附「建过会话」那句话。
+        // 首跑不该被画成一整窗全零的表。
         let zero = row("2026-08-03", UsageMeasures::default());
         assert_eq!(
             detail(Dim::Day, vec![zero.clone()], UsageMeasures::default()),
@@ -1719,13 +1668,14 @@ mod tests {
             "No activity in this range (try --since all).\n"
         );
 
-        // 有流水 → 表尾那句不出现。
+        // 有流水 → 表正常画。
         let busy = detail(
             Dim::Day,
             vec![row("2026-08-03", measures(1_000, 10, 990))],
             measures(1_000, 10, 990),
         );
-        assert!(!busy.contains("only sessions created"), "{busy}");
+        assert!(busy.contains("2026-08-03"), "{busy}");
+        assert!(busy.contains("total"), "{busy}");
     }
 
     #[test]
@@ -1746,13 +1696,13 @@ mod tests {
             for header in &headers {
                 assert!(text.contains(header), "{dim:?} 缺列 {header}：\n{text}");
             }
-            assert!(text.contains("TOTAL"), "{dim:?} 缺 TOTAL：\n{text}");
+            assert!(text.contains("total"), "{dim:?} 缺 total：\n{text}");
 
             // 数据行与 TOTAL 行的格子数必须等于列数（`debug_assert` 只在 debug 生效）。
             let mut cells = detail_row(dim, &report.rows[0], "", None, &ThemePalette::default());
             assert_eq!(cells.len(), columns.len(), "{dim:?} 数据行");
             cells = detail_total(dim, &report, &ThemePalette::default());
-            assert_eq!(cells.len(), columns.len(), "{dim:?} TOTAL 行");
+            assert_eq!(cells.len(), columns.len(), "{dim:?} total 行");
         }
     }
 
@@ -1865,7 +1815,7 @@ mod tests {
         // 没有名字的子会话显示 `—`（不重复 id、不猜标题）。
         assert!(text.contains(NONE_MARK), "{text}");
 
-        // 列表里查不到（已归档 / 已删除）→ TITLE 与 WHO 都是 `—`，不猜。
+        // 列表里查不到（已归档 / 已删除）→ title 与 who 都是 `—`，不猜。
         let text = format_detail(
             &report,
             Dim::Session,
@@ -1978,7 +1928,7 @@ mod tests {
             text.contains("840ms"),
             "平均耗时 = tool_time/calls：\n{text}"
         );
-        assert!(text.contains("TOTAL"), "{text}");
+        assert!(text.contains("total"), "{text}");
     }
 
     #[test]

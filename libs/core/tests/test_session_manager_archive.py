@@ -29,6 +29,7 @@ from wing.event_bus import event_bus
 from wing.schema import Message
 from wing.session import SessionArchivedError, SessionManager
 from wing.store import FileSessionStore, MemorySessionStore, SessionMetadata
+from _support import materialize
 
 pytestmark = pytest.mark.asyncio
 
@@ -112,7 +113,11 @@ class TestExplicitArchive:
         归档条目（CI review N4）。准入判据 = 展示判据。
         """
         session = SessionManager({"file": file_store}).create_session()
-        session.set_title("metadata only")
+        # 只写 metadata 的会话（工具 / 脚本产物）：直接落一份，不经过会话对象
+        # （`set_title` 在未物化的草稿上不落盘——那是「只打开不用」的语义）。
+        file_store.save_metadata(
+            session.session_id, SessionMetadata(session_name="metadata only")
+        )
         assert (root / session.session_id / "metadata.json").exists()
 
         sm = SessionManager({"file": file_store})
@@ -140,7 +145,7 @@ class TestExplicitArchive:
         self, root: Path, sm: SessionManager, file_store: FileSessionStore
     ) -> None:
         """归档往返是纯移动：链内容逐字一致，恢复后照常 resume（红线）。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.context_manager.add_message(Message(role="user", content="hello"))
         before = _history(root, sid)
@@ -191,7 +196,7 @@ class TestExplicitArchive:
         self, root: Path, sm: SessionManager, file_store: FileSessionStore
     ) -> None:
         """被订阅的会话不可归档（钉住条件与 release 同一套）。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.context_manager.add_message(Message(role="user", content="hello"))
         event_bus.route_attach("client-1", sid)
@@ -214,7 +219,7 @@ class TestExplicitArchive:
         with pytest.raises(LookupError):
             sm.unarchive_session("no-such-session")
 
-        memory_session = sm.create_session(backend="memory")
+        memory_session = materialize(sm.create_session(backend="memory"))
         with pytest.raises(RuntimeError) as excinfo:
             sm.archive_session(memory_session.session_id)
         assert "does not support archiving" in str(excinfo.value)
@@ -383,7 +388,7 @@ class TestEvictedSessionWriteSeal:
     async def test_failed_flush_retry_cannot_resurrect_the_live_dir(
         self, root: Path, sm: SessionManager, file_store: FileSessionStore, monkeypatch
     ) -> None:
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.context_manager.add_message(Message(role="user", content="hello"))
 
@@ -418,7 +423,7 @@ class TestEvictedSessionWriteSeal:
         日志 append 是最"深"的一条写路径（worker 直接持有 ContextManager，
         不经 `_sessions` 查找）——封盘必须盖住它，否则它能把归档后的目录重建。
         """
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.context_manager.add_message(Message(role="user", content="hello"))
         assert (root / sid / "history.jsonl").exists()
@@ -436,7 +441,7 @@ class TestEvictedSessionWriteSeal:
         self, root: Path, sm: SessionManager, file_store: FileSessionStore, monkeypatch
     ) -> None:
         """封盘本身：detach 之后 flush_usage / aclose 收尾都不再触达 store。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         session.context_manager.add_message(Message(role="user", content="hello"))
         session.detach()
         session._usage.record_turn()  # 制造脏标记
@@ -529,7 +534,7 @@ class TestArchivedList:
     async def test_entry_carries_tags_and_model(
         self, root: Path, sm: SessionManager
     ) -> None:
-        session = sm.create_session(tags=["favorite"])
+        session = materialize(sm.create_session(tags=["favorite"]))
         sid = session.session_id
         sm.archive_session(sid)
 
@@ -604,7 +609,7 @@ class TestArchiverAndRuntimeEntryPoints:
         from wing.runtime import WingRuntime
 
         runtime = WingRuntime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         session_id = session.session_id
 
         # 空会话（从未落盘）：没有可归档的磁盘状态 → 幂等空动作，不是 500。

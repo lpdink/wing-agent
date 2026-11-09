@@ -1514,13 +1514,13 @@ mod tests {
     const USAGE_BODY: &str = r#"{
         "range": {"since": "2026-08-03", "until": "2026-10-23", "data_since": "2026-10-20"},
         "group_by": "day",
-        "totals": {"sessions": 59, "sessions_created": 734, "user_messages": 1539,
+        "totals": {"sessions": 59, "user_messages": 1539,
                    "llm_calls": 7516, "tool_calls": 8316, "tool_errors": 146,
                    "prompt_tokens": 1360000000, "completion_tokens": 4800000,
                    "cached_tokens": 1351840000, "llm_time_ms": 72000000,
                    "tool_time_ms": 2040000},
         "rows": [{"key": "2026-10-23", "label": null, "parent_session_id": null,
-                  "sessions": 6, "sessions_created": 90, "user_messages": 34,
+                  "sessions": 6, "user_messages": 34,
                   "llm_calls": 156, "tool_calls": 210, "tool_errors": 2,
                   "prompt_tokens": 1200000, "completion_tokens": 45600,
                   "cached_tokens": 936000, "llm_time_ms": 6000000,
@@ -1545,13 +1545,12 @@ mod tests {
             .await
             .unwrap();
 
-        // 扁平的 row：`key`/`label`/`parent_session_id` + 11 个度量都在同一层。
+        // 扁平的 row：`key`/`label`/`parent_session_id` + 10 个度量都在同一层。
         assert_eq!(resp.group_by, "day");
         assert_eq!(resp.range.since, "2026-08-03");
         assert_eq!(resp.range.until, "2026-10-23");
         assert_eq!(resp.range.data_since.as_deref(), Some("2026-10-20"));
         assert_eq!(resp.totals.prompt_tokens, 1_360_000_000);
-        assert_eq!(resp.totals.sessions_created, 734);
         assert_eq!(resp.rows.len(), 1);
         assert_eq!(resp.rows[0].key, "2026-10-23");
         assert_eq!(resp.rows[0].label, None);
@@ -1606,7 +1605,7 @@ mod tests {
 
         let resp = client.get_usage(&UsageQuery::default()).await.unwrap();
         assert_eq!(resp.range.data_since, None);
-        assert_eq!(resp.totals, UsageMeasures::default(), "11 个度量缺省全 0");
+        assert_eq!(resp.totals, UsageMeasures::default(), "10 个度量缺省全 0");
         assert!(resp.rows.is_empty());
         assert!(!resp.truncated);
         assert_eq!(server.recorded()[0].path, "/api/usage", "空查询不发 ?");

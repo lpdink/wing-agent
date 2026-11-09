@@ -714,14 +714,14 @@ mod tests {
         }
     }
 
-    /// COST = `≈-` + 既有 token 记法（契约 §7 样列的 `≈-14.2k`）；无参照 → `—`。
+    /// COST = `≈-` + 既有 token 记法（契约 §7 样列的 `≈-14.20k`）；无参照 → `—`。
     #[test]
     fn the_cost_column_uses_the_shared_token_notation() {
         let mut report = report();
         report.forks[0].tokens_lost = Some(14_200);
         report.forks[1].tokens_lost = None;
         let text = render(&report);
-        assert!(text.contains("≈-14.2k"), "{text}");
+        assert!(text.contains("≈-14.20k"), "{text}");
         assert!(text.contains(NONE_MARK), "{text}");
         assert!(
             !text.contains("≈-0") && !text.contains("≈0"),
@@ -729,7 +729,7 @@ mod tests {
         );
         // 负的 tokens_lost（不该发生）也不许退化成裸数字 `-14200`。
         report.forks[0].tokens_lost = Some(-14_200);
-        assert!(render(&report).contains("≈-14.2k"), "{text}");
+        assert!(render(&report).contains("≈-14.20k"), "{text}");
     }
 
     /// 窄终端不撕行：表体每一行等宽（`render/table/plain` 的截断不越预算）。
@@ -815,7 +815,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("2026-10-18T15:40:58.010"), "{text}");
-        assert!(text.contains("≈-14.2k"), "{text}");
+        assert!(text.contains("≈-14.20k"), "{text}");
         assert!(text.contains("external"), "{text}");
         assert!(text.contains("avoidable: YES"), "{text}");
         // 人类的 WHEN 形态（表格里也是这一列）。

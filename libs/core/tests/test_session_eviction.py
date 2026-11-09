@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from _support import wait_until_async
+from _support import materialize, wait_until_async
 from wing.agent.inbox import Inbound
 from wing.background import BackgroundScheduler
 from wing.event import DeliveredEvent
@@ -56,7 +56,7 @@ class TestIdleEviction:
     @pytest.mark.asyncio
     async def test_evicts_idle_session_beyond_ttl(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         _seed(session, "hello")
         sid = session.session_id
 
@@ -75,7 +75,7 @@ class TestIdleEviction:
     @pytest.mark.asyncio
     async def test_keeps_session_within_ttl(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         now = time.monotonic()
 
         assert runtime.sm.evict_idle_sessions(ttl_seconds=100.0, now=now + 50) == []
@@ -88,7 +88,7 @@ class TestIdleEviction:
     @pytest.mark.asyncio
     async def test_touch_resets_idle_timer(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
 
         # 把空闲起点推到 10000s 前：已远超 TTL
@@ -101,8 +101,8 @@ class TestIdleEviction:
     @pytest.mark.asyncio
     async def test_working_and_waiting_are_pinned(self):
         runtime = _runtime()
-        working = runtime.create_session()
-        waiting = runtime.create_session()
+        working = materialize(runtime.create_session())
+        waiting = materialize(runtime.create_session())
         _go_working(working)
         _go_waiting(waiting)
 
@@ -113,7 +113,7 @@ class TestIdleEviction:
     @pytest.mark.asyncio
     async def test_subscribed_session_is_pinned(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
         event_bus.route_attach("client-x", sid)
         try:
@@ -128,7 +128,7 @@ class TestIdleEviction:
     async def test_non_durable_backend_is_pinned(self):
         """memory 后端逐出 = 数据销毁：永远不逐出。"""
         runtime = _runtime()
-        session = runtime.create_session(backend="memory")
+        session = materialize(runtime.create_session(backend="memory"))
         _seed(session, "ephemeral")
 
         assert runtime.sm.evict_idle_sessions(ttl_seconds=0.0) == []
@@ -143,7 +143,7 @@ class TestIdleEviction:
         连同它将要驱动的那一轮一起掐掉。
         """
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
         try:
             session.agent._inbox._queue.put_nowait(
@@ -159,7 +159,7 @@ class TestIdleEviction:
     @pytest.mark.asyncio
     async def test_evict_is_idempotent(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         assert runtime.sm.evict(session.session_id, reason="test") is True
         assert runtime.sm.evict(session.session_id, reason="test") is False
         await runtime.sm.wait_teardowns()
@@ -174,7 +174,7 @@ class TestIdleEviction:
         from wing.provider.openai.provider import OpenAICompatProvider
 
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         provider = session.agent.model_provider
         assert isinstance(provider, OpenAICompatProvider)
 
@@ -195,7 +195,7 @@ class TestIdleEviction:
         from wing.provider.openai.provider import OpenAICompatProvider
 
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         provider = session.agent.model_provider
         assert isinstance(provider, OpenAICompatProvider)
 
@@ -225,7 +225,7 @@ class TestReaper:
     @pytest.mark.asyncio
     async def test_attach_is_idempotent_and_touches_on_event(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
         reaper = runtime.reaper
 
@@ -242,7 +242,7 @@ class TestReaper:
     @pytest.mark.asyncio
     async def test_sweep_respects_ttl_and_enabled(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
 
         from wing.config import get_config
@@ -257,7 +257,7 @@ class TestReaper:
             config.sessions.eviction.idle_ttl_seconds = original
 
         # enabled=False → 扫描不做事（新会话不再被逐出）。
-        session2 = runtime.create_session()
+        session2 = materialize(runtime.create_session())
         config.sessions.eviction.enabled = False
         try:
             await asyncio.sleep(0.01)
@@ -273,7 +273,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_loaded_session(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         _seed(session, "hello")
         sid = session.session_id
 
@@ -294,7 +294,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_refuses_busy_session(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         _go_working(session)
 
         with pytest.raises(RuntimeError, match="status=working"):
@@ -304,7 +304,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_refuses_subscribed_session(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         sid = session.session_id
         event_bus.route_attach("client-x", sid)
         try:
@@ -317,7 +317,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_refuses_non_durable_session(self):
         runtime = _runtime()
-        session = runtime.create_session(backend="memory")
+        session = materialize(runtime.create_session(backend="memory"))
         with pytest.raises(RuntimeError, match="non-durable"):
             runtime.release_session(session.session_id)
         assert runtime.sm.get_session(session.session_id) is not None
@@ -329,7 +329,7 @@ class TestHydration:
     @pytest.mark.asyncio
     async def test_ensure_loaded_rehydrates_chain_and_model_record(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         _seed(session, "alpha", "beta")
         sid = session.session_id
         session._apply_model("qwen3-max")  # 落盘模型三元组（alt 声明的 id）
@@ -368,7 +368,7 @@ class TestHydration:
     @pytest.mark.asyncio
     async def test_runtime_subscribe_hydrates_evicted_session(self):
         runtime = _runtime()
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         _seed(session, "hello")
         sid = session.session_id
 

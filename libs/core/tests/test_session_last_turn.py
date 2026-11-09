@@ -23,6 +23,7 @@ import pytest
 from wing.gateway.projection import build_session_info
 from wing.store import SessionMetadata
 from wing.store.file import FileSessionStore
+from _support import materialize
 
 pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
@@ -103,7 +104,7 @@ def test_legacy_metadata_without_fields_reads_none(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_turn_result_persists_fields_and_projects_them(runtime):
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     sid = session.session_id
 
     # 未收口：两字段都无（info 投影与盘上一致，都是 None）。
@@ -135,7 +136,7 @@ async def test_throttled_flush_inside_record_turn_still_persists_fields(runtime)
     这是写点顺序的钉子：字段若在 ``record_turn()`` 之后写，这一次落盘带的就是
     None，而随后的显式 ``flush()`` 因脏标记已清成为 no-op——字段只留在内存里。
     """
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     sid = session.session_id
     tracker = session._usage  # noqa: SLF001
 
@@ -178,7 +179,7 @@ async def test_throttled_flush_inside_record_turn_still_persists_fields(runtime)
 @pytest.mark.asyncio
 async def test_subtype_is_passed_through_verbatim(runtime):
     """错误收口同样是一次收口（模型不会继续了）：subtype 逐字透传，不改写。"""
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     session.agent.sink.turn_result(
         subtype="error_max_turns", is_error=True, num_turns=3, duration_ms=9
     )
@@ -192,7 +193,7 @@ async def test_subtype_is_passed_through_verbatim(runtime):
 @pytest.mark.asyncio
 async def test_next_turn_overwrites_and_fields_survive_resume(runtime):
     """下一次收口覆盖；逐出 + resume 后从盘上延续（跨进程事实）。"""
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     sid = session.session_id
     session.agent.sink.turn_result(subtype="success", num_turns=1, duration_ms=1)
     first_end = session.last_turn_end

@@ -6,6 +6,11 @@
 //! current directory, exactly like every other creation path (`wing run`,
 //! the TUI, stdio).
 //!
+//! The empty session is a **draft**: nothing hits the disk until the first
+//! user message (see docs/dev/architecture.md "会话物化"), so the id is only
+//! valid while the gateway process keeps it in memory — drive it from the
+//! same session of work, not after a restart.
+//!
 //! `wing resume` is the explicit hydration entry: it loads an evicted session
 //! back into gateway memory and prints the state summary. The 404→resume
 //! convention already hydrates on demand for `wing tail` / `info` /

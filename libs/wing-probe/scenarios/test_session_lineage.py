@@ -4,9 +4,10 @@
 `libs/core/wing/{store/base.py,session/manager.py,gateway/**}`）：
 
 - ``POST /api/session/create`` 的 ``parent_session_id`` 是**创建时刻的一次性
-  事实**：带父创建把字段写进 ``metadata.json``（``read_metadata`` 可读），
-  列表行（``GET /api/session/list``）与 ``GET /api/session/info`` 都投影它，
-  响应的 ``parent_session_id`` 是**读回**（调用方据此对账）；
+  事实**：先写进内存 metadata（响应是**读回**），随第一条用户消息（**物化**）
+  落盘到 ``metadata.json``（``read_metadata`` 可读）；列表行
+  （``GET /api/session/list``）与 ``GET /api/session/info`` 都投影它；
+- **空会话不是会话**：只建不用（没有第一条消息）的会话不落盘、不列表；
 - **持久**：逐出（release）→ 列表行仍在（``status: inactive``）→ resume 水合
   后字段照旧；
 - **弱引用**：只做格式卫生（同 session id 规则），不校验父会话存在性——幽灵父
@@ -92,6 +93,30 @@ def _rows_by_id(rows: list[dict]) -> dict[str, dict]:
     return {row["id"]: row for row in rows}
 
 
+async def _materialize(
+    probe: Probe,
+    session_id: str,
+    *,
+    content: str = "born",
+    model_id: str | None = None,
+) -> None:
+    """跑一轮把会话**物化**（第一条用户消息才落盘：血缘 / 标签随它一起写）。
+
+    建会话本身不再留任何磁盘痕迹——协议里的 parent 只是内存草稿，断言"落盘了"
+    必须先让它出生。``model_id`` 只在创建时没带模型覆盖时需要。
+    """
+    driver = probe.driver_required
+    if model_id is not None:
+        await driver.http.request(
+            "POST",
+            "/api/session/update",
+            body={"session_id": session_id, "model_id": model_id},
+        )
+    session = await driver.attach(session_id, workspace=probe.workspace)
+    result = await session.chat(content)
+    assert result.data["subtype"] == "success", result.data
+
+
 def _metadata(probe: Probe, session_id: str) -> dict:
     """会话 ``metadata.json`` 的解析结果（缺失即失败——断言不静默放行）。"""
     data = read_metadata(probe.env.session_dir(session_id))
@@ -103,12 +128,15 @@ def _metadata(probe: Probe, session_id: str) -> dict:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_parent_is_recorded_and_projected(probe: Probe) -> None:
-    """带父创建：metadata 落盘 + 列表行与 info 都携带；无父创建零字段。
+    """带父创建：先去内存草稿，物化后 metadata / 列表行 / info 都携带。
 
-    WHEN 带父创建 child、不带父创建 root
-    THEN 响应是**读回**、``metadata.json`` 有 / 无该键、列表行与 info 逐字一致。
+    WHEN 带父创建 child、不带父创建 root；第一条消息之前与之后各读一次
+    THEN 草稿期盘上零痕迹；物化后 ``metadata.json`` 有该键，列表行与 info 逐字一致。
     """
-    root = await _create(probe, session_id="lineage-root", tags=[VISIBLE_TAG])
+    probe.register(LINEAGE_MODEL, *[Turn.of(text=f"ack {index}") for index in range(4)])
+    root = await _create(
+        probe, session_id="lineage-root", model_id=LINEAGE_MODEL, tags=[VISIBLE_TAG]
+    )
     assert root[FIELD] is None, root
 
     child = await _create(
@@ -121,22 +149,27 @@ async def test_parent_is_recorded_and_projected(probe: Probe) -> None:
     assert child["session_id"] == "lineage-child", child
     assert child[FIELD] == "lineage-root", child
 
-    # 持久事实：创建**即**落盘（不依赖任何后续动作）——无标（因此后续没有别的
-    # 写盘）的子会话立刻读盘就有字段；无父且无标的会话则零写盘（连文件都不建）。
-    quiet = await _create(probe, session_id="lineage-quiet", parent="lineage-root")
-    assert quiet[FIELD] == "lineage-root", quiet
-    assert _metadata(probe, "lineage-quiet")[FIELD] == "lineage-root"
-    await _create(probe, session_id="lineage-bare")
-    assert read_metadata(probe.env.session_dir("lineage-bare")) is None
+    # 草稿期：血缘只在内存里（响应读得出来），盘上没有 metadata
+    # （显式 id 会认领一个空目录——那是别名归一的机制，空目录不是会话）。
+    assert read_metadata(probe.env.session_dir("lineage-child")) is None
 
-    # 投影：列表行与 info 携带同一个值。
+    # 物化：第一条用户消息把整份 metadata（含血缘）一次落盘。
+    await _materialize(probe, "lineage-child")
     assert _metadata(probe, "lineage-child")[FIELD] == "lineage-root"
+
+    # 无父创建：物化后 metadata 里没有该键（零字段语义不变）。
+    await _materialize(probe, "lineage-root")
     assert FIELD not in _metadata(probe, "lineage-root")
 
+    # 自动 id + 父 + 无标：物化后同样带字段。
+    quiet = await _create(probe, parent="lineage-root", model_id=LINEAGE_MODEL)
+    await _materialize(probe, quiet["session_id"])
+    assert _metadata(probe, quiet["session_id"])[FIELD] == "lineage-root"
+
+    # 投影：列表行与 info 携带同一个值。
     rows = _rows_by_id(await _list(probe))
     assert rows["lineage-child"][FIELD] == "lineage-root", rows["lineage-child"]
     assert rows["lineage-root"][FIELD] is None, rows["lineage-root"]
-
     info = await _info(probe, "lineage-child")
     assert info[FIELD] == "lineage-root", info
 
@@ -145,15 +178,16 @@ async def test_parent_is_recorded_and_projected(probe: Probe) -> None:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_auto_generated_id_records_parent(probe: Probe) -> None:
-    """**自动生成 id**（不带 session_id）的带父创建同样落盘血缘。
+    """**自动生成 id**（不带 session_id）的带父创建同样记录血缘。
 
-    `wing run` 是血缘采集的主力路径且不暴露 `--session-id`——它不经过认领键，
-    会话目录的创建依赖 metadata 落盘那次 mkdir，因此值得有独立覆盖：
+    `wing run` 是血缘采集的主力路径且不暴露 `--session-id`——它不经过认领键：
+    会话目录完全依赖**物化**那一次 metadata 落盘（不再有"创建即 mkdir"）。
 
-    WHEN 不带 session_id 带父创建 child（另建一个无标 quiet 验证"创建即落盘"）
-    THEN 响应是读回、``metadata.json`` 立刻有字段、列表行与 info 投影一致。
+    WHEN 不带 session_id 带父创建 child
+    THEN 响应是读回、物化后 ``metadata.json`` 有字段、列表行与 info 投影一致。
     """
-    parent = await _create(probe, tags=[VISIBLE_TAG])
+    probe.register(LINEAGE_MODEL, *[Turn.of(text="ack") for _ in range(3)])
+    parent = await _create(probe, model_id=LINEAGE_MODEL, tags=[VISIBLE_TAG])
     parent_id = parent["session_id"]
     child = await _create(
         probe, parent=parent_id, model_id=LINEAGE_MODEL, tags=[VISIBLE_TAG]
@@ -161,13 +195,12 @@ async def test_auto_generated_id_records_parent(probe: Probe) -> None:
     child_id = child["session_id"]
     assert child_id != parent_id
     assert child[FIELD] == parent_id, child
+    assert read_metadata(probe.env.session_dir(child_id)) is None
 
-    # 落盘不依赖任何后续动作：无标子会话的唯一写盘来自血缘本身。
-    quiet = await _create(probe, parent=parent_id)
-    assert quiet[FIELD] == parent_id, quiet
-    assert _metadata(probe, quiet["session_id"])[FIELD] == parent_id
-
+    await _materialize(probe, child_id)
     assert _metadata(probe, child_id)[FIELD] == parent_id
+    await _materialize(probe, parent_id)
+
     rows = _rows_by_id(await _list(probe))
     assert rows[child_id][FIELD] == parent_id, rows[child_id]
     assert (await _info(probe, child_id))[FIELD] == parent_id
@@ -222,16 +255,33 @@ async def test_parent_survives_eviction_and_resume(probe: Probe) -> None:
 async def test_parent_filter_selects_direct_children(probe: Probe) -> None:
     """``?parent=`` = 直接子（不含父自己、不含孙辈），且是子集过滤。
 
-    WHEN 建 A → B → C 三层
+    WHEN 建 A → B → C 三层并各自跑一轮（物化：空会话不列表）
     THEN ``?parent=A`` 只有 B、``?parent=B`` 只有 C、``?parent=C`` 空；
     每个查询都逐行等于"全量 + 谓词"（同样的行序）；词法非法值 400。
     """
-    await _create(probe, session_id="lineage-a", tags=[VISIBLE_TAG])
-    await _create(probe, session_id="lineage-b", parent="lineage-a", tags=[VISIBLE_TAG])
-    await _create(probe, session_id="lineage-c", parent="lineage-b", tags=[VISIBLE_TAG])
+    probe.register(LINEAGE_MODEL, *[Turn.of(text="ack") for _ in range(3)])
+    await _create(
+        probe, session_id="lineage-a", model_id=LINEAGE_MODEL, tags=[VISIBLE_TAG]
+    )
+    await _create(
+        probe,
+        session_id="lineage-b",
+        parent="lineage-a",
+        model_id=LINEAGE_MODEL,
+        tags=[VISIBLE_TAG],
+    )
+    await _create(
+        probe,
+        session_id="lineage-c",
+        parent="lineage-b",
+        model_id=LINEAGE_MODEL,
+        tags=[VISIBLE_TAG],
+    )
+    for session_id in ("lineage-a", "lineage-b", "lineage-c"):
+        await _materialize(probe, session_id)
 
     full = await _list(probe)
-    assert _ids(full) == ["lineage-a", "lineage-b", "lineage-c"], full
+    assert {row["id"] for row in full} == {"lineage-a", "lineage-b", "lineage-c"}, full
 
     assert _ids(await _list(probe, parent="lineage-a")) == ["lineage-b"]
     assert _ids(await _list(probe, parent="lineage-b")) == ["lineage-c"]
@@ -304,14 +354,17 @@ async def test_invalid_parent_is_rejected_without_traces(probe: Probe) -> None:
     assert sorted(entry.name for entry in probe.env.sessions_path.iterdir()) == []
     assert await _list(probe) == []
 
-    # 弱引用：格式合法但**不存在**的父被接受，事实就是该值。
+    # 弱引用：格式合法但**不存在**的父被接受，事实就是该值（物化后落盘）。
+    probe.register(LINEAGE_MODEL, Turn.of(text="ghost ack"))
     ghost = await _create(
         probe,
         session_id="lineage-ghost",
         parent="lineage-nowhere",
+        model_id=LINEAGE_MODEL,
         tags=[VISIBLE_TAG],
     )
     assert ghost[FIELD] == "lineage-nowhere", ghost
+    await _materialize(probe, "lineage-ghost")
     assert _metadata(probe, "lineage-ghost")[FIELD] == "lineage-nowhere"
     assert _ids(await _list(probe, parent="lineage-nowhere")) == ["lineage-ghost"]
 
@@ -333,8 +386,12 @@ async def test_adopt_ignores_parent_and_never_rewrites(probe: Probe) -> None:
     请求带了 parent 而"认父"，已有父的会话也不会被换父；响应是**读回**既有记录。
     忽略是显式的：日志里留一行 warning。
     """
-    first = await _create(probe, session_id="lineage-root", tags=[VISIBLE_TAG])
+    probe.register(LINEAGE_MODEL, *[Turn.of(text="ack") for _ in range(2)])
+    first = await _create(
+        probe, session_id="lineage-root", model_id=LINEAGE_MODEL, tags=[VISIBLE_TAG]
+    )
     assert first[FIELD] is None, first
+    await _materialize(probe, "lineage-root")
 
     adopted = await _create(
         probe, session_id="lineage-root", parent="lineage-other", tags=[VISIBLE_TAG]
@@ -347,9 +404,12 @@ async def test_adopt_ignores_parent_and_never_rewrites(probe: Probe) -> None:
         probe,
         session_id="lineage-kid",
         parent="lineage-root",
+        model_id=LINEAGE_MODEL,
         tags=[VISIBLE_TAG],
     )
     assert child[FIELD] == "lineage-root", child
+    await _materialize(probe, "lineage-kid")
+
     reparented = await _create(probe, session_id="lineage-kid", parent="lineage-other")
     assert reparented[FIELD] == "lineage-root", reparented
     assert _metadata(probe, "lineage-kid")[FIELD] == "lineage-root"
