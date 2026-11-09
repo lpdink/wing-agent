@@ -231,7 +231,8 @@ class TestTheGateIsFailSafe:
         await session.post("again")
 
         assert session.materialized is True
-        assert _raw(root, sid)["session_name"] == "first"
+        # 没送出去的那条不该留下标题：标题跟着真正让会话出生的消息走。
+        assert _raw(root, sid)["session_name"] == "again"
         assert [row["session_id"] for row in _catalog_rows()] == [sid]
 
     @pytest.mark.asyncio

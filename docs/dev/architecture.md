@@ -196,7 +196,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 **空会话不是会话**：新建的会话在**第一条用户消息**到来前只是内存草稿——不写
 `metadata.json` / `history.jsonl`，也不进用量目录（`session_catalog`）。`Session.post()`
-是新建会话的**唯一**出生触发器（`Session._materialize`）：标题、`last_interaction`、hook
+是新建会话的**唯一**出生触发器（`Session.materialize`）：标题、`last_interaction`、hook
 注入的追加系统提示词、创建期覆盖 / 标签 / 血缘与模型记录全部随那**一次** metadata 写落盘
 （写失败保持草稿，下一次消息重试）。
 
@@ -216,6 +216,10 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
   id 只在这一段工作里有效（重启同理）。持久消费者另论：登记唤醒触发器是对「这个会话要活到
   重启之后」的显式承诺，`SessionManager.ensure_durable` 因此把草稿**就地物化**
   （`Session.materialize`），而不是登记一个重启后必然失败的触发器。
+- **已知取舍**：`ensure_durable` 物化出的是「无标题、无标签、无 history」的会话——它不进列表
+  （展示判据要有 history 或标签），也不可归档（归档准入 = 展示判据），因此这份 metadata 会留在
+  盘上（每个几百字节），直到该会话真的收到第一条消息。量级由「登记在草稿上的唤醒」决定，
+  不做额外清理路径（删目录是破坏性动作，换不来什么磁盘）。
 
 ### 会话逐出（eviction）
 

@@ -264,6 +264,18 @@ class TestCreate:
         _session_trigger(service)
         assert ports.durable == [PARENT, CHILD], "target 先、source 后各承诺一次"
 
+    def test_an_invalid_request_does_not_materialize_anything(
+        self, service: WakeService, ports
+    ) -> None:
+        """校验不过的请求（非法 on_events / 自指）不在磁盘上留任何东西。"""
+        with pytest.raises(ValueError):
+            _session_trigger(service, on_events="done,error")
+        with pytest.raises(ValueError):
+            _session_trigger(
+                service, source_session_id=PARENT, target_session_id=PARENT
+            )
+        assert ports.durable == []
+
     def test_timer_defaults(self, service: WakeService, clock: Clock) -> None:
         trigger = _timer_trigger(service)
         assert trigger.kind == "timer"

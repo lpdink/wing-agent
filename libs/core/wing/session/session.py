@@ -844,7 +844,7 @@ class Session:
         """
         if self._materialized or self._detached:
             return
-        self._write_metadata()
+        self._store.save_metadata(self._session_id, self._metadata)
         self._materialized = True
         if self._on_materialize is not None:
             self._on_materialize(self)
@@ -853,10 +853,6 @@ class Session:
     def materialized(self) -> bool:
         """会话是否已物化（第一条用户消息之后为真；既有会话构造时即为真）。"""
         return self._materialized
-
-    def _write_metadata(self) -> None:
-        """无条件写一次 metadata（物化路径专用：不受闸门与摘除标志约束）。"""
-        self._store.save_metadata(self._session_id, self._metadata)
 
     def _save_metadata(self) -> None:
         """将当前 metadata 模型保存到 store（摘除 / 未物化时是 no-op）。"""
@@ -867,7 +863,7 @@ class Session:
             return
         if not self._materialized:
             return
-        self._write_metadata()
+        self._store.save_metadata(self._session_id, self._metadata)
 
     def set_title(self, title: str) -> None:
         """设置 session 标题（草稿上只改内存，随首条消息落盘）。
@@ -1282,14 +1278,20 @@ class Session:
                 LLM 请求体——两处都在 ``encode("utf-8")`` 处炸）
         """
         require_utf8(content, field="message content")
+        previous_title = self._metadata.session_name
         self._check_first_message_metadata(content)
         self._metadata.last_interaction = datetime.now().isoformat()
-        if self._materialized:
-            # 既有会话：每条消息的互动时间都要落盘（中断 / 进程退出后仍是事实）。
-            self._save_metadata()
-        else:
-            # 首条消息：标题与 last_interaction 随整份草稿一次写全。
-            self.materialize()
+        try:
+            if self._materialized:
+                # 既有会话：每条消息的互动时间都要落盘（中断 / 进程退出后仍是事实）。
+                self._save_metadata()
+            else:
+                # 首条消息：标题与 last_interaction 随整份草稿一次写全。
+                self.materialize()
+        except BaseException:
+            # 没送出去的消息不该留在草稿里当标题：下一次投递重新命名。
+            self._metadata.session_name = previous_title
+            raise
         await self._agent.post(
             content,
             request_id=request_id,

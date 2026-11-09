@@ -201,6 +201,12 @@ class WakeService:
             next_fire_at_ms = first_fire_at_ms(parsed, self._clock())
             spec_text = parsed.text
 
+        # 到这里请求已全部合法：登记唤醒 = 持久性承诺，草稿就地物化
+        # （放在校验之后：非法请求不该在磁盘上留下任何东西）。
+        self._ports.ensure_durable(target)
+        if kind == KIND_SESSION:
+            self._ports.ensure_durable(str(source))
+
         prompt_text = prompt if prompt and prompt.strip() else None
         if kind == KIND_SESSION:
             refreshed = self._refresh_existing(
@@ -597,8 +603,6 @@ class WakeService:
             if self._ports.is_archived(session_id):
                 raise LookupError(f"{field} {session_id!r} is archived")
             raise LookupError(f"{field} {session_id!r} not found")
-        # 触发器跨重启：目标 / source 也必须跨重启（草稿在这里就地物化）。
-        self._ports.ensure_durable(session_id)
 
     def _stored_spec(self, trigger: WakeTrigger) -> WakeSpec | None:
         """库里的 spec → ``WakeSpec``；坏 spec 在此一次性落 ``failed`` 并返回 ``None``。

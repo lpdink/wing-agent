@@ -8,7 +8,7 @@
 |------|------|
 | **WingRuntime** | 服务层协调者（`runtime.py`）。路由 handler 薄化，逻辑下沉到 Session / ContextManager。 |
 | **Session** | 一个会话：消息链 + 状态 + metadata，经 SessionStore 持久化（`session/session.py`）。新建会话在**物化**之前只是内存草稿。 |
-| **会话物化（materialization）** | 会话的「出生」：第一条用户消息（`Session.post` → `_materialize`）到来时才落盘 metadata / history / 用量目录行；此前是内存草稿（显式动作只留在内存）。既有会话（resume / 收养 / fork 子会话）构造时已在盘上，直接放行。与**媒体物化**（`SessionStore.materialize`：把老池媒体对象复制进会话目录）是两个不同的概念——本词条指会话本身，`materialize(media_id)` 指媒体字节。口径见 [architecture.md](architecture.md)「会话物化」。 |
+| **会话物化（materialization）** | 会话的「出生」：第一条用户消息（`Session.post` → `Session.materialize`）到来时才落盘 metadata / history / 用量目录行；此前是内存草稿（显式动作只留在内存）。既有会话（resume / 收养 / fork 子会话）构造时已在盘上，直接放行。与**媒体物化**（`SessionStore.materialize`：把老池媒体对象复制进会话目录）是两个不同的概念——本词条指会话本身，`materialize(media_id)` 指媒体字节。口径见 [architecture.md](architecture.md)「会话物化」。 |
 | **SessionManager** | 多会话管理 + fork/resume + store 注册表（`{name: store}`）（`session/manager.py`）。 |
 | **AgentTemplate** | agent 模板：model（引用 id）/ tools / system_prompt / skills / rules，来自配置 `agents:`；`model` 是 id，经 `Config.find_model()` 查表得到调用名与 provider（`session/template.py`，无「默认第一个 provider」）。 |
 | **WingAgent** | ReAct agent，`wing/agent/` 包（core / react_loop / tool_executor / event_sink / inbox / tool_context）；公开导入路径经 re-export 保持不变（PR #53）。 |
