@@ -235,7 +235,7 @@ fn fmt_hit_rate(usage: &SessionUsage) -> String {
 
 fn fmt_hit_rate_from(cached: i64, prompt: i64) -> String {
     match format::hit_rate(cached, prompt) {
-        Some(rate) => format!("{rate:.2}%"),
+        Some(rate) => format::percent(rate),
         None => "-".to_string(),
     }
 }

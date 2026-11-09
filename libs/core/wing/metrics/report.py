@@ -59,7 +59,7 @@ def usage_report(
     """聚合窗口内的用量事实，返回**线格式**（``GET /api/usage`` 的响应体）。
 
     Args:
-        since: ``YYYY-MM-DD`` 或字面量 ``all``（= 有记录的第一天）；缺省 = ``until``
+        since: ``YYYY-MM-DD`` 或字面量 ``all``（= 有审计流水的第一天）；缺省 = ``until``
             往前 :data:`DEFAULT_RANGE_DAYS` 天。
         until: ``YYYY-MM-DD``；缺省 = 今天（网关本地时区）。
         group_by: :data:`GROUP_BY_VALUES` 之一。
@@ -118,7 +118,7 @@ def _resolve_window(
 ) -> Window:
     """把两个日期字符串解析成闭区间。
 
-    ``since=all`` 取库里最早的一天（= 稠密行从有数据处开始）。时钟回拨 / 向西跨时区
+    ``since=all`` 取审计流水最早的一天（= 稠密行从有读数处开始）。时钟回拨 / 向西跨时区
     会留下「记录时刻晚于读端今天」的行，所以 ``all`` 取 ``min(最早一天, until)``：
     这条逃生路径（「范围内没活动 → try --since all」）绝不变成 400。
 

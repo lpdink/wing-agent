@@ -527,7 +527,7 @@ impl Widget for StatusBar<'_> {
             {
                 // 两位小数：整数百分比会把 99.4% 与 99.9% 印成同一个「99」。
                 right_spans.push(Span::styled(
-                    format!(" ◎{rate:.2}%"),
+                    format!(" ◎{}", format::percent(rate)),
                     Style::default().fg(self.palette.dim),
                 ));
             }
@@ -654,14 +654,14 @@ impl TurnUsage {
         let actual_ratio =
             self.cached_tokens.clamp(0, self.prompt_tokens) as f64 / self.prompt_tokens as f64;
         if self.cache_expected_tokens <= 0 {
-            return format!("{:.2}% cache", actual_ratio * 100.0);
+            return format!("{} cache", format::percent(actual_ratio * 100.0));
         }
         let theory_ratio =
             self.cache_expected_tokens.min(self.prompt_tokens) as f64 / self.prompt_tokens as f64;
         format!(
-            "{:.2}% / 理论 {:.2}% cache",
-            actual_ratio * 100.0,
-            theory_ratio * 100.0
+            "{} / 理论 {} cache",
+            format::percent(actual_ratio * 100.0),
+            format::percent(theory_ratio * 100.0)
         )
     }
 }
@@ -739,7 +739,7 @@ mod tests {
     /// 理论水位未知（`cache_expected_tokens == 0`：旧网关 / 无参照）时，命中率那一格
     /// 只有一个数字（两位小数，与审计面同一精度）。
     #[test]
-    fn test_turn_usage_cache_cell_is_unchanged_when_the_theory_is_unknown() {
+    fn test_turn_usage_cache_cell_is_a_single_number_without_a_theory() {
         let usage = TurnUsage {
             prompt_tokens: 1200,
             completion_tokens: 340,
@@ -846,7 +846,7 @@ mod tests {
             ..StatusData::default()
         };
         let out = render_text(&data);
-        // 80_000 / 120_500 = 66.4% → 状态栏取整为 66%。
+        // 80_000 / 120_500 = 66.39%（两位小数，与审计面同一记法）。
         assert!(out.contains("↑120.50k ↓4.20k ◎66.39%"), "got: {out}");
     }
 
@@ -1373,10 +1373,16 @@ mod tests {
     fn the_mode_outlives_the_provider_when_the_row_runs_out() {
         // 优先级：模型 → 模式 → provider。132 列 + 满配数据（24 字符 id、累计用量
         // 全满）时 provider 让出、强调点留下；宽到放得下两者时，模式仍然排在
-        // provider 之前。
+        // provider 之前。132（而不是更早的 120）是两位小数记法后的预算：右侧
+        // 累计用量比整数百分比长 7 列，120 列时模式与 provider 都已让出。
         let tight = render_bar(&busy(), SID, 132).0.join("");
         assert!(tight.contains("think:medium"), "{tight:?}");
         assert!(!tight.contains("dashscope"), "{tight:?}");
+
+        // 120 列（经典宽度）仍保住模型段：让位从尾部整段剥，不撕半个段。
+        let classic = render_bar(&busy(), SID, 120).0.join("");
+        assert!(classic.contains("DeepSeek-Flash"), "{classic:?}");
+        assert!(!classic.contains("think:medium"), "{classic:?}");
 
         let roomy = render_bar(&busy(), SID, 200).0.join("");
         let mode = roomy.find("think:medium").expect("模式");

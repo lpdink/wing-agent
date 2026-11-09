@@ -674,15 +674,15 @@ pub struct CacheReportResponse {
 /// 统计窗口（闭区间，`YYYY-MM-DD`；「一天」= 网关本地时区的 00:00–24:00）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageRange {
-    /// 窗口起点（含）；`since=all` 时是网关算出的「有记录的第一天」。
+    /// 窗口起点（含）；`since=all` 时是网关算出的「有审计流水的第一天」。
     #[serde(default)]
     pub since: String,
     #[serde(default)]
     pub until: String,
     /// 审计流水（`audit_*` 三张表）最早的一天；没有任何审计行 → `None`。
     ///
-    /// `None` 与「键缺席」同义：老网关不返回这个字段。它只描述**流水**的起点
-    /// （会话计数类指标另有更早的历史），正是「token / 调用统计从这里起」那句提示的依据。
+    /// `None` 与「键缺席」同义：老网关不返回这个字段。早于它的日子没有读数，
+    /// 正是「token / 调用 / 消息统计从这里起」那句提示的依据。
     #[serde(default)]
     pub data_since: Option<String>,
 }

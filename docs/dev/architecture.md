@@ -194,22 +194,28 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 ### 会话物化（materialization）
 
-**空会话不是会话**：新建的会话在**第一条用户消息**到来前只是内存草稿——不建目录、不写
+**空会话不是会话**：新建的会话在**第一条用户消息**到来前只是内存草稿——不写
 `metadata.json` / `history.jsonl`，也不进用量目录（`session_catalog`）。`Session.post()`
-是唯一的出生触发器（`Session._materialize`）：标题、`last_interaction`、hook 注入的追加
-系统提示词、创建期覆盖 / 标签 / 血缘与模型记录全部随那**一次** metadata 写落盘。
+是新建会话的**唯一**出生触发器（`Session._materialize`）：标题、`last_interaction`、hook
+注入的追加系统提示词、创建期覆盖 / 标签 / 血缘与模型记录全部随那**一次** metadata 写落盘
+（写失败保持草稿，下一次消息重试）。
 
 为什么：TUI 打开即建会话（见下「会话创建与 TUI」的取舍），"只开不用就退出"的那批如果
 落盘，就会在磁盘与 `wing usage` 里积累成永远为 0 的活动。物化把「打开」与「用过」分开。
 
-- **显式 id 的认领目录**：create-or-adopt 带 `session_id` 时仍会 `mkdir`（别名归一的机制），
-  但空目录不是会话（`SessionStore.exists` 判 metadata / history）——列表、归档、统计都不认它；
+- **静默走漏的目录仍可能有**：显式 id 的 create-or-adopt 仍会 `mkdir` 认领目录（别名归一的
+  机制），媒体 / 用户文件上传也会写进会话目录；这些空目录与孤立字节**不是会话**
+  （`SessionStore.exists` 判 metadata / history）——列表、归档、统计都不认它们；
 - **草稿状态的边界**：物化之前打标 / 切模型 / `session/update` 只改内存对象（它们是草稿的
   一部分，随第一条消息一起落盘）；从未发消息 → 这些设置随草稿丢弃（没有可观察的落点）；
 - **既有会话不受影响**：resume / 收养 / fork 的子会话构造时已在盘上（`store.exists` 为真），
   显式动作照常立即落盘；
 - **用量目录跟着物化走**：`session_catalog` 行（血缘 / workspace / 模板归属的素材）在第一条
-  消息时登记，fork 的子会话生来就有历史、构造即登记。
+  消息时登记；fork 的子会话生来就有历史，在 fork 时登记。
+- **逐出 = 草稿销毁**：草稿没有磁盘状态，被逐出（空闲 TTL）后 id 即 404——`wing new` 拿到的
+  id 只在这一段工作里有效（重启同理）。持久消费者另论：登记唤醒触发器是对「这个会话要活到
+  重启之后」的显式承诺，`SessionManager.ensure_durable` 因此把草稿**就地物化**
+  （`Session.materialize`），而不是登记一个重启后必然失败的触发器。
 
 ### 会话逐出（eviction）
 

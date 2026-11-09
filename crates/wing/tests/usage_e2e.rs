@@ -168,7 +168,7 @@ fn parse_query(query: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// 11 个度量的全零填充 + 一组「今天很忙」的数字（值不重要，形状是契约）。
+/// 10 个度量的全零填充 + 一组「今天很忙」的数字（值不重要，形状是契约）。
 fn measures(prompt: i64, completion: i64, calls: i64) -> Value {
     json!({
         "sessions": 2,

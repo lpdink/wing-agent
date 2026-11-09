@@ -46,7 +46,7 @@ libs/core/wing/
 ├── runtime.py                       WingRuntime — service 层协调者（post() 唯一入站，路由到 Session/CM）
 ├── system.py                        系统级热重载流程（config → hooks → commands → provider → skills/rules；runtime 委托）
 ├── session/                         会话生命周期包（公共 API 经 __init__ re-export）
-│   ├── session.py                   Session — messages + state + metadata（经 SessionStore）
+│   ├── session.py                   Session — messages + state + metadata（经 SessionStore）；物化闸门（首条消息前不落盘）
 │   ├── manager.py                   SessionManager — 多会话、fork/resume、store registry
 │   ├── fork.py                      fork 的数据搬迁：记录切片 / 拓扑重映射 / 媒体复制（纯函数，无 self）
 │   ├── reaper.py                    SessionReaper — 空闲会话逐出（触摸订阅 + 扫描）
@@ -65,7 +65,7 @@ libs/core/wing/
 │   └── cache_store.py               账本的唯一 SQL 处：cache_call / cache_segment（进程级 wing.db）
 ├── metrics/                         用量统计包（L3）：审计流水 + 会话目录的聚合（`store` 读、`catalog` 写）
 │   ├── store.py                     唯一 SQL 处：audit_* / session_catalog 的聚合（窗口 + 各维度）
-│   ├── measures.py                  度量词表（11 个整数）+ 行 / 窗口值类型（纯函数）
+│   ├── measures.py                  度量词表（10 个整数）+ 行 / 窗口值类型（纯函数）
 │   ├── report.py                    查询编排：窗口 → 各维度的行 → wire 投影
 │   └── catalog.py                   session_catalog 的写入与启动回填（派生投影）
 ├── background.py                    BackgroundScheduler — 周期任务宿主（逐出 / 自动归档 / 会话目录回填）
@@ -316,7 +316,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
 | [`docs/dev/backend-layout.md`](docs/dev/backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射（历史记录）、分层守门测试（`test_layering.py`） |
 | [`docs/dev/cache-accounting.md`](docs/dev/cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、账本位置与上界、理论命中率定义、verdict / blame / avoidable 全表（每条结论落到「我能避免 / 该报 bug / 什么都不用做」）、降级与排错手册、回滚 |
-| [`docs/dev/usage.md`](docs/dev/usage.md) | 用量统计：数据来源（`audit_*` + `session_catalog`）、`GET /api/usage` 契约与各维度、11 个度量的口径与可归因性、一天与时区、根/子会话软机制、`wing usage` 命令面（热力图分档 / 7 个 `--by` / 仪表盘五段）与 `wing info` 的用量块、与 `wing cache` / 会话账本的口径差异、回填与历史起点、增长与保留、已知缺口、排错 |
+| [`docs/dev/usage.md`](docs/dev/usage.md) | 用量统计：数据来源（`audit_*` + `session_catalog`）、`GET /api/usage` 契约与各维度、10 个度量的口径与可归因性、一天与时区、根/子会话软机制、`wing usage` 命令面（热力图分档 / 7 个 `--by` / 仪表盘五段）与 `wing info` 的用量块、与 `wing cache` / 会话账本的口径差异、回填与历史起点、增长与保留、已知缺口、排错 |
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |
 | [`docs/dev/config-logging.md`](docs/dev/config-logging.md) | WING_HOME 布局、config.yaml 键、日志轮转与查询 |

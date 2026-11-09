@@ -612,7 +612,7 @@ class TestArchiverAndRuntimeEntryPoints:
         session = materialize(runtime.create_session())
         session_id = session.session_id
 
-        # 空会话（从未落盘）：没有可归档的磁盘状态 → 幂等空动作，不是 500。
+        # 无名且无历史的会话：不满足展示判据，没有可归档的东西 → 幂等空动作。
         assert runtime.archive_session(session_id) == (False, "nothing to archive")
         session.context_manager.add_message(Message(role="user", content="hi"))
 

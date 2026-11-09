@@ -197,6 +197,99 @@ class TestTheFirstMessageMaterializes:
 
 
 # ============================================================
+# 写失败 / 摘除：闸门必须可重试、不许留下第四条写路径
+# ============================================================
+
+
+class TestTheGateIsFailSafe:
+    @pytest.mark.asyncio
+    async def test_a_failed_first_write_keeps_the_session_a_draft(
+        self, sm: SessionManager, root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """首条消息落盘失败 → 仍是草稿（下一次 post 重试，catalog 不提前登记）。"""
+        session = sm.create_session()
+        sid = session.session_id
+        session.agent._worker.cancel()
+
+        original = session.store.save_metadata
+        failures = {"left": 1}
+
+        def flaky(session_id: str, metadata: Any) -> None:
+            if failures["left"]:
+                failures["left"] -= 1
+                raise OSError("simulated disk full")
+            original(session_id, metadata)
+
+        monkeypatch.setattr(session.store, "save_metadata", flaky)
+
+        with pytest.raises(OSError):
+            await session.post("first")
+        assert session.materialized is False
+        assert not (root / sid / "metadata.json").exists()
+        assert _catalog_rows() == []
+
+        await session.post("again")
+
+        assert session.materialized is True
+        assert _raw(root, sid)["session_name"] == "first"
+        assert [row["session_id"] for row in _catalog_rows()] == [sid]
+
+    @pytest.mark.asyncio
+    async def test_a_detached_session_never_materializes(
+        self, sm: SessionManager, root: Path
+    ) -> None:
+        """摘除后 `post` 不写 metadata、也不写 catalog（第四条写路径被封住）。"""
+        session = sm.create_session()
+        sid = session.session_id
+        session.agent._worker.cancel()
+        session.detach()
+
+        await session.post("too late")
+
+        assert session.materialized is False
+        assert not (root / sid).exists()
+        assert _catalog_rows() == []
+
+
+# ============================================================
+# 持久消费者的显式承诺
+# ============================================================
+
+
+class TestDurableConsumers:
+    @pytest.mark.asyncio
+    async def test_ensure_durable_materializes_a_draft(
+        self, sm: SessionManager, root: Path
+    ) -> None:
+        """登记唤醒 = 对「活到重启之后」的承诺：草稿就地物化（不是拒绝、不是空转）。"""
+        session = sm.create_session(parent_session_id="root-a")
+        sid = session.session_id
+        assert not (root / sid).exists()
+
+        sm.ensure_durable(sid)
+
+        assert session.materialized is True
+        raw = _raw(root, sid)
+        assert raw["template_name"] == "default"
+        assert raw["parent_session_id"] == "root-a"
+        # 第一条消息还没来：没有标题 / 互动时间（不发明事实）。
+        assert "session_name" not in raw
+        assert "last_interaction" not in raw
+        assert [row["session_id"] for row in _catalog_rows()] == [sid]
+
+        # 幂等：第二次是 no-op。
+        sm.ensure_durable(sid)
+        assert len(_catalog_rows()) == 1
+
+    @pytest.mark.asyncio
+    async def test_ensure_durable_on_an_unknown_session_raises(
+        self, sm: SessionManager
+    ) -> None:
+        with pytest.raises(LookupError):
+            sm.ensure_durable("no-such-session")
+
+
+# ============================================================
 # 既有会话不受闸门影响
 # ============================================================
 
@@ -221,7 +314,7 @@ class TestExistingSessionsPassTheGate:
     async def test_fork_child_is_born_materialized(
         self, sm: SessionManager, root: Path
     ) -> None:
-        """fork 的子会话生来带着历史：它的显式动作立即落盘。"""
+        """fork 的子会话生来带着历史：显式动作与首条消息都立即落盘。"""
         source = sm.create_session()
         await _post(source, "hello")
         seed_messages(source, "hello", "hi")
@@ -237,3 +330,11 @@ class TestExistingSessionsPassTheGate:
 
         await child.update_state(model_id="qwen3-max")
         assert _raw(root, child.session_id)["model_id"] == "qwen3-max"
+
+        # 子会话没有「草稿期」：首条消息的标题与互动时间在 post 里直接落盘
+        # （`materialize` 对它是 no-op，回归面见 fork 的标题测试）。
+        child.agent._worker.cancel()
+        await child.post("child first words")
+        raw = _raw(root, child.session_id)
+        assert raw["session_name"] == "child first words"
+        assert raw["forked_from"] == source.session_id

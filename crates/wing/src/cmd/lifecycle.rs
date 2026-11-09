@@ -9,7 +9,8 @@
 //! The empty session is a **draft**: nothing hits the disk until the first
 //! user message (see docs/dev/architecture.md "会话物化"), so the id is only
 //! valid while the gateway process keeps it in memory — drive it from the
-//! same session of work, not after a restart.
+//! same session of work, not after a restart, and not after the idle reaper
+//! evicts it.
 //!
 //! `wing resume` is the explicit hydration entry: it loads an evicted session
 //! back into gateway memory and prints the state summary. The 404→resume

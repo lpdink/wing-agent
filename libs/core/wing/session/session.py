@@ -9,7 +9,8 @@ Session 是有行为的对象，在构造器中创建 ContextManager 和 WingAge
   - Session 通过 from_template 类方法创建（统一入口）
   - Session 不反向引用 agent（agent 在 Session 之下）
   - Session 不直接与存储介质打交道——持久状态全部经由 SessionStore
-    （metadata 读写、消息日志均委托 store）
+    （metadata 读写、消息日志均委托 store；TrackedList 在第一条消息
+    到来时经 MessageLog 创建底层存储）
   - **物化**：新建会话在第一条用户消息到来前只是内存草稿，磁盘上零痕迹
     （见 `_materialize`；口径见 docs/dev/architecture.md「会话物化」）
 """
@@ -252,7 +253,7 @@ class Session:
         self._session_id = session_id
         self._messages = messages
         self._store = store
-        # 物化闸门（见 `_materialize`）：既有会话（resume / 收养 / fork 的子会话）
+        # 物化闸门（见 `materialize`）：既有会话（resume / 收养 / fork 的子会话）
         # 构造时已在盘上，直接放行；新建会话在第一条用户消息到来前零落盘。
         self._materialized = store.exists(session_id)
         self._on_materialize = on_materialize
@@ -731,10 +732,13 @@ class Session:
         （``SessionManager.evict``）是最后一次正确写点。
 
         封的口径 = 三类写口：用量账本（``UsageTracker.seal``）、metadata
-        （``_save_metadata``）、消息日志（``TrackedList.seal`` → 后端实例）。
+        （``_save_metadata``）、消息日志（``TrackedList.seal`` → 后端实例），外加
+        **物化回调**（置空 ``_on_materialize``：迟到的 ``post`` 不再写
+        ``session_catalog``，已摘除的 Session 也不再反向持有 SessionManager）。
         三者之外没有第四条落盘路径（``SessionStore`` 是全部持久状态的唯一所有者）。
         """
         self._detached = True
+        self._on_materialize = None
         self._usage.seal()
         self._messages.seal()
 
@@ -816,25 +820,43 @@ class Session:
 
     # ── metadata 管理 ──────────────────────────────
 
-    def _materialize(self) -> None:
+    def materialize(self) -> None:
         """打开落盘闸门——会话**出生**的时刻（幂等）。
 
         触发点是第一条用户消息（``post``）：在此之前会话只是内存里的草稿，
         任何 metadata 写（hook 注入的追加系统提示词、创建 override、打标、
         模型切换……）都留在内存里，第一条消息到来时随整份 metadata 一次落盘。
-        TUI 开了不用就退出的空会话因此零痕迹：不建目录、不写 ``metadata.json``、
-        不写 ``history.jsonl``（历史本来就在首条消息时才追加），也不进用量目录。
+        TUI 开了不用就退出的空会话因此零痕迹：不写 ``metadata.json``、不写
+        ``history.jsonl``（历史本来就在首条消息时才追加），也不进用量目录
+        （自生成 id 连目录都不建；显式 id 的认领目录见 ``claim_session_id``）。
+
+        **先落盘、后开门**：写失败（磁盘满 / 只读挂载 / 不可编码）时保持草稿并
+        照抛，下一次 ``post`` 会重试——半个会话（有 history 没 metadata、目录行
+        已登记）比一次失败更糟。摘除后的会话不再物化（见 ``detach``）。
 
         ``on_materialize`` 回调由创建路径挂上（``SessionManager.create_session``
         用来写 ``session_catalog``）：目录行是**创建动作**的投影，空会话既已不
         存在，行也不该提前写。
+
+        公开的第二类调用方是**持久消费者**：登记唤醒触发器是对「这个会话要活到
+        重启之后」的显式承诺，``SessionManager.ensure_durable`` 因此会就地物化
+        草稿（见 docs/dev/wake.md）。
         """
-        if self._materialized:
+        if self._materialized or self._detached:
             return
+        self._write_metadata()
         self._materialized = True
-        self._save_metadata()
         if self._on_materialize is not None:
             self._on_materialize(self)
+
+    @property
+    def materialized(self) -> bool:
+        """会话是否已物化（第一条用户消息之后为真；既有会话构造时即为真）。"""
+        return self._materialized
+
+    def _write_metadata(self) -> None:
+        """无条件写一次 metadata（物化路径专用：不受闸门与摘除标志约束）。"""
+        self._store.save_metadata(self._session_id, self._metadata)
 
     def _save_metadata(self) -> None:
         """将当前 metadata 模型保存到 store（摘除 / 未物化时是 no-op）。"""
@@ -845,10 +867,10 @@ class Session:
             return
         if not self._materialized:
             return
-        self._store.save_metadata(self._session_id, self._metadata)
+        self._write_metadata()
 
     def set_title(self, title: str) -> None:
-        """设置 session 标题并持久化。
+        """设置 session 标题（草稿上只改内存，随首条消息落盘）。
 
         Raises:
             ValueError: 标题不可编码为 UTF-8（落盘就会炸，且失败路径不留半份记录）
@@ -860,7 +882,7 @@ class Session:
     def apply_tag_ops(
         self, *, add: Iterable[str] = (), remove: Iterable[str] = ()
     ) -> TagMutation:
-        """原子应用标签增删并落盘（幂等；无实际变化不产生写）。
+        """原子应用标签增删（幂等；无实际变化不产生写；草稿上只改内存）。
 
         打标时间随变更一并维护（新增记时间、移除删记录）——整条 metadata
         一次落盘，两个字段不会各自漂移。
@@ -986,8 +1008,9 @@ class Session:
         """把 CM 当前 append_system_prompt 快照进 metadata 并落盘。
 
         create_session 在 before_session_start hook 跑完后调用——hook 注入的
-        内容（如 workspace / OS 信息）是会话级状态，必须随创建落盘，resume /
-        fork 重建 CM 时才能复现同一系统提示词（KV cache 前缀稳定）。
+        内容（如 workspace / OS 信息）是会话级状态，必须随**物化**落盘（既有的
+        fork 子会话当场落盘），resume / fork 重建 CM 时才能复现同一系统提示词
+        （KV cache 前缀稳定）。
         与记录相同（含同为 None）时跳过，不产生写噪声。
         """
         value = self._context_manager.append_system_prompt or None
@@ -1227,8 +1250,9 @@ class Session:
         空 content（纯图消息：内容全在 media）**不写标题**：空串不是 None 语义
         ——写进去会让 `session_name is not None` 永久挡住后续文本消息的自动标题。
 
-        持久化由紧随其后的 ``_materialize`` 一次性完成（标题与 last_interaction
-        合并成首条消息的**唯一**一次落盘）。
+        持久化由紧随其后的 ``post`` 逻辑完成：草稿在 ``materialize`` 里一次写全
+        （标题与 last_interaction 合并成首条消息的**唯一**一次落盘），既有会话由
+        ``_save_metadata`` 直接落盘。
         """
         if self._metadata.session_name is not None or not content:
             return
@@ -1248,19 +1272,24 @@ class Session:
         media 非空时消息携带媒体引用（字节在会话媒体目录；引用已由
         ``SessionManager._post`` 闸门校验可兑现）。
 
-        第一条消息是会话的**出生**时刻（见 :meth:`_materialize`）：此后 metadata
-        才开始落盘。校验（UTF-8）在任何副作用之前。
+        第一条消息是会话的**出生**时刻（见 :meth:`materialize`）：草稿里的全部
+        状态随它一次落盘。已经在盘上的会话（fork 子会话 / resume）没有「草稿期」，
+        每条消息都照旧落盘 ``last_interaction``（列表排序与归档年龄都读它）。
+        校验（UTF-8）在任何副作用之前。
 
         Raises:
             ValueError: 正文不可编码为 UTF-8（它在首条消息时会成为标题，也会进
                 LLM 请求体——两处都在 ``encode("utf-8")`` 处炸）
         """
         require_utf8(content, field="message content")
-        # 标题与 last_interaction 都是内存改动，随 `_materialize` 的那一次落盘生效：
-        # 首条消息只写一次 metadata。
         self._check_first_message_metadata(content)
         self._metadata.last_interaction = datetime.now().isoformat()
-        self._materialize()
+        if self._materialized:
+            # 既有会话：每条消息的互动时间都要落盘（中断 / 进程退出后仍是事实）。
+            self._save_metadata()
+        else:
+            # 首条消息：标题与 last_interaction 随整份草稿一次写全。
+            self.materialize()
         await self._agent.post(
             content,
             request_id=request_id,

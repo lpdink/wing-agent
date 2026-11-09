@@ -799,7 +799,7 @@ fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> Strin
         "tokens:",
         format::tokens(own.prompt_tokens),
         match format::hit_rate(own.cached_tokens, own.prompt_tokens) {
-            Some(rate) => format!(" ({rate:.2}% cached)"),
+            Some(rate) => format!(" ({} cached)", format::percent(rate)),
             None => String::new(),
         },
         format::tokens(own.completion_tokens)
@@ -2282,7 +2282,7 @@ mod tests {
     }
 
     /// 全零行不是「有读数」：`—` 降级必须可达，子树的 `tree:` 行也不能因为
-    /// 「目录里多了一行」就冒出来。
+    /// 「端点返回了一行」就冒出来。
     #[test]
     fn a_zero_row_is_not_a_reading() {
         let ledger = SessionUsage {

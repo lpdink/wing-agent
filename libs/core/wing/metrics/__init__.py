@@ -13,8 +13,8 @@
   磁盘才是事实源）。
 
 写路径的其余两处不在本包：用户消息行由 ``audit/recorder.py`` 随事件写（与既有三张
-``audit_*`` 同一条管道），会话目录行由 ``SessionManager`` 在新建分支上调用
-:func:`wing.metrics.catalog.record_session_created`。
+``audit_*`` 同一条管道），会话目录行由 ``SessionManager`` 在会话**物化**（第一条用户
+消息）与 fork 时调用 :func:`wing.metrics.catalog.record_session_created`。
 """
 
 from __future__ import annotations

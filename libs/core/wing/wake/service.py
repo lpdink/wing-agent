@@ -597,6 +597,8 @@ class WakeService:
             if self._ports.is_archived(session_id):
                 raise LookupError(f"{field} {session_id!r} is archived")
             raise LookupError(f"{field} {session_id!r} not found")
+        # 触发器跨重启：目标 / source 也必须跨重启（草稿在这里就地物化）。
+        self._ports.ensure_durable(session_id)
 
     def _stored_spec(self, trigger: WakeTrigger) -> WakeSpec | None:
         """库里的 spec → ``WakeSpec``；坏 spec 在此一次性落 ``failed`` 并返回 ``None``。

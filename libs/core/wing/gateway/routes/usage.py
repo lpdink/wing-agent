@@ -40,7 +40,7 @@ async def usage(
     since: str | None = Query(
         None,
         description=(
-            "窗口起点：`YYYY-MM-DD` 或字面量 `all`（= 有记录的第一天）；"
+            "窗口起点：`YYYY-MM-DD` 或字面量 `all`（= 有审计流水的第一天）；"
             "缺省 = until 往前 84 天"
         ),
     ),

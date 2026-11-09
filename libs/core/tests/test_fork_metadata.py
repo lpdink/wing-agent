@@ -118,9 +118,11 @@ class TestForkMetadata:
         last_uuid = source.context_manager.get_context_window()[-1].uuid
         new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
 
-        # 首条消息的 metadata 半步（不经 LLM）：标题是内存改动，落盘走一次保存。
-        new_session._check_first_message_metadata("my new question")
-        new_session._save_metadata()
+        # 首条消息走真实 `post`（停掉 worker：不跑 turn）：子会话生来已物化，
+        # 标题与 last_interaction 必须在 `post` 里直接落盘（回归：物化闸门不得
+        # 把既有会话的每消息落盘也挡掉）。
+        new_session.agent._worker.cancel()
+        await new_session.post("my new question")
 
         meta = source.store.load_metadata(new_session.session_id)
         assert meta is not None
@@ -176,7 +178,6 @@ class TestResumeTemplate:
 
         session = materialize(sm.create_session(template_name="coder"))
         seed_messages(session, "hello")
-        materialize(session)  # 触发 metadata 持久化（正常流程由 post 触发）
         sid = session.session_id
 
         # 模拟重启

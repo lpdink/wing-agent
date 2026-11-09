@@ -24,7 +24,9 @@ from pydantic import BaseModel, Field
 class UsageRange(BaseModel):
     """统计窗口（闭区间，``YYYY-MM-DD``；「一天」= 网关本地时区的 00:00–24:00）。"""
 
-    since: str = Field(description="窗口起点（含）；`since=all` 时 = 有记录的第一天")
+    since: str = Field(
+        description="窗口起点（含）；`since=all` 时 = 有审计流水的第一天"
+    )
     until: str = Field(description="窗口终点（含）")
     data_since: str | None = Field(
         default=None,

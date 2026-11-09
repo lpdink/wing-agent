@@ -460,16 +460,16 @@ class TestCreateAndProjection:
         assert entry.tag_meta["pin"].added_at == meta["pin"].added_at
 
     @pytest.mark.asyncio
-    async def test_tagged_session_without_messages_is_listed(
+    async def test_tagged_session_without_a_name_is_listed(
         self, file_sm: SessionManager
     ):
-        """带标会话在首条消息落盘前就可被列表找到（"创建即打标"的窗口期）。"""
+        """物化后无名但有标的会话可被列表找到（如首条消息是纯图）。"""
         session = materialize(file_sm.create_session(tags=["wing-probe"]))
 
         infos = {i.id: i for i in file_sm.list_sessions()}
         entry = infos[session.session_id]
         assert entry.tags == ["wing-probe"]
-        assert entry.name is None  # 无名（首条消息未至）但已可寻址
+        assert entry.name is None  # 无标题但有标签：仍可寻址
 
     @pytest.mark.asyncio
     async def test_create_with_invalid_tag_fails_cleanly(self, file_sm: SessionManager):

@@ -39,6 +39,10 @@ class FakePorts:
     def session_exists(self, session_id: str) -> bool:
         return session_id in self.existing
 
+    def ensure_durable(self, session_id: str) -> None:
+        # 本组测试只看端点形状：物化是 runtime 的职责，这里不记。
+        pass
+
     def is_archived(self, session_id: str) -> bool:
         return session_id in self.archived
 

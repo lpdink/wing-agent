@@ -22,7 +22,7 @@ pub const MAX_MEDIA_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// 因为「CLI 到底发了什么」本身就是契约的一半（见 `tests/usage_e2e.rs` 的逐字断言）。
 #[derive(Debug, Clone, Default)]
 pub struct UsageQuery {
-    /// `YYYY-MM-DD` 或字面量 `all`（= 有记录的第一天）。
+    /// `YYYY-MM-DD` 或字面量 `all`（= 有审计流水的第一天）。
     pub since: Option<String>,
     /// `YYYY-MM-DD`（缺省 = 今天，网关本地时区）。
     pub until: Option<String>,

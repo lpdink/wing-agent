@@ -633,7 +633,7 @@ fn today_text(measures: &UsageMeasures) -> String {
         },
         format::tokens(measures.prompt_tokens),
         match format::hit_rate(measures.cached_tokens, measures.prompt_tokens) {
-            Some(rate) => format!(" ({rate:.2}% cached)"),
+            Some(rate) => format!(" ({} cached)", format::percent(rate)),
             None => String::new(),
         },
         format::tokens(measures.completion_tokens),
@@ -1012,7 +1012,7 @@ fn ordered_rows(report: &UsageResponse, tree: bool) -> Vec<(usize, String)> {
 /// 缓存命中这件事就看不出来了。
 fn cache_text(measures: &UsageMeasures) -> String {
     match format::hit_rate(measures.cached_tokens, measures.prompt_tokens) {
-        Some(rate) => format!("{rate:.2}%"),
+        Some(rate) => format::percent(rate),
         None => NONE_MARK.to_string(),
     }
 }

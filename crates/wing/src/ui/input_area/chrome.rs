@@ -11,7 +11,7 @@
 //! ╭─ ⠋ Working... (12s) · Esc to interrupt ────────────────────╮
 //! │ ❯ explain the event flow of the gateway                   │
 //! │   and where the resume path hooks in                      │
-//! ╰─ ~/ws/wing · 1.2k in · 340 out · 42.5 t/s ──────── 87% ───╯
+//! ╰─ ~/ws/wing · 1.20k in · 340 out · 42.5 t/s ──────── 87% ───╯
 //!
 //! ╭─────────────────────────────────────────  Enter  发送 ─╮   ← nothing typed
 //! │ ❯ ask anything                                         │

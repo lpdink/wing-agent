@@ -379,7 +379,6 @@ class TestCompatibility:
     async def test_untouched_session_writes_no_record(self, sm, root):
         session = materialize(sm.create_session())
         sid = session.session_id
-        materialize(session)  # 触发一次 metadata 落盘
 
         raw = json.loads((root / sid / "metadata.json").read_text(encoding="utf-8"))
         assert "model_id" not in raw

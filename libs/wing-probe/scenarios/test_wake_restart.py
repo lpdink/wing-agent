@@ -87,8 +87,6 @@ async def test_restart_compensates_once_and_realigns_recurring(probe: Probe) -> 
     """一次性补发一次；周期型只重新对齐、不补发，之后照常触发。"""
     probe.register(PARENT_MODEL, *[Turn.of(text=PARENT_ACK) for _ in range(12)])
     parent = await probe.session(model=PARENT_MODEL)
-    # 物化（第一条消息）：唤醒投递的目标会话必须在磁盘上活得比网关进程久。
-    assert (await parent.chat("stay")).data["subtype"] == "success"
     http = probe.driver_required.http  # 重启会换 driver：之后一律重新取
 
     once = (

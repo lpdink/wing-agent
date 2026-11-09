@@ -233,6 +233,9 @@ class _RuntimeWakePorts:
     def session_exists(self, session_id: str) -> bool:
         return self._runtime.session_exists(session_id)
 
+    def ensure_durable(self, session_id: str) -> None:
+        self._runtime.sm.ensure_durable(session_id)
+
     def is_archived(self, session_id: str) -> bool:
         return self._runtime.is_archived(session_id)
 

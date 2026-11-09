@@ -763,7 +763,7 @@ class TestParentSessionId:
     """血缘（`parent_session_id`）的创建语义（见 docs/dev/session-lineage.md §2）。
 
     这些用例走**真实 manager 路径**（网关侧是 mock、probe 侧是 HTTP 面）：
-    把「创建即落盘 / 收养忽略 / 自指闸门 / 直接子过滤」这组不变量钉在单元层。
+    把「物化落盘 / 收养忽略 / 自指闸门 / 直接子过滤」这组不变量钉在单元层。
     """
 
     @pytest.mark.asyncio

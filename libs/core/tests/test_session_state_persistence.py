@@ -6,7 +6,7 @@
   override（system_prompt / append_system_prompt / tools / max_turns /
   effort / yolo）；
 - 跨进程重启后的 resume 还原（同一存储根目录新建 SessionManager）；
-- before_session_start hook 注入的 append_system_prompt 随创建落盘
+- before_session_start hook 注入的 append_system_prompt 随**物化**（第一条用户消息）落盘
   （fork/resume 不再丢失 → 系统提示词逐字节不变 → KV cache 前缀命中）；
 - fork 快照：子会话 metadata 记录 fork 时刻**有效状态**（含存量会话的
   live append 值），子会话重启后不偏离；
@@ -510,7 +510,6 @@ class TestCompatibility:
     async def test_untouched_session_writes_no_records(self, sm, root):
         session = materialize(sm.create_session())
         sid = session.session_id
-        materialize(session)  # 触发一次 metadata 落盘
 
         raw = _raw_metadata(root, sid)
         for field in (

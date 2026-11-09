@@ -129,6 +129,15 @@ pub fn hit_rate(cached: i64, prompt: i64) -> Option<f64> {
     Some(cached.max(0) as f64 / prompt as f64 * 100.0)
 }
 
+/// 百分比的唯一记法：两位小数 + `%`（`66.39%` / `100.00%`）。
+///
+/// 审计面（状态栏 / `wing usage` / `wing info` / 退出摘要）共用这一处：整数百分比
+/// 会把 99.4% 与 99.9% 印成同一个「99」，缓存命中因此看不出差别。精度只有一份，
+/// 调整时不必追五个 `format!("{:.2}%")`。
+pub fn percent(rate: f64) -> String {
+    format!("{rate:.2}%")
+}
+
 /// 一张图片的标签：`[Image #N W×H SIZE]`——composer 的图片 chip 与消息里的图片
 /// 标签行共用的记法（两处各写一份必然漂移）。
 ///
@@ -223,7 +232,8 @@ mod tests {
         assert_eq!(hit_rate(5, 10), Some(50.0));
         // 审计面在意两位小数（浮点位模式不是契约）。
         let rate = hit_rate(80_000, 120_500).expect("non-zero denominator");
-        assert_eq!(format!("{rate:.2}%"), "66.39%");
+        assert_eq!(percent(rate), "66.39%");
+        assert_eq!(percent(100.0), "100.00%");
     }
 
     #[test]
