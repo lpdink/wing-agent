@@ -7,7 +7,7 @@ use super::support::*;
 use crate::app::commands;
 use crate::app::intent::SessionUpdate;
 use crate::app::*;
-use crate::protocol::{EventMeta, WingEvent};
+use crate::protocol::{EventMeta, SessionStatus, WingEvent};
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::input_area::SubmitPayload;
@@ -2047,4 +2047,157 @@ fn test_a_compaction_receipt_from_another_session_still_clears_the_block() {
     });
     assert!(!app.compacting, "旧会话的回执也要解除拦截");
     assert!(app.toast.is_none(), "但不要在别的会话里 toast 它的结果");
+}
+
+// ── /compact 的落地（`dispatch_compact`）──
+//
+// `execute_intent` 需要 `WingTerminal`，所以往返这一段抽成了独立函数
+// （同 `dispatch_send_message`）。这里直接驱动它：无连接、成功、409 三条路径。
+
+/// 一个只答 `/api/session/compact` 的极简 HTTP 服务：返回给定的状态码与响应体。
+async fn compact_endpoint(status: u16, body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    base
+}
+
+async fn wait_compaction_receipt(
+    rx: &mut tokio::sync::mpsc::Receiver<crate::app::intent::FetchResult>,
+) -> crate::app::intent::FetchPayload {
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("回执必须到达")
+        .expect("回执通道还开着")
+        .payload
+}
+
+#[tokio::test]
+async fn test_dispatch_compact_without_a_connection_reports_instead_of_silence() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::dispatch_compact(None, "sess".into(), None, tx).await;
+    match wait_compaction_receipt(&mut rx).await {
+        crate::app::intent::FetchPayload::CompactFailed { message } => {
+            assert!(message.contains("not connected"), "{message}");
+        }
+        _ => panic!("expected CompactFailed"),
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_compact_maps_success_to_the_token_pair() {
+    let base = compact_endpoint(
+        200,
+        r#"{"ok":true,"original_tokens":1000,"compressed_tokens":200}"#,
+    )
+    .await;
+    let http = wing_api_client::GatewayClient::new(&base, None).expect("client");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::dispatch_compact(Some(http), "sess".into(), None, tx).await;
+    match wait_compaction_receipt(&mut rx).await {
+        crate::app::intent::FetchPayload::CompactDone {
+            original,
+            compressed,
+        } => {
+            assert_eq!((original, compressed), (1000, 200));
+        }
+        _ => panic!("expected CompactDone"),
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_compact_turns_a_409_into_a_refusal_line() {
+    // 网关的错误响应形状是 `ErrorResponse{error, detail}`（不是 FastAPI 的裸 detail）。
+    let base = compact_endpoint(
+        409,
+        r#"{"error":"conflict","detail":"session is not idle"}"#,
+    )
+    .await;
+    let http = wing_api_client::GatewayClient::new(&base, None).expect("client");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::dispatch_compact(Some(http), "sess".into(), None, tx).await;
+    match wait_compaction_receipt(&mut rx).await {
+        crate::app::intent::FetchPayload::CompactFailed { message } => {
+            assert_eq!(message, "Compact refused: session is not idle");
+        }
+        _ => panic!("expected CompactFailed"),
+    }
+}
+
+#[test]
+fn test_compact_refused_while_a_message_is_queued() {
+    let mut app = test_app();
+    app.chat.push_pending(
+        "req-1".into(),
+        crate::ui::chat_view::Submission::text("still queued"),
+    );
+    assert!(app.try_frontend_command("/compact"));
+    assert!(
+        app.drain_intents().is_empty(),
+        "排队输入等同「这一轮马上要开跑」"
+    );
+    let toast = app.toast.as_ref().expect("说明为什么被拒");
+    assert!(toast.message.contains("queued"), "{}", toast.message);
+    assert!(!app.compacting);
+}
+
+#[test]
+fn test_a_switched_sync_session_ends_the_compaction_block() {
+    // 会话身份在压缩期间变了（重连换成了新会话）：回执再也不会认领，标记必须作废。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    assert!(app.compacting);
+
+    let mut event = sync_event_with_status(
+        SessionStatus::Idle,
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+    );
+    if let WingEvent::SyncSession { session_id, .. } = &mut event {
+        *session_id = "a-newer-session".into();
+    }
+    app.handle_event(event);
+
+    assert!(!app.compacting, "换了会话就没人能解除旧的压缩标记");
+    assert!(app.toast.is_none(), "顺手把持久提示也收掉");
+}
+
+#[test]
+fn test_finish_compaction_keeps_a_plain_toast() {
+    // 只清"压缩中"那条持久提示；普通的 3s 提示是别的事情，不该被顺手抹掉。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    app.show_toast(Toast::info(
+        "something else",
+        std::time::Duration::from_secs(3),
+    ));
+
+    app.finish_compaction();
+    assert!(!app.compacting);
+    assert_eq!(
+        app.toast.as_ref().map(|toast| toast.message.as_str()),
+        Some("something else")
+    );
 }

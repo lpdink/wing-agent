@@ -359,46 +359,13 @@ pub async fn execute_intent(
             FetchPayload::SessionList,
         ),
         AppIntent::CompactSession { instruction } => {
-            match transport {
-                Some(t) => {
-                    let http = t.http.clone();
-                    let session_id = app.session_id.clone();
-                    let tx = fetch_tx.clone();
-                    let sid = session_id.clone();
-                    tokio::spawn(async move {
-                        let payload = match http
-                            .compact_session(&session_id, instruction.as_deref())
-                            .await
-                        {
-                            Ok(resp) => FetchPayload::CompactDone {
-                                original: resp.original_tokens,
-                                compressed: resp.compressed_tokens,
-                            },
-                            Err(e) => FetchPayload::CompactFailed {
-                                message: compact_failure_message(&e),
-                            },
-                        };
-                        let _ = tx
-                            .send(FetchResult {
-                                session_id: sid,
-                                payload,
-                            })
-                            .await;
-                    });
-                }
-                None => {
-                    // 没有连接 = 这个请求永远不会发出，也就永远不会有回执。直接投一条
-                    // 失败回执：否则"压缩在飞"没人解除，之后每条消息都只能留在草稿里。
-                    let _ = fetch_tx
-                        .send(FetchResult {
-                            session_id: app.session_id.clone(),
-                            payload: FetchPayload::CompactFailed {
-                                message: "Compact failed: not connected".into(),
-                            },
-                        })
-                        .await;
-                }
-            }
+            dispatch_compact(
+                transport.as_ref().map(|t| t.http.clone()),
+                app.session_id.clone(),
+                instruction,
+                fetch_tx.clone(),
+            )
+            .await;
         }
         AppIntent::InterruptSession => {
             if let Some(t) = transport
@@ -805,6 +772,52 @@ async fn adopt_new_session(
         "{}",
         switch.log_message()
     );
+}
+
+/// `AppIntent::CompactSession` 的落地：无连接直接回失败，有连接把往返挪进后台任务。
+///
+/// 无连接这条不是防御性代码：intent 在这儿被静默丢掉的话，客户端永远等不到回执，
+/// 本地"压缩在飞"就没人解除——之后每条消息都只能留在草稿里。
+///
+/// 从 `execute_intent` 抽出来是为了可测（同 `dispatch_send_message`）；收的是
+/// `http` 而不是 `&Transport`：后者要一条真 WS 连接，而这条路径只用到 HTTP。
+pub(super) async fn dispatch_compact(
+    http: Option<wing_api_client::GatewayClient>,
+    session_id: String,
+    instruction: Option<String>,
+    fetch_tx: mpsc::Sender<FetchResult>,
+) {
+    let Some(http) = http else {
+        let _ = fetch_tx
+            .send(FetchResult {
+                session_id,
+                payload: FetchPayload::CompactFailed {
+                    message: "Compact failed: not connected".into(),
+                },
+            })
+            .await;
+        return;
+    };
+    tokio::spawn(async move {
+        let payload = match http
+            .compact_session(&session_id, instruction.as_deref())
+            .await
+        {
+            Ok(resp) => FetchPayload::CompactDone {
+                original: resp.original_tokens,
+                compressed: resp.compressed_tokens,
+            },
+            Err(e) => FetchPayload::CompactFailed {
+                message: compact_failure_message(&e),
+            },
+        };
+        let _ = fetch_tx
+            .send(FetchResult {
+                session_id,
+                payload,
+            })
+            .await;
+    });
 }
 
 /// 手动压缩失败的文案：409（会话不空闲 / 已有压缩在飞 / 被中断）说的是**可行动**的
