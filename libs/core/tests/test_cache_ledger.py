@@ -1299,6 +1299,20 @@ class TestCacheEndpoint:
         with TestClient(server._app) as tc:
             yield tc, tmp_path / "sessions"
 
+    @staticmethod
+    def _seed_listed_session(sessions_root: Path, session_id: str) -> None:
+        """让会话在盘上存在（归档 / 列表判据 = history **或** 带标签的 metadata）。
+
+        生产上物化由第一条用户消息完成；本类的主角是账本与归档，直接落一份带标
+        metadata 即可（不为此付一次真实 turn）。
+        """
+        from wing.store import SessionMetadata
+        from wing.store.file import FileSessionStore
+
+        FileSessionStore(sessions_root).save_metadata(
+            session_id, SessionMetadata(tags=["probe"])
+        )
+
     def _seed_ledger(self, session_id: str) -> None:
         """按生产写入路径造一份账本（两次调用：改 rules 文件 → 前缀破碎）。"""
         ledger = CacheLedger(session_id)
@@ -1485,7 +1499,7 @@ class TestCacheEndpoint:
 
     def test_archived_session_reports_empty(self, real_client):
         """归档会话按"不存在"处理（与 `read_session_aux` 同口径的冻结语义）。"""
-        client, _ = real_client
+        client, sessions_root = real_client
         session_id = "cache-archived"
         assert (
             client.post(
@@ -1494,6 +1508,7 @@ class TestCacheEndpoint:
             ).status_code
             == 200
         )
+        self._seed_listed_session(sessions_root, session_id)
         self._seed_ledger(session_id)
         assert (
             client.get(f"/api/session/cache?session_id={session_id}").json()["summary"][
@@ -1553,7 +1568,7 @@ class TestCacheEndpoint:
 
     def test_archiving_drops_the_ledger_rows(self, real_client):
         """归档清掉账本行：归档会话没人读得到，留着只会让库随会话数线性长大。"""
-        client, _ = real_client
+        client, sessions_root = real_client
         session_id = "cache-archive-clean"
         assert (
             client.post(
@@ -1562,6 +1577,7 @@ class TestCacheEndpoint:
             ).status_code
             == 200
         )
+        self._seed_listed_session(sessions_root, session_id)
         self._seed_ledger(session_id)
         assert len(recorded_calls(session_id)) == 2
         assert (

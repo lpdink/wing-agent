@@ -28,7 +28,7 @@ use common::e2e::{read_request, run_wing, start_fake_gateway};
 const SESSION_ID: &str = "20261023-101500-abcdef01";
 const UNKNOWN_ID: &str = "ghost-session";
 /// 一帧仪表盘的标题行（`usage -w` 每帧都会画，且每帧只画一次）。
-const FRAME_TITLE: &str = "WING USAGE";
+const FRAME_TITLE: &str = "wing usage";
 
 // ============================================================
 // Stub gateway
@@ -168,11 +168,10 @@ fn parse_query(query: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// 11 个度量的全零填充 + 一组「今天很忙」的数字（值不重要，形状是契约）。
+/// 10 个度量的全零填充 + 一组「今天很忙」的数字（值不重要，形状是契约）。
 fn measures(prompt: i64, completion: i64, calls: i64) -> Value {
     json!({
         "sessions": 2,
-        "sessions_created": 1,
         "user_messages": 4,
         "llm_calls": calls,
         "tool_calls": 6,
@@ -199,12 +198,12 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
         "origin" => (
             vec![
                 json!({"key": "me", "label": null, "parent_session_id": null,
-                       "sessions": 1, "sessions_created": 1, "user_messages": 4,
+                       "sessions": 1, "user_messages": 4,
                        "llm_calls": 3, "tool_calls": 6, "tool_errors": 0,
                        "prompt_tokens": 1200, "completion_tokens": 10,
                        "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 500}),
                 json!({"key": "agents", "label": null, "parent_session_id": null,
-                       "sessions": 1, "sessions_created": 0, "user_messages": 0,
+                       "sessions": 1, "user_messages": 0,
                        "llm_calls": 0, "tool_calls": 0, "tool_errors": 0,
                        "prompt_tokens": 0, "completion_tokens": 0,
                        "cached_tokens": 0, "llm_time_ms": 0, "tool_time_ms": 0}),
@@ -218,7 +217,7 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
                 "key": params.get("session_id").cloned().unwrap_or_default(),
                 "label": null,
                 "parent_session_id": null,
-                "sessions": 1, "sessions_created": 1, "user_messages": 4,
+                "sessions": 1, "user_messages": 4,
                 "llm_calls": 3, "tool_calls": 6, "tool_errors": 0,
                 "prompt_tokens": 1200, "completion_tokens": 10,
                 "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 500,
@@ -240,7 +239,7 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
                 "key": "gateway/deepseek-flash",
                 "label": "DeepSeek-Flash",
                 "parent_session_id": null,
-                "sessions": 2, "sessions_created": 1, "user_messages": 4,
+                "sessions": 2, "user_messages": 4,
                 "llm_calls": 3, "tool_calls": 0, "tool_errors": 0,
                 "prompt_tokens": 1200, "completion_tokens": 10,
                 "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 0,
@@ -251,12 +250,12 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
         _ => (
             vec![
                 json!({"key": "2026-10-22", "label": null, "parent_session_id": null,
-                       "sessions": 1, "sessions_created": 0, "user_messages": 1,
+                       "sessions": 1, "user_messages": 1,
                        "llm_calls": 1, "tool_calls": 2, "tool_errors": 0,
                        "prompt_tokens": 500, "completion_tokens": 5,
                        "cached_tokens": 400, "llm_time_ms": 400, "tool_time_ms": 100}),
                 json!({"key": "2026-10-23", "label": null, "parent_session_id": null,
-                       "sessions": 2, "sessions_created": 1, "user_messages": 4,
+                       "sessions": 2, "user_messages": 4,
                        "llm_calls": 3, "tool_calls": 6, "tool_errors": 0,
                        "prompt_tokens": 1200, "completion_tokens": 10,
                        "cached_tokens": 1200, "llm_time_ms": 1000, "tool_time_ms": 500}),
@@ -342,7 +341,7 @@ async fn usage_text_draws_the_dashboard() {
     let (code, stdout, stderr) = run_wing(&["usage"], &stub.home).await;
     assert_eq!(code, 0, "stderr: {stderr}");
 
-    assert!(stdout.contains("WING USAGE"), "{stdout}");
+    assert!(stdout.contains("wing usage"), "{stdout}");
     assert!(stdout.contains("→"), "范围行：{stdout}");
     assert!(
         stdout.contains("less · ░ ▒ ▓ █ more"),
@@ -350,7 +349,7 @@ async fn usage_text_draws_the_dashboard() {
     );
     assert!(stdout.contains("active"), "统计行：{stdout}");
     // WHO 表（含合计行）与 MODEL 表。
-    assert!(stdout.contains("LLM CALLS"), "{stdout}");
+    assert!(stdout.contains("llm calls"), "{stdout}");
     assert!(stdout.contains("total"), "{stdout}");
     assert!(stdout.contains("DeepSeek-Flash"), "{stdout}");
 
@@ -405,8 +404,8 @@ async fn a_breakdown_sends_its_dimension_and_limit() {
     // 文本形态：MODEL 表 + TOTAL 行。
     let (code, stdout, _stderr) = run_wing(&["usage", "--by", "model"], &stub.home).await;
     assert_eq!(code, 0);
-    assert!(stdout.contains("PROVIDER"), "{stdout}");
-    assert!(stdout.contains("TOTAL"), "{stdout}");
+    assert!(stdout.contains("provider"), "{stdout}");
+    assert!(stdout.contains("total"), "{stdout}");
 }
 
 #[tokio::test]
@@ -503,7 +502,7 @@ async fn info_gains_a_usage_block_and_keeps_its_json_shape() {
         stdout.contains("calls:              3 llm · 6 tools"),
         "{stdout}"
     );
-    assert!(stdout.contains("(100% cached)"), "{stdout}");
+    assert!(stdout.contains("(100.00% cached)"), "{stdout}");
     // 端点只返回了自身一行 → 没有子孙，不打 tree 行。
     assert!(!stdout.contains("tree:"), "{stdout}");
 

@@ -178,16 +178,16 @@ mod tests {
     #[test]
     fn fmt_tokens_compact_boundaries() {
         assert_eq!(fmt_tokens_compact(999), "999 tokens");
-        assert_eq!(fmt_tokens_compact(1000), "1.0k tokens");
-        // 差一点到 1M 的时候走一档：`1000.0k` 读起来该是 `1.0M`（记法见 format::tokens）。
-        assert_eq!(fmt_tokens_compact(999_999), "1.0M tokens");
-        assert_eq!(fmt_tokens_compact(1_000_000), "1.0M tokens");
+        assert_eq!(fmt_tokens_compact(1000), "1.00k tokens");
+        // 差一点到 1M 的时候走一档：`1000.00k` 读起来该是 `1.00M`（记法见 format::tokens）。
+        assert_eq!(fmt_tokens_compact(999_999), "1.00M tokens");
+        assert_eq!(fmt_tokens_compact(1_000_000), "1.00M tokens");
     }
 
     #[test]
     fn fmt_turn_result_success_with_result() {
         let msg = fmt_turn_result(Some("Created hello.rs"), 3, 12000, Some(2100));
-        assert_eq!(msg, "3 turns · 12s · 2.1k tokens\nCreated hello.rs");
+        assert_eq!(msg, "3 turns · 12s · 2.10k tokens\nCreated hello.rs");
     }
 
     #[test]

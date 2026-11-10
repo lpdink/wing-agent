@@ -100,7 +100,12 @@ async def test_filters_select_a_subsequence_of_the_full_list(probe: Probe) -> No
     THEN ``status`` / ``tag`` / 两者组合的每个查询都与"全量 + 对应谓词"逐行相等
     （命中行的行序一致）；未知标签是空结果（200），不是错误。
     """
-    probe.register(FILTER_MODEL, Turn.of(text="reply a"), Turn.of(text="reply b"))
+    probe.register(
+        FILTER_MODEL,
+        Turn.of(text="reply a"),
+        Turn.of(text="reply b"),
+        Turn.of(text="reply c"),
+    )
     http = probe.driver_required.http
 
     crew = await probe.session(model=FILTER_MODEL)
@@ -111,8 +116,9 @@ async def test_filters_select_a_subsequence_of_the_full_list(probe: Probe) -> No
     await _tag(http, both.session_id, ["crew", "pin"])
 
     # 一条退到盘上（inactive）：过滤要能穿过 active / inactive 分组。
-    # 打标让它在列表里可见（无名且无标的会话被列表隐藏——过滤不会凭空造行）。
+    # 先跑一轮把它物化（空会话不落盘、也就列不出来——过滤不会凭空造行）。
     released = await probe.session(model=FILTER_MODEL)
+    await released.chat("c")
     await _tag(http, released.session_id, ["crew"])
     await http.unsubscribe(released.session_id, probe.driver_required.client_id)
     assert (await http.release_session(released.session_id))["released"] is True
@@ -161,18 +167,17 @@ async def test_status_filter_observes_transitions_without_subscription(
     """
     probe.register(RAIL_MODEL, Turn.of(text="hello there", chunk=2, delay=1.2))
     session = await probe.session(model=RAIL_MODEL)
-    # 打标让它在列表里可见（无名且无标的会话被列表隐藏）。
-    await _tag(probe.driver_required.http, session.session_id, ["crew"])
 
     async with _observer(probe) as observer:
-        assert session.session_id in _ids(await _list(observer, status=ACTIVE_STATUSES))
-
+        # 发第一条消息：物化（落盘）+ 起一轮，未订阅的观察者据此看到 working → idle。
         await session.send("hi")
         assert await _wait_status(observer, session.session_id, "working") == "working"
 
         result = await session.watch.expect("turn_result", within=20.0)
         assert result.data["subtype"] == "success", result.data
         assert await _wait_status(observer, session.session_id, "idle") == "idle"
+        # 物化之后它在活跃投影里（有标题的会话，不靠标签也能列出来）。
+        assert session.session_id in _ids(await _list(observer, status=ACTIVE_STATUSES))
 
 
 @pytest.mark.probe_env(models=[WAITING_MODEL])

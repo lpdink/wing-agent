@@ -17,6 +17,7 @@ from wing.gateway.projection import build_session_info
 from wing.schema import LLMUsage, ToolCall
 from wing.session.usage import UsageTracker
 from wing.store import SessionStore, SessionUsage
+from _support import materialize
 
 pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
@@ -146,7 +147,7 @@ def runtime():
 
 @pytest.mark.asyncio
 async def test_session_records_usage_from_live_events(runtime):
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     sink = session.agent.sink
     tc = ToolCall(id="c1", name="Bash", arguments={})
 
@@ -186,7 +187,7 @@ async def test_session_records_usage_from_live_events(runtime):
 
 @pytest.mark.asyncio
 async def test_usage_survives_resume_and_keeps_counting(runtime):
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     sid = session.session_id
     session.agent.sink.llm_metrics(
         LLMUsage(prompt_tokens=10, completion_tokens=4, cached_tokens=2),
@@ -217,7 +218,7 @@ async def test_usage_survives_resume_and_keeps_counting(runtime):
 
 @pytest.mark.asyncio
 async def test_aclose_flushes_mid_turn_accumulation(runtime):
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     session.agent.sink.llm_metrics(
         LLMUsage(prompt_tokens=8, completion_tokens=2, cached_tokens=0),
         duration_ms=11,
@@ -233,7 +234,7 @@ async def test_aclose_flushes_mid_turn_accumulation(runtime):
 @pytest.mark.asyncio
 async def test_manager_flush_usage_covers_a_running_turn(runtime):
     """进程退出前的落盘点：回合未收尾的累计也不丢。"""
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     session.agent.sink.user_message_accepted("hi", "r1")
 
     runtime.sm.flush_usage()
@@ -244,8 +245,8 @@ async def test_manager_flush_usage_covers_a_running_turn(runtime):
 
 @pytest.mark.asyncio
 async def test_events_of_other_sessions_are_ignored(runtime):
-    first = runtime.create_session()
-    second = runtime.create_session()
+    first = materialize(runtime.create_session())
+    second = materialize(runtime.create_session())
 
     event_bus.emit(
         LLMCallMetricsEvent(
@@ -264,7 +265,7 @@ async def test_events_of_other_sessions_are_ignored(runtime):
 
 @pytest.mark.asyncio
 async def test_session_info_projection_carries_usage(runtime):
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     session.agent.sink.llm_metrics(
         LLMUsage(prompt_tokens=20, completion_tokens=5, cached_tokens=10),
         duration_ms=100,
@@ -291,7 +292,7 @@ async def test_persist_failure_keeps_the_live_ledger(
     runtime, monkeypatch, wing_warnings
 ):
     """盘写失败只降级：live 账本照常读数，warning 留痕，turn 不被打断。"""
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
 
     def _boom(*args, **kwargs):
         raise OSError("disk full")
@@ -315,7 +316,7 @@ async def test_failed_resume_leaves_no_subscription_and_no_accounting(runtime):
     构造期订阅（而不是注册时激活）会把这条 400 路径变成资源泄漏——被放弃
     的 Session 持有整份消息历史，却永远等不到 aclose 的退订。
     """
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     sid = session.session_id
     session.set_title("usage-test")  # 落一份 metadata：逐出后仍在磁盘上可见
     assert runtime.sm.evict(sid, reason="test")
@@ -335,7 +336,7 @@ async def test_unexecuted_tool_calls_are_not_counted(runtime):
     """参数非法 / 未知工具的短路没有真正执行：不计 tool_calls、不计时长。"""
     from wing.agent.tool_executor import ToolExecutor
 
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     executor = ToolExecutor(session.agent.sink)
     executor.set_tools({})
 
@@ -354,7 +355,7 @@ async def test_unexecuted_tool_calls_are_not_counted(runtime):
 @pytest.mark.asyncio
 async def test_closed_session_ignores_late_events(runtime):
     """aclose 后事件不再记账（退订）——逐出后的残留事件不复活会话。"""
-    session = runtime.create_session()
+    session = materialize(runtime.create_session())
     await session.aclose()
 
     event_bus.emit(

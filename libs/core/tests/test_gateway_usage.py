@@ -1,7 +1,7 @@
 """tests/test_gateway_usage.py — ``GET /api/usage`` 的线格式契约。
 
 用 ``TestClient``（真实 app + 真实 ``WingRuntime``）：这个端点的契约一半在模型上
-（11 个字段的形状）、一半在状态码上（语义非法 400 / 未知会话 404 / 越界 422），
+（10 个字段的形状）、一半在状态码上（语义非法 400 / 未知会话 404 / 越界 422），
 两者都只在 HTTP 边界上成立。
 
 数据播种走生产写入路径（HTTP 建会话 + ``AuditRecorder`` 事件），断言只钉**相对
@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wing.db import get_database
-from wing.metrics import MEASURE_FIELDS
+from wing.metrics import MEASURE_FIELDS, record_session_created
 
 from _support import (
     gateway_server,
@@ -27,6 +27,7 @@ from _support import (
     seed_llm_call,
     seed_tool_call,
     seed_user_message,
+    sessions_root,
 )
 
 TODAY = date.today()
@@ -34,8 +35,24 @@ YESTERDAY = TODAY - timedelta(days=1)
 SINCE = (TODAY - timedelta(days=6)).isoformat()
 UNTIL = TODAY.isoformat()
 
-#: 线格式里 Row 的「非度量」键（其余键必须正好是 11 个度量）。
+#: 线格式里 Row 的「非度量」键（其余键必须正好是 10 个度量）。
 ROW_EXTRA_KEYS = {"key", "label", "parent_session_id"}
+
+
+def _seed_disk_session(session_id: str) -> None:
+    """给会话一份磁盘 metadata（列表可见性需要它；不是物化时机的断言面）。"""
+    from wing.store import SessionMetadata
+    from wing.store.file import FileSessionStore
+
+    FileSessionStore(sessions_root()).save_metadata(
+        session_id,
+        SessionMetadata(
+            session_name="cold",
+            last_interaction=TODAY.isoformat(),
+            # 列表判据是「有 history **或** 带标签」：这个种子会话没有历史。
+            tags=["usage-probe"],
+        ),
+    )
 
 
 class TestUsageEndpoint:
@@ -52,6 +69,16 @@ class TestUsageEndpoint:
         response = client.post("/api/session/create", json=body)
         assert response.status_code == 200, response.text
         return response.json()
+
+    @staticmethod
+    def _seed_catalog(session_id: str, **fields: Any) -> None:
+        """登记目录行（血缘 / workspace / 模板的归属素材）。
+
+        生产写入走**物化**（第一条用户消息），这里直接写目录行——这些用例的主角是
+        聚合口径，不是物化时机（后者由 ``test_session_materialization.py`` 与
+        ``test_first_message_writes_the_session_catalog`` 钉住）。
+        """
+        record_session_created(session_id, **fields)
 
     def test_response_shape(self, client: TestClient) -> None:
         """200 的形状：range / group_by / totals / rows / truncated，度量一个不少。"""
@@ -71,7 +98,7 @@ class TestUsageEndpoint:
         assert body["group_by"] == "day"
         assert body["truncated"] is False
         assert set(body["totals"]) == set(MEASURE_FIELDS)
-        # day 稠密：窗口内每天都有一行，且每行都带齐 11 个度量
+        # day 稠密：窗口内每天都有一行，且每行都带齐 10 个度量
         assert [row["key"] for row in body["rows"]] == [
             (date.fromisoformat(SINCE) + timedelta(days=offset)).isoformat()
             for offset in range(7)
@@ -81,12 +108,11 @@ class TestUsageEndpoint:
         assert body["totals"]["llm_calls"] == 1
         assert body["totals"]["tool_calls"] == 1
         assert body["totals"]["user_messages"] == 1
-        assert body["totals"]["sessions_created"] == 1
         assert body["totals"]["prompt_tokens"] == 100
 
     def test_origin_rows_are_fixed_and_grouped(self, client: TestClient) -> None:
-        self._create(client, session_id="root-1")
-        self._create(client, session_id="child-1", parent_session_id="root-1")
+        self._seed_catalog("root-1")
+        self._seed_catalog("child-1", parent_session_id="root-1")
         seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
         seed_llm_call("child-1", local_time(YESTERDAY), prompt=90)
 
@@ -101,8 +127,8 @@ class TestUsageEndpoint:
         assert body["totals"]["prompt_tokens"] == 100
 
     def test_session_scope_with_tree(self, client: TestClient) -> None:
-        self._create(client, session_id="root-1")
-        self._create(client, session_id="child-1", parent_session_id="root-1")
+        self._seed_catalog("root-1")
+        self._seed_catalog("child-1", parent_session_id="root-1")
         seed_llm_call("root-1", local_time(YESTERDAY), prompt=10)
         seed_llm_call("child-1", local_time(YESTERDAY), prompt=90)
 
@@ -184,7 +210,7 @@ class TestUsageEndpoint:
             "/api/usage", params={"since": "all", "until": UNTIL, "group_by": "session"}
         ).json()
 
-        # 目录行的创建时刻是「现在」，所以最早的一天可能来自审计行（30 天前）
+        # 窗口起点只看审计流水（目录行不参与）
         assert body["range"]["since"] == early.isoformat()
         assert body["range"]["until"] == UNTIL
         assert body["totals"]["llm_calls"] == 1
@@ -243,12 +269,19 @@ class TestUsageEndpoint:
         assert response.status_code == 200
         assert [row["key"] for row in response.json()["rows"]] == ["shape-1"]
 
-    def test_create_writes_the_session_catalog(self, client: TestClient) -> None:
-        """建会话 → 目录行（创建时刻 / workspace / 模板 / 模型引用词）。"""
-        created = self._create(
-            client, session_id="cat-1", workspace="/proj/x", tags=["usage-probe"]
+    def test_empty_session_writes_no_catalog_row(self, client: TestClient) -> None:
+        """只建不用 = 零痕迹：目录行跟着**第一条用户消息**（物化）走。"""
+        self._create(client, session_id="cat-0", workspace="/proj/x")
+
+        assert get_database().query("SELECT * FROM session_catalog") == []
+
+    def test_first_message_writes_the_session_catalog(self, client: TestClient) -> None:
+        """第一条用户消息 → 目录行（workspace / 模板 / 模型引用词）。"""
+        self._create(client, session_id="cat-1", workspace="/proj/x")
+        sent = client.post(
+            "/api/session/send", json={"session_id": "cat-1", "content": "hi"}
         )
-        assert created["session_id"] == "cat-1"
+        assert sent.status_code == 200, sent.text
 
         rows = get_database().query("SELECT * FROM session_catalog")
         assert len(rows) == 1
@@ -263,6 +296,7 @@ class TestUsageEndpoint:
     ) -> None:
         """create-or-adopt 命中既有会话 = resume 语义：目录行是创建时的事实。"""
         self._create(client, session_id="cat-2", workspace="/proj/first")
+        client.post("/api/session/send", json={"session_id": "cat-2", "content": "hi"})
         before = dict(get_database().query("SELECT * FROM session_catalog")[0])
         client.post("/api/session/release", json={"session_id": "cat-2"})
 
@@ -274,6 +308,7 @@ class TestUsageEndpoint:
     def test_fork_writes_a_catalog_row(self, client: TestClient) -> None:
         """fork 也是新建会话：写一行（``forked_from`` 是内容血统，父血缘不写）。"""
         self._create(client, session_id="src-1")
+        client.post("/api/session/send", json={"session_id": "src-1", "content": "hi"})
         seed_llm_call("src-1", local_time(YESTERDAY))
         branches = client.get("/api/session/branches", params={"session_id": "src-1"})
         assert branches.status_code == 200
@@ -296,6 +331,8 @@ class TestUsageEndpoint:
     def test_usage_does_not_hydrate_the_session(self, client: TestClient) -> None:
         """只读库：调端点不把已逐出的会话读回内存（``release`` 之后仍 inactive）。"""
         self._create(client, session_id="cold-1", tags=["usage-probe"])
+        # 让会话在盘上存在（本用例的主角是「读端点不水合」，不是物化时机）。
+        _seed_disk_session("cold-1")
         seed_llm_call("cold-1", local_time(YESTERDAY))
         assert (
             client.post(

@@ -107,8 +107,8 @@ class SessionMetadata(BaseModel):
     - usage：会话用量 / 运行时长的累计账本（计数 + token + 时长），由 ``session.usage.UsageTracker``
       在回合收尾、会话释放与进程退出前落盘；旧会话没有这个记录，读出即零。语义见 ``SessionUsage``。
     - parent_session_id：创建者会话 id（血缘——谁创建了我，产品语义见 docs/dev/session-lineage.md）。
-      **弱引用**：创建时只做格式卫生（同 session id 规则），不校验父是否存在；创建时刻一次写入，此后没有
-      修改路径（树是创建时刻的事实）。与 ``forked_from``（内容血统：fork 的源会话）正交——它记录的是
+      **弱引用**：创建时只做格式卫生（同 session id 规则），不校验父是否存在；创建时刻写进内存
+      metadata、随**物化**（第一条用户消息）落盘，此后没有修改路径（树是创建时刻的事实）。与 ``forked_from``（内容血统：fork 的源会话）正交——它记录的是
       **创建动作**。收养（create-or-adopt 命中已存在 id）忽略请求里的 parent，绝不改写既有记录。
     - last_turn_end / last_turn_subtype：最近一次**收口轮次**的结束时刻（本地 naive ISO，与
       ``last_interaction`` 同口径）与该轮的 ``TurnResultEvent.subtype``（``success`` /

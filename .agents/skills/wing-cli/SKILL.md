@@ -154,7 +154,7 @@ crew 被折起时行尾会多一行 `N tasks · M crew folded`（M 同样含不�
 
 | 命令 | 说明 |
 |---|---|
-| `wing new [--workspace D] [--agent A] [--tag T]` | 建一个空会话并打印 id |
+| `wing new [--workspace D] [--agent A] [--tag T]` | 建一个空会话并打印 id（草稿：**第一条消息之前不落盘**，网关重启 / 逐出后 id 作废） |
 | `wing resume <sid>` | 把已逐出的会话读回网关内存（**不是**「带 prompt 续跑」——那是 `wing run -r`） |
 | `wing release <sid...>` | 显式逐出内存态（忙碌 / 被订阅 / 非持久后端 → 409） |
 | `wing archive <sid...>` / `--restore <sid...>` / `--list` | 归档（冷存储）/ 恢复 / 列归档区 |

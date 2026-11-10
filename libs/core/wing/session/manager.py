@@ -240,9 +240,9 @@ class SessionManager:
 
         ``parent_session_id`` 是**血缘**（谁创建了我，产品语义见 docs/dev/session-lineage.md）：
         只做格式卫生（同 session id 规则）、**不校验存在性**（弱引用——幽灵父由展示层降级为根），
-        与 ``session_id`` 同时给出且字面相等（自指）即 400。带父创建时在本方法内一次写入
-        metadata（此后没有修改路径）；**收养路径忽略它**（resume 语义：既有会话的记录不被改写）
-        并记 warning。无父创建零字段、零写盘。
+        与 ``session_id`` 同时给出且字面相等（自指）即 400。带父创建时写进内存 metadata，
+        随**物化**（第一条用户消息）落盘（此后没有修改路径）；**收养路径忽略它**（resume 语义：
+        既有会话的记录不被改写）并记 warning。无父创建零字段、零写盘。
 
         Args:
             template_name: Agent 模板名称，None 时使用默认模板（仅新会话生效）
@@ -352,13 +352,14 @@ class SessionManager:
             messages=messages,
             store=store,
             workspace=workspace,
+            # 用量目录（派生投影）跟着**物化**走：空会话不写。收养 / resume 的
+            # 既有会话在构造时已物化，回调不触发。
+            on_materialize=self._record_session_catalog,
         )
 
-        # 血缘落盘：创建时刻的一次性事实（此后没有修改路径），写在**构造成功
-        # 之后**——构造期失败（provider 解析等）因此不会留下"有 parent 无会话"的
-        # 记录（那种残骸会让同 id 的下一次 create 收养到一个幽灵事实）。此后任何
-        # 一次 _save_metadata（hook 注入 / 打标 / 用量落盘）写的都是这个已带上字段
-        # 的内存对象，不会被抹掉；无 parent 时不写（零字段、零写盘，存量不变）。
+        # 血缘：创建时刻的一次性事实（此后没有修改路径）。先只写进内存对象——
+        # 会话尚未物化（第一条消息还没来）时，``_save_metadata`` 是 no-op；
+        # 物化时随整份 metadata 一次落盘。无 parent 时零字段、零写盘。
         if parent_session_id is not None:
             session.record_parent_session_id(parent_session_id)
 
@@ -367,7 +368,7 @@ class SessionManager:
             session.apply_agent_override(agent_override)
 
         # 创建即打标（原子语义：校验在写盘前完成，非法标签此刻 raise——
-        # 会话尚未注册、磁盘零痕迹）
+        # 会话尚未注册、磁盘零痕迹）。未物化时只改内存对象，随首条消息落盘。
         if tags:
             session.apply_tag_ops(add=tags)
 
@@ -379,11 +380,10 @@ class SessionManager:
         CacheStore(sid).clear()
 
         self._register(session)
-        # 用量目录（派生投影）：新建会话的一次性事实，收养 / resume 不写。
-        self._record_session_catalog(session)
 
-        # 触发 before_session_start hook，随后把 hook 注入落盘：resume 重建 CM
-        # 时恢复同一系统提示词（前缀身份不因换入内存而漂移）。
+        # 触发 before_session_start hook，随后把 hook 注入写进内存 metadata
+        # （草稿随首条消息落盘）：resume 重建 CM 时恢复同一系统提示词
+        # （前缀身份不因换入内存而漂移）。
         hooks.invoke("before_session_start", session)
         session.sync_append_system_prompt()
 
@@ -408,9 +408,10 @@ class SessionManager:
     ) -> None:
         """把**新建**会话登记进用量目录（`wing.metrics.catalog`，写一次即不再更新）。
 
-        两条分支共用这一个写点：新建（create 的非收养路径）与 fork。收养 / resume
-        不写——目录行是创建动作的一次性事实，存量会话由
-        :meth:`backfill_session_catalog` 补齐。
+        两个写点：新建会话的**物化**（第一条用户消息到来，经 ``from_template`` 的
+        ``on_materialize`` 回调）与 fork（子会话生来就带着历史）。收养 / resume 不写
+        ——目录行是创建动作的一次性事实，存量会话由
+        :meth:`backfill_session_catalog` 补齐。只开不用的空会话不写：它不是会话。
         """
         record_session_created(
             session.session_id,
@@ -747,6 +748,25 @@ class SessionManager:
         """
         return self._resolve_with_store(session_id) is not None
 
+    def ensure_durable(self, session_id: str) -> None:
+        """确保该会话在磁盘上存在（草稿就地**物化**；既有会话 no-op）。
+
+        持久消费者（唤醒触发器）的入口：触发器跨重启，目标与 source 也必须跨重启
+        ——登记在草稿上的触发器重启后投递必然 `LookupError`。把「登记唤醒」视为对
+        会话持久性的显式承诺，因此在这里替它落盘（用户的第一条消息还没来，标题 /
+        last_interaction 留空，metadata 里只有模板等已有事实）。
+
+        Raises:
+            LookupError: 会话不存在（内存与磁盘都没有；id 格式不合规同价）
+        """
+        resolved = self._resolve_with_store(session_id)
+        if resolved is None:
+            raise self.missing_session_error(session_id)
+        resolved_id, _store = resolved
+        session = self._sessions.get(resolved_id)
+        if session is not None:
+            session.materialize()
+
     # ── 标签 ─────────────────────────────────
 
     def set_session_tags(
@@ -759,9 +779,13 @@ class SessionManager:
         """按 session id 原子增删标签（幂等；读或写都不触发水合）。
 
         标签是**持久 metadata**（不是运行时状态），因此有两条互斥路径：已在内存 → 经
-        ``Session.apply_tag_ops`` 改内存元数据并落盘（内存对象是磁盘事实的同一来源，绕开它会被后续
-        save 回写覆盖）；未加载 / 已逐出 → 直接 store 读改写，**不水合**——给旧会话打 favorite 不会
-        把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
+        ``Session.apply_tag_ops`` 改内存元数据（内存对象是磁盘事实的同一来源，绕开它会被后续
+        save 回写覆盖；**草稿见下方"例外"**）；未加载 / 已逐出 → 直接 store 读改写，**不水合**
+        ——给旧会话打 favorite 不会把它"弄醒"变成 idle（会话保持 inactive，内存零代价）。
+
+        **例外（草稿）**：第一条消息之前的会话还没物化，打标只改内存、随首条消息落盘；
+        若该会话始终没有消息，标签随草稿丢弃（它没有可观察的落点）——响应里的 tags 是
+        **读回内存态**，不是"已持久"的承诺。
 
         打标时间（``tag_meta``）随同一处变更维护：新增记时间、移除删记录，与 tags 一次落盘。
         session id 先过格式闸门（``_resolve_with_store``）：不合规的值按"不存在"处理，绝不触达 store

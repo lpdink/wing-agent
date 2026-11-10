@@ -6,7 +6,7 @@
   override（system_prompt / append_system_prompt / tools / max_turns /
   effort / yolo）；
 - 跨进程重启后的 resume 还原（同一存储根目录新建 SessionManager）；
-- before_session_start hook 注入的 append_system_prompt 随创建落盘
+- before_session_start hook 注入的 append_system_prompt 随**物化**（第一条用户消息）落盘
   （fork/resume 不再丢失 → 系统提示词逐字节不变 → KV cache 前缀命中）；
 - fork 快照：子会话 metadata 记录 fork 时刻**有效状态**（含存量会话的
   live append 值），子会话重启后不偏离；
@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from _support import seed_messages
+from _support import materialize, seed_messages
 from wing.hooks import hooks
 from wing.schema import Message
 from wing.session import AgentTemplate, AgentOverride, SessionManager
@@ -63,7 +63,7 @@ class TestUpdateStatePersists:
 
     @pytest.mark.asyncio
     async def test_options_and_tools_restored_after_restart(self, sm, root):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
 
         await session.update_state(
@@ -88,7 +88,7 @@ class TestUpdateStatePersists:
     @pytest.mark.asyncio
     async def test_model_switch_keeps_recorded_options(self, sm, root):
         """跨 provider 切模型后，记录在案的 thinking/effort 不悄悄重置。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         await session.update_state(thinking=False, reasoning_effort="high")
 
         await session.update_state(model_id="qwen3-max")
@@ -118,6 +118,7 @@ class TestCreateOverridePersists:
                 yolo=True,
             )
         )
+        materialize(session)
         sid = session.session_id
         source_prompt = session.context_manager.system_prompt.content
 
@@ -144,6 +145,7 @@ class TestCreateOverridePersists:
             session = sm.create_session(
                 agent_override=AgentOverride(append_system_prompt="From override.")
             )
+            materialize(session)
             sid = session.session_id
             assert (
                 session.context_manager.append_system_prompt
@@ -173,7 +175,7 @@ class TestProviderResetKeepsSessionSwitches:
     async def test_pool_reset_keeps_recorded_switches(self, sm):
         from wing.provider.pool import reset_providers
 
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         await session.update_state(thinking=False, reasoning_effort="low")
         agent = session.agent
         old_provider = agent.model_provider
@@ -210,7 +212,7 @@ class TestProviderResetKeepsSessionSwitches:
         from wing.config import AgentConfig, Config, ProviderConfig
         from wing.provider.pool import reset_providers
 
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         loop = session.agent._loop
         assert loop._config is session.agent.model_provider.config
 
@@ -251,6 +253,7 @@ class TestHookFiringFollowsSessionId:
             session = sm.create_session(
                 agent_override=AgentOverride(append_system_prompt="From override.")
             )
+            materialize(session)
             sid = session.session_id
             assert calls == [sid], "create（新 session）必须触发 hook"
             assert (
@@ -304,6 +307,7 @@ class TestTemplateSwitch:
                 yolo=True,
             )
         )
+        materialize(session)
         sid = session.session_id
 
         template = AgentTemplate(name="coder", model="claude-x", provider_name="alt")
@@ -342,6 +346,7 @@ class TestForkSnapshot:
                 yolo=True,
             )
         )
+        materialize(source)
         await source.update_state(thinking=False)
         seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
@@ -376,7 +381,7 @@ class TestForkSnapshot:
         派生默认（如 anthropic 未配置 thinking 时的 disabled）被固化进记录后，
         会让子会话请求体带上源会话没有的显式配置——前缀身份被破坏。
         """
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
@@ -392,7 +397,7 @@ class TestForkSnapshot:
     @pytest.mark.asyncio
     async def test_fork_copies_recorded_provider_options(self, sm, root):
         """显式动作切换过的开关：记录原样进子会话（fork 快照的一部分）。"""
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         await source.update_state(thinking=False, reasoning_effort="low")
         seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
@@ -411,7 +416,7 @@ class TestForkSnapshot:
     @pytest.mark.asyncio
     async def test_fork_copies_live_append_without_record(self, sm, root):
         """存量会话（append 未落盘、只在内存）fork 时按 live 值拷贝。"""
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         # 模拟"字段引入前创建的会话"：hook 注入只存在于内存
         source.context_manager.append_to_system_prompt(
             "<current_directory>/x</current_directory>"
@@ -444,7 +449,9 @@ class TestToolsDegradation:
 
     @pytest.mark.asyncio
     async def test_partial_unresolvable_keeps_resolvable_subset(self, sm, root):
-        session = sm.create_session(agent_override=AgentOverride(tools=["Read"]))
+        session = materialize(
+            sm.create_session(agent_override=AgentOverride(tools=["Read"]))
+        )
         sid = session.session_id
         session._metadata.tools = ["Read", "ghost.DeadTool"]
         session._save_metadata()
@@ -454,7 +461,7 @@ class TestToolsDegradation:
 
     @pytest.mark.asyncio
     async def test_all_unresolvable_keeps_template_tools(self, sm, root):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session._metadata.tools = ["ghost.DeadTool"]
         session._save_metadata()
@@ -475,7 +482,7 @@ class TestLiveSkewAndEmptyRecords:
         Bash 工具的 "always allow (yolo)" 只改内存、不落记录——切模型不得
         静默撤销用户刚在确认框里做出的选择。
         """
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         await session.update_state(yolo=False)
         session.agent.set_yolo(True)
 
@@ -487,7 +494,7 @@ class TestLiveSkewAndEmptyRecords:
     @pytest.mark.asyncio
     async def test_explicit_empty_tools_restored(self, sm, root):
         """`tools: []` 是显式动作（清空工具集），不能与「无记录」混淆。"""
-        session = sm.create_session(agent_override=AgentOverride(tools=[]))
+        session = materialize(sm.create_session(agent_override=AgentOverride(tools=[])))
         sid = session.session_id
         assert session.agent.tools == []
         assert _raw_metadata(root, sid)["tools"] == []
@@ -501,9 +508,8 @@ class TestCompatibility:
 
     @pytest.mark.asyncio
     async def test_untouched_session_writes_no_records(self, sm, root):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
-        session.touch_last_interaction()  # 触发一次 metadata 落盘
 
         raw = _raw_metadata(root, sid)
         for field in (

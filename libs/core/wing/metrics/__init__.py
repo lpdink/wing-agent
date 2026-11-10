@@ -6,15 +6,15 @@
 
 - :mod:`wing.metrics.store` 是**唯一**握有这两组表 SQL 的地方（常量 SQL + 位置绑定 +
   坏行丢弃）；
-- :mod:`wing.metrics.measures` 是度量的唯一词表（11 个整数 + 三个值类型，纯函数）；
+- :mod:`wing.metrics.measures` 是度量的唯一词表（10 个整数 + 三个值类型，纯函数）；
 - :mod:`wing.metrics.report` 是查询编排（窗口 → 各维度的行 → 线格式），不写 SQL、
   不 import ``gateway``；
 - :mod:`wing.metrics.catalog` 是**写侧**：会话目录行的采集与启动回填（目录是派生投影，
   磁盘才是事实源）。
 
 写路径的其余两处不在本包：用户消息行由 ``audit/recorder.py`` 随事件写（与既有三张
-``audit_*`` 同一条管道），会话目录行由 ``SessionManager`` 在新建分支上调用
-:func:`wing.metrics.catalog.record_session_created`。
+``audit_*`` 同一条管道），会话目录行由 ``SessionManager`` 在会话**物化**（第一条用户
+消息）与 fork 时调用 :func:`wing.metrics.catalog.record_session_created`。
 """
 
 from __future__ import annotations

@@ -29,7 +29,7 @@
 | target 已逐出 | 投递自带水合（`ensure_loaded`），无需特殊处理 |
 | target 已归档 / 不存在 | `state=failed` + 一行 warn；不重试、不影响 source |
 | source 或 target 被归档 | 该会话相关的触发器一并 `canceled`（显式归档与自动归档都算） |
-| 创建期校验 | source / target 都必须可解析（不水合）；`target == source` → 400；一次性 spec 带 `times` → 400 |
+| 创建期校验 | source / target 都必须可解析（不水合）；登记即**持久性承诺**：草稿（第一条用户消息之前）就地物化，否则重启后投递必然失败；`target == source` → 400；一次性 spec 带 `times` → 400 |
 | 防环 | **不做**（用户明确决定）：A 订阅 B、B 订阅 A 会互相唤醒，这是使用者的事 |
 | 保留期 | **不做**清理（先观察体积） |
 

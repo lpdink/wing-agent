@@ -56,6 +56,8 @@ class FakePorts:
 
     def __init__(self) -> None:
         self.existing: set[str] = {CHILD, PARENT, OTHER, GRAND, GRAND2}
+        #: 登记唤醒时被要求「持久化」的会话（草稿就地物化）。
+        self.durable: list[str] = []
         self.archived: set[str] = set()
         self.running: set[str] = set()
         """还会再跑一轮的会话（正在跑 / 等回答 / 排队输入；不在表里 = 已静默或未加载）。"""
@@ -64,6 +66,9 @@ class FakePorts:
 
     def session_exists(self, session_id: str) -> bool:
         return session_id in self.existing
+
+    def ensure_durable(self, session_id: str) -> None:
+        self.durable.append(session_id)
 
     def is_archived(self, session_id: str) -> bool:
         return session_id in self.archived
@@ -251,6 +256,25 @@ class TestCreate:
     def test_unknown_target(self, service: WakeService) -> None:
         with pytest.raises(LookupError):
             _session_trigger(service, target_session_id="ghost")
+
+    def test_registration_makes_target_and_source_durable(
+        self, service: WakeService, ports
+    ) -> None:
+        """登记唤醒 = 持久性承诺：source 与 target 都要在盘上（草稿就地物化）。"""
+        _session_trigger(service)
+        assert ports.durable == [PARENT, CHILD], "target 先、source 后各承诺一次"
+
+    def test_an_invalid_request_does_not_materialize_anything(
+        self, service: WakeService, ports
+    ) -> None:
+        """校验不过的请求（非法 on_events / 自指）不在磁盘上留任何东西。"""
+        with pytest.raises(ValueError):
+            _session_trigger(service, on_events="done,error")
+        with pytest.raises(ValueError):
+            _session_trigger(
+                service, source_session_id=PARENT, target_session_id=PARENT
+            )
+        assert ports.durable == []
 
     def test_timer_defaults(self, service: WakeService, clock: Clock) -> None:
         trigger = _timer_trigger(service)

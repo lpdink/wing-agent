@@ -5,8 +5,8 @@
 目录行经 ``metrics.catalog.record_session_created``。测试不手写 INSERT 造数：那样
 测的是 SQLite，不是采集链路。
 
-窗口一律相对「今天」取（目录行的创建时刻是 ``datetime.now()``，只有落在窗口里
-才谈得上 ``sessions_created``）。
+窗口一律相对「今天」取（审计行的时间列由 ``created_at`` 显式给出——时间维度是
+这些用例的主角）。
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def _row_by_key(report: dict, key: str) -> dict:
 class TestMeasures:
     def test_wire_carries_all_measure_fields(self) -> None:
         assert tuple(Measures().wire()) == MEASURE_FIELDS
-        assert len(MEASURE_FIELDS) == 11
+        assert len(MEASURE_FIELDS) == 10
         # 全零填充：默认值一个都不省略
         assert set(Measures().wire().values()) == {0}
 
@@ -188,15 +188,18 @@ class TestDayDimension:
         assert report["totals"]["llm_calls"] == 1
         assert len(report["rows"]) == 7
 
-    def test_sessions_created_lands_on_creation_day(self) -> None:
+    def test_catalog_only_rows_are_not_activity(self) -> None:
+        """目录行（会话存在过）不是读数：没有审计事实的窗口仍是一整窗全零。"""
         record_session_created("cat-s1", workspace="/w")
 
         report = _report()
 
-        assert _row_by_key(report, TODAY.isoformat())["sessions_created"] == 1
-        assert report["totals"]["sessions_created"] == 1
-        # 没有审计事实的会话不算「活跃会话」
-        assert report["totals"]["sessions"] == 0
+        assert all(report["totals"][name] == 0 for name in MEASURE_FIELDS)
+        assert all(
+            report["rows"][index][name] == 0
+            for index in range(len(report["rows"]))
+            for name in MEASURE_FIELDS
+        )
 
 
 # ============================================================
@@ -222,11 +225,10 @@ class TestOriginDimension:
         assert me["tool_calls"] == 1
         assert me["prompt_tokens"] == 10
         assert me["sessions"] == 1
-        assert me["sessions_created"] == 1
         assert agents["llm_calls"] == 1
         assert agents["user_messages"] == 1
         assert agents["prompt_tokens"] == 90
-        assert agents["sessions_created"] == 1
+        assert agents["sessions"] == 1
 
     def test_unknown_session_counts_as_me(self) -> None:
         """目录里没有的会话（旧数据 / 手工清理）按「我」计——不知道就当是自己开的。"""
@@ -317,7 +319,6 @@ class TestModelDimension:
         assert row["tool_errors"] == 0
         assert row["tool_time_ms"] == 0
         assert row["user_messages"] == 0
-        assert row["sessions_created"] == 0
 
     def test_token_ranking_and_key_tiebreak(self) -> None:
         seed_llm_call(
@@ -371,8 +372,6 @@ class TestToolDimension:
         assert bash["llm_calls"] == 0
         assert bash["prompt_tokens"] == 0
         assert bash["user_messages"] == 0
-        # 目录事实不在 `_measure_columns` 里：只有 5 个维度由 report 注入，tool 维恒 0
-        assert bash["sessions_created"] == 0
 
     def test_totals_stay_whole_event_when_rows_are_limited(self) -> None:
         for name in ("Bash", "Edit", "Grep", "Read"):
@@ -454,12 +453,7 @@ class TestSessionDimension:
         report = _report(group_by="session", session_id="quiet-1", tree=True)
 
         assert [row["key"] for row in report["rows"]] == ["quiet-1"]
-        assert all(
-            report["rows"][0][name] == 0
-            for name in MEASURE_FIELDS
-            if name != "sessions_created"
-        )
-        assert report["rows"][0]["sessions_created"] == 1
+        assert all(report["rows"][0][name] == 0 for name in MEASURE_FIELDS)
 
     def test_self_row_survives_limit(self) -> None:
         """自身行是 scope 的锚点：被排行挤出 `limit` 后仍出现在结果里。"""
@@ -493,7 +487,7 @@ class TestSessionDimension:
 
 
 class TestWorkspaceAndAgent:
-    def test_workspace_rows_group_activity_and_creation(self) -> None:
+    def test_workspace_rows_group_activity(self) -> None:
         record_session_created("w1", workspace="/proj/a")
         record_session_created("w2", workspace="/proj/a")
         record_session_created("w3", workspace="/proj/b")
@@ -503,19 +497,16 @@ class TestWorkspaceAndAgent:
         report = _report(group_by="workspace")
 
         assert [row["key"] for row in report["rows"]] == ["/proj/b", "/proj/a"]
-        assert _row_by_key(report, "/proj/a")["sessions_created"] == 2
+        assert _row_by_key(report, "/proj/a")["sessions"] == 1
         assert _row_by_key(report, "/proj/a")["prompt_tokens"] == 10
-        assert report["totals"]["sessions_created"] == 3
 
-    def test_created_only_bucket_still_gets_a_row(self) -> None:
-        """只在窗口内建过、还没有任何活动的桶也占一行（否则刚建的会话会静默消失）。"""
+    def test_catalog_only_bucket_gets_no_row(self) -> None:
+        """只在目录里存在、没有任何活动的桶不出行：没有读数的维度不发明行。"""
         record_session_created("w1", workspace="/proj/idle")
 
         report = _report(group_by="workspace")
 
-        row = _row_by_key(report, "/proj/idle")
-        assert row["sessions"] == 0
-        assert row["sessions_created"] == 1
+        assert report["rows"] == []
 
     def test_agent_rows_use_template_name_and_empty_key(self) -> None:
         record_session_created("t1", template_name="coder")
@@ -527,7 +518,6 @@ class TestWorkspaceAndAgent:
 
         assert [row["key"] for row in report["rows"]] == ["", "coder"]
         assert _row_by_key(report, "")["sessions"] == 1
-        assert _row_by_key(report, "coder")["sessions_created"] == 1
 
 
 # ============================================================
@@ -608,10 +598,8 @@ class TestDefaultsAndAll:
         assert report["range"]["until"] == TODAY.isoformat()
         assert len(report["rows"]) == 1
 
-    def test_data_since_is_the_audit_start_not_the_catalog_start(
-        self, tmp_path: Path
-    ) -> None:
-        """``data_since`` 只看三张 ``audit_*``：目录回填能把会话追溯得更早，读数却不行。"""
+    def test_the_window_does_not_follow_the_catalog(self, tmp_path: Path) -> None:
+        """目录行不把窗口往前拉：``since=all`` 与 ``data_since`` 都只看审计流水。"""
         # 回填把 2025-01-02 的存量会话写进目录，而审计流水只有今天的一条。
         store = _store(tmp_path)
         store.save_metadata("20250102-030405-abcdef", SessionMetadata(tags=LISTED))
@@ -619,20 +607,14 @@ class TestDefaultsAndAll:
         seed_llm_call("audit-1", local_time(TODAY, hour=9), prompt=10)
 
         metrics = MetricsStore()
-        assert metrics.earliest_day() == "2025-01-02"
-        assert metrics.earliest_audit_day() == TODAY.isoformat()
+        assert metrics.earliest_day() == TODAY.isoformat()
 
-        # 端点：`data_since` 说流水从今天起；`since=all` 仍从目录的最早一天起
-        # （计数类指标是完整的，token 类不是）。
         report = _report(since="all", until=UNTIL)
         assert report["range"]["data_since"] == TODAY.isoformat()
-        assert report["range"]["since"] == "2025-01-02"
+        assert report["range"]["since"] == TODAY.isoformat()
 
     def test_the_earliest_day_agrees_with_the_text_minimum(self) -> None:
-        """`since=all` 的起点与 `MIN(substr(ts,1,10))` 同值（索引友好写法不改口径）。
-
-        反向也钉住：`session_catalog` 的回填可以比流水早得多，`earliest_day` 要把它算进来。
-        """
+        """`since=all` 的起点与 `MIN(substr(ts,1,10))` 同值（索引友好写法不改口径）。"""
         seed_llm_call("a", local_time(TWO_DAYS_AGO, hour=23), prompt=1)
         seed_user_message("b", local_time(YESTERDAY, hour=1))
         record_session_created("catalog-only")
@@ -642,8 +624,7 @@ class TestDefaultsAndAll:
             "SELECT MIN(d) AS day FROM ("
             "SELECT MIN(substr(ts, 1, 10)) AS d FROM audit_llm_call"
             " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_tool_call"
-            " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message"
-            " UNION ALL SELECT MIN(substr(created_ts, 1, 10)) FROM session_catalog)"
+            " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message)"
         )[0]["day"]
 
         assert MetricsStore().earliest_day() == expected
@@ -668,7 +649,7 @@ class TestDefaultsAndAll:
             " UNION ALL SELECT MIN(substr(ts, 1, 10)) FROM audit_user_message)"
         )[0]["day"]
 
-        assert MetricsStore().earliest_audit_day() == expected
+        assert MetricsStore().earliest_day() == expected
         assert expected == TWO_DAYS_AGO.isoformat()
 
     def test_since_all_on_an_empty_database_is_one_day(self) -> None:
@@ -725,7 +706,6 @@ class TestDegradedDatabase:
         assert store.has_usage_record("anything") is False
         assert store.by_day(_window()) == {}
         assert store.by_session(_window()) == []
-        assert store.created_total(_window()) == 0
 
 
 # ============================================================

@@ -346,3 +346,17 @@ def seed_user_message(session_id: str, at: datetime) -> None:
     AuditRecorder().on_event(
         UserMessageAcceptedEvent(session_id=session_id, content="hi", created_at=at)
     )
+
+
+def materialize(session: Any) -> Any:
+    """把新建会话推到**已物化**（生产触发点是第一条用户消息），返回它自己。
+
+    会话在第一条用户消息到来前只是内存草稿（不写 metadata / history）。这些用例
+    要断言的是物化**之后**的持久化语义（resume / fork / 逐出 / 用量 / 状态还原），
+    不该为开闸付一次真实 turn（那会打网络、留噪声）。``last_interaction`` 一并写入：
+    生产上它由 ``Session.post`` 在物化前设置，测试里的"已物化会话"必须与之一致。
+    物化时机本身由 ``test_session_materialization.py`` 钉住。
+    """
+    session._metadata.last_interaction = datetime.now().isoformat()
+    session.materialize()
+    return session

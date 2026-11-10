@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from _support import materialize
+
 
 def _make_session(tmp_path: Path, workspace: str | None = None):
     """构建最小化 Session 实例用于 set_workspace 测试。"""
@@ -38,6 +40,7 @@ class TestSetWorkspace:
         target.mkdir()
 
         session = _make_session(tmp_path, workspace=str(tmp_path))
+        materialize(session)
         session.set_workspace(str(target))
 
         assert session.session_workspace == str(target)

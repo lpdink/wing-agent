@@ -175,17 +175,15 @@ async def test_fork_does_not_inherit_tags(probe: Probe) -> None:
 @pytest.mark.probe_env(models=[TAG_MODEL])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_tagged_session_without_messages_is_listed_immediately(
-    probe: Probe,
-) -> None:
-    """创建即打标：首条消息落盘前 list 就能找到（"创建即打标"的窗口期）。
+async def test_a_tagged_draft_waits_for_the_first_message(probe: Probe) -> None:
+    """创建即打标只是草稿：第一条消息之前 list 找不到它，磁盘上也没有 metadata。
 
     WHEN 创建一个带 ["wing-probe"] 的会话、不发任何消息
-    THEN /api/session/list 立即包含它（tags 已带、name 为空）——"按标签找回"
-    从会话出生那一刻成立，而不是等首条消息。
+    THEN /api/session/list 不含它、``metadata.json`` 不存在（空会话不是会话）；
+    标签随第一条消息一起落盘（此后按标签找回才成立）。
     """
     session = await _create(probe, tags=["wing-probe"])
+    payload = await probe.driver_required.http.request("GET", "/api/session/list")
 
-    entry = await _list_entry(probe, session.session_id)
-    assert entry["tags"] == ["wing-probe"], entry
-    assert not entry.get("name"), entry
+    assert session.session_id not in {entry["id"] for entry in payload["sessions"]}
+    assert read_metadata(probe.env.session_dir(session.session_id)) is None

@@ -3,8 +3,9 @@
 
 写法只有两种，且都是 ``INSERT OR IGNORE``：
 
-- :func:`record_session_created`——新建会话时写一次（之后永不更新：workspace / 模板 /
-  父都不变，``model_id`` 是**创建时刻**的绑定而不是当前模型，标题由前端 join）；
+- :func:`record_session_created`——新建会话**物化**（第一条用户消息）时写一次（之后永不
+  更新：workspace / 模板 / 父都不变，``model_id`` 是创建期的绑定而不是当前模型，标题由
+  前端 join）；只开不用的空会话不写行——它不是会话；
 - :func:`backfill_catalog`——网关启动后的后台补齐，只处理「磁盘上有、目录里没有」的
   会话（存量会话 + 运行期被拷进来的会话目录）。
 
@@ -12,6 +13,9 @@
 ``created_source``：``id``（id 前缀 ``YYYYMMDD-HHMMSS``，秒级）→ ``log``
 （``history.jsonl`` 首条记录的时刻，毫秒）→ ``meta``（``last_interaction``，兜底）。
 三档都拿不到就**跳过**——不发明时间，这一行留给下一次回填。
+
+创建时刻只是目录自己的溯源事实（``created_source`` / ``created_ts``）：它**不再**投影成
+任何产品度量（旧的 ``sessions_created`` 已删除——「建过多少会话」对用户没有意义）。
 
 写失败绝不影响 agent：``wing.db`` 降级时写语句一律返回 ``False``、事务句柄拿到
 ``live=False``（写不了就什么都没发生），本层再兜一层 ``try/except``（与
@@ -57,12 +61,12 @@ def record_session_created(
 ) -> None:
     """登记一个**新建**会话（``INSERT OR IGNORE``：同 id 的既有行不被覆盖）。
 
-    调用点必须是「创建新会话」的那几条分支（新建 / fork）。create-or-adopt 命中既有
-    会话、以及 resume，都**不写**——目录行是创建动作的一次性事实（与「血缘只写一次」
-    同口径），存量会话由 :func:`backfill_catalog` 补齐。
+    调用点必须是「创建新会话」的那几条分支（新建的**物化** / fork）。create-or-adopt
+    命中既有会话、以及 resume，都**不写**——目录行是创建动作的一次性事实（与「血缘只写
+    一次」同口径），存量会话由 :func:`backfill_catalog` 补齐。
 
-    等锁上限收紧到诊断档：建会话路由在事件循环线程上调用，另一个进程攥着写锁时宁可
-    丢这一行，也不要把事件循环冻在稳态的 5 秒上。丢行不重试——它最迟在下一轮回填时
+    等锁上限收紧到诊断档：写点（首条用户消息的 ``post`` / fork）在事件循环线程上，
+    另一个进程攥着写锁时宁可丢这一行，也不要把事件循环冻在稳态的 5 秒上。丢行不重试——它最迟在下一轮回填时
     按差集补上（连创建时刻都拿不到的那批会话补不了，见 :func:`_created_at`）。
     """
     ts_ms, ts = _stamp(datetime.now())

@@ -183,7 +183,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 
 | 操作 | 端点 | 要点 |
 |------|------|------|
-| create | `POST /api/session/create` | 选 `backend: file\|memory`；session id **由后端生成**（客户端不得指定）；`before_session_start` hook 跑完后把追加系统提示词落盘 |
+| create | `POST /api/session/create` | 选 `backend: file\|memory`；session id 缺省**由后端生成**（编排方可带 id 收养）；`before_session_start` hook 在创建时跑，但**不落盘**——新会话是内存草稿（见下「会话物化」） |
 | resume | `POST /api/session/resume` | 同一个 session id 换入内存：还原 template_name + workspace + 模型绑定 + 提示词与动态状态（metadata 记录优先于模板/配置默认，见 glossary「持久会话状态」）；**不触发** `before_session_start`（不是新会话） |
 | fork | `POST /api/session/fork` | 写完整 metadata（workspace/forked_from/template + 源生效状态快照：模型 / 提示词 / 工具 / 开关），继承源 backend；**子会话 = 源记录前缀**（append 顺序，日志级拷贝 + uuid 全量重映射；活跃链由 tip 回溯自然得出，压缩节点即止——被压缩区间随行但不活跃，即"回得去"）；**属于创建新 session**（新 session id）→ `before_session_start` 在子会话上生效 |
 | rewind | `POST /api/session/rewind` | 丢弃指定消息之后的内容 |
@@ -191,6 +191,35 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | interrupt | `POST /api/session/interrupt` | 委托 `Session.agent.interrupt()`；打断对账见下 |
 | release | `POST /api/session/release` | 逐出内存态（显式 eviction）；钉住条件不满足时 409 |
 | archive | `POST /api/session/archive` | 归档 / 恢复（设置归档状态）；纯移动（字节不变）；钉住条件不满足时 409 |
+
+### 会话物化（materialization）
+
+**空会话不是会话**：新建的会话在**第一条用户消息**到来前只是内存草稿——不写
+`metadata.json` / `history.jsonl`，也不进用量目录（`session_catalog`）。`Session.post()`
+是新建会话的**唯一**出生触发器（`Session.materialize`）：标题、`last_interaction`、hook
+注入的追加系统提示词、创建期覆盖 / 标签 / 血缘与模型记录全部随那**一次** metadata 写落盘
+（写失败保持草稿，下一次消息重试）。
+
+为什么：TUI 打开即建会话（见下「会话创建与 TUI」的取舍），"只开不用就退出"的那批如果
+落盘，就会在磁盘与 `wing usage` 里积累成永远为 0 的活动。物化把「打开」与「用过」分开。
+
+- **静默走漏的目录仍可能有**：显式 id 的 create-or-adopt 仍会 `mkdir` 认领目录（别名归一的
+  机制），媒体 / 用户文件上传也会写进会话目录；这些空目录与孤立字节**不是会话**
+  （`SessionStore.exists` 判 metadata / history）——列表、归档、统计都不认它们；
+- **草稿状态的边界**：物化之前打标 / 切模型 / `session/update` 只改内存对象（它们是草稿的
+  一部分，随第一条消息一起落盘）；从未发消息 → 这些设置随草稿丢弃（没有可观察的落点）；
+- **既有会话不受影响**：resume / 收养 / fork 的子会话构造时已在盘上（`store.exists` 为真），
+  显式动作照常立即落盘；
+- **用量目录跟着物化走**：`session_catalog` 行（血缘 / workspace / 模板归属的素材）在第一条
+  消息时登记；fork 的子会话生来就有历史，在 fork 时登记。
+- **逐出 = 草稿销毁**：草稿没有磁盘状态，被逐出（空闲 TTL）后 id 即 404——`wing new` 拿到的
+  id 只在这一段工作里有效（重启同理）。持久消费者另论：登记唤醒触发器是对「这个会话要活到
+  重启之后」的显式承诺，`SessionManager.ensure_durable` 因此把草稿**就地物化**
+  （`Session.materialize`），而不是登记一个重启后必然失败的触发器。
+- **已知取舍**：`ensure_durable` 物化出的是「无标题、无标签、无 history」的会话——它不进列表
+  （展示判据要有 history 或标签），也不可归档（归档准入 = 展示判据），因此这份 metadata 会留在
+  盘上（每个几百字节），直到该会话真的收到第一条消息。量级由「登记在草稿上的唤醒」决定，
+  不做额外清理路径（删目录是破坏性动作，换不来什么磁盘）。
 
 ### 会话逐出（eviction）
 
@@ -397,7 +426,7 @@ draft（`_record_draft`）、`render_probe --jsonl`（调试工具）、probe �
 
 - **不在上下文中施加魔法**：从不注入隐藏 system prompt。
 - **理论最高缓存命中率**：除压缩外绝不破坏缓存前缀；`explicit_cache_mode` 可为支持的 provider（如 DashScope）追加 `cache_control` 标记（PR #17）。
-- **前缀身份 = 会话状态**：一次请求的"前缀"不止消息——`system` 段（含 `append_system_prompt`）、`tools` 声明、影响服务端处理的开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）都参与缓存身份。因此这些会话级状态全部持久化在 `metadata.json`（`system_prompt` / `append_system_prompt` / `tools` / `thinking` / `reasoning_effort` / `yolo` / `max_turns`），resume / fork 重建 agent 后逐字节复现——否则重建后的请求从第 0 个 token 起就与重建前不同，整个上下文无法命中缓存。`append_system_prompt` 由 `before_session_start` hook（如 workspace_env_inject）与 `AgentOverride.append_system_prompt` 共用同一字段写入、随创建落盘。
+- **前缀身份 = 会话状态**：一次请求的"前缀"不止消息——`system` 段（含 `append_system_prompt`）、`tools` 声明、影响服务端处理的开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）都参与缓存身份。因此这些会话级状态全部持久化在 `metadata.json`（`system_prompt` / `append_system_prompt` / `tools` / `thinking` / `reasoning_effort` / `yolo` / `max_turns`），resume / fork 重建 agent 后逐字节复现——否则重建后的请求从第 0 个 token 起就与重建前不同，整个上下文无法命中缓存。`append_system_prompt` 由 `before_session_start` hook（如 workspace_env_inject）与 `AgentOverride.append_system_prompt` 共用同一字段写入、随**物化**（第一条用户消息）落盘。
 
 **hook 的触发条件是 session id 是否变化**：create 与 fork 都在创建新 session（新 id）→ `before_session_start` 生效；resume 是同一个 id 换入内存 → 不触发，`append_system_prompt` 由持久记录还原（这就是"逐出 / 重启后 resume 不再丢提示词、也不再碎前缀"的修复点）。fork 的复制口径：提示词 / 工具集 / yolo / max_turns 取源会话此刻的 **live 有效值**（子会话先继承，`before_session_start` 随后在新会话上叠加注入——不自幂等的 hook 会叠出一层重复内容，属钩子自身的问题，钩子系统重做时收口）；`thinking` / `reasoning_effort` 只拷**显式记录**——provider 派生默认值（如 anthropic 未配置 thinking）不得被固化成子会话的显式配置，否则请求体会带上源会话没有的字段。
 

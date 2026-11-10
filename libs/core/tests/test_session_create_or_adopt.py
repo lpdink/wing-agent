@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from _support import seed_messages
+from _support import materialize, seed_messages
 from wing.hooks import hooks
 from wing.session import AgentOverride, SessionManager, tool_refs
 from wing.session.override import non_utf8_override_fields
@@ -73,7 +73,7 @@ class TestCreateWithRequestedId:
 
     @pytest.mark.asyncio
     async def test_id_is_exact_and_lands_on_disk(self, sm: SessionManager, root: Path):
-        session = sm.create_session(session_id=CUSTOM_ID)
+        session = materialize(sm.create_session(session_id=CUSTOM_ID))
         assert session.session_id == CUSTOM_ID
         seed_messages(session, "hello")
         assert (root / CUSTOM_ID / "history.jsonl").exists()
@@ -82,7 +82,7 @@ class TestCreateWithRequestedId:
     @pytest.mark.asyncio
     async def test_absent_id_keeps_backend_generation(self, sm: SessionManager):
         """不给 session_id → 行为不变（自生成形态）。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         assert session.session_id != CUSTOM_ID
         assert session.session_id[:8].isdigit()
 
@@ -111,7 +111,9 @@ class TestCreateWithRequestedId:
         assert _session_dirs(root) == []
 
         # 重试（合法标签）是**新建**，不是收养半成品
-        session = sm.create_session(session_id=CUSTOM_ID, tags=["favorite"])
+        session = materialize(
+            sm.create_session(session_id=CUSTOM_ID, tags=["favorite"])
+        )
         assert session.session_id == CUSTOM_ID
         assert session.tags == ["favorite"]
         seed_messages(session, "hi")
@@ -141,7 +143,7 @@ class TestCreateWithRequestedId:
         # 认领键（mkdir）在纯校验之后 → 零残留，重试是全新会话
         assert _session_dirs(root) == []
 
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         assert created.session_id == CUSTOM_ID
         assert created.template_name == "default"
         assert created.model_id == "gpt-4"
@@ -156,10 +158,10 @@ class TestAdoptExistingSession:
     async def test_in_memory_adopt_returns_same_session(
         self, sm: SessionManager, root: Path
     ):
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         seed_messages(created, "hello")
 
-        adopted = sm.create_session(session_id=CUSTOM_ID)
+        adopted = materialize(sm.create_session(session_id=CUSTOM_ID))
 
         assert adopted is created
         assert _session_dirs(root) == [CUSTOM_ID]  # 不产生第二个会话
@@ -169,11 +171,11 @@ class TestAdoptExistingSession:
     async def test_adopt_after_restart_hydrates_same_history(
         self, sm: SessionManager, root: Path
     ):
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         seed_messages(created, "hello", "world")
 
         restarted = _restart(root)
-        adopted = restarted.create_session(session_id=CUSTOM_ID)
+        adopted = materialize(restarted.create_session(session_id=CUSTOM_ID))
 
         assert adopted.session_id == CUSTOM_ID
         assert _roles(adopted) == ["user", "assistant"]
@@ -206,17 +208,19 @@ class TestAdoptExistingSession:
 
     @pytest.mark.asyncio
     async def test_adopt_applies_tags(self, sm: SessionManager):
-        created = sm.create_session(session_id=CUSTOM_ID)
-        adopted = sm.create_session(session_id=CUSTOM_ID, tags=["favorite", "task=x"])
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
+        adopted = materialize(
+            sm.create_session(session_id=CUSTOM_ID, tags=["favorite", "task=x"])
+        )
         assert adopted is created
         assert adopted.tags == ["favorite", "task=x"]
 
     @pytest.mark.asyncio
     async def test_memory_backend_create_or_adopt(self):
         sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         seed_messages(created, "hello")
-        adopted = sm.create_session(session_id=CUSTOM_ID)
+        adopted = materialize(sm.create_session(session_id=CUSTOM_ID))
         assert adopted is created
         assert sm.list_sessions()[0].id == CUSTOM_ID
 
@@ -226,7 +230,7 @@ class TestAdoptAppliesResumeSubset:
 
     @pytest.mark.asyncio
     async def test_applied_fields_take_effect_and_persist(self, sm: SessionManager):
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         adopted = sm.create_session(
             session_id=CUSTOM_ID,
             agent_override=AgentOverride(
@@ -235,6 +239,7 @@ class TestAdoptAppliesResumeSubset:
                 tools=["Read", "Bash"],
             ),
         )
+        materialize(adopted)
 
         assert adopted is created
         assert adopted.agent.model == "gpt-4o-mini"
@@ -251,7 +256,7 @@ class TestAdoptAppliesResumeSubset:
     @pytest.mark.asyncio
     async def test_create_only_fields_are_ignored(self, sm: SessionManager):
         """system_prompt / append_system_prompt / max_turns / yolo 在收养时不生效。"""
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         before_prompt = created.context_manager.setin_system_prompt
         before_max_turns = created.agent.max_turns
         before_yolo = created.agent.yolo
@@ -265,6 +270,7 @@ class TestAdoptAppliesResumeSubset:
                 yolo=True,
             ),
         )
+        materialize(adopted)
 
         assert adopted.context_manager.setin_system_prompt == before_prompt
         assert adopted.context_manager.append_system_prompt == before_prompt
@@ -282,7 +288,7 @@ class TestAdoptAppliesResumeSubset:
     @pytest.mark.asyncio
     async def test_invalid_tools_do_not_apply_model(self, sm: SessionManager):
         """覆盖里的工具 ref 无法解析 → 在任何字段生效之前失败（无半截状态）。"""
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         before_model = created.agent.model
 
         with pytest.raises(ValueError):
@@ -301,7 +307,7 @@ class TestResumeOverrideSubset:
 
     @pytest.mark.asyncio
     async def test_applies_to_in_memory_session(self, sm: SessionManager):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         seed_messages(session, "hello")
 
         resumed = sm.resume_session(
@@ -318,7 +324,7 @@ class TestResumeOverrideSubset:
     async def test_applies_to_hydrated_session_and_persists(
         self, sm: SessionManager, root: Path
     ):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         session_id = session.session_id
         seed_messages(session, "hello")
 
@@ -340,7 +346,7 @@ class TestResumeOverrideSubset:
 
     @pytest.mark.asyncio
     async def test_invalid_tools_do_not_apply_model(self, sm: SessionManager):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         before_model = session.agent.model
         with pytest.raises(ValueError):
             sm.resume_session(
@@ -395,9 +401,9 @@ class TestFilesystemAliases:
 
     @pytest.mark.asyncio
     async def test_case_variant_adopts_the_same_session(self, aliasing: SessionManager):
-        created = aliasing.create_session(session_id="Team-A", tags=["x"])
+        created = materialize(aliasing.create_session(session_id="Team-A", tags=["x"]))
         seed_messages(created, "from A")
-        adopted = aliasing.create_session(session_id="team-a", tags=["y"])
+        adopted = materialize(aliasing.create_session(session_id="team-a", tags=["y"]))
 
         assert adopted is created
         assert adopted.session_id == created.session_id  # 真名，不是请求字符串
@@ -409,7 +415,7 @@ class TestFilesystemAliases:
         """冷路径（不在内存）：变体 resume 归一到同一会话，不得再水合一份。"""
         store = _CaseInsensitiveFileStore(tmp_path / "sessions")
         first = SessionManager({"file": store})
-        created = first.create_session(session_id="Team-A", tags=["x"])
+        created = materialize(first.create_session(session_id="Team-A", tags=["x"]))
         seed_messages(created, "hello")
 
         restarted = SessionManager({"file": store})
@@ -423,9 +429,9 @@ class TestFilesystemAliases:
         self, aliasing: SessionManager, root: Path
     ):
         """两个变体 id 只对应**一个** Session 对象——一份日志只有一个写入者。"""
-        a = aliasing.create_session(session_id="Team-A", tags=["x"])
-        b = aliasing.create_session(session_id="team-a", tags=["y"])
-        c = aliasing.create_session(session_id="TEAM-a", tags=["z"])
+        a = materialize(aliasing.create_session(session_id="Team-A", tags=["x"]))
+        b = materialize(aliasing.create_session(session_id="team-a", tags=["y"]))
+        c = materialize(aliasing.create_session(session_id="TEAM-a", tags=["z"]))
         assert a is b is c
         seed_messages(a, "only")
         assert len(_history_lines(root, "Team-A")) == 1
@@ -440,8 +446,10 @@ class TestFilesystemAliases:
         "认领键"（mkdir 判据）能看见——不归一的话，两个 Session 的第一次写入会
         落进同一个目录（静默混合）。
         """
-        a = aliasing.create_session(session_id="Team-E")  # 无 tags：只有认领
-        b = aliasing.create_session(session_id="team-e")
+        a = materialize(
+            aliasing.create_session(session_id="Team-E")
+        )  # 无 tags：只有认领
+        b = materialize(aliasing.create_session(session_id="team-e"))
         assert a is b
         assert list(aliasing._sessions) == ["Team-E"]
         seed_messages(a, "single writer")
@@ -450,8 +458,8 @@ class TestFilesystemAliases:
     @pytest.mark.asyncio
     async def test_new_variant_still_creates(self, aliasing: SessionManager):
         """别名只在**真的命中**时归一：全新 id 照常新建（不得误伤）。"""
-        created = aliasing.create_session(session_id="Team-A")
-        fresh = aliasing.create_session(session_id="Team-B")
+        created = materialize(aliasing.create_session(session_id="Team-A"))
+        fresh = materialize(aliasing.create_session(session_id="Team-B"))
         assert created is not fresh
         assert sorted(aliasing._sessions) == ["Team-A", "Team-B"]
 
@@ -501,8 +509,8 @@ class TestFilesystemAliases:
         sm = SessionManager({"file": FileSessionStore(root)})
         aliases = _fs_is_case_insensitive(tmp_path)
 
-        created = sm.create_session(session_id="Team-R", tags=["x"])
-        second = sm.create_session(session_id="team-r", tags=["y"])
+        created = materialize(sm.create_session(session_id="Team-R", tags=["x"]))
+        second = materialize(sm.create_session(session_id="team-r", tags=["y"]))
 
         if aliases:
             assert second is created
@@ -525,7 +533,7 @@ class TestIgnoredOverrideWarnings:
     async def test_resume_override_warns_about_ignored_fields(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sm.resume_session(
             session.session_id,
             agent_override=AgentOverride(
@@ -548,7 +556,7 @@ class TestIgnoredOverrideWarnings:
         self, sm: SessionManager, wing_warnings: list[str]
     ):
         """旧字段 `model` / `provider` 被 pydantic 静默丢弃：不生效、不出声。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         before = session.agent.model
         override = AgentOverride.model_validate(
             {"model": "gpt-4o-mini", "provider": "alt"}
@@ -564,13 +572,14 @@ class TestIgnoredOverrideWarnings:
     async def test_legacy_fields_are_silently_ignored_on_adopt(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         adopted = sm.create_session(
             session_id=CUSTOM_ID,
             agent_override=AgentOverride.model_validate(
                 {"model": "gpt-4o-mini", "provider": "alt"}
             ),
         )
+        materialize(adopted)
         assert adopted is created
         assert adopted.agent.model == created.agent.model
         assert not [line for line in wing_warnings if "override" in line], wing_warnings
@@ -584,6 +593,7 @@ class TestIgnoredOverrideWarnings:
                 {"model": "gpt-4o-mini", "provider": "alt"}
             )
         )
+        materialize(session)
         assert session.agent.model == "gpt-4"  # 模板默认，未被旧字段影响
         assert not [line for line in wing_warnings if "override" in line], wing_warnings
 
@@ -591,7 +601,7 @@ class TestIgnoredOverrideWarnings:
     async def test_model_id_override_is_silent(
         self, sm: SessionManager, wing_warnings: list[str]
     ):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sm.resume_session(
             session.session_id,
             agent_override=AgentOverride(model_id="gpt-4o-mini"),
@@ -629,13 +639,14 @@ class TestAdoptIgnoresCreateParams:
 
     @pytest.mark.asyncio
     async def test_existing_id_skips_create_param_validation(self, sm: SessionManager):
-        created = sm.create_session(session_id=CUSTOM_ID)
+        created = materialize(sm.create_session(session_id=CUSTOM_ID))
         adopted = sm.create_session(
             session_id=CUSTOM_ID,
             backend="nope",
             template_name="nope",
             workspace="/nope",
         )
+        materialize(adopted)
         assert adopted is created
         assert adopted.template_name == created.template_name
 
@@ -700,7 +711,7 @@ class TestNonUtf8InputGates:
                     model_id="gpt-4o-mini", system_prompt="\ud800"
                 ),
             )
-        session = sm.create_session(session_id="Ghost-2")
+        session = materialize(sm.create_session(session_id="Ghost-2"))
         assert session.session_id == "Ghost-2"
         # 幽灵的痕迹（模板默认提示词之外没有任何覆盖）不存在
         assert not session.context_manager.setin_system_prompt
@@ -724,7 +735,7 @@ class TestNonUtf8InputGates:
     async def test_resume_and_update_gates_leave_state_untouched(
         self, sm: SessionManager
     ):
-        session = sm.create_session(session_id="K-1")
+        session = materialize(sm.create_session(session_id="K-1"))
         before = session.agent.model
 
         with pytest.raises(ValueError):
@@ -752,22 +763,24 @@ class TestParentSessionId:
     """血缘（`parent_session_id`）的创建语义（见 docs/dev/session-lineage.md §2）。
 
     这些用例走**真实 manager 路径**（网关侧是 mock、probe 侧是 HTTP 面）：
-    把「创建即落盘 / 收养忽略 / 自指闸门 / 直接子过滤」这组不变量钉在单元层。
+    把「物化落盘 / 收养忽略 / 自指闸门 / 直接子过滤」这组不变量钉在单元层。
     """
 
     @pytest.mark.asyncio
     async def test_auto_generated_id_persists_parent_on_disk_and_reloads(
         self, sm: SessionManager, root: Path
     ):
-        """自动 id（不给 session_id）的带父创建：**创建即落盘**，重启后仍在。
+        """自动 id（不给 session_id）的带父创建：血缘随**物化**落盘，重启后仍在。
 
         `wing run`（血缘采集的主力）不暴露 `--session-id`——它走的正是这条
-        不经过认领键的路径，目录创建完全依赖 metadata 落盘的那次 mkdir。
+        不经过认领键的路径：parent 先只进内存 metadata，第一条用户消息到来时
+        随整份 metadata 一次落盘。
         """
         session = sm.create_session(parent_session_id="root-a")
         assert session.parent_session_id == "root-a"
+        assert not (root / session.session_id).exists(), "未物化：盘上零痕迹"
 
-        # 落盘不依赖任何后续动作：无标会话的唯一写盘就来自血缘本身。
+        materialize(session)
         meta_path = root / session.session_id / "metadata.json"
         assert json.loads(meta_path.read_text(encoding="utf-8"))[
             "parent_session_id"
@@ -780,12 +793,12 @@ class TestParentSessionId:
 
     @pytest.mark.asyncio
     async def test_no_parent_writes_nothing(self, sm: SessionManager, root: Path):
-        """无父 = 零字段：无标会话连 metadata 文件都不建；带标会话没有该键。"""
+        """无父 = 零字段：未物化的会话连 metadata 文件都不建；带标会话没有该键。"""
         bare = sm.create_session()
         assert bare.parent_session_id is None
         assert not (root / bare.session_id / "metadata.json").exists()
 
-        tagged = sm.create_session(tags=["crew"])
+        tagged = materialize(sm.create_session(tags=["crew"]))
         assert tagged.parent_session_id is None
         metadata = json.loads(
             (root / tagged.session_id / "metadata.json").read_text(encoding="utf-8")
@@ -806,7 +819,7 @@ class TestParentSessionId:
         self, sm: SessionManager, root: Path, wing_warnings: list[str]
     ):
         """磁盘收养（真会话、换进程）忽略请求里的 parent：不改写、留 warning。"""
-        first = sm.create_session(session_id=CUSTOM_ID)
+        first = materialize(sm.create_session(session_id=CUSTOM_ID))
         seed_messages(first, "hello")
 
         adopted = _restart(root).create_session(
@@ -827,11 +840,15 @@ class TestParentSessionId:
         self, sm: SessionManager
     ):
         """`list_sessions(parent=...)` = 直接子（不含父自己、不含孙辈）。"""
-        top = sm.create_session(session_id="root-a")
+        top = materialize(sm.create_session(session_id="root-a"))
         seed_messages(top, "root")
-        child = sm.create_session(session_id="child-b", parent_session_id="root-a")
+        child = materialize(
+            sm.create_session(session_id="child-b", parent_session_id="root-a")
+        )
         seed_messages(child, "child")
-        grand = sm.create_session(session_id="grand-c", parent_session_id="child-b")
+        grand = materialize(
+            sm.create_session(session_id="grand-c", parent_session_id="child-b")
+        )
         seed_messages(grand, "grand")
 
         assert [s.id for s in sm.list_sessions(parent="root-a")] == ["child-b"]

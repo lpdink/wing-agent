@@ -70,7 +70,7 @@ class CreateSessionRequest(BaseModel):
         default=None,
         description=(
             "创建者会话 id（**血缘**：谁创建了我；由 CLI 从 WING_SESSION_ID 填入，"
-            "显式调用方可给任意格式合法的 id）。创建时一次写入 metadata，此后没有"
+            "显式调用方可给任意格式合法的 id）。创建时写进内存 metadata、随物化落盘，此后没有"
             "修改路径；缺省 = 根会话（零字段）。只做格式卫生（同 session_id 规则）、"
             "**不校验父是否存在**（弱引用）；与 session_id 同时给出且字面相等"
             "（自指）→ 400。**收养路径忽略它**（resume 语义：既有会话的记录不被改写），"

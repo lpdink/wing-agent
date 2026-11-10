@@ -4,6 +4,7 @@
 由组合根（``WingRuntime``）实现——与远程工具「普通 Tool + 注入的 dispatch 闭包」同款思路：
 
 - ``session_exists``：创建期校验（纯解析，不水合）；
+- ``ensure_durable``：持久性承诺（草稿就地物化——触发器跨重启，目标也必须跨重启）；
 - ``is_archived``：把「已归档」与「真不存在」的失败文案区分开（两者都是 ``state=failed``）；
 - ``session_will_run_again``：``done`` 静息判据要的运行时事实（``wing/wake/quiescence.py``）；
 - ``deliver``：把一条普通用户消息投进目标会话（实现体是 ``runtime.post``，带 ``request_id``）。
@@ -21,6 +22,18 @@ class WakePorts(Protocol):
 
     def session_exists(self, session_id: str) -> bool:
         """该会话是否可解析（live 区；不水合、不发事件）。"""
+        ...
+
+    def ensure_durable(self, session_id: str) -> None:
+        """把会话推到「磁盘上存在」（草稿就地物化；既有会话 no-op）。
+
+        唤醒是**持久**事实（``wake_trigger`` 跨重启），目标与 source 必须同样持久：
+        第一条用户消息之前的会话只是内存草稿（见 architecture.md「会话物化」），
+        登记在草稿上的触发器会在重启后投递失败。登记因此是一次显式的持久性承诺。
+
+        Raises:
+            LookupError: 会话不存在
+        """
         ...
 
     def is_archived(self, session_id: str) -> bool:

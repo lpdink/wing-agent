@@ -172,9 +172,10 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX idx_audit_user_message_session ON audit_user_message(session_id, ts_ms);
 
         -- 会话目录：磁盘会话元数据的**派生投影**（磁盘是事实源，可随时重建）。
-        -- 只在创建时写一次、之后不再更新——model_id 是创建时刻的绑定，不是当前模型；
-        -- 标题由前端 join（目录不存名字）。created_source 标注创建时刻的精度来源：
-        -- create（实况创建）/ id（id 前缀）/ log（history 首条）/ meta（last_interaction）。
+        -- 只在物化（第一条用户消息 / fork）时写一次、之后不再更新——model_id 是创建
+        -- 时刻的绑定，不是当前模型；标题由前端 join（目录不存名字）。created_* 三列是
+        -- 目录自己的溯源事实（不再投影成任何产品度量）。created_source 标注创建时刻的
+        -- 精度来源：create（实况创建）/ id（id 前缀）/ log（history 首条）/ meta（last_interaction）。
         CREATE TABLE session_catalog (
             session_id TEXT PRIMARY KEY,
             created_at_ms INTEGER NOT NULL,

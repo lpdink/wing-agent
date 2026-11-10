@@ -546,9 +546,9 @@ class FileSessionStore(SessionStore):
     def list_summaries(self) -> list[SessionSummary]:
         """列举 session（存在性判据：history.jsonl **或** 带标签的 metadata）。
 
-        带标会话即使还没有首条消息（"创建即打标"的窗口期）也可被列表到——
-        上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
-        由 SessionManager 决定（无名且无标的条目会被它过滤）。
+        无名但带标的会话也列出（例如首条消息是纯图）：是否最终进列表由
+        SessionManager 决定（无名且无标的条目会被它过滤）。草稿（第一条用户
+        消息之前）不写 metadata，因此不在这里（见 architecture.md「会话物化」）。
 
         目录名不过 session id 闸门的一律跳过：它们不是会话（也无法经任何
         API 寻址——解析闸门同样拒绝），可能只是 root 里的杂物，或是存储

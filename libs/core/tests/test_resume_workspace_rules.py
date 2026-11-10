@@ -17,6 +17,7 @@ import pytest
 
 from wing.session import SessionManager
 from wing.store import FileSessionStore
+from _support import materialize
 
 _MARKER = "UNIQUE_RULE_MARKER_42"
 
@@ -39,7 +40,7 @@ async def test_resume_loads_rules_from_workspace(
     (ws / "RULES.md").write_text(_MARKER, encoding="utf-8")
 
     sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-    session = sm.create_session(workspace=str(ws))
+    session = materialize(sm.create_session(workspace=str(ws)))
     # set_workspace 持久化 metadata.workspace（现实里由 TUI 经 gateway 触发），
     # 并让 session 落盘、可被全新 SM 实例 resume。
     session.set_workspace(str(ws))

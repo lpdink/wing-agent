@@ -44,10 +44,9 @@ _SCOPE_TREE = (
     "JOIN tree ON c.parent_session_id = tree.sid) SELECT sid FROM tree)"
 )
 
-#: 摊平流里的**可加列**：度量词表去掉 ``sessions``（去重计数）与
-#: ``sessions_created``（来自会话目录，不在审计流里）。
+#: 摊平流里的**可加列**：度量词表去掉 ``sessions``（去重计数，不能相加）。
 _ADDITIVE_COLUMNS: tuple[str, ...] = tuple(
-    name for name in MEASURE_FIELDS if name not in ("sessions", "sessions_created")
+    name for name in MEASURE_FIELDS if name != "sessions"
 )
 
 
@@ -128,57 +127,16 @@ SELECT tool_name,
 FROM ({_TOOL_CONTRIBUTIONS}) GROUP BY tool_name
 """
 
-_CREATED_BY_DAY = (
-    "SELECT substr(created_ts, 1, 10) AS day, COUNT(*) AS created "
-    "FROM session_catalog WHERE {created} GROUP BY day"
-)
-
-#: 归属（我 / 我的 AI）按目录里的 ``parent_session_id``；目录里没有的会话在
-#: ``report`` 里按 ``me`` 计（LEFT JOIN 的 NULL 与「根会话」不可区分，两者都算 me）。
-_CREATED_BY_ORIGIN = (
-    "SELECT CASE WHEN parent_session_id IS NULL THEN 0 ELSE 1 END AS agents, "
-    "COUNT(*) AS created FROM session_catalog WHERE {created} GROUP BY agents"
-)
-
-_CREATED_TOTAL = "SELECT COUNT(*) AS created FROM session_catalog WHERE {created}"
-
-_CREATED_BY_SESSION = (
-    "SELECT session_id AS session_id, COUNT(*) AS created "
-    "FROM session_catalog WHERE {created} GROUP BY session_id"
-)
-
-#: 按列分组的会话数（列名来自调用方的封闭取值，不外泄到 SQL 之外）。
-_CREATED_BY_COLUMN = (
-    "SELECT COALESCE({column}, '') AS key, COUNT(*) AS created "
-    "FROM session_catalog WHERE {created} GROUP BY key"
-)
-
-#: 「有记录的第一天」：四张表各自的最早日，取最小（无数据 → NULL）。
+#: 「有记录的第一天」= 审计流水（三张 ``audit_*``）最早的一天；无审计行 → NULL。
 #:
-#: 与 :data:`_EARLIEST_AUDIT_DAY` 同一形状：每张表 ``ORDER BY <ms 列> LIMIT 1`` 走索引，
-#: 而不是 ``MIN(substr(ts, 1, 10))`` 的全扫描——``since=all`` 是 ``wing info`` 每次请求都
-#: 走的路径。时钟回拨留下的「``ts`` 更早但 ``ts_ms`` 更晚」的行上两种写法可能差一天，这里
-#: 取 ``ts_ms``（写入时刻）：它是索引列，也与 ``audit_*`` 的其它窗口过滤同源。
-_EARLIEST_DAY = (
-    "SELECT MIN(d) AS day FROM ("
-    "SELECT (SELECT substr(ts, 1, 10) FROM audit_llm_call"
-    " ORDER BY ts_ms LIMIT 1) AS d"
-    " UNION ALL SELECT (SELECT substr(ts, 1, 10) FROM audit_tool_call"
-    " ORDER BY ts_ms LIMIT 1)"
-    " UNION ALL SELECT (SELECT substr(ts, 1, 10) FROM audit_user_message"
-    " ORDER BY ts_ms LIMIT 1)"
-    " UNION ALL SELECT (SELECT substr(created_ts, 1, 10) FROM session_catalog"
-    " ORDER BY created_at_ms LIMIT 1))"
-)
-
-#: 「审计流水从哪天起」：只看三张 ``audit_*``（``session_catalog`` 的回填可以早得多，
-#: 而读数在它之前是**不存在**的，不是 0）。无审计行 → NULL。
+#: 只看流水：``session_catalog`` 是为**归属**（血缘 / workspace / 模板）而写的派生投影，
+#: 它不能把窗口往前拉——早于流水的那段时间没有任何读数（不是 0）。
 #:
 #: 每个子查询走 ``ORDER BY ts_ms LIMIT 1``（``idx_audit_*_ts`` 上的索引扫描）而不是
 #: ``MIN(substr(ts, 1, 10))``：后者是每张表的全扫描，且这条路径**每个** ``/api/usage``
 #: 请求都要走一次（实测 100 万行 44ms vs 0.0ms）。``ts`` 与 ``ts_ms`` 同源同刻，
 #: 取最早一刻的那一行得到的日期就是最早的一天。
-_EARLIEST_AUDIT_DAY = (
+_EARLIEST_DAY = (
     "SELECT MIN(d) AS day FROM ("
     "SELECT (SELECT substr(ts, 1, 10) FROM audit_llm_call"
     " ORDER BY ts_ms LIMIT 1) AS d"
@@ -248,16 +206,12 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _measures(row: sqlite3.Row, *, sessions_created: int = 0) -> Measures:
+def _measures(row: sqlite3.Row) -> Measures:
     """一行聚合 → :class:`Measures`（列名即字段名，见 ``_MEASURE_COLUMNS``）。
 
-    键集取自 :data:`MEASURE_FIELDS`（加一个度量只改词表）；``sessions_created`` 是唯一
-    不由聚合列给出的字段（它来自会话目录）。
+    键集取自 :data:`MEASURE_FIELDS`（加一个度量只改词表）。
     """
-    values: dict[str, int] = {
-        name: _count(row[name]) for name in MEASURE_FIELDS if name != "sessions_created"
-    }
-    return Measures(sessions_created=sessions_created, **values)
+    return Measures(**{name: _count(row[name]) for name in MEASURE_FIELDS})
 
 
 def _ms_envelope(window: Window) -> tuple[int, int]:
@@ -286,21 +240,6 @@ def _audit_predicate(window: Window) -> tuple[str, list[Any]]:
     since, until = window.day_strings()
     low, high = _ms_envelope(window)
     sql = "ts >= ? AND ts < ? AND ts_ms >= ? AND ts_ms < ?"
-    params: list[Any] = [
-        since,
-        (window.until + timedelta(days=1)).isoformat(),
-        low,
-        high,
-    ]
-    scope, scope_params = _scope_predicate(window)
-    return sql + scope, params + scope_params
-
-
-def _created_predicate(window: Window) -> tuple[str, list[Any]]:
-    """``session_catalog`` 的 ``WHERE`` 主体（``created_ts`` / ``created_at_ms``）。"""
-    since, until = window.day_strings()
-    low, high = _ms_envelope(window)
-    sql = "created_ts >= ? AND created_ts < ? AND created_at_ms >= ? AND created_at_ms < ?"
     params: list[Any] = [
         since,
         (window.until + timedelta(days=1)).isoformat(),
@@ -362,7 +301,7 @@ class MetricsStore:
     # ── 读 ───────────────────────────────────────
 
     def totals(self, window: Window) -> Measures:
-        """整段窗口的总量（不含 ``sessions_created``：目录侧单独查）。"""
+        """整段窗口的总量。"""
         sql, params = _contributions(window)
         rows = self._rows(_TOTALS.format(contributions=sql), params)
         return _measures(rows[0]) if rows else Measures()
@@ -423,76 +362,9 @@ class MetricsStore:
             buckets.append(ToolBucket(tool_name=tool_name, measures=_measures(row)))
         return buckets
 
-    def created_by_day(self, window: Window) -> dict[str, int]:
-        """按天的新建会话数（来自 ``session_catalog``，含回填的历史会话）。"""
-        where, params = _created_predicate(window)
-        return {
-            day: _count(row["created"])
-            for row in self._rows(_CREATED_BY_DAY.format(created=where), params)
-            if (day := _text(row["day"])) is not None
-        }
-
-    def created_by_origin(self, window: Window) -> tuple[int, int]:
-        """``(me, agents)`` 的新建会话数（无父 = me，有父 = agents）。"""
-        where, params = _created_predicate(window)
-        me = agents = 0
-        for row in self._rows(_CREATED_BY_ORIGIN.format(created=where), params):
-            created = _count(row["created"])
-            if _count(row["agents"]):
-                agents += created
-            else:
-                me += created
-        return me, agents
-
-    def created_total(self, window: Window) -> int:
-        """窗口内新建的会话总数（**总量**的独立来源，不依赖任何维度的行）。"""
-        where, params = _created_predicate(window)
-        rows = self._rows(_CREATED_TOTAL.format(created=where), params)
-        return _count(rows[0]["created"]) if rows else 0
-
-    def created_by_session(self, window: Window) -> dict[str, int]:
-        """按会话的新建事实（``session`` 维度的行级 ``sessions_created``）。"""
-        where, params = _created_predicate(window)
-        result: dict[str, int] = {}
-        for row in self._rows(_CREATED_BY_SESSION.format(created=where), params):
-            session_id = _text(row["session_id"])
-            if session_id is None:
-                continue
-            result[session_id] = result.get(session_id, 0) + _count(row["created"])
-        return result
-
-    def created_by_workspace(self, window: Window) -> dict[str, int]:
-        """按 workspace 的新建会话数（空值 → 空串键）。"""
-        return self._created_by_column(window, "workspace")
-
-    def created_by_template(self, window: Window) -> dict[str, int]:
-        """按 agent 模板的新建会话数（无模板 → 空串键）。"""
-        return self._created_by_column(window, "template_name")
-
-    def _created_by_column(self, window: Window, column: str) -> dict[str, int]:
-        where, params = _created_predicate(window)
-        sql = _CREATED_BY_COLUMN.format(column=column, created=where)
-        result: dict[str, int] = {}
-        for row in self._rows(sql, params):
-            key = _text(row["key"])
-            if key is None:
-                continue
-            result[key] = result.get(key, 0) + _count(row["created"])
-        return result
-
     def earliest_day(self) -> str | None:
-        """有记录的第一天（四张表的 ``MIN``；库为空 → ``None``）。"""
+        """有记录的第一天（三张 ``audit_*`` 的 ``MIN``；库为空 → ``None``）。"""
         rows = self._rows(_EARLIEST_DAY, ())
-        return _text(rows[0]["day"]) if rows else None
-
-    def earliest_audit_day(self) -> str | None:
-        """审计流水（三张 ``audit_*``）最早的一天；没有审计行 → ``None``。
-
-        与 :meth:`earliest_day` 的差别就是 ``session_catalog``：回填把存量会话补进目录，
-        于是「建过多少会话」能追溯到安装之前，而 token / 调用计数不行——消费方据这个
-        差值给出「审计从此日起」的诚实提示。
-        """
-        rows = self._rows(_EARLIEST_AUDIT_DAY, ())
         return _text(rows[0]["day"]) if rows else None
 
     def has_usage_record(self, session_id: str) -> bool:
@@ -500,7 +372,7 @@ class MetricsStore:
 
         与 ``SessionManager.session_exists`` **不是同一个判据**：那边回答「这个会话
         现在能不能用」（内存 + 各 store + id 形状），这里回答「统计认识这个 id 吗」
-        （只读库、不水合）。两边在归档会话与刚建的空会话上故意给出不同答案。
+        （只读库、不水合）。两边在归档会话与空会话上故意给出不同答案。
         """
         rows = self._rows(_SCOPE_EXISTS, (session_id,) * len(_SCOPE_TABLES))
         return bool(rows)

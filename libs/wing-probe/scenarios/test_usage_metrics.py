@@ -33,7 +33,6 @@ IDLE_MODEL = "probe/usage-idle"
 
 #: 可加度量（``sessions`` 是去重计数，单日窗口下才与行相等）。
 ADDITIVE = (
-    "sessions_created",
     "user_messages",
     "llm_calls",
     "tool_calls",
@@ -68,7 +67,7 @@ async def test_usage_reports_the_turn_it_just_ran(probe: Probe) -> None:
 
     WHEN 两帧 usage（tool 轮 + 收尾轮）+ 一次 Bash 调用
     THEN ``group_by=day`` 的今日行：llm_calls=2 / tool_calls=1 / 三桶 token 累加 /
-    user_messages=1 / sessions=1 / sessions_created=1；totals 与行逐字段相等；
+    user_messages=1 / sessions=1；totals 与行逐字段相等；
     只读 sqlite3 交叉对账：audit_llm_call 两行、audit_tool_call 一行、
     audit_user_message 一行、session_catalog 一行（根会话）。
     """
@@ -102,7 +101,6 @@ async def test_usage_reports_the_turn_it_just_ran(probe: Probe) -> None:
     assert today["cached_tokens"] == 40
     assert today["user_messages"] == 1
     assert today["sessions"] == 1
-    assert today["sessions_created"] == 1
     assert today["llm_time_ms"] > 0
     assert today["tool_time_ms"] >= 0
 
@@ -144,7 +142,6 @@ async def test_empty_database_is_200_with_zeros(probe: Probe) -> None:
     assert body["totals"]["sessions"] == 0
     assert body["totals"]["llm_calls"] == 0
     assert body["totals"]["prompt_tokens"] == 0
-    assert body["totals"]["sessions_created"] == 0
     # 库完全为空时 `since=all` 收敛到 until 当天：仍然是稠密的一行
     assert [row["key"] for row in body["rows"]] == [date.today().isoformat()]
     assert body["truncated"] is False
@@ -279,4 +276,3 @@ async def test_lineage_splits_me_and_agents(probe: Probe) -> None:
     assert agents["prompt_tokens"] == 90
     assert agents["sessions"] == 1
     assert body["totals"]["prompt_tokens"] == 100
-    assert body["totals"]["sessions_created"] == 2

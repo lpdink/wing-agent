@@ -351,8 +351,8 @@ pub enum Command {
     ///
     /// Default view is a dashboard (heatmap + today + "me vs my agents" + models);
     /// `--by <dim>` prints one ranked breakdown instead. Every number comes from
-    /// the audit flow in `wing.db` (token / call counting starts there — session
-    /// counts go further back, and the dashboard says so when that matters).
+    /// the audit flow in `wing.db`; the dashboard says where that flow starts
+    /// when it is younger than the window.
     Usage {
         /// Range start: all | today | yesterday | <N>d|<N>w|<N>m|<N>y | 2026-10-01
         /// (m = 30 days, y = 365 days; relative forms count back from today).
@@ -450,6 +450,10 @@ pub enum Command {
     Reload,
 
     /// Create an empty session and print its id.
+    ///
+    /// The session is a draft: nothing is persisted until its first user
+    /// message, so the id stops working once the gateway restarts or evicts
+    /// it.
     New(lifecycle::NewArgs),
 
     /// Load an evicted session back into gateway memory and print its state.
@@ -463,7 +467,8 @@ pub enum Command {
     /// Tags are opaque strings (lowercase recommended; `k=v` is a namespace
     /// convention). Positional args add tags, --remove removes them; both in
     /// one call is applied atomically. Idempotent; never wakes evicted
-    /// sessions; no tags at all = pure read.
+    /// sessions; no tags at all = pure read. On an unsent draft (no first
+    /// message yet) tags stay in memory until that message arrives.
     Tag {
         /// Session ID (omit when using --list).
         session_id: Option<String>,

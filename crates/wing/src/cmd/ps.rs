@@ -170,8 +170,7 @@ impl InfoUsage {
             .map(|row| row.measures.clone())
             .unwrap_or_default();
         let totals = &report.totals;
-        // 子孙有流水才有 `tree:` 行：`totals - 自身行` 里 `sessions_created` 只会来自
-        // 目录（回填的存量会话 / 新建的空会话），那不算读数。
+        // 子孙有流水才有 `tree:` 行（`totals - 自身行` 全零 = 没有子孙读数）。
         let rest = totals.sub(&own);
         let tree = rest.has_flow().then(|| {
             // `sessions` 是去重计数：作用域内除了自身，剩下的都是子孙。
@@ -800,7 +799,7 @@ fn format_usage_block(block: &InfoUsage, ledger: Option<&SessionUsage>) -> Strin
         "tokens:",
         format::tokens(own.prompt_tokens),
         match format::hit_rate(own.cached_tokens, own.prompt_tokens) {
-            Some(rate) => format!(" ({rate:.0}% cached)"),
+            Some(rate) => format!(" ({} cached)", format::percent(rate)),
             None => String::new(),
         },
         format::tokens(own.completion_tokens)
@@ -2172,7 +2171,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("  tokens:             ↑ 1.2M in (78% cached) · ↓ 45.6k out"),
+            text.contains("  tokens:             ↑ 1.20M in (78.00% cached) · ↓ 45.60k out"),
             "{text}"
         );
         assert!(
@@ -2180,7 +2179,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("  tree:               1 sessions · ↑ 4.6M · ↓ 180.0k"),
+            text.contains("  tree:               1 sessions · ↑ 4.60M · ↓ 180.00k"),
             "{text}"
         );
     }
@@ -2220,7 +2219,7 @@ mod tests {
         };
         assert_eq!(
             format_usage_block(&block, Some(&ledger)),
-            format!("usage:  {NONE_MARK} (no audit flow; ledger: 12 turns · ↑1.2M ↓45.0k)\n")
+            format!("usage:  {NONE_MARK} (no audit flow; ledger: 12 turns · ↑1.20M ↓45.00k)\n")
         );
         // 账本也是空的：只说「没有流水」，不编造账本读数。
         assert_eq!(
@@ -2282,14 +2281,10 @@ mod tests {
         );
     }
 
-    /// 只有目录事实（`sessions_created`）的会话不是「有读数」：`—` 降级必须可达，
-    /// 子树的 `tree:` 行也不能因为「目录里多了一行」就冒出来。
+    /// 全零行不是「有读数」：`—` 降级必须可达，子树的 `tree:` 行也不能因为
+    /// 「端点返回了一行」就冒出来。
     #[test]
-    fn a_catalog_only_row_is_not_a_reading() {
-        let catalog_only = UsageMeasures {
-            sessions_created: 1,
-            ..UsageMeasures::default()
-        };
+    fn a_zero_row_is_not_a_reading() {
         let ledger = SessionUsage {
             turns: 12,
             user_messages: 7,
@@ -2298,15 +2293,15 @@ mod tests {
             ..SessionUsage::default()
         };
         let report = usage_report(
-            vec![usage_row("sid", None, catalog_only.clone())],
-            catalog_only,
+            vec![usage_row("sid", None, UsageMeasures::default())],
+            UsageMeasures::default(),
         );
         let block = InfoUsage::from_report(&report, "sid");
         assert!(block.tree.is_none(), "目录行不是子孙流水");
         let text = format_usage_block(&block, Some(&ledger));
         assert!(
             text.starts_with(&format!("usage:  {NONE_MARK}")),
-            "只建过会话 → 走 `—` 降级：\n{text}"
+            "没有读数 → 走 `—` 降级：\n{text}"
         );
         assert!(!text.contains("calls:"), "不打一排 0：\n{text}");
         assert!(text.contains("ledger: 12 turns"), "回落到账本：\n{text}");
@@ -2340,7 +2335,7 @@ mod tests {
         let block = InfoUsage::from_report(&report, "sid");
         let text = format_usage_block(&block, None);
         assert!(text.contains("250 sessions"), "不靠行数：\n{text}");
-        assert!(text.contains("↑ 4.6G"), "{text}");
+        assert!(text.contains("↑ 4.60B"), "{text}");
     }
 
     /// 自身没有流水、但子孙有：自身那一小节写 `—`（不写一排 0），`tree:` 照常。

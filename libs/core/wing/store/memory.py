@@ -163,19 +163,20 @@ class MemorySessionStore(SessionStore):
 
     # ── 查询 ──────────────────────────────────
 
-    def _live_session_ids(self) -> set[str]:
-        """有 metadata 或有消息的 session（对齐文件后端"首次写入前不存在"语义：
-        仅 open_log 而未写入任何记录的 session 不可解析）。"""
-        ids = set(self._metadata)
-        for session_id, message_log in self._logs.items():
-            if next(message_log.iter_all(), None) is not None:
-                ids.add(session_id)
-        return ids
-
     def exists(self, session_id: str) -> bool:
-        """精确判断 session 是否存在。id 不合规即 ValueError（同 file 后端）。"""
+        """精确判断 session 是否存在。id 不合规即 ValueError（同 file 后端）。
+
+        判据与文件后端同口径（有 metadata 或已写入消息）：仅 ``open_log`` 而未写
+        任何记录的 session 不可解析。按 id 单点查——不扫全量日志（``Session``
+        构造时每个会话都要问一次）。
+        """
         validate_session_id(session_id)
-        return session_id in self._live_session_ids()
+        if session_id in self._metadata:
+            return True
+        message_log = self._logs.get(session_id)
+        return (
+            message_log is not None and next(message_log.iter_all(), None) is not None
+        )
 
     def resolve_stored_id(self, session_id: str) -> str | None:
         """键即请求值：进程内字典没有文件系统别名问题（大小写/归一化都逐字区分）。
@@ -195,9 +196,9 @@ class MemorySessionStore(SessionStore):
     def list_summaries(self) -> list[SessionSummary]:
         """列举 session（存在性判据：有日志记录 **或** 带标签的 metadata）。
 
-        带标会话即使还没有首条消息（"创建即打标"的窗口期）也可被列表到——
-        上层据此让 ``ps --tag`` / ``tag --list`` 立即找得到；是否最终进列表
-        由 SessionManager 决定（无名且无标的条目会被它过滤）。
+        无名但带标的会话也列出（例如首条消息是纯图）：是否最终进列表由
+        SessionManager 决定（无名且无标的条目会被它过滤）。草稿（第一条用户
+        消息之前）不写 metadata，因此不在这里（见 architecture.md「会话物化」）。
 
         与 file 后端"目录名不过闸门即跳过"的口径一致：memory 后端的 key 由
         会话层确定（默认自生成，编排方可经 create-or-adopt 指定），天然通过

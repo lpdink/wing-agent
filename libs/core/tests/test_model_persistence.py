@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from _support import seed_messages
+from _support import materialize, seed_messages
 from wing.config import ModelCapabilities, ModelSpec
 from wing.event import SessionInitEvent, SessionStateChangedEvent, SyncSessionEvent
 from wing.event_bus import event_bus
@@ -88,7 +88,7 @@ class TestExplicitSwitchPersists:
     @pytest.mark.asyncio
     async def test_switch_model_id_restored_after_restart(self, sm, root):
         """按 id 切换：provider 随映射而来，三元组一次落盘，重启后 id 优先还原。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         assert session.model_id == "gpt-4"  # 模板默认模型的 id
 
@@ -111,7 +111,7 @@ class TestExplicitSwitchPersists:
     async def test_switch_within_provider_keeps_provider(
         self, sm, root, _isolate_config
     ):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         provider_name = session.agent.model_provider.name
 
@@ -136,6 +136,7 @@ class TestCreateOverridePersists:
         session = sm.create_session(
             agent_override=AgentOverride(model_id="gpt-4o-mini")
         )
+        materialize(session)
         sid = session.session_id
 
         meta = _metadata(root, sid)
@@ -156,7 +157,7 @@ class TestTemplateSwitchPersists:
 
     @pytest.mark.asyncio
     async def test_template_switch_overwrites_record(self, sm, root):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         # 先留下一个旧的显式记录，验证会被模板切换覆写
         await session.update_state(model_id="qwen3-max")
@@ -185,7 +186,7 @@ class TestForkSnapshot:
 
     @pytest.mark.asyncio
     async def test_fork_after_switch_records_source_model(self, sm, root):
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         await source.update_state(model_id="qwen3-max")
         seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
@@ -206,7 +207,7 @@ class TestForkSnapshot:
 
     @pytest.mark.asyncio
     async def test_fork_without_switch_snapshots_effective_model(self, sm, root):
-        source = sm.create_session()
+        source = materialize(sm.create_session())
         seed_messages(source, "hello", "question")
         target = source.context_manager.get_context_window()[-1].uuid
 
@@ -227,7 +228,7 @@ class TestDegradation:
     async def test_unknown_provider_falls_back_and_keeps_record(
         self, sm, root, wing_logs
     ):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.store.save_metadata(
             sid,
@@ -254,7 +255,7 @@ class TestDegradation:
         # 目录声明必须仍然覆盖模板引用的 model id（否则模板解析就该失败）
         _isolate_config.providers[0].models = ["gpt-4", "only-this-model"]
 
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.store.save_metadata(
             sid,
@@ -284,7 +285,7 @@ class TestDegradation:
             ),
         ]
 
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="obj-model")
 
@@ -306,7 +307,7 @@ class TestDegradation:
             ModelSpec(name="obj-model"),
         ]
 
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         await session.update_state(model_id="obj-model")
 
@@ -321,7 +322,7 @@ class TestDegradation:
 
     @pytest.mark.asyncio
     async def test_partial_record_treated_as_no_record(self, sm, root):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         session.store.save_metadata(sid, SessionMetadata(model_name="half-written"))
 
@@ -339,7 +340,7 @@ class TestPersistFailureIsBestEffort:
         from wing.runtime import WingRuntime
 
         rt = WingRuntime()
-        session = rt.create_session()
+        session = materialize(rt.create_session())
         sid = session.session_id
 
         def _boom(session_id: str, metadata: SessionMetadata) -> None:
@@ -362,7 +363,7 @@ class TestCompatibility:
     @pytest.mark.asyncio
     async def test_legacy_metadata_resumes_with_template_model(self, sm, root):
         template_model = sm.template_manager.default.model
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
         seed_messages(session, "hello")
 
@@ -376,9 +377,8 @@ class TestCompatibility:
 
     @pytest.mark.asyncio
     async def test_untouched_session_writes_no_record(self, sm, root):
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         sid = session.session_id
-        session.touch_last_interaction()  # 触发一次 metadata 落盘
 
         raw = json.loads((root / sid / "metadata.json").read_text(encoding="utf-8"))
         assert "model_id" not in raw
@@ -394,7 +394,7 @@ class TestRestoreEvents:
         from wing.runtime import WingRuntime
 
         rt1 = WingRuntime()
-        session = rt1.create_session()
+        session = materialize(rt1.create_session())
         sid = session.session_id
         await session.update_state(model_id="qwen3-max")
 

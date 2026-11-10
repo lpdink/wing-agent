@@ -896,8 +896,8 @@ mod tests {
             working_text.contains("Esc to interrupt"),
             "活动栏带中断提示：{working_text}"
         );
-        // 4.2k in 之类：这一轮的用量也进 meta rail。
-        assert!(working_text.contains("1.2k in"), "meta rail 带本轮读数");
+        // 1.20k in 之类：这一轮的用量也进 meta rail。
+        assert!(working_text.contains("1.20k in"), "meta rail 带本轮读数");
     }
 
     #[test]

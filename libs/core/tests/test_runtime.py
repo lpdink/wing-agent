@@ -27,6 +27,8 @@ from wing.request_context import (
     set_request_context,
 )
 
+from _support import materialize
+
 pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
 
 
@@ -58,7 +60,7 @@ class TestContextvarsIsolation:
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
 
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         event_bus.route_attach("test-client", session.session_id)
 
         await runtime.post(
@@ -84,7 +86,7 @@ class TestContextvarsIsolation:
             client_id="outer-cid",
         )
 
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         event_bus.route_attach("test-client", session.session_id)
         await runtime.post(
             "hello",
@@ -130,7 +132,7 @@ class TestContextvarsIsolation:
     async def test_multiple_posts_isolated(self, runtime: Any):
         """多次 post() 各自有自己的 contextvar，互不干扰。"""
         results: dict[str, list] = {"first": [], "second": []}
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         event_bus.route_attach("test-client", session.session_id)
 
         # 第一次 post
@@ -176,7 +178,7 @@ class TestSubscription:
     @pytest.mark.asyncio
     async def test_subscribe_attaches_route(self, runtime: Any):
         """subscribe 注册路由。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         runtime.subscribe("tui", session.session_id)
         assert "tui" in event_bus.routing_table
         assert session.session_id in event_bus.routing_table["tui"]
@@ -184,7 +186,7 @@ class TestSubscription:
     @pytest.mark.asyncio
     async def test_subscribe_pushes_sync_events(self, runtime: Any):
         """subscribe 推送 SyncSessionEvent + ContextStatsEvent。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
 
@@ -205,7 +207,7 @@ class TestSubscription:
     @pytest.mark.asyncio
     async def test_unsubscribe_detaches_route(self, runtime: Any):
         """unsubscribe 取消路由注册。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         runtime.subscribe("tui", session.session_id)
         assert "tui" in event_bus.routing_table
 
@@ -224,7 +226,7 @@ class TestSubscription:
     @pytest.mark.asyncio
     async def test_multiple_clients_subscribe(self, runtime: Any):
         """多个 client 订阅同一个 session。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         runtime.subscribe("client-a", session.session_id)
         runtime.subscribe("client-b", session.session_id)
         assert "client-a" in event_bus.routing_table
@@ -250,14 +252,14 @@ class TestSessionLifecycle:
     @pytest.mark.asyncio
     async def test_fork_session_raises_on_nonexistent_source(self, runtime: Any):
         """fork_session source 不存在时 raise LookupError。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         with pytest.raises(LookupError, match="Fork failed"):
             runtime.fork_session(session.session_id, "nonexistent-uuid")
 
     @pytest.mark.asyncio
     async def test_resume_session_returns_existing(self, runtime: Any):
         """resume_session 内存中已存在时直接返回。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         resumed = runtime.resume_session(session.session_id)
         assert resumed is session
 
@@ -272,7 +274,7 @@ class TestSessionLifecycle:
         """真实 fork 操作创建新 session。"""
         from wing.schema import Message
 
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
 
         # 添加用户消息
         session.agent.context_manager.add_message(
@@ -297,7 +299,7 @@ class TestSessionLifecycle:
         from wing.schema import Message
 
         # 创建并持久化一个 session
-        old_session = runtime.create_session()
+        old_session = materialize(runtime.create_session())
         old_session.agent.context_manager.add_message(
             Message(role="user", content="test for resume")
         )
@@ -325,7 +327,7 @@ class TestSessionSerialization:
     @pytest.mark.asyncio
     async def test_to_agent_info_returns_correct_fields(self, runtime: Any):
         """to_agent_info 返回包含 model_name、provider_name、tools、skills、rules、workspace 的 AgentInfo。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         info = session.to_agent_info()
         assert info.model_name is not None
         assert isinstance(info.tools, list)
@@ -360,7 +362,7 @@ class TestSessionSerialization:
     @pytest.mark.asyncio
     async def test_serialize_messages_empty(self, runtime: Any):
         """空消息历史序列化为空列表。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         msgs = session.serialize_messages()
         # 新 session 可能只有 system prompt 在 context window 中
         # active_chain 无用户消息时为空
@@ -375,7 +377,7 @@ class TestSessionSerialization:
         """添加消息后序列化包含正确字段。"""
         from wing.schema import Message
 
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         session.agent.context_manager.add_message(Message(role="user", content="hello"))
         msgs = session.serialize_messages()
         user_msgs = [m for m in msgs if m["role"] == "user"]
@@ -392,7 +394,7 @@ class TestQueryInterface:
     @pytest.mark.asyncio
     async def test_get_session_state_existing(self, runtime: Any):
         """get_session_state 返回存在的 session 状态。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         state = runtime.get_session_state(session.session_id)
         assert state is not None
         assert state["session_id"] == session.session_id
@@ -421,8 +423,8 @@ class TestQueryInterface:
         from wing.runtime import WingRuntime
 
         runtime = WingRuntime()
-        active = runtime.create_session(tags=["crew"])
-        pinned = runtime.create_session(tags=["crew", "pin"])
+        active = materialize(runtime.create_session(tags=["crew"]))
+        pinned = materialize(runtime.create_session(tags=["crew", "pin"]))
         released, _ = runtime.release_session(pinned.session_id)
         assert released is True
 
@@ -450,7 +452,7 @@ class TestQueryInterface:
         # 刚建、无名无标的空会话哪个方向都不出现（过滤只做减法，不造行）。
         # 这里钉的是产品事实；可见性规则本身（manager 层的判断）由
         # `TestListSessionFilters.test_visibility_runs_before_the_filter` 直接钉。
-        empty = runtime.create_session()
+        empty = materialize(runtime.create_session())
         assert empty.session_id not in [s.id for s in runtime.list_sessions()]
         assert empty.session_id not in [
             s.id for s in runtime.list_sessions(statuses={"idle", "working", "waiting"})
@@ -477,7 +479,7 @@ class TestToolBindingIsolation:
         """fork 后，新 agent 的工具闭包引用新 agent 而非旧 agent。"""
         from wing.schema import Message
 
-        old_session = runtime.create_session()
+        old_session = materialize(runtime.create_session())
         old_agent_id = id(old_session.agent)
 
         # 添加消息，让 fork 有目标
@@ -515,7 +517,7 @@ class TestToolBindingIsolation:
         from wing.schema import Message
 
         # 先建一个"历史 session"并持久化到磁盘
-        old_session = runtime.create_session()
+        old_session = materialize(runtime.create_session())
         old_agent_id = id(old_session.agent)
         old_session.agent.context_manager.add_message(
             Message(role="user", content="test for resume")
@@ -558,7 +560,7 @@ class TestPostRouting:
     @pytest.mark.asyncio
     async def test_post_delegates_to_sm(self, runtime: Any):
         """post() 调用 SM._post() 处理消息。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         event_bus.route_attach("test-client", session.session_id)
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
@@ -576,7 +578,7 @@ class TestPostRouting:
     @pytest.mark.asyncio
     async def test_post_unrecognized_command_falls_to_agent(self, runtime: Any):
         """不认识的 /command 传给 agent 处理。"""
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         event_bus.route_attach("test-client", session.session_id)
         received: list = []
         event_bus.subscribe(lambda e: received.append(e))
@@ -626,7 +628,7 @@ class TestSMPostNoContextvars:
         event_bus.subscribe(lambda e: received.append(e))
 
         # 直接调 SM._post()——不经过 WingRuntime
-        session = runtime.create_session()
+        session = materialize(runtime.create_session())
         event_bus.route_attach("test-client", session.session_id)
         await runtime.sm._post(
             "hello",

@@ -13,6 +13,7 @@ import pytest
 
 from wing.session import SessionManager
 from wing.store import FileSessionStore
+from _support import materialize
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_update_model(self, sm):
         """按 model id 切换模型（调用名与 provider 随映射而来）。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         original_model = session.agent.model
         assert original_model != "gpt-4o-mini"
 
@@ -41,7 +42,7 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_update_title(self, sm):
         """设置 session 标题。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         assert session.session_name is None
 
         await session.update_state(title="My Test Session")
@@ -50,7 +51,7 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_update_thinking(self, sm):
         """开关 thinking 模式。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         original = session.agent.thinking
 
         await session.update_state(thinking=not original)
@@ -59,14 +60,14 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_update_reasoning_effort(self, sm):
         """设置推理力度。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         await session.update_state(reasoning_effort="high")
         assert session.agent.reasoning_effort == "high"
 
     @pytest.mark.asyncio
     async def test_update_yolo(self, sm):
         """开关 yolo 模式。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         original = session.agent.yolo
 
         await session.update_state(yolo=not original)
@@ -75,7 +76,7 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_none_params_skipped(self, sm):
         """所有参数为 None 时不执行任何操作。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         original_model = session.agent.model
         original_name = session.session_name
 
@@ -87,7 +88,7 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_template_switch_called(self, sm):
         """template 不为 None 时调用 switch_template。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         mock_template = MagicMock()
         session.switch_template = AsyncMock()
 
@@ -97,7 +98,7 @@ class TestSessionUpdateState:
     @pytest.mark.asyncio
     async def test_multiple_fields_updated(self, sm):
         """多字段同时更新，全部生效。"""
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         await session.update_state(
             model_id="gpt-4o-mini",
             title="Multi Update",
@@ -141,7 +142,7 @@ class TestModelDisplayName:
         # 读的是模块全局 _config，patch get_config 名字对它们无效）。
         monkeypatch.setattr(wing.config.loader, "_config", cfg)
         sm = SessionManager({"memory": MemorySessionStore()}, default_backend="memory")
-        session = sm.create_session()
+        session = materialize(sm.create_session())
         assert session.agent.model_display_name == "Fancy Flash"
         assert session.to_agent_info().model_display_name == "Fancy Flash"
         assert session.to_agent_info().model_id == "fancy"
@@ -170,7 +171,7 @@ class TestNonUtf8UpdateState:
 
     @pytest.mark.asyncio
     async def test_model_is_gated_before_mutation(self, file_sm: SessionManager):
-        session = file_sm.create_session(session_id="U-1")
+        session = materialize(file_sm.create_session(session_id="U-1"))
         before = session.agent.model
 
         with pytest.raises(ValueError) as failure:
@@ -189,7 +190,7 @@ class TestNonUtf8UpdateState:
     async def test_reasoning_effort_is_gated_before_mutation(
         self, file_sm: SessionManager
     ):
-        session = file_sm.create_session(session_id="U-2")
+        session = materialize(file_sm.create_session(session_id="U-2"))
         before = session.agent.reasoning_effort
 
         with pytest.raises(ValueError) as failure:
@@ -205,7 +206,7 @@ class TestNonUtf8UpdateState:
     @pytest.mark.asyncio
     async def test_unknown_model_id_leaves_no_record(self, file_sm: SessionManager):
         """未知 id（C7 文案）与闸门同口径：先查后改，失败不留任何记录。"""
-        session = file_sm.create_session(session_id="U-3")
+        session = materialize(file_sm.create_session(session_id="U-3"))
         before = session.agent.model
 
         with pytest.raises(ValueError) as failure:
@@ -234,7 +235,7 @@ class TestBestEffortStatePersistence:
         self, wing_warnings: list[str], tmp_path: Path
     ):
         sm = SessionManager({"file": FileSessionStore(tmp_path / "sessions")})
-        session = sm.create_session(session_id="H-1")
+        session = materialize(sm.create_session(session_id="H-1"))
 
         session.context_manager.append_to_system_prompt("\ud800")  # hook 干的事
         session.sync_append_system_prompt()  # 不抛
