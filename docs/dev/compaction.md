@@ -81,6 +81,7 @@
 | inbox 里有已投递、未被取走的输入 | 409，同上（那也是一轮即将开始的 turn） |
 | 已有手动压缩在飞 | 409 `compaction already in progress` |
 | 压缩被 `interrupt` / `shutdown` 取消 | 409 `compaction interrupted` |
+| 压缩期间链被改动（热切工具注入 reminder 等） | 409 `CompactionAborted`，可原样重试 |
 
 准入判据与"取出口闸门"之间没有 await：`status` / `has_pending` 检查与 `Inbox.hold()` 都是
 同步调用，单线程事件循环下原子。
@@ -93,10 +94,13 @@
 
 - **`rewind` 被拒**（`SessionBusyError` → 409）：它改链，放它进来就等于让它被静默覆盖；
 - 压缩写链前还要**自校验窗口未变**（`do_manual_compact` 在 `append_detached` 之前比对快照
-  与当前窗口的 uuid 序列）——不一致就整次放弃，绝不落半份摘要。这是兜住"未来又长出一个
-  改链入口"的网，不是 rewind 专用；
-- `fork` / `update` 不受影响：前者只读源链生成子会话（快照语义本就允许），后者改的是会话
-  参数（压缩收口时会重新取一次当前工具集，自然收敛）；
+  与当前窗口的 uuid 序列）——不一致就整次放弃（`CompactionAborted` → 409，可原样重试），
+  绝不落半份摘要。这是兜住"未来又长出一个改链入口"的网，不是 rewind 专用；
+- **热切工具**（`POST /api/session/update` 的 `tools`）是个已知的活口子：链非空时它走
+  `ContextManager.on_tools_changed` 向链上**注入 System Reminder**，与压缩并发时上面那条
+  自校验会命中——压缩作废（409，摘要作废但链未损），重试即可。不在压缩期间禁用热切，
+  是因为它的语义本来就是"下一轮生效"，让压缩退让比让工具集等待更便宜；
+- `fork` 不受影响：它只读源链生成子会话（快照语义本就允许）；
 - 逐出 / 归档 / release 由 `SessionManager._blocked_reason` 的 `compacting` 一条钉住；唤醒
   判据（`session_will_run_again`）**不看** `compacting`——压缩不产生轮次，它只是把之后的
   输入推迟到收口后处理。

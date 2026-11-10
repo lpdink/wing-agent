@@ -2184,6 +2184,25 @@ fn test_a_switched_sync_session_ends_the_compaction_block() {
 }
 
 #[test]
+fn test_finish_compaction_leaves_other_persistent_toasts_alone() {
+    // 断线提示也是持久的：压缩收口顺手抹掉它，断着线的用户就再也看不到提示了。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    app.show_toast(Toast::persistent(
+        "⚡ Connection lost — reconnecting…",
+        crate::ui::toast::ToastKind::Warning,
+    ));
+
+    app.finish_compaction();
+    assert!(!app.compacting);
+    assert_eq!(
+        app.toast.as_ref().map(|toast| toast.message.as_str()),
+        Some("⚡ Connection lost — reconnecting…")
+    );
+}
+
+#[test]
 fn test_finish_compaction_keeps_a_plain_toast() {
     // 只清"压缩中"那条持久提示；普通的 3s 提示是别的事情，不该被顺手抹掉。
     let mut app = test_app();

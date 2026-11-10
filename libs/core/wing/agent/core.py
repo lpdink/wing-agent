@@ -566,11 +566,11 @@ class WingAgent:
         另有 ERROR + notice。
         """
         started = time.monotonic()
-        # 手动压缩是会话级独占操作（持有 inbox 取出口闸门）：先收掉在飞的压缩，再按
-        # 常规路径清积压 / 收口 worker。取消不写链，链仍自洽。
-        await self._cancel_compaction()
         self._inbox.cancel_all_waiters()
         dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
+        # 手动压缩是会话级独占操作（持有 inbox 取出口闸门）：积压已在入口清掉（不把
+        # 锁/取消等待期间新到的消息一起吞掉），这里再收掉在飞的压缩。取消不写链。
+        await self._cancel_compaction()
 
         rebuilt = False
         async with self._interrupt_lock:

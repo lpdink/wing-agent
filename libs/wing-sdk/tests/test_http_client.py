@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from wing_sdk.http_client import GatewayClient
+from wing_sdk.http_client import COMPACT_TIMEOUT, GatewayClient
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,11 +37,21 @@ class _RecordingClient:
         self.calls: list[dict[str, Any]] = []
 
     async def post(
-        self, path: str, json: dict | None = None, headers: dict | None = None
+        self,
+        path: str,
+        json: dict | None = None,
+        headers: dict | None = None,
+        timeout: float | None = None,
     ) -> _FakeResponse:
-        self.calls.append(
-            {"method": "POST", "path": path, "json": json, "headers": headers or {}}
-        )
+        entry: dict[str, Any] = {
+            "method": "POST",
+            "path": path,
+            "json": json,
+            "headers": headers or {},
+        }
+        if timeout is not None:
+            entry["timeout"] = timeout
+        self.calls.append(entry)
         return _FakeResponse({"ok": True})
 
     async def get(self, path: str, params: dict | None = None) -> _FakeResponse:
@@ -179,6 +189,12 @@ async def test_interrupt_and_compact(client: GatewayClient):
             "/api/session/compact",
             {"session_id": "S-1", "instruction": "keep decisions"},
         ),
+    ]
+    # 压缩单独给足预算（client 级 60s 会让长压缩"本地先超时、后端照样改写链"）。
+    assert [c.get("timeout") for c in _calls(client)] == [
+        None,
+        COMPACT_TIMEOUT,
+        COMPACT_TIMEOUT,
     ]
 
 

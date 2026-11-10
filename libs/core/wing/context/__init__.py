@@ -16,6 +16,7 @@
 
 from .cache_ledger import CacheLedger, build_report, empty_report
 from .compaction import (
+    CompactionAborted,
     Compactor,
     LLMMessagesResult,
     PendingCompact,
@@ -27,6 +28,7 @@ from .manager import ContextManager
 __all__ = [
     "CacheLedger",
     "ContextManager",
+    "CompactionAborted",
     "Compactor",
     "LLMMessagesResult",
     "PendingCompact",

@@ -31,6 +31,7 @@ from wing.schema.cache import (
 
 from .cache_ledger import CacheLedger
 from .compaction import (
+    CompactionAborted,
     Compactor,
     LLMMessagesResult,
     PendingCompact,
@@ -713,7 +714,7 @@ class ContextManager:
         # 快照 ⇄ 现在的窗口必须一致：压缩期间任何改链动作（rewind / 未来的新入口）
         # 都会被下面这个 `set_tip` 静默覆盖。不一致就整次放弃——绝不落半份摘要。
         if [m.uuid for m in self.get_context_window()] != [m.uuid for m in msgs]:
-            raise RuntimeError("session chain changed during compaction; retry")
+            raise CompactionAborted("session chain changed during compaction; retry")
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None
         compact_node = Message(

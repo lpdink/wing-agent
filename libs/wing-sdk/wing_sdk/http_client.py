@@ -6,6 +6,11 @@ from typing import Any
 
 import httpx
 
+#: 手动压缩的请求预算：服务端给 1200s（`gateway/routes/session.py`），客户端留余量。
+#: 与 `wing-api-client` 同口径——client 级 60s 会让长压缩"本地先失败、后端照样把链
+#: 换成摘要"。
+COMPACT_TIMEOUT = 1300.0
+
 
 class GatewayClient:
     """异步 HTTP 客户端，覆盖 Gateway 会话与系统端点。
@@ -116,7 +121,7 @@ class GatewayClient:
         body: dict = {"session_id": session_id}
         if instruction:
             body["instruction"] = instruction
-        return await self._post("/api/session/compact", body)
+        return await self._post("/api/session/compact", body, timeout=COMPACT_TIMEOUT)
 
     async def rewind_session(self, session_id: str, target_uuid: str) -> dict:
         return await self._post(
@@ -188,9 +193,16 @@ class GatewayClient:
     # ── 内部 ─────────────────────────────────────────────────
 
     async def _post(
-        self, path: str, body: dict, headers: dict[str, str] | None = None
+        self,
+        path: str,
+        body: dict,
+        headers: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict:
-        resp = await self._client.post(path, json=body, headers=headers)
+        resp = await self._client.post(
+            path, json=body, headers=headers, timeout=timeout
+        )
         resp.raise_for_status()
         return resp.json()
 

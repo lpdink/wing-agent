@@ -275,7 +275,7 @@ impl App {
             self.restore_draft(Submission::new(payload.text, images));
             // 持久提示：压缩可能还有几十秒，这条同时是"为什么发不出去"的解释。
             self.show_toast(Toast::persistent(
-                "Compacting context — message kept in the draft",
+                format!("{COMPACT_TOAST_PREFIX} — message kept in the draft"),
                 ToastKind::Warning,
             ));
             return true;
@@ -333,13 +333,19 @@ impl App {
         true
     }
 
-    /// 手动压缩收口：解除"压缩在飞"并抹掉持久提示（幂等）。
+    /// 手动压缩收口：解除"压缩在飞"并抹掉**自己那条**持久提示（幂等）。
     ///
     /// 会话身份变化（恢复成新会话 / 断线重连 / 新建）也走这里——此时在飞的回执
     /// 已不可信，本地标记必须视为过期，否则发送被永久拦在草稿里。
+    ///
+    /// 只清 `COMPACT_TOAST_PREFIX` 开头的那条：持久 toast 不止压缩一条，断线时挂的
+    /// 「Connection lost — reconnecting…」同样是持久的，顺手抹掉会让断着线的用户
+    /// 看不到任何提示（它只在断线那一刻挂一次，不会自己回来）。
     pub(super) fn finish_compaction(&mut self) {
         self.compacting = false;
-        if self.toast.as_ref().is_some_and(|toast| toast.persistent) {
+        if self.toast.as_ref().is_some_and(|toast| {
+            toast.persistent && toast.message.starts_with(COMPACT_TOAST_PREFIX)
+        }) {
             self.clear_toast();
         }
     }
@@ -928,6 +934,10 @@ fn set_yolo(app: &mut App, text: &str) -> bool {
     }
 }
 
+/// 压缩进度提示的共用前缀（"进行中"与"消息留在草稿里"两条都从它开头）——
+/// `finish_compaction` 按它认领自己那条持久 toast。
+const COMPACT_TOAST_PREFIX: &str = "Compacting context";
+
 /// `/compact [instruction]` — compact the context, with an optional focus.
 ///
 /// 手动压缩是会话级**独占**操作（后端在非 idle 时 409 拒绝），所以这里先做三层
@@ -965,7 +975,10 @@ fn compact_session(app: &mut App, text: &str) -> bool {
     app.compacting = true;
     // 持久 toast：压缩可能跑几十秒，这段时间用户需要一直看得见"发生了什么"
     // （同时他发的消息会被拦下——见 `submit_message`）。
-    app.show_toast(Toast::persistent("Compacting context…", ToastKind::Info));
+    app.show_toast(Toast::persistent(
+        format!("{COMPACT_TOAST_PREFIX}…"),
+        ToastKind::Info,
+    ));
     app.push_intent(AppIntent::CompactSession { instruction });
     true
 }

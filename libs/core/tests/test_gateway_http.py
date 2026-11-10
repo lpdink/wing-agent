@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from _support import gateway_auth_config
 from wing.agent import SessionBusyError
+from wing.context import CompactionAborted
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
@@ -1722,6 +1723,17 @@ class TestSessionCompact:
         )
         resp = client.post("/api/session/compact", json={"session_id": "test-id"})
         assert resp.status_code == 400
+
+    def test_compact_aborted_by_a_chain_change_returns_409(
+        self, client: TestClient, mock_runtime
+    ):
+        """压缩期间链被改动（热切工具注入 reminder / rewind）→ 409：作废但可重试。"""
+        mock_runtime.compact_session = AsyncMock(
+            side_effect=CompactionAborted("session chain changed during compaction")
+        )
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 409
+        assert "chain changed" in resp.json()["detail"]
 
     def test_compact_busy_returns_409(self, client: TestClient, mock_runtime):
         """会话不空闲 / 已有压缩在飞 → 409（重试同一个请求不会变好）。

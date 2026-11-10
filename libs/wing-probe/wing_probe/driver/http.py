@@ -193,8 +193,15 @@ class DriverHttp(GatewayClient):
     # ── 出网口（GatewayClient 唯一的两处） ────────────────────
 
     async def _post(
-        self, path: str, body: dict, headers: dict[str, str] | None = None
+        self,
+        path: str,
+        body: dict,
+        headers: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict:
+        # timeout 由 SDK 的长耗时端点（压缩）给出；留档不需要它（驱动的是本地网关，
+        # 场景关心的是请求/响应形状，不是链路耗时）。
         call, payload = await self._call("POST", path, body=body, headers=headers)
         return self._as_object(call, payload)
 

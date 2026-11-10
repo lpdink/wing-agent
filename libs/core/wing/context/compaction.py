@@ -50,6 +50,14 @@ class PendingCompact:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
+class CompactionAborted(RuntimeError):
+    """手动压缩在写链前发现窗口已被改动（并发 rewind / 热切工具注入 reminder）。
+
+    这次摘要作废、链未被触碰，调用方可以**原样重试**。网关因此把它映射成 409
+    （"等它过去再试"这类可行动结论），而不是 400（参数 / 状态错误）。
+    """
+
+
 COMPACT_IMAGE_MARKER = "[image message]"
 """纯图消息（content 为空、媒体被剥离）在**压缩请求**里的替代文本。
 

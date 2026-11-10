@@ -16,7 +16,7 @@ import pytest
 
 from _support import default_compactor, make_cm
 from wing.chain import TrackedList
-from wing.context import Compactor, ContextManager, PendingCompact
+from wing.context import CompactionAborted, Compactor, ContextManager, PendingCompact
 from wing.schema import ChainNode, LLMResponse, LLMUsage, Message
 from wing.store.file import FileMessageLog
 
@@ -98,6 +98,40 @@ class TestManualCompact:
         assert synced == ["called"]
         # 指令透传给 Compactor（渲染进压缩 prompt）
         assert "keep decisions" in calls[0]["messages"][-1].content
+
+    async def test_chain_changed_underneath_aborts_without_writing(self, tmp_dir):
+        """压缩期间链被改动（rewind / 热切工具注入 reminder）→ 整次放弃，链零变更。
+
+        摘要节点是拿**压缩前**的快照写的：放它进去就会把期间的新内容从活跃链上截掉。
+        所以写链前自校验窗口，发现不一致就抛 `CompactionAborted`（网关 → 409，
+        可原样重试），绝不落半份摘要。
+        """
+        cm = _make_cm(tmp_dir)
+        _seed(cm)
+        before = [m.uuid for m in cm.get_context_window()]
+        provider, _ = _mock_provider()
+
+        # 压缩调用期间，模拟另一条路径改链（这里直接追加一条消息，等价于 rewind /
+        # reminder 注入的效果：窗口在 await 期间变长）。
+        original_generate = provider.generate
+
+        async def _mutating_generate(*args, **kwargs):
+            cm.add_message(Message(role="user", content="sneaked in"))
+            async for item in original_generate(*args, **kwargs):
+                yield item
+
+        provider.generate = _mutating_generate
+
+        with pytest.raises(CompactionAborted, match="chain changed"):
+            await cm.do_manual_compact(
+                model="m", model_provider=provider, current_tools=lambda: []
+            )
+
+        window = cm.get_context_window()
+        # 链上只有那条"偷渡"的消息：没有摘要节点，也没有被截断。
+        assert [m.uuid for m in window] == [*before, window[-1].uuid], window
+        assert window[-1].content == "sneaked in"
+        assert not any((m.content or "").startswith("[Compact]") for m in window)
 
     async def test_without_compactor_raises(self, tmp_dir):
         cm = _make_cm(tmp_dir, compactor=None)
