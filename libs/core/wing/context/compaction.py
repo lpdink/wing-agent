@@ -92,6 +92,77 @@ def resolve_context_tokens(
     return sum(m.estimate_tokens() for m in messages)
 
 
+def _is_request_boundary(messages: list[Message], idx: int) -> bool:
+    """``idx`` 是不是"切在它之前"合法、且上下文大小已知的位置。
+
+    - ``user`` 消息：新 turn 的起点；
+    - ``assistant`` 消息：请求的应答位置或续跑位置——保留区以 assistant 开头合法
+      （两条协议都接受相邻 assistant / 由序列化层合并），以 ``tool`` 开头则会让
+      tool_result 变成孤儿，所以 ``tool`` / ``system`` 永远不是候选。
+    """
+    return messages[idx].role in ("user", "assistant")
+
+
+def select_cut(
+    messages: list[Message],
+    *,
+    trust_start: int,
+    total_tokens: int,
+    keep_recent_tokens: int,
+) -> int:
+    """按**服务端 usage** 选压缩切点：返回保留区起点下标（0 = 无可压）。
+
+    每个带 usage 的 assistant 消息的 ``prompt_tokens`` 就是"该请求开始时上下文有
+    多大"，所以切点只能落在**上下文大小已知、且不破坏配对**的位置上：``user`` 消息
+    与 ``assistant`` 消息（保留区以 assistant 开头合法，绝不以 ``tool`` 开头——那会
+    让 tool_result 变成孤儿）。工具调用对因此构造性闭合：切点左侧的下一个请求发出
+    时，上一组 tool_result 必然已齐。
+
+    ``p(c)`` = c 及其之后第一条有 usage 的 assistant 的 ``prompt_tokens``（c 位于最后
+    一条 assistant 之后时就是 ``total`` 本身——末尾那条还没被回答的 user 消息）。
+    取**最早**的满足 ``p(c) >= total - keep_recent`` 的候选：``total - p(c)`` 即 c
+    之后那段上下文的大小（system 与 tools 在差值里抵消），保留区因此"尽量大、
+    但不超过 keep_recent"。``user`` 边界与它后面那条 assistant 的 ``p`` 相同，因此
+    "整轮保留"总是优先于"保留答案、把问题压进摘要"——后者只在轮首 message 无法作为
+    切点（窗口第一条消息）时才会发生。
+
+    本地估算在这条路径上一个数字都不参与——"总是估得太低、切得太深"正是旧实现拿
+    "只含 message 的估算"去对"含 system + tools 的窗口阈值"的结果。
+
+    Args:
+        messages: 上下文窗口（``ContextManager.get_context_window()``）。
+        trust_start: 窗口里服务端 usage 可信的起点（``ContextManager`` 的信任边界；
+            压缩换入 / rewind 之前的 usage 度量的是已经不存在的窗口）。
+        total_tokens: 当前上下文大小（信任区间里最后一条 usage）。
+        keep_recent_tokens: 目标保留区大小（模型声明）。
+    """
+    if not messages or total_tokens <= 0:
+        return 0
+    target = total_tokens - keep_recent_tokens
+    # 反向扫描：cursor 恒为"c 处上下文有多大"——c 之及之后第一条有 usage 的
+    # assistant 的 prompt_tokens；c 在最后一条 assistant 之后（末尾那条还没被回答的
+    # user 消息）时就是 total 本身。它沿链向左单调不减，因此第一个 p(c) < target
+    # 的候选就说明再往前都不合格。
+    cursor = total_tokens
+    choice = 0
+    for idx in range(len(messages) - 1, -1, -1):
+        if idx < trust_start:
+            break
+        msg = messages[idx]
+        if (
+            msg.role == "assistant"
+            and msg.usage is not None
+            and msg.usage.prompt_tokens > 0
+        ):
+            cursor = msg.usage.prompt_tokens
+        if idx == 0 or not _is_request_boundary(messages, idx):
+            continue
+        if cursor < target:
+            break
+        choice = idx
+    return choice
+
+
 class Compactor:
     """上下文压缩引擎。
 
@@ -99,6 +170,9 @@ class Compactor:
       - compact_window_tokens = context_window_tokens - keep_recent_tokens
       - Early trigger: tokens >= compact_window_tokens → 后台异步压缩
       - Apply:         tokens >= context_window_tokens → 换入预计算结果
+
+    切点见模块级 `select_cut`（服务端 usage 锚定）与 `_calc_cut_idx`（无服务端
+    数字时的估算兜底）。
     """
 
     # 本 PROMPT 取自 https://github.com/browser-use/agent-sdk（五段式续作摘要模板）。
@@ -207,10 +281,13 @@ class Compactor:
         raise RuntimeError("can't extract summary")
 
     def _calc_cut_idx(self, messages: list[Message]) -> int:
-        """计算要压缩的消息切割点。
+        """**兜底**切点：没有任何可信的服务端 usage 时才走这里。
 
-        从头部开始累积 token，超过 compact_window_tokens 时停止。
-        然后通过 _find_safe_cut_idx 确保工具调用对完整。
+        从头部开始累积本地估算的 token，超过 compact_window_tokens 时停止，然后通过
+        `_find_safe_cut_idx` 补齐工具调用对。口径与 `need_early_trigger` 的估算兜底
+        一致（两边都拿不到服务端数字时才同时生效），因此不会出现"触发用服务端、
+        切点用估算"的混单位。已知偏差：message 估算不含 system + tools 声明
+        （窗口阈值含），切点会偏深——这正是主路径改用 `select_cut` 的原因。
         """
         if not messages:
             return 0

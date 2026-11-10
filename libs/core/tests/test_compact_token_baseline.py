@@ -129,7 +129,9 @@ async def _drive_to_applied(cm: ContextManager) -> None:
     window = await _assemble(cm)  # 3 → 换入摘要
     contents = [m.content for m in window]
     assert contents[1] == COMPACT_SUMMARY, contents
-    assert contents[2:] == ["beta", "beta reply"], contents
+    # 保留区 = 切点之后的尾部：第一次压缩的切点落在 "alpha" 之后（"reply one" 是
+    # 窗口里唯一可锚的位置——把问题压进摘要、把答案留在链上）。
+    assert contents[2:] == ["reply one", "beta", "beta reply"], contents
     assert cm._pending_compact_result is None
 
 
@@ -274,7 +276,15 @@ async def test_second_compaction_rebases_boundary(tmp_dir):
     cm.add_message(Message(role="user", content="epsilon"))
     cm.add_message(_turn_reply("epsilon reply"))
     contents = [m.content for m in await _assemble(cm)]
-    assert contents[1:] == [COMPACT_SUMMARY, "epsilon", "epsilon reply"], contents
+    # 第二次的切点落在上次换入的边界处（信任起点）：上一次的摘要 + 保留区被重新
+    # 摘要，边界之后新落的 turn 留在链上。
+    assert contents[1:] == [
+        COMPACT_SUMMARY,
+        "gamma",
+        "gamma reply",
+        "epsilon",
+        "epsilon reply",
+    ], contents
 
     # 新的压缩节点是根；边界 = 换入时刻的链尖（重链接 tail 的最后一条）。
     window = cm.get_context_window()
@@ -341,11 +351,16 @@ async def test_relinked_declaration_is_remapped(tmp_dir):
     保留区里有 rewind 回退行（边界"信任从我之后恢复"）时，整条复制会带走那条边界；
     照抄旧 uuid 就指向离链的节点 → 读侧一条都不采信 → 换入之后落链的真实 usage 全部
     失效（与"换入后失效一次"的预期完全不同），重新加载也一样。
+
+    走的是**没有可用服务端 usage** 的兜底切点：usage 锚定的切点从不切在信任边界
+    之前，保留区里因此不会出现边界行；能让边界行落进保留区的只有两条路——估算兜底
+    （本用例），以及"pending 算好之后链又被 rewind 改过"（`_verify_snapshot_valid`
+    之外的时间窗）。
     """
     cm = _make_cm(tmp_dir)
     cm.add_message(Message(role="user", content="alpha"))
     # 早期消息够长：这一轮压缩的切点（估算 ≥ compact_window）落在它之后。
-    cm.add_message(Message(role="assistant", content="x" * 3000))
+    cm.add_message(Message(role="assistant", content="x" * 4000))
     cm.add_message(Message(role="user", content="beta"))
     cm.add_message(_turn_reply("beta reply", prompt_tokens=0))
 
@@ -356,8 +371,8 @@ async def test_relinked_declaration_is_remapped(tmp_dir):
     rewind_row = cm.get_context_window()[-1]
     assert rewind_row.usage_boundary_uuid == rewind_row.uuid, rewind_row
 
-    # 回退之后的真实 usage + 一条用户消息 → 触发压缩并换入。
-    cm.add_message(_turn_reply("fresh reply", prompt_tokens=PRE_COMPACT_TOKENS))
+    # 回退之后没有真实 usage（上游不回带）→ 触发压缩走估算兜底并换入。
+    cm.add_message(_turn_reply("fresh reply", prompt_tokens=0))
     cm.add_message(Message(role="user", content="delta"))
     await _assemble(cm)
     assert cm._pending_compact_task is not None, [

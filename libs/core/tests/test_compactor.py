@@ -7,8 +7,8 @@ from typing import AsyncIterator
 import pytest
 
 from _support import default_compactor, make_cm
-from wing.context import Compactor
-from wing.schema import LLMResponse, Message, ToolCall
+from wing.context import Compactor, select_cut
+from wing.schema import LLMResponse, LLMUsage, Message, ToolCall
 
 
 # ---------------------------------------------------------------------------
@@ -542,3 +542,138 @@ class TestCompactIntegration:
         window = cm.get_context_window()
         assert len(window) >= 2
         assert "new question" in (window[-1].content or "")
+
+
+# ===================================================================
+# 4. select_cut —— 服务端 usage 锚定的切点
+# ===================================================================
+#
+# 判据：切点 = 窗口里最早一个「p(c) >= total - keep_recent」的位置，p(c) 取 c 及
+# 其后第一条有 usage 的 assistant 的 prompt_tokens。本地估算（以及它漏掉
+# system + tools 导致的低估）在这条路径上不参与任何判断。
+
+
+def _reply(text: str, prompt_tokens: int) -> Message:
+    return Message(
+        role="assistant", content=text, usage=LLMUsage(prompt_tokens=prompt_tokens)
+    )
+
+
+def _user(text: str) -> Message:
+    return Message(role="user", content=text)
+
+
+class TestSelectCut:
+    def test_turn_boundary_by_server_usage(self):
+        """保留区按服务端 usage 定：取最早一个「之后 ≈ keep_recent」的轮首。"""
+        c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
+        msgs = [
+            _user("u1"),
+            _reply("a1", 10_000),
+            _user("u2"),
+            _reply("a2", 30_000),
+            _user("u3"),
+            _reply("a3", 90_000),
+            _user("u4"),
+        ]
+        # total = 90_000，target = 70_000：u3 之后（p = 90_000）是第一个够格的轮首。
+        assert (
+            select_cut(
+                msgs, trust_start=0, total_tokens=90_000, keep_recent_tokens=20_000
+            )
+            == 4
+        )
+        assert c.keep_recent_tokens == 20_000  # 阈值不参与切点计算，只提供 keep_recent
+
+    def test_long_content_does_not_move_the_cut(self):
+        """内容再长也不动切点：口径只看服务端数字（旧估算会一路切到链尾）。"""
+        msgs = [
+            _user("u1"),
+            _reply("x" * 40_000, 5_000),
+            _user("u2"),
+            _reply("y" * 40_000, 6_000),
+        ]
+        assert (
+            select_cut(
+                msgs, trust_start=0, total_tokens=6_000, keep_recent_tokens=5_000
+            )
+            == 1
+        )
+
+    def test_answers_win_over_questions_only_at_window_head(self):
+        """窗口第一条消息不能当切点：单轮窗口只能「压掉问题、留下答案」。"""
+        msgs = [_user("u1"), _reply("a1", 1_100)]
+        assert (
+            select_cut(msgs, trust_start=0, total_tokens=1_100, keep_recent_tokens=400)
+            == 1
+        )
+
+    def test_trailing_question_is_a_cut_point(self):
+        """末尾还没被回答的 user 消息：压缩它之前的一切，把问题留给本轮。"""
+        msgs = [
+            Message(role="assistant", content="[Compact] s"),
+            _user("next question"),
+        ]
+        assert (
+            select_cut(
+                msgs, trust_start=0, total_tokens=9_000, keep_recent_tokens=1_000
+            )
+            == 1
+        )
+
+    def test_trust_start_bounds_the_cut(self):
+        """信任边界之前不切（那里的 usage 度量的是已经不存在的窗口）。"""
+        msgs = [
+            _reply("[Compact] s", 0),
+            _user("u1"),
+            _reply("a1", 1_100),  # 压缩前窗口的 usage（不可信）
+            _user("u2"),
+            _reply("a2", 1_200),  # 边界之后的真实 usage
+        ]
+        # 边界之后只有 u2：切点在它（保留区 = [u2, a2]），不得切到 u1。
+        assert (
+            select_cut(
+                msgs, trust_start=3, total_tokens=1_200, keep_recent_tokens=1_000
+            )
+            == 3
+        )
+
+    def test_tool_group_is_never_split(self):
+        """切点绝不落在 tool 结果之前（tool_result 会变成孤儿）。"""
+        msgs = [
+            _user("u1"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[ToolCall(id="tc1", name="Bash", arguments={})],
+            ),
+            Message(role="tool", content="out", tool_call_id="tc1"),
+            _reply("a2", 90_000),
+            _user("u2"),
+            _reply("a3", 95_000),
+        ]
+        cut = select_cut(
+            msgs, trust_start=0, total_tokens=95_000, keep_recent_tokens=10_000
+        )
+        assert msgs[cut].role != "tool", cut
+        assert cut <= 3
+
+    def test_missing_usage_falls_through_to_zero(self):
+        """没有任何服务端口径（total = 0 / 空窗口）→ 0，调用方走估算兜底。"""
+        msgs = [_user("u1"), _reply("a1", 0)]
+        assert (
+            select_cut(msgs, trust_start=0, total_tokens=0, keep_recent_tokens=400) == 0
+        )
+        assert (
+            select_cut([], trust_start=0, total_tokens=1_000, keep_recent_tokens=400)
+            == 0
+        )
+
+    def test_single_message_window_cannot_be_cut(self):
+        """只有一条消息：没有可压缩区间（切点 0）。"""
+        assert (
+            select_cut(
+                [_user("u1")], trust_start=0, total_tokens=5_000, keep_recent_tokens=400
+            )
+            == 0
+        )
