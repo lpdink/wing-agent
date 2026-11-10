@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from _support import gateway_auth_config
+from wing.agent import SessionBusyError
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
@@ -1721,6 +1722,19 @@ class TestSessionCompact:
         )
         resp = client.post("/api/session/compact", json={"session_id": "test-id"})
         assert resp.status_code == 400
+
+    def test_compact_busy_returns_409(self, client: TestClient, mock_runtime):
+        """会话不空闲 / 已有压缩在飞 → 409（重试同一个请求不会变好）。
+
+        `SessionBusyError` 是 `RuntimeError` 的子类：分支顺序错了就会落到下面的
+        400，所有前端拿到的都是"操作失败"而不是"先中断再压缩"。
+        """
+        mock_runtime.compact_session = AsyncMock(
+            side_effect=SessionBusyError("session is not idle")
+        )
+        resp = client.post("/api/session/compact", json={"session_id": "test-id"})
+        assert resp.status_code == 409
+        assert "not idle" in resp.json()["detail"]
 
     def test_compact_forwards_instruction(self, client: TestClient, mock_runtime):
         """instruction 随请求体透传给 runtime.compact_session。"""

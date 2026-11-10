@@ -16,6 +16,13 @@
 事实口径（2026-09-16 实施期确认，见 spec 场景内引用）：**手动** compact 把操作前
 整个上下文窗口压成单条摘要节点（无保留区）；**后台**自动压缩才是"摘要节点 +
 重链接保留区"。本文件断言手动路径。
+
+另有一组**独占语义**场景（同一份文件，判据见 docs/dev/compaction.md §3）：
+``test_manual_compact_refused_while_working``（turn 在飞 → 409）·
+``test_manual_compact_discards_pending_auto_compact``（丢掉待生效的自动压缩）·
+``test_message_during_manual_compact_waits``（压缩期间投递的消息排在收口之后）·
+``test_rewind_refused_during_manual_compact``（压缩期间的改链入口被拒）·
+``test_interrupt_cancels_manual_compact``（interrupt 取消在飞压缩）。
 """
 
 from __future__ import annotations
@@ -318,6 +325,7 @@ async def test_compact_failure_leaves_no_trace(probe: Probe) -> None:
 # 压缩结束才开始处理；interrupt 取消在飞压缩且链零变更。
 
 BUSY_MODEL = "probe/compact-busy"
+REWIND_MODEL = "probe/compact-rewind-gate"
 DROPS_PENDING_MODEL = "probe/compact-drops-pending"
 QUEUES_INPUT_MODEL = "probe/compact-queues-input"
 CANCELLED_MODEL = "probe/compact-cancelled"
@@ -474,6 +482,46 @@ async def test_message_during_manual_compact_waits(probe: Probe) -> None:
     assert context.messages[-1].content == "queued during compaction", (
         context.describe()
     )
+
+
+@pytest.mark.probe_env(models=[REWIND_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_rewind_refused_during_manual_compact(probe: Probe) -> None:
+    """压缩在飞时 rewind 被拒（409，链零变更）。
+
+    WHEN 手动压缩在飞时 ``POST /api/session/rewind``
+    THEN 409；压缩照常收口成摘要，且 rewind 从未发生过（压缩的 ``set_tip`` 拿的是
+    快照，放它进来就等于让它被静默覆盖）。此后 rewind 恢复正常。
+    """
+    probe.register(
+        REWIND_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text=f"<summary>{MANUAL_SUMMARY}</summary>", first_delay=2.0),
+        Turn.of(text="reply two"),
+    )
+    session = await probe.session(model=REWIND_MODEL)
+    await session.chat("alpha")
+    alpha_uuid = session.history.messages()[0]["uuid"]
+
+    compacting = asyncio.create_task(session.compact())
+    await _poll(lambda: bool(_compact_calls(probe, REWIND_MODEL)))
+
+    with pytest.raises(DriverHttpError) as refused:
+        await session.rewind(alpha_uuid)
+    assert refused.value.status == 409, refused.value
+
+    await compacting
+    await session.watch.expect("compact_done", within=15)
+    after = probe.history(session)
+    assert [message["content"] for message in after.messages()] == [
+        f"[Compact] {MANUAL_SUMMARY}"
+    ], after.describe()
+
+    # 压缩收口之后 rewind 照常可用（闸门只覆盖它真正在飞的那段时间）。
+    compact_node_uuid = after.messages()[0]["uuid"]
+    draft = await session.rewind(compact_node_uuid)
+    assert draft == {"ok": True, "draft": f"[Compact] {MANUAL_SUMMARY}"}, draft
 
 
 @pytest.mark.probe_env(models=[CANCELLED_MODEL])

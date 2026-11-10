@@ -34,6 +34,7 @@ use crate::ui::input_area::SubmitPayload;
 use crate::ui::popup::command::PopupAction;
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
+use crate::ui::toast::ToastKind;
 
 /// Classified result of parsing a boolean-style argument.
 #[derive(Debug)]
@@ -262,19 +263,20 @@ impl App {
             }
             return true;
         }
+        let images: Vec<_> = payload
+            .images
+            .into_iter()
+            .map(ImagePayload::into_image)
+            .collect();
         // 手动压缩在飞：这一条不发出去——后端也会把它留在 inbox 里直到压缩收口，
         // 但用户此刻最需要的是"知道为什么没发出去"，而不是一条悬着的 pending 气泡。
         // 草稿已经被 composer 清空，这里把整份提交产物（正文 + 图片 chip）原样还回去。
         if self.compacting {
-            let images: Vec<_> = payload
-                .images
-                .into_iter()
-                .map(ImagePayload::into_image)
-                .collect();
             self.restore_draft(Submission::new(payload.text, images));
-            self.show_toast(Toast::warning(
+            // 持久提示：压缩可能还有几十秒，这条同时是"为什么发不出去"的解释。
+            self.show_toast(Toast::persistent(
                 "Compacting context — message kept in the draft",
-                std::time::Duration::from_secs(3),
+                ToastKind::Warning,
             ));
             return true;
         }
@@ -284,11 +286,6 @@ impl App {
         // carries the submission itself, so a failure can hand it back to the
         // composer (see `restore_failed_send`).
         let request_id = crate::protocol::generate_request_id();
-        let images: Vec<_> = payload
-            .images
-            .into_iter()
-            .map(ImagePayload::into_image)
-            .collect();
         // 提交产物随 pending 条目一起留下（正文 + 图片 + 预测引用）：气泡用它拼内容
         // （图块 / 标签），失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），
         // 换来「被拒 / 失败之后内容还在用户手里」。
@@ -334,6 +331,17 @@ impl App {
             std::time::Duration::from_secs(3),
         ));
         true
+    }
+
+    /// 手动压缩收口：解除"压缩在飞"并抹掉持久提示（幂等）。
+    ///
+    /// 会话身份变化（恢复成新会话 / 断线重连 / 新建）也走这里——此时在飞的回执
+    /// 已不可信，本地标记必须视为过期，否则发送被永久拦在草稿里。
+    pub(super) fn finish_compaction(&mut self) {
+        self.compacting = false;
+        if self.toast.as_ref().is_some_and(|toast| toast.persistent) {
+            self.clear_toast();
+        }
     }
 
     /// 把一份提交产物放回草稿：文本 + 图片 chip。
@@ -488,6 +496,31 @@ impl App {
             match result {
                 Ok(bytes) => self.images.supply_media(&media_id, bytes),
                 Err(_) => self.images.media_failed(&media_id),
+            }
+            return;
+        }
+
+        // 压缩回执也在守卫**之前**：它清的是"压缩在飞"这个本地标记，不给它一条
+        // 生路，用户之后每条消息都只能留在草稿里（`/compact` 也会一直被拒）。
+        // toast 只在同一个会话里说——否则那句话描述的是别的会话的上下文。
+        if let FetchPayload::CompactFailed { message } = payload {
+            self.finish_compaction();
+            if session_id == self.session_id {
+                self.show_toast(Toast::error(message, std::time::Duration::from_secs(3)));
+            }
+            return;
+        }
+        if let FetchPayload::CompactDone {
+            original,
+            compressed,
+        } = payload
+        {
+            self.finish_compaction();
+            if session_id == self.session_id {
+                self.show_toast(Toast::info(
+                    format!("Compact done: {original} → {compressed} tokens"),
+                    std::time::Duration::from_secs(3),
+                ));
             }
             return;
         }
@@ -679,21 +712,6 @@ impl App {
             FetchPayload::SkillsInfo(text) => {
                 self.chat.push(ChatCell::SystemMessage(text));
             }
-            FetchPayload::CompactDone {
-                original,
-                compressed,
-            } => {
-                self.compacting = false;
-                self.show_toast(Toast::info(
-                    format!("Compact done: {original} → {compressed} tokens"),
-                    std::time::Duration::from_secs(3),
-                ));
-            }
-            FetchPayload::CompactRefused { message } => {
-                // 压缩失败 / 被拒的收口：解除"压缩在飞"（否则发送被永久拦下）。
-                self.compacting = false;
-                self.show_toast(Toast::error(message, std::time::Duration::from_secs(3)));
-            }
             FetchPayload::Toast { message, is_error } => {
                 if is_error {
                     self.show_toast(Toast::error(message, std::time::Duration::from_secs(3)));
@@ -714,10 +732,12 @@ impl App {
                 });
             }
             // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的
-            // 发送失败 / 内容寻址的媒体字节）。
+            // 发送失败 / 内容寻址的媒体字节 / 压缩收口）。
             FetchPayload::ClipboardImage { .. }
             | FetchPayload::ClipboardPaste(_)
             | FetchPayload::SendFailed { .. }
+            | FetchPayload::CompactDone { .. }
+            | FetchPayload::CompactFailed { .. }
             | FetchPayload::MediaBytes { .. } => {}
         }
     }
@@ -945,10 +965,7 @@ fn compact_session(app: &mut App, text: &str) -> bool {
     app.compacting = true;
     // 持久 toast：压缩可能跑几十秒，这段时间用户需要一直看得见"发生了什么"
     // （同时他发的消息会被拦下——见 `submit_message`）。
-    app.show_toast(Toast::persistent(
-        "Compacting context…",
-        crate::ui::toast::ToastKind::Info,
-    ));
+    app.show_toast(Toast::persistent("Compacting context…", ToastKind::Info));
     app.push_intent(AppIntent::CompactSession { instruction });
     true
 }

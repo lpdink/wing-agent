@@ -655,8 +655,37 @@ class TestSelectCut:
         cut = select_cut(
             msgs, trust_start=0, total_tokens=95_000, keep_recent_tokens=10_000
         )
-        assert msgs[cut].role != "tool", cut
-        assert cut <= 3
+        # 下标 1（带 tool_calls 的 assistant）与下标 2（tool 结果）的 p(c) 相同，
+        # 最左的合格候选必然是 1——tool 下标永远轮不到。
+        assert cut == 1, cut
+        assert msgs[cut].role == "assistant" and msgs[cut + 1].role == "tool"
+
+    def test_non_monotonic_usage_does_not_stop_the_scan(self):
+        """usage 不单调（换模型 / 上游截断）时不依赖单调性提前退出。
+
+        递减序列下"最左的合格候选"仍是 1；关键是扫描走完整窗、不因为某处
+        ``p(c) < target`` 就认定更左的都不可用。
+        """
+        msgs = [
+            _user("u1"),
+            _reply("a1", 150_000),
+            _user("u2"),
+            _reply("a2", 20_000),
+            _user("u3"),
+            _reply("a3", 30_000),
+        ]
+        assert (
+            select_cut(
+                msgs, trust_start=0, total_tokens=30_000, keep_recent_tokens=10_000
+            )
+            == 1
+        )
+        # 恒定 usage：所有候选等价 → 最左（只压掉第一条），而不是被误判为"都不合格"。
+        flat = [_user("u1"), _reply("a1", 1_000), _user("u2"), _reply("a2", 1_000)]
+        assert (
+            select_cut(flat, trust_start=0, total_tokens=1_000, keep_recent_tokens=200)
+            == 1
+        )
 
     def test_missing_usage_falls_through_to_zero(self):
         """没有任何服务端口径（total = 0 / 空窗口）→ 0，调用方走估算兜底。"""

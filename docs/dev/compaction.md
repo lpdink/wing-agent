@@ -39,10 +39,17 @@
   工具调用对因此**构造性闭合**，不需要"先切再向后扩展补闭合"的修补。
 - **该位置的大小** `p(c)` = c 及其之后第一条有 usage 的 assistant 的 `prompt_tokens`
   （c 在最后一条 assistant 之后时就是 `total` 本身——末尾那条还没被回答的 user 消息）。
-- **选点**：取最早一个满足 `p(c) >= total - keep_recent` 的候选。`total - p(c)` 就是 c
-  之后那段上下文的大小（system 与 tools 在差值里抵消），保留区因此"尽量大、但不超过
-  `keep_recent`"。`user` 边界与它后面那条 assistant 的 `p` 相同，所以"整轮保留"永远优先
-  于"保留答案、把问题压进摘要"——后者只在轮首消息无法作为切点（窗口第一条）时发生。
+- **选点**：取**最左**（保留区最大）一个满足 `p(c) >= total - keep_recent` 的候选。
+  `total - p(c)` 就是 c 之后那段上下文的大小（同一次请求里的 system 与 tools 声明在差值里
+  抵消），保留区因此逼近 `keep_recent`。扫描走完整窗、不因某处 `p(c) < target` 提前退出
+  ——"usage 沿链单调"在换模型 / 上游截断时并不成立。`user` 边界与它后面那条 assistant 的
+  `p` 相同，所以"整轮保留"永远优先于"保留答案、把问题压进摘要"——后者只在轮首消息无法
+  作为切点（窗口第一条）时发生。
+
+  `keep_recent` 是**目标值而非硬上界**：差值不含切点那条 user 消息本身，也不含最后一条
+  assistant 的 completion（`prompt_tokens` 只度量请求侧）。已知边界：换模型后历史 usage
+  是旧 tokenizer 的口径、与新数字不可比，切点可能偏浅或偏深（`set_model` 只换阈值，不重置
+  信任边界）——表现是"压得比预期少 / 多"，不会损坏链。
 - **兜底**：整条信任区间都没有可信 usage（新会话 / provider 不回 usage / 边界悬空）时，
   退回本地估算的 `_calc_cut_idx` + `_find_safe_cut_idx`——与"触发也用估算"同口径，不混
   单位；这条路径仍带 system + tools 的低估偏差，是可以接受的降级（真实形态下它只在
@@ -78,6 +85,22 @@
 准入判据与"取出口闸门"之间没有 await：`status` / `has_pending` 检查与 `Inbox.hold()` 都是
 同步调用，单线程事件循环下原子。
 
+### 独占的另一半：改链入口
+
+压缩的执行形态是"取窗口快照 → await 一次可达分钟级的 LLM 摘要 → 用快照写链"，所以**任何在
+压缩期间改链的动作都会被收口时的 `set_tip` 覆盖**。除 inbox 闸门（挡"输入驱动的新 turn"）
+之外：
+
+- **`rewind` 被拒**（`SessionBusyError` → 409）：它改链，放它进来就等于让它被静默覆盖；
+- 压缩写链前还要**自校验窗口未变**（`do_manual_compact` 在 `append_detached` 之前比对快照
+  与当前窗口的 uuid 序列）——不一致就整次放弃，绝不落半份摘要。这是兜住"未来又长出一个
+  改链入口"的网，不是 rewind 专用；
+- `fork` / `update` 不受影响：前者只读源链生成子会话（快照语义本就允许），后者改的是会话
+  参数（压缩收口时会重新取一次当前工具集，自然收敛）；
+- 逐出 / 归档 / release 由 `SessionManager._blocked_reason` 的 `compacting` 一条钉住；唤醒
+  判据（`session_will_run_again`）**不看** `compacting`——压缩不产生轮次，它只是把之后的
+  输入推迟到收口后处理。
+
 ### 与 turn 的互斥：inbox 取出口闸门
 
 `Inbox.hold()` / `release()` 是压缩期间**不把输入交给 worker** 的闸门：
@@ -92,10 +115,15 @@
 ### 可中断
 
 压缩本体跑在独立 task 里（`WingAgent._run_compact`），`interrupt()` / `shutdown()` 取消它
-并有界等待。压缩只在**最后一个 await 之后**写链（`append_detached` / `set_tip` 之间没有挂
-起点），所以取消不会半提交：链零变更，aux 也没有残留。HTTP 侧靠
-`task.cancelled()` + `current_task().cancelling()` 区分"子任务被取消"与"调用方自己被取消"
-（后者是客户端断连，不该再写响应）。
+（与 worker 同款的取消阶梯：`cancel` → 有界等待 → 重投，吸收型取消被击穿）。压缩只在
+**最后一个 await 之后**写链（`append_detached` / `set_tip` 之间没有挂起点），所以取消不会
+半提交：链零变更，aux 也没有残留。
+
+"压缩在飞"（`compacting`）与取出口闸门只由 task 的**终局回调**（`_on_compact_finished`）
+释放——不挂在调用方的 `finally` 上：取消可能被吸收，阶梯耗尽后压缩仍会写链，那时闸门必须
+继续持有（新 turn 不得先跑起来）。子 task 被外部取消（interrupt / shutdown，调用方自身没
+被取消）时转成 `SessionBusyError` → 409 `compaction interrupted`；调用方自己被取消（客户端
+断连，`current_task().cancelling() > 0`）时连带收掉子 task 再退出。
 
 ### 前端（TUI）
 
@@ -103,9 +131,13 @@
   通过 → 置 `compacting`、弹出**持久** toast「Compacting context…」；
 - 压缩期间**禁止发送**：`submit_message` 把整份提交产物（正文 + 图片 chip）原样还回草稿
   并提示（后端另有一层：消息会留在 inbox 直到压缩收口）；
-- 回执收口：`CompactDone` → 解除拦截 + 「Compact done: A → B tokens」；失败 / 被拒
-  （`CompactRefused`，409 的文案直接给"先中断"这类可行动结论）→ 解除拦截 + 错误 toast；
-- 切会话 / 新建 / 恢复 / fork 时复位 `compacting`（在飞的是旧会话，回执会被会话守卫丢弃）。
+- 回执收口：`CompactDone` → 解除拦截 + 「Compact done: A → B tokens」；`CompactFailed`
+  （409 的文案直接给"先中断"这类可行动结论）→ 解除拦截 + 错误 toast。**两个回执都在会话
+  守卫之前分派**（与 composer 的其它在飞回执同款）：守卫一旦丢掉它，本地"压缩在飞"就再也
+  没人清、发送被永久拦在草稿里；
+- 会话身份变化（新建 / 恢复 / fork / 重连换成新会话 / sync 的 `switched` 分支）一律走
+  `App::finish_compaction()`：在飞的是旧会话，回执已认不到，标记视为过期；
+- 没有连接时 `/compact` 不静默丢 intent——直接投一条失败回执（否则同样会卡住）。
 
 `POST /api/session/compact` 的客户端超时必须单独放宽（`wing-api-client` 里 1300s）：client
 级 60s 会让长压缩"客户端先失败、后端照样把链换掉"。
@@ -113,12 +145,14 @@
 ## 4. 测试面
 
 - 单测：`libs/core/tests/test_compactor.py`（`select_cut` 的判据：轮首 / 续跑 / 信任边界 /
-  末尾提问 / 工具配对的构造性闭合 / 无 usage 兜底）、`test_inbox_hold.py`（闸门阻塞 / 保序 /
-  取消不丢输入 + agent 的准入与取消）、`test_compact_token_baseline.py`（口径边界）、
-  `test_manual_compact.py`（链形状 / pending 丢弃 / 失败不半提交）。
+  末尾提问 / 工具配对的构造性闭合 / 非单调 usage / 无 usage 兜底）、`test_agent_compaction.py`
+  （inbox 闸门阻塞 / 保序 / 取消不丢输入 + agent 的准入与取消）、
+  `test_compact_token_baseline.py`（口径边界）、`test_manual_compact.py`（链形状 / pending
+  丢弃 / 失败不半提交）、`test_gateway_http.py`（409 的路由映射）。
 - probe（整机红线，`libs/wing-probe/scenarios/`）：`test_auto_compact.py`（early → pending →
   apply、跨进程重启、口径不回落）、`test_compact.py`（手动压缩的链形状、指令渲染、失败零
   变更、**忙碌 409**、**手动丢弃 pending**、**压缩期间投递的消息排在压缩之后**、**interrupt
-  取消压缩**）、`test_fork.py` / `test_rewind.py`（在保留区 / 回退点上的口径）。
+  取消压缩**、**压缩期间 rewind 被拒**）、`test_fork.py` / `test_rewind.py`（在保留区 /
+  回退点上的口径）。
 - TUI：`crates/wing/src/app/tests/commands.rs`（忙碌拒绝 / 重复压缩拒绝 / 压缩中发送回填 /
-  回执解除拦截）。
+  回执解除拦截 / 旧会话回执照样解除）与 `runner.rs` 的 `compact_failure_message`（409 → 人话）。

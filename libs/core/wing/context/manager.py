@@ -35,7 +35,6 @@ from .compaction import (
     LLMMessagesResult,
     PendingCompact,
     resolve_context_tokens,
-    select_cut,
 )
 from .resources import (
     RuleFile,
@@ -506,35 +505,20 @@ class ContextManager:
         msgs: list[Message],
         model: str,
         model_provider: ModelProvider,
-        options: "RequestOptions | None" = None,
-        trust_start: int = 0,
-        server_tokens: int | None = None,
+        options: "RequestOptions | None",
+        trust_start: int,
+        server_tokens: int | None,
     ) -> None:
-        """启动后台异步 compact task。
-
-        切点优先按服务端 usage 选（`select_cut`，与触发同源）；只有整条信任区间都
-        没有可信 usage 时才退回本地估算（`_calc_cut_idx`，同口径的兜底）。
-        """
-        if server_tokens is None:
-            # 兜底：末尾那条还没被回答的 user 消息不能被压进摘要——它是本轮要问的
-            # 问题本身。估算路径没有"服务端不在候选里"的构造性保护，只能显式剔除。
-            head = msgs[:-1] if msgs and msgs[-1].role == "user" else msgs
-            cut_idx = self.compactor._calc_cut_idx(head)
-        else:
-            head = msgs
-            cut_idx = select_cut(
-                msgs,
-                trust_start=trust_start,
-                total_tokens=server_tokens,
-                keep_recent_tokens=self.compactor.keep_recent_tokens,
-            )
-
+        """启动后台异步 compact task（切点判据见 `Compactor.pick_cut`）。"""
+        cut_idx = self.compactor.pick_cut(
+            msgs, trust_start=trust_start, server_tokens=server_tokens
+        )
         if cut_idx == 0:
             return
 
-        start_uuid: str = head[0].uuid  # ty: ignore[invalid-assignment]
-        end_uuid: str = head[cut_idx - 1].uuid  # ty: ignore[invalid-assignment]
-        full_context = [self.system_prompt] + head[:cut_idx]
+        start_uuid: str = msgs[0].uuid  # ty: ignore[invalid-assignment]
+        end_uuid: str = msgs[cut_idx - 1].uuid  # ty: ignore[invalid-assignment]
+        full_context = [self.system_prompt] + msgs[:cut_idx]
         # 使用声明集——与主调用 prefix 一致，最大化缓存命中
         compact_tools = list(self._declared_tools)
 
@@ -725,6 +709,11 @@ class ContextManager:
             model=model,
             provider=getattr(model_provider, "name", ""),
         )
+
+        # 快照 ⇄ 现在的窗口必须一致：压缩期间任何改链动作（rewind / 未来的新入口）
+        # 都会被下面这个 `set_tip` 静默覆盖。不一致就整次放弃——绝不落半份摘要。
+        if [m.uuid for m in self.get_context_window()] != [m.uuid for m in msgs]:
+            raise RuntimeError("session chain changed during compaction; retry")
 
         last_compressed_uuid = msgs[-1].uuid if msgs else None
         compact_node = Message(

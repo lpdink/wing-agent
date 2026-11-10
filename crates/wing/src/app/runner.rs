@@ -359,39 +359,45 @@ pub async fn execute_intent(
             FetchPayload::SessionList,
         ),
         AppIntent::CompactSession { instruction } => {
-            if let Some(t) = transport {
-                let http = t.http.clone();
-                let session_id = app.session_id.clone();
-                let tx = fetch_tx.clone();
-                let sid = session_id.clone();
-                tokio::spawn(async move {
-                    match http
-                        .compact_session(&session_id, instruction.as_deref())
-                        .await
-                    {
-                        Ok(resp) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id: sid,
-                                    payload: FetchPayload::CompactDone {
-                                        original: resp.original_tokens,
-                                        compressed: resp.compressed_tokens,
-                                    },
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(FetchResult {
-                                    session_id,
-                                    payload: FetchPayload::CompactRefused {
-                                        message: compact_failure_message(&e),
-                                    },
-                                })
-                                .await;
-                        }
-                    }
-                });
+            match transport {
+                Some(t) => {
+                    let http = t.http.clone();
+                    let session_id = app.session_id.clone();
+                    let tx = fetch_tx.clone();
+                    let sid = session_id.clone();
+                    tokio::spawn(async move {
+                        let payload = match http
+                            .compact_session(&session_id, instruction.as_deref())
+                            .await
+                        {
+                            Ok(resp) => FetchPayload::CompactDone {
+                                original: resp.original_tokens,
+                                compressed: resp.compressed_tokens,
+                            },
+                            Err(e) => FetchPayload::CompactFailed {
+                                message: compact_failure_message(&e),
+                            },
+                        };
+                        let _ = tx
+                            .send(FetchResult {
+                                session_id: sid,
+                                payload,
+                            })
+                            .await;
+                    });
+                }
+                None => {
+                    // 没有连接 = 这个请求永远不会发出，也就永远不会有回执。直接投一条
+                    // 失败回执：否则"压缩在飞"没人解除，之后每条消息都只能留在草稿里。
+                    let _ = fetch_tx
+                        .send(FetchResult {
+                            session_id: app.session_id.clone(),
+                            payload: FetchPayload::CompactFailed {
+                                message: "Compact failed: not connected".into(),
+                            },
+                        })
+                        .await;
+                }
             }
         }
         AppIntent::InterruptSession => {
@@ -791,9 +797,8 @@ async fn adopt_new_session(
 ) {
     t.switch_session(&old_session_id, &new_sid).await;
     app.invalidate_session_cache();
-    // 压缩在飞的是**旧**会话：回执会被会话守卫丢弃，本地的"压缩中"标记必须跟着
-    // 一起作废，否则新会话永远发不出消息。
-    app.compacting = false;
+    // 压缩在飞的是**旧**会话（回执已认不到这个会话），本地标记跟着作废。
+    app.finish_compaction();
     tracing::info!(
         old = old_session_id,
         new = new_sid,
@@ -806,11 +811,9 @@ async fn adopt_new_session(
 /// 结论，不该被包成"Compact failed: API error (409): …"。
 fn compact_failure_message(error: &wing_api_client::ApiClientError) -> String {
     match error {
-        wing_api_client::ApiClientError::Api {
-            status: 409,
-            detail,
-            ..
-        } => format!("Compact refused: {detail}"),
+        wing_api_client::ApiClientError::Api { detail, .. } if error.is_conflict() => {
+            format!("Compact refused: {detail}")
+        }
         _ => format!("Compact failed: {error}"),
     }
 }
@@ -1190,6 +1193,26 @@ mod tests {
             Some("DeepSeek-Flash")
         );
         assert_eq!(app.status.provider.as_deref(), Some("qoder"));
+    }
+
+    #[test]
+    fn test_compact_failure_message_splits_refusal_from_failure() {
+        let refused = wing_api_client::ApiClientError::Api {
+            status: 409,
+            detail: "session is not idle".into(),
+            body: None,
+        };
+        assert_eq!(
+            compact_failure_message(&refused),
+            "Compact refused: session is not idle"
+        );
+
+        let failed = wing_api_client::ApiClientError::Api {
+            status: 500,
+            detail: "boom".into(),
+            body: None,
+        };
+        assert!(compact_failure_message(&failed).starts_with("Compact failed: "));
     }
 
     #[test]

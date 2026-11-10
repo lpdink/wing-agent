@@ -36,11 +36,11 @@ pub enum FetchPayload {
     SkillsInfo(String),
     /// Compact session completed (original_tokens, compressed_tokens).
     CompactDone { original: i64, compressed: i64 },
-    /// 手动压缩被拒绝 / 失败（文案已经面向用户）。
+    /// 手动压缩收口（被拒 / 失败 / 未连上），文案已经面向用户。
     ///
     /// 与 `Toast` 分开是因为它还携带**状态**：压缩在飞时发送被拦下，回执一到
-    /// 就必须解除拦截（否则会话永远发不出消息）。
-    CompactRefused { message: String },
+    /// 就必须解除拦截（否则会话永远发不出消息）。因此在会话守卫**之前**分派。
+    CompactFailed { message: String },
     /// 设置目录 + 稀疏文档快照（`GET schema` + `GET get`，并发一次拿回）。
     ///
     /// 装箱：`SettingsSchemaResponse` 带着整棵 catalog，是枚举里最大的一档

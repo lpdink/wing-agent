@@ -651,6 +651,8 @@ impl App {
             // 后立即纠正（点击期间也不会据此算错目标值）。
             self.status.pinned = false;
             self.push_intent(AppIntent::FetchInfo);
+            // 压缩在飞的是上一个会话：它的回执已经认不到这个会话，本地标记作废。
+            self.finish_compaction();
         }
 
         // Clear old content + reset render context before replay.

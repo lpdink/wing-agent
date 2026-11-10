@@ -85,15 +85,6 @@ class SessionArchivedError(Exception):
         self.session_id = session_id
 
 
-class SessionBusyError(RuntimeError):
-    """会话不空闲 / 已有独占操作在飞——该操作被拒绝（而不是排队等待）。
-
-    **刻意是 ``RuntimeError`` 的子类**：网关把它单独映射成 409（客户端据此给出
-    "先中断再压缩"这类可行动提示），而其它把 ``RuntimeError`` 当"操作失败"的调用方
-    （CLI / SDK / 未来的前端）仍能照旧捕获。不是 ``LookupError``——会话明明在场。
-    """
-
-
 def _warn_alias(requested: str, resolved: str) -> None:
     """别名（请求 id ≠ 存储键）时说清发生了什么——**不做静默归一**。
 

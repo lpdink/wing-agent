@@ -64,8 +64,8 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.event import SessionStatus
 from wing.media import file_too_large_message, sniff_image_mime, too_large_message
+from wing.agent import SessionBusyError
 from wing.request_context import session_context
-from wing.session import SessionBusyError
 from wing.session.tags import validate_tag
 from wing.store.names import validate_file_name
 
@@ -819,6 +819,9 @@ async def rewind_session(
         draft = server.runtime.rewind_session(body.session_id, body.target_uuid)
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
+    except SessionBusyError as e:
+        # 409：手动压缩在飞（会话级独占操作）——它与 rewind 的链写入不兼容。
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

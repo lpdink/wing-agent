@@ -2000,7 +2000,7 @@ fn test_compact_done_clears_the_block() {
     let mut app = test_app();
     assert!(app.try_frontend_command("/compact"));
     app.drain_intents();
-    app.compacting = true;
+    assert!(app.compacting, "命令本身必须置位（下面的回执才有东西可清）");
 
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id: "test-session".into(),
@@ -2015,19 +2015,36 @@ fn test_compact_done_clears_the_block() {
 }
 
 #[test]
-fn test_compact_refusal_clears_the_block() {
+fn test_compact_failure_clears_the_block() {
     let mut app = test_app();
     assert!(app.try_frontend_command("/compact"));
     app.drain_intents();
-    app.compacting = true;
 
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id: "test-session".into(),
-        payload: crate::app::intent::FetchPayload::CompactRefused {
+        payload: crate::app::intent::FetchPayload::CompactFailed {
             message: "Compact refused: session is not idle".into(),
         },
     });
     assert!(!app.compacting, "失败回执必须解除发送拦截");
     let toast = app.toast.as_ref().expect("失败提示");
     assert_eq!(toast.kind, crate::ui::toast::ToastKind::Error);
+}
+
+#[test]
+fn test_a_compaction_receipt_from_another_session_still_clears_the_block() {
+    // 回执在会话守卫**之前**分派：否则换了会话就永远没人解除"压缩在飞"。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "an-older-session".into(),
+        payload: crate::app::intent::FetchPayload::CompactDone {
+            original: 10,
+            compressed: 1,
+        },
+    });
+    assert!(!app.compacting, "旧会话的回执也要解除拦截");
+    assert!(app.toast.is_none(), "但不要在别的会话里 toast 它的结果");
 }

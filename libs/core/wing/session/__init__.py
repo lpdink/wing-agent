@@ -5,7 +5,7 @@
 
     from wing.session import (
         Session, serialize_message, tool_refs,
-        SessionManager, SessionReaper, SessionArchiver, SessionBusyError,
+        SessionManager, SessionReaper, SessionArchiver,
         AgentTemplate, AgentTemplateManager,
         ModelBinding,
         AgentOverride,
@@ -21,7 +21,7 @@
 """
 
 from .archiver import SessionArchiver
-from .manager import SessionArchivedError, SessionBusyError, SessionManager
+from .manager import SessionArchivedError, SessionManager
 from .model_binding import ModelBinding
 from .override import AgentOverride
 from .reaper import SessionReaper
@@ -37,7 +37,6 @@ __all__ = [
     "Session",
     "SessionArchivedError",
     "SessionArchiver",
-    "SessionBusyError",
     "SessionManager",
     "SessionReaper",
     "TagMutation",

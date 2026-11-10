@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import asyncio
 
+from wing.agent import SessionBusyError
 from wing.agent.event_sink import emit_best_effort
 from wing.event import (
     BUSY_STATES,
@@ -692,9 +693,10 @@ class WingRuntime:
             (original_tokens, compressed_tokens)
 
         Raises:
-            LookupError: session 不存在（含归档：SessionArchivedError）
-            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断
-            RuntimeError: 未配置 compactor 或压缩失败
+            LookupError: session 不存在（归档命中是 SessionArchivedError，刻意不继承
+                LookupError——网关单独映射成 404 + ``error="session_archived"``）
+            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断 / 正在关闭
+            RuntimeError: 未配置 compactor / 压缩失败 / 压缩期间链被改动
         """
         session = self._require_session(session_id)
         original, compressed = await session.agent.compact(instruction)
@@ -742,14 +744,23 @@ class WingRuntime:
 
         委托给 ContextManager.rewind()，发射事件。
 
+        手动压缩在飞时拒绝：压缩是会话级独占操作，它拿的是压缩开始时的窗口快照，
+        收口时会 `set_tip` 到快照的链末——期间的 rewind 会被它静默覆盖（用户以为
+        回退生效了、实际上从链上消失了，而摘要里还带着想丢弃的内容）。
+
         Returns:
             draft 文本，或 None
 
         Raises:
             LookupError: session 不存在
             ValueError: target_uuid 无效
+            SessionBusyError: 会话正在压缩
         """
         session = self._require_session(session_id)
+        if session.agent.compacting:
+            raise SessionBusyError(
+                "session is compacting; wait for it to finish before rewinding"
+            )
         cm = session.agent.context_manager
 
         draft = cm.rewind(target_uuid)

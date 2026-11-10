@@ -56,6 +56,16 @@ _INTERRUPT_WAIT_SECONDS = 6.0
 _INTERRUPT_MAX_CANCELS = 3
 
 
+class SessionBusyError(RuntimeError):
+    """会话不空闲 / 已有独占操作在飞——该操作被拒绝（而不是排队等待）。
+
+    **刻意是 ``RuntimeError`` 的子类**：网关把它单独映射成 409（客户端据此给出
+    "先中断再压缩"这类可行动提示），而把 ``RuntimeError`` 当"操作失败"的调用方
+    （runtime 的其它入口、未来的进程内消费者）仍能照旧捕获。不是 ``LookupError``
+    ——会话明明在场。
+    """
+
+
 def _find_model_spec(provider_name: str, model: str) -> ModelSpec | None:
     """按 (provider, 调用名) 查目录里的模型声明；provider 已从配置移除时返回 None。
 
@@ -449,6 +459,9 @@ class WingAgent:
         - **取出口闸门**：压缩期间 `Inbox.hold()`，worker 取不到任何输入——压缩中
           到达的消息留在队列里，压缩结束才开始处理，不会与压缩赛跑。
 
+        别的改链入口（`rewind`）由各自的入口拒绝（`WingRuntime.rewind_session`）：
+        压缩拿的是窗口快照，放它进来就等于让它被收口时的 `set_tip` 静默覆盖。
+
         压缩只在最后一个 await 之后写链（`append_detached` / `set_tip` 之间没有挂起
         点），因此被取消（interrupt / shutdown）不会半提交。
 
@@ -456,20 +469,30 @@ class WingAgent:
             (original_tokens, compressed_tokens)
 
         Raises:
-            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断
+            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断 / 会话正在关闭
         """
-        from wing.session import SessionBusyError
-
         if self.compacting:
             raise SessionBusyError("compaction already in progress")
-        if self.status != "idle" or self._inbox.has_pending:
+        if self._closing:
+            # 模板切换 / 逐出正在拆解本 agent：它的 shutdown 已经跑完取消，不会再
+            # 收掉这里新建的 task。
+            raise SessionBusyError("session is shutting down")
+        if self.status != "idle":
             raise SessionBusyError(
                 "session is not idle; interrupt the running turn before compacting"
+            )
+        if self._inbox.has_pending:
+            raise SessionBusyError(
+                "session has queued input; wait for it to be accepted"
             )
 
         self._inbox.hold()
         task = asyncio.create_task(self._run_compact(instruction))
         self._compact_task = task
+        # 收口只挂在 task 的终局上（不挂在调用方的 finally）：取消可能被吸收，
+        # 有界等待超时后压缩仍会写链——那时闸门与 `compacting` 必须继续持有，
+        # 否则新 turn 会在它写链之前跑起来。
+        task.add_done_callback(self._on_compact_finished)
         try:
             return await task
         except asyncio.CancelledError:
@@ -477,14 +500,16 @@ class WingAgent:
             if current is None or current.cancelling() == 0:
                 # 子任务被外部取消（interrupt / shutdown），本协程自身没被取消
                 raise SessionBusyError("compaction interrupted") from None
-            # 调用方自己被取消（客户端断连）：连带收掉子任务再走——否则 `finally`
-            # 会先清掉 `_compact_task`，给第二次压缩留出一个与它并发的窗口。
-            task.cancel()
-            await asyncio.wait({task}, timeout=_INTERRUPT_WAIT_SECONDS)
+            # 调用方自己被取消（客户端断连）：连带收掉子任务再走。
+            await self._cancel_compaction()
             raise
-        finally:
-            self._compact_task = None
-            self._inbox.release()
+
+    def _on_compact_finished(self, task: "asyncio.Task[tuple[int, int]]") -> None:
+        """压缩 task 的终局收口：清标记 + 释放取出口闸门（唯一释放点）。"""
+        if self._compact_task is not task:
+            return
+        self._compact_task = None
+        self._inbox.release()
 
     async def _run_compact(self, instruction: str | None) -> tuple[int, int]:
         """压缩本体（独立 task：interrupt / shutdown 取消的是它，不是调用方协程）。"""
@@ -497,12 +522,21 @@ class WingAgent:
         )
 
     async def _cancel_compaction(self) -> None:
-        """取消在飞的手动压缩（有界等待；压缩被取消时不写链）。"""
+        """取消在飞的手动压缩（有界；压缩被取消时不写链）。
+
+        与 worker 的取消阶梯同款：单次 `cancel()` 可能被吸收（见
+        `_INTERRUPT_MAX_CANCELS` 的说明），所以重投到 task 真的终局。超时也放手
+        ——闸门与 `compacting` 由 `_on_compact_finished` 在 task 真正结束时释放，
+        调用方（interrupt / shutdown）不会因为这边没收干净而误开闸门。
+        """
         task = self._compact_task
         if task is None or task.done():
             return
-        task.cancel()
-        await asyncio.wait({task}, timeout=_INTERRUPT_WAIT_SECONDS)
+        for _ in range(_INTERRUPT_MAX_CANCELS):
+            task.cancel()
+            await asyncio.wait({task}, timeout=_INTERRUPT_WAIT_SECONDS)
+            if task.done():
+                return
 
     async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。

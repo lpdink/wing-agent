@@ -1,13 +1,13 @@
-"""Inbox 取出口闸门（`hold` / `release`）与 `WingAgent.compact` 的准入 / 互斥 / 取消。
+"""手动压缩的会话级独占语义：inbox 取出口闸门 + `WingAgent.compact` 的准入 / 互斥 / 取消。
 
 被守的语义（`agent/inbox.py` + `agent/core.py`）：
 
 - `hold()` 期间 `get()` **不把消息交出去**——消息留在队列里（`has_pending` 为真），
   压缩结束 `release()` 后按原序交付；hold 边界上已经取到手的条目原样放回队首。
 - 手动压缩是会话级独占操作：非 idle（在跑 turn / 等 ask）/ 有排队输入 / 已有压缩在飞
-  一律拒绝（`SessionBusyError`），不排队等待。
-- 压缩被 interrupt 取消时链零变更（压缩只在最后一个 await 之后写链），且 hold 一定
-  被释放（下一次 `get()` 照常交付）。
+  / 会话正在关闭，一律拒绝（`SessionBusyError`），不排队等待。
+- 压缩被 interrupt 取消时链零变更（压缩只在最后一个 await 之后写链），且闸门由
+  task 的终局回调释放（取消被吸收时继续持有，不开半扇门）。
 """
 
 from __future__ import annotations
@@ -19,20 +19,12 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from wing.agent import WingAgent
+from _support import wait_until_async
+from wing.agent import SessionBusyError, WingAgent
 from wing.agent.inbox import Inbox
 from wing.schema import LLMResponse, LLMUsage, Message
-from wing.session import SessionBusyError
 
 pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
-
-
-async def _wait_until(pred: Any, timeout: float = 2.0) -> None:
-    expires = asyncio.get_running_loop().time() + timeout
-    while not pred():
-        if asyncio.get_running_loop().time() >= expires:
-            raise AssertionError("condition not met within deadline")
-        await asyncio.sleep(0.005)
 
 
 # ── Inbox 闸门 ────────────────────────────────────────
@@ -202,7 +194,7 @@ async def test_compaction_holds_input_until_it_finishes(
     await asyncio.wait_for(running, 2.0)
     # 压缩结束后 worker 才拿到它（随后这一轮会失败——测试没配主调用剧本，
     # 但「取走」这个事实已经由 has_pending 翻转证明）。
-    await _wait_until(lambda: agent._inbox.has_pending is False)
+    await wait_until_async(lambda: agent._inbox.has_pending is False)
     await agent.interrupt()
 
 
@@ -223,3 +215,16 @@ async def test_interrupt_cancels_compaction_without_touching_chain(
     assert agent.compacting is False
     assert [m.content for m in agent.context_manager.get_context_window()] == before
     assert agent._inbox.held is False, "取消后必须释放取出口闸门"
+
+
+@pytest.mark.asyncio
+async def test_compact_rejects_a_closing_agent(agent: WingAgent) -> None:
+    """拆解中（`_closing`）的 agent 不再接受新的压缩——它的 shutdown 已经跑过取消。"""
+    agent._closing = True
+    try:
+        with pytest.raises(SessionBusyError):
+            await agent.compact()
+    finally:
+        agent._closing = False
+    assert agent.compacting is False
+    assert agent._inbox.held is False

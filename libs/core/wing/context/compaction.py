@@ -92,17 +92,6 @@ def resolve_context_tokens(
     return sum(m.estimate_tokens() for m in messages)
 
 
-def _is_request_boundary(messages: list[Message], idx: int) -> bool:
-    """``idx`` 是不是"切在它之前"合法、且上下文大小已知的位置。
-
-    - ``user`` 消息：新 turn 的起点；
-    - ``assistant`` 消息：请求的应答位置或续跑位置——保留区以 assistant 开头合法
-      （两条协议都接受相邻 assistant / 由序列化层合并），以 ``tool`` 开头则会让
-      tool_result 变成孤儿，所以 ``tool`` / ``system`` 永远不是候选。
-    """
-    return messages[idx].role in ("user", "assistant")
-
-
 def select_cut(
     messages: list[Message],
     *,
@@ -112,22 +101,11 @@ def select_cut(
 ) -> int:
     """按**服务端 usage** 选压缩切点：返回保留区起点下标（0 = 无可压）。
 
-    每个带 usage 的 assistant 消息的 ``prompt_tokens`` 就是"该请求开始时上下文有
-    多大"，所以切点只能落在**上下文大小已知、且不破坏配对**的位置上：``user`` 消息
-    与 ``assistant`` 消息（保留区以 assistant 开头合法，绝不以 ``tool`` 开头——那会
-    让 tool_result 变成孤儿）。工具调用对因此构造性闭合：切点左侧的下一个请求发出
-    时，上一组 tool_result 必然已齐。
-
-    ``p(c)`` = c 及其之后第一条有 usage 的 assistant 的 ``prompt_tokens``（c 位于最后
-    一条 assistant 之后时就是 ``total`` 本身——末尾那条还没被回答的 user 消息）。
-    取**最早**的满足 ``p(c) >= total - keep_recent`` 的候选：``total - p(c)`` 即 c
-    之后那段上下文的大小（system 与 tools 在差值里抵消），保留区因此"尽量大、
-    但不超过 keep_recent"。``user`` 边界与它后面那条 assistant 的 ``p`` 相同，因此
-    "整轮保留"总是优先于"保留答案、把问题压进摘要"——后者只在轮首 message 无法作为
-    切点（窗口第一条消息）时才会发生。
-
-    本地估算在这条路径上一个数字都不参与——"总是估得太低、切得太深"正是旧实现拿
-    "只含 message 的估算"去对"含 system + tools 的窗口阈值"的结果。
+    不变量：切点只落在 ``user`` / ``assistant`` 上（上下文大小已知、工具调用对构造性
+    闭合）；候选 ``p(c)`` = c 及之后第一条有 usage 的 assistant 的 ``prompt_tokens``
+    （c 在最后一条 assistant 之后时是 ``total``）；取最左的 ``p(c) >= total -
+    keep_recent`` 者，即"保留区尽可能大、逼近 keep_recent"。判据全文与已知边界
+    （软上界 / 换模型的 tokenizer 漂移）见 ``docs/dev/compaction.md`` §2。
 
     Args:
         messages: 上下文窗口（``ContextManager.get_context_window()``）。
@@ -139,10 +117,11 @@ def select_cut(
     if not messages or total_tokens <= 0:
         return 0
     target = total_tokens - keep_recent_tokens
-    # 反向扫描：cursor 恒为"c 处上下文有多大"——c 之及之后第一条有 usage 的
-    # assistant 的 prompt_tokens；c 在最后一条 assistant 之后（末尾那条还没被回答的
-    # user 消息）时就是 total 本身。它沿链向左单调不减，因此第一个 p(c) < target
-    # 的候选就说明再往前都不合格。
+    # 从右向左扫（保留区起点向左 = 保留区变大），记下最左的合格候选。cursor 恒为
+    # "c 处上下文有多大"：c 及之后第一条有 usage 的 assistant 的 prompt_tokens；c 在
+    # 最后一条 assistant 之后时就是 total 本身。**不因 cursor 越过 target 而提前退出**
+    # ——那要求 usage 沿链单调，而换模型 / 上游截断都会打破它；整窗只有几十条消息，
+    # 扫完的代价可以忽略。
     cursor = total_tokens
     choice = 0
     for idx in range(len(messages) - 1, -1, -1):
@@ -155,11 +134,13 @@ def select_cut(
             and msg.usage.prompt_tokens > 0
         ):
             cursor = msg.usage.prompt_tokens
-        if idx == 0 or not _is_request_boundary(messages, idx):
+        # 候选只能落在 user / assistant 上：两者都是"上下文大小已知、且不破坏配对"
+        # 的位置（保留区以 assistant 开头合法、由序列化层合并相邻同角色；以 tool
+        # 开头会让 tool_result 变成孤儿）。
+        if idx == 0 or msg.role not in ("user", "assistant"):
             continue
-        if cursor < target:
-            break
-        choice = idx
+        if cursor >= target:
+            choice = idx
     return choice
 
 
@@ -279,6 +260,29 @@ class Compactor:
         if match := re.search(r"<summary>(.*?)</summary>", text, re.DOTALL):
             return match.group(1).strip()
         raise RuntimeError("can't extract summary")
+
+    def pick_cut(
+        self,
+        messages: list[Message],
+        *,
+        trust_start: int,
+        server_tokens: int | None,
+    ) -> int:
+        """自动压缩的切点（保留区起点下标；0 = 本轮压不掉任何东西）。
+
+        服务端 usage 可用时走 `select_cut`（与触发同源）；整条信任区间都没有可信
+        usage 时退回本地估算——"末尾那条还没被回答的 user 消息不得进摘要"只在估算
+        路径上需要显式剔除，服务端路径的候选位置本就要求"该处上下文大小已知"。
+        """
+        if server_tokens is not None:
+            return select_cut(
+                messages,
+                trust_start=trust_start,
+                total_tokens=server_tokens,
+                keep_recent_tokens=self.keep_recent_tokens,
+            )
+        head = messages[:-1] if messages and messages[-1].role == "user" else messages
+        return self._calc_cut_idx(head)
 
     def _calc_cut_idx(self, messages: list[Message]) -> int:
         """**兜底**切点：没有任何可信的服务端 usage 时才走这里。
