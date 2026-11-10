@@ -43,6 +43,10 @@
 它等的是网关子进程而不是算力，少给 worker 只会更慢。12 核上的合计与取舍见
 [test-speed.md](test-speed.md) §1。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 
+**就绪握手：`/api/health` 的 200 不等于「这个网关是我们的」。** `reserve_port()` 是 `bind(0)` 后立刻释放（关闭 socket 后存在竞态），从预留到子进程真正 bind 之间有窗口——子进程要跑完解释器启动 + `import wing`，过载的 CI 上以秒计。窗口里**另一个 probe env** 拿到同一个端口，那个端口上就听着别人的网关：`/api/health` 无鉴权、照常 200（`wait_for_health` 只在每次 GET **前**看进程死活，半途时刻会漏），我们的子进程反而在 `GatewayServer.start()` 的端口占用检查上 `sys.exit(1)` 退了。判错的代价不是红而是**假绿**：整套场景对着别人的 `WING_HOME` 跑断言（还会顺手改掉邻居的 `config.yaml`）。2026-11-10 的 CI 就是这么挂的——`test_settings_restart_required.py` 挂在 `assert process.poll() is None`（`assert 1 is None`），而它前面所有 settings 断言全过（打的是邻居的网关）。
+
+所以 200 之后还有两道：先看一眼子进程（此刻已退出 ⇒ 应答者不是我们），再**核对身份**——`GET /api/settings/get` 的 `fingerprint` = 应答者读的那份 `config.yaml` 的 sha256，而那份文件是本 env 刚写的。不符即 `GatewayPortCollision`（可重试：换端口重来，上限仍是 `gateway_attempts`）。两种"核对不了"的情形退化为只看进程死活：场景把配置文件删了（没有凭据可用），以及 auth 打开但没有 admin key（`settings/get` 必 403，只有 tool_runtime key 时不制造假红）。代价是每次 env 启动多一个 `settings/get`（毫秒级）。判据与反例钉在 `tests/test_env_readiness.py`（邻居的网关绝不被报成"就绪"、干净环境下核对真的跑了、auth 下用的是场景自己的 admin key）。
+
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 
 网关二进制解析顺序（`wing_probe.env.resolve_gateway_bin`）：`$WING_GATEWAY_BIN` → 与 `sys.executable` 同目录 → 仓库 `.venv/bin/wing-gateway` → `PATH`。

@@ -16,12 +16,16 @@
 
 端口策略：假 Provider 用 ``port=0`` 由 OS 分配后读回真实端口；网关端口
 ``bind(0)`` 预留（关闭 socket 后存在竞态）——启动即退出（典型端口冲突）时
-换端口重试，最多 ``gateway_attempts`` 次。
+换端口重试，最多 ``gateway_attempts`` 次。光靠"子进程退没退"不够：预留到 bind
+之间端口可能被**别人的网关**占走，而 ``/api/health`` 无鉴权、照常 200——所以就绪
+判定还有第二步**身份核对**（应答者读的那份配置是不是本 env 写的，见
+:meth:`ProbeEnv._verify_identity`）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
@@ -30,7 +34,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import IO, Any
 
@@ -142,6 +146,15 @@ def conflicting_config_knobs(**values: Any) -> list[str]:
 
 class ProbeEnvError(RuntimeError):
     """环境自举失败（二进制缺失 / 进程提前退出 / 健康检查超时）。"""
+
+
+class GatewayPortCollision(ProbeEnvError):
+    """预留的端口上应答的是**别人的网关**（``reserve_port()`` 的窗口被抢了）。
+
+    可重试：``start_gateway`` 见它即换端口重来。单列一个类型是因为「子进程死了」
+    只是这一类的**常见**旁证而不是判据——身份核对可能在子进程还没走到端口检查时
+    就否掉应答者（那时 ``poll()`` 仍是 ``None``，按"进程已退"判定会漏掉重试）。
+    """
 
 
 # ── 端口 ────────────────────────────────────────────────────────
@@ -524,6 +537,19 @@ def write_config(wing_home: str | Path, text: str) -> Path:
     return path
 
 
+def config_fingerprint(path: str | Path) -> str | None:
+    """配置文件字节的 sha256（文件读不出 → ``None``）。
+
+    与 ``GET /api/settings/get`` 的 ``fingerprint`` 同口径（产品侧就是
+    ``sha256(file bytes)``，坏文件也照算），所以它是应答者「读的是我这份配置」的
+    身份凭据：本 env 刚把这份文件写下去，别人家的网关指纹必然不同。
+    """
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 # ── 日志与健康等待 ──────────────────────────────────────────────
 
 
@@ -560,10 +586,16 @@ async def wait_for_health(
     process: subprocess.Popen[bytes] | None = None,
     log_path: str | Path | None = None,
     label: str = "gateway",
+    identity: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
-    """轮询 ``url`` 直至 200；进程提前退出或超时抛 ``ProbeEnvError``。
+    """轮询 ``url`` 直至 200（并跑过 ``identity``）；进程提前退出或超时抛 ``ProbeEnvError``。
 
     失败报告必须能独立定位：解析出的 url、超时值、进程退出码与日志尾部。
+
+    **200 不等于"我们的网关就绪"**：同一端口上可能听着别人的网关（见
+    :class:`GatewayPortCollision`），它的 200 一样干净。所以拿到 200 之后还有两道：
+    先看一眼子进程（此刻已退出 ⇒ 应答者不是我们），再跑 ``identity``——「应答者读的
+    配置是不是我这份」的唯一凭据（:meth:`ProbeEnv._verify_identity`）。
     """
     deadline = time.monotonic() + timeout
     timeout_ctx = httpx.Timeout(HEALTH_REQUEST_TIMEOUT)
@@ -580,6 +612,14 @@ async def wait_for_health(
             except httpx.HTTPError:
                 response = None  # 尚未监听 / 连接被拒
             if response is not None and response.status_code == 200:
+                if process is not None and process.poll() is not None:
+                    raise ProbeEnvError(
+                        f"{label} exited with code {process.returncode} while "
+                        f"answering {url} — the 200 came from another process "
+                        f"listening on the same port\n{log_section(log_path)}"
+                    )
+                if identity is not None:
+                    await identity()
                 return
             if time.monotonic() >= deadline:
                 detail = (
@@ -758,7 +798,7 @@ class ProbeEnv:
         return self.provider
 
     async def start_gateway(self) -> None:
-        """写配置 → 起网关子进程 → 等健康（端口冲突换端口重试）。"""
+        """写配置 → 起网关子进程 → 等健康 → 核对身份（端口被抢则换端口重试）。"""
         if self._process is not None and self._process.poll() is None:
             return
         self._prepare_dirs()
@@ -779,18 +819,92 @@ class ProbeEnv:
                         f"wing-gateway [{' '.join(self.command())}] "
                         f"(attempt {attempt}/{self._gateway_attempts})"
                     ),
+                    identity=self._verify_identity,
                 )
             except ProbeEnvError as exc:
                 last_error = exc
                 exited = self._process is not None and self._process.poll() is not None
                 await self._terminate_process()
-                if exited and attempt < self._gateway_attempts:
-                    _log.warning("gateway died on start (attempt %d): %s", attempt, exc)
+                # 身份不符是**可重试**的：抢了端口的邻居可能在我们核对完才让子进程
+                # 死在端口检查上，那时 poll() 仍是 None。
+                if (exited or isinstance(exc, GatewayPortCollision)) and (
+                    attempt < self._gateway_attempts
+                ):
+                    _log.warning("gateway start failed (attempt %d): %s", attempt, exc)
                     continue  # 大概率端口冲突：换端口重试
-                raise ProbeEnvError(f"{exc}\n{self.startup_report(binary)}") from exc
+                # 保留失败分类（GatewayPortCollision 的可重试语义不该被包装掉）。
+                raise type(exc)(f"{exc}\n{self.startup_report(binary)}") from exc
             self._log_marker(f"--- probe: gateway healthy on port {port} ---")
             return
         raise last_error if last_error is not None else ProbeEnvError("gateway failed")
+
+    async def _verify_identity(self) -> None:
+        """就绪判定第二步：确认 ``/api/health`` 的应答者**就是我们起的那个进程**。
+
+        ``reserve_port()`` 是 ``bind(0)`` 后立刻释放，从预留到子进程真正 bind 之间有
+        个窗口（子进程要跑完解释器启动 + ``import wing``，过载的 CI 上以秒计）。窗口
+        里另一个 probe env 可能拿到同一个端口，于是那个端口上听的是**别人的网关**：
+        ``/api/health`` 无鉴权、照常 200，我们的子进程反而在 ``GatewayServer.start()``
+        的端口占用检查上 ``sys.exit(1)`` 退了。只按"进程退没退"判断会漏掉这种半途
+        时刻，而漏掉的代价不是红而是**假绿**——整套场景对着别人的 ``WING_HOME`` 跑
+        断言（还会顺手改掉邻居的 config.yaml）。
+
+        身份凭据只有一份：``GET /api/settings/get`` 回的 ``fingerprint`` = 应答者读的
+        那份 ``config.yaml`` 的 sha256，而那份文件是本 env 写的（见
+        :func:`config_fingerprint`）。坏配置（setup mode）也照算，所以这条对
+        ``config_text`` 场景同样成立。
+
+        Raises:
+            GatewayPortCollision: 应答者是别人（指纹不符 / 不是 Setting API）。
+            ProbeEnvError: 应答者是我们，但子进程已退出（产品侧启动即崩）。
+        """
+        port = self._port
+        expected = config_fingerprint(self.config_path)
+        if port is None or expected is None:
+            return  # 没有身份凭据可用（场景刻意删掉配置文件）——退回只看进程死活
+        headers: dict[str, str] | None = None
+        key = self._admin_key
+        if key is not None:
+            # auth 打开时 settings/get 受鉴权保护；auth 关着时这个头被忽略，无害。
+            headers = {"Authorization": f"Bearer {key}"}
+        elif (self.auth or {}).get("enabled"):
+            return  # auth 打开但没有可用的 admin key：settings/get 必被拒，核对不了
+        url = f"{self.gateway_url}/api/settings/get"
+        try:
+            # 与健康检查同一份就绪预算：settings/get 实际应答是毫秒级，这个上限只在
+            # 病态负载下才用得上（超时按未定处理 ⇒ 交给换端口重试，不当作指纹不符）。
+            async with httpx.AsyncClient(
+                timeout=self._health_timeout, trust_env=False
+            ) as client:
+                response = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise GatewayPortCollision(
+                f"identity check failed: {url} is not answering ({exc})"
+            ) from exc
+        if response.status_code != 200:
+            raise GatewayPortCollision(
+                f"identity check failed: {url} answered {response.status_code} "
+                f"(the listener on port {port} is not our gateway)"
+            )
+        try:
+            actual = response.json().get("fingerprint")
+        except (ValueError, AttributeError) as exc:
+            raise GatewayPortCollision(
+                f"identity check failed: {url} did not return the Setting API "
+                f"(the listener on port {port} is not our gateway)"
+            ) from exc
+        if actual != expected:
+            raise GatewayPortCollision(
+                f"port {port} was taken over: the gateway answering there reads a "
+                f"different config.yaml (fingerprint {str(actual)[:12]} != ours "
+                f"{expected[:12]})"
+            )
+        if self._process is not None and self._process.poll() is not None:
+            raise ProbeEnvError(
+                f"wing-gateway exited with code {self._process.returncode} right "
+                f"after passing the identity check on port {port}\n"
+                f"{log_section(self.log_path)}"
+            )
 
     async def kill_gateway(self) -> None:
         """**硬杀**网关子进程（SIGKILL，不给收尾机会），env 本身继续可用。
@@ -1011,18 +1125,15 @@ class ProbeEnv:
         return self._process
 
     @property
-    def shutdown_api_key(self) -> str | None:
-        """关闭自己的网关子进程时要带的 key（auth 段里挑一把非 tool_runtime 的）。
+    def _admin_key(self) -> str | None:
+        """``auth.keys`` 里第一把非 ``tool_runtime`` 角色的 key（没有则 ``None``）。
 
-        ``/api/shutdown`` 不在 ``tool_runtime`` 的 allowlist 里：auth 打开时必须带
-        一把 admin 语义的 key 才能优雅关停，否则只能等 ``terminate()`` 兜底（正确
-        但慢 5s）。场景没给 auth / 没给 keys / 只给了 tool_runtime key 时返回
-        None——关停退化为 terminate，不影响正确性。
+        admin 是全量访问（隐式"非受限"角色），所以它能读 ``/api/settings/get``、
+        也能关自己的网关；只有 tool_runtime key 时两件事都做不了（403）。
         """
         keys = (self.auth or {}).get("keys")
         if not isinstance(keys, Sequence):
             return None
-        fallback: str | None = None
         for entry in keys:
             if not isinstance(entry, Mapping):
                 continue
@@ -1031,8 +1142,29 @@ class ProbeEnv:
                 continue
             if entry.get("role", "admin") != "tool_runtime":
                 return key
-            fallback = fallback or key
-        return fallback
+        return None
+
+    @property
+    def shutdown_api_key(self) -> str | None:
+        """关闭自己的网关子进程时要带的 key（auth 段里挑一把非 tool_runtime 的）。
+
+        ``/api/shutdown`` 不在 ``tool_runtime`` 的 allowlist 里：auth 打开时必须带
+        一把 admin 语义的 key 才能优雅关停，否则只能等 ``terminate()`` 兜底（正确
+        但慢 5s）。场景没给 auth / 没给 keys 时返回 None——关停退化为 terminate，
+        不影响正确性；只给了 tool_runtime key 时退回那把（拿不到权限，但语义上
+        "关自己的进程"仍优先于无 key 的 401）。
+        """
+        if (key := self._admin_key) is not None:
+            return key
+        keys = (self.auth or {}).get("keys")
+        if not isinstance(keys, Sequence):
+            return None
+        for entry in keys:
+            if isinstance(entry, Mapping):
+                key = entry.get("key")
+                if isinstance(key, str) and key:
+                    return key
+        return None
 
     def session_dir(self, session_id: str) -> Path:
         """会话持久目录 ``<sessions>/<session_id>/``（history.jsonl 所在）。"""
