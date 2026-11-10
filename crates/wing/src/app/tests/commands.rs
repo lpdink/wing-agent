@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::commands;
 use crate::app::intent::SessionUpdate;
 use crate::app::*;
+use crate::protocol::{EventMeta, WingEvent};
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::input_area::SubmitPayload;
@@ -1911,4 +1912,122 @@ fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
         app.drain_intents().is_empty(),
         "agent 忙碌时不刷新——刷新留到下一次打开"
     );
+}
+
+// ── 手动压缩的交互守卫（准入 / 压缩中禁发 / 回执收口）──
+//
+// 后端是权威判据（非 idle 一律 409），这里守的是"用户在 TUI 上看到什么"：
+// 不许发、不许重复压、压缩中发的消息原样还回草稿、回执到了就解除拦截。
+
+/// 造一个"turn 在飞"的 app（TurnStarted 是 working 的唯一来源）。
+fn app_with_running_turn() -> App {
+    let mut app = test_app();
+    app.handle_event(WingEvent::TurnStarted {
+        meta: EventMeta {
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            session_id: Some("test-session".into()),
+            request_id: "r".into(),
+        },
+    });
+    app.drain_intents();
+    app
+}
+
+#[test]
+fn test_compact_refused_while_turn_runs() {
+    let mut app = app_with_running_turn();
+    assert!(app.try_frontend_command("/compact keep the design"));
+    assert!(
+        app.drain_intents().is_empty(),
+        "turn 在飞时不得发出压缩请求"
+    );
+    let toast = app.toast.as_ref().expect("说明为什么被拒");
+    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Warning);
+    assert!(toast.message.contains("busy"), "{}", toast.message);
+    assert!(!app.compacting);
+}
+
+#[test]
+fn test_compact_starts_with_a_persistent_toast() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact keep the design"));
+    let intents = app.drain_intents();
+    assert!(
+        matches!(
+            &intents[..],
+            [AppIntent::CompactSession {
+                instruction: Some(i)
+            }] if i == "keep the design"
+        ),
+        "{intents:?}"
+    );
+    assert!(app.compacting, "压缩在飞：发送要被拦下");
+    let toast = app.toast.as_ref().expect("进行中提示");
+    assert!(toast.persistent, "压缩可能跑几十秒，提示不能自己过期");
+    assert_eq!(toast.message, "Compacting context…");
+}
+
+#[test]
+fn test_second_compact_is_refused_while_one_runs() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    assert!(app.try_frontend_command("/compact"));
+    assert!(app.drain_intents().is_empty(), "不许并发两次压缩");
+    let toast = app.toast.as_ref().expect("说明为什么被拒");
+    assert_eq!(toast.message, "Compaction already in progress");
+}
+
+#[test]
+fn test_send_is_held_in_the_draft_while_compacting() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+
+    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(
+        app.drain_intents().is_empty(),
+        "压缩中不得把消息投出去（后端也会把它压在 inbox 里）"
+    );
+    assert_eq!(app.chat.pending_len(), 0, "不得留一条悬着的 pending");
+    assert_eq!(app.input.text(), "hello", "草稿原样还回 composer");
+    let toast = app.toast.as_ref().expect("说明为什么没发出去");
+    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Warning);
+}
+
+#[test]
+fn test_compact_done_clears_the_block() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    app.compacting = true;
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::CompactDone {
+            original: 100,
+            compressed: 10,
+        },
+    });
+    assert!(!app.compacting);
+    let toast = app.toast.as_ref().expect("完成提示");
+    assert_eq!(toast.message, "Compact done: 100 → 10 tokens");
+}
+
+#[test]
+fn test_compact_refusal_clears_the_block() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    app.compacting = true;
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::CompactRefused {
+            message: "Compact refused: session is not idle".into(),
+        },
+    });
+    assert!(!app.compacting, "失败回执必须解除发送拦截");
+    let toast = app.toast.as_ref().expect("失败提示");
+    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Error);
 }

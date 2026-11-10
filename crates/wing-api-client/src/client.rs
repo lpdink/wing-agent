@@ -1,10 +1,19 @@
 //! [`GatewayClient`] — Wing Gateway 的 HTTP API 客户端。
 
+use std::time::Duration;
+
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 
 use crate::error::{ApiClientError, extract_api_error};
 use crate::models::*;
+
+/// 常规请求的 client 级超时。
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 手动压缩的请求预算：服务端给 1200s（`gateway/routes/session.py`），客户端留 100s
+/// 余量——长压缩在客户端先超时会让前端以为失败，后端却已经把链换成了摘要。
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(1300);
 
 /// Gateway 默认端口。
 pub const DEFAULT_PORT: u16 = 32523;
@@ -95,7 +104,7 @@ impl GatewayClient {
     /// `Authorization: Bearer <key>` header。
     pub fn new(base_url: impl Into<String>, api_key: Option<&str>) -> Result<Self, ApiClientError> {
         let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(DEFAULT_TIMEOUT)
             .default_headers(build_auth_headers(api_key)?)
             .build()?;
         Ok(Self {
@@ -477,7 +486,11 @@ impl GatewayClient {
             session_id: session_id.to_owned(),
             instruction: instruction.map(str::to_owned),
         };
-        self.post_json("/api/session/compact", &body).await
+        // 服务端给压缩 1200s（`gateway/routes/session.py`），client 级 60s 会在
+        // 长压缩上先超时：调用方看到"失败"、后端却已经把链换成了摘要。这里必须
+        // 给足预算（服务端超时 + 余量）。
+        self.post_json_with_timeout("/api/session/compact", &body, Some(COMPACT_TIMEOUT))
+            .await
     }
 
     /// 中断 session 当前任务。
@@ -804,12 +817,28 @@ impl GatewayClient {
         path: &str,
         body: &Req,
     ) -> Result<Resp, ApiClientError> {
-        let resp = self
+        self.post_json_with_timeout(path, body, None).await
+    }
+
+    /// POST JSON body，按需覆盖 client 级的 60s 超时 → deserialize JSON response。
+    ///
+    /// 长耗时端点（手动压缩：服务端允许 1200s）必须自己给预算——client 级超时
+    /// 到期只会让调用方看到一条"超时失败"，而后端照样在跑并把链改写掉。`None`
+    /// 沿用 client 级超时。
+    async fn post_json_with_timeout<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Req,
+        timeout: Option<Duration>,
+    ) -> Result<Resp, ApiClientError> {
+        let mut request = self
             .http
             .post(format!("{}{}", self.base_url, path))
-            .json(body)
-            .send()
-            .await?;
+            .json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let resp = request.send().await?;
 
         if !resp.status().is_success() {
             return Err(extract_api_error(resp).await);

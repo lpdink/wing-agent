@@ -20,15 +20,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+from collections.abc import Callable
 
 import pytest
 
 from wing_probe import (
+    PENDING_KEY,
     HistoryView,
+    message_semantics,
     Probe,
     Turn,
+    Usage,
     assert_compact_transition,
+    wait_pending,
 )
 from wing_probe.driver import DriverHttpError
 
@@ -300,3 +307,214 @@ async def test_compact_failure_leaves_no_trace(probe: Probe) -> None:
     assert recovered_material["unzip_last_uuid"] == after.messages()[-1]["uuid"]
     assert recovered_material["compressed_messages"] == len(after.messages())
     assert [event["type"] for event in recovered.events()] == ["compact_done"]
+
+
+# ===================================================================
+# 手动压缩的准入 / 互斥 / 可中断（会话级独占操作）
+# ===================================================================
+#
+# 判据（`agent/core.py::WingAgent.compact` + `agent/inbox.py` 的取出口闸门）：
+# 非 idle / 有排队输入 / 已有压缩在飞一律 409 拒绝；压缩期间到达的消息留在 inbox，
+# 压缩结束才开始处理；interrupt 取消在飞压缩且链零变更。
+
+BUSY_MODEL = "probe/compact-busy"
+DROPS_PENDING_MODEL = "probe/compact-drops-pending"
+QUEUES_INPUT_MODEL = "probe/compact-queues-input"
+CANCELLED_MODEL = "probe/compact-cancelled"
+
+AUTO_SUMMARY = "Task: answer the user. State: two turns done. Next: continue."
+AUTO_SUMMARY_LOOKING = f"<summary>{AUTO_SUMMARY}</summary>"
+MANUAL_SUMMARY = "manual summary body"
+
+
+async def _poll(condition: Callable[[], bool], *, within: float = 10.0) -> None:
+    """轮询到条件成立（假 Provider 的请求留档 / 事件游标之外的确定信号）。"""
+    expires = time.monotonic() + within
+    while not condition():
+        if time.monotonic() >= expires:
+            raise AssertionError(f"condition not met within {within}s")
+        await asyncio.sleep(0.02)
+
+
+def _compact_calls(probe: Probe, model: str) -> list:
+    return [request for request in probe.requests_for(model) if not request.stream]
+
+
+def _message_fingerprint(view: HistoryView) -> list[str]:
+    """消息层的逐字段指纹（事件节点不算——interrupt 等动作会合法地追加事件）。"""
+    return [
+        json.dumps(message_semantics(message), sort_keys=True)
+        for message in view.messages()
+    ]
+
+
+@pytest.mark.probe_env(models=[BUSY_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_manual_compact_refused_while_working(probe: Probe) -> None:
+    """turn 在飞时手动压缩被拒（409，链零变更）。
+
+    WHEN 一轮 LLM 调用还在跑（``first_delay`` 撑住首个内容帧）时 POST compact
+    THEN 409「会话不空闲」；这一轮照常收口，活跃链与记录集零变更、没有
+    ``compact_done``。用户必须先 ``interrupt`` 再压缩。
+    """
+    probe.register(
+        BUSY_MODEL,
+        Turn.of(text="slow reply", first_delay=1.5),
+        Turn.of(text=f"<summary>{MANUAL_SUMMARY}</summary>"),
+    )
+    session = await probe.session(model=BUSY_MODEL)
+    await session.send("alpha")
+    await session.watch.expect("turn_started", within=15)
+
+    with pytest.raises(DriverHttpError) as refused:
+        await session.compact()
+    assert refused.value.status == 409, refused.value
+    assert "idle" in str(refused.value), refused.value
+
+    # 这一轮照常收口；压缩既没发生也没留下痕迹。
+    await session.watch.expect("turn_result", within=20)
+    session.watch.assert_never("compact_done")
+    after = probe.history(session)
+    assert after.messages()[-1]["role"] == "assistant", after.describe()
+    assert all("[Compact]" not in (m["content"] or "") for m in after.messages())
+
+    # 空闲之后同一个会话照常可以手动压缩。
+    await session.compact()
+    await session.watch.expect("compact_done", within=15)
+    assert probe.history(session).messages()[0]["content"] == (
+        f"[Compact] {MANUAL_SUMMARY}"
+    )
+
+
+@pytest.mark.probe_env(
+    models=[DROPS_PENDING_MODEL],
+    context_window_tokens=1000,
+    keep_recent_tokens=400,
+)
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_manual_compact_discards_pending_auto_compact(probe: Probe) -> None:
+    """手动压缩丢弃待生效的自动压缩（不和它抢链）。
+
+    WHEN 后台压缩已落盘 pending（aux 在）时执行手动压缩
+    THEN 手动压缩成功；aux 被清掉；活跃链是手动摘要（自动压缩的产物永不换入），
+    下一轮请求里也看不到自动压缩的摘要文本。
+    """
+    usage = (300, 900, 1200)
+    probe.register(
+        DROPS_PENDING_MODEL,
+        Turn.of(text="reply one", usage=Usage(prompt_tokens=usage[0])),
+        Turn.of(text="reply two", usage=Usage(prompt_tokens=usage[1])),
+        Turn.of(text=AUTO_SUMMARY_LOOKING, usage=Usage(prompt_tokens=usage[2])),
+        Turn.of(text=AUTO_SUMMARY_LOOKING, usage=Usage(prompt_tokens=usage[2])),
+        Turn.of(text=f"<summary>{MANUAL_SUMMARY}</summary>"),
+        Turn.of(text="post manual reply", usage=Usage(prompt_tokens=1500)),
+    )
+    session = await probe.session(model=DROPS_PENDING_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    await session.chat("gamma")
+    pending = await wait_pending(probe, session)
+    assert pending["compact_content"].startswith("[Compact] Task:"), pending
+
+    response = await session.compact()
+    assert response["ok"] is True, response
+    await session.watch.expect("compact_done", within=15)
+
+    after = probe.history(session)
+    assert after.aux(PENDING_KEY) is None, after.describe()
+    assert [message["content"] for message in after.messages()] == [
+        f"[Compact] {MANUAL_SUMMARY}"
+    ], after.describe()
+
+    # 下一轮：请求前缀 = system + 手动摘要；自动压缩的摘要文本一处都看不到。
+    result = await session.chat("delta")
+    assert result.data["result"] == "post manual reply", result.data
+    body = json.dumps(probe.context(DROPS_PENDING_MODEL, 5).body, ensure_ascii=False)
+    assert MANUAL_SUMMARY in body, body[:400]
+    assert AUTO_SUMMARY not in body, body[:400]
+
+
+@pytest.mark.probe_env(models=[QUEUES_INPUT_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_message_during_manual_compact_waits(probe: Probe) -> None:
+    """压缩期间投递的消息不驱动 turn：压缩结束才开始处理。
+
+    WHEN 手动压缩在飞（``first_delay`` 撑住压缩调用）时发一条用户消息
+    THEN 压缩收口（``compact_done``）之前不出现 ``turn_started``；压缩结束后这一轮
+    才开跑，且它的请求里已经是压缩后的上下文（system + 摘要 + 新消息）。
+    """
+    probe.register(
+        QUEUES_INPUT_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text=f"<summary>{MANUAL_SUMMARY}</summary>", first_delay=1.5),
+        Turn.of(text="reply two"),
+    )
+    session = await probe.session(model=QUEUES_INPUT_MODEL)
+    await session.chat("alpha")
+
+    cursor = session.watch.cursor
+    compacting = asyncio.create_task(session.compact())
+    await _poll(lambda: bool(_compact_calls(probe, QUEUES_INPUT_MODEL)))
+
+    await session.send("queued during compaction")
+    # 压缩在飞：这一轮不得开始。
+    await session.watch.expect_none("turn_started", within=0.4)
+
+    await compacting
+    await session.watch.expect("turn_result", within=20)
+    session.watch.assert_ordered(["compact_done", "turn_started"], since=cursor)
+
+    context = probe.context(QUEUES_INPUT_MODEL, 2)
+    assert context.messages[0].content == f"[Compact] {MANUAL_SUMMARY}", (
+        context.describe()
+    )
+    assert context.messages[-1].content == "queued during compaction", (
+        context.describe()
+    )
+
+
+@pytest.mark.probe_env(models=[CANCELLED_MODEL])
+@pytest.mark.timeout(120)
+@pytest.mark.asyncio
+async def test_interrupt_cancels_manual_compact(probe: Probe) -> None:
+    """interrupt 取消在飞的手动压缩：请求以 409 收尾，链零变更。
+
+    WHEN 手动压缩在飞时 ``interrupt``
+    THEN 压缩请求返回 409「compaction interrupted」、没有 ``compact_done``、
+    活跃链与记录集零变更（压缩只在最后一个 await 之后写链）；此后会话仍可用
+    ——下一条消息的请求里既没有摘要也没有残留的半截状态。
+    """
+    probe.register(
+        CANCELLED_MODEL,
+        Turn.of(text="reply one"),
+        Turn.of(text=f"<summary>{MANUAL_SUMMARY}</summary>", first_delay=3.0),
+        Turn.of(text="reply two"),
+    )
+    session = await probe.session(model=CANCELLED_MODEL)
+    await session.chat("alpha")
+    before = probe.history(session)
+
+    compacting = asyncio.create_task(session.compact())
+    await _poll(lambda: bool(_compact_calls(probe, CANCELLED_MODEL)))
+    await session.interrupt()
+
+    with pytest.raises(DriverHttpError) as cancelled:
+        await compacting
+    assert cancelled.value.status == 409, cancelled.value
+    assert "interrupt" in str(cancelled.value).lower(), cancelled.value
+
+    session.watch.assert_never("compact_done")
+    after = probe.history(session)
+    # 消息层零变更——interrupt 自己会落一条 interrupted 事实事件，那是它的正常产物。
+    assert _message_fingerprint(after) == _message_fingerprint(before), after.describe()
+    after.assert_chain_invariants()
+
+    # 取消之后照常继续：请求前缀 = system + 原链（摘要不在）。
+    result = await session.chat("beta")
+    assert result.data["result"] == "reply two", result.data
+    context = probe.context(CANCELLED_MODEL, 2)
+    assert context.messages[0].content == "alpha", context.describe()
+    assert MANUAL_SUMMARY not in json.dumps(context.body, ensure_ascii=False)

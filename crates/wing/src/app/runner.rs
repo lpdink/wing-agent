@@ -384,9 +384,8 @@ pub async fn execute_intent(
                             let _ = tx
                                 .send(FetchResult {
                                     session_id,
-                                    payload: FetchPayload::Toast {
-                                        message: format!("Compact failed: {e}"),
-                                        is_error: true,
+                                    payload: FetchPayload::CompactRefused {
+                                        message: compact_failure_message(&e),
                                     },
                                 })
                                 .await;
@@ -792,12 +791,28 @@ async fn adopt_new_session(
 ) {
     t.switch_session(&old_session_id, &new_sid).await;
     app.invalidate_session_cache();
+    // 压缩在飞的是**旧**会话：回执会被会话守卫丢弃，本地的"压缩中"标记必须跟着
+    // 一起作废，否则新会话永远发不出消息。
+    app.compacting = false;
     tracing::info!(
         old = old_session_id,
         new = new_sid,
         "{}",
         switch.log_message()
     );
+}
+
+/// 手动压缩失败的文案：409（会话不空闲 / 已有压缩在飞 / 被中断）说的是**可行动**的
+/// 结论，不该被包成"Compact failed: API error (409): …"。
+fn compact_failure_message(error: &wing_api_client::ApiClientError) -> String {
+    match error {
+        wing_api_client::ApiClientError::Api {
+            status: 409,
+            detail,
+            ..
+        } => format!("Compact refused: {detail}"),
+        _ => format!("Compact failed: {error}"),
+    }
 }
 
 /// 换会话失败：一条 3s 错误 toast（文案与三个意图各自的一致）。

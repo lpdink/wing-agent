@@ -148,6 +148,9 @@ class WingAgent:
         # `_arm_worker_renewal`）与 interrupt 的直接重建都不再发生——"逐出后
         # 又被复活"必须不可能。
         self._closing: bool = False
+        # 在飞的手动压缩（会话级独占操作，见 `compact`）。它持有 inbox 取出口闸门，
+        # 期间 worker 取不到任何输入；interrupt / shutdown 据此取消它。
+        self._compact_task: asyncio.Task[tuple[int, int]] | None = None
         self._worker = self._spawn_worker()
 
     # ── ToolContext Protocol 实现 ──
@@ -432,6 +435,75 @@ class WingAgent:
         """接收用户消息或 feedback。media 非空时消息携带媒体引用（字节在存储）。"""
         await self._inbox.post(content, request_id, role, tool_call_id, media=media)
 
+    @property
+    def compacting(self) -> bool:
+        """是否有手动压缩在飞（会话级独占操作）。"""
+        return self._compact_task is not None
+
+    async def compact(self, instruction: str | None = None) -> tuple[int, int]:
+        """手动压缩上下文：会话级**独占**操作（唯一入口）。
+
+        与 turn 的互斥落在两处：
+        - **准入**：非 idle（在跑 turn / 等用户回答 ask）或有排队输入 → 直接拒绝，
+          用户必须先把在飞的 turn 中断掉；
+        - **取出口闸门**：压缩期间 `Inbox.hold()`，worker 取不到任何输入——压缩中
+          到达的消息留在队列里，压缩结束才开始处理，不会与压缩赛跑。
+
+        压缩只在最后一个 await 之后写链（`append_detached` / `set_tip` 之间没有挂起
+        点），因此被取消（interrupt / shutdown）不会半提交。
+
+        Returns:
+            (original_tokens, compressed_tokens)
+
+        Raises:
+            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断
+        """
+        from wing.session import SessionBusyError
+
+        if self.compacting:
+            raise SessionBusyError("compaction already in progress")
+        if self.status != "idle" or self._inbox.has_pending:
+            raise SessionBusyError(
+                "session is not idle; interrupt the running turn before compacting"
+            )
+
+        self._inbox.hold()
+        task = asyncio.create_task(self._run_compact(instruction))
+        self._compact_task = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                # 子任务被外部取消（interrupt / shutdown），本协程自身没被取消
+                raise SessionBusyError("compaction interrupted") from None
+            # 调用方自己被取消（客户端断连）：连带收掉子任务再走——否则 `finally`
+            # 会先清掉 `_compact_task`，给第二次压缩留出一个与它并发的窗口。
+            task.cancel()
+            await asyncio.wait({task}, timeout=_INTERRUPT_WAIT_SECONDS)
+            raise
+        finally:
+            self._compact_task = None
+            self._inbox.release()
+
+    async def _run_compact(self, instruction: str | None) -> tuple[int, int]:
+        """压缩本体（独立 task：interrupt / shutdown 取消的是它，不是调用方协程）。"""
+        return await self.context_manager.do_manual_compact(
+            model=self.model,
+            model_provider=self.model_provider,
+            current_tools=lambda: self.tools,
+            instruction=instruction,
+            options=self.request_options(),
+        )
+
+    async def _cancel_compaction(self) -> None:
+        """取消在飞的手动压缩（有界等待；压缩被取消时不写链）。"""
+        task = self._compact_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.wait({task}, timeout=_INTERRUPT_WAIT_SECONDS)
+
     async def interrupt(self) -> list[str]:
         """中断 Agent：清理积压、触发 hooks、取消旧 worker 后重建。
 
@@ -460,6 +532,9 @@ class WingAgent:
         另有 ERROR + notice。
         """
         started = time.monotonic()
+        # 手动压缩是会话级独占操作（持有 inbox 取出口闸门）：先收掉在飞的压缩，再按
+        # 常规路径清积压 / 收口 worker。取消不写链，链仍自洽。
+        await self._cancel_compaction()
         self._inbox.cancel_all_waiters()
         dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
 
@@ -503,6 +578,8 @@ class WingAgent:
         name，没有任何 client 所有权要终结。
         """
         self._closing = True
+        # 在飞的手动压缩同样要收口：它持有取出口闸门，且会在拆解后的链上写。
+        await self._cancel_compaction()
         # 清积压留在锁内无妨：shutdown 是终局，锁等待期间到达的输入注定无人
         # 消费（`_closing` 已挡住一切重建）——不存在 interrupt 的"吞消息"语义。
         async with self._interrupt_lock:

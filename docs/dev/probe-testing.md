@@ -323,6 +323,8 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 **前缀身份红线**（KV cache 语义；`scenarios/test_session_persistence.py` + `scenarios/test_fork.py::test_fork_after_compact_keeps_region_out_of_context`）：一次请求的"前缀" = `system` 段（含 `append_system_prompt`）+ `tools` 声明 + 处理开关（`enable_thinking` / `preserve_thinking` / `reasoning_effort`）+ 消息。会话重建后这些必须逐字节复现——**适用面是同一个 session id 的重建**（逐出后水合 resume、网关重启后 restore）；fork 是新会话（session id 变化 → `prompt_cache_key` 变化，且 `before_session_start` 会在子会话上重新注入），只对账消息层前缀与 tools / 开关。场景直接对账**假 Provider 留档的原始请求体**（`probe.request(...).body`），而不是只看链形状：fork 后的 live 上下文与文件视图可能不一致，只有请求体能抓住"已摘要历史被复活""hook 注入丢失"这类回归。消息比较走 `ContextView` 的 role + 归一化 content（各自请求的最后一条会被 `cache_control` 标记序列化成块数组——那是标记位置差异，不是 token 差异）。
 
+**手动压缩的独占语义红线**（`scenarios/test_compact.py`，判据见 [compaction.md](compaction.md)）：`test_manual_compact_refused_while_working`（turn 在飞 → 409，链零变更）、`test_manual_compact_discards_pending_auto_compact`（手动压缩丢弃待生效的自动压缩：aux 清空、自动摘要永不换入）、`test_message_during_manual_compact_waits`（压缩期间投递的消息在 `compact_done` 之前不得驱动 turn，之后的请求里是压缩后的上下文）、`test_interrupt_cancels_manual_compact`（interrupt 取消在飞压缩 → 409「compaction interrupted」，消息层零变更）。切点的 usage 锚定口径由 `scenarios/test_auto_compact.py` 的增长式剧本承担（**恒定 `usage` 会让所有候选等价**，剧本必须给单调增长的 `prompt_tokens`）。
+
 **口径**（与 spec 一致，比 spec 严的部分在此声明）：
 
 - 只保 **`history` 链上的上下文事实**：链拓扑、记录配对、瞬态记录不落盘。**不做**"全事件类型 × `persist` 布尔矩阵"对账（二批）；

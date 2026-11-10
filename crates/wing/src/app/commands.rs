@@ -262,6 +262,22 @@ impl App {
             }
             return true;
         }
+        // 手动压缩在飞：这一条不发出去——后端也会把它留在 inbox 里直到压缩收口，
+        // 但用户此刻最需要的是"知道为什么没发出去"，而不是一条悬着的 pending 气泡。
+        // 草稿已经被 composer 清空，这里把整份提交产物（正文 + 图片 chip）原样还回去。
+        if self.compacting {
+            let images: Vec<_> = payload
+                .images
+                .into_iter()
+                .map(ImagePayload::into_image)
+                .collect();
+            self.restore_draft(Submission::new(payload.text, images));
+            self.show_toast(Toast::warning(
+                "Compacting context — message kept in the draft",
+                std::time::Duration::from_secs(3),
+            ));
+            return true;
+        }
         // The message only moves up into chat history when the
         // model actually receives it (user_message_accepted). Until then it
         // queues in the pending area below in-flight streaming output — and
@@ -667,10 +683,16 @@ impl App {
                 original,
                 compressed,
             } => {
+                self.compacting = false;
                 self.show_toast(Toast::info(
                     format!("Compact done: {original} → {compressed} tokens"),
                     std::time::Duration::from_secs(3),
                 ));
+            }
+            FetchPayload::CompactRefused { message } => {
+                // 压缩失败 / 被拒的收口：解除"压缩在飞"（否则发送被永久拦下）。
+                self.compacting = false;
+                self.show_toast(Toast::error(message, std::time::Duration::from_secs(3)));
             }
             FetchPayload::Toast { message, is_error } => {
                 if is_error {
@@ -887,7 +909,32 @@ fn set_yolo(app: &mut App, text: &str) -> bool {
 }
 
 /// `/compact [instruction]` — compact the context, with an optional focus.
+///
+/// 手动压缩是会话级**独占**操作（后端在非 idle 时 409 拒绝），所以这里先做三层
+/// 本地判据：turn 在飞（含等用户回答 ask）/ 还有没被接受的消息 / 已经有一次压缩
+/// 在飞。拒绝时给原因，不静默吞掉命令。
 fn compact_session(app: &mut App, text: &str) -> bool {
+    if app.compacting {
+        app.show_toast(Toast::info(
+            "Compaction already in progress",
+            std::time::Duration::from_secs(3),
+        ));
+        return true;
+    }
+    if app.turn.working {
+        app.show_toast(Toast::warning(
+            "Session is busy — press Esc to interrupt, then /compact",
+            std::time::Duration::from_secs(3),
+        ));
+        return true;
+    }
+    if app.chat.pending_len() > 0 {
+        app.show_toast(Toast::warning(
+            "Wait for the queued message to be accepted before compacting",
+            std::time::Duration::from_secs(3),
+        ));
+        return true;
+    }
     // `/compact` 或 `/compact <侧重指令>` —— 指令附加到压缩 prompt。
     let args = text.strip_prefix("/compact").unwrap().trim();
     let instruction = if args.is_empty() {
@@ -895,6 +942,13 @@ fn compact_session(app: &mut App, text: &str) -> bool {
     } else {
         Some(args.to_string())
     };
+    app.compacting = true;
+    // 持久 toast：压缩可能跑几十秒，这段时间用户需要一直看得见"发生了什么"
+    // （同时他发的消息会被拦下——见 `submit_message`）。
+    app.show_toast(Toast::persistent(
+        "Compacting context…",
+        crate::ui::toast::ToastKind::Info,
+    ));
     app.push_intent(AppIntent::CompactSession { instruction });
     true
 }

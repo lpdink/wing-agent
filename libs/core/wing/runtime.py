@@ -679,28 +679,25 @@ class WingRuntime:
     async def compact_session(
         self, session_id: str, instruction: str | None = None
     ) -> tuple[int, int]:
-        """压缩 session 上下文。
+        """手动压缩 session 上下文（会话级独占操作）。
 
         instruction 为用户下发的压缩侧重指令（/compact <侧重>），
         透传给 Compactor 附加到压缩 prompt；None 表示使用默认压缩策略。
 
-        委托给 ContextManager.do_manual_compact()，发射事件。
+        委托给 `WingAgent.compact()`：准入（非 idle / 已有压缩在飞一律拒绝）、
+        与 turn 的互斥（压缩期间不交付输入）、可中断（interrupt 取消在飞压缩）
+        都由 agent 持有；本方法只负责取会话与发射事件。
 
         Returns:
             (original_tokens, compressed_tokens)
 
         Raises:
-            LookupError: session 不存在
+            LookupError: session 不存在（含归档：SessionArchivedError）
+            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断
             RuntimeError: 未配置 compactor 或压缩失败
         """
         session = self._require_session(session_id)
-        original, compressed = await session.agent.context_manager.do_manual_compact(
-            model=session.agent.model,
-            model_provider=session.agent.model_provider,
-            current_tools=lambda: session.agent.tools,
-            instruction=instruction,
-            options=session.agent.request_options(),
-        )
+        original, compressed = await session.agent.compact(instruction)
 
         self._emit_session_event(
             CompactDoneEvent(

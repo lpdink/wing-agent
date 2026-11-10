@@ -187,7 +187,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 | resume | `POST /api/session/resume` | 同一个 session id 换入内存：还原 template_name + workspace + 模型绑定 + 提示词与动态状态（metadata 记录优先于模板/配置默认，见 glossary「持久会话状态」）；**不触发** `before_session_start`（不是新会话） |
 | fork | `POST /api/session/fork` | 写完整 metadata（workspace/forked_from/template + 源生效状态快照：模型 / 提示词 / 工具 / 开关），继承源 backend；**子会话 = 源记录前缀**（append 顺序，日志级拷贝 + uuid 全量重映射；活跃链由 tip 回溯自然得出，压缩节点即止——被压缩区间随行但不活跃，即"回得去"）；**属于创建新 session**（新 session id）→ `before_session_start` 在子会话上生效 |
 | rewind | `POST /api/session/rewind` | 丢弃指定消息之后的内容 |
-| compact | `POST /api/session/compact` | 委托 `ContextManager.do_manual_compact()` |
+| compact | `POST /api/session/compact` | 委托 `WingAgent.compact()`（准入 409 / 与 turn 互斥 / 可中断）→ `ContextManager.do_manual_compact()` |
 | interrupt | `POST /api/session/interrupt` | 委托 `Session.agent.interrupt()`；打断对账见下 |
 | release | `POST /api/session/release` | 逐出内存态（显式 eviction）；钉住条件不满足时 409 |
 | archive | `POST /api/session/archive` | 归档 / 恢复（设置归档状态）；纯移动（字节不变）；钉住条件不满足时 409 |
@@ -436,7 +436,7 @@ draft（`_record_draft`）、`render_probe --jsonl`（调试工具）、probe �
   - **不上链**：活跃链由 tip 沿 `parent_uuid` 回溯自然得出——压缩节点是根（`parent_uuid=None` + `unzip_last_uuid` 指向区间末），已摘要内容不复活；选压缩**之前**的节点时压缩节点被切在前缀之外，子会话里压缩仿佛没发生过。
   没有链遍历（`walk_full_chain` / `trace_chain` 都退出 fork 路径）：活跃链是加载语义的**结果**，不是拷贝时要算的东西。
 - **压缩节点的 `unzip_last_uuid` 是压缩区间的唯一编码**：任何复制 / 重链路径都必须把它带上——丢了，被压缩区间（乃至整段历史）就从 `/rewind`、`/fork` 候选里消失。已覆盖的两条路径：fork（记录前缀拷贝 + 全量重映射，见上）与 rewind（回退行复制 parent 时带上，回退到"压缩后第一条消息"不再塌候选）。
-- 压缩双阈值（`context_window_tokens` 触发应用、`keep_recent_tokens` 是保留区）是**模型级声明**（`providers[].models[]`，唯一配置来源）：会话构造与换模型时解析进 `Compactor`——生效窗口跟随当前模型，`/api/session/info` 的 `context_window_tokens` 即此刻的生效值；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。换模型只改后续判定：已生成的 pending compact 是链快照的预计算（切点算好、uuid 自校验），换窗口不重算它，apply 只看新窗口。
+- 压缩双阈值（`context_window_tokens` 触发应用、`keep_recent_tokens` 是保留区）是**模型级声明**（`providers[].models[]`，唯一配置来源）：会话构造与换模型时解析进 `Compactor`——生效窗口跟随当前模型，`/api/session/info` 的 `context_window_tokens` 即此刻的生效值；压缩由 `context/compaction.py` 的 LLM 摘要策略完成。换模型只改后续判定：已生成的 pending compact 是链快照的预计算（切点算好、uuid 自校验），换窗口不重算它，apply 只看新窗口。**切点锚在服务端 usage 上**（`select_cut`：候选只能是 `user` / `assistant` 消息，取最早一个「之后那段 ≤ keep_recent」的位置），本地估算只在整条信任区间都没有可信 usage 时兜底；**手动压缩**是全量压缩 + 会话级独占操作（非 idle 409、压缩期间 inbox 不交付输入、可被 interrupt 取消）。完整判据与准入矩阵见 [compaction.md](compaction.md)。
 - **token 口径锚在链上的 `usage_boundary_uuid` 边界上**（`ContextManager._usage_trust_start`）：压缩换入会把「压缩前窗口」的 `prompt_tokens` 留在链上（保留区整条复制、`usage` 随行），而保留区虽在链序上位于压缩节点之后，它的 usage 同样产生于换入之前（prompt 里含已被摘要掉的区段）。边界记的是**信任从这里恢复的那个节点**：自动压缩写「换入时刻的链尖」（保留区末条，没有保留区时是压缩节点自己）、手动压缩写自己、rewind 回退行写自己（压缩换入重链接保留区时，保留区里的边界随 relink 重映射）。读取侧取**所有可解析边界里最靠后的那个起点**，只采信它之后的服务端 usage；链上没有边界（引入该字段之前的存量记录）→ 全链可采信（历史口径，下一次压缩或 rewind 即带边界）；最后一条边界不可解析（被 rewind 剪断 / 日志损坏）→ 一条都不采信、退回估算。这份 `usage` 本身是**审计事实**（那一轮服务端回了什么），照旧留在记录里，只是不再当作"当前 context 大小"。
 
 **KV cache 的已知边界（有意不处理）**：

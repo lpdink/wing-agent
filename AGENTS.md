@@ -59,7 +59,7 @@ libs/core/wing/
 ├── chain.py                         TrackedList — 链拓扑引擎（I/O 委托 MessageLog）
 ├── context/                         上下文域包：窗口投影 / 声明集 / 压缩 / 资源加载 / 缓存账本
 │   ├── manager.py                   ContextManager — 窗口投影 / 声明集 / rewind / pending compact 编排 / 缓存分段
-│   ├── compaction.py                Compactor — 压缩策略（LLM 摘要）+ PendingCompact / LLMMessagesResult
+│   ├── compaction.py                Compactor — 压缩策略（LLM 摘要）+ 切点判据 select_cut + PendingCompact / LLMMessagesResult
 │   ├── resources.py                 skills/rules 文件加载（glob + frontmatter，与消息链无关；加载期采 src 事实）
 │   ├── cache_ledger.py              缓存账本 — 分段指纹 / 理论命中率 / 分叉归因 / 端点投影（best-effort 记账）
 │   └── cache_store.py               账本的唯一 SQL 处：cache_call / cache_segment（进程级 wing.db）
@@ -99,7 +99,7 @@ libs/core/wing/
 │   ├── react_loop.py                ReAct 主循环：drain → hook → LLM → tools → commit
 │   ├── tool_executor.py             工具并发分发（asyncio.gather）+ 中断拆卸
 │   ├── event_sink.py                AgentEventSink — 唯一事件发射出口 + persist 分流
-│   ├── inbox.py                     消息队列（drain-and-merge）+ feedback waiters
+│   ├── inbox.py                     消息队列（drain-and-merge）+ 取出口闸门（hold/release）+ feedback waiters
 │   ├── diagnostics.py               worker 协程栈内省（`_report_undead_worker` 的取证工具，纯 stdlib）
 │   └── tool_context.py              ToolContext Protocol — 工具收到的窄接口（ctx）
 ├── provider/                        模型调用层（协议隔离）
@@ -316,6 +316,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/architecture.md`](docs/dev/architecture.md) | 三层架构与数据流、TUI / stdio / ACP / 编排 CLI 四种前端形态、远程工具、会话生命周期与中断提交语义、事件系统与统一日志、持久化与压缩 |
 | [`docs/dev/backend-layout.md`](docs/dev/backend-layout.md) | 后端分层规范（`libs/core/wing/**`）：分层图与依赖方向、每包职责一句话、迁移映射（历史记录）、分层守门测试（`test_layering.py`） |
 | [`docs/dev/cache-accounting.md`](docs/dev/cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、账本位置与上界、理论命中率定义、verdict / blame / avoidable 全表（每条结论落到「我能避免 / 该报 bug / 什么都不用做」）、降级与排错手册、回滚 |
+| [`docs/dev/compaction.md`](docs/dev/compaction.md) | 上下文压缩：自动（early）压缩的双阈值与 **usage 锚定的切点**（候选位置 / `p(c)` / 兜底口径）、pending 状态机与换入语义、手动压缩（全量 + 侧重指令）的**准入矩阵**、与 turn 的互斥（inbox 取出口闸门）、可中断、TUI 交互守卫与测试面 |
 | [`docs/dev/usage.md`](docs/dev/usage.md) | 用量统计：数据来源（`audit_*` + `session_catalog`）、`GET /api/usage` 契约与各维度、10 个度量的口径与可归因性、一天与时区、根/子会话软机制、`wing usage` 命令面（热力图分档 / 7 个 `--by` / 仪表盘五段）与 `wing info` 的用量块、与 `wing cache` / 会话账本的口径差异、回填与历史起点、增长与保留、已知缺口、排错 |
 | [`docs/dev/http-api.md`](docs/dev/http-api.md) | 完整 HTTP 端点表 + WebSocket 协议 + 鉴权 |
 | [`docs/dev/glossary.md`](docs/dev/glossary.md) | 核心概念速查：SessionStore / MessageLog / TrackedList、工具命名空间、prompt 命令、压缩等 |

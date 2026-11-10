@@ -85,6 +85,15 @@ class SessionArchivedError(Exception):
         self.session_id = session_id
 
 
+class SessionBusyError(RuntimeError):
+    """会话不空闲 / 已有独占操作在飞——该操作被拒绝（而不是排队等待）。
+
+    **刻意是 ``RuntimeError`` 的子类**：网关把它单独映射成 409（客户端据此给出
+    "先中断再压缩"这类可行动提示），而其它把 ``RuntimeError`` 当"操作失败"的调用方
+    （CLI / SDK / 未来的前端）仍能照旧捕获。不是 ``LookupError``——会话明明在场。
+    """
+
+
 def _warn_alias(requested: str, resolved: str) -> None:
     """别名（请求 id ≠ 存储键）时说清发生了什么——**不做静默归一**。
 
@@ -1021,9 +1030,14 @@ class SessionManager:
         四类：在飞 turn（working / waiting）、inbox 有待处理输入、非持久
         后端、有订阅的客户端。前两者是正确性（拆解会打断它们），后两者是
         语义（memory 后端逐出即毁数据；订阅中的会话是用户的工作集）。
+
+        另加一条：**手动压缩在飞**——它是会话级独占操作（`WingAgent.compacting`），
+        status 在压缩期间仍是 idle（压缩不是 turn），拆解会把它正在改写的链拆掉。
         """
         if session.status != "idle":
             return f"status={session.status}"
+        if session.agent.compacting:
+            return "compacting"
         if session.agent.has_pending_input:
             # 消息已入队但 turn 未开始（status 仍 idle）——直接投递
             # `agent.post()` 的路径（工具侧内部投递等）不经过

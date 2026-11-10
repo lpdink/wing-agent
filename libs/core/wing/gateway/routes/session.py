@@ -65,6 +65,7 @@ from wing.config import get_config
 from wing.event import SessionStatus
 from wing.media import file_too_large_message, sniff_image_mime, too_large_message
 from wing.request_context import session_context
+from wing.session import SessionBusyError
 from wing.session.tags import validate_tag
 from wing.store.names import validate_file_name
 
@@ -747,6 +748,10 @@ async def compact_session(
             raise HTTPException(status_code=504, detail="compact timed out (1200s)")
         except LookupError:
             raise HTTPException(status_code=404, detail="session not found")
+        except SessionBusyError as e:
+            # 409：会话不空闲 / 已有压缩在飞 / 压缩被中断——重试同一个请求不会
+            # 变好，客户端要先中断在飞的 turn（或等这次的压缩收尾）。
+            raise HTTPException(status_code=409, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
