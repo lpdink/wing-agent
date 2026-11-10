@@ -4,6 +4,7 @@
 封装 agent 的入站消息管理：
 - asyncio.Queue 接收用户消息（Inbound）
 - drain / drain_for_steer 原语
+- hold / release：取出口闸门（手动压缩这类会话级独占操作期间不交付输入）
 - feedback waiters：工具通过 ask_feedback 注册，用户回复按 tool_call_id 定向 resolve
 """
 
@@ -29,18 +30,54 @@ class Inbound:
 
 
 class Inbox:
-    """Agent 入站消息管理：队列 + feedback waiters。"""
+    """Agent 入站消息管理：队列 + feedback waiters + 取出口闸门。"""
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[Inbound] = asyncio.Queue()
         # tool_call_id → Future，严格寻址。
         self._feedback_waiters: dict[str, asyncio.Future[str]] = {}
+        # 取出口闸门：hold 期间 `get()` 不把输入交给 worker（手动压缩是会话级独占
+        # 操作，压缩期间到达的消息留在队列里，压缩结束后才开始处理）。
+        self._held = False
+        self._released = asyncio.Event()
+        self._released.set()
 
     # ── 队列操作 ──
 
+    def hold(self) -> None:
+        """暂停取出口（与 `release` 成对，由独占操作的持有者调用）。
+
+        已排队的输入**留在队列里**：`has_pending` 照常为真（逐出 / 归档据此钉住
+        会话），worker 停在下一次 `get()` 的等锁上，而不是把消息取走干等。
+        """
+        self._held = True
+        self._released.clear()
+
+    def release(self) -> None:
+        """恢复取出口（幂等）。"""
+        self._held = False
+        self._released.set()
+
+    @property
+    def held(self) -> bool:
+        """取出口是否被独占操作持有。"""
+        return self._held
+
     async def get(self) -> Inbound:
-        """阻塞等待首条消息。"""
-        return await self._queue.get()
+        """阻塞等待首条消息（取出口被 hold 时等待，不取走任何条目）。"""
+        while True:
+            await self._released.wait()
+            first = await self._queue.get()
+            if not self._held:
+                return first
+            # 等到消息的途中被 hold 了：原样放回队首，回到闸门前继续等。
+            self._requeue_front([first])
+
+    def _requeue_front(self, items: list[Inbound]) -> None:
+        """把条目放回队首（保持原序）——hold 边界上取出的那条不能插到队尾。"""
+        rest = self.drain()
+        for item in [*items, *rest]:
+            self._queue.put_nowait(item)
 
     def drain(self) -> list[Inbound]:
         """Non-blocking drain：取出队列中所有待处理消息。"""

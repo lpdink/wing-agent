@@ -50,12 +50,16 @@ EARLY_MODEL = "probe/auto-compact-early"
 RESTART_MODEL = "probe/auto-compact-restart"
 
 #: 上下文窗口旋钮（模型声明）：compact_window = 1000 - 400 = 600 tokens。
-#: 首轮无服务端 usage 时走本地估算（system + 一条 user ≈ 46 tokens）→ 不触发；
-#: 剧本回报的 1100 跨过 600（early）与 1000（apply）两个阈值。
+#: 首轮无服务端 usage 时走本地估算（system + 一条 user ≈ 46 tokens）→ 不触发。
 CONTEXT_WINDOW = 1000
 KEEP_RECENT = 400
 COMPACT_WINDOW = CONTEXT_WINDOW - KEEP_RECENT
-SERVER_TOKENS = 1100
+
+#: 每一轮服务端回报的 prompt_tokens（**必须增长**）：切点锚在相邻两次 usage 之差
+#: 上（"c 之后那段上下文有多大"），恒定值会让所有候选等价、切点退化到窗口头部。
+#: 300 → 900 → 1200 → 1500：第 3 轮组装时 total=900 跨过 early（600），第 4 轮
+#: 组装时 total=1200 跨过 apply（1000）。
+SERVER_TOKENS = (300, 900, 1200, 1500)
 
 #: 压缩产物（假 Provider 的压缩调用返回带 ``<summary>`` 的文本）。
 SUMMARY_TEXT = "Task: answer the user. State: two turns done. Next: continue."
@@ -73,19 +77,25 @@ FORMAT_ANCHOR = "Wrap your summary in <summary></summary> tags."
 INSTRUCTION_ANCHOR = "Additional instruction from the user"
 
 
-def _script() -> tuple[Turn, ...]:
-    """剧本：首轮真实文本 + 其余同文本（主调用 / 后台压缩共用）。
+def _usage(index: int) -> Usage:
+    """第 ``index`` 轮的服务端口径（剧本与断言共用同一份数字）。"""
+    return Usage(prompt_tokens=SERVER_TOKENS[index])
 
-    第 4 次请求（``gamma``）一定是第 4 个 Turn（见测试内的推演：``gamma`` 只有在
-    pending 落盘之后才发出，此时后台压缩早已消费过一个 Turn），因此给它一段
-    **可辨识**的文本，用来钉死"apply 之后的那一轮"。
+
+def _script() -> tuple[Turn, ...]:
+    """剧本：三轮真实对话 + 压缩/主调用共用文本 + 换入之后的一轮。
+
+    请求序（含并发）：``alpha`` → ``beta`` → ``gamma``（组装时触发 early compact，
+    压缩请求与它并发）→ ``delta``（组装时换入）。第 3、4 个 Turn 供"压缩请求"与
+    "gamma 轮"共用（同文本、同 usage）——谁先到假 Provider 由事件循环调度决定，
+    结论因此与到达顺序无关。
     """
-    usage = Usage(prompt_tokens=SERVER_TOKENS)
     return (
-        Turn.of(text="reply one", usage=usage),
-        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=usage),
-        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=usage),
-        Turn.of(text="post compact reply", usage=usage),
+        Turn.of(text="reply one", usage=_usage(0)),
+        Turn.of(text="reply two", usage=_usage(1)),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=_usage(2)),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=_usage(2)),
+        Turn.of(text="post compact reply", usage=_usage(3)),
     )
 
 
@@ -165,10 +175,11 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
     probe.register(EARLY_MODEL, *_script())
     session = await probe.session(model=EARLY_MODEL)
 
-    # 阈值前提：剧本回报的 1100 同时跨过 early（600 = 1000 − 400）与 apply（1000）
-    # 两个阈值——这是本场景能触发后台压缩、并在下一轮换入的全部算术（首轮没有
-    # 服务端 usage，走本地估算 ≈46，远低于 early）。
-    assert COMPACT_WINDOW <= SERVER_TOKENS and SERVER_TOKENS >= CONTEXT_WINDOW
+    # 阈值前提：第 3 轮组装时的口径（900）跨过 early（600 = 1000 − 400），第 4 轮
+    # 组装时的口径（1200）跨过 apply（1000）——这是本场景能触发后台压缩、并在下一
+    # 轮换入的全部算术（首轮没有服务端 usage，走本地估算 ≈46，远低于 early）。
+    assert SERVER_TOKENS[1] >= COMPACT_WINDOW, SERVER_TOKENS
+    assert SERVER_TOKENS[2] >= CONTEXT_WINDOW, SERVER_TOKENS
 
     # 首轮：无服务端 usage，本地估算远低于阈值——不触发任何压缩。
     await session.chat("alpha")
@@ -176,12 +187,16 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
     snapshot = probe.history(session)
     alpha_uuid, reply_one_uuid = [message["uuid"] for message in snapshot.messages()]
 
-    # 第二轮：服务端 usage 跨过 early 阈值 → 后台压缩（主调用照常跑完）。
+    # 第二轮：口径 300，仍在两个阈值之下——不触发。
     await session.chat("beta")
+
+    # 第三轮：口径 900 跨过 early 阈值 → 后台压缩（主调用照常跑完）。
+    await session.chat("gamma")
     pending = await wait_pending(probe, session)
     _assert_early_compact_shape(probe, EARLY_MODEL, pending)
 
-    # pending 的内容 = 被压缩区间两端（最后一条 user 消息之前的部分）——尚未生效。
+    # pending 的内容 = 被压缩区间两端（切点落在第一轮的问答上：p("beta") 与
+    # p("reply two") 之间的差 300 ≤ keep_recent，再往左就装不下保留区了）——尚未生效。
     assert pending["start_uuid"] == alpha_uuid, pending
     assert pending["end_uuid"] == reply_one_uuid, pending
     unapplied = probe.history(session)
@@ -189,14 +204,16 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
         "alpha",
         "reply one",
         "beta",
+        "reply two",
+        "gamma",
         SUMMARY_LOOKING_TEXT,
     ], unapplied.describe()
     session.watch.assert_never("compact_done")
     assert probe.last_http_call(path="/api/session/compact") is None
 
-    # 第三轮：pending 换入 → 请求前缀与落盘链同步改变。
+    # 第四轮：pending 换入 → 请求前缀与落盘链同步改变。
     before_apply = probe.history(session)
-    result = await session.chat("gamma")
+    result = await session.chat("delta")
     assert result.data["result"] == "post compact reply", result.data
     _assert_applied(probe, session, before_apply, model=EARLY_MODEL)
 
@@ -206,8 +223,10 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
     assert [message["content"] for message in final.messages()] == [
         COMPACT_CONTENT,
         "beta",
-        SUMMARY_LOOKING_TEXT,
+        "reply two",
         "gamma",
+        SUMMARY_LOOKING_TEXT,
+        "delta",
         "post compact reply",
     ], final.describe()
 
@@ -231,6 +250,7 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
+    await session.chat("gamma")
     pending = await wait_pending(probe, session)
     _assert_early_compact_shape(probe, RESTART_MODEL, pending)
 
@@ -252,14 +272,14 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
     # 新进程里按需水合（重建 CM），下一轮 apply 生效。
     resumed = await probe.resume(session.session_id)
     assert resumed.session_id == session.session_id
-    result = await resumed.chat("gamma")
+    result = await resumed.chat("delta")
     assert result.data["result"] == "post compact reply", result.data
 
     _assert_applied(probe, resumed, before_apply, model=RESTART_MODEL)
 
-    # 留档跨重启连续（假 Provider 不重启）：4 次请求 = 首轮 + beta 轮 + 压缩 +
-    # 重启后的 gamma 轮，压缩请求在它之前。
-    assert len(probe.requests_for(RESTART_MODEL)) == 4, probe.requests.summary()
+    # 留档跨重启连续（假 Provider 不重启）：5 次请求 = 首轮 + beta 轮 + gamma 轮 +
+    # 压缩 + 重启后的 delta 轮，压缩请求在它之前。
+    assert len(probe.requests_for(RESTART_MODEL)) == 5, probe.requests.summary()
     assert (
         _compact_calls(probe, RESTART_MODEL)[0].index
         < _streamed(probe, RESTART_MODEL)[-1].index
@@ -269,8 +289,10 @@ async def test_pending_compact_survives_process_restart(probe: Probe) -> None:
     assert [message["content"] for message in final.messages()] == [
         COMPACT_CONTENT,
         "beta",
-        SUMMARY_LOOKING_TEXT,
+        "reply two",
         "gamma",
+        SUMMARY_LOOKING_TEXT,
+        "delta",
         "post compact reply",
     ], final.describe()
 
@@ -313,6 +335,7 @@ async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
+    await session.chat("gamma")
     await wait_pending(probe, session)
 
     before_apply = probe.history(session)
@@ -324,9 +347,9 @@ async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
     assert len(retained_before) == 1, before_apply.describe()
     original = retained_before[0]
     assert original.get("stop_reason") == "stop", original
-    assert original["usage"]["prompt_tokens"] == SERVER_TOKENS, original
+    assert original["usage"]["prompt_tokens"] == SERVER_TOKENS[2], original
 
-    result = await session.chat("gamma")
+    result = await session.chat("delta")
     assert result.data["result"] == "post compact reply", result.data
 
     final = probe.history(session)
@@ -346,23 +369,24 @@ async def test_compact_relink_keeps_tail_message_facts(probe: Probe) -> None:
     )
     # provider 审计字段跟随：stop_reason / usage 不缺（截断审计在压缩后仍可读）。
     assert relinked.get("stop_reason") == "stop", relinked
-    assert relinked["usage"]["prompt_tokens"] == SERVER_TOKENS, relinked
+    assert relinked["usage"]["prompt_tokens"] == SERVER_TOKENS[2], relinked
     final.assert_chain_invariants()
 
 
 def _no_usage_script() -> tuple[Turn, ...]:
     """剧本：压缩换入之后那一轮**不带 usage**（模拟不回带 usage 的兼容网关）。
 
-    前四轮与 ``_script`` 同构（主调用 / 后台压缩共用同一段文本，消除到达顺序的
-    竞态）；第 4 轮是换入之后的主调用，``usage`` 缺省 = 全零——落链的 assistant
-    的 ``prompt_tokens`` 为 0，服务端口径里"最后一条有 usage 的 assistant"因此
-    仍是保留区里那条**压缩前**的回复。第 5 轮回到真实 usage（口径自愈）。
+    前五轮与 ``_script`` 同构（主调用 / 后台压缩共用同一段文本，消除到达顺序的
+    竞态）；换入之后的那一轮（``post compact reply``）``usage`` 缺省 = 全零——落链
+    的 assistant 的 ``prompt_tokens`` 为 0，服务端口径里"最后一条有 usage 的
+    assistant"因此仍是保留区里那条**压缩前**的回复。最后一轮回到真实 usage
+    （口径自愈）。
     """
-    full = Usage(prompt_tokens=SERVER_TOKENS)
     return (
-        Turn.of(text="reply one", usage=full),
-        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=full),
-        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=full),
+        Turn.of(text="reply one", usage=_usage(0)),
+        Turn.of(text="reply two", usage=_usage(1)),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=_usage(2)),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=_usage(2)),
         Turn.of(text="post compact reply"),
         Turn.of(text="delta reply", usage=Usage(prompt_tokens=RECOVERED_TOKENS)),
     )
@@ -403,11 +427,12 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
 
     await session.chat("alpha")
     await session.chat("beta")
+    await session.chat("gamma")
     await wait_pending(probe, session)
 
-    # 换入（gamma 轮）+ 这一轮没有真实 usage。
+    # 换入（delta 轮）+ 这一轮没有真实 usage。
     before_apply = probe.history(session)
-    result = await session.chat("gamma")
+    result = await session.chat("delta")
     assert result.data["result"] == "post compact reply", result.data
     _assert_applied(probe, session, before_apply, model=STALE_MODEL)
 
@@ -416,16 +441,16 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
     total = info["context_stats"]["total_tokens"]
     assert total < COMPACT_WINDOW, info["context_stats"]
 
-    # 边界 = 换入时刻的链尖：换入那一轮请求的最后一条消息（gamma）。
+    # 边界 = 换入时刻的链尖：换入那一轮请求的最后一条消息（delta）。
     final = probe.history(session)
     compact_node, boundary = _boundary_of(probe, session)
     assert compact_node["content"] == COMPACT_CONTENT, compact_node
     assert boundary is not None, compact_node
-    assert boundary["content"] == "gamma", boundary
+    assert boundary["content"] == "delta", boundary
     assert final.messages()[-2]["uuid"] == compact_node["usage_boundary_uuid"]
 
     # 下一轮：不得再压一次、不得把整条链换成摘要。
-    result = await session.chat("delta")
+    result = await session.chat("epsilon")
     assert result.data["result"] == "delta reply", result.data
     assert len(_compact_calls(probe, STALE_MODEL)) == 1, probe.requests.summary()
     assert probe.history(session).aux(PENDING_KEY) is None
@@ -434,10 +459,12 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
     assert [message["content"] for message in settled.messages()] == [
         COMPACT_CONTENT,
         "beta",
-        SUMMARY_LOOKING_TEXT,
+        "reply two",
         "gamma",
-        "post compact reply",
+        SUMMARY_LOOKING_TEXT,
         "delta",
+        "post compact reply",
+        "epsilon",
         "delta reply",
     ], settled.describe()
 
@@ -466,9 +493,10 @@ async def test_compact_token_baseline_survives_restart(probe: Probe) -> None:
 
     await session.chat("alpha")
     await session.chat("beta")
+    await session.chat("gamma")
     await wait_pending(probe, session)
     before_apply = probe.history(session)
-    await session.chat("gamma")
+    await session.chat("delta")
     _assert_applied(probe, session, before_apply, model=BASELINE_RESTART_MODEL)
     assert (await session.info())["context_stats"]["total_tokens"] < COMPACT_WINDOW
 
@@ -491,7 +519,7 @@ async def test_compact_token_baseline_survives_restart(probe: Probe) -> None:
     info = await resumed.info()
     assert info["context_stats"]["total_tokens"] < COMPACT_WINDOW, info["context_stats"]
 
-    result = await resumed.chat("delta")
+    result = await resumed.chat("epsilon")
     assert result.data["result"] == "delta reply", result.data
     assert len(_compact_calls(probe, BASELINE_RESTART_MODEL)) == 1, (
         probe.requests.summary()
@@ -501,10 +529,12 @@ async def test_compact_token_baseline_survives_restart(probe: Probe) -> None:
     assert [message["content"] for message in settled.messages()] == [
         COMPACT_CONTENT,
         "beta",
-        SUMMARY_LOOKING_TEXT,
+        "reply two",
         "gamma",
-        "post compact reply",
+        SUMMARY_LOOKING_TEXT,
         "delta",
+        "post compact reply",
+        "epsilon",
         "delta reply",
     ], settled.describe()
     assert (await resumed.info())["context_stats"]["total_tokens"] == (RECOVERED_TOKENS)

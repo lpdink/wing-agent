@@ -30,7 +30,7 @@ Despite the name, there is no backend "magic dispatch" anymore. A slash command 
 | `/workdir` | | `<path>` | Switch the working directory |
 | `/think` | `/t` | `on\|off\|low\|medium\|high\|xhigh\|max` | Toggle thinking / set reasoning effort |
 | `/yolo` | | `on\|off` | Toggle YOLO mode (skip dangerous-command review) |
-| `/compact` | | | Compress the session context |
+| `/compact` | | `[focus]` | Compress the session context (full summary; refused while the session is busy — press `Esc` to interrupt first) |
 | `/context` | | | Show context stats and the system prompt |
 | `/skills` | | | Show loaded skills |
 | `/rewind` | | `<uuid>` | Rewind to a specific message (discards later messages) |
@@ -64,7 +64,7 @@ The source of truth for this list is `crates/wing/src/ui/popup/command.rs` (`TUI
 ## Context & maintenance
 
 ```
-/compact               # summarize old messages, keep recent ones
+/compact               # summarize the whole context (optional focus: "keep the architecture decisions")
 /context               # message count, token usage, system prompt
 /skills                # list loaded skill files
 /reload                # pick up config/hooks/skills changes without restarting

@@ -50,6 +50,14 @@ class PendingCompact:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
+class CompactionAborted(RuntimeError):
+    """手动压缩在写链前发现窗口已被改动（并发 rewind / 热切工具注入 reminder）。
+
+    这次摘要作废、链未被触碰，调用方可以**原样重试**。网关因此把它映射成 409
+    （"等它过去再试"这类可行动结论），而不是 400（参数 / 状态错误）。
+    """
+
+
 COMPACT_IMAGE_MARKER = "[image message]"
 """纯图消息（content 为空、媒体被剥离）在**压缩请求**里的替代文本。
 
@@ -92,6 +100,58 @@ def resolve_context_tokens(
     return sum(m.estimate_tokens() for m in messages)
 
 
+def select_cut(
+    messages: list[Message],
+    *,
+    trust_start: int,
+    total_tokens: int,
+    keep_recent_tokens: int,
+) -> int:
+    """按**服务端 usage** 选压缩切点：返回保留区起点下标（0 = 无可压）。
+
+    不变量：切点只落在 ``user`` / ``assistant`` 上（上下文大小已知、工具调用对构造性
+    闭合）；候选 ``p(c)`` = c 及之后第一条有 usage 的 assistant 的 ``prompt_tokens``
+    （c 在最后一条 assistant 之后时是 ``total``）；取最左的 ``p(c) >= total -
+    keep_recent`` 者，即"保留区尽可能大、逼近 keep_recent"。判据全文与已知边界
+    （软上界 / 换模型的 tokenizer 漂移）见 ``docs/dev/compaction.md`` §2。
+
+    Args:
+        messages: 上下文窗口（``ContextManager.get_context_window()``）。
+        trust_start: 窗口里服务端 usage 可信的起点（``ContextManager`` 的信任边界；
+            压缩换入 / rewind 之前的 usage 度量的是已经不存在的窗口）。
+        total_tokens: 当前上下文大小（信任区间里最后一条 usage）。
+        keep_recent_tokens: 目标保留区大小（模型声明）。
+    """
+    if not messages or total_tokens <= 0:
+        return 0
+    target = total_tokens - keep_recent_tokens
+    # 从右向左扫（保留区起点向左 = 保留区变大），记下最左的合格候选。cursor 恒为
+    # "c 处上下文有多大"：c 及之后第一条有 usage 的 assistant 的 prompt_tokens；c 在
+    # 最后一条 assistant 之后时就是 total 本身。**不因 cursor 越过 target 而提前退出**
+    # ——那要求 usage 沿链单调，而换模型 / 上游截断都会打破它；整窗只有几十条消息，
+    # 扫完的代价可以忽略。
+    cursor = total_tokens
+    choice = 0
+    for idx in range(len(messages) - 1, -1, -1):
+        if idx < trust_start:
+            break
+        msg = messages[idx]
+        if (
+            msg.role == "assistant"
+            and msg.usage is not None
+            and msg.usage.prompt_tokens > 0
+        ):
+            cursor = msg.usage.prompt_tokens
+        # 候选只能落在 user / assistant 上：两者都是"上下文大小已知、且不破坏配对"
+        # 的位置（保留区以 assistant 开头合法、由序列化层合并相邻同角色；以 tool
+        # 开头会让 tool_result 变成孤儿）。
+        if idx == 0 or msg.role not in ("user", "assistant"):
+            continue
+        if cursor >= target:
+            choice = idx
+    return choice
+
+
 class Compactor:
     """上下文压缩引擎。
 
@@ -99,6 +159,9 @@ class Compactor:
       - compact_window_tokens = context_window_tokens - keep_recent_tokens
       - Early trigger: tokens >= compact_window_tokens → 后台异步压缩
       - Apply:         tokens >= context_window_tokens → 换入预计算结果
+
+    切点见模块级 `select_cut`（服务端 usage 锚定）与 `_calc_cut_idx`（无服务端
+    数字时的估算兜底）。
     """
 
     # 本 PROMPT 取自 https://github.com/browser-use/agent-sdk（五段式续作摘要模板）。
@@ -206,11 +269,37 @@ class Compactor:
             return match.group(1).strip()
         raise RuntimeError("can't extract summary")
 
-    def _calc_cut_idx(self, messages: list[Message]) -> int:
-        """计算要压缩的消息切割点。
+    def pick_cut(
+        self,
+        messages: list[Message],
+        *,
+        trust_start: int,
+        server_tokens: int | None,
+    ) -> int:
+        """自动压缩的切点（保留区起点下标；0 = 本轮压不掉任何东西）。
 
-        从头部开始累积 token，超过 compact_window_tokens 时停止。
-        然后通过 _find_safe_cut_idx 确保工具调用对完整。
+        服务端 usage 可用时走 `select_cut`（与触发同源）；整条信任区间都没有可信
+        usage 时退回本地估算——"末尾那条还没被回答的 user 消息不得进摘要"只在估算
+        路径上需要显式剔除，服务端路径的候选位置本就要求"该处上下文大小已知"。
+        """
+        if server_tokens is not None:
+            return select_cut(
+                messages,
+                trust_start=trust_start,
+                total_tokens=server_tokens,
+                keep_recent_tokens=self.keep_recent_tokens,
+            )
+        head = messages[:-1] if messages and messages[-1].role == "user" else messages
+        return self._calc_cut_idx(head)
+
+    def _calc_cut_idx(self, messages: list[Message]) -> int:
+        """**兜底**切点：没有任何可信的服务端 usage 时才走这里。
+
+        从头部开始累积本地估算的 token，超过 compact_window_tokens 时停止，然后通过
+        `_find_safe_cut_idx` 补齐工具调用对。口径与 `need_early_trigger` 的估算兜底
+        一致（两边都拿不到服务端数字时才同时生效），因此不会出现"触发用服务端、
+        切点用估算"的混单位。已知偏差：message 估算不含 system + tools 声明
+        （窗口阈值含），切点会偏深——这正是主路径改用 `select_cut` 的原因。
         """
         if not messages:
             return 0

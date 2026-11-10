@@ -14,6 +14,7 @@
 | [settings.md](settings.md) | 设置面：声明层（`S(...)` → 目录 / 模板 / 校验）、稀疏文档与「缺席即默认」、Setting API 与保存事务、密文语义、生效域全表、setup mode、TUI 全屏面板（键位表）、首次运行向导、`wing config` CLI |
 | [media-images.md](media-images.md) | 媒体与图片（read-image）：ReadImage 工具、内容寻址媒体池、模型能力声明、请求期图片投影（高水位 + 量子批量驱逐）与 KV/前缀 cache |
 | [cache-accounting.md](cache-accounting.md) | 缓存账本（KV 前缀缓存）：分段表（谁产 label）、理论命中率定义、verdict / blame / avoidable 全表、降级与排错手册 |
+| [compaction.md](compaction.md) | 上下文压缩：自动（early）压缩的双阈值与 usage 锚定的切点、pending 状态机与换入语义、手动压缩（全量 + 侧重指令）的准入矩阵、与 turn 的互斥（inbox 取出口闸门）、可中断、TUI 交互守卫与测试面 |
 | [tui-rendering.md](tui-rendering.md) | Markdown 渲染的调试入口（`render_probe`）、`Content`/`Thinking` 两个 profile 的差异、流式==终态的不变量与对账、已知边界清单 |
 | [tui-images.md](tui-images.md) | 终端图片能力的两档阶梯、探测与配置、三态、资源上限与压力验证、新鲜度（重写同一路径 ≤1s 换图）、**用户消息里的图（网关媒体对象：形状来自引用、按视口抓字节、字节 LRU）**、失效触发点、性能数字、真机验收清单 |
 | [tui-input.md](tui-input.md) | TUI 输入通道：键盘/鼠标/滚轮的上报模式（DECSET）与生命周期对称、选择与滚动的指针语义、粘贴通道（OSC 5522：stdin 接驳 + 协议机 + 文本/图片入口） |

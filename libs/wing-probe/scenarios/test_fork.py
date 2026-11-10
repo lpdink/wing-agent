@@ -467,8 +467,11 @@ TAIL_CONTEXT_WINDOW = 1000
 TAIL_KEEP_RECENT = 400
 TAIL_COMPACT_WINDOW = TAIL_CONTEXT_WINDOW - TAIL_KEEP_RECENT
 
-#: 压缩前窗口的服务端口径（保留区里那条 assistant 携带它，换入之后不得再被采信）。
-PRE_COMPACT_TOKENS = 1100
+#: 各轮服务端回报的 prompt_tokens（**必须增长**：切点锚在相邻两次 usage 之差上，
+#: 恒定值会让所有候选等价、切点退化到窗口头部；见 ``scenarios/test_auto_compact.py``）。
+REPLY_ONE_TOKENS = 300
+REPLY_TWO_TOKENS = 900
+PRE_COMPACT_TOKENS = 1200
 #: 换入之后各轮的真实 usage（口径落到它们身上才说明"信任"恢复了）。
 PARENT_TOKENS = 300
 CHILD_TOKENS = 500
@@ -493,8 +496,11 @@ async def test_fork_inside_retained_tail_keeps_token_baseline(probe: Probe) -> N
     换入时刻的链尖（边界）落在 fork 点之后 → 指向前缀之外 → 钉到前缀末条记录
     （= 子会话活跃链尖）→ 一条都不采信。
     """
+    # 口径：300 → 900 跨过 early（600），1200 跨过 apply（1000）；切点落在第一轮
+    # 问答之后（p("beta") 与 p("reply two") 之间的差 300 ≤ keep_recent）。
     script = (
-        Turn.of(text="reply one", usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS)),
+        Turn.of(text="reply one", usage=Usage(prompt_tokens=REPLY_ONE_TOKENS)),
+        Turn.of(text="reply two", usage=Usage(prompt_tokens=REPLY_TWO_TOKENS)),
         Turn.of(
             text=f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
             usage=Usage(prompt_tokens=PRE_COMPACT_TOKENS),
@@ -510,16 +516,19 @@ async def test_fork_inside_retained_tail_keeps_token_baseline(probe: Probe) -> N
     session = await probe.session(model=COMPACT_TAIL_FORK_MODEL)
     await session.chat("alpha")
     await session.chat("beta")
+    await session.chat("gamma")
     # 等后台压缩把待生效状态落盘（apply 在下一轮请求里发生）。
     await wait_pending(probe, session)
 
-    await session.chat("gamma")
+    await session.chat("delta")
     source = probe.history(session)
     assert [message["content"] for message in source.messages()] == [
         f"[Compact] {COMPACT_TAIL_FORK_SUMMARY}",
         "beta",
-        f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+        "reply two",
         "gamma",
+        f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+        "delta",
         "post compact reply",
     ], source.describe()
 
@@ -535,13 +544,13 @@ async def test_fork_inside_retained_tail_keeps_token_baseline(probe: Probe) -> N
     assert [message["content"] for message in child_view.messages()] == [
         f"[Compact] {COMPACT_TAIL_FORK_SUMMARY}",
         "beta",
-        f"<summary>{COMPACT_TAIL_FORK_SUMMARY}</summary>",
+        "reply two",
     ], child_view.describe()
     chain = child_view.active_chain()
     # 边界钉在子会话的链尖上（指向前缀之外时不得删键——删键会退回"信任保留区"）。
     assert chain[0]["usage_boundary_uuid"] == chain[-1]["uuid"], child_view.describe()
     # 保留区里那条 assistant 的压缩前 usage 照旧随行（审计事实，不是口径）。
-    assert chain[-1]["usage"]["prompt_tokens"] == PRE_COMPACT_TOKENS, (
+    assert chain[-1]["usage"]["prompt_tokens"] == REPLY_TWO_TOKENS, (
         child_view.describe()
     )
 

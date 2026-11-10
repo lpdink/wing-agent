@@ -163,7 +163,7 @@ crew 被折起时行尾会多一行 `N tasks · M crew folded`（M 同样含不�
 | `wing branches <sid>` | 列出可 fork / rewind 的节点（`fork` / `rewind` 要的 uuid 从这里来） |
 | `wing asks <sid> [--wait N] [--json]` | 在挂的 Ask 及其 `tool_call_id`（在挂 Ask 不在链上，`tail` 看不到） |
 | `wing interrupt <sid>`（别名 `wing int <sid>`） | 中断当前轮次（TUI 的 Esc）；半成品留在上下文里 |
-| `wing compact <sid> [instruction]` | 手动压缩上下文，可给侧重指令 |
+| `wing compact <sid> [instruction]` | 手动压缩上下文，可给侧重指令。会话**不空闲**（在跑轮次 / 有排队输入 / 已有压缩在飞）时 409 拒绝——先 `wing interrupt <sid>`；压缩期间的投递会排队到压缩收口才处理 |
 | `wing update <sid> [--model --agent --title --thinking --effort --yolo --tools --workspace]` | 只改你传的字段；`--agent` 会带上新模板的 thinking / effort / yolo |
 | `wing tag <sid> [tags...] [--remove T] / wing tag --list` | 读写会话标签（幂等；`--list` 是全局清点） |
 

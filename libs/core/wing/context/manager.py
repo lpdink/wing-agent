@@ -31,6 +31,7 @@ from wing.schema.cache import (
 
 from .cache_ledger import CacheLedger
 from .compaction import (
+    CompactionAborted,
     Compactor,
     LLMMessagesResult,
     PendingCompact,
@@ -459,7 +460,7 @@ class ContextManager:
             return result(self.get_context_window())
 
         msgs = self.get_context_window()
-        server_tokens = self._last_prompt_tokens()
+        trust_start, server_tokens = self._usage_window()
 
         # ── Step 1: 有预计算结果？尝试 apply ──
         if self._pending_compact_result is not None:
@@ -492,7 +493,9 @@ class ContextManager:
 
         # ── Step 3: 该触发 early compact 了？ ──
         if self.compactor.need_early_trigger(msgs, server_tokens):
-            self._start_background_compact(msgs, model, model_provider, options)
+            self._start_background_compact(
+                msgs, model, model_provider, options, trust_start, server_tokens
+            )
 
         return result(msgs)
 
@@ -503,19 +506,20 @@ class ContextManager:
         msgs: list[Message],
         model: str,
         model_provider: ModelProvider,
-        options: "RequestOptions | None" = None,
+        options: "RequestOptions | None",
+        trust_start: int,
+        server_tokens: int | None,
     ) -> None:
-        """启动后台异步 compact task。"""
-        preserve_last = msgs[-1].role == "user" if msgs else False
-        head = msgs[:-1] if preserve_last else msgs
-        cut_idx = self.compactor._calc_cut_idx(head)
-
+        """启动后台异步 compact task（切点判据见 `Compactor.pick_cut`）。"""
+        cut_idx = self.compactor.pick_cut(
+            msgs, trust_start=trust_start, server_tokens=server_tokens
+        )
         if cut_idx == 0:
             return
 
-        start_uuid: str = head[0].uuid  # ty: ignore[invalid-assignment]
-        end_uuid: str = head[cut_idx - 1].uuid  # ty: ignore[invalid-assignment]
-        full_context = [self.system_prompt] + head[:cut_idx]
+        start_uuid: str = msgs[0].uuid  # ty: ignore[invalid-assignment]
+        end_uuid: str = msgs[cut_idx - 1].uuid  # ty: ignore[invalid-assignment]
+        full_context = [self.system_prompt] + msgs[:cut_idx]
         # 使用声明集——与主调用 prefix 一致，最大化缓存命中
         compact_tools = list(self._declared_tools)
 
@@ -707,6 +711,11 @@ class ContextManager:
             provider=getattr(model_provider, "name", ""),
         )
 
+        # 快照 ⇄ 现在的窗口必须一致：压缩期间任何改链动作（rewind / 未来的新入口）
+        # 都会被下面这个 `set_tip` 静默覆盖。不一致就整次放弃——绝不落半份摘要。
+        if [m.uuid for m in self.get_context_window()] != [m.uuid for m in msgs]:
+            raise CompactionAborted("session chain changed during compaction; retry")
+
         last_compressed_uuid = msgs[-1].uuid if msgs else None
         compact_node = Message(
             role="assistant",
@@ -792,18 +801,26 @@ class ContextManager:
         self._messages.append(event)
 
     def _last_prompt_tokens(self) -> int | None:
-        """从消息列表中查找最后一条有服务端 usage 的 assistant 消息的 prompt_tokens。
+        """服务端回传的真实 context 大小（信任区间里最后一条 assistant 的 usage）。
 
-        这是服务端回传的真实 context 大小——优先使用。事件节点不计。
+        事件节点不计；只采信**能证明度量在当前窗口上**的 usage（见 `_usage_trust_start`）。
+        没有可信 usage 时返回 None（调用方退回本地估算）。
+        """
+        return self._usage_window()[1]
 
-        只采信**能证明度量在当前窗口上**的 usage（见 `_usage_trust_start`）：压缩
-        换入会把「压缩前窗口」的数值留在链上（保留区整条复制、usage 随行），按它
-        判定 context 大小会让压缩阈值对着一份已经不存在的窗口反复触发。
+    def _usage_window(self) -> tuple[int, int | None]:
+        """信任区间在**窗口坐标**里的起点 + 该区间最后一条可信 usage。
+
+        返回 ``(window_start, total)``：``window_start`` 是 `get_context_window()`
+        的下标（窗口是活跃链的 Message 投影，事件节点不占位），``total`` 为 None
+        表示一条可信 usage 都没有。压缩切点（`select_cut`）与阈值判定共用本方法
+        ——两者必须同一个数字，否则会出现"按服务端触发、按估算切"的混口径。
         """
         chain = self._messages.active_chain
         start = self._usage_trust_start(chain)
         if start is None:
-            return None
+            return 0, None
+        window_start = sum(1 for node in chain[:start] if isinstance(node, Message))
         for node in reversed(chain[start:]):
             if (
                 isinstance(node, Message)
@@ -811,8 +828,8 @@ class ContextManager:
                 and node.usage is not None
                 and node.usage.prompt_tokens > 0
             ):
-                return node.usage.prompt_tokens
-        return None
+                return window_start, node.usage.prompt_tokens
+        return window_start, None
 
     def _usage_trust_start(self, chain: list[ChainNode]) -> int | None:
         """活跃链上「服务端 usage 可采信」的起点下标（None = 一条都不采信）。

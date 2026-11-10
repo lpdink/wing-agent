@@ -30,7 +30,7 @@
 | `/workdir` | | `<path>` | 切换工作目录 |
 | `/think` | `/t` | `on\|off\|low\|medium\|high\|xhigh\|max` | 开关 thinking / 设置推理力度 |
 | `/yolo` | | `on\|off` | 开关 YOLO 模式（跳过危险命令审查） |
-| `/compact` | | | 压缩 session 上下文 |
+| `/compact` | | `[侧重指令]` | 压缩 session 上下文（全量摘要；会话不空闲时拒绝，先 `Esc` 中断） |
 | `/context` | | | 显示上下文统计与系统提示词 |
 | `/skills` | | | 显示已加载的 skills |
 | `/rewind` | | `<uuid>` | 回退到指定消息（丢弃其后所有消息） |
@@ -64,7 +64,7 @@
 ## 上下文与维护
 
 ```
-/compact               # 摘要旧消息，保留近期消息
+/compact               # 把整段上下文压成一条摘要（可带侧重：「保留架构决策」）
 /context               # 消息数、token 用量、系统提示词
 /skills                # 列出已加载的 skill 文件
 /reload                # 无需重启即可生效配置/hooks/skills 变更

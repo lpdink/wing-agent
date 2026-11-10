@@ -151,6 +151,12 @@ pub struct App {
     last_tick: std::time::Instant,
     /// Active toast notification (lazy-expired in draw).
     toast: Option<Toast>,
+    /// 手动压缩在飞（`/compact` 的 HTTP 回执还没到）。
+    ///
+    /// 会话级独占操作：压缩期间不发消息（草稿原样留在 composer），也不接受第二次
+    /// `/compact`。后端另有权威判据（非 idle 一律 409）——这里只管"用户看得见、
+    /// 不会白等"的交互面。
+    compacting: bool,
     /// Queued ask panels (every ask — the retired Bash confirmation included;
     /// see `AskPanel::from_ask`). Concurrent asks queue up; the front entry is
     /// the active one.
@@ -296,6 +302,7 @@ impl App {
             program_status: Reporter::from_env(),
             last_tick: std::time::Instant::now(),
             toast: None,
+            compacting: false,
             ask_panels: std::collections::VecDeque::new(),
             model_panel: None,
             model_sources: Vec::new(),

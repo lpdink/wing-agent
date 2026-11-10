@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::commands;
 use crate::app::intent::SessionUpdate;
 use crate::app::*;
+use crate::protocol::{EventMeta, SessionStatus, WingEvent};
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
 use crate::ui::input_area::SubmitPayload;
@@ -1910,5 +1911,312 @@ fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
     assert!(
         app.drain_intents().is_empty(),
         "agent 忙碌时不刷新——刷新留到下一次打开"
+    );
+}
+
+// ── 手动压缩的交互守卫（准入 / 压缩中禁发 / 回执收口）──
+//
+// 后端是权威判据（非 idle 一律 409），这里守的是"用户在 TUI 上看到什么"：
+// 不许发、不许重复压、压缩中发的消息原样还回草稿、回执到了就解除拦截。
+
+/// 造一个"turn 在飞"的 app（TurnStarted 是 working 的唯一来源）。
+fn app_with_running_turn() -> App {
+    let mut app = test_app();
+    app.handle_event(WingEvent::TurnStarted {
+        meta: EventMeta {
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            session_id: Some("test-session".into()),
+            request_id: "r".into(),
+        },
+    });
+    app.drain_intents();
+    app
+}
+
+#[test]
+fn test_compact_refused_while_turn_runs() {
+    let mut app = app_with_running_turn();
+    assert!(app.try_frontend_command("/compact keep the design"));
+    assert!(
+        app.drain_intents().is_empty(),
+        "turn 在飞时不得发出压缩请求"
+    );
+    let toast = app.toast.as_ref().expect("说明为什么被拒");
+    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Warning);
+    assert!(toast.message.contains("busy"), "{}", toast.message);
+    assert!(!app.compacting);
+}
+
+#[test]
+fn test_compact_starts_with_a_persistent_toast() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact keep the design"));
+    let intents = app.drain_intents();
+    assert!(
+        matches!(
+            &intents[..],
+            [AppIntent::CompactSession {
+                instruction: Some(i)
+            }] if i == "keep the design"
+        ),
+        "{intents:?}"
+    );
+    assert!(app.compacting, "压缩在飞：发送要被拦下");
+    let toast = app.toast.as_ref().expect("进行中提示");
+    assert!(toast.persistent, "压缩可能跑几十秒，提示不能自己过期");
+    assert_eq!(toast.message, "Compacting context…");
+}
+
+#[test]
+fn test_second_compact_is_refused_while_one_runs() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    assert!(app.try_frontend_command("/compact"));
+    assert!(app.drain_intents().is_empty(), "不许并发两次压缩");
+    let toast = app.toast.as_ref().expect("说明为什么被拒");
+    assert_eq!(toast.message, "Compaction already in progress");
+}
+
+#[test]
+fn test_send_is_held_in_the_draft_while_compacting() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+
+    assert!(app.submit_message(SubmitPayload::text("hello")));
+    assert!(
+        app.drain_intents().is_empty(),
+        "压缩中不得把消息投出去（后端也会把它压在 inbox 里）"
+    );
+    assert_eq!(app.chat.pending_len(), 0, "不得留一条悬着的 pending");
+    assert_eq!(app.input.text(), "hello", "草稿原样还回 composer");
+    let toast = app.toast.as_ref().expect("说明为什么没发出去");
+    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Warning);
+}
+
+#[test]
+fn test_compact_done_clears_the_block() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    assert!(app.compacting, "命令本身必须置位（下面的回执才有东西可清）");
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::CompactDone {
+            original: 100,
+            compressed: 10,
+        },
+    });
+    assert!(!app.compacting);
+    let toast = app.toast.as_ref().expect("完成提示");
+    assert_eq!(toast.message, "Compact done: 100 → 10 tokens");
+}
+
+#[test]
+fn test_compact_failure_clears_the_block() {
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "test-session".into(),
+        payload: crate::app::intent::FetchPayload::CompactFailed {
+            message: "Compact refused: session is not idle".into(),
+        },
+    });
+    assert!(!app.compacting, "失败回执必须解除发送拦截");
+    let toast = app.toast.as_ref().expect("失败提示");
+    assert_eq!(toast.kind, crate::ui::toast::ToastKind::Error);
+}
+
+#[test]
+fn test_a_compaction_receipt_from_another_session_still_clears_the_block() {
+    // 回执在会话守卫**之前**分派：否则换了会话就永远没人解除"压缩在飞"。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "an-older-session".into(),
+        payload: crate::app::intent::FetchPayload::CompactDone {
+            original: 10,
+            compressed: 1,
+        },
+    });
+    assert!(!app.compacting, "旧会话的回执也要解除拦截");
+    assert!(app.toast.is_none(), "但不要在别的会话里 toast 它的结果");
+}
+
+// ── /compact 的落地（`dispatch_compact`）──
+//
+// `execute_intent` 需要 `WingTerminal`，所以往返这一段抽成了独立函数
+// （同 `dispatch_send_message`）。这里直接驱动它：无连接、成功、409 三条路径。
+
+/// 一个只答 `/api/session/compact` 的极简 HTTP 服务：返回给定的状态码与响应体。
+async fn compact_endpoint(status: u16, body: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    base
+}
+
+async fn wait_compaction_receipt(
+    rx: &mut tokio::sync::mpsc::Receiver<crate::app::intent::FetchResult>,
+) -> crate::app::intent::FetchPayload {
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("回执必须到达")
+        .expect("回执通道还开着")
+        .payload
+}
+
+#[tokio::test]
+async fn test_dispatch_compact_without_a_connection_reports_instead_of_silence() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::dispatch_compact(None, "sess".into(), None, tx).await;
+    match wait_compaction_receipt(&mut rx).await {
+        crate::app::intent::FetchPayload::CompactFailed { message } => {
+            assert!(message.contains("not connected"), "{message}");
+        }
+        _ => panic!("expected CompactFailed"),
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_compact_maps_success_to_the_token_pair() {
+    let base = compact_endpoint(
+        200,
+        r#"{"ok":true,"original_tokens":1000,"compressed_tokens":200}"#,
+    )
+    .await;
+    let http = wing_api_client::GatewayClient::new(&base, None).expect("client");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::dispatch_compact(Some(http), "sess".into(), None, tx).await;
+    match wait_compaction_receipt(&mut rx).await {
+        crate::app::intent::FetchPayload::CompactDone {
+            original,
+            compressed,
+        } => {
+            assert_eq!((original, compressed), (1000, 200));
+        }
+        _ => panic!("expected CompactDone"),
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_compact_turns_a_409_into_a_refusal_line() {
+    // 网关的错误响应形状是 `ErrorResponse{error, detail}`（不是 FastAPI 的裸 detail）。
+    let base = compact_endpoint(
+        409,
+        r#"{"error":"conflict","detail":"session is not idle"}"#,
+    )
+    .await;
+    let http = wing_api_client::GatewayClient::new(&base, None).expect("client");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    crate::app::runner::dispatch_compact(Some(http), "sess".into(), None, tx).await;
+    match wait_compaction_receipt(&mut rx).await {
+        crate::app::intent::FetchPayload::CompactFailed { message } => {
+            assert_eq!(message, "Compact refused: session is not idle");
+        }
+        _ => panic!("expected CompactFailed"),
+    }
+}
+
+#[test]
+fn test_compact_refused_while_a_message_is_queued() {
+    let mut app = test_app();
+    app.chat.push_pending(
+        "req-1".into(),
+        crate::ui::chat_view::Submission::text("still queued"),
+    );
+    assert!(app.try_frontend_command("/compact"));
+    assert!(
+        app.drain_intents().is_empty(),
+        "排队输入等同「这一轮马上要开跑」"
+    );
+    let toast = app.toast.as_ref().expect("说明为什么被拒");
+    assert!(toast.message.contains("queued"), "{}", toast.message);
+    assert!(!app.compacting);
+}
+
+#[test]
+fn test_a_switched_sync_session_ends_the_compaction_block() {
+    // 会话身份在压缩期间变了（重连换成了新会话）：回执再也不会认领，标记必须作废。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    assert!(app.compacting);
+
+    let mut event = sync_event_with_status(
+        SessionStatus::Idle,
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+    );
+    if let WingEvent::SyncSession { session_id, .. } = &mut event {
+        *session_id = "a-newer-session".into();
+    }
+    app.handle_event(event);
+
+    assert!(!app.compacting, "换了会话就没人能解除旧的压缩标记");
+    assert!(app.toast.is_none(), "顺手把持久提示也收掉");
+}
+
+#[test]
+fn test_finish_compaction_leaves_other_persistent_toasts_alone() {
+    // 断线提示也是持久的：压缩收口顺手抹掉它，断着线的用户就再也看不到提示了。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    app.show_toast(Toast::persistent(
+        "⚡ Connection lost — reconnecting…",
+        crate::ui::toast::ToastKind::Warning,
+    ));
+
+    app.finish_compaction();
+    assert!(!app.compacting);
+    assert_eq!(
+        app.toast.as_ref().map(|toast| toast.message.as_str()),
+        Some("⚡ Connection lost — reconnecting…")
+    );
+}
+
+#[test]
+fn test_finish_compaction_keeps_a_plain_toast() {
+    // 只清"压缩中"那条持久提示；普通的 3s 提示是别的事情，不该被顺手抹掉。
+    let mut app = test_app();
+    assert!(app.try_frontend_command("/compact"));
+    app.drain_intents();
+    app.show_toast(Toast::info(
+        "something else",
+        std::time::Duration::from_secs(3),
+    ));
+
+    app.finish_compaction();
+    assert!(!app.compacting);
+    assert_eq!(
+        app.toast.as_ref().map(|toast| toast.message.as_str()),
+        Some("something else")
     );
 }

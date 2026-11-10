@@ -274,6 +274,11 @@ class FakeProvider:
                 headers=headers,
                 request_index=logged.index,
             )
+        # 非流式也撑得住"响应未到"的窗口：压缩这类非流式调用没有分片可断，只靠
+        # 首帧前的那一段等待（``first_delay`` 优先，其次 ``delay``）表达慢调用。
+        delay = turn.first_delay if turn.first_delay is not None else turn.delay
+        if delay:
+            await asyncio.sleep(delay)
         return web.json_response(
             completion_response(
                 turn,

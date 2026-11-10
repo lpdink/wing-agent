@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import asyncio
 
+from wing.agent import SessionBusyError
 from wing.agent.event_sink import emit_best_effort
 from wing.event import (
     BUSY_STATES,
@@ -679,28 +680,26 @@ class WingRuntime:
     async def compact_session(
         self, session_id: str, instruction: str | None = None
     ) -> tuple[int, int]:
-        """压缩 session 上下文。
+        """手动压缩 session 上下文（会话级独占操作）。
 
         instruction 为用户下发的压缩侧重指令（/compact <侧重>），
         透传给 Compactor 附加到压缩 prompt；None 表示使用默认压缩策略。
 
-        委托给 ContextManager.do_manual_compact()，发射事件。
+        委托给 `WingAgent.compact()`：准入（非 idle / 已有压缩在飞一律拒绝）、
+        与 turn 的互斥（压缩期间不交付输入）、可中断（interrupt 取消在飞压缩）
+        都由 agent 持有；本方法只负责取会话与发射事件。
 
         Returns:
             (original_tokens, compressed_tokens)
 
         Raises:
-            LookupError: session 不存在
-            RuntimeError: 未配置 compactor 或压缩失败
+            LookupError: session 不存在（归档命中是 SessionArchivedError，刻意不继承
+                LookupError——网关单独映射成 404 + ``error="session_archived"``）
+            SessionBusyError: 会话不空闲 / 已有压缩在飞 / 压缩被中断 / 正在关闭
+            RuntimeError: 未配置 compactor / 压缩失败 / 压缩期间链被改动
         """
         session = self._require_session(session_id)
-        original, compressed = await session.agent.context_manager.do_manual_compact(
-            model=session.agent.model,
-            model_provider=session.agent.model_provider,
-            current_tools=lambda: session.agent.tools,
-            instruction=instruction,
-            options=session.agent.request_options(),
-        )
+        original, compressed = await session.agent.compact(instruction)
 
         self._emit_session_event(
             CompactDoneEvent(
@@ -745,14 +744,23 @@ class WingRuntime:
 
         委托给 ContextManager.rewind()，发射事件。
 
+        手动压缩在飞时拒绝：压缩是会话级独占操作，它拿的是压缩开始时的窗口快照，
+        收口时会 `set_tip` 到快照的链末——期间的 rewind 会被它静默覆盖（用户以为
+        回退生效了、实际上从链上消失了，而摘要里还带着想丢弃的内容）。
+
         Returns:
             draft 文本，或 None
 
         Raises:
             LookupError: session 不存在
             ValueError: target_uuid 无效
+            SessionBusyError: 会话正在压缩
         """
         session = self._require_session(session_id)
+        if session.agent.compacting:
+            raise SessionBusyError(
+                "session is compacting; wait for it to finish before rewinding"
+            )
         cm = session.agent.context_manager
 
         draft = cm.rewind(target_uuid)

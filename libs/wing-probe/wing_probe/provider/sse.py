@@ -11,7 +11,8 @@
 分片与延迟：``Turn.chunk`` 决定 thinking / text 的分片粒度；``ToolCall.cut``
 决定参数 JSON 的切断点；``Turn.delay`` 是**除首帧外**每帧前的等待秒数
 （由 server 逐帧 sleep）；``Turn.first_delay`` 给定则取代**首个内容帧**上的
-``delay``（撑开「首帧未到」的窗口，其余帧仍按 ``delay`` 的节奏）。
+``delay``（撑开「首帧未到」的窗口，其余帧仍按 ``delay`` 的节奏）。非流式响应
+（压缩调用）没有分片，整段等待取 ``first_delay``（缺省回落到 ``delay``）。
 """
 
 from __future__ import annotations

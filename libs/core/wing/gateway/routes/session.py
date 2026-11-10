@@ -62,8 +62,10 @@ from wing.gateway.routes._common import (
 from wing.common.utils import InvalidInputError, validate_session_id
 from wing.common.logger import log
 from wing.config import get_config
+from wing.context import CompactionAborted
 from wing.event import SessionStatus
 from wing.media import file_too_large_message, sniff_image_mime, too_large_message
+from wing.agent import SessionBusyError
 from wing.request_context import session_context
 from wing.session.tags import validate_tag
 from wing.store.names import validate_file_name
@@ -747,6 +749,10 @@ async def compact_session(
             raise HTTPException(status_code=504, detail="compact timed out (1200s)")
         except LookupError:
             raise HTTPException(status_code=404, detail="session not found")
+        except (SessionBusyError, CompactionAborted) as e:
+            # 409：会话不空闲 / 已有压缩在飞 / 压缩被中断 / 压缩期间链被改动。前三种
+            # 要先中断在飞的 turn，最后一种是"重试即可"——都不是 400 那种参数错误。
+            raise HTTPException(status_code=409, detail=str(e))
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
@@ -814,6 +820,9 @@ async def rewind_session(
         draft = server.runtime.rewind_session(body.session_id, body.target_uuid)
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
+    except SessionBusyError as e:
+        # 409：手动压缩在飞（会话级独占操作）——它与 rewind 的链写入不兼容。
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
