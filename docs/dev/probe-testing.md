@@ -14,7 +14,7 @@
 |------|--------|
 | `make test-probe` | 全部：基础设施自测 + 场景（= `uv run pytest libs/wing-probe/ --timeout=120 --dist loadfile -n 1.5×核数`） |
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
-| `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（不起网关，秒级） |
+| `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（绝大多数不起网关，秒级；就绪握手的反例要真网关，见 `test_env_readiness.py`） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
 | `make test` | 四组（python / probe / rust / ts）**并行**跑完，末尾统一给结论（失败详情在结论之前）——见 `scripts/collect_output.sh` |
 | CI | `probe-check` job（与 `python-check` / `rust-check` 并列） |
@@ -45,7 +45,9 @@
 
 **就绪握手：`/api/health` 的 200 不等于「这个网关是我们的」。** `reserve_port()` 是 `bind(0)` 后立刻释放（关闭 socket 后存在竞态），从预留到子进程真正 bind 之间有窗口——子进程要跑完解释器启动 + `import wing`，过载的 CI 上以秒计。窗口里**另一个 probe env** 拿到同一个端口，那个端口上就听着别人的网关：`/api/health` 无鉴权、照常 200（`wait_for_health` 只在每次 GET **前**看进程死活，半途时刻会漏），我们的子进程反而在 `GatewayServer.start()` 的端口占用检查上 `sys.exit(1)` 退了。判错的代价不是红而是**假绿**：整套场景对着别人的 `WING_HOME` 跑断言（还会顺手改掉邻居的 `config.yaml`）。2026-11-10 的 CI 就是这么挂的——`test_settings_restart_required.py` 挂在 `assert process.poll() is None`（`assert 1 is None`），而它前面所有 settings 断言全过（打的是邻居的网关）。
 
-所以 200 之后还有两道：先看一眼子进程（此刻已退出 ⇒ 应答者不是我们），再**核对身份**——`GET /api/settings/get` 的 `fingerprint` = 应答者读的那份 `config.yaml` 的 sha256，而那份文件是本 env 刚写的。不符即 `GatewayPortCollision`（可重试：换端口重来，上限仍是 `gateway_attempts`）。两种"核对不了"的情形退化为只看进程死活：场景把配置文件删了（没有凭据可用），以及 auth 打开但没有 admin key（`settings/get` 必 403，只有 tool_runtime key 时不制造假红）。代价是每次 env 启动多一个 `settings/get`（毫秒级）。判据与反例钉在 `tests/test_env_readiness.py`（邻居的网关绝不被报成"就绪"、干净环境下核对真的跑了、auth 下用的是场景自己的 admin key）。
+所以 200 之后还有两道：先看一眼子进程（此刻已退出 ⇒ 应答者不是我们），再**核对身份**——`GET /api/settings/get` 的两个 env 唯一事实：`config_path`（应答者读的那份 `config.yaml` 的绝对路径）与 `fingerprint`（那份文件的 sha256，本 env 刚写下它）。**两个都要对**：只看指纹不够——`config_text` 逐字落盘、端口由 `-p` 覆盖，两个 env 用同一份原文时字节相同、指纹也相同。不符即 `GatewayPortCollision`（可重试：换端口重来，上限仍是 `gateway_attempts`）。
+
+两个方向都不许误判。**"核对不了"退化为只看进程死活**（不制造假红）：不带 key 时被 401/403（auth 打开但场景只写了 tool_runtime key），或子进程读的那份文件根本不存在（场景把 `WING_HOME` 重定向走了）。**"不是我们的网关"要的是肯定证据**：带着 admin key 仍被拒才算；`settings/get` 干脆打不通时，只有子进程已退才判端口被抢，否则按"网关不再应答"报（不去赖端口）。代价是每次 env 启动多一个 `settings/get`（毫秒级；单请求超时 `HEALTH_REQUEST_TIMEOUT`）。判据与反例钉在 `tests/test_env_readiness.py`（邻居的网关绝不被报成"就绪"、同一份 `config_text` 的两个 env 也不行、干净环境下核对真的跑了、auth 下用的是场景自己的 admin key）。
 
 **为什么台账钩子住 `libs/wing-probe/conftest.py`，而不在 `scenarios/` 里**：pytest 的 conftest 加载只从某个路径**向上**走（`Config._importconftest`：`for parent in reversed((directory, *directory.parents))`），而从不下潜；**xdist 的 controller 不做收集**，只为 `args` 调这个函数。于是 `pytest libs/wing-probe/`（`make test-probe` 的原样调用）时 controller 只加载 args 那一层的 conftest——把台账的合并/汇总钩子放进嵌套的 `scenarios/conftest.py`，串行照常工作、一开 `-n` 就成死代码：失败现场的转储路径与逃生舱理由整体消失（CI 的 `probe-check` 没有 artifacts 上传步骤，终端汇总就是这些路径的聚汇点），而测试仍然全绿。`tests/test_conftest_layout.py` 用 AST 门禁守这条位置约定（改名的同义本地函数不算数）。
 

@@ -833,7 +833,12 @@ class ProbeEnv:
                     _log.warning("gateway start failed (attempt %d): %s", attempt, exc)
                     continue  # 大概率端口冲突：换端口重试
                 # 保留失败分类（GatewayPortCollision 的可重试语义不该被包装掉）。
-                raise type(exc)(f"{exc}\n{self.startup_report(binary)}") from exc
+                error = (
+                    GatewayPortCollision
+                    if isinstance(exc, GatewayPortCollision)
+                    else ProbeEnvError
+                )
+                raise error(f"{exc}\n{self.startup_report(binary)}") from exc
             self._log_marker(f"--- probe: gateway healthy on port {port} ---")
             return
         raise last_error if last_error is not None else ProbeEnvError("gateway failed")
@@ -849,50 +854,69 @@ class ProbeEnv:
         时刻，而漏掉的代价不是红而是**假绿**——整套场景对着别人的 ``WING_HOME`` 跑
         断言（还会顺手改掉邻居的 config.yaml）。
 
-        身份凭据只有一份：``GET /api/settings/get`` 回的 ``fingerprint`` = 应答者读的
-        那份 ``config.yaml`` 的 sha256，而那份文件是本 env 写的（见
-        :func:`config_fingerprint`）。坏配置（setup mode）也照算，所以这条对
-        ``config_text`` 场景同样成立。
+        凭据取自 ``GET /api/settings/get`` 的两个 env 唯一事实：``fingerprint``（应答者
+        读的那份文件的 sha256，本 env 刚写下它）与 ``config_path``（应答者的 WING_HOME
+        下的绝对路径）。**两个都要对**——只看指纹不够：``config_text`` 逐字落盘、端口
+        由 ``-p`` 覆盖，两个 env 用同一份原文时字节相同、指纹也相同。坏配置（setup
+        mode）两条都照常给出，所以对 ``config_text`` 场景同样成立。
 
         Raises:
-            GatewayPortCollision: 应答者是别人（指纹不符 / 不是 Setting API）。
-            ProbeEnvError: 应答者是我们，但子进程已退出（产品侧启动即崩）。
+            GatewayPortCollision: 应答者是别人（路径 / 指纹不符，或带着 key 仍被拒）。
+            ProbeEnvError: 应答者是我们、但核对期间子进程退出或不再应答。
         """
         port = self._port
-        expected = config_fingerprint(self.config_path)
+        expected_path = self.gateway_config_path()
+        expected = config_fingerprint(expected_path)
         if port is None or expected is None:
-            return  # 没有身份凭据可用（场景刻意删掉配置文件）——退回只看进程死活
-        headers: dict[str, str] | None = None
+            return  # 没有凭据可用（子进程读的那份文件不存在）——退回只看进程死活
         key = self._admin_key
-        if key is not None:
-            # auth 打开时 settings/get 受鉴权保护；auth 关着时这个头被忽略，无害。
-            headers = {"Authorization": f"Bearer {key}"}
-        elif (self.auth or {}).get("enabled"):
-            return  # auth 打开但没有可用的 admin key：settings/get 必被拒，核对不了
+        # auth 打开时 settings/get 受鉴权保护：带场景自己写下的 admin key（auth 关着
+        # 时这个头被忽略）。只有 tool_runtime key 时不带——那把读不了 Setting API。
+        headers = {"Authorization": f"Bearer {key}"} if key else None
         url = f"{self.gateway_url}/api/settings/get"
         try:
-            # 与健康检查同一份就绪预算：settings/get 实际应答是毫秒级，这个上限只在
-            # 病态负载下才用得上（超时按未定处理 ⇒ 交给换端口重试，不当作指纹不符）。
             async with httpx.AsyncClient(
-                timeout=self._health_timeout, trust_env=False
+                timeout=HEALTH_REQUEST_TIMEOUT, trust_env=False
             ) as client:
                 response = await client.get(url, headers=headers)
         except httpx.HTTPError as exc:
-            raise GatewayPortCollision(
-                f"identity check failed: {url} is not answering ({exc})"
+            if self._process is not None and self._process.poll() is not None:
+                # 端口无应答 + 子进程已退：那个 200 不是它给的。
+                raise GatewayPortCollision(
+                    f"{url} stopped answering while our gateway exited with code "
+                    f"{self._process.returncode} — the 200 came from another "
+                    f"process\n{log_section(self.log_path)}"
+                ) from exc
+            raise ProbeEnvError(
+                f"identity check could not reach {url} ({exc})\n"
+                f"{log_section(self.log_path)}"
             ) from exc
+        if response.status_code in (401, 403):
+            if headers is None:
+                return  # 我们自己没带 key：核对不了，不据此判"端口被抢"
+            raise GatewayPortCollision(
+                f"identity check failed: {url} rejected our admin key "
+                f"({response.status_code}) — the listener on port {port} is not ours"
+            )
         if response.status_code != 200:
             raise GatewayPortCollision(
                 f"identity check failed: {url} answered {response.status_code} "
                 f"(the listener on port {port} is not our gateway)"
             )
         try:
-            actual = response.json().get("fingerprint")
-        except (ValueError, AttributeError) as exc:
+            payload = response.json()
+            actual = payload["fingerprint"]
+            actual_path = payload["config_path"]
+        except (ValueError, KeyError, TypeError) as exc:
             raise GatewayPortCollision(
                 f"identity check failed: {url} did not return the Setting API "
                 f"(the listener on port {port} is not our gateway)"
             ) from exc
+        if actual_path != str(expected_path):
+            raise GatewayPortCollision(
+                f"port {port} was taken over: the gateway answering there reads "
+                f"{actual_path}, not our {expected_path}"
+            )
         if actual != expected:
             raise GatewayPortCollision(
                 f"port {port} was taken over: the gateway answering there reads a "
@@ -1062,6 +1086,11 @@ class ProbeEnv:
         env["no_proxy"] = env["NO_PROXY"]
         env.update(self._env_overrides)
         return env
+
+    def gateway_config_path(self) -> Path:
+        """**子进程**实际会读的那份 ``config.yaml``（跟随 ``env_overrides`` 的 WING_HOME）。"""
+        home = self.env_vars().get("WING_HOME")
+        return Path(home) / "core" / "config.yaml" if home else self.config_path
 
     def command(self, port: int | None = None) -> list[str]:
         """本次（或给定端口的）启动命令——报告用。"""
