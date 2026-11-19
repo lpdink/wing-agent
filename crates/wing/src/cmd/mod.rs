@@ -314,10 +314,9 @@ pub enum Command {
         flat: bool,
         /// Redraw every 2 seconds (clear screen + reprint).
         ///
-        /// A display mode, not a stream: the redraw repeats the whole table, so
+        /// A display mode, not a stream: each redraw repeats the whole table, so
         /// piping it somewhere that reads to the end (`> file`, `| cat`) sees the
-        /// frames concatenated. The flag lives here and on `wing usage` only —
-        /// nowhere else accepts it.
+        /// frames concatenated.
         #[arg(short = 'w', long = "watch")]
         watch: bool,
     },
@@ -382,8 +381,7 @@ pub enum Command {
         limit: u32,
         /// Redraw every 2 seconds (clear screen + reprint).
         ///
-        /// Same display mode as `wing ps -w`, and the only other command that
-        /// accepts it.
+        /// A display mode, not a stream — same shape as `wing ps -w`.
         #[arg(short = 'w', long = "watch")]
         watch: bool,
     },
@@ -1062,11 +1060,24 @@ fn install_panic_hook() {
 
 /// RAII：退出 `run_tui` 的任何路径（含提前 `?`）都收尾 TUI 会话，绝不把终端留在 raw。
 /// 没开过会话时 [`tui::end_tui_session`] 是空操作。
+///
+/// 会话期同时持有 SIGPIPE 的处置：终端 owner 期间 EPIPE 必须是**可恢复错误**
+/// （剪贴板 helper 的 stdin、接驳的 stop pipe 都会撞上它，且都必须活下来把 raw 模式
+/// 与鼠标上报关掉）——`main` 装的默认处置在这里换成 `SIG_IGN`，退出时换回去。
+/// 见 `crate::util::sigpipe`。
 struct TuiSessionGuard;
+
+impl TuiSessionGuard {
+    fn new() -> Self {
+        crate::util::sigpipe::ignore();
+        Self
+    }
+}
 
 impl Drop for TuiSessionGuard {
     fn drop(&mut self) {
         let _ = tui::end_tui_session();
+        crate::util::sigpipe::restore_default();
     }
 }
 
@@ -1083,8 +1094,9 @@ fn restore_panic_hook() {
 async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Initialize logging (file only, no console output).
     let _log_guard = init_logging();
-    // TUI 会话（raw + stdin 接驳）一旦开启就活到进程收尾；本 guard 兜住所有提前返回。
-    let _session = TuiSessionGuard;
+    // TUI 会话（raw + stdin 接驳 + SIGPIPE 可恢复）一旦开启就活到进程收尾；本 guard
+    // 兜住所有提前返回。
+    let _session = TuiSessionGuard::new();
 
     // Load user configuration (needed early for api_key). `mut`: setup 阶段会预览
     // Interface 根（颜色等改动当场生效），随后原样交给 run_app。
@@ -1254,6 +1266,32 @@ mod tests {
             .expect("tags outside stdio mode must be rejected");
         assert!(message.contains("stdio"), "{message}");
         assert!(message.contains("wing run --tag"), "{message}");
+    }
+
+    /// `-w/--watch` 只长在真正消费它的两个子命令上：写在别处是用法错误
+    /// （`clap` 的 `UnknownArgument`，退出码 2），不是静默 no-op。
+    #[test]
+    fn watch_is_accepted_only_by_ps_and_usage() {
+        for argv in [["wing", "ps", "-w"], ["wing", "usage", "-w"]] {
+            let cli = Cli::try_parse_from(argv).expect("parses");
+            let watch = match cli.command {
+                Some(Command::Ps { watch, .. }) | Some(Command::Usage { watch, .. }) => watch,
+                other => panic!("expected ps/usage, got {other:?}"),
+            };
+            assert!(watch, "{argv:?} must set the flag");
+        }
+
+        let rejected: [&[&str]; 3] = [
+            &["wing", "tail", "sid", "-w"],
+            &["wing", "-w", "ps"],
+            &["wing", "info", "sid", "--watch"],
+        ];
+        for argv in rejected {
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{argv:?} must be rejected instead of silently ignored"
+            );
+        }
     }
 
     /// `wing ps` 的两个血缘旗标：`--parent` 收一个会话 id、`--tree` 是布尔；

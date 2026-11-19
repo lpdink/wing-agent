@@ -192,9 +192,9 @@ impl StdioRenderer {
         }
     }
 
-    /// Write one frame line. The failure policy is [`StdoutSink`]'s: a downstream
-    /// that closed the pipe kills the process with SIGPIPE (141), it does not
-    /// panic; a genuine write error still panics.
+    /// Write one frame line. The failure policy is [`StdoutSink`]'s; in the `wing`
+    /// binary a downstream that closed the pipe kills the process with SIGPIPE
+    /// (141) before the sink sees an error.
     fn out_line(&self, text: &str) {
         self.out.line(text);
     }

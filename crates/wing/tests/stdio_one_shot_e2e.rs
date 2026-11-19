@@ -291,3 +291,51 @@ async fn json_success_emits_a_single_result_frame_before_the_trailing_done() {
     assert_eq!(frames[0]["subtype"], "success");
     assert_eq!(frames[0]["result"], "hello there");
 }
+
+// ============================================================
+// 帧口的失败契约：下游关掉 stdout
+// ============================================================
+
+/// `StdoutSink` 的那条路（stdio 帧口）与 CLI 的 `println!` 同款：读端一走，进程
+/// 安静地死于 SIGPIPE（141），不是「failed printing to stdout」的 panic。
+///
+/// 读端在 spawn 之前就关掉，所以第一帧的写必定 EPIPE —— 断言不依赖帧序，也不依赖
+/// 假网关推完脚本。
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_frames_die_with_sigpipe_when_the_reader_leaves() {
+    use std::os::unix::process::ExitStatusExt;
+
+    use common::e2e::{RUN_TIMEOUT, closed_stdout, wing_command};
+
+    let (home, _port) = start_fake_gateway(
+        "wing-one-shot",
+        "closed-stdout",
+        script_success_then_done,
+        |stream, script| async move {
+            handle_conn(stream, script).await;
+        },
+    )
+    .await;
+    let child = wing_command(&["-p", "hello", "--output-format", "stream-json"], &home)
+        .stdout(closed_stdout())
+        .spawn()
+        .unwrap();
+
+    let output = tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output())
+        .await
+        .expect("the stdio front end kept running with an unwritable stdout")
+        .unwrap();
+
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGPIPE),
+        "expected a SIGPIPE death (shell sees 141), got {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("failed printing to stdout"),
+        "the sink must not turn a closed pipe into a panic: {stderr:?}"
+    );
+}

@@ -249,7 +249,7 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 3. **`-r` 忽略创建期旗标**：`--tools` / `-m` / `--agent` / `--effort` / `--system-prompt` / `--append-system-prompt` / `--max-turns` 在 resume 路径上都不生效（工具集、模型、模板沿用原会话）。换模板要 `wing update <sid> --agent <name>`。
 4. **`wing resume` ≠ `wing run -r`**：前者只是把逐出会话读回内存，不发消息；续跑用后者。
 5. **`-w/--watch` 不是 `wing watch`**：前者是 `wing ps` / `wing usage` 上的「每 2 秒刷新」显示旗标（别的子命令不接受它），后者是唤醒订阅。
-6. **`-p` 会打开参数过滤器（未知旗标被静默丢）**：`wing run --permission-mode bypassPermissions -p …` 照常派发 `run`，但 `--permission-mode` 连同它的值被当成外部 SDK 旗标丢掉——不报错、也不生效。子命令自己的旗标务必写在子命令之后。（顶层的 `-p` 是另一回事：那会走 stdio 并忽略子命令，见 §1。）
+6. **`-p` 会打开参数过滤器（未知旗标被静默丢）**：`wing run --permission-mode bypassPermissions -p …` 照常派发 `run`，但 `--permission-mode` 连同它的值被当成外部 SDK 旗标丢掉——不报错、也不生效。子命令自己的旗标务必写在子命令之后。（顶层的 `-p` 是另一回事：那会走 stdio 并忽略子命令，见 §1。）**已知旗标写在错的地方则是用法错误**，不再静默接受：`wing -p … -w` 直接 exit 2。
 7. **notify 没有目标是正常的**：root shell 里没有 `WING_SESSION_ID` → `off (no parent session)`，需要 `--notify-to <sid>` 或显式 `wing watch`。
 8. **source == target 会被 400 拒**：不能登记「它静息时叫醒它自己」；也**不做防环**（A 订阅 B、B 订阅 A 会互相唤醒，这是使用者的事）。
 9. **归档会取消触发器**：source 或 target 进归档区 → 相关触发器 `canceled`；长期订阅别挂在会被自动归档（默认 90 天）的会话上，给它们打 `pin` 标签可豁免自动归档。

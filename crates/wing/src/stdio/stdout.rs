@@ -5,11 +5,13 @@
 //! 直接解析失败。所有写者共享同一个 [`StdoutSink`]，锁内完成「整行 + 换行 +
 //! flush」。
 //!
-//! 写失败不静默丢弃：真·写错误（`EIO` / `ENOSPC`…）panic，进程带非零码退出。
+//! 写失败不静默丢弃：真·写错误（`EIO` / `ENOSPC`…）与 EPIPE 都 panic，进程带非零码
+//! 退出。
 //!
-//! **下游关闭管道不在其列**：`main` 把 SIGPIPE 恢复成默认处置，读端一走进程就在
-//! `write` 里被内核杀掉（shell 看到 141，与 `seq` / `grep` 一致），EPIPE 到不了
-//! 这里——「Broken pipe → panic」那条路已经不存在了。
+//! **在 `wing` 二进制里 EPIPE 到不了这里**：`main` 先装了 SIGPIPE 的默认处置
+//! （`util::sigpipe`），读端一走进程就在 `write` 里被内核杀掉（shell 看到 141，与
+//! `seq` / `grep` 一致）。库的其它调用者（单测、bench）没有那一装，EPIPE 仍按
+//! panic 收场——它们没有 shell，也就没有 141 这个词汇。
 
 use std::io::Write;
 use std::sync::Mutex;
