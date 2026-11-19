@@ -160,6 +160,7 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
   - **Ask 定向回答**：`wing asks <sid> [--wait N]` 给出在挂 ask 的 `tool_call_id`（Ask 的 tool call 属于**未提交** assistant 消息，`wing tail` 看不到——只有订阅时的会话快照/实时事件携带它；`--wait` 等 ask 出现，超时非零），`wing run -r <sid> -p <answer> --tool-call-id <id>`（stdio 模式同名顶层旗标）把消息路由到该 ask 的 feedback waiter；ask 落链后 `wing tail <sid> -t tool_call` 同样可见 call id；
   - 会话级命令沿用 `wing tail` / `info` 的 **404 → resume → 重试一次** 惯例（`branches` / `fork` / `rewind` / `compact` / `update` 命中"已逐出"时先水合）；`interrupt` **刻意不水合**——没有在跑的东西可中断，报错说明并指向 `wing ps --all`；
 - `wing models|tools|agents`：系统查询；`wing start|stop|restart|status`：网关守护进程生命周期（`restart` = stop + start 语法糖，默认的 TUI / stdio 启动路径会自动拉起网关）。
+- **管道契约**：stdout 的下游随时可以走（`| head`、`| grep -q`、编排器把管道关掉）。`main` 在解析参数之前把 SIGPIPE 恢复成**默认处置**（Rust 运行期默认 `SIG_IGN`），于是"下游离开"= 进程在 `write` 里被内核杀掉（shell 看到 **141**），而不是 143 处 `print!` / `println!` 与 stdio 帧口各自把 EPIPE 翻成 panic（101 + 回溯）——后者既不是响亮的失败（读端已走，没人读 stderr），又把一次正常的管道截断说成 wing 的 bug。机制是进程级的，只作用于管道 / FIFO：socket 写走 `MSG_NOSIGNAL`（macOS `SO_NOSIGPIPE`），WS / HTTP 对端关闭仍是普通 `EPIPE` 错误。
 
 ## 远程工具（PR #47 / #50）
 

@@ -5,8 +5,11 @@
 //! 直接解析失败。所有写者共享同一个 [`StdoutSink`]，锁内完成「整行 + 换行 +
 //! flush」。
 //!
-//! 写失败沿用 `println!` 的语义：stdout 写不进去（编排器关了管道）是致命错误
-//! 而不是静默丢弃——panic 让进程带非零码退出，编排器看得见。
+//! 写失败不静默丢弃：真·写错误（`EIO` / `ENOSPC`…）panic，进程带非零码退出。
+//!
+//! **下游关闭管道不在其列**：`main` 把 SIGPIPE 恢复成默认处置，读端一走进程就在
+//! `write` 里被内核杀掉（shell 看到 141，与 `seq` / `grep` 一致），EPIPE 到不了
+//! 这里——「Broken pipe → panic」那条路已经不存在了。
 
 use std::io::Write;
 use std::sync::Mutex;

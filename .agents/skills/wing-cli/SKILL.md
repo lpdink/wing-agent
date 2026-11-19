@@ -40,6 +40,8 @@ tags: [cli, orchestration, reference, wake, headless]
 
 两个全局旗标对所有子命令可用：`--json`（机器可读输出）、`-w/--watch`（每 2 秒刷新的显示模式，目前只有 `wing ps` 消费它——**和 `wing watch` 子命令没有关系**）。
 
+**管道是正常用法**：下游随时可以走（`wing ps | head`、`| grep -q`、编排器把管道关掉）。下游一关，进程就安静地死于 SIGPIPE——shell 看到 **141**，stderr 不长 panic 回溯（和 `seq` / `yes` / `grep` 一致）。所以判断成败时永远配 `set -o pipefail`（否则 `$?` 是下游的），而 141 的意思是「消费者走了」，不是 wing 出错。
+
 **模式判据与旗标过滤是两件事。** stdio 模式只看**顶层** `-p` / `--prompt`（或 `--input-format stream-json`）：有它就派发 stdio，**连子命令一起忽略**（`wing -p "..." ps` 不会跑 `ps`）。写在子命令上的 `-p` 属于那个子命令（`wing run -p …` / `wing watch -p …` 照常派发），不是 stdio。
 
 而 `-p` / `--prompt`（或 `--input-format stream-json`）出现在 argv **任意位置**都会启用 stdio 的**参数过滤器**（`main.rs` 在 clap 之前按原始 argv 判定）：不认识的长短旗标被静默丢掉（`--permission-mode bypassPermissions` 连它的值一起没），不报错、也没生效。所以：外部 SDK 的旗标塞进来不会炸，但子命令自己的旗标必须跟在子命令之后——放错位置时，`--tag` / `--agent` / `--tool-call-id` / `--session-id` / `--include-partial-messages` 会被显式拒绝，`--resume-session-at` 在任何形态下都直接拒（本 CLI 不支持会话截断），其余（如 `--tools`）可能被静默忽略。
