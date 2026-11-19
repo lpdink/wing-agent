@@ -156,14 +156,10 @@ pub struct Cli {
     #[arg(long = "yolo")]
     pub yolo: bool,
 
-    // ---- global output flags (available to all subcommands) ----
+    // ---- global output flag (available to every subcommand) ----
     /// Output JSON (for agent consumption). Default is table/text.
     #[arg(global = true, long = "json")]
     pub json: bool,
-
-    /// Watch mode: refresh every 2 seconds.
-    #[arg(global = true, short = 'w', long = "watch")]
-    pub watch: bool,
 }
 
 impl Cli {
@@ -316,6 +312,14 @@ pub enum Command {
         /// --json instead.
         #[arg(long = "flat")]
         flat: bool,
+        /// Redraw every 2 seconds (clear screen + reprint).
+        ///
+        /// A display mode, not a stream: the redraw repeats the whole table, so
+        /// piping it somewhere that reads to the end (`> file`, `| cat`) sees the
+        /// frames concatenated. The flag lives here and on `wing usage` only —
+        /// nowhere else accepts it.
+        #[arg(short = 'w', long = "watch")]
+        watch: bool,
     },
 
     /// Show session runtime info (model, tools, tokens, status).
@@ -376,6 +380,12 @@ pub enum Command {
         /// Rows for a ranked breakdown (1..=200; default 20).
         #[arg(long, value_name = "N", default_value_t = usage::DEFAULT_LIMIT)]
         limit: u32,
+        /// Redraw every 2 seconds (clear screen + reprint).
+        ///
+        /// Same display mode as `wing ps -w`, and the only other command that
+        /// accepts it.
+        #[arg(short = 'w', long = "watch")]
+        watch: bool,
     },
 
     /// Interrupt the session's current task (the TUI's Esc).
@@ -865,6 +875,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 parent,
                 tree,
                 flat,
+                watch,
             } => {
                 crate::cmd::ps::run_ps(
                     all,
@@ -872,7 +883,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     parent.as_deref(),
                     crate::cmd::ps::TableMode::pick(tree, flat),
                     cli.json,
-                    cli.watch,
+                    watch,
                 )
                 .await
             }
@@ -892,6 +903,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                 session,
                 tree,
                 limit,
+                watch,
             } => {
                 let opts = crate::cmd::usage::UsageOpts {
                     since,
@@ -902,7 +914,7 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     tree,
                     limit,
                 };
-                crate::cmd::usage::run(opts, cli.json, cli.watch).await
+                crate::cmd::usage::run(opts, cli.json, watch).await
             }
             Command::Interrupt { session_id } => {
                 crate::cmd::control::run_interrupt(&session_id, cli.json).await
