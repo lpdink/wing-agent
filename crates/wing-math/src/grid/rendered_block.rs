@@ -211,10 +211,10 @@ impl RenderedBlock {
         }
 
         // Content rows with left/right padding
-        for r in 0..self.height {
+        for source in self.cells.iter().take(self.height) {
             let mut row = Vec::with_capacity(new_width);
             row.extend(std::iter::repeat_n(" ".to_string(), left));
-            row.extend(self.cells[r].iter().cloned());
+            row.extend(source.iter().cloned());
             row.extend(std::iter::repeat_n(" ".to_string(), right));
             rows.push(row);
         }
