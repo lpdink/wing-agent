@@ -1272,7 +1272,12 @@ mod tests {
     /// （`clap` 的 `UnknownArgument`，退出码 2），不是静默 no-op。
     #[test]
     fn watch_is_accepted_only_by_ps_and_usage() {
-        for argv in [["wing", "ps", "-w"], ["wing", "usage", "-w"]] {
+        for argv in [
+            ["wing", "ps", "-w"],
+            ["wing", "ps", "--watch"],
+            ["wing", "usage", "-w"],
+            ["wing", "usage", "--watch"],
+        ] {
             let cli = Cli::try_parse_from(argv).expect("parses");
             let watch = match cli.command {
                 Some(Command::Ps { watch, .. }) | Some(Command::Usage { watch, .. }) => watch,
@@ -1292,6 +1297,36 @@ mod tests {
                 "{argv:?} must be rejected instead of silently ignored"
             );
         }
+    }
+
+    /// `TuiSessionGuard` 是「终端 owner 期间 EPIPE 必须是可恢复错误」的接线点：
+    /// 会话期 `SIG_IGN`、退出时恢复默认。不需要 tty 就能断言处置本身。
+    #[cfg(unix)]
+    #[test]
+    fn the_tui_session_owns_the_sigpipe_disposition() {
+        /// 读回当前处置并复原（`signal` 返回**前一个** handler）。
+        fn disposition(restore: libc::sighandler_t) -> libc::sighandler_t {
+            // SAFETY: 只在本进程装 / 读 SIGPIPE 的处置，调用方负责复原。
+            unsafe { libc::signal(libc::SIGPIPE, restore) }
+        }
+
+        let previous = disposition(libc::SIG_IGN);
+        // 从「流式前端的处置」进 TUI：会话期必须把 EPIPE 变回可恢复错误。
+        crate::util::sigpipe::restore_default();
+        {
+            let _session = TuiSessionGuard::new();
+            assert_eq!(
+                disposition(libc::SIG_IGN),
+                libc::SIG_IGN,
+                "a terminal owner must keep EPIPE a recoverable error"
+            );
+        }
+        assert_eq!(
+            disposition(libc::SIG_IGN),
+            libc::SIG_DFL,
+            "leaving the TUI must give the stream disposition back"
+        );
+        let _ = previous;
     }
 
     /// `wing ps` 的两个血缘旗标：`--parent` 收一个会话 id、`--tree` 是布尔；

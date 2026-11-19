@@ -48,3 +48,33 @@ pub fn restore_default() {}
 
 #[cfg(not(unix))]
 pub fn ignore() {}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// 读回当前处置并复原（`signal` 返回**前一个** handler）。
+    fn disposition(restore: libc::sighandler_t) -> libc::sighandler_t {
+        // SAFETY: 只在本进程装 / 读 SIGPIPE 的处置，结束时由调用方复原。
+        unsafe { libc::signal(libc::SIGPIPE, restore) }
+    }
+
+    /// 两个开关装的是它们名字说的那个处置（打反了 `141` 与「可恢复错误」就对调了）。
+    #[test]
+    fn the_two_switches_install_the_dispositions_they_name() {
+        let previous = disposition(libc::SIG_IGN);
+        assert_eq!(previous, libc::SIG_IGN, "the runtime's default must hold");
+
+        restore_default();
+        let installed = disposition(libc::SIG_IGN);
+        assert_eq!(
+            installed,
+            libc::SIG_DFL,
+            "restore_default must install SIG_DFL"
+        );
+
+        ignore();
+        let installed = disposition(previous);
+        assert_eq!(installed, libc::SIG_IGN, "ignore must install SIG_IGN");
+    }
+}

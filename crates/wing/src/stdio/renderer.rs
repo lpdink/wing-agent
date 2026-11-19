@@ -192,9 +192,9 @@ impl StdioRenderer {
         }
     }
 
-    /// Write one frame line. The failure policy is [`StdoutSink`]'s; in the `wing`
-    /// binary a downstream that closed the pipe kills the process with SIGPIPE
-    /// (141) before the sink sees an error.
+    /// Write one frame line. Failure policy: [`StdoutSink`] panics on a write error,
+    /// and the binary's `util::sigpipe` turns EPIPE into a SIGPIPE death before the
+    /// sink ever sees it.
     fn out_line(&self, text: &str) {
         self.out.line(text);
     }

@@ -40,7 +40,7 @@ tags: [cli, orchestration, reference, wake, headless]
 
 全局旗标只有一个 `--json`（机器可读输出）。`-w/--watch`（每 2 秒刷新的显示模式）**只长在 `wing ps` / `wing usage` 上**——写在别的子命令上是 clap 的用法错误（退出码 2），不是静默 no-op，也**和 `wing watch` 子命令没有关系**。
 
-**管道是正常用法**：下游随时可以走（`wing ps | head`、`| grep -q`、编排器把管道关掉）。下游一关，进程就安静地死于 SIGPIPE——shell 看到 **141**，stderr 不长 panic 回溯（和 `seq` / `yes` / `grep` 一致）。所以判断成败时永远配 `set -o pipefail`（否则 `$?` 是下游的），而 141 的意思是「消费者走了」，不是 wing 出错。
+**管道是正常用法**（unix）：下游随时可以走（`wing ps | head`、`| grep -q`、编排器把管道关掉）。下游一关，进程就安静地死于 SIGPIPE——shell 看到 **141**，stderr 不长 panic 回溯（和 `seq` / `yes` / `grep` 一致）。所以判断成败时永远配 `set -o pipefail`（否则 `$?` 是下游的），而 141 的意思是「消费者走了」，不是 wing 出错。
 
 **模式判据与旗标过滤是两件事。** stdio 模式只看**顶层** `-p` / `--prompt`（或 `--input-format stream-json`）：有它就派发 stdio，**连子命令一起忽略**（`wing -p "..." ps` 不会跑 `ps`）。写在子命令上的 `-p` 属于那个子命令（`wing run -p …` / `wing watch -p …` 照常派发），不是 stdio。
 
