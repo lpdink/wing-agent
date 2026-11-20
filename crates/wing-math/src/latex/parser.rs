@@ -316,10 +316,7 @@ impl EqParser {
         }
         // Make sure it's not a prefix of a longer command
         let after = start + name_chars.len();
-        if after < self.chars.len() && self.chars[after].is_ascii_alphabetic() {
-            return false;
-        }
-        true
+        !(after < self.chars.len() && self.chars[after].is_ascii_alphabetic())
     }
 
     /// Parse an atom that treats `(...)` as invisible grouping (no parens shown).

@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 /// 一次 CLI 调用的超时（超时即 panic：挂死与失败必须可区分）。
-const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+pub const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 一枚测试独占的 `WING_HOME`（`prefix` 让失败时的临时目录名可辨认）。
 pub fn scratch_home(prefix: &str, tag: &str) -> PathBuf {
@@ -66,8 +66,12 @@ where
     (home, port)
 }
 
-/// 跑一次真二进制，回收 `(退出码, stdout, stderr)`。超时 / 挂死算失败。
-pub async fn run_wing(args: &[&str], home: &Path) -> (i32, String, String) {
+/// 跑真二进制的 `Command`，已套好测试环境（WING_HOME 隔离 / 日志不落 / 无 stdin /
+/// 子进程随测试收掉）。
+///
+/// [`run_wing`] 是它的「跑到结束、收三元组」版本；需要自己拿 stdout（读一帧就走、
+/// 关掉读端看写失败）或自己判退出状态的用例从这里起步，**不要再抄一遍环境设置**。
+pub fn wing_command(args: &[&str], home: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
     command
         .args(args)
@@ -77,7 +81,12 @@ pub async fn run_wing(args: &[&str], home: &Path) -> (i32, String, String) {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let child = command.spawn().unwrap();
+    command
+}
+
+/// 跑一次真二进制，回收 `(退出码, stdout, stderr)`。超时 / 挂死算失败。
+pub async fn run_wing(args: &[&str], home: &Path) -> (i32, String, String) {
+    let child = wing_command(args, home).spawn().unwrap();
     let output = match tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output()).await {
         Ok(result) => result.unwrap(),
         Err(_) => panic!("`wing {args:?}` did not exit in {}s", RUN_TIMEOUT.as_secs()),
@@ -87,6 +96,21 @@ pub async fn run_wing(args: &[&str], home: &Path) -> (i32, String, String) {
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
     )
+}
+
+/// 一个**读端已经关掉**的管道，可作子进程的 stdout：写端在下发前就交出去，读端在
+/// 这里关掉，所以子进程的第一次写必定 EPIPE（不依赖「谁先跑」的竞态）。
+#[cfg(unix)]
+pub fn closed_stdout() -> std::process::Stdio {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut fds = [0i32; 2];
+    // SAFETY: 两个合法的 fd 槽位；失败即测试环境坏了。
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() failed");
+    // SAFETY: 读端不需要（也不该）留给任何人。
+    unsafe { libc::close(fds[0]) };
+    // SAFETY: `fds[1]` 是本进程独占的写端，所有权交给 `Stdio`。
+    std::process::Stdio::from(unsafe { OwnedFd::from_raw_fd(fds[1]) })
 }
 
 /// 读一条完整 HTTP/1.1 请求：`(head, body)`；连接关闭（或读失败）返回 `None`。

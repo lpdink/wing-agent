@@ -192,9 +192,9 @@ impl StdioRenderer {
         }
     }
 
-    /// Write one frame line, keeping `println!`'s failure semantics: a stdout
-    /// that cannot be written (e.g. the orchestrator closed the pipe) is fatal
-    /// rather than silently swallowed.
+    /// Write one frame line. Failure policy: [`StdoutSink`] panics on a write error,
+    /// and the binary's `util::sigpipe` turns EPIPE into a SIGPIPE death before the
+    /// sink ever sees it.
     fn out_line(&self, text: &str) {
         self.out.line(text);
     }

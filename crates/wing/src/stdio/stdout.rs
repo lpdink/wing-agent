@@ -5,8 +5,10 @@
 //! 直接解析失败。所有写者共享同一个 [`StdoutSink`]，锁内完成「整行 + 换行 +
 //! flush」。
 //!
-//! 写失败沿用 `println!` 的语义：stdout 写不进去（编排器关了管道）是致命错误
-//! 而不是静默丢弃——panic 让进程带非零码退出，编排器看得见。
+//! 写入失败一律 panic（不静默丢弃）。
+//!
+//! EPIPE 的进程级语义由 `util::sigpipe` 统一：`wing` 二进制里读端一走就死于
+//! SIGPIPE（141），库的其它调用者（单测 / bench）仍是 panic。
 
 use std::io::Write;
 use std::sync::Mutex;

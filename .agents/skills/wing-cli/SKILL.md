@@ -38,7 +38,9 @@ tags: [cli, orchestration, reference, wake, headless]
 | **ACP** | `wing acp` | stdio 上的 Agent Client Protocol v1 服务端，把每个 ACP session 桥到本机 wing session | Zed / omnigent 等 ACP 客户端 |
 | **编排 CLI** | `wing run` / `wait` / `ps` / … | 一条命令一个动作、不进交互；全部支持 `--json` | agent 编排、脚本、CI |
 
-两个全局旗标对所有子命令可用：`--json`（机器可读输出）、`-w/--watch`（每 2 秒刷新的显示模式，目前只有 `wing ps` 消费它——**和 `wing watch` 子命令没有关系**）。
+全局旗标只有一个 `--json`（机器可读输出）。`-w/--watch`（每 2 秒刷新的显示模式）**只长在 `wing ps` / `wing usage` 上**——写在别的子命令上是 clap 的用法错误（退出码 2），不是静默 no-op，也**和 `wing watch` 子命令没有关系**。
+
+**管道是正常用法**（unix）：下游随时可以走（`wing ps | head`、`| grep -q`、编排器把管道关掉）。下游一关，进程就安静地死于 SIGPIPE——shell 看到 **141**，stderr 不长 panic 回溯（和 `seq` / `yes` / `grep` 一致）。所以判断成败时永远配 `set -o pipefail`（否则 `$?` 是下游的），而 141 的意思是「消费者走了」，不是 wing 出错。
 
 **模式判据与旗标过滤是两件事。** stdio 模式只看**顶层** `-p` / `--prompt`（或 `--input-format stream-json`）：有它就派发 stdio，**连子命令一起忽略**（`wing -p "..." ps` 不会跑 `ps`）。写在子命令上的 `-p` 属于那个子命令（`wing run -p …` / `wing watch -p …` 照常派发），不是 stdio。
 
@@ -114,7 +116,7 @@ tags: [cli, orchestration, reference, wake, headless]
 
 | 命令 | 说明 |
 |---|---|
-| `wing ps [--all] [--tag T] [--parent SID] [--flat] [--tree] [--json]` | 会话列表。人类默认是**一层一个任务**：后代折进 `CREW` 列（`40 ?1 ●3` = 后代总数 / 其中在等你 / 其中在干活），行尾一行写明折了多少 + 两条展开出口；`--parent SID` 看某个任务的直接 crew，`--tree` 画整棵森林，`--flat` 是旧的全量平铺。默认过滤 inactive（被 `pin` 的除外，其上级同样保留）；`--tag` / `--parent` 隐含 `--all` |
+| `wing ps [--all] [--tag T] [--parent SID] [--flat] [--tree] [-w] [--json]` | 会话列表。人类默认是**一层一个任务**：后代折进 `CREW` 列（`40 ?1 ●3` = 后代总数 / 其中在等你 / 其中在干活），行尾一行写明折了多少 + 两条展开出口；`--parent SID` 看某个任务的直接 crew，`--tree` 画整棵森林，`--flat` 是旧的全量平铺。默认过滤 inactive（被 `pin` 的除外，其上级同样保留）；`--tag` / `--parent` 隐含 `--all`；`-w` 每 2 秒重绘 |
 | `wing info <sid> [--json]` | 运行时信息：状态 / workdir / 工具 / tokens / 模型 / 用量 |
 | `wing cache [sid] [--limit N] [--why TS\|INDEX] [--json]` | KV 前缀缓存账本：理论 vs 实际命中率 + 分叉归因（省略 sid = 最近活跃的那个，header 里会打印它选中了谁） |
 | `wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M] [--session SID] [--tree] [--limit N] [--json] [-w]` | 我的使用史：默认仪表盘（活动热力图 + 今天 + `me`/`agents` + 模型），`--by day\|model\|session\|tool\|workspace\|agent\|origin` 出明细；`WHEN` = `all\|today\|yesterday\|<N>d\|<N>w\|<N>m\|<N>y\|YYYY-MM-DD`（缺省 `12w`；`--until` 不收 `all`）。所有数字读审计流水（token / 调用从 `wing.db` 建库起算，`--since all` 也补不出更早的读数） |
@@ -246,8 +248,8 @@ wing run -r "$CLONE" -p "你是被 fork 出来的执行者：上下文里的背�
 2. **忘了 `cd`**：session 的 workspace 就是 `wing run` 进程的 cwd。派发前 `cd <目标目录>`，事后用 `wing info <sid> --json | jq .workdir` 兜底核对。
 3. **`-r` 忽略创建期旗标**：`--tools` / `-m` / `--agent` / `--effort` / `--system-prompt` / `--append-system-prompt` / `--max-turns` 在 resume 路径上都不生效（工具集、模型、模板沿用原会话）。换模板要 `wing update <sid> --agent <name>`。
 4. **`wing resume` ≠ `wing run -r`**：前者只是把逐出会话读回内存，不发消息；续跑用后者。
-5. **`-w/--watch` 不是 `wing watch`**：前者是全局的「每 2 秒刷新」显示旗标（目前只有 `wing ps` 用），后者是唤醒订阅。
-6. **`-p` 会打开参数过滤器（未知旗标被静默丢）**：`wing run --permission-mode bypassPermissions -p …` 照常派发 `run`，但 `--permission-mode` 连同它的值被当成外部 SDK 旗标丢掉——不报错、也不生效。子命令自己的旗标务必写在子命令之后。（顶层的 `-p` 是另一回事：那会走 stdio 并忽略子命令，见 §1。）
+5. **`-w/--watch` 不是 `wing watch`**：前者是 `wing ps` / `wing usage` 上的「每 2 秒刷新」显示旗标（别的子命令不接受它），后者是唤醒订阅。
+6. **`-p` 会打开参数过滤器（未知旗标被静默丢）**：`wing run --permission-mode bypassPermissions -p …` 照常派发 `run`，但 `--permission-mode` 连同它的值被当成外部 SDK 旗标丢掉——不报错、也不生效。子命令自己的旗标务必写在子命令之后。（顶层的 `-p` 是另一回事：那会走 stdio 并忽略子命令，见 §1。）**已知旗标写在错的地方则是用法错误**，不再静默接受：`wing -p … -w` 直接 exit 2。
 7. **notify 没有目标是正常的**：root shell 里没有 `WING_SESSION_ID` → `off (no parent session)`，需要 `--notify-to <sid>` 或显式 `wing watch`。
 8. **source == target 会被 400 拒**：不能登记「它静息时叫醒它自己」；也**不做防环**（A 订阅 B、B 订阅 A 会互相唤醒，这是使用者的事）。
 9. **归档会取消触发器**：source 或 target 进归档区 → 相关触发器 `canceled`；长期订阅别挂在会被自动归档（默认 90 天）的会话上，给它们打 `pin` 标签可豁免自动归档。

@@ -23,7 +23,7 @@ use tokio::net::TcpStream;
 
 mod common;
 
-use common::e2e::{read_request, run_wing, start_fake_gateway};
+use common::e2e::{read_request, run_wing, start_fake_gateway, wing_command};
 
 const SESSION_ID: &str = "20261023-101500-abcdef01";
 const UNKNOWN_ID: &str = "ghost-session";
@@ -531,14 +531,8 @@ async fn info_gains_a_usage_block_and_keeps_its_json_shape() {
 #[tokio::test]
 async fn watch_clears_the_screen_before_drawing_a_frame() {
     let stub = Stub::start("watch").await;
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"))
-        .args(["usage", "-w"])
-        .env("WING_HOME", &stub.home)
-        .env_remove("RUST_LOG")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
+    let mut child = wing_command(&["usage", "-w"], &stub.home)
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
         .spawn()
         .unwrap();
 

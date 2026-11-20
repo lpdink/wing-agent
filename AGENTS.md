@@ -167,7 +167,7 @@ libs/core/wing/
 
 ```
 crates/wing/src/
-├── main.rs                          入口（args_os 收集 + UTF-8 校验 → clap；stdio 模式检测 → 过滤未知参数）
+├── main.rs                          入口（SIGPIPE 处置 → args_os 收集 + UTF-8 校验 → clap；stdio 模式检测 → 过滤未知参数）
 ├── lib.rs                           库根：模块导出（供 bench / tests 引用；deny print_stdout/stderr）
 ├── cmd/                             CLI 子命令与分发
 │   ├── mod.rs                       Cli/Command 定义 + dispatch（TUI / 网关生命周期 / 编排子命令 / stdio）
@@ -283,10 +283,10 @@ crates/wing/src/
 │   ├── cursor.rs                    光标形状 / 可见性
 │   └── stdin_proxy.rs               stdin 接驳（在 crossterm 之前安装的读代理；session_guard 的靶子）
 ├── config/                          TUI 配置（mod=配置模型 + 调色板 preset/appearance / colors / rendering / paste=粘贴图片压缩参数 / catalog=Interface 根声明 + 规范形 dump / store=读写+指纹+原子写）
-└── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ base64（RFC 4648 编解码，OSC 与剪贴板协议共用）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）
+└── util/                            clipboard / clipboard_paste（本地剪贴板读取）/ base64（RFC 4648 编解码，OSC 与剪贴板协议共用）/ mime（MIME 归一）/ format（token / 命中率 / 图片标签等共享记法）/ image_compress（粘贴图片压缩）/ open(链接打开) / logging / osc9（桌面通知）/ program_status（OSC 7501 程序状态）/ partial_json / title（OSC 0）/ wing_home（WING_HOME 解析）/ sigpipe（SIGPIPE 处置：流式前端死于 141、终端 owner 保持可恢复错误）
 ```
 
-配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `stdio_one_shot` · `tail_filter` · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（8 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `splash_preview` 开屏整块（状态栏 + 牌子 + 输入卡）的真帧 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
+配套：`crates/wing/benches/`（criterion 基准：流式渲染 `stream_render` · 工具参数流式解析 `tool_args_stream` · 图片逐帧与编码 `image_frame` · 大会话重放与首帧 `session_replay`）、`crates/wing/tests/`（测试二进制 + `common/` 与 `acp_harness/` 支撑模块，五类：渲染回归 `stream_render_*` · `math_render` · `markdown_math_drift` · `vs16_row_drift`；前端形态 e2e `acp` · `control_plane` · `usage` · `stdio_resident` · `stdio_one_shot` · `tail_filter` · `sigpipe`（管道关闭 = 141） · `setup_preflight` · `wait_fail_fast` · `status_build_skew` · `wing_home` · `session_lineage`；stdin 接驳与终端误解析 `stdin_proxy_*` · `crossterm_*` · `tui_event_stream_*` · 终端能力探测 `appearance_probe_pty`；WS / argv / 退出摘要 `ws_*` · `argv_non_utf8` · `exit_summary_shape`；源码门禁 `layer_guard` · `session_guard`；共享底座 `common/{e2e,guard,pty}`）、`crates/wing/examples/`（8 个：`export_logo` 从欢迎屏像素网格导 SVG · `welcome_preview` 开屏预览 · `splash_preview` 开屏整块（状态栏 + 牌子 + 输入卡）的真帧 · `render_probe` markdown 渲染探针 · `theme_preview` 主题预览 · `reconnect_flow_verify` 网关重启后的重连流程验证 · `image_demo` 单图走 `ui::image` 真实管线（终端兼容性矩阵的肉眼验收）· `thinking_preview` 思考行创作期预览（`--animate` 看刷光））。
 
 源码门禁：`layer_guard.rs` 把 Rust 侧分层规则钉成扫描断言（Python 侧对应 `libs/core/tests/test_layering.py`，两侧规范见 [docs/dev/backend-layout.md](docs/dev/backend-layout.md)）；`session_guard.rs` 钉**编译器管不着的终端时序**（接驳安装点唯一、settle 早于首次 poll 等五条规则，语义见 [docs/dev/tui-input.md](docs/dev/tui-input.md)）。
 
