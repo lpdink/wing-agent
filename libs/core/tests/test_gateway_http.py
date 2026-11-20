@@ -977,6 +977,7 @@ class TestSessionInfo:
         mock_session.parent_session_id = None
         mock_session.last_turn_end = "2026-01-01T10:00:00.123456"
         mock_session.last_turn_subtype = "success"
+        mock_session.last_turn_result.return_value = None
         mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
         mock_session.agent.context_manager.get_skills_info.return_value = (
@@ -1035,6 +1036,7 @@ class TestSessionInfo:
         mock_session.parent_session_id = None
         mock_session.last_turn_end = None
         mock_session.last_turn_subtype = None
+        mock_session.last_turn_result.return_value = None
         mock_session.status = "idle"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
@@ -1071,6 +1073,7 @@ class TestSessionInfo:
         mock_session.parent_session_id = None
         mock_session.last_turn_end = None
         mock_session.last_turn_subtype = None
+        mock_session.last_turn_result.return_value = None
         mock_session.status = "waiting"
         mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""

@@ -267,6 +267,14 @@ class Session:
         if workspace is not None:
             metadata.workspace = workspace
         self._metadata = metadata
+        self._last_turn_result = next(
+            (
+                event
+                for event in messages.iter_history_reverse()
+                if isinstance(event, TurnResultEvent) and event.session_id == session_id
+            ),
+            None,
+        )
 
         self._context_manager = context_manager
         self._agent = agent
@@ -703,6 +711,10 @@ class Session:
         """该轮的 ``turn_result`` subtype（逐字透传，未收口过为 None）。"""
         return self._metadata.last_turn_subtype
 
+    def last_turn_result(self) -> TurnResultEvent | None:
+        """最近一轮的收口记录。fork 复制的源会话事件不属于本会话。"""
+        return self._last_turn_result
+
     @property
     def store(self) -> SessionStore:
         """该 session 所属的 SessionStore（fork 继承后端、SM 聚合用）。"""
@@ -782,6 +794,7 @@ class Session:
             # flush 因脏标记已清而是 no-op）。
             self._metadata.last_turn_end = datetime.now().isoformat()
             self._metadata.last_turn_subtype = event.subtype
+            self._last_turn_result = event
             self._usage.record_turn()
             self._usage.flush()
 

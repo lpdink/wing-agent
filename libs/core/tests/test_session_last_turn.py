@@ -112,6 +112,7 @@ async def test_turn_result_persists_fields_and_projects_them(runtime):
     assert session.last_turn_subtype is None
     info = build_session_info(session)
     assert info.last_turn_end is None and info.last_turn_subtype is None
+    assert info.last_turn_result is None
 
     session.agent.sink.turn_result(subtype="success", num_turns=1, duration_ms=1500)
 
@@ -205,6 +206,13 @@ async def test_next_turn_overwrites_and_fields_survive_resume(runtime):
     resumed = runtime.sm.resume_session(sid)
     assert resumed.last_turn_end == first_end
     assert resumed.last_turn_subtype == "success"
+    outcome = build_session_info(resumed).last_turn_result
+    assert outcome is not None
+    assert outcome.model_dump() == {
+        "subtype": "success",
+        "is_error": False,
+        "num_turns": 1,
+    }
 
     resumed.agent.sink.turn_result(
         subtype="error_during_execution", is_error=True, num_turns=2, duration_ms=4
@@ -216,3 +224,15 @@ async def test_next_turn_overwrites_and_fields_survive_resume(runtime):
     assert recorded is not None
     assert recorded.last_turn_end == second_end
     assert recorded.last_turn_subtype == "error_during_execution"
+    outcome = build_session_info(resumed).last_turn_result
+    assert outcome is not None
+    assert outcome.model_dump() == {
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "num_turns": 2,
+    }
+
+    forked = runtime.sm.fork_session(sid, "current")
+    assert forked is not None
+    child, _ = forked
+    assert build_session_info(child).last_turn_result is None

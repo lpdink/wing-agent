@@ -86,6 +86,9 @@ async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> N
     # 断言是上面的 num_turns（"含数字 2" 之类的弱锚不算数）。
     assert "Reached max turns limit" in result.data["errors"][0], result.data["errors"]
     assert await _wait_idle(session) == "idle"
+    assert (await session.info())["last_turn_result"] == {
+        key: result.data[key] for key in ("subtype", "is_error", "num_turns")
+    }
     session.watch.assert_never("error")
 
     # ── 没有第三次调用：剧本三轮，这里只消费了前两轮 ──
@@ -125,6 +128,9 @@ async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> N
     assert follow_up.data["subtype"] == "success", follow_up.data
     assert follow_up.data["result"] == "after max turns", follow_up.data
     assert follow_up.data["num_turns"] == 1, follow_up.data
+    assert (await session.info())["last_turn_result"] == {
+        key: follow_up.data[key] for key in ("subtype", "is_error", "num_turns")
+    }
     assert probe.requests.count(MAX_TURNS_MODEL) == MAX_TURNS + 1, (
         probe.requests.summary()
     )

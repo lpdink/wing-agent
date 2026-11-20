@@ -338,6 +338,12 @@ class ContextStatsInfo(BaseModel):
     total_tokens: int = Field(description="当前上下文 token 总数")
 
 
+class TurnOutcomeInfo(BaseModel):
+    subtype: str
+    is_error: bool
+    num_turns: int
+
+
 class SessionInfoResponse(BaseModel):
     """GET /api/session/info 响应——session 运行时状态。"""
 
@@ -391,6 +397,9 @@ class SessionInfoResponse(BaseModel):
             "该轮 turn_result 的 subtype: success|error_during_execution|"
             "error_max_turns（逐字透传；与 last_turn_end 同生同灭）"
         ),
+    )
+    last_turn_result: TurnOutcomeInfo | None = Field(
+        default=None, description="本会话最近一次收口的 turn_result 记录摘要"
     )
     status: str = Field(
         default="idle", description="运行时状态: inactive|idle|working|waiting"

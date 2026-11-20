@@ -437,6 +437,14 @@ pub struct SessionUsage {
     pub tool_time_ms: i64,
 }
 
+/// 最近一轮收口的 turn_result 摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnOutcomeInfo {
+    pub subtype: String,
+    pub is_error: bool,
+    pub num_turns: i64,
+}
+
 /// GET /api/session/info 响应——session 运行时状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfoResponse {
@@ -465,6 +473,10 @@ pub struct SessionInfoResponse {
     /// 创建该会话的父会话 id（血缘）；根会话 / 旧网关为 None。
     #[serde(default)]
     pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub last_turn_subtype: Option<String>,
+    #[serde(default)]
+    pub last_turn_result: Option<TurnOutcomeInfo>,
     #[serde(default)]
     pub status: String,
     pub context_stats: ContextStatsInfo,

@@ -35,6 +35,7 @@ from wing.gateway.protocol import (
     SettingProblem,
     SettingsSchemaResponse,
     SettingsSetResponse,
+    TurnOutcomeInfo,
     WakeInfo,
 )
 from wing.runtime import SettingsApplyResult
@@ -51,6 +52,7 @@ def build_session_info(session: Session) -> SessionInfoResponse:
     # （message_count / total_tokens 允许与 `status` 的展示口径不同）——这里按协议
     # 语义单独取一次，不从 `status` 复用。
     msg_count, total_tok = cm.get_context_stats()
+    last_turn = session.last_turn_result()
     return SessionInfoResponse(
         model=status["model"],
         model_id=session.model_id,
@@ -68,6 +70,15 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         parent_session_id=session.parent_session_id,
         last_turn_end=session.last_turn_end,
         last_turn_subtype=session.last_turn_subtype,
+        last_turn_result=(
+            TurnOutcomeInfo(
+                subtype=last_turn.subtype,
+                is_error=last_turn.is_error,
+                num_turns=last_turn.num_turns,
+            )
+            if last_turn is not None
+            else None
+        ),
         status=session.status,
         context_stats=ContextStatsInfo(
             message_count=msg_count,

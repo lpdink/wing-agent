@@ -292,6 +292,10 @@ class TrackedList(Generic[T]):
         """在内存 map 中按 uuid 查找消息（last-write-wins），返回类型化对象。"""
         return self._all_items.get(uuid)
 
+    def iter_history_reverse(self) -> Iterator[T]:
+        """按写入顺序倒序遍历所有记录，包含已离开活跃链的节点。"""
+        return (self._all_items[uuid] for uuid in reversed(self._lines_order))
+
     def walk_full_chain(self, from_uuid: str | None = None) -> list[T]:
         """从内存 map 回溯构建完整链，**包含**压缩节点（可跨压缩继续回溯）。
 

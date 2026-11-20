@@ -572,6 +572,8 @@ fn feed_info_full(
             session_name: None,
             workdir: None,
             parent_session_id: None,
+            last_turn_subtype: None,
+            last_turn_result: None,
             status: "idle".into(),
             context_stats: ContextStatsInfo {
                 message_count: 0,

@@ -7,7 +7,8 @@
 //! Uses a hybrid approach: subscribes to session events via WebSocket
 //! for fast TurnResult notification, and polls HTTP `/api/session/info`
 //! every 1 second as a safety net (prevents starvation if the WS event
-//! is missed due to subscription timing).
+//! is missed due to subscription timing). The HTTP snapshot carries the
+//! last turn outcome, so a completed failure still exits with an error.
 //!
 //! # Example (orchestrator pattern)
 //!
@@ -27,6 +28,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tokio::time::interval;
 use wing_api_client::GatewayClient as GatewayApiClient;
+use wing_api_client::models::SessionInfoResponse;
 
 use super::common;
 use crate::gateway::CloseReason;
@@ -106,21 +108,11 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
     // 6. Check initial status — "wait for idle" means idle/inactive → done now.
     for sid in session_ids {
         match http.get_session_info(sid).await {
-            Ok(info) => {
-                if is_idle(&info.status) {
-                    // Already idle — fetch result and mark done.
-                    let (result_text, num_messages) = fetch_last_result(&http, sid).await;
-                    results.push(SessionResult {
-                        session_id: sid.clone(),
-                        status: info.status,
-                        subtype: "success".into(),
-                        is_error: false,
-                        result: result_text,
-                        num_messages,
-                    });
-                    pending.remove(sid);
-                }
+            Ok(info) if is_idle(&info.status) => {
+                results.push(idle_result(&http, sid.clone(), info).await);
+                pending.remove(sid);
             }
+            Ok(_) => {}
             Err(e) => {
                 // Session not found or error — treat as done with error.
                 tracing::warn!("Failed to get info for {sid}: {e}");
@@ -194,16 +186,7 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
                         && is_idle(&info.status)
                     {
                         pending.remove(&sid);
-                        let (result_text, num_messages) =
-                            fetch_last_result(&http, &sid).await;
-                        results.push(SessionResult {
-                            session_id: sid,
-                            status: info.status,
-                            subtype: "success".into(),
-                            is_error: false,
-                            result: result_text,
-                            num_messages,
-                        });
+                        results.push(idle_result(&http, sid, info).await);
                     }
                 }
             }
@@ -239,6 +222,40 @@ async fn wait_inner(session_ids: &[String], timeout_secs: u64) -> Result<WaitOut
 /// A session is idle (done) if its status is `idle` or `inactive`.
 fn is_idle(status: &str) -> bool {
     status == "idle" || status == "inactive"
+}
+
+async fn idle_result(
+    http: &GatewayApiClient,
+    session_id: String,
+    info: SessionInfoResponse,
+) -> SessionResult {
+    let failure = match info.last_turn_result {
+        Some(turn) => turn.is_error.then_some((turn.subtype, turn.num_turns)),
+        None => info
+            .last_turn_subtype
+            .filter(|subtype| subtype.starts_with("error_"))
+            .map(|subtype| (subtype, 0)),
+    };
+    if let Some((subtype, num_turns)) = failure {
+        return SessionResult {
+            session_id,
+            status: info.status,
+            subtype,
+            is_error: true,
+            result: String::new(),
+            num_messages: num_turns,
+        };
+    }
+
+    let (result, num_messages) = fetch_last_result(http, &session_id).await;
+    SessionResult {
+        session_id,
+        status: info.status,
+        subtype: "success".into(),
+        is_error: false,
+        result,
+        num_messages,
+    }
 }
 
 /// Apply one WS event to the wait state.

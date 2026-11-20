@@ -10,13 +10,15 @@
 //!   went nowhere.
 //!
 //! These tests drive the real binary against a minimal in-process HTTP + WS
-//! server: one stream dies with an oversized frame (exactly what a >16 MiB
-//! `sync_session` payload does), the other delivers a normal `TurnResult`.
+//! server. They also check that live and HTTP failure results agree.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::WebSocketStream;
@@ -26,7 +28,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 
 mod common;
 
-use common::e2e::{read_request, start_fake_gateway};
+use common::e2e::{read_request, run_wing, start_fake_gateway};
 
 /// The client's per-frame receive limit (tungstenite default).
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -35,12 +37,17 @@ const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const SESSION_ID: &str = "20260101-000000-testtest";
 
 /// What the fake gateway does once the client is subscribed.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Scenario {
     /// Kill the client's read task with a frame one byte over the limit.
     OversizedFrame,
     /// Deliver a normal turn completion.
     TurnResult,
+    LiveFailure,
+    /// Failure is visible either immediately or after the first status check.
+    HttpFailure(Arc<AtomicBool>),
+    /// An older gateway only exposes the subtype, if available.
+    LegacyIdle(Option<&'static str>),
 }
 
 // ============================================================
@@ -86,10 +93,28 @@ async fn handle_conn(mut stream: TcpStream, scenario: Scenario) {
                     .to_string()
             }
             "/api/session/info" => {
-                // "working" keeps the session pending — the wait must not
-                // finish on its own; only an event (or the dead stream) ends it.
-                r#"{"model":"test","api_url":"http://x","tools":[],"total_tokens":0,"context_window_tokens":1,"thinking":false,"reasoning_effort":null,"yolo":false,"session_name":null,"status":"working","context_stats":{"message_count":0,"total_tokens":0}}"#
-                    .to_string()
+                let mut info = json!({
+                    "model": "test", "api_url": "http://x", "tools": [],
+                    "total_tokens": 0, "context_window_tokens": 1, "thinking": false,
+                    "yolo": false, "status": "working",
+                    "context_stats": {"message_count": 0, "total_tokens": 0},
+                });
+                match &scenario {
+                    Scenario::HttpFailure(completed) if completed.swap(true, Ordering::Relaxed) => {
+                        info["status"] = json!("idle");
+                        info["last_turn_result"] = json!({
+                            "subtype": "error_max_turns",
+                            "is_error": true,
+                            "num_turns": 3,
+                        });
+                    }
+                    Scenario::LegacyIdle(subtype) => {
+                        info["status"] = json!("idle");
+                        info["last_turn_subtype"] = json!(subtype);
+                    }
+                    _ => {}
+                }
+                info.to_string()
             }
             _ => "{}".to_string(),
         };
@@ -130,6 +155,18 @@ async fn drive_ws(mut ws: WebSocketStream<TcpStream>, scenario: Scenario) {
             let _ = ws.send(Message::Text(event.into())).await;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        Scenario::LiveFailure => {
+            let event = json!({
+                "type": "turn_result", "subtype": "error_max_turns", "is_error": true,
+                "num_turns": 3, "duration_ms": 12, "session_id": SESSION_ID,
+                "created_at": "2026-01-01T00:00:00+00:00", "request_id": "r",
+            });
+            let _ = ws.send(Message::Text(event.to_string().into())).await;
+            let _ = ws.next().await;
+        }
+        Scenario::HttpFailure(_) | Scenario::LegacyIdle(_) => {
+            let _ = ws.next().await;
+        }
     }
 }
 /// Case-insensitive header lookup over the raw request head (header *values*
@@ -149,6 +186,61 @@ fn header_value(head: &str, name: &str) -> Option<String> {
 /// Bind a port, publish it in a scratch `WING_HOME`, serve `scenario` there.
 async fn start_gateway(scenario: Scenario, tag: &str) -> (PathBuf, u16) {
     start_fake_gateway("wing-e2e", tag, scenario, handle_conn).await
+}
+
+#[tokio::test]
+async fn wait_reports_the_same_failure_live_and_over_http() {
+    let expected = json!({
+        "results": [{
+            "session_id": SESSION_ID,
+            "status": "idle",
+            "subtype": "error_max_turns",
+            "is_error": true,
+            "result": "",
+            "num_messages": 3,
+        }],
+    });
+    for (tag, scenario) in [
+        ("wait-live-failure", Scenario::LiveFailure),
+        (
+            "wait-late-failure",
+            Scenario::HttpFailure(Arc::new(AtomicBool::new(true))),
+        ),
+        (
+            "wait-poll-failure",
+            Scenario::HttpFailure(Arc::new(AtomicBool::new(false))),
+        ),
+    ] {
+        let (home, _) = start_gateway(scenario, tag).await;
+        let (code, stdout, stderr) =
+            run_wing(&["wait", SESSION_ID, "--timeout", "10", "--json"], &home).await;
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(code, 1, "{tag}: {stdout}\n{stderr}");
+        let output: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(output, expected, "{tag}");
+    }
+}
+
+#[tokio::test]
+async fn wait_accepts_status_from_legacy_gateways() {
+    for (tag, subtype, expected_code) in [
+        ("wait-legacy-failure", Some("error_max_turns"), 1),
+        ("wait-legacy-idle", None, 0),
+    ] {
+        let (home, _) = start_gateway(Scenario::LegacyIdle(subtype), tag).await;
+        let (code, stdout, stderr) =
+            run_wing(&["wait", SESSION_ID, "--timeout", "10", "--json"], &home).await;
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(code, expected_code, "{stdout}\n{stderr}");
+        let output: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            output["results"][0]["subtype"],
+            subtype.unwrap_or("success")
+        );
+        assert_eq!(output["results"][0]["is_error"], expected_code != 0);
+    }
 }
 
 #[tokio::test]
