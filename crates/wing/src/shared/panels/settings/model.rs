@@ -167,3 +167,56 @@ impl ModelEdits {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_model_names_do_not_leak_into_nested_fields_or_other_lists() {
+        let doc = SettingsDoc::new(
+            json!({"providers": [{"models": ["short"], "fallback_models": ["fallback"]}]}),
+            json!({"providers": [{"models": ["local"]}]}),
+            Default::default(),
+            "base".into(),
+        );
+        assert_eq!(
+            short_name(&doc, Root::Gateway, "providers[0].models[0].name"),
+            Some(&json!("short"))
+        );
+        for (root, path) in [
+            (Root::Gateway, "providers[0].models[0].capabilities.name"),
+            (Root::Gateway, "providers[0].fallback_models[0].name"),
+            (Root::Interface, "providers[0].models[0].name"),
+        ] {
+            assert_eq!(field_value(&doc, root, path), None, "{root:?} {path}");
+        }
+    }
+
+    #[test]
+    fn interface_reorders_do_not_reassign_gateway_promotion_history() {
+        let mut doc = SettingsDoc::new(
+            json!({"providers": [{"models": ["short", {"name": "object"}]}]}),
+            json!({}),
+            Default::default(),
+            "base".into(),
+        );
+        let mut edits = ModelEdits::default();
+        let vision = "providers[0].models[0].capabilities.vision";
+        assert!(
+            edits
+                .write(&mut doc, Root::Gateway, vision, json!(true), Some(false))
+                .is_none()
+        );
+        edits.remap(
+            Root::Interface,
+            "providers[0].models",
+            &doc_edit::swap_index_map(0, 1),
+        );
+        assert!(edits.reset(&mut doc, Root::Gateway, vision));
+        assert_eq!(
+            doc.value(Root::Gateway, "providers[0].models"),
+            Some(&json!(["short", {"name": "object"}]))
+        );
+    }
+}

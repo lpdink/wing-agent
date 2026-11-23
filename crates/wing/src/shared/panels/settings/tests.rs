@@ -3227,3 +3227,203 @@ fn leaving_expanded_items_with_left_retires_the_enum_choice() {
     press_code(&mut panel, KeyCode::Esc);
     assert_eq!(panel.view(), View::Categories);
 }
+
+#[test]
+fn settings_action_debug_keeps_credentials_out_of_diagnostics() {
+    let gateway_secret = "gateway-secret-for-test";
+    let interface_secret = "interface-secret-for-test";
+    let preview = SettingsAction::PreviewInterface(json!({"api_key": interface_secret}));
+    let save = SettingsAction::Save {
+        gateway: json!({"providers": [{"api_key": gateway_secret}]}),
+        base: "disk-fingerprint".into(),
+        interface: json!({"api_key": interface_secret}),
+        gateway_dirty: true,
+        interface_dirty: false,
+    };
+    let debug = format!("{preview:?} {save:?}");
+    for private in [
+        "api_key",
+        gateway_secret,
+        interface_secret,
+        "disk-fingerprint",
+    ] {
+        assert!(!debug.contains(private), "debug leaked {private}");
+    }
+    assert!(debug.contains("PreviewInterface(<redacted>)"));
+    assert!(debug.contains("gateway_dirty: true"));
+    assert!(debug.contains("interface_dirty: false"));
+    for (action, name) in [
+        (SettingsAction::None, "None"),
+        (SettingsAction::RestartGateway, "RestartGateway"),
+        (
+            SettingsAction::Close { discard: true },
+            "Close { discard: true }",
+        ),
+        (SettingsAction::Reload, "Reload"),
+    ] {
+        assert_eq!(format!("{action:?}"), name);
+    }
+}
+
+#[test]
+fn search_paste_rebuilds_results_and_a_snapshot_retires_the_old_target() {
+    let mut panel = panel();
+    search(&mut panel, "gate");
+    let old = panel.paste_target().expect("search accepts paste");
+    panel.apply_snapshot(&schema(), state());
+    assert_eq!(panel.search_query(), Some("gate"));
+    let active = panel.paste_target().expect("search survived the snapshot");
+    assert_ne!(active, old);
+    panel.insert_paste(old, "stale").unwrap();
+    assert_eq!(panel.search_query(), Some("gate"));
+    assert!(panel.insert_paste(active, "way\nport").is_err());
+    panel.insert_paste(active, "way.port").unwrap();
+    assert_eq!(panel.search_query(), Some("gateway.port"));
+    assert_eq!(cursor_path(&panel), "gateway.port");
+    assert_eq!(press_code(&mut panel, KeyCode::Enter), SettingsAction::None);
+    assert_eq!(panel.group().unwrap().title, "Net");
+    assert_eq!(panel.dirty_count(), 0);
+
+    press_code(&mut panel, KeyCode::Char('d'));
+    assert!(panel.prompt().is_some());
+    assert!(panel.paste_target().is_none());
+    panel.insert_paste(active, "late reply").unwrap();
+    assert!(panel.prompt().is_some());
+    press_code(&mut panel, KeyCode::Esc);
+    press_code(&mut panel, KeyCode::Char('?'));
+    assert!(panel.paste_target().is_none());
+}
+
+#[test]
+fn problem_page_keys_use_the_viewport_and_repeat_failures_preserve_the_return_view() {
+    let backend = [
+        "gateway.port",
+        "gateway.auth.enabled",
+        "providers[0].base_url",
+        "providers[0].protocol",
+        "providers[0].name",
+        "providers[0].models[0]",
+        "extra_body",
+    ]
+    .into_iter()
+    .map(|path| SettingProblem {
+        path: Some(path.into()),
+        kind: "invalid_value".into(),
+        message: format!("Rejected {path}"),
+        hint: None,
+    })
+    .collect();
+    let mut panel = panel();
+    goto(&mut panel, "gateway.port");
+    let mut failure = ok_response(backend);
+    failure.ok = false;
+    for _ in 0..2 {
+        panel.apply_save(super::SaveOutcome {
+            gateway: Some(failure.clone()),
+            interface_ok: None,
+        });
+        assert_eq!(panel.view(), View::Problems);
+    }
+    panel.set_viewport_rows(3);
+    press_code(&mut panel, KeyCode::PageDown);
+    assert_eq!(panel.problem_cursor(), 3);
+    press_code(&mut panel, KeyCode::PageDown);
+    assert_eq!(panel.problem_cursor(), 6);
+    press_code(&mut panel, KeyCode::PageUp);
+    assert_eq!(panel.problem_cursor(), 3);
+    press_code(&mut panel, KeyCode::Home);
+    assert_eq!(panel.problem_cursor(), 0);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(cursor_path(&panel), "gateway.port");
+}
+
+#[test]
+fn an_object_only_model_catalog_uses_its_declared_list_type() {
+    let mut schema = schema();
+    schema.root = fx::mixed_model_catalog();
+    schema.groups.clear();
+    let models = schema.root.children[0]
+        .element
+        .as_mut()
+        .unwrap()
+        .children
+        .iter_mut()
+        .find(|node| node.key == "models")
+        .unwrap();
+    models
+        .variants
+        .as_mut()
+        .unwrap()
+        .retain(|node| node.kind == wing_api_client::models::SettingKind::Object);
+    let values = json!({"providers": [{"models": [{"id": "old-id", "name": "old-model"}]}]});
+    let mut panel = SettingsPanel::new(
+        &schema,
+        state_with(values, Vec::new()),
+        None,
+        View::Categories,
+    );
+    let declared = panel
+        .gateway_catalog()
+        .node_at("providers[0].models")
+        .unwrap();
+    assert_eq!(declared.variants.as_ref().unwrap().len(), 1);
+    search(&mut panel, "providers[].models");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "providers[0].models[]");
+    assert!(panel.footer_hint().contains("Enter 新增"));
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.prompt().is_none());
+    assert_eq!(cursor_path(&panel), "providers[0].models[1].name");
+    assert_eq!(
+        model_doc(&panel)[0],
+        json!({"id": "old-id", "name": "old-model"})
+    );
+    assert_eq!(model_doc(&panel)[1], json!({"name": ""}));
+}
+
+#[test]
+fn reverting_vision_preserves_other_model_fields_until_the_last_override_is_reset() {
+    let mut panel = mixed_model_panel();
+    search(&mut panel, "Image input");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Tab);
+    let id = "providers[0].models[0].id";
+    goto(&mut panel, id);
+    press_code(&mut panel, KeyCode::Enter);
+    type_text(&mut panel, "persistent-id");
+    press_code(&mut panel, KeyCode::Enter);
+    let vision = "providers[0].models[0].capabilities.vision";
+    goto(&mut panel, vision);
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(
+        model_doc(&panel)[0],
+        json!({"name": "legacy/model", "id": "persistent-id"})
+    );
+    assert!(panel.is_dirty(super::Root::Gateway, id));
+    assert!(!panel.is_dirty(super::Root::Gateway, vision));
+    goto(&mut panel, id);
+    press_code(&mut panel, KeyCode::Char('r'));
+    assert_eq!(model_doc(&panel)[0], "legacy/model");
+    assert_eq!(panel.dirty_count(), 0);
+
+    let original_object = "providers[0].models[1]";
+    goto(&mut panel, original_object);
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, &format!("{original_object}.capabilities"));
+    press_code(&mut panel, KeyCode::Right);
+    goto(
+        &mut panel,
+        &format!("{original_object}.capabilities.vision"),
+    );
+    press_code(&mut panel, KeyCode::Char('r'));
+    assert_eq!(
+        model_doc(&panel)[1],
+        json!({"id": "chosen", "name": "upstream", "display_name": "Friendly"})
+    );
+    assert_eq!(
+        panel.current_row().unwrap().value,
+        ValueText::Default("disabled".into())
+    );
+}
