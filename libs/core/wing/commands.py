@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import glob
+import os
 from pathlib import Path
 from typing import Optional
 
 import frontmatter
 from pydantic import BaseModel
+from yaml.error import MarkedYAMLError, YAMLError
 
 from wing.common.logger import log
 
@@ -114,7 +116,9 @@ def expand_prompt_command(name: str, args: str) -> str | None:
             post = frontmatter.load(f)
         content = post.content
     except Exception as e:
-        log.error(f"Failed to read prompt command file {md_path}: {e}")
+        log.error(
+            f"Failed to read prompt command file {_prompt_file_failure(md_path, e)}"
+        )
         return None
 
     final_content = content.replace("$ARGUMENTS", args)
@@ -126,6 +130,21 @@ def expand_prompt_command(name: str, args: str) -> str | None:
     if args:
         return f"{final_content} <user_input>{args}</user_input>"
     return final_content
+
+
+def _prompt_file_failure(path: Path, exc: Exception) -> str:
+    if isinstance(exc, MarkedYAMLError) and exc.problem_mark is not None:
+        mark = exc.problem_mark
+        detail = f"invalid YAML front matter at line {mark.line + 1}, column {mark.column + 1}"
+    elif isinstance(exc, YAMLError):
+        detail = "invalid YAML front matter"
+    elif isinstance(exc, UnicodeDecodeError):
+        detail = f"invalid UTF-8 at byte offset {exc.start}"
+    elif isinstance(exc, OSError) and exc.errno is not None:
+        detail = os.strerror(exc.errno)
+    else:
+        detail = type(exc).__name__
+    return f"{str(path)!r}: {detail}"
 
 
 def load_prompt_command_from_file(
@@ -175,7 +194,9 @@ def load_prompt_command_from_file(
     except Exception as e:
         if diagnostics is not None:
             diagnostics.append(md_path)
-        log.error(f"Failed to load prompt command from {md_path}: {type(e).__name__}")
+        log.error(
+            f"Failed to load prompt command from {_prompt_file_failure(md_path, e)}"
+        )
         return None
 
 

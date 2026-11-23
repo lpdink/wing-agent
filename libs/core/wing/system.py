@@ -19,13 +19,14 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
 
-from wing.config.document import invalid_yaml_message
 from wing.common.logger import log
+from wing.config.document import invalid_yaml_message
 
 if TYPE_CHECKING:
     from wing.config import Config
@@ -70,13 +71,25 @@ def failure_detail(exc: Exception) -> str:
     return type(exc).__name__
 
 
+def _record_exception(items: list[ReloadResultItem], name: str, exc: Exception) -> None:
+    detail = failure_detail(exc)
+    items.append(ReloadResultItem(name=name, ok=False, detail=detail))
+    trace = exc.__traceback__
+    assert trace is not None
+    while trace.tb_next is not None:
+        trace = trace.tb_next
+    filename = Path(trace.tb_frame.f_code.co_filename).name
+    log.warning(f"{name}: {detail} (source {filename!r}:{trace.tb_lineno})")
+
+
 def record_step(
     items: list[ReloadResultItem], name: str, fn: Callable[[], str | None]
 ) -> bool:
     try:
         detail = fn()
     except Exception as exc:
-        detail = failure_detail(exc)
+        _record_exception(items, name, exc)
+        return False
     ok = detail is None
     items.append(ReloadResultItem(name=name, ok=ok, detail=detail))
     if not ok:
@@ -135,9 +148,7 @@ async def reload_system(
         new_session_defaults_changed = before != _new_session_defaults(sm, config)
         items.append(ReloadResultItem(name="config.yaml", ok=True))
     except Exception as e:
-        items.append(
-            ReloadResultItem(name="config.yaml", ok=False, detail=failure_detail(e))
-        )
+        _record_exception(items, "config.yaml", e)
         return ReloadResult(ok=False, items=items)
 
     def _reload_hooks() -> str | None:
@@ -164,9 +175,7 @@ async def reload_system(
 
         rebuilt = await reset_providers()
     except Exception as e:
-        items.append(
-            ReloadResultItem(name="provider", ok=False, detail=failure_detail(e))
-        )
+        _record_exception(items, "provider", e)
     else:
         items.append(
             ReloadResultItem(

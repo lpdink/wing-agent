@@ -136,7 +136,7 @@ async def settings_get(request: Request) -> SettingsGetResponse:
     setup_mode = server.in_setup_mode
     path = get_config_path()
     config_path = str(path)
-    # 一次建树喂三处：读盘切分（read_document）、掩码 / 密文状态、问题清单。
+    # 原始文档用于启动校验，稀疏视图用于掩码和密文状态。
     catalog = build_catalog()
     pending_restart_paths = server.pending_restart_paths()
     try:

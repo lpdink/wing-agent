@@ -165,7 +165,7 @@ async def test_saved_config_with_partial_reload_failure_can_be_retried(
     hook = tmp_path / "broken.py"
     hook.write_text(f"raise RuntimeError({marker!r})", encoding="utf-8")
     command = tmp_path / "broken.md"
-    command.write_text(f"---\ndescription: {marker}\n---\n", encoding="utf-8")
+    command.write_text(f"---\ndescription: [{marker}\n---\n", encoding="utf-8")
     good_command = tmp_path / "working.md"
     good_command.write_text(
         "---\nname: remaining-command\n---\nWorks.\n", encoding="utf-8"
@@ -189,6 +189,12 @@ async def test_saved_config_with_partial_reload_failure_can_be_retried(
     assert "1 hook file" in items["hooks"]["detail"]
     assert "1 prompt command file" in items["prompt commands"]["detail"]
     assert marker not in str(receipt)
+    assert str(hook) not in str(receipt) and str(command) not in str(receipt)
+    diagnostics = probe.env.log_path.read_text(encoding="utf-8")
+    assert f"{str(hook)!r}:1: RuntimeError" in diagnostics
+    assert f"{str(command)!r}: invalid YAML front matter at line" in diagnostics
+    assert "provider: UnicodeEncodeError (source " in diagnostics
+    assert marker not in diagnostics
     saved = await _settings(http)
     assert saved["fingerprint"] == receipt["fingerprint"]
     assert saved["values"]["providers"][0]["api_key"] is None

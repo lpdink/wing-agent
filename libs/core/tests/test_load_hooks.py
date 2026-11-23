@@ -102,3 +102,36 @@ class TestLoadHooks:
         """glob 规则没有匹配到任何文件时不 crash"""
         with tempfile.TemporaryDirectory() as tmpdir:
             load_hooks([f"{tmpdir}/nonexistent/*.py"])
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "import absent_wing_hook_dependency",
+            "missing Python module for import 'absent_wing_hook_dependency'",
+        ),
+        (
+            "from importlib import import_module\nimport_module('private_fixture_value')",
+            "missing Python module",
+        ),
+        ("raise RuntimeError('private_fixture_value')", "RuntimeError"),
+        ("if 'private_fixture_value'", "invalid Python syntax"),
+    ],
+)
+def test_hook_load_diagnostics_include_source_but_no_exception_values(
+    tmp_path, monkeypatch, source, expected
+):
+    from wing.common.logger import log
+
+    path = tmp_path / "broken_hook.py"
+    path.write_text(source + "\n", encoding="utf-8")
+    messages: list[str] = []
+    monkeypatch.setattr(log, "warning", messages.append)
+
+    assert load_hooks([str(path)]) == 1
+    (message,) = messages
+    line = len(source.splitlines())
+    assert f"{str(path)!r}:{line}" in message
+    assert expected in message
+    assert "private_fixture_value" not in message
