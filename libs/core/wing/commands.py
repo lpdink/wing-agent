@@ -128,7 +128,9 @@ def expand_prompt_command(name: str, args: str) -> str | None:
     return final_content
 
 
-def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
+def load_prompt_command_from_file(
+    md_path: Path, *, diagnostics: list[Path] | None = None
+) -> MagicCommand | None:
     """从 md 文件加载 prompt 类型命令元数据。
 
     只加载 frontmatter 中的元数据（name/description/aliases），
@@ -140,6 +142,8 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
 
         original_name = post.get("name")
         if not original_name:
+            if diagnostics is not None:
+                diagnostics.append(md_path)
             log.warning(f"Prompt command {md_path} missing required 'name' field")
             return None
 
@@ -150,6 +154,8 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
         aliases_raw = post.get("aliases", [])
 
         if not isinstance(aliases_raw, list):
+            if diagnostics is not None:
+                diagnostics.append(md_path)
             log.warning(
                 f"Prompt command {md_path} 'aliases' should be a list, got {type(aliases_raw)}"
             )
@@ -167,11 +173,15 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
         )
 
     except Exception as e:
-        log.error(f"Failed to load prompt command from {md_path}: {e}")
+        if diagnostics is not None:
+            diagnostics.append(md_path)
+        log.error(f"Failed to load prompt command from {md_path}: {type(e).__name__}")
         return None
 
 
-def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
+def load_prompt_commands_from_paths(
+    paths: list[str], *, diagnostics: list[Path] | None = None
+) -> list[MagicCommand]:
     """从多个 glob 路径加载 prompt 类型命令。"""
     commands: list[MagicCommand] = []
 
@@ -184,7 +194,7 @@ def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
             if not md_path.is_file():
                 continue
 
-            cmd = load_prompt_command_from_file(md_path)
+            cmd = load_prompt_command_from_file(md_path, diagnostics=diagnostics)
             if cmd:
                 commands.append(cmd)
                 log.info(f"Loaded prompt command: /{cmd.name} from {md_path}")
@@ -192,14 +202,16 @@ def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
     return commands
 
 
-def register_prompt_commands(paths: list[str]) -> None:
+def register_prompt_commands(paths: list[str]) -> int:
     """加载并注册 prompt 类型命令到全局 registry。"""
-    commands = load_prompt_commands_from_paths(paths)
+    diagnostics: list[Path] = []
+    commands = load_prompt_commands_from_paths(paths, diagnostics=diagnostics)
 
     for cmd in commands:
         magic_registry.register_command(cmd)
         alias_str = f" (aliases: {', '.join(cmd.aliases)})" if cmd.aliases else ""
         log.debug(f"Registered prompt command: /{cmd.name}{alias_str}")
+    return len(set(diagnostics))
 
 
 __all__ = [

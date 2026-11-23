@@ -204,6 +204,7 @@ pub(crate) fn schema(catalog: &SettingNode) -> SettingsSchemaResponse {
 
 pub(crate) fn state(values: Value) -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets: sample_secrets(),
         fingerprint: "fp-1".into(),

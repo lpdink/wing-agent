@@ -650,6 +650,40 @@ impl App {
             return;
         }
 
+        // Settings requests are global and can finish after a chat switch.
+        let payload = match payload {
+            FetchPayload::Settings { id, schema, state } => {
+                if id == self.settings_fetch_id {
+                    self.handle_settings_fetch(*schema, *state);
+                }
+                return;
+            }
+            FetchPayload::SettingsFetchError { id, message } => {
+                if id == self.settings_fetch_id {
+                    self.handle_settings_fetch_error(message);
+                }
+                return;
+            }
+            FetchPayload::SettingsSaved(response) => {
+                self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Saved(*response));
+                return;
+            }
+            FetchPayload::SettingsSaveError {
+                message,
+                conflict,
+                unconfirmed,
+            } => {
+                use crate::app::settings::GatewaySaveReport;
+                self.settle_gateway_save(if unconfirmed {
+                    GatewaySaveReport::Unconfirmed { message }
+                } else {
+                    GatewaySaveReport::Failed { message, conflict }
+                });
+                return;
+            }
+            payload => payload,
+        };
+
         // Session guard: discard results from a previous session.
         if session_id != self.session_id {
             tracing::debug!(
@@ -844,18 +878,6 @@ impl App {
                     self.show_toast(Toast::info(message, std::time::Duration::from_secs(3)));
                 }
             }
-            FetchPayload::Settings { schema, state } => {
-                self.handle_settings_fetch(*schema, *state);
-            }
-            FetchPayload::SettingsSaved(response) => {
-                self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Saved(*response));
-            }
-            FetchPayload::SettingsSaveError { message, conflict } => {
-                self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Failed {
-                    message,
-                    conflict,
-                });
-            }
             // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的
             // 发送失败 / 内容寻址的媒体字节 / 压缩收口）。
             FetchPayload::ClipboardImage { .. }
@@ -863,7 +885,11 @@ impl App {
             | FetchPayload::SendFinished { .. }
             | FetchPayload::CompactDone { .. }
             | FetchPayload::CompactFailed { .. }
-            | FetchPayload::MediaBytes { .. } => {}
+            | FetchPayload::MediaBytes { .. }
+            | FetchPayload::Settings { .. }
+            | FetchPayload::SettingsFetchError { .. }
+            | FetchPayload::SettingsSaved(_)
+            | FetchPayload::SettingsSaveError { .. } => {}
         }
     }
 }

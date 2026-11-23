@@ -182,13 +182,17 @@ def build_settings_secret_states(
     }
 
 
-def build_reload_response(result: ReloadResult) -> ReloadResponse:
+def build_reload_response(
+    result: ReloadResult, pending_restart_paths: list[str] | None = None
+) -> ReloadResponse:
     """``ReloadResult`` → wire 形状（``/api/system/reload`` 与保存回执共用的唯一投影）。
 
     形状由 protocol 冻结：加一个回执字段只改这里。
     """
     return ReloadResponse(
         ok=result.ok,
+        pending_restart_paths=pending_restart_paths,
+        new_session_defaults_changed=result.new_session_defaults_changed,
         results=[
             ReloadResultItem(name=item.name, ok=item.ok, detail=item.detail)
             for item in result.items
@@ -196,7 +200,9 @@ def build_reload_response(result: ReloadResult) -> ReloadResponse:
     )
 
 
-def build_settings_apply_response(result: SettingsApplyResult) -> SettingsSetResponse:
+def build_settings_apply_response(
+    result: SettingsApplyResult, pending_restart_paths: list[str] | None = None
+) -> SettingsSetResponse:
     """``SettingsApplyResult`` → POST /api/settings/set 的回执。"""
     return SettingsSetResponse(
         ok=result.ok,
@@ -205,7 +211,9 @@ def build_settings_apply_response(result: SettingsApplyResult) -> SettingsSetRes
         changed=list(result.changed),
         restart_required=list(result.restart_required),
         reload=(
-            build_reload_response(result.reload) if result.reload is not None else None
+            build_reload_response(result.reload, pending_restart_paths)
+            if result.reload is not None
+            else None
         ),
         setup_mode_exited=result.setup_mode_exited,
         backup_path=result.backup_path,

@@ -204,6 +204,7 @@ pub struct SettingsPanel {
     problem_cursor: usize,
     config_path: String,
     setup_mode: bool,
+    retry_setup: bool,
     stale: bool,
     restart_required: Vec<String>,
     viewport_rows: usize,
@@ -266,8 +267,9 @@ impl SettingsPanel {
             problem_cursor: 0,
             config_path: schema.config_path.clone(),
             setup_mode: state.setup_mode,
+            retry_setup: false,
             stale: false,
-            restart_required: Vec::new(),
+            restart_required: state.pending_restart_paths.unwrap_or_default(),
             viewport_rows: 10,
         };
         // 进入第 0 组：展开它的顶层成员，进入分类时就有内容（不用逐个 Enter）。
@@ -463,7 +465,7 @@ impl SettingsPanel {
         self.backend_problems = state.problems;
         self.setup_mode = state.setup_mode;
         self.stale = false;
-        self.restart_required.clear();
+        self.restart_required = state.pending_restart_paths.unwrap_or_default();
         self.edit = None;
         self.pending = None;
         self.choices = None;
@@ -480,10 +482,16 @@ impl SettingsPanel {
     /// 切到问题清单视图（保存失败后的入口），脏标记保留。
     pub fn apply_save(&mut self, outcome: SaveOutcome) {
         if let Some(response) = outcome.gateway {
-            self.doc.set_fingerprint(response.fingerprint.clone());
-            self.backend_problems = response.problems.clone();
-            self.restart_required = response.restart_required.clone();
+            self.backend_problems = response.problems;
             if response.ok {
+                self.doc.set_fingerprint(response.fingerprint);
+                self.retry_setup = self.setup_mode && !response.setup_mode_exited;
+                if let Some(paths) = response
+                    .reload
+                    .and_then(|reload| reload.pending_restart_paths)
+                {
+                    self.restart_required = paths;
+                }
                 self.doc.mark_baseline(Root::Gateway);
                 self.model_edits.clear();
                 self.stale = false;
@@ -616,6 +624,10 @@ impl SettingsPanel {
 
     pub fn fingerprint(&self) -> &str {
         self.doc.fingerprint()
+    }
+
+    pub fn gateway_catalog(&self) -> &SettingNode {
+        &self.gateway_catalog
     }
 
     /// config.yaml 的绝对路径（标题栏）。
@@ -1663,7 +1675,7 @@ impl SettingsPanel {
     // ── 保存 / 重载 / 重启 / 关闭 ────────────────────────────
 
     fn save_action(&mut self) -> SettingsAction {
-        let gateway_dirty = self.doc.dirty_count_in(Root::Gateway) > 0;
+        let gateway_dirty = self.retry_setup || self.doc.dirty_count_in(Root::Gateway) > 0;
         let interface_dirty = self.doc.dirty_count_in(Root::Interface) > 0;
         if !gateway_dirty && !interface_dirty {
             return SettingsAction::None;
@@ -1677,7 +1689,7 @@ impl SettingsPanel {
         }
     }
 
-    /// `Ctrl+R`：只在**真的有待重启的变更**（上次保存回执的 `restart_required` 非空）时接受。
+    /// `Ctrl+R`：只在网关报告待重启路径时接受。
     /// 没有 → 无操作 —— 键位栏同样不显示它，免得教用户按一个没有意义的键。
     fn restart_action(&mut self) -> SettingsAction {
         if self.restart_required.is_empty() {

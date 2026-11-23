@@ -16,7 +16,6 @@ use std::sync::atomic::Ordering;
 use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SendOutcome, SessionUpdate};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
-use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
 use crate::app::transport::Transport;
 use crate::app::transport::{GatewayEndpoint, Recovery};
@@ -525,6 +524,8 @@ pub async fn execute_intent(
         }
         // ---- 设置面板 ----
         AppIntent::FetchSettings | AppIntent::ReloadSettings => {
+            app.settings_fetch_id = app.settings_fetch_id.wrapping_add(1);
+            let id = app.settings_fetch_id;
             if let Some(t) = transport {
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
@@ -535,12 +536,13 @@ pub async fn execute_intent(
                     let (schema, state) = tokio::join!(http.settings_schema(), http.settings_get());
                     let payload = match (schema, state) {
                         (Ok(schema), Ok(state)) => FetchPayload::Settings {
+                            id,
                             schema: Box::new(schema),
                             state: Box::new(state),
                         },
-                        (Err(e), _) | (_, Err(e)) => FetchPayload::Toast {
-                            message: format!("载入设置失败：{e}"),
-                            is_error: true,
+                        (Err(e), _) | (_, Err(e)) => FetchPayload::SettingsFetchError {
+                            id,
+                            message: format!("读取设置文件失败：{e}"),
                         },
                     };
                     let _ = tx
@@ -550,6 +552,8 @@ pub async fn execute_intent(
                         })
                         .await;
                 });
+            } else {
+                app.handle_settings_fetch_error("读取设置文件失败：网关未连接".into());
             }
         }
         AppIntent::SaveSettings {
@@ -586,20 +590,18 @@ pub async fn execute_intent(
             } else {
                 InterfaceSaveReport::Skipped
             };
-            // 两半的状态先存住：合并回执（与缓存回写）都读这一份。
-            app.settings_save = Some(PendingSettingsSave {
-                interface: report,
-                document: (*gateway).clone(),
-            });
+            app.settings_save = Some(report);
             // Gateway 半边：异步（回执两半合体，不阻塞主循环）。
             if gateway_dirty {
+                app.settings_fetch_id = app.settings_fetch_id.wrapping_add(1);
+                app.settings_reload_pending = false;
                 if let Some(t) = transport.as_ref() {
                     let http = t.http.clone();
                     let session_id = app.session_id.clone();
                     let tx = fetch_tx.clone();
                     let request = wing_api_client::models::SettingsSetRequest {
                         base: Some(base),
-                        document: (*gateway).clone(),
+                        document: *gateway,
                     };
                     tokio::spawn(async move {
                         let payload = match http.settings_set(&request).await {
@@ -607,6 +609,10 @@ pub async fn execute_intent(
                             Err(e) => FetchPayload::SettingsSaveError {
                                 message: e.to_string(),
                                 conflict: e.is_conflict(),
+                                unconfirmed: !matches!(
+                                    e,
+                                    wing_api_client::ApiClientError::Api { .. }
+                                ),
                             },
                         };
                         let _ = tx

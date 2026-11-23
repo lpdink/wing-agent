@@ -27,8 +27,8 @@ use wing_api_client::models::ReloadResponse;
 use super::common;
 
 /// Entry point for `wing reload`.
-pub async fn run_reload(json: bool) -> ExitCode {
-    match reload_inner().await {
+pub async fn run_reload(json: bool, host: Option<String>, port: Option<u16>) -> ExitCode {
+    match reload_inner(host, port).await {
         Ok(resp) => {
             if json {
                 common::print_json_compact(&resp);
@@ -45,35 +45,18 @@ pub async fn run_reload(json: bool) -> ExitCode {
     }
 }
 
-async fn reload_inner() -> Result<ReloadResponse> {
-    // `ensure_gateway` starts a gateway when none is running — and a fresh
-    // process read the config at boot, so the per-item receipt below describes
-    // a pipeline that had nothing to re-read. Say that on stderr instead of
-    // letting the receipt imply a live config change.
-    let was_running = gateway_responding().await;
-    let (host, port) = common::ensure_gateway().await?;
-    if !was_running {
-        eprintln!(
-            "note: no gateway was running — it was just started, and a fresh \
-             process already loads the config at boot (the items below are that \
-             pipeline run, not a re-read of an edited file)"
+async fn reload_inner(host: Option<String>, port: Option<u16>) -> Result<ReloadResponse> {
+    let configured = super::backend_config::read_backend_gateway_config();
+    let host = host.unwrap_or(configured.host);
+    let port = port.unwrap_or(configured.port);
+    let http = common::create_api_client(&host, port)?;
+    if !matches!(http.health().await, Ok(health) if health.service == "wing-gateway") {
+        anyhow::bail!(
+            "no running Wing gateway found at {host}:{port}. Run `wing start` to start one, \
+             or use `wing reload --host <old-host> --port <old-port>` if its address changed."
         );
     }
-    let http = common::create_api_client(&host, port)?;
     Ok(http.reload_system().await?)
-}
-
-/// Whether a wing gateway answers on the configured endpoint (a cheap probe;
-/// unlike [`common::ensure_gateway`] it starts nothing).
-async fn gateway_responding() -> bool {
-    let gw = super::backend_config::read_backend_gateway_config();
-    let base = format!("http://{}:{}", gw.host, gw.port);
-    match wing_api_client::GatewayClient::new(&base, None) {
-        Ok(client) => {
-            matches!(client.health().await, Ok(health) if health.service == "wing-gateway")
-        }
-        Err(_) => false,
-    }
 }
 
 /// Render the per-item report, in the response's own order (the name order is
@@ -81,7 +64,7 @@ async fn gateway_responding() -> bool {
 fn format_reload(resp: &ReloadResponse) -> String {
     let mut text = String::new();
     text.push_str(if resp.ok {
-        "reload: ok\n"
+        "reload: ok (running gateway re-read config.yaml)\n"
     } else {
         "reload: FAILED\n"
     });
@@ -93,16 +76,45 @@ fn format_reload(resp: &ReloadResponse) -> String {
         .unwrap_or(0)
         .min(24);
     for item in &resp.results {
+        let detail = item
+            .detail
+            .as_deref()
+            .filter(|_| item.ok || resp.pending_restart_paths.is_some());
         let status = if item.ok { "ok" } else { "FAIL" };
         text.push_str(&format!(
             "  {:<4} {:<name_width$} {}\n",
             status,
             common::truncate_chars(&item.name, name_width),
-            common::single_line(item.detail.as_deref().unwrap_or("")),
+            common::single_line(detail.unwrap_or("")),
         ));
     }
     if resp.results.is_empty() {
         text.push_str("  (no items reported)\n");
+    }
+    if resp.new_session_defaults_changed {
+        text.push_str("New session defaults updated.\n");
+    }
+    if let Some(paths) = resp
+        .pending_restart_paths
+        .as_ref()
+        .filter(|paths| !paths.is_empty())
+    {
+        let config_failed = resp
+            .results
+            .first()
+            .is_some_and(|item| item.name == "config.yaml" && !item.ok);
+        let action = if config_failed {
+            "Fix config.yaml before restarting."
+        } else {
+            "In a TUI connected to this gateway, press Ctrl+R in settings."
+        };
+        text.push_str(&format!(
+            "Restart required for {}. {action}\n",
+            paths.join(", ")
+        ));
+    }
+    if !resp.ok {
+        text.push_str("Check the failed steps, then run `wing reload` again.\n");
     }
     text
 }
@@ -124,6 +136,8 @@ mod tests {
     #[test]
     fn reload_report_keeps_the_contract_order() {
         let resp = ReloadResponse {
+            pending_restart_paths: None,
+            new_session_defaults_changed: false,
             ok: true,
             results: vec![
                 item("config.yaml", true, None),
@@ -154,12 +168,17 @@ mod tests {
             positions.windows(2).all(|w| w[0] < w[1]),
             "顺序错了：{positions:?}\n{text}"
         );
-        assert!(text.starts_with("reload: ok\n"), "{text}");
+        assert!(
+            text.starts_with("reload: ok (running gateway re-read config.yaml)\n"),
+            "{text}"
+        );
     }
 
     #[test]
     fn reload_report_shows_failures_and_details() {
         let resp = ReloadResponse {
+            pending_restart_paths: Some(vec![]),
+            new_session_defaults_changed: false,
             ok: false,
             results: vec![
                 item("config.yaml", false, Some("providers 不得为空")),
@@ -173,6 +192,8 @@ mod tests {
 
         // 单项失败（非 config）继续——逐项如实打印。
         let resp = ReloadResponse {
+            pending_restart_paths: Some(vec![]),
+            new_session_defaults_changed: false,
             ok: false,
             results: vec![
                 item("config.yaml", true, None),
@@ -189,11 +210,29 @@ mod tests {
     }
 
     #[test]
+    fn reload_report_from_an_older_gateway_only_shows_the_failed_step() {
+        let response: ReloadResponse = serde_json::from_str(
+            r#"{"ok":false,"results":[{"name":"config.yaml","ok":false,"detail":"raw config value"}]}"#,
+        ).unwrap();
+        let text = format_reload(&response);
+        assert!(text.contains("FAIL config.yaml"), "{text}");
+        assert!(!text.contains("raw config value"), "{text}");
+        assert!(!text.contains("Restart required"), "{text}");
+        let wire = serde_json::to_value(&response).unwrap();
+        assert!(wire.get("pending_restart_paths").is_none());
+    }
+
+    #[test]
     fn reload_report_with_no_items_is_still_readable() {
         let resp = ReloadResponse {
+            pending_restart_paths: None,
+            new_session_defaults_changed: false,
             ok: true,
             results: vec![],
         };
-        assert_eq!(format_reload(&resp), "reload: ok\n  (no items reported)\n");
+        assert_eq!(
+            format_reload(&resp),
+            "reload: ok (running gateway re-read config.yaml)\n  (no items reported)\n"
+        );
     }
 }

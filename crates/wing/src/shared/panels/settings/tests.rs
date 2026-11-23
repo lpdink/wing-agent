@@ -56,6 +56,7 @@ fn schema() -> SettingsSchemaResponse {
 
 fn state_with(values: Value, problems: Vec<SettingProblem>) -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets: HashMap::new(),
         fingerprint: "fp-1".into(),
@@ -1874,7 +1875,12 @@ fn ctrl_r_asks_before_discarding_dirty_changes() {
 /// 灌一次「带 restart_required」的保存回执（Ctrl+R 的前提）。
 fn mark_restart_pending(panel: &mut SettingsPanel) {
     let mut response = ok_response(Vec::new());
-    response.restart_required = vec!["gateway.port".into()];
+    response.reload = Some(wing_api_client::models::ReloadResponse {
+        ok: true,
+        results: vec![],
+        pending_restart_paths: Some(vec!["gateway.port".into()]),
+        new_session_defaults_changed: false,
+    });
     panel.apply_save(super::SaveOutcome {
         gateway: Some(response),
         interface_ok: None,
@@ -1912,7 +1918,12 @@ fn restart_required_is_tracked_from_the_last_save() {
     let mut panel = panel();
     edit_port(&mut panel, "8080");
     let mut response = ok_response(Vec::new());
-    response.restart_required = vec!["gateway.port".into()];
+    response.reload = Some(wing_api_client::models::ReloadResponse {
+        ok: true,
+        results: vec![],
+        pending_restart_paths: Some(vec!["gateway.port".into()]),
+        new_session_defaults_changed: false,
+    });
     panel.apply_save(super::SaveOutcome {
         gateway: Some(response),
         interface_ok: None,

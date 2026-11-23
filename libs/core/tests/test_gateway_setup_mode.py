@@ -502,7 +502,7 @@ class TestEnterOperational:
             assert [item["name"] for item in body["reload"]["results"]] == ENTER_ITEMS[
                 :4
             ]
-            assert body["reload"]["results"][-1]["detail"] == "boom"
+            assert body["reload"]["results"][-1]["detail"] == "RuntimeError"
 
             # 文件真的写下去了（配置合法）；网关**保持 setup mode**（没有半死状态）。
             written = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -729,9 +729,7 @@ class TestUnparseableFileRepair:
     ):
         """修好之后 problems 清空；修好之前 status 给的是带行号的 parse 问题（不伪装成字段错误）。
 
-        文案来自 ``ConfigDocumentError.as_problem``（03 的实现，逐字未改）：PyYAML 自己的
-        多行文本，其中 ``line 3, column 4`` 就是用户定位坏行所需的行号（boot 侧另有一条
-        中文的「第 N 行，第 M 列」形态，两者指向同一行）。
+        设置读取和启动诊断都保留位置，并且省略 YAML 源码片段。
         """
         _wing_home(tmp_path, monkeypatch, SYNTAX_ERROR_YAML)
         server = _server(SYNTAX_ERROR_YAML, tmp_path, monkeypatch)
@@ -740,7 +738,7 @@ class TestUnparseableFileRepair:
             (problem,) = status["problems"]
             assert problem["path"] is None
             assert problem["kind"] == "invalid_value"
-            assert "line 3, column 4" in problem["message"]
+            assert "第 3 行，第 4 列" in problem["message"]
 
 
 # ============================================================
@@ -780,7 +778,7 @@ class TestModeReporting:
         (problem,) = server.setup_problems
         assert problem.path is None
         assert "配置合法但运行时装配失败" in problem.message
-        assert "logs dir is read-only" in problem.message
+        assert "log level: OSError" in problem.message
 
         with _client(server) as tc:
             status = tc.get("/api/settings/status").json()
@@ -850,4 +848,4 @@ class TestCliDegradedBanner:
         assert out.count("⚠ 配置不可用") == 1
         assert "（invalid）" in out  # boot_reason 非 None
         assert "配置合法但运行时装配失败" in out
-        assert "logs dir is read-only" in out
+        assert "log level: OSError" in out

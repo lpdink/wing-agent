@@ -125,7 +125,7 @@ pub(super) async fn execute_write<B: SettingsApi>(
                 };
                 format!("{}\n", json_string(&output))
             } else {
-                render_write_text(&response, note.as_deref())
+                render_write_text(&response, note.as_deref(), current.setup_mode)
             };
             if response.ok {
                 Outcome::ok(stdout)
@@ -154,7 +154,11 @@ pub(super) struct WriteOutput {
 }
 
 /// 写回执（纯函数，便于断言）：只打印路径与状态，**绝不打印值**（密文自然脱敏）。
-fn render_write_text(response: &SettingsSetResponse, note: Option<&str>) -> String {
+fn render_write_text(
+    response: &SettingsSetResponse,
+    note: Option<&str>,
+    was_setup: bool,
+) -> String {
     let mut out = String::new();
     if !response.ok {
         out.push_str("✗ 保存被拒绝（配置校验未通过，未写盘）\n");
@@ -188,29 +192,43 @@ fn render_write_text(response: &SettingsSetResponse, note: Option<&str>) -> Stri
     if let Some(note) = note {
         out.push_str(&format!("  {note}\n"));
     }
-    if !response.restart_required.is_empty() {
-        out.push_str(&format!(
-            "⚠ 需重启网关才生效：{}\n",
-            response.restart_required.join(", ")
-        ));
-        out.push_str("  运行 wing stop && wing start（或在 TUI 设置面板里按 Ctrl+R）\n");
-    }
     if let Some(reload) = &response.reload {
-        if !reload.results.is_empty() {
-            let summary: Vec<String> = reload
-                .results
-                .iter()
-                .map(|item| format!("{} {}", item.name, if item.ok { "✓" } else { "✗" }))
-                .collect();
-            out.push_str(&format!("热重载：{}\n", summary.join(" · ")));
-        }
-        for item in reload.results.iter().filter(|item| !item.ok) {
-            if let Some(detail) = item.detail.as_deref() {
-                out.push_str(&format!("  ✗ {}：{detail}\n", item.name));
+        if !reload.ok {
+            let action = if was_setup {
+                "检查失败项后再次保存"
+            } else {
+                "检查失败项后运行 wing reload 重试"
+            };
+            let status = if was_setup {
+                "网关初始化失败"
+            } else {
+                "部分设置未生效"
+            };
+            out.push_str(&format!("⚠ {status}。{action}\n"));
+            for item in reload.results.iter().filter(|item| !item.ok) {
+                out.push_str(&format!("  ✗ {}", item.name));
+                if let Some(detail) = item
+                    .detail
+                    .as_deref()
+                    .filter(|_| reload.pending_restart_paths.is_some())
+                {
+                    out.push_str(&format!("：{}", crate::cmd::common::single_line(detail)));
+                }
+                out.push('\n');
             }
         }
-        if !reload.ok {
-            out.push_str("⚠ 热重载未全部成功（配置已写盘且合法）\n");
+        if reload.new_session_defaults_changed {
+            out.push_str("新会话默认设置已更新\n");
+        }
+        if let Some(paths) = reload
+            .pending_restart_paths
+            .as_ref()
+            .filter(|paths| !paths.is_empty())
+        {
+            out.push_str(&format!(
+                "⚠ 待重启：{}（TUI 设置面板可按 Ctrl+R）\n",
+                paths.join(", ")
+            ));
         }
     }
     if response.setup_mode_exited {
@@ -1222,6 +1240,8 @@ mod tests {
             ],
             restart_required: vec!["gateway.port".to_string()],
             reload: Some(ReloadResponse {
+                pending_restart_paths: Some(vec!["gateway.port".into()]),
+                new_session_defaults_changed: true,
                 ok: false,
                 results: vec![
                     ReloadResultItem {
@@ -1239,14 +1259,14 @@ mod tests {
             setup_mode_exited: true,
             backup_path: Some("/tmp/config.yaml.bak".to_string()),
         };
-        let text = render_write_text(&response, Some("新增项：providers[1]"));
+        let text = render_write_text(&response, Some("新增项：providers[1]"), false);
         assert!(text.contains("✓ 已保存（2 处变更）"), "{text}");
         assert!(text.contains("  · gateway.port"), "{text}");
         assert!(text.contains("新增项：providers[1]"), "{text}");
-        assert!(text.contains("⚠ 需重启网关才生效：gateway.port"), "{text}");
-        assert!(text.contains("热重载：config.yaml ✓ · hooks ✗"), "{text}");
+        assert!(text.contains("⚠ 待重启：gateway.port"), "{text}");
+        assert!(text.contains("新会话默认设置已更新"), "{text}");
         assert!(text.contains("  ✗ hooks：boom"), "{text}");
-        assert!(text.contains("⚠ 热重载未全部成功"), "{text}");
+        assert!(text.contains("⚠ 部分设置未生效"), "{text}");
         assert!(text.contains("✓ 网关已转入正常模式"), "{text}");
         assert!(text.contains("备份：/tmp/config.yaml.bak"), "{text}");
     }
@@ -1268,7 +1288,7 @@ mod tests {
             setup_mode_exited: false,
             backup_path: None,
         };
-        let text = render_write_text(&response, None);
+        let text = render_write_text(&response, None, false);
         assert!(text.contains("✗ 保存被拒绝"), "{text}");
         assert!(
             text.contains("providers[0].models: 至少声明一个模型"),

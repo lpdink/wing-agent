@@ -273,6 +273,7 @@ where
     let mut panel = SettingsPanel::new(&schema, state, interface, View::Problems);
 
     let mut note = baseline_note(panel.problems());
+    let mut gateway_ready = false;
     let mut ctrl_c_at: Option<Instant> = None;
 
     loop {
@@ -327,8 +328,13 @@ where
                 )
                 .await;
                 note = save_note;
-                if ready {
-                    // 收起设置列表（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
+                if gateway_dirty {
+                    gateway_ready = ready;
+                }
+                if gateway_ready && panel.dirty_count() == 0 {
+                    if !gateway_dirty {
+                        note = Note::ok("✓ 配置就绪，正在启动…");
+                    }
                     draw_setup_frame(terminal, &mut panel, config, &note, false)?;
                     tokio::time::sleep(READY_DWELL).await;
                     return Ok(SetupOutcome::Ready);
@@ -348,7 +354,7 @@ where
                     (Ok(new_schema), Ok(new_state)) => {
                         panel.apply_snapshot(&new_schema, new_state);
                     }
-                    _ => note = Note::error("重新载入失败：网关不可达"),
+                    _ => note = Note::error("读取设置文件失败：网关不可达"),
                 }
                 if let Some(source) = http.read_interface() {
                     *config = crate::config::store::appconfig_from_doc(&source.doc);
@@ -434,7 +440,7 @@ async fn save_once<H: SetupBackend>(
             Ok(_) => interface_ok = Some(true),
             Err(e) => {
                 interface_ok = Some(false);
-                parts.push(format!("TUI 配置写入失败：{e}"));
+                parts.push(format!("TUI 配置写入失败：{e}。修复后按 s 重试"));
             }
         }
     }
@@ -461,7 +467,14 @@ async fn save_once<H: SetupBackend>(
                     ));
                 } else if !ready {
                     // 文件写了但网关没就绪（A12）：绝不放行到"没有会话能力"的启动链。
-                    parts.push("保存成功，但网关仍未就绪 — 修完问题再按 s".into());
+                    let failed = response
+                        .reload
+                        .as_ref()
+                        .and_then(|r| r.results.iter().find(|item| !item.ok));
+                    parts.push(match failed {
+                        Some(item) => format!("已保存，初始化失败 · {} · 按 s 重试", item.name),
+                        None => "已保存，网关仍未就绪 · 按 s 重试".into(),
+                    });
                 }
                 // 后端的非致命说明（"旧密钥没有保留"之类）必须让用户看见 ——
                 // 回执就一行，但它是这一屏唯一的出口。
@@ -469,19 +482,25 @@ async fn save_once<H: SetupBackend>(
                     parts.push(format!("⚠ {warning}"));
                 }
                 // 要重启才生效的键（Ctrl+R 在 setup 里是 no-op）：告诉用户去哪儿按。
-                if !response.restart_required.is_empty() {
-                    // 动作在前（一行会被 CJK 宽度裁掉尾巴）：先在 setup 里说清"去哪儿按"。
-                    parts.push(format!(
-                        "需重启网关（进 TUI 后 Ctrl+R）：{}",
-                        response.restart_required.join("、")
-                    ));
+                if let Some(paths) = response
+                    .reload
+                    .as_ref()
+                    .and_then(|r| r.pending_restart_paths.as_ref())
+                    .filter(|paths| !paths.is_empty())
+                {
+                    parts.push(format!("待重启（进 TUI 后 Ctrl+R）：{}", paths.join("、")));
                 }
                 gateway_saved = Some(response);
             }
-            Err(e) => parts.push(format!("保存失败：{e}")),
+            Err(e) => parts.push(if e.is_conflict() {
+                "设置文件已更改，按 R 重新读取文件".into()
+            } else {
+                format!("Gateway 保存未确认：{e}")
+            }),
         }
     }
 
+    let gateway_saved_ok = gateway_saved.as_ref().is_some_and(|response| response.ok);
     if gateway_saved.is_some() || interface_ok.is_some() {
         // 一次合并两半：`ok=false` 时面板自己会切到问题清单视图（apply_save）。
         panel.apply_save(SaveOutcome {
@@ -497,6 +516,9 @@ async fn save_once<H: SetupBackend>(
         parts.join(" · ")
     };
 
+    if ready && interface_ok == Some(false) {
+        return (Note::error(format!("Gateway 已就绪 · {caveats}")), true);
+    }
     if ready {
         // 就绪 + 有要交代的事：把交代缀在就绪句后面（绝不静默吞掉）。
         let text = if caveats.is_empty() {
@@ -509,7 +531,12 @@ async fn save_once<H: SetupBackend>(
     if caveats.is_empty() {
         return (Note::ok("设置已保存"), false);
     }
-    (Note::error(caveats), false)
+    let text = if interface_ok == Some(true) && gateway_dirty && !gateway_saved_ok {
+        format!("Interface 已保存 · {caveats}")
+    } else {
+        caveats
+    };
+    (Note::error(text), false)
 }
 
 // ===========================================================================
@@ -979,6 +1006,7 @@ mod tests {
     /// setup mode 的第一次读：模板刚落地，两个 `empty_list`（`providers` / `agents`）。
     fn first_run_state() -> SettingsGetResponse {
         SettingsGetResponse {
+            pending_restart_paths: None,
             values: json!({}),
             secrets: HashMap::<String, SecretState>::new(),
             fingerprint: "fp-1".into(),
@@ -1440,7 +1468,34 @@ mod tests {
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 
         assert!(matches!(outcome, SetupOutcome::Quit));
-        assert!(screen(&terminal).contains("保存成功，但网关仍未就绪"));
+        assert!(screen(&terminal).contains("已保存，网关仍未就绪"));
+    }
+
+    #[tokio::test]
+    async fn failed_initialization_can_retry_the_saved_document() {
+        let mut backend = FakeBackend::first_run();
+        let mut response = saved_response(true, "fp-2", false, vec![]);
+        response.reload = Some(wing_api_client::models::ReloadResponse {
+            ok: false,
+            results: vec![wing_api_client::models::ReloadResultItem {
+                name: "runtime".into(),
+                ok: false,
+                detail: None,
+            }],
+            pending_restart_paths: None,
+            new_session_defaults_changed: false,
+        });
+        backend.set = FakeSet::Saved(response);
+        let mut events = edit_and_save("enabled");
+        events.push(key(KeyCode::Char('s')));
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+        assert_eq!(outcome, SetupOutcome::Quit);
+        assert!(screen(&terminal).contains("初始化失败 · runtime"));
+        let saves = backend.sets();
+        assert_eq!(saves.len(), 2);
+        assert_eq!(saves[1].base.as_deref(), Some("fp-2"));
+        assert_eq!(saves[1].document, saves[0].document);
     }
 
     // ── ⑤ Ctrl+C 双击 → Quit ────────────────────────────────────
@@ -1566,7 +1621,7 @@ mod tests {
 
     /// 就绪的那次保存带着"TUI 配置没写进去"的交代 —— 不能被就绪句吞掉。
     #[tokio::test]
-    async fn a_ready_save_keeps_the_interface_failure_in_the_receipt() {
+    async fn a_ready_save_keeps_the_unsaved_interface_draft_open() {
         let mut backend = FakeBackend::first_run();
         backend.interface = Some(interface_source("auto"));
         backend.interface_write_fails = true;
@@ -1582,9 +1637,9 @@ mod tests {
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, events).await;
 
-        assert_eq!(outcome, SetupOutcome::Ready, "网关半边就绪 ⇒ 进正常 TUI");
+        assert_eq!(outcome, SetupOutcome::Quit, "Interface 写入失败时留在向导");
         let screen = screen(&terminal);
-        assert!(screen.contains("✓ 配置就绪"), "{screen}");
+        assert!(screen.contains("Gateway 已就绪"), "{screen}");
         assert!(
             screen.contains("TUI 配置写入失败"),
             "写入失败必须跟着就绪句一起露面：\n{screen}"
@@ -1597,7 +1652,12 @@ mod tests {
         let mut backend = FakeBackend::first_run();
         let mut response = saved_response(true, "fp-2", true, vec![]);
         response.warnings = vec!["原配置文件无法解析，其中的密钥无法保留，请重新填写".into()];
-        response.restart_required = vec!["gateway.port".into()];
+        response.reload = Some(wing_api_client::models::ReloadResponse {
+            ok: true,
+            results: vec![],
+            pending_restart_paths: Some(vec!["gateway.port".into()]),
+            new_session_defaults_changed: false,
+        });
         backend.set = FakeSet::Saved(response);
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
@@ -1632,7 +1692,7 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Quit));
         let screen = screen(&terminal);
         assert!(screen.contains("TUI 配置写入失败"), "{screen}");
-        assert!(screen.contains("保存失败"), "{screen}");
+        assert!(screen.contains("Gateway 保存未确认"), "{screen}");
     }
 
     #[tokio::test]
@@ -1644,7 +1704,7 @@ mod tests {
 
         assert!(matches!(outcome, SetupOutcome::Quit), "传输失败不构成就绪");
         assert!(
-            screen(&terminal).contains("保存失败"),
+            screen(&terminal).contains("Gateway 保存未确认"),
             "{}",
             screen(&terminal)
         );

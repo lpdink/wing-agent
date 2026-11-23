@@ -245,7 +245,7 @@ pub struct App {
     /// 生命周期与分派全在 [`settings`] 模块。
     settings_panel: Option<crate::shared::panels::settings::SettingsPanel>,
     /// 面板的 Gateway 数据（`GET schema` + `GET get` 的一次成功快照）：
-    /// cache-first 打开与保存后的回写共用。
+    /// 打开时可复用最近一次 GET。
     settings_cache: Option<(
         wing_api_client::models::SettingsSchemaResponse,
         wing_api_client::models::SettingsGetResponse,
@@ -258,7 +258,8 @@ pub struct App {
     /// 而打开时的后台刷新只在面板干净时应用。
     settings_reload_pending: bool,
     /// 保存的两半：Interface 半边已定，Gateway 半边在飞（合并回执需要它）。
-    settings_save: Option<settings::PendingSettingsSave>,
+    settings_save: Option<settings::InterfaceSaveReport>,
+    settings_fetch_id: u64,
     /// 调色板刚变过（实时预览）：欢迎屏 header 的缓存键里没有调色板，
     /// `sync_welcome` 下一帧强制重建一次（同 Ctrl+O 需要显式作废 cell 缓存）。
     welcome_theme_dirty: bool,
@@ -360,6 +361,7 @@ impl App {
             settings_pending: false,
             settings_reload_pending: false,
             settings_save: None,
+            settings_fetch_id: 0,
             welcome_theme_dirty: false,
             splash_probe: None,
         }

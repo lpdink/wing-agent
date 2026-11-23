@@ -99,6 +99,10 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
 | GET | `/api/tools` | 全局工具列表（内置 + 远程，平铺；ref / namespace / name / llm_name / description）（PR #50） |
 
+`/api/system/reload` 和保存回执中的 `reload` 保持 `ok`、`results` 及逐项顺序。`pending_restart_paths`
+列出已加载并需要重启的设置路径，空数组表示没有待重启项，缺少字段或 `null` 表示状态未知。
+无效文件保留上一份已加载配置的待重启状态。`new_session_defaults_changed` 表示这次重载改变了新会话的默认值。
+
 > `/api/models` 的响应形状（对象数组；`model_details` 平行数组已不存在）：
 
 ```json
@@ -125,7 +129,7 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 
 ```json
 {"ok": true, "fingerprint": "…", "problems": [], "changed": ["providers[0].extra_body"],
- "restart_required": [], "reload": {"ok": true, "results": [{"name": "config.yaml", "ok": true}, …]},
+ "restart_required": [], "reload": {"ok": true, "results": [{"name": "config.yaml", "ok": true}, …], "pending_restart_paths": []},
  "setup_mode_exited": false, "backup_path": "…/config.yaml.bak", "warnings": []}
 ```
 

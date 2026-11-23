@@ -518,6 +518,10 @@ pub struct ReloadResponse {
     pub ok: bool,
     #[serde(default)]
     pub results: Vec<ReloadResultItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_restart_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_session_defaults_changed: bool,
 }
 
 /// 单个可分叉/回退的消息节点信息。
@@ -1654,6 +1658,8 @@ pub struct SettingsGetResponse {
     #[serde(default)]
     pub setup_mode: bool,
     pub config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_restart_paths: Option<Vec<String>>,
 }
 
 /// GET /api/settings/status 响应——启动路径上的最便宜预检。

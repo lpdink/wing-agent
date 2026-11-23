@@ -168,6 +168,13 @@ class ConfigDocumentError(ValueError):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def invalid_yaml_message(exc: Exception) -> str:
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return f"config.yaml 不是合法 YAML（第 {mark.line + 1} 行，第 {mark.column + 1} 列）"
+    return "config.yaml 不是合法 YAML 或 UTF-8 文本"
+
+
 def read_document(
     *, catalog: SettingNode | None = None
 ) -> tuple[SparseDocument, ConfigFingerprint]:
@@ -191,9 +198,7 @@ def read_document(
     try:
         parsed = yaml.safe_load(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
-        raise ConfigDocumentError(
-            f"config.yaml 不是合法 YAML：{exc}", fingerprint.value
-        ) from exc
+        raise ConfigDocumentError(invalid_yaml_message(exc), fingerprint.value) from exc
     if parsed is None:
         parsed = {}
     if not isinstance(parsed, dict):
