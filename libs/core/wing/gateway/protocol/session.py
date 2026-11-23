@@ -104,6 +104,7 @@ class SubscribeRequest(BaseModel):
     """订阅 session 事件的请求体。需要 X-Client-Id header。"""
 
     session_id: str = Field(description="要订阅的 session ID")
+    replay: bool = Field(default=True, description="订阅时推送完整会话快照")
 
 
 class UnsubscribeRequest(BaseModel):

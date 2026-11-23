@@ -189,7 +189,7 @@ async def subscribe(
     if x_client_id not in server.clients:
         raise HTTPException(status_code=400, detail="client not connected")
     try:
-        server.runtime.subscribe(x_client_id, body.session_id)
+        server.runtime.subscribe(x_client_id, body.session_id, replay=body.replay)
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return OkResponse()

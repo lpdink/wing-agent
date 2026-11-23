@@ -480,17 +480,21 @@ class TestSessionFork:
 class TestSessionSubscribe:
     """POST /api/session/subscribe 测试。"""
 
-    def test_subscribe_ok(self, client: TestClient, mock_runtime):
-        """成功订阅。"""
+    @pytest.mark.parametrize("replay", [None, True, False])
+    def test_subscribe_ok(self, client: TestClient, mock_runtime, replay):
+        """成功订阅，缺省保留完整回放。"""
+        body = {"session_id": "test-session-id"}
+        if replay is not None:
+            body["replay"] = replay
         resp = client.post(
             "/api/session/subscribe",
-            json={"session_id": "test-session-id"},
+            json=body,
             headers={"X-Client-Id": "test-client-id"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         mock_runtime.subscribe.assert_called_once_with(
-            "test-client-id", "test-session-id"
+            "test-client-id", "test-session-id", replay=replay is not False
         )
 
     def test_subscribe_missing_header(self, client: TestClient):

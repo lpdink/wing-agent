@@ -9,7 +9,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 ```
 1. WS  GET/WS  /ws                 → ConnectResponse { type:"connected", client_id }
 2. HTTP POST  /api/session/create   → { session_id }
-3. HTTP POST  /api/session/subscribe { session_id, client_id }
+3. HTTP POST  /api/session/subscribe { session_id, replay? } （X-Client-Id header）
 4. HTTP POST  /api/session/send      { session_id, content, request_id?, tool_call_id?, media? } → agent loop 启动
    （`tool_call_id` = 定向回答一个在挂 Ask 的 feedback waiter；CLI 侧：`wing asks` 拿 id，
    `wing run --tool-call-id` 回答）
@@ -29,7 +29,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/create` | 创建新 session（可选 `backend: file\|memory`，默认 file；`workspace`、`template` 等；可选 `tags` 创建即打标，校验语义同 `/api/session/tag`，与其他创建期状态一样**随物化落盘**；可选 `session_id` = **create-or-adopt**：不存在则以该 id 建会话，已存在则收养既有会话——语义同 `/api/session/resume`，`agent` 覆盖只应用 resume 子集。**收养路径忽略创建参数**：`template_name` / `workspace` / `backend` 一律以 metadata 为准、且不做校验，因此同一个请求体可能"id 存在 → 200（参数被忽略）/ id 不存在 → 400（如 `backend` 非法）"；**例外**是"该 id 已命中内存里的**空会话**"（同 FS 的变体）：那条路径走的是认领之后的校验分支，`backend` / `template_name` 非法仍会 **400**；可选 `parent_session_id` = **血缘**（谁创建了我，语义见 [session-lineage.md](session-lineage.md)）：只做格式卫生（同 session id 规则）、**不校验父是否存在**（弱引用），与 `session_id` 同时给出且字面相等（自指）→ 400；带父创建在创建时刻写进内存 metadata、随**物化**（第一条用户消息）落盘（此后没有修改路径），**收养路径忽略它**（既有记录不被改写，日志留 warning）。响应的 `parent_session_id` 是**读回**（同 `tags` 惯例）：null = 该会话无父（根会话 / 旧网关不带此字段），调用方据此对账请求是否被记录） |
 | POST | `/api/session/resume` | 恢复已有 session（还原 template_name、workspace 与模型绑定；模型绑定按恢复链还原：`metadata.model_id` 命中用当前映射 → 快照兜底 → 模板默认；也是被逐出会话的显式水合入口）。可选 `agent` 覆盖：**只应用 `model_id` / `effort` / `tools`**——`system_prompt` / `append_system_prompt` / `max_turns` / `yolo` 一律不应用（它们会改请求前缀或会话既有限额，属创建期语义），被忽略的字段会记 warning |
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
-| POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
+| POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件，不在内存的会话先按需水合。`replay` 缺省为 `true`，推送完整 `sync_session`。`replay: false` 跳过本次完整快照，仍推送 `session_init`、`context_stats` 和后续事件。客户端遇到快照重组上限时，可用 `false` 重连并恢复直播 |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
 | POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。可选 `request_id` 由发送端生成，响应回显实际 ID。缺省由网关生成。ID 约束与 WS 相同，非法或重复返回 400。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 = 无媒体；新输入的 `width` / `height` 须在 `0..2^32−1`，`bytes` 须在 `0..2^53−1`；id 必须是该会话已存在的对象、mime 必须在支持列表内——幽灵引用 / 非法 id / 非法 mime 回 400，消息不进历史）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask；该通道**只承载文本**，同时带 `media` 时记 WARN 后按文本 resolve）；无该 id / id 已失效则回退普通入队。正文与媒体均为空的普通输入返回 400。会话正在关闭旧 agent 时返回 409 |
 | POST | `/api/session/media` | 上传媒体（**原始字节体**：`?session_id=<sid>[&name=<n>]`，body = 图片字节，非 JSON / 非 multipart）。收包顺序：会话存在（否则 404，且**不隐式建会话**）→ `Content-Length` 预检（声明值 > `images.max_bytes` 直接 400，**不收包**）→ 收包 → 字节校验：body 非空 → `≤ images.max_bytes`（真实字节兜底）→ magic bytes ∈ {png, jpeg, webp, gif} → 头部尺寸可解析；失败一律 400 且**零存储副作用**（不建目录、不写对象）。id = 字节的 sha256（内容寻址），同字节重复上传返回**同一 id** 且不重写对象（幂等）；响应 `{"ok":true,"media":{id,mime,bytes,width,height,name?}}`，`media` 就是消息 `media` 数组的元素形状（可直接回投 `/api/session/send`）。`name` 是展示素材（缺省 / 空串 = 不记录，建议给 basename；长度上限 255 字符，超限 400；id 才是寻址键）。**不水合**已逐出会话（与 `/api/session/tag` 同款）；写入只落 `<sessions-root>/<sid>/media/<id>`，老共享池只读不写。鉴权 / setup mode 行为与其它 session 端点一致 |

@@ -621,7 +621,9 @@ class WingRuntime:
     # 订阅管理
     # ============================================================
 
-    def subscribe(self, client_id: str, session_id: str) -> None:
+    def subscribe(
+        self, client_id: str, session_id: str, *, replay: bool = True
+    ) -> None:
         """订阅 session 事件。
 
         不在内存的会话按需水合（被逐出的会话重新订阅即恢复直播）。
@@ -631,7 +633,7 @@ class WingRuntime:
         """
         session = self.sm.ensure_loaded(session_id)
         event_bus.route_attach(client_id, session_id)
-        self._push_sync(client_id, session)
+        self._push_sync(client_id, session, replay=replay)
 
     def unsubscribe(self, client_id: str, session_id: str) -> None:
         """取消订阅 session 事件。"""
@@ -1067,18 +1069,15 @@ class WingRuntime:
             )
         )
 
-    def _push_sync(
-        self, client_id: str, session: Session, draft: str | None = None
-    ) -> None:
-        """向指定 client 推送会话快照、初始化事件和上下文统计。"""
+    def _push_sync(self, client_id: str, session: Session, *, replay: bool) -> None:
+        """向指定 client 推送初始化事件、上下文统计和可选的会话快照。"""
         client_target = EventTarget(scope="client", client_ids=[client_id])
 
         cm = session.context_manager
         agent = session.agent
 
-        event_bus.emit(
-            session.sync_event(draft=draft, target=client_target, include_agent=True)
-        )
+        if replay:
+            event_bus.emit(session.sync_event(target=client_target, include_agent=True))
 
         event_bus.emit(
             SessionInitEvent(
