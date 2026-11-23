@@ -235,6 +235,18 @@ fn render_write_text(
             ));
         }
     }
+    if response
+        .reload
+        .as_ref()
+        .and_then(|reload| reload.pending_restart_paths.as_ref())
+        .is_none()
+        && !response.restart_required.is_empty()
+    {
+        out.push_str(&format!(
+            "启动时读取的设置已更改 · {}\n",
+            response.restart_required.join(", ")
+        ));
+    }
     if response.setup_mode_exited {
         out.push_str("✓ 网关已转入正常模式\n");
     }

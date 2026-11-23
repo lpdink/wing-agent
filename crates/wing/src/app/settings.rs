@@ -580,6 +580,18 @@ pub(super) fn save_notice_text(
                 lines.push(format!("  ⚠ {} 待重启 · Ctrl+R 重启网关", paths.join("、")));
             }
         }
+        if response
+            .reload
+            .as_ref()
+            .and_then(|reload| reload.pending_restart_paths.as_ref())
+            .is_none()
+            && !response.restart_required.is_empty()
+        {
+            lines.push(format!(
+                "  启动时读取的设置已更改 · {}",
+                response.restart_required.join("、")
+            ));
+        }
         lines.extend(
             response
                 .warnings
