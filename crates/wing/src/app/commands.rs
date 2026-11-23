@@ -19,7 +19,9 @@
 
 use super::App;
 use super::AppIntent;
+use super::intent::SendOutcome;
 use super::title;
+use super::{LocalSend, LocalSendState};
 use crate::shared::constants::CLEAR_COMMAND;
 use crate::shared::constants::COPY_COMMAND;
 use crate::shared::constants::NEW_COMMAND;
@@ -149,6 +151,18 @@ pub(super) const COMMANDS: &[CommandRoute] = &[
         takes_args: true,
         handler: copy_assistant_message,
     },
+    CommandRoute {
+        name: "/recover",
+        aliases: &[],
+        takes_args: false,
+        handler: recover_submission,
+    },
+    CommandRoute {
+        name: "/sync",
+        aliases: &[],
+        takes_args: false,
+        handler: refresh_session,
+    },
     // ---- HTTP-migrated commands (side effect = AppIntent) ----
     CommandRoute {
         name: "/context",
@@ -268,6 +282,12 @@ impl App {
             .into_iter()
             .map(ImagePayload::into_image)
             .collect();
+        if self.pending_session_snapshot.is_some() {
+            self.restore_draft(Submission::new(payload.text, images));
+            self.show_snapshot_wait();
+            return true;
+        }
+
         // 手动压缩在飞：这一条不发出去——后端也会把它留在 inbox 里直到压缩收口，
         // 但用户此刻最需要的是"知道为什么没发出去"，而不是一条悬着的 pending 气泡。
         // 草稿已经被 composer 清空，这里把整份提交产物（正文 + 图片 chip）原样还回去。
@@ -280,11 +300,6 @@ impl App {
             ));
             return true;
         }
-        // The message only moves up into chat history when the
-        // model actually receives it (user_message_accepted). Until then it
-        // queues in the pending area below in-flight streaming output — and
-        // carries the submission itself, so a failure can hand it back to the
-        // composer (see `restore_failed_send`).
         let request_id = crate::protocol::generate_request_id();
         // 提交产物随 pending 条目一起留下（正文 + 图片 + 预测引用）：气泡用它拼内容
         // （图块 / 标签），失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），
@@ -309,16 +324,119 @@ impl App {
         true
     }
 
-    /// 一条发不出去的用户消息：从 pending 队列取回产物、还给草稿、提示原因。
-    ///
-    /// 三条发送失败路径（上传 / WS / 断连）与服务端拒绝共用这里——共同点是草稿在提交
-    /// 时就清了，内容只在 pending 里。**纯数据恢复**：只写 composer 与 toast，不 push
-    /// intent、不碰 chat（不重发、不重复上传）。
-    ///
-    /// 条目已经不在队列里（被打断丢弃 / 已提升）⇒ 只提示原因：内容要么已经在历史里
-    /// 看得见，要么由那条路径自己解释过了。
-    pub(super) fn restore_failed_send(&mut self, request_id: &str, reason: &str) -> bool {
-        let Some(submission) = self.chat.take_pending(request_id) else {
+    pub(super) fn track_local_send(&mut self, session_id: &str, request_id: &str) {
+        if let Some(submission) = self.chat.pending_submission(request_id) {
+            self.local_sends.push(LocalSend {
+                session_id: session_id.to_owned(),
+                request_id: request_id.to_owned(),
+                epoch: self.draft_recovery_epoch,
+                submission,
+                state: LocalSendState::Writing { stream_lost: false },
+            });
+        }
+    }
+
+    pub(super) fn mark_send_stream_lost(&mut self, session_id: Option<&str>) {
+        for sent in &mut self.local_sends {
+            if session_id.is_none_or(|id| id == sent.session_id) {
+                sent.state = match sent.state {
+                    LocalSendState::Writing { .. } => LocalSendState::Writing { stream_lost: true },
+                    LocalSendState::AwaitingAcceptance | LocalSendState::Uncertain => {
+                        LocalSendState::Uncertain
+                    }
+                };
+            }
+        }
+    }
+
+    pub(super) fn take_local_send(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Option<LocalSend> {
+        let index = self
+            .local_sends
+            .iter()
+            .position(|sent| sent.session_id == session_id && sent.request_id == request_id)?;
+        Some(self.local_sends.remove(index))
+    }
+
+    pub(super) fn settle_local_sends<'a>(
+        &mut self,
+        session_id: &str,
+        request_ids: impl IntoIterator<Item = &'a str>,
+    ) {
+        for id in request_ids {
+            self.take_local_send(session_id, id);
+        }
+    }
+
+    fn finish_local_send(&mut self, session_id: &str, request_id: String, outcome: SendOutcome) {
+        if let SendOutcome::Unsent(reason) = outcome {
+            let fallback = self
+                .take_local_send(session_id, &request_id)
+                .filter(|sent| sent.epoch == self.draft_recovery_epoch)
+                .map(|sent| sent.submission);
+            self.restore_failed_send(session_id, &request_id, &reason, fallback);
+            return;
+        }
+        let Some(sent) = self
+            .local_sends
+            .iter_mut()
+            .find(|sent| sent.session_id == session_id && sent.request_id == request_id)
+        else {
+            // A precise gateway event may precede the socket receipt.
+            return;
+        };
+        let reason = match outcome {
+            SendOutcome::Written
+                if matches!(sent.state, LocalSendState::Writing { stream_lost: false }) =>
+            {
+                sent.state = LocalSendState::AwaitingAcceptance;
+                return;
+            }
+            SendOutcome::Written => "connection lost before gateway confirmation".into(),
+            SendOutcome::Uncertain(reason) => reason,
+            SendOutcome::Unsent(_) => unreachable!(),
+        };
+        sent.state = LocalSendState::Uncertain;
+        if self.session_id == session_id {
+            self.chat.remove_pending(std::slice::from_ref(&request_id));
+        }
+        if self.subscription_target() == session_id {
+            self.show_toast(Toast::warning(
+                format!("Message delivery unknown: {reason}. Use /recover to restore the draft."),
+                std::time::Duration::from_secs(8),
+            ));
+        }
+    }
+
+    pub(super) fn offer_uncertain_recovery(&mut self) {
+        if self.local_sends.iter().any(|sent| {
+            sent.session_id == self.session_id && sent.state == LocalSendState::Uncertain
+        }) {
+            self.show_toast(Toast::warning(
+                "A submission has uncertain delivery. Use /recover to restore its draft.",
+                std::time::Duration::from_secs(8),
+            ));
+        }
+    }
+
+    /// Restore a failed local send, including after a same-session replay.
+    pub(super) fn restore_failed_send(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        reason: &str,
+        fallback: Option<std::sync::Arc<Submission>>,
+    ) -> bool {
+        let pending = self.chat.take_pending(request_id);
+        let submission = if self.subscription_target() == session_id {
+            pending.or_else(|| fallback.map(std::sync::Arc::unwrap_or_clone))
+        } else {
+            None
+        };
+        let Some(submission) = submission else {
             self.show_toast(Toast::warning(
                 reason.to_string(),
                 std::time::Duration::from_secs(3),
@@ -480,11 +598,12 @@ impl App {
             return;
         }
 
-        // 消息的后台发送失败回执：属于那条 pending 条目（按 `request_id` 认领），
-        // 同样在守卫之前分派——换过会话后条目多半已被 `chat.clear()` 清掉，此时
-        // `restore_failed_send` 只 toast 原因（不碰草稿、不假装回填）。
-        if let FetchPayload::SendFailed { request_id, reason } = payload {
-            self.restore_failed_send(&request_id, &reason);
+        if let FetchPayload::SendFinished {
+            request_id,
+            outcome,
+        } = payload
+        {
+            self.finish_local_send(&session_id, request_id, outcome);
             return;
         }
 
@@ -741,7 +860,7 @@ impl App {
             // 发送失败 / 内容寻址的媒体字节 / 压缩收口）。
             FetchPayload::ClipboardImage { .. }
             | FetchPayload::ClipboardPaste(_)
-            | FetchPayload::SendFailed { .. }
+            | FetchPayload::SendFinished { .. }
             | FetchPayload::CompactDone { .. }
             | FetchPayload::CompactFailed { .. }
             | FetchPayload::MediaBytes { .. } => {}
@@ -755,12 +874,42 @@ impl App {
 
 /// `/clear` — wipe the chat view (history stays on the gateway).
 fn clear_chat(app: &mut App, _text: &str) -> bool {
+    app.draft_recovery_epoch = app.draft_recovery_epoch.wrapping_add(1);
     app.chat.clear();
     app.refresh_copy_candidates();
     app.show_toast(Toast::info(
         "Chat cleared",
         std::time::Duration::from_secs(2),
     ));
+    true
+}
+
+/// `/recover` restores the latest uncertain submission for this session into the composer.
+fn recover_submission(app: &mut App, _text: &str) -> bool {
+    if app.subscription_target() == app.session_id
+        && let Some(index) = app.local_sends.iter().rposition(|sent| {
+            sent.session_id == app.session_id && sent.state == LocalSendState::Uncertain
+        })
+    {
+        let sent = app.local_sends.remove(index);
+        app.chat
+            .remove_pending(std::slice::from_ref(&sent.request_id));
+        app.restore_draft(std::sync::Arc::unwrap_or_clone(sent.submission));
+        app.show_toast(Toast::warning(
+            "Draft restored. Delivery was uncertain. Check the conversation before sending again.",
+            std::time::Duration::from_secs(6),
+        ));
+    } else {
+        app.show_toast(Toast::info(
+            "No uncertain submission to recover for this session",
+            std::time::Duration::from_secs(3),
+        ));
+    }
+    true
+}
+
+fn refresh_session(app: &mut App, _text: &str) -> bool {
+    app.push_intent(AppIntent::RefreshSession);
     true
 }
 

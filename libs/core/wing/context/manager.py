@@ -80,6 +80,7 @@ class ContextManager:
 
         self._session_id = session_id
         self._messages = messages
+        self.on_history_refresh: Callable[[], None] | None = None
         self._workspace = Path(workspace).resolve() if workspace else None
 
         self._skills_patterns = skills_patterns or []
@@ -426,6 +427,8 @@ class ContextManager:
         model_provider: ModelProvider,
         current_tools: Callable[[], list[Tool]],
         options: "RequestOptions | None" = None,
+        *,
+        compaction_applied: bool = False,
     ) -> LLMMessagesResult:
         """Get messages ready for LLM API call.
 
@@ -456,7 +459,7 @@ class ContextManager:
                 cache_parts=cache_parts,
             )
 
-        if not self.compactor:
+        if not self.compactor or compaction_applied:
             return result(self.get_context_window())
 
         msgs = self.get_context_window()
@@ -464,24 +467,10 @@ class ContextManager:
 
         # ── Step 1: 有预计算结果？尝试 apply ──
         if self._pending_compact_result is not None:
-            if self.compactor.need_apply_compact(msgs, server_tokens):
-                if self._pending_compact_task and not self._pending_compact_task.done():
-                    try:
-                        await self._pending_compact_task
-                    except Exception:
-                        pass
-
-                if self._pending_compact_result is not None:
-                    end_idx = self._verify_snapshot_valid(msgs)
-                    if end_idx is not None:
-                        self._apply_pending_compact(msgs, end_idx)
-                        # Compact 打破 prefix cache——同步声明集（await 后求值，避免过期快照）
-                        self._sync_declared_tools(current_tools())
-                        return result(self.get_context_window())
-                    else:
-                        self._discard_pending_compact()
-            else:
-                # 未到 apply 阈值：不能走 Step 2/3（避免重复启动 compact task）
+            if self._try_apply_pending_compact(msgs, server_tokens, current_tools):
+                self.publish_history_refresh()
+                return result(self.get_context_window())
+            if self._pending_compact_result is not None:
                 return result(msgs)
 
         # ── Step 2: task 还在跑？ ──
@@ -498,6 +487,46 @@ class ContextManager:
             )
 
         return result(msgs)
+
+    def append_with_pending_compact(
+        self, message: Message, current_tools: Callable[[], list[Tool]]
+    ) -> bool:
+        """Append the input with a ready compaction when this request reaches the threshold."""
+        if self._pending_compact_result is None:
+            return False
+        messages = self.get_context_window()
+        _, server_tokens = self._usage_window()
+        return self._try_apply_pending_compact(
+            messages, server_tokens, current_tools, next_message=message
+        )
+
+    def _try_apply_pending_compact(
+        self,
+        messages: list[Message],
+        server_tokens: int | None,
+        current_tools: Callable[[], list[Tool]],
+        *,
+        next_message: Message | None = None,
+    ) -> bool:
+        prospective = (
+            [*messages, next_message] if next_message is not None else messages
+        )
+        if self.compactor is None or not self.compactor.need_apply_compact(
+            prospective, server_tokens
+        ):
+            return False
+        end_idx = self._verify_snapshot_valid(messages)
+        if end_idx is None:
+            self._discard_pending_compact()
+            return False
+        tools = current_tools()
+        self._apply_pending_compact(messages, end_idx, next_message=next_message)
+        self._sync_declared_tools(tools)
+        return True
+
+    def publish_history_refresh(self) -> None:
+        if self.on_history_refresh is not None:
+            self.on_history_refresh()
 
     # ── 异步 compact 内部方法 ─────────────────────
 
@@ -577,7 +606,9 @@ class ContextManager:
             return end_idx
         return None
 
-    def _apply_pending_compact(self, msgs: list[Message], end_idx: int) -> None:
+    def _apply_pending_compact(
+        self, msgs: list[Message], end_idx: int, *, next_message: Message | None = None
+    ) -> None:
         """将预计算的 compact 结果换入消息链。
 
         摘要节点取代 msgs[:end_idx+1]（区间起点由它的 unzip_last_uuid
@@ -631,24 +662,16 @@ class ContextManager:
         # 携带的 usage 度量的是**压缩前**窗口（含已被摘要掉的 head），下一轮真实
         # usage 落链之前不得当作当前 context 大小（否则会对着一个不存在的窗口再压
         # 一次）。
-        compact_node.usage_boundary_uuid = (
-            relink_tail[-1].uuid if relink_tail else compact_node.uuid
-        )
+        if next_message is not None:
+            next_message.uuid = str(uuid.uuid4())
+            next_message.parent_uuid = prev_uuid
+            relink_tail.append(next_message)
+            prev_uuid = next_message.uuid
+        assert prev_uuid is not None
+        compact_node.usage_boundary_uuid = prev_uuid
 
-        # TODO(crash-safety): append_detached(compact_node) 和 set_tip 之间存在
-        # 崩溃窗口。如果进程在 compact_node 写入后、relink tail set_tip 前被杀，
-        # compact_node（parent_uuid=None）会成为新根，trace_chain 从它回溯到
-        # None 就停了，原始 tail 消息从活跃链中丢失。这不是 async compact 引入
-        # 的新问题——旧的同步 compact 也有同样的窗口。彻底修复需要 TrackedList
-        # 支持批量原子写入（先写所有节点，再原子切换 tip）。
-        self._messages.append_detached(compact_node)
-        for msg in relink_tail:
-            self._messages.append_detached(msg)
-
-        if relink_tail:
-            self._messages.set_tip(relink_tail[-1].uuid)  # ty: ignore[invalid-argument-type]
-        else:
-            self._messages.set_tip(compact_node.uuid)
+        self._messages.extend_detached([compact_node, *relink_tail])
+        self._messages.set_tip(prev_uuid)
 
         self._pending_compact_task = None
         self._pending_compact_result = None
@@ -985,6 +1008,7 @@ class ContextManager:
                 content_blocks=parent_msg.content_blocks,
                 tool_calls=parent_msg.tool_calls,
                 tool_call_id=parent_msg.tool_call_id,
+                media=parent_msg.media,
                 parent_uuid=parent_msg.parent_uuid,
                 unzip_last_uuid=parent_msg.unzip_last_uuid,
             )

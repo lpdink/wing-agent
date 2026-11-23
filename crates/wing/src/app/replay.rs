@@ -130,6 +130,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
         // （切会话时这条路径要把整份历史投影一遍）。
         let SessionMessage {
             role,
+            uuid,
             content,
             media,
             reasoning_content,
@@ -140,13 +141,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
 
         match role.as_str() {
             "user" => {
-                // 正文 + 图片引用一起进 cell（`chat_view::media`）：图片画成图块还是标签行
-                // 由渲染期的图片能力决定，与 pending / promote 同一条路径。纯图消息
-                // （正文为空、media 非空）因此也进历史——它是一条合法的消息。
-                let body = media::UserMessageBody::new(content, media);
-                if !body.is_empty() {
-                    chat.push(ChatCell::UserMessage(body));
-                }
+                chat.push_committed_user_message(uuid, media::UserMessageBody::new(content, media));
             }
             "assistant" => {
                 // Cell order mirrors the live stream (reasoning → text → tool

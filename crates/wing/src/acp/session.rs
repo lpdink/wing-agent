@@ -884,6 +884,17 @@ impl SessionHub {
     /// 而不是 prompt 轮次的事件循环里。中继经 `claim_model_relay` 合并：
     /// 同一会话同时只有一次在途，期间的变更合到下一次。
     fn dispatch(self: &Arc<Self>, event: WingEvent) {
+        // ACP replays the subscription snapshot once. Live transcript broadcasts
+        // would compete with Ask and Done in the bounded turn queue.
+        if matches!(
+            event,
+            WingEvent::UserMessageQueued { .. }
+                | WingEvent::UserMessageCommitted { .. }
+                | WingEvent::UserMessagesDropped { .. }
+                | WingEvent::SessionHistoryRefreshed(_)
+        ) {
+            return;
+        }
         let Some(session_id) = event.session_id().map(str::to_string) else {
             // 全局事件（无 session_id）：ACP 侧没有对应物。
             tracing::debug!(event_type = event.event_type(), "acp: global event dropped");
@@ -1113,7 +1124,7 @@ impl Attached {
         loop {
             match tokio::time::timeout_at(deadline, self.rx.recv()).await {
                 Ok(Some(event)) => {
-                    if matches!(event, WingEvent::SyncSession { .. }) {
+                    if matches!(event, WingEvent::SyncSession(_)) {
                         return Ok(event);
                     }
                     tracing::debug!(
@@ -1339,6 +1350,7 @@ impl Drop for Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SessionSnapshot;
     use agent_client_protocol::schema::v1::ElicitationCapabilities;
     use agent_client_protocol::schema::v1::ElicitationFormCapabilities;
     use serde_json::json;
@@ -1543,6 +1555,43 @@ mod tests {
         assert!(!entry.is_armed());
         assert!(!entry.has_turn_in_flight());
         assert!(!entry.deliver(event("s1")), "disarmed → dropped again");
+    }
+
+    #[test]
+    fn input_sync_broadcasts_leave_capacity_for_acp_turn_events() {
+        let (hub, _outbound) = test_hub();
+        let entry = hub.register("s1");
+        let mut events = entry.arm_turn().unwrap();
+        let meta = event("s1").meta().unwrap().clone();
+        let broadcasts = [
+            WingEvent::UserMessageQueued {
+                message: crate::protocol::QueuedUserMessage {
+                    origin_request_id: "request".into(),
+                    content: "text".into(),
+                    media: vec![],
+                },
+                meta: meta.clone(),
+            },
+            WingEvent::UserMessageCommitted {
+                message_uuid: "message".into(),
+                origin_request_ids: vec!["request".into()],
+                content: "text".into(),
+                media: vec![],
+                meta: meta.clone(),
+            },
+            WingEvent::UserMessagesDropped {
+                origin_request_ids: vec!["other-request".into()],
+                meta: meta.clone(),
+            },
+        ];
+        for _ in 0..events.max_capacity() {
+            for broadcast in &broadcasts {
+                hub.dispatch(broadcast.clone());
+            }
+        }
+        hub.dispatch(WingEvent::Done { meta });
+        assert!(matches!(events.try_recv(), Ok(WingEvent::Done { .. })));
+        assert!(events.is_empty());
     }
 
     /// close 的回收与排队中的 prompt：条目被回收后，排队者拿到 gate 必须
@@ -1873,18 +1922,26 @@ mod tests {
         let entry = hub.register("s1");
         let (mut attached, _) = hub.attach_session("s1").await.expect("attach");
 
+        let initial = sync_event("s1");
+        let WingEvent::SyncSession(mut refresh) = initial.clone() else {
+            unreachable!()
+        };
+        refresh.messages.clear();
+        hub.dispatch(WingEvent::SessionHistoryRefreshed(refresh));
+        assert!(attached.rx.is_empty());
+
         // 快照之前混进来的实时帧：丢弃（debug），不能污染回放。
         entry.deliver(event("s1"));
-        entry.deliver(sync_event("s1"));
+        hub.dispatch(initial);
 
         let snapshot = attached
             .read_snapshot(Duration::from_secs(1))
             .await
             .expect("snapshot arrives");
         match &snapshot {
-            WingEvent::SyncSession {
+            WingEvent::SyncSession(SessionSnapshot {
                 messages, events, ..
-            } => {
+            }) => {
                 assert_eq!(messages.len(), 1, "messages 原样带出（回放素材）");
                 assert_eq!(messages[0]["role"], "user");
                 assert!(events.is_empty());
@@ -2056,7 +2113,7 @@ mod tests {
             .read_snapshot(Duration::from_secs(1))
             .await
             .expect("sync_session 必须经分流到达挂载句柄");
-        assert!(matches!(snapshot, WingEvent::SyncSession { .. }));
+        assert!(matches!(snapshot, WingEvent::SyncSession(_)));
     }
 
     #[tokio::test]

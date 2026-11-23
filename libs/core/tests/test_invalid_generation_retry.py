@@ -46,6 +46,7 @@ class _Ctx:
 
     def __init__(self) -> None:
         self.usage_calls: list = []
+        self.compaction_applied = False
 
     def record_usage(self, usage: Any) -> None:
         self.usage_calls.append(usage)

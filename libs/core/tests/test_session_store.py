@@ -176,8 +176,9 @@ class TestFileLogStreaming:
 
     def test_iter_all_parses_lazily(self, tmp_path: Path, monkeypatch):
         """取第一条只解析第一条——不得预读/物化整份文件。"""
-        import wing.store.file as file_module
         from types import SimpleNamespace
+
+        import wing.store.file as file_module
         from wing.store.file import FileMessageLog
 
         log = FileMessageLog(tmp_path)
@@ -215,6 +216,119 @@ class TestFileLogStreaming:
 
         assert (tmp_path / "history.jsonl").read_bytes() == before
         assert [r["content"] for r in log.iter_all()] == ["keep"]
+
+    def test_failed_fsync_rolls_back_whole_append(self, tmp_path, monkeypatch):
+        import os
+
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": "keep"}])
+        before = (tmp_path / "history.jsonl").read_bytes()
+
+        fsync = os.fsync
+
+        def fail_fsync(fd):
+            if os.fstat(fd).st_size > len(before):
+                raise OSError("fsync failed after flush")
+            fsync(fd)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", fail_fsync)
+            with pytest.raises(OSError, match="fsync failed"):
+                log.append([{"content": "first"}, {"content": "second"}])
+
+        assert (tmp_path / "history.jsonl").read_bytes() == before
+        log.append([{"content": "later"}])
+        assert [record["content"] for record in log.iter_all()] == ["keep", "later"]
+
+    def test_uncertain_append_is_repaired_before_read_or_write(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        from wing.store import FileSessionStore, HistoryWriteUncertain
+
+        store = FileSessionStore(tmp_path)
+        sid = _sid("uncertain")
+        log = store.open_log(sid)
+        history = log.path / "history.jsonl"
+        log.append([{"role": "user", "content": "keep"}])
+        before = history.read_bytes()
+        fsync = os.fsync
+        inode = history.stat().st_ino
+
+        def fail_history_sync(fd):
+            if os.fstat(fd).st_ino == inode:
+                raise OSError("history fsync failed")
+            fsync(fd)
+
+        def fail_truncate(*args):
+            raise OSError("history truncate failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", fail_history_sync)
+            patch.setattr(os, "ftruncate", fail_truncate)
+            with pytest.raises(HistoryWriteUncertain, match="could not be rolled back"):
+                log.append([{"role": "user", "content": "uncertain"}])
+            assert b"uncertain" in history.read_bytes()
+
+            def cold_read():
+                return list(store.open_log(sid).iter_all())
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                assert [
+                    m["content"] for m in pool.submit(cold_read).result(timeout=2)
+                ] == ["keep"]
+            assert b"uncertain" in history.read_bytes()
+            with pytest.raises(HistoryWriteUncertain, match="before archive"):
+                store.archive(sid)
+            with pytest.raises(HistoryWriteUncertain, match="requires tail recovery"):
+                log.append([{"role": "user", "content": "later"}])
+            assert b"later" not in history.read_bytes()
+
+        reopened = FileSessionStore(tmp_path).open_log(sid)
+        assert [m["content"] for m in reopened.iter_all()] == ["keep"]
+        assert b"uncertain" in history.read_bytes()
+        with monkeypatch.context() as patch:
+
+            def fail_directory_sync():
+                raise OSError("directory sync failed")
+
+            patch.setattr(reopened, "_sync_directory", fail_directory_sync)
+            with pytest.raises(HistoryWriteUncertain, match="requires tail recovery"):
+                reopened.append([{"role": "user", "content": "later"}])
+        assert history.read_bytes() == before
+        reopened.append([{"role": "user", "content": "later"}])
+        assert history.read_bytes().startswith(before)
+        assert b"uncertain" not in history.read_bytes()
+        assert [m["content"] for m in reopened.iter_all()] == ["keep", "later"]
+
+    def test_double_failure_can_leave_restart_boundary_unknown(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+
+        from wing.store import HistoryWriteUncertain
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"content": "keep"}])
+
+        def fail(*args):
+            raise OSError("filesystem cannot confirm writes")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", fail)
+            patch.setattr(os, "ftruncate", fail)
+            with pytest.raises(
+                HistoryWriteUncertain, match="restart boundary could not be confirmed"
+            ):
+                log.append([{"content": "uncertain"}])
+        assert [path.name for path in tmp_path.iterdir()] == ["history.jsonl"]
+        assert [record["content"] for record in log.iter_all()] == ["keep"]
 
     def test_append_failure_does_not_create_file(self, tmp_path: Path):
         from wing.store.file import FileMessageLog

@@ -8,7 +8,7 @@ MessageLog 是消息日志的耐久语义，TrackedList 组合 MessageLog 做 I/
 ``wing.store.file`` / ``wing.store.memory`` 直达。
 """
 
-from wing.store.base import MessageLog, SessionStore
+from wing.store.base import HistoryWriteUncertain, MessageLog, SessionStore
 from wing.store.file import FileSessionStore
 from wing.store.memory import MemorySessionStore
 from wing.store.models import (
@@ -25,6 +25,7 @@ from wing.store.records import canonical_record
 __all__ = [
     "ArchivedSession",
     "FileRef",
+    "HistoryWriteUncertain",
     "MessageLog",
     "SessionMetadata",
     "SessionStore",

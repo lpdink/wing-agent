@@ -178,8 +178,29 @@ impl GatewayClient {
 
     /// 订阅 session 事件。`client_id` 来自 WS 连接。
     pub async fn subscribe(&self, session_id: &str, client_id: &str) -> Result<(), ApiClientError> {
+        self.subscribe_with_replay(session_id, client_id, None)
+            .await
+    }
+
+    /// Subscribe to a session's live events without requesting its history snapshot.
+    pub async fn subscribe_live(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<(), ApiClientError> {
+        self.subscribe_with_replay(session_id, client_id, Some(false))
+            .await
+    }
+
+    async fn subscribe_with_replay(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        replay: Option<bool>,
+    ) -> Result<(), ApiClientError> {
         let body = SubscribeRequest {
             session_id: session_id.to_owned(),
+            replay,
         };
         self.post_json_with_client_id("/api/session/subscribe", &body, client_id)
             .await

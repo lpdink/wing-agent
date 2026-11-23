@@ -2,8 +2,8 @@
 """Inbox — 消息队列 + feedback waiters。
 
 封装 agent 的入站消息管理：
-- asyncio.Queue 接收用户消息（Inbound）
-- drain / drain_for_steer 原语
+- 用户消息队列（Inbound）
+- 批量 drain 与只读队列快照
 - hold / release：取出口闸门（手动压缩这类会话级独占操作期间不交付输入）
 - feedback waiters：工具通过 ask_feedback 注册，用户回复按 tool_call_id 定向 resolve
 """
@@ -11,9 +11,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 from wing.common.logger import log, log_excerpt
+from wing.common.utils import InvalidInputError
+from wing.event import PendingUserMessage
 from wing.schema import MediaRef, Message
 
 
@@ -28,19 +31,66 @@ class Inbound:
     message: Message
     request_id: str | None = None
 
+    def pending_user_message(self) -> PendingUserMessage | None:
+        if (
+            self.request_id is None
+            or self.message.role != "user"
+            or not (self.message.content or self.message.media)
+        ):
+            return None
+        return PendingUserMessage(
+            origin_request_id=self.request_id,
+            content=self.message.content or "",
+            media=self.message.media or [],
+        )
+
+
+RECENT_INPUT_ID_LIMIT = 1024
+
+
+class InputRequestIds:
+    """Collision guard shared by the agents of a loaded session."""
+
+    def __init__(self) -> None:
+        self._active: set[str] = set()
+        self._recent: OrderedDict[str, None] = OrderedDict()
+
+    def require_available(self, request_id: str | None) -> None:
+        if request_id is not None and (
+            request_id in self._active or request_id in self._recent
+        ):
+            raise InvalidInputError("request_id already used in this session")
+
+    def reserve(self, request_id: str | None) -> None:
+        if request_id is not None:
+            self._active.add(request_id)
+
+    def release(self, items: list[Inbound]) -> None:
+        for item in items:
+            if item.request_id is not None:
+                self._active.discard(item.request_id)
+
+    def remember_committed(self, request_ids: list[str]) -> None:
+        for request_id in request_ids:
+            self._recent[request_id] = None
+            if len(self._recent) > RECENT_INPUT_ID_LIMIT:
+                self._recent.popitem(last=False)
+
 
 class Inbox:
     """Agent 入站消息管理：队列 + feedback waiters + 取出口闸门。"""
 
-    def __init__(self) -> None:
-        self._queue: asyncio.Queue[Inbound] = asyncio.Queue()
+    def __init__(self, input_request_ids: InputRequestIds | None = None) -> None:
+        self.input_request_ids = (
+            input_request_ids if input_request_ids is not None else InputRequestIds()
+        )
+        self._queue: deque[Inbound] = deque()
         # tool_call_id → Future，严格寻址。
         self._feedback_waiters: dict[str, asyncio.Future[str]] = {}
         # 取出口闸门：hold 期间 `get()` 不把输入交给 worker（手动压缩是会话级独占
         # 操作，压缩期间到达的消息留在队列里，压缩结束后才开始处理）。
         self._held = False
-        self._released = asyncio.Event()
-        self._released.set()
+        self._ready = asyncio.Event()
 
     # ── 队列操作 ──
 
@@ -51,12 +101,13 @@ class Inbox:
         会话），worker 停在下一次 `get()` 的等锁上，而不是把消息取走干等。
         """
         self._held = True
-        self._released.clear()
+        self._ready.clear()
 
     def release(self) -> None:
         """恢复取出口（幂等）。"""
         self._held = False
-        self._released.set()
+        if self._queue:
+            self._ready.set()
 
     @property
     def held(self) -> bool:
@@ -65,71 +116,33 @@ class Inbox:
 
     async def get(self) -> Inbound:
         """阻塞等待首条消息（取出口被 hold 时等待，不取走任何条目）。"""
-        while True:
-            await self._released.wait()
-            first = await self._queue.get()
-            if not self._held:
-                return first
-            # 等到消息的途中被 hold 了：原样放回队首，回到闸门前继续等。
-            self._requeue_front([first])
+        while self._held or not self._queue:
+            await self._ready.wait()
+        first = self._queue.popleft()
+        if not self._queue:
+            self._ready.clear()
+        return first
 
-    def _requeue_front(self, items: list[Inbound]) -> None:
-        """把条目放回队首（保持原序）——hold 边界上取出的那条不能插到队尾。"""
-        rest = self.drain()
-        for item in [*items, *rest]:
-            self._queue.put_nowait(item)
+    def _enqueue(self, item: Inbound) -> None:
+        self.input_request_ids.reserve(item.request_id)
+        self._queue.append(item)
+        if not self._held:
+            self._ready.set()
+
+    def prepend(self, items: list[Inbound]) -> None:
+        self._queue.extendleft(reversed(items))
+        if self._queue and not self._held:
+            self._ready.set()
 
     def drain(self) -> list[Inbound]:
-        """Non-blocking drain：取出队列中所有待处理消息。"""
-        items: list[Inbound] = []
-        while not self._queue.empty():
-            try:
-                items.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+        """Take queued input, leaving its IDs reserved until the batch settles."""
+        items = self.snapshot()
+        self._queue.clear()
+        self._ready.clear()
         return items
 
-    def drain_for_steer(self) -> list[Inbound]:
-        """部分 drain：只取**队首连续**的「无 media 纯文本」user 消息（D7）。
-
-        返回 Inbound 列表（保留 request_id），由调用方发射
-        UserMessageAcceptedEvent 并经 `format_steer_note` 格式化注入。
-
-        队列语义 = 「steer 变 next turn」：遇到第一条不可 steer 的消息（带 media
-        的贴图消息 / 空 content / 非 user）**立即停止**——它与其后所有消息（含
-        后续纯文本）按原序留在队列，等下一轮 drain-and-merge 一起进上下文。
-        首条带图消息因此天然阻断其后消息：图片与文本同轮进模型，顺序不被打乱
-        （D5：文本/图片分开承载、不承诺交错顺序——但绝不把队列切碎）。
-
-        实现是「先全部 drain、前缀留给调用方、其余按原序回填」：方法体内**无
-        await**，单线程事件循环下取空与回填之间不会与新的 `post` 交错；无界
-        队列的 `put_nowait` 恒不阻塞。旧实现的过滤式 drain 会把不合条件的条目
-        **直接丢弃**（带图消息静默消失）——这里修掉的就是那条数据丢失路径。
-        """
-        batch = self.drain()
-        steerable: list[Inbound] = []
-        index = 0
-        while index < len(batch):
-            candidate = batch[index]
-            if not (
-                candidate.message.role == "user"
-                and candidate.message.content
-                and not candidate.message.media
-            ):
-                break
-            steerable.append(candidate)
-            index += 1
-        for item in batch[index:]:
-            self._queue.put_nowait(item)
-        return steerable
-
-    @staticmethod
-    def format_steer_note(items: list[Inbound]) -> str:
-        """把 Inbound 列表格式化为 steer note。无有效消息时返回空串。"""
-        notes = [b.message.content for b in items if b.message.content]
-        if not notes:
-            return ""
-        return f"[User steer note: {'\n'.join(notes)}]\n"
+    def snapshot(self) -> list[Inbound]:
+        return list(self._queue)
 
     def clear(self) -> list[Inbound]:
         """清空队列（interrupt 时调用），返回被丢弃的条目。
@@ -138,7 +151,9 @@ class Inbox:
         告知前端（`InterruptedEvent.dropped_request_ids`）——前端只把这些
         消息标为 discarded，不误伤锁等待期间新到的消息。
         """
-        return self.drain()
+        dropped = self.drain()
+        self.input_request_ids.release(dropped)
+        return dropped
 
     @property
     def has_pending(self) -> bool:
@@ -148,7 +163,7 @@ class Inbox:
         `_set_working(True)`），此时 status 仍是 idle——不看队列会误判为
         「空闲可逐出」并把这条输入连同它将要驱动的那一轮一起掐掉。
         """
-        return not self._queue.empty()
+        return bool(self._queue)
 
     # ── Feedback waiters ──
 
@@ -208,8 +223,8 @@ class Inbox:
         role: str = "user",
         tool_call_id: str | None = None,
         media: list[MediaRef] | None = None,
-    ) -> None:
-        """接收用户消息或 feedback。
+    ) -> Inbound | None:
+        """接收用户消息或 feedback。返回实际入队的输入。
 
         Feedback 严格寻址：只有携带 tool_call_id 且命中 waiter 的消息才会
         resolve 对应 Future；无 id 或 id 已失效的消息一律进队列。
@@ -218,6 +233,7 @@ class Inbox:
         答复只承载文本**：命中 waiter 时 media 无处安放（Ask 答复通道是纯文本），
         记 WARN 后按文本 resolve——不发明新语义，也不静默吞掉调用方的意图。
         """
+        self.input_request_ids.require_available(request_id)
         if tool_call_id is not None:
             if self.resolve(tool_call_id, content):
                 if media:
@@ -226,11 +242,15 @@ class Inbox:
                         f"{tool_call_id} carries {len(media)} media ref(s); "
                         "directed answers are text-only, media ignored"
                     )
-                return
+                return None
             log.info(
                 f"inbox.post: no live feedback waiter for tool_call_id="
                 f"{tool_call_id}, falling through to queue"
             )
 
+        if role == "user" and not (content or media):
+            raise InvalidInputError("message content or media is required")
         msg = Message(role=role, content=content, media=media)  # ty: ignore
-        await self._queue.put(Inbound(message=msg, request_id=request_id))
+        item = Inbound(message=msg, request_id=request_id)
+        self._enqueue(item)
+        return item

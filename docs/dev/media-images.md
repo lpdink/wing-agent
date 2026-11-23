@@ -27,7 +27,7 @@ agent），本文在「用户贴图」末尾与配置 / 整机证据处给出交
    ▼                                                      ▼
 Message(role="user", content=…, media=[MediaRef])      ToolOutput(信封, media=[MediaRef])
    │ drain-and-merge：content 拼接、media 按消息序 concat   │ → tool 消息（history 只落引用）
-   │ 纯图消息合法；steer 遇带图消息阻断（D7）               │
+   │ 纯图消息合法；steer 同样携带图片               │
    └──────────────────────────┬───────────────────────────┘
                               ▼
 plan_request_media(messages, policy, vision, cap)      请求期投影（确定性、不读字节）
@@ -162,10 +162,7 @@ D5/D6/D7 拍板：
   请求体只有一个 image part、没有空 text part），`user_message_accepted` 的发射条件相应放宽为
   content 或 media 非空（否则纯图消息的 pending 会卡到 turn end）。定向答复（`tool_call_id`）
   是纯文本通道：同时携带 media 时记 WARN 并按文本 resolve。
-- **steer 阻断（D7）**：`Inbox.drain_for_steer` 只取**队首连续**的「无 media 纯文本」消息；遇到
-  第一条带 media 的消息立即停止——它与其后所有消息（含后续纯文本）按原序留在队列，等下一轮
-  drain-and-merge 一起进上下文（"steer 变 next turn"）。interrupt 的 `clear()` 照旧清空队列，
-  但**媒体对象永不删除**。
+- **steer**：完整工具批次入链后，如果当前 turn 还有下一次模型调用，排队文本与附件合并为独立 user 消息。OpenAI 请求中该消息紧随工具结果。Anthropic 请求把 `tool_result` 块放在同一个 user 消息首部，其后追加输入文本和图片。中断丢弃排队输入时，媒体对象仍由会话保管。
 - **无 vision 降级（D6）**：text 模型收到贴图 → 不发 image part，改发占位文本并**告知图片存在与
   保存路径**（`MediaAccess.path` → `store.media_path`，纯查询不读字节）。memory 后端 / 路径不可得
   → 降级为"仍在会话中"文案（不编路径）。模型据此可换路（换视觉模型 / 让用户换模型 / 对文件 OCR）。
@@ -493,8 +490,8 @@ providers:
 |------|----------|
 | `test_user_pasted_image_reaches_request_and_history` | 带 refs 的 user 消息 → 请求体 user content = [原文本, image part]、data URL 解码**逐字节 == 对象字节**；history 有引用、**无 base64**；对象在 `<sid>/media/` |
 | `test_pure_image_message_is_accepted` | content 为空、media 非空：请求体只有一个 image part（无空 text part）、turn 收口、`user_message_accepted` 照发（`origin_request_id` 对得上） |
-| `test_queued_media_messages_merge_in_order` | 工具执行期间两条带图消息 → 第一条阻断 steer；下一轮合并为**一条** user 消息，media 顺序 = 消息序 × 消息内序（[r1,r2] + [r3]） |
-| `test_steer_stops_at_media_message`（红线） | `[纯文本A, 带图B, 纯文本C]` → 只有 A 进 steer note（工具结果头部）；B/C 本轮请求里**都不在**，下一轮完整保序进入；accepted 的 `origin_request_id` 顺序 = 消费顺序 |
+| `test_queued_media_messages_merge_in_order` | 工具执行期间两条带图消息 → 同一轮合并为**一条** user 消息，media 顺序 = 消息序 × 消息内序（[r1,r2] + [r3]） |
+| `test_steer_merges_text_before_and_after_media` | `[纯文本A, 带图B, 纯文本C]` 在同一轮保序合并，工具结果保留原文与 call ID，三个 `user_message_accepted` 顺序对应原输入 |
 | `test_no_vision_user_image_placeholder_carries_saved_path`（红线） | text 模型：无 image part、原文本一字节不改、占位 == `…saved at <sessions-root>/<sid>/media/<id>>`；对象仍在（永不删除） |
 | `test_memory_backend_no_vision_placeholder_has_no_path` | memory 后端（对象经 ReadImage 入进程内桶）：占位降级为"kept in the session"，请求体无本地路径；tool 位仍是 tool 冻结文案（分流按角色） |
 | `test_budget_eviction_includes_user_images`（红线） | `images={"max_images":0,"request_budget_bytes":200,"evict_quantum_bytes":64}`：user 图（最旧）+ tool 图合计超限 → 丢 user 图（user 变体占位"仍在会话中"）、tool 图仍为 image part；链上引用与对象不动 |

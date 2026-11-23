@@ -21,11 +21,16 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import WebSocket
-
 from _support import gateway_auth_config, wait_until_async
+from fastapi import WebSocket
 from wing.config import ApiKeyEntry
-from wing.event import EventTarget, NoticeEvent, wire_dump
+from wing.event import (
+    EventTarget,
+    NoticeEvent,
+    UserMessageCommittedEvent,
+    UserMessageQueuedEvent,
+    wire_dump,
+)
 from wing.event_bus import event_bus
 from wing.gateway.frames import (
     HARD_LIMIT_BYTES,
@@ -236,6 +241,38 @@ class TestChunkedDelivery:
         assert {e["id"] for e in envelopes} == {envelopes[0]["id"]}
         assert "".join(e["data"] for e in envelopes) == payload
 
+    async def test_adjacent_chunked_input_events_are_sent_contiguously(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 512)
+        server = _make_server()
+        stub = _RecordingWs()
+        _register(server, _as_ws(stub))
+        text = "x" * 2000
+        queued = UserMessageQueuedEvent(
+            origin_request_id="request",
+            content=text,
+            media=[],
+            target=EventTarget(scope="global"),
+        )
+        committed = UserMessageCommittedEvent(
+            message_uuid="message",
+            origin_request_ids=["request"],
+            content=text,
+            media=[],
+            target=EventTarget(scope="global"),
+        )
+        server._on_event(queued)
+        server._on_event(committed)
+        counts = [
+            len(build_frames(json.dumps(wire_dump(event)), event.type))
+            for event in (queued, committed)
+        ]
+        assert min(counts) > 1
+        await wait_until_async(lambda: len(stub.sent) == sum(counts))
+        events = [json.loads(frame)["of_type"] for frame in stub.sent]
+        assert events == [queued.type] * counts[0] + [committed.type] * counts[1]
+
     async def test_global_and_client_scope_share_the_path(self, monkeypatch):
         monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 512)
         # 两个独立网关：一个走 global 广播，一个走 client 定向（避免互相干扰）。
@@ -350,6 +387,49 @@ class TestChunkedDelivery:
         )
 
         assert "slow-client" not in event_bus.routing_table
+
+    async def test_first_event_is_subject_to_backlog_limit(self, monkeypatch):
+        monkeypatch.setattr("wing.gateway.server.MAX_PENDING_EVENT_BYTES", 600)
+        server = _make_server()
+        ws = _RecordingWs()
+        _register(server, _as_ws(ws))
+        server._on_event(_notice("x" * 800))
+        await wait_until_async(lambda: bool(ws.close_calls))
+        assert ws.sent == []
+        assert ws.close_calls == [(1013, "slow consumer")]
+
+    async def test_event_backlog_recycles_only_the_slow_connection(self, monkeypatch):
+        monkeypatch.setattr("wing.gateway.server.MAX_PENDING_EVENT_BYTES", 1200)
+        server = _make_server()
+        slow = _RecordingWs()
+        fast = _RecordingWs()
+        _register(server, _as_ws(slow), "slow")
+        _register(server, _as_ws(fast), "fast")
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+        original_send = slow.send_text
+
+        async def slow_send(data: str) -> None:
+            await original_send(data)
+            if len(slow.sent) > 1:
+                entered.set()
+                await blocked.wait()
+
+        monkeypatch.setattr(slow, "send_text", slow_send)
+        try:
+            for index in range(8):
+                server._on_event(_notice(f"{index}:" + "x" * 360))
+                await wait_until_async(lambda: len(fast.sent) > index)
+                if index == 1:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+            await wait_until_async(lambda: "slow" not in server.clients)
+            assert len(slow.sent) == 2
+            assert [json.loads(frame)["message"][0] for frame in fast.sent] == list(
+                "01234567"
+            )
+            assert slow.close_calls == [(1013, "slow consumer")]
+        finally:
+            blocked.set()
 
     async def test_small_events_keep_the_single_frame_path(self):
         """小事件必须与既有实现逐字节一致（不包装、不切分）。"""

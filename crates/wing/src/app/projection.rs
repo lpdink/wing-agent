@@ -6,9 +6,7 @@
 //! notifications, interruptions) leave through `AppIntent`s, so a projection never performs I/O
 //! itself.
 //!
-//! The session-scoped guards (drop events from other sessions, always accept `SyncSession`) live
-//! here too: they decide **what the projection is allowed to see**, which is the projection's own
-//! contract.
+//! Snapshots target the active subscription. Live events target the displayed session.
 //!
 //! Call directions: the main loop ([`super`]) calls in with every event; projections call out to
 //! [`super::modal`] (ask registration).
@@ -18,9 +16,8 @@ use super::AppIntent;
 use super::replay;
 use super::title;
 use super::turn_state;
-use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
-use crate::protocol::SessionStatus;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
@@ -31,31 +28,12 @@ use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
 use crate::ui::cells::tool_call::ToolStatus;
-use crate::ui::chat_view::ChatCell;
+use crate::ui::chat_view::{ChatCell, UserMessageBody};
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
 use crate::ui::welcome::SessionFacts;
 use crate::util::program_status::State;
 use crate::util::title::AttentionKind;
-use wing_api_client::models::SessionUsage;
-
-/// `SyncSession` 快照的借用视图——重放的输入。
-///
-/// 具名字段而不是 11 个位置参数：`draft` 与 `name` 同为 `Option<String>`，
-/// `messages` 与 `events` 同为 `&[Value]`，位置一错就是静默的语义错误。
-struct SyncSnapshot<'a> {
-    session_id: String,
-    messages: &'a [serde_json::Value],
-    uncommitted: Option<&'a serde_json::Value>,
-    uncommitted_tools: &'a [serde_json::Value],
-    events: &'a [serde_json::Value],
-    status: SessionStatus,
-    turn_started_at: Option<&'a str>,
-    draft: Option<String>,
-    name: Option<String>,
-    agent: Option<Box<AgentInfo>>,
-    usage: Option<SessionUsage>,
-}
 
 impl App {
     /// Handle a gateway event.
@@ -65,13 +43,55 @@ impl App {
     /// first consumer. The trailing `_ =>` fallback lives in [`Self::handle_state`]
     /// and logs at debug level.
     pub(super) fn handle_event(&mut self, event: WingEvent) {
-        // Defense-in-depth: skip events from other sessions.
-        // Protects against backend events emitted without scope="session".
-        //
-        // Session lifecycle events (SyncSession) are always accepted —
-        // their session_id may intentionally differ from the current one.
-        if !matches!(event, WingEvent::SyncSession { .. })
-            && let Some(event_sid) = event.session_id()
+        if let Some(session_id) = event.session_id() {
+            match &event {
+                WingEvent::UserMessageQueued { message, .. } => {
+                    self.take_local_send(session_id, &message.origin_request_id);
+                }
+                WingEvent::UserMessageAccepted {
+                    origin_request_id, ..
+                } => {
+                    self.take_local_send(session_id, origin_request_id);
+                }
+                WingEvent::UserMessageCommitted {
+                    origin_request_ids, ..
+                }
+                | WingEvent::UserMessagesDropped {
+                    origin_request_ids, ..
+                }
+                | WingEvent::Interrupted {
+                    dropped_request_ids: Some(origin_request_ids),
+                    ..
+                } => {
+                    self.settle_local_sends(
+                        session_id,
+                        origin_request_ids.iter().map(String::as_str),
+                    );
+                }
+                WingEvent::Error { meta, .. } if session_id != self.session_id => {
+                    self.take_local_send(session_id, &meta.request_id);
+                }
+                _ => {}
+            }
+        }
+        match event {
+            WingEvent::SyncSession(snapshot) => {
+                if snapshot.session_id == self.subscription_target() {
+                    self.pending_session_snapshot = None;
+                    self.apply_sync_session(snapshot);
+                }
+                return;
+            }
+            WingEvent::SessionHistoryRefreshed(snapshot) => {
+                if self.pending_session_snapshot.is_none() && snapshot.session_id == self.session_id
+                {
+                    self.apply_sync_session(snapshot);
+                }
+                return;
+            }
+            _ => {}
+        }
+        if let Some(event_sid) = event.session_id()
             && event_sid != self.session_id
         {
             tracing::debug!(
@@ -127,21 +147,40 @@ impl App {
             WingEvent::UserMessageAccepted {
                 origin_request_id, ..
             } => {
-                // The message has actually been fed to the model — only now
-                // may it move up into chat history. Untracked ids (another
-                // client's sends) are ignored: this client does not render
-                // them.
-                if !self.chat.promote_pending(&origin_request_id) {
-                    tracing::debug!(
-                        origin_request_id,
-                        "user_message_accepted for untracked message, ignoring"
-                    );
+                if !self.user_input_sync {
+                    self.chat.promote_pending(&origin_request_id);
                 }
             }
+            WingEvent::UserMessageQueued { message, .. } => {
+                self.user_input_sync = true;
+                self.chat.queue_user_message(
+                    message.origin_request_id,
+                    UserMessageBody::new(message.content, message.media),
+                );
+            }
+            WingEvent::UserMessageCommitted {
+                message_uuid,
+                origin_request_ids,
+                content,
+                media,
+                ..
+            } => {
+                self.user_input_sync = true;
+                self.chat.remove_pending(&origin_request_ids);
+                self.chat.push_committed_user_message(
+                    Some(message_uuid),
+                    UserMessageBody::new(content, media),
+                );
+            }
+            WingEvent::UserMessagesDropped {
+                origin_request_ids, ..
+            } => {
+                self.chat.discard_pending(&origin_request_ids);
+            }
             WingEvent::Done { .. } => {
-                // Turn-end safety net: promote anything still queued (e.g.
-                // accepted events lost across a disconnect/reconnect).
-                self.chat.promote_all_pending();
+                if !self.user_input_sync && !self.history_incomplete {
+                    self.chat.promote_all_pending();
+                }
                 self.finish_turn();
                 self.clear_ask_state();
                 // Restore idle title — but if the user is not focused and a
@@ -166,13 +205,12 @@ impl App {
                 dropped_request_ids,
                 ..
             } => {
-                // The interrupt discarded exactly the requests the backend
-                // reports — messages that arrived while the interrupt was in
-                // flight survive and are promoted by `user_message_accepted`.
-                // Legacy gateways omit the list: keep the blanket discard.
                 match dropped_request_ids {
                     Some(ids) => self.chat.discard_pending(&ids),
-                    None => self.chat.discard_all_pending(),
+                    None if !self.user_input_sync && !self.history_incomplete => {
+                        self.chat.discard_all_pending()
+                    }
+                    None => {}
                 }
                 self.finish_turn();
                 self.clear_ask_state();
@@ -215,22 +253,25 @@ impl App {
             }
 
             WingEvent::Error { message, meta, .. } => {
-                // 被拒的 `ClientRequest` 帧带回客户端的 `request_id`（帧关联）：
-                // 命中的那条消息根本没进模型（闸门在 Delivered 之前），所以把产物从
-                // pending 队列取回、还给草稿——否则随后 `done` 的 `promote_all_pending`
-                // 会把它当「已发送」晋升。**无关联的 error**（request_id 是新 uuid 的
-                // turn 级失败，或旧网关的帧）匹配不到任何条目，行为逐字不变。
-                let rejected = self.chat.take_pending(&meta.request_id);
-                self.finish_turn();
-                // The backend cancels every feedback waiter when a turn dies —
-                // a stale ask panel must not outlive it (nor get answered into
-                // a dead waiter), and the record must not stay `blocked`.
-                self.clear_ask_state();
+                // A frame rejection is scoped to its submission. A turn error
+                // may arrive through the same event with an unrelated request ID.
+                let session_id = self.session_id.clone();
+                let original = self.take_local_send(&session_id, &meta.request_id);
+                let rejected = self.chat.take_pending(&meta.request_id).or_else(|| {
+                    original
+                        .filter(|sent| sent.epoch == self.draft_recovery_epoch)
+                        .map(|sent| std::sync::Arc::unwrap_or_clone(sent.submission))
+                });
+                if rejected.is_none() || !self.user_input_sync {
+                    self.finish_turn();
+                    self.clear_ask_state();
+                    self.set_program_status(State::Error, Some(&message));
+                    self.notify_unfocused(message.clone(), AttentionKind::Error);
+                }
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
-                // The most specific failure text wing has for the record.
-                self.set_program_status(State::Error, Some(&message));
-                self.notify_unfocused(message.clone(), AttentionKind::Error);
-                if let Some(submission) = rejected {
+                if let Some(submission) = rejected
+                    && self.subscription_target() == self.session_id
+                {
                     // 与发送失败同一条回填路径（内容已经在草稿里，理由在 Error cell / toast 里）。
                     self.restore_draft(submission);
                     self.show_toast(Toast::warning(
@@ -336,6 +377,9 @@ impl App {
                 tool_success,
                 ..
             } => {
+                if self.user_input_sync {
+                    self.dismiss_resolved_ask(&tool_call_id);
+                }
                 self.handle_tool_result(
                     tool_name,
                     tool_args,
@@ -529,34 +573,6 @@ impl App {
                 // 顶部横幅）；关着 → 丢掉设置缓存（见 `note_settings_changed`）。
                 self.note_settings_changed(&fingerprint);
             }
-            WingEvent::SyncSession {
-                session_id,
-                messages,
-                uncommitted,
-                uncommitted_tools,
-                events,
-                status,
-                turn_started_at,
-                draft,
-                name,
-                agent,
-                usage,
-                ..
-            } => {
-                self.apply_sync_session(SyncSnapshot {
-                    session_id,
-                    messages: &messages,
-                    uncommitted: uncommitted.as_ref(),
-                    uncommitted_tools: &uncommitted_tools,
-                    events: &events,
-                    status,
-                    turn_started_at: turn_started_at.as_deref(),
-                    draft,
-                    name,
-                    agent,
-                    usage,
-                });
-            }
             // ---- Turn result (rich completion data) ----
             WingEvent::TurnResult {
                 subtype,
@@ -612,6 +628,63 @@ impl App {
         }
     }
 
+    fn adopt_session_identity(&mut self, session_id: String) -> bool {
+        if self.session_id == session_id {
+            return false;
+        }
+        self.session_id = session_id;
+        self.draft_recovery_epoch = self.draft_recovery_epoch.wrapping_add(1);
+        self.status.pinned = false;
+        self.push_intent(AppIntent::FetchInfo);
+        self.finish_compaction();
+        true
+    }
+
+    pub(super) fn show_snapshot_wait(&mut self) {
+        self.show_toast(Toast::info(
+            "Waiting for session sync",
+            std::time::Duration::from_secs(2),
+        ));
+    }
+
+    pub(super) fn expire_session_snapshot(&mut self, now: tokio::time::Instant) {
+        if !self
+            .snapshot_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            return;
+        }
+        self.use_live_session();
+    }
+
+    pub(super) fn use_live_session(&mut self) {
+        let Some(pending) = self.pending_session_snapshot.take() else {
+            return;
+        };
+        self.clear_ask_state();
+        self.close_model_panel();
+        if self.adopt_session_identity(pending.session_id) {
+            self.chat.clear();
+            self.status = crate::ui::status_bar::StatusData {
+                connected: self.connected,
+                ..Default::default()
+            };
+            self.session_facts = None;
+            self.user_input_sync = false;
+            self.turn.reset_usage();
+        }
+        self.history_incomplete = true;
+        self.finish_turn();
+        self.turn.last_result = false;
+        self.push_intent(AppIntent::SetTitle(title::title_idle(
+            self.dir_label().as_deref(),
+        )));
+        self.sync_program_status();
+        self.chat.push(ChatCell::WarningMessage(
+            "Session history unavailable. Showing live events. Use /sync to retry history.".into(),
+        ));
+    }
+
     /// Replace the whole view with a session snapshot (`SyncSession`).
     ///
     /// A full state replacement, not an append: clear → session facts →
@@ -624,10 +697,11 @@ impl App {
     /// once-only live event, not replayed), and an empty uncommitted projection
     /// does not mean idle: between rounds, or while the first LLM call is still
     /// in flight, a turn runs with nothing finalized to project.
-    fn apply_sync_session(&mut self, snapshot: SyncSnapshot<'_>) {
-        let SyncSnapshot {
+    fn apply_sync_session(&mut self, snapshot: SessionSnapshot) {
+        let SessionSnapshot {
             session_id,
             messages,
+            pending_user_messages,
             uncommitted,
             uncommitted_tools,
             events,
@@ -637,27 +711,34 @@ impl App {
             name,
             agent,
             usage,
+            ..
         } = snapshot;
-        // Update session_id to the new session (Phase 3c).
-        //
-        // 快照不带会话的标签（pin 星标的数据源）：换会话时补一次
-        // `/api/session/info`（响应携带 tags / tag_meta）。只有**身份真的变了**
-        // 才取——首帧（启动）与重连沿用既有路径，不重复请求。
-        let switched = self.session_id != session_id;
-        self.session_id = session_id;
-        if switched {
-            // 星标此刻挂的是**上一个会话**的状态：先复位成未知（未 pin），
-            // 别在一个 RTT 的窗口里把别人的 pin 显成你的——补取的 info 到达
-            // 后立即纠正（点击期间也不会据此算错目标值）。
-            self.status.pinned = false;
-            self.push_intent(AppIntent::FetchInfo);
-            // 压缩在飞的是上一个会话：它的回执已经认不到这个会话，本地标记作废。
-            self.finish_compaction();
-        }
+        let switched = self.adopt_session_identity(session_id);
+        self.history_incomplete = false;
 
-        // Clear old content + reset render context before replay.
-        // SyncSession is a full state replacement — not an append.
-        self.chat.clear();
+        // Optimistic sends on this connection may follow the snapshot. A
+        // disconnect already removed echoes whose acknowledgements could be lost.
+        self.user_input_sync = pending_user_messages.is_some();
+        if let Some(messages) = pending_user_messages {
+            let session_id = self.session_id.clone();
+            self.settle_local_sends(
+                &session_id,
+                messages
+                    .iter()
+                    .map(|message| message.origin_request_id.as_str()),
+            );
+            self.chat.rebuild_with_pending_queue(
+                messages.into_iter().map(|message| {
+                    (
+                        message.origin_request_id,
+                        UserMessageBody::new(message.content, message.media),
+                    )
+                }),
+                !switched,
+            );
+        } else {
+            self.chat.clear();
+        }
         self.ctx.reset();
 
         // Session facts (skills / rules counts) ride the snapshot straight into
@@ -718,7 +799,9 @@ impl App {
         // enter it, `idle` / `inactive` clear a stale one (the view can be
         // replaced under a running turn by a switch / reconnect, and the past
         // turn's `Done` is filtered out as a foreign session's event).
-        let turn_instant = turn_started_at.and_then(turn_state::instant_from_utc_iso);
+        let turn_instant = turn_started_at
+            .as_deref()
+            .and_then(turn_state::instant_from_utc_iso);
         if status.turn_in_flight() {
             self.turn.start();
             if let Some(instant) = turn_instant {
@@ -742,11 +825,11 @@ impl App {
         // the diff — the anchor always exists first.
         //
         // 1. Committed Message projections (text/thinking/ToolCall cells).
-        replay::replay_messages(&mut self.chat, messages);
+        replay::replay_messages(&mut self.chat, &messages);
         // 2. Uncommitted assistant Message projection — SAME replay path
         //    (a single Message payload, not a list). Never fed to
         //    handle_event as a pseudo-event.
-        if let Some(uncommitted_msg) = uncommitted {
+        if let Some(uncommitted_msg) = &uncommitted {
             replay::replay_messages(&mut self.chat, std::slice::from_ref(uncommitted_msg));
             // A mid-execution Bash card (finalized tool_use, no result
             // yet) shows elapsed anchored to the turn start.
@@ -758,7 +841,7 @@ impl App {
         //    EXISTING live ToolCallStream branch (client-side partial
         //    parse via partial_json.rs); zero new rendering logic. The
         //    subsequent live tool_call_stream deltas append seamlessly.
-        for tool in uncommitted_tools {
+        for tool in &uncommitted_tools {
             let tool_call_id = tool
                 .get("tool_call_id")
                 .and_then(|v| v.as_str())
@@ -793,7 +876,7 @@ impl App {
         //    cells from the same normalization entry as the live path;
         //    registering them makes a resumed pending ask answerable
         //    through the same channel.
-        for panel in replay::replay_events(&mut self.chat, events) {
+        for panel in replay::replay_events(&mut self.chat, &events) {
             self.register_ask_panel(panel);
         }
 
@@ -827,6 +910,7 @@ impl App {
         // an idle snapshot is `idle`. A session switch or reconnect must not
         // leave the record describing the view that was replaced.
         self.sync_program_status();
+        self.offer_uncertain_recovery();
     }
 
     /// Handle tool call results with tool-specific routing.

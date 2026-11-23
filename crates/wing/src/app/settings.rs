@@ -705,6 +705,8 @@ pub(super) async fn restart_gateway(
         return;
     }
 
+    app.set_connected(false);
+
     // 3. 重读两份配置 → 新端点（端口 / host / api_key 都可能刚被改过）。
     let backend = crate::cmd::backend_config::read_backend_gateway_config();
     let api_key = AppConfig::load().api_key.filter(|key| !key.is_empty());
@@ -728,15 +730,16 @@ pub(super) async fn restart_gateway(
     }
 
     // 5. 重连 + 会话恢复（与 run loop 的 retry 臂同一对原语）。
-    let lost_session = app.session_id.clone();
+    let lost_session = app.subscription_target().to_owned();
     match connect_transport(endpoint).await {
         Ok(new_transport) => {
             let workspace = app.launch_workspace.clone();
             match new_transport
-                .recover_session(&app.session_id, workspace.as_deref())
+                .recover_session(&lost_session, workspace.as_deref())
                 .await
             {
-                Ok(recovery) => {
+                Ok((session_id, recovery)) => {
+                    app.await_session_snapshot(session_id);
                     *transport = Some(new_transport);
                     app.set_connected(true);
                     app.clear_toast();

@@ -65,6 +65,13 @@ where
         .collect())
 }
 
+pub(super) fn user_media_refs<'de, D>(deserializer: D) -> Result<Vec<MediaRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    tolerant_media_array(deserializer, "user media", true)
+}
+
 /// 字节的媒体对象 id：内容的 sha256，小写 hex（与网关的 `media_id_for` 逐字节一致）。
 pub fn media_id_of(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);

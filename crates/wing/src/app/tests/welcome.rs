@@ -5,6 +5,7 @@
 //! `ui::welcome`; what is asserted here is the wiring: the app owns a welcome,
 //! rebuilds the header while the sweep runs, and stops once it settles.
 
+use crate::protocol::SessionSnapshot;
 use std::time::Duration;
 
 use super::support::*;
@@ -574,9 +575,10 @@ fn scrolling_the_welcome_out_of_view_parks_the_clock() {
 #[test]
 fn the_start_screen_shows_session_facts_in_the_nameplate() {
     let mut app = test_app();
-    app.handle_event(crate::protocol::WingEvent::SyncSession {
+    app.handle_event(crate::protocol::WingEvent::SyncSession(SessionSnapshot {
         session_id: "test-session".into(),
         messages: vec![],
+        pending_user_messages: None,
         uncommitted: None,
         uncommitted_tools: vec![],
         events: vec![],
@@ -601,7 +603,7 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
             session_id: Some("test-session".into()),
             request_id: "r".into(),
         },
-    });
+    }));
 
     let body = frame_body(&mut app, 100, 30);
     let row = crate::ui::welcome::identity_text(app.chat.header_lines());

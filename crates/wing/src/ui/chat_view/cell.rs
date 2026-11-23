@@ -13,6 +13,8 @@
 //! sent-but-not-yet-accepted user message, i.e. another content state, not a
 //! viewport concern.
 
+use std::sync::Arc;
+
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -55,11 +57,7 @@ pub enum ChatCell {
     /// User message: text plus the pictures it carries (`media`), rendered as an anchor
     /// block per picture when the terminal can draw them (see `media`).
     UserMessage(UserMessageBody),
-    /// User message awaiting model acceptance — rendered in the pending
-    /// area below all committed cells, dimmed to signal "queued, not yet
-    /// fed to the model". Promoted to `UserMessage` on
-    /// `user_message_accepted`, or demoted to `DiscardedUserMessage` when
-    /// an interrupt discards it.
+    /// User input awaiting commitment, rendered dimmed below the transcript.
     PendingUserMessage(UserMessageBody),
     /// User message discarded by an interrupt before reaching the model —
     /// dimmed + struck through to signal "never sent".
@@ -239,17 +237,22 @@ fn assistant_message_lines(
     composed
 }
 
-/// A user message that has been sent but not yet accepted by the model.
-///
-/// Rendered in the pending area below all committed cells ("stuck at the
-/// bottom") until `user_message_accepted` promotes it into history.
+/// A pending bubble, identified by the originating client request.
 pub struct PendingMessage {
-    /// ClientRequest.request_id — correlates with UserMessageAccepted.
     pub request_id: String,
-    /// 提交产物（正文 + 图片）：气泡不读它——它留着给**失败回填**（发送失败 / 服务端
-    /// 拒绝时把内容原样还给草稿）。生命周期与条目本身绑定，没有第二处需要清理。
-    pub(crate) submission: Submission,
-    pub(crate) cell: CachedCell, // PendingUserMessage(display text)
+    /// Only optimistic local entries carry an original for draft recovery.
+    pub(crate) submission: Option<Arc<Submission>>,
+    pub(crate) cell: CachedCell,
+}
+
+impl PendingMessage {
+    pub(super) fn queued(request_id: String, body: UserMessageBody) -> Self {
+        Self {
+            request_id,
+            submission: None,
+            cell: CachedCell::new(ChatCell::PendingUserMessage(body)),
+        }
+    }
 }
 
 /// 一次提交的产物（`SubmitPayload` 去掉展示那一半后的**原件**）：正文 + 图片。

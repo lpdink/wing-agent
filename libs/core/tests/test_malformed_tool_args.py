@@ -166,9 +166,7 @@ class TestFullTurnMalformedArgs:
 
         monkeypatch.setattr(agent.model_provider, "generate", _generate)
 
-        agent._inbox._queue.put_nowait(
-            Inbound(message=Message(role="user", content="go"))
-        )
+        agent._inbox._enqueue(Inbound(message=Message(role="user", content="go")))
 
         async def _wait_done():
             while not any(isinstance(e, DoneEvent) for e in events):

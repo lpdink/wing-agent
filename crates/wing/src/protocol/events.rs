@@ -194,6 +194,78 @@ where
     super::media::tolerant_media_array(deserializer, "tool_media", false)
 }
 
+/// A user input queued in the inbox, as broadcast and projected by snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedUserMessage {
+    pub origin_request_id: String,
+    pub content: String,
+    #[serde(default, deserialize_with = "super::media::user_media_refs")]
+    pub media: Vec<MediaRef>,
+}
+
+/// Replay material shared by subscription snapshots and live history refreshes.
+///
+/// Project messages, uncommitted content, unfinished tools, then fact events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    #[serde(default)]
+    pub session_id: String,
+    /// Committed Message projections (active chain).
+    #[serde(default)]
+    pub messages: Vec<serde_json::Value>,
+    /// Ordered, uncommitted user inputs. Presence (even `[]`) signals
+    /// support for the queue and commit event protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_user_messages: Option<Vec<QueuedUserMessage>>,
+    /// Single uncommitted assistant Message projection (finalized blocks of
+    /// the in-progress turn) — rendered via the same `replay_messages` path
+    /// as `messages`. Null when no turn is in progress.
+    #[serde(default)]
+    pub uncommitted: Option<serde_json::Value>,
+    /// Unfinished tool calls' raw args fragments
+    /// (`[{tool_call_id, tool_name, args_fragment}]`) — rendered via the
+    /// live `ToolCallStream` branch (client-side partial parse).
+    #[serde(default)]
+    pub uncommitted_tools: Vec<serde_json::Value>,
+    /// Durable fact-event nodes on the active chain (in chain order) —
+    /// replay material for diff views and other message-projection gaps.
+    #[serde(default)]
+    pub events: Vec<serde_json::Value>,
+    /// Session status at snapshot time — `working` / `waiting` mean a turn
+    /// is in flight, `idle` / `inactive` mean none is.
+    ///
+    /// A mid-join subscriber takes its turn state from here and nowhere
+    /// else: it can never hear the already-past `turn_started` (once-only
+    /// live event, never replayed), and the uncommitted projections are not
+    /// a substitute — between rounds, or while the first LLM call is still
+    /// in flight, a turn runs with nothing finalized to project.
+    ///
+    /// Required: the snapshot MUST state the turn state (CLI and gateway
+    /// ship as one version, so it is always on the wire; a missing or
+    /// unknown value is a protocol error, not a case to guess around).
+    pub status: SessionStatus,
+    /// When the current turn started (UTC ISO-8601) — restores elapsed time
+    /// on resume instead of recounting from the resume moment. Null when no
+    /// turn is in progress.
+    #[serde(default)]
+    pub turn_started_at: Option<String>,
+    /// Boxed: the agent snapshot is the largest inline payload of this
+    /// variant — boxing keeps `WingEvent` small (clippy large_enum_variant).
+    #[serde(default)]
+    pub agent: Option<Box<AgentInfo>>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub draft: Option<String>,
+    /// 快照时刻的会话用量账本——前端累计的**基线**（快照之后的 live
+    /// 增量恰好是它未包含的部分；HTTP `/api/session/info` 的快照与 WS 帧
+    /// 无跨通道定序，不能拿来做基线）。旧网关不带 → None（按零基线）。
+    #[serde(default)]
+    pub usage: Option<SessionUsage>,
+    #[serde(flatten)]
+    pub meta: EventMeta,
+}
+
 // ============================================================
 // WingEvent — the main event enum
 // ============================================================
@@ -375,19 +447,40 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
-    /// User message accepted into the model context — either as the input of
-    /// a new turn (before `turn_started`) or as a steer note after tool
-    /// execution. The TUI holds sent messages in a pending area and promotes
-    /// them into chat history only when this event arrives: a message moves
-    /// up exactly when the model actually receives it.
-    ///
-    /// `origin_request_id` is the request_id the client submitted with, used
-    /// to correlate with the local pending queue; `content` carries the
-    /// original text. Internal posts (no request_id) never fire this event.
+    /// Per-request acceptance for legacy clients and usage accounting.
     #[serde(rename = "user_message_accepted")]
     UserMessageAccepted {
         content: String,
         origin_request_id: String,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// A user input has entered the inbox.
+    #[serde(rename = "user_message_queued")]
+    UserMessageQueued {
+        #[serde(flatten)]
+        message: QueuedUserMessage,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// The final user message written to history for a batch of inputs.
+    #[serde(rename = "user_message_committed")]
+    UserMessageCommitted {
+        message_uuid: String,
+        origin_request_ids: Vec<String>,
+        content: String,
+        #[serde(default, deserialize_with = "super::media::user_media_refs")]
+        media: Vec<MediaRef>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// A batch left the inbox but could not be committed.
+    #[serde(rename = "user_messages_dropped")]
+    UserMessagesDropped {
+        origin_request_ids: Vec<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -422,69 +515,13 @@ pub enum WingEvent {
     },
 
     // ---- state_change ----
-    /// Full session state sync.
-    ///
-    /// Carries the turn state (`status`, required) plus four replay groups —
-    /// subscribers MUST assemble the groups in the order `messages →
-    /// uncommitted → uncommitted_tools → events`, then continue seamlessly with
-    /// the live stream. The replay materials are `#[serde(default)]`: a frame
-    /// with nothing in flight / nothing anchored (or a null-stripped wire
-    /// frame) degrades to "replay committed only".
+    /// Session snapshot for subscription and explicit history restoration.
     #[serde(rename = "sync_session")]
-    SyncSession {
-        #[serde(default)]
-        session_id: String,
-        /// Committed Message projections (active chain).
-        #[serde(default)]
-        messages: Vec<serde_json::Value>,
-        /// Single uncommitted assistant Message projection (finalized blocks of
-        /// the in-progress turn) — rendered via the same `replay_messages` path
-        /// as `messages`. Null when no turn is in progress.
-        #[serde(default)]
-        uncommitted: Option<serde_json::Value>,
-        /// Unfinished tool calls' raw args fragments
-        /// (`[{tool_call_id, tool_name, args_fragment}]`) — rendered via the
-        /// live `ToolCallStream` branch (client-side partial parse).
-        #[serde(default)]
-        uncommitted_tools: Vec<serde_json::Value>,
-        /// Durable fact-event nodes on the active chain (in chain order) —
-        /// replay material for diff views and other message-projection gaps.
-        #[serde(default)]
-        events: Vec<serde_json::Value>,
-        /// Session status at snapshot time — `working` / `waiting` mean a turn
-        /// is in flight, `idle` / `inactive` mean none is.
-        ///
-        /// A mid-join subscriber takes its turn state from here and nowhere
-        /// else: it can never hear the already-past `turn_started` (once-only
-        /// live event, never replayed), and the uncommitted projections are not
-        /// a substitute — between rounds, or while the first LLM call is still
-        /// in flight, a turn runs with nothing finalized to project.
-        ///
-        /// Required: the snapshot MUST state the turn state (CLI and gateway
-        /// ship as one version, so it is always on the wire; a missing or
-        /// unknown value is a protocol error, not a case to guess around).
-        status: SessionStatus,
-        /// When the current turn started (UTC ISO-8601) — restores elapsed time
-        /// on resume instead of recounting from the resume moment. Null when no
-        /// turn is in progress.
-        #[serde(default)]
-        turn_started_at: Option<String>,
-        /// Boxed: the agent snapshot is the largest inline payload of this
-        /// variant — boxing keeps `WingEvent` small (clippy large_enum_variant).
-        #[serde(default)]
-        agent: Option<Box<AgentInfo>>,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        draft: Option<String>,
-        /// 快照时刻的会话用量账本——前端累计的**基线**（快照之后的 live
-        /// 增量恰好是它未包含的部分；HTTP `/api/session/info` 的快照与 WS 帧
-        /// 无跨通道定序，不能拿来做基线）。旧网关不带 → None（按零基线）。
-        #[serde(default)]
-        usage: Option<SessionUsage>,
-        #[serde(flatten)]
-        meta: EventMeta,
-    },
+    SyncSession(SessionSnapshot),
+
+    /// Authoritative live history refresh for clients that rebuild their transcript.
+    #[serde(rename = "session_history_refreshed")]
+    SessionHistoryRefreshed(SessionSnapshot),
 
     /// Session state changed — unified event for model/thinking/yolo/title/agent updates.
     #[serde(rename = "session_state_changed")]
@@ -733,8 +770,12 @@ impl WingEvent {
             Self::Done { .. } => "done",
             Self::TurnStarted { .. } => "turn_started",
             Self::UserMessageAccepted { .. } => "user_message_accepted",
+            Self::UserMessageQueued { .. } => "user_message_queued",
+            Self::UserMessageCommitted { .. } => "user_message_committed",
+            Self::UserMessagesDropped { .. } => "user_messages_dropped",
             Self::DiffContent { .. } => "diff_content",
-            Self::SyncSession { .. } => "sync_session",
+            Self::SyncSession(_) => "sync_session",
+            Self::SessionHistoryRefreshed(_) => "session_history_refreshed",
             Self::SessionStateChanged { .. } => "session_state_changed",
             Self::SettingsChanged { .. } => "settings_changed",
             Self::Interrupted { .. } => "interrupted",
@@ -765,8 +806,10 @@ impl WingEvent {
             | Self::Done { meta, .. }
             | Self::TurnStarted { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
+            | Self::UserMessageQueued { meta, .. }
+            | Self::UserMessageCommitted { meta, .. }
+            | Self::UserMessagesDropped { meta, .. }
             | Self::DiffContent { meta, .. }
-            | Self::SyncSession { meta, .. }
             | Self::SessionStateChanged { meta, .. }
             | Self::SettingsChanged { meta, .. }
             | Self::Interrupted { meta, .. }
@@ -777,22 +820,21 @@ impl WingEvent {
             | Self::ToolResultTurn { meta, .. }
             | Self::TurnResult { meta, .. }
             | Self::SessionInit { meta, .. } => Some(meta),
+            Self::SyncSession(snapshot) | Self::SessionHistoryRefreshed(snapshot) => {
+                Some(&snapshot.meta)
+            }
             Self::Unknown => None,
         }
     }
 
     /// Returns the session this event belongs to, if present.
     ///
-    /// Most variants carry it in [`EventMeta`]; `SyncSession` has its own
-    /// **named** `session_id` field instead — serde's flatten only sees the
-    /// keys no named field consumed, so its meta never holds the id. Frontends
-    /// route the replay snapshot by this value (wing acp's `SessionHub`), so it
-    /// must read the named field. An absent key (empty string) counts as none,
-    /// matching the meta-based variants.
+    /// Snapshots carry a named `session_id`, which serde consumes before
+    /// deserializing the flattened metadata.
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::SyncSession { session_id, .. } => {
-                (!session_id.is_empty()).then_some(session_id.as_str())
+            Self::SyncSession(snapshot) | Self::SessionHistoryRefreshed(snapshot) => {
+                (!snapshot.session_id.is_empty()).then_some(snapshot.session_id.as_str())
             }
             _ => self.meta().and_then(|m| m.session_id.as_deref()),
         }
@@ -1052,7 +1094,7 @@ mod tests {
         }"#;
         let event: WingEvent = serde_json::from_str(legacy).unwrap();
         match event {
-            WingEvent::SyncSession { agent, .. } => {
+            WingEvent::SyncSession(SessionSnapshot { agent, .. }) => {
                 let agent = agent.expect("agent snapshot");
                 assert_eq!(
                     agent.provider_name, None,
@@ -1653,7 +1695,7 @@ mod tests {
         }"#;
         let event: WingEvent = serde_json::from_str(json).unwrap();
         match event {
-            WingEvent::SyncSession {
+            WingEvent::SyncSession(SessionSnapshot {
                 session_id,
                 messages,
                 uncommitted,
@@ -1661,7 +1703,7 @@ mod tests {
                 events,
                 turn_started_at,
                 ..
-            } => {
+            }) => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(messages.len(), 1);
                 assert!(uncommitted.is_none());
@@ -1716,7 +1758,7 @@ mod tests {
             );
             let event: WingEvent = serde_json::from_str(&json).unwrap();
             match event {
-                WingEvent::SyncSession { status, .. } => {
+                WingEvent::SyncSession(SessionSnapshot { status, .. }) => {
                     assert_eq!(status, expected, "raw {raw:?}");
                     assert_eq!(status.turn_in_flight(), in_flight);
                 }
@@ -1779,12 +1821,12 @@ mod tests {
         }"#;
         let event: WingEvent = serde_json::from_str(json).unwrap();
         match event {
-            WingEvent::SyncSession {
+            WingEvent::SyncSession(SessionSnapshot {
                 uncommitted,
                 uncommitted_tools,
                 turn_started_at,
                 ..
-            } => {
+            }) => {
                 assert!(uncommitted.is_some());
                 assert_eq!(uncommitted_tools.len(), 1);
                 assert_eq!(uncommitted_tools[0]["tool_call_id"].as_str(), Some("tc1"));

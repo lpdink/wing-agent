@@ -26,7 +26,6 @@ _EFFORT_VALUES = "low|medium|high|xhigh|max"
 # 归档条目就是存储层模型（含投影期补全的展示名），不另立一份镜像。
 from wing.store import ArchivedSession, FileRef, SessionUsage, TagMeta
 
-
 # ============================================================
 # 请求模型
 # ============================================================
@@ -105,6 +104,7 @@ class SubscribeRequest(BaseModel):
     """订阅 session 事件的请求体。需要 X-Client-Id header。"""
 
     session_id: str = Field(description="要订阅的 session ID")
+    replay: bool = Field(default=True, description="订阅时推送完整会话快照")
 
 
 class UnsubscribeRequest(BaseModel):
@@ -118,6 +118,10 @@ class SendMessageRequest(BaseModel):
 
     session_id: str = Field(description="目标 session ID")
     content: str = Field(description="消息内容")
+    request_id: str | None = Field(
+        default=None,
+        description="客户端生成的唯一请求 ID。缺省由网关生成，响应回显实际 ID",
+    )
     media: list[MediaRef] | None = Field(
         default=None,
         description=(

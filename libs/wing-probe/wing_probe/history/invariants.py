@@ -75,8 +75,12 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = DELTA_EVENT_TYPES | frozenset(
         "llm_call_metrics",
         "assistant_turn",
         "tool_result_turn",
+        "user_message_queued",
+        "user_message_committed",
+        "user_messages_dropped",
         # event/state_change.py
         "sync_session",
+        "session_history_refreshed",
         "session_state_changed",
         "session_init",
         # event/query_response.py

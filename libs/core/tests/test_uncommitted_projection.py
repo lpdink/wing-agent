@@ -52,9 +52,7 @@ def runtime():
 def _start_turn(agent, content: str = "go") -> None:
     from wing.agent.inbox import Inbound
 
-    agent._inbox._queue.put_nowait(
-        Inbound(message=Message(role="user", content=content))
-    )
+    agent._inbox._enqueue(Inbound(message=Message(role="user", content=content)))
 
 
 # ============================================================

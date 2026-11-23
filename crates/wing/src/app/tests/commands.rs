@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::commands;
 use crate::app::intent::SessionUpdate;
 use crate::app::*;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::{EventMeta, SessionStatus, WingEvent};
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
@@ -1432,6 +1433,7 @@ mod session_list {
         app.handle_key(key(KeyCode::Right));
         app.update_popup_from_input();
         app.handle_key(key(KeyCode::Down)); // kid-01
+        app.await_session_snapshot("pending-session".into());
         app.handle_key(key(KeyCode::Enter));
         let resumed = app
             .drain_intents()
@@ -2174,9 +2176,10 @@ fn test_a_switched_sync_session_ends_the_compaction_block() {
         Vec::new(),
         None,
     );
-    if let WingEvent::SyncSession { session_id, .. } = &mut event {
+    if let WingEvent::SyncSession(SessionSnapshot { session_id, .. }) = &mut event {
         *session_id = "a-newer-session".into();
     }
+    app.await_session_snapshot(event.session_id().unwrap().into());
     app.handle_event(event);
 
     assert!(!app.compacting, "换了会话就没人能解除旧的压缩标记");

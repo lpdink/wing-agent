@@ -16,11 +16,7 @@ OSError，与磁盘打满的 ENOSPC 同类），断言用户看得见的三件�
 能力即复刻"同一故障击穿两层兜底 handler"的现场。root 无视权限位，故在 root
 下跳过（CI 与本地开发都是普通用户）。
 
-不变量逃生舱：注入落盘故障必然让**磁盘**链断开（故障期间该会话的写入整体
-失败，内存链与磁盘分叉，恢复后新记录的 parent_uuid 指向一个没写进文件的
-uuid）——这是 `TrackedList` 既有的"先改内存再落盘"语义在故障下的必然结果
-（磁盘链修复不在 #187 范围）。本场景断言的是消费者存活与续期，故显式关闭
-teardown 的内置不变量并给出理由。
+失败期间的输入由精确丢弃事件收口，恢复后的历史链保持完整。
 """
 
 from __future__ import annotations
@@ -29,7 +25,7 @@ import os
 
 import pytest
 
-from wing_probe import Probe, Turn
+from wing_probe import Driver, Probe, Turn
 
 MODEL = "probe/worker-resilience"
 
@@ -47,18 +43,7 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
             "root / 无权限位的平台：本场景靠去掉 history.jsonl 的写权限注入落盘失败"
         )
 
-    probe.register(
-        MODEL,
-        # 第 2 个 Turn 可能被故障那轮吃掉（取决于故障落在哪一步）——第 2/3 个
-        # Turn 同文，恢复轮的断言因此不依赖"故障轮是否发出过模型请求"。
-        Turn.of(text="first"),
-        Turn.of(text="recovered"),
-        Turn.of(text="recovered"),
-    )
-    probe.without_invariants(
-        "注入落盘故障必然让磁盘链断开（故障期间该会话写入整体失败，内存链与磁盘"
-        "分叉）——本场景断言消费者存活与续期，磁盘链修复不在 #187 范围"
-    )
+    probe.register(MODEL, Turn.of(text="first"), Turn.of(text="recovered"))
     session = await probe.session(model=MODEL)
 
     result = await session.chat("one")
@@ -72,7 +57,16 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
     os.chmod(history, 0o400)
     try:
         cursor = session.watch.cursor
-        await session.send("two")
+        failed_id = await session.send("two")
+        dropped = await session.watch.expect("user_messages_dropped")
+        assert dropped.data["origin_request_ids"] == [failed_id]
+        session.watch.assert_never(
+            "user_message_committed", where={"origin_request_ids": [failed_id]}
+        )
+        assert [m["content"] for m in (await session.get())["messages"]] == [
+            "one",
+            "first",
+        ]
         event = await session.watch.expect(["turn_result", "error"], within=30)
 
         # ① error 收口：报告三连都到达客户端（前端据此复位 working 态）。
@@ -97,3 +91,102 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
     result = await session.chat("three")
     assert result.data["subtype"] == "success", result.data
     assert result.data["result"] == "recovered", result.data
+    assert [m["content"] for m in probe.history(session).messages()] == [
+        "one",
+        "first",
+        "three",
+        "recovered",
+    ]
+
+
+@pytest.mark.probe_env(models=[MODEL], hooks=["hooks/*.py"])
+@pytest.mark.asyncio
+async def test_indeterminate_append_refreshes_two_subscribers_and_recovers_after_restart(
+    probe: Probe,
+) -> None:
+    probe.register(MODEL, Turn.of(text="first"), Turn.of(text="recovered"))
+    session = await probe.session(model=MODEL)
+    await session.chat("one")
+    history = session.session_dir / "history.jsonl"
+    hook_dir = probe.env.root / "hooks"
+    hook_dir.mkdir()
+    control = probe.env.root / "fault-enabled"
+    (hook_dir / "fault.py").write_text(
+        f"""
+import os
+from pathlib import Path
+
+history = Path({str(history)!r})
+control = Path({str(control)!r})
+fsync = os.fsync
+ftruncate = os.ftruncate
+
+def affects(fd):
+    if not control.exists():
+        return False
+    target = history.stat()
+    opened = os.fstat(fd)
+    return (target.st_dev, target.st_ino) == (opened.st_dev, opened.st_ino)
+
+def fail_sync(fd):
+    if affects(fd):
+        raise OSError("test history fsync failure")
+    return fsync(fd)
+
+def fail_truncate(fd, size):
+    if affects(fd):
+        raise OSError("test history ftruncate failure")
+    return ftruncate(fd, size)
+
+os.fsync = fail_sync
+os.ftruncate = fail_truncate
+""",
+        encoding="utf-8",
+    )
+    assert (await session.driver.http.request("POST", "/api/system/reload"))["ok"]
+    other = await Driver.connect(probe.env)
+    try:
+        watcher = await other.attach(session.session_id)
+        subscribed = await watcher.watch.expect("sync_session")
+        control.touch()
+        failed_id = await session.send("uncertain input")
+        for subscriber in (session, watcher):
+            await subscriber.watch.expect(
+                "user_message_queued", where={"origin_request_id": failed_id}
+            )
+            error = await subscriber.watch.expect("error")
+            assert (
+                "write outcome unknown, recovery boundary saved"
+                in error.data["message"]
+            )
+            await subscriber.watch.expect("done")
+            reconciled = await subscriber.watch.expect("session_history_refreshed")
+            assert reconciled.data["pending_user_messages"] == []
+            assert reconciled.data["status"] == "idle"
+            assert reconciled.data["messages"] == subscribed.data["messages"]
+            subscriber.watch.assert_never(
+                "user_messages_dropped", where={"origin_request_ids": [failed_id]}
+            )
+        assert b"uncertain input" in history.read_bytes()
+        assert len(probe.requests_for(MODEL)) == 1
+    finally:
+        await other.close()
+
+    await probe.restart_gateway()
+    resumed = await probe.resume(session.session_id)
+    sync = await resumed.watch.expect("sync_session")
+    assert sync.data["messages"] == subscribed.data["messages"]
+    assert sync.data["pending_user_messages"] == []
+    assert b"uncertain input" in history.read_bytes(), (
+        "cold load must leave the bytes alone"
+    )
+    control.unlink()
+    assert (await resumed.chat("three")).data["result"] == "recovered"
+    assert probe.context(MODEL, 1).texts("user") == ["one", "three"]
+    assert b"uncertain input" not in history.read_bytes()
+    assert [m["content"] for m in probe.history(resumed).messages()] == [
+        "one",
+        "first",
+        "three",
+        "recovered",
+    ]

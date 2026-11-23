@@ -368,14 +368,9 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
 | pending 入队时的内容定格 | `ChatView::push_pending`（`ui/chat_view/model.rs`） |
 | 提交时把本机字节喂给图片 lane（pending 立刻有图） | `App::submit_message`（`app/commands.rs`） |
 
-**已知边界（合并轮次下的号码漂移）**：后端在队列 / steer 窗口里把多份提交合并成**一条**历史记录
-（正文拼接、media 按提交序 concat）时，活体视图按「每份提交各自从 1 编号」渲染（两个 pending 气泡各一份
-`[Image #1 …]`），resume 后重放同一条记录给的是「消息内序号」（`[Image #1 …]`、`[Image #2 …]`）——
-同一段内容重启前后长得不一样。纯展示、链上无数据影响（号码不是寻址键），登记为已知边界，
-不为对齐而重编号。
+**消息提交与编号**。本地提交立即出现在待处理区，其他端的输入随 `user_message_queued` 到达。网关合并同一批的正文和媒体后，`user_message_committed` 按请求 ID 移除对应待处理项，并用最终消息 UUID 和媒体列表创建一个历史气泡。待处理气泡各自从 `#1` 编号，提交气泡与历史重放统一按批次合并后的媒体顺序编号。连接旧网关时，本地气泡由 `user_message_accepted` 逐条提升，旧版直播的编号按原提交保留。
 
-**三条路径一份内容**：本客户端发出去的消息（pending → `promote` 原样搬 body，编码缓存因此不失效）、
-重连 / resume 的重放、以及纯图消息（正文为空）——都是 `UserMessageBody` + 同一份 `render_body`。
+本地与远端输入、提交与重放都用 `UserMessageBody` 和 `render_body`。
 无 media 的消息**恒等**（渲染结果就是正文），这是「与从前逐字节一致」的落点；坏掉的媒体条目只花掉一行
 标签，不花掉整条消息。正文已经以 `\n` 收尾时不再补行——图块 / 标签接在下一行行首（别的入口写进历史的
 尾换行不该在 resume 时露出一个空行；TUI 自己的提交路径先 `trim()`，走不到这一支）。
@@ -384,17 +379,16 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
 
 ## 发送失败 / 被拒：把内容还给草稿
 
-草稿在提交那一刻就清了，内容只在 `pending` 队列里；所以**每一条失败路径都要把内容放回去**，否则用户
-刚写的字与刚贴的图就没了。`pending` 条目因此携带**提交产物原件**（`Submission { content, images, media }`，
-`ChatView::push_pending`），失败时 `ChatView::take_pending` 出队并交回原件，`App::restore_failed_send`
-写回 composer + warning toast：
+提交时清空草稿。本地待处理项和后台任务保留 `Submission`，用 `App::restore_failed_send` 恢复确定未发出的正文与图片。切会话或重连期间，提交会等待目标会话的 `SyncSession`，草稿仍可编辑。订阅确认后最多等待 8 秒。快照超时后，TUI 进入目标会话的直播视图。重组或帧大小超限时，TUI 重连并仅订阅该会话的直播。`/sync` 可重试完整回放。
 
 | 失败路径 | 触发点 | 行为 |
 |---|---|---|
-| 网关断连（transport 为 None） | `runner::dispatch_send_message` 的本地分支 | 不上传不发送 → 回填 + `Not sent — gateway disconnected; draft restored` |
-| 上传失败 | 后台任务（`runner::deliver_user_message`，`upload_media` 出错） | 整条不发（**不发送半截**：少一张图的引用列表会被当成完整输入）→ 回执 → 回填 + `Image upload failed: …; draft restored` |
-| WS 发送失败 | 同上 | 回执 → 回填 + `Send failed: …; draft restored` |
-| **服务端拒绝** | `WingEvent::Error` 携带的 `request_id` 命中本地 pending（网关对失败的 `ClientRequest` 帧回填客户端的 `request_id`） | 取回 + 回填 + toast；条目**已出队**，随后 `done` 的兜底提升绝不把它当「已发送」 |
+| 网关断连 | 提交时已经断开 | 恢复草稿，并提示 `Not sent — gateway disconnected` |
+| 切换或重连 | 目标会话的快照尚未应用 | 保留草稿，并提示 `Waiting for session sync` |
+| 上传失败 | `upload_media` 失败 | 终止整条发送，恢复草稿并提示原因 |
+| WS 写入明确未发生 | 写任务已关闭或拒绝写入该请求 | 按请求 ID 恢复草稿 |
+| WS 送达状态未知 | 写入前后失去连接，尚未观察到网关确认 | 按会话保留原文和图片，收到关联事件后结算。`/recover` 可手动取回最近一条原稿 |
+| 服务端拒绝 | 错误帧的 `request_id` 对应本地待处理输入 | 恢复草稿并提示原因 |
 
 **后台发送（慢链路）**：逐张上传 + WS 发送跑在**后台任务**里（`runner::spawn_send_message`），
 事件循环一步不等网络——慢链路（远程网关 / SSH 隧道）上 N 张图 = N 个完整往返，内联 await 会把 UI 冻住
@@ -411,11 +405,7 @@ struck-through 的 cell，因为那内容没有回到草稿）。空草稿走 `s
 `insert_image` 重新入册：号码按 composer 的既有契约走——**空草稿从头计，草稿里已有图片 chip 时从图片号码
 之后续号**（长文本 chip 不算：两套号码互不干扰；号码是草稿内的身份，不是计数）。
 
-**关联不到 pending 的 `error` 什么都不做**：turn 级失败（LLM 报错等）的 `request_id` 是后端新生成的
-uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到任何条目，行为与从前逐字相同。同类边界还有
-**重连 / 切会话**：`SyncSession` 到达时 `chat.clear()` 连 pending 一起清（既有行为），若失败回调
-恰好落在其后，`take_pending` 取不回内容——此时只提示原因（toast **不带** `draft restored`），
-不假装回填。
+同会话重连后，晚到的明确发送失败回执仍可恢复原草稿。切换会话或清空视图后，旧发送回执只显示提示。轮次错误沿既有错误事件收口。手动取回的输入由用户决定何时再次发送。
 
 ## 真机验收清单（图片粘贴链路，最终版）
 
@@ -441,15 +431,11 @@ uuid，旧网关的拒绝帧同样没有客户端 id——两者都匹配不到�
    模型收到图（让它描述图片内容 / 读图上的文字）。
 5. 多张：一次消息带 2–3 张，模型按提交顺序提到它们；`/clear` + 图 → 见到
    `Image dropped: /clear takes no image` 的 info toast。
-6. 发送后 `resume`（`/session` 切走再切回，或重启 TUI）：历史里那条消息仍带 `[Image #1 …]` 标签行，
-   **号码与 pending 时一致**（消息内 1-based）。**例外**：排队期间被后端 batch 合并的多条消息在历史里
-   是**一条**（`run_turn` 的 drain-and-merge），标签行按合并后的消息重排（`#1..#N` 覆盖 batch 内的全部
-   图片）——live 的每个 pending 气泡各自从 #1 数，合并行不会。
+6. 发送后 `resume`（`/session` 切走再切回，或重启 TUI），历史中已提交的图片数量、顺序和气泡内编号与直播一致。处于待处理状态的输入随快照恢复，提交后按最终批次编号。
 
 **C. 失败与回填（07）**
 
-7. 断开网关（`wing stop` 或杀掉进程）后 `Enter`：warning toast `Not sent — gateway disconnected; draft restored`，
-   文本与图片 chip **都在草稿里**（图片可再删）。
+7. 断开网关（`wing stop` 或杀掉进程）后按 `Enter`，确认文本与图片 chip 仍在草稿。终端会显示断连提示，或提示等待目标会话的同步快照。
 8. 上传失败：把**网关**的 `images.max_bytes`（不属于 TUI 配置，默认 4.5 MiB）调到比压缩产物小
    （如 `1024`，前端 `paste.image.max_bytes` 保持默认）再粘一张截图 → 上传 400：整条不发（无半截消息），
    内容回填 + `Image upload failed: …; draft restored`。

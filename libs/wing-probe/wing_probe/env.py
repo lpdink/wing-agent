@@ -1016,8 +1016,12 @@ class ProbeEnv:
         """
         if self.config_text is not None:
             return self.config_text
+        protocol = (self.provider_extra or {}).get("protocol")
+        provider_url = (
+            self.provider.url if protocol == "anthropic" else self.provider.base_url
+        )
         return render_config_yaml(
-            provider_base_url=self.provider.base_url,
+            provider_base_url=provider_url,
             gateway_port=port,
             model=self.model,
             models=self.models,

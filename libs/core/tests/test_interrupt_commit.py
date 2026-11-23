@@ -83,9 +83,7 @@ def _usage() -> LLMUsage:
 
 
 def _start_turn(agent: WingAgent, content: str = "go") -> None:
-    agent._inbox._queue.put_nowait(
-        Inbound(message=Message(role="user", content=content))
-    )
+    agent._inbox._enqueue(Inbound(message=Message(role="user", content=content)))
 
 
 def _result_emitted(events: list[Any], tool_call_id: str) -> bool:

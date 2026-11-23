@@ -12,10 +12,12 @@ TrackedList — 链拓扑引擎，UUID + parentUuid 链模型。
 - 始终以类型化对象工作，存储层传输 raw dict（ts 由本类注入）
 - 内存中维护 full chain map（_all_items），find/trace_chain 从内存读取
 
-已知问题：
-1. 并发不安全。
-2. compact 的 append_detached + set_tip 之间存在崩溃窗口（见 ContextManager
-   中的 TODO(crash-safety)）。彻底修复需要 MessageLog 支持批量原子切换 tip。
+写入与恢复：
+- 写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
+  写入成功后才更新内存并切换 tip。
+- 文件日志追加失败会尝试回截。若回截也失败，存储只暴露确认过的前缀，并尽力记录
+  恢复偏移供重启读取。进程在记录偏移之前退出，或文件系统无法确认写入恢复偏移时，
+  重启可能读到批次的完整前缀。JSONL 批次本身没有跨崩溃的提交标志。
 """
 
 from __future__ import annotations
@@ -70,16 +72,17 @@ class TrackedList(Generic[T]):
                 f"expected ChainNode (Message or WingEvent), got {type(item).__name__}"
             )
 
-    def _ensure_type(self, items: list[T]) -> None:
+    def _prepare_append(self, items: list[T]) -> None:
         """检查 ChainNode 家族约束，同时填充 uuid/parentUuid。"""
+        parent_uuid = self._last_uuid
         for it in items:
             self._require_node(it)
             if it.uuid is None:
                 it.uuid = str(uuid_mod.uuid4())
             if it.parent_uuid is None:
-                it.parent_uuid = self._last_uuid
+                it.parent_uuid = parent_uuid
             if it.uuid:
-                self._last_uuid = it.uuid
+                parent_uuid = it.uuid
 
     def _check_type(self, items: list[T]) -> None:
         """检查 ChainNode 家族约束（detached 场景，不填充拓扑字段）。"""
@@ -206,32 +209,33 @@ class TrackedList(Generic[T]):
 
     def append(self, item: T) -> None:
         """追加元素。填充 uuid/parentUuid，写日志。"""
-        self._ensure_type([item])
-        self._data.append(item)
-        self._last_uuid = item.uuid
-        self._persist_append([item])
-        self._update_memory(item)
+        self.extend([item])
 
     def extend(self, items: Union[Iterator[T], List[T]]) -> None:
         """批量追加多条消息。每条填充 uuid/parentUuid，写日志。"""
         lst = list(items)
-        self._ensure_type(lst)
+        self._prepare_append(lst)
+        self._persist_append(lst)
         self._data.extend(lst)
         for item in lst:
             self._update_memory(item)
             self._last_uuid = item.uuid
-        self._persist_append(lst)
 
     def append_detached(self, item: T) -> None:
         """追加消息，但不自动填充 uuid/parentUuid。
 
         调用方已自行设置好拓扑关系时使用（compact/rewind 场景）。
         """
-        self._check_type([item])
-        self._data.append(item)
-        self._last_uuid = item.uuid
-        self._persist_append([item])
-        self._update_memory(item)
+        self.extend_detached([item])
+
+    def extend_detached(self, items: list[T]) -> None:
+        """Append prelinked nodes as one log batch."""
+        self._check_type(items)
+        self._persist_append(items)
+        self._data.extend(items)
+        for item in items:
+            self._last_uuid = item.uuid
+            self._update_memory(item)
 
     def set_tip(self, uuid: str) -> None:
         """将活跃链末尾切换到指定 uuid。

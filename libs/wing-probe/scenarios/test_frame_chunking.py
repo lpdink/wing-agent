@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import pytest
 
-from wing_probe import ChunkEnvelope, Frame, Probe, Turn, parse_envelope
+from wing_probe import ChunkEnvelope, Driver, Frame, Probe, Turn, parse_envelope
+from wing_probe.driver.ws import ChunkLimits
 
 MODEL = "probe/frame-chunking"
 
@@ -134,3 +135,50 @@ async def test_oversized_event_is_chunked_and_reassembled(probe: Probe) -> None:
     ]
     assert len(assistant) == 1, probe.history(session).messages()
     assert assistant[0]["content"] == LONG_TEXT, len(assistant[0]["content"])
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.timeout(45)
+@pytest.mark.asyncio
+async def test_oversized_replay_can_be_skipped_on_reconnect(probe: Probe) -> None:
+    probe.register(MODEL, Turn.of(text=LONG_TEXT, chunk=SSE_CHUNK_CHARS))
+    session = await probe.session(model=MODEL)
+    await session.chat("write a long answer", within=30)
+    limits = ChunkLimits(max_buffered_bytes=SOFT_LIMIT_BYTES)
+
+    original = await Driver.connect(probe.env, limits=limits)
+    try:
+        await original.attach(session.session_id)
+        assert await original.websocket.wait_closed(timeout=10)
+        assert "chunk reassembly buffer exceeded" in (
+            original.websocket.close_reason or ""
+        )
+    finally:
+        await original.close()
+
+    reconnected = await Driver.connect(probe.env, limits=limits)
+    try:
+        live = await reconnected.attach(session.session_id, subscribe=False)
+        reply = await reconnected.http.request(
+            "POST",
+            "/api/session/subscribe",
+            body={"session_id": session.session_id, "replay": False},
+            headers={"X-Client-Id": reconnected.client_id},
+        )
+        assert reply == {"ok": True}
+        await live.watch.expect("session_init")
+        await live.watch.expect("context_stats")
+
+        await session.driver.http.request(
+            "POST",
+            "/api/session/update",
+            body={"session_id": session.session_id, "title": "Live after reconnect"},
+        )
+        event = await live.watch.expect("session_state_changed")
+        assert event.data["title"] == "Live after reconnect"
+        assert event.data["session_id"] == session.session_id
+        live.watch.assert_never("sync_session")
+        assert not any(frame.chunk for frame in reconnected.frames.frames)
+        assert not reconnected.websocket.closed
+    finally:
+        await reconnected.close()

@@ -73,6 +73,18 @@ static TUI_ONLY_COMMANDS: LazyLock<Vec<CommandInfo>> = LazyLock::new(|| {
             params: "[N]".into(),
         },
         CommandInfo {
+            name: "recover".into(),
+            aliases: vec![],
+            description: "Restore the last submission with uncertain delivery".into(),
+            params: String::new(),
+        },
+        CommandInfo {
+            name: "sync".into(),
+            aliases: vec![],
+            description: "Request the current session history again".into(),
+            params: String::new(),
+        },
+        CommandInfo {
             name: "tips".into(),
             aliases: vec![],
             description: "List every startup tip".into(),

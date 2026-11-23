@@ -25,7 +25,7 @@ from wing.config import (
     resolve_model_capabilities,
     resolve_model_display_name,
 )
-from wing.event import AskEvent, NoticeEvent, WingEvent
+from wing.event import AskEvent, InterruptedEvent, NoticeEvent, WingEvent
 from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
 from wing.provider.pool import get_provider
@@ -33,11 +33,12 @@ from wing.schema import CacheProbe, MediaRef, Message, Tool
 
 from .diagnostics import _worker_frames
 from .event_sink import AgentEventSink
-from .inbox import Inbox
+from .inbox import Inbox, InputRequestIds
 from .react_loop import ReActLoop
 from .tool_executor import ToolExecutor, _current_tool_call_id
 
 if TYPE_CHECKING:
+    from wing.event import PendingUserMessage
     from wing.media import MediaAccess
 
 
@@ -98,6 +99,7 @@ class WingAgent:
         max_turns: int | None = None,
         yolo: bool | None = None,
         media: MediaAccess | None = None,
+        input_request_ids: InputRequestIds | None = None,
     ) -> None:
         self.model = model
         self._provider_name = provider_name
@@ -115,7 +117,7 @@ class WingAgent:
         self._reasoning_effort: str | None = None
 
         # ── 内部部件组装 ──
-        self._inbox = Inbox()
+        self._inbox = Inbox(input_request_ids)
         self._sink = AgentEventSink(
             session_id=self.session_id,
             append_event=context_manager.append_event,
@@ -254,9 +256,23 @@ class WingAgent:
     # ── 对外接口 ──
 
     @property
+    def input_request_ids(self) -> InputRequestIds:
+        return self._inbox.input_request_ids
+
+    def require_input_id_available(self, request_id: str | None) -> None:
+        self.input_request_ids.require_available(request_id)
+
+    @property
     def has_pending_input(self) -> bool:
         """inbox 里是否有待处理输入（已投递、worker 尚未取走）。"""
         return self._inbox.has_pending
+
+    def pending_user_messages(self) -> list[PendingUserMessage]:
+        return self._loop.pending_user_messages()
+
+    @property
+    def preparing_input(self) -> bool:
+        return self._loop.preparing_input
 
     @property
     def tools(self) -> list[Tool]:
@@ -443,7 +459,14 @@ class WingAgent:
         media: list[MediaRef] | None = None,
     ) -> None:
         """接收用户消息或 feedback。media 非空时消息携带媒体引用（字节在存储）。"""
-        await self._inbox.post(content, request_id, role, tool_call_id, media=media)
+        if self._closing:
+            raise SessionBusyError("session is replacing or shutting down its agent")
+        item = await self._inbox.post(
+            content, request_id, role, tool_call_id, media=media
+        )
+        pending = item.pending_user_message() if item is not None else None
+        if pending is not None:
+            self._sink.user_message_queued(pending)
 
     @property
     def compacting(self) -> bool:
@@ -554,9 +577,9 @@ class WingAgent:
         被 interrupt 复活。
 
         Returns:
-            被放弃的积压输入的 `request_id` 列表（打断时刻已排队、尚未被消费）。调用方（runtime）
-            把它带进 `InterruptedEvent`——前端据此只把真正被丢弃的消息标为 discarded，不误伤锁等待
-            期间新到的消息。
+            被放弃的准备批次及打断入口处积压输入的 `request_id`。Runtime 将它们带入
+            `InterruptedEvent`。准备批次另发 `user_messages_dropped`，旧客户端可通过
+            `InterruptedEvent` 一次清理。
 
         正常返回（含阶梯耗尽的**降级**路径——那时 `worker_stopped=False`、前面另有 ERROR + notice）
         必有且**仅**一条 INFO（`Agent interrupt complete: …`，与 `shutdown()` 的
@@ -567,7 +590,9 @@ class WingAgent:
         """
         started = time.monotonic()
         self._inbox.cancel_all_waiters()
-        dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
+        dropped = [
+            b.request_id for b in self._inbox.clear() if b.request_id is not None
+        ]
         # 手动压缩是会话级独占操作（持有 inbox 取出口闸门）：积压已在入口清掉（不把
         # 锁/取消等待期间新到的消息一起吞掉），这里再收掉在飞的压缩。取消不写链。
         await self._cancel_compaction()
@@ -577,6 +602,7 @@ class WingAgent:
             self._fire_interrupt_hooks()
 
             old = self._worker
+            preparing_ids = self._loop.preparing_request_ids()
             try:
                 stopped = await self._stop_worker(old)
             except asyncio.CancelledError:
@@ -584,6 +610,8 @@ class WingAgent:
                 # 吞掉，并按 worker 的实际状态决定后续。
                 stopped = old.done()
             if stopped:
+                if old.cancelled():
+                    dropped[:0] = preparing_ids
                 # 终局续期可能已抢先重建（worker 在等待期间正好死亡），
                 # shutdown 也可能已置位 _closing——只在还是旧 worker 且未关闭
                 # 时重建，避免出现第二个消费者 / 复活已关闭的 agent。
@@ -602,7 +630,7 @@ class WingAgent:
         )
         return dropped
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, notify: bool = False) -> None:
         """显式关闭 Agent：取消阶梯收口，不重建 worker。
 
         收口与 interrupt 共用同一阶梯（有界）：worker 不响应取消时打 ERROR
@@ -612,20 +640,25 @@ class WingAgent:
         name，没有任何 client 所有权要终结。
         """
         self._closing = True
+        dropped = [
+            b.request_id for b in self._inbox.clear() if b.request_id is not None
+        ]
         # 在飞的手动压缩同样要收口：它持有取出口闸门，且会在拆解后的链上写。
         await self._cancel_compaction()
-        # 清积压留在锁内无妨：shutdown 是终局，锁等待期间到达的输入注定无人
-        # 消费（`_closing` 已挡住一切重建）——不存在 interrupt 的"吞消息"语义。
         async with self._interrupt_lock:
             self._fire_interrupt_hooks()
             self._inbox.cancel_all_waiters()
-            self._inbox.clear()
-
+            preparing_ids = self._loop.preparing_request_ids()
             worker = self._worker
             try:
                 stopped = await self._stop_worker(worker, notify=False)
             except asyncio.CancelledError:
                 stopped = worker.done()
+        if notify:
+            if worker.cancelled():
+                dropped[:0] = preparing_ids
+            with self._sink.best_effort():
+                self._sink.emit(InterruptedEvent(dropped_request_ids=dropped))
         log.info(
             f"Agent shutdown complete: session={self.session_id} "
             f"worker_stopped={stopped}"

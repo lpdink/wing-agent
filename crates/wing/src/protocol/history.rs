@@ -11,7 +11,7 @@
 //! fields default, `null` optional fields count as absent, unknown fields are
 //! ignored (forward tolerant), and a payload that is not a Message projection
 //! fails to decode — callers skip it. One field goes further on purpose:
-//! malformed `media` entries never fail the record (see [`media_refs`]).
+//! malformed `media` entries never fail the record (see [`super::media::user_media_refs`]).
 //!
 //! Decode-only on purpose: serializing a mirror would drop unknown fields and
 //! change key order, which would break `wing tail --json --type all` (raw
@@ -74,27 +74,11 @@ pub struct SessionMessage {
     #[serde(default)]
     pub tool_call_id: Option<String>,
     /// The pictures the message carries (`serialize_message` projects
-    /// `Message.media`). Always a list — see [`media_refs`] for the decoding
+    /// `Message.media`). Always a list — see [`super::media::user_media_refs`] for the decoding
     /// rules (absent / `null` / a malformed entry all degrade to "fewer
     /// pictures", never to a dropped record).
-    #[serde(default, deserialize_with = "media_refs")]
+    #[serde(default, deserialize_with = "super::media::user_media_refs")]
     pub media: Vec<MediaRef>,
-}
-
-/// Decode the `media` field **without ever failing the record**
-/// (see [`super::media::tolerant_media_array`]).
-///
-/// The pictures are a rendering adornment: a malformed entry must cost one
-/// label line, not the whole message (the backend's model layer is tolerant
-/// for the same reason — a corrupt history record must not break the load).
-/// Absent (`#[serde(default)]`), `null` and a non-array value all mean "no
-/// pictures"; a bad entry inside the array is skipped with a warning, the rest
-/// are kept. Unlike `tool_media`, a non-array value is itself worth a warning.
-fn media_refs<'de, D>(deserializer: D) -> Result<Vec<MediaRef>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    super::media::tolerant_media_array(deserializer, "history media", true)
 }
 
 impl SessionMessage {

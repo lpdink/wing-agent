@@ -33,11 +33,11 @@ from wing.event import (
     SessionInitEvent,
     SessionStateChangedEvent,
     SettingsChangedEvent,
-    SyncSessionEvent,
     WingEvent,
 )
 from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
+from wing.common.utils import validate_request_id
 from wing.context import CacheLedger, empty_report
 from wing.metrics import usage_report as build_usage_report
 from wing.event_bus import event_bus
@@ -316,6 +316,8 @@ class WingRuntime:
         media: list[MediaRef] | None = None,
     ) -> None:
         """唯一入站入口。设置 RequestContext，try/finally 确保恢复。"""
+        if request_id is not None:
+            validate_request_id(request_id)
         token = set_request_context(
             request_id=request_id,
             session_id=session_id,
@@ -619,7 +621,9 @@ class WingRuntime:
     # 订阅管理
     # ============================================================
 
-    def subscribe(self, client_id: str, session_id: str) -> None:
+    def subscribe(
+        self, client_id: str, session_id: str, *, replay: bool = True
+    ) -> None:
         """订阅 session 事件。
 
         不在内存的会话按需水合（被逐出的会话重新订阅即恢复直播）。
@@ -629,7 +633,7 @@ class WingRuntime:
         """
         session = self.sm.ensure_loaded(session_id)
         event_bus.route_attach(client_id, session_id)
-        self._push_sync(client_id, session)
+        self._push_sync(client_id, session, replay=replay)
 
     def unsubscribe(self, client_id: str, session_id: str) -> None:
         """取消订阅 session 事件。"""
@@ -754,18 +758,22 @@ class WingRuntime:
         Raises:
             LookupError: session 不存在
             ValueError: target_uuid 无效
-            SessionBusyError: 会话正在压缩
+            SessionBusyError: 会话正在压缩或准备提交用户输入
         """
         session = self._require_session(session_id)
         if session.agent.compacting:
             raise SessionBusyError(
                 "session is compacting; wait for it to finish before rewinding"
             )
+        if target_uuid != "current" and session.agent.preparing_input:
+            raise SessionBusyError(
+                "session is preparing user input; wait or interrupt before rewinding"
+            )
         cm = session.agent.context_manager
 
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)
-        self._emit_session_event(self._sync_session_event(session, draft=draft))
+        self._emit_session_event(session.sync_event(draft=draft))
 
         targets = cm.get_branch_targets()
         self._emit_session_event(
@@ -1061,71 +1069,15 @@ class WingRuntime:
             )
         )
 
-    def _sync_session_event(
-        self,
-        session: Session,
-        *,
-        draft: str | None = None,
-        target: EventTarget | None = None,
-        include_agent: bool = False,
-    ) -> SyncSessionEvent:
-        """``SyncSessionEvent`` 的唯一装配点（中途订阅与 rewind 共用）。
-
-        四组重放素材（messages → uncommitted → uncommitted_tools → events）的顺序
-        是对外契约：只在这里拼，加第五组素材时订阅快照与 rewind 后的重放不会分叉。
-
-        ``include_agent``：订阅路径额外带 ``agent`` / ``name``——新订阅者拿不到会话
-        元信息，必须随快照下发；rewind 是既有订阅者的增量广播，不带这两项。
-        """
-        from wing.event import wire_dump
-
-        cm = session.context_manager
-        agent = session.agent
-        return SyncSessionEvent(
-            session_id=session.session_id,
-            messages=session.serialize_messages(),
-            uncommitted=agent.uncommitted_message(),
-            uncommitted_tools=agent.uncommitted_tools(),
-            events=[
-                wire_dump(e)
-                for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())
-            ],
-            status=session.status,
-            turn_started_at=(
-                agent.turn_started_at.isoformat() if agent.turn_started_at else None
-            ),
-            agent=session.to_agent_info() if include_agent else None,
-            name=session.session_name if include_agent else None,
-            draft=draft,
-            usage=session.usage,
-            target=target,
-        )
-
-    def _push_sync(
-        self, client_id: str, session: Session, draft: str | None = None
-    ) -> None:
-        """向指定 client 推送 SyncSessionEvent + SessionInitEvent + ContextStatsEvent。
-
-        SyncSession 携带四组重放素材：messages（已提交 Message 投影）、
-        uncommitted（单个未提交 assistant Message 投影）、uncommitted_tools
-        （未终结 tool 调用的原始 args 片段）、events（活跃链事实事件，按链序）
-        ——中途订阅者据此获得与从始至终订阅一致的完整视图，组装顺序为
-        messages → uncommitted → uncommitted_tools → events。快照同时是
-        **状态**：status（快照时刻的运行状态，前端据此进入 working——内容投影
-        为空 ≠ 不在跑，一轮 LLM 调用在飞行时两者都空）、turn_started_at
-        （恢复 working 已耗时）与 usage（用量账本基线：快照之后的 live 增量
-        恰好是它未包含的部分，前端据此累计，不与 HTTP 快照混源）。
-        """
+    def _push_sync(self, client_id: str, session: Session, *, replay: bool) -> None:
+        """向指定 client 推送初始化事件、上下文统计和可选的会话快照。"""
         client_target = EventTarget(scope="client", client_ids=[client_id])
 
         cm = session.context_manager
         agent = session.agent
 
-        event_bus.emit(
-            self._sync_session_event(
-                session, draft=draft, target=client_target, include_agent=True
-            )
-        )
+        if replay:
+            event_bus.emit(session.sync_event(target=client_target, include_agent=True))
 
         event_bus.emit(
             SessionInitEvent(

@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::*;
 use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
@@ -489,7 +490,7 @@ fn test_sync_titles_use_the_new_sessions_workdir() {
     let _ = app.drain_intents();
 
     let mut sync = sync_event_with_status(SessionStatus::Idle, vec![], None, vec![], vec![], None);
-    if let WingEvent::SyncSession { agent, .. } = &mut sync {
+    if let WingEvent::SyncSession(SessionSnapshot { agent, .. }) = &mut sync {
         *agent = Some(Box::new(crate::protocol::AgentInfo {
             model_name: "test-model".into(),
             model_id: None,
@@ -567,9 +568,9 @@ fn sync_event_with_agent(
     messages: Vec<serde_json::Value>,
 ) -> WingEvent {
     let mut ev = sync_event(messages, None, vec![], vec![], None);
-    if let WingEvent::SyncSession {
+    if let WingEvent::SyncSession(SessionSnapshot {
         agent: agent_slot, ..
-    } = &mut ev
+    }) = &mut ev
     {
         *agent_slot = agent.map(Box::new);
     }
@@ -1589,4 +1590,526 @@ fn test_reasoning_freezes_on_turn_end_and_interrupt() {
         meta: event_meta(),
     });
     assert_eq!(thinking_active(&app), Some(false), "打断定格");
+}
+
+fn user_input_event(kind: &str, mut frame: serde_json::Value) -> WingEvent {
+    use serde_json::json;
+
+    frame["type"] = json!(kind);
+    frame["created_at"] = json!("2026-01-01T00:00:00Z");
+    frame["request_id"] = json!("event-request");
+    frame
+        .as_object_mut()
+        .unwrap()
+        .entry("session_id")
+        .or_insert(json!("test-session"));
+    let event: WingEvent = serde_json::from_value(frame).expect("valid gateway frame");
+    assert_eq!(event.event_type(), kind);
+    assert_eq!(event.meta().unwrap().request_id, "event-request");
+    event
+}
+
+fn user_input_snapshot(messages: serde_json::Value, pending: serde_json::Value) -> WingEvent {
+    user_input_event(
+        "sync_session",
+        serde_json::json!({
+            "status": "working", "messages": messages, "pending_user_messages": pending
+        }),
+    )
+}
+
+#[test]
+fn identical_local_and_remote_inputs_reconcile_by_request_id() {
+    use crate::ui::input_area::ImagePayload;
+    use serde_json::json;
+
+    for content in ["same text with image", ""] {
+        let mut sender = test_app();
+        let mut subscriber = test_app();
+        let snapshot = user_input_snapshot(json!([]), json!([]));
+        let picture = crate::util::image_compress::CompressedImage {
+            bytes: vec![0xFF; 16],
+            width: 8,
+            height: 8,
+        };
+        for app in [&mut sender, &mut subscriber] {
+            app.handle_event(snapshot.clone());
+            assert!(app.submit_message(SubmitPayload {
+                text: content.into(),
+                images: vec![ImagePayload {
+                    image: picture.clone(),
+                    label: String::new()
+                }],
+            }));
+        }
+        let sender_id = sender.chat.pending[0].request_id.clone();
+        let subscriber_id = subscriber.chat.pending[0].request_id.clone();
+        assert_ne!(sender_id, subscriber_id);
+        let mut media = crate::ui::chat_view::media::predicted_media(&picture);
+        media.name = Some("server.jpg".into());
+        for id in [&sender_id, &subscriber_id] {
+            let frame = user_input_event(
+                "user_message_queued",
+                json!({
+                    "origin_request_id": id, "content": content, "media": [media]
+                }),
+            );
+            sender.handle_event(frame.clone());
+            subscriber.handle_event(frame);
+        }
+        for app in [&mut sender, &mut subscriber] {
+            let ids: Vec<_> = app.chat.pending.iter().map(|p| &p.request_id).collect();
+            assert_eq!(ids, [&sender_id, &subscriber_id]);
+            for pending in &app.chat.pending {
+                assert!(
+                    matches!(pending.cell.cell(), ChatCell::PendingUserMessage(body)
+                    if body.text == content && body.media.as_slice() == std::slice::from_ref(&media))
+                );
+            }
+            app.handle_event(accepted_event(&sender_id));
+            app.handle_event(WingEvent::Done { meta: event_meta() });
+            assert_eq!(app.chat.pending_len(), 2);
+            assert!(app.chat.cells.is_empty());
+            assert!(!app.turn.working);
+        }
+
+        let final_text = if content.is_empty() {
+            ""
+        } else {
+            "expanded by the hook"
+        };
+        let commit = user_input_event(
+            "user_message_committed",
+            json!({
+                "message_uuid": "merged-uuid", "origin_request_ids": [sender_id, subscriber_id],
+                "content": final_text, "media": [media, media]
+            }),
+        );
+        sender.handle_event(commit.clone());
+        subscriber.handle_event(commit.clone());
+        sender.handle_event(commit);
+        for app in [&sender, &subscriber] {
+            assert_eq!(app.chat.pending_len(), 0);
+            assert_eq!(app.chat.len(), 1);
+            assert!(
+                matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body)
+                if body.text == final_text && body.media == [media.clone(), media.clone()])
+            );
+        }
+    }
+}
+
+#[test]
+fn a_steer_commit_sits_between_tool_results_and_next_generation() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(json!([]), json!([])));
+    app.handle_event(user_input_event(
+        "user_message_queued",
+        json!({
+            "origin_request_id": "steer", "content": "before hook", "media": []
+        }),
+    ));
+    for call_id in ["call-a", "call-b"] {
+        app.handle_event(WingEvent::ToolCall {
+            tool_name: "Read".into(),
+            tool_args: json!({}),
+            tool_call_id: call_id.into(),
+            meta: event_meta(),
+        });
+    }
+    for (call_id, result) in [("call-b", "result B"), ("call-a", "result A")] {
+        app.handle_event(WingEvent::ToolCallResult {
+            tool_name: "Read".into(),
+            tool_args: json!({}),
+            tool_call_id: call_id.into(),
+            tool_result: result.into(),
+            tool_success: true,
+            tool_media: vec![],
+            model: String::new(),
+            meta: event_meta(),
+        });
+    }
+    app.handle_event(user_input_event("user_message_committed", json!({
+        "message_uuid": "steer-uuid", "origin_request_ids": ["steer"], "content": "steer", "media": []
+    })));
+    app.handle_event(WingEvent::Text {
+        content: "next".into(),
+        meta: event_meta(),
+    });
+
+    assert!(app.turn.working);
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(matches!(app.chat.cells[0].cell(), ChatCell::ToolCall(block)
+        if block.tool_call_id == "call-a" && block.result.as_deref() == Some("result A")));
+    assert!(matches!(app.chat.cells[1].cell(), ChatCell::ToolCall(block)
+        if block.tool_call_id == "call-b" && block.result.as_deref() == Some("result B")));
+    assert!(
+        matches!(app.chat.cells[2].cell(), ChatCell::UserMessage(body) if body.text == "steer")
+    );
+    assert!(matches!(app.chat.cells[3].cell(), ChatCell::AssistantMessage(text) if text == "next"));
+}
+
+#[test]
+fn reconnect_replaces_optimistic_entries_and_dedupes_commits_against_history() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(json!([]), json!([])));
+    assert!(app.submit_message(SubmitPayload::text("lost echo")));
+    let origin = app.chat.pending[0].request_id.clone();
+
+    app.set_connected(false);
+    app.set_connected(true);
+    // The subscription is established but the App has yet to read its snapshot.
+    assert!(app.submit_message(SubmitPayload::text("new optimistic echo")));
+    let new_origin = app.chat.pending[0].request_id.clone();
+    let picture =
+        json!({"id": "a".repeat(64), "mime": "image/png", "bytes": 16, "width": 8, "height": 8});
+    let message = json!({"uuid": "committed", "role": "user", "content": "lost echo"});
+    app.handle_event(user_input_snapshot(
+        json!([message, message]),
+        json!([
+            {"origin_request_id": "pending-picture", "content": "", "media": [picture]},
+            {"origin_request_id": "pending-text", "content": "queued text", "media": []}
+        ]),
+    ));
+    assert_eq!(app.chat.len(), 1);
+    assert_eq!(app.chat.pending_len(), 3);
+    assert!(
+        matches!(app.chat.pending[0].cell.cell(), ChatCell::PendingUserMessage(body)
+        if body.text.is_empty() && body.media.len() == 1 && body.media[0].id == picture["id"])
+    );
+    assert_eq!(app.chat.pending[1].request_id, "pending-text");
+    assert_eq!(app.chat.pending[2].request_id, new_origin);
+    app.handle_event(user_input_event("user_message_committed", json!({
+        "message_uuid": "committed", "origin_request_ids": [origin], "content": "lost echo", "media": []
+    })));
+    assert_eq!(app.chat.len(), 1);
+    assert_eq!(app.chat.pending_len(), 3);
+
+    assert!(app.submit_message(SubmitPayload::text("upload in flight")));
+    let in_flight = app.chat.pending.last().unwrap().request_id.clone();
+    app.handle_event(user_input_snapshot(
+        json!([message]),
+        json!([
+            {"origin_request_id": "pending-text", "content": "queued text", "media": []}
+        ]),
+    ));
+    assert_eq!(app.chat.pending_len(), 3);
+    assert_eq!(app.chat.pending[1].request_id, new_origin);
+    assert_eq!(app.chat.pending[2].request_id, in_flight);
+}
+
+#[test]
+fn specific_drops_leave_inputs_for_the_next_turn_and_switch_resets_sync() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(
+        json!([]),
+        json!([
+            {"origin_request_id": "dropped-batch", "content": "hook failed", "media": []},
+            {"origin_request_id": "dropped-queue", "content": "interrupted", "media": []},
+            {"origin_request_id": "survives", "content": "after interrupt", "media": []}
+        ]),
+    ));
+    app.handle_event(user_input_event(
+        "user_messages_dropped",
+        json!({
+            "origin_request_ids": ["dropped-batch", "unknown"]
+        }),
+    ));
+    assert!(app.turn.working);
+    app.handle_event(WingEvent::Interrupted {
+        dropped_request_ids: Some(vec!["dropped-queue".into()]),
+        meta: event_meta(),
+    });
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_eq!(app.chat.pending_len(), 1);
+    assert_eq!(app.chat.pending[0].request_id, "survives");
+    assert!(
+        matches!(app.chat.cells[0].cell(), ChatCell::DiscardedUserMessage(body) if body.text == "hook failed")
+    );
+    assert!(
+        matches!(app.chat.cells[1].cell(), ChatCell::DiscardedUserMessage(body) if body.text == "interrupted")
+    );
+    app.handle_event(user_input_event("user_message_committed", json!({
+        "message_uuid": "survivor", "origin_request_ids": ["survives"], "content": "after interrupt", "media": []
+    })));
+    app.handle_event(turn_started_event());
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(
+        matches!(app.chat.cells[2].cell(), ChatCell::UserMessage(body) if body.text == "after interrupt")
+    );
+
+    app.await_session_snapshot("old-session".into());
+    app.handle_event(user_input_event(
+        "sync_session",
+        json!({"session_id": "old-session", "status": "idle"}),
+    ));
+    app.handle_event(user_input_event(
+        "user_message_queued",
+        json!({
+            "origin_request_id": "foreign", "content": "other session", "media": []
+        }),
+    ));
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(app.chat.cells.is_empty());
+    assert!(app.submit_message(SubmitPayload::text("legacy fallback")));
+    let mut meta = event_meta();
+    meta.session_id = Some("old-session".into());
+    app.handle_event(WingEvent::Done { meta });
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(
+        matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body) if body.text == "legacy fallback")
+    );
+}
+
+#[test]
+fn an_overflowing_media_ref_preserves_sync_and_attachment_order() {
+    use serde_json::json;
+
+    let picture = |digit: &str, width: u64| {
+        json!({
+            "id": digit.repeat(64), "mime": "image/png", "bytes": 16,
+            "width": width, "height": 8
+        })
+    };
+    let media = json!([
+        picture("b", 16),
+        picture("c", u64::from(u32::MAX) + 1),
+        picture("a", 8)
+    ]);
+    let queued = json!({"origin_request_id": "request", "content": "", "media": media});
+    let history = json!({"uuid": "previous", "role": "user", "content": "previous"});
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(json!([history]), json!([queued])));
+    assert_eq!(app.chat.len(), 1);
+    assert_eq!(app.chat.pending_len(), 1);
+    app.handle_event(user_input_event("user_message_queued", queued));
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_eq!(app.chat.pending_len(), 1);
+    let ChatCell::PendingUserMessage(body) = app.chat.pending[0].cell.cell() else {
+        panic!("pure image input")
+    };
+    let expected_ids = ["b".repeat(64), "a".repeat(64)];
+    assert_eq!(
+        body.media
+            .iter()
+            .map(|picture| &picture.id)
+            .collect::<Vec<_>>(),
+        expected_ids.iter().collect::<Vec<_>>()
+    );
+    let expected = body.clone();
+
+    let commit = user_input_event(
+        "user_message_committed",
+        json!({
+            "message_uuid": "picture", "origin_request_ids": ["request"], "content": "", "media": media
+        }),
+    );
+    app.handle_event(commit.clone());
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(matches!(app.chat.cells[1].cell(), ChatCell::UserMessage(body) if body == &expected));
+
+    app.handle_event(user_input_snapshot(
+        json!([history, {"uuid": "picture", "role": "user", "content": "", "media": media}]),
+        json!([]),
+    ));
+    app.handle_event(commit);
+    assert_eq!(app.chat.len(), 2);
+    assert!(matches!(app.chat.cells[1].cell(), ChatCell::UserMessage(body) if body == &expected));
+}
+
+#[test]
+fn a_remote_tool_result_releases_its_ask_while_other_asks_remain() {
+    use crossterm::event::KeyCode;
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(json!([]), json!([])));
+    for id in ["answered-elsewhere", "still-open"] {
+        app.handle_event(user_input_event(
+            "ask",
+            json!({
+                "tool_call_id": id, "question": "Allow?", "required": true, "choices": ["y", "n"]
+            }),
+        ));
+    }
+    app.await_session_snapshot("test-session".into());
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.ask_panels.len(), 2);
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, AppIntent::SendMessage { .. }))
+    );
+    app.pending_session_snapshot = None;
+
+    app.handle_event(user_input_event(
+        "tool_call_result",
+        json!({
+            "tool_call_id": "answered-elsewhere", "tool_name": "Bash", "tool_args": {},
+            "tool_result": "approved and finished", "tool_success": true
+        }),
+    ));
+    assert!(app.turn.working);
+    assert_eq!(app.ask_panels.len(), 1);
+    assert_eq!(app.ask_panels[0].tool_call_id, "still-open");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.drain_intents().iter().any(|intent| matches!(intent, AppIntent::SendMessage { tool_call_id: Some(id), .. } if id == "still-open")));
+}
+
+#[test]
+fn history_refresh_replays_history_and_the_queue_without_losing_local_echo() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    let stale = json!({"origin_request_id": "stale", "content": "old queue", "media": []});
+    app.handle_event(user_input_snapshot(
+        json!([{"role": "user", "uuid": "old", "content": "old history"}]),
+        json!([stale]),
+    ));
+    assert!(app.submit_message(SubmitPayload::text("local send in flight")));
+    let local = app.chat.pending[1].request_id.clone();
+    let media =
+        json!([{"id": "a".repeat(64), "mime": "image/png", "bytes": 16, "width": 8, "height": 8}]);
+    let refreshed = json!({
+        "status": "working",
+        "messages": [{"role": "user", "uuid": "canonical", "content": "compacted history"}],
+        "pending_user_messages": [{"origin_request_id": "remote-picture", "content": "", "media": media}],
+        "uncommitted": {"role": "assistant", "content": "in progress"}
+    });
+    app.handle_event(user_input_event("session_history_refreshed", refreshed));
+
+    assert!(app.turn.working);
+    assert_eq!(app.chat.len(), 2);
+    assert!(
+        matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body) if body.text == "compacted history")
+    );
+    assert!(
+        matches!(app.chat.cells[1].cell(), ChatCell::AssistantMessage(text) if text == "in progress")
+    );
+    assert_eq!(app.chat.pending_len(), 2);
+    assert_eq!(app.chat.pending[0].request_id, "remote-picture");
+    assert!(
+        matches!(app.chat.pending[0].cell.cell(), ChatCell::PendingUserMessage(body) if body.text.is_empty() && body.media.len() == 1)
+    );
+    assert_eq!(app.chat.pending[1].request_id, local);
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_eq!(app.chat.pending_len(), 2);
+    app.handle_event(user_input_event("user_message_committed", json!({
+        "message_uuid": "canonical", "origin_request_ids": [], "content": "compacted history", "media": []
+    })));
+    assert_eq!(app.chat.len(), 2);
+}
+
+#[test]
+fn history_refresh_cannot_complete_a_pending_subscription() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.await_session_snapshot("target".into());
+    app.handle_event(user_input_event(
+        "session_history_refreshed",
+        json!({
+            "session_id": "target", "status": "idle", "pending_user_messages": []
+        }),
+    ));
+    assert_eq!(app.session_id, "test-session");
+    assert!(!app.user_input_ready());
+    app.handle_event(user_input_event(
+        "sync_session",
+        json!({
+            "session_id": "target", "status": "idle", "pending_user_messages": []
+        }),
+    ));
+    assert_eq!(app.session_id, "target");
+    assert!(app.user_input_ready());
+}
+
+#[test]
+fn precise_gateway_events_clear_uncertain_originals_in_either_order() {
+    use crate::app::intent::{FetchPayload, FetchResult, SendOutcome};
+    use crate::ui::chat_view::Submission;
+    use serde_json::json;
+
+    for (kind, input) in [
+        (
+            "user_message_queued",
+            json!({"origin_request_id": "r", "content": "same text", "media": []}),
+        ),
+        (
+            "user_message_committed",
+            json!({"message_uuid": "m", "origin_request_ids": ["r"], "content": "same text", "media": []}),
+        ),
+        (
+            "user_messages_dropped",
+            json!({"origin_request_ids": ["r"]}),
+        ),
+        ("interrupted", json!({"dropped_request_ids": ["r"]})),
+    ] {
+        for event_first in [false, true] {
+            let mut app = test_app();
+            app.chat
+                .push_pending("r".into(), Submission::text("same text"));
+            app.track_local_send("test-session", "r");
+            let mut foreign = input.clone();
+            foreign["session_id"] = json!("other-session");
+            app.handle_event(user_input_event(kind, foreign));
+            assert_eq!(app.local_sends.len(), 1);
+            if event_first {
+                app.handle_event(user_input_event(kind, input.clone()));
+            }
+            app.handle_fetch_result(FetchResult {
+                session_id: "test-session".into(),
+                payload: FetchPayload::SendFinished {
+                    request_id: "r".into(),
+                    outcome: SendOutcome::Uncertain("write interrupted".into()),
+                },
+            });
+            if !event_first {
+                assert_eq!(app.local_sends.len(), 1);
+                assert!(app.toast.as_ref().unwrap().message.contains("/recover"));
+                app.handle_event(user_input_event(kind, input.clone()));
+            }
+            assert!(app.local_sends.is_empty());
+            assert!(app.try_frontend_command("/recover"));
+            assert!(app.input.is_empty());
+        }
+    }
+}
+
+#[test]
+fn only_exact_pending_snapshot_ids_settle_uncertain_originals() {
+    use crate::app::intent::{FetchPayload, FetchResult, SendOutcome};
+    use crate::ui::chat_view::Submission;
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.chat
+        .push_pending("r".into(), Submission::text("some text"));
+    app.track_local_send("test-session", "r");
+    app.handle_fetch_result(FetchResult {
+        session_id: "test-session".into(),
+        payload: FetchPayload::SendFinished {
+            request_id: "r".into(),
+            outcome: SendOutcome::Uncertain("write interrupted".into()),
+        },
+    });
+    let history = json!([{"role": "user", "uuid": "r", "content": "some text"}]);
+    app.handle_event(user_input_snapshot(
+        history,
+        json!([{"origin_request_id": "other", "media": [], "content": "some text"}]),
+    ));
+    assert_eq!(app.local_sends.len(), 1);
+    assert!(app.input.is_empty());
+    app.handle_event(user_input_snapshot(
+        json!([]),
+        json!([{"origin_request_id": "r", "media": [], "content": "some text"}]),
+    ));
+    assert!(app.local_sends.is_empty());
+    assert!(app.input.is_empty());
 }

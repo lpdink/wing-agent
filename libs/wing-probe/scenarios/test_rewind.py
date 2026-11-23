@@ -103,7 +103,11 @@ async def test_middle_rewind_chain_shape_and_draft(probe: Probe) -> None:
     assert copy["role"] == source["role"] == "assistant", copy
     assert copy["content"] == source["content"] == "reply one", copy
     assert copy["parent_uuid"] == source["parent_uuid"], copy  # 祖父
-    assert copy["parent_uuid"] == messages[0]["uuid"], copy
+    parent = before.by_uuid[copy["parent_uuid"]]
+    assert parent["type"] == "turn_started", parent
+    accepted = before.by_uuid[parent["parent_uuid"]]
+    assert accepted["type"] == "user_message_accepted", accepted
+    assert accepted["parent_uuid"] == messages[0]["uuid"], accepted
 
     # 复制行**不复制** provider 审计字段（usage / stop_reason）——实现的上下文
     # 事实口径（`HistoryView.message_semantics` 的比较口径同源）。先确认源行
@@ -210,9 +214,7 @@ async def test_rewind_skips_event_ancestors(probe: Probe) -> None:
     WHEN 目标消息的直接 parent 是事件记录（如 diff / ask）
     THEN 断言通过：复制源取到最近 Message 而非事件节点；链形状断言通过。
 
-    构造：第二轮的用户消息 parent 是 ``turn_started`` / ``user_message_accepted`` /
-    ``turn_result`` / ``done`` 这类事实事件节点链，最近 Message 祖先才是上一条
-    assistant 回复——这正是"跳过事件节点回溯"的边界。
+    第二轮用户消息紧随上一轮的 ``done``，最近 Message 祖先是上一条 assistant 回复。
     """
     probe.register(
         EVENT_PARENT_MODEL,
@@ -227,7 +229,7 @@ async def test_rewind_skips_event_ancestors(probe: Probe) -> None:
     target = before.messages()[2]  # 第二轮用户消息 "beta"
     parent = before.by_uuid[target["parent_uuid"]]
     assert is_event(parent), before.describe()
-    assert parent["type"] == "turn_started", parent
+    assert parent["type"] == "done", parent
 
     response = await session.rewind(target["uuid"])
     after = probe.history(session)
@@ -249,7 +251,7 @@ async def test_rewind_skips_event_ancestors(probe: Probe) -> None:
     assert copy["role"] == source["role"] == "assistant", copy
     assert copy["content"] == source["content"] == "reply one", copy
     assert copy["uuid"] != parent["uuid"], "复制行不得复用事件节点身份"
-    assert copy["parent_uuid"] == before.messages()[0]["uuid"], copy
+    assert copy["parent_uuid"] == source["parent_uuid"], copy
     assert [message["content"] for message in after.messages()] == [
         "alpha",
         "reply one",

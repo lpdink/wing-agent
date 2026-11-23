@@ -10,9 +10,7 @@
   （否则前端 pending 卡到 turn end）；
 - **多消息合并**：同一轮 drain 出的多条带图消息合并成**一条** user 消息，media
   顺序 = 消息序 × 消息内序；
-- **steer 阻断（D7）**：工具执行期间到达的 `[纯文本A, 带图B, 纯文本C]` → 只有 A 被
-  steer 注入（note 进工具结果），B/C 连同其后的纯文本一起留在队列，下一轮完整、
-  保序进入；
+- **steer**：工具执行期间到达的文本和图片按入队顺序合并，作为独立 user 消息参加本轮的后续请求；
 - **no_vision 附路径（D6）**：text 模型收到贴图 → 无 image part，占位文本携带对象
   保存路径（`<sessions-root>/<sid>/media/<id>`）；对象仍在（永不删除）；
 - **memory 后端**：`media_path` 恒 None → 降级为"仍在会话中"文案（不报路径）；
@@ -324,7 +322,6 @@ async def test_queued_media_messages_merge_in_order(probe: Probe) -> None:
         VISION_MODEL,
         Turn.of(tool_calls=[ToolCall("Bash", {"command": "sleep 3"})]),
         Turn.of(text="round two"),
-        Turn.of(text="round three"),
     )
     session = await probe.session(model=VISION_MODEL, yolo=True)
     d1, d2, d3 = png(2, 2, tint=0x10), png(2, 2, tint=0x11), png(2, 2, tint=0x12)
@@ -334,20 +331,14 @@ async def test_queued_media_messages_merge_in_order(probe: Probe) -> None:
 
     await session.send("start a slow tool")
     await session.watch.expect("tool_call", within=15)
-    # 工具执行期间两条**带图**消息：第一条阻断 steer，两条一起等下一轮。
+    # 工具执行期间的带图消息一起进入同轮后续请求。
     await session.send("first image message", media=[r1, r2])
     await session.send("second image message", media=[r3])
 
     first = await session.watch.expect("turn_result", within=30)
     assert first.data["subtype"] == "success", first.data
-    round_one = probe.context(VISION_MODEL, 1)
-    wire = json.dumps(round_one.body, ensure_ascii=False)
-    assert "first image message" not in wire, round_one.describe()
-
-    second = await session.watch.expect("turn_result", within=30)
-    assert second.data["subtype"] == "success", second.data
-
-    context = probe.context(VISION_MODEL, 2)
+    assert len(session.watch.events("turn_started")) == 1
+    context = probe.context(VISION_MODEL, 1)
     merged = user_messages(context.body)[-1]
     parts = content_parts(merged)
     assert [part["type"] for part in parts] == [
@@ -369,19 +360,18 @@ async def test_queued_media_messages_merge_in_order(probe: Probe) -> None:
     assert records[-1]["media"] == [r1, r2, r3], records[-1]
 
 
-# ── 场景 4：steer 阻断（D7 红线） ────────────────────────────────
+# ── 场景 4：文本和图片混合 steer ────────────────────────────────
 
 
 @pytest.mark.probe_env(models=[VISION_SPEC])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_steer_stops_at_media_message(probe: Probe) -> None:
-    """`[纯文本A, 带图B, 纯文本C]`：只有 A 被 steer，B/C 下一轮完整保序进入。"""
+async def test_steer_merges_text_before_and_after_media(probe: Probe) -> None:
+    """文本与带图输入一起提交，所有文本保序拼接。"""
     probe.register(
         VISION_MODEL,
         Turn.of(tool_calls=[ToolCall("Bash", {"command": "sleep 3"})]),
         Turn.of(text="round two"),
-        Turn.of(text="round three"),
     )
     session = await probe.session(model=VISION_MODEL, yolo=True)
     data = png(2, 2, tint=0x20)
@@ -396,30 +386,17 @@ async def test_steer_stops_at_media_message(probe: Probe) -> None:
     first = await session.watch.expect("turn_result", within=30)
     assert first.data["subtype"] == "success", first.data
 
-    # 本轮（工具轮）：steer note 只有 A；B/C 都不在本轮请求里。
-    round_one = probe.context(VISION_MODEL, 1)
-    tool_message = [
-        message for message in messages_of(round_one.body) if message["role"] == "tool"
-    ][0]
-    # 工具结果可能被显式缓存模式数组化（末位文本块带 cache_control）——取 part 文本。
-    note_part = content_parts(tool_message)[0]
-    assert note_part["text"].startswith("[User steer note: steer me now]\n"), note_part
-    round_one_wire = json.dumps(round_one.body, ensure_ascii=False)
-    assert "image message" not in round_one_wire, round_one.describe()
-    assert "trailing text" not in round_one_wire, round_one.describe()
-
-    # 下一轮：带图消息与它后面的纯文本一起、按原序进入（一条合并消息）。
-    second = await session.watch.expect("turn_result", within=30)
-    assert second.data["subtype"] == "success", second.data
-
-    context = probe.context(VISION_MODEL, 2)
-    merged = user_messages(context.body)[-1]
-    parts = content_parts(merged)
+    context = probe.context(VISION_MODEL, 1)
+    (tool,) = context.messages_of("tool")
+    (tool_result,) = session.watch.events("tool_call_result")
+    assert tool.content == tool_result.data["tool_result"]
+    assert tool.tool_call_id == tool_result.data["tool_call_id"]
+    parts = content_parts(user_messages(context.body)[-1])
     assert [part["type"] for part in parts] == ["text", "image_url"], parts
-    assert parts[0]["text"] == "image message\ntrailing text", parts
+    assert parts[0]["text"] == "steer me now\nimage message\ntrailing text", parts
     assert image_bytes(parts[1]) == data
+    assert len(session.watch.events("turn_started")) == 1
 
-    # 消费确认的完整顺序与归属：A 随工具轮被消费，B/C 下一轮才被消费。
     accepted = session.watch.events("user_message_accepted")
     assert [
         (event.data["origin_request_id"], event.data["content"]) for event in accepted
@@ -433,7 +410,7 @@ async def test_steer_stops_at_media_message(probe: Probe) -> None:
     view = probe.history(session)
     assert [m["content"] for m in view.messages() if m["role"] == "user"] == [
         "start a slow tool",
-        "image message\ntrailing text",
+        "steer me now\nimage message\ntrailing text",
     ], view.describe()
 
 
@@ -647,3 +624,39 @@ async def test_ghost_media_reference_is_rejected(probe: Probe) -> None:
     assert probe.history(session).messages() == [], probe.history(session).describe()
     session.watch.assert_never("delivered")
     session.watch.assert_never("user_message_accepted")
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC])
+@pytest.mark.asyncio
+async def test_inbound_media_integers_fit_rust_and_javascript(probe: Probe) -> None:
+    probe.register(VISION_MODEL, Turn.of(text="saw image"))
+    session = await probe.session(model=VISION_MODEL)
+    http = session.driver.http
+    ref = (await http.upload_media(session.session_id, png(2, 2, tint=0x19)))["media"]
+    for field, value in (("width", 2**32), ("height", -1), ("bytes", 2**53)):
+        invalid = {**ref, field: value}
+        with pytest.raises(DriverHttpError) as failure:
+            await http.request(
+                "POST",
+                "/api/session/send",
+                body={
+                    "session_id": session.session_id,
+                    "content": "",
+                    "media": [invalid],
+                },
+            )
+        assert failure.value.call.status == 400
+        assert field in (failure.value.call.response or {})["detail"]
+        request_id = await session.send("", media=[invalid])
+        error = await session.watch.expect("error", where={"request_id": request_id})
+        assert field in error.data["message"]
+    session.watch.assert_never(["user_message_queued", "user_message_committed"])
+    assert not probe.requests_for(VISION_MODEL)
+
+    accepted_id = await session.send("", media=[ref])
+    commit = await session.watch.expect(
+        "user_message_committed", where={"origin_request_ids": [accepted_id]}
+    )
+    assert commit.data["content"] == "" and commit.data["media"] == [ref]
+    await session.watch.expect("done")
+    assert (await session.get())["messages"][0]["media"] == [ref]

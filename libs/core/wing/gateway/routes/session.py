@@ -66,6 +66,7 @@ from wing.context import CompactionAborted
 from wing.event import SessionStatus
 from wing.media import file_too_large_message, sniff_image_mime, too_large_message
 from wing.agent import SessionBusyError
+from wing.store import HistoryWriteUncertain
 from wing.request_context import session_context
 from wing.session.tags import validate_tag
 from wing.store.names import validate_file_name
@@ -188,7 +189,7 @@ async def subscribe(
     if x_client_id not in server.clients:
         raise HTTPException(status_code=400, detail="client not connected")
     try:
-        server.runtime.subscribe(x_client_id, body.session_id)
+        server.runtime.subscribe(x_client_id, body.session_id, replay=body.replay)
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     return OkResponse()
@@ -224,7 +225,7 @@ async def send_message(
     request: Request,
 ) -> SendMessageResponse:
     server = get_server(request)
-    request_id = uuid.uuid4().hex
+    request_id = body.request_id if body.request_id is not None else uuid.uuid4().hex
 
     # 被逐出（不在内存）的会话按需水合；磁盘上也没有才 404。
     try:
@@ -240,6 +241,8 @@ async def send_message(
             tool_call_id=body.tool_call_id,
             media=body.media,
         )
+    except SessionBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except InvalidInputError as e:
         # 正文非法（不可编码为 UTF-8）/ 媒体引用不可兑现（幽灵引用 / 非法 id）：
         # 输入问题 → 400，不是 500。
@@ -821,7 +824,6 @@ async def rewind_session(
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
     except SessionBusyError as e:
-        # 409：手动压缩在飞（会话级独占操作）——它与 rewind 的链写入不兼容。
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -861,7 +863,7 @@ async def archive_session(
             changed, detail = server.runtime.unarchive_session(body.session_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="session not found")
-    except RuntimeError as e:
+    except (RuntimeError, HistoryWriteUncertain) as e:
         raise HTTPException(status_code=409, detail=str(e))
     return ArchiveResponse(
         ok=True,

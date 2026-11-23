@@ -237,6 +237,34 @@ class TestReportPathIsUnfailable:
         await agent.shutdown()
 
     @pytest.mark.asyncio
+    async def test_uncertain_user_append_reports_error_without_definite_drop(
+        self, runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from wing.store import HistoryWriteUncertain
+
+        agent = runtime.create_session().agent
+        log = _persist_log(agent)
+        original = log.append
+
+        def guarded(records):
+            if any(record.get("role") == "user" for record in records):
+                raise HistoryWriteUncertain("requires tail recovery")
+            original(records)
+
+        monkeypatch.setattr(log, "append", guarded)
+        events: list[Any] = []
+        event_bus.subscribe(events.append)
+        try:
+            await _run_turn(agent, "uncertain input", "req-uncertain")
+            assert "user_message_queued" in _types(events)
+            assert "error" in _types(events)
+            assert "user_message_committed" not in _types(events)
+            assert "user_messages_dropped" not in _types(events)
+            assert agent.context_manager.get_context_window() == []
+        finally:
+            await agent.shutdown()
+
+    @pytest.mark.asyncio
     async def test_whole_persist_outage_keeps_consuming(
         self, runtime: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -500,7 +528,13 @@ class TestWorkerRenewal:
         with patch.object(agent.model_provider, "generate", _boom_generate):
             late = agent._spawn_worker()  # 关闭之后才终止的消费者（竞态现场）
             agent._worker = late
-            await agent.post("nobody should wake up", request_id="req-closed")
+            from wing.agent import SessionBusyError
+            from wing.agent.inbox import Inbound
+            from wing.schema import Message
+
+            with pytest.raises(SessionBusyError):
+                await agent.post("rejected", request_id="req-closed")
+            agent._inbox._enqueue(Inbound(message=Message(role="user", content="late")))
             await wait_until_async(late.done)
             await _settle()
 

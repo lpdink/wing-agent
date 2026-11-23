@@ -3,7 +3,7 @@
 被守的语义（`agent/inbox.py` + `agent/core.py`）：
 
 - `hold()` 期间 `get()` **不把消息交出去**——消息留在队列里（`has_pending` 为真），
-  压缩结束 `release()` 后按原序交付；hold 边界上已经取到手的条目原样放回队首。
+  压缩结束 `release()` 后按原序交付。
 - 手动压缩是会话级独占操作：非 idle（在跑 turn / 等 ask）/ 有排队输入 / 已有压缩在飞
   / 会话正在关闭，一律拒绝（`SessionBusyError`），不排队等待。
 - 压缩被 interrupt 取消时链零变更（压缩只在最后一个 await 之后写链），且闸门由
@@ -21,7 +21,8 @@ import pytest_asyncio
 
 from _support import wait_until_async
 from wing.agent import SessionBusyError, WingAgent
-from wing.agent.inbox import Inbox
+from wing.agent.inbox import RECENT_INPUT_ID_LIMIT, Inbox
+from wing.common.utils import InvalidInputError
 from wing.schema import LLMResponse, LLMUsage, Message
 
 pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
@@ -48,11 +49,28 @@ async def test_get_blocks_while_held() -> None:
 
 
 @pytest.mark.asyncio
+async def test_committed_ids_are_bounded_and_cleared_queue_ids_are_reusable() -> None:
+    inbox = Inbox()
+    outstanding = "first"
+    await inbox.post("queued", request_id=outstanding)
+    inbox.input_request_ids.remember_committed(
+        [str(i) for i in range(RECENT_INPUT_ID_LIMIT + 1)]
+    )
+    inbox.input_request_ids.require_available("0")
+    with pytest.raises(InvalidInputError):
+        inbox.input_request_ids.require_available("1")
+    with pytest.raises(InvalidInputError):
+        await inbox.post("same ID", request_id=outstanding)
+    assert [item.request_id for item in inbox.clear()] == [outstanding]
+    await inbox.post("reused after clear", request_id=outstanding)
+
+
+@pytest.mark.asyncio
 async def test_hold_after_getter_is_waiting_keeps_order() -> None:
-    """hold 落在「已经挂在 get() 上」的窗口里：取到手的条目要放回队首。"""
+    """hold 落在 get 已经等待的窗口里，待处理输入仍保留原顺序。"""
     inbox = Inbox()
     waiting = asyncio.create_task(inbox.get())
-    await asyncio.sleep(0.02)  # 让它停在 queue.get() 上
+    await asyncio.sleep(0.02)  # 让它等待首条输入
 
     inbox.hold()
     await inbox.post("first")

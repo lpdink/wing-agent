@@ -13,14 +13,15 @@ use tokio::sync::mpsc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SessionUpdate};
+use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SendOutcome, SessionUpdate};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
 use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
-use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
-use crate::protocol::MediaRef;
+use crate::app::transport::{GatewayEndpoint, Recovery};
+use crate::gateway::client::MessageWriteError;
+use crate::protocol::{ClientRequest, MediaRef};
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
@@ -306,7 +307,7 @@ pub async fn execute_intent(
         }
         AppIntent::CreateSession { workspace } => {
             if let Some(t) = transport {
-                let old_session_id = app.session_id.clone();
+                let old_session_id = app.subscription_target().to_owned();
                 let req = wing_api_client::models::CreateSessionRequest {
                     workspace: workspace.clone(),
                     // 血缘（软信号）：TUI 被 agent 拉起时（env 里有
@@ -328,7 +329,7 @@ pub async fn execute_intent(
             session_id: target_id,
         } => {
             if let Some(t) = transport {
-                let old_session_id = app.session_id.clone();
+                let old_session_id = app.subscription_target().to_owned();
                 match t.http.resume_session(&target_id).await {
                     Ok(resp) => {
                         adopt_new_session(app, t, old_session_id, resp.session_id, Switch::Resume)
@@ -339,7 +340,7 @@ pub async fn execute_intent(
             }
         }
         AppIntent::ForkSession { target_uuid } => {
-            if let Some(t) = transport {
+            if let Some(t) = transport.as_ref().filter(|_| app.user_input_ready()) {
                 let old_session_id = app.session_id.clone();
                 match t.http.fork_session(&old_session_id, &target_uuid).await {
                     Ok(resp) => {
@@ -375,7 +376,7 @@ pub async fn execute_intent(
             }
         }
         AppIntent::RewindSession { target_uuid } => {
-            if let Some(t) = transport {
+            if let Some(t) = transport.as_ref().filter(|_| app.user_input_ready()) {
                 match t.http.rewind_session(&app.session_id, &target_uuid).await {
                     Ok(_) => {
                         app.show_toast(Toast::info(
@@ -392,6 +393,7 @@ pub async fn execute_intent(
                 }
             }
         }
+        AppIntent::RefreshSession => request_session_snapshot(app, transport.as_ref()).await,
         AppIntent::ReloadSystem => {
             if let Some(t) = transport {
                 match t.http.reload_system().await {
@@ -631,53 +633,39 @@ pub async fn execute_intent(
     }
 }
 
-/// 一条用户消息的完整发送：带图先把每张上传成引用，再把消息（含引用）交给网关。
-///
-/// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
-/// （真实 stdout），单测造不出来（同 `apply_update_session` 的抽取理由）。
-///
-/// **失败契约**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
-/// 少一张图的引用列表会被当成完整输入）。调用方拿 `Err(reason)` 去把提交产物**还给
-/// 草稿**（后台任务把它包成回执 → `App::restore_failed_send` 从 pending 队列取回文本
-/// 与图片 chip + warning toast）；已经上传成功的图留在存储里（政策：媒体永不删除）。
-///
-/// **返回**：`Ok(())` = 帧已投进 WS 写通道（成功路径不动 pending：条目等后端的
-/// `user_message_accepted` 提升）；`Err(reason)` = 整条没发出去（无连接 / 上传失败 /
-/// WS 写不出去），`reason` 是给 toast 的文案。
-pub(super) async fn deliver_user_message(
+/// Upload every attachment before handing the complete request to the writer.
+async fn deliver_user_message(
     http: &wing_api_client::GatewayClient,
     ws: &crate::gateway::RequestSender,
     message: &mut OutgoingMessage,
-) -> Result<(), String> {
-    // 图片 move 出去（不克隆压缩产物）：回执只需要剩下的两个 id。
+) -> Result<(), MessageWriteError> {
     let media = if message.images.is_empty() {
-        // 纯文本：帧里没有 `media` 键，行为与引入图片之前逐字节相同。
         None
     } else {
         let images = std::mem::take(&mut message.images);
-        match upload_images(http, &message.session_id, images).await {
-            Ok(refs) => Some(refs),
-            Err(e) => {
-                tracing::warn!("image upload failed: {e}");
-                return Err(format!("Image upload failed: {e}"));
-            }
-        }
-    };
-
-    if let Err(e) = ws
-        .send_message(
-            &message.session_id,
-            &message.content,
-            message.tool_call_id.take(),
-            message.request_id.clone(),
-            media,
+        Some(
+            upload_images(http, &message.session_id, images)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "image upload failed");
+                    MessageWriteError::Unsent(format!("Image upload failed: {error}"))
+                })?,
         )
-        .await
-    {
-        tracing::error!("failed to send message: {e}");
-        return Err(format!("Send failed: {e}"));
-    }
-    Ok(())
+    };
+    ws.send_confirmed(ClientRequest {
+        session_id: message.session_id.clone(),
+        content: std::mem::take(&mut message.content),
+        tool_call_id: message.tool_call_id.take(),
+        request_id: message.request_id.clone(),
+        media,
+    })
+    .await
+    .map_err(|error| match error {
+        MessageWriteError::Unsent(reason) => {
+            MessageWriteError::Unsent(format!("Send failed: {reason}"))
+        }
+        other => other,
+    })
 }
 
 /// 一条待发消息的载荷：`SendMessage` 的字段 + 目标会话，总是整体传递（也把下面几个
@@ -728,7 +716,7 @@ fn spawn_fetch<T, F, Fut>(
 
 /// 三个「换会话」意图（新建 / 恢复 / fork）的差别只在文案。
 #[derive(Clone, Copy)]
-enum Switch {
+pub(super) enum Switch {
     Create,
     Resume,
     Fork,
@@ -755,14 +743,18 @@ impl Switch {
 }
 
 /// 换会话成功后的统一收尾：先切订阅，再作废会话缓存（顺序即契约）。
-async fn adopt_new_session(
+pub(super) async fn adopt_new_session(
     app: &mut App,
-    t: &mut Transport,
+    t: &Transport,
     old_session_id: String,
     new_sid: String,
     switch: Switch,
 ) {
-    t.switch_session(&old_session_id, &new_sid).await;
+    if let Err(error) = t.switch_session(&old_session_id, &new_sid).await {
+        report_switch_failure(app, switch, format_args!("{error:#}"));
+        return;
+    }
+    app.await_session_snapshot(new_sid.clone());
     app.invalidate_session_cache();
     // 压缩在飞的是**旧**会话（回执已认不到这个会话），本地标记跟着作废。
     app.finish_compaction();
@@ -772,6 +764,52 @@ async fn adopt_new_session(
         "{}",
         switch.log_message()
     );
+}
+
+pub(super) async fn recover_subscription(
+    app: &mut App,
+    transport: &Transport,
+) -> anyhow::Result<Recovery> {
+    let replay = !app.recover_live_only;
+    let (session_id, recovery) = transport
+        .recover_session_with_replay(
+            app.subscription_target(),
+            app.launch_workspace.as_deref(),
+            replay,
+        )
+        .await?;
+    app.recover_live_only = false;
+    app.await_session_snapshot(session_id);
+    app.set_connected(true);
+    if !replay {
+        app.use_live_session();
+    }
+    Ok(recovery)
+}
+
+pub(super) async fn request_session_snapshot(app: &mut App, transport: Option<&Transport>) {
+    let Some(transport) = transport.filter(|_| app.connected) else {
+        app.show_toast(Toast::warning(
+            "History retry needs a connection",
+            std::time::Duration::from_secs(4),
+        ));
+        return;
+    };
+    let target = app.subscription_target().to_owned();
+    let result = tokio::time::timeout(
+        super::SESSION_SNAPSHOT_TIMEOUT,
+        transport.http.subscribe(&target, &transport.client_id),
+    )
+    .await;
+    let warning = match result {
+        Ok(Ok(())) => {
+            app.await_session_snapshot(target);
+            return;
+        }
+        Ok(Err(error)) => format!("Could not request history: {error}"),
+        Err(_) => "History request timed out. Use /sync to try again.".into(),
+    };
+    app.show_toast(Toast::warning(warning, std::time::Duration::from_secs(4)));
 }
 
 /// `AppIntent::CompactSession` 的落地：无连接直接回失败，有连接把往返挪进后台任务。
@@ -890,12 +928,26 @@ pub(super) fn dispatch_send_message(
     message: OutgoingMessage,
     fetch_tx: mpsc::Sender<FetchResult>,
 ) {
-    let Some(transport) = transport else {
+    let Some(transport) = transport
+        .filter(|_| app.user_input_ready() && app.subscription_target() == message.session_id)
+    else {
+        // A new socket can exist before recovery subscribes to the session.
+        // Keep unsent input in the draft until the event stream is ready.
         // Gateway connection lost — nothing left the client, so the content
         // goes back to the composer. 纯本地动作（无 I/O），不必绕后台任务。
-        app.restore_failed_send(&message.request_id, "Not sent — gateway disconnected");
+        app.restore_failed_send(
+            &message.session_id,
+            &message.request_id,
+            if app.connected && transport.is_some() {
+                "Not sent — waiting for session sync"
+            } else {
+                "Not sent — gateway disconnected"
+            },
+            None,
+        );
         return;
     };
+    app.track_local_send(&message.session_id, &message.request_id);
     spawn_send_message(transport, send_chain, message, fetch_tx);
 }
 
@@ -920,19 +972,35 @@ fn spawn_send_message(
             // 上一条的成败由它自己的回执处理，这里只接顺序。
             let _ = previous.await;
         }
-        if let Err(reason) = deliver_user_message(&http, &ws, &mut message).await {
-            // 内容还给草稿：回执走和压缩同一条 fetch 通道（App 侧不看会话守卫——
-            // 条目按 request_id 认领，找不到就只 toast，不碰草稿）。
-            let _ = fetch_tx
-                .send(FetchResult {
-                    session_id: message.session_id,
-                    payload: FetchPayload::SendFailed {
-                        request_id: message.request_id,
-                        reason,
-                    },
-                })
-                .await;
-        }
+        let directed = message.tool_call_id.is_some();
+        let outcome = match deliver_user_message(&http, &ws, &mut message).await {
+            Ok(()) if directed => return,
+            Ok(()) => SendOutcome::Written,
+            Err(MessageWriteError::Unsent(reason)) => SendOutcome::Unsent(reason),
+            Err(MessageWriteError::Uncertain(reason)) if directed => {
+                let _ = fetch_tx
+                    .send(FetchResult {
+                        session_id: message.session_id,
+                        payload: FetchPayload::Toast {
+                            message: format!("Message delivery unknown: {reason}"),
+                            is_error: true,
+                        },
+                    })
+                    .await;
+                return;
+            }
+            Err(MessageWriteError::Uncertain(reason)) => SendOutcome::Uncertain(reason),
+        };
+        let payload = FetchPayload::SendFinished {
+            request_id: message.request_id,
+            outcome,
+        };
+        let _ = fetch_tx
+            .send(FetchResult {
+                session_id: message.session_id,
+                payload,
+            })
+            .await;
     });
     *send_chain = Some(handle);
 }

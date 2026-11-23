@@ -13,9 +13,6 @@ mod events;
 mod history;
 pub mod media;
 
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-
 pub use client_request::ClientRequest;
 pub use connect_response::ConnectResponse;
 pub use events::*;
@@ -28,14 +25,7 @@ pub use media::{is_media_id, media_id_of, predicted_ref};
 /// （上行 `ClientRequest.media`、上传回执、下行 `tool_media` 共用）。
 pub use wing_api_client::models::MediaRef;
 
-/// Monotonic counter for generating unique request IDs within a process.
-static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Generate a unique request ID.
-///
-/// Format: `wing_{counter}` where counter is a monotonically increasing u64.
-/// Guaranteed collision-free within a single process lifetime.
+/// Generate a request ID for correlation across clients on the same session.
 pub fn generate_request_id() -> String {
-    let id = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("wing_{id}")
+    format!("wing_{}", uuid::Uuid::new_v4().simple())
 }

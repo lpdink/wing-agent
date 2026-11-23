@@ -6,6 +6,7 @@
 use crate::app::App;
 use crate::config::AppConfig;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
@@ -56,9 +57,10 @@ pub(super) fn sync_event_with_status(
     events: Vec<serde_json::Value>,
     turn_started_at: Option<String>,
 ) -> WingEvent {
-    WingEvent::SyncSession {
+    WingEvent::SyncSession(SessionSnapshot {
         session_id: "test-session".into(),
         messages,
+        pending_user_messages: None,
         uncommitted,
         uncommitted_tools,
         events,
@@ -73,7 +75,7 @@ pub(super) fn sync_event_with_status(
             session_id: Some("test-session".into()),
             request_id: "r".into(),
         },
-    }
+    })
 }
 
 /// Provider group whose models have `id == name` (the存量配置 shape).

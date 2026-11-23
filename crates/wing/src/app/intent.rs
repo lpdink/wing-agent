@@ -16,6 +16,13 @@ use wing_api_client::models::{
 use crate::util::image_compress::CompressOptions;
 use crate::util::image_compress::CompressedImage;
 
+/// Socket write outcome. Only `Unsent` confirms that a retry could not duplicate delivery.
+pub enum SendOutcome {
+    Written,
+    Unsent(String),
+    Uncertain(String),
+}
+
 /// Payload of a background fetch result.
 pub enum FetchPayload {
     /// Session runtime info (model, tokens, thinking, yolo).
@@ -83,16 +90,10 @@ pub enum FetchPayload {
             crate::util::clipboard_paste::PasteFailure,
         >,
     ),
-    /// 一条消息的**后台发送失败**回执（`SendMessage` 后台任务，见
-    /// `runner::spawn_send_message`）。
-    ///
-    /// 条目按 `request_id` 认领（pending 就是它的锚），所以和压缩一样在会话守卫
-    /// **之前**分派：换过会话后也该有反馈（条目不在时只 toast，不碰草稿）。
-    SendFailed {
-        /// 与 `SendMessage` / pending 条目同一个关联 id。
+    /// Socket write result for a local user submission.
+    SendFinished {
         request_id: String,
-        /// 给 toast 的文案（`Image upload failed: …` / `Send failed: …`）。
-        reason: String,
+        outcome: SendOutcome,
     },
     /// Show a toast message (for errors or success feedback from background tasks).
     Toast { message: String, is_error: bool },
@@ -120,9 +121,8 @@ pub enum AppIntent {
     /// `tool_call_id` — Some when this message answers a pending Ask event
     /// (routes to the ask's feedback waiter); None for plain user input.
     ///
-    /// `request_id` — client-generated correlation id; echoes back in
-    /// `delivered` / `user_message_accepted` events so the app can match
-    /// the message against its pending queue.
+    /// `request_id` — client-generated correlation ID used by the gateway’s
+    /// queue and commit events to resolve the optimistic entry.
     ///
     /// `images` — 随消息发出的图片（压缩产物，按提交顺序）。空 = 纯文本，
     /// runner 走原路径（不上传、帧里没有 `media` 键）；非空时 runner 先逐张
@@ -227,6 +227,9 @@ pub enum AppIntent {
 
     /// Interrupt the current agent turn via HTTP API.
     InterruptSession,
+
+    /// Re-request the snapshot for the current subscription.
+    RefreshSession,
 
     /// Rewind the session to a specific message via HTTP API.
     RewindSession { target_uuid: String },

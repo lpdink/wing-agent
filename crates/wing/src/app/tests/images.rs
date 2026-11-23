@@ -2119,7 +2119,7 @@ fn a_discarded_user_picture_stays_a_label() {
 }
 
 /// 提交（本机字节已知）→ pending 气泡立刻有图：引用是按内容寻址预测的，字节直接进 lane，
-/// 不必等一次上传往返，也不必再抓一次；promote 之后缓存命中，不重编码。
+/// 不必等上传往返；网关确认入队和提交后继续命中编码缓存。
 #[test]
 fn a_submitted_picture_draws_before_the_upload_lands() {
     let bytes = png_bytes(200, 150);
@@ -2168,10 +2168,38 @@ fn a_submitted_picture_draws_before_the_upload_lands() {
         "bytes in hand are never fetched"
     );
 
-    // promote 只搬 body：同一 id 命中编码缓存（不再有一次 Pending 的空白）。
-    assert!(app.chat.promote_pending(&request_id));
-    let buf = frame(&mut app, &mut term);
-    assert!(has_placeholder(&buf), "promote 不打断已画出来的图");
+    let selection = app.selection_fingerprint(crate::ui::selection::SelectionRegion::Chat);
+    let rebuild_epoch = app.chat.structure_epoch();
+    let mut media = crate::ui::chat_view::media::predicted_media(&picture);
+    media.name = Some("normalized.jpg".into());
+    let meta = crate::protocol::EventMeta {
+        created_at: String::new(),
+        session_id: Some(app.session_id.clone()),
+        request_id: "gateway-event".into(),
+    };
+    app.handle_event(crate::protocol::WingEvent::UserMessageQueued {
+        message: crate::protocol::QueuedUserMessage {
+            origin_request_id: request_id.clone(),
+            content: "看这张".into(),
+            media: vec![media.clone()],
+        },
+        meta: meta.clone(),
+    });
+    assert_eq!(app.chat.structure_epoch(), rebuild_epoch);
+    assert_ne!(
+        app.selection_fingerprint(crate::ui::selection::SelectionRegion::Chat),
+        selection
+    );
+    assert!(has_placeholder(&frame(&mut app, &mut term)));
+    app.handle_event(crate::protocol::WingEvent::UserMessageCommitted {
+        message_uuid: "user-message".into(),
+        origin_request_ids: vec![request_id],
+        content: "看这张".into(),
+        media: vec![media],
+        meta,
+    });
+    assert!(has_placeholder(&frame(&mut app, &mut term)));
+    assert_eq!(app.chat.pending_len(), 0);
 }
 
 /// 滚动回归：气泡的文本比 cell 顶早一行（1 行上内边距 + `Paragraph::scroll(skip-1)`），

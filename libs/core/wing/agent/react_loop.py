@@ -20,15 +20,17 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log, utf8_safe
+from wing.common.utils import require_utf8
 from wing.common.with_retry import with_retry
 from wing.config import get_config
 from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message, usage_wire
 from wing.schema.cache import PURPOSE_MAIN
+from wing.store import HistoryWriteUncertain
 
 from .event_sink import AgentEventSink
-from .inbox import Inbox
+from .inbox import Inbound, Inbox
 from .tool_executor import (
     INTERRUPTED_RESULT,
     InterruptedToolResults,
@@ -37,6 +39,7 @@ from .tool_executor import (
 
 if TYPE_CHECKING:
     from wing.context import ContextManager
+    from wing.event import PendingUserMessage
     from wing.provider.base import ModelProvider, RequestOptions, StreamAccumulator
     from wing.schema import Tool
 
@@ -58,6 +61,7 @@ class _TurnAccumulator:
     """单次 turn 的累计状态（局部对象，不暴露）。"""
 
     num_turns: int = 0
+    compaction_applied: bool = False
     last_text: str = ""
     usage: LLMUsage = field(default_factory=LLMUsage)
     start_time: float = field(default_factory=time.time)
@@ -104,6 +108,7 @@ class ReActLoop:
         self._sink = sink
         self._cm = context_manager
         self._inbox = inbox
+        self._preparing_input: list[Inbound] = []
         self._current_model = current_model
         self._current_provider = current_provider
         self._current_tools = current_tools
@@ -144,70 +149,126 @@ class ReActLoop:
         """当前一轮 LLM 调用的流累积状态（None 表示无进行中轮次）。"""
         return self._current_acc
 
+    @property
+    def preparing_input(self) -> bool:
+        return bool(self._preparing_input)
+
+    def preparing_request_ids(self) -> list[str]:
+        return [
+            item.origin_request_id
+            for item in self._pending_items(self._preparing_input)
+        ]
+
+    def pending_user_messages(self) -> list[PendingUserMessage]:
+        return self._pending_items(self._preparing_input + self._inbox.snapshot())
+
+    @staticmethod
+    def _pending_items(batch: list[Inbound]) -> list[PendingUserMessage]:
+        return [
+            pending
+            for item in batch
+            if (pending := item.pending_user_message()) is not None
+        ]
+
+    async def _commit_user_batch(
+        self,
+        batch: list[Inbound],
+        ctx: _TurnAccumulator,
+        *,
+        next_turn_index: int,
+        steer: bool = False,
+    ) -> Message | None:
+        users = [item.message for item in batch if item.message.role == "user"]
+        content = "\n".join(msg.content for msg in users if msg.content)
+        media = [ref for msg in users for ref in (msg.media or [])]
+        if not content and not media:
+            self._inbox.input_request_ids.release(batch)
+            return None
+
+        pending = self._pending_items(batch)
+        origin_ids = [item.origin_request_id for item in pending]
+        # The drained batch remains visible until the hook and append settle.
+        self._preparing_input = batch
+        suppress_drop = False
+        requeued = False
+        try:
+            modified = await hooks.invoke_async("before_user_message", content)
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
+            if modified is not None:
+                content = modified
+            require_utf8(content, field="message content")
+            message = Message(role="user", content=content, media=media or None)
+            can_call = self._can_call_llm(next_turn_index)
+            if steer and not can_call:
+                self._inbox.prepend(batch)
+                requeued = True
+                suppress_drop = True
+                return None
+            if can_call:
+                try:
+                    if steer:
+                        self._current_provider()
+                    ctx.compaction_applied = self._cm.append_with_pending_compact(
+                        message, self._current_tools
+                    )
+                except HistoryWriteUncertain:
+                    raise
+                except Exception:
+                    if steer:
+                        self._inbox.prepend(batch)
+                        requeued = True
+                        suppress_drop = True
+                    raise
+            if not ctx.compaction_applied:
+                self._cm.add_message(message)
+        except HistoryWriteUncertain:
+            # Indeterminate appends are reconciled from an authoritative snapshot.
+            suppress_drop = True
+            raise
+        else:
+            self._inbox.input_request_ids.remember_committed(origin_ids)
+            suppress_drop = True
+        finally:
+            self._preparing_input = []
+            if not requeued:
+                self._inbox.input_request_ids.release(batch)
+            if not suppress_drop:
+                with self._sink.best_effort():
+                    self._sink.user_messages_dropped(origin_ids)
+
+        self._sink.user_message_committed(message, origin_ids)
+        with self._sink.best_effort():
+            for item in pending:
+                self._sink.user_message_accepted(item.content, item.origin_request_id)
+        if ctx.compaction_applied:
+            self._cm.publish_history_refresh()
+        return message
+
+    def _can_call_llm(self, num_turns: int) -> bool:
+        return self.max_turns is None or num_turns < self.max_turns
+
     async def run_turn(self) -> None:
-        """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。
-
-        消费语义为 drain-and-merge——block 等待首条消息，再 non-blocking
-        取出剩余消息，将所有 user content 拼接为一条消息注入 context。
-
-        媒体同样合并：batch 内各条 user 消息的 media 按**消息序 × 消息内序**
-        concat 成一条消息的 media（与 content 的拼接同源同序）。content 为空但
-        携带 media 的消息（纯图贴图）**合法**——只有 content 与 media 都空才
-        直接返回。
-        """
+        """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。"""
         first = await self._inbox.get()
         batch = [first] + self._inbox.drain()
-
-        content = "\n".join(
-            b.message.content
-            for b in batch
-            if b.message.role == "user" and b.message.content
-        )
-        media = [
-            ref
-            for b in batch
-            if b.message.role == "user"
-            for ref in (b.message.media or [])
-        ]
-        if not content and not media:
-            return
-
-        message = Message(role="user", content=content, media=media or None)
-        request_id = first.request_id
-
-        # 进入 working 状态（inbox.get 返回后才设置——等待期间为 idle）
         if self._set_working:
             self._set_working(True)
 
-        token = set_request_context(request_id=request_id, session_id=self._cm.id)
+        token = set_request_context(request_id=first.request_id, session_id=self._cm.id)
         ctx = _TurnAccumulator()
+        refresh_history = False
         try:
-            # 消费确认：被合并进本轮输入的用户消息在此正式"被模型接受"。
-            # 前端据此把排队中的消息上移进聊天历史。只对外部投递发射
-            # （request_id 存在）；内部投递（无 request_id）不发射。
-            # 纯图消息（content 为空、media 非空）同样发射——否则它的 pending
-            # 会一直卡到 turn end。先于 turn_started——事件流顺序即渲染顺序。
-            for b in batch:
-                if (
-                    b.request_id
-                    and b.message.role == "user"
-                    and (b.message.content or b.message.media)
-                ):
-                    self._sink.user_message_accepted(
-                        b.message.content or "", b.request_id
-                    )
+            message = await self._commit_user_batch(
+                batch, ctx, next_turn_index=ctx.num_turns
+            )
+            if message is None:
+                return
             self._sink.turn_started()
 
-            modified_content = await hooks.invoke_async(
-                "before_user_message", message.content
-            )
-            if modified_content is not None:
-                message.content = modified_content
-
-            self._cm.add_message(message)
-
             while True:
-                if self.max_turns is not None and ctx.num_turns >= self.max_turns:
+                if not self._can_call_llm(ctx.num_turns):
                     self._sink.turn_result(
                         subtype="error_max_turns",
                         is_error=True,
@@ -236,6 +297,7 @@ class ReActLoop:
         except Exception as e:
             from wing.common.utils import format_exception_chain
 
+            refresh_history = isinstance(e, HistoryWriteUncertain)
             error_detail = format_exception_chain(e)
             log.exception(f"处理消息失败: {error_detail}")
             # 上报窗口（#187）：收尾动作与它报告的故障同源——落盘失败时
@@ -260,6 +322,8 @@ class ReActLoop:
             if self._set_working:
                 self._set_working(False)
             reset_request_context(token)
+            if refresh_history:
+                self._cm.publish_history_refresh()
 
     async def _llm_turn(self, ctx: _TurnAccumulator) -> bool:
         """执行一轮 LLM 生成 + 工具执行。
@@ -283,30 +347,23 @@ class ReActLoop:
             tc_results = e.results
             interrupted_exc = e
 
-        # Steer: drain inbox 中积攒的用户消息。每条被消费的消息都是在此刻
-        # 真正"被模型接受"——逐条发射 UserMessageAcceptedEvent，前端据此
-        # 把排队消息上移（落在工具结果之后、下一轮输出之前）。
-        # `drain_for_steer` 是**部分** drain（D7）：只取队首连续的无 media
-        # 纯文本；首条带图消息起全部留队列——本轮的注入口径因此恒为纯文本，
-        # 带图消息与它后面的消息一起走下一轮 drain-and-merge。
-        if self.steer and tc_results:
-            steer_items = self._inbox.drain_for_steer()
-            if steer_items:
-                for b in steer_items:
-                    if b.request_id and b.message.content:
-                        self._sink.user_message_accepted(
-                            b.message.content, b.request_id
-                        )
-                steer_notes = self._inbox.format_steer_note(steer_items)
-                tc_results[-1].content = steer_notes + (tc_results[-1].content or "")
-
-        turn_messages = [assistant_msg] + tc_results
-        self._cm.add_messages(turn_messages)
+        self._cm.add_messages([assistant_msg, *tc_results])
 
         # 轮边界：本轮内容已提交进链（assistant Message + tool 结果），
         # 当前 accumulator 置空——未提交投影失效，避免中途订阅者把已提交
         # 内容经投影再渲染一次（多轮 turn 的双重渲染）。
         self._current_acc = None
+
+        if (
+            interrupted_exc is None
+            and pending_tool_calls
+            and self._inbox.has_pending
+            and self.steer
+            and self._can_call_llm(ctx.num_turns + 1)
+        ):
+            await self._commit_user_batch(
+                self._inbox.drain(), ctx, next_turn_index=ctx.num_turns + 1, steer=True
+            )
 
         count, tokens = self._cm.get_context_stats()
         ctx_window = self._cm.context_window_tokens
@@ -315,9 +372,7 @@ class ReActLoop:
         if interrupted_exc is not None:
             raise interrupted_exc.original
 
-        if not pending_tool_calls:
-            return False
-        return True
+        return bool(pending_tool_calls)
 
     # ── 生成有效性（无效轮次重试）─────────────────
 
@@ -354,11 +409,14 @@ class ReActLoop:
         # 触发后台 compact 用触发时刻的 provider / options 快照（compact 是
         # 预计算：允许因 reload 退场而失败——下一轮重新触发）。CM 把 system 侧
         # 分段交回来（cache_parts），与**发送时刻**解析出的探针一起交给 provider。
+        compaction_applied = ctx.compaction_applied
+        ctx.compaction_applied = False
         llm_result = await self._cm.get_messages_for_llm(
             model=model,
             model_provider=self._current_provider(),
             current_tools=self._current_tools,
             options=self._current_options(),
+            compaction_applied=compaction_applied,
         )
         # 发送时刻重新解析（晚解析纪律）：「解析 → 首次迭代」之间 MUST 无
         # await（此处到 `_call_llm` 进入流迭代全是同步代码）——池换新与

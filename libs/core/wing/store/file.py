@@ -29,12 +29,12 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Collection
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
 from wing.common.utils import is_valid_session_id, validate_session_id
-from wing.store.base import MessageLog, SessionStore
+from wing.store.base import HistoryWriteUncertain, MessageLog, SessionStore
 from wing.store.models import (
     ArchivedSession,
     FileRef,
@@ -64,14 +64,25 @@ def _is_same_entry(candidate: Path, target: Path) -> bool:
         return False
 
 
+class _HistoryTails:
+    """Byte boundaries shared by the event-loop writer and cold readers."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.offsets: dict[Path, int] = {}
+
+
 class FileMessageLog(MessageLog):
     """文件消息日志：history.jsonl（append+fsync）。"""
 
     _HISTORY = "history.jsonl"
+    _RECOVERY = ".history-recovery.json"
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, tails: _HistoryTails | None = None) -> None:
         self._path = Path(path)
         self._sealed = False
+        self._recovery_checked = False
+        self._tails = tails if tails is not None else _HistoryTails()
 
     @property
     def path(self) -> Path:
@@ -95,16 +106,33 @@ class FileMessageLog(MessageLog):
         消费方（fork 切片 / 标题回退）在 ``record.get`` 上炸掉。
         """
         hist = self._path / self._HISTORY
-        if not hist.exists():
-            return
-        with open(hist, "r", encoding="utf-8") as f:
-            for line in f:
+        with self._tails.lock:
+            offset = self._known_tail_locked()
+            try:
+                f = open(hist, "rb")
+            except FileNotFoundError as exc:
+                if offset is not None:
+                    raise HistoryWriteUncertain(
+                        "history is missing during recovery"
+                    ) from exc
+                return
+            size = os.fstat(f.fileno()).st_size
+        with f:
+            if offset is not None and size < offset:
+                raise HistoryWriteUncertain("history ends before its recovery offset")
+            remaining = size if offset is None else offset
+            # Freeze the readable prefix before iterating without holding the writer lock.
+            while remaining:
+                line = f.readline(remaining)
+                if not line:
+                    return
+                remaining -= len(line)
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(record, dict):
                     yield record
@@ -121,8 +149,7 @@ class FileMessageLog(MessageLog):
           前缀，而 fork 的批量前缀追加失败会留下"有历史没 metadata"的
           幽灵会话（该目录此后会被 list 到）；
         - **不拼大字符串**：fork/compact 的批量前缀动辄 MiB 级，``join``
-          会把同一份数据再复制一遍。逐条写即可——崩溃窗口仍是最后一行
-          可能截断（加载路径跳过损坏行）。
+          会把同一份数据再复制一遍。进程崩溃可能留下完整的批次前缀或截断行。
 
         代价是整批一份编码副本（``blobs``）——批量只出现在 fork / compact
         这类重塑路径上，换 all-or-nothing 划算；逐轮的小批量追加可忽略。
@@ -135,11 +162,88 @@ class FileMessageLog(MessageLog):
         blobs = [json.dumps(r, ensure_ascii=False).encode("utf-8") for r in records]
         self._path.mkdir(parents=True, exist_ok=True)
         with open(self._path / self._HISTORY, "ab") as f:
-            for blob in blobs:
-                f.write(blob)
-                f.write(b"\n")
-            f.flush()
-            os.fsync(f.fileno())
+            with self._tails.lock:
+                previous = self._known_tail_locked()
+                start = f.tell() if previous is None else previous
+                self._tails.offsets[self._path] = start
+            if previous is not None:
+                try:
+                    self._restore_tail(f, previous)
+                    (self._path / self._RECOVERY).unlink(missing_ok=True)
+                    self._sync_directory()
+                except OSError as exc:
+                    raise HistoryWriteUncertain(
+                        "history requires tail recovery"
+                    ) from exc
+            try:
+                for blob in blobs:
+                    f.write(blob)
+                    f.write(b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+            except OSError:
+                try:
+                    self._restore_tail(f, start)
+                except OSError as rollback_error:
+                    restart_boundary = self._record_recovery(start)
+                    raise HistoryWriteUncertain(
+                        f"history append could not be rolled back at offset {start}; "
+                        f"write outcome unknown, {restart_boundary}"
+                    ) from rollback_error
+                with self._tails.lock:
+                    self._tails.offsets.pop(self._path)
+                raise
+            with self._tails.lock:
+                self._tails.offsets.pop(self._path)
+
+    def _known_tail_locked(self) -> int | None:
+        offset = self._tails.offsets.get(self._path)
+        if offset is not None or self._recovery_checked:
+            return offset
+        try:
+            offset = json.loads(
+                (self._path / self._RECOVERY).read_text(encoding="utf-8")
+            )
+            if type(offset) is not int or offset < 0:
+                raise ValueError("invalid history recovery offset")
+        except FileNotFoundError:
+            self._recovery_checked = True
+            return None
+        except (OSError, ValueError) as exc:
+            raise HistoryWriteUncertain(
+                "cannot verify history recovery boundary"
+            ) from exc
+        self._tails.offsets[self._path] = offset
+        self._recovery_checked = True
+        return offset
+
+    def requires_recovery(self) -> bool:
+        with self._tails.lock:
+            return self._known_tail_locked() is not None
+
+    def _record_recovery(self, offset: int) -> str:
+        try:
+            atomic_write_json(self._path / self._RECOVERY, offset)
+            self._sync_directory()
+        except OSError:
+            log.exception("Cannot confirm history recovery boundary: %s", self._path)
+            return "restart boundary could not be confirmed"
+        return "recovery boundary saved"
+
+    def _sync_directory(self) -> None:
+        fd = os.open(self._path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _restore_tail(f: BinaryIO, offset: int) -> None:
+        f.flush()
+        if os.fstat(f.fileno()).st_size < offset:
+            raise OSError("history ends before its recovery offset")
+        os.ftruncate(f.fileno(), offset)
+        os.fsync(f.fileno())
 
     # ── aux kv ────────────────────────────────
 
@@ -187,6 +291,7 @@ class FileSessionStore(SessionStore):
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
+        self._history_tails = _HistoryTails()
         # 批量索引窗口（`index_batch`）：非 None 时索引操作按序攒在这里
         # （``(kind, id, entry)``，kind ∈ {"upsert", "remove"}），窗口结束按序重放。
         # **必须有序**：同一个 id 在窗口内可能 archive → unarchive → archive，
@@ -255,7 +360,7 @@ class FileSessionStore(SessionStore):
     # ── log ───────────────────────────────────
 
     def open_log(self, session_id: str) -> FileMessageLog:
-        return FileMessageLog(self._session_dir(session_id))
+        return FileMessageLog(self._session_dir(session_id), self._history_tails)
 
     # ── 媒体字节（内容寻址，session 私有）─────────
 
@@ -670,6 +775,8 @@ class FileSessionStore(SessionStore):
         """移入归档区 + 登记索引（见基类契约；rename 与索引更新同一次调用）。"""
         safe_id = validate_session_id(session_id)
         live = self._root / safe_id
+        if self.open_log(safe_id).requires_recovery():
+            raise HistoryWriteUncertain("history requires tail recovery before archive")
         if not live.is_dir():
             raise FileNotFoundError(f"session dir not found: {live}")
         target = self._archive_root() / safe_id

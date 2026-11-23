@@ -28,10 +28,14 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
 from wing.event import (
+    EventTarget,
     LLMCallMetricsEvent,
+    SessionHistoryRefreshedEvent,
+    SyncSessionEvent,
     ToolCallResultEvent,
     TurnResultEvent,
     UserMessageAcceptedEvent,
+    wire_dump,
 )
 from wing.event_bus import event_bus
 from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
@@ -52,6 +56,7 @@ from .usage import UsageTracker
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
+    from wing.agent.inbox import InputRequestIds
     from wing.event.base import AgentInfo, SessionStatus, WingEvent
 
     from .override import AgentOverride
@@ -156,6 +161,8 @@ def _build_runtime(
     messages: TrackedList[ChainNode],
     store: SessionStore,
     workspace: str | None,
+    *,
+    input_request_ids: InputRequestIds | None = None,
 ) -> tuple[ContextManager, "WingAgent"]:
     """按模板装配一对 (ContextManager, WingAgent)。
 
@@ -187,6 +194,7 @@ def _build_runtime(
         max_turns=template.max_turns,
         yolo=template.yolo,
         media=media,
+        input_request_ids=input_request_ids,
     )
     return context_manager, agent
 
@@ -194,7 +202,7 @@ def _build_runtime(
 def validate_media_refs(
     store: SessionStore, session_id: str, media: list[MediaRef] | None
 ) -> None:
-    """校验消息携带的媒体引用可兑现（id 格式 + mime + 对象存在）；不合规即 raise。
+    """校验入站媒体引用可兑现，且元数据能在所有前端无损表示。
 
     消息入口闸门（``SessionManager._post`` 调用）：
 
@@ -207,8 +215,8 @@ def validate_media_refs(
 
     缺任何一条即 ``InvalidInputError``（HTTP 400 语义）：幽灵引用不是"暂时读不到"，
     而是调用方发了不该发的请求——放它进历史只会让后续每一轮请求都渲染一个永远缺失
-    的占位。校验仍只认"id 格式 + mime + 存在"：``bytes`` / 尺寸是提示性元数据
-    （只进驱逐启发式），不读字节复核。
+    的占位。尺寸须能用 Rust u32 表示，字节数须能用 JS 安全整数表示。
+    校验只约束新输入的字段范围，尺寸和字节数仍然是提示性元数据。
 
     None / 空列表 = 无媒体（no-op）：无媒体路径不因本闸门产生任何分支或开销。
     """
@@ -222,6 +230,15 @@ def validate_media_refs(
                 f"unsupported media reference mime {ref.mime!r} for id={ref.id!r} "
                 f"(supported: {sorted(SUPPORTED_IMAGE_MIMES)})"
             )
+        for field, value, maximum in (
+            ("width", ref.width, (1 << 32) - 1),
+            ("height", ref.height, (1 << 32) - 1),
+            ("bytes", ref.bytes, (1 << 53) - 1),
+        ):
+            if not 0 <= value <= maximum:
+                raise InvalidInputError(
+                    f"media reference {field} must be in 0..{maximum}"
+                )
         if not store.media_exists(session_id, ref.id):
             raise InvalidInputError(
                 f"media reference not found in session {session_id!r}: "
@@ -270,6 +287,7 @@ class Session:
 
         self._context_manager = context_manager
         self._agent = agent
+        context_manager.on_history_refresh = self._publish_history_refresh
 
         # 将 workspace 注入 agent 作为 Bash 工具的 cwd。
         # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
@@ -353,7 +371,9 @@ class Session:
         # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
         # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
         old_agent = self._agent
-        await old_agent.shutdown()
+        await old_agent.shutdown(
+            notify=old_agent.status != "idle" or old_agent.has_pending_input
+        )
 
         self._context_manager, self._agent = _build_runtime(
             template,
@@ -361,7 +381,9 @@ class Session:
             self._messages,
             self._store,
             self._metadata.workspace,
+            input_request_ids=old_agent.input_request_ids,
         )
+        self._context_manager.on_history_refresh = self._publish_history_refresh
         # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），
         # 与模板无关：新 CM 上重新挂载持久化值（否则重启/切换后丢失）。
         if self._metadata.append_system_prompt:
@@ -684,6 +706,49 @@ class Session:
         """序列化 context window 中的消息为 dict 列表。"""
         cm = self._context_manager
         return [serialize_message(msg) for msg in cm.get_context_window()]
+
+    def sync_event(
+        self,
+        *,
+        draft: str | None = None,
+        target: EventTarget | None = None,
+        include_agent: bool = False,
+        refresh: bool = False,
+    ) -> SyncSessionEvent | SessionHistoryRefreshedEvent:
+        """Project the active history and all live state at the same point in time."""
+        cm = self.context_manager
+        agent = self.agent
+        event_type = SessionHistoryRefreshedEvent if refresh else SyncSessionEvent
+        return event_type(
+            session_id=self.session_id,
+            messages=self.serialize_messages(),
+            uncommitted=agent.uncommitted_message(),
+            uncommitted_tools=agent.uncommitted_tools(),
+            pending_user_messages=agent.pending_user_messages(),
+            events=[
+                wire_dump(e)
+                for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())
+            ],
+            status=self.status,
+            turn_started_at=(
+                agent.turn_started_at.isoformat() if agent.turn_started_at else None
+            ),
+            agent=self.to_agent_info() if include_agent else None,
+            name=self.session_name if include_agent else None,
+            draft=draft,
+            usage=self.usage,
+            target=target,
+        )
+
+    def _publish_history_refresh(self) -> None:
+        if event_bus.subscribers_of(self.session_id):
+            self.agent.emit(
+                self.sync_event(
+                    target=EventTarget(scope="session"),
+                    include_agent=True,
+                    refresh=True,
+                )
+            )
 
     @property
     def last_interaction(self) -> str | None:

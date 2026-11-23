@@ -64,15 +64,18 @@ impl Recovery {
 impl Transport {
     /// Switch event subscription from an old session to a new one.
     ///
-    /// Subscribes to `new_session_id` and unsubscribes from `old_session_id`.
-    /// Both operations are fire-and-forget — failures are logged but not propagated.
-    pub async fn switch_session(&self, old_session_id: &str, new_session_id: &str) {
-        if let Err(e) = self.http.subscribe(new_session_id, &self.client_id).await {
-            tracing::warn!("subscribe new session failed: {e}");
-        }
-        if let Err(e) = self.http.unsubscribe(old_session_id, &self.client_id).await {
+    /// Keep the old subscription until the new one succeeds.
+    pub async fn switch_session(&self, old_session_id: &str, new_session_id: &str) -> Result<()> {
+        self.http
+            .subscribe(new_session_id, &self.client_id)
+            .await
+            .context("subscribe new session failed")?;
+        if old_session_id != new_session_id
+            && let Err(e) = self.http.unsubscribe(old_session_id, &self.client_id).await
+        {
             tracing::warn!("unsubscribe old session failed: {e}");
         }
+        Ok(())
     }
 }
 
@@ -134,7 +137,17 @@ impl Transport {
         &self,
         session_id: &str,
         workspace: Option<&str>,
-    ) -> Result<Recovery> {
+    ) -> Result<(String, Recovery)> {
+        self.recover_session_with_replay(session_id, workspace, true)
+            .await
+    }
+
+    pub(super) async fn recover_session_with_replay(
+        &self,
+        session_id: &str,
+        workspace: Option<&str>,
+        replay: bool,
+    ) -> Result<(String, Recovery)> {
         let (effective_id, outcome) = match self.http.resume_session(session_id).await {
             Ok(_) => (session_id.to_string(), Recovery::Resumed),
             Err(e) if e.is_not_found() => {
@@ -180,12 +193,16 @@ impl Transport {
             }
         };
 
-        self.http
-            .subscribe(&effective_id, &self.client_id)
-            .await
-            .context("subscribe failed during session recovery")?;
+        let subscribed = if replay {
+            self.http.subscribe(&effective_id, &self.client_id).await
+        } else {
+            self.http
+                .subscribe_live(&effective_id, &self.client_id)
+                .await
+        };
+        subscribed.context("subscribe failed during session recovery")?;
 
-        Ok(outcome)
+        Ok((effective_id, outcome))
     }
 }
 

@@ -146,7 +146,7 @@ class TestIdleEviction:
         session = materialize(runtime.create_session())
         sid = session.session_id
         try:
-            session.agent._inbox._queue.put_nowait(
+            session.agent._inbox._enqueue(
                 Inbound(message=Message(role="user", content="queued"))
             )
             assert session.agent.has_pending_input is True

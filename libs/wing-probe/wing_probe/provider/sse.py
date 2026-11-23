@@ -1,4 +1,4 @@
-"""SSE 编码器 —— 剧本 Turn → OpenAI 兼容 chunk 帧（纯函数，可独立对账）。
+"""SSE 编码器 —— 剧本 Turn → OpenAI 兼容及 Anthropic 帧。
 
 刻意不依赖 wing 侧的 SSE 实现：这是"外来生产者"的独立实现，帧形态按公开
 协议（``data: {chunk}\\n\\n`` 帧 + ``data: [DONE]`` 终止；``choices[0].delta``
@@ -43,6 +43,7 @@ class SSEFrame:
     delay: float = 0.0
     kind: str = "meta"
     """通道标记（:data:`FRAME_KINDS` 之一）。"""
+    event: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in FRAME_KINDS:
@@ -54,7 +55,8 @@ class SSEFrame:
     def text(self) -> str:
         if self.data is None:
             return DONE_TEXT
-        return f"data: {json.dumps(self.data, ensure_ascii=False)}\n\n"
+        prefix = f"event: {self.event}\n" if self.event else ""
+        return f"{prefix}data: {json.dumps(self.data, ensure_ascii=False)}\n\n"
 
     def encode(self) -> bytes:
         return self.text.encode("utf-8")
@@ -246,6 +248,89 @@ def tool_calls_wire(turn: Turn, *, turn_index: int) -> list[dict[str, Any]]:
             "function": {"name": call.name, "arguments": call.argument_text},
         }
         for index, call in enumerate(turn.tool_calls)
+    ]
+
+
+def anthropic_stream_frames(
+    turn: Turn, *, turn_index: int, model: str, message_id: str
+) -> list[SSEFrame]:
+    """Encode scripted text and tool calls for the Anthropic Messages stream."""
+    usage = turn.resolved_usage
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def add(event: str, *, kind: str = "meta", **fields: Any) -> None:
+        events.append((kind, {"type": event, **fields}))
+
+    add(
+        "message_start",
+        message={
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+            "usage": {"input_tokens": usage.prompt_tokens, "output_tokens": 0},
+        },
+    )
+    index = 0
+    for block_type, chunks in (
+        ("thinking", turn.reasoning_chunks()),
+        ("text", turn.content_chunks()),
+    ):
+        if chunks:
+            add(
+                "content_block_start",
+                index=index,
+                content_block={"type": block_type, block_type: ""},
+            )
+            for chunk in chunks:
+                add(
+                    "content_block_delta",
+                    kind="content" if block_type == "text" else "thinking",
+                    index=index,
+                    delta={"type": f"{block_type}_delta", block_type: chunk},
+                )
+            add("content_block_stop", index=index)
+            index += 1
+    for call_index, call in enumerate(turn.tool_calls):
+        add(
+            "content_block_start",
+            index=index,
+            content_block={
+                "type": "tool_use",
+                "input": {},
+                "name": call.name,
+                "id": resolve_call_id(
+                    call, turn_index=turn_index, call_index=call_index
+                ),
+            },
+        )
+        for chunk in call.argument_chunks():
+            add(
+                "content_block_delta",
+                kind="tool_call",
+                index=index,
+                delta={"type": "input_json_delta", "partial_json": chunk},
+            )
+        add("content_block_stop", index=index)
+        index += 1
+    if not turn.truncated:
+        stop_reason = {
+            "tool_calls": "tool_use",
+            "stop": "end_turn",
+            "length": "max_tokens",
+        }.get(turn.finish_reason, turn.finish_reason)
+        add(
+            "message_delta",
+            delta={"stop_reason": stop_reason},
+            usage={"output_tokens": usage.completion_tokens},
+        )
+        add("message_stop")
+    return [
+        SSEFrame(
+            data=data, delay=frame_delay(turn, index), kind=kind, event=data["type"]
+        )
+        for index, (kind, data) in enumerate(events)
     ]
 
 

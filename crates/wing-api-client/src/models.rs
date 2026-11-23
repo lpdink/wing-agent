@@ -187,6 +187,9 @@ pub struct ForkSessionRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct SubscribeRequest {
     pub session_id: String,
+    /// Absent uses the gateway default. `false` subscribes to live events only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]

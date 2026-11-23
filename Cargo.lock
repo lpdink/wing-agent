@@ -4320,6 +4320,7 @@ dependencies = [
  "unicode-linebreak",
  "unicode-width",
  "url",
+ "uuid",
  "wing-api-client",
  "wing-math",
 ]

@@ -16,18 +16,17 @@ from pydantic import Field
 from wing.store import SessionUsage
 
 from .base import AgentInfo, SessionStatus, WingEvent
-
+from .react import PendingUserMessage
 
 # ============================================================
 # Session 生命周期事件
 # ============================================================
 
 
-class SyncSessionEvent(WingEvent):
+class _SessionSnapshot(WingEvent):
     """同步 session 完整状态。
 
-    由 /session 切换、/fork 触发。
-    通知前端需要同步（replay）指定 session 的完整上下文。
+    订阅快照与主动历史刷新共用此投影。
 
     状态（快照事实）：
     status：快照时刻 session 的运行状态（idle / working / waiting），与
@@ -53,18 +52,19 @@ class SyncSessionEvent(WingEvent):
       （`[{tool_call_id, tool_name, args_fragment}]`），前端经既有 live
       ToolCallStream 分支局部解析渲染活工具卡
     events：活跃链上的**事实类**事件节点（按链序，过滤规则见 get_active_events）
+    pending_user_messages：尚未提交的输入，准备中的批次在队首
     agent：该 session 的 AgentInfo
     name：session 名称
     draft：用户还没发出去的草稿（rewind/fork 时可能有）
     """
 
-    type: Literal["sync_session"] = "sync_session"
     persist: ClassVar[bool] = False
     session_id: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
     uncommitted: dict[str, Any] | None = None
     uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    pending_user_messages: list[PendingUserMessage] = Field(default_factory=list)
     # 无默认值：每个构造点都必须显式给出快照时刻的状态——同步载荷自描述，
     # 前端不做推断（漏给值应当是构造期的错误，而非静默退化成"不在跑"）。
     status: SessionStatus
@@ -80,6 +80,14 @@ class SyncSessionEvent(WingEvent):
     增量 = 其后事件之和」因此精确成立（HTTP `/api/session/info` 的快照
     与 WS 帧无跨通道定序，不能拿来做基线，否则会把在途事件重复计入）。
     旧网关不带这个字段（None）——前端按零基线显示。"""
+
+
+class SyncSessionEvent(_SessionSnapshot):
+    type: Literal["sync_session"] = "sync_session"
+
+
+class SessionHistoryRefreshedEvent(_SessionSnapshot):
+    type: Literal["session_history_refreshed"] = "session_history_refreshed"
 
 
 class SessionStateChangedEvent(WingEvent):
@@ -112,7 +120,9 @@ class SessionStateChangedEvent(WingEvent):
 class InterruptedEvent(WingEvent):
     type: Literal["interrupted"] = "interrupted"
     dropped_request_ids: list[str] = Field(default_factory=list)
-    """打断入口放弃的积压输入（`request_id`，队列序）。
+    """打断丢弃的请求 ID，包含准备批次和打断入口处的积压输入。
+
+    准备批次另有 `user_messages_dropped`，这里重复其 ID 供旧端清理。
 
     前端据此只把**这些** pending 消息标为 discarded；锁等待期间新投递的
     消息（客户端 POST 已应答）不在其中，留给重建后的消费者。旧网关不含
