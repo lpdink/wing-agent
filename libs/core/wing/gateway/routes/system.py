@@ -13,6 +13,10 @@ import signal
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
+from starlette.responses import JSONResponse
+
+from wing.config import get_config_path
+from wing.config.document import ConfigDocumentError, read_raw_document
 
 from wing.event import CommandInfo
 from wing.gateway.protocol import (
@@ -24,6 +28,7 @@ from wing.gateway.protocol import (
     ReloadResponse,
     ToolInfo,
     ToolsListResponse,
+    error_response,
 )
 from wing.gateway.projection import build_reload_response
 from wing.gateway.routes._common import get_server
@@ -128,10 +133,30 @@ async def reload_system(request: Request) -> ReloadResponse:
 
 @router.post(
     "/api/shutdown",
+    response_model=dict[str, str],
     summary="优雅关闭 Gateway",
 )
-async def shutdown() -> dict[str, str]:
-    """优雅关闭 Gateway 进程。"""
+async def shutdown(
+    request: Request, settings_fingerprint: str | None = None
+) -> dict[str, str] | JSONResponse:
+    """A restart can require the disk version validated by settings status."""
+    if settings_fingerprint is None:
+        return _schedule_shutdown()
+    async with get_server(request).settings_lock:
+        try:
+            _, fingerprint = read_raw_document(get_config_path())
+        except (ConfigDocumentError, OSError):
+            return error_response(
+                409, "config.yaml changed before shutdown", error="conflict"
+            )
+        if fingerprint.value != settings_fingerprint:
+            return error_response(
+                409, "config.yaml changed before shutdown", error="conflict"
+            )
+        return _schedule_shutdown()
+
+
+def _schedule_shutdown() -> dict[str, str]:
     asyncio.get_running_loop().call_later(0.1, os.kill, os.getpid(), signal.SIGTERM)
     return {"status": "shutting_down"}
 

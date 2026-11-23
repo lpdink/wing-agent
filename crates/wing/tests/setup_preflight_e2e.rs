@@ -189,19 +189,47 @@ mod tui_paste {
             .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
     }
 
-    async fn serve_setup(mut stream: TcpStream, seen: mpsc::UnboundedSender<(&'static str, bool)>) {
+    #[derive(Clone)]
+    struct SetupStub {
+        seen: mpsc::UnboundedSender<(&'static str, bool)>,
+        operational: bool,
+        stage: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn serve_setup(mut stream: TcpStream, stub: SetupStub) {
+        use std::sync::atomic::Ordering;
+        let SetupStub {
+            seen,
+            operational,
+            stage,
+        } = stub;
         let mut buffer = Vec::new();
         let problem = json!({"path":"provider_token", "kind":"missing_required", "message":"Fixture provider key is required"});
         while let Some((head, body)) = read_request(&mut stream, &mut buffer).await {
             let path = head.split_whitespace().nth(1).unwrap_or_default();
             let auth_ok = header(&head, "authorization")
                 .is_some_and(|value| value.strip_prefix("Bearer ") == Some(INTERFACE_KEY));
+            let mut status = "200 OK";
             let result = match path {
+                "/api/settings/status" if operational && stage.load(Ordering::SeqCst) > 0 => {
+                    let check = stage.fetch_add(1, Ordering::SeqCst);
+                    let _ = seen.send(("readiness auth", auth_ok));
+                    if !auth_ok || check == 1 {
+                        status = if auth_ok {
+                            "503 Unavailable"
+                        } else {
+                            "401 Unauthorized"
+                        };
+                        json!({"error":"fixture-check"})
+                    } else {
+                        json!({"valid":true,"setup_mode":false,"problems":[]})
+                    }
+                }
                 "/api/settings/status" => {
-                    json!({"valid":false,"setup_mode":true,"problems":[problem]})
+                    json!({"valid":false,"setup_mode":!operational,"problems":[problem]})
                 }
                 "/api/settings/get" => {
-                    json!({"values":{},"setup_mode":true,"fingerprint":"fixture-base","config_path":"fixture.yaml","problems":[problem]})
+                    json!({"values":{},"setup_mode":!operational,"fingerprint":"fixture-base","config_path":"fixture.yaml","problems":[problem]})
                 }
                 "/api/settings/schema" => {
                     json!({"version":"fixture","config_path":"fixture.yaml","root":{
@@ -210,12 +238,18 @@ mod tui_paste {
                     }})
                 }
                 "/api/settings/set" => {
-                    let matched = serde_json::from_slice::<Value>(&body).ok()
-                        == Some(json!({
-                            "base":"fixture-base","document":{"provider_token":PROVIDER_KEY}
-                        }));
+                    let old_key = header(&head, "authorization") == Some("Bearer old-fixture-key");
+                    let matched = old_key
+                        && stage.load(Ordering::SeqCst) == 0
+                        && serde_json::from_slice::<Value>(&body).ok()
+                            == Some(json!({
+                                "base":"fixture-base","document":{"provider_token":PROVIDER_KEY}
+                            }));
+                    if matched {
+                        stage.store(1, Ordering::SeqCst);
+                    }
                     let _ = seen.send(("provider saved", matched));
-                    json!({"ok":matched,"fingerprint":"saved","problems":[],"setup_mode_exited":matched,"changed":["provider_token"]})
+                    json!({"ok":matched,"fingerprint":"saved","problems":[],"setup_mode_exited":matched && !operational,"changed":["provider_token"]})
                 }
                 "/ws" => {
                     let _ = seen.send(("WS auth", auth_ok));
@@ -242,7 +276,7 @@ mod tui_paste {
             };
             let result = result.to_string();
             let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 result.len(),
                 result
             );
@@ -258,9 +292,27 @@ mod tui_paste {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn setup_paste_saves_and_authenticates_with_the_new_interface_key() {
+        verify_setup_auth(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operational_repair_retries_readiness_with_the_rotated_key() {
+        verify_setup_auth(true).await;
+    }
+
+    async fn verify_setup_auth(operational: bool) {
         let (seen, mut requests) = mpsc::unbounded_channel();
-        let (home, port) =
-            start_fake_gateway("wing-setup-e2e", "tui-paste", seen, serve_setup).await;
+        let stub = SetupStub {
+            seen,
+            operational,
+            stage: Default::default(),
+        };
+        let tag = if operational {
+            "tui-rotation"
+        } else {
+            "tui-paste"
+        };
+        let (home, port) = start_fake_gateway("wing-setup-e2e", tag, stub, serve_setup).await;
         fs::create_dir_all(home.join("tui")).unwrap();
         let interface_path = home.join("tui/config.yaml");
         fs::write(
@@ -306,14 +358,14 @@ mod tui_paste {
         drop(command);
         let fd = master.as_raw_fd();
         let mut output = Vec::new();
-        let mut wait_for = |text: &str| {
-            let text = text.as_bytes();
+        let mut wait_for = |fragment: &str| {
+            let text = fragment.as_bytes();
             output.extend(read_written(fd, Duration::from_secs(4), |buf| {
                 buf.windows(text.len()).any(|window| window == text)
             }));
             assert!(
                 output.windows(text.len()).any(|window| window == text),
-                "expected setup frame fragment"
+                "expected setup frame fragment {fragment:?}"
             );
         };
         wait_for("Fixture provider key is required");
@@ -331,9 +383,31 @@ mod tui_paste {
             bracketed(&format!("{PROVIDER_KEY}\n"))
         );
         write_all(fd, provider_paste.as_bytes());
+        let readiness_frame = if operational {
+            // Drain redraws while the wizard handles the save and readiness request.
+            let frame = read_written(fd, Duration::from_millis(800), |_| false);
+            for expected in ["provider saved", "readiness auth"] {
+                let observed = tokio::time::timeout(Duration::from_secs(4), requests.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("missing fixture request {expected}"));
+                assert_eq!(observed, Some((expected, true)));
+            }
+            write_all(fd, b"s");
+            frame
+        } else {
+            Vec::new()
+        };
         wait_for("\x1b[?1049l");
-
-        for expected in ["provider saved", "WS auth", "HTTP auth"] {
+        output.extend(readiness_frame);
+        for expected in [
+            if operational {
+                "readiness auth"
+            } else {
+                "provider saved"
+            },
+            "WS auth",
+            "HTTP auth",
+        ] {
             let observed = tokio::time::timeout(Duration::from_secs(4), requests.recv())
                 .await
                 .unwrap();

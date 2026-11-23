@@ -736,8 +736,7 @@ const RESTART_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// 不重写任何重连逻辑。两条容易踩的线：
 ///
 /// 1. **端口可能刚被改过**（用户改 `gateway.port` 保存 + `Ctrl+R` 的意义就是这个）：
-///    第 3 步重读 `~/.wing/core/config.yaml`（host/port 的事实来源）与 TUI 配置
-///    （`api_key` 的生效域是 restart），把新的端点写回 `*endpoint`；
+///    使用网关验证的监听地址和本地 Interface 凭据重建端点；
 /// 2. **重连退避不与显式重启打架**：重启期间 event loop 停在这里，`select!` 的
 ///    WS 断开分支不会同时运行；成功 → 传输已换成新的（退避没被触发）；失败 →
 ///    `*transport = None`，交给既有退避路径（它的目标是 `*endpoint`，也就是新端点）。
@@ -753,9 +752,8 @@ pub(super) async fn restart_gateway(
         ));
         return;
     };
-    match current.http.settings_status().await {
-        Ok(status) if status.valid => {}
-        Ok(_) => {
+    let (listener, fingerprint) = match current.http.settings_status().await {
+        Ok(status) if !status.valid => {
             app.show_toast(Toast::warning(
                 "配置文件有问题。修复后再重启网关",
                 Duration::from_secs(5),
@@ -763,6 +761,16 @@ pub(super) async fn restart_gateway(
             app.push_intent(AppIntent::FetchSettings);
             return;
         }
+        Ok(status) => match (status.restart_listener, status.fingerprint) {
+            (Some(listener), Some(fingerprint)) if listener.port != 0 => (listener, fingerprint),
+            _ => {
+                app.show_toast(Toast::warning(
+                    "网关未提供可验证的重启地址",
+                    Duration::from_secs(5),
+                ));
+                return;
+            }
+        },
         Err(_) => {
             app.show_toast(Toast::warning(
                 "无法确认磁盘配置。请重新读取文件后重试",
@@ -770,12 +778,43 @@ pub(super) async fn restart_gateway(
             ));
             return;
         }
-    }
-    if current.http.shutdown().await.is_err() {
+    };
+    let next_endpoint = GatewayEndpoint {
+        ws_url: format!("ws://{}:{}/ws", listener.host, listener.port),
+        http_base: format!("http://{}:{}", listener.host, listener.port),
+        api_key: AppConfig::load().api_key.filter(|key| !key.is_empty()),
+    };
+    let current_port = url::Url::parse(&endpoint.http_base)
+        .ok()
+        .and_then(|url| url.port_or_known_default());
+    if current_port != Some(listener.port)
+        && !matches!(
+            tokio::time::timeout(
+                RESTART_PROBE_TIMEOUT,
+                tokio::net::TcpListener::bind((listener.host.as_str(), listener.port)),
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    {
         app.show_toast(Toast::warning(
-            "网关拒绝关闭。请检查连接与鉴权",
+            "无法绑定重启目标地址",
             Duration::from_secs(5),
         ));
+        return;
+    }
+    if let Err(error) = current
+        .http
+        .shutdown_if_config_unchanged(&fingerprint)
+        .await
+    {
+        let message = if error.is_conflict() {
+            app.push_intent(AppIntent::FetchSettings);
+            "设置文件已更改。检查设置后再重启"
+        } else {
+            "网关拒绝关闭。请检查连接与鉴权"
+        };
+        app.show_toast(Toast::warning(message, Duration::from_secs(5)));
         return;
     }
 
@@ -790,17 +829,9 @@ pub(super) async fn restart_gateway(
 
     app.set_connected(false);
 
-    // 3. 重读两份配置 → 新端点（端口 / host / api_key 都可能刚被改过）。
-    let backend = crate::cmd::backend_config::read_backend_gateway_config();
-    let api_key = AppConfig::load().api_key.filter(|key| !key.is_empty());
-    *endpoint = GatewayEndpoint {
-        ws_url: format!("ws://{}:{}/ws", backend.host, backend.port),
-        http_base: format!("http://{}:{}", backend.host, backend.port),
-        api_key,
-    };
+    *endpoint = next_endpoint;
 
-    // 4. 重新拉起（复用 `wing start` 的守护进程启动）。
-    if let Err(e) = crate::cmd::start::start_gateway(&backend.host, backend.port).await {
+    if let Err(e) = crate::cmd::start::start_gateway(&listener.host, listener.port).await {
         tracing::warn!("gateway restart failed: {e:#}");
         app.show_toast(Toast::warning(
             format!("网关重启失败：{e}"),

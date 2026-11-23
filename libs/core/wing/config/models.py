@@ -843,11 +843,14 @@ class GatewayConfig(BaseModel):
         doc="监听地址",
         apply=ApplyScope.RESTART,
         default="127.0.0.1",
+        min_length=1,
     )
     port: int = S(
         doc="监听端口",
         apply=ApplyScope.RESTART,
         default=32523,
+        ge=1,
+        le=65535,
     )
     auth: AuthConfig = S(
         doc="API key 鉴权配置",

@@ -281,7 +281,8 @@ where
     let mut panel = SettingsPanel::new(&schema, state, interface, View::Problems);
 
     let mut note = baseline_note(panel.problems());
-    let mut gateway_ready = false;
+    let mut readiness = Readiness::Unready;
+    let mut replacement = None;
     let mut ctrl_c_at: Option<Instant> = None;
     let mut clipboard_read = None;
 
@@ -352,6 +353,15 @@ where
         }
 
         match panel.handle_key(key) {
+            SettingsAction::None
+                if readiness == Readiness::Unconfirmed
+                    && key.code == KeyCode::Char('s')
+                    && key.modifiers.is_empty()
+                    && !panel_input_active(&panel) =>
+            {
+                readiness = check_readiness(replacement.as_ref().unwrap_or(http)).await;
+                note = readiness.note();
+            }
             SettingsAction::None => {}
             SettingsAction::PreviewInterface(doc) => {
                 // 实时预览：背板的调色板每帧从 `config` 现算，下一帧就是新颜色。
@@ -364,8 +374,8 @@ where
                 gateway_dirty,
                 interface_dirty,
             } => {
-                let (save_note, ready) = save_once(
-                    http,
+                let result = save_once(
+                    replacement.as_ref().unwrap_or(http),
                     &mut panel,
                     gateway,
                     base,
@@ -374,20 +384,17 @@ where
                     interface_dirty,
                 )
                 .await;
-                note = save_note;
-                if gateway_dirty {
-                    gateway_ready = ready;
+                note = result.note;
+                if let Some(client) = result.replacement {
+                    replacement = Some(client);
                 }
-                if gateway_ready && panel.dirty_count() == 0 {
-                    if !gateway_dirty {
-                        note = Note::ok("✓ 配置就绪，正在启动…");
-                    }
-                    if let Some(saved) = panel.saved_interface() {
-                        *config = crate::config::store::appconfig_from_doc(saved);
-                    }
-                    draw_setup_frame(terminal, &mut panel, config, &note, false)?;
-                    tokio::time::sleep(READY_DWELL).await;
-                    return Ok(SetupOutcome::Ready);
+                if let Some(status) = result.readiness {
+                    readiness = status;
+                } else if readiness == Readiness::Unconfirmed && panel.dirty_count() == 0 {
+                    readiness = check_readiness(replacement.as_ref().unwrap_or(http)).await;
+                    note = readiness.note();
+                } else if readiness == Readiness::Ready && panel.dirty_count() == 0 {
+                    note = readiness.note();
                 }
             }
             // setup 里没有可重启的会话/连接，网关此刻正服务着这条修复请求；忽略——
@@ -399,7 +406,8 @@ where
             // 面板是 setup 唯一的 UI：关掉它 = 退出。
             SettingsAction::Close { .. } => return Ok(SetupOutcome::Quit),
             SettingsAction::Reload => {
-                let (new_schema, new_state) = tokio::join!(http.schema(), http.get());
+                let current = replacement.as_ref().unwrap_or(http);
+                let (new_schema, new_state) = tokio::join!(current.schema(), current.get());
                 match (new_schema, new_state) {
                     (Ok(new_schema), Ok(new_state)) => {
                         panel.apply_snapshot(&new_schema, new_state);
@@ -410,7 +418,19 @@ where
                     *config = crate::config::store::appconfig_from_doc(&source.doc);
                     panel.set_interface(source);
                 }
+                if readiness == Readiness::Unconfirmed {
+                    readiness = check_readiness(current).await;
+                    note = readiness.note();
+                }
             }
+        }
+        if readiness == Readiness::Ready && panel.dirty_count() == 0 {
+            if let Some(saved) = panel.saved_interface() {
+                *config = crate::config::store::appconfig_from_doc(saved);
+            }
+            draw_setup_frame(terminal, &mut panel, config, &note, false)?;
+            tokio::time::sleep(READY_DWELL).await;
+            return Ok(SetupOutcome::Ready);
         }
     }
 }
@@ -460,15 +480,52 @@ fn q_is_quit(panel: &SettingsPanel, key: &KeyEvent) -> bool {
     if key.code != KeyCode::Char('q') || !key.modifiers.is_empty() {
         return false;
     }
-    let panel_busy = panel.edit_state().is_some()
+    !panel_input_active(panel)
+}
+
+fn panel_input_active(panel: &SettingsPanel) -> bool {
+    panel.edit_state().is_some()
         || panel.prompt().is_some()
         || panel.search_query().is_some()
         || panel.choices().is_some()
-        || panel.view() == View::Help;
-    !panel_busy
+        || panel.view() == View::Help
 }
 
-/// 一次 `s`：两半各自执行 + 合并回执；返回 `(状态行, 是否就绪)`。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    Unready,
+    Unconfirmed,
+}
+
+impl Readiness {
+    fn note(self) -> Note {
+        match self {
+            Self::Ready => Note::ok("✓ 配置就绪，正在启动…"),
+            Self::Unready => Note::error("已保存，网关仍未就绪"),
+            Self::Unconfirmed => Note {
+                compact: Some("已保存 · 按 s 重查就绪状态".into()),
+                ..Note::error("已保存，就绪状态未确认 · 按 s 重查")
+            },
+        }
+    }
+}
+
+async fn check_readiness(http: &impl SetupBackend) -> Readiness {
+    match http.status().await {
+        Ok(status) if status.valid => Readiness::Ready,
+        Ok(_) => Readiness::Unready,
+        Err(_) => Readiness::Unconfirmed,
+    }
+}
+
+struct SetupSave<H> {
+    note: Note,
+    readiness: Option<Readiness>,
+    replacement: Option<H>,
+}
+
+/// 一次 `s`：两半各自执行，再合并回执与网关就绪状态。
 ///
 /// 回执是**一行**，但两半的结论谁都不能被谁盖掉：TUI 写入失败、Gateway 失败 /
 /// 未就绪 / 后端 warnings 都进同一个 `parts`，按发生顺序拼起来。
@@ -480,7 +537,7 @@ async fn save_once<H: SetupBackend>(
     interface: Value,
     gateway_dirty: bool,
     interface_dirty: bool,
-) -> (Note, bool) {
+) -> SetupSave<H> {
     /// 一句话里最多拼几条 —— 再多也读不过来（且会被面板宽度裁掉）。
     const MAX_PARTS: usize = 3;
     let mut parts: Vec<String> = Vec::new();
@@ -501,7 +558,9 @@ async fn save_once<H: SetupBackend>(
     let was_setup = panel.setup_mode();
     let mut apply_failed = false;
     let mut gateway_saved: Option<SettingsSetResponse> = None;
-    let mut ready = false;
+    let mut readiness = gateway_dirty.then_some(Readiness::Unready);
+    let mut replacement = None;
+    let mut compact = None;
     if gateway_dirty {
         let request = SettingsSetRequest {
             base: Some(base),
@@ -509,11 +568,26 @@ async fn save_once<H: SetupBackend>(
         };
         match http.set(&request).await {
             Ok(response) => {
-                // 就绪判定：回执的 `setup_mode_exited` 是规范路径，`status.valid` 是兜底
-                // （保存成功 ⇒ 网关就地转入正常模式）。
-                ready = response.ok
-                    && (response.setup_mode_exited
-                        || matches!(http.status().await, Ok(status) if status.valid));
+                if response.ok {
+                    let saved_interface = if interface_ok == Some(true) {
+                        Some(&interface)
+                    } else {
+                        panel.saved_interface()
+                    };
+                    let rebound = saved_interface.map(|doc| http.rebind(doc)).transpose();
+                    readiness = Some(match rebound {
+                        Ok(client) => {
+                            replacement = client.flatten();
+                            if response.setup_mode_exited {
+                                Readiness::Ready
+                            } else {
+                                check_readiness(replacement.as_ref().unwrap_or(http)).await
+                            }
+                        }
+                        Err(_) => Readiness::Unconfirmed,
+                    });
+                }
+                let ready = readiness == Some(Readiness::Ready);
                 if !response.ok {
                     parts.push(format!(
                         "设置未保存：{} 个问题，见问题清单",
@@ -534,14 +608,17 @@ async fn save_once<H: SetupBackend>(
                             .iter()
                             .filter(|item| !item.ok)
                             .collect::<Vec<_>>();
+                        compact = failed
+                            .first()
+                            .map(|item| format!("已保存 · {} 失败", item.name));
                         let mut summary = status.to_string();
                         for item in &failed {
                             summary.push_str(&format!(" · {}", item.name));
                         }
-                        let action = if was_setup && !ready {
-                            "按 s 重试"
-                        } else {
-                            "检查后运行 wing reload 重试"
+                        let action = match readiness {
+                            Some(Readiness::Unconfirmed) => "就绪状态未确认 · 按 s 重查",
+                            Some(Readiness::Unready) if was_setup => "按 s 重试",
+                            _ => "检查后运行 wing reload 重试",
                         };
                         summary.push_str(&format!(" · {action}"));
                         if let Some(detail) =
@@ -553,8 +630,12 @@ async fn save_once<H: SetupBackend>(
                             ));
                         }
                         parts.insert(0, summary);
-                    } else if !ready {
-                        parts.insert(0, "已保存，网关仍未就绪 · 按 s 重试".into());
+                    } else if let Some(status) = readiness.filter(|_| !ready) {
+                        let mut summary = status.note().text;
+                        if status == Readiness::Unready && was_setup {
+                            summary.push_str(" · 按 s 重试");
+                        }
+                        parts.insert(0, summary);
                     }
                 }
                 // 后端的非致命说明（"旧密钥没有保留"之类）必须让用户看见 ——
@@ -601,32 +682,37 @@ async fn save_once<H: SetupBackend>(
         parts.join(" · ")
     };
 
-    if ready && interface_ok == Some(false) {
-        return (Note::error(format!("Gateway 已就绪 · {caveats}")), true);
-    }
-    if ready {
-        // 就绪 + 有要交代的事：把交代缀在就绪句后面（绝不静默吞掉）。
+    let note = if readiness == Some(Readiness::Ready) && interface_ok == Some(false) {
+        Note::error(format!("Gateway 已就绪 · {caveats}"))
+    } else if readiness == Some(Readiness::Ready) {
         let text = if caveats.is_empty() {
             "✓ 配置就绪，正在启动…".to_string()
         } else {
             format!("✓ 配置就绪，正在启动…（{caveats}）")
         };
-        let note = if apply_failed {
+        if apply_failed {
             Note::error(text)
         } else {
             Note::ok(text)
-        };
-        return (note, true);
-    }
-    if caveats.is_empty() {
-        return (Note::ok("设置已保存"), false);
-    }
-    let text = if interface_ok == Some(true) && gateway_dirty && !gateway_saved_ok {
-        format!("Interface 已保存 · {caveats}")
+        }
+    } else if caveats.is_empty() {
+        Note::ok("设置已保存")
+    } else if interface_ok == Some(true) && gateway_dirty && !gateway_saved_ok {
+        Note::error(format!("Interface 已保存 · {caveats}"))
     } else {
-        caveats
+        Note::error(caveats)
     };
-    (Note::error(text), false)
+    if !gateway_dirty && interface_ok == Some(true) {
+        replacement = http.rebind(&interface).ok().flatten();
+    }
+    if compact.is_none() && readiness == Some(Readiness::Unconfirmed) {
+        compact = Readiness::Unconfirmed.note().compact;
+    }
+    SetupSave {
+        note: Note { compact, ..note },
+        readiness,
+        replacement,
+    }
 }
 
 // ===========================================================================
@@ -639,6 +725,9 @@ trait SetupBackend: SettingsApi {
     fn read_interface(&self) -> Option<InterfaceSource>;
     /// Interface 根的本地写盘（原子写 + `.bak`）。
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError>;
+    fn rebind(&self, interface: &Value) -> Result<Option<Self>>
+    where
+        Self: Sized;
     async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure>;
 }
 
@@ -655,6 +744,14 @@ impl SetupBackend for GatewayApiClient {
 
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError> {
         crate::config::store::write_interface_doc(doc)
+    }
+
+    fn rebind(&self, interface: &Value) -> Result<Option<Self>> {
+        let key = interface
+            .get("api_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty());
+        Ok(Some(self.with_api_key(key)?))
     }
 
     async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure> {
@@ -790,7 +887,13 @@ fn draw_note(frame: &mut Frame, area: Rect, palette: &ThemePalette, note: &Note)
         return;
     }
     frame.render_widget(Clear, area);
-    let line = Line::from(Span::styled(note.text.clone(), note.style(palette)));
+    let text =
+        if unicode_width::UnicodeWidthStr::width(note.text.as_str()) > usize::from(area.width) {
+            note.compact.as_ref().unwrap_or(&note.text)
+        } else {
+            &note.text
+        };
+    let line = Line::from(Span::styled(text.as_str(), note.style(palette)));
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
@@ -858,6 +961,7 @@ fn draw_wordmark(frame: &mut Frame, x: u16, top: u16, accent: sprite::Rgb, light
 /// 背板底行的状态行：一句话 + 语气。
 struct Note {
     text: String,
+    compact: Option<String>,
     kind: NoteKind,
 }
 
@@ -877,6 +981,7 @@ impl Note {
     fn info(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Info,
         }
     }
@@ -884,6 +989,7 @@ impl Note {
     fn hint(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Hint,
         }
     }
@@ -891,6 +997,7 @@ impl Note {
     fn ok(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Ok,
         }
     }
@@ -898,6 +1005,7 @@ impl Note {
     fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Error,
         }
     }
@@ -1161,6 +1269,7 @@ mod tests {
                 schema: schema(),
                 state: first_run_state(),
                 status: SettingsStatusResponse {
+                    restart_listener: None,
                     valid: false,
                     setup_mode: false,
                     problems: first_run_state().problems,
@@ -1238,6 +1347,10 @@ mod tests {
                 fingerprint: "fp-tui".into(),
                 backup_path: None,
             })
+        }
+
+        fn rebind(&self, _interface: &Value) -> Result<Option<Self>> {
+            Ok(None)
         }
 
         async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure> {
@@ -1529,6 +1642,7 @@ mod tests {
         let mut backend = FakeBackend::first_run();
         backend.set = Some(saved_response(true, "fp-2", false, vec![]));
         backend.status = SettingsStatusResponse {
+            restart_listener: None,
             valid: true,
             setup_mode: false,
             problems: vec![],
@@ -1647,31 +1761,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operational_gateway_repair_reports_partial_reload_on_the_ready_frame() {
-        let mut backend = FakeBackend::first_run();
-        backend.status.valid = true;
-        let mut response = saved_response(true, "fp-2", false, vec![]);
-        response.reload = Some(wing_api_client::models::ReloadResponse {
-            diagnostics_redacted: true,
-            ok: false,
-            results: vec![wing_api_client::models::ReloadResultItem {
-                name: "provider".into(),
-                ok: false,
-                detail: None,
-            }],
-            pending_restart_paths: Some(vec![]),
-            new_session_defaults_changed: false,
-        });
-        backend.set = Some(response);
-        let (outcome, terminal) = run(
-            &backend,
-            &mut AppConfig::default(),
-            edit_and_save("enabled"),
-        )
-        .await;
-        assert_eq!(outcome, SetupOutcome::Ready);
-        let screen = screen(&terminal);
-        assert!(screen.contains("部分设置未生效 · provider"), "{screen}");
+    async fn partial_apply_shows_the_failed_step_on_wide_and_narrow_ready_frames() {
+        for was_setup in [false, true] {
+            for (width, height) in [(120, 40), (32, 12)] {
+                let mut backend = FakeBackend::first_run();
+                backend.state.setup_mode = was_setup;
+                backend.status.valid = true;
+                let step = if was_setup {
+                    "prompt commands"
+                } else {
+                    "provider"
+                };
+                let mut response = saved_response(true, "fp-2", was_setup, vec![]);
+                response.reload = Some(wing_api_client::models::ReloadResponse {
+                    diagnostics_redacted: true,
+                    ok: false,
+                    results: vec![wing_api_client::models::ReloadResultItem {
+                        name: step.into(),
+                        ok: false,
+                        detail: None,
+                    }],
+                    pending_restart_paths: Some(vec![]),
+                    new_session_defaults_changed: false,
+                });
+                backend.set = Some(response);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let outcome = run_setup_tui_with(
+                    &mut terminal,
+                    &backend,
+                    &mut AppConfig::default(),
+                    &endpoint(),
+                    &mut script(edit_and_save("enabled")),
+                )
+                .await
+                .unwrap();
+                assert_eq!(outcome, SetupOutcome::Ready);
+                let screen = screen(&terminal);
+                for fragment in ["已保存", step, "失败"] {
+                    if !was_setup && width > 32 && fragment == "失败" {
+                        assert!(screen.contains("部分设置未生效"), "{screen}");
+                    } else {
+                        assert!(screen.contains(fragment), "{screen}");
+                    }
+                }
+            }
+        }
     }
 
     // ── ⑤ Ctrl+C 双击 → Quit ────────────────────────────────────
@@ -1943,6 +2077,7 @@ mod tests {
         // 配置可用。
         assert!(matches!(
             classify_preflight(Ok(SettingsStatusResponse {
+                restart_listener: None,
                 valid: true,
                 setup_mode: false,
                 problems: vec![],
@@ -1953,6 +2088,7 @@ mod tests {
 
         // 配置不可用（降级启动）。
         match classify_preflight(Ok(SettingsStatusResponse {
+            restart_listener: None,
             valid: false,
             setup_mode: false,
             problems: vec![problem("providers", "empty_list", "空")],

@@ -172,6 +172,15 @@ async def test_cors_origins_change_names_the_restart_path(probe: Probe) -> None:
         headers = await _preflight_headers(restarted, preflight)
         assert headers.get("access-control-allow-origin") == CORS_ORIGIN
         assert (await restarted.reload())["pending_restart_paths"] == []
+        status = await restarted.request("GET", "/api/settings/status")
+        assert status["restart_listener"]["port"] == probe.env.port
+        file = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
+        file_port = file["gateway"]["port"]
+        assert file_port != probe.env.port
+        file["gateway"]["port"] = _free_port()
+        probe.env.config_path.write_text(yaml.safe_dump(file), encoding="utf-8")
+        status = await restarted.request("GET", "/api/settings/status")
+        assert status["restart_listener"]["port"] == file["gateway"]["port"]
 
 
 @pytest.mark.asyncio
@@ -214,3 +223,37 @@ async def test_manual_restart_changes_persist_across_reloads_and_invalid_config(
     config_path.write_text(original, encoding="utf-8")
     restored = await http.reload()
     assert restored["ok"] and restored["pending_restart_paths"] == [], restored
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_a_file_that_cannot_cold_boot(probe: Probe) -> None:
+    http = probe.driver_required.http
+    path = probe.env.config_path
+    current = yaml.safe_load(path.read_text(encoding="utf-8"))
+    current["gateway"]["port"] = _free_port()
+    clean = yaml.safe_dump(current)
+    path.write_text(clean, encoding="utf-8")
+    assert (await http.reload())["pending_restart_paths"] == ["gateway.port"]
+    validated = await http.request("GET", "/api/settings/status")
+    assert validated["valid"]
+    for invalid in (
+        f"123: unknown root key\n{clean}",
+        yaml.safe_dump({**current, "gateway": {"port": 70000}}),
+    ):
+        path.write_text(invalid, encoding="utf-8")
+        status = await http.request("GET", "/api/settings/status")
+        assert not status["valid"] and not status["setup_mode"]
+        assert status["problems"] and status["restart_listener"] is None
+        view = await http.request("GET", "/api/settings/get")
+        assert view["problems"] and view["values"]["providers"]
+        assert view["pending_restart_paths"] == ["gateway.port"]
+        with pytest.raises(DriverHttpError) as refusal:
+            await http.request(
+                "POST", f"/api/shutdown?settings_fingerprint={validated['fingerprint']}"
+            )
+        assert refusal.value.status == 409
+        assert (await http.health())["status"] == "ok"
+    path.write_text(clean, encoding="utf-8")
+    repaired = await http.request("GET", "/api/settings/status")
+    assert repaired["valid"] and repaired["fingerprint"] == validated["fingerprint"]
+    assert repaired["restart_listener"]["port"] == current["gateway"]["port"]

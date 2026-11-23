@@ -30,12 +30,13 @@ from wing.config import (
     build_groups,
     get_config_path,
 )
+from wing.config.boot import validate_boot_document
 from wing.config.document import (
     ConfigDocumentError,
     mask_secrets,
-    problems_of,
-    read_document,
+    read_raw_document,
     secret_states,
+    sparse_document,
 )
 from wing.gateway.protocol import (
     ErrorResponse,
@@ -47,6 +48,7 @@ from wing.gateway.protocol import (
     SettingsStatusResponse,
     error_response,
 )
+from wing.gateway.protocol.settings import RestartListener
 from wing.gateway.projection import (
     build_settings_apply_response,
     build_settings_problem,
@@ -70,10 +72,7 @@ def _with_boot_problems(
 ) -> list[ConfigProblem]:
     """降级期把「启动为什么没起来」并进问题清单。
 
-    ``read_document`` 的口径里有些形态（顶层非字符串键）是**未知键**——进 ``extra``
-    原样保留、不算错误；但启动读取更严（``Config(**parsed)`` / 运行时装配），
-    网关确实因为它没起来。不并进来的话用户会看到「invalid 但一条问题都没有」
-    ——setup 首屏就是空清单。
+    磁盘校验无法报告运行时装配错误。降级期使用启动快照补充这些问题。
 
     去重按 ``(path, kind)``（与面板的合并口径一致）：同一处问题磁盘视图能说得更细
     时以它为准（它描述的是**当前**文件），启动快照只补磁盘视图答不出来的那一类。
@@ -135,12 +134,13 @@ async def settings_get(request: Request) -> SettingsGetResponse:
     """
     server = get_server(request)
     setup_mode = server.in_setup_mode
-    config_path = str(get_config_path())
+    path = get_config_path()
+    config_path = str(path)
     # 一次建树喂三处：读盘切分（read_document）、掩码 / 密文状态、问题清单。
     catalog = build_catalog()
     pending_restart_paths = server.pending_restart_paths()
     try:
-        doc, fingerprint = read_document(catalog=catalog)
+        parsed, fingerprint = read_raw_document(path)
     except ConfigDocumentError as exc:
         return SettingsGetResponse(
             values={},
@@ -152,11 +152,13 @@ async def settings_get(request: Request) -> SettingsGetResponse:
             pending_restart_paths=pending_restart_paths,
         )
 
+    boot = validate_boot_document(parsed, path)
+    doc = sparse_document(parsed, catalog)
     return SettingsGetResponse(
         values=mask_secrets(doc, catalog),
         secrets=build_settings_secret_states(secret_states(doc, catalog)),
         fingerprint=fingerprint.value,
-        problems=_projected_problems(server, problems_of(doc, catalog=catalog)),
+        problems=_projected_problems(server, boot.problems),
         setup_mode=setup_mode,
         config_path=config_path,
         pending_restart_paths=pending_restart_paths,
@@ -180,8 +182,9 @@ async def settings_status(request: Request) -> SettingsStatusResponse:
     """
     server = get_server(request)
     setup_mode = server.in_setup_mode
+    path = get_config_path()
     try:
-        doc, fingerprint = read_document()
+        parsed, fingerprint = read_raw_document(path)
     except ConfigDocumentError as exc:
         return SettingsStatusResponse(
             valid=False,
@@ -190,9 +193,16 @@ async def settings_status(request: Request) -> SettingsStatusResponse:
             fingerprint=exc.fingerprint,
         )
 
-    problems = _projected_problems(server, problems_of(doc))
+    boot = validate_boot_document(parsed, path)
+    problems = _projected_problems(server, boot.problems)
+    valid = not setup_mode and boot.config is not None
+    listener = None
+    if not setup_mode and boot.config is not None:
+        host, port = server.restart_listener(boot.config.gateway)
+        listener = RestartListener(host=host, port=port)
     return SettingsStatusResponse(
-        valid=(not setup_mode) and not problems,
+        valid=valid,
+        restart_listener=listener,
         setup_mode=setup_mode,
         problems=problems,
         fingerprint=fingerprint.value,

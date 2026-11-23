@@ -113,6 +113,11 @@ impl GatewayClient {
         })
     }
 
+    /// Rebuild this client for the same endpoint with a different credential.
+    pub fn with_api_key(&self, api_key: Option<&str>) -> Result<Self, ApiClientError> {
+        Self::new(&self.base_url, api_key)
+    }
+
     /// 使用默认地址 (`http://127.0.0.1:{DEFAULT_PORT}`) 创建 client。
     pub fn localhost(api_key: Option<&str>) -> Result<Self, ApiClientError> {
         Self::new(format!("http://127.0.0.1:{DEFAULT_PORT}"), api_key)
@@ -774,11 +779,22 @@ impl GatewayClient {
 
     /// 优雅关闭 Gateway。
     pub async fn shutdown(&self) -> Result<(), ApiClientError> {
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, "/api/shutdown"))
-            .send()
-            .await?;
+        self.shutdown_request(None).await
+    }
+
+    pub async fn shutdown_if_config_unchanged(
+        &self,
+        fingerprint: &str,
+    ) -> Result<(), ApiClientError> {
+        self.shutdown_request(Some(fingerprint)).await
+    }
+
+    async fn shutdown_request(&self, fingerprint: Option<&str>) -> Result<(), ApiClientError> {
+        let mut request = self.http.post(format!("{}/api/shutdown", self.base_url));
+        if let Some(fingerprint) = fingerprint {
+            request = request.query(&[("settings_fingerprint", fingerprint)]);
+        }
+        let resp = request.send().await?;
 
         if !resp.status().is_success() {
             return Err(extract_api_error(resp).await);

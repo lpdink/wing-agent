@@ -370,6 +370,14 @@ class GatewayServer:
             "sessions.archive.startup_delay_seconds": config.sessions.archive.startup_delay_seconds,
         }
 
+    def restart_listener(self, config: GatewayConfig) -> tuple[str, int]:
+        """Keep live launch overrides on axes whose configured values did not change."""
+        file_host, file_port = self._configured_listener
+        return (
+            self.host if config.host == file_host else config.host,
+            self.port if config.port == file_port else config.port,
+        )
+
     def pending_restart_paths(self) -> list[str] | None:
         if self.in_setup_mode:
             return None
@@ -379,9 +387,10 @@ class GatewayServer:
             for path, value in self._schedule_settings(config).items()
             if value != self._running_schedules[path]
         ]
-        if config.gateway.host not in (self.host, self._configured_listener[0]):
+        host, port = self.restart_listener(config.gateway)
+        if host != self.host:
             paths.append("gateway.host")
-        if config.gateway.port not in (self.port, self._configured_listener[1]):
+        if port != self.port:
             paths.append("gateway.port")
         if frozenset(config.gateway.cors.origins) != self._running_cors_origins:
             paths.append("gateway.cors.origins")

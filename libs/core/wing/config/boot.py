@@ -31,10 +31,11 @@ from ..common.fs import atomic_write_text
 from . import loader
 from .catalog import build_catalog
 from .document import (
+    ConfigDocumentError,
     SparseDocument,
-    invalid_yaml_message,
     malformed_document_problem,
     problems_of,
+    read_raw_document,
 )
 from .emit import default_document, emit_config_yaml
 from .models import Config, GatewayConfig
@@ -149,38 +150,30 @@ def _read_boot_config(path: Path) -> BootResult:
         )
 
     try:
-        raw_bytes = path.read_bytes()
+        parsed, _ = read_raw_document(path)
+    except ConfigDocumentError as exc:
+        return _failure(path, BootFailure.PARSE_ERROR, str(exc))
     except OSError as exc:
         return _failure(path, BootFailure.PARSE_ERROR, f"config.yaml 读不出来：{exc}")
+    result = validate_boot_document(parsed, path)
+    if result.ok:
+        loader._config = result.config
+    return result
 
-    try:
-        parsed = yaml.safe_load(raw_bytes.decode("utf-8"))
-    except (yaml.YAMLError, UnicodeDecodeError) as exc:
-        return _failure(path, BootFailure.PARSE_ERROR, invalid_yaml_message(exc))
 
-    if parsed is None:
-        parsed = {}
-    if not isinstance(parsed, dict):
-        return _failure(
-            path,
-            BootFailure.PARSE_ERROR,
-            f"config.yaml 顶层必须是映射，实得 {type(parsed).__name__}",
-        )
-
+def validate_boot_document(parsed: dict[Any, Any], path: Path) -> BootResult:
+    """Validate the original mapping without installing config or writing a template."""
     # 顶层键不是字符串（YAML 把裸数字 / bool / 日期解析成对应类型）：`Config(**parsed)`
     # 会抛 `TypeError: keywords must be strings`，而 pydantic 的 ValidationError
     # 路径根本进不去。先给一条**说得清**的问题，而不是让用户看 TypeError。
     # endpoint 照常取——Rust 侧 serde 对结构体的非字符串键是**跳过**（实测：`1: oops`
     # 不影响它读到 `gateway.port`），两边必须落在同一个端口上。
     endpoint = _endpoint_of(parsed)
-    bad_keys = [key for key in parsed if not isinstance(key, str)]
-    if bad_keys:
-        shown = ", ".join(str(key) for key in bad_keys[:5])
-        more = "…" if len(bad_keys) > 5 else ""
+    if any(not isinstance(key, str) for key in parsed):
         return _failure(
             path,
             BootFailure.INVALID,
-            f"config.yaml 顶层键必须是字符串，实得：{shown}{more}",
+            "config.yaml 顶层键必须是字符串（请为数字等键加引号）",
             endpoint=endpoint,
         )
 
@@ -192,13 +185,13 @@ def _read_boot_config(path: Path) -> BootResult:
         return BootResult(
             ok=False,
             config=None,
-            problems=problems_of(SparseDocument(data=parsed)),
+            problems=problems_of(SparseDocument(data=parsed))
+            or [_problem("config.yaml 无法通过启动校验")],
             reason=BootFailure.INVALID,
             path=path,
             endpoint=endpoint,
         )
 
-    loader._config = config
     return BootResult(
         ok=True, config=config, problems=[], reason=None, path=path, endpoint=endpoint
     )

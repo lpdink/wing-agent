@@ -271,6 +271,7 @@ impl FakeBackend {
             }),
             get: Ok(get_response(values)),
             status: Ok(SettingsStatusResponse {
+                restart_listener: None,
                 valid: true,
                 setup_mode: false,
                 problems: Vec::new(),
