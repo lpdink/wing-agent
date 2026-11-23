@@ -110,6 +110,8 @@ pub struct App {
     pub input: InputArea,
     pub session_id: String,
     user_input_sync: bool,
+    /// The subscribed session whose view has yet to be applied.
+    pending_session_snapshot: Option<String>,
     draft_recovery_epoch: u64,
     /// In-app text selection — one gesture, anchored in the *content*
     /// coordinates of the region it started in (chat band or composer), with
@@ -290,6 +292,7 @@ impl App {
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
             user_input_sync: false,
+            pending_session_snapshot: None,
             draft_recovery_epoch: 0,
             selection: SelectionSession::default(),
             should_quit: false,
@@ -641,6 +644,20 @@ impl App {
     /// Drain all pending intents. Called by the runner after each draw cycle.
     pub fn drain_intents(&mut self) -> Vec<AppIntent> {
         std::mem::take(&mut self.intents)
+    }
+
+    fn await_session_snapshot(&mut self, session_id: String) {
+        self.pending_session_snapshot = Some(session_id);
+    }
+
+    fn subscription_target(&self) -> &str {
+        self.pending_session_snapshot
+            .as_deref()
+            .unwrap_or(&self.session_id)
+    }
+
+    fn user_input_ready(&self) -> bool {
+        self.connected && self.pending_session_snapshot.is_none()
     }
 
     /// Update the gateway connection state.
@@ -1247,7 +1264,8 @@ pub async fn run_app(
     // （与上面的图像探测同款取舍）。
     let _ = crate::tui::stdin_proxy::settle_paste_channel();
 
-    let mut app = App::with_images(session_id, config, launch_workspace, images);
+    let mut app = App::with_images(session_id.clone(), config, launch_workspace, images);
+    app.await_session_snapshot(session_id);
     // Initial program-status record: the session starts at rest (a mid-turn
     // resume replaces this with `working` when its SyncSession lands).
     app.set_program_status(State::Idle, None);
@@ -1508,9 +1526,10 @@ pub async fn run_app(
                     // The pushed SyncSession updates App state (session_id,
                     // chat replay), exactly like the `/new` command.
                     let workspace = app.launch_workspace.clone();
-                    let lost_session = app.session_id.clone();
-                    match t.recover_session(&app.session_id, workspace.as_deref()).await {
-                        Ok(recovery) => {
+                    let lost_session = app.subscription_target().to_owned();
+                    match t.recover_session(&lost_session, workspace.as_deref()).await {
+                        Ok((session_id, recovery)) => {
+                            app.await_session_snapshot(session_id);
                             recovery_pending = false;
                             app.set_connected(true);
                             app.clear_toast();

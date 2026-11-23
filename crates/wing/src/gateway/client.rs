@@ -10,11 +10,11 @@ use anyhow::Context;
 use anyhow::Result;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::error::CapacityError;
+use tokio_tungstenite::tungstenite::error::{CapacityError, ProtocolError};
 
 use crate::gateway::chunk::Limits;
 use crate::gateway::chunk::Outcome;
@@ -119,10 +119,21 @@ impl fmt::Display for CloseReason {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum MessageWriteError {
+    Unsent(String),
+    Uncertain(String),
+}
+
+struct OutboundRequest {
+    request: ClientRequest,
+    receipt: Option<oneshot::Sender<Result<(), MessageWriteError>>>,
+}
+
 /// Gateway WebSocket client.
 pub struct GatewayClient {
     /// Channel for sending requests to the WS write task.
-    tx: mpsc::Sender<ClientRequest>,
+    tx: mpsc::Sender<OutboundRequest>,
     /// Channel for receiving events from the WS read task.
     rx: mpsc::Receiver<WingEvent>,
     /// Connection info from the initial handshake.
@@ -212,26 +223,63 @@ impl GatewayClient {
         };
 
         // Create channels for async communication with the WS tasks.
-        let (tx, mut rx) = mpsc::channel::<ClientRequest>(64);
+        let (tx, mut rx) = mpsc::channel::<OutboundRequest>(64);
         let (event_tx, event_rx) = mpsc::channel::<WingEvent>(256);
         // Shared with the read task: why the read task ended. First write wins
         // (the read task exits exactly once), reads are lock-free.
         let close_reason: Arc<OnceLock<CloseReason>> = Arc::new(OnceLock::new());
 
-        // Spawn write task.
+        // The reader owns connection lifetime. Outstanding requests that the
+        // writer never dequeues lose their receipt and are definitely unsent.
+        let (reader_closed_tx, mut reader_closed) = oneshot::channel();
         tokio::spawn(async move {
-            while let Some(req) = rx.recv().await {
-                match serde_json::to_string(&req) {
-                    Ok(json) => {
-                        if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
-                            tracing::error!("failed to send to gateway: {e}");
-                            break;
+            loop {
+                let OutboundRequest { request, receipt } = tokio::select! {
+                    biased;
+                    _ = &mut reader_closed => break,
+                    request = rx.recv() => {
+                        let Some(request) = request else { break };
+                        request
+                    },
+                };
+                let json = match serde_json::to_string(&request) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to serialize request");
+                        if let Some(receipt) = receipt {
+                            let _ = receipt.send(Err(MessageWriteError::Unsent(error.to_string())));
                         }
-                        tracing::debug!(request_id = %req.request_id, "sent request");
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::error!("failed to serialize request: {e}");
-                    }
+                };
+                let result = tokio::select! {
+                    biased;
+                    result = async {
+                        ws_sink.feed(Message::Text(json.into())).await.map_err(|error| {
+                            match error {
+                                WsError::AlreadyClosed
+                                | WsError::WriteBufferFull(_)
+                                | WsError::Protocol(ProtocolError::SendAfterClosing) => {
+                                    MessageWriteError::Unsent(error.to_string())
+                                }
+                                _ => MessageWriteError::Uncertain(error.to_string()),
+                            }
+                        })?;
+                        ws_sink.flush().await.map_err(|error| MessageWriteError::Uncertain(error.to_string()))
+                    } => result,
+                    _ = &mut reader_closed => Err(MessageWriteError::Uncertain("Connection closed during write".into())),
+                };
+                let write_failed = result.is_err();
+                if let Err(error) = &result {
+                    tracing::error!(?error, request_id = %request.request_id, "failed to write request");
+                } else {
+                    tracing::debug!(request_id = %request.request_id, "sent request");
+                }
+                if let Some(receipt) = receipt {
+                    let _ = receipt.send(result);
+                }
+                if write_failed {
+                    break;
                 }
             }
             tracing::debug!("write task exiting");
@@ -359,6 +407,7 @@ impl GatewayClient {
                 _ => tracing::warn!("read task exiting: {reason}"),
             }
             let _ = reason_slot.set(reason);
+            let _ = reader_closed_tx.send(());
         });
 
         Ok(Self {
@@ -433,7 +482,7 @@ impl GatewayClient {
 /// [`GatewayClient::send_message`] 逐字一致——后者就是转发到这里。
 #[derive(Clone)]
 pub struct RequestSender {
-    tx: mpsc::Sender<ClientRequest>,
+    tx: mpsc::Sender<OutboundRequest>,
 }
 
 impl RequestSender {
@@ -446,7 +495,7 @@ impl RequestSender {
         request_id: String,
         media: Option<Vec<MediaRef>>,
     ) -> Result<()> {
-        let req = ClientRequest {
+        let request = ClientRequest {
             request_id,
             session_id: session_id.to_string(),
             content: content.to_string(),
@@ -454,10 +503,32 @@ impl RequestSender {
             media,
         };
         self.tx
-            .send(req)
+            .send(OutboundRequest {
+                request,
+                receipt: None,
+            })
             .await
             .context("gateway write channel closed")?;
         Ok(())
+    }
+    /// Await the TUI writer's outcome before releasing a recoverable draft.
+    pub(crate) async fn send_confirmed(
+        &self,
+        request: ClientRequest,
+    ) -> Result<(), MessageWriteError> {
+        let (receipt, written) = oneshot::channel();
+        self.tx
+            .send(OutboundRequest {
+                request,
+                receipt: Some(receipt),
+            })
+            .await
+            .map_err(|_| MessageWriteError::Unsent("Gateway write channel closed".into()))?;
+        written.await.unwrap_or_else(|_| {
+            Err(MessageWriteError::Unsent(
+                "Gateway writer stopped before sending".into(),
+            ))
+        })
     }
 }
 

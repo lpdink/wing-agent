@@ -20,7 +20,8 @@ use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
 use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
-use crate::protocol::MediaRef;
+use crate::gateway::client::MessageWriteError;
+use crate::protocol::{ClientRequest, MediaRef};
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
 use crate::tui::WingTerminal;
 use crate::ui::toast::Toast;
@@ -631,53 +632,39 @@ pub async fn execute_intent(
     }
 }
 
-/// 一条用户消息的完整发送：带图先把每张上传成引用，再把消息（含引用）交给网关。
-///
-/// 从 `execute_intent` 抽出来是为了可测——`execute_intent` 需要 `WingTerminal`
-/// （真实 stdout），单测造不出来（同 `apply_update_session` 的抽取理由）。
-///
-/// **失败契约**：上传或 WS 发送任一步失败 ⇒ 整条**不发**（不发送半截消息——
-/// 少一张图的引用列表会被当成完整输入）。调用方拿 `Err(reason)` 去把提交产物**还给
-/// 草稿**（后台任务把它包成回执 → `App::restore_failed_send` 从 pending 队列取回文本
-/// 与图片 chip + warning toast）；已经上传成功的图留在存储里（政策：媒体永不删除）。
-///
-/// **返回**：`Ok(())` = 帧已投进 WS 写通道（成功路径不动 pending：条目等后端的
-/// commit 事件入历史）；`Err(reason)` = 整条没发出去（无连接 / 上传失败 /
-/// WS 写不出去），`reason` 是给 toast 的文案。
-pub(super) async fn deliver_user_message(
+/// Upload every attachment before handing the complete request to the writer.
+async fn deliver_user_message(
     http: &wing_api_client::GatewayClient,
     ws: &crate::gateway::RequestSender,
     message: &mut OutgoingMessage,
-) -> Result<(), String> {
-    // 图片 move 出去（不克隆压缩产物）：回执只需要剩下的两个 id。
+) -> Result<(), MessageWriteError> {
     let media = if message.images.is_empty() {
-        // 纯文本：帧里没有 `media` 键，行为与引入图片之前逐字节相同。
         None
     } else {
         let images = std::mem::take(&mut message.images);
-        match upload_images(http, &message.session_id, images).await {
-            Ok(refs) => Some(refs),
-            Err(e) => {
-                tracing::warn!("image upload failed: {e}");
-                return Err(format!("Image upload failed: {e}"));
-            }
-        }
-    };
-
-    if let Err(e) = ws
-        .send_message(
-            &message.session_id,
-            &message.content,
-            message.tool_call_id.take(),
-            message.request_id.clone(),
-            media,
+        Some(
+            upload_images(http, &message.session_id, images)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "image upload failed");
+                    MessageWriteError::Unsent(format!("Image upload failed: {error}"))
+                })?,
         )
-        .await
-    {
-        tracing::error!("failed to send message: {e}");
-        return Err(format!("Send failed: {e}"));
-    }
-    Ok(())
+    };
+    ws.send_confirmed(ClientRequest {
+        session_id: message.session_id.clone(),
+        content: std::mem::take(&mut message.content),
+        tool_call_id: message.tool_call_id.take(),
+        request_id: message.request_id.clone(),
+        media,
+    })
+    .await
+    .map_err(|error| match error {
+        MessageWriteError::Unsent(reason) => {
+            MessageWriteError::Unsent(format!("Send failed: {reason}"))
+        }
+        other => other,
+    })
 }
 
 /// 一条待发消息的载荷：`SendMessage` 的字段 + 目标会话，总是整体传递（也把下面几个
@@ -728,7 +715,7 @@ fn spawn_fetch<T, F, Fut>(
 
 /// 三个「换会话」意图（新建 / 恢复 / fork）的差别只在文案。
 #[derive(Clone, Copy)]
-enum Switch {
+pub(super) enum Switch {
     Create,
     Resume,
     Fork,
@@ -755,14 +742,18 @@ impl Switch {
 }
 
 /// 换会话成功后的统一收尾：先切订阅，再作废会话缓存（顺序即契约）。
-async fn adopt_new_session(
+pub(super) async fn adopt_new_session(
     app: &mut App,
-    t: &mut Transport,
+    t: &Transport,
     old_session_id: String,
     new_sid: String,
     switch: Switch,
 ) {
-    t.switch_session(&old_session_id, &new_sid).await;
+    if let Err(error) = t.switch_session(&old_session_id, &new_sid).await {
+        report_switch_failure(app, switch, format_args!("{error:#}"));
+        return;
+    }
+    app.await_session_snapshot(new_sid.clone());
     app.invalidate_session_cache();
     // 压缩在飞的是**旧**会话（回执已认不到这个会话），本地标记跟着作废。
     app.finish_compaction();
@@ -890,7 +881,7 @@ pub(super) fn dispatch_send_message(
     message: OutgoingMessage,
     fetch_tx: mpsc::Sender<FetchResult>,
 ) {
-    let Some(transport) = transport.filter(|_| app.connected) else {
+    let Some(transport) = transport.filter(|_| app.user_input_ready()) else {
         // A new socket can exist before recovery subscribes to the session.
         // Keep unsent input in the draft until the event stream is ready.
         // Gateway connection lost — nothing left the client, so the content
@@ -930,18 +921,24 @@ fn spawn_send_message(
             // 上一条的成败由它自己的回执处理，这里只接顺序。
             let _ = previous.await;
         }
-        if let Err(reason) = deliver_user_message(&http, &ws, &mut message).await {
-            let _ = fetch_tx
-                .send(FetchResult {
-                    session_id: message.session_id,
-                    payload: FetchPayload::SendFailed {
-                        request_id: message.request_id,
-                        reason,
-                        draft,
-                    },
-                })
-                .await;
-        }
+        let payload = match deliver_user_message(&http, &ws, &mut message).await {
+            Ok(()) => return,
+            Err(MessageWriteError::Unsent(reason)) => FetchPayload::SendFailed {
+                request_id: message.request_id,
+                reason,
+                draft,
+            },
+            Err(MessageWriteError::Uncertain(reason)) => FetchPayload::Toast {
+                message: format!("Message delivery unknown: {reason}"),
+                is_error: true,
+            },
+        };
+        let _ = fetch_tx
+            .send(FetchResult {
+                session_id: message.session_id,
+                payload,
+            })
+            .await;
     });
     *send_chain = Some(handle);
 }

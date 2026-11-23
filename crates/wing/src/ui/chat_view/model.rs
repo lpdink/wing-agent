@@ -93,7 +93,7 @@ impl ChatView {
                 .mutate(|cell| *cell = ChatCell::PendingUserMessage(body));
         }
         if !same_body || index != target {
-            self.rebuilds = self.rebuilds.wrapping_add(1);
+            self.pending_revision = self.pending_revision.wrapping_add(1);
         }
         self.pending.insert(target, pending);
     }
@@ -434,9 +434,14 @@ impl ChatView {
         // 不是"这一帧怎么看"。
     }
 
-    /// Revision of structural changes that may preserve cell counts.
+    /// Number of full transcript rebuilds.
     pub fn structure_epoch(&self) -> u64 {
         self.rebuilds
+    }
+
+    /// Revision of queue changes that may preserve cell counts.
+    pub(crate) fn pending_revision(&self) -> u64 {
+        self.pending_revision
     }
 
     /// Return the raw text of the last assistant message, if any.

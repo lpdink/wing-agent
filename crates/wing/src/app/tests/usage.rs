@@ -133,6 +133,7 @@ fn a_switch_without_usage_zeroes_the_counters() {
     app.handle_event(sync_with("test-session", Some(usage(100, 20, 40))));
     assert_eq!(counters(&app), (100, 20, 40));
 
+    app.await_session_snapshot("other-session".into());
     app.handle_event(sync_with("other-session", None));
     assert_eq!(app.session_id, "other-session");
     assert_eq!(counters(&app), (0, 0, 0), "换会话不夹带上一个会话的累计");

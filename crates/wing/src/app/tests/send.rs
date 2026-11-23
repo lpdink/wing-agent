@@ -9,6 +9,7 @@
 //! 以及任一步失败时"整条不发"。进生产的路径是 `dispatch_send_message`（后台任务 + 失败
 //! 回执），测试按 `run_app` 的接线把回执喂回 `handle_fetch_result`。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -18,7 +19,7 @@ use futures_util::StreamExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::support::*;
@@ -55,7 +56,10 @@ enum UploadRoute {
     Ok,
     /// 同 `Ok`，但每次应答先等 `delay_ms`（慢链路：把「后台发送不阻塞调用方」与
     /// 「两条快速提交保持顺序」的时序差做成确定性的）。
-    OkDelayed { delay_ms: u64 },
+    OkDelayed {
+        delay_ms: u64,
+    },
+    OkAfter(Arc<Notify>),
     /// 前 `after_ok` 次成功，之后按 `(status, body)` 失败。
     FailAfter {
         after_ok: usize,
@@ -64,29 +68,28 @@ enum UploadRoute {
     },
 }
 
+type SessionReplies = HashMap<&'static str, (u16, &'static str)>;
+
 /// 进程内假网关（WS + HTTP 两个临时端口）。
 struct FakeGateway {
     ws_url: String,
     http_base: String,
     frames: Arc<Mutex<Vec<String>>>,
-    events: broadcast::Sender<String>,
+    events: broadcast::Sender<Message>,
+    session_requests: Arc<Mutex<Vec<String>>>,
     uploads: Arc<Mutex<Vec<Upload>>>,
     route: Arc<Mutex<UploadRoute>>,
 }
 
 impl FakeGateway {
     async fn start() -> Self {
-        Self::start_with_ws(true).await
+        Self::start_with_replies(HashMap::new()).await
     }
 
-    /// WS 在握手后立刻发 Close 并断开（驱动"发不出去"的失败契约）。
-    async fn start_with_a_dead_ws() -> Self {
-        Self::start_with_ws(false).await
-    }
-
-    async fn start_with_ws(keep_ws_alive: bool) -> Self {
+    async fn start_with_replies(replies: SessionReplies) -> Self {
         let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let (events, _) = broadcast::channel::<String>(16);
+        let (events, _) = broadcast::channel::<Message>(16);
+        let session_requests = Arc::new(Mutex::new(Vec::new()));
         let uploads: Arc<Mutex<Vec<Upload>>> = Arc::new(Mutex::new(Vec::new()));
         let route = Arc::new(Mutex::new(UploadRoute::Ok));
 
@@ -109,12 +112,6 @@ impl FakeGateway {
                         if ws.send(Message::Text(hello.into())).await.is_err() {
                             return;
                         }
-                        if !keep_ws_alive {
-                            // 死连接的确定性造法：Close 帧 + 立刻断开。
-                            let _ = ws.send(Message::Close(None)).await;
-                            let _ = ws.close(None).await;
-                            return;
-                        }
                         loop {
                             tokio::select! {
                                 incoming = ws.next() => {
@@ -125,7 +122,8 @@ impl FakeGateway {
                                 }
                                 frame = incoming_events.recv() => {
                                     let Ok(frame) = frame else { break };
-                                    if ws.send(Message::Text(frame.into())).await.is_err() {
+                                    let close = frame.is_close();
+                                    if ws.send(frame).await.is_err() || close {
                                         break;
                                     }
                                 }
@@ -142,57 +140,46 @@ impl FakeGateway {
         {
             let uploads = Arc::clone(&uploads);
             let route = Arc::clone(&route);
+            let session_requests = Arc::clone(&session_requests);
+            let replies = Arc::new(replies);
             tokio::spawn(async move {
                 while let Ok((mut stream, _)) = http_listener.accept().await {
                     let uploads = Arc::clone(&uploads);
                     let route = Arc::clone(&route);
+                    let session_requests = Arc::clone(&session_requests);
+                    let replies = Arc::clone(&replies);
                     tokio::spawn(async move {
                         let Some((head, body)) = read_request(&mut stream).await else {
                             return;
                         };
-                        let (status, payload) = {
-                            let target = request_target(&head);
-                            uploads.lock().expect("uploads").push(Upload {
+                        let target = request_target(&head);
+                        let upload = target.starts_with("/api/session/media?");
+                        let (status, payload) = if upload {
+                            let mut seen = uploads.lock().expect("uploads");
+                            seen.push(Upload {
                                 path: target.clone(),
                                 content_type: header_value(&head, "content-type"),
                                 body: body.clone(),
                             });
-                            match route.lock().expect("route").clone() {
-                                UploadRoute::Ok | UploadRoute::OkDelayed { .. } => {
-                                    let id =
-                                        format!("{:064x}", 0xAB_C0FFEE_u64 + body.len() as u64);
-                                    let media = format!(
-                                        r#"{{"id":"{id}","mime":"image/jpeg","bytes":{},"width":8,"height":8}}"#,
-                                        body.len()
-                                    );
-                                    (200, format!(r#"{{"ok":true,"media":{media}}}"#))
+                            let route = route.lock().expect("route").clone();
+                            upload_reply(&route, seen.len() - 1, body.len())
+                        } else {
+                            session_requests.lock().unwrap().push(target.clone());
+                            let (status, payload) = replies
+                                .get(target.as_str())
+                                .copied()
+                                .unwrap_or((500, r#"{"error":"unexpected endpoint"}"#));
+                            (status, payload.to_string())
+                        };
+                        if upload {
+                            let wait = route.lock().expect("route").clone();
+                            match wait {
+                                UploadRoute::OkDelayed { delay_ms } => {
+                                    tokio::time::sleep(Duration::from_millis(delay_ms)).await
                                 }
-                                UploadRoute::FailAfter {
-                                    after_ok,
-                                    status,
-                                    body: text,
-                                } => {
-                                    let seen = uploads.lock().expect("uploads").len() - 1;
-                                    if seen < after_ok {
-                                        let media = format!(
-                                            r#"{{"id":"{:064x}","mime":"image/jpeg","bytes":{},"width":8,"height":8}}"#,
-                                            0xAB_C0FFEE_u64 + seen as u64,
-                                            body.len()
-                                        );
-                                        (200, format!(r#"{{"ok":true,"media":{media}}}"#))
-                                    } else {
-                                        (status, text.to_string())
-                                    }
-                                }
+                                UploadRoute::OkAfter(release) => release.notified().await,
+                                _ => {}
                             }
-                        };
-                        // 慢链路：应答之前先压住（guard 不跨 await）。
-                        let delay = match *route.lock().expect("route") {
-                            UploadRoute::OkDelayed { delay_ms } => Some(delay_ms),
-                            UploadRoute::Ok | UploadRoute::FailAfter { .. } => None,
-                        };
-                        if let Some(delay_ms) = delay {
-                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         }
                         let response = format!(
                             "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\n\
@@ -213,6 +200,7 @@ impl FakeGateway {
             http_base,
             frames,
             events,
+            session_requests,
             uploads,
             route,
         }
@@ -247,6 +235,28 @@ impl FakeGateway {
     fn uploads(&self) -> Vec<Upload> {
         self.uploads.lock().expect("uploads").clone()
     }
+}
+
+fn upload_reply(route: &UploadRoute, seen: usize, size: usize) -> (u16, String) {
+    let id = match route {
+        UploadRoute::FailAfter {
+            after_ok,
+            status,
+            body,
+        } => {
+            if seen >= *after_ok {
+                return (*status, body.to_string());
+            }
+            0xAB_C0FFEE_u64 + seen as u64
+        }
+        _ => 0xAB_C0FFEE_u64 + size as u64,
+    };
+    (
+        200,
+        format!(
+            r#"{{"ok":true,"media":{{"id":"{id:064x}","mime":"image/jpeg","bytes":{size},"width":8,"height":8}}}}"#
+        ),
+    )
 }
 
 /// 读到请求头 + 按 `Content-Length` 收齐 body。
@@ -487,7 +497,13 @@ async fn a_sent_picture_is_reconciled_on_both_websocket_clients() {
             .as_object_mut()
             .unwrap()
             .extend(meta.as_object().unwrap().clone());
-        assert_eq!(gateway.events.send(frame.to_string()).unwrap(), 2);
+        assert_eq!(
+            gateway
+                .events
+                .send(Message::Text(frame.to_string().into()))
+                .unwrap(),
+            2
+        );
         for (app, transport) in [
             (&mut sender, &mut sending_transport),
             (&mut subscriber, &mut subscribing_transport),
@@ -515,6 +531,156 @@ async fn a_sent_picture_is_reconciled_on_both_websocket_clients() {
             matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body)
             if body.text.is_empty() && body.media.len() == 1 && body.media[0].id == sent["media"][0]["id"])
         );
+    }
+}
+
+fn switch_snapshot(target: &str) -> crate::protocol::WingEvent {
+    let mut event = sync_event(vec![], None, vec![], vec![], None);
+    if let crate::protocol::WingEvent::SyncSession {
+        session_id,
+        pending_user_messages,
+        ..
+    } = &mut event
+    {
+        *session_id = target.into();
+        *pending_user_messages = Some(vec![]);
+    }
+    event
+}
+
+fn assert_waits_for_target_snapshot(app: &mut crate::app::App, target: &str) {
+    use crate::app::AppIntent;
+    use crossterm::event::KeyCode;
+
+    app.input.set_text("next message");
+    app.input.insert_image(image(0x01, 10));
+    app.handle_event(switch_snapshot("test-session"));
+    assert_eq!(app.session_id, "test-session");
+    assert!(!app.user_input_ready());
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.input.text(), "next message[Image #1 8×8 10B]");
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, AppIntent::SendMessage { .. }))
+    );
+
+    app.handle_event(switch_snapshot(target));
+    assert_eq!(app.session_id, target);
+    assert!(app.user_input_ready());
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.input.is_empty());
+    assert!(app.drain_intents().iter().any(
+        |intent| matches!(intent, AppIntent::SendMessage { content, images, .. }
+        if content == "next message" && images == &[image(0x01, 10)])
+    ));
+}
+
+#[tokio::test]
+async fn an_explicit_switch_waits_for_the_target_snapshot_before_taking_input() {
+    use crate::app::runner::{Switch, adopt_new_session};
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([
+        ("/api/session/subscribe", (200, "{}")),
+        ("/api/session/unsubscribe", (200, "{}")),
+    ]))
+    .await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    adopt_new_session(
+        &mut app,
+        &transport,
+        "test-session".into(),
+        "target".into(),
+        Switch::Resume,
+    )
+    .await;
+    assert_eq!(
+        &*gateway.session_requests.lock().unwrap(),
+        &["/api/session/subscribe", "/api/session/unsubscribe"]
+    );
+    assert_waits_for_target_snapshot(&mut app, "target");
+    assert!(gateway.frames().is_empty());
+}
+
+#[tokio::test]
+async fn a_rejected_subscription_keeps_the_current_session_usable() {
+    use crate::app::runner::{Switch, adopt_new_session};
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([(
+        "/api/session/subscribe",
+        (500, r#"{"detail":"subscribe refused"}"#),
+    )]))
+    .await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    adopt_new_session(
+        &mut app,
+        &transport,
+        "test-session".into(),
+        "target".into(),
+        Switch::Resume,
+    )
+    .await;
+    assert_eq!(
+        &*gateway.session_requests.lock().unwrap(),
+        &["/api/session/subscribe"]
+    );
+    app.handle_event(switch_snapshot("target"));
+    assert_eq!(app.session_id, "test-session");
+    assert!(app.user_input_ready());
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("subscribe refused")
+    );
+    let _receipts = send(&mut app, Some(&transport), "still subscribed", vec![]);
+    let sent: serde_json::Value =
+        serde_json::from_str(&wait_for_frames(&gateway, 1).await[0]).unwrap();
+    assert_eq!(sent["session_id"], "test-session");
+}
+
+#[tokio::test]
+async fn replacement_recovery_waits_for_the_new_session_snapshot() {
+    use crate::app::transport::Recovery;
+
+    for (body, expected) in [
+        (
+            r#"{"error":"session_not_found","detail":"missing"}"#,
+            Recovery::Fresh,
+        ),
+        (
+            r#"{"error":"session_archived","detail":"archived"}"#,
+            Recovery::Archived,
+        ),
+    ] {
+        let gateway = FakeGateway::start_with_replies(HashMap::from([
+            ("/api/session/resume", (404, body)),
+            (
+                "/api/session/create",
+                (
+                    200,
+                    r#"{"session_id":"replacement","template_name":"default"}"#,
+                ),
+            ),
+            ("/api/session/subscribe", (200, "{}")),
+        ]))
+        .await;
+        let transport = connect(&gateway).await;
+        let mut app = test_app();
+        app.set_connected(false);
+        let (target, recovery) = transport
+            .recover_session(app.subscription_target(), None)
+            .await
+            .unwrap();
+        assert_eq!(recovery, expected);
+        assert_eq!(target, "replacement");
+        app.await_session_snapshot(target);
+        app.set_connected(true);
+        assert_waits_for_target_snapshot(&mut app, "replacement");
+        assert!(gateway.frames().is_empty());
     }
 }
 
@@ -679,44 +845,31 @@ async fn a_refill_appends_after_a_draft_the_user_retyped_in() {
 /// WS 发不出去（死连接）：同一失败契约（内容回到草稿 + `Send failed` toast），且不发半截。
 #[tokio::test]
 async fn a_dead_ws_connection_fails_the_send_with_the_same_contract() {
-    let gateway = FakeGateway::start_with_a_dead_ws().await;
-    let transport = connect(&gateway).await;
-
-    // 等 Close 帧被读任务记录（之后写任务才会在下一个写操作上失败）。
-    for _ in 0..400 {
-        if transport.ws.close_reason().is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(
-        transport.ws.close_reason().is_some(),
-        "假网关的 Close 帧没有到达"
-    );
-
-    // 写任务在第一次写失败后退出；通道层从那之后的发送会被拒绝。
-    // （`send_message` 只等待通道投递，所以"写任务已死"要靠探测，不能靠等待。）
-    let mut rejected = false;
-    for _ in 0..400 {
-        if transport
-            .ws
-            .send_message("test-session", "probe", None, "probe".into(), None)
-            .await
-            .is_err()
-        {
-            rejected = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(rejected, "写任务没有随死连接退出");
-
+    let gateway = FakeGateway::start().await;
+    let release = Arc::new(Notify::new());
+    *gateway.route.lock().unwrap() = UploadRoute::OkAfter(Arc::clone(&release));
+    let mut transport = connect(&gateway).await;
     let mut app = test_app();
+
     let mut rx = send(&mut app, Some(&transport), "hi", vec![image(0x05, 4)]);
+    wait_for_uploads(&gateway, 1).await;
+    gateway.events.send(Message::Close(None)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), transport.ws.recv_event())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    app.set_connected(false);
+    app.set_connected(true);
+    app.handle_event(sync_event(vec![], None, vec![], vec![], None));
+    assert!(app.chat.pending.is_empty());
+    release.notify_one();
     let receipt = wait_for_receipt(&mut rx).await;
     app.handle_fetch_result(receipt);
     assert!(app.chat.pending.is_empty(), "pending 条目取回");
     assert_eq!(app.input.text(), "hi[Image #1 8×8 4B]", "内容回到草稿");
+    assert!(gateway.frames().is_empty());
     let toast = app.toast.as_ref().expect("failure toast");
     assert_eq!(toast.kind, ToastKind::Warning);
     assert!(

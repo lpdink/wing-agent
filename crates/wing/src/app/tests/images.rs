@@ -2168,7 +2168,10 @@ fn a_submitted_picture_draws_before_the_upload_lands() {
         "bytes in hand are never fetched"
     );
 
-    let media = crate::ui::chat_view::media::predicted_media(&picture);
+    let selection = app.selection_fingerprint(crate::ui::selection::SelectionRegion::Chat);
+    let rebuild_epoch = app.chat.structure_epoch();
+    let mut media = crate::ui::chat_view::media::predicted_media(&picture);
+    media.name = Some("normalized.jpg".into());
     let meta = crate::protocol::EventMeta {
         created_at: String::new(),
         session_id: Some(app.session_id.clone()),
@@ -2182,6 +2185,11 @@ fn a_submitted_picture_draws_before_the_upload_lands() {
         },
         meta: meta.clone(),
     });
+    assert_eq!(app.chat.structure_epoch(), rebuild_epoch);
+    assert_ne!(
+        app.selection_fingerprint(crate::ui::selection::SelectionRegion::Chat),
+        selection
+    );
     assert!(has_placeholder(&frame(&mut app, &mut term)));
     app.handle_event(crate::protocol::WingEvent::UserMessageCommitted {
         message_uuid: "user-message".into(),

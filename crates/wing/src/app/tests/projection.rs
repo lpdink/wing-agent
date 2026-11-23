@@ -1843,6 +1843,7 @@ fn specific_drops_leave_inputs_for_the_next_turn_and_switch_resets_sync() {
         matches!(app.chat.cells[2].cell(), ChatCell::UserMessage(body) if body.text == "after interrupt")
     );
 
+    app.await_session_snapshot("old-session".into());
     app.handle_event(user_input_event(
         "sync_session",
         json!({"session_id": "old-session", "status": "idle"}),
@@ -1863,4 +1864,99 @@ fn specific_drops_leave_inputs_for_the_next_turn_and_switch_resets_sync() {
     assert!(
         matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body) if body.text == "legacy fallback")
     );
+}
+
+#[test]
+fn an_overflowing_media_ref_preserves_sync_and_attachment_order() {
+    use serde_json::json;
+
+    let picture = |digit: &str, width: u64| {
+        json!({
+            "id": digit.repeat(64), "mime": "image/png", "bytes": 16,
+            "width": width, "height": 8
+        })
+    };
+    let media = json!([
+        picture("b", 16),
+        picture("c", u64::from(u32::MAX) + 1),
+        picture("a", 8)
+    ]);
+    let queued = json!({"origin_request_id": "request", "content": "", "media": media});
+    let history = json!({"uuid": "previous", "role": "user", "content": "previous"});
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(json!([history]), json!([queued])));
+    assert_eq!(app.chat.len(), 1);
+    assert_eq!(app.chat.pending_len(), 1);
+    app.handle_event(user_input_event("user_message_queued", queued));
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_eq!(app.chat.pending_len(), 1);
+    let ChatCell::PendingUserMessage(body) = app.chat.pending[0].cell.cell() else {
+        panic!("pure image input")
+    };
+    let expected_ids = ["b".repeat(64), "a".repeat(64)];
+    assert_eq!(
+        body.media
+            .iter()
+            .map(|picture| &picture.id)
+            .collect::<Vec<_>>(),
+        expected_ids.iter().collect::<Vec<_>>()
+    );
+    let expected = body.clone();
+
+    let commit = user_input_event(
+        "user_message_committed",
+        json!({
+            "message_uuid": "picture", "origin_request_ids": ["request"], "content": "", "media": media
+        }),
+    );
+    app.handle_event(commit.clone());
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(matches!(app.chat.cells[1].cell(), ChatCell::UserMessage(body) if body == &expected));
+
+    app.handle_event(user_input_snapshot(
+        json!([history, {"uuid": "picture", "role": "user", "content": "", "media": media}]),
+        json!([]),
+    ));
+    app.handle_event(commit);
+    assert_eq!(app.chat.len(), 2);
+    assert!(matches!(app.chat.cells[1].cell(), ChatCell::UserMessage(body) if body == &expected));
+}
+
+#[test]
+fn a_remote_tool_result_releases_its_ask_while_other_asks_remain() {
+    use crossterm::event::KeyCode;
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.handle_event(user_input_snapshot(json!([]), json!([])));
+    for id in ["answered-elsewhere", "still-open"] {
+        app.handle_event(user_input_event(
+            "ask",
+            json!({
+                "tool_call_id": id, "question": "Allow?", "required": true, "choices": ["y", "n"]
+            }),
+        ));
+    }
+    app.await_session_snapshot("test-session".into());
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.ask_panels.len(), 2);
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, AppIntent::SendMessage { .. }))
+    );
+    app.pending_session_snapshot = None;
+
+    app.handle_event(user_input_event(
+        "tool_call_result",
+        json!({
+            "tool_call_id": "answered-elsewhere", "tool_name": "Bash", "tool_args": {},
+            "tool_result": "approved and finished", "tool_success": true
+        }),
+    ));
+    assert!(app.turn.working);
+    assert_eq!(app.ask_panels.len(), 1);
+    assert_eq!(app.ask_panels[0].tool_call_id, "still-open");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.drain_intents().iter().any(|intent| matches!(intent, AppIntent::SendMessage { tool_call_id: Some(id), .. } if id == "still-open")));
 }

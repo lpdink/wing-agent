@@ -199,6 +199,7 @@ where
 pub struct QueuedUserMessage {
     pub origin_request_id: String,
     pub content: String,
+    #[serde(default, deserialize_with = "super::media::user_media_refs")]
     pub media: Vec<MediaRef>,
 }
 
@@ -407,6 +408,7 @@ pub enum WingEvent {
         message_uuid: String,
         origin_request_ids: Vec<String>,
         content: String,
+        #[serde(default, deserialize_with = "super::media::user_media_refs")]
         media: Vec<MediaRef>,
         #[serde(flatten)]
         meta: EventMeta,

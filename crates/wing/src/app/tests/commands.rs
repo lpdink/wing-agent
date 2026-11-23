@@ -2177,6 +2177,7 @@ fn test_a_switched_sync_session_ends_the_compaction_block() {
     if let WingEvent::SyncSession { session_id, .. } = &mut event {
         *session_id = "a-newer-session".into();
     }
+    app.await_session_snapshot(event.session_id().unwrap().into());
     app.handle_event(event);
 
     assert!(!app.compacting, "换了会话就没人能解除旧的压缩标记");

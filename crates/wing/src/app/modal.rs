@@ -431,7 +431,30 @@ impl App {
 
     /// Handle a terminal key event.
     pub(super) fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        match self.route_key(&key) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let route = self.route_key(&key);
+        let waiting_on_composer = self.pending_session_snapshot.is_some()
+            && match route {
+                KeyRoute::PopupNav | KeyRoute::PopupEmpty if key.code == KeyCode::Enter => true,
+                KeyRoute::Composer | KeyRoute::PopupNav | KeyRoute::PopupEmpty => {
+                    matches!(key.code, KeyCode::Enter | KeyCode::Char('\r' | '\n'))
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                }
+                _ => false,
+            };
+        let waiting_on_ask =
+            route == KeyRoute::AskPanel && key.code == KeyCode::Enter && !self.user_input_ready();
+        if waiting_on_composer || waiting_on_ask {
+            self.show_toast(Toast::info(
+                "Waiting for session sync",
+                std::time::Duration::from_secs(2),
+            ));
+            return;
+        }
+        match route {
             // Modal owners keep the Ctrl+C counter untouched: the gesture only
             // counts while the app itself is receiving keys.
             KeyRoute::Quit => self.handle_quit_key(key),
@@ -909,6 +932,19 @@ impl App {
             let id = panel.tool_call_id.clone();
             let panel = panel.clone();
             self.chat.update_ask_panel(&id, panel);
+        }
+    }
+
+    pub(super) fn dismiss_resolved_ask(&mut self, tool_call_id: &str) {
+        if let Some(index) = self
+            .ask_panels
+            .iter()
+            .position(|panel| panel.tool_call_id == tool_call_id)
+        {
+            self.ask_panels.remove(index);
+            self.chat.remove_ask(tool_call_id);
+            self.refresh_ask_placeholder();
+            self.sync_program_status();
         }
     }
 

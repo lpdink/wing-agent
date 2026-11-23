@@ -6,9 +6,7 @@
 //! notifications, interruptions) leave through `AppIntent`s, so a projection never performs I/O
 //! itself.
 //!
-//! The session-scoped guards (drop events from other sessions, always accept `SyncSession`) live
-//! here too: they decide **what the projection is allowed to see**, which is the projection's own
-//! contract.
+//! Snapshots target the active subscription. Live events target the displayed session.
 //!
 //! Call directions: the main loop ([`super`]) calls in with every event; projections call out to
 //! [`super::modal`] (ask registration).
@@ -67,13 +65,12 @@ impl App {
     /// first consumer. The trailing `_ =>` fallback lives in [`Self::handle_state`]
     /// and logs at debug level.
     pub(super) fn handle_event(&mut self, event: WingEvent) {
-        // Defense-in-depth: skip events from other sessions.
-        // Protects against backend events emitted without scope="session".
-        //
-        // Session lifecycle events (SyncSession) are always accepted —
-        // their session_id may intentionally differ from the current one.
-        if !matches!(event, WingEvent::SyncSession { .. })
-            && let Some(event_sid) = event.session_id()
+        if let WingEvent::SyncSession { session_id, .. } = &event {
+            if session_id != self.subscription_target() {
+                return;
+            }
+            self.pending_session_snapshot = None;
+        } else if let Some(event_sid) = event.session_id()
             && event_sid != self.session_id
         {
             tracing::debug!(
@@ -347,6 +344,9 @@ impl App {
                 tool_success,
                 ..
             } => {
+                if self.user_input_sync {
+                    self.dismiss_resolved_ask(&tool_call_id);
+                }
                 self.handle_tool_result(
                     tool_name,
                     tool_args,

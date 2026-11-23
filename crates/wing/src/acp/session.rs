@@ -884,6 +884,16 @@ impl SessionHub {
     /// 而不是 prompt 轮次的事件循环里。中继经 `claim_model_relay` 合并：
     /// 同一会话同时只有一次在途，期间的变更合到下一次。
     fn dispatch(self: &Arc<Self>, event: WingEvent) {
+        // Input synchronization is a TUI concern. Keep its broadcasts out of
+        // the bounded ACP turn queue, where they would compete with Ask and Done.
+        if matches!(
+            event,
+            WingEvent::UserMessageQueued { .. }
+                | WingEvent::UserMessageCommitted { .. }
+                | WingEvent::UserMessagesDropped { .. }
+        ) {
+            return;
+        }
         let Some(session_id) = event.session_id().map(str::to_string) else {
             // 全局事件（无 session_id）：ACP 侧没有对应物。
             tracing::debug!(event_type = event.event_type(), "acp: global event dropped");
@@ -1543,6 +1553,43 @@ mod tests {
         assert!(!entry.is_armed());
         assert!(!entry.has_turn_in_flight());
         assert!(!entry.deliver(event("s1")), "disarmed → dropped again");
+    }
+
+    #[test]
+    fn input_sync_broadcasts_leave_capacity_for_acp_turn_events() {
+        let (hub, _outbound) = test_hub();
+        let entry = hub.register("s1");
+        let mut events = entry.arm_turn().unwrap();
+        let meta = event("s1").meta().unwrap().clone();
+        let broadcasts = [
+            WingEvent::UserMessageQueued {
+                message: crate::protocol::QueuedUserMessage {
+                    origin_request_id: "request".into(),
+                    content: "text".into(),
+                    media: vec![],
+                },
+                meta: meta.clone(),
+            },
+            WingEvent::UserMessageCommitted {
+                message_uuid: "message".into(),
+                origin_request_ids: vec!["request".into()],
+                content: "text".into(),
+                media: vec![],
+                meta: meta.clone(),
+            },
+            WingEvent::UserMessagesDropped {
+                origin_request_ids: vec!["other-request".into()],
+                meta: meta.clone(),
+            },
+        ];
+        for _ in 0..events.max_capacity() {
+            for broadcast in &broadcasts {
+                hub.dispatch(broadcast.clone());
+            }
+        }
+        hub.dispatch(WingEvent::Done { meta });
+        assert!(matches!(events.try_recv(), Ok(WingEvent::Done { .. })));
+        assert!(events.is_empty());
     }
 
     /// close 的回收与排队中的 prompt：条目被回收后，排队者拿到 gate 必须

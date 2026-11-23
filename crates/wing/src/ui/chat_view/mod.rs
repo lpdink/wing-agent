@@ -98,9 +98,10 @@ pub struct ChatView {
     /// Used by `scroll_down` to detect the bottom edge and re-arm
     /// auto-scroll immediately, without waiting for the next render pass.
     pub(crate) last_total: usize,
-    /// Invalidates selection when a rebuild or queue reconciliation changes rows
-    /// without changing cell counts. See `App::selection_guard`.
+    /// Full transcript rebuilds invalidate selections and picture placements.
     rebuilds: u64,
+    /// Queue reconciliation can move or replace bubbles without changing their count.
+    pending_revision: u64,
     /// Ctrl+O 的全局展开覆盖（`None` = 跟随 `rendering.thinking` 的默认）。
     ///
     /// 会话级状态、只由 Ctrl+O 写；渲染期经 `CellContext` 下发（整条
@@ -162,6 +163,7 @@ impl ChatView {
             header_lines: Vec::new(),
             last_total: 0,
             rebuilds: 0,
+            pending_revision: 0,
             thinking_expanded: None,
             geometry: ChatGeometry::default(),
             frame_links: LinkTable::new(),

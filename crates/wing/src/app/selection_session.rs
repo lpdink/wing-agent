@@ -92,6 +92,7 @@ pub(super) enum SelectionGuard {
         /// session switches / compaction / rewind even when the rebuilt
         /// content ends up with the same cell count.
         rebuilds: u64,
+        pending_revision: u64,
     },
     /// Composer: the draft itself plus the width it was wrapped against.
     Composer {
@@ -525,6 +526,7 @@ impl App {
                 pending: self.chat.pending_len(),
                 width: self.geometry.width(),
                 rebuilds: self.chat.structure_epoch(),
+                pending_revision: self.chat.pending_revision(),
             },
         }
     }
