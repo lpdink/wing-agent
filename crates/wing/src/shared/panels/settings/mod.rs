@@ -32,12 +32,12 @@ use wing_api_client::models::SettingsSetResponse;
 
 use crate::shared::doc_edit;
 
+use crate::shared::text_edit::TextInputId;
 pub use doc::Root;
 pub use doc::SettingsDoc;
 pub use edit::Constraints;
 pub use edit::EditState;
 pub use edit::ScalarKind;
-pub use edit::SettingsPasteTarget;
 pub use groups::AnchorView;
 pub use groups::GroupAnchor;
 pub use problems::Problem;
@@ -490,7 +490,7 @@ impl SettingsPanel {
         self.restart_required = state.pending_restart_paths.unwrap_or_default();
         self.edit = None;
         if let Some(search) = &mut self.search {
-            search.target = SettingsPasteTarget::new();
+            search.target = TextInputId::new();
         }
         self.pending = None;
         self.choices = None;
@@ -603,6 +603,10 @@ impl SettingsPanel {
 
     pub fn view(&self) -> View {
         self.view
+    }
+
+    pub(crate) fn has_active_input(&self) -> bool {
+        self.edit.is_some() || self.search.is_some()
     }
 
     pub fn edit_state(&self) -> Option<&EditState> {

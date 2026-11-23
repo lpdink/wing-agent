@@ -10,6 +10,19 @@
 //! 契约：`cursor` 是**字符**下标（不是字节），且始终满足 `cursor <= buffer.chars().count()`；
 //! 每条操作自己保证这个后置条件（越界只钳位，不 panic）。
 
+/// Identity of one open text input. Delayed paste replies must carry this identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextInputId(u64);
+
+impl TextInputId {
+    pub(crate) fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// 第 `char_idx` 个字符的字节偏移（越界钳到字符串末尾）。
 pub(crate) fn char_to_byte(s: &str, char_idx: usize) -> usize {
     s.char_indices()

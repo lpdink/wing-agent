@@ -239,9 +239,8 @@ impl App {
         if let Some(panel) = self.settings_panel.as_mut() {
             if reload
                 || (panel.dirty_count() == 0
-                    && panel.edit_state().is_none()
+                    && !panel.has_active_input()
                     && panel.prompt().is_none()
-                    && panel.search_query().is_none()
                     && panel.choices().is_none())
             {
                 panel.apply_snapshot(&schema, state);

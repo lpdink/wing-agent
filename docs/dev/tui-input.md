@@ -168,7 +168,7 @@
 
 ## 粘贴（文本 / 图片）：OSC 5522 协议 + 本地读取（L1）
 
-除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。普通 TUI 会在接收粘贴事件时记录输入归属。设置打开时只请求纯文本，并将回执绑定到当时的搜索或编辑实例。浏览态消费粘贴，离开原输入后丢弃迟到的回执。设置以外的文本沿用 `App::handle_paste` 的模态路由。图片仍沿用「占位符 → 字节 → 压缩 → 原地落定」流水线，设置打开后只允许已有的占位符完成。
+除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。普通 TUI 在 stdin 接驳层将粘贴公告按原位置交给键盘事件流，由 App 按同一顺序确定输入归属。设置打开时只请求纯文本，并将回执绑定到当时的搜索或编辑实例。浏览态消费粘贴，离开原输入后丢弃迟到的回执。设置以外的文本沿用 `App::handle_paste` 的模态路由。图片仍沿用「占位符 → 字节 → 压缩 → 原地落定」流水线，设置打开后只允许已有的占位符完成。
 
 **通道先探测再启用**：不实现 5522 的终端从这套机制里拿不到任何东西，却要背下 fd 0 接驳的全部事故面（见下），所以启动时先问一句 DECRQM「你支持 mode 5522 吗」，按诚实答案决定装不装——阴性终端**在第一次 crossterm poll 之前**就把接驳拆掉、一个 `?5522h` 都不发，回到 #221 之前的纯输入路径。
 
@@ -206,7 +206,7 @@ App 侧边沿（图片读，文本读不发前两支）:
 1. **接驳必须早于本进程任何一次 `poll`**。向导正是最早的机会（它自己也用 crossterm 的全局事件源），所以第一段就把接驳装上；反过来（先 `poll` 再装）泵线程会把真实 tty 的就绪吃掉，事件源从此再不被唤醒 —— 键盘永久哑掉（反面证据：`tests/stdin_proxy_stale_event_source.rs`）。
 2. **段与段之间绝不拆接驳**（`restore_terminal` 只写离开序列，raw mode 与 fd 0 归会话）——拆了就必须重装，而复用的单例仍指着旧的文件描述。
 
-两条都有测试，但分工要说清：`tests/stdin_proxy_two_segments.rs` / `stdin_proxy_stale_event_source.rs` 钉的是**机制**（同一单例跨段工作、注册先于接驳才有效），生产接线则由源码门禁 `tests/session_guard.rs` 钉住——它扫真实 `src/**`，断言 `stdin_proxy::install(` 恰好一处且位于 `begin_tui_session`、`stdin_proxy::restore(` 恰好一处且位于 `end_tui_session`、`restore_terminal` 不引用这两者，再加探针化的两条：`stdin_proxy::settle_paste_channel(` 恰好两处且各自早于本段第一次 poll（`run_app` 里早于 `spawn_event_stream_with_clipboard`、`run_tui` 里早于 `run_setup_tui`）、`spawn_event_stream_with_clipboard` 里 mode 5522 与协议机都门控在阳性判定之后（`\x1b[?5522h` 全生产唯一发送点）——零豁免；把安装挪走、把拆解加回段边界、或让协议机绕开判定，都会变红。
+两条都有测试，但分工要说清：`tests/stdin_proxy_two_segments.rs` / `stdin_proxy_stale_event_source.rs` 钉的是**机制**（同一单例跨段工作、注册先于接驳才有效），生产接线则由源码门禁 `tests/session_guard.rs` 钉住——它扫真实 `src/**`，断言 `stdin_proxy::install(` 恰好一处且位于 `begin_tui_session`、`stdin_proxy::restore(` 恰好一处且位于 `end_tui_session`、`restore_terminal` 不引用这两者，再加探针化的两条：`stdin_proxy::settle_paste_channel(` 恰好两处且各自早于本段第一次 poll（`run_app` 里早于 `spawn_event_stream_with_clipboard`、`run_tui` 里早于 `run_setup_tui`）、`spawn_event_stream_inner` 里 mode 5522 与协议机都门控在阳性判定之后（`\x1b[?5522h` 全生产唯一发送点）——零豁免；把安装挪走、把拆解加回段边界、或让协议机绕开判定，都会变红。
 
 向导与主 TUI 的进入序列现在**逐字相同**（`?5522h` 移出 `enter_sequence`，见上「四态判定与时机」）：mode 只在协议机启动处（主 TUI 的 `spawn_event_stream`）才开，而向导自己的事件循环不驱动协议机——「向导把用户 Cmd+V 吞成没人读的协议事件」在构造上不再可能。向导同样在自己的第一次 poll 前收束探针判定（阴性共享拆解收益）。
 
@@ -300,11 +300,10 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
 
 - **键位**：`Ctrl+V`（控制字节 `0x16`，终端基本都原样转发）与终端回传的 `super+v`
   （kitty 键盘协议下 Ghostty 把不可执行的 `Cmd+V` 以 `CSI 118;9u` 交回应用）路由到同一个
-  `KeyRoute::PasteClipboard`，是**应用保留键**（ask / `/model` / 候选 popup 之下也接住，
-  落点再做挡板；**设置浮层除外** —— 它连应用保留键也接管，与 `Ctrl+O` 同档）。
+  `KeyRoute::PasteClipboard`。设置浏览态消费快捷键，搜索与编辑态读取纯文本。设置以外走原有模态路由。
   **不接** `Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧，接上只会「有时被
   终端吃掉、有时没有」）。两种字节形态的 crossterm 解码钉在 `tests/clipboard_paste_keys.rs`。
-- **顺序**：设置的搜索和编辑只读取文本。其他状态依次尝试图片和文本。macOS：`osascript` 让 AppKit 把剪贴板的 PNG 表示写进 `$TMPDIR`
+- **顺序**：设置的搜索和编辑请求纯文本，macOS 用 `NSPasteboardTypeString`，Wayland 依次请求 `text/plain;charset=utf-8` 和 `text/plain`。设置以外依次尝试图片和文本。macOS：`osascript` 让 AppKit 把剪贴板的 PNG 表示写进 `$TMPDIR`
   临时文件（TIFF-only 的剪贴板——截图的规范表示——在这里被转换；纯文本剪贴板非零退出并
   留下 0 字节文件，即「没有图片」的信号），然后 `pbpaste` 读文本，图片失败不阻断文本。
   Linux：`wl-paste`（Wayland）→ `xclip` / `xsel`（X11）；图片先列类型（`--list-types` /

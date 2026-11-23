@@ -480,10 +480,29 @@ fn settings_paste_inserts_long_unicode_text_at_the_editor_cursor() {
     assert_eq!(editor.visible_buffer(), format!("前{pasted}後"));
     assert_eq!(editor.cursor(), 401);
     assert_eq!(panel(&app).dirty_count(), 0);
+    assert!(panel(&app).is_stale());
     assert_eq!(app.input.text(), "chat draft");
     assert!(app.drain_intents().is_empty());
 
     press(&mut app, KeyCode::Esc);
+    assert_eq!(panel(&app).dirty_count(), 0);
+}
+
+#[test]
+fn settings_paste_routes_to_search_above_open_choices_and_preserves_a_stale_baseline() {
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "preset");
+    press(&mut app, KeyCode::Enter);
+    assert!(panel(&app).choices().is_some());
+    press(&mut app, KeyCode::Char('/'));
+    app.handle_paste("accent");
+    assert_eq!(panel(&app).search_query(), Some("accent"));
+    assert!(panel(&app).search_hits() > 0);
+    app.handle_settings_fetch(gateway_schema(), gateway_state(sample_values(), "fp-2"));
+    assert_eq!(panel(&app).search_query(), Some("accent"));
+    press(&mut app, KeyCode::Esc);
+    assert!(panel(&app).is_stale());
+    assert_eq!(panel(&app).fingerprint(), "fp-1");
     assert_eq!(panel(&app).dirty_count(), 0);
 }
 
@@ -537,6 +556,28 @@ fn settings_clipboard_paste_masks_secrets_and_ignores_reopened_targets() {
     app.input.set_text("draft stays");
     app.handle_fetch_result(delivered(target, "late"));
     assert_eq!(app.input.text(), "draft stays");
+}
+
+#[test]
+fn settings_terminal_clipboard_paste_is_discarded_after_edit_replacement_or_dismissal() {
+    use crate::tui::ClipboardEvent;
+
+    let mut app = app_with_settings_panel();
+    app.input.set_text("original draft");
+    goto(&mut app, "api_key");
+    press(&mut app, KeyCode::Enter);
+    let target = panel(&app).paste_target().unwrap();
+    let paste = || ClipboardEvent::TextInput {
+        target,
+        result: Ok("fixture-terminal-token".to_owned().into()),
+    };
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Enter);
+    app.handle_clipboard(paste());
+    assert_eq!(panel(&app).edit_state().unwrap().buffer_len(), 0);
+    app.close_settings_panel(false);
+    app.handle_clipboard(paste());
+    assert_eq!(app.input.text(), "original draft");
 }
 
 #[test]
@@ -634,6 +675,13 @@ fn paste_is_dropped_before_it_can_reach_a_queued_ask() {
             "late".into(),
         )),
     );
+    let crate::tui::ClipboardTarget::TextOnly(target) = target else {
+        panic!("settings search owns the clipboard request");
+    };
+    app.handle_clipboard(crate::tui::ClipboardEvent::TextInput {
+        target,
+        result: Ok("late terminal paste".to_owned().into()),
+    });
     assert_eq!(app.ask_panels.front().unwrap().states[0].draft, "");
 
     app.handle_paste("ok");

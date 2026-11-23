@@ -35,7 +35,7 @@ pub(crate) const MAX_PENDING_IMAGES: usize = 8;
 pub(crate) const MAX_PENDING_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::app::intent::AppIntent;
-use crate::shared::panels::settings::SettingsPasteTarget;
+use crate::shared::text_edit::TextInputId;
 use crate::tui::ClipboardEvent;
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
@@ -65,14 +65,16 @@ pub struct PendingClipboardImage {
 impl App {
     pub(super) fn clipboard_target(&self) -> ClipboardTarget {
         match &self.settings_panel {
-            Some(panel) => ClipboardTarget::Settings(panel.paste_target()),
+            Some(panel) => panel
+                .paste_target()
+                .map_or(ClipboardTarget::Ignore, ClipboardTarget::TextOnly),
             None => ClipboardTarget::Default,
         }
     }
 
     pub(super) fn request_clipboard_paste(&mut self) {
         let target = self.clipboard_target();
-        if target != ClipboardTarget::Settings(None) && !self.clipboard_read_in_flight {
+        if target != ClipboardTarget::Ignore && !self.clipboard_read_in_flight {
             self.clipboard_read_in_flight = true;
             self.push_intent(AppIntent::ReadClipboard(target));
         }
@@ -80,7 +82,7 @@ impl App {
 
     pub(super) fn paste_into_settings(
         &mut self,
-        target: SettingsPasteTarget,
+        target: TextInputId,
         result: Result<&str, String>,
     ) {
         let Some(panel) = &mut self.settings_panel else {
@@ -107,13 +109,10 @@ impl App {
                     self.on_clipboard_image_delivered(bytes, mime, name)
                 }
             },
-            ClipboardEvent::Settings { target, result } => {
+            ClipboardEvent::TextInput { target, result } => {
                 let result = match &result {
-                    Ok(ClipboardPayload::Text(text)) => Ok(text.as_str()),
-                    Ok(ClipboardPayload::Image { .. })
-                    | Err(ClipboardFailure::NoRepresentation) => {
-                        Err("Clipboard has no text".into())
-                    }
+                    Ok(text) => Ok(text.as_str()),
+                    Err(ClipboardFailure::NoRepresentation) => Err("Clipboard has no text".into()),
                     Err(ClipboardFailure::Status(_)) => Err("Clipboard read failed".into()),
                     Err(failure) => Err(failure.message()),
                 };
@@ -136,13 +135,11 @@ impl App {
         result: Result<PasteOutcome, PasteFailure>,
     ) {
         self.clipboard_read_in_flight = false;
-        if let ClipboardTarget::Settings(target) = target {
-            if let Some(target) = target {
-                self.paste_into_settings(
-                    target,
-                    crate::util::clipboard_paste::settings_text(&result),
-                );
-            }
+        if let ClipboardTarget::TextOnly(target) = target {
+            self.paste_into_settings(target, crate::util::clipboard_paste::settings_text(&result));
+            return;
+        }
+        if target == ClipboardTarget::Ignore {
             return;
         }
         if self.settings_panel.is_some() {

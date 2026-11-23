@@ -390,7 +390,7 @@ fn the_probe_settles_before_the_first_poll_of_each_segment() {
 #[test]
 fn the_paste_channel_starts_only_after_a_positive_probe() {
     let source = production_of(SESSION_FILE);
-    let body = function_body(&source, "spawn_event_stream_with_clipboard");
+    let body = function_body(&source, "spawn_event_stream_inner");
 
     let verdict = live_hits(&body, VERDICT_READ);
     assert_eq!(
