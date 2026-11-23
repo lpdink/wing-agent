@@ -1,22 +1,14 @@
-//! 渲染原语：行裁剪、CJK 折行、带高度预算的行缓冲、浮层框。
+//! 渲染原语：行裁剪、CJK 折行、带高度预算的行缓冲。
 //!
 //! 一条硬约束是「任何一行都不许溢出自己的区域」。`clamp_line` 是它的唯一实现：
 //! 所有组合出来的 [`Line`] 在写进 buffer 之前都过一遍它（最外层还有 `Buffer::set_line`
 //! 的 `max_width` 兜底），于是「多尺寸不溢出」不是纪律而是结构。
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::symbols::border;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use ratatui::widgets::Block;
-use ratatui::widgets::Borders;
-use ratatui::widgets::Clear;
-use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::ThemePalette;
 use crate::render::markdown::truncate_to_display_width;
 use crate::render::markdown::wrap::wrap_plain_text;
 
@@ -177,13 +169,9 @@ impl LineBuf {
         self.height.saturating_sub(self.lines.len())
     }
 
-    pub(crate) fn is_full(&self) -> bool {
-        self.remaining() == 0
-    }
-
     /// 写一行（自动裁到宽度）；缓冲满了返回 `false`。
     pub(crate) fn push(&mut self, line: Line<'static>) -> bool {
-        if self.is_full() {
+        if self.remaining() == 0 {
             return false;
         }
         self.lines.push(clamp_line(line, self.width));
@@ -195,13 +183,6 @@ impl LineBuf {
         self.push(Line::from(Span::styled(text.to_string(), style)))
     }
 
-    /// 折行写一段散文（每条折行结果占一行）。
-    pub(crate) fn prose(&mut self, text: &str, style: Style) {
-        for row in wrap_rows(text, self.width, self.remaining()) {
-            self.text(&row, style);
-        }
-    }
-
     pub(crate) fn blank(&mut self) {
         self.push(Line::from(""));
     }
@@ -209,44 +190,6 @@ impl LineBuf {
     pub(crate) fn take(self) -> Vec<Line<'static>> {
         self.lines
     }
-}
-
-/// 在 `area` 内居中放一个 `w × h` 的矩形（都按 `area` 钳制）。
-pub(crate) fn centered_box(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
-    }
-}
-
-/// 画一个带标题的浮层框（先 `Clear` 底下，再画框，返回可写内容的 inner）。
-///
-/// 浮层框是三处共用的原语（帮助 / 模态提示），因此它的 `Clear` 也在这里：
-/// 少了它，底下的树会从框的缝隙里透出来。
-pub(crate) fn draw_box(area: Rect, title: &str, buf: &mut Buffer, palette: &ThemePalette) -> Rect {
-    if area.width < 2 || area.height < 2 {
-        return Rect::ZERO;
-    }
-    Clear.render(area, buf);
-    let style = Style::default().fg(palette.accent);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::PLAIN)
-        .border_style(style);
-    let inner = block.inner(area);
-    block.render(area, buf);
-    let label = single_row(&format!(" {title} "), area.width.saturating_sub(2) as usize);
-    buf.set_line(
-        area.x + 1,
-        area.y,
-        &Line::from(Span::styled(label, style)),
-        area.width.saturating_sub(2),
-    );
-    inner
 }
 
 #[cfg(test)]
@@ -330,71 +273,8 @@ mod tests {
         assert!(buf.push(Line::from("一")));
         assert!(buf.push(Line::from("二")));
         assert!(!buf.push(Line::from("三")), "满了之后静默丢弃");
-        assert!(buf.is_full());
         assert_eq!(buf.remaining(), 0);
         let out = buf.take();
         assert_eq!(out.len(), 2);
-    }
-
-    #[test]
-    fn line_buf_prose_wraps_and_stops_at_the_budget() {
-        let mut buf = LineBuf::new(8, 2);
-        buf.prose("一二三四五六七八九十十一十二十三", Style::default());
-        let out = buf.take();
-        assert_eq!(out.len(), 2);
-        assert!(out[1].to_string().ends_with('…'), "{out:?}");
-    }
-
-    #[test]
-    fn centered_box_clamps_inside_the_area() {
-        let area = Rect::new(10, 5, 40, 10);
-        let boxed = centered_box(area, 20, 4);
-        assert_eq!(boxed, Rect::new(20, 8, 20, 4));
-        let huge = centered_box(area, 100, 100);
-        assert_eq!(huge, area, "超大尺寸被钳到整个区域");
-        let tiny = centered_box(area, 0, 0);
-        assert_eq!(tiny.width, 0);
-    }
-
-    #[test]
-    fn draw_box_clears_underneath_and_returns_the_inner() {
-        let area = Rect::new(0, 0, 20, 6);
-        let mut buf = Buffer::empty(area);
-        // 先写满 'x'，框内的内容才必须被 Clear 覆盖。
-        for y in 0..area.height {
-            for x in 0..area.width {
-                buf[(x, y)].set_symbol("x");
-            }
-        }
-        let inner = draw_box(area, "标题", &mut buf, &ThemePalette::default());
-        assert_eq!(inner, Rect::new(1, 1, 18, 4));
-        assert_eq!(buf[(0, 0)].symbol(), "┌");
-        assert_eq!(buf[(1, 0)].symbol(), " ");
-        assert_eq!(buf[(2, 0)].symbol(), "标");
-        assert_eq!(buf[(19, 5)].symbol(), "┘");
-        assert_eq!(buf[(5, 3)].symbol(), " ", "框内被 Clear 抹干净");
-    }
-
-    #[test]
-    fn draw_box_gives_up_on_degenerate_areas() {
-        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
-        assert_eq!(
-            draw_box(
-                Rect::new(0, 0, 1, 4),
-                "t",
-                &mut buf,
-                &ThemePalette::default()
-            ),
-            Rect::ZERO
-        );
-        assert_eq!(
-            draw_box(
-                Rect::new(0, 0, 4, 1),
-                "t",
-                &mut buf,
-                &ThemePalette::default()
-            ),
-            Rect::ZERO
-        );
     }
 }

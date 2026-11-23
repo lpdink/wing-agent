@@ -32,18 +32,6 @@ use super::text::wrap_rows;
 /// 条目细节行的最大行数（超过按 `…` 收尾）。
 const MAX_DETAIL_ROWS: usize = 3;
 
-/// 清单标题（v2：它占右栏的**分组头**那一行，所以从清单行里搬了出来）。
-pub(crate) fn heading_line(palette: &ThemePalette, width: usize) -> Line<'static> {
-    let heading = Style::default()
-        .fg(palette.accent)
-        .add_modifier(Modifier::BOLD);
-    clamp_line(
-        Line::from(Span::styled(" 待修复".to_string(), heading)),
-        width,
-    )
-}
-
-/// 问题清单的行列表（标题在分组头那一行，见 [`heading_line`]；这里只含条目与底部说明）。
 pub(crate) fn problem_lines(
     panel: &SettingsPanel,
     palette: &ThemePalette,
@@ -57,11 +45,6 @@ pub(crate) fn problem_lines(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let problems = panel.problems();
-    // 底部说明行占一行（矮终端下先让位给内容）。
-    let footnote = height >= 3;
-    let list_height = height
-        .saturating_sub(usize::from(footnote))
-        .max(usize::from(problems.is_empty()));
     if problems.is_empty() {
         lines.push(clamp_line(
             Line::from(Span::styled("暂无问题。".to_string(), dim)),
@@ -84,23 +67,9 @@ pub(crate) fn problem_lines(
                 )
             })
             .collect();
-        lines.extend(visible_entries(
-            entries,
-            panel.problem_cursor(),
-            list_height,
-        ));
+        lines.extend(visible_entries(entries, panel.problem_cursor(), height));
     }
 
-    if footnote {
-        let note = if problems.is_empty() {
-            "按 Esc 返回树。".to_string()
-        } else if panel.setup_mode() {
-            "修完全部问题后网关自动进入正常模式，TUI 会继续启动。".to_string()
-        } else {
-            "改完按 s 保存；保存失败会自动回到这里。".to_string()
-        };
-        lines.push(clamp_line(Line::from(Span::styled(note, dim)), width));
-    }
     lines.truncate(height);
     lines
 }
@@ -239,8 +208,6 @@ mod tests {
             ),
             problem(None, "invalid_value", "配置里出现了未知键", None),
         ]);
-        // 标题不在清单行里（v2：它占右栏的分组头那一行）。
-        assert!(heading_line(&palette(), 60).to_string().contains("待修复"));
         let lines = problem_lines(&panel, &palette(), 60, 12);
         let joined = texts(&lines).join("\n");
         assert!(!joined.contains("待修复"), "标题已搬走：{joined}");
@@ -249,15 +216,6 @@ mod tests {
             joined.contains("路径 providers · 至少声明一个 provider"),
             "{joined}"
         );
-        assert!(
-            joined.contains("改完按 s 保存；保存失败会自动回到这里。"),
-            "底部说明行：{joined}"
-        );
-        assert!(
-            !joined.contains("修完全部问题"),
-            "非 setup 模式不出现 setup 说明：{joined}"
-        );
-
         // 光标下移一条 → 标记跟着走。
         fx::press(&mut panel, crossterm::event::KeyCode::Down);
         let out = texts(&problem_lines(&panel, &palette(), 60, 12));
@@ -292,7 +250,6 @@ mod tests {
         assert!(panel.problems().is_empty());
         let joined = texts(&problem_lines(&panel, &palette(), 60, 8)).join("\n");
         assert!(joined.contains("暂无问题。"), "{joined}");
-        assert!(joined.contains("按 Esc 返回树"), "{joined}");
     }
 
     #[test]

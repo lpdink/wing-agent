@@ -43,7 +43,6 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use ratatui::widgets::Widget as _;
 
 use self::images::Images;
 use self::transport::GatewayEndpoint;
@@ -246,14 +245,11 @@ pub struct App {
     /// 生命周期与分派全在 [`settings`] 模块。
     settings_panel: Option<crate::shared::panels::settings::SettingsPanel>,
     /// 面板的 Gateway 数据（`GET schema` + `GET get` 的一次成功快照）：
-    /// cache-first 打开、overlay 的目录（详情栏）、保存后的回写都读它。
+    /// cache-first 打开与保存后的回写共用。
     settings_cache: Option<(
         wing_api_client::models::SettingsSchemaResponse,
         wing_api_client::models::SettingsGetResponse,
     )>,
-    /// Interface 根的 catalog（`interface_catalog()`）；与注入面板的那一份相同，
-    /// 供 overlay 的详情栏 / 色块预览用（07 没有"行 → 节点"的访问器，见 `shared::panels::settings`）。
-    interface_catalog: Option<wing_api_client::models::SettingNode>,
     /// 打开面板时的 `config` 快照（实时预览的回退基准；保存成功 / `R` 重载后更新）。
     config_snapshot: Option<AppConfig>,
     /// 已请求、尚未返回的 `FetchSettings`（无缓存时到达后要自动打开面板；关面板即清）。
@@ -360,7 +356,6 @@ impl App {
             session_facts: None,
             settings_panel: None,
             settings_cache: None,
-            interface_catalog: None,
             config_snapshot: None,
             settings_pending: false,
             settings_reload_pending: false,
@@ -796,14 +791,28 @@ impl App {
             // 排版才知道它多高 —— 整块与输入卡要一起算光学中心。
             let now = std::time::Instant::now();
             let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
-            let splash_plan = self.splash_plan(&palette, area, full_card_w, now);
+            let settings_open = self.settings_panel.is_some();
+            let splash_plan = if settings_open {
+                None
+            } else {
+                self.splash_plan(&palette, area, full_card_w, now)
+            };
             let (splash, hero_rows) = match splash_plan {
                 Some((hero_rows, _)) => (true, hero_rows),
                 None => (false, 0),
             };
             let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
-            let composer_h = self.input.height(composer_w);
-            let bands = frame_layout(area, splash, hero_rows, composer_h, self.popup.height());
+            let bands = if settings_open {
+                settings_layout(area, self.chat.cells.is_empty())
+            } else {
+                frame_layout(
+                    area,
+                    splash,
+                    hero_rows,
+                    self.input.height(composer_w),
+                    self.popup.height(),
+                )
+            };
 
             // Status bar (model top-left, cumulative usage, connection) — plus
             // the session identity tail (id + pin star), the two pointer
@@ -866,9 +875,8 @@ impl App {
             // never reflows the cells. `self.chat` now holds this frame's content height and the
             // effective scroll offset (auto-scroll / clamp included).
             //
-            // 设置面板开着时不画：overlay 是最后写入者，画在它下面只是白费；顺手清掉 hover / drag
-            // 态，免得关掉面板后拖拽态复活。
-            if self.settings_panel.is_some() {
+            // Settings keeps background clicks modal. Clear any previous scrollbar drag.
+            if settings_open {
                 self.clear_scrollbar_interaction();
             } else if let Some(geom) = self.scrollbar_geometry() {
                 scrollbar::paint(frame.buffer_mut(), &geom, self.scrollbar, &palette);
@@ -880,119 +888,75 @@ impl App {
                 self.clear_scrollbar_interaction();
             }
 
-            // The composer card — always visible; the rect it is laid out into
-            // is recorded in the frame's geometry (the widget keeps its own
-            // copy for cursor placement): mouse events arrive between frames,
-            // so hit testing works off the last frame's rect — the same
-            // contract as the chat band's. The two rails carry what used to be
-            // rows of their own: what the agent is doing (top) and where the
-            // session stands — workdir, this turn's usage, scroll position
-            // (bottom).
-            let activity = if self.turn.working {
-                self.turn.started_at.map(|started_at| ActivityRail {
-                    spinner: &self.turn.spinner,
-                    started_at,
-                })
+            let input_rect = if let Some(panel) = self.settings_panel.as_mut() {
+                self.geometry.record_composer(Rect::ZERO);
+                crate::ui::settings::draw(frame, panel, bands.composer, &palette);
+                Rect::ZERO
             } else {
-                None
-            };
-            let meta = MetaRail {
-                workdir: self.status.workdir.as_deref(),
-                usage: &self.turn.usage,
-                total_lines: self.chat.content_height(),
-                visible_height: chat_height as usize,
-                scroll_offset: self.chat.scroll_position(),
-            };
-            let input_rect = if splash {
-                centered_card(bands.composer, composer_w)
-            } else {
-                crate::ui::input_area::chrome::card_area(bands.composer)
-            };
-            let popup_rect = if splash {
-                splash_popup(input_rect, self.popup.height(), area)
-            } else {
-                bands.popup
-            };
-            let keyboard_held = self.composer_typing_blocked();
-            self.geometry.record_composer(input_rect);
-            frame.render_widget(
-                ComposerWidget::new(&mut self.input, &palette, activity, meta)
-                    .keyboard_held(keyboard_held),
-                input_rect,
-            );
-
-            // Pop-down command popup — below the composer and floated with it,
-            // so the list hangs off the card instead of the screen edge.
-            if let Some(rect) = popup_rect
-                && let Some((rows, state, filter, header)) = self.popup.active.render_data()
-            {
-                // 开屏的 `rect` 已经是卡片矩形（与输入卡同宽同列），再剥一层边距
-                // 会比卡片窄 2 列；会话里的 `rect` 是排版行，才要按惯例留边。
-                let area = if splash {
-                    rect
+                let activity = if self.turn.working {
+                    self.turn.started_at.map(|started_at| ActivityRail {
+                        spinner: &self.turn.spinner,
+                        started_at,
+                    })
                 } else {
-                    crate::ui::input_area::chrome::card_area(rect)
+                    None
                 };
-                let mut popup = SelectionPopup::new(rows, state, filter, &palette);
-                // 层视图的标题行（当前层的名字）画在同一个矩形里，占顶上一行。
-                if let Some(header) = header {
-                    popup = popup.with_header(header);
-                }
-                frame.render_widget(popup, area);
-            }
+                let meta = MetaRail {
+                    workdir: self.status.workdir.as_deref(),
+                    usage: &self.turn.usage,
+                    total_lines: self.chat.content_height(),
+                    visible_height: chat_height as usize,
+                    scroll_offset: self.chat.scroll_position(),
+                };
+                let input_rect = if splash {
+                    centered_card(bands.composer, composer_w)
+                } else {
+                    crate::ui::input_area::chrome::card_area(bands.composer)
+                };
+                let popup_rect = if splash {
+                    splash_popup(input_rect, self.popup.height(), area)
+                } else {
+                    bands.popup
+                };
+                let keyboard_held = self.composer_typing_blocked();
+                self.geometry.record_composer(input_rect);
+                frame.render_widget(
+                    ComposerWidget::new(&mut self.input, &palette, activity, meta)
+                        .keyboard_held(keyboard_held),
+                    input_rect,
+                );
 
-            // Position the input cursor *inside* the render pass so ratatui
-            // owns cursor show/hide/move. The previous post-draw
-            // `execute!(Show/Hide, MoveTo)` wrote to the backend out-of-band,
-            // which desyncs ratatui's cursor tracking and is explicitly
-            // discouraged by ratatui.
-            //
-            // 设置面板开着时不定位：面板自己画反显光标，终端光标留在 overlay 上
-            // 就是一个游离的方块（不调用它 = 这一帧隐藏光标）。
-            if self.settings_panel.is_none() {
+                // Pop-down command popup — below the composer and floated with it,
+                // so the list hangs off the card instead of the screen edge.
+                if let Some(rect) = popup_rect
+                    && let Some((rows, state, filter, header)) = self.popup.active.render_data()
+                {
+                    // 开屏的 `rect` 已经是卡片矩形（与输入卡同宽同列），再剥一层边距
+                    // 会比卡片窄 2 列；会话里的 `rect` 是排版行，才要按惯例留边。
+                    let area = if splash {
+                        rect
+                    } else {
+                        crate::ui::input_area::chrome::card_area(rect)
+                    };
+                    let mut popup = SelectionPopup::new(rows, state, filter, &palette);
+                    // 层视图的标题行（当前层的名字）画在同一个矩形里，占顶上一行。
+                    if let Some(header) = header {
+                        popup = popup.with_header(header);
+                    }
+                    frame.render_widget(popup, area);
+                }
+
+                // Position the input cursor *inside* the render pass so ratatui
+                // owns cursor show/hide/move. The previous post-draw
+                // `execute!(Show/Hide, MoveTo)` wrote to the backend out-of-band,
+                // which desyncs ratatui's cursor tracking and is explicitly
+                // discouraged by ratatui.
                 let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
                 let cursor_x = cursor_x.min(area.width.saturating_sub(1));
                 let cursor_y = cursor_y.min(area.height.saturating_sub(1));
                 frame.set_cursor_position((cursor_x, cursor_y));
-            }
-
-            // 设置面板：居中**浮层卡片**（v2），垫在 toast *之前*（保存回执的 toast 要压在
-            // 它上面）。卡片自己 `Clear` 自己那块——四周的聊天背景因此还在（v1 是全屏
-            // overlay，这里额外全屏 `Clear` 一次；浮层不再需要，也不该抹掉背景）。
-            let settings_card = self
-                .settings_panel
-                .as_ref()
-                .map(|_| crate::ui::settings::card_area(area));
-            if let Some(panel) = self.settings_panel.as_mut()
-                && let Some(card) = settings_card
-            {
-                // 契约：每帧把两栏各自的可见行数告诉面板（翻页步长）。
-                panel.set_viewport_rows(
-                    crate::ui::settings::tree_viewport_rows(panel, card) as usize
-                );
-                panel.set_anchor_viewport_rows(crate::ui::settings::anchors_viewport_rows(
-                    panel, card,
-                ) as usize);
-                panel.set_anchors_visible(crate::ui::settings::has_anchor_column(panel, card));
-            }
-            if let Some(panel) = self.settings_panel.as_ref()
-                && let Some(card) = settings_card
-                && let Some((schema, _)) = self.settings_cache.as_ref()
-            {
-                crate::ui::settings::SettingsOverlay::new(
-                    panel,
-                    crate::ui::settings::SettingsCatalogs::new(
-                        &schema.root,
-                        self.interface_catalog.as_ref(),
-                    ),
-                    &palette,
-                )
-                .render(card, frame.buffer_mut());
-                // 卡片盖住的链接 hit box 要作废（与 toast 同一条不变量：看不见的
-                // hit box 不许打开看不见的链接）。指针侧另有一道门
-                // （`background_pointer_blocked`），这里保证的是**表本身**不撒谎。
-                self.chat.mask_links(card);
-            }
+                input_rect
+            };
 
             // Toast overlay (rendered last, on top of everything).
             let mut toast_area: Option<Rect> = None;
@@ -1021,12 +985,7 @@ impl App {
             let clip = self.chat.geometry().area;
             let recorded = self.chat.frame_images();
             self.images.observe_visible(recorded);
-            // 浮层卡片是"挡一块"而不是"挡全屏"：背景里的图片照常画，被卡片（或 toast）
-            // 压住的那几张由 `paint` 的 masks **整张**跳过（半张覆盖会撕碎图形协议）。
-            // 关面板时 `close_settings_panel` 会 invalidate
-            // 一次，编码与句柄在那里作废。
-            let mut masks: Vec<Rect> = toast_area.into_iter().collect();
-            masks.extend(settings_card);
+            let masks: Vec<Rect> = toast_area.into_iter().collect();
             if !self.selection.is_press_active() {
                 self.images
                     .paint(recorded, clip, &masks, frame.buffer_mut());
@@ -1041,11 +1000,7 @@ impl App {
             // so the copy must come from the frame the user was actually looking at. The composer
             // needs no snapshot — its wrapping is ours, so the copy comes from the draft itself.
             //
-            // 设置面板开着时不画：面板是**模态浮层**，键盘已经被它接管、指针也不再认领背景
-            // （`background_pointer_blocked`），而拖拽坐标落在卡片四周的 chat band 上（选区锚在
-            // 内容坐标）—— 高亮画出来只会和卡片打架（打开面板时已有的选区已被取消，这里挡的是
-            // "面板开着时新起的拖拽"）。
-            if self.selection.is_press_active() && self.settings_panel.is_none() {
+            if self.selection.is_press_active() && !settings_open {
                 match self.selection.region() {
                     Some(SelectionRegion::Chat) => {
                         self.chat
@@ -1138,6 +1093,35 @@ struct FrameLayout {
     composer: Rect,
     /// 命令弹层（挂在输入卡下面）；不显示时为 `None`。
     popup: Option<Rect>,
+}
+
+fn settings_layout(area: Rect, chat_empty: bool) -> FrameLayout {
+    let status_height = u16::from(area.height > 1);
+    let available = area.height - status_height;
+    let chat_reserve = if !chat_empty && available >= 5 {
+        (available / 3).max(1)
+    } else {
+        0
+    };
+    let settings_height = (available - chat_reserve).min(20);
+    let chat_height = available - settings_height;
+    FrameLayout {
+        status: Rect {
+            height: status_height,
+            ..area
+        },
+        band: Rect {
+            y: area.y + status_height,
+            height: chat_height,
+            ..area
+        },
+        composer: Rect {
+            y: area.bottom() - settings_height,
+            height: settings_height,
+            ..area
+        },
+        popup: None,
+    }
 }
 
 /// 排这一帧的版面（见 [`FrameLayout`]）。`hero_rows == 0` = 会话版式。

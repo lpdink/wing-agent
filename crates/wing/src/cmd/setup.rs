@@ -19,7 +19,7 @@
 //!
 //! 背板复用 [`crate::ui::welcome`] 的**帧数据与绘制原语**（`art` 的字母网格、`sprite` 的半格渲染、
 //! `wordmark` 的渐变大字），**不复用** `Welcome` 结构体——它绑定 chat header 的宽度阶梯与可见性门控。
-//! 前景就是同一个 [`SettingsPanel`] + [`SettingsOverlay`]，首屏 = 问题清单。
+//! 设置区域复用 [`SettingsPanel`] 和会话 TUI 的单栏列表，首屏 = 问题清单。
 //!
 //! 三个前端共用这里的预检（[`preflight_config`] / [`preflight_or_report`]）。**stdout 一个字节都不
 //! 写**（stdio / ACP 的协议帧通道就是这条 stdout 的语义）：本模块唯一的打印点是降级报告的 `eprint!`。
@@ -48,8 +48,10 @@ use ratatui::widgets::Paragraph;
 use serde_json::Value;
 use wing_api_client::ApiClientError;
 use wing_api_client::GatewayClient as GatewayApiClient;
+#[cfg(test)]
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::SettingProblem;
+#[cfg(test)]
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetRequest;
 use wing_api_client::models::SettingsSetResponse;
@@ -68,11 +70,6 @@ use crate::shared::panels::settings::SettingsAction;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
 use crate::tui::TermEvent;
-use crate::ui::settings::SettingsCatalogs;
-use crate::ui::settings::SettingsOverlay;
-use crate::ui::settings::anchors_viewport_rows;
-use crate::ui::settings::has_anchor_column;
-use crate::ui::settings::tree_viewport_rows;
 use crate::ui::shimmer::to_rgb;
 use crate::ui::welcome::art;
 use crate::ui::welcome::sprite;
@@ -271,26 +268,15 @@ where
 
     // 2. Interface 根（本地读写；读失败 = 树里没有这个根，不拿默认值冒充）。
     let interface = http.read_interface();
-    let mut interface_catalog: Option<SettingNode> =
-        interface.as_ref().map(|source| source.catalog.clone());
 
     // 3. 面板：首屏 = 问题清单（同一个组件服务 setup / 保存失败 / 随时查看）。
     let mut panel = SettingsPanel::new(&schema, state, interface, View::Problems);
-    let mut schema = schema;
 
     let mut note = baseline_note(panel.problems());
     let mut ctrl_c_at: Option<Instant> = None;
 
     loop {
-        draw_setup_frame(
-            terminal,
-            &mut panel,
-            &schema,
-            interface_catalog.as_ref(),
-            config,
-            &note,
-            true,
-        )?;
+        draw_setup_frame(terminal, &mut panel, config, &note, true)?;
 
         let key = match next_setup_input(terminal, events).await? {
             SetupInput::Key(key) => key,
@@ -342,16 +328,8 @@ where
                 .await;
                 note = save_note;
                 if ready {
-                    // 关闭 overlay（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
-                    draw_setup_frame(
-                        terminal,
-                        &mut panel,
-                        &schema,
-                        interface_catalog.as_ref(),
-                        config,
-                        &note,
-                        false,
-                    )?;
+                    // 收起设置列表（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
+                    draw_setup_frame(terminal, &mut panel, config, &note, false)?;
                     tokio::time::sleep(READY_DWELL).await;
                     return Ok(SetupOutcome::Ready);
                 }
@@ -369,14 +347,12 @@ where
                 match (new_schema, new_state) {
                     (Ok(new_schema), Ok(new_state)) => {
                         panel.apply_snapshot(&new_schema, new_state);
-                        schema = new_schema;
                     }
                     _ => note = Note::error("重新载入失败：网关不可达"),
                 }
                 if let Some(source) = http.read_interface() {
                     *config = crate::config::store::appconfig_from_doc(&source.doc);
-                    panel.set_interface(source.clone());
-                    interface_catalog = Some(source.catalog);
+                    panel.set_interface(source);
                 }
             }
         }
@@ -616,8 +592,6 @@ impl SetupEvents for TerminalEvents {
 fn draw_setup_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     panel: &mut SettingsPanel,
-    schema: &SettingsSchemaResponse,
-    interface_catalog: Option<&SettingNode>,
     config: &AppConfig,
     note: &Note,
     panel_open: bool,
@@ -639,13 +613,7 @@ fn draw_setup_frame<B: Backend>(
         // 小终端里也不该整条消失。
         draw_note(frame, note_area, &palette, note);
         if panel_open {
-            // 契约：每帧同步两栏各自的可见行数与左栏可见性，再 Clear + 整块 render。
-            panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
-            panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
-            panel.set_anchors_visible(has_anchor_column(panel, panel_area));
-            frame.render_widget(Clear, panel_area);
-            let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
-            frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
+            crate::ui::settings::draw(frame, panel, panel_area, &palette);
         } else {
             // 面板已关（就绪帧）：显式清掉那一块，否则 ratatui 的 diff 会留着上一帧的面板。
             frame.render_widget(Clear, panel_area);
@@ -1947,6 +1915,35 @@ mod tests {
         assert_eq!((panel.height, note.height), (0, 1));
         let (_, panel, note) = split_setup_areas(Rect::new(0, 0, 20, 0));
         assert_eq!((panel.height, note.height), (0, 0));
+    }
+
+    #[test]
+    fn setup_draws_the_shared_problem_list_and_keeps_its_status() {
+        let backend = FakeBackend::first_run();
+        for (width, height) in [(32, 10), (120, 40)] {
+            let mut panel =
+                SettingsPanel::new(&backend.schema, backend.state.clone(), None, View::Problems);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let note = Note::hint("setup marker");
+            draw_setup_frame(
+                &mut terminal,
+                &mut panel,
+                &AppConfig::default(),
+                &note,
+                true,
+            )
+            .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("Settings"), "{text}");
+            assert!(text.contains("setup marker"), "{text}");
+            assert!(text.contains('❯'), "{text}");
+        }
     }
 
     /// `Resize` 必须被当成"重排 + 重画"，不是退出 —— 用户在 setup 阶段拉窗口

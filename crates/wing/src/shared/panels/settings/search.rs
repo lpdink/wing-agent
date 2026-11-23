@@ -107,6 +107,7 @@ fn collect_hits(node: &SettingNode, root: Root, needle: &str, hits: &mut HashSet
 fn node_matches(node: &SettingNode, needle: &str) -> bool {
     let contains = |text: &str| text.to_lowercase().contains(needle);
     contains(&node.path)
+        || contains(super::model::field_label(node))
         || contains(&node.title)
         || contains(&node.doc)
         || node.notes.iter().any(|note| contains(note))

@@ -197,6 +197,10 @@ impl SettingsDoc {
         self.dirty.insert((root, path.to_string()));
     }
 
+    pub(crate) fn clear_dirty(&mut self, root: Root, path: &str) {
+        self.dirty.remove(&(root, path.to_string()));
+    }
+
     /// 该 **具体路径** 自己是否被标脏（不含子孙）。
     pub fn is_dirty(&self, root: Root, path: &str) -> bool {
         self.dirty.contains(&(root, path.to_string()))

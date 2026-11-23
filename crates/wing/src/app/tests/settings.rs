@@ -1,6 +1,6 @@
 //! 设置面板的 App 接线测试。
 //!
-//! 覆盖：模态优先级 · ask 排队 · overlay 的绘制落点与三者处置
+//! 覆盖：模态优先级 · ask 排队 · 底部设置的布局与指针归属
 //! （`needs_full_redraw` / `images.invalidate()` 的配对）·
 //! 实时预览与快照 · 一键保存两边的四种组合 · 轮次中拒绝重启 ·
 //! `settings_changed` 的指纹比对 · 命令表别名。
@@ -562,110 +562,61 @@ fn an_ask_arriving_while_the_panel_is_open_waits_in_the_queue() {
     assert_eq!(sent, Some(("y".to_string(), Some("ask-9".into()))));
 }
 
-// ── 3. overlay 的绘制落点 + 三者处置 ────────────────────
+// ── 3. Settings frame and composer restoration ──────────────────────────
 
 #[test]
-fn the_open_panel_floats_over_the_chat_and_leaves_the_background_visible() {
-    let mut app = test_app();
-    app.chat.push(ChatCell::UserMessage("hello world".into()));
-    app.input.set_text("draft text");
-    let mut terminal = test_terminal(100, 30);
+fn the_bottom_settings_frame_preserves_chat_and_restores_the_draft() {
+    for (width, height) in [(32, 12), (120, 32)] {
+        let mut app = test_app();
+        app.chat.push(ChatCell::UserMessage("chat marker".into()));
+        app.input.set_text("draft text");
+        app.input.move_left();
+        let cursor = (app.input.cursor_row, app.input.cursor_col);
+        let mut terminal = test_terminal(width, height);
+        draw(&mut app, &mut terminal);
+        let original_composer = app.geometry.composer_rect();
 
-    app.draw(&mut terminal).expect("draw");
-    let before = frame_text(terminal.backend().buffer());
-    assert!(before.contains("hello world"));
-    assert!(before.contains("draft text"));
-
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    // 打开面板要求整屏重画一次：卡片底下的图片像素要擦掉（与关闭时对称）。
-    assert!(app.needs_full_redraw, "打开面板 = 一次整屏重画");
-    app.draw(&mut terminal).expect("draw");
-    let buf = terminal.backend().buffer().clone();
-    let after = frame_text(&buf);
-    assert!(after.contains("Settings"), "卡片的标题在场：\n{after}");
-
-    // 卡片几何：min(终端宽-4, 110) × min(终端高-4, 32)，居中。
-    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 100, 30));
-    assert_eq!(card, ratatui::layout::Rect::new(2, 2, 96, 26));
-    assert_eq!(buf[(card.x, card.y)].symbol(), "┌", "卡片左上角");
-    assert_eq!(
-        buf[(card.right() - 1, card.bottom() - 1)].symbol(),
-        "┘",
-        "卡片右下角"
-    );
-
-    // 四周露出背景：状态栏与 composer 都还在（v1 的全屏 overlay 会把它们抹掉）。
-    assert!(after.contains("test-session"), "状态栏可见：\n{after}");
-    assert!(after.contains("draft text"), "composer 可见：\n{after}");
-    // 卡片内部不透底：被它盖住的那条消息不见了。
-    assert!(!after.contains("hello world"), "卡片内部不透底：\n{after}");
-}
-
-#[test]
-fn a_small_terminal_degrades_the_panel_to_full_screen() {
-    // < 80×24：浮层比全屏更难读，直接铺满。
-    for (width, height) in [(79u16, 30u16), (80, 23), (60, 48), (40, 10)] {
-        let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, width, height));
-        assert_eq!(
-            card,
-            ratatui::layout::Rect::new(0, 0, width, height),
-            "{width}x{height} 应当铺满"
+        app.inject_settings_panel(
+            &gateway_schema(),
+            gateway_state(sample_values(), "fp-1"),
+            Some(interface_source("magenta")),
         );
+        draw(&mut app, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let text = frame_text(buf);
+        let top = app.geometry.chat_band().bottom();
+        assert_eq!(app.geometry.composer_rect(), ratatui::layout::Rect::ZERO);
+        assert_eq!(buf[(0, top)].symbol(), "S");
+        assert!(text.lines().next().unwrap().contains("-session"), "{text}");
+        assert!(text.contains("chat marker"), "{text}");
+        assert!(!text.contains("draft text"), "{text}");
+
+        press(&mut app, KeyCode::Enter);
+        draw(&mut app, &mut terminal);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        draw(&mut app, &mut terminal);
+        assert!(app.settings_panel.is_none());
+        assert_eq!(app.input.text(), "draft text");
+        assert_eq!((app.input.cursor_row, app.input.cursor_col), cursor);
+        assert_eq!(app.geometry.composer_rect(), original_composer);
+        assert!(frame_text(terminal.backend().buffer()).contains("draft text"));
     }
-    // ≥ 80×24：浮层，且不超过 110×32。
-    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 80, 24));
-    assert_eq!(card, ratatui::layout::Rect::new(2, 2, 76, 20));
-    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 200, 60));
-    assert_eq!(card, ratatui::layout::Rect::new(45, 14, 110, 32));
 }
 
 #[test]
-fn the_open_panel_suppresses_pictures_and_closing_invalidates_them() {
-    let dir = TempDir::new("settings-overlay");
-    let plot = dir.file("plot.png");
-    write_png(&plot, 800, 600);
-    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
-    app.chat
-        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
-    let mut terminal = test_terminal(60, 48);
-    draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
-        has_placeholder(buf)
-    });
-    assert_eq!(app.images.stats().expect("lane").cached, 1);
-
-    // 面板开着：这一帧不画图片（overlay 是最后写入者）。
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(
-        !has_placeholder(&buf),
-        "卡片挡住的图片这一帧不画（打开面板时还整屏擦过一次）"
-    );
-
-    // 关闭：整屏重画 + 图片句柄失效（两者的配对）。
-    app.close_settings_panel(false);
-    assert!(app.needs_full_redraw, "关闭后面板要求整屏重画");
-    // `invalidate` 在**关闭那一刻**就已经生效（不是靠下一次 draw 的兜底）——
-    // 下一帧的 `needs_full_redraw` 分支会把它再做一遍，只有在这里读才分得清。
-    assert_eq!(
-        app.images.stats().expect("lane").cached,
-        0,
-        "关闭动作自己调了 images.invalidate()（不等 draw）"
-    );
-    let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(!has_placeholder(&buf), "失效的编码不会再画");
-    assert_eq!(
-        app.images.stats().expect("lane").cached,
-        0,
-        "关闭面板时 images.invalidate() 被调用（编码被丢掉）"
-    );
+fn settings_controls_stay_reachable_in_an_empty_short_session() {
+    let mut app = app_with_settings_panel();
+    let mut terminal = test_terminal(32, 5);
+    draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("providers"));
+    press(&mut app, KeyCode::End);
+    draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("Interface"));
+    press(&mut app, KeyCode::Enter);
+    draw(&mut app, &mut terminal);
+    assert_eq!(panel(&app).view(), View::Tree);
+    assert!(frame_text(terminal.backend().buffer()).contains("colors"));
 }
 
 #[test]
@@ -1296,7 +1247,7 @@ fn closing_the_panel_drops_the_open_and_reload_flags() {
     app.settings_reload_pending = true;
     app.close_settings_panel(false);
     assert!(!app.settings_pending && !app.settings_reload_pending);
-    assert!(app.interface_catalog.is_none());
+    assert!(app.settings_panel.is_none());
 }
 
 // ── 9. 保存载荷：密文红线（接线级） ────────────────────────
@@ -1490,144 +1441,56 @@ async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
     assert!(app.drain_intents().is_empty(), "早退不产出任何副作用");
 }
 
-// ── 浮层的两条边界────────────────────────────
+// ── Visible chat retains its frame geometry while settings owns clicks ──
 
-/// 一张带链接的聊天 + 一台 100×30 的终端：链接的 hit box 落在卡片底下。
-fn app_with_link_under_the_card() -> App {
+#[test]
+fn visible_chat_links_keep_their_geometry_and_settings_blocks_clicks() {
     let mut app = test_app();
     app.chat.push(ChatCell::AssistantMessage(
         "see [docs](https://example.com) for details".into(),
     ));
-    app
-}
-
-/// 链接 hit box 的左上角（屏幕坐标）。
-fn link_cell(app: &App) -> (u16, u16) {
-    let (row, links) = app.chat.frame_links().first().expect("帧里有链接").clone();
-    (links[0].start, row)
-}
-
-#[test]
-fn a_click_on_the_card_does_not_open_the_link_underneath() {
-    let mut app = app_with_link_under_the_card();
     let mut terminal = test_terminal(100, 30);
-    draw(&mut app, &mut terminal);
-    let at = link_cell(&app);
-    let card = crate::ui::settings::card_area(terminal.backend().buffer().area);
-    assert!(
-        card.contains(ratatui::layout::Position::new(at.0, at.1)),
-        "夹具前提：链接在卡片底下（{at:?} vs {card:?}）"
-    );
-
     app.inject_settings_panel(
         &gateway_schema(),
         gateway_state(sample_values(), "fp-1"),
         Some(interface_source("magenta")),
     );
     draw(&mut app, &mut terminal);
-    // 卡片盖住的 hit box 已经作废（看不见的不许点得着）。
-    assert!(
-        app.chat.frame_links().is_empty(),
-        "卡片下的链接 hit box 要作废：{:?}",
-        app.chat.frame_links()
-    );
-    // 再点同一格：不产生 OpenLink，也不产生任何意图。
-    app.handle_mouse(mouse_press(at));
-    app.handle_mouse(mouse_release(at));
-    assert!(
-        app.drain_intents().is_empty(),
-        "浮层期间背景不接指针（审查 S1）"
-    );
-    // 滚轮是**独立通道**（`app::mouse` 的模块 doc：永远滚聊天视图，不被任何浮层认领）——
-    // 背景滚一下不改面板的任何状态，v1 就是这个口径，这里不动。
-}
-
-#[test]
-fn a_drag_on_the_card_does_not_copy_a_stale_snapshot() {
-    let mut app = app_with_link_under_the_card();
-    let mut terminal = test_terminal(100, 30);
-    draw(&mut app, &mut terminal);
-    let at = link_cell(&app);
-
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    draw(&mut app, &mut terminal);
+    let (row, links) = app
+        .chat
+        .frame_links()
+        .first()
+        .expect("visible chat link")
+        .clone();
+    let at = (links[0].start, row);
+    assert!(app.geometry.chat_band().contains(at.into()));
     app.handle_mouse(mouse_press(at));
     app.handle_mouse(mouse_drag((at.0 + 4, at.1)));
     app.handle_mouse(mouse_release((at.0 + 4, at.1)));
-    // 选区绘制被浮层挡掉、`capture_visible_rows` 也不跑：与其复制到打开面板前
-    // 那一帧的快照，不如根本不认领这个手势。
-    assert!(app.drain_intents().is_empty(), "浮层期间不产生复制意图");
-    assert!(!app.selection.is_press_active(), "没有留下半截选区");
+    assert!(app.drain_intents().is_empty());
+    assert!(!app.selection.is_press_active());
 }
 
 #[test]
-fn a_picture_outside_the_card_is_still_painted() {
-    // 浮层只挡它盖住的那张图；露在外面的背景照画（masks 写成整块区域就退化成 v1）。
-    let dir = TempDir::new("settings-card-mask");
-    let plot = dir.file("plot.png");
-    write_png(&plot, 120, 60);
-    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
-    app.chat
-        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
-    // 200 列：卡片 110 列居中（x 45..155），小图的盒子在最左边，两者不相交。
-    let mut terminal = test_terminal(200, 40);
-    let buf = draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
-        has_placeholder(buf)
-    });
-    let before = placeholder_rect(&buf).expect("画出来了");
-    let card = crate::ui::settings::card_area(buf.area);
-    assert!(
-        !card.intersects(before),
-        "夹具前提：图在卡片之外（{before:?} vs {card:?}）"
-    );
-
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    // 打开面板会整屏重画一次（`needs_full_redraw` ⇒ `terminal.clear()` +
-    // `images.invalidate()`），编码要过一两个 worker 轮次才回来 —— 所以这里等到它回来，
-    // 断言的是"背景那张图最终照画"，而不是"同一帧内不闪"。
-    let buf = draw_until(&mut app, &mut terminal, "the picture is back", |_, buf| {
-        has_placeholder(buf)
-    });
-    assert_eq!(
-        placeholder_rect(&buf),
-        Some(before),
-        "同一张图、同一个盒子（没有被重排或撕成半张）"
-    );
-}
-
-#[test]
-fn a_picture_under_the_card_is_skipped_whole() {
-    // 上一条的另一半：盖住的那张整张跳过（半张覆盖会撕碎图形协议）。
-    let dir = TempDir::new("settings-card-mask");
-    let plot = dir.file("plot.png");
-    write_png(&plot, 800, 600);
+fn a_picture_inside_the_chat_band_is_painted_and_invalidated_on_close() {
+    let dir = TempDir::new("settings-chat-picture");
+    write_png(&dir.file("plot.png"), 120, 60);
     let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
     app.chat
         .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
     let mut terminal = test_terminal(120, 40);
-    let buf = draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
-        has_placeholder(buf)
-    });
-    let before = placeholder_rect(&buf).expect("画出来了");
-    let card = crate::ui::settings::card_area(buf.area);
-    assert!(
-        card.intersects(before),
-        "夹具前提：图被卡片盖住（{before:?} vs {card:?}）"
-    );
-
     app.inject_settings_panel(
         &gateway_schema(),
         gateway_state(sample_values(), "fp-1"),
         Some(interface_source("magenta")),
     );
-    let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(!has_placeholder(&buf), "被卡片盖住的那张整张不画");
+    let buf = draw_until(&mut app, &mut terminal, "visible chat picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let picture = placeholder_rect(&buf).expect("painted picture");
+    assert!(picture.bottom() <= app.geometry.chat_band().bottom());
+    assert_eq!(app.images.stats().expect("lane").cached, 1);
+    app.close_settings_panel(false);
+    assert!(app.needs_full_redraw);
+    assert_eq!(app.images.stats().expect("lane").cached, 0);
 }

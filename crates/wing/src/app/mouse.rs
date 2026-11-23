@@ -85,8 +85,7 @@ impl PointerOwner {
     /// live widget state; none of them mutates anything — the press handler
     /// does that once, after the chain has picked a winner.
     fn claims(self, app: &App, column: u16, row: u16) -> bool {
-        // 设置面板是**浮层模态**：卡片四周的聊天还看得见，但它不是可交互的表面
-        // （见 [`App::background_pointer_blocked`]）。四个背景认领一律先过这道门。
+        // Settings owns clicks while open, including over the visible chat and status bar.
         if app.background_pointer_blocked() {
             return false;
         }

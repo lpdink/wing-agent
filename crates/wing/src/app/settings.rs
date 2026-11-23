@@ -1,7 +1,7 @@
 //! 设置面板的 App 侧接线（`/settings`）。
 //!
-//! `shared/panels/settings` 的状态机产出 [`SettingsAction`]，overlay
-//! （`ui/settings`）把它画出来；这一层负责**它周围的一切**：
+//! `shared/panels/settings` 的状态机产出 [`SettingsAction`]，`ui/settings` 绘制列表。
+//! 这里负责会话里的设置生命周期：
 //!
 //! * **生命周期**——打开（cache-first + 后台刷新）、关闭（预览回退 + 整屏重画 +
 //!   图片失效）、`R` 重载、`Ctrl+R` 重启；
@@ -137,16 +137,12 @@ impl App {
     ) {
         let catalog = crate::config::catalog::interface_catalog();
         let interface = match crate::config::store::read_interface_doc() {
-            Ok(read) => {
-                self.interface_catalog = Some(catalog.clone());
-                Some(InterfaceSource {
-                    groups: crate::config::catalog::interface_groups(),
-                    catalog,
-                    doc: read.doc,
-                })
-            }
+            Ok(read) => Some(InterfaceSource {
+                groups: crate::config::catalog::interface_groups(),
+                catalog,
+                doc: read.doc,
+            }),
             Err(e) => {
-                self.interface_catalog = None;
                 self.show_toast(Toast::warning(
                     format!("无法读取 TUI 配置，面板只显示 Gateway 根：{e}"),
                     Duration::from_secs(5),
@@ -154,32 +150,27 @@ impl App {
                 None
             }
         };
-        self.settings_panel = Some(SettingsPanel::new(schema, state, interface, View::Tree));
+        self.settings_panel = Some(SettingsPanel::new(
+            schema,
+            state,
+            interface,
+            View::Categories,
+        ));
         self.settings_pending = false;
-        // 选区锚在内容坐标：overlay 期间的帧几何与内容都变了，留着只会指向别的文本。
         self.cancel_selection();
-        // v2 的卡片是**浮层**：四周露出聊天背景，于是"卡片底下那张图"成了新问题——
-        // 图形协议画上去的像素不会因为这一帧不画它就消失（sixel 尤其如此）。
-        // 打开时整屏重画一次（`terminal.clear()` + `images.invalidate()` 是既有配对），
-        // 与 `close_settings_panel` 的那一次对称：进出面板各擦一次屏幕。
+        // A viewport resize can leave pixels drawn by the previous frame's graphics protocol.
         self.needs_full_redraw = true;
         self.chat_dirty = true;
     }
 
     /// 关闭面板（`discard=true` = 用户确认放弃未保存改动 → 预览回退）。
-    ///
-    /// **无论哪条路径**都要整屏重画 + 让图片句柄失效：overlay 的 `Clear` 抹过终端，
-    /// ratatui 的 diff 面对"曾经被 Clear 过"的屏幕会留下残影，
-    /// 而图片协议的内容在 Clear 之后终端已不再持有。
     pub(super) fn close_settings_panel(&mut self, discard: bool) {
         self.settings_panel = None;
-        self.interface_catalog = None;
         self.settings_pending = false;
         self.settings_reload_pending = false;
         if discard {
             self.restore_config_snapshot();
         }
-        // 面板开着时新起的拖拽锚在看不见的 chat band 上：一起收掉。
         self.cancel_selection();
         self.needs_full_redraw = true;
         self.images.invalidate();
@@ -196,12 +187,11 @@ impl App {
         interface: Option<InterfaceSource>,
     ) {
         self.config_snapshot = Some(self.config.clone());
-        self.interface_catalog = interface.as_ref().map(|source| source.catalog.clone());
         self.settings_panel = Some(SettingsPanel::new(
             schema,
             state.clone(),
             interface,
-            View::Tree,
+            View::Categories,
         ));
         self.settings_cache = Some((schema.clone(), state));
         self.cancel_selection();
@@ -311,7 +301,11 @@ impl App {
     /// 本地半边立刻做（预览回到磁盘状态），Gateway 半边走 `ReloadSettings` ——
     /// 回到 `get` 的结果由 `settings_reload_pending` 标记为"无条件应用"。
     pub(super) fn reload_settings(&mut self) {
-        let catalog = self.interface_catalog.clone();
+        let catalog = self
+            .settings_panel
+            .as_ref()
+            .and_then(SettingsPanel::interface_catalog)
+            .cloned();
         match (catalog, crate::config::store::read_interface_doc()) {
             (Some(catalog), Ok(read)) => {
                 let doc = read.doc;
