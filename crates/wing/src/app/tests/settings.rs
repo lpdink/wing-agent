@@ -1494,3 +1494,163 @@ fn a_picture_inside_the_chat_band_is_painted_and_invalidated_on_close() {
     assert!(app.needs_full_redraw);
     assert_eq!(app.images.stats().expect("lane").cached, 0);
 }
+
+#[test]
+fn a_gateway_save_holds_the_model_draft_until_the_receipt_and_retries_failure() {
+    use crate::shared::panels::settings::ValueText;
+    use crate::shared::panels::settings::test_support as model_fixture;
+
+    let mut app = test_app();
+    let mut schema = gateway_schema();
+    schema.root = model_fixture::mixed_model_catalog();
+    schema.groups.clear();
+    app.inject_settings_panel(
+        &schema,
+        gateway_state(model_fixture::mixed_model_values(), "fp-1"),
+        None,
+    );
+    goto(&mut app, "Image input");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('s'));
+    let [
+        AppIntent::SaveSettings {
+            gateway,
+            base,
+            gateway_dirty: true,
+            ..
+        },
+    ]: [AppIntent; 1] = app.drain_intents().try_into().expect("one Gateway save")
+    else {
+        panic!("expected a Gateway save");
+    };
+    assert_eq!(base, "fp-1");
+    assert_eq!(
+        gateway["providers"][0]["models"][0]["capabilities"]["vision"],
+        true
+    );
+    record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
+    for key in [KeyCode::Tab, KeyCode::Char('s'), KeyCode::Esc] {
+        press(&mut app, key);
+    }
+    assert!(app.drain_intents().is_empty());
+    assert!(app.settings_save.is_some());
+    assert_eq!(
+        panel(&app).current_row().unwrap().value,
+        ValueText::Text("enabled".into())
+    );
+    assert_eq!(panel(&app).dirty_count(), 1);
+
+    app.settle_gateway_save(GatewaySaveReport::Failed {
+        message: "fake transport failure".into(),
+        conflict: false,
+    });
+    assert!(app.settings_save.is_none());
+    assert_eq!(panel(&app).dirty_count(), 1);
+    press(&mut app, KeyCode::Char('s'));
+    let [AppIntent::SaveSettings { gateway: retry, .. }]: [AppIntent; 1] =
+        app.drain_intents().try_into().expect("one retry")
+    else {
+        panic!("expected a retry");
+    };
+    assert_eq!(gateway, retry);
+    record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
+    app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
+        true,
+        "fp-2",
+        vec![],
+    )));
+    assert!(
+        app.drain_intents()
+            .into_iter()
+            .all(|intent| matches!(intent, AppIntent::FetchSettings))
+    );
+    assert!(app.settings_save.is_none());
+    assert_eq!(panel(&app).dirty_count(), 0);
+    assert_eq!(
+        panel(&app).current_row().unwrap().value,
+        ValueText::Text("enabled".into())
+    );
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        panel(&app).current_row().unwrap().value,
+        ValueText::Text("disabled".into())
+    );
+    press(&mut app, KeyCode::Char('s'));
+    let [AppIntent::SaveSettings { gateway, base, .. }]: [AppIntent; 1] =
+        app.drain_intents().try_into().expect("one follow-up save")
+    else {
+        panic!("expected a follow-up Gateway save");
+    };
+    assert_eq!(base, "fp-2");
+    assert_eq!(
+        gateway["providers"][0]["models"][0],
+        json!({"name": "legacy/model", "capabilities": {"vision": false}})
+    );
+}
+
+#[test]
+fn cold_open_and_settings_notifications_cannot_cover_short_frame_editing() {
+    use crate::ui::toast::Toast;
+    use ratatui::style::Modifier;
+
+    let mut app = test_app();
+    app.open_settings_panel();
+    let loading_message = app.toast.as_ref().expect("loading toast").message.clone();
+    app.handle_settings_fetch(gateway_schema(), gateway_state(sample_values(), "fp-1"));
+    assert!(
+        app.toast
+            .as_ref()
+            .is_none_or(|toast| toast.message != loading_message)
+    );
+    let mut terminal = test_terminal(32, 5);
+    draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("❯ providers"));
+
+    goto(&mut app, "gateway.port");
+    press(&mut app, KeyCode::Enter);
+    press_event(&mut app, ctrl(KeyCode::Char('u')));
+    type_text(&mut app, &format!("{}abcdef", "long value ".repeat(8)));
+    let warning = "Warning from settings while the editor is active";
+    app.show_toast(Toast::warning(warning, std::time::Duration::from_secs(30)));
+    for (width, height) in [(32, 5), (120, 32)] {
+        let mut terminal = test_terminal(width, height);
+        draw(&mut app, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let text = frame_text(buf);
+        assert!(text.contains("Warning from settings"), "{text}");
+        if width == 120 {
+            assert!(text.contains(warning), "{text}");
+        }
+        assert!(text.contains("abcdef"), "{text}");
+        assert!(
+            buf.content
+                .iter()
+                .any(|cell| cell.modifier.contains(Modifier::REVERSED)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn pending_restart_is_visible_in_the_compact_settings_footer() {
+    let mut app = app_with_settings_panel();
+    let mut response = settings_response(true, "fp-2", vec![]);
+    response.restart_required = vec!["gateway.port".into()];
+    app.settings_panel
+        .as_mut()
+        .unwrap()
+        .apply_save(SaveOutcome {
+            gateway: Some(response),
+            interface_ok: None,
+        });
+    goto(&mut app, "gateway.port");
+    press(&mut app, KeyCode::Enter);
+    press_event(&mut app, ctrl(KeyCode::Char('u')));
+    type_text(&mut app, "1234");
+    press(&mut app, KeyCode::Enter);
+    let mut terminal = test_terminal(32, 5);
+    draw(&mut app, &mut terminal);
+    let text = frame_text(terminal.backend().buffer());
+    assert!(text.contains("Ctrl+R"), "{text}");
+    assert!(text.contains("port") && text.contains("1234"), "{text}");
+}

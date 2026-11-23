@@ -1,7 +1,7 @@
 # 设置面（Setting API · TUI 设置面板 · 首次运行向导 · `wing config`）
 
 本页是**配置这条产品线**的机制级文档：一份声明（`S(...)`）怎么变成目录 / 模板 / 校验，配置怎么经
-API 保存与生效，配置不可用时网关怎么活着（setup mode），以及三个消费入口（TUI 浮层面板 /
+API 保存与生效，配置不可用时网关怎么活着（setup mode），以及三个消费入口（TUI 单栏设置 /
 首次运行向导 / `wing config` CLI）各自长什么样、改它们要注意什么。
 
 涉及两个文件（都叫 `config.yaml`，语义完全不同）：
@@ -86,7 +86,7 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 消费方 | 读什么 |
 |---|---|
 | `GET /api/settings/schema` | `groups[]`（id / title / doc / members）——**前端左列锚点的唯一来源**，前端零硬编码 |
-| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（面板左栏锚点的说明；不进 config.yaml） |
+| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（设置分类的说明；不进 config.yaml） |
 | `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**（分组表管界面顺序，不管文件顺序；同组成员必须连续，见门禁） |
 
 门禁（`tests/test_config_groups.py`）：id / title 唯一、成员非空且都是真实顶层字段、
@@ -437,7 +437,8 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
 新模型直接进入名称编辑。已有短写改名后仍使用短写，修改图片输入等高级字段时会转成对象并保留原名称。
 本次草稿里若撤掉所有触发转换的字段，条目会恢复短写。未改动的模型保留原有配置形态。
 
-Interface 编辑提交后即时预览。保存将预览写入配置，确认放弃后恢复之前的设置。Gateway 修改累积到 `s`。
+Interface 编辑提交后即时预览。保存将预览写入配置，确认放弃后恢复之前的设置。Gateway 修改累积到 `s`，
+保存请求进行中暂缓设置操作，收到结果后可继续编辑。
 其它客户端修改文件后，面板提示通过 `R` 从磁盘读取，草稿仍留在面板中。
 
 ## 10. 首次运行向导（setup TUI）
@@ -536,7 +537,7 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
   `build_groups()` 当场抛（界面里它会无处可去），`test_config_groups.py` 也会红。
 - 改界面分类（加组 / 并组 / 改名 / 调顺序）：只动 `SETTING_GROUPS` 一张表（§1.1）；
   `config.yaml` 零迁移（顶层键不动，只有分隔注释跟着变）。前端**不许**出现组名字面量——
-  左栏锚点全部来自 `schema.groups[]`（Interface 的那一份在 `config/catalog.rs::interface_groups()`）。
+  分类列表来自 `schema.groups[]`（Interface 的那一份在 `config/catalog.rs::interface_groups()`）。
 - **给 LIST 字段加密文叶子前先想配对**：只要元素子树里有可达的 `secret=True` 叶子，就必须同时声明
   `identity_field`（元素里那个唯一的非密文标量字段名）——否则列表结构一变，`null` 哨兵配不上，
   密钥只能被丢弃（回执警告 + 用户重填），或者更糟：**按下标错配**（§6 的不变量）。

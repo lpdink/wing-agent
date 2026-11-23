@@ -1918,6 +1918,41 @@ mod tests {
     }
 
     #[test]
+    fn returning_from_an_enum_to_the_setup_categories_releases_q() {
+        let backend = FakeBackend::first_run();
+        let mut panel = SettingsPanel::new(
+            &backend.schema,
+            backend.state.clone(),
+            Some(InterfaceSource {
+                catalog: crate::config::catalog::interface_catalog(),
+                groups: crate::config::catalog::interface_groups(),
+                doc: serde_json::json!({}),
+            }),
+            View::Categories,
+        );
+        let press = |panel: &mut SettingsPanel, code| {
+            panel.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        };
+        press(&mut panel, KeyCode::Char('/'));
+        for ch in "colors.preset".chars() {
+            press(&mut panel, KeyCode::Char(ch));
+        }
+        press(&mut panel, KeyCode::Enter);
+        press(&mut panel, KeyCode::Enter);
+        assert!(panel.choices().is_some());
+        press(&mut panel, KeyCode::Home);
+        press(&mut panel, KeyCode::Left);
+        press(&mut panel, KeyCode::Left);
+        assert_eq!(panel.view(), View::Categories);
+        press(&mut panel, KeyCode::Home);
+        press(&mut panel, KeyCode::Enter);
+        assert!(q_is_quit(
+            &panel,
+            &KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+        ));
+    }
+
+    #[test]
     fn setup_draws_the_shared_problem_list_and_keeps_its_status() {
         let backend = FakeBackend::first_run();
         for (width, height) in [(32, 10), (120, 40)] {

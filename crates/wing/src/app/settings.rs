@@ -100,6 +100,8 @@ pub(super) struct PendingSettingsSave {
     pub(super) document: Value,
 }
 
+const SETTINGS_LOADING: &str = "正在载入设置…";
+
 impl App {
     // -----------------------------------------------------------------------
     // 生命周期
@@ -115,7 +117,7 @@ impl App {
             return;
         }
         if self.settings_cache.is_none() {
-            self.show_toast(Toast::info("正在载入设置…", Duration::from_secs(3)));
+            self.show_toast(Toast::info(SETTINGS_LOADING, Duration::from_secs(3)));
         }
         // 打开时的 config 快照：`Esc` 放弃 / `R` 重载的回退基准。
         self.config_snapshot = Some(self.config.clone());
@@ -135,6 +137,13 @@ impl App {
         schema: &SettingsSchemaResponse,
         state: SettingsGetResponse,
     ) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.message == SETTINGS_LOADING)
+        {
+            self.clear_toast();
+        }
         let catalog = crate::config::catalog::interface_catalog();
         let interface = match crate::config::store::read_interface_doc() {
             Ok(read) => Some(InterfaceSource {

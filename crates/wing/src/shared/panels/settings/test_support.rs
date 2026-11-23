@@ -319,3 +319,34 @@ pub(crate) fn problem(root: Root, path: Option<&str>, kind: &str, message: &str)
         hint: None,
     }
 }
+
+/// A typed provider model catalog with the two wire variants and the vision default.
+pub(crate) fn mixed_model_catalog() -> SettingNode {
+    let mut vision = bool_field("vision", false);
+    vision.doc = "是否接受图片输入".into();
+    let models = list_of(
+        "models",
+        vec![
+            element(str_field("str")),
+            element(object(
+                "ModelSpec",
+                vec![
+                    str_field("id"),
+                    required_str("name"),
+                    str_field("display_name"),
+                    object("capabilities", vec![vision]),
+                ],
+            )),
+        ],
+    );
+    root(vec![
+        list("providers", element(object("ProviderConfig", vec![models]))),
+        int_field("port", None, None),
+    ])
+}
+
+pub(crate) fn mixed_model_values() -> Value {
+    json!({"providers": [{"models": [
+        "legacy/model", {"id": "chosen", "name": "upstream", "display_name": "Friendly", "capabilities": {"vision": true}}, "untouched"
+    ]}], "port": 1234})
+}
