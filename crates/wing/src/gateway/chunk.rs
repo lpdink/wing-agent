@@ -360,6 +360,7 @@ fn truncate(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SessionSnapshot;
     use serde_json::json;
 
     const META: (&str, &str) = ("2026-09-13T00:00:00+00:00", "req-1");
@@ -431,7 +432,9 @@ mod tests {
 
     fn sync_content(event: &WingEvent) -> Option<&str> {
         match event {
-            WingEvent::SyncSession { messages, .. } => messages.first()?.get("content")?.as_str(),
+            WingEvent::SyncSession(SessionSnapshot { messages, .. }) => {
+                messages.first()?.get("content")?.as_str()
+            }
             _ => None,
         }
     }
@@ -542,9 +545,34 @@ mod tests {
         assert!(is_pending(&r.on_text(&first)));
         let events = delivered(r.on_text(&last));
         match &events[0] {
-            WingEvent::SyncSession { session_id, .. } => assert_eq!(session_id, "会话🙂"),
+            WingEvent::SyncSession(SessionSnapshot { session_id, .. }) => {
+                assert_eq!(session_id, "会话🙂")
+            }
             other => panic!("expected SyncSession, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn history_refresh_keeps_its_type_on_plain_and_chunked_wire_paths() {
+        let kind = "session_history_refreshed";
+        let payload = sync_payload(32).replacen("sync_session", kind, 1);
+        let (first, last) = payload.split_at(payload.len() / 2);
+        let mut r = Reassembler::default();
+        let plain = delivered(r.on_text(&payload));
+        assert!(is_pending(
+            &r.on_text(&envelope("refresh", 0, 2, kind, first))
+        ));
+        assert!(is_pending(&r.on_text(&text_payload("next delta"))));
+        let chunked = delivered(r.on_text(&envelope("refresh", 1, 2, kind, last)));
+        for event in [&plain[0], &chunked[0]] {
+            assert_eq!(event.event_type(), kind);
+            assert_eq!(event.session_id(), Some("s1"));
+            let WingEvent::SessionHistoryRefreshed(snapshot) = event else {
+                panic!("expected a history refresh");
+            };
+            assert_eq!(snapshot.messages[0]["content"], "x".repeat(32));
+        }
+        assert!(matches!(&chunked[1], WingEvent::Text { content, .. } if content == "next delta"));
     }
 
     #[test]
@@ -560,7 +588,7 @@ mod tests {
 
         let events = delivered(r.on_text(&last));
         assert_eq!(events.len(), 3);
-        assert!(matches!(events[0], WingEvent::SyncSession { .. }));
+        assert!(matches!(events[0], WingEvent::SyncSession(_)));
         match (&events[1], &events[2]) {
             (WingEvent::Text { content: a, .. }, WingEvent::Text { content: b, .. }) => {
                 assert_eq!((a.as_str(), b.as_str()), ("live-1", "live-2"))

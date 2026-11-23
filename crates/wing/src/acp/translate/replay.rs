@@ -24,6 +24,7 @@
 //! 结果一律 `completed`；没有匹配 tool 消息的 tool_call 保持 `in_progress`
 //! （中断轮次的真实状态）。
 
+use crate::protocol::SessionSnapshot;
 use agent_client_protocol::schema::v1::ContentBlock;
 use agent_client_protocol::schema::v1::ContentChunk;
 use agent_client_protocol::schema::v1::SessionUpdate;
@@ -37,13 +38,13 @@ use super::ToolCards;
 ///
 /// 非 `sync_session` 事件 → 空序列（调用方只会在快照上调用它）。
 pub fn replay_updates(cards: &mut ToolCards, event: &WingEvent) -> Vec<SessionUpdate> {
-    let WingEvent::SyncSession {
+    let WingEvent::SyncSession(SessionSnapshot {
         messages,
         uncommitted,
         uncommitted_tools,
         events,
         ..
-    } = event
+    }) = event
     else {
         return Vec::new();
     };

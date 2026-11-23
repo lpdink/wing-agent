@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::*;
 use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
@@ -489,7 +490,7 @@ fn test_sync_titles_use_the_new_sessions_workdir() {
     let _ = app.drain_intents();
 
     let mut sync = sync_event_with_status(SessionStatus::Idle, vec![], None, vec![], vec![], None);
-    if let WingEvent::SyncSession { agent, .. } = &mut sync {
+    if let WingEvent::SyncSession(SessionSnapshot { agent, .. }) = &mut sync {
         *agent = Some(Box::new(crate::protocol::AgentInfo {
             model_name: "test-model".into(),
             model_id: None,
@@ -567,9 +568,9 @@ fn sync_event_with_agent(
     messages: Vec<serde_json::Value>,
 ) -> WingEvent {
     let mut ev = sync_event(messages, None, vec![], vec![], None);
-    if let WingEvent::SyncSession {
+    if let WingEvent::SyncSession(SessionSnapshot {
         agent: agent_slot, ..
-    } = &mut ev
+    }) = &mut ev
     {
         *agent_slot = agent.map(Box::new);
     }
@@ -1959,4 +1960,72 @@ fn a_remote_tool_result_releases_its_ask_while_other_asks_remain() {
     assert_eq!(app.ask_panels[0].tool_call_id, "still-open");
     app.handle_key(key(KeyCode::Enter));
     assert!(app.drain_intents().iter().any(|intent| matches!(intent, AppIntent::SendMessage { tool_call_id: Some(id), .. } if id == "still-open")));
+}
+
+#[test]
+fn history_refresh_replays_history_and_the_queue_without_losing_local_echo() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    let stale = json!({"origin_request_id": "stale", "content": "old queue", "media": []});
+    app.handle_event(user_input_snapshot(
+        json!([{"role": "user", "uuid": "old", "content": "old history"}]),
+        json!([stale]),
+    ));
+    assert!(app.submit_message(SubmitPayload::text("local send in flight")));
+    let local = app.chat.pending[1].request_id.clone();
+    let media =
+        json!([{"id": "a".repeat(64), "mime": "image/png", "bytes": 16, "width": 8, "height": 8}]);
+    let refreshed = json!({
+        "status": "working",
+        "messages": [{"role": "user", "uuid": "canonical", "content": "compacted history"}],
+        "pending_user_messages": [{"origin_request_id": "remote-picture", "content": "", "media": media}],
+        "uncommitted": {"role": "assistant", "content": "in progress"}
+    });
+    app.handle_event(user_input_event("session_history_refreshed", refreshed));
+
+    assert!(app.turn.working);
+    assert_eq!(app.chat.len(), 2);
+    assert!(
+        matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body) if body.text == "compacted history")
+    );
+    assert!(
+        matches!(app.chat.cells[1].cell(), ChatCell::AssistantMessage(text) if text == "in progress")
+    );
+    assert_eq!(app.chat.pending_len(), 2);
+    assert_eq!(app.chat.pending[0].request_id, "remote-picture");
+    assert!(
+        matches!(app.chat.pending[0].cell.cell(), ChatCell::PendingUserMessage(body) if body.text.is_empty() && body.media.len() == 1)
+    );
+    assert_eq!(app.chat.pending[1].request_id, local);
+    app.handle_event(WingEvent::Done { meta: event_meta() });
+    assert_eq!(app.chat.pending_len(), 2);
+    app.handle_event(user_input_event("user_message_committed", json!({
+        "message_uuid": "canonical", "origin_request_ids": [], "content": "compacted history", "media": []
+    })));
+    assert_eq!(app.chat.len(), 2);
+}
+
+#[test]
+fn history_refresh_cannot_complete_a_pending_subscription() {
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.await_session_snapshot("target".into());
+    app.handle_event(user_input_event(
+        "session_history_refreshed",
+        json!({
+            "session_id": "target", "status": "idle", "pending_user_messages": []
+        }),
+    ));
+    assert_eq!(app.session_id, "test-session");
+    assert!(!app.user_input_ready());
+    app.handle_event(user_input_event(
+        "sync_session",
+        json!({
+            "session_id": "target", "status": "idle", "pending_user_messages": []
+        }),
+    ));
+    assert_eq!(app.session_id, "target");
+    assert!(app.user_input_ready());
 }

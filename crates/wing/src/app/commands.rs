@@ -307,14 +307,17 @@ impl App {
     /// Restore a failed local send, including after a same-session replay.
     pub(super) fn restore_failed_send(
         &mut self,
+        session_id: &str,
         request_id: &str,
         reason: &str,
         fallback: Option<std::sync::Arc<Submission>>,
     ) -> bool {
-        let submission = self
-            .chat
-            .take_pending(request_id)
-            .or_else(|| fallback.map(std::sync::Arc::unwrap_or_clone));
+        let pending = self.chat.take_pending(request_id);
+        let submission = if self.subscription_target() == session_id {
+            pending.or_else(|| fallback.map(std::sync::Arc::unwrap_or_clone))
+        } else {
+            None
+        };
         let Some(submission) = submission else {
             self.show_toast(Toast::warning(
                 reason.to_string(),
@@ -484,11 +487,9 @@ impl App {
         } = payload
         {
             let fallback = draft
-                .filter(|draft| {
-                    self.session_id == session_id && self.draft_recovery_epoch == draft.epoch
-                })
+                .filter(|draft| self.draft_recovery_epoch == draft.epoch)
                 .map(|draft| draft.submission);
-            self.restore_failed_send(&request_id, &reason, fallback);
+            self.restore_failed_send(&session_id, &request_id, &reason, fallback);
             return;
         }
 

@@ -16,10 +16,8 @@ use super::AppIntent;
 use super::replay;
 use super::title;
 use super::turn_state;
-use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
-use crate::protocol::QueuedUserMessage;
-use crate::protocol::SessionStatus;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
@@ -36,26 +34,6 @@ use crate::ui::toast::Toast;
 use crate::ui::welcome::SessionFacts;
 use crate::util::program_status::State;
 use crate::util::title::AttentionKind;
-use wing_api_client::models::SessionUsage;
-
-/// `SyncSession` 快照的借用视图——重放的输入。
-///
-/// 使用具名字段：`draft` 与 `name` 同为 `Option<String>`，
-/// `messages` 与 `events` 同为 `&[Value]`，位置一错就是静默的语义错误。
-struct SyncSnapshot<'a> {
-    session_id: String,
-    messages: &'a [serde_json::Value],
-    pending_user_messages: Option<Vec<QueuedUserMessage>>,
-    uncommitted: Option<&'a serde_json::Value>,
-    uncommitted_tools: &'a [serde_json::Value],
-    events: &'a [serde_json::Value],
-    status: SessionStatus,
-    turn_started_at: Option<&'a str>,
-    draft: Option<String>,
-    name: Option<String>,
-    agent: Option<Box<AgentInfo>>,
-    usage: Option<SessionUsage>,
-}
 
 impl App {
     /// Handle a gateway event.
@@ -65,12 +43,24 @@ impl App {
     /// first consumer. The trailing `_ =>` fallback lives in [`Self::handle_state`]
     /// and logs at debug level.
     pub(super) fn handle_event(&mut self, event: WingEvent) {
-        if let WingEvent::SyncSession { session_id, .. } = &event {
-            if session_id != self.subscription_target() {
+        match event {
+            WingEvent::SyncSession(snapshot) => {
+                if snapshot.session_id == self.subscription_target() {
+                    self.pending_session_snapshot = None;
+                    self.apply_sync_session(snapshot);
+                }
                 return;
             }
-            self.pending_session_snapshot = None;
-        } else if let Some(event_sid) = event.session_id()
+            WingEvent::SessionHistoryRefreshed(snapshot) => {
+                if self.pending_session_snapshot.is_none() && snapshot.session_id == self.session_id
+                {
+                    self.apply_sync_session(snapshot);
+                }
+                return;
+            }
+            _ => {}
+        }
+        if let Some(event_sid) = event.session_id()
             && event_sid != self.session_id
         {
             tracing::debug!(
@@ -238,7 +228,9 @@ impl App {
                     self.notify_unfocused(message.clone(), AttentionKind::Error);
                 }
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
-                if let Some(submission) = rejected {
+                if let Some(submission) = rejected
+                    && self.subscription_target() == self.session_id
+                {
                     // 与发送失败同一条回填路径（内容已经在草稿里，理由在 Error cell / toast 里）。
                     self.restore_draft(submission);
                     self.show_toast(Toast::warning(
@@ -540,36 +532,6 @@ impl App {
                 // 顶部横幅）；关着 → 丢掉设置缓存（见 `note_settings_changed`）。
                 self.note_settings_changed(&fingerprint);
             }
-            WingEvent::SyncSession {
-                session_id,
-                messages,
-                pending_user_messages,
-                uncommitted,
-                uncommitted_tools,
-                events,
-                status,
-                turn_started_at,
-                draft,
-                name,
-                agent,
-                usage,
-                ..
-            } => {
-                self.apply_sync_session(SyncSnapshot {
-                    session_id,
-                    messages: &messages,
-                    pending_user_messages,
-                    uncommitted: uncommitted.as_ref(),
-                    uncommitted_tools: &uncommitted_tools,
-                    events: &events,
-                    status,
-                    turn_started_at: turn_started_at.as_deref(),
-                    draft,
-                    name,
-                    agent,
-                    usage,
-                });
-            }
             // ---- Turn result (rich completion data) ----
             WingEvent::TurnResult {
                 subtype,
@@ -637,8 +599,8 @@ impl App {
     /// once-only live event, not replayed), and an empty uncommitted projection
     /// does not mean idle: between rounds, or while the first LLM call is still
     /// in flight, a turn runs with nothing finalized to project.
-    fn apply_sync_session(&mut self, snapshot: SyncSnapshot<'_>) {
-        let SyncSnapshot {
+    fn apply_sync_session(&mut self, snapshot: SessionSnapshot) {
+        let SessionSnapshot {
             session_id,
             messages,
             pending_user_messages,
@@ -651,6 +613,7 @@ impl App {
             name,
             agent,
             usage,
+            ..
         } = snapshot;
         // Update session_id to the new session (Phase 3c).
         //
@@ -746,7 +709,9 @@ impl App {
         // enter it, `idle` / `inactive` clear a stale one (the view can be
         // replaced under a running turn by a switch / reconnect, and the past
         // turn's `Done` is filtered out as a foreign session's event).
-        let turn_instant = turn_started_at.and_then(turn_state::instant_from_utc_iso);
+        let turn_instant = turn_started_at
+            .as_deref()
+            .and_then(turn_state::instant_from_utc_iso);
         if status.turn_in_flight() {
             self.turn.start();
             if let Some(instant) = turn_instant {
@@ -770,11 +735,11 @@ impl App {
         // the diff — the anchor always exists first.
         //
         // 1. Committed Message projections (text/thinking/ToolCall cells).
-        replay::replay_messages(&mut self.chat, messages);
+        replay::replay_messages(&mut self.chat, &messages);
         // 2. Uncommitted assistant Message projection — SAME replay path
         //    (a single Message payload, not a list). Never fed to
         //    handle_event as a pseudo-event.
-        if let Some(uncommitted_msg) = uncommitted {
+        if let Some(uncommitted_msg) = &uncommitted {
             replay::replay_messages(&mut self.chat, std::slice::from_ref(uncommitted_msg));
             // A mid-execution Bash card (finalized tool_use, no result
             // yet) shows elapsed anchored to the turn start.
@@ -786,7 +751,7 @@ impl App {
         //    EXISTING live ToolCallStream branch (client-side partial
         //    parse via partial_json.rs); zero new rendering logic. The
         //    subsequent live tool_call_stream deltas append seamlessly.
-        for tool in uncommitted_tools {
+        for tool in &uncommitted_tools {
             let tool_call_id = tool
                 .get("tool_call_id")
                 .and_then(|v| v.as_str())
@@ -821,7 +786,7 @@ impl App {
         //    cells from the same normalization entry as the live path;
         //    registering them makes a resumed pending ask answerable
         //    through the same channel.
-        for panel in replay::replay_events(&mut self.chat, events) {
+        for panel in replay::replay_events(&mut self.chat, &events) {
             self.register_ask_panel(panel);
         }
 

@@ -21,6 +21,7 @@
 //!
 //! **取样面**：开屏整块。弹层 / 设置面板 / toast / 图片不在 fixture 里，画不出来。
 
+use crate::protocol::SessionSnapshot;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -329,7 +330,7 @@ fn meta() -> EventMeta {
 /// 会话快照：模型段 / 工作目录 / 会话事实 / 草稿 / turn 在飞都从这一条进 App。
 fn sync_event(spec: &Spec) -> WingEvent {
     let (skills, rules) = (spec.facts.skills, spec.facts.rules);
-    WingEvent::SyncSession {
+    WingEvent::SyncSession(SessionSnapshot {
         session_id: SESSION_ID.into(),
         messages: Vec::new(),
         pending_user_messages: None,
@@ -369,7 +370,7 @@ fn sync_event(spec: &Spec) -> WingEvent {
             ..SessionUsage::default()
         }),
         meta: meta(),
-    }
+    })
 }
 
 /// 这一轮的一次 LLM 调用：输入卡 meta rail 的读数（也累加进会话账本）。

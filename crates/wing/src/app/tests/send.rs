@@ -9,6 +9,7 @@
 //! 以及任一步失败时"整条不发"。进生产的路径是 `dispatch_send_message`（后台任务 + 失败
 //! 回执），测试按 `run_app` 的接线把回执喂回 `handle_fetch_result`。
 
+use crate::protocol::SessionSnapshot;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -536,11 +537,11 @@ async fn a_sent_picture_is_reconciled_on_both_websocket_clients() {
 
 fn switch_snapshot(target: &str) -> crate::protocol::WingEvent {
     let mut event = sync_event(vec![], None, vec![], vec![], None);
-    if let crate::protocol::WingEvent::SyncSession {
+    if let crate::protocol::WingEvent::SyncSession(SessionSnapshot {
         session_id,
         pending_user_messages,
         ..
-    } = &mut event
+    }) = &mut event
     {
         *session_id = target.into();
         *pending_user_messages = Some(vec![]);
@@ -600,6 +601,56 @@ async fn an_explicit_switch_waits_for_the_target_snapshot_before_taking_input() 
         &["/api/session/subscribe", "/api/session/unsubscribe"]
     );
     assert_waits_for_target_snapshot(&mut app, "target");
+    assert!(gateway.frames().is_empty());
+}
+
+#[tokio::test]
+async fn an_upload_failure_cannot_restore_the_old_draft_while_the_new_snapshot_is_pending() {
+    use crate::app::runner::{Switch, adopt_new_session};
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([
+        ("/api/session/subscribe", (200, "{}")),
+        ("/api/session/unsubscribe", (200, "{}")),
+    ]))
+    .await;
+    gateway.fail_uploads_after(
+        0,
+        400,
+        r#"{"error":"bad_media","detail":"rejected old image"}"#,
+    );
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    let mut rx = send(
+        &mut app,
+        Some(&transport),
+        "old message",
+        vec![image(0x01, 10)],
+    );
+
+    adopt_new_session(
+        &mut app,
+        &transport,
+        "test-session".into(),
+        "target".into(),
+        Switch::Resume,
+    )
+    .await;
+    assert_eq!(app.subscription_target(), "target");
+    assert_eq!(app.session_id, "test-session");
+    assert_eq!(app.chat.pending_len(), 1);
+    app.input.set_text("target draft");
+    app.handle_fetch_result(wait_for_receipt(&mut rx).await);
+    assert_eq!(app.chat.pending_len(), 0);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("rejected old image")
+    );
+
+    app.handle_event(switch_snapshot("target"));
+    assert_eq!(app.input.text(), "target draft");
     assert!(gateway.frames().is_empty());
 }
 

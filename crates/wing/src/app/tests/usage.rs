@@ -8,6 +8,7 @@
 use super::support::test_app;
 use crate::app::*;
 use crate::protocol::EventMeta;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use wing_api_client::models::SessionUsage;
@@ -21,7 +22,7 @@ fn meta(session_id: &str) -> EventMeta {
 }
 
 fn sync_with(session_id: &str, usage: Option<SessionUsage>) -> WingEvent {
-    WingEvent::SyncSession {
+    WingEvent::SyncSession(SessionSnapshot {
         session_id: session_id.into(),
         messages: vec![],
         pending_user_messages: None,
@@ -35,7 +36,7 @@ fn sync_with(session_id: &str, usage: Option<SessionUsage>) -> WingEvent {
         draft: None,
         usage,
         meta: meta(session_id),
-    }
+    })
 }
 
 fn metrics(prompt: i64, completion: i64, cached: i64) -> WingEvent {

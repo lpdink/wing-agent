@@ -884,13 +884,14 @@ impl SessionHub {
     /// 而不是 prompt 轮次的事件循环里。中继经 `claim_model_relay` 合并：
     /// 同一会话同时只有一次在途，期间的变更合到下一次。
     fn dispatch(self: &Arc<Self>, event: WingEvent) {
-        // Input synchronization is a TUI concern. Keep its broadcasts out of
-        // the bounded ACP turn queue, where they would compete with Ask and Done.
+        // ACP replays the subscription snapshot once. Live transcript broadcasts
+        // would compete with Ask and Done in the bounded turn queue.
         if matches!(
             event,
             WingEvent::UserMessageQueued { .. }
                 | WingEvent::UserMessageCommitted { .. }
                 | WingEvent::UserMessagesDropped { .. }
+                | WingEvent::SessionHistoryRefreshed(_)
         ) {
             return;
         }
@@ -1123,7 +1124,7 @@ impl Attached {
         loop {
             match tokio::time::timeout_at(deadline, self.rx.recv()).await {
                 Ok(Some(event)) => {
-                    if matches!(event, WingEvent::SyncSession { .. }) {
+                    if matches!(event, WingEvent::SyncSession(_)) {
                         return Ok(event);
                     }
                     tracing::debug!(
@@ -1349,6 +1350,7 @@ impl Drop for Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SessionSnapshot;
     use agent_client_protocol::schema::v1::ElicitationCapabilities;
     use agent_client_protocol::schema::v1::ElicitationFormCapabilities;
     use serde_json::json;
@@ -1920,18 +1922,26 @@ mod tests {
         let entry = hub.register("s1");
         let (mut attached, _) = hub.attach_session("s1").await.expect("attach");
 
+        let initial = sync_event("s1");
+        let WingEvent::SyncSession(mut refresh) = initial.clone() else {
+            unreachable!()
+        };
+        refresh.messages.clear();
+        hub.dispatch(WingEvent::SessionHistoryRefreshed(refresh));
+        assert!(attached.rx.is_empty());
+
         // 快照之前混进来的实时帧：丢弃（debug），不能污染回放。
         entry.deliver(event("s1"));
-        entry.deliver(sync_event("s1"));
+        hub.dispatch(initial);
 
         let snapshot = attached
             .read_snapshot(Duration::from_secs(1))
             .await
             .expect("snapshot arrives");
         match &snapshot {
-            WingEvent::SyncSession {
+            WingEvent::SyncSession(SessionSnapshot {
                 messages, events, ..
-            } => {
+            }) => {
                 assert_eq!(messages.len(), 1, "messages 原样带出（回放素材）");
                 assert_eq!(messages[0]["role"], "user");
                 assert!(events.is_empty());
@@ -2103,7 +2113,7 @@ mod tests {
             .read_snapshot(Duration::from_secs(1))
             .await
             .expect("sync_session 必须经分流到达挂载句柄");
-        assert!(matches!(snapshot, WingEvent::SyncSession { .. }));
+        assert!(matches!(snapshot, WingEvent::SyncSession(_)));
     }
 
     #[tokio::test]

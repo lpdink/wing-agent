@@ -11,6 +11,7 @@
 //! 后者变成「收到空事件 / 未知事件」，测试立即失败。
 
 use std::time::Duration;
+use wing::protocol::SessionSnapshot;
 
 use futures_util::SinkExt;
 use serde_json::json;
@@ -108,7 +109,9 @@ where
 
 fn sync_content(event: &WingEvent) -> Option<&str> {
     match event {
-        WingEvent::SyncSession { messages, .. } => messages.first()?.get("content")?.as_str(),
+        WingEvent::SyncSession(SessionSnapshot { messages, .. }) => {
+            messages.first()?.get("content")?.as_str()
+        }
         _ => None,
     }
 }
@@ -194,7 +197,7 @@ async fn live_event_between_fragments_arrives_after_the_complete_event() {
         .expect("must not stall")
         .expect("sync must arrive first");
     assert!(
-        matches!(first, WingEvent::SyncSession { .. }),
+        matches!(first, WingEvent::SyncSession(_)),
         "分片期间插入的 live 事件不得抢先（否则 chat.clear() 吞掉它）"
     );
 

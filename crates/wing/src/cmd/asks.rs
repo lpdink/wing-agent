@@ -25,6 +25,7 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use crate::protocol::SessionSnapshot;
 use std::process::ExitCode;
 use std::time::Duration;
 use std::time::Instant;
@@ -123,11 +124,11 @@ async fn asks_inner(session_id: &str, wait_secs: u64) -> Result<(AsksOutput, boo
             continue;
         }
         match event {
-            WingEvent::SyncSession {
+            WingEvent::SyncSession(SessionSnapshot {
                 events,
                 status: snapshot_status,
                 ..
-            } => {
+            }) => {
                 status = status_str(snapshot_status);
                 asks = collect_asks(events)?;
                 snapshot_seen = true;

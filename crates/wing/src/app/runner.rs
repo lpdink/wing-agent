@@ -886,7 +886,12 @@ pub(super) fn dispatch_send_message(
         // Keep unsent input in the draft until the event stream is ready.
         // Gateway connection lost — nothing left the client, so the content
         // goes back to the composer. 纯本地动作（无 I/O），不必绕后台任务。
-        app.restore_failed_send(&message.request_id, "Not sent — gateway disconnected", None);
+        app.restore_failed_send(
+            &message.session_id,
+            &message.request_id,
+            "Not sent — gateway disconnected",
+            None,
+        );
         return;
     };
     let draft = app

@@ -7,6 +7,7 @@ use super::support::*;
 use crate::app::commands;
 use crate::app::intent::SessionUpdate;
 use crate::app::*;
+use crate::protocol::SessionSnapshot;
 use crate::protocol::{EventMeta, SessionStatus, WingEvent};
 use crate::shared::panels::SelectionPanel;
 use crate::ui::chat_view::ChatCell;
@@ -2174,7 +2175,7 @@ fn test_a_switched_sync_session_ends_the_compaction_block() {
         Vec::new(),
         None,
     );
-    if let WingEvent::SyncSession { session_id, .. } = &mut event {
+    if let WingEvent::SyncSession(SessionSnapshot { session_id, .. }) = &mut event {
         *session_id = "a-newer-session".into();
     }
     app.await_session_snapshot(event.session_id().unwrap().into());
