@@ -1147,6 +1147,44 @@ mod imp {
     pub fn take_sequences() -> Option<mpsc::Receiver<Sequence>> {
         lock().seq_rx.take()
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_dropped_clipboard_sequence_does_not_leave_an_announcement_in_keyboard_input() {
+            let (tx, mut rx) = mpsc::channel(1);
+            let announcements = Announcements::new();
+            let mut splitter = Splitter::new();
+            let start = b"a\x1b]5522;type=read:status=OK:pw=b3Rw\x07b";
+            assert!(tx.try_send(b"already queued".to_vec().into()).is_ok());
+
+            let mut pending = Vec::new();
+            enqueue_feed(
+                splitter.feed(start, Instant::now()),
+                &mut pending,
+                &tx,
+                Some(&announcements),
+            );
+            assert_eq!(pending, b"ab");
+            assert_eq!(rx.try_recv().unwrap().as_ref(), b"already queued");
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            drop(rx);
+            pending.clear();
+            enqueue_feed(
+                splitter.feed(start, Instant::now()),
+                &mut pending,
+                &tx,
+                Some(&announcements),
+            );
+            assert_eq!(pending, b"ab");
+        }
+    }
 }
 
 #[cfg(not(unix))]

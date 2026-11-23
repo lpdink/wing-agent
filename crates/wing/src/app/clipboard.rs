@@ -45,7 +45,7 @@ use crate::ui::input_area::ImageStage;
 use crate::ui::toast::Toast;
 use crate::util::clipboard_paste::PasteFailure;
 use crate::util::clipboard_paste::PasteOutcome;
-use crate::util::image_compress::CompressedImage;
+use crate::util::image_compress::{CompressedImage, KNOWN_IMAGE_MIMES};
 
 use super::App;
 
@@ -215,6 +215,16 @@ impl App {
     /// 用户眼里早已作废，重新插一个 chip 才是意外（删占位符 = 「这张我不要了」）。
     fn on_clipboard_image_delivered(&mut self, bytes: Vec<u8>, mime: String, name: Option<String>) {
         let Some(target) = self.image_reads.pop_front() else {
+            let mime = if KNOWN_IMAGE_MIMES.contains(&mime.as_str()) {
+                mime.as_str()
+            } else {
+                "image/unknown"
+            };
+            tracing::debug!(
+                mime,
+                bytes = bytes.len(),
+                "orphan OSC clipboard image dropped"
+            );
             return;
         };
         if !self.input.image_target_is_live(target) {

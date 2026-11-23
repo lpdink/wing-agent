@@ -946,6 +946,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_debug_retains_event_context_and_redacts_pasted_content() {
+        use crate::shared::text_edit::TextInputId;
+        use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+
+        const TOKEN: &str = "fixture-private-clipboard-text";
+        let bracketed = TermEvent::Paste(TOKEN.into());
+        assert_eq!(format!("{bracketed:?}"), "Paste(<redacted>)");
+        let ordinary = TermEvent::Clipboard(ClipboardEvent::Delivered(ClipboardPayload::Text(
+            TOKEN.into(),
+        )));
+        assert_eq!(
+            format!("{ordinary:?}"),
+            "Clipboard(Delivered(Text(<redacted>)))"
+        );
+        let scoped = TermEvent::Clipboard(ClipboardEvent::TextInput {
+            target: TextInputId::new(),
+            result: Ok(TOKEN.to_owned().into()),
+        });
+        let debug = format!("{scoped:?}");
+        assert!(debug.contains("TextInput"));
+        assert!(debug.contains("Ok(<redacted>)"));
+        assert!(!debug.contains(TOKEN));
+
+        let picture = ClipboardPayload::Image {
+            bytes: vec![102, 103, 104],
+            mime: "image/png".into(),
+            name: Some("fixture.png".into()),
+        };
+        assert_eq!(
+            format!("{picture:?}"),
+            r#"Image { len: 3, mime: "image/png", name: Some("fixture.png") }"#
+        );
+        let mouse = TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 42,
+            row: 7,
+            modifiers: KeyModifiers::SHIFT,
+        });
+        let debug = format!("{mouse:?}");
+        for detail in ["Moved", "column: 42", "row: 7", "SHIFT"] {
+            assert!(debug.contains(detail));
+        }
+        let escape = TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(format!("{escape:?}").contains("Esc"));
+        assert_eq!(
+            format!("{:?}", TermEvent::Resize(120, 40)),
+            "Resize(120, 40)"
+        );
+        assert_eq!(format!("{:?}", TermEvent::Focus(false)), "Focus(false)");
+    }
+
     /// 没起过事件流（向导 / 初始化失败路径）：收尾是 no-op——不 panic、不动 flag
     /// （接驳与 raw mode 此前也没装 / 没开，两步还原都是空操作）。
     #[test]

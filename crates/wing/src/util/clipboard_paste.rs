@@ -915,6 +915,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clipboard_debug_reports_kind_and_image_size_without_the_payload() {
+        let text = PasteOutcome::Text("fixture-private-helper-output".into());
+        assert_eq!(format!("{text:?}"), "Text(<redacted>)");
+        let image = PasteOutcome::Image {
+            bytes: vec![20, 21, 22],
+            mime: "image/png".into(),
+        };
+        assert_eq!(
+            format!("{image:?}"),
+            r#"Image { mime: "image/png", len: 3 }"#
+        );
+        assert_eq!(format!("{:?}", PasteOutcome::Empty), "Empty");
+    }
+
+    #[test]
+    fn reserved_image_file_can_disappear_before_timeout_cleanup() {
+        let runner = FakeRunner::new(|spec| match spec.program {
+            "/usr/bin/osascript" => {
+                let path = spec.image_file.as_ref().unwrap();
+                std::fs::remove_file(path).unwrap();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "image helper stopped",
+                ))
+            }
+            "/usr/bin/pbpaste" => Ok(b"plain fallback".to_vec()),
+            other => panic!("unexpected program {other}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
+            Ok(PasteOutcome::Text("plain fallback".into())),
+        );
+        assert!(!runner.call(0).image_file.unwrap().exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_the_read_error_when_the_clipboard_temp_path_is_a_directory() {
+        let path =
+            std::env::temp_dir().join(format!("wing-clipboard-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        let child = path.join("unrelated");
+        std::fs::write(&child, b"keep").unwrap();
+
+        let result = read_and_remove(&path);
+        let retained = std::fs::read(&child);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(
+            matches!(result, Err(PasteFailure::Failed(message)) if message.starts_with("cannot read the clipboard temp file"))
+        );
+        assert_eq!(retained.unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_failing_plain_text_helper_never_falls_back_to_an_image_reader() {
+        let runner = FakeRunner::new(|spec| {
+            assert_eq!(spec.program, "/usr/bin/osascript");
+            assert!(spec.image_file.is_none());
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fixture helper denied",
+            ))
+        });
+        let result = read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOnly);
+        assert!(
+            matches!(&result, Err(PasteFailure::Failed(reason)) if reason.contains("fixture helper denied"))
+        );
+        assert_eq!(settings_text(&result), Err("Clipboard read failed".into()));
+        assert_eq!(runner.called(), ["/usr/bin/osascript"]);
+    }
+
     /// osascript 的「没有图片」形态：非零退出 + 0 字节文件（实测）。
     fn osascript_without_picture(spec: &CommandSpec) -> io::Result<Vec<u8>> {
         let path = spec.image_file.as_ref().expect("osascript writes a file");

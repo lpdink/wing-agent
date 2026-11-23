@@ -823,3 +823,194 @@ fn local_paste_result_survives_a_session_switch() {
     });
     assert_eq!(app.input.text(), "kept");
 }
+
+fn app_with_open_clipboard_secret() -> (App, crate::shared::text_edit::TextInputId) {
+    use crate::config::catalog::{interface_catalog, interface_groups};
+    use crate::shared::panels::settings::InterfaceSource;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serde_json::json;
+    use wing_api_client::models::{SettingsGetResponse, SettingsSchemaResponse};
+
+    let mut root = interface_catalog();
+    root.children.clear();
+    let schema = SettingsSchemaResponse {
+        version: "test".into(),
+        groups: Vec::new(),
+        root,
+        config_path: "fixture.yaml".into(),
+    };
+    let state = SettingsGetResponse {
+        values: json!({}),
+        secrets: Default::default(),
+        fingerprint: "fixture-base".into(),
+        problems: Vec::new(),
+        setup_mode: false,
+        config_path: schema.config_path.clone(),
+        pending_restart_paths: None,
+    };
+    let mut app = test_app();
+    app.input.set_text("existing conversation draft");
+    app.inject_settings_panel(
+        &schema,
+        state,
+        Some(InterfaceSource {
+            groups: interface_groups(),
+            catalog: interface_catalog(),
+            doc: json!({}),
+        }),
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.handle_paste("api_key");
+    for _ in 0..2 {
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+    let panel = app.settings_panel.as_ref().unwrap();
+    assert!(panel.edit_state().unwrap().is_secret());
+    let target = panel.paste_target().unwrap();
+    (app, target)
+}
+
+#[test]
+fn scoped_clipboard_failures_are_actionable_and_do_not_disclose_helper_details() {
+    let (mut app, target) = app_with_open_clipboard_secret();
+    for (failure, expected) in [
+        (ClipboardFailure::NoRepresentation, "Clipboard has no text"),
+        (
+            ClipboardFailure::Status("fixture-private-terminal-detail".into()),
+            "Clipboard read failed",
+        ),
+        (ClipboardFailure::Timeout, "Clipboard read timed out"),
+    ] {
+        app.handle_clipboard(ClipboardEvent::TextInput {
+            target,
+            result: Err(failure),
+        });
+        assert_eq!(app.toast.as_ref().unwrap().message, expected);
+    }
+    for (result, expected) in [
+        (
+            Ok(PasteOutcome::Image {
+                bytes: vec![1, 2, 3],
+                mime: "image/png".into(),
+            }),
+            "Clipboard has no text",
+        ),
+        (
+            Err(PasteFailure::Failed("fixture-private-helper-detail".into())),
+            "Clipboard read failed",
+        ),
+        (Err(PasteFailure::Timeout), "Clipboard read timed out"),
+    ] {
+        app.on_clipboard_paste(ClipboardTarget::TextOnly(target), result);
+        let toast = app.toast.as_ref().unwrap();
+        assert_eq!(toast.message, expected);
+        assert_eq!(toast.kind, ToastKind::Warning);
+    }
+
+    let editor = app.settings_panel.as_ref().unwrap().edit_state().unwrap();
+    assert_eq!(editor.buffer_len(), 0);
+    assert_eq!(app.input.text(), "existing conversation draft");
+    assert!(app.image_reads.is_empty());
+    assert!(app.drain_intents().is_empty());
+}
+
+#[test]
+fn clipboard_completions_without_an_eligible_input_discard_text_and_clear_the_read_gate() {
+    let (mut app, target) = app_with_open_clipboard_secret();
+    app.handle_clipboard(ClipboardEvent::Delivered(ClipboardPayload::Text(
+        "old composer paste".into(),
+    )));
+    assert_eq!(
+        app.settings_panel
+            .as_ref()
+            .unwrap()
+            .edit_state()
+            .unwrap()
+            .buffer_len(),
+        0,
+    );
+    app.close_settings_panel(false);
+    app.clipboard_read_in_flight = true;
+    app.on_clipboard_paste(
+        ClipboardTarget::Ignore,
+        Ok(PasteOutcome::Text("ignored completion".into())),
+    );
+    app.handle_clipboard(ClipboardEvent::TextInput {
+        target,
+        result: Err(ClipboardFailure::Timeout),
+    });
+
+    assert!(!app.clipboard_read_in_flight);
+    assert!(app.toast.is_none());
+    assert_eq!(app.input.text(), "existing conversation draft");
+    app.request_clipboard_paste();
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::ReadClipboard(ClipboardTarget::Default)]
+    ));
+}
+
+#[test]
+fn pasted_secrets_are_redacted_in_the_save_intent_but_preserved_in_its_document() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    const TOKEN: &str = "fixture-secret-replacement-41";
+    let (mut app, target) = app_with_open_clipboard_secret();
+    app.on_clipboard_paste(
+        ClipboardTarget::TextOnly(target),
+        Ok(PasteOutcome::Text(format!("{TOKEN}\r\n"))),
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+    let save = app
+        .drain_intents()
+        .into_iter()
+        .find(|intent| matches!(intent, AppIntent::SaveSettings { .. }))
+        .expect("settings save intent");
+    let debug = format!("{save:?}");
+    assert!(debug.contains("interface: <redacted>"));
+    assert!(!debug.contains(TOKEN));
+    let AppIntent::SaveSettings {
+        interface,
+        interface_dirty,
+        gateway_dirty,
+        ..
+    } = save
+    else {
+        unreachable!();
+    };
+    assert!(interface_dirty);
+    assert!(!gateway_dirty);
+    assert!(interface.into_value()["api_key"].as_str() == Some(TOKEN));
+}
+
+#[test]
+fn orphan_osc_images_preserve_the_active_input_and_log_only_bounded_metadata() {
+    let (mut app, target) = app_with_open_clipboard_secret();
+    let path =
+        std::env::temp_dir().join(format!("wing-clipboard-debug-{}.log", uuid::Uuid::new_v4()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::fs::File::create(&path).unwrap())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        deliver_image(&mut app, vec![1, 2, 3], Some("fixture-private-file.png"));
+        app.handle_clipboard(ClipboardEvent::Delivered(ClipboardPayload::Image {
+            bytes: b"fixture-private-image-bytes".to_vec(),
+            mime: "fixture-private-mime\n".repeat(64),
+            name: None,
+        }));
+    });
+    let log = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(log.matches("orphan OSC clipboard image dropped").count(), 2);
+    assert!(log.contains("mime=\"image/png\" bytes=3"));
+    assert!(log.contains("mime=\"image/unknown\" bytes=27"));
+    assert!(!log.contains("fixture-private"));
+    assert_eq!(app.clipboard_target(), ClipboardTarget::TextOnly(target));
+    assert_eq!(app.input.text(), "existing conversation draft");
+    assert!(app.pending_clipboard_images().is_empty());
+    assert!(app.drain_intents().is_empty());
+}

@@ -194,6 +194,10 @@ fn a_positive_probe_opens_5522_and_serves_a_clipboard_read() {
     )) if text.as_bytes() == payload)
     );
 
+    // A standalone Escape must arrive even with no following input to complete a sequence.
+    write_all(outer_master, b"\x1b");
+    assert!(matches!(next_input(&mut rx), TermEvent::Key(key) if key.code == KeyCode::Esc));
+
     // Reverse the two keys. Even a bare Escape immediately before the OSC
     // opener must keep its position, and Ignore must issue no read request.
     let batch = [b"\x1b".as_slice(), &paste("bmV3"), b"\r"].concat();

@@ -957,39 +957,146 @@ mod tests {
         out
     }
 
+    fn paste_packets(pw: &str, mimes: &[&str]) -> [Vec<u8>; 3] {
+        let pw = b64_encode(pw.as_bytes());
+        [
+            packet(&format!("type=read:status=OK:pw={pw}"), None),
+            packet(
+                &format!("type=read:status=DATA:mime={}:pw={pw}", b64_encode(b".")),
+                Some(mimes.join(" ").as_bytes()),
+            ),
+            packet(&format!("type=read:status=DONE:pw={pw}"), None),
+        ]
+    }
+
     /// 终端发来的 unsolicited paste event（OK + listing + DONE）。
     fn event_triplet(pw: &str, mimes: &[&str], at_ms: u64, s: &mut Session) -> Vec<Effect> {
-        let mut effects = s.on_sequence(
-            &packet(
-                &format!("type=read:status=OK:pw={}", b64_encode(pw.as_bytes())),
-                None,
-            ),
-            at(at_ms),
-        );
-        let listing = if mimes.is_empty() {
-            String::new()
-        } else {
-            format!("{}\n", mimes.join(" "))
+        paste_packets(pw, mimes)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(offset, packet)| s.on_sequence(&packet, at(at_ms + offset as u64)))
+            .collect()
+    }
+
+    #[test]
+    fn canceled_announcement_markers_are_consumed_without_reusing_their_route() {
+        fn marker_text(bytes: &[u8]) -> &str {
+            std::str::from_utf8(bytes)
+                .unwrap()
+                .strip_prefix("\x1b[200~")
+                .unwrap()
+                .strip_suffix("\x1b[201~")
+                .unwrap()
+        }
+
+        let announcements = Announcements::new();
+        let mut canceled_marker = Vec::new();
+        drop(announcements.mark(&mut canceled_marker));
+        let mut live_marker = Vec::new();
+        let mut route = announcements.mark(&mut live_marker);
+
+        assert!(matches!(
+            announcements.decode(marker_text(&canceled_marker)),
+            Some(None)
+        ));
+        assert!(announcements.decode("ordinary bracketed paste").is_none());
+        assert!(matches!(
+            route.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let request = announcements
+            .decode(marker_text(&live_marker))
+            .flatten()
+            .unwrap();
+        let event = TermEvent::ClipboardAnnouncement(request);
+        assert_eq!(format!("{event:?}"), "ClipboardAnnouncement");
+        let TermEvent::ClipboardAnnouncement(request) = event else {
+            unreachable!()
         };
-        effects.extend(s.on_sequence(
-            &packet(
-                &format!(
-                    "type=read:status=DATA:mime={}:pw={}",
-                    b64_encode(b"."),
-                    b64_encode(pw.as_bytes())
-                ),
-                Some(listing.as_bytes()),
-            ),
-            at(at_ms + 1),
+        request.route(ClipboardTarget::Default);
+        assert_eq!(route.try_recv(), Ok(ClipboardTarget::Default));
+        assert!(matches!(
+            announcements.decode(marker_text(&live_marker)),
+            Some(None)
         ));
-        effects.extend(s.on_sequence(
-            &packet(
-                &format!("type=read:status=DONE:pw={}", b64_encode(pw.as_bytes())),
-                None,
-            ),
-            at(at_ms + 2),
-        ));
-        effects
+    }
+
+    #[test]
+    fn incomplete_announcement_reports_timeout_only_to_its_live_input() {
+        let [start, _, done] = paste_packets("fixture", &["text/plain"]);
+        let expires = at(IDLE_TIMEOUT.as_millis() as u64);
+        let mut session = Session::new();
+        let target = TextInputId::new();
+        assert!(
+            session
+                .on_sequence_for(&start, ClipboardTarget::TextOnly(target), at(0))
+                .is_empty()
+        );
+        assert_eq!(
+            session.on_timeout(expires),
+            [Effect::TextInput {
+                target,
+                result: Err(ClipboardFailure::Timeout)
+            }]
+        );
+        assert!(session.on_sequence(&done, expires).is_empty());
+
+        assert!(
+            session
+                .on_sequence_for(&start, ClipboardTarget::Ignore, at(0))
+                .is_empty()
+        );
+        assert!(session.on_timeout(expires).is_empty());
+        assert!(session.deadline().is_none());
+    }
+
+    #[tokio::test]
+    async fn ordered_driver_discards_abandoned_announcements_and_scopes_nontext_rejection() {
+        let (seq_tx, seq_rx) = mpsc::channel::<Sequence>(12);
+        let (ev_tx, mut ev_rx) = mpsc::channel(8);
+        let (write_tx, mut writes) = mpsc::unbounded_channel();
+        spawn_with(seq_rx, ev_tx, true, move |request| {
+            write_tx.send(request.to_vec()).unwrap();
+            Ok(())
+        });
+
+        let (cancel, canceled) = oneshot::channel();
+        drop(cancel);
+        let target = TextInputId::new();
+        let (route, live) = oneshot::channel();
+        route.send(ClipboardTarget::TextOnly(target)).unwrap();
+        for (otp, mimes, route) in [
+            ("canceled", &["text/plain"][..], Some(canceled)),
+            ("missing", &["text/plain"][..], None),
+            ("image only", &["image/png"][..], Some(live)),
+        ] {
+            let [bytes, listing, done] = paste_packets(otp, mimes);
+            seq_tx.send(Sequence { bytes, route }).await.unwrap();
+            seq_tx.send(listing.into()).await.unwrap();
+            seq_tx.send(done.into()).await.unwrap();
+        }
+        drop(seq_tx);
+
+        let rejected = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+            .await
+            .unwrap();
+        assert!(
+            matches!(rejected, Some(TermEvent::Clipboard(ClipboardEvent::TextInput {
+            target: owner, result: Err(ClipboardFailure::NoRepresentation),
+        })) if owner == target)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), writes.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
